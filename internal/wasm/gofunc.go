@@ -11,6 +11,10 @@ import (
 	"github.com/tetratelabs/wazero/api"
 )
 
+// gofunc_fast.go holds the generated zero-reflection adapters for common host
+// function signatures. Regenerate it after changing the covered matrix:
+//go:generate go run gen_gofunc_fast.go
+
 type paramsKind byte
 
 const (
@@ -32,13 +36,16 @@ var (
 var _ api.GoModuleFunction = (*reflectGoModuleFunction)(nil)
 
 type reflectGoModuleFunction struct {
-	fn              *reflect.Value
-	params, results []ValueType
+	fn                      *reflect.Value
+	paramTypes              []reflect.Type
+	paramKinds, resultKinds []reflect.Kind
+	numIn                   int
+	params, results         []ValueType
 }
 
 // Call implements the same method as documented on api.GoModuleFunction.
 func (f *reflectGoModuleFunction) Call(ctx context.Context, mod api.Module, stack []uint64) {
-	callGoFunc(ctx, mod, f.fn, stack)
+	callGoFunc(ctx, mod, f.fn, f.numIn, f.paramTypes, f.paramKinds, f.resultKinds, stack)
 }
 
 // EqualTo is exposed for testing.
@@ -55,9 +62,12 @@ func (f *reflectGoModuleFunction) EqualTo(that interface{}) bool {
 var _ api.GoFunction = (*reflectGoFunction)(nil)
 
 type reflectGoFunction struct {
-	fn              *reflect.Value
-	pk              paramsKind
-	params, results []ValueType
+	fn                      *reflect.Value
+	pk                      paramsKind
+	paramTypes              []reflect.Type
+	paramKinds, resultKinds []reflect.Kind
+	numIn                   int
+	params, results         []ValueType
 }
 
 // EqualTo is exposed for testing.
@@ -76,33 +86,33 @@ func (f *reflectGoFunction) Call(ctx context.Context, stack []uint64) {
 	if f.pk == paramsKindNoContext {
 		ctx = nil
 	}
-	callGoFunc(ctx, nil, f.fn, stack)
+	callGoFunc(ctx, nil, f.fn, f.numIn, f.paramTypes, f.paramKinds, f.resultKinds, stack)
 }
 
 // callGoFunc executes the reflective function by converting params to Go
 // types. The results of the function call are converted back to api.ValueType.
-func callGoFunc(ctx context.Context, mod api.Module, fn *reflect.Value, stack []uint64) {
-	tp := fn.Type()
-
+//
+// numIn, paramTypes, paramKinds and resultKinds are precomputed at parse
+// time (see parseGoReflectFunc) so that this per-call path never needs to
+// call fn.Type(), tp.In(i) or tp.NumIn().
+func callGoFunc(ctx context.Context, mod api.Module, fn *reflect.Value, numIn int, paramTypes []reflect.Type, paramKinds, resultKinds []reflect.Kind, stack []uint64) {
 	var in []reflect.Value
-	pLen := tp.NumIn()
-	if pLen != 0 {
-		in = make([]reflect.Value, pLen)
+	if numIn != 0 {
+		in = make([]reflect.Value, numIn)
 
 		i := 0
 		if ctx != nil {
-			in[0] = newContextVal(ctx)
+			in[0] = reflect.ValueOf(ctx)
 			i++
 		}
 		if mod != nil {
-			in[1] = newModuleVal(mod)
+			in[1] = reflect.ValueOf(mod)
 			i++
 		}
 
-		for j := 0; i < pLen; i++ {
-			next := tp.In(i)
-			val := reflect.New(next).Elem()
-			k := next.Kind()
+		for j := 0; i < numIn; i++ {
+			val := reflect.New(paramTypes[j]).Elem()
+			k := paramKinds[j]
 			raw := stack[j]
 			j++
 
@@ -124,7 +134,7 @@ func callGoFunc(ctx context.Context, mod api.Module, fn *reflect.Value, stack []
 
 	// Execute the host function and push back the call result onto the stack.
 	for i, ret := range fn.Call(in) {
-		switch ret.Kind() {
+		switch resultKinds[i] {
 		case reflect.Float32:
 			stack[i] = uint64(math.Float32bits(float32(ret.Float())))
 		case reflect.Float64:
@@ -134,21 +144,9 @@ func callGoFunc(ctx context.Context, mod api.Module, fn *reflect.Value, stack []
 		case reflect.Int32, reflect.Int64:
 			stack[i] = uint64(ret.Int())
 		default:
-			panic(fmt.Errorf("BUG: result[%d] has an invalid type: %v", i, ret.Kind()))
+			panic(fmt.Errorf("BUG: result[%d] has an invalid type: %v", i, resultKinds[i]))
 		}
 	}
-}
-
-func newContextVal(ctx context.Context) reflect.Value {
-	val := reflect.New(goContextType).Elem()
-	val.Set(reflect.ValueOf(ctx))
-	return val
-}
-
-func newModuleVal(m api.Module) reflect.Value {
-	val := reflect.New(moduleType).Elem()
-	val.Set(reflect.ValueOf(m))
-	return val
 }
 
 // MustParseGoReflectFuncCode parses Code from the go function or panics.
@@ -188,13 +186,19 @@ func parseGoReflectFunc(fn interface{}) (params, results []ValueType, code Code,
 	}
 
 	pCount := p.NumIn() - pOffset
+	var paramTypes []reflect.Type
+	var paramKinds []reflect.Kind
 	if pCount > 0 {
 		params = make([]ValueType, pCount)
+		paramTypes = make([]reflect.Type, pCount)
+		paramKinds = make([]reflect.Kind, pCount)
 	}
 	for i := 0; i < len(params); i++ {
 		pI := p.In(i + pOffset)
 		if t, ok := getTypeOf(pI.Kind()); ok {
 			params[i] = t
+			paramTypes[i] = pI
+			paramKinds[i] = pI.Kind()
 			continue
 		}
 
@@ -215,13 +219,16 @@ func parseGoReflectFunc(fn interface{}) (params, results []ValueType, code Code,
 	}
 
 	rCount := p.NumOut()
+	var resultKinds []reflect.Kind
 	if rCount > 0 {
 		results = make([]ValueType, rCount)
+		resultKinds = make([]reflect.Kind, rCount)
 	}
 	for i := 0; i < len(results); i++ {
 		rI := p.Out(i)
 		if t, ok := getTypeOf(rI.Kind()); ok {
 			results[i] = t
+			resultKinds[i] = rI.Kind()
 			continue
 		}
 
@@ -235,10 +242,20 @@ func parseGoReflectFunc(fn interface{}) (params, results []ValueType, code Code,
 	}
 
 	code = Code{}
-	if pk == paramsKindContextModule {
-		code.GoFunc = &reflectGoModuleFunction{fn: &fnV, params: params, results: results}
+	if gf, ok := fastGoFunc(pk, fn); ok {
+		// fn matches one of the common concrete signatures handled without
+		// reflection at call time: use that instead of the general path.
+		code.GoFunc = gf
+	} else if pk == paramsKindContextModule {
+		code.GoFunc = &reflectGoModuleFunction{
+			fn: &fnV, numIn: p.NumIn(), paramTypes: paramTypes, paramKinds: paramKinds, resultKinds: resultKinds,
+			params: params, results: results,
+		}
 	} else {
-		code.GoFunc = &reflectGoFunction{pk: pk, fn: &fnV, params: params, results: results}
+		code.GoFunc = &reflectGoFunction{
+			pk: pk, fn: &fnV, numIn: p.NumIn(), paramTypes: paramTypes, paramKinds: paramKinds, resultKinds: resultKinds,
+			params: params, results: results,
+		}
 	}
 	return
 }
