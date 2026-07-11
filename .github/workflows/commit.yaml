@@ -1,0 +1,306 @@
+name: Test
+on:
+  pull_request:
+    branches: [main]
+    paths-ignore:  # ignore docs as they are built with Netlify.
+      - '**/*.md'
+      - 'site/**'
+      - 'netlify.toml'
+  push:
+    branches: [main]
+    paths-ignore:  # ignore docs as they are built with Netlify.
+      - '**/*.md'
+      - 'site/**'
+      - 'netlify.toml'
+
+env:  # Update this prior to requiring a higher minor version in go.mod
+  GO_VERSION: "1.26"
+
+defaults:
+  run:  # use bash for all operating systems unless overridden
+    shell: bash
+
+concurrency:
+  # https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#example-using-concurrency-to-cancel-any-in-progress-job-or-run
+  group: ${{ github.ref }}-${{ github.workflow }}-${{ github.actor }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Pre-commit check
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install latest wast2json and wasm-tools
+        run: |  # Needed for build.spectest. wabt includes wast2json; wasm-tools is used for exception-handling spectests.
+          wabt_version=1.0.39
+          wabt_url=https://github.com/WebAssembly/wabt/releases/download/${wabt_version}/wabt-${wabt_version}-linux-x64.tar.gz
+          curl -sSL ${wabt_url} | tar --strip-components 2 -C /usr/local/bin -xzf - wabt-${wabt_version}/bin/wast2json
+          wasm_tools_version=1.245.1
+          wasm_tools_url=https://github.com/bytecodealliance/wasm-tools/releases/download/v${wasm_tools_version}/wasm-tools-${wasm_tools_version}-x86_64-linux.tar.gz
+          curl -sSL ${wasm_tools_url} | tar --strip-components 1 -C /usr/local/bin -xzf - wasm-tools-${wasm_tools_version}-x86_64-linux/wasm-tools
+
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:  # not cache: true as we also need to cache golint
+          cache: false
+          go-version: ${{ env.GO_VERSION }}
+
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/.cache/golangci-lint
+            ~/go/pkg/mod
+            ~/go/bin
+          key: check-${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ hashFiles('**/go.sum', 'Makefile') }}
+
+      - run: make build.spectest
+
+      - run: make check
+
+  test:
+    name: ${{ matrix.platform.arch }}, ${{ matrix.platform.os }}, Go-${{ matrix.go-version }}
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false  # don't fail fast as sometimes failures are arch/OS specific
+      matrix:  # Use versions consistent with wazero's Go support policy.
+        platform:
+        - os: ubuntu-24.04
+          arch: amd64
+        - os: windows-2025
+          arch: amd64
+        - os: macos-14
+          arch: arm64
+        go-version:
+          - "1.26"  # Current Go version
+          - "1.25"  # Floor Go version of wazero (current - 1)
+
+    steps:
+
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ matrix.go-version }}
+
+      # Ensure the pagefile is large enough to execute tests like TestStore_hammer_close on Windows.
+      - name: configure Pagefile
+        uses: al-cheb/configure-pagefile-action@v1.5
+        if: runner.os == 'Windows'
+        with:
+          minimum-size: 8GB
+          maximum-size: 16GB
+          disk-root: "D:"
+
+      # Run -race could be really slow without -short, so run them together on this workflow.
+      # Since -short is not added in the scratch tests, all the tests are run in CI in practice.
+      - run: make test go_test_options='-timeout 20m -race -short'
+
+      - name: "Generate coverage report"  # only once (not per OS)
+        if: runner.os == 'Linux'
+        run: make coverage
+
+      - name: "Upload coverage report"  # only on main push and only once (not per OS)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && runner.os == 'Linux'
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        run: bash <(curl -s https://codecov.io/bash)
+
+  test_scratch:
+    name: ${{ matrix.platform.arch }}, Linux (scratch), Go-${{ matrix.go-version }}${{ matrix.platform.no_prot_exec && ', no-prot-exec' }}
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false  # don't fail fast as sometimes failures are arch/OS specific
+      matrix:  # Use versions consistent with wazero's Go support policy.
+        go-version:
+          - "1.26"  # Current Go version
+          - "1.25"  # Floor Go version of wazero (current - 1)
+        platform:
+          - os: ubuntu-24.04
+            arch: amd64
+          - os: ubuntu-24.04
+            arch: amd64
+            no_prot_exec: true
+          - os: ubuntu-24.04-arm
+            arch: arm64
+          - os: ubuntu-24.04-riscv
+            arch: riscv64
+
+    steps:
+
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ matrix.go-version }}
+
+      - name: Build test binaries
+        run: |
+          parent="$(dirname $PWD)/"
+          go list -f '{{.Dir}}' ./... | egrep -v 'spectest' | while IFS= read -r pkg; do
+          basepath="${pkg#${parent}}"
+          echo go test "${pkg}" -c -o "_tests/${basepath}.test"
+          go test "${pkg}" -c -o "_tests/${basepath}.test"
+          done
+          go build -o wazerocli ./cmd/wazero
+        env:
+          GOARCH: ${{ matrix.platform.arch }}
+          CGO_ENABLED: 0
+
+      - name: Build scratch container
+        run: |
+          echo 'FROM scratch' >> Dockerfile
+          echo 'CMD ["/test", "-test.v"]' >> Dockerfile
+          docker buildx build -t wazero:test --platform linux/${{ matrix.platform.arch }} .
+
+      - name: Write seccomp config
+        if: ${{ matrix.platform.no_prot_exec }}
+        run: |
+          echo '{
+            "defaultAction": "SCMP_ACT_ALLOW",
+            "syscalls": [
+              {
+                "names": ["mprotect", "pkey_mprotect", "mmap", "mmap2"],
+                "action": "SCMP_ACT_ERRNO",
+                "errnoRet": 1,
+                "args": [
+                  { "index": 2, "value": 4, "valueTwo": 4, "op": "SCMP_CMP_MASKED_EQ" }
+                ]
+              }
+            ]
+          }' > no-prot-exec.json
+
+      - name: Run built test binaries
+        # This runs all tests compiled above in sequence. Note: This mounts /tmp to allow t.TempDir() in tests.
+        run: find _tests -name "*.test" | xargs -t -Itestbin docker run --platform linux/${{ matrix.platform.arch }} -v $(pwd)/testbin:/test -v $(pwd)/wazerocli:/wazero -e WAZEROCLI=/wazero --tmpfs /tmp ${{ matrix.platform.no_prot_exec && '--security-opt seccomp=$PWD/no-prot-exec.json' }} --rm -t wazero:test
+
+  test_bsd:
+    name: amd64, ${{ matrix.os.name }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false  # don't fail fast as sometimes failures are OS specific
+      matrix:
+        os:
+          - name: freebsd
+            version: "14.3"
+          - name: openbsd
+            version: "7.8"
+          - name: netbsd
+            version: "10.1"
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build test binaries
+        run: |
+          parent="$(dirname $PWD)/"
+          go list -f '{{.Dir}}' ./... | egrep -v 'imports|sysfs' | while IFS= read -r pkg; do
+          basepath="${pkg#${parent}}"
+          echo go test "${pkg}" -c -o "_tests/${basepath}.test"
+          go test "${pkg}" -c -o "_tests/${basepath}.test"
+          done
+          go build -o wazerocli ./cmd/wazero
+        env:
+          GOOS: ${{ matrix.os.name }}
+
+      - name: Run built test binaries
+        uses: cross-platform-actions/action@v0.32.0
+        env:
+          WAZEROCLI: ./wazerocli
+        with:
+          operating_system: ${{ matrix.os.name }}
+          version: ${{ matrix.os.version }}
+          shell: bash
+          sync_files: runner-to-vm
+          environment_variables: WAZEROCLI
+          # This runs all tests compiled above in sequence.
+          run: find _tests -name "*.test" | xargs -t -Itestbin nice testbin -test.short -test.v
+
+  test_vm:
+    name: amd64, ${{ matrix.os.name }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false  # don't fail fast as sometimes failures are OS specific
+      matrix:
+        os:
+          - name: dragonfly
+            version: "6.4.2"
+            action: 'vmactions/dragonflybsd-vm@v1'
+          - name: illumos
+            version: "r151054"
+            action: 'vmactions/omnios-vm@v1'
+          - name: solaris
+            version: "11.4"
+            action: 'vmactions/solaris-vm@v1'
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build test binaries
+        run: |
+          parent="$(dirname $PWD)/"
+          go list -f '{{.Dir}}' ./... | egrep -v 'imports|sysfs' | while IFS= read -r pkg; do
+          basepath="${pkg#${parent}}"
+          echo go test "${pkg}" -c -o "_tests/${basepath}.test"
+          go test "${pkg}" -c -o "_tests/${basepath}.test"
+          done
+          go build -o wazerocli ./cmd/wazero
+          envsubst < ./.github/actions/vmactions/template.yml > ./.github/actions/vmactions/action.yml
+        env:
+          GOOS: ${{ matrix.os.name }}
+          VMACTIONS: ${{ matrix.os.action }}
+
+      - name: Run built test binaries
+        uses: ./.github/actions/vmactions
+        env:
+          WAZEROCLI: ./wazerocli
+        with:
+          envs: WAZEROCLI
+          # This runs all tests compiled above in sequence.
+          run: find _tests -name "*.test" | xargs -t -Itestbin nice testbin -test.short -test.v
+
+  # This ensures that internal/integration_test/fuzz is runnable, and is not intended to
+  # run full-length fuzzing while trying to find low-hanging frontend bugs.
+  fuzz:
+    name: Minimal Fuzzing (${{ matrix.platform.os }}, ${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false  # don't fail fast as sometimes failures are arch/OS specific
+      matrix:  # Use versions consistent with wazero's Go support policy.
+        platform:
+          - os: ubuntu-24.04
+            arch: amd64
+          - os: macos-14
+            arch: arm64
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - uses: actions/cache@v5
+        id: cache
+        with:
+          # Cache corpus and artifacts so that we don't start from scratch but rather with a meaningful corpus
+          # in the subsequent CI jobs.
+          path: |
+            ~/.cargo
+            ~/.cache/go-build
+            ~/go/pkg/mod
+            ~/.rustup/toolchains/
+            internal/integration_test/fuzz/target
+            internal/integration_test/fuzz/fuzz/artifacts
+            internal/integration_test/fuzz/fuzz/corpus
+          key: build-fuzz-${{ matrix.platform.os }}-${{ matrix.platform.arch }}-go-${{ env.GO_VERSION }}-${{ hashFiles('**/go.sum', 'Makefile', '**/Cargo.lock', '**/Cargo.toml', '**/*.rs') }}
+
+      - run: cargo install cargo-fuzz
+        if: steps.cache.outputs.cache-hit != 'true'
+      # Run fuzzing only for a minute, not a full-length intensive one, but 60 seconds seems enough to find minor "front-end"
+      # bugs which might exist in binary parser, validation, or instantiation phase while not pressuring CI jobs.
+      - run: make fuzz fuzz_timeout_seconds=60
+        if: ${{ github.event_name  == 'pull_request' }}
+      # Run a bit longer on main branch push!
+      - run: make fuzz fuzz_timeout_seconds=180
+        if: ${{ github.event_name  == 'push' }}

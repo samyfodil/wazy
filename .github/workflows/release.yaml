@@ -1,0 +1,158 @@
+name: Release CLI
+on:
+  pull_request:
+    branches: [main]
+    paths-ignore:  # ignore docs as they are built with Netlify.
+      - '**/*.md'
+      - 'site/**'
+      - 'netlify.toml'
+  push:
+    branches: [main]
+    tags: 'v[0-9]+.[0-9]+.[0-9]+**'  # Ex. v0.2.0 v0.2.1-rc2
+
+env: # Update this prior to requiring a higher minor version in go.mod
+  GO_VERSION: "1.26"
+
+defaults:
+  run:  # use bash for all operating systems unless overridden
+    shell: bash
+
+concurrency:
+  # https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#example-using-concurrency-to-cancel-any-in-progress-job-or-run
+  group: ${{ github.ref }}-${{ github.workflow }}-${{ github.actor }}
+  cancel-in-progress: true
+
+jobs:
+  pre_release:
+    name: Pre-release build
+    runs-on: ubuntu-24.04
+    # This allows us to test in the following job regardless of the event (tag or not).
+    outputs:
+      VERSION: ${{ steps.output-version.outputs.VERSION }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          cache: false
+          go-version: ${{ env.GO_VERSION }}
+
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/go/bin
+          key: pre-release-check-${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum', 'Makefile') }}
+
+      - name: Make artifacts (test)
+        if: github.event_name != 'push' || !contains(github.ref, 'refs/tags/')
+        run: |
+          VERSION=${{ github.sha }}
+          make dist VERSION=$VERSION
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+        shell: bash
+
+      - name: Make artifacts
+        # Triggers only on tag creation.
+        if: github.event_name == 'push' && contains(github.ref, 'refs/tags/')
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          make dist VERSION=$VERSION
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+        shell: bash
+
+      # This allows us to test in the following job regardless of the event (tag or not).
+      - id: output-version
+        run: echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
+        shell: bash
+
+      # In order to share the built artifacts in the subsequent tests, we use cache instead of actions/upload-artifacts.
+      # The reason is that upload-artifacts are not globally consistent and sometimes pre_release_test won't be able to
+      # find the artifacts uploaded here. See https://github.com/actions/upload-artifact/issues/21 for more context.
+      # Downside of this is that, we pressure the cache capacity set per repository. We delete all caches created
+      # on PRs on close. See .github/workflows/clear_cache.yaml. On main branch, in any way this cache will be deleted
+      # in 7 days, also this at most a few MB, so this won't be an issue.
+      - uses: actions/cache@v5
+        id: cache
+        with:
+          # Use share the cache containing archives across OSes.
+          enableCrossOsArchive: true
+          # Note: this creates a cache per run.
+          key: release-artifacts-${{ github.run_id }}
+          path:
+            dist/
+
+  # pre_release_test tests the artifacts built by pre_release in the OS dependent way.
+  pre_release_test:
+    needs: pre_release
+    name: Pre-release test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false # don't fail fast as sometimes failures are arch/OS specific
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2025]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/cache@v5
+        id: cache
+        with:
+          # We need this cache to run tests.
+          fail-on-cache-miss: true
+          enableCrossOsArchive: true
+          key: release-artifacts-${{ github.run_id }}
+          path:
+            dist/
+
+      - name: Test (linux)
+         # Check if the version was correctly inserted with VERSION variable
+        if: runner.os == 'Linux'
+        run: |
+          tar xf dist/wazero_${{ needs.pre_release.outputs.VERSION }}_linux_amd64.tar.gz
+          ./wazero version | grep ${{ needs.pre_release.outputs.VERSION }}
+
+      - name: Test (darwin)
+        # Check if the version was correctly inserted with VERSION variable
+        if: runner.os == 'macOS'
+        run: |
+          tar xf dist/wazero_${{ needs.pre_release.outputs.VERSION }}_darwin_amd64.tar.gz
+          ./wazero version | grep ${{ needs.pre_release.outputs.VERSION }}
+
+      # This only checks the installer when built on Windows as it is simpler than switching OS.
+      # refreshenv is from choco, and lets you reload ENV variables (used here for PATH).
+      - name: Test Windows Installer
+        if: runner.os == 'Windows'
+        run: |
+          unzip dist/wazero_${{ needs.pre_release.outputs.VERSION }}_windows_amd64.zip
+          ./wazero version | grep ${{ needs.pre_release.outputs.VERSION }}
+        shell: bash
+
+  # Triggers only on the tag creation.
+  release:
+    if: github.event_name == 'push' && contains(github.ref, 'refs/tags/')
+    needs: pre_release_test
+    name: Release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:  # Ensure release_notes.sh can see prior commits
+          fetch-depth: 0
+
+      - uses: actions/cache@v5
+        id: cache
+        with:
+          fail-on-cache-miss: true
+          enableCrossOsArchive: true
+          key: release-artifacts-${{ github.run_id }}
+          path:
+            dist/
+
+      - name: Create draft release
+        run: |
+          ls dist
+          tag="${GITHUB_REF#refs/tags/}"
+          ./.github/workflows/release_notes.sh ${tag} > release-notes.txt
+          gh release create ${tag} --draft --notes-file release-notes.txt --title ${GITHUB_REF#refs/tags/} ./dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
