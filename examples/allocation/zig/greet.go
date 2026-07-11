@@ -36,9 +36,9 @@ func run() error {
 
 	// Instantiate a Go-defined module named "env" that exports a function to
 	// log to the console.
-	_, err := r.NewHostModuleBuilder("env").
-		NewFunctionBuilder().WithFunc(logString).Export("log").
-		Instantiate(ctx)
+	envBuilder := r.NewHostModuleBuilder("env")
+	wazero.HostProc2(envBuilder.NewFunctionBuilder(), logString).Export("log")
+	_, err := envBuilder.Instantiate(ctx)
 	if err != nil {
 		return err
 	}

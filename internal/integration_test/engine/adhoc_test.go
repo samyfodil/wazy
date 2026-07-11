@@ -193,10 +193,14 @@ func testUserDefinedPrimitiveHostFunc(t *testing.T, r wazero.Runtime) {
 	type f64 float64
 
 	const fn = "fn"
+	hostImpl := func(u1 u32, u2 u64, f1 f32, f2 f64) u64 {
+		return u64(u1) + u2 + u64(math.Float32bits(float32(f1))) + u64(math.Float64bits(float64(f2)))
+	}
 	hostCompiled, err := r.NewHostModuleBuilder("host").NewFunctionBuilder().
-		WithFunc(func(u1 u32, u2 u64, f1 f32, f2 f64) u64 {
-			return u64(u1) + u2 + u64(math.Float32bits(float32(f1))) + u64(math.Float64bits(float64(f2)))
-		}).Export(fn).Compile(testCtx)
+		WithGoFunction(api.GoFunc(func(_ context.Context, stack []uint64) {
+			stack[0] = uint64(hostImpl(u32(api.DecodeU32(stack[0])), u64(stack[1]), f32(api.DecodeF32(stack[2])), f64(api.DecodeF64(stack[3]))))
+		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeF32, api.ValueTypeF64}, []api.ValueType{api.ValueTypeI64}).
+		Export(fn).Compile(testCtx)
 	require.NoError(t, err)
 
 	_, err = r.InstantiateModule(testCtx, hostCompiled, wazero.NewModuleConfig())
@@ -222,12 +226,15 @@ func testReftypeImports(t *testing.T, r wazero.Runtime) {
 	}
 
 	hostObj := &dog{name: "hello"}
+	externrefFn := func(ctx context.Context, externrefFromRefNull uintptr) uintptr {
+		require.Zero(t, externrefFromRefNull)
+		return uintptr(unsafe.Pointer(hostObj))
+	}
 	host, err := r.NewHostModuleBuilder("host").
 		NewFunctionBuilder().
-		WithFunc(func(ctx context.Context, externrefFromRefNull uintptr) uintptr {
-			require.Zero(t, externrefFromRefNull)
-			return uintptr(unsafe.Pointer(hostObj))
-		}).
+		WithGoFunction(api.GoFunc(func(ctx context.Context, stack []uint64) {
+			stack[0] = api.EncodeExternref(externrefFn(ctx, api.DecodeExternref(stack[0])))
+		}), []api.ValueType{api.ValueTypeExternref}, []api.ValueType{api.ValueTypeExternref}).
 		Export("externref").
 		Instantiate(testCtx)
 	require.NoError(t, err)
@@ -329,7 +336,9 @@ func testUnreachable(t *testing.T, r wazero.Runtime) {
 	}
 
 	_, err := r.NewHostModuleBuilder("host").
-		NewFunctionBuilder().WithFunc(callUnreachable).Export("cause_unreachable").
+		NewFunctionBuilder().
+		WithGoFunction(api.GoFunc(func(context.Context, []uint64) { callUnreachable() }), nil, nil).
+		Export("cause_unreachable").
 		Instantiate(testCtx)
 	require.NoError(t, err)
 
@@ -355,9 +364,9 @@ func testRecursiveEntry(t *testing.T, r wazero.Runtime) {
 		require.NoError(t, err)
 	}
 
-	_, err := r.NewHostModuleBuilder("env").
-		NewFunctionBuilder().WithFunc(hostfunc).Export("host_func").
-		Instantiate(testCtx)
+	b := r.NewHostModuleBuilder("env")
+	wazero.HostProc0(b.NewFunctionBuilder(), hostfunc).Export("host_func")
+	_, err := b.Instantiate(testCtx)
 	require.NoError(t, err)
 
 	module, err := r.Instantiate(testCtx, recursiveWasm)
@@ -382,9 +391,9 @@ func testHostFuncMemory(t *testing.T, r wazero.Runtime) {
 		return 0
 	}
 
-	host, err := r.NewHostModuleBuilder("host").
-		NewFunctionBuilder().WithFunc(storeInt).Export("store_int").
-		Instantiate(testCtx)
+	b := r.NewHostModuleBuilder("host")
+	wazero.HostFunc2(b.NewFunctionBuilder(), storeInt).Export("store_int")
+	host, err := b.Instantiate(testCtx)
 	require.NoError(t, err)
 	defer func() {
 		require.NoError(t, host.Close(testCtx))
@@ -416,23 +425,24 @@ func testNestedGoContext(t *testing.T, r wazero.Runtime) {
 
 	var importing api.Module
 
-	imported, err := r.NewHostModuleBuilder(importedName).
-		NewFunctionBuilder().
-		WithFunc(func(ctx context.Context, p uint32) uint32 {
-			// We expect the initial context, testCtx, to be overwritten by "outer" when it called this.
-			require.Equal(t, nestedCtx, ctx)
-			return p + 1
-		}).
-		Export("inner").
-		NewFunctionBuilder().
-		WithFunc(func(ctx context.Context, module api.Module, p uint32) uint32 {
-			require.Equal(t, testCtx, ctx)
-			results, err := module.ExportedFunction("inner").Call(nestedCtx, uint64(p))
-			require.NoError(t, err)
-			return uint32(results[0]) + 1
-		}).
-		Export("outer").
-		Instantiate(testCtx)
+	inner := func(ctx context.Context, p uint32) uint32 {
+		// We expect the initial context, testCtx, to be overwritten by "outer" when it called this.
+		require.Equal(t, nestedCtx, ctx)
+		return p + 1
+	}
+	b := r.NewHostModuleBuilder(importedName)
+	b.NewFunctionBuilder().
+		WithGoFunction(api.GoFunc(func(ctx context.Context, stack []uint64) {
+			stack[0] = api.EncodeU32(inner(ctx, api.DecodeU32(stack[0])))
+		}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).
+		Export("inner")
+	wazero.HostFunc1(b.NewFunctionBuilder(), func(ctx context.Context, module api.Module, p uint32) uint32 {
+		require.Equal(t, testCtx, ctx)
+		results, err := module.ExportedFunction("inner").Call(nestedCtx, uint64(p))
+		require.NoError(t, err)
+		return uint32(results[0]) + 1
+	}).Export("outer")
+	imported, err := b.Instantiate(testCtx)
 	require.NoError(t, err)
 	defer func() {
 		require.NoError(t, imported.Close(testCtx))
@@ -457,22 +467,29 @@ func testHostFunctionContextParameter(t *testing.T, r wazero.Runtime) {
 	importingName := t.Name() + "-importing"
 
 	var importing api.Module
-	fns := map[string]interface{}{
-		"ctx": func(ctx context.Context, p uint32) uint32 {
-			require.Equal(t, testCtx, ctx)
-			return p + 1
+	fns := map[string]func(b wazero.HostFunctionBuilder) wazero.HostFunctionBuilder{
+		"ctx": func(b wazero.HostFunctionBuilder) wazero.HostFunctionBuilder {
+			fn := func(ctx context.Context, p uint32) uint32 {
+				require.Equal(t, testCtx, ctx)
+				return p + 1
+			}
+			return b.WithGoFunction(api.GoFunc(func(ctx context.Context, stack []uint64) {
+				stack[0] = api.EncodeU32(fn(ctx, api.DecodeU32(stack[0])))
+			}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32})
 		},
-		"ctx mod": func(ctx context.Context, module api.Module, p uint32) uint32 {
-			require.Equal(t, importing, module)
-			return p + 1
+		"ctx mod": func(b wazero.HostFunctionBuilder) wazero.HostFunctionBuilder {
+			return wazero.HostFunc1(b, func(ctx context.Context, module api.Module, p uint32) uint32 {
+				require.Equal(t, importing, module)
+				return p + 1
+			})
 		},
 	}
 
 	for test := range fns {
 		t.Run(test, func(t *testing.T) {
-			imported, err := r.NewHostModuleBuilder(importedName).
-				NewFunctionBuilder().WithFunc(fns[test]).Export("return_input").
-				Instantiate(testCtx)
+			hb := r.NewHostModuleBuilder(importedName)
+			fns[test](hb.NewFunctionBuilder()).Export("return_input")
+			imported, err := hb.Instantiate(testCtx)
 			require.NoError(t, err)
 			defer func() {
 				require.NoError(t, imported.Close(testCtx))
@@ -498,24 +515,54 @@ func testHostFunctionNumericParameter(t *testing.T, r wazero.Runtime) {
 	importedName := t.Name() + "-imported"
 	importingName := t.Name() + "-importing"
 
-	fns := map[string]interface{}{
-		"i32": func(ctx context.Context, p uint32) uint32 {
-			return p + 1
+	fns := map[string]func(b wazero.HostFunctionBuilder) wazero.HostFunctionBuilder{
+		"i32": func(b wazero.HostFunctionBuilder) wazero.HostFunctionBuilder {
+			fn := func(ctx context.Context, p uint32) uint32 {
+				return p + 1
+			}
+			return b.WithGoFunction(api.GoFunc(func(ctx context.Context, stack []uint64) {
+				stack[0] = api.EncodeU32(fn(ctx, api.DecodeU32(stack[0])))
+			}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32})
 		},
-		"i32n": func(ctx context.Context, p int32) int32 {
-			return p - 1
+		"i32n": func(b wazero.HostFunctionBuilder) wazero.HostFunctionBuilder {
+			fn := func(ctx context.Context, p int32) int32 {
+				return p - 1
+			}
+			return b.WithGoFunction(api.GoFunc(func(ctx context.Context, stack []uint64) {
+				stack[0] = api.EncodeI32(fn(ctx, api.DecodeI32(stack[0])))
+			}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32})
 		},
-		"i64": func(ctx context.Context, p uint64) uint64 {
-			return p + 1
+		"i64": func(b wazero.HostFunctionBuilder) wazero.HostFunctionBuilder {
+			fn := func(ctx context.Context, p uint64) uint64 {
+				return p + 1
+			}
+			return b.WithGoFunction(api.GoFunc(func(ctx context.Context, stack []uint64) {
+				stack[0] = fn(ctx, stack[0])
+			}), []api.ValueType{api.ValueTypeI64}, []api.ValueType{api.ValueTypeI64})
 		},
-		"i64n": func(ctx context.Context, p int64) int64 {
-			return p - 1
+		"i64n": func(b wazero.HostFunctionBuilder) wazero.HostFunctionBuilder {
+			fn := func(ctx context.Context, p int64) int64 {
+				return p - 1
+			}
+			return b.WithGoFunction(api.GoFunc(func(ctx context.Context, stack []uint64) {
+				stack[0] = api.EncodeI64(fn(ctx, int64(stack[0])))
+			}), []api.ValueType{api.ValueTypeI64}, []api.ValueType{api.ValueTypeI64})
 		},
-		"f32": func(ctx context.Context, p float32) float32 {
-			return p + 1
+		"f32": func(b wazero.HostFunctionBuilder) wazero.HostFunctionBuilder {
+			fn := func(ctx context.Context, p float32) float32 {
+				return p + 1
+			}
+			return b.WithGoFunction(api.GoFunc(func(ctx context.Context, stack []uint64) {
+				stack[0] = api.EncodeF32(fn(ctx, api.DecodeF32(stack[0])))
+			}), []api.ValueType{api.ValueTypeF32}, []api.ValueType{api.ValueTypeF32})
 		},
-		"f64": func(ctx context.Context, p float64) float64 {
-			return p + 1
+		"f64": func(b wazero.HostFunctionBuilder) wazero.HostFunctionBuilder {
+			fn := func(ctx context.Context, p float64) float64 {
+				return p + 1
+			}
+			return b.WithGoFunction(api.GoFunc(func(ctx context.Context, stack []uint64) {
+				stack[0] = api.EncodeF64(fn(ctx, api.DecodeF64(stack[0])))
+			}), []api.ValueType{api.ValueTypeF64}, []api.ValueType{api.ValueTypeF64})
 		},
 	}
 
@@ -562,9 +609,9 @@ func testHostFunctionNumericParameter(t *testing.T, r wazero.Runtime) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			imported, err := r.NewHostModuleBuilder(importedName).
-				NewFunctionBuilder().WithFunc(fns[test.name]).Export("return_input").
-				Instantiate(testCtx)
+			hb := r.NewHostModuleBuilder(importedName)
+			fns[test.name](hb.NewFunctionBuilder()).Export("return_input")
+			imported, err := hb.Instantiate(testCtx)
 			require.NoError(t, err)
 			defer func() {
 				require.NoError(t, imported.Close(testCtx))
@@ -625,17 +672,15 @@ func callHostFunctionIndirect(t *testing.T, r wazero.Runtime) {
 	originModuleBytes := binaryencoding.EncodeModule(originModule)
 
 	var originInst, importingInst api.Module
-	_, err := r.NewHostModuleBuilder(hostModule).
-		NewFunctionBuilder().
-		WithFunc(func(ctx context.Context, mod api.Module) {
-			// Module must be the caller (importing module), not the origin.
-			require.Equal(t, mod, importingInst)
-			require.NotEqual(t, mod, originInst)
-			// Name must be the caller, not origin.
-			require.Equal(t, importingWasmModule, mod.Name())
-		}).
-		Export(hostFn).
-		Instantiate(testCtx)
+	b := r.NewHostModuleBuilder(hostModule)
+	wazero.HostProc0(b.NewFunctionBuilder(), func(ctx context.Context, mod api.Module) {
+		// Module must be the caller (importing module), not the origin.
+		require.Equal(t, mod, importingInst)
+		require.NotEqual(t, mod, originInst)
+		// Name must be the caller, not origin.
+		require.Equal(t, importingWasmModule, mod.Name())
+	}).Export(hostFn)
+	_, err := b.Instantiate(testCtx)
 	require.NoError(t, err)
 
 	importingInst, err = r.Instantiate(testCtx, importingModuleBytes)
@@ -783,8 +828,12 @@ func testCloseInFlight(t *testing.T, r wazero.Runtime) {
 			}
 
 			// Create the host module, which exports the function that closes the importing module.
-			importedCode, err = r.NewHostModuleBuilder(t.Name() + "-imported").
-				NewFunctionBuilder().WithFunc(closeAndReturn).Export("return_input").
+			importedCode, err = r.NewHostModuleBuilder(t.Name()+"-imported").
+				NewFunctionBuilder().
+				WithGoFunction(api.GoFunc(func(ctx context.Context, stack []uint64) {
+					stack[0] = api.EncodeU32(closeAndReturn(ctx, api.DecodeU32(stack[0])))
+				}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).
+				Export("return_input").
 				Compile(testCtx)
 			require.NoError(t, err)
 
@@ -988,11 +1037,11 @@ func testMemoryGrowInRecursiveCall(t *testing.T, r wazero.Runtime) {
 	const hostFnName = "grow_memory"
 	var growFn api.Function
 	hostCompiled, err := r.NewHostModuleBuilder(hostModuleName).NewFunctionBuilder().
-		WithFunc(func() {
+		WithGoFunction(api.GoFunc(func(context.Context, []uint64) {
 			// Does the recursive call into Wasm, which grows memory.
 			_, err := growFn.Call(testCtx)
 			require.NoError(t, err)
-		}).Export(hostFnName).Compile(testCtx)
+		}), nil, nil).Export(hostFnName).Compile(testCtx)
 	require.NoError(t, err)
 
 	_, err = r.InstantiateModule(testCtx, hostCompiled, wazero.NewModuleConfig())
@@ -1198,9 +1247,8 @@ func testModuleMemory(t *testing.T, r wazero.Runtime) {
 func testTwoIndirection(t *testing.T, r wazero.Runtime) {
 	var buf bytes.Buffer
 	ctx := experimental.WithFunctionListenerFactory(testCtx, logging.NewLoggingListenerFactory(&buf))
-	_, err := r.NewHostModuleBuilder("host").NewFunctionBuilder().WithFunc(func(
-		_ context.Context, m api.Module, d uint32,
-	) uint32 {
+	b := r.NewHostModuleBuilder("host")
+	wazero.HostFunc1(b.NewFunctionBuilder(), func(_ context.Context, m api.Module, d uint32) uint32 {
 		if d == math.MaxUint32 {
 			panic(errors.New("host-function panic"))
 		} else if d == math.MaxUint32-1 {
@@ -1209,7 +1257,8 @@ func testTwoIndirection(t *testing.T, r wazero.Runtime) {
 			panic(errors.New("host-function panic"))
 		}
 		return 1 / d // panics if d ==0.
-	}).Export("div").Instantiate(ctx)
+	}).Export("div")
+	_, err := b.Instantiate(ctx)
 	require.NoError(t, err)
 
 	ft := wasm.FunctionType{Params: []wasm.ValueType{i32}, Results: []wasm.ValueType{i32}}
@@ -1436,9 +1485,14 @@ func testBeforeListenerStackIterator(t *testing.T, r wazero.Runtime) {
 	}
 
 	ctx := experimental.WithFunctionListenerFactory(testCtx, fnListener)
-	_, err := r.NewHostModuleBuilder("host").NewFunctionBuilder().WithFunc(func(x int32) int32 {
+	f4 := func(x int32) int32 {
 		return x + 100
-	}).Export("f4").Instantiate(ctx)
+	}
+	_, err := r.NewHostModuleBuilder("host").NewFunctionBuilder().
+		WithGoFunction(api.GoFunc(func(_ context.Context, stack []uint64) {
+			stack[0] = api.EncodeI32(f4(api.DecodeI32(stack[0])))
+		}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).
+		Export("f4").Instantiate(ctx)
 	require.NoError(t, err)
 
 	m := binaryencoding.EncodeModule(&wasm.Module{

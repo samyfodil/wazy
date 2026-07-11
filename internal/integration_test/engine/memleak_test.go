@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tetratelabs/wazero"
+	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/internal/platform"
 )
 
@@ -53,7 +54,9 @@ func testMemoryLeakInstantiateRuntimeAndModule() error {
 	hostBuilder := r.NewHostModuleBuilder("test")
 
 	for i := 0; i < 100; i++ {
-		hostBuilder.NewFunctionBuilder().WithFunc(func() uint32 { return uint32(i) }).Export(strconv.Itoa(i))
+		hostBuilder.NewFunctionBuilder().WithGoFunction(api.GoFunc(func(_ context.Context, stack []uint64) {
+			stack[0] = api.EncodeU32(uint32(i))
+		}), nil, []api.ValueType{api.ValueTypeI32}).Export(strconv.Itoa(i))
 	}
 
 	hostMod, err := hostBuilder.Instantiate(ctx)

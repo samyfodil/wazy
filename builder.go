@@ -10,13 +10,23 @@ import (
 // HostFunctionBuilder defines a host function (in Go), so that a
 // WebAssembly binary (e.g. %.wasm file) can import and use it.
 //
-// Here's an example of an addition function:
+// There are two ways to define a host function's implementation and its
+// WebAssembly signature:
 //
-//	hostModuleBuilder.NewFunctionBuilder().
-//		WithFunc(func(cxt context.Context, x, y uint32) uint32 {
-//			return x + y
-//		}).
-//		Export("add")
+//   - The strongly-typed HostFunc0-HostFunc8 and HostProc0-HostProc8 helpers
+//     (in the root wazero package) derive the WebAssembly signature from a Go
+//     function whose parameters and result are numeric (a HostValue),
+//     prefixed by context.Context and api.Module. They are chainable:
+//
+//     wazero.HostFunc2(b, func(ctx context.Context, mod api.Module, x, y uint32) uint32 {
+//     return x + y
+//     }).Export("add")
+//
+//   - WithGoModuleFunction (and WithGoFunction, when the calling module is not
+//     needed) take an explicit WebAssembly signature and read parameters from,
+//     and write results to, the raw stack. Use these for signatures the typed
+//     helpers cannot express: more than 8 parameters, multiple results, or no
+//     context.Context/api.Module prefix.
 //
 // # Memory
 //
@@ -38,8 +48,11 @@ import (
 //   - This is an interface for decoupling, not third-party implementations.
 //     All implementations are in wazero.
 type HostFunctionBuilder interface {
-	// WithGoFunction is an advanced feature for those who need higher
-	// performance than WithFunc at the cost of more complexity.
+	// WithGoFunction registers a host function from an explicit WebAssembly
+	// signature and an api.GoFunction that reads parameters from, and writes
+	// results to, the raw stack. It is the lower-level counterpart to the
+	// typed HostFunc0-HostFunc8/HostProc0-HostProc8 helpers, and is the right
+	// tool when their fixed "numeric, ctx+mod prefix" shape does not fit.
 	//
 	// Here's an example addition function:
 	//
@@ -55,8 +68,12 @@ type HostFunctionBuilder interface {
 	// See WithGoModuleFunction if you also need to access the calling module.
 	WithGoFunction(fn api.GoFunction, params, results []api.ValueType) HostFunctionBuilder
 
-	// WithGoModuleFunction is an advanced feature for those who need higher
-	// performance than WithFunc at the cost of more complexity.
+	// WithGoModuleFunction registers a host function from an explicit
+	// WebAssembly signature and an api.GoModuleFunction that reads parameters
+	// from, and writes results to, the raw stack. It is the lower-level
+	// counterpart to the typed HostFunc0-HostFunc8/HostProc0-HostProc8
+	// helpers, and is the right tool when their fixed "numeric, ctx+mod
+	// prefix" shape does not fit.
 	//
 	// Here's an example addition function that loads operands from memory:
 	//
@@ -76,43 +93,6 @@ type HostFunctionBuilder interface {
 	//
 	// See WithGoFunction if you don't need access to the calling module.
 	WithGoModuleFunction(fn api.GoModuleFunction, params, results []api.ValueType) HostFunctionBuilder
-
-	// WithFunc uses reflect.Value to map a go `func` to a WebAssembly
-	// compatible Signature. An input that isn't a `func` will fail to
-	// instantiate.
-	//
-	// Here's an example of an addition function:
-	//
-	//	builder.WithFunc(func(cxt context.Context, x, y uint32) uint32 {
-	//		return x + y
-	//	})
-	//
-	// # Defining a function
-	//
-	// Except for the context.Context and optional api.Module, all parameters
-	// or result types must map to WebAssembly numeric value types. This means
-	// uint32, int32, uint64, int64, float32 or float64.
-	//
-	// api.Module may be specified as the second parameter, usually to access
-	// memory. This is important because there are only numeric types in Wasm.
-	// The only way to share other data is via writing memory and sharing
-	// offsets.
-	//
-	//	builder.WithFunc(func(ctx context.Context, m api.Module, offset uint32) uint32 {
-	//		mem := m.Memory()
-	//		x, _ := mem.ReadUint32Le(ctx, offset)
-	//		y, _ := mem.ReadUint32Le(ctx, offset + 4) // 32 bits == 4 bytes!
-	//		return x + y
-	//	})
-	//
-	// This example propagates context properly when calling other functions
-	// exported in the api.Module:
-	//
-	//	builder.WithFunc(func(ctx context.Context, m api.Module, offset, byteCount uint32) uint32 {
-	//		fn = m.ExportedFunction("__read")
-	//		results, err := fn(ctx, offset, byteCount)
-	//	--snip--
-	WithFunc(interface{}) HostFunctionBuilder
 
 	// WithName defines the optional module-local name of this function, e.g.
 	// "random_get"
@@ -150,18 +130,21 @@ type HostFunctionBuilder interface {
 //	r := wazero.NewRuntime(ctx)
 //	defer r.Close(ctx) // This closes everything this Runtime created.
 //
-//	hello := func() {
+//	hello := func(context.Context, api.Module) {
 //		println("hello!")
 //	}
-//	env, _ := r.NewHostModuleBuilder("env").
-//		NewFunctionBuilder().WithFunc(hello).Export("hello").
+//	env, _ := wazero.HostProc0(r.NewHostModuleBuilder("env").NewFunctionBuilder(), hello).
+//		Export("hello").
 //		Instantiate(ctx)
 //
 // If the same module may be instantiated multiple times, it is more efficient
-// to separate steps. Here's an example:
+// to separate steps. Here's an example using WithGoModuleFunction for a
+// function whose signature the typed helpers don't cover:
 //
 //	compiled, _ := r.NewHostModuleBuilder("env").
-//		NewFunctionBuilder().WithFunc(getRandomString).Export("get_random_string").
+//		NewFunctionBuilder().
+//		WithGoModuleFunction(getRandomString, nil, []api.ValueType{api.ValueTypeI32}).
+//		Export("get_random_string").
 //		Compile(ctx)
 //
 //	env1, _ := r.InstantiateModule(ctx, compiled, wazero.NewModuleConfig().WithName("env.1"))
@@ -200,11 +183,11 @@ type HostModuleBuilder interface {
 	//	r := wazero.NewRuntime(ctx)
 	//	defer r.Close(ctx) // This closes everything this Runtime created.
 	//
-	//	hello := func() {
+	//	hello := func(context.Context, api.Module) {
 	//		println("hello!")
 	//	}
-	//	env, _ := r.NewHostModuleBuilder("env").
-	//		NewFunctionBuilder().WithFunc(hello).Export("hello").
+	//	env, _ := wazero.HostProc0(r.NewHostModuleBuilder("env").NewFunctionBuilder(), hello).
+	//		Export("hello").
 	//		Instantiate(ctx)
 	//
 	// # Notes
@@ -250,12 +233,6 @@ func (h *hostFunctionBuilder) WithGoFunction(fn api.GoFunction, params, results 
 // WithGoModuleFunction implements HostFunctionBuilder.WithGoModuleFunction
 func (h *hostFunctionBuilder) WithGoModuleFunction(fn api.GoModuleFunction, params, results []api.ValueType) HostFunctionBuilder {
 	h.fn = &wasm.HostFunc{ParamTypes: wasm.FromApiValueType(params), ResultTypes: wasm.FromApiValueType(results), Code: wasm.Code{GoFunc: fn}}
-	return h
-}
-
-// WithFunc implements HostFunctionBuilder.WithFunc
-func (h *hostFunctionBuilder) WithFunc(fn interface{}) HostFunctionBuilder {
-	h.fn = fn
 	return h
 }
 

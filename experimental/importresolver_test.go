@@ -25,7 +25,7 @@ func TestImportResolver(t *testing.T) {
 			callCount++
 		}
 		modImport, err := r.NewHostModuleBuilder(fmt.Sprintf("env%d", i)).
-			NewFunctionBuilder().WithFunc(start).Export("start").
+			NewFunctionBuilder().WithGoFunction(api.GoFunc(func(ctx context.Context, _ []uint64) { start(ctx) }), nil, nil).Export("start").
 			Compile(ctx)
 		require.NoError(t, err)
 		// Anonymous module, it will be resolved by the import resolver.

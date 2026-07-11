@@ -3,7 +3,6 @@ package wazevo
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"runtime"
 	"sync/atomic"
 	"unsafe"
@@ -764,11 +763,13 @@ func (c *callEngine) cloneStack(l uintptr) (newSP, newFP, newTop uintptr, newSta
 	relSp := c.stackTop - uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall))
 	relFp := c.stackTop - c.execCtx.framePointerBeforeGoCall
 
-	// Copy the existing contents in the previous Go-allocated stack into the new one.
+	// Copy the existing contents in the previous Go-allocated stack into the new
+	// one. The stack pointers are raw uintptr addresses, so we build the []byte
+	// views via sliceHeader (see hostmodule.go) rather than unsafe.Slice, keeping
+	// go vet's unsafeptr check quiet and matching the original semantics.
 	var prevStackAligned, newStackAligned []byte
 	{
-		//nolint:staticcheck
-		sh := (*reflect.SliceHeader)(unsafe.Pointer(&prevStackAligned))
+		sh := (*sliceHeader)(unsafe.Pointer(&prevStackAligned))
 		sh.Data = c.stackTop - relSp
 		sh.Len = int(relSp)
 		sh.Cap = int(relSp)
@@ -777,8 +778,7 @@ func (c *callEngine) cloneStack(l uintptr) (newSP, newFP, newTop uintptr, newSta
 	{
 		newSP = newTop - relSp
 		newFP = newTop - relFp
-		//nolint:staticcheck
-		sh := (*reflect.SliceHeader)(unsafe.Pointer(&newStackAligned))
+		sh := (*sliceHeader)(unsafe.Pointer(&newStackAligned))
 		sh.Data = newSP
 		sh.Len = int(relSp)
 		sh.Cap = int(relSp)

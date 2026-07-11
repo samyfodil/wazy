@@ -102,7 +102,10 @@ const (
 	// This can be defined in Go as:
 	//  r.NewHostModuleBuilder("env").
 	//		NewFunctionBuilder().
-	//		WithFunc(func(context.Context, _ uintptr) (_ uintptr) { return }).
+	//		WithGoFunction(api.GoFunc(func(ctx context.Context, stack []uint64) {
+	//			// stack[0] holds the externref parameter as a uintptr; the
+	//			// result is written back to stack[0].
+	//		}), []api.ValueType{api.ValueTypeExternref}, []api.ValueType{api.ValueTypeExternref}).
 	//		Export("f")
 	//
 	// Note: The usage of this type is toggled with api.CoreFeatureBulkMemoryOperations.

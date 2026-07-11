@@ -61,8 +61,8 @@ func TestNewFunctionExporter(t *testing.T) {
 
 		// Override proc_exit to prove the point that you can add or replace
 		// functions like this.
-		wasiBuilder.NewFunctionBuilder().
-			WithFunc(func(ctx context.Context, mod api.Module, exitCode uint32) {
+		wazero.HostProc1(wasiBuilder.NewFunctionBuilder(),
+			func(ctx context.Context, mod api.Module, exitCode uint32) {
 				require.Equal(t, uint32(2), exitCode)
 				// ignore the code instead!
 				mod.Close(ctx)

@@ -5,6 +5,7 @@ import (
 	_ "embed"
 
 	"github.com/tetratelabs/wazero"
+	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/imports/assemblyscript"
 )
 
@@ -33,7 +34,9 @@ func Example_functionExporter() {
 	// First construct your own module builder for "env"
 	envBuilder := r.NewHostModuleBuilder("env").
 		NewFunctionBuilder().
-		WithFunc(func() uint32 { return 1 }).
+		WithGoFunction(api.GoFunc(func(_ context.Context, stack []uint64) {
+			stack[0] = api.EncodeU32(1)
+		}), nil, []api.ValueType{api.ValueTypeI32}).
 		Export("get_int")
 
 	// Now, add AssemblyScript special function imports into it.

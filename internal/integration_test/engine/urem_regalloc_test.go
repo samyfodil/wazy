@@ -25,7 +25,7 @@ func TestUremRegalloc(t *testing.T) {
 	defer r.Close(ctx)
 
 	_, err := r.NewHostModuleBuilder("repro").
-		NewFunctionBuilder().WithFunc(func(context.Context, uint32) {}).
+		NewFunctionBuilder().WithGoFunction(api.GoFunc(func(context.Context, []uint64) {}), []api.ValueType{api.ValueTypeI32}, nil).
 		Export("update_nonce").
 		Instantiate(ctx)
 	require.NoError(t, err)

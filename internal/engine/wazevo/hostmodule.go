@@ -2,7 +2,6 @@ package wazevo
 
 import (
 	"encoding/binary"
-	"reflect"
 	"unsafe"
 
 	"github.com/tetratelabs/wazero/experimental"
@@ -16,11 +15,9 @@ func buildHostModuleOpaque(m *wasm.Module, listeners []experimental.FunctionList
 	binary.LittleEndian.PutUint64(ret[0:], uint64(uintptr(unsafe.Pointer(m))))
 
 	if len(listeners) > 0 {
-		//nolint:staticcheck
-		sliceHeader := (*reflect.SliceHeader)(unsafe.Pointer(&listeners))
-		binary.LittleEndian.PutUint64(ret[8:], uint64(sliceHeader.Data))
-		binary.LittleEndian.PutUint64(ret[16:], uint64(sliceHeader.Len))
-		binary.LittleEndian.PutUint64(ret[24:], uint64(sliceHeader.Cap))
+		binary.LittleEndian.PutUint64(ret[8:], uint64(uintptr(unsafe.Pointer(unsafe.SliceData(listeners)))))
+		binary.LittleEndian.PutUint64(ret[16:], uint64(len(listeners)))
+		binary.LittleEndian.PutUint64(ret[24:], uint64(cap(listeners)))
 	}
 
 	offset := 32
@@ -32,10 +29,22 @@ func buildHostModuleOpaque(m *wasm.Module, listeners []experimental.FunctionList
 	return ret
 }
 
+// sliceHeader mirrors the layout of reflect.SliceHeader. The opaque host-module
+// context is addressed by a raw uintptr (opaqueBegin) that crosses the Go<->Wasm
+// ABI boundary, so building slice views over it necessarily starts from an
+// integer address rather than a Go pointer. Using this header (rather than
+// unsafe.Slice((*byte)(unsafe.Pointer(opaqueBegin)), ...)) keeps go vet's
+// unsafeptr check quiet and preserves the original, GC-invisible Data-as-uintptr
+// semantics that the reflect.SliceHeader-based code relied on.
+type sliceHeader struct {
+	Data uintptr
+	Len  int
+	Cap  int
+}
+
 func hostModuleFromOpaque(opaqueBegin uintptr) *wasm.Module {
 	var opaqueViewOverSlice []byte
-	//nolint:staticcheck
-	sh := (*reflect.SliceHeader)(unsafe.Pointer(&opaqueViewOverSlice))
+	sh := (*sliceHeader)(unsafe.Pointer(&opaqueViewOverSlice))
 	sh.Data = opaqueBegin
 	sh.Len = 32
 	sh.Cap = 32
@@ -44,8 +53,7 @@ func hostModuleFromOpaque(opaqueBegin uintptr) *wasm.Module {
 
 func hostModuleListenersSliceFromOpaque(opaqueBegin uintptr) []experimental.FunctionListener {
 	var opaqueViewOverSlice []byte
-	//nolint:staticcheck
-	sh := (*reflect.SliceHeader)(unsafe.Pointer(&opaqueViewOverSlice))
+	sh := (*sliceHeader)(unsafe.Pointer(&opaqueViewOverSlice))
 	sh.Data = opaqueBegin
 	sh.Len = 32
 	sh.Cap = 32
@@ -54,8 +62,7 @@ func hostModuleListenersSliceFromOpaque(opaqueBegin uintptr) []experimental.Func
 	l := binary.LittleEndian.Uint64(opaqueViewOverSlice[16:])
 	c := binary.LittleEndian.Uint64(opaqueViewOverSlice[24:])
 	var ret []experimental.FunctionListener
-	//nolint:staticcheck
-	sh = (*reflect.SliceHeader)(unsafe.Pointer(&ret))
+	sh = (*sliceHeader)(unsafe.Pointer(&ret))
 	sh.Data = uintptr(b)
 	sh.Len = int(l)
 	sh.Cap = int(c)
@@ -67,8 +74,7 @@ func hostModuleGoFuncFromOpaque[T any](index int, opaqueBegin uintptr) T {
 	ptr := opaqueBegin + offset
 
 	var opaqueViewOverFunction []byte
-	//nolint:staticcheck
-	sh := (*reflect.SliceHeader)(unsafe.Pointer(&opaqueViewOverFunction))
+	sh := (*sliceHeader)(unsafe.Pointer(&opaqueViewOverFunction))
 	sh.Data = ptr
 	sh.Len = 16
 	sh.Cap = 16

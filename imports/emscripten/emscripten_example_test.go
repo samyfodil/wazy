@@ -5,6 +5,7 @@ import (
 	_ "embed"
 
 	"github.com/tetratelabs/wazero"
+	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/imports/emscripten"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 )
@@ -61,7 +62,9 @@ func Example_functionExporter() {
 	// you need.
 	envBuilder := r.NewHostModuleBuilder("env").
 		NewFunctionBuilder().
-		WithFunc(func() uint32 { return 1 }).
+		WithGoFunction(api.GoFunc(func(_ context.Context, stack []uint64) {
+			stack[0] = api.EncodeU32(1)
+		}), nil, []api.ValueType{api.ValueTypeI32}).
 		Export("get_int")
 
 	// Now, add Emscripten special function imports into it.

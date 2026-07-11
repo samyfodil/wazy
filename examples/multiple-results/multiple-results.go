@@ -112,11 +112,10 @@ func multiValueFromImportedHostWasmFunctions(ctx context.Context, r wazero.Runti
 	if _, err := r.NewHostModuleBuilder("multi-value/host").
 		// Define a function that returns two results
 		NewFunctionBuilder().
-		WithFunc(func(context.Context) (age uint64, errno uint32) {
-			age = 37
-			errno = 0
-			return
-		}).
+		WithGoFunction(api.GoFunc(func(_ context.Context, stack []uint64) {
+			stack[0] = 37 // age
+			stack[1] = 0  // errno
+		}), nil, []api.ValueType{api.ValueTypeI64, api.ValueTypeI32}).
 		Export("get_age").
 		Instantiate(ctx); err != nil {
 		return nil, err

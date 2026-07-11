@@ -36,48 +36,44 @@ func Example_enableSnapshotterKey() {
 
 	// Register host functions using snapshot and restore. Generally snapshot is saved
 	// into a mutable location in context to be referenced during restore.
-	_, err := rt.NewHostModuleBuilder("example").
-		NewFunctionBuilder().
-		WithFunc(func(ctx context.Context, mod api.Module, snapshotPtr uint32) int32 {
-			// Because we enabled snapshots with WithSnapshotter, this is non-nil.
-			snapshot := experimental.GetSnapshotter(ctx).Snapshot()
+	b := rt.NewHostModuleBuilder("example")
+	wazero.HostFunc1(b.NewFunctionBuilder(), func(ctx context.Context, mod api.Module, snapshotPtr uint32) int32 {
+		// Because we enabled snapshots with WithSnapshotter, this is non-nil.
+		snapshot := experimental.GetSnapshotter(ctx).Snapshot()
 
-			// Get our mutable snapshots holder to be able to add to it. Our example only calls snapshot
-			// and restore once but real programs will often call them at multiple layers within a call
-			// stack with various e.g., try/catch statements.
-			snapshots := ctx.Value(snapshotsKey{}).(*[]experimental.Snapshot)
-			idx := len(*snapshots)
-			*snapshots = append(*snapshots, snapshot)
+		// Get our mutable snapshots holder to be able to add to it. Our example only calls snapshot
+		// and restore once but real programs will often call them at multiple layers within a call
+		// stack with various e.g., try/catch statements.
+		snapshots := ctx.Value(snapshotsKey{}).(*[]experimental.Snapshot)
+		idx := len(*snapshots)
+		*snapshots = append(*snapshots, snapshot)
 
-			// Write a value to be passed back to restore. This is meant to be opaque to the guest
-			// and used to re-reference the snapshot.
-			ok := mod.Memory().WriteUint32Le(snapshotPtr, uint32(idx))
-			if !ok {
-				log.Panicln("failed to write snapshot index")
-			}
+		// Write a value to be passed back to restore. This is meant to be opaque to the guest
+		// and used to re-reference the snapshot.
+		ok := mod.Memory().WriteUint32Le(snapshotPtr, uint32(idx))
+		if !ok {
+			log.Panicln("failed to write snapshot index")
+		}
 
-			return 0
-		}).
-		Export("snapshot").
-		NewFunctionBuilder().
-		WithFunc(func(ctx context.Context, mod api.Module, snapshotPtr uint32) {
-			// Read the value written by snapshot to re-reference the snapshot.
-			idx, ok := mod.Memory().ReadUint32Le(snapshotPtr)
-			if !ok {
-				log.Panicln("failed to read snapshot index")
-			}
+		return 0
+	}).Export("snapshot")
+	wazero.HostProc1(b.NewFunctionBuilder(), func(ctx context.Context, mod api.Module, snapshotPtr uint32) {
+		// Read the value written by snapshot to re-reference the snapshot.
+		idx, ok := mod.Memory().ReadUint32Le(snapshotPtr)
+		if !ok {
+			log.Panicln("failed to read snapshot index")
+		}
 
-			// Get the snapshot
-			snapshots := ctx.Value(snapshotsKey{}).(*[]experimental.Snapshot)
-			snapshot := (*snapshots)[idx]
+		// Get the snapshot
+		snapshots := ctx.Value(snapshotsKey{}).(*[]experimental.Snapshot)
+		snapshot := (*snapshots)[idx]
 
-			// Restore! The invocation of this function will end as soon as we invoke
-			// Restore, so we also pass in our return value. The guest function run
-			// will finish with this return value.
-			snapshot.Restore([]uint64{5})
-		}).
-		Export("restore").
-		Instantiate(ctx)
+		// Restore! The invocation of this function will end as soon as we invoke
+		// Restore, so we also pass in our return value. The guest function run
+		// will finish with this return value.
+		snapshot.Restore([]uint64{5})
+	}).Export("restore")
+	_, err := b.Instantiate(ctx)
 	if err != nil {
 		log.Panicln(err)
 	}

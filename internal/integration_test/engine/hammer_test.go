@@ -82,11 +82,14 @@ func closeImportedModuleWhileInUse(t *testing.T, r wazero.Runtime) {
 		require.NoError(t, imported.Close(testCtx))
 
 		// Redefine the imported module, with a function that no longer blocks.
+		returnInput := func(ctx context.Context, x uint32) uint32 {
+			return x
+		}
 		imported, err := r.NewHostModuleBuilder(imported.Name()).
 			NewFunctionBuilder().
-			WithFunc(func(ctx context.Context, x uint32) uint32 {
-				return x
-			}).
+			WithGoFunction(api.GoFunc(func(ctx context.Context, stack []uint64) {
+				stack[0] = api.EncodeU32(returnInput(ctx, api.DecodeU32(stack[0])))
+			}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).
 			Export("return_input").
 			Instantiate(testCtx)
 		require.NoError(t, err)
@@ -115,8 +118,10 @@ func closeModuleWhileInUse(t *testing.T, r wazero.Runtime, closeFn func(imported
 	}
 
 	// Create the host module, which exports the blocking function.
-	imported, err := r.NewHostModuleBuilder(t.Name() + "-imported").
-		NewFunctionBuilder().WithFunc(blockAndReturn).Export("return_input").
+	imported, err := r.NewHostModuleBuilder(t.Name()+"-imported").
+		NewFunctionBuilder().WithGoFunction(api.GoFunc(func(ctx context.Context, stack []uint64) {
+		stack[0] = api.EncodeU32(blockAndReturn(ctx, api.DecodeU32(stack[0])))
+	}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("return_input").
 		Instantiate(testCtx)
 	require.NoError(t, err)
 	defer imported.Close(testCtx)

@@ -80,9 +80,13 @@ func (e *counter) getAndIncrement() (ret uint32) {
 func instantiateWithEnv(ctx context.Context, r wazero.Runtime) api.Module {
 	// Instantiate a new "env" module which exports a stateful function.
 	c := &counter{}
-	_, err := r.NewHostModuleBuilder("env").
-		NewFunctionBuilder().WithFunc(c.getAndIncrement).Export("next_i32").
-		Instantiate(ctx)
+	envBuilder := r.NewHostModuleBuilder("env")
+	envBuilder.NewFunctionBuilder().
+		WithGoFunction(api.GoFunc(func(_ context.Context, stack []uint64) {
+			stack[0] = uint64(c.getAndIncrement())
+		}), nil, []api.ValueType{api.ValueTypeI32}).
+		Export("next_i32")
+	_, err := envBuilder.Instantiate(ctx)
 	if err != nil {
 		log.Panicln(err)
 	}

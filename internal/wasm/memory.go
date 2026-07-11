@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
-	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -306,22 +305,30 @@ func PagesToUnitOfBytes(pages uint32) string {
 
 // Below are raw functions used to implement the api.Memory API:
 
+// sliceHeader mirrors the memory layout of a Go slice ([]byte). It is used to
+// atomically overwrite the length and capacity words of a live slice in place,
+// which unsafe.Slice cannot express (it only builds a fresh slice value). Len
+// and Cap are declared as uintptr (the same width as the slice header's int
+// fields) so their addresses can be handed directly to sync/atomic. The Data
+// field is unsafe.Pointer, not uintptr, so the garbage collector keeps
+// tracking the backing array while the length/cap words are updated.
+type sliceHeader struct {
+	Data unsafe.Pointer
+	Len  uintptr
+	Cap  uintptr
+}
+
 // Uses atomic write to update the length of a slice.
 func atomicStoreLengthAndCap(slice *[]byte, length uintptr, cap uintptr) {
-	//nolint:staticcheck
-	slicePtr := (*reflect.SliceHeader)(unsafe.Pointer(slice))
-	capPtr := (*uintptr)(unsafe.Pointer(&slicePtr.Cap))
-	atomic.StoreUintptr(capPtr, cap)
-	lenPtr := (*uintptr)(unsafe.Pointer(&slicePtr.Len))
-	atomic.StoreUintptr(lenPtr, length)
+	slicePtr := (*sliceHeader)(unsafe.Pointer(slice))
+	atomic.StoreUintptr(&slicePtr.Cap, cap)
+	atomic.StoreUintptr(&slicePtr.Len, length)
 }
 
 // Uses atomic write to update the length of a slice.
 func atomicStoreLength(slice *[]byte, length uintptr) {
-	//nolint:staticcheck
-	slicePtr := (*reflect.SliceHeader)(unsafe.Pointer(slice))
-	lenPtr := (*uintptr)(unsafe.Pointer(&slicePtr.Len))
-	atomic.StoreUintptr(lenPtr, length)
+	slicePtr := (*sliceHeader)(unsafe.Pointer(slice))
+	atomic.StoreUintptr(&slicePtr.Len, length)
 }
 
 // memoryBytesNumToPages converts the given number of bytes into the number of pages.

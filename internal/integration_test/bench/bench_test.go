@@ -262,9 +262,9 @@ func createRuntime(b *testing.B, config wazero.RuntimeConfig) wazero.Runtime {
 
 	r := wazero.NewRuntimeWithConfig(testCtx, config)
 
-	_, err := r.NewHostModuleBuilder("env").
-		NewFunctionBuilder().WithFunc(getRandomString).Export("get_random_string").
-		Instantiate(testCtx)
+	hostBuilder := r.NewHostModuleBuilder("env")
+	wazero.HostProc2(hostBuilder.NewFunctionBuilder(), getRandomString).Export("get_random_string")
+	_, err := hostBuilder.Instantiate(testCtx)
 	if err != nil {
 		b.Fatal(err)
 	}

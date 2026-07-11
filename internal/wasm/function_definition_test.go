@@ -15,7 +15,7 @@ func TestModule_BuildFunctionDefinitions(t *testing.T) {
 	}
 
 	nopCode := Code{Body: []byte{OpcodeEnd}}
-	fn := func(uint32) uint32 { return 1 }
+	fn := &hostGoModuleFunc{}
 	tests := []struct {
 		name            string
 		m               *Module
@@ -64,7 +64,7 @@ func TestModule_BuildFunctionDefinitions(t *testing.T) {
 			m: &Module{
 				TypeSection:     []FunctionType{i32_i32},
 				FunctionSection: []Index{0},
-				CodeSection:     []Code{MustParseGoReflectFuncCode(fn)},
+				CodeSection:     []Code{{GoFunc: fn}},
 				NameSection: &NameSection{
 					ModuleName:    "m",
 					FunctionNames: NameMap{{Index: Index(0), Name: "fn"}},
@@ -78,7 +78,7 @@ func TestModule_BuildFunctionDefinitions(t *testing.T) {
 					name:        "fn",
 					moduleName:  "m",
 					Debugname:   "m.fn",
-					goFunc:      MustParseGoReflectFuncCode(fn).GoFunc,
+					goFunc:      fn,
 					Functype:    &i32_i32,
 					paramNames:  []string{"x"},
 					resultNames: []string{"y"},

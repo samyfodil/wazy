@@ -250,7 +250,7 @@ func Test_loggingListener(t *testing.T) {
 
 	var out bytes.Buffer
 	lf := logging.NewLoggingListenerFactory(&out)
-	fn := func() {}
+	fn := api.GoFunc(func(context.Context, []uint64) {})
 	for _, tt := range tests {
 		tc := tt
 		t.Run(tc.name, func(t *testing.T) {
@@ -272,7 +272,7 @@ func Test_loggingListener(t *testing.T) {
 			}
 
 			if tc.isHostFunc {
-				m.CodeSection = []wasm.Code{wasm.MustParseGoReflectFuncCode(fn)}
+				m.CodeSection = []wasm.Code{{GoFunc: fn}}
 			} else {
 				m.CodeSection = []wasm.Code{{Body: []byte{wasm.OpcodeEnd}}}
 			}

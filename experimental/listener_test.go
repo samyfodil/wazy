@@ -76,7 +76,7 @@ func TestFunctionListenerFactory(t *testing.T) {
 	r := wazero.NewRuntime(ctx)
 	defer r.Close(ctx) // This closes everything this Runtime created.
 
-	_, err := r.NewHostModuleBuilder("host").NewFunctionBuilder().WithFunc(func() {}).Export("").Instantiate(ctx)
+	_, err := r.NewHostModuleBuilder("host").NewFunctionBuilder().WithGoFunction(api.GoFunc(func(context.Context, []uint64) {}), nil, nil).Export("").Instantiate(ctx)
 	require.NoError(t, err)
 
 	// Ensure the imported function was converted to a listener.

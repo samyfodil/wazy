@@ -1,8 +1,10 @@
 package binaryencoding
 
 import (
+	"context"
 	"testing"
 
+	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/internal/testing/require"
 	"github.com/tetratelabs/wazero/internal/wasm"
 )
@@ -208,13 +210,12 @@ func TestModule_Encode(t *testing.T) {
 }
 
 func TestModule_Encode_HostFunctionSection_Unsupported(t *testing.T) {
-	// We don't currently have an approach to serialize reflect.Value pointers
-	fn := func() {}
-
+	// Host functions (api.GoFunction/api.GoModuleFunction) have no wire
+	// representation, so encoding a module that contains one must fail.
 	captured := require.CapturePanic(func() {
 		EncodeModule(&wasm.Module{
 			TypeSection: []wasm.FunctionType{{}},
-			CodeSection: []wasm.Code{wasm.MustParseGoReflectFuncCode(fn)},
+			CodeSection: []wasm.Code{{GoFunc: api.GoFunc(func(context.Context, []uint64) {})}},
 		})
 	})
 	require.EqualError(t, captured, "BUG: GoFunction is not encodable")

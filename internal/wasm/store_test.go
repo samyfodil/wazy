@@ -100,7 +100,7 @@ func TestStore_Instantiate(t *testing.T) {
 	m, err := NewHostModule(
 		"foo",
 		[]string{"fn"},
-		map[string]*HostFunc{"fn": {ExportName: "fn", Code: Code{GoFunc: func() {}}}},
+		map[string]*HostFunc{"fn": {ExportName: "fn", Code: Code{GoFunc: api.GoFunc(func(context.Context, []uint64) {})}}},
 		api.CoreFeaturesV1,
 	)
 	require.NoError(t, err)
@@ -184,7 +184,7 @@ func TestStore_hammer(t *testing.T) {
 	m, err := NewHostModule(
 		importedModuleName,
 		[]string{"fn"},
-		map[string]*HostFunc{"fn": {ExportName: "fn", Code: Code{GoFunc: func() {}}}},
+		map[string]*HostFunc{"fn": {ExportName: "fn", Code: Code{GoFunc: api.GoFunc(func(context.Context, []uint64) {})}}},
 		api.CoreFeaturesV1,
 	)
 	require.NoError(t, err)
@@ -243,7 +243,7 @@ func TestStore_hammer_close(t *testing.T) {
 	m, err := NewHostModule(
 		importedModuleName,
 		[]string{"fn"},
-		map[string]*HostFunc{"fn": {ExportName: "fn", Code: Code{GoFunc: func() {}}}},
+		map[string]*HostFunc{"fn": {ExportName: "fn", Code: Code{GoFunc: api.GoFunc(func(context.Context, []uint64) {})}}},
 		api.CoreFeaturesV1,
 	)
 	require.NoError(t, err)
@@ -307,7 +307,7 @@ func TestStore_Instantiate_Errors(t *testing.T) {
 	m, err := NewHostModule(
 		importedModuleName,
 		[]string{"fn"},
-		map[string]*HostFunc{"fn": {ExportName: "fn", Code: Code{GoFunc: func() {}}}},
+		map[string]*HostFunc{"fn": {ExportName: "fn", Code: Code{GoFunc: api.GoFunc(func(context.Context, []uint64) {})}}},
 		api.CoreFeaturesV1,
 	)
 	require.NoError(t, err)

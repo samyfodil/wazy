@@ -1054,12 +1054,15 @@ func TestE2E_host_functions(t *testing.T) {
 			var expectedMod api.Module
 
 			b := r.NewHostModuleBuilder("env")
-			b.NewFunctionBuilder().WithFunc(func(ctx2 context.Context, d float64) float64 {
+			rootFn := func(ctx2 context.Context, d float64) float64 {
 				require.Equal(t, ctx, ctx2)
 				require.Equal(t, 35.0, d)
 				return math.Sqrt(d)
-			}).Export("root")
-			b.NewFunctionBuilder().WithFunc(func(ctx2 context.Context, mod api.Module, a uint32, b uint64, c float32, d float64) (uint32, uint64, float32, float64) {
+			}
+			b.NewFunctionBuilder().WithGoFunction(api.GoFunc(func(ctx context.Context, stack []uint64) {
+				stack[0] = api.EncodeF64(rootFn(ctx, api.DecodeF64(stack[0])))
+			}), []api.ValueType{api.ValueTypeF64}, []api.ValueType{api.ValueTypeF64}).Export("root")
+			squareFn := func(ctx2 context.Context, mod api.Module, a uint32, b uint64, c float32, d float64) (uint32, uint64, float32, float64) {
 				require.Equal(t, expectedMod, mod)
 				require.Equal(t, ctx, ctx2)
 				require.Equal(t, uint32(2), a)
@@ -1067,7 +1070,14 @@ func TestE2E_host_functions(t *testing.T) {
 				require.Equal(t, float32(15.0), c)
 				require.Equal(t, 35.0, d)
 				return a * a, b * b, c * c, d * d
-			}).Export("square")
+			}
+			b.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+				r0, r1, r2, r3 := squareFn(ctx, mod, api.DecodeU32(stack[0]), stack[1], api.DecodeF32(stack[2]), api.DecodeF64(stack[3]))
+				stack[0] = api.EncodeU32(r0)
+				stack[1] = r1
+				stack[2] = api.EncodeF32(r2)
+				stack[3] = api.EncodeF64(r3)
+			}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeF32, api.ValueTypeF64}, []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeF32, api.ValueTypeF64}).Export("square")
 
 			_, err := b.Instantiate(ctx)
 			require.NoError(t, err)
@@ -1275,7 +1285,7 @@ func TestStackUnwind_panic_in_host(t *testing.T) {
 	}
 
 	_, err := r.NewHostModuleBuilder("host").
-		NewFunctionBuilder().WithFunc(callUnreachable).Export("cause_unreachable").
+		NewFunctionBuilder().WithGoFunction(api.GoFunc(func(context.Context, []uint64) { callUnreachable() }), nil, nil).Export("cause_unreachable").
 		Instantiate(ctx)
 	require.NoError(t, err)
 

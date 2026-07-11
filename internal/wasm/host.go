@@ -92,30 +92,14 @@ func addFuncs(
 		if hf.Name == "" {
 			hf.Name = k // default name to export name
 		}
+		// Host functions are always registered with explicit ParamTypes and
+		// ResultTypes and an api.GoModuleFunction or api.GoFunction
+		// implementation (see the wazero.HostFunctionBuilder methods and the
+		// wazero.HostFuncN/HostProcN helpers). There is nothing to resolve here.
 		switch hf.Code.GoFunc.(type) {
 		case api.GoModuleFunction, api.GoFunction:
-			continue // already parsed
-		}
-
-		// Resolve the code using reflection
-		hf.ParamTypes, hf.ResultTypes, hf.Code, err = parseGoReflectFunc(hf.Code.GoFunc)
-		if err != nil {
-			return fmt.Errorf("func[%s.%s] %w", moduleName, k, err)
-		}
-
-		// Assign names to the function, if they exist.
-		params := hf.ParamTypes
-		if paramNames := hf.ParamNames; paramNames != nil {
-			if paramNamesLen := len(paramNames); paramNamesLen != len(params) {
-				return fmt.Errorf("func[%s.%s] has %d params, but %d params names", moduleName, k, paramNamesLen, len(params))
-			}
-		}
-
-		results := hf.ResultTypes
-		if resultNames := hf.ResultNames; resultNames != nil {
-			if resultNamesLen := len(resultNames); resultNamesLen != len(results) {
-				return fmt.Errorf("func[%s.%s] has %d results, but %d results names", moduleName, k, resultNamesLen, len(results))
-			}
+		default:
+			return fmt.Errorf("func[%s.%s] is not an api.GoFunction or api.GoModuleFunction", moduleName, k)
 		}
 	}
 

@@ -2,11 +2,21 @@ package arm64
 
 import (
 	"encoding/binary"
-	"reflect"
 	"unsafe"
 
 	"github.com/tetratelabs/wazero/internal/wasmdebug"
 )
+
+// sliceHeader mirrors the layout of reflect.SliceHeader. It builds a []byte
+// over a raw machine-stack address (a plain uintptr, not a Go-managed pointer)
+// without importing reflect, and without a uintptr->unsafe.Pointer conversion
+// that go vet's unsafeptr check would flag. The stack memory is not
+// GC-managed, so Data stays a uintptr, exactly as the original code did.
+type sliceHeader struct {
+	Data uintptr
+	Len  int
+	Cap  int
+}
 
 // UnwindStack implements wazevo.unwindStack.
 func UnwindStack(sp, _, top uintptr, returnAddresses []uintptr) []uintptr {
@@ -14,8 +24,7 @@ func UnwindStack(sp, _, top uintptr, returnAddresses []uintptr) []uintptr {
 
 	var stackBuf []byte
 	{
-		//nolint:staticcheck
-		hdr := (*reflect.SliceHeader)(unsafe.Pointer(&stackBuf))
+		hdr := (*sliceHeader)(unsafe.Pointer(&stackBuf))
 		hdr.Data = sp
 		hdr.Len = l
 		hdr.Cap = l

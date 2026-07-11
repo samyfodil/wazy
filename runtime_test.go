@@ -338,7 +338,7 @@ func TestRuntime_InstantiateModule_UsesContext(t *testing.T) {
 	}
 
 	_, err := r.NewHostModuleBuilder("env").
-		NewFunctionBuilder().WithFunc(start).Export("start").
+		NewFunctionBuilder().WithGoFunction(api.GoFunc(func(ctx context.Context, _ []uint64) { start(ctx) }), nil, nil).Export("start").
 		Instantiate(testCtx)
 	require.NoError(t, err)
 
@@ -419,7 +419,7 @@ func TestRuntime_Instantiate_ErrorOnStart(t *testing.T) {
 			}
 
 			host, err := r.NewHostModuleBuilder("host").
-				NewFunctionBuilder().WithFunc(start).Export("start").
+				NewFunctionBuilder().WithGoFunction(api.GoFunc(func(context.Context, []uint64) { start() }), nil, nil).Export("start").
 				Instantiate(testCtx)
 			require.NoError(t, err)
 
@@ -514,9 +514,9 @@ func TestRuntime_InstantiateModule_ExitError(t *testing.T) {
 				require.NoError(t, m.CloseWithExitCode(ctx, tc.exitCode))
 			}
 
-			env, err := r.NewHostModuleBuilder("env").
-				NewFunctionBuilder().WithFunc(start).Export("exit").
-				Instantiate(testCtx)
+			b := r.NewHostModuleBuilder("env")
+			HostProc0(b.NewFunctionBuilder(), start).Export("exit")
+			env, err := b.Instantiate(testCtx)
 			require.NoError(t, err)
 			defer env.Close(testCtx)
 
@@ -662,10 +662,10 @@ func TestHostFunctionWithCustomContext(t *testing.T) {
 				require.Equal(t, secondString, hts.Content)
 			}
 
-			_, err := r.NewHostModuleBuilder("env").
-				NewFunctionBuilder().WithFunc(start).Export("host").
-				NewFunctionBuilder().WithFunc(callFunc).Export("host2").
-				Instantiate(hostCtx)
+			b := r.NewHostModuleBuilder("env")
+			HostProc0(b.NewFunctionBuilder(), start).Export("host")
+			HostProc0(b.NewFunctionBuilder(), callFunc).Export("host2")
+			_, err := b.Instantiate(hostCtx)
 			require.NoError(t, err)
 
 			startFnIndex := uint32(2)

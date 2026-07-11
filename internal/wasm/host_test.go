@@ -9,17 +9,24 @@ import (
 	. "github.com/tetratelabs/wazero/internal/wasip1"
 )
 
-func argsSizesGet(ctx context.Context, mod api.Module, resultArgc, resultArgvBufSize uint32) uint32 {
-	return 0
-}
+// arbitrary is an unexported context key type used by testCtx.
+type arbitrary struct{}
 
-func fdWrite(ctx context.Context, mod api.Module, fd, iovs, iovsCount, resultSize uint32) uint32 {
-	return 0
-}
+// testCtx is an arbitrary, non-default context. Non-nil also prevents linter errors.
+var testCtx = context.WithValue(context.Background(), arbitrary{}, "arbitrary")
 
-func swap(ctx context.Context, x, y uint32) (uint32, uint32) {
-	return y, x
-}
+// hostGoModuleFunc is a minimal struct-pointer api.GoModuleFunction. Tests that
+// compare host functions use pointer values (not bare api.GoModuleFunc func
+// values) so that Code.GoFunc can be compared with reflect.DeepEqual.
+type hostGoModuleFunc struct{}
+
+func (f *hostGoModuleFunc) Call(context.Context, api.Module, []uint64) {}
+
+var (
+	argsSizesGet = &hostGoModuleFunc{}
+	fdWrite      = &hostGoModuleFunc{}
+	swap         = &hostGoModuleFunc{}
+)
 
 func TestNewHostModule(t *testing.T) {
 	t.Run("empty name not allowed", func(t *testing.T) {
@@ -46,13 +53,17 @@ func TestNewHostModule(t *testing.T) {
 			nameToHostFunc: map[string]*HostFunc{
 				ArgsSizesGetName: {
 					ExportName:  ArgsSizesGetName,
+					ParamTypes:  []ValueType{i32, i32},
 					ParamNames:  []string{"result.argc", "result.argv_len"},
+					ResultTypes: []ValueType{i32},
 					ResultNames: []string{"errno"},
 					Code:        Code{GoFunc: argsSizesGet},
 				},
 				FdWriteName: {
 					ExportName:  FdWriteName,
+					ParamTypes:  []ValueType{i32, i32, i32, i32},
 					ParamNames:  []string{"fd", "iovs", "iovs_len", "result.size"},
+					ResultTypes: []ValueType{i32},
 					ResultNames: []string{"errno"},
 					Code:        Code{GoFunc: fdWrite},
 				},
@@ -63,7 +74,7 @@ func TestNewHostModule(t *testing.T) {
 					{Params: []ValueType{i32, i32, i32, i32}, Results: []ValueType{i32}},
 				},
 				FunctionSection: []Index{0, 1},
-				CodeSection:     []Code{MustParseGoReflectFuncCode(argsSizesGet), MustParseGoReflectFuncCode(fdWrite)},
+				CodeSection:     []Code{{GoFunc: argsSizesGet}, {GoFunc: fdWrite}},
 				ExportSection: []Export{
 					{Name: ArgsSizesGetName, Type: ExternTypeFunc, Index: 0},
 					{Name: FdWriteName, Type: ExternTypeFunc, Index: 1},
@@ -98,14 +109,19 @@ func TestNewHostModule(t *testing.T) {
 			},
 		},
 		{
-			name:           "multi-value",
-			moduleName:     "swapper",
-			exportNames:    []string{swapName},
-			nameToHostFunc: map[string]*HostFunc{swapName: {ExportName: swapName, Code: Code{GoFunc: swap}}},
+			name:        "multi-value",
+			moduleName:  "swapper",
+			exportNames: []string{swapName},
+			nameToHostFunc: map[string]*HostFunc{swapName: {
+				ExportName:  swapName,
+				ParamTypes:  []ValueType{i32, i32},
+				ResultTypes: []ValueType{i32, i32},
+				Code:        Code{GoFunc: swap},
+			}},
 			expected: &Module{
 				TypeSection:     []FunctionType{{Params: []ValueType{i32, i32}, Results: []ValueType{i32, i32}}},
 				FunctionSection: []Index{0},
-				CodeSection:     []Code{MustParseGoReflectFuncCode(swap)},
+				CodeSection:     []Code{{GoFunc: swap}},
 				ExportSection:   []Export{{Name: "swap", Type: ExternTypeFunc, Index: 0}},
 				Exports:         map[string]*Export{"swap": {Name: "swap", Type: ExternTypeFunc, Index: 0}},
 				NameSection:     &NameSection{ModuleName: "swapper", FunctionNames: NameMap{{Index: 0, Name: "swap"}}},
@@ -160,18 +176,15 @@ func TestNewHostModule_Errors(t *testing.T) {
 		expectedErr      string
 	}{
 		{
-			name:           "not a function",
-			moduleName:     "modname",
-			exportNames:    []string{"fn"},
-			nameToHostFunc: map[string]*HostFunc{"fn": {ExportName: "fn", Code: Code{GoFunc: t}}},
-			expectedErr:    "func[modname.fn] kind != func: ptr",
-		},
-		{
-			name:           "function has multiple results",
-			moduleName:     "yetanother",
-			exportNames:    []string{"fn"},
-			nameToHostFunc: map[string]*HostFunc{"fn": {ExportName: "fn", Code: Code{GoFunc: func() (uint32, uint32) { return 0, 0 }}}},
-			expectedErr:    "func[yetanother.fn] multiple result types invalid as feature \"multi-value\" is disabled",
+			name:        "function has multiple results",
+			moduleName:  "yetanother",
+			exportNames: []string{"fn"},
+			nameToHostFunc: map[string]*HostFunc{"fn": {
+				ExportName:  "fn",
+				ResultTypes: []ValueType{i32, i32},
+				Code:        Code{GoFunc: api.GoModuleFunc(func(context.Context, api.Module, []uint64) {})},
+			}},
+			expectedErr: "func[yetanother.fn] multiple result types invalid as feature \"multi-value\" is disabled",
 		},
 	}
 

@@ -38,7 +38,7 @@ func TestE2E_tail_call_import(t *testing.T) {
 			var expectedMod api.Module
 
 			b := r.NewHostModuleBuilder("env")
-			b.NewFunctionBuilder().WithFunc(func(ctx2 context.Context, mod api.Module, a, b, c, d, e, f, g, h int32) int32 {
+			wazero.HostFunc8(b.NewFunctionBuilder(), func(ctx2 context.Context, mod api.Module, a, b, c, d, e, f, g, h int32) int32 {
 				require.Equal(t, expectedMod, mod)
 				require.Equal(t, ctx, ctx2)
 				return a + b + c + d + e + f + g + h
@@ -145,7 +145,7 @@ func TestE2E_tail_call_import_indirect(t *testing.T) {
 			var expectedMod api.Module
 
 			b := r.NewHostModuleBuilder("env")
-			b.NewFunctionBuilder().WithFunc(func(ctx2 context.Context, mod api.Module, a, b, c, d, e, f, g, h int32) int32 {
+			wazero.HostFunc8(b.NewFunctionBuilder(), func(ctx2 context.Context, mod api.Module, a, b, c, d, e, f, g, h int32) int32 {
 				require.Equal(t, expectedMod, mod)
 				require.Equal(t, ctx, ctx2)
 				return a + b + c + d + e + f + g + h

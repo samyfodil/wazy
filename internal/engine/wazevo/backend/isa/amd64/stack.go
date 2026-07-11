@@ -2,22 +2,31 @@ package amd64
 
 import (
 	"encoding/binary"
-	"reflect"
 	"unsafe"
 
 	"github.com/tetratelabs/wazero/internal/wasmdebug"
 )
 
+// sliceHeader mirrors the layout of reflect.SliceHeader. It lets stackView
+// build a []byte over a raw machine-stack address (a plain uintptr, not a
+// Go-managed pointer) without importing reflect. We deliberately avoid
+// unsafe.Slice((*byte)(unsafe.Pointer(rbp)), l) here: that form makes go vet's
+// unsafeptr check flag the uintptr->unsafe.Pointer conversion, and it would
+// change the backing array's GC visibility. The stack memory is not
+// GC-managed, so Data stays a uintptr, exactly as the original code did.
+type sliceHeader struct {
+	Data uintptr
+	Len  int
+	Cap  int
+}
+
 func stackView(rbp, top uintptr) []byte {
 	l := int(top - rbp)
 	var stackBuf []byte
-	{
-		//nolint:staticcheck
-		hdr := (*reflect.SliceHeader)(unsafe.Pointer(&stackBuf))
-		hdr.Data = rbp
-		hdr.Len = l
-		hdr.Cap = l
-	}
+	hdr := (*sliceHeader)(unsafe.Pointer(&stackBuf))
+	hdr.Data = rbp
+	hdr.Len = l
+	hdr.Cap = l
 	return stackBuf
 }
 

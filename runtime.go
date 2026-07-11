@@ -77,11 +77,11 @@ type Runtime interface {
 	// Below defines and instantiates a module named "env" with one function:
 	//
 	//	ctx := context.Background()
-	//	hello := func() {
+	//	hello := func(context.Context, api.Module) {
 	//		fmt.Fprintln(stdout, "hello!")
 	//	}
-	//	_, err := r.NewHostModuleBuilder("env").
-	//		NewFunctionBuilder().WithFunc(hello).Export("hello").
+	//	_, err := wazero.HostProc0(r.NewHostModuleBuilder("env").NewFunctionBuilder(), hello).
+	//		Export("hello").
 	//		Instantiate(ctx, r)
 	//
 	// Note: empty `moduleName` is not allowed.

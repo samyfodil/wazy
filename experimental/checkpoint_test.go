@@ -18,36 +18,32 @@ func TestSnapshotNestedWasmInvocation(t *testing.T) {
 
 	sidechannel := 0
 
-	_, err := rt.NewHostModuleBuilder("example").
-		NewFunctionBuilder().
-		WithFunc(func(ctx context.Context, mod api.Module, snapshotPtr uint32) int32 {
-			defer func() {
-				sidechannel = 10
-			}()
-			snapshot := experimental.GetSnapshotter(ctx).Snapshot()
-			snapshots := ctx.Value(snapshotsKey{}).(*[]experimental.Snapshot)
-			idx := len(*snapshots)
-			*snapshots = append(*snapshots, snapshot)
-			ok := mod.Memory().WriteUint32Le(snapshotPtr, uint32(idx))
-			require.True(t, ok)
+	b := rt.NewHostModuleBuilder("example")
+	wazero.HostFunc1(b.NewFunctionBuilder(), func(ctx context.Context, mod api.Module, snapshotPtr uint32) int32 {
+		defer func() {
+			sidechannel = 10
+		}()
+		snapshot := experimental.GetSnapshotter(ctx).Snapshot()
+		snapshots := ctx.Value(snapshotsKey{}).(*[]experimental.Snapshot)
+		idx := len(*snapshots)
+		*snapshots = append(*snapshots, snapshot)
+		ok := mod.Memory().WriteUint32Le(snapshotPtr, uint32(idx))
+		require.True(t, ok)
 
-			_, err := mod.ExportedFunction("restore").Call(ctx, uint64(snapshotPtr))
-			require.NoError(t, err)
+		_, err := mod.ExportedFunction("restore").Call(ctx, uint64(snapshotPtr))
+		require.NoError(t, err)
 
-			return 2
-		}).
-		Export("snapshot").
-		NewFunctionBuilder().
-		WithFunc(func(ctx context.Context, mod api.Module, snapshotPtr uint32) {
-			idx, ok := mod.Memory().ReadUint32Le(snapshotPtr)
-			require.True(t, ok)
-			snapshots := ctx.Value(snapshotsKey{}).(*[]experimental.Snapshot)
-			snapshot := (*snapshots)[idx]
+		return 2
+	}).Export("snapshot")
+	wazero.HostProc1(b.NewFunctionBuilder(), func(ctx context.Context, mod api.Module, snapshotPtr uint32) {
+		idx, ok := mod.Memory().ReadUint32Le(snapshotPtr)
+		require.True(t, ok)
+		snapshots := ctx.Value(snapshotsKey{}).(*[]experimental.Snapshot)
+		snapshot := (*snapshots)[idx]
 
-			snapshot.Restore([]uint64{12})
-		}).
-		Export("restore").
-		Instantiate(ctx)
+		snapshot.Restore([]uint64{12})
+	}).Export("restore")
+	_, err := b.Instantiate(ctx)
 	require.NoError(t, err)
 
 	mod, err := rt.Instantiate(ctx, snapshotWasm)
@@ -72,30 +68,26 @@ func TestSnapshotMultipleWasmInvocations(t *testing.T) {
 	rt := wazero.NewRuntime(ctx)
 	defer rt.Close(ctx)
 
-	_, err := rt.NewHostModuleBuilder("example").
-		NewFunctionBuilder().
-		WithFunc(func(ctx context.Context, mod api.Module, snapshotPtr uint32) int32 {
-			snapshot := experimental.GetSnapshotter(ctx).Snapshot()
-			snapshots := ctx.Value(snapshotsKey{}).(*[]experimental.Snapshot)
-			idx := len(*snapshots)
-			*snapshots = append(*snapshots, snapshot)
-			ok := mod.Memory().WriteUint32Le(snapshotPtr, uint32(idx))
-			require.True(t, ok)
+	b := rt.NewHostModuleBuilder("example")
+	wazero.HostFunc1(b.NewFunctionBuilder(), func(ctx context.Context, mod api.Module, snapshotPtr uint32) int32 {
+		snapshot := experimental.GetSnapshotter(ctx).Snapshot()
+		snapshots := ctx.Value(snapshotsKey{}).(*[]experimental.Snapshot)
+		idx := len(*snapshots)
+		*snapshots = append(*snapshots, snapshot)
+		ok := mod.Memory().WriteUint32Le(snapshotPtr, uint32(idx))
+		require.True(t, ok)
 
-			return 0
-		}).
-		Export("snapshot").
-		NewFunctionBuilder().
-		WithFunc(func(ctx context.Context, mod api.Module, snapshotPtr uint32) {
-			idx, ok := mod.Memory().ReadUint32Le(snapshotPtr)
-			require.True(t, ok)
-			snapshots := ctx.Value(snapshotsKey{}).(*[]experimental.Snapshot)
-			snapshot := (*snapshots)[idx]
+		return 0
+	}).Export("snapshot")
+	wazero.HostProc1(b.NewFunctionBuilder(), func(ctx context.Context, mod api.Module, snapshotPtr uint32) {
+		idx, ok := mod.Memory().ReadUint32Le(snapshotPtr)
+		require.True(t, ok)
+		snapshots := ctx.Value(snapshotsKey{}).(*[]experimental.Snapshot)
+		snapshot := (*snapshots)[idx]
 
-			snapshot.Restore([]uint64{12})
-		}).
-		Export("restore").
-		Instantiate(ctx)
+		snapshot.Restore([]uint64{12})
+	}).Export("restore")
+	_, err := b.Instantiate(ctx)
 	require.NoError(t, err)
 
 	mod, err := rt.Instantiate(ctx, snapshotWasm)

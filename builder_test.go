@@ -13,13 +13,6 @@ import (
 func TestNewHostModuleBuilder_Compile(t *testing.T) {
 	i32, i64 := wasm.ValueTypeI32, wasm.ValueTypeI64
 
-	uint32_uint32 := func(context.Context, uint32) uint32 {
-		return 0
-	}
-	uint64_uint32 := func(context.Context, uint64) uint32 {
-		return 0
-	}
-
 	gofunc1 := api.GoFunc(func(ctx context.Context, stack []uint64) {
 		stack[0] = 0
 	})
@@ -47,61 +40,10 @@ func TestNewHostModuleBuilder_Compile(t *testing.T) {
 			expected: &wasm.Module{NameSection: &wasm.NameSection{ModuleName: "env"}},
 		},
 		{
-			name: "WithFunc",
-			input: func(r Runtime) HostModuleBuilder {
-				return r.NewHostModuleBuilder("host").
-					NewFunctionBuilder().WithFunc(uint32_uint32).Export("1")
-			},
-			expected: &wasm.Module{
-				TypeSection: []wasm.FunctionType{
-					{Params: []wasm.ValueType{i32}, Results: []wasm.ValueType{i32}},
-				},
-				FunctionSection: []wasm.Index{0},
-				CodeSection:     []wasm.Code{wasm.MustParseGoReflectFuncCode(uint32_uint32)},
-				ExportSection: []wasm.Export{
-					{Name: "1", Type: wasm.ExternTypeFunc, Index: 0},
-				},
-				Exports: map[string]*wasm.Export{
-					"1": {Name: "1", Type: wasm.ExternTypeFunc, Index: 0},
-				},
-				NameSection: &wasm.NameSection{
-					FunctionNames: wasm.NameMap{{Index: 0, Name: "1"}},
-					ModuleName:    "host",
-				},
-			},
-		},
-		{
-			name: "WithFunc WithName WithParameterNames",
+			name: "WithGoFunction WithName WithResultNames",
 			input: func(r Runtime) HostModuleBuilder {
 				return r.NewHostModuleBuilder("host").NewFunctionBuilder().
-					WithFunc(uint32_uint32).
-					WithName("get").WithParameterNames("x").
-					Export("1")
-			},
-			expected: &wasm.Module{
-				TypeSection: []wasm.FunctionType{
-					{Params: []wasm.ValueType{i32}, Results: []wasm.ValueType{i32}},
-				},
-				FunctionSection: []wasm.Index{0},
-				CodeSection:     []wasm.Code{wasm.MustParseGoReflectFuncCode(uint32_uint32)},
-				ExportSection: []wasm.Export{
-					{Name: "1", Type: wasm.ExternTypeFunc, Index: 0},
-				},
-				Exports: map[string]*wasm.Export{
-					"1": {Name: "1", Type: wasm.ExternTypeFunc, Index: 0},
-				},
-				NameSection: &wasm.NameSection{
-					FunctionNames: wasm.NameMap{{Index: 0, Name: "get"}},
-					LocalNames:    []wasm.NameMapAssoc{{Index: 0, NameMap: wasm.NameMap{{Index: 0, Name: "x"}}}},
-					ModuleName:    "host",
-				},
-			},
-		},
-		{
-			name: "WithFunc WithName WithResultNames",
-			input: func(r Runtime) HostModuleBuilder {
-				return r.NewHostModuleBuilder("host").NewFunctionBuilder().
-					WithFunc(uint32_uint32).
+					WithGoFunction(gofunc1, wasm.ToApiValueType([]wasm.ValueType{i32}), wasm.ToApiValueType([]wasm.ValueType{i32})).
 					WithName("get").WithResultNames("x").
 					Export("1")
 			},
@@ -110,7 +52,9 @@ func TestNewHostModuleBuilder_Compile(t *testing.T) {
 					{Params: []wasm.ValueType{i32}, Results: []wasm.ValueType{i32}},
 				},
 				FunctionSection: []wasm.Index{0},
-				CodeSection:     []wasm.Code{wasm.MustParseGoReflectFuncCode(uint32_uint32)},
+				CodeSection: []wasm.Code{
+					{GoFunc: gofunc1},
+				},
 				ExportSection: []wasm.Export{
 					{Name: "1", Type: wasm.ExternTypeFunc, Index: 0},
 				},
@@ -120,60 +64,6 @@ func TestNewHostModuleBuilder_Compile(t *testing.T) {
 				NameSection: &wasm.NameSection{
 					FunctionNames: wasm.NameMap{{Index: 0, Name: "get"}},
 					ResultNames:   []wasm.NameMapAssoc{{Index: 0, NameMap: wasm.NameMap{{Index: 0, Name: "x"}}}},
-					ModuleName:    "host",
-				},
-			},
-		},
-		{
-			name: "WithFunc overwrites existing",
-			input: func(r Runtime) HostModuleBuilder {
-				return r.NewHostModuleBuilder("host").
-					NewFunctionBuilder().WithFunc(uint32_uint32).Export("1").
-					NewFunctionBuilder().WithFunc(uint64_uint32).Export("1")
-			},
-			expected: &wasm.Module{
-				TypeSection: []wasm.FunctionType{
-					{Params: []wasm.ValueType{i64}, Results: []wasm.ValueType{i32}},
-				},
-				FunctionSection: []wasm.Index{0},
-				CodeSection:     []wasm.Code{wasm.MustParseGoReflectFuncCode(uint64_uint32)},
-				ExportSection: []wasm.Export{
-					{Name: "1", Type: wasm.ExternTypeFunc, Index: 0},
-				},
-				Exports: map[string]*wasm.Export{
-					"1": {Name: "1", Type: wasm.ExternTypeFunc, Index: 0},
-				},
-				NameSection: &wasm.NameSection{
-					FunctionNames: wasm.NameMap{{Index: 0, Name: "1"}},
-					ModuleName:    "host",
-				},
-			},
-		},
-		{
-			name: "WithFunc twice",
-			input: func(r Runtime) HostModuleBuilder {
-				// Intentionally out of order
-				return r.NewHostModuleBuilder("host").
-					NewFunctionBuilder().WithFunc(uint64_uint32).Export("2").
-					NewFunctionBuilder().WithFunc(uint32_uint32).Export("1")
-			},
-			expected: &wasm.Module{
-				TypeSection: []wasm.FunctionType{
-					{Params: []wasm.ValueType{i64}, Results: []wasm.ValueType{i32}},
-					{Params: []wasm.ValueType{i32}, Results: []wasm.ValueType{i32}},
-				},
-				FunctionSection: []wasm.Index{0, 1},
-				CodeSection:     []wasm.Code{wasm.MustParseGoReflectFuncCode(uint64_uint32), wasm.MustParseGoReflectFuncCode(uint32_uint32)},
-				ExportSection: []wasm.Export{
-					{Name: "2", Type: wasm.ExternTypeFunc, Index: 0},
-					{Name: "1", Type: wasm.ExternTypeFunc, Index: 1},
-				},
-				Exports: map[string]*wasm.Export{
-					"2": {Name: "2", Type: wasm.ExternTypeFunc, Index: 0},
-					"1": {Name: "1", Type: wasm.ExternTypeFunc, Index: 1},
-				},
-				NameSection: &wasm.NameSection{
-					FunctionNames: wasm.NameMap{{Index: 0, Name: "2"}, {Index: 1, Name: "1"}},
 					ModuleName:    "host",
 				},
 			},
@@ -329,35 +219,6 @@ func TestNewHostModuleBuilder_Compile(t *testing.T) {
 			// Closing the module shouldn't remove the compiler cache
 			require.NoError(t, mod.Close(testCtx))
 			require.Equal(t, uint32(1), b.r.store.Engine.CompiledModuleCount())
-		})
-	}
-}
-
-// TestNewHostModuleBuilder_Compile_Errors only covers a few scenarios to avoid
-// duplicating tests in internal/wasm/host_test.go
-func TestNewHostModuleBuilder_Compile_Errors(t *testing.T) {
-	tests := []struct {
-		name        string
-		input       func(Runtime) HostModuleBuilder
-		expectedErr string
-	}{
-		{
-			name: "error compiling", // should fail due to invalid param.
-			input: func(rt Runtime) HostModuleBuilder {
-				return rt.NewHostModuleBuilder("host").NewFunctionBuilder().
-					WithFunc(&wasm.HostFunc{ExportName: "fn", Code: wasm.Code{GoFunc: func(string) {}}}).
-					Export("fn")
-			},
-			expectedErr: `func[host.fn] param[0] is unsupported: string`,
-		},
-	}
-
-	for _, tt := range tests {
-		tc := tt
-
-		t.Run(tc.name, func(t *testing.T) {
-			_, e := tc.input(NewRuntime(testCtx)).Compile(testCtx)
-			require.EqualError(t, e, tc.expectedErr)
 		})
 	}
 }

@@ -9,6 +9,7 @@ import (
 	goruntime "runtime"
 	"testing"
 
+	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/internal/platform"
 	"github.com/tetratelabs/wazero/internal/testing/require"
 	"github.com/tetratelabs/wazero/internal/wasm"
@@ -89,11 +90,11 @@ func TestCompilationCache(t *testing.T) {
 
 		goFn := func() (dummy uint32) { return }
 		fooCompiled, err := foo.NewHostModuleBuilder("env").
-			NewFunctionBuilder().WithFunc(goFn).Export("go_fn").
+			NewFunctionBuilder().WithGoFunction(api.GoFunc(func(_ context.Context, stack []uint64) { stack[0] = api.EncodeU32(goFn()) }), nil, []api.ValueType{api.ValueTypeI32}).Export("go_fn").
 			Compile(testCtx)
 		require.NoError(t, err)
 		barCompiled, err := bar.NewHostModuleBuilder("env").
-			NewFunctionBuilder().WithFunc(goFn).Export("go_fn").
+			NewFunctionBuilder().WithGoFunction(api.GoFunc(func(_ context.Context, stack []uint64) { stack[0] = api.EncodeU32(goFn()) }), nil, []api.ValueType{api.ValueTypeI32}).Export("go_fn").
 			Compile(testCtx)
 		require.NoError(t, err)
 
