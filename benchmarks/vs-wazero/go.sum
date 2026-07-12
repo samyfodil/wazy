@@ -1,0 +1,4 @@
+github.com/tetratelabs/wazero v1.12.1-0.20260630042819-c0f3a4ec6411 h1:jwBZ2TcD+Daq3FUkR4EKc/kWlIcdpVUnai8B4F/2uUU=
+github.com/tetratelabs/wazero v1.12.1-0.20260630042819-c0f3a4ec6411/go.mod h1:LvKtzl2RqO4gyF27BiXU+nKAjcV8f38U+kP/q2vgxh0=
+golang.org/x/sys v0.44.0 h1:ildZl3J4uzeKP07r2F++Op7E9B29JRUy+a27EibtBTQ=
+golang.org/x/sys v0.44.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
