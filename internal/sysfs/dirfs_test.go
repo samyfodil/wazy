@@ -719,6 +719,26 @@ func TestDirFS_Readdir(t *testing.T) {
 
 		require.Equal(t, 0, len(dirents))
 	})
+
+	// Readdir after Close must report EBADF, not silently succeed on a stale
+	// (possibly reused) descriptor. This guards the Linux getdents64 fast path,
+	// which reads the cached f.fd directly instead of going through os.File.
+	t.Run("sys.EBADF after close", func(t *testing.T) {
+		require.EqualErrno(t, 0, testFS.Mkdir("closed", 0o700))
+		require.NoError(t, os.WriteFile(path.Join(root, "closed", "a"), nil, 0o444))
+
+		closedDir, errno := testFS.OpenFile("closed", sys.O_RDONLY, 0)
+		require.EqualErrno(t, 0, errno)
+
+		// Drain to EOF first so any EOF short-circuit can't hide the close.
+		_, errno = closedDir.Readdir(-1)
+		require.EqualErrno(t, 0, errno)
+
+		require.EqualErrno(t, 0, closedDir.Close())
+
+		_, errno = closedDir.Readdir(-1)
+		require.EqualErrno(t, sys.EBADF, errno)
+	})
 }
 
 func TestDirFS_Link(t *testing.T) {

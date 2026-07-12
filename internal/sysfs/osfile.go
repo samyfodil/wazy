@@ -43,6 +43,22 @@ type osFile struct {
 
 	// cachedStat includes fields that won't change while a file is open.
 	cachedSt *cachedStat
+
+	// direntBuf is a reusable buffer for raw getdents64 reads, used only by
+	// the Linux fast path in readdir_linux.go. Always nil on other
+	// platforms.
+	direntBuf []byte
+
+	// bufferedDirents holds entries parsed from a prior getdents64 batch
+	// that haven't yet been returned by Readdir, since a single batch can
+	// contain more entries than were requested. Used only by the Linux fast
+	// path in readdir_linux.go. Always nil on other platforms.
+	bufferedDirents []experimentalsys.Dirent
+
+	// direntsEOF is true once getdents64 has signaled the end of the
+	// directory (a zero-length read). Used only by the Linux fast path in
+	// readdir_linux.go. Always false on other platforms.
+	direntsEOF bool
 }
 
 // cachedStat returns the cacheable parts of sys.Stat_t or an error if they
@@ -134,6 +150,10 @@ func (f *osFile) reopen() (errno experimentalsys.Errno) {
 	_ = f.file.Close()
 	f.file = file
 	f.fd = file.Fd()
+	// The old descriptor's directory stream (if any) is gone: any entries
+	// buffered from it are no longer valid to hand out.
+	f.bufferedDirents = nil
+	f.direntsEOF = false
 	return 0
 }
 
@@ -225,6 +245,18 @@ func (f *osFile) Seek(offset int64, whence int) (newOffset int64, errno experime
 			f.reopenDir = true
 		}
 	}
+
+	if errno == 0 && offset == 0 && whence == io.SeekStart {
+		// A rewind invalidates anything buffered by the Linux
+		// getdents64 fast path (readdir_linux.go): either this was a real
+		// lseek(2) to zero, which by itself resets the directory's
+		// getdents64 cursor without going through f.reopenDir/f.reopen(),
+		// or f.reopenDir was just set above and reopen() hasn't run yet.
+		// Always false/nil (a no-op) on non-directories and on platforms
+		// where the fast path isn't used.
+		f.bufferedDirents = nil
+		f.direntsEOF = false
+	}
 	return
 }
 
@@ -235,12 +267,25 @@ func (f *osFile) Poll(flag experimentalsys.Pflag, timeoutMillis int32) (ready bo
 
 // Readdir implements File.Readdir. Notably, this uses "Readdir", not
 // "ReadDir", from os.File.
+//
+// On Linux, this reads raw directory entries via getdents64 instead of
+// os.File.Readdir (FileInfo mode), because the latter lstats every single
+// entry even though wazy only needs the Name, Ino and Type already present
+// in the getdents64 record. See readdir_linux.go for details. Every other
+// platform is unchanged, see readdir_unsupported.go.
 func (f *osFile) Readdir(n int) (dirents []experimentalsys.Dirent, errno experimentalsys.Errno) {
 	if f.reopenDir { // re-open the directory if needed.
 		f.reopenDir = false
 		if errno = adjustReaddirErr(f, f.closed, f.reopen()); errno != 0 {
 			return
 		}
+	}
+
+	if direntGetdentsSupported && f.path != "" {
+		if dirents, errno = f.readdirGetdents(n); errno != 0 {
+			errno = adjustReaddirErr(f, f.closed, errno)
+		}
+		return
 	}
 
 	if dirents, errno = readdir(f.file, f.path, n); errno != 0 {
@@ -314,5 +359,6 @@ func (f *osFile) Close() experimentalsys.Errno {
 }
 
 func (f *osFile) close() experimentalsys.Errno {
+	f.releaseDirentBuf()
 	return experimentalsys.UnwrapOSError(f.file.Close())
 }

@@ -121,7 +121,7 @@ Verified good: fd_read/fd_write/fd_seek/clock_time_get are zero-alloc; iovecs sl
 memory without copying; fd table lookup is lock-free inlined bitmask; WASI binds via direct
 `GoModuleFunc` (no reflection).
 
-- **W1. `fd_readdir`: lstat(2) + FileInfo alloc per entry** (`sysfs/file.go:501` uses `os.File.Readdir`; stdlib lstats every name). Measured 16,653 ns vs 1,502 ns embed.FS for 13 entries. 8KB guest buffer → up to ~339 lstats per call. Fix: parse getdents64 directly (`syscall.ReadDirent`), or `ReadDir` (DirEntry mode) + lazy ino. Impact: high, **measured**, certain.
+- **W1. `fd_readdir`: lstat(2) + FileInfo alloc per entry** — **RESOLVED** (Linux): raw getdents64 parsing via `syscall.ReadDirent` with per-entry lstat only for DT_UNKNOWN/DT_WHT; surplus records buffered on the file; pooled 8KB buffer. sysfs.DirFS readdir -51% (16.2→7.9µs), allocs -47%; per-entry lstat eliminated entirely on d_type-populating filesystems. Audit added an EBADF-after-Close guard (stale-fd reuse). Non-Linux unchanged (remaining: name-string allocs + per-dir fstat, and W14 sizing).
 - **W2. `AdaptFS.Stat` = open+fstat+close** for `fs.FS` mounts (`adapter.go:39`); measured 3,751 vs 1,376 ns. Fix: `fs.StatFS` fast path. Impact: high, certain.
 - **W3. `poll_oneoff` polls blocking fds sequentially, each with the full remaining timeout** (`poll.go:181-210`) — latency bug + N ppolls; multi-fd `_poll` already exists internally (`poll_linux.go:30`). Fix: batch into one ppoll. Impact: high for socket guests, certain.
 - **W4. Socket read/write: `SyscallConn()` + 2 escaping closures per call** (~3-4 allocs) (`sock.go:102-154`). Fix: cache RawConn/fd at construction. Impact: med-high, certain.
