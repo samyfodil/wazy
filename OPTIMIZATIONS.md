@@ -44,9 +44,9 @@ the original reflection-based host-function registration **1086 ns/op, 6 allocs*
 
 pprof on fib: `callNativeFunc` 59% flat, `popValue` 13.6%, `pushValue` 6.8%, malloc ~10%.
 
-- **I1. `*callFrame` heap alloc per call** — `interpreter.go:888,868,178`. Fix: `frames []callFrame` by value. Impact: high, **measured**, certain.
-- **I2. Dispatch func is 'big' (cost 56600) → inliner cap drops to 20**: `popValue`(23), `drop`(79), `popMemoryOffset`(44), `popFrame`, `functionForOffset` all real calls. Fix: manually inline hot pops; split rare ops (SIMD/atomics, ~60% of switch) into `callNativeFuncRare`. Impact: high, **measured**, certain.
-- **I3. `frame.pc` lives on heap** — reload+store per instruction, defeats BCE (`Found IsInBounds` at :901). Fix: local pc, sync at call sites/traps. Impact: high, likely.
+- **I1. `*callFrame` heap alloc per call** — **RESOLVED**: `frames []callFrame` value slice; frame pointer re-taken after every nested call. fib_for_30 allocs/op: 1,346,273 → 2.
+- **I2. Dispatch func is 'big' (cost 56600) → inliner cap drops to 20** — **RESOLVED**: SIMD/atomics/bulk-memory cases (79 ops) split into `callNativeFuncRare`; cost 56600 → ~11350, `popValue`/`pushValue`/`drop`/`popMemoryOffset` (289 sites) now inline into the dispatch loop.
+- **I3. `frame.pc` lives on heap** — **RESOLVED**: local `pc` register mirror with documented sync policy (traps/calls/throws sync, ALU/branch path store-free); loop guard indexes `len(body)` directly so the per-instruction bounds check is eliminated. Trap stack traces verified byte-identical. I1+I2+I3 combined: fib_for_20 ~1.8 ms → ~1.05-1.2 ms, fib_for_30 ~184-211 ms → ~125-147 ms (~30% faster), allocs flat 2/op.
 - **I4. `ctx.Value(EnableSnapshotterKey{})` per call instruction** — `interpreter.go:252`. Fix: compute once per activation. Impact: med-high, certain.
 - **I5. Label ops compiled in and executed as no-ops**; `br`-to-next pairs emitted (`compiler.go:506,739,673`). Fix: strip labels + remap PCs in `lowerIR`; peephole fallthrough brs. Impact: medium, certain.
 - **I6. Two-level dispatch** (switch on kind, then on `op.B1` type tag) for all ALU/load/store. Fix: specialize kinds at lowering (`AddI32`, `LoadI64`, ...). Impact: medium, likely.
