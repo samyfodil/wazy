@@ -9,6 +9,48 @@ benchmark and a `PrintFinalizedMachineCode` dump), all reverted; the tree is cle
 
 ---
 
+## OUTCOME (P3.0 shipped; P3.1+ BLOCKED — read before implementing)
+
+**P3.0 shipped** (fixed per-frame slots for execCtx/moduleCtx, gated on
+try_table-with-catch functions; nothing reads them yet). The P3.2 *regalloc* crux was
+validated GO: regalloc keeps and correctly allocates an abnormal-edge landing pad, and a
+landing pad with a genuinely empty register live-in is entered correctly by a direct throw
+transfer on both ISAs.
+
+**But P3.1 (drop the register snapshot) is BLOCKED, and the block is fundamental.** An
+attempt to drop the snapshot for the empty-operand-floor case — with execCtx/moduleCtx
+memory-homed via the P3.0 slots — was disproven by a **real C++ workload**
+(`experimental.TestCppExceptions/test_catch_specific`, `cpp_exceptions.wasm` funcIdx 2: a
+`catch_all_ref` handler whose continuation calls two more functions before returning). Even
+with execCtx, moduleCtx, cat-3 locals, and an *empty* cat-4 floor all accounted for, the
+handler continuation still reads **some further category of callee-saved-register-resident
+state** that only the full snapshot restore provides. A/B confirmed reproducibly: forcing
+unconditional snapshot capture fixes it; gating on `FloorSize==0` does not. The extra
+category was not fully identified.
+
+This is the **third** time a careful enumeration of "what a landing pad needs" has been
+wrong: §4.1 missed `moduleCtx`; the P3 spike (below) missed this category; and the resume
+point's true callee-saved live-in set has resisted three analyses. The lesson: the
+enter-continuation resume point inherits the *entire* callee-saved register file by
+construction (the register allocator may keep any cross-`try` value there), so enumerating
+a safe subset to memory-home is not a frontend-tractable problem. Dropping the snapshot
+safely requires a **general abnormal-edge liveness model in the register allocator** (the
+"clobber-all invoke/landingpad edge" the design explicitly ruled out of scope), not the
+incremental memory-homing this document proposed.
+
+**Conclusion: the residual 1 KB register snapshot per enter is the practical floor.**
+C1 is effectively complete at P3.0. The remaining win (deleting the two Go exits per enter,
+~90× on the EH-fast-path microbenchmark) is real but is gated behind allocator surgery whose
+risk/effort is disproportionate to the benefit for current workloads. A secondary blocker
+found along the way: routing execCtx/moduleCtx reads through `ssa.Builder.MustFindValue` on
+an *unsealed* block inserts a spurious block param in **every** function (EH or not), because
+`Seal`'s `unknownValues` path adds a param unconditionally rather than taking `findValue`'s
+"same value from every predecessor" shortcut — any revival must solve that too. Everything
+below is the original spike; it is preserved for context but its "memory-home the four
+categories" premise is **superseded by this outcome**.
+
+---
+
 ## Executive summary
 
 **Where we are.** C1 P0/P1/P2a are shipped. The *throw* path already unwinds the native
