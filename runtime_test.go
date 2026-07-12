@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -185,6 +186,157 @@ func TestRuntime_CompileModule_Errors(t *testing.T) {
 			require.EqualError(t, err, tc.expectedErr)
 		})
 	}
+}
+
+// TestRuntime_CompileModule_CacheHitSkipsFunctionBodyValidation is a
+// regression test for finding A3: CompileModule must skip the expensive
+// per-function-body opcode walk (wasm.Module.ValidateFunctionBodies) when the
+// engine already reports a compiled artifact for this exact module.ID, while
+// still running every other (cheap, structural) check.
+//
+// It uses a module whose only defect is in a function body -- OpcodeF32Abs
+// popping an operand off an empty value stack -- so success or failure of
+// CompileModule is a direct, black-box signal of whether the function-body
+// walk ran. The mockEngine stub (see runtime_test.go's mockEngine) lets the
+// "already compiled" state be asserted without a real engine or a real prior
+// compile.
+func TestRuntime_CompileModule_CacheHitSkipsFunctionBodyValidation(t *testing.T) {
+	// Structurally valid, but func[0]'s body is invalid: f32.abs is executed
+	// against an empty operand stack.
+	badBodyModule := &wasm.Module{
+		TypeSection:     []wasm.FunctionType{{}},
+		FunctionSection: []wasm.Index{0},
+		CodeSection:     []wasm.Code{{Body: []byte{wasm.OpcodeF32Abs, wasm.OpcodeEnd}}},
+	}
+	bin := binaryencoding.EncodeModule(badBodyModule)
+
+	// Compute the module ID exactly as runtime.CompileModule will for this
+	// call (testCtx carries no experimentalapi.FunctionListenerFactory, so
+	// listeners is nil; engineLessConfig-derived configs default
+	// ensureTermination to false), so the mock engine can be pre-seeded as
+	// already holding a compiled artifact for it.
+	var idOnly wasm.Module
+	idOnly.AssignModuleID(bin, nil, false)
+
+	t.Run("cold: full validation runs and rejects the bad function body", func(t *testing.T) {
+		engine := &mockEngine{name: "mock", cachedModules: map[*wasm.Module]struct{}{}}
+		conf := *engineLessConfig
+		conf.newEngine = func(context.Context, api.CoreFeatures, filecache.Cache) wasm.Engine { return engine }
+		r := NewRuntimeWithConfig(testCtx, &conf)
+		defer r.Close(testCtx)
+
+		_, err := r.CompileModule(testCtx, bin)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "cannot pop the 1st f32 operand")
+		require.Equal(t, 1, engine.hasCompiledModuleCalls)
+		// Validate failed before CompileModule's real-compile path could run.
+		require.Equal(t, 0, engine.compileModuleCalls)
+	})
+
+	t.Run("hit: pre-existing compiled artifact skips function body validation", func(t *testing.T) {
+		engine := &mockEngine{
+			name:           "mock",
+			cachedModules:  map[*wasm.Module]struct{}{},
+			precompiledIDs: map[wasm.ModuleID]bool{idOnly.ID: true},
+		}
+		conf := *engineLessConfig
+		conf.newEngine = func(context.Context, api.CoreFeatures, filecache.Cache) wasm.Engine { return engine }
+		r := NewRuntimeWithConfig(testCtx, &conf)
+		defer r.Close(testCtx)
+
+		compiled, err := r.CompileModule(testCtx, bin)
+		require.NoError(t, err)
+		require.NotNil(t, compiled)
+		require.Equal(t, 1, engine.hasCompiledModuleCalls)
+		// The real compile must not run: the cached artifact is reused as-is,
+		// which is also what makes this a single probe rather than a
+		// memory/disk probe followed by a redundant second one.
+		require.Equal(t, 0, engine.compileModuleCalls)
+		// No rollback: HasCompiledModule's reference is owned by the returned
+		// CompiledModule and released only when it is Close'd.
+		require.Equal(t, 0, engine.deleteCompiledModuleCalls)
+	})
+}
+
+// nilListenerFactory is a FunctionListenerFactory whose NewFunctionListener is
+// invoked (once per function) as buildFunctionListeners builds each
+// FunctionDefinition. It returns nil listeners; its only purpose is to force
+// the FunctionDefinition-building path in CompileModule.
+type nilListenerFactory struct{}
+
+func (nilListenerFactory) NewFunctionListener(api.FunctionDefinition) experimental.FunctionListener {
+	return nil
+}
+
+// TestRuntime_CompileModule_ListenerFactoryInvalidModule is a regression test
+// for finding A3: with a FunctionListenerFactory in context, CompileModule
+// builds FunctionDefinitions (which index TypeSection by each function's/
+// imported function's declared type index) to hand to the factory. Those
+// indices are only bounds-checked by validation, so building the definitions
+// on a not-yet-validated module -- as an early cache probe would require --
+// panics on an adversarial binary that decodes but fails validation. The fix
+// keeps the validate-first ordering whenever a factory is present, so such a
+// module must surface a clean validation error, never panic.
+func TestRuntime_CompileModule_ListenerFactoryInvalidModule(t *testing.T) {
+	ctx := experimental.WithFunctionListenerFactory(testCtx, nilListenerFactory{})
+
+	t.Run("out-of-range function type index", func(t *testing.T) {
+		// Decodes (code count == function count) but func[0]'s type index (5)
+		// is out of range of the 1-entry TypeSection.
+		bin := binaryencoding.EncodeModule(&wasm.Module{
+			TypeSection:     []wasm.FunctionType{{}},
+			FunctionSection: []wasm.Index{5},
+			CodeSection:     []wasm.Code{{Body: []byte{wasm.OpcodeEnd}}},
+		})
+		r := NewRuntime(testCtx)
+		defer r.Close(testCtx)
+
+		_, err := r.CompileModule(ctx, bin)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "type section index 5 out of range")
+	})
+
+	t.Run("out-of-range imported function type index", func(t *testing.T) {
+		bin := binaryencoding.EncodeModule(&wasm.Module{
+			TypeSection: []wasm.FunctionType{{}},
+			ImportSection: []wasm.Import{
+				{Module: "m", Name: "f", Type: wasm.ExternTypeFunc, DescFunc: 9},
+			},
+		})
+		r := NewRuntime(testCtx)
+		defer r.Close(testCtx)
+
+		_, err := r.CompileModule(ctx, bin)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "type index out of range")
+	})
+}
+
+// TestRuntime_CompileModule_ErrorPrecedence pins down finding A3 item (d):
+// splitting Validate into ValidateStructure + function-body validation must
+// not change which error a multiply-defective module surfaces. A module that
+// is never a cache hit (any invalid module) always takes the full-Validate
+// path, so a structural defect (checked before the per-body opcode walk) still
+// wins over a function-body defect, exactly as before the split.
+func TestRuntime_CompileModule_ErrorPrecedence(t *testing.T) {
+	// Two defects: an export names a nonexistent function index (structural,
+	// validated before bodies), and func[0]'s body runs f32.abs on an empty
+	// stack (a per-body defect).
+	bin := binaryencoding.EncodeModule(&wasm.Module{
+		TypeSection:     []wasm.FunctionType{{}},
+		FunctionSection: []wasm.Index{0},
+		CodeSection:     []wasm.Code{{Body: []byte{wasm.OpcodeF32Abs, wasm.OpcodeEnd}}},
+		ExportSection:   []wasm.Export{{Name: "x", Type: wasm.ExternTypeFunc, Index: 99}},
+	})
+	r := NewRuntime(testCtx)
+	defer r.Close(testCtx)
+
+	_, err := r.CompileModule(testCtx, bin)
+	require.Error(t, err)
+	// The structural (export) defect must win over the function-body defect.
+	require.Contains(t, err.Error(), "unknown function for export")
+	require.False(t, strings.Contains(err.Error(), "f32 operand"),
+		"structural error must win, got body error: %v", err)
 }
 
 // TestModule_Memory only covers a couple cases to avoid duplication of internal/wasm/runtime_test.go
@@ -787,10 +939,29 @@ type mockEngine struct {
 	name          string
 	cachedModules map[*wasm.Module]struct{}
 	closed        bool
+
+	// precompiledIDs simulates the engine already holding a validated,
+	// compiled artifact for these module IDs -- as if it had been produced by
+	// an earlier process and found via the file cache. HasCompiledModule
+	// reports a hit for these IDs without any prior CompileModule call,
+	// letting tests exercise runtime.CompileModule's cache-hit path (skip
+	// ValidateFunctionBodies) without a real engine.
+	precompiledIDs map[wasm.ModuleID]bool
+
+	hasCompiledModuleCalls    int
+	compileModuleCalls        int
+	deleteCompiledModuleCalls int
+}
+
+// HasCompiledModule implements the same method as documented on wasm.Engine.
+func (e *mockEngine) HasCompiledModule(module *wasm.Module, _ []experimental.FunctionListener, _ bool) (bool, error) {
+	e.hasCompiledModuleCalls++
+	return e.precompiledIDs[module.ID], nil
 }
 
 // CompileModule implements the same method as documented on wasm.Engine.
 func (e *mockEngine) CompileModule(_ context.Context, module *wasm.Module, _ []experimental.FunctionListener, _ bool) error {
+	e.compileModuleCalls++
 	e.cachedModules[module] = struct{}{}
 	return nil
 }
@@ -802,6 +973,7 @@ func (e *mockEngine) CompiledModuleCount() uint32 {
 
 // DeleteCompiledModule implements the same method as documented on wasm.Engine.
 func (e *mockEngine) DeleteCompiledModule(module *wasm.Module) {
+	e.deleteCompiledModuleCalls++
 	delete(e.cachedModules, module)
 }
 

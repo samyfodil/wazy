@@ -133,7 +133,7 @@ func TestModule_validateTable(t *testing.T) {
 				ElementSection: []ElementSegment{
 					{
 						OffsetExpr: NewConstantExpressionFromI32(0),
-						Init:       []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0)},
+						Init:       []Index{0},
 						Type:       RefTypeFuncref,
 					},
 				},
@@ -150,7 +150,7 @@ func TestModule_validateTable(t *testing.T) {
 				ElementSection: []ElementSegment{
 					{
 						OffsetExpr: NewConstantExpressionFromI32(0),
-						Init:       []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0)},
+						Init:       []Index{0},
 						Type:       RefTypeFuncref,
 					},
 				},
@@ -166,7 +166,7 @@ func TestModule_validateTable(t *testing.T) {
 				ElementSection: []ElementSegment{
 					{
 						OffsetExpr: NewConstantExpressionFromI32(0),
-						Init:       []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0)},
+						Init:       []Index{0},
 						Type:       RefTypeFuncref,
 					},
 				},
@@ -182,11 +182,8 @@ func TestModule_validateTable(t *testing.T) {
 				ElementSection: []ElementSegment{
 					{
 						OffsetExpr: NewConstantExpressionFromI32(1),
-						Init: []ConstantExpression{
-							NewConstantExpressionFromOpcode(OpcodeRefFunc, const0),
-							NewConstantExpressionFromOpcode(OpcodeRefFunc, leb128.EncodeInt32(2)),
-						},
-						Type: RefTypeFuncref,
+						Init:       []Index{0, 2},
+						Type:       RefTypeFuncref,
 					},
 				},
 			},
@@ -224,7 +221,7 @@ func TestModule_validateTable(t *testing.T) {
 				ElementSection: []ElementSegment{
 					{
 						OffsetExpr: NewConstantExpressionFromOpcode(OpcodeGlobalGet, []byte{0x0}),
-						Init:       []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0)},
+						Init:       []Index{0},
 						Type:       RefTypeFuncref,
 					},
 				},
@@ -244,7 +241,7 @@ func TestModule_validateTable(t *testing.T) {
 				ElementSection: []ElementSegment{
 					{
 						OffsetExpr: NewConstantExpressionFromOpcode(OpcodeGlobalGet, []byte{0x0}),
-						Init:       []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0)},
+						Init:       []Index{0},
 						Type:       RefTypeFuncref,
 					},
 				},
@@ -264,7 +261,7 @@ func TestModule_validateTable(t *testing.T) {
 				ElementSection: []ElementSegment{
 					{
 						OffsetExpr: NewConstantExpressionFromOpcode(OpcodeGlobalGet, []byte{0x0}),
-						Init:       []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0)},
+						Init:       []Index{0},
 						Type:       RefTypeFuncref,
 					},
 				},
@@ -285,11 +282,8 @@ func TestModule_validateTable(t *testing.T) {
 				ElementSection: []ElementSegment{
 					{
 						OffsetExpr: NewConstantExpressionFromOpcode(OpcodeGlobalGet, []byte{0x1}),
-						Init: []ConstantExpression{
-							NewConstantExpressionFromOpcode(OpcodeRefFunc, const0),
-							NewConstantExpressionFromOpcode(OpcodeRefFunc, leb128.EncodeInt32(2)),
-						},
-						Type: RefTypeFuncref,
+						Init:       []Index{0, 2},
+						Type:       RefTypeFuncref,
 					},
 				},
 			},
@@ -307,11 +301,8 @@ func TestModule_validateTable(t *testing.T) {
 				ElementSection: []ElementSegment{
 					{
 						OffsetExpr: NewConstantExpressionFromI32(5),
-						Init: []ConstantExpression{
-							NewConstantExpressionFromOpcode(OpcodeGlobalGet, const0),
-							NewConstantExpressionFromOpcode(OpcodeGlobalGet, const1),
-						},
-						Type: RefTypeFuncref,
+						Init:       []Index{elementInitImportedGlobalReference | 0, elementInitImportedGlobalReference | 1},
+						Type:       RefTypeFuncref,
 					},
 				},
 			},
@@ -329,11 +320,8 @@ func TestModule_validateTable(t *testing.T) {
 				ElementSection: []ElementSegment{
 					{
 						OffsetExpr: NewConstantExpressionFromI32(5),
-						Init: []ConstantExpression{
-							NewConstantExpressionFromOpcode(OpcodeGlobalGet, const0),
-							NewConstantExpressionFromOpcode(OpcodeGlobalGet, const1),
-						},
-						Type: RefTypeExternref,
+						Init:       []Index{elementInitImportedGlobalReference | 0, elementInitImportedGlobalReference | 1},
+						Type:       RefTypeExternref,
 					},
 				},
 			},
@@ -353,15 +341,12 @@ func TestModule_validateTable(t *testing.T) {
 				ElementSection: []ElementSegment{
 					{
 						OffsetExpr: NewConstantExpressionFromI32(1),
-						Init: []ConstantExpression{
-							NewConstantExpressionFromOpcode(OpcodeRefFunc, const0),
-							NewConstantExpressionFromOpcode(OpcodeRefFunc, leb128.EncodeInt32(2)),
-						},
-						Type: RefTypeFuncref,
+						Init:       []Index{0, 2},
+						Type:       RefTypeFuncref,
 					},
 					{
 						OffsetExpr: NewConstantExpressionFromOpcode(OpcodeGlobalGet, []byte{0x1}),
-						Init:       []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0), NewConstantExpressionFromOpcode(OpcodeRefFunc, leb128.EncodeInt32(2))},
+						Init:       []Index{0, 2},
 						Type:       RefTypeFuncref,
 					},
 				},
@@ -377,7 +362,7 @@ func TestModule_validateTable(t *testing.T) {
 				ElementSection: []ElementSegment{
 					{
 						OffsetExpr: NewConstantExpressionFromI32(0),
-						Init:       []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0)},
+						Init:       []Index{0},
 						Type:       ValueTypeConcreteRef(0, true),
 					},
 				},
@@ -393,8 +378,11 @@ func TestModule_validateTable(t *testing.T) {
 				ElementSection: []ElementSegment{
 					{
 						OffsetExpr: NewConstantExpressionFromI32(0),
-						Init:       []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefNull, []byte{0x00})},
-						Type:       ValueTypeConcreteRef(0, true),
+						// A concrete/typed ref.null cannot be compacted (see CompactElementInit), so it
+						// stays on the Exprs rare path exactly as the decoder would have left it.
+						Init:  []Index{elementInitExprReference},
+						Exprs: []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefNull, []byte{0x00})},
+						Type:  ValueTypeConcreteRef(0, true),
 					},
 				},
 			},
@@ -479,9 +467,7 @@ func TestModule_validateTable_Errors(t *testing.T) {
 					{
 						OffsetExpr: NewConstantExpressionFromOpcode(OpcodeI32Const, leb128.EncodeUint64(math.MaxUint64)),
 						Type:       RefTypeExternref,
-						Init: []ConstantExpression{
-							NewConstantExpressionFromOpcode(OpcodeRefFunc, const0),
-						},
+						Init:       []Index{0},
 					},
 				},
 			},
@@ -496,9 +482,10 @@ func TestModule_validateTable_Errors(t *testing.T) {
 					{
 						OffsetExpr: NewConstantExpressionFromOpcode(OpcodeI32Const, leb128.EncodeUint64(math.MaxUint64)),
 						Type:       ValueTypeConcreteRef(0, true),
-						Init: []ConstantExpression{
-							NewConstantExpressionFromOpcode(OpcodeRefNull, []byte{ValueTypeExternref.Kind()}),
-						},
+						// A mismatched ref.null (funcref/externref vs. this segment's concrete Type)
+						// cannot be compacted (see CompactElementInit), so it stays on the Exprs rare path.
+						Init:  []Index{elementInitExprReference},
+						Exprs: []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefNull, []byte{ValueTypeExternref.Kind()})},
 					},
 				},
 			},
@@ -514,10 +501,8 @@ func TestModule_validateTable_Errors(t *testing.T) {
 				ElementSection: []ElementSegment{
 					{
 						OffsetExpr: NewConstantExpressionFromOpcode(OpcodeI32Const, leb128.EncodeUint64(math.MaxUint64)),
-						Init: []ConstantExpression{
-							NewConstantExpressionFromOpcode(OpcodeRefFunc, const0),
-						},
-						Type: RefTypeFuncref,
+						Init:       []Index{0},
+						Type:       RefTypeFuncref,
 					},
 				},
 			},
@@ -533,7 +518,7 @@ func TestModule_validateTable_Errors(t *testing.T) {
 				ElementSection: []ElementSegment{
 					{
 						OffsetExpr: NewConstantExpressionFromI64(0),
-						Init:       []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0)},
+						Init:       []Index{0},
 						Type:       RefTypeFuncref,
 					},
 				},
@@ -548,7 +533,7 @@ func TestModule_validateTable_Errors(t *testing.T) {
 				CodeSection:     []Code{codeEnd},
 				ElementSection: []ElementSegment{
 					{
-						OffsetExpr: NewConstantExpressionFromI32(0), Init: []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0)},
+						OffsetExpr: NewConstantExpressionFromI32(0), Init: []Index{0},
 						Type: RefTypeFuncref,
 					},
 				},
@@ -564,7 +549,7 @@ func TestModule_validateTable_Errors(t *testing.T) {
 				CodeSection:     []Code{codeEnd},
 				ElementSection: []ElementSegment{
 					{
-						OffsetExpr: NewConstantExpressionFromI32(2), Init: []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0)},
+						OffsetExpr: NewConstantExpressionFromI32(2), Init: []Index{0},
 						Type: RefTypeFuncref,
 					},
 				},
@@ -580,11 +565,11 @@ func TestModule_validateTable_Errors(t *testing.T) {
 				CodeSection:     []Code{codeEnd},
 				ElementSection: []ElementSegment{
 					{
-						OffsetExpr: NewConstantExpressionFromI32(1), Init: []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0)},
+						OffsetExpr: NewConstantExpressionFromI32(1), Init: []Index{0},
 						Type: RefTypeFuncref,
 					},
 					{
-						OffsetExpr: NewConstantExpressionFromI32(1), Init: []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0), NewConstantExpressionFromOpcode(OpcodeRefFunc, const0)},
+						OffsetExpr: NewConstantExpressionFromI32(1), Init: []Index{0, 0},
 						Type: RefTypeFuncref,
 					},
 				},
@@ -616,7 +601,7 @@ func TestModule_validateTable_Errors(t *testing.T) {
 				CodeSection:     []Code{codeEnd},
 				ElementSection: []ElementSegment{
 					{
-						OffsetExpr: NewConstantExpressionFromI32(1), Init: []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0), NewConstantExpressionFromOpcode(OpcodeRefFunc, const1)},
+						OffsetExpr: NewConstantExpressionFromI32(1), Init: []Index{0, 1},
 						Type: RefTypeFuncref,
 					},
 				},
@@ -637,10 +622,7 @@ func TestModule_validateTable_Errors(t *testing.T) {
 				CodeSection:     []Code{codeEnd},
 				ElementSection: []ElementSegment{
 					{
-						OffsetExpr: NewConstantExpressionFromI32(1), Init: []ConstantExpression{
-							NewConstantExpressionFromOpcode(OpcodeGlobalGet, leb128.EncodeInt32(1)),
-							NewConstantExpressionFromOpcode(OpcodeGlobalGet, leb128.EncodeInt32(100)),
-						},
+						OffsetExpr: NewConstantExpressionFromI32(1), Init: []Index{elementInitImportedGlobalReference | 1, elementInitImportedGlobalReference | 100},
 						Type: RefTypeFuncref,
 					},
 				},
@@ -658,7 +640,7 @@ func TestModule_validateTable_Errors(t *testing.T) {
 				CodeSection:     []Code{codeEnd},
 				ElementSection: []ElementSegment{
 					{
-						OffsetExpr: NewConstantExpressionFromOpcode(OpcodeGlobalGet, []byte{0x0}), Init: []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0)},
+						OffsetExpr: NewConstantExpressionFromOpcode(OpcodeGlobalGet, []byte{0x0}), Init: []Index{0},
 						Type: RefTypeFuncref,
 					},
 				},
@@ -677,7 +659,7 @@ func TestModule_validateTable_Errors(t *testing.T) {
 				CodeSection:     []Code{codeEnd},
 				ElementSection: []ElementSegment{
 					{
-						OffsetExpr: NewConstantExpressionFromOpcode(OpcodeGlobalGet, []byte{0x0}), Init: []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0), NewConstantExpressionFromOpcode(OpcodeRefFunc, const1)},
+						OffsetExpr: NewConstantExpressionFromOpcode(OpcodeGlobalGet, []byte{0x0}), Init: []Index{0, 1},
 						Type: RefTypeFuncref,
 					},
 				},
@@ -698,7 +680,7 @@ func TestModule_validateTable_Errors(t *testing.T) {
 				ElementSection: []ElementSegment{
 					{
 						OffsetExpr: NewConstantExpressionFromOpcode(OpcodeGlobalGet, []byte{0x0}),
-						Init:       []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0)},
+						Init:       []Index{0},
 						Type:       RefTypeFuncref,
 					},
 				},
@@ -718,7 +700,7 @@ func TestModule_validateTable_Errors(t *testing.T) {
 				ElementSection: []ElementSegment{
 					{
 						OffsetExpr: NewConstantExpressionFromOpcode(OpcodeGlobalGet, leb128.EncodeUint64(math.MaxUint64)),
-						Init:       []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0)},
+						Init:       []Index{0},
 						Type:       RefTypeFuncref,
 					},
 				},
@@ -791,11 +773,7 @@ func TestModule_buildTables(t *testing.T) {
 			module: &Module{
 				TableSection: []Table{{Min: 10, Type: RefTypeExternref}},
 				ElementSection: []ElementSegment{
-					{OffsetExpr: NewConstantExpressionFromI32(5), Init: []ConstantExpression{
-						NewConstantExpressionFromOpcode(OpcodeRefNull, []byte{RefTypeExternref.Kind()}),
-						NewConstantExpressionFromOpcode(OpcodeRefNull, []byte{RefTypeExternref.Kind()}),
-						NewConstantExpressionFromOpcode(OpcodeRefNull, []byte{RefTypeExternref.Kind()}),
-					}}, // three null refs.
+					{OffsetExpr: NewConstantExpressionFromI32(5), Init: []Index{ElementInitNullReference, ElementInitNullReference, ElementInitNullReference}}, // three null refs.
 				},
 			},
 			expectedTables: []*TableInstance{{References: make([]Reference, 10), Min: 10, Type: RefTypeExternref}},
@@ -808,7 +786,7 @@ func TestModule_buildTables(t *testing.T) {
 				FunctionSection: []Index{0},
 				CodeSection:     []Code{codeEnd},
 				ElementSection: []ElementSegment{
-					{OffsetExpr: NewConstantExpressionFromI32(0), Init: []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0)}},
+					{OffsetExpr: NewConstantExpressionFromI32(0), Init: []Index{0}},
 				},
 			},
 			expectedTables: []*TableInstance{{References: make([]Reference, 1), Min: 1}},
@@ -820,7 +798,7 @@ func TestModule_buildTables(t *testing.T) {
 				FunctionSection: []Index{0},
 				CodeSection:     []Code{codeEnd},
 				ElementSection: []ElementSegment{
-					{OffsetExpr: NewConstantExpressionFromI32(0), Init: []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0)}},
+					{OffsetExpr: NewConstantExpressionFromI32(0), Init: []Index{0}},
 				},
 			},
 			importedTables: []*TableInstance{{Min: 2}},
@@ -834,7 +812,7 @@ func TestModule_buildTables(t *testing.T) {
 				FunctionSection: []Index{0},
 				CodeSection:     []Code{codeEnd},
 				ElementSection: []ElementSegment{
-					{OffsetExpr: NewConstantExpressionFromI32(0), Init: []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0)}},
+					{OffsetExpr: NewConstantExpressionFromI32(0), Init: []Index{0}},
 				},
 			},
 			importedTables: []*TableInstance{{Min: 1}},
@@ -848,7 +826,7 @@ func TestModule_buildTables(t *testing.T) {
 				FunctionSection: []Index{0, 0, 0, 0},
 				CodeSection:     []Code{codeEnd, codeEnd, codeEnd, codeEnd},
 				ElementSection: []ElementSegment{
-					{OffsetExpr: NewConstantExpressionFromI32(1), Init: []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0), NewConstantExpressionFromOpcode(OpcodeRefFunc, leb128.EncodeInt32(2))}},
+					{OffsetExpr: NewConstantExpressionFromI32(1), Init: []Index{0, 2}},
 				},
 			},
 			expectedTables: []*TableInstance{{References: make([]Reference, 3), Min: 3}},
@@ -879,7 +857,7 @@ func TestModule_buildTables(t *testing.T) {
 				FunctionSection: []Index{0},
 				CodeSection:     []Code{codeEnd},
 				ElementSection: []ElementSegment{
-					{OffsetExpr: NewConstantExpressionFromI32(0), Init: []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0)}},
+					{OffsetExpr: NewConstantExpressionFromI32(0), Init: []Index{0}},
 				},
 			},
 			importedGlobals: []*GlobalInstance{{Type: GlobalType{ValType: ValueTypeI32}, Val: 1}},
@@ -896,7 +874,7 @@ func TestModule_buildTables(t *testing.T) {
 				FunctionSection: []Index{0},
 				CodeSection:     []Code{codeEnd},
 				ElementSection: []ElementSegment{
-					{OffsetExpr: NewConstantExpressionFromI32(0), Init: []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0)}},
+					{OffsetExpr: NewConstantExpressionFromI32(0), Init: []Index{0}},
 				},
 			},
 			importedGlobals: []*GlobalInstance{{Type: GlobalType{ValType: ValueTypeI32}, Val: 1}},
@@ -914,7 +892,7 @@ func TestModule_buildTables(t *testing.T) {
 				FunctionSection: []Index{0},
 				CodeSection:     []Code{codeEnd},
 				ElementSection: []ElementSegment{
-					{OffsetExpr: NewConstantExpressionFromI32(0), Init: []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0)}},
+					{OffsetExpr: NewConstantExpressionFromI32(0), Init: []Index{0}},
 				},
 			},
 			importedGlobals: []*GlobalInstance{{Type: GlobalType{ValType: ValueTypeI32}, Val: 1}},
@@ -935,12 +913,12 @@ func TestModule_buildTables(t *testing.T) {
 				ElementSection: []ElementSegment{
 					{
 						OffsetExpr: NewConstantExpressionFromOpcode(OpcodeGlobalGet, []byte{0x0}),
-						Init:       []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefNull, []byte{RefTypeExternref.Kind()}), NewConstantExpressionFromOpcode(OpcodeRefFunc, leb128.EncodeInt32(2))},
+						Init:       []Index{ElementInitNullReference, 2},
 						TableIndex: 1,
 					},
 					{
 						OffsetExpr: NewConstantExpressionFromOpcode(OpcodeGlobalGet, []byte{0x1}),
-						Init:       []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, leb128.EncodeInt32(0)), NewConstantExpressionFromOpcode(OpcodeRefFunc, leb128.EncodeInt32(2))},
+						Init:       []Index{0, 2},
 						TableIndex: 0,
 					},
 				},
@@ -966,8 +944,8 @@ func TestModule_buildTables(t *testing.T) {
 				FunctionSection: []Index{0, 0, 0, 0},
 				CodeSection:     []Code{codeEnd, codeEnd, codeEnd, codeEnd},
 				ElementSection: []ElementSegment{
-					{OffsetExpr: NewConstantExpressionFromI32(1), Init: []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0), NewConstantExpressionFromOpcode(OpcodeRefFunc, leb128.EncodeInt32(2))}},
-					{OffsetExpr: NewConstantExpressionFromOpcode(OpcodeGlobalGet, []byte{1}), Init: []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, leb128.EncodeInt32(1)), NewConstantExpressionFromOpcode(OpcodeRefFunc, leb128.EncodeInt32(2))}},
+					{OffsetExpr: NewConstantExpressionFromI32(1), Init: []Index{0, 2}},
+					{OffsetExpr: NewConstantExpressionFromOpcode(OpcodeGlobalGet, []byte{1}), Init: []Index{1, 2}},
 				},
 			},
 			importedGlobals: []*GlobalInstance{
@@ -1013,7 +991,7 @@ func TestModule_buildTable_Errors(t *testing.T) {
 				ElementSection: []ElementSegment{
 					{
 						OffsetExpr: NewConstantExpressionFromI32(2),
-						Init:       []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0)},
+						Init:       []Index{0},
 					},
 				},
 			},
@@ -1033,7 +1011,7 @@ func TestModule_buildTable_Errors(t *testing.T) {
 				ElementSection: []ElementSegment{
 					{
 						OffsetExpr: NewConstantExpressionFromOpcode(OpcodeGlobalGet, []byte{0x0}),
-						Init:       []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0)},
+						Init:       []Index{0},
 					},
 				},
 			},
@@ -1054,7 +1032,7 @@ func TestModule_buildTable_Errors(t *testing.T) {
 				ElementSection: []ElementSegment{
 					{
 						OffsetExpr: NewConstantExpressionFromOpcode(OpcodeGlobalGet, []byte{0x0}),
-						Init:       []ConstantExpression{NewConstantExpressionFromOpcode(OpcodeRefFunc, const0)},
+						Init:       []Index{0},
 					},
 				},
 			},

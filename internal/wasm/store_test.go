@@ -11,7 +11,6 @@ import (
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/internalapi"
-	"github.com/samyfodil/wazy/internal/leb128"
 	"github.com/samyfodil/wazy/internal/sys"
 	"github.com/samyfodil/wazy/internal/testing/hammer"
 	"github.com/samyfodil/wazy/internal/testing/require"
@@ -441,6 +440,11 @@ func (e *mockEngine) Close() error {
 // CompileModule implements the same method as documented on wasm.Engine.
 func (e *mockEngine) CompileModule(context.Context, *Module, []experimental.FunctionListener, bool) error {
 	return nil
+}
+
+// HasCompiledModule implements the same method as documented on wasm.Engine.
+func (e *mockEngine) HasCompiledModule(*Module, []experimental.FunctionListener, bool) (bool, error) {
+	return false, nil
 }
 
 // LookupFunction implements the same method as documented on wasm.Engine.
@@ -974,14 +978,14 @@ func TestModuleInstance_applyElements(t *testing.T) {
 		// This shouldn't panic.
 		m.applyElements([]ElementSegment{{Mode: ElementModeActive, OffsetExpr: NewConstantExpressionFromI32(100)}})
 		m.applyElements([]ElementSegment{
-			{Mode: ElementModeActive, OffsetExpr: NewConstantExpressionFromI32(0), Init: make([]ConstantExpression, 3)},
-			{Mode: ElementModeActive, OffsetExpr: NewConstantExpressionFromI32(100), Init: make([]ConstantExpression, 5)}, // Iteration stops at this point, so the offset:5 below shouldn't be applied.
-			{Mode: ElementModeActive, OffsetExpr: NewConstantExpressionFromI32(5), Init: make([]ConstantExpression, 5)},
+			{Mode: ElementModeActive, OffsetExpr: NewConstantExpressionFromI32(0), Init: make([]Index, 3)},
+			{Mode: ElementModeActive, OffsetExpr: NewConstantExpressionFromI32(100), Init: make([]Index, 5)}, // Iteration stops at this point, so the offset:5 below shouldn't be applied.
+			{Mode: ElementModeActive, OffsetExpr: NewConstantExpressionFromI32(5), Init: make([]Index, 5)},
 		})
 		require.Equal(t, []Reference{0, 0, 0, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff},
 			m.Tables[0].References)
 		m.applyElements([]ElementSegment{
-			{Mode: ElementModeActive, OffsetExpr: NewConstantExpressionFromI32(5), Init: make([]ConstantExpression, 5)},
+			{Mode: ElementModeActive, OffsetExpr: NewConstantExpressionFromI32(5), Init: make([]Index, 5)},
 		})
 		require.Equal(t, []Reference{0, 0, 0, 0xffff, 0xffff, 0, 0, 0, 0, 0}, m.Tables[0].References)
 	})
@@ -998,31 +1002,17 @@ func TestModuleInstance_applyElements(t *testing.T) {
 		}
 
 		// This shouldn't panic.
-		m.applyElements([]ElementSegment{{Mode: ElementModeActive, OffsetExpr: NewConstantExpressionFromI32(100), Init: []ConstantExpression{
-			NewConstantExpressionFromOpcode(OpcodeRefFunc, leb128.EncodeInt32(1)),
-			NewConstantExpressionFromOpcode(OpcodeRefFunc, leb128.EncodeInt32(2)),
-			NewConstantExpressionFromOpcode(OpcodeRefFunc, leb128.EncodeInt32(3)),
-		}}})
+		m.applyElements([]ElementSegment{{Mode: ElementModeActive, OffsetExpr: NewConstantExpressionFromI32(100), Init: []Index{1, 2, 3}}})
 		m.applyElements([]ElementSegment{
-			{Mode: ElementModeActive, OffsetExpr: NewConstantExpressionFromI32(0), Init: []ConstantExpression{
-				NewConstantExpressionFromOpcode(OpcodeRefFunc, leb128.EncodeInt32(0)),
-				NewConstantExpressionFromOpcode(OpcodeRefFunc, leb128.EncodeInt32(1)),
-				NewConstantExpressionFromOpcode(OpcodeRefFunc, leb128.EncodeInt32(2)),
-			}},
-			{Mode: ElementModeActive, OffsetExpr: NewConstantExpressionFromI32(9), Init: []ConstantExpression{
-				NewConstantExpressionFromOpcode(OpcodeGlobalGet, leb128.EncodeUint32(1)),
-			}},
-			{Mode: ElementModeActive, OffsetExpr: NewConstantExpressionFromI32(100), Init: make([]ConstantExpression, 5)}, // Iteration stops at this point, so the offset:5 below shouldn't be applied.
-			{Mode: ElementModeActive, OffsetExpr: NewConstantExpressionFromI32(5), Init: make([]ConstantExpression, 5)},
+			{Mode: ElementModeActive, OffsetExpr: NewConstantExpressionFromI32(0), Init: []Index{0, 1, 2}},
+			{Mode: ElementModeActive, OffsetExpr: NewConstantExpressionFromI32(9), Init: []Index{elementInitImportedGlobalReference | 1}},
+			{Mode: ElementModeActive, OffsetExpr: NewConstantExpressionFromI32(100), Init: make([]Index, 5)}, // Iteration stops at this point, so the offset:5 below shouldn't be applied.
+			{Mode: ElementModeActive, OffsetExpr: NewConstantExpressionFromI32(5), Init: make([]Index, 5)},
 		})
 		require.Equal(t, []Reference{0xa, 0xaa, 0xaaa, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xabcde},
 			m.Tables[0].References)
 		m.applyElements([]ElementSegment{
-			{Mode: ElementModeActive, OffsetExpr: NewConstantExpressionFromI32(5), Init: []ConstantExpression{
-				NewConstantExpressionFromOpcode(OpcodeRefFunc, leb128.EncodeInt32(0)),
-				NewConstantExpressionFromOpcode(OpcodeRefNull, []byte{RefTypeFuncref.Kind()}),
-				NewConstantExpressionFromOpcode(OpcodeRefFunc, leb128.EncodeInt32(2)),
-			}},
+			{Mode: ElementModeActive, OffsetExpr: NewConstantExpressionFromI32(5), Init: []Index{0, ElementInitNullReference, 2}},
 		})
 		require.Equal(t, []Reference{0xa, 0xaa, 0xaaa, 0xffff, 0xffff, 0xa, 0x0, 0xaaa, 0xffff, 0xabcde},
 			m.Tables[0].References)

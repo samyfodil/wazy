@@ -179,16 +179,15 @@ func (m *ModuleInstance) GetFunctionTypeID(t *FunctionType) FunctionTypeID {
 
 func (m *ModuleInstance) buildElementInstances(elements []ElementSegment) {
 	m.ElementInstances = make([][]Reference, len(elements))
-	for i, elm := range elements {
+	for i := range elements {
+		elm := &elements[i]
 		if elm.Type.Kind() == RefTypeFuncref.Kind() && elm.Mode == ElementModePassive {
 			// Only passive elements can be access as element instances.
 			// See https://www.w3.org/TR/2022/WD-wasm-core-2-20220419/syntax/modules.html#element-segments
-			inits := elm.Init
-			inst := make([]Reference, len(inits))
+			inst := make([]Reference, len(elm.Init))
 			m.ElementInstances[i] = inst
-			for j, idx := range inits {
-				initExprResults := evaluateConstExprInModuleInstance(&idx, m)
-				inst[j] = Reference(initExprResults[0])
+			for j := range elm.Init {
+				inst[j] = evaluateElementInitInModuleInstance(elm, j, m)
 			}
 		}
 	}
@@ -223,9 +222,8 @@ func (m *ModuleInstance) applyElements(elems []ElementSegment) {
 				references[offset+uint32(i)] = Reference(0)
 			}
 		} else {
-			for i, init := range elem.Init {
-				initExprResults := evaluateConstExprInModuleInstance(&init, m)
-				references[offset+uint32(i)] = Reference(initExprResults[0])
+			for i := range elem.Init {
+				references[offset+uint32(i)] = evaluateElementInitInModuleInstance(elem, i, m)
 			}
 		}
 	}

@@ -16,6 +16,37 @@ type Engine interface {
 	// CompileModule implements the same method as documented on wasm.Engine.
 	CompileModule(ctx context.Context, module *Module, listeners []experimental.FunctionListener, ensureTermination bool) error
 
+	// HasCompiledModule reports whether this engine already holds a compiled
+	// artifact for module (identified by module.ID - see Module.AssignModuleID),
+	// either resident in memory or found in on-disk file cache. A true result
+	// acquires a reference on the artifact exactly as CompileModule's own
+	// cache-hit path would (bumping an internal refcount, and for a file-cache
+	// hit, promoting it into the in-memory cache as a side effect so a
+	// following CompileModule call for the same module resolves via the cheap
+	// in-memory path instead of re-reading the file cache).
+	//
+	// A true result acquires exactly ONE reference, and the caller MUST
+	// release exactly one to balance it. The reference is meant to be handed
+	// to the resulting CompiledModule so its Close releases it; on any error
+	// path that prevents returning that CompiledModule, the caller must
+	// instead call DeleteCompiledModule once. Failing to release leaks the
+	// reference and the module is never released from cache tracking.
+	//
+	// Because a true result already holds a reference, the caller must NOT
+	// additionally call CompileModule for the same module while holding it:
+	// CompileModule's own cache-hit path acquires a SECOND reference (it is
+	// not idempotent on the refcount), which would then be unbalanced. On a
+	// hit, skip CompileModule entirely; only call it on a false result.
+	//
+	// module.ID must already be assigned (via Module.AssignModuleID) before
+	// calling this. listeners and ensureTermination must be the same values
+	// that will be passed to CompileModule for this module.
+	//
+	// This exists so wazy.Runtime.CompileModule can skip the expensive
+	// per-function-body validation pass on a cache hit: see the TRUST MODEL
+	// note at that call site.
+	HasCompiledModule(module *Module, listeners []experimental.FunctionListener, ensureTermination bool) (bool, error)
+
 	// CompiledModuleCount is exported for testing, to track the size of the compilation cache.
 	CompiledModuleCount() uint32
 

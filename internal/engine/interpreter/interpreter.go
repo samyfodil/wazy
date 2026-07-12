@@ -512,6 +512,18 @@ func (f internalFunction) SourceOffsetForPC(pc experimental.ProgramCounter) uint
 // interpreter mode doesn't maintain call frames in the stack, so pass the zero size to the IR.
 const callFrameStackSize = 0
 
+// HasCompiledModule implements the same method as documented on wasm.Engine.
+//
+// The interpreter engine only ever caches in memory (there is no file cache
+// counterpart to wazevo's), so this is just the same in-memory lookup
+// CompileModule itself does on a cache hit, exposed so callers can make that
+// check before CompileModule (see wasm.Engine.HasCompiledModule's docs on the
+// reference-acquisition contract this establishes).
+func (e *engine) HasCompiledModule(module *wasm.Module, _ []experimental.FunctionListener, _ bool) (bool, error) {
+	_, ok := e.getCompiledFunctions(module, true)
+	return ok, nil
+}
+
 // CompileModule implements the same method as documented on wasm.Engine.
 func (e *engine) CompileModule(_ context.Context, module *wasm.Module, listeners []experimental.FunctionListener, ensureTermination bool) error {
 	if _, ok := e.getCompiledFunctions(module, true); ok { // cache hit!

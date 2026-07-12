@@ -278,42 +278,15 @@ func (m *Module) typeIndexOfFunction(funcIdx Index) (Index, bool) {
 	return typeIdx, true
 }
 
+// Validate performs every validation check on m: cheap, module-structure
+// checks plus the expensive per-function-body instruction walk. It is
+// equivalent to ValidateStructure followed by ValidateFunctionBodies, in the
+// same relative position the checks always ran in (so error precedence when a
+// module has multiple defects is unchanged from before this method was
+// split).
 func (m *Module) Validate(enabledFeatures api.CoreFeatures) error {
-	for i := range m.TypeSection {
-		tp := &m.TypeSection[i]
-		tp.CacheNumInUint64()
-	}
-
-	if err := m.validateConcreteRefTypes(); err != nil {
-		return err
-	}
-
-	if err := m.validateStartSection(); err != nil {
-		return err
-	}
-
-	functions, globals, memory, tables, tags, err := m.AllDeclarations()
+	functions, globals, memory, tables, tags, err := m.validateBeforeFunctionBodies(enabledFeatures)
 	if err != nil {
-		return err
-	}
-
-	if err = m.validateTableInitExprs(globals, uint32(len(functions))); err != nil {
-		return err
-	}
-
-	if err = m.validateImports(enabledFeatures); err != nil {
-		return err
-	}
-
-	if err = m.validateGlobals(globals, uint32(len(functions)), MaximumGlobals); err != nil {
-		return err
-	}
-
-	if err = m.validateMemory(memory, globals, enabledFeatures); err != nil {
-		return err
-	}
-
-	if err = m.validateExports(enabledFeatures, functions, globals, memory, tables, tags); err != nil {
 		return err
 	}
 
@@ -323,18 +296,103 @@ func (m *Module) Validate(enabledFeatures api.CoreFeatures) error {
 		}
 	} // No need to validate host functions as NewHostModule validates
 
-	if err = m.validateTable(enabledFeatures, tables, MaximumTableIndex); err != nil {
+	return m.validateAfterFunctionBodies(enabledFeatures, tables)
+}
+
+// ValidateStructure performs every Validate check *except* walking the
+// instruction sequence of function bodies (see ValidateFunctionBodies for
+// that part). This is the cheap, non-per-function-body portion of
+// validation: module structure (imports/exports/globals/memory/table/tag
+// consistency, start function shape, etc.), plus caching derived TypeSection
+// metadata (FunctionType.CacheNumInUint64) that both engines read at compile
+// and instantiation time regardless of whether function bodies are
+// (re)validated.
+//
+// This is exported for wazy.Runtime.CompileModule, which calls it instead of
+// Validate when the engine already holds a compiled artifact for this exact
+// module (see the TRUST MODEL note at that call site): the opcode walk was
+// already performed - and must have succeeded - the first time this
+// byte-identical binary was compiled, but instantiation still needs the
+// structural outputs of this pass on *this* freshly-decoded Module value.
+func (m *Module) ValidateStructure(enabledFeatures api.CoreFeatures) error {
+	_, _, _, tables, _, err := m.validateBeforeFunctionBodies(enabledFeatures)
+	if err != nil {
+		return err
+	}
+	return m.validateAfterFunctionBodies(enabledFeatures, tables)
+}
+
+// ValidateFunctionBodies walks the instruction sequence of every function
+// body declared in the CodeSection: the expensive, per-opcode part of
+// Validate. It is exported for symmetry with ValidateStructure and so
+// callers/tests can exercise the split independently.
+func (m *Module) ValidateFunctionBodies(enabledFeatures api.CoreFeatures) error {
+	if m.CodeSection == nil {
+		return nil
+	}
+	functions, globals, memory, tables, tags, err := m.AllDeclarations()
+	if err != nil {
+		return err
+	}
+	return m.validateFunctions(enabledFeatures, functions, globals, memory, tables, tags, MaximumFunctionIndex)
+}
+
+// validateBeforeFunctionBodies performs every Validate check that precedes
+// the per-function-body opcode walk. It returns the AllDeclarations() results
+// so Validate can feed them directly into validateFunctions without
+// recomputing them.
+func (m *Module) validateBeforeFunctionBodies(enabledFeatures api.CoreFeatures) (functions []Index, globals []GlobalType, memory *Memory, tables []Table, tags []Index, err error) {
+	for i := range m.TypeSection {
+		tp := &m.TypeSection[i]
+		tp.CacheNumInUint64()
+	}
+
+	if err = m.validateConcreteRefTypes(); err != nil {
+		return
+	}
+
+	if err = m.validateStartSection(); err != nil {
+		return
+	}
+
+	functions, globals, memory, tables, tags, err = m.AllDeclarations()
+	if err != nil {
+		return
+	}
+
+	if err = m.validateTableInitExprs(globals, uint32(len(functions))); err != nil {
+		return
+	}
+
+	if err = m.validateImports(enabledFeatures); err != nil {
+		return
+	}
+
+	if err = m.validateGlobals(globals, uint32(len(functions)), MaximumGlobals); err != nil {
+		return
+	}
+
+	if err = m.validateMemory(memory, globals, enabledFeatures); err != nil {
+		return
+	}
+
+	err = m.validateExports(enabledFeatures, functions, globals, memory, tables, tags)
+	return
+}
+
+// validateAfterFunctionBodies performs every Validate check that follows the
+// per-function-body opcode walk. tables is threaded through from
+// validateBeforeFunctionBodies to avoid recomputing AllDeclarations.
+func (m *Module) validateAfterFunctionBodies(enabledFeatures api.CoreFeatures, tables []Table) error {
+	if err := m.validateTable(enabledFeatures, tables, MaximumTableIndex); err != nil {
 		return err
 	}
 
-	if err = m.validateDataCountSection(); err != nil {
+	if err := m.validateDataCountSection(); err != nil {
 		return err
 	}
 
-	if err = m.validateTagSection(); err != nil {
-		return err
-	}
-	return nil
+	return m.validateTagSection()
 }
 
 func (m *Module) validateConcreteRefTypes() error {
@@ -518,18 +576,27 @@ func (m *Module) declaredFunctionIndexes(enabledFeatures api.CoreFeatures) (ret 
 
 	for i := range m.ElementSection {
 		elem := &m.ElementSection[i]
-		for _, initExpr := range elem.Init {
-			_, _, _ = evaluateConstExpr(
-				&initExpr,
-				func(globalIndex Index) (ValueType, uint64, uint64, error) {
-					vt, err := m.resolveConstExprGlobalType(enabledFeatures, SectionIDElement, Index(i), globalIndex)
-					return vt, 0, 0, err
-				},
-				func(funcIndex Index) (Reference, error) {
-					ret[funcIndex] = struct{}{}
-					return 0, nil
-				},
-			)
+		for _, v := range elem.Init {
+			switch {
+			case v == ElementInitNullReference, v&elementInitImportedGlobalReference != 0:
+				// Neither a plain "ref.null" nor a "global.get" entry ever declares a function index.
+			case v&elementInitExprReference != 0:
+				// Rare path: fall back to the general evaluator over the stored expression, exactly as
+				// before, since it may itself contain a ref.func (e.g. buried in an extended-const form).
+				_, _, _ = evaluateConstExpr(
+					&elem.Exprs[v&^elementInitExprReference],
+					func(globalIndex Index) (ValueType, uint64, uint64, error) {
+						vt, err := m.resolveConstExprGlobalType(enabledFeatures, SectionIDElement, Index(i), globalIndex)
+						return vt, 0, 0, err
+					},
+					func(funcIndex Index) (Reference, error) {
+						ret[funcIndex] = struct{}{}
+						return 0, nil
+					},
+				)
+			default:
+				ret[v] = struct{}{}
+			}
 		}
 	}
 	return

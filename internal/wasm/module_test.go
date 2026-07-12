@@ -384,6 +384,56 @@ func TestModule_Validate_Errors(t *testing.T) {
 	}
 }
 
+// TestModule_ValidateStructure_SkipsFunctionBodies pins down exactly what
+// Validate splits into: ValidateStructure (every check except walking
+// function bodies) and ValidateFunctionBodies (only that walk). This is what
+// lets wazy.Runtime.CompileModule skip re-validating function bodies on a
+// compilation cache hit while still performing every other module-structure
+// check - see the TRUST MODEL note at that call site in runtime.go.
+func TestModule_ValidateStructure_SkipsFunctionBodies(t *testing.T) {
+	// A signature with both params and results wide enough that
+	// CacheNumInUint64 (V128 counts double) has an observable effect,
+	// distinguishing "computed" from the zero value.
+	sig := FunctionType{
+		Params:  []ValueType{ValueTypeV128},
+		Results: []ValueType{ValueTypeI64, ValueTypeF64},
+	}
+	newModuleWithBadFunctionBody := func() *Module {
+		return &Module{
+			TypeSection:     []FunctionType{sig},
+			FunctionSection: []Index{0},
+			// f32.abs against an empty operand stack: invalid instruction
+			// sequence. This does not affect module structure in any way.
+			CodeSection: []Code{{Body: []byte{OpcodeF32Abs, OpcodeEnd}}},
+		}
+	}
+
+	t.Run("Validate (unsplit) still catches it", func(t *testing.T) {
+		err := newModuleWithBadFunctionBody().Validate(api.CoreFeaturesV1)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "cannot pop the 1st f32 operand")
+	})
+
+	t.Run("ValidateFunctionBodies alone catches it", func(t *testing.T) {
+		err := newModuleWithBadFunctionBody().ValidateFunctionBodies(api.CoreFeaturesV1)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "cannot pop the 1st f32 operand")
+	})
+
+	t.Run("ValidateStructure alone does not catch it, but still caches TypeSection metadata", func(t *testing.T) {
+		m := newModuleWithBadFunctionBody()
+		err := m.ValidateStructure(api.CoreFeaturesV1)
+		require.NoError(t, err)
+
+		// Engines (and instantiation) read ParamNumInUint64/ResultNumInUint64
+		// off *this* freshly-decoded Module value regardless of whether its
+		// function bodies are (re)validated, so ValidateStructure must still
+		// populate them.
+		require.Equal(t, 2, m.TypeSection[0].ParamNumInUint64)  // v128 -> 2
+		require.Equal(t, 2, m.TypeSection[0].ResultNumInUint64) // i64 + f64 -> 2
+	})
+}
+
 func TestModule_validateStartSection(t *testing.T) {
 	t.Run("no start section", func(t *testing.T) {
 		m := Module{}
@@ -943,28 +993,15 @@ func TestModule_declaredFunctionIndexes(t *testing.T) {
 				ElementSection: []ElementSegment{
 					{
 						Mode: ElementModeActive,
-						Init: []ConstantExpression{
-							NewConstantExpressionFromOpcode(OpcodeRefFunc, []byte{0}),
-							NewConstantExpressionFromOpcode(OpcodeRefNull, []byte{ValueTypeExternref.Kind()}),
-							NewConstantExpressionFromOpcode(OpcodeRefFunc, []byte{5}),
-						},
+						Init: []Index{0, ElementInitNullReference, 5},
 					},
 					{
 						Mode: ElementModeDeclarative,
-						Init: []ConstantExpression{
-							NewConstantExpressionFromOpcode(OpcodeRefFunc, []byte{1}),
-							NewConstantExpressionFromOpcode(OpcodeRefNull, []byte{ValueTypeExternref.Kind()}),
-							NewConstantExpressionFromOpcode(OpcodeRefFunc, []byte{5}),
-						},
+						Init: []Index{1, ElementInitNullReference, 5},
 					},
 					{
 						Mode: ElementModePassive,
-						Init: []ConstantExpression{
-							NewConstantExpressionFromOpcode(OpcodeRefFunc, []byte{5}),
-							NewConstantExpressionFromOpcode(OpcodeRefFunc, []byte{2}),
-							NewConstantExpressionFromOpcode(OpcodeRefNull, []byte{ValueTypeExternref.Kind()}),
-							NewConstantExpressionFromOpcode(OpcodeRefNull, []byte{ValueTypeExternref.Kind()}),
-						},
+						Init: []Index{5, 2, ElementInitNullReference, ElementInitNullReference},
 					},
 				},
 			},
@@ -988,28 +1025,15 @@ func TestModule_declaredFunctionIndexes(t *testing.T) {
 				ElementSection: []ElementSegment{
 					{
 						Mode: ElementModeActive,
-						Init: []ConstantExpression{
-							NewConstantExpressionFromOpcode(OpcodeRefFunc, []byte{0}),
-							NewConstantExpressionFromOpcode(OpcodeRefNull, []byte{ValueTypeExternref.Kind()}),
-							NewConstantExpressionFromOpcode(OpcodeRefFunc, []byte{5}),
-						},
+						Init: []Index{0, ElementInitNullReference, 5},
 					},
 					{
 						Mode: ElementModeDeclarative,
-						Init: []ConstantExpression{
-							NewConstantExpressionFromOpcode(OpcodeRefFunc, []byte{1}),
-							NewConstantExpressionFromOpcode(OpcodeRefNull, []byte{ValueTypeExternref.Kind()}),
-							NewConstantExpressionFromOpcode(OpcodeRefFunc, []byte{5}),
-						},
+						Init: []Index{1, ElementInitNullReference, 5},
 					},
 					{
 						Mode: ElementModePassive,
-						Init: []ConstantExpression{
-							NewConstantExpressionFromOpcode(OpcodeRefFunc, []byte{5}),
-							NewConstantExpressionFromOpcode(OpcodeRefFunc, []byte{2}),
-							NewConstantExpressionFromOpcode(OpcodeRefNull, []byte{ValueTypeExternref.Kind()}),
-							NewConstantExpressionFromOpcode(OpcodeRefNull, []byte{ValueTypeExternref.Kind()}),
-						},
+						Init: []Index{5, 2, ElementInitNullReference, ElementInitNullReference},
 					},
 				},
 			},

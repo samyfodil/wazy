@@ -988,10 +988,7 @@ func testLookupFunction(t *testing.T, r wazy.Runtime) {
 			{
 				OffsetExpr: wasm.NewConstantExpressionFromI32(0),
 				TableIndex: 0,
-				Init: []wasm.ConstantExpression{
-					wasm.NewConstantExpressionFromOpcode(wasm.OpcodeRefFunc, []byte{2}),
-					wasm.NewConstantExpressionFromOpcode(wasm.OpcodeRefFunc, []byte{0}),
-				},
+				Init:       []wasm.Index{2, 0},
 			},
 		},
 	})
@@ -2301,10 +2298,7 @@ func testCloseTableExportingModule(t *testing.T, r wazy.Runtime) {
 				OffsetExpr: wasm.NewConstantExpressionFromI32(5),
 				TableIndex: 0, Type: wasm.RefTypeFuncref, Mode: wasm.ElementModeActive,
 				// Set the function 0, 1 at table offset 5.
-				Init: []wasm.ConstantExpression{
-					wasm.NewConstantExpressionFromOpcode(wasm.OpcodeRefFunc, []byte{0}),
-					wasm.NewConstantExpressionFromOpcode(wasm.OpcodeRefFunc, []byte{1}),
-				},
+				Init: []wasm.Index{0, 1},
 			},
 		},
 		TypeSection:     []wasm.FunctionType{{Results: []wasm.ValueType{i32}}},
@@ -2415,10 +2409,7 @@ func testCloseTableImportingModule(t *testing.T, r wazy.Runtime) {
 				OffsetExpr: wasm.NewConstantExpressionFromI32(5),
 				TableIndex: 0, Type: wasm.RefTypeFuncref, Mode: wasm.ElementModeActive,
 				// Set the function 0, 1 at table offset 5.
-				Init: []wasm.ConstantExpression{
-					wasm.NewConstantExpressionFromOpcode(wasm.OpcodeRefFunc, []byte{0}),
-					wasm.NewConstantExpressionFromOpcode(wasm.OpcodeRefFunc, []byte{1}),
-				},
+				Init: []wasm.Index{0, 1},
 			},
 		},
 		FunctionSection: []wasm.Index{0, 0},

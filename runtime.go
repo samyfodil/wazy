@@ -235,10 +235,80 @@ func (r *runtime) CompileModule(ctx context.Context, binary []byte) (CompiledMod
 		r.memoryLimitPages, r.memoryCapacityFromMax, !r.dwarfDisabled, r.storeCustomSections)
 	if err != nil {
 		return nil, err
-	} else if err = internal.Validate(r.enabledFeatures); err != nil {
-		// TODO: decoders should validate before returning, as that allows
-		// them to err with the correct position in the wasm binary.
-		return nil, err
+	}
+
+	// The module ID is a hash over the raw binary plus the compile-affecting
+	// flags (listener presence per function, ensureTermination). Computing it
+	// before validating lets us ask the engine whether it already has a
+	// compiled artifact for this exact binary and skip the (expensive)
+	// function-body validation pass below when it does.
+	//
+	// buildFunctionListeners, however, is NOT safe to run on a decoded but
+	// not-yet-validated module: it builds FunctionDefinition metadata that
+	// indexes TypeSection by each function's / imported function's declared
+	// type index, and those indices are only checked by validation (the
+	// per-function-body pass rejects an out-of-range one). Building them
+	// first would panic on an adversarial/corrupt binary that decodes but
+	// fails validation. So we only take the probe-before-validate fast path
+	// when there is no FunctionListenerFactory in ctx - the overwhelmingly
+	// common case, in which listeners is nil and nothing indexes TypeSection
+	// ahead of validation. With a factory present (an experimental,
+	// non-hot-path feature) we keep the original validate-first ordering and
+	// forgo the cache-hit validation skip; the engine's own CompileModule
+	// still resolves a cached artifact cheaply on its internal probe.
+	var listeners []experimentalapi.FunctionListener
+	var hasCompiled bool
+	if ctx.Value(expctxkeys.FunctionListenerFactoryKey{}) == nil {
+		internal.AssignModuleID(binary, nil, r.ensureTermination)
+
+		// hasCompiled acquires a reference on the engine's cached artifact
+		// for this module.ID (if any) - see wasm.Engine.HasCompiledModule. We
+		// must balance that reference: either reach the CompiledModule return
+		// below (whose Close releases it), or explicitly release it on any
+		// error returned between here and there.
+		if hasCompiled, err = r.store.Engine.HasCompiledModule(internal, nil, r.ensureTermination); err != nil {
+			return nil, err
+		}
+
+		if hasCompiled {
+			// TRUST MODEL: a hit here can come from the engine's on-disk file
+			// cache (wazevo), which we already trust no less than a fresh
+			// compile - we mmap and EXECUTE the machine code either way. The
+			// crc32 checksum embedded in the cache entry still guards against
+			// corruption, and a wazyVersion mismatch still forces a recompile;
+			// neither of those checks is weakened here. Given that, skipping
+			// *revalidation* of the source binary adds no new trust: a hit is
+			// only possible when module.ID - a sha256 over the raw binary plus
+			// every compile-affecting flag (see AssignModuleID: listener
+			// presence per function, ensureTermination) - matches exactly,
+			// which can only happen if this exact binary, with these exact
+			// flags, was already compiled (and therefore already ran the
+			// per-function-body opcode walk successfully) before.
+			//
+			// We still run ValidateStructure: the cheap, non-per-function-body
+			// checks it performs (e.g. caching FunctionType.ParamNumInUint64 /
+			// ResultNumInUint64) populate fields on *this* freshly decoded
+			// Module value, which the engine and instantiation read directly -
+			// they are not carried over from the cached artifact.
+			if err = internal.ValidateStructure(r.enabledFeatures); err != nil {
+				r.store.Engine.DeleteCompiledModule(internal)
+				return nil, err
+			}
+		} else if err = internal.Validate(r.enabledFeatures); err != nil {
+			// TODO: decoders should validate before returning, as that allows
+			// them to err with the correct position in the wasm binary.
+			return nil, err
+		}
+	} else {
+		if err = internal.Validate(r.enabledFeatures); err != nil {
+			// TODO: decoders should validate before returning, as that allows
+			// them to err with the correct position in the wasm binary.
+			return nil, err
+		}
+		if listeners, err = buildFunctionListeners(ctx, internal); err != nil {
+			return nil, err
+		}
+		internal.AssignModuleID(binary, listeners, r.ensureTermination)
 	}
 
 	// Now that the module is validated, cache the memory definitions.
@@ -250,17 +320,20 @@ func (r *runtime) CompileModule(ctx context.Context, binary []byte) (CompiledMod
 	// typeIDs are static and compile-time known.
 	typeIDs, err := r.store.GetFunctionTypeIDs(internal.TypeSection)
 	if err != nil {
+		if hasCompiled {
+			r.store.Engine.DeleteCompiledModule(internal)
+		}
 		return nil, err
 	}
 	c.typeIDs = typeIDs
 
-	listeners, err := buildFunctionListeners(ctx, internal)
-	if err != nil {
-		return nil, err
-	}
-	internal.AssignModuleID(binary, listeners, r.ensureTermination)
-	if err = r.store.Engine.CompileModule(ctx, internal, listeners, r.ensureTermination); err != nil {
-		return nil, err
+	if !hasCompiled {
+		// On a miss, CompileModule performs its own (single) probe of memory
+		// and file cache before compiling; we don't duplicate that here to
+		// avoid racing a concurrent compile of the same module twice.
+		if err = r.store.Engine.CompileModule(ctx, internal, listeners, r.ensureTermination); err != nil {
+			return nil, err
+		}
 	}
 	return c, nil
 }

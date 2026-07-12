@@ -142,6 +142,16 @@ func NewEngine(ctx context.Context, _ api.CoreFeatures, fc filecache.Cache) wasm
 	return e
 }
 
+// HasCompiledModule implements wasm.Engine.
+func (e *engine) HasCompiledModule(module *wasm.Module, listeners []experimental.FunctionListener, ensureTermination bool) (bool, error) {
+	if wazevoapi.PerfMapEnabled {
+		wazevoapi.PerfMap.Lock()
+		defer wazevoapi.PerfMap.Unlock()
+	}
+	_, ok, err := e.getCompiledModule(module, listeners, ensureTermination)
+	return ok, err
+}
+
 // CompileModule implements wasm.Engine.
 func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listeners []experimental.FunctionListener, ensureTermination bool) (err error) {
 	if wazevoapi.PerfMapEnabled {

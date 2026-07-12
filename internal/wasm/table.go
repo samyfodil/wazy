@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/leb128"
 )
 
 // Table describes the limits of elements and its type in a table.
@@ -66,8 +67,34 @@ type ElementSegment struct {
 
 	// Followings are set/used regardless of the Mode.
 
-	// Init expressions are table elements where each expression evaluates to the function index by which the module initialize the table.
-	Init []ConstantExpression
+	// Init holds, per table element, a compact encoding of the expression that produces its reference,
+	// avoiding a heap-allocated ConstantExpression (plus a LEB128 round-trip) per entry for the
+	// overwhelmingly common case of large all-funcref tables (e.g. TinyGo's function table can have
+	// thousands of entries). Each entry is one of:
+	//
+	//   - a plain function index (the "ref.func $idx" case): the entry itself, with neither of the two
+	//     high flag bits below set, and not equal to ElementInitNullReference.
+	//   - ElementInitNullReference: a "ref.null" entry whose own encoded heap type matched this segment's
+	//     Type exactly at decode time (the standard, unambiguous shape real producers emit). Its value is
+	//     always the null reference (0) and its type is this segment's Type.
+	//   - a global index tagged with elementInitImportedGlobalReference (the "global.get $idx" case):
+	//     mask the flag off to recover the index. The type/value is still resolved dynamically through
+	//     the same global-resolver callback evaluateConstExpr would have used, so no type information
+	//     needs to be cached here.
+	//   - an index into Exprs tagged with elementInitExprReference: the rare-path fallback for anything
+	//     the three forms above can't represent -- extended-const arithmetic, a mismatched or
+	//     concrete/typed "ref.null", or any other decodable expression. Mask the flag off to index Exprs.
+	//
+	// Function and global indices are both bounded by 1<<27 (MaximumFunctionIndex / MaximumGlobals), so
+	// the top 5 bits of the uint32 are always free for the two flags/sentinel above without ambiguity:
+	// the largest possible flagged value, elementInitImportedGlobalReference|(1<<27-1), is still far
+	// below ElementInitNullReference (every bit set), and elementInitExprReference (bit 30) is never set
+	// alongside elementInitImportedGlobalReference (bit 31) by construction.
+	Init []Index
+
+	// Exprs holds the rare-path ConstantExpression for entries in Init tagged with
+	// elementInitExprReference. This is nil unless the segment actually contains such an entry.
+	Exprs []ConstantExpression
 
 	// Type holds the type of this element segment, which is the RefType in WebAssembly 2.0.
 	Type RefType
@@ -76,10 +103,84 @@ type ElementSegment struct {
 	Mode ElementMode
 }
 
+const (
+	// ElementInitNullReference is the ElementSegment.Init sentinel for a "ref.null" entry whose heap type
+	// matches the segment's declared Type. See ElementSegment.Init's doc for the full encoding scheme.
+	ElementInitNullReference = Index(math.MaxUint32)
+
+	// elementInitImportedGlobalReference flags an ElementSegment.Init entry as a global index (used by a
+	// "global.get" entry) rather than a plain function index (used by "ref.func"). Global indices are
+	// bounded by MaximumGlobals (1<<27), so bit 31 is always free to use as a flag.
+	elementInitImportedGlobalReference = Index(1) << 31
+
+	// elementInitExprReference flags an ElementSegment.Init entry as an index into ElementSegment.Exprs:
+	// the rare-path fallback for anything a plain function/global index can't represent.
+	elementInitExprReference = Index(1) << 30
+)
+
 // IsActive returns true if the element segment is "active" mode which requires the runtime to initialize table
 // with the contents in .Init field.
 func (e *ElementSegment) IsActive() bool {
 	return e.Mode == ElementModeActive
+}
+
+// FuncIndex returns (Init[i], true) if that entry is a plain "ref.func" function index, or (0, false) if
+// it is a "ref.null", "global.get", or Exprs-backed entry. This is used by the test binary encoder, which
+// only supports encoding plain-funcref active element segments.
+func (e *ElementSegment) FuncIndex(i int) (Index, bool) {
+	v := e.Init[i]
+	if v == ElementInitNullReference || v&elementInitImportedGlobalReference != 0 || v&elementInitExprReference != 0 {
+		return 0, false
+	}
+	return v, true
+}
+
+// CompactElementInit converts a single decoded element-vector entry (expr) into ElementSegment's compact
+// Init representation, appending to exprs and returning the corresponding tagged index when the entry
+// doesn't fit one of the compact forms. See ElementSegment.Init's doc for the full encoding this
+// implements. This is used by the binary decoder for element segments whose entries are full const-expr
+// vectors (element section prefixes 4-7); the plain function-index vectors (prefixes 0-3) never need
+// this, since every entry there is already known at decode time to be a bare function index.
+//
+// elemType is the segment's declared Type: a "ref.null" entry is only compacted to
+// ElementInitNullReference when elemType is exactly the bare nullable RefTypeFuncref or RefTypeExternref
+// constant and the entry's own encoded heap type matches it (the standard shape real producers emit).
+// Comparing full RefType equality here -- not just the Kind() byte -- matters: evaluateElementInit
+// reports the sentinel's type as elemType itself, and for any other elemType (a non-nullable variant, a
+// concrete/typed ref, one sharing a Kind() byte by coincidence, etc.) validateTable's default case would
+// then compare elemType against itself and trivially "pass" a comparison that should have compared the
+// null's *actual* (always bare, always nullable) type against elemType instead. Anything else --
+// including such a mismatch, a concrete/typed ref.null, or any other decodable-but-non-standard
+// expression (e.g. an extended-const arithmetic sequence) -- is preserved byte-for-byte in exprs so
+// downstream evaluation and validation behave exactly as if this compaction never happened.
+func CompactElementInit(expr ConstantExpression, elemType RefType, exprs []ConstantExpression) (Index, []ConstantExpression) {
+	if data := expr.Data; len(data) >= 3 && data[len(data)-1] == OpcodeEnd {
+		switch data[0] {
+		case OpcodeRefFunc:
+			if idx, n, err := leb128.LoadUint32(data[1:]); err == nil && int(n) == len(data)-2 && idx < uint32(elementInitExprReference) {
+				return Index(idx), exprs
+			}
+		case OpcodeGlobalGet:
+			if idx, n, err := leb128.LoadUint32(data[1:]); err == nil && int(n) == len(data)-2 && idx < uint32(elementInitExprReference) {
+				return Index(idx) | elementInitImportedGlobalReference, exprs
+			}
+		case OpcodeRefNull:
+			if len(data) == 3 && (elemType == RefTypeFuncref && data[1] == RefTypeFuncref.Kind() ||
+				elemType == RefTypeExternref && data[1] == RefTypeExternref.Kind()) {
+				return ElementInitNullReference, exprs
+			}
+		}
+	}
+	exprs = append(exprs, expr)
+	return Index(len(exprs)-1) | elementInitExprReference, exprs
+}
+
+// NewElementInitGlobalGet returns the ElementSegment.Init entry equivalent to a "global.get $idx" entry
+// (the compact form CompactElementInit produces for one). This is primarily useful for tests exercising
+// CompactElementInit/decodeElementConstExprVector's output directly, since the flag bit it sets is
+// otherwise a package-private implementation detail of ElementSegment.Init's encoding.
+func NewElementInitGlobalGet(idx Index) Index {
+	return idx | elementInitImportedGlobalReference
 }
 
 // TableInstance represents a table of (RefTypeFuncref) elements in a module.
@@ -140,9 +241,9 @@ func (m *Module) validateTable(enabledFeatures api.CoreFeatures, tables []Table,
 		initCount := uint32(len(elem.Init))
 
 		// Any offset applied is to the element, not the function index: validate here if the funcidx is sound.
-		for ei, init := range elem.Init {
-			_, initType, err := evaluateConstExpr(
-				&init,
+		for ei := range elem.Init {
+			_, initType, err := evaluateElementInit(
+				elem, ei,
 				func(globalIndex Index) (ValueType, uint64, uint64, error) {
 					if globalIndex >= Index(globalsCount) {
 						return 0, 0, 0, fmt.Errorf("%s[%d].init[%d] global index %d out of range", SectionIDName(SectionIDElement), idx, ei, globalIndex)

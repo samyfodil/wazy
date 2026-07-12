@@ -1782,11 +1782,7 @@ var (
 				{
 					OffsetExpr: constExprI32(0), TableIndex: 0, Type: wasm.RefTypeFuncref, Mode: wasm.ElementModeActive,
 					// Set the function 1, 2, 3 at the beginning of the table.
-					Init: []wasm.ConstantExpression{
-						wasm.NewConstantExpressionFromOpcode(wasm.OpcodeRefFunc, []byte{1}),
-						wasm.NewConstantExpressionFromOpcode(wasm.OpcodeRefFunc, []byte{2}),
-						wasm.NewConstantExpressionFromOpcode(wasm.OpcodeRefFunc, []byte{3}),
-					},
+					Init: []wasm.Index{1, 2, 3},
 				},
 			},
 			CodeSection: []wasm.Code{
