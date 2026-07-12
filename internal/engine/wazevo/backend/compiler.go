@@ -115,6 +115,11 @@ type Compiler interface {
 	// FrameSize returns the most recently compiled function's frame size;
 	// see the Machine method of the same name.
 	FrameSize() int64
+
+	// SetHasEHContext forwards to the Machine method of the same name; it
+	// must be called after Lower() and before RegAlloc() for the current
+	// function.
+	SetHasEHContext(v bool)
 }
 
 // RelocationInfo represents the relocation information for a call instruction.
@@ -403,6 +408,11 @@ func (c *compiler) CompiledBlockOffsets() []CompiledBlockOffset {
 // FrameSize implements Compiler.FrameSize.
 func (c *compiler) FrameSize() int64 {
 	return c.mach.FrameSize()
+}
+
+// SetHasEHContext implements Compiler.SetHasEHContext.
+func (c *compiler) SetHasEHContext(v bool) {
+	c.mach.SetHasEHContext(v)
 }
 
 func (c *compiler) GetFunctionABI(sig *ssa.Signature) *FunctionABI {

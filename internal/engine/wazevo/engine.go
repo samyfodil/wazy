@@ -591,6 +591,14 @@ func (e *engine) compileLocalWasmFunction(
 		wazevoapi.VerifyOrSetDeterministicCompilationContextValue(ctx, "Optimized SSA", ssaBuilder.Format())
 	}
 
+	// Tell the backend whether this function needs the reserved per-frame
+	// execCtx/moduleCtx slots (P3.0): only functions containing a
+	// try_table with catch clauses accumulate pending EH entries during
+	// lowering, and only those pay the extra 2 frame words + 2 prologue
+	// stores. Must be set before be.Compile(), which reserves the frame
+	// space (RegAlloc) and emits the stores (PostRegAlloc).
+	be.SetHasEHContext(len(fe.PendingEhEntries()) > 0)
+
 	// Now our ssaBuilder contains the necessary information to further lower them to
 	// machine code.
 	original, rels, err := be.Compile(ctx)

@@ -78,6 +78,13 @@ type (
 
 		spillSlotSize int64
 		spillSlots    map[regalloc.VRegID]int64
+		// hasEHContext is set (via SetHasEHContext) for functions containing
+		// a try_table with catch clauses. When true, RegAlloc reserves the
+		// first ehCtxReservedSlotSize bytes of the spill-slot region for the
+		// execCtx/moduleCtx slots and setupPrologue stores rax/rbx there. See
+		// backend.Machine.EhCtxSlotOffsets. P3.0 groundwork; nothing reads
+		// the slots yet.
+		hasEHContext  bool
 		currentABI    *backend.FunctionABI
 		clobberedRegs []regalloc.VReg
 
@@ -193,6 +200,7 @@ func (m *machine) Reset() {
 	}
 
 	m.stackBoundsCheckDisabled = false
+	m.hasEHContext = false
 	m.regAlloc.Reset()
 	m.labelPositionPool.Reset()
 	m.instrPool.Reset()
@@ -291,8 +299,33 @@ func (m *machine) SetCompiler(c backend.Compiler) {
 // SetCurrentABI implements backend.Machine.
 func (m *machine) SetCurrentABI(abi *backend.FunctionABI) { m.currentABI = abi }
 
+// ehCtxReservedSlotSize is the number of bytes at the bottom of the
+// spill-slot region reserved for the fixed execCtx/moduleCtx slots when
+// the function has an EH context (see SetHasEHContext / EhCtxSlotOffsets).
+// Two 8-byte words, already 16-byte aligned so it preserves the frame's
+// 16-byte alignment invariant.
+const ehCtxReservedSlotSize = 16
+
+// SetHasEHContext implements backend.Machine.
+func (m *machine) SetHasEHContext(v bool) { m.hasEHContext = v }
+
+// EhCtxSlotOffsets implements backend.Machine.
+//
+// On amd64 spill slots grow upward from RSP (slot 0 lives at [RSP+0]), so the
+// two reserved words sit at [RSP+0] (execCtx) and [RSP+8] (moduleCtx).
+func (m *machine) EhCtxSlotOffsets() (execCtxOffset, moduleCtxOffset int64) {
+	return 0, 8
+}
+
 // RegAlloc implements backend.Machine.
 func (m *machine) RegAlloc() {
+	// Reserve the fixed execCtx/moduleCtx slots at the bottom of the
+	// spill-slot region before the allocator hands out any of its own slots,
+	// so the reserved offsets ([RSP+0]/[RSP+8]) are stable regardless of how
+	// many spill slots this function ends up needing.
+	if m.hasEHContext {
+		m.spillSlotSize = ehCtxReservedSlotSize
+	}
 	rf := m.regAllocFn
 	m.regAllocStarted = true
 	m.regAlloc.DoAllocation(&rf)

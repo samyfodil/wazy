@@ -149,6 +149,32 @@ type (
 		// matched catching frame before transferring control to its
 		// landing pad. Valid after Finalize(), like CompiledBlockOffsets.
 		FrameSize() int64
+
+		// SetHasEHContext records, for the function about to be compiled,
+		// whether it contains a try_table with catch clauses and therefore
+		// needs the reserved per-frame execCtx/moduleCtx slots (see
+		// EhCtxSlotOffsets). It must be called after SSA lowering and
+		// before RegAlloc()/PostRegAlloc() (which reserve the frame space
+		// and emit the two prologue stores respectively). When false (the
+		// default, re-established by Reset()), the frame layout and prologue
+		// are byte-for-byte identical to before P3.0 -- non-EH functions
+		// pay nothing. This is the P3.0 "fixed frame slot" enabling
+		// primitive: it only reserves space and stores execCtx/moduleCtx;
+		// nothing reads the slots yet, so runtime behavior is unchanged.
+		SetHasEHContext(v bool)
+
+		// EhCtxSlotOffsets returns the SP-relative, compile-time-constant
+		// byte offsets of the reserved per-frame slots that setupPrologue
+		// stores execCtx and moduleCtx into (from the entry-ABI registers:
+		// rax/rbx on amd64, x0/x1 on arm64). Because these slots are carved
+		// out of the very bottom of the spill-slot region before the
+		// register allocator hands out any of its own slots, the offsets are
+		// fixed regardless of how many spill slots the function ends up
+		// needing, and they are SP-relative hence relocation-safe across a
+		// stack grow. Only meaningful for functions where SetHasEHContext(true)
+		// was set; a later phase reloads execCtx/moduleCtx from here in
+		// self-sufficient landing pads.
+		EhCtxSlotOffsets() (execCtxOffset, moduleCtxOffset int64)
 	}
 
 	// CompiledBlockOffset pairs an ssa.BasicBlockID with its resolved,

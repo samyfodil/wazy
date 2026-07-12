@@ -84,6 +84,39 @@ func TestMachine_setupPrologue(t *testing.T) {
 	}
 }
 
+// TestMachine_setupPrologue_ehContext asserts the P3.0 prologue stores: a
+// function with an EH context stores execCtx (rax) and moduleCtx (rbx) into
+// the two reserved fixed slots at the bottom of the spill region ([rsp+0] and
+// [rsp+8]). RegAlloc reserves ehCtxReservedSlotSize bytes there (simulated
+// here by seeding spillSlotSize=16), so the offsets are compile-time constant.
+func TestMachine_setupPrologue_ehContext(t *testing.T) {
+	_, _, m := newSetupWithMockContext()
+	m.DisableStackCheck()
+	m.spillSlotSize = ehCtxReservedSlotSize // as RegAlloc reserves for an EH function.
+	m.hasEHContext = true
+	m.currentABI = &backend.FunctionABI{}
+
+	root := m.allocateNop()
+	m.rootInstr = root
+	udf := m.allocateInstr()
+	udf.asUD2()
+	root.next = udf
+	udf.prev = root
+
+	m.setupPrologue()
+	require.Equal(t, root, m.rootInstr)
+	err := m.Encode(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, `
+	pushq %rbp
+	movq %rsp, %rbp
+	sub $16, %rsp
+	mov.q %rax, (%rsp)
+	mov.q %rbx, 8(%rsp)
+	ud2
+`, m.Format())
+}
+
 func TestMachine_postRegAlloc(t *testing.T) {
 	for _, tc := range []struct {
 		exp           string

@@ -121,6 +121,22 @@ func (m *machine) setupPrologue() {
 		//             (low address)
 	}
 
+	// P3.0: for functions with an EH context, store the entry-ABI context
+	// registers (execCtx in rax, moduleCtx in rbx) into the reserved fixed
+	// slots at the bottom of the spill region. RegAlloc reserved
+	// ehCtxReservedSlotSize bytes there, so RSP now points at them. These
+	// registers still hold execCtx/moduleCtx here: the entry ABI delivers
+	// them in rax/rbx, and the only intervening code (the stack-bounds
+	// check, incl. its Go stack-grow re-entry) preserves both -- the same
+	// invariant that lets the function body read execCtx/moduleCtx from
+	// rax/rbx after the prologue. Nothing reads these slots yet (P3.0), so
+	// this does not change runtime behavior.
+	if m.hasEHContext {
+		execOff, modOff := m.EhCtxSlotOffsets()
+		cur = linkInstr(cur, m.allocateInstr().asMovRM(raxVReg, newOperandMem(m.newAmodeImmReg(uint32(execOff), rspVReg)), 8))
+		cur = linkInstr(cur, m.allocateInstr().asMovRM(rbxVReg, newOperandMem(m.newAmodeImmReg(uint32(modOff), rspVReg)), 8))
+	}
+
 	linkInstr(cur, prevInitInst)
 }
 

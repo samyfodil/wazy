@@ -98,6 +98,13 @@ type (
 
 		maxRequiredStackSizeForCalls int64
 		stackBoundsCheckDisabled     bool
+		// hasEHContext is set (via SetHasEHContext) for functions containing
+		// a try_table with catch clauses. When true, RegAlloc reserves the
+		// first ehCtxReservedSlotSize bytes of the spill-slot region for the
+		// execCtx/moduleCtx slots and setupPrologue stores x0/x1 there. See
+		// backend.Machine.EhCtxSlotOffsets. P3.0 groundwork; nothing reads
+		// the slots yet.
+		hasEHContext bool
 
 		regAllocStarted bool
 	}
@@ -237,8 +244,35 @@ func (m *machine) FlushPendingInstructions() {
 	m.pendingInstructions = m.pendingInstructions[:0]
 }
 
+// ehCtxReservedSlotSize is the number of bytes at the bottom of the
+// spill-slot region reserved for the fixed execCtx/moduleCtx slots when
+// the function has an EH context (see SetHasEHContext / EhCtxSlotOffsets).
+// Two 8-byte words, already 16-byte aligned so it preserves the frame's
+// 16-byte alignment invariant.
+const ehCtxReservedSlotSize = 16
+
+// SetHasEHContext implements backend.Machine.
+func (m *machine) SetHasEHContext(v bool) { m.hasEHContext = v }
+
+// EhCtxSlotOffsets implements backend.Machine.
+//
+// On arm64 spill-slot offsets are relative to SP but sit above the 16-byte
+// frame-size slot (getVRegSpillSlotOffsetFromSP adds 16), so the two reserved
+// words -- spill offsets 0 and 8 -- live at [SP+16] (execCtx) and [SP+24]
+// (moduleCtx).
+func (m *machine) EhCtxSlotOffsets() (execCtxOffset, moduleCtxOffset int64) {
+	return 16, 24
+}
+
 // RegAlloc implements backend.Machine Function.
 func (m *machine) RegAlloc() {
+	// Reserve the fixed execCtx/moduleCtx slots at the bottom of the
+	// spill-slot region before the allocator hands out any of its own slots,
+	// so the reserved offsets ([SP+16]/[SP+24]) are stable regardless of how
+	// many spill slots this function ends up needing.
+	if m.hasEHContext {
+		m.spillSlotSize = ehCtxReservedSlotSize
+	}
 	m.regAllocStarted = true
 	m.regAlloc.DoAllocation(&m.regAllocFn)
 	// Now that we know the final spill slot size, we must align spillSlotSize to 16 bytes.
@@ -256,6 +290,7 @@ func (m *machine) Reset() {
 	}
 	m.clobberedRegs = m.clobberedRegs[:0]
 	m.regAllocStarted = false
+	m.hasEHContext = false
 	m.regAlloc.Reset()
 	m.spillSlotSize = 0
 	m.unresolvedAddressModes = m.unresolvedAddressModes[:0]

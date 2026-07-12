@@ -34,6 +34,12 @@ func (m mockMachine) CompiledBlockOffsets() []CompiledBlockOffset { return nil }
 // FrameSize implements Machine.FrameSize.
 func (m mockMachine) FrameSize() int64 { return 0 }
 
+// SetHasEHContext implements Machine.SetHasEHContext.
+func (m mockMachine) SetHasEHContext(bool) {}
+
+// EhCtxSlotOffsets implements Machine.EhCtxSlotOffsets.
+func (m mockMachine) EhCtxSlotOffsets() (int64, int64) { return 0, 8 }
+
 // CompileThrowTransferRegisterRestore implements Machine.CompileThrowTransferRegisterRestore.
 func (m mockMachine) CompileThrowTransferRegisterRestore() []byte { panic("TODO") }
 

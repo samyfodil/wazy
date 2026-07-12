@@ -145,7 +145,33 @@ func (m *machine) setupPrologue() {
 	//
 	cur = m.createFrameSizeSlot(cur, m.frameSize())
 
+	// P3.0: for functions with an EH context, store the entry-ABI context
+	// registers (execCtx in x0, moduleCtx in x1) into the reserved fixed
+	// slots at the bottom of the spill region ([SP+16]/[SP+24]). RegAlloc
+	// reserved ehCtxReservedSlotSize bytes there, and SP is now at its final
+	// value (below the frame-size slot). x0/x1 still hold execCtx/moduleCtx
+	// here: x0 always points at the execution context whenever native code is
+	// entered from Go (including after the stack-grow re-entry, see
+	// saveRequiredRegs), and x1 is saved/restored across that re-entry -- the
+	// same invariant that lets the function body read them after the prologue.
+	// Nothing reads these slots yet (P3.0), so runtime behavior is unchanged.
+	if m.hasEHContext {
+		execOff, modOff := m.EhCtxSlotOffsets()
+		cur = m.storeEhCtxSlot(cur, x0VReg, execOff)
+		cur = m.storeEhCtxSlot(cur, x1VReg, modOff)
+	}
+
 	linkInstr(cur, prevInitInst)
+}
+
+// storeEhCtxSlot emits `str src, [sp, #off]` for the reserved P3.0
+// execCtx/moduleCtx frame slots.
+func (m *machine) storeEhCtxSlot(cur *instruction, src regalloc.VReg, off int64) *instruction {
+	amode := m.amodePool.Allocate()
+	*amode = addressMode{kind: addressModeKindRegUnsignedImm12, rn: spVReg, imm: off}
+	store := m.allocateInstr()
+	store.asStore(operandNR(src), amode, 64)
+	return linkInstr(cur, store)
 }
 
 func (m *machine) createReturnAddrAndSizeOfArgRetSlot(cur *instruction) *instruction {
