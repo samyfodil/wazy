@@ -552,6 +552,20 @@ func (i *instruction) asLoadPair64(src1, src2 regalloc.VReg, amode *addressMode)
 	i.setAmode(amode)
 }
 
+func (i *instruction) asStorePair128(src1, src2 regalloc.VReg, amode *addressMode) {
+	i.kind = storeP128
+	i.rn = operandNR(src1)
+	i.rm = operandNR(src2)
+	i.setAmode(amode)
+}
+
+func (i *instruction) asLoadPair128(src1, src2 regalloc.VReg, amode *addressMode) {
+	i.kind = loadP128
+	i.rn = operandNR(src1)
+	i.rm = operandNR(src2)
+	i.setAmode(amode)
+}
+
 func (i *instruction) asStore(src operand, amode *addressMode, sizeInBits byte) {
 	switch sizeInBits {
 	case 8:
@@ -1121,6 +1135,12 @@ func (i *instruction) String() (str string) {
 	case loadP64:
 		str = fmt.Sprintf("ldp %s, %s, %s",
 			formatVRegSized(i.rn.nr(), 64), formatVRegSized(i.rm.nr(), 64), i.getAmode().format(64))
+	case storeP128:
+		str = fmt.Sprintf("stp %s, %s, %s",
+			formatVRegSized(i.rn.nr(), 128), formatVRegSized(i.rm.nr(), 128), i.getAmode().format(128))
+	case loadP128:
+		str = fmt.Sprintf("ldp %s, %s, %s",
+			formatVRegSized(i.rn.nr(), 128), formatVRegSized(i.rm.nr(), 128), i.getAmode().format(128))
 	case mov64:
 		str = fmt.Sprintf("mov %s, %s",
 			formatVRegSized(i.rd, 64),
@@ -1620,6 +1640,10 @@ const (
 	storeP64
 	// loadP64 represents a load of a pair of registers.
 	loadP64
+	// storeP128 represents a store of a pair of 128-bit (SIMD&FP) registers.
+	storeP128
+	// loadP128 represents a load of a pair of 128-bit (SIMD&FP) registers.
+	loadP128
 	// mov64 represents a MOV instruction. These are encoded as ORR's but we keep them separate for better handling.
 	mov64
 	// mov32 represents a 32-bit MOV. This zeroes the top 32 bits of the destination.

@@ -247,55 +247,132 @@ func (m *machine) CompileGoFunctionTrampoline(exitCode wazevoapi.ExitCode, sig *
 	return m.compiler.Buf()
 }
 
-func (m *machine) saveRegistersInExecutionContext(cur *instruction, regs []regalloc.VReg) *instruction {
+// registerSaveRestoreSlot describes one step of saveRegistersInExecutionContext /
+// restoreRegistersInExecutionContext: either a pair of adjacent same-type registers (r2 valid),
+// saved/restored together via a single stp/ldp, or a single leftover register (r2 ==
+// regalloc.VRegInvalid), saved/restored via a plain str/ldr exactly as before this pairing
+// optimization was introduced.
+type registerSaveRestoreSlot struct {
+	r1, r2 regalloc.VReg
+	offset int64
+}
+
+// registerSaveRestoreSlots walks regs -- one of the fixed register lists used by
+// CompileGoFunctionTrampoline (calleeSavedRegistersSorted) or CompileStackGrowCallSequence
+// (saveRequiredRegs) -- and greedily pairs up adjacent registers of the same type so they can be
+// saved/restored with a single stp/ldp instead of two separate str/ldr. Any unpaired register
+// (e.g. an int register followed by a float register, or a final odd-one-out) falls back to a
+// single str/ldr at its own 16-byte-aligned slot, matching the layout used before pairing.
+//
+// saveRegistersInExecutionContext and restoreRegistersInExecutionContext both call this function
+// so that a save and its matching restore always agree byte-for-byte on the layout. This is the
+// only property that's required: wazevo.executionContext.savedRegisters is otherwise only ever
+// copied wholesale (try_table/snapshot bookkeeping in call_engine.go), never interpreted
+// field-by-field, so it's fine for calleeSavedRegistersSorted and saveRequiredRegs to end up with
+// different physical layouts from each other as long as each is self-consistent between its own
+// save and restore call sites.
+func registerSaveRestoreSlots(regs []regalloc.VReg) []registerSaveRestoreSlot {
+	slots := make([]registerSaveRestoreSlot, 0, len(regs))
 	offset := wazevoapi.ExecutionContextOffsetSavedRegistersBegin.I64()
-	for _, v := range regs {
+	for i := 0; i < len(regs); {
+		r1 := regs[i]
+		if i+1 < len(regs) && regs[i+1].RegType() == r1.RegType() {
+			r2 := regs[i+1]
+			slots = append(slots, registerSaveRestoreSlot{r1: r1, r2: r2, offset: offset})
+			if r1.RegType() == regalloc.RegTypeInt {
+				offset += 16 // Two 8-byte registers, packed contiguously into one 16-byte slot.
+			} else {
+				offset += 32 // Two 16-byte registers, packed contiguously into one 32-byte slot.
+			}
+			i += 2
+		} else {
+			slots = append(slots, registerSaveRestoreSlot{r1: r1, r2: regalloc.VRegInvalid, offset: offset})
+			offset += 16 // Single register keeps its own 16-byte-aligned slot, as before pairing.
+			i++
+		}
+	}
+	return slots
+}
+
+func (m *machine) saveRegistersInExecutionContext(cur *instruction, regs []regalloc.VReg) *instruction {
+	for _, slot := range registerSaveRestoreSlots(regs) {
 		store := m.allocateInstr()
-		var sizeInBits byte
-		switch v.RegType() {
-		case regalloc.RegTypeInt:
-			sizeInBits = 64
-		case regalloc.RegTypeFloat:
-			sizeInBits = 128
-		}
 		mode := m.amodePool.Allocate()
-		*mode = addressMode{
-			kind: addressModeKindRegUnsignedImm12,
+		if slot.r2 == regalloc.VRegInvalid {
+			var sizeInBits byte
+			switch slot.r1.RegType() {
+			case regalloc.RegTypeInt:
+				sizeInBits = 64
+			case regalloc.RegTypeFloat:
+				sizeInBits = 128
+			}
 			// Execution context is always the first argument.
-			rn: x0VReg, imm: offset,
+			*mode = addressMode{kind: addressModeKindRegUnsignedImm12, rn: x0VReg, imm: slot.offset}
+			store.asStore(operandNR(slot.r1), mode, sizeInBits)
+		} else {
+			var sizeInBits byte
+			switch slot.r1.RegType() {
+			case regalloc.RegTypeInt:
+				sizeInBits = 64
+			case regalloc.RegTypeFloat:
+				sizeInBits = 128
+			}
+			if !offsetFitsInAddressModeKindRegSignedImm7(sizeInBits, slot.offset) {
+				panic("BUG: offset for paired register save does not fit in the stp imm7")
+			}
+			// Execution context is always the first argument.
+			*mode = addressMode{kind: addressModeKindRegSignedImm7, rn: x0VReg, imm: slot.offset}
+			switch slot.r1.RegType() {
+			case regalloc.RegTypeInt:
+				store.asStorePair64(slot.r1, slot.r2, mode)
+			case regalloc.RegTypeFloat:
+				store.asStorePair128(slot.r1, slot.r2, mode)
+			}
 		}
-		store.asStore(operandNR(v), mode, sizeInBits)
-		store.prev = cur
-		cur.next = store
-		cur = store
-		offset += 16 // Imm12 must be aligned 16 for vector regs, so we unconditionally store regs at the offset of multiple of 16.
+		cur = linkInstr(cur, store)
 	}
 	return cur
 }
 
 func (m *machine) restoreRegistersInExecutionContext(cur *instruction, regs []regalloc.VReg) *instruction {
-	offset := wazevoapi.ExecutionContextOffsetSavedRegistersBegin.I64()
-	for _, v := range regs {
+	for _, slot := range registerSaveRestoreSlots(regs) {
 		load := m.allocateInstr()
-		var as func(dst regalloc.VReg, amode *addressMode, sizeInBits byte)
-		var sizeInBits byte
-		switch v.RegType() {
-		case regalloc.RegTypeInt:
-			as = load.asULoad
-			sizeInBits = 64
-		case regalloc.RegTypeFloat:
-			as = load.asFpuLoad
-			sizeInBits = 128
-		}
 		mode := m.amodePool.Allocate()
-		*mode = addressMode{
-			kind: addressModeKindRegUnsignedImm12,
+		if slot.r2 == regalloc.VRegInvalid {
+			var as func(dst regalloc.VReg, amode *addressMode, sizeInBits byte)
+			var sizeInBits byte
+			switch slot.r1.RegType() {
+			case regalloc.RegTypeInt:
+				as = load.asULoad
+				sizeInBits = 64
+			case regalloc.RegTypeFloat:
+				as = load.asFpuLoad
+				sizeInBits = 128
+			}
 			// Execution context is always the first argument.
-			rn: x0VReg, imm: offset,
+			*mode = addressMode{kind: addressModeKindRegUnsignedImm12, rn: x0VReg, imm: slot.offset}
+			as(slot.r1, mode, sizeInBits)
+		} else {
+			var sizeInBits byte
+			switch slot.r1.RegType() {
+			case regalloc.RegTypeInt:
+				sizeInBits = 64
+			case regalloc.RegTypeFloat:
+				sizeInBits = 128
+			}
+			if !offsetFitsInAddressModeKindRegSignedImm7(sizeInBits, slot.offset) {
+				panic("BUG: offset for paired register restore does not fit in the ldp imm7")
+			}
+			// Execution context is always the first argument.
+			*mode = addressMode{kind: addressModeKindRegSignedImm7, rn: x0VReg, imm: slot.offset}
+			switch slot.r1.RegType() {
+			case regalloc.RegTypeInt:
+				load.asLoadPair64(slot.r1, slot.r2, mode)
+			case regalloc.RegTypeFloat:
+				load.asLoadPair128(slot.r1, slot.r2, mode)
+			}
 		}
-		as(v, mode, sizeInBits)
 		cur = linkInstr(cur, load)
-		offset += 16 // Imm12 must be aligned 16 for vector regs, so we unconditionally load regs at the offset of multiple of 16.
 	}
 	return cur
 }

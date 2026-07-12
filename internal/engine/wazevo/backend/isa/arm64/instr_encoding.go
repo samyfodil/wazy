@@ -88,19 +88,25 @@ func (i *instruction) encode(m *machine) {
 		toIsSp := to == sp
 		fromIsSp := from == sp
 		c.Emit4Bytes(encodeMov64(regNumberInEncoding[to], regNumberInEncoding[from], toIsSp, fromIsSp))
-	case loadP64, storeP64:
+	case loadP64, storeP64, loadP128, storeP128:
 		rt, rt2 := regNumberInEncoding[i.rn.realReg()], regNumberInEncoding[i.rm.realReg()]
 		amode := i.getAmode()
 		rn := regNumberInEncoding[amode.rn.RealReg()]
-		var pre bool
+		load := kind == loadP64 || kind == loadP128
+		is128 := kind == loadP128 || kind == storeP128
 		switch amode.kind {
-		case addressModeKindPostIndex:
-		case addressModeKindPreIndex:
-			pre = true
+		case addressModeKindPostIndex, addressModeKindPreIndex:
+			if is128 {
+				// Not needed by any current caller (the register-pairing save/restore always uses
+				// addressModeKindRegSignedImm7); avoid silently mis-encoding as a 64-bit GPR pair.
+				panic("BUG: pre/post-indexed pair load/store is not implemented for 128-bit register pairs")
+			}
+			c.Emit4Bytes(encodePreOrPostIndexLoadStorePair64(amode.kind == addressModeKindPreIndex, load, rn, rt, rt2, amode.imm))
+		case addressModeKindRegSignedImm7:
+			c.Emit4Bytes(encodeLoadStorePairSignedOffset(is128, load, rn, rt, rt2, amode.imm))
 		default:
 			panic("BUG")
 		}
-		c.Emit4Bytes(encodePreOrPostIndexLoadStorePair64(pre, kind == loadP64, rn, rt, rt2, amode.imm))
 	case loadFpuConst32:
 		rd := regNumberInEncoding[i.rd.RealReg()]
 		if i.u1 == 0 {
@@ -1754,6 +1760,42 @@ func encodePreOrPostIndexLoadStorePair64(pre bool, load bool, rn, rt, rt2 uint32
 	if pre {
 		ret |= 0b1 << 24
 	}
+	return
+}
+
+// encodeLoadStorePairSignedOffset encodes the "signed offset" (no writeback) variant of Load/store
+// pair, i.e. the addressing mode where the base register rn is left unmodified and imm is simply
+// added to it. This is used for both the 64-bit GPR-pair form (v=false, imm scaled by 8) and the
+// 128-bit SIMD&FP register-pair form (v=true, imm scaled by 16); both forms share opc==0b10.
+// https://developer.arm.com/documentation/ddi0596/2021-12/Base-Instructions/LDP--Load-Pair-of-Registers-
+// https://developer.arm.com/documentation/ddi0596/2021-12/Base-Instructions/STP--Store-Pair-of-Registers-
+// https://developer.arm.com/documentation/ddi0596/2021-12/SIMD-FP-Instructions/LDP--SIMD-FP---Load-Pair-of-SIMD-FP-registers-
+// https://developer.arm.com/documentation/ddi0596/2021-12/SIMD-FP-Instructions/STP--SIMD-FP---Store-Pair-of-SIMD-FP-registers-
+func encodeLoadStorePairSignedOffset(v bool, load bool, rn, rt, rt2 uint32, imm int64) (ret uint32) {
+	scale := int64(8)
+	if v {
+		scale = 16
+	}
+	if imm%scale != 0 {
+		panic("imm for pair load/store must be a multiple of the operand size")
+	}
+	imm7 := imm / scale
+	if imm7 < -64 || imm7 > 63 {
+		panic("imm7 for pair load/store is out of range")
+	}
+	ret = rt
+	ret |= rn << 5
+	ret |= rt2 << 10
+	ret |= (uint32(imm7) & 0b1111111) << 15
+	if load {
+		ret |= 0b1 << 22
+	}
+	ret |= 0b10 << 23 // "Signed offset" addressing variant (no writeback).
+	if v {
+		ret |= 0b1 << 26 // SIMD&FP register pair.
+	}
+	ret |= 0b101 << 27
+	ret |= 0b10 << 30 // opc == 0b10, for both the 64-bit GPR and the 128-bit SIMD&FP pair forms.
 	return
 }
 

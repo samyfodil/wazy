@@ -103,6 +103,15 @@ const (
 	// exiting right above the stack pointer. Since we don't know the exact stack space needed for a function
 	// at a compilation phase, this is used as a placeholder and further lowered to a real addressing mode like above.
 	addressModeKindResultStackSpace
+
+	// addressModeKindRegSignedImm7 takes a base register and a 7-bit "signed" immediate offset, used
+	// exclusively by the pair load/store instructions (storeP64/loadP64/storeP128/loadP128). Unlike
+	// addressModeKindPostIndex/addressModeKindPreIndex, the base register is not updated -- this is the
+	// "signed offset" addressing variant of STP/LDP. The immediate is scaled by the operand size: 8 for a
+	// pair of 64-bit registers, 16 for a pair of 128-bit registers.
+	// https://developer.arm.com/documentation/ddi0596/2021-12/Base-Instructions/LDP--Load-Pair-of-Registers-
+	// https://developer.arm.com/documentation/ddi0596/2021-12/Base-Instructions/STP--Store-Pair-of-Registers-
+	addressModeKindRegSignedImm7
 )
 
 func (a addressMode) format(dstSizeBits byte) (ret string) {
@@ -140,6 +149,12 @@ func (a addressMode) format(dstSizeBits byte) (ret string) {
 		ret = fmt.Sprintf("[%s], #%#x", base, a.imm)
 	case addressModeKindPreIndex:
 		ret = fmt.Sprintf("[%s, #%#x]!", base, a.imm)
+	case addressModeKindRegSignedImm7:
+		if a.imm != 0 {
+			ret = fmt.Sprintf("[%s, #%#x]", base, a.imm)
+		} else {
+			ret = fmt.Sprintf("[%s]", base)
+		}
 	case addressModeKindArgStackSpace:
 		ret = fmt.Sprintf("[#arg_space, #%#x]", a.imm)
 	case addressModeKindResultStackSpace:
@@ -168,6 +183,19 @@ func offsetFitsInAddressModeKindRegUnsignedImm12(dstSizeInBits byte, offset int6
 
 func offsetFitsInAddressModeKindRegSignedImm9(offset int64) bool {
 	return -256 <= offset && offset <= 255
+}
+
+// offsetFitsInAddressModeKindRegSignedImm7 reports whether offset can be encoded as the imm7 of the
+// "signed offset" (no writeback) STP/LDP variant, i.e. addressModeKindRegSignedImm7, whose immediate
+// is a signed 7-bit value scaled by dstSizeInBits/8 (8 for a 64-bit register pair, 16 for a 128-bit
+// register pair).
+func offsetFitsInAddressModeKindRegSignedImm7(dstSizeInBits byte, offset int64) bool {
+	divisor := int64(dstSizeInBits) / 8
+	if offset%divisor != 0 {
+		return false
+	}
+	imm7 := offset / divisor
+	return -64 <= imm7 && imm7 <= 63
 }
 
 func (a addressMode) indexRegBits() byte {

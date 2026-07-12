@@ -19,6 +19,11 @@ func Test_dummy(t *testing.T) {
 func TestInstruction_encode(t *testing.T) {
 	m := NewBackend().(*machine)
 	dummyLabel := label(1)
+	signedImm7Amode := func(rn regalloc.VReg, imm int64) *addressMode {
+		mode := m.amodePool.Allocate()
+		*mode = addressMode{kind: addressModeKindRegSignedImm7, rn: rn, imm: imm}
+		return mode
+	}
 	for _, tc := range []struct {
 		setup func(*instruction)
 		want  string
@@ -1296,6 +1301,34 @@ func TestInstruction_encode(t *testing.T) {
 		}},
 		{want: "ff7f81a9", setup: func(i *instruction) {
 			i.asStorePair64(xzrVReg, xzrVReg, addressModePreOrPostIndex(m, spVReg, 16, true))
+		}},
+		// addressModeKindRegSignedImm7 (the "signed offset", no-writeback STP/LDP variant used by
+		// saveRegistersInExecutionContext/restoreRegistersInExecutionContext). Expected bytes were
+		// independently cross-checked by decoding them with golang.org/x/arch/arm64/arm64asm in a
+		// throwaway scratch module (not a dependency of this module).
+		{want: "010806a9", setup: func(i *instruction) { // stp x1, x2, [x0, #0x60]
+			i.asStorePair64(x1VReg, x2VReg, signedImm7Amode(x0VReg, 0x60))
+		}},
+		{want: "010846a9", setup: func(i *instruction) { // ldp x1, x2, [x0, #0x60]
+			i.asLoadPair64(x1VReg, x2VReg, signedImm7Amode(x0VReg, 0x60))
+		}},
+		{want: "e3931fa9", setup: func(i *instruction) { // stp x3, x4, [sp, #0x1f8] (imm7 == 63, max positive)
+			i.asStorePair64(x3VReg, x4VReg, signedImm7Amode(spVReg, 63*8))
+		}},
+		{want: "451960a9", setup: func(i *instruction) { // ldp x5, x6, [x10, #-0x200] (imm7 == -64, max negative)
+			i.asLoadPair64(x5VReg, x6VReg, signedImm7Amode(x10VReg, -64*8))
+		}},
+		{want: "1f7c00a9", setup: func(i *instruction) { // stp xzr, xzr, [x0]
+			i.asStorePair64(xzrVReg, xzrVReg, signedImm7Amode(x0VReg, 0))
+		}},
+		{want: "010803ad", setup: func(i *instruction) { // stp q1, q2, [x0, #0x60]
+			i.asStorePair128(v1VReg, v2VReg, signedImm7Amode(x0VReg, 0x60))
+		}},
+		{want: "9dfa5fad", setup: func(i *instruction) { // ldp q29, q30, [x20, #0x3f0] (imm7 == 63, max positive)
+			i.asLoadPair128(v29VReg, v30VReg, signedImm7Amode(x20VReg, 63*16))
+		}},
+		{want: "e07f20ad", setup: func(i *instruction) { // stp q0, q31, [sp, #-0x400] (imm7 == -64, max negative)
+			i.asStorePair128(v0VReg, v31VReg, signedImm7Amode(spVReg, -64*16))
 		}},
 		{want: "20000014", setup: func(i *instruction) {
 			i.asBr(dummyLabel)
