@@ -368,6 +368,32 @@ in-tree oracle for "did we get it right" is the interpreter, which records exact
 `targetStackDepth` per clause (`interpreter.go`), plus the existing
 `eh_locals_*` regression corpus (§6).
 
+**CORRECTION (found during P2b implementation — the four-category enumeration above is
+incomplete, and P2b was consequently BLOCKED).** The register snapshot restored at the
+throw-time resume point masks not just categories 3 and 4 but *every* SSA value the
+resumed catching frame keeps live across the try body in a callee-saved register. Two more
+categories exist beyond the wasm-visible ones:
+
+- **`moduleCtxPtrValue`** — whole-function-live; handler blocks unconditionally reload
+  memory base/globals through it (`reloadAfterCall`). Homeable in a frame slot in principle,
+  but see the next point.
+- **`execCtxPtrValue`** — whole-function-live and the *irreducible root blocker*. The
+  enter-continuation's first instruction dereferences it (the `caughtExceptionClauseIdx`
+  load), and every proposed frontend memory home for the categories above is itself
+  *addressed through execCtx*. It therefore cannot be given a frontend memory home (circular:
+  you need execCtx to load execCtx), and wazevo exposes no frame-slot/alloca facility to the
+  frontend — spilling is entirely a regalloc concern, and regalloc is free to (and does)
+  place execCtx in a callee-saved register across the try.
+
+Empirically (P2b poison experiment): clobbering the throw-time callee-saved restore corrupts
+even the *simplest* throwing module with no memory, no globals, and an empty operand floor
+(incl. the pdfium C++ rethrow gate). So the §4.1 claim "frontend-only, no regalloc changes"
+is **insufficient to drop the register snapshot**. A true zero-cost enter requires the §3.3
+direct-landing-pad transfer with a **backend/regalloc-supported abnormal-edge ABI** that
+re-establishes execCtx from a fixed register or slot — exactly the "invoke/landingpad
+clobber-all edge" §7 rules out of P2 scope. That is a **P3 backend item**. Until then the
+per-enter callee-saved-register snapshot stays; P2a (save-area pooling) is the shipped state.
+
 ### 4.2 SP/FP recovery and stack growth
 
 - **No SP is captured at enter** — the design captures nothing at enter. At throw, SP/FP for
