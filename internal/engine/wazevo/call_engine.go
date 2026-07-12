@@ -246,7 +246,7 @@ func (c *callEngine) CallWithStack(ctx context.Context, paramResultStack []uint6
 
 // CallWithStack implements api.Function.
 func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint64) (err error) {
-	snapshotEnabled := ctx.Value(expctxkeys.EnableSnapshotterKey{}) != nil
+	snapshotEnabled := expctxkeys.SnapshotterEnabled.Load() && ctx.Value(expctxkeys.EnableSnapshotterKey{}) != nil
 	if snapshotEnabled {
 		ctx = context.WithValue(ctx, expctxkeys.SnapshotterKey{}, c)
 	}
@@ -385,12 +385,12 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		case wazevoapi.ExitCodeCallGoFunction:
 			index := wazevoapi.GoFunctionIndexFromExitCode(ec)
 			f := hostModuleGoFuncFromOpaque[api.GoFunction](index, c.execCtx.goFunctionCallCalleeModuleContextOpaque)
-			func() {
-				if snapshotEnabled {
-					defer snapshotRecoverFn(c)
-				}
-				f.Call(ctx, goCallStackView(c.execCtx.stackPointerBeforeGoCall))
-			}()
+			stack := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
+			if snapshotEnabled {
+				callGoFunctionWithSnapshotRecover(c, ctx, f, stack)
+			} else {
+				f.Call(ctx, stack)
+			}
 			// Back to the native code.
 			c.execCtx.exitCode = wazevoapi.ExitCodeOK
 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
@@ -407,12 +407,11 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			def := hostModule.FunctionDefinition(wasm.Index(index))
 			listener.Before(ctx, callerModule, def, s, c.stackIterator(true))
 			// Call into the Go function.
-			func() {
-				if snapshotEnabled {
-					defer snapshotRecoverFn(c)
-				}
+			if snapshotEnabled {
+				callGoFunctionWithSnapshotRecover(c, ctx, f, s)
+			} else {
 				f.Call(ctx, s)
-			}()
+			}
 			// Call Listener.After.
 			listener.After(ctx, callerModule, def, s)
 			// Back to the native code.
@@ -423,12 +422,12 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			index := wazevoapi.GoFunctionIndexFromExitCode(ec)
 			f := hostModuleGoFuncFromOpaque[api.GoModuleFunction](index, c.execCtx.goFunctionCallCalleeModuleContextOpaque)
 			mod := c.callerModuleInstance()
-			func() {
-				if snapshotEnabled {
-					defer snapshotRecoverFn(c)
-				}
-				f.Call(ctx, mod, goCallStackView(c.execCtx.stackPointerBeforeGoCall))
-			}()
+			stack := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
+			if snapshotEnabled {
+				callGoModuleFunctionWithSnapshotRecover(c, ctx, f, mod, stack)
+			} else {
+				f.Call(ctx, mod, stack)
+			}
 			// Back to the native code.
 			c.execCtx.exitCode = wazevoapi.ExitCodeOK
 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
@@ -445,12 +444,11 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			def := hostModule.FunctionDefinition(wasm.Index(index))
 			listener.Before(ctx, callerModule, def, s, c.stackIterator(true))
 			// Call into the Go function.
-			func() {
-				if snapshotEnabled {
-					defer snapshotRecoverFn(c)
-				}
+			if snapshotEnabled {
+				callGoModuleFunctionWithSnapshotRecover(c, ctx, f, callerModule, s)
+			} else {
 				f.Call(ctx, callerModule, s)
-			}()
+			}
 			// Call Listener.After.
 			listener.After(ctx, callerModule, def, s)
 			// Back to the native code.
@@ -918,4 +916,22 @@ func snapshotRecoverFn(c *callEngine) {
 			panic(r)
 		}
 	}
+}
+
+// callGoFunctionWithSnapshotRecover calls f.Call, guarded by a defer/recover
+// that catches this call engine's own snapshot restores (see snapshot.Restore
+// and snapshotRecoverFn). This is only invoked when the snapshotter is
+// enabled for the current call; the defer disqualifies this function itself
+// from inlining, but keeping it separate lets the (overwhelmingly common)
+// snapshotter-disabled path call f.Call directly and inline.
+func callGoFunctionWithSnapshotRecover(c *callEngine, ctx context.Context, f api.GoFunction, stack []uint64) {
+	defer snapshotRecoverFn(c)
+	f.Call(ctx, stack)
+}
+
+// callGoModuleFunctionWithSnapshotRecover is callGoFunctionWithSnapshotRecover
+// for api.GoModuleFunction, which additionally takes the caller's api.Module.
+func callGoModuleFunctionWithSnapshotRecover(c *callEngine, ctx context.Context, f api.GoModuleFunction, mod api.Module, stack []uint64) {
+	defer snapshotRecoverFn(c)
+	f.Call(ctx, mod, stack)
 }

@@ -25,6 +25,7 @@ type Snapshotter interface {
 // Passing the returned context to a exported function invocation enables snapshots,
 // and allows host functions to retrieve the Snapshotter using GetSnapshotter.
 func WithSnapshotter(ctx context.Context) context.Context {
+	expctxkeys.SnapshotterEnabled.Store(true)
 	return context.WithValue(ctx, expctxkeys.EnableSnapshotterKey{}, struct{}{})
 }
 

@@ -247,9 +247,12 @@ func (ce *callEngine) applyExceptionHandler(frame *callFrame, clause *exceptionT
 // Returns false on normal return (caller should do frame.pc++).
 func (ce *callEngine) callWithUnwind(ctx context.Context, m *wasm.ModuleInstance, tf *function) bool {
 	// Short-circuit: skip defer/recover overhead when neither exception
-	// handlers nor the snapshotter are active for the calling frame.
+	// handlers nor the snapshotter are active for the calling frame. The
+	// SnapshotterEnabled latch avoids walking the ctx.Value chain at all
+	// unless some context in this process has ever enabled the snapshotter.
 	frame := ce.frames[len(ce.frames)-1]
-	if len(frame.f.parent.exceptionTable) == 0 && ctx.Value(expctxkeys.EnableSnapshotterKey{}) == nil {
+	if len(frame.f.parent.exceptionTable) == 0 &&
+		!(expctxkeys.SnapshotterEnabled.Load() && ctx.Value(expctxkeys.EnableSnapshotterKey{}) != nil) {
 		ce.callFunction(ctx, m, tf)
 		return false
 	}
@@ -754,7 +757,7 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 		}
 	}
 
-	if ctx.Value(expctxkeys.EnableSnapshotterKey{}) != nil {
+	if expctxkeys.SnapshotterEnabled.Load() && ctx.Value(expctxkeys.EnableSnapshotterKey{}) != nil {
 		ctx = context.WithValue(ctx, expctxkeys.SnapshotterKey{}, ce)
 	}
 
