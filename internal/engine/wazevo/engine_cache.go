@@ -190,9 +190,13 @@ func serializeCompiledModule(wazyVersion string, cm *compiledModule) io.Reader {
 	} else {
 		buf.WriteByte(0) // indicates that source map is not present.
 	}
-	// Try-table info: number of try_tables (4 bytes), then for each:
-	// numLocals (4 bytes), reuseLocals (1 byte), clause count (4 bytes),
-	// then for each clause: kind (1 byte) + tagIndex (4 bytes).
+	// Try-table info: a format-version byte (guards this section's binary
+	// layout independently, same pattern as ehTableFormatVersion below --
+	// bumped when FloorSize was added), then number of try_tables (4
+	// bytes), then for each: numLocals (4 bytes), reuseLocals (1 byte),
+	// floorSize (4 bytes), clause count (4 bytes), then for each clause:
+	// kind (1 byte) + tagIndex (4 bytes).
+	buf.WriteByte(tryTableInfoFormatVersion)
 	buf.Write(u32.LeBytes(uint32(len(cm.tryTableInfo))))
 	for _, info := range cm.tryTableInfo {
 		buf.Write(u32.LeBytes(uint32(info.NumLocals)))
@@ -201,6 +205,7 @@ func serializeCompiledModule(wazyVersion string, cm *compiledModule) io.Reader {
 			b = 1
 		}
 		buf.WriteByte(b)
+		buf.Write(u32.LeBytes(uint32(info.FloorSize)))
 		buf.Write(u32.LeBytes(uint32(len(info.CatchClauses))))
 		for _, c := range info.CatchClauses {
 			buf.WriteByte(c.Kind)
@@ -256,6 +261,13 @@ func serializeCompiledModule(wazyVersion string, cm *compiledModule) io.Reader {
 // this whenever that section's binary layout changes, so that old cache
 // entries are detected as stale rather than misparsed.
 const ehTableFormatVersion = 1
+
+// tryTableInfoFormatVersion guards the try-table-info cache section
+// (cm.tryTableInfo) independently of wazyVersion, same rationale as
+// ehTableFormatVersion: bump whenever this section's binary layout
+// changes (e.g. when TryTableInfo.FloorSize was added) so that old cache
+// entries are detected as stale rather than misparsed.
+const tryTableInfoFormatVersion = 1
 
 func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *compiledModule, staleCache bool, err error) {
 	defer reader.Close()
@@ -366,9 +378,15 @@ func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *co
 			sm.executableOffsets = append(sm.executableOffsets, uintptr(executableRelativeOffset)+executableOffset)
 		}
 	}
-	// Try-table info.
+	// Try-table info -- see serializeCompiledModule's comment for the
+	// layout. A missing/mismatched format-version byte means either a
+	// pre-FloorSize cache entry or an incompatible layout version: treat as
+	// stale (forces a recompile) rather than risk misparsing raw bytes as
+	// this section's structure.
+	if _, err = io.ReadFull(bufReader, eightBytes[:1]); err != nil || eightBytes[0] != tryTableInfoFormatVersion {
+		return nil, true, nil
+	}
 	if _, err = io.ReadFull(bufReader, eightBytes[:4]); err != nil {
-		// Treat old cache entries without try-table data as stale (trigger recompile).
 		return nil, true, nil
 	}
 	tableLen := binary.LittleEndian.Uint32(eightBytes[:4])
@@ -380,6 +398,10 @@ func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *co
 			}
 			numLocals := int(binary.LittleEndian.Uint32(eightBytes[:4]))
 			reuseLocals := eightBytes[4] != 0
+			if _, err = io.ReadFull(bufReader, eightBytes[:4]); err != nil {
+				return nil, false, fmt.Errorf("compilationcache: error reading floor size for try_table[%d]: %v", i, err)
+			}
+			floorSize := int(binary.LittleEndian.Uint32(eightBytes[:4]))
 			if _, err = io.ReadFull(bufReader, eightBytes[:4]); err != nil {
 				return nil, false, fmt.Errorf("compilationcache: error reading catch clause count for try_table[%d]: %v", i, err)
 			}
@@ -398,6 +420,7 @@ func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *co
 				CatchClauses: clauses,
 				NumLocals:    numLocals,
 				ReuseLocals:  reuseLocals,
+				FloorSize:    floorSize,
 			}
 		}
 	}

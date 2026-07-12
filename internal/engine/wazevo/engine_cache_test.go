@@ -37,18 +37,19 @@ func TestSerializeCompiledModule(t *testing.T) {
 				magic,
 				[]byte{byte(len(testVersion))},
 				[]byte(testVersion),
-				u32.LeBytes(1),              // number of functions.
-				u64.LeBytes(0),              // offset.
-				u64.LeBytes(5),              // length of code.
-				[]byte{1, 2, 3, 4, 5},       // code.
-				crcf([]byte{1, 2, 3, 4, 5}), // crc for the code.
-				[]byte{0},                   // no source map.
-				u32.LeBytes(0),              // empty catch clause table.
-				[]byte{ehTableFormatVersion}, // eh table format version.
-				u32.LeBytes(1),               // number of functions (eh tables).
-				u32.LeBytes(0),               // func[0]: 0 eh entries.
-				u32.LeBytes(1),               // number of function frame sizes.
-				u64.LeBytes(0),               // func[0] frame size.
+				u32.LeBytes(1),                    // number of functions.
+				u64.LeBytes(0),                    // offset.
+				u64.LeBytes(5),                    // length of code.
+				[]byte{1, 2, 3, 4, 5},             // code.
+				crcf([]byte{1, 2, 3, 4, 5}),       // crc for the code.
+				[]byte{0},                         // no source map.
+				[]byte{tryTableInfoFormatVersion}, // try-table info format version.
+				u32.LeBytes(0),                    // empty catch clause table.
+				[]byte{ehTableFormatVersion},      // eh table format version.
+				u32.LeBytes(1),                    // number of functions (eh tables).
+				u32.LeBytes(0),                    // func[0]: 0 eh entries.
+				u32.LeBytes(1),                    // number of function frame sizes.
+				u64.LeBytes(0),                    // func[0] frame size.
 			),
 		},
 		{
@@ -62,18 +63,19 @@ func TestSerializeCompiledModule(t *testing.T) {
 				magic,
 				[]byte{byte(len(testVersion))},
 				[]byte(testVersion),
-				u32.LeBytes(1),              // number of functions.
-				u64.LeBytes(0),              // offset.
-				u64.LeBytes(5),              // length of code.
-				[]byte{1, 2, 3, 4, 5},       // code.
-				crcf([]byte{1, 2, 3, 4, 5}), // crc for the code.
-				[]byte{0},                   // no source map.
-				u32.LeBytes(0),              // empty catch clause table.
-				[]byte{ehTableFormatVersion}, // eh table format version.
-				u32.LeBytes(1),               // number of functions (eh tables).
-				u32.LeBytes(0),               // func[0]: 0 eh entries.
-				u32.LeBytes(1),               // number of function frame sizes.
-				u64.LeBytes(0),               // func[0] frame size.
+				u32.LeBytes(1),                    // number of functions.
+				u64.LeBytes(0),                    // offset.
+				u64.LeBytes(5),                    // length of code.
+				[]byte{1, 2, 3, 4, 5},             // code.
+				crcf([]byte{1, 2, 3, 4, 5}),       // crc for the code.
+				[]byte{0},                         // no source map.
+				[]byte{tryTableInfoFormatVersion}, // try-table info format version.
+				u32.LeBytes(0),                    // empty catch clause table.
+				[]byte{ehTableFormatVersion},      // eh table format version.
+				u32.LeBytes(1),                    // number of functions (eh tables).
+				u32.LeBytes(0),                    // func[0]: 0 eh entries.
+				u32.LeBytes(1),                    // number of function frame sizes.
+				u64.LeBytes(0),                    // func[0] frame size.
 			),
 		},
 		{
@@ -97,14 +99,15 @@ func TestSerializeCompiledModule(t *testing.T) {
 				[]byte{1, 2, 3, 4, 5, 1, 2, 3},       // code.
 				crcf([]byte{1, 2, 3, 4, 5, 1, 2, 3}), // crc for the code.
 				[]byte{0},                            // no source map.
+				[]byte{tryTableInfoFormatVersion},    // try-table info format version.
 				u32.LeBytes(0),                       // empty catch clause table.
-				[]byte{ehTableFormatVersion},          // eh table format version.
-				u32.LeBytes(2),                        // number of functions (eh tables).
-				u32.LeBytes(0),                        // func[0]: 0 eh entries.
-				u32.LeBytes(0),                        // func[1]: 0 eh entries.
-				u32.LeBytes(2),                        // number of function frame sizes.
-				u64.LeBytes(0),                        // func[0] frame size.
-				u64.LeBytes(0),                        // func[1] frame size.
+				[]byte{ehTableFormatVersion},         // eh table format version.
+				u32.LeBytes(2),                       // number of functions (eh tables).
+				u32.LeBytes(0),                       // func[0]: 0 eh entries.
+				u32.LeBytes(0),                       // func[1]: 0 eh entries.
+				u32.LeBytes(2),                       // number of function frame sizes.
+				u64.LeBytes(0),                       // func[0] frame size.
+				u64.LeBytes(0),                       // func[1] frame size.
 			),
 		},
 	}
@@ -179,16 +182,17 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				u32.LeBytes(1), // number of functions.
 				u64.LeBytes(0), // offset.
 				// Executable.
-				u64.LeBytes(5),              // size.
-				[]byte{1, 2, 3, 4, 5},       // machine code.
-				crcf([]byte{1, 2, 3, 4, 5}), // machine code.
-				[]byte{0},                   // no source map.
-				u32.LeBytes(0),              // empty catch clause table.
-				[]byte{ehTableFormatVersion}, // eh table format version.
-				u32.LeBytes(1),                // number of functions (eh tables).
-				u32.LeBytes(0),                // func[0]: 0 eh entries.
-				u32.LeBytes(1),                // number of function frame sizes.
-				u64.LeBytes(0),                // func[0] frame size.
+				u64.LeBytes(5),                    // size.
+				[]byte{1, 2, 3, 4, 5},             // machine code.
+				crcf([]byte{1, 2, 3, 4, 5}),       // machine code.
+				[]byte{0},                         // no source map.
+				[]byte{tryTableInfoFormatVersion}, // try-table info format version.
+				u32.LeBytes(0),                    // empty catch clause table.
+				[]byte{ehTableFormatVersion},      // eh table format version.
+				u32.LeBytes(1),                    // number of functions (eh tables).
+				u32.LeBytes(0),                    // func[0]: 0 eh entries.
+				u32.LeBytes(1),                    // number of function frame sizes.
+				u64.LeBytes(0),                    // func[0] frame size.
 			),
 			expCompiledModule: &compiledModule{
 				executables:        &executables{executable: []byte{1, 2, 3, 4, 5}},
@@ -214,15 +218,16 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				u64.LeBytes(10),                             // size.
 				[]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},       // machine code.
 				crcf([]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}), // crc for machine code.
-				[]byte{0},      // no source map.
-				u32.LeBytes(0), // empty catch clause table.
-				[]byte{ehTableFormatVersion}, // eh table format version.
-				u32.LeBytes(2),                // number of functions (eh tables).
-				u32.LeBytes(0),                // func[0]: 0 eh entries.
-				u32.LeBytes(0),                // func[1]: 0 eh entries.
-				u32.LeBytes(2),                // number of function frame sizes.
-				u64.LeBytes(0),                // func[0] frame size.
-				u64.LeBytes(0),                // func[1] frame size.
+				[]byte{0},                         // no source map.
+				[]byte{tryTableInfoFormatVersion}, // try-table info format version.
+				u32.LeBytes(0),                    // empty catch clause table.
+				[]byte{ehTableFormatVersion},      // eh table format version.
+				u32.LeBytes(2),                    // number of functions (eh tables).
+				u32.LeBytes(0),                    // func[0]: 0 eh entries.
+				u32.LeBytes(0),                    // func[1]: 0 eh entries.
+				u32.LeBytes(2),                    // number of function frame sizes.
+				u64.LeBytes(0),                    // func[0] frame size.
+				u64.LeBytes(0),                    // func[1] frame size.
 			),
 			importedFunctionCount: 1,
 			expCompiledModule: &compiledModule{
@@ -289,12 +294,13 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				u32.LeBytes(1), // number of functions.
 				u64.LeBytes(0), // offset.
 				// Executable.
-				u64.LeBytes(5),              // size.
-				[]byte{1, 2, 3, 4, 5},       // machine code.
-				crcf([]byte{1, 2, 3, 4, 5}), // machine code.
-				[]byte{0},                   // no source map.
-				u32.LeBytes(0),              // empty catch clause table.
-				[]byte{ehTableFormatVersion + 1}, // wrong eh table format version.
+				u64.LeBytes(5),                    // size.
+				[]byte{1, 2, 3, 4, 5},             // machine code.
+				crcf([]byte{1, 2, 3, 4, 5}),       // machine code.
+				[]byte{0},                         // no source map.
+				[]byte{tryTableInfoFormatVersion}, // try-table info format version.
+				u32.LeBytes(0),                    // empty catch clause table.
+				[]byte{ehTableFormatVersion + 1},  // wrong eh table format version.
 				u32.LeBytes(1),
 				u32.LeBytes(0),
 				u32.LeBytes(1),

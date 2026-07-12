@@ -3602,10 +3602,17 @@ func (c *Compiler) lowerCurrentOpcode() {
 			})
 		}
 		numLocals := len(c.wasmFunctionTyp.Params) + len(c.wasmFunctionLocalTypes)
+		// The operand floor is whatever is on the value stack below this
+		// try_table's own block params -- identical computation to
+		// originalStackLenWithoutParam below, just captured here (before
+		// bodyBlk/handler blocks are built) so it can travel with the
+		// try-table metadata. See TryTableInfo.FloorSize's doc comment.
+		floorSize := len(state.values) - len(bt.Params)
 		tryTableID := c.tryTableMetadata.Append(wazevoapi.TryTableInfo{
 			CatchClauses: clauseInstances,
 			NumLocals:    numLocals,
 			ReuseLocals:  c.tryTableDepth > 0,
+			FloorSize:    floorSize,
 		})
 
 		// Allocate the following block (after try_table end).

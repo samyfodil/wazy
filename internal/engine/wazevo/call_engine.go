@@ -56,6 +56,29 @@ type (
 		// are NOT recoverable from the (unwound, but never cloned/rolled
 		// back) native stack alone.
 		activeCatchScopes []activeCatchScope
+		// ehLocalsPool holds one reusable locals-mirror buffer per
+		// currently-open *non-nested* try_table-with-catch scope (see
+		// acquireLocalsSaveArea), indexed by ehLocalsPoolDepth's value at
+		// the time the buffer was acquired. Nested same-function try_tables
+		// (TryTableInfo.ReuseLocals) share their enclosing scope's buffer
+		// and never touch this pool. Buffers are reused -- grown via make
+		// only when a given depth needs more locals than its pool entry
+		// currently holds -- across dynamic enters *and* across separate
+		// calls to this callEngine, so a hot loop that repeatedly
+		// enters/leaves a try_table at the same nesting depth allocates at
+		// most once (on the first, capacity-establishing entry) rather than
+		// on every entry. This is what replaces the old
+		// make([]uint64, NumLocals*2) done unconditionally by
+		// ExitCodeTryTableEnter.
+		ehLocalsPool [][]uint64
+		// ehLocalsPoolDepth is the number of currently-open non-nested
+		// try_table-with-catch scopes (i.e. scopes that own -- rather than
+		// share -- a locals-mirror buffer), and the index into ehLocalsPool
+		// that the *next* such scope will acquire. Reset to 0 at the start
+		// of every call; decremented in lockstep with activeCatchScopes
+		// truncation wherever a scope owning a buffer is popped (see
+		// popCatchScopes).
+		ehLocalsPoolDepth int
 		// pendingException holds the most recently caught exception, so handler
 		// code can read its params after re-entry.
 		pendingException *wasm.Exception
@@ -72,19 +95,30 @@ type (
 	// and the SP/FP to resume at are now derived from compiledModule.ehTables
 	// and a fresh stack walk at throw time instead of a stored checkpoint.
 	//
-	// savedRegisters is the one field kept for the same reason it existed
-	// before: the throw-time control transfer resumes the catching frame
-	// directly at its try_table enter-continuation (resumePC below),
-	// bypassing the enter trampoline's own register-restore tail that the
-	// non-throwing path returns through. Any value the catching function's
-	// own code keeps live across the try body in a callee-saved register
-	// (which the register allocator does freely, e.g. for a value used both
-	// before and after a call inside the body) would otherwise read back
+	// savedRegisters is still captured and restored *unconditionally* for
+	// every try_table-with-catch scope (this MVP pass tried gating it on
+	// TryTableInfo.FloorSize == 0 -- an empty wasm operand floor -- and
+	// reverted that: a real C++/Emscripten-compiled module crashed, because
+	// handler blocks unconditionally call reloadAfterCall(), which reads
+	// through moduleCtxPtrValue -- a per-function SSA value live across the
+	// *entire* function body, regardless of the wasm operand stack, that
+	// regalloc is free to keep in a callee-saved register across the enter
+	// call exactly like a category-4 value. See TryTableInfo.FloorSize's
+	// doc comment and the longer note at the ExitCodeTryTableEnter case
+	// below for the full story; this is the top item left for Opus). The
+	// throw-time control transfer resumes the catching frame directly at
+	// its try_table enter-continuation (resumePC below), bypassing the
+	// enter trampoline's own register-restore tail that the non-throwing
+	// path returns through. Any value the catching function's own code
+	// keeps live across the try body in a callee-saved register (which the
+	// register allocator does freely, e.g. for a value used both before and
+	// after a call inside the body -- moduleCtxPtrValue being the
+	// pervasive, whole-function-lived example) would otherwise read back
 	// whatever the deepest abandoned callee last left there. Restoring this
-	// snapshot -- captured cheaply here (a 1KB struct copy done by the enter
-	// trampoline's own prologue via saveRegistersInExecutionContext, not a
-	// stack clone) -- via afterThrowTransferEntrypoint before the jump
-	// keeps that correct without any frontend/regalloc changes. See
+	// snapshot -- captured cheaply here (a 1KB struct copy done by the
+	// enter trampoline's own prologue via saveRegistersInExecutionContext,
+	// not a stack clone) -- via afterThrowTransferEntrypoint before the
+	// jump keeps that correct without any frontend/regalloc changes. See
 	// backend.Machine.CompileThrowTransferRegisterRestore.
 	activeCatchScope struct {
 		// moduleInstance is the module that set up this scope. Used for tag
@@ -114,11 +148,15 @@ type (
 		// this try_table was entered (i.e. already captured, for free, by
 		// the enter trampoline's own prologue -- see
 		// saveRegistersInExecutionContext -- before any Go code runs).
+		// Captured unconditionally for every scope; see this struct's own
+		// doc comment above for why it cannot yet be made conditional.
 		savedRegisters [64][2]uint64
-		// localsSaveArea is a heap buffer where locals are mirrored inside
-		// try bodies. Handlers read from it to get throw-time values. Nil
-		// for nested same-function try_tables that reuse the enclosing
-		// scope's save area (TryTableInfo.ReuseLocals).
+		// localsSaveArea is this scope's locals-mirror buffer -- acquired
+		// from callEngine.ehLocalsPool (acquireLocalsSaveArea), NOT a fresh
+		// heap allocation. Handlers read from it to get throw-time values.
+		// Nil for nested same-function try_tables that reuse the enclosing
+		// scope's save area (TryTableInfo.ReuseLocals) and for try_tables
+		// whose function has no locals.
 		localsSaveArea []uint64
 	}
 
@@ -320,8 +358,12 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		}
 	}
 
-	// Clear any stale try_table handler state from a previous call.
+	// Clear any stale try_table handler state from a previous call. Note:
+	// ehLocalsPool itself is intentionally NOT cleared -- its whole purpose
+	// is to be reused across calls (see its doc comment); only the
+	// per-call depth counter resets.
 	c.activeCatchScopes = c.activeCatchScopes[:0]
+	c.ehLocalsPoolDepth = 0
 
 	var paramResultPtr *uint64
 	if len(paramResultStack) > 0 {
@@ -377,6 +419,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			// Ensures that we can reuse this callEngine even after an error.
 			c.execCtx.exitCode = wazevoapi.ExitCodeOK
 			c.activeCatchScopes = c.activeCatchScopes[:0]
+			c.ehLocalsPoolDepth = 0
 		}
 	}()
 
@@ -659,12 +702,17 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			// at throw time (handleThrow), not from a checkpoint captured
 			// here. What must still be recorded per dynamic entry is the
 			// state a throw cannot recompute merely by unwinding: which
-			// module instance owns this scope's tag namespace, where its
-			// locals save area (if any) lives, and -- as the documented P1
-			// safety net -- a 1KB callee-saved-register snapshot (the
-			// savedRegisters copy below; see activeCatchScope's doc comment
-			// for why the throw-time transfer still needs it). The stack
-			// clone is what P1 removes; this register snapshot is retained.
+			// module instance owns this scope's tag namespace, and where
+			// its locals mirror buffer (if any) lives. Unlike P1, the
+			// locals buffer no longer allocates on the common path: it
+			// comes from ehLocalsPool (acquireLocalsSaveArea), reused
+			// across dynamic enters instead of make()'d fresh every time.
+			// The callee-saved-register snapshot below is still captured
+			// unconditionally, not skipped based on TryTableInfo.FloorSize
+			// -- see activeCatchScope's doc comment for why (a real
+			// C++/Emscripten module crashed when this MVP tried gating it
+			// on an empty wasm operand floor: moduleCtxPtrValue's
+			// whole-function live range needs the same protection).
 			//
 			// The encoded exit code (with tryTableID in upper bits) is on the
 			// Go call stack as the second trampoline argument, not in execCtx.exitCode.
@@ -674,11 +722,13 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			me := mod.Engine.(*moduleEngine)
 			info := &me.parent.tryTableInfo[tryTableID]
 
-			// Allocate a heap buffer for locals so handlers can read throw-time values.
-			// Nested try_tables in the same function (ReuseLocals) share the enclosing scope's save area.
+			// Acquire a (reused, not freshly heap-allocated) buffer for
+			// locals so handlers can read throw-time values. Nested
+			// try_tables in the same function (ReuseLocals) share the
+			// enclosing scope's save area and never touch the pool.
 			var saveArea []uint64
 			if info.NumLocals > 0 && !info.ReuseLocals {
-				saveArea = make([]uint64, info.NumLocals*2) // 16 bytes per local
+				saveArea = c.acquireLocalsSaveArea(info.NumLocals)
 				c.execCtx.localsSaveAreaPtr = uintptr(unsafe.Pointer(&saveArea[0]))
 			}
 
@@ -698,6 +748,28 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)),
 				c.execCtx.framePointerBeforeGoCall, c.stackTop)
 
+			// The callee-saved register snapshot is captured unconditionally
+			// (NOT gated on TryTableInfo.FloorSize) -- see this field's own
+			// doc comment for why FloorSize alone is not a sufficient
+			// condition to skip it: a real C++/Emscripten-compiled module
+			// (experimental/exceptions_test.go's TestCppExceptions) crashed
+			// when this was gated on an empty wasm operand floor, because
+			// handler blocks unconditionally call reloadAfterCall(), which
+			// reads through moduleCtxPtrValue -- a per-function SSA value
+			// with a live range spanning the *entire* function body,
+			// completely independent of the wasm operand stack, that
+			// regalloc is free to keep in a callee-saved register across
+			// the enter call exactly like any category-4 value. Skipping
+			// the restore left that register holding whatever the deepest
+			// abandoned callee last wrote there, so any handler that
+			// touched memory or a mutable global (i.e. almost every
+			// realistic module, just not the memory/global-free synthetic
+			// benchmarks) read through a corrupted moduleCtxPtrValue. Left
+			// for Opus: give moduleCtxPtrValue (and anything else with a
+			// whole-function live range) its own memory-based reload in
+			// handler blocks, symmetric to how locals are reloaded, so the
+			// register snapshot can be skipped safely and generally rather
+			// than always paid for.
 			c.activeCatchScopes = append(c.activeCatchScopes, activeCatchScope{
 				moduleInstance: mod,
 				resumePC:       resumePC,
@@ -714,7 +786,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			// Pop the most recent scope and restore the locals save area
 			// pointer from the scope below (or clear it).
 			if n := len(c.activeCatchScopes); n > 0 {
-				c.activeCatchScopes = c.activeCatchScopes[:n-1]
+				c.activeCatchScopes = c.popCatchScopes(c.activeCatchScopes, n-1)
 				c.restoreLocalsSaveAreaPtrFrom(c.activeCatchScopes, n-2)
 			}
 			c.execCtx.exitCode = wazevoapi.ExitCodeOK
@@ -782,14 +854,15 @@ func (c *callEngine) handleThrow(exn *wasm.Exception) bool {
 				// nearest enclosing one that owns a save area
 				// (same-function ReuseLocals scopes share their
 				// enclosing scope's), and the callee-saved register
-				// snapshot from this exact scope (see activeCatchScope's
-				// doc comment for why), then discard this scope and
-				// everything above it: their try_tables are being
-				// unwound past, exactly as doHandleException used to
-				// truncate tryHandlers.
+				// snapshot from this exact scope -- unconditionally; see
+				// activeCatchScope's doc comment for why this cannot yet
+				// be gated on TryTableInfo.FloorSize. Then discard this
+				// scope and everything above it: their try_tables are
+				// being unwound past, exactly as doHandleException used
+				// to truncate tryHandlers.
 				c.restoreLocalsSaveAreaPtrFrom(scopes, scopeIdx)
 				c.execCtx.savedRegisters = scopes[scopeIdx].savedRegisters
-				c.activeCatchScopes = scopes[:scopeIdx]
+				c.activeCatchScopes = c.popCatchScopes(scopes, scopeIdx)
 
 				// The matched clause's index ci within e.Clauses
 				// (declaration order) is exactly what the compiled br_table
@@ -826,7 +899,7 @@ func (c *callEngine) handleThrow(exn *wasm.Exception) bool {
 			}
 			containing++
 		}
-		scopes = scopes[:len(scopes)-containing]
+		scopes = c.popCatchScopes(scopes, len(scopes)-containing)
 		return false
 	}
 
@@ -870,6 +943,53 @@ func (c *callEngine) restoreLocalsSaveAreaPtrFrom(scopes []activeCatchScope, fro
 		}
 	}
 	c.execCtx.localsSaveAreaPtr = 0
+}
+
+// acquireLocalsSaveArea returns a locals-mirror buffer for a fresh
+// (non-nested) try_table-with-catch scope, sized to hold numLocals*2
+// uint64s (16 bytes/local, matching storeLocalToSaveArea's/
+// reloadLocalsFromSaveArea's stride). Unlike P1, this never allocates on
+// the common path: it reuses callEngine.ehLocalsPool, keyed by
+// ehLocalsPoolDepth (the count of currently-open non-nested scopes), so a
+// hot loop that repeatedly enters/leaves a try_table at the same nesting
+// depth -- even across separate calls to this callEngine -- allocates at
+// most once per depth (the first time that depth needs a bigger buffer
+// than it currently has). Any stale contents left over from a previous use
+// are harmless: the caller (ExitCodeTryTableEnter) is only ever reached
+// right before the compiled body unconditionally re-initializes every
+// local's slot (storeAllLocalsToSaveArea), so nothing reads the buffer
+// before it is fully overwritten.
+func (c *callEngine) acquireLocalsSaveArea(numLocals int) []uint64 {
+	need := numLocals * 2
+	d := c.ehLocalsPoolDepth
+	c.ehLocalsPoolDepth++
+	if d < len(c.ehLocalsPool) {
+		if cap(c.ehLocalsPool[d]) >= need {
+			return c.ehLocalsPool[d][:need]
+		}
+		buf := make([]uint64, need)
+		c.ehLocalsPool[d] = buf
+		return buf
+	}
+	buf := make([]uint64, need)
+	c.ehLocalsPool = append(c.ehLocalsPool, buf)
+	return buf
+}
+
+// popCatchScopes truncates scopes to newLen, decrementing ehLocalsPoolDepth
+// once for each discarded scope that owned a pooled locals buffer (i.e.
+// every scope with a non-nil localsSaveArea -- see acquireLocalsSaveArea),
+// keeping the pool's depth bookkeeping in lockstep with activeCatchScopes'
+// own stack discipline no matter which of the three call sites
+// (ExitCodeTryTableLeave, or handleThrow's per-frame no-match/match
+// discards) is doing the popping.
+func (c *callEngine) popCatchScopes(scopes []activeCatchScope, newLen int) []activeCatchScope {
+	for i := newLen; i < len(scopes); i++ {
+		if len(scopes[i].localsSaveArea) > 0 {
+			c.ehLocalsPoolDepth--
+		}
+	}
+	return scopes[:newLen]
 }
 
 func (c *callEngine) callerModuleInstance() *wasm.ModuleInstance {
