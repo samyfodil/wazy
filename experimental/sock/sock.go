@@ -3,7 +3,7 @@ package sock
 import (
 	"context"
 
-	"github.com/tetratelabs/wazero/internal/sock"
+	"github.com/samyfodil/wazy/internal/sock"
 )
 
 // Config configures the host to open TCP sockets and allows guest access to

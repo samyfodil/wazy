@@ -8,10 +8,10 @@ import (
 	"os"
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
-	"github.com/tetratelabs/wazero/internal/platform"
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/imports/wasi_snapshot_preview1"
+	"github.com/samyfodil/wazy/internal/platform"
+	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
 //go:embed testdata/*
@@ -29,7 +29,7 @@ func BenchmarkLibsodium(b *testing.B) {
 	}
 
 	ctx := context.Background()
-	r := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfigCompiler())
+	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler())
 	defer r.Close(ctx)
 	wasi_snapshot_preview1.MustInstantiate(ctx, r)
 
@@ -113,12 +113,12 @@ func BenchmarkLibsodium(b *testing.B) {
 			wasm, err := tests.ReadFile(path)
 			require.NoError(b, err)
 
-			cfg := wazero.NewModuleConfig().
+			cfg := wazy.NewModuleConfig().
 				WithStdout(io.Discard).
 				WithStderr(io.Discard).
 				WithStdin(os.Stdin).
 				WithRandSource(rand.Reader).
-				WithFSConfig(wazero.NewFSConfig()).
+				WithFSConfig(wazy.NewFSConfig()).
 				WithSysNanosleep().
 				WithSysNanotime().
 				WithSysWalltime().

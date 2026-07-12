@@ -4,13 +4,13 @@ import (
 	_ "embed"
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasip1"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasip1"
 )
 
 func Test_clockResGet(t *testing.T) {
-	mod, r, log := requireProxyModule(t, wazero.NewModuleConfig())
+	mod, r, log := requireProxyModule(t, wazy.NewModuleConfig())
 	defer r.Close(testCtx)
 
 	expectedMemoryMicro := []byte{
@@ -71,7 +71,7 @@ func Test_clockResGet(t *testing.T) {
 }
 
 func Test_clockResGet_Unsupported(t *testing.T) {
-	mod, r, log := requireProxyModule(t, wazero.NewModuleConfig())
+	mod, r, log := requireProxyModule(t, wazy.NewModuleConfig())
 	defer r.Close(testCtx)
 
 	tests := []struct {
@@ -122,7 +122,7 @@ func Test_clockResGet_Unsupported(t *testing.T) {
 }
 
 func Test_clockTimeGet(t *testing.T) {
-	mod, r, log := requireProxyModule(t, wazero.NewModuleConfig())
+	mod, r, log := requireProxyModule(t, wazy.NewModuleConfig())
 	defer r.Close(testCtx)
 
 	tests := []struct {
@@ -179,7 +179,7 @@ func Test_clockTimeGet(t *testing.T) {
 
 // Similar to https://github.com/WebAssembly/wasi-testsuite/blob/dc7f8d27be1030cd4788ebdf07d9b57e5d23441e/tests/c/testsuite/clock_gettime-monotonic.c
 func Test_clockTimeGet_monotonic(t *testing.T) {
-	mod, r, _ := requireProxyModule(t, wazero.NewModuleConfig().
+	mod, r, _ := requireProxyModule(t, wazy.NewModuleConfig().
 		// Important not to use fake time!
 		WithSysNanotime())
 	defer r.Close(testCtx)
@@ -204,7 +204,7 @@ func Test_clockTimeGet_monotonic(t *testing.T) {
 }
 
 func Test_clockTimeGet_Unsupported(t *testing.T) {
-	mod, r, log := requireProxyModule(t, wazero.NewModuleConfig())
+	mod, r, log := requireProxyModule(t, wazy.NewModuleConfig())
 	defer r.Close(testCtx)
 
 	tests := []struct {
@@ -256,7 +256,7 @@ func Test_clockTimeGet_Unsupported(t *testing.T) {
 }
 
 func Test_clockTimeGet_Errors(t *testing.T) {
-	mod, r, log := requireProxyModule(t, wazero.NewModuleConfig())
+	mod, r, log := requireProxyModule(t, wazy.NewModuleConfig())
 	defer r.Close(testCtx)
 
 	memorySize := mod.Memory().Size()

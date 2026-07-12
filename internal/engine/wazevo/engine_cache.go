@@ -10,15 +10,15 @@ import (
 	"io"
 	"unsafe"
 
-	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/backend"
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/ssa"
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/wazevoapi"
-	"github.com/tetratelabs/wazero/internal/filecache"
-	"github.com/tetratelabs/wazero/internal/platform"
-	"github.com/tetratelabs/wazero/internal/u32"
-	"github.com/tetratelabs/wazero/internal/u64"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/backend"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/ssa"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/wazevoapi"
+	"github.com/samyfodil/wazy/internal/filecache"
+	"github.com/samyfodil/wazy/internal/platform"
+	"github.com/samyfodil/wazy/internal/u32"
+	"github.com/samyfodil/wazy/internal/u64"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 var crc = crc32.MakeTable(crc32.Castagnoli)
@@ -116,7 +116,7 @@ func (e *engine) addCompiledModuleToCache(module *wasm.Module, cm *compiledModul
 	if e.fileCache == nil || module.IsHostModule {
 		return
 	}
-	err = e.fileCache.Add(fileCacheKey(module), serializeCompiledModule(e.wazeroVersion, cm))
+	err = e.fileCache.Add(fileCacheKey(module), serializeCompiledModule(e.wazyVersion, cm))
 	return
 }
 
@@ -136,7 +136,7 @@ func (e *engine) getCompiledModuleFromCache(module *wasm.Module) (cm *compiledMo
 	// We retrieve *code structures from `cached`.
 	var staleCache bool
 	// Note: cached.Close is ensured to be called in deserializeCodes.
-	cm, staleCache, err = deserializeCompiledModule(e.wazeroVersion, cached)
+	cm, staleCache, err = deserializeCompiledModule(e.wazyVersion, cached)
 	if err != nil {
 		hit = false
 		return
@@ -148,14 +148,14 @@ func (e *engine) getCompiledModuleFromCache(module *wasm.Module) (cm *compiledMo
 
 var magic = []byte{'W', 'A', 'Z', 'E', 'V', 'O'}
 
-func serializeCompiledModule(wazeroVersion string, cm *compiledModule) io.Reader {
+func serializeCompiledModule(wazyVersion string, cm *compiledModule) io.Reader {
 	buf := bytes.NewBuffer(nil)
 	// First 6 byte: WAZEVO header.
 	buf.Write(magic)
 	// Next 1 byte: length of version:
-	buf.WriteByte(byte(len(wazeroVersion)))
-	// Version of wazero.
-	buf.WriteString(wazeroVersion)
+	buf.WriteByte(byte(len(wazyVersion)))
+	// Version of wazy.
+	buf.WriteString(wazyVersion)
 	// Number of *code (== locally defined functions in the module): 4 bytes.
 	buf.Write(u32.LeBytes(uint32(len(cm.functionOffsets))))
 	for _, offset := range cm.functionOffsets {
@@ -202,9 +202,9 @@ func serializeCompiledModule(wazeroVersion string, cm *compiledModule) io.Reader
 	return bytes.NewReader(buf.Bytes())
 }
 
-func deserializeCompiledModule(wazeroVersion string, reader io.ReadCloser) (cm *compiledModule, staleCache bool, err error) {
+func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *compiledModule, staleCache bool, err error) {
 	defer reader.Close()
-	cacheHeaderSize := len(magic) + 1 /* version size */ + len(wazeroVersion) + 4 /* number of functions */
+	cacheHeaderSize := len(magic) + 1 /* version size */ + len(wazyVersion) + 4 /* number of functions */
 
 	// Read the header before the native code.
 	header := make([]byte, cacheHeaderSize)
@@ -229,7 +229,7 @@ func deserializeCompiledModule(wazeroVersion string, reader io.ReadCloser) (cm *
 	if cachedVersionEnd >= len(header) {
 		staleCache = true
 		return
-	} else if cachedVersion := string(header[cachedVersionBegin:cachedVersionEnd]); cachedVersion != wazeroVersion {
+	} else if cachedVersion := string(header[cachedVersionBegin:cachedVersionEnd]); cachedVersion != wazyVersion {
 		staleCache = true
 		return
 	}

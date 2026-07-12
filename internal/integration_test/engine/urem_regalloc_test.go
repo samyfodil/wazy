@@ -6,9 +6,9 @@ import (
 	"encoding/binary"
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
 //go:embed testdata/urem_regalloc.wasm
@@ -21,7 +21,7 @@ var uremRegallocWasm []byte
 // a wrong result that triggers a spurious bounds-check unreachable trap.
 func TestUremRegalloc(t *testing.T) {
 	ctx := context.Background()
-	r := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig())
+	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfig())
 	defer r.Close(ctx)
 
 	_, err := r.NewHostModuleBuilder("repro").

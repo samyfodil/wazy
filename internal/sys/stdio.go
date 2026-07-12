@@ -4,9 +4,9 @@ import (
 	"io"
 	"os"
 
-	experimentalsys "github.com/tetratelabs/wazero/experimental/sys"
-	"github.com/tetratelabs/wazero/internal/sysfs"
-	"github.com/tetratelabs/wazero/sys"
+	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
+	"github.com/samyfodil/wazy/internal/sysfs"
+	"github.com/samyfodil/wazy/sys"
 )
 
 // StdinFile is a fs.ModeDevice file for use implementing FdStdin.

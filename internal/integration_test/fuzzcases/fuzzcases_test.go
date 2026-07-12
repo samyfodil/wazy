@@ -8,13 +8,13 @@ import (
 	"math"
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/platform"
-	"github.com/tetratelabs/wazero/internal/testing/binaryencoding"
-	"github.com/tetratelabs/wazero/internal/testing/nodiff"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/platform"
+	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
+	"github.com/samyfodil/wazy/internal/testing/nodiff"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 var ctx = context.Background()
@@ -31,33 +31,33 @@ func getWasmBinary(t *testing.T, testId string) []byte {
 	return ret
 }
 
-func runWithCompiler(t *testing.T, runner func(t *testing.T, r wazero.Runtime)) {
+func runWithCompiler(t *testing.T, runner func(t *testing.T, r wazy.Runtime)) {
 	if !platform.CompilerSupported() {
 		return
 	}
 	t.Run("compiler", func(t *testing.T) {
-		r := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfigCompiler())
+		r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler())
 		defer r.Close(ctx)
 		runner(t, r)
 	})
 }
 
-func runWithInterpreter(t *testing.T, runner func(t *testing.T, r wazero.Runtime)) {
+func runWithInterpreter(t *testing.T, runner func(t *testing.T, r wazy.Runtime)) {
 	t.Run("interpreter", func(t *testing.T) {
-		r := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfigInterpreter())
+		r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigInterpreter())
 		defer r.Close(ctx)
 		runner(t, r)
 	})
 }
 
-func run(t *testing.T, runner func(t *testing.T, r wazero.Runtime)) {
+func run(t *testing.T, runner func(t *testing.T, r wazy.Runtime)) {
 	runWithInterpreter(t, runner)
 	runWithCompiler(t, runner)
 }
 
 // Test695 requires two functions to exit with "out of bounds memory access" consistently across the implementations.
 func Test695(t *testing.T) {
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		module, err := r.Instantiate(ctx, getWasmBinary(t, "695"))
 		require.NoError(t, err)
 
@@ -72,7 +72,7 @@ func Test695(t *testing.T) {
 }
 
 func Test696(t *testing.T) {
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		module, err := r.Instantiate(ctx, getWasmBinary(t, "696"))
 		require.NoError(t, err)
 		for _, tc := range []struct {
@@ -99,7 +99,7 @@ func Test696(t *testing.T) {
 // Test699 ensures that accessing element instances and data instances works
 // without crash even when the access happens in the nested function call.
 func Test699(t *testing.T) {
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		defer r.Close(ctx)
 		_, err := r.Instantiate(ctx, getWasmBinary(t, "699"))
 		require.NoError(t, err)
@@ -108,7 +108,7 @@ func Test699(t *testing.T) {
 
 // Test701 requires two functions to exit with "out of bounds memory access" consistently across the implementations.
 func Test701(t *testing.T) {
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		module, err := r.Instantiate(ctx, getWasmBinary(t, "701"))
 		require.NoError(t, err)
 
@@ -123,14 +123,14 @@ func Test701(t *testing.T) {
 }
 
 func Test704(t *testing.T) {
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		_, err := r.Instantiate(ctx, getWasmBinary(t, "704"))
 		require.NoError(t, err)
 	})
 }
 
 func Test708(t *testing.T) {
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		_, err := r.Instantiate(ctx, getWasmBinary(t, "708"))
 		require.NotNil(t, err)
 		require.Contains(t, err.Error(), "out of bounds memory access")
@@ -138,7 +138,7 @@ func Test708(t *testing.T) {
 }
 
 func Test709(t *testing.T) {
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "709"))
 		require.NoError(t, err)
 
@@ -153,7 +153,7 @@ func Test709(t *testing.T) {
 }
 
 func Test715(t *testing.T) {
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "715"))
 		require.NoError(t, err)
 
@@ -167,7 +167,7 @@ func Test715(t *testing.T) {
 }
 
 func Test716(t *testing.T) {
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "716"))
 		require.NoError(t, err)
 
@@ -181,7 +181,7 @@ func Test716(t *testing.T) {
 }
 
 func Test717(t *testing.T) {
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "717"))
 		require.NoError(t, err)
 
@@ -199,7 +199,7 @@ func Test717(t *testing.T) {
 }
 
 func Test718(t *testing.T) {
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "718"))
 		require.NoError(t, err)
 
@@ -211,7 +211,7 @@ func Test718(t *testing.T) {
 }
 
 func Test719(t *testing.T) {
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "719"))
 		require.NoError(t, err)
 
@@ -224,7 +224,7 @@ func Test719(t *testing.T) {
 }
 
 func Test720(t *testing.T) {
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "720"))
 		require.NoError(t, err)
 
@@ -237,7 +237,7 @@ func Test720(t *testing.T) {
 }
 
 func Test721(t *testing.T) {
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "721"))
 		require.NoError(t, err)
 
@@ -251,7 +251,7 @@ func Test721(t *testing.T) {
 }
 
 func Test722(t *testing.T) {
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "722"))
 		require.NoError(t, err)
 
@@ -266,7 +266,7 @@ func Test722(t *testing.T) {
 
 func Test725(t *testing.T) {
 	functions := []string{"i32.load8_s", "i32.load16_s"}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "725"))
 		require.NoError(t, err)
 
@@ -297,7 +297,7 @@ func Test730(t *testing.T) {
 		{name: "f64x2.min/mix", exp: [2]uint64{1 << 63, 0}},
 	}
 
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "730"))
 		require.NoError(t, err)
 
@@ -314,7 +314,7 @@ func Test730(t *testing.T) {
 }
 
 func Test733(t *testing.T) {
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "733"))
 		require.NoError(t, err)
 
@@ -348,14 +348,14 @@ func Test733(t *testing.T) {
 }
 
 func Test873(t *testing.T) {
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		_, err := r.Instantiate(ctx, getWasmBinary(t, "873"))
 		require.NoError(t, err)
 	})
 }
 
 func Test874(t *testing.T) {
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		_, err := r.Instantiate(ctx, getWasmBinary(t, "874"))
 		require.NoError(t, err)
 	})
@@ -364,7 +364,7 @@ func Test874(t *testing.T) {
 func Test888(t *testing.T) {
 	// This tests that importing FuncRef type globals and using it as an initialization of the locally-defined
 	// FuncRef global works fine.
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		imported := binaryencoding.EncodeModule(&wasm.Module{
 			MemorySection: &wasm.Memory{Min: 0, Max: 5, IsMaxEncoded: true},
 			GlobalSection: []wasm.Global{
@@ -382,11 +382,11 @@ func Test888(t *testing.T) {
 			},
 		})
 
-		_, err := r.InstantiateWithConfig(ctx, imported, wazero.NewModuleConfig().WithName("host"))
+		_, err := r.InstantiateWithConfig(ctx, imported, wazy.NewModuleConfig().WithName("host"))
 		require.NoError(t, err)
 
 		_, err = r.InstantiateWithConfig(ctx, getWasmBinary(t, "888"),
-			wazero.NewModuleConfig().WithName("test"))
+			wazy.NewModuleConfig().WithName("test"))
 		require.NoError(t, err)
 	})
 }
@@ -397,7 +397,7 @@ func Test1054(t *testing.T) {
 	}
 
 	modules := make([]api.Module, 0, 3)
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "1054"))
 		require.NoError(t, err)
 		modules = append(modules, mod)
@@ -418,7 +418,7 @@ func Test1777(t *testing.T) {
 		return
 	}
 
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "1777"))
 		require.NoError(t, err)
 		f := mod.ExportedFunction("")
@@ -435,7 +435,7 @@ func Test1792a(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		_, err := r.Instantiate(ctx, getWasmBinary(t, "1792a"))
 		require.NoError(t, err)
 	})
@@ -447,7 +447,7 @@ func Test1792b(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		_, err := r.Instantiate(ctx, getWasmBinary(t, "1792b"))
 		require.NoError(t, err)
 	})
@@ -458,7 +458,7 @@ func Test1792c(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "1792c"))
 		require.NoError(t, err)
 		f := mod.ExportedFunction("")
@@ -478,7 +478,7 @@ func Test1793a(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "1793a"))
 		require.NoError(t, err)
 		m := mod.(*wasm.ModuleInstance)
@@ -495,7 +495,7 @@ func Test1793b(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "1793b"))
 		require.NoError(t, err)
 		m := mod.(*wasm.ModuleInstance)
@@ -512,7 +512,7 @@ func Test1793c(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "1793c"))
 		require.NoError(t, err)
 		m := mod.(*wasm.ModuleInstance)
@@ -529,7 +529,7 @@ func Test1793d(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "1793d"))
 		require.NoError(t, err)
 		m := mod.(*wasm.ModuleInstance)
@@ -544,7 +544,7 @@ func Test1797a(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "1797a"))
 		require.NoError(t, err)
 		m := mod.(*wasm.ModuleInstance)
@@ -559,7 +559,7 @@ func Test1797b(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "1797b"))
 		require.NoError(t, err)
 		m := mod.(*wasm.ModuleInstance)
@@ -577,7 +577,7 @@ func Test1797c(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "1797c"))
 		require.NoError(t, err)
 		m := mod.(*wasm.ModuleInstance)
@@ -592,7 +592,7 @@ func Test1797d(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "1797d"))
 		require.NoError(t, err)
 		m := mod.(*wasm.ModuleInstance)
@@ -611,7 +611,7 @@ func Test1802(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "1802"))
 		require.NoError(t, err, "wasm binary should build successfully")
 		m := mod.(*wasm.ModuleInstance)
@@ -625,7 +625,7 @@ func Test1812(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "1812"))
 		require.NoError(t, err)
 		m := mod.(*wasm.ModuleInstance)
@@ -646,7 +646,7 @@ func Test1817(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "1817"))
 		require.NoError(t, err)
 		m := mod.(*wasm.ModuleInstance)
@@ -666,7 +666,7 @@ func Test1820(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "1820"))
 		require.NoError(t, err)
 		m := mod.(*wasm.ModuleInstance)
@@ -684,7 +684,7 @@ func Test1823(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "1823"))
 		require.NoError(t, err)
 		m := mod.(*wasm.ModuleInstance)
@@ -701,7 +701,7 @@ func Test1825(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "1825"))
 		require.NoError(t, err)
 		m := mod.(*wasm.ModuleInstance)
@@ -718,7 +718,7 @@ func Test1826(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "1826"))
 		require.NoError(t, err)
 		m := mod.(*wasm.ModuleInstance)
@@ -734,7 +734,7 @@ func Test1846(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "1846"))
 		require.NoError(t, err)
 		m := mod.(*wasm.ModuleInstance)
@@ -753,7 +753,7 @@ func Test1949(t *testing.T) {
 		return
 	}
 	const offset = 65526
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "1949"))
 		require.NoError(t, err)
 		_, err = mod.ExportedFunction("").Call(ctx)
@@ -769,7 +769,7 @@ func Test1999(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "1999"))
 		require.NoError(t, err)
 		_, err = mod.ExportedFunction("").Call(ctx, 0)
@@ -782,7 +782,7 @@ func Test2000a(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "2000a"))
 		require.NoError(t, err)
 		_, err = mod.ExportedFunction("").Call(ctx, 0)
@@ -794,7 +794,7 @@ func Test2000b(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "2000b"))
 		require.NoError(t, err)
 		_, err = mod.ExportedFunction("").Call(ctx)
@@ -807,7 +807,7 @@ func Test2001(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "2001"))
 		require.NoError(t, err)
 		_, err = mod.ExportedFunction("").Call(ctx)
@@ -819,7 +819,7 @@ func Test2006(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "2006"))
 		require.NoError(t, err)
 		_, err = mod.ExportedFunction("").Call(ctx, 0)
@@ -831,7 +831,7 @@ func Test2007(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "2007"))
 		require.NoError(t, err)
 		_, err = mod.ExportedFunction("").Call(ctx)
@@ -844,7 +844,7 @@ func Test2008(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "2008"))
 		require.NoError(t, err)
 		_, err = mod.ExportedFunction("").Call(ctx)
@@ -857,7 +857,7 @@ func Test2009(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "2009"))
 		require.NoError(t, err)
 		res, err := mod.ExportedFunction("").Call(ctx)
@@ -870,7 +870,7 @@ func Test2017(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "2017"))
 		require.NoError(t, err)
 		_, err = mod.ExportedFunction("").Call(ctx)
@@ -883,7 +883,7 @@ func Test2031(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "2031"))
 		require.NoError(t, err)
 		res, err := mod.ExportedFunction("").Call(ctx, 0)
@@ -896,7 +896,7 @@ func Test2034(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "2034"))
 		require.NoError(t, err)
 		res, err := mod.ExportedFunction("").Call(ctx, make([]uint64, 20)...)
@@ -909,7 +909,7 @@ func Test2037(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "2037"))
 		require.NoError(t, err)
 		res, err := mod.ExportedFunction("").Call(ctx)
@@ -922,7 +922,7 @@ func Test2040(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "2040"))
 		require.NoError(t, err)
 		_, err = mod.ExportedFunction("").Call(ctx, 0)
@@ -934,7 +934,7 @@ func Test2057(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "2057"))
 		require.NoError(t, err)
 		res, err := mod.ExportedFunction("").Call(ctx, 0)
@@ -947,7 +947,7 @@ func Test2058(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "2058"))
 		require.NoError(t, err)
 		_, err = mod.ExportedFunction("").Call(ctx, 0, 0, 0)
@@ -963,7 +963,7 @@ func Test2060(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		mod, err := r.Instantiate(ctx, getWasmBinary(t, "2060"))
 		require.NoError(t, err)
 		_, err = mod.ExportedFunction("").Call(ctx, 0)
@@ -979,7 +979,7 @@ func Test2060(t *testing.T) {
 }
 
 func Test2070(t *testing.T) {
-	run(t, func(t *testing.T, r wazero.Runtime) {
+	run(t, func(t *testing.T, r wazy.Runtime) {
 		_, err := r.Instantiate(ctx, getWasmBinary(t, "2070"))
 		require.NoError(t, err)
 	})
@@ -1017,7 +1017,7 @@ func Test2097(t *testing.T) {
 	bin, err := hex.DecodeString("0061736d010000000107016000037f7f7f02010003030200000a49022f0010010004001001027d00024002400240024002400240440000000000000000000b0b0b0b0b0b000b0005000b000b1703017c017c017e00000000000000000000000b43420b0b")
 	require.NoError(t, err)
 
-	r := wazero.NewRuntime(context.Background())
+	r := wazy.NewRuntime(context.Background())
 	_, err = r.Instantiate(ctx, bin)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unexpected end of function")
@@ -1030,7 +1030,7 @@ func Test2112(t *testing.T) {
 		return
 	}
 
-	r := wazero.NewRuntimeWithConfig(context.Background(), wazero.NewRuntimeConfigCompiler())
+	r := wazy.NewRuntimeWithConfig(context.Background(), wazy.NewRuntimeConfigCompiler())
 	_, err = r.Instantiate(ctx, bin)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid function[0]: unknown misc opcode 0x30")

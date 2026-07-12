@@ -4,8 +4,8 @@ import (
 	"encoding/binary"
 	"unsafe"
 
-	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 func buildHostModuleOpaque(m *wasm.Module, listeners []experimental.FunctionListener) moduleContextOpaque {

@@ -8,10 +8,10 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
-	"github.com/tetratelabs/wazero/internal/platform"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/imports/wasi_snapshot_preview1"
+	"github.com/samyfodil/wazy/internal/platform"
 )
 
 type arbitrary struct{}
@@ -26,13 +26,13 @@ var caseWasm []byte
 
 func BenchmarkInvocation(b *testing.B) {
 	b.Run("interpreter", func(b *testing.B) {
-		m := instantiateHostFunctionModuleWithEngine(b, wazero.NewRuntimeConfigInterpreter())
+		m := instantiateHostFunctionModuleWithEngine(b, wazy.NewRuntimeConfigInterpreter())
 		defer m.Close(testCtx)
 		runAllInvocationBenches(b, m)
 	})
 	if runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64" {
 		b.Run("compiler", func(b *testing.B) {
-			m := instantiateHostFunctionModuleWithEngine(b, wazero.NewRuntimeConfigCompiler())
+			m := instantiateHostFunctionModuleWithEngine(b, wazy.NewRuntimeConfigCompiler())
 			defer m.Close(testCtx)
 			runAllInvocationBenches(b, m)
 		})
@@ -41,23 +41,23 @@ func BenchmarkInvocation(b *testing.B) {
 
 func BenchmarkInitialization(b *testing.B) {
 	b.Run("interpreter", func(b *testing.B) {
-		r := createRuntime(b, wazero.NewRuntimeConfigInterpreter())
+		r := createRuntime(b, wazy.NewRuntimeConfigInterpreter())
 		runInitializationBench(b, r)
 	})
 
 	b.Run("interpreter-multiple", func(b *testing.B) {
-		r := createRuntime(b, wazero.NewRuntimeConfigInterpreter())
+		r := createRuntime(b, wazy.NewRuntimeConfigInterpreter())
 		runInitializationConcurrentBench(b, r)
 	})
 
 	if platform.CompilerSupported() {
 		b.Run("compiler", func(b *testing.B) {
-			r := createRuntime(b, wazero.NewRuntimeConfigCompiler())
+			r := createRuntime(b, wazy.NewRuntimeConfigCompiler())
 			runInitializationBench(b, r)
 		})
 
 		b.Run("compiler-multiple", func(b *testing.B) {
-			r := createRuntime(b, wazero.NewRuntimeConfigCompiler())
+			r := createRuntime(b, wazy.NewRuntimeConfigCompiler())
 			runInitializationConcurrentBench(b, r)
 		})
 	}
@@ -71,32 +71,32 @@ func BenchmarkCompilation(b *testing.B) {
 	// Note: recreate runtime each time in the loop to ensure that
 	// recompilation happens if the extern cache is not used.
 	b.Run("with extern cache", func(b *testing.B) {
-		cache, err := wazero.NewCompilationCacheWithDir(b.TempDir())
+		cache, err := wazy.NewCompilationCacheWithDir(b.TempDir())
 		if err != nil {
 			b.Fatal(err)
 		}
 		for i := 0; i < b.N; i++ {
-			r := wazero.NewRuntimeWithConfig(context.Background(), wazero.NewRuntimeConfigCompiler().WithCompilationCache(cache))
+			r := wazy.NewRuntimeWithConfig(context.Background(), wazy.NewRuntimeConfigCompiler().WithCompilationCache(cache))
 			runCompilation(b, r)
 		}
 	})
 	b.Run("without extern cache", func(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			r := wazero.NewRuntimeWithConfig(context.Background(), wazero.NewRuntimeConfigCompiler())
+			r := wazy.NewRuntimeWithConfig(context.Background(), wazy.NewRuntimeConfigCompiler())
 			runCompilation(b, r)
 		}
 	})
 	b.Run("interpreter", func(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			r := wazero.NewRuntimeWithConfig(context.Background(), wazero.NewRuntimeConfigInterpreter())
+			r := wazy.NewRuntimeWithConfig(context.Background(), wazy.NewRuntimeConfigInterpreter())
 			runCompilation(b, r)
 		}
 	})
 }
 
-func runCompilation(b *testing.B, r wazero.Runtime) wazero.CompiledModule {
+func runCompilation(b *testing.B, r wazy.Runtime) wazy.CompiledModule {
 	compiled, err := r.CompileModule(testCtx, caseWasm)
 	if err != nil {
 		b.Fatal(err)
@@ -104,12 +104,12 @@ func runCompilation(b *testing.B, r wazero.Runtime) wazero.CompiledModule {
 	return compiled
 }
 
-func runInitializationBench(b *testing.B, r wazero.Runtime) {
+func runInitializationBench(b *testing.B, r wazy.Runtime) {
 	compiled := runCompilation(b, r)
 	defer compiled.Close(testCtx)
 	// Configure with real sources to avoid performance hit initializing fake ones. These sources are not used
 	// in the benchmark.
-	config := wazero.NewModuleConfig().WithSysNanotime().WithSysWalltime().WithRandSource(rand.Reader).
+	config := wazy.NewModuleConfig().WithSysNanotime().WithSysWalltime().WithRandSource(rand.Reader).
 		// To measure the pure instantiation time without including calling _start.
 		WithStartFunctions()
 	b.ResetTimer()
@@ -122,12 +122,12 @@ func runInitializationBench(b *testing.B, r wazero.Runtime) {
 	}
 }
 
-func runInitializationConcurrentBench(b *testing.B, r wazero.Runtime) {
+func runInitializationConcurrentBench(b *testing.B, r wazy.Runtime) {
 	compiled := runCompilation(b, r)
 	defer compiled.Close(testCtx)
 	// Configure with real sources to avoid performance hit initializing fake ones. These sources are not used
 	// in the benchmark.
-	config := wazero.NewModuleConfig().
+	config := wazy.NewModuleConfig().
 		WithSysNanotime().
 		WithSysWalltime().
 		WithRandSource(rand.Reader).
@@ -234,7 +234,7 @@ func runRandomMatMul(b *testing.B, m api.Module) {
 	}
 }
 
-func instantiateHostFunctionModuleWithEngine(b *testing.B, config wazero.RuntimeConfig) api.Module {
+func instantiateHostFunctionModuleWithEngine(b *testing.B, config wazy.RuntimeConfig) api.Module {
 	r := createRuntime(b, config)
 
 	// Instantiate runs the "_start" function which is what TinyGo compiles "main" to.
@@ -245,7 +245,7 @@ func instantiateHostFunctionModuleWithEngine(b *testing.B, config wazero.Runtime
 	return m
 }
 
-func createRuntime(b *testing.B, config wazero.RuntimeConfig) wazero.Runtime {
+func createRuntime(b *testing.B, config wazy.RuntimeConfig) wazy.Runtime {
 	getRandomString := func(ctx context.Context, m api.Module, retBufPtr uint32, retBufSize uint32) {
 		results, err := m.ExportedFunction("allocate_buffer").Call(ctx, 10)
 		if err != nil {
@@ -260,10 +260,10 @@ func createRuntime(b *testing.B, config wazero.RuntimeConfig) wazero.Runtime {
 		m.Memory().Write(offset, b)
 	}
 
-	r := wazero.NewRuntimeWithConfig(testCtx, config)
+	r := wazy.NewRuntimeWithConfig(testCtx, config)
 
 	hostBuilder := r.NewHostModuleBuilder("env")
-	wazero.HostProc2(hostBuilder.NewFunctionBuilder(), getRandomString).Export("get_random_string")
+	wazy.HostProc2(hostBuilder.NewFunctionBuilder(), getRandomString).Export("get_random_string")
 	_, err := hostBuilder.Instantiate(testCtx)
 	if err != nil {
 		b.Fatal(err)

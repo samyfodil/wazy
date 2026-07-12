@@ -7,12 +7,12 @@ import (
 	"math"
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/platform"
-	"github.com/tetratelabs/wazero/internal/testing/binaryencoding"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/platform"
+	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 const (
@@ -20,7 +20,7 @@ const (
 	// Go-implemented host function registered via WithGoModuleFunction.
 	callGoHostName = "call_go_host"
 	// callGoTypedHostName is the name of exported function which calls the
-	// Go-implemented host function registered via wazero.HostFunc1.
+	// Go-implemented host function registered via wazy.HostFunc1.
 	callGoTypedHostName = "call_go_typed_host"
 )
 
@@ -129,7 +129,7 @@ func getCallEngine(m *wasm.ModuleInstance, name string) (ce api.Function) {
 
 func setupHostCallBench(requireNoError func(error)) *wasm.ModuleInstance {
 	ctx := context.Background()
-	r := wazero.NewRuntime(ctx)
+	r := wazy.NewRuntime(ctx)
 
 	const i32, f32 = api.ValueTypeI32, api.ValueTypeF32
 	hostBuilder := r.NewHostModuleBuilder("host").
@@ -140,7 +140,7 @@ func setupHostCallBench(requireNoError func(error)) *wasm.ModuleInstance {
 		}
 		stack[0] = uint64(ret)
 	}), []api.ValueType{i32}, []api.ValueType{f32}).Export("go")
-	wazero.HostFunc1(hostBuilder.NewFunctionBuilder(), func(ctx context.Context, m api.Module, pos uint32) float32 {
+	wazy.HostFunc1(hostBuilder.NewFunctionBuilder(), func(ctx context.Context, m api.Module, pos uint32) float32 {
 		ret, ok := m.Memory().ReadUint32Le(pos)
 		if !ok {
 			panic("couldn't read memory")

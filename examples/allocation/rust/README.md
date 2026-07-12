@@ -4,8 +4,8 @@ This example shows how to pass strings in and out of a Wasm function defined
 in Rust, built with `cargo build --release --target wasm32-unknown-unknown`
 
 ```bash
-$ go run greet.go wazero
-Hello, wazero!
+$ go run greet.go wazy
+Hello, wazy!
 ```
 
 Under the covers, [lib.rs](testdata/src/lib.rs) does a few things of interest:

@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/wazevoapi"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/wazevoapi"
 )
 
 // Builder is used to builds SSA consisting of Basic Blocks per function.

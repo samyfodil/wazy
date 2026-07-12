@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
 // TestLogScopes tests the bitset works as expected

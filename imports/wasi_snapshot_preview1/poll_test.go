@@ -7,18 +7,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	experimentalsys "github.com/tetratelabs/wazero/experimental/sys"
-	"github.com/tetratelabs/wazero/internal/sys"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasip1"
-	"github.com/tetratelabs/wazero/internal/wasm"
-	sysapi "github.com/tetratelabs/wazero/sys"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
+	"github.com/samyfodil/wazy/internal/sys"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasip1"
+	"github.com/samyfodil/wazy/internal/wasm"
+	sysapi "github.com/samyfodil/wazy/sys"
 )
 
 func Test_pollOneoff(t *testing.T) {
-	mod, r, log := requireProxyModule(t, wazero.NewModuleConfig())
+	mod, r, log := requireProxyModule(t, wazy.NewModuleConfig())
 	defer r.Close(testCtx)
 
 	mem := []byte{
@@ -64,7 +64,7 @@ func Test_pollOneoff(t *testing.T) {
 }
 
 func Test_pollOneoff_Errors(t *testing.T) {
-	mod, r, log := requireProxyModule(t, wazero.NewModuleConfig())
+	mod, r, log := requireProxyModule(t, wazy.NewModuleConfig())
 	defer r.Close(testCtx)
 
 	tests := []struct {
@@ -155,7 +155,7 @@ func Test_pollOneoff_Stdin(t *testing.T) {
 	require.NoError(t, err)
 	defer w.Close()
 	defer r.Close()
-	_, _ = w.Write([]byte("wazero"))
+	_, _ = w.Write([]byte("wazy"))
 
 	tests := []struct {
 		name                                   string
@@ -412,7 +412,7 @@ func Test_pollOneoff_Stdin(t *testing.T) {
 	for _, tt := range tests {
 		tc := tt
 		t.Run(tc.name, func(t *testing.T) {
-			mod, r, log := requireProxyModule(t, wazero.NewModuleConfig())
+			mod, r, log := requireProxyModule(t, wazy.NewModuleConfig())
 			defer r.Close(testCtx)
 			defer log.Reset()
 
@@ -452,7 +452,7 @@ func setStdin(t *testing.T, mod api.Module, stdin experimentalsys.File) {
 func Test_pollOneoff_Zero(t *testing.T) {
 	poller := &pollStdinFile{StdinFile: sys.StdinFile{Reader: strings.NewReader("test")}, ready: true}
 
-	mod, r, log := requireProxyModule(t, wazero.NewModuleConfig())
+	mod, r, log := requireProxyModule(t, wazy.NewModuleConfig())
 	defer r.Close(testCtx)
 	defer log.Reset()
 
@@ -545,8 +545,8 @@ func Test_pollOneoff_NonStdinPollable(t *testing.T) {
 	// Create a file so we can open it and get an fd.
 	require.NoError(t, os.WriteFile(tmpDir+"/test.txt", []byte("data"), 0o600))
 
-	cfg := wazero.NewModuleConfig().WithFSConfig(
-		wazero.NewFSConfig().WithDirMount(tmpDir, "/"),
+	cfg := wazy.NewModuleConfig().WithFSConfig(
+		wazy.NewFSConfig().WithDirMount(tmpDir, "/"),
 	)
 	mod, r, log := requireProxyModule(t, cfg)
 	defer r.Close(testCtx)
@@ -590,8 +590,8 @@ func Test_pollOneoff_NonStdinPollUnsupported(t *testing.T) {
 	tmpDir := t.TempDir()
 	require.NoError(t, os.WriteFile(tmpDir+"/test.txt", []byte("data"), 0o600))
 
-	cfg := wazero.NewModuleConfig().WithFSConfig(
-		wazero.NewFSConfig().WithDirMount(tmpDir, "/"),
+	cfg := wazy.NewModuleConfig().WithFSConfig(
+		wazy.NewFSConfig().WithDirMount(tmpDir, "/"),
 	)
 
 	tests := []struct {
@@ -653,8 +653,8 @@ func Test_pollOneoff_NonStdinPollableNotReady(t *testing.T) {
 	tmpDir := t.TempDir()
 	require.NoError(t, os.WriteFile(tmpDir+"/test.txt", []byte("data"), 0o600))
 
-	cfg := wazero.NewModuleConfig().WithFSConfig(
-		wazero.NewFSConfig().WithDirMount(tmpDir, "/"),
+	cfg := wazy.NewModuleConfig().WithFSConfig(
+		wazy.NewFSConfig().WithDirMount(tmpDir, "/"),
 	)
 	mod, r, log := requireProxyModule(t, cfg)
 	defer r.Close(testCtx)
@@ -703,8 +703,8 @@ func Test_pollOneoff_NonStdinPollableTimeoutBudget(t *testing.T) {
 	require.NoError(t, os.WriteFile(tmpDir+"/one.txt", []byte("one"), 0o600))
 	require.NoError(t, os.WriteFile(tmpDir+"/two.txt", []byte("two"), 0o600))
 
-	cfg := wazero.NewModuleConfig().WithFSConfig(
-		wazero.NewFSConfig().WithDirMount(tmpDir, "/"),
+	cfg := wazy.NewModuleConfig().WithFSConfig(
+		wazy.NewFSConfig().WithDirMount(tmpDir, "/"),
 	)
 	mod, r, log := requireProxyModule(t, cfg)
 	defer r.Close(testCtx)

@@ -150,7 +150,7 @@ func TestRequire(t *testing.T) {
 		{
 			name: "Equal passes on equal: string",
 			require: func(t TestingT) {
-				Equal(t, "wazero", "wazero")
+				Equal(t, "wazy", "wazy")
 			},
 		},
 		{
@@ -168,9 +168,9 @@ func TestRequire(t *testing.T) {
 		{
 			name: "Equal fails on nil: string",
 			require: func(t TestingT) {
-				Equal(t, "wazero", nil)
+				Equal(t, "wazy", nil)
 			},
-			expectedLog: `expected "wazero", but was nil`,
+			expectedLog: `expected "wazy", but was nil`,
 		},
 		{
 			name: "Equal fails on nil: []byte",
@@ -190,30 +190,30 @@ func TestRequire(t *testing.T) {
 		{
 			name: "Equal fails on not same type: string",
 			require: func(t TestingT) {
-				Equal(t, "wazero", uint32(1))
+				Equal(t, "wazy", uint32(1))
 			},
-			expectedLog: `expected "wazero", but was uint32(1)`,
+			expectedLog: `expected "wazy", but was uint32(1)`,
 		},
 		{
 			name: "Equal fails on not same type: []byte",
 			require: func(t TestingT) {
-				Equal(t, []byte{1, 2, 3, 4}, "wazero")
+				Equal(t, []byte{1, 2, 3, 4}, "wazy")
 			},
-			expectedLog: `expected []uint8([1 2 3 4]), but was string(wazero)`,
+			expectedLog: `expected []uint8([1 2 3 4]), but was string(wazy)`,
 		},
 		{
 			name: "Equal fails on not same type: struct",
 			require: func(t TestingT) {
-				Equal(t, &testStruct{name: "takeshi"}, "wazero")
+				Equal(t, &testStruct{name: "takeshi"}, "wazy")
 			},
-			expectedLog: `expected *require.testStruct(&{takeshi}), but was string(wazero)`,
+			expectedLog: `expected *require.testStruct(&{takeshi}), but was string(wazy)`,
 		},
 		{
 			name: "Equal fails on not equal: string",
 			require: func(t TestingT) {
-				Equal(t, "wazero", "walero")
+				Equal(t, "wazy", "walero")
 			},
-			expectedLog: `expected "wazero", but was "walero"`,
+			expectedLog: `expected "wazy", but was "walero"`,
 		},
 		{
 			name: "Equal fails on not equal: uint64", // ensure we don't use multi-line output!
@@ -414,7 +414,7 @@ was:
 		{
 			name: "Equal passes on equal: string",
 			require: func(t TestingT) {
-				Equal(t, "wazero", "wazero")
+				Equal(t, "wazy", "wazy")
 			},
 		},
 		{
@@ -432,9 +432,9 @@ was:
 		{
 			name: "Equal fails on nil: string",
 			require: func(t TestingT) {
-				Equal(t, "wazero", nil)
+				Equal(t, "wazy", nil)
 			},
-			expectedLog: `expected "wazero", but was nil`,
+			expectedLog: `expected "wazy", but was nil`,
 		},
 		{
 			name: "Equal fails on nil: []byte",
@@ -466,9 +466,9 @@ was:
 		{
 			name: "NotEqual fails on equal: string",
 			require: func(t TestingT) {
-				NotEqual(t, "wazero", "wazero")
+				NotEqual(t, "wazy", "wazy")
 			},
-			expectedLog: `expected to not equal "wazero"`,
+			expectedLog: `expected to not equal "wazy"`,
 		},
 		{
 			name: "NotEqual fails on equal: []byte",

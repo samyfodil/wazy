@@ -10,9 +10,9 @@ import (
 	"testing"
 	gofstest "testing/fstest"
 
-	experimentalsys "github.com/tetratelabs/wazero/experimental/sys"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/sys"
+	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/sys"
 )
 
 //go:embed file_test.go
@@ -20,9 +20,9 @@ var embedFS embed.FS
 
 var (
 	//go:embed testdata
-	testdata   embed.FS
-	wazeroFile = "wazero.txt"
-	emptyFile  = "empty.txt"
+	testdata  embed.FS
+	wazyFile  = "wazero.txt"
+	emptyFile = "empty.txt"
 )
 
 func TestStdioFileSetNonblock(t *testing.T) {
@@ -274,7 +274,7 @@ func TestFileIsDir(t *testing.T) {
 
 		t.Run(tc.name, func(t *testing.T) {
 			t.Run("file", func(t *testing.T) {
-				f, errno := OpenFSFile(tc.fs, wazeroFile, experimentalsys.O_RDONLY, 0)
+				f, errno := OpenFSFile(tc.fs, wazyFile, experimentalsys.O_RDONLY, 0)
 				require.EqualErrno(t, 0, errno)
 				defer f.Close()
 
@@ -324,7 +324,7 @@ func TestFileReadAndPread(t *testing.T) {
 		tc := tc
 
 		t.Run(tc.name, func(t *testing.T) {
-			f, errno := OpenFSFile(tc.fs, wazeroFile, experimentalsys.O_RDONLY, 0)
+			f, errno := OpenFSFile(tc.fs, wazyFile, experimentalsys.O_RDONLY, 0)
 			require.EqualErrno(t, 0, errno)
 			defer f.Close()
 
@@ -372,8 +372,8 @@ func TestFilePoll_POLLIN(t *testing.T) {
 	require.False(t, ready)
 
 	// Write to the pipe to make the data available
-	expected := []byte("wazero")
-	_, err = w.Write([]byte("wazero"))
+	expected := []byte("wazy")
+	_, err = w.Write([]byte("wazy"))
 	require.NoError(t, err)
 
 	// We should now be able to poll ready
@@ -436,7 +436,7 @@ func (f *nonblockFsFile) SetNonblock(enable bool) experimentalsys.Errno {
 func TestFsFilePoll_Pollable(t *testing.T) {
 	timeout := int32(0) // return immediately
 
-	memFS := gofstest.MapFS{"test.txt": {Data: []byte("wazero")}}
+	memFS := gofstest.MapFS{"test.txt": {Data: []byte("wazy")}}
 	memFile, err := memFS.Open("test.txt")
 	require.NoError(t, err)
 	defer memFile.Close()
@@ -463,7 +463,7 @@ func TestFsFilePoll_Pollable(t *testing.T) {
 }
 
 func TestFsFileNonblock(t *testing.T) {
-	memFS := gofstest.MapFS{"test.txt": {Data: []byte("wazero")}}
+	memFS := gofstest.MapFS{"test.txt": {Data: []byte("wazy")}}
 	memFile, err := memFS.Open("test.txt")
 	require.NoError(t, err)
 	defer memFile.Close()
@@ -480,7 +480,7 @@ func TestFsFileNonblock(t *testing.T) {
 }
 
 func TestFsFileNonblock_NotSupported(t *testing.T) {
-	memFS := gofstest.MapFS{"test.txt": {Data: []byte("wazero")}}
+	memFS := gofstest.MapFS{"test.txt": {Data: []byte("wazy")}}
 	memFile, err := memFS.Open("test.txt")
 	require.NoError(t, err)
 	defer memFile.Close()
@@ -497,7 +497,7 @@ func TestFsFileNonblock_NotSupported(t *testing.T) {
 func TestFsFilePoll_NonPollable(t *testing.T) {
 	timeout := int32(0) // return immediately
 
-	memFS := gofstest.MapFS{"test.txt": {Data: []byte("wazero")}}
+	memFS := gofstest.MapFS{"test.txt": {Data: []byte("wazy")}}
 	memFile, err := memFS.Open("test.txt")
 	require.NoError(t, err)
 	defer memFile.Close()
@@ -648,7 +648,7 @@ func TestFileSeek(t *testing.T) {
 		tc := tc
 
 		t.Run(tc.name, func(t *testing.T) {
-			f, errno := tc.openFile(wazeroFile)
+			f, errno := tc.openFile(wazyFile)
 			require.EqualErrno(t, 0, errno)
 			defer f.Close()
 
@@ -781,7 +781,7 @@ func TestFileSeek_Unsupported(t *testing.T) {
 func TestFileWriteAndPwrite(t *testing.T) {
 	// sys.FS doesn't support writes, and there is no other built-in
 	// implementation except os.File.
-	path := path.Join(t.TempDir(), wazeroFile)
+	path := path.Join(t.TempDir(), wazyFile)
 	f := requireOpenFile(t, path, experimentalsys.O_RDWR|experimentalsys.O_CREAT, 0o600)
 	defer f.Close()
 
@@ -876,7 +876,7 @@ func TestFileWrite_Unsupported(t *testing.T) {
 	require.NoError(t, err)
 
 	// Use sys.O_RDWR so that it fails due to type not flags
-	f, errno := OpenFSFile(&maskFS{embedFS}, wazeroFile, experimentalsys.O_RDWR, 0)
+	f, errno := OpenFSFile(&maskFS{embedFS}, wazyFile, experimentalsys.O_RDWR, 0)
 	require.EqualErrno(t, 0, errno)
 	defer f.Close()
 
@@ -892,7 +892,7 @@ func TestFileWrite_Unsupported(t *testing.T) {
 		}},
 	}
 
-	buf := []byte("wazero")
+	buf := []byte("wazy")
 
 	for _, tc := range tests {
 		tc := tc
@@ -915,7 +915,7 @@ func TestFileWrite_Errors(t *testing.T) {
 	flag := experimentalsys.O_RDONLY
 	f := requireOpenFile(t, path, flag, 0o600)
 	defer f.Close()
-	buf := []byte("wazero")
+	buf := []byte("wazy")
 
 	tests := []struct {
 		name string
@@ -1227,7 +1227,7 @@ func dirEmbedMapFS(t *testing.T, tmpDir string) (fs.FS, fs.FS, fs.FS) {
 	embedFS, err := fs.Sub(testdata, "testdata")
 	require.NoError(t, err)
 
-	f, err := embedFS.Open(wazeroFile)
+	f, err := embedFS.Open(wazyFile)
 	require.NoError(t, err)
 	defer f.Close()
 
@@ -1235,14 +1235,14 @@ func dirEmbedMapFS(t *testing.T, tmpDir string) (fs.FS, fs.FS, fs.FS) {
 	require.NoError(t, err)
 
 	mapFS := gofstest.MapFS{
-		emptyFile:  &gofstest.MapFile{},
-		wazeroFile: &gofstest.MapFile{Data: bytes},
+		emptyFile: &gofstest.MapFile{},
+		wazyFile:  &gofstest.MapFile{Data: bytes},
 	}
 
 	// Write a file as can't open "testdata" in scratch tests because they
 	// can't read the original filesystem.
 	require.NoError(t, os.WriteFile(path.Join(tmpDir, emptyFile), nil, 0o600))
-	require.NoError(t, os.WriteFile(path.Join(tmpDir, wazeroFile), bytes, 0o600))
+	require.NoError(t, os.WriteFile(path.Join(tmpDir, wazyFile), bytes, 0o600))
 	dirFS := os.DirFS(tmpDir)
 	return dirFS, embedFS, mapFS
 }

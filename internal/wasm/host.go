@@ -4,8 +4,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/wasmdebug"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/wasmdebug"
 )
 
 type HostFuncExporter interface {
@@ -94,8 +94,8 @@ func addFuncs(
 		}
 		// Host functions are always registered with explicit ParamTypes and
 		// ResultTypes and an api.GoModuleFunction or api.GoFunction
-		// implementation (see the wazero.HostFunctionBuilder methods and the
-		// wazero.HostFuncN/HostProcN helpers). There is nothing to resolve here.
+		// implementation (see the wazy.HostFunctionBuilder methods and the
+		// wazy.HostFuncN/HostProcN helpers). There is nothing to resolve here.
 		switch hf.Code.GoFunc.(type) {
 		case api.GoModuleFunction, api.GoFunction:
 		default:

@@ -5,7 +5,7 @@ package sysfs
 import (
 	"os"
 
-	"github.com/tetratelabs/wazero/experimental/sys"
+	"github.com/samyfodil/wazy/experimental/sys"
 )
 
 func unlink(name string) sys.Errno {

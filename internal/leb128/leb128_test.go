@@ -6,7 +6,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
 func TestEncode_DecodeInt32(t *testing.T) {

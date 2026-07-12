@@ -1,11 +1,11 @@
-package wazero
+package wazy
 
 import (
 	"io/fs"
 
-	experimentalsys "github.com/tetratelabs/wazero/experimental/sys"
-	"github.com/tetratelabs/wazero/internal/sys"
-	"github.com/tetratelabs/wazero/internal/sysfs"
+	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
+	"github.com/samyfodil/wazy/internal/sys"
+	"github.com/samyfodil/wazy/internal/sysfs"
 )
 
 // FSConfig configures filesystem paths the embedding host allows the wasm
@@ -49,14 +49,14 @@ import (
 //
 // # Windows
 //
-// While wazero supports Windows as a platform, all known compilers use POSIX
+// While wazy supports Windows as a platform, all known compilers use POSIX
 // conventions at runtime. For example, even when running on Windows, paths
 // used by wasm are separated by forward slash (/), not backslash (\).
 //
 // # Notes
 //
 //   - This is an interface for decoupling, not third-party implementations.
-//     All implementations are in wazero.
+//     All implementations are in wazy.
 //   - FSConfig is immutable. Each WithXXX function returns a new instance
 //     including the corresponding change.
 //   - RATIONALE.md includes design background and relationship to WebAssembly

@@ -4,9 +4,9 @@ The examples in this directory deal with memory allocation concerns in
 WebAssembly, e.g. How to pass strings in and out of WebAssembly functions.
 
 ```bash
-$ go run greet.go wazero
-wasm >> Hello, wazero!
-go >> Hello, wazero!
+$ go run greet.go wazy
+wasm >> Hello, wazy!
+go >> Hello, wazy!
 ```
 
 While the below examples use strings, they are written in a way that would work

@@ -8,7 +8,7 @@ on:
     - cron: "23 3 * * *"
   workflow_dispatch:  # Allows manual refresh
 
-# This builds images and pushes them to ghcr.io/tetratelabs/wazero/internal-$tag
+# This builds images and pushes them to ghcr.io/samyfodil/wazy/internal-$tag
 # Using these avoid docker.io rate-limits particularly on pull requests.
 jobs:
   copy-images:

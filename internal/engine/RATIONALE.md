@@ -1,8 +1,8 @@
-# Notable rationale of wazero (Engine)
+# Notable rationale of wazy (Engine)
 
 ## Tail Call Implementation
 
-The tail call implementation in wazero takes some liberties at interpreting the WebAssembly spec, with the goal of correctness, if not strict adherence to the spec. In principle
+The tail call implementation in wazy takes some liberties at interpreting the WebAssembly spec, with the goal of correctness, if not strict adherence to the spec. In principle
 
 - in the interpreter, tail calls are implemented by simply resetting the program counter to the start of the function being called
 - in the compiler, tail calls are implemented by emitting a jump instruction to the start of the function.

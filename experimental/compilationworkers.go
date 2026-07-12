@@ -3,7 +3,7 @@ package experimental
 import (
 	"context"
 
-	"github.com/tetratelabs/wazero/internal/expctxkeys"
+	"github.com/samyfodil/wazy/internal/expctxkeys"
 )
 
 // WithCompilationWorkers sets the desired number of compilation workers.

@@ -3,8 +3,8 @@ package binaryencoding
 import (
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 func TestEncodeGlobal(t *testing.T) {

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
 //go:embed testdata/cli.wasm
@@ -38,11 +38,11 @@ func TestRun(t *testing.T) {
 	// otherwise so running unit tests normally does not require special build steps.
 	var cmdExe string
 	var cmdArgs []string
-	if cmdPath := os.Getenv("WAZEROCLI"); cmdPath != "" {
+	if cmdPath := os.Getenv("WAZYCLI"); cmdPath != "" {
 		cmdExe = cmdPath
 	} else {
 		cmdExe = filepath.Join(runtime.GOROOT(), "bin", "go")
-		cmdArgs = []string{"run", "../../cmd/wazero"}
+		cmdArgs = []string{"run", "../../cmd/wazy"}
 	}
 	cmdArgs = append(cmdArgs, "run", wasmPath)
 

@@ -6,14 +6,14 @@ import (
 	_ "embed"
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/experimental/logging"
-	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
-	internal "github.com/tetratelabs/wazero/internal/emscripten"
-	"github.com/tetratelabs/wazero/internal/testing/binaryencoding"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/experimental/logging"
+	"github.com/samyfodil/wazy/imports/wasi_snapshot_preview1"
+	internal "github.com/samyfodil/wazy/internal/emscripten"
+	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 const (
@@ -47,7 +47,7 @@ func TestGrow(t *testing.T) {
 	ctx := experimental.WithFunctionListenerFactory(testCtx,
 		logging.NewHostLoggingListenerFactory(&log, logging.LogScopeMemory))
 
-	r := wazero.NewRuntime(ctx)
+	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)
 
 	wasi_snapshot_preview1.MustInstantiate(ctx, r)
@@ -323,7 +323,7 @@ func TestNewFunctionExporterForModule(t *testing.T) {
 		tc := tt
 
 		t.Run(tc.name, func(t *testing.T) {
-			r := wazero.NewRuntime(testCtx)
+			r := wazy.NewRuntime(testCtx)
 			defer r.Close(testCtx)
 
 			guest, err := r.CompileModule(testCtx, binaryencoding.EncodeModule(tc.input))
@@ -347,7 +347,7 @@ func TestInstantiateForModule(t *testing.T) {
 	// Set context to one that has an experimental listener
 	ctx := experimental.WithFunctionListenerFactory(testCtx, logging.NewLoggingListenerFactory(&log))
 
-	r := wazero.NewRuntime(ctx)
+	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)
 
 	compiled, err := r.CompileModule(ctx, invokeWasm)
@@ -356,7 +356,7 @@ func TestInstantiateForModule(t *testing.T) {
 	_, err = InstantiateForModule(ctx, r, compiled)
 	require.NoError(t, err)
 
-	mod, err := r.InstantiateModule(ctx, compiled, wazero.NewModuleConfig())
+	mod, err := r.InstantiateModule(ctx, compiled, wazy.NewModuleConfig())
 	require.NoError(t, err)
 
 	tests := []struct {

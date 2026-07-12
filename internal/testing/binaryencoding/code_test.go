@@ -3,8 +3,8 @@ package binaryencoding
 import (
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 var addLocalZeroLocalTwo = []byte{wasm.OpcodeLocalGet, 0, wasm.OpcodeLocalGet, 2, wasm.OpcodeI32Add, wasm.OpcodeEnd}

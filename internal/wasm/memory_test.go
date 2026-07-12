@@ -8,9 +8,9 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
 func TestMemoryPageConsts(t *testing.T) {

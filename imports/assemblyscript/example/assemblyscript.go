@@ -8,8 +8,8 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/imports/assemblyscript"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/imports/assemblyscript"
 )
 
 // asWasm compiled using `npm install && npm run build`
@@ -26,7 +26,7 @@ func main() {
 	ctx := context.Background()
 
 	// Create a new WebAssembly Runtime.
-	r := wazero.NewRuntime(ctx)
+	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx) // This closes everything this Runtime created.
 
 	// Instantiate a module implementing functions used by AssemblyScript.
@@ -41,7 +41,7 @@ func main() {
 	// we'll use in this example.
 	mod, err := r.InstantiateWithConfig(ctx, asWasm,
 		// Override the default module config that discards stdout and stderr.
-		wazero.NewModuleConfig().WithStdout(os.Stdout).WithStderr(os.Stderr))
+		wazy.NewModuleConfig().WithStdout(os.Stdout).WithStderr(os.Stderr))
 	if err != nil {
 		log.Panicln(err)
 	}

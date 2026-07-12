@@ -6,11 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
-	"github.com/tetratelabs/wazero/internal/platform"
-	"github.com/tetratelabs/wazero/internal/testing/dwarftestdata"
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/imports/wasi_snapshot_preview1"
+	"github.com/samyfodil/wazy/internal/platform"
+	"github.com/samyfodil/wazy/internal/testing/dwarftestdata"
+	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
 var dwarfTests = map[string]testCase{
@@ -24,14 +24,14 @@ func TestEngineCompiler_DWARF(t *testing.T) {
 	if !platform.CompilerSupported() {
 		t.Skip()
 	}
-	runAllTests(t, dwarfTests, wazero.NewRuntimeConfigCompiler(), false)
+	runAllTests(t, dwarfTests, wazy.NewRuntimeConfigCompiler(), false)
 }
 
 func TestEngineInterpreter_DWARF(t *testing.T) {
-	runAllTests(t, dwarfTests, wazero.NewRuntimeConfigInterpreter(), false)
+	runAllTests(t, dwarfTests, wazy.NewRuntimeConfigInterpreter(), false)
 }
 
-func testTinyGoDWARF(t *testing.T, r wazero.Runtime) {
+func testTinyGoDWARF(t *testing.T, r wazy.Runtime) {
 	runDWARFTest(t, r, dwarftestdata.TinyGoWasm, `module[] function[_start] failed: wasm error: unreachable
 wasm stack trace:
 	.runtime._panic(i32)
@@ -59,7 +59,7 @@ wasm stack trace:
 		0x1d12: /runtime_wasm_wasi.go:21:5`)
 }
 
-func testZigDWARF(t *testing.T, r wazero.Runtime) {
+func testZigDWARF(t *testing.T, r wazy.Runtime) {
 	runDWARFTest(t, r, dwarftestdata.ZigWasm, `module[main.wasm] function[_start] failed: wasm error: unreachable
 wasm stack trace:
 	main.wasm.builtin.default_panic(i32,i32,i32,i32)
@@ -73,7 +73,7 @@ wasm stack trace:
 		      /start.zig:199:5`)
 }
 
-func testCCDWARF(t *testing.T, r wazero.Runtime) {
+func testCCDWARF(t *testing.T, r wazy.Runtime) {
 	runDWARFTest(t, r, dwarftestdata.ZigCCWasm, `module[] function[_start] failed: wasm error: unreachable
 wasm stack trace:
 	.a()
@@ -84,7 +84,7 @@ wasm stack trace:
 	._start.command_export()`)
 }
 
-func testRustDWARF(t *testing.T, r wazero.Runtime) {
+func testRustDWARF(t *testing.T, r wazy.Runtime) {
 	runDWARFTest(t, r, dwarftestdata.RustWasm, `module[main-144f120e836a09da.wasm] function[_start] failed: wasm error: unreachable
 wasm stack trace:
 	main-144f120e836a09da.wasm.__rust_start_panic(i32,i32) i32
@@ -129,7 +129,7 @@ wasm stack trace:
 		0x37: wasisdk:/crt1-command.c:43:13`)
 }
 
-func runDWARFTest(t *testing.T, r wazero.Runtime, bin []byte, exp string) {
+func runDWARFTest(t *testing.T, r wazy.Runtime, bin []byte, exp string) {
 	if len(bin) == 0 {
 		t.Skip() // Skip if the binary is empty which can happen when xz is not installed on the system
 	}

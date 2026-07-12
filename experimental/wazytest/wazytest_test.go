@@ -1,4 +1,4 @@
-package wazerotest
+package wazytest
 
 import (
 	"bytes"
@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/tetratelabs/wazero/api"
+	"github.com/samyfodil/wazy/api"
 )
 
 func TestNewFunction(t *testing.T) {

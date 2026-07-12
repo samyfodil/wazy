@@ -1,4 +1,4 @@
-package wazerotest
+package wazytest
 
 import (
 	"context"
@@ -11,9 +11,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/internalapi"
-	"github.com/tetratelabs/wazero/sys"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/internalapi"
+	"github.com/samyfodil/wazy/sys"
 )
 
 const (
@@ -23,7 +23,7 @@ const (
 // Module is an implementation of the api.Module interface, it represents a
 // WebAssembly module.
 type Module struct {
-	internalapi.WazeroOnlyType
+	internalapi.WazyOnlyType
 
 	// The module name that will be returned by calling the Name method.
 	ModuleName string
@@ -179,7 +179,7 @@ func (m *Module) initialize() {
 // Global is an implementation of the api.Global interface, it represents a
 // global in a WebAssembly module.
 type Global struct {
-	internalapi.WazeroOnlyType
+	internalapi.WazyOnlyType
 
 	// Type of the global value, used to interpret bits of the Value field.
 	ValueType api.ValueType
@@ -236,7 +236,7 @@ func GlobalF64(value float64, export ...string) *Global {
 // Until accessed through a Module's method, the function definition's
 // ModuleName method returns an empty string and its Index method returns 0.
 type Function struct {
-	internalapi.WazeroOnlyType
+	internalapi.WazyOnlyType
 
 	// GoModuleFunction may be set to a non-nil value to allow calling of the
 	// function via Call or CallWithStack.
@@ -402,7 +402,7 @@ func (f *Function) CallWithStack(ctx context.Context, stack []uint64) error {
 }
 
 type functionDefinition struct {
-	internalapi.WazeroOnlyType
+	internalapi.WazyOnlyType
 	function *Function
 }
 
@@ -459,7 +459,7 @@ func (def functionDefinition) ExportNames() []string {
 // Memory is an implementation of the api.Memory interface, representing the
 // memory of a WebAssembly module.
 type Memory struct {
-	internalapi.WazeroOnlyType
+	internalapi.WazyOnlyType
 
 	// Byte slices holding the memory pages.
 	//
@@ -632,7 +632,7 @@ func (m *Memory) isOutOfRange(offset, length uint32) bool {
 }
 
 type memoryDefinition struct {
-	internalapi.WazeroOnlyType
+	internalapi.WazyOnlyType
 	memory *Memory
 }
 

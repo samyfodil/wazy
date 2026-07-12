@@ -5,10 +5,10 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/leb128"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/leb128"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 func Test_ensureElementKindFuncRef(t *testing.T) {

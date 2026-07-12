@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tetratelabs/wazero/experimental/sys"
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/samyfodil/wazy/experimental/sys"
+	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
 func TestTcpConnFile_Write(t *testing.T) {

@@ -4,12 +4,12 @@ import (
 	_ "embed"
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/internal/platform"
-	"github.com/tetratelabs/wazero/internal/testing/hammer"
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/internal/platform"
+	"github.com/samyfodil/wazy/internal/testing/hammer"
+	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
 // We do not currently have hammer tests for bitwise and/or operations. The tests are designed to have
@@ -48,7 +48,7 @@ var threadTests = map[string]testCase{
 }
 
 func TestThreadsNotEnabled(t *testing.T) {
-	r := wazero.NewRuntime(testCtx)
+	r := wazy.NewRuntime(testCtx)
 	_, err := r.Instantiate(testCtx, mutexWasm)
 	require.EqualError(t, err, "section memory: shared memory requested but threads feature not enabled")
 }
@@ -57,14 +57,14 @@ func TestThreadsCompiler_hammer(t *testing.T) {
 	if !platform.CompilerSupports(api.CoreFeaturesV2 | experimental.CoreFeaturesThreads) {
 		t.Skip()
 	}
-	runAllTests(t, threadTests, wazero.NewRuntimeConfigCompiler().WithCoreFeatures(api.CoreFeaturesV2|experimental.CoreFeaturesThreads), false)
+	runAllTests(t, threadTests, wazy.NewRuntimeConfigCompiler().WithCoreFeatures(api.CoreFeaturesV2|experimental.CoreFeaturesThreads), false)
 }
 
 func TestThreadsInterpreter_hammer(t *testing.T) {
-	runAllTests(t, threadTests, wazero.NewRuntimeConfigInterpreter().WithCoreFeatures(api.CoreFeaturesV2|experimental.CoreFeaturesThreads), false)
+	runAllTests(t, threadTests, wazy.NewRuntimeConfigInterpreter().WithCoreFeatures(api.CoreFeaturesV2|experimental.CoreFeaturesThreads), false)
 }
 
-func incrementGuardedByMutex(t *testing.T, r wazero.Runtime) {
+func incrementGuardedByMutex(t *testing.T, r wazy.Runtime) {
 	P := 8               // max count of goroutines
 	if testing.Short() { // Adjust down if `-test.short`
 		P = 4
@@ -114,7 +114,7 @@ func incrementGuardedByMutex(t *testing.T, r wazero.Runtime) {
 	}
 }
 
-func atomicAdd(t *testing.T, r wazero.Runtime) {
+func atomicAdd(t *testing.T, r wazy.Runtime) {
 	P := 8               // max count of goroutines
 	if testing.Short() { // Adjust down if `-test.short`
 		P = 4
@@ -176,7 +176,7 @@ func atomicAdd(t *testing.T, r wazero.Runtime) {
 	}
 }
 
-func atomicSub(t *testing.T, r wazero.Runtime) {
+func atomicSub(t *testing.T, r wazy.Runtime) {
 	P := 8               // max count of goroutines
 	if testing.Short() { // Adjust down if `-test.short`
 		P = 4
@@ -238,7 +238,7 @@ func atomicSub(t *testing.T, r wazero.Runtime) {
 	}
 }
 
-func atomicXor(t *testing.T, r wazero.Runtime) {
+func atomicXor(t *testing.T, r wazy.Runtime) {
 	P := 8               // max count of goroutines
 	if testing.Short() { // Adjust down if `-test.short`
 		P = 4

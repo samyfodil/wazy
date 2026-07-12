@@ -7,9 +7,9 @@ import (
 	"net"
 	"time"
 
-	experimentalsys "github.com/tetratelabs/wazero/experimental/sys"
-	"github.com/tetratelabs/wazero/internal/platform"
-	"github.com/tetratelabs/wazero/sys"
+	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
+	"github.com/samyfodil/wazy/internal/platform"
+	"github.com/samyfodil/wazy/sys"
 )
 
 // Context holds module-scoped system resources currently only supported by
@@ -31,7 +31,7 @@ type Context struct {
 // Args is like os.Args and defaults to nil.
 //
 // Note: The count will never be more than math.MaxUint32.
-// See wazero.ModuleConfig WithArgs
+// See wazy.ModuleConfig WithArgs
 func (c *Context) Args() [][]byte {
 	return c.args
 }
@@ -39,7 +39,7 @@ func (c *Context) Args() [][]byte {
 // ArgsSize is the size to encode Args as Null-terminated strings.
 //
 // Note: To get the size without null-terminators, subtract the length of Args from this value.
-// See wazero.ModuleConfig WithArgs
+// See wazy.ModuleConfig WithArgs
 // See https://en.wikipedia.org/wiki/Null-terminated_string
 func (c *Context) ArgsSize() uint32 {
 	return c.argsSize
@@ -48,7 +48,7 @@ func (c *Context) ArgsSize() uint32 {
 // Environ are "key=value" entries like os.Environ and default to nil.
 //
 // Note: The count will never be more than math.MaxUint32.
-// See wazero.ModuleConfig WithEnv
+// See wazy.ModuleConfig WithEnv
 func (c *Context) Environ() [][]byte {
 	return c.environ
 }
@@ -56,7 +56,7 @@ func (c *Context) Environ() [][]byte {
 // EnvironSize is the size to encode Environ as Null-terminated strings.
 //
 // Note: To get the size without null-terminators, subtract the length of Environ from this value.
-// See wazero.ModuleConfig WithEnv
+// See wazy.ModuleConfig WithEnv
 // See https://en.wikipedia.org/wiki/Null-terminated_string
 func (c *Context) EnvironSize() uint32 {
 	return c.environSize
@@ -104,7 +104,7 @@ func (c *Context) FS() *FSContext {
 }
 
 // RandSource is a source of random bytes and defaults to a deterministic source.
-// see wazero.ModuleConfig WithRandSource
+// see wazy.ModuleConfig WithRandSource
 func (c *Context) RandSource() io.Reader {
 	return c.randSource
 }

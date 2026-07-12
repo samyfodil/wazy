@@ -1,13 +1,13 @@
 package wasm
 
 import (
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/internalapi"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/internalapi"
 )
 
 // constantGlobal wraps GlobalInstance to implement api.Global.
 type constantGlobal struct {
-	internalapi.WazeroOnlyType
+	internalapi.WazyOnlyType
 	g *GlobalInstance
 }
 
@@ -29,7 +29,7 @@ func (g constantGlobal) String() string {
 
 // mutableGlobal extends constantGlobal to allow updates.
 type mutableGlobal struct {
-	internalapi.WazeroOnlyType
+	internalapi.WazyOnlyType
 	g *GlobalInstance
 }
 

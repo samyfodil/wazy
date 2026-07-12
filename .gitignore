@@ -7,7 +7,7 @@
 *.dll
 *.so
 *.dylib
-/wazero
+/wazy
 build
 dist
 

@@ -14,11 +14,11 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/sys"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/imports/wasi_snapshot_preview1"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/sys"
 )
 
 func Test_NonblockingFile(t *testing.T) {
@@ -26,9 +26,9 @@ func Test_NonblockingFile(t *testing.T) {
 	tempDir := t.TempDir()
 	fifoAbsPath := tempDir + fifo
 
-	moduleConfig := wazero.NewModuleConfig().
+	moduleConfig := wazy.NewModuleConfig().
 		WithArgs("wasi", "nonblock", fifo).
-		WithFSConfig(wazero.NewFSConfig().WithDirMount(tempDir, "/")).
+		WithFSConfig(wazy.NewFSConfig().WithDirMount(tempDir, "/")).
 		WithSysNanosleep()
 
 	err := syscall.Mkfifo(fifoAbsPath, 0o666)
@@ -51,7 +51,7 @@ func Test_NonblockingFile(t *testing.T) {
 
 	f, err := os.OpenFile(fifoAbsPath, os.O_APPEND|os.O_WRONLY, 0)
 	require.NoError(t, err)
-	n, err := f.Write([]byte("wazero"))
+	n, err := f.Write([]byte("wazy"))
 	require.NoError(t, err)
 	require.NotEqual(t, 0, n)
 	console := <-ch
@@ -59,7 +59,7 @@ func Test_NonblockingFile(t *testing.T) {
 
 	// Check if the first line starts with at least one dot.
 	require.True(t, strings.HasPrefix(lines[0], "."))
-	require.Equal(t, "wazero", lines[1])
+	require.Equal(t, "wazy", lines[1])
 }
 
 type fifo struct {
@@ -111,10 +111,10 @@ func Test_NonblockGo(t *testing.T) {
 
 			var consoleBuf bytes.Buffer
 
-			moduleConfig := wazero.NewModuleConfig().
+			moduleConfig := wazy.NewModuleConfig().
 				WithArgs(args...).
 				WithFSConfig( // Mount the tempDir as root.
-						wazero.NewFSConfig().WithDirMount(tempDir, "/")).
+						wazy.NewFSConfig().WithDirMount(tempDir, "/")).
 				WithStderr(pw). // Write Stderr to pw
 				WithStdout(&consoleBuf).
 				WithStartFunctions().
@@ -122,7 +122,7 @@ func Test_NonblockGo(t *testing.T) {
 
 			ch := make(chan string, 1)
 			go func() {
-				r := wazero.NewRuntimeWithConfig(testCtx, runtimeCfg)
+				r := wazy.NewRuntimeWithConfig(testCtx, runtimeCfg)
 				defer func() {
 					require.NoError(t, r.Close(testCtx))
 				}()

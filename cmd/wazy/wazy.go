@@ -15,16 +15,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/experimental/logging"
-	"github.com/tetratelabs/wazero/experimental/sock"
-	"github.com/tetratelabs/wazero/experimental/sysfs"
-	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
-	internalsys "github.com/tetratelabs/wazero/internal/sys"
-	"github.com/tetratelabs/wazero/internal/version"
-	"github.com/tetratelabs/wazero/sys"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/experimental/logging"
+	"github.com/samyfodil/wazy/experimental/sock"
+	"github.com/samyfodil/wazy/experimental/sysfs"
+	"github.com/samyfodil/wazy/imports/wasi_snapshot_preview1"
+	internalsys "github.com/samyfodil/wazy/internal/sys"
+	"github.com/samyfodil/wazy/internal/version"
+	"github.com/samyfodil/wazy/sys"
 )
 
 func main() {
@@ -58,7 +58,7 @@ func doMain(stdOut io.Writer, stdErr logging.Writer) int {
 	case "run":
 		return doRun(flag.Args()[1:], stdOut, stdErr)
 	case "version":
-		fmt.Fprintln(stdOut, version.GetWazeroVersion())
+		fmt.Fprintln(stdOut, version.GetWazyVersion())
 		return 0
 	default:
 		fmt.Fprintln(stdErr, "invalid command")
@@ -77,11 +77,11 @@ func doCompile(args []string, stdErr io.Writer) int {
 	var count int
 	var cpuProfile string
 	var memProfile string
-	if version.GetWazeroVersion() != version.Default {
+	if version.GetWazyVersion() != version.Default {
 		count = 1
 	} else {
 		flags.IntVar(&count, "count", 1,
-			"Number of times to perform the compilation. This is useful to benchmark performance of the wazero compiler.")
+			"Number of times to perform the compilation. This is useful to benchmark performance of the wazy compiler.")
 
 		flags.StringVar(&cpuProfile, "cpuprofile", "",
 			"Enables cpu profiling and writes the profile at the given path.")
@@ -123,7 +123,7 @@ func doCompile(args []string, stdErr io.Writer) int {
 		return 1
 	}
 
-	c := wazero.NewRuntimeConfig()
+	c := wazy.NewRuntimeConfig()
 	if rc, cache := maybeUseCacheDir(cacheDir, stdErr); rc != 0 {
 		return rc
 	} else if cache != nil {
@@ -139,7 +139,7 @@ func doCompile(args []string, stdErr io.Writer) int {
 
 	ctx = experimental.WithCompilationWorkers(ctx, *workers)
 
-	rt := wazero.NewRuntimeWithConfig(ctx, c)
+	rt := wazy.NewRuntimeWithConfig(ctx, c)
 	defer rt.Close(ctx)
 
 	for count > 0 {
@@ -184,7 +184,7 @@ func doRun(args []string, stdOut io.Writer, stdErr logging.Writer) int {
 			"For example, -mount=/:/ or c:\\:/ makes the entire host volume writeable by wasm. "+
 			"For read-only mounts, append the suffix ':ro'. "+
 			"Note that the volume mount inherently allows the guest to escape the volume via relative path lookups like '../../'. "+
-			"If that is not desired, use wazero as a library and implement a custom fs.FS.")
+			"If that is not desired, use wazy as a library and implement a custom fs.FS.")
 
 	var listens sliceFlag
 	flags.Var(&listens, "listen",
@@ -207,7 +207,7 @@ func doRun(args []string, stdOut io.Writer, stdErr logging.Writer) int {
 
 	var cpuProfile string
 	var memProfile string
-	if version.GetWazeroVersion() == version.Default {
+	if version.GetWazyVersion() == version.Default {
 		flags.StringVar(&cpuProfile, "cpuprofile", "",
 			"Enables cpu profiling and writes the profile at the given path.")
 
@@ -276,11 +276,11 @@ func doRun(args []string, stdOut io.Writer, stdErr logging.Writer) int {
 
 	wasmExe := filepath.Base(wasmPath)
 
-	var rtc wazero.RuntimeConfig
+	var rtc wazy.RuntimeConfig
 	if useInterpreter {
-		rtc = wazero.NewRuntimeConfigInterpreter()
+		rtc = wazy.NewRuntimeConfigInterpreter()
 	} else {
-		rtc = wazero.NewRuntimeConfig()
+		rtc = wazy.NewRuntimeConfig()
 	}
 
 	ctx := maybeHostLogging(context.Background(), logging.LogScopes(hostlogging), stdErr)
@@ -320,12 +320,12 @@ func doRun(args []string, stdOut io.Writer, stdErr logging.Writer) int {
 		ctx = sock.WithConfig(ctx, sockCfg)
 	}
 
-	rt := wazero.NewRuntimeWithConfig(ctx, rtc)
+	rt := wazy.NewRuntimeWithConfig(ctx, rtc)
 	defer rt.Close(ctx)
 
 	// Because we are running a binary directly rather than embedding in an application,
 	// we default to wiring up commonly used OS functionality.
-	conf := wazero.NewModuleConfig().
+	conf := wazy.NewModuleConfig().
 		WithStdout(stdOut).
 		WithStderr(stdErr).
 		WithStdin(os.Stdin).
@@ -379,8 +379,8 @@ func doRun(args []string, stdOut io.Writer, stdErr logging.Writer) int {
 	return 0
 }
 
-func validateMounts(mounts sliceFlag, stdErr logging.Writer) (rc int, rootPath string, config wazero.FSConfig) {
-	config = wazero.NewFSConfig()
+func validateMounts(mounts sliceFlag, stdErr logging.Writer) (rc int, rootPath string, config wazy.FSConfig) {
+	config = wazy.NewFSConfig()
 	for _, mount := range mounts {
 		if len(mount) == 0 {
 			fmt.Fprintln(stdErr, "invalid mount: empty string")
@@ -482,7 +482,7 @@ func maybeHostLogging(ctx context.Context, scopes logging.LogScopes, stdErr logg
 
 func cacheDirFlag(flags *flag.FlagSet) *string {
 	return flags.String("cachedir", "", "Writeable directory for native code compiled from wasm. "+
-		"Contents are re-used for the same version of wazero.")
+		"Contents are re-used for the same version of wazy.")
 }
 
 func workersFlag(flags *flag.FlagSet) *int {
@@ -490,9 +490,9 @@ func workersFlag(flags *flag.FlagSet) *int {
 		"Increasing this value may improve compilation speed at the cost of higher memory usage.")
 }
 
-func maybeUseCacheDir(cacheDir *string, stdErr io.Writer) (int, wazero.CompilationCache) {
+func maybeUseCacheDir(cacheDir *string, stdErr io.Writer) (int, wazy.CompilationCache) {
 	if dir := *cacheDir; dir != "" {
-		if cache, err := wazero.NewCompilationCacheWithDir(dir); err != nil {
+		if cache, err := wazy.NewCompilationCacheWithDir(dir); err != nil {
 			fmt.Fprintf(stdErr, "invalid cachedir: %v\n", err)
 			return 1, cache
 		} else {
@@ -503,29 +503,29 @@ func maybeUseCacheDir(cacheDir *string, stdErr io.Writer) (int, wazero.Compilati
 }
 
 func printUsage(stdErr io.Writer) {
-	fmt.Fprintln(stdErr, "wazero CLI")
+	fmt.Fprintln(stdErr, "wazy CLI")
 	fmt.Fprintln(stdErr)
-	fmt.Fprintln(stdErr, "Usage:\n  wazero <command>")
+	fmt.Fprintln(stdErr, "Usage:\n  wazy <command>")
 	fmt.Fprintln(stdErr)
 	fmt.Fprintln(stdErr, "Commands:")
 	fmt.Fprintln(stdErr, "  compile\tPre-compiles a WebAssembly binary")
 	fmt.Fprintln(stdErr, "  run\t\tRuns a WebAssembly binary")
-	fmt.Fprintln(stdErr, "  version\tDisplays the version of wazero CLI")
+	fmt.Fprintln(stdErr, "  version\tDisplays the version of wazy CLI")
 }
 
 func printCompileUsage(stdErr io.Writer, flags *flag.FlagSet) {
-	fmt.Fprintln(stdErr, "wazero CLI")
+	fmt.Fprintln(stdErr, "wazy CLI")
 	fmt.Fprintln(stdErr)
-	fmt.Fprintln(stdErr, "Usage:\n  wazero compile <options> <path to wasm file>")
+	fmt.Fprintln(stdErr, "Usage:\n  wazy compile <options> <path to wasm file>")
 	fmt.Fprintln(stdErr)
 	fmt.Fprintln(stdErr, "Options:")
 	flags.PrintDefaults()
 }
 
 func printRunUsage(stdErr io.Writer, flags *flag.FlagSet) {
-	fmt.Fprintln(stdErr, "wazero CLI")
+	fmt.Fprintln(stdErr, "wazy CLI")
 	fmt.Fprintln(stdErr)
-	fmt.Fprintln(stdErr, "Usage:\n  wazero run <options> <path to wasm file> [--] <wasm args>")
+	fmt.Fprintln(stdErr, "Usage:\n  wazy run <options> <path to wasm file> [--] <wasm args>")
 	fmt.Fprintln(stdErr)
 	fmt.Fprintln(stdErr, "Options:")
 	flags.PrintDefaults()

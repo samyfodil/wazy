@@ -3,15 +3,15 @@ package main
 import (
 	"context"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/experimental"
 )
 
 // Ensure that validation and compilation do not panic!
 func tryCompile(wasmBin []byte) {
 	ctx := context.Background()
-	r := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfigCompiler().
+	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler().
 		WithCoreFeatures(api.CoreFeaturesV2|experimental.CoreFeaturesThreads))
 	defer func() {
 		if err := r.Close(context.Background()); err != nil {

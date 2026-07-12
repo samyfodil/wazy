@@ -38,7 +38,7 @@ jobs:
       BINARYEN_INSTALL: ~/binaryen-install
 
     steps:
-      - name: Checkout wazero
+      - name: Checkout wazy
         uses: actions/checkout@v6
 
       - uses: actions/cache@v5
@@ -96,7 +96,7 @@ jobs:
             arch: amd64
 
     steps:
-      - name: Checkout wazero
+      - name: Checkout wazy
         uses: actions/checkout@v6
 
       - uses: actions/cache@v5
@@ -139,11 +139,11 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Checkout wazero
+      - name: Checkout wazy
         uses: actions/checkout@v6
 
-      - name: Install wazero
-        run: go install ./cmd/wazero
+      - name: Install wazy
+        run: go install ./cmd/wazy
 
       - name: Checkout wasi-testsuite
         uses: actions/checkout@v6
@@ -205,7 +205,7 @@ jobs:
         with:
           go-version: ${{ matrix.go-version }}
 
-      - name: Checkout wazero
+      - name: Checkout wazy
         uses: actions/checkout@v6
 
       - name: Cache Go test binaries
@@ -251,7 +251,7 @@ jobs:
             arch: arm64
 
     steps:
-      - name: Checkout wazero
+      - name: Checkout wazy
         uses: actions/checkout@v6
 
       - uses: actions/setup-go@v6

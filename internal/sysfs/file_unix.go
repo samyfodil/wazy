@@ -5,7 +5,7 @@ package sysfs
 import (
 	"syscall"
 
-	"github.com/tetratelabs/wazero/experimental/sys"
+	"github.com/samyfodil/wazy/experimental/sys"
 )
 
 const (

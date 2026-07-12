@@ -7,15 +7,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/experimental/logging"
-	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
-	"github.com/tetratelabs/wazero/internal/testing/proxy"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasip1"
-	"github.com/tetratelabs/wazero/sys"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/experimental/logging"
+	"github.com/samyfodil/wazy/imports/wasi_snapshot_preview1"
+	"github.com/samyfodil/wazy/internal/testing/proxy"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasip1"
+	"github.com/samyfodil/wazy/sys"
 )
 
 type arbitrary struct{}
@@ -34,7 +34,7 @@ var exitOnStartUnstableWasm []byte
 
 func TestNewFunctionExporter(t *testing.T) {
 	t.Run("export as wasi_unstable", func(t *testing.T) {
-		r := wazero.NewRuntime(testCtx)
+		r := wazy.NewRuntime(testCtx)
 		defer r.Close(testCtx)
 
 		// Instantiate the current WASI functions under the wasi_unstable
@@ -52,7 +52,7 @@ func TestNewFunctionExporter(t *testing.T) {
 	})
 
 	t.Run("override function", func(t *testing.T) {
-		r := wazero.NewRuntime(testCtx)
+		r := wazy.NewRuntime(testCtx)
 		defer r.Close(testCtx)
 
 		// Export the default WASI functions
@@ -61,7 +61,7 @@ func TestNewFunctionExporter(t *testing.T) {
 
 		// Override proc_exit to prove the point that you can add or replace
 		// functions like this.
-		wazero.HostProc1(wasiBuilder.NewFunctionBuilder(),
+		wazy.HostProc1(wasiBuilder.NewFunctionBuilder(),
 			func(ctx context.Context, mod api.Module, exitCode uint32) {
 				require.Equal(t, uint32(2), exitCode)
 				// ignore the code instead!
@@ -86,18 +86,18 @@ func maskMemory(t *testing.T, mod api.Module, size int) {
 	}
 }
 
-func requireProxyModule(t *testing.T, config wazero.ModuleConfig) (api.Module, api.Closer, *bytes.Buffer) {
+func requireProxyModule(t *testing.T, config wazy.ModuleConfig) (api.Module, api.Closer, *bytes.Buffer) {
 	return requireProxyModuleWithContext(testCtx, t, config)
 }
 
-func requireProxyModuleWithContext(ctx context.Context, t *testing.T, config wazero.ModuleConfig) (api.Module, api.Closer, *bytes.Buffer) {
+func requireProxyModuleWithContext(ctx context.Context, t *testing.T, config wazy.ModuleConfig) (api.Module, api.Closer, *bytes.Buffer) {
 	var log bytes.Buffer
 
 	// Set context to one that has an experimental listener
 	ctx = experimental.WithFunctionListenerFactory(ctx,
 		proxy.NewLoggingListenerFactory(&log, logging.LogScopeAll))
 
-	r := wazero.NewRuntime(ctx)
+	r := wazy.NewRuntime(ctx)
 
 	wasiModuleCompiled, err := wasi_snapshot_preview1.NewBuilder(r).Compile(ctx)
 	require.NoError(t, err)
@@ -126,14 +126,14 @@ func requireErrnoNosys(t *testing.T, funcName string, params ...uint64) string {
 	ctx := experimental.WithFunctionListenerFactory(testCtx,
 		proxy.NewLoggingListenerFactory(&log, logging.LogScopeAll))
 
-	r := wazero.NewRuntime(ctx)
+	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)
 
 	// Instantiate the wasi module.
 	wasiModuleCompiled, err := wasi_snapshot_preview1.NewBuilder(r).Compile(ctx)
 	require.NoError(t, err)
 
-	_, err = r.InstantiateModule(ctx, wasiModuleCompiled, wazero.NewModuleConfig())
+	_, err = r.InstantiateModule(ctx, wasiModuleCompiled, wazy.NewModuleConfig())
 	require.NoError(t, err)
 
 	proxyBin := proxy.NewModuleBinary(wasi_snapshot_preview1.ModuleName, wasiModuleCompiled)
@@ -141,7 +141,7 @@ func requireErrnoNosys(t *testing.T, funcName string, params ...uint64) string {
 	proxyCompiled, err := r.CompileModule(ctx, proxyBin)
 	require.NoError(t, err)
 
-	mod, err := r.InstantiateModule(ctx, proxyCompiled, wazero.NewModuleConfig())
+	mod, err := r.InstantiateModule(ctx, proxyCompiled, wazy.NewModuleConfig())
 	require.NoError(t, err)
 
 	requireErrnoResult(t, wasip1.ErrnoNosys, mod, funcName, params...)

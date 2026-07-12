@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
 // TestLeb128NoAlloc ensures no allocation required in the leb128 package.

@@ -1,4 +1,4 @@
-# Codecov for main is visible here https://app.codecov.io/gh/tetratelabs/wazero
+# Codecov for main is visible here https://app.codecov.io/gh/samyfodil/wazy
 
 # We use codecov only as a UI, so we disable PR comments and commit status.
 # See https://docs.codecov.com/docs/pull-request-comments

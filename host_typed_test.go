@@ -1,4 +1,4 @@
-package wazero
+package wazy
 
 import (
 	"context"
@@ -6,10 +6,10 @@ import (
 	"math"
 	"testing"
 
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/testing/binaryencoding"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 // TestHostFunc_equivalence registers the same logical host functions two

@@ -64,7 +64,7 @@ jobs:
     runs-on: ${{ matrix.platform.os }}
     strategy:
       fail-fast: false  # don't fail fast as sometimes failures are arch/OS specific
-      matrix:  # Use versions consistent with wazero's Go support policy.
+      matrix:  # Use versions consistent with wazy's Go support policy.
         platform:
         - os: ubuntu-24.04
           arch: amd64
@@ -74,7 +74,7 @@ jobs:
           arch: arm64
         go-version:
           - "1.26"  # Current Go version
-          - "1.25"  # Floor Go version of wazero (current - 1)
+          - "1.25"  # Floor Go version of wazy (current - 1)
 
     steps:
 
@@ -112,10 +112,10 @@ jobs:
     runs-on: ${{ matrix.platform.os }}
     strategy:
       fail-fast: false  # don't fail fast as sometimes failures are arch/OS specific
-      matrix:  # Use versions consistent with wazero's Go support policy.
+      matrix:  # Use versions consistent with wazy's Go support policy.
         go-version:
           - "1.26"  # Current Go version
-          - "1.25"  # Floor Go version of wazero (current - 1)
+          - "1.25"  # Floor Go version of wazy (current - 1)
         platform:
           - os: ubuntu-24.04
             arch: amd64
@@ -143,7 +143,7 @@ jobs:
           echo go test "${pkg}" -c -o "_tests/${basepath}.test"
           go test "${pkg}" -c -o "_tests/${basepath}.test"
           done
-          go build -o wazerocli ./cmd/wazero
+          go build -o wazycli ./cmd/wazy
         env:
           GOARCH: ${{ matrix.platform.arch }}
           CGO_ENABLED: 0
@@ -152,7 +152,7 @@ jobs:
         run: |
           echo 'FROM scratch' >> Dockerfile
           echo 'CMD ["/test", "-test.v"]' >> Dockerfile
-          docker buildx build -t wazero:test --platform linux/${{ matrix.platform.arch }} .
+          docker buildx build -t wazy:test --platform linux/${{ matrix.platform.arch }} .
 
       - name: Write seccomp config
         if: ${{ matrix.platform.no_prot_exec }}
@@ -173,7 +173,7 @@ jobs:
 
       - name: Run built test binaries
         # This runs all tests compiled above in sequence. Note: This mounts /tmp to allow t.TempDir() in tests.
-        run: find _tests -name "*.test" | xargs -t -Itestbin docker run --platform linux/${{ matrix.platform.arch }} -v $(pwd)/testbin:/test -v $(pwd)/wazerocli:/wazero -e WAZEROCLI=/wazero --tmpfs /tmp ${{ matrix.platform.no_prot_exec && '--security-opt seccomp=$PWD/no-prot-exec.json' }} --rm -t wazero:test
+        run: find _tests -name "*.test" | xargs -t -Itestbin docker run --platform linux/${{ matrix.platform.arch }} -v $(pwd)/testbin:/test -v $(pwd)/wazycli:/wazy -e WAZYCLI=/wazy --tmpfs /tmp ${{ matrix.platform.no_prot_exec && '--security-opt seccomp=$PWD/no-prot-exec.json' }} --rm -t wazy:test
 
   test_bsd:
     name: amd64, ${{ matrix.os.name }}
@@ -200,20 +200,20 @@ jobs:
           echo go test "${pkg}" -c -o "_tests/${basepath}.test"
           go test "${pkg}" -c -o "_tests/${basepath}.test"
           done
-          go build -o wazerocli ./cmd/wazero
+          go build -o wazycli ./cmd/wazy
         env:
           GOOS: ${{ matrix.os.name }}
 
       - name: Run built test binaries
         uses: cross-platform-actions/action@v0.32.0
         env:
-          WAZEROCLI: ./wazerocli
+          WAZYCLI: ./wazycli
         with:
           operating_system: ${{ matrix.os.name }}
           version: ${{ matrix.os.version }}
           shell: bash
           sync_files: runner-to-vm
-          environment_variables: WAZEROCLI
+          environment_variables: WAZYCLI
           # This runs all tests compiled above in sequence.
           run: find _tests -name "*.test" | xargs -t -Itestbin nice testbin -test.short -test.v
 
@@ -245,7 +245,7 @@ jobs:
           echo go test "${pkg}" -c -o "_tests/${basepath}.test"
           go test "${pkg}" -c -o "_tests/${basepath}.test"
           done
-          go build -o wazerocli ./cmd/wazero
+          go build -o wazycli ./cmd/wazy
           envsubst < ./.github/actions/vmactions/template.yml > ./.github/actions/vmactions/action.yml
         env:
           GOOS: ${{ matrix.os.name }}
@@ -254,9 +254,9 @@ jobs:
       - name: Run built test binaries
         uses: ./.github/actions/vmactions
         env:
-          WAZEROCLI: ./wazerocli
+          WAZYCLI: ./wazycli
         with:
-          envs: WAZEROCLI
+          envs: WAZYCLI
           # This runs all tests compiled above in sequence.
           run: find _tests -name "*.test" | xargs -t -Itestbin nice testbin -test.short -test.v
 
@@ -267,7 +267,7 @@ jobs:
     runs-on: ${{ matrix.platform.os }}
     strategy:
       fail-fast: false  # don't fail fast as sometimes failures are arch/OS specific
-      matrix:  # Use versions consistent with wazero's Go support policy.
+      matrix:  # Use versions consistent with wazy's Go support policy.
         platform:
           - os: ubuntu-24.04
             arch: amd64

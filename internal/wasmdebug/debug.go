@@ -10,9 +10,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/wasmruntime"
-	"github.com/tetratelabs/wazero/sys"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/wasmruntime"
+	"github.com/samyfodil/wazy/sys"
 )
 
 // FuncName returns the naming convention of "moduleName.funcName".
@@ -136,17 +136,17 @@ func (s *stackTrace) FromRecovered(recovered interface{}) error {
 	}
 
 	// If we have a runtime.Error, something severe happened which should include the stack trace. This could be
-	// a nil pointer from wazero or a user-defined function from HostModuleBuilder.
+	// a nil pointer from wazy or a user-defined function from HostModuleBuilder.
 	if runtimeErr, ok := recovered.(runtime.Error); ok {
-		return fmt.Errorf("%w (recovered by wazero)\nwasm stack trace:\n\t%s\n\n%s\n%s",
+		return fmt.Errorf("%w (recovered by wazy)\nwasm stack trace:\n\t%s\n\n%s\n%s",
 			runtimeErr, stack, GoRuntimeErrorTracePrefix, debug.Stack())
 	}
 
 	// At this point we expect the error was from a function defined by HostModuleBuilder that intentionally called panic.
 	if runtimeErr, ok := recovered.(error); ok { // e.g. panic(errors.New("whoops"))
-		return fmt.Errorf("%w (recovered by wazero)\nwasm stack trace:\n\t%s", runtimeErr, stack)
+		return fmt.Errorf("%w (recovered by wazy)\nwasm stack trace:\n\t%s", runtimeErr, stack)
 	} else { // e.g. panic("whoops")
-		return fmt.Errorf("%v (recovered by wazero)\nwasm stack trace:\n\t%s", recovered, stack)
+		return fmt.Errorf("%v (recovered by wazy)\nwasm stack trace:\n\t%s", recovered, stack)
 	}
 }
 

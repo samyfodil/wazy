@@ -3,7 +3,7 @@ package sys
 import (
 	"io/fs"
 
-	"github.com/tetratelabs/wazero/sys"
+	"github.com/samyfodil/wazy/sys"
 )
 
 // FS is a writeable fs.FS bridge backed by syscall functions needed for ABI
@@ -45,7 +45,7 @@ type FS interface {
 	// with a EBADF.
 	//
 	// Some implementations choose whether to enforce read-only opens, namely
-	// fs.FS. While fs.FS is supported (Adapt), wazero cannot runtime enforce
+	// fs.FS. While fs.FS is supported (Adapt), wazy cannot runtime enforce
 	// open flags. Instead, we encourage good behavior and test our built-in
 	// implementations.
 	//

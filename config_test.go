@@ -1,4 +1,4 @@
-package wazero
+package wazy
 
 import (
 	"bytes"
@@ -7,13 +7,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/fstest"
-	"github.com/tetratelabs/wazero/internal/platform"
-	internalsys "github.com/tetratelabs/wazero/internal/sys"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasm"
-	"github.com/tetratelabs/wazero/sys"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/fstest"
+	"github.com/samyfodil/wazy/internal/platform"
+	internalsys "github.com/samyfodil/wazy/internal/sys"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasm"
+	"github.com/samyfodil/wazy/sys"
 )
 
 func TestRuntimeConfig(t *testing.T) {
@@ -113,10 +113,10 @@ func TestModuleConfig(t *testing.T) {
 		{
 			name: "WithName",
 			with: func(c ModuleConfig) ModuleConfig {
-				return c.WithName("wazero")
+				return c.WithName("wazy")
 			},
 			expectNameSet: true,
-			expectedName:  "wazero",
+			expectedName:  "wazy",
 		},
 		{
 			name: "WithName empty",
@@ -129,7 +129,7 @@ func TestModuleConfig(t *testing.T) {
 		{
 			name: "WithName twice",
 			with: func(c ModuleConfig) ModuleConfig {
-				return c.WithName("wazero").WithName("wa0")
+				return c.WithName("wazy").WithName("wa0")
 			},
 			expectNameSet: true,
 			expectedName:  "wa0",
@@ -137,7 +137,7 @@ func TestModuleConfig(t *testing.T) {
 		{
 			name: "WithName can clear",
 			with: func(c ModuleConfig) ModuleConfig {
-				return c.WithName("wazero").WithName("")
+				return c.WithName("wazy").WithName("")
 			},
 			expectNameSet: true,
 			expectedName:  "",

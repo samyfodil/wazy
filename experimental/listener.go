@@ -3,8 +3,8 @@ package experimental
 import (
 	"context"
 
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/expctxkeys"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/expctxkeys"
 )
 
 // StackIterator allows iterating on each function of the call stack, starting
@@ -282,7 +282,7 @@ func NewStackIterator(stack ...StackFrame) StackIterator {
 	}
 	// The size of function definition is only one pointer which should allow
 	// the compiler to optimize the conversion to api.FunctionDefinition; but
-	// the presence of internal.WazeroOnlyType, despite being defined as an
+	// the presence of internal.WazyOnlyType, despite being defined as an
 	// empty struct, forces a heap allocation that we amortize by caching the
 	// result.
 	for i, frame := range stack {

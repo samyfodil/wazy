@@ -7,20 +7,20 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/wazevoapi"
-	"github.com/tetratelabs/wazero/internal/expctxkeys"
-	"github.com/tetratelabs/wazero/internal/internalapi"
-	"github.com/tetratelabs/wazero/internal/wasm"
-	"github.com/tetratelabs/wazero/internal/wasmdebug"
-	"github.com/tetratelabs/wazero/internal/wasmruntime"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/wazevoapi"
+	"github.com/samyfodil/wazy/internal/expctxkeys"
+	"github.com/samyfodil/wazy/internal/internalapi"
+	"github.com/samyfodil/wazy/internal/wasm"
+	"github.com/samyfodil/wazy/internal/wasmdebug"
+	"github.com/samyfodil/wazy/internal/wasmruntime"
 )
 
 type (
 	// callEngine implements api.Function.
 	callEngine struct {
-		internalapi.WazeroOnly
+		internalapi.WazyOnly
 		stack []byte
 		// stackTop is the pointer to the *aligned* top of the stack. This must be updated
 		// whenever the stack is changed. This is passed to the assembly function

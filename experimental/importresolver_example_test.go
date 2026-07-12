@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/imports/wasi_snapshot_preview1"
 )
 
 var (
@@ -28,7 +28,7 @@ var (
 func Example_importResolver() {
 	ctx := context.Background()
 
-	r := wazero.NewRuntime(ctx)
+	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)
 
 	// The client imports the inoutdispatcher module that reads from stdin and writes to stdout.
@@ -61,7 +61,7 @@ func Example_importResolver() {
 		const inoutDispatcherModuleName = "inoutdispatcher"
 
 		dispatcherInstance, err := r.InstantiateModule(ctx, idm,
-			wazero.NewModuleConfig().
+			wazy.NewModuleConfig().
 				WithStdin(&m.in).
 				WithStdout(&m.out).
 				WithName("")) // Makes it an anonymous module.
@@ -76,7 +76,7 @@ func Example_importResolver() {
 			return nil
 		})
 
-		m.client, err = r.InstantiateModule(ctx, idcm, wazero.NewModuleConfig().WithName(fmt.Sprintf("m%d", i)))
+		m.client, err = r.InstantiateModule(ctx, idcm, wazy.NewModuleConfig().WithName(fmt.Sprintf("m%d", i)))
 		if err != nil {
 			log.Panicln(err)
 		}

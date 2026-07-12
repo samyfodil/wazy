@@ -3,10 +3,10 @@ package arm64
 import (
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/backend"
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/backend/regalloc"
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/ssa"
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/backend"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/backend/regalloc"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/ssa"
+	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
 func TestMachine_insertAddOrSubStackPointer(t *testing.T) {

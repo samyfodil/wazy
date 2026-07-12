@@ -24,12 +24,12 @@ import (
 	_ "embed"
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/internal/platform"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasmruntime"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/internal/platform"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasmruntime"
 )
 
 //go:embed testdata/eh_cross_callnative.wasm
@@ -67,7 +67,7 @@ var ehCatchOutsideWasm []byte
 
 // TestExceptionHandlingInterpreter runs EH tests only for the interpreter.
 func TestExceptionHandlingInterpreter(t *testing.T) {
-	cfg := wazero.NewRuntimeConfigInterpreter().
+	cfg := wazy.NewRuntimeConfigInterpreter().
 		WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling)
 	runEHTests(t, cfg)
 }
@@ -77,12 +77,12 @@ func TestExceptionHandlingCompiler(t *testing.T) {
 	if !platform.CompilerSupported() {
 		t.Skip()
 	}
-	cfg := wazero.NewRuntimeConfigCompiler().
+	cfg := wazy.NewRuntimeConfigCompiler().
 		WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling)
 	runEHTests(t, cfg)
 }
 
-func runEHTests(t *testing.T, cfg wazero.RuntimeConfig) {
+func runEHTests(t *testing.T, cfg wazy.RuntimeConfig) {
 	t.Run("cross_frame_catch", func(t *testing.T) {
 		testEHCrossFrameCatch(t, cfg)
 	})
@@ -122,13 +122,13 @@ func runEHTests(t *testing.T, cfg wazero.RuntimeConfig) {
 // try_table in grandparent, exception thrown in grandchild,
 // propagating through child which has no handler of its own.
 // The grandparent's handler must catch it correctly.
-func testEHCrossFrameCatch(t *testing.T, cfg wazero.RuntimeConfig) {
+func testEHCrossFrameCatch(t *testing.T, cfg wazy.RuntimeConfig) {
 	ctx := context.Background()
-	r := wazero.NewRuntimeWithConfig(ctx, cfg)
+	r := wazy.NewRuntimeWithConfig(ctx, cfg)
 	defer r.Close(ctx)
 
 	mod, err := r.InstantiateWithConfig(ctx, ehCrossCallnativeWasm,
-		wazero.NewModuleConfig().WithStartFunctions())
+		wazy.NewModuleConfig().WithStartFunctions())
 	require.NoError(t, err)
 
 	// grandparent has a try_table, calls child, child calls grandchild which throws.
@@ -146,13 +146,13 @@ func testEHCrossFrameCatch(t *testing.T, cfg wazero.RuntimeConfig) {
 // testEHPdfiumRethrow tests the Emscripten destructor-cleanup pattern:
 // catch_all_ref captures the exnref, runs cleanup, then rethrows via throw_ref.
 // This pattern appears in pdfium.wasm for C++ exception handling.
-func testEHPdfiumRethrow(t *testing.T, cfg wazero.RuntimeConfig) {
+func testEHPdfiumRethrow(t *testing.T, cfg wazy.RuntimeConfig) {
 	ctx := context.Background()
-	r := wazero.NewRuntimeWithConfig(ctx, cfg)
+	r := wazy.NewRuntimeWithConfig(ctx, cfg)
 	defer r.Close(ctx)
 
 	mod, err := r.InstantiateWithConfig(ctx, ehPdfiumWasm,
-		wazero.NewModuleConfig().WithStartFunctions())
+		wazy.NewModuleConfig().WithStartFunctions())
 	require.NoError(t, err)
 
 	// One-level: leaf throws, level2 catches + rethrows, outer catches.
@@ -169,13 +169,13 @@ func testEHPdfiumRethrow(t *testing.T, cfg wazero.RuntimeConfig) {
 // testThrowRefNull verifies that throw_ref on a null exnref traps with
 // "null reference" (not "unreachable"). This was a bug where the interpreter
 // used ErrRuntimeUnreachable instead of ErrRuntimeNullReference.
-func testThrowRefNull(t *testing.T, cfg wazero.RuntimeConfig) {
+func testThrowRefNull(t *testing.T, cfg wazy.RuntimeConfig) {
 	ctx := context.Background()
-	r := wazero.NewRuntimeWithConfig(ctx, cfg)
+	r := wazy.NewRuntimeWithConfig(ctx, cfg)
 	defer r.Close(ctx)
 
 	mod, err := r.InstantiateWithConfig(ctx, ehThrowRefNullWasm,
-		wazero.NewModuleConfig().WithStartFunctions())
+		wazy.NewModuleConfig().WithStartFunctions())
 	require.NoError(t, err)
 
 	// Call with null exnref (0) — should trap as "null reference".
@@ -186,13 +186,13 @@ func testThrowRefNull(t *testing.T, cfg wazero.RuntimeConfig) {
 // testBrExitsTryTable verifies that br/br_if that exits a try_table block
 // correctly pops the try handler. Without the fix, orphaned handlers would
 // cause a popTryHandler underflow panic ("slice bounds out of range [:-1]").
-func testBrExitsTryTable(t *testing.T, cfg wazero.RuntimeConfig) {
+func testBrExitsTryTable(t *testing.T, cfg wazy.RuntimeConfig) {
 	ctx := context.Background()
-	r := wazero.NewRuntimeWithConfig(ctx, cfg)
+	r := wazy.NewRuntimeWithConfig(ctx, cfg)
 	defer r.Close(ctx)
 
 	mod, err := r.InstantiateWithConfig(ctx, ehBrOrphanWasm,
-		wazero.NewModuleConfig().WithStartFunctions())
+		wazy.NewModuleConfig().WithStartFunctions())
 	require.NoError(t, err)
 
 	// The function calls loop_with_try (which exits try_table via br_if),
@@ -206,13 +206,13 @@ func testBrExitsTryTable(t *testing.T, cfg wazero.RuntimeConfig) {
 // so it doesn't interfere with later exception dispatch. Without the fix,
 // the stale handler from try_table A incorrectly catches a throw meant for
 // the outer handler, returning 99 instead of 1.
-func testBrStaleHandler(t *testing.T, cfg wazero.RuntimeConfig) {
+func testBrStaleHandler(t *testing.T, cfg wazy.RuntimeConfig) {
 	ctx := context.Background()
-	r := wazero.NewRuntimeWithConfig(ctx, cfg)
+	r := wazy.NewRuntimeWithConfig(ctx, cfg)
 	defer r.Close(ctx)
 
 	mod, err := r.InstantiateWithConfig(ctx, ehBrStaleHandlerWasm,
-		wazero.NewModuleConfig().WithStartFunctions())
+		wazy.NewModuleConfig().WithStartFunctions())
 	require.NoError(t, err)
 
 	// Without fix: stale handler A catches $tag1 -> wrong checkpoint restore.
@@ -224,13 +224,13 @@ func testBrStaleHandler(t *testing.T, cfg wazero.RuntimeConfig) {
 
 // testEHLocalsCorrupted verifies that locals mutated inside a try_table body
 // retain their throw-time values when an exception is caught (issue #2503).
-func testEHLocalsCorrupted(t *testing.T, cfg wazero.RuntimeConfig) {
+func testEHLocalsCorrupted(t *testing.T, cfg wazy.RuntimeConfig) {
 	ctx := context.Background()
-	r := wazero.NewRuntimeWithConfig(ctx, cfg)
+	r := wazy.NewRuntimeWithConfig(ctx, cfg)
 	defer r.Close(ctx)
 
 	mod, err := r.InstantiateWithConfig(ctx, ehLocalsCorruptedWasm,
-		wazero.NewModuleConfig().WithStartFunctions())
+		wazy.NewModuleConfig().WithStartFunctions())
 	require.NoError(t, err)
 
 	// f() sets flag=1, enters try_table, sets flag=0, then throws.
@@ -242,13 +242,13 @@ func testEHLocalsCorrupted(t *testing.T, cfg wazero.RuntimeConfig) {
 
 // testEHLocalsNestedNocatch verifies that a try_table with no catch clauses
 // nested inside one with catch clauses doesn't break locals tracking.
-func testEHLocalsNestedNocatch(t *testing.T, cfg wazero.RuntimeConfig) {
+func testEHLocalsNestedNocatch(t *testing.T, cfg wazy.RuntimeConfig) {
 	ctx := context.Background()
-	r := wazero.NewRuntimeWithConfig(ctx, cfg)
+	r := wazy.NewRuntimeWithConfig(ctx, cfg)
 	defer r.Close(ctx)
 
 	mod, err := r.InstantiateWithConfig(ctx, ehLocalsNestedNocatchWasm,
-		wazero.NewModuleConfig().WithStartFunctions())
+		wazy.NewModuleConfig().WithStartFunctions())
 	require.NoError(t, err)
 
 	// The inner try_table (no catch) must not break the outer try body's
@@ -261,13 +261,13 @@ func testEHLocalsNestedNocatch(t *testing.T, cfg wazero.RuntimeConfig) {
 // testEHLocalsNestedCatch verifies that nested try_tables in the same function
 // share the locals save area so an outer handler sees throw-time local values
 // modified inside the inner try body.
-func testEHLocalsNestedCatch(t *testing.T, cfg wazero.RuntimeConfig) {
+func testEHLocalsNestedCatch(t *testing.T, cfg wazy.RuntimeConfig) {
 	ctx := context.Background()
-	r := wazero.NewRuntimeWithConfig(ctx, cfg)
+	r := wazy.NewRuntimeWithConfig(ctx, cfg)
 	defer r.Close(ctx)
 
 	mod, err := r.InstantiateWithConfig(ctx, ehLocalsNestedCatchWasm,
-		wazero.NewModuleConfig().WithStartFunctions())
+		wazy.NewModuleConfig().WithStartFunctions())
 	require.NoError(t, err)
 
 	// Inner try catches $t2, but thrower throws $t1 → outer catches.
@@ -280,13 +280,13 @@ func testEHLocalsNestedCatch(t *testing.T, cfg wazero.RuntimeConfig) {
 // testEHLocalsCrossFunc verifies cross-function try_table nesting: function A
 // has a try_table and calls B which also has a try_table. B throws an exception
 // caught by A. A's handler must see A's locals, not B's.
-func testEHLocalsCrossFunc(t *testing.T, cfg wazero.RuntimeConfig) {
+func testEHLocalsCrossFunc(t *testing.T, cfg wazy.RuntimeConfig) {
 	ctx := context.Background()
-	r := wazero.NewRuntimeWithConfig(ctx, cfg)
+	r := wazy.NewRuntimeWithConfig(ctx, cfg)
 	defer r.Close(ctx)
 
 	mod, err := r.InstantiateWithConfig(ctx, ehLocalsCrossFuncWasm,
-		wazero.NewModuleConfig().WithStartFunctions())
+		wazy.NewModuleConfig().WithStartFunctions())
 	require.NoError(t, err)
 
 	// A sets flag=0 inside its try body, then calls B which throws.
@@ -297,13 +297,13 @@ func testEHLocalsCrossFunc(t *testing.T, cfg wazero.RuntimeConfig) {
 }
 
 // testEHBrOwnLabel verifies that br to a try_table's own label pops its handler.
-func testEHBrOwnLabel(t *testing.T, cfg wazero.RuntimeConfig) {
+func testEHBrOwnLabel(t *testing.T, cfg wazy.RuntimeConfig) {
 	ctx := context.Background()
-	r := wazero.NewRuntimeWithConfig(ctx, cfg)
+	r := wazy.NewRuntimeWithConfig(ctx, cfg)
 	defer r.Close(ctx)
 
 	mod, err := r.InstantiateWithConfig(ctx, ehBrOwnLabelWasm,
-		wazero.NewModuleConfig().WithStartFunctions())
+		wazy.NewModuleConfig().WithStartFunctions())
 	require.NoError(t, err)
 
 	res, err := mod.ExportedFunction("run").Call(ctx)
@@ -313,13 +313,13 @@ func testEHBrOwnLabel(t *testing.T, cfg wazero.RuntimeConfig) {
 
 // testEHCatchOutside verifies that a catch clause jumping outside an enclosing
 // try_table pops that try_table's handler.
-func testEHCatchOutside(t *testing.T, cfg wazero.RuntimeConfig) {
+func testEHCatchOutside(t *testing.T, cfg wazy.RuntimeConfig) {
 	ctx := context.Background()
-	r := wazero.NewRuntimeWithConfig(ctx, cfg)
+	r := wazy.NewRuntimeWithConfig(ctx, cfg)
 	defer r.Close(ctx)
 
 	mod, err := r.InstantiateWithConfig(ctx, ehCatchOutsideWasm,
-		wazero.NewModuleConfig().WithStartFunctions())
+		wazy.NewModuleConfig().WithStartFunctions())
 	require.NoError(t, err)
 
 	res, err := mod.ExportedFunction("run").Call(ctx)
@@ -352,14 +352,14 @@ func TestExceptionHandlingCompilationCache(t *testing.T) {
 			ctx := context.Background()
 
 			// First: compile fresh and populate the file cache.
-			cache1, err := wazero.NewCompilationCacheWithDir(cacheDir)
+			cache1, err := wazy.NewCompilationCacheWithDir(cacheDir)
 			require.NoError(t, err)
-			cfg1 := wazero.NewRuntimeConfigCompiler().
+			cfg1 := wazy.NewRuntimeConfigCompiler().
 				WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling).
 				WithCompilationCache(cache1)
-			r1 := wazero.NewRuntimeWithConfig(ctx, cfg1)
+			r1 := wazy.NewRuntimeWithConfig(ctx, cfg1)
 			mod1, err := r1.InstantiateWithConfig(ctx, tc.wasm,
-				wazero.NewModuleConfig().WithStartFunctions())
+				wazy.NewModuleConfig().WithStartFunctions())
 			require.NoError(t, err)
 			res, err := mod1.ExportedFunction(tc.fn).Call(ctx, tc.args...)
 			require.NoError(t, err)
@@ -369,14 +369,14 @@ func TestExceptionHandlingCompilationCache(t *testing.T) {
 
 			// Second: new runtime loading from file cache.
 			// Without the fix, catchClauseTable is empty → panic.
-			cache2, err := wazero.NewCompilationCacheWithDir(cacheDir)
+			cache2, err := wazy.NewCompilationCacheWithDir(cacheDir)
 			require.NoError(t, err)
-			cfg2 := wazero.NewRuntimeConfigCompiler().
+			cfg2 := wazy.NewRuntimeConfigCompiler().
 				WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling).
 				WithCompilationCache(cache2)
-			r2 := wazero.NewRuntimeWithConfig(ctx, cfg2)
+			r2 := wazy.NewRuntimeWithConfig(ctx, cfg2)
 			mod2, err := r2.InstantiateWithConfig(ctx, tc.wasm,
-				wazero.NewModuleConfig().WithStartFunctions())
+				wazy.NewModuleConfig().WithStartFunctions())
 			require.NoError(t, err)
 			res, err = mod2.ExportedFunction(tc.fn).Call(ctx, tc.args...)
 			require.NoError(t, err)

@@ -10,19 +10,19 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/experimental/logging"
-	"github.com/tetratelabs/wazero/internal/testing/binaryencoding"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/experimental/logging"
+	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
-// We haven't had public APIs for referencing all the imported entries from wazero.CompiledModule,
+// We haven't had public APIs for referencing all the imported entries from wazy.CompiledModule,
 // so we use the unsafe.Pointer and the internal memory layout to get the internal *wasm.Module
-// from wazero.CompiledFunction.  This must be synced with the struct definition of wazero.compiledModule (internal one).
-func extractInternalWasmModuleFromCompiledModule(c wazero.CompiledModule) (*wasm.Module, error) {
+// from wazy.CompiledFunction.  This must be synced with the struct definition of wazy.compiledModule (internal one).
+func extractInternalWasmModuleFromCompiledModule(c wazy.CompiledModule) (*wasm.Module, error) {
 	// This is the internal representation of interface in Go.
 	// https://research.swtch.com/interfaces
 	type iface struct {
@@ -30,7 +30,7 @@ func extractInternalWasmModuleFromCompiledModule(c wazero.CompiledModule) (*wasm
 		data unsafe.Pointer
 	}
 
-	// This corresponds to the unexported wazero.compiledModule to get *wasm.Module from wazero.CompiledModule interface.
+	// This corresponds to the unexported wazy.compiledModule to get *wasm.Module from wazy.CompiledModule interface.
 	type compiledModule struct {
 		module *wasm.Module
 	}
@@ -51,8 +51,8 @@ func RequireNoDiffT(t *testing.T, wasmBin []byte, checkMemory, loggingCheck bool
 // RequireNoDiff ensures that the behavior is the same between the compiler and the interpreter for any given binary.
 func RequireNoDiff(wasmBin []byte, checkMemory, loggingCheck bool, requireNoError func(err error)) {
 	const features = api.CoreFeaturesV2 | experimental.CoreFeaturesThreads | experimental.CoreFeaturesTailCall | experimental.CoreFeaturesExtendedConst | experimental.CoreFeaturesExceptionHandling | experimental.CoreFeaturesTypedFunctionReferences
-	compiler := wazero.NewRuntimeWithConfig(context.Background(), wazero.NewRuntimeConfigCompiler().WithCoreFeatures(features))
-	interpreter := wazero.NewRuntimeWithConfig(context.Background(), wazero.NewRuntimeConfigInterpreter().WithCoreFeatures(features))
+	compiler := wazy.NewRuntimeWithConfig(context.Background(), wazy.NewRuntimeConfigCompiler().WithCoreFeatures(features))
+	interpreter := wazy.NewRuntimeWithConfig(context.Background(), wazy.NewRuntimeConfigInterpreter().WithCoreFeatures(features))
 	defer compiler.Close(context.Background())
 	defer interpreter.Close(context.Background())
 
@@ -74,7 +74,7 @@ func RequireNoDiff(wasmBin []byte, checkMemory, loggingCheck bool, requireNoErro
 
 	compilerCompiled, err := compiler.CompileModule(compilerCtx, wasmBin)
 	if err != nil && strings.Contains(err.Error(), "has an empty module name") {
-		// This is the limitation wazero imposes to allow special-casing of anonymous modules.
+		// This is the limitation wazy imposes to allow special-casing of anonymous modules.
 		return
 	}
 	requireNoError(err)
@@ -92,9 +92,9 @@ func RequireNoDiff(wasmBin []byte, checkMemory, loggingCheck bool, requireNoErro
 
 	// Instantiate module.
 	compilerMod, compilerInstErr := compiler.InstantiateModule(compilerCtx, compilerCompiled,
-		wazero.NewModuleConfig().WithName(string(internalMod.ID[:])))
+		wazy.NewModuleConfig().WithName(string(internalMod.ID[:])))
 	interpreterMod, interpreterInstErr := interpreter.InstantiateModule(interpreterCtx, interpreterCompiled,
-		wazero.NewModuleConfig().WithName(string(internalMod.ID[:])))
+		wazy.NewModuleConfig().WithName(string(internalMod.ID[:])))
 
 	okToInvoke, err := ensureInstantiationError(compilerInstErr, interpreterInstErr)
 	requireNoError(err)
@@ -160,7 +160,7 @@ func ensureMutableGlobalsMatch(compilerMod, interpreterMod api.Module, requireNo
 }
 
 // ensureDummyImports instantiates the modules which are required imports by `origin` *wasm.Module.
-func ensureDummyImports(r wazero.Runtime, origin *wasm.Module, requireNoError func(err error)) (skip bool) {
+func ensureDummyImports(r wazy.Runtime, origin *wasm.Module, requireNoError func(err error)) (skip bool) {
 	impMods := make(map[string][]wasm.Import)
 	for _, imp := range origin.ImportSection {
 		if imp.Module == "" {
@@ -179,7 +179,7 @@ func ensureDummyImports(r wazero.Runtime, origin *wasm.Module, requireNoError fu
 			_, ok := usedName[imp.Name]
 			if ok {
 				// Import segment can have duplicated "{module_name}.{name}" pair while it is prohibited for exports.
-				// Decision on allowing modules with these "ill" imports or not is up to embedder, and wazero chooses
+				// Decision on allowing modules with these "ill" imports or not is up to embedder, and wazy chooses
 				// not to allow. Hence, we skip the entire case.
 				// See "Note" at https://www.w3.org/TR/wasm-core-2/syntax/modules.html#imports
 				return true

@@ -5,10 +5,10 @@ import (
 	_ "embed"
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
 //go:embed testdata/cpp_exceptions.wasm
@@ -17,14 +17,14 @@ var cppExceptionsWasm []byte
 func TestCppExceptions(t *testing.T) {
 	ctx := context.Background()
 
-	cfg := wazero.NewRuntimeConfig().
+	cfg := wazy.NewRuntimeConfig().
 		WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling)
 
-	r := wazero.NewRuntimeWithConfig(ctx, cfg)
+	r := wazy.NewRuntimeWithConfig(ctx, cfg)
 	defer r.Close(ctx)
 
 	mod, err := r.InstantiateWithConfig(ctx, cppExceptionsWasm,
-		wazero.NewModuleConfig().WithStartFunctions("_initialize"))
+		wazy.NewModuleConfig().WithStartFunctions("_initialize"))
 	require.NoError(t, err)
 
 	tests := []struct {

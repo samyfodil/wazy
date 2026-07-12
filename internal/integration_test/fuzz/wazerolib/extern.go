@@ -8,12 +8,12 @@ import (
 	"strings"
 	"unsafe"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/internal/testing/binaryencoding"
-	"github.com/tetratelabs/wazero/internal/testing/nodiff"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
+	"github.com/samyfodil/wazy/internal/testing/nodiff"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 func main() {}
@@ -117,9 +117,9 @@ func test_signal_stack() {
 		},
 	})
 	ctx := context.Background()
-	config := wazero.NewRuntimeConfigCompiler().WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesTailCall)
+	config := wazy.NewRuntimeConfigCompiler().WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesTailCall)
 
-	r := wazero.NewRuntimeWithConfig(ctx, config)
+	r := wazy.NewRuntimeWithConfig(ctx, config)
 	module, err := r.Instantiate(ctx, bin)
 	if err != nil {
 		panic(err)

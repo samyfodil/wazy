@@ -3,7 +3,7 @@ package amd64
 import (
 	"fmt"
 
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/ssa"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/ssa"
 )
 
 type cond byte

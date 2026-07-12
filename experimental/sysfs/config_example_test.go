@@ -4,11 +4,11 @@ import (
 	"io/fs"
 	"testing/fstest"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/experimental/sysfs"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/experimental/sysfs"
 )
 
-var moduleConfig wazero.ModuleConfig
+var moduleConfig wazy.ModuleConfig
 
 // This example shows how to adapt a fs.FS to a sys.FS
 func ExampleAdaptFS() {
@@ -18,8 +18,8 @@ func ExampleAdaptFS() {
 	}
 	root := &sysfs.AdaptFS{FS: m}
 
-	moduleConfig = wazero.NewModuleConfig().
-		WithFSConfig(wazero.NewFSConfig().(sysfs.FSConfig).WithSysFSMount(root, "/"))
+	moduleConfig = wazy.NewModuleConfig().
+		WithFSConfig(wazy.NewFSConfig().(sysfs.FSConfig).WithSysFSMount(root, "/"))
 
 	// Output:
 }
@@ -28,8 +28,8 @@ func ExampleAdaptFS() {
 func ExampleDirFS() {
 	root := sysfs.DirFS(".")
 
-	moduleConfig = wazero.NewModuleConfig().
-		WithFSConfig(wazero.NewFSConfig().(sysfs.FSConfig).WithSysFSMount(root, "/"))
+	moduleConfig = wazy.NewModuleConfig().
+		WithFSConfig(wazy.NewFSConfig().(sysfs.FSConfig).WithSysFSMount(root, "/"))
 
 	// Output:
 }
@@ -39,8 +39,8 @@ func ExampleReadFS() {
 	root := sysfs.DirFS(".")
 	readOnly := &sysfs.ReadFS{FS: root}
 
-	moduleConfig = wazero.NewModuleConfig().
-		WithFSConfig(wazero.NewFSConfig().(sysfs.FSConfig).WithSysFSMount(readOnly, "/"))
+	moduleConfig = wazy.NewModuleConfig().
+		WithFSConfig(wazy.NewFSConfig().(sysfs.FSConfig).WithSysFSMount(readOnly, "/"))
 
 	// Output:
 }

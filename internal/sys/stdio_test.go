@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	experimentalsys "github.com/tetratelabs/wazero/experimental/sys"
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
+	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
 // pollableReader is a mock io.Reader that implements experimentalsys.Pollable.

@@ -2,7 +2,7 @@ package sys
 
 import "strconv"
 
-// Errno is a subset of POSIX errno used by wazero interfaces. Zero is not an
+// Errno is a subset of POSIX errno used by wazy interfaces. Zero is not an
 // error. Other values should not be interpreted numerically, rather by constants
 // prefixed with 'E'.
 //
@@ -15,7 +15,7 @@ type Errno uint16
 // that would introduce a package cycle.
 
 // This is a subset of errors to reduce implementation burden. `wasip1` defines
-// almost all POSIX error numbers, but not all are used in practice. wazero
+// almost all POSIX error numbers, but not all are used in practice. wazy
 // will add ones needed in POSIX order, as needed by functions that explicitly
 // document returning them.
 //

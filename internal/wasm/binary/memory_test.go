@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/internal/testing/binaryencoding"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 func Test_newMemorySizer(t *testing.T) {
@@ -160,7 +160,7 @@ func TestMemoryType(t *testing.T) {
 			expected: []byte{0x1, 0x80, 0x80, 0x4, 0x80, 0x80, 0x4},
 		},
 		{
-			name:             "min 0, max largest, wazero limit",
+			name:             "min 0, max largest, wazy limit",
 			input:            &wasm.Memory{Max: max, IsMaxEncoded: true},
 			memoryLimitPages: 512,
 			expected:         []byte{0x1, 0, 0x80, 0x80, 0x4},

@@ -11,18 +11,18 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/internal/expctxkeys"
-	"github.com/tetratelabs/wazero/internal/filecache"
-	"github.com/tetratelabs/wazero/internal/internalapi"
-	"github.com/tetratelabs/wazero/internal/moremath"
-	"github.com/tetratelabs/wazero/internal/wasm"
-	"github.com/tetratelabs/wazero/internal/wasmdebug"
-	"github.com/tetratelabs/wazero/internal/wasmruntime"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/internal/expctxkeys"
+	"github.com/samyfodil/wazy/internal/filecache"
+	"github.com/samyfodil/wazy/internal/internalapi"
+	"github.com/samyfodil/wazy/internal/moremath"
+	"github.com/samyfodil/wazy/internal/wasm"
+	"github.com/samyfodil/wazy/internal/wasmdebug"
+	"github.com/samyfodil/wazy/internal/wasmruntime"
 )
 
-// callStackCeiling is the maximum WebAssembly call frame stack height. This allows wazero to raise
+// callStackCeiling is the maximum WebAssembly call frame stack height. This allows wazy to raise
 // wasm.ErrCallStackOverflow instead of overflowing the Go runtime.
 //
 // The default value should suffice for most use cases. Those wishing to change this can via `go build -ldflags`.
@@ -168,7 +168,7 @@ func (t *thrownException) doRestore(ce *callEngine, callerFrameCount int) {
 //
 // This implements api.Function.
 type callEngine struct {
-	internalapi.WazeroOnlyType
+	internalapi.WazyOnlyType
 
 	// stack contains the operands.
 	// Note that all the values are represented as uint64.

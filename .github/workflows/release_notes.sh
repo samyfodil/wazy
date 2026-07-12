@@ -1,6 +1,6 @@
 #!/bin/sh -ue
 #
-# This script generates the release notes "wazero" for a specific release tag.
+# This script generates the release notes "wazy" for a specific release tag.
 # .github/workflows/release_notes.sh v1.3.0
 
 tag=$1
@@ -17,7 +17,7 @@ changelog=$(git log --format='%h %s %aN, %(trailers:key=co-authored-by)' "${rang
 # strip the v off the tag name more shell portable than ${tag:1}
 version=$(echo "${tag}" | cut -c2-100) || exit 1
 cat <<EOF
-wazero ${version} supports X and Y and notably fixes Z
+wazy ${version} supports X and Y and notably fixes Z
 
 TODO: classify the below into up to 4 major headings and the rest as bulleted items in minor changes
 The published release notes should only include the summary statement in this section.
@@ -28,7 +28,7 @@ ${changelog}
 
 Don't forget to cite who was involved and why
 
-## wazero Y
+## wazy Y
 
 ## Minor changes
 

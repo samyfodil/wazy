@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/tetratelabs/wazero/internal/internalapi"
+	"github.com/samyfodil/wazy/internal/internalapi"
 )
 
 // ExternType classifies imports and exports with their respective types.
@@ -92,9 +92,9 @@ const (
 
 	// ValueTypeExternref is a externref type.
 	//
-	// Note: in wazero, externref type value are opaque raw 64-bit pointers,
+	// Note: in wazy, externref type value are opaque raw 64-bit pointers,
 	// and the ValueTypeExternref type in the signature will be translated as
-	// uintptr in wazero's API level.
+	// uintptr in wazy's API level.
 	//
 	// For example, given the import function:
 	//	(func (import "env" "f") (param externref) (result externref))
@@ -134,15 +134,15 @@ func ValueTypeName(t ValueType) string {
 
 // Module is a sandboxed, ready to execute Wasm module. This can be used to get exported functions, etc.
 //
-// In WebAssembly terminology, this corresponds to a "Module Instance", but wazero calls pre-instantiation module as
-// "Compiled Module" as in wazero.CompiledModule, therefore we call this post-instantiation module simply "Module".
+// In WebAssembly terminology, this corresponds to a "Module Instance", but wazy calls pre-instantiation module as
+// "Compiled Module" as in wazy.CompiledModule, therefore we call this post-instantiation module simply "Module".
 // See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#module-instances%E2%91%A0
 //
 // # Notes
 //
 //   - This is an interface for decoupling, not third-party implementations.
-//     All implementations are in wazero.
-//   - Closing the wazero.Runtime closes any Module it instantiated.
+//     All implementations are in wazy.
+//   - Closing the wazy.Runtime closes any Module it instantiated.
 type Module interface {
 	fmt.Stringer
 
@@ -155,7 +155,7 @@ type Module interface {
 	// ExportedFunction returns a function exported from this module or nil if it wasn't.
 	//
 	// # Notes
-	//   - The default wazero.ModuleConfig attempts to invoke `_start`, which
+	//   - The default wazy.ModuleConfig attempts to invoke `_start`, which
 	//     in rare cases can close the module. When in doubt, check IsClosed prior
 	//     to invoking a function export after instantiation.
 	//   - The semantics of host functions assumes the existence of an "importing module" because, for example, the host function needs access to
@@ -207,7 +207,7 @@ type Module interface {
 	//   - Closer was called directly.
 	//   - A guest function called Closer indirectly, such as `_start` calling
 	//     `proc_exit`, which internally closed the module.
-	//   - wazero.RuntimeConfig `WithCloseOnContextDone` was enabled and a
+	//   - wazy.RuntimeConfig `WithCloseOnContextDone` was enabled and a
 	//     context completion closed the module.
 	//
 	// Where any of the above are possible, check this value before calling an
@@ -216,7 +216,7 @@ type Module interface {
 	// the module successfully will not result it one.
 	IsClosed() bool
 
-	internalapi.WazeroOnly
+	internalapi.WazyOnly
 }
 
 // Closer closes a resource.
@@ -224,7 +224,7 @@ type Module interface {
 // # Notes
 //
 //   - This is an interface for decoupling, not third-party implementations.
-//     All implementations are in wazero.
+//     All implementations are in wazy.
 type Closer interface {
 	// Close closes the resource.
 	//
@@ -235,14 +235,14 @@ type Closer interface {
 }
 
 // ExportDefinition is a WebAssembly type exported in a module
-// (wazero.CompiledModule).
+// (wazy.CompiledModule).
 //
 // See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#exports%E2%91%A0
 //
 // # Notes
 //
 //   - This is an interface for decoupling, not third-party implementations.
-//     All implementations are in wazero.
+//     All implementations are in wazy.
 type ExportDefinition interface {
 	// ModuleName is the possibly empty name of the module defining this
 	// export.
@@ -267,18 +267,18 @@ type ExportDefinition interface {
 	// so "" is possible.
 	ExportNames() []string
 
-	internalapi.WazeroOnly
+	internalapi.WazyOnly
 }
 
 // MemoryDefinition is a WebAssembly memory exported in a module
-// (wazero.CompiledModule). Units are in pages (64KB).
+// (wazy.CompiledModule). Units are in pages (64KB).
 //
 // See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#exports%E2%91%A0
 //
 // # Notes
 //
 //   - This is an interface for decoupling, not third-party implementations.
-//     All implementations are in wazero.
+//     All implementations are in wazy.
 type MemoryDefinition interface {
 	ExportDefinition
 
@@ -289,18 +289,18 @@ type MemoryDefinition interface {
 	// unbounded.
 	Max() (uint32, bool)
 
-	internalapi.WazeroOnly
+	internalapi.WazyOnly
 }
 
 // FunctionDefinition is a WebAssembly function exported in a module
-// (wazero.CompiledModule).
+// (wazy.CompiledModule).
 //
 // See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#exports%E2%91%A0
 //
 // # Notes
 //
 //   - This is an interface for decoupling, not third-party implementations.
-//     All implementations are in wazero.
+//     All implementations are in wazy.
 type FunctionDefinition interface {
 	ExportDefinition
 
@@ -326,7 +326,7 @@ type FunctionDefinition interface {
 	DebugName() string
 
 	// GoFunction is non-nil when implemented by the embedder instead of a wasm
-	// binary, e.g. via wazero.HostModuleBuilder
+	// binary, e.g. via wazy.HostModuleBuilder
 	//
 	// The expected results are nil, GoFunction or GoModuleFunction.
 	GoFunction() interface{}
@@ -353,18 +353,18 @@ type FunctionDefinition interface {
 	// available for one or more results.
 	ResultNames() []string
 
-	internalapi.WazeroOnly
+	internalapi.WazyOnly
 }
 
 // Function is a WebAssembly function exported from an instantiated module
-// (wazero.Runtime InstantiateModule).
+// (wazy.Runtime InstantiateModule).
 //
 // See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#syntax-func
 //
 // # Notes
 //
 //   - This is an interface for decoupling, not third-party implementations.
-//     All implementations are in wazero.
+//     All implementations are in wazy.
 type Function interface {
 	// Definition is metadata about this function from its defining module.
 	Definition() FunctionDefinition
@@ -389,7 +389,7 @@ type Function interface {
 	// When RuntimeConfig.WithCloseOnContextDone is toggled, the invocation of this Call method is ensured to be closed
 	// whenever one of the three conditions is met. In the event of close, sys.ExitError will be returned and
 	// the api.Module from which this api.Function is derived will be made closed. See the documentation of
-	// WithCloseOnContextDone on wazero.RuntimeConfig for detail. See examples in context_done_example_test.go for
+	// WithCloseOnContextDone on wazy.RuntimeConfig for detail. See examples in context_done_example_test.go for
 	// the end-to-end demonstrations of how these terminations can be performed.
 	Call(ctx context.Context, params ...uint64) ([]uint64, error)
 
@@ -421,7 +421,7 @@ type Function interface {
 	//     whether the callee is a host or wasm defined function.
 	CallWithStack(ctx context.Context, stack []uint64) error
 
-	internalapi.WazeroOnly
+	internalapi.WazyOnly
 }
 
 // GoModuleFunction is a Function implemented in Go instead of a wasm binary.
@@ -502,7 +502,7 @@ func (f GoFunc) Call(ctx context.Context, stack []uint64) {
 	f(ctx, stack)
 }
 
-// Global is a WebAssembly 1.0 (20191205) global exported from an instantiated module (wazero.Runtime InstantiateModule).
+// Global is a WebAssembly 1.0 (20191205) global exported from an instantiated module (wazy.Runtime InstantiateModule).
 //
 // For example, if the value is not mutable, you can read it once:
 //
@@ -523,7 +523,7 @@ func (f GoFunc) Call(ctx context.Context, stack []uint64) {
 // # Notes
 //
 //   - This is an interface for decoupling, not third-party implementations.
-//     All implementations are in wazero.
+//     All implementations are in wazy.
 type Global interface {
 	fmt.Stringer
 
@@ -541,7 +541,7 @@ type Global interface {
 // # Notes
 //
 //   - This is an interface for decoupling, not third-party implementations.
-//     All implementations are in wazero.
+//     All implementations are in wazy.
 type MutableGlobal interface {
 	Global
 
@@ -550,7 +550,7 @@ type MutableGlobal interface {
 	// See Global.Type for how to encode this value from a Go type.
 	Set(v uint64)
 
-	internalapi.WazeroOnly
+	internalapi.WazyOnly
 }
 
 // Memory allows restricted access to a module's memory. Notably, this does not allow growing.
@@ -560,7 +560,7 @@ type MutableGlobal interface {
 // # Notes
 //
 //   - This is an interface for decoupling, not third-party implementations.
-//     All implementations are in wazero.
+//     All implementations are in wazy.
 //   - This includes all value types available in WebAssembly 1.0 (20191205) and all are encoded little-endian.
 type Memory interface {
 	// Definition is metadata about this memory from its defining module.
@@ -572,7 +572,7 @@ type Memory interface {
 	// # Notes
 	//
 	//   - This overflows (returns zero) if the memory has the maximum 65536 pages.
-	// 	   As a workaround until wazero v2 to fix the return type, use Grow(0) to obtain the current pages and
+	// 	   As a workaround until wazy v2 to fix the return type, use Grow(0) to obtain the current pages and
 	//     multiply by 65536.
 	//
 	// See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#-hrefsyntax-instr-memorymathsfmemorysize%E2%91%A0
@@ -646,7 +646,7 @@ type Memory interface {
 	// shared. The same exists Wasm side. For example, if Wasm changes its
 	// memory capacity, ex via "memory.grow"), the host slice is no longer
 	// shared. Those who need a stable view must set Wasm memory min=max, or
-	// use wazero.RuntimeConfig WithMemoryCapacityPages to ensure max is always
+	// use wazy.RuntimeConfig WithMemoryCapacityPages to ensure max is always
 	// allocated.
 	Read(offset, byteCount uint32) ([]byte, bool)
 
@@ -683,7 +683,7 @@ type Memory interface {
 	// WriteString writes the string to the underlying buffer at the offset or returns false if out of range.
 	WriteString(offset uint32, v string) bool
 
-	internalapi.WazeroOnly
+	internalapi.WazyOnly
 }
 
 // CustomSection contains the name and raw data of a custom section.
@@ -691,14 +691,14 @@ type Memory interface {
 // # Notes
 //
 //   - This is an interface for decoupling, not third-party implementations.
-//     All implementations are in wazero.
+//     All implementations are in wazy.
 type CustomSection interface {
 	// Name is the name of the custom section
 	Name() string
 	// Data is the raw data of the custom section
 	Data() []byte
 
-	internalapi.WazeroOnly
+	internalapi.WazyOnly
 }
 
 // EncodeExternref encodes the input as a ValueTypeExternref.

@@ -10,12 +10,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/moremath"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasm"
-	"github.com/tetratelabs/wazero/internal/wasmruntime"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/moremath"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasm"
+	"github.com/samyfodil/wazy/internal/wasmruntime"
 )
 
 type (
@@ -107,7 +107,7 @@ func (c commandActionVal) String() string {
 			v = "null"
 		} else {
 			original, _ := strconv.ParseUint(c.Value.(string), 10, 64)
-			// In wazero, externref is opaque pointer, so "0" is considered as null.
+			// In wazy, externref is opaque pointer, so "0" is considered as null.
 			// So in order to treat "externref 0" in spectest non nullref, we increment the value.
 			v = fmt.Sprintf("%d", original+1)
 		}
@@ -273,7 +273,7 @@ func (c commandActionVal) toUint64() (ret uint64) {
 			ret = 0
 		} else {
 			original, _ := strconv.ParseUint(strValue, 10, 64)
-			// In wazero, externref is opaque pointer, so "0" is considered as null.
+			// In wazy, externref is opaque pointer, so "0" is considered as null.
 			// So in order to treat "externref 0" in spectest non nullref, we increment the value.
 			ret = original + 1
 		}
@@ -346,7 +346,7 @@ var spectestWasm []byte
 
 // Run runs all the test inside the testDataFS file system where all the cases are described
 // via JSON files created from wast2json.
-func Run(t *testing.T, testDataFS embed.FS, ctx context.Context, config wazero.RuntimeConfig) {
+func Run(t *testing.T, testDataFS embed.FS, ctx context.Context, config wazy.RuntimeConfig) {
 	files, err := testDataFS.ReadDir("testdata")
 	require.NoError(t, err)
 
@@ -359,7 +359,7 @@ func Run(t *testing.T, testDataFS embed.FS, ctx context.Context, config wazero.R
 	}
 
 	// If the go:embed path resolution was wrong, this fails.
-	// https://github.com/tetratelabs/wazero/issues/247
+	// https://github.com/samyfodil/wazy/issues/247
 	require.True(t, len(caseNames) > 0, "len(caseNames)=%d (not greater than zero)", len(caseNames))
 
 	for _, f := range caseNames {
@@ -377,7 +377,7 @@ func Run(t *testing.T, testDataFS embed.FS, ctx context.Context, config wazero.R
 // where mandatoryLine is the line number which can be run regardless of the lineBegin and lineEnd. It is useful when
 // we only want to run specific command while running "module" command to instantiate a module. If you don't need it,
 // just pass -1.
-func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, config wazero.RuntimeConfig, mandatoryLine, lineBegin, lineEnd int) {
+func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, config wazy.RuntimeConfig, mandatoryLine, lineBegin, lineEnd int) {
 	raw, err := testDataFS.ReadFile(testdataPath(f + ".json"))
 	require.NoError(t, err)
 
@@ -387,12 +387,12 @@ func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, c
 	wastName := basename(base.SourceFile)
 
 	t.Run(wastName, func(t *testing.T) {
-		r := wazero.NewRuntimeWithConfig(ctx, config)
+		r := wazy.NewRuntimeWithConfig(ctx, config)
 		defer func() {
 			require.NoError(t, r.Close(ctx))
 		}()
 
-		_, err := r.InstantiateWithConfig(ctx, spectestWasm, wazero.NewModuleConfig())
+		_, err := r.InstantiateWithConfig(ctx, spectestWasm, wazy.NewModuleConfig())
 		require.NoError(t, err)
 
 		modules := make(map[string]api.Module)
@@ -416,7 +416,7 @@ func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, c
 						registeredName = base.Commands[next].As
 						i++ // Skip the entire "register" command.
 					}
-					mod, err := r.InstantiateWithConfig(ctx, buf, wazero.NewModuleConfig().WithName(registeredName))
+					mod, err := r.InstantiateWithConfig(ctx, buf, wazy.NewModuleConfig().WithName(registeredName))
 					require.NoError(t, err, msg)
 					if c.Name != "" {
 						modules[c.Name] = mod
@@ -469,7 +469,7 @@ func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, c
 						// We don't support direct loading of wast yet.
 						buf, err := testDataFS.ReadFile(testdataPath(c.Filename))
 						require.NoError(t, err, msg)
-						_, err = r.InstantiateWithConfig(ctx, buf, wazero.NewModuleConfig())
+						_, err = r.InstantiateWithConfig(ctx, buf, wazy.NewModuleConfig())
 						require.Error(t, err, msg)
 					}
 				case "assert_trap":
@@ -496,7 +496,7 @@ func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, c
 					}
 					buf, err := testDataFS.ReadFile(testdataPath(c.Filename))
 					require.NoError(t, err, msg)
-					_, err = r.InstantiateWithConfig(ctx, buf, wazero.NewModuleConfig())
+					_, err = r.InstantiateWithConfig(ctx, buf, wazy.NewModuleConfig())
 					require.Error(t, err, msg)
 				case "assert_exhaustion":
 					switch c.Action.ActionType {
@@ -518,7 +518,7 @@ func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, c
 					}
 					buf, err := testDataFS.ReadFile(testdataPath(c.Filename))
 					require.NoError(t, err, msg)
-					_, err = r.InstantiateWithConfig(ctx, buf, wazero.NewModuleConfig())
+					_, err = r.InstantiateWithConfig(ctx, buf, wazy.NewModuleConfig())
 					require.Error(t, err, msg)
 				case "assert_exception":
 					m := lastInstantiatedModule
@@ -540,7 +540,7 @@ func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, c
 				case "assert_uninstantiable":
 					buf, err := testDataFS.ReadFile(testdataPath(c.Filename))
 					require.NoError(t, err, msg)
-					_, err = r.InstantiateWithConfig(ctx, buf, wazero.NewModuleConfig())
+					_, err = r.InstantiateWithConfig(ctx, buf, wazy.NewModuleConfig())
 					if c.Text == "out of bounds table access" {
 						// This is not actually an instantiation error, but assert_trap in the original wast, but wast2json translates it to assert_uninstantiable.
 						// Anyway, this spectest case expects the error due to active element offset ouf of bounds
@@ -548,7 +548,7 @@ func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, c
 						// https://github.com/WebAssembly/spec/blob/d39195773112a22b245ffbe864bab6d1182ccb06/test/core/linking.wast#L264-L274
 						//
 						// In practice, such a module instance can be used for invoking functions without any issue. In addition, we have to
-						// retain functions after the expected "instantiation" failure, so in wazero we choose to not raise error in that case.
+						// retain functions after the expected "instantiation" failure, so in wazy we choose to not raise error in that case.
 						require.NoError(t, err, msg)
 					} else {
 						require.Error(t, err, msg)

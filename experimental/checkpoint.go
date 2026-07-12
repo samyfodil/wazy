@@ -3,7 +3,7 @@ package experimental
 import (
 	"context"
 
-	"github.com/tetratelabs/wazero/internal/expctxkeys"
+	"github.com/samyfodil/wazy/internal/expctxkeys"
 )
 
 // Snapshot holds the execution state at the time of a Snapshotter.Snapshot call.

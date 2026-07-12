@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"unsafe"
 
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/wazevoapi"
-	"github.com/tetratelabs/wazero/internal/internalapi"
-	"github.com/tetratelabs/wazero/internal/wasm"
-	"github.com/tetratelabs/wazero/internal/wasmdebug"
-	"github.com/tetratelabs/wazero/internal/wasmruntime"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/wazevoapi"
+	"github.com/samyfodil/wazy/internal/internalapi"
+	"github.com/samyfodil/wazy/internal/wasm"
+	"github.com/samyfodil/wazy/internal/wasmdebug"
+	"github.com/samyfodil/wazy/internal/wasmruntime"
 )
 
 type (
@@ -361,7 +361,7 @@ func moduleInstanceFromOpaquePtr(ptr *byte) *wasm.ModuleInstance {
 }
 
 type hostFunction struct {
-	internalapi.WazeroOnly
+	internalapi.WazyOnly
 	def            *wasm.FunctionDefinition
 	lookedUpModule *wasm.ModuleInstance
 	g              api.GoModuleFunction

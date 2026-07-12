@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/internalapi"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/internalapi"
 )
 
 // LookupFunction looks up the table by the given index, and returns the api.Function implementation if found,
@@ -35,7 +35,7 @@ func (m *ModuleInstance) LookupFunction(t *TableInstance, typeId FunctionTypeID,
 
 // lookedUpGoFunction implements lookedUpGoModuleFunction.
 type lookedUpGoFunction struct {
-	internalapi.WazeroOnly
+	internalapi.WazyOnly
 	def *FunctionDefinition
 	// lookedUpModule is the *ModuleInstance from which this Go function is looked up, i.e. owner of the table.
 	lookedUpModule *ModuleInstance

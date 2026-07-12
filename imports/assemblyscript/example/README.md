@@ -17,7 +17,7 @@ sad sad world at index.ts:7:3
 
 Note: [index.ts](testdata/index.ts) avoids use of JavaScript functions that use
 I/O, such as [console.log][1]. If your code uses these, compile your code with
-the [wasi-shim][2] and configure in wazero using
+the [wasi-shim][2] and configure in wazy using
 `wasi_snapshot_preview1.Instantiate`.
 
 [1]: https://github.com/AssemblyScript/assemblyscript/blob/v0.26.7/std/assembly/bindings/dom.ts#L143

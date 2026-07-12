@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/testing/nodiff"
+	"github.com/samyfodil/wazy/internal/testing/nodiff"
 )
 
 // TestReRunFailedRequireNoDiffCase re-runs the failed case specified by WASM_BINARY_NAME in testdata directory.

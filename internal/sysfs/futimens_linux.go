@@ -6,7 +6,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	experimentalsys "github.com/tetratelabs/wazero/experimental/sys"
+	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
 )
 
 const _UTIME_OMIT = unix.UTIME_OMIT

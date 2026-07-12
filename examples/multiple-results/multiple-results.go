@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
 )
 
 // main implements functions with multiple returns values, using both an
@@ -34,7 +34,7 @@ func main() {
 	ctx := context.Background()
 
 	// Create a new WebAssembly Runtime.
-	r := wazero.NewRuntime(ctx)
+	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx) // This closes everything this Runtime created.
 
 	// Add a module that uses offset parameters for multiple results defined in WebAssembly.
@@ -43,8 +43,8 @@ func main() {
 		log.Panicln(err)
 	}
 
-	// wazero enables WebAssembly Core Specification 2.0 features by default.
-	runtimeWithMultiValue := wazero.NewRuntime(ctx)
+	// wazy enables WebAssembly Core Specification 2.0 features by default.
+	runtimeWithMultiValue := wazy.NewRuntime(ctx)
 
 	// Add a module that uses multiple results values
 
@@ -81,7 +81,7 @@ var resultOffsetWasm []byte
 
 // resultOffsetWasmFunctions are the WebAssembly equivalent of the Go-defined
 // resultOffsetHostFunctions. The source is in testdata/result_offset.wat
-func resultOffsetWasmFunctions(ctx context.Context, r wazero.Runtime) (api.Module, error) {
+func resultOffsetWasmFunctions(ctx context.Context, r wazy.Runtime) (api.Module, error) {
 	return r.Instantiate(ctx, resultOffsetWasm)
 }
 
@@ -94,7 +94,7 @@ var multiValueWasm []byte
 
 // multiValueWasmFunctions are the WebAssembly equivalent of the Go-defined
 // multiValueHostFunctions. The source is in testdata/multi_value.wat
-func multiValueWasmFunctions(ctx context.Context, r wazero.Runtime) (api.Module, error) {
+func multiValueWasmFunctions(ctx context.Context, r wazy.Runtime) (api.Module, error) {
 	return r.Instantiate(ctx, multiValueWasm)
 }
 
@@ -107,7 +107,7 @@ var multiValueFromImportedHostWasm []byte
 
 // multiValueFromImportedHostWasmFunctions return the WebAssembly which imports the Go-defined "get_age" function.
 // The imported "get_age" function returns multiple results. The source is in testdata/multi_value_imported.wat
-func multiValueFromImportedHostWasmFunctions(ctx context.Context, r wazero.Runtime) (api.Module, error) {
+func multiValueFromImportedHostWasmFunctions(ctx context.Context, r wazy.Runtime) (api.Module, error) {
 	// Instantiate the host module with the exported `get_age` function which returns multiple results.
 	if _, err := r.NewHostModuleBuilder("multi-value/host").
 		// Define a function that returns two results

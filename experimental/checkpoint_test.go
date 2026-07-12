@@ -4,22 +4,22 @@ import (
 	"context"
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
 func TestSnapshotNestedWasmInvocation(t *testing.T) {
 	ctx := context.Background()
 
-	rt := wazero.NewRuntime(ctx)
+	rt := wazy.NewRuntime(ctx)
 	defer rt.Close(ctx)
 
 	sidechannel := 0
 
 	b := rt.NewHostModuleBuilder("example")
-	wazero.HostFunc1(b.NewFunctionBuilder(), func(ctx context.Context, mod api.Module, snapshotPtr uint32) int32 {
+	wazy.HostFunc1(b.NewFunctionBuilder(), func(ctx context.Context, mod api.Module, snapshotPtr uint32) int32 {
 		defer func() {
 			sidechannel = 10
 		}()
@@ -35,7 +35,7 @@ func TestSnapshotNestedWasmInvocation(t *testing.T) {
 
 		return 2
 	}).Export("snapshot")
-	wazero.HostProc1(b.NewFunctionBuilder(), func(ctx context.Context, mod api.Module, snapshotPtr uint32) {
+	wazy.HostProc1(b.NewFunctionBuilder(), func(ctx context.Context, mod api.Module, snapshotPtr uint32) {
 		idx, ok := mod.Memory().ReadUint32Le(snapshotPtr)
 		require.True(t, ok)
 		snapshots := ctx.Value(snapshotsKey{}).(*[]experimental.Snapshot)
@@ -65,11 +65,11 @@ func TestSnapshotNestedWasmInvocation(t *testing.T) {
 func TestSnapshotMultipleWasmInvocations(t *testing.T) {
 	ctx := context.Background()
 
-	rt := wazero.NewRuntime(ctx)
+	rt := wazy.NewRuntime(ctx)
 	defer rt.Close(ctx)
 
 	b := rt.NewHostModuleBuilder("example")
-	wazero.HostFunc1(b.NewFunctionBuilder(), func(ctx context.Context, mod api.Module, snapshotPtr uint32) int32 {
+	wazy.HostFunc1(b.NewFunctionBuilder(), func(ctx context.Context, mod api.Module, snapshotPtr uint32) int32 {
 		snapshot := experimental.GetSnapshotter(ctx).Snapshot()
 		snapshots := ctx.Value(snapshotsKey{}).(*[]experimental.Snapshot)
 		idx := len(*snapshots)
@@ -79,7 +79,7 @@ func TestSnapshotMultipleWasmInvocations(t *testing.T) {
 
 		return 0
 	}).Export("snapshot")
-	wazero.HostProc1(b.NewFunctionBuilder(), func(ctx context.Context, mod api.Module, snapshotPtr uint32) {
+	wazy.HostProc1(b.NewFunctionBuilder(), func(ctx context.Context, mod api.Module, snapshotPtr uint32) {
 		idx, ok := mod.Memory().ReadUint32Le(snapshotPtr)
 		require.True(t, ok)
 		snapshots := ctx.Value(snapshotsKey{}).(*[]experimental.Snapshot)

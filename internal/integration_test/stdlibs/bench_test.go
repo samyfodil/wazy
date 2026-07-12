@@ -12,35 +12,35 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/sys"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/imports/wasi_snapshot_preview1"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/sys"
 )
 
 func BenchmarkZig(b *testing.B) {
-	c := wazero.NewRuntimeConfigCompiler()
+	c := wazy.NewRuntimeConfigCompiler()
 	runtBenches(b, context.Background(), c, zigTestCase)
 }
 
 func BenchmarkWasip1(b *testing.B) {
-	c := wazero.NewRuntimeConfigCompiler()
+	c := wazy.NewRuntimeConfigCompiler()
 	runtBenches(b, context.Background(), c, wasip1TestCase)
 }
 
 type testCase struct {
 	name, dir    string
-	readTestCase func(fpath string, fname string) (_ []byte, c wazero.ModuleConfig, stdout, stderr *os.File, err error)
+	readTestCase func(fpath string, fname string) (_ []byte, c wazy.ModuleConfig, stdout, stderr *os.File, err error)
 }
 
 var (
 	zigTestCase = testCase{
 		name: "zig",
 		dir:  "testdata/zig/",
-		readTestCase: func(fpath string, fname string) (_ []byte, c wazero.ModuleConfig, stdout, stderr *os.File, err error) {
+		readTestCase: func(fpath string, fname string) (_ []byte, c wazy.ModuleConfig, stdout, stderr *os.File, err error) {
 			bin, err := os.ReadFile(fpath)
 			c, stdout, stderr = defaultModuleConfig()
-			c = c.WithFSConfig(wazero.NewFSConfig().WithDirMount(".", "/")).
+			c = c.WithFSConfig(wazy.NewFSConfig().WithDirMount(".", "/")).
 				WithArgs("test.wasm")
 			return bin, c, stdout, stderr, err
 		},
@@ -48,7 +48,7 @@ var (
 	wasip1TestCase = testCase{
 		name: "wasip1",
 		dir:  "testdata/go/",
-		readTestCase: func(fpath string, fname string) (_ []byte, c wazero.ModuleConfig, stdout, stderr *os.File, err error) {
+		readTestCase: func(fpath string, fname string) (_ []byte, c wazy.ModuleConfig, stdout, stderr *os.File, err error) {
 			if !strings.HasSuffix(fname, ".test") {
 				return nil, nil, nil, nil, nil
 			}
@@ -72,10 +72,10 @@ var (
 
 			c, stdout, stderr = defaultModuleConfig()
 			c = c.WithFSConfig(
-				wazero.NewFSConfig().
+				wazy.NewFSConfig().
 					WithDirMount(sysroot, "/")).
 				WithEnv("PWD", normalizedTestdir).
-				WithEnv("GOWASIRUNTIME", "wazero")
+				WithEnv("GOWASIRUNTIME", "wazy")
 
 			args := []string{fname, "-test.short", "-test.v"}
 
@@ -112,7 +112,7 @@ var (
 	}
 )
 
-func runtBenches(b *testing.B, ctx context.Context, rc wazero.RuntimeConfig, tc testCase) {
+func runtBenches(b *testing.B, ctx context.Context, rc wazy.RuntimeConfig, tc testCase) {
 	cwd, _ := os.Getwd()
 	files, err := os.ReadDir(tc.dir)
 	require.NoError(b, err)
@@ -132,14 +132,14 @@ func runtBenches(b *testing.B, ctx context.Context, rc wazero.RuntimeConfig, tc 
 		b.Run("Compile/"+fname, func(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				r := wazero.NewRuntimeWithConfig(ctx, rc)
+				r := wazy.NewRuntimeWithConfig(ctx, rc)
 				_, err := r.CompileModule(ctx, bin)
 				require.NoError(b, err)
 				require.NoError(b, r.Close(ctx))
 			}
 		})
 		b.Run("Run/"+fname, func(b *testing.B) {
-			r := wazero.NewRuntimeWithConfig(ctx, rc)
+			r := wazy.NewRuntimeWithConfig(ctx, rc)
 			wasi_snapshot_preview1.MustInstantiate(ctx, r)
 			b.Cleanup(func() { r.Close(ctx) })
 
@@ -167,7 +167,7 @@ func normalizeOsPath(path string) string {
 	return testdirnormalized
 }
 
-func defaultModuleConfig() (c wazero.ModuleConfig, stdout, stderr *os.File) {
+func defaultModuleConfig() (c wazy.ModuleConfig, stdout, stderr *os.File) {
 	var err error
 	// Note: do not use os.Stdout or os.Stderr as they will mess up the `-bench` output to be fed to the benchstat tool.
 	stdout, err = os.CreateTemp("", "")
@@ -178,7 +178,7 @@ func defaultModuleConfig() (c wazero.ModuleConfig, stdout, stderr *os.File) {
 	if err != nil {
 		panic(err)
 	}
-	c = wazero.NewModuleConfig().
+	c = wazy.NewModuleConfig().
 		WithSysNanosleep().
 		WithSysNanotime().
 		WithSysWalltime().

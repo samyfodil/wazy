@@ -17,15 +17,15 @@ import (
 	gofstest "testing/fstest"
 	"time"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	experimentalsock "github.com/tetratelabs/wazero/experimental/sock"
-	experimentalsys "github.com/tetratelabs/wazero/experimental/sys"
-	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
-	"github.com/tetratelabs/wazero/internal/fstest"
-	internalsys "github.com/tetratelabs/wazero/internal/sys"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/sys"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	experimentalsock "github.com/samyfodil/wazy/experimental/sock"
+	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
+	"github.com/samyfodil/wazy/imports/wasi_snapshot_preview1"
+	"github.com/samyfodil/wazy/internal/fstest"
+	internalsys "github.com/samyfodil/wazy/internal/sys"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/sys"
 )
 
 // sleepALittle directly slows down test execution. So, use this sparingly and
@@ -96,8 +96,8 @@ const direntCountTons = 8096
 func testFdReaddirLs(t *testing.T, bin []byte, toolchain, rootDir string, expectDots int) {
 	t.Helper()
 
-	moduleConfig := wazero.NewModuleConfig().
-		WithFSConfig(wazero.NewFSConfig().
+	moduleConfig := wazy.NewModuleConfig().
+		WithFSConfig(wazy.NewFSConfig().
 			WithReadOnlyDirMount(path.Join(rootDir, "dir"), "/"))
 
 	t.Run("empty directory", func(t *testing.T) {
@@ -140,8 +140,8 @@ ENOTDIR
 	})
 
 	t.Run("directory with tons of entries", func(t *testing.T) {
-		moduleConfig = wazero.NewModuleConfig().
-			WithFSConfig(wazero.NewFSConfig().
+		moduleConfig = wazy.NewModuleConfig().
+			WithFSConfig(wazy.NewFSConfig().
 				WithReadOnlyDirMount(path.Join(rootDir, "tons"), "/")).
 			WithArgs("wasi", "ls", ".")
 
@@ -192,7 +192,7 @@ func Test_fdReaddir_stat(t *testing.T) {
 }
 
 func testFdReaddirStat(t *testing.T, bin []byte) {
-	moduleConfig := wazero.NewModuleConfig().WithArgs("wasi", "stat")
+	moduleConfig := wazy.NewModuleConfig().WithArgs("wasi", "stat")
 
 	console := compileAndRun(t, testCtx, moduleConfig.WithFS(gofstest.MapFS{}), bin)
 
@@ -218,10 +218,10 @@ func Test_preopen(t *testing.T) {
 }
 
 func testPreopen(t *testing.T, bin []byte) {
-	moduleConfig := wazero.NewModuleConfig().WithArgs("wasi", "preopen")
+	moduleConfig := wazy.NewModuleConfig().WithArgs("wasi", "preopen")
 
 	console := compileAndRun(t, testCtx, moduleConfig.
-		WithFSConfig(wazero.NewFSConfig().
+		WithFSConfig(wazy.NewFSConfig().
 			WithDirMount(".", "/").
 			WithFSMount(gofstest.MapFS{}, "/tmp")), bin)
 
@@ -234,15 +234,15 @@ func testPreopen(t *testing.T, bin []byte) {
 `, "\n"+console)
 }
 
-func compileAndRun(t *testing.T, ctx context.Context, config wazero.ModuleConfig, bin []byte) (console string) {
+func compileAndRun(t *testing.T, ctx context.Context, config wazy.ModuleConfig, bin []byte) (console string) {
 	return compileAndRunWithPreStart(t, ctx, config, bin, nil)
 }
 
-func compileAndRunWithPreStart(t *testing.T, ctx context.Context, config wazero.ModuleConfig, bin []byte, preStart func(t *testing.T, mod api.Module)) (console string) {
+func compileAndRunWithPreStart(t *testing.T, ctx context.Context, config wazy.ModuleConfig, bin []byte, preStart func(t *testing.T, mod api.Module)) (console string) {
 	// same for console and stderr as sometimes the stack trace is in one or the other.
 	var consoleBuf bytes.Buffer
 
-	r := wazero.NewRuntimeWithConfig(ctx, runtimeCfg)
+	r := wazy.NewRuntimeWithConfig(ctx, runtimeCfg)
 	defer r.Close(ctx)
 
 	_, err := wasi_snapshot_preview1.Instantiate(ctx, r)
@@ -324,7 +324,7 @@ func Test_Poll(t *testing.T) {
 		tc := tt
 		t.Run(tc.name, func(t *testing.T) {
 			start := time.Now()
-			console := compileAndRunWithPreStart(t, testCtx, wazero.NewModuleConfig().WithArgs(tc.args...), wasmZigCc,
+			console := compileAndRunWithPreStart(t, testCtx, wazy.NewModuleConfig().WithArgs(tc.args...), wasmZigCc,
 				func(t *testing.T, mod api.Module) {
 					setStdin(t, mod, tc.stdin)
 				})
@@ -345,7 +345,7 @@ func (eofReader) Read([]byte) (int, error) {
 }
 
 func Test_Sleep(t *testing.T) {
-	moduleConfig := wazero.NewModuleConfig().WithArgs("wasi", "sleepmillis", "100").WithSysNanosleep()
+	moduleConfig := wazy.NewModuleConfig().WithArgs("wasi", "sleepmillis", "100").WithSysNanosleep()
 	start := time.Now()
 	console := compileAndRun(t, testCtx, moduleConfig, wasmZigCc)
 	require.True(t, time.Since(start) >= 100*time.Millisecond)
@@ -375,9 +375,9 @@ func testOpenWriteOnly(t *testing.T, bin []byte) {
 
 func testOpen(t *testing.T, cmd string, bin []byte) {
 	t.Run(cmd, func(t *testing.T) {
-		moduleConfig := wazero.NewModuleConfig().
+		moduleConfig := wazy.NewModuleConfig().
 			WithArgs("wasi", "open-"+cmd).
-			WithFSConfig(wazero.NewFSConfig().WithDirMount(t.TempDir(), "/"))
+			WithFSConfig(wazy.NewFSConfig().WithDirMount(t.TempDir(), "/"))
 
 		console := compileAndRun(t, testCtx, moduleConfig, bin)
 		require.Equal(t, "OK", strings.TrimSpace(console))
@@ -405,7 +405,7 @@ func Test_Sock(t *testing.T) {
 func testSock(t *testing.T, bin []byte) {
 	sockCfg := experimentalsock.NewConfig().WithTCPListener("127.0.0.1", 0)
 	ctx := experimentalsock.WithConfig(testCtx, sockCfg)
-	moduleConfig := wazero.NewModuleConfig().WithArgs("wasi", "sock")
+	moduleConfig := wazy.NewModuleConfig().WithArgs("wasi", "sock")
 	tcpAddrCh := make(chan *net.TCPAddr, 1)
 	ch := make(chan string, 1)
 	go func() {
@@ -418,7 +418,7 @@ func testSock(t *testing.T, bin []byte) {
 	// Give a little time for _start to complete
 	sleepALittle()
 
-	// Now dial to the initial address, which should be now held by wazero.
+	// Now dial to the initial address, which should be now held by wazy.
 	conn, err := net.Dial("tcp", tcpAddr.String())
 	require.NoError(t, err)
 	defer conn.Close()
@@ -450,7 +450,7 @@ func testHTTP(t *testing.T, bin []byte) {
 	sockCfg := experimentalsock.NewConfig().WithTCPListener("127.0.0.1", 0)
 	ctx := experimentalsock.WithConfig(testCtx, sockCfg)
 
-	moduleConfig := wazero.NewModuleConfig().
+	moduleConfig := wazy.NewModuleConfig().
 		WithSysWalltime().WithSysNanotime(). // HTTP middleware uses both clocks
 		WithArgs("wasi", "http")
 	tcpAddrCh := make(chan *net.TCPAddr, 1)
@@ -466,7 +466,7 @@ func testHTTP(t *testing.T, bin []byte) {
 	sleepALittle()
 
 	// Now, send a POST to the address which we had pre-opened.
-	body := bytes.NewReader([]byte("wazero"))
+	body := bytes.NewReader([]byte("wazy"))
 	req, err := http.NewRequest(http.MethodPost, "http://"+tcpAddr.String(), body)
 	require.NoError(t, err)
 
@@ -477,7 +477,7 @@ func testHTTP(t *testing.T, bin []byte) {
 	require.Equal(t, 200, resp.StatusCode)
 	b, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	require.Equal(t, "wazero\n", string(b))
+	require.Equal(t, "wazy\n", string(b))
 
 	console := <-ch
 	require.Equal(t, "", console)
@@ -510,7 +510,7 @@ func testStdin(t *testing.T, bin []byte) {
 		stdoutReader.Close()
 	}()
 	require.NoError(t, err)
-	moduleConfig := wazero.NewModuleConfig().
+	moduleConfig := wazy.NewModuleConfig().
 		WithSysNanotime(). // poll_oneoff requires nanotime.
 		WithArgs("wasi", "stdin").
 		WithStdin(stdinReader).
@@ -518,7 +518,7 @@ func testStdin(t *testing.T, bin []byte) {
 	ch := make(chan struct{}, 1)
 	go func() {
 		defer close(ch)
-		r := wazero.NewRuntimeWithConfig(testCtx, runtimeCfg)
+		r := wazy.NewRuntimeWithConfig(testCtx, runtimeCfg)
 		defer func() {
 			require.NoError(t, r.Close(testCtx))
 		}()
@@ -548,7 +548,7 @@ func testStdin(t *testing.T, bin []byte) {
 func Test_LargeStdout(t *testing.T) {
 	if wasmGo != nil {
 		var buf bytes.Buffer
-		r := wazero.NewRuntimeWithConfig(testCtx, runtimeCfg)
+		r := wazy.NewRuntimeWithConfig(testCtx, runtimeCfg)
 		defer func() {
 			require.NoError(t, r.Close(testCtx))
 		}()
@@ -559,7 +559,7 @@ func Test_LargeStdout(t *testing.T) {
 		compiled, err := r.CompileModule(testCtx, wasmGo)
 		require.NoError(t, err)
 
-		_, err = r.InstantiateModule(testCtx, compiled, wazero.NewModuleConfig().
+		_, err = r.InstantiateModule(testCtx, compiled, wazy.NewModuleConfig().
 			WithArgs("wasi", "largestdout").
 			WithStdout(&buf)) // clear
 		require.NoError(t, err)

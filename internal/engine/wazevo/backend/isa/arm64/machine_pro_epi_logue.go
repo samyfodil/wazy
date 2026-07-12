@@ -3,8 +3,8 @@ package arm64
 import (
 	"fmt"
 
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/backend/regalloc"
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/wazevoapi"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/backend/regalloc"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/wazevoapi"
 )
 
 // PostRegAlloc implements backend.Machine.

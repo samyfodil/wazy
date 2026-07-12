@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
 func TestFileCache_Add(t *testing.T) {
@@ -116,7 +116,7 @@ func TestFileCache_Get(t *testing.T) {
 }
 
 func TestFileCache_path(t *testing.T) {
-	fc := &fileCache{dirPath: "/tmp/.wazero"}
+	fc := &fileCache{dirPath: "/tmp/.wazy"}
 	actual := fc.path(Key{1, 2, 3, 4, 5})
-	require.Equal(t, "/tmp/.wazero/0102030405000000000000000000000000000000000000000000000000000000", actual)
+	require.Equal(t, "/tmp/.wazy/0102030405000000000000000000000000000000000000000000000000000000", actual)
 }

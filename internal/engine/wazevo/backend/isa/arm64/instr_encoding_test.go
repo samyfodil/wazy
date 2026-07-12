@@ -7,9 +7,9 @@ import (
 	"math"
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/backend/regalloc"
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/ssa"
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/backend/regalloc"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/ssa"
+	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
 func Test_dummy(t *testing.T) {
@@ -1855,7 +1855,7 @@ func TestInstruction_encode(t *testing.T) {
 			m := &machine{compiler: mc}
 			m.encode(i)
 			// Note: for quick iteration we can use golang.org/x/arch package to verify the encoding.
-			// 	but wazero doesn't add even a test dependency to it, so commented out.
+			// 	but wazy doesn't add even a test dependency to it, so commented out.
 			// inst, err := arm64asm.Decode(m.buf)
 			// require.NoError(t, err, hex.EncodeToString(m.buf))
 			// fmt.Println(inst.String())
@@ -1912,7 +1912,7 @@ func TestInstruction_encode_br_condflag(t *testing.T) {
 		_, _, m := newSetupWithMockContext()
 		i.encode(m)
 		// Note: for quick iteration we can use golang.org/x/arch package to verify the encoding.
-		// 	but wazero doesn't add even a test dependency to it, so commented out.
+		// 	but wazy doesn't add even a test dependency to it, so commented out.
 		// inst, err := arm64asm.Decode(m.buf)
 		// require.NoError(t, err)
 		// fmt.Println(inst.String())
@@ -2243,7 +2243,7 @@ func TestInstruction_encoding_store_encoding(t *testing.T) {
 			_, _, m := newSetupWithMockContext()
 			i.encode(m)
 			// Note: for quick iteration we can use golang.org/x/arch package to verify the encoding.
-			// 	but wazero doesn't add even a test dependency to it, so commented out.
+			// 	but wazy doesn't add even a test dependency to it, so commented out.
 			// inst, err := arm64asm.Decode(m.buf)
 			// require.NoError(t, err)
 			// fmt.Println(inst.String())

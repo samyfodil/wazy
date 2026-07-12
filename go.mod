@@ -1,6 +1,6 @@
-module github.com/tetratelabs/wazero
+module github.com/samyfodil/wazy
 
-// Floor Go version of wazero (current - 1)
+// Floor Go version of wazy (current - 1)
 go 1.25.0
 
 // All the beta tags are retracted and replaced with "pre" to prevent users

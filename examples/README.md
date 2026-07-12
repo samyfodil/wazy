@@ -1,6 +1,6 @@
-## wazero examples
+## wazy examples
 
-The following example projects can help you practice WebAssembly with wazero:
+The following example projects can help you practice WebAssembly with wazy:
 
 * [allocation](allocation) - how to pass strings in and out of WebAssembly
   functions defined in Rust or TinyGo.
@@ -16,5 +16,5 @@ The following example projects can help you practice WebAssembly with wazero:
 * [wasi](../imports/wasi_snapshot_preview1/example) - how to use I/O in your
   WebAssembly modules using WASI (WebAssembly System Interface).
 
-Please [open an issue](https://github.com/tetratelabs/wazero/issues/new) if you
+Please [open an issue](https://github.com/samyfodil/wazy/issues/new) if you
 would like to see another example.

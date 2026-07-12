@@ -6,10 +6,10 @@ import (
 )
 
 // Cache allows the compiler engine to skip compilation of wasm to machine code
-// where doing so is redundant for the same wasm binary and version of wazero.
+// where doing so is redundant for the same wasm binary and version of wazy.
 //
 // This augments the default in-memory cache of compiled functions, by
-// decoupling it from a wazero.Runtime instance. Concretely, a runtime loses
+// decoupling it from a wazy.Runtime instance. Concretely, a runtime loses
 // its cache once closed. This cache allows the runtime to rebuild its
 // in-memory cache quicker, significantly reducing first-hit penalty on a hit.
 //
@@ -32,9 +32,9 @@ type Cache interface {
 	Add(key Key, content io.Reader) (err error)
 	//
 	// Delete is called when the cache on the `key` returned by Get is no longer usable, and
-	// must be purged. Specifically, this is called happens when the wazero's version has been changed.
-	// For example, that is when there's a difference between the version of compiling wazero and the
-	// version of the currently used wazero.
+	// must be purged. Specifically, this is called happens when the wazy's version has been changed.
+	// For example, that is when there's a difference between the version of compiling wazy and the
+	// version of the currently used wazy.
 	Delete(key Key) (err error)
 }
 

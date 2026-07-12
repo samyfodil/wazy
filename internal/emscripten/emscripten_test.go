@@ -4,17 +4,17 @@ import (
 	"context"
 	"testing"
 
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental/wazerotest"
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/experimental/wazytest"
+	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
 func Test_callOnPanic(t *testing.T) {
 	const exists = "f"
 	var called bool
-	f := wazerotest.NewFunction(func(context.Context, api.Module) { called = true })
+	f := wazytest.NewFunction(func(context.Context, api.Module) { called = true })
 	f.ExportNames = []string{exists}
-	m := wazerotest.NewModule(nil, f)
+	m := wazytest.NewModule(nil, f)
 	t.Run("exists", func(t *testing.T) {
 		callOrPanic(context.Background(), m, exists, nil)
 		require.True(t, called)

@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tetratelabs/wazero/experimental/sys"
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/samyfodil/wazy/experimental/sys"
+	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
 func TestPoll_Windows(t *testing.T) {
@@ -92,7 +92,7 @@ func TestPoll_Windows(t *testing.T) {
 		require.Equal(t, 0, npipes)
 		require.Equal(t, 0, nsockets)
 
-		w.Write([]byte("wazero"))
+		w.Write([]byte("wazy"))
 		npipes, nsockets, errno = peekAll(fds, nil)
 		require.Zero(t, errno)
 		require.Equal(t, 1, npipes)
@@ -121,7 +121,7 @@ func TestPoll_Windows(t *testing.T) {
 		require.NoError(t, err)
 		tcp, err := net.DialTCP("tcp", nil, tcpAddr)
 		require.NoError(t, err)
-		tcp.Write([]byte("wazero"))
+		tcp.Write([]byte("wazy"))
 
 		conn.Control(func(fd uintptr) {
 			fds[0].fd = fd

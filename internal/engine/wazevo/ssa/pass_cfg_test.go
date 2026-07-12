@@ -4,7 +4,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
 func TestBuilder_passCalculateImmediateDominators(t *testing.T) {

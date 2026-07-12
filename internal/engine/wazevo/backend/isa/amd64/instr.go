@@ -3,9 +3,9 @@ package amd64
 import (
 	"fmt"
 
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/backend"
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/backend/regalloc"
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/ssa"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/backend"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/backend/regalloc"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/ssa"
 )
 
 type instruction struct {

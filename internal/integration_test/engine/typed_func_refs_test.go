@@ -5,33 +5,33 @@ import (
 	"os"
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/internal/platform"
-	"github.com/tetratelabs/wazero/internal/testing/binaryencoding"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasm"
-	"github.com/tetratelabs/wazero/internal/wasmruntime"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/internal/platform"
+	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasm"
+	"github.com/samyfodil/wazy/internal/wasmruntime"
 )
 
 func typedFuncRefsConfigs() []struct {
 	name   string
-	config wazero.RuntimeConfig
+	config wazy.RuntimeConfig
 } {
 	configs := []struct {
 		name   string
-		config wazero.RuntimeConfig
+		config wazy.RuntimeConfig
 	}{
-		{"interpreter", wazero.NewRuntimeConfigInterpreter().WithCoreFeatures(
+		{"interpreter", wazy.NewRuntimeConfigInterpreter().WithCoreFeatures(
 			api.CoreFeaturesV2 | experimental.CoreFeaturesTypedFunctionReferences,
 		)},
 	}
 	if platform.CompilerSupported() {
 		configs = append(configs, struct {
 			name   string
-			config wazero.RuntimeConfig
-		}{"compiler", wazero.NewRuntimeConfigCompiler().WithCoreFeatures(
+			config wazy.RuntimeConfig
+		}{"compiler", wazy.NewRuntimeConfigCompiler().WithCoreFeatures(
 			api.CoreFeaturesV2 | experimental.CoreFeaturesTypedFunctionReferences,
 		)})
 	}
@@ -49,17 +49,17 @@ func TestCallRefWithConcreteRefLocals(t *testing.T) {
 
 	configs := []struct {
 		name   string
-		config wazero.RuntimeConfig
+		config wazy.RuntimeConfig
 	}{
-		{"interpreter", wazero.NewRuntimeConfigInterpreter().WithCoreFeatures(
+		{"interpreter", wazy.NewRuntimeConfigInterpreter().WithCoreFeatures(
 			api.CoreFeaturesV2 | experimental.CoreFeaturesTypedFunctionReferences | experimental.CoreFeaturesTailCall,
 		)},
 	}
 	if platform.CompilerSupported() {
 		configs = append(configs, struct {
 			name   string
-			config wazero.RuntimeConfig
-		}{"compiler", wazero.NewRuntimeConfigCompiler().WithCoreFeatures(
+			config wazy.RuntimeConfig
+		}{"compiler", wazy.NewRuntimeConfigCompiler().WithCoreFeatures(
 			api.CoreFeaturesV2 | experimental.CoreFeaturesTypedFunctionReferences | experimental.CoreFeaturesTailCall,
 		)})
 	}
@@ -67,10 +67,10 @@ func TestCallRefWithConcreteRefLocals(t *testing.T) {
 	for _, tc := range configs {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			r := wazero.NewRuntimeWithConfig(ctx, tc.config)
+			r := wazy.NewRuntimeWithConfig(ctx, tc.config)
 			defer r.Close(ctx)
 
-			inst, err := r.InstantiateWithConfig(ctx, buf, wazero.NewModuleConfig())
+			inst, err := r.InstantiateWithConfig(ctx, buf, wazy.NewModuleConfig())
 			require.NoError(t, err)
 
 			fn := inst.ExportedFunction("run")
@@ -116,11 +116,11 @@ func TestCallRefTrapOnNull(t *testing.T) {
 	for _, tc := range typedFuncRefsConfigs() {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			r := wazero.NewRuntimeWithConfig(ctx, tc.config)
+			r := wazy.NewRuntimeWithConfig(ctx, tc.config)
 			defer r.Close(ctx)
 
 			buf := binaryencoding.EncodeModule(mod)
-			inst, err := r.InstantiateWithConfig(ctx, buf, wazero.NewModuleConfig())
+			inst, err := r.InstantiateWithConfig(ctx, buf, wazy.NewModuleConfig())
 			require.NoError(t, err)
 
 			_, err = inst.ExportedFunction("test").Call(ctx)
@@ -157,11 +157,11 @@ func TestRefAsNonNullTrapOnNull(t *testing.T) {
 	for _, tc := range typedFuncRefsConfigs() {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			r := wazero.NewRuntimeWithConfig(ctx, tc.config)
+			r := wazy.NewRuntimeWithConfig(ctx, tc.config)
 			defer r.Close(ctx)
 
 			buf := binaryencoding.EncodeModule(mod)
-			inst, err := r.InstantiateWithConfig(ctx, buf, wazero.NewModuleConfig())
+			inst, err := r.InstantiateWithConfig(ctx, buf, wazy.NewModuleConfig())
 			require.NoError(t, err)
 
 			_, err = inst.ExportedFunction("test").Call(ctx)
@@ -181,10 +181,10 @@ func TestBrOnNull(t *testing.T) {
 	for _, tc := range typedFuncRefsConfigs() {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			r := wazero.NewRuntimeWithConfig(ctx, tc.config)
+			r := wazy.NewRuntimeWithConfig(ctx, tc.config)
 			defer r.Close(ctx)
 
-			inst, err := r.InstantiateWithConfig(ctx, buf, wazero.NewModuleConfig())
+			inst, err := r.InstantiateWithConfig(ctx, buf, wazy.NewModuleConfig())
 			require.NoError(t, err)
 
 			// null ref → branches, returns -1
@@ -232,10 +232,10 @@ func TestBrOnNonNull(t *testing.T) {
 	for _, tc := range typedFuncRefsConfigs() {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			r := wazero.NewRuntimeWithConfig(ctx, tc.config)
+			r := wazy.NewRuntimeWithConfig(ctx, tc.config)
 			defer r.Close(ctx)
 
-			inst, err := r.InstantiateWithConfig(ctx, buf, wazero.NewModuleConfig())
+			inst, err := r.InstantiateWithConfig(ctx, buf, wazy.NewModuleConfig())
 			require.NoError(t, err)
 
 			// null ref → falls through, returns -1

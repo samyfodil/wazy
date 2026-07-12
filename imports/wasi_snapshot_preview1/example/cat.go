@@ -8,9 +8,9 @@ import (
 	"log"
 	"os"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
-	"github.com/tetratelabs/wazero/sys"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/imports/wasi_snapshot_preview1"
+	"github.com/samyfodil/wazy/sys"
 )
 
 // catFS is an embedded filesystem limited to test.txt
@@ -47,17 +47,17 @@ func main() {
 	ctx := context.Background()
 
 	// Create a new WebAssembly Runtime.
-	r := wazero.NewRuntime(ctx)
+	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx) // This closes everything this Runtime created.
 
-	// Since wazero uses fs.FS, we can use standard libraries to do things like trim the leading path.
+	// Since wazy uses fs.FS, we can use standard libraries to do things like trim the leading path.
 	rooted, err := fs.Sub(catFS, "testdata")
 	if err != nil {
 		log.Panicln(err)
 	}
 
 	// Combine the above into our baseline config, overriding defaults.
-	config := wazero.NewModuleConfig().
+	config := wazy.NewModuleConfig().
 		// By default, I/O streams are discarded and there's no file system.
 		WithStdout(os.Stdout).WithStderr(os.Stderr).WithFS(rooted)
 

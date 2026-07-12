@@ -5,10 +5,10 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/backend/regalloc"
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/ssa"
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/wazevoapi"
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/backend/regalloc"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/ssa"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/wazevoapi"
+	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
 func Test_calleeSavedVRegs(t *testing.T) {

@@ -10,26 +10,26 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/experimental/logging"
-	"github.com/tetratelabs/wazero/internal/integration_test/spectest"
-	v1 "github.com/tetratelabs/wazero/internal/integration_test/spectest/v1"
-	"github.com/tetratelabs/wazero/internal/platform"
-	"github.com/tetratelabs/wazero/internal/testing/binaryencoding"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/experimental/logging"
+	"github.com/samyfodil/wazy/internal/integration_test/spectest"
+	v1 "github.com/samyfodil/wazy/internal/integration_test/spectest/v1"
+	"github.com/samyfodil/wazy/internal/platform"
+	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 func TestFileCache_compiler(t *testing.T) {
 	if !platform.CompilerSupported() {
 		return
 	}
-	runAllFileCacheTests(t, wazero.NewRuntimeConfigCompiler())
+	runAllFileCacheTests(t, wazy.NewRuntimeConfigCompiler())
 }
 
-func runAllFileCacheTests(t *testing.T, config wazero.RuntimeConfig) {
+func runAllFileCacheTests(t *testing.T, config wazy.RuntimeConfig) {
 	t.Run("spectest", func(t *testing.T) {
 		testSpecTestCompilerCache(t, config)
 	})
@@ -41,7 +41,7 @@ func runAllFileCacheTests(t *testing.T, config wazero.RuntimeConfig) {
 	})
 }
 
-func testSpecTestCompilerCache(t *testing.T, config wazero.RuntimeConfig) {
+func testSpecTestCompilerCache(t *testing.T, config wazy.RuntimeConfig) {
 	const cachePathKey = "FILE_CACHE_DIR"
 	cacheDir := os.Getenv(cachePathKey)
 	if len(cacheDir) == 0 {
@@ -81,7 +81,7 @@ func testSpecTestCompilerCache(t *testing.T, config wazero.RuntimeConfig) {
 		require.True(t, len(files) > 0)
 	} else {
 		// Run the spectest with the file cache.
-		cc, err := wazero.NewCompilationCacheWithDir(cacheDir)
+		cc, err := wazy.NewCompilationCacheWithDir(cacheDir)
 		require.NoError(t, err)
 		spectest.Run(t, v1.Testcases, context.Background(),
 			config.WithCompilationCache(cc).WithCoreFeatures(api.CoreFeaturesV1))
@@ -89,7 +89,7 @@ func testSpecTestCompilerCache(t *testing.T, config wazero.RuntimeConfig) {
 }
 
 // TestListeners ensures that compilation cache works as expected on and off with respect to listeners.
-func testListeners(t *testing.T, config wazero.RuntimeConfig) {
+func testListeners(t *testing.T, config wazy.RuntimeConfig) {
 	if !platform.CompilerSupported() {
 		t.Skip()
 	}
@@ -121,21 +121,21 @@ func testListeners(t *testing.T, config wazero.RuntimeConfig) {
 			context.Background(), logging.NewLoggingListenerFactory(out))
 
 		{
-			cc, err := wazero.NewCompilationCacheWithDir(dir)
+			cc, err := wazy.NewCompilationCacheWithDir(dir)
 			require.NoError(t, err)
 			rc := config.WithCompilationCache(cc)
 
-			r := wazero.NewRuntimeWithConfig(ctxWithListener, rc)
+			r := wazy.NewRuntimeWithConfig(ctxWithListener, rc)
 			_, err = r.CompileModule(ctxWithListener, wasmBin)
 			require.NoError(t, err)
 			err = r.Close(ctxWithListener)
 			require.NoError(t, err)
 		}
 
-		cc, err := wazero.NewCompilationCacheWithDir(dir)
+		cc, err := wazy.NewCompilationCacheWithDir(dir)
 		require.NoError(t, err)
 		rc := config.WithCompilationCache(cc)
-		r := wazero.NewRuntimeWithConfig(ctxWithListener, rc)
+		r := wazy.NewRuntimeWithConfig(ctxWithListener, rc)
 		_, err = r.Instantiate(ctxWithListener, wasmBin)
 		require.NoError(t, err)
 		err = r.Close(ctxWithListener)
@@ -158,14 +158,14 @@ func testListeners(t *testing.T, config wazero.RuntimeConfig) {
 
 		// Compile with listeners.
 		{
-			cc, err := wazero.NewCompilationCacheWithDir(dir)
+			cc, err := wazy.NewCompilationCacheWithDir(dir)
 			require.NoError(t, err)
 			rc := config.WithCompilationCache(cc)
 
 			out := bytes.NewBuffer(nil)
 			ctxWithListener := experimental.WithFunctionListenerFactory(
 				context.Background(), logging.NewLoggingListenerFactory(out))
-			r := wazero.NewRuntimeWithConfig(ctxWithListener, rc)
+			r := wazy.NewRuntimeWithConfig(ctxWithListener, rc)
 			_, err = r.CompileModule(ctxWithListener, wasmBin)
 			require.NoError(t, err)
 			err = r.Close(ctxWithListener)
@@ -173,10 +173,10 @@ func testListeners(t *testing.T, config wazero.RuntimeConfig) {
 		}
 
 		// Then compile without listeners -> run it.
-		cc, err := wazero.NewCompilationCacheWithDir(dir)
+		cc, err := wazy.NewCompilationCacheWithDir(dir)
 		require.NoError(t, err)
 		rc := config.WithCompilationCache(cc)
-		r := wazero.NewRuntimeWithConfig(context.Background(), rc)
+		r := wazy.NewRuntimeWithConfig(context.Background(), rc)
 		_, err = r.Instantiate(context.Background(), wasmBin)
 		require.NoError(t, err)
 		err = r.Close(context.Background())
@@ -188,10 +188,10 @@ func testListeners(t *testing.T, config wazero.RuntimeConfig) {
 
 		// Compile without listeners.
 		{
-			cc, err := wazero.NewCompilationCacheWithDir(dir)
+			cc, err := wazy.NewCompilationCacheWithDir(dir)
 			require.NoError(t, err)
 			rc := config.WithCompilationCache(cc)
-			r := wazero.NewRuntimeWithConfig(context.Background(), rc)
+			r := wazy.NewRuntimeWithConfig(context.Background(), rc)
 			_, err = r.CompileModule(context.Background(), wasmBin)
 			require.NoError(t, err)
 			err = r.Close(context.Background())
@@ -203,10 +203,10 @@ func testListeners(t *testing.T, config wazero.RuntimeConfig) {
 		ctxWithListener := experimental.WithFunctionListenerFactory(
 			context.Background(), logging.NewLoggingListenerFactory(out))
 
-		cc, err := wazero.NewCompilationCacheWithDir(dir)
+		cc, err := wazy.NewCompilationCacheWithDir(dir)
 		require.NoError(t, err)
 		rc := config.WithCompilationCache(cc)
-		r := wazero.NewRuntimeWithConfig(ctxWithListener, rc)
+		r := wazy.NewRuntimeWithConfig(ctxWithListener, rc)
 		_, err = r.Instantiate(ctxWithListener, wasmBin)
 		require.NoError(t, err)
 		err = r.Close(ctxWithListener)
@@ -226,7 +226,7 @@ func testListeners(t *testing.T, config wazero.RuntimeConfig) {
 }
 
 // TestWithCloseOnContextDone ensures that compilation cache works as expected on and off with respect to WithCloseOnContextDone config.
-func testWithCloseOnContextDone(t *testing.T, config wazero.RuntimeConfig) {
+func testWithCloseOnContextDone(t *testing.T, config wazy.RuntimeConfig) {
 	var (
 		zero    uint32 = 0
 		wasmBin        = binaryencoding.EncodeModule(&wasm.Module{
@@ -248,21 +248,21 @@ func testWithCloseOnContextDone(t *testing.T, config wazero.RuntimeConfig) {
 		dir := t.TempDir()
 		ctx := context.Background()
 		{
-			cc, err := wazero.NewCompilationCacheWithDir(dir)
+			cc, err := wazy.NewCompilationCacheWithDir(dir)
 			require.NoError(t, err)
 			rc := config.WithCompilationCache(cc).WithCloseOnContextDone(true)
 
-			r := wazero.NewRuntimeWithConfig(ctx, rc)
+			r := wazy.NewRuntimeWithConfig(ctx, rc)
 			_, err = r.CompileModule(ctx, wasmBin)
 			require.NoError(t, err)
 			err = r.Close(ctx)
 			require.NoError(t, err)
 		}
 
-		cc, err := wazero.NewCompilationCacheWithDir(dir)
+		cc, err := wazy.NewCompilationCacheWithDir(dir)
 		require.NoError(t, err)
 		rc := config.WithCompilationCache(cc).WithCloseOnContextDone(true)
-		r := wazero.NewRuntimeWithConfig(ctx, rc)
+		r := wazy.NewRuntimeWithConfig(ctx, rc)
 
 		timeoutCtx, done := context.WithTimeout(ctx, time.Second)
 		defer done()
@@ -276,21 +276,21 @@ func testWithCloseOnContextDone(t *testing.T, config wazero.RuntimeConfig) {
 		dir := t.TempDir()
 		ctx := context.Background()
 		{
-			cc, err := wazero.NewCompilationCacheWithDir(dir)
+			cc, err := wazy.NewCompilationCacheWithDir(dir)
 			require.NoError(t, err)
 			rc := config.WithCompilationCache(cc).WithCloseOnContextDone(false)
 
-			r := wazero.NewRuntimeWithConfig(ctx, rc)
+			r := wazy.NewRuntimeWithConfig(ctx, rc)
 			_, err = r.CompileModule(ctx, wasmBin)
 			require.NoError(t, err)
 			err = r.Close(ctx)
 			require.NoError(t, err)
 		}
 
-		cc, err := wazero.NewCompilationCacheWithDir(dir)
+		cc, err := wazy.NewCompilationCacheWithDir(dir)
 		require.NoError(t, err)
 		rc := config.WithCompilationCache(cc).WithCloseOnContextDone(true)
-		r := wazero.NewRuntimeWithConfig(ctx, rc)
+		r := wazy.NewRuntimeWithConfig(ctx, rc)
 
 		timeoutCtx, done := context.WithTimeout(ctx, time.Second)
 		defer done()

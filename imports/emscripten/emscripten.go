@@ -16,10 +16,10 @@ import (
 	"context"
 	"strings"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	internal "github.com/tetratelabs/wazero/internal/emscripten"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	internal "github.com/samyfodil/wazy/internal/emscripten"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 const i32 = wasm.ValueTypeI32
@@ -30,7 +30,7 @@ const i32 = wasm.ValueTypeI32
 // already instantiated, and don't need to unload it.
 //
 // Deprecated: Due to Emscripten dynamic import generation, InstantiateForModule should be used instead.
-func MustInstantiate(ctx context.Context, r wazero.Runtime) {
+func MustInstantiate(ctx context.Context, r wazy.Runtime) {
 	if _, err := Instantiate(ctx, r); err != nil {
 		panic(err)
 	}
@@ -41,12 +41,12 @@ func MustInstantiate(ctx context.Context, r wazero.Runtime) {
 //
 // # Notes
 //
-//   - Failure cases are documented on wazero.Runtime InstantiateModule.
-//   - Closing the wazero.Runtime has the same effect as closing the result.
+//   - Failure cases are documented on wazy.Runtime InstantiateModule.
+//   - Closing the wazy.Runtime has the same effect as closing the result.
 //   - To add more functions to the "env" module, use FunctionExporter.
 //
 // Deprecated: Due to Emscripten dynamic import generation, InstantiateForModule should be used instead.
-func Instantiate(ctx context.Context, r wazero.Runtime) (api.Closer, error) {
+func Instantiate(ctx context.Context, r wazy.Runtime) (api.Closer, error) {
 	builder := r.NewHostModuleBuilder("env")
 	NewFunctionExporter().ExportFunctions(builder)
 	return builder.Instantiate(ctx)
@@ -58,11 +58,11 @@ func Instantiate(ctx context.Context, r wazero.Runtime) (api.Closer, error) {
 // # Notes
 //
 //   - This is an interface for decoupling, not third-party implementations.
-//     All implementations are in wazero.
+//     All implementations are in wazy.
 type FunctionExporter interface {
-	// ExportFunctions builds functions to export with a wazero.HostModuleBuilder
+	// ExportFunctions builds functions to export with a wazy.HostModuleBuilder
 	// named "env".
-	ExportFunctions(wazero.HostModuleBuilder)
+	ExportFunctions(wazy.HostModuleBuilder)
 }
 
 // NewFunctionExporter returns a FunctionExporter object with trace disabled.
@@ -74,7 +74,7 @@ func NewFunctionExporter() FunctionExporter {
 type functionExporter struct{}
 
 // ExportFunctions implements FunctionExporter.ExportFunctions
-func (functionExporter) ExportFunctions(builder wazero.HostModuleBuilder) {
+func (functionExporter) ExportFunctions(builder wazy.HostModuleBuilder) {
 	exporter := builder.(wasm.HostFuncExporter)
 	exporter.ExportHostFunc(internal.NotifyMemoryGrowth)
 }
@@ -83,7 +83,7 @@ type emscriptenFns []*wasm.HostFunc
 
 // InstantiateForModule instantiates a module named "env" populated with any
 // known functions used in emscripten.
-func InstantiateForModule(ctx context.Context, r wazero.Runtime, guest wazero.CompiledModule) (api.Closer, error) {
+func InstantiateForModule(ctx context.Context, r wazy.Runtime, guest wazy.CompiledModule) (api.Closer, error) {
 	// Create the exporter for the supplied wasm
 	exporter, err := NewFunctionExporterForModule(guest)
 	if err != nil {
@@ -98,7 +98,7 @@ func InstantiateForModule(ctx context.Context, r wazero.Runtime, guest wazero.Co
 
 // NewFunctionExporterForModule returns a guest-specific FunctionExporter,
 // populated with any known functions used in emscripten.
-func NewFunctionExporterForModule(guest wazero.CompiledModule) (FunctionExporter, error) {
+func NewFunctionExporterForModule(guest wazy.CompiledModule) (FunctionExporter, error) {
 	ret := emscriptenFns{}
 	for _, fn := range guest.ImportedFunctions() {
 		importModule, importName, isImport := fn.Import()
@@ -124,7 +124,7 @@ func NewFunctionExporterForModule(guest wazero.CompiledModule) (FunctionExporter
 }
 
 // ExportFunctions implements FunctionExporter.ExportFunctions
-func (i emscriptenFns) ExportFunctions(builder wazero.HostModuleBuilder) {
+func (i emscriptenFns) ExportFunctions(builder wazy.HostModuleBuilder) {
 	exporter := builder.(wasm.HostFuncExporter)
 	for _, fn := range i {
 		exporter.ExportHostFunc(fn)

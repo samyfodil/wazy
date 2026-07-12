@@ -1,10 +1,10 @@
-package wazero
+package wazy
 
 import (
 	"context"
 
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 // HostFunctionBuilder defines a host function (in Go), so that a
@@ -14,11 +14,11 @@ import (
 // WebAssembly signature:
 //
 //   - The strongly-typed HostFunc0-HostFunc8 and HostProc0-HostProc8 helpers
-//     (in the root wazero package) derive the WebAssembly signature from a Go
+//     (in the root wazy package) derive the WebAssembly signature from a Go
 //     function whose parameters and result are numeric (a HostValue),
 //     prefixed by context.Context and api.Module. They are chainable:
 //
-//     wazero.HostFunc2(b, func(ctx context.Context, mod api.Module, x, y uint32) uint32 {
+//     wazy.HostFunc2(b, func(ctx context.Context, mod api.Module, x, y uint32) uint32 {
 //     return x + y
 //     }).Export("add")
 //
@@ -46,7 +46,7 @@ import (
 // # Notes
 //
 //   - This is an interface for decoupling, not third-party implementations.
-//     All implementations are in wazero.
+//     All implementations are in wazy.
 type HostFunctionBuilder interface {
 	// WithGoFunction registers a host function from an explicit WebAssembly
 	// signature and an api.GoFunction that reads parameters from, and writes
@@ -127,13 +127,13 @@ type HostFunctionBuilder interface {
 // function:
 //
 //	ctx := context.Background()
-//	r := wazero.NewRuntime(ctx)
+//	r := wazy.NewRuntime(ctx)
 //	defer r.Close(ctx) // This closes everything this Runtime created.
 //
 //	hello := func(context.Context, api.Module) {
 //		println("hello!")
 //	}
-//	env, _ := wazero.HostProc0(r.NewHostModuleBuilder("env").NewFunctionBuilder(), hello).
+//	env, _ := wazy.HostProc0(r.NewHostModuleBuilder("env").NewFunctionBuilder(), hello).
 //		Export("hello").
 //		Instantiate(ctx)
 //
@@ -147,15 +147,15 @@ type HostFunctionBuilder interface {
 //		Export("get_random_string").
 //		Compile(ctx)
 //
-//	env1, _ := r.InstantiateModule(ctx, compiled, wazero.NewModuleConfig().WithName("env.1"))
-//	env2, _ := r.InstantiateModule(ctx, compiled, wazero.NewModuleConfig().WithName("env.2"))
+//	env1, _ := r.InstantiateModule(ctx, compiled, wazy.NewModuleConfig().WithName("env.1"))
+//	env2, _ := r.InstantiateModule(ctx, compiled, wazy.NewModuleConfig().WithName("env.2"))
 //
 // See HostFunctionBuilder for valid host function signatures and other details.
 //
 // # Notes
 //
 //   - This is an interface for decoupling, not third-party implementations.
-//     All implementations are in wazero.
+//     All implementations are in wazy.
 //   - HostModuleBuilder is mutable: each method returns the same instance for
 //     chaining.
 //   - methods do not return errors, to allow chaining. Any validation errors
@@ -180,13 +180,13 @@ type HostModuleBuilder interface {
 	// Here's an example:
 	//
 	//	ctx := context.Background()
-	//	r := wazero.NewRuntime(ctx)
+	//	r := wazy.NewRuntime(ctx)
 	//	defer r.Close(ctx) // This closes everything this Runtime created.
 	//
 	//	hello := func(context.Context, api.Module) {
 	//		println("hello!")
 	//	}
-	//	env, _ := wazero.HostProc0(r.NewHostModuleBuilder("env").NewFunctionBuilder(), hello).
+	//	env, _ := wazy.HostProc0(r.NewHostModuleBuilder("env").NewFunctionBuilder(), hello).
 	//		Export("hello").
 	//		Instantiate(ctx)
 	//

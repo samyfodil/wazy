@@ -5,8 +5,8 @@ import (
 	_ "embed"
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/internal/platform"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/internal/platform"
 )
 
 //go:embed testdata/i32_upper_bits.wasm
@@ -109,10 +109,10 @@ func TestI32UpperBits(t *testing.T) {
 
 	for _, engine := range []struct {
 		name   string
-		config wazero.RuntimeConfig
+		config wazy.RuntimeConfig
 	}{
-		{"interpreter", wazero.NewRuntimeConfigInterpreter()},
-		{"compiler", wazero.NewRuntimeConfigCompiler()},
+		{"interpreter", wazy.NewRuntimeConfigInterpreter()},
+		{"compiler", wazy.NewRuntimeConfigCompiler()},
 	} {
 		t.Run(engine.name, func(t *testing.T) {
 			if engine.name == "compiler" && !platform.CompilerSupported() {
@@ -120,7 +120,7 @@ func TestI32UpperBits(t *testing.T) {
 			}
 
 			ctx := context.Background()
-			r := wazero.NewRuntimeWithConfig(ctx, engine.config)
+			r := wazy.NewRuntimeWithConfig(ctx, engine.config)
 			defer r.Close(ctx)
 
 			mod, err := r.Instantiate(ctx, i32UpperBitsWasm)
@@ -165,10 +165,10 @@ func TestI32UpperBitsNoDiff(t *testing.T) {
 
 	ctx := context.Background()
 
-	rInterp := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfigInterpreter())
+	rInterp := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigInterpreter())
 	defer rInterp.Close(ctx)
 
-	rComp := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfigCompiler())
+	rComp := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler())
 	defer rComp.Close(ctx)
 
 	modInterp, err := rInterp.Instantiate(ctx, i32UpperBitsWasm)

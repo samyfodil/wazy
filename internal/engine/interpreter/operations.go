@@ -1790,7 +1790,7 @@ func newOperationI32WrapFromI64() unionOperation {
 //
 // See [1] and [2] for when we encounter undefined behavior in the WebAssembly specification if NewOperationITruncFromF.NonTrapping == false.
 // To summarize, if the source float value is NaN or doesn't fit in the destination range of integers (incl. +=Inf),
-// then the runtime behavior is undefined. In wazero, the engines are expected to exit the execution in these undefined cases with
+// then the runtime behavior is undefined. In wazy, the engines are expected to exit the execution in these undefined cases with
 // wasmruntime.ErrRuntimeInvalidConversionToInteger error.
 //
 // [1] https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#-hrefop-trunc-umathrmtruncmathsfu_m-n-z for unsigned integers.
@@ -1989,7 +1989,7 @@ func newOperationTableCopy(srcTableIndex, dstTableIndex uint32) unionOperation {
 // This corresponds to wasm.OpcodeRefFuncName, and engines are expected to
 // push the opaque pointer value of engine specific func for the given FunctionIndex.
 //
-// Note: in wazero, we express any reference types (funcref or externref) as opaque pointers which is uint64.
+// Note: in wazy, we express any reference types (funcref or externref) as opaque pointers which is uint64.
 // Therefore, the engine implementations emit instructions to push the address of *function onto the stack.
 func newOperationRefFunc(functionIndex uint32) unionOperation {
 	return unionOperation{Kind: operationKindRefFunc, U1: uint64(functionIndex)}

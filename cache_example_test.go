@@ -1,4 +1,4 @@
-package wazero_test
+package wazy_test
 
 import (
 	"context"
@@ -6,10 +6,10 @@ import (
 	"log"
 	"os"
 
-	"github.com/tetratelabs/wazero"
+	"github.com/samyfodil/wazy"
 )
 
-// This is a basic example of using the file system compilation cache via wazero.NewCompilationCacheWithDir.
+// This is a basic example of using the file system compilation cache via wazy.NewCompilationCacheWithDir.
 // The main goal is to show how it is configured.
 func Example_compileCache() {
 	// Prepare a cache directory.
@@ -24,9 +24,9 @@ func Example_compileCache() {
 	// Create a runtime config which shares a compilation cache directory.
 	cache := newCompilationCacheWithDir(cacheDir)
 	defer cache.Close(ctx)
-	config := wazero.NewRuntimeConfig().WithCompilationCache(cache)
+	config := wazy.NewRuntimeConfig().WithCompilationCache(cache)
 
-	// Using the same wazero.CompilationCache instance allows the in-memory cache sharing.
+	// Using the same wazy.CompilationCache instance allows the in-memory cache sharing.
 	newRuntimeCompileClose(ctx, config)
 	newRuntimeCompileClose(ctx, config)
 
@@ -39,17 +39,17 @@ func Example_compileCache() {
 	//
 }
 
-func newCompilationCacheWithDir(cacheDir string) wazero.CompilationCache {
-	cache, err := wazero.NewCompilationCacheWithDir(cacheDir)
+func newCompilationCacheWithDir(cacheDir string) wazy.CompilationCache {
+	cache, err := wazy.NewCompilationCacheWithDir(cacheDir)
 	if err != nil {
 		log.Panicln(err)
 	}
 	return cache
 }
 
-// newRuntimeCompileClose creates a new wazero.Runtime, compile a binary, and then delete the runtime.
-func newRuntimeCompileClose(ctx context.Context, config wazero.RuntimeConfig) {
-	r := wazero.NewRuntimeWithConfig(ctx, config)
+// newRuntimeCompileClose creates a new wazy.Runtime, compile a binary, and then delete the runtime.
+func newRuntimeCompileClose(ctx context.Context, config wazy.RuntimeConfig) {
+	r := wazy.NewRuntimeWithConfig(ctx, config)
 	defer r.Close(ctx) // This closes everything this Runtime created except the file system cache.
 
 	_, err := r.CompileModule(ctx, addWasm)

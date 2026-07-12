@@ -10,7 +10,7 @@ $ go run add.go 7 9
 
 ### Compilation
 
-wazero is a WebAssembly runtime, embedded in your host application. To run
+wazy is a WebAssembly runtime, embedded in your host application. To run
 WebAssembly functions, you need access to a WebAssembly Binary (Wasm),
 typically a `%.wasm` file.
 

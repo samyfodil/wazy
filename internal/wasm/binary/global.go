@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"fmt"
 
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 // decodeGlobal returns the api.Global decoded with the WebAssembly 1.0 (20191205) Binary Format.

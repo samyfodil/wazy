@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/wazevoapi"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/wazevoapi"
 )
 
 // passLayoutBlocks implements Builder.LayoutBlocks. This re-organizes builder.reversePostOrderedBasicBlocks.

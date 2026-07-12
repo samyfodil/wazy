@@ -5,14 +5,14 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/platform"
-	"github.com/tetratelabs/wazero/internal/testing/binaryencoding"
-	"github.com/tetratelabs/wazero/internal/testing/hammer"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasm"
-	"github.com/tetratelabs/wazero/sys"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/platform"
+	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
+	"github.com/samyfodil/wazy/internal/testing/hammer"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasm"
+	"github.com/samyfodil/wazy/sys"
 )
 
 var hammers = map[string]testCase{
@@ -26,14 +26,14 @@ func TestEngineCompiler_hammer(t *testing.T) {
 	if !platform.CompilerSupported() {
 		t.Skip()
 	}
-	runAllTests(t, hammers, wazero.NewRuntimeConfigCompiler(), false)
+	runAllTests(t, hammers, wazy.NewRuntimeConfigCompiler(), false)
 }
 
 func TestEngineInterpreter_hammer(t *testing.T) {
-	runAllTests(t, hammers, wazero.NewRuntimeConfigInterpreter(), false)
+	runAllTests(t, hammers, wazy.NewRuntimeConfigInterpreter(), false)
 }
 
-func concurrentCompilationInstantiationExecution(t *testing.T, r wazero.Runtime) {
+func concurrentCompilationInstantiationExecution(t *testing.T, r wazy.Runtime) {
 	P := 16              // max count of goroutines
 	if testing.Short() { // Adjust down if `-test.short`
 		P = 4
@@ -62,7 +62,7 @@ func concurrentCompilationInstantiationExecution(t *testing.T, r wazero.Runtime)
 	}, nil)
 }
 
-func closeImportingModuleWhileInUse(t *testing.T, r wazero.Runtime) {
+func closeImportingModuleWhileInUse(t *testing.T, r wazy.Runtime) {
 	closeModuleWhileInUse(t, r, func(imported, importing api.Module) (api.Module, api.Module) {
 		// Close the importing module, despite calls being in-flight.
 		require.NoError(t, importing.Close(testCtx))
@@ -75,7 +75,7 @@ func closeImportingModuleWhileInUse(t *testing.T, r wazero.Runtime) {
 	})
 }
 
-func closeImportedModuleWhileInUse(t *testing.T, r wazero.Runtime) {
+func closeImportedModuleWhileInUse(t *testing.T, r wazy.Runtime) {
 	closeModuleWhileInUse(t, r, func(imported, importing api.Module) (api.Module, api.Module) {
 		// Close the importing and imported module, despite calls being in-flight.
 		require.NoError(t, importing.Close(testCtx))
@@ -103,7 +103,7 @@ func closeImportedModuleWhileInUse(t *testing.T, r wazero.Runtime) {
 	})
 }
 
-func closeModuleWhileInUse(t *testing.T, r wazero.Runtime, closeFn func(imported, importing api.Module) (api.Module, api.Module)) {
+func closeModuleWhileInUse(t *testing.T, r wazy.Runtime, closeFn func(imported, importing api.Module) (api.Module, api.Module)) {
 	P := 8               // max count of goroutines
 	if testing.Short() { // Adjust down if `-test.short`
 		P = 4

@@ -3,14 +3,14 @@ package wasi_snapshot_preview1_test
 import (
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasip1"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasip1"
 )
 
 func Test_schedYield(t *testing.T) {
 	var yielded bool
-	mod, r, log := requireProxyModule(t, wazero.NewModuleConfig().
+	mod, r, log := requireProxyModule(t, wazy.NewModuleConfig().
 		WithOsyield(func() {
 			yielded = true
 		}))

@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-// These two special exit codes are reserved by wazero for context Cancel and Timeout integrations.
+// These two special exit codes are reserved by wazy for context Cancel and Timeout integrations.
 // The assumption here is that well-behaving Wasm programs won't use these two exit codes.
 const (
 	// ExitCodeContextCanceled corresponds to context.Canceled and returned by ExitError.ExitCode in that case.

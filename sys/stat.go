@@ -32,7 +32,7 @@ type EpochNanos = int64
 //     See https://pubs.opengroup.org/onlinepubs/9699919799/functions/stat.html
 //   - Fields here are required for WebAssembly ABI including wasip1
 //     (a.k.a. wasix) and wasi-filesystem (a.k.a. wasip2).
-//   - This isn't the same as syscall.Stat_t because wazero supports Windows,
+//   - This isn't the same as syscall.Stat_t because wazy supports Windows,
 //     which doesn't have that type. runtime.GOOS that has this already also
 //     have inconsistent field lengths, which complicates wasm binding.
 //   - Use NewStat_t to create this from an existing fs.FileInfo.

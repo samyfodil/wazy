@@ -3,13 +3,13 @@ package wasi_snapshot_preview1_test
 import (
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasip1"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasip1"
 )
 
 func Test_argsGet(t *testing.T) {
-	mod, r, log := requireProxyModule(t, wazero.NewModuleConfig().WithArgs("a", "bc"))
+	mod, r, log := requireProxyModule(t, wazy.NewModuleConfig().WithArgs("a", "bc"))
 	defer r.Close(testCtx)
 
 	argvBuf := uint32(16) // arbitrary offset
@@ -38,7 +38,7 @@ func Test_argsGet(t *testing.T) {
 }
 
 func Test_argsGet_Errors(t *testing.T) {
-	mod, r, log := requireProxyModule(t, wazero.NewModuleConfig().WithArgs("a", "bc"))
+	mod, r, log := requireProxyModule(t, wazy.NewModuleConfig().WithArgs("a", "bc"))
 	defer r.Close(testCtx)
 
 	memorySize := mod.Memory().Size()
@@ -102,7 +102,7 @@ func Test_argsGet_Errors(t *testing.T) {
 }
 
 func Test_argsSizesGet(t *testing.T) {
-	mod, r, log := requireProxyModule(t, wazero.NewModuleConfig().WithArgs("a", "bc"))
+	mod, r, log := requireProxyModule(t, wazy.NewModuleConfig().WithArgs("a", "bc"))
 	defer r.Close(testCtx)
 
 	resultArgc := uint32(16)    // arbitrary offset
@@ -130,7 +130,7 @@ func Test_argsSizesGet(t *testing.T) {
 }
 
 func Test_argsSizesGet_Errors(t *testing.T) {
-	mod, r, log := requireProxyModule(t, wazero.NewModuleConfig().WithArgs("a", "bc"))
+	mod, r, log := requireProxyModule(t, wazy.NewModuleConfig().WithArgs("a", "bc"))
 	defer r.Close(testCtx)
 
 	memorySize := mod.Memory().Size()

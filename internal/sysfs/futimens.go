@@ -5,7 +5,7 @@ package sysfs
 import (
 	"syscall"
 
-	"github.com/tetratelabs/wazero/experimental/sys"
+	"github.com/samyfodil/wazy/experimental/sys"
 )
 
 func timesToTimespecs(atim int64, mtim int64) (times *[2]syscall.Timespec) {

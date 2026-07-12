@@ -4,12 +4,12 @@ import (
 	"context"
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental/table"
-	"github.com/tetratelabs/wazero/internal/testing/binaryencoding"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/experimental/table"
+	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 func TestLookupFunction(t *testing.T) {
@@ -46,7 +46,7 @@ func TestLookupFunction(t *testing.T) {
 		TableSection: []wasm.Table{{Type: wasm.RefTypeFuncref, Min: 100}},
 	})
 
-	r := wazero.NewRuntime(context.Background())
+	r := wazy.NewRuntime(context.Background())
 	m, err := r.Instantiate(context.Background(), bytes)
 	require.NoError(t, err)
 	require.NotNil(t, m)

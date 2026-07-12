@@ -4,13 +4,13 @@ import (
 	"context"
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/testcases"
-	"github.com/tetratelabs/wazero/internal/testing/binaryencoding"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/testcases"
+	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 // TestE2E_tail_call_import implements a test case similar to testcases.TailCallManyParams,
@@ -21,16 +21,16 @@ func TestE2E_tail_call_import(t *testing.T) {
 
 	for _, tc := range []struct {
 		name string
-		cfg  wazero.RuntimeConfig
+		cfg  wazy.RuntimeConfig
 	}{
-		{"interpreter", wazero.NewRuntimeConfigInterpreter()},
-		{"default", wazero.NewRuntimeConfig()},
+		{"interpreter", wazy.NewRuntimeConfigInterpreter()},
+		{"default", wazy.NewRuntimeConfig()},
 	} {
 
 		config := tc.cfg.WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesTailCall)
 
 		t.Run(tc.name, func(t *testing.T) {
-			r := wazero.NewRuntimeWithConfig(ctx, config)
+			r := wazy.NewRuntimeWithConfig(ctx, config)
 			defer func() {
 				require.NoError(t, r.Close(ctx))
 			}()
@@ -38,7 +38,7 @@ func TestE2E_tail_call_import(t *testing.T) {
 			var expectedMod api.Module
 
 			b := r.NewHostModuleBuilder("env")
-			wazero.HostFunc8(b.NewFunctionBuilder(), func(ctx2 context.Context, mod api.Module, a, b, c, d, e, f, g, h int32) int32 {
+			wazy.HostFunc8(b.NewFunctionBuilder(), func(ctx2 context.Context, mod api.Module, a, b, c, d, e, f, g, h int32) int32 {
 				require.Equal(t, expectedMod, mod)
 				require.Equal(t, ctx, ctx2)
 				return a + b + c + d + e + f + g + h
@@ -104,7 +104,7 @@ func TestE2E_tail_call_import(t *testing.T) {
 			compiled, err := r.CompileModule(ctx, binaryencoding.EncodeModule(m))
 			require.NoError(t, err)
 
-			inst, err := r.InstantiateModule(ctx, compiled, wazero.NewModuleConfig())
+			inst, err := r.InstantiateModule(ctx, compiled, wazy.NewModuleConfig())
 			require.NoError(t, err)
 
 			expectedMod = inst
@@ -128,16 +128,16 @@ func TestE2E_tail_call_import_indirect(t *testing.T) {
 
 	for _, tc := range []struct {
 		name string
-		cfg  wazero.RuntimeConfig
+		cfg  wazy.RuntimeConfig
 	}{
-		{"interpreter", wazero.NewRuntimeConfigInterpreter()},
-		{"default", wazero.NewRuntimeConfig()},
+		{"interpreter", wazy.NewRuntimeConfigInterpreter()},
+		{"default", wazy.NewRuntimeConfig()},
 	} {
 
 		config := tc.cfg.WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesTailCall)
 
 		t.Run(tc.name, func(t *testing.T) {
-			r := wazero.NewRuntimeWithConfig(ctx, config)
+			r := wazy.NewRuntimeWithConfig(ctx, config)
 			defer func() {
 				require.NoError(t, r.Close(ctx))
 			}()
@@ -145,7 +145,7 @@ func TestE2E_tail_call_import_indirect(t *testing.T) {
 			var expectedMod api.Module
 
 			b := r.NewHostModuleBuilder("env")
-			wazero.HostFunc8(b.NewFunctionBuilder(), func(ctx2 context.Context, mod api.Module, a, b, c, d, e, f, g, h int32) int32 {
+			wazy.HostFunc8(b.NewFunctionBuilder(), func(ctx2 context.Context, mod api.Module, a, b, c, d, e, f, g, h int32) int32 {
 				require.Equal(t, expectedMod, mod)
 				require.Equal(t, ctx, ctx2)
 				return a + b + c + d + e + f + g + h
@@ -224,7 +224,7 @@ func TestE2E_tail_call_import_indirect(t *testing.T) {
 			compiled, err := r.CompileModule(ctx, binaryencoding.EncodeModule(m))
 			require.NoError(t, err)
 
-			inst, err := r.InstantiateModule(ctx, compiled, wazero.NewModuleConfig())
+			inst, err := r.InstantiateModule(ctx, compiled, wazy.NewModuleConfig())
 			require.NoError(t, err)
 
 			expectedMod = inst

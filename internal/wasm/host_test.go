@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	. "github.com/tetratelabs/wazero/internal/wasip1"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	. "github.com/samyfodil/wazy/internal/wasip1"
 )
 
 // arbitrary is an unexported context key type used by testCtx.

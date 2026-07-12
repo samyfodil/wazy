@@ -9,13 +9,13 @@ import (
 	"strings"
 	"unsafe"
 
-	"github.com/tetratelabs/wazero/api"
-	experimentalsys "github.com/tetratelabs/wazero/experimental/sys"
-	socketapi "github.com/tetratelabs/wazero/internal/sock"
-	"github.com/tetratelabs/wazero/internal/sys"
-	"github.com/tetratelabs/wazero/internal/wasip1"
-	"github.com/tetratelabs/wazero/internal/wasm"
-	sysapi "github.com/tetratelabs/wazero/sys"
+	"github.com/samyfodil/wazy/api"
+	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
+	socketapi "github.com/samyfodil/wazy/internal/sock"
+	"github.com/samyfodil/wazy/internal/sys"
+	"github.com/samyfodil/wazy/internal/wasip1"
+	"github.com/samyfodil/wazy/internal/wasm"
+	sysapi "github.com/samyfodil/wazy/sys"
 )
 
 // fdAdvise is the WASI function named FdAdviseName which provides file
@@ -1721,7 +1721,7 @@ func openFlags(dirflags, oflags, fdflags uint16, rights uint32) (openFlags exper
 	// divergent behavior compared to WASI runtimes which have a more strict
 	// interpretation of the WASI capabilities model; for example, a program
 	// which sets O_CREAT but does not give read or write permissions will
-	// successfully create a file when running with wazero, but might get a
+	// successfully create a file when running with wazy, but might get a
 	// permission denied error on other runtimes.
 	defaultMode := experimentalsys.O_RDONLY
 	if oflags&wasip1.O_TRUNC != 0 {

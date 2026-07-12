@@ -1,4 +1,4 @@
-package wazero
+package wazy
 
 import (
 	"context"
@@ -10,10 +10,10 @@ import (
 	goruntime "runtime"
 	"sync"
 
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/filecache"
-	"github.com/tetratelabs/wazero/internal/version"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/filecache"
+	"github.com/samyfodil/wazy/internal/version"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 // CompilationCache reduces time spent compiling (Runtime.CompileModule) the same wasm module.
@@ -21,7 +21,7 @@ import (
 // # Notes
 //
 //   - This is an interface for decoupling, not third-party implementations.
-//     All implementations are in wazero.
+//     All implementations are in wazy.
 //   - Instances of this can be reused across multiple runtimes, if configured
 //     via RuntimeConfig.
 //   - The cache check happens before the compilation, so if multiple Goroutines are
@@ -34,28 +34,28 @@ import (
 type CompilationCache interface{ api.Closer }
 
 // NewCompilationCache returns a new CompilationCache to be passed to RuntimeConfig.
-// This configures only in-memory cache, and doesn't persist to the file system. See wazero.NewCompilationCacheWithDir for detail.
+// This configures only in-memory cache, and doesn't persist to the file system. See wazy.NewCompilationCacheWithDir for detail.
 //
-// The returned CompilationCache can be used to share the in-memory compilation results across multiple instances of wazero.Runtime.
+// The returned CompilationCache can be used to share the in-memory compilation results across multiple instances of wazy.Runtime.
 func NewCompilationCache() CompilationCache {
 	return &cache{}
 }
 
-// NewCompilationCacheWithDir is like wazero.NewCompilationCache except the result also writes
+// NewCompilationCacheWithDir is like wazy.NewCompilationCache except the result also writes
 // state into the directory specified by `dirname` parameter.
 //
 // If the dirname doesn't exist, this creates it or returns an error.
 //
-// Those running wazero as a CLI or frequently restarting a process using the same wasm should
+// Those running wazy as a CLI or frequently restarting a process using the same wasm should
 // use this feature to reduce time waiting to compile the same module a second time.
 //
-// The contents written into dirname are wazero-version specific, meaning different versions of
-// wazero will duplicate entries for the same input wasm.
+// The contents written into dirname are wazy-version specific, meaning different versions of
+// wazy will duplicate entries for the same input wasm.
 //
 // Note: The embedder must safeguard this directory from external changes.
 func NewCompilationCacheWithDir(dirname string) (CompilationCache, error) {
 	c := &cache{}
-	err := c.ensuresFileCache(dirname, version.GetWazeroVersion())
+	err := c.ensuresFileCache(dirname, version.GetWazyVersion())
 	return c, err
 }
 
@@ -85,7 +85,7 @@ func (c *cache) Close(_ context.Context) (err error) {
 	return
 }
 
-func (c *cache) ensuresFileCache(dir string, wazeroVersion string) error {
+func (c *cache) ensuresFileCache(dir string, wazyVersion string) error {
 	// Resolve a potentially relative directory into an absolute one.
 	var err error
 	dir, err = filepath.Abs(dir)
@@ -99,7 +99,7 @@ func (c *cache) ensuresFileCache(dir string, wazeroVersion string) error {
 	}
 
 	// Create a version-specific directory to avoid conflicts.
-	dirname := path.Join(dir, "wazero-"+wazeroVersion+"-"+goruntime.GOARCH+"-"+goruntime.GOOS)
+	dirname := path.Join(dir, "wazy-"+wazyVersion+"-"+goruntime.GOARCH+"-"+goruntime.GOOS)
 	if err = mkdir(dirname); err != nil {
 		return err
 	}

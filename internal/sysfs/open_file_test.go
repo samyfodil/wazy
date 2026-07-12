@@ -6,8 +6,8 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/tetratelabs/wazero/experimental/sys"
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/samyfodil/wazy/experimental/sys"
+	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
 func TestOpenFile(t *testing.T) {

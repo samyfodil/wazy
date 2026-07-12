@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tetratelabs/wazero"
+	"github.com/samyfodil/wazy"
 )
 
 func TestMain(m *testing.M) {
@@ -21,7 +21,7 @@ func TestMain(m *testing.M) {
 }
 
 // runtimeCfg is a shared runtime configuration for tests within this package to reduce the compilation time of the binary.
-var runtimeCfg = wazero.NewRuntimeConfig().WithCompilationCache(wazero.NewCompilationCache())
+var runtimeCfg = wazy.NewRuntimeConfig().WithCompilationCache(wazy.NewCompilationCache())
 
 // compileWasip1Wasm allows us to generate a binary with runtime.GOOS=wasip1
 // and runtime.GOARCH=wasm. This intentionally does so on-demand, because the
@@ -52,7 +52,7 @@ func compileWasip1Wasm() ([]byte, error) {
 	}
 
 	// Proactively compile the binary to reduce the test time.
-	r := wazero.NewRuntimeWithConfig(context.Background(), runtimeCfg)
+	r := wazy.NewRuntimeWithConfig(context.Background(), runtimeCfg)
 	defer r.Close(context.Background())
 	_, err = r.CompileModule(context.Background(), bin)
 	return bin, err

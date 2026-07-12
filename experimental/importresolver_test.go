@@ -5,18 +5,18 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/internal/testing/binaryencoding"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 func TestImportResolver(t *testing.T) {
 	ctx := context.Background()
 
-	r := wazero.NewRuntime(ctx)
+	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)
 
 	for i := 0; i < 5; i++ {
@@ -29,7 +29,7 @@ func TestImportResolver(t *testing.T) {
 			Compile(ctx)
 		require.NoError(t, err)
 		// Anonymous module, it will be resolved by the import resolver.
-		instanceImport, err := r.InstantiateModule(ctx, modImport, wazero.NewModuleConfig().WithName(""))
+		instanceImport, err := r.InstantiateModule(ctx, modImport, wazy.NewModuleConfig().WithName(""))
 		require.NoError(t, err)
 
 		resolveImport := func(name string) api.Module {
@@ -56,7 +56,7 @@ func TestImportResolver(t *testing.T) {
 		modMain, err := r.CompileModule(ctx, binary)
 		require.NoError(t, err)
 
-		_, err = r.InstantiateModule(ctx, modMain, wazero.NewModuleConfig())
+		_, err = r.InstantiateModule(ctx, modMain, wazy.NewModuleConfig())
 		require.NoError(t, err)
 		require.Equal(t, 1, callCount)
 	}

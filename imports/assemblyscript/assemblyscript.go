@@ -7,9 +7,9 @@
 // Note: Sometimes only "abort" is imported.
 //
 //   - "abort" - exits with 255 with an abort message written to
-//     wazero.ModuleConfig WithStderr.
+//     wazy.ModuleConfig WithStderr.
 //   - "trace" - no output unless.
-//   - "seed" - uses wazero.ModuleConfig WithRandSource as the source of seed
+//   - "seed" - uses wazy.ModuleConfig WithRandSource as the source of seed
 //     values.
 //
 // See https://www.assemblyscript.org/concepts.html#special-imports
@@ -33,13 +33,13 @@ import (
 	"strings"
 	"unicode/utf16"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	experimentalsys "github.com/tetratelabs/wazero/experimental/sys"
-	. "github.com/tetratelabs/wazero/internal/assemblyscript"
-	internalsys "github.com/tetratelabs/wazero/internal/sys"
-	"github.com/tetratelabs/wazero/internal/wasm"
-	"github.com/tetratelabs/wazero/sys"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
+	. "github.com/samyfodil/wazy/internal/assemblyscript"
+	internalsys "github.com/samyfodil/wazy/internal/sys"
+	"github.com/samyfodil/wazy/internal/wasm"
+	"github.com/samyfodil/wazy/sys"
 )
 
 const (
@@ -50,7 +50,7 @@ const (
 //
 // This is a simpler function for those who know the module "env" is not
 // already instantiated, and don't need to unload it.
-func MustInstantiate(ctx context.Context, r wazero.Runtime) {
+func MustInstantiate(ctx context.Context, r wazy.Runtime) {
 	if _, err := Instantiate(ctx, r); err != nil {
 		panic(err)
 	}
@@ -61,10 +61,10 @@ func MustInstantiate(ctx context.Context, r wazero.Runtime) {
 //
 // # Notes
 //
-//   - Failure cases are documented on wazero.Runtime InstantiateModule.
-//   - Closing the wazero.Runtime has the same effect as closing the result.
+//   - Failure cases are documented on wazy.Runtime InstantiateModule.
+//   - Closing the wazy.Runtime has the same effect as closing the result.
 //   - To add more functions to the "env" module, use FunctionExporter.
-func Instantiate(ctx context.Context, r wazero.Runtime) (api.Closer, error) {
+func Instantiate(ctx context.Context, r wazy.Runtime) (api.Closer, error) {
 	builder := r.NewHostModuleBuilder("env")
 	NewFunctionExporter().ExportFunctions(builder)
 	return builder.Instantiate(ctx)
@@ -76,26 +76,26 @@ func Instantiate(ctx context.Context, r wazero.Runtime) (api.Closer, error) {
 // # Notes
 //
 //   - This is an interface for decoupling, not third-party implementations.
-//     All implementations are in wazero.
+//     All implementations are in wazy.
 type FunctionExporter interface {
 	// WithAbortMessageDisabled configures the AssemblyScript abort function to
 	// discard any message.
 	WithAbortMessageDisabled() FunctionExporter
 
 	// WithTraceToStdout configures the AssemblyScript trace function to output
-	// messages to Stdout, as configured by wazero.ModuleConfig WithStdout.
+	// messages to Stdout, as configured by wazy.ModuleConfig WithStdout.
 	WithTraceToStdout() FunctionExporter
 
 	// WithTraceToStderr configures the AssemblyScript trace function to output
-	// messages to Stderr, as configured by wazero.ModuleConfig WithStderr.
+	// messages to Stderr, as configured by wazy.ModuleConfig WithStderr.
 	//
 	// Because of the potential volume of trace messages, it is often more
 	// appropriate to use WithTraceToStdout instead.
 	WithTraceToStderr() FunctionExporter
 
-	// ExportFunctions builds functions to export with a wazero.HostModuleBuilder
+	// ExportFunctions builds functions to export with a wazy.HostModuleBuilder
 	// named "env".
-	ExportFunctions(wazero.HostModuleBuilder)
+	ExportFunctions(wazy.HostModuleBuilder)
 }
 
 // NewFunctionExporter returns a FunctionExporter object with trace disabled.
@@ -123,7 +123,7 @@ func (e *functionExporter) WithTraceToStderr() FunctionExporter {
 }
 
 // ExportFunctions implements FunctionExporter.ExportFunctions
-func (e *functionExporter) ExportFunctions(builder wazero.HostModuleBuilder) {
+func (e *functionExporter) ExportFunctions(builder wazy.HostModuleBuilder) {
 	exporter := builder.(wasm.HostFuncExporter)
 	exporter.ExportHostFunc(e.abortFn)
 	exporter.ExportHostFunc(e.traceFn)

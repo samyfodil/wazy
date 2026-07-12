@@ -6,13 +6,13 @@ import (
 	"math"
 	"testing"
 
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/experimental/logging"
-	"github.com/tetratelabs/wazero/experimental/wazerotest"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	wasi "github.com/tetratelabs/wazero/internal/wasip1"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/experimental/logging"
+	"github.com/samyfodil/wazy/experimental/wazytest"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	wasi "github.com/samyfodil/wazy/internal/wasip1"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 type arbitrary struct{}
@@ -327,9 +327,9 @@ func Test_loggingListener_indentation(t *testing.T) {
 }
 
 func BenchmarkLoggingListener(b *testing.B) {
-	module := wazerotest.NewModule(
-		wazerotest.NewMemory(0),
-		wazerotest.NewFunction(func(ctx context.Context, mod api.Module) {}),
+	module := wazytest.NewModule(
+		wazytest.NewMemory(0),
+		wazytest.NewFunction(func(ctx context.Context, mod api.Module) {}),
 	)
 
 	function := module.Function(0)

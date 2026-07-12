@@ -1,4 +1,4 @@
-Fuzzing infrastructure for wazero engines via [wasm-tools](https://github.com/bytecodealliance/wasm-tools).
+Fuzzing infrastructure for wazy engines via [wasm-tools](https://github.com/bytecodealliance/wasm-tools).
 
 ### Dependency
 
@@ -57,14 +57,14 @@ Note that `--sanitizer=none` and `--no-trace-compares` are always recommended to
 If the fuzzer encounters error, you would get the output like the following:
 
 ```
-Failed Wasm binary has been written to /Users/mathetake/wazero/internal/integration_test/fuzz/wazerolib/testdata/73c61e218b8547ef35271a22ca95f932dcc102bda9b3a9bdf1976e6ed36da31d.wasm
-Failed Wasm Text has been written to /Users/mathetake/wazero/internal/integration_test/fuzz/wazerolib/testdata/73c61e218b8547ef35271a22ca95f932dcc102bda9b3a9bdf1976e6ed36da31d.wat
-To reproduce the failure, execute: WASM_BINARY_PATH=/Users/mathetake/wazero/internal/integration_test/fuzz/wazerolib/testdata/73c61e218b8547ef35271a22ca95f932dcc102bda9b3a9bdf1976e6ed36da31d.wasm go test ./wazerolib/...
+Failed Wasm binary has been written to /Users/mathetake/wazy/internal/integration_test/fuzz/wazerolib/testdata/73c61e218b8547ef35271a22ca95f932dcc102bda9b3a9bdf1976e6ed36da31d.wasm
+Failed Wasm Text has been written to /Users/mathetake/wazy/internal/integration_test/fuzz/wazerolib/testdata/73c61e218b8547ef35271a22ca95f932dcc102bda9b3a9bdf1976e6ed36da31d.wat
+To reproduce the failure, execute: WASM_BINARY_PATH=/Users/mathetake/wazy/internal/integration_test/fuzz/wazerolib/testdata/73c61e218b8547ef35271a22ca95f932dcc102bda9b3a9bdf1976e6ed36da31d.wasm go test ./wazerolib/...
 ```
 
 then you can check the wasm and wat as well as reproduce the error by running
 ```
-WASM_BINARY_PATH=/Users/mathetake/wazero/internal/integration_test/fuzz/wazerolib/testdata/73c61e218b8547ef35271a22ca95f932dcc102bda9b3a9bdf1976e6ed36da31d.wasm go test ./wazerolib/...
+WASM_BINARY_PATH=/Users/mathetake/wazy/internal/integration_test/fuzz/wazerolib/testdata/73c61e218b8547ef35271a22ca95f932dcc102bda9b3a9bdf1976e6ed36da31d.wasm go test ./wazerolib/...
 ```
 
 

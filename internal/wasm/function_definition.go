@@ -1,9 +1,9 @@
 package wasm
 
 import (
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/internalapi"
-	"github.com/tetratelabs/wazero/internal/wasmdebug"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/internalapi"
+	"github.com/samyfodil/wazy/internal/wasmdebug"
 )
 
 // ImportedFunctions returns the definitions of each imported function.
@@ -113,7 +113,7 @@ func (m *Module) buildFunctionDefinitionsOnce() {
 
 // FunctionDefinition implements api.FunctionDefinition
 type FunctionDefinition struct {
-	internalapi.WazeroOnlyType
+	internalapi.WazyOnlyType
 	moduleName string
 	index      Index
 	name       string

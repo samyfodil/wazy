@@ -5,13 +5,13 @@ import (
 	_ "embed"
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/experimental/wazerotest"
-	"github.com/tetratelabs/wazero/internal/testing/binaryencoding"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/experimental/wazytest"
+	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 // compile-time check to ensure recorder implements FunctionListenerFactory
@@ -73,7 +73,7 @@ func TestFunctionListenerFactory(t *testing.T) {
 		},
 	})
 
-	r := wazero.NewRuntime(ctx)
+	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx) // This closes everything this Runtime created.
 
 	_, err := r.NewHostModuleBuilder("host").NewFunctionBuilder().WithGoFunction(api.GoFunc(func(context.Context, []uint64) {}), nil, nil).Export("").Instantiate(ctx)
@@ -94,7 +94,7 @@ func TestFunctionListenerFactory(t *testing.T) {
 
 	// Ensures that FunctionListener is a compile-time option, so passing
 	// context.Background here is ok to use listeners at runtime.
-	m, err := r.InstantiateModule(context.Background(), compiled, wazero.NewModuleConfig())
+	m, err := r.InstantiateModule(context.Background(), compiled, wazy.NewModuleConfig())
 	require.NoError(t, err)
 
 	fn1 := m.ExportedFunction("fn1")
@@ -108,10 +108,10 @@ func TestFunctionListenerFactory(t *testing.T) {
 }
 
 func TestMultiFunctionListenerFactory(t *testing.T) {
-	module := wazerotest.NewModule(nil,
-		wazerotest.NewFunction(func(ctx context.Context, mod api.Module, value int32) {}),
-		wazerotest.NewFunction(func(ctx context.Context, mod api.Module, value int32) {}),
-		wazerotest.NewFunction(func(ctx context.Context, mod api.Module, value int32) {}),
+	module := wazytest.NewModule(nil,
+		wazytest.NewFunction(func(ctx context.Context, mod api.Module, value int32) {}),
+		wazytest.NewFunction(func(ctx context.Context, mod api.Module, value int32) {}),
+		wazytest.NewFunction(func(ctx context.Context, mod api.Module, value int32) {}),
 	)
 
 	stack := []experimental.StackFrame{
@@ -151,10 +151,10 @@ func TestMultiFunctionListenerFactory(t *testing.T) {
 }
 
 func BenchmarkMultiFunctionListener(b *testing.B) {
-	module := wazerotest.NewModule(nil,
-		wazerotest.NewFunction(func(ctx context.Context, mod api.Module, value int32) {}),
-		wazerotest.NewFunction(func(ctx context.Context, mod api.Module, value int32) {}),
-		wazerotest.NewFunction(func(ctx context.Context, mod api.Module, value int32) {}),
+	module := wazytest.NewModule(nil,
+		wazytest.NewFunction(func(ctx context.Context, mod api.Module, value int32) {}),
+		wazytest.NewFunction(func(ctx context.Context, mod api.Module, value int32) {}),
+		wazytest.NewFunction(func(ctx context.Context, mod api.Module, value int32) {}),
 	)
 
 	stack := []experimental.StackFrame{

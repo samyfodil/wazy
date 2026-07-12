@@ -7,13 +7,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	experimentalsock "github.com/tetratelabs/wazero/experimental/sock"
-	"github.com/tetratelabs/wazero/internal/sys"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasip1"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	experimentalsock "github.com/samyfodil/wazy/experimental/sock"
+	"github.com/samyfodil/wazy/internal/sys"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasip1"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 func Test_sockAccept(t *testing.T) {
@@ -47,7 +47,7 @@ func Test_sockAccept(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := experimentalsock.WithConfig(testCtx, experimentalsock.NewConfig().WithTCPListener("127.0.0.1", 0))
 
-			mod, r, log := requireProxyModuleWithContext(ctx, t, wazero.NewModuleConfig())
+			mod, r, log := requireProxyModuleWithContext(ctx, t, wazy.NewModuleConfig())
 			defer r.Close(testCtx)
 
 			// Dial the socket so that a call to accept doesn't hang.
@@ -100,7 +100,7 @@ func Test_sockShutdown(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := experimentalsock.WithConfig(testCtx, experimentalsock.NewConfig().WithTCPListener("127.0.0.1", 0))
 
-			mod, r, log := requireProxyModuleWithContext(ctx, t, wazero.NewModuleConfig())
+			mod, r, log := requireProxyModuleWithContext(ctx, t, wazy.NewModuleConfig())
 			defer r.Close(testCtx)
 
 			// Dial the socket so that a call to accept doesn't hang.
@@ -239,7 +239,7 @@ func Test_sockRecv(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := experimentalsock.WithConfig(testCtx, experimentalsock.NewConfig().WithTCPListener("127.0.0.1", 0))
 
-			mod, r, log := requireProxyModuleWithContext(ctx, t, wazero.NewModuleConfig())
+			mod, r, log := requireProxyModuleWithContext(ctx, t, wazy.NewModuleConfig())
 			defer r.Close(testCtx)
 
 			// Dial the socket so that a call to accept doesn't hang.
@@ -326,7 +326,7 @@ func Test_sockSend(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := experimentalsock.WithConfig(testCtx, experimentalsock.NewConfig().WithTCPListener("127.0.0.1", 0))
 
-			mod, r, log := requireProxyModuleWithContext(ctx, t, wazero.NewModuleConfig())
+			mod, r, log := requireProxyModuleWithContext(ctx, t, wazy.NewModuleConfig())
 			defer r.Close(testCtx)
 
 			// Dial the socket so that a call to accept doesn't hang.

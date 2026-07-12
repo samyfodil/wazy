@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"unsafe"
 
-	"github.com/tetratelabs/wazero/internal/wasmdebug"
+	"github.com/samyfodil/wazy/internal/wasmdebug"
 )
 
 // sliceHeader mirrors the layout of reflect.SliceHeader. It lets stackView

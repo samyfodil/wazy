@@ -1,10 +1,10 @@
-package wazero
+package wazy
 
 import (
 	"context"
 	"math"
 
-	"github.com/tetratelabs/wazero/api"
+	"github.com/samyfodil/wazy/api"
 )
 
 // HostValue is the set of Go types that HostFunc0-HostFunc8 and
@@ -44,7 +44,7 @@ func hostValueType[T HostValue]() api.ValueType {
 	case uintptr:
 		return api.ValueTypeExternref
 	default:
-		panic("wazero: BUG: unreachable, T is constrained to HostValue")
+		panic("wazy: BUG: unreachable, T is constrained to HostValue")
 	}
 }
 
@@ -73,7 +73,7 @@ func decodeHostValue[T HostValue](raw uint64) T {
 	case uintptr:
 		return T(uintptr(raw))
 	default:
-		panic("wazero: BUG: unreachable, T is constrained to HostValue")
+		panic("wazy: BUG: unreachable, T is constrained to HostValue")
 	}
 }
 
@@ -96,7 +96,7 @@ func encodeHostValue[T HostValue](v T) uint64 {
 	case uintptr:
 		return uint64(x)
 	default:
-		panic("wazero: BUG: unreachable, T is constrained to HostValue")
+		panic("wazy: BUG: unreachable, T is constrained to HostValue")
 	}
 }
 
@@ -121,7 +121,7 @@ func encodeHostValue[T HostValue](v T) uint64 {
 // Here's the addition example from HostFunctionBuilder's docs, this time
 // with HostFunc2 (two parameters, one result):
 //
-//	wazero.HostFunc2(builder, func(ctx context.Context, mod api.Module, x, y uint32) uint32 {
+//	wazy.HostFunc2(builder, func(ctx context.Context, mod api.Module, x, y uint32) uint32 {
 //		return x + y
 //	}).Export("add")
 func HostFunc0[R HostValue](b HostFunctionBuilder, fn func(context.Context, api.Module) R) HostFunctionBuilder {

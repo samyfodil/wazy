@@ -8,9 +8,9 @@ in TinyGo, built with
 ```
 
 ```bash
-$ go run greet.go wazero
-wasm >> Hello, wazero!
-go >> Hello, wazero!
+$ go run greet.go wazy
+wasm >> Hello, wazy!
+go >> Hello, wazy!
 ```
 
 Under the covers, [greet.go](testdata/greet.go) does a few things of interest:

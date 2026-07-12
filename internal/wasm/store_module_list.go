@@ -85,7 +85,7 @@ func (s *Store) registerModule(m *ModuleInstance) error {
 	return nil
 }
 
-// Module implements wazero.Runtime Module
+// Module implements wazy.Runtime Module
 func (s *Store) Module(moduleName string) *ModuleInstance {
 	m, err := s.module(moduleName)
 	if err != nil {

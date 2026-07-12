@@ -5,7 +5,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
 func TestBytes(t *testing.T) {

@@ -12,16 +12,16 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/backend"
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/frontend"
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/ssa"
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/wazevoapi"
-	"github.com/tetratelabs/wazero/internal/filecache"
-	"github.com/tetratelabs/wazero/internal/platform"
-	"github.com/tetratelabs/wazero/internal/version"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/backend"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/frontend"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/ssa"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/wazevoapi"
+	"github.com/samyfodil/wazy/internal/filecache"
+	"github.com/samyfodil/wazy/internal/platform"
+	"github.com/samyfodil/wazy/internal/version"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 type (
@@ -31,7 +31,7 @@ type (
 	}
 	// engine implements wasm.Engine.
 	engine struct {
-		wazeroVersion   string
+		wazyVersion     string
 		fileCache       filecache.Cache
 		compiledModules map[wasm.ModuleID]*compiledModuleWithCount
 		// sortedCompiledModules is a list of compiled modules sorted by the initial address of the executable.
@@ -136,7 +136,7 @@ func NewEngine(ctx context.Context, _ api.CoreFeatures, fc filecache.Cache) wasm
 		machine:         machine,
 		be:              be,
 		fileCache:       fc,
-		wazeroVersion:   version.GetWazeroVersion(),
+		wazyVersion:     version.GetWazyVersion(),
 	}
 	e.compileSharedFunctions()
 	return e

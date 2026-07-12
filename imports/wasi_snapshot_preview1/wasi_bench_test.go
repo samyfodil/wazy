@@ -6,26 +6,26 @@ import (
 	"os"
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	experimentalsys "github.com/tetratelabs/wazero/experimental/sys"
-	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
-	"github.com/tetratelabs/wazero/internal/sys"
-	"github.com/tetratelabs/wazero/internal/testing/proxy"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasip1"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
+	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
+	"github.com/samyfodil/wazy/imports/wasi_snapshot_preview1"
+	"github.com/samyfodil/wazy/internal/sys"
+	"github.com/samyfodil/wazy/internal/testing/proxy"
+	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasip1"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 // configArgsEnviron ensures the result data are the same between args and ENV.
-var configArgsEnviron = wazero.NewModuleConfig().
+var configArgsEnviron = wazy.NewModuleConfig().
 	WithArgs("aa=bbbb", "cccccc=dddddddd", "eeeeeeeeee=ffffffffffff").
 	WithEnv("aa", "bbbb").
 	WithEnv("cccccc", "dddddddd").
 	WithEnv("eeeeeeeeee", "ffffffffffff")
 
 func Benchmark_ArgsEnviron(b *testing.B) {
-	r := wazero.NewRuntime(testCtx)
+	r := wazy.NewRuntime(testCtx)
 	defer r.Close(testCtx)
 
 	mod, err := instantiateProxyModule(r, configArgsEnviron)
@@ -66,10 +66,10 @@ func (money) Read(b []byte) (n int, err error) {
 }
 
 func Benchmark_fdRead(b *testing.B) {
-	r := wazero.NewRuntime(testCtx)
+	r := wazy.NewRuntime(testCtx)
 	defer r.Close(testCtx)
 
-	mod, err := instantiateProxyModule(r, wazero.NewModuleConfig().WithStdin(money{}))
+	mod, err := instantiateProxyModule(r, wazy.NewModuleConfig().WithStdin(money{}))
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -171,17 +171,17 @@ func Benchmark_fdReaddir(b *testing.B) {
 		bc := bb
 
 		b.Run(bc.name, func(b *testing.B) {
-			r := wazero.NewRuntime(testCtx)
+			r := wazy.NewRuntime(testCtx)
 			defer r.Close(testCtx)
 
-			fsConfig := wazero.NewFSConfig()
+			fsConfig := wazy.NewFSConfig()
 			if bc.fs != nil {
 				fsConfig = fsConfig.WithFSMount(bc.fs, "")
 			} else {
 				fsConfig = fsConfig.WithDirMount(bc.dirMount, "")
 			}
 
-			mod, err := instantiateProxyModule(r, wazero.NewModuleConfig().WithFSConfig(fsConfig))
+			mod, err := instantiateProxyModule(r, wazy.NewModuleConfig().WithFSConfig(fsConfig))
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -292,17 +292,17 @@ func Benchmark_pathFilestat(b *testing.B) {
 		bc := bb
 
 		b.Run(bc.name, func(b *testing.B) {
-			r := wazero.NewRuntime(testCtx)
+			r := wazy.NewRuntime(testCtx)
 			defer r.Close(testCtx)
 
-			fsConfig := wazero.NewFSConfig()
+			fsConfig := wazy.NewFSConfig()
 			if bc.fs != nil {
 				fsConfig = fsConfig.WithFSMount(bc.fs, "")
 			} else {
 				fsConfig = fsConfig.WithDirMount(bc.dirMount, "")
 			}
 
-			mod, err := instantiateProxyModule(r, wazero.NewModuleConfig().WithFSConfig(fsConfig))
+			mod, err := instantiateProxyModule(r, wazy.NewModuleConfig().WithFSConfig(fsConfig))
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -367,10 +367,10 @@ func (f writerFunc) Write(buf []byte) (n int, err error) {
 }
 
 func Benchmark_fdWrite(b *testing.B) {
-	r := wazero.NewRuntime(testCtx)
+	r := wazy.NewRuntime(testCtx)
 	defer r.Close(testCtx)
 
-	mod, err := instantiateProxyModule(r, wazero.NewModuleConfig().
+	mod, err := instantiateProxyModule(r, wazy.NewModuleConfig().
 		WithStdout(writerFunc(func(buf []byte) (n int, err error) { return len(buf), nil })),
 	)
 	if err != nil {
@@ -426,13 +426,13 @@ func Benchmark_fdWrite(b *testing.B) {
 }
 
 // instantiateProxyModule instantiates a guest that re-exports WASI functions.
-func instantiateProxyModule(r wazero.Runtime, config wazero.ModuleConfig) (api.Module, error) {
+func instantiateProxyModule(r wazy.Runtime, config wazy.ModuleConfig) (api.Module, error) {
 	wasiModuleCompiled, err := wasi_snapshot_preview1.NewBuilder(r).Compile(testCtx)
 	if err != nil {
 		return nil, err
 	}
 
-	if _, err = r.InstantiateModule(testCtx, wasiModuleCompiled, wazero.NewModuleConfig()); err != nil {
+	if _, err = r.InstantiateModule(testCtx, wasiModuleCompiled, wazy.NewModuleConfig()); err != nil {
 		return nil, err
 	}
 
