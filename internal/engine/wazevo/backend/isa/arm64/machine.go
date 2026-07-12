@@ -607,6 +607,20 @@ func (m *machine) requiredStackSize() int64 {
 		16 // frame size saved below the clobbered registers.
 }
 
+// CompiledBlockOffsets implements backend.Machine.
+func (m *machine) CompiledBlockOffsets() []backend.CompiledBlockOffset {
+	ret := make([]backend.CompiledBlockOffset, len(m.orderedSSABlockLabelPos))
+	for i, pos := range m.orderedSSABlockLabelPos {
+		ret[i] = backend.CompiledBlockOffset{BlockID: pos.sb.ID(), Offset: pos.binaryOffset}
+	}
+	return ret
+}
+
+// FrameSize implements backend.Machine.
+func (m *machine) FrameSize() int64 {
+	return m.frameSize()
+}
+
 func (m *machine) frameSize() int64 {
 	s := m.clobberedRegSlotSize() + m.spillSlotSize
 	if s&0xf != 0 {

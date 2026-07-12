@@ -107,6 +107,14 @@ type Compiler interface {
 
 	// GetFunctionABI returns the ABI information for the given signature.
 	GetFunctionABI(sig *ssa.Signature) *FunctionABI
+
+	// CompiledBlockOffsets returns the resolved block offsets for the most
+	// recently compiled function; see the Machine method of the same name.
+	CompiledBlockOffsets() []CompiledBlockOffset
+
+	// FrameSize returns the most recently compiled function's frame size;
+	// see the Machine method of the same name.
+	FrameSize() int64
 }
 
 // RelocationInfo represents the relocation information for a call instruction.
@@ -385,6 +393,16 @@ func (c *compiler) Buf() []byte {
 // BufPtr implements Compiler.BufPtr.
 func (c *compiler) BufPtr() *[]byte {
 	return &c.buf
+}
+
+// CompiledBlockOffsets implements Compiler.CompiledBlockOffsets.
+func (c *compiler) CompiledBlockOffsets() []CompiledBlockOffset {
+	return c.mach.CompiledBlockOffsets()
+}
+
+// FrameSize implements Compiler.FrameSize.
+func (c *compiler) FrameSize() int64 {
+	return c.mach.FrameSize()
 }
 
 func (c *compiler) GetFunctionABI(sig *ssa.Signature) *FunctionABI {

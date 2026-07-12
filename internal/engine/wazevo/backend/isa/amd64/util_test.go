@@ -46,6 +46,10 @@ func (m *mockCompiler) SourceOffsetInfo() []backend.SourceOffsetInfo { return ni
 
 func (m *mockCompiler) AddSourceOffsetInfo(int64, ssa.SourceOffset) {}
 
+func (m *mockCompiler) CompiledBlockOffsets() []backend.CompiledBlockOffset { return nil }
+
+func (m *mockCompiler) FrameSize() int64 { return 0 }
+
 func (m *mockCompiler) AddRelocationInfo(funcRef ssa.FuncRef, isTailCall bool) {
 	m.relocs = append(m.relocs, backend.RelocationInfo{FuncRef: funcRef, Offset: int64(len(m.buf))})
 }

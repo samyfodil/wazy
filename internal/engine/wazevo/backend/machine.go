@@ -99,6 +99,17 @@ type (
 		// call the stack grow builtin function.
 		CompileStackGrowCallSequence() []byte
 
+		// CompileThrowTransferRegisterRestore returns a tiny callable blob
+		// (execCtx in the ISA's conventional first-argument register in,
+		// callee-saved registers restored from
+		// wazevo.executionContext.savedRegisters, plain return out) used by
+		// the throw-time control transfer (afterThrowTransferEntrypoint /
+		// (*callEngine).handleThrow) in place of a Go-call trampoline's own
+		// post-exit register-restore tail, which a throw transfer bypasses
+		// entirely (it jumps straight into an arbitrary landing pad, never
+		// through goCallReturnAddress).
+		CompileThrowTransferRegisterRestore() []byte
+
 		// CompileEntryPreamble returns the sequence of instructions shared by multiple functions to
 		// enter the function from Go.
 		CompileEntryPreamble(signature *ssa.Signature) []byte
@@ -115,5 +126,35 @@ type (
 		// CallTrampolineIslandInfo returns the interval of the offset where the trampoline island is placed, and
 		// the size of the trampoline island. If islandSize is zero, the trampoline island is not used on this machine.
 		CallTrampolineIslandInfo(numFunctions int) (interval, islandSize int, err error)
+
+		// CompiledBlockOffsets returns the resolved, function-body-relative
+		// start offsets of every ssa.BasicBlock compiled in the most recent
+		// Compile(), in final code-layout order. Valid only after Encode()
+		// (i.e. after Finalize()) has run for the current function and
+		// before the next Reset(); a block eliminated by dead-block
+		// elimination is simply absent from the result. Used by the engine
+		// to build the per-function exception side table (offsets of
+		// try_table body ranges and catch-clause landing pads) from the
+		// same block-position bookkeeping the backend already maintains
+		// for branch-target resolution.
+		CompiledBlockOffsets() []CompiledBlockOffset
+
+		// FrameSize returns the most recently compiled function's total
+		// fixed-frame size (clobbered-register + spill-slot area, in
+		// bytes), i.e. what SP is offset by from FP/the frame's base
+		// throughout the function's steady-state execution. On amd64,
+		// where the exception unwinder recovers a frame's FP (RBP) but not
+		// its SP directly (see backend/isa/amd64/stack.go:UnwindStackForThrow),
+		// the engine uses this to compute SP = FP - FrameSize for the
+		// matched catching frame before transferring control to its
+		// landing pad. Valid after Finalize(), like CompiledBlockOffsets.
+		FrameSize() int64
+	}
+
+	// CompiledBlockOffset pairs an ssa.BasicBlockID with its resolved,
+	// function-body-relative start offset in the compiled executable.
+	CompiledBlockOffset struct {
+		BlockID ssa.BasicBlockID
+		Offset  int64
 	}
 )

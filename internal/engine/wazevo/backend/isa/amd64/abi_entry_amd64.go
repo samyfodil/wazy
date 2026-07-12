@@ -7,3 +7,12 @@ func entrypoint(preambleExecutable, functionExecutable *byte, executionContextPt
 // afterGoFunctionCallEntrypoint enters the machine code after growing the stack.
 // This implements wazevo.afterGoFunctionCallEntrypoint, and see the comments there for detail.
 func afterGoFunctionCallEntrypoint(executable *byte, executionContextPtr uintptr, stackPointer, framePointer uintptr)
+
+// afterThrowTransferEntrypoint is like afterGoFunctionCallEntrypoint, except
+// it additionally restores the callee-saved registers from
+// wazevo.executionContext.savedRegisters (via restoreFn, a tiny blob
+// produced by Machine.CompileThrowTransferRegisterRestore) before jumping to
+// targetPC. This implements wazevo.afterThrowTransferEntrypoint -- see the
+// comments there and on (*callEngine).handleThrow for why a throw-time
+// control transfer needs this and afterGoFunctionCallEntrypoint does not.
+func afterThrowTransferEntrypoint(restoreFn *byte, executionContextPtr uintptr, stackPointer, framePointer, targetPC uintptr)

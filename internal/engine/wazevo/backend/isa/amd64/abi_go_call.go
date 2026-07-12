@@ -380,6 +380,34 @@ func (m *machine) CompileStackGrowCallSequence() []byte {
 	return m.c.Buf()
 }
 
+// CompileThrowTransferRegisterRestore implements backend.Machine. It
+// produces a tiny callable (CALL-then-RET) blob that restores the
+// callee-saved registers from wazevo.executionContext.savedRegisters
+// (execCtx passed in RAX, matching every other Go-call trampoline's
+// convention) and returns. Needs no RBP/RSP frame of its own: it touches
+// no stack, only loads from [RAX+offset] into fixed registers.
+//
+// Used only by the throw-time control transfer
+// (afterThrowTransferEntrypoint / (*callEngine).handleThrow), which cannot
+// rely on a Go-call trampoline's own post-exit tail doing this: unlike
+// every other exit code, a throw's control transfer jumps directly into an
+// arbitrary landing pad (afterGoFunctionCallEntrypoint resumes *inside*
+// the throw trampoline's own tail, which is unreachable here since the
+// destination isn't goCallReturnAddress).
+func (m *machine) CompileThrowTransferRegisterRestore() []byte {
+	cur := m.allocateNop()
+	m.rootInstr = cur
+
+	// Execution context is always the first argument.
+	execCtrPtr := raxVReg
+	cur = m.restoreRegistersInExecutionContext(cur, execCtrPtr, calleeSavedVRegs)
+
+	linkInstr(cur, m.allocateInstr().asRet())
+
+	m.encodeWithoutSSA(m.rootInstr)
+	return m.c.Buf()
+}
+
 // insertStackBoundsCheck will insert the instructions after `cur` to check the
 // stack bounds, and if there's no sufficient spaces required for the function,
 // exit the execution and try growing it in Go world.

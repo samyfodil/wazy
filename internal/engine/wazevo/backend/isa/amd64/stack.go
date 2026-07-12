@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"unsafe"
 
+	"github.com/samyfodil/wazy/internal/engine/wazevo/wazevoapi"
 	"github.com/samyfodil/wazy/internal/wasmdebug"
 )
 
@@ -69,6 +70,47 @@ func UnwindStack(_, rbp, top uintptr, returnAddresses []uintptr) []uintptr {
 		}
 	}
 	return returnAddresses
+}
+
+// UnwindStackForThrow is the exception-handling variant of UnwindStack: for
+// each frame it additionally recovers FP (=RBP), which is directly available
+// from the RBP chain. Unlike arm64, amd64 has no on-stack marker from which
+// to recover a frame's SP directly during this walk (frames are chained
+// purely via [Caller_RBP][ReturnAddress] pairs, with no frame_size word) --
+// the caller (call_engine.go) computes SP = FP - FrameSize for whichever
+// single frame matches an exception, using that function's FrameSize
+// (backend.Machine.FrameSize) recorded at compile time. See
+// wazevoapi.ThrowFrame.
+//
+// Unlike UnwindStack, this has no wasmdebug.MaxFrames cap: silently giving
+// up before reaching a matching (or the outermost) frame would wrongly
+// report a catchable exception as uncaught.
+func UnwindStackForThrow(rbp, top uintptr, frames []wazevoapi.ThrowFrame) []wazevoapi.ThrowFrame {
+	stackBuf := stackView(rbp, top)
+
+	for i := uint64(0); i < uint64(len(stackBuf)); {
+		callerRBP := binary.LittleEndian.Uint64(stackBuf[i:])
+		retAddr := binary.LittleEndian.Uint64(stackBuf[i+8:])
+		frames = append(frames, wazevoapi.ThrowFrame{
+			ReturnAddress: uintptr(retAddr),
+			FP:            uintptr(callerRBP),
+		})
+		i = callerRBP - uint64(rbp)
+	}
+	return frames
+}
+
+// FirstReturnAddress returns, in O(1), the return address of the frame
+// whose callee's frame is chained from rbp -- i.e. the address the function
+// at rbp will return to. On amd64 the RBP chain stores [Caller_RBP,
+// ReturnAddress] at rbp, so the return address is the second word. Used to
+// recover a try_table's enter-continuation from the still-live enter
+// trampoline frame at try_table-enter time (see call_engine.go's
+// firstReturnAddress and ExitCodeTryTableEnter); it reads the exact word
+// UnwindStackForThrow would read for its first frame.
+func FirstReturnAddress(rbp uintptr) uintptr {
+	stackBuf := stackView(rbp, rbp+16)
+	return uintptr(binary.LittleEndian.Uint64(stackBuf[8:]))
 }
 
 // GoCallStackView implements wazevo.goCallStackView.

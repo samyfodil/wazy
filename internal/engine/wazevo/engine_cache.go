@@ -207,8 +207,55 @@ func serializeCompiledModule(wazyVersion string, cm *compiledModule) io.Reader {
 			buf.Write(u32.LeBytes(c.TagIndex))
 		}
 	}
+
+	// Exception side table (per-function PC-range entries; see
+	// wazevoapi.EhEntry / docs/design/eh-side-table.md). Preceded by an
+	// explicit format-version byte -- distinct from the wazyVersion check
+	// above -- so that a cache entry written by an older build of this exact
+	// section's layout is unambiguously detected as stale (rather than
+	// misparsed) even if wazyVersion happens not to have changed. Layout:
+	// ehTableFormatVersion (1 byte), numFunctions (4 bytes), then per
+	// function: entry count (4 bytes), then per entry:
+	// startOffset/endOffset (8 bytes each, executable-relative),
+	// tryTableID (4 bytes), clause count (4 bytes), then per clause:
+	// kind (1 byte) + tagIndex (4 bytes) + landingPad (8 bytes,
+	// executable-relative).
+	buf.WriteByte(ehTableFormatVersion)
+	buf.Write(u32.LeBytes(uint32(len(cm.ehTables))))
+	var executableAddr uintptr
+	if len(cm.executable) > 0 {
+		executableAddr = uintptr(unsafe.Pointer(&cm.executable[0]))
+	}
+	for _, entries := range cm.ehTables {
+		buf.Write(u32.LeBytes(uint32(len(entries))))
+		for _, e := range entries {
+			buf.Write(u64.LeBytes(uint64(e.StartOffset - executableAddr)))
+			buf.Write(u64.LeBytes(uint64(e.EndOffset - executableAddr)))
+			buf.Write(u32.LeBytes(uint32(e.TryTableID)))
+			buf.Write(u32.LeBytes(uint32(len(e.Clauses))))
+			for _, c := range e.Clauses {
+				buf.WriteByte(c.Kind)
+				buf.Write(u32.LeBytes(c.TagIndex))
+				buf.Write(u64.LeBytes(uint64(c.LandingPad - executableAddr)))
+			}
+		}
+	}
+	// functionFrameSizes: one int64 per local function (used on amd64 to
+	// recover a throw-time ancestor frame's SP from its FP; see
+	// wazevoapi.ThrowFrame / resolveThrowTransferSPFP).
+	buf.Write(u32.LeBytes(uint32(len(cm.functionFrameSizes))))
+	for _, sz := range cm.functionFrameSizes {
+		buf.Write(u64.LeBytes(uint64(sz)))
+	}
+
 	return bytes.NewReader(buf.Bytes())
 }
+
+// ehTableFormatVersion guards the exception side-table cache section
+// (cm.ehTables / cm.functionFrameSizes) independently of wazyVersion: bump
+// this whenever that section's binary layout changes, so that old cache
+// entries are detected as stale rather than misparsed.
+const ehTableFormatVersion = 1
 
 func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *compiledModule, staleCache bool, err error) {
 	defer reader.Close()
@@ -354,6 +401,95 @@ func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *co
 			}
 		}
 	}
+
+	// Exception side table -- see serializeCompiledModule's comment for the
+	// layout. A missing/mismatched format-version byte means either a
+	// pre-side-table cache entry or one written by an incompatible layout
+	// version: either way, treat as stale (forces a recompile) rather than
+	// risk misparsing raw bytes as this section's structure.
+	if _, err = io.ReadFull(bufReader, eightBytes[:1]); err != nil || eightBytes[0] != ehTableFormatVersion {
+		return nil, true, nil
+	}
+	if _, err = io.ReadFull(bufReader, eightBytes[:4]); err != nil {
+		return nil, true, nil
+	}
+	numFuncs := binary.LittleEndian.Uint32(eightBytes[:4])
+	if int(numFuncs) != len(cm.functionOffsets) {
+		// Should be impossible (both are derived from the same module at
+		// serialize time), but guards against silently misparsing a
+		// corrupted/foreign cache entry as this section's structure.
+		return nil, true, nil
+	}
+	var executableAddr uintptr
+	if len(cm.executable) > 0 {
+		executableAddr = uintptr(unsafe.Pointer(&cm.executable[0]))
+	}
+	cm.ehTables = make([][]wazevoapi.EhEntry, numFuncs)
+	for fnum := uint32(0); fnum < numFuncs; fnum++ {
+		if _, err = io.ReadFull(bufReader, eightBytes[:4]); err != nil {
+			return nil, false, fmt.Errorf("compilationcache: error reading eh table entry count for func[%d]: %v", fnum, err)
+		}
+		entryCount := binary.LittleEndian.Uint32(eightBytes[:4])
+		if entryCount == 0 {
+			continue
+		}
+		entries := make([]wazevoapi.EhEntry, entryCount)
+		for i := range entries {
+			startOffset, err := readUint64(bufReader, &eightBytes)
+			if err != nil {
+				return nil, false, fmt.Errorf("compilationcache: error reading eh entry[%d][%d] start offset: %v", fnum, i, err)
+			}
+			endOffset, err := readUint64(bufReader, &eightBytes)
+			if err != nil {
+				return nil, false, fmt.Errorf("compilationcache: error reading eh entry[%d][%d] end offset: %v", fnum, i, err)
+			}
+			if _, err = io.ReadFull(bufReader, eightBytes[:4]); err != nil {
+				return nil, false, fmt.Errorf("compilationcache: error reading eh entry[%d][%d] try-table id: %v", fnum, i, err)
+			}
+			tryTableID := int(binary.LittleEndian.Uint32(eightBytes[:4]))
+			if _, err = io.ReadFull(bufReader, eightBytes[:4]); err != nil {
+				return nil, false, fmt.Errorf("compilationcache: error reading eh entry[%d][%d] clause count: %v", fnum, i, err)
+			}
+			clauseCount := binary.LittleEndian.Uint32(eightBytes[:4])
+			clauses := make([]wazevoapi.EhClause, clauseCount)
+			for j := range clauses {
+				if _, err = io.ReadFull(bufReader, eightBytes[:1]); err != nil {
+					return nil, false, fmt.Errorf("compilationcache: error reading eh clause[%d][%d][%d] kind: %v", fnum, i, j, err)
+				}
+				kind := eightBytes[0]
+				if _, err = io.ReadFull(bufReader, eightBytes[:4]); err != nil {
+					return nil, false, fmt.Errorf("compilationcache: error reading eh clause[%d][%d][%d] tag index: %v", fnum, i, j, err)
+				}
+				tagIndex := binary.LittleEndian.Uint32(eightBytes[:4])
+				landingPad, err := readUint64(bufReader, &eightBytes)
+				if err != nil {
+					return nil, false, fmt.Errorf("compilationcache: error reading eh clause[%d][%d][%d] landing pad: %v", fnum, i, j, err)
+				}
+				clauses[j] = wazevoapi.EhClause{Kind: kind, TagIndex: tagIndex, LandingPad: uintptr(landingPad) + executableAddr}
+			}
+			entries[i] = wazevoapi.EhEntry{
+				StartOffset: uintptr(startOffset) + executableAddr,
+				EndOffset:   uintptr(endOffset) + executableAddr,
+				TryTableID:  tryTableID,
+				Clauses:     clauses,
+			}
+		}
+		cm.ehTables[fnum] = entries
+	}
+
+	if _, err = io.ReadFull(bufReader, eightBytes[:4]); err != nil {
+		return nil, false, fmt.Errorf("compilationcache: error reading function frame size count: %v", err)
+	}
+	frameSizeCount := binary.LittleEndian.Uint32(eightBytes[:4])
+	cm.functionFrameSizes = make([]int64, frameSizeCount)
+	for i := range cm.functionFrameSizes {
+		sz, err := readUint64(bufReader, &eightBytes)
+		if err != nil {
+			return nil, false, fmt.Errorf("compilationcache: error reading function frame size[%d]: %v", i, err)
+		}
+		cm.functionFrameSizes[i] = int64(sz)
+	}
+
 	return
 }
 

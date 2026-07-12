@@ -80,6 +80,13 @@ type Compiler struct {
 	// emit extra stores to the locals save area so handler blocks can read
 	// throw-time values.
 	tryTableDepth int
+	// pendingEhEntries accumulates, purely per-function (reset in Init;
+	// never shared across parallel-compile workers, unlike tryTableMetadata,
+	// because the exception side table is organized per-function rather
+	// than by a module-global try-table ID), one EhPendingEntry per
+	// try_table-with-catch encountered during this function's lowering, in
+	// encounter order. See EhPendingEntry.
+	pendingEhEntries []EhPendingEntry
 
 	// Following are reused for the known safe bounds analysis.
 
@@ -179,6 +186,46 @@ func (c *Compiler) WithTryTableMetadata(t tryTableMetadata) *Compiler {
 // TryTableMetadata returns the accumulated try_table metadata.
 func (c *Compiler) TryTableMetadata() []wazevoapi.TryTableInfo {
 	return c.tryTableMetadata.Table()
+}
+
+// EhPendingClause is one not-yet-resolved catch clause of an EhPendingEntry:
+// the compiled handler block's ID stands in for its executable offset
+// (EhClause.LandingPad), which is only known after this function has been
+// fully compiled (Lower+RegAlloc+Finalize).
+type EhPendingClause struct {
+	Kind         byte
+	TagIndex     uint32
+	HandlerBlkID ssa.BasicBlockID
+}
+
+// EhPendingEntry is one not-yet-resolved try_table body range, recorded by
+// the frontend while lowering a try_table-with-catch. BodyBlkIDStart is the
+// ID of the try body's first block (bodyBlk); BodyBlkIDEnd is the exclusive
+// upper bound of every ssa.BasicBlockID allocated while lowering that body
+// (including nested constructs and nested try_tables), captured via
+// ssa.Builder.BlockIDMax() at the try_table's own `end`. Because the
+// frontend allocates a try_table's handler blocks *before* its own bodyBlk
+// (see the OpcodeTryTable lowering), [BodyBlkIDStart, BodyBlkIDEnd) never
+// contains a handler-block ID, even though those IDs are numerically close.
+//
+// The engine resolves this, after compiling the function, into one or more
+// wazevoapi.EhEntry values (one per contiguous run of the body's blocks in
+// the final code layout -- see wazevoapi.EhEntry's doc comment) using
+// backend.Compiler.CompiledBlockOffsets().
+type EhPendingEntry struct {
+	BodyBlkIDStart, BodyBlkIDEnd ssa.BasicBlockID
+	Clauses                      []EhPendingClause
+	// TryTableID is the module-local try-table ID assigned via
+	// tryTableMetadata.Append for this same try_table, letting the throw
+	// path look up NumLocals/ReuseLocals (wazevoapi.TryTableInfo) for
+	// locals-save-area bookkeeping when unwinding past this try's frame.
+	TryTableID int
+}
+
+// PendingEhEntries returns the EhPendingEntry values accumulated while
+// lowering the function most recently processed by LowerToSSA.
+func (c *Compiler) PendingEhEntries() []EhPendingEntry {
+	return c.pendingEhEntries
 }
 
 func (c *Compiler) declareSignatures(listenerOn bool) {
@@ -335,6 +382,7 @@ func (c *Compiler) Init(idx, typIndex wasm.Index, typ *wasm.FunctionType, localT
 	c.wasmFunctionBodyOffsetInCodeSection = bodyOffsetInCodeSection
 	c.needListener = needListener
 	c.tryTableDepth = 0
+	c.pendingEhEntries = c.pendingEhEntries[:0]
 	c.clearSafeBounds()
 	c.varLengthKnownSafeBoundWithIDPool.Reset()
 	c.knownSafeBoundsAtTheEndOfBlocks = c.knownSafeBoundsAtTheEndOfBlocks[:0]

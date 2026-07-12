@@ -42,34 +42,84 @@ type (
 		execCtxPtr        uintptr
 		numberOfResults   int
 		stackIteratorImpl stackIterator
-		// tryHandlers is the stack of active try_table exception handlers,
-		// used to match catch clauses when a throw exits to the dispatch loop.
-		tryHandlers []tryHandler
+		// activeCatchScopes is the stack of currently-open try_table (with
+		// catch clauses) activations, pushed/popped 1:1 by
+		// ExitCodeTryTableEnter/Leave exactly as tryHandlers was before,
+		// but slimmed to only what a throw can no longer recompute from the
+		// exception side table itself: which module instance owns this
+		// scope's tag namespace and where its locals save area lives.
+		// Catch-clause matching and control transfer are driven by the
+		// per-function exception side table (compiledModule.ehTables) plus
+		// a native stack walk (see (*callEngine).handleThrow), not by
+		// searching this slice -- it exists purely to recover, for
+		// whichever frame turns out to catch, the two pieces of state that
+		// are NOT recoverable from the (unwound, but never cloned/rolled
+		// back) native stack alone.
+		activeCatchScopes []activeCatchScope
 		// pendingException holds the most recently caught exception, so handler
 		// code can read its params after re-entry.
 		pendingException *wasm.Exception
 	}
 
-	// tryHandler records the state at a try_table entry for exception handling.
-	// On match, we restore the stack to the checkpoint state and re-enter at returnAddress.
-	tryHandler struct {
-		// Cloned stack and state from the try_table entry checkpoint,
-		// using the same approach as experimental.Snapshot.
-		sp, fp, top    uintptr
-		returnAddress  *byte
-		savedRegisters [64][2]uint64
-		stack          []byte // cloned stack
-		// catchClauses describes what exceptions this handler catches.
-		catchClauses []wazevoapi.CatchClauseInstance
-		// localsSaveArea is a heap buffer where locals are mirrored inside
-		// try bodies. Handlers read from it to get updated values.
-		// Nil for nested same-function try_tables that reuse the enclosing
-		// handler's save area.
-		localsSaveArea []uint64
-		// moduleInstance is the module that set up this try handler.
-		// Used for tag matching in doHandleException (the tag index in
-		// catch clauses is relative to this module's tag index space).
+	// activeCatchScope records the state a throw cannot recover merely by
+	// unwinding the native stack: which module instance to resolve
+	// catch-clause tag indices against, where the throw-time locals live,
+	// and a callee-saved-register snapshot. Pushed/popped in exact lockstep
+	// with try_table enter/leave (ExitCodeTryTableEnter/Leave below), one
+	// entry per dynamic try_table-with-catch entry -- identical cadence to
+	// the old tryHandler, just without the fields the side table replaced
+	// (sp/fp/top/returnAddress/stack/catchClauses): catch-clause matching
+	// and the SP/FP to resume at are now derived from compiledModule.ehTables
+	// and a fresh stack walk at throw time instead of a stored checkpoint.
+	//
+	// savedRegisters is the one field kept for the same reason it existed
+	// before: the throw-time control transfer resumes the catching frame
+	// directly at its try_table enter-continuation (resumePC below),
+	// bypassing the enter trampoline's own register-restore tail that the
+	// non-throwing path returns through. Any value the catching function's
+	// own code keeps live across the try body in a callee-saved register
+	// (which the register allocator does freely, e.g. for a value used both
+	// before and after a call inside the body) would otherwise read back
+	// whatever the deepest abandoned callee last left there. Restoring this
+	// snapshot -- captured cheaply here (a 1KB struct copy done by the enter
+	// trampoline's own prologue via saveRegistersInExecutionContext, not a
+	// stack clone) -- via afterThrowTransferEntrypoint before the jump
+	// keeps that correct without any frontend/regalloc changes. See
+	// backend.Machine.CompileThrowTransferRegisterRestore.
+	activeCatchScope struct {
+		// moduleInstance is the module that set up this scope. Used for tag
+		// matching (the tag index in catch clauses is relative to this
+		// module's tag index space) exactly as tryHandler.moduleInstance was.
 		moduleInstance *wasm.ModuleInstance
+		// resumePC is the native return address of this try_table's enter
+		// trampoline call: the instruction the non-throwing path resumes at
+		// with caughtExceptionClauseIdx == -1, i.e. the reload+br_table the
+		// backend compiled right after the enter call. A throw resumes the
+		// catching frame at exactly this PC (with caughtExceptionClauseIdx
+		// set to the matched clause instead of -1) so the compiled
+		// br_table dispatches to the handler block with every
+		// register/reload invariant (execCtx reload, savedRegisters
+		// restored) satisfied identically to the fast path -- rather than
+		// jumping straight into a raw landing pad, which on arm64 would
+		// bypass the execCtx reload the handler inherits from this exact
+		// point (see (*callEngine).handleThrow and afterThrowTransferEntrypoint).
+		// It is a code address into the (mmap'd, never-relocated)
+		// executable kept alive by the compiledModule, so it is both
+		// immune to stack growth/relocation between enter and throw and
+		// safe to hold as a bare uintptr for the duration of the call.
+		// Captured for free from the enter trampoline's own frame
+		// (firstReturnAddress) at enter time.
+		resumePC uintptr
+		// savedRegisters is a copy of execCtx.savedRegisters at the moment
+		// this try_table was entered (i.e. already captured, for free, by
+		// the enter trampoline's own prologue -- see
+		// saveRegistersInExecutionContext -- before any Go code runs).
+		savedRegisters [64][2]uint64
+		// localsSaveArea is a heap buffer where locals are mirrored inside
+		// try bodies. Handlers read from it to get throw-time values. Nil
+		// for nested same-function try_tables that reuse the enclosing
+		// scope's save area (TryTableInfo.ReuseLocals).
+		localsSaveArea []uint64
 	}
 
 	// executionContext is the struct to be read/written by assembly functions.
@@ -270,8 +320,8 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		}
 	}
 
-	// Clear any stale try_table handlers from a previous call.
-	c.tryHandlers = c.tryHandlers[:0]
+	// Clear any stale try_table handler state from a previous call.
+	c.activeCatchScopes = c.activeCatchScopes[:0]
 
 	var paramResultPtr *uint64
 	if len(paramResultStack) > 0 {
@@ -326,7 +376,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		if err != nil {
 			// Ensures that we can reuse this callEngine even after an error.
 			c.execCtx.exitCode = wazevoapi.ExitCodeOK
-			c.tryHandlers = c.tryHandlers[:0]
+			c.activeCatchScopes = c.activeCatchScopes[:0]
 		}
 	}()
 
@@ -585,26 +635,37 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case wazevoapi.ExitCodeThrow:
 			// Throw trampoline: (execCtx, exnref) → ().
-			// Reads the exnref from the stack, searches for a matching handler.
+			// Reads the exnref from the stack, then walks the native stack
+			// against the per-function exception side table and transfers
+			// control directly to a matching landing pad -- see handleThrow.
 			s := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
 			// Read the Exception pointer directly from the uint64 value to avoid
 			// conversion from uintptr into unsafe.Pointer, which triggers checkptr.
 			exn := *(**wasm.Exception)(unsafe.Pointer(&s[0]))
-			if !c.doHandleException(exn) {
+			if !c.handleThrow(exn) {
 				panic(wasmruntime.ErrRuntimeUncaughtException)
 			}
-			if len(exn.Params) > 0 {
-				c.execCtx.exceptionParamsPtr = uintptr(unsafe.Pointer(&exn.Params[0]))
-			}
-			c.execCtx.exceptionPtr = uintptr(unsafe.Pointer(exn))
-			c.execCtx.exitCode = wazevoapi.ExitCodeOK
-			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
-				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
+			// handleThrow already transferred control on a match (the
+			// destination PC/SP/FP are the matched landing pad's, not
+			// goCallReturnAddress/stackPointerBeforeGoCall like every other
+			// exit code's uniform "resume where we left off").
 		case wazevoapi.ExitCodeNullReference:
 			panic(wasmruntime.ErrRuntimeNullReference)
 		case wazevoapi.ExitCodeTryTableEnter:
-			// Save current state as a try handler checkpoint using stack cloning
-			// (same approach as experimental.Snapshot).
+			// Push a slimmed activeCatchScope for this try_table. Unlike
+			// the old tryHandler this does no stack cloning (the >=10KB
+			// clone is gone): catch-clause matching and the resume SP/FP
+			// now come from the exception side table and a fresh stack walk
+			// at throw time (handleThrow), not from a checkpoint captured
+			// here. What must still be recorded per dynamic entry is the
+			// state a throw cannot recompute merely by unwinding: which
+			// module instance owns this scope's tag namespace, where its
+			// locals save area (if any) lives, and -- as the documented P1
+			// safety net -- a 1KB callee-saved-register snapshot (the
+			// savedRegisters copy below; see activeCatchScope's doc comment
+			// for why the throw-time transfer still needs it). The stack
+			// clone is what P1 removes; this register snapshot is retained.
+			//
 			// The encoded exit code (with tryTableID in upper bits) is on the
 			// Go call stack as the second trampoline argument, not in execCtx.exitCode.
 			tryTableEnterStack := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
@@ -612,28 +673,35 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			mod := c.callerModuleInstance()
 			me := mod.Engine.(*moduleEngine)
 			info := &me.parent.tryTableInfo[tryTableID]
-			returnAddress := c.execCtx.goCallReturnAddress
-			oldTop, oldSp := c.stackTop, uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall))
-			newSP, newFP, newTop, newStack := c.cloneStack(uintptr(len(c.stack)) + 16)
-			adjustClonedStack(oldSp, oldTop, newSP, newFP, newTop)
 
 			// Allocate a heap buffer for locals so handlers can read throw-time values.
-			// Nested try_tables in the same function (ReuseLocals) share the enclosing handler's save area.
+			// Nested try_tables in the same function (ReuseLocals) share the enclosing scope's save area.
 			var saveArea []uint64
 			if info.NumLocals > 0 && !info.ReuseLocals {
 				saveArea = make([]uint64, info.NumLocals*2) // 16 bytes per local
 				c.execCtx.localsSaveAreaPtr = uintptr(unsafe.Pointer(&saveArea[0]))
 			}
 
-			c.tryHandlers = append(c.tryHandlers, tryHandler{
-				sp:             newSP,
-				fp:             newFP,
-				top:            newTop,
-				returnAddress:  returnAddress,
-				savedRegisters: c.execCtx.savedRegisters,
-				stack:          newStack,
-				catchClauses:   info.CatchClauses,
+			// Capture this try_table's enter-continuation: the return
+			// address of the enter trampoline call, i.e. the reload+br_table
+			// the compiled catching frame resumes at once the trampoline
+			// returns. c.execCtx.goCallReturnAddress is NOT it (that points
+			// into the shared enter trampoline's own restore-and-return
+			// tail, which depends on the trampoline's now-transient stack
+			// frame); the enter-continuation is the trampoline's caller
+			// return address, recoverable in O(1) from the trampoline's
+			// still-live frame exactly as the throw-time walk recovers each
+			// frame's return address. This is a pure read of an address
+			// already on the stack -- no clone, no walk of the whole stack
+			// -- so the non-throwing fast path is unchanged.
+			resumePC := firstReturnAddress(
+				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)),
+				c.execCtx.framePointerBeforeGoCall, c.stackTop)
+
+			c.activeCatchScopes = append(c.activeCatchScopes, activeCatchScope{
 				moduleInstance: mod,
+				resumePC:       resumePC,
+				savedRegisters: c.execCtx.savedRegisters,
 				localsSaveArea: saveArea,
 			})
 			// Set clauseIdx = -1 (no exception) in execCtx for the compiled code
@@ -643,11 +711,11 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case wazevoapi.ExitCodeTryTableLeave:
-			// Pop the most recent try handler and restore the locals save
-			// area pointer from the handler below (or clear it).
-			if len(c.tryHandlers) > 0 {
-				c.tryHandlers = c.tryHandlers[:len(c.tryHandlers)-1]
-				c.restoreLocalsSaveAreaPtr(len(c.tryHandlers) - 1)
+			// Pop the most recent scope and restore the locals save area
+			// pointer from the scope below (or clear it).
+			if n := len(c.activeCatchScopes); n > 0 {
+				c.activeCatchScopes = c.activeCatchScopes[:n-1]
+				c.restoreLocalsSaveAreaPtrFrom(c.activeCatchScopes, n-2)
 			}
 			c.execCtx.exitCode = wazevoapi.ExitCodeOK
 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
@@ -658,62 +726,145 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 	}
 }
 
-// doHandleException tries to match the given exception against active try handlers.
-// If a match is found, it restores the execution state to the handler's checkpoint
-// (like snapshot.doRestore) and writes the matched clause index as the trampoline
-// return value. Returns true if handled.
-func (c *callEngine) doHandleException(exn *wasm.Exception) bool {
-	// Search try handlers from innermost (last) to outermost (first).
-	for i := len(c.tryHandlers) - 1; i >= 0; i-- {
-		h := &c.tryHandlers[i]
-		for clauseIdx, clause := range h.catchClauses {
-			// Use the module that set up the handler (not the one that threw)
-			// because clause.TagIndex is relative to that module's tag space.
-			mod := h.moduleInstance
-			matched := false
-			switch clause.Kind {
-			case wasm.CatchKindCatch, wasm.CatchKindCatchRef:
-				matched = mod.Tags[clause.TagIndex] == exn.Tag
-			case wasm.CatchKindCatchAll, wasm.CatchKindCatchAllRef:
-				matched = true
+// handleThrow searches the current native stack segment for a try_table
+// whose exception side table entry (compiledModule.ehTables) contains some
+// frame's own PC and whose clauses match exn's tag, walking outward from the
+// throw site (frame 0) through its ancestors. On a match it transfers
+// control directly to that clause's landing pad -- via
+// afterGoFunctionCallEntrypoint with the matching frame's own SP/FP,
+// recovered fresh from the walk, never captured/rolled back -- and returns
+// true. Returns false if no frame in this segment catches it (the caller
+// then panics, uncaught, exactly as before).
+//
+// This replaces the old doHandleException's tryHandlers search plus full
+// stack/register checkpoint restore: there is no checkpoint any more (try
+// entry clones nothing), so a caught exception simply abandons every frame
+// between the throw site and the catching frame in place -- their memory is
+// never touched again -- and jumps straight into the catching frame's own,
+// still-intact native stack frame, mirroring the interpreter's
+// searchExceptionTable/applyExceptionHandler (which also never rolls back
+// state, just unwinds).
+func (c *callEngine) handleThrow(exn *wasm.Exception) bool {
+	eng := c.parent.parent.parent
+	scopes := c.activeCatchScopes
+
+	// tryFrame attempts to match exn against fr's own try_tables (cm's
+	// ehTable entries containing fr.ReturnAddress, searched innermost
+	// first -- entries are recorded in encounter order, so a backward scan
+	// mirrors searchExceptionTable's). On a match, it finalizes
+	// activeCatchScopes and transfers control, returning true. On no
+	// match, it discards whatever fr contributed to `scopes` (so the next,
+	// shallower frame's own scopes are back on top) and returns false.
+	tryFrame := func(fr wazevoapi.ThrowFrame, cm *compiledModule) bool {
+		fnIdx := cm.functionIndexOf(fr.ReturnAddress)
+		entries := cm.ehTables[fnIdx]
+
+		containing := 0
+		for i := len(entries) - 1; i >= 0; i-- {
+			e := &entries[i]
+			if fr.ReturnAddress < e.StartOffset || fr.ReturnAddress >= e.EndOffset {
+				continue
 			}
-			if matched {
-				// Restore localsSaveAreaPtr from the matched handler or
-				// the nearest enclosing one (same-function reuse).
-				c.restoreLocalsSaveAreaPtr(i)
+			scopeIdx := len(scopes) - 1 - containing
+			if scopeIdx < 0 {
+				panic("BUG: activeCatchScopes underflow while matching a throw")
+			}
+			mod := scopes[scopeIdx].moduleInstance
+			for ci := range e.Clauses {
+				cl := &e.Clauses[ci]
+				matched := cl.Kind == wasm.CatchKindCatchAll || cl.Kind == wasm.CatchKindCatchAllRef ||
+					mod.Tags[cl.TagIndex] == exn.Tag
+				if !matched {
+					continue
+				}
 
-				// Pop all handlers at and above this one.
-				c.tryHandlers = c.tryHandlers[:i]
+				// Restore localsSaveAreaPtr from this scope or the
+				// nearest enclosing one that owns a save area
+				// (same-function ReuseLocals scopes share their
+				// enclosing scope's), and the callee-saved register
+				// snapshot from this exact scope (see activeCatchScope's
+				// doc comment for why), then discard this scope and
+				// everything above it: their try_tables are being
+				// unwound past, exactly as doHandleException used to
+				// truncate tryHandlers.
+				c.restoreLocalsSaveAreaPtrFrom(scopes, scopeIdx)
+				c.execCtx.savedRegisters = scopes[scopeIdx].savedRegisters
+				c.activeCatchScopes = scopes[:scopeIdx]
 
-				// Store the caught exception so handler code can read params.
+				// The matched clause's index ci within e.Clauses
+				// (declaration order) is exactly what the compiled br_table
+				// at the enter-continuation dispatches on, so it feeds
+				// caughtExceptionClauseIdx directly. cl.LandingPad is no
+				// longer used by the transfer -- the br_table, not a direct
+				// jump, routes to the handler block -- it survives only as
+				// the dead-code marker buildEhEntries uses to drop
+				// unreachable try_tables (see wazevoapi.EhClause).
 				c.pendingException = exn
+				if len(exn.Params) > 0 {
+					c.execCtx.exceptionParamsPtr = uintptr(unsafe.Pointer(&exn.Params[0]))
+				}
+				c.execCtx.exceptionPtr = uintptr(unsafe.Pointer(exn))
+				// The matched clause index, read by the compiled code at
+				// resumePC exactly where the non-throwing path reads -1.
+				c.execCtx.caughtExceptionClauseIdx = int64(ci)
+				c.execCtx.exitCode = wazevoapi.ExitCodeOK
 
-				// Restore the cloned stack (like snapshot.doRestore).
-				spp := *(**uint64)(unsafe.Pointer(&h.sp))
-				c.stack = h.stack
-				c.stackTop = h.top
-				ec := &c.execCtx
-				ec.stackBottomPtr = &c.stack[0]
-				ec.stackPointerBeforeGoCall = spp
-				ec.framePointerBeforeGoCall = h.fp
-				ec.goCallReturnAddress = h.returnAddress
-				ec.savedRegisters = h.savedRegisters
-
-				// Set the matched clause index in execCtx for compiled code to read.
-				ec.caughtExceptionClauseIdx = int64(clauseIdx)
+				// Resume the catching frame at its try_table
+				// enter-continuation (resumePC) -- the same PC, SP/FP, and
+				// restored-register state the non-throwing path resumes with
+				// -- rather than jumping into the raw landing pad. The
+				// compiled reload+br_table there then establishes execCtx
+				// (in x8 on arm64, RBP-relative on amd64) and dispatches to
+				// handler ci, identically to the fast path. SP/FP come from
+				// the fresh walk (never a stale checkpoint); resumePC is the
+				// scope's captured code address.
+				sp, fp := resolveThrowTransferSPFP(fr, cm.functionFrameSizes[fnIdx])
+				resumePC := scopes[scopeIdx].resumePC
+				restoreFn := cm.sharedFunctions.throwTransferRegisterRestoreAddress
+				afterThrowTransferEntrypoint(restoreFn, c.execCtxPtr, sp, fp, resumePC)
 				return true
 			}
+			containing++
+		}
+		scopes = scopes[:len(scopes)-containing]
+		return false
+	}
+
+	frame0 := wazevoapi.ThrowFrame{
+		ReturnAddress: uintptr(unsafe.Pointer(c.execCtx.goCallReturnAddress)),
+		SP:            uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)),
+		FP:            c.execCtx.framePointerBeforeGoCall,
+	}
+	if cm0 := eng.compiledModuleOfAddr(frame0.ReturnAddress); cm0 != nil && tryFrame(frame0, cm0) {
+		return true
+	}
+
+	for _, fr := range unwindStackForThrow(frame0.SP, frame0.FP, c.stackTop, nil) {
+		cm := eng.compiledModuleOfAddr(fr.ReturnAddress)
+		if cm == nil {
+			// Reached the trampoline/entry preamble (or, in principle,
+			// unknown code): end of this native-stack segment. A throw
+			// cannot cross this boundary -- the segment's own
+			// callWithStack recover() degrades it to a Go error at the
+			// host boundary, exactly as tryHandlers scoping did before.
+			break
+		}
+		if tryFrame(fr, cm) {
+			return true
 		}
 	}
+	c.activeCatchScopes = scopes
 	return false
 }
 
-// restoreLocalsSaveAreaPtr walks tryHandlers from index `from` downward
-// and sets localsSaveAreaPtr to the first handler that owns a save area,
-// or clears it if none is found.
-func (c *callEngine) restoreLocalsSaveAreaPtr(from int) {
+// restoreLocalsSaveAreaPtrFrom walks scopes from index `from` downward and
+// sets execCtx.localsSaveAreaPtr to the first scope that owns a save area
+// (nested same-function ReuseLocals scopes share their enclosing scope's),
+// or clears it if none is found (including when from < 0, i.e. no
+// enclosing scope exists at all).
+func (c *callEngine) restoreLocalsSaveAreaPtrFrom(scopes []activeCatchScope, from int) {
 	for i := from; i >= 0; i-- {
-		if sa := c.tryHandlers[i].localsSaveArea; len(sa) > 0 {
+		if sa := scopes[i].localsSaveArea; len(sa) > 0 {
 			c.execCtx.localsSaveAreaPtr = uintptr(unsafe.Pointer(&sa[0]))
 			return
 		}

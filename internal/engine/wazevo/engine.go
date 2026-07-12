@@ -76,7 +76,13 @@ type (
 		tryTableEnterAddress *byte
 		// tryTableLeaveAddress is the address of try_table leave trampoline.
 		tryTableLeaveAddress *byte
-		listenerTrampolines  listenerTrampolines
+		// throwTransferRegisterRestoreAddress is the address of the tiny
+		// callable blob (backend.Machine.CompileThrowTransferRegisterRestore)
+		// that restores callee-saved registers from
+		// wazevo.executionContext.savedRegisters as part of a throw-time
+		// control transfer; see (*callEngine).handleThrow.
+		throwTransferRegisterRestoreAddress *byte
+		listenerTrampolines                 listenerTrampolines
 	}
 
 	listenerTrampolines = map[*wasm.FunctionType]struct {
@@ -105,6 +111,17 @@ type (
 		// tryTableInfo stores per-try_table metadata (catch clauses,
 		// local count) indexed by try_table ID assigned during compilation.
 		tryTableInfo []wazevoapi.TryTableInfo
+		// ehTables holds, per local function index, that function's
+		// exception side table (PC-range entries for its try_tables, sorted
+		// in encounter/compile order -- see wazevoapi.EhEntry). Offsets are
+		// rebased to absolute addresses once cm.executable is finalized,
+		// exactly like sourceMap.
+		ehTables [][]wazevoapi.EhEntry
+		// functionFrameSizes holds, per local function index, that
+		// function's fixed-frame size (backend.Machine.FrameSize) as of
+		// compile time. Used on amd64 to recover a throw-time ancestor
+		// frame's SP from its FP (see wazevoapi.ThrowFrame).
+		functionFrameSizes []int64
 	}
 
 	executables struct {
@@ -264,6 +281,8 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 	be := backend.NewCompiler(ctx, machine, ssaBuilder)
 	cm.executables.compileEntryPreambles(module, machine, be)
 	cm.functionOffsets = make([]int, localFns)
+	cm.ehTables = make([][]wazevoapi.EhEntry, localFns)
+	cm.functionFrameSizes = make([]int64, localFns)
 
 	var indexes []int
 	if wazevoapi.DeterministicCompilationVerifierEnabled {
@@ -284,12 +303,12 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 			fctx := functionContext(ctx, module, i, fidx)
 
 			needListener := len(listeners) > i && listeners[i] != nil
-			body, relsPerFunc, err := e.compileLocalWasmFunction(fctx, module, wasm.Index(i), fe, ssaBuilder, be, needListener)
+			body, relsPerFunc, ehEntries, frameSize, err := e.compileLocalWasmFunction(fctx, module, wasm.Index(i), fe, ssaBuilder, be, needListener)
 			if err != nil {
 				return nil, fmt.Errorf("compile function %d/%d: %v", i, len(module.CodeSection)-1, err)
 			}
 
-			relocator.appendFunction(fctx, module, cm, i, fidx, body, relsPerFunc, be.SourceOffsetInfo())
+			relocator.appendFunction(fctx, module, cm, i, fidx, body, relsPerFunc, be.SourceOffsetInfo(), ehEntries, frameSize)
 		}
 		cm.tryTableInfo = fe.TryTableMetadata()
 	} else {
@@ -304,6 +323,8 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 			body        []byte
 			relsPerFunc []backend.RelocationInfo
 			offsPerFunc []backend.SourceOffsetInfo
+			ehEntries   []wazevoapi.EhEntry
+			frameSize   int64
 		}
 
 		compiledFuncs := make([]compiledFunc, len(module.CodeSection))
@@ -349,7 +370,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 					fctx := functionContext(ctx, module, i, fidx)
 
 					needListener := len(listeners) > i && listeners[i] != nil
-					body, relsPerFunc, err := e.compileLocalWasmFunction(fctx, module, wasm.Index(i), fe, ssaBuilder, be, needListener)
+					body, relsPerFunc, ehEntries, frameSize, err := e.compileLocalWasmFunction(fctx, module, wasm.Index(i), fe, ssaBuilder, be, needListener)
 					if err != nil {
 						cancel(fmt.Errorf("compile function %d/%d: %v", i, len(module.CodeSection)-1, err))
 						return
@@ -361,6 +382,8 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 						// of process them immediately we need to copy the memory.
 						slices.Clone(relsPerFunc),
 						slices.Clone(be.SourceOffsetInfo()),
+						ehEntries, // already a fresh slice: buildEhEntries allocates its own.
+						frameSize,
 					}
 				}
 			}()
@@ -373,7 +396,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 
 		for i := range compiledFuncs {
 			fn := &compiledFuncs[i]
-			relocator.appendFunction(fn.fctx, module, cm, fn.fnum, fn.fidx, fn.body, fn.relsPerFunc, fn.offsPerFunc)
+			relocator.appendFunction(fn.fctx, module, cm, fn.fnum, fn.fidx, fn.body, fn.relsPerFunc, fn.offsPerFunc, fn.ehEntries, fn.frameSize)
 		}
 		cm.tryTableInfo = sharedTTM.Table()
 	}
@@ -399,6 +422,8 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 			cm.sourceMap.executableOffsets[i] += uintptr(unsafe.Pointer(&cm.executable[0]))
 		}
 	}
+
+	rebaseEhTables(cm)
 
 	relocator.resolveRelocations(machine, executable, importedFns)
 
@@ -458,6 +483,8 @@ func (r *engineRelocator) appendFunction(
 	body []byte,
 	relsPerFunc []backend.RelocationInfo,
 	offsPerFunc []backend.SourceOffsetInfo,
+	ehEntries []wazevoapi.EhEntry,
+	frameSize int64,
 ) {
 	// Align 16-bytes boundary.
 	r.totalSize = (r.totalSize + 15) &^ 15
@@ -475,6 +502,30 @@ func (r *engineRelocator) appendFunction(
 			cm.sourceMap.wasmBinaryOffsets = append(cm.sourceMap.wasmBinaryOffsets, uint64(info.SourceOffset))
 		}
 	}
+
+	// Rebase this function's exception side-table entries from
+	// function-relative to executable-relative (module-relative) offsets,
+	// same pattern as the source map above; a further absolute-address
+	// rebase happens once cm.executable's base address is known (see
+	// compileModule, mirroring sourceMap.executableOffsets there).
+	if len(ehEntries) > 0 {
+		rebased := make([]wazevoapi.EhEntry, len(ehEntries))
+		for i, e := range ehEntries {
+			clauses := make([]wazevoapi.EhClause, len(e.Clauses))
+			for j, c := range e.Clauses {
+				c.LandingPad += uintptr(r.totalSize)
+				clauses[j] = c
+			}
+			rebased[i] = wazevoapi.EhEntry{
+				StartOffset: e.StartOffset + uintptr(r.totalSize),
+				EndOffset:   e.EndOffset + uintptr(r.totalSize),
+				Clauses:     clauses,
+				TryTableID:  e.TryTableID,
+			}
+		}
+		cm.ehTables[fnum] = rebased
+	}
+	cm.functionFrameSizes[fnum] = frameSize
 
 	fref := frontend.FunctionIndexToFuncRef(fidx)
 	r.refToBinaryOffset[fref] = r.totalSize
@@ -510,7 +561,7 @@ func (e *engine) compileLocalWasmFunction(
 	ssaBuilder ssa.Builder,
 	be backend.Compiler,
 	needListener bool,
-) (body []byte, rels []backend.RelocationInfo, err error) {
+) (body []byte, rels []backend.RelocationInfo, ehEntries []wazevoapi.EhEntry, frameSize int64, err error) {
 	typIndex := module.FunctionSection[localFunctionIndex]
 	typ := &module.TypeSection[typIndex]
 	codeSeg := &module.CodeSection[localFunctionIndex]
@@ -544,11 +595,107 @@ func (e *engine) compileLocalWasmFunction(
 	// machine code.
 	original, rels, err := be.Compile(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("ssa->machine code: %v", err)
+		return nil, nil, nil, 0, fmt.Errorf("ssa->machine code: %v", err)
 	}
 
+	// Resolve this function's pending exception side-table entries (offsets
+	// of try_table body ranges and catch-clause landing pads) now, while
+	// the backend's post-compile block-offset bookkeeping for this specific
+	// function is still valid (i.e. before the next be.Init()/Reset()).
+	ehEntries = buildEhEntries(fe.PendingEhEntries(), be.CompiledBlockOffsets(), int64(len(original)))
+	frameSize = be.FrameSize()
+
 	// TODO: optimize as zero copy.
-	return slices.Clone(original), rels, nil
+	return slices.Clone(original), rels, ehEntries, frameSize, nil
+}
+
+// rebaseEhTables adds the executable's base address to every offset in
+// cm.ehTables, turning the executable-relative offsets built by
+// buildEhEntries/appendFunction (or read back, still executable-relative,
+// from the file cache -- see engine_cache.go) into absolute addresses.
+// Mirrors the sourceMap.executableOffsets rebase right above its call site.
+func rebaseEhTables(cm *compiledModule) {
+	if len(cm.executable) == 0 {
+		return
+	}
+	base := uintptr(unsafe.Pointer(&cm.executable[0]))
+	for _, entries := range cm.ehTables {
+		for i := range entries {
+			e := &entries[i]
+			e.StartOffset += base
+			e.EndOffset += base
+			for j := range e.Clauses {
+				e.Clauses[j].LandingPad += base
+			}
+		}
+	}
+}
+
+// buildEhEntries resolves a function's pending exception side-table entries
+// (recorded by the frontend while lowering try_tables, frontend.EhPendingEntry)
+// into wazevoapi.EhEntry values with function-body-relative offsets, using
+// the post-compile block layout (backend.Compiler.CompiledBlockOffsets, in
+// final code-layout order) and the function's total compiled body length.
+func buildEhEntries(pending []frontend.EhPendingEntry, blockOffsets []backend.CompiledBlockOffset, bodyLen int64) []wazevoapi.EhEntry {
+	if len(pending) == 0 {
+		return nil
+	}
+
+	offsetOf := make(map[ssa.BasicBlockID]int64, len(blockOffsets))
+	for _, bo := range blockOffsets {
+		offsetOf[bo.BlockID] = bo.Offset
+	}
+
+	var out []wazevoapi.EhEntry
+	for _, p := range pending {
+		clauses := make([]wazevoapi.EhClause, len(p.Clauses))
+		unreachableEntry := false
+		for i, pc := range p.Clauses {
+			off, ok := offsetOf[pc.HandlerBlkID]
+			if !ok {
+				// The handler block was eliminated as dead code: this
+				// try_table (and hence its whole body) is unreachable, so
+				// nothing can ever throw into it. Skip the whole entry.
+				unreachableEntry = true
+				break
+			}
+			clauses[i] = wazevoapi.EhClause{Kind: pc.Kind, TagIndex: pc.TagIndex, LandingPad: uintptr(off)}
+		}
+		if unreachableEntry {
+			continue
+		}
+
+		// Walk the ordered block layout once, coalescing contiguous runs of
+		// blocks whose ID falls in [BodyBlkIDStart, BodyBlkIDEnd) into
+		// (start,end) ranges. A non-contiguous body (if block layout didn't
+		// keep it together) simply produces multiple EhEntry values here,
+		// all sharing the same Clauses/TryTableID.
+		inRun := false
+		var runStart int64
+		flush := func(end int64) {
+			if inRun {
+				out = append(out, wazevoapi.EhEntry{
+					StartOffset: uintptr(runStart),
+					EndOffset:   uintptr(end),
+					Clauses:     clauses,
+					TryTableID:  p.TryTableID,
+				})
+				inRun = false
+			}
+		}
+		for _, bo := range blockOffsets {
+			if bo.BlockID >= p.BodyBlkIDStart && bo.BlockID < p.BodyBlkIDEnd {
+				if !inRun {
+					inRun = true
+					runStart = bo.Offset
+				}
+			} else {
+				flush(bo.Offset)
+			}
+		}
+		flush(bodyLen)
+	}
+	return out
 }
 
 func (e *engine) compileHostModule(ctx context.Context, module *wasm.Module, listeners []experimental.FunctionListener) (*compiledModule, error) {
@@ -763,7 +910,7 @@ func (e *engine) NewModuleEngine(m *wasm.Module, mi *wasm.ModuleInstance) (wasm.
 }
 
 func (e *engine) compileSharedFunctions() {
-	var sizes [12]int
+	var sizes [13]int
 	var trampolines []byte
 
 	addTrampoline := func(i int, buf []byte) {
@@ -863,6 +1010,9 @@ func (e *engine) compileSharedFunctions() {
 			Results: []ssa.Type{},
 		}, false))
 
+	e.be.Init()
+	addTrampoline(12, e.machine.CompileThrowTransferRegisterRestore())
+
 	fns := &sharedFunctions{
 		executable:          mmapExecutable(trampolines),
 		listenerTrampolines: make(listenerTrampolines),
@@ -893,6 +1043,8 @@ func (e *engine) compileSharedFunctions() {
 	fns.tryTableEnterAddress = &fns.executable[offset]
 	offset += sizes[10]
 	fns.tryTableLeaveAddress = &fns.executable[offset]
+	offset += sizes[11]
+	fns.throwTransferRegisterRestoreAddress = &fns.executable[offset]
 
 	if wazevoapi.PerfMapEnabled {
 		wazevoapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.memoryGrowAddress)), uint64(sizes[0]), "memory_grow_trampoline")
@@ -907,6 +1059,7 @@ func (e *engine) compileSharedFunctions() {
 		wazevoapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.throwTrampolineAddress)), uint64(sizes[9]), "throw_trampoline")
 		wazevoapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.tryTableEnterAddress)), uint64(sizes[10]), "try_table_enter_trampoline")
 		wazevoapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.tryTableLeaveAddress)), uint64(sizes[11]), "try_table_leave_trampoline")
+		wazevoapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.throwTransferRegisterRestoreAddress)), uint64(sizes[12]), "throw_transfer_register_restore")
 	}
 
 	e.sharedFunctions = fns

@@ -37,6 +37,11 @@ type (
 		blockType *wasm.FunctionType
 		// clonedArgs hold the arguments to Else block.
 		clonedArgs ssa.Values
+		// pendingEhIdx indexes into Compiler.pendingEhEntries for a
+		// controlFrameKindTryTableWithCatch frame -- OpcodeEnd fills in
+		// that pending entry's BodyBlkIDEnd once the try body has been
+		// fully lowered. Unused (left zero) for all other frame kinds.
+		pendingEhIdx int
 	}
 
 	controlFrameKind byte
@@ -1491,6 +1496,12 @@ func (c *Compiler) lowerCurrentOpcode() {
 			if c.tryTableDepth > 0 {
 				c.tryTableDepth--
 			}
+			// Finalize the pending EH entry's body block-ID range
+			// regardless of reachability at this `end` (even if the body
+			// became unreachable partway through, e.g. it always throws,
+			// any of its blocks that DID get compiled must still be
+			// covered by the side table).
+			c.pendingEhEntries[ctrl.pendingEhIdx].BodyBlkIDEnd = ssa.BasicBlockID(c.ssaBuilder.BlockIDMax())
 		}
 
 		builder.Seal(followingBlk)
@@ -3597,10 +3608,16 @@ func (c *Compiler) lowerCurrentOpcode() {
 			ReuseLocals:  c.tryTableDepth > 0,
 		})
 
-		// Allocate the following block (after try_table end) and body block.
+		// Allocate the following block (after try_table end).
 		followingBlk := builder.AllocateBasicBlock()
 		c.addBlockParamsFromWasmTypes(bt.Results, followingBlk)
-		bodyBlk := builder.AllocateBasicBlock()
+
+		// bodyBlk is allocated *after* the handler blocks below (when there
+		// are catch clauses) so that [bodyBlk.ID(), BlockIDMax() at this
+		// try's `end`) is a block-ID range uncontaminated by handler-block
+		// IDs -- see EhPendingEntry's doc comment.
+		var bodyBlk ssa.BasicBlock
+		var pendingEhIdx int
 
 		if len(catchClauses) > 0 {
 			// Store the caller module context so the dispatch loop can find the module.
@@ -3615,6 +3632,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 			targets := varPool.Allocate(len(catchClauses) + 1) // +1 for bodyBlk
 
 			currentBlk := builder.CurrentBlock()
+			pendingClauses := make([]EhPendingClause, 0, len(catchClauses))
 			for _, cc := range catchClauses {
 				handlerBlk := builder.AllocateBasicBlock()
 				builder.SetCurrentBlock(handlerBlk)
@@ -3649,7 +3667,24 @@ func (c *Compiler) lowerCurrentOpcode() {
 				c.insertJumpToBlock(jmpArgs, targetBlk)
 
 				targets = targets.Append(varPool, ssa.Value(handlerBlk.ID()))
+				pendingClauses = append(pendingClauses, EhPendingClause{
+					Kind: cc.kind, TagIndex: cc.tagIndex, HandlerBlkID: handlerBlk.ID(),
+				})
 			}
+
+			// Now allocate the body block (see the comment above) and
+			// record the pending exception side-table entry for this
+			// try_table. BodyBlkIDEnd is filled in at this try's own
+			// OpcodeEnd, once its whole body (including nested constructs)
+			// has been lowered.
+			bodyBlk = builder.AllocateBasicBlock()
+			pendingEhIdx = len(c.pendingEhEntries)
+			c.pendingEhEntries = append(c.pendingEhEntries, EhPendingEntry{
+				BodyBlkIDStart: bodyBlk.ID(),
+				Clauses:        pendingClauses,
+				TryTableID:     tryTableID,
+			})
+
 			// Last target is the body block (default for clauseIdx == -1 / out of range).
 			targets = targets.Append(varPool, ssa.Value(bodyBlk.ID()))
 
@@ -3694,6 +3729,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 		} else {
 			// No catch clauses — try_table acts as a plain block.
 			// Jump directly to body without entering exception handling.
+			bodyBlk = builder.AllocateBasicBlock()
 			c.insertJumpToBlock(ssa.ValuesNil, bodyBlk)
 		}
 
@@ -3717,6 +3753,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 		}
 		state.ctrlPush(controlFrame{
 			kind:                         kind,
+			pendingEhIdx:                 pendingEhIdx,
 			originalStackLenWithoutParam: len(state.values) - len(bt.Params),
 			followingBlock:               followingBlk,
 			blockType:                    bt,

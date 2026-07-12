@@ -2391,14 +2391,14 @@ L0 (SSA Block: blk0):
 	subs wzr, w9, w10
 	csel w9, w10, w9, hs
 	br_table_sequence x9, table_index=0
-L4 (SSA Block: blk4):
+L3 (SSA Block: blk3):
 L1 (SSA Block: blk1):
 	mov x0, xzr
 	add sp, sp, #0x10
 	add sp, sp, #0x10
 	ldr x30, [sp], #0x10
 	ret
-L3 (SSA Block: blk3):
+L4 (SSA Block: blk4):
 	ldr x9, [sp, #0x18]
 	str x9, [x8, #0x8]
 	ldr x9, [x8, #0x4b8]
@@ -2425,12 +2425,12 @@ L0 (SSA Block: blk0):
 	subs wzr, w132?, w136?
 	csel w137?, w136?, w132?, hs
 	br_table_sequence x137?, table_index=0
-L4 (SSA Block: blk4):
+L3 (SSA Block: blk3):
 L1 (SSA Block: blk1):
 	mov x133?, xzr
 	mov x0, x133?
 	ret
-L3 (SSA Block: blk3):
+L4 (SSA Block: blk4):
 	str x129?, [x128?, #0x8]
 	ldr x135?, [x128?, #0x4b8]
 	mov x0, x128?
@@ -2461,14 +2461,14 @@ L0 (SSA Block: blk0):
 	subs wzr, w9, w10
 	csel w9, w10, w9, hs
 	br_table_sequence x9, table_index=0
-L4 (SSA Block: blk4):
+L3 (SSA Block: blk3):
 L1 (SSA Block: blk1):
 	movz w0, #0x2a, lsl 0
 	add sp, sp, #0x10
 	add sp, sp, #0x10
 	ldr x30, [sp], #0x10
 	ret
-L3 (SSA Block: blk3):
+L4 (SSA Block: blk4):
 	ldr x9, [sp, #0x18]
 	str x9, [x8, #0x8]
 	ldr x9, [x8, #0x4a0]
@@ -2520,7 +2520,7 @@ L0 (SSA Block: blk0):
 	subs wzr, w9, w10
 	csel w9, w10, w9, hs
 	br_table_sequence x9, table_index=0
-L4 (SSA Block: blk4):
+L3 (SSA Block: blk3):
 	ldr x8, [x8, #0x4c8]
 	ldr w9, [x8]
 	ldr w10, [x8, #0x8]
@@ -2537,7 +2537,7 @@ L1 (SSA Block: blk1):
 	add sp, sp, #0x30
 	ldr x30, [sp], #0x10
 	ret
-L3 (SSA Block: blk3):
+L4 (SSA Block: blk4):
 	ldr x9, [x8, #0x4d8]
 	ldr w10, [sp, #0x18]
 	str w10, [x9]
@@ -2602,14 +2602,14 @@ L0 (SSA Block: blk0):
 	subs wzr, w9, w10
 	csel w9, w10, w9, hs
 	br_table_sequence x9, table_index=0
-L4 (SSA Block: blk4):
+L3 (SSA Block: blk3):
 L1 (SSA Block: blk1):
 	movz w0, #0x17, lsl 0
 	add sp, sp, #0x10
 	add sp, sp, #0x10
 	ldr x30, [sp], #0x10
 	ret
-L3 (SSA Block: blk3):
+L4 (SSA Block: blk4):
 	ldr x9, [sp, #0x18]
 	str x9, [x8, #0x8]
 	ldr x9, [x8, #0x4a0]

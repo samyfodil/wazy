@@ -4,6 +4,7 @@ package wazevo
 
 import (
 	"github.com/samyfodil/wazy/internal/engine/wazevo/backend"
+	"github.com/samyfodil/wazy/internal/engine/wazevo/wazevoapi"
 )
 
 func newMachine() backend.Machine {
@@ -13,6 +14,30 @@ func newMachine() backend.Machine {
 // unwindStack is a function to unwind the stack, and appends return addresses to `returnAddresses` slice.
 // The implementation must be aligned with the ABI/Calling convention.
 func unwindStack(sp, fp, top uintptr, returnAddresses []uintptr) []uintptr {
+	panic("unsupported architecture")
+}
+
+// unwindStackForThrow is the exception-handling variant of unwindStack; see
+// wazevoapi.ThrowFrame.
+func unwindStackForThrow(sp, fp, top uintptr, frames []wazevoapi.ThrowFrame) []wazevoapi.ThrowFrame {
+	panic("unsupported architecture")
+}
+
+// firstReturnAddress captures a frame's return address for the try_table
+// enter-continuation; see the arm64/amd64 implementations.
+func firstReturnAddress(sp, fp, top uintptr) uintptr {
+	panic("unsupported architecture")
+}
+
+// resolveThrowTransferSPFP resolves the SP/FP for a throw-time control
+// transfer; see the arm64/amd64 implementations.
+func resolveThrowTransferSPFP(fr wazevoapi.ThrowFrame, frameSize int64) (sp, fp uintptr) {
+	panic("unsupported architecture")
+}
+
+// afterThrowTransferEntrypoint transfers control to a throw's matched
+// landing pad; see the arm64/amd64 implementations.
+func afterThrowTransferEntrypoint(restoreFn *byte, executionContextPtr uintptr, sp, fp, targetPC uintptr) {
 	panic("unsupported architecture")
 }
 

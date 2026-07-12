@@ -28,6 +28,15 @@ func (m mockMachine) StartLoweringFunction(maxBlockID ssa.BasicBlockID) { panic(
 
 func (m mockMachine) CallTrampolineIslandInfo(_ int) (_, _ int, _ error) { panic("implement me") }
 
+// CompiledBlockOffsets implements Machine.CompiledBlockOffsets.
+func (m mockMachine) CompiledBlockOffsets() []CompiledBlockOffset { return nil }
+
+// FrameSize implements Machine.FrameSize.
+func (m mockMachine) FrameSize() int64 { return 0 }
+
+// CompileThrowTransferRegisterRestore implements Machine.CompileThrowTransferRegisterRestore.
+func (m mockMachine) CompileThrowTransferRegisterRestore() []byte { panic("TODO") }
+
 func (m mockMachine) ArgsResultsRegs() (argResultInts, argResultFloats []regalloc.RealReg) {
 	return m.argResultInts, m.argResultFloats
 }

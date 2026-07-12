@@ -7,6 +7,7 @@ import (
 	"io"
 	"testing"
 
+	"github.com/samyfodil/wazy/internal/engine/wazevo/wazevoapi"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/internal/u32"
 	"github.com/samyfodil/wazy/internal/u64"
@@ -27,8 +28,10 @@ func TestSerializeCompiledModule(t *testing.T) {
 	}{
 		{
 			in: &compiledModule{
-				executables:     &executables{executable: []byte{1, 2, 3, 4, 5}},
-				functionOffsets: []int{0},
+				executables:        &executables{executable: []byte{1, 2, 3, 4, 5}},
+				functionOffsets:    []int{0},
+				ehTables:           [][]wazevoapi.EhEntry{nil},
+				functionFrameSizes: []int64{0},
 			},
 			exp: concat(
 				magic,
@@ -41,12 +44,19 @@ func TestSerializeCompiledModule(t *testing.T) {
 				crcf([]byte{1, 2, 3, 4, 5}), // crc for the code.
 				[]byte{0},                   // no source map.
 				u32.LeBytes(0),              // empty catch clause table.
+				[]byte{ehTableFormatVersion}, // eh table format version.
+				u32.LeBytes(1),               // number of functions (eh tables).
+				u32.LeBytes(0),               // func[0]: 0 eh entries.
+				u32.LeBytes(1),               // number of function frame sizes.
+				u64.LeBytes(0),               // func[0] frame size.
 			),
 		},
 		{
 			in: &compiledModule{
-				executables:     &executables{executable: []byte{1, 2, 3, 4, 5}},
-				functionOffsets: []int{0},
+				executables:        &executables{executable: []byte{1, 2, 3, 4, 5}},
+				functionOffsets:    []int{0},
+				ehTables:           [][]wazevoapi.EhEntry{nil},
+				functionFrameSizes: []int64{0},
 			},
 			exp: concat(
 				magic,
@@ -59,12 +69,19 @@ func TestSerializeCompiledModule(t *testing.T) {
 				crcf([]byte{1, 2, 3, 4, 5}), // crc for the code.
 				[]byte{0},                   // no source map.
 				u32.LeBytes(0),              // empty catch clause table.
+				[]byte{ehTableFormatVersion}, // eh table format version.
+				u32.LeBytes(1),               // number of functions (eh tables).
+				u32.LeBytes(0),               // func[0]: 0 eh entries.
+				u32.LeBytes(1),               // number of function frame sizes.
+				u64.LeBytes(0),               // func[0] frame size.
 			),
 		},
 		{
 			in: &compiledModule{
-				executables:     &executables{executable: []byte{1, 2, 3, 4, 5, 1, 2, 3}},
-				functionOffsets: []int{0, 5},
+				executables:        &executables{executable: []byte{1, 2, 3, 4, 5, 1, 2, 3}},
+				functionOffsets:    []int{0, 5},
+				ehTables:           [][]wazevoapi.EhEntry{nil, nil},
+				functionFrameSizes: []int64{0, 0},
 			},
 			exp: concat(
 				magic,
@@ -81,6 +98,13 @@ func TestSerializeCompiledModule(t *testing.T) {
 				crcf([]byte{1, 2, 3, 4, 5, 1, 2, 3}), // crc for the code.
 				[]byte{0},                            // no source map.
 				u32.LeBytes(0),                       // empty catch clause table.
+				[]byte{ehTableFormatVersion},          // eh table format version.
+				u32.LeBytes(2),                        // number of functions (eh tables).
+				u32.LeBytes(0),                        // func[0]: 0 eh entries.
+				u32.LeBytes(0),                        // func[1]: 0 eh entries.
+				u32.LeBytes(2),                        // number of function frame sizes.
+				u64.LeBytes(0),                        // func[0] frame size.
+				u64.LeBytes(0),                        // func[1] frame size.
 			),
 		},
 	}
@@ -160,10 +184,17 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				crcf([]byte{1, 2, 3, 4, 5}), // machine code.
 				[]byte{0},                   // no source map.
 				u32.LeBytes(0),              // empty catch clause table.
+				[]byte{ehTableFormatVersion}, // eh table format version.
+				u32.LeBytes(1),                // number of functions (eh tables).
+				u32.LeBytes(0),                // func[0]: 0 eh entries.
+				u32.LeBytes(1),                // number of function frame sizes.
+				u64.LeBytes(0),                // func[0] frame size.
 			),
 			expCompiledModule: &compiledModule{
-				executables:     &executables{executable: []byte{1, 2, 3, 4, 5}},
-				functionOffsets: []int{0},
+				executables:        &executables{executable: []byte{1, 2, 3, 4, 5}},
+				functionOffsets:    []int{0},
+				ehTables:           [][]wazevoapi.EhEntry{nil},
+				functionFrameSizes: []int64{0},
 			},
 			expStaleCache: false,
 			expErr:        "",
@@ -185,11 +216,20 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				crcf([]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}), // crc for machine code.
 				[]byte{0},      // no source map.
 				u32.LeBytes(0), // empty catch clause table.
+				[]byte{ehTableFormatVersion}, // eh table format version.
+				u32.LeBytes(2),                // number of functions (eh tables).
+				u32.LeBytes(0),                // func[0]: 0 eh entries.
+				u32.LeBytes(0),                // func[1]: 0 eh entries.
+				u32.LeBytes(2),                // number of function frame sizes.
+				u64.LeBytes(0),                // func[0] frame size.
+				u64.LeBytes(0),                // func[1] frame size.
 			),
 			importedFunctionCount: 1,
 			expCompiledModule: &compiledModule{
-				executables:     &executables{executable: []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}},
-				functionOffsets: []int{0, 7},
+				executables:        &executables{executable: []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}},
+				functionOffsets:    []int{0, 7},
+				ehTables:           [][]wazevoapi.EhEntry{nil, nil},
+				functionFrameSizes: []int64{0, 0},
 			},
 			expStaleCache: false,
 			expErr:        "",
@@ -208,6 +248,57 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				crcf([]byte{1, 2, 3, 4, 5}), // machine code.
 				[]byte{0},                   // no source map.
 				// no catch clause table — old format.
+			),
+			expStaleCache: true,
+		},
+		{
+			// Simulates a cache entry written before the exception side
+			// table (P0) was added: the (old-format) catch-clause table is
+			// present, but there's nothing after it. This must be detected
+			// as stale via the ehTableFormatVersion marker byte, not
+			// misparsed (e.g. by reading unrelated trailing garbage as if
+			// it were the marker and coincidentally matching, or by reading
+			// past EOF and surfacing a plain error instead of staleness).
+			name: "old cache without eh table (stale)",
+			in: concat(
+				magic,
+				[]byte{byte(len(testVersion))},
+				[]byte(testVersion),
+				u32.LeBytes(1), // number of functions.
+				u64.LeBytes(0), // offset.
+				// Executable.
+				u64.LeBytes(5),              // size.
+				[]byte{1, 2, 3, 4, 5},       // machine code.
+				crcf([]byte{1, 2, 3, 4, 5}), // machine code.
+				[]byte{0},                   // no source map.
+				u32.LeBytes(0),              // empty catch clause table.
+				// no eh table section at all — pre-side-table format.
+			),
+			expStaleCache: true,
+		},
+		{
+			// Same as above, but with a byte present at the marker position
+			// that doesn't match the current ehTableFormatVersion (e.g. a
+			// future/older layout version) -- must also be stale, not
+			// misparsed.
+			name: "eh table format version mismatch (stale)",
+			in: concat(
+				magic,
+				[]byte{byte(len(testVersion))},
+				[]byte(testVersion),
+				u32.LeBytes(1), // number of functions.
+				u64.LeBytes(0), // offset.
+				// Executable.
+				u64.LeBytes(5),              // size.
+				[]byte{1, 2, 3, 4, 5},       // machine code.
+				crcf([]byte{1, 2, 3, 4, 5}), // machine code.
+				[]byte{0},                   // no source map.
+				u32.LeBytes(0),              // empty catch clause table.
+				[]byte{ehTableFormatVersion + 1}, // wrong eh table format version.
+				u32.LeBytes(1),
+				u32.LeBytes(0),
+				u32.LeBytes(1),
+				u64.LeBytes(0),
 			),
 			expStaleCache: true,
 		},

@@ -2375,6 +2375,41 @@ func (m *machine) requiredStackSize() int64 {
 		16 // return address and the caller RBP.
 }
 
+// CompiledBlockOffsets implements backend.Machine.
+func (m *machine) CompiledBlockOffsets() []backend.CompiledBlockOffset {
+	ret := make([]backend.CompiledBlockOffset, len(m.orderedSSABlockLabelPos))
+	for i, pos := range m.orderedSSABlockLabelPos {
+		ret[i] = backend.CompiledBlockOffset{BlockID: pos.sb.ID(), Offset: pos.binaryOffset}
+	}
+	return ret
+}
+
+// FrameSize implements backend.Machine.
+//
+// This is deliberately NOT frameSize() (clobberedRegSlotSize() + spillSlotSize):
+// clobberedRegSlotSize charges a flat 16 bytes per clobbered register
+// regardless of type, to keep frameSize() 16-byte-aligned by construction
+// for the stack-bounds-check/requiredStackSize use case, where
+// over-estimating is harmless. But the prologue (setupPrologue,
+// machine_pro_epi_logue.go) actually pushes integer clobbered registers via
+// a plain 8-byte PUSH (only XMM registers get a real 16-byte slot, via
+// `SUB $16,RSP` + MOVDQU), so clobberedRegSlotSize() overcounts by 8 bytes
+// per integer clobbered register. That's fine for a conservative bound, but
+// FrameSize's caller (the amd64 throw-time transfer, resolveThrowTransferSPFP)
+// needs the *exact* byte distance from RBP to the steady-state RSP, so it
+// recomputes it directly from clobberedRegs here instead.
+func (m *machine) FrameSize() int64 {
+	var clobberedBytes int64
+	for _, r := range m.clobberedRegs {
+		if r.RegType() == regalloc.RegTypeInt {
+			clobberedBytes += 8
+		} else {
+			clobberedBytes += 16
+		}
+	}
+	return clobberedBytes + m.spillSlotSize
+}
+
 func (m *machine) frameSize() int64 {
 	s := m.clobberedRegSlotSize() + m.spillSlotSize
 	if s&0xf != 0 {

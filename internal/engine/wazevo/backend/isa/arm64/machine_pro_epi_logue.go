@@ -476,6 +476,35 @@ func (m *machine) CompileStackGrowCallSequence() []byte {
 	return m.compiler.Buf()
 }
 
+// CompileThrowTransferRegisterRestore implements backend.Machine. It
+// produces a tiny callable (BL-then-RET) blob that restores the
+// callee-saved registers from wazevo.executionContext.savedRegisters
+// (execCtx passed in x0, matching every other Go-call trampoline's
+// convention -- see saveRegistersInExecutionContext/
+// restoreRegistersInExecutionContext) and returns.
+//
+// Used only by the throw-time control transfer
+// (afterThrowTransferEntrypoint / (*callEngine).handleThrow), which cannot
+// rely on a Go-call trampoline's own post-exit tail doing this: unlike
+// every other exit code, a throw's control transfer jumps directly into an
+// arbitrary landing pad (afterGoFunctionCallEntrypoint resumes *inside*
+// the throw trampoline's own tail, which is unreachable here since the
+// destination isn't goCallReturnAddress).
+func (m *machine) CompileThrowTransferRegisterRestore() []byte {
+	cur := m.allocateInstr()
+	cur.asNop0()
+	m.rootInstr = cur
+
+	cur = m.restoreRegistersInExecutionContext(cur, calleeSavedRegistersSorted)
+
+	ret := m.allocateInstr()
+	ret.asRet()
+	linkInstr(cur, ret)
+
+	m.encode(m.rootInstr)
+	return m.compiler.Buf()
+}
+
 func (m *machine) addsAddOrSubStackPointer(cur *instruction, rd regalloc.VReg, diff int64, add bool) *instruction {
 	m.pendingInstructions = m.pendingInstructions[:0]
 	m.insertAddOrSubStackPointer(rd, diff, add)
