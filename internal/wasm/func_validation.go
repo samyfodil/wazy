@@ -1724,7 +1724,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				return fmt.Errorf("read block: %w", err)
 			}
 			controlBlockStack.push(pc, 0, 0, bt, num, 0)
-			controlBlockStack.stack[len(controlBlockStack.stack)-1].savedInitLocals = maps.Clone(sts.initLocals)
+			controlBlockStack.stack[len(controlBlockStack.stack)-1].savedInitLocals = cloneInitLocals(sts.initLocals)
 			if err = valueTypeStack.popParams(op, bt.Params, false); err != nil {
 				return err
 			}
@@ -2113,7 +2113,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				return fmt.Errorf("read block: %w", err)
 			}
 			controlBlockStack.push(pc, 0, 0, bt, num, op)
-			controlBlockStack.stack[len(controlBlockStack.stack)-1].savedInitLocals = maps.Clone(sts.initLocals)
+			controlBlockStack.stack[len(controlBlockStack.stack)-1].savedInitLocals = cloneInitLocals(sts.initLocals)
 			if err = valueTypeStack.popParams(op, bt.Params, false); err != nil {
 				return err
 			}
@@ -2130,7 +2130,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				return fmt.Errorf("read block: %w", err)
 			}
 			controlBlockStack.push(pc, 0, 0, bt, num, op)
-			controlBlockStack.stack[len(controlBlockStack.stack)-1].savedInitLocals = maps.Clone(sts.initLocals)
+			controlBlockStack.stack[len(controlBlockStack.stack)-1].savedInitLocals = cloneInitLocals(sts.initLocals)
 			if err = valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
 				return fmt.Errorf("cannot pop the operand for 'if': %v", err)
 			}
@@ -2155,7 +2155,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				return err
 			}
 			// Restore init locals to the state at if-entry for the else branch.
-			sts.initLocals = maps.Clone(bl.savedInitLocals)
+			sts.initLocals = cloneInitLocals(bl.savedInitLocals)
 			// Before entering instructions inside else, we pop all the values pushed by then block.
 			valueTypeStack.resetAtStackLimit()
 			// Plus we have to push any block params again.
@@ -2433,9 +2433,29 @@ func (sts *stacks) markLocalInit(index, inputLen uint32, localTypes []ValueType)
 	if index >= inputLen {
 		lt := localTypes[index-inputLen]
 		if lt.IsRef() && !lt.IsNullable() {
+			// initLocals may be nil here: cloneInitLocals treats an empty map as nil to
+			// avoid allocating a snapshot for the overwhelmingly common case where no
+			// non-defaultable locals are in play. Lazily allocate on first real write so
+			// that a nil map round-tripped through a block/if/else restore is still safe
+			// to write into.
+			if sts.initLocals == nil {
+				sts.initLocals = make(map[uint32]struct{})
+			}
 			sts.initLocals[index] = struct{}{}
 		}
 	}
+}
+
+// cloneInitLocals returns an independent copy of m, or nil if m is empty. Cloning only
+// when non-empty avoids an allocation for every block/loop/if/else in the (overwhelmingly
+// common) case where no non-defaultable locals (GC/function-references feature) are in
+// play; a nil result is treated as equivalent to an empty map everywhere initLocals is
+// read or written (see markLocalInit).
+func cloneInitLocals(m map[uint32]struct{}) map[uint32]struct{} {
+	if len(m) == 0 {
+		return nil
+	}
+	return maps.Clone(m)
 }
 
 func (s *controlBlockStack) pop() *controlBlock {

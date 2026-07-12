@@ -72,7 +72,7 @@ pprof on fib: `callNativeFunc` 59% flat, `popValue` 13.6%, `pushValue` 6.8%, mal
 - **C10. `Call` allocates `paramResultSlice` per invocation** — `call_engine.go:193`. Measured +21ns/+27% vs `CallWithStack`. Fix: reusable buffer on callEngine (Call is documented non-concurrent) — but results alias next params; needs care or doc cross-ref. Impact: medium, certain.
 - **C11. try_table: `local.set` in try body emits fresh save-area-ptr load each time** (no CSE to clean up) — `lower.go:1106-1119,4614`. Fix: SSA variable per block. Impact: medium (EH), certain.
 - **C12. Regalloc: fixed 64-slot scans** in `releaseCallerSavedRegs` (per call instr!), `fixMergeState` (per edge), `scheduleSpill`. Fix: occupancy bitmask + `bits.TrailingZeros64`. Impact: med-low, certain.
-- **C13. `ssa.builder.Init`: O(nextValueID) map deletes because debug annotations always populated** (`builder.go:293`, `frontend.go:378`); signatures map iterated per compile to reset a debug-only flag. Fix: `clear()`, gate behind debug flags. Impact: med-low, certain.
+- **C13. `ssa.builder.Init`: O(nextValueID) map deletes / debug-flag resets per compile** — **RESOLVED**: `clear()` + `AnnotateValue` and `sig.used` reset gated behind `SSALoggingEnabled` (consumer trace confirmed debug-only).
 - **C14. `spillSlots` map + 3-pass manual clear in Reset** (both ISAs). Fix: slice by VRegID. Impact: low-med, certain.
 - **C15. `basicBlock.addPred` O(preds²) debug guard in prod path** — br_table trampolines create thousands of preds. Fix: gate behind `SSAValidationEnabled`. Impact: low-med, certain.
 - **C16. Euler-tour + RMQ dominator table built per function, consumed only on spill reloads**; re-inits at previous max size; `math.Log2` instead of `bits.Len32`. Fix: lazy build. Impact: low-med, likely.
@@ -84,7 +84,7 @@ pprof on fib: `callNativeFunc` 59% flat, `popValue` 13.6%, `pushValue` 6.8%, mal
 
 - **R1. Element segments: heap `ConstantExpression` per funcref entry** — decode re-encodes the index via LEB (`binary/element.go:23-42`), then `evaluateConstExpr` re-parses it with 2 heap stacks per entry, ×3 (validate, declared-indexes, instantiate). Fix: `[]Index` representation with sentinel/flag (upstream wazero's shape) or non-allocating fast path. Impact: high, certain.
 - **R2. All decoding via `bytes.Reader` byte-at-a-time** — **RESOLVED**: whole binary package rewritten to `(buf, offset)` slice threading; leb128 `Load*` are closure-free primitives with folded overflow checks (proven by frozen-algorithm differential test). Plus code-body arena + single-pass locals (R4), string arena + import-module interning (R13), `strings.Builder` type keys (R9 — lazy rejected: concurrent first-use via emscripten/table paths), decode micro-allocs (R15/R16). DecodeModule: -27.5% ns/op interleaved (up to 1.5x quiet), allocs 456 → 132 (-71%).
-- **R3. `maps.Clone(sts.initLocals)` per control op in validation** (`func_validation.go:1727,2116,2133,2158`) — allocates even when empty (the ~always case). Fix: nil-if-empty or undo journal. Impact: high, certain.
+- **R3. `maps.Clone(sts.initLocals)` per control op in validation** — **RESOLVED**: `cloneInitLocals` returns nil for empty maps; `markLocalInit` lazily allocates. Compile-path allocs down 9-32% depending on engine.
 - **R4. `decodeCode`: body copied per function + locals parsed twice** — **RESOLVED** (with R2): one arena per code section, single-pass locals. decodeCode alloc share: 40% → 1.9%.
 - **R5. `ValueType` widened to uint64 (8x memory)** on every type slice/validation stack (`module.go:1196`). Fix: pack to uint32 or 1-byte kind + sparse side table. Impact: med-high, certain (repr) / likely (effect).
 - **R6. `evaluateConstExpr` allocates 2 stacks even for `i32.const`** — per global/data/element at instantiate. Fix: fast-path 1-instruction forms. Impact: med-high, certain.
@@ -101,16 +101,16 @@ pprof on fib: `callNativeFunc` 59% flat, `popValue` 13.6%, `pushValue` 6.8%, mal
 ## 5. API / cache / instantiate layer
 
 - **A1. `ExportedFunction()` = new callEngine + ≥10 KiB zeroed stack per lookup** (`module_engine.go:162-226`, `call_engine.go:150-174`). The `mod.ExportedFunction("f").Call(ctx)` per-request pattern pays ~10.3 KB garbage each time. Fix: lazy stack alloc + `sync.Pool` by size class + cached per-export Function. Impact: high, certain.
-- **A2. File-cache deserialize: unbuffered `*os.File` → 8-byte read(2) per function offset / source-map entry** (`engine_cache.go:241-363`). Fix: one-line `bufio.NewReaderSize`; also `reader.Read` → `io.ReadFull` (short-read bug). Impact: high, certain.
+- **A2. File-cache deserialize: unbuffered `*os.File`** — **RESOLVED**: `bufio.NewReaderSize(64KiB)` wrap + `io.ReadFull` short-read fixes. Measured on a 786KB module cache hit: 4978 read(2) syscalls → 13.
 - **A3. Cache-hit `CompileModule` still fully decodes AND validates every opcode before checking the cache** (`runtime.go:229-266`). Fix: hash + probe cache first, skip body validation on hit. Impact: high (cache-hit startup), likely.
 - **A4. Reflect host functions** — see H1. Also `newContextVal`/`newModuleVal` → `reflect.ValueOf` is a trivial 2-4 alloc win.
 - **A5. `serializeCompiledModule` builds whole artifact in memory (full executable copy, no `Grow`)** then triple-passes it; plus fsync per Add. Fix: `io.MultiReader` zero-copy. Impact: medium, certain.
 - **A6. Every instantiate builds a ~4.9 KB `math/rand` source (607×int64 + ~1800 seed iterations) + fake-clock closures** (`config.go:846`, `platform/crypto.go:15`). Fix: lazy or 16-byte splitmix64/PCG. Impact: med-high for instantiate-per-request, certain.
 - **A7. Snapshotter `ctx.Value` on every call** — **RESOLVED**: `expctxkeys.SnapshotterEnabled` atomic latch set in `experimental.WithSnapshotter` gates every hot-path `ctx.Value(EnableSnapshotterKey)` in wazevo entry and both interpreter sites. (Interpreter per-activation caching from I4 still open.)
 - **A8. DWARF on by default: all `.debug_*` sections copied + `dwarf.Data` eagerly parsed per compile** — consumed only for error stack traces. Fix: subslice + lazy parse. Impact: medium (debug-built guests), certain.
-- **A9. Engine takes write lock for the read-only instantiate-path lookup** (`engine_cache.go:101`, mux is RWMutex). Fix: RLock / atomic refcount. Impact: medium under concurrency, certain.
+- **A9. Engine takes write lock for the read-only instantiate-path lookup** — **RESOLVED**: RLock when not bumping refcount.
 - **A10. File-cache hit still allocates full SSA builder + backend compiler just for entry preambles** (`engine_cache.go:76`). Fix: serialize preambles or share engine-level compiler. Impact: medium, likely.
-- **A11. Host-module instantiation builds a full (unused) sys.Context** — pays A6 for nothing (`runtime.go:320`). Fix: skip for host modules. Impact: low-med, certain.
+- **A11. Host-module instantiation builds a full (unused) sys.Context** — **RESOLVED**: skipped for host modules (Sys==nil was already the documented expectation).
 - **A12. `WithEnv` O(n²) clone-per-var; environ re-encoded per instantiate.** Low.
 - **A13. `InstantiateModule` mutates the caller's documented-immutable `ModuleConfig`** (`runtime.go:317` sockConfig) — race; fix without deep-cloning environKeys. Correctness, certain.
 - **A14. `GetFunctionTypeIDs`: per-type mutex round-trips + `+=` key building.** Low.
@@ -131,7 +131,7 @@ memory without copying; fd table lookup is lock-free inlined bitmask; WASI binds
 - **W8. `poll_oneoff` heap-allocates one `*event` per subscription** (`poll.go:109`, escape-verified) — this is every sleep/timer tick in Rust/TinyGo guests. Fix: write records into outBuf directly. Impact: medium, certain.
 - **W9. DirentCache first-read reallocates the window; dot entries force growth** (`sys/fs.go:184-201`). Low-med.
 - **W10. `path_open` re-looks-up the fd it just created** for the O_DIRECTORY check. Low.
-- **W11. `fd_prestat_dir_name` copies via throwaway `[]byte`** — use existing `WriteString`. Low.
+- **W11. `fd_prestat_dir_name` copies via throwaway `[]byte`** — **RESOLVED**: `WriteString`.
 - **W12. `random_get` = one getrandom(2) per guest call** with real entropy configured; batch/buffer. Low-med.
 - **W13. `poll_oneoff` zeroes the whole out buffer though writeEvent overwrites most of it.** Low.
 - **W14. `fdReaddir` over-requests entries vs what the buffer holds** (multiplier for W1). Low.

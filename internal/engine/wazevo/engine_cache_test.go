@@ -109,9 +109,12 @@ func TestDeserializeCompiledModule(t *testing.T) {
 		expErr                string
 	}{
 		{
+			// With a buffered reader + io.ReadFull, a short input now surfaces as an
+			// io.ErrUnexpectedEOF from the read itself rather than reaching the
+			// (now practically unreachable) post-read length check.
 			name:   "invalid header",
 			in:     []byte{1},
-			expErr: "compilationcache: invalid header length: 1",
+			expErr: "compilationcache: error reading header: unexpected EOF",
 		},
 		{
 			name: "invalid magic",

@@ -323,9 +323,18 @@ func (r *runtime) InstantiateModule(
 		}
 	}
 
+	// Host modules never consult their own Sys: host functions are invoked with the
+	// CALLING module's Sys (see wasi_snapshot_preview1 and assemblyscript imports, which
+	// all read mod.(*wasm.ModuleInstance).Sys off the module passed to the host function,
+	// not off themselves). Building one here would be pure waste (rand source, fake clocks,
+	// etc.) for something that's never read; ModuleInstance.Sys == nil is already the
+	// documented expectation for such modules (see the "nil if from HostModuleBuilder"
+	// comment in internal/wasm/module_instance.go's ensureResourcesClosed).
 	var sysCtx *internalsys.Context
-	if sysCtx, err = config.toSysContext(); err != nil {
-		return nil, err
+	if !code.module.IsHostModule {
+		if sysCtx, err = config.toSysContext(); err != nil {
+			return nil, err
+		}
 	}
 
 	name := config.name

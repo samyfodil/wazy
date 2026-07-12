@@ -1,6 +1,7 @@
 package wazevo
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -99,8 +100,15 @@ func (e *engine) addCompiledModuleToMemory(m *wasm.Module, cm *compiledModule) *
 }
 
 func (e *engine) getCompiledModuleFromMemory(module *wasm.Module, increaseRefCount bool) (cm *compiledModule, ok bool) {
-	e.mux.Lock()
-	defer e.mux.Unlock()
+	// Only the refCount bump requires exclusive access; a plain lookup can proceed
+	// under a read lock since e.mux is a sync.RWMutex.
+	if increaseRefCount {
+		e.mux.Lock()
+		defer e.mux.Unlock()
+	} else {
+		e.mux.RLock()
+		defer e.mux.RUnlock()
+	}
 
 	cmWithCount, ok := e.compiledModules[module.ID]
 	if ok {
@@ -204,11 +212,14 @@ func serializeCompiledModule(wazyVersion string, cm *compiledModule) io.Reader {
 
 func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *compiledModule, staleCache bool, err error) {
 	defer reader.Close()
+	// Wrap the raw file in a buffered reader: without it, every 8-byte read (one per function
+	// offset / source-map entry) is its own read(2) syscall.
+	bufReader := bufio.NewReaderSize(reader, 64<<10)
 	cacheHeaderSize := len(magic) + 1 /* version size */ + len(wazyVersion) + 4 /* number of functions */
 
 	// Read the header before the native code.
 	header := make([]byte, cacheHeaderSize)
-	n, err := reader.Read(header)
+	n, err := io.ReadFull(bufReader, header)
 	if err != nil {
 		return nil, false, fmt.Errorf("compilationcache: error reading header: %v", err)
 	}
@@ -241,14 +252,14 @@ func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *co
 	for i := uint32(0); i < functionsNum; i++ {
 		// Read the offset of each function in the executable.
 		var offset uint64
-		if offset, err = readUint64(reader, &eightBytes); err != nil {
+		if offset, err = readUint64(bufReader, &eightBytes); err != nil {
 			err = fmt.Errorf("compilationcache: error reading func[%d] executable offset: %v", i, err)
 			return
 		}
 		cm.functionOffsets[i] = int(offset)
 	}
 
-	executableLen, err := readUint64(reader, &eightBytes)
+	executableLen, err := readUint64(bufReader, &eightBytes)
 	if err != nil {
 		err = fmt.Errorf("compilationcache: error reading executable size: %v", err)
 		return
@@ -261,14 +272,14 @@ func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *co
 			return nil, false, err
 		}
 
-		_, err = io.ReadFull(reader, executable)
+		_, err = io.ReadFull(bufReader, executable)
 		if err != nil {
 			err = fmt.Errorf("compilationcache: error reading executable (len=%d): %v", executableLen, err)
 			return nil, false, err
 		}
 
 		expected := crc32.Checksum(executable, crc)
-		if _, err = io.ReadFull(reader, eightBytes[:4]); err != nil {
+		if _, err = io.ReadFull(bufReader, eightBytes[:4]); err != nil {
 			return nil, false, fmt.Errorf("compilationcache: could not read checksum: %v", err)
 		} else if checksum := binary.LittleEndian.Uint32(eightBytes[:4]); expected != checksum {
 			return nil, false, fmt.Errorf("compilationcache: checksum mismatch (expected %d, got %d)", expected, checksum)
@@ -280,25 +291,25 @@ func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *co
 		cm.executable = executable
 	}
 
-	if _, err := io.ReadFull(reader, eightBytes[:1]); err != nil {
+	if _, err := io.ReadFull(bufReader, eightBytes[:1]); err != nil {
 		return nil, false, fmt.Errorf("compilationcache: error reading source map presence: %v", err)
 	}
 
 	if eightBytes[0] == 1 {
 		sm := &cm.sourceMap
-		sourceMapLen, err := readUint64(reader, &eightBytes)
+		sourceMapLen, err := readUint64(bufReader, &eightBytes)
 		if err != nil {
 			err = fmt.Errorf("compilationcache: error reading source map length: %v", err)
 			return nil, false, err
 		}
 		executableOffset := uintptr(unsafe.Pointer(&cm.executable[0]))
 		for i := uint64(0); i < sourceMapLen; i++ {
-			wasmBinaryOffset, err := readUint64(reader, &eightBytes)
+			wasmBinaryOffset, err := readUint64(bufReader, &eightBytes)
 			if err != nil {
 				err = fmt.Errorf("compilationcache: error reading source map[%d] wasm binary offset: %v", i, err)
 				return nil, false, err
 			}
-			executableRelativeOffset, err := readUint64(reader, &eightBytes)
+			executableRelativeOffset, err := readUint64(bufReader, &eightBytes)
 			if err != nil {
 				err = fmt.Errorf("compilationcache: error reading source map[%d] executable offset: %v", i, err)
 				return nil, false, err
@@ -309,7 +320,7 @@ func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *co
 		}
 	}
 	// Try-table info.
-	if _, err = io.ReadFull(reader, eightBytes[:4]); err != nil {
+	if _, err = io.ReadFull(bufReader, eightBytes[:4]); err != nil {
 		// Treat old cache entries without try-table data as stale (trigger recompile).
 		return nil, true, nil
 	}
@@ -317,18 +328,18 @@ func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *co
 	if tableLen > 0 {
 		cm.tryTableInfo = make([]wazevoapi.TryTableInfo, tableLen)
 		for i := uint32(0); i < tableLen; i++ {
-			if _, err = io.ReadFull(reader, eightBytes[:5]); err != nil {
+			if _, err = io.ReadFull(bufReader, eightBytes[:5]); err != nil {
 				return nil, false, fmt.Errorf("compilationcache: error reading try_table[%d] header: %v", i, err)
 			}
 			numLocals := int(binary.LittleEndian.Uint32(eightBytes[:4]))
 			reuseLocals := eightBytes[4] != 0
-			if _, err = io.ReadFull(reader, eightBytes[:4]); err != nil {
+			if _, err = io.ReadFull(bufReader, eightBytes[:4]); err != nil {
 				return nil, false, fmt.Errorf("compilationcache: error reading catch clause count for try_table[%d]: %v", i, err)
 			}
 			clauseCount := binary.LittleEndian.Uint32(eightBytes[:4])
 			clauses := make([]wazevoapi.CatchClauseInstance, clauseCount)
 			for j := uint32(0); j < clauseCount; j++ {
-				if _, err = io.ReadFull(reader, eightBytes[:5]); err != nil {
+				if _, err = io.ReadFull(bufReader, eightBytes[:5]); err != nil {
 					return nil, false, fmt.Errorf("compilationcache: error reading catch clause[%d][%d]: %v", i, j, err)
 				}
 				clauses[j] = wazevoapi.CatchClauseInstance{
@@ -347,14 +358,14 @@ func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *co
 }
 
 // readUint64 strictly reads an uint64 in little-endian byte order, using the
-// given array as a buffer. This returns io.EOF if less than 8 bytes were read.
+// given array as a buffer. This returns io.EOF if nothing could be read, or
+// io.ErrUnexpectedEOF if fewer than 8 bytes were available.
 func readUint64(reader io.Reader, b *[8]byte) (uint64, error) {
 	s := b[0:8]
-	n, err := reader.Read(s)
-	if err != nil {
+	// io.ReadFull, not reader.Read: a plain Read may return fewer bytes than
+	// requested without error (e.g. across an internal buffer boundary).
+	if _, err := io.ReadFull(reader, s); err != nil {
 		return 0, err
-	} else if n < 8 { // more strict than reader.Read
-		return 0, io.EOF
 	}
 
 	// Read the u64 from the underlying buffer.

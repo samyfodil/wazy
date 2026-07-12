@@ -279,8 +279,12 @@ func (b *builder) Init(s *Signature) {
 	b.donePreBlockLayoutPasses = false
 	b.doneBlockLayout = false
 	b.donePostBlockLayoutPasses = false
-	for _, sig := range b.signatures {
-		sig.used = false
+	if wazevoapi.SSALoggingEnabled {
+		// sig.used only feeds Signature-printing in Format() (via usedSignatures), which is
+		// itself only reachable from debug/print paths; skip the reset when nothing reads it.
+		for _, sig := range b.signatures {
+			sig.used = false
+		}
 	}
 
 	b.redundantParams = b.redundantParams[:0]
@@ -290,8 +294,11 @@ func (b *builder) Init(s *Signature) {
 	b.loopNestingForestRoots = b.loopNestingForestRoots[:0]
 	b.basicBlocksPool.Reset()
 
+	// valueAnnotations is only ever populated for debug printing (see AnnotateValue callers,
+	// gated behind wazevoapi.SSALoggingEnabled), so it is normally empty; clear() handles
+	// that in O(1) instead of a per-key delete loop, and is still correct when non-empty.
+	clear(b.valueAnnotations)
 	for v := ValueID(0); v < b.nextValueID; v++ {
-		delete(b.valueAnnotations, v)
 		b.valuesInfo[v] = ValueInfo{alias: ValueInvalid}
 	}
 	b.nextValueID = 0

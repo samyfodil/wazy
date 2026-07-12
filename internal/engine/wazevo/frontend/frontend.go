@@ -375,8 +375,10 @@ func (c *Compiler) LowerToSSA() {
 	//  they can use native stack vs wazy cannot use Go-routine stack and have to use Go-runtime allocated []byte as a stack.
 	c.execCtxPtrValue = entryBlock.AddParam(builder, executionContextPtrTyp)
 	c.moduleCtxPtrValue = entryBlock.AddParam(builder, moduleContextPtrTyp)
-	builder.AnnotateValue(c.execCtxPtrValue, "exec_ctx")
-	builder.AnnotateValue(c.moduleCtxPtrValue, "module_ctx")
+	if wazevoapi.SSALoggingEnabled {
+		builder.AnnotateValue(c.execCtxPtrValue, "exec_ctx")
+		builder.AnnotateValue(c.moduleCtxPtrValue, "module_ctx")
+	}
 
 	for i, typ := range c.wasmFunctionTyp.Params {
 		st := WasmTypeToSSAType(typ)

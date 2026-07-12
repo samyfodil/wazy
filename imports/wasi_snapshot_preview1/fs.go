@@ -673,7 +673,7 @@ func fdPrestatDirNameFn(_ context.Context, mod api.Module, params []uint64) expe
 		return experimentalsys.ENAMETOOLONG
 	}
 
-	if !mod.Memory().Write(path, []byte(name)[:pathLen]) {
+	if !mod.Memory().WriteString(path, name[:pathLen]) {
 		return experimentalsys.EFAULT
 	}
 	return 0
