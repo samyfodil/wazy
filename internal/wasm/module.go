@@ -857,30 +857,43 @@ func (f *FunctionType) EqualsType(other *FunctionType) bool {
 }
 
 // key gets or generates the key for Store.typeIDs. e.g. "i32_v" for one i32 parameter and no (void) result.
+//
+// The key is built with a single pre-sized strings.Builder rather than repeated string += concatenation (which
+// reallocated on every operand). Grow is pre-computed from the operand name lengths so the no-rec-group case
+// allocates exactly once; a rec-group suffix (rare) may cost one extra grow.
 func (f *FunctionType) key() string {
 	if f.string != "" {
 		return f.string
 	}
-	var ret string
+	// 3 covers the worst-case separators ("v_" + "v" when both operand lists are empty).
+	n := 3
 	for _, b := range f.Params {
-		ret += ValueTypeName(b)
-	}
-	if len(f.Params) == 0 {
-		ret += "v_"
-	} else {
-		ret += "_"
+		n += len(ValueTypeName(b))
 	}
 	for _, b := range f.Results {
-		ret += ValueTypeName(b)
+		n += len(ValueTypeName(b))
+	}
+	var sb strings.Builder
+	sb.Grow(n)
+	for _, b := range f.Params {
+		sb.WriteString(ValueTypeName(b))
+	}
+	if len(f.Params) == 0 {
+		sb.WriteString("v_")
+	} else {
+		sb.WriteByte('_')
+	}
+	for _, b := range f.Results {
+		sb.WriteString(ValueTypeName(b))
 	}
 	if len(f.Results) == 0 {
-		ret += "v"
+		sb.WriteByte('v')
 	}
 	if f.RecGroupSize > 1 {
-		ret += fmt.Sprintf("|rec%d/%d", f.RecGroupPosition, f.RecGroupSize)
+		fmt.Fprintf(&sb, "|rec%d/%d", f.RecGroupPosition, f.RecGroupSize)
 	}
-	f.string = ret
-	return ret
+	f.string = sb.String()
+	return f.string
 }
 
 // String implements fmt.Stringer.

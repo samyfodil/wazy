@@ -1,7 +1,6 @@
 package binary
 
 import (
-	"bytes"
 	"testing"
 
 	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
@@ -115,15 +114,15 @@ func TestEncodeValTypes(t *testing.T) {
 
 func Test_decodeUTF8(t *testing.T) {
 	t.Run("empty", func(t *testing.T) {
-		actual, n, err := decodeUTF8(bytes.NewReader([]byte{0, '?', '?'}), "")
+		actual, n, err := decodeUTF8([]byte{0, '?', '?'}, 0, &stringArena{}, "")
 		require.NoError(t, err)
 		require.Equal(t, "", actual)
-		require.Equal(t, uint32(1), n)
+		require.Equal(t, 1, n)
 	})
 	t.Run("non-empty", func(t *testing.T) {
-		actual, n, err := decodeUTF8(bytes.NewReader([]byte{3, 'f', 'o', 'o', '?', '?'}), "")
+		actual, n, err := decodeUTF8([]byte{3, 'f', 'o', 'o', '?', '?'}, 0, &stringArena{}, "")
 		require.NoError(t, err)
 		require.Equal(t, "foo", actual)
-		require.Equal(t, uint32(4), n)
+		require.Equal(t, 4, n)
 	})
 }

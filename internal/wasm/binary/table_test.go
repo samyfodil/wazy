@@ -1,7 +1,6 @@
 package binary
 
 import (
-	"bytes"
 	"fmt"
 	"testing"
 
@@ -63,7 +62,7 @@ func TestTableType(t *testing.T) {
 
 		t.Run(fmt.Sprintf("decode - %s", tc.name), func(t *testing.T) {
 			var decoded wasm.Table
-			err := decodeTable(bytes.NewReader(b), api.CoreFeatureReferenceTypes, &decoded)
+			_, err := decodeTable(b, 0, api.CoreFeatureReferenceTypes, &decoded)
 			require.NoError(t, err)
 			require.Equal(t, decoded, tc.input)
 		})
@@ -107,7 +106,7 @@ func TestDecodeTableType_Errors(t *testing.T) {
 		tc := tt
 		t.Run(tc.name, func(t *testing.T) {
 			var decoded wasm.Table
-			err := decodeTable(bytes.NewReader(tc.input), tc.features, &decoded)
+			_, err := decodeTable(tc.input, 0, tc.features, &decoded)
 			require.EqualError(t, err, tc.expectedErr)
 		})
 	}

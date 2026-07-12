@@ -2,7 +2,6 @@ package leb128
 
 import (
 	"errors"
-	"fmt"
 	"io"
 )
 
@@ -93,27 +92,16 @@ func EncodeUint64(value uint64) (buf []byte) {
 	}
 }
 
-type nextByte func(i int) (byte, error)
-
+// DecodeUint32 reads a LEB128 encoded uint32 one byte at a time via r.
+//
+// This has the identical decode logic to LoadUint32, duplicated instead of shared through a closure so that
+// neither path pays for an indirect call per byte.
 func DecodeUint32(r io.ByteReader) (ret uint32, bytesRead uint64, err error) {
-	return decodeUint32(func(_ int) (byte, error) { return r.ReadByte() })
-}
-
-func LoadUint32(buf []byte) (ret uint32, bytesRead uint64, err error) {
-	return decodeUint32(func(i int) (byte, error) {
-		if i >= len(buf) {
-			return 0, io.EOF
-		}
-		return buf[i], nil
-	})
-}
-
-func decodeUint32(next nextByte) (ret uint32, bytesRead uint64, err error) {
 	// Derived from https://github.com/golang/go/blob/go1.24.0/src/encoding/binary/varint.go
 	// with the modification on the overflow handling tailored for 32-bits.
 	var s uint32
 	for i := 0; i < maxVarintLen32; i++ {
-		b, err := next(i)
+		b, err := r.ReadByte()
 		if err != nil {
 			return 0, 0, err
 		}
@@ -130,6 +118,30 @@ func decodeUint32(next nextByte) (ret uint32, bytesRead uint64, err error) {
 	return 0, 0, errOverflow32
 }
 
+// LoadUint32 is the same as DecodeUint32 but reads directly out of buf via index, rather than through the
+// io.ByteReader interface.
+func LoadUint32(buf []byte) (ret uint32, bytesRead uint64, err error) {
+	bufLen := len(buf)
+	var s uint32
+	for i := 0; i < maxVarintLen32; i++ {
+		if i >= bufLen {
+			return 0, 0, io.EOF
+		}
+		b := buf[i]
+		if b < 0x80 {
+			// Unused bits must be all zero.
+			if i == maxVarintLen32-1 && (b&0xf0) > 0 {
+				return 0, 0, errOverflow32
+			}
+			return ret | uint32(b)<<s, uint64(i) + 1, nil
+		}
+		ret |= uint32(b&0x7f) << s
+		s += 7
+	}
+	return 0, 0, errOverflow32
+}
+
+// LoadUint64 is the same as LoadUint32, but for 64-bit results.
 func LoadUint64(buf []byte) (ret uint64, bytesRead uint64, err error) {
 	bufLen := len(buf)
 	if bufLen == 0 {
@@ -156,46 +168,72 @@ func LoadUint64(buf []byte) (ret uint64, bytesRead uint64, err error) {
 	return 0, 0, errOverflow64
 }
 
+// DecodeInt32 reads a LEB128 encoded int32 one byte at a time via r.
 func DecodeInt32(r io.ByteReader) (ret int32, bytesRead uint64, err error) {
-	return decodeInt32(func(_ int) (byte, error) { return r.ReadByte() })
-}
-
-func LoadInt32(buf []byte) (ret int32, bytesRead uint64, err error) {
-	return decodeInt32(func(i int) (byte, error) {
-		if i >= len(buf) {
-			return 0, io.EOF
-		}
-		return buf[i], nil
-	})
-}
-
-func decodeInt32(next nextByte) (ret int32, bytesRead uint64, err error) {
 	var shift int
-	var b byte
 	for {
-		b, err = next(int(bytesRead))
-		if err != nil {
-			return 0, 0, fmt.Errorf("readByte failed: %w", err)
+		b, e := r.ReadByte()
+		if e != nil {
+			return 0, 0, e
 		}
 		ret |= (int32(b) & 0x7f) << shift
 		shift += 7
 		bytesRead++
 		if b&0x80 == 0 {
 			if shift < 32 && (b&0x40) != 0 {
-				ret |= ^0 << shift
+				ret |= ^int32(0) << shift
 			}
-			// Over flow checks.
-			// fixme: can be optimized.
-			if bytesRead > maxVarintLen32 {
-				return 0, 0, errOverflow32
-			} else if unused := b & 0b00110000; bytesRead == maxVarintLen32 && ret < 0 && unused != 0b00110000 {
-				return 0, 0, errOverflow32
-			} else if bytesRead == maxVarintLen32 && ret >= 0 && unused != 0x00 {
+			if of := int32OverflowCheck(b, bytesRead, ret); of {
 				return 0, 0, errOverflow32
 			}
-			return
+			return ret, bytesRead, nil
 		}
 	}
+}
+
+// LoadInt32 is the same as DecodeInt32 but reads directly out of buf via index, rather than through the
+// io.ByteReader interface.
+func LoadInt32(buf []byte) (ret int32, bytesRead uint64, err error) {
+	var shift int
+	bufLen := len(buf)
+	for i := 0; ; i++ {
+		if i >= bufLen {
+			return 0, 0, io.EOF
+		}
+		b := buf[i]
+		ret |= (int32(b) & 0x7f) << shift
+		shift += 7
+		if b&0x80 == 0 {
+			bytesRead = uint64(i) + 1
+			if shift < 32 && (b&0x40) != 0 {
+				ret |= ^int32(0) << shift
+			}
+			if of := int32OverflowCheck(b, bytesRead, ret); of {
+				return 0, 0, errOverflow32
+			}
+			return ret, bytesRead, nil
+		}
+	}
+}
+
+// int32OverflowCheck folds the redundant terminal-byte overflow checks that used to be three cascaded branches
+// (one that could never be false when the other two applied) into a single mask comparison against the final
+// byte, done only once bytesRead reaches maxVarintLen32.
+func int32OverflowCheck(finalByte byte, bytesRead uint64, ret int32) bool {
+	if bytesRead > maxVarintLen32 {
+		return true
+	}
+	if bytesRead == maxVarintLen32 {
+		// The top 3 bits of the final byte are beyond the 32-bit range: they must agree with the sign of ret.
+		const unusedBits = 0b00110000
+		unused := finalByte & unusedBits
+		want := byte(0)
+		if ret < 0 {
+			want = unusedBits
+		}
+		return unused != want
+	}
+	return false
 }
 
 // DecodeInt33AsInt64 is a special cased decoder for wasm.BlockType which is encoded as a positive signed integer, yet
@@ -205,11 +243,10 @@ func decodeInt32(next nextByte) (ret int32, bytesRead uint64, err error) {
 func DecodeInt33AsInt64(r io.ByteReader) (ret int64, bytesRead uint64, err error) {
 	var shift int
 	var b int64
-	var rb byte
 	for shift < 35 {
-		rb, err = r.ReadByte()
-		if err != nil {
-			return 0, 0, fmt.Errorf("readByte failed: %w", err)
+		rb, e := r.ReadByte()
+		if e != nil {
+			return 0, 0, e
 		}
 		b = int64(rb)
 		ret |= (b & int33Mask2) << shift
@@ -219,7 +256,34 @@ func DecodeInt33AsInt64(r io.ByteReader) (ret int64, bytesRead uint64, err error
 			break
 		}
 	}
+	return int33Finish(b, shift, bytesRead, ret)
+}
 
+// LoadInt33AsInt64 is the same as DecodeInt33AsInt64 but reads directly out of buf via index, rather than
+// through the io.ByteReader interface.
+func LoadInt33AsInt64(buf []byte) (ret int64, bytesRead uint64, err error) {
+	var shift int
+	var b int64
+	bufLen := len(buf)
+	i := 0
+	for shift < 35 {
+		if i >= bufLen {
+			return 0, 0, io.EOF
+		}
+		b = int64(buf[i])
+		i++
+		ret |= (b & int33Mask2) << shift
+		shift += 7
+		if b&int33Mask == 0 {
+			break
+		}
+	}
+	return int33Finish(b, shift, uint64(i), ret)
+}
+
+// int33Finish applies the sign extension and overflow checks shared by DecodeInt33AsInt64 and LoadInt33AsInt64
+// once the raw 35-bit accumulation loop above has produced ret, shift and bytesRead from the final byte b.
+func int33Finish(b int64, shift int, bytesRead uint64, ret int64) (int64, uint64, error) {
 	// fixme: can be optimized
 	if shift < 33 && (b&int33Mask3) == int33Mask3 {
 		ret |= int33Mask4 << shift
@@ -230,38 +294,34 @@ func DecodeInt33AsInt64(r io.ByteReader) (ret int64, bytesRead uint64, err error
 	if ret&int33Mask5 > 0 {
 		ret = ret - int33Mask6
 	}
-	// Over flow checks.
-	// fixme: can be optimized.
+
+	// Over flow checks: the loop above can run at most maxVarintLen33 times (bounded by shift<35), so bytesRead
+	// can never exceed maxVarintLen33; the > case is kept for defensive symmetry with the 32/64-bit variants.
 	if bytesRead > maxVarintLen33 {
 		return 0, 0, errOverflow33
-	} else if unused := b & 0b00100000; bytesRead == maxVarintLen33 && ret < 0 && unused != 0b00100000 {
-		return 0, 0, errOverflow33
-	} else if bytesRead == maxVarintLen33 && ret >= 0 && unused != 0x00 {
-		return 0, 0, errOverflow33
+	}
+	if bytesRead == maxVarintLen33 {
+		// The top 2 bits of the final byte are beyond the 33-bit range: they must agree with the sign of ret.
+		const unusedBits = 0b00100000
+		unused := b & unusedBits
+		want := int64(0)
+		if ret < 0 {
+			want = unusedBits
+		}
+		if unused != want {
+			return 0, 0, errOverflow33
+		}
 	}
 	return ret, bytesRead, nil
 }
 
+// DecodeInt64 reads a LEB128 encoded int64 one byte at a time via r.
 func DecodeInt64(r io.ByteReader) (ret int64, bytesRead uint64, err error) {
-	return decodeInt64(func(_ int) (byte, error) { return r.ReadByte() })
-}
-
-func LoadInt64(buf []byte) (ret int64, bytesRead uint64, err error) {
-	return decodeInt64(func(i int) (byte, error) {
-		if i >= len(buf) {
-			return 0, io.EOF
-		}
-		return buf[i], nil
-	})
-}
-
-func decodeInt64(next nextByte) (ret int64, bytesRead uint64, err error) {
 	var shift int
-	var b byte
 	for {
-		b, err = next(int(bytesRead))
-		if err != nil {
-			return 0, 0, fmt.Errorf("readByte failed: %w", err)
+		b, e := r.ReadByte()
+		if e != nil {
+			return 0, 0, e
 		}
 		ret |= (int64(b) & 0x7f) << shift
 		shift += 7
@@ -270,16 +330,53 @@ func decodeInt64(next nextByte) (ret int64, bytesRead uint64, err error) {
 			if shift < 64 && (b&int64Mask3) == int64Mask3 {
 				ret |= int64Mask4 << shift
 			}
-			// Over flow checks.
-			// fixme: can be optimized.
-			if bytesRead > maxVarintLen64 {
-				return 0, 0, errOverflow64
-			} else if unused := b & 0b00111110; bytesRead == maxVarintLen64 && ret < 0 && unused != 0b00111110 {
-				return 0, 0, errOverflow64
-			} else if bytesRead == maxVarintLen64 && ret >= 0 && unused != 0x00 {
+			if of := int64OverflowCheck(b, bytesRead, ret); of {
 				return 0, 0, errOverflow64
 			}
-			return
+			return ret, bytesRead, nil
 		}
 	}
+}
+
+// LoadInt64 is the same as DecodeInt64 but reads directly out of buf via index, rather than through the
+// io.ByteReader interface.
+func LoadInt64(buf []byte) (ret int64, bytesRead uint64, err error) {
+	var shift int
+	bufLen := len(buf)
+	for i := 0; ; i++ {
+		if i >= bufLen {
+			return 0, 0, io.EOF
+		}
+		b := buf[i]
+		ret |= (int64(b) & 0x7f) << shift
+		shift += 7
+		if b&0x80 == 0 {
+			bytesRead = uint64(i) + 1
+			if shift < 64 && (b&int64Mask3) == int64Mask3 {
+				ret |= int64Mask4 << shift
+			}
+			if of := int64OverflowCheck(b, bytesRead, ret); of {
+				return 0, 0, errOverflow64
+			}
+			return ret, bytesRead, nil
+		}
+	}
+}
+
+// int64OverflowCheck is the 64-bit equivalent of int32OverflowCheck.
+func int64OverflowCheck(finalByte byte, bytesRead uint64, ret int64) bool {
+	if bytesRead > maxVarintLen64 {
+		return true
+	}
+	if bytesRead == maxVarintLen64 {
+		// The unused high bits of the final byte are beyond the 64-bit range: they must agree with the sign of ret.
+		const unusedBits = 0b00111110
+		unused := finalByte & unusedBits
+		want := byte(0)
+		if ret < 0 {
+			want = unusedBits
+		}
+		return unused != want
+	}
+	return false
 }

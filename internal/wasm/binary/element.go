@@ -1,7 +1,6 @@
 package binary
 
 import (
-	"bytes"
 	"fmt"
 
 	"github.com/samyfodil/wazy/api"
@@ -9,69 +8,72 @@ import (
 	"github.com/samyfodil/wazy/internal/wasm"
 )
 
-func ensureElementKindFuncRef(r *bytes.Reader) error {
-	elemKind, err := r.ReadByte()
+func ensureElementKindFuncRef(buf []byte, offset int) (int, error) {
+	elemKind, offset, err := readByte(buf, offset)
 	if err != nil {
-		return fmt.Errorf("read element prefix: %w", err)
+		return offset, fmt.Errorf("read element prefix: %w", err)
 	}
 	if elemKind != 0x0 { // ElemKind is fixed to 0x0 now: https://www.w3.org/TR/2022/WD-wasm-core-2-20220419/binary/modules.html#element-section
-		return fmt.Errorf("element kind must be zero but was 0x%x", elemKind)
+		return offset, fmt.Errorf("element kind must be zero but was 0x%x", elemKind)
 	}
-	return nil
+	return offset, nil
 }
 
-func decodeElementInitValueVector(r *bytes.Reader) ([]wasm.ConstantExpression, error) {
-	vs, _, err := leb128.DecodeUint32(r)
+func decodeElementInitValueVector(buf []byte, offset int) ([]wasm.ConstantExpression, int, error) {
+	vs, n, err := leb128.LoadUint32(buf[offset:])
 	if err != nil {
-		return nil, fmt.Errorf("get size of vector: %w", err)
+		return nil, offset, fmt.Errorf("get size of vector: %w", err)
 	}
+	offset += int(n)
 
 	vec := make([]wasm.ConstantExpression, vs)
 	for i := range vec {
-		u32, _, err := leb128.DecodeUint32(r)
+		u32, n, err := leb128.LoadUint32(buf[offset:])
 		if err != nil {
-			return nil, fmt.Errorf("read function index: %w", err)
+			return nil, offset, fmt.Errorf("read function index: %w", err)
 		}
+		offset += int(n)
 
 		if u32 >= wasm.MaximumFunctionIndex {
-			return nil, fmt.Errorf("too large function index in Element init: %d", u32)
+			return nil, offset, fmt.Errorf("too large function index in Element init: %d", u32)
 		}
 		vec[i] = wasm.NewConstantExpressionFromOpcode(wasm.OpcodeRefFunc, leb128.EncodeUint32(u32))
 	}
-	return vec, nil
+	return vec, offset, nil
 }
 
-func decodeElementConstExprVector(r *bytes.Reader, elemType wasm.RefType, enabledFeatures api.CoreFeatures) ([]wasm.ConstantExpression, error) {
-	vs, _, err := leb128.DecodeUint32(r)
+func decodeElementConstExprVector(buf []byte, offset int, elemType wasm.RefType, enabledFeatures api.CoreFeatures) ([]wasm.ConstantExpression, int, error) {
+	vs, n, err := leb128.LoadUint32(buf[offset:])
 	if err != nil {
-		return nil, fmt.Errorf("failed to get the size of constexpr vector: %w", err)
+		return nil, offset, fmt.Errorf("failed to get the size of constexpr vector: %w", err)
 	}
+	offset += int(n)
+
 	vec := make([]wasm.ConstantExpression, vs)
 	for i := range vec {
-		err := decodeConstantExpression(r, enabledFeatures, &vec[i])
+		offset, err = decodeConstantExpression(buf, offset, enabledFeatures, &vec[i])
 		if err != nil {
-			return nil, err
+			return nil, offset, err
 		}
 		// Expression will be validated later since we don't yet have globals to resolve the types yet.
-
 	}
-	return vec, nil
+	return vec, offset, nil
 }
 
-func decodeElementRefType(r *bytes.Reader) (wasm.RefType, error) {
-	b, err := r.ReadByte()
+func decodeElementRefType(buf []byte, offset int) (wasm.RefType, int, error) {
+	b, offset, err := readByte(buf, offset)
 	if err != nil {
-		return 0, fmt.Errorf("read element ref type: %w", err)
+		return 0, offset, fmt.Errorf("read element ref type: %w", err)
 	}
 	switch b {
 	case wasm.RefPrefixNullable, wasm.RefPrefixNonNullable:
-		return decodeRefType(r, b == wasm.RefPrefixNullable)
+		return decodeRefType(buf, offset, b == wasm.RefPrefixNullable)
 	default:
 		ret := wasm.ValueType(b)
 		if ret != wasm.RefTypeFuncref && ret != wasm.RefTypeExternref {
-			return 0, fmt.Errorf("invalid ref type for element: 0x%x", b)
+			return 0, offset, fmt.Errorf("invalid ref type for element: 0x%x", b)
 		}
-		return ret, nil
+		return ret, offset, nil
 	}
 }
 
@@ -96,15 +98,16 @@ const (
 	elementSegmentPrefixDeclarativeConstExprVector
 )
 
-func decodeElementSegment(r *bytes.Reader, enabledFeatures api.CoreFeatures, ret *wasm.ElementSegment) error {
-	prefix, _, err := leb128.DecodeUint32(r)
+func decodeElementSegment(buf []byte, offset int, enabledFeatures api.CoreFeatures, ret *wasm.ElementSegment) (int, error) {
+	prefix, n, err := leb128.LoadUint32(buf[offset:])
 	if err != nil {
-		return fmt.Errorf("read element prefix: %w", err)
+		return offset, fmt.Errorf("read element prefix: %w", err)
 	}
+	offset += int(n)
 
 	if prefix != elementSegmentPrefixLegacy {
 		if err := enabledFeatures.RequireEnabled(api.CoreFeatureBulkMemoryOperations); err != nil {
-			return fmt.Errorf("non-zero prefix for element segment is invalid as %w", err)
+			return offset, fmt.Errorf("non-zero prefix for element segment is invalid as %w", err)
 		}
 	}
 
@@ -112,139 +115,143 @@ func decodeElementSegment(r *bytes.Reader, enabledFeatures api.CoreFeatures, ret
 	switch prefix {
 	case elementSegmentPrefixLegacy:
 		// Legacy prefix which is WebAssembly 1.0 compatible.
-		err = decodeConstantExpression(r, enabledFeatures, &ret.OffsetExpr)
+		offset, err = decodeConstantExpression(buf, offset, enabledFeatures, &ret.OffsetExpr)
 		if err != nil {
-			return fmt.Errorf("read expr for offset: %w", err)
+			return offset, fmt.Errorf("read expr for offset: %w", err)
 		}
 
-		ret.Init, err = decodeElementInitValueVector(r)
+		ret.Init, offset, err = decodeElementInitValueVector(buf, offset)
 		if err != nil {
-			return err
+			return offset, err
 		}
 
 		ret.Mode = wasm.ElementModeActive
 		ret.Type = wasm.RefTypeFuncref.AsNonNullable()
-		return nil
+		return offset, nil
 	case elementSegmentPrefixPassiveFuncrefValueVector:
 		// Prefix 1 requires funcref.
-		if err = ensureElementKindFuncRef(r); err != nil {
-			return err
+		if offset, err = ensureElementKindFuncRef(buf, offset); err != nil {
+			return offset, err
 		}
 
-		ret.Init, err = decodeElementInitValueVector(r)
+		ret.Init, offset, err = decodeElementInitValueVector(buf, offset)
 		if err != nil {
-			return err
+			return offset, err
 		}
 		ret.Mode = wasm.ElementModePassive
 		ret.Type = wasm.RefTypeFuncref.AsNonNullable()
-		return nil
+		return offset, nil
 	case elementSegmentPrefixActiveFuncrefValueVectorWithTableIndex:
-		ret.TableIndex, _, err = leb128.DecodeUint32(r)
+		var tn uint64
+		ret.TableIndex, tn, err = leb128.LoadUint32(buf[offset:])
 		if err != nil {
-			return fmt.Errorf("get size of vector: %w", err)
+			return offset, fmt.Errorf("get size of vector: %w", err)
 		}
+		offset += int(tn)
 
 		if ret.TableIndex != 0 {
 			if err := enabledFeatures.RequireEnabled(api.CoreFeatureReferenceTypes); err != nil {
-				return fmt.Errorf("table index must be zero but was %d: %w", ret.TableIndex, err)
+				return offset, fmt.Errorf("table index must be zero but was %d: %w", ret.TableIndex, err)
 			}
 		}
 
-		err := decodeConstantExpression(r, enabledFeatures, &ret.OffsetExpr)
+		offset, err = decodeConstantExpression(buf, offset, enabledFeatures, &ret.OffsetExpr)
 		if err != nil {
-			return fmt.Errorf("read expr for offset: %w", err)
+			return offset, fmt.Errorf("read expr for offset: %w", err)
 		}
 
 		// Prefix 2 requires funcref.
-		if err = ensureElementKindFuncRef(r); err != nil {
-			return err
+		if offset, err = ensureElementKindFuncRef(buf, offset); err != nil {
+			return offset, err
 		}
 
-		ret.Init, err = decodeElementInitValueVector(r)
+		ret.Init, offset, err = decodeElementInitValueVector(buf, offset)
 		if err != nil {
-			return err
+			return offset, err
 		}
 
 		ret.Mode = wasm.ElementModeActive
 		ret.Type = wasm.RefTypeFuncref.AsNonNullable()
-		return nil
+		return offset, nil
 	case elementSegmentPrefixDeclarativeFuncrefValueVector:
 		// Prefix 3 requires funcref.
-		if err = ensureElementKindFuncRef(r); err != nil {
-			return err
+		if offset, err = ensureElementKindFuncRef(buf, offset); err != nil {
+			return offset, err
 		}
-		ret.Init, err = decodeElementInitValueVector(r)
+		ret.Init, offset, err = decodeElementInitValueVector(buf, offset)
 		if err != nil {
-			return err
+			return offset, err
 		}
 		ret.Type = wasm.RefTypeFuncref.AsNonNullable()
 		ret.Mode = wasm.ElementModeDeclarative
-		return nil
+		return offset, nil
 	case elementSegmentPrefixActiveFuncrefConstExprVector:
-		err := decodeConstantExpression(r, enabledFeatures, &ret.OffsetExpr)
+		offset, err = decodeConstantExpression(buf, offset, enabledFeatures, &ret.OffsetExpr)
 		if err != nil {
-			return fmt.Errorf("read expr for offset: %w", err)
+			return offset, fmt.Errorf("read expr for offset: %w", err)
 		}
 
-		ret.Init, err = decodeElementConstExprVector(r, wasm.RefTypeFuncref, enabledFeatures)
+		ret.Init, offset, err = decodeElementConstExprVector(buf, offset, wasm.RefTypeFuncref, enabledFeatures)
 		if err != nil {
-			return err
+			return offset, err
 		}
 		ret.Mode = wasm.ElementModeActive
 		ret.Type = wasm.RefTypeFuncref
-		return nil
+		return offset, nil
 	case elementSegmentPrefixPassiveConstExprVector:
-		ret.Type, err = decodeElementRefType(r)
+		ret.Type, offset, err = decodeElementRefType(buf, offset)
 		if err != nil {
-			return err
+			return offset, err
 		}
-		ret.Init, err = decodeElementConstExprVector(r, ret.Type, enabledFeatures)
+		ret.Init, offset, err = decodeElementConstExprVector(buf, offset, ret.Type, enabledFeatures)
 		if err != nil {
-			return err
+			return offset, err
 		}
 		ret.Mode = wasm.ElementModePassive
-		return nil
+		return offset, nil
 	case elementSegmentPrefixActiveConstExprVector:
-		ret.TableIndex, _, err = leb128.DecodeUint32(r)
+		var tn uint64
+		ret.TableIndex, tn, err = leb128.LoadUint32(buf[offset:])
 		if err != nil {
-			return fmt.Errorf("get size of vector: %w", err)
+			return offset, fmt.Errorf("get size of vector: %w", err)
 		}
+		offset += int(tn)
 
 		if ret.TableIndex != 0 {
 			if err := enabledFeatures.RequireEnabled(api.CoreFeatureReferenceTypes); err != nil {
-				return fmt.Errorf("table index must be zero but was %d: %w", ret.TableIndex, err)
+				return offset, fmt.Errorf("table index must be zero but was %d: %w", ret.TableIndex, err)
 			}
 		}
-		err := decodeConstantExpression(r, enabledFeatures, &ret.OffsetExpr)
+		offset, err = decodeConstantExpression(buf, offset, enabledFeatures, &ret.OffsetExpr)
 		if err != nil {
-			return fmt.Errorf("read expr for offset: %w", err)
+			return offset, fmt.Errorf("read expr for offset: %w", err)
 		}
 
-		ret.Type, err = decodeElementRefType(r)
+		ret.Type, offset, err = decodeElementRefType(buf, offset)
 		if err != nil {
-			return err
+			return offset, err
 		}
 
-		ret.Init, err = decodeElementConstExprVector(r, ret.Type, enabledFeatures)
+		ret.Init, offset, err = decodeElementConstExprVector(buf, offset, ret.Type, enabledFeatures)
 		if err != nil {
-			return err
+			return offset, err
 		}
 
 		ret.Mode = wasm.ElementModeActive
-		return nil
+		return offset, nil
 	case elementSegmentPrefixDeclarativeConstExprVector:
-		ret.Type, err = decodeElementRefType(r)
+		ret.Type, offset, err = decodeElementRefType(buf, offset)
 		if err != nil {
-			return err
+			return offset, err
 		}
-		ret.Init, err = decodeElementConstExprVector(r, ret.Type, enabledFeatures)
+		ret.Init, offset, err = decodeElementConstExprVector(buf, offset, ret.Type, enabledFeatures)
 		if err != nil {
-			return err
+			return offset, err
 		}
 
 		ret.Mode = wasm.ElementModeDeclarative
-		return nil
+		return offset, nil
 	default:
-		return fmt.Errorf("invalid element segment prefix: 0x%x", prefix)
+		return offset, fmt.Errorf("invalid element segment prefix: 0x%x", prefix)
 	}
 }

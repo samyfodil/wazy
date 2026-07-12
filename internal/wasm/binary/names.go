@@ -1,7 +1,6 @@
 package binary
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 
@@ -27,9 +26,7 @@ const (
 // * LocalNames decode from subsection 2
 //
 // See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#binary-namesec
-func decodeNameSection(r *bytes.Reader, limit uint64) (result *wasm.NameSection, err error) {
-	// TODO: add leb128 functions that work on []byte and offset. While using a reader allows us to reuse reader-based
-	// leb128 functions, it is less efficient, causes untestable code and in some cases more complex vs plain []byte.
+func decodeNameSection(buf []byte, offset int, arena *stringArena, limit uint64) (result *wasm.NameSection, newOffset int, err error) {
 	result = &wasm.NameSection{}
 
 	// subsectionID is decoded if known, and skipped if not
@@ -38,114 +35,124 @@ func decodeNameSection(r *bytes.Reader, limit uint64) (result *wasm.NameSection,
 	var subsectionSize uint32
 	var bytesRead uint64
 	for limit > 0 {
-		if subsectionID, err = r.ReadByte(); err != nil {
+		if subsectionID, offset, err = readByte(buf, offset); err != nil {
 			if err == io.EOF {
-				return result, nil
+				return result, offset, nil
 			}
 			// TODO: untestable as this can't fail for a reason beside EOF reading a byte from a buffer
-			return nil, fmt.Errorf("failed to read a subsection ID: %w", err)
+			return nil, offset, fmt.Errorf("failed to read a subsection ID: %w", err)
 		}
 		limit--
 
-		if subsectionSize, bytesRead, err = leb128.DecodeUint32(r); err != nil {
-			return nil, fmt.Errorf("failed to read the size of subsection[%d]: %w", subsectionID, err)
+		if subsectionSize, bytesRead, err = leb128.LoadUint32(buf[offset:]); err != nil {
+			return nil, offset, fmt.Errorf("failed to read the size of subsection[%d]: %w", subsectionID, err)
 		}
+		offset += int(bytesRead)
 		limit -= bytesRead
 
 		switch subsectionID {
 		case subsectionIDModuleName:
-			if result.ModuleName, _, err = decodeUTF8(r, "module name"); err != nil {
-				return nil, err
+			if result.ModuleName, offset, err = decodeUTF8(buf, offset, arena, "module name"); err != nil {
+				return nil, offset, err
 			}
 		case subsectionIDFunctionNames:
-			if result.FunctionNames, err = decodeFunctionNames(r); err != nil {
-				return nil, err
+			if result.FunctionNames, offset, err = decodeFunctionNames(buf, offset, arena); err != nil {
+				return nil, offset, err
 			}
 		case subsectionIDLocalNames:
-			if result.LocalNames, err = decodeLocalNames(r); err != nil {
-				return nil, err
+			if result.LocalNames, offset, err = decodeLocalNames(buf, offset, arena); err != nil {
+				return nil, offset, err
 			}
 		default: // Skip other subsections.
-			// Note: Not Seek because it doesn't err when given an offset past EOF. Rather, it leads to undefined state.
-			if _, err = io.CopyN(io.Discard, r, int64(subsectionSize)); err != nil {
-				return nil, fmt.Errorf("failed to skip subsection[%d]: %w", subsectionID, err)
+			// Note: this mirrors io.CopyN's behavior (used here prior to the slice-indexed rewrite), which
+			// reports io.EOF whenever fewer than subsectionSize bytes remain - unlike io.ReadFull, it never
+			// reports io.ErrUnexpectedEOF for a partial remainder.
+			if len(buf)-offset < int(subsectionSize) {
+				return nil, offset, fmt.Errorf("failed to skip subsection[%d]: %w", subsectionID, io.EOF)
 			}
+			offset += int(subsectionSize)
 		}
 		limit -= uint64(subsectionSize)
 	}
-	return
+	return result, offset, nil
 }
 
-func decodeFunctionNames(r *bytes.Reader) (wasm.NameMap, error) {
-	functionCount, err := decodeFunctionCount(r, subsectionIDFunctionNames)
+func decodeFunctionNames(buf []byte, offset int, arena *stringArena) (wasm.NameMap, int, error) {
+	functionCount, offset, err := decodeFunctionCount(buf, offset, subsectionIDFunctionNames)
 	if err != nil {
-		return nil, err
+		return nil, offset, err
 	}
 
 	result := make(wasm.NameMap, functionCount)
 	for i := uint32(0); i < functionCount; i++ {
-		functionIndex, err := decodeFunctionIndex(r, subsectionIDFunctionNames)
+		functionIndex, o, err := decodeFunctionIndex(buf, offset, subsectionIDFunctionNames)
 		if err != nil {
-			return nil, err
+			return nil, offset, err
 		}
+		offset = o
 
-		name, _, err := decodeUTF8(r, "function[%d] name", functionIndex)
+		name, o, err := decodeUTF8(buf, offset, arena, "function[%d] name", functionIndex)
 		if err != nil {
-			return nil, err
+			return nil, offset, err
 		}
+		offset = o
 		result[i] = wasm.NameAssoc{Index: functionIndex, Name: name}
 	}
-	return result, nil
+	return result, offset, nil
 }
 
-func decodeLocalNames(r *bytes.Reader) (wasm.IndirectNameMap, error) {
-	functionCount, err := decodeFunctionCount(r, subsectionIDLocalNames)
+func decodeLocalNames(buf []byte, offset int, arena *stringArena) (wasm.IndirectNameMap, int, error) {
+	functionCount, offset, err := decodeFunctionCount(buf, offset, subsectionIDLocalNames)
 	if err != nil {
-		return nil, err
+		return nil, offset, err
 	}
 
 	result := make(wasm.IndirectNameMap, functionCount)
 	for i := uint32(0); i < functionCount; i++ {
-		functionIndex, err := decodeFunctionIndex(r, subsectionIDLocalNames)
+		functionIndex, o, err := decodeFunctionIndex(buf, offset, subsectionIDLocalNames)
 		if err != nil {
-			return nil, err
+			return nil, offset, err
 		}
+		offset = o
 
-		localCount, _, err := leb128.DecodeUint32(r)
+		localCount, n, err := leb128.LoadUint32(buf[offset:])
 		if err != nil {
-			return nil, fmt.Errorf("failed to read the local count for function[%d]: %w", functionIndex, err)
+			return nil, offset, fmt.Errorf("failed to read the local count for function[%d]: %w", functionIndex, err)
 		}
+		offset += int(n)
 
 		locals := make(wasm.NameMap, localCount)
 		for j := uint32(0); j < localCount; j++ {
-			localIndex, _, err := leb128.DecodeUint32(r)
+			localIndex, n, err := leb128.LoadUint32(buf[offset:])
 			if err != nil {
-				return nil, fmt.Errorf("failed to read a local index of function[%d]: %w", functionIndex, err)
+				return nil, offset, fmt.Errorf("failed to read a local index of function[%d]: %w", functionIndex, err)
 			}
+			offset += int(n)
 
-			name, _, err := decodeUTF8(r, "function[%d] local[%d] name", functionIndex, localIndex)
+			name, o, err := decodeUTF8(buf, offset, arena, "function[%d] local[%d] name", functionIndex, localIndex)
 			if err != nil {
-				return nil, err
+				return nil, offset, err
 			}
+			offset = o
 			locals[j] = wasm.NameAssoc{Index: localIndex, Name: name}
 		}
 		result[i] = wasm.NameMapAssoc{Index: functionIndex, NameMap: locals}
 	}
-	return result, nil
+	return result, offset, nil
 }
 
-func decodeFunctionIndex(r *bytes.Reader, subsectionID uint8) (uint32, error) {
-	functionIndex, _, err := leb128.DecodeUint32(r)
+func decodeFunctionIndex(buf []byte, offset int, subsectionID uint8) (uint32, int, error) {
+	functionIndex, n, err := leb128.LoadUint32(buf[offset:])
 	if err != nil {
-		return 0, fmt.Errorf("failed to read a function index in subsection[%d]: %w", subsectionID, err)
+		return 0, offset, fmt.Errorf("failed to read a function index in subsection[%d]: %w", subsectionID, err)
 	}
-	return functionIndex, nil
+	return functionIndex, offset + int(n), nil
 }
 
-func decodeFunctionCount(r *bytes.Reader, subsectionID uint8) (uint32, error) {
-	functionCount, _, err := leb128.DecodeUint32(r)
+func decodeFunctionCount(buf []byte, offset int, subsectionID uint8) (uint32, int, error) {
+	functionCount, n, err := leb128.LoadUint32(buf[offset:])
 	if err != nil {
-		return 0, fmt.Errorf("failed to read the function count of subsection[%d]: %w", subsectionID, err)
+		return 0, offset, fmt.Errorf("failed to read the function count of subsection[%d]: %w", subsectionID, err)
 	}
-	return functionCount, nil
+	return functionCount, offset + int(n), nil
 }

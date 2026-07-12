@@ -1,7 +1,6 @@
 package binary
 
 import (
-	"bytes"
 	"fmt"
 
 	"github.com/samyfodil/wazy/api"
@@ -9,48 +8,55 @@ import (
 	"github.com/samyfodil/wazy/internal/wasm"
 )
 
-func decodeFunctionType(enabledFeatures api.CoreFeatures, r *bytes.Reader, ret *wasm.FunctionType) (err error) {
-	b, err := r.ReadByte()
+func decodeFunctionType(enabledFeatures api.CoreFeatures, buf []byte, offset int, arena *valueTypeArena, ret *wasm.FunctionType) (int, error) {
+	b, offset, err := readByte(buf, offset)
 	if err != nil {
-		return fmt.Errorf("read leading byte: %w", err)
+		return offset, fmt.Errorf("read leading byte: %w", err)
 	}
 
 	if b != 0x60 {
-		return fmt.Errorf("%w: %#x != 0x60", ErrInvalidByte, b)
+		return offset, fmt.Errorf("%w: %#x != 0x60", ErrInvalidByte, b)
 	}
 
-	paramCount, _, err := leb128.DecodeUint32(r)
+	paramCount, n, err := leb128.LoadUint32(buf[offset:])
 	if err != nil {
-		return fmt.Errorf("could not read parameter count: %w", err)
+		return offset, fmt.Errorf("could not read parameter count: %w", err)
+	}
+	offset += int(n)
+
+	paramTypes, offset, err := decodeValueTypes(buf, offset, paramCount, arena)
+	if err != nil {
+		return offset, fmt.Errorf("could not read parameter types: %w", err)
 	}
 
-	paramTypes, err := decodeValueTypes(r, paramCount)
+	resultCount, n, err := leb128.LoadUint32(buf[offset:])
 	if err != nil {
-		return fmt.Errorf("could not read parameter types: %w", err)
+		return offset, fmt.Errorf("could not read result count: %w", err)
 	}
-
-	resultCount, _, err := leb128.DecodeUint32(r)
-	if err != nil {
-		return fmt.Errorf("could not read result count: %w", err)
-	}
+	offset += int(n)
 
 	// Guard >1.0 feature multi-value
 	if resultCount > 1 {
 		if err = enabledFeatures.RequireEnabled(api.CoreFeatureMultiValue); err != nil {
-			return fmt.Errorf("multiple result types invalid as %v", err)
+			return offset, fmt.Errorf("multiple result types invalid as %v", err)
 		}
 	}
 
-	resultTypes, err := decodeValueTypes(r, resultCount)
+	resultTypes, offset, err := decodeValueTypes(buf, offset, resultCount, arena)
 	if err != nil {
-		return fmt.Errorf("could not read result types: %w", err)
+		return offset, fmt.Errorf("could not read result types: %w", err)
 	}
 
 	ret.Params = paramTypes
 	ret.Results = resultTypes
 
-	// cache the key for the function type
+	// Eagerly cache the key here, while decoding is single-threaded. This is NOT deferred to first use because
+	// key() lazily populates FunctionType.string, and that first population can happen concurrently: the runtime
+	// call_indirect helpers reach it through Store.GetFunctionTypeID on a *shared* FunctionType — e.g.
+	// internal/emscripten (*InvokeFunc).Call and experimental/table.LookupFunction both call key() while
+	// executing guest code, which is multi-goroutine. Populating it now makes every later key()/String() a pure
+	// read of an already-set field. key() itself is cheap (single pre-sized Builder), so eager caching is cheap.
 	_ = ret.String()
 
-	return nil
+	return offset, nil
 }

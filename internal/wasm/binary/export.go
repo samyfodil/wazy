@@ -1,32 +1,33 @@
 package binary
 
 import (
-	"bytes"
 	"fmt"
 
 	"github.com/samyfodil/wazy/internal/leb128"
 	"github.com/samyfodil/wazy/internal/wasm"
 )
 
-func decodeExport(r *bytes.Reader, ret *wasm.Export) (err error) {
-	if ret.Name, _, err = decodeUTF8(r, "export name"); err != nil {
-		return
+func decodeExport(buf []byte, offset int, arena *stringArena, ret *wasm.Export) (int, error) {
+	var err error
+	if ret.Name, offset, err = decodeUTF8(buf, offset, arena, "export name"); err != nil {
+		return offset, err
 	}
 
-	b, err := r.ReadByte()
+	b, offset, err := readByte(buf, offset)
 	if err != nil {
-		err = fmt.Errorf("error decoding export kind: %w", err)
-		return
+		return offset, fmt.Errorf("error decoding export kind: %w", err)
 	}
 
 	ret.Type = b
 	switch ret.Type {
 	case wasm.ExternTypeFunc, wasm.ExternTypeTable, wasm.ExternTypeMemory, wasm.ExternTypeGlobal, wasm.ExternTypeTag:
-		if ret.Index, _, err = leb128.DecodeUint32(r); err != nil {
-			err = fmt.Errorf("error decoding export index: %w", err)
+		var n uint64
+		if ret.Index, n, err = leb128.LoadUint32(buf[offset:]); err != nil {
+			return offset, fmt.Errorf("error decoding export index: %w", err)
 		}
+		offset += int(n)
 	default:
-		err = fmt.Errorf("%w: invalid byte for exportdesc: %#x", ErrInvalidByte, b)
+		return offset, fmt.Errorf("%w: invalid byte for exportdesc: %#x", ErrInvalidByte, b)
 	}
-	return
+	return offset, nil
 }

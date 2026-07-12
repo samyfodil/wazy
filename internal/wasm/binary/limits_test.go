@@ -1,7 +1,6 @@
 package binary
 
 import (
-	"bytes"
 	"fmt"
 	"math"
 	"testing"
@@ -87,7 +86,7 @@ func TestLimitsType(t *testing.T) {
 		})
 
 		t.Run(fmt.Sprintf("decode - %s", tc.name), func(t *testing.T) {
-			min, max, shared, err := decodeLimitsType(bytes.NewReader(b))
+			min, max, shared, _, err := decodeLimitsType(b, 0)
 			require.NoError(t, err)
 			require.Equal(t, min, tc.min)
 			require.Equal(t, max, tc.max)

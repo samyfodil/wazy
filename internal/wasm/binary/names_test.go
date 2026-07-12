@@ -1,7 +1,6 @@
 package binary
 
 import (
-	"bytes"
 	"testing"
 
 	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
@@ -66,7 +65,7 @@ func TestDecodeNameSection(t *testing.T) {
 
 		t.Run(tc.name, func(t *testing.T) {
 			data := binaryencoding.EncodeNameSectionData(tc.input)
-			ns, err := decodeNameSection(bytes.NewReader(data), uint64(len(data)))
+			ns, _, err := decodeNameSection(data, 0, &stringArena{}, uint64(len(data)))
 			require.NoError(t, err)
 			require.Equal(t, tc.input, ns)
 		})
@@ -167,7 +166,7 @@ func TestDecodeNameSection_Errors(t *testing.T) {
 		tc := tt
 
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := decodeNameSection(bytes.NewReader(tc.input), uint64(len(tc.input)))
+			_, _, err := decodeNameSection(tc.input, 0, &stringArena{}, uint64(len(tc.input)))
 			require.EqualError(t, err, tc.expectedErr)
 		})
 	}

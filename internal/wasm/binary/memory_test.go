@@ -1,7 +1,6 @@
 package binary
 
 import (
-	"bytes"
 	"fmt"
 	"testing"
 
@@ -193,9 +192,9 @@ func TestMemoryType(t *testing.T) {
 			if tc.input.IsShared {
 				features = features.SetEnabled(experimental.CoreFeaturesThreads, true)
 			}
-			binary, err := decodeMemory(bytes.NewReader(b), features, newMemorySizer(tmax, false), tmax)
+			decoded, _, err := decodeMemory(b, 0, features, newMemorySizer(tmax, false), tmax)
 			require.NoError(t, err)
-			require.Equal(t, binary, expectedDecoded)
+			require.Equal(t, decoded, expectedDecoded)
 		})
 	}
 }
@@ -248,7 +247,7 @@ func TestDecodeMemoryType_Errors(t *testing.T) {
 				// Allow test to work if threads is ever added to default features by explicitly removing threads features
 				features = features.SetEnabled(experimental.CoreFeaturesThreads, false)
 			}
-			_, err := decodeMemory(bytes.NewReader(tc.input), features, newMemorySizer(max, false), max)
+			_, _, err := decodeMemory(tc.input, 0, features, newMemorySizer(max, false), max)
 			require.EqualError(t, err, tc.expectedErr)
 		})
 	}

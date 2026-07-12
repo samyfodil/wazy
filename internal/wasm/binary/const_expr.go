@@ -1,7 +1,6 @@
 package binary
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 
@@ -12,105 +11,128 @@ import (
 	"github.com/samyfodil/wazy/internal/wasm"
 )
 
-func decodeConstantExpression(r *bytes.Reader, enabledFeatures api.CoreFeatures, ret *wasm.ConstantExpression) error {
-	lenAtStart := r.Len()
-	startPos := r.Size() - int64(lenAtStart)
+func decodeConstantExpression(buf []byte, offset int, enabledFeatures api.CoreFeatures, ret *wasm.ConstantExpression) (int, error) {
+	startOffset := offset
 	for {
-		opcode, err := r.ReadByte()
+		opcode, o, err := readByte(buf, offset)
 		if err != nil {
-			return fmt.Errorf("read const expression opcode: %v", err)
+			return offset, fmt.Errorf("read const expression opcode: %v", err)
 		}
+		offset = o
 		switch opcode {
 		case wasm.OpcodeI32Const:
 			// Treat constants as signed as their interpretation is not yet known per /RATIONALE.md
-			_, _, err = leb128.DecodeInt32(r)
+			var n uint64
+			_, n, err = leb128.LoadInt32(buf[offset:])
+			offset += int(n)
 		case wasm.OpcodeI32Add, wasm.OpcodeI32Sub, wasm.OpcodeI32Mul:
 			// No immediate to read.
 			if !enabledFeatures.IsEnabled(experimental.CoreFeaturesExtendedConst) {
-				return fmt.Errorf("%v is not supported in a constant expression as feature \"extended-const\" is disabled", wasm.InstructionName(opcode))
+				return offset, fmt.Errorf("%v is not supported in a constant expression as feature \"extended-const\" is disabled", wasm.InstructionName(opcode))
 			}
 		case wasm.OpcodeI64Const:
 			// Treat constants as signed as their interpretation is not yet known per /RATIONALE.md
-			_, _, err = leb128.DecodeInt64(r)
+			var n uint64
+			_, n, err = leb128.LoadInt64(buf[offset:])
+			offset += int(n)
 		case wasm.OpcodeI64Add, wasm.OpcodeI64Sub, wasm.OpcodeI64Mul:
 			// No immediate to read.
 			if !enabledFeatures.IsEnabled(experimental.CoreFeaturesExtendedConst) {
-				return fmt.Errorf("%v is not supported in a constant expression as feature \"extended-const\" is disabled", wasm.InstructionName(opcode))
+				return offset, fmt.Errorf("%v is not supported in a constant expression as feature \"extended-const\" is disabled", wasm.InstructionName(opcode))
 			}
 		case wasm.OpcodeF32Const:
-			buf := make([]byte, 4)
-			if _, err := io.ReadFull(r, buf); err != nil {
-				return fmt.Errorf("read f32 constant: %v", err)
+			var tmp [4]byte
+			data, o, e := readBytes(buf, offset, 4)
+			if e != nil {
+				return offset, fmt.Errorf("read f32 constant: %v", e)
 			}
-			_, err = ieee754.DecodeFloat32(buf)
+			copy(tmp[:], data)
+			offset = o
+			_, err = ieee754.DecodeFloat32(tmp[:])
 		case wasm.OpcodeF64Const:
-			buf := make([]byte, 8)
-			if _, err := io.ReadFull(r, buf); err != nil {
-				return fmt.Errorf("read f64 constant: %v", err)
+			var tmp [8]byte
+			data, o, e := readBytes(buf, offset, 8)
+			if e != nil {
+				return offset, fmt.Errorf("read f64 constant: %v", e)
 			}
-			_, err = ieee754.DecodeFloat64(buf)
+			copy(tmp[:], data)
+			offset = o
+			_, err = ieee754.DecodeFloat64(tmp[:])
 		case wasm.OpcodeGlobalGet:
-			_, _, err = leb128.DecodeUint32(r)
+			var n uint64
+			_, n, err = leb128.LoadUint32(buf[offset:])
+			offset += int(n)
 		case wasm.OpcodeRefNull:
 			if err := enabledFeatures.RequireEnabled(api.CoreFeatureBulkMemoryOperations); err != nil {
-				return fmt.Errorf("ref.null is not supported as %w", err)
+				return offset, fmt.Errorf("ref.null is not supported as %w", err)
 			}
-			b, err := r.ReadByte()
+			b, o, err := readByte(buf, offset)
 			reftype := wasm.ValueType(b)
 			if err != nil {
-				return fmt.Errorf("read reference type for ref.null: %w", err)
+				return offset, fmt.Errorf("read reference type for ref.null: %w", err)
 			}
 			switch reftype {
 			case wasm.RefTypeFuncref, wasm.RefTypeExternref, wasm.ValueTypeExnref:
 				// Valid abstract heap type.
+				offset = o
 			default:
-				// Could be a concrete type index; unread the byte and try reading as LEB128.
-				if err := r.UnreadByte(); err != nil {
-					return fmt.Errorf("unread byte for ref.null: %w", err)
-				}
-				_, _, err = leb128.DecodeUint32(r)
+				// Could be a concrete type index; re-decode the same byte(s) (still at `offset`, since we
+				// haven't advanced past it) as LEB128, rather than the reader-based "unread the byte" dance.
+				var n uint64
+				_, n, err = leb128.LoadUint32(buf[offset:])
 				if err != nil {
-					return fmt.Errorf("invalid type for ref.null: 0x%x", reftype)
+					return offset, fmt.Errorf("invalid type for ref.null: 0x%x", reftype)
 				}
+				offset += int(n)
 			}
 		case wasm.OpcodeRefFunc:
 			if err := enabledFeatures.RequireEnabled(api.CoreFeatureBulkMemoryOperations); err != nil {
-				return fmt.Errorf("ref.func is not supported as %w", err)
+				return offset, fmt.Errorf("ref.func is not supported as %w", err)
 			}
 			// Parsing index.
-			_, _, err = leb128.DecodeUint32(r)
+			var n uint64
+			_, n, err = leb128.LoadUint32(buf[offset:])
+			offset += int(n)
 		case wasm.OpcodeVecPrefix:
 			if err := enabledFeatures.RequireEnabled(api.CoreFeatureSIMD); err != nil {
-				return fmt.Errorf("vector instructions are not supported as %w", err)
+				return offset, fmt.Errorf("vector instructions are not supported as %w", err)
 			}
-			opcode, err = r.ReadByte()
+			vecOpcode, o, err := readByte(buf, offset)
 			if err != nil {
-				return fmt.Errorf("read vector instruction opcode suffix: %w", err)
+				return offset, fmt.Errorf("read vector instruction opcode suffix: %w", err)
+			}
+			offset = o
+
+			if vecOpcode != wasm.OpcodeVecV128Const {
+				return offset, fmt.Errorf("invalid vector opcode for const expression: %#x", vecOpcode)
 			}
 
-			if opcode != wasm.OpcodeVecV128Const {
-				return fmt.Errorf("invalid vector opcode for const expression: %#x", opcode)
+			// Mirrors the original r.Read(make([]byte, 16)) semantics exactly (not io.ReadFull): copy as many
+			// bytes as are available, up to 16, and only error with "needs 16 bytes but was N" when a partial
+			// (but non-zero) read occurs; io.EOF only when nothing at all remains.
+			avail := len(buf) - offset
+			if avail <= 0 {
+				return offset, fmt.Errorf("read vector const instruction immediates: %w", io.EOF)
 			}
-
-			n, err := r.Read(make([]byte, 16))
-			if err != nil {
-				return fmt.Errorf("read vector const instruction immediates: %w", err)
-			} else if n != 16 {
-				return fmt.Errorf("read vector const instruction immediates: needs 16 bytes but was %d bytes", n)
+			n := avail
+			if n > 16 {
+				n = 16
+			}
+			offset += n
+			if n != 16 {
+				return offset, fmt.Errorf("read vector const instruction immediates: needs 16 bytes but was %d bytes", n)
 			}
 		case wasm.OpcodeEnd:
-			data := make([]byte, lenAtStart-(r.Len()))
-			if _, err := r.ReadAt(data, startPos); err != nil {
-				return fmt.Errorf("error re-buffering ConstantExpression.Data: %w", err)
-			}
+			data := make([]byte, offset-startOffset)
+			copy(data, buf[startOffset:offset])
 			ret.Data = data
-			return nil
+			return offset, nil
 		default:
-			return fmt.Errorf("%v for const expression op code: %#x", ErrInvalidByte, opcode)
+			return offset, fmt.Errorf("%v for const expression op code: %#x", ErrInvalidByte, opcode)
 		}
 
 		if err != nil {
-			return fmt.Errorf("read value: %v", err)
+			return offset, fmt.Errorf("read value: %v", err)
 		}
 	}
 }

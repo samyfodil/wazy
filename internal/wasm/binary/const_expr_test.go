@@ -1,7 +1,6 @@
 package binary
 
 import (
-	"bytes"
 	"strconv"
 	"testing"
 
@@ -83,7 +82,7 @@ func TestDecodeConstantExpression(t *testing.T) {
 		tc := tt
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
 			var actual wasm.ConstantExpression
-			err := decodeConstantExpression(bytes.NewReader(tc.in),
+			_, err := decodeConstantExpression(tc.in, 0,
 				api.CoreFeatureBulkMemoryOperations|api.CoreFeatureSIMD|experimental.CoreFeaturesExtendedConst, &actual)
 			require.NoError(t, err)
 			require.Equal(t, tc.exp, actual)
@@ -200,7 +199,7 @@ func TestDecodeConstantExpression_errors(t *testing.T) {
 		tc := tt
 		t.Run(tc.expectedErr, func(t *testing.T) {
 			var actual wasm.ConstantExpression
-			err := decodeConstantExpression(bytes.NewReader(tc.in), tc.features, &actual)
+			_, err := decodeConstantExpression(tc.in, 0, tc.features, &actual)
 			require.EqualError(t, err, tc.expectedErr)
 		})
 	}

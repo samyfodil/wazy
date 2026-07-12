@@ -1,7 +1,6 @@
 package binary
 
 import (
-	"bytes"
 	"fmt"
 
 	"github.com/samyfodil/wazy/api"
@@ -10,38 +9,53 @@ import (
 )
 
 func decodeImport(
-	r *bytes.Reader,
+	buf []byte,
+	offset int,
 	idx uint32,
 	memorySizer memorySizer,
 	memoryLimitPages uint32,
 	enabledFeatures api.CoreFeatures,
+	arena *stringArena,
+	prevModule string,
 	ret *wasm.Import,
-) (err error) {
-	if ret.Module, _, err = decodeUTF8(r, "import module"); err != nil {
+) (newOffset int, err error) {
+	// Intern the module namespace: imports are grouped by module in practice ("env",
+	// "wasi_snapshot_preview1", ...), so the module string of one import almost always equals the previous
+	// import's. Reuse it via a single comparison instead of copying identical bytes into the arena again.
+	// string(rawModule) in an == comparison does not allocate (compiler special case).
+	var rawModule []byte
+	if rawModule, offset, err = decodeUTF8Raw(buf, offset, "import module"); err != nil {
 		err = fmt.Errorf("import[%d] error decoding module: %w", idx, err)
-		return
+		return offset, err
+	}
+	if prevModule == string(rawModule) {
+		ret.Module = prevModule
+	} else {
+		ret.Module = arena.string(rawModule)
 	}
 
-	if ret.Name, _, err = decodeUTF8(r, "import name"); err != nil {
+	if ret.Name, offset, err = decodeUTF8(buf, offset, arena, "import name"); err != nil {
 		err = fmt.Errorf("import[%d] error decoding name: %w", idx, err)
-		return
+		return offset, err
 	}
 
-	b, err := r.ReadByte()
+	b, offset, err := readByte(buf, offset)
 	if err != nil {
 		err = fmt.Errorf("import[%d] error decoding type: %w", idx, err)
-		return
+		return offset, err
 	}
 	ret.Type = b
 	switch ret.Type {
 	case wasm.ExternTypeFunc:
-		ret.DescFunc, _, err = leb128.DecodeUint32(r)
+		var n uint64
+		ret.DescFunc, n, err = leb128.LoadUint32(buf[offset:])
+		offset += int(n)
 	case wasm.ExternTypeTable:
-		err = decodeTable(r, enabledFeatures, &ret.DescTable)
+		offset, err = decodeTable(buf, offset, enabledFeatures, &ret.DescTable)
 	case wasm.ExternTypeMemory:
-		ret.DescMem, err = decodeMemory(r, enabledFeatures, memorySizer, memoryLimitPages)
+		ret.DescMem, offset, err = decodeMemory(buf, offset, enabledFeatures, memorySizer, memoryLimitPages)
 	case wasm.ExternTypeGlobal:
-		ret.DescGlobal, err = decodeGlobalType(r)
+		ret.DescGlobal, offset, err = decodeGlobalType(buf, offset)
 	case wasm.ExternTypeTag:
 		if err = enabledFeatures.RequireEnabled(api.CoreFeatureSIMD << 4); err != nil { // CoreFeaturesExceptionHandling
 			err = fmt.Errorf("tag imports require exception handling feature: %w", err)
@@ -49,7 +63,7 @@ func decodeImport(
 		}
 		// Tag import: read attribute byte (must be 0x00) then type index.
 		var attr byte
-		attr, err = r.ReadByte()
+		attr, offset, err = readByte(buf, offset)
 		if err != nil {
 			break
 		}
@@ -57,12 +71,14 @@ func decodeImport(
 			err = fmt.Errorf("invalid tag attribute: %#x", attr)
 			break
 		}
-		ret.DescTag, _, err = leb128.DecodeUint32(r)
+		var n uint64
+		ret.DescTag, n, err = leb128.LoadUint32(buf[offset:])
+		offset += int(n)
 	default:
 		err = fmt.Errorf("%w: invalid byte for importdesc: %#x", ErrInvalidByte, b)
 	}
 	if err != nil {
 		err = fmt.Errorf("import[%d] %s[%s.%s]: %w", idx, wasm.ExternTypeName(ret.Type), ret.Module, ret.Name, err)
 	}
-	return
+	return offset, err
 }

@@ -1,42 +1,43 @@
 package binary
 
 import (
-	"bytes"
 	"fmt"
 
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/wasm"
 )
 
-// decodeGlobal returns the api.Global decoded with the WebAssembly 1.0 (20191205) Binary Format.
+// decodeGlobal decodes the api.Global from buf[offset:] with the WebAssembly 1.0 (20191205) Binary Format,
+// returning the offset after it.
 //
 // See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#binary-global
-func decodeGlobal(r *bytes.Reader, enabledFeatures api.CoreFeatures, ret *wasm.Global) (err error) {
-	ret.Type, err = decodeGlobalType(r)
+func decodeGlobal(buf []byte, offset int, enabledFeatures api.CoreFeatures, ret *wasm.Global) (int, error) {
+	var err error
+	ret.Type, offset, err = decodeGlobalType(buf, offset)
 	if err != nil {
-		return err
+		return offset, err
 	}
 
-	err = decodeConstantExpression(r, enabledFeatures, &ret.Init)
-	return
+	return decodeConstantExpression(buf, offset, enabledFeatures, &ret.Init)
 }
 
-// decodeGlobalType returns the wasm.GlobalType decoded with the WebAssembly 1.0 (20191205) Binary Format.
+// decodeGlobalType returns the wasm.GlobalType decoded from buf[offset:] with the WebAssembly 1.0 (20191205)
+// Binary Format, and the offset after it.
 //
 // See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#binary-globaltype
-func decodeGlobalType(r *bytes.Reader) (wasm.GlobalType, error) {
-	vt, err := decodeValueTypes(r, 1)
+func decodeGlobalType(buf []byte, offset int) (wasm.GlobalType, int, error) {
+	vt, offset, err := decodeValueType(buf, offset)
 	if err != nil {
-		return wasm.GlobalType{}, fmt.Errorf("read value type: %w", err)
+		return wasm.GlobalType{}, offset, fmt.Errorf("read value type: %w", err)
 	}
 
 	ret := wasm.GlobalType{
-		ValType: vt[0],
+		ValType: vt,
 	}
 
-	b, err := r.ReadByte()
+	b, offset, err := readByte(buf, offset)
 	if err != nil {
-		return wasm.GlobalType{}, fmt.Errorf("read mutablity: %w", err)
+		return wasm.GlobalType{}, offset, fmt.Errorf("read mutablity: %w", err)
 	}
 
 	switch mut := b; mut {
@@ -44,7 +45,7 @@ func decodeGlobalType(r *bytes.Reader) (wasm.GlobalType, error) {
 	case 0x01: // mutable
 		ret.Mutable = true
 	default:
-		return wasm.GlobalType{}, fmt.Errorf("%w for mutability: %#x != 0x00 or 0x01", ErrInvalidByte, mut)
+		return wasm.GlobalType{}, offset, fmt.Errorf("%w for mutability: %#x != 0x00 or 0x01", ErrInvalidByte, mut)
 	}
-	return ret, nil
+	return ret, offset, nil
 }

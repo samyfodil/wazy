@@ -1,9 +1,7 @@
 package binary
 
 import (
-	"bytes"
 	"fmt"
-	"io"
 
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/leb128"
@@ -24,17 +22,18 @@ const (
 	dataSegmentPrefixActiveWithMemoryIndex dataSegmentPrefix = 0x2
 )
 
-func decodeDataSegment(r *bytes.Reader, enabledFeatures api.CoreFeatures, ret *wasm.DataSegment) (err error) {
-	dataSegmentPrefx, _, err := leb128.DecodeUint32(r)
+func decodeDataSegment(buf []byte, offset int, enabledFeatures api.CoreFeatures, ret *wasm.DataSegment) (newOffset int, err error) {
+	dataSegmentPrefx, n, err := leb128.LoadUint32(buf[offset:])
 	if err != nil {
 		err = fmt.Errorf("read data segment prefix: %w", err)
-		return
+		return offset, err
 	}
+	offset += int(n)
 
 	if dataSegmentPrefx != dataSegmentPrefixActive {
 		if err = enabledFeatures.RequireEnabled(api.CoreFeatureBulkMemoryOperations); err != nil {
 			err = fmt.Errorf("non-zero prefix for data segment is invalid as %w", err)
-			return
+			return offset, err
 		}
 	}
 
@@ -44,17 +43,19 @@ func decodeDataSegment(r *bytes.Reader, enabledFeatures api.CoreFeatures, ret *w
 		// Active data segment as in
 		// https://www.w3.org/TR/2022/WD-wasm-core-2-20220419/binary/modules.html#data-section
 		if dataSegmentPrefx == 0x2 {
-			d, _, err := leb128.DecodeUint32(r)
+			d, n, err := leb128.LoadUint32(buf[offset:])
 			if err != nil {
-				return fmt.Errorf("read memory index: %v", err)
-			} else if d != 0 {
-				return fmt.Errorf("memory index must be zero but was %d", d)
+				return offset, fmt.Errorf("read memory index: %v", err)
+			}
+			offset += int(n)
+			if d != 0 {
+				return offset, fmt.Errorf("memory index must be zero but was %d", d)
 			}
 		}
 
-		err = decodeConstantExpression(r, enabledFeatures, &ret.OffsetExpression)
+		offset, err = decodeConstantExpression(buf, offset, enabledFeatures, &ret.OffsetExpression)
 		if err != nil {
-			return fmt.Errorf("read offset expression: %v", err)
+			return offset, fmt.Errorf("read offset expression: %v", err)
 		}
 	case dataSegmentPrefixPassive:
 		// Passive data segment doesn't need const expr nor memory index encoded.
@@ -62,18 +63,21 @@ func decodeDataSegment(r *bytes.Reader, enabledFeatures api.CoreFeatures, ret *w
 		ret.Passive = true
 	default:
 		err = fmt.Errorf("invalid data segment prefix: 0x%x", dataSegmentPrefx)
-		return
+		return offset, err
 	}
 
-	vs, _, err := leb128.DecodeUint32(r)
+	vs, n, err := leb128.LoadUint32(buf[offset:])
 	if err != nil {
 		err = fmt.Errorf("get the size of vector: %v", err)
-		return
+		return offset, err
 	}
+	offset += int(n)
 
-	ret.Init = make([]byte, vs)
-	if _, err = io.ReadFull(r, ret.Init); err != nil {
-		err = fmt.Errorf("read bytes for init: %v", err)
+	data, newOffset, err := readBytes(buf, offset, int(vs))
+	if err != nil {
+		return offset, fmt.Errorf("read bytes for init: %v", err)
 	}
-	return
+	ret.Init = make([]byte, vs)
+	copy(ret.Init, data)
+	return newOffset, nil
 }

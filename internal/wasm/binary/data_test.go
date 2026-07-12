@@ -1,7 +1,6 @@
 package binary
 
 import (
-	"bytes"
 	"strconv"
 	"testing"
 
@@ -121,7 +120,7 @@ func Test_decodeDataSegment(t *testing.T) {
 		tc := tt
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
 			var actual wasm.DataSegment
-			err := decodeDataSegment(bytes.NewReader(tc.in), tc.features, &actual)
+			_, err := decodeDataSegment(tc.in, 0, tc.features, &actual)
 			if tc.expErr == "" {
 				require.NoError(t, err)
 				require.Equal(t, tc.exp, actual)

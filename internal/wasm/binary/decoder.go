@@ -23,38 +23,37 @@ func DecodeModule(
 	memoryCapacityFromMax,
 	dwarfEnabled, storeCustomSections bool,
 ) (*wasm.Module, error) {
-	r := bytes.NewReader(binary)
-
 	// Magic number.
-	buf := make([]byte, 4)
-	if _, err := io.ReadFull(r, buf); err != nil || !bytes.Equal(buf, Magic) {
+	if len(binary) < 4 || !bytes.Equal(binary[:4], Magic) {
 		return nil, ErrInvalidMagicNumber
 	}
 
 	// Version.
-	if _, err := io.ReadFull(r, buf); err != nil || !bytes.Equal(buf, version) {
+	if len(binary) < 8 || !bytes.Equal(binary[4:8], version) {
 		return nil, ErrInvalidVersion
 	}
 
 	memSizer := newMemorySizer(memoryLimitPages, memoryCapacityFromMax)
 
 	m := &wasm.Module{}
+	// arena batches every string decoded for this module (import/export/custom/name-section strings) into a few
+	// []byte chunks instead of one allocation per string. It lives only for this DecodeModule call, so concurrent
+	// DecodeModule calls never share it.
+	arena := &stringArena{}
 	var lastSectionID wasm.SectionID
 	var info, line, str, abbrev, ranges []byte // For DWARF Data.
-	for {
+	offset := 8
+	for offset < len(binary) {
 		// TODO: except custom sections, all others are required to be in order, but we aren't checking yet.
 		// See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#modules%E2%91%A0%E2%93%AA
-		sectionID, err := r.ReadByte()
-		if err == io.EOF {
-			break
-		} else if err != nil {
-			return nil, fmt.Errorf("read section id: %w", err)
-		}
+		sectionID := binary[offset]
+		offset++
 
-		sectionSize, _, err := leb128.DecodeUint32(r)
+		sectionSize, n, err := leb128.LoadUint32(binary[offset:])
 		if err != nil {
 			return nil, fmt.Errorf("get size of section %s: %v", wasm.SectionIDName(sectionID), err)
 		}
+		offset += int(n)
 
 		var ok bool
 		lastSectionID, ok = checkSectionOrder(sectionID, lastSectionID)
@@ -62,15 +61,18 @@ func DecodeModule(
 			return nil, errors.New("invalid section order")
 		}
 
-		sectionContentStart := r.Len()
+		sectionContentStart := offset
 		switch sectionID {
 		case wasm.SectionIDCustom:
 			// First, validate the section and determine if the section for this name has already been set
-			name, nameSize, decodeErr := decodeUTF8(r, "custom section name")
+			name, nameEndOffset, decodeErr := decodeUTF8(binary, offset, arena, "custom section name")
 			if decodeErr != nil {
 				err = decodeErr
 				break
-			} else if sectionSize < nameSize {
+			}
+			nameSize := uint32(nameEndOffset - offset)
+			offset = nameEndOffset
+			if sectionSize < nameSize {
 				err = fmt.Errorf("malformed custom section %s", name)
 				break
 			} else if name == "name" && m.NameSection != nil {
@@ -84,7 +86,7 @@ func DecodeModule(
 			var c *wasm.CustomSection
 			if name != "name" {
 				if storeCustomSections || dwarfEnabled {
-					c, err = decodeCustomSection(r, name, uint64(limit))
+					c, offset, err = decodeCustomSection(binary, offset, name, uint64(limit))
 					if err != nil {
 						return nil, fmt.Errorf("failed to read custom section name[%s]: %w", name, err)
 					}
@@ -104,55 +106,59 @@ func DecodeModule(
 						}
 					}
 				} else {
-					if _, err = io.CopyN(io.Discard, r, int64(limit)); err != nil {
-						return nil, fmt.Errorf("failed to skip name[%s]: %w", name, err)
+					// Mirrors io.CopyN's behavior (used here prior to the slice-indexed rewrite): io.EOF
+					// whenever fewer than limit bytes remain, never io.ErrUnexpectedEOF for a partial remainder.
+					if int(limit) > len(binary)-offset {
+						return nil, fmt.Errorf("failed to skip name[%s]: %w", name, io.EOF)
 					}
+					offset += int(limit)
 				}
 			} else {
-				m.NameSection, err = decodeNameSection(r, uint64(limit))
+				m.NameSection, offset, err = decodeNameSection(binary, offset, arena, uint64(limit))
 			}
 		case wasm.SectionIDType:
-			m.TypeSection, err = decodeTypeSection(enabledFeatures, r)
+			m.TypeSection, offset, err = decodeTypeSection(enabledFeatures, binary, offset)
 		case wasm.SectionIDImport:
-			m.ImportSection, m.ImportPerModule, m.ImportFunctionCount, m.ImportGlobalCount, m.ImportMemoryCount, m.ImportTableCount, m.ImportTagCount, err = decodeImportSection(r, memSizer, memoryLimitPages, enabledFeatures)
+			m.ImportSection, m.ImportPerModule, m.ImportFunctionCount, m.ImportGlobalCount, m.ImportMemoryCount, m.ImportTableCount, m.ImportTagCount, offset, err =
+				decodeImportSection(binary, offset, arena, memSizer, memoryLimitPages, enabledFeatures)
 			if err != nil {
 				return nil, err // avoid re-wrapping the error.
 			}
 		case wasm.SectionIDFunction:
-			m.FunctionSection, err = decodeFunctionSection(r)
+			m.FunctionSection, offset, err = decodeFunctionSection(binary, offset)
 		case wasm.SectionIDTable:
-			m.TableSection, err = decodeTableSection(r, enabledFeatures)
+			m.TableSection, offset, err = decodeTableSection(binary, offset, enabledFeatures)
 		case wasm.SectionIDMemory:
-			m.MemorySection, err = decodeMemorySection(r, enabledFeatures, memSizer, memoryLimitPages)
+			m.MemorySection, offset, err = decodeMemorySection(binary, offset, enabledFeatures, memSizer, memoryLimitPages)
 		case wasm.SectionIDTag:
 			if err := enabledFeatures.RequireEnabled(experimental.CoreFeaturesExceptionHandling); err != nil {
 				return nil, fmt.Errorf("tag section not supported as %v", err)
 			}
-			m.TagSection, err = decodeTagSection(r)
+			m.TagSection, offset, err = decodeTagSection(binary, offset)
 		case wasm.SectionIDGlobal:
-			if m.GlobalSection, err = decodeGlobalSection(r, enabledFeatures); err != nil {
+			if m.GlobalSection, offset, err = decodeGlobalSection(binary, offset, enabledFeatures); err != nil {
 				return nil, err // avoid re-wrapping the error.
 			}
 		case wasm.SectionIDExport:
-			m.ExportSection, m.Exports, err = decodeExportSection(r)
+			m.ExportSection, m.Exports, offset, err = decodeExportSection(binary, offset, arena)
 		case wasm.SectionIDStart:
-			m.StartSection, err = decodeStartSection(r)
+			m.StartSection, offset, err = decodeStartSection(binary, offset)
 		case wasm.SectionIDElement:
-			m.ElementSection, err = decodeElementSection(r, enabledFeatures)
+			m.ElementSection, offset, err = decodeElementSection(binary, offset, enabledFeatures)
 		case wasm.SectionIDCode:
-			m.CodeSection, err = decodeCodeSection(r)
+			m.CodeSection, offset, err = decodeCodeSection(binary, offset, sectionSize)
 		case wasm.SectionIDData:
-			m.DataSection, err = decodeDataSection(r, enabledFeatures)
+			m.DataSection, offset, err = decodeDataSection(binary, offset, enabledFeatures)
 		case wasm.SectionIDDataCount:
 			if err := enabledFeatures.RequireEnabled(api.CoreFeatureBulkMemoryOperations); err != nil {
 				return nil, fmt.Errorf("data count section not supported as %v", err)
 			}
-			m.DataCountSection, err = decodeDataCountSection(r)
+			m.DataCountSection, offset, err = decodeDataCountSection(binary, offset)
 		default:
 			err = ErrInvalidSectionID
 		}
 
-		readBytes := sectionContentStart - r.Len()
+		readBytes := offset - sectionContentStart
 		if err == nil && int(sectionSize) != readBytes {
 			err = fmt.Errorf("invalid section length: expected to be %d but got %d", sectionSize, readBytes)
 		}

@@ -1,7 +1,6 @@
 package binary
 
 import (
-	"bytes"
 	"testing"
 
 	"github.com/samyfodil/wazy/api"
@@ -45,7 +44,7 @@ func TestTableSection(t *testing.T) {
 		tc := tt
 
 		t.Run(tc.name, func(t *testing.T) {
-			tables, err := decodeTableSection(bytes.NewReader(tc.input), api.CoreFeatureReferenceTypes)
+			tables, _, err := decodeTableSection(tc.input, 0, api.CoreFeatureReferenceTypes)
 			require.NoError(t, err)
 			require.Equal(t, tc.expected, tables)
 		})
@@ -75,7 +74,7 @@ func TestTableSection_Errors(t *testing.T) {
 		tc := tt
 
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := decodeTableSection(bytes.NewReader(tc.input), tc.features)
+			_, _, err := decodeTableSection(tc.input, 0, tc.features)
 			require.EqualError(t, err, tc.expectedErr)
 		})
 	}
@@ -104,7 +103,7 @@ func TestMemorySection(t *testing.T) {
 		tc := tt
 
 		t.Run(tc.name, func(t *testing.T) {
-			memories, err := decodeMemorySection(bytes.NewReader(tc.input), api.CoreFeaturesV2, newMemorySizer(max, false), max)
+			memories, _, err := decodeMemorySection(tc.input, 0, api.CoreFeaturesV2, newMemorySizer(max, false), max)
 			require.NoError(t, err)
 			require.Equal(t, tc.expected, memories)
 		})
@@ -134,7 +133,7 @@ func TestMemorySection_Errors(t *testing.T) {
 		tc := tt
 
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := decodeMemorySection(bytes.NewReader(tc.input), api.CoreFeaturesV2, newMemorySizer(max, false), max)
+			_, _, err := decodeMemorySection(tc.input, 0, api.CoreFeaturesV2, newMemorySizer(max, false), max)
 			require.EqualError(t, err, tc.expectedErr)
 		})
 	}
@@ -166,7 +165,7 @@ func TestDecodeExportSection(t *testing.T) {
 		tc := tt
 
 		t.Run(tc.name, func(t *testing.T) {
-			actual, actualExpMap, err := decodeExportSection(bytes.NewReader(tc.input))
+			actual, actualExpMap, _, err := decodeExportSection(tc.input, 0, &stringArena{})
 			require.NoError(t, err)
 			require.Equal(t, tc.expected, actual)
 
@@ -214,7 +213,7 @@ func TestDecodeExportSection_Errors(t *testing.T) {
 		tc := tt
 
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, err := decodeExportSection(bytes.NewReader(tc.input))
+			_, _, _, err := decodeExportSection(tc.input, 0, &stringArena{})
 			require.EqualError(t, err, tc.expectedErr)
 		})
 	}
@@ -231,13 +230,13 @@ func TestEncodeStartSection(t *testing.T) {
 
 func TestDecodeDataCountSection(t *testing.T) {
 	t.Run("ok", func(t *testing.T) {
-		v, err := decodeDataCountSection(bytes.NewReader([]byte{0x1}))
+		v, _, err := decodeDataCountSection([]byte{0x1}, 0)
 		require.NoError(t, err)
 		require.Equal(t, uint32(1), *v)
 	})
 	t.Run("eof", func(t *testing.T) {
 		// EOF is fine as the datacount is optional.
-		_, err := decodeDataCountSection(bytes.NewReader([]byte{}))
+		_, _, err := decodeDataCountSection([]byte{}, 0)
 		require.NoError(t, err)
 	})
 }

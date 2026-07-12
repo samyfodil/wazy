@@ -1,7 +1,6 @@
 package binary
 
 import (
-	"bytes"
 	"fmt"
 	"testing"
 
@@ -85,7 +84,7 @@ func TestFunctionType(t *testing.T) {
 
 		t.Run(fmt.Sprintf("decode - %s", tc.name), func(t *testing.T) {
 			var actual wasm.FunctionType
-			err := decodeFunctionType(api.CoreFeaturesV2, bytes.NewReader(b), &actual)
+			_, err := decodeFunctionType(api.CoreFeaturesV2, b, 0, &valueTypeArena{}, &actual)
 			require.NoError(t, err)
 			// Set the FunctionType key on the input.
 			_ = tc.input.String()
@@ -139,7 +138,7 @@ func TestDecodeFunctionType_Errors(t *testing.T) {
 
 		t.Run(tc.name, func(t *testing.T) {
 			var actual wasm.FunctionType
-			err := decodeFunctionType(api.CoreFeaturesV1, bytes.NewReader(tc.input), &actual)
+			_, err := decodeFunctionType(api.CoreFeaturesV1, tc.input, 0, &valueTypeArena{}, &actual)
 			require.EqualError(t, err, tc.expectedErr)
 		})
 	}

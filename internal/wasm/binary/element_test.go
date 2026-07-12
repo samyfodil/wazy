@@ -1,7 +1,6 @@
 package binary
 
 import (
-	"bytes"
 	"strconv"
 	"testing"
 
@@ -12,8 +11,10 @@ import (
 )
 
 func Test_ensureElementKindFuncRef(t *testing.T) {
-	require.NoError(t, ensureElementKindFuncRef(bytes.NewReader([]byte{0x0})))
-	require.Error(t, ensureElementKindFuncRef(bytes.NewReader([]byte{0x1})))
+	_, err := ensureElementKindFuncRef([]byte{0x0}, 0)
+	require.NoError(t, err)
+	_, err = ensureElementKindFuncRef([]byte{0x1}, 0)
+	require.Error(t, err)
 }
 
 func Test_decodeElementInitValueVector(t *testing.T) {
@@ -48,7 +49,7 @@ func Test_decodeElementInitValueVector(t *testing.T) {
 	for i, tt := range tests {
 		tc := tt
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
-			actual, err := decodeElementInitValueVector(bytes.NewReader(tc.in))
+			actual, _, err := decodeElementInitValueVector(tc.in, 0)
 			if tc.expErr != "" {
 				require.EqualError(t, err, tc.expErr)
 			} else {
@@ -124,7 +125,7 @@ func Test_decodeElementConstExprVector(t *testing.T) {
 	for i, tt := range tests {
 		tc := tt
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
-			actual, err := decodeElementConstExprVector(bytes.NewReader(tc.in), tc.refType, tc.features)
+			actual, _, err := decodeElementConstExprVector(tc.in, 0, tc.refType, tc.features)
 			require.NoError(t, err)
 			require.Equal(t, tc.exp, actual)
 		})
@@ -167,7 +168,7 @@ func Test_decodeElementConstExprVector_errors(t *testing.T) {
 	for _, tt := range tests {
 		tc := tt
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := decodeElementConstExprVector(bytes.NewReader(tc.in), tc.refType, tc.features)
+			_, _, err := decodeElementConstExprVector(tc.in, 0, tc.refType, tc.features)
 			require.EqualError(t, err, tc.expErr)
 		})
 	}
@@ -497,7 +498,7 @@ func TestDecodeElementSegment(t *testing.T) {
 		tc := tt
 		t.Run(tc.name, func(t *testing.T) {
 			var actual wasm.ElementSegment
-			err := decodeElementSegment(bytes.NewReader(tc.in), tc.features, &actual)
+			_, err := decodeElementSegment(tc.in, 0, tc.features, &actual)
 			if tc.expErr != "" {
 				require.EqualError(t, err, tc.expErr)
 			} else {
@@ -510,6 +511,6 @@ func TestDecodeElementSegment(t *testing.T) {
 
 func TestDecodeElementSegment_errors(t *testing.T) {
 	var actual wasm.ElementSegment
-	err := decodeElementSegment(bytes.NewReader([]byte{1}), api.CoreFeatureMultiValue, &actual)
+	_, err := decodeElementSegment([]byte{1}, 0, api.CoreFeatureMultiValue, &actual)
 	require.EqualError(t, err, `non-zero prefix for element segment is invalid as feature "bulk-memory-operations" is disabled`)
 }

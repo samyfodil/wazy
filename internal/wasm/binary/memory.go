@@ -1,7 +1,6 @@
 package binary
 
 import (
-	"bytes"
 	"fmt"
 
 	"github.com/samyfodil/wazy/api"
@@ -9,34 +8,36 @@ import (
 	"github.com/samyfodil/wazy/internal/wasm"
 )
 
-// decodeMemory returns the api.Memory decoded with the WebAssembly 1.0 (20191205) Binary Format.
+// decodeMemory returns the api.Memory decoded from buf[offset:] with the WebAssembly 1.0 (20191205) Binary
+// Format, and the offset after it.
 //
 // See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#binary-memory
 func decodeMemory(
-	r *bytes.Reader,
+	buf []byte,
+	offset int,
 	enabledFeatures api.CoreFeatures,
 	memorySizer func(minPages uint32, maxPages *uint32) (min, capacity, max uint32),
 	memoryLimitPages uint32,
-) (*wasm.Memory, error) {
-	min, maxP, shared, err := decodeLimitsType(r)
+) (*wasm.Memory, int, error) {
+	min, maxP, shared, offset, err := decodeLimitsType(buf, offset)
 	if err != nil {
-		return nil, err
+		return nil, offset, err
 	}
 
 	if shared {
 		if !enabledFeatures.IsEnabled(experimental.CoreFeaturesThreads) {
-			return nil, fmt.Errorf("shared memory requested but threads feature not enabled")
+			return nil, offset, fmt.Errorf("shared memory requested but threads feature not enabled")
 		}
 
 		// This restriction may be lifted in the future.
 		// https://webassembly.github.io/threads/core/binary/types.html#memory-types
 		if maxP == nil {
-			return nil, fmt.Errorf("shared memory requires a maximum size to be specified")
+			return nil, offset, fmt.Errorf("shared memory requires a maximum size to be specified")
 		}
 	}
 
 	min, capacity, max := memorySizer(min, maxP)
 	mem := &wasm.Memory{Min: min, Cap: capacity, Max: max, IsMaxEncoded: maxP != nil, IsShared: shared}
 
-	return mem, mem.Validate(memoryLimitPages)
+	return mem, offset, mem.Validate(memoryLimitPages)
 }
