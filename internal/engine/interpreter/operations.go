@@ -463,6 +463,150 @@ func (o operationKind) String() (ret string) {
 		ret = "operationKindBrOnNull"
 	case operationKindBrOnNonNull:
 		ret = "operationKindBrOnNonNull"
+	case operationKindAddI32:
+		ret = "AddI32"
+	case operationKindAddI64:
+		ret = "AddI64"
+	case operationKindAddF32:
+		ret = "AddF32"
+	case operationKindAddF64:
+		ret = "AddF64"
+	case operationKindSubI32:
+		ret = "SubI32"
+	case operationKindSubI64:
+		ret = "SubI64"
+	case operationKindSubF32:
+		ret = "SubF32"
+	case operationKindSubF64:
+		ret = "SubF64"
+	case operationKindMulI32:
+		ret = "MulI32"
+	case operationKindMulI64:
+		ret = "MulI64"
+	case operationKindMulF32:
+		ret = "MulF32"
+	case operationKindMulF64:
+		ret = "MulF64"
+	case operationKindEqI32:
+		ret = "EqI32"
+	case operationKindEqI64:
+		ret = "EqI64"
+	case operationKindEqF32:
+		ret = "EqF32"
+	case operationKindEqF64:
+		ret = "EqF64"
+	case operationKindNeI32:
+		ret = "NeI32"
+	case operationKindNeI64:
+		ret = "NeI64"
+	case operationKindNeF32:
+		ret = "NeF32"
+	case operationKindNeF64:
+		ret = "NeF64"
+	case operationKindLtS32:
+		ret = "LtS32"
+	case operationKindLtU32:
+		ret = "LtU32"
+	case operationKindLtS64:
+		ret = "LtS64"
+	case operationKindLtU64:
+		ret = "LtU64"
+	case operationKindLtF32:
+		ret = "LtF32"
+	case operationKindLtF64:
+		ret = "LtF64"
+	case operationKindGtS32:
+		ret = "GtS32"
+	case operationKindGtU32:
+		ret = "GtU32"
+	case operationKindGtS64:
+		ret = "GtS64"
+	case operationKindGtU64:
+		ret = "GtU64"
+	case operationKindGtF32:
+		ret = "GtF32"
+	case operationKindGtF64:
+		ret = "GtF64"
+	case operationKindLeS32:
+		ret = "LeS32"
+	case operationKindLeU32:
+		ret = "LeU32"
+	case operationKindLeS64:
+		ret = "LeS64"
+	case operationKindLeU64:
+		ret = "LeU64"
+	case operationKindLeF32:
+		ret = "LeF32"
+	case operationKindLeF64:
+		ret = "LeF64"
+	case operationKindGeS32:
+		ret = "GeS32"
+	case operationKindGeU32:
+		ret = "GeU32"
+	case operationKindGeS64:
+		ret = "GeS64"
+	case operationKindGeU64:
+		ret = "GeU64"
+	case operationKindGeF32:
+		ret = "GeF32"
+	case operationKindGeF64:
+		ret = "GeF64"
+	case operationKindDivS32:
+		ret = "DivS32"
+	case operationKindDivU32:
+		ret = "DivU32"
+	case operationKindDivS64:
+		ret = "DivS64"
+	case operationKindDivU64:
+		ret = "DivU64"
+	case operationKindDivF32:
+		ret = "DivF32"
+	case operationKindDivF64:
+		ret = "DivF64"
+	case operationKindRemS32:
+		ret = "RemS32"
+	case operationKindRemU32:
+		ret = "RemU32"
+	case operationKindRemS64:
+		ret = "RemS64"
+	case operationKindRemU64:
+		ret = "RemU64"
+	case operationKindLoadI32:
+		ret = "LoadI32"
+	case operationKindLoadI64:
+		ret = "LoadI64"
+	case operationKindLoadF32:
+		ret = "LoadF32"
+	case operationKindLoadF64:
+		ret = "LoadF64"
+	case operationKindLoad8S32:
+		ret = "Load8S32"
+	case operationKindLoad8S64:
+		ret = "Load8S64"
+	case operationKindLoad8U32:
+		ret = "Load8U32"
+	case operationKindLoad8U64:
+		ret = "Load8U64"
+	case operationKindLoad16S32:
+		ret = "Load16S32"
+	case operationKindLoad16S64:
+		ret = "Load16S64"
+	case operationKindLoad16U32:
+		ret = "Load16U32"
+	case operationKindLoad16U64:
+		ret = "Load16U64"
+	case operationKindLoad32S:
+		ret = "Load32S"
+	case operationKindLoad32U:
+		ret = "Load32U"
+	case operationKindStoreI32:
+		ret = "StoreI32"
+	case operationKindStoreI64:
+		ret = "StoreI64"
+	case operationKindStoreF32:
+		ret = "StoreF32"
+	case operationKindStoreF64:
+		ret = "StoreF64"
 	default:
 		panic(fmt.Errorf("unknown operation %d", o))
 	}
@@ -806,6 +950,180 @@ const (
 	operationKindBrOnNull
 	// operationKindBrOnNonNull is the Kind for br_on_non_null instruction.
 	operationKindBrOnNonNull
+
+	// The operationKinds below are specialized, monomorphic variants of the
+	// generic Add/Sub/Mul/Eq/Ne/Lt/Gt/Le/Ge/Div/Rem/Load/Load8/Load16/Load32/Store
+	// operations above. engine.lowerIR rewrites every generic op of one of
+	// those Kinds into one of these at compile time (once per function, not
+	// per execution), so the hot dispatch loop in callNativeFunc never has to
+	// branch on B1 (the unsignedType/signedType/signedInt tag) a second time
+	// after already switching on Kind. Because lowerIR runs for every
+	// compiled function, the generic Kinds above never reach dispatch for
+	// these families; callNativeFuncRare panics defensively if they do.
+
+	// operationKindAddI32 is the Kind for NewOperationAdd specialized to i32.
+	operationKindAddI32
+	// operationKindAddI64 is the Kind for NewOperationAdd specialized to i64.
+	operationKindAddI64
+	// operationKindAddF32 is the Kind for NewOperationAdd specialized to f32.
+	operationKindAddF32
+	// operationKindAddF64 is the Kind for NewOperationAdd specialized to f64.
+	operationKindAddF64
+	// operationKindSubI32 is the Kind for NewOperationSub specialized to i32.
+	operationKindSubI32
+	// operationKindSubI64 is the Kind for NewOperationSub specialized to i64.
+	operationKindSubI64
+	// operationKindSubF32 is the Kind for NewOperationSub specialized to f32.
+	operationKindSubF32
+	// operationKindSubF64 is the Kind for NewOperationSub specialized to f64.
+	operationKindSubF64
+	// operationKindMulI32 is the Kind for NewOperationMul specialized to i32.
+	operationKindMulI32
+	// operationKindMulI64 is the Kind for NewOperationMul specialized to i64.
+	operationKindMulI64
+	// operationKindMulF32 is the Kind for NewOperationMul specialized to f32.
+	operationKindMulF32
+	// operationKindMulF64 is the Kind for NewOperationMul specialized to f64.
+	operationKindMulF64
+
+	// operationKindEqI32 is the Kind for NewOperationEq specialized to i32.
+	operationKindEqI32
+	// operationKindEqI64 is the Kind for NewOperationEq specialized to i64.
+	operationKindEqI64
+	// operationKindEqF32 is the Kind for NewOperationEq specialized to f32.
+	operationKindEqF32
+	// operationKindEqF64 is the Kind for NewOperationEq specialized to f64.
+	operationKindEqF64
+	// operationKindNeI32 is the Kind for NewOperationNe specialized to i32.
+	operationKindNeI32
+	// operationKindNeI64 is the Kind for NewOperationNe specialized to i64.
+	operationKindNeI64
+	// operationKindNeF32 is the Kind for NewOperationNe specialized to f32.
+	operationKindNeF32
+	// operationKindNeF64 is the Kind for NewOperationNe specialized to f64.
+	operationKindNeF64
+
+	// operationKindLtS32 is the Kind for NewOperationLt specialized to signed i32.
+	operationKindLtS32
+	// operationKindLtU32 is the Kind for NewOperationLt specialized to unsigned i32.
+	operationKindLtU32
+	// operationKindLtS64 is the Kind for NewOperationLt specialized to signed i64.
+	operationKindLtS64
+	// operationKindLtU64 is the Kind for NewOperationLt specialized to unsigned i64.
+	operationKindLtU64
+	// operationKindLtF32 is the Kind for NewOperationLt specialized to f32.
+	operationKindLtF32
+	// operationKindLtF64 is the Kind for NewOperationLt specialized to f64.
+	operationKindLtF64
+
+	// operationKindGtS32 is the Kind for NewOperationGt specialized to signed i32.
+	operationKindGtS32
+	// operationKindGtU32 is the Kind for NewOperationGt specialized to unsigned i32.
+	operationKindGtU32
+	// operationKindGtS64 is the Kind for NewOperationGt specialized to signed i64.
+	operationKindGtS64
+	// operationKindGtU64 is the Kind for NewOperationGt specialized to unsigned i64.
+	operationKindGtU64
+	// operationKindGtF32 is the Kind for NewOperationGt specialized to f32.
+	operationKindGtF32
+	// operationKindGtF64 is the Kind for NewOperationGt specialized to f64.
+	operationKindGtF64
+
+	// operationKindLeS32 is the Kind for NewOperationLe specialized to signed i32.
+	operationKindLeS32
+	// operationKindLeU32 is the Kind for NewOperationLe specialized to unsigned i32.
+	operationKindLeU32
+	// operationKindLeS64 is the Kind for NewOperationLe specialized to signed i64.
+	operationKindLeS64
+	// operationKindLeU64 is the Kind for NewOperationLe specialized to unsigned i64.
+	operationKindLeU64
+	// operationKindLeF32 is the Kind for NewOperationLe specialized to f32.
+	operationKindLeF32
+	// operationKindLeF64 is the Kind for NewOperationLe specialized to f64.
+	operationKindLeF64
+
+	// operationKindGeS32 is the Kind for NewOperationGe specialized to signed i32.
+	operationKindGeS32
+	// operationKindGeU32 is the Kind for NewOperationGe specialized to unsigned i32.
+	operationKindGeU32
+	// operationKindGeS64 is the Kind for NewOperationGe specialized to signed i64.
+	operationKindGeS64
+	// operationKindGeU64 is the Kind for NewOperationGe specialized to unsigned i64.
+	operationKindGeU64
+	// operationKindGeF32 is the Kind for NewOperationGe specialized to f32.
+	operationKindGeF32
+	// operationKindGeF64 is the Kind for NewOperationGe specialized to f64.
+	operationKindGeF64
+
+	// operationKindDivS32 is the Kind for NewOperationDiv specialized to signed i32.
+	operationKindDivS32
+	// operationKindDivU32 is the Kind for NewOperationDiv specialized to unsigned i32.
+	operationKindDivU32
+	// operationKindDivS64 is the Kind for NewOperationDiv specialized to signed i64.
+	operationKindDivS64
+	// operationKindDivU64 is the Kind for NewOperationDiv specialized to unsigned i64.
+	operationKindDivU64
+	// operationKindDivF32 is the Kind for NewOperationDiv specialized to f32.
+	operationKindDivF32
+	// operationKindDivF64 is the Kind for NewOperationDiv specialized to f64.
+	operationKindDivF64
+
+	// operationKindRemS32 is the Kind for NewOperationRem specialized to signed i32.
+	operationKindRemS32
+	// operationKindRemU32 is the Kind for NewOperationRem specialized to unsigned i32.
+	operationKindRemU32
+	// operationKindRemS64 is the Kind for NewOperationRem specialized to signed i64.
+	operationKindRemS64
+	// operationKindRemU64 is the Kind for NewOperationRem specialized to unsigned i64.
+	operationKindRemU64
+
+	// operationKindLoadI32 is the Kind for NewOperationLoad specialized to i32. Also used for
+	// f32 (operationKindLoadF32 shares this case): a load only moves bits, so the i32/f32
+	// tag makes no runtime difference.
+	operationKindLoadI32
+	// operationKindLoadI64 is the Kind for NewOperationLoad specialized to i64. Also used for
+	// f64 (operationKindLoadF64 shares this case) for the same reason as LoadI32/F32.
+	operationKindLoadI64
+	// operationKindLoadF32 is the Kind for NewOperationLoad specialized to f32; shares LoadI32's case.
+	operationKindLoadF32
+	// operationKindLoadF64 is the Kind for NewOperationLoad specialized to f64; shares LoadI64's case.
+	operationKindLoadF64
+
+	// operationKindLoad8S32 is the Kind for NewOperationLoad8 specialized to sign-extend-to-i32.
+	operationKindLoad8S32
+	// operationKindLoad8S64 is the Kind for NewOperationLoad8 specialized to sign-extend-to-i64.
+	operationKindLoad8S64
+	// operationKindLoad8U32 is the Kind for NewOperationLoad8 specialized to zero-extend-to-i32;
+	// shares Load8U64's case since zero-extending a byte is width-independent.
+	operationKindLoad8U32
+	// operationKindLoad8U64 is the Kind for NewOperationLoad8 specialized to zero-extend-to-i64.
+	operationKindLoad8U64
+
+	// operationKindLoad16S32 is the Kind for NewOperationLoad16 specialized to sign-extend-to-i32.
+	operationKindLoad16S32
+	// operationKindLoad16S64 is the Kind for NewOperationLoad16 specialized to sign-extend-to-i64.
+	operationKindLoad16S64
+	// operationKindLoad16U32 is the Kind for NewOperationLoad16 specialized to zero-extend-to-i32;
+	// shares Load16U64's case since zero-extending is width-independent.
+	operationKindLoad16U32
+	// operationKindLoad16U64 is the Kind for NewOperationLoad16 specialized to zero-extend-to-i64.
+	operationKindLoad16U64
+
+	// operationKindLoad32S is the Kind for NewOperationLoad32 specialized to signed (i64.load32_s).
+	operationKindLoad32S
+	// operationKindLoad32U is the Kind for NewOperationLoad32 specialized to unsigned (i64.load32_u).
+	operationKindLoad32U
+
+	// operationKindStoreI32 is the Kind for NewOperationStore specialized to i32. Also used for
+	// f32 (operationKindStoreF32 shares this case): a store only moves bits.
+	operationKindStoreI32
+	// operationKindStoreI64 is the Kind for NewOperationStore specialized to i64. Also used for
+	// f64 (operationKindStoreF64 shares this case) for the same reason as StoreI32/F32.
+	operationKindStoreI64
+	// operationKindStoreF32 is the Kind for NewOperationStore specialized to f32; shares StoreI32's case.
+	operationKindStoreF32
+	// operationKindStoreF64 is the Kind for NewOperationStore specialized to f64; shares StoreI64's case.
+	operationKindStoreF64
 
 	// operationKindEnd is always placed at the bottom of this iota definition to be used in the test.
 	operationKindEnd
@@ -1162,6 +1480,26 @@ func (o unionOperation) String() string {
 
 	case operationKindBrOnNonNull:
 		return fmt.Sprintf("%s %s %s", o.Kind, label(o.U1).String(), label(o.U2).String())
+
+	case operationKindAddI32, operationKindAddI64, operationKindAddF32, operationKindAddF64,
+		operationKindSubI32, operationKindSubI64, operationKindSubF32, operationKindSubF64,
+		operationKindMulI32, operationKindMulI64, operationKindMulF32, operationKindMulF64,
+		operationKindEqI32, operationKindEqI64, operationKindEqF32, operationKindEqF64,
+		operationKindNeI32, operationKindNeI64, operationKindNeF32, operationKindNeF64,
+		operationKindLtS32, operationKindLtU32, operationKindLtS64, operationKindLtU64, operationKindLtF32, operationKindLtF64,
+		operationKindGtS32, operationKindGtU32, operationKindGtS64, operationKindGtU64, operationKindGtF32, operationKindGtF64,
+		operationKindLeS32, operationKindLeU32, operationKindLeS64, operationKindLeU64, operationKindLeF32, operationKindLeF64,
+		operationKindGeS32, operationKindGeU32, operationKindGeS64, operationKindGeU64, operationKindGeF32, operationKindGeF64,
+		operationKindDivS32, operationKindDivU32, operationKindDivS64, operationKindDivU64, operationKindDivF32, operationKindDivF64,
+		operationKindRemS32, operationKindRemU32, operationKindRemS64, operationKindRemU64:
+		return o.Kind.String()
+
+	case operationKindLoadI32, operationKindLoadI64, operationKindLoadF32, operationKindLoadF64,
+		operationKindLoad8S32, operationKindLoad8S64, operationKindLoad8U32, operationKindLoad8U64,
+		operationKindLoad16S32, operationKindLoad16S64, operationKindLoad16U32, operationKindLoad16U64,
+		operationKindLoad32S, operationKindLoad32U,
+		operationKindStoreI32, operationKindStoreI64, operationKindStoreF32, operationKindStoreF64:
+		return fmt.Sprintf("%s (align=%d, offset=%d)", o.Kind, o.U1, o.U2)
 
 	default:
 		panic(fmt.Sprintf("TODO: %v", o.Kind))

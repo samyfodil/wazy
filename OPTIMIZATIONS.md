@@ -49,12 +49,12 @@ pprof on fib: `callNativeFunc` 59% flat, `popValue` 13.6%, `pushValue` 6.8%, mal
 - **I3. `frame.pc` lives on heap** — **RESOLVED**: local `pc` register mirror with documented sync policy (traps/calls/throws sync, ALU/branch path store-free); loop guard indexes `len(body)` directly so the per-instruction bounds check is eliminated. Trap stack traces verified byte-identical. I1+I2+I3 combined: fib_for_20 ~1.8 ms → ~1.05-1.2 ms, fib_for_30 ~184-211 ms → ~125-147 ms (~30% faster), allocs flat 2/op.
 - **I4. `ctx.Value(EnableSnapshotterKey{})` per call instruction** — `interpreter.go:252`. Fix: compute once per activation. Impact: med-high, certain.
 - **I5. Label ops compiled in and executed as no-ops**; `br`-to-next pairs emitted (`compiler.go:506,739,673`). Fix: strip labels + remap PCs in `lowerIR`; peephole fallthrough brs. Impact: medium, certain.
-- **I6. Two-level dispatch** (switch on kind, then on `op.B1` type tag) for all ALU/load/store. Fix: specialize kinds at lowering (`AddI32`, `LoadI64`, ...). Impact: medium, likely.
+- **I6. Two-level dispatch** — **RESOLVED**: `lowerIR` specialization pass rewrites generic ALU/compare/load/store kinds into 72 monomorphic kinds; inner type switches deleted from dispatch. Hot/rare split rebalanced with dynamic-frequency data (no relocated op >0.26% in real workloads).
 - **I7. `LabelCallers` map written per branch, never read** — `compiler.go:258` + ~20 sites; cleared with per-key deletes. Fix: delete it. Impact: medium (compile time), certain.
 - **I8. `unionOperation` is 56 B**; `Us []uint64` header dead for ~95% of ops. Fix: side pool → 32 B ops. Impact: medium, likely.
 - **I9. Per-call chain `callWithUnwind`→`callFunction`→3-way dispatch**, all non-inlinable, static per callee. Fix: callee-kind tag, direct dispatch. Impact: medium, likely.
-- **I10. Memory ops: double bounds check + 2 non-inlined calls per load** — `interpreter.go:4917` + `memory.go:335`. Fix: single inline check + `binary.LittleEndian` direct. Impact: med-high, certain/likely.
-- **I11. Global get/set chases `g.Type.ValType` to detect V128** — statically known; put in `op.B3`. Impact: low-med, certain.
+- **I10. Memory ops: double bounds check + 2 non-inlined calls per load** — **RESOLVED**: specialized load/store cases use one merged bounds check (proven equivalent incl. the 4GiB boundary) + direct `binary.LittleEndian` access. I6+I10+I11 combined: ~3.9% geomean on interpreter benchmarks (interleaved benchstat; smaller than scanned estimate because I1-I3 already inlined the helpers these paths used).
+- **I11. Global get/set chases `g.Type.ValType` to detect V128** — **RESOLVED**: V128-ness precomputed into `op.B3` at lowering.
 - **I12. `BrIf` calls non-inlined `drop` even for the no-drop common case** — check the -1 sentinel inline. Impact: low-med, certain.
 - I13/I14 (compile-time): `lowerIR` zero-extend temp allocs; `Next()` per-key map clear. Low.
 

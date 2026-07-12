@@ -639,6 +639,224 @@ func (e *engine) lowerIR(ir *compilationResult, ret *compiledFunction) error {
 		}
 	}
 
+	// Specialize generic ALU/compare/load/store ops into monomorphic Kinds, and
+	// precompute the global-is-V128 flag, so the hot dispatch loop in
+	// callNativeFunc never re-branches on B1/g.Type after already switching on
+	// Kind (I6/I11 of the interpreter tier-2 optimizations). This runs once per
+	// compiled function, not per execution, so the extra pass over the body is
+	// not performance sensitive.
+	//
+	// Contract: this pass is the ONLY place the generic Add/Sub/Mul/Eq/Ne/Lt/Gt/
+	// Le/Ge/Div/Rem/Load/Load8/Load16/Load32/Store Kinds are turned into their
+	// specialized variants, and CompileModule always runs it, so those generic
+	// Kinds never reach the dispatch switch. Their generic cases were therefore
+	// deleted from callNativeFunc; callNativeFuncRare panics defensively if one
+	// is ever dispatched (which would mean a body skipped this pass). Every
+	// (B1[,B2]) combination the compiler can emit MUST be handled below: an
+	// unhandled combination would leave the op generic and trip that panic. The
+	// switch bodies of the specialized cases are kept bit-identical to the old
+	// generic inner-switch branches they replaced.
+	for i := range ret.body {
+		op := &ret.body[i]
+		switch op.Kind {
+		case operationKindGlobalGet, operationKindGlobalSet:
+			// Precompute whether this global is a V128 so dispatch can branch on
+			// op.B3 instead of dereferencing g.Type on every access.
+			op.B3 = ir.Globals[op.U1].ValType == wasm.ValueTypeV128
+		case operationKindAdd:
+			switch unsignedType(op.B1) {
+			case unsignedTypeI32:
+				op.Kind = operationKindAddI32
+			case unsignedTypeI64:
+				op.Kind = operationKindAddI64
+			case unsignedTypeF32:
+				op.Kind = operationKindAddF32
+			case unsignedTypeF64:
+				op.Kind = operationKindAddF64
+			}
+		case operationKindSub:
+			switch unsignedType(op.B1) {
+			case unsignedTypeI32:
+				op.Kind = operationKindSubI32
+			case unsignedTypeI64:
+				op.Kind = operationKindSubI64
+			case unsignedTypeF32:
+				op.Kind = operationKindSubF32
+			case unsignedTypeF64:
+				op.Kind = operationKindSubF64
+			}
+		case operationKindMul:
+			switch unsignedType(op.B1) {
+			case unsignedTypeI32:
+				op.Kind = operationKindMulI32
+			case unsignedTypeI64:
+				op.Kind = operationKindMulI64
+			case unsignedTypeF32:
+				op.Kind = operationKindMulF32
+			case unsignedTypeF64:
+				op.Kind = operationKindMulF64
+			}
+		case operationKindEq:
+			switch unsignedType(op.B1) {
+			case unsignedTypeI32:
+				op.Kind = operationKindEqI32
+			case unsignedTypeI64:
+				op.Kind = operationKindEqI64
+			case unsignedTypeF32:
+				op.Kind = operationKindEqF32
+			case unsignedTypeF64:
+				op.Kind = operationKindEqF64
+			}
+		case operationKindNe:
+			switch unsignedType(op.B1) {
+			case unsignedTypeI32:
+				op.Kind = operationKindNeI32
+			case unsignedTypeI64:
+				op.Kind = operationKindNeI64
+			case unsignedTypeF32:
+				op.Kind = operationKindNeF32
+			case unsignedTypeF64:
+				op.Kind = operationKindNeF64
+			}
+		case operationKindLt:
+			switch signedType(op.B1) {
+			case signedTypeInt32:
+				op.Kind = operationKindLtS32
+			case signedTypeUint32:
+				op.Kind = operationKindLtU32
+			case signedTypeInt64:
+				op.Kind = operationKindLtS64
+			case signedTypeUint64:
+				op.Kind = operationKindLtU64
+			case signedTypeFloat32:
+				op.Kind = operationKindLtF32
+			case signedTypeFloat64:
+				op.Kind = operationKindLtF64
+			}
+		case operationKindGt:
+			switch signedType(op.B1) {
+			case signedTypeInt32:
+				op.Kind = operationKindGtS32
+			case signedTypeUint32:
+				op.Kind = operationKindGtU32
+			case signedTypeInt64:
+				op.Kind = operationKindGtS64
+			case signedTypeUint64:
+				op.Kind = operationKindGtU64
+			case signedTypeFloat32:
+				op.Kind = operationKindGtF32
+			case signedTypeFloat64:
+				op.Kind = operationKindGtF64
+			}
+		case operationKindLe:
+			switch signedType(op.B1) {
+			case signedTypeInt32:
+				op.Kind = operationKindLeS32
+			case signedTypeUint32:
+				op.Kind = operationKindLeU32
+			case signedTypeInt64:
+				op.Kind = operationKindLeS64
+			case signedTypeUint64:
+				op.Kind = operationKindLeU64
+			case signedTypeFloat32:
+				op.Kind = operationKindLeF32
+			case signedTypeFloat64:
+				op.Kind = operationKindLeF64
+			}
+		case operationKindGe:
+			switch signedType(op.B1) {
+			case signedTypeInt32:
+				op.Kind = operationKindGeS32
+			case signedTypeUint32:
+				op.Kind = operationKindGeU32
+			case signedTypeInt64:
+				op.Kind = operationKindGeS64
+			case signedTypeUint64:
+				op.Kind = operationKindGeU64
+			case signedTypeFloat32:
+				op.Kind = operationKindGeF32
+			case signedTypeFloat64:
+				op.Kind = operationKindGeF64
+			}
+		case operationKindDiv:
+			switch signedType(op.B1) {
+			case signedTypeInt32:
+				op.Kind = operationKindDivS32
+			case signedTypeUint32:
+				op.Kind = operationKindDivU32
+			case signedTypeInt64:
+				op.Kind = operationKindDivS64
+			case signedTypeUint64:
+				op.Kind = operationKindDivU64
+			case signedTypeFloat32:
+				op.Kind = operationKindDivF32
+			case signedTypeFloat64:
+				op.Kind = operationKindDivF64
+			}
+		case operationKindRem:
+			switch signedInt(op.B1) {
+			case signedInt32:
+				op.Kind = operationKindRemS32
+			case signedInt64:
+				op.Kind = operationKindRemS64
+			case signedUint32:
+				op.Kind = operationKindRemU32
+			case signedUint64:
+				op.Kind = operationKindRemU64
+			}
+		case operationKindLoad:
+			switch unsignedType(op.B1) {
+			case unsignedTypeI32:
+				op.Kind = operationKindLoadI32
+			case unsignedTypeI64:
+				op.Kind = operationKindLoadI64
+			case unsignedTypeF32:
+				op.Kind = operationKindLoadF32
+			case unsignedTypeF64:
+				op.Kind = operationKindLoadF64
+			}
+		case operationKindLoad8:
+			switch signedInt(op.B1) {
+			case signedInt32:
+				op.Kind = operationKindLoad8S32
+			case signedInt64:
+				op.Kind = operationKindLoad8S64
+			case signedUint32:
+				op.Kind = operationKindLoad8U32
+			case signedUint64:
+				op.Kind = operationKindLoad8U64
+			}
+		case operationKindLoad16:
+			switch signedInt(op.B1) {
+			case signedInt32:
+				op.Kind = operationKindLoad16S32
+			case signedInt64:
+				op.Kind = operationKindLoad16S64
+			case signedUint32:
+				op.Kind = operationKindLoad16U32
+			case signedUint64:
+				op.Kind = operationKindLoad16U64
+			}
+		case operationKindLoad32:
+			if op.B1 == 1 { // Signed.
+				op.Kind = operationKindLoad32S
+			} else {
+				op.Kind = operationKindLoad32U
+			}
+		case operationKindStore:
+			switch unsignedType(op.B1) {
+			case unsignedTypeI32:
+				op.Kind = operationKindStoreI32
+			case unsignedTypeI64:
+				op.Kind = operationKindStoreI64
+			case unsignedTypeF32:
+				op.Kind = operationKindStoreF32
+			case unsignedTypeF64:
+				op.Kind = operationKindStoreF64
+			}
+		}
+	}
+
 	// Resolve exception table entries (translate labels to PC).
 	if len(ir.PendingExceptionTable) > 0 {
 		ret.exceptionTable = make([]exceptionTableEntry, len(ir.PendingExceptionTable))
@@ -992,23 +1210,6 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 		case operationKindDrop:
 			ce.drop(op.U1)
 			pc++
-		case operationKindSelect:
-			c := ce.popValue()
-			if op.B3 { // Target is vector.
-				x2Hi, x2Lo := ce.popValue(), ce.popValue()
-				if c == 0 {
-					_, _ = ce.popValue(), ce.popValue() // discard the x1's lo and hi bits.
-					ce.pushValue(x2Lo)
-					ce.pushValue(x2Hi)
-				}
-			} else {
-				v2 := ce.popValue()
-				if c == 0 {
-					_ = ce.popValue()
-					ce.pushValue(v2)
-				}
-			}
-			pc++
 		case operationKindPick:
 			index := len(ce.stack) - 1 - int(op.U1)
 			ce.pushValue(ce.stack[index])
@@ -1030,118 +1231,149 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 		case operationKindGlobalGet:
 			g := globals[op.U1]
 			ce.pushValue(g.Val)
-			if g.Type.ValType == wasm.ValueTypeV128 {
+			if op.B3 { // V128; precomputed at lowering time (I11) to avoid deref'ing g.Type here.
 				ce.pushValue(g.ValHi)
 			}
 			pc++
 		case operationKindGlobalSet:
 			g := globals[op.U1]
-			if g.Type.ValType == wasm.ValueTypeV128 {
+			if op.B3 { // V128; precomputed at lowering time (I11) to avoid deref'ing g.Type here.
 				g.ValHi = ce.popValue()
 			}
 			g.Val = ce.popValue()
 			pc++
-		case operationKindLoad:
+		// I10: these Load*/Store* cases inline the bounds check instead of going through
+		// popMemoryOffset+MemoryInstance.ReadXxx/WriteXxx: popMemoryOffset's own
+		// "offset > math.MaxUint32" check is subsumed by the single "ea+N >
+		// len(Buffer)" check below, because len(memoryInst.Buffer) can never
+		// exceed 1<<32 (MemoryLimitPages * MemoryPageSize) and N >= 1, so any ea
+		// >= 1<<32 already fails ea+N > len(Buffer). ea itself cannot overflow
+		// uint64: op.U2 (the static offset immediate) and the truncated dynamic
+		// base are both <= math.MaxUint32, so their sum is <= ~2^33.
+		case operationKindLoadI32, operationKindLoadF32:
 			frame.pc = pc // sync: OOB trap
-			offset := ce.popMemoryOffset(op)
-			switch unsignedType(op.B1) {
-			case unsignedTypeI32, unsignedTypeF32:
-				if val, ok := memoryInst.ReadUint32Le(offset); !ok {
-					panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
-				} else {
-					ce.pushValue(uint64(val))
-				}
-			case unsignedTypeI64, unsignedTypeF64:
-				if val, ok := memoryInst.ReadUint64Le(offset); !ok {
-					panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
-				} else {
-					ce.pushValue(val)
-				}
-			}
-			pc++
-		case operationKindLoad8:
-			frame.pc = pc // sync: OOB trap
-			val, ok := memoryInst.ReadByte(ce.popMemoryOffset(op))
-			if !ok {
+			ea := op.U2 + uint64(uint32(ce.popValue()))
+			if ea+4 > uint64(len(memoryInst.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
-
-			switch signedInt(op.B1) {
-			case signedInt32:
-				ce.pushValue(uint64(uint32(int8(val))))
-			case signedInt64:
-				ce.pushValue(uint64(int8(val)))
-			case signedUint32, signedUint64:
-				ce.pushValue(uint64(val))
-			}
+			ce.pushValue(uint64(binary.LittleEndian.Uint32(memoryInst.Buffer[ea:])))
 			pc++
-		case operationKindLoad16:
+		case operationKindLoadI64, operationKindLoadF64:
 			frame.pc = pc // sync: OOB trap
-			val, ok := memoryInst.ReadUint16Le(ce.popMemoryOffset(op))
-			if !ok {
+			ea := op.U2 + uint64(uint32(ce.popValue()))
+			if ea+8 > uint64(len(memoryInst.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
-
-			switch signedInt(op.B1) {
-			case signedInt32:
-				ce.pushValue(uint64(uint32(int16(val))))
-			case signedInt64:
-				ce.pushValue(uint64(int16(val)))
-			case signedUint32, signedUint64:
-				ce.pushValue(uint64(val))
-			}
+			ce.pushValue(binary.LittleEndian.Uint64(memoryInst.Buffer[ea:]))
 			pc++
-		case operationKindLoad32:
+		case operationKindLoad8S32:
 			frame.pc = pc // sync: OOB trap
-			val, ok := memoryInst.ReadUint32Le(ce.popMemoryOffset(op))
-			if !ok {
+			ea := op.U2 + uint64(uint32(ce.popValue()))
+			if ea+1 > uint64(len(memoryInst.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
-
-			if op.B1 == 1 { // Signed
-				ce.pushValue(uint64(int32(val)))
-			} else {
-				ce.pushValue(uint64(val))
-			}
+			ce.pushValue(uint64(uint32(int8(memoryInst.Buffer[ea]))))
 			pc++
-		case operationKindStore:
+		case operationKindLoad8S64:
+			frame.pc = pc // sync: OOB trap
+			ea := op.U2 + uint64(uint32(ce.popValue()))
+			if ea+1 > uint64(len(memoryInst.Buffer)) {
+				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+			}
+			ce.pushValue(uint64(int8(memoryInst.Buffer[ea])))
+			pc++
+		case operationKindLoad8U32, operationKindLoad8U64:
+			frame.pc = pc // sync: OOB trap
+			ea := op.U2 + uint64(uint32(ce.popValue()))
+			if ea+1 > uint64(len(memoryInst.Buffer)) {
+				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+			}
+			ce.pushValue(uint64(memoryInst.Buffer[ea]))
+			pc++
+		case operationKindLoad16S32:
+			frame.pc = pc // sync: OOB trap
+			ea := op.U2 + uint64(uint32(ce.popValue()))
+			if ea+2 > uint64(len(memoryInst.Buffer)) {
+				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+			}
+			ce.pushValue(uint64(uint32(int16(binary.LittleEndian.Uint16(memoryInst.Buffer[ea:])))))
+			pc++
+		case operationKindLoad16S64:
+			frame.pc = pc // sync: OOB trap
+			ea := op.U2 + uint64(uint32(ce.popValue()))
+			if ea+2 > uint64(len(memoryInst.Buffer)) {
+				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+			}
+			ce.pushValue(uint64(int16(binary.LittleEndian.Uint16(memoryInst.Buffer[ea:]))))
+			pc++
+		case operationKindLoad16U32, operationKindLoad16U64:
+			frame.pc = pc // sync: OOB trap
+			ea := op.U2 + uint64(uint32(ce.popValue()))
+			if ea+2 > uint64(len(memoryInst.Buffer)) {
+				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+			}
+			ce.pushValue(uint64(binary.LittleEndian.Uint16(memoryInst.Buffer[ea:])))
+			pc++
+		case operationKindLoad32S:
+			frame.pc = pc // sync: OOB trap
+			ea := op.U2 + uint64(uint32(ce.popValue()))
+			if ea+4 > uint64(len(memoryInst.Buffer)) {
+				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+			}
+			ce.pushValue(uint64(int32(binary.LittleEndian.Uint32(memoryInst.Buffer[ea:]))))
+			pc++
+		case operationKindLoad32U:
+			frame.pc = pc // sync: OOB trap
+			ea := op.U2 + uint64(uint32(ce.popValue()))
+			if ea+4 > uint64(len(memoryInst.Buffer)) {
+				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+			}
+			ce.pushValue(uint64(binary.LittleEndian.Uint32(memoryInst.Buffer[ea:])))
+			pc++
+		case operationKindStoreI32, operationKindStoreF32:
 			frame.pc = pc // sync: OOB trap
 			val := ce.popValue()
-			offset := ce.popMemoryOffset(op)
-			switch unsignedType(op.B1) {
-			case unsignedTypeI32, unsignedTypeF32:
-				if !memoryInst.WriteUint32Le(offset, uint32(val)) {
-					panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
-				}
-			case unsignedTypeI64, unsignedTypeF64:
-				if !memoryInst.WriteUint64Le(offset, val) {
-					panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
-				}
+			ea := op.U2 + uint64(uint32(ce.popValue()))
+			if ea+4 > uint64(len(memoryInst.Buffer)) {
+				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
+			binary.LittleEndian.PutUint32(memoryInst.Buffer[ea:], uint32(val))
+			pc++
+		case operationKindStoreI64, operationKindStoreF64:
+			frame.pc = pc // sync: OOB trap
+			val := ce.popValue()
+			ea := op.U2 + uint64(uint32(ce.popValue()))
+			if ea+8 > uint64(len(memoryInst.Buffer)) {
+				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+			}
+			binary.LittleEndian.PutUint64(memoryInst.Buffer[ea:], val)
 			pc++
 		case operationKindStore8:
 			frame.pc = pc // sync: OOB trap
 			val := byte(ce.popValue())
-			offset := ce.popMemoryOffset(op)
-			if !memoryInst.WriteByte(offset, val) {
+			ea := op.U2 + uint64(uint32(ce.popValue()))
+			if ea+1 > uint64(len(memoryInst.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
+			memoryInst.Buffer[ea] = val
 			pc++
 		case operationKindStore16:
 			frame.pc = pc // sync: OOB trap
 			val := uint16(ce.popValue())
-			offset := ce.popMemoryOffset(op)
-			if !memoryInst.WriteUint16Le(offset, val) {
+			ea := op.U2 + uint64(uint32(ce.popValue()))
+			if ea+2 > uint64(len(memoryInst.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
+			binary.LittleEndian.PutUint16(memoryInst.Buffer[ea:], val)
 			pc++
 		case operationKindStore32:
 			frame.pc = pc // sync: OOB trap
 			val := uint32(ce.popValue())
-			offset := ce.popMemoryOffset(op)
-			if !memoryInst.WriteUint32Le(offset, val) {
+			ea := op.U2 + uint64(uint32(ce.popValue()))
+			if ea+4 > uint64(len(memoryInst.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
+			binary.LittleEndian.PutUint32(memoryInst.Buffer[ea:], val)
 			pc++
 		case operationKindMemorySize:
 			ce.pushValue(uint64(memoryInst.Pages()))
@@ -1158,45 +1390,65 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			operationKindConstF32, operationKindConstF64:
 			ce.pushValue(op.U1)
 			pc++
-		case operationKindEq:
-			var b bool
-			switch unsignedType(op.B1) {
-			case unsignedTypeI32:
-				v2, v1 := ce.popValue(), ce.popValue()
-				b = uint32(v1) == uint32(v2)
-			case unsignedTypeI64:
-				v2, v1 := ce.popValue(), ce.popValue()
-				b = v1 == v2
-			case unsignedTypeF32:
-				v2, v1 := ce.popValue(), ce.popValue()
-				b = math.Float32frombits(uint32(v2)) == math.Float32frombits(uint32(v1))
-			case unsignedTypeF64:
-				v2, v1 := ce.popValue(), ce.popValue()
-				b = math.Float64frombits(v2) == math.Float64frombits(v1)
-			}
-			if b {
+		case operationKindEqI32:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if uint32(v1) == uint32(v2) {
 				ce.pushValue(1)
 			} else {
 				ce.pushValue(0)
 			}
 			pc++
-		case operationKindNe:
-			var b bool
-			switch unsignedType(op.B1) {
-			case unsignedTypeI32:
-				v2, v1 := ce.popValue(), ce.popValue()
-				b = uint32(v1) != uint32(v2)
-			case unsignedTypeI64:
-				v2, v1 := ce.popValue(), ce.popValue()
-				b = v1 != v2
-			case unsignedTypeF32:
-				v2, v1 := ce.popValue(), ce.popValue()
-				b = math.Float32frombits(uint32(v2)) != math.Float32frombits(uint32(v1))
-			case unsignedTypeF64:
-				v2, v1 := ce.popValue(), ce.popValue()
-				b = math.Float64frombits(v2) != math.Float64frombits(v1)
+		case operationKindEqI64:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if v1 == v2 {
+				ce.pushValue(1)
+			} else {
+				ce.pushValue(0)
 			}
-			if b {
+			pc++
+		case operationKindEqF32:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if math.Float32frombits(uint32(v2)) == math.Float32frombits(uint32(v1)) {
+				ce.pushValue(1)
+			} else {
+				ce.pushValue(0)
+			}
+			pc++
+		case operationKindEqF64:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if math.Float64frombits(v2) == math.Float64frombits(v1) {
+				ce.pushValue(1)
+			} else {
+				ce.pushValue(0)
+			}
+			pc++
+		case operationKindNeI32:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if uint32(v1) != uint32(v2) {
+				ce.pushValue(1)
+			} else {
+				ce.pushValue(0)
+			}
+			pc++
+		case operationKindNeI64:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if v1 != v2 {
+				ce.pushValue(1)
+			} else {
+				ce.pushValue(0)
+			}
+			pc++
+		case operationKindNeF32:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if math.Float32frombits(uint32(v2)) != math.Float32frombits(uint32(v1)) {
+				ce.pushValue(1)
+			} else {
+				ce.pushValue(0)
+			}
+			pc++
+		case operationKindNeF64:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if math.Float64frombits(v2) != math.Float64frombits(v1) {
 				ce.pushValue(1)
 			} else {
 				ce.pushValue(0)
@@ -1213,147 +1465,260 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 				ce.pushValue(0)
 			}
 			pc++
-		case operationKindLt:
-			v2 := ce.popValue()
-			v1 := ce.popValue()
-			var b bool
-			switch signedType(op.B1) {
-			case signedTypeInt32:
-				b = int32(v1) < int32(v2)
-			case signedTypeInt64:
-				b = int64(v1) < int64(v2)
-			case signedTypeUint32:
-				b = uint32(v1) < uint32(v2)
-			case signedTypeUint64:
-				b = v1 < v2
-			case signedTypeFloat32:
-				b = math.Float32frombits(uint32(v1)) < math.Float32frombits(uint32(v2))
-			case signedTypeFloat64:
-				b = math.Float64frombits(v1) < math.Float64frombits(v2)
-			}
-			if b {
+		case operationKindLtS32:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if int32(v1) < int32(v2) {
 				ce.pushValue(1)
 			} else {
 				ce.pushValue(0)
 			}
 			pc++
-		case operationKindGt:
-			v2 := ce.popValue()
-			v1 := ce.popValue()
-			var b bool
-			switch signedType(op.B1) {
-			case signedTypeInt32:
-				b = int32(v1) > int32(v2)
-			case signedTypeInt64:
-				b = int64(v1) > int64(v2)
-			case signedTypeUint32:
-				b = uint32(v1) > uint32(v2)
-			case signedTypeUint64:
-				b = v1 > v2
-			case signedTypeFloat32:
-				b = math.Float32frombits(uint32(v1)) > math.Float32frombits(uint32(v2))
-			case signedTypeFloat64:
-				b = math.Float64frombits(v1) > math.Float64frombits(v2)
-			}
-			if b {
+		case operationKindLtU32:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if uint32(v1) < uint32(v2) {
 				ce.pushValue(1)
 			} else {
 				ce.pushValue(0)
 			}
 			pc++
-		case operationKindLe:
-			v2 := ce.popValue()
-			v1 := ce.popValue()
-			var b bool
-			switch signedType(op.B1) {
-			case signedTypeInt32:
-				b = int32(v1) <= int32(v2)
-			case signedTypeInt64:
-				b = int64(v1) <= int64(v2)
-			case signedTypeUint32:
-				b = uint32(v1) <= uint32(v2)
-			case signedTypeUint64:
-				b = v1 <= v2
-			case signedTypeFloat32:
-				b = math.Float32frombits(uint32(v1)) <= math.Float32frombits(uint32(v2))
-			case signedTypeFloat64:
-				b = math.Float64frombits(v1) <= math.Float64frombits(v2)
-			}
-			if b {
+		case operationKindLtS64:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if int64(v1) < int64(v2) {
 				ce.pushValue(1)
 			} else {
 				ce.pushValue(0)
 			}
 			pc++
-		case operationKindGe:
-			v2 := ce.popValue()
-			v1 := ce.popValue()
-			var b bool
-			switch signedType(op.B1) {
-			case signedTypeInt32:
-				b = int32(v1) >= int32(v2)
-			case signedTypeInt64:
-				b = int64(v1) >= int64(v2)
-			case signedTypeUint32:
-				b = uint32(v1) >= uint32(v2)
-			case signedTypeUint64:
-				b = v1 >= v2
-			case signedTypeFloat32:
-				b = math.Float32frombits(uint32(v1)) >= math.Float32frombits(uint32(v2))
-			case signedTypeFloat64:
-				b = math.Float64frombits(v1) >= math.Float64frombits(v2)
-			}
-			if b {
+		case operationKindLtU64:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if v1 < v2 {
 				ce.pushValue(1)
 			} else {
 				ce.pushValue(0)
 			}
 			pc++
-		case operationKindAdd:
-			v2 := ce.popValue()
-			v1 := ce.popValue()
-			switch unsignedType(op.B1) {
-			case unsignedTypeI32:
-				v := uint32(v1) + uint32(v2)
-				ce.pushValue(uint64(v))
-			case unsignedTypeI64:
-				ce.pushValue(v1 + v2)
-			case unsignedTypeF32:
-				ce.pushValue(addFloat32bits(uint32(v1), uint32(v2)))
-			case unsignedTypeF64:
-				v := math.Float64frombits(v1) + math.Float64frombits(v2)
-				ce.pushValue(math.Float64bits(v))
+		case operationKindLtF32:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if math.Float32frombits(uint32(v1)) < math.Float32frombits(uint32(v2)) {
+				ce.pushValue(1)
+			} else {
+				ce.pushValue(0)
 			}
 			pc++
-		case operationKindSub:
-			v2 := ce.popValue()
-			v1 := ce.popValue()
-			switch unsignedType(op.B1) {
-			case unsignedTypeI32:
-				ce.pushValue(uint64(uint32(v1) - uint32(v2)))
-			case unsignedTypeI64:
-				ce.pushValue(v1 - v2)
-			case unsignedTypeF32:
-				ce.pushValue(subFloat32bits(uint32(v1), uint32(v2)))
-			case unsignedTypeF64:
-				v := math.Float64frombits(v1) - math.Float64frombits(v2)
-				ce.pushValue(math.Float64bits(v))
+		case operationKindLtF64:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if math.Float64frombits(v1) < math.Float64frombits(v2) {
+				ce.pushValue(1)
+			} else {
+				ce.pushValue(0)
 			}
 			pc++
-		case operationKindMul:
+		case operationKindGtS32:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if int32(v1) > int32(v2) {
+				ce.pushValue(1)
+			} else {
+				ce.pushValue(0)
+			}
+			pc++
+		case operationKindGtU32:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if uint32(v1) > uint32(v2) {
+				ce.pushValue(1)
+			} else {
+				ce.pushValue(0)
+			}
+			pc++
+		case operationKindGtS64:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if int64(v1) > int64(v2) {
+				ce.pushValue(1)
+			} else {
+				ce.pushValue(0)
+			}
+			pc++
+		case operationKindGtU64:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if v1 > v2 {
+				ce.pushValue(1)
+			} else {
+				ce.pushValue(0)
+			}
+			pc++
+		case operationKindGtF32:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if math.Float32frombits(uint32(v1)) > math.Float32frombits(uint32(v2)) {
+				ce.pushValue(1)
+			} else {
+				ce.pushValue(0)
+			}
+			pc++
+		case operationKindGtF64:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if math.Float64frombits(v1) > math.Float64frombits(v2) {
+				ce.pushValue(1)
+			} else {
+				ce.pushValue(0)
+			}
+			pc++
+		case operationKindLeS32:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if int32(v1) <= int32(v2) {
+				ce.pushValue(1)
+			} else {
+				ce.pushValue(0)
+			}
+			pc++
+		case operationKindLeU32:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if uint32(v1) <= uint32(v2) {
+				ce.pushValue(1)
+			} else {
+				ce.pushValue(0)
+			}
+			pc++
+		case operationKindLeS64:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if int64(v1) <= int64(v2) {
+				ce.pushValue(1)
+			} else {
+				ce.pushValue(0)
+			}
+			pc++
+		case operationKindLeU64:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if v1 <= v2 {
+				ce.pushValue(1)
+			} else {
+				ce.pushValue(0)
+			}
+			pc++
+		case operationKindLeF32:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if math.Float32frombits(uint32(v1)) <= math.Float32frombits(uint32(v2)) {
+				ce.pushValue(1)
+			} else {
+				ce.pushValue(0)
+			}
+			pc++
+		case operationKindLeF64:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if math.Float64frombits(v1) <= math.Float64frombits(v2) {
+				ce.pushValue(1)
+			} else {
+				ce.pushValue(0)
+			}
+			pc++
+		case operationKindGeS32:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if int32(v1) >= int32(v2) {
+				ce.pushValue(1)
+			} else {
+				ce.pushValue(0)
+			}
+			pc++
+		case operationKindGeU32:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if uint32(v1) >= uint32(v2) {
+				ce.pushValue(1)
+			} else {
+				ce.pushValue(0)
+			}
+			pc++
+		case operationKindGeS64:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if int64(v1) >= int64(v2) {
+				ce.pushValue(1)
+			} else {
+				ce.pushValue(0)
+			}
+			pc++
+		case operationKindGeU64:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if v1 >= v2 {
+				ce.pushValue(1)
+			} else {
+				ce.pushValue(0)
+			}
+			pc++
+		case operationKindGeF32:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if math.Float32frombits(uint32(v1)) >= math.Float32frombits(uint32(v2)) {
+				ce.pushValue(1)
+			} else {
+				ce.pushValue(0)
+			}
+			pc++
+		case operationKindGeF64:
+			v2, v1 := ce.popValue(), ce.popValue()
+			if math.Float64frombits(v1) >= math.Float64frombits(v2) {
+				ce.pushValue(1)
+			} else {
+				ce.pushValue(0)
+			}
+			pc++
+		case operationKindAddI32:
 			v2 := ce.popValue()
 			v1 := ce.popValue()
-			switch unsignedType(op.B1) {
-			case unsignedTypeI32:
-				ce.pushValue(uint64(uint32(v1) * uint32(v2)))
-			case unsignedTypeI64:
-				ce.pushValue(v1 * v2)
-			case unsignedTypeF32:
-				ce.pushValue(mulFloat32bits(uint32(v1), uint32(v2)))
-			case unsignedTypeF64:
-				v := math.Float64frombits(v2) * math.Float64frombits(v1)
-				ce.pushValue(math.Float64bits(v))
-			}
+			ce.pushValue(uint64(uint32(v1) + uint32(v2)))
+			pc++
+		case operationKindAddI64:
+			v2 := ce.popValue()
+			v1 := ce.popValue()
+			ce.pushValue(v1 + v2)
+			pc++
+		case operationKindAddF32:
+			v2 := ce.popValue()
+			v1 := ce.popValue()
+			ce.pushValue(addFloat32bits(uint32(v1), uint32(v2)))
+			pc++
+		case operationKindAddF64:
+			v2 := ce.popValue()
+			v1 := ce.popValue()
+			v := math.Float64frombits(v1) + math.Float64frombits(v2)
+			ce.pushValue(math.Float64bits(v))
+			pc++
+		case operationKindSubI32:
+			v2 := ce.popValue()
+			v1 := ce.popValue()
+			ce.pushValue(uint64(uint32(v1) - uint32(v2)))
+			pc++
+		case operationKindSubI64:
+			v2 := ce.popValue()
+			v1 := ce.popValue()
+			ce.pushValue(v1 - v2)
+			pc++
+		case operationKindSubF32:
+			v2 := ce.popValue()
+			v1 := ce.popValue()
+			ce.pushValue(subFloat32bits(uint32(v1), uint32(v2)))
+			pc++
+		case operationKindSubF64:
+			v2 := ce.popValue()
+			v1 := ce.popValue()
+			v := math.Float64frombits(v1) - math.Float64frombits(v2)
+			ce.pushValue(math.Float64bits(v))
+			pc++
+		case operationKindMulI32:
+			v2 := ce.popValue()
+			v1 := ce.popValue()
+			ce.pushValue(uint64(uint32(v1) * uint32(v2)))
+			pc++
+		case operationKindMulI64:
+			v2 := ce.popValue()
+			v1 := ce.popValue()
+			ce.pushValue(v1 * v2)
+			pc++
+		case operationKindMulF32:
+			v2 := ce.popValue()
+			v1 := ce.popValue()
+			ce.pushValue(mulFloat32bits(uint32(v1), uint32(v2)))
+			pc++
+		case operationKindMulF64:
+			v2 := ce.popValue()
+			v1 := ce.popValue()
+			v := math.Float64frombits(v2) * math.Float64frombits(v1)
+			ce.pushValue(math.Float64bits(v))
 			pc++
 		case operationKindClz:
 			v := ce.popValue()
@@ -1385,83 +1750,102 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 				ce.pushValue(uint64(bits.OnesCount64(v)))
 			}
 			pc++
-		case operationKindDiv:
+		case operationKindDivS32:
 			frame.pc = pc // sync: divide-by-zero / overflow trap
-			// If an integer, check we won't divide by zero.
-			t := signedType(op.B1)
 			v2, v1 := ce.popValue(), ce.popValue()
-			switch t {
-			case signedTypeFloat32, signedTypeFloat64: // not integers
-			case signedTypeInt32, signedTypeUint32:
-				if uint32(v2) == 0 {
-					panic(wasmruntime.ErrRuntimeIntegerDivideByZero)
-				}
-			default:
-				if v2 == 0 {
-					panic(wasmruntime.ErrRuntimeIntegerDivideByZero)
-				}
+			d := int32(v2)
+			n := int32(v1)
+			if d == 0 {
+				panic(wasmruntime.ErrRuntimeIntegerDivideByZero)
 			}
-
-			switch t {
-			case signedTypeInt32:
-				d := int32(v2)
-				n := int32(v1)
-				if n == math.MinInt32 && d == -1 {
-					panic(wasmruntime.ErrRuntimeIntegerOverflow)
-				}
-				ce.pushValue(uint64(uint32(n / d)))
-			case signedTypeInt64:
-				d := int64(v2)
-				n := int64(v1)
-				if n == math.MinInt64 && d == -1 {
-					panic(wasmruntime.ErrRuntimeIntegerOverflow)
-				}
-				ce.pushValue(uint64(n / d))
-			case signedTypeUint32:
-				d := uint32(v2)
-				n := uint32(v1)
-				ce.pushValue(uint64(n / d))
-			case signedTypeUint64:
-				d := v2
-				n := v1
-				ce.pushValue(n / d)
-			case signedTypeFloat32:
-				ce.pushValue(divFloat32bits(uint32(v1), uint32(v2)))
-			case signedTypeFloat64:
-				ce.pushValue(math.Float64bits(math.Float64frombits(v1) / math.Float64frombits(v2)))
+			if n == math.MinInt32 && d == -1 {
+				panic(wasmruntime.ErrRuntimeIntegerOverflow)
 			}
+			ce.pushValue(uint64(uint32(n / d)))
 			pc++
-		case operationKindRem:
+		case operationKindDivU32:
 			frame.pc = pc // sync: divide-by-zero trap
 			v2, v1 := ce.popValue(), ce.popValue()
-			switch signedInt(op.B1) {
-			case signedInt32, signedUint32:
-				if uint32(v2) == 0 {
-					panic(wasmruntime.ErrRuntimeIntegerDivideByZero)
-				}
-			default:
-				if v2 == 0 {
-					panic(wasmruntime.ErrRuntimeIntegerDivideByZero)
-				}
+			d := uint32(v2)
+			n := uint32(v1)
+			if d == 0 {
+				panic(wasmruntime.ErrRuntimeIntegerDivideByZero)
 			}
-			switch signedInt(op.B1) {
-			case signedInt32:
-				d := int32(v2)
-				n := int32(v1)
-				ce.pushValue(uint64(uint32(n % d)))
-			case signedInt64:
-				d := int64(v2)
-				n := int64(v1)
-				ce.pushValue(uint64(n % d))
-			case signedUint32:
-				d := uint32(v2)
-				n := uint32(v1)
-				ce.pushValue(uint64(n % d))
-			case signedUint64:
-				d := v2
-				n := v1
-				ce.pushValue(n % d)
+			ce.pushValue(uint64(n / d))
+			pc++
+		case operationKindDivS64:
+			frame.pc = pc // sync: divide-by-zero / overflow trap
+			v2, v1 := ce.popValue(), ce.popValue()
+			d := int64(v2)
+			n := int64(v1)
+			if d == 0 {
+				panic(wasmruntime.ErrRuntimeIntegerDivideByZero)
 			}
+			if n == math.MinInt64 && d == -1 {
+				panic(wasmruntime.ErrRuntimeIntegerOverflow)
+			}
+			ce.pushValue(uint64(n / d))
+			pc++
+		case operationKindDivU64:
+			frame.pc = pc // sync: divide-by-zero trap
+			v2, v1 := ce.popValue(), ce.popValue()
+			d := v2
+			n := v1
+			if d == 0 {
+				panic(wasmruntime.ErrRuntimeIntegerDivideByZero)
+			}
+			ce.pushValue(n / d)
+			pc++
+		case operationKindDivF32:
+			// Float division never traps (IEEE 754: div-by-zero yields Inf/NaN), so
+			// unlike the integer variants above this doesn't need a frame.pc sync.
+			v2, v1 := ce.popValue(), ce.popValue()
+			ce.pushValue(divFloat32bits(uint32(v1), uint32(v2)))
+			pc++
+		case operationKindDivF64:
+			// Float division never traps; see operationKindDivF32.
+			v2, v1 := ce.popValue(), ce.popValue()
+			ce.pushValue(math.Float64bits(math.Float64frombits(v1) / math.Float64frombits(v2)))
+			pc++
+		case operationKindRemS32:
+			frame.pc = pc // sync: divide-by-zero trap
+			v2, v1 := ce.popValue(), ce.popValue()
+			d := int32(v2)
+			n := int32(v1)
+			if d == 0 {
+				panic(wasmruntime.ErrRuntimeIntegerDivideByZero)
+			}
+			ce.pushValue(uint64(uint32(n % d)))
+			pc++
+		case operationKindRemU32:
+			frame.pc = pc // sync: divide-by-zero trap
+			v2, v1 := ce.popValue(), ce.popValue()
+			d := uint32(v2)
+			n := uint32(v1)
+			if d == 0 {
+				panic(wasmruntime.ErrRuntimeIntegerDivideByZero)
+			}
+			ce.pushValue(uint64(n % d))
+			pc++
+		case operationKindRemS64:
+			frame.pc = pc // sync: divide-by-zero trap
+			v2, v1 := ce.popValue(), ce.popValue()
+			d := int64(v2)
+			n := int64(v1)
+			if d == 0 {
+				panic(wasmruntime.ErrRuntimeIntegerDivideByZero)
+			}
+			ce.pushValue(uint64(n % d))
+			pc++
+		case operationKindRemU64:
+			frame.pc = pc // sync: divide-by-zero trap
+			v2, v1 := ce.popValue(), ce.popValue()
+			d := v2
+			n := v1
+			if d == 0 {
+				panic(wasmruntime.ErrRuntimeIntegerDivideByZero)
+			}
+			ce.pushValue(n % d)
 			pc++
 		case operationKindAnd:
 			v2 := ce.popValue()
@@ -1655,291 +2039,6 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 				ce.pushValue(v1&^signbit | v2&signbit)
 			}
 			pc++
-		case operationKindI32WrapFromI64:
-			ce.pushValue(uint64(uint32(ce.popValue())))
-			pc++
-		case operationKindITruncFromF:
-			frame.pc = pc // sync: invalid-conversion / overflow trap
-			if op.B1 == 0 {
-				// float32
-				switch signedInt(op.B2) {
-				case signedInt32:
-					v := math.Trunc(float64(math.Float32frombits(uint32(ce.popValue()))))
-					if math.IsNaN(v) { // NaN cannot be compared with themselves, so we have to use IsNaN
-						if op.B3 {
-							// non-trapping conversion must cast nan to zero.
-							v = 0
-						} else {
-							panic(wasmruntime.ErrRuntimeInvalidConversionToInteger)
-						}
-					} else if v < math.MinInt32 || v > math.MaxInt32 {
-						if op.B3 {
-							// non-trapping conversion must "saturate" the value for overflowing sources.
-							if v < 0 {
-								v = math.MinInt32
-							} else {
-								v = math.MaxInt32
-							}
-						} else {
-							panic(wasmruntime.ErrRuntimeIntegerOverflow)
-						}
-					}
-					ce.pushValue(uint64(uint32(int32(v))))
-				case signedInt64:
-					v := math.Trunc(float64(math.Float32frombits(uint32(ce.popValue()))))
-					res := int64(v)
-					if math.IsNaN(v) { // NaN cannot be compared with themselves, so we have to use IsNaN
-						if op.B3 {
-							// non-trapping conversion must cast nan to zero.
-							res = 0
-						} else {
-							panic(wasmruntime.ErrRuntimeInvalidConversionToInteger)
-						}
-					} else if v < math.MinInt64 || v >= math.MaxInt64 {
-						// Note: math.MaxInt64 is rounded up to math.MaxInt64+1 in 64-bit float representation,
-						// and that's why we use '>=' not '>' to check overflow.
-						if op.B3 {
-							// non-trapping conversion must "saturate" the value for overflowing sources.
-							if v < 0 {
-								res = math.MinInt64
-							} else {
-								res = math.MaxInt64
-							}
-						} else {
-							panic(wasmruntime.ErrRuntimeIntegerOverflow)
-						}
-					}
-					ce.pushValue(uint64(res))
-				case signedUint32:
-					v := math.Trunc(float64(math.Float32frombits(uint32(ce.popValue()))))
-					if math.IsNaN(v) { // NaN cannot be compared with themselves, so we have to use IsNaN
-						if op.B3 {
-							// non-trapping conversion must cast nan to zero.
-							v = 0
-						} else {
-							panic(wasmruntime.ErrRuntimeInvalidConversionToInteger)
-						}
-					} else if v < 0 || v > math.MaxUint32 {
-						if op.B3 {
-							// non-trapping conversion must "saturate" the value for overflowing source.
-							if v < 0 {
-								v = 0
-							} else {
-								v = math.MaxUint32
-							}
-						} else {
-							panic(wasmruntime.ErrRuntimeIntegerOverflow)
-						}
-					}
-					ce.pushValue(uint64(uint32(v)))
-				case signedUint64:
-					v := math.Trunc(float64(math.Float32frombits(uint32(ce.popValue()))))
-					res := uint64(v)
-					if math.IsNaN(v) { // NaN cannot be compared with themselves, so we have to use IsNaN
-						if op.B3 {
-							// non-trapping conversion must cast nan to zero.
-							res = 0
-						} else {
-							panic(wasmruntime.ErrRuntimeInvalidConversionToInteger)
-						}
-					} else if v < 0 || v >= math.MaxUint64 {
-						// Note: math.MaxUint64 is rounded up to math.MaxUint64+1 in 64-bit float representation,
-						// and that's why we use '>=' not '>' to check overflow.
-						if op.B3 {
-							// non-trapping conversion must "saturate" the value for overflowing source.
-							if v < 0 {
-								res = 0
-							} else {
-								res = math.MaxUint64
-							}
-						} else {
-							panic(wasmruntime.ErrRuntimeIntegerOverflow)
-						}
-					}
-					ce.pushValue(res)
-				}
-			} else {
-				// float64
-				switch signedInt(op.B2) {
-				case signedInt32:
-					v := math.Trunc(math.Float64frombits(ce.popValue()))
-					if math.IsNaN(v) { // NaN cannot be compared with themselves, so we have to use IsNaN
-						if op.B3 {
-							// non-trapping conversion must cast nan to zero.
-							v = 0
-						} else {
-							panic(wasmruntime.ErrRuntimeInvalidConversionToInteger)
-						}
-					} else if v < math.MinInt32 || v > math.MaxInt32 {
-						if op.B3 {
-							// non-trapping conversion must "saturate" the value for overflowing source.
-							if v < 0 {
-								v = math.MinInt32
-							} else {
-								v = math.MaxInt32
-							}
-						} else {
-							panic(wasmruntime.ErrRuntimeIntegerOverflow)
-						}
-					}
-					ce.pushValue(uint64(uint32(int32(v))))
-				case signedInt64:
-					v := math.Trunc(math.Float64frombits(ce.popValue()))
-					res := int64(v)
-					if math.IsNaN(v) { // NaN cannot be compared with themselves, so we have to use IsNaN
-						if op.B3 {
-							// non-trapping conversion must cast nan to zero.
-							res = 0
-						} else {
-							panic(wasmruntime.ErrRuntimeInvalidConversionToInteger)
-						}
-					} else if v < math.MinInt64 || v >= math.MaxInt64 {
-						// Note: math.MaxInt64 is rounded up to math.MaxInt64+1 in 64-bit float representation,
-						// and that's why we use '>=' not '>' to check overflow.
-						if op.B3 {
-							// non-trapping conversion must "saturate" the value for overflowing source.
-							if v < 0 {
-								res = math.MinInt64
-							} else {
-								res = math.MaxInt64
-							}
-						} else {
-							panic(wasmruntime.ErrRuntimeIntegerOverflow)
-						}
-					}
-					ce.pushValue(uint64(res))
-				case signedUint32:
-					v := math.Trunc(math.Float64frombits(ce.popValue()))
-					if math.IsNaN(v) { // NaN cannot be compared with themselves, so we have to use IsNaN
-						if op.B3 {
-							// non-trapping conversion must cast nan to zero.
-							v = 0
-						} else {
-							panic(wasmruntime.ErrRuntimeInvalidConversionToInteger)
-						}
-					} else if v < 0 || v > math.MaxUint32 {
-						if op.B3 {
-							// non-trapping conversion must "saturate" the value for overflowing source.
-							if v < 0 {
-								v = 0
-							} else {
-								v = math.MaxUint32
-							}
-						} else {
-							panic(wasmruntime.ErrRuntimeIntegerOverflow)
-						}
-					}
-					ce.pushValue(uint64(uint32(v)))
-				case signedUint64:
-					v := math.Trunc(math.Float64frombits(ce.popValue()))
-					res := uint64(v)
-					if math.IsNaN(v) { // NaN cannot be compared with themselves, so we have to use IsNaN
-						if op.B3 {
-							// non-trapping conversion must cast nan to zero.
-							res = 0
-						} else {
-							panic(wasmruntime.ErrRuntimeInvalidConversionToInteger)
-						}
-					} else if v < 0 || v >= math.MaxUint64 {
-						// Note: math.MaxUint64 is rounded up to math.MaxUint64+1 in 64-bit float representation,
-						// and that's why we use '>=' not '>' to check overflow.
-						if op.B3 {
-							// non-trapping conversion must "saturate" the value for overflowing source.
-							if v < 0 {
-								res = 0
-							} else {
-								res = math.MaxUint64
-							}
-						} else {
-							panic(wasmruntime.ErrRuntimeIntegerOverflow)
-						}
-					}
-					ce.pushValue(res)
-				}
-			}
-			pc++
-		case operationKindFConvertFromI:
-			switch signedInt(op.B1) {
-			case signedInt32:
-				if op.B2 == 0 {
-					// float32
-					v := float32(int32(ce.popValue()))
-					ce.pushValue(uint64(math.Float32bits(v)))
-				} else {
-					// float64
-					v := float64(int32(ce.popValue()))
-					ce.pushValue(math.Float64bits(v))
-				}
-			case signedInt64:
-				if op.B2 == 0 {
-					// float32
-					v := float32(int64(ce.popValue()))
-					ce.pushValue(uint64(math.Float32bits(v)))
-				} else {
-					// float64
-					v := float64(int64(ce.popValue()))
-					ce.pushValue(math.Float64bits(v))
-				}
-			case signedUint32:
-				if op.B2 == 0 {
-					// float32
-					v := float32(uint32(ce.popValue()))
-					ce.pushValue(uint64(math.Float32bits(v)))
-				} else {
-					// float64
-					v := float64(uint32(ce.popValue()))
-					ce.pushValue(math.Float64bits(v))
-				}
-			case signedUint64:
-				if op.B2 == 0 {
-					// float32
-					v := float32(ce.popValue())
-					ce.pushValue(uint64(math.Float32bits(v)))
-				} else {
-					// float64
-					v := float64(ce.popValue())
-					ce.pushValue(math.Float64bits(v))
-				}
-			}
-			pc++
-		case operationKindF32DemoteFromF64:
-			v := float32(math.Float64frombits(ce.popValue()))
-			ce.pushValue(uint64(math.Float32bits(v)))
-			pc++
-		case operationKindF64PromoteFromF32:
-			v := float64(math.Float32frombits(uint32(ce.popValue())))
-			ce.pushValue(math.Float64bits(v))
-			pc++
-		case operationKindExtend:
-			if op.B1 == 1 {
-				// Signed.
-				v := int64(int32(ce.popValue()))
-				ce.pushValue(uint64(v))
-			} else {
-				v := uint64(uint32(ce.popValue()))
-				ce.pushValue(v)
-			}
-			pc++
-		case operationKindSignExtend32From8:
-			v := uint32(int8(ce.popValue()))
-			ce.pushValue(uint64(v))
-			pc++
-		case operationKindSignExtend32From16:
-			v := uint32(int16(ce.popValue()))
-			ce.pushValue(uint64(v))
-			pc++
-		case operationKindSignExtend64From8:
-			v := int64(int8(ce.popValue()))
-			ce.pushValue(uint64(v))
-			pc++
-		case operationKindSignExtend64From16:
-			v := int64(int16(ce.popValue()))
-			ce.pushValue(uint64(v))
-			pc++
-		case operationKindSignExtend64From32:
-			v := int64(int32(ce.popValue()))
-			ce.pushValue(uint64(v))
-			pc++
 		case operationKindThrow:
 			frame.pc = pc // sync: searchExceptionTable reads frame.pc; unwinding trace too
 			tagIndex := uint32(op.U1)
@@ -2050,15 +2149,6 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			body = ce.resetPc(frame, tf)
 			pc = frame.pc // reload: resetPc reset pc to 0 for the reused frame
 
-		case operationKindRefAsNonNull:
-			frame.pc = pc // sync: null-ref trap
-			ref := ce.popValue()
-			if ref == 0 {
-				panic(wasmruntime.ErrRuntimeNullReference)
-			}
-			ce.pushValue(ref)
-			pc++
-
 		case operationKindBrOnNull:
 			ref := ce.popValue()
 			if ref == 0 {
@@ -2090,13 +2180,317 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 }
 
 // callNativeFuncRare handles the cold opcodes split out of callNativeFunc's main
-// dispatch switch: SIMD/v128, atomics, and bulk memory/table operations. These
-// account for the majority of the switch by node count but are rarely executed
-// in practice, so moving them here keeps callNativeFunc small enough for the
+// dispatch switch: SIMD/v128, atomics, bulk memory/table operations, select,
+// conversions/extends, and ref.as_non_null. These account for the majority of
+// the switch by node count but are rarely executed (or, for select/conversions,
+// just cold relative to the specialized ALU/compare/load/store cases) in
+// practice, so moving them here keeps callNativeFunc small enough for the
 // compiler to inline its hot-path helpers (popValue, pushValue, drop, etc.)
 // into the dispatch loop. pc++ for these ops is done once by the caller.
 func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, functions []function, memoryInst *wasm.MemoryInstance, tables []*wasm.TableInstance, dataInstances []wasm.DataInstance, elementInstances []wasm.ElementInstance) {
 	switch op.Kind {
+	// Select, conversions, extends, and reinterprets: pure value ops with no
+	// data-dependent memory access. Moved out of callNativeFunc's hot dispatch
+	// switch (which already syncs frame.pc before delegating here, covering
+	// the ones that can trap) purely to keep that function's node count under
+	// the inliner's "big function" threshold; see the budget note atop this
+	// file's I6/I10/I11 changes. These are not hot for typical numeric/loop
+	// code, unlike the specialized ALU/compare/load/store cases kept above.
+	case operationKindSelect:
+		c := ce.popValue()
+		if op.B3 { // Target is vector.
+			x2Hi, x2Lo := ce.popValue(), ce.popValue()
+			if c == 0 {
+				_, _ = ce.popValue(), ce.popValue() // discard the x1's lo and hi bits.
+				ce.pushValue(x2Lo)
+				ce.pushValue(x2Hi)
+			}
+		} else {
+			v2 := ce.popValue()
+			if c == 0 {
+				_ = ce.popValue()
+				ce.pushValue(v2)
+			}
+		}
+	case operationKindRefAsNonNull:
+		ref := ce.popValue()
+		if ref == 0 {
+			panic(wasmruntime.ErrRuntimeNullReference)
+		}
+		ce.pushValue(ref)
+	case operationKindI32WrapFromI64:
+		ce.pushValue(uint64(uint32(ce.popValue())))
+	case operationKindITruncFromF:
+		if op.B1 == 0 {
+			// float32
+			switch signedInt(op.B2) {
+			case signedInt32:
+				v := math.Trunc(float64(math.Float32frombits(uint32(ce.popValue()))))
+				if math.IsNaN(v) { // NaN cannot be compared with themselves, so we have to use IsNaN
+					if op.B3 {
+						// non-trapping conversion must cast nan to zero.
+						v = 0
+					} else {
+						panic(wasmruntime.ErrRuntimeInvalidConversionToInteger)
+					}
+				} else if v < math.MinInt32 || v > math.MaxInt32 {
+					if op.B3 {
+						// non-trapping conversion must "saturate" the value for overflowing sources.
+						if v < 0 {
+							v = math.MinInt32
+						} else {
+							v = math.MaxInt32
+						}
+					} else {
+						panic(wasmruntime.ErrRuntimeIntegerOverflow)
+					}
+				}
+				ce.pushValue(uint64(uint32(int32(v))))
+			case signedInt64:
+				v := math.Trunc(float64(math.Float32frombits(uint32(ce.popValue()))))
+				res := int64(v)
+				if math.IsNaN(v) { // NaN cannot be compared with themselves, so we have to use IsNaN
+					if op.B3 {
+						// non-trapping conversion must cast nan to zero.
+						res = 0
+					} else {
+						panic(wasmruntime.ErrRuntimeInvalidConversionToInteger)
+					}
+				} else if v < math.MinInt64 || v >= math.MaxInt64 {
+					// Note: math.MaxInt64 is rounded up to math.MaxInt64+1 in 64-bit float representation,
+					// and that's why we use '>=' not '>' to check overflow.
+					if op.B3 {
+						// non-trapping conversion must "saturate" the value for overflowing sources.
+						if v < 0 {
+							res = math.MinInt64
+						} else {
+							res = math.MaxInt64
+						}
+					} else {
+						panic(wasmruntime.ErrRuntimeIntegerOverflow)
+					}
+				}
+				ce.pushValue(uint64(res))
+			case signedUint32:
+				v := math.Trunc(float64(math.Float32frombits(uint32(ce.popValue()))))
+				if math.IsNaN(v) { // NaN cannot be compared with themselves, so we have to use IsNaN
+					if op.B3 {
+						// non-trapping conversion must cast nan to zero.
+						v = 0
+					} else {
+						panic(wasmruntime.ErrRuntimeInvalidConversionToInteger)
+					}
+				} else if v < 0 || v > math.MaxUint32 {
+					if op.B3 {
+						// non-trapping conversion must "saturate" the value for overflowing source.
+						if v < 0 {
+							v = 0
+						} else {
+							v = math.MaxUint32
+						}
+					} else {
+						panic(wasmruntime.ErrRuntimeIntegerOverflow)
+					}
+				}
+				ce.pushValue(uint64(uint32(v)))
+			case signedUint64:
+				v := math.Trunc(float64(math.Float32frombits(uint32(ce.popValue()))))
+				res := uint64(v)
+				if math.IsNaN(v) { // NaN cannot be compared with themselves, so we have to use IsNaN
+					if op.B3 {
+						// non-trapping conversion must cast nan to zero.
+						res = 0
+					} else {
+						panic(wasmruntime.ErrRuntimeInvalidConversionToInteger)
+					}
+				} else if v < 0 || v >= math.MaxUint64 {
+					// Note: math.MaxUint64 is rounded up to math.MaxUint64+1 in 64-bit float representation,
+					// and that's why we use '>=' not '>' to check overflow.
+					if op.B3 {
+						// non-trapping conversion must "saturate" the value for overflowing source.
+						if v < 0 {
+							res = 0
+						} else {
+							res = math.MaxUint64
+						}
+					} else {
+						panic(wasmruntime.ErrRuntimeIntegerOverflow)
+					}
+				}
+				ce.pushValue(res)
+			}
+		} else {
+			// float64
+			switch signedInt(op.B2) {
+			case signedInt32:
+				v := math.Trunc(math.Float64frombits(ce.popValue()))
+				if math.IsNaN(v) { // NaN cannot be compared with themselves, so we have to use IsNaN
+					if op.B3 {
+						// non-trapping conversion must cast nan to zero.
+						v = 0
+					} else {
+						panic(wasmruntime.ErrRuntimeInvalidConversionToInteger)
+					}
+				} else if v < math.MinInt32 || v > math.MaxInt32 {
+					if op.B3 {
+						// non-trapping conversion must "saturate" the value for overflowing source.
+						if v < 0 {
+							v = math.MinInt32
+						} else {
+							v = math.MaxInt32
+						}
+					} else {
+						panic(wasmruntime.ErrRuntimeIntegerOverflow)
+					}
+				}
+				ce.pushValue(uint64(uint32(int32(v))))
+			case signedInt64:
+				v := math.Trunc(math.Float64frombits(ce.popValue()))
+				res := int64(v)
+				if math.IsNaN(v) { // NaN cannot be compared with themselves, so we have to use IsNaN
+					if op.B3 {
+						// non-trapping conversion must cast nan to zero.
+						res = 0
+					} else {
+						panic(wasmruntime.ErrRuntimeInvalidConversionToInteger)
+					}
+				} else if v < math.MinInt64 || v >= math.MaxInt64 {
+					// Note: math.MaxInt64 is rounded up to math.MaxInt64+1 in 64-bit float representation,
+					// and that's why we use '>=' not '>' to check overflow.
+					if op.B3 {
+						// non-trapping conversion must "saturate" the value for overflowing source.
+						if v < 0 {
+							res = math.MinInt64
+						} else {
+							res = math.MaxInt64
+						}
+					} else {
+						panic(wasmruntime.ErrRuntimeIntegerOverflow)
+					}
+				}
+				ce.pushValue(uint64(res))
+			case signedUint32:
+				v := math.Trunc(math.Float64frombits(ce.popValue()))
+				if math.IsNaN(v) { // NaN cannot be compared with themselves, so we have to use IsNaN
+					if op.B3 {
+						// non-trapping conversion must cast nan to zero.
+						v = 0
+					} else {
+						panic(wasmruntime.ErrRuntimeInvalidConversionToInteger)
+					}
+				} else if v < 0 || v > math.MaxUint32 {
+					if op.B3 {
+						// non-trapping conversion must "saturate" the value for overflowing source.
+						if v < 0 {
+							v = 0
+						} else {
+							v = math.MaxUint32
+						}
+					} else {
+						panic(wasmruntime.ErrRuntimeIntegerOverflow)
+					}
+				}
+				ce.pushValue(uint64(uint32(v)))
+			case signedUint64:
+				v := math.Trunc(math.Float64frombits(ce.popValue()))
+				res := uint64(v)
+				if math.IsNaN(v) { // NaN cannot be compared with themselves, so we have to use IsNaN
+					if op.B3 {
+						// non-trapping conversion must cast nan to zero.
+						res = 0
+					} else {
+						panic(wasmruntime.ErrRuntimeInvalidConversionToInteger)
+					}
+				} else if v < 0 || v >= math.MaxUint64 {
+					// Note: math.MaxUint64 is rounded up to math.MaxUint64+1 in 64-bit float representation,
+					// and that's why we use '>=' not '>' to check overflow.
+					if op.B3 {
+						// non-trapping conversion must "saturate" the value for overflowing source.
+						if v < 0 {
+							res = 0
+						} else {
+							res = math.MaxUint64
+						}
+					} else {
+						panic(wasmruntime.ErrRuntimeIntegerOverflow)
+					}
+				}
+				ce.pushValue(res)
+			}
+		}
+	case operationKindFConvertFromI:
+		switch signedInt(op.B1) {
+		case signedInt32:
+			if op.B2 == 0 {
+				// float32
+				v := float32(int32(ce.popValue()))
+				ce.pushValue(uint64(math.Float32bits(v)))
+			} else {
+				// float64
+				v := float64(int32(ce.popValue()))
+				ce.pushValue(math.Float64bits(v))
+			}
+		case signedInt64:
+			if op.B2 == 0 {
+				// float32
+				v := float32(int64(ce.popValue()))
+				ce.pushValue(uint64(math.Float32bits(v)))
+			} else {
+				// float64
+				v := float64(int64(ce.popValue()))
+				ce.pushValue(math.Float64bits(v))
+			}
+		case signedUint32:
+			if op.B2 == 0 {
+				// float32
+				v := float32(uint32(ce.popValue()))
+				ce.pushValue(uint64(math.Float32bits(v)))
+			} else {
+				// float64
+				v := float64(uint32(ce.popValue()))
+				ce.pushValue(math.Float64bits(v))
+			}
+		case signedUint64:
+			if op.B2 == 0 {
+				// float32
+				v := float32(ce.popValue())
+				ce.pushValue(uint64(math.Float32bits(v)))
+			} else {
+				// float64
+				v := float64(ce.popValue())
+				ce.pushValue(math.Float64bits(v))
+			}
+		}
+	case operationKindF32DemoteFromF64:
+		v := float32(math.Float64frombits(ce.popValue()))
+		ce.pushValue(uint64(math.Float32bits(v)))
+	case operationKindF64PromoteFromF32:
+		v := float64(math.Float32frombits(uint32(ce.popValue())))
+		ce.pushValue(math.Float64bits(v))
+	case operationKindExtend:
+		if op.B1 == 1 {
+			// Signed.
+			v := int64(int32(ce.popValue()))
+			ce.pushValue(uint64(v))
+		} else {
+			v := uint64(uint32(ce.popValue()))
+			ce.pushValue(v)
+		}
+	case operationKindSignExtend32From8:
+		v := uint32(int8(ce.popValue()))
+		ce.pushValue(uint64(v))
+	case operationKindSignExtend32From16:
+		v := uint32(int16(ce.popValue()))
+		ce.pushValue(uint64(v))
+	case operationKindSignExtend64From8:
+		v := int64(int8(ce.popValue()))
+		ce.pushValue(uint64(v))
+	case operationKindSignExtend64From16:
+		v := int64(int16(ce.popValue()))
+		ce.pushValue(uint64(v))
+	case operationKindSignExtend64From32:
+		v := int64(int32(ce.popValue()))
+		ce.pushValue(uint64(v))
 	case operationKindMemoryInit:
 		dataInstance := dataInstances[op.U1]
 		copySize := ce.popValue()
@@ -4663,6 +5057,18 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		}
 		memoryInst.Mux.Unlock()
 		ce.pushValue(uint64(old))
+
+	case operationKindAdd, operationKindSub, operationKindMul,
+		operationKindEq, operationKindNe, operationKindLt, operationKindGt, operationKindLe, operationKindGe,
+		operationKindDiv, operationKindRem,
+		operationKindLoad, operationKindLoad8, operationKindLoad16, operationKindLoad32, operationKindStore:
+		// engine.lowerIR always rewrites these generic Kinds into their
+		// specialized (e.g. AddI32, LtF64, LoadI64, StoreF32, ...) variants
+		// before a function ever executes -- see the specialization pass added
+		// there for I6/I10. Reaching here means a compiledFunction's body was
+		// built without going through lowerIR (CompileModule always calls it),
+		// which is a bug in whatever constructed the body.
+		panic(fmt.Sprintf("BUG: unspecialized %s reached execution; lowerIR must specialize this operation before dispatch", op.Kind))
 	}
 }
 
