@@ -24,7 +24,7 @@ wazy is measurably faster than [wazero][wazero], the runtime it descends from, o
 
 Methodology and per-optimization numbers live in [OPTIMIZATIONS.md](OPTIMIZATIONS.md).
 
-The largest change: **reflection is gone from host-function registration.** Wasm can only pass numbers, so a host function's Go signature has to be mapped to the Wasm value stack. The common approach uses `reflect` on every call. It is convenient, and about 14x slower than a direct call. wazy removes that path. Host functions are registered through typed generic helpers that derive the Wasm signature from Go's type system at compile time and read and write the value stack directly:
+The host-call speedup comes from dropping reflection. Instead of the usual `reflect`-per-call path (~14x slower), typed generic helpers derive the Wasm signature from Go's types at compile time:
 
 ```go
 wazy.HostFunc2(builder, func(ctx context.Context, mod api.Module, x, y uint32) uint32 {
@@ -32,7 +32,7 @@ wazy.HostFunc2(builder, func(ctx context.Context, mod api.Module, x, y uint32) u
 }).Export("add")
 ```
 
-`HostFunc0`–`HostFunc8` and `HostProc0`–`HostProc8` cover functions with and without a return value; `WithGoModuleFunction` handles anything they don't. Every path compiles to the same zero-allocation calling convention: no reflection, no per-call garbage.
+`HostFunc0`–`HostFunc8` and `HostProc0`–`HostProc8` cover most functions; `WithGoModuleFunction` handles the rest. All zero-allocation.
 
 ## Moving fast
 
