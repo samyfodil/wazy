@@ -226,9 +226,6 @@ jobs:
           - name: illumos
             version: "r151054"
             action: 'vmactions/omnios-vm@v1'
-          - name: solaris
-            version: "11.4"
-            action: 'vmactions/solaris-vm@v1'
 
     steps:
       - uses: actions/checkout@v6
