@@ -238,6 +238,13 @@ type (
 		// round-trip (which is also the scheduler/GC yield point) over N
 		// iterations. Its starting value is irrelevant to correctness.
 		interruptCounter uint64
+		// interruptCheckMask is (interval-1), loaded by loop headers to decide
+		// when to perform the module-exit-code check: the check runs when
+		// (interruptCounter & interruptCheckMask) == 0. Seeded per callEngine
+		// from the compiled module's interval, but a runtime value so the yield
+		// frequency can be retuned (e.g. for an observed-hot loop) without a
+		// recompile. mask==0 => check every iteration.
+		interruptCheckMask uint64
 	}
 )
 
@@ -299,6 +306,39 @@ func alignedStackTop(s []byte) uintptr {
 // Definition implements api.Function.
 func (c *callEngine) Definition() api.FunctionDefinition {
 	return c.parent.module.Source.FunctionDefinition(c.indexInModule)
+}
+
+// SetInterruptCheckInterval retunes, at runtime, how often this function's
+// compiled loops perform the module-exit-code check (the scheduler/GC yield and
+// cancellation point) — a larger interval trades cancellation/GC responsiveness
+// for lower per-iteration overhead on a known-hot loop. It writes the amortized
+// check's mask (interval-1) into this callEngine's execution context, so no
+// recompile is needed. Implements the bridge interface behind
+// wazy.SetInterruptCheckInterval.
+//
+// The write is atomic and benignly racy: the mask affects only yield frequency,
+// never correctness, so another goroutine may call this while the function runs.
+// Because the mask is loaded once at each loop's preheader, a change applies the
+// next time a loop is entered (the common set-then-call use); it does not alter
+// the yield rate of a loop already spinning.
+//
+// It errors unless the module was compiled with WithCloseOnContextDone and a
+// non-zero WithInterruptCheckInterval (only then is the runtime-mask path
+// present in the code).
+func (c *callEngine) SetInterruptCheckInterval(interval uint64) error {
+	if err := wasm.ValidateInterruptCheckInterval(interval); err != nil {
+		return err
+	}
+	cm := c.parent.parent
+	if !cm.ensureTermination || cm.interruptCheckInterval == 0 {
+		return fmt.Errorf("runtime interrupt-check interval requires the module compiled with WithCloseOnContextDone and a non-zero WithInterruptCheckInterval")
+	}
+	var mask uint64
+	if interval > 1 {
+		mask = interval - 1 // interval 0 or 1 => mask 0 => check every iteration
+	}
+	atomic.StoreUint64(&c.execCtx.interruptCheckMask, mask)
+	return nil
 }
 
 // Call implements api.Function.

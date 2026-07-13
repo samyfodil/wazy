@@ -207,6 +207,10 @@ func (m *moduleEngine) NewFunction(index wasm.Index) api.Function {
 		numberOfResults:        typ.ResultNumInUint64,
 	}
 
+	if p.interruptCheckInterval != 0 {
+		ce.execCtx.interruptCheckMask = p.interruptCheckInterval - 1
+	}
+
 	sharedFunctions := p.sharedFunctions
 	ce.execCtx.memoryGrowTrampolineAddress = sharedFunctions.memoryGrowAddress
 	ce.execCtx.stackGrowCallTrampolineAddress = sharedFunctions.stackGrowAddress

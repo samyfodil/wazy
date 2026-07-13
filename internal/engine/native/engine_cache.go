@@ -253,6 +253,15 @@ func serializeCompiledModule(wazyVersion string, cm *compiledModule) io.Reader {
 		buf.Write(u64.LeBytes(uint64(sz)))
 	}
 
+	// Interrupt-check interval: a format-version byte then the interval (8
+	// bytes). This is part of the module's compile identity and seeds the
+	// runtime interruptCheckMask, so a cache-loaded module keeps the yield
+	// frequency it was compiled with (rather than defaulting to 0 =
+	// check-every-iteration). Own version byte so an older cache entry lacking
+	// this section is detected as stale rather than misparsed.
+	buf.WriteByte(interruptIntervalFormatVersion)
+	buf.Write(u64.LeBytes(cm.interruptCheckInterval))
+
 	return bytes.NewReader(buf.Bytes())
 }
 
@@ -268,6 +277,12 @@ const ehTableFormatVersion = 1
 // changes (e.g. when TryTableInfo.FloorSize was added) so that old cache
 // entries are detected as stale rather than misparsed.
 const tryTableInfoFormatVersion = 1
+
+// interruptIntervalFormatVersion guards the trailing interrupt-check-interval
+// scalar, same rationale as ehTableFormatVersion: a cache entry written before
+// this section existed hits EOF at the version byte and is treated as stale
+// (forcing one recompile) rather than misparsed.
+const interruptIntervalFormatVersion = 1
 
 func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *compiledModule, staleCache bool, err error) {
 	defer reader.Close()
@@ -512,6 +527,19 @@ func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *co
 		}
 		cm.functionFrameSizes[i] = int64(sz)
 	}
+
+	// Interrupt-check interval section (see serialize). A cache entry written
+	// before this section existed EOFs here; treat that (and any short read or
+	// version mismatch) as stale so it is recompiled rather than loaded with a
+	// zero interval.
+	if _, err = io.ReadFull(bufReader, eightBytes[:1]); err != nil || eightBytes[0] != interruptIntervalFormatVersion {
+		return nil, true, nil
+	}
+	interval, err := readUint64(bufReader, &eightBytes)
+	if err != nil {
+		return nil, true, nil
+	}
+	cm.interruptCheckInterval = interval
 
 	return
 }

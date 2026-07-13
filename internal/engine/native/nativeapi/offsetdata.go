@@ -79,6 +79,11 @@ const (
 	// non-zero interrupt-check interval, only perform the module-exit-code check
 	// when (counter & (interval-1)) == 0 (see frontend loop lowering).
 	ExecutionContextOffsetInterruptCounter Offset = 1248
+	// ExecutionContextOffsetInterruptCheckMask is an offset of the
+	// `interruptCheckMask` field. It holds (interval-1); loop headers load it at
+	// runtime (rather than baking it as a constant) so the amortized-check
+	// frequency can be retuned per run/per loop without recompiling.
+	ExecutionContextOffsetInterruptCheckMask Offset = 1256
 )
 
 // ModuleContextOffsetData allows the compilers to get the information about offsets to the fields of native.moduleContextOpaque,

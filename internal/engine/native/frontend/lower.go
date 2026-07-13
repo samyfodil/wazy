@@ -1363,6 +1363,17 @@ func (c *Compiler) lowerCurrentOpcode() {
 
 		args := c.allocateVarLengthValues(len(bt.Params), state.values[originalLen:]...)
 
+		// The interrupt-check mask is loop-invariant, so load it once here in the
+		// preheader (which dominates the loop header) rather than every iteration.
+		var interruptMaskVal ssa.Value
+		if c.ensureTermination && c.interruptCheckInterval != 0 {
+			interruptMaskVal = builder.AllocateInstruction().
+				AsLoad(c.execCtxPtrValue,
+					nativeapi.ExecutionContextOffsetInterruptCheckMask.U32(),
+					ssa.TypeI64,
+				).Insert(builder).Return()
+		}
+
 		// Insert the jump to the header of loop.
 		br := builder.AllocateInstruction()
 		br.AsJump(args, loopHeader)
@@ -1377,10 +1388,12 @@ func (c *Compiler) lowerCurrentOpcode() {
 				c.emitCheckModuleExitCode(builder)
 			} else {
 				// Amortized checking: bump a counter in the execution context and
-				// only do the Go round-trip when (counter & (interval-1)) == 0.
-				// interval is a power of two, so the mask is interval-1.
-				mask := c.interruptCheckInterval - 1
-
+				// only do the Go round-trip when (counter & mask) == 0. The mask
+				// (= interval-1) was hoisted to the preheader (interruptMaskVal) and
+				// comes from the execution context at runtime rather than baked in,
+				// so the yield frequency can be retuned per run/per loop without
+				// recompiling. mask==0 (interval 1) degenerates to checking every
+				// iteration.
 				current := builder.AllocateInstruction().
 					AsLoad(c.execCtxPtrValue,
 						nativeapi.ExecutionContextOffsetInterruptCounter.U32(),
@@ -1393,8 +1406,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 						nativeapi.ExecutionContextOffsetInterruptCounter.U32()).
 					Insert(builder)
 
-				maskVal := builder.AllocateInstruction().AsIconst64(mask).Insert(builder).Return()
-				masked := builder.AllocateInstruction().AsBand(next, maskVal).Insert(builder).Return()
+				masked := builder.AllocateInstruction().AsBand(next, interruptMaskVal).Insert(builder).Return()
 				zero := builder.AllocateInstruction().AsIconst64(0).Insert(builder).Return()
 				cond := builder.AllocateInstruction().
 					AsIcmp(masked, zero, ssa.IntegerCmpCondEqual).Insert(builder).Return()
