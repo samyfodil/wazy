@@ -1,0 +1,27 @@
+# wazy
+
+> A fast, pure-Go WebAssembly runtime: zero dependencies, no CGO. Embeds Wasm compiled from Rust, C/C++, TinyGo, Zig, and more, and runs it with an optimizing amd64/arm64 compiler or a portable interpreter. Derived from wazero; focused on performance and WASI/WebAssembly standards conformance.
+
+wazy is a Go library: `go get github.com/samyfodil/wazy`. The public API lives in the root package, with `api/` for shared types and `experimental/` for unstable features. WASI preview1 is provided by `imports/wasi_snapshot_preview1`.
+
+## Documentation
+
+- [README](README.md): overview, install, usage, and benchmarks vs. wazero.
+- [RATIONALE](RATIONALE.md): design decisions, engine internals, and trade-offs.
+- [CONTRIBUTING](CONTRIBUTING.md): how to build, test, and contribute.
+- [AGENTS](AGENTS.md): build/test/format commands and conventions for coding agents.
+- [OPTIMIZATIONS](OPTIMIZATIONS.md): performance roadmap and completed optimizations.
+
+## Source
+
+- [Root API](runtime.go): runtime, module compilation, and instantiation.
+- [Typed host functions](host_typed.go): reflection-free `HostFunc0..8` / `HostProc0..8`.
+- [Optimizing compiler](internal/engine/native): amd64/arm64 JIT backend.
+- [Interpreter](internal/engine/interpreter): portable fallback engine.
+- [WASI preview1](imports/wasi_snapshot_preview1): WASI host module.
+- [CLI](cmd/wazy): command-line runner.
+
+## Optional
+
+- [API reference](https://pkg.go.dev/github.com/samyfodil/wazy): generated Go docs.
+- [License](LICENSE): Apache 2.0.
