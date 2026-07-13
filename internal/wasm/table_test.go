@@ -301,7 +301,7 @@ func TestModule_validateTable(t *testing.T) {
 				ElementSection: []ElementSegment{
 					{
 						OffsetExpr: NewConstantExpressionFromI32(5),
-						Init:       []Index{elementInitImportedGlobalReference | 0, elementInitImportedGlobalReference | 1},
+						Init:       []Index{elementInitImportedGlobalReference, elementInitImportedGlobalReference | 1},
 						Type:       RefTypeFuncref,
 					},
 				},
@@ -320,7 +320,7 @@ func TestModule_validateTable(t *testing.T) {
 				ElementSection: []ElementSegment{
 					{
 						OffsetExpr: NewConstantExpressionFromI32(5),
-						Init:       []Index{elementInitImportedGlobalReference | 0, elementInitImportedGlobalReference | 1},
+						Init:       []Index{elementInitImportedGlobalReference, elementInitImportedGlobalReference | 1},
 						Type:       RefTypeExternref,
 					},
 				},
@@ -722,8 +722,6 @@ func TestModule_validateTable_Errors(t *testing.T) {
 }
 
 var (
-	const0 = leb128.EncodeInt32(0)
-	const1 = leb128.EncodeInt32(1)
 )
 
 func TestModule_buildTables(t *testing.T) {

@@ -674,7 +674,7 @@ func TestModule_ValidateFunction_BulkMemoryOperations(t *testing.T) {
 }
 
 var (
-	f32, f64, i32, i64, v128, externref = ValueTypeF32, ValueTypeF64, ValueTypeI32, ValueTypeI64, ValueTypeV128, ValueTypeExternref
+	f32, f64, i32, i64, v128 = ValueTypeF32, ValueTypeF64, ValueTypeI32, ValueTypeI64, ValueTypeV128
 	f32i32_v                            = initFt([]ValueType{f32, i32}, nil)
 	f64f32_i64                          = initFt([]ValueType{f64, f32}, []ValueType{i64})
 	f64i32_v128i64                      = initFt([]ValueType{f64, i32}, []ValueType{v128, i64})
