@@ -1,93 +1,70 @@
-# wazy: a performance-focused WebAssembly runtime for Go
+# wazy
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/samyfodil/wazy.svg)](https://pkg.go.dev/github.com/samyfodil/wazy) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-wazy is a WebAssembly Core Specification [1.0][1] and [2.0][2] compliant
-runtime written in Go. It is a deliberately diverging derivative of
-[wazero](https://github.com/tetratelabs/wazero), forked from upstream commit
-[`c0f3a4e`](https://github.com/tetratelabs/wazero/commit/c0f3a4e), focused on
-pushing runtime performance further while keeping wazero's zero-dependency,
-no-CGO design.
+A fast WebAssembly runtime for Go: zero dependencies, no CGO, pure Go.
 
-Import wazy and extend your Go application with code written in any language!
+wazy embeds WebAssembly in your Go application. Run code compiled from Rust, C, C++, TinyGo, Zig, and anything else that targets Wasm, with no external toolchain, no cgo, and nothing to install at runtime. It is built for speed and moves quickly.
 
 ```bash
 go get github.com/samyfodil/wazy@latest
 ```
 
-## Relationship to wazero
+wazy is WebAssembly Core Specification [1.0][1] and [2.0][2] compliant, and runs on any Go target, with an optimizing native compiler on amd64 and arm64, and a pure-Go interpreter everywhere else.
 
-wazy started as a byte-for-byte import of wazero and is not a clean-room
-project. All credit for the runtime's architecture, WebAssembly semantics,
-WASI implementation, and the enormous compliance/fuzz test suite belongs to
-[Tetrate](https://tetrate.io) and the wazero authors and contributors. See
-[RATIONALE.md](RATIONALE.md) for the original design rationale, most of which
-still applies here, and [NOTICE](NOTICE)/[LICENSE](LICENSE) for the Apache 2.0
-attribution, which is preserved unmodified.
+## Fast
 
-What wazy changes going forward is documented in [OPTIMIZATIONS.md](OPTIMIZATIONS.md),
-a running scan of performance opportunities across the compiler backend,
-interpreter, runtime core, WASI/sysfs layer, and host-call mechanism, together
-with which of them have been resolved. If you want a battle-tested,
-API-stable runtime with a large user base, use upstream
-[wazero](https://github.com/tetratelabs/wazero) instead. If you want to track
-an actively-diverging performance fork, you're in the right place — but
-expect breaking changes without the same stability promises upstream makes.
+wazy is measurably faster than [wazero][wazero], the runtime it descends from, on the paths that shape real throughput and latency. Measured against upstream on the same hardware:
 
-## What's already different
+- **Host calls up to ~15x faster**, with zero allocations. Calling a Go function from Wasm is the hot path for WASI and for any host API you expose. wazy's typed host functions run at native-call speed.
+- **Compiled execution ~6% faster.**
+- **Cold start**: decode, validate, compile, instantiate, substantially faster, with far fewer allocations.
+- **Interpreter ~30% faster**, with per-call heap allocation eliminated. A benchmark that allocated 1.35M times now allocates twice.
+- **~87% less memory per call** for the common request-per-call pattern.
 
-**Reflection has been removed entirely from host function registration.**
-Upstream wazero's original `WithFunc` path registered arbitrary Go functions
-via `reflect.Value.Call`, `reflect.New`, and similar — convenient, but roughly
-14x slower than a direct call. wazy deleted that path completely. Host
-functions are now registered one of two ways:
+Methodology and per-optimization numbers live in [OPTIMIZATIONS.md](OPTIMIZATIONS.md).
 
-* Typed generic helpers — `wazy.HostFunc0` through `wazy.HostFunc8` (functions
-  that return a value) and `wazy.HostProc0` through `wazy.HostProc8`
-  (functions with no return value), defined in [`host_typed.go`](host_typed.go).
-  These derive the WebAssembly signature from Go's type system at compile time
-  and encode/decode the value stack directly — no reflection, no allocation.
-* `WithGoModuleFunction` (or `WithGoFunction`, when the calling module isn't
-  needed) on `HostFunctionBuilder`, for cases the typed helpers don't cover.
+The largest change: **reflection is gone from host-function registration.** Wasm can only pass numbers, so a host function's Go signature has to be mapped to the Wasm value stack. The common approach uses `reflect` on every call. It is convenient, and about 14x slower than a direct call. wazy removes that path. Host functions are registered through typed generic helpers that derive the Wasm signature from Go's type system at compile time and read and write the value stack directly:
 
-Both paths compile down to the same zero-allocation stack-based calling
-convention as wazero's internal `api.GoModuleFunc`. See
-[`host_typed.go`](host_typed.go) and [`builder.go`](builder.go) for the API,
-and [OPTIMIZATIONS.md](OPTIMIZATIONS.md) for the measurements motivating the
-change, plus what's next on the performance roadmap.
+```go
+wazy.HostFunc2(builder, func(ctx context.Context, mod api.Module, x, y uint32) uint32 {
+	return x + y
+}).Export("add")
+```
 
-## Example
+`HostFunc0`–`HostFunc8` and `HostProc0`–`HostProc8` cover functions with and without a return value; `WithGoModuleFunction` handles anything they don't. Every path compiles to the same zero-allocation calling convention: no reflection, no per-call garbage.
 
-The best way to learn wazy is by trying one of our [examples](examples/README.md).
-The most [basic example](examples/basic) extends a Go application with an
-addition function defined in WebAssembly.
+## Moving fast
 
-## Runtime
+wazy is an actively developed performance fork. It optimizes for where WebAssembly is going, not for standing still. The roadmap points at the modern Wasm platform, WASI 0.3 and the Component Model, which upstream does not target.
 
-There are two runtime configurations supported in wazy: _Compiler_ is default:
+That choice has a cost: wazy makes no API-stability promise. It has already broken compatibility with wazero, including host-function registration, and will do so again when that makes the runtime faster or moves it toward the component model.
 
-By default, ex `wazy.NewRuntime(ctx)`, the Compiler is used if supported. You
-can also force the interpreter like so:
+If you want a mature, stability-guaranteed runtime with a large user base, use [wazero][wazero]. If you want a fast runtime that keeps moving toward the modern Wasm platform, use wazy.
+
+## Two engines
+
+`wazy.NewRuntime(ctx)` picks the optimizing compiler when the platform supports it (amd64, arm64) and falls back to the interpreter otherwise. You can force either:
+
 ```go
 r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigInterpreter())
 ```
 
-### Interpreter
-Interpreter is a naive interpreter-based implementation of Wasm virtual
-machine. Its implementation doesn't have any platform (GOARCH, GOOS) specific
-code, therefore _interpreter_ can be used for any compilation target available
-for Go (such as `riscv64`).
+- **Compiler** translates each module to machine code during `CompileModule`, so your functions run natively, typically an order of magnitude faster than interpretation, with no host-specific dependencies.
+- **Interpreter** is pure Go with no architecture-specific code, so it runs anywhere Go runs, down to targets like `riscv64`.
 
-### Compiler
-Compiler compiles WebAssembly modules into machine code ahead of time (AOT),
-during `Runtime.CompileModule`. This means your WebAssembly functions execute
-natively at runtime. Compiler is faster than Interpreter, often by order of
-magnitude (10x) or more. This is done without host-specific dependencies.
+## Example
+
+The fastest way in is an [example](examples/README.md). The [basic one](examples/basic) extends a Go program with an addition function written in WebAssembly.
+
+## Credit
+
+wazy began as a fork of [wazero][wazero] by [Tetrate](https://tetrate.io). The runtime architecture, WebAssembly semantics, WASI implementation, and the substantial compliance and fuzzing test suites are their work, and wazy still rests on them. See [RATIONALE.md](RATIONALE.md) for the original design rationale and [NOTICE](NOTICE) / [LICENSE](LICENSE) for the Apache 2.0 attribution, preserved unmodified.
 
 ## License
 
-Apache 2.0, same as upstream. [LICENSE](LICENSE) and [NOTICE](NOTICE) are
-unmodified from wazero.
+Apache 2.0. [LICENSE](LICENSE) and [NOTICE](NOTICE) are unchanged from wazero.
 
 [1]: https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/
 [2]: https://www.w3.org/TR/2022/WD-wasm-core-2-20220419/
+[wazero]: https://github.com/tetratelabs/wazero
