@@ -26,6 +26,11 @@ func (b *builder) runPreBlockLayoutPasses() {
 	passCalculateImmediateDominators(b)
 	passRedundantPhiEliminationOpt(b)
 	passNopInstElimination(b)
+	// passConstFoldAndCSE performs constant folding, algebraic simplification, and local (per-block)
+	// common subexpression elimination. It must run after passNopInstElimination (so it doesn't
+	// redo the shift/rotate-by-0 identity that pass already handles) and before
+	// passDeadCodeEliminationOpt (so DCE cleans up the instructions this pass aliases away).
+	passConstFoldAndCSE(b)
 
 	// TODO: implement either conversion of irreducible CFG into reducible one, or irreducible CFG detection where we panic.
 	// 	WebAssembly program shouldn't result in irreducible CFG, but we should handle it properly in just in case.
@@ -34,9 +39,6 @@ func (b *builder) runPreBlockLayoutPasses() {
 	// TODO: implement more optimization passes like:
 	// 	block coalescing.
 	// 	Copy-propagation.
-	// 	Constant folding.
-	// 	Common subexpression elimination.
-	// 	Arithmetic simplifications.
 	// 	and more!
 
 	// passDeadCodeEliminationOpt could be more accurate if we do this after other optimizations.

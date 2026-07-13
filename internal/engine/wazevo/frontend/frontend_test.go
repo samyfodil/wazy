@@ -1311,8 +1311,7 @@ blk0: (v0:i64, v1:i64)
 	v22:i32 = CallIndirect v20:sig0, v0, v21
 	v27:i64 = Load v1, 0x8
 	v28:i32 = Load v27, 0x8
-	v29:i32 = Iconst_32 0x10
-	v30:i32 = Ushr v28, v29
+	v30:i32 = Ushr v28, v11
 	Jump blk_ret, v4, v12, v22, v30
 `,
 		},
@@ -1353,10 +1352,9 @@ blk0: (v0:i64, v1:i64)
 	v7:i32 = Load v1, 0x10
 	v8:i32 = Iconst_32 0x10
 	v9:i32 = Ushr v7, v8
-	v10:i32 = Iconst_32 0x1
 	Store v1, v0, 0x8
 	v11:i64 = Load v0, 0x48
-	v12:i32 = CallIndirect v11:sig1, v0, v10
+	v12:i32 = CallIndirect v11:sig1, v0, v2
 	Jump blk_ret, v4, v9, v12
 `,
 		},
