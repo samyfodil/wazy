@@ -1,6 +1,6 @@
 # Contributing
 
-Contributions are welcome, from humans and AI agents alike. There is no company behind wazy, no CLA, no DCO signoff, and no real-name requirement. If the change is good and the tests are green, it goes in. Open a pull request.
+Contributions are welcome, from humans and AI agents alike. If the change is good and the tests are green, it goes in. Open a pull request.
 
 ## Before you open a PR
 
