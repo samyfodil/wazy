@@ -4362,6 +4362,31 @@ func (c *Compiler) emitCheckModuleExitCode(builder ssa.Builder) {
 }
 
 // memOpSetup inserts the bounds check and calculates the address of the memory operation (loads/stores).
+// constUpperBoundU32 returns the value of v as an unsigned 32-bit constant if v
+// is a constant instruction, mirroring the 32-bit-address assumption memOpSetup
+// makes elsewhere.
+func (c *Compiler) constUpperBoundU32(v ssa.Value) (uint64, bool) {
+	if d := c.ssaBuilder.InstructionOfValue(v); d != nil && d.Constant() {
+		return uint64(uint32(d.ConstantVal())), true
+	}
+	return 0, false
+}
+
+// recordMaskedSafeBound materializes the absolute address for a bounds-check-
+// elided access (if not already computed) and records the known-safe bound so
+// subsequent accesses off the same base reuse it. Shared by the masked-base
+// elision path.
+func (c *Compiler) recordMaskedSafeBound(baseAddr ssa.Value, baseAddrID ssa.ValueID, ceil uint64, address ssa.Value) ssa.Value {
+	builder := c.ssaBuilder
+	if !address.Valid() {
+		memBase := c.getMemoryBaseValue(false)
+		extBaseAddr := builder.AllocateInstruction().AsUExtend(baseAddr, 32, 64).Insert(builder).Return()
+		address = builder.AllocateInstruction().AsIadd(memBase, extBaseAddr).Insert(builder).Return()
+	}
+	c.recordKnownSafeBound(baseAddrID, ceil, address)
+	return address
+}
+
 func (c *Compiler) memOpSetup(baseAddr ssa.Value, constOffset, operationSizeInBytes uint64) (address ssa.Value) {
 	address = ssa.ValueInvalid
 	builder := c.ssaBuilder
@@ -4403,6 +4428,25 @@ func (c *Compiler) memOpSetup(baseAddr ssa.Value, constOffset, operationSizeInBy
 					AsIadd(memBase, extBaseAddr).Insert(builder).Return()
 			}
 			c.recordKnownSafeBound(baseAddrID, ceil, address)
+			return
+		}
+	}
+
+	// A base address of the form (x & C) is bounded above by the constant mask C:
+	// only bits set in C can be set in the result, so the result is <= C as an
+	// unsigned value. Hence if C + ceil <= min it can never be out of bounds --
+	// the same "min is a permanent static lower bound" reasoning as the constant
+	// case above. This covers the ubiquitous masked-index idiom (hash slot
+	// h & (n-1), ring-buffer i & mask, & 0x…) that a constant-only check cannot.
+	// Mirrors the constant case's 32-bit-address assumption (uint32 truncation).
+	if def := builder.InstructionOfValue(baseAddr); def != nil && def.Opcode() == ssa.OpcodeBand {
+		x, y := def.Arg2()
+		mask, ok := c.constUpperBoundU32(x)
+		if !ok {
+			mask, ok = c.constUpperBoundU32(y)
+		}
+		if ok && mask+ceil <= c.memoryMinSizeInBytes {
+			address = c.recordMaskedSafeBound(baseAddr, baseAddrID, ceil, address)
 			return
 		}
 	}
