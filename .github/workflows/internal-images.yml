@@ -2,10 +2,8 @@
 ---
 name: internal-images
 
-# Refresh the tags once a day. This limits impact of rate-limited images. See RATIONALE.md
+# Disabled: no scheduled run; manual-only via workflow_dispatch.
 on:
-  schedule:
-    - cron: "23 3 * * *"
   workflow_dispatch:  # Allows manual refresh
 
 # This builds images and pushes them to ghcr.io/samyfodil/wazy/internal-$tag

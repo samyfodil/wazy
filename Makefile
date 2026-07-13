@@ -3,8 +3,6 @@ gofumpt       := mvdan.cc/gofumpt@v0.6.0
 gosimports    := github.com/rinchsan/gosimports/cmd/gosimports@v0.3.8
 golangci_lint := github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.5
 asmfmt        := github.com/klauspost/asmfmt/cmd/asmfmt@v1.3.2
-# sync this with netlify.toml!
-hugo          := github.com/gohugoio/hugo@v0.115.2
 
 # Make 3.81 doesn't support '**' globbing: Set explicitly instead of recursion.
 all_sources   := $(wildcard *.go */*.go */*/*.go */*/*/*.go */*/*/*.go */*/*/*/*.go)
@@ -308,11 +306,6 @@ check:
 		echo "The following differences will fail CI until committed:"; \
 		git diff --exit-code; \
 	fi
-
-.PHONY: site
-site: ## Serve website content
-	@git submodule update --init
-	@cd site && go run $(hugo) server --minify --disableFastRender --baseURL localhost:1313 --cleanDestinationDir -D
 
 .PHONY: clean
 clean: ## Ensure a clean build
