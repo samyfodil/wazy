@@ -237,6 +237,15 @@ func (r *runtime) CompileModule(ctx context.Context, binary []byte) (CompiledMod
 		return nil, err
 	}
 
+	// The loop interrupt-check interval (for WithCloseOnContextDone) is a
+	// per-compile setting read from ctx; it is folded into the module ID so
+	// distinct intervals compile to distinct cached variants. The engine reads
+	// the same value from ctx to configure loop lowering.
+	interruptCheckInterval := wasm.InterruptCheckIntervalFromContext(ctx)
+	if err = wasm.ValidateInterruptCheckInterval(interruptCheckInterval); err != nil {
+		return nil, err
+	}
+
 	// The module ID is a hash over the raw binary plus the compile-affecting
 	// flags (listener presence per function, ensureTermination). Computing it
 	// before validating lets us ask the engine whether it already has a
@@ -259,7 +268,7 @@ func (r *runtime) CompileModule(ctx context.Context, binary []byte) (CompiledMod
 	var listeners []experimentalapi.FunctionListener
 	var hasCompiled bool
 	if ctx.Value(expctxkeys.FunctionListenerFactoryKey{}) == nil {
-		internal.AssignModuleID(binary, nil, r.ensureTermination)
+		internal.AssignModuleID(binary, nil, r.ensureTermination, interruptCheckInterval)
 
 		// hasCompiled acquires a reference on the engine's cached artifact
 		// for this module.ID (if any) - see wasm.Engine.HasCompiledModule. We
@@ -308,7 +317,7 @@ func (r *runtime) CompileModule(ctx context.Context, binary []byte) (CompiledMod
 		if listeners, err = buildFunctionListeners(ctx, internal); err != nil {
 			return nil, err
 		}
-		internal.AssignModuleID(binary, listeners, r.ensureTermination)
+		internal.AssignModuleID(binary, listeners, r.ensureTermination, interruptCheckInterval)
 	}
 
 	// Now that the module is validated, cache the memory definitions.

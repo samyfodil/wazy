@@ -1371,16 +1371,48 @@ func (c *Compiler) lowerCurrentOpcode() {
 		c.switchTo(originalLen, loopHeader)
 
 		if c.ensureTermination {
-			checkModuleExitCodePtr := builder.AllocateInstruction().
-				AsLoad(c.execCtxPtrValue,
-					nativeapi.ExecutionContextOffsetCheckModuleExitCodeTrampolineAddress.U32(),
-					ssa.TypeI64,
-				).Insert(builder).Return()
+			if c.interruptCheckInterval == 0 {
+				// Check every iteration: a Go round-trip (also the scheduler/GC
+				// yield point) at every loop header.
+				c.emitCheckModuleExitCode(builder)
+			} else {
+				// Amortized checking: bump a counter in the execution context and
+				// only do the Go round-trip when (counter & (interval-1)) == 0.
+				// interval is a power of two, so the mask is interval-1.
+				mask := c.interruptCheckInterval - 1
 
-			args := c.allocateVarLengthValues(1, c.execCtxPtrValue)
-			builder.AllocateInstruction().
-				AsCallIndirect(checkModuleExitCodePtr, &c.checkModuleExitCodeSig, args).
-				Insert(builder)
+				current := builder.AllocateInstruction().
+					AsLoad(c.execCtxPtrValue,
+						nativeapi.ExecutionContextOffsetInterruptCounter.U32(),
+						ssa.TypeI64,
+					).Insert(builder).Return()
+				one := builder.AllocateInstruction().AsIconst64(1).Insert(builder).Return()
+				next := builder.AllocateInstruction().AsIadd(current, one).Insert(builder).Return()
+				builder.AllocateInstruction().
+					AsStore(ssa.OpcodeStore, next, c.execCtxPtrValue,
+						nativeapi.ExecutionContextOffsetInterruptCounter.U32()).
+					Insert(builder)
+
+				maskVal := builder.AllocateInstruction().AsIconst64(mask).Insert(builder).Return()
+				masked := builder.AllocateInstruction().AsBand(next, maskVal).Insert(builder).Return()
+				zero := builder.AllocateInstruction().AsIconst64(0).Insert(builder).Return()
+				cond := builder.AllocateInstruction().
+					AsIcmp(masked, zero, ssa.IntegerCmpCondEqual).Insert(builder).Return()
+
+				checkBlk := builder.AllocateBasicBlock()
+				afterBlk := builder.AllocateBasicBlock()
+
+				builder.AllocateInstruction().AsBrnz(cond, ssa.ValuesNil, checkBlk).Insert(builder)
+				builder.AllocateInstruction().AsJump(ssa.ValuesNil, afterBlk).Insert(builder)
+
+				builder.SetCurrentBlock(checkBlk)
+				c.emitCheckModuleExitCode(builder)
+				builder.AllocateInstruction().AsJump(ssa.ValuesNil, afterBlk).Insert(builder)
+				builder.Seal(checkBlk)
+
+				builder.SetCurrentBlock(afterBlk)
+				builder.Seal(afterBlk)
+			}
 		}
 	case wasm.OpcodeIf:
 		bt := c.readBlockType()
@@ -4298,6 +4330,23 @@ func (c *Compiler) lowerTailCallReturnCallRef(typeIndex uint32) {
 
 	c.reloadAfterCall()
 	c.lowerReturn(builder)
+}
+
+// emitCheckModuleExitCode emits the indirect call to the check-module-exit-code
+// trampoline. This is a Go round-trip: besides observing a pending
+// WithCloseOnContextDone cancellation, it is the only scheduler/GC yield point
+// in an otherwise non-preemptible compiled loop, so it must stay a Go call.
+func (c *Compiler) emitCheckModuleExitCode(builder ssa.Builder) {
+	checkModuleExitCodePtr := builder.AllocateInstruction().
+		AsLoad(c.execCtxPtrValue,
+			nativeapi.ExecutionContextOffsetCheckModuleExitCodeTrampolineAddress.U32(),
+			ssa.TypeI64,
+		).Insert(builder).Return()
+
+	args := c.allocateVarLengthValues(1, c.execCtxPtrValue)
+	builder.AllocateInstruction().
+		AsCallIndirect(checkModuleExitCodePtr, &c.checkModuleExitCodeSig, args).
+		Insert(builder)
 }
 
 // memOpSetup inserts the bounds check and calculates the address of the memory operation (loads/stores).

@@ -231,6 +231,13 @@ type (
 		// localsSaveAreaPtr points to the tryHandler's localsSaveArea slice
 		// backing array. Handlers load locals from this slice.
 		localsSaveAreaPtr uintptr
+		// interruptCounter is a monotonically increasing counter bumped at every
+		// loop header when WithCloseOnContextDone is active with a non-zero
+		// interrupt-check interval. The module-exit-code check is only performed
+		// when (interruptCounter & (interval-1)) == 0, amortizing the Go
+		// round-trip (which is also the scheduler/GC yield point) over N
+		// iterations. Its starting value is irrelevant to correctness.
+		interruptCounter uint64
 	}
 )
 

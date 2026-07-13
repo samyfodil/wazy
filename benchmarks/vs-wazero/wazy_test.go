@@ -61,8 +61,44 @@ func setupHostCallWazy(tb testing.TB) hostCallEnv {
 // never invoked by the benchmarked exports (fibonacci is pure); it only has to
 // exist so instantiation resolves the import.
 func newCaseRuntimeWazy(tb testing.TB) wazy.Runtime {
+	return newCaseRuntimeWazyCfg(tb, wazy.NewRuntimeConfigCompiler())
+}
+
+// newCaseRuntimeWazyClose is newCaseRuntimeWazy with WithCloseOnContextDone, so
+// caseWasm's loop-containing exports emit the interrupt check (H6 / C21 area).
+func newCaseRuntimeWazyClose(tb testing.TB) wazy.Runtime {
+	return newCaseRuntimeWazyCfg(tb, wazy.NewRuntimeConfigCompiler().WithCloseOnContextDone(true))
+}
+
+// newHostLoopWazy builds a runtime with an env.cb host function (identity) and
+// returns the instantiated hostloop "work" function. closeOn toggles
+// WithCloseOnContextDone.
+func newHostLoopWazy(tb testing.TB, wasm []byte, closeOn bool) (wazy.Runtime, interface {
+	CallWithStack(context.Context, []uint64) error
+},
+) {
 	ctx := context.Background()
-	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler())
+	cfg := wazy.NewRuntimeConfigCompiler()
+	if closeOn {
+		cfg = cfg.WithCloseOnContextDone(true)
+	}
+	r := wazy.NewRuntimeWithConfig(ctx, cfg)
+	hb := r.NewHostModuleBuilder("env")
+	hb.NewFunctionBuilder().WithGoModuleFunction(wazyapi.GoModuleFunc(func(ctx context.Context, mod wazyapi.Module, stack []uint64) {
+	}), []wazyapi.ValueType{wazyapi.ValueTypeI32}, []wazyapi.ValueType{wazyapi.ValueTypeI32}).Export("cb")
+	if _, err := hb.Instantiate(ctx); err != nil {
+		tb.Fatal(err)
+	}
+	mod, err := r.Instantiate(ctx, wasm)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return r, mod.ExportedFunction("work")
+}
+
+func newCaseRuntimeWazyCfg(tb testing.TB, cfg wazy.RuntimeConfig) wazy.Runtime {
+	ctx := context.Background()
+	r := wazy.NewRuntimeWithConfig(ctx, cfg)
 	hb := r.NewHostModuleBuilder("env")
 	hb.NewFunctionBuilder().WithGoModuleFunction(wazyapi.GoModuleFunc(func(ctx context.Context, mod wazyapi.Module, stack []uint64) {
 	}), []wazyapi.ValueType{wazyapi.ValueTypeI32, wazyapi.ValueTypeI32}, nil).Export("get_random_string")

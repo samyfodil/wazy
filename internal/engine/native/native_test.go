@@ -81,4 +81,5 @@ func Test_ExecutionContextOffsets(t *testing.T) {
 	require.Equal(t, nativeapi.Offset(unsafe.Offsetof(execCtx.exceptionParamsPtr)), nativeapi.ExecutionContextOffsetExceptionParamsPtr)
 	require.Equal(t, nativeapi.Offset(unsafe.Offsetof(execCtx.caughtExceptionClauseIdx)), nativeapi.ExecutionContextOffsetCaughtExceptionClauseIdx)
 	require.Equal(t, nativeapi.Offset(unsafe.Offsetof(execCtx.localsSaveAreaPtr)), nativeapi.ExecutionContextOffsetLocalsSaveAreaPtr)
+	require.Equal(t, nativeapi.Offset(unsafe.Offsetof(execCtx.interruptCounter)), nativeapi.ExecutionContextOffsetInterruptCounter)
 }

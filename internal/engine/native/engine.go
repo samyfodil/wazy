@@ -266,6 +266,12 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 	}
 
 	withListener := len(listeners) > 0
+	// The interval is validated at the API boundary (runtime.CompileModule) and
+	// folded into module.ID, so this read is consistent with that module's ID.
+	// It configures loop lowering below; a re-lower is a fresh CompileModule
+	// under a context carrying a different interval (a distinct module.ID, hence
+	// a distinct cached variant).
+	interruptCheckInterval := wasm.InterruptCheckIntervalFromContext(ctx)
 	cm := &compiledModule{
 		offsets: nativeapi.NewModuleContextOffsetData(module, withListener), parent: e, module: module,
 		ensureTermination: ensureTermination,
@@ -301,6 +307,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 	if workers := experimental.GetCompilationWorkers(ctx); workers <= 1 {
 		// Compile with a single goroutine.
 		fe := frontend.NewFrontendCompiler(module, ssaBuilder, &cm.offsets, ensureTermination, withListener, needSourceInfo)
+		fe.SetInterruptCheckInterval(interruptCheckInterval)
 
 		for i := range module.CodeSection {
 			if nativeapi.DeterministicCompilationVerifierEnabled {
@@ -358,6 +365,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 				fe := frontend.NewFrontendCompiler(
 					module, ssaBuilder, &cm.offsets, ensureTermination, withListener, needSourceInfo).
 					WithTryTableMetadata(sharedTTM)
+				fe.SetInterruptCheckInterval(interruptCheckInterval)
 
 				for {
 					if err := ctx.Err(); err != nil {

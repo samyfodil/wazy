@@ -55,6 +55,12 @@ type Compiler struct {
 	mutableGlobalVariablesIndexes []wasm.Index // index to ^.
 	needListener                  bool
 	needSourceOffsetInfo          bool
+	// interruptCheckInterval controls loop interrupt-check lowering when
+	// ensureTermination is set: 0 means check every iteration (a Go round-trip
+	// per loop header), a power of two N means check only every Nth iteration
+	// via a counter in the execution context. Defaults to 0; set per compile by
+	// the engine (see SetInterruptCheckInterval).
+	interruptCheckInterval uint64
 	// br is reused during lowering.
 	br            *bytes.Reader
 	loweringState loweringState
@@ -130,6 +136,13 @@ func NewFrontendCompiler(m *wasm.Module, ssaBuilder ssa.Builder, offset *nativea
 	}
 	c.declareSignatures(listenerOn)
 	return c
+}
+
+// SetInterruptCheckInterval sets the loop interrupt-check interval used when
+// ensureTermination is active. interval must be 0 (check every iteration) or a
+// power of two. It must be called before lowering.
+func (c *Compiler) SetInterruptCheckInterval(interval uint64) {
+	c.interruptCheckInterval = interval
 }
 
 // tryTableMetadata accumulates try_table metadata during compilation.

@@ -58,8 +58,42 @@ func setupHostCallWazero(tb testing.TB) hostCallEnv {
 
 // newCaseRuntimeWazero is the wazero counterpart of newCaseRuntimeWazy.
 func newCaseRuntimeWazero(tb testing.TB) wazero.Runtime {
+	return newCaseRuntimeWazeroCfg(tb, wazero.NewRuntimeConfigCompiler())
+}
+
+// newCaseRuntimeWazeroClose is newCaseRuntimeWazero with WithCloseOnContextDone
+// (wazero@main checks every loop iteration; it has no interval knob).
+func newCaseRuntimeWazeroClose(tb testing.TB) wazero.Runtime {
+	return newCaseRuntimeWazeroCfg(tb, wazero.NewRuntimeConfigCompiler().WithCloseOnContextDone(true))
+}
+
+// newHostLoopWazero mirrors newHostLoopWazy on wazero.
+func newHostLoopWazero(tb testing.TB, wasm []byte, closeOn bool) (wazero.Runtime, interface {
+	CallWithStack(context.Context, []uint64) error
+},
+) {
 	ctx := context.Background()
-	r := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfigCompiler())
+	cfg := wazero.NewRuntimeConfigCompiler()
+	if closeOn {
+		cfg = cfg.WithCloseOnContextDone(true)
+	}
+	r := wazero.NewRuntimeWithConfig(ctx, cfg)
+	hb := r.NewHostModuleBuilder("env")
+	hb.NewFunctionBuilder().WithGoModuleFunction(wazeroapi.GoModuleFunc(func(ctx context.Context, mod wazeroapi.Module, stack []uint64) {
+	}), []wazeroapi.ValueType{wazeroapi.ValueTypeI32}, []wazeroapi.ValueType{wazeroapi.ValueTypeI32}).Export("cb")
+	if _, err := hb.Instantiate(ctx); err != nil {
+		tb.Fatal(err)
+	}
+	mod, err := r.Instantiate(ctx, wasm)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return r, mod.ExportedFunction("work")
+}
+
+func newCaseRuntimeWazeroCfg(tb testing.TB, cfg wazero.RuntimeConfig) wazero.Runtime {
+	ctx := context.Background()
+	r := wazero.NewRuntimeWithConfig(ctx, cfg)
 	hb := r.NewHostModuleBuilder("env")
 	hb.NewFunctionBuilder().WithGoModuleFunction(wazeroapi.GoModuleFunc(func(ctx context.Context, mod wazeroapi.Module, stack []uint64) {
 	}), []wazeroapi.ValueType{wazeroapi.ValueTypeI32, wazeroapi.ValueTypeI32}, nil).Export("get_random_string")

@@ -74,6 +74,11 @@ const (
 	// where locals are mirrored inside try_table bodies, so that handler blocks
 	// can read throw-time local values after stack-clone restore.
 	ExecutionContextOffsetLocalsSaveAreaPtr Offset = 1240
+	// ExecutionContextOffsetInterruptCounter is an offset of the `interruptCounter`
+	// field. Loop headers increment it and, under WithCloseOnContextDone with a
+	// non-zero interrupt-check interval, only perform the module-exit-code check
+	// when (counter & (interval-1)) == 0 (see frontend loop lowering).
+	ExecutionContextOffsetInterruptCounter Offset = 1248
 )
 
 // ModuleContextOffsetData allows the compilers to get the information about offsets to the fields of native.moduleContextOpaque,

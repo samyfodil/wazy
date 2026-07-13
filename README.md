@@ -18,6 +18,7 @@ wazy is measurably faster than [wazero][wazero], the runtime it descends from, o
 
 - **Host calls up to ~15x faster**, with zero allocations. Calling a Go function from Wasm is the hot path for WASI and for any host API you expose. wazy's typed host functions run at native-call speed.
 - **Compiled execution 4–18% faster** on real TinyGo workloads (geomean ~6% vs `wazero@main`). Memory-heavy code leads — string manipulation −18%, array reversal −14%, base64 −12% — with recursive fibonacci −4%. The compiler also allocates less per module (up to −17% on real Rust/Zig/C output).
+- **Interruptible loops stay cheap.** `WithCloseOnContextDone` (deadline and cancellation enforcement) amortizes its per-loop safety check instead of paying a Go round-trip on every iteration. On a realistic loop that calls a host function each iteration it adds **~5%** (vs upstream's ~75%); on the real fibonacci it runs **~12x faster** than upstream, and on a tight compute loop **~13x**. The overhead scales to the loop body, so only near-empty compute kernels pay a real tax — tunable per compile with `wazy.WithInterruptCheckInterval`. Opt in with `WithCloseOnContextDone(true)` when embedding untrusted or unbounded guests.
 - **Cold start**: decode, validate, compile, instantiate, substantially faster, with far fewer allocations.
 - **Interpreter ~30% faster**, with per-call heap allocation eliminated. A benchmark that allocated 1.35M times now allocates twice.
 - **~87% less memory per call** for the common request-per-call pattern.

@@ -213,10 +213,11 @@ func TestRuntime_CompileModule_CacheHitSkipsFunctionBodyValidation(t *testing.T)
 	// Compute the module ID exactly as runtime.CompileModule will for this
 	// call (testCtx carries no experimentalapi.FunctionListenerFactory, so
 	// listeners is nil; engineLessConfig-derived configs default
-	// ensureTermination to false), so the mock engine can be pre-seeded as
-	// already holding a compiled artifact for it.
+	// ensureTermination to false; and no wazy.WithInterruptCheckInterval
+	// override, so the interval is wasm.DefaultInterruptCheckInterval), so the
+	// mock engine can be pre-seeded as already holding a compiled artifact.
 	var idOnly wasm.Module
-	idOnly.AssignModuleID(bin, nil, false)
+	idOnly.AssignModuleID(bin, nil, false, wasm.DefaultInterruptCheckInterval)
 
 	t.Run("cold: full validation runs and rejects the bad function body", func(t *testing.T) {
 		engine := &mockEngine{name: "mock", cachedModules: map[*wasm.Module]struct{}{}}
