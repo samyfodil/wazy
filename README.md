@@ -59,7 +59,7 @@ The fastest way in is an [example](examples/README.md). The [basic one](examples
 
 ## Credit
 
-wazy began as a fork of [wazero][wazero] by [Tetrate](https://tetrate.io). The runtime architecture, WebAssembly semantics, WASI implementation, and the substantial compliance and fuzzing test suites are their work, and wazy still rests on them. See [RATIONALE.md](RATIONALE.md) for the original design rationale and [NOTICE](NOTICE) / [LICENSE](LICENSE) for the Apache 2.0 attribution, preserved unmodified.
+wazy began as a fork of [wazero][wazero], and still rests on its runtime architecture, WebAssembly semantics, WASI implementation, and compliance and fuzzing test suites. See [RATIONALE.md](RATIONALE.md) for the original design rationale and [NOTICE](NOTICE) / [LICENSE](LICENSE) for the Apache 2.0 attribution, preserved unmodified.
 
 ## License
 
