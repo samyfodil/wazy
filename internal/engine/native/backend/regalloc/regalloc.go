@@ -958,7 +958,7 @@ func (a *Allocator[I, B, F]) fixMergeState(f F, blk B) {
 	blkSt := a.getOrAllocateBlockState(bID)
 	desiredOccupants := &blkSt.startRegs
 	var desiredOccupantsSet RegSet
-	for i, v := range desiredOccupants {
+	for i, v := range desiredOccupants.arr {
 		if v != nil {
 			desiredOccupantsSet = desiredOccupantsSet.add(RealReg(i))
 		}

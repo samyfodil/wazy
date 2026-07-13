@@ -2,6 +2,7 @@ package regalloc
 
 import (
 	"fmt"
+	"math/bits"
 	"strings"
 )
 
@@ -46,7 +47,14 @@ func (rs RegSet) Range(f func(allocatedRealReg RealReg)) {
 	}
 }
 
-type regInUseSet[I Instr, B Block[I], F Function[I, B]] [64]*vrState[I, B, F]
+// regInUseSet maps each in-use RealReg to its vrState. `mask` mirrors occupancy
+// (bit r set iff arr[r] != nil) so range_ visits only live registers via
+// bits.TrailingZeros64 instead of scanning all 64 slots — range_ runs on the
+// hot per-call-instruction and per-edge paths (C12).
+type regInUseSet[I Instr, B Block[I], F Function[I, B]] struct {
+	arr  [64]*vrState[I, B, F]
+	mask uint64
+}
 
 func newRegInUseSet[I Instr, B Block[I], F Function[I, B]]() regInUseSet[I, B, F] {
 	var ret regInUseSet[I, B, F]
@@ -55,12 +63,13 @@ func newRegInUseSet[I Instr, B Block[I], F Function[I, B]]() regInUseSet[I, B, F
 }
 
 func (rs *regInUseSet[I, B, F]) reset() {
-	clear(rs[:])
+	clear(rs.arr[:])
+	rs.mask = 0
 }
 
 func (rs *regInUseSet[I, B, F]) format(info *RegisterInfo) string { //nolint:unused
 	var ret []string
-	for i, vr := range rs {
+	for i, vr := range rs.arr {
 		if vr != nil {
 			ret = append(ret, fmt.Sprintf("(%s->v%d)", info.RealRegName(RealReg(i)), vr.v.ID()))
 		}
@@ -69,28 +78,29 @@ func (rs *regInUseSet[I, B, F]) format(info *RegisterInfo) string { //nolint:unu
 }
 
 func (rs *regInUseSet[I, B, F]) has(r RealReg) bool {
-	return r < 64 && rs[r] != nil
+	return r < 64 && rs.arr[r] != nil
 }
 
 func (rs *regInUseSet[I, B, F]) get(r RealReg) *vrState[I, B, F] {
-	return rs[r]
+	return rs.arr[r]
 }
 
 func (rs *regInUseSet[I, B, F]) remove(r RealReg) {
-	rs[r] = nil
+	rs.arr[r] = nil
+	rs.mask &^= 1 << r
 }
 
 func (rs *regInUseSet[I, B, F]) add(r RealReg, vr *vrState[I, B, F]) {
 	if r >= 64 {
 		return
 	}
-	rs[r] = vr
+	rs.arr[r] = vr
+	rs.mask |= 1 << r
 }
 
 func (rs *regInUseSet[I, B, F]) range_(f func(allocatedRealReg RealReg, vr *vrState[I, B, F])) {
-	for i, vr := range rs {
-		if vr != nil {
-			f(RealReg(i), vr)
-		}
+	for m := rs.mask; m != 0; m &= m - 1 {
+		r := bits.TrailingZeros64(m)
+		f(RealReg(r), rs.arr[r])
 	}
 }
