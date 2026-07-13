@@ -65,11 +65,11 @@ TEXT ·afterThrowTransferEntrypoint(SB), NOSPLIT|NOFRAME, $0-40
 	MOVQ SP, 24(AX)
 
 	// Restore callee-saved registers from execCtx.savedRegisters (AX).
-	MOVQ 96(AX), DX
-	MOVQ 112(AX), R12
-	MOVQ 128(AX), R13
-	MOVQ 144(AX), R14
-	MOVQ 160(AX), R15
+	MOVQ  96(AX), DX
+	MOVQ  112(AX), R12
+	MOVQ  128(AX), R13
+	MOVQ  144(AX), R14
+	MOVQ  160(AX), R15
 	MOVOU 176(AX), X8
 	MOVOU 192(AX), X9
 	MOVOU 208(AX), X10

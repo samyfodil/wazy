@@ -675,22 +675,22 @@ func TestModule_ValidateFunction_BulkMemoryOperations(t *testing.T) {
 
 var (
 	f32, f64, i32, i64, v128 = ValueTypeF32, ValueTypeF64, ValueTypeI32, ValueTypeI64, ValueTypeV128
-	f32i32_v                            = initFt([]ValueType{f32, i32}, nil)
-	f64f32_i64                          = initFt([]ValueType{f64, f32}, []ValueType{i64})
-	f64i32_v128i64                      = initFt([]ValueType{f64, i32}, []ValueType{v128, i64})
-	i32_i32                             = initFt([]ValueType{i32}, []ValueType{i32})
-	i32f64_v                            = initFt([]ValueType{i32, f64}, nil)
-	i32i32_i32                          = initFt([]ValueType{i32, i32}, []ValueType{i32})
-	i32_v                               = initFt([]ValueType{i32}, nil)
-	v_v                                 = FunctionType{}
-	v_f32                               = initFt(nil, []ValueType{f32})
-	v_f32f32                            = initFt(nil, []ValueType{f32, f32})
-	v_f64i32                            = initFt(nil, []ValueType{f64, i32})
-	v_f64f64                            = initFt(nil, []ValueType{f64, f64})
-	v_i32                               = initFt(nil, []ValueType{i32})
-	v_i32i32                            = initFt(nil, []ValueType{i32, i32})
-	v_i32i64                            = initFt(nil, []ValueType{i32, i64})
-	v_i64i64                            = initFt(nil, []ValueType{i64, i64})
+	f32i32_v                 = initFt([]ValueType{f32, i32}, nil)
+	f64f32_i64               = initFt([]ValueType{f64, f32}, []ValueType{i64})
+	f64i32_v128i64           = initFt([]ValueType{f64, i32}, []ValueType{v128, i64})
+	i32_i32                  = initFt([]ValueType{i32}, []ValueType{i32})
+	i32f64_v                 = initFt([]ValueType{i32, f64}, nil)
+	i32i32_i32               = initFt([]ValueType{i32, i32}, []ValueType{i32})
+	i32_v                    = initFt([]ValueType{i32}, nil)
+	v_v                      = FunctionType{}
+	v_f32                    = initFt(nil, []ValueType{f32})
+	v_f32f32                 = initFt(nil, []ValueType{f32, f32})
+	v_f64i32                 = initFt(nil, []ValueType{f64, i32})
+	v_f64f64                 = initFt(nil, []ValueType{f64, f64})
+	v_i32                    = initFt(nil, []ValueType{i32})
+	v_i32i32                 = initFt(nil, []ValueType{i32, i32})
+	v_i32i64                 = initFt(nil, []ValueType{i32, i64})
+	v_i64i64                 = initFt(nil, []ValueType{i64, i64})
 )
 
 func initFt(params, results []ValueType) FunctionType {

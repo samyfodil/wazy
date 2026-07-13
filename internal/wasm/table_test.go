@@ -721,9 +721,6 @@ func TestModule_validateTable_Errors(t *testing.T) {
 	}
 }
 
-var (
-)
-
 func TestModule_buildTables(t *testing.T) {
 	three := uint32(3)
 	tests := []struct {

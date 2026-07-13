@@ -119,8 +119,7 @@ func DecodeModule(
 		case wasm.SectionIDType:
 			m.TypeSection, offset, err = decodeTypeSection(enabledFeatures, binary, offset)
 		case wasm.SectionIDImport:
-			m.ImportSection, m.ImportPerModule, m.ImportFunctionCount, m.ImportGlobalCount, m.ImportMemoryCount, m.ImportTableCount, m.ImportTagCount, offset, err =
-				decodeImportSection(binary, offset, arena, memSizer, memoryLimitPages, enabledFeatures)
+			m.ImportSection, m.ImportPerModule, m.ImportFunctionCount, m.ImportGlobalCount, m.ImportMemoryCount, m.ImportTableCount, m.ImportTagCount, offset, err = decodeImportSection(binary, offset, arena, memSizer, memoryLimitPages, enabledFeatures)
 			if err != nil {
 				return nil, err // avoid re-wrapping the error.
 			}
