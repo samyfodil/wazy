@@ -1,6 +1,6 @@
 package adhoc
 
-// Adversarial exception-handling tests for the wazevo compiler's landing-pad
+// Adversarial exception-handling tests for the native compiler's landing-pad
 // live-state reconstruction (docs/design/eh-side-table.md section 4.1). Each
 // module below deliberately arranges for a value the landing pad must observe
 // to have a *throw-time* value that differs from its entry-time value and to be

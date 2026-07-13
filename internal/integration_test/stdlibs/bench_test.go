@@ -1,4 +1,4 @@
-package wazevo_test
+package native_test
 
 import (
 	"bytes"

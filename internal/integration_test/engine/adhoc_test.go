@@ -88,13 +88,13 @@ func TestEngineInterpreter(t *testing.T) {
 	runAllTests(t, tests, wazy.NewRuntimeConfigInterpreter().WithCloseOnContextDone(true), false)
 }
 
-// TestWazevoDeepRecursionWithHostCalls runs testDeepRecursionWithHostCalls
-// against the wazevo (compiler) engine only: at the depth this test uses,
+// TestNativeDeepRecursionWithHostCalls runs testDeepRecursionWithHostCalls
+// against the native (compiler) engine only: at the depth this test uses,
 // the tree-walking interpreter hits its own, much shallower native
-// recursion ceiling (an orthogonal limit, unrelated to the wazevo
+// recursion ceiling (an orthogonal limit, unrelated to the native
 // stack-bounds-check margin under test here), so it isn't part of the
 // shared `tests` table that runs under both engines.
-func TestWazevoDeepRecursionWithHostCalls(t *testing.T) {
+func TestNativeDeepRecursionWithHostCalls(t *testing.T) {
 	if !platform.CompilerSupported() {
 		t.Skip()
 	}
@@ -110,7 +110,7 @@ const i32, i64, f32, f64, v128 = wasm.ValueTypeI32, wasm.ValueTypeI64, wasm.Valu
 
 var memoryCapacityPages = uint32(2)
 
-func runAllTests(t *testing.T, tests map[string]testCase, config wazy.RuntimeConfig, isWazevo bool) {
+func runAllTests(t *testing.T, tests map[string]testCase, config wazy.RuntimeConfig, isNative bool) {
 	for name, tc := range tests {
 		name := name
 		tc := tc
@@ -1101,7 +1101,7 @@ func testMemoryGrowInRecursiveCall(t *testing.T, r wazy.Runtime) {
 
 // testDeepRecursionWithHostCalls drives a wasm function that recurses
 // natively (native "call" instructions, not a wasm loop) to a depth well
-// beyond wazevo's initial per-callEngine stack allocation (10KiB, see
+// beyond native's initial per-callEngine stack allocation (10KiB, see
 // callEngine.requiredInitialStackSize), calling a host function at every
 // level of the recursion. This is the specific scenario the H7
 // stack-bounds-check-margin optimization (see

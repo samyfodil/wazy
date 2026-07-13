@@ -1,4 +1,4 @@
-# Zero-cost `try_table` via a PC-range exception side table (wazevo)
+# Zero-cost `try_table` via a PC-range exception side table (native)
 
 Optimization finding **C1** (and the closely-related **C11**). This document is an
 implementation design only — no code is changed by it.
@@ -163,9 +163,9 @@ at frame granularity (`interpreter/interpreter.go:145-250`):
   `interpreter.go:153-166,254+`).
 
 Two things transfer directly: the **PC-range table** structure (`startPC/endPC/targetPC/
-targetStackDepth`) and the innermost-first search. The one wazevo-specific complication:
+targetStackDepth`) and the innermost-first search. The one native-specific complication:
 the interpreter's locals and operand stack are already in memory (the `[]uint64` value
-stack), so it needs no register recovery; wazevo's live values may be in registers that a
+stack), so it needs no register recovery; native's live values may be in registers that a
 native unwind clobbers (§4.1).
 
 ### 1.5 Serialization (`engine_cache.go`)
@@ -182,7 +182,7 @@ This is the exact shape the new side table serializes in.
 ### 1.6 The existing native-stack unwinder (used today for stack traces)
 
 `unwindStack(sp, fp, top, out)` (`isa_arm64.go:16`, `isa_amd64.go:16`) walks one contiguous
-wazevo stack segment and appends return addresses. It is already used by the
+native stack segment and appends return addresses. It is already used by the
 `stackIterator` (`call_engine.go:788-813`) and the panic/abort path
 (`call_engine.go:300-313`). Two ISA-specific facts drive the whole design:
 
@@ -196,7 +196,7 @@ wazevo stack segment and appends return addresses. It is already used by the
   `adjustClonedStack` is a no-op on arm64 (`isa_arm64.go:28-32`): after a clone the layout
   shifts wholesale but relative distances are preserved.
 
-Crucially, **wazevo frames are fixed-size** (the prologue emits a compile-time constant
+Crucially, **native frames are fixed-size** (the prologue emits a compile-time constant
 frame size; wasm has no `alloca`). So a function's SP is invariant across its entire body,
 and unwinding to a frame recovers exactly the SP/FP the frame would have at *any* point in
 its body — including a landing pad. This is what makes SP/FP recovery at throw time exact
@@ -381,7 +381,7 @@ categories exist beyond the wasm-visible ones:
   enter-continuation's first instruction dereferences it (the `caughtExceptionClauseIdx`
   load), and every proposed frontend memory home for the categories above is itself
   *addressed through execCtx*. It therefore cannot be given a frontend memory home (circular:
-  you need execCtx to load execCtx), and wazevo exposes no frame-slot/alloca facility to the
+  you need execCtx to load execCtx), and native exposes no frame-slot/alloca facility to the
   frontend — spilling is entirely a regalloc concern, and regalloc is free to (and does)
   place execCtx in a callee-saved register across the try.
 
@@ -440,7 +440,7 @@ additive and testable against the existing stack-trace tests.
 - **Host (Go) frames.** When wasm calls an imported host function, execution **exits to Go**
   (`ExitCodeCallGoFunction`, `call_engine.go:385+`); if that host re-enters wasm it runs on a
   **new** `callEngine.callWithStack` with its **own** stack segment. The native unwinder
-  physically cannot walk past a Go frame (it is not in the wazevo stack buffer), so a throw
+  physically cannot walk past a Go frame (it is not in the native stack buffer), so a throw
   is bounded by its segment. If uncaught in the segment it `panic`s
   `ErrRuntimeUncaughtException`, which the segment's `callWithStack` `defer/recover` converts
   to a Go **error** at the host boundary (`call_engine.go:280-331`) — identical to today's
@@ -476,7 +476,7 @@ deterministic because every field derives from deterministic compilation (block 
 codegen, slot assignments from the frontend). Bump the cache format so old entries recompile
 — the existing "missing try-table block => staleCache" path already gives us this
 (`engine_cache.go:324-325`); extend it to "old try-table shape => staleCache". `CatchClauseInstance`
-(`wazevoapi/try_table.go`) is reused; `TryTableInfo` (with `NumLocals`/`ReuseLocals`) is
+(`nativeapi/try_table.go`) is reused; `TryTableInfo` (with `NumLocals`/`ReuseLocals`) is
 retired in favor of `ehEntry`.
 
 ---

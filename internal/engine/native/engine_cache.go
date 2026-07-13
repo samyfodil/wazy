@@ -154,7 +154,7 @@ func (e *engine) getCompiledModuleFromCache(module *wasm.Module) (cm *compiledMo
 	return
 }
 
-var magic = []byte{'W', 'A', 'Z', 'E', 'V', 'O'}
+var magic = []byte{'N', 'A', 'T', 'I', 'V', 'E'}
 
 func serializeCompiledModule(wazyVersion string, cm *compiledModule) io.Reader {
 	buf := bytes.NewBuffer(nil)

@@ -5,10 +5,10 @@ package bench
 // common per-request call shape (e.g. an HTTP handler doing
 // mod.ExportedFunction("handle").Call(ctx, ...) on every request), and
 // ModuleInstance.ExportedFunction always calls Engine.NewFunction fresh --
-// wazevo's moduleEngine.NewFunction builds a brand new *callEngine on every
+// native's moduleEngine.NewFunction builds a brand new *callEngine on every
 // such call, which before A1 unconditionally allocated a fresh ~10KB wasm
 // stack (among other things) in (*callEngine).init on every single call. See
-// internal/engine/wazevo/stack_pool.go for the pool that replaces that.
+// internal/engine/native/stack_pool.go for the pool that replaces that.
 //
 // B/op and allocs/op are what matter here (allocs/op is load-immune, unlike
 // ns/op, which is why OPTIMIZATIONS.md's A1 entry uses it as the reliable

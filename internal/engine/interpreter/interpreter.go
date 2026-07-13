@@ -515,7 +515,7 @@ const callFrameStackSize = 0
 // HasCompiledModule implements the same method as documented on wasm.Engine.
 //
 // The interpreter engine only ever caches in memory (there is no file cache
-// counterpart to wazevo's), so this is just the same in-memory lookup
+// counterpart to native's), so this is just the same in-memory lookup
 // CompileModule itself does on a cache hit, exposed so callers can make that
 // check before CompileModule (see wasm.Engine.HasCompiledModule's docs on the
 // reference-acquisition contract this establishes).

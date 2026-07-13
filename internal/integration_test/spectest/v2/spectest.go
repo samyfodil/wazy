@@ -2,7 +2,7 @@ package v2
 
 import "embed"
 
-// Testcases is exported for testing wazevo in internal/engine/wazevo.
+// Testcases is exported for testing native in internal/engine/native.
 //
 //go:embed testdata/*.wasm
 //go:embed testdata/*.json

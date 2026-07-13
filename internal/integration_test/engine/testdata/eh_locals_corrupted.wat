@@ -1,7 +1,7 @@
 ;; Test: locals mutated inside a try_table body must retain their
 ;; throw-time values when an exception is caught.
 ;;
-;; Bug: wazevo clones the stack (including spill slots holding locals)
+;; Bug: native clones the stack (including spill slots holding locals)
 ;; on try_table entry. When a throw occurs, the cloned stack is restored,
 ;; reverting locals to their try_table-entry values instead of the
 ;; throw-time values required by the spec.

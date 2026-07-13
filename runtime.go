@@ -8,7 +8,7 @@ import (
 	"github.com/samyfodil/wazy/api"
 	experimentalapi "github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/engine/interpreter"
-	"github.com/samyfodil/wazy/internal/engine/wazevo"
+	"github.com/samyfodil/wazy/internal/engine/native"
 	"github.com/samyfodil/wazy/internal/expctxkeys"
 	"github.com/samyfodil/wazy/internal/platform"
 	internalsock "github.com/samyfodil/wazy/internal/sock"
@@ -162,7 +162,7 @@ func NewRuntimeWithConfig(ctx context.Context, rConfig RuntimeConfig) Runtime {
 	}
 	if configEngine == nil {
 		if configKind == engineKindCompiler {
-			configEngine = wazevo.NewEngine
+			configEngine = native.NewEngine
 		} else {
 			configEngine = interpreter.NewEngine
 		}
@@ -272,7 +272,7 @@ func (r *runtime) CompileModule(ctx context.Context, binary []byte) (CompiledMod
 
 		if hasCompiled {
 			// TRUST MODEL: a hit here can come from the engine's on-disk file
-			// cache (wazevo), which we already trust no less than a fresh
+			// cache (native), which we already trust no less than a fresh
 			// compile - we mmap and EXECUTE the machine code either way. The
 			// crc32 checksum embedded in the cache entry still guards against
 			// corruption, and a wazyVersion mismatch still forces a recompile;

@@ -1,4 +1,4 @@
-# P3: a backend ABI for zero-cost `try_table` enter (wazevo)
+# P3: a backend ABI for zero-cost `try_table` enter (native)
 
 Feasibility spike + implementation plan for **phase P3** of the exception-handling
 redesign (C1). Companion to `docs/design/eh-side-table.md`; read that first, especially
@@ -55,7 +55,7 @@ categories" premise is **superseded by this outcome**.
 
 **Where we are.** C1 P0/P1/P2a are shipped. The *throw* path already unwinds the native
 stack against a per-function PC-range side table (`compiledModule.ehTables`,
-`wazevoapi/eh_table.go`) and transfers control with a fresh SP/FP — no stack clone.
+`nativeapi/eh_table.go`) and transfers control with a fresh SP/FP — no stack clone.
 But **enter is still a Go exit** (`ExitCodeTryTableEnter`, `call_engine.go:697-784`) that
 per dynamic entry (a) pushes an `activeCatchScope`, (b) copies the **1 KB**
 `execCtx.savedRegisters` snapshot (`[64][2]uint64`, `call_engine.go:776`), and (c) acquires
@@ -312,7 +312,7 @@ P3 only adds the fixed-slot stores/reloads, which are themselves relocation-safe
   **fresh** walk of the *current* stack: amd64 gets FP from the RBP chain and computes
   `SP = FP − FrameSize()` (`isa_amd64.go:44-49`, `functionFrameSizes`); arm64 gets SP directly
   from the per-frame `frame_size` chain (`isa_arm64.go:40-42`, `unwind_stack.go`). Because
-  wazevo frames are fixed-size (no `alloca`), that SP/FP is exact anywhere in the body,
+  native frames are fixed-size (no `alloca`), that SP/FP is exact anywhere in the body,
   including a landing pad (`eh-side-table.md` §1.6).
 - **Stack grow/relocate between enter and throw is safe by construction.** The side table is
   code-relative; `LandingPad`/return addresses are addresses in the mmap'd, never-relocated

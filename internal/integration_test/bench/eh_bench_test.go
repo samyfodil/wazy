@@ -1,6 +1,6 @@
 package bench
 
-// Benchmarks for the wazevo exception-handling (try_table) compiled fast
+// Benchmarks for the native exception-handling (try_table) compiled fast
 // path and throw path. See docs/design/eh-side-table.md: at the time that
 // design was written, no such benchmark existed anywhere in the repo
 // (grep of benchmarks/ and internal/integration_test found none), so these
@@ -132,7 +132,7 @@ func instantiateEHBenchModule(tb testing.TB, bin []byte) api.Module {
 //	    (local.get $acc)))
 //
 // The try_table's body never throws; catch_all is dead code at runtime,
-// exactly like TryTableCatchAllEmpty in internal/engine/wazevo/testcases,
+// exactly like TryTableCatchAllEmpty in internal/engine/native/testcases,
 // but driven from a hot loop instead of a single call.
 func buildEHFastPathModule() []byte {
 	m := &wasm.Module{
