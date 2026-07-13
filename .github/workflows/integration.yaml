@@ -2,16 +2,12 @@ name: Standard Library Integration Tests
 on:
   pull_request:
     branches: [main]
-    paths-ignore:  # ignore docs as they are built with Netlify.
+    paths-ignore:  # ignore doc-only changes
       - '**/*.md'
-      - 'site/**'
-      - 'netlify.toml'
   push:
     branches: [main]
-    paths-ignore:  # ignore docs as they are built with Netlify.
+    paths-ignore:  # ignore doc-only changes
       - '**/*.md'
-      - 'site/**'
-      - 'netlify.toml'
 
 defaults:
   run:  # use bash for all operating systems unless overridden
