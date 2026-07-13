@@ -59,7 +59,7 @@ The fastest way in is an [example](examples/README.md). The [basic one](examples
 
 ## Credit
 
-wazy began as a fork of [wazero][wazero], and still rests on its runtime architecture, WebAssembly semantics, WASI implementation, and compliance and fuzzing test suites. See [RATIONALE.md](RATIONALE.md) for the original design rationale and [NOTICE](NOTICE) / [LICENSE](LICENSE) for the Apache 2.0 attribution, preserved unmodified.
+wazy started from [wazero][wazero]'s code and still draws on its WebAssembly semantics, WASI implementation, and compliance and fuzzing test suites. We do not intend to keep wazero's API compatibility or its architecture. The goals are pure Go, performance, and conformance to the standard. See [RATIONALE.md](RATIONALE.md) for wazero's original design rationale and [NOTICE](NOTICE) / [LICENSE](LICENSE) for the Apache 2.0 attribution, preserved unmodified.
 
 ## License
 
