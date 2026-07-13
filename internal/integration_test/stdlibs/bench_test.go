@@ -85,6 +85,10 @@ var (
 				"TestFileReaddir/sysdir",
 				"TestFileReadDir/sysdir",
 				"TestFileReaddirnames/sysdir",
+				// Inherited wazero limitation: sysfs resolves paths against the
+				// mount root, so an open os.Root handle does not survive a rename
+				// of its parent directory (openat re-resolves the stale path).
+				"TestRootRenameAfterOpen",
 			}
 
 			// Skip tests that are fragile on Windows.
