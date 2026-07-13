@@ -1,3 +1,5 @@
+//go:build libsodium
+
 package libsodium
 
 import (

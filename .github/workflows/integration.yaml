@@ -267,4 +267,4 @@ jobs:
         run: make libsodium
 
       - name: Run test binaries
-        run: go test ./internal/integration_test/libsodium -bench=. -benchtime=1x
+        run: go test -tags libsodium ./internal/integration_test/libsodium -bench=. -benchtime=1x
