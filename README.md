@@ -17,12 +17,12 @@ wazy is compliant with the WebAssembly Core Specification [1.0][1] and [2.0][2].
 wazy is measurably faster than [wazero][wazero], the runtime it descends from, on the paths that set real throughput and latency. Measured against upstream on the same hardware:
 
 - **Host calls up to ~15x faster**, with zero allocations. Calling a Go function from Wasm is the hot path for WASI and for any host API you expose. wazy's typed host functions run at native-call speed.
-- **Compiled execution ~6% faster.**
+- **Compiled execution 4–18% faster** on real TinyGo workloads (geomean ~6% vs `wazero@main`). Memory-heavy code leads — string manipulation −18%, array reversal −14%, base64 −12% — with recursive fibonacci −4%. The compiler also allocates less per module (up to −17% on real Rust/Zig/C output).
 - **Cold start**: decode, validate, compile, instantiate, substantially faster, with far fewer allocations.
 - **Interpreter ~30% faster**, with per-call heap allocation eliminated. A benchmark that allocated 1.35M times now allocates twice.
 - **~87% less memory per call** for the common request-per-call pattern.
 
-Methodology and per-optimization numbers are in [OPTIMIZATIONS.md](OPTIMIZATIONS.md).
+Methodology and per-optimization numbers are in [OPTIMIZATIONS.md](OPTIMIZATIONS.md). The head-to-head suite lives in [`benchmarks/vs-wazero`](benchmarks/vs-wazero) — `cd benchmarks/vs-wazero && go test -bench .` runs the same workloads (compile, execution, host calls) on wazy and upstream side by side.
 
 The host-call speedup comes from dropping reflection. Instead of the usual `reflect`-per-call path, which is ~14x slower, typed generic helpers derive the Wasm signature from Go's types at compile time:
 
