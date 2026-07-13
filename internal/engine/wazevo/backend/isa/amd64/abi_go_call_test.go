@@ -38,19 +38,6 @@ func TestMachine_CompileGoFunctionTrampoline(t *testing.T) {
 			exp: `
 	pushq %rbp
 	movq %rsp, %rbp
-	sub $40, %rsp
-	cmpq 40(%rax), %rsp
-	jnbe L1
-	add $40, %rsp
-	pushq %r15
-	movabsq $40, %r15
-	mov.q %r15, 64(%rax)
-	popq %r15
-	callq *80(%rax)
-	jmp L2
-L1:
-	add $40, %rsp
-L2:
 	mov.q %rdx, 96(%rax)
 	mov.q %r12, 112(%rax)
 	mov.q %r13, 128(%rax)
@@ -72,10 +59,10 @@ L2:
 	mov.l %r12, (%rax)
 	mov.q %rsp, 56(%rax)
 	mov.q %rbp, 1152(%rax)
-	lea L3, %r12
+	lea L1, %r12
 	mov.q %r12, 48(%rax)
 	exit_sequence %rax
-L3:
+L1:
 	add $8, %rsp
 	movq 8(%rsp), %rbx
 	movss 16(%rsp), %xmm0
@@ -110,19 +97,6 @@ L3:
 			exp: `
 	pushq %rbp
 	movq %rsp, %rbp
-	sub $40, %rsp
-	cmpq 40(%rax), %rsp
-	jnbe L1
-	add $40, %rsp
-	pushq %r15
-	movabsq $40, %r15
-	mov.q %r15, 64(%rax)
-	popq %r15
-	callq *80(%rax)
-	jmp L2
-L1:
-	add $40, %rsp
-L2:
 	mov.q %rdx, 96(%rax)
 	mov.q %r12, 112(%rax)
 	mov.q %r13, 128(%rax)
@@ -147,10 +121,10 @@ L2:
 	mov.l %r12, (%rax)
 	mov.q %rsp, 56(%rax)
 	mov.q %rbp, 1152(%rax)
-	lea L3, %r12
+	lea L1, %r12
 	mov.q %r12, 48(%rax)
 	exit_sequence %rax
-L3:
+L1:
 	add $8, %rsp
 	movq 96(%rax), %rdx
 	movq 112(%rax), %r12
@@ -180,19 +154,6 @@ L3:
 			exp: `
 	pushq %rbp
 	movq %rsp, %rbp
-	sub $24, %rsp
-	cmpq 40(%rax), %rsp
-	jnbe L1
-	add $24, %rsp
-	pushq %r15
-	movabsq $24, %r15
-	mov.q %r15, 64(%rax)
-	popq %r15
-	callq *80(%rax)
-	jmp L2
-L1:
-	add $24, %rsp
-L2:
 	mov.q %rdx, 96(%rax)
 	mov.q %r12, 112(%rax)
 	mov.q %r13, 128(%rax)
@@ -213,10 +174,10 @@ L2:
 	mov.l %r12, (%rax)
 	mov.q %rsp, 56(%rax)
 	mov.q %rbp, 1152(%rax)
-	lea L3, %r12
+	lea L1, %r12
 	mov.q %r12, 48(%rax)
 	exit_sequence %rax
-L3:
+L1:
 	add $8, %rsp
 	movq 96(%rax), %rdx
 	movq 112(%rax), %r12
@@ -258,19 +219,6 @@ L3:
 			exp: `
 	pushq %rbp
 	movq %rsp, %rbp
-	sub $248, %rsp
-	cmpq 40(%rax), %rsp
-	jnbe L1
-	add $248, %rsp
-	pushq %r15
-	movabsq $248, %r15
-	mov.q %r15, 64(%rax)
-	popq %r15
-	callq *80(%rax)
-	jmp L2
-L1:
-	add $248, %rsp
-L2:
 	mov.q %rdx, 96(%rax)
 	mov.q %r12, 112(%rax)
 	mov.q %r13, 128(%rax)
@@ -309,10 +257,10 @@ L2:
 	mov.l %r12, (%rax)
 	mov.q %rsp, 56(%rax)
 	mov.q %rbp, 1152(%rax)
-	lea L3, %r12
+	lea L1, %r12
 	mov.q %r12, 48(%rax)
 	exit_sequence %rax
-L3:
+L1:
 	add $8, %rsp
 	movsd (%rsp), %xmm0
 	movdqu 8(%rsp), %xmm1

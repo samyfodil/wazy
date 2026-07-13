@@ -66,7 +66,19 @@ func (m *machine) CompileGoFunctionTrampoline(exitCode wazevoapi.ExitCode, sig *
 
 	// Next, we should allocate the stack for the Go function call if necessary.
 	goCallStackSize, sliceSizeInBytes := backend.GoFunctionCallRequiredStackSize(sig, argBegin)
-	cur = m.insertStackBoundsCheck(goCallStackSize+frameInfoSize, cur)
+	// H7: every wasm frame's prologue check reserves
+	// backend.StackBoundsCheckMarginBytes of guaranteed slack below its own
+	// frame base at every call site it makes (see the invariant proof on
+	// that constant). So whenever this trampoline's own real stack usage
+	// (the Go arg/result slice + the frame_size/sliceSize bookkeeping pair
+	// pushed below it) fits within that margin, entering this trampoline
+	// can never underflow the stack buffer, and the check/grow-call
+	// sequence below can be skipped entirely. Larger (rare, huge-arity)
+	// signatures keep the full check, exactly as before.
+	requiredStackSizeForGoCall := goCallStackSize + frameInfoSize
+	if requiredStackSizeForGoCall > backend.StackBoundsCheckMarginBytes {
+		cur = m.insertStackBoundsCheck(requiredStackSizeForGoCall, cur)
+	}
 
 	originalArg0Reg := x17VReg // Caller save, so we can use it for whatever we want.
 	if m.currentABI.AlignedArgResultStackSlotSize() > 0 {

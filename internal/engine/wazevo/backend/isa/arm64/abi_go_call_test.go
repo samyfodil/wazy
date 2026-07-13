@@ -55,14 +55,6 @@ func TestMachine_CompileGoFunctionTrampoline(t *testing.T) {
 	movz x27, #0xa0, lsl 0
 	sub sp, sp, x27
 	stp x30, x27, [sp, #-0x10]!
-	sub x27, sp, #0x130
-	ldr x11, [x0, #0x28]
-	subs xzr, x27, x11
-	b.ge #0x14
-	movz x27, #0x130, lsl 0
-	str x27, [x0, #0x40]
-	ldr x27, [x0, #0x50]
-	bl x27
 	add x17, sp, #0x10
 	stp x19, x20, [x0, #0x60]
 	stp x21, x22, [x0, #0x70]
@@ -175,14 +167,6 @@ func TestMachine_CompileGoFunctionTrampoline(t *testing.T) {
 			needModuleContextPtr: true,
 			exp: `
 	stp x30, xzr, [sp, #-0x10]!
-	sub x27, sp, #0x30
-	ldr x11, [x0, #0x28]
-	subs xzr, x27, x11
-	b.ge #0x14
-	orr x27, xzr, #0x30
-	str x27, [x0, #0x40]
-	ldr x27, [x0, #0x50]
-	bl x27
 	stp x19, x20, [x0, #0x60]
 	stp x21, x22, [x0, #0x70]
 	stp x23, x24, [x0, #0x80]
@@ -241,14 +225,6 @@ func TestMachine_CompileGoFunctionTrampoline(t *testing.T) {
 			needModuleContextPtr: true,
 			exp: `
 	stp x30, xzr, [sp, #-0x10]!
-	sub x27, sp, #0x30
-	ldr x11, [x0, #0x28]
-	subs xzr, x27, x11
-	b.ge #0x14
-	orr x27, xzr, #0x30
-	str x27, [x0, #0x40]
-	ldr x27, [x0, #0x50]
-	bl x27
 	stp x19, x20, [x0, #0x60]
 	stp x21, x22, [x0, #0x70]
 	stp x23, x24, [x0, #0x80]
@@ -304,14 +280,6 @@ func TestMachine_CompileGoFunctionTrampoline(t *testing.T) {
 			},
 			exp: `
 	stp x30, xzr, [sp, #-0x10]!
-	sub x27, sp, #0x20
-	ldr x11, [x0, #0x28]
-	subs xzr, x27, x11
-	b.ge #0x14
-	orr x27, xzr, #0x20
-	str x27, [x0, #0x40]
-	ldr x27, [x0, #0x50]
-	bl x27
 	stp x19, x20, [x0, #0x60]
 	stp x21, x22, [x0, #0x70]
 	stp x23, x24, [x0, #0x80]
@@ -365,14 +333,6 @@ func TestMachine_CompileGoFunctionTrampoline(t *testing.T) {
 			},
 			exp: `
 	stp x30, xzr, [sp, #-0x10]!
-	sub x27, sp, #0x20
-	ldr x11, [x0, #0x28]
-	subs xzr, x27, x11
-	b.ge #0x14
-	orr x27, xzr, #0x20
-	str x27, [x0, #0x40]
-	ldr x27, [x0, #0x50]
-	bl x27
 	stp x19, x20, [x0, #0x60]
 	stp x21, x22, [x0, #0x70]
 	stp x23, x24, [x0, #0x80]

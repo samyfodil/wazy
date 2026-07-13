@@ -73,7 +73,7 @@ func TestMachine_requiredStackSize(t *testing.T) {
 		clobberedRegs: make([]regalloc.VReg, 10), spillSlotSize: 16 * 8,
 		maxRequiredStackSizeForCalls: 320,
 	}
-	require.Equal(t, int64(16*18)+int64(320)+32, m.requiredStackSize())
+	require.Equal(t, int64(16*18)+int64(320)+backend.StackBoundsCheckMarginBytes+32, m.requiredStackSize())
 }
 
 func TestMachine_arg0OffsetFromSP(t *testing.T) {

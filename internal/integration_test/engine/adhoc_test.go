@@ -88,6 +88,19 @@ func TestEngineInterpreter(t *testing.T) {
 	runAllTests(t, tests, wazy.NewRuntimeConfigInterpreter().WithCloseOnContextDone(true), false)
 }
 
+// TestWazevoDeepRecursionWithHostCalls runs testDeepRecursionWithHostCalls
+// against the wazevo (compiler) engine only: at the depth this test uses,
+// the tree-walking interpreter hits its own, much shallower native
+// recursion ceiling (an orthogonal limit, unrelated to the wazevo
+// stack-bounds-check margin under test here), so it isn't part of the
+// shared `tests` table that runs under both engines.
+func TestWazevoDeepRecursionWithHostCalls(t *testing.T) {
+	if !platform.CompilerSupported() {
+		t.Skip()
+	}
+	testDeepRecursionWithHostCalls(t, wazy.NewRuntimeWithConfig(testCtx, wazy.NewRuntimeConfigCompiler().WithCloseOnContextDone(true)))
+}
+
 type arbitrary struct{}
 
 // testCtx is an arbitrary, non-default context. Non-nil also prevents linter errors.
@@ -1084,6 +1097,94 @@ func testMemoryGrowInRecursiveCall(t *testing.T, r wazy.Runtime) {
 
 	_, err = main.Call(testCtx)
 	require.NoError(t, err)
+}
+
+// testDeepRecursionWithHostCalls drives a wasm function that recurses
+// natively (native "call" instructions, not a wasm loop) to a depth well
+// beyond wazevo's initial per-callEngine stack allocation (10KiB, see
+// callEngine.requiredInitialStackSize), calling a host function at every
+// level of the recursion. This is the specific scenario the H7
+// stack-bounds-check-margin optimization (see
+// backend.StackBoundsCheckMarginBytes) has to get right: the recursion
+// forces many stack-grow relocations over the course of the call (the
+// initial buffer is nowhere near big enough for `depth` native frames), and
+// at every depth -- including the levels immediately before/after a given
+// stack grow, where the currently-allocated buffer is closest to
+// exhausted -- a host call happens right there. A wrong margin would show
+// up here as either a crash (the host call's argument/result slice written
+// past the buffer) or a silently wrong final sum (if it corrupted a sibling
+// frame's locals instead of crashing outright). The host function is a
+// trivial i32 identity, deliberately small enough that H7 elides its own
+// stack-bounds check -- exactly the code path this test exists to exercise.
+//
+// This test is engine-agnostic (it runs under both the compiler and
+// interpreter engines via the shared `tests` table below), which also
+// cross-checks the two engines agree on the result.
+func testDeepRecursionWithHostCalls(t *testing.T, r wazy.Runtime) {
+	const hostModuleName = "env"
+	const hostFnName = "identity"
+
+	_, err := r.NewHostModuleBuilder(hostModuleName).NewFunctionBuilder().
+		WithGoFunction(api.GoFunc(func(context.Context, []uint64) {
+			// Identity: for a single-i32-param/single-i32-result signature,
+			// the parameter and the result occupy the very same Go-call
+			// slice slot (see backend.GoFunctionCallRequiredStackSize,
+			// which sizes the slice as max(params, results), not their
+			// sum), so doing nothing here returns the input unchanged.
+		}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).
+		Export(hostFnName).Instantiate(testCtx)
+	require.NoError(t, err)
+
+	sig := wasm.FunctionType{
+		Params: []wasm.ValueType{i32}, Results: []wasm.ValueType{i32},
+		ParamNumInUint64: 1, ResultNumInUint64: 1,
+	}
+	bin := binaryencoding.EncodeModule(&wasm.Module{
+		ImportFunctionCount: 1,
+		TypeSection:         []wasm.FunctionType{sig},
+		FunctionSection:     []wasm.Index{0},
+		CodeSection: []wasm.Code{
+			{
+				// (func $recurse (param $depth i32) (result i32)
+				//   (if (result i32) (i32.eqz (local.get $depth))
+				//     (then (i32.const 0))
+				//     (else
+				//       (i32.add (call $identity (local.get $depth))
+				//                (call $recurse (i32.sub (local.get $depth) (i32.const 1)))))))
+				Body: []byte{
+					wasm.OpcodeLocalGet, 0,
+					wasm.OpcodeI32Eqz,
+					wasm.OpcodeIf, byte(i32),
+					wasm.OpcodeI32Const, 0,
+					wasm.OpcodeElse,
+					wasm.OpcodeLocalGet, 0,
+					wasm.OpcodeCall, 0, // host identity(depth) -- small signature, H7-elided.
+					wasm.OpcodeLocalGet, 0,
+					wasm.OpcodeI32Const, 1,
+					wasm.OpcodeI32Sub,
+					wasm.OpcodeCall, 1, // recurse(depth-1) -- self, native stack recursion.
+					wasm.OpcodeI32Add,
+					wasm.OpcodeEnd,
+					wasm.OpcodeEnd,
+				},
+			},
+		},
+		ImportSection:   []wasm.Import{{Module: hostModuleName, Name: hostFnName, DescFunc: 0}},
+		ImportPerModule: map[string][]*wasm.Import{hostModuleName: {{Module: hostModuleName, Name: hostFnName, DescFunc: 0}}},
+		ExportSection:   []wasm.Export{{Name: "recurse", Type: wasm.ExternTypeFunc, Index: 1}},
+	})
+
+	inst, err := r.Instantiate(testCtx, bin)
+	require.NoError(t, err)
+
+	// Deep enough to force dozens of stack-grow relocations (the initial
+	// buffer is 10KiB; even a handful of bytes of guaranteed margin per
+	// frame exhausts that in well under a hundred levels), while still
+	// running in well under a second.
+	const depth = uint64(20000)
+	res, err := inst.ExportedFunction("recurse").Call(testCtx, depth)
+	require.NoError(t, err)
+	require.Equal(t, depth*(depth+1)/2, res[0])
 }
 
 func testCall(t *testing.T, r wazy.Runtime) {

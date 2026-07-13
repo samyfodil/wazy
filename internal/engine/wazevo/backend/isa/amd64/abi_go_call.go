@@ -48,7 +48,19 @@ func (m *machine) CompileGoFunctionTrampoline(exitCode wazevoapi.ExitCode, sig *
 	cur = m.setupRBPRSP(cur)
 
 	goSliceSizeAligned, goSliceSizeAlignedUnaligned := backend.GoFunctionCallRequiredStackSize(sig, argBegin)
-	cur = m.insertStackBoundsCheck(goSliceSizeAligned+8 /* size of the Go slice */, cur)
+	// H7: every wasm frame's prologue check reserves
+	// backend.StackBoundsCheckMarginBytes of guaranteed slack below its own
+	// frame base at every call site it makes (see the invariant proof on
+	// that constant). So whenever this trampoline's own real stack usage
+	// (the Go arg/result slice + the 8 bytes of size-field bookkeeping
+	// pushed below it) fits within that margin, entering this trampoline
+	// can never underflow the stack buffer, and the check/grow-call
+	// sequence below can be skipped entirely. Larger (rare, huge-arity)
+	// signatures keep the full check, exactly as before.
+	requiredStackSizeForGoCall := goSliceSizeAligned + 8 // size of the Go slice, incl. the pushed slice-size field.
+	if requiredStackSizeForGoCall > backend.StackBoundsCheckMarginBytes {
+		cur = m.insertStackBoundsCheck(requiredStackSizeForGoCall, cur)
+	}
 
 	// Save the callee saved registers.
 	cur = m.saveRegistersInExecutionContext(cur, execCtrPtr, calleeSavedVRegs)
