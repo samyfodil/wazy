@@ -9,7 +9,7 @@ import (
 	"path"
 )
 
-const failedCasesDir = "wazerolib/testdata"
+const failedCasesDir = "wazylib/testdata"
 
 // saveFailedBinary writes binary and wat into failedCasesDir so that it is easy to reproduce the error.
 func saveFailedBinary(bin []byte, reproduceTestName string) {
@@ -38,6 +38,6 @@ func saveFailedBinary(bin []byte, reproduceTestName string) {
 	fmt.Printf(`
 Failed WebAssembly Binary in hex: %s
 Failed Wasm binary has been written to %s
-To reproduce the failure, execute: WASM_BINARY_PATH=%s go test -run=%s ./wazerolib/...
+To reproduce the failure, execute: WASM_BINARY_PATH=%s go test -run=%s ./wazylib/...
 `, hex.EncodeToString(bin), binaryPath, binaryPath, reproduceTestName)
 }

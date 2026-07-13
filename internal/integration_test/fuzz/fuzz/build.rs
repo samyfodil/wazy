@@ -4,11 +4,11 @@ use std::str;
 
 fn main() {
     // Get the absolute path to the root of this repository (not cargo target).
-    let wazero_fuzz_dir = format!("{}/..", var("CARGO_MANIFEST_DIR").unwrap());
+    let wazy_fuzz_dir = format!("{}/..", var("CARGO_MANIFEST_DIR").unwrap());
 
-    let wazero_fuzz_lib_dir = format!("{}/wazerolib", wazero_fuzz_dir.as_str());
-    let library_out_path = format!("{}/libwazero.a", wazero_fuzz_lib_dir);
-    let library_source_path = format!("{}/...", wazero_fuzz_lib_dir);
+    let wazy_fuzz_lib_dir = format!("{}/wazylib", wazy_fuzz_dir.as_str());
+    let library_out_path = format!("{}/libwazy.a", wazy_fuzz_lib_dir);
+    let library_source_path = format!("{}/...", wazy_fuzz_lib_dir);
 
     // Parse the GOARCH from the --target argument passed to cargo.
     let goarch = var("TARGET")
@@ -23,9 +23,9 @@ fn main() {
         })
         .unwrap();
 
-    // Build the wazero library via go build -buildmode c-archive....
+    // Build the wazy library via go build -buildmode c-archive....
     let mut command = process::Command::new("go");
-    command.current_dir(&wazero_fuzz_lib_dir);
+    command.current_dir(&wazy_fuzz_lib_dir);
     command.arg("build");
     command.args(["-buildmode", "c-archive"]);
     command.args(["-o", library_out_path.as_str()]);
@@ -38,15 +38,15 @@ fn main() {
     // If the build didn't succeed, exit the process with the stderr from Go's command.
     if !output.status.success() {
         panic!(
-            "failed to compile wazero lib: {}\n",
+            "failed to compile wazy lib: {}\n",
             str::from_utf8(&output.stderr).unwrap(),
         );
     }
 
-    // Ensures that we rebuild the library when the source code for wazero file has been changed.
-    println!("cargo:rerun-if-changed={}/../../..", wazero_fuzz_dir);
+    // Ensures that we rebuild the library when the source code for wazy file has been changed.
+    println!("cargo:rerun-if-changed={}/../../..", wazy_fuzz_dir);
 
-    // Ensures that the linker can find the wazero library.
-    println!("cargo:rustc-link-search={}", wazero_fuzz_lib_dir);
-    println!("cargo:rustc-link-lib=static=wazero");
+    // Ensures that the linker can find the wazy library.
+    println!("cargo:rustc-link-search={}", wazy_fuzz_lib_dir);
+    println!("cargo:rustc-link-lib=static=wazy");
 }

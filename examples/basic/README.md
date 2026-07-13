@@ -15,7 +15,7 @@ WebAssembly functions, you need access to a WebAssembly Binary (Wasm),
 typically a `%.wasm` file.
 
 [add.wasm](testdata/add.wasm) was compiled from [add.go](testdata/add.go) with
-[TinyGo][1], as it is the most common way to compile Go source to Wasm. Here's
+TinyGo, as it is the most common way to compile Go source to Wasm. Here's
 the minimal command to build a `%.wasm` binary.
 
 ```bash
@@ -29,7 +29,5 @@ the minimal command to build a `%.wasm` binary.
 * The embedding application is often called the "host" in WebAssembly.
 * The Wasm binary is often called the "guest" in WebAssembly. Sometimes they
   need [imports](../../imports) to implement features such as console output.
-  TinyGo's `wasi` target, requires [WASI][2] imports.
+  TinyGo's `wasi` target, requires WASI imports.
 
-[1]: https://wazero.io/languages/tinygo
-[2]: https://wazero.io/specs/#wasi

@@ -147,14 +147,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "wazero-fuzz"
+name = "wazy-fuzz"
 version = "0.1.0"
 
 [[package]]
-name = "wazero-fuzz-fuzz"
+name = "wazy-fuzz-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "wasm-smith",
- "wazero-fuzz",
+ "wazy-fuzz",
 ]

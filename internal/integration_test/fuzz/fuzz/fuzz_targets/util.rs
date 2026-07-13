@@ -1,4 +1,4 @@
-//! This module provides the functions implemented by wazero via CGo.
+//! This module provides the functions implemented by wazy via CGo.
 
 extern "C" {
     // require_no_diff is implemented in Go, and accepts the pointer to the binary and its size.
@@ -95,7 +95,7 @@ pub fn run_nodiff(
     // Generate the configuration.
     let mut config = Config::arbitrary(&mut u)?;
 
-    // 64-bit memory won't be supported by wazero.
+    // 64-bit memory won't be supported by wazy.
     config.memory64_enabled = false;
     // For exactly one memory exists.
     config.max_memories = 1;
@@ -138,7 +138,7 @@ pub fn run_nodiff(
     module.ensure_termination(1000).unwrap();
     let module_bytes = module.to_bytes();
 
-    // Pass the randomly generated module to the wazero library.
+    // Pass the randomly generated module to the wazy library.
     unsafe {
         require_no_diff(
             module_bytes.as_ptr(),

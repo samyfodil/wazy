@@ -18,4 +18,3 @@ Under the covers, [greet.go](testdata/greet.go) does a few things of interest:
 * Uses `reflect.StringHeader` to build back a string from a pointer, len pair.
 * Relies on CGO to allocate memory used to pass data from TinyGo to host.
 
-See https://wazero.io/languages/tinygo/ for more tips.

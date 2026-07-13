@@ -19,4 +19,3 @@ you would track memory for arbitrary blobs. We also watched function signatures
 carefully as Rust compiles different WebAssembly signatures depending on the
 input type.
 
-See https://wazero.io/languages/rust/ for more tips.

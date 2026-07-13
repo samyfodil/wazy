@@ -8,8 +8,7 @@ languages or shared compiler toolchains.
 * [WASI](wasi_snapshot_preview1) e.g. `tinygo build -o X.wasm -target=wasi X.go`
 
 Note: You may not see a language listed here because it either works without
-host imports, or it uses WASI. Refer to https://wazero.io/languages/ for more
-(wazy is a derivative of wazero and inherits its guest-language support).
+host imports, or it uses WASI.
 
 Please [open an issue](https://github.com/samyfodil/wazy/issues/new) if you
 would like to see support for another compiled language or toolchain.
@@ -30,7 +29,7 @@ bridge is Application Binary Interface (ABI), but we'll call them simply host
 imports.
 
 Packages in this directory are sometimes well re-used, such as the case in
-[WASI](https://wazero.io/specs/#wasi). For example, Rust, TinyGo, and Zig can
+WASI. For example, Rust, TinyGo, and Zig can
 all target WebAssembly in a way that imports the same "wasi_snapshot_preview1"
 module in the compiled `%.wasm` file. To support any of these, wazy users can
 invoke `wasi_snapshot_preview1.Instantiate` on their `wazy.Runtime`.

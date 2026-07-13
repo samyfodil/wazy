@@ -213,7 +213,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "wazero-fuzz-fuzz"
+name = "wazy-fuzz-fuzz"
 version = "0.0.0"
 dependencies = [
  "arbitrary",
