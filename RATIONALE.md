@@ -2,29 +2,29 @@
 
 ## Zero dependencies
 
-Wazy has zero dependencies to differentiate itself from other runtimes which
-have heavy impact usually due to CGO. By avoiding CGO, wazy avoids
+Wazy has zero dependencies to differentiate itself from other runtimes, which
+often have heavy impact due to CGO. By avoiding CGO, wazy avoids
 prerequisites such as shared libraries or libc, and lets users keep features
 like cross compilation.
 
-Avoiding most `go.mod` dependencies reduces interference on Go version support,
-and size of a statically compiled binary. However, doing so brings some
-responsibility into the project.
+Avoiding most `go.mod` dependencies reduces interference with Go version
+support and the size of a statically compiled binary. However, doing so brings
+some responsibility into the project.
 
 Go's native platform support is good: we don't need platform-specific code to
 get monotonic time, nor do we need much work to implement certain features
 needed by our compiler such as `mmap`. That said, Go does not support all
 common operating systems to the same degree.
 
-The general tradeoff the project takes from a strict dependency policy is more
-explicit support of platforms (in the compiler runtime), as well a larger and
-more technically difficult codebase.
+The general tradeoff from a strict dependency policy is more explicit platform
+support (in the compiler runtime), as well as a larger and more technically
+difficult codebase.
 
 ### Why do we use CGO to implement system calls on darwin?
 
 wazy is dependency and CGO free by design. In some cases, we have code that
-can optionally use CGO, but retain a fallback for when that's disabled. The only
-operating system (`GOOS`) we use CGO by default in is `darwin`.
+can optionally use CGO, but retains a fallback for when that's disabled. The
+only operating system (`GOOS`) where we use CGO by default is `darwin`.
 
 Unlike other operating systems, regardless of `CGO_ENABLED`, Go always uses
 "CGO" mechanisms in the runtime layer of `darwin`. This is explained in
@@ -36,9 +36,8 @@ Unlike other operating systems, regardless of `CGO_ENABLED`, Go always uses
 > to ensure binary compatibility in each dynamically linked system library and
 > framework.
 
-This plays to our advantage for system calls that aren't yet exposed in the Go
-standard library, notably `futimens` for nanosecond-precision timestamp
-manipulation.
+This helps us with system calls that aren't yet exposed in the Go standard
+library, notably `futimens` for nanosecond-precision timestamp manipulation.
 
 ### Why x/sys
 
@@ -51,31 +50,31 @@ package neglects.
 After [heavy consideration](https://github.com/wazero/wazero/issues/2434) we
 decided to add it as a dependency.
 
-Using was shown to improve the experience of using wazy on older,
-or less common, OSes without increasing the maintenance work, or creating
-deployment issues for users of wazy.
+Using it was shown to improve the experience of using wazy on older or less
+common OSes without increasing maintenance work or creating deployment issues
+for users of wazy.
 
 ## Project structure
 
-wazy uses internal packages extensively to balance API compatibility desires for end users with the need to safely
+wazy uses internal packages extensively to balance API compatibility for end users with the need to safely
 share internals between compilers.
 
 End-user packages include `wazy`, with `Config` structs, `api`, with shared types, and the built-in `wasi` library.
 Everything else is internal.
 
 We put the main program for wazy into a directory of the same name to match conventions used in `go install`,
-notably the name of the folder becomes the binary name. We chose to use `cmd/wazy` as it is common practice
+notably that the folder name becomes the binary name. We chose `cmd/wazy` because it is common practice
 and less surprising than `wazy/wazy`.
 
 ### Internal packages
 
-Most code in wazy is internal, and it is acknowledged that this prevents external implementation of facets such as
+Most code in wazy is internal, and we acknowledge that this prevents external implementation of facets such as
 compilers or decoding. It also prevents splitting this code into separate repositories, resulting in a larger monorepo.
-This also adds work as more code needs to be centrally reviewed.
+This adds work because more code needs to be centrally reviewed.
 
-However, the alternative is neither secure nor viable. To allow external implementation would require exporting symbols
-public, such as the `CodeSection`, which can easily create bugs. Moreover, there's a high drift risk for any attempt at
-external implementations, compounded not just by wazy's code organization, but also the fast moving Wasm and WASI
+However, the alternative is neither secure nor viable. Allowing external implementation would require exporting public
+symbols, such as the `CodeSection`, which can easily create bugs. Moreover, any attempt at external implementations has
+a high drift risk, compounded not just by wazy's code organization, but also by the fast-moving Wasm and WASI
 specifications.
 
 For example, implementing a compiler correctly requires expertise in Wasm, Golang and assembly. This requires deep
@@ -84,10 +83,10 @@ in a high quality experience. Even if someone had these skills, supporting exter
 are constants in the central one. Supporting an external codebase is harder on the project team, and could starve time
 from the already large burden on the central codebase.
 
-The tradeoffs of internal packages are a larger codebase and responsibility to implement all standard features. It also
-implies thinking about extension more as forking is not viable for reasons above also. The primary mitigation of these
-realities are friendly OSS licensing, high rigor and a collaborative spirit which aim to make contribution in the shared
-codebase productive.
+The tradeoffs of internal packages are a larger codebase and responsibility for implementing all standard features. It
+also means thinking more about extension, because forking is not viable for the reasons above. The primary mitigations
+for these realities are friendly OSS licensing, high rigor and a collaborative spirit, all of which aim to make
+contribution in the shared codebase productive.
 
 ### Avoiding cyclic dependencies
 
@@ -98,7 +97,7 @@ wazy shares constants and interfaces with internal code by a sharing pattern des
 * implementation code can also depend on `api` in a corresponding package under `/internal`.
   * Ex  package `wasm` -> `/internal/wasm/*.go` and can depend on the type `api.Module`.
 
-The above guarantees no cyclic dependencies at the cost of having to re-define symbols that exist in both packages.
+The above guarantees no cyclic dependencies at the cost of re-defining symbols that exist in both packages.
 For example, if `wasm.Store` is a type the user needs access to, it is narrowed by a cover type in the `wazy`:
 
 ```go
@@ -107,17 +106,17 @@ type runtime struct {
 }
 ```
 
-This is not as bad as it sounds as mutations are only available via configuration. This means exported functions are
-limited to only a few functions.
+This is not as bad as it sounds, because mutations are only available via configuration. This means exported functions
+are limited to only a few functions.
 
 ### Avoiding security bugs
 
-In order to avoid security flaws such as code insertion, nothing in the public API is permitted to write directly to any
+To avoid security flaws such as code insertion, nothing in the public API is permitted to write directly to any
 mutable symbol in the internal package. For example, the package `api` is shared with internal code. To ensure
 immutability, the `api` package cannot contain any mutable public symbol, such as a slice or a struct with an exported
 field.
 
-In practice, this means shared functionality like memory mutation need to be implemented by interfaces.
+In practice, this means shared functionality like memory mutation needs to be implemented by interfaces.
 
 Here are some examples:
 * `api.Memory` protects access by exposing functions like `WriteFloat64Le` instead of exporting a buffer (`[]byte`).
@@ -131,7 +130,7 @@ Besides security, this practice prevents other bugs and allows centralization of
 
 It may seem strange that only certain API have an initial `context.Context`
 parameter. We originally had a `context.Context` for anything that might be
-traced, but it turned out to be only useful for lifecycle and host functions.
+traced, but it turned out to be useful only for lifecycle and host functions.
 
 For instruction-scoped aspects like memory updates, a context parameter is too
 fine-grained and also invisible in practice. For example, most users will use
@@ -145,18 +144,18 @@ with signatures expressed as WebAssembly types. For example, `i32` is a 32-bit
 type which might be interpreted as signed. Function signatures can have zero or
 more parameters or results even if WebAssembly 1.0 allows up to one result.
 
-The guest can export functions, so that the host can call it. In the case of
+The guest can export functions, so that the host can call them. In the case of
 wazy, the host is Go and an exported function can be called via
 `api.Function`. `api.Function` allows users to supply parameters and read
 results as a slice of uint64. For example, if there are no results, an empty
 slice is returned. The user can learn the signature via `FunctionDescription`,
 which returns the `api.ValueType` corresponding to each parameter or result.
 `api.ValueType` defines the mapping of WebAssembly types to `uint64` values for
-reason described in this section. The special case of `v128` is also mentioned
+reasons described in this section. The special case of `v128` is also mentioned
 below.
 
-wazy maps each value type to a uint64 values because it holds the largest
-type in WebAssembly 1.0 (i64). A slice allows you to express empty (e.g. a
+wazy maps each value type to a uint64 value because it holds the largest
+type in WebAssembly 1.0 (i64). A slice allows you to express empty values (e.g. a
 nullary signature), for example a start function.
 
 Here's an example of calling a function, noting this syntax works for both a
@@ -178,11 +177,10 @@ programming, and utilities to avoid ambiguity and edge cases around casting.
 
 Alternatively, we could have defined a byte buffer based approach and a binary
 encoding of value types in and out. For example, an empty byte slice would mean
-no values, while a non-empty could use a binary encoding for supported values.
+no values, while a non-empty slice could use a binary encoding for supported values.
 This could work, but it is more difficult for the normal case of i32 and i64.
-It also shares a struggle with the current approach, which is that value types
-were added after WebAssembly 1.0 and not all of them have an encoding. More on
-this below.
+It also shares a struggle with the current approach: value types were added
+after WebAssembly 1.0 and not all of them have an encoding. More on this below.
 
 In summary, wazy chose an approach for signature mapping because there was
 none, and the one we chose biases towards simplicity with integers and handles
@@ -193,7 +191,7 @@ the rest with documentation and utilities.
 Value types added after WebAssembly 1.0 stressed the current model, as some
 have no encoding or are larger than 64 bits. While problematic, these value
 types are not commonly used in exported (extern) functions. However, some
-decisions were made and detailed below.
+decisions were made and are detailed below.
 
 For example `externref` has no guest representation. wazy chose to map
 references to uint64 as that's the largest value needed to encode a pointer on
@@ -212,7 +210,7 @@ so would break all users.
 ### Interfaces, not structs
 
 All exported types in public packages, regardless of configuration vs runtime, are interfaces. The primary benefits are
-internal flexibility and avoiding people accidentally mis-initializing by instantiating the types on their own vs using
+internal flexibility and avoiding people accidentally mis-initializing by instantiating the types on their own instead of using
 the `NewXxx` constructor functions. In other words, there's less support load when things can't be done incorrectly.
 
 Here's an example:
@@ -224,19 +222,19 @@ rt := wazy.NewRuntimeConfig() // initialized properly
 
 There are a few drawbacks to this, notably some work for maintainers.
 * Interfaces are decoupled from the structs implementing them, which means the signature has to be repeated twice.
-* Interfaces have to be documented and guarded at time of use, that 3rd party implementations aren't supported.
+* Interfaces have to be documented and guarded at time of use, because 3rd party implementations aren't supported.
 * As of Golang 1.21, interfaces are still [not well supported](https://github.com/golang/go/issues/5860) in godoc.
 
 ## Config
 
 wazy configures scopes such as Runtime and Module using `XxxConfig` types. For example, `RuntimeConfig` configures
-`Runtime` and `ModuleConfig` configure `Module` (instantiation). In all cases, config types begin defaults and can be
+`Runtime` and `ModuleConfig` configure `Module` (instantiation). In all cases, config types begin with defaults and can be
 customized by a user, e.g., selecting features or a module name override.
 
 ### Why don't we make each configuration setting return an error?
 No config types create resources that would need to be closed, nor do they return errors on use. This helps reduce
-resource leaks, and makes chaining easier. It makes it possible to parse configuration (ex by parsing yaml) independent
-of validating it.
+resource leaks, and makes chaining easier. It makes it possible to parse configuration (ex by parsing yaml) independently
+from validating it.
 
 Instead of:
 ```
@@ -263,7 +261,7 @@ if err != nil {
 }
 ```
 
-This allows users one place to look for errors, and also the benefit that if anything internally opens a resource, but
+This gives users one place to look for errors, with the added benefit that if anything internally opens a resource, but
 errs, there's nothing they need to close. In other words, users don't need to track which resources need closing on
 partial error, as that is handled internally by the only code that can read configuration fields.
 
@@ -292,8 +290,8 @@ if err != nil {
 ```
 
 ### Why aren't configuration assigned with option types?
-The option pattern is a familiar one in Go. For example, someone defines a type `func (x X) err` and uses it to update
-the target. For example, you could imagine wazy could choose to make `ModuleConfig` from options vs chaining fields.
+The option pattern is familiar in Go. For example, someone defines a type `func (x X) err` and uses it to update
+the target. For example, you could imagine wazy choosing to make `ModuleConfig` from options instead of chaining fields.
 
 Ex instead of:
 ```go
@@ -366,12 +364,12 @@ config := r.NewModuleConfig(ModuleConfigFS(fs))
 configDerived := config.WithOptions(ModuleConfigName("name"))
 ```
 
-wazy took the path of the former design primarily due to:
+wazy took the former design primarily because:
 * interfaces provide natural namespaces for their methods, which is more direct than functions with name prefixes.
 * parsing config into function callbacks is more direct vs parsing config into a slice of functions to do the same.
-* in either case derived config is needed and the options pattern is more awkward to achieve that.
+* in either case derived config is needed and the options pattern makes that more awkward.
 
-There are other reasons such as test and debug being simpler without options: the above list is constrained to conserve
+There are other reasons, such as simpler testing and debugging without options: the above list is constrained to conserve
 space. It is accepted that the options pattern is common in Go, which is the main reason for documenting this decision.
 
 ### Why aren't config types deeply structured?
@@ -383,7 +381,7 @@ wazy's configuration types cover the two main scopes of WebAssembly use:
   also allows sub-configuration of `FSConfig`.
 
 These default to a flat definition each, with lazy sub-configuration only after
-proven to be necessary. A flat structure is easier to work with and is also
+proven necessary. A flat structure is easier to work with and is also
 easy to discover. Unlike the option pattern described earlier, more
 configuration in the interface doesn't taint the package namespace, only
 `ModuleConfig`.
@@ -396,8 +394,8 @@ the cognitive load we may be adding to our users.
 In other words, discomfort adding more configuration is a feature, not a bug.
 We should only add new configuration rarely, and before doing so, ensure it
 will be used. In fact, this is why we support using context fields for
-experimental configuration. By letting users practice, we can find out if a
-configuration was a good idea or not before committing to it, and potentially
+experimental configuration. By letting users practice, we can find out whether a
+configuration was a good idea before committing to it and potentially
 sprawling our types.
 
 In reflection, this approach worked well for the nearly 1.5 year period leading
@@ -408,7 +406,7 @@ and it was well understood why when it occurred.
 
 We formerly had functions like `StartWASICommand` that would verify
 preconditions and start WASI's `_start` command. However, this caused confusion
-because both many languages compiled a WASI dependency, and many did so
+because many languages compiled a WASI dependency, and many did so
 inconsistently.
 
 The conflict is that exported functions need to use features the language
@@ -417,7 +415,7 @@ where `_start` needs to complete in order for exported behavior to work.
 
 For example, unlike `GOOS=wasip1` in Go 1.21, TinyGo's "wasi" target supports
 function exports. So, the only way to use FFI style is via the "wasi" target.
-Not explicitly calling `_start` before an ABI such as wapc-go, would crash, due
+Not explicitly calling `_start` before an ABI such as wapc-go would crash, due
 to setup not happening (e.g. to implement `panic`). Other embedders such as
 Envoy also called `_start` for the same reason. To avoid a common problem for
 users unaware of WASI, and also to simplify normal use of WASI (e.g. `main`),
@@ -431,7 +429,7 @@ remove it.
 This decision was made in 2022, and holds true in 2023, even with the
 introduction of "wasix". It holds because "wasix" is backwards compatible with
 "wasip1". In the future, there will be other ways to start applications, and
-may not be backwards compatible with "wasip1".
+they may not be backwards compatible with "wasip1".
 
 Most notably WASI "Preview 2" is not implemented in a way compatible with
 wasip1. Its start function is likely to be different, and defined in the
@@ -454,11 +452,11 @@ which manages them.
 
 ### Why not multi-store?
 Multi-store isn't supported as the extra tier complicates lifecycle and locking. Moreover, in practice it is unusual for
-there to be an engine that has multiple stores which have multiple modules. More often, it is the case that there is
+there to be an engine that has multiple stores which have multiple modules. More often, there is
 either 1 engine with 1 store and multiple modules, or 1 engine with many stores, each having 1 non-host module. In worst
 case, a user can use multiple runtimes until "multi-store" is better understood.
 
-If later, we have demand for multiple stores, that can be accomplished by overload. e.g. `Runtime.InstantiateInStore` or
+If later we have demand for multiple stores, that can be accomplished by overload. e.g. `Runtime.InstantiateInStore` or
 `Runtime.Store(name) Store`.
 
 ## Exit
@@ -468,9 +466,9 @@ If later, we have demand for multiple stores, that can be accomplished by overlo
 It is reasonable to think an exit error should be returned, even if the code is
 success (zero). Even on success, the module is no longer functional. For
 example, function exports would error later. However, wazy does not. The only
-time `sys.ExitError` is on error (non-zero).
+time `sys.ExitError` is returned is on error (non-zero).
 
-This decision was to improve performance and ergonomics for guests that both
+This decision improves performance and ergonomics for guests that both
 use WASI (have a `_start` function), and also allow custom exports.
 Specifically, Rust, TinyGo and normal wasi-libc, don't exit the module during
 `_start`. If they did, it would invalidate their function exports. This means
@@ -511,7 +509,7 @@ There are a lot of areas where windows behaves differently, despite the
 `os.File` abstraction. This goes well beyond file locking concerns (e.g.
 `EBUSY` errors on open files). For example, errors like `ACCESS_DENIED` aren't
 properly mapped to `EPERM`. There are trickier parts too. `FileInfo.Sys()`
-doesn't return enough information to build inodes needed for WASI. To rebuild
+doesn't return enough information to build inodes needed for WASI. Rebuilding
 them requires the full path to the underlying file, not just its directory
 name, and there's no way for us to get that information. At one point we tried,
 but in practice things became tangled and functionality such as read-only
@@ -527,7 +525,7 @@ is enforced to be the correct signature and succeed, but the export itself isn't
 exports are not required to be contained to a "_start" function invocation. Finally, the "__indirect_function_table"
 export is also not enforced.
 
-The reason for the exceptions are that implementations aren't following the rules. For example, TinyGo doesn't export
+The reason for the exceptions is that implementations aren't following the rules. For example, TinyGo doesn't export
 "__indirect_function_table", so crashing on this would make wazy unable to run TinyGo modules. Similarly, modules
 loaded by wapc-go don't always define a "_start" function. Since "snapshot-01" is not a proper version, and certainly
 not a W3C recommendation, there's no sense in breaking users over matters like this.
@@ -553,10 +551,10 @@ In reflection, this worked well as more ABI became usable in wazy.
 
 WebAssembly 1.0 (20191205) specifies some aspects to control isolation between modules ([sandboxing](https://en.wikipedia.org/wiki/Sandbox_(computer_security))).
 For example, `wasm.Memory` has size constraints and each instance of it is isolated from each other. While `wasm.Memory`
-can be shared, by exporting it, it is not exported by default. In fact a WebAssembly Module (Wasm) has no memory by
+can be shared by exporting it, it is not exported by default. In fact a WebAssembly Module (Wasm) has no memory by
 default.
 
-While memory is defined in WebAssembly 1.0 (20191205), many aspects are not. Let's use an example of `exec.Cmd` as for
+While memory is defined in WebAssembly 1.0 (20191205), many aspects are not. Let's use an example of `exec.Cmd` as, for
 example, a WebAssembly System Interfaces (WASI) command is implemented as a module with a `_start` function, and in many
 ways acts similar to a process with a `main` function.
 
@@ -569,7 +567,7 @@ WASI implements system interfaces with host functions. Concretely, to write to c
 "fd_write" from "wasi_snapshot_preview1" and calls it with the `fd` parameter set to 1 (STDOUT).
 
 The [snapshot-01](https://github.com/WebAssembly/WASI/blob/snapshot-01/phases/snapshot/docs.md) version of WASI has no
-means to declare configuration, although its function definitions imply configuration for example if fd 1 should exist,
+means to declare configuration, although its function definitions imply configuration, for example if fd 1 should exist,
 and if so where should it write. Moreover, snapshot-01 was last updated in late 2020 and the specification is being
 completely rewritten as of early 2022. This means WASI as defined by "snapshot-01" will not clarify aspects like which
 file descriptors are required. While it is possible a subsequent version may, it is too early to tell as no version of
@@ -579,18 +577,18 @@ write to console, as they can define their own host functions, such as they did 
 wazy aims to serve Go developers as a primary function, and help them transition between WASI specifications. In
 order to do this, we have to allow top-level configuration. To ensure isolation by default, `ModuleConfig` has WithXXX
 that override defaults to no-op or empty. One `ModuleConfig` instance is used regardless of how many times the same WASI
-functions are imported. The nil defaults allow safe concurrency in these situations, as well lower the cost when they
+functions are imported. The nil defaults allow safe concurrency in these situations, as well as lower cost when they
 are never used. Finally, a one-to-one mapping with `Module` allows the module to close the `ModuleConfig` instead of
 confusing users with another API to close.
 
 Naming, defaults and validation rules of aspects like `STDIN` and `Environ` are intentionally similar to other Go
-libraries such as `exec.Cmd` or `syscall.SetEnv`, and differences called out where helpful. For example, there's no goal
+libraries such as `exec.Cmd` or `syscall.SetEnv`, with differences called out where helpful. For example, there's no goal
 to emulate any operating system primitive specific to Windows (such as a 'c:\' drive). Moreover, certain defaults
 working with real system calls are neither relevant nor safe to inherit: For example, `exec.Cmd` defaults to read STDIN
 from a real file descriptor ("/dev/null"). Defaulting to this, vs reading `io.EOF`, would be unsafe as it can exhaust
 file descriptors if resources aren't managed properly. In other words, blind copying of defaults isn't wise as it can
 violate isolation or endanger the embedding process. In summary, we try to be similar to normal Go code, but often need
-act differently and document `ModuleConfig` is more about emulating, not necessarily performing real system calls.
+act differently and document `ModuleConfig` as more about emulating, not necessarily performing real system calls.
 
 ## File systems
 
@@ -618,7 +616,7 @@ In other words, the use case requests never stopped, and aren't solved by
 exposing only real files.
 
 In summary, the primary motivation for exposing a replacement for `fs.FS` and
-`fs.File` was around repetitive use case requests for years, around
+`fs.File` was repeated use case requests over years, around
 interception and the ability to create new files, both virtual and real files.
 While some use cases are solved with real files, not all are. Regardless, an
 interface approach is necessary to ensure users can intercept I/O operations.
@@ -632,7 +630,7 @@ described in a subsequent section.
 
 As noted above, users have been asking for a file abstraction for over two
 years, and a common answer was to wait. Making users wait is a problem,
-especially so long. Good reasons to make people wait are stabilization. Edge
+especially so long. Stabilization is a good reason to make people wait. Edge
 case features are not a great reason to hold abstractions from users.
 
 Another reason is implementation difficulty. Go did not attempt to abstract
@@ -655,8 +653,8 @@ words, even in real files, `Fd()` is not wholly portable, despite it being
 useful on many operating systems with the `syscall` package.
 
 The reasons above, why Go doesn't abstract `FdFile` interface are a subset of
-reasons why `sys.File` does not. If we exposed `File.Fd()` we not only would
-have to declare all the edge cases that Go describes including impact of
+reasons why `sys.File` does not. If we exposed `File.Fd()` we would not only
+have to declare all the edge cases that Go describes, including impact of
 finalizers, we would have to describe these in terms of virtualized files.
 Then, we would have to reason with this value vs our existing virtualized
 `sys.FileTable`, mapping whatever type we return to keys in that table, also
@@ -664,7 +662,7 @@ in consideration of garbage collection impact. The combination of issues like
 this could lead down a path of not implementing a file system abstraction at
 all, and instead a weak key mapped abstraction of the `syscall` package. Once
 we finished with all the edge cases, we would have lost context of the original
-reason why we started.. simply to allow file write access!
+reason why we started: simply to allow file write access!
 
 When wazy attempts to do more than what the Go programming language team, it
 has to be carefully evaluated, to:
@@ -683,14 +681,14 @@ expose `Fd()` on `sys.File`.
 wazy exposes `File.Poll` which allows one-at-a-time poll use cases,
 requested by multiple users. This not only includes abstract tests such as
 Go 1.21 `GOOS=wasip1`, but real use cases including python and container2wasm
-repls, as well listen sockets. The main use cases is non-blocking poll on a
+repls, as well listen sockets. The main use case is non-blocking poll on a
 single file. Being a single file, this has no risk of problems such as
 head-of-line blocking, even when emulated.
 
-The main use case of multi-poll are bidirectional network services, something
+The main use case of multi-poll is bidirectional network services, something
 not used in `GOOS=wasip1` standard libraries, but could be in the future.
 Moving forward without a multi-poller allows wazy to expose its file system
-abstraction instead of continuing to hold back it back for edge cases. We'll
+abstraction instead of continuing to hold it back for edge cases. We'll
 continue discussion below regardless, as rationale was requested.
 
 You can loop through multiple `sys.File`, using `File.Poll` to see if an event
@@ -703,8 +701,8 @@ goroutines to avoid this, but interrupting a "forever" poll is problematic. All
 of these are reasons to consider a multi-poll API, but do not require exporting
 `File.Fd()`.
 
-Should multi-poll becomes critical, `sys.FS` could expose a `Poll` function
-like below, despite it being the non-portable, complicated if possible to
+Should multi-poll become critical, `sys.FS` could expose a `Poll` function
+like below, despite it being non-portable and complicated, if possible, to
 implement on all platforms and virtual file systems.
 ```go
 ready, errno := fs.Poll([]sys.PollFile{{f1, sys.POLLIN}, {f2, sys.POLLOUT}}, timeoutMillis)
@@ -727,7 +725,7 @@ users, and also permit single file polling as exists now.
 
 An early design of wazy's API included a `WithWorkDirFS` which allowed
 control over which file a relative path such as "./config.yml" resolved to,
-independent of the root file system. This intended to help separate concerns
+independent of the root file system. This was intended to help separate concerns
 like mutability of files, but it didn't work and was removed.
 
 Compilers that target wasm act differently with regard to the working
@@ -738,7 +736,7 @@ working directory.
 
 The only place wazy can standardize a layered concern is via a host function.
 Since WASI doesn't use host functions to track the working directory, we can't
-standardize the storage and initial value of it.
+standardize its storage and initial value.
 
 Meanwhile, code may be able to affect the working directory by compiling
 `chdir` into their main function, using an argument or ENV for the initial
@@ -771,11 +769,11 @@ subsequent read as perhaps the bytes leading up to the error are enough to
 satisfy the processor.
 
 This decision boils down to whether or not to track an error bit per file
-descriptor or not. If not, the assumption is that a subsequent operation would
+descriptor. If not, the assumption is that a subsequent operation would
 also error, this time without reading any bytes.
 
 The current opinion is to go with the simplest path, which is to return the
-bytes read and ignore the error the there were any. Assume a subsequent
+bytes read and ignore the error if there were any. Assume a subsequent
 operation will err if it needs to. This helps reduce the complexity of the code
 in wazy and also accommodates the scenario where the bytes read are enough to
 satisfy its processor.
@@ -788,16 +786,16 @@ by unix systems: when opening a file, the lowest unused number is picked.
 The WASI standard documents that programs cannot expect that file descriptor
 numbers will be allocated with a lowest-first strategy, and they should instead
 assume the values will be random. Since _random_ is a very imprecise concept in
-computers, we technically satisfying the implementation with the descriptor
+computers, we technically satisfy the implementation with the descriptor
 allocation strategy we use in Wazy. We could imagine adding more _randomness_
 to the descriptor selection process, however this should never be used as a
-security measure to prevent applications from guessing the next file number so
+security measure to prevent applications from guessing the next file number, so
 there are no strong incentives to complicate the logic.
 
 ### Why does `FSConfig.WithDirMount` not match behaviour with `os.DirFS`?
 
 It may seem that we should require any feature that seems like a standard
-library in Go, to behave the same way as the standard library. Doing so would
+library in Go to behave the same way as the standard library. Doing so would
 present least surprise to Go developers. In the case of how we handle
 filesystems, we break from that as it is incompatible with the expectations of
 WASI, the most commonly implemented filesystem ABI.
@@ -829,7 +827,7 @@ because it performs and fits wasip1 better.
 `fd_readdir` in wasip1 (and so also wasix) is like `getdents` in Linux, not
 `readdir` in POSIX. `getdents` is more like Go's `os.File.Readdir`.
 
-We currently have an internal type `sys.DirentCache` which only is used by
+We currently have an internal type `sys.DirentCache` which is only used by
 wasip1 or wasix. When `HostModuleBuilder` adds support for instantiation state,
 we could move this to the `wasi_snapshot_preview1` package. Meanwhile, all
 filesystem code is internal anyway, so this special-case is acceptable.
@@ -882,7 +880,7 @@ The initial implementation of `fd_pread` instead used `Seek`. To avoid a
 regression, we fall back to `io.Seeker` when `io.ReaderAt` is not supported.
 
 This requires obtaining the initial file offset, seeking to the intended read
-offset, and resetting the file offset the initial state. If this final seek
+offset, and resetting the file offset to the initial state. If this final seek
 fails, the file offset is left in an undefined state. This is not thread-safe.
 
 While seeking per read seems expensive, the common case of `embed.openFile` is
@@ -926,7 +924,7 @@ The semantics in wazy follows that of wasmtime.
 See https://github.com/bytecodealliance/wasmtime/blob/2ca01ae9478f199337cf743a6ab543e8c3f3b238/crates/wasi-common/src/snapshots/preview_1.rs#L578-L582
 
 Their semantics match when `path_len` == the length of `path`, so in practice
-this difference won't matter match.
+this difference won't matter much.
 
 ## fd_readdir
 
@@ -941,7 +939,7 @@ This did not include the requested change of making dot entries optional.
 The `phases/snapshot/docs.md` document was altered in subsequent years in
 significant ways, often in lock-step with wasmtime or wasi-libc. In January
 2022, `sock_accept` was added to `phases/snapshot/docs.md`, a document later
-renamed to later renamed to `legacy/preview1/docs.md`.
+renamed to `legacy/preview1/docs.md`.
 
 As a result, the ABI and behavior remained unstable: The `snapshot-01` tag was
 not an effective basis of portability. A test suite was requested well before
@@ -967,14 +965,14 @@ not just Go, but other common programming languages. This was rejected by the
 WASI lead for preview1, but considered for the completely different ABI named
 preview2.
 
-In February 2023, the WASI chair declared that new rule requiring preview1 to
+In February 2023, the WASI chair declared that the new rule requiring preview1 to
 return dot entries "was decided by the subgroup as a whole", citing meeting
 notes. According to these notes, the WASI lead stated incorrectly that POSIX
 conformance required returning dot entries, something it explicitly says are
 optional. In other words, he said filtering them out would make Preview1
 non-conforming, and asked if anyone objects to this. The co-chair was noted to
 say "Because there are existing P1 programs, we shouldn’t make changes like
-this." No other were recorded to say anything.
+this." No others were recorded to say anything.
 
 In summary, preview1 was changed retrospectively to require dot entries and
 preview2 was changed to require their absence. This rule was reverse engineered
@@ -1008,10 +1006,10 @@ For example, Go does not return them from `os.ReadDir`, and materializing them
 is complicated (at least dot-dot is).
 
 A directory entry has stat information in it. The stat information includes
-inode which is used for comparing file equivalence. In the simple case of dot,
+inode, which is used for comparing file equivalence. In the simple case of dot,
 we could materialize a special entry to expose the same info as stat on the fd
 would return. However, doing this and not doing dot-dot would cause confusion,
-and dot-dot is far more tricky. To back-fill inode information about a parent
+and dot-dot is far trickier. To back-fill inode information about a parent
 directory would be costly and subtle. For example, the pre-open (mount) of the
 directory may be different than its logical parent. This is easy to understand
 when considering the common case of mounting "/" and "/tmp" as pre-opens. To
@@ -1034,13 +1032,13 @@ need to synthesize this value for all entries. In practice, the simplest way is
 using an incrementing number, such as done in the WASI preview2 adapter.
 
 Working around these issues causes expense to all users of wazy, so we'd
-then look to see if that would be justified or not. However, the most common
+then look to see if that would be justified. However, the most common
 compilers involved in end user questions, as of early 2023 are TinyGo, Rust and
 Zig. All of these compile code which ignores dot and dot-dot entries. In other
 words, faking these entries would not only cost our codebase with complexity,
 but it would also add unnecessary overhead as the values aren't commonly used.
 
-The final reason why we might do this, is an end users or a specification
+The final reason why we might do this is an end user or a specification
 requiring us to. As of early 2023, no end user has raised concern over Go and
 by extension wazy not returning dot and dot-dot. The snapshot-01 spec of WASI
 does not mention anything on this point. Also, POSIX has the following to say,
@@ -1155,10 +1153,10 @@ func time_now() (sec int64, nsec int32, mono int64) {
 }
 ```
 
-Splitting functions for wall and clock time allow implementations to choose
+Splitting functions for wall and clock time allows implementations to choose
 whether to implement the clock once (as in Go), or split them out.
 
-Each can be configured with a `ClockResolution`, although is it usually
+Each can be configured with a `ClockResolution`, although it is usually
 incorrect as detailed in a sub-heading below. The only reason for exposing this
 is to satisfy WASI:
 
@@ -1168,7 +1166,7 @@ See https://github.com/WebAssembly/wasi-clocks
 
 WebAssembly has an implicit design pattern of capabilities based security. By
 defaulting to a fake time, we reduce the chance of timing attacks, at the cost
-of requiring configuration to opt-into real clocks.
+of requiring configuration to opt into real clocks.
 
 See https://gruss.cc/files/fantastictimers.pdf for an example attacks.
 
@@ -1183,7 +1181,7 @@ wazy can't use `time.Clock` as a plugin for clock implementation as it is
 only substitutable with build flags (`faketime`) and conflates wall and
 monotonic time in the same call.
 
-Go's `time.Clock` was added monotonic time after the fact. For portability with
+Go's `time.Clock` added monotonic time after the fact. For portability with
 prior APIs, a decision was made to combine readings into the same API call.
 
 See https://go.googlesource.com/proposal/+/master/design/12914-monotonic.md
@@ -1199,7 +1197,7 @@ from the host process one.
 
 ### `ClockResolution`
 
-A clock's resolution is hardware and OS dependent so requires a system call to retrieve an accurate value.
+A clock's resolution is hardware and OS dependent, so it requires a system call to retrieve an accurate value.
 Go does not provide a function for getting resolution, so without CGO we don't have an easy way to get an actual
 value. For now, we return fixed values of 1us for realtime and 1ns for monotonic, assuming that realtime clocks are
 often lower precision than monotonic clocks. In the future, this could be improved by having OS+arch specific assembly
@@ -1358,7 +1356,7 @@ separately.
 ### FdRead and FdWrite Subscription to Stdin
 
 Subscribing `Stdin` for reads (writes make no sense and cause an error),
-requires extra care: wazy allows to configure a custom reader for `Stdin`.
+requires extra care: wazy allows configuration of a custom reader for `Stdin`.
 
 In general, if a custom reader is found, the behavior will be the same
 as for regular file descriptors: data is assumed to be present and
@@ -1372,7 +1370,7 @@ and it is emulated on Windows.
 
 ### Poll on POSIX
 
-On POSIX systems, `poll(2)` allows to wait for incoming data on a file
+On POSIX systems, `poll(2)` allows waiting for incoming data on a file
 descriptor, and block until either data becomes available or the timeout
 expires.
 
@@ -1390,7 +1388,7 @@ Usage of `syfs.poll()` is currently only reserved for standard input, because
 
 So, if the subscription is for `os.Stdin` and the handle is detected
 to correspond to an interactive session, then `sysfs.poll()` will be
-invoked with a the `Stdin` handle *and* the timeout.
+invoked with the `Stdin` handle *and* the timeout.
 
 This also means that in this specific case, the timeout is uninterruptible,
 unless data becomes available on `Stdin` itself.
@@ -1430,8 +1428,8 @@ There are ways to obviate this issue. We outline here one idea, that is however
 not currently implemented. A common approach to support context cancellation is
 to add a signal file descriptor to the set, e.g. the read-end of a pipe or an
 eventfd on Linux. When the context is canceled, we may unblock a Select call by
-writing to the fd, causing it to return immediately. This however requires to
-do a bit of housekeeping to hide the "special" FD from the end-user.
+writing to the fd, causing it to return immediately. This however requires
+doing a bit of housekeeping to hide the "special" FD from the end-user.
 
 [poll_oneoff]: https://github.com/WebAssembly/wasi-poll#why-is-the-function-called-poll_oneoff
 [async-io-windows]: https://tinyclouds.org/iocp_links
@@ -1440,7 +1438,7 @@ do a bit of housekeeping to hide the "special" FD from the end-user.
 
 ## Signed encoding of integer global constant initializers
 
-wazy treats integer global constant initializers signed as their interpretation is not known at declaration time. For
+wazy treats integer global constant initializers as signed because their interpretation is not known at declaration time. For
 example, there is no signed integer [value type](https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#value-types%E2%91%A0).
 
 To get at the problem, let's use an example.
@@ -1467,7 +1465,7 @@ wazy limitations are imposed pragmatically and described below.
 The possible number of function instances in [a module](https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#module-instances%E2%91%A0) is not specified in the WebAssembly specifications since [`funcaddr`](https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#syntax-funcaddr) corresponding to a function instance in a store can be arbitrary number.
 wazy limits the maximum function instances to 2^27 as even that number would occupy 1GB in function pointers.
 
-That is because not only we _believe_ that all use cases are fine with the limitation, but also we have no way to test wazy runtimes under these unusual circumstances.
+That is because not only do we _believe_ that all use cases are fine with the limitation, but also we have no way to test wazy runtimes under these unusual circumstances.
 
 ### Number of function types in a store
 
@@ -1480,7 +1478,7 @@ This is due to the same reason for the limitation on the number of functions abo
 
 While the the spec does not clarify a limitation of function stack values, wazy limits this to 2^27 = 134,217,728.
 The reason is that we internally represent all the values as 64-bit integers regardless of its types (including f32, f64), and 2^27 values means
-1 GiB = (2^30). 1 GiB is the reasonable for most applications [as we see a Goroutine has 250 MB as a limit on the stack for 32-bit arch](https://github.com/golang/go/blob/go1.24.0/src/runtime/proc.go#L154-L161), considering that WebAssembly is (currently) 32-bit environment.
+1 GiB = (2^30). 1 GiB is reasonable for most applications [as we see a Goroutine has 250 MB as a limit on the stack for 32-bit arch](https://github.com/golang/go/blob/go1.24.0/src/runtime/proc.go#L154-L161), considering that WebAssembly is (currently) 32-bit environment.
 
 All the functions are statically analyzed at module instantiation phase, and if a function can potentially reach this limit, an error is returned.
 
@@ -1528,7 +1526,7 @@ a Go function (`ModuleInstance.FailIfClosed`) that atomically checks a sentinel 
 
 [It _is indeed_ possible to check the sentinel value directly, without leaving the native world][native_check], thus sparing some cycles;
 however, because native code never preempts (see section above), this may lead to a state where the other goroutines
-never get the chance to run, and thus never get the chance to set the sentinel value; effectively preventing
+never get the chance to run, and thus never get the chance to set the sentinel value, effectively preventing
 cancellation from taking place.
 
 [native_check]: https://github.com/tetratelabs/wazero/issues/1409
@@ -1563,7 +1561,7 @@ This is implemented in wazy in [hammer.go](internal/testing/hammer/hammer.go)
 
 ### Lock-free, cross-goroutine observations of updates
 
-How to achieve cross-goroutine reads of a variable are not explicitly defined in https://go.dev/ref/mem. wazy uses
+How to achieve cross-goroutine reads of a variable is not explicitly defined in https://go.dev/ref/mem. wazy uses
 atomics to implement this following unofficial practice. For example, a `Close` operation can be guarded to happen only
 once via compare-and-swap (CAS) against a zero value. When we use this pattern, we consistently use atomics to both
 read and update the same numeric field.
