@@ -59,11 +59,11 @@ The fastest way in is an [example](examples/README.md). The [basic one](examples
 
 ## Credit
 
-wazy started from [wazero][wazero]'s code and still draws on its WebAssembly semantics, WASI implementation, and compliance and fuzzing test suites. We do not intend to keep wazero's API compatibility or its architecture. The goals are pure Go, performance, and conformance to the standard. See [RATIONALE.md](RATIONALE.md) for wazero's original design rationale and [NOTICE](NOTICE) / [LICENSE](LICENSE) for the Apache 2.0 attribution, preserved unmodified.
+wazy started from [wazero][wazero]'s code (Copyright 2020-2023 wazero authors) and still draws on its WebAssembly semantics, WASI implementation, and compliance and fuzzing test suites. We do not intend to keep wazero's API compatibility or its architecture. The goals are pure Go, performance, and conformance to the standard. See [RATIONALE.md](RATIONALE.md) for wazero's original design rationale and [LICENSE](LICENSE) for the Apache 2.0 license.
 
 ## License
 
-Apache 2.0. [LICENSE](LICENSE) and [NOTICE](NOTICE) are unchanged from wazero.
+Apache 2.0. See [LICENSE](LICENSE).
 
 [1]: https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/
 [2]: https://www.w3.org/TR/2022/WD-wasm-core-2-20220419/
