@@ -4,17 +4,17 @@
 
 A fast WebAssembly runtime for Go: zero dependencies, no CGO, pure Go.
 
-wazy embeds WebAssembly in your Go application. Run code compiled from Rust, C, C++, TinyGo, Zig, and anything else that targets Wasm, with no external toolchain, no cgo, and nothing to install at runtime. It is built for speed and moves quickly.
+wazy embeds WebAssembly in your Go application. Run code compiled from Rust, C, C++, TinyGo, Zig, and anything else that targets Wasm. No external toolchain. No cgo. Nothing to install at runtime. It is built for speed and developed aggressively.
 
 ```bash
 go get github.com/samyfodil/wazy@latest
 ```
 
-wazy is WebAssembly Core Specification [1.0][1] and [2.0][2] compliant, and runs on any Go target, with an optimizing native compiler on amd64 and arm64, and a pure-Go interpreter everywhere else.
+wazy is compliant with the WebAssembly Core Specification [1.0][1] and [2.0][2]. It runs on any Go target, with an optimizing native compiler on amd64 and arm64, and a pure-Go interpreter everywhere else.
 
 ## Fast
 
-wazy is measurably faster than [wazero][wazero], the runtime it descends from, on the paths that shape real throughput and latency. Measured against upstream on the same hardware:
+wazy is measurably faster than [wazero][wazero], the runtime it descends from, on the paths that set real throughput and latency. Measured against upstream on the same hardware:
 
 - **Host calls up to ~15x faster**, with zero allocations. Calling a Go function from Wasm is the hot path for WASI and for any host API you expose. wazy's typed host functions run at native-call speed.
 - **Compiled execution ~6% faster.**
@@ -22,9 +22,9 @@ wazy is measurably faster than [wazero][wazero], the runtime it descends from, o
 - **Interpreter ~30% faster**, with per-call heap allocation eliminated. A benchmark that allocated 1.35M times now allocates twice.
 - **~87% less memory per call** for the common request-per-call pattern.
 
-Methodology and per-optimization numbers live in [OPTIMIZATIONS.md](OPTIMIZATIONS.md).
+Methodology and per-optimization numbers are in [OPTIMIZATIONS.md](OPTIMIZATIONS.md).
 
-The host-call speedup comes from dropping reflection. Instead of the usual `reflect`-per-call path (~14x slower), typed generic helpers derive the Wasm signature from Go's types at compile time:
+The host-call speedup comes from dropping reflection. Instead of the usual `reflect`-per-call path, which is ~14x slower, typed generic helpers derive the Wasm signature from Go's types at compile time:
 
 ```go
 wazy.HostFunc2(builder, func(ctx context.Context, mod api.Module, x, y uint32) uint32 {
@@ -32,19 +32,19 @@ wazy.HostFunc2(builder, func(ctx context.Context, mod api.Module, x, y uint32) u
 }).Export("add")
 ```
 
-`HostFunc0`–`HostFunc8` and `HostProc0`–`HostProc8` cover most functions; `WithGoModuleFunction` handles the rest. All zero-allocation.
+`HostFunc0`–`HostFunc8` and `HostProc0`–`HostProc8` cover most functions. `WithGoModuleFunction` handles the rest. All zero-allocation.
 
 ## Moving fast
 
-wazy is an actively developed performance fork. It optimizes for where WebAssembly is going, not for standing still. The roadmap points at the modern Wasm platform, WASI 0.3 and the Component Model, which upstream does not target.
+wazy is an actively developed performance fork. It is built for where WebAssembly is going: WASI 0.3 and the Component Model, which upstream does not target.
 
-That choice has a cost: wazy makes no API-stability promise. It has already broken compatibility with wazero, including host-function registration, and will do so again when that makes the runtime faster or moves it toward the component model.
+That choice has a cost. wazy makes no API-stability promise. It has already broken compatibility with wazero, including host-function registration, and will do so again when that makes the runtime faster or moves it toward the Component Model.
 
-If you want a mature, stability-guaranteed runtime with a large user base, use [wazero][wazero]. If you want a fast runtime that keeps moving toward the modern Wasm platform, use wazy.
+If you want a mature, stability-guaranteed runtime with a large user base, use [wazero][wazero]. If you want a fast runtime moving toward the modern Wasm platform, use wazy.
 
 ## Two engines
 
-`wazy.NewRuntime(ctx)` picks the optimizing compiler when the platform supports it (amd64, arm64) and falls back to the interpreter otherwise. You can force either:
+`wazy.NewRuntime(ctx)` picks the optimizing compiler when the platform supports it, amd64 or arm64, and falls back to the interpreter otherwise. You can force either:
 
 ```go
 r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigInterpreter())
