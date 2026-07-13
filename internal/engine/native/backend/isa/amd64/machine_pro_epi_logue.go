@@ -111,7 +111,7 @@ func (m *machine) setupPrologue() {
 	//
 	cur = m.setupRBPRSP(cur)
 
-	if !m.stackBoundsCheckDisabled {
+	if !m.stackBoundsCheckDisabled && !m.canSkipStackBoundsCheck() {
 		cur = m.insertStackBoundsCheck(m.requiredStackSize(), cur)
 	}
 

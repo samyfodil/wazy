@@ -99,6 +99,16 @@ import "github.com/samyfodil/wazy/internal/engine/native/ssa"
 // signatures fall back to the full check (still correct, just not elided).
 const StackBoundsCheckMarginBytes = 512
 
+// LeafStackCheckHeadroomBytes is slack kept below MARGIN when eliding a leaf
+// function's prologue stack-bounds check (both ISAs). A leaf makes no calls of
+// any kind (so maxRequiredStackSizeForCalls stays 0) and thus its whole frame
+// sits within the MARGIN its caller already reserved below it (invariant point
+// 3 above). This headroom additionally covers the return-address push of any
+// Go-exiting trampoline (interrupt check, memory.grow, ...) the leaf might still
+// invoke -- those exit to Go rather than recursing on the wasm stack, so they
+// consume only a few bytes of it.
+const LeafStackCheckHeadroomBytes = 128
+
 // GoFunctionCallRequiredStackSize returns the size of the stack required for the Go function call.
 // argBegin is the index of the first argument in the signature which is not either execution context or module context.
 func GoFunctionCallRequiredStackSize(sig *ssa.Signature, argBegin int) (ret, retUnaligned int64) {

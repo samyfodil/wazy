@@ -2493,6 +2493,19 @@ func (m *machine) requiredStackSize() int64 {
 		16 // return address and the caller RBP.
 }
 
+// canSkipStackBoundsCheck reports whether this function's prologue stack-bounds
+// check can be elided. A leaf (makes no call of any kind -- direct, indirect,
+// tail, or host-import -- so maxRequiredStackSizeForCalls stays 0, see
+// prepareCall) whose frame fits within the H7 MARGIN its caller already
+// reserved below it cannot overflow: by the invariant in backend/go_call.go
+// (point 3) every callee's frame base sits >= MARGIN above stackBottomPtr, and
+// a leaf never re-establishes that margin for a callee (it has none), so
+// eliding its check cannot compromise a deeper frame.
+func (m *machine) canSkipStackBoundsCheck() bool {
+	return m.maxRequiredStackSizeForCalls == 0 &&
+		m.frameSize()+backend.LeafStackCheckHeadroomBytes <= backend.StackBoundsCheckMarginBytes
+}
+
 // CompiledBlockOffsets implements backend.Machine.
 func (m *machine) CompiledBlockOffsets() []backend.CompiledBlockOffset {
 	ret := make([]backend.CompiledBlockOffset, len(m.orderedSSABlockLabelPos))

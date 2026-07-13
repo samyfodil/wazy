@@ -117,7 +117,7 @@ func (m *machine) setupPrologue() {
 	// size_of_arg_ret is used for stack unwinding.
 	cur = m.createReturnAddrAndSizeOfArgRetSlot(cur)
 
-	if !m.stackBoundsCheckDisabled {
+	if !m.stackBoundsCheckDisabled && !m.canSkipStackBoundsCheck() {
 		cur = m.insertStackBoundsCheck(m.requiredStackSize(), cur)
 	}
 
