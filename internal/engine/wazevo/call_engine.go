@@ -235,8 +235,10 @@ type (
 )
 
 func (c *callEngine) requiredInitialStackSize() int {
-	const initialStackSizeDefault = 10240
-	stackSize := initialStackSizeDefault
+	// stackPoolBaseSize (stack_pool.go) is this function's own default, kept
+	// as a single source of truth since it is also pool size class 0's
+	// canonical size -- see that file's doc comment.
+	stackSize := stackPoolBaseSize
 	paramResultInBytes := c.sizeOfParamResultSlice * 8 * 2 // * 8 because uint64 is 8 bytes, and *2 because we need both separated param/result slots.
 	required := paramResultInBytes + 32 + 16               // 32 is enough to accommodate the call frame info, and 16 exists just in case when []byte is not aligned to 16 bytes.
 	if required > stackSize {
@@ -245,17 +247,37 @@ func (c *callEngine) requiredInitialStackSize() int {
 	return stackSize
 }
 
+// init sets up the call-invariant fields of a freshly-constructed
+// callEngine (see moduleEngine.NewFunction). Notably, in the default
+// (StackGuardCheckEnabled == false) build, it does NOT allocate the wasm
+// stack anymore: that used to be an unconditional
+// `c.stack = make([]byte, requiredInitialStackSize())` here, i.e. a fresh
+// ~10KB allocation on every single callEngine, hence on every
+// mod.ExportedFunction(name).Call(ctx) (NewFunction builds a fresh
+// callEngine per call -- ExportedFunction is never cached). That
+// allocation is now done by (*callEngine).callWithStack, pulling from
+// engine.stackPools (stack_pool.go) instead, and released back when that
+// call returns.
+//
+// It can't just be done once here instead of in callWithStack: a single
+// callEngine can have Call/CallWithStack invoked more than once across its
+// lifetime -- e.g. a cached api.Function handle reused in a hot loop, as
+// BenchmarkInvocation's fib benchmarks and BenchmarkRedundancyHeavyExec
+// both do -- and the pool's contract is "acquire at the start of a
+// top-level call, release when it returns". Acquiring only once here and
+// releasing after the first call returns would hand this callEngine's
+// buffer to a different pool consumer while a second call on the very same
+// callEngine still thinks it owns it.
 func (c *callEngine) init() {
-	stackSize := c.requiredInitialStackSize()
 	if wazevoapi.StackGuardCheckEnabled {
-		stackSize += wazevoapi.StackGuardCheckGuardPageSize
-	}
-	c.stack = make([]byte, stackSize)
-	c.stackTop = alignedStackTop(c.stack)
-	if wazevoapi.StackGuardCheckEnabled {
+		// Debug-only path: never pooled -- see acquireStack's doc comment
+		// for why (in short: CheckStackGuardPage requires the guard page
+		// to still be all-zero, which a reused buffer cannot guarantee) --
+		// so it keeps the simple eager-allocate-once-here behavior.
+		stackSize := c.requiredInitialStackSize() + wazevoapi.StackGuardCheckGuardPageSize
+		c.stack = make([]byte, stackSize)
+		c.stackTop = alignedStackTop(c.stack)
 		c.execCtx.stackBottomPtr = &c.stack[wazevoapi.StackGuardCheckGuardPageSize]
-	} else {
-		c.execCtx.stackBottomPtr = &c.stack[0]
 	}
 	c.execCtxPtr = uintptr(unsafe.Pointer(&c.execCtx))
 }
@@ -342,6 +364,36 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 	if wazevoapi.StackGuardCheckEnabled {
 		defer func() {
 			wazevoapi.CheckStackGuardPage(c.stack)
+		}()
+	} else {
+		// Acquire this top-level call's wasm stack from the shared pool
+		// (stack_pool.go) instead of allocating a fresh one, and release it
+		// back when this call returns -- via defer, so it happens on every
+		// exit path, including the ctx-already-done early return
+		// immediately below and a panic/trap unwinding through the
+		// recover() defer further down.
+		//
+		// This defer is registered before (and therefore, per Go's LIFO
+		// defer order, runs *after*) the recover-handling defer below: that
+		// defer's own work (building a trap backtrace via unwindStack,
+		// which reads through c.stackTop/c.stack) must finish before this
+		// buffer is handed back to the pool for some other goroutine to
+		// reuse.
+		eng := c.parent.parent.parent
+		var stackBoxed *[]byte
+		c.stack, stackBoxed = eng.acquireStack(c.requiredInitialStackSize())
+		c.stackTop = alignedStackTop(c.stack)
+		c.execCtx.stackBottomPtr = &c.stack[0]
+		defer func() {
+			// Release whichever buffer c.stack currently is -- not
+			// necessarily the one just acquired above: stack growth
+			// (growStack/cloneStack) or an experimental Snapshot restore
+			// (doRestore) may have replaced it with a different buffer
+			// mid-call. Exactly one buffer is released here, exactly once,
+			// matching the exactly-one acquire above; any old,
+			// pre-growth/pre-restore buffer is simply not returned to the
+			// pool and left for the GC, same as before pooling existed.
+			eng.releaseStack(c.stack, stackBoxed)
 		}()
 	}
 

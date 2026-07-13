@@ -9,10 +9,16 @@ import (
 )
 
 func TestCallEngine_init(t *testing.T) {
+	// init() no longer eagerly allocates the wasm stack in the default
+	// (StackGuardCheckEnabled == false) build -- that's now acquired from
+	// the engine's stack pool by callWithStack itself, once per top-level
+	// call (see stack_pool.go and callWithStack's doc comments) -- so a
+	// bare callEngine{} (no parent chain to reach an *engine through) can
+	// no longer be used to exercise that part. What init() still does
+	// unconditionally is wire up execCtxPtr.
 	c := &callEngine{}
 	c.init()
-	require.True(t, c.stackTop%16 == 0)
-	require.Equal(t, &c.stack[0], c.execCtx.stackBottomPtr)
+	require.Equal(t, uintptr(unsafe.Pointer(&c.execCtx)), c.execCtxPtr)
 }
 
 func TestCallEngine_growStack(t *testing.T) {

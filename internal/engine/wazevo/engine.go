@@ -45,6 +45,14 @@ type (
 		// The followings are reused for compiling shared functions.
 		machine backend.Machine
 		be      backend.Compiler
+
+		// stackPools holds pooled wasm-execution stack buffers (see
+		// (*callEngine).callWithStack and stack_pool.go), shared by every
+		// moduleEngine/callEngine created from this engine (i.e. per
+		// Runtime), so recycling amortizes across every module and every
+		// goroutine calling into it, not just one. sync.Pool is itself
+		// goroutine-safe, so no extra locking is needed here.
+		stackPools [stackPoolNumClasses]sync.Pool
 	}
 
 	sharedFunctions struct {
