@@ -2486,16 +2486,15 @@ func (m *machine) copyToTmp(v regalloc.VReg) regalloc.VReg {
 }
 
 func (m *machine) requiredStackSize() int64 {
+	// H7: MARGIN (backend.StackBoundsCheckMarginBytes) is intentionally NOT
+	// part of this immediate. It is instead reserved by biasing the stored
+	// stackBottomPtr check-limit up by MARGIN (see call_engine.go and
+	// backend/go_call.go), which keeps this hot-path prologue immediate
+	// small (imm8 for typical frames) instead of crossing the amd64
+	// imm8->imm32 encoding boundary. See the full invariant proof on
+	// backend.StackBoundsCheckMarginBytes.
 	return m.maxRequiredStackSizeForCalls +
 		m.frameSize() +
-		// H7: guarantee a flat MARGIN of extra slack below this frame at
-		// every call site (wasm-to-wasm or wasm-to-host-trampoline), so a
-		// go-call trampoline with a small enough Go argument/result slice
-		// can skip its own stack-bounds check. This does not change how
-		// much stack this frame physically consumes (see frameSize() vs
-		// FrameSize()) -- only when the stack-grow path fires. See the
-		// full invariant proof on backend.StackBoundsCheckMarginBytes.
-		backend.StackBoundsCheckMarginBytes +
 		16 + // Need for stack checking.
 		16 // return address and the caller RBP.
 }

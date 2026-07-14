@@ -73,7 +73,11 @@ func TestMachine_requiredStackSize(t *testing.T) {
 		clobberedRegs: make([]regalloc.VReg, 10), spillSlotSize: 16 * 8,
 		maxRequiredStackSizeForCalls: 320,
 	}
-	require.Equal(t, int64(16*18)+int64(320)+backend.StackBoundsCheckMarginBytes+32, m.requiredStackSize())
+	// H7-followup: MARGIN is no longer part of requiredStackSize()'s
+	// immediate (it is reserved by biasing the stored stackBottomPtr
+	// check-limit instead, see call_engine.go), so the expected value here
+	// drops from 16*18+320+MARGIN(512)+32=1152 to 16*18+320+32=640.
+	require.Equal(t, int64(16*18)+int64(320)+32, m.requiredStackSize())
 }
 
 func TestMachine_arg0OffsetFromSP(t *testing.T) {

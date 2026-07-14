@@ -9,6 +9,7 @@ import (
 
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/internal/engine/native/backend"
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
 	"github.com/samyfodil/wazy/internal/expctxkeys"
 	"github.com/samyfodil/wazy/internal/internalapi"
@@ -172,7 +173,17 @@ type (
 		originalStackPointer uintptr
 		// goReturnAddress holds the return address to go back to the caller of the assembly function.
 		goReturnAddress uintptr
-		// stackBottomPtr holds the pointer to the bottom of the stack.
+		// stackBottomPtr holds the check LIMIT used by the prologue/go-call
+		// stack-bounds checks: the actual bottom of the c.stack buffer,
+		// biased UP by backend.StackBoundsCheckMarginBytes (H7's MARGIN).
+		// Biasing it here (rather than adding MARGIN into every function's
+		// requiredStackSize() immediate) reserves the same slack while
+		// keeping that immediate small on the hot path. See the invariant
+		// proof on backend.StackBoundsCheckMarginBytes (backend/go_call.go).
+		// stackBottomPtr is only ever read as this check limit -- never
+		// used for pointer arithmetic back to the real buffer start -- so
+		// biasing it is safe; the grow/clone/restore paths always re-derive
+		// it fresh from the (possibly new) c.stack slice below.
 		stackBottomPtr *byte
 		// goCallReturnAddress holds the return address to go back to the caller of the Go function.
 		goCallReturnAddress *byte
@@ -291,7 +302,7 @@ func (c *callEngine) init() {
 		stackSize := c.requiredInitialStackSize() + nativeapi.StackGuardCheckGuardPageSize
 		c.stack = make([]byte, stackSize)
 		c.stackTop = alignedStackTop(c.stack)
-		c.execCtx.stackBottomPtr = &c.stack[nativeapi.StackGuardCheckGuardPageSize]
+		c.execCtx.stackBottomPtr = stackCheckLimitPtr(c.stack, nativeapi.StackGuardCheckGuardPageSize)
 	}
 	c.execCtxPtr = uintptr(unsafe.Pointer(&c.execCtx))
 }
@@ -301,6 +312,21 @@ func (c *callEngine) init() {
 func alignedStackTop(s []byte) uintptr {
 	stackAddr := uintptr(unsafe.Pointer(&s[len(s)-1]))
 	return stackAddr - (stackAddr & (16 - 1))
+}
+
+// stackCheckLimitPtr returns the value to store in
+// executionContext.stackBottomPtr: the stack-bounds-check LIMIT, i.e. the
+// logical bottom of the usable stack (stack[base]) biased UP by H7's
+// backend.StackBoundsCheckMarginBytes (MARGIN). Every assignment to
+// stackBottomPtr goes through here so the MARGIN bias can never be forgotten
+// by a future edit -- omitting it would under-reserve the guard and risk a
+// stack overflow. base is 0 for a plain pooled/grown buffer, or
+// nativeapi.StackGuardCheckGuardPageSize for the debug guard-page build. The
+// indexing is always in range: the real buffer is >= stackPoolBaseSize
+// (10240) and only ever grows, so base+MARGIN < len(stack) always holds. See
+// the invariant proof on backend.StackBoundsCheckMarginBytes.
+func stackCheckLimitPtr(stack []byte, base int) *byte {
+	return &stack[base+backend.StackBoundsCheckMarginBytes]
 }
 
 // Definition implements api.Function.
@@ -430,7 +456,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		var stackBoxed *[]byte
 		c.stack, stackBoxed = eng.acquireStack(c.requiredInitialStackSize())
 		c.stackTop = alignedStackTop(c.stack)
-		c.execCtx.stackBottomPtr = &c.stack[0]
+		c.execCtx.stackBottomPtr = stackCheckLimitPtr(c.stack, 0)
 		defer func() {
 			// Release whichever buffer c.stack currently is -- not
 			// necessarily the one just acquired above: stack growth
@@ -1106,7 +1132,7 @@ func (c *callEngine) growStackWithGuarded() (newSP uintptr, newFP uintptr, err e
 		return
 	}
 	if nativeapi.StackGuardCheckEnabled {
-		c.execCtx.stackBottomPtr = &c.stack[nativeapi.StackGuardCheckGuardPageSize]
+		c.execCtx.stackBottomPtr = stackCheckLimitPtr(c.stack, nativeapi.StackGuardCheckGuardPageSize)
 	}
 	return
 }
@@ -1121,7 +1147,7 @@ func (c *callEngine) growStack() (newSP, newFP uintptr, err error) {
 
 	newLen := 2*currentLen + c.execCtx.stackGrowRequiredSize + 16 // Stack might be aligned to 16 bytes, so add 16 bytes just in case.
 	newSP, newFP, c.stackTop, c.stack = c.cloneStack(newLen)
-	c.execCtx.stackBottomPtr = &c.stack[0]
+	c.execCtx.stackBottomPtr = stackCheckLimitPtr(c.stack, 0)
 	return
 }
 
@@ -1265,7 +1291,7 @@ func (s *snapshot) doRestore() {
 	c.stack = s.stack
 	c.stackTop = s.top
 	ec := &c.execCtx
-	ec.stackBottomPtr = &c.stack[0]
+	ec.stackBottomPtr = stackCheckLimitPtr(c.stack, 0)
 	ec.stackPointerBeforeGoCall = spp
 	ec.framePointerBeforeGoCall = s.fp
 	ec.goCallReturnAddress = s.returnAddress
