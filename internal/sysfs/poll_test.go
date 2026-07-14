@@ -83,3 +83,34 @@ func Test_poll(t *testing.T) {
 		}
 	})
 }
+
+// TestPollReadiness proves the W3 any-ready fix: with one ready and one empty
+// blocking fd, PollReadiness returns the ready one promptly rather than blocking
+// on the empty fd for the full timeout (the bug a sequential loop had).
+func TestPollReadiness(t *testing.T) {
+	ra, wa, err := os.Pipe()
+	require.NoError(t, err)
+	defer ra.Close()
+	defer wa.Close()
+	rb, wb, err := os.Pipe()
+	require.NoError(t, err)
+	defer rb.Close()
+	defer wb.Close()
+
+	_, err = wa.Write([]byte("data")) // pipe A ready; pipe B stays empty
+	require.NoError(t, err)
+
+	fileA := newOsFile("", sys.O_RDONLY, 0, ra)
+	fileB := newOsFile("", sys.O_RDONLY, 0, rb)
+	files := []sys.Pollable{fileA.(sys.Pollable), fileB.(sys.Pollable)}
+
+	// A 10s timeout would hang if we blocked on the empty fd first.
+	start := time.Now()
+	ready, errno, ok := PollReadiness(files, 10_000)
+	require.True(t, ok)
+	require.EqualErrno(t, 0, errno)
+	require.True(t, time.Since(start) < time.Second, "should return promptly, not block on empty fd")
+	require.NotNil(t, ready)
+	require.True(t, ready[0], "fd A had data")
+	require.False(t, ready[1], "fd B was empty")
+}

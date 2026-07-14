@@ -38,6 +38,14 @@ func (a *AdaptFS) Lstat(path string) (sys.Stat_t, experimentalsys.Errno) {
 
 // Stat implements the same method as documented on sys.FS
 func (a *AdaptFS) Stat(path string) (sys.Stat_t, experimentalsys.Errno) {
+	// ponytail: fs.StatFS avoids the open+fstat+close round trip (W2).
+	if statFS, ok := a.FS.(fs.StatFS); ok {
+		info, err := statFS.Stat(cleanPath(path))
+		if errno := experimentalsys.UnwrapOSError(err); errno != 0 {
+			return sys.Stat_t{}, errno
+		}
+		return sys.NewStat_t(info), 0
+	}
 	f, errno := a.OpenFile(path, experimentalsys.O_RDONLY, 0)
 	if errno != 0 {
 		return sys.Stat_t{}, errno

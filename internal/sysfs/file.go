@@ -93,6 +93,14 @@ func (f *stdioFile) Poll(flag experimentalsys.Pflag, timeoutMillis int32) (ready
 	return false, experimentalsys.ENOSYS
 }
 
+// pollFd forwards fdPoller to the underlying file for batched polling (W3).
+func (f *stdioFile) pollFd() (uintptr, bool) {
+	if p, ok := f.File.(fdPoller); ok {
+		return p.pollFd()
+	}
+	return 0, false
+}
+
 // SetAppend implements File.SetAppend
 func (f *stdioFile) SetAppend(bool) experimentalsys.Errno {
 	// Ignore for stdio.
@@ -407,6 +415,14 @@ func (f *fsFile) Poll(flag experimentalsys.Pflag, timeoutMillis int32) (ready bo
 		return p.Poll(flag, timeoutMillis)
 	}
 	return false, experimentalsys.ENOSYS
+}
+
+// pollFd forwards fdPoller to the underlying file for batched polling (W3).
+func (f *fsFile) pollFd() (uintptr, bool) {
+	if p, ok := f.file.(fdPoller); ok {
+		return p.pollFd()
+	}
+	return 0, false
 }
 
 // dirError is used for commands that work against a directory, but not a file.

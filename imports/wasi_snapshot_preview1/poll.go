@@ -7,6 +7,7 @@ import (
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/experimental/sys"
 	internalsys "github.com/samyfodil/wazy/internal/sys"
+	"github.com/samyfodil/wazy/internal/sysfs"
 	"github.com/samyfodil/wazy/internal/wasip1"
 	"github.com/samyfodil/wazy/internal/wasm"
 )
@@ -174,9 +175,55 @@ func pollOneoffFn(_ context.Context, mod api.Module, params []uint64) sys.Errno 
 		return 0
 	}
 
-	// Wait for the timeout to expire, or for data to become available on
-	// each blocking fd subscriber. The remaining time budget is tracked
-	// across iterations so total wall time never exceeds the timeout.
+	// Wait for the timeout to expire, or for data to become available on any
+	// blocking fd subscriber. With more than one blocking fd, a single batched
+	// _poll honors poll_oneoff's any-ready semantics (return as soon as ANY fd
+	// is ready) and issues one syscall — a purely-sequential loop would instead
+	// block on the first fd for the whole timeout while a later fd is ready.
+	if len(blockingPollSubs) > 1 {
+		pollables := make([]sys.Pollable, len(blockingPollSubs))
+		allPollable := true
+		for i, sub := range blockingPollSubs {
+			if p, ok := sub.file.(sys.Pollable); ok {
+				pollables[i] = p
+			} else {
+				allPollable = false
+				break
+			}
+		}
+		if allPollable {
+			if ready, errno, batched := sysfs.PollReadiness(pollables, int32(timeout.Milliseconds())); batched {
+				switch errno {
+				case 0:
+					for i, sub := range blockingPollSubs {
+						if ready != nil && ready[i] {
+							sub.evt.errno = 0
+							writeEvent(outBuf[nevents*32:], sub.evt)
+							nevents++
+						}
+					}
+				case sys.ENOSYS, sys.ENOTSUP:
+					for _, sub := range blockingPollSubs {
+						sub.evt.errno = wasip1.ErrnoNotsup
+						writeEvent(outBuf[nevents*32:], sub.evt)
+						nevents++
+					}
+				default:
+					return errno
+				}
+				if nevents != nsubscriptions {
+					if !mod.Memory().WriteUint32Le(resultNevents, nevents) {
+						return sys.EFAULT
+					}
+				}
+				return 0
+			}
+		}
+	}
+
+	// Fallback: sequential per-fd poll (single blocking fd, or a mix that can't
+	// batch, e.g. sockets). The remaining time budget is tracked across
+	// iterations so total wall time never exceeds the timeout.
 	remaining := timeout
 	for _, sub := range blockingPollSubs {
 		p, ok := sub.file.(sys.Pollable)

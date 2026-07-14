@@ -265,6 +265,9 @@ func (f *osFile) Poll(flag experimentalsys.Pflag, timeoutMillis int32) (ready bo
 	return poll(f.fd, flag, timeoutMillis)
 }
 
+// pollFd implements fdPoller for batched polling (W3).
+func (f *osFile) pollFd() (uintptr, bool) { return f.fd, true }
+
 // Readdir implements File.Readdir. Notably, this uses "Readdir", not
 // "ReadDir", from os.File.
 //
