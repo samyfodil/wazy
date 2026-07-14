@@ -57,6 +57,12 @@ type Compiler interface {
 	// Buf returns the buffer of the encoded machine code. This is only used for testing purpose.
 	Buf() []byte
 
+	// TakeBuf returns the encoded machine-code buffer and relinquishes ownership:
+	// the next Compile/Finalize allocates a fresh buffer instead of reusing this
+	// one. This lets the caller retain the buffer without copying it (it would
+	// otherwise be overwritten when the next function is compiled).
+	TakeBuf() []byte
+
 	BufPtr() *[]byte
 
 	// Format returns the debug string of the current state of the compiler.
@@ -391,6 +397,12 @@ func (c *compiler) EmitByte(b byte) {
 }
 
 // Buf implements Compiler.Buf.
+func (c *compiler) TakeBuf() []byte {
+	buf := c.buf
+	c.buf = nil // next Compile/Finalize allocates fresh; caller now owns buf.
+	return buf
+}
+
 func (c *compiler) Buf() []byte {
 	return c.buf
 }

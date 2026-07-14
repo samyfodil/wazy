@@ -635,8 +635,10 @@ func (e *engine) compileLocalWasmFunction(
 	ehEntries = buildEhEntries(fe.PendingEhEntries(), be.CompiledBlockOffsets(), int64(len(original)))
 	frameSize = be.FrameSize()
 
-	// TODO: optimize as zero copy.
-	return slices.Clone(original), rels, ehEntries, frameSize, nil
+	// Take ownership of the backend's buffer (== original) instead of cloning it:
+	// the caller keeps it in relocator.bodies until it is copied into the mmap'd
+	// executable, and be allocates a fresh buffer for the next function.
+	return be.TakeBuf(), rels, ehEntries, frameSize, nil
 }
 
 // rebaseEhTables adds the executable's base address to every offset in
@@ -786,7 +788,7 @@ func (e *engine) compileHostModule(ctx context.Context, module *wasm.Module, lis
 		if err := be.Finalize(ctx); err != nil {
 			return nil, err
 		}
-		body := be.Buf()
+		body := be.TakeBuf() // take ownership instead of cloning; be allocates fresh next iteration.
 
 		if nativeapi.PerfMapEnabled {
 			name := module.FunctionDefinition(wasm.Index(i)).DebugName()
@@ -796,8 +798,7 @@ func (e *engine) compileHostModule(ctx context.Context, module *wasm.Module, lis
 				fmt.Sprintf("trampoline:%s", name))
 		}
 
-		// TODO: optimize as zero copy.
-		bodies[i] = slices.Clone(body)
+		bodies[i] = body
 		totalSize += len(body)
 	}
 
