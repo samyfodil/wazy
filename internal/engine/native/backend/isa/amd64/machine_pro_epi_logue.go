@@ -10,7 +10,69 @@ import (
 func (m *machine) PostRegAlloc() {
 	m.setupPrologue()
 	m.postRegAlloc()
+	m.dedupTrapCtxSaves()
 	m.emitTrapIslands()
+}
+
+// dedupTrapCtxSaves removes redundant per-site trap-island exec-context saves.
+//
+// C22 (shared trap islands) emits, at every conditional-trap site, a
+// `mov execCtx, [rsp+trapIslandCtxOffsetFromRSP]` so the shared island can recover
+// the execution context from a fixed stack slot. That store is dead if the slot
+// already holds the exec-context on every path to this site: the slot is written
+// only by these saves (register spills use *positive* frame offsets, never this
+// negative scratch word) and rsp is stable between calls, so within a basic block
+// the first save dominates every later one until an intervening call clobbers the
+// memory below rsp. In bounds-check-dense loops this is pure hot-path waste -- e.g.
+// random_mat_mul re-emits ~12 identical saves per inner iteration (one per check).
+//
+// Scope: per basic block (reset at each block boundary, since a block may be
+// reached by a path that never ran the save; a cross-block single-predecessor
+// extension could remove more but is left out for now). Sound because the removed
+// stores are provably redundant, not because traps are rare. arm64 needs none of
+// this: it hands the exec-context to the island in the reserved x27 register and
+// emits no per-site save. See OPTIMIZATIONS.md C27.
+func (m *machine) dedupTrapCtxSaves() {
+	blocks := m.orderedSSABlockLabelPos
+	for bi, pos := range blocks {
+		// Bound the block by the next block's first instruction rather than
+		// pos.end: register allocation and epilogue insertion can append
+		// instructions past the recorded end (see emitTrapIslands), so pos.end
+		// is not a reliable block terminator here. pos.begin (the label) is.
+		var stop *instruction
+		if bi+1 < len(blocks) {
+			stop = blocks[bi+1].begin
+		}
+		saved := false // is the exec-context already live in the slot on all paths to here (this block)?
+		for cur := pos.begin; cur != nil && cur != stop; cur = cur.next {
+			if cur.IsCall() || cur.IsIndirectCall() {
+				saved = false // a call clobbers the memory below rsp
+			} else if isTrapCtxSave(cur) {
+				if saved {
+					// Unlink this redundant save. A save is always followed by its
+					// icmp+trap branch, so it is never a block boundary and
+					// pos.begin/end need no update.
+					cur.prev.next = cur.next
+					if cur.next != nil {
+						cur.next.prev = cur.prev
+					}
+				} else {
+					saved = true
+				}
+			}
+		}
+	}
+}
+
+// isTrapCtxSave reports whether i is a trap-island exec-context save, i.e. a
+// `movRM reg -> [rsp+trapIslandCtxOffsetFromRSP]`. That slot is written by nothing
+// else (the island's reload is a mov64MR, a different kind), so this match is exact.
+func isTrapCtxSave(i *instruction) bool {
+	if i.kind != movRM || i.op2.kind != operandKindMem {
+		return false
+	}
+	a := i.op2.addressMode()
+	return a.kind() == amodeImmReg && a.base == rspVReg && a.imm32 == trapIslandCtxOffsetFromRSP
 }
 
 // emitTrapIslands materializes the shared trap islands allocated by
