@@ -38,13 +38,9 @@ func (m *machine) insertLoadConstant(v uint64, valType ssa.Type, vr regalloc.VRe
 
 	switch valType {
 	case ssa.TypeF32:
-		loadF := m.allocateInstr()
-		loadF.asLoadFpuConst32(vr, v)
-		m.insert(loadF)
+		m.lowerFpuConst32(vr, v)
 	case ssa.TypeF64:
-		loadF := m.allocateInstr()
-		loadF.asLoadFpuConst64(vr, v)
-		m.insert(loadF)
+		m.lowerFpuConst64(vr, v)
 	case ssa.TypeI32:
 		if v == 0 {
 			m.InsertMove(vr, xzrVReg, ssa.TypeI32)
@@ -60,6 +56,85 @@ func (m *machine) insertLoadConstant(v uint64, valType ssa.Type, vr regalloc.VRe
 	default:
 		panic("TODO")
 	}
+}
+
+// fpConstCheapToMaterialize reports whether the bit pattern v (of the given width) can be built in a
+// GPR with at most two movz/movk (or a single bitmask-immediate). arm64 has no single-instruction
+// 64-bit immediate, so high-entropy 64-bit patterns (3-4 nonzero 16-bit chunks) are cheaper to load
+// from an inline literal than to materialize; those keep the ldr-literal form.
+func fpConstCheapToMaterialize(v uint64, bits byte) bool {
+	if bits <= 32 {
+		return true // at most movz + movk.
+	}
+	var nzZero, nzNeg int // 16-bit chunks that differ from 0 (MOVZ) / from 0xffff (MOVN).
+	for i := 0; i < 4; i++ {
+		c := (v >> (uint(i) * 16)) & 0xffff
+		if c != 0 {
+			nzZero++
+		}
+		if c != 0xffff {
+			nzNeg++
+		}
+	}
+	return nzZero <= 2 || nzNeg <= 2 || isBitMaskImmediate(v, true)
+}
+
+// lowerFpuConst32/64/128 load a floating-point/vector constant into rd. When the pattern is cheap to
+// build in a GPR (fpConstCheapToMaterialize) they materialize it there and move it into the FP
+// register with `ins`, avoiding the executed branch-over-literal of the inline ldr form. Zero, an
+// expensive high-entropy pattern, and the post-register-allocation block-arg path (no scratch VReg
+// available) keep the existing eor / ldr-literal encoding.
+func (m *machine) lowerFpuConst32(rd regalloc.VReg, v uint64) {
+	if v == 0 || m.regAllocStarted {
+		i := m.allocateInstr()
+		i.asLoadFpuConst32(rd, v)
+		m.insert(i)
+		return
+	}
+	tmp := m.compiler.AllocateVReg(ssa.TypeI32)
+	m.lowerConstantI32(tmp, int32(uint32(v)))
+	mov := m.allocateInstr()
+	mov.asMovToVec(rd, operandNR(tmp), vecArrangementS, vecIndex(0))
+	m.insert(mov)
+}
+
+func (m *machine) lowerFpuConst64(rd regalloc.VReg, v uint64) {
+	if v == 0 || m.regAllocStarted || !fpConstCheapToMaterialize(v, 64) {
+		i := m.allocateInstr()
+		i.asLoadFpuConst64(rd, v)
+		m.insert(i)
+		return
+	}
+	tmp := m.compiler.AllocateVReg(ssa.TypeI64)
+	m.lowerConstantI64(tmp, int64(v))
+	mov := m.allocateInstr()
+	mov.asMovToVec(rd, operandNR(tmp), vecArrangementD, vecIndex(0))
+	m.insert(mov)
+}
+
+func (m *machine) lowerFpuConst128(rd regalloc.VReg, lo, hi uint64) {
+	if (lo == 0 && hi == 0) || m.regAllocStarted ||
+		!fpConstCheapToMaterialize(lo, 64) || !fpConstCheapToMaterialize(hi, 64) {
+		i := m.allocateInstr()
+		i.asLoadFpuConst128(rd, lo, hi)
+		m.insert(i)
+		return
+	}
+	m.insVecLaneConst(rd, lo, vecIndex(0))
+	m.insVecLaneConst(rd, hi, vecIndex(1))
+}
+
+// insVecLaneConst materializes laneVal in a GPR (xzr when zero) and moves it into rd's 64-bit lane
+// via `ins Vd.D[index], Xn`.
+func (m *machine) insVecLaneConst(rd regalloc.VReg, laneVal uint64, index vecIndex) {
+	gp := xzrVReg
+	if laneVal != 0 {
+		gp = m.compiler.AllocateVReg(ssa.TypeI64)
+		m.lowerConstantI64(gp, int64(laneVal))
+	}
+	mov := m.allocateInstr()
+	mov.asMovToVec(rd, operandNR(gp), vecArrangementD, index)
+	m.insert(mov)
 }
 
 // The following logics are based on the old asm/arm64 package.

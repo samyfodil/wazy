@@ -362,9 +362,7 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 	case ssa.OpcodeVconst:
 		result := m.compiler.VRegOf(instr.Return())
 		lo, hi := instr.VconstData()
-		v := m.allocateInstr()
-		v.asLoadFpuConst128(result, lo, hi)
-		m.insert(v)
+		m.lowerFpuConst128(result, lo, hi)
 	case ssa.OpcodeVbnot:
 		x := instr.Arg()
 		ins := m.allocateInstr()
@@ -820,11 +818,10 @@ func (m *machine) lowerShuffle(rd regalloc.VReg, rn, rm operand, lane1, lane2 ui
 	// `lane1`, `lane2` are already encoded as two u64s with the right layout:
 	//     lane1 := lane[7]<<56 | ... | lane[1]<<8 | lane[0]
 	//     lane2 := lane[15]<<56 | ... | lane[9]<<8 | lane[8]
-	// Thus, we can use loadFpuConst128.
+	// A shuffle mask is usually high-entropy so this keeps the ldr-literal form; a cheap
+	// mask is materialized in GPRs instead.
 	tmp := operandNR(m.compiler.AllocateVReg(ssa.TypeV128))
-	lfc := m.allocateInstr()
-	lfc.asLoadFpuConst128(tmp.nr(), lane1, lane2)
-	m.insert(lfc)
+	m.lowerFpuConst128(tmp.nr(), lane1, lane2)
 
 	// tbl <rd>.16b, { <vReg>.16B, <wReg>.16b }, <tmp>.16b
 	tbl2 := m.allocateInstr()

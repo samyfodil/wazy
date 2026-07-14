@@ -752,10 +752,13 @@ tbl x1.16b, { v29.16b, v30.16b }, v1?.16b
 			expectedAsm: `
 mov v29.16b, x2.16b
 mov v30.16b, x15.16b
-ldr q1?, #8; b 32; data.v128  0100010001000100 0100010001000100
+orr x2?, xzr, #0x100010001000100
+ins v1?.d[0], x2?
+orr x3?, xzr, #0x100010001000100
+ins v1?.d[1], x3?
 tbl x1.16b, { v29.16b, v30.16b }, v1?.16b
 `,
-			expectedBytes: "5d1ca24efe1daf4e4000009c0500001400010001000100010001000100010001a123004e",
+			expectedBytes: "5d1ca24efe1daf4ee08308b2001c084ee08308b2001c184ea123004e",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

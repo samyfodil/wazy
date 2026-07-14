@@ -46,13 +46,13 @@ func TestMachine_lowerConstant(t *testing.T) {
 		ssaB.InsertInstruction(ssaConstInstr)
 
 		vr := m.lowerConstant(ssaConstInstr)
-		machInstr := getPendingInstr(m)
 		require.Equal(t, regalloc.VRegIDNonReservedBegin, vr.ID())
 		require.Equal(t, regalloc.RegTypeFloat, vr.RegType())
-		require.Equal(t, loadFpuConst32, machInstr.kind)
-		require.Equal(t, uint64(math.Float32bits(1.1234)), machInstr.u1)
-
-		require.Equal(t, "ldr s128?, #8; b 8; data.f32 1.123400", formatEmittedInstructionsInCurrentBlock(m))
+		// A 32-bit pattern is always <=2 movz/movk, so it is materialized in a GPR and moved into
+		// the FP register with `ins`, avoiding the executed branch-over-literal.
+		require.Equal(t, `movz w129?, #0xcb92, lsl 0
+movk w129?, #0x3f8f, lsl 16
+ins v128?.s[0], w129?`, formatEmittedInstructionsInCurrentBlock(m))
 	})
 
 	t.Run("TypeF64", func(t *testing.T) {
