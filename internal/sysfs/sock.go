@@ -3,6 +3,7 @@ package sysfs
 import (
 	"net"
 	"os"
+	"syscall"
 
 	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
 	socketapi "github.com/samyfodil/wazy/internal/sock"
@@ -87,6 +88,11 @@ type tcpConnFile struct {
 
 	tc *net.TCPConn
 
+	// rc caches the connection's syscall.RawConn so per-read/write syscalls skip
+	// a SyscallConn() allocation (W4). nil if SyscallConn failed at construction,
+	// in which case control() falls back to syscallConnControl.
+	rc syscall.RawConn
+
 	// nonblock is true when the underlying connection is flagged as non-blocking.
 	// This ensures that reads and writes return experimentalsys.EAGAIN without blocking the caller.
 	nonblock bool
@@ -95,7 +101,29 @@ type tcpConnFile struct {
 }
 
 func newTcpConn(tc *net.TCPConn) socketapi.TCPConn {
-	return &tcpConnFile{tc: tc}
+	f := &tcpConnFile{tc: tc}
+	// Cache RawConn once; RawConn.Control still guards fd validity per call.
+	if rc, err := tc.SyscallConn(); err == nil {
+		f.rc = rc
+	}
+	return f
+}
+
+// control runs op against the connection's fd, reusing the cached RawConn when
+// available. op matches RawConn.Control's signature exactly (writing results via
+// captured vars) so no adapter closure is allocated on top of it — one escaping
+// closure per call instead of two (W4). RawConn.Control keeps the fd valid for
+// the duration of the call. The returned Errno is Control's own error, which the
+// caller should use only when op reported success (inner errno wins).
+func (f *tcpConnFile) control(op func(fd uintptr)) experimentalsys.Errno {
+	if f.rc != nil {
+		return experimentalsys.UnwrapOSError(f.rc.Control(op))
+	}
+	rc, err := f.tc.SyscallConn()
+	if err != nil {
+		return experimentalsys.UnwrapOSError(err)
+	}
+	return experimentalsys.UnwrapOSError(rc.Control(op))
 }
 
 // Read implements the same method as documented on experimentalsys.File
@@ -104,12 +132,14 @@ func (f *tcpConnFile) Read(buf []byte) (n int, errno experimentalsys.Errno) {
 		return 0, 0 // Short-circuit 0-len reads.
 	}
 	if nonBlockingFileReadSupported && f.IsNonblock() {
-		n, errno = syscallConnControl(f.tc, func(fd uintptr) (int, experimentalsys.Errno) {
-			n, err := readSocket(fd, buf)
-			errno = experimentalsys.UnwrapOSError(err)
-			errno = fileError(f, f.closed, errno)
-			return n, errno
+		controlErr := f.control(func(fd uintptr) {
+			var e experimentalsys.Errno
+			n, e = readSocket(fd, buf)
+			errno = fileError(f, f.closed, e)
 		})
+		if errno == 0 { // inner errno wins; else surface Control's own error
+			errno = controlErr
+		}
 	} else {
 		n, errno = read(f.tc, buf)
 	}
@@ -123,12 +153,15 @@ func (f *tcpConnFile) Read(buf []byte) (n int, errno experimentalsys.Errno) {
 // Write implements the same method as documented on experimentalsys.File
 func (f *tcpConnFile) Write(buf []byte) (n int, errno experimentalsys.Errno) {
 	if nonBlockingFileWriteSupported && f.IsNonblock() {
-		return syscallConnControl(f.tc, func(fd uintptr) (int, experimentalsys.Errno) {
-			n, err := writeSocket(fd, buf)
-			errno = experimentalsys.UnwrapOSError(err)
-			errno = fileError(f, f.closed, errno)
-			return n, errno
+		controlErr := f.control(func(fd uintptr) {
+			var e experimentalsys.Errno
+			n, e = writeSocket(fd, buf)
+			errno = fileError(f, f.closed, e)
 		})
+		if errno == 0 { // inner errno wins; else surface Control's own error
+			errno = controlErr
+		}
+		return
 	} else {
 		n, errno = write(f.tc, buf)
 	}
@@ -145,12 +178,15 @@ func (f *tcpConnFile) Recvfrom(p []byte, flags int) (n int, errno experimentalsy
 		errno = experimentalsys.EINVAL
 		return
 	}
-	return syscallConnControl(f.tc, func(fd uintptr) (int, experimentalsys.Errno) {
-		n, err := recvfrom(fd, p, MSG_PEEK)
-		errno = experimentalsys.UnwrapOSError(err)
-		errno = fileError(f, f.closed, errno)
-		return n, errno
+	controlErr := f.control(func(fd uintptr) {
+		var e experimentalsys.Errno
+		n, e = recvfrom(fd, p, MSG_PEEK)
+		errno = fileError(f, f.closed, e)
 	})
+	if errno == 0 { // inner errno wins; else surface Control's own error
+		errno = controlErr
+	}
+	return
 }
 
 // Close implements the same method as documented on experimentalsys.File
