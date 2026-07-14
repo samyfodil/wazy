@@ -26,7 +26,11 @@ const (
 	ExecutionContextOffsetOriginalStackPointer Offset = 24
 	// ExecutionContextOffsetGoReturnAddress is an offset of `goReturnAddress` field in native.executionContext
 	ExecutionContextOffsetGoReturnAddress Offset = 32
-	// ExecutionContextOffsetStackBottomPtr is an offset of `stackBottomPtr` field in native.executionContext
+	// ExecutionContextOffsetStackBottomPtr is an offset of `stackBottomPtr` field in native.executionContext.
+	// NOTE: the value at this offset is the stack-bounds-check LIMIT, i.e. the
+	// buffer bottom biased UP by backend.StackBoundsCheckMarginBytes (H7's
+	// MARGIN); the prologue/go-call checks compare SP directly against it. See
+	// callEngine.stackCheckLimitPtr and the proof on StackBoundsCheckMarginBytes.
 	ExecutionContextOffsetStackBottomPtr Offset = 40
 	// ExecutionContextOffsetGoCallReturnAddress is an offset of `goCallReturnAddress` field in native.executionContext
 	ExecutionContextOffsetGoCallReturnAddress Offset = 48

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"unsafe"
 
+	"github.com/samyfodil/wazy/internal/engine/native/backend"
 	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
@@ -37,17 +38,25 @@ func TestCallEngine_growStack(t *testing.T) {
 			stack:    s,
 			stackTop: uintptr(unsafe.Pointer(&s[15])),
 			execCtx: executionContext{
-				stackGrowRequiredSize:    160,
+				// stackGrowRequiredSize is large enough here (rather than
+				// the toy value this test used pre-H7-followup) so that
+				// newLen comfortably exceeds
+				// backend.StackBoundsCheckMarginBytes: growStack indexes
+				// the new buffer at that offset when setting
+				// stackBottomPtr (see production invariant that the real
+				// stack buffer is always >= stackPoolBaseSize (10240) >>
+				// MARGIN, so this indexing never goes out of range).
+				stackGrowRequiredSize:    1000,
 				stackPointerBeforeGoCall: (*uint64)(unsafe.Pointer(&s[10])),
 				framePointerBeforeGoCall: uintptr(unsafe.Pointer(&s[14])),
 			},
 		}
 		newSP, newFp, err := c.growStack()
 		require.NoError(t, err)
-		require.Equal(t, 160+32*2+16, len(c.stack))
+		require.Equal(t, 1000+32*2+16, len(c.stack))
 
 		require.True(t, c.stackTop%16 == 0)
-		require.Equal(t, &c.stack[0], c.execCtx.stackBottomPtr)
+		require.Equal(t, &c.stack[backend.StackBoundsCheckMarginBytes], c.execCtx.stackBottomPtr)
 
 		var view []byte
 		{

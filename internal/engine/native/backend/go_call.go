@@ -9,9 +9,14 @@ import "github.com/samyfodil/wazy/internal/engine/native/ssa"
 // prologue check (insertStackBoundsCheck, both ISAs) is a pure comparison
 // against native.executionContext.stackBottomPtr -- it does not change how
 // much stack a frame physically consumes, only how early/how large the
-// underlying stack buffer grows. Reserving MARGIN in the check therefore
-// just shifts *when* the existing stack-grow mechanism fires; it adds no
-// instructions and no per-call cost to ordinary wasm execution.
+// underlying stack buffer grows. Reserving MARGIN is implemented by biasing
+// the stored stackBottomPtr check-limit up by MARGIN (see call_engine.go)
+// rather than by adding MARGIN into every function's requiredStackSize()
+// immediate; requiredStackSize() (isa/amd64/machine.go, isa/arm64/
+// machine.go) therefore excludes MARGIN, which keeps that hot-path prologue
+// immediate small. This just shifts *which side* of the check inequality
+// carries MARGIN and *when* the existing stack-grow mechanism fires; it
+// adds no instructions and no per-call cost to ordinary wasm execution.
 //
 // What it buys: CompileGoFunctionTrampoline, for a host-function signature
 // whose entire Go argument/result slice (plus its small fixed bookkeeping
@@ -22,9 +27,13 @@ import "github.com/samyfodil/wazy/internal/engine/native/ssa"
 // removes ~4 instructions (an add/sub, a cmp, a conditional branch, and the
 // reverse add/sub) from the hot path of every such host call.
 //
-// Invariant that makes this safe (stated once here; both ISAs rely on it
-// and both wire MARGIN into requiredStackSize() -- isa/amd64/machine.go and
-// isa/arm64/machine.go):
+// Invariant that makes this safe (stated once here; both ISAs rely on it).
+// MARGIN is reserved by biasing the stored stackBottomPtr check-limit up by
+// MARGIN (set in call_engine.go), not by adding MARGIN into
+// requiredStackSize() (isa/amd64/machine.go and isa/arm64/machine.go, which
+// therefore exclude it) -- only which side of the check inequality below
+// carries MARGIN has moved; the inequality itself, and everything the rest
+// of this proof derives from it, is unchanged:
 //
 //  1. Every wasm function's prologue check verifies that
 //     frameBase - stackBottomPtr >= maxRequiredStackSizeForCalls +
