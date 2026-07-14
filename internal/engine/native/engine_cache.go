@@ -3,7 +3,6 @@ package native
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
@@ -12,9 +11,7 @@ import (
 	"unsafe"
 
 	"github.com/samyfodil/wazy/experimental"
-	"github.com/samyfodil/wazy/internal/engine/native/backend"
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
-	"github.com/samyfodil/wazy/internal/engine/native/ssa"
 	"github.com/samyfodil/wazy/internal/filecache"
 	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/u32"
@@ -74,10 +71,15 @@ func (e *engine) getCompiledModule(module *wasm.Module, listeners []experimental
 			}
 		}
 		e.addCompiledModuleToMemory(module, cm)
-		ssaBuilder := ssa.NewBuilder()
-		machine := newMachine()
-		be := backend.NewCompiler(context.Background(), machine, ssaBuilder)
-		cm.executables.compileEntryPreambles(module, machine, be)
+		// ponytail: entry preambles are deserialized from the cache entry
+		// above (see the entryPreambleFormatVersion section in
+		// deserializeCompiledModule), so no recompile is needed here. One
+		// thing intentionally left out on this hit path: PerfMap entries for
+		// the preambles (nativeapi.PerfMap.AddEntry, see
+		// compileEntryPreambles) are not re-registered, since PerfMap is
+		// debug-only and off by default. If that's ever needed on a cache
+		// hit, reconstruct the entries here from module.TypeSection +
+		// cm.entryPreamblesPtrs when nativeapi.PerfMapEnabled is true.
 
 		// Set the finalizer.
 		e.setFinalizer(cm.executables, executablesFinalizer)
@@ -157,38 +159,50 @@ func (e *engine) getCompiledModuleFromCache(module *wasm.Module) (cm *compiledMo
 var magic = []byte{'N', 'A', 'T', 'I', 'V', 'E'}
 
 func serializeCompiledModule(wazyVersion string, cm *compiledModule) io.Reader {
-	buf := bytes.NewBuffer(nil)
+	// The native code (cm.executable) is often hundreds of KiB; copying it
+	// into a shared buffer just to serialize it would double the memory
+	// traffic of every cache write. Instead we split the output into a head
+	// (everything up to and including the code-segment length), the
+	// executable itself streamed directly with zero extra copies, and a tail
+	// (everything after the executable), then chain them with
+	// io.MultiReader.
+	// The head has a deterministic size, so presize it exactly to avoid the
+	// buffer regrowth allocations.
+	headSize := len(magic) + 1 /* version size */ + len(wazyVersion) +
+		4 /* function count */ + 8*len(cm.functionOffsets) + 8 /* code length */
+	head := bytes.NewBuffer(make([]byte, 0, headSize))
 	// First 6 byte: NATIVE header.
-	buf.Write(magic)
+	head.Write(magic)
 	// Next 1 byte: length of version:
-	buf.WriteByte(byte(len(wazyVersion)))
+	head.WriteByte(byte(len(wazyVersion)))
 	// Version of wazy.
-	buf.WriteString(wazyVersion)
+	head.WriteString(wazyVersion)
 	// Number of *code (== locally defined functions in the module): 4 bytes.
-	buf.Write(u32.LeBytes(uint32(len(cm.functionOffsets))))
+	head.Write(u32.LeBytes(uint32(len(cm.functionOffsets))))
 	for _, offset := range cm.functionOffsets {
 		// The offset of this function in the executable (8 bytes).
-		buf.Write(u64.LeBytes(uint64(offset)))
+		head.Write(u64.LeBytes(uint64(offset)))
 	}
 	// The length of code segment (8 bytes).
-	buf.Write(u64.LeBytes(uint64(len(cm.executable))))
-	// Append the native code.
-	buf.Write(cm.executable)
-	// Append checksum.
+	head.Write(u64.LeBytes(uint64(len(cm.executable))))
+
+	tail := bytes.NewBuffer(nil)
+	// Append checksum. Computed directly from cm.executable -- it doesn't
+	// need to live in a buffer first.
 	checksum := crc32.Checksum(cm.executable, crc)
-	buf.Write(u32.LeBytes(checksum))
+	tail.Write(u32.LeBytes(checksum))
 	if sm := cm.sourceMap; len(sm.executableOffsets) > 0 {
-		buf.WriteByte(1) // indicates that source map is present.
+		tail.WriteByte(1) // indicates that source map is present.
 		l := len(sm.wasmBinaryOffsets)
-		buf.Write(u64.LeBytes(uint64(l)))
+		tail.Write(u64.LeBytes(uint64(l)))
 		executableAddr := uintptr(unsafe.Pointer(&cm.executable[0]))
 		for i := 0; i < l; i++ {
-			buf.Write(u64.LeBytes(sm.wasmBinaryOffsets[i]))
+			tail.Write(u64.LeBytes(sm.wasmBinaryOffsets[i]))
 			// executableOffsets is absolute address, so we need to subtract executableAddr.
-			buf.Write(u64.LeBytes(uint64(sm.executableOffsets[i] - executableAddr)))
+			tail.Write(u64.LeBytes(uint64(sm.executableOffsets[i] - executableAddr)))
 		}
 	} else {
-		buf.WriteByte(0) // indicates that source map is not present.
+		tail.WriteByte(0) // indicates that source map is not present.
 	}
 	// Try-table info: a format-version byte (guards this section's binary
 	// layout independently, same pattern as ehTableFormatVersion below --
@@ -196,20 +210,20 @@ func serializeCompiledModule(wazyVersion string, cm *compiledModule) io.Reader {
 	// bytes), then for each: numLocals (4 bytes), reuseLocals (1 byte),
 	// floorSize (4 bytes), clause count (4 bytes), then for each clause:
 	// kind (1 byte) + tagIndex (4 bytes).
-	buf.WriteByte(tryTableInfoFormatVersion)
-	buf.Write(u32.LeBytes(uint32(len(cm.tryTableInfo))))
+	tail.WriteByte(tryTableInfoFormatVersion)
+	tail.Write(u32.LeBytes(uint32(len(cm.tryTableInfo))))
 	for _, info := range cm.tryTableInfo {
-		buf.Write(u32.LeBytes(uint32(info.NumLocals)))
+		tail.Write(u32.LeBytes(uint32(info.NumLocals)))
 		b := byte(0)
 		if info.ReuseLocals {
 			b = 1
 		}
-		buf.WriteByte(b)
-		buf.Write(u32.LeBytes(uint32(info.FloorSize)))
-		buf.Write(u32.LeBytes(uint32(len(info.CatchClauses))))
+		tail.WriteByte(b)
+		tail.Write(u32.LeBytes(uint32(info.FloorSize)))
+		tail.Write(u32.LeBytes(uint32(len(info.CatchClauses))))
 		for _, c := range info.CatchClauses {
-			buf.WriteByte(c.Kind)
-			buf.Write(u32.LeBytes(c.TagIndex))
+			tail.WriteByte(c.Kind)
+			tail.Write(u32.LeBytes(c.TagIndex))
 		}
 	}
 
@@ -225,32 +239,32 @@ func serializeCompiledModule(wazyVersion string, cm *compiledModule) io.Reader {
 	// tryTableID (4 bytes), clause count (4 bytes), then per clause:
 	// kind (1 byte) + tagIndex (4 bytes) + landingPad (8 bytes,
 	// executable-relative).
-	buf.WriteByte(ehTableFormatVersion)
-	buf.Write(u32.LeBytes(uint32(len(cm.ehTables))))
+	tail.WriteByte(ehTableFormatVersion)
+	tail.Write(u32.LeBytes(uint32(len(cm.ehTables))))
 	var executableAddr uintptr
 	if len(cm.executable) > 0 {
 		executableAddr = uintptr(unsafe.Pointer(&cm.executable[0]))
 	}
 	for _, entries := range cm.ehTables {
-		buf.Write(u32.LeBytes(uint32(len(entries))))
+		tail.Write(u32.LeBytes(uint32(len(entries))))
 		for _, e := range entries {
-			buf.Write(u64.LeBytes(uint64(e.StartOffset - executableAddr)))
-			buf.Write(u64.LeBytes(uint64(e.EndOffset - executableAddr)))
-			buf.Write(u32.LeBytes(uint32(e.TryTableID)))
-			buf.Write(u32.LeBytes(uint32(len(e.Clauses))))
+			tail.Write(u64.LeBytes(uint64(e.StartOffset - executableAddr)))
+			tail.Write(u64.LeBytes(uint64(e.EndOffset - executableAddr)))
+			tail.Write(u32.LeBytes(uint32(e.TryTableID)))
+			tail.Write(u32.LeBytes(uint32(len(e.Clauses))))
 			for _, c := range e.Clauses {
-				buf.WriteByte(c.Kind)
-				buf.Write(u32.LeBytes(c.TagIndex))
-				buf.Write(u64.LeBytes(uint64(c.LandingPad - executableAddr)))
+				tail.WriteByte(c.Kind)
+				tail.Write(u32.LeBytes(c.TagIndex))
+				tail.Write(u64.LeBytes(uint64(c.LandingPad - executableAddr)))
 			}
 		}
 	}
 	// functionFrameSizes: one int64 per local function (used on amd64 to
 	// recover a throw-time ancestor frame's SP from its FP; see
 	// nativeapi.ThrowFrame / resolveThrowTransferSPFP).
-	buf.Write(u32.LeBytes(uint32(len(cm.functionFrameSizes))))
+	tail.Write(u32.LeBytes(uint32(len(cm.functionFrameSizes))))
 	for _, sz := range cm.functionFrameSizes {
-		buf.Write(u64.LeBytes(uint64(sz)))
+		tail.Write(u64.LeBytes(uint64(sz)))
 	}
 
 	// Interrupt-check interval: a format-version byte then the interval (8
@@ -259,10 +273,50 @@ func serializeCompiledModule(wazyVersion string, cm *compiledModule) io.Reader {
 	// frequency it was compiled with (rather than defaulting to 0 =
 	// check-every-iteration). Own version byte so an older cache entry lacking
 	// this section is detected as stale rather than misparsed.
-	buf.WriteByte(interruptIntervalFormatVersion)
-	buf.Write(u64.LeBytes(cm.interruptCheckInterval))
+	tail.WriteByte(interruptIntervalFormatVersion)
+	tail.Write(u64.LeBytes(cm.interruptCheckInterval))
 
-	return bytes.NewReader(buf.Bytes())
+	// Entry preambles: position-independent Go->wasm trampolines, one per
+	// entry in the module's TypeSection (see compileEntryPreambles). They're
+	// pure register-relative code with no absolute-address fixups, so the
+	// raw bytes cached here and re-mmapped on load are byte-identical to
+	// recompiling them from the module's TypeSection -- this lets a cache hit
+	// skip building an SSA builder/backend compiler entirely. Own format-
+	// version byte, same rationale as interruptIntervalFormatVersion: a cache
+	// entry written before this section existed EOFs here and is treated as
+	// stale rather than misparsed. Layout: entryPreambleFormatVersion (1
+	// byte), numPreambles (4 bytes), and if numPreambles > 0: numPreambles
+	// per-preamble sizes (4 bytes each, including 16-byte alignment padding),
+	// blob length (8 bytes), the raw preamble blob, then a CRC32 checksum (4
+	// bytes) over the blob. The blob is executed code loaded from disk, so it
+	// is checksummed exactly like cm.executable to reject corrupted/tampered
+	// cache entries before they are mmapped.
+	tail.WriteByte(entryPreambleFormatVersion)
+	n := len(cm.entryPreamblesPtrs)
+	tail.Write(u32.LeBytes(uint32(n)))
+	if n > 0 {
+		base := uintptr(unsafe.Pointer(&cm.entryPreambles[0]))
+		for i := 0; i < n; i++ {
+			start := uintptr(unsafe.Pointer(cm.entryPreamblesPtrs[i])) - base
+			var end uintptr
+			if i+1 < n {
+				end = uintptr(unsafe.Pointer(cm.entryPreamblesPtrs[i+1])) - base
+			} else {
+				end = uintptr(len(cm.entryPreambles))
+			}
+			tail.Write(u32.LeBytes(uint32(end - start)))
+		}
+		tail.Write(u64.LeBytes(uint64(len(cm.entryPreambles))))
+		tail.Write(cm.entryPreambles)
+		// Checksum over the preamble blob, mirroring the executable checksum.
+		tail.Write(u32.LeBytes(crc32.Checksum(cm.entryPreambles, crc)))
+	}
+
+	// *bytes.Buffer already implements io.Reader; MultiReader drains each once,
+	// which is exactly the single-pass consumption fileCache.Add performs. Only
+	// the executable needs a wrapping reader (it's a raw []byte). This avoids
+	// the extra bytes.NewReader wrappers around the head/tail buffers.
+	return io.MultiReader(head, bytes.NewReader(cm.executable), tail)
 }
 
 // ehTableFormatVersion guards the exception side-table cache section
@@ -283,6 +337,14 @@ const tryTableInfoFormatVersion = 1
 // this section existed hits EOF at the version byte and is treated as stale
 // (forcing one recompile) rather than misparsed.
 const interruptIntervalFormatVersion = 1
+
+// entryPreambleFormatVersion guards the trailing entry-preambles cache
+// section (cm.entryPreambles / cm.entryPreamblesPtrs), same rationale as
+// ehTableFormatVersion / interruptIntervalFormatVersion: its own version byte
+// means a cache entry written before this section existed (or under an
+// incompatible layout) hits EOF/mismatch here and is treated as stale rather
+// than misparsed.
+const entryPreambleFormatVersion = 1
 
 func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *compiledModule, staleCache bool, err error) {
 	defer reader.Close()
@@ -540,6 +602,66 @@ func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *co
 		return nil, true, nil
 	}
 	cm.interruptCheckInterval = interval
+
+	// Entry preambles section (see serialize). A cache entry written before
+	// this section existed EOFs here; treat that (and any short read or
+	// version mismatch) as stale so it is recompiled rather than loaded
+	// without its preambles. The blob is executed code, so it carries a CRC32
+	// checksum (verified before mmapping) exactly like cm.executable.
+	if _, err = io.ReadFull(bufReader, eightBytes[:1]); err != nil || eightBytes[0] != entryPreambleFormatVersion {
+		return nil, true, nil
+	}
+	if _, err = io.ReadFull(bufReader, eightBytes[:4]); err != nil {
+		return nil, true, nil
+	}
+	numPreambles := binary.LittleEndian.Uint32(eightBytes[:4])
+	if numPreambles > 0 {
+		sizes := make([]int, numPreambles)
+		for i := range sizes {
+			if _, err = io.ReadFull(bufReader, eightBytes[:4]); err != nil {
+				return nil, false, fmt.Errorf("compilationcache: error reading entry preamble[%d] size: %v", i, err)
+			}
+			sizes[i] = int(binary.LittleEndian.Uint32(eightBytes[:4]))
+		}
+		blobLen, err := readUint64(bufReader, &eightBytes)
+		if err != nil {
+			return nil, false, fmt.Errorf("compilationcache: error reading entry preamble blob length: %v", err)
+		}
+		blob := make([]byte, blobLen)
+		if _, err = io.ReadFull(bufReader, blob); err != nil {
+			return nil, false, fmt.Errorf("compilationcache: error reading entry preamble blob (len=%d): %v", blobLen, err)
+		}
+		// Verify the checksum before mmapping, mirroring the executable path.
+		expected := crc32.Checksum(blob, crc)
+		if _, err = io.ReadFull(bufReader, eightBytes[:4]); err != nil {
+			return nil, false, fmt.Errorf("compilationcache: could not read entry preamble checksum: %v", err)
+		} else if checksum := binary.LittleEndian.Uint32(eightBytes[:4]); expected != checksum {
+			return nil, false, fmt.Errorf("compilationcache: entry preamble checksum mismatch (expected %d, got %d)", expected, checksum)
+		}
+		// Validate the per-preamble offsets against the blob length before
+		// indexing into the mmapped code: a corrupted or foreign cache entry
+		// must return stale (forcing a clean recompile) rather than panic on
+		// &cm.entryPreambles[offset]. Every size must be non-negative and the
+		// running offset must stay within [0, blobLen); the sizes must also
+		// exactly cover the blob.
+		offset := 0
+		for _, size := range sizes {
+			if size < 0 || offset < 0 || uint64(offset) >= blobLen {
+				return nil, true, nil
+			}
+			offset += size
+		}
+		if uint64(offset) != blobLen {
+			return nil, true, nil
+		}
+		cm.entryPreambles = mmapExecutable(blob)
+		cm.entryPreamblesPtrs = make([]*byte, numPreambles)
+		offset = 0
+		for i, size := range sizes {
+			cm.entryPreamblesPtrs[i] = &cm.entryPreambles[offset]
+			offset += size
+		}
+	}
 
 	return
 }
