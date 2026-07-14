@@ -147,14 +147,25 @@ func (m *machine) setupPrologue() {
 		//                                          +-----------------+ <----- SP
 		//                                             (low address)
 		//
-		_amode := addressModePreOrPostIndex(m, spVReg,
-			-16,  // stack pointer must be 16-byte aligned.
-			true, // Decrement before store.
-		)
-		for _, vr := range regs {
-			// TODO: pair stores to reduce the number of instructions.
+		// Reserve the whole clobber region in one SP adjustment, then save each register (or
+		// stp-paired pair) at a positive offset from SP. C9: one sub + stp/ldp instead of a
+		// pre-index str per register.
+		slots, total := m.clobberedRegSlots()
+		cur = m.addsAddOrSubStackPointer(cur, spVReg, total, false /* decrement */)
+		for _, slot := range slots {
 			store := m.allocateInstr()
-			store.asStore(operandNR(vr), _amode, regTypeToRegisterSizeInBits(vr.RegType()))
+			mode := m.amodePool.Allocate()
+			if slot.r2 == regalloc.VRegInvalid {
+				*mode = addressMode{kind: addressModeKindRegUnsignedImm12, rn: spVReg, imm: slot.offset}
+				store.asStore(operandNR(slot.r1), mode, regTypeToRegisterSizeInBits(slot.r1.RegType()))
+			} else {
+				*mode = addressMode{kind: addressModeKindRegSignedImm7, rn: spVReg, imm: slot.offset}
+				if slot.r1.RegType() == regalloc.RegTypeInt {
+					store.asStorePair64(slot.r1, slot.r2, mode)
+				} else {
+					store.asStorePair128(slot.r1, slot.r2, mode)
+				}
+			}
 			cur = linkInstr(cur, store)
 		}
 	}
@@ -389,23 +400,31 @@ func (m *machine) setupEpilogueAfter(cur *instruction) {
 		//   SP---> +-----------------+
 		//             (low address)
 
-		l := len(m.clobberedRegs) - 1
-		for i := range m.clobberedRegs {
-			vr := m.clobberedRegs[l-i] // reverse order to restore.
+		// Restore each register (or ldp-paired pair) at its positive offset, then release the whole
+		// clobber region with one SP adjustment -- mirror of the prologue save above (C9).
+		slots, total := m.clobberedRegSlots()
+		for _, slot := range slots {
 			load := m.allocateInstr()
-			amode := addressModePreOrPostIndex(m, spVReg,
-				16,    // stack pointer must be 16-byte aligned.
-				false, // Increment after store.
-			)
-			// TODO: pair loads to reduce the number of instructions.
-			switch regTypeToRegisterSizeInBits(vr.RegType()) {
-			case 64: // save int reg.
-				load.asULoad(vr, amode, 64)
-			case 128: // save vector reg.
-				load.asFpuLoad(vr, amode, 128)
+			mode := m.amodePool.Allocate()
+			if slot.r2 == regalloc.VRegInvalid {
+				*mode = addressMode{kind: addressModeKindRegUnsignedImm12, rn: spVReg, imm: slot.offset}
+				switch regTypeToRegisterSizeInBits(slot.r1.RegType()) {
+				case 64: // int reg.
+					load.asULoad(slot.r1, mode, 64)
+				case 128: // vector reg.
+					load.asFpuLoad(slot.r1, mode, 128)
+				}
+			} else {
+				*mode = addressMode{kind: addressModeKindRegSignedImm7, rn: spVReg, imm: slot.offset}
+				if slot.r1.RegType() == regalloc.RegTypeInt {
+					load.asLoadPair64(slot.r1, slot.r2, mode)
+				} else {
+					load.asLoadPair128(slot.r1, slot.r2, mode)
+				}
 			}
 			cur = linkInstr(cur, load)
 		}
+		cur = m.addsAddOrSubStackPointer(cur, spVReg, total, true /* increment */)
 	}
 
 	// Reload the return address (lr).

@@ -654,8 +654,51 @@ func (m *machine) getVRegSpillSlotOffsetFromSP(id regalloc.VRegID, size byte) in
 	return offset + 16 // spill slot starts above the clobbered registers and the frame size.
 }
 
+// clobberedRegSlots greedily pairs adjacent same-type clobbered registers so each pair is
+// saved/restored with a single stp/ldp instead of two str/ldr (C9). Offsets are measured from the
+// bottom (low address / SP) of the clobber region; an int pair packs into 16 bytes, a vector pair
+// into 32, and any unpaired register keeps its own 16-byte-aligned slot. setupPrologue and
+// setupEpilogueAfter both drive off this, so save and restore always agree on the layout.
+func (m *machine) clobberedRegSlots() (slots []registerSaveRestoreSlot, totalSize int64) {
+	regs := m.clobberedRegs
+	slots = make([]registerSaveRestoreSlot, 0, len(regs))
+	for i := 0; i < len(regs); {
+		r1 := regs[i]
+		if i+1 < len(regs) && regs[i+1].RegType() == r1.RegType() {
+			slots = append(slots, registerSaveRestoreSlot{r1: r1, r2: regs[i+1], offset: totalSize})
+			if r1.RegType() == regalloc.RegTypeInt {
+				totalSize += 16 // two 8-byte registers packed into one 16-byte slot.
+			} else {
+				totalSize += 32 // two 16-byte registers packed into one 32-byte slot.
+			}
+			i += 2
+		} else {
+			slots = append(slots, registerSaveRestoreSlot{r1: r1, r2: regalloc.VRegInvalid, offset: totalSize})
+			totalSize += 16 // single register keeps its own 16-byte-aligned slot.
+			i++
+		}
+	}
+	return
+}
+
 func (m *machine) clobberedRegSlotSize() int64 {
-	return int64(len(m.clobberedRegs) * 16)
+	// Allocation-free size-only mirror of clobberedRegSlots (frameSize() calls this repeatedly).
+	regs := m.clobberedRegs
+	var size int64
+	for i := 0; i < len(regs); {
+		if i+1 < len(regs) && regs[i+1].RegType() == regs[i].RegType() {
+			if regs[i].RegType() == regalloc.RegTypeInt {
+				size += 16
+			} else {
+				size += 32
+			}
+			i += 2
+		} else {
+			size += 16
+			i++
+		}
+	}
+	return size
 }
 
 func (m *machine) arg0OffsetFromSP() int64 {

@@ -50,11 +50,10 @@ func TestMachine_setupPrologue(t *testing.T) {
 			clobberedRegs: []regalloc.VReg{v18VReg, v19VReg, x18VReg, x25VReg},
 			exp: `
 	stp x30, xzr, [sp, #-0x10]!
-	str q18, [sp, #-0x10]!
-	str q19, [sp, #-0x10]!
-	str x18, [sp, #-0x10]!
-	str x25, [sp, #-0x10]!
-	orr x27, xzr, #0x40
+	sub sp, sp, #0x30
+	stp q18, q19, [sp]
+	stp x18, x25, [sp, #0x20]
+	orr x27, xzr, #0x30
 	str x27, [sp, #-0x10]!
 	udf
 `,
@@ -64,12 +63,11 @@ func TestMachine_setupPrologue(t *testing.T) {
 			clobberedRegs: []regalloc.VReg{v18VReg, v19VReg, x18VReg, x25VReg},
 			exp: `
 	stp x30, xzr, [sp, #-0x10]!
-	str q18, [sp, #-0x10]!
-	str q19, [sp, #-0x10]!
-	str x18, [sp, #-0x10]!
-	str x25, [sp, #-0x10]!
+	sub sp, sp, #0x30
+	stp q18, q19, [sp]
+	stp x18, x25, [sp, #0x20]
 	sub sp, sp, #0x140
-	orr x27, xzr, #0x180
+	movz x27, #0x170, lsl 0
 	str x27, [sp, #-0x10]!
 	udf
 `,
@@ -82,12 +80,11 @@ func TestMachine_setupPrologue(t *testing.T) {
 	orr x27, xzr, #0x1e0
 	sub sp, sp, x27
 	stp x30, x27, [sp, #-0x10]!
-	str q18, [sp, #-0x10]!
-	str q19, [sp, #-0x10]!
-	str x18, [sp, #-0x10]!
-	str x25, [sp, #-0x10]!
+	sub sp, sp, #0x30
+	stp q18, q19, [sp]
+	stp x18, x25, [sp, #0x20]
 	sub sp, sp, #0x140
-	orr x27, xzr, #0x180
+	movz x27, #0x170, lsl 0
 	str x27, [sp, #-0x10]!
 	udf
 `,
@@ -193,8 +190,8 @@ func TestMachine_postRegAlloc(t *testing.T) {
 		{
 			exp: `
 	add sp, sp, #0x10
-	ldr q27, [sp], #0x10
-	ldr q18, [sp], #0x10
+	ldp q18, q27, [sp]
+	add sp, sp, #0x20
 	ldr x30, [sp], #0x10
 	ret
 `,
@@ -203,10 +200,9 @@ func TestMachine_postRegAlloc(t *testing.T) {
 		{
 			exp: `
 	add sp, sp, #0x10
-	ldr x25, [sp], #0x10
-	ldr x18, [sp], #0x10
-	ldr q27, [sp], #0x10
-	ldr q18, [sp], #0x10
+	ldp q18, q27, [sp]
+	ldp x18, x25, [sp, #0x20]
+	add sp, sp, #0x30
 	ldr x30, [sp], #0x10
 	ret
 `,
@@ -216,10 +212,9 @@ func TestMachine_postRegAlloc(t *testing.T) {
 			exp: `
 	add sp, sp, #0x10
 	add sp, sp, #0xa0
-	ldr x25, [sp], #0x10
-	ldr x18, [sp], #0x10
-	ldr q27, [sp], #0x10
-	ldr q18, [sp], #0x10
+	ldp q18, q27, [sp]
+	ldp x18, x25, [sp, #0x20]
+	add sp, sp, #0x30
 	ldr x30, [sp], #0x10
 	ret
 `,
@@ -230,10 +225,9 @@ func TestMachine_postRegAlloc(t *testing.T) {
 			exp: `
 	add sp, sp, #0x10
 	add sp, sp, #0xa0
-	ldr x25, [sp], #0x10
-	ldr x18, [sp], #0x10
-	ldr q27, [sp], #0x10
-	ldr q18, [sp], #0x10
+	ldp q18, q27, [sp]
+	ldp x18, x25, [sp, #0x20]
+	add sp, sp, #0x30
 	ldr x30, [sp], #0x10
 	add sp, sp, #0x150
 	ret

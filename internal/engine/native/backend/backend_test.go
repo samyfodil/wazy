@@ -880,11 +880,10 @@ L0 (SSA Block: blk0):
 	orr x27, xzr, #0xc0
 	sub sp, sp, x27
 	stp x30, x27, [sp, #-0x10]!
-	str x19, [sp, #-0x10]!
-	str x20, [sp, #-0x10]!
-	str q18, [sp, #-0x10]!
-	str q19, [sp, #-0x10]!
-	orr x27, xzr, #0x40
+	sub sp, sp, #0x30
+	stp x19, x20, [sp]
+	stp q18, q19, [sp, #0x10]
+	orr x27, xzr, #0x30
 	str x27, [sp, #-0x10]!
 	bl f1
 	ldr w8, [sp, #-0xc0]
@@ -911,35 +910,34 @@ L0 (SSA Block: blk0):
 	ldr x20, [sp, #-0x18]
 	ldr s18, [sp, #-0x10]
 	ldr d19, [sp, #-0x8]
-	str d19, [sp, #0x118]
-	str s18, [sp, #0x110]
-	str x20, [sp, #0x108]
-	str w19, [sp, #0x100]
-	str d17, [sp, #0xf8]
-	str s16, [sp, #0xf0]
-	str x17, [sp, #0xe8]
-	str w16, [sp, #0xe0]
-	str d15, [sp, #0xd8]
-	str s14, [sp, #0xd0]
-	str x15, [sp, #0xc8]
-	str w14, [sp, #0xc0]
-	str d13, [sp, #0xb8]
-	str s12, [sp, #0xb0]
-	str x13, [sp, #0xa8]
-	str w12, [sp, #0xa0]
-	str d11, [sp, #0x98]
-	str s10, [sp, #0x90]
-	str x11, [sp, #0x88]
-	str w10, [sp, #0x80]
-	str d9, [sp, #0x78]
-	str s8, [sp, #0x70]
-	str x9, [sp, #0x68]
-	str w8, [sp, #0x60]
+	str d19, [sp, #0x108]
+	str s18, [sp, #0x100]
+	str x20, [sp, #0xf8]
+	str w19, [sp, #0xf0]
+	str d17, [sp, #0xe8]
+	str s16, [sp, #0xe0]
+	str x17, [sp, #0xd8]
+	str w16, [sp, #0xd0]
+	str d15, [sp, #0xc8]
+	str s14, [sp, #0xc0]
+	str x15, [sp, #0xb8]
+	str w14, [sp, #0xb0]
+	str d13, [sp, #0xa8]
+	str s12, [sp, #0xa0]
+	str x13, [sp, #0x98]
+	str w12, [sp, #0x90]
+	str d11, [sp, #0x88]
+	str s10, [sp, #0x80]
+	str x11, [sp, #0x78]
+	str w10, [sp, #0x70]
+	str d9, [sp, #0x68]
+	str s8, [sp, #0x60]
+	str x9, [sp, #0x58]
+	str w8, [sp, #0x50]
 	add sp, sp, #0x10
-	ldr q19, [sp], #0x10
-	ldr q18, [sp], #0x10
-	ldr x20, [sp], #0x10
-	ldr x19, [sp], #0x10
+	ldp x19, x20, [sp]
+	ldp q18, q19, [sp, #0x10]
+	add sp, sp, #0x30
 	ldr x30, [sp], #0x10
 	add sp, sp, #0xc0
 	ret
@@ -1454,25 +1452,17 @@ L0 (SSA Block: blk0):
 			afterFinalizeARM64: `
 L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
-	str x19, [sp, #-0x10]!
-	str x20, [sp, #-0x10]!
-	str x21, [sp, #-0x10]!
-	str x22, [sp, #-0x10]!
-	str x23, [sp, #-0x10]!
-	str x24, [sp, #-0x10]!
-	str x25, [sp, #-0x10]!
-	str x26, [sp, #-0x10]!
-	str q18, [sp, #-0x10]!
-	str q19, [sp, #-0x10]!
-	str q20, [sp, #-0x10]!
-	str q21, [sp, #-0x10]!
-	str q22, [sp, #-0x10]!
-	str q23, [sp, #-0x10]!
-	str q24, [sp, #-0x10]!
-	str q25, [sp, #-0x10]!
-	str q26, [sp, #-0x10]!
-	str q27, [sp, #-0x10]!
-	movz x27, #0x120, lsl 0
+	sub sp, sp, #0xe0
+	stp x19, x20, [sp]
+	stp x21, x22, [sp, #0x10]
+	stp x23, x24, [sp, #0x20]
+	stp x25, x26, [sp, #0x30]
+	stp q18, q19, [sp, #0x40]
+	stp q20, q21, [sp, #0x60]
+	stp q22, q23, [sp, #0x80]
+	stp q24, q25, [sp, #0xa0]
+	stp q26, q27, [sp, #0xc0]
+	orr x27, xzr, #0xe0
 	str x27, [sp, #-0x10]!
 	orr w8, wzr, #0x2
 	madd w8, w2, w8, wzr
@@ -1591,24 +1581,16 @@ L0 (SSA Block: blk0):
 	fadd s9, s9, s10
 	fadd s0, s8, s9
 	add sp, sp, #0x10
-	ldr q27, [sp], #0x10
-	ldr q26, [sp], #0x10
-	ldr q25, [sp], #0x10
-	ldr q24, [sp], #0x10
-	ldr q23, [sp], #0x10
-	ldr q22, [sp], #0x10
-	ldr q21, [sp], #0x10
-	ldr q20, [sp], #0x10
-	ldr q19, [sp], #0x10
-	ldr q18, [sp], #0x10
-	ldr x26, [sp], #0x10
-	ldr x25, [sp], #0x10
-	ldr x24, [sp], #0x10
-	ldr x23, [sp], #0x10
-	ldr x22, [sp], #0x10
-	ldr x21, [sp], #0x10
-	ldr x20, [sp], #0x10
-	ldr x19, [sp], #0x10
+	ldp x19, x20, [sp]
+	ldp x21, x22, [sp, #0x10]
+	ldp x23, x24, [sp, #0x20]
+	ldp x25, x26, [sp, #0x30]
+	ldp q18, q19, [sp, #0x40]
+	ldp q20, q21, [sp, #0x60]
+	ldp q22, q23, [sp, #0x80]
+	ldp q24, q25, [sp, #0xa0]
+	ldp q26, q27, [sp, #0xc0]
+	add sp, sp, #0xe0
 	ldr x30, [sp], #0x10
 	ret
 `,
@@ -1908,8 +1890,8 @@ L6 (SSA Block: blk6):
 			afterFinalizeARM64: `
 L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
-	str q29, [sp, #-0x10]!
-	str q30, [sp, #-0x10]!
+	sub sp, sp, #0x20
+	stp q29, q30, [sp]
 	orr x27, xzr, #0x20
 	str x27, [sp, #-0x10]!
 	mov v29.16b, v0.16b
@@ -1917,8 +1899,8 @@ L0 (SSA Block: blk0):
 	ldr q8, #8; b 32; data.v128  0706050403020100 1f1e1d1c1b1a1918
 	tbl v0.16b, { v29.16b, v30.16b }, v8.16b
 	add sp, sp, #0x10
-	ldr q30, [sp], #0x10
-	ldr q29, [sp], #0x10
+	ldp q29, q30, [sp]
+	add sp, sp, #0x20
 	ldr x30, [sp], #0x10
 	ret
 `,
