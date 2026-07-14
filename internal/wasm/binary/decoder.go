@@ -2,7 +2,6 @@ package binary
 
 import (
 	"bytes"
-	"debug/dwarf"
 	"errors"
 	"fmt"
 	"io"
@@ -168,8 +167,9 @@ func DecodeModule(
 	}
 
 	if dwarfEnabled {
-		d, _ := dwarf.New(abbrev, nil, nil, info, line, nil, ranges, str)
-		m.DWARFLines = wasmdebug.NewDWARFLines(d)
+		// Defer dwarf.New (abbrev/unit-header parsing) to the first Line() call --
+		// DWARF is only read when formatting an error stack trace.
+		m.DWARFLines = wasmdebug.NewDWARFLinesLazy(abbrev, info, line, ranges, str)
 	}
 
 	functionCount, codeCount := m.SectionElementCount(wasm.SectionIDFunction), m.SectionElementCount(wasm.SectionIDCode)

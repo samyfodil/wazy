@@ -14,12 +14,17 @@ func decodeCustomSection(buf []byte, offset int, name string, limit uint64) (res
 		return nil, offset, io.EOF
 	}
 
-	data := make([]byte, limit)
-	n := copy(data, buf[offset:])
-
+	// Subslice the section rather than make+copy: custom sections (notably the
+	// large .debug_* DWARF sections, copied on every compile even though they are
+	// consumed only when formatting an error stack trace) are read-only views into
+	// the source binary. n matches what copy() would have transferred.
+	n := int(limit)
+	if avail := len(buf) - offset; n > avail {
+		n = avail
+	}
 	result = &wasm.CustomSection{
 		Name: name,
-		Data: data,
+		Data: buf[offset : offset+n],
 	}
 	return result, offset + n, nil
 }

@@ -12,8 +12,12 @@ import (
 
 // DWARFLines is used to retrieve source code line information from the DWARF data.
 type DWARFLines struct {
-	// d is created by DWARF custom sections.
+	// d is created by DWARF custom sections. When constructed lazily (see
+	// NewDWARFLinesLazy) it is nil until the first Line() call parses raw*.
 	d *dwarf.Data
+	// raw* hold the undecoded .debug_* sections for lazy construction; nil once
+	// parsed (or when built eagerly via NewDWARFLines).
+	rawAbbrev, rawInfo, rawLine, rawRanges, rawStr []byte
 	// linesPerEntry maps dwarf.Offset for dwarf.Entry to the list of lines contained by the entry.
 	// The value is sorted in the increasing order by the address.
 	linesPerEntry map[dwarf.Offset][]line
@@ -31,6 +35,24 @@ func NewDWARFLines(d *dwarf.Data) *DWARFLines {
 		return nil
 	}
 	return &DWARFLines{d: d, linesPerEntry: map[dwarf.Offset][]line{}}
+}
+
+// NewDWARFLinesLazy returns DWARFLines that defers dwarf.New (which parses the
+// abbrev tables and unit headers) to the first Line() call. DWARF is consumed only
+// when formatting an error stack trace, so the common no-error compile should never
+// pay for it. Returns nil when there is no debug info (no .debug_info section).
+func NewDWARFLinesLazy(abbrev, info, lineSec, ranges, str []byte) *DWARFLines {
+	if len(info) == 0 {
+		return nil
+	}
+	return &DWARFLines{
+		linesPerEntry: map[dwarf.Offset][]line{},
+		rawAbbrev:     abbrev,
+		rawInfo:       info,
+		rawLine:       lineSec,
+		rawRanges:     ranges,
+		rawStr:        str,
+	}
 }
 
 // isTombstoneAddr returns true if the given address is invalid a.k.a tombstone address which was made no longer valid
@@ -58,6 +80,14 @@ func (d *DWARFLines) Line(instructionOffset uint64) (ret []string) {
 	// concurrent access to this function.
 	d.mux.Lock()
 	defer d.mux.Unlock()
+
+	if d.d == nil { // lazily parse the DWARF sections on first use (see NewDWARFLinesLazy).
+		d.d, _ = dwarf.New(d.rawAbbrev, nil, nil, d.rawInfo, d.rawLine, nil, d.rawRanges, d.rawStr)
+		d.rawAbbrev, d.rawInfo, d.rawLine, d.rawRanges, d.rawStr = nil, nil, nil, nil, nil
+		if d.d == nil {
+			return
+		}
+	}
 
 	r := d.d.Reader()
 
