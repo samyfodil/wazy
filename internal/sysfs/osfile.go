@@ -42,7 +42,7 @@ type osFile struct {
 	closed bool
 
 	// cachedStat includes fields that won't change while a file is open.
-	cachedSt *cachedStat
+	cachedSt cachedStat
 
 	// direntBuf is a reusable buffer for raw getdents64 reads, used only by
 	// the Linux fast path in readdir_linux.go. Always nil on other
@@ -64,7 +64,7 @@ type osFile struct {
 // cachedStat returns the cacheable parts of sys.Stat_t or an error if they
 // couldn't be retrieved.
 func (f *osFile) cachedStat() (dev uint64, ino sys.Inode, isDir bool, errno experimentalsys.Errno) {
-	if f.cachedSt == nil {
+	if !f.cachedSt.valid {
 		if _, errno = f.Stat(); errno != 0 {
 			return
 		}
@@ -199,7 +199,7 @@ func (f *osFile) Stat() (sys.Stat_t, experimentalsys.Errno) {
 	st, errno := statFile(f.file)
 	switch errno {
 	case 0:
-		f.cachedSt = &cachedStat{dev: st.Dev, ino: st.Ino, isDir: st.Mode&fs.ModeDir == fs.ModeDir}
+		f.cachedSt = cachedStat{dev: st.Dev, ino: st.Ino, isDir: st.Mode&fs.ModeDir == fs.ModeDir, valid: true}
 	case experimentalsys.EIO:
 		errno = experimentalsys.EBADF
 	}

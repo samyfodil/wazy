@@ -148,7 +148,7 @@ type fsFile struct {
 	closed bool
 
 	// cachedStat includes fields that won't change while a file is open.
-	cachedSt *cachedStat
+	cachedSt cachedStat
 }
 
 type cachedStat struct {
@@ -160,12 +160,16 @@ type cachedStat struct {
 
 	// isDir is sys.Stat_t Mode masked with fs.ModeDir
 	isDir bool
+
+	// valid is set once the cacheable fields above are populated. Stored by
+	// value (not behind a pointer) so a Stat call doesn't allocate (W5).
+	valid bool
 }
 
 // cachedStat returns the cacheable parts of sys.Stat_t or an error if they
 // couldn't be retrieved.
 func (f *fsFile) cachedStat() (dev uint64, ino sys.Inode, isDir bool, errno experimentalsys.Errno) {
-	if f.cachedSt == nil {
+	if !f.cachedSt.valid {
 		if _, errno = f.Stat(); errno != 0 {
 			return
 		}
@@ -210,7 +214,7 @@ func (f *fsFile) Stat() (sys.Stat_t, experimentalsys.Errno) {
 	st, errno := statFile(f.file)
 	switch errno {
 	case 0:
-		f.cachedSt = &cachedStat{dev: st.Dev, ino: st.Ino, isDir: st.Mode&fs.ModeDir == fs.ModeDir}
+		f.cachedSt = cachedStat{dev: st.Dev, ino: st.Ino, isDir: st.Mode&fs.ModeDir == fs.ModeDir, valid: true}
 	case experimentalsys.EIO:
 		errno = experimentalsys.EBADF
 	}

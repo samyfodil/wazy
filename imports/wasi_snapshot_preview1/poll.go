@@ -86,7 +86,7 @@ func pollOneoffFn(_ context.Context, mod api.Module, params []uint64) sys.Errno 
 	fsc := mod.(*wasm.ModuleInstance).Sys.FS()
 	// blockingPollSubs are fd read subscriptions processed after the loop via polling.
 	var blockingPollSubs []struct {
-		evt  *event
+		evt  event
 		file sys.File
 	}
 	// The timeout is initialized at max Duration, the loop will find the minimum.
@@ -107,7 +107,7 @@ func pollOneoffFn(_ context.Context, mod api.Module, params []uint64) sys.Errno 
 		argBuf := inBuf[inOffset+8+8:]
 		userData := inBuf[inOffset : inOffset+8]
 
-		evt := &event{
+		evt := event{
 			eventType: eventType,
 			userData:  userData,
 			errno:     wasip1.ErrnoSuccess,
@@ -142,7 +142,7 @@ func pollOneoffFn(_ context.Context, mod api.Module, params []uint64) sys.Errno 
 				// The fd is in blocking mode; do not ack yet, append
 				// to a slice for deferred polling evaluation.
 				blockingPollSubs = append(blockingPollSubs, struct {
-					evt  *event
+					evt  event
 					file sys.File
 				}{evt, file.File})
 			}
@@ -304,8 +304,10 @@ func isNonblock(f sys.File) bool {
 }
 
 // writeEvent writes the event corresponding to the processed subscription.
+// evt is passed by value (~40 bytes; userData slices guest memory) so callers
+// never heap-allocate an *event per subscription (W8).
 // https://github.com/WebAssembly/WASI/blob/snapshot-01/phases/snapshot/docs.md#-event-struct
-func writeEvent(outBuf []byte, evt *event) {
+func writeEvent(outBuf []byte, evt event) {
 	copy(outBuf, evt.userData)  // userdata
 	outBuf[8] = byte(evt.errno) // uint16, but safe as < 255
 	outBuf[9] = 0
