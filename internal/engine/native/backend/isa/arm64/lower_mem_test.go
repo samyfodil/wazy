@@ -458,11 +458,123 @@ func TestMachine_collectAddends(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, b, m := newSetupWithMockContext()
 			ptr, verify := tc.setup(ctx, b, m)
-			actual32sQ, actual64sQ, actualOffset := m.collectAddends(ptr)
+			actual32sQ, actual64sQ, actualOffset := m.collectAddends(ptr, 64)
 			require.Equal(t, tc.exp32s, actual32sQ.Data)
 			require.Equal(t, tc.exp64s, actual64sQ.Data)
 			require.Equal(t, tc.offset, actualOffset)
 			verify(t)
+		})
+	}
+}
+
+func TestMachine_lowerToAddressMode_scaledIndex(t *testing.T) {
+	base, index := regalloc.VReg(1000).SetRegType(regalloc.RegTypeInt), regalloc.VReg(2000).SetRegType(regalloc.RegTypeInt)
+	addParam := func(ctx *mockCompiler, b ssa.Builder, typ ssa.Type, v regalloc.VReg) ssa.Value {
+		p := b.CurrentBlock().AddParam(b, typ)
+		ctx.vRegMap[p] = v
+		ctx.definitions[p] = backend.SSAValueDefinition{V: p}
+		return p
+	}
+	insertI32Const := func(m *mockCompiler, b ssa.Builder, v uint32) *ssa.Instruction {
+		inst := b.AllocateInstruction()
+		inst.AsIconst32(v)
+		b.InsertInstruction(inst)
+		m.definitions[inst.Return()] = backend.SSAValueDefinition{Instr: inst}
+		return inst
+	}
+	shifted := regalloc.VReg(3000).SetRegType(regalloc.RegTypeInt)
+	insertIshl := func(m *mockCompiler, b ssa.Builder, x, amount ssa.Value) *ssa.Instruction {
+		inst := b.AllocateInstruction()
+		inst.AsIshl(x, amount)
+		b.InsertInstruction(inst)
+		m.definitions[inst.Return()] = backend.SSAValueDefinition{Instr: inst, V: inst.Return()}
+		m.vRegMap[inst.Return()] = shifted // consulted only when the shift is not folded.
+		return inst
+	}
+	insertIadd := func(m *mockCompiler, b ssa.Builder, lhs, rhs ssa.Value) *ssa.Instruction {
+		inst := b.AllocateInstruction()
+		inst.AsIadd(lhs, rhs)
+		b.InsertInstruction(inst)
+		m.definitions[inst.Return()] = backend.SSAValueDefinition{Instr: inst, V: inst.Return()}
+		return inst
+	}
+	insertExt := func(m *mockCompiler, b ssa.Builder, v ssa.Value, signed bool) *ssa.Instruction {
+		inst := b.AllocateInstruction()
+		if signed {
+			inst.AsSExtend(v, 32, 64)
+		} else {
+			inst.AsUExtend(v, 32, 64)
+		}
+		b.InsertInstruction(inst)
+		m.definitions[inst.Return()] = backend.SSAValueDefinition{Instr: inst, V: v}
+		return inst
+	}
+
+	for _, tc := range []struct {
+		name    string
+		size    byte
+		setup   func(*mockCompiler, ssa.Builder) ssa.Value
+		expKind addressModeKind
+		expExt  extendOp
+		expRm   regalloc.VReg
+	}{
+		{
+			name: "64-bit index scaled (lsl)",
+			size: 64,
+			setup: func(ctx *mockCompiler, b ssa.Builder) ssa.Value {
+				p := addParam(ctx, b, ssa.TypeI64, base)
+				idx := addParam(ctx, b, ssa.TypeI64, index)
+				sh := insertI32Const(ctx, b, 3)
+				return insertIadd(ctx, b, p, insertIshl(ctx, b, idx, sh.Return()).Return()).Return()
+			},
+			expKind: addressModeKindRegScaled, expExt: extendOpUXTX, expRm: index,
+		},
+		{
+			name: "32-bit index zero-extended and scaled",
+			size: 32,
+			setup: func(ctx *mockCompiler, b ssa.Builder) ssa.Value {
+				p := addParam(ctx, b, ssa.TypeI64, base)
+				idx := addParam(ctx, b, ssa.TypeI32, index)
+				sh := insertI32Const(ctx, b, 2)
+				return insertIadd(ctx, b, p, insertIshl(ctx, b, insertExt(ctx, b, idx, false).Return(), sh.Return()).Return()).Return()
+			},
+			expKind: addressModeKindRegScaledExtended, expExt: extendOpUXTW, expRm: index,
+		},
+		{
+			name: "32-bit index sign-extended and scaled",
+			size: 64,
+			setup: func(ctx *mockCompiler, b ssa.Builder) ssa.Value {
+				p := addParam(ctx, b, ssa.TypeI64, base)
+				idx := addParam(ctx, b, ssa.TypeI32, index)
+				sh := insertI32Const(ctx, b, 3)
+				return insertIadd(ctx, b, p, insertIshl(ctx, b, insertExt(ctx, b, idx, true).Return(), sh.Return()).Return()).Return()
+			},
+			expKind: addressModeKindRegScaledExtended, expExt: extendOpSXTW, expRm: index,
+		},
+		{
+			name: "shift mismatch is not folded (no scaled index)",
+			size: 64, // needs lsl #3, but the shift is #2
+			setup: func(ctx *mockCompiler, b ssa.Builder) ssa.Value {
+				p := addParam(ctx, b, ssa.TypeI64, base)
+				idx := addParam(ctx, b, ssa.TypeI64, index)
+				sh := insertI32Const(ctx, b, 2)
+				return insertIadd(ctx, b, p, insertIshl(ctx, b, idx, sh.Return()).Return()).Return()
+			},
+			// The shift stays a real lsl; the address falls back to base+imm9 with the shifted
+			// value folded into the base (i.e. no scaled addressing mode).
+			expKind: addressModeKindRegSignedImm9,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, b, m := newSetupWithMockContext()
+			ptr := tc.setup(ctx, b)
+			amode := m.lowerToAddressMode(ptr, 0, tc.size)
+			require.Equal(t, tc.expKind, amode.kind)
+			if tc.expKind == addressModeKindRegScaled || tc.expKind == addressModeKindRegScaledExtended {
+				require.Equal(t, base, amode.rn)
+				require.Equal(t, tc.expRm, amode.rm)
+				require.Equal(t, tc.expExt, amode.extOp)
+			}
 		})
 	}
 }

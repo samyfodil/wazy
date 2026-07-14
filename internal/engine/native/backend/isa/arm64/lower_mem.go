@@ -124,10 +124,10 @@ func (a addressMode) format(dstSizeBits byte) (ret string) {
 
 	switch a.kind {
 	case addressModeKindRegScaledExtended:
-		amount := a.sizeInBitsToShiftAmount(dstSizeBits)
+		amount := sizeInBitsToShiftAmount(dstSizeBits)
 		ret = fmt.Sprintf("[%s, %s, %s #%#x]", base, formatVRegSized(a.rm, a.indexRegBits()), a.extOp, amount)
 	case addressModeKindRegScaled:
-		amount := a.sizeInBitsToShiftAmount(dstSizeBits)
+		amount := sizeInBitsToShiftAmount(dstSizeBits)
 		ret = fmt.Sprintf("[%s, %s, lsl #%#x]", base, formatVRegSized(a.rm, a.indexRegBits()), amount)
 	case addressModeKindRegExtended:
 		ret = fmt.Sprintf("[%s, %s, %s]", base, formatVRegSized(a.rm, a.indexRegBits()), a.extOp)
@@ -204,20 +204,6 @@ func (a addressMode) indexRegBits() byte {
 		panic("invalid index register for address mode. it must be either 32 or 64 bits")
 	}
 	return bits
-}
-
-func (a addressMode) sizeInBitsToShiftAmount(sizeInBits byte) (lsl byte) {
-	switch sizeInBits {
-	case 8:
-		lsl = 0
-	case 16:
-		lsl = 1
-	case 32:
-		lsl = 2
-	case 64:
-		lsl = 3
-	}
-	return
 }
 
 func extLoadSignSize(op ssa.Opcode) (size byte, signed bool) {
@@ -297,13 +283,25 @@ func (m *machine) lowerStore(si *ssa.Instruction) {
 
 // lowerToAddressMode converts a pointer to an addressMode that can be used as an operand for load/store instructions.
 func (m *machine) lowerToAddressMode(ptr ssa.Value, offsetBase uint32, size byte) (amode *addressMode) {
-	// TODO: currently the instruction selection logic doesn't support addressModeKindRegScaledExtended and
-	// addressModeKindRegScaled since collectAddends doesn't take ssa.OpcodeIshl into account. This should be fixed
-	// to support more efficient address resolution.
-
-	a32s, a64s, offset := m.collectAddends(ptr)
+	a32s, a64s, offset := m.collectAddends(ptr, size)
 	offset += int64(offsetBase)
 	return m.lowerToAddressModeFromAddends(a32s, a64s, size, offset)
+}
+
+// sizeInBitsToShiftAmount returns log2(size/8), i.e. the scaled-index shift the hardware applies for a
+// transfer of the given size, or 0xff when the size has no scaled addressing form (e.g. 128-bit).
+func sizeInBitsToShiftAmount(sizeInBits byte) byte {
+	switch sizeInBits {
+	case 8:
+		return 0
+	case 16:
+		return 1
+	case 32:
+		return 2
+	case 64:
+		return 3
+	}
+	return 0xff
 }
 
 // lowerToAddressModeFromAddends creates an addressMode from a list of addends collected by collectAddends.
@@ -312,6 +310,40 @@ func (m *machine) lowerToAddressMode(ptr ssa.Value, offsetBase uint32, size byte
 // Extracted as a separate function for easy testing.
 func (m *machine) lowerToAddressModeFromAddends(a32s *nativeapi.Queue[addend32], a64s *nativeapi.Queue[regalloc.VReg], size byte, offset int64) (amode *addressMode) {
 	amode = m.amodePool.Allocate()
+
+	// A folded `index << log2(size)` becomes the scaled index of [base, index, lsl #n]. Scaled
+	// addressing has no immediate field, so any base/offset/remaining addends fold into rn below.
+	if m.shiftedIndexSet {
+		var base regalloc.VReg
+		if !a64s.Empty() {
+			base = a64s.Dequeue()
+		} else {
+			// ponytail: rare (load off a pure shifted value with no base); one mov to seed the base.
+			base = m.compiler.AllocateVReg(ssa.TypeI64)
+			m.lowerConstantI64(base, offset)
+			offset = 0
+		}
+		si := m.shiftedIndex
+		if si.ext == extendOpUXTX {
+			*amode = addressMode{kind: addressModeKindRegScaled, rn: base, rm: si.r, extOp: extendOpUXTX}
+		} else {
+			*amode = addressMode{kind: addressModeKindRegScaledExtended, rn: base, rm: si.r, extOp: si.ext}
+		}
+		baseReg := amode.rn
+		if offset != 0 {
+			baseReg = m.addConstToReg64(baseReg, offset)
+		}
+		for !a64s.Empty() {
+			baseReg = m.addReg64ToReg64(baseReg, a64s.Dequeue())
+		}
+		for !a32s.Empty() {
+			a32 := a32s.Dequeue()
+			baseReg = m.addRegToReg64Ext(baseReg, a32.r, a32.ext)
+		}
+		amode.rn = baseReg
+		return
+	}
+
 	switch a64sExist, a32sExist := !a64s.Empty(), !a32s.Empty(); {
 	case a64sExist && a32sExist:
 		var base regalloc.VReg
@@ -382,12 +414,16 @@ func (m *machine) lowerToAddressModeFromAddends(a32s *nativeapi.Queue[addend32],
 	return
 }
 
-var addendsMatchOpcodes = [4]ssa.Opcode{ssa.OpcodeUExtend, ssa.OpcodeSExtend, ssa.OpcodeIadd, ssa.OpcodeIconst}
+var addendsMatchOpcodes = [5]ssa.Opcode{ssa.OpcodeUExtend, ssa.OpcodeSExtend, ssa.OpcodeIadd, ssa.OpcodeIconst, ssa.OpcodeIshl}
 
-func (m *machine) collectAddends(ptr ssa.Value) (addends32 *nativeapi.Queue[addend32], addends64 *nativeapi.Queue[regalloc.VReg], offset int64) {
+var scaledIndexExtendOpcodes = [2]ssa.Opcode{ssa.OpcodeUExtend, ssa.OpcodeSExtend}
+
+func (m *machine) collectAddends(ptr ssa.Value, size byte) (addends32 *nativeapi.Queue[addend32], addends64 *nativeapi.Queue[regalloc.VReg], offset int64) {
 	m.addendsWorkQueue.Reset()
 	m.addends32.Reset()
 	m.addends64.Reset()
+	m.shiftedIndexSet = false
+	sizeShift := sizeInBitsToShiftAmount(size)
 	m.addendsWorkQueue.Enqueue(ptr)
 
 	for !m.addendsWorkQueue.Empty() {
@@ -438,6 +474,37 @@ func (m *machine) collectAddends(ptr ssa.Value) (addends32 *nativeapi.Queue[adde
 			}
 			def.Instr.MarkLowered()
 			continue
+		case ssa.OpcodeIshl:
+			// `index << log2(size)` can become the scaled index of the address mode (base + index<<n).
+			// Only one such index fits, and only when the shift equals the transfer size's scale.
+			target, amount := def.Instr.Arg2()
+			amountDef := m.compiler.ValueDefinition(amount)
+			if !m.shiftedIndexSet && sizeShift != 0xff &&
+				amountDef.IsFromInstr() && amountDef.Instr.Constant() &&
+				byte(amountDef.Instr.ConstantVal())&63 == sizeShift {
+				targetDef := m.compiler.ValueDefinition(target)
+				if ext := m.compiler.MatchInstrOneOf(targetDef, scaledIndexExtendOpcodes[:]); //
+				(ext == ssa.OpcodeUExtend || ext == ssa.OpcodeSExtend) && targetDef.Instr.Arg().Type().Bits() == 32 {
+					// A 32-bit index sign/zero-extended then scaled: [base, w_index, {S,U}XTW #n].
+					eop := extendOpUXTW
+					if ext == ssa.OpcodeSExtend {
+						eop = extendOpSXTW
+					}
+					in := targetDef.Instr.Arg()
+					m.shiftedIndex = addend32{r: m.getOperand_NR(m.compiler.ValueDefinition(in), extModeNone).nr(), ext: eop}
+					targetDef.Instr.MarkLowered()
+				} else {
+					// A 64-bit index scaled: [base, x_index, lsl #n].
+					m.shiftedIndex = addend32{r: m.getOperand_NR(targetDef, extModeZeroExtend64).nr(), ext: extendOpUXTX}
+				}
+				m.shiftedIndexSet = true
+				amountDef.Instr.MarkLowered()
+				def.Instr.MarkLowered()
+				continue
+			}
+			// Not foldable: use the shifted result as a whole 64-bit addend (do not mark lowered — it
+			// is emitted as a normal shift and its result is consumed here).
+			m.addends64.Enqueue(m.getOperand_NR(def, extModeZeroExtend64).nr())
 		default:
 			// If the addend is not one of them, we simply use it as-is (without merging!), optionally zero-extending it.
 			m.addends64.Enqueue(m.getOperand_NR(def, extModeZeroExtend64 /* optional zero ext */).nr())

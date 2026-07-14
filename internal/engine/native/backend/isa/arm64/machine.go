@@ -49,7 +49,12 @@ type (
 		addendsWorkQueue nativeapi.Queue[ssa.Value]
 		addends32        nativeapi.Queue[addend32]
 		// addends64 is used during address lowering, defined here for reuse.
-		addends64              nativeapi.Queue[regalloc.VReg]
+		addends64 nativeapi.Queue[regalloc.VReg]
+		// shiftedIndex holds an `index << log2(size)` folded into the scaled index of an
+		// addressMode (base + index<<n). ext==extendOpUXTX means a 64-bit index (RegScaled);
+		// ext==UXTW/SXTW means a 32-bit index sign/zero-extended then scaled (RegScaledExtended).
+		shiftedIndex           addend32
+		shiftedIndexSet        bool
 		unresolvedAddressModes []*instruction
 
 		// condBrRelocs holds the conditional branches which need offset relocation.
