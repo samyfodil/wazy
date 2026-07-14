@@ -1435,10 +1435,13 @@ func (m *machine) lowerXmmCmovAfterRegAlloc(i *instruction) {
 }
 
 func (m *machine) lowerExtend(_arg, ret ssa.Value, from, to byte, signed bool) {
-	rd0 := m.c.VRegOf(ret)
+	// movsx/movzx are defKindOp2 (the extend itself is a valid single-Def
+	// spill anchor), so we extend straight into the return vreg -- no temp +
+	// copy. lowerIcmpToFlag's zero-extend (asMovzxRmR into VRegOf(ret)) does
+	// exactly this. This is unlike the defKindNone ALU ops (C2), whose trailing
+	// copy is load-bearing as the spill anchor.
+	rd := m.c.VRegOf(ret)
 	arg := m.getOperand_Mem_Reg(m.c.ValueDefinition(_arg))
-
-	rd := m.c.AllocateVReg(ret.Type())
 
 	ext := m.allocateInstr()
 	switch {
@@ -1470,8 +1473,6 @@ func (m *machine) lowerExtend(_arg, ret ssa.Value, from, to byte, signed bool) {
 		panic(fmt.Sprintf("BUG: unhandled extend: from=%d, to=%d, signed=%t", from, to, signed))
 	}
 	m.insert(ext)
-
-	m.copyTo(rd, rd0)
 }
 
 func (m *machine) lowerVconst(dst regalloc.VReg, lo, hi uint64) {
@@ -1808,7 +1809,10 @@ func (m *machine) lowerAluRmiROp(si *ssa.Instruction, op aluRmiROpcode) {
 
 	xDef, yDef := m.c.ValueDefinition(x), m.c.ValueDefinition(y)
 
-	// TODO: commutative args can be swapped if one of them is an immediate.
+	// Commutative-const swap (put a const-x in the imm32 rm slot) was assessed
+	// (C7) and dropped: real producers canonicalize the constant to y, so the
+	// swap fired 0 times across Go/Rust/TinyGo modules -- it only ever helps
+	// hand-written wasm, for the cost of a Constant() check on every ALU op.
 	rn := m.getOperand_Reg(xDef)
 	rm := m.getOperand_Mem_Imm32_Reg(yDef)
 	rd := m.c.VRegOf(si.Return())
