@@ -79,6 +79,21 @@ func (m *Module) buildFunctionDefinitionsOnce() {
 		def.goFunc = code.GoFunc
 	}
 
+	// Group export names by function index in a single pass. The previous code
+	// rescanned the whole export section for every function -- O(functions x
+	// exports). ExportSection is iterated in order, so the per-function slices
+	// preserve export order exactly as before.
+	var exportsByFunc map[Index][]string
+	for i := range m.ExportSection {
+		e := &m.ExportSection[i]
+		if e.Type == ExternTypeFunc {
+			if exportsByFunc == nil {
+				exportsByFunc = make(map[Index][]string)
+			}
+			exportsByFunc[e.Index] = append(exportsByFunc[e.Index], e.Name)
+		}
+	}
+
 	n, nLen := 0, len(functionNames)
 	for i := range m.FunctionDefinitionSection {
 		d := &m.FunctionDefinitionSection[i]
@@ -102,12 +117,7 @@ func (m *Module) buildFunctionDefinitionsOnce() {
 		d.paramNames = paramNames(localNames, funcIdx, len(d.Functype.Params))
 		d.resultNames = paramNames(resultNames, funcIdx, len(d.Functype.Results))
 
-		for i := range m.ExportSection {
-			e := &m.ExportSection[i]
-			if e.Type == ExternTypeFunc && e.Index == funcIdx {
-				d.exportNames = append(d.exportNames, e.Name)
-			}
-		}
+		d.exportNames = exportsByFunc[funcIdx]
 	}
 }
 
