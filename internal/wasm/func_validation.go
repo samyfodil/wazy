@@ -579,8 +579,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			if err := enabledFeatures.RequireEnabled(experimental.CoreFeaturesExceptionHandling); err != nil {
 				return fmt.Errorf("%s invalid as %v", OpcodeTryTableName, err)
 			}
-			br.Reset(body[pc+1:])
-			bt, num, err := DecodeBlockType(m.TypeSection, br, enabledFeatures)
+			bt, num, err := decodeBlockTypeFast(m.TypeSection, body, pc+1, enabledFeatures, br)
 			if err != nil {
 				return fmt.Errorf("read block: %w", err)
 			}
@@ -1718,8 +1717,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				return fmt.Errorf("unknown SIMD instruction %s", vectorInstructionName[vecOpcode])
 			}
 		} else if op == OpcodeBlock {
-			br.Reset(body[pc+1:])
-			bt, num, err := DecodeBlockType(m.TypeSection, br, enabledFeatures)
+			bt, num, err := decodeBlockTypeFast(m.TypeSection, body, pc+1, enabledFeatures, br)
 			if err != nil {
 				return fmt.Errorf("read block: %w", err)
 			}
@@ -2107,8 +2105,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				return fmt.Errorf("invalid atomic opcode: 0x%x", atomicOpcode)
 			}
 		} else if op == OpcodeLoop {
-			br.Reset(body[pc+1:])
-			bt, num, err := DecodeBlockType(m.TypeSection, br, enabledFeatures)
+			bt, num, err := decodeBlockTypeFast(m.TypeSection, body, pc+1, enabledFeatures, br)
 			if err != nil {
 				return fmt.Errorf("read block: %w", err)
 			}
@@ -2124,8 +2121,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			valueTypeStack.pushStackLimit(len(bt.Params))
 			pc += num
 		} else if op == OpcodeIf {
-			br.Reset(body[pc+1:])
-			bt, num, err := DecodeBlockType(m.TypeSection, br, enabledFeatures)
+			bt, num, err := decodeBlockTypeFast(m.TypeSection, body, pc+1, enabledFeatures, br)
 			if err != nil {
 				return fmt.Errorf("read block: %w", err)
 			}
@@ -2709,6 +2705,50 @@ type controlBlock struct {
 //
 // See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#binary-blocktype
 // See https://github.com/WebAssembly/spec/blob/wg-2.0.draft1/proposals/multi-value/Overview.md
+// fastBlockType returns the cached singleton FunctionType for a single-byte block
+// type -- the overwhelmingly common case: an empty block, or one primitive/abstract-
+// reference result. ok=false means the byte needs the full decoder (ref-null/ref
+// heap types, or a multi-value type index), which is multi-byte. The 9 whitelisted
+// bytes match DecodeBlockType's single-byte cases exactly; positive type-index bytes
+// (0x00-0x3f) and 0x63/0x64 deliberately fall through to the slow path.
+func fastBlockType(b byte) (*FunctionType, bool) {
+	switch b {
+	case 0x40:
+		return blockType_v_v, true
+	case 0x7f:
+		return blockType_v_i32, true
+	case 0x7e:
+		return blockType_v_i64, true
+	case 0x7d:
+		return blockType_v_f32, true
+	case 0x7c:
+		return blockType_v_f64, true
+	case 0x7b:
+		return blockType_v_v128, true
+	case 0x70:
+		return blockType_v_funcref, true
+	case 0x6f:
+		return blockType_v_externref, true
+	case 0x69:
+		return blockType_v_exnref, true
+	}
+	return nil, false
+}
+
+// decodeBlockTypeFast decodes the block type at body[pos:], taking the single-byte
+// fast path when possible and otherwise resetting br and deferring to DecodeBlockType.
+// This avoids a bytes.Reader.Reset + leb128 interface round-trip on every block/loop/
+// if in a function body. The bounds guard mirrors the slow path's body[pos:] EOF.
+func decodeBlockTypeFast(types []FunctionType, body []byte, pos uint64, enabledFeatures api.CoreFeatures, br *bytes.Reader) (*FunctionType, uint64, error) {
+	if pos < uint64(len(body)) {
+		if ft, ok := fastBlockType(body[pos]); ok {
+			return ft, 1, nil
+		}
+	}
+	br.Reset(body[pos:])
+	return DecodeBlockType(types, br, enabledFeatures)
+}
+
 func DecodeBlockType(types []FunctionType, r *bytes.Reader, enabledFeatures api.CoreFeatures) (*FunctionType, uint64, error) {
 	raw, num, err := leb128.DecodeInt33AsInt64(r)
 	if err != nil {
