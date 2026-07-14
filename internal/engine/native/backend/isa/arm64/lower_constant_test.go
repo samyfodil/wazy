@@ -65,10 +65,13 @@ ins v128?.s[0], w129?`, formatEmittedInstructionsInCurrentBlock(m))
 		machInstr := getPendingInstr(m)
 		require.Equal(t, regalloc.VRegIDNonReservedBegin, vr.ID())
 		require.Equal(t, regalloc.RegTypeFloat, vr.RegType())
-		require.Equal(t, loadFpuConst64, machInstr.kind)
+		// -9471.2 is a high-entropy F64 (not cheap to build in a GPR), so it is
+		// loaded from the shared literal pool via a single ldr-literal rather
+		// than the inline ldr+branch-over-literal (C8 part 2b).
+		require.Equal(t, loadFpuConstPooled, machInstr.kind)
 		require.Equal(t, math.Float64bits(-9471.2), machInstr.u1)
 
-		require.Equal(t, "ldr d128?, #8; b 16; data.f64 -9471.200000", formatEmittedInstructionsInCurrentBlock(m))
+		require.Equal(t, "ldr d128?, L0 ;; pooled const c0c27f999999999a 0000000000000000", formatEmittedInstructionsInCurrentBlock(m))
 	})
 }
 
@@ -153,5 +156,39 @@ func TestMachine_lowerConstantI64(t *testing.T) {
 			exp := strings.Join(tc.exp, "\n")
 			require.Equal(t, exp, formatEmittedInstructionsInCurrentBlock(m))
 		})
+	}
+}
+
+// TestFpuConstPooledDemotion verifies the ±1MB range fallback (C8 part 2b):
+// demoting a pooled FP-const load back to the inline ldr+branch-over-literal
+// form must preserve the constant, the destination register, AND the
+// instruction's list links (prev/next) so the demoted instr stays in place.
+func TestFpuConstPooledDemotion(t *testing.T) {
+	for _, tc := range []struct {
+		width  byte
+		lo, hi uint64
+		expK5  instructionKind
+	}{
+		{32, 0x3f8f_cb92, 0, loadFpuConst32},
+		{64, 0xc0c2_7f99_9999_999a, 0, loadFpuConst64},
+		{128, 0x0706_0504_0302_0100, 0x0f0e_0d0c_0b0a_0908, loadFpuConst128},
+	} {
+		_, _, m := newSetupWithMockContext()
+		prev, next := m.allocateNop(), m.allocateNop()
+		i := m.allocateInstr()
+		i.asLoadFpuConstPooled(regToVReg(v0).SetRegType(regalloc.RegTypeFloat), tc.lo, tc.hi, tc.width, label(7))
+		i.prev, i.next = prev, next
+
+		require.Equal(t, loadFpuConstPooled, i.kind)
+		i.demoteFpuConstPooledToInline()
+
+		require.Equal(t, tc.expK5, i.kind)
+		require.Equal(t, tc.lo, i.u1)
+		if tc.width == 128 {
+			require.Equal(t, tc.hi, i.u2)
+		}
+		// List links survive the rewrite.
+		require.Equal(t, prev, i.prev)
+		require.Equal(t, next, i.next)
 	}
 }

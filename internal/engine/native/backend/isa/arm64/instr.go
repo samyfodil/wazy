@@ -107,6 +107,8 @@ var defKinds = [numInstructionKinds]defKind{
 	loadFpuConst32:       defKindRD,
 	loadFpuConst64:       defKindRD,
 	loadFpuConst128:      defKindRD,
+	loadFpuConstPooled:   defKindRD,
+	fpuConstPoolData:     defKindNone,
 	fpuStore32:           defKindNone,
 	fpuStore64:           defKindNone,
 	fpuStore128:          defKindNone,
@@ -249,6 +251,8 @@ var useKinds = [numInstructionKinds]useKind{
 	loadFpuConst32:       useKindNone,
 	loadFpuConst64:       useKindNone,
 	loadFpuConst128:      useKindNone,
+	loadFpuConstPooled:   useKindNone,
+	fpuConstPoolData:     useKindNone,
 	vecLoad1R:            useKindRN,
 	cSel:                 useKindRNRM,
 	fpuCSel:              useKindRNRM,
@@ -775,6 +779,62 @@ func (i *instruction) asLoadFpuConst128(rd regalloc.VReg, lo, hi uint64) {
 	i.rd = rd
 }
 
+// asLoadFpuConstPooled sets up a pooled FP-constant load: rd receives the
+// width-bit constant (lo/hi kept for a possible demotion back to inline) from
+// pool slot l via a PC-relative ldr-literal whose offset is resolved later.
+func (i *instruction) asLoadFpuConstPooled(rd regalloc.VReg, lo, hi uint64, width byte, l label) {
+	i.kind = loadFpuConstPooled
+	i.rd = rd
+	i.u1 = lo
+	i.u2 = hi
+	i.rn.data = uint64(l)      // target pool-slot label (until resolved)
+	i.rn.data2 = uint64(width) // 32 / 64 / 128
+	i.rm.data2 = 0             // resolved flag (0 = not yet)
+}
+
+func (i *instruction) fpuConstPoolLabel() label { return label(i.rn.data) }
+func (i *instruction) fpuConstPoolWidth() byte  { return byte(i.rn.data2) }
+
+// fpuConstPoolOffsetResolve stores the resolved byte offset from this ldr to
+// its pool slot.
+func (i *instruction) fpuConstPoolOffsetResolve(offset int64) {
+	i.rm.data = uint64(offset)
+	i.rm.data2 = 1
+}
+
+func (i *instruction) fpuConstPoolOffsetResolved() bool { return i.rm.data2 == 1 }
+func (i *instruction) fpuConstPoolOffset() int64        { return int64(i.rm.data) }
+
+// demoteFpuConstPooledToInline rewrites a pooled load back into the
+// self-contained inline ldr+branch-over-literal form, used when the pool slot
+// falls outside the ±1MB ldr-literal range. It rewrites only the payload
+// fields (not prev/next), so the instruction stays linked in place. The
+// asLoadFpuConst* forms read rd/u1/u2 only, so the stale rn/rm from the pooled
+// form (cleared here for hygiene) are irrelevant to their encoding.
+func (i *instruction) demoteFpuConstPooledToInline() {
+	lo, hi, width := i.u1, i.u2, i.fpuConstPoolWidth()
+	rd := i.rd
+	i.rn, i.rm = operand{}, operand{}
+	switch width {
+	case 32:
+		i.asLoadFpuConst32(rd, lo)
+	case 64:
+		i.asLoadFpuConst64(rd, lo)
+	default:
+		i.asLoadFpuConst128(rd, lo, hi)
+	}
+}
+
+// asFpuConstPoolData sets up a raw pool-slot holding a width-bit literal.
+func (i *instruction) asFpuConstPoolData(lo, hi uint64, width byte) {
+	i.kind = fpuConstPoolData
+	i.u1 = lo
+	i.u2 = hi
+	i.rn.data2 = uint64(width)
+}
+
+func (i *instruction) fpuConstPoolDataWidth() byte { return byte(i.rn.data2) }
+
 func (i *instruction) asFpuCmp(rn, rm operand, is64bit bool) {
 	i.kind = fpuCmp
 	i.rn, i.rm = rn, rm
@@ -1248,6 +1308,11 @@ func (i *instruction) String() (str string) {
 	case loadFpuConst128:
 		str = fmt.Sprintf("ldr %s, #8; b 32; data.v128  %016x %016x",
 			formatVRegSized(i.rd, 128), i.u1, i.u2)
+	case loadFpuConstPooled:
+		str = fmt.Sprintf("ldr %s, %s ;; pooled const %016x %016x",
+			formatVRegSized(i.rd, i.fpuConstPoolWidth()), i.fpuConstPoolLabel(), i.u1, i.u2)
+	case fpuConstPoolData:
+		str = fmt.Sprintf("data.const%d %016x %016x", i.fpuConstPoolDataWidth(), i.u1, i.u2)
 	case fpuToInt:
 		var op, src, dst string
 		if signed := i.u1 == 1; signed {
@@ -1696,6 +1761,17 @@ const (
 	loadFpuConst64
 	// loadFpuConst128 represents a load of a 128-bit floating-point constant.
 	loadFpuConst128
+	// loadFpuConstPooled loads a high-entropy FP/SIMD constant from the
+	// per-function literal pool via a single PC-relative ldr-literal, instead of
+	// the inline ldr+branch-over-literal (loadFpuConst*). The pool slot is
+	// shared across identical constants (dedup) and materialized once after the
+	// function body (see emitFpConstPool). Its imm19 offset to the slot is
+	// filled in by resolveRelativeAddresses; if the slot is out of the ±1MB
+	// ldr-literal range it is demoted back to the inline form there.
+	loadFpuConstPooled
+	// fpuConstPoolData is a raw literal-pool slot (4/8/16 bytes) appended after
+	// the function body; loadFpuConstPooled sites ldr-load from it.
+	fpuConstPoolData
 	// vecLoad1R represents a load of a one single-element structure that replicates to all lanes of a vector.
 	vecLoad1R
 	// fpuToInt represents a conversion from FP to integer.
@@ -2443,6 +2519,10 @@ func (i *instruction) size() int64 {
 			return 4 // zero loading can be encoded as a single instruction.
 		}
 		return 4 + 4 + 16
+	case loadFpuConstPooled:
+		return 4 // a single ldr-literal.
+	case fpuConstPoolData:
+		return int64(i.fpuConstPoolDataWidth()) / 8 // 4, 8 or 16 bytes of raw data.
 	case brTableSequence:
 		return 4*4 + int64(i.u2)*4
 	default:

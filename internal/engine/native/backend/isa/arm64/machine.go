@@ -70,6 +70,16 @@ type (
 		// allocation (see lowerExitIfTrueWithCodeShared and emitTrapIslands).
 		trapIslands []trapIsland
 
+		// fpConstPool is this function's deduplicated pool of high-entropy
+		// FP/SIMD constants, materialized once after the function body (see
+		// emitFpConstPool). Each entry is loaded via a PC-relative ldr-literal
+		// (loadFpuConstPooled) that shares one copy across identical loads,
+		// instead of the inline ldr+branch-over-literal form.
+		fpConstPool []fpConst
+		// fpConstPoolRelocs gathers the pooled loads whose ±1MB range must be
+		// checked in resolveRelativeAddresses; reused across rerun iterations.
+		fpConstPoolRelocs []fpConstPoolReloc
+
 		// spillSlotSize is the size of the stack slot in bytes used for spilling registers.
 		// During the execution of the function, the stack looks like:
 		//
@@ -138,6 +148,18 @@ type (
 	trapIsland struct {
 		code nativeapi.ExitCode
 		l    label
+	}
+	// fpConst is one deduplicated entry in the per-function FP/SIMD literal pool.
+	fpConst struct {
+		lo, hi uint64
+		width  byte // 32, 64 or 128
+		l      label
+	}
+	// fpConstPoolReloc is a pooled load whose ldr-literal offset needs range
+	// checking / resolution against its pool slot.
+	fpConstPoolReloc struct {
+		ldr    *instruction
+		offset int64 // byte offset of the ldr from the function start.
 	}
 )
 
@@ -320,6 +342,23 @@ func (m *machine) Reset() {
 	m.perBlockHead, m.perBlockEnd, m.rootInstr = nil, nil, nil
 	m.orderedSSABlockLabelPos = m.orderedSSABlockLabelPos[:0]
 	m.trapIslands = m.trapIslands[:0]
+	m.fpConstPool = m.fpConstPool[:0]
+	m.fpConstPoolRelocs = m.fpConstPoolRelocs[:0]
+}
+
+// getOrAddFpConst returns the label of the pool slot holding the width-bit
+// constant (lo,hi), allocating (and deduplicating) it on first use. The slot
+// itself is materialized by emitFpConstPool after register allocation.
+func (m *machine) getOrAddFpConst(lo, hi uint64, width byte) label {
+	for i := range m.fpConstPool {
+		if c := &m.fpConstPool[i]; c.lo == lo && c.hi == hi && c.width == width {
+			return c.l
+		}
+	}
+	l := m.nextLabel
+	m.nextLabel++
+	m.fpConstPool = append(m.fpConstPool, fpConst{lo: lo, hi: hi, width: width, l: l})
+	return l
 }
 
 // getOrCreateTrapIsland returns the label of this function's shared trap
@@ -446,8 +485,10 @@ func (m *machine) resolveRelativeAddresses(ctx context.Context) {
 		m.unresolvedAddressModes = m.unresolvedAddressModes[:0]
 	}
 	for {
-		// Reuse the slice to gather the unresolved conditional branches.
+		// Reuse the slices to gather the unresolved conditional branches and
+		// pooled FP-constant loads.
 		m.condBrRelocs = m.condBrRelocs[:0]
+		m.fpConstPoolRelocs = m.fpConstPoolRelocs[:0]
 
 		var fn string
 		var fnIndex int
@@ -487,6 +528,10 @@ func (m *machine) resolveRelativeAddresses(ctx context.Context) {
 							nextLabel: nextLabel,
 						})
 					}
+				case loadFpuConstPooled:
+					m.fpConstPoolRelocs = append(m.fpConstPoolRelocs, fpConstPoolReloc{
+						ldr: cur, offset: offset + size,
+					})
 				}
 				size += cur.size()
 				if cur == pos.end {
@@ -518,6 +563,21 @@ func (m *machine) resolveRelativeAddresses(ctx context.Context) {
 				m.insertConditionalJumpTrampoline(cbr, reloc.currentLabelPos, reloc.nextLabel)
 				// Then, we need to recall this function to fix up the label offsets
 				// as they have changed after the trampoline is inserted.
+				needRerun = true
+			}
+		}
+		// A pooled FP-const load is a ±1MB ldr-literal to a slot that always
+		// sits ahead of it (the pool is after the body), so only the forward
+		// bound can be exceeded, and only in a >1MB function. If so, demote the
+		// load back to the self-contained inline form (its size grows, shifting
+		// offsets) and rerun. Demotion is monotonic -- the function only grows,
+		// consts are finite -- so this converges like the condBr trampolines.
+		for i := range m.fpConstPoolRelocs {
+			reloc := &m.fpConstPoolRelocs[i]
+			offsetOfTarget := m.labelPositionPool.Get(int(reloc.ldr.fpuConstPoolLabel())).binaryOffset
+			diff := offsetOfTarget - reloc.offset
+			if diff>>2 > maxSignedInt19 {
+				reloc.ldr.demoteFpuConstPooledToInline()
 				needRerun = true
 			}
 		}
@@ -553,6 +613,14 @@ func (m *machine) resolveRelativeAddresses(ctx context.Context) {
 				}
 				cur.condBrOffsetResolve(diff)
 			}
+		case loadFpuConstPooled:
+			target := cur.fpuConstPoolLabel()
+			offsetOfTarget := m.labelPositionPool.Get(int(target)).binaryOffset
+			diff := offsetOfTarget - currentOffset
+			if diff>>2 > maxSignedInt19 || diff < 0 {
+				panic("BUG: pooled FP-const load offset out of ldr-literal range must be demoted to inline")
+			}
+			cur.fpuConstPoolOffsetResolve(diff)
 		case brTableSequence:
 			tableIndex := cur.u1
 			targets := m.jmpTableTargets[tableIndex]

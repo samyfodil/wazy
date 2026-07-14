@@ -12,6 +12,44 @@ func (m *machine) PostRegAlloc() {
 	m.setupPrologue()
 	m.postRegAlloc()
 	m.emitTrapIslands()
+	m.emitFpConstPool()
+}
+
+// emitFpConstPool materializes the deduplicated FP/SIMD literal pool after the
+// function body (and after any trap islands). Each slot is a labeled
+// fpuConstPoolData holding the raw constant; loadFpuConstPooled sites ldr-load
+// from it via a PC-relative offset resolved in resolveRelativeAddresses. Pool
+// data is never executed (only loaded), so it sits past every branch/return.
+func (m *machine) emitFpConstPool() {
+	if len(m.fpConstPool) == 0 {
+		return
+	}
+
+	lastPos := m.orderedSSABlockLabelPos[len(m.orderedSSABlockLabelPos)-1]
+	// Trap-island / epilogue insertion may have appended past the recorded
+	// block end; walk to the true tail so the pool comes after everything.
+	cur := lastPos.end
+	for cur.next != nil {
+		cur = cur.next
+	}
+
+	for i := range m.fpConstPool {
+		fc := &m.fpConstPool[i]
+
+		nop := m.allocateInstr()
+		nop.asNop0WithLabel(fc.l)
+		pos := m.labelPositionPool.GetOrAllocate(int(fc.l))
+		pos.begin, pos.end = nop, nop
+		cur = linkInstr(cur, nop)
+
+		data := m.allocateInstr()
+		data.asFpuConstPoolData(fc.lo, fc.hi, fc.width)
+		cur = linkInstr(cur, data)
+	}
+
+	// Extend the last block to cover the pool so label offset resolution walks
+	// over it.
+	lastPos.end = cur
 }
 
 // emitTrapIslands materializes the shared trap islands allocated by

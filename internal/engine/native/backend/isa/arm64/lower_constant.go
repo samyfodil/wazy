@@ -2,6 +2,7 @@ package arm64
 
 import (
 	"github.com/samyfodil/wazy/internal/engine/native/backend/regalloc"
+	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
 	"github.com/samyfodil/wazy/internal/engine/native/ssa"
 )
 
@@ -79,16 +80,53 @@ func fpConstCheapToMaterialize(v uint64, bits byte) bool {
 	return nzZero <= 2 || nzNeg <= 2 || isBitMaskImmediate(v, true)
 }
 
-// lowerFpuConst32/64/128 load a floating-point/vector constant into rd. When the pattern is cheap to
-// build in a GPR (fpConstCheapToMaterialize) they materialize it there and move it into the FP
-// register with `ins`, avoiding the executed branch-over-literal of the inline ldr form. Zero, an
-// expensive high-entropy pattern, and the post-register-allocation block-arg path (no scratch VReg
-// available) keep the existing eor / ldr-literal encoding.
+// lowerFpuConst32/64/128 load a floating-point/vector constant into rd, picking the cheapest form:
+//
+//   - zero: a single `eor` (asLoadFpuConst*, handled by their zero special case).
+//   - cheap to build in a GPR (fpConstCheapToMaterialize) and a scratch VReg is available
+//     (pre-register-allocation): materialize in a GPR and move it in with `ins` -- no memory access.
+//   - otherwise (high-entropy patterns, and the post-register-allocation block-arg path which has no
+//     scratch VReg): load from the shared per-function literal pool via a single PC-relative
+//     ldr-literal (loadFpuConstPooled). This drops the executed branch-over-literal of the inline
+//     ldr form and shares one copy of the data across identical constants.
+//
+// The disassembler build (PrintMachineCodeHexPerFunctionDisassemblable) keeps the inline ldr form,
+// which already emits dummy instructions in place of the non-disassemblable literal.
+func (m *machine) fpPoolingEnabled() bool {
+	return !nativeapi.PrintMachineCodeHexPerFunctionDisassemblable
+}
+
+func (m *machine) poolFpConst(rd regalloc.VReg, lo, hi uint64, width byte) {
+	l := m.getOrAddFpConst(lo, hi, width)
+	i := m.allocateInstr()
+	i.asLoadFpuConstPooled(rd, lo, hi, width, l)
+	m.insert(i)
+}
+
+func (m *machine) insertInlineFpuConst(rd regalloc.VReg, lo, hi uint64, width byte) {
+	i := m.allocateInstr()
+	switch width {
+	case 32:
+		i.asLoadFpuConst32(rd, lo)
+	case 64:
+		i.asLoadFpuConst64(rd, lo)
+	default:
+		i.asLoadFpuConst128(rd, lo, hi)
+	}
+	m.insert(i)
+}
+
 func (m *machine) lowerFpuConst32(rd regalloc.VReg, v uint64) {
-	if v == 0 || m.regAllocStarted {
-		i := m.allocateInstr()
-		i.asLoadFpuConst32(rd, v)
-		m.insert(i)
+	if v == 0 {
+		m.insertInlineFpuConst(rd, 0, 0, 32)
+		return
+	}
+	if m.regAllocStarted {
+		if m.fpPoolingEnabled() {
+			m.poolFpConst(rd, v, 0, 32)
+		} else {
+			m.insertInlineFpuConst(rd, v, 0, 32)
+		}
 		return
 	}
 	tmp := m.compiler.AllocateVReg(ssa.TypeI32)
@@ -99,29 +137,40 @@ func (m *machine) lowerFpuConst32(rd regalloc.VReg, v uint64) {
 }
 
 func (m *machine) lowerFpuConst64(rd regalloc.VReg, v uint64) {
-	if v == 0 || m.regAllocStarted || !fpConstCheapToMaterialize(v, 64) {
-		i := m.allocateInstr()
-		i.asLoadFpuConst64(rd, v)
-		m.insert(i)
+	if v == 0 {
+		m.insertInlineFpuConst(rd, 0, 0, 64)
 		return
 	}
-	tmp := m.compiler.AllocateVReg(ssa.TypeI64)
-	m.lowerConstantI64(tmp, int64(v))
-	mov := m.allocateInstr()
-	mov.asMovToVec(rd, operandNR(tmp), vecArrangementD, vecIndex(0))
-	m.insert(mov)
+	if !m.regAllocStarted && fpConstCheapToMaterialize(v, 64) {
+		tmp := m.compiler.AllocateVReg(ssa.TypeI64)
+		m.lowerConstantI64(tmp, int64(v))
+		mov := m.allocateInstr()
+		mov.asMovToVec(rd, operandNR(tmp), vecArrangementD, vecIndex(0))
+		m.insert(mov)
+		return
+	}
+	if m.fpPoolingEnabled() {
+		m.poolFpConst(rd, v, 0, 64)
+	} else {
+		m.insertInlineFpuConst(rd, v, 0, 64)
+	}
 }
 
 func (m *machine) lowerFpuConst128(rd regalloc.VReg, lo, hi uint64) {
-	if (lo == 0 && hi == 0) || m.regAllocStarted ||
-		!fpConstCheapToMaterialize(lo, 64) || !fpConstCheapToMaterialize(hi, 64) {
-		i := m.allocateInstr()
-		i.asLoadFpuConst128(rd, lo, hi)
-		m.insert(i)
+	if lo == 0 && hi == 0 {
+		m.insertInlineFpuConst(rd, 0, 0, 128)
 		return
 	}
-	m.insVecLaneConst(rd, lo, vecIndex(0))
-	m.insVecLaneConst(rd, hi, vecIndex(1))
+	if !m.regAllocStarted && fpConstCheapToMaterialize(lo, 64) && fpConstCheapToMaterialize(hi, 64) {
+		m.insVecLaneConst(rd, lo, vecIndex(0))
+		m.insVecLaneConst(rd, hi, vecIndex(1))
+		return
+	}
+	if m.fpPoolingEnabled() {
+		m.poolFpConst(rd, lo, hi, 128)
+	} else {
+		m.insertInlineFpuConst(rd, lo, hi, 128)
+	}
 }
 
 // insVecLaneConst materializes laneVal in a GPR (xzr when zero) and moves it into rd's 64-bit lane

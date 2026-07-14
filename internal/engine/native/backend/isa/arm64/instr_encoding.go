@@ -129,6 +129,24 @@ func (i *instruction) encode(m *machine) {
 		} else {
 			encodeLoadFpuConst128(c, rd, lo, hi)
 		}
+	case loadFpuConstPooled:
+		if !i.fpuConstPoolOffsetResolved() {
+			panic("BUG: loadFpuConstPooled offset not resolved before encode")
+		}
+		encodeLoadFpuConstLiteral(c, regNumberInEncoding[i.rd.RealReg()], i.fpuConstPoolWidth(), i.fpuConstPoolOffset())
+	case fpuConstPoolData:
+		switch i.fpuConstPoolDataWidth() {
+		case 32:
+			c.Emit4Bytes(uint32(i.u1))
+		case 64:
+			c.Emit4Bytes(uint32(i.u1))
+			c.Emit4Bytes(uint32(i.u1 >> 32))
+		default: // 128
+			c.Emit4Bytes(uint32(i.u1))
+			c.Emit4Bytes(uint32(i.u1 >> 32))
+			c.Emit4Bytes(uint32(i.u2))
+			c.Emit4Bytes(uint32(i.u2 >> 32))
+		}
 	case aluRRRR:
 		c.Emit4Bytes(encodeAluRRRR(
 			aluOp(i.u1),
@@ -1133,6 +1151,26 @@ const dummyInstruction uint32 = 0x14000000 // "b 0"
 //	ldr s8, #8  ;; literal load of data.f32
 //	b 8           ;; skip the data
 //	data.f32 xxxxxxx
+//
+// encodeLoadFpuConstLiteral encodes a SIMD&FP LDR (literal): `ldr <rd>, #imm`
+// where imm = offsetToPool (a forward, 4-aligned byte offset). Same family as
+// the inline encoders but the literal lives in the shared pool rather than
+// inline after the load, so there is no branch-over-literal.
+// https://developer.arm.com/documentation/ddi0596/2020-12/SIMD-FP-Instructions/LDR--literal--SIMD-FP-
+func encodeLoadFpuConstLiteral(c backend.Compiler, rd uint32, width byte, offsetToPool int64) {
+	var opc uint32 // bits[31:30]: 00=32-bit S, 01=64-bit D, 10=128-bit Q.
+	switch width {
+	case 32:
+		opc = 0b00
+	case 64:
+		opc = 0b01
+	default: // 128
+		opc = 0b10
+	}
+	imm19 := uint32(offsetToPool/4) & 0x7ffff // pool is always ahead => positive, in range.
+	c.Emit4Bytes(opc<<30 | 0b111<<26 | imm19<<5 | rd)
+}
+
 func encodeLoadFpuConst32(c backend.Compiler, rd uint32, rawF32 uint64) {
 	c.Emit4Bytes(
 		// https://developer.arm.com/documentation/ddi0596/2020-12/SIMD-FP-Instructions/LDR--literal--SIMD-FP---Load-SIMD-FP-Register--PC-relative-literal--?lang=en

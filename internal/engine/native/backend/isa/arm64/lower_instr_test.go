@@ -1,6 +1,7 @@
 package arm64
 
 import (
+	"context"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -741,10 +742,13 @@ func TestMachine_lowerShuffle(t *testing.T) {
 			expectedAsm: `
 mov v29.16b, x2.16b
 mov v30.16b, x15.16b
-ldr q1?, #8; b 32; data.v128  0706050403020100 0f0e0d0c0b0a0908
+ldr q1?, L0 ;; pooled const 0706050403020100 0f0e0d0c0b0a0908
 tbl x1.16b, { v29.16b, v30.16b }, v1?.16b
 `,
-			expectedBytes: "5d1ca24efe1daf4e4000009c05000014000102030405060708090a0b0c0d0e0fa123004e",
+			// The high-entropy shuffle mask is loaded from the literal pool via a
+			// single ldr-literal (no branch-over-literal); the 16 mask bytes sit
+			// in the pool appended after the body (C8 part 2b).
+			expectedBytes: "5d1ca24efe1daf4e4000009ca123004e000102030405060708090a0b0c0d0e0f",
 		},
 		{
 			name:  "lanes 0101...",
@@ -773,7 +777,19 @@ tbl x1.16b, { v29.16b, v30.16b }, v1?.16b
 			require.Equal(t, tc.expectedAsm, "\n"+formatEmittedInstructionsInCurrentBlock(m)+"\n")
 
 			m.FlushPendingInstructions()
-			m.encode(m.perBlockHead)
+			// Drive the real finalization pipeline: a pooled mask load needs its
+			// ldr-literal offset resolved against the pool emitted after the body
+			// (emitFpConstPool + resolveRelativeAddresses inside Encode). The
+			// block takes a fresh label so it can't collide with pool-slot labels
+			// (which start at 0 in this mock).
+			m.rootInstr = m.perBlockHead
+			blkLabel := m.nextLabel
+			m.nextLabel++
+			pos := m.labelPositionPool.GetOrAllocate(int(blkLabel))
+			pos.begin, pos.end = m.perBlockHead, m.perBlockEnd
+			m.orderedSSABlockLabelPos = append(m.orderedSSABlockLabelPos[:0], pos)
+			m.emitFpConstPool()
+			require.NoError(t, m.Encode(context.Background()))
 			buf := m.compiler.Buf()
 			require.Equal(t, tc.expectedBytes, hex.EncodeToString(buf))
 		})

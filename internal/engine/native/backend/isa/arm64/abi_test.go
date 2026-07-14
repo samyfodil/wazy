@@ -43,8 +43,11 @@ func TestAbiImpl_callerGenVRegToFunctionArg_constant_inlining(t *testing.T) {
 	abi.Init(&ssa.Signature{Params: []ssa.Type{ssa.TypeI64, ssa.TypeF64}}, intParamResultRegs, floatParamResultRegs)
 	m.callerGenVRegToFunctionArg(abi, 0, regalloc.VReg(100).SetRegType(regalloc.RegTypeInt), backend.SSAValueDefinition{Instr: i64, RefCount: 1}, 0)
 	m.callerGenVRegToFunctionArg(abi, 1, regalloc.VReg(50).SetRegType(regalloc.RegTypeFloat), backend.SSAValueDefinition{Instr: f64, RefCount: 1}, 0)
+	// 3.14 is a high-entropy F64 loaded on the post-regalloc arg path (no scratch
+	// VReg), so it goes to the shared literal pool via a single ldr-literal
+	// instead of the inline ldr+branch-over-literal (C8 part 2b).
 	require.Equal(t, `movz x100?, #0xa, lsl 0
 mov x0, x100?
-ldr d50?, #8; b 16; data.f64 3.140000
+ldr d50?, L0 ;; pooled const 40091eb851eb851f 0000000000000000
 mov v0.8b, v50?.8b`, formatEmittedInstructionsInCurrentBlock(m))
 }
