@@ -8,12 +8,19 @@ import (
 	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
-// c27TrapWasm exercises C27 (dedup of per-site trap-island exec-context saves)
-// end-to-end. sum4 does four dynamic loads in one straight-line block, so the
-// four bounds-check sites share a machine block: C27 keeps the first ctx-save and
-// removes the other three. The correctness risk is that a trap at one of the
-// *removed* sites must still recover the exec-context (from the surviving save's
-// slot) and report memory_out_of_bounds — not a stale/garbage trap or a crash.
+// c27TrapWasm exercises shared trap-island exec-context recovery end-to-end.
+// sum4 does four dynamic loads in one straight-line block, so four bounds-check
+// sites share a machine block. On amd64 the exec-context the island needs is
+// written ONCE to the reserved ctx slot in the prologue (see needsCtxSlot /
+// setupPrologue), not re-saved at each site. The correctness risk is that a trap
+// at any of these sites — here the second load — must recover the exec-context
+// from the reserved slot and report memory_out_of_bounds, not a stale/garbage
+// trap or a crash.
+//
+// History: this originally guarded the C27 per-site-save dedup pass; that pass
+// (and its per-site saves) was replaced by the reserved-slot scheme, so the
+// dedup miscompile class it protected against no longer exists by construction.
+// The test is kept as a regression guard for the reserved-slot recovery path.
 //
 //	(module (memory 1)
 //	  (func (export "sum4") (param $p i32) (result i32)
@@ -28,7 +35,7 @@ var c27TrapWasm = []byte{
 	0x0b,
 }
 
-func TestC27TrapAfterDedupE2E(t *testing.T) {
+func TestSharedTrapIslandCtxRecoveryE2E(t *testing.T) {
 	ctx := context.Background()
 	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler())
 	defer r.Close(ctx)
@@ -49,9 +56,9 @@ func TestC27TrapAfterDedupE2E(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(24), res[0])
 
-	// p=0xFFFC: first load (0xFFFC, the KEPT save) is in-bounds; the second load
-	// (0x10000) is out of bounds and its ctx-save was DEDUP'd. The trap must still
-	// fire correctly via the shared island reading the surviving save's slot.
+	// p=0xFFFC: first load (0xFFFC) is in-bounds; the second load (0x10000) is
+	// out of bounds. The trap must fire correctly via the shared island reading
+	// execCtx from the reserved prologue slot.
 	_, err = sum4.Call(ctx, 0xFFFC)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "out of bounds memory access")

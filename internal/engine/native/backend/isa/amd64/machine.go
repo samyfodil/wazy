@@ -101,11 +101,6 @@ type (
 		// sequences, one per exit code, emitted once after register
 		// allocation (see lowerExitIfTrueWithCodeShared and emitTrapIslands).
 		trapIslands []trapIsland
-		// trapCtxSaves records, in program order, every per-site exec-context save
-		// emitted by lowerExitIfTrueWithCodeShared. dedupTrapCtxSaves uses this to
-		// identify saves *exactly* -- pattern-matching `movRM -> [rsp-16]` is unsafe
-		// because the go-call/tail-call argument marshalling reuses that same slot.
-		trapCtxSaves []*instruction
 
 		consts []_const
 
@@ -206,13 +201,6 @@ type trapIsland struct {
 	l    label
 }
 
-// trapIslandCtxOffsetFromRSP is where a conditional-trap site stores the
-// execution context pointer for the island to reload: the word just below
-// the stack pointer (disp32 -16), which holds no live data and cannot be
-// overwritten between the site and the island (no call or push intervenes,
-// and signal handlers run on their own stack).
-const trapIslandCtxOffsetFromRSP uint32 = 0xffff_fff0
-
 // getOrCreateTrapIsland returns the label of this function's shared trap
 // island for the given exit code, allocating it on first use. The island
 // itself is materialized by emitTrapIslands after register allocation.
@@ -231,7 +219,6 @@ func (m *machine) getOrCreateTrapIsland(code nativeapi.ExitCode) label {
 func (m *machine) Reset() {
 	m.consts = m.consts[:0]
 	m.trapIslands = m.trapIslands[:0]
-	m.trapCtxSaves = m.trapCtxSaves[:0]
 	m.clobberedRegs = m.clobberedRegs[:0]
 	for key := range m.spillSlots {
 		m.clobberedRegs = append(m.clobberedRegs, regalloc.VReg(key))
@@ -358,13 +345,23 @@ func (m *machine) EhCtxSlotOffsets() (execCtxOffset, moduleCtxOffset int64) {
 	return 0, 8
 }
 
+// needsCtxSlot reports whether this function reserves the fixed exec-context
+// slot at the bottom of the spill region. Two readers need it: the P3.0 EH
+// path (both execCtx and moduleCtx) and the shared conditional-trap islands
+// (execCtx only -- reloaded there instead of being re-saved at every trap
+// site; see lowerExitIfTrueWithCodeShared / emitTrapIslands). Trap islands are
+// created during lowering, so len(trapIslands) is final by RegAlloc time.
+func (m *machine) needsCtxSlot() bool {
+	return m.hasEHContext || len(m.trapIslands) > 0
+}
+
 // RegAlloc implements backend.Machine.
 func (m *machine) RegAlloc() {
 	// Reserve the fixed execCtx/moduleCtx slots at the bottom of the
 	// spill-slot region before the allocator hands out any of its own slots,
 	// so the reserved offsets ([RSP+0]/[RSP+8]) are stable regardless of how
 	// many spill slots this function ends up needing.
-	if m.hasEHContext {
+	if m.needsCtxSlot() {
 		m.spillSlotSize = ehCtxReservedSlotSize
 	}
 	rf := m.regAllocFn
@@ -1108,7 +1105,7 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 			// specific site.
 			m.lowerExitIfTrueWithCode(m.c.VRegOf(execCtx), c, code)
 		} else {
-			m.lowerExitIfTrueWithCodeShared(m.c.VRegOf(execCtx), c, code)
+			m.lowerExitIfTrueWithCodeShared(c, code)
 		}
 	case ssa.OpcodeLoad:
 		ptr, offset, typ := instr.LoadData()
@@ -1690,7 +1687,7 @@ func (m *machine) lowerExitIfTrueWithCode(execCtx regalloc.VReg, cond ssa.Value,
 // code, instead of inlining the whole exit sequence at each site. The hot
 // path falls through (the branch is taken only when trapping), and the
 // island is materialized once, after register allocation, by emitTrapIslands.
-func (m *machine) lowerExitIfTrueWithCodeShared(execCtx regalloc.VReg, cond ssa.Value, code nativeapi.ExitCode) {
+func (m *machine) lowerExitIfTrueWithCodeShared(cond ssa.Value, code nativeapi.ExitCode) {
 	condDef := m.c.ValueDefinition(cond)
 	if !m.c.MatchInstr(condDef, ssa.OpcodeIcmp) {
 		panic("TODO: ExitIfTrue must come after Icmp at the moment: " + condDef.Instr.Opcode().String())
@@ -1698,17 +1695,11 @@ func (m *machine) lowerExitIfTrueWithCodeShared(execCtx regalloc.VReg, cond ssa.
 	cvalInstr := condDef.Instr
 	cvalInstr.MarkLowered()
 
-	// The island runs after register allocation and needs the execution
-	// context in a known location; unlike arm64 there is no reserved scratch
-	// register, so it is handed over through the word just below the stack
-	// pointer (see trapIslandCtxOffsetFromRSP).
-	store := m.allocateInstr().asMovRM(
-		execCtx,
-		newOperandMem(m.newAmodeImmReg(trapIslandCtxOffsetFromRSP, rspVReg)),
-		8,
-	)
-	m.insert(store)
-	m.trapCtxSaves = append(m.trapCtxSaves, store) // for dedupTrapCtxSaves (C27).
+	// No per-site exec-context save: the island reloads execCtx from the
+	// reserved ctx slot ([rsp + ctxSlotOffsets execCtx]), written once in the
+	// prologue for any function with trap islands (see needsCtxSlot,
+	// setupPrologue, emitTrapIslands). arm64 instead hands it over in the
+	// reserved x27 register.
 
 	x, y, c := cvalInstr.IcmpData()
 	xx, yy := m.c.ValueDefinition(x), m.c.ValueDefinition(y)
