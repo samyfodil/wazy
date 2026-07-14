@@ -101,6 +101,11 @@ type (
 		// sequences, one per exit code, emitted once after register
 		// allocation (see lowerExitIfTrueWithCodeShared and emitTrapIslands).
 		trapIslands []trapIsland
+		// trapCtxSaves records, in program order, every per-site exec-context save
+		// emitted by lowerExitIfTrueWithCodeShared. dedupTrapCtxSaves uses this to
+		// identify saves *exactly* -- pattern-matching `movRM -> [rsp-16]` is unsafe
+		// because the go-call/tail-call argument marshalling reuses that same slot.
+		trapCtxSaves []*instruction
 
 		consts []_const
 
@@ -226,6 +231,7 @@ func (m *machine) getOrCreateTrapIsland(code nativeapi.ExitCode) label {
 func (m *machine) Reset() {
 	m.consts = m.consts[:0]
 	m.trapIslands = m.trapIslands[:0]
+	m.trapCtxSaves = m.trapCtxSaves[:0]
 	m.clobberedRegs = m.clobberedRegs[:0]
 	for key := range m.spillSlots {
 		m.clobberedRegs = append(m.clobberedRegs, regalloc.VReg(key))
@@ -1702,6 +1708,7 @@ func (m *machine) lowerExitIfTrueWithCodeShared(execCtx regalloc.VReg, cond ssa.
 		8,
 	)
 	m.insert(store)
+	m.trapCtxSaves = append(m.trapCtxSaves, store) // for dedupTrapCtxSaves (C27).
 
 	x, y, c := cvalInstr.IcmpData()
 	xx, yy := m.c.ValueDefinition(x), m.c.ValueDefinition(y)

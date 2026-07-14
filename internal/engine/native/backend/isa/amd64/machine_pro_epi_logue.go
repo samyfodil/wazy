@@ -10,7 +10,95 @@ import (
 func (m *machine) PostRegAlloc() {
 	m.setupPrologue()
 	m.postRegAlloc()
+	m.dedupTrapCtxSaves()
 	m.emitTrapIslands()
+}
+
+// dedupTrapCtxSaves removes redundant per-site trap-island exec-context saves.
+//
+// C22 (shared trap islands) emits, at every conditional-trap site, a
+// `mov execCtx, [rsp+trapIslandCtxOffsetFromRSP]` (= [rsp-16]) so the shared island
+// can recover the execution context. Within a basic block the first such save keeps
+// [rsp-16] live until something overwrites it, so later saves are redundant -- pure
+// hot-path waste in bounds-check-dense loops (random_mat_mul re-emits ~12 per inner
+// iteration).
+//
+// The slot is NOT exclusive to trap saves: the go-call/tail-call argument marshalling
+// also writes real data below rsp, including to [rsp-16]. So (a) saves are identified
+// by an exact recorded set, never by pattern-matching `movRM -> [rsp-16]`, and (b)
+// `saved` is reset by clobbersTrapSlot on calls, tail calls, and any write below rsp
+// -- not just calls. (An earlier version assumed the slot was call-clobbered-only and
+// pattern-matched; it deleted a 32-bit arg store and miscompiled a tail-call-indirect
+// to an imported function -- see OPTIMIZATIONS.md C27.)
+//
+// Scope: per basic block (reset at each boundary, since a block may be reached by a
+// path that never ran the save; a cross-block single-predecessor extension could
+// remove more but is left out). arm64 needs none of this -- it hands the exec-context
+// to the island in the reserved x27 register and emits no per-site save.
+func (m *machine) dedupTrapCtxSaves() {
+	if len(m.trapCtxSaves) == 0 {
+		return
+	}
+	// Exact set of trap-context saves (recorded at emission). We cannot identify
+	// them by pattern (`movRM -> [rsp-16]`): the go-call/tail-call argument
+	// marshalling writes real data to that same slot with movRM, and deleting one
+	// of those corrupts an argument (miscompile fixed here).
+	saveSet := make(map[*instruction]bool, len(m.trapCtxSaves))
+	for _, s := range m.trapCtxSaves {
+		saveSet[s] = true
+	}
+
+	blocks := m.orderedSSABlockLabelPos
+	for bi, pos := range blocks {
+		// Bound the block by the next block's first instruction rather than
+		// pos.end: register allocation and epilogue insertion can append
+		// instructions past the recorded end (see emitTrapIslands), so pos.end
+		// is not a reliable block terminator here. pos.begin (the label) is.
+		var stop *instruction
+		if bi+1 < len(blocks) {
+			stop = blocks[bi+1].begin
+		}
+		saved := false // is the exec-context still live in the slot on all paths to here (this block)?
+		for cur := pos.begin; cur != nil && cur != stop; cur = cur.next {
+			switch {
+			case saveSet[cur]:
+				if saved {
+					// Redundant: unlink it. A save is always followed by its
+					// icmp+trap branch, so it is never a block boundary and
+					// pos.begin/end need no update.
+					cur.prev.next = cur.next
+					if cur.next != nil {
+						cur.next.prev = cur.prev
+					}
+				} else {
+					saved = true
+				}
+			case clobbersTrapSlot(cur):
+				saved = false
+			}
+		}
+	}
+}
+
+// clobbersTrapSlot reports whether i may overwrite the trap-context slot [rsp-16]
+// or move rsp, invalidating a previously-saved exec-context. This covers calls and
+// tail calls (which push a return address / marshal below rsp) and any instruction
+// that touches an rsp-relative memory operand at a negative offset -- the region the
+// go-call/tail-call argument marshalling reuses. Register spills use *positive* rsp
+// offsets and never trip this, so the common bounds-check-loop dedup is preserved.
+func clobbersTrapSlot(i *instruction) bool {
+	if i.IsCall() || i.IsIndirectCall() || i.kind == tailCall || i.kind == tailCallIndirect {
+		return true
+	}
+	return rspNegativeMemOperand(i.op1) || rspNegativeMemOperand(i.op2)
+}
+
+func rspNegativeMemOperand(o operand) bool {
+	if o.kind != operandKindMem {
+		return false
+	}
+	a := o.addressMode()
+	return a.base == rspVReg && int32(a.imm32) < 0
 }
 
 // emitTrapIslands materializes the shared trap islands allocated by
