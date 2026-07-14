@@ -52,6 +52,8 @@ func TestSerializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0),                         // func[0] frame size.
 				[]byte{interruptIntervalFormatVersion}, // interrupt-interval format version.
 				u64.LeBytes(0),                         // interrupt-check interval.
+				[]byte{entryPreambleFormatVersion},     // entry preamble format version.
+				u32.LeBytes(0),                         // no entry preambles.
 			),
 		},
 		{
@@ -80,6 +82,8 @@ func TestSerializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0),                         // func[0] frame size.
 				[]byte{interruptIntervalFormatVersion}, // interrupt-interval format version.
 				u64.LeBytes(0),                         // interrupt-check interval.
+				[]byte{entryPreambleFormatVersion},     // entry preamble format version.
+				u32.LeBytes(0),                         // no entry preambles.
 			),
 		},
 		{
@@ -114,6 +118,8 @@ func TestSerializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0),                         // func[1] frame size.
 				[]byte{interruptIntervalFormatVersion}, // interrupt-interval format version.
 				u64.LeBytes(0),                         // interrupt-check interval.
+				[]byte{entryPreambleFormatVersion},     // entry preamble format version.
+				u32.LeBytes(0),                         // no entry preambles.
 			),
 		},
 	}
@@ -201,6 +207,8 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0),                         // func[0] frame size.
 				[]byte{interruptIntervalFormatVersion}, // interrupt-interval format version.
 				u64.LeBytes(64),                        // interrupt-check interval.
+				[]byte{entryPreambleFormatVersion},     // entry preamble format version.
+				u32.LeBytes(0),                         // no entry preambles.
 			),
 			expCompiledModule: &compiledModule{
 				executables:            &executables{executable: []byte{1, 2, 3, 4, 5}},
@@ -239,6 +247,8 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0),                         // func[1] frame size.
 				[]byte{interruptIntervalFormatVersion}, // interrupt-interval format version.
 				u64.LeBytes(64),                        // interrupt-check interval.
+				[]byte{entryPreambleFormatVersion},     // entry preamble format version.
+				u32.LeBytes(0),                         // no entry preambles.
 			),
 			importedFunctionCount: 1,
 			expCompiledModule: &compiledModule{
@@ -426,6 +436,48 @@ func TestDeserializeCompiledModule(t *testing.T) {
 			require.Equal(t, tc.expStaleCache, staleCache)
 		})
 	}
+}
+
+// TestSerializeDeserializeEntryPreambles exercises the numPreambles>0 path:
+// a round-trip must preserve the preamble pointers and blob bytes, and a
+// corrupted blob must be rejected by the CRC32 checksum.
+func TestSerializeDeserializeEntryPreambles(t *testing.T) {
+	// Distinct from the executable bytes below so bytes.Index locates the blob
+	// unambiguously.
+	blob := make([]byte, 32)
+	for i := range blob {
+		blob[i] = byte(i + 100)
+	}
+	cm := &compiledModule{
+		executables:        &executables{executable: []byte{1, 2, 3, 4, 5}},
+		functionOffsets:    []int{0},
+		ehTables:           [][]nativeapi.EhEntry{nil},
+		functionFrameSizes: []int64{0},
+	}
+	cm.entryPreambles = mmapExecutable(blob)
+	cm.entryPreamblesPtrs = []*byte{&cm.entryPreambles[0], &cm.entryPreambles[16]}
+
+	serialized, err := io.ReadAll(serializeCompiledModule(testVersion, cm))
+	require.NoError(t, err)
+
+	// Positive: round-trip preserves the two preambles and the blob bytes.
+	got, stale, err := deserializeCompiledModule(testVersion, io.NopCloser(bytes.NewReader(serialized)))
+	require.NoError(t, err)
+	require.False(t, stale)
+	require.Equal(t, 2, len(got.entryPreamblesPtrs))
+	require.Equal(t, blob, got.entryPreambles)
+	// The second pointer must land exactly at offset 16 of the loaded blob.
+	require.True(t, got.entryPreamblesPtrs[1] == &got.entryPreambles[16])
+
+	// Negative: corrupting a single blob byte must fail the checksum.
+	idx := bytes.Index(serialized, blob)
+	require.True(t, idx >= 0)
+	corrupt := make([]byte, len(serialized))
+	copy(corrupt, serialized)
+	corrupt[idx] ^= 0xFF
+	_, _, err = deserializeCompiledModule(testVersion, io.NopCloser(bytes.NewReader(corrupt)))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "entry preamble checksum mismatch")
 }
 
 func Test_fileCacheKey(t *testing.T) {
