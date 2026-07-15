@@ -126,3 +126,39 @@ func TestRealHello_PrintsHelloWorld(t *testing.T) {
 		t.Fatalf("run() returned Err, want Ok (stderr: %q)", stderr.String())
 	}
 }
+
+// TestRealHello_ReinstantiateAfterCloseOnSameRuntime is the regression proof
+// for a real leak found while profiling the call path: instantiateGraph's
+// inline-export core instances build a private host module (via
+// buildCanonHostModule) per canon-produced core func (a WASI trap stub or
+// resource canon) and register it on the Runtime under a unique
+// "wazy:component/privN" name, but that module was never appended to
+// Instance.closers -- only the passthrough shim that imports from it was
+// (see BenchmarkInstantiateHello's doc, which worked around this same bug by
+// paying for a fresh Runtime every iteration). So Instance.Close never freed
+// those private names, and a second Instantiate of the same component on the
+// same Runtime reliably failed with "already instantiated" the moment it
+// tried to reuse "wazy:component/priv1". Fixed by threading the private
+// module through to instantiateGraph's closers slice; this proves a full
+// Instantiate+Close+Instantiate+Close cycle on one Runtime now succeeds.
+func TestRealHello_ReinstantiateAfterCloseOnSameRuntime(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	inst1, err := Instantiate(ctx, r, realHelloWasm)
+	if err != nil {
+		t.Fatalf("first Instantiate: %v", err)
+	}
+	if err := inst1.Close(ctx); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+
+	inst2, err := Instantiate(ctx, r, realHelloWasm)
+	if err != nil {
+		t.Fatalf("second Instantiate on the same Runtime: %v", err)
+	}
+	if err := inst2.Close(ctx); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}

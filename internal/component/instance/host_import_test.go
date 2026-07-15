@@ -282,21 +282,21 @@ func noopComponentFunc(uint32) (bool, int, aliasTarget, error) {
 func TestBindInstanceExport_InstanceIndexOutOfRange(t *testing.T) {
 	comp := &binary.Component{}
 	exp := binary.Export{Name: "inst", ExternType: 0x05, ExternIndex: 0}
-	err := bindInstanceExport(comp, exp, noopComponentFunc, nil, nil, 0, map[string]*boundExport{})
+	err := bindInstanceExport(comp, exp, noopComponentFunc, nil, nil, 0, nil, map[string]*boundExport{})
 	requireErrContains(t, err, "out of range of 0 instance(s)")
 }
 
 func TestBindInstanceExport_InlineKindUnsupported(t *testing.T) {
 	comp := &binary.Component{Instances: []binary.Instance{{Kind: 0x01}}}
 	exp := binary.Export{Name: "inst", ExternType: 0x05, ExternIndex: 0}
-	err := bindInstanceExport(comp, exp, noopComponentFunc, nil, nil, 0, map[string]*boundExport{})
+	err := bindInstanceExport(comp, exp, noopComponentFunc, nil, nil, 0, nil, map[string]*boundExport{})
 	requireErrContains(t, err, "not a component instantiation")
 }
 
 func TestBindInstanceExport_NestedComponentOutOfRange(t *testing.T) {
 	comp := &binary.Component{Instances: []binary.Instance{{Kind: 0x00, ComponentIdx: 0}}}
 	exp := binary.Export{Name: "inst", ExternType: 0x05, ExternIndex: 0}
-	err := bindInstanceExport(comp, exp, noopComponentFunc, nil, nil, 0, map[string]*boundExport{})
+	err := bindInstanceExport(comp, exp, noopComponentFunc, nil, nil, 0, nil, map[string]*boundExport{})
 	requireErrContains(t, err, "decoded nested component")
 }
 
@@ -306,7 +306,7 @@ func TestBindInstanceExport_NotPureShim(t *testing.T) {
 		NestedComponents: []*binary.Component{{CoreModules: []binary.CoreModule{{}}}},
 	}
 	exp := binary.Export{Name: "inst", ExternType: 0x05, ExternIndex: 0}
-	err := bindInstanceExport(comp, exp, noopComponentFunc, nil, nil, 0, map[string]*boundExport{})
+	err := bindInstanceExport(comp, exp, noopComponentFunc, nil, nil, 0, nil, map[string]*boundExport{})
 	requireErrContains(t, err, "out of scope for this milestone")
 }
 
@@ -318,7 +318,7 @@ func TestBindInstanceExport_MemberNotFunc(t *testing.T) {
 		}},
 	}
 	exp := binary.Export{Name: "inst", ExternType: 0x05, ExternIndex: 0}
-	err := bindInstanceExport(comp, exp, noopComponentFunc, nil, nil, 0, map[string]*boundExport{})
+	err := bindInstanceExport(comp, exp, noopComponentFunc, nil, nil, 0, nil, map[string]*boundExport{})
 	requireErrContains(t, err, "only func members are supported")
 }
 
@@ -330,7 +330,7 @@ func TestBindInstanceExport_MemberFuncIdxOutOfRange(t *testing.T) {
 		}},
 	}
 	exp := binary.Export{Name: "inst", ExternType: 0x05, ExternIndex: 0}
-	err := bindInstanceExport(comp, exp, noopComponentFunc, nil, nil, 0, map[string]*boundExport{})
+	err := bindInstanceExport(comp, exp, noopComponentFunc, nil, nil, 0, nil, map[string]*boundExport{})
 	requireErrContains(t, err, "out of range of the shim's")
 }
 
@@ -343,7 +343,7 @@ func TestBindInstanceExport_ShimImportNoMatchingArg(t *testing.T) {
 		}},
 	}
 	exp := binary.Export{Name: "inst", ExternType: 0x05, ExternIndex: 0}
-	err := bindInstanceExport(comp, exp, noopComponentFunc, nil, nil, 0, map[string]*boundExport{})
+	err := bindInstanceExport(comp, exp, noopComponentFunc, nil, nil, 0, nil, map[string]*boundExport{})
 	requireErrContains(t, err, "no matching instantiate-arg")
 }
 
@@ -358,7 +358,7 @@ func TestBindInstanceExport_ArgNonFuncSort(t *testing.T) {
 		}},
 	}
 	exp := binary.Export{Name: "inst", ExternType: 0x05, ExternIndex: 0}
-	err := bindInstanceExport(comp, exp, noopComponentFunc, nil, nil, 0, map[string]*boundExport{})
+	err := bindInstanceExport(comp, exp, noopComponentFunc, nil, nil, 0, nil, map[string]*boundExport{})
 	requireErrContains(t, err, "non-func sort")
 }
 

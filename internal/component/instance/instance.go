@@ -123,6 +123,103 @@ type boundExport struct {
 	// finished reading them, so the guest can free/reuse any memory the call
 	// allocated (e.g. a returned string's backing bytes).
 	postReturnFuncName string
+
+	// coreFn/postReturnFn/reallocFn are api.Function handles resolved ONCE,
+	// at bind time (see finalizeBoundExport), instead of via a fresh
+	// mod.ExportedFunction lookup on every invoke() call. This matters
+	// because the native engine allocates a whole callEngine (~10KB) per
+	// ExportedFunction(name).Call -- see
+	// internal/engine/native/call_engine.go's NewFunction doc, "resolve
+	// once, reuse" -- and invoke() used to call ExportedFunction 2-3 times
+	// per Call (core func, cabi_realloc, post-return).
+	//
+	// coreFn/postReturnFn may be nil (mod doesn't export the name); invoke()
+	// keeps the exact same nil-check/error message it always surfaced from a
+	// failed lookup, just against the cached field instead of a fresh one.
+	// reallocFn is nil when mod exports no "cabi_realloc" -- reallocOf's
+	// lazy nil-check semantics (fail only when actually needed) are
+	// preserved by cachedReallocOf.
+	coreFn       api.Function
+	postReturnFn api.Function
+	reallocFn    api.Function
+
+	// The fields below cache fd's ABI flattening / type resolution, computed
+	// once at bind time (finalizeBoundExport) instead of on every invoke()
+	// call -- fd is immutable once bound, so LowerFlat/LiftFlat.
+	// resolveTypeRef/abi.Flatten/abi.FlattenFunc always recompute the exact
+	// same values for the life of the boundExport. A resolution/flatten
+	// error is cached rather than failing bind, so it still surfaces from
+	// the same call-time code path (with the same message) as before this
+	// caching existed -- see finalizeBoundExport's doc.
+	coreParamsWant, coreResultsWant []string
+	flattenErr                      error
+
+	paramTypes      []binary.TypeDesc
+	paramUsesMemory []bool
+	paramErrs       []error
+
+	hasResult        bool
+	tooManyResults   int // > 0: fd declares this many (>1) named results
+	resultType       binary.TypeDesc
+	resultUsesMemory bool
+	resultFlatKinds  []string
+	resultErr        error
+}
+
+// finalizeBoundExport resolves be's core func handles and precomputes its ABI
+// flattening/type-resolution metadata, both exactly once. Called by every
+// site that constructs a boundExport (instantiateComponent, bindFuncExport,
+// bindFuncExportGraph), after be.mod/funcName/fd/postReturnFuncName are set.
+//
+// Deliberately never fails: a lookup or resolution that would have errored
+// happens exactly as before this existed, just later -- invoke()/lowerParams/
+// liftResult check the cached field (a nil api.Function, or a non-nil cached
+// error) at call time and produce the identical error message a fresh
+// lookup/resolve would have. This keeps bind-time behavior (and every
+// existing error-surfaces-from-Call test) unchanged while still doing the
+// resolution/computation only once rather than on every invoke() call.
+func finalizeBoundExport(be *boundExport, resolve abi.Resolver) {
+	be.coreFn = be.mod.ExportedFunction(be.funcName)
+	if be.postReturnFuncName != "" {
+		be.postReturnFn = be.mod.ExportedFunction(be.postReturnFuncName)
+	}
+	be.reallocFn = be.mod.ExportedFunction("cabi_realloc")
+
+	be.coreParamsWant, be.coreResultsWant, be.flattenErr = abi.FlattenFunc(be.fd, resolve, "lift")
+
+	be.paramTypes = make([]binary.TypeDesc, len(be.fd.Params))
+	be.paramUsesMemory = make([]bool, len(be.fd.Params))
+	be.paramErrs = make([]error, len(be.fd.Params))
+	for i, p := range be.fd.Params {
+		pt, err := resolveTypeRef(&p.Type, resolve)
+		if err != nil {
+			be.paramErrs[i] = err
+			continue
+		}
+		be.paramTypes[i] = pt
+		be.paramUsesMemory[i] = usesMemory(pt, resolve)
+	}
+
+	resultRefs := funcResultTypeRefs(be.fd)
+	switch {
+	case len(resultRefs) > 1:
+		be.tooManyResults = len(resultRefs)
+	case len(resultRefs) == 1:
+		be.hasResult = true
+		rt, err := resolveTypeRef(&resultRefs[0], resolve)
+		if err != nil {
+			be.resultErr = err
+			return
+		}
+		be.resultType = rt
+		be.resultUsesMemory = usesMemory(rt, resolve)
+		flatKinds, err := abi.Flatten(rt, resolve)
+		if err != nil {
+			be.resultErr = err
+			return
+		}
+		be.resultFlatKinds = flatKinds
+	}
 }
 
 // Instantiate decodes componentBytes as a WebAssembly component, instantiates
@@ -305,11 +402,13 @@ func instantiateComponent(ctx context.Context, r wazy.Runtime, comp *binary.Comp
 			core.Close(ctx) //nolint:errcheck
 			return nil, fmt.Errorf("component/instance: export %q: resolve canon type %d: %w", name, canon.TypeIdx, err)
 		}
-		exports[name] = &boundExport{
+		be := &boundExport{
 			mod:      core,
 			funcName: coreFuncIdx[canon.CoreFuncIdx],
 			fd:       td.(binary.FuncDesc), // validated by validateCanons
 		}
+		finalizeBoundExport(be, resolve)
+		exports[name] = be
 	}
 
 	return &Instance{resolve: resolve, exports: exports, closers: []api.Module{core}, resources: newHandleTable()}, nil
@@ -448,29 +547,25 @@ func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName stri
 		return nil, fmt.Errorf("component/instance: export %q takes %d parameter(s), got %d", exportName, len(fd.Params), len(args))
 	}
 
-	coreFn := be.mod.ExportedFunction(be.funcName)
-	if coreFn == nil {
+	// be.coreFn/flattenErr etc. were resolved/computed once at bind time
+	// (finalizeBoundExport) rather than here on every call -- see
+	// boundExport's doc.
+	if be.coreFn == nil {
 		return nil, fmt.Errorf("component/instance: core module has no exported function %q (referenced by canon lift for export %q)", be.funcName, exportName)
 	}
-
-	// FlattenFunc gives the real core function signature (lift context: this
-	// is the actual wrapper the core module exports). We cross-check our own
-	// per-value flattening against it below to catch whole parameter-list /
-	// result spilling, which this milestone does not implement.
-	coreParamsWant, coreResultsWant, err := abi.FlattenFunc(fd, in.resolve, "lift")
-	if err != nil {
-		return nil, fmt.Errorf("component/instance: export %q: flatten func type: %w", exportName, err)
+	if be.flattenErr != nil {
+		return nil, fmt.Errorf("component/instance: export %q: flatten func type: %w", exportName, be.flattenErr)
 	}
 
 	mem, memAvailable := memoryBytesOf(be.mod)
-	realloc := reallocOf(ctx, be.mod)
+	realloc := cachedReallocOf(ctx, be)
 
-	coreArgs, err := in.lowerParams(fd, args, mem, memAvailable, realloc, exportName)
+	coreArgs, err := in.lowerParams(be, args, mem, memAvailable, realloc, exportName)
 	if err != nil {
 		return nil, err
 	}
-	if len(coreArgs) != len(coreParamsWant) {
-		return nil, fmt.Errorf("component/instance: export %q: parameter list flattens to %d core value(s) but the core signature expects %d; whole-parameter-list spilling to memory is not supported by this milestone", exportName, len(coreArgs), len(coreParamsWant))
+	if len(coreArgs) != len(be.coreParamsWant) {
+		return nil, fmt.Errorf("component/instance: export %q: parameter list flattens to %d core value(s) but the core signature expects %d; whole-parameter-list spilling to memory is not supported by this milestone", exportName, len(coreArgs), len(be.coreParamsWant))
 	}
 
 	stack := make([]uint64, len(coreArgs))
@@ -478,12 +573,12 @@ func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName stri
 		stack[i] = cv.Bits
 	}
 
-	rawResults, err := coreFn.Call(ctx, stack...)
+	rawResults, err := be.coreFn.Call(ctx, stack...)
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: export %q: call core func %q: %w", exportName, be.funcName, err)
 	}
 
-	results, err := in.liftResult(fd, rawResults, coreResultsWant, mem, memAvailable, exportName)
+	results, err := in.liftResult(be, rawResults, mem, memAvailable, exportName)
 	if err != nil {
 		return nil, err
 	}
@@ -493,13 +588,12 @@ func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName stri
 	// memory. Per definitions.py's canon_lift, it is called with the same
 	// flat core values the lift produced.
 	if be.postReturnFuncName != "" {
-		prFn := be.mod.ExportedFunction(be.postReturnFuncName)
-		if prFn == nil {
+		if be.postReturnFn == nil {
 			return nil, fmt.Errorf("component/instance: export %q: post-return core func %q not found", exportName, be.postReturnFuncName)
 		}
 		prArgs := make([]uint64, len(rawResults))
 		copy(prArgs, rawResults)
-		if _, err := prFn.Call(ctx, prArgs...); err != nil {
+		if _, err := be.postReturnFn.Call(ctx, prArgs...); err != nil {
 			return nil, fmt.Errorf("component/instance: export %q: post-return %q: %w", exportName, be.postReturnFuncName, err)
 		}
 	}
@@ -508,15 +602,16 @@ func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName stri
 }
 
 // lowerParams lowers each component-level argument into its flattened core
-// values, in parameter order.
-func (in *Instance) lowerParams(fd binary.FuncDesc, args []abi.Value, mem []byte, memAvailable bool, realloc abi.Realloc, exportName string) ([]abi.CoreValue, error) {
+// values, in parameter order, using be's precomputed per-param type/
+// usesMemory/error (see finalizeBoundExport) instead of recomputing them.
+func (in *Instance) lowerParams(be *boundExport, args []abi.Value, mem []byte, memAvailable bool, realloc abi.Realloc, exportName string) ([]abi.CoreValue, error) {
 	var coreArgs []abi.CoreValue
-	for i, p := range fd.Params {
-		pt, err := resolveTypeRef(&p.Type, in.resolve)
-		if err != nil {
+	for i, p := range be.fd.Params {
+		if err := be.paramErrs[i]; err != nil {
 			return nil, fmt.Errorf("component/instance: export %q param %d (%s): %w", exportName, i, p.Name, err)
 		}
-		if usesMemory(pt, in.resolve) && !memAvailable {
+		pt := be.paramTypes[i]
+		if be.paramUsesMemory[i] && !memAvailable {
 			return nil, fmt.Errorf("component/instance: export %q param %d (%s) requires linear memory (string/list), but the core module exports no memory", exportName, i, p.Name)
 		}
 		flat, err := abi.LowerFlat(args[i], pt, in.resolve, realloc, mem)
@@ -529,32 +624,30 @@ func (in *Instance) lowerParams(fd binary.FuncDesc, args []abi.Value, mem []byte
 }
 
 // liftResult lifts the raw core call results back into a single abi.Value per
-// fd's declared result type. Multi-result functions and results that require
-// memory when none is available both fail loudly.
-func (in *Instance) liftResult(fd binary.FuncDesc, rawResults []uint64, coreResultsWant []string, mem []byte, memAvailable bool, exportName string) ([]abi.Value, error) {
-	resultRefs := funcResultTypeRefs(fd)
-	if len(resultRefs) > 1 {
-		return nil, fmt.Errorf("component/instance: export %q has %d named results; multiple component-level results are not supported by this milestone", exportName, len(resultRefs))
+// be's declared result type, using be's precomputed result type/usesMemory/
+// flatKinds/error (see finalizeBoundExport) instead of recomputing them.
+// Multi-result functions and results that require memory when none is
+// available both fail loudly.
+func (in *Instance) liftResult(be *boundExport, rawResults []uint64, mem []byte, memAvailable bool, exportName string) ([]abi.Value, error) {
+	if be.tooManyResults > 0 {
+		return nil, fmt.Errorf("component/instance: export %q has %d named results; multiple component-level results are not supported by this milestone", exportName, be.tooManyResults)
 	}
-	if len(resultRefs) == 0 {
+	if !be.hasResult {
 		if len(rawResults) != 0 {
 			return nil, fmt.Errorf("component/instance: export %q: core func returned %d value(s) for a 0-result signature", exportName, len(rawResults))
 		}
 		return nil, nil
 	}
-
-	rt, err := resolveTypeRef(&resultRefs[0], in.resolve)
-	if err != nil {
-		return nil, fmt.Errorf("component/instance: export %q result: %w", exportName, err)
+	if be.resultErr != nil {
+		return nil, fmt.Errorf("component/instance: export %q result: %w", exportName, be.resultErr)
 	}
-	if usesMemory(rt, in.resolve) && !memAvailable {
+
+	rt := be.resultType
+	if be.resultUsesMemory && !memAvailable {
 		return nil, fmt.Errorf("component/instance: export %q result requires linear memory (string/list), but the core module exports no memory", exportName)
 	}
 
-	flatKinds, err := abi.Flatten(rt, in.resolve)
-	if err != nil {
-		return nil, fmt.Errorf("component/instance: export %q result: %w", exportName, err)
-	}
+	flatKinds := be.resultFlatKinds
 
 	// Per the Canonical ABI (definitions.py's flatten_functype), when a
 	// lift's result flattens to more than MAX_FLAT_RESULTS (1) core values
@@ -567,7 +660,7 @@ func (in *Instance) liftResult(fd binary.FuncDesc, rawResults []uint64, coreResu
 	// it's being used in a result context here; MaxFlatResults (1) is the
 	// correct threshold for a function result, so that case is handled
 	// directly rather than by calling LiftFlat.
-	if len(coreResultsWant) == abi.MaxFlatResults && len(flatKinds) > abi.MaxFlatResults {
+	if len(be.coreResultsWant) == abi.MaxFlatResults && len(flatKinds) > abi.MaxFlatResults {
 		// The spill mechanism itself needs linear memory as scratch space
 		// for the pointer indirection, regardless of whether rt's own type
 		// otherwise needs memory (e.g. a plain record of two u64s doesn't,
@@ -584,8 +677,8 @@ func (in *Instance) liftResult(fd binary.FuncDesc, rawResults []uint64, coreResu
 		}
 		return []abi.Value{val}, nil
 	}
-	if len(flatKinds) != len(coreResultsWant) {
-		return nil, fmt.Errorf("component/instance: export %q result flattens to %d core value(s), exceeding the flat-result limit (core signature returns %d value(s), a spilled memory pointer); spilled results are not supported by this milestone", exportName, len(flatKinds), len(coreResultsWant))
+	if len(flatKinds) != len(be.coreResultsWant) {
+		return nil, fmt.Errorf("component/instance: export %q result flattens to %d core value(s), exceeding the flat-result limit (core signature returns %d value(s), a spilled memory pointer); spilled results are not supported by this milestone", exportName, len(flatKinds), len(be.coreResultsWant))
 	}
 	if len(rawResults) != len(flatKinds) {
 		return nil, fmt.Errorf("component/instance: export %q: core func returned %d value(s), expected %d", exportName, len(rawResults), len(flatKinds))
@@ -651,6 +744,21 @@ func reallocOf(ctx context.Context, mod api.Module) abi.Realloc {
 		}
 	}
 	return reallocOfFunc(ctx, fn)
+}
+
+// cachedReallocOf is reallocOf's boundExport-caching counterpart: it builds
+// the abi.Realloc from be.reallocFn -- resolved once at bind time by
+// finalizeBoundExport -- instead of a fresh mod.ExportedFunction("cabi_realloc")
+// lookup on every invoke() call. Preserves reallocOf's exact lazy-failure
+// message/semantics when the module exports no cabi_realloc (be.reallocFn ==
+// nil): the error only surfaces if the returned Realloc is actually invoked.
+func cachedReallocOf(ctx context.Context, be *boundExport) abi.Realloc {
+	if be.reallocFn == nil {
+		return func(uint32, uint32, uint32, uint32) (uint32, error) {
+			return 0, fmt.Errorf("component/instance: memory allocation requires a %q export on the core module, which is not present", "cabi_realloc")
+		}
+	}
+	return reallocOfFunc(ctx, be.reallocFn)
 }
 
 // reallocOfFunc returns the abi.Realloc that calls fn -- an already-resolved

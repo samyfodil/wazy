@@ -178,10 +178,12 @@ func TestRealAdder_GreetPostReturnWired(t *testing.T) {
 
 // TestRealAdder_GreetPostReturnActuallyCalled proves invoke() really
 // executes the post-return call during a live Call (not dead/skipped code):
-// with postReturnFuncName corrupted to a name the guest doesn't export, the
-// call must fail with the "post-return core func ... not found" error --
-// which only fires from inside the post-return branch of invoke(), after a
-// successful lift.
+// with the cached post-return handle corrupted to nil (simulating a name the
+// guest doesn't export -- postReturnFn is resolved once at bind time by
+// finalizeBoundExport, see boundExport's doc, so invoke() itself no longer
+// does a fresh lookup to corrupt), the call must fail with the "post-return
+// core func ... not found" error -- which only fires from inside the
+// post-return branch of invoke(), after a successful lift.
 func TestRealAdder_GreetPostReturnActuallyCalled(t *testing.T) {
 	ctx := context.Background()
 	r := wazy.NewRuntime(ctx)
@@ -198,6 +200,7 @@ func TestRealAdder_GreetPostReturnActuallyCalled(t *testing.T) {
 		t.Fatal("no bound export for component:adder/calc#greet")
 	}
 	be.postReturnFuncName = "does-not-exist"
+	be.postReturnFn = nil
 
 	_, err = inst.CallExport(ctx, "component:adder/calc", "greet", "wazy")
 	requireErrContains(t, err, "post-return core func \"does-not-exist\" not found")

@@ -391,7 +391,7 @@ func instantiateWithImports(ctx context.Context, r wazy.Runtime, comp *binary.Co
 		}
 	}
 
-	exports, err := bindImportExports(comp, componentFunc, coreFuncAliases, instMods, numProducedCoreFuncs)
+	exports, err := bindImportExports(comp, componentFunc, coreFuncAliases, instMods, numProducedCoreFuncs, resolve)
 	if err != nil {
 		return fail(err)
 	}
@@ -548,19 +548,19 @@ func importInterfaceName(comp *binary.Component, instIdx uint32) (string, error)
 // binds directly; an instance export (the WIT-exports-an-interface shape --
 // see the package doc) resolves through its re-export shim and binds each of
 // the shim's members, keyed by instanceExportKey(exportName, memberName).
-func bindImportExports(comp *binary.Component, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncAliases []aliasTarget, instMods map[int]api.Module, numProducedCoreFuncs int) (map[string]*boundExport, error) {
+func bindImportExports(comp *binary.Component, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncAliases []aliasTarget, instMods map[int]api.Module, numProducedCoreFuncs int, resolve abi.Resolver) (map[string]*boundExport, error) {
 	exports := make(map[string]*boundExport, len(comp.Exports))
 	for _, exp := range comp.Exports {
 		switch exp.ExternType {
 		case 0x01: // func
-			be, err := bindFuncExport(comp, exp.ExternIndex, componentFunc, coreFuncAliases, instMods, numProducedCoreFuncs, exp.Name)
+			be, err := bindFuncExport(comp, exp.ExternIndex, componentFunc, coreFuncAliases, instMods, numProducedCoreFuncs, resolve, exp.Name)
 			if err != nil {
 				return nil, err
 			}
 			exports[exp.Name] = be
 
 		case 0x05: // instance
-			if err := bindInstanceExport(comp, exp, componentFunc, coreFuncAliases, instMods, numProducedCoreFuncs, exports); err != nil {
+			if err := bindInstanceExport(comp, exp, componentFunc, coreFuncAliases, instMods, numProducedCoreFuncs, resolve, exports); err != nil {
 				return nil, err
 			}
 
@@ -577,7 +577,7 @@ func bindImportExports(comp *binary.Component, componentFunc func(uint32) (bool,
 // one. Used both for a plain func export and for a member function inside
 // an instance export (bindInstanceExport), which is why it takes funcIdx and
 // a diagnostic name rather than a binary.Export directly.
-func bindFuncExport(comp *binary.Component, funcIdx uint32, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncAliases []aliasTarget, instMods map[int]api.Module, numProducedCoreFuncs int, diagName string) (*boundExport, error) {
+func bindFuncExport(comp *binary.Component, funcIdx uint32, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncAliases []aliasTarget, instMods map[int]api.Module, numProducedCoreFuncs int, resolve abi.Resolver, diagName string) (*boundExport, error) {
 	isLift, liftCanonIdx, _, err := componentFunc(funcIdx)
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: export %q: %w", diagName, err)
@@ -614,7 +614,9 @@ func bindFuncExport(comp *binary.Component, funcIdx uint32, componentFunc func(u
 		return nil, fmt.Errorf("component/instance: export %q: %w", diagName, err)
 	}
 
-	return &boundExport{mod: mod, funcName: tgt.name, fd: fd, postReturnFuncName: postReturnName}, nil
+	be := &boundExport{mod: mod, funcName: tgt.name, fd: fd, postReturnFuncName: postReturnName}
+	finalizeBoundExport(be, resolve)
+	return be, nil
 }
 
 // resolvePostReturnFunc looks for a post-return option (CanonOpt kind 0x05)
@@ -660,7 +662,7 @@ func resolvePostReturnFunc(canon binary.Canon, coreFuncAliases []aliasTarget, nu
 // of its func exports resolves, via its own func-import name, to the
 // instantiate-arg that supplied it, which names a func in the *outer*
 // component's func index space (almost always a lift, per this milestone).
-func bindInstanceExport(comp *binary.Component, exp binary.Export, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncAliases []aliasTarget, instMods map[int]api.Module, numProducedCoreFuncs int, exports map[string]*boundExport) error {
+func bindInstanceExport(comp *binary.Component, exp binary.Export, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncAliases []aliasTarget, instMods map[int]api.Module, numProducedCoreFuncs int, resolve abi.Resolver, exports map[string]*boundExport) error {
 	if int(exp.ExternIndex) >= len(comp.Instances) {
 		return fmt.Errorf("component/instance: export %q references instance %d, out of range of %d instance(s)", exp.Name, exp.ExternIndex, len(comp.Instances))
 	}
@@ -699,7 +701,7 @@ func bindInstanceExport(comp *binary.Component, exp binary.Export, componentFunc
 			return fmt.Errorf("component/instance: %s: instantiate-arg %q has non-func sort %#x", diagName, importName, arg.Sort)
 		}
 
-		be, err := bindFuncExport(comp, arg.SortIdx, componentFunc, coreFuncAliases, instMods, numProducedCoreFuncs, diagName)
+		be, err := bindFuncExport(comp, arg.SortIdx, componentFunc, coreFuncAliases, instMods, numProducedCoreFuncs, resolve, diagName)
 		if err != nil {
 			return err
 		}

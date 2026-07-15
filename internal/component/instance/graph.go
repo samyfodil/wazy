@@ -6,6 +6,7 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
 )
 
@@ -283,13 +284,20 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		case 0x01: // inline exports: a passthrough shim regrouping earlier items
 			items := make([]shimItem, 0, len(ci.Exports))
 			for _, e := range ci.Exports {
-				item, wasiCall, err := resolveInlineExportItem(ctx, r, comp, cfg, resources, e, coreMemSpace, coreTableSpace, instMods, neededTypes, name, nextPrivateName, coreFuncTarget, coreMemTarget)
+				item, wasiCall, privMod, err := resolveInlineExportItem(ctx, r, comp, cfg, resources, e, coreMemSpace, coreTableSpace, instMods, neededTypes, name, nextPrivateName, coreFuncTarget, coreMemTarget)
 				if err != nil {
 					return fail(fmt.Errorf("component/instance: core instance %d: %w", k, err))
 				}
 				items = append(items, item)
 				if wasiCall != "" {
 					wasiCalls = append(wasiCalls, wasiCall)
+				}
+				if privMod != nil {
+					// A canon-produced core func's own private host module
+					// (see resolveInlineExportItem's doc): the shim below
+					// only imports from it, so it must be tracked here too
+					// or Instance.Close leaks it.
+					closers = append(closers, privMod)
 				}
 			}
 			shimBytes, err := buildPassthroughShim(items)
@@ -308,7 +316,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		}
 	}
 
-	exports, err := bindImportExportsGraph(comp, componentFunc, coreFuncTarget)
+	exports, err := bindImportExportsGraph(comp, componentFunc, coreFuncTarget, resolve)
 	if err != nil {
 		return fail(err)
 	}
@@ -384,17 +392,24 @@ func discoverNeededFuncTypes(ctx context.Context, r wazy.Runtime, comp *binary.C
 // this entry's required core-level type in neededTypes when it's a canon-
 // produced func with no caller-supplied implementation. It returns the
 // "iface.func" WASI call name when this entry is a canon lower, for
-// Instance.WASICalls -- empty otherwise.
+// Instance.WASICalls -- empty otherwise -- and, when this entry is a
+// canon-produced func, the private host module buildCanonHostModule
+// instantiated for it (nil otherwise): the caller must append this to
+// Instance.closers itself (see instantiateGraph), since it is a real,
+// separately-registered module the shim only imports from, and Close would
+// otherwise leak it (and, on Runtime reuse, permanently occupy its private
+// name -- see bench_test.go's BenchmarkInstantiateHello doc for the bug this
+// closes).
 func resolveInlineExportItem(
 	ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, resources *handleTable,
 	e binary.CoreInlineExport, coreMemSpace, coreTableSpace []aliasTarget, instMods map[int]api.Module,
 	neededTypes map[string]map[string]coreFuncSig, groupName string, nextPrivateName func() string,
 	coreFuncTarget func(int) (api.Module, string, error), coreMemTarget func(int) (api.Module, error),
-) (shimItem, string, error) {
+) (shimItem, string, api.Module, error) {
 	switch e.Sort {
 	case 0x00: // func
 		if int(e.CoreSortIdx) >= len(comp.CoreFuncSpace) {
-			return shimItem{}, "", fmt.Errorf("inline export %q references core func %d, out of range of the %d-entry core func index space", e.Name, e.CoreSortIdx, len(comp.CoreFuncSpace))
+			return shimItem{}, "", nil, fmt.Errorf("inline export %q references core func %d, out of range of the %d-entry core func index space", e.Name, e.CoreSortIdx, len(comp.CoreFuncSpace))
 		}
 		entry := comp.CoreFuncSpace[e.CoreSortIdx]
 		switch entry.Kind {
@@ -402,56 +417,56 @@ func resolveInlineExportItem(
 			al := comp.Aliases[entry.Alias]
 			mod, ok := instMods[int(al.InstanceIdx)]
 			if !ok {
-				return shimItem{}, "", fmt.Errorf("inline export %q: core func %d targets core instance %d, which was not instantiated", e.Name, e.CoreSortIdx, al.InstanceIdx)
+				return shimItem{}, "", nil, fmt.Errorf("inline export %q: core func %d targets core instance %d, which was not instantiated", e.Name, e.CoreSortIdx, al.InstanceIdx)
 			}
 			fn := mod.ExportedFunction(al.Name)
 			if fn == nil {
-				return shimItem{}, "", fmt.Errorf("inline export %q: core instance %d (%q) has no exported function %q", e.Name, al.InstanceIdx, mod.Name(), al.Name)
+				return shimItem{}, "", nil, fmt.Errorf("inline export %q: core instance %d (%q) has no exported function %q", e.Name, al.InstanceIdx, mod.Name(), al.Name)
 			}
 			def := fn.Definition()
-			return shimItem{Sort: shimSortFunc, FromModule: mod.Name(), FromName: al.Name, ExportName: e.Name, Params: def.ParamTypes(), Results: def.ResultTypes()}, "", nil
+			return shimItem{Sort: shimSortFunc, FromModule: mod.Name(), FromName: al.Name, ExportName: e.Name, Params: def.ParamTypes(), Results: def.ResultTypes()}, "", nil, nil
 
 		case binary.CoreFuncFromCanon:
 			canon := comp.Canons[entry.Canon]
 			mod, exportName, params, results, wasiCall, err := buildCanonHostModule(ctx, r, comp, cfg, resources, canon, neededTypes, groupName, e.Name, nextPrivateName(), coreMemTarget, coreFuncTarget)
 			if err != nil {
-				return shimItem{}, "", fmt.Errorf("inline export %q: %w", e.Name, err)
+				return shimItem{}, "", nil, fmt.Errorf("inline export %q: %w", e.Name, err)
 			}
 			// mod is a host module here (see buildCanonHostModule): its
 			// ExportedFunction is deliberately forbidden to call directly
 			// (see hostModuleInstance in builder.go), so params/results come
 			// straight from what buildCanonHostModule itself declared the Go
 			// func with, not by re-querying mod.
-			return shimItem{Sort: shimSortFunc, FromModule: mod.Name(), FromName: exportName, ExportName: e.Name, Params: params, Results: results}, wasiCall, nil
+			return shimItem{Sort: shimSortFunc, FromModule: mod.Name(), FromName: exportName, ExportName: e.Name, Params: params, Results: results}, wasiCall, mod, nil
 
 		default:
-			return shimItem{}, "", fmt.Errorf("inline export %q: unknown core func space entry kind %d", e.Name, entry.Kind)
+			return shimItem{}, "", nil, fmt.Errorf("inline export %q: unknown core func space entry kind %d", e.Name, entry.Kind)
 		}
 
 	case 0x02: // memory
 		if int(e.CoreSortIdx) >= len(coreMemSpace) {
-			return shimItem{}, "", fmt.Errorf("inline export %q references core memory %d, out of range of the %d-entry core memory index space", e.Name, e.CoreSortIdx, len(coreMemSpace))
+			return shimItem{}, "", nil, fmt.Errorf("inline export %q references core memory %d, out of range of the %d-entry core memory index space", e.Name, e.CoreSortIdx, len(coreMemSpace))
 		}
 		at := coreMemSpace[e.CoreSortIdx]
 		mod, ok := instMods[int(at.instIdx)]
 		if !ok {
-			return shimItem{}, "", fmt.Errorf("inline export %q: core memory %d targets core instance %d, which was not instantiated", e.Name, e.CoreSortIdx, at.instIdx)
+			return shimItem{}, "", nil, fmt.Errorf("inline export %q: core memory %d targets core instance %d, which was not instantiated", e.Name, e.CoreSortIdx, at.instIdx)
 		}
-		return shimItem{Sort: shimSortMemory, FromModule: mod.Name(), FromName: at.name, ExportName: e.Name}, "", nil
+		return shimItem{Sort: shimSortMemory, FromModule: mod.Name(), FromName: at.name, ExportName: e.Name}, "", nil, nil
 
 	case 0x01: // table
 		if int(e.CoreSortIdx) >= len(coreTableSpace) {
-			return shimItem{}, "", fmt.Errorf("inline export %q references core table %d, out of range of the %d-entry core table index space", e.Name, e.CoreSortIdx, len(coreTableSpace))
+			return shimItem{}, "", nil, fmt.Errorf("inline export %q references core table %d, out of range of the %d-entry core table index space", e.Name, e.CoreSortIdx, len(coreTableSpace))
 		}
 		at := coreTableSpace[e.CoreSortIdx]
 		mod, ok := instMods[int(at.instIdx)]
 		if !ok {
-			return shimItem{}, "", fmt.Errorf("inline export %q: core table %d targets core instance %d, which was not instantiated", e.Name, e.CoreSortIdx, at.instIdx)
+			return shimItem{}, "", nil, fmt.Errorf("inline export %q: core table %d targets core instance %d, which was not instantiated", e.Name, e.CoreSortIdx, at.instIdx)
 		}
-		return shimItem{Sort: shimSortTable, FromModule: mod.Name(), FromName: at.name, ExportName: e.Name}, "", nil
+		return shimItem{Sort: shimSortTable, FromModule: mod.Name(), FromName: at.name, ExportName: e.Name}, "", nil, nil
 
 	default:
-		return shimItem{}, "", fmt.Errorf("inline export %q has unsupported core:sort %#x; only func (0x00), table (0x01), and memory (0x02) are supported by the graph engine", e.Name, e.Sort)
+		return shimItem{}, "", nil, fmt.Errorf("inline export %q has unsupported core:sort %#x; only func (0x00), table (0x01), and memory (0x02) are supported by the graph engine", e.Name, e.Sort)
 	}
 }
 
@@ -655,19 +670,19 @@ func resourceCanonHostFuncGraph(comp *binary.Component, cfg *config, resources *
 // coreFuncTarget instead of the flat (coreFuncAliases, numProducedCoreFuncs)
 // partition instantiateWithImports uses, since the graph engine's core func
 // index space can genuinely interleave alias- and canon-produced entries.
-func bindImportExportsGraph(comp *binary.Component, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error)) (map[string]*boundExport, error) {
+func bindImportExportsGraph(comp *binary.Component, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver) (map[string]*boundExport, error) {
 	exports := make(map[string]*boundExport, len(comp.Exports))
 	for _, exp := range comp.Exports {
 		switch exp.ExternType {
 		case 0x01: // func
-			be, err := bindFuncExportGraph(comp, exp.ExternIndex, componentFunc, coreFuncTarget, exp.Name)
+			be, err := bindFuncExportGraph(comp, exp.ExternIndex, componentFunc, coreFuncTarget, resolve, exp.Name)
 			if err != nil {
 				return nil, err
 			}
 			exports[exp.Name] = be
 
 		case 0x05: // instance
-			if err := bindInstanceExportGraph(comp, exp, componentFunc, coreFuncTarget, exports); err != nil {
+			if err := bindInstanceExportGraph(comp, exp, componentFunc, coreFuncTarget, resolve, exports); err != nil {
 				return nil, err
 			}
 
@@ -680,7 +695,7 @@ func bindImportExportsGraph(comp *binary.Component, componentFunc func(uint32) (
 
 // bindFuncExportGraph is bindFuncExport's graph-engine counterpart -- see
 // bindImportExportsGraph.
-func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), diagName string) (*boundExport, error) {
+func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver, diagName string) (*boundExport, error) {
 	isLift, liftCanonIdx, _, err := componentFunc(funcIdx)
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: export %q: %w", diagName, err)
@@ -708,7 +723,9 @@ func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc f
 		return nil, fmt.Errorf("component/instance: export %q: %w", diagName, err)
 	}
 
-	return &boundExport{mod: mod, funcName: name, fd: fd, postReturnFuncName: postReturnName}, nil
+	be := &boundExport{mod: mod, funcName: name, fd: fd, postReturnFuncName: postReturnName}
+	finalizeBoundExport(be, resolve)
+	return be, nil
 }
 
 // resolvePostReturnFuncGraph is resolvePostReturnFunc's graph-engine
@@ -736,7 +753,7 @@ func resolvePostReturnFuncGraph(canon binary.Canon, coreFuncTarget func(int) (ap
 // bindInstanceExportGraph is bindInstanceExport's graph-engine counterpart --
 // identical resolution of the re-export-shim shape (see host_import.go's
 // doc), but calling bindFuncExportGraph for each member.
-func bindInstanceExportGraph(comp *binary.Component, exp binary.Export, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), exports map[string]*boundExport) error {
+func bindInstanceExportGraph(comp *binary.Component, exp binary.Export, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver, exports map[string]*boundExport) error {
 	// The component-level "instance" sort index space is every imported
 	// instance (comp.Imports with ExternType == 0x05), in import order,
 	// followed by every locally-instantiated one (comp.Instances) -- unlike
@@ -791,7 +808,7 @@ func bindInstanceExportGraph(comp *binary.Component, exp binary.Export, componen
 			return fmt.Errorf("component/instance: %s: instantiate-arg %q has non-func sort %#x", diagName, importName, arg.Sort)
 		}
 
-		be, err := bindFuncExportGraph(comp, arg.SortIdx, componentFunc, coreFuncTarget, diagName)
+		be, err := bindFuncExportGraph(comp, arg.SortIdx, componentFunc, coreFuncTarget, resolve, diagName)
 		if err != nil {
 			return err
 		}
