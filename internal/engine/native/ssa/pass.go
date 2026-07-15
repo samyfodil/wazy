@@ -25,12 +25,14 @@ func (b *builder) runPreBlockLayoutPasses() {
 	// The result of passCalculateImmediateDominators will be used by various passes below.
 	passCalculateImmediateDominators(b)
 	passRedundantPhiEliminationOpt(b)
-	passNopInstElimination(b)
-	// passConstFoldAndCSE performs constant folding, algebraic simplification, and local (per-block)
-	// common subexpression elimination. It must run after passNopInstElimination (so it doesn't
-	// redo the shift/rotate-by-0 identity that pass already handles) and before
-	// passDeadCodeEliminationOpt (so DCE cleans up the instructions this pass aliases away).
-	passConstFoldAndCSE(b)
+
+	// Note: wazy intentionally does NOT run middle-end "language compiler"
+	// optimizations here (constant folding, algebraic identities, CSE,
+	// shift-by-0 elimination). Real WebAssembly producers (LLVM/Go/Rust/...)
+	// already perform them before emitting wasm, so on producer code these
+	// passes fire ~never while costing compile time (passConstFoldAndCSE was
+	// measured at +10.7% compile for execution-neutral output). They were
+	// removed; DCE below still resolves the aliases the remaining passes create.
 
 	// TODO: implement either conversion of irreducible CFG into reducible one, or irreducible CFG detection where we panic.
 	// 	WebAssembly program shouldn't result in irreducible CFG, but we should handle it properly in just in case.
@@ -354,36 +356,6 @@ func (b *builder) incRefCount(id ValueID, from *Instruction) {
 	}
 	info := &b.valuesInfo[id]
 	info.RefCount++
-}
-
-// passNopInstElimination eliminates the instructions which is essentially a no-op.
-func passNopInstElimination(b *builder) {
-	for blk := b.blockIteratorBegin(); blk != nil; blk = b.blockIteratorNext() {
-		for cur := blk.rootInstr; cur != nil; cur = cur.next {
-			switch cur.Opcode() {
-			// TODO: add more logics here.
-			case OpcodeIshl, OpcodeSshr, OpcodeUshr:
-				x, amount := cur.Arg2()
-				definingInst := b.InstructionOfValue(amount)
-				if definingInst == nil {
-					// If there's no defining instruction, that means the amount is coming from the parameter.
-					continue
-				}
-				if definingInst.Constant() {
-					v := definingInst.ConstantVal()
-
-					if x.Type().Bits() == 64 {
-						v = v % 64
-					} else {
-						v = v % 32
-					}
-					if v == 0 {
-						b.alias(cur.Return(), x)
-					}
-				}
-			}
-		}
-	}
 }
 
 // passSortSuccessors sorts the successors of each block in the natural program order.

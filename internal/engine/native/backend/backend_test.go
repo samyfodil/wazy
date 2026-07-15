@@ -1333,144 +1333,146 @@ L0 (SSA Block: blk0):
 L0 (SSA Block: blk0):
 	mov x130?, x2
 	mov v131?.8b, v0.8b
-	orr w306?, wzr, #0x2
-	madd w133?, w130?, w306?, wzr
-	orr w305?, wzr, #0x3
-	madd w135?, w130?, w305?, wzr
-	orr w304?, wzr, #0x4
-	madd w137?, w130?, w304?, wzr
-	movz w303?, #0x5, lsl 0
-	madd w139?, w130?, w303?, wzr
-	orr w302?, wzr, #0x6
-	madd w141?, w130?, w302?, wzr
-	orr w301?, wzr, #0x7
-	madd w143?, w130?, w301?, wzr
-	orr w300?, wzr, #0x8
-	madd w145?, w130?, w300?, wzr
-	movz w299?, #0x9, lsl 0
-	madd w147?, w130?, w299?, wzr
-	movz w298?, #0xa, lsl 0
-	madd w149?, w130?, w298?, wzr
-	movz w297?, #0xb, lsl 0
-	madd w151?, w130?, w297?, wzr
-	orr w296?, wzr, #0xc
-	madd w153?, w130?, w296?, wzr
-	movz w295?, #0xd, lsl 0
-	madd w155?, w130?, w295?, wzr
-	orr w294?, wzr, #0xe
-	madd w157?, w130?, w294?, wzr
-	orr w293?, wzr, #0xf
-	madd w159?, w130?, w293?, wzr
-	orr w292?, wzr, #0x10
-	madd w161?, w130?, w292?, wzr
-	movz w291?, #0x11, lsl 0
-	madd w163?, w130?, w291?, wzr
-	movz w290?, #0x12, lsl 0
-	madd w165?, w130?, w290?, wzr
-	movz w289?, #0x13, lsl 0
-	madd w167?, w130?, w289?, wzr
-	movz w288?, #0x14, lsl 0
-	madd w169?, w130?, w288?, wzr
-	add w170?, w167?, w169?
-	add w171?, w165?, w170?
-	add w172?, w163?, w171?
-	add w173?, w161?, w172?
-	add w174?, w159?, w173?
-	add w175?, w157?, w174?
-	add w176?, w155?, w175?
-	add w177?, w153?, w176?
-	add w178?, w151?, w177?
-	add w179?, w149?, w178?
-	add w180?, w147?, w179?
-	add w181?, w145?, w180?
-	add w182?, w143?, w181?
-	add w183?, w141?, w182?
-	add w184?, w139?, w183?
-	add w185?, w137?, w184?
-	add w186?, w135?, w185?
-	add w187?, w133?, w186?
-	add w188?, w130?, w187?
-	movz w287?, #0x3f80, lsl 16
+	orr w309?, wzr, #0x1
+	madd w133?, w130?, w309?, wzr
+	orr w308?, wzr, #0x2
+	madd w135?, w130?, w308?, wzr
+	orr w307?, wzr, #0x3
+	madd w137?, w130?, w307?, wzr
+	orr w306?, wzr, #0x4
+	madd w139?, w130?, w306?, wzr
+	movz w305?, #0x5, lsl 0
+	madd w141?, w130?, w305?, wzr
+	orr w304?, wzr, #0x6
+	madd w143?, w130?, w304?, wzr
+	orr w303?, wzr, #0x7
+	madd w145?, w130?, w303?, wzr
+	orr w302?, wzr, #0x8
+	madd w147?, w130?, w302?, wzr
+	movz w301?, #0x9, lsl 0
+	madd w149?, w130?, w301?, wzr
+	movz w300?, #0xa, lsl 0
+	madd w151?, w130?, w300?, wzr
+	movz w299?, #0xb, lsl 0
+	madd w153?, w130?, w299?, wzr
+	orr w298?, wzr, #0xc
+	madd w155?, w130?, w298?, wzr
+	movz w297?, #0xd, lsl 0
+	madd w157?, w130?, w297?, wzr
+	orr w296?, wzr, #0xe
+	madd w159?, w130?, w296?, wzr
+	orr w295?, wzr, #0xf
+	madd w161?, w130?, w295?, wzr
+	orr w294?, wzr, #0x10
+	madd w163?, w130?, w294?, wzr
+	movz w293?, #0x11, lsl 0
+	madd w165?, w130?, w293?, wzr
+	movz w292?, #0x12, lsl 0
+	madd w167?, w130?, w292?, wzr
+	movz w291?, #0x13, lsl 0
+	madd w169?, w130?, w291?, wzr
+	movz w290?, #0x14, lsl 0
+	madd w171?, w130?, w290?, wzr
+	add w172?, w169?, w171?
+	add w173?, w167?, w172?
+	add w174?, w165?, w173?
+	add w175?, w163?, w174?
+	add w176?, w161?, w175?
+	add w177?, w159?, w176?
+	add w178?, w157?, w177?
+	add w179?, w155?, w178?
+	add w180?, w153?, w179?
+	add w181?, w151?, w180?
+	add w182?, w149?, w181?
+	add w183?, w147?, w182?
+	add w184?, w145?, w183?
+	add w185?, w143?, w184?
+	add w186?, w141?, w185?
+	add w187?, w139?, w186?
+	add w188?, w137?, w187?
+	add w189?, w135?, w188?
+	add w190?, w133?, w189?
+	movz w289?, #0x3f80, lsl 16
+	ins v288?.s[0], w289?
+	fmul s192?, s131?, s288?
+	movz w287?, #0x4000, lsl 16
 	ins v286?.s[0], w287?
-	fmul s190?, s131?, s286?
-	movz w285?, #0x4000, lsl 16
+	fmul s194?, s131?, s286?
+	movz w285?, #0x4040, lsl 16
 	ins v284?.s[0], w285?
-	fmul s192?, s131?, s284?
-	movz w283?, #0x4040, lsl 16
+	fmul s196?, s131?, s284?
+	movz w283?, #0x4080, lsl 16
 	ins v282?.s[0], w283?
-	fmul s194?, s131?, s282?
-	movz w281?, #0x4080, lsl 16
+	fmul s198?, s131?, s282?
+	movz w281?, #0x40a0, lsl 16
 	ins v280?.s[0], w281?
-	fmul s196?, s131?, s280?
-	movz w279?, #0x40a0, lsl 16
+	fmul s200?, s131?, s280?
+	movz w279?, #0x40c0, lsl 16
 	ins v278?.s[0], w279?
-	fmul s198?, s131?, s278?
-	movz w277?, #0x40c0, lsl 16
+	fmul s202?, s131?, s278?
+	movz w277?, #0x40e0, lsl 16
 	ins v276?.s[0], w277?
-	fmul s200?, s131?, s276?
-	movz w275?, #0x40e0, lsl 16
+	fmul s204?, s131?, s276?
+	movz w275?, #0x4100, lsl 16
 	ins v274?.s[0], w275?
-	fmul s202?, s131?, s274?
-	movz w273?, #0x4100, lsl 16
+	fmul s206?, s131?, s274?
+	movz w273?, #0x4110, lsl 16
 	ins v272?.s[0], w273?
-	fmul s204?, s131?, s272?
-	movz w271?, #0x4110, lsl 16
+	fmul s208?, s131?, s272?
+	movz w271?, #0x4120, lsl 16
 	ins v270?.s[0], w271?
-	fmul s206?, s131?, s270?
-	movz w269?, #0x4120, lsl 16
+	fmul s210?, s131?, s270?
+	movz w269?, #0x4130, lsl 16
 	ins v268?.s[0], w269?
-	fmul s208?, s131?, s268?
-	movz w267?, #0x4130, lsl 16
+	fmul s212?, s131?, s268?
+	movz w267?, #0x4140, lsl 16
 	ins v266?.s[0], w267?
-	fmul s210?, s131?, s266?
-	movz w265?, #0x4140, lsl 16
+	fmul s214?, s131?, s266?
+	movz w265?, #0x4150, lsl 16
 	ins v264?.s[0], w265?
-	fmul s212?, s131?, s264?
-	movz w263?, #0x4150, lsl 16
+	fmul s216?, s131?, s264?
+	movz w263?, #0x4160, lsl 16
 	ins v262?.s[0], w263?
-	fmul s214?, s131?, s262?
-	movz w261?, #0x4160, lsl 16
+	fmul s218?, s131?, s262?
+	movz w261?, #0x4170, lsl 16
 	ins v260?.s[0], w261?
-	fmul s216?, s131?, s260?
-	movz w259?, #0x4170, lsl 16
+	fmul s220?, s131?, s260?
+	movz w259?, #0x4180, lsl 16
 	ins v258?.s[0], w259?
-	fmul s218?, s131?, s258?
-	movz w257?, #0x4180, lsl 16
+	fmul s222?, s131?, s258?
+	movz w257?, #0x4188, lsl 16
 	ins v256?.s[0], w257?
-	fmul s220?, s131?, s256?
-	movz w255?, #0x4188, lsl 16
+	fmul s224?, s131?, s256?
+	movz w255?, #0x4190, lsl 16
 	ins v254?.s[0], w255?
-	fmul s222?, s131?, s254?
-	movz w253?, #0x4190, lsl 16
+	fmul s226?, s131?, s254?
+	movz w253?, #0x4198, lsl 16
 	ins v252?.s[0], w253?
-	fmul s224?, s131?, s252?
-	movz w251?, #0x4198, lsl 16
+	fmul s228?, s131?, s252?
+	movz w251?, #0x41a0, lsl 16
 	ins v250?.s[0], w251?
-	fmul s226?, s131?, s250?
-	movz w249?, #0x41a0, lsl 16
-	ins v248?.s[0], w249?
-	fmul s228?, s131?, s248?
-	fadd s229?, s226?, s228?
-	fadd s230?, s224?, s229?
-	fadd s231?, s222?, s230?
-	fadd s232?, s220?, s231?
-	fadd s233?, s218?, s232?
-	fadd s234?, s216?, s233?
-	fadd s235?, s214?, s234?
-	fadd s236?, s212?, s235?
-	fadd s237?, s210?, s236?
-	fadd s238?, s208?, s237?
-	fadd s239?, s206?, s238?
-	fadd s240?, s204?, s239?
-	fadd s241?, s202?, s240?
-	fadd s242?, s200?, s241?
-	fadd s243?, s198?, s242?
-	fadd s244?, s196?, s243?
-	fadd s245?, s194?, s244?
-	fadd s246?, s192?, s245?
-	fadd s247?, s190?, s246?
-	mov v0.8b, v247?.8b
-	mov x0, x188?
+	fmul s230?, s131?, s250?
+	fadd s231?, s228?, s230?
+	fadd s232?, s226?, s231?
+	fadd s233?, s224?, s232?
+	fadd s234?, s222?, s233?
+	fadd s235?, s220?, s234?
+	fadd s236?, s218?, s235?
+	fadd s237?, s216?, s236?
+	fadd s238?, s214?, s237?
+	fadd s239?, s212?, s238?
+	fadd s240?, s210?, s239?
+	fadd s241?, s208?, s240?
+	fadd s242?, s206?, s241?
+	fadd s243?, s204?, s242?
+	fadd s244?, s202?, s243?
+	fadd s245?, s200?, s244?
+	fadd s246?, s198?, s245?
+	fadd s247?, s196?, s246?
+	fadd s248?, s194?, s247?
+	fadd s249?, s192?, s248?
+	mov v0.8b, v249?.8b
+	mov x0, x190?
 	ret
 `,
 			afterFinalizeARM64: `
@@ -1488,44 +1490,47 @@ L0 (SSA Block: blk0):
 	stp q26, q27, [sp, #0xc0]
 	orr x27, xzr, #0xe0
 	str x27, [sp, #-0x10]!
-	orr w8, wzr, #0x2
+	orr w8, wzr, #0x1
 	madd w8, w2, w8, wzr
-	orr w9, wzr, #0x3
+	orr w9, wzr, #0x2
 	madd w9, w2, w9, wzr
-	orr w10, wzr, #0x4
+	orr w10, wzr, #0x3
 	madd w10, w2, w10, wzr
-	movz w11, #0x5, lsl 0
+	orr w11, wzr, #0x4
 	madd w11, w2, w11, wzr
-	orr w12, wzr, #0x6
+	movz w12, #0x5, lsl 0
 	madd w12, w2, w12, wzr
-	orr w13, wzr, #0x7
+	orr w13, wzr, #0x6
 	madd w13, w2, w13, wzr
-	orr w14, wzr, #0x8
+	orr w14, wzr, #0x7
 	madd w14, w2, w14, wzr
-	movz w15, #0x9, lsl 0
+	orr w15, wzr, #0x8
 	madd w15, w2, w15, wzr
-	movz w16, #0xa, lsl 0
+	movz w16, #0x9, lsl 0
 	madd w16, w2, w16, wzr
-	movz w17, #0xb, lsl 0
+	movz w17, #0xa, lsl 0
 	madd w17, w2, w17, wzr
-	orr w19, wzr, #0xc
+	movz w19, #0xb, lsl 0
 	madd w19, w2, w19, wzr
-	movz w20, #0xd, lsl 0
+	orr w20, wzr, #0xc
 	madd w20, w2, w20, wzr
-	orr w21, wzr, #0xe
+	movz w21, #0xd, lsl 0
 	madd w21, w2, w21, wzr
-	orr w22, wzr, #0xf
+	orr w22, wzr, #0xe
 	madd w22, w2, w22, wzr
-	orr w23, wzr, #0x10
+	orr w23, wzr, #0xf
 	madd w23, w2, w23, wzr
-	movz w24, #0x11, lsl 0
+	orr w24, wzr, #0x10
 	madd w24, w2, w24, wzr
-	movz w25, #0x12, lsl 0
+	movz w25, #0x11, lsl 0
 	madd w25, w2, w25, wzr
-	movz w26, #0x13, lsl 0
+	movz w26, #0x12, lsl 0
 	madd w26, w2, w26, wzr
-	movz w29, #0x14, lsl 0
+	movz w29, #0x13, lsl 0
 	madd w29, w2, w29, wzr
+	movz w30, #0x14, lsl 0
+	madd w30, w2, w30, wzr
+	add w29, w29, w30
 	add w26, w26, w29
 	add w25, w25, w26
 	add w24, w24, w25
@@ -1543,8 +1548,7 @@ L0 (SSA Block: blk0):
 	add w11, w11, w12
 	add w10, w10, w11
 	add w9, w9, w10
-	add w8, w8, w9
-	add w0, w2, w8
+	add w0, w8, w9
 	movz w8, #0x3f80, lsl 16
 	ins v8.s[0], w8
 	fmul s8, s0, s8
@@ -1944,13 +1948,15 @@ L0 (SSA Block: blk0):
 	str x27, [sp, #-0x10]!
 	mov v29.16b, v0.16b
 	mov v30.16b, v1.16b
-	ldr q8, #8; b 32; data.v128  0706050403020100 1f1e1d1c1b1a1918
+	ldr q8, L2 ;; pooled const 0706050403020100 1f1e1d1c1b1a1918
 	tbl v0.16b, { v29.16b, v30.16b }, v8.16b
 	add sp, sp, #0x10
 	ldp q29, q30, [sp]
 	add sp, sp, #0x20
 	ldr x30, [sp], #0x10
 	ret
+L2:
+	data.const128 0706050403020100 1f1e1d1c1b1a1918
 `,
 		},
 		{

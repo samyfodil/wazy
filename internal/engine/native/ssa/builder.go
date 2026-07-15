@@ -190,11 +190,6 @@ type builder struct {
 	blkStack2       []*basicBlock
 	redundantParams []redundantParam
 
-	// cseCache is the reusable scratch map for passConstFoldAndCSE's per-block value numbering.
-	// It's cleared at the start of processing each block (and hence each function compile), and
-	// kept across compiles purely to avoid a map allocation per block.
-	cseCache map[cseKey]Value
-
 	// blockIterCur is used to implement blockIteratorBegin and blockIteratorNext.
 	blockIterCur int
 
