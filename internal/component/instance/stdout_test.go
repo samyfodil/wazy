@@ -36,6 +36,9 @@ const outputStreamResourceType = 0
 //go:embed testdata/stdout_write.wasm
 var stdoutWriteWasm []byte
 
+//go:embed testdata/stdout_write_alias.wasm
+var stdoutWriteAliasWasm []byte
+
 // stdoutStreamsImportOpts registers the two host imports the fixture needs:
 // test:cli/stdout's get-stdout (mints an own<output-stream> handle naming
 // streamRep) and test:cli/streams's [method]output-stream.write (resolves
@@ -170,6 +173,63 @@ func TestStdout_DroppedHandle(t *testing.T) {
 	requireErrContains(t, err, "unknown handle")
 	if out.Len() != 0 {
 		t.Fatalf("host buffer should not have been written to, got %q", out.String())
+	}
+}
+
+// TestStdoutAlias_Decodes proves the decoder gap fixes (binary.Component's
+// TypeSpace/ResolveType and AliasDef.CoreSort) by decoding
+// stdout_write_alias.wasm -- the "natural" cross-import-alias pattern real
+// WASI guests use (test:cli/stdout's get-stdout returns own<output-stream>
+// of the SAME nominal resource aliased from test:cli/streams via `alias
+// export $streams "output-stream" (type $ot_outer)`) -- and resolving every
+// canon lift's TypeIdx through the full type index space. Before those
+// fixes, the intervening type-sort alias shifted every later type-section
+// deftype's true index past what binary.Component.Types (type-section-only)
+// could see, and this would fail with "out of range of N types" instead of
+// resolving to a func type.
+func TestStdoutAlias_Decodes(t *testing.T) {
+	comp, err := binary.Decode(bytes.NewReader(stdoutWriteAliasWasm))
+	if err != nil {
+		t.Fatalf("decode stdout_write_alias.wasm: %v", err)
+	}
+
+	for _, cn := range comp.Canons {
+		if cn.Kind != 0x00 { // lift
+			continue
+		}
+		td, err := comp.ResolveType(cn.TypeIdx)
+		if err != nil {
+			t.Fatalf("ResolveType(%d) for a canon lift: %v", cn.TypeIdx, err)
+		}
+		if _, ok := td.(binary.FuncDesc); !ok {
+			t.Fatalf("ResolveType(%d) for a canon lift: got %T, want binary.FuncDesc", cn.TypeIdx, td)
+		}
+	}
+}
+
+// TestStdoutAlias_HelloWorld is the full milestone proof: the natural
+// cross-import-alias fixture not only decodes (TestStdoutAlias_Decodes) but
+// instantiates and runs exactly like stdout_write.wat's hand-worked-around
+// version -- get-stdout then write(stream, "hello world" bytes) -- proving
+// both decoder fixes together are sufficient to run a real-guest-shaped
+// component end to end.
+func TestStdoutAlias_HelloWorld(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	var out bytes.Buffer
+	inst, err := Instantiate(ctx, r, stdoutWriteAliasWasm, stdoutStreamsImportOpts(&out, 1)...)
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	defer inst.Close(ctx)
+
+	if _, err := inst.Call(ctx, "run"); err != nil {
+		t.Fatalf("Call run: %v", err)
+	}
+	if got := out.String(); got != "hello world" {
+		t.Fatalf("captured %q, want %q", got, "hello world")
 	}
 }
 

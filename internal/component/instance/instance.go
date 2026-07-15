@@ -182,11 +182,15 @@ func instantiateComponent(ctx context.Context, r wazy.Runtime, comp *binary.Comp
 	exports := make(map[string]*boundExport, len(canonForExport))
 	for name, canonIdx := range canonForExport {
 		canon := comp.Canons[canonIdx]
-		fd := comp.Types[canon.TypeIdx].Descriptor.(binary.FuncDesc) // validated by validateCanons
+		td, err := comp.ResolveType(canon.TypeIdx) // validated by validateCanons
+		if err != nil {
+			core.Close(ctx) //nolint:errcheck
+			return nil, fmt.Errorf("component/instance: export %q: resolve canon type %d: %w", name, canon.TypeIdx, err)
+		}
 		exports[name] = &boundExport{
 			mod:      core,
 			funcName: coreFuncIdx[canon.CoreFuncIdx],
-			fd:       fd,
+			fd:       td.(binary.FuncDesc), // validated by validateCanons
 		}
 	}
 
@@ -202,14 +206,21 @@ func coreModuleBytes(cm binary.CoreModule, componentBytes []byte) ([]byte, error
 	return componentBytes[cm.Offset : cm.Offset+cm.Size], nil
 }
 
-// typeResolver returns an abi.Resolver over the component's type table.
+// typeResolver returns an abi.Resolver over the component's full type index
+// space (comp.ResolveType), not just the type-section-only comp.Types --
+// see binary.Component.ResolveType's doc for what a type index can name
+// (a type-section deftype, or a resolvable type-sort alias) and what fails
+// loud (an unresolvable alias, e.g. one exported from an imported instance,
+// or an out-of-range index). abi.Resolver's contract is a nil return for
+// "not found", so a ResolveType error collapses to nil here; callers that
+// need the reason call comp.ResolveType directly (see e.g. validateCanons).
 func typeResolver(comp *binary.Component) abi.Resolver {
-	types := comp.Types
 	return func(idx uint32) binary.TypeDesc {
-		if int(idx) >= len(types) {
+		t, err := comp.ResolveType(idx)
+		if err != nil {
 			return nil
 		}
-		return types[idx].Descriptor
+		return t
 	}
 }
 
@@ -224,6 +235,9 @@ func buildCoreFuncIndexSpace(comp *binary.Component) ([]string, error) {
 		}
 		if al.TargetKind != 0x01 {
 			return nil, fmt.Errorf("component/instance: alias[%d] targets kind %#x; only core-export aliases (off the sole core instance) are supported for no-import components", i, al.TargetKind)
+		}
+		if al.CoreSort != 0x00 {
+			return nil, fmt.Errorf("component/instance: alias[%d] has core:sort %#x (not func); only core func aliases are supported for no-import components", i, al.CoreSort)
 		}
 		if int(al.InstanceIdx) != 0 {
 			return nil, fmt.Errorf("component/instance: alias[%d] references core instance %d, expected the sole core instance (index 0)", i, al.InstanceIdx)
@@ -243,11 +257,12 @@ func validateCanons(comp *binary.Component, coreFuncIdx []string) error {
 		if int(cn.CoreFuncIdx) >= len(coreFuncIdx) {
 			return fmt.Errorf("component/instance: canon[%d] references core func index %d, but the core func index space only has %d entries", i, cn.CoreFuncIdx, len(coreFuncIdx))
 		}
-		if int(cn.TypeIdx) >= len(comp.Types) {
-			return fmt.Errorf("component/instance: canon[%d] references type index %d, out of range of %d types", i, cn.TypeIdx, len(comp.Types))
+		td, err := comp.ResolveType(cn.TypeIdx)
+		if err != nil {
+			return fmt.Errorf("component/instance: canon[%d] type index %d: %w", i, cn.TypeIdx, err)
 		}
-		if _, ok := comp.Types[cn.TypeIdx].Descriptor.(binary.FuncDesc); !ok {
-			return fmt.Errorf("component/instance: canon[%d] type index %d is not a func type (got %T)", i, cn.TypeIdx, comp.Types[cn.TypeIdx].Descriptor)
+		if _, ok := td.(binary.FuncDesc); !ok {
+			return fmt.Errorf("component/instance: canon[%d] type index %d is not a func type (got %T)", i, cn.TypeIdx, td)
 		}
 	}
 	return nil

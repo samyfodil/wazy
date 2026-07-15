@@ -139,6 +139,40 @@ func TestImports_ExportComponentFuncOutOfRange(t *testing.T) {
 	requireErrContains(t, err, "component func index space")
 }
 
+// TestImports_CoreExportAlias_CoreSortMismatchFallsBackToProbe simulates a
+// pre-CoreSort AliasDef (its zero value, 0x00, is indistinguishable from a
+// real func classification) on log_hello's "memory" core-export alias, and
+// proves the classifier falls back to probing the instantiated module
+// (which correctly reports "memory" is not a func) rather than trusting a
+// CoreSort that disagrees with what the alias actually names. If the
+// fallback didn't fire, "memory" would be misclassified as a func alias,
+// corrupting the core func index space that "run"'s export binding relies
+// on (see host_import.go's coreFuncAliases construction).
+func TestImports_CoreExportAlias_CoreSortMismatchFallsBackToProbe(t *testing.T) {
+	comp := decodeLogHello(t)
+	found := false
+	for i := range comp.Aliases {
+		al := &comp.Aliases[i]
+		if al.Sort == 0x00 && al.TargetKind == 0x01 && al.Name == "memory" {
+			al.CoreSort = 0x00 // simulate "unknown" (pre-CoreSort) reading as func
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("log_hello fixture has no core-export alias named \"memory\"")
+	}
+
+	inst, err := runImport(t, comp, stringLogOpt(noopLog))
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	defer inst.Close(context.Background())
+
+	if _, err := inst.Call(context.Background(), "run"); err != nil {
+		t.Fatalf("Call run: %v", err)
+	}
+}
+
 func TestImports_LiftTypeNotFunc(t *testing.T) {
 	comp := decodeLogHello(t)
 	comp.Types[1] = binary.Type{Descriptor: binary.PrimitiveDesc{Prim: "u32"}}

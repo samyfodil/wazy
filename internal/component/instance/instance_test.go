@@ -356,6 +356,16 @@ func TestInstantiateComponent_AliasTargetKind(t *testing.T) {
 	requireErrContains(t, err, "targets kind")
 }
 
+func TestInstantiateComponent_AliasCoreSort(t *testing.T) {
+	ctx, r := newRuntime(t)
+	comp := baseValidComponent("f")
+	comp.CoreModules[0].Size = len(emptyCoreWasm)
+	comp.Aliases[0].CoreSort = 0x02 // memory, not func
+
+	_, err := instantiateComponent(ctx, r, comp, emptyCoreWasm)
+	requireErrContains(t, err, "core:sort")
+}
+
 func TestInstantiateComponent_AliasInstanceIdx(t *testing.T) {
 	ctx, r := newRuntime(t)
 	comp := baseValidComponent("f")

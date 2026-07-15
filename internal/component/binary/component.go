@@ -7,8 +7,20 @@ import (
 
 // Component represents a parsed WebAssembly Component Model container.
 type Component struct {
-	// Types contains the type definitions from the type section.
+	// Types contains the type definitions from the type section (section 7)
+	// only, in that section's declaration order. This is NOT the full
+	// component type index space that canon TypeIdx and export/instance type
+	// references index into -- that space also includes type-sort aliases
+	// and imported types, interleaved with Types in overall declaration
+	// order. See TypeSpace and ResolveType.
 	Types []Type
+
+	// TypeSpace is the component's full type index space: one entry per
+	// type-index-producing definition (type-section deftype, type-sort
+	// alias, or imported type), in overall declaration order across
+	// sections. Use ResolveType to resolve a type index through it rather
+	// than indexing Types or TypeSpace directly. See typespace.go.
+	TypeSpace []TypeSpaceEntry
 
 	// Imports contains the import bindings.
 	Imports []Import
@@ -98,7 +110,7 @@ type CoreInstantiateArg struct {
 // CoreInlineExport represents an inlined export in a core instance.
 type CoreInlineExport struct {
 	Name       string
-	Sort       byte // 0x00 = core func/table/mem/global
+	Sort       byte // core:sort: 0x00 func, 0x01 table, 0x02 memory, 0x03 global, 0x04 tag, 0x10 type, 0x11 module, 0x12 instance
 	CoreSortIdx uint32
 }
 
@@ -149,12 +161,27 @@ type Canon struct {
 
 // AliasDef represents an alias binding (section 6).
 type AliasDef struct {
-	Sort          byte // sort of the aliased item
+	Sort          byte // sort of the aliased item: 0x00 = core, 0x01 = func, 0x02 = value, 0x03 = type, 0x04 = component, 0x05 = instance
 	TargetKind    byte // 0x00 = export, 0x01 = core export, 0x02 = outer
 	InstanceIdx   uint32 // for export/core export targets
 	Name          string // for export/core export targets
 	OuterCount    uint32 // for outer targets
 	OuterIndex    uint32 // for outer targets
+
+	// CoreSort is the core:sort discriminator byte that follows Sort when
+	// Sort == 0x00 (i.e. this alias names a core-level item): 0x00 func,
+	// 0x01 table, 0x02 memory, 0x03 global, 0x04 tag, 0x10 type, 0x11
+	// module, 0x12 instance. It is meaningless (and left at its zero value,
+	// 0x00) when Sort != 0x00.
+	//
+	// A core-export alias (Sort == 0x00, TargetKind == 0x01) needs this to
+	// tell a core-func alias apart from a core-memory/table/global alias --
+	// see internal/component/instance, which used to disambiguate by
+	// probing the instantiated target module's exports (a name that
+	// resolves to a Function is a func alias) because this field didn't
+	// exist; that probe is now a fallback for AliasDefs built by hand
+	// (e.g. in tests) rather than by decodeAliasSection.
+	CoreSort byte
 }
 
 // Start represents the start section (section 9).
@@ -297,7 +324,11 @@ func (c *Component) Dump(w io.Writer) error {
 			case 0x02:
 				targetDesc = fmt.Sprintf("outer count=%d index=%d", a.OuterCount, a.OuterIndex)
 			}
-			if _, err := fmt.Fprintf(w, "  [%d] sort=%#x %s\n", i, a.Sort, targetDesc); err != nil {
+			sortDesc := fmt.Sprintf("%#x", a.Sort)
+			if a.Sort == 0x00 {
+				sortDesc = fmt.Sprintf("%#x (core:%#x)", a.Sort, a.CoreSort)
+			}
+			if _, err := fmt.Fprintf(w, "  [%d] sort=%s %s\n", i, sortDesc, targetDesc); err != nil {
 				return err
 			}
 		}

@@ -201,8 +201,14 @@ func instantiateWithImports(ctx context.Context, r wazy.Runtime, comp *binary.Co
 
 	// Core func index space: lowered funcs occupy [0, numLowers); core-func
 	// aliases follow. Core-export aliases are classified as func vs
-	// memory/table/global by probing the instantiated target module, since
-	// the decoder does not retain the alias's core:sort discriminator.
+	// memory/table/global primarily by the alias's own core:sort
+	// discriminator (AliasDef.CoreSort, populated by decodeAliasSection).
+	// Probing the instantiated target module's exports is kept as a
+	// fallback for AliasDefs that predate CoreSort -- most notably
+	// hand-built binary.Component values in tests that construct an
+	// AliasDef directly rather than via Decode, where CoreSort's zero value
+	// (0x00, "func") is indistinguishable from "not populated"; the probe
+	// resolves that ambiguity by checking what the alias actually names.
 	var coreFuncAliases []aliasTarget
 	for i, al := range comp.Aliases {
 		if al.Sort != 0x00 || al.TargetKind != 0x01 {
@@ -217,7 +223,15 @@ func instantiateWithImports(ctx context.Context, r wazy.Runtime, comp *binary.Co
 			// supported; such aliases are not needed for the supported shape.
 			continue
 		}
-		if mod.ExportedFunction(al.Name) != nil {
+		isFunc := al.CoreSort == 0x00
+		if isFunc && mod.ExportedFunction(al.Name) == nil {
+			// CoreSort claims func but the target module disagrees (e.g. a
+			// hand-built AliasDef in a test that left CoreSort at its zero
+			// value without meaning "func"); fall back to the probe's
+			// verdict rather than trust a CoreSort that doesn't match reality.
+			isFunc = false
+		}
+		if isFunc {
 			coreFuncAliases = append(coreFuncAliases, aliasTarget{instIdx: al.InstanceIdx, name: al.Name})
 		}
 	}
@@ -310,11 +324,12 @@ func resolveLoweredImport(comp *binary.Component, cfg *config, resources *handle
 // exports/imports that use these canon-produced core funcs) -- so this
 // bypasses the abi package entirely and talks to the handle table directly.
 func resourceCanonHostFunc(comp *binary.Component, resources *handleTable, name string, canon binary.Canon) (hostFuncDef, error) {
-	if int(canon.TypeIdx) >= len(comp.Types) {
-		return hostFuncDef{}, fmt.Errorf("component/instance: inline export %q: canon references type %d, out of range of %d types", name, canon.TypeIdx, len(comp.Types))
+	td, err := comp.ResolveType(canon.TypeIdx)
+	if err != nil {
+		return hostFuncDef{}, fmt.Errorf("component/instance: inline export %q: canon references type %d: %w", name, canon.TypeIdx, err)
 	}
-	if _, ok := comp.Types[canon.TypeIdx].Descriptor.(binary.ResourceDesc); !ok {
-		return hostFuncDef{}, fmt.Errorf("component/instance: inline export %q: canon type %d is not a resource type (got %T)", name, canon.TypeIdx, comp.Types[canon.TypeIdx].Descriptor)
+	if _, ok := td.(binary.ResourceDesc); !ok {
+		return hostFuncDef{}, fmt.Errorf("component/instance: inline export %q: canon type %d is not a resource type (got %T)", name, canon.TypeIdx, td)
 	}
 	typeIdx := canon.TypeIdx
 
@@ -384,12 +399,13 @@ func bindImportExports(comp *binary.Component, componentFunc func(uint32) (bool,
 			return nil, fmt.Errorf("component/instance: export %q resolves to an imported func rather than a lift; only lifted funcs may be exported", exp.Name)
 		}
 		canon := comp.Canons[liftCanonIdx]
-		if int(canon.TypeIdx) >= len(comp.Types) {
-			return nil, fmt.Errorf("component/instance: export %q lift references type %d, out of range of %d types", exp.Name, canon.TypeIdx, len(comp.Types))
+		td, err := comp.ResolveType(canon.TypeIdx)
+		if err != nil {
+			return nil, fmt.Errorf("component/instance: export %q lift references type %d: %w", exp.Name, canon.TypeIdx, err)
 		}
-		fd, ok := comp.Types[canon.TypeIdx].Descriptor.(binary.FuncDesc)
+		fd, ok := td.(binary.FuncDesc)
 		if !ok {
-			return nil, fmt.Errorf("component/instance: export %q lift type %d is not a func type (got %T)", exp.Name, canon.TypeIdx, comp.Types[canon.TypeIdx].Descriptor)
+			return nil, fmt.Errorf("component/instance: export %q lift type %d is not a func type (got %T)", exp.Name, canon.TypeIdx, td)
 		}
 
 		cfi := int(canon.CoreFuncIdx)

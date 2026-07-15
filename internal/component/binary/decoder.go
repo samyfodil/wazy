@@ -146,7 +146,16 @@ func decodeComponent(buf []byte) (*Component, error) {
 				return nil, fmt.Errorf("alias section: %w", err)
 			}
 			offset = newOffset
+			aliasBase := uint32(len(c.Aliases))
 			c.Aliases = append(c.Aliases, aliases...)
+			// Type-sort aliases (sort 0x03) occupy the next index in the
+			// component's full type index space, interleaved with
+			// type-section deftypes and imported types -- see typespace.go.
+			for j, al := range aliases {
+				if al.Sort == 0x03 {
+					c.TypeSpace = append(c.TypeSpace, TypeSpaceEntry{Kind: TypeSpaceAlias, Alias: aliasBase + uint32(j)})
+				}
+			}
 
 		case 7: // Type section
 			types, newOffset, err := decodeTypeSection(buf, offset, sectionSize)
@@ -157,6 +166,9 @@ func decodeComponent(buf []byte) (*Component, error) {
 			base := uint32(len(c.Types))
 			for j := range types {
 				types[j].Index = base + uint32(j)
+				// Every type-section deftype occupies the next index in the
+				// full type index space -- see typespace.go.
+				c.TypeSpace = append(c.TypeSpace, TypeSpaceEntry{Kind: TypeSpaceDef, Def: base + uint32(j)})
 			}
 			c.Types = append(c.Types, types...)
 
@@ -182,7 +194,18 @@ func decodeComponent(buf []byte) (*Component, error) {
 				return nil, fmt.Errorf("import section: %w", err)
 			}
 			offset = newOffset
+			importBase := uint32(len(c.Imports))
 			c.Imports = append(c.Imports, imports...)
+			// An import whose externdesc names a type (0x03) occupies the
+			// next index in the component's full type index space -- see
+			// typespace.go. Its structural definition is not decoded (see
+			// ResolveType), but its position in the space must still be
+			// accounted for so later deftypes/aliases get the right index.
+			for j, im := range imports {
+				if im.ExternType == 0x03 {
+					c.TypeSpace = append(c.TypeSpace, TypeSpaceEntry{Kind: TypeSpaceImport, Import: importBase + uint32(j)})
+				}
+			}
 
 		case 11: // Export section
 			exports, newOffset, err := decodeExportSection(buf, offset, sectionSize)
@@ -583,12 +606,16 @@ func decodeAliasSection(buf []byte, offset int, sectionSize uint32) ([]AliasDef,
 		sort := buf[offset]
 		offset++
 
-		// Handle core sort (0x00 carries a discriminator)
+		var coreSort byte
+		// Handle core sort (0x00 carries a discriminator: func/table/memory/
+		// global/tag/type/module/instance) that the instance engine needs to
+		// tell a core-func alias apart from a core-memory/table/global alias.
 		if sort == 0x00 {
 			if offset >= len(buf) {
 				return nil, offset, ErrTruncatedBinary
 			}
-			offset++ // skip discriminator for now
+			coreSort = buf[offset]
+			offset++
 		}
 
 		if offset >= len(buf) {
@@ -599,6 +626,7 @@ func decodeAliasSection(buf []byte, offset int, sectionSize uint32) ([]AliasDef,
 
 		var alias AliasDef
 		alias.Sort = sort
+		alias.CoreSort = coreSort
 		alias.TargetKind = targetKind
 
 		switch targetKind {
