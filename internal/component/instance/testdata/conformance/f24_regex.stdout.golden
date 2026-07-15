@@ -1,0 +1,16 @@
+-- emails --
+user=alice domain=example.com
+user=bob domain=work.org
+-- phones --
+47..59: 555-123-4567
+63..75: 555-987-6543
+-- redacted --
+Contact: [redacted], [redacted]; call 555-123-4567 or 555-987-6543.
+Contact: [redacted], [redacted]; call 555-***-**** or 555-***-****.
+-- word boundary split --
+["The", "quick", "brown", "fox", "jumps"]
+-- is_match --
+"12345" -> true
+"12a45" -> false
+"" -> false
+"0" -> true

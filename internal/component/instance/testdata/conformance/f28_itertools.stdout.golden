@@ -1,0 +1,25 @@
+-- chunks(4) --
+[1, 2, 3, 4]
+[5, 6, 7, 8]
+[9, 10, 11, 12]
+-- tuple_windows --
+(1,2,3) (2,3,4) (3,4,5) (4,5,6) (5,6,7) (6,7,8) (7,8,9) (8,9,10) (9,10,11) (10,11,12) 
+-- cartesian_product --
+[('a', 1), ('a', 2), ('b', 1), ('b', 2), ('c', 1), ('c', 2)]
+-- chunk_by --
+key=1 group=[1, 1]
+key=2 group=[2, 2, 2]
+key=3 group=[3]
+key=1 group=[1, 1]
+-- kmerge --
+[1, 2, 3, 4, 5, 6, 7, 8, 9]
+-- zip_longest --
+Both(1, "a")
+Both(2, "b")
+Left(3)
+-- dedup + sorted --
+[1, 2, 3, 4, 5, 6, 9]
+-- unique --
+["x", "y", "z", "w"]
+-- fold + min_max via minmax() --
+min=1 max=12

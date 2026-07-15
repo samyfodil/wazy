@@ -23,14 +23,21 @@ import (
 // WithWASI registers real implementations for exactly the WASI imports a
 // wasi:cli/command world's critical stdio path needs:
 //
-//   - wasi:cli/stdout.get-stdout, wasi:cli/stderr.get-stderr,
-//     wasi:cli/stdin.get-stdin: mint an own<output-stream>/own<input-stream>
-//     handle (via the M4.1 handle table, resource.go) whose host rep is one
-//     of two fixed constants (wasiStdoutRep/wasiStderrRep) identifying which
-//     configured io.Writer a later write resolves to. There is exactly one
-//     logical stdout stream and one logical stderr stream per Instance, so
-//     unlike the resource-scoped `output-stream` type at the WIT level,
-//     nothing here needs a dynamically-allocated rep pool.
+//   - wasi:cli/stdout.get-stdout, wasi:cli/stderr.get-stderr: mint an
+//     own<output-stream> handle (via the M4.1 handle table, resource.go)
+//     whose host rep is one of two fixed constants (wasiStdoutRep/
+//     wasiStderrRep) identifying which configured io.Writer a later write
+//     resolves to. There is exactly one logical stdout stream and one
+//     logical stderr stream per Instance, so unlike the resource-scoped
+//     `output-stream` type at the WIT level, nothing here needs a
+//     dynamically-allocated rep pool.
+//   - wasi:cli/stdin.get-stdin: mint an own<input-stream> handle over the
+//     entirety of WASIConfig.Stdin (read once, up front), reusing wasi_fs.go's
+//     fsStreamNode/[method]input-stream.{read,blocking-read} machinery --
+//     the same rep-resolution and EOF (stream-error::closed) path a file's
+//     read-via-stream stream goes through, not a separate implementation. A
+//     nil Stdin behaves as an always-empty stream (immediate EOF on the
+//     first read).
 //   - wasi:io/streams [method]output-stream.{check-write,write,
 //     blocking-write-and-flush,blocking-flush}: resolve the borrow<
 //     output-stream> self handle back to its rep, then read/write against
@@ -216,8 +223,35 @@ func WithWASI(cfg WASIConfig) []Option {
 	// one resource/handle namespace spanning both the two fixed stdio reps
 	// below and the dynamically-minted write-via-stream/append-via-stream
 	// reps wasi_fs.go's descriptor methods hand out (see writeSink's doc),
-	// so both halves of that dispatch need the same *wasiFS.
+	// so both halves of that dispatch need the same *wasiFS; get-stdin
+	// (below) also mints its input-stream reps through this same fs, reusing
+	// wasi_fs.go's fsStreamNode/streamNode/streamRead machinery (the exact
+	// path [method]descriptor.read-via-stream uses for file reads) instead
+	// of a separate stdin-only implementation.
 	fs := newWasiFS(cfg.FS)
+
+	// stdinBytes is the entirety of WASIConfig.Stdin, read once up front
+	// (mirrors read-via-stream's own model: an fsDescNode's content is a
+	// fully in-memory byte slice a stream then serves via a pos cursor --
+	// see fsStreamNode's doc). A real WASI stdin is a live, potentially
+	// unbounded stream, but every conformance fixture that reads stdin
+	// (f20_cat/f21_wc/f22_grep/f23_upper) is invoked with a fixed, already-
+	// fully-available byte string (WASIConfig.Stdin is a bytes.Reader over
+	// it in every caller), so eager slurp is both correct for those and
+	// consistent with the rest of this package's "no real I/O to actually
+	// block on" design (see streamRead's doc). A nil Stdin reads as an
+	// always-empty stream (io.ReadAll(nil-typed io.Reader) would panic, so
+	// this guards explicitly, matching WASIConfig.Stdin's doc).
+	var (
+		stdinBytes   []byte
+		stdinReadErr error
+	)
+	if cfg.Stdin != nil {
+		// Recorded, not swallowed: surfaced the first time get-stdin is
+		// actually called (below), so a guest that never touches stdin is
+		// unaffected by a bad Reader.
+		stdinBytes, stdinReadErr = io.ReadAll(cfg.Stdin)
+	}
 
 	writerForRep := func(rep uint32) (io.Writer, error) {
 		switch rep {
@@ -237,11 +271,23 @@ func WithWASI(cfg WASIConfig) []Option {
 		return []abi.Value{wasiStdoutRep}, nil
 	}
 	getStdin := func(context.Context, []abi.Value) ([]abi.Value, error) {
-		// input-stream has no methods in the WIT subset a wasi:cli/command
-		// world imports (see this file's package doc), so the rep this
-		// names is never resolved back through anything; any distinct
-		// constant works.
-		return []abi.Value{uint32(1)}, nil
+		if stdinReadErr != nil {
+			return nil, fmt.Errorf("wasi:cli/stdin.get-stdin: reading WASIConfig.Stdin: %w", stdinReadErr)
+		}
+		// Mint a real fsStreamNode over the fully-read stdin bytes, exactly
+		// as [method]descriptor.read-via-stream does for a file's content
+		// (wasi_fs.go) -- the rep this returns is then resolved by the very
+		// same [method]input-stream.{read,blocking-read} registered in
+		// wasiFilesystemOptions (both dispatch through fs.streamNode/
+		// fs.streams), so EOF (stream-error::closed, once pos reaches
+		// len(data)) and chunked reads work identically to a file-backed
+		// stream with no separate implementation. This func is registered
+		// via the plain WithImport path (not withImportCustom), so
+		// allocHandleResult (host_import.go) auto-wraps the returned bare
+		// rep into a real guest own<input-stream> handle -- mirrors
+		// getStdout/getStderr returning their own fixed reps the same way.
+		rep := fs.newStreamRep(&fsStreamNode{data: stdinBytes})
+		return []abi.Value{rep}, nil
 	}
 
 	exit := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {

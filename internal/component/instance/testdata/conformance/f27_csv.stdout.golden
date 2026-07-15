@@ -1,0 +1,12 @@
+-- parsed 5 rows --
+Alice | Engineering | 95000.00
+Bob | Sales | 72000.00
+Carol | Engineering | 110000.00
+Dave | Marketing | 68000.00
+Eve | Engineering | 88000.00
+-- engineering, +10%, sorted desc --
+name,department,salary
+Carol,Engineering,121000.00000000001
+Alice,Engineering,104500.00000000001
+Eve,Engineering,96800.00000000001
+total: 322300.00

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
+	"io"
 	"testing"
 
 	"github.com/samyfodil/wazy"
@@ -154,6 +155,65 @@ var conformanceFixtures = []conformanceFixture{
 		desc: "filter/map/flat_map/collect, zip/enumerate/fold, windows/chunks/scan, HashMap group-by (key-sorted for determinism), returned closures, Option/Result combinators, partition, take_while/skip_while, sort_by_key -- exercises complex iterator/closure chains with formatting",
 		wasm: f19IterchainsWasm, golden: f19IterchainsGolden,
 	},
+
+	// --- batch 3: two axes nothing above exercises -- (1) stdin, the last
+	// untested host->guest streaming data-flow direction (f20-f23: wired
+	// wasi:cli/stdin.get-stdin -> wasi_fs.go's fsStreamNode/input-stream.
+	// {read,blocking-read} machinery, backed by WASIConfig.Stdin instead of
+	// a file -- see wasi.go's getStdin doc), and (2) real third-party
+	// crates.io dependencies beyond serde_json (f13_json already covered
+	// serde; f24-f28 add regex, sha2+hex, base64, csv+serde, itertools). ---
+
+	{
+		name: "f20_cat",
+		desc: "std::io::stdin().read_to_end() then print verbatim + byte count -- simplest possible get-stdin -> input-stream.{read,blocking-read} -> EOF exercise, raw bytes (not read_to_string) including multi-byte UTF-8 and no trailing newline",
+		wasm: f20CatWasm, golden: f20CatGolden,
+		stdin: f20CatStdin,
+	},
+	{
+		name: "f21_wc",
+		desc: "std::io::stdin().read_to_string() then print line/word/byte counts (mimics `wc`) -- exercises the utf8 read_to_string path over stdin instead of f20_cat's raw read_to_end",
+		wasm: f21WcWasm, golden: f21WcGolden,
+		stdin: f21WcStdin,
+	},
+	{
+		name: "f22_grep",
+		desc: "read stdin, print 1-indexed lines containing a substring pattern taken from argv (case-sensitive str::contains) -- exercises stdin input-stream together with WASIConfig.Args in the same run",
+		wasm: f22GrepWasm, golden: f22GrepGolden,
+		stdin: f22GrepStdin,
+		args:  []string{"error"},
+	},
+	{
+		name: "f23_upperstdin",
+		desc: "read stdin (accented + CJK + emoji), print uppercased + char count -- Unicode case conversion fed entirely through the stdin input-stream path (vs f02_strings/f16_unicode's string literals), so the guest must assemble UTF-8 across the read-to-string boundary correctly",
+		wasm: f23UpperstdinWasm, golden: f23UpperstdinGolden,
+		stdin: f23UpperstdinStdin,
+	},
+	{
+		name: "f24_regex",
+		desc: "real `regex` crate: capture groups (email/phone), find_iter with byte offsets, replace_all (twice, chained), split on a pattern, is_match -- a real third-party crate with its own NFA/DFA engine and heap-heavy internals",
+		wasm: f24RegexWasm, golden: f24RegexGolden,
+	},
+	{
+		name: "f25_sha2",
+		desc: "real `sha2` + `hex` crates: SHA-256/SHA-512 of empty/ascii/unicode/10000-byte inputs, plus an incremental multi-update hash matching a single-shot hash of the concatenation -- deterministic cryptographic hashing through a real crate",
+		wasm: f25Sha2Wasm, golden: f25Sha2Golden,
+	},
+	{
+		name: "f26_base64",
+		desc: "real `base64` crate: standard/URL-safe/no-pad encode, decode round-trip of empty/ascii/unicode/all-256-byte-values/binary-with-nulls data -- exercises a real crate over raw non-UTF8 byte data end to end",
+		wasm: f26Base64Wasm, golden: f26Base64Golden,
+	},
+	{
+		name: "f27_csv",
+		desc: "real `csv` + `serde` derive crates: deserialize CSV text into typed structs, filter/transform/sort, re-serialize via csv::Writer -- exercises a real crate's record<->struct marshalling (including float formatting) end to end, in-memory only",
+		wasm: f27CsvWasm, golden: f27CsvGolden,
+	},
+	{
+		name: "f28_itertools",
+		desc: "real `itertools` crate: chunks, tuple_windows, cartesian_product, chunk_by, kmerge, zip_longest, dedup, unique, minmax -- heavy iterator-combinator usage over deterministic in-memory data",
+		wasm: f28ItertoolsWasm, golden: f28ItertoolsGolden,
+	},
 }
 
 type conformanceFixture struct {
@@ -166,6 +226,14 @@ type conformanceFixture struct {
 	args []string
 	env  []string
 	fs   map[string][]byte
+
+	// stdin, when non-nil, is fed to the guest via WASIConfig.Stdin (as a
+	// bytes.Reader) -- the exact bytes wasmtime's golden was captured
+	// against (see the fixture manifest doc's batch-3 note and wasi.go's
+	// getStdin doc). A nil stdin (every fixture before f20_cat) leaves
+	// WASIConfig.Stdin nil, matching wasmtime's default of an empty stdin
+	// for fixtures that never read it.
+	stdin []byte
 
 	// wantCallErr is true for fixtures whose guest terminates via
 	// wasi:cli/exit with a nonzero status (f09_exit): wazy has no host
@@ -192,10 +260,16 @@ func TestConformance(t *testing.T) {
 			r := wazy.NewRuntime(ctx)
 			defer r.Close(ctx)
 
+			var stdin io.Reader
+			if fx.stdin != nil {
+				stdin = bytes.NewReader(fx.stdin)
+			}
+
 			var stdout, stderr bytes.Buffer
 			inst, err := Instantiate(ctx, r, fx.wasm, WithWASI(WASIConfig{
 				Stdout: &stdout,
 				Stderr: &stderr,
+				Stdin:  stdin,
 				Args:   fx.args,
 				Env:    fx.env,
 				FS:     fx.fs,
@@ -367,3 +441,69 @@ var f19IterchainsWasm []byte
 
 //go:embed testdata/conformance/f19_iterchains.stdout.golden
 var f19IterchainsGolden string
+
+//go:embed testdata/conformance/f20_cat.component.wasm
+var f20CatWasm []byte
+
+//go:embed testdata/conformance/f20_cat.stdout.golden
+var f20CatGolden string
+
+//go:embed testdata/conformance/f20_cat.input.stdin.data
+var f20CatStdin []byte
+
+//go:embed testdata/conformance/f21_wc.component.wasm
+var f21WcWasm []byte
+
+//go:embed testdata/conformance/f21_wc.stdout.golden
+var f21WcGolden string
+
+//go:embed testdata/conformance/f21_wc.input.stdin.data
+var f21WcStdin []byte
+
+//go:embed testdata/conformance/f22_grep.component.wasm
+var f22GrepWasm []byte
+
+//go:embed testdata/conformance/f22_grep.stdout.golden
+var f22GrepGolden string
+
+//go:embed testdata/conformance/f22_grep.input.stdin.data
+var f22GrepStdin []byte
+
+//go:embed testdata/conformance/f23_upperstdin.component.wasm
+var f23UpperstdinWasm []byte
+
+//go:embed testdata/conformance/f23_upperstdin.stdout.golden
+var f23UpperstdinGolden string
+
+//go:embed testdata/conformance/f23_upperstdin.input.stdin.data
+var f23UpperstdinStdin []byte
+
+//go:embed testdata/conformance/f24_regex.component.wasm
+var f24RegexWasm []byte
+
+//go:embed testdata/conformance/f24_regex.stdout.golden
+var f24RegexGolden string
+
+//go:embed testdata/conformance/f25_sha2.component.wasm
+var f25Sha2Wasm []byte
+
+//go:embed testdata/conformance/f25_sha2.stdout.golden
+var f25Sha2Golden string
+
+//go:embed testdata/conformance/f26_base64.component.wasm
+var f26Base64Wasm []byte
+
+//go:embed testdata/conformance/f26_base64.stdout.golden
+var f26Base64Golden string
+
+//go:embed testdata/conformance/f27_csv.component.wasm
+var f27CsvWasm []byte
+
+//go:embed testdata/conformance/f27_csv.stdout.golden
+var f27CsvGolden string
+
+//go:embed testdata/conformance/f28_itertools.component.wasm
+var f28ItertoolsWasm []byte
+
+//go:embed testdata/conformance/f28_itertools.stdout.golden
+var f28ItertoolsGolden string
