@@ -1,0 +1,449 @@
+{
+  "borrow_handle": {
+    "alignment": 4,
+    "flatten": [
+      "i32"
+    ],
+    "kind": "value",
+    "size": 4
+  },
+  "enum_basic": {
+    "alignment": 1,
+    "flatten": [
+      "i32"
+    ],
+    "kind": "value",
+    "size": 1
+  },
+  "flags_16": {
+    "alignment": 2,
+    "flatten": [
+      "i32"
+    ],
+    "kind": "value",
+    "size": 2
+  },
+  "flags_17": {
+    "alignment": 4,
+    "flatten": [
+      "i32"
+    ],
+    "kind": "value",
+    "size": 4
+  },
+  "flags_32": {
+    "alignment": 4,
+    "flatten": [
+      "i32"
+    ],
+    "kind": "value",
+    "size": 4
+  },
+  "flags_8": {
+    "alignment": 1,
+    "flatten": [
+      "i32"
+    ],
+    "kind": "value",
+    "size": 1
+  },
+  "func_basic": {
+    "kind": "func",
+    "lift": {
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    "lower": {
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    }
+  },
+  "func_flat_count_spill": {
+    "kind": "func",
+    "lift": {
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    "lower": {
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    }
+  },
+  "func_many_params": {
+    "kind": "func",
+    "lift": {
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    "lower": {
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    }
+  },
+  "func_many_results_named": {
+    "kind": "func",
+    "lift": {
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    "lower": {
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": []
+    }
+  },
+  "func_no_spill_boundary": {
+    "kind": "func",
+    "lift": {
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    "lower": {
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    }
+  },
+  "func_variant_param": {
+    "kind": "func",
+    "lift": {
+      "params": [
+        "i32",
+        "i64"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    "lower": {
+      "params": [
+        "i32",
+        "i64",
+        "i32"
+      ],
+      "results": []
+    }
+  },
+  "list_record": {
+    "alignment": 4,
+    "flatten": [
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 8
+  },
+  "list_string": {
+    "alignment": 4,
+    "flatten": [
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 8
+  },
+  "list_u64": {
+    "alignment": 4,
+    "flatten": [
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 8
+  },
+  "list_u8": {
+    "alignment": 4,
+    "flatten": [
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 8
+  },
+  "option_record": {
+    "alignment": 4,
+    "flatten": [
+      "i32",
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 12
+  },
+  "option_string": {
+    "alignment": 4,
+    "flatten": [
+      "i32",
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 12
+  },
+  "option_u32": {
+    "alignment": 4,
+    "flatten": [
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 8
+  },
+  "own_handle": {
+    "alignment": 4,
+    "flatten": [
+      "i32"
+    ],
+    "kind": "value",
+    "size": 4
+  },
+  "prim_bool": {
+    "alignment": 1,
+    "flatten": [
+      "i32"
+    ],
+    "kind": "value",
+    "size": 1
+  },
+  "prim_char": {
+    "alignment": 4,
+    "flatten": [
+      "i32"
+    ],
+    "kind": "value",
+    "size": 4
+  },
+  "prim_f32": {
+    "alignment": 4,
+    "flatten": [
+      "f32"
+    ],
+    "kind": "value",
+    "size": 4
+  },
+  "prim_f64": {
+    "alignment": 8,
+    "flatten": [
+      "f64"
+    ],
+    "kind": "value",
+    "size": 8
+  },
+  "prim_s16": {
+    "alignment": 2,
+    "flatten": [
+      "i32"
+    ],
+    "kind": "value",
+    "size": 2
+  },
+  "prim_string": {
+    "alignment": 4,
+    "flatten": [
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 8
+  },
+  "prim_u32": {
+    "alignment": 4,
+    "flatten": [
+      "i32"
+    ],
+    "kind": "value",
+    "size": 4
+  },
+  "prim_u64": {
+    "alignment": 8,
+    "flatten": [
+      "i64"
+    ],
+    "kind": "value",
+    "size": 8
+  },
+  "prim_u8": {
+    "alignment": 1,
+    "flatten": [
+      "i32"
+    ],
+    "kind": "value",
+    "size": 1
+  },
+  "record_nested": {
+    "alignment": 4,
+    "flatten": [
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 20
+  },
+  "record_simple": {
+    "alignment": 4,
+    "flatten": [
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 8
+  },
+  "result_empty": {
+    "alignment": 1,
+    "flatten": [
+      "i32"
+    ],
+    "kind": "value",
+    "size": 1
+  },
+  "result_err_only": {
+    "alignment": 4,
+    "flatten": [
+      "i32",
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 12
+  },
+  "result_ok_err": {
+    "alignment": 4,
+    "flatten": [
+      "i32",
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 12
+  },
+  "result_ok_only": {
+    "alignment": 4,
+    "flatten": [
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 8
+  },
+  "tuple_basic": {
+    "alignment": 4,
+    "flatten": [
+      "i32",
+      "i32",
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 16
+  },
+  "tuple_nested": {
+    "alignment": 8,
+    "flatten": [
+      "i32",
+      "i32",
+      "i32",
+      "i64"
+    ],
+    "kind": "value",
+    "size": 24
+  },
+  "variant_i32f32": {
+    "alignment": 4,
+    "flatten": [
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 8
+  },
+  "variant_mixed_i64": {
+    "alignment": 8,
+    "flatten": [
+      "i32",
+      "i64"
+    ],
+    "kind": "value",
+    "size": 16
+  },
+  "variant_with_voids": {
+    "alignment": 8,
+    "flatten": [
+      "i32",
+      "i64"
+    ],
+    "kind": "value",
+    "size": 16
+  }
+}

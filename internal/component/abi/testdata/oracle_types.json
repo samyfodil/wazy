@@ -1,0 +1,890 @@
+{
+  "types": [
+    {
+      "name": "prim_bool",
+      "type": {
+        "kind": "primitive",
+        "prim": "bool"
+      }
+    },
+    {
+      "name": "prim_u8",
+      "type": {
+        "kind": "primitive",
+        "prim": "u8"
+      }
+    },
+    {
+      "name": "prim_s16",
+      "type": {
+        "kind": "primitive",
+        "prim": "s16"
+      }
+    },
+    {
+      "name": "prim_u32",
+      "type": {
+        "kind": "primitive",
+        "prim": "u32"
+      }
+    },
+    {
+      "name": "prim_u64",
+      "type": {
+        "kind": "primitive",
+        "prim": "u64"
+      }
+    },
+    {
+      "name": "prim_f32",
+      "type": {
+        "kind": "primitive",
+        "prim": "f32"
+      }
+    },
+    {
+      "name": "prim_f64",
+      "type": {
+        "kind": "primitive",
+        "prim": "f64"
+      }
+    },
+    {
+      "name": "prim_char",
+      "type": {
+        "kind": "primitive",
+        "prim": "char"
+      }
+    },
+    {
+      "name": "prim_string",
+      "type": {
+        "kind": "primitive",
+        "prim": "string"
+      }
+    },
+    {
+      "name": "record_simple",
+      "type": {
+        "kind": "record",
+        "fields": [
+          {
+            "name": "a",
+            "type": {
+              "kind": "primitive",
+              "prim": "u8"
+            }
+          },
+          {
+            "name": "b",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "record_nested",
+      "type": {
+        "kind": "record",
+        "fields": [
+          {
+            "name": "inner",
+            "type": {
+              "kind": "ref",
+              "name": "record_simple"
+            }
+          },
+          {
+            "name": "c",
+            "type": {
+              "kind": "primitive",
+              "prim": "u16"
+            }
+          },
+          {
+            "name": "d",
+            "type": {
+              "kind": "primitive",
+              "prim": "string"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "variant_mixed_i64",
+      "type": {
+        "kind": "variant",
+        "cases": [
+          {
+            "name": "a",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "b",
+            "type": {
+              "kind": "primitive",
+              "prim": "f32"
+            }
+          },
+          {
+            "name": "c",
+            "type": {
+              "kind": "primitive",
+              "prim": "f64"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "variant_i32f32",
+      "type": {
+        "kind": "variant",
+        "cases": [
+          {
+            "name": "a",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "b",
+            "type": {
+              "kind": "primitive",
+              "prim": "f32"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "variant_with_voids",
+      "type": {
+        "kind": "variant",
+        "cases": [
+          {
+            "name": "none1",
+            "type": null
+          },
+          {
+            "name": "val",
+            "type": {
+              "kind": "primitive",
+              "prim": "u64"
+            }
+          },
+          {
+            "name": "none2",
+            "type": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "tuple_basic",
+      "type": {
+        "kind": "tuple",
+        "elems": [
+          {
+            "kind": "primitive",
+            "prim": "u8"
+          },
+          {
+            "kind": "primitive",
+            "prim": "u32"
+          },
+          {
+            "kind": "primitive",
+            "prim": "string"
+          }
+        ]
+      }
+    },
+    {
+      "name": "tuple_nested",
+      "type": {
+        "kind": "tuple",
+        "elems": [
+          {
+            "kind": "ref",
+            "name": "record_simple"
+          },
+          {
+            "kind": "ref",
+            "name": "variant_mixed_i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "list_u64",
+      "type": {
+        "kind": "list",
+        "elem": {
+          "kind": "primitive",
+          "prim": "u64"
+        }
+      }
+    },
+    {
+      "name": "list_string",
+      "type": {
+        "kind": "list",
+        "elem": {
+          "kind": "primitive",
+          "prim": "string"
+        }
+      }
+    },
+    {
+      "name": "list_record",
+      "type": {
+        "kind": "list",
+        "elem": {
+          "kind": "ref",
+          "name": "record_simple"
+        }
+      }
+    },
+    {
+      "name": "list_u8",
+      "type": {
+        "kind": "list",
+        "elem": {
+          "kind": "primitive",
+          "prim": "u8"
+        }
+      }
+    },
+    {
+      "name": "option_u32",
+      "type": {
+        "kind": "option",
+        "elem": {
+          "kind": "primitive",
+          "prim": "u32"
+        }
+      }
+    },
+    {
+      "name": "option_string",
+      "type": {
+        "kind": "option",
+        "elem": {
+          "kind": "primitive",
+          "prim": "string"
+        }
+      }
+    },
+    {
+      "name": "option_record",
+      "type": {
+        "kind": "option",
+        "elem": {
+          "kind": "ref",
+          "name": "record_simple"
+        }
+      }
+    },
+    {
+      "name": "result_ok_err",
+      "type": {
+        "kind": "result",
+        "ok": {
+          "kind": "primitive",
+          "prim": "u32"
+        },
+        "err": {
+          "kind": "primitive",
+          "prim": "string"
+        }
+      }
+    },
+    {
+      "name": "result_ok_only",
+      "type": {
+        "kind": "result",
+        "ok": {
+          "kind": "primitive",
+          "prim": "u32"
+        },
+        "err": null
+      }
+    },
+    {
+      "name": "result_err_only",
+      "type": {
+        "kind": "result",
+        "ok": null,
+        "err": {
+          "kind": "primitive",
+          "prim": "string"
+        }
+      }
+    },
+    {
+      "name": "result_empty",
+      "type": {
+        "kind": "result",
+        "ok": null,
+        "err": null
+      }
+    },
+    {
+      "name": "flags_8",
+      "type": {
+        "kind": "flags",
+        "names": [
+          "f0",
+          "f1",
+          "f2",
+          "f3",
+          "f4",
+          "f5",
+          "f6",
+          "f7"
+        ]
+      }
+    },
+    {
+      "name": "flags_16",
+      "type": {
+        "kind": "flags",
+        "names": [
+          "f0",
+          "f1",
+          "f2",
+          "f3",
+          "f4",
+          "f5",
+          "f6",
+          "f7",
+          "f8",
+          "f9",
+          "f10",
+          "f11",
+          "f12",
+          "f13",
+          "f14",
+          "f15"
+        ]
+      }
+    },
+    {
+      "name": "flags_17",
+      "type": {
+        "kind": "flags",
+        "names": [
+          "f0",
+          "f1",
+          "f2",
+          "f3",
+          "f4",
+          "f5",
+          "f6",
+          "f7",
+          "f8",
+          "f9",
+          "f10",
+          "f11",
+          "f12",
+          "f13",
+          "f14",
+          "f15",
+          "f16"
+        ]
+      }
+    },
+    {
+      "name": "flags_32",
+      "type": {
+        "kind": "flags",
+        "names": [
+          "f0",
+          "f1",
+          "f2",
+          "f3",
+          "f4",
+          "f5",
+          "f6",
+          "f7",
+          "f8",
+          "f9",
+          "f10",
+          "f11",
+          "f12",
+          "f13",
+          "f14",
+          "f15",
+          "f16",
+          "f17",
+          "f18",
+          "f19",
+          "f20",
+          "f21",
+          "f22",
+          "f23",
+          "f24",
+          "f25",
+          "f26",
+          "f27",
+          "f28",
+          "f29",
+          "f30",
+          "f31"
+        ]
+      }
+    },
+    {
+      "name": "enum_basic",
+      "type": {
+        "kind": "enum",
+        "cases": [
+          "red",
+          "green",
+          "blue",
+          "alpha",
+          "omega"
+        ]
+      }
+    },
+    {
+      "name": "own_handle",
+      "type": {
+        "kind": "own"
+      }
+    },
+    {
+      "name": "borrow_handle",
+      "type": {
+        "kind": "borrow"
+      }
+    },
+    {
+      "name": "func_basic",
+      "type": {
+        "kind": "func",
+        "params": [
+          {
+            "name": "a",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "b",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          }
+        ],
+        "results": {
+          "unnamed": {
+            "kind": "primitive",
+            "prim": "u32"
+          }
+        }
+      }
+    },
+    {
+      "name": "func_many_params",
+      "type": {
+        "kind": "func",
+        "params": [
+          {
+            "name": "p0",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p1",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p2",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p3",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p4",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p5",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p6",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p7",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p8",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p9",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p10",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p11",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p12",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p13",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p14",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p15",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p16",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          }
+        ],
+        "results": {
+          "unnamed": {
+            "kind": "primitive",
+            "prim": "u32"
+          }
+        }
+      }
+    },
+    {
+      "name": "func_no_spill_boundary",
+      "type": {
+        "kind": "func",
+        "params": [
+          {
+            "name": "p0",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p1",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p2",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p3",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p4",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p5",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p6",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p7",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p8",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p9",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p10",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p11",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p12",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p13",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p14",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "p15",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          }
+        ],
+        "results": {
+          "unnamed": {
+            "kind": "primitive",
+            "prim": "u32"
+          }
+        }
+      }
+    },
+    {
+      "name": "func_many_results_named",
+      "type": {
+        "kind": "func",
+        "params": [
+          {
+            "name": "a",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          }
+        ],
+        "results": {
+          "named": [
+            {
+              "name": "x",
+              "type": {
+                "kind": "primitive",
+                "prim": "u32"
+              }
+            },
+            {
+              "name": "y",
+              "type": {
+                "kind": "primitive",
+                "prim": "u32"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "func_flat_count_spill",
+      "type": {
+        "kind": "func",
+        "params": [
+          {
+            "name": "s0",
+            "type": {
+              "kind": "primitive",
+              "prim": "string"
+            }
+          },
+          {
+            "name": "s1",
+            "type": {
+              "kind": "primitive",
+              "prim": "string"
+            }
+          },
+          {
+            "name": "s2",
+            "type": {
+              "kind": "primitive",
+              "prim": "string"
+            }
+          },
+          {
+            "name": "s3",
+            "type": {
+              "kind": "primitive",
+              "prim": "string"
+            }
+          },
+          {
+            "name": "s4",
+            "type": {
+              "kind": "primitive",
+              "prim": "string"
+            }
+          },
+          {
+            "name": "s5",
+            "type": {
+              "kind": "primitive",
+              "prim": "string"
+            }
+          },
+          {
+            "name": "s6",
+            "type": {
+              "kind": "primitive",
+              "prim": "string"
+            }
+          },
+          {
+            "name": "s7",
+            "type": {
+              "kind": "primitive",
+              "prim": "string"
+            }
+          },
+          {
+            "name": "s8",
+            "type": {
+              "kind": "primitive",
+              "prim": "string"
+            }
+          }
+        ],
+        "results": {
+          "unnamed": {
+            "kind": "primitive",
+            "prim": "u32"
+          }
+        }
+      }
+    },
+    {
+      "name": "func_variant_param",
+      "type": {
+        "kind": "func",
+        "params": [
+          {
+            "name": "v",
+            "type": {
+              "kind": "ref",
+              "name": "variant_mixed_i64"
+            }
+          }
+        ],
+        "results": {
+          "unnamed": {
+            "kind": "ref",
+            "name": "option_u32"
+          }
+        }
+      }
+    }
+  ]
+}
