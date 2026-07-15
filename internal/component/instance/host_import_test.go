@@ -46,11 +46,52 @@ func TestImports_NonInstanceImport(t *testing.T) {
 	requireErrContains(t, err, "only instance imports")
 }
 
-func TestImports_NestedInstances(t *testing.T) {
+// TestImports_UnreferencedNestedInstance proves a nested component instance
+// that no export points at is simply unused, not an error -- only the
+// component-export -> Instance -> NestedComponent chain (bindInstanceExport)
+// is walked, matching how comp.Canons entries that no export reaches are
+// also never independently validated.
+func TestImports_UnreferencedNestedInstance(t *testing.T) {
 	comp := decodeLogHello(t)
 	comp.Instances = []binary.Instance{{Kind: 0x00}}
+	inst, err := runImport(t, comp, stringLogOpt(noopLog))
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	inst.Close(context.Background())
+}
+
+// TestImports_InstanceExportNestedComponentOutOfRange exercises the
+// instance-export resolution path (bindInstanceExport): an export naming an
+// Instance whose ComponentIdx has no matching decoded NestedComponent (e.g.
+// log_hello, which has none) fails loud rather than panicking or silently
+// producing a broken export.
+func TestImports_InstanceExportNestedComponentOutOfRange(t *testing.T) {
+	comp := decodeLogHello(t)
+	comp.Instances = []binary.Instance{{Kind: 0x00, ComponentIdx: 0}}
+	comp.Exports = append(comp.Exports, binary.Export{Name: "extra", ExternType: 0x05, ExternIndex: 0})
 	_, err := runImport(t, comp, stringLogOpt(noopLog))
-	requireErrContains(t, err, "nested component instance")
+	requireErrContains(t, err, "decoded nested component")
+}
+
+// TestImports_InstanceExportInlineKindUnsupported exercises the inline-export
+// (Kind == 0x01) Instance branch of bindInstanceExport, which is not a
+// component instantiation and so cannot name a nested component to resolve.
+func TestImports_InstanceExportInlineKindUnsupported(t *testing.T) {
+	comp := decodeLogHello(t)
+	comp.Instances = []binary.Instance{{Kind: 0x01}}
+	comp.Exports = append(comp.Exports, binary.Export{Name: "extra", ExternType: 0x05, ExternIndex: 0})
+	_, err := runImport(t, comp, stringLogOpt(noopLog))
+	requireErrContains(t, err, "not a component instantiation")
+}
+
+// TestImports_InstanceExportIndexOutOfRange exercises the export.ExternIndex
+// out of range of comp.Instances branch of bindInstanceExport.
+func TestImports_InstanceExportIndexOutOfRange(t *testing.T) {
+	comp := decodeLogHello(t)
+	comp.Exports = append(comp.Exports, binary.Export{Name: "extra", ExternType: 0x05, ExternIndex: 99})
+	_, err := runImport(t, comp, stringLogOpt(noopLog))
+	requireErrContains(t, err, "out of range of 0 instance(s)")
 }
 
 func TestImports_UnsupportedCanonKind(t *testing.T) {
@@ -103,11 +144,11 @@ func TestImports_FromExportsMultipleNames(t *testing.T) {
 	requireErrContains(t, err, "referenced under 2 name(s)")
 }
 
-func TestImports_ExportNotFunc(t *testing.T) {
+func TestImports_ExportNotFuncOrInstance(t *testing.T) {
 	comp := decodeLogHello(t)
-	comp.Exports[0].ExternType = 0x05 // instance
+	comp.Exports[0].ExternType = 0x02 // value
 	_, err := runImport(t, comp, stringLogOpt(noopLog))
-	requireErrContains(t, err, "only func exports")
+	requireErrContains(t, err, "only func and instance exports")
 }
 
 func TestImports_ExportResolvesToImport(t *testing.T) {
@@ -137,6 +178,188 @@ func TestImports_ExportComponentFuncOutOfRange(t *testing.T) {
 	comp.Exports[0].ExternIndex = 99
 	_, err := runImport(t, comp, stringLogOpt(noopLog))
 	requireErrContains(t, err, "component func index space")
+}
+
+// TestImports_ExportPostReturnOutOfRange exercises bindFuncExport's
+// post-return wiring: an out-of-range post-return CanonOpt index on the
+// "run" lift fails loud (via resolvePostReturnFunc) instead of being
+// silently ignored.
+func TestImports_ExportPostReturnOutOfRange(t *testing.T) {
+	comp := decodeLogHello(t)
+	comp.Canons[1].Opts = append(comp.Canons[1].Opts, binary.CanonOpt{Kind: 0x05, Idx: 99})
+	_, err := runImport(t, comp, stringLogOpt(noopLog))
+	requireErrContains(t, err, "out of range of the core func index space")
+}
+
+// ------- resolvePostReturnFunc (pure unit tests) -------
+
+func TestResolvePostReturnFunc_NoOpt(t *testing.T) {
+	name, err := resolvePostReturnFunc(binary.Canon{}, nil, 0, 0)
+	if err != nil || name != "" {
+		t.Fatalf("got (%q, %v), want (\"\", nil)", name, err)
+	}
+}
+
+func TestResolvePostReturnFunc_CanonProducedFunc(t *testing.T) {
+	canon := binary.Canon{Opts: []binary.CanonOpt{{Kind: 0x05, Idx: 0}}}
+	_, err := resolvePostReturnFunc(canon, nil, 1, 0) // idx 0 < numProducedCoreFuncs (1)
+	requireErrContains(t, err, "canon-produced func")
+}
+
+func TestResolvePostReturnFunc_OutOfRange(t *testing.T) {
+	canon := binary.Canon{Opts: []binary.CanonOpt{{Kind: 0x05, Idx: 5}}}
+	_, err := resolvePostReturnFunc(canon, []aliasTarget{{name: "a"}}, 0, 0)
+	requireErrContains(t, err, "out of range of the core func index space")
+}
+
+func TestResolvePostReturnFunc_CrossInstanceMismatch(t *testing.T) {
+	canon := binary.Canon{Opts: []binary.CanonOpt{{Kind: 0x05, Idx: 0}}}
+	_, err := resolvePostReturnFunc(canon, []aliasTarget{{instIdx: 1, name: "pr"}}, 0, 0)
+	requireErrContains(t, err, "cross-instance post-return is not supported")
+}
+
+func TestResolvePostReturnFunc_Success(t *testing.T) {
+	canon := binary.Canon{Opts: []binary.CanonOpt{{Kind: 0x05, Idx: 0}}}
+	name, err := resolvePostReturnFunc(canon, []aliasTarget{{instIdx: 0, name: "pr"}}, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "pr" {
+		t.Fatalf("got %q, want %q", name, "pr")
+	}
+}
+
+// ------- validateShimComponent / bindInstanceExport (pure unit tests) -------
+
+func TestValidateShimComponent(t *testing.T) {
+	if err := validateShimComponent(&binary.Component{}); err != nil {
+		t.Fatalf("empty nested component should validate: %v", err)
+	}
+	if err := validateShimComponent(&binary.Component{Imports: []binary.Import{{ExternType: 0x01}}}); err != nil {
+		t.Fatalf("func imports only should validate: %v", err)
+	}
+
+	cases := []struct {
+		name  string
+		shim  *binary.Component
+		wants string
+	}{
+		{"core module", &binary.Component{CoreModules: []binary.CoreModule{{}}}, "not a pure re-export shim"},
+		{"core instance", &binary.Component{CoreInstances: []binary.CoreInstance{{}}}, "not a pure re-export shim"},
+		{"canon", &binary.Component{Canons: []binary.Canon{{}}}, "not a pure re-export shim"},
+		{"nested instance", &binary.Component{Instances: []binary.Instance{{}}}, "not a pure re-export shim"},
+		{"further nesting", &binary.Component{NestedComponents: []*binary.Component{{}}}, "not a pure re-export shim"},
+		{"func-sort alias", &binary.Component{Aliases: []binary.AliasDef{{Sort: 0x01}}}, "not a pure re-export shim"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateShimComponent(tc.shim)
+			requireErrContains(t, err, tc.wants)
+		})
+	}
+}
+
+func TestShimFuncImportNames(t *testing.T) {
+	nested := &binary.Component{Imports: []binary.Import{
+		{Name: "t", ExternType: 0x03}, // type import: not a func-sort item
+		{Name: "a", ExternType: 0x01},
+		{Name: "b", ExternType: 0x01},
+	}}
+	got := shimFuncImportNames(nested)
+	want := []string{"a", "b"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// noopComponentFunc is a componentFunc stub for bindInstanceExport unit
+// tests that only need to exercise validation branches which bail before
+// ever calling componentFunc.
+func noopComponentFunc(uint32) (bool, int, aliasTarget, error) {
+	return false, 0, aliasTarget{}, nil
+}
+
+func TestBindInstanceExport_InstanceIndexOutOfRange(t *testing.T) {
+	comp := &binary.Component{}
+	exp := binary.Export{Name: "inst", ExternType: 0x05, ExternIndex: 0}
+	err := bindInstanceExport(comp, exp, noopComponentFunc, nil, nil, 0, map[string]*boundExport{})
+	requireErrContains(t, err, "out of range of 0 instance(s)")
+}
+
+func TestBindInstanceExport_InlineKindUnsupported(t *testing.T) {
+	comp := &binary.Component{Instances: []binary.Instance{{Kind: 0x01}}}
+	exp := binary.Export{Name: "inst", ExternType: 0x05, ExternIndex: 0}
+	err := bindInstanceExport(comp, exp, noopComponentFunc, nil, nil, 0, map[string]*boundExport{})
+	requireErrContains(t, err, "not a component instantiation")
+}
+
+func TestBindInstanceExport_NestedComponentOutOfRange(t *testing.T) {
+	comp := &binary.Component{Instances: []binary.Instance{{Kind: 0x00, ComponentIdx: 0}}}
+	exp := binary.Export{Name: "inst", ExternType: 0x05, ExternIndex: 0}
+	err := bindInstanceExport(comp, exp, noopComponentFunc, nil, nil, 0, map[string]*boundExport{})
+	requireErrContains(t, err, "decoded nested component")
+}
+
+func TestBindInstanceExport_NotPureShim(t *testing.T) {
+	comp := &binary.Component{
+		Instances:        []binary.Instance{{Kind: 0x00, ComponentIdx: 0}},
+		NestedComponents: []*binary.Component{{CoreModules: []binary.CoreModule{{}}}},
+	}
+	exp := binary.Export{Name: "inst", ExternType: 0x05, ExternIndex: 0}
+	err := bindInstanceExport(comp, exp, noopComponentFunc, nil, nil, 0, map[string]*boundExport{})
+	requireErrContains(t, err, "out of scope for this milestone")
+}
+
+func TestBindInstanceExport_MemberNotFunc(t *testing.T) {
+	comp := &binary.Component{
+		Instances: []binary.Instance{{Kind: 0x00, ComponentIdx: 0}},
+		NestedComponents: []*binary.Component{{
+			Exports: []binary.Export{{Name: "x", ExternType: 0x02}}, // value, not func
+		}},
+	}
+	exp := binary.Export{Name: "inst", ExternType: 0x05, ExternIndex: 0}
+	err := bindInstanceExport(comp, exp, noopComponentFunc, nil, nil, 0, map[string]*boundExport{})
+	requireErrContains(t, err, "only func members are supported")
+}
+
+func TestBindInstanceExport_MemberFuncIdxOutOfRange(t *testing.T) {
+	comp := &binary.Component{
+		Instances: []binary.Instance{{Kind: 0x00, ComponentIdx: 0}},
+		NestedComponents: []*binary.Component{{
+			Exports: []binary.Export{{Name: "add", ExternType: 0x01, ExternIndex: 5}}, // no imports at all
+		}},
+	}
+	exp := binary.Export{Name: "inst", ExternType: 0x05, ExternIndex: 0}
+	err := bindInstanceExport(comp, exp, noopComponentFunc, nil, nil, 0, map[string]*boundExport{})
+	requireErrContains(t, err, "out of range of the shim's")
+}
+
+func TestBindInstanceExport_ShimImportNoMatchingArg(t *testing.T) {
+	comp := &binary.Component{
+		Instances: []binary.Instance{{Kind: 0x00, ComponentIdx: 0}}, // no Args
+		NestedComponents: []*binary.Component{{
+			Imports: []binary.Import{{Name: "import-func-add", ExternType: 0x01}},
+			Exports: []binary.Export{{Name: "add", ExternType: 0x01, ExternIndex: 0}},
+		}},
+	}
+	exp := binary.Export{Name: "inst", ExternType: 0x05, ExternIndex: 0}
+	err := bindInstanceExport(comp, exp, noopComponentFunc, nil, nil, 0, map[string]*boundExport{})
+	requireErrContains(t, err, "no matching instantiate-arg")
+}
+
+func TestBindInstanceExport_ArgNonFuncSort(t *testing.T) {
+	comp := &binary.Component{
+		Instances: []binary.Instance{{Kind: 0x00, ComponentIdx: 0, Args: []binary.InstantiateArg{
+			{Name: "import-func-add", Sort: 0x03, SortIdx: 0}, // type sort, not func
+		}}},
+		NestedComponents: []*binary.Component{{
+			Imports: []binary.Import{{Name: "import-func-add", ExternType: 0x01}},
+			Exports: []binary.Export{{Name: "add", ExternType: 0x01, ExternIndex: 0}},
+		}},
+	}
+	exp := binary.Export{Name: "inst", ExternType: 0x05, ExternIndex: 0}
+	err := bindInstanceExport(comp, exp, noopComponentFunc, nil, nil, 0, map[string]*boundExport{})
+	requireErrContains(t, err, "non-func sort")
 }
 
 // TestImports_CoreExportAlias_CoreSortMismatchFallsBackToProbe simulates a

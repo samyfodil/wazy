@@ -125,11 +125,19 @@ func decodeComponent(buf []byte) (*Component, error) {
 			c.RawSections = append(c.RawSections, RawSection{ID: sectionID, Size: sectionSize})
 			offset += int(sectionSize)
 
-		case 4: // Component section (not yet fully decoded)
+		case 4: // Component section: a fully embedded nested component.
 			if sectionSize > uint32(len(buf)-offset) {
 				return nil, fmt.Errorf("section %s: %w", sectionIDName(sectionID), ErrTruncatedBinary)
 			}
-			c.RawSections = append(c.RawSections, RawSection{ID: sectionID, Size: sectionSize})
+			// Per Binary.md, section_4(<component>) carries a *complete*
+			// component binary (preamble included), so it recurses through
+			// decodeComponent unchanged rather than through Decode (which
+			// would re-read the whole buffer via io.ReadAll).
+			nested, err := decodeComponent(buf[offset : offset+int(sectionSize)])
+			if err != nil {
+				return nil, fmt.Errorf("nested component[%d]: %w", len(c.NestedComponents), err)
+			}
+			c.NestedComponents = append(c.NestedComponents, nested)
 			offset += int(sectionSize)
 
 		case 5: // Instance section

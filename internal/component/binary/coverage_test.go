@@ -2574,6 +2574,72 @@ func TestDumpWithNilStart(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------
+// Nested component section (id 4) tests
+// ---------------------------------------------------------------------
+
+// TestNestedComponentSection_Decoded proves section 4's body is decoded
+// recursively as a full nested component (its own preamble included, per
+// Binary.md's section_4(<component>) grammar), not skipped into RawSections.
+func TestNestedComponentSection_Decoded(t *testing.T) {
+	nested := preamble() // a minimal, valid, entirely empty nested component
+	buf := preamble()
+	buf = append(buf, 4, byte(len(nested)))
+	buf = append(buf, nested...)
+
+	c, err := Decode(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if len(c.NestedComponents) != 1 {
+		t.Fatalf("NestedComponents: got %d, want 1", len(c.NestedComponents))
+	}
+	if len(c.NestedComponents[0].Types) != 0 || len(c.NestedComponents[0].Imports) != 0 {
+		t.Errorf("nested component: expected an empty decode, got %+v", c.NestedComponents[0])
+	}
+	for _, rawID := range []byte{4} {
+		for _, rs := range c.RawSections {
+			if rs.ID == rawID {
+				t.Errorf("section id 4 should be decoded into NestedComponents, not left in RawSections: %+v", rs)
+			}
+		}
+	}
+}
+
+// TestNestedComponentSection_Truncated proves a section-4 size claim that
+// overruns the remaining buffer fails loud (the bounds check that guards the
+// buf[offset:offset+size] slice before recursing).
+func TestNestedComponentSection_Truncated(t *testing.T) {
+	buf := preamble()
+	buf = append(buf, 4, 0x10) // claims 16 bytes but none follow
+	_, err := Decode(bytes.NewReader(buf))
+	if !errors.Is(err, ErrTruncatedBinary) {
+		t.Fatalf("expected ErrTruncatedBinary, got %v", err)
+	}
+}
+
+// TestNestedComponentSection_InvalidNested proves a section-4 body that is
+// present and correctly sized, but not itself a valid component (bad
+// preamble), fails loud with an error naming the nested component rather
+// than being silently accepted or panicking.
+func TestNestedComponentSection_InvalidNested(t *testing.T) {
+	badNested := []byte{0xff, 0xff, 0xff, 0xff, 0x0d, 0x00, 0x01, 0x00} // bad magic
+	buf := preamble()
+	buf = append(buf, 4, byte(len(badNested)))
+	buf = append(buf, badNested...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected an error decoding an invalid nested component")
+	}
+	if !strings.Contains(err.Error(), "nested component[0]") {
+		t.Errorf("error should name the nested component: %v", err)
+	}
+	if !errors.Is(err, ErrInvalidMagicNumber) {
+		t.Errorf("expected the wrapped error to be ErrInvalidMagicNumber, got %v", err)
+	}
+}
+
 func TestReadSortidxTruncated(t *testing.T) {
 	tests := []struct {
 		name string

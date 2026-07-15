@@ -37,6 +37,25 @@ type Component struct {
 	// Instances instantiate components with arguments (section 5).
 	Instances []Instance
 
+	// NestedComponents are fully embedded sub-components (section 4), decoded
+	// recursively -- per the Binary.md grammar, section_4(<component>) is a
+	// complete component binary (its own magic/version/layer preamble plus
+	// its own sections), not a bare section list. wit-component emits these
+	// for a world that exports an interface: it packages the lifted core
+	// funcs into a nested-component "shim" that re-exports them, and the
+	// top-level export names an Instance (section 5) that instantiates this
+	// nested component -- see internal/component/instance, which resolves
+	// that shim to call the funcs it re-exports.
+	//
+	// Some real-world nested components (e.g. the wasip2 CLI adapter emitted
+	// alongside a `wasi:cli/command` world) are far more complex than the
+	// re-export shim -- they embed their own core module and full
+	// instantiation graph. Those still decode fine here (this is a purely
+	// structural, recursive decode with no semantic assumptions), but
+	// internal/component/instance fails loud rather than trying to
+	// instantiate them.
+	NestedComponents []*Component
+
 	// Aliases bring names into scope (section 6).
 	Aliases []AliasDef
 

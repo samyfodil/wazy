@@ -19,9 +19,24 @@
 //     imports and calls. The caller supplies Go implementations via WithImport.
 //     See host_import.go for the lowering/wrapper machinery.
 //
-// Still rejected in both: canon resource.* built-ins, non-func exports,
-// multi-result functions, whole-parameter-list / result spilling to memory,
-// and string/list values when no linear memory is available.
+// The host-import path also handles a component with zero WIT imports whose
+// world *exports an interface* rather than a bare function: wit-component
+// packages the lifted funcs into a nested "re-export shim" component (a
+// second, fully embedded component -- binary.Component.NestedComponents)
+// and an Instance that instantiates it, with the top-level export naming
+// that instance. See resolveInstanceExport / bindInstanceExport in
+// host_import.go for how that shim is resolved back to the outer canon
+// lifts, and CallExport for how a caller reaches a function inside it. A
+// canon lift's post-return option (e.g. on a function returning a string)
+// is also wired here: the post-return core func is called with the lift's
+// flat results immediately after lifting, per definitions.py's canon_lift.
+//
+// Still rejected in both: canon resource.* built-ins, non-func exports
+// outside the re-export-shim shape above, multi-result functions,
+// whole-parameter-list / result spilling to memory, string/list values when
+// no linear memory is available, and any nested component beyond a pure
+// re-export shim (e.g. the wasip2 CLI adapter shim, which embeds its own
+// core module and instantiation graph -- out of scope here).
 //
 // # Decoder gaps worked around here
 //
@@ -74,6 +89,15 @@ type boundExport struct {
 	mod      api.Module      // exports funcName; its Memory() backs lower/lift
 	funcName string          // core export name to call
 	fd       binary.FuncDesc // component-level func type (lift signature)
+
+	// postReturnFuncName is the core export to call, on mod, after lifting
+	// the result -- the canon lift's post-return option (CanonOpt kind
+	// 0x05). Empty when the lift declares no post-return. Per
+	// definitions.py's canon_lift, it is called with the same flat core
+	// values the lift produced (not the lifted abi.Value), after lifting has
+	// finished reading them, so the guest can free/reuse any memory the call
+	// allocated (e.g. a returned string's backing bytes).
+	postReturnFuncName string
 }
 
 // Instantiate decodes componentBytes as a WebAssembly component, instantiates
@@ -107,9 +131,17 @@ func Instantiate(ctx context.Context, r wazy.Runtime, componentBytes []byte, opt
 // grouped into their own inline-export core instance (exactly like a lowered
 // import func), which the main core module then imports by instantiate-arg,
 // so the component ends up with more than one core instance even though it
-// has zero component-level imports.
+// has zero component-level imports. It also covers a component whose world
+// exports an interface: that shape needs zero WIT imports and only canon
+// lift, but still declares a nested component instance (comp.Instances) for
+// the re-export shim -- see the package doc -- which only the general path
+// (bindInstanceExport) resolves; instantiateComponent's strict path rejects
+// any nested component instance outright.
 func needsImportPath(comp *binary.Component) bool {
 	if len(comp.Imports) > 0 {
+		return true
+	}
+	if len(comp.Instances) > 0 {
 		return true
 	}
 	for _, cn := range comp.Canons {
@@ -299,6 +331,31 @@ func (in *Instance) Call(ctx context.Context, exportName string, args ...abi.Val
 	return in.invoke(ctx, be, exportName, args)
 }
 
+// CallExport invokes memberName inside the exported instance instanceName.
+//
+// A WIT world that exports an *interface* (rather than a bare function)
+// compiles to a component whose top-level export is instance-typed: the
+// tooling packages the interface's lifted functions into a nested
+// "re-export shim" component and an Instance (section 5) that instantiates
+// it, and the top-level export names that instance -- see
+// resolveInstanceExport in host_import.go. CallExport is how a caller
+// reaches a function inside such an instance, e.g.
+// CallExport(ctx, "component:adder/calc", "add", u32(2), u32(3)).
+//
+// This is sugar for Call(ctx, instanceName+"#"+memberName, args...); both
+// spellings work, since instance members are bound into the same exports
+// map as plain func exports.
+func (in *Instance) CallExport(ctx context.Context, instanceName, memberName string, args ...abi.Value) ([]abi.Value, error) {
+	return in.Call(ctx, instanceExportKey(instanceName, memberName), args...)
+}
+
+// instanceExportKey builds the exports-map key for a member function inside
+// an exported instance, joining the instance export name and the member
+// name with "#".
+func instanceExportKey(instanceName, memberName string) string {
+	return instanceName + "#" + memberName
+}
+
 func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName string, args []abi.Value) ([]abi.Value, error) {
 	fd := be.fd
 	if len(args) != len(fd.Params) {
@@ -340,7 +397,28 @@ func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName stri
 		return nil, fmt.Errorf("component/instance: export %q: call core func %q: %w", exportName, be.funcName, err)
 	}
 
-	return in.liftResult(fd, rawResults, coreResultsWant, mem, memAvailable, exportName)
+	results, err := in.liftResult(fd, rawResults, coreResultsWant, mem, memAvailable, exportName)
+	if err != nil {
+		return nil, err
+	}
+
+	// Post-return runs after lifting has finished reading rawResults (e.g. a
+	// returned string's bytes), so the guest can safely free/reuse that
+	// memory. Per definitions.py's canon_lift, it is called with the same
+	// flat core values the lift produced.
+	if be.postReturnFuncName != "" {
+		prFn := be.mod.ExportedFunction(be.postReturnFuncName)
+		if prFn == nil {
+			return nil, fmt.Errorf("component/instance: export %q: post-return core func %q not found", exportName, be.postReturnFuncName)
+		}
+		prArgs := make([]uint64, len(rawResults))
+		copy(prArgs, rawResults)
+		if _, err := prFn.Call(ctx, prArgs...); err != nil {
+			return nil, fmt.Errorf("component/instance: export %q: post-return %q: %w", exportName, be.postReturnFuncName, err)
+		}
+	}
+
+	return results, nil
 }
 
 // lowerParams lowers each component-level argument into its flattened core
@@ -390,6 +468,35 @@ func (in *Instance) liftResult(fd binary.FuncDesc, rawResults []uint64, coreResu
 	flatKinds, err := abi.Flatten(rt, in.resolve)
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: export %q result: %w", exportName, err)
+	}
+
+	// Per the Canonical ABI (definitions.py's flatten_functype), when a
+	// lift's result flattens to more than MAX_FLAT_RESULTS (1) core values
+	// -- e.g. a string result, which flattens to (ptr, len) -- the core
+	// function instead returns a single i32: a pointer into its own linear
+	// memory where it wrote the result using the type's normal (non-flat)
+	// store/load representation, not the flat value sequence. abi.LiftFlat's
+	// own spill path exists for this same pattern but is gated on
+	// MaxFlatParams (16, the *parameter* limit), since it has no way to know
+	// it's being used in a result context here; MaxFlatResults (1) is the
+	// correct threshold for a function result, so that case is handled
+	// directly rather than by calling LiftFlat.
+	if len(coreResultsWant) == abi.MaxFlatResults && len(flatKinds) > abi.MaxFlatResults {
+		// The spill mechanism itself needs linear memory as scratch space
+		// for the pointer indirection, regardless of whether rt's own type
+		// otherwise needs memory (e.g. a plain record of two u64s doesn't,
+		// per usesMemory, but still can't flatten to a single core value).
+		if !memAvailable {
+			return nil, fmt.Errorf("component/instance: export %q result flattens to %d core value(s) that must be returned via a memory pointer, but the core module exports no memory", exportName, len(flatKinds))
+		}
+		if len(rawResults) != 1 {
+			return nil, fmt.Errorf("component/instance: export %q: core func returned %d value(s) for a spilled (pointer) result, expected 1", exportName, len(rawResults))
+		}
+		val, err := abi.Load(mem, uint32(rawResults[0]), rt, in.resolve)
+		if err != nil {
+			return nil, fmt.Errorf("component/instance: export %q result: load spilled result: %w", exportName, err)
+		}
+		return []abi.Value{val}, nil
 	}
 	if len(flatKinds) != len(coreResultsWant) {
 		return nil, fmt.Errorf("component/instance: export %q result flattens to %d core value(s), exceeding the flat-result limit (core signature returns %d value(s), a spilled memory pointer); spilled results are not supported by this milestone", exportName, len(flatKinds), len(coreResultsWant))

@@ -509,13 +509,17 @@ func TestCall_StringResultRequiresMemory(t *testing.T) {
 	requireErrContains(t, err, "requires linear memory")
 }
 
-func TestCall_SpilledResultNotSupported(t *testing.T) {
+// TestCall_SpilledResultRequiresMemory proves the "returned via a memory
+// pointer" spill path (a result flattening to more than MaxFlatResults core
+// values, e.g. a record{u64,u64} -> [i64,i64]) needs linear memory as
+// scratch space for the pointer indirection even when the value's own type
+// otherwise wouldn't (per usesMemory, a record of two u64s doesn't need
+// memory to lower/lift directly) -- dummy_core.wasm exports no memory, so
+// this must fail loud rather than dereference a garbage/absent pointer.
+func TestCall_SpilledResultRequiresMemory(t *testing.T) {
 	ctx, r := newRuntime(t)
 	comp := baseValidComponent("f")
 	comp.CoreModules[0].Size = len(dummyCoreWasm)
-	// record{a: u64, b: u64} flattens to [i64, i64]: 2 flat values, over
-	// MaxFlatResults (1), but doesn't need memory -- isolates the "spilled
-	// result" branch from the "requires linear memory" branch.
 	recordType := binary.RecordDesc{Fields: []binary.RecordField{
 		{Name: "a", Type: binary.TypeRef{Primitive: "u64"}},
 		{Name: "b", Type: binary.TypeRef{Primitive: "u64"}},
@@ -533,7 +537,7 @@ func TestCall_SpilledResultNotSupported(t *testing.T) {
 	defer inst.Close(ctx)
 
 	_, err = inst.Call(ctx, "run")
-	requireErrContains(t, err, "spilled results are not supported")
+	requireErrContains(t, err, "must be returned via a memory pointer")
 }
 
 func TestCall_MultipleNamedResultsNotSupported(t *testing.T) {

@@ -72,9 +72,6 @@ type aliasTarget struct {
 // See the package doc for the supported topology and the decoder gaps this
 // works around.
 func instantiateWithImports(ctx context.Context, r wazy.Runtime, comp *binary.Component, componentBytes []byte, cfg *config) (*Instance, error) {
-	if len(comp.Instances) > 0 {
-		return nil, fmt.Errorf("component/instance: component declares %d nested component instance(s); not supported by this milestone", len(comp.Instances))
-	}
 	for _, im := range comp.Imports {
 		if im.ExternType != 0x05 { // instance
 			return nil, fmt.Errorf("component/instance: import %q has extern kind %s (%#x); only instance imports are supported", im.Name, api.ExternTypeName(im.ExternType), im.ExternType)
@@ -384,46 +381,203 @@ func importInterfaceName(comp *binary.Component, instIdx uint32) (string, error)
 }
 
 // bindImportExports binds each component export to the core function that
-// implements it (via its lift and the core func index space).
+// implements it (via its lift and the core func index space). A func export
+// binds directly; an instance export (the WIT-exports-an-interface shape --
+// see the package doc) resolves through its re-export shim and binds each of
+// the shim's members, keyed by instanceExportKey(exportName, memberName).
 func bindImportExports(comp *binary.Component, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncAliases []aliasTarget, instMods map[int]api.Module, numProducedCoreFuncs int) (map[string]*boundExport, error) {
 	exports := make(map[string]*boundExport, len(comp.Exports))
 	for _, exp := range comp.Exports {
-		if exp.ExternType != 0x01 { // func
-			return nil, fmt.Errorf("component/instance: export %q has extern kind %s (%#x); only func exports are supported", exp.Name, api.ExternTypeName(exp.ExternType), exp.ExternType)
-		}
-		isLift, liftCanonIdx, _, err := componentFunc(exp.ExternIndex)
-		if err != nil {
-			return nil, fmt.Errorf("component/instance: export %q: %w", exp.Name, err)
-		}
-		if !isLift {
-			return nil, fmt.Errorf("component/instance: export %q resolves to an imported func rather than a lift; only lifted funcs may be exported", exp.Name)
-		}
-		canon := comp.Canons[liftCanonIdx]
-		td, err := comp.ResolveType(canon.TypeIdx)
-		if err != nil {
-			return nil, fmt.Errorf("component/instance: export %q lift references type %d: %w", exp.Name, canon.TypeIdx, err)
-		}
-		fd, ok := td.(binary.FuncDesc)
-		if !ok {
-			return nil, fmt.Errorf("component/instance: export %q lift type %d is not a func type (got %T)", exp.Name, canon.TypeIdx, td)
-		}
+		switch exp.ExternType {
+		case 0x01: // func
+			be, err := bindFuncExport(comp, exp.ExternIndex, componentFunc, coreFuncAliases, instMods, numProducedCoreFuncs, exp.Name)
+			if err != nil {
+				return nil, err
+			}
+			exports[exp.Name] = be
 
-		cfi := int(canon.CoreFuncIdx)
+		case 0x05: // instance
+			if err := bindInstanceExport(comp, exp, componentFunc, coreFuncAliases, instMods, numProducedCoreFuncs, exports); err != nil {
+				return nil, err
+			}
+
+		default:
+			return nil, fmt.Errorf("component/instance: export %q has extern kind %s (%#x); only func and instance exports are supported", exp.Name, api.ExternTypeName(exp.ExternType), exp.ExternType)
+		}
+	}
+	return exports, nil
+}
+
+// bindFuncExport resolves a component func index (funcIdx, in the outer
+// component's func index space) to a lift canon and binds it into a
+// boundExport, including its post-return core func if the lift declares
+// one. Used both for a plain func export and for a member function inside
+// an instance export (bindInstanceExport), which is why it takes funcIdx and
+// a diagnostic name rather than a binary.Export directly.
+func bindFuncExport(comp *binary.Component, funcIdx uint32, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncAliases []aliasTarget, instMods map[int]api.Module, numProducedCoreFuncs int, diagName string) (*boundExport, error) {
+	isLift, liftCanonIdx, _, err := componentFunc(funcIdx)
+	if err != nil {
+		return nil, fmt.Errorf("component/instance: export %q: %w", diagName, err)
+	}
+	if !isLift {
+		return nil, fmt.Errorf("component/instance: export %q resolves to an imported func rather than a lift; only lifted funcs may be exported", diagName)
+	}
+	canon := comp.Canons[liftCanonIdx]
+	td, err := comp.ResolveType(canon.TypeIdx)
+	if err != nil {
+		return nil, fmt.Errorf("component/instance: export %q lift references type %d: %w", diagName, canon.TypeIdx, err)
+	}
+	fd, ok := td.(binary.FuncDesc)
+	if !ok {
+		return nil, fmt.Errorf("component/instance: export %q lift type %d is not a func type (got %T)", diagName, canon.TypeIdx, td)
+	}
+
+	cfi := int(canon.CoreFuncIdx)
+	if cfi < numProducedCoreFuncs {
+		return nil, fmt.Errorf("component/instance: export %q lifts core func %d, which is a canon-produced func (lower/resource.*) rather than a real core export; unsupported", diagName, cfi)
+	}
+	ai := cfi - numProducedCoreFuncs
+	if ai >= len(coreFuncAliases) {
+		return nil, fmt.Errorf("component/instance: export %q lifts core func %d, out of range of the core func index space (%d canon-produced funcs + %d aliases)", diagName, cfi, numProducedCoreFuncs, len(coreFuncAliases))
+	}
+	tgt := coreFuncAliases[ai]
+	mod, ok := instMods[int(tgt.instIdx)]
+	if !ok {
+		return nil, fmt.Errorf("component/instance: export %q targets core instance %d, which was not instantiated", diagName, tgt.instIdx)
+	}
+
+	postReturnName, err := resolvePostReturnFunc(canon, coreFuncAliases, numProducedCoreFuncs, tgt.instIdx)
+	if err != nil {
+		return nil, fmt.Errorf("component/instance: export %q: %w", diagName, err)
+	}
+
+	return &boundExport{mod: mod, funcName: tgt.name, fd: fd, postReturnFuncName: postReturnName}, nil
+}
+
+// resolvePostReturnFunc looks for a post-return option (CanonOpt kind 0x05)
+// on canon and, if present, resolves its core func index through the same
+// core func index space bindFuncExport used for the lift itself (canon-
+// produced funcs first, then coreFuncAliases), returning the core export
+// name to call. It fails loud if the post-return func targets a different
+// core instance than the lift's own core func (mainInstIdx) -- cross-instance
+// post-return is not needed by any shape this package supports and would
+// otherwise silently call the wrong module's export. Returns "", nil if the
+// lift declares no post-return.
+func resolvePostReturnFunc(canon binary.Canon, coreFuncAliases []aliasTarget, numProducedCoreFuncs int, mainInstIdx uint32) (string, error) {
+	for _, opt := range canon.Opts {
+		if opt.Kind != 0x05 { // post-return
+			continue
+		}
+		cfi := int(opt.Idx)
 		if cfi < numProducedCoreFuncs {
-			return nil, fmt.Errorf("component/instance: export %q lifts core func %d, which is a canon-produced func (lower/resource.*) rather than a real core export; unsupported", exp.Name, cfi)
+			return "", fmt.Errorf("post-return core func %d is a canon-produced func (lower/resource.*) rather than a real core export; unsupported", cfi)
 		}
 		ai := cfi - numProducedCoreFuncs
 		if ai >= len(coreFuncAliases) {
-			return nil, fmt.Errorf("component/instance: export %q lifts core func %d, out of range of the core func index space (%d canon-produced funcs + %d aliases)", exp.Name, cfi, numProducedCoreFuncs, len(coreFuncAliases))
+			return "", fmt.Errorf("post-return core func %d out of range of the core func index space (%d canon-produced funcs + %d aliases)", cfi, numProducedCoreFuncs, len(coreFuncAliases))
 		}
 		tgt := coreFuncAliases[ai]
-		mod, ok := instMods[int(tgt.instIdx)]
-		if !ok {
-			return nil, fmt.Errorf("component/instance: export %q targets core instance %d, which was not instantiated", exp.Name, tgt.instIdx)
+		if tgt.instIdx != mainInstIdx {
+			return "", fmt.Errorf("post-return core func targets core instance %d, but the lift's core func targets core instance %d; cross-instance post-return is not supported", tgt.instIdx, mainInstIdx)
 		}
-		exports[exp.Name] = &boundExport{mod: mod, funcName: tgt.name, fd: fd}
+		return tgt.name, nil
 	}
-	return exports, nil
+	return "", nil
+}
+
+// bindInstanceExport resolves an instance-typed export (exp.ExternType ==
+// 0x05) -- the WIT-exports-an-interface shape -- and binds each function the
+// exported instance re-exports into exports, keyed by
+// instanceExportKey(exp.Name, memberName).
+//
+// The export's sortidx names an Instance (section 5) that instantiates a
+// NestedComponent (section 4): the "re-export shim" wit-component emits to
+// package the outer component's lifted funcs as an instance. That shim is
+// required to be a pure passthrough -- see validateShimComponent -- so each
+// of its func exports resolves, via its own func-import name, to the
+// instantiate-arg that supplied it, which names a func in the *outer*
+// component's func index space (almost always a lift, per this milestone).
+func bindInstanceExport(comp *binary.Component, exp binary.Export, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncAliases []aliasTarget, instMods map[int]api.Module, numProducedCoreFuncs int, exports map[string]*boundExport) error {
+	if int(exp.ExternIndex) >= len(comp.Instances) {
+		return fmt.Errorf("component/instance: export %q references instance %d, out of range of %d instance(s)", exp.Name, exp.ExternIndex, len(comp.Instances))
+	}
+	inst := comp.Instances[exp.ExternIndex]
+	if inst.Kind != 0x00 {
+		return fmt.Errorf("component/instance: export %q instance %d is not a component instantiation (kind %#x); inline-export instances are not supported", exp.Name, exp.ExternIndex, inst.Kind)
+	}
+	if int(inst.ComponentIdx) >= len(comp.NestedComponents) {
+		return fmt.Errorf("component/instance: export %q instance %d references nested component %d, out of range of %d decoded nested component(s)", exp.Name, exp.ExternIndex, inst.ComponentIdx, len(comp.NestedComponents))
+	}
+	nested := comp.NestedComponents[inst.ComponentIdx]
+	if err := validateShimComponent(nested); err != nil {
+		return fmt.Errorf("component/instance: export %q: nested component %d: %w; a more complex nested component (e.g. the wasip2 CLI adapter shim, which embeds its own core module and instantiation graph) is out of scope for this milestone", exp.Name, inst.ComponentIdx, err)
+	}
+
+	argByName := make(map[string]binary.InstantiateArg, len(inst.Args))
+	for _, a := range inst.Args {
+		argByName[a.Name] = a
+	}
+	shimFuncImports := shimFuncImportNames(nested)
+
+	for _, member := range nested.Exports {
+		diagName := instanceExportKey(exp.Name, member.Name)
+		if member.ExternType != 0x01 { // func
+			return fmt.Errorf("component/instance: export %q member %q has extern kind %s (%#x); only func members are supported", exp.Name, member.Name, api.ExternTypeName(member.ExternType), member.ExternType)
+		}
+		if int(member.ExternIndex) >= len(shimFuncImports) {
+			return fmt.Errorf("component/instance: %s: func index %d out of range of the shim's %d func import(s)", diagName, member.ExternIndex, len(shimFuncImports))
+		}
+		importName := shimFuncImports[member.ExternIndex]
+		arg, ok := argByName[importName]
+		if !ok {
+			return fmt.Errorf("component/instance: %s: shim import %q has no matching instantiate-arg", diagName, importName)
+		}
+		if arg.Sort != 0x01 { // func
+			return fmt.Errorf("component/instance: %s: instantiate-arg %q has non-func sort %#x", diagName, importName, arg.Sort)
+		}
+
+		be, err := bindFuncExport(comp, arg.SortIdx, componentFunc, coreFuncAliases, instMods, numProducedCoreFuncs, diagName)
+		if err != nil {
+			return err
+		}
+		exports[diagName] = be
+	}
+	return nil
+}
+
+// validateShimComponent rejects any nested component that is not a pure
+// re-export shim: every func it exports must resolve directly to one of its
+// own func imports (see shimFuncImportNames), with nothing else in the
+// nested component able to produce a func-sort index. A func-sort alias is
+// also rejected even though the shims this milestone targets never emit one
+// -- allowing it would silently mis-index shimFuncImportNames, which only
+// accounts for imports.
+func validateShimComponent(nested *binary.Component) error {
+	if len(nested.CoreModules) > 0 || len(nested.CoreInstances) > 0 || len(nested.Canons) > 0 ||
+		len(nested.Instances) > 0 || len(nested.NestedComponents) > 0 {
+		return fmt.Errorf("not a pure re-export shim (has core module(s), core instance(s), canon(s), nested instance(s), or further nested component(s))")
+	}
+	for _, al := range nested.Aliases {
+		if al.Sort == 0x01 { // func-sort alias: would occupy the func index space
+			return fmt.Errorf("not a pure re-export shim (has a func-sort alias)")
+		}
+	}
+	return nil
+}
+
+// shimFuncImportNames returns nested's func-sort import names in the order
+// they occupy the func index space -- i.e. every import whose ExternType is
+// func (0x01), in declaration order. validateShimComponent guarantees these
+// are the shim's only possible func-sort producers, so a func export's
+// ExternIndex indexes directly into this list.
+func shimFuncImportNames(nested *binary.Component) []string {
+	var names []string
+	for _, im := range nested.Imports {
+		if im.ExternType == 0x01 {
+			names = append(names, im.Name)
+		}
+	}
+	return names
 }
 
 // buildHostWrapper builds the wazy GoModuleFunction that adapts a HostFunc to
