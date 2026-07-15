@@ -1,11 +1,13 @@
 package instance
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
 	"testing"
 
 	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/internal/component/abi"
 )
 
 // real_hello.component.wasm is a genuine rustc wasm32-wasip2 wasi:cli/command
@@ -80,4 +82,47 @@ func TestRealHello_RunReachesWASI(t *testing.T) {
 	}
 	t.Logf("run() trapped as expected: %v", err)
 	requireErrContains(t, err, "not implemented (trap stub)")
+}
+
+// TestRealHello_PrintsHelloWorld is THE milestone: a genuine, off-the-shelf
+// rustc wasm32-wasip2 wasi:cli/command component -- not a synthetic .wat
+// fixture -- really executes on wazy and prints "hello world" through the
+// real WASI 0.2 host surface WithWASI registers (see wasi.go): the guest's
+// println! goes through the preview1-to-preview2 adapter's fd_write, which
+// calls wasi:cli/stdout.get-stdout for an own<output-stream> handle and then
+// [method]output-stream.write on it, landing the guest-computed bytes in
+// the *bytes.Buffer this test owns.
+func TestRealHello_PrintsHelloWorld(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	var stdout, stderr bytes.Buffer
+	inst, err := Instantiate(ctx, r, realHelloWasm, WithWASI(WASIConfig{Stdout: &stdout, Stderr: &stderr})...)
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	defer inst.Close(ctx)
+
+	results, err := inst.Call(ctx, "wasi:cli/run@0.2.3#run")
+	if err != nil {
+		t.Fatalf("Call run(): %v (stdout so far: %q, stderr so far: %q)", err, stdout.String(), stderr.String())
+	}
+
+	if got := stdout.String(); got != "hello world\n" {
+		t.Fatalf("stdout = %q, want %q (stderr: %q)", got, "hello world\n", stderr.String())
+	}
+
+	// run() -> result<_, _> per the decoded WIT (wasi:cli/run's `run: func()
+	// -> result;`); a successful run lifts to Ok (IsErr == false).
+	if len(results) != 1 {
+		t.Fatalf("run() returned %d result(s), want 1", len(results))
+	}
+	rv, ok := results[0].(abi.ResultValue)
+	if !ok {
+		t.Fatalf("run() result: expected abi.ResultValue, got %T (%v)", results[0], results[0])
+	}
+	if rv.IsErr {
+		t.Fatalf("run() returned Err, want Ok (stderr: %q)", stderr.String())
+	}
 }

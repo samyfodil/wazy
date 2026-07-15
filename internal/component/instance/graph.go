@@ -197,6 +197,52 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		return fmt.Sprintf("wazy:component/priv%d", privateHostModCount)
 	}
 
+	// coreFuncTarget resolves an absolute core func index to the module that
+	// exports it and the export name to call. Defined before the main loop
+	// (rather than after, where bindImportExportsGraph also needs it) so
+	// resolveInlineExportItem can use the very same closure -- via
+	// canonMemoryAndRealloc -- to resolve a canon lower's own "realloc"
+	// CanonOpt while still inside the loop that's filling in instMods. This
+	// is safe because it captures instMods by reference (a Go map, not a
+	// snapshot) and the Component Model's index spaces are strictly
+	// forward-declared: anything a core instance k's canon opts reference
+	// must already have been instantiated by earlier iterations.
+	coreFuncTarget := func(cfi int) (api.Module, string, error) {
+		if cfi < 0 || cfi >= len(comp.CoreFuncSpace) {
+			return nil, "", fmt.Errorf("core func index %d out of range of the %d-entry core func index space", cfi, len(comp.CoreFuncSpace))
+		}
+		entry := comp.CoreFuncSpace[cfi]
+		switch entry.Kind {
+		case binary.CoreFuncFromAlias:
+			al := comp.Aliases[entry.Alias]
+			mod, ok := instMods[int(al.InstanceIdx)]
+			if !ok {
+				return nil, "", fmt.Errorf("core func index %d targets core instance %d, which was not instantiated", cfi, al.InstanceIdx)
+			}
+			return mod, al.Name, nil
+		case binary.CoreFuncFromCanon:
+			return nil, "", fmt.Errorf("core func index %d is a canon-produced func (lower/resource.*) rather than a real core export; unsupported", cfi)
+		default:
+			return nil, "", fmt.Errorf("core func index %d: unknown core func space entry kind %d", cfi, entry.Kind)
+		}
+	}
+
+	// coreMemTarget is coreFuncTarget's counterpart for the core MEMORY index
+	// space -- used only by canonMemoryAndRealloc (via buildCanonHostModule)
+	// to resolve a canon lower's own "memory" CanonOpt. Safe to define here
+	// for the same forward-declaration reason as coreFuncTarget above.
+	coreMemTarget := func(idx int) (api.Module, error) {
+		if idx < 0 || idx >= len(coreMemSpace) {
+			return nil, fmt.Errorf("core memory index %d out of range of the %d-entry core memory index space", idx, len(coreMemSpace))
+		}
+		at := coreMemSpace[idx]
+		mod, ok := instMods[int(at.instIdx)]
+		if !ok {
+			return nil, fmt.Errorf("core memory index %d targets core instance %d, which was not instantiated", idx, at.instIdx)
+		}
+		return mod, nil
+	}
+
 	for k, ci := range comp.CoreInstances {
 		name, nerr := moduleNameForGraph(k, refNames[uint32(k)], emptyNameTarget)
 		if nerr != nil {
@@ -236,7 +282,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		case 0x01: // inline exports: a passthrough shim regrouping earlier items
 			items := make([]shimItem, 0, len(ci.Exports))
 			for _, e := range ci.Exports {
-				item, wasiCall, err := resolveInlineExportItem(ctx, r, comp, cfg, resources, e, coreMemSpace, coreTableSpace, instMods, neededTypes, name, nextPrivateName)
+				item, wasiCall, err := resolveInlineExportItem(ctx, r, comp, cfg, resources, e, coreMemSpace, coreTableSpace, instMods, neededTypes, name, nextPrivateName, coreFuncTarget, coreMemTarget)
 				if err != nil {
 					return fail(fmt.Errorf("component/instance: core instance %d: %w", k, err))
 				}
@@ -258,26 +304,6 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 
 		default:
 			return fail(fmt.Errorf("component/instance: core instance %d has unknown kind %#x", k, ci.Kind))
-		}
-	}
-
-	coreFuncTarget := func(cfi int) (api.Module, string, error) {
-		if cfi < 0 || cfi >= len(comp.CoreFuncSpace) {
-			return nil, "", fmt.Errorf("core func index %d out of range of the %d-entry core func index space", cfi, len(comp.CoreFuncSpace))
-		}
-		entry := comp.CoreFuncSpace[cfi]
-		switch entry.Kind {
-		case binary.CoreFuncFromAlias:
-			al := comp.Aliases[entry.Alias]
-			mod, ok := instMods[int(al.InstanceIdx)]
-			if !ok {
-				return nil, "", fmt.Errorf("core func index %d targets core instance %d, which was not instantiated", cfi, al.InstanceIdx)
-			}
-			return mod, al.Name, nil
-		case binary.CoreFuncFromCanon:
-			return nil, "", fmt.Errorf("core func index %d is a canon-produced func (lower/resource.*) rather than a real core export; unsupported", cfi)
-		default:
-			return nil, "", fmt.Errorf("core func index %d: unknown core func space entry kind %d", cfi, entry.Kind)
 		}
 	}
 
@@ -362,6 +388,7 @@ func resolveInlineExportItem(
 	ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, resources *handleTable,
 	e binary.CoreInlineExport, coreMemSpace, coreTableSpace []aliasTarget, instMods map[int]api.Module,
 	neededTypes map[string]map[string]coreFuncSig, groupName string, nextPrivateName func() string,
+	coreFuncTarget func(int) (api.Module, string, error), coreMemTarget func(int) (api.Module, error),
 ) (shimItem, string, error) {
 	switch e.Sort {
 	case 0x00: // func
@@ -385,7 +412,7 @@ func resolveInlineExportItem(
 
 		case binary.CoreFuncFromCanon:
 			canon := comp.Canons[entry.Canon]
-			mod, exportName, params, results, wasiCall, err := buildCanonHostModule(ctx, r, comp, cfg, resources, canon, neededTypes, groupName, e.Name, nextPrivateName())
+			mod, exportName, params, results, wasiCall, err := buildCanonHostModule(ctx, r, comp, cfg, resources, canon, neededTypes, groupName, e.Name, nextPrivateName(), coreMemTarget, coreFuncTarget)
 			if err != nil {
 				return shimItem{}, "", fmt.Errorf("inline export %q: %w", e.Name, err)
 			}
@@ -441,6 +468,7 @@ func resolveInlineExportItem(
 func buildCanonHostModule(
 	ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, resources *handleTable,
 	canon binary.Canon, neededTypes map[string]map[string]coreFuncSig, groupName, entryName, privateName string,
+	coreMemTarget func(int) (api.Module, error), coreFuncTarget func(int) (api.Module, string, error),
 ) (mod api.Module, exportName string, params, results []api.ValueType, wasiCall string, err error) {
 	var def hostFuncDef
 
@@ -483,7 +511,11 @@ func buildCanonHostModule(
 		wasiCall = iface + "." + at.name
 
 		if hi, ok := cfg.imports[importKey{iface: iface, name: at.name}]; ok {
-			fn, hiParams, hiResults, herr := buildHostWrapper(iface, at.name, hi, resources)
+			memMod, reallocFn, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
+			if merr != nil {
+				return nil, "", nil, nil, "", fmt.Errorf("import %q func %q: %w", iface, at.name, merr)
+			}
+			fn, hiParams, hiResults, herr := buildHostWrapper(iface, at.name, hi, resources, memMod, reallocFn)
 			if herr != nil {
 				return nil, "", nil, nil, "", herr
 			}
@@ -519,6 +551,43 @@ func buildCanonHostModule(
 		return nil, "", nil, nil, "", fmt.Errorf("instantiate private host func module %q: %w", privateName, berr)
 	}
 	return hostMod, "f", def.params, def.results, wasiCall, nil
+}
+
+// canonMemoryAndRealloc resolves a canon lower's own "memory" (CanonOpt kind
+// 0x03, a core memory index) and "realloc" (kind 0x04, a core func index)
+// options -- when present -- to the real module that provides each, via
+// coreMemTarget and coreFuncTarget respectively. These become
+// buildHostWrapper's memOverride/reallocOverride (see its doc): per the
+// Canonical ABI, they are static choices fixed by the component binary, not
+// whichever module happens to directly execute the `call` reaching the host
+// func at runtime -- which, in a real wasip2 CLI adapter graph, is often an
+// indirect call-table trampoline module with no memory of its own (see this
+// file's package doc). A canon with neither option (most resource-only or
+// memory-free lowers) returns (nil, nil, nil): buildHostWrapper then falls
+// back to the runtime caller, exactly as before this existed.
+func canonMemoryAndRealloc(canon binary.Canon, coreMemTarget func(int) (api.Module, error), coreFuncTarget func(int) (api.Module, string, error)) (memMod api.Module, reallocFn api.Function, err error) {
+	for _, opt := range canon.Opts {
+		switch opt.Kind {
+		case 0x03: // memory
+			mod, merr := coreMemTarget(int(opt.Idx))
+			if merr != nil {
+				return nil, nil, fmt.Errorf("canon lower memory option: %w", merr)
+			}
+			memMod = mod
+
+		case 0x04: // realloc
+			mod, name, rerr := coreFuncTarget(int(opt.Idx))
+			if rerr != nil {
+				return nil, nil, fmt.Errorf("canon lower realloc option: %w", rerr)
+			}
+			fn := mod.ExportedFunction(name)
+			if fn == nil {
+				return nil, nil, fmt.Errorf("canon lower realloc option: core instance %q has no exported function %q", mod.Name(), name)
+			}
+			reallocFn = fn
+		}
+	}
+	return memMod, reallocFn, nil
 }
 
 // resourceCanonHostFuncGraph is resourceCanonHostFunc's graph-engine

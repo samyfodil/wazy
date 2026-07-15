@@ -38,6 +38,17 @@ type hostImport struct {
 	fn      HostFunc
 	params  []binary.TypeDesc
 	results []binary.TypeDesc
+
+	// customFD/customResolve, when customFD is non-nil, replace params/results
+	// entirely: buildHostWrapper uses this FuncDesc and resolver directly
+	// instead of building them via synthFuncDesc. synthFuncDesc's table only
+	// has one slot per top-level param/result (see its doc), so it cannot
+	// express a genuinely nested composite type -- e.g. list<tuple<string,
+	// string>>, where the tuple itself needs its own resolvable type index.
+	// wasi.go's withImportCustom is the only caller that sets this; WithImport
+	// always leaves it nil.
+	customFD      *binary.FuncDesc
+	customResolve abi.Resolver
 }
 
 func newConfig(opts []Option) *config {
@@ -306,7 +317,12 @@ func resolveLoweredImport(comp *binary.Component, cfg *config, resources *handle
 		return hostFuncDef{}, fmt.Errorf("component/instance: no host implementation provided for import %q func %q (use WithImport)", iface, at.name)
 	}
 
-	fn, params, results, err := buildHostWrapper(iface, at.name, hi, resources)
+	// nil, nil: no memory/realloc override -- this path (instantiateWithImports)
+	// only ever wires a lowered import directly into the same core instance
+	// that calls it (no indirect call-table trampoline in between, unlike the
+	// graph engine's buildCanonHostModule counterpart), so the runtime
+	// caller's own module already provides the right memory/realloc.
+	fn, params, results, err := buildHostWrapper(iface, at.name, hi, resources, nil, nil)
 	if err != nil {
 		return hostFuncDef{}, err
 	}
@@ -586,8 +602,30 @@ func shimFuncImportNames(nested *binary.Component) []string {
 // own<T>/borrow<T> handles to their host rep via resources), calls the
 // HostFunc, and lowers the results back into the core return slots (again
 // allocating a fresh handle for any own<T>/borrow<T> result).
-func buildHostWrapper(iface, funcName string, hi *hostImport, resources *handleTable) (api.GoModuleFunction, []api.ValueType, []api.ValueType, error) {
-	fd, resolve := synthFuncDesc(hi.params, hi.results)
+//
+// memOverride/reallocOverride, when non-nil, replace the module wazy passes
+// the returned GoModuleFunc at call time as the source of linear memory /
+// cabi_realloc for lift/lower, rather than deriving them from that runtime
+// caller. Per the Canonical ABI, a canon lower's memory/realloc are static
+// options fixed by the component binary (CanonOpt kinds 0x03/0x04) -- they
+// need not be, and in a real multi-module graph often are not, the same
+// module that literally executes the `call` instruction reaching this func.
+// The graph engine's buildCanonHostModule (graph.go) resolves and passes
+// these explicitly for exactly that reason: real_hello.component.wasm wires
+// its WASI imports through an indirect call-table trampoline module (see
+// graph.go's package doc) that has no memory of its own, so relying on the
+// runtime caller would silently read/write nothing (see
+// canonMemoryAndRealloc). The simpler, single-hop instantiateWithImports
+// path (resolveLoweredImport) always passes nil, nil, since there the
+// runtime caller already is the right module.
+func buildHostWrapper(iface, funcName string, hi *hostImport, resources *handleTable, memOverride api.Module, reallocOverride api.Function) (api.GoModuleFunction, []api.ValueType, []api.ValueType, error) {
+	var fd binary.FuncDesc
+	var resolve abi.Resolver
+	if hi.customFD != nil {
+		fd, resolve = *hi.customFD, hi.customResolve
+	} else {
+		fd, resolve = synthFuncDesc(hi.params, hi.results)
+	}
 
 	rawParams, err := flattenRefs(fd.Params, resolve)
 	if err != nil {
@@ -600,8 +638,17 @@ func buildHostWrapper(iface, funcName string, hi *hostImport, resources *handleT
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("component/instance: import %q func %q results: %w", iface, funcName, err)
 	}
+	// A result wider than MaxFlatResults is not returned on the core stack:
+	// per the Canonical ABI's flatten_functype in "lower" context (exactly
+	// what abi.FlattenFunc computes below), the guest instead appends one
+	// extra i32 out-pointer parameter -- a buffer it already allocated -- and
+	// expects the full (non-flat) value Store()d there, with no core return
+	// values at all. outPtrIdx names that parameter's position on the
+	// incoming stack (the flat width of the real params, since the
+	// out-pointer is appended after them); -1 means no spilling is needed.
+	outPtrIdx := -1
 	if len(rawResults) > abi.MaxFlatResults {
-		return nil, nil, nil, fmt.Errorf("component/instance: import %q func %q has %d flat results, exceeding the flat limit; spilled results are not supported by this milestone", iface, funcName, len(rawResults))
+		outPtrIdx = len(rawParams)
 	}
 
 	coreParams, coreResults, err := abi.FlattenFunc(fd, resolve, "lower")
@@ -618,7 +665,11 @@ func buildHostWrapper(iface, funcName string, hi *hostImport, resources *handleT
 	}
 
 	fn := api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
-		args, err := liftHostArgs(fd, resolve, stack, mod, resources)
+		memMod := mod
+		if memOverride != nil {
+			memMod = memOverride
+		}
+		args, err := liftHostArgs(fd, resolve, stack, memMod, resources)
 		if err != nil {
 			panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
 		}
@@ -626,7 +677,11 @@ func buildHostWrapper(iface, funcName string, hi *hostImport, resources *handleT
 		if err != nil {
 			panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
 		}
-		if err := lowerHostResults(ctx, fd, resolve, results, stack, mod, resources); err != nil {
+		var realloc abi.Realloc
+		if reallocOverride != nil {
+			realloc = reallocOfFunc(ctx, reallocOverride)
+		}
+		if err := lowerHostResults(ctx, fd, resolve, results, stack, memMod, resources, outPtrIdx, realloc); err != nil {
 			panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
 		}
 	})
@@ -803,8 +858,15 @@ func allocHandleResult(resources *handleTable, rt binary.TypeDesc, v abi.Value) 
 // return slots at the front of the stack, per fd's result types. An
 // own<T>/borrow<T> result is expected as a host rep (uint32) and is
 // allocated a fresh guest handle via resources before being lowered -- see
-// allocHandleResult.
-func lowerHostResults(ctx context.Context, fd binary.FuncDesc, resolve abi.Resolver, results []abi.Value, stack []uint64, mod api.Module, resources *handleTable) error {
+// allocHandleResult. outPtrIdx, when >= 0, names the stack slot holding the
+// out-pointer buildHostWrapper's caller pre-computed for a result too wide
+// to return flat (see its doc): the result is Store()d into guest memory
+// there instead of written to the (in that case, empty) core return slots.
+// realloc, when non-nil, overrides the default reallocOf(ctx, mod) (see
+// buildHostWrapper's memOverride/reallocOverride doc for why a caller in a
+// multi-module graph may need to supply the canon's own declared realloc
+// rather than deriving one from mod).
+func lowerHostResults(ctx context.Context, fd binary.FuncDesc, resolve abi.Resolver, results []abi.Value, stack []uint64, mod api.Module, resources *handleTable, outPtrIdx int, realloc abi.Realloc) error {
 	refs := funcResultTypeRefs(fd)
 	if len(results) != len(refs) {
 		return fmt.Errorf("returned %d result(s), but the import declares %d", len(results), len(refs))
@@ -828,7 +890,24 @@ func lowerHostResults(ctx context.Context, fd binary.FuncDesc, resolve abi.Resol
 	if err != nil {
 		return fmt.Errorf("result: %w", err)
 	}
-	realloc := reallocOf(ctx, mod)
+	if realloc == nil {
+		realloc = reallocOf(ctx, mod)
+	}
+
+	if outPtrIdx >= 0 {
+		if !memAvailable {
+			return fmt.Errorf("result must be returned via a memory pointer (too wide to flatten), but the calling module has no memory")
+		}
+		if outPtrIdx >= len(stack) {
+			return fmt.Errorf("result: out-pointer stack slot %d out of range (stack has %d value(s))", outPtrIdx, len(stack))
+		}
+		ptr := api.DecodeU32(stack[outPtrIdx])
+		if err := abi.Store(mem, ptr, rt, resultVal, resolve, realloc); err != nil {
+			return fmt.Errorf("result: store spilled result: %w", err)
+		}
+		return nil
+	}
+
 	flat, err := abi.LowerFlat(resultVal, rt, resolve, realloc, mem)
 	if err != nil {
 		return fmt.Errorf("result: lower: %w", err)

@@ -522,23 +522,40 @@ func TestBuildHostWrapper_SpilledParams(t *testing.T) {
 	for i := 0; i < 17; i++ {
 		params = append(params, binary.PrimitiveDesc{Prim: "u32"})
 	}
-	_, _, _, err := buildHostWrapper("i", "f", &hostImport{fn: noopLog, params: params}, newHandleTable())
+	_, _, _, err := buildHostWrapper("i", "f", &hostImport{fn: noopLog, params: params}, newHandleTable(), nil, nil)
 	requireErrContains(t, err, "whole-parameter-list spilling")
 }
 
 func TestBuildHostWrapper_SpilledResults(t *testing.T) {
-	// A record of two u64 flattens to [i64,i64] = 2 results, over MaxFlatResults.
+	// A record of two u64 flattens to [i64,i64] = 2 results, over
+	// MaxFlatResults -- buildHostWrapper supports this via the Canonical
+	// ABI's "lower" spill convention (see lowerHostResults's doc) rather
+	// than rejecting it: the wrapper takes one extra i32 out-pointer param
+	// and returns nothing at the core level, matching what a real
+	// wit-component-generated import of a wide-result WASI func (e.g.
+	// wasi:io/streams' check-write) actually declares.
 	rec := binary.RecordDesc{Fields: []binary.RecordField{
 		{Name: "a", Type: binary.TypeRef{Primitive: "u64"}},
 		{Name: "b", Type: binary.TypeRef{Primitive: "u64"}},
 	}}
-	_, _, _, err := buildHostWrapper("i", "f", &hostImport{fn: noopLog, results: []binary.TypeDesc{rec}}, newHandleTable())
-	requireErrContains(t, err, "spilled results")
+	fn, params, results, err := buildHostWrapper("i", "f", &hostImport{fn: noopLog, results: []binary.TypeDesc{rec}}, newHandleTable(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fn == nil {
+		t.Fatal("nil wrapper")
+	}
+	if len(params) != 1 || params[0] != api.ValueTypeI32 {
+		t.Fatalf("params: %#v, want a single i32 out-pointer", params)
+	}
+	if results != nil {
+		t.Fatalf("results: %#v, want none (spilled to memory)", results)
+	}
 }
 
 func TestBuildHostWrapper_Success(t *testing.T) {
 	fn, params, results, err := buildHostWrapper("i", "f",
-		&hostImport{fn: noopLog, params: []binary.TypeDesc{binary.PrimitiveDesc{Prim: "string"}}}, newHandleTable())
+		&hostImport{fn: noopLog, params: []binary.TypeDesc{binary.PrimitiveDesc{Prim: "string"}}}, newHandleTable(), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -612,7 +629,7 @@ func TestLowerHostResults(t *testing.T) {
 	fd, resolve := synthFuncDesc(nil, []binary.TypeDesc{binary.PrimitiveDesc{Prim: "u32"}})
 
 	stack := make([]uint64, 1)
-	if err := lowerHostResults(ctx, fd, resolve, []abi.Value{uint32(7)}, stack, mod, newHandleTable()); err != nil {
+	if err := lowerHostResults(ctx, fd, resolve, []abi.Value{uint32(7)}, stack, mod, newHandleTable(), -1, nil); err != nil {
 		t.Fatal(err)
 	}
 	if stack[0] != 7 {
@@ -620,13 +637,13 @@ func TestLowerHostResults(t *testing.T) {
 	}
 
 	// count mismatch
-	if err := lowerHostResults(ctx, fd, resolve, nil, stack, mod, newHandleTable()); err == nil {
+	if err := lowerHostResults(ctx, fd, resolve, nil, stack, mod, newHandleTable(), -1, nil); err == nil {
 		t.Fatal("expected count-mismatch error")
 	}
 
 	// zero results is a no-op
 	fdEmpty, resEmpty := synthFuncDesc(nil, nil)
-	if err := lowerHostResults(ctx, fdEmpty, resEmpty, nil, nil, mod, newHandleTable()); err != nil {
+	if err := lowerHostResults(ctx, fdEmpty, resEmpty, nil, nil, mod, newHandleTable(), -1, nil); err != nil {
 		t.Fatalf("zero results: %v", err)
 	}
 
@@ -634,9 +651,71 @@ func TestLowerHostResults(t *testing.T) {
 	fdMulti, resMulti := synthFuncDesc(nil, []binary.TypeDesc{
 		binary.PrimitiveDesc{Prim: "u32"}, binary.PrimitiveDesc{Prim: "u32"},
 	})
-	if err := lowerHostResults(ctx, fdMulti, resMulti, []abi.Value{uint32(1), uint32(2)}, make([]uint64, 2), mod, newHandleTable()); err == nil {
+	if err := lowerHostResults(ctx, fdMulti, resMulti, []abi.Value{uint32(1), uint32(2)}, make([]uint64, 2), mod, newHandleTable(), -1, nil); err == nil {
 		t.Fatal("expected multiple-results error")
 	}
+}
+
+// TestLowerHostResults_Spilled proves the out-pointer path itself (not just
+// buildHostWrapper's signature computation, see
+// TestBuildHostWrapper_SpilledResults): given outPtrIdx naming the stack
+// slot holding a guest-allocated buffer, lowerHostResults Store()s the full
+// (non-flat) result there and leaves the core stack otherwise untouched --
+// then reads it back via abi.Load to confirm the bytes really landed.
+func TestLowerHostResults_Spilled(t *testing.T) {
+	ctx, mod := memModule(t)
+	rec := binary.RecordDesc{Fields: []binary.RecordField{
+		{Name: "a", Type: binary.TypeRef{Primitive: "u64"}},
+		{Name: "b", Type: binary.TypeRef{Primitive: "u64"}},
+	}}
+	fd, resolve := synthFuncDesc(nil, []binary.TypeDesc{rec})
+
+	const outPtr = 64
+	stack := []uint64{outPtr}
+	rv := []abi.Value{[]abi.Value{uint64(11), uint64(22)}}
+	if err := lowerHostResults(ctx, fd, resolve, rv, stack, mod, newHandleTable(), 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	if stack[0] != outPtr {
+		t.Fatalf("spilled lowering must not touch the out-pointer stack slot, got %d", stack[0])
+	}
+
+	mem, ok := memoryBytesOf(mod)
+	if !ok {
+		t.Fatal("expected memory")
+	}
+	got, err := abi.Load(mem, outPtr, rec, resolve)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	fields, ok := got.([]abi.Value)
+	if !ok || len(fields) != 2 {
+		t.Fatalf("Load: got %#v", got)
+	}
+	if fields[0].(uint64) != 11 || fields[1].(uint64) != 22 {
+		t.Fatalf("Load: got %#v, want [11 22]", fields)
+	}
+}
+
+// TestLowerHostResults_SpilledNeedsMemory proves the spilled path fails
+// loud (rather than dereferencing a bogus pointer into a nil mem slice) when
+// the calling module has no linear memory at all.
+func TestLowerHostResults_SpilledNeedsMemory(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	t.Cleanup(func() { r.Close(ctx) })
+	mod, err := r.InstantiateWithConfig(ctx, dummyCoreWasm, wazy.NewModuleConfig().WithName("d3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := binary.RecordDesc{Fields: []binary.RecordField{
+		{Name: "a", Type: binary.TypeRef{Primitive: "u64"}},
+		{Name: "b", Type: binary.TypeRef{Primitive: "u64"}},
+	}}
+	fd, resolve := synthFuncDesc(nil, []binary.TypeDesc{rec})
+	rv := []abi.Value{[]abi.Value{uint64(1), uint64(2)}}
+	err = lowerHostResults(ctx, fd, resolve, rv, []uint64{0}, mod, newHandleTable(), 0, nil)
+	requireErrContains(t, err, "no memory")
 }
 
 func TestLowerHostResults_NeedsMemoryNone(t *testing.T) {
@@ -648,7 +727,7 @@ func TestLowerHostResults_NeedsMemoryNone(t *testing.T) {
 		t.Fatal(err)
 	}
 	fd, resolve := synthFuncDesc(nil, []binary.TypeDesc{binary.PrimitiveDesc{Prim: "string"}})
-	if err := lowerHostResults(ctx, fd, resolve, []abi.Value{"x"}, make([]uint64, 2), mod, newHandleTable()); err == nil {
+	if err := lowerHostResults(ctx, fd, resolve, []abi.Value{"x"}, make([]uint64, 2), mod, newHandleTable(), -1, nil); err == nil {
 		t.Fatal("expected memory-required error")
 	}
 }

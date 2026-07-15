@@ -650,6 +650,17 @@ func reallocOf(ctx context.Context, mod api.Module) abi.Realloc {
 			return 0, fmt.Errorf("component/instance: memory allocation requires a %q export on the core module, which is not present", "cabi_realloc")
 		}
 	}
+	return reallocOfFunc(ctx, fn)
+}
+
+// reallocOfFunc returns the abi.Realloc that calls fn -- an already-resolved
+// api.Function -- with the standard cabi_realloc(origPtr, origSize, align,
+// newSize) -> newPtr signature. Factored out of reallocOf so a caller that
+// has already resolved the exact realloc func to call (e.g. buildHostWrapper,
+// via a canon lower's own "realloc" CanonOpt rather than a fixed "cabi_realloc"
+// name on the runtime caller -- see its doc) can reuse the same call/error
+// handling without going through mod.ExportedFunction("cabi_realloc") again.
+func reallocOfFunc(ctx context.Context, fn api.Function) abi.Realloc {
 	return func(origPtr, origSize, align, newSize uint32) (uint32, error) {
 		res, err := fn.Call(ctx, uint64(origPtr), uint64(origSize), uint64(align), uint64(newSize))
 		if err != nil {
