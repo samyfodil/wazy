@@ -1,0 +1,10 @@
+(component
+  (type $bare-result (result))
+  (type $err-only (result (error string)))
+  (type $ok-only (result u32))
+  (type $both (result u32 (error string)))
+  (export "bare-result" (type $bare-result))
+  (export "err-only" (type $err-only))
+  (export "ok-only" (type $ok-only))
+  (export "both" (type $both))
+)

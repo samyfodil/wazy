@@ -87,7 +87,15 @@ func decodeComponent(buf []byte) (*Component, error) {
 		// Dispatch on section ID.
 		switch sectionID {
 		case 0: // Custom
-			// Skip custom sections entirely for M1.
+			// Skip custom sections entirely for M1. Bounds-check the claimed
+			// size against the remaining buffer so a truncated custom
+			// section fails loud instead of silently truncating the
+			// component (the section-size mismatch check below can't catch
+			// this case, since it compares bytesRead against sectionSize,
+			// and here bytesRead is unconditionally set equal to sectionSize).
+			if sectionSize > uint32(len(buf)-offset) {
+				return nil, fmt.Errorf("section %s: %w", sectionIDName(sectionID), ErrTruncatedBinary)
+			}
 			offset += int(sectionSize)
 
 		case 7: // Type section
@@ -119,7 +127,11 @@ func decodeComponent(buf []byte) (*Component, error) {
 			c.Exports = append(c.Exports, exports...)
 
 		default:
-			// Record and skip unknown/unimplemented sections.
+			// Record and skip unknown/unimplemented sections. Same
+			// truncation bounds-check as the custom-section case above.
+			if sectionSize > uint32(len(buf)-offset) {
+				return nil, fmt.Errorf("section %s: %w", sectionIDName(sectionID), ErrTruncatedBinary)
+			}
 			c.RawSections = append(c.RawSections, RawSection{ID: sectionID, Size: sectionSize})
 			offset += int(sectionSize)
 		}
