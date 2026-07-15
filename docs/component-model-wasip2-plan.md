@@ -1,9 +1,23 @@
 # WASI 0.2 Component Model runtime — build plan
 
-Status: planned
+Status: **core goal achieved** — a real off-the-shelf rustc-built WASI 0.2 component runs on wazy and prints "hello world"
 Branch: `feat/wasip2-component-model`
 Reviewed via: `/plan-eng-review` (2026-07-14, CLEARED)
 Scope decision: **Real p2 CM runtime** — load arbitrary off-the-shelf `.component.wasm` at runtime.
+
+## Achieved (2026-07-15)
+- **Parse** real `.component.wasm` (incl. the 62KB rustc `wasi:cli/command` guest, nested components, full type index space).
+- **Canonical ABI** — layout + memory store/load + flat lift/lower, all diff-verified against `definitions.py` (the differential oracle).
+- **Instantiate + call**, both directions — exports lifted, host imports lowered; resources (own/borrow handle tables), streams, post-return, spilled args/results.
+- **General multi-module instantiation graph** — the CLI guest's 4 core modules + 17 core instances + preview1 adapter wire and execute.
+- **WASI 0.2 host layer** (`WithWASI`) — cli/io-streams/environment/preopens; `real_hello.component.wasm` (genuine cargo/rustc reactor `real_adder` + the full `wasi:cli/command` hello-world) **run for real**, verified genuine (string flows from guest memory, not a Go literal).
+- 4 packages, all >=90% coverage; ~14 real bugs caught by the oracle + independent verification.
+
+## Remaining for a production WASI runtime (not started; deliberate)
+- WASI interface **breadth**: real filesystem read/write, sockets, clocks, actual stdin, args — beyond the hello-world critical path.
+- **Conformance**: run the official component-model + WASI 0.2 suites; burn down.
+- Decoder gaps in TODOS.md (resourcetype rep mislabel, type-sort *export* index tracking).
+- The **performance** pass (plan was compliance-first; optimization deferred).
 
 ---
 
