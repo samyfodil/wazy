@@ -22,15 +22,17 @@ Scope decision: **Real p2 CM runtime** — load arbitrary off-the-shelf `.compon
 
 **The major WASI 0.2 surface is done and verified:** cli · io streams + poll · environment · filesystem (read/write/dir) · random · sockets (TCP). Real guests run doing compute, all file I/O, every stdio/args/env direction, and networking.
 
-## Performance pass (started)
-Compliance-first, then optimized — with the oracle + conformance as the guard that marshalling stays byte-identical:
-- **~4x faster component calls** — profile showed `invoke()` re-resolving `api.Function` handles (a `callEngine` alloc per call) and recomputing immutable ABI metadata every call. Cached both at bind time (`finalizeBoundExport`). CallAdd 1529->380 ns/op (-92% bytes), CallGreet 2109->535 ns/op (-94% bytes). Oracle + 35/35 conformance still green.
-- Also fixed a closer-leak bug the profiling flushed out (canon host modules not in `Instance.closers`).
+## Performance pass (DONE — profile-driven, oracle+conformance guarded)
+Compliance-first, then optimized — every change verified marshalling stayed byte-identical (ABI oracle + 35/35 wasmtime conformance) and race-clean:
+- **Component calls ~6x faster**: cache resolved `api.Function` handles + immutable ABI metadata at bind time (`finalizeBoundExport`); pool the per-call `[]uint64`/`[]CoreValue` scratch; constant flatten slices; unboxed string ptr/len reads. **CallAdd 1529->253 ns/op (6.0x), 29->5 allocs.** CallGreet 2109->480 ns/op, 28->8 allocs.
+- **Instantiate 6-25x faster**: opt-in `CompileCache` (compile core modules once, reuse via `InstantiateModule` — `WithCompileCache`). adder 1.79ms->270us (6.6x); the 4-module CLI guest 27ms->1.07ms (25x).
+- **Generic-engine memory pooling** (`internal/wasm`, benefits ALL wazy embedders): pool linear-memory `[]byte` with full-capacity zeroing (no data bleed) + shared-memory-safe refcounting. Cached component instantiate 232us->55us; plain `vs-wazero BenchmarkInstantiate/wazy` 16.4us->4.75us (-97.6% bytes). Full `go test ./...` green.
+- Fixed 2 bugs the profiling flushed out (closer leak; the shared-memory close-race the pooling forced a real refcount for).
 
-## Remaining (user's-call / diminishing)
-- Perf, bigger + riskier (touch generic `internal/wasm`, change contracts — the user's design call): a compiled-module cache for repeated same-component instantiate (#4), linear-memory buffer pooling (#5, `NewMemoryInstance` is 64% of Instantiate's bytes).
-- Minor breadth: UDP, `ip-name-lookup`, real clocks-in-output, symlinks; the upstream `wasi-testsuite`.
+## Remaining (optional / out of scope)
+- Minor breadth: `ip-name-lookup`, real clocks-in-output, symlinks; the upstream `wasi-testsuite` (thin 0.2 corpus).
 - Async / WASI 0.3 (explicitly out of scope).
+- Further micro-opts (recursive lower/lift `dst` threading, the coercing-iterator interface alloc).
 
 ---
 
