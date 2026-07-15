@@ -63,6 +63,19 @@ type MemoryInstance struct {
 	ownerModuleEngine ModuleEngine
 
 	expBuffer experimental.LinearMemory
+
+	// imported is true once this memory instance has been shared with
+	// another ModuleInstance via cross-module import resolution (see
+	// store.go's resolveImports, ExternTypeMemory case). Guarded by Mux.
+	//
+	// ownerClosed is true once the owning module's ensureResourcesClosed
+	// has run. Guarded by Mux.
+	//
+	// Together these let the owner's Close and a concurrent resolveImports
+	// agree, race-free, on whether it is safe to return Buffer to the
+	// linear-memory buffer pool (memory_pool.go) -- see that file's doc for
+	// the full safety argument.
+	imported, ownerClosed bool
 }
 
 // NewMemoryInstance creates a new instance based on the parameters in the SectionIDMemory.
@@ -88,6 +101,8 @@ func NewMemoryInstance(memSec *Memory, allocator experimental.MemoryAllocator, m
 		// the memory buffer allocation here is virtual and doesn't consume physical memory until it's used.
 		// 	* https://github.com/golang/go/blob/go1.24.0/src/runtime/malloc.go#L1059
 		buffer = make([]byte, minBytes, maxBytes)
+	} else if pooled := getPooledMemoryBuffer(capBytes); pooled != nil {
+		buffer = pooled[:minBytes]
 	} else {
 		buffer = make([]byte, minBytes, capBytes)
 	}

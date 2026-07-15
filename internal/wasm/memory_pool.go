@@ -1,0 +1,80 @@
+package wasm
+
+import "sync"
+
+// memoryBufferPools holds free linear-memory buffers, bucketed by their
+// exact byte capacity, for reuse across MemoryInstance create/close cycles.
+// This exists purely to amortize the make([]byte, ...) + zero-fill cost that
+// NewMemoryInstance otherwise pays on every Instantiate call -- profiling
+// showed this dominates a cached (CompileCache-backed) Instantiate's
+// allocation cost (96%+ of bytes, ~25-30% of CPU time in
+// BenchmarkInstantiateCached), since a fresh multi-hundred-KB-to-multi-MB
+// slice is allocated and cleared from scratch every time even though the
+// compiled module (and therefore the memory's Min/Cap/Max shape) is
+// identical across calls.
+//
+// # Safety
+//
+// A buffer is only ever returned to this pool by a MemoryInstance's owning
+// module (see ensureResourcesClosed in module_instance.go), and only when
+// mem.imported is false: this exact MemoryInstance was never shared with
+// another ModuleInstance via cross-module import resolution (store.go's
+// resolveImports, ExternTypeMemory case). If it were shared, a still-live
+// importer ModuleInstance could still be reading/writing the same backing
+// array through its own (identical, aliased) MemoryInstance.Buffer -- pooling
+// it out from under that importer would let some unrelated, later-instantiated
+// module's data land in memory the importer believes is still its own, a
+// cross-tenant correctness and security bug. See resolveImports' handling of
+// mem.Mux/mem.imported/mem.ownerClosed for the race-free handshake that
+// makes checking "was this ever shared" safe against a concurrent import
+// resolution racing a concurrent Close of the owner.
+//
+// Shared (memSec.IsShared, i.e. the wasm threads proposal's shared memory)
+// and custom-allocator (experimental.MemoryAllocator, tracked via expBuffer)
+// memories never go through this pool at all -- see NewMemoryInstance and
+// ensureResourcesClosed, which gate pooling to exactly the plain
+// make([]byte, minBytes, capBytes) case.
+//
+// Every buffer handed out by getPooledMemoryBuffer is fully zeroed across its
+// entire capacity (not just the requested length) before being returned,
+// because wasm linear memory MUST start all-zero, and MemoryInstance.Grow can
+// later re-slice into previously-hidden capacity without any further
+// zeroing pass of its own (see Grow's "we already have the capacity we
+// need" branch).
+var memoryBufferPools sync.Map // map[uint64]*sync.Pool, keyed by cap(buffer) in bytes.
+
+// getPooledMemoryBuffer returns a zeroed buffer with cap() == capBytes from
+// the pool, or nil if none is available -- the caller should fall back to
+// make([]byte, ...) in that case.
+func getPooledMemoryBuffer(capBytes uint64) []byte {
+	if capBytes == 0 {
+		return nil
+	}
+	v, ok := memoryBufferPools.Load(capBytes)
+	if !ok {
+		return nil
+	}
+	got := v.(*sync.Pool).Get()
+	if got == nil {
+		return nil
+	}
+	buf := got.([]byte)
+	// Linear memory must start all-zero: clear the whole capacity, not just
+	// the length, since Grow can later expose more of it without its own
+	// zeroing pass.
+	clear(buf[:cap(buf)])
+	return buf
+}
+
+// putPooledMemoryBuffer returns buf to the pool, bucketed by its capacity,
+// for reuse by a future MemoryInstance of the same shape. See the package
+// doc above for the safety argument the caller (ensureResourcesClosed) must
+// uphold before calling this.
+func putPooledMemoryBuffer(buf []byte) {
+	capBytes := uint64(cap(buf))
+	if capBytes == 0 {
+		return
+	}
+	v, _ := memoryBufferPools.LoadOrStore(capBytes, &sync.Pool{})
+	v.(*sync.Pool).Put(buf[:cap(buf)])
+}

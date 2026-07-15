@@ -500,6 +500,24 @@ func (m *ModuleInstance) resolveImports(ctx context.Context, module *Module) (er
 					err = errorMaxSizeMismatch(i, expected.Max, importedMemory.Max)
 					return
 				}
+
+				// Mark this memory as shared before handing it out, so its
+				// owner's Close (ensureResourcesClosed) can never decide to
+				// recycle Buffer into the linear-memory buffer pool while we
+				// (a second, independent ModuleInstance) hold a live
+				// reference to it. Both sides serialize on mem.Mux, so
+				// exactly one of "the owner already committed to closing" or
+				// "we already registered as an importer" is observed here --
+				// see memory_pool.go's doc for the full race argument.
+				importedMemory.Mux.Lock()
+				alreadyClosed := importedMemory.ownerClosed
+				importedMemory.imported = true
+				importedMemory.Mux.Unlock()
+				if alreadyClosed {
+					err = errorInvalidImport(i, fmt.Errorf("memory owner module was closed concurrently"))
+					return
+				}
+
 				m.MemoryInstance = importedMemory
 				m.Engine.ResolveImportedMemory(importedModule.Engine)
 			case ExternTypeGlobal:

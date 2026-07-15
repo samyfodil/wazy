@@ -156,9 +156,28 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 	}
 
 	if mem := m.MemoryInstance; mem != nil && mem.ownerModuleEngine == m.Engine {
+		mem.Mux.Lock()
+		alreadyClosed := mem.ownerClosed
+		mem.ownerClosed = true
+		imported := mem.imported
+		mem.Mux.Unlock()
+
 		if mem.expBuffer != nil {
 			mem.expBuffer.Free()
 			mem.expBuffer = nil
+		} else if !alreadyClosed && !imported && !mem.Shared {
+			// Safe to recycle: this MemoryInstance was never shared with
+			// another ModuleInstance (see resolveImports' matching
+			// mem.Mux-guarded check in store.go), so no other live module
+			// can be holding a reference to Buffer. See memory_pool.go's
+			// doc for the full argument.
+			putPooledMemoryBuffer(mem.Buffer)
+			// Drop our own reference so that a stale post-Close read of this
+			// (now closed) MemoryInstance -- e.g. through an api.Memory the
+			// caller kept around past Close, which was already a misuse --
+			// observes an empty memory rather than whatever unrelated
+			// module's data the pool later hands the same backing array to.
+			mem.Buffer = nil
 		}
 	}
 
