@@ -1,0 +1,13 @@
+# TODOS
+
+## WASI 0.3 / async component-model follow-on
+- **What:** Add the native async ABI on top of the real WASI 0.2 Component Model runtime: `future<T>`/`stream<T>`, task/subtask lifecycle, a host event loop, and reworked async interfaces (`wasi:io` is deleted in 0.3, folded into the Canonical ABI).
+- **Why:** Would make wazy the only pure-Go runtime that can run async 0.3 components. Go's goroutines+channels back futures/streams more naturally than Wasmtime's Rust event loop — the one place wazy's substrate is an asset.
+- **Context:** ~8–10k LOC on top of the p2 runtime. Reference: Wasmtime + `bytecodealliance/wasip3-prototyping`, and the async section of the component-model `definitions.py`. Zero pure-Go prior art. Highest-variance part is async correctness debugging.
+- **Depends on / blocked by:** p2 CM runtime shipped and solid (milestones 1–4). Also blocked on the 0.3 spec settling — as of 2026-07 Wasmtime still marks its p3 support experimental/unstable. Do NOT start early; spec churn will waste the work.
+
+## Audit inherited interface bugs (http body, fs/sockets)
+- **What:** During the interface-salvage lane, give the parts carried over from `wazero-wasip2` a dedicated correctness audit: the known http-body-loss bug, and the filesystem + sockets interfaces their README flags as un-reviewed (esp. resource release).
+- **Why:** These are silent data bugs (dropped response bodies, leaked/mis-released handles) that won't surface in a hello-world demo but will bite real guests in production.
+- **Context:** `wazero-wasip2` README lists: "HTTP has a chance of losing the body" and that only `clock/http/io/tls/random` were partially reviewed — filesystem and sockets unaudited. When salvaging syscall bodies, treat these as suspect and add targeted tests (body round-trip, handle-release leak assert).
+- **Depends on / blocked by:** Lane E (interface implementation). Validate against the vendored WASI `.wit` as the surface oracle.
