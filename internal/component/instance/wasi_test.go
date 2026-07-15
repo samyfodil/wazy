@@ -19,6 +19,14 @@ import (
 func wasiHostFunc(t *testing.T, cfg WASIConfig, iface, name string) HostFunc {
 	t.Helper()
 	c := newConfig(WithWASI(cfg))
+	// Mirrors what a real Instantiate does right after newHandleTable()
+	// (see runResourceHooks' doc): wasi_fs.go's filesystem host funcs
+	// (get-directories, open-at, read-via-stream, ...) need a live
+	// *handleTable to mint own<T> handles through, which a real
+	// Instantiate always provides before any host func can run but this
+	// helper -- extracting a HostFunc directly, without instantiating a
+	// guest -- otherwise would not.
+	runResourceHooks(c, newHandleTable())
 	hi, ok := c.imports[importKey{iface: iface, name: name}]
 	if !ok {
 		t.Fatalf("WithWASI did not register %q %q", iface, name)
@@ -156,6 +164,12 @@ func TestWASI_GetArguments_Empty(t *testing.T) {
 	}
 }
 
+// TestWASI_GetDirectories proves get-directories returns exactly one
+// preopened root descriptor ("/"), backed by a real, resolvable own<
+// descriptor> handle -- see wasi_fs.go's package doc for why an empty
+// result (this func's pre-filesystem behavior) makes a real guest's
+// std::fs path fail before ever reaching a WASI call this package doesn't
+// implement.
 func TestWASI_GetDirectories(t *testing.T) {
 	fn := wasiHostFunc(t, WASIConfig{}, wasiIfacePreopens, "get-directories")
 	results, err := fn(context.Background(), nil)
@@ -166,8 +180,18 @@ func TestWASI_GetDirectories(t *testing.T) {
 		t.Fatalf("get-directories: %#v", results)
 	}
 	dirs, ok := results[0].([]abi.Value)
-	if !ok || len(dirs) != 0 {
-		t.Fatalf("get-directories: got %#v, want an empty []abi.Value", results[0])
+	if !ok || len(dirs) != 1 {
+		t.Fatalf("get-directories: got %#v, want a single-entry []abi.Value", results[0])
+	}
+	entry, ok := dirs[0].([]abi.Value)
+	if !ok || len(entry) != 2 {
+		t.Fatalf("get-directories[0]: got %#v, want a 2-element tuple<own<descriptor>,string>", dirs[0])
+	}
+	if _, ok := entry[0].(uint32); !ok {
+		t.Fatalf("get-directories[0][0] (descriptor handle): got %#v (%T), want uint32", entry[0], entry[0])
+	}
+	if name, ok := entry[1].(string); !ok || name != "/" {
+		t.Fatalf("get-directories[0][1] (name): got %#v, want \"/\"", entry[1])
 	}
 }
 

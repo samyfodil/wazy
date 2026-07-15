@@ -390,19 +390,19 @@ func TestLowerHostResults_BorrowHandle(t *testing.T) {
 
 func TestResourceCanonHostFunc_TypeIdxOutOfRange(t *testing.T) {
 	comp := &binary.Component{}
-	_, err := resourceCanonHostFunc(comp, newHandleTable(), "new", binary.Canon{Kind: 0x02, TypeIdx: 5})
+	_, err := resourceCanonHostFunc(comp, newConfig(nil), newHandleTable(), "new", binary.Canon{Kind: 0x02, TypeIdx: 5})
 	requireErrContains(t, err, "out of range")
 }
 
 func TestResourceCanonHostFunc_NotAResourceType(t *testing.T) {
 	comp := &binary.Component{Types: []binary.Type{{Descriptor: binary.PrimitiveDesc{Prim: "u32"}}}}
-	_, err := resourceCanonHostFunc(comp, newHandleTable(), "new", binary.Canon{Kind: 0x02, TypeIdx: 0})
+	_, err := resourceCanonHostFunc(comp, newConfig(nil), newHandleTable(), "new", binary.Canon{Kind: 0x02, TypeIdx: 0})
 	requireErrContains(t, err, "not a resource type")
 }
 
 func TestResourceCanonHostFunc_UnsupportedKind(t *testing.T) {
 	comp := &binary.Component{Types: []binary.Type{{Descriptor: binary.ResourceDesc{}}}}
-	_, err := resourceCanonHostFunc(comp, newHandleTable(), "new", binary.Canon{Kind: 0x99, TypeIdx: 0})
+	_, err := resourceCanonHostFunc(comp, newConfig(nil), newHandleTable(), "new", binary.Canon{Kind: 0x99, TypeIdx: 0})
 	requireErrContains(t, err, "unsupported resource canon kind")
 }
 

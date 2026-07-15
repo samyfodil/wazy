@@ -23,6 +23,21 @@ type Option func(*config)
 // interface name + function name.
 type config struct {
 	imports map[importKey]*hostImport
+
+	// resourceHooks are invoked with the Instance's *handleTable as soon as
+	// it exists (graph.go/instantiateWithImports, right after
+	// newHandleTable()), letting an Option's host func closures capture a
+	// reference to the same table generic lift/lower already threads
+	// through -- see withResourcesHook's doc for why a HostFunc sometimes
+	// needs this directly instead.
+	resourceHooks []func(*handleTable)
+
+	// resourceTags maps (imported interface, exported resource name) --
+	// e.g. ("wasi:filesystem/types@0.2.3", "descriptor") -- to the
+	// ResourceType tag an Option's own<T>/borrow<T> declarations (WithImport/
+	// withImportCustom) use for that same resource. See withResourceTag's
+	// doc for why this mapping needs to exist at all.
+	resourceTags map[importKey]uint32
 }
 
 type importKey struct {
@@ -52,7 +67,7 @@ type hostImport struct {
 }
 
 func newConfig(opts []Option) *config {
-	c := &config{imports: make(map[importKey]*hostImport)}
+	c := &config{imports: make(map[importKey]*hostImport), resourceTags: make(map[importKey]uint32)}
 	for _, o := range opts {
 		o(c)
 	}
@@ -68,6 +83,137 @@ func WithImport(iface, name string, fn HostFunc, params, results []binary.TypeDe
 	return func(c *config) {
 		c.imports[importKey{iface: iface, name: name}] = &hostImport{fn: fn, params: params, results: results}
 	}
+}
+
+// withResourcesHook registers hook to run against the Instance's
+// *handleTable as soon as it is created (before any host func is invoked).
+//
+// liftHostArgs/lowerHostResults (this file) resolve an own<T>/borrow<T>
+// handle <-> host-rep automatically, but only for a func's top-level
+// params/results (resolveHandleArg/allocHandleResult, called once per
+// top-level entry) -- see their docs. A HostFunc whose own<T> is nested
+// inside a composite result (e.g. wasi:filesystem/preopens.get-directories'
+// list<tuple<own<descriptor>,string>>, or wasi:filesystem/types'
+// [method]descriptor.open-at's result<descriptor,error-code>) must mint that
+// handle itself via resources.NewOwn, since nothing upstream will do it for
+// a nested position. Such a HostFunc needs its own reference to the same
+// per-Instance table, which does not otherwise exist until instantiation
+// begins (well after an Option's closures are built) -- withResourcesHook
+// is how it gets one. Used by wasi.go's filesystem host funcs; ordinary
+// WithImport-registered funcs never need it.
+func withResourcesHook(hook func(*handleTable)) Option {
+	return func(c *config) {
+		c.resourceHooks = append(c.resourceHooks, hook)
+	}
+}
+
+// runResourceHooks invokes every hook cfg registered via withResourcesHook
+// against resources. Called once per Instantiate, immediately after
+// newHandleTable(), by both instantiation paths that support host imports
+// (graph.go's instantiateGraph and this file's instantiateWithImports).
+func runResourceHooks(cfg *config, resources *handleTable) {
+	for _, hook := range cfg.resourceHooks {
+		hook(resources)
+	}
+}
+
+// withResourceTag records that the resource named name, exported by
+// imported interface iface (e.g. ("wasi:filesystem/types@0.2.3",
+// "descriptor")), is the same logical resource an Option's own<T>/
+// borrow<T> declarations tag with ResourceType tag.
+//
+// # Why this mapping has to exist
+//
+// A resource type has two entirely separate numberings in play at once:
+//
+//   - The real component binary's own type index (whatever canon.TypeIdx
+//     names for a `canon resource.new/drop/rep` core func the GUEST calls
+//     directly -- e.g. when its generated bindings drop an owned
+//     descriptor handle). This index is specific to one particular .wasm
+//     file's type section/alias layout and cannot be known in advance.
+//
+//   - The caller-chosen ResourceType tag an Option's own<T>/borrow<T>
+//     TypeDesc uses (WithImport/withImportCustom): since this package's
+//     decoder cannot retain an imported instance type's nested func
+//     signatures (see wasi.go's package doc), WithImport's caller supplies
+//     the FuncDesc by hand, including a self-chosen, wasm-binary-agnostic
+//     resource tag (e.g. wasi.go's wasiOutputStreamResType) -- the SAME
+//     tag reused across every host func that mints or resolves a handle
+//     for that resource, entirely independent of any one guest binary.
+//
+// Both numberings key into the very same handleTable (resource.go), which
+// cross-checks a handle's minting tag against every later operation's tag
+// (mirroring the Canonical ABI's `trap_if(h.rt is not rt)`). Left alone,
+// that check trips the moment BOTH numberings touch the same handle: a
+// WithImport-registered host func mints an own<descriptor> handle tagged
+// with wasi.go's constant, and the guest later drops it via a
+// resource.drop canon tagged with the real (unrelated) wasm type index --
+// two different numbers naming what both sides intend as the same
+// resource. This was invisible until a real guest's compiled glue
+// (rustc's wasi_snapshot_preview1 adapter, populating its preopens table)
+// actually dropped an owned host-resource handle -- no earlier fixture's
+// guest code did.
+//
+// withResourceTag closes that gap: resourceCanonHostFunc/
+// resourceCanonHostFuncGraph, given a resource.new/drop/rep canon, try to
+// trace its TypeIdx back to an (iface, name) pair the same way
+// importInterfaceName resolves a lowered import's target (only possible
+// when the type index names a type-sort alias exporting from an *imported*
+// instance -- see effectiveResourceTypeIdx); if that succeeds and iface+
+// name is registered here, the REAL wasm-level index is translated to tag
+// before touching resources, so both numberings agree. A resource this
+// package doesn't recognize (not registered, or genuinely guest-defined,
+// e.g. real_adder's own resource type) falls back to the raw TypeIdx
+// unchanged -- exactly today's existing, working behavior.
+func withResourceTag(iface, name string, tag uint32) Option {
+	return func(c *config) {
+		c.resourceTags[importKey{iface: iface, name: name}] = tag
+	}
+}
+
+// effectiveResourceTypeIdx translates canon.TypeIdx to the caller-chosen
+// ResourceType tag registered (via withResourceTag) for the imported
+// resource it names, if any; otherwise it returns canon.TypeIdx unchanged.
+// See withResourceTag's doc for why this translation must happen at all.
+func effectiveResourceTypeIdx(comp *binary.Component, cfg *config, typeIdx uint32) uint32 {
+	iface, name, ok := resolveImportedResourceName(comp, typeIdx)
+	if !ok {
+		return typeIdx
+	}
+	if tag, ok := cfg.resourceTags[importKey{iface: iface, name: name}]; ok {
+		return tag
+	}
+	return typeIdx
+}
+
+// resolveImportedResourceName reports the (imported interface, exported
+// resource name) a component type index names, when that index is a
+// type-sort alias exporting a name from one of this component's *imported*
+// instances -- the shape a real WASI guest's `alias export $ifaceInst
+// "descriptor" (type ...)` produces (comp.ResolveType cannot follow this
+// alias structurally, per typespace.go's doc, but the alias's own Name +
+// InstanceIdx fields are enough to identify which import+name it targets
+// without needing the type's full structural definition). Reports ok=false
+// for anything else: a locally-defined (guest-owned) resource type, an
+// alias of some other shape, or a Component with no TypeSpace (e.g. a
+// hand-built test Component that never went through Decode).
+func resolveImportedResourceName(comp *binary.Component, typeIdx uint32) (iface, name string, ok bool) {
+	if int(typeIdx) >= len(comp.TypeSpace) {
+		return "", "", false
+	}
+	entry := comp.TypeSpace[typeIdx]
+	if entry.Kind != binary.TypeSpaceAlias || int(entry.Alias) >= len(comp.Aliases) {
+		return "", "", false
+	}
+	al := comp.Aliases[entry.Alias]
+	if al.Sort != 0x03 || al.TargetKind != 0x00 { // type-sort export alias
+		return "", "", false
+	}
+	ifaceName, err := importInterfaceName(comp, al.InstanceIdx)
+	if err != nil {
+		return "", "", false
+	}
+	return ifaceName, al.Name, true
 }
 
 // aliasTarget is a resolved (instance index, export name) pair naming what an
@@ -154,6 +300,7 @@ func instantiateWithImports(ctx context.Context, r wazy.Runtime, comp *binary.Co
 
 	numProducedCoreFuncs := len(coreFuncCanonIdxs)
 	resources := newHandleTable()
+	runResourceHooks(cfg, resources)
 
 	// Instantiate core instances in order. FromExports instances (which group
 	// lowered import funcs and/or resource canon funcs) become synthetic
@@ -291,7 +438,7 @@ func resolveCoreFuncCanon(comp *binary.Component, cfg *config, resources *handle
 	case 0x01: // lower
 		return resolveLoweredImport(comp, cfg, resources, e.Name, canon, componentFunc)
 	case 0x02, 0x03, 0x04: // resource.new, resource.drop, resource.rep
-		return resourceCanonHostFunc(comp, resources, e.Name, canon)
+		return resourceCanonHostFunc(comp, cfg, resources, e.Name, canon)
 	default:
 		return hostFuncDef{}, fmt.Errorf("component/instance: inline export %q references canon[%d] of kind %#x, which does not produce a core func", e.Name, coreFuncCanonIdxs[e.CoreSortIdx], canon.Kind)
 	}
@@ -336,7 +483,7 @@ func resolveLoweredImport(comp *binary.Component, cfg *config, resources *handle
 // and borrow only appear at the *component* level, in the func types of
 // exports/imports that use these canon-produced core funcs) -- so this
 // bypasses the abi package entirely and talks to the handle table directly.
-func resourceCanonHostFunc(comp *binary.Component, resources *handleTable, name string, canon binary.Canon) (hostFuncDef, error) {
+func resourceCanonHostFunc(comp *binary.Component, cfg *config, resources *handleTable, name string, canon binary.Canon) (hostFuncDef, error) {
 	td, err := comp.ResolveType(canon.TypeIdx)
 	if err != nil {
 		return hostFuncDef{}, fmt.Errorf("component/instance: inline export %q: canon references type %d: %w", name, canon.TypeIdx, err)
@@ -344,7 +491,7 @@ func resourceCanonHostFunc(comp *binary.Component, resources *handleTable, name 
 	if _, ok := td.(binary.ResourceDesc); !ok {
 		return hostFuncDef{}, fmt.Errorf("component/instance: inline export %q: canon type %d is not a resource type (got %T)", name, canon.TypeIdx, td)
 	}
-	typeIdx := canon.TypeIdx
+	typeIdx := effectiveResourceTypeIdx(comp, cfg, canon.TypeIdx)
 
 	switch canon.Kind {
 	case 0x02: // resource.new: rep:i32 -> handle:i32

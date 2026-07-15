@@ -177,6 +177,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	}
 
 	resources := newHandleTable()
+	runResourceHooks(cfg, resources)
 	instMods := make(map[int]api.Module, len(comp.CoreInstances))
 	var closers []api.Module
 	closeAll := func() {
@@ -535,7 +536,7 @@ func buildCanonHostModule(
 
 	case 0x02, 0x03, 0x04: // resource.new, resource.drop, resource.rep
 		var rerr error
-		def, rerr = resourceCanonHostFuncGraph(comp, resources, entryName, canon)
+		def, rerr = resourceCanonHostFuncGraph(comp, cfg, resources, entryName, canon)
 		if rerr != nil {
 			return nil, "", nil, nil, "", rerr
 		}
@@ -601,18 +602,18 @@ func canonMemoryAndRealloc(canon binary.Canon, coreMemTarget func(int) (api.Modu
 // (e.g. wasi:filesystem/types' "descriptor") whose nested type declarations
 // this decoder does not retain (see typespace.go's doc) -- a hard
 // requirement here would make every such canon unresolvable. The tag itself
-// (canon.TypeIdx) does not depend on resolving the type at all, so this
-// still validates when it *can* (a resolvable type that is definitely not a
-// resource fails loud, same as resourceCanonHostFunc), and only widens the
-// "can't resolve structurally" case from a hard failure to a warning-free
-// best effort.
-func resourceCanonHostFuncGraph(comp *binary.Component, resources *handleTable, name string, canon binary.Canon) (hostFuncDef, error) {
+// (canon.TypeIdx, or its cfg-translated form -- see effectiveResourceTypeIdx's
+// doc) does not depend on resolving the type at all, so this still validates
+// when it *can* (a resolvable type that is definitely not a resource fails
+// loud, same as resourceCanonHostFunc), and only widens the "can't resolve
+// structurally" case from a hard failure to a warning-free best effort.
+func resourceCanonHostFuncGraph(comp *binary.Component, cfg *config, resources *handleTable, name string, canon binary.Canon) (hostFuncDef, error) {
 	if td, err := comp.ResolveType(canon.TypeIdx); err == nil {
 		if _, ok := td.(binary.ResourceDesc); !ok {
 			return hostFuncDef{}, fmt.Errorf("component/instance: inline export %q: canon type %d is not a resource type (got %T)", name, canon.TypeIdx, td)
 		}
 	}
-	typeIdx := canon.TypeIdx
+	typeIdx := effectiveResourceTypeIdx(comp, cfg, canon.TypeIdx)
 
 	switch canon.Kind {
 	case 0x02: // resource.new: rep:i32 -> handle:i32

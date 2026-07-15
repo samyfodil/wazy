@@ -50,15 +50,24 @@ import (
 //     behave correctly, not just instantiate; real_args.component.wasm (see
 //     real_args_test.go) additionally calls get-arguments to echo argv.
 //
-// Deliberately left unregistered -- see WithWASI's doc -- are
-// wasi:filesystem/types' filesystem-error-code and the four
-// [method]descriptor.* funcs: with get-directories always returning empty,
-// no descriptor handle can ever exist for the guest to call them with, so
-// the graph engine's own automatic trap-stub fallback (buildCanonHostModule
-// in graph.go, using the real guest module's own declared core-level import
-// type as the trap stub's signature) already satisfies "instantiable, but
-// fails loud if actually invoked" -- reimplementing that here would just be
-// a second, redundant copy of the same mechanism.
+// get-directories, in turn, returns a real preopened root descriptor
+// ("/") backed by WASIConfig.FS, and wasi_fs.go registers real
+// implementations for the wasi:filesystem/types + wasi:io/streams
+// input-stream + wasi:cli/terminal-* funcs a real guest's
+// std::fs::read_to_string reaches once it does -- see wasi_fs.go's package
+// doc for the exact discovered call list and why nested own<T> handles
+// (e.g. open-at's result<descriptor,error-code>) need special handling
+// beyond this file's top-level-only own<T>/borrow<T> plumbing.
+//
+// Still deliberately left unregistered are wasi:filesystem/types'
+// write-via-stream and append-via-stream (no guest fixture this package
+// runs ever calls them -- read_to_string's read-only path doesn't need
+// them) and wasi:sockets: the graph engine's own automatic
+// trap-stub fallback (buildCanonHostModule in graph.go, using the real
+// guest module's own declared core-level import type as the trap stub's
+// signature) already satisfies "instantiable, but fails loud if actually
+// invoked" for these -- reimplementing that here would just be a second,
+// redundant copy of the same mechanism.
 //
 // # Nested WIT types
 //
@@ -123,6 +132,13 @@ const (
 	wasiIfaceEnvironment = "wasi:cli/environment@0.2.3"
 	wasiIfaceStreams     = "wasi:io/streams@0.2.3"
 	wasiIfacePreopens    = "wasi:filesystem/preopens@0.2.3"
+
+	// Added for real filesystem I/O (see wasi_fs.go).
+	wasiIfaceFilesystemTypes = "wasi:filesystem/types@0.2.3"
+	wasiIfaceTerminalStdin   = "wasi:cli/terminal-stdin@0.2.3"
+	wasiIfaceTerminalStdout  = "wasi:cli/terminal-stdout@0.2.3"
+	wasiIfaceTerminalStderr  = "wasi:cli/terminal-stderr@0.2.3"
+	wasiIfaceError           = "wasi:io/error@0.2.3"
 )
 
 // WASIConfig configures the WASI 0.2 host implementation WithWASI builds.
@@ -148,6 +164,16 @@ type WASIConfig struct {
 	// real_args.component.wasm does) sees exactly Args, in order, lowered
 	// into the WIT list<string> shape.
 	Args []string
+
+	// FS backs the single preopened root directory ("/") wasi:filesystem/
+	// preopens.get-directories returns -- see wasi_fs.go. Keys are full
+	// virtual paths (e.g. "/greeting.txt", matching what a guest's
+	// std::fs::read_to_string("/greeting.txt") resolves to internally: its
+	// path relative to the "/" preopen, i.e. "greeting.txt", joined back
+	// onto "/"); values are that file's contents. A nil/empty FS is a
+	// valid, empty filesystem: every open-at fails with
+	// error-code::no-entry, exactly as a real empty directory would.
+	FS map[string][]byte
 }
 
 // WithWASI returns the Options that register a WASI 0.2 host implementation
@@ -233,10 +259,6 @@ func WithWASI(cfg WASIConfig) []Option {
 		return []abi.Value{args}, nil
 	}
 
-	getDirectories := func(context.Context, []abi.Value) ([]abi.Value, error) {
-		return []abi.Value{[]abi.Value{}}, nil
-	}
-
 	checkWrite := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
 		if len(args) != 1 {
 			return nil, fmt.Errorf("[method]output-stream.check-write: expected 1 arg (self), got %d", len(args))
@@ -293,9 +315,8 @@ func WithWASI(cfg WASIConfig) []Option {
 	writeFD, writeResolve := wasiWriteSig()
 	blockingFlushFD, blockingFlushResolve := wasiBlockingFlushSig()
 	envFD, envResolve := wasiGetEnvironmentSig()
-	dirFD, dirResolve := wasiGetDirectoriesSig()
 
-	return []Option{
+	opts := []Option{
 		WithImport(wasiIfaceStderr, "get-stderr", getStderr,
 			nil, []binary.TypeDesc{binary.OwnDesc{ResourceType: wasiOutputStreamResType}}),
 		WithImport(wasiIfaceStdin, "get-stdin", getStdin,
@@ -309,13 +330,13 @@ func WithWASI(cfg WASIConfig) []Option {
 			nil, []binary.TypeDesc{binary.ListDesc{Element: binary.TypeRef{Primitive: "string"}}}),
 
 		withImportCustom(wasiIfaceEnvironment, "get-environment", getEnvironment, envFD, envResolve),
-		withImportCustom(wasiIfacePreopens, "get-directories", getDirectories, dirFD, dirResolve),
 
 		withImportCustom(wasiIfaceStreams, "[method]output-stream.check-write", checkWrite, checkWriteFD, checkWriteResolve),
 		withImportCustom(wasiIfaceStreams, "[method]output-stream.write", write, writeFD, writeResolve),
 		withImportCustom(wasiIfaceStreams, "[method]output-stream.blocking-write-and-flush", write, writeFD, writeResolve),
 		withImportCustom(wasiIfaceStreams, "[method]output-stream.blocking-flush", blockingFlush, blockingFlushFD, blockingFlushResolve),
 	}
+	return append(opts, wasiFilesystemOptions(cfg)...)
 }
 
 // wasiBytesFromList converts a lifted list<u8> (see abi.Value's doc: list<T>
