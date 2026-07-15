@@ -401,7 +401,16 @@ func (r *runtime) InstantiateModule(
 	// Only add guest module configuration to guests.
 	if !code.module.IsHostModule {
 		if sockConfig, ok := ctx.Value(internalsock.ConfigKey{}).(*internalsock.Config); ok {
-			config.sockConfig = sockConfig
+			// ModuleConfig is documented immutable and may be reused across
+			// (concurrent) instantiations, so copy before setting the per-ctx
+			// socket config rather than mutating the caller's value in place
+			// (a data race, and a leak of one ctx's sockConfig into later
+			// instantiations sharing the config). A shallow struct copy
+			// suffices: only the sockConfig pointer changes; every other field
+			// (including the shared map refs) is read-only from here on.
+			cfg := *config
+			cfg.sockConfig = sockConfig
+			config = &cfg
 		}
 	}
 
