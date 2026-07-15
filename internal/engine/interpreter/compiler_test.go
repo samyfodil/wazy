@@ -50,9 +50,8 @@ func TestCompile(t *testing.T) {
 				Operations: []unionOperation{ // begin with params: []
 					newOperationBr(newLabel(labelKindReturn, 0)), // return!
 				},
-				LabelCallers: map[label]uint32{},
-				Functions:    []uint32{0},
-				Types:        []wasm.FunctionType{v_v},
+				Functions: []uint32{0},
+				Types:     []wasm.FunctionType{v_v},
 			},
 		},
 		{
@@ -66,9 +65,8 @@ func TestCompile(t *testing.T) {
 				Operations: []unionOperation{ // begin with params: []
 					newOperationBr(newLabel(labelKindReturn, 0)), // return!
 				},
-				LabelCallers: map[label]uint32{},
-				Functions:    []uint32{0},
-				Types:        []wasm.FunctionType{v_v},
+				Functions: []uint32{0},
+				Types:     []wasm.FunctionType{v_v},
 			},
 		},
 		{
@@ -84,7 +82,6 @@ func TestCompile(t *testing.T) {
 					newOperationDrop(inclusiveRange{Start: 1, End: 1}), // [$x]
 					newOperationBr(newLabel(labelKindReturn, 0)),       // return!
 				},
-				LabelCallers: map[label]uint32{},
 				Types: []wasm.FunctionType{
 					{
 						Params: []wasm.ValueType{i32}, Results: []wasm.ValueType{i32},
@@ -114,10 +111,9 @@ func TestCompile(t *testing.T) {
 					newOperationDrop(inclusiveRange{}),                                    // []
 					newOperationBr(newLabel(labelKindReturn, 0)),                          // return!
 				},
-				LabelCallers: map[label]uint32{},
-				Types:        []wasm.FunctionType{v_v},
-				Functions:    []uint32{0},
-				UsesMemory:   true,
+				Types:      []wasm.FunctionType{v_v},
+				Functions:  []uint32{0},
+				UsesMemory: true,
 			},
 		},
 		{
@@ -139,10 +135,9 @@ func TestCompile(t *testing.T) {
 					newOperationDrop(inclusiveRange{}),                                    // []
 					newOperationBr(newLabel(labelKindReturn, 0)),                          // return!
 				},
-				LabelCallers: map[label]uint32{},
-				Types:        []wasm.FunctionType{v_v},
-				Functions:    []uint32{0},
-				UsesMemory:   true,
+				Types:      []wasm.FunctionType{v_v},
+				Functions:  []uint32{0},
+				UsesMemory: true,
 			},
 		},
 		{
@@ -161,7 +156,6 @@ func TestCompile(t *testing.T) {
 					newOperationDrop(inclusiveRange{Start: 1, End: 1}), // [$old_size]
 					newOperationBr(newLabel(labelKindReturn, 0)),       // return!
 				},
-				LabelCallers: map[label]uint32{},
 				Types: []wasm.FunctionType{{
 					Params: []wasm.ValueType{i32}, Results: []wasm.ValueType{i32},
 					ParamNumInUint64:  1,
@@ -226,9 +220,8 @@ func TestCompile_Block(t *testing.T) {
 				// Note: i32.add comes after br 0 so is unreachable. Compilation succeeds when it feels like it
 				// shouldn't because the br instruction is stack-polymorphic. In other words, (br 0) substitutes for the
 				// two i32 parameters to add.
-				LabelCallers: map[label]uint32{newLabel(labelKindContinuation, 2): 1},
-				Functions:    []uint32{0},
-				Types:        []wasm.FunctionType{v_v},
+				Functions: []uint32{0},
+				Types:     []wasm.FunctionType{v_v},
 			},
 		},
 	}
@@ -301,7 +294,6 @@ func TestCompile_BulkMemoryOperations(t *testing.T) {
 		Memory:           memoryTypeStandard,
 		UsesMemory:       true,
 		HasDataInstances: true,
-		LabelCallers:     map[label]uint32{},
 		Functions:        []wasm.Index{0},
 		Types:            []wasm.FunctionType{v_v},
 	}
@@ -350,9 +342,8 @@ func TestCompile_MultiValue(t *testing.T) {
 					newOperationDrop(inclusiveRange{Start: 2, End: 3}), // [$y, $x]
 					newOperationBr(newLabel(labelKindReturn, 0)),       // return!
 				},
-				LabelCallers: map[label]uint32{},
-				Functions:    []wasm.Index{0},
-				Types:        []wasm.FunctionType{i32i32_i32i32},
+				Functions: []wasm.Index{0},
+				Types:     []wasm.FunctionType{i32i32_i32i32},
 			},
 		},
 		{
@@ -387,9 +378,8 @@ func TestCompile_MultiValue(t *testing.T) {
 				},
 				// Note: f64.add comes after br 0 so is unreachable. This is why neither the add, nor its other operand
 				// are in the above compilation result.
-				LabelCallers: map[label]uint32{newLabel(labelKindContinuation, 2): 1}, // arbitrary label
-				Functions:    []wasm.Index{0},
-				Types:        []wasm.FunctionType{v_f64f64},
+				Functions: []wasm.Index{0},
+				Types:     []wasm.FunctionType{v_f64f64},
 			},
 		},
 		{
@@ -408,9 +398,8 @@ func TestCompile_MultiValue(t *testing.T) {
 					newOperationConstI64(356),                    // [306, 356]
 					newOperationBr(newLabel(labelKindReturn, 0)), // return!
 				},
-				LabelCallers: map[label]uint32{},
-				Functions:    []wasm.Index{0},
-				Types:        []wasm.FunctionType{_i32i64},
+				Functions: []wasm.Index{0},
+				Types:     []wasm.FunctionType{_i32i64},
 			},
 		},
 		{
@@ -455,11 +444,6 @@ func TestCompile_MultiValue(t *testing.T) {
 					newOperationLabel(newLabel(labelKindContinuation, 2)),
 					newOperationDrop(inclusiveRange{Start: 1, End: 1}), // .L2 = [3], .L2_else = [-1]
 					newOperationBr(newLabel(labelKindReturn, 0)),
-				},
-				LabelCallers: map[label]uint32{
-					newLabel(labelKindHeader, 2):       1,
-					newLabel(labelKindContinuation, 2): 2,
-					newLabel(labelKindElse, 2):         1,
 				},
 				Functions: []wasm.Index{0},
 				Types:     []wasm.FunctionType{i32_i32},
@@ -512,11 +496,6 @@ func TestCompile_MultiValue(t *testing.T) {
 					newOperationDrop(inclusiveRange{Start: 1, End: 1}), // .L2 = [3], .L2_else = [-1]
 					newOperationBr(newLabel(labelKindReturn, 0)),
 				},
-				LabelCallers: map[label]uint32{
-					newLabel(labelKindHeader, 2):       1,
-					newLabel(labelKindContinuation, 2): 2,
-					newLabel(labelKindElse, 2):         1,
-				},
 				Functions: []wasm.Index{0},
 				Types:     []wasm.FunctionType{i32_i32, i32i32_i32},
 			},
@@ -568,11 +547,6 @@ func TestCompile_MultiValue(t *testing.T) {
 					newOperationDrop(inclusiveRange{Start: 1, End: 1}), // .L2 = [3], .L2_else = [-1]
 					newOperationBr(newLabel(labelKindReturn, 0)),
 				},
-				LabelCallers: map[label]uint32{
-					newLabel(labelKindHeader, 2):       1,
-					newLabel(labelKindContinuation, 2): 2,
-					newLabel(labelKindElse, 2):         1,
-				},
 				Functions: []wasm.Index{0},
 				Types:     []wasm.FunctionType{i32_i32, i32i32_i32},
 			},
@@ -622,9 +596,8 @@ func TestCompile_NonTrappingFloatToIntConversion(t *testing.T) {
 			newOperationDrop(inclusiveRange{Start: 1, End: 1}), // [i32.trunc_sat_f32_s($0)]
 			newOperationBr(newLabel(labelKindReturn, 0)),       // return!
 		},
-		LabelCallers: map[label]uint32{},
-		Functions:    []wasm.Index{0},
-		Types:        []wasm.FunctionType{f32_i32},
+		Functions: []wasm.Index{0},
+		Types:     []wasm.FunctionType{f32_i32},
 	}
 	c, err := newCompiler(api.CoreFeatureNonTrappingFloatToIntConversion, 0, module, false)
 	require.NoError(t, err)
@@ -651,9 +624,8 @@ func TestCompile_SignExtensionOps(t *testing.T) {
 			newOperationDrop(inclusiveRange{Start: 1, End: 1}), // [i32.extend8_s($0)]
 			newOperationBr(newLabel(labelKindReturn, 0)),       // return!
 		},
-		LabelCallers: map[label]uint32{},
-		Functions:    []wasm.Index{0},
-		Types:        []wasm.FunctionType{i32_i32},
+		Functions: []wasm.Index{0},
+		Types:     []wasm.FunctionType{i32_i32},
 	}
 	c, err := newCompiler(api.CoreFeatureSignExtensionOps, 0, module, false)
 	require.NoError(t, err)
@@ -704,10 +676,9 @@ func TestCompile_CallIndirectNonZeroTableIndex(t *testing.T) {
 			newOperationCallIndirect(2, 5),
 			newOperationBr(newLabel(labelKindReturn, 0)), // return!
 		},
-		HasTable:     true,
-		LabelCallers: map[label]uint32{},
-		Functions:    []wasm.Index{0},
-		Types:        []wasm.FunctionType{v_v, v_v, v_v},
+		HasTable:  true,
+		Functions: []wasm.Index{0},
+		Types:     []wasm.FunctionType{v_v, v_v, v_v},
 	}
 
 	c, err := newCompiler(api.CoreFeatureBulkMemoryOperations, 0, module, false)

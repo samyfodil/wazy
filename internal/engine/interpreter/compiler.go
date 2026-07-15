@@ -243,19 +243,6 @@ type compilationResult struct {
 	// Non nil only when the given Wasm module has the DWARF section.
 	IROperationSourceOffsetsInWasmBinary []uint64
 
-	// LabelCallers maps label to the number of callers to that label.
-	// Here "callers" means that the call-sites which jumps to the label with br, br_if or br_table
-	// instructions.
-	//
-	// Note: zero possible and allowed in wasm. e.g.
-	//
-	//	(block
-	//	  (br 0)
-	//	  (block i32.const 1111)
-	//	)
-	//
-	// This example the label corresponding to `(block i32.const 1111)` is never be reached at runtime because `br 0` exits the function before we reach there
-	LabelCallers map[label]uint32
 	// UsesMemory is true if this function might use memory.
 	UsesMemory bool
 	// PendingExceptionTable holds unresolved exception table entries, built during
@@ -316,7 +303,6 @@ func newCompiler(enabledFeatures api.CoreFeatures, callFrameStackSizeInUint64 in
 			HasTable:            hasTable,
 			HasDataInstances:    hasDataInstances,
 			HasElementInstances: hasElementInstances,
-			LabelCallers:        map[label]uint32{},
 		},
 		globals:           globals,
 		funcs:             functions,
@@ -346,12 +332,6 @@ func (c *compiler) Next() (*compilationResult, error) {
 	c.result.IROperationSourceOffsetsInWasmBinary = c.result.IROperationSourceOffsetsInWasmBinary[:0]
 	c.result.UsesMemory = false
 	c.result.PendingExceptionTable = c.result.PendingExceptionTable[:0]
-	// Clears the existing entries in LabelCallers.
-	for frameID := uint32(0); frameID <= c.currentFrameID; frameID++ {
-		for k := labelKind(0); k < labelKindNum; k++ {
-			delete(c.result.LabelCallers, newLabel(k, frameID))
-		}
-	}
 	// Reset the previous states.
 	c.pc = 0
 	c.currentOpPC = 0
@@ -500,7 +480,6 @@ operatorSwitch:
 
 		// Prep labels for inside and the continuation of this loop.
 		loopLabel := newLabel(labelKindHeader, frame.frameID)
-		c.result.LabelCallers[loopLabel]++
 
 		// Emit the branch operation to enter inside the loop.
 		c.emit(newOperationBr(loopLabel))
@@ -546,8 +525,6 @@ operatorSwitch:
 		// Prep labels for if and else of this if.
 		thenLabel := newLabel(labelKindHeader, frame.frameID)
 		elseLabel := newLabel(labelKindElse, frame.frameID)
-		c.result.LabelCallers[thenLabel]++
-		c.result.LabelCallers[elseLabel]++
 
 		// Emit the branch operation to enter the then block.
 		c.emit(newOperationBrIf(thenLabel, elseLabel, nopinclusiveRange))
@@ -599,7 +576,6 @@ operatorSwitch:
 		// Prep labels for else and the continuation of this if block.
 		elseLabel := newLabel(labelKindElse, frame.frameID)
 		continuationLabel := newLabel(labelKindContinuation, frame.frameID)
-		c.result.LabelCallers[continuationLabel]++
 
 		// Emit the instructions for exiting the if loop,
 		// and then the initiation of else block.
@@ -629,7 +605,6 @@ operatorSwitch:
 			if frame.kind == controlFrameKindIfWithoutElse {
 				// Emit the else label.
 				elseLabel := newLabel(labelKindElse, frame.frameID)
-				c.result.LabelCallers[continuationLabel]++
 				c.emit(newOperationLabel(elseLabel))
 				c.emit(newOperationBr(continuationLabel))
 				c.emit(newOperationLabel(continuationLabel))
@@ -668,7 +643,6 @@ operatorSwitch:
 			// This case we have to emit "empty" else label.
 			elseLabel := newLabel(labelKindElse, frame.frameID)
 			continuationLabel := newLabel(labelKindContinuation, frame.frameID)
-			c.result.LabelCallers[continuationLabel] += 2
 			c.emit(dropOp)
 			c.emit(newOperationBr(continuationLabel))
 			// Emit the else which soon branches into the continuation.
@@ -680,7 +654,6 @@ operatorSwitch:
 			controlFrameKindIfWithElse,
 			controlFrameKindTryTable:
 			continuationLabel := newLabel(labelKindContinuation, frame.frameID)
-			c.result.LabelCallers[continuationLabel]++
 			c.emit(dropOp)
 			c.emit(newOperationBr(continuationLabel))
 			c.emit(newOperationLabel(continuationLabel))
@@ -709,7 +682,6 @@ operatorSwitch:
 		targetFrame.ensureContinuation()
 		dropOp := newOperationDrop(c.getFrameDropRange(targetFrame, false))
 		targetID := targetFrame.asLabel()
-		c.result.LabelCallers[targetID]++
 		c.emit(dropOp)
 		c.emit(newOperationBr(targetID))
 		// Br operation is stack-polymorphic, and mark the state as unreachable.
@@ -732,10 +704,8 @@ operatorSwitch:
 		targetFrame.ensureContinuation()
 		drop := c.getFrameDropRange(targetFrame, false)
 		target := targetFrame.asLabel()
-		c.result.LabelCallers[target]++
 
 		continuationLabel := newLabel(labelKindHeader, c.nextFrameID())
-		c.result.LabelCallers[continuationLabel]++
 		c.emit(newOperationBrIf(target, continuationLabel, drop))
 		// Start emitting else block operations.
 		c.emit(newOperationLabel(continuationLabel))
@@ -777,7 +747,6 @@ operatorSwitch:
 			targetLabel := targetFrame.asLabel()
 			targetLabels[i] = uint64(targetLabel)
 			targetLabels[i+1] = drop.AsU64()
-			c.result.LabelCallers[targetLabel]++
 		}
 
 		// Prep default target control frame.
@@ -790,7 +759,6 @@ operatorSwitch:
 		defaultTargetFrame.ensureContinuation()
 		defaultTargetDrop := c.getFrameDropRange(defaultTargetFrame, false)
 		defaultLabel := defaultTargetFrame.asLabel()
-		c.result.LabelCallers[defaultLabel]++
 		targetLabels[s] = uint64(defaultLabel)
 		targetLabels[s+1] = defaultTargetDrop.AsU64()
 		c.emit(newOperationBrTable(targetLabels))
@@ -876,7 +844,6 @@ operatorSwitch:
 			targetFrame := c.controlFrames.get(int(labelIdx))
 			targetFrame.ensureContinuation()
 			targetLabel := targetFrame.asLabel()
-			c.result.LabelCallers[targetLabel]++
 			pendingClauses = append(pendingClauses, pendingCatchClause{
 				kind:             kind,
 				tagIndex:         tagIdx,
@@ -3601,10 +3568,8 @@ operatorSwitch:
 		targetFrame.ensureContinuation()
 		drop := c.getFrameDropRange(targetFrame, false)
 		target := targetFrame.asLabel()
-		c.result.LabelCallers[target]++
 
 		continuationLabel := newLabel(labelKindHeader, c.nextFrameID())
-		c.result.LabelCallers[continuationLabel]++
 		c.emit(newOperationBrOnNull(target, continuationLabel, drop))
 		c.emit(newOperationLabel(continuationLabel))
 		// On fall-through (non-null), the ref is pushed back at runtime.
@@ -3625,10 +3590,8 @@ operatorSwitch:
 		targetFrame.ensureContinuation()
 		drop := c.getFrameDropRange(targetFrame, false)
 		target := targetFrame.asLabel()
-		c.result.LabelCallers[target]++
 
 		continuationLabel := newLabel(labelKindHeader, c.nextFrameID())
-		c.result.LabelCallers[continuationLabel]++
 		c.emit(newOperationBrOnNonNull(target, continuationLabel, drop))
 		c.emit(newOperationLabel(continuationLabel))
 
