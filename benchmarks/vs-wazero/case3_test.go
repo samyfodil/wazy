@@ -8,8 +8,15 @@ import (
 )
 
 // caseExports are the real-compiled-code (from Go, via caseWasm) exports and
-// their canonical single-i32 args: fibonacci is pure recursion; the others run
-// memory-touching loops (base64, string ops, array reverse, matrix multiply).
+// their canonical single-i32 args: fibonacci is pure recursion; string_manipulation,
+// reverse_array and random_mat_mul run pure-compute loops (zero host calls);
+// base64 is the outlier -- it calls the env.get_random_string host import 100
+// times, so BenchmarkCase3/base64 measures host-call crossing overhead (wazy's
+// native Go call vs wasmtime's cgo boundary), NOT base64 codegen. Correctness
+// (fibonacci result parity, no errors, and these host-call counts) is asserted
+// by TestCase3Parity. Only fibonacci returns a value; the others work via memory
+// but execute identical bytecode on all three runtimes, so the work is
+// equivalent by construction as long as none errors (asserted).
 var caseExports = []struct {
 	name string
 	arg  int32
