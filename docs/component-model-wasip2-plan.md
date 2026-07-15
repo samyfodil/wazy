@@ -22,11 +22,15 @@ Scope decision: **Real p2 CM runtime** — load arbitrary off-the-shelf `.compon
 
 **The major WASI 0.2 surface is done and verified:** cli · io streams + poll · environment · filesystem (read/write/dir) · random · sockets (TCP). Real guests run doing compute, all file I/O, every stdio/args/env direction, and networking.
 
-## Remaining (not started; deliberate)
-- Minor breadth: UDP, `ip-name-lookup`, real clocks-in-output, symlinks.
-- The upstream `wasi-testsuite` corpus.
+## Performance pass (started)
+Compliance-first, then optimized — with the oracle + conformance as the guard that marshalling stays byte-identical:
+- **~4x faster component calls** — profile showed `invoke()` re-resolving `api.Function` handles (a `callEngine` alloc per call) and recomputing immutable ABI metadata every call. Cached both at bind time (`finalizeBoundExport`). CallAdd 1529->380 ns/op (-92% bytes), CallGreet 2109->535 ns/op (-94% bytes). Oracle + 35/35 conformance still green.
+- Also fixed a closer-leak bug the profiling flushed out (canon host modules not in `Instance.closers`).
+
+## Remaining (user's-call / diminishing)
+- Perf, bigger + riskier (touch generic `internal/wasm`, change contracts — the user's design call): a compiled-module cache for repeated same-component instantiate (#4), linear-memory buffer pooling (#5, `NewMemoryInstance` is 64% of Instantiate's bytes).
+- Minor breadth: UDP, `ip-name-lookup`, real clocks-in-output, symlinks; the upstream `wasi-testsuite`.
 - Async / WASI 0.3 (explicitly out of scope).
-- The **performance pass** — the plan was compliance-first; optimization is the deferred second phase, and wazy's whole identity. This is the natural "true completion" for this project.
 
 ---
 
