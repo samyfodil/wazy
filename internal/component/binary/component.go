@@ -31,6 +31,10 @@ type Type struct {
 	// For now, we stub most kinds.
 	Kind string
 
+	// Descriptor is the full semantic representation of the type (enum, record, func, etc).
+	// It is set during parsing and contains the complete structure for ABI and other uses.
+	Descriptor TypeDesc
+
 	// Raw holds the raw bytes of this type definition (for round-trip verification).
 	Raw []byte
 }

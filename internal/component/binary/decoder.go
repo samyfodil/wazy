@@ -147,13 +147,15 @@ func decodeTypeSection(buf []byte, offset int, sectionSize uint32) ([]Type, int,
 	offset += int(n)
 
 	types := make([]Type, count)
-	for i := uint32(0); i < count; i++ {
-		kind, newOffset, err := readDeftype(buf, offset)
+	for i := range count {
+		// Single walk: the descriptor is the source of truth, and its Kind()
+		// method derives the human-readable kind string.
+		desc, newOffset, err := readDeftypeDesc(buf, offset)
 		if err != nil {
 			return nil, newOffset, fmt.Errorf("type[%d]: %w", i, err)
 		}
 		offset = newOffset
-		types[i] = Type{Index: i, Kind: kind}
+		types[i] = Type{Index: i, Kind: desc.Kind(), Descriptor: desc}
 	}
 
 	if bytesRead := offset - sectionStart; bytesRead > int(sectionSize) {
@@ -174,7 +176,7 @@ func decodeImportSection(buf []byte, offset int, sectionSize uint32) ([]Import, 
 	offset += int(n)
 
 	imports := make([]Import, count)
-	for i := uint32(0); i < count; i++ {
+	for i := range count {
 		name, off, err := readExternName(buf, offset)
 		if err != nil {
 			return nil, off, fmt.Errorf("import[%d] name: %w", i, err)
@@ -207,7 +209,7 @@ func decodeExportSection(buf []byte, offset int, sectionSize uint32) ([]Export, 
 	offset += int(n)
 
 	exports := make([]Export, count)
-	for i := uint32(0); i < count; i++ {
+	for i := range count {
 		name, off, err := readExternName(buf, offset)
 		if err != nil {
 			return nil, off, fmt.Errorf("export[%d] name: %w", i, err)
