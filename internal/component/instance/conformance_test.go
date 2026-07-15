@@ -214,6 +214,59 @@ var conformanceFixtures = []conformanceFixture{
 		desc: "real `itertools` crate: chunks, tuple_windows, cartesian_product, chunk_by, kmerge, zip_longest, dedup, unique, minmax -- heavy iterator-combinator usage over deterministic in-memory data",
 		wasm: f28ItertoolsWasm, golden: f28ItertoolsGolden,
 	},
+
+	// --- batch 4: the WASI filesystem surface no fixture above touches --
+	// directory listing/scoping and random-access reads/writes -- each
+	// chosen to hit a wasi:filesystem/types descriptor method this package
+	// didn't implement yet (see wasi_fs.go's "batch 4" doc addendum for the
+	// discovery + implementation notes). f07/f08/f17 above only ever
+	// open-at + read/write-via-stream a single flat file at a time; these
+	// seven are the first fixtures whose guest calls
+	// [method]descriptor.read-directory, seeks within an open file, or
+	// removes a path. ---
+
+	{
+		name: "f29_readdir",
+		desc: "std::fs::read_dir(\"/\") over 2 files + 1 subdirectory, name-sorted, plus a count -- exercises [method]descriptor.read-directory -> directory-entry-stream resource -> [method]directory-entry-stream.read-directory-entry",
+		wasm: f29ReaddirWasm, golden: f29ReaddirGolden,
+		fs: map[string][]byte{"/a.txt": []byte("A"), "/b.txt": []byte("BB"), "/sub/inner.txt": []byte("inner")},
+	},
+	{
+		name: "f30_filetypes",
+		desc: "std::fs::read_dir(\"/\") then entry.file_type()/metadata().len() per entry, distinguishing files from a synthetic directory -- exercises DirEntryType::type together with read-directory's file-vs-dir shape",
+		wasm: f30FiletypesWasm, golden: f30FiletypesGolden,
+		fs: map[string][]byte{"/a.txt": []byte("A"), "/b.txt": []byte("BB"), "/sub/inner.txt": []byte("inner")},
+	},
+	{
+		name: "f31_seek",
+		desc: "open a file, Seek::Start/Current/End then read a slice at each position -- exercises [method]descriptor.read-via-stream(offset) called repeatedly against one open descriptor as std::io::Seek's backing implementation",
+		wasm: f31SeekWasm, golden: f31SeekGolden,
+		fs: map[string][]byte{"/data.txt": []byte("0123456789ABCDEFGHIJ world hello")},
+	},
+	{
+		name: "f32_nested",
+		desc: "3 files under a nested path (/a/b.txt, /a/c.txt, /d.txt), listing \"/\" and \"/a\" separately then reading a nested file -- exercises path resolution + directory scoping over the flat host-FS map (no directory ever explicitly present as its own map key)",
+		wasm: f32NestedWasm, golden: f32NestedGolden,
+		fs: map[string][]byte{"/a/b.txt": []byte("b content"), "/a/c.txt": []byte("c content"), "/d.txt": []byte("d content")},
+	},
+	{
+		name: "f33_createlist",
+		desc: "std::fs::write creates a new file, then read_dir(\"/\") shows it alongside a read-back of its content -- exercises write-then-list consistency: read-directory must observe an open-at(create) commit from earlier in the same run",
+		wasm: f33CreatelistWasm, golden: f33CreatelistGolden,
+		fs: map[string][]byte{},
+	},
+	{
+		name: "f34_append",
+		desc: "write, stat len, OpenOptions::append + write_all, stat len again, read back, then overwrite (truncate) + stat len a third time -- exercises append-via-stream's write-cursor seeded at the file's current end, together with stat's size field staying live across writes",
+		wasm: f34AppendWasm, golden: f34AppendGolden,
+		fs: map[string][]byte{},
+	},
+	{
+		name: "f35_remove",
+		desc: "list \"/\", std::fs::remove_file, list \"/\" again, then attempt to read the removed path and print io::ErrorKind -- exercises [method]descriptor.unlink-file-at",
+		wasm: f35RemoveWasm, golden: f35RemoveGolden,
+		fs: map[string][]byte{"/gone.txt": []byte("x")},
+	},
 }
 
 type conformanceFixture struct {
@@ -507,3 +560,45 @@ var f28ItertoolsWasm []byte
 
 //go:embed testdata/conformance/f28_itertools.stdout.golden
 var f28ItertoolsGolden string
+
+//go:embed testdata/conformance/f29_readdir.component.wasm
+var f29ReaddirWasm []byte
+
+//go:embed testdata/conformance/f29_readdir.stdout.golden
+var f29ReaddirGolden string
+
+//go:embed testdata/conformance/f30_filetypes.component.wasm
+var f30FiletypesWasm []byte
+
+//go:embed testdata/conformance/f30_filetypes.stdout.golden
+var f30FiletypesGolden string
+
+//go:embed testdata/conformance/f31_seek.component.wasm
+var f31SeekWasm []byte
+
+//go:embed testdata/conformance/f31_seek.stdout.golden
+var f31SeekGolden string
+
+//go:embed testdata/conformance/f32_nested.component.wasm
+var f32NestedWasm []byte
+
+//go:embed testdata/conformance/f32_nested.stdout.golden
+var f32NestedGolden string
+
+//go:embed testdata/conformance/f33_createlist.component.wasm
+var f33CreatelistWasm []byte
+
+//go:embed testdata/conformance/f33_createlist.stdout.golden
+var f33CreatelistGolden string
+
+//go:embed testdata/conformance/f34_append.component.wasm
+var f34AppendWasm []byte
+
+//go:embed testdata/conformance/f34_append.stdout.golden
+var f34AppendGolden string
+
+//go:embed testdata/conformance/f35_remove.component.wasm
+var f35RemoveWasm []byte
+
+//go:embed testdata/conformance/f35_remove.stdout.golden
+var f35RemoveGolden string

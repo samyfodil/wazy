@@ -1,0 +1,3 @@
+before: gone.txt
+after: 
+read after remove: err kind=NotFound

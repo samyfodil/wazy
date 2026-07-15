@@ -82,6 +82,63 @@ import (
 // descriptor) -- read_to_string never calls metadata itself, so nothing in
 // the original discovery list had exercised this path before.
 //
+// # Batch 4: directories, seek, and unlink
+//
+// f07/f08/f17's fixtures (and the read/write funcs above) only ever
+// open-at + read/write-via-stream one flat file at a time -- nothing
+// through f28_itertools ever asks this package to enumerate a directory's
+// children, open a *directory* descriptor at all, or remove a path. Seven
+// more conformance fixtures (f29_readdir through f35_remove --
+// conformance_test.go) close that gap, discovered the same one-trap-at-a-
+// time way as the original list above:
+//
+//   - std::fs::read_dir("/") (f29_readdir) opens "." *first*, not "/" --
+//     its first host call is open-at(root, path=".", open-flags=directory),
+//     not read-directory directly. Without wasiJoinFSPath treating rel=="."
+//     as naming the directory itself, this resolves to the bogus path "/."
+//     (found in no fs.files entry) and the guest panics on a spurious
+//     error-code::no-entry before read-directory is ever reached.
+//   - [method]descriptor.read-directory -> result<own<directory-entry-
+//     stream>, error-code>, then repeated
+//     [method]directory-entry-stream.read-directory-entry() ->
+//     result<option<directory-entry{type, name}>, error-code> calls until
+//     none, is std's actual iterator protocol over a directory (not one
+//     batch list<T> call) -- mirrors read-via-stream's own
+//     mint-a-resource-then-pull-from-it shape.
+//   - [method]descriptor.unlink-file-at(path) (f35_remove) is
+//     std::fs::remove_file's host call.
+//   - Nothing new was needed for f31_seek (std::io::Seek is implemented
+//     entirely in terms of repeated read-via-stream(offset) calls against
+//     the same open descriptor -- no distinct "seek" WASI func exists) or
+//     f34_append (append-via-stream/stat, both already implemented for
+//     f08_filewrite/f17_multifs, are sufficient) -- both fixtures are
+//     included anyway because nothing before batch 4 exercised that
+//     *combination* (seek positions spanning start/current/end; a
+//     stat-after-append/stat-after-truncate size sequence) even though no
+//     new host func resulted.
+//
+// ## Directory modeling
+//
+// wasiFS.files stays exactly what it always was: a flat map<string,
+// []byte> of *files* (WASIConfig.FS's own shape) -- no key is ever added
+// for a directory's own existence. A directory (the preopened root, or any
+// deeper path like "/a") is instead *synthetic*: fsIsDir reports a path is
+// one if it's "/" or if any file lives strictly underneath it, and
+// fsListDirEntries derives a directory's listing by scanning fs.files for
+// keys under that prefix, folding every deeper path back down to its
+// immediate next component (deduplicated) as a synthetic subdirectory
+// entry. This means an explicitly-empty directory (one with zero files
+// anywhere under it) cannot exist in this model -- there is no key to hang
+// its existence off of -- which every batch-4 fixture avoids needing (each
+// synthetic subdirectory always contains at least one file). Tracking
+// directories as their own explicit set (rather than inferring them from
+// file prefixes) was considered and rejected: it would require every
+// directory-creating operation (there are none yet -- no fixture calls
+// std::fs::create_dir) to remember to update a second data structure in
+// lockstep with fs.files, for a case this package's fixtures never
+// exercise; inferring from prefixes needs no such bookkeeping and cannot
+// drift out of sync with the files that are its only source of truth.
+//
 // # Nested own<T> handles
 //
 // Every func below whose result nests an own<T> inside a result<>/list<>
@@ -102,6 +159,12 @@ const (
 	wasiTerminalInputResType  uint32 = 5
 	wasiTerminalOutputResType uint32 = 6
 )
+
+// wasiDirEntryStreamResType tags wasi:filesystem/types' `directory-entry-
+// stream` resource (see this file's "batch 4" doc addendum), minted by
+// [method]descriptor.read-directory and consumed one entry at a time by
+// [method]directory-entry-stream.read-directory-entry.
+const wasiDirEntryStreamResType uint32 = 7
 
 // wasi:filesystem/types' error-code enum, and the two enum indices this
 // package actually returns, in declaration order (from `wasm-tools
@@ -147,8 +210,10 @@ const (
 )
 
 // wasi:filesystem/types' descriptor-type enum indices this package returns
-// (a descriptor is either the one preopened root directory, or a regular
-// file opened under it -- no other descriptor-type ever occurs).
+// (a descriptor is either the preopened root directory, a *synthetic*
+// subdirectory minted the same way (see openAt's "batch 4" doc addendum and
+// wasiFS.fsIsDir), or a regular file opened under one of those -- no other
+// descriptor-type ever occurs).
 const (
 	wasiDescriptorTypeDirectory   uint32 = 3
 	wasiDescriptorTypeRegularFile uint32 = 6
@@ -165,14 +230,17 @@ const wasiStreamErrClosed uint32 = 1
 // wasi:filesystem/types' open-flags flag bits this package inspects, per
 // their WIT declaration order create/directory/exclusive/truncate: create
 // (bit 0) makes open-at create a missing path's FS entry instead of failing
-// with error-code::no-entry, and truncate (bit 3) resets an existing
-// (writable) entry's content to empty. directory/exclusive are not
-// inspected -- this in-memory filesystem has no directory-vs-file open
-// ambiguity beyond isDir, and no concurrent opener to race against for
-// exclusive to matter.
+// with error-code::no-entry, directory (bit 1) requests a directory
+// descriptor rather than a file one -- see openAt's "batch 4" doc addendum,
+// discovered by std::fs::read_dir("/") opening "." with this bit set before
+// ever calling read-directory -- and truncate (bit 3) resets an existing
+// (writable) entry's content to empty. exclusive is not inspected -- this
+// in-memory filesystem has no concurrent opener to race against for it to
+// matter.
 const (
-	wasiOpenFlagCreate   uint32 = 1 << 0
-	wasiOpenFlagTruncate uint32 = 1 << 3
+	wasiOpenFlagCreate    uint32 = 1 << 0
+	wasiOpenFlagDirectory uint32 = 1 << 1
+	wasiOpenFlagTruncate  uint32 = 1 << 3
 )
 
 // wasi:filesystem/types' descriptor-flags bit this package inspects (bit 1,
@@ -229,14 +297,37 @@ type fsStreamNode struct {
 	pos  int
 }
 
+// fsDirEntry is one child wasiFS.fsListDirEntries synthesizes for a
+// directory: name is the child's own path component (never a full path),
+// isDir says whether it is itself a (synthetic) subdirectory or a regular
+// file -- see fsListDirEntries' doc for how these are derived from the
+// flat fs.files map.
+type fsDirEntry struct {
+	name  string
+	isDir bool
+}
+
+// fsDirStreamNode is one live wasi:filesystem/types `directory-entry-
+// stream`, minted by read-directory: entries is the full listing captured
+// at read-directory time (a real OS's readdir(3) offers no stronger
+// consistency guarantee against concurrent mutation either, so a snapshot
+// is a legitimate implementation choice, not a shortcut), pos is the next
+// index [method]directory-entry-stream.read-directory-entry returns. mu
+// guards pos, mirroring fsStreamNode's mu doc.
+type fsDirStreamNode struct {
+	mu      sync.Mutex
+	entries []fsDirEntry
+	pos     int
+}
+
 // wasiFS holds the mutable state wasi_fs.go's host funcs close over: the
 // configured virtual filesystem (files -- no longer read-only once
 // write-via-stream/append-via-stream are registered, see fsFileGet/
-// fsFileSet), the live descriptor/input-stream/output-stream rep tables,
-// and a reference to the owning Instance's resource handle table
-// (resources) -- set once via withResourcesHook, see this file's package
-// doc's "Nested own<T> handles" section for why these closures cannot get
-// it any other way.
+// fsFileSet), the live descriptor/input-stream/output-stream/directory-
+// entry-stream rep tables, and a reference to the owning Instance's
+// resource handle table (resources) -- set once via withResourcesHook, see
+// this file's package doc's "Nested own<T> handles" section for why these
+// closures cannot get it any other way.
 type wasiFS struct {
 	mu    sync.Mutex
 	files map[string][]byte
@@ -248,6 +339,8 @@ type wasiFS struct {
 	nextStream   uint32
 	writeStreams map[uint32]*fsWriteStreamNode
 	nextWriteRep uint32
+	dirStreams   map[uint32]*fsDirStreamNode
+	nextDirRep   uint32
 }
 
 // newWasiFS returns a wasiFS backed by files (WASIConfig.FS; a nil map
@@ -256,17 +349,17 @@ type wasiFS struct {
 // within the run, but since that internal map is never the caller's own nil
 // variable, a caller that wants to observe writes after run() must pass a
 // non-nil (possibly empty) map, matching this package's doc comment on
-// WASIConfig.FS). Rep numbering for descs, (read-)streams, and writeStreams
-// each starts at 1, mirroring handleTable's own "0 is never allocated"
-// convention (resource.go); the three counters are independent of each
-// other, of wasiStdoutRep/wasiStderrRep (wasi.go), and of the handleTable's
-// own handle numbering -- a rep is this package's private key into wasiFS's
-// own maps, meaningful only together with which map it is looked up in.
-// writeStreams' reps additionally never collide with wasiStdoutRep(1)/
-// wasiStderrRep(2) because they share the same output-stream handle
-// namespace (wasiOutputStreamResType) wasi.go's write/check-write/
-// blocking-flush dispatch on: nextWriteRep starts at 3 for exactly that
-// reason.
+// WASIConfig.FS). Rep numbering for descs, (read-)streams, writeStreams,
+// and dirStreams each starts at 1, mirroring handleTable's own "0 is never
+// allocated" convention (resource.go); the four counters are independent
+// of each other, of wasiStdoutRep/wasiStderrRep (wasi.go), and of the
+// handleTable's own handle numbering -- a rep is this package's private key
+// into wasiFS's own maps, meaningful only together with which map it is
+// looked up in. writeStreams' reps additionally never collide with
+// wasiStdoutRep(1)/wasiStderrRep(2) because they share the same
+// output-stream handle namespace (wasiOutputStreamResType) wasi.go's
+// write/check-write/blocking-flush dispatch on: nextWriteRep starts at 3
+// for exactly that reason.
 func newWasiFS(files map[string][]byte) *wasiFS {
 	return &wasiFS{
 		files:        files,
@@ -276,6 +369,8 @@ func newWasiFS(files map[string][]byte) *wasiFS {
 		nextStream:   1,
 		writeStreams: make(map[uint32]*fsWriteStreamNode),
 		nextWriteRep: 3,
+		dirStreams:   make(map[uint32]*fsDirStreamNode),
+		nextDirRep:   1,
 	}
 }
 
@@ -298,6 +393,83 @@ func (w *wasiFS) fsFileSet(path string, content []byte) {
 		w.files = make(map[string][]byte)
 	}
 	w.files[path] = content
+}
+
+// fsFileDelete removes path from files, reporting whether it was present
+// (unlink-file-at's only way to distinguish a real removal from a
+// no-entry error -- see unlinkFileAt's doc).
+func (w *wasiFS) fsFileDelete(path string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, ok := w.files[path]; !ok {
+		return false
+	}
+	delete(w.files, path)
+	return true
+}
+
+// fsIsDir reports whether path names a directory in this package's
+// synthetic directory model: the root "/" always is one (even with zero
+// files, e.g. f33_createlist's fixture starts from an empty fs.files
+// entirely), and any other path is one exactly when some file lives
+// strictly underneath it (fs.files has no entry recording a directory's
+// own existence the way it does a file's -- see this file's "batch 4" doc
+// addendum's "Directory modeling" section for why). A path that is itself
+// a live file (found in fs.files) is never also a directory -- this
+// in-memory model has no path that is simultaneously both.
+func (w *wasiFS) fsIsDir(path string) bool {
+	if path == "/" {
+		return true
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, isFile := w.files[path]; isFile {
+		return false
+	}
+	prefix := path + "/"
+	for k := range w.files {
+		if strings.HasPrefix(k, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// fsListDirEntries returns dir's immediate children: every file directly
+// under dir becomes a regular-file entry, and every distinct next path
+// component of a more deeply nested file becomes one (deduplicated)
+// synthetic directory entry -- e.g. with fs.files {"/a/b.txt", "/a/c.txt",
+// "/d.txt"}, fsListDirEntries("/") yields [{"a", isDir:true}, {"d.txt",
+// isDir:false}], and fsListDirEntries("/a") yields [{"b.txt", false},
+// {"c.txt", false}]. Order is unspecified (Go map iteration), matching a
+// real OS's own readdir(3) not guaranteeing order either -- every guest in
+// this package's conformance fixtures sorts before printing for exactly
+// this reason.
+func (w *wasiFS) fsListDirEntries(dir string) []fsDirEntry {
+	prefix := dir
+	if prefix != "/" {
+		prefix += "/"
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	seenDirs := make(map[string]bool)
+	var out []fsDirEntry
+	for k := range w.files {
+		if !strings.HasPrefix(k, prefix) || k == prefix {
+			continue
+		}
+		rest := k[len(prefix):]
+		if idx := strings.IndexByte(rest, '/'); idx >= 0 {
+			child := rest[:idx]
+			if !seenDirs[child] {
+				seenDirs[child] = true
+				out = append(out, fsDirEntry{name: child, isDir: true})
+			}
+			continue
+		}
+		out = append(out, fsDirEntry{name: rest, isDir: false})
+	}
+	return out
 }
 
 // setResources implements withResourcesHook's callback: it runs once, right
@@ -356,6 +528,29 @@ func (w *wasiFS) newStreamRep(s *fsStreamNode) uint32 {
 	w.nextStream++
 	w.streams[rep] = s
 	return rep
+}
+
+// newDirStreamRep mints a fresh directory-entry-stream rep naming s and
+// returns it.
+func (w *wasiFS) newDirStreamRep(s *fsDirStreamNode) uint32 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	rep := w.nextDirRep
+	w.nextDirRep++
+	w.dirStreams[rep] = s
+	return rep
+}
+
+// dirStreamNode resolves rep to its fsDirStreamNode, failing loud if
+// unknown -- mirrors streamNode's doc.
+func (w *wasiFS) dirStreamNode(rep uint32) (*fsDirStreamNode, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	s, ok := w.dirStreams[rep]
+	if !ok {
+		return nil, fmt.Errorf("wasi:filesystem/types: directory-entry-stream rep %d does not name a live stream", rep)
+	}
+	return s, nil
 }
 
 // streamNode resolves rep to its fsStreamNode, failing loud if unknown.
@@ -431,7 +626,17 @@ func (w *wasiFS) writeStreamWrite(rep uint32, buf []byte) error {
 // doc (see types.wit), a `rel` that itself starts with "/" is invalid --
 // it must be relative to dir, not another absolute path -- so that case
 // returns ok=false rather than silently concatenating into a bogus path.
+// rel of "." or "" names dir itself (discovered via std::fs::read_dir("/"),
+// whose first host call is open-at(root, path=".", open-flags=directory) --
+// std re-opens the preopened directory it already holds by its own POSIX
+// "." convention rather than special-casing "no rename needed"; without
+// this case, wasiJoinFSPath would produce "/." or "//", neither of which
+// names anything in fs.files, and the guest would panic on a bogus
+// error-code::no-entry).
 func wasiJoinFSPath(dir, rel string) (path string, ok bool) {
+	if rel == "." || rel == "" {
+		return dir, true
+	}
 	if strings.HasPrefix(rel, "/") {
 		return "", false
 	}
@@ -525,6 +730,26 @@ func wasiFilesystemOptions(fs *wasiFS) []Option {
 		full, ok := wasiJoinFSPath(node.path, path)
 		if !ok {
 			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeNotPermitted}}, nil
+		}
+		// A directory open (open-flags::directory set -- discovered via
+		// std::fs::read_dir("/"), whose first host call is exactly
+		// open-at(root, ".", DIRECTORY) -- mints a synthetic directory
+		// descriptor instead of falling into the file create/truncate/
+		// read logic below: this in-memory model has no fs.files entry
+		// recording a directory's own existence (see fsIsDir's doc), so a
+		// directory open never touches fs.files at all, unlike a file
+		// open's fsFileGet/fsFileSet.
+		if openFlags&wasiOpenFlagDirectory != 0 {
+			if !fs.fsIsDir(full) {
+				return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeNotDirectory}}, nil
+			}
+			resources, err := fs.getResources()
+			if err != nil {
+				return nil, err
+			}
+			rep := fs.newDescRep(&fsDescNode{isDir: true, path: full})
+			handle := resources.NewOwn(wasiDescriptorResType, rep)
+			return []abi.Value{abi.ResultValue{IsErr: false, Payload: handle}}, nil
 		}
 		writable := descFlags&wasiDescFlagWrite != 0
 		content, found := fs.fsFileGet(full)
@@ -620,7 +845,11 @@ func wasiFilesystemOptions(fs *wasiFS) []Option {
 	// open-at, stat-at has no create/truncate flags to act on, so a missing
 	// path is unconditionally error-code::no-entry. path-flags (args[1]) is
 	// ignored for the same reason openAt ignores it (no symlinks in this
-	// in-memory filesystem).
+	// in-memory filesystem). Since batch 4 (see this file's doc addendum),
+	// a resolved path may also name a synthetic subdirectory (fsIsDir) --
+	// stat-at answers that case with descriptor-type::directory and a
+	// zero size/link-count-1 record, the same directory-stat shape stat
+	// itself returns for the preopened root.
 	statAt := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
 		if len(args) != 3 {
 			return nil, fmt.Errorf("[method]descriptor.stat-at: expected 3 args (self, path-flags, path), got %d", len(args))
@@ -646,12 +875,17 @@ func wasiFilesystemOptions(fs *wasiFS) []Option {
 		}
 		content, found := fs.fsFileGet(full)
 		if !found {
+			if fs.fsIsDir(full) {
+				rec := []abi.Value{
+					wasiDescriptorTypeDirectory, // type
+					uint64(1),                   // link-count
+					uint64(0),                   // size
+					nil, nil, nil,               // timestamps: always none, see stat's doc
+				}
+				return []abi.Value{abi.ResultValue{IsErr: false, Payload: rec}}, nil
+			}
 			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeNoEntry}}, nil
 		}
-		// This flat in-memory filesystem has no subdirectories beyond the
-		// single preopened root, so every path stat-at can find is a
-		// regular file (matching stat's own doc: the three timestamp
-		// fields are always `none`).
 		rec := []abi.Value{
 			wasiDescriptorTypeRegularFile, // type
 			uint64(1),                     // link-count
@@ -661,6 +895,119 @@ func wasiFilesystemOptions(fs *wasiFS) []Option {
 			nil,                           // status-change-timestamp
 		}
 		return []abi.Value{abi.ResultValue{IsErr: false, Payload: rec}}, nil
+	}
+
+	// readDirectory implements [method]descriptor.read-directory(self:
+	// borrow<descriptor>) -> result<own<directory-entry-stream>,
+	// error-code> -- discovered via f29_readdir.component.wasm
+	// (testdata/conformance): std::fs::read_dir("/") open-ats "." with
+	// open-flags::directory (see openAt's "batch 4" doc addendum) to get a
+	// directory descriptor, then calls this to get an iterator-shaped
+	// stream over that directory's children. Snapshots fs.fsListDirEntries
+	// once, at call time, into the minted fsDirStreamNode -- see that
+	// type's doc for why a snapshot is a legitimate readdir(3) semantics
+	// choice.
+	readDirectory := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("[method]descriptor.read-directory: expected 1 arg (self), got %d", len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]descriptor.read-directory: self: expected uint32 rep, got %T", args[0])
+		}
+		node, err := fs.descNode(selfRep)
+		if err != nil {
+			return nil, fmt.Errorf("[method]descriptor.read-directory: %w", err)
+		}
+		if !node.isDir {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeNotDirectory}}, nil
+		}
+		resources, err := fs.getResources()
+		if err != nil {
+			return nil, err
+		}
+		rep := fs.newDirStreamRep(&fsDirStreamNode{entries: fs.fsListDirEntries(node.path)})
+		handle := resources.NewOwn(wasiDirEntryStreamResType, rep)
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: handle}}, nil
+	}
+
+	// readDirectoryEntry implements
+	// [method]directory-entry-stream.read-directory-entry(self:
+	// borrow<directory-entry-stream>) -> result<option<directory-entry>,
+	// error-code>: pulls the next entry off the stream's snapshot (see
+	// fsDirStreamNode's doc), or option::none once exhausted -- mirroring
+	// [method]input-stream.read's stream-error::closed-at-EOF shape, but
+	// unlike that stream this one has no error case this package's
+	// in-memory model can ever produce (a directory-entry-stream never
+	// outlives the fs.files snapshot it was minted from), so the result is
+	// always Ok.
+	readDirectoryEntry := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("[method]directory-entry-stream.read-directory-entry: expected 1 arg (self), got %d", len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]directory-entry-stream.read-directory-entry: self: expected uint32 rep, got %T", args[0])
+		}
+		s, err := fs.dirStreamNode(selfRep)
+		if err != nil {
+			return nil, fmt.Errorf("[method]directory-entry-stream.read-directory-entry: %w", err)
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.pos >= len(s.entries) {
+			return []abi.Value{abi.ResultValue{IsErr: false, Payload: nil}}, nil // option::none
+		}
+		e := s.entries[s.pos]
+		s.pos++
+		t := wasiDescriptorTypeRegularFile
+		if e.isDir {
+			t = wasiDescriptorTypeDirectory
+		}
+		entry := []abi.Value{t, e.name} // directory-entry{type, name}
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: entry}}, nil
+	}
+
+	// unlinkFileAt implements [method]descriptor.unlink-file-at(self:
+	// borrow<descriptor>, path: string) -> result<_, error-code> --
+	// discovered via f35_remove.component.wasm (testdata/conformance):
+	// std::fs::remove_file resolves to this. Removes exactly one fs.files
+	// entry; a path that resolves to a (synthetic) directory or to nothing
+	// at all is rejected the same way a real unlink(2) rejects them
+	// (is-directory / no-entry respectively) -- this in-memory model never
+	// needs to worry about a directory becoming non-empty or empty as a
+	// side effect, since directories are never separately represented (see
+	// fsIsDir's doc).
+	unlinkFileAt := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 2 {
+			return nil, fmt.Errorf("[method]descriptor.unlink-file-at: expected 2 args (self, path), got %d", len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]descriptor.unlink-file-at: self: expected uint32 rep, got %T", args[0])
+		}
+		path, ok := args[1].(string)
+		if !ok {
+			return nil, fmt.Errorf("[method]descriptor.unlink-file-at: path: expected string, got %T", args[1])
+		}
+		node, err := fs.descNode(selfRep)
+		if err != nil {
+			return nil, fmt.Errorf("[method]descriptor.unlink-file-at: %w", err)
+		}
+		if !node.isDir {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeNotDirectory}}, nil
+		}
+		full, ok := wasiJoinFSPath(node.path, path)
+		if !ok {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeNotPermitted}}, nil
+		}
+		if fs.fsIsDir(full) {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeIsDirectory}}, nil
+		}
+		if !fs.fsFileDelete(full) {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeNoEntry}}, nil
+		}
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: nil}}, nil
 	}
 
 	readViaStream := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
@@ -867,6 +1214,9 @@ func wasiFilesystemOptions(fs *wasiFS) []Option {
 	getTypeFD, getTypeResolve := wasiGetTypeSig()
 	statFD, statResolve := wasiStatSig()
 	statAtFD, statAtResolve := wasiStatAtSig()
+	readDirectoryFD, readDirectoryResolve := wasiReadDirectorySig()
+	readDirEntryFD, readDirEntryResolve := wasiReadDirectoryEntrySig()
+	unlinkFileAtFD, unlinkFileAtResolve := wasiUnlinkFileAtSig()
 	readViaStreamFD, readViaStreamResolve := wasiReadViaStreamSig()
 	writeViaStreamFD, writeViaStreamResolve := wasiWriteViaStreamSig()
 	appendViaStreamFD, appendViaStreamResolve := wasiAppendViaStreamSig()
@@ -889,6 +1239,7 @@ func wasiFilesystemOptions(fs *wasiFS) []Option {
 		// resource.drop canon tags the handle with the real wasm-binary
 		// type index, not this package's synthetic ResourceType constant.
 		withResourceTag(wasiIfaceFilesystemTypes, "descriptor", wasiDescriptorResType),
+		withResourceTag(wasiIfaceFilesystemTypes, "directory-entry-stream", wasiDirEntryStreamResType),
 		withResourceTag(wasiIfaceStreams, "input-stream", wasiInputStreamResType),
 		withResourceTag(wasiIfaceStreams, "output-stream", wasiOutputStreamResType),
 		withResourceTag(wasiIfaceError, "error", wasiErrorResType),
@@ -900,6 +1251,9 @@ func wasiFilesystemOptions(fs *wasiFS) []Option {
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.get-type", getType, getTypeFD, getTypeResolve),
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.stat", stat, statFD, statResolve),
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.stat-at", statAt, statAtFD, statAtResolve),
+		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.read-directory", readDirectory, readDirectoryFD, readDirectoryResolve),
+		withImportCustom(wasiIfaceFilesystemTypes, "[method]directory-entry-stream.read-directory-entry", readDirectoryEntry, readDirEntryFD, readDirEntryResolve),
+		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.unlink-file-at", unlinkFileAt, unlinkFileAtFD, unlinkFileAtResolve),
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.read-via-stream", readViaStream, readViaStreamFD, readViaStreamResolve),
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.write-via-stream", writeViaStream, writeViaStreamFD, writeViaStreamResolve),
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.append-via-stream", appendViaStream, appendViaStreamFD, appendViaStreamResolve),
@@ -1067,6 +1421,70 @@ func wasiStatAtSig() (binary.FuncDesc, abi.Resolver) {
 		Params: []binary.FuncParam{
 			{Name: "self", Type: selfRef},
 			{Name: "path-flags", Type: pathFlagsRef},
+			{Name: "path", Type: binary.TypeRef{Primitive: "string"}},
+		},
+		Results: binary.FuncResults{Unnamed: &resultRef},
+	}
+	return fd, tbl.resolver()
+}
+
+// wasiReadDirectorySig builds the FuncDesc/resolver for
+// [method]descriptor.read-directory(self: borrow<descriptor>) ->
+// result<own<directory-entry-stream>, error-code>.
+func wasiReadDirectorySig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiDescriptorResType})
+	okRef := tbl.add(binary.OwnDesc{ResourceType: wasiDirEntryStreamResType})
+	errRef := wasiErrorCodeType(tbl)
+	resultRef := tbl.add(binary.ResultDesc{Ok: &okRef, Err: &errRef})
+	fd := binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}},
+		Results: binary.FuncResults{Unnamed: &resultRef},
+	}
+	return fd, tbl.resolver()
+}
+
+// wasiDirectoryEntryType interns wasi:filesystem/types' `directory-entry`
+// record (`record directory-entry { type: descriptor-type, name: string
+// }`) into tbl and returns its TypeRef, in exact WIT declaration order
+// (from `wasm-tools component wit`).
+func wasiDirectoryEntryType(tbl *typeTable) binary.TypeRef {
+	typeRef := wasiDescriptorTypeType(tbl)
+	return tbl.add(binary.RecordDesc{Fields: []binary.RecordField{
+		{Name: "type", Type: typeRef},
+		{Name: "name", Type: binary.TypeRef{Primitive: "string"}},
+	}})
+}
+
+// wasiReadDirectoryEntrySig builds the FuncDesc/resolver for
+// [method]directory-entry-stream.read-directory-entry(self:
+// borrow<directory-entry-stream>) -> result<option<directory-entry>,
+// error-code>.
+func wasiReadDirectoryEntrySig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiDirEntryStreamResType})
+	entryRef := wasiDirectoryEntryType(tbl)
+	okRef := tbl.add(binary.OptionDesc{Element: entryRef})
+	errRef := wasiErrorCodeType(tbl)
+	resultRef := tbl.add(binary.ResultDesc{Ok: &okRef, Err: &errRef})
+	fd := binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}},
+		Results: binary.FuncResults{Unnamed: &resultRef},
+	}
+	return fd, tbl.resolver()
+}
+
+// wasiUnlinkFileAtSig builds the FuncDesc/resolver for
+// [method]descriptor.unlink-file-at(self: borrow<descriptor>, path:
+// string) -> result<_, error-code>.
+func wasiUnlinkFileAtSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiDescriptorResType})
+	errRef := wasiErrorCodeType(tbl)
+	resultRef := tbl.add(binary.ResultDesc{Err: &errRef})
+	fd := binary.FuncDesc{
+		Params: []binary.FuncParam{
+			{Name: "self", Type: selfRef},
 			{Name: "path", Type: binary.TypeRef{Primitive: "string"}},
 		},
 		Results: binary.FuncResults{Unnamed: &resultRef},

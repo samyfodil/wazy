@@ -1,0 +1,3 @@
+/: a,d.txt
+/a: b.txt,c.txt
+a/b.txt=b content

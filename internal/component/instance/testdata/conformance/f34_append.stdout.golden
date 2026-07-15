@@ -1,0 +1,6 @@
+after write: len=6
+after append: len=12
+line1
+line2
+after truncate-write: len=6
+short
