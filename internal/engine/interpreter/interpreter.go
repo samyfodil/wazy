@@ -1179,6 +1179,14 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 		// on, for example, how many args are used,
 		// how the stack is modified, etc.
 		switch op.Kind {
+		case operationKindLabel:
+			// Labels are branch anchors left in the body by the compiler; they
+			// are pure no-ops at runtime (pc lands on them by fall-through or as
+			// a branch target -- e.g. a loop header, every iteration). Handle
+			// them inline as a single pc++ instead of letting them fall to the
+			// default arm, which dispatches a full non-inlined callNativeFuncRare
+			// call that then matches no case and returns (I5).
+			pc++
 		case operationKindBuiltinFunctionCheckExitCode:
 			frame.pc = pc // sync: FailIfClosed may panic
 			if err := m.FailIfClosed(); err != nil {
