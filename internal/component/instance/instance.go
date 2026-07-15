@@ -1,34 +1,39 @@
 // Package instance instantiates a decoded WebAssembly component and exposes
-// its exported functions for calling. This is the M3 STEP 2 "spine": a real
-// component actually runs end to end, from raw component bytes through the
-// embedded core module through the canon lift wiring to a lifted result.
+// its exported functions for calling. It covers the M3 "spine": a real
+// component runs end to end, both the no-import export direction (M3 STEP 2)
+// and the host-import direction (M3 STEP 3, this file plus host_import.go).
 //
 // # Scope
 //
-// Instantiate and Call only support the shape needed to prove the spine
-// works: a component with no imports, exactly one embedded core module,
-// instantiated as the component's single core instance with no arguments,
-// exporting functions defined purely via "canon lift" of a core function
-// reached through a single core-export alias. Everything beyond that
-// (component imports, multiple core modules/instances, canon lower, resource
-// canonical built-ins, non-func exports, multi-result functions, and
-// params/results that need linear memory when the core module exports none)
-// fails loudly with a specific, named error instead of silently truncating
-// or returning a zero value.
+// Two component shapes are supported, and anything outside them fails loudly
+// with a specific, named error rather than silently returning a zero value:
 //
-// # Known decoder limitation
+//   - No-import (M3 STEP 2): one embedded core module, instantiated as the
+//     component's single core instance with no arguments, exporting functions
+//     defined purely via "canon lift" of a core function reached through a
+//     single core-export alias.
 //
-// The component binary decoder (internal/component/binary, decodeAliasSection)
-// parses past the one-byte core:sort discriminator on a core-sort alias
-// (func/table/mem/global/type/module/instance) but does not retain it on
-// binary.AliasDef. Because "canon lift" can only ever reference a core
-// *function*, every core-sort/core-export alias this package resolves is
-// therefore assumed to be a func alias. That assumption holds for every
-// component this milestone can otherwise instantiate (no core memory/table/
-// global aliases are reachable without imports or multiple core instances,
-// both of which are already rejected above), but a future milestone that
-// mixes core func aliases with core memory/table/global aliases in the same
-// component will need AliasDef to retain the discriminator to disambiguate.
+//   - Host-import (M3 STEP 3): the component imports one or more instances of
+//     host functions (e.g. `test:pkg/host` exporting `log: func(msg: string)`)
+//     that are lowered (canon lower) into core functions the guest core module
+//     imports and calls. The caller supplies Go implementations via WithImport.
+//     See host_import.go for the lowering/wrapper machinery.
+//
+// Still rejected in both: canon resource.* built-ins, non-func exports,
+// multi-result functions, whole-parameter-list / result spilling to memory,
+// and string/list values when no linear memory is available.
+//
+// # Decoder gaps worked around here
+//
+// The component binary decoder (internal/component/binary) does not retain the
+// per-alias core:sort discriminator (func vs memory vs table vs global) on
+// binary.AliasDef. Rather than require a binary change, this package
+// disambiguates core-export aliases by probing the actually-instantiated
+// module's exports (a name that resolves to a Function is a core-func alias; a
+// memory alias does not). It also does not retain the func signatures declared
+// inside an imported instance type, which is why the host-import direction
+// takes the imported function's WIT type from the caller via WithImport rather
+// than from the decoded component.
 package instance
 
 import (
@@ -42,74 +47,84 @@ import (
 	"github.com/samyfodil/wazy/internal/component/binary"
 )
 
-// Instance is an instantiated, no-import WebAssembly component: a single
-// core module instance plus the wiring needed to call its component-level
-// exported functions through their canon lift signatures.
+// Instance is an instantiated WebAssembly component: the set of instantiated
+// core/host modules plus, for each component-level exported function, the
+// binding needed to call it through its canon lift signature.
 type Instance struct {
-	comp *binary.Component
-	core api.Module
-
-	// coreFuncIdx is the core func index space: coreFuncIdx[i] is the name
-	// of the core-module export that core func index i refers to.
-	coreFuncIdx []string
-
-	// canonForExport maps a component export name to the index into
-	// comp.Canons that defines it (always a canon lift; see package docs).
-	canonForExport map[string]int
-
 	resolve abi.Resolver
+
+	// exports maps a component export name to the binding that backs it.
+	exports map[string]*boundExport
+
+	// closers are every module instantiated for this component (core guest
+	// modules and synthetic host modules), closed in reverse order by Close.
+	closers []api.Module
+}
+
+// boundExport binds a component export to the core function that implements
+// it and to the module that provides the linear memory / cabi_realloc used to
+// lower parameters and lift results across the call.
+type boundExport struct {
+	mod      api.Module      // exports funcName; its Memory() backs lower/lift
+	funcName string          // core export name to call
+	fd       binary.FuncDesc // component-level func type (lift signature)
 }
 
 // Instantiate decodes componentBytes as a WebAssembly component, instantiates
-// its single embedded core module into r, and wires up the export -> canon
-// lift -> core func mapping needed to call exported functions via Call.
+// its embedded core module(s) into r (registering caller-provided host
+// implementations for any imports), and wires up the export -> canon lift ->
+// core func bindings needed to call exported functions via Call.
 //
-// See the package doc for exactly what shape of component is supported;
-// anything outside that shape is rejected with a descriptive error rather
-// than silently mishandled.
-func Instantiate(ctx context.Context, r wazy.Runtime, componentBytes []byte) (*Instance, error) {
+// See the package doc for exactly which component shapes are supported;
+// anything outside them is rejected with a descriptive error.
+func Instantiate(ctx context.Context, r wazy.Runtime, componentBytes []byte, opts ...Option) (*Instance, error) {
 	comp, err := binary.Decode(bytes.NewReader(componentBytes))
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: decode component: %w", err)
 	}
+
+	cfg := newConfig(opts)
+
+	if len(comp.Imports) > 0 {
+		return instantiateWithImports(ctx, r, comp, componentBytes, cfg)
+	}
 	return instantiateComponent(ctx, r, comp, componentBytes)
 }
 
-// instantiateComponent does the validation and wiring described in the
-// package doc, given an already-decoded Component. It is split out from
-// Instantiate so tests can exercise every validation branch directly against
-// a hand-built binary.Component, without needing binary.Decode to produce
-// each specific (often hard-to-construct) shape from real wasm bytes.
+// instantiateComponent handles the no-import (M3 STEP 2) shape. It is split
+// out from Instantiate so tests can exercise every validation branch directly
+// against a hand-built binary.Component, without needing binary.Decode to
+// produce each specific (often hard-to-construct) shape from real wasm bytes.
 func instantiateComponent(ctx context.Context, r wazy.Runtime, comp *binary.Component, componentBytes []byte) (*Instance, error) {
 	if len(comp.Imports) > 0 {
-		return nil, fmt.Errorf("component/instance: component declares %d import(s); components with imports are not supported by this milestone", len(comp.Imports))
+		return nil, fmt.Errorf("component/instance: component declares %d import(s); use the import-aware path", len(comp.Imports))
 	}
 	if len(comp.Instances) > 0 {
 		return nil, fmt.Errorf("component/instance: component declares %d nested component instance(s); not supported by this milestone", len(comp.Instances))
 	}
 	if len(comp.CoreModules) != 1 {
-		return nil, fmt.Errorf("component/instance: expected exactly 1 embedded core module, found %d; multiple core modules are not supported by this milestone", len(comp.CoreModules))
+		return nil, fmt.Errorf("component/instance: expected exactly 1 embedded core module, found %d; multiple core modules are not supported for no-import components", len(comp.CoreModules))
 	}
 	if len(comp.CoreInstances) != 1 {
-		return nil, fmt.Errorf("component/instance: expected exactly 1 core instance, found %d; multiple core instances are not supported by this milestone", len(comp.CoreInstances))
+		return nil, fmt.Errorf("component/instance: expected exactly 1 core instance, found %d; multiple core instances are not supported for no-import components", len(comp.CoreInstances))
 	}
 
 	ci := comp.CoreInstances[0]
 	if ci.Kind != 0x00 {
-		return nil, fmt.Errorf("component/instance: core instance is not a module instantiation (kind %#x); inline-export core instances are not supported by this milestone", ci.Kind)
+		return nil, fmt.Errorf("component/instance: core instance is not a module instantiation (kind %#x); inline-export core instances are not supported for no-import components", ci.Kind)
 	}
 	if int(ci.ModuleIdx) != 0 {
 		return nil, fmt.Errorf("component/instance: core instance references core module index %d, expected the sole core module (index 0)", ci.ModuleIdx)
 	}
 	if len(ci.Args) > 0 {
-		return nil, fmt.Errorf("component/instance: core module instantiation takes %d argument(s); core modules with their own imports are not supported by this milestone", len(ci.Args))
+		return nil, fmt.Errorf("component/instance: core module instantiation takes %d argument(s); core modules with their own imports are not supported for no-import components", len(ci.Args))
 	}
 
 	cm := comp.CoreModules[0]
-	if cm.Offset < 0 || cm.Size < 0 || cm.Offset+cm.Size > len(componentBytes) {
-		return nil, fmt.Errorf("component/instance: core module byte range [%d:%d) is out of bounds for a %d-byte component", cm.Offset, cm.Offset+cm.Size, len(componentBytes))
+	coreBytes, err := coreModuleBytes(cm, componentBytes)
+	if err != nil {
+		return nil, err
 	}
-	coreBytes := componentBytes[cm.Offset : cm.Offset+cm.Size]
 
 	core, err := r.InstantiateWithConfig(ctx, coreBytes, wazy.NewModuleConfig())
 	if err != nil {
@@ -118,48 +133,65 @@ func instantiateComponent(ctx context.Context, r wazy.Runtime, comp *binary.Comp
 
 	coreFuncIdx, err := buildCoreFuncIndexSpace(comp)
 	if err != nil {
-		core.Close(ctx) //nolint:errcheck // best-effort cleanup; the decode/wiring error below is what matters
+		core.Close(ctx) //nolint:errcheck // best-effort cleanup; the wiring error below is what matters
 		return nil, err
 	}
-
 	if err := validateCanons(comp, coreFuncIdx); err != nil {
 		core.Close(ctx) //nolint:errcheck
 		return nil, err
 	}
-
 	canonForExport, err := buildExportIndex(comp)
 	if err != nil {
 		core.Close(ctx) //nolint:errcheck
 		return nil, err
 	}
 
+	resolve := typeResolver(comp)
+	exports := make(map[string]*boundExport, len(canonForExport))
+	for name, canonIdx := range canonForExport {
+		canon := comp.Canons[canonIdx]
+		fd := comp.Types[canon.TypeIdx].Descriptor.(binary.FuncDesc) // validated by validateCanons
+		exports[name] = &boundExport{
+			mod:      core,
+			funcName: coreFuncIdx[canon.CoreFuncIdx],
+			fd:       fd,
+		}
+	}
+
+	return &Instance{resolve: resolve, exports: exports, closers: []api.Module{core}}, nil
+}
+
+// coreModuleBytes returns the slice of componentBytes holding an embedded core
+// module, bounds-checked.
+func coreModuleBytes(cm binary.CoreModule, componentBytes []byte) ([]byte, error) {
+	if cm.Offset < 0 || cm.Size < 0 || cm.Offset+cm.Size > len(componentBytes) {
+		return nil, fmt.Errorf("component/instance: core module byte range [%d:%d) is out of bounds for a %d-byte component", cm.Offset, cm.Offset+cm.Size, len(componentBytes))
+	}
+	return componentBytes[cm.Offset : cm.Offset+cm.Size], nil
+}
+
+// typeResolver returns an abi.Resolver over the component's type table.
+func typeResolver(comp *binary.Component) abi.Resolver {
 	types := comp.Types
-	resolve := func(idx uint32) binary.TypeDesc {
+	return func(idx uint32) binary.TypeDesc {
 		if int(idx) >= len(types) {
 			return nil
 		}
 		return types[idx].Descriptor
 	}
-
-	return &Instance{
-		comp:           comp,
-		core:           core,
-		coreFuncIdx:    coreFuncIdx,
-		canonForExport: canonForExport,
-		resolve:        resolve,
-	}, nil
 }
 
-// buildCoreFuncIndexSpace walks comp.Aliases to construct the core func
-// index space (see package doc for the core:sort discriminator caveat).
+// buildCoreFuncIndexSpace walks comp.Aliases to construct the core func index
+// space for a no-import component, where every alias is a core-func alias off
+// the sole core instance.
 func buildCoreFuncIndexSpace(comp *binary.Component) ([]string, error) {
 	coreFuncIdx := make([]string, 0, len(comp.Aliases))
 	for i, al := range comp.Aliases {
 		if al.Sort != 0x00 {
-			return nil, fmt.Errorf("component/instance: alias[%d] has non-core sort %#x; only core func aliases are supported by this milestone", i, al.Sort)
+			return nil, fmt.Errorf("component/instance: alias[%d] has non-core sort %#x; only core func aliases are supported for no-import components", i, al.Sort)
 		}
 		if al.TargetKind != 0x01 {
-			return nil, fmt.Errorf("component/instance: alias[%d] targets kind %#x; only core-export aliases (off the sole core instance) are supported by this milestone", i, al.TargetKind)
+			return nil, fmt.Errorf("component/instance: alias[%d] targets kind %#x; only core-export aliases (off the sole core instance) are supported for no-import components", i, al.TargetKind)
 		}
 		if int(al.InstanceIdx) != 0 {
 			return nil, fmt.Errorf("component/instance: alias[%d] references core instance %d, expected the sole core instance (index 0)", i, al.InstanceIdx)
@@ -169,13 +201,12 @@ func buildCoreFuncIndexSpace(comp *binary.Component) ([]string, error) {
 	return coreFuncIdx, nil
 }
 
-// validateCanons checks that every canon is a supported "canon lift" whose
-// core func index and type index are in range, so later Call lookups never
-// need to re-check them.
+// validateCanons checks that every canon in a no-import component is a
+// supported "canon lift" whose core func index and type index are in range.
 func validateCanons(comp *binary.Component, coreFuncIdx []string) error {
 	for i, cn := range comp.Canons {
 		if cn.Kind != 0x00 {
-			return fmt.Errorf("component/instance: canon[%d] has kind %#x; only canon lift (0x00) is supported by this milestone", i, cn.Kind)
+			return fmt.Errorf("component/instance: canon[%d] has kind %#x; only canon lift (0x00) is supported for no-import components", i, cn.Kind)
 		}
 		if int(cn.CoreFuncIdx) >= len(coreFuncIdx) {
 			return fmt.Errorf("component/instance: canon[%d] references core func index %d, but the core func index space only has %d entries", i, cn.CoreFuncIdx, len(coreFuncIdx))
@@ -190,11 +221,10 @@ func validateCanons(comp *binary.Component, coreFuncIdx []string) error {
 	return nil
 }
 
-// buildExportIndex maps each func-sort component export name to its index
-// into comp.Canons. Because Instantiate already rejected any component
-// import or component-level func alias (which would otherwise also occupy
-// slots in the component func index space), that index space is exactly the
-// canon declaration order: component func index i == comp.Canons[i].
+// buildExportIndex maps each func-sort component export name to its index into
+// comp.Canons. Because a no-import component has no import or component-level
+// func alias occupying the component func index space, that space is exactly
+// the canon declaration order: component func index i == comp.Canons[i].
 func buildExportIndex(comp *binary.Component) (map[string]int, error) {
 	canonForExport := make(map[string]int, len(comp.Exports))
 	for _, exp := range comp.Exports {
@@ -210,45 +240,40 @@ func buildExportIndex(comp *binary.Component) (map[string]int, error) {
 }
 
 // Call invokes the component-level exported function named exportName with
-// args. Each arg is lowered into core wasm values per its declared
-// parameter type, the underlying core function (found via the export's
-// canon lift) is called with the flattened arguments, and the raw core
-// results are lifted back into an abi.Value per the canon's declared
+// args. Each arg is lowered into core wasm values per its declared parameter
+// type, the underlying core function is called with the flattened arguments,
+// and the raw core results are lifted back into abi.Values per the export's
 // result type.
 func (in *Instance) Call(ctx context.Context, exportName string, args ...abi.Value) ([]abi.Value, error) {
-	canonIdx, ok := in.canonForExport[exportName]
+	be, ok := in.exports[exportName]
 	if !ok {
 		return nil, fmt.Errorf("component/instance: export %q not found", exportName)
 	}
-	canon := in.comp.Canons[canonIdx]
-	fd, ok := in.comp.Types[canon.TypeIdx].Descriptor.(binary.FuncDesc)
-	if !ok {
-		// Instantiate already validated this; kept as a defensive check.
-		return nil, fmt.Errorf("component/instance: export %q: canon type is not a func type (got %T)", exportName, in.comp.Types[canon.TypeIdx].Descriptor)
-	}
+	return in.invoke(ctx, be, exportName, args)
+}
 
+func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName string, args []abi.Value) ([]abi.Value, error) {
+	fd := be.fd
 	if len(args) != len(fd.Params) {
 		return nil, fmt.Errorf("component/instance: export %q takes %d parameter(s), got %d", exportName, len(fd.Params), len(args))
 	}
 
-	coreFuncName := in.coreFuncIdx[canon.CoreFuncIdx]
-	coreFn := in.core.ExportedFunction(coreFuncName)
+	coreFn := be.mod.ExportedFunction(be.funcName)
 	if coreFn == nil {
-		return nil, fmt.Errorf("component/instance: core module has no exported function %q (referenced by canon lift for export %q)", coreFuncName, exportName)
+		return nil, fmt.Errorf("component/instance: core module has no exported function %q (referenced by canon lift for export %q)", be.funcName, exportName)
 	}
 
-	// FlattenFunc tells us the real core function signature (lift context:
-	// this is the actual wrapper the core module exports). We cross-check
-	// our own per-value flattening against it below to catch whole
-	// parameter-list / result spilling, which this milestone doesn't
-	// implement.
+	// FlattenFunc gives the real core function signature (lift context: this
+	// is the actual wrapper the core module exports). We cross-check our own
+	// per-value flattening against it below to catch whole parameter-list /
+	// result spilling, which this milestone does not implement.
 	coreParamsWant, coreResultsWant, err := abi.FlattenFunc(fd, in.resolve, "lift")
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: export %q: flatten func type: %w", exportName, err)
 	}
 
-	mem, memAvailable := in.memoryBytes()
-	realloc := in.reallocFn(ctx)
+	mem, memAvailable := memoryBytesOf(be.mod)
+	realloc := reallocOf(ctx, be.mod)
 
 	coreArgs, err := in.lowerParams(fd, args, mem, memAvailable, realloc, exportName)
 	if err != nil {
@@ -265,7 +290,7 @@ func (in *Instance) Call(ctx context.Context, exportName string, args ...abi.Val
 
 	rawResults, err := coreFn.Call(ctx, stack...)
 	if err != nil {
-		return nil, fmt.Errorf("component/instance: export %q: call core func %q: %w", exportName, coreFuncName, err)
+		return nil, fmt.Errorf("component/instance: export %q: call core func %q: %w", exportName, be.funcName, err)
 	}
 
 	return in.liftResult(fd, rawResults, coreResultsWant, mem, memAvailable, exportName)
@@ -292,10 +317,9 @@ func (in *Instance) lowerParams(fd binary.FuncDesc, args []abi.Value, mem []byte
 	return coreArgs, nil
 }
 
-// liftResult lifts the raw core call results back into a single abi.Value
-// per fd's declared result type. Multi-result functions (more than one
-// named result) and results that require memory when the core module has
-// none both fail loudly rather than being silently mishandled.
+// liftResult lifts the raw core call results back into a single abi.Value per
+// fd's declared result type. Multi-result functions and results that require
+// memory when none is available both fail loudly.
 func (in *Instance) liftResult(fd binary.FuncDesc, rawResults []uint64, coreResultsWant []string, mem []byte, memAvailable bool, exportName string) ([]abi.Value, error) {
 	resultRefs := funcResultTypeRefs(fd)
 	if len(resultRefs) > 1 {
@@ -321,10 +345,6 @@ func (in *Instance) liftResult(fd binary.FuncDesc, rawResults []uint64, coreResu
 		return nil, fmt.Errorf("component/instance: export %q result: %w", exportName, err)
 	}
 	if len(flatKinds) != len(coreResultsWant) {
-		// FlattenFunc collapsed the result to a single pointer because it
-		// exceeds MaxFlatResults: the real core func returns a memory
-		// pointer we'd need to Load a synthetic record from, which this
-		// milestone does not implement.
 		return nil, fmt.Errorf("component/instance: export %q result flattens to %d core value(s), exceeding the flat-result limit (core signature returns %d value(s), a spilled memory pointer); spilled results are not supported by this milestone", exportName, len(flatKinds), len(coreResultsWant))
 	}
 	if len(rawResults) != len(flatKinds) {
@@ -343,31 +363,48 @@ func (in *Instance) liftResult(fd binary.FuncDesc, rawResults []uint64, coreResu
 	return []abi.Value{val}, nil
 }
 
-// Close releases the underlying core module instance. It does not close the
-// Runtime passed to Instantiate, which the caller owns.
+// Close releases every module instantiated for this component (in reverse
+// order of instantiation). It does not close the Runtime passed to
+// Instantiate, which the caller owns.
 func (in *Instance) Close(ctx context.Context) error {
-	return in.core.Close(ctx)
+	var firstErr error
+	for i := len(in.closers) - 1; i >= 0; i-- {
+		if err := in.closers[i].Close(ctx); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
-// memoryBytes returns a read/write view of the core module's exported
-// "memory", if it has one.
-func (in *Instance) memoryBytes() ([]byte, bool) {
-	m := in.core.ExportedMemory("memory")
+// memoryBytesOf returns a read/write view of mod's linear memory, if it has
+// one. It uses Memory() (not ExportedMemory) so that a guest module which
+// imports rather than exports its memory is still handled.
+//
+// wazy's Module.Memory() returns a typed-nil *MemoryInstance (a non-nil
+// api.Memory whose Size()/Read() panic) when the module has no memory, so the
+// nil-interface check alone is not enough; the recover degrades that panic to
+// the same "no memory" result.
+func memoryBytesOf(mod api.Module) (buf []byte, ok bool) {
+	defer func() {
+		if recover() != nil {
+			buf, ok = nil, false
+		}
+	}()
+	m := mod.Memory()
 	if m == nil {
 		return nil, false
 	}
-	buf, ok := m.Read(0, m.Size())
+	buf, ok = m.Read(0, m.Size())
 	if !ok {
 		return nil, false
 	}
 	return buf, true
 }
 
-// reallocFn returns the abi.Realloc backed by the core module's
-// "cabi_realloc" export, or one that fails loudly if the core module
-// doesn't export it.
-func (in *Instance) reallocFn(ctx context.Context) abi.Realloc {
-	fn := in.core.ExportedFunction("cabi_realloc")
+// reallocOf returns the abi.Realloc backed by mod's "cabi_realloc" export, or
+// one that fails loudly if mod doesn't export it.
+func reallocOf(ctx context.Context, mod api.Module) abi.Realloc {
+	fn := mod.ExportedFunction("cabi_realloc")
 	if fn == nil {
 		return func(uint32, uint32, uint32, uint32) (uint32, error) {
 			return 0, fmt.Errorf("component/instance: memory allocation requires a %q export on the core module, which is not present", "cabi_realloc")
@@ -385,9 +422,9 @@ func (in *Instance) reallocFn(ctx context.Context) abi.Realloc {
 	}
 }
 
-// funcResultTypeRefs normalizes FuncResults (unnamed-or-named) into a slice
-// of TypeRefs: 0 entries for no results, 1 for a single unnamed or named
-// result, or more for multiple named results (which Call rejects).
+// funcResultTypeRefs normalizes FuncResults (unnamed-or-named) into a slice of
+// TypeRefs: 0 entries for no results, 1 for a single unnamed or named result,
+// or more for multiple named results (which invoke rejects).
 func funcResultTypeRefs(fd binary.FuncDesc) []binary.TypeRef {
 	if fd.Results.Unnamed != nil {
 		return []binary.TypeRef{*fd.Results.Unnamed}
@@ -400,9 +437,7 @@ func funcResultTypeRefs(fd binary.FuncDesc) []binary.TypeRef {
 }
 
 // resolveTypeRef resolves a TypeRef (primitive or type-table index) to its
-// binary.TypeDesc, failing loud instead of returning a nil descriptor that
-// would otherwise surface as an opaque "unknown type descriptor" error
-// downstream.
+// binary.TypeDesc, failing loud instead of returning a nil descriptor.
 func resolveTypeRef(ref *binary.TypeRef, resolve abi.Resolver) (binary.TypeDesc, error) {
 	if ref.Primitive != "" {
 		return binary.PrimitiveDesc{Prim: ref.Primitive}, nil
@@ -417,8 +452,8 @@ func resolveTypeRef(ref *binary.TypeRef, resolve abi.Resolver) (binary.TypeDesc,
 	return t, nil
 }
 
-// usesMemory reports whether a value of type t needs linear memory to lower
-// or lift (directly, as a string/list, or transitively through a
+// usesMemory reports whether a value of type t needs linear memory to lower or
+// lift (directly, as a string/list, or transitively through a
 // record/tuple/variant/option/result field).
 func usesMemory(t binary.TypeDesc, resolve abi.Resolver) bool {
 	switch d := t.(type) {

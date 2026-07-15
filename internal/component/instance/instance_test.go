@@ -3,10 +3,12 @@ package instance
 import (
 	"context"
 	_ "embed"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
 )
 
@@ -639,7 +641,7 @@ func TestCall_WithStringParam(t *testing.T) {
 		t.Fatalf("expected uint32(5), got %#v", results[0])
 	}
 
-	mem, ok := inst.memoryBytes()
+	mem, ok := memoryBytesOf(inst.exports["run"].mod)
 	if !ok || mem == nil {
 		t.Fatal("expected the strmod core module's memory to be available")
 	}
@@ -660,7 +662,7 @@ func TestReallocFn_Success(t *testing.T) {
 	}
 	defer inst.Close(ctx)
 
-	realloc := inst.reallocFn(ctx)
+	realloc := reallocOf(ctx, inst.exports["run"].mod)
 	ptr, err := realloc(0, 0, 4, 8)
 	if err != nil {
 		t.Fatalf("realloc: %v", err)
@@ -682,7 +684,7 @@ func TestLowerParams_ResolveError(t *testing.T) {
 	defer inst.Close(ctx)
 
 	fd := binary.FuncDesc{Params: []binary.FuncParam{{Name: "bad", Type: binary.TypeRef{}}}}
-	_, err = inst.lowerParams(fd, []any{uint32(1)}, nil, false, inst.reallocFn(ctx), "x")
+	_, err = inst.lowerParams(fd, []any{uint32(1)}, nil, false, reallocOf(ctx, inst.exports["run"].mod), "x")
 	requireErrContains(t, err, "type reference has neither")
 }
 
@@ -699,7 +701,7 @@ func TestLowerParams_LowerFlatError(t *testing.T) {
 
 	fd := binary.FuncDesc{Params: []binary.FuncParam{{Name: "x", Type: binary.TypeRef{Primitive: "u32"}}}}
 	// A string where a u32 is expected: LowerFlat itself should reject it.
-	_, err = inst.lowerParams(fd, []any{"not a u32"}, nil, false, inst.reallocFn(ctx), "x")
+	_, err = inst.lowerParams(fd, []any{"not a u32"}, nil, false, reallocOf(ctx, inst.exports["run"].mod), "x")
 	requireErrContains(t, err, "lower:")
 }
 
@@ -805,7 +807,7 @@ func TestReallocFn_NoExport(t *testing.T) {
 	}
 	defer inst.Close(ctx)
 
-	realloc := inst.reallocFn(ctx)
+	realloc := reallocOf(ctx, inst.exports["run"].mod)
 	if _, err := realloc(0, 0, 4, 8); err == nil {
 		t.Fatal("expected an error calling realloc with no cabi_realloc export, got nil")
 	}
@@ -822,7 +824,7 @@ func TestMemoryBytes_NoMemory(t *testing.T) {
 	}
 	defer inst.Close(ctx)
 
-	mem, ok := inst.memoryBytes()
+	mem, ok := memoryBytesOf(inst.exports["run"].mod)
 	if ok || mem != nil {
 		t.Fatalf("expected (nil, false) for a module with no memory export, got (%v, %v)", mem, ok)
 	}
@@ -837,5 +839,128 @@ func requireErrContains(t *testing.T, err error, substr string) {
 	}
 	if !strings.Contains(err.Error(), substr) {
 		t.Fatalf("expected error to contain %q, got: %v", substr, err)
+	}
+}
+
+// ------- import direction (M3 STEP 3): host function called with "hello" -------
+
+//go:embed testdata/log_hello.wasm
+var logHelloWasm []byte
+
+// TestLogHello is the M3 STEP 3 milestone proof: a component that imports
+// log: func(msg: string) and whose exported run() calls it must invoke a host
+// Go function with the Go string "hello".
+func TestLogHello(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	var captured string
+	var calls int
+	logFn := func(ctx context.Context, args []abi.Value) ([]abi.Value, error) {
+		calls++
+		if len(args) != 1 {
+			t.Fatalf("log: expected 1 arg, got %d", len(args))
+		}
+		s, ok := args[0].(string)
+		if !ok {
+			t.Fatalf("log: expected string arg, got %T", args[0])
+		}
+		captured = s
+		return nil, nil
+	}
+
+	inst, err := Instantiate(ctx, r, logHelloWasm,
+		WithImport("test:pkg/host", "log", logFn,
+			[]binary.TypeDesc{binary.PrimitiveDesc{Prim: "string"}}, nil))
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	defer inst.Close(ctx)
+
+	results, err := inst.Call(ctx, "run")
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if results != nil {
+		t.Fatalf("run has no results, got %#v", results)
+	}
+	if calls != 1 {
+		t.Fatalf("expected the host log to be called exactly once, got %d", calls)
+	}
+	if captured != "hello" {
+		t.Fatalf("host log captured %q, want %q", captured, "hello")
+	}
+}
+
+// TestLogHello_MissingHostImpl fails loud when no host implementation is
+// registered for an import the component lowers and calls.
+func TestLogHello_MissingHostImpl(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	_, err := Instantiate(ctx, r, logHelloWasm) // no WithImport
+	if err == nil {
+		t.Fatal("expected an error with no host implementation, got nil")
+	}
+	if !strings.Contains(err.Error(), "no host implementation") {
+		t.Fatalf("expected error to mention the missing host implementation, got: %v", err)
+	}
+}
+
+// TestLogHello_WrongDeclaredResultCount registers a HostFunc that returns a
+// result the import type says it shouldn't; the mismatch must surface as a
+// call error, not be silently dropped.
+func TestLogHello_HostResultCountMismatch(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	// Declared type: (msg: string) with no results, but the impl returns one.
+	badFn := func(ctx context.Context, args []abi.Value) ([]abi.Value, error) {
+		return []abi.Value{uint32(1)}, nil
+	}
+	inst, err := Instantiate(ctx, r, logHelloWasm,
+		WithImport("test:pkg/host", "log", badFn,
+			[]binary.TypeDesc{binary.PrimitiveDesc{Prim: "string"}}, nil))
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	defer inst.Close(ctx)
+
+	_, err = inst.Call(ctx, "run")
+	if err == nil {
+		t.Fatal("expected a call error from the result-count mismatch, got nil")
+	}
+	if !strings.Contains(err.Error(), "result") {
+		t.Fatalf("expected error to mention results, got: %v", err)
+	}
+}
+
+// TestLogHello_HostFuncError propagates an error returned by the HostFunc out
+// through the originating Call.
+func TestLogHello_HostFuncError(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	boomFn := func(ctx context.Context, args []abi.Value) ([]abi.Value, error) {
+		return nil, fmt.Errorf("boom from host")
+	}
+	inst, err := Instantiate(ctx, r, logHelloWasm,
+		WithImport("test:pkg/host", "log", boomFn,
+			[]binary.TypeDesc{binary.PrimitiveDesc{Prim: "string"}}, nil))
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	defer inst.Close(ctx)
+
+	_, err = inst.Call(ctx, "run")
+	if err == nil {
+		t.Fatal("expected the host error to surface, got nil")
+	}
+	if !strings.Contains(err.Error(), "boom from host") {
+		t.Fatalf("expected error to contain the host error, got: %v", err)
 	}
 }
