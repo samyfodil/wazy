@@ -12,6 +12,12 @@
 - **Context:** Add a `CoreSort byte` field to `AliasDef`, populate it in `decodeAliasSection`, and have `internal/component/instance` filter aliases by CoreSort==func when building the core-func index space. Surfaced during M3.2.
 - **Depends on / blocked by:** Do before a milestone that instantiates a component with an exported memory/table (i.e. real WASI guests that use `canon lower` with a memory option).
 
+## Decoder must track the full component type INDEX SPACE (not just the type section) — REAL-GUEST BLOCKER
+- **What:** `binary.Component.Types` only holds type-section deftypes. But a component's type index space also includes type-sort **aliases** (and imported/exported types). Canon `TypeIdx` (and export/instance references) index that *full* space, so on any component that aliases a type, canon TypeIdx points past `comp.Types` and the engine fails loud ("lift references type N, out of range of M types").
+- **Why:** every real off-the-shelf WASI guest aliases interface types into its index space (e.g. `alias export $streams "output-stream" (type ...)`). Until this is fixed, only hand-built fixtures that avoid cross-import type aliases can instantiate. This is THE blocker between the working mechanism and running a real guest.
+- **Context:** build an ordered type-index-space model in the decoder: interleave type-section entries, type-sort alias defs (export/core-export/outer targets), and imported types in declaration order, so an index resolves to the right entry. The instance engine's canon/export resolution then indexes that space instead of `comp.Types`. Surfaced in M4.2 (worked around by giving each import its own local resource type).
+- **Depends on / blocked by:** relates to [[the AliasDef core-sort discriminator item]] — do both before attempting a real componentized guest.
+
 ## readResourcetypeDesc mislabels the rep valtype
 - **What:** `binary/descriptor.go` `readResourcetypeDesc` decodes a resource's `rep` (a core type, `i32` = byte 0x7f) through the component-level primitive table, where 0x7f means `bool` — so `ResourceDesc.Rep` prints as "bool".
 - **Why:** harmless today (the handle table and resource canons treat reps as raw uint32 at the ABI boundary and never read `ResourceDesc.Rep`), but wrong and will mislead anything that inspects resource rep types semantically.
