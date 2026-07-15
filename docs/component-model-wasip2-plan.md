@@ -17,15 +17,16 @@ Scope decision: **Real p2 CM runtime** — load arbitrary off-the-shelf `.compon
   - `real_readfile` — reads a file from a host FS
   - `real_transform` — reads `/input.txt`, uppercases, writes `/output.txt`
 - 4 packages, all >=90% coverage; ~18 real bugs caught by the oracle + independent verification (incl. enum >32 cases, nested own/borrow resolution, missing get-random-bytes / stat-at).
-- **Differential conformance vs wasmtime: 28/28 byte-identical** — a suite of real rustc `wasi:cli/command` programs (arithmetic/float/int edge cases, serde_json roundtrip, 10k collections, deep recursion, unicode casing, args/env, file read/write/multi-file, panic, exit, iterators) each run under wasmtime for golden stdout, then asserted identical on wazy (verified non-circular). `internal/component/instance/conformance_test.go`.
+- **Differential conformance vs wasmtime: 35/35 byte-identical** — real rustc `wasi:cli/command` programs (arithmetic/float/int edge cases, serde_json/regex/sha2/base64/csv/itertools crates, 10k collections, deep recursion, unicode casing, args/env, stdin cat/wc/grep, file read/write/append/seek/read_dir/remove, panic, exit) each run under wasmtime for golden stdout, then asserted identical on wazy (verified non-circular). `internal/component/instance/conformance_test.go`.
+- **wasi:sockets TCP + wasi:io/poll** — a real `std::net::TcpStream` guest connects through wazy to a host server and exchanges data both ways (`real_tcp`, behavioral test vs a Go server).
 
-## Remaining for a production WASI runtime (not started; deliberate)
-- WASI interface **breadth left**: sockets, real clocks, actual stdin input — the common file/cli/env surface is done and conformance-verified.
-- Grow the conformance suite further; run the upstream wasi-testsuite.
-- The **performance** pass (compliance-first was the plan; optimization deferred).
-- **Conformance**: run the official component-model + WASI 0.2 suites; burn down.
-- Decoder gaps in TODOS.md (resourcetype rep mislabel, type-sort *export* index tracking).
-- The **performance** pass (plan was compliance-first; optimization deferred).
+**The major WASI 0.2 surface is done and verified:** cli · io streams + poll · environment · filesystem (read/write/dir) · random · sockets (TCP). Real guests run doing compute, all file I/O, every stdio/args/env direction, and networking.
+
+## Remaining (not started; deliberate)
+- Minor breadth: UDP, `ip-name-lookup`, real clocks-in-output, symlinks.
+- The upstream `wasi-testsuite` corpus.
+- Async / WASI 0.3 (explicitly out of scope).
+- The **performance pass** — the plan was compliance-first; optimization is the deferred second phase, and wazy's whole identity. This is the natural "true completion" for this project.
 
 ---
 
