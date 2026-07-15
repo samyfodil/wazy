@@ -1,0 +1,12 @@
+(module
+  (memory (export "memory") 1)
+  (global $next (mut i32) (i32.const 8))
+  (func (export "cabi_realloc")
+        (param $orig_ptr i32) (param $orig_size i32) (param $align i32) (param $new_size i32)
+        (result i32)
+    (local $ret i32)
+    (local.set $ret (global.get $next))
+    (global.set $next (i32.add (global.get $next) (local.get $new_size)))
+    (local.get $ret))
+  (func (export "strlen") (param $ptr i32) (param $len i32) (result i32)
+    local.get $len))
