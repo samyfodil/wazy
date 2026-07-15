@@ -1,0 +1,45 @@
+i8_min=-128 i8_max=127
+i16_min=-32768 i16_max=32767
+i32_min=-2147483648 i32_max=2147483647
+i64_min=-9223372036854775808 i64_max=9223372036854775807
+u8_max=255 u16_max=65535 u32_max=4294967295 u64_max=18446744073709551615
+i128_min=-170141183460469231731687303715884105728 i128_max=170141183460469231731687303715884105727
+u128_max=340282366920938463463374607431768211455
+wrap_add=-2147483648
+wrap_sub=2147483647
+wrap_mul=-2
+wrap_neg=-2147483648
+wrap_u8=9
+checked_add=None
+checked_sub=None
+checked_div_zero=None
+sat_add=2147483647
+sat_sub=-2147483648
+sat_mul=9223372036854775807
+overflow_add=-2147483648 true
+leading_zeros=31
+trailing_zeros=3
+count_ones=8
+rotate_left=2
+swap_bytes=0x4030201
+hex_neg1_i32=ffffffff
+hex_neg1_i64=ffffffffffffffff
+hex_neg1_i8=ff
+bin_neg1_i8=11111111
+oct_neg1_i16=177777
+hex_upper_neg=FFFFFF01
+hex_alt_neg=0xffffffff
+as_u64=18446744073709551615
+as_u32=4294967295
+f_as_i32=2147483647
+f_as_u8=0
+nan_as_i32=0
+f_as_u64_of_neg=0
+div_euclid=-3
+rem_euclid=2
+normal_div=-2
+normal_rem=-1
+pow=4611686018427387904
+checked_pow=None
+wrapping_abs_min=-2147483648
+done

@@ -1,0 +1,18 @@
+len=10000
+sum_before=4977735650
+min=97
+max=999986
+sorted_sum=4977735650
+median=494773
+binary_search_value_found=true
+binary_search_missing=false
+dedup_len=9962
+map_len=909
+map_key_sum=2275126
+map_val_sum=499500
+first_five=[(8, 974), (18, 803), (20, 40), (21, 447), (30, 607)]
+last_five=[(4995, 369), (4994, 784), (4988, 133), (4982, 199), (4979, 215)]
+range_sum=90339
+big_string_len=23890
+digit_count=18890
+done

@@ -1,0 +1,10 @@
+ackermann(2,3)=9
+ackermann(2,7)=17
+ackermann(3,3)=61
+deep_sum(1000)=500500
+deep_sum(5000)=12502500
+tree_depth=1000
+tree_sum=1
+is_even(2000)=true
+is_odd(2001)=true
+done

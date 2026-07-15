@@ -96,6 +96,64 @@ var conformanceFixtures = []conformanceFixture{
 		desc: "1000 numbered println! lines -- exercises repeated/streamed output-stream.write calls at volume",
 		wasm: f10BigoutWasm, golden: f10BigoutGolden,
 	},
+
+	// --- harder batch: stresses the Canonical ABI + WASI far more than the
+	// first ten (float/int formatting edge cases, serde_json record/list
+	// marshalling, 10k/1k-element collections, deep non-tail recursion,
+	// unicode casing/boundary edge cases, multi-handle filesystem I/O, a
+	// guest trap via panic!, and long iterator/closure chains). ---
+
+	{
+		name: "f11_floats",
+		desc: "NaN/inf/-0.0/subnormals/MAX/MIN/EPSILON, {:e}/{:.17}/{:.0} formatting -- exercises float lift/lower + Rust's exact Display/LowerExp formatting",
+		wasm: f11FloatsWasm, golden: f11FloatsGolden,
+	},
+	{
+		name: "f12_ints",
+		desc: "i8/i16/i32/i64/i128/u128 MIN/MAX, wrapping/checked/saturating/overflowing ops, hex/oct/bin of negatives, float<->int as-casts (incl. NaN/out-of-range saturating casts) -- exercises integer width handling",
+		wasm: f12IntsWasm, golden: f12IntsGolden,
+	},
+	{
+		name: "f13_json",
+		desc: "serde_json::Value parse/mutate/re-serialize + typed struct roundtrip via serde derive, unicode string field -- hammers string/list/record marshalling and allocation through a real crate dependency",
+		wasm: f13JsonWasm, golden: f13JsonGolden,
+	},
+	{
+		name: "f14_largedata",
+		desc: "10k-element Vec (xorshift-filled) sort/binary-search/dedup/sum, 1000-entry BTreeMap insert+range+iterate, 50KB string build -- stresses allocation + large linear-memory ops",
+		wasm: f14LargedataWasm, golden: f14LargedataGolden,
+	},
+	{
+		name: "f15_deeprec",
+		desc: "ackermann(3,3), 5000-deep non-tail recursion, 1000-deep boxed-tree build/walk, mutual recursion -- exercises guest call-stack depth",
+		wasm: f15DeeprecWasm, golden: f15DeeprecGolden,
+	},
+	{
+		name: "f16_unicode",
+		desc: "multi-byte upper/lowercasing (ß->SS, Turkish İ/ı), char boundaries, combining marks, ZWJ emoji sequences, char_indices, unicode split/trim/classification -- exercises utf8 edge cases beyond f02_strings",
+		wasm: f16UnicodeWasm, golden: f16UnicodeGolden,
+	},
+	{
+		name: "f17_multifs",
+		desc: "3 preopened files read + concatenated sorted by name, 2 files written and read back, interleaved multi-handle reads, overwrite, stat, missing-file error -- stresses the fs descriptor/stream path with several live handles at once",
+		wasm: f17MultifsWasm, golden: f17MultifsGolden,
+		fs: map[string][]byte{
+			"/alpha.txt": f17MultifsInputAlpha,
+			"/beta.txt":  f17MultifsInputBeta,
+			"/gamma.txt": f17MultifsInputGamma,
+		},
+	},
+	{
+		name: "f18_panic",
+		desc: "prints several lines then panic!(): wasmtime traps on the guest's `unreachable` (panic -> abort -> unreachable) after printing stdout up through the panic; stdout must still match up to that point and wazy must also report a call error (compare STDOUT only, per wasmtime's own stderr/backtrace being non-deterministic and out of scope)",
+		wasm: f18PanicWasm, golden: f18PanicGolden,
+		wantCallErr: true,
+	},
+	{
+		name: "f19_iterchains",
+		desc: "filter/map/flat_map/collect, zip/enumerate/fold, windows/chunks/scan, HashMap group-by (key-sorted for determinism), returned closures, Option/Result combinators, partition, take_while/skip_while, sort_by_key -- exercises complex iterator/closure chains with formatting",
+		wasm: f19IterchainsWasm, golden: f19IterchainsGolden,
+	},
 }
 
 type conformanceFixture struct {
@@ -246,3 +304,66 @@ var f10BigoutWasm []byte
 
 //go:embed testdata/conformance/f10_bigout.stdout.golden
 var f10BigoutGolden string
+
+//go:embed testdata/conformance/f11_floats.component.wasm
+var f11FloatsWasm []byte
+
+//go:embed testdata/conformance/f11_floats.stdout.golden
+var f11FloatsGolden string
+
+//go:embed testdata/conformance/f12_ints.component.wasm
+var f12IntsWasm []byte
+
+//go:embed testdata/conformance/f12_ints.stdout.golden
+var f12IntsGolden string
+
+//go:embed testdata/conformance/f13_json.component.wasm
+var f13JsonWasm []byte
+
+//go:embed testdata/conformance/f13_json.stdout.golden
+var f13JsonGolden string
+
+//go:embed testdata/conformance/f14_largedata.component.wasm
+var f14LargedataWasm []byte
+
+//go:embed testdata/conformance/f14_largedata.stdout.golden
+var f14LargedataGolden string
+
+//go:embed testdata/conformance/f15_deeprec.component.wasm
+var f15DeeprecWasm []byte
+
+//go:embed testdata/conformance/f15_deeprec.stdout.golden
+var f15DeeprecGolden string
+
+//go:embed testdata/conformance/f16_unicode.component.wasm
+var f16UnicodeWasm []byte
+
+//go:embed testdata/conformance/f16_unicode.stdout.golden
+var f16UnicodeGolden string
+
+//go:embed testdata/conformance/f17_multifs.component.wasm
+var f17MultifsWasm []byte
+
+//go:embed testdata/conformance/f17_multifs.stdout.golden
+var f17MultifsGolden string
+
+//go:embed testdata/conformance/f17_multifs.input.alpha.txt
+var f17MultifsInputAlpha []byte
+
+//go:embed testdata/conformance/f17_multifs.input.beta.txt
+var f17MultifsInputBeta []byte
+
+//go:embed testdata/conformance/f17_multifs.input.gamma.txt
+var f17MultifsInputGamma []byte
+
+//go:embed testdata/conformance/f18_panic.component.wasm
+var f18PanicWasm []byte
+
+//go:embed testdata/conformance/f18_panic.stdout.golden
+var f18PanicGolden string
+
+//go:embed testdata/conformance/f19_iterchains.component.wasm
+var f19IterchainsWasm []byte
+
+//go:embed testdata/conformance/f19_iterchains.stdout.golden
+var f19IterchainsGolden string

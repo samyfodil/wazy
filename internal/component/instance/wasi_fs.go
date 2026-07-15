@@ -3,6 +3,7 @@ package instance
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"strings"
 	"sync"
 
@@ -70,6 +71,16 @@ import (
 // path once minted, differing only in the stream's starting offset), rather
 // than leaving a func this close to write-via-stream's own semantics as a
 // landmine for the next guest that does call it.)
+//
+// A later fixture (testdata/conformance/f17_multifs.component.wasm, see
+// conformance_test.go), whose main calls std::fs::metadata directly (not
+// via read_to_string), surfaced one more func this same discovery process
+// hadn't hit yet: [method]descriptor.stat-at. std::sys::fs::metadata on
+// wasip2 goes through the preview1-to-preview2 adapter's
+// path_filestat_get, which is stat-at (look a path up under a directory
+// descriptor without opening it), not stat (fstat an already-open
+// descriptor) -- read_to_string never calls metadata itself, so nothing in
+// the original discovery list had exercised this path before.
 //
 // # Nested own<T> handles
 //
@@ -595,6 +606,63 @@ func wasiFilesystemOptions(fs *wasiFS) []Option {
 		return []abi.Value{abi.ResultValue{IsErr: false, Payload: rec}}, nil
 	}
 
+	// statAt implements [method]descriptor.stat-at(self: borrow<descriptor>,
+	// path-flags: path-flags, path: string) -> result<descriptor-stat,
+	// error-code> -- discovered via f17_multifs.component.wasm
+	// (testdata/conformance): std::fs::metadata resolves to
+	// std::sys::fs::metadata on wasip2, which calls the preview1-to-preview2
+	// adapter's path_filestat_get, NOT [method]descriptor.stat (that's
+	// fd_filestat_get, for a descriptor already open) -- stat-at instead
+	// looks a path up under a still-open directory descriptor without ever
+	// minting a new descriptor for it, mirroring a real fstatat(2). Shares
+	// its path resolution (wasiJoinFSPath) and not-found/not-a-directory
+	// error handling with openAt, but never calls fs.fsFileSet: unlike
+	// open-at, stat-at has no create/truncate flags to act on, so a missing
+	// path is unconditionally error-code::no-entry. path-flags (args[1]) is
+	// ignored for the same reason openAt ignores it (no symlinks in this
+	// in-memory filesystem).
+	statAt := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 3 {
+			return nil, fmt.Errorf("[method]descriptor.stat-at: expected 3 args (self, path-flags, path), got %d", len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]descriptor.stat-at: self: expected uint32 rep, got %T", args[0])
+		}
+		path, ok := args[2].(string)
+		if !ok {
+			return nil, fmt.Errorf("[method]descriptor.stat-at: path: expected string, got %T", args[2])
+		}
+		node, err := fs.descNode(selfRep)
+		if err != nil {
+			return nil, fmt.Errorf("[method]descriptor.stat-at: %w", err)
+		}
+		if !node.isDir {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeNotDirectory}}, nil
+		}
+		full, ok := wasiJoinFSPath(node.path, path)
+		if !ok {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeNotPermitted}}, nil
+		}
+		content, found := fs.fsFileGet(full)
+		if !found {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeNoEntry}}, nil
+		}
+		// This flat in-memory filesystem has no subdirectories beyond the
+		// single preopened root, so every path stat-at can find is a
+		// regular file (matching stat's own doc: the three timestamp
+		// fields are always `none`).
+		rec := []abi.Value{
+			wasiDescriptorTypeRegularFile, // type
+			uint64(1),                     // link-count
+			uint64(len(content)),          // size
+			nil,                           // data-access-timestamp
+			nil,                           // data-modification-timestamp
+			nil,                           // status-change-timestamp
+		}
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: rec}}, nil
+	}
+
 	readViaStream := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
 		if len(args) != 2 {
 			return nil, fmt.Errorf("[method]descriptor.read-via-stream: expected 2 args (self, offset), got %d", len(args))
@@ -746,6 +814,49 @@ func wasiFilesystemOptions(fs *wasiFS) []Option {
 		return []abi.Value{abi.ResultValue{IsErr: false, Payload: rec}}, nil
 	}
 
+	// metadataHashAt is metadata-hash's stat-at counterpart -- reached the
+	// same way statAt is (the preview1-to-preview2 adapter's
+	// path_filestat_get combines stat-at AND metadata-hash-at into a full
+	// POSIX fstatat result, mirroring fd_filestat_get's stat+metadata-hash
+	// pairing for an already-open descriptor). Unlike metadata-hash, there
+	// is no live descriptor rep to reuse as an identity source here (stat-at
+	// never mints one), so this hashes the resolved absolute path instead
+	// (FNV-1a) -- still unique per distinct file and stable across repeated
+	// calls against the same path within a run, which is all a "looks like
+	// a plausible fstatat result" inode stand-in needs to be (nothing this
+	// package's fixtures inspect the actual value).
+	metadataHashAt := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 3 {
+			return nil, fmt.Errorf("[method]descriptor.metadata-hash-at: expected 3 args (self, path-flags, path), got %d", len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]descriptor.metadata-hash-at: self: expected uint32 rep, got %T", args[0])
+		}
+		path, ok := args[2].(string)
+		if !ok {
+			return nil, fmt.Errorf("[method]descriptor.metadata-hash-at: path: expected string, got %T", args[2])
+		}
+		node, err := fs.descNode(selfRep)
+		if err != nil {
+			return nil, fmt.Errorf("[method]descriptor.metadata-hash-at: %w", err)
+		}
+		if !node.isDir {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeNotDirectory}}, nil
+		}
+		full, ok := wasiJoinFSPath(node.path, path)
+		if !ok {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeNotPermitted}}, nil
+		}
+		if _, found := fs.fsFileGet(full); !found {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeNoEntry}}, nil
+		}
+		h := fnv.New64a()
+		_, _ = h.Write([]byte(full))
+		rec := []abi.Value{h.Sum64(), uint64(0)} // lower, upper
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: rec}}, nil
+	}
+
 	getTerminalStdin := func(context.Context, []abi.Value) ([]abi.Value, error) { return []abi.Value{nil}, nil }
 	getTerminalStdout := func(context.Context, []abi.Value) ([]abi.Value, error) { return []abi.Value{nil}, nil }
 	getTerminalStderr := func(context.Context, []abi.Value) ([]abi.Value, error) { return []abi.Value{nil}, nil }
@@ -755,10 +866,12 @@ func wasiFilesystemOptions(fs *wasiFS) []Option {
 	openAtFD, openAtResolve := wasiOpenAtSig()
 	getTypeFD, getTypeResolve := wasiGetTypeSig()
 	statFD, statResolve := wasiStatSig()
+	statAtFD, statAtResolve := wasiStatAtSig()
 	readViaStreamFD, readViaStreamResolve := wasiReadViaStreamSig()
 	writeViaStreamFD, writeViaStreamResolve := wasiWriteViaStreamSig()
 	appendViaStreamFD, appendViaStreamResolve := wasiAppendViaStreamSig()
 	metadataHashFD, metadataHashResolve := wasiMetadataHashSig()
+	metadataHashAtFD, metadataHashAtResolve := wasiMetadataHashAtSig()
 	inReadFD, inReadResolve := wasiInputStreamReadSig()
 	inBlockingReadFD, inBlockingReadResolve := wasiInputStreamReadSig()
 	termInFD, termInResolve := wasiGetTerminalSig(wasiTerminalInputResType)
@@ -786,10 +899,12 @@ func wasiFilesystemOptions(fs *wasiFS) []Option {
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.open-at", openAt, openAtFD, openAtResolve),
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.get-type", getType, getTypeFD, getTypeResolve),
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.stat", stat, statFD, statResolve),
+		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.stat-at", statAt, statAtFD, statAtResolve),
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.read-via-stream", readViaStream, readViaStreamFD, readViaStreamResolve),
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.write-via-stream", writeViaStream, writeViaStreamFD, writeViaStreamResolve),
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.append-via-stream", appendViaStream, appendViaStreamFD, appendViaStreamResolve),
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.metadata-hash", metadataHash, metadataHashFD, metadataHashResolve),
+		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.metadata-hash-at", metadataHashAt, metadataHashAtFD, metadataHashAtResolve),
 
 		withImportCustom(wasiIfaceStreams, "[method]input-stream.read", streamRead, inReadFD, inReadResolve),
 		withImportCustom(wasiIfaceStreams, "[method]input-stream.blocking-read", streamRead, inBlockingReadFD, inBlockingReadResolve),
@@ -936,6 +1051,29 @@ func wasiStatSig() (binary.FuncDesc, abi.Resolver) {
 	return fd, tbl.resolver()
 }
 
+// wasiStatAtSig builds the FuncDesc/resolver for
+// [method]descriptor.stat-at(self: borrow<descriptor>, path-flags:
+// path-flags, path: string) -> result<descriptor-stat, error-code>.
+// path-flags shares open-at's single-field "symlink-follow" shape (per its
+// WIT declaration).
+func wasiStatAtSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiDescriptorResType})
+	pathFlagsRef := tbl.add(binary.FlagsDesc{Names: []string{"symlink-follow"}})
+	okRef := wasiDescriptorStatType(tbl)
+	errRef := wasiErrorCodeType(tbl)
+	resultRef := tbl.add(binary.ResultDesc{Ok: &okRef, Err: &errRef})
+	fd := binary.FuncDesc{
+		Params: []binary.FuncParam{
+			{Name: "self", Type: selfRef},
+			{Name: "path-flags", Type: pathFlagsRef},
+			{Name: "path", Type: binary.TypeRef{Primitive: "string"}},
+		},
+		Results: binary.FuncResults{Unnamed: &resultRef},
+	}
+	return fd, tbl.resolver()
+}
+
 // wasiReadViaStreamSig builds the FuncDesc/resolver for
 // [method]descriptor.read-via-stream(self: borrow<descriptor>, offset:
 // filesize) -> result<own<input-stream>, error-code>.
@@ -1032,6 +1170,27 @@ func wasiMetadataHashSig() (binary.FuncDesc, abi.Resolver) {
 	resultRef := tbl.add(binary.ResultDesc{Ok: &okRef, Err: &errRef})
 	fd := binary.FuncDesc{
 		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}},
+		Results: binary.FuncResults{Unnamed: &resultRef},
+	}
+	return fd, tbl.resolver()
+}
+
+// wasiMetadataHashAtSig builds the FuncDesc/resolver for
+// [method]descriptor.metadata-hash-at(self: borrow<descriptor>, path-flags:
+// path-flags, path: string) -> result<metadata-hash-value, error-code>.
+func wasiMetadataHashAtSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiDescriptorResType})
+	pathFlagsRef := tbl.add(binary.FlagsDesc{Names: []string{"symlink-follow"}})
+	okRef := wasiMetadataHashType(tbl)
+	errRef := wasiErrorCodeType(tbl)
+	resultRef := tbl.add(binary.ResultDesc{Ok: &okRef, Err: &errRef})
+	fd := binary.FuncDesc{
+		Params: []binary.FuncParam{
+			{Name: "self", Type: selfRef},
+			{Name: "path-flags", Type: pathFlagsRef},
+			{Name: "path", Type: binary.TypeRef{Primitive: "string"}},
+		},
 		Results: binary.FuncResults{Unnamed: &resultRef},
 	}
 	return fd, tbl.resolver()

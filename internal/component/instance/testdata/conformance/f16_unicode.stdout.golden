@@ -1,0 +1,38 @@
+orig=Straße naïve İstanbul ǅungla 日本語 🎉🚀 é
+bytes_len=54
+chars_len=37
+upper=STRASSE NAÏVE İSTANBUL ǄUNGLA 日本語 🎉🚀 É
+lower=straße naïve i̇stanbul ǆungla 日本語 🎉🚀 é
+ss_upper=STRASSE
+ss_upper_len=7
+turkish_upper=İSTANBUL II II
+turkish_lower=i̇stanbul ıi iı
+reversed=é 🚀🎉 語本日 algnuǅ lubnatsİ evïan eßartS
+cjk_byte_len=18
+cjk_char_len=6
+first_char_at=0 char=日
+is_char_boundary_1=false
+is_char_boundary_3=true
+combining_bytes_len=3
+combining_chars_len=2
+combining_display=é
+emoji_bytes_len=25
+emoji_chars_len=7
+mixed_bytes_len=11
+mixed_chars_len=5
+  idx=0 char=a char_len=1
+  idx=1 char=é char_len=2
+  idx=3 char=中 char_len=3
+  idx=6 char=🎉 char_len=4
+  idx=10 char=z char_len=1
+split_parts=["a", "b", "", "c"]
+trimmed="hello"
+ascii_upper=STRAßE NAïVE İSTANBUL ǅUNGLA 日本語 🎉🚀 é
+char=a is_alphabetic=true is_numeric=false is_whitespace=false is_ascii=true
+char=Z is_alphabetic=true is_numeric=false is_whitespace=false is_ascii=true
+char=0 is_alphabetic=false is_numeric=true is_whitespace=false is_ascii=true
+char=  is_alphabetic=false is_numeric=false is_whitespace=true is_ascii=true
+char=ß is_alphabetic=true is_numeric=false is_whitespace=false is_ascii=false
+char=日 is_alphabetic=true is_numeric=false is_whitespace=false is_ascii=false
+char=🎉 is_alphabetic=false is_numeric=false is_whitespace=false is_ascii=false
+done

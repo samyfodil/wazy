@@ -1,0 +1,18 @@
+chain1=QCKBRWNJMPSVRLZYPCKWTHFVDZNLQRJGS
+sum_of_products=770
+window_sums=[6, 9, 12, 15, 18, 21, 24, 27]
+chunk_sums=[6, 15, 24, 10]
+running_max=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+len=2 words=["my"]
+len=3 words=["box", "dog", "fox", "the", "the"]
+len=4 words=["five", "jugs", "lazy", "over", "pack", "with"]
+len=5 words=["brown", "dozen", "jumps", "quick"]
+len=6 words=["liquor"]
+mapped=[6, 7, 8, 9, 10]
+chained_option=21
+oks_count=2 errs_count=1
+taken=[1, 2, 3]
+skipped=[10, 4, 5]
+pairs=[(1, "a"), (1, "a2"), (2, "b"), (3, "c")]
+formatted=[00]-[01]-[04]-[09]-[16]
+done

@@ -1,0 +1,14 @@
+name="wazy"
+version=2
+tags_len=3
+active=true
+score=3.14159
+unicode="héllo wörld 日本語 🎉"
+serialized={"meta":{"active":true,"nothing":null,"score":6.28318},"name":"wazy","nested_list":[[1,2,3],[4,5,6]],"new_field":{"a":1,"b":[true,false,null]},"tags":["wasm","component","abi","mutated"],"unicode":"héllo wörld 日本語 🎉","version":3}
+pretty_len=419
+total_weight=3.75
+item id=1 label=a weight=1.5
+item id=2 label=b weight=2.25
+items_json=[{"id":1,"label":"a","weight":1.5},{"id":2,"label":"b","weight":2.25}]
+parse_error_is_err=true
+done

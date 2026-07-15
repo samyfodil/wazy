@@ -1,0 +1,29 @@
+sorted_names=["alpha.txt", "beta.txt", "gamma.txt"]
+read alpha.txt (14 bytes)
+read beta.txt (17 bytes)
+read gamma.txt (23 bytes)
+concatenated=ALPHA-CONTENT
+Beta Content Two
+gamma content THREE 42
+
+concatenated_len=54
+wrote out1 (54 bytes) and out2 (54 bytes)
+readback_out1=ALPHA-CONTENT
+BETA CONTENT TWO
+GAMMA CONTENT THREE 42
+
+readback_out2=
+24 EERHT tnetnoc ammag
+owT tnetnoC ateB
+TNETNOC-AHPLA
+readback_out1_matches=true
+readback_out2_matches=true
+interleaved_lens=14 17 23
+reread_after_overwrite=ALPHA-CONTENT
+BETA CONTENT TWO
+GAMMA CONTENT THREE 42
+-appended
+alpha_len=14
+alpha_is_file=true
+missing_is_err=true
+done
