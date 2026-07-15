@@ -669,8 +669,13 @@ func wasiListFromBytes(buf []byte) []abi.Value {
 // dispatch, since output-stream is one resource/handle namespace spanning
 // both stdio and the write-via-stream/append-via-stream streams this file
 // mints -- see wasi.go's writeSink doc for why that dispatch lives there
-// instead of here.
-func wasiFilesystemOptions(fs *wasiFS) []Option {
+// instead of here. sockets is likewise constructed by WithWASI (always
+// non-nil, even when WASIConfig.AllowTCP is false -- see its doc) and
+// consulted as a fallback by streamRead (below), since input-stream is
+// another resource/handle namespace spanning fs/stdin reads AND (when
+// AllowTCP is set) socket reads -- mirrors the write-side dispatch's own
+// three-way fallback in wasi.go's writeSink.
+func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []Option {
 	getDirectories := func(context.Context, []abi.Value) ([]abi.Value, error) {
 		resources, err := fs.getResources()
 		if err != nil {
@@ -1101,10 +1106,16 @@ func wasiFilesystemOptions(fs *wasiFS) []Option {
 	}
 
 	// streamRead implements both [method]input-stream.read and
-	// [method]input-stream.blocking-read: since every byte is already
-	// resident in memory (no real I/O to actually block on), "read some of
-	// what's available now" and "block until at least one byte is
-	// available" have identical observable behavior here.
+	// [method]input-stream.blocking-read. For an fs/stdin-backed stream,
+	// every byte is already resident in memory (no real I/O to actually
+	// block on), so "read some of what's available now" and "block until
+	// at least one byte is available" have identical observable behavior.
+	// For a socket-backed stream (rep not found in fs.streams, falling
+	// through to sockets.inStreamNode -- see wasiFilesystemOptions' own doc
+	// for why this func's dispatch spans both), the read is a genuine
+	// blocking net.Conn.Read (sockInStream.read), so the two methods differ
+	// there in name only, identically to how this package's fs path never
+	// distinguished them either.
 	streamRead := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
 		if len(args) != 2 {
 			return nil, fmt.Errorf("[method]input-stream.read: expected 2 args (self, len), got %d", len(args))
@@ -1119,6 +1130,9 @@ func wasiFilesystemOptions(fs *wasiFS) []Option {
 		}
 		s, err := fs.streamNode(selfRep)
 		if err != nil {
+			if sock, found := sockets.inStreamNode(selfRep); found {
+				return sock.read(length)
+			}
 			return nil, fmt.Errorf("[method]input-stream.read: %w", err)
 		}
 		s.mu.Lock()

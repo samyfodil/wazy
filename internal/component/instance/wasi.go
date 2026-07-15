@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 
 	"github.com/samyfodil/wazy/internal/component/abi"
@@ -203,6 +204,27 @@ type WASIConfig struct {
 	// caller that wants to see what a guest wrote must pass a non-nil
 	// (possibly empty) map instead of nil.
 	FS map[string][]byte
+
+	// AllowTCP opts into a real wasi:sockets (TCP-only) + wasi:io/poll host
+	// implementation -- see wasi_sockets.go's package doc. False (the
+	// default) leaves wasi:sockets/wasi:io/poll entirely unregistered, so
+	// the graph engine's own automatic trap-stub fallback fails loud,
+	// naming the specific iface+func, the moment a guest actually calls
+	// into sockets (mirrors wasi.go's pre-existing doc on why
+	// wasi:sockets was left unregistered before this field existed).
+	// AllowTCP must be true for Dialer to have any effect.
+	AllowTCP bool
+
+	// Dialer, when non-nil, replaces the real net.Dial WithWASI otherwise
+	// uses to satisfy a guest's wasi:sockets/tcp
+	// [method]tcp-socket.start-connect -- see wasi_sockets.go's
+	// startConnect. A test that wants a real TCP exchange against a
+	// scratch server it controls (rather than genuine outbound network
+	// access) injects a Dialer that ignores the guest-requested address
+	// and always dials that server (or one that enforces loopback-only
+	// addresses), without needing any change to wasi_sockets.go itself.
+	// Has no effect unless AllowTCP is also true.
+	Dialer func(network, address string) (net.Conn, error)
 }
 
 // WithWASI returns the Options that register a WASI 0.2 host implementation
@@ -229,6 +251,23 @@ func WithWASI(cfg WASIConfig) []Option {
 	// path [method]descriptor.read-via-stream uses for file reads) instead
 	// of a separate stdin-only implementation.
 	fs := newWasiFS(cfg.FS)
+
+	// sockets backs a real wasi:sockets (TCP-only) + wasi:io/poll
+	// implementation (wasi_sockets.go), gated behind cfg.AllowTCP (see
+	// WASIConfig.AllowTCP's doc). It is always constructed -- even when
+	// AllowTCP is false -- so writeSink/checkWrite/blockingFlush/
+	// wasiFilesystemOptions' streamRead (below) can unconditionally
+	// consult it as a dispatch fallback without a nil check; when AllowTCP
+	// is false, wasiSocketOptions is never called, so sockets.tcpSocks/
+	// inStreams/outStreams simply stay empty for the run's whole lifetime
+	// and every fallback lookup reports "not found", falling through to
+	// each dispatch's existing "unknown rep" error exactly as before this
+	// field existed.
+	dial := cfg.Dialer
+	if dial == nil {
+		dial = func(network, address string) (net.Conn, error) { return net.Dial(network, address) }
+	}
+	sockets := newWasiSockets(dial)
 
 	// stdinBytes is the entirety of WASIConfig.Stdin, read once up front
 	// (mirrors read-via-stream's own model: an fsDescNode's content is a
@@ -369,27 +408,32 @@ func WithWASI(cfg WASIConfig) []Option {
 	}
 
 	// writeSink resolves an output-stream rep to "how to write buf against
-	// it": either a stdio io.Writer (writerForRep) or one of wasi_fs.go's
-	// file-write streams (fs.writeStreamWrite) -- the two rep ranges never
-	// collide (see newWasiFS's doc: its write-stream rep counter starts at
-	// 3, leaving wasiStdoutRep(1)/wasiStderrRep(2) exclusively stdio's), so
-	// trying stdio first and falling back to fs is unambiguous. A rep
-	// neither side recognizes is a genuinely unknown output-stream handle;
+	// it": a stdio io.Writer (writerForRep), one of wasi_fs.go's file-write
+	// streams (fs.writeStreamWrite), or -- when WASIConfig.AllowTCP is set
+	// -- a socket-backed stream (sockets.outStreamNode, wasi_sockets.go).
+	// The three rep ranges never collide (see newWasiFS's doc for
+	// stdio/fs, and wasi_sockets.go's package doc's "Rep numbering"
+	// section for why sockets' reps start at a disjoint 1<<20 base), so
+	// trying them in order is unambiguous. A rep none of the three
+	// recognizes is a genuinely unknown output-stream handle;
 	// writerForRep's own "does not name a stdout/stderr stream" error is
 	// returned for that case (matching checkWrite/blockingFlush's identical
-	// fallback below) rather than fs's differently-worded "does not name a
-	// live stream", so all three output-stream methods report an unknown
+	// fallback below) rather than fs's/sockets' differently-worded "not
+	// found" errors, so all three output-stream methods report an unknown
 	// rep the same way.
 	writeSink := func(rep uint32, buf []byte) error {
 		w, werr := writerForRep(rep)
-		if werr != nil {
-			if _, found := fs.writeStreamNode(rep); !found {
-				return werr
-			}
+		if werr == nil {
+			_, err := w.Write(buf)
+			return err
+		}
+		if _, found := fs.writeStreamNode(rep); found {
 			return fs.writeStreamWrite(rep, buf)
 		}
-		_, err := w.Write(buf)
-		return err
+		if s, found := sockets.outStreamNode(rep); found {
+			return s.write(buf)
+		}
+		return werr
 	}
 
 	checkWrite := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
@@ -402,12 +446,14 @@ func WithWASI(cfg WASIConfig) []Option {
 		}
 		if _, err := writerForRep(rep); err != nil {
 			if _, found := fs.writeStreamNode(rep); !found {
-				return nil, err
+				if _, found := sockets.outStreamNode(rep); !found {
+					return nil, err
+				}
 			}
 		}
 		// A large, fixed budget: there is no real backpressure to model
-		// against a Go io.Writer or an in-memory file, so this never has to
-		// make the guest wait.
+		// against a Go io.Writer, an in-memory file, or a net.Conn, so this
+		// never has to make the guest wait.
 		return []abi.Value{abi.ResultValue{IsErr: false, Payload: uint64(1) << 40}}, nil
 	}
 
@@ -438,13 +484,16 @@ func WithWASI(cfg WASIConfig) []Option {
 			return nil, fmt.Errorf("[method]output-stream.blocking-flush: self: expected uint32 rep, got %T", args[0])
 		}
 		if _, err := writerForRep(rep); err != nil {
-			// No internal buffering on either side (stdio writes straight
+			// No internal buffering on any side (stdio writes straight
 			// through to the configured io.Writer; fs writes commit
-			// straight into fs.files -- see writeStreamWrite's doc), so
-			// flushing a file-write stream has nothing to do beyond
-			// confirming rep actually names one.
+			// straight into fs.files -- see writeStreamWrite's doc; socket
+			// writes are unbuffered net.Conn.Write syscalls -- see
+			// sockOutStream.write's doc), so flushing has nothing to do
+			// beyond confirming rep actually names a live stream.
 			if _, found := fs.writeStreamNode(rep); !found {
-				return nil, err
+				if _, found := sockets.outStreamNode(rep); !found {
+					return nil, err
+				}
 			}
 		}
 		return []abi.Value{abi.ResultValue{IsErr: false, Payload: nil}}, nil
@@ -479,7 +528,11 @@ func WithWASI(cfg WASIConfig) []Option {
 		withImportCustom(wasiIfaceStreams, "[method]output-stream.blocking-write-and-flush", write, writeFD, writeResolve),
 		withImportCustom(wasiIfaceStreams, "[method]output-stream.blocking-flush", blockingFlush, blockingFlushFD, blockingFlushResolve),
 	}
-	return append(opts, wasiFilesystemOptions(fs)...)
+	opts = append(opts, wasiFilesystemOptions(fs, sockets)...)
+	if cfg.AllowTCP {
+		opts = append(opts, wasiSocketOptions(sockets)...)
+	}
+	return opts
 }
 
 // wasiBytesFromList converts a lifted list<u8> (see abi.Value's doc: list<T>
