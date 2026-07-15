@@ -55,7 +55,7 @@ func TestImports_NestedInstances(t *testing.T) {
 
 func TestImports_UnsupportedCanonKind(t *testing.T) {
 	comp := decodeLogHello(t)
-	comp.Canons = append(comp.Canons, binary.Canon{Kind: 0x02}) // resource.new
+	comp.Canons = append(comp.Canons, binary.Canon{Kind: 0xff}) // not a real canon kind
 	_, err := runImport(t, comp, stringLogOpt(noopLog))
 	requireErrContains(t, err, "only canon lift")
 }
@@ -122,7 +122,7 @@ func TestImports_ExportLiftsLoweredFunc(t *testing.T) {
 	// Point the lift's core func at the lowered import func (index 0).
 	comp.Canons[1].CoreFuncIdx = 0
 	_, err := runImport(t, comp, stringLogOpt(noopLog))
-	requireErrContains(t, err, "lowered import func")
+	requireErrContains(t, err, "rather than a real core export")
 }
 
 func TestImports_ExportCoreFuncAliasOutOfRange(t *testing.T) {
@@ -265,7 +265,7 @@ func TestBuildHostWrapper_SpilledParams(t *testing.T) {
 	for i := 0; i < 17; i++ {
 		params = append(params, binary.PrimitiveDesc{Prim: "u32"})
 	}
-	_, _, _, err := buildHostWrapper("i", "f", &hostImport{fn: noopLog, params: params})
+	_, _, _, err := buildHostWrapper("i", "f", &hostImport{fn: noopLog, params: params}, newHandleTable())
 	requireErrContains(t, err, "whole-parameter-list spilling")
 }
 
@@ -275,13 +275,13 @@ func TestBuildHostWrapper_SpilledResults(t *testing.T) {
 		{Name: "a", Type: binary.TypeRef{Primitive: "u64"}},
 		{Name: "b", Type: binary.TypeRef{Primitive: "u64"}},
 	}}
-	_, _, _, err := buildHostWrapper("i", "f", &hostImport{fn: noopLog, results: []binary.TypeDesc{rec}})
+	_, _, _, err := buildHostWrapper("i", "f", &hostImport{fn: noopLog, results: []binary.TypeDesc{rec}}, newHandleTable())
 	requireErrContains(t, err, "spilled results")
 }
 
 func TestBuildHostWrapper_Success(t *testing.T) {
 	fn, params, results, err := buildHostWrapper("i", "f",
-		&hostImport{fn: noopLog, params: []binary.TypeDesc{binary.PrimitiveDesc{Prim: "string"}}})
+		&hostImport{fn: noopLog, params: []binary.TypeDesc{binary.PrimitiveDesc{Prim: "string"}}}, newHandleTable())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +319,7 @@ func TestLiftHostArgs_String(t *testing.T) {
 	if !mem.WriteString(0, "hi") {
 		t.Fatal("write failed")
 	}
-	args, err := liftHostArgs(fd, resolve, []uint64{0, 2}, mod)
+	args, err := liftHostArgs(fd, resolve, []uint64{0, 2}, mod, newHandleTable())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +331,7 @@ func TestLiftHostArgs_String(t *testing.T) {
 func TestLiftHostArgs_StackUnderflow(t *testing.T) {
 	_, mod := memModule(t)
 	fd, resolve := synthFuncDesc([]binary.TypeDesc{binary.PrimitiveDesc{Prim: "string"}}, nil)
-	if _, err := liftHostArgs(fd, resolve, []uint64{0}, mod); err == nil {
+	if _, err := liftHostArgs(fd, resolve, []uint64{0}, mod, newHandleTable()); err == nil {
 		t.Fatal("expected stack underflow error")
 	}
 }
@@ -345,7 +345,7 @@ func TestLiftHostArgs_NeedsMemoryNone(t *testing.T) {
 		t.Fatal(err)
 	}
 	fd, resolve := synthFuncDesc([]binary.TypeDesc{binary.PrimitiveDesc{Prim: "string"}}, nil)
-	if _, err := liftHostArgs(fd, resolve, []uint64{0, 0}, mod); err == nil {
+	if _, err := liftHostArgs(fd, resolve, []uint64{0, 0}, mod, newHandleTable()); err == nil {
 		t.Fatal("expected memory-required error")
 	}
 }
@@ -355,7 +355,7 @@ func TestLowerHostResults(t *testing.T) {
 	fd, resolve := synthFuncDesc(nil, []binary.TypeDesc{binary.PrimitiveDesc{Prim: "u32"}})
 
 	stack := make([]uint64, 1)
-	if err := lowerHostResults(ctx, fd, resolve, []abi.Value{uint32(7)}, stack, mod); err != nil {
+	if err := lowerHostResults(ctx, fd, resolve, []abi.Value{uint32(7)}, stack, mod, newHandleTable()); err != nil {
 		t.Fatal(err)
 	}
 	if stack[0] != 7 {
@@ -363,13 +363,13 @@ func TestLowerHostResults(t *testing.T) {
 	}
 
 	// count mismatch
-	if err := lowerHostResults(ctx, fd, resolve, nil, stack, mod); err == nil {
+	if err := lowerHostResults(ctx, fd, resolve, nil, stack, mod, newHandleTable()); err == nil {
 		t.Fatal("expected count-mismatch error")
 	}
 
 	// zero results is a no-op
 	fdEmpty, resEmpty := synthFuncDesc(nil, nil)
-	if err := lowerHostResults(ctx, fdEmpty, resEmpty, nil, nil, mod); err != nil {
+	if err := lowerHostResults(ctx, fdEmpty, resEmpty, nil, nil, mod, newHandleTable()); err != nil {
 		t.Fatalf("zero results: %v", err)
 	}
 
@@ -377,7 +377,7 @@ func TestLowerHostResults(t *testing.T) {
 	fdMulti, resMulti := synthFuncDesc(nil, []binary.TypeDesc{
 		binary.PrimitiveDesc{Prim: "u32"}, binary.PrimitiveDesc{Prim: "u32"},
 	})
-	if err := lowerHostResults(ctx, fdMulti, resMulti, []abi.Value{uint32(1), uint32(2)}, make([]uint64, 2), mod); err == nil {
+	if err := lowerHostResults(ctx, fdMulti, resMulti, []abi.Value{uint32(1), uint32(2)}, make([]uint64, 2), mod, newHandleTable()); err == nil {
 		t.Fatal("expected multiple-results error")
 	}
 }
@@ -391,7 +391,7 @@ func TestLowerHostResults_NeedsMemoryNone(t *testing.T) {
 		t.Fatal(err)
 	}
 	fd, resolve := synthFuncDesc(nil, []binary.TypeDesc{binary.PrimitiveDesc{Prim: "string"}})
-	if err := lowerHostResults(ctx, fd, resolve, []abi.Value{"x"}, make([]uint64, 2), mod); err == nil {
+	if err := lowerHostResults(ctx, fd, resolve, []abi.Value{"x"}, make([]uint64, 2), mod, newHandleTable()); err == nil {
 		t.Fatal("expected memory-required error")
 	}
 }

@@ -59,6 +59,12 @@ type Instance struct {
 	// closers are every module instantiated for this component (core guest
 	// modules and synthetic host modules), closed in reverse order by Close.
 	closers []api.Module
+
+	// resources is this instance's resource handle table (see resource.go),
+	// shared by every resource type the instance declares or imports. It is
+	// always non-nil, even for instances with no resource canons, so callers
+	// never need a nil check.
+	resources *handleTable
 }
 
 // boundExport binds a component export to the core function that implements
@@ -85,10 +91,36 @@ func Instantiate(ctx context.Context, r wazy.Runtime, componentBytes []byte, opt
 
 	cfg := newConfig(opts)
 
-	if len(comp.Imports) > 0 {
+	if needsImportPath(comp) {
 		return instantiateWithImports(ctx, r, comp, componentBytes, cfg)
 	}
 	return instantiateComponent(ctx, r, comp, componentBytes)
+}
+
+// needsImportPath reports whether comp needs the general, host-import-capable
+// instantiation path (instantiateWithImports) rather than instantiateComponent's
+// strict "one core module, one no-argument core instance, only canon lift"
+// shape. Beyond components with real WIT imports, this also covers
+// self-contained components that still need the general core-instance wiring
+// -- most notably a component that declares its own resource type: the
+// resource.new/resource.rep/resource.drop canons for it become core funcs
+// grouped into their own inline-export core instance (exactly like a lowered
+// import func), which the main core module then imports by instantiate-arg,
+// so the component ends up with more than one core instance even though it
+// has zero component-level imports.
+func needsImportPath(comp *binary.Component) bool {
+	if len(comp.Imports) > 0 {
+		return true
+	}
+	for _, cn := range comp.Canons {
+		if cn.Kind != 0x00 { // anything other than canon lift needs the general wiring path
+			return true
+		}
+	}
+	if len(comp.CoreInstances) != 1 || len(comp.CoreInstances[0].Args) > 0 {
+		return true
+	}
+	return false
 }
 
 // instantiateComponent handles the no-import (M3 STEP 2) shape. It is split
@@ -158,7 +190,7 @@ func instantiateComponent(ctx context.Context, r wazy.Runtime, comp *binary.Comp
 		}
 	}
 
-	return &Instance{resolve: resolve, exports: exports, closers: []api.Module{core}}, nil
+	return &Instance{resolve: resolve, exports: exports, closers: []api.Module{core}, resources: newHandleTable()}, nil
 }
 
 // coreModuleBytes returns the slice of componentBytes holding an embedded core

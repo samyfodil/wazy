@@ -92,15 +92,19 @@ func instantiateWithImports(ctx context.Context, r wazy.Runtime, comp *binary.Co
 			compFuncAliases = append(compFuncAliases, aliasTarget{instIdx: al.InstanceIdx, name: al.Name})
 		}
 	}
-	var liftCanonIdxs, lowerCanonIdxs []int
+	// coreFuncCanonIdxs holds every canon that produces a NEW core func
+	// (lower, plus the three resource canons); liftCanonIdxs holds every
+	// canon that instead produces a component-level func for export. Only
+	// these five kinds are supported.
+	var liftCanonIdxs, coreFuncCanonIdxs []int
 	for i, cn := range comp.Canons {
 		switch cn.Kind {
 		case 0x00: // lift
 			liftCanonIdxs = append(liftCanonIdxs, i)
-		case 0x01: // lower
-			lowerCanonIdxs = append(lowerCanonIdxs, i)
+		case 0x01, 0x02, 0x03, 0x04: // lower, resource.new, resource.drop, resource.rep
+			coreFuncCanonIdxs = append(coreFuncCanonIdxs, i)
 		default:
-			return nil, fmt.Errorf("component/instance: canon[%d] has kind %#x; only canon lift (0x00) and lower (0x01) are supported", i, cn.Kind)
+			return nil, fmt.Errorf("component/instance: canon[%d] has kind %#x; only canon lift (0x00), lower (0x01), resource.new (0x02), resource.drop (0x03), and resource.rep (0x04) are supported", i, cn.Kind)
 		}
 	}
 
@@ -140,12 +144,13 @@ func instantiateWithImports(ctx context.Context, r wazy.Runtime, comp *binary.Co
 		return nil, err
 	}
 
-	numLowers := len(lowerCanonIdxs)
+	numProducedCoreFuncs := len(coreFuncCanonIdxs)
+	resources := newHandleTable()
 
 	// Instantiate core instances in order. FromExports instances (which group
-	// lowered import funcs) become synthetic host modules; instantiate
-	// instances become real guest modules whose imports resolve, by name,
-	// against the earlier-registered modules.
+	// lowered import funcs and/or resource canon funcs) become synthetic
+	// host modules; instantiate instances become real guest modules whose
+	// imports resolve, by name, against the earlier-registered modules.
 	for k, ci := range comp.CoreInstances {
 		switch ci.Kind {
 		case 0x00: // instantiate a core module
@@ -167,7 +172,7 @@ func instantiateWithImports(ctx context.Context, r wazy.Runtime, comp *binary.Co
 			instMods[k] = mod
 			closers = append(closers, mod)
 
-		case 0x01: // inline exports: a host module grouping lowered import funcs
+		case 0x01: // inline exports: a host module grouping lowered import / resource canon funcs
 			names := refNames[uint32(k)]
 			if len(names) != 1 {
 				return fail(fmt.Errorf("component/instance: inline-export core instance %d is referenced under %d name(s); exactly 1 is supported by this milestone", k, len(names)))
@@ -175,7 +180,7 @@ func instantiateWithImports(ctx context.Context, r wazy.Runtime, comp *binary.Co
 			hostModName := names[0]
 			b := r.NewHostModuleBuilder(hostModName)
 			for _, e := range ci.Exports {
-				fnDef, err := resolveLoweredImport(comp, cfg, e, lowerCanonIdxs, componentFunc)
+				fnDef, err := resolveCoreFuncCanon(comp, cfg, resources, e, coreFuncCanonIdxs, componentFunc)
 				if err != nil {
 					return fail(err)
 				}
@@ -217,12 +222,12 @@ func instantiateWithImports(ctx context.Context, r wazy.Runtime, comp *binary.Co
 		}
 	}
 
-	exports, err := bindImportExports(comp, componentFunc, coreFuncAliases, instMods, numLowers)
+	exports, err := bindImportExports(comp, componentFunc, coreFuncAliases, instMods, numProducedCoreFuncs)
 	if err != nil {
 		return fail(err)
 	}
 
-	return &Instance{resolve: resolve, exports: exports, closers: closers}, nil
+	return &Instance{resolve: resolve, exports: exports, closers: closers, resources: resources}, nil
 }
 
 // moduleNameFor picks the wazy module name to register a real core instance
@@ -248,39 +253,102 @@ type hostFuncDef struct {
 	results []api.ValueType
 }
 
-// resolveLoweredImport resolves one inline export (grouping a lowered import
-// func) all the way to the caller's HostFunc, and builds the wazy adapter.
-func resolveLoweredImport(comp *binary.Component, cfg *config, e binary.CoreInlineExport, lowerCanonIdxs []int, componentFunc func(uint32) (bool, int, aliasTarget, error)) (hostFuncDef, error) {
+// resolveCoreFuncCanon resolves one inline export -- which groups a canon
+// that produces a core func (lower, or one of the three resource canons) --
+// all the way to its wazy host-module adapter.
+func resolveCoreFuncCanon(comp *binary.Component, cfg *config, resources *handleTable, e binary.CoreInlineExport, coreFuncCanonIdxs []int, componentFunc func(uint32) (bool, int, aliasTarget, error)) (hostFuncDef, error) {
 	if e.Sort != 0x00 { // core func
 		return hostFuncDef{}, fmt.Errorf("component/instance: inline export %q has core sort %#x; only core funcs (0x00) may be grouped this way", e.Name, e.Sort)
 	}
-	if int(e.CoreSortIdx) >= len(lowerCanonIdxs) {
-		return hostFuncDef{}, fmt.Errorf("component/instance: inline export %q references core func %d, which is not one of the %d lowered import funcs; only lowered funcs may be grouped this way", e.Name, e.CoreSortIdx, len(lowerCanonIdxs))
+	if int(e.CoreSortIdx) >= len(coreFuncCanonIdxs) {
+		return hostFuncDef{}, fmt.Errorf("component/instance: inline export %q references core func %d, which is not one of the %d canon-produced core funcs (lower/resource.new/resource.drop/resource.rep); only those may be grouped this way", e.Name, e.CoreSortIdx, len(coreFuncCanonIdxs))
 	}
-	lowerCanon := comp.Canons[lowerCanonIdxs[e.CoreSortIdx]]
+	canon := comp.Canons[coreFuncCanonIdxs[e.CoreSortIdx]]
 
+	switch canon.Kind {
+	case 0x01: // lower
+		return resolveLoweredImport(comp, cfg, resources, e.Name, canon, componentFunc)
+	case 0x02, 0x03, 0x04: // resource.new, resource.drop, resource.rep
+		return resourceCanonHostFunc(comp, resources, e.Name, canon)
+	default:
+		return hostFuncDef{}, fmt.Errorf("component/instance: inline export %q references canon[%d] of kind %#x, which does not produce a core func", e.Name, coreFuncCanonIdxs[e.CoreSortIdx], canon.Kind)
+	}
+}
+
+// resolveLoweredImport resolves a canon lower to the caller's HostFunc, and
+// builds the wazy adapter.
+func resolveLoweredImport(comp *binary.Component, cfg *config, resources *handleTable, name string, lowerCanon binary.Canon, componentFunc func(uint32) (bool, int, aliasTarget, error)) (hostFuncDef, error) {
 	isLift, _, at, err := componentFunc(lowerCanon.FuncIdx)
 	if err != nil {
-		return hostFuncDef{}, fmt.Errorf("component/instance: inline export %q: %w", e.Name, err)
+		return hostFuncDef{}, fmt.Errorf("component/instance: inline export %q: %w", name, err)
 	}
 	if isLift {
-		return hostFuncDef{}, fmt.Errorf("component/instance: inline export %q lowers a lifted (exported) func rather than an import; unsupported by this milestone", e.Name)
+		return hostFuncDef{}, fmt.Errorf("component/instance: inline export %q lowers a lifted (exported) func rather than an import; unsupported by this milestone", name)
 	}
 
 	iface, err := importInterfaceName(comp, at.instIdx)
 	if err != nil {
-		return hostFuncDef{}, fmt.Errorf("component/instance: inline export %q: %w", e.Name, err)
+		return hostFuncDef{}, fmt.Errorf("component/instance: inline export %q: %w", name, err)
 	}
 	hi, ok := cfg.imports[importKey{iface: iface, name: at.name}]
 	if !ok {
 		return hostFuncDef{}, fmt.Errorf("component/instance: no host implementation provided for import %q func %q (use WithImport)", iface, at.name)
 	}
 
-	fn, params, results, err := buildHostWrapper(iface, at.name, hi)
+	fn, params, results, err := buildHostWrapper(iface, at.name, hi, resources)
 	if err != nil {
 		return hostFuncDef{}, err
 	}
 	return hostFuncDef{fn: fn, params: params, results: results}, nil
+}
+
+// resourceCanonHostFunc builds the fixed-signature host func for a
+// resource.new / resource.drop / resource.rep canon, operating on resources.
+// Per the Canonical ABI these three core funcs always take/return plain i32
+// handles/reps -- there is no FuncDesc/WIT type involved at this layer (own
+// and borrow only appear at the *component* level, in the func types of
+// exports/imports that use these canon-produced core funcs) -- so this
+// bypasses the abi package entirely and talks to the handle table directly.
+func resourceCanonHostFunc(comp *binary.Component, resources *handleTable, name string, canon binary.Canon) (hostFuncDef, error) {
+	if int(canon.TypeIdx) >= len(comp.Types) {
+		return hostFuncDef{}, fmt.Errorf("component/instance: inline export %q: canon references type %d, out of range of %d types", name, canon.TypeIdx, len(comp.Types))
+	}
+	if _, ok := comp.Types[canon.TypeIdx].Descriptor.(binary.ResourceDesc); !ok {
+		return hostFuncDef{}, fmt.Errorf("component/instance: inline export %q: canon type %d is not a resource type (got %T)", name, canon.TypeIdx, comp.Types[canon.TypeIdx].Descriptor)
+	}
+	typeIdx := canon.TypeIdx
+
+	switch canon.Kind {
+	case 0x02: // resource.new: rep:i32 -> handle:i32
+		fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
+			rep := api.DecodeU32(stack[0])
+			stack[0] = api.EncodeU32(resources.NewOwn(typeIdx, rep))
+		})
+		return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32}, results: []api.ValueType{api.ValueTypeI32}}, nil
+
+	case 0x03: // resource.drop: handle:i32 -> ()
+		fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
+			h := api.DecodeU32(stack[0])
+			if err := resources.Drop(typeIdx, h); err != nil {
+				panic(fmt.Errorf("component/instance: resource.drop (type %d): %w", typeIdx, err))
+			}
+		})
+		return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32}, results: nil}, nil
+
+	case 0x04: // resource.rep: handle:i32 -> rep:i32
+		fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
+			h := api.DecodeU32(stack[0])
+			rep, err := resources.Rep(typeIdx, h)
+			if err != nil {
+				panic(fmt.Errorf("component/instance: resource.rep (type %d): %w", typeIdx, err))
+			}
+			stack[0] = api.EncodeU32(rep)
+		})
+		return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32}, results: []api.ValueType{api.ValueTypeI32}}, nil
+
+	default:
+		return hostFuncDef{}, fmt.Errorf("component/instance: inline export %q: unsupported resource canon kind %#x", name, canon.Kind)
+	}
 }
 
 // importInterfaceName maps a component instance index to the imported
@@ -302,7 +370,7 @@ func importInterfaceName(comp *binary.Component, instIdx uint32) (string, error)
 
 // bindImportExports binds each component export to the core function that
 // implements it (via its lift and the core func index space).
-func bindImportExports(comp *binary.Component, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncAliases []aliasTarget, instMods map[int]api.Module, numLowers int) (map[string]*boundExport, error) {
+func bindImportExports(comp *binary.Component, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncAliases []aliasTarget, instMods map[int]api.Module, numProducedCoreFuncs int) (map[string]*boundExport, error) {
 	exports := make(map[string]*boundExport, len(comp.Exports))
 	for _, exp := range comp.Exports {
 		if exp.ExternType != 0x01 { // func
@@ -325,12 +393,12 @@ func bindImportExports(comp *binary.Component, componentFunc func(uint32) (bool,
 		}
 
 		cfi := int(canon.CoreFuncIdx)
-		if cfi < numLowers {
-			return nil, fmt.Errorf("component/instance: export %q lifts core func %d, which is a lowered import func rather than a real core export; unsupported", exp.Name, cfi)
+		if cfi < numProducedCoreFuncs {
+			return nil, fmt.Errorf("component/instance: export %q lifts core func %d, which is a canon-produced func (lower/resource.*) rather than a real core export; unsupported", exp.Name, cfi)
 		}
-		ai := cfi - numLowers
+		ai := cfi - numProducedCoreFuncs
 		if ai >= len(coreFuncAliases) {
-			return nil, fmt.Errorf("component/instance: export %q lifts core func %d, out of range of the core func index space (%d lowers + %d aliases)", exp.Name, cfi, numLowers, len(coreFuncAliases))
+			return nil, fmt.Errorf("component/instance: export %q lifts core func %d, out of range of the core func index space (%d canon-produced funcs + %d aliases)", exp.Name, cfi, numProducedCoreFuncs, len(coreFuncAliases))
 		}
 		tgt := coreFuncAliases[ai]
 		mod, ok := instMods[int(tgt.instIdx)]
@@ -344,9 +412,11 @@ func bindImportExports(comp *binary.Component, componentFunc func(uint32) (bool,
 
 // buildHostWrapper builds the wazy GoModuleFunction that adapts a HostFunc to
 // the guest's lowered core calling convention: it lifts the flat core args
-// (reading strings/lists from the calling module's memory), calls the
-// HostFunc, and lowers the results back into the core return slots.
-func buildHostWrapper(iface, funcName string, hi *hostImport) (api.GoModuleFunction, []api.ValueType, []api.ValueType, error) {
+// (reading strings/lists from the calling module's memory, and resolving
+// own<T>/borrow<T> handles to their host rep via resources), calls the
+// HostFunc, and lowers the results back into the core return slots (again
+// allocating a fresh handle for any own<T>/borrow<T> result).
+func buildHostWrapper(iface, funcName string, hi *hostImport, resources *handleTable) (api.GoModuleFunction, []api.ValueType, []api.ValueType, error) {
 	fd, resolve := synthFuncDesc(hi.params, hi.results)
 
 	rawParams, err := flattenRefs(fd.Params, resolve)
@@ -378,7 +448,7 @@ func buildHostWrapper(iface, funcName string, hi *hostImport) (api.GoModuleFunct
 	}
 
 	fn := api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
-		args, err := liftHostArgs(fd, resolve, stack, mod)
+		args, err := liftHostArgs(fd, resolve, stack, mod, resources)
 		if err != nil {
 			panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
 		}
@@ -386,7 +456,7 @@ func buildHostWrapper(iface, funcName string, hi *hostImport) (api.GoModuleFunct
 		if err != nil {
 			panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
 		}
-		if err := lowerHostResults(ctx, fd, resolve, results, stack, mod); err != nil {
+		if err := lowerHostResults(ctx, fd, resolve, results, stack, mod, resources); err != nil {
 			panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
 		}
 	})
@@ -461,8 +531,12 @@ func flattenResultRefs(fd binary.FuncDesc, resolve abi.Resolver) ([]string, erro
 
 // liftHostArgs lifts the flat core arguments on the stack into component-level
 // argument values, per fd's parameter types, reading string/list backing data
-// from the calling module's memory.
-func liftHostArgs(fd binary.FuncDesc, resolve abi.Resolver, stack []uint64, mod api.Module) ([]abi.Value, error) {
+// from the calling module's memory. own<T>/borrow<T> params are lifted by abi
+// as a bare handle (uint32, per abi.Value's documented mapping); this
+// function then resolves that handle to the host rep it names via resources,
+// so the HostFunc receives the rep, not the raw handle -- see
+// resolveHandleArg.
+func liftHostArgs(fd binary.FuncDesc, resolve abi.Resolver, stack []uint64, mod api.Module, resources *handleTable) ([]abi.Value, error) {
 	mem, memAvailable := memoryBytesOf(mod)
 	args := make([]abi.Value, len(fd.Params))
 	pos := 0
@@ -489,15 +563,78 @@ func liftHostArgs(fd binary.FuncDesc, resolve abi.Resolver, stack []uint64, mod 
 		if err != nil {
 			return nil, fmt.Errorf("param %d: lift: %w", i, err)
 		}
+		v, err = resolveHandleArg(resources, pt, v)
+		if err != nil {
+			return nil, fmt.Errorf("param %d: %w", i, err)
+		}
 		args[i] = v
 		pos += len(flat)
 	}
 	return args, nil
 }
 
+// resolveHandleArg translates a lifted own<T>/borrow<T> argument -- a bare
+// guest handle (uint32), per abi's own/borrow-as-i32 mapping -- into the host
+// rep it names, via resources. own consumes the handle (ownership transfers
+// to the host, mirroring lift_own); borrow only reads it (lift_borrow),
+// leaving the handle valid in the guest's table. Any other type passes v
+// through unchanged.
+func resolveHandleArg(resources *handleTable, pt binary.TypeDesc, v abi.Value) (abi.Value, error) {
+	switch d := pt.(type) {
+	case binary.OwnDesc:
+		h, ok := v.(uint32)
+		if !ok {
+			return nil, fmt.Errorf("own<%d> arg: expected a uint32 handle, got %T", d.ResourceType, v)
+		}
+		rep, err := resources.TakeOwn(d.ResourceType, h)
+		if err != nil {
+			return nil, fmt.Errorf("own<%d> arg: %w", d.ResourceType, err)
+		}
+		return rep, nil
+	case binary.BorrowDesc:
+		h, ok := v.(uint32)
+		if !ok {
+			return nil, fmt.Errorf("borrow<%d> arg: expected a uint32 handle, got %T", d.ResourceType, v)
+		}
+		rep, err := resources.Rep(d.ResourceType, h)
+		if err != nil {
+			return nil, fmt.Errorf("borrow<%d> arg: %w", d.ResourceType, err)
+		}
+		return rep, nil
+	default:
+		return v, nil
+	}
+}
+
+// allocHandleResult translates a HostFunc's own<T>/borrow<T> result -- a
+// host rep (uint32) -- into a freshly minted guest handle for it, via
+// resources (mirrors lower_own / lower_borrow). Any other type passes v
+// through unchanged.
+func allocHandleResult(resources *handleTable, rt binary.TypeDesc, v abi.Value) (abi.Value, error) {
+	switch d := rt.(type) {
+	case binary.OwnDesc:
+		rep, ok := v.(uint32)
+		if !ok {
+			return nil, fmt.Errorf("own<%d> result: expected a uint32 rep, got %T", d.ResourceType, v)
+		}
+		return resources.NewOwn(d.ResourceType, rep), nil
+	case binary.BorrowDesc:
+		rep, ok := v.(uint32)
+		if !ok {
+			return nil, fmt.Errorf("borrow<%d> result: expected a uint32 rep, got %T", d.ResourceType, v)
+		}
+		return resources.NewBorrow(d.ResourceType, rep), nil
+	default:
+		return v, nil
+	}
+}
+
 // lowerHostResults lowers the HostFunc's result values back into the core
-// return slots at the front of the stack, per fd's result types.
-func lowerHostResults(ctx context.Context, fd binary.FuncDesc, resolve abi.Resolver, results []abi.Value, stack []uint64, mod api.Module) error {
+// return slots at the front of the stack, per fd's result types. An
+// own<T>/borrow<T> result is expected as a host rep (uint32) and is
+// allocated a fresh guest handle via resources before being lowered -- see
+// allocHandleResult.
+func lowerHostResults(ctx context.Context, fd binary.FuncDesc, resolve abi.Resolver, results []abi.Value, stack []uint64, mod api.Module, resources *handleTable) error {
 	refs := funcResultTypeRefs(fd)
 	if len(results) != len(refs) {
 		return fmt.Errorf("returned %d result(s), but the import declares %d", len(results), len(refs))
@@ -517,8 +654,12 @@ func lowerHostResults(ctx context.Context, fd binary.FuncDesc, resolve abi.Resol
 	if usesMemory(rt, resolve) && !memAvailable {
 		return fmt.Errorf("result requires linear memory (string/list), but the calling module has none")
 	}
+	resultVal, err := allocHandleResult(resources, rt, results[0])
+	if err != nil {
+		return fmt.Errorf("result: %w", err)
+	}
 	realloc := reallocOf(ctx, mod)
-	flat, err := abi.LowerFlat(results[0], rt, resolve, realloc, mem)
+	flat, err := abi.LowerFlat(resultVal, rt, resolve, realloc, mem)
 	if err != nil {
 		return fmt.Errorf("result: lower: %w", err)
 	}
