@@ -17,7 +17,7 @@ Scope decision: **Real p2 CM runtime** — load arbitrary off-the-shelf `.compon
   - `real_readfile` — reads a file from a host FS
   - `real_transform` — reads `/input.txt`, uppercases, writes `/output.txt`
 - 4 packages, all >=90% coverage; ~18 real bugs caught by the oracle + independent verification (incl. enum >32 cases, nested own/borrow resolution, missing get-random-bytes / stat-at).
-- **Differential conformance vs wasmtime: 19/19 byte-identical** — a suite of real rustc `wasi:cli/command` programs (arithmetic/float/int edge cases, serde_json roundtrip, 10k collections, deep recursion, unicode casing, args/env, file read/write/multi-file, panic, exit, iterators) each run under wasmtime for golden stdout, then asserted identical on wazy (verified non-circular). `internal/component/instance/conformance_test.go`.
+- **Differential conformance vs wasmtime: 28/28 byte-identical** — a suite of real rustc `wasi:cli/command` programs (arithmetic/float/int edge cases, serde_json roundtrip, 10k collections, deep recursion, unicode casing, args/env, file read/write/multi-file, panic, exit, iterators) each run under wasmtime for golden stdout, then asserted identical on wazy (verified non-circular). `internal/component/instance/conformance_test.go`.
 
 ## Remaining for a production WASI runtime (not started; deliberate)
 - WASI interface **breadth left**: sockets, real clocks, actual stdin input — the common file/cli/env surface is done and conformance-verified.
