@@ -16,10 +16,13 @@ Scope decision: **Real p2 CM runtime** — load arbitrary off-the-shelf `.compon
   - `real_args` — echoes args + env (host->guest `list<string>`/`list<tuple>`)
   - `real_readfile` — reads a file from a host FS
   - `real_transform` — reads `/input.txt`, uppercases, writes `/output.txt`
-- 4 packages, all >=90% coverage; ~16 real bugs caught by the oracle + independent verification (incl. enum >32 cases, nested own/borrow resolution).
+- 4 packages, all >=90% coverage; ~18 real bugs caught by the oracle + independent verification (incl. enum >32 cases, nested own/borrow resolution, missing get-random-bytes / stat-at).
+- **Differential conformance vs wasmtime: 19/19 byte-identical** — a suite of real rustc `wasi:cli/command` programs (arithmetic/float/int edge cases, serde_json roundtrip, 10k collections, deep recursion, unicode casing, args/env, file read/write/multi-file, panic, exit, iterators) each run under wasmtime for golden stdout, then asserted identical on wazy (verified non-circular). `internal/component/instance/conformance_test.go`.
 
 ## Remaining for a production WASI runtime (not started; deliberate)
-- WASI interface **breadth left**: sockets, clocks (real now), actual stdin input — the common file/cli/env surface is done.
+- WASI interface **breadth left**: sockets, real clocks, actual stdin input — the common file/cli/env surface is done and conformance-verified.
+- Grow the conformance suite further; run the upstream wasi-testsuite.
+- The **performance** pass (compliance-first was the plan; optimization deferred).
 - **Conformance**: run the official component-model + WASI 0.2 suites; burn down.
 - Decoder gaps in TODOS.md (resourcetype rep mislabel, type-sort *export* index tracking).
 - The **performance** pass (plan was compliance-first; optimization deferred).
