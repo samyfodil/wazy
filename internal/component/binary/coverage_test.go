@@ -1530,6 +1530,935 @@ type errReader struct{}
 
 func (errReader) Read([]byte) (int, error) { return 0, errors.New("read failure") }
 
+// Tests for core module, core instance, instance, alias, canon, and start sections
+
+func TestDecodeCoreInstance_Instantiate(t *testing.T) {
+	// Construct a component with a core module and core instance.
+	buf := preamble()
+	// Section 1: core module (just a minimal core wasm module)
+	coreModuleBody := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00} // minimal core module
+	buf = append(buf, 0x01, byte(len(coreModuleBody)))
+	buf = append(buf, coreModuleBody...)
+
+	// Section 2: core instance with instantiate form
+	// 0x00 moduleIdx vec(args)
+	// instantiatearg: 0x00 len(name) name 0x12 instanceidx
+	coreInstBody := []byte{
+		0x01,       // count = 1
+		0x00,       // kind = instantiate
+		0x00,       // moduleIdx = 0
+		0x00,       // argCount = 0
+	}
+	buf = append(buf, 0x02, byte(len(coreInstBody)))
+	buf = append(buf, coreInstBody...)
+
+	c, err := Decode(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+
+	if len(c.CoreModules) != 1 {
+		t.Errorf("CoreModules: got %d, want 1", len(c.CoreModules))
+	}
+	if len(c.CoreInstances) != 1 {
+		t.Errorf("CoreInstances: got %d, want 1", len(c.CoreInstances))
+	}
+	ci := c.CoreInstances[0]
+	if ci.Kind != 0x00 {
+		t.Errorf("kind: got %#x, want 0x00", ci.Kind)
+	}
+	if ci.ModuleIdx != 0 {
+		t.Errorf("moduleIdx: got %d, want 0", ci.ModuleIdx)
+	}
+	if len(ci.Args) != 0 {
+		t.Errorf("args: got %d, want 0", len(ci.Args))
+	}
+}
+
+func TestDecodeCoreInstance_InlineExports(t *testing.T) {
+	buf := preamble()
+	// Minimal core module
+	coreModuleBody := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
+	buf = append(buf, 0x01, byte(len(coreModuleBody)))
+	buf = append(buf, coreModuleBody...)
+
+	// Section 2: core instance with inline exports
+	coreInstBody := []byte{
+		0x01,                   // count = 1
+		0x01,                   // kind = inline exports
+		0x00,                   // exportCount = 0
+	}
+	buf = append(buf, 0x02, byte(len(coreInstBody)))
+	buf = append(buf, coreInstBody...)
+
+	c, err := Decode(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if len(c.CoreInstances) != 1 || c.CoreInstances[0].Kind != 0x01 {
+		t.Errorf("inline exports not decoded correctly")
+	}
+}
+
+func TestDecodeCoreInstance_InvalidKind(t *testing.T) {
+	buf := preamble()
+	coreModuleBody := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
+	buf = append(buf, 0x01, byte(len(coreModuleBody)))
+	buf = append(buf, coreModuleBody...)
+
+	coreInstBody := []byte{
+		0x01,       // count = 1
+		0xff,       // kind = invalid
+	}
+	buf = append(buf, 0x02, byte(len(coreInstBody)))
+	buf = append(buf, coreInstBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected error for invalid core instance kind")
+	}
+}
+
+func TestDecodeInstance(t *testing.T) {
+	buf := preamble()
+	// Section 5: instance
+	instBody := []byte{
+		0x01,       // count = 1
+		0x00,       // kind = instantiate
+		0x00,       // componentIdx = 0
+		0x00,       // argCount = 0
+	}
+	buf = append(buf, 0x05, byte(len(instBody)))
+	buf = append(buf, instBody...)
+
+	c, err := Decode(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if len(c.Instances) != 1 || c.Instances[0].Kind != 0x00 {
+		t.Errorf("instance not decoded")
+	}
+}
+
+func TestDecodeAlias(t *testing.T) {
+	buf := preamble()
+	// Section 6: alias (export target)
+	// sort=0x01 (func), target=0x00 (export), instanceidx=0, name="f"
+	aliasBody := []byte{
+		0x01,               // count = 1
+		0x01,               // sort = func
+		0x00,               // target kind = export
+		0x00,               // instance index = 0
+		0x01, 'f',          // label: len=1, "f"
+	}
+	buf = append(buf, 0x06, byte(len(aliasBody)))
+	buf = append(buf, aliasBody...)
+
+	c, err := Decode(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if len(c.Aliases) != 1 {
+		t.Errorf("alias not decoded")
+	}
+	alias := c.Aliases[0]
+	if alias.Sort != 0x01 || alias.TargetKind != 0x00 || alias.Name != "f" {
+		t.Errorf("alias decoded incorrectly: %+v", alias)
+	}
+}
+
+func TestDecodeAlias_CoreExport(t *testing.T) {
+	buf := preamble()
+	// Section 6: alias with core export
+	// sort=0x00 (core) + discriminator, target=0x01 (core export)
+	aliasBody := []byte{
+		0x01,               // count = 1
+		0x00,               // sort = core
+		0x01,               // discriminator = func
+		0x01,               // target kind = core export
+		0x00,               // instance index = 0
+		0x01, 'f',          // label
+	}
+	buf = append(buf, 0x06, byte(len(aliasBody)))
+	buf = append(buf, aliasBody...)
+
+	c, err := Decode(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if len(c.Aliases) != 1 {
+		t.Fatalf("alias not decoded")
+	}
+	alias := c.Aliases[0]
+	if alias.TargetKind != 0x01 {
+		t.Errorf("core export target not decoded")
+	}
+}
+
+func TestDecodeAlias_Outer(t *testing.T) {
+	buf := preamble()
+	// Section 6: alias with outer target
+	// sort=0x01 (func), target=0x02 (outer)
+	aliasBody := []byte{
+		0x01,               // count = 1
+		0x01,               // sort = func
+		0x02,               // target kind = outer
+		0x01,               // outer count = 1
+		0x00,               // outer index = 0
+	}
+	buf = append(buf, 0x06, byte(len(aliasBody)))
+	buf = append(buf, aliasBody...)
+
+	c, err := Decode(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if len(c.Aliases) != 1 || c.Aliases[0].TargetKind != 0x02 {
+		t.Errorf("outer alias not decoded")
+	}
+}
+
+func TestDecodeCanon_Lift(t *testing.T) {
+	buf := preamble()
+	// Add a type first (for the canon to reference)
+	buf = append(buf, 0x07, 0x01, 0x00) // section 7, size 1, count=0
+
+	// Section 8: canon with lift
+	// 0x00 0x00 coreidx opts typeidx
+	canonBody := []byte{
+		0x01,           // count = 1
+		0x00,           // kind = lift
+		0x00,           // prefix
+		0x00,           // core func idx = 0
+		0x00,           // opt count = 0
+		0x00,           // type idx = 0
+	}
+	buf = append(buf, 0x08, byte(len(canonBody)))
+	buf = append(buf, canonBody...)
+
+	c, err := Decode(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if len(c.Canons) != 1 {
+		t.Errorf("canon not decoded")
+	}
+	canon := c.Canons[0]
+	if canon.Kind != 0x00 || canon.CoreFuncIdx != 0 || canon.TypeIdx != 0 {
+		t.Errorf("lift canon decoded incorrectly: %+v", canon)
+	}
+}
+
+func TestDecodeCanon_Lower(t *testing.T) {
+	buf := preamble()
+	// Section 8: canon with lower
+	canonBody := []byte{
+		0x01,           // count = 1
+		0x01,           // kind = lower
+		0x00,           // prefix
+		0x00,           // func idx = 0
+		0x00,           // opt count = 0
+	}
+	buf = append(buf, 0x08, byte(len(canonBody)))
+	buf = append(buf, canonBody...)
+
+	c, err := Decode(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if len(c.Canons) != 1 || c.Canons[0].Kind != 0x01 {
+		t.Errorf("lower canon not decoded")
+	}
+}
+
+func TestDecodeCanon_Resource(t *testing.T) {
+	buf := preamble()
+	// Section 8: canon with resource.new
+	canonBody := []byte{
+		0x01,           // count = 1
+		0x02,           // kind = resource.new
+		0x00,           // type idx = 0
+	}
+	buf = append(buf, 0x08, byte(len(canonBody)))
+	buf = append(buf, canonBody...)
+
+	c, err := Decode(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if len(c.Canons) != 1 || c.Canons[0].Kind != 0x02 {
+		t.Errorf("resource canon not decoded")
+	}
+}
+
+func TestDecodeCanon_UnsupportedKind(t *testing.T) {
+	buf := preamble()
+	canonBody := []byte{
+		0x01,           // count = 1
+		0xff,           // kind = unsupported
+	}
+	buf = append(buf, 0x08, byte(len(canonBody)))
+	buf = append(buf, canonBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil || !strings.Contains(err.Error(), "unsupported (M1)") {
+		t.Fatalf("expected unsupported kind error, got: %v", err)
+	}
+}
+
+func TestDecodeStart(t *testing.T) {
+	buf := preamble()
+	// Section 9: start
+	// funcidx vec(valueidx) resultcount
+	startBody := []byte{
+		0x00,           // func idx = 0
+		0x00,           // arg count = 0
+		0x00,           // result count = 0
+	}
+	buf = append(buf, 0x09, byte(len(startBody)))
+	buf = append(buf, startBody...)
+
+	c, err := Decode(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if c.Start == nil || c.Start.FuncIdx != 0 {
+		t.Errorf("start section not decoded")
+	}
+}
+
+func TestDecodeStart_WithArgsAndResults(t *testing.T) {
+	buf := preamble()
+	// Section 9: start with args and results
+	startBody := []byte{
+		0x00,           // func idx = 0
+		0x02,           // arg count = 2
+		0x00, 0x01,     // args: 0, 1
+		0x02,           // result count = 2
+	}
+	buf = append(buf, 0x09, byte(len(startBody)))
+	buf = append(buf, startBody...)
+
+	c, err := Decode(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if c.Start == nil || len(c.Start.Args) != 2 || c.Start.ResultCount != 2 {
+		t.Errorf("start with args/results not decoded correctly: %+v", c.Start)
+	}
+}
+
+func TestDecodeTruncated_CoreInstance(t *testing.T) {
+	buf := preamble()
+	coreModuleBody := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
+	buf = append(buf, 0x01, byte(len(coreModuleBody)))
+	buf = append(buf, coreModuleBody...)
+
+	coreInstBody := []byte{0x01, 0x00} // missing moduleIdx
+	buf = append(buf, 0x02, byte(len(coreInstBody)))
+	buf = append(buf, coreInstBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected truncation error")
+	}
+}
+
+func TestDecodeTruncated_Alias(t *testing.T) {
+	buf := preamble()
+	aliasBody := []byte{0x01, 0x01} // count=1, sort=1, but missing target kind
+	buf = append(buf, 0x06, byte(len(aliasBody)))
+	buf = append(buf, aliasBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected truncation error in alias")
+	}
+}
+
+func TestDecodeTruncated_Canon(t *testing.T) {
+	buf := preamble()
+	canonBody := []byte{0x01, 0x00} // count=1, kind=lift, but missing prefix
+	buf = append(buf, 0x08, byte(len(canonBody)))
+	buf = append(buf, canonBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected truncation error in canon")
+	}
+}
+
+func TestDecodeTruncated_Start(t *testing.T) {
+	buf := preamble()
+	buf = append(buf, 0x09, 0x00) // section 9, empty size
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected truncation error in start")
+	}
+}
+
+func TestDecodeCanonWithOptions(t *testing.T) {
+	buf := preamble()
+	// Section 8: canon with options
+	canonBody := []byte{
+		0x01,           // count = 1
+		0x00,           // kind = lift
+		0x00,           // prefix
+		0x00,           // core func idx = 0
+		0x02,           // opt count = 2
+		0x00,           // opt[0] kind = utf8 (no data)
+		0x03, 0x00,     // opt[1] kind = memory, idx = 0
+		0x00,           // type idx = 0
+	}
+	buf = append(buf, 0x08, byte(len(canonBody)))
+	buf = append(buf, canonBody...)
+
+	c, err := Decode(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if len(c.Canons) != 1 || len(c.Canons[0].Opts) != 2 {
+		t.Errorf("canon options not decoded")
+	}
+}
+
+func TestHOSTComponentWithCanonAndAlias(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "host_component.wasm"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	c, err := Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+
+	// host_component has 1 core module, 1 core instance, 1 alias, 1 canon, 1 export
+	if len(c.CoreModules) != 1 {
+		t.Errorf("CoreModules: got %d, want 1", len(c.CoreModules))
+	}
+	if len(c.CoreInstances) != 1 {
+		t.Errorf("CoreInstances: got %d, want 1", len(c.CoreInstances))
+	}
+	if len(c.Aliases) != 1 {
+		t.Errorf("Aliases: got %d, want 1", len(c.Aliases))
+	}
+	if len(c.Canons) != 1 {
+		t.Errorf("Canons: got %d, want 1", len(c.Canons))
+	}
+	if len(c.Exports) != 1 {
+		t.Errorf("Exports: got %d, want 1", len(c.Exports))
+	}
+
+	// Verify canon details
+	canon := c.Canons[0]
+	if canon.Kind != 0x00 {
+		t.Errorf("canon kind: got %#x, want 0x00 (lift)", canon.Kind)
+	}
+
+	// Verify alias details
+	alias := c.Aliases[0]
+	if alias.TargetKind != 0x01 {
+		t.Errorf("alias target: got %#x, want 0x01 (core export)", alias.TargetKind)
+	}
+}
+
+func TestExtendedComponentWithCanonAndAliases(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "extended_component.wasm"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	c, err := Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+
+	// extended_component has core module, core instance, aliases, canon
+	if len(c.CoreModules) < 1 {
+		t.Errorf("CoreModules: got %d, want >=1", len(c.CoreModules))
+	}
+	if len(c.CoreInstances) < 1 {
+		t.Errorf("CoreInstances: got %d, want >=1", len(c.CoreInstances))
+	}
+	if len(c.Aliases) < 1 {
+		t.Errorf("Aliases: got %d, want >=1", len(c.Aliases))
+	}
+	if len(c.Canons) < 1 {
+		t.Errorf("Canons: got %d, want >=1", len(c.Canons))
+	}
+}
+
+// More thorough error path coverage
+
+func TestDecodeCoreInstance_TruncatedArgName(t *testing.T) {
+	buf := preamble()
+	coreModuleBody := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
+	buf = append(buf, 0x01, byte(len(coreModuleBody)))
+	buf = append(buf, coreModuleBody...)
+
+	// Core instance with arg that has truncated name
+	coreInstBody := []byte{
+		0x01,       // count = 1
+		0x00,       // kind = instantiate
+		0x00,       // moduleIdx = 0
+		0x01,       // argCount = 1
+		0x00, 0x05, // name: kind=0x00, len=5 (but only provide 0 bytes)
+	}
+	buf = append(buf, 0x02, byte(len(coreInstBody)))
+	buf = append(buf, coreInstBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected truncation error for core instance arg name")
+	}
+}
+
+func TestDecodeCoreInstance_MissingPrefix(t *testing.T) {
+	buf := preamble()
+	coreModuleBody := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
+	buf = append(buf, 0x01, byte(len(coreModuleBody)))
+	buf = append(buf, coreModuleBody...)
+
+	// Core instance instantiate arg missing the 0x12 prefix
+	coreInstBody := []byte{
+		0x01,       // count = 1
+		0x00,       // kind = instantiate
+		0x00,       // moduleIdx = 0
+		0x01,       // argCount = 1
+		0x00, 0x01, 'x',   // name: kind=0x00, len=1, "x"
+		0x13,       // WRONG: should be 0x12
+	}
+	buf = append(buf, 0x02, byte(len(coreInstBody)))
+	buf = append(buf, coreInstBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil || !strings.Contains(err.Error(), "0x12 prefix") {
+		t.Fatalf("expected 0x12 prefix error, got: %v", err)
+	}
+}
+
+func TestDecodeCoreInstance_TruncatedInlineExportName(t *testing.T) {
+	buf := preamble()
+	coreModuleBody := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
+	buf = append(buf, 0x01, byte(len(coreModuleBody)))
+	buf = append(buf, coreModuleBody...)
+
+	coreInstBody := []byte{
+		0x01,       // count = 1
+		0x01,       // kind = inline exports
+		0x01,       // exportCount = 1
+		0x00, 0x05, // name: kind=0x00, len=5 (but only provide 0 bytes)
+	}
+	buf = append(buf, 0x02, byte(len(coreInstBody)))
+	buf = append(buf, coreInstBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected truncation error for core instance export name")
+	}
+}
+
+func TestDecodeInstance_Truncated(t *testing.T) {
+	buf := preamble()
+	instBody := []byte{
+		0x01,       // count = 1
+		0x00,       // kind = instantiate
+		0x00,       // componentIdx = 0
+		// missing argCount
+	}
+	buf = append(buf, 0x05, byte(len(instBody)))
+	buf = append(buf, instBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected truncation error for instance argCount")
+	}
+}
+
+func TestDecodeAlias_InvalidTargetKind(t *testing.T) {
+	buf := preamble()
+	aliasBody := []byte{
+		0x01,       // count = 1
+		0x01,       // sort = func
+		0x03,       // target kind = invalid
+	}
+	buf = append(buf, 0x06, byte(len(aliasBody)))
+	buf = append(buf, aliasBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected error for invalid alias target kind")
+	}
+}
+
+func TestDecodeAlias_TruncatedInstanceIndex(t *testing.T) {
+	buf := preamble()
+	aliasBody := []byte{
+		0x01,       // count = 1
+		0x01,       // sort = func
+		0x00,       // target kind = export
+		// missing instance index
+	}
+	buf = append(buf, 0x06, byte(len(aliasBody)))
+	buf = append(buf, aliasBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected truncation error for alias instance index")
+	}
+}
+
+func TestDecodeAlias_TruncatedName(t *testing.T) {
+	buf := preamble()
+	aliasBody := []byte{
+		0x01,       // count = 1
+		0x01,       // sort = func
+		0x00,       // target kind = export
+		0x00,       // instance index = 0
+		0x05, 'a',  // label: len=5, but only provide 1 byte
+	}
+	buf = append(buf, 0x06, byte(len(aliasBody)))
+	buf = append(buf, aliasBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected truncation error for alias name")
+	}
+}
+
+func TestDecodeAlias_TruncatedOuterCount(t *testing.T) {
+	buf := preamble()
+	aliasBody := []byte{
+		0x01,       // count = 1
+		0x01,       // sort = func
+		0x02,       // target kind = outer
+		// missing outer count
+	}
+	buf = append(buf, 0x06, byte(len(aliasBody)))
+	buf = append(buf, aliasBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected truncation error for alias outer count")
+	}
+}
+
+func TestDecodeCanon_LiftInvalidPrefix(t *testing.T) {
+	buf := preamble()
+	canonBody := []byte{
+		0x01,       // count = 1
+		0x00,       // kind = lift
+		0x01,       // WRONG: should be 0x00
+	}
+	buf = append(buf, 0x08, byte(len(canonBody)))
+	buf = append(buf, canonBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil || !strings.Contains(err.Error(), "0x00 prefix") {
+		t.Fatalf("expected 0x00 prefix error for lift, got: %v", err)
+	}
+}
+
+func TestDecodeCanon_LowerInvalidPrefix(t *testing.T) {
+	buf := preamble()
+	canonBody := []byte{
+		0x01,       // count = 1
+		0x01,       // kind = lower
+		0x01,       // WRONG: should be 0x00
+	}
+	buf = append(buf, 0x08, byte(len(canonBody)))
+	buf = append(buf, canonBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil || !strings.Contains(err.Error(), "0x00 prefix") {
+		t.Fatalf("expected 0x00 prefix error for lower, got: %v", err)
+	}
+}
+
+func TestDecodeCanonOpts_UnsupportedKind(t *testing.T) {
+	buf := preamble()
+	canonBody := []byte{
+		0x01,       // count = 1
+		0x00,       // kind = lift
+		0x00,       // prefix
+		0x00,       // core func idx = 0
+		0x01,       // opt count = 1
+		0xff,       // opt kind = unsupported
+	}
+	buf = append(buf, 0x08, byte(len(canonBody)))
+	buf = append(buf, canonBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil || !strings.Contains(err.Error(), "unsupported (M1)") {
+		t.Fatalf("expected unsupported canon opt kind error, got: %v", err)
+	}
+}
+
+func TestDecodeCanonOpts_TruncatedIndex(t *testing.T) {
+	buf := preamble()
+	canonBody := []byte{
+		0x01,       // count = 1
+		0x00,       // kind = lift
+		0x00,       // prefix
+		0x00,       // core func idx = 0
+		0x01,       // opt count = 1
+		0x03,       // opt kind = memory (needs index)
+		// missing index
+	}
+	buf = append(buf, 0x08, byte(len(canonBody)))
+	buf = append(buf, canonBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected truncation error for canon opt index")
+	}
+}
+
+func TestDumpCoreInstancesAndCanons(t *testing.T) {
+	c := &Component{
+		CoreModules: []CoreModule{{Offset: 100, Size: 50}},
+		CoreInstances: []CoreInstance{
+			{Kind: 0x00, ModuleIdx: 0, Args: []CoreInstantiateArg{{Name: "test", InstanceIdx: 0}}},
+			{Kind: 0x01, Exports: []CoreInlineExport{{Name: "run", Sort: 0x01, CoreSortIdx: 0}}},
+		},
+		Instances: []Instance{
+			{Kind: 0x00, ComponentIdx: 0},
+		},
+		Aliases: []AliasDef{
+			{Sort: 0x01, TargetKind: 0x00, InstanceIdx: 0, Name: "f"},
+			{Sort: 0x01, TargetKind: 0x02, OuterCount: 1, OuterIndex: 0},
+		},
+		Canons: []Canon{
+			{Kind: 0x00, CoreFuncIdx: 0, TypeIdx: 1},
+			{Kind: 0x01, FuncIdx: 0},
+			{Kind: 0x02, TypeIdx: 2},
+			{Kind: 0x03, TypeIdx: 2},
+			{Kind: 0x04, TypeIdx: 2},
+		},
+		Start: &Start{FuncIdx: 0, Args: []uint32{0, 1}, ResultCount: 2},
+	}
+
+	var buf bytes.Buffer
+	if err := c.Dump(&buf); err != nil {
+		t.Fatalf("Dump: %v", err)
+	}
+	out := buf.String()
+
+	// Check that all new sections are in the dump
+	for _, want := range []string{
+		"Core Modules:", "Core Instances:", "Instances:", "Aliases:", "Canons:", "Start:",
+		"instantiate module", "inline exports", "instantiate component",
+		"lift core func", "lower func", "resource.new", "resource.drop", "resource.rep",
+		"export instance", "outer count",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("dump missing %q\n---\n%s", want, out)
+		}
+	}
+}
+
+func TestCanonWithAllOptTypes(t *testing.T) {
+	buf := preamble()
+	// Section 8: canon with all supported opt types
+	canonBody := []byte{
+		0x01,           // count = 1
+		0x00,           // kind = lift
+		0x00,           // prefix
+		0x00,           // core func idx = 0
+		0x07,           // opt count = 7
+		0x00,           // utf8
+		0x01,           // utf16
+		0x02,           // latin1+utf16
+		0x03, 0x00,     // memory, idx=0
+		0x04, 0x00,     // realloc, idx=0
+		0x05, 0x00,     // post-return, idx=0
+		0x06,           // async (no index)
+		0x00,           // type idx = 0
+	}
+	buf = append(buf, 0x08, byte(len(canonBody)))
+	buf = append(buf, canonBody...)
+
+	c, err := Decode(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if len(c.Canons) != 1 || len(c.Canons[0].Opts) != 7 {
+		t.Errorf("canon with all opts not decoded: %+v", c.Canons[0])
+	}
+}
+
+func TestDecodeStartWithTruncatedArgs(t *testing.T) {
+	buf := preamble()
+	startBody := []byte{
+		0x00,           // func idx = 0
+		0x02,           // arg count = 2
+		0x00,           // arg[0] = 0
+		// missing arg[1]
+	}
+	buf = append(buf, 0x09, byte(len(startBody)))
+	buf = append(buf, startBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected truncation error for start args")
+	}
+}
+
+func TestDecodeStartWithTruncatedResultCount(t *testing.T) {
+	buf := preamble()
+	startBody := []byte{
+		0x00,           // func idx = 0
+		0x00,           // arg count = 0
+		// missing result count
+	}
+	buf = append(buf, 0x09, byte(len(startBody)))
+	buf = append(buf, startBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected truncation error for start result count")
+	}
+}
+
+func TestDecodeCoreInstanceTruncatedCount(t *testing.T) {
+	buf := preamble()
+	coreModuleBody := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
+	buf = append(buf, 0x01, byte(len(coreModuleBody)))
+	buf = append(buf, coreModuleBody...)
+
+	coreInstBody := []byte{} // empty, missing count
+	buf = append(buf, 0x02, byte(len(coreInstBody)))
+	buf = append(buf, coreInstBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected truncation error for core instance count")
+	}
+}
+
+func TestDecodeInstanceTruncatedCount(t *testing.T) {
+	buf := preamble()
+	instBody := []byte{} // empty, missing count
+	buf = append(buf, 0x05, byte(len(instBody)))
+	buf = append(buf, instBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected truncation error for instance count")
+	}
+}
+
+func TestDecodeAliasTruncatedCount(t *testing.T) {
+	buf := preamble()
+	aliasBody := []byte{} // empty, missing count
+	buf = append(buf, 0x06, byte(len(aliasBody)))
+	buf = append(buf, aliasBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected truncation error for alias count")
+	}
+}
+
+func TestDecodeAliasTruncatedSort(t *testing.T) {
+	buf := preamble()
+	aliasBody := []byte{0x01} // count=1, missing sort
+	buf = append(buf, 0x06, byte(len(aliasBody)))
+	buf = append(buf, aliasBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected truncation error for alias sort")
+	}
+}
+
+func TestDecodeAliasTruncatedCoreDiscriminator(t *testing.T) {
+	buf := preamble()
+	aliasBody := []byte{0x01, 0x00} // count=1, sort=core, missing discriminator
+	buf = append(buf, 0x06, byte(len(aliasBody)))
+	buf = append(buf, aliasBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected truncation error for alias core discriminator")
+	}
+}
+
+func TestDecodeCanonTruncatedCount(t *testing.T) {
+	buf := preamble()
+	canonBody := []byte{} // empty, missing count
+	buf = append(buf, 0x08, byte(len(canonBody)))
+	buf = append(buf, canonBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected truncation error for canon count")
+	}
+}
+
+func TestDecodeCanonTruncatedKind(t *testing.T) {
+	buf := preamble()
+	canonBody := []byte{0x01} // count=1, missing kind
+	buf = append(buf, 0x08, byte(len(canonBody)))
+	buf = append(buf, canonBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected truncation error for canon kind")
+	}
+}
+
+func TestInstance_InvalidKind(t *testing.T) {
+	buf := preamble()
+	instBody := []byte{
+		0x01,       // count = 1
+		0xff,       // kind = invalid
+	}
+	buf = append(buf, 0x05, byte(len(instBody)))
+	buf = append(buf, instBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected error for invalid instance kind")
+	}
+}
+
+func TestInstanceWithArgs(t *testing.T) {
+	buf := preamble()
+	// Section 5: instance with arguments
+	instBody := []byte{
+		0x01,               // count = 1
+		0x00,               // kind = instantiate
+		0x00,               // componentIdx = 0
+		0x01,               // argCount = 1
+		0x00, 0x01, 'x',    // arg name: kind=0x00, len=1, "x"
+		0x01, 0x00,         // arg sortidx: sort=func, idx=0
+	}
+	buf = append(buf, 0x05, byte(len(instBody)))
+	buf = append(buf, instBody...)
+
+	c, err := Decode(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if len(c.Instances) != 1 || len(c.Instances[0].Args) != 1 {
+		t.Errorf("instance with args not decoded correctly")
+	}
+}
+
+func TestDumpWithNilStart(t *testing.T) {
+	// Verify that Dump doesn't print Start section when it's nil
+	c := &Component{}
+	var buf bytes.Buffer
+	if err := c.Dump(&buf); err != nil {
+		t.Fatalf("Dump: %v", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "Start:") {
+		t.Errorf("dump should not include Start: when Start is nil")
+	}
+}
+
 func TestReadSortidxTruncated(t *testing.T) {
 	tests := []struct {
 		name string

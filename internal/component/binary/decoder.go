@@ -98,6 +98,56 @@ func decodeComponent(buf []byte) (*Component, error) {
 			}
 			offset += int(sectionSize)
 
+		case 1: // Core Module section
+			newOffset, err := decodeCoreModuleSection(buf, offset, sectionStart, sectionSize)
+			if err != nil {
+				return nil, fmt.Errorf("core module section: %w", err)
+			}
+			offset = newOffset
+			// Record the module's byte range
+			c.CoreModules = append(c.CoreModules, CoreModule{
+				Offset: sectionStart,
+				Size:   int(sectionSize),
+			})
+
+		case 2: // Core Instance section
+			coreInstances, newOffset, err := decodeCoreInstanceSection(buf, offset, sectionSize)
+			if err != nil {
+				return nil, fmt.Errorf("core instance section: %w", err)
+			}
+			offset = newOffset
+			c.CoreInstances = append(c.CoreInstances, coreInstances...)
+
+		case 3: // Core Type section (not yet fully decoded)
+			if sectionSize > uint32(len(buf)-offset) {
+				return nil, fmt.Errorf("section %s: %w", sectionIDName(sectionID), ErrTruncatedBinary)
+			}
+			c.RawSections = append(c.RawSections, RawSection{ID: sectionID, Size: sectionSize})
+			offset += int(sectionSize)
+
+		case 4: // Component section (not yet fully decoded)
+			if sectionSize > uint32(len(buf)-offset) {
+				return nil, fmt.Errorf("section %s: %w", sectionIDName(sectionID), ErrTruncatedBinary)
+			}
+			c.RawSections = append(c.RawSections, RawSection{ID: sectionID, Size: sectionSize})
+			offset += int(sectionSize)
+
+		case 5: // Instance section
+			instances, newOffset, err := decodeInstanceSection(buf, offset, sectionSize)
+			if err != nil {
+				return nil, fmt.Errorf("instance section: %w", err)
+			}
+			offset = newOffset
+			c.Instances = append(c.Instances, instances...)
+
+		case 6: // Alias section
+			aliases, newOffset, err := decodeAliasSection(buf, offset, sectionSize)
+			if err != nil {
+				return nil, fmt.Errorf("alias section: %w", err)
+			}
+			offset = newOffset
+			c.Aliases = append(c.Aliases, aliases...)
+
 		case 7: // Type section
 			types, newOffset, err := decodeTypeSection(buf, offset, sectionSize)
 			if err != nil {
@@ -109,6 +159,22 @@ func decodeComponent(buf []byte) (*Component, error) {
 				types[j].Index = base + uint32(j)
 			}
 			c.Types = append(c.Types, types...)
+
+		case 8: // Canonical section
+			canons, newOffset, err := decodeCanonSection(buf, offset, sectionSize)
+			if err != nil {
+				return nil, fmt.Errorf("canon section: %w", err)
+			}
+			offset = newOffset
+			c.Canons = append(c.Canons, canons...)
+
+		case 9: // Start section
+			start, newOffset, err := decodeStartSection(buf, offset, sectionSize)
+			if err != nil {
+				return nil, fmt.Errorf("start section: %w", err)
+			}
+			offset = newOffset
+			c.Start = start
 
 		case 10: // Import section
 			imports, newOffset, err := decodeImportSection(buf, offset, sectionSize)
@@ -275,4 +341,470 @@ func readSortidx(buf []byte, off int) (sort byte, idx uint32, _ int, err error) 
 		return sort, 0, off, err
 	}
 	return sort, idx, off + int(n), nil
+}
+
+// decodeCoreModuleSection decodes the core module section (section 1).
+// It just validates that the embedded core module is present; the actual
+// wasm module is not parsed here (wazy's core decoder handles it).
+func decodeCoreModuleSection(buf []byte, offset int, sectionStart int, sectionSize uint32) (int, error) {
+	// Section 1 contains a single embedded core wasm module.
+	// We store it by its byte range but don't decode it here.
+	// Just advance the offset by sectionSize.
+	return offset + int(sectionSize), nil
+}
+
+// decodeCoreInstanceSection decodes the core instance section (section 2).
+// Section 2 contains vec(core:instance).
+func decodeCoreInstanceSection(buf []byte, offset int, sectionSize uint32) ([]CoreInstance, int, error) {
+	sectionStart := offset
+
+	count, n, err := leb128.LoadUint32(buf[offset:])
+	if err != nil {
+		return nil, offset, fmt.Errorf("read count: %w", err)
+	}
+	offset += int(n)
+
+	instances := make([]CoreInstance, count)
+	for i := range count {
+		if offset >= len(buf) {
+			return nil, offset, ErrTruncatedBinary
+		}
+		kind := buf[offset]
+		offset++
+
+		var instance CoreInstance
+		instance.Kind = kind
+
+		switch kind {
+		case 0x00: // instantiate: moduleidx vec(core:instantiatearg)
+			moduleIdx, n, err := leb128.LoadUint32(buf[offset:])
+			if err != nil {
+				return nil, offset, fmt.Errorf("instance[%d] module index: %w", i, err)
+			}
+			offset += int(n)
+			instance.ModuleIdx = moduleIdx
+
+			// Read args: vec(core:instantiatearg)
+			argCount, n, err := leb128.LoadUint32(buf[offset:])
+			if err != nil {
+				return nil, offset, fmt.Errorf("instance[%d] arg count: %w", i, err)
+			}
+			offset += int(n)
+
+			args := make([]CoreInstantiateArg, argCount)
+			for j := range argCount {
+				name, off, err := readExternName(buf, offset)
+				if err != nil {
+					return nil, off, fmt.Errorf("instance[%d] arg[%d] name: %w", i, j, err)
+				}
+				offset = off
+
+				// Each arg has a 0x12 prefix byte
+				if offset >= len(buf) || buf[offset] != 0x12 {
+					return nil, offset, fmt.Errorf("instance[%d] arg[%d]: expected 0x12 prefix", i, j)
+				}
+				offset++
+
+				instanceIdx, n, err := leb128.LoadUint32(buf[offset:])
+				if err != nil {
+					return nil, offset, fmt.Errorf("instance[%d] arg[%d] instance index: %w", i, j, err)
+				}
+				offset += int(n)
+
+				args[j] = CoreInstantiateArg{Name: name, InstanceIdx: instanceIdx}
+			}
+			instance.Args = args
+
+		case 0x01: // inline exports: vec(core:inlineexport)
+			exportCount, n, err := leb128.LoadUint32(buf[offset:])
+			if err != nil {
+				return nil, offset, fmt.Errorf("instance[%d] export count: %w", i, err)
+			}
+			offset += int(n)
+
+			exports := make([]CoreInlineExport, exportCount)
+			for j := range exportCount {
+				name, off, err := readExternName(buf, offset)
+				if err != nil {
+					return nil, off, fmt.Errorf("instance[%d] export[%d] name: %w", i, j, err)
+				}
+				offset = off
+
+				sort, idx, off, err := readSortidx(buf, offset)
+				if err != nil {
+					return nil, off, fmt.Errorf("instance[%d] export[%d] sortidx: %w", i, j, err)
+				}
+				offset = off
+
+				exports[j] = CoreInlineExport{Name: name, Sort: sort, CoreSortIdx: idx}
+			}
+			instance.Exports = exports
+
+		default:
+			return nil, offset, fmt.Errorf("instance[%d]: invalid kind %#x", i, kind)
+		}
+
+		instances[i] = instance
+	}
+
+	if bytesRead := offset - sectionStart; bytesRead > int(sectionSize) {
+		return nil, offset, fmt.Errorf("core instance section: read %d bytes but section is only %d", bytesRead, sectionSize)
+	}
+	return instances, offset, nil
+}
+
+// decodeInstanceSection decodes the instance section (section 5).
+// Section 5 contains vec(instance).
+func decodeInstanceSection(buf []byte, offset int, sectionSize uint32) ([]Instance, int, error) {
+	sectionStart := offset
+
+	count, n, err := leb128.LoadUint32(buf[offset:])
+	if err != nil {
+		return nil, offset, fmt.Errorf("read count: %w", err)
+	}
+	offset += int(n)
+
+	instances := make([]Instance, count)
+	for i := range count {
+		if offset >= len(buf) {
+			return nil, offset, ErrTruncatedBinary
+		}
+		kind := buf[offset]
+		offset++
+
+		var instance Instance
+		instance.Kind = kind
+
+		switch kind {
+		case 0x00: // instantiate: componentidx vec(instantiatearg)
+			componentIdx, n, err := leb128.LoadUint32(buf[offset:])
+			if err != nil {
+				return nil, offset, fmt.Errorf("instance[%d] component index: %w", i, err)
+			}
+			offset += int(n)
+			instance.ComponentIdx = componentIdx
+
+			// Read args: vec(instantiatearg)
+			argCount, n, err := leb128.LoadUint32(buf[offset:])
+			if err != nil {
+				return nil, offset, fmt.Errorf("instance[%d] arg count: %w", i, err)
+			}
+			offset += int(n)
+
+			args := make([]InstantiateArg, argCount)
+			for j := range argCount {
+				name, off, err := readExternName(buf, offset)
+				if err != nil {
+					return nil, off, fmt.Errorf("instance[%d] arg[%d] name: %w", i, j, err)
+				}
+				offset = off
+
+				sort, idx, off, err := readSortidx(buf, offset)
+				if err != nil {
+					return nil, off, fmt.Errorf("instance[%d] arg[%d] sortidx: %w", i, j, err)
+				}
+				offset = off
+
+				args[j] = InstantiateArg{Name: name, Sort: sort, SortIdx: idx}
+			}
+			instance.Args = args
+
+		case 0x01: // inline exports: vec(inlineexport)
+			exportCount, n, err := leb128.LoadUint32(buf[offset:])
+			if err != nil {
+				return nil, offset, fmt.Errorf("instance[%d] export count: %w", i, err)
+			}
+			offset += int(n)
+
+			exports := make([]InlineExport, exportCount)
+			for j := range exportCount {
+				name, off, err := readExternName(buf, offset)
+				if err != nil {
+					return nil, off, fmt.Errorf("instance[%d] export[%d] name: %w", i, j, err)
+				}
+				offset = off
+
+				sort, idx, off, err := readSortidx(buf, offset)
+				if err != nil {
+					return nil, off, fmt.Errorf("instance[%d] export[%d] sortidx: %w", i, j, err)
+				}
+				offset = off
+
+				exports[j] = InlineExport{Name: name, Sort: sort, SortIdx: idx}
+			}
+			instance.Exports = exports
+
+		default:
+			return nil, offset, fmt.Errorf("instance[%d]: invalid kind %#x", i, kind)
+		}
+
+		instances[i] = instance
+	}
+
+	if bytesRead := offset - sectionStart; bytesRead > int(sectionSize) {
+		return nil, offset, fmt.Errorf("instance section: read %d bytes but section is only %d", bytesRead, sectionSize)
+	}
+	return instances, offset, nil
+}
+
+// decodeAliasSection decodes the alias section (section 6).
+// Section 6 contains vec(alias).
+func decodeAliasSection(buf []byte, offset int, sectionSize uint32) ([]AliasDef, int, error) {
+	sectionStart := offset
+
+	count, n, err := leb128.LoadUint32(buf[offset:])
+	if err != nil {
+		return nil, offset, fmt.Errorf("read count: %w", err)
+	}
+	offset += int(n)
+
+	aliases := make([]AliasDef, count)
+	for i := range count {
+		if offset >= len(buf) {
+			return nil, offset, ErrTruncatedBinary
+		}
+		sort := buf[offset]
+		offset++
+
+		// Handle core sort (0x00 carries a discriminator)
+		if sort == 0x00 {
+			if offset >= len(buf) {
+				return nil, offset, ErrTruncatedBinary
+			}
+			offset++ // skip discriminator for now
+		}
+
+		if offset >= len(buf) {
+			return nil, offset, ErrTruncatedBinary
+		}
+		targetKind := buf[offset]
+		offset++
+
+		var alias AliasDef
+		alias.Sort = sort
+		alias.TargetKind = targetKind
+
+		switch targetKind {
+		case 0x00, 0x01: // export or core export
+			instanceIdx, n, err := leb128.LoadUint32(buf[offset:])
+			if err != nil {
+				return nil, offset, fmt.Errorf("alias[%d] instance index: %w", i, err)
+			}
+			offset += int(n)
+			alias.InstanceIdx = instanceIdx
+
+			// Alias names are simple labels, not extern names
+			name, off, err := readLabel(buf, offset)
+			if err != nil {
+				return nil, off, fmt.Errorf("alias[%d] name: %w", i, err)
+			}
+			offset = off
+			alias.Name = name
+
+		case 0x02: // outer
+			outerCount, n, err := leb128.LoadUint32(buf[offset:])
+			if err != nil {
+				return nil, offset, fmt.Errorf("alias[%d] outer count: %w", i, err)
+			}
+			offset += int(n)
+			alias.OuterCount = outerCount
+
+			outerIdx, n, err := leb128.LoadUint32(buf[offset:])
+			if err != nil {
+				return nil, offset, fmt.Errorf("alias[%d] outer index: %w", i, err)
+			}
+			offset += int(n)
+			alias.OuterIndex = outerIdx
+
+		default:
+			return nil, offset, fmt.Errorf("alias[%d]: invalid target kind %#x", i, targetKind)
+		}
+
+		aliases[i] = alias
+	}
+
+	if bytesRead := offset - sectionStart; bytesRead > int(sectionSize) {
+		return nil, offset, fmt.Errorf("alias section: read %d bytes but section is only %d", bytesRead, sectionSize)
+	}
+	return aliases, offset, nil
+}
+
+// decodeCanonSection decodes the canonical section (section 8).
+// Section 8 contains vec(canon).
+func decodeCanonSection(buf []byte, offset int, sectionSize uint32) ([]Canon, int, error) {
+	sectionStart := offset
+
+	count, n, err := leb128.LoadUint32(buf[offset:])
+	if err != nil {
+		return nil, offset, fmt.Errorf("read count: %w", err)
+	}
+	offset += int(n)
+
+	canons := make([]Canon, count)
+	for i := range count {
+		if offset >= len(buf) {
+			return nil, offset, ErrTruncatedBinary
+		}
+		kind := buf[offset]
+		offset++
+
+		var canon Canon
+		canon.Kind = kind
+
+		switch kind {
+		case 0x00: // lift: 0x00 coreidx opts typeidx
+			if offset >= len(buf) || buf[offset] != 0x00 {
+				return nil, offset, fmt.Errorf("canon[%d]: expected 0x00 prefix for lift", i)
+			}
+			offset++
+
+			coreFuncIdx, n, err := leb128.LoadUint32(buf[offset:])
+			if err != nil {
+				return nil, offset, fmt.Errorf("canon[%d] core func index: %w", i, err)
+			}
+			offset += int(n)
+			canon.CoreFuncIdx = coreFuncIdx
+
+			// Read opts: vec(canonopt)
+			opts, off, err := decodeCanonOpts(buf, offset)
+			if err != nil {
+				return nil, off, fmt.Errorf("canon[%d] opts: %w", i, err)
+			}
+			offset = off
+			canon.Opts = opts
+
+			typeIdx, n, err := leb128.LoadUint32(buf[offset:])
+			if err != nil {
+				return nil, offset, fmt.Errorf("canon[%d] type index: %w", i, err)
+			}
+			offset += int(n)
+			canon.TypeIdx = typeIdx
+
+		case 0x01: // lower: 0x01 funcidx opts
+			if offset >= len(buf) || buf[offset] != 0x00 {
+				return nil, offset, fmt.Errorf("canon[%d]: expected 0x00 prefix for lower", i)
+			}
+			offset++
+
+			funcIdx, n, err := leb128.LoadUint32(buf[offset:])
+			if err != nil {
+				return nil, offset, fmt.Errorf("canon[%d] func index: %w", i, err)
+			}
+			offset += int(n)
+			canon.FuncIdx = funcIdx
+
+			// Read opts: vec(canonopt)
+			opts, off, err := decodeCanonOpts(buf, offset)
+			if err != nil {
+				return nil, off, fmt.Errorf("canon[%d] opts: %w", i, err)
+			}
+			offset = off
+			canon.Opts = opts
+
+		case 0x02, 0x03, 0x04: // resource.new, resource.drop, resource.rep: typeidx
+			typeIdx, n, err := leb128.LoadUint32(buf[offset:])
+			if err != nil {
+				return nil, offset, fmt.Errorf("canon[%d] type index: %w", i, err)
+			}
+			offset += int(n)
+			canon.TypeIdx = typeIdx
+
+		default:
+			return nil, offset, fmt.Errorf("canon[%d]: unsupported (M1) kind %#x", i, kind)
+		}
+
+		canons[i] = canon
+	}
+
+	if bytesRead := offset - sectionStart; bytesRead > int(sectionSize) {
+		return nil, offset, fmt.Errorf("canon section: read %d bytes but section is only %d", bytesRead, sectionSize)
+	}
+	return canons, offset, nil
+}
+
+// decodeCanonOpts decodes vec(canonopt).
+func decodeCanonOpts(buf []byte, offset int) ([]CanonOpt, int, error) {
+	count, n, err := leb128.LoadUint32(buf[offset:])
+	if err != nil {
+		return nil, offset, fmt.Errorf("read count: %w", err)
+	}
+	offset += int(n)
+
+	opts := make([]CanonOpt, count)
+	for i := range count {
+		if offset >= len(buf) {
+			return nil, offset, ErrTruncatedBinary
+		}
+		optKind := buf[offset]
+		offset++
+
+		var opt CanonOpt
+		opt.Kind = optKind
+
+		switch optKind {
+		case 0x00, 0x01, 0x02: // string encodings: no data
+			// utf8, utf16, latin1+utf16
+		case 0x03, 0x04, 0x05, 0x07: // memory, realloc, post-return, callback: carry an index
+			idx, n, err := leb128.LoadUint32(buf[offset:])
+			if err != nil {
+				return nil, offset, fmt.Errorf("canonopt[%d] index: %w", i, err)
+			}
+			offset += int(n)
+			opt.Idx = idx
+		case 0x06: // async: no data
+		default:
+			return nil, offset, fmt.Errorf("canonopt[%d]: unsupported (M1) kind %#x", i, optKind)
+		}
+
+		opts[i] = opt
+	}
+
+	return opts, offset, nil
+}
+
+// decodeStartSection decodes the start section (section 9).
+// Section 9 contains: funcidx vec(valueidx) resultcount.
+func decodeStartSection(buf []byte, offset int, sectionSize uint32) (*Start, int, error) {
+	sectionStart := offset
+
+	funcIdx, n, err := leb128.LoadUint32(buf[offset:])
+	if err != nil {
+		return nil, offset, fmt.Errorf("func index: %w", err)
+	}
+	offset += int(n)
+
+	// Read args: vec(valueidx)
+	argCount, n, err := leb128.LoadUint32(buf[offset:])
+	if err != nil {
+		return nil, offset, fmt.Errorf("arg count: %w", err)
+	}
+	offset += int(n)
+
+	args := make([]uint32, argCount)
+	for i := range argCount {
+		arg, n, err := leb128.LoadUint32(buf[offset:])
+		if err != nil {
+			return nil, offset, fmt.Errorf("arg[%d]: %w", i, err)
+		}
+		offset += int(n)
+		args[i] = arg
+	}
+
+	// Read result count
+	resultCount, n, err := leb128.LoadUint32(buf[offset:])
+	if err != nil {
+		return nil, offset, fmt.Errorf("result count: %w", err)
+	}
+	offset += int(n)
+
+	start := &Start{
+		FuncIdx:     funcIdx,
+		Args:        args,
+		ResultCount: resultCount,
+	}
+
+	if bytesRead := offset - sectionStart; bytesRead > int(sectionSize) {
+		return nil, offset, fmt.Errorf("start section: read %d bytes but section is only %d", bytesRead, sectionSize)
+	}
+	return start, offset, nil
 }

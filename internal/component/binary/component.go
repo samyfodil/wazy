@@ -16,8 +16,26 @@ type Component struct {
 	// Exports contains the export bindings.
 	Exports []Export
 
+	// CoreModules are embedded core wasm modules (section 1).
+	CoreModules []CoreModule
+
+	// CoreInstances instantiate core modules with arguments (section 2).
+	CoreInstances []CoreInstance
+
+	// Instances instantiate components with arguments (section 5).
+	Instances []Instance
+
+	// Aliases bring names into scope (section 6).
+	Aliases []AliasDef
+
+	// Canons describe canonical lift/lower bindings (section 8).
+	Canons []Canon
+
+	// Start is the optional start section that specifies startup behavior (section 9).
+	Start *Start
+
 	// RawSections tracks sections we parse the header for but skip the body.
-	// Used for sections we don't fully decode yet (e.g., canonical, instance, alias).
+	// Used for sections we don't fully decode yet (e.g., core-type, component decls).
 	RawSections []RawSection
 }
 
@@ -63,6 +81,89 @@ type Export struct {
 	ExternIndex uint32
 }
 
+// CoreModule represents an embedded core wasm module (section 1).
+// The binary is stored as an offset and size; it is not parsed here,
+// as wazy's core decoder handles that separately.
+type CoreModule struct {
+	Offset int // byte offset in the component binary
+	Size   int // byte length of the core module
+}
+
+// CoreInstantiateArg represents an argument to instantiate a core module.
+type CoreInstantiateArg struct {
+	Name       string
+	InstanceIdx uint32
+}
+
+// CoreInlineExport represents an inlined export in a core instance.
+type CoreInlineExport struct {
+	Name       string
+	Sort       byte // 0x00 = core func/table/mem/global
+	CoreSortIdx uint32
+}
+
+// CoreInstance represents a core module instantiation (section 2).
+type CoreInstance struct {
+	Kind       byte // 0x00 = instantiate, 0x01 = inline exports
+	ModuleIdx  uint32 // used if Kind == 0x00
+	Args       []CoreInstantiateArg
+	Exports    []CoreInlineExport
+}
+
+// InstantiateArg represents an argument to instantiate a component.
+type InstantiateArg struct {
+	Name  string
+	Sort  byte
+	SortIdx uint32
+}
+
+// InlineExport represents an inlined export in an instance.
+type InlineExport struct {
+	Name    string
+	Sort    byte
+	SortIdx uint32
+}
+
+// Instance represents a component instance (section 5).
+type Instance struct {
+	Kind       byte // 0x00 = instantiate, 0x01 = inline exports
+	ComponentIdx uint32 // used if Kind == 0x00
+	Args       []InstantiateArg
+	Exports    []InlineExport
+}
+
+// CanonOpt represents a canonical option.
+type CanonOpt struct {
+	Kind byte // 0x00-0x07 (and potentially more)
+	Idx  uint32 // for options that carry an index
+}
+
+// Canon represents a canonical lift/lower binding (section 8).
+type Canon struct {
+	Kind        byte // 0x00 = lift, 0x01 = lower, 0x02/0x03/0x04 = resource.*
+	CoreFuncIdx uint32 // used for lift (0x00)
+	FuncIdx     uint32 // used for lower (0x01) and for result indices in Start
+	Opts        []CanonOpt
+	TypeIdx     uint32 // used for lift
+}
+
+// AliasDef represents an alias binding (section 6).
+type AliasDef struct {
+	Sort          byte // sort of the aliased item
+	TargetKind    byte // 0x00 = export, 0x01 = core export, 0x02 = outer
+	InstanceIdx   uint32 // for export/core export targets
+	Name          string // for export/core export targets
+	OuterCount    uint32 // for outer targets
+	OuterIndex    uint32 // for outer targets
+}
+
+// Start represents the start section (section 9).
+type Start struct {
+	FuncIdx    uint32
+	Args       []uint32
+	ResultCount uint32
+}
+
 // RawSection represents a section header we parsed but did not fully decode.
 type RawSection struct {
 	ID   byte
@@ -70,7 +171,7 @@ type RawSection struct {
 }
 
 // Dump writes a human-readable summary of the component to w.
-// It prints the type section and the import/export graph.
+// It prints the type section, import/export graph, and instantiation graph.
 func (c *Component) Dump(w io.Writer) error {
 	if _, err := io.WriteString(w, "Component Model Binary\n"); err != nil {
 		return err
@@ -120,6 +221,124 @@ func (c *Component) Dump(w io.Writer) error {
 			}
 		}
 		if _, err := io.WriteString(w, "\n"); err != nil {
+			return err
+		}
+	}
+
+	// Dump core modules
+	if len(c.CoreModules) > 0 {
+		if _, err := io.WriteString(w, "Core Modules:\n"); err != nil {
+			return err
+		}
+		for i, m := range c.CoreModules {
+			if _, err := fmt.Fprintf(w, "  [%d] offset=%d size=%d\n", i, m.Offset, m.Size); err != nil {
+				return err
+			}
+		}
+		if _, err := io.WriteString(w, "\n"); err != nil {
+			return err
+		}
+	}
+
+	// Dump core instances
+	if len(c.CoreInstances) > 0 {
+		if _, err := io.WriteString(w, "Core Instances:\n"); err != nil {
+			return err
+		}
+		for i, ci := range c.CoreInstances {
+			if ci.Kind == 0x00 {
+				if _, err := fmt.Fprintf(w, "  [%d] instantiate module %d\n", i, ci.ModuleIdx); err != nil {
+					return err
+				}
+			} else {
+				if _, err := fmt.Fprintf(w, "  [%d] inline exports\n", i); err != nil {
+					return err
+				}
+			}
+		}
+		if _, err := io.WriteString(w, "\n"); err != nil {
+			return err
+		}
+	}
+
+	// Dump instances
+	if len(c.Instances) > 0 {
+		if _, err := io.WriteString(w, "Instances:\n"); err != nil {
+			return err
+		}
+		for i, inst := range c.Instances {
+			if inst.Kind == 0x00 {
+				if _, err := fmt.Fprintf(w, "  [%d] instantiate component %d\n", i, inst.ComponentIdx); err != nil {
+					return err
+				}
+			} else {
+				if _, err := fmt.Fprintf(w, "  [%d] inline exports\n", i); err != nil {
+					return err
+				}
+			}
+		}
+		if _, err := io.WriteString(w, "\n"); err != nil {
+			return err
+		}
+	}
+
+	// Dump aliases
+	if len(c.Aliases) > 0 {
+		if _, err := io.WriteString(w, "Aliases:\n"); err != nil {
+			return err
+		}
+		for i, a := range c.Aliases {
+			targetDesc := ""
+			switch a.TargetKind {
+			case 0x00:
+				targetDesc = fmt.Sprintf("export instance %d name %q", a.InstanceIdx, a.Name)
+			case 0x01:
+				targetDesc = fmt.Sprintf("core export instance %d name %q", a.InstanceIdx, a.Name)
+			case 0x02:
+				targetDesc = fmt.Sprintf("outer count=%d index=%d", a.OuterCount, a.OuterIndex)
+			}
+			if _, err := fmt.Fprintf(w, "  [%d] sort=%#x %s\n", i, a.Sort, targetDesc); err != nil {
+				return err
+			}
+		}
+		if _, err := io.WriteString(w, "\n"); err != nil {
+			return err
+		}
+	}
+
+	// Dump canons
+	if len(c.Canons) > 0 {
+		if _, err := io.WriteString(w, "Canons:\n"); err != nil {
+			return err
+		}
+		for i, cn := range c.Canons {
+			kindStr := ""
+			switch cn.Kind {
+			case 0x00:
+				kindStr = fmt.Sprintf("lift core func %d type %d", cn.CoreFuncIdx, cn.TypeIdx)
+			case 0x01:
+				kindStr = fmt.Sprintf("lower func %d", cn.FuncIdx)
+			case 0x02:
+				kindStr = fmt.Sprintf("resource.new type %d", cn.TypeIdx)
+			case 0x03:
+				kindStr = fmt.Sprintf("resource.drop type %d", cn.TypeIdx)
+			case 0x04:
+				kindStr = fmt.Sprintf("resource.rep type %d", cn.TypeIdx)
+			default:
+				kindStr = fmt.Sprintf("kind %#x", cn.Kind)
+			}
+			if _, err := fmt.Fprintf(w, "  [%d] %s\n", i, kindStr); err != nil {
+				return err
+			}
+		}
+		if _, err := io.WriteString(w, "\n"); err != nil {
+			return err
+		}
+	}
+
+	// Dump start
+	if c.Start != nil {
+		if _, err := fmt.Fprintf(w, "Start:\n  func %d args=%v results=%d\n\n", c.Start.FuncIdx, c.Start.Args, c.Start.ResultCount); err != nil {
 			return err
 		}
 	}
