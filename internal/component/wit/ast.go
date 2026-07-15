@@ -2,6 +2,18 @@ package wit
 
 import "fmt"
 
+// GateItem is a single feature-gate attribute attached to a WIT item:
+// "@since(version = X)", "@unstable(feature = X)", or "@deprecated(version = X)".
+type GateItem struct {
+	Kind    string // "since", "unstable", or "deprecated"
+	Version string // semver value, set for "since" and "deprecated"
+	Feature string // feature name, set for "unstable"
+}
+
+// Gate is zero or more feature-gate attributes stacked immediately before an
+// item (e.g. "@since(version = 0.2.0) @deprecated(version = 0.2.2)").
+type Gate []GateItem
+
 // Package represents a WIT package definition.
 type Package struct {
 	// Name is the fully-qualified package name (e.g., "wasi:io@0.2.0").
@@ -18,8 +30,10 @@ type PackageItem interface {
 
 // Interface represents a WIT interface definition.
 type Interface struct {
-	Name  string
-	Items []InterfaceItem
+	Name       string
+	Items      []InterfaceItem
+	Gate       Gate
+	ExternalID string
 }
 
 func (*Interface) packageItem() {}
@@ -29,10 +43,23 @@ type InterfaceItem interface {
 	interfaceItem()
 }
 
+// InterfaceFunc represents a named function item directly inside an
+// interface, e.g. "read: func(len: u64) -> result<list<u8>, stream-error>;".
+type InterfaceFunc struct {
+	Name       string
+	Func       Func
+	Gate       Gate
+	ExternalID string
+}
+
+func (*InterfaceFunc) interfaceItem() {}
+
 // World represents a WIT world definition.
 type World struct {
-	Name  string
-	Items []WorldItem
+	Name       string
+	Items      []WorldItem
+	Gate       Gate
+	ExternalID string
 }
 
 func (*World) packageItem() {}
@@ -44,15 +71,17 @@ type WorldItem interface {
 
 // TypeDef represents a type definition.
 type TypeDef struct {
-	Name   string
-	Type   TypeDefBody
-	Docs   string
+	Name        string
+	Type        TypeDefBody
+	Docs        string
+	Gate        Gate
+	ExternalID  string
 	Unsupported string // if unsupported construct is detected, name it here
 }
 
-func (*TypeDef) packageItem() {}
+func (*TypeDef) packageItem()   {}
 func (*TypeDef) interfaceItem() {}
-func (*TypeDef) worldItem() {}
+func (*TypeDef) worldItem()     {}
 
 // TypeDefBody represents the body of a type definition.
 type TypeDefBody interface {
@@ -113,12 +142,16 @@ type Resource struct {
 
 func (*Resource) typeDefBody() {}
 
-// ResourceMethod represents a method or constructor on a resource.
+// ResourceMethod represents a method, static function, or constructor on a
+// resource: "name: func(...)", "name: static func(...)", or
+// "constructor(...)".
 type ResourceMethod struct {
-	Name        string
-	IsStatic    bool
+	Name          string
+	IsStatic      bool
 	IsConstructor bool
-	Func        Func
+	Func          Func
+	Gate          Gate
+	ExternalID    string
 }
 
 // Func represents a function definition or type.
@@ -136,18 +169,33 @@ type FuncParam struct {
 
 // Use represents a use statement.
 type Use struct {
-	Path  string // e.g., "wasi:io/streams.{InputStream, OutputStream}"
-	Names map[string]string // local alias -> imported name
+	Path       string            // e.g., "wasi:io/streams.{InputStream, OutputStream}"
+	Names      map[string]string // local alias -> imported name
+	Gate       Gate
+	ExternalID string
 }
 
-func (*Use) packageItem() {}
+func (*Use) packageItem()   {}
 func (*Use) interfaceItem() {}
-func (*Use) worldItem() {}
+func (*Use) worldItem()     {}
+
+// Include represents an "include world;" or
+// "include world with { a as a1, b as b1 };" statement.
+type Include struct {
+	Path       string
+	Renames    map[string]string // original name -> alias
+	Gate       Gate
+	ExternalID string
+}
+
+func (*Include) worldItem() {}
 
 // Import represents an import statement.
 type Import struct {
-	Name string
-	Type ImportType
+	Name       string
+	Type       ImportType
+	Gate       Gate
+	ExternalID string
 }
 
 func (*Import) worldItem() {}
@@ -173,8 +221,10 @@ func (*ImportInterface) importType() {}
 
 // Export represents an export statement.
 type Export struct {
-	Name string
-	Type ExportType
+	Name       string
+	Type       ExportType
+	Gate       Gate
+	ExternalID string
 }
 
 func (*Export) worldItem() {}
@@ -200,12 +250,12 @@ func (*ExportInterface) exportType() {}
 
 // TypeRef represents a type reference (including primitive types and compound types).
 type TypeRef struct {
-	Kind       string // "u32", "string", "list", "option", "result", "record", etc.
-	Name       string // for named types (user-defined or resource types)
-	Inner      *TypeRef // for list<T>, option<T>, own<T>, borrow<T>
-	Inner2     *TypeRef // for result<T,E>, map<K,V>, tuple element
-	Tuple      []*TypeRef // for tuple<T1, T2, ...>
-	Unsupported string // if an unsupported construct is detected, name it here
+	Kind        string     // "u32", "string", "list", "option", "result", "record", etc.
+	Name        string     // for named types (user-defined or resource types)
+	Inner       *TypeRef   // for list<T>, option<T>, own<T>, borrow<T>
+	Inner2      *TypeRef   // for result<T,E>, map<K,V>, tuple element
+	Tuple       []*TypeRef // for tuple<T1, T2, ...>
+	Unsupported string     // if an unsupported construct is detected, name it here
 }
 
 // String returns a human-readable representation of the type.

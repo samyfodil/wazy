@@ -7,10 +7,10 @@ import (
 
 // Parser parses WIT source code into an AST.
 type Parser struct {
-	tokens    []Token
-	pos       int
-	current   Token
-	filename  string
+	tokens   []Token
+	pos      int
+	current  Token
+	filename string
 }
 
 // Parse parses WIT source code and returns a Package AST.
@@ -22,9 +22,9 @@ func Parse(name, src string) (*Package, error) {
 	}
 
 	p := &Parser{
-		tokens:    tokens,
-		pos:       0,
-		filename:  name,
+		tokens:   tokens,
+		pos:      0,
+		filename: name,
 	}
 	if len(tokens) > 0 {
 		p.current = tokens[0]
@@ -100,17 +100,130 @@ func (p *Parser) parsePackageDecl() (string, error) {
 	return name.String(), nil
 }
 
+// parseAttributes parses zero or more feature-gate / external-id attributes
+// immediately preceding a WIT item:
+//
+//	gate      ::= gate-item*
+//	gate-item ::= '@unstable' '(' 'feature' '=' id ')'
+//	            | '@since' '(' 'version' '=' <semver> ')'
+//	            | '@deprecated' '(' 'version' '=' <semver> ')'
+//	external-id ::= '@external-id' '(' string-literal ')'
+//
+// It returns the accumulated Gate (since/unstable/deprecated items, in the
+// order they appeared) and the external-id string, if any.
+func (p *Parser) parseAttributes() (Gate, string, error) {
+	var gate Gate
+	externalID := ""
+
+	for {
+		switch p.current.Type {
+		case TokenSince, TokenDeprecated:
+			kind := "since"
+			if p.current.Type == TokenDeprecated {
+				kind = "deprecated"
+			}
+			p.advance()
+
+			if !p.expect(TokenLParen) {
+				return nil, "", p.errorf("expected '(' after @%s", kind)
+			}
+			p.advance()
+
+			if !p.expect(TokenVersion_Keyword) {
+				return nil, "", p.errorf("expected 'version' in @%s(...)", kind)
+			}
+			p.advance()
+
+			if !p.expect(TokenEq) {
+				return nil, "", p.errorf("expected '=' after 'version' in @%s(...)", kind)
+			}
+			p.advance()
+
+			if p.current.Type != TokenVersion && !p.isIdentifierToken() {
+				return nil, "", p.errorf("expected version value in @%s(...)", kind)
+			}
+			version := p.current.Text
+			p.advance()
+
+			if !p.expect(TokenRParen) {
+				return nil, "", p.errorf("expected ')' to close @%s(...)", kind)
+			}
+			p.advance()
+
+			gate = append(gate, GateItem{Kind: kind, Version: version})
+
+		case TokenUnstable:
+			p.advance()
+
+			if !p.expect(TokenLParen) {
+				return nil, "", p.errorf("expected '(' after @unstable")
+			}
+			p.advance()
+
+			if !p.expect(TokenFeature) {
+				return nil, "", p.errorf("expected 'feature' in @unstable(...)")
+			}
+			p.advance()
+
+			if !p.expect(TokenEq) {
+				return nil, "", p.errorf("expected '=' after 'feature' in @unstable(...)")
+			}
+			p.advance()
+
+			if !p.isIdentifierToken() {
+				return nil, "", p.errorf("expected feature name in @unstable(...)")
+			}
+			feature := p.current.Text
+			p.advance()
+
+			if !p.expect(TokenRParen) {
+				return nil, "", p.errorf("expected ')' to close @unstable(...)")
+			}
+			p.advance()
+
+			gate = append(gate, GateItem{Kind: "unstable", Feature: feature})
+
+		case TokenExternalID:
+			p.advance()
+
+			if !p.expect(TokenLParen) {
+				return nil, "", p.errorf("expected '(' after @external-id")
+			}
+			p.advance()
+
+			if p.current.Type != TokenString {
+				return nil, "", p.errorf("expected string literal in @external-id(...)")
+			}
+			externalID = p.current.Text
+			p.advance()
+
+			if !p.expect(TokenRParen) {
+				return nil, "", p.errorf("expected ')' to close @external-id(...)")
+			}
+			p.advance()
+
+		default:
+			return gate, externalID, nil
+		}
+	}
+}
+
 // parsePackageItem parses a top-level package item (interface, world, type def, use, etc).
 func (p *Parser) parsePackageItem() (PackageItem, error) {
+	gate, externalID, err := p.parseAttributes()
+	if err != nil {
+		return nil, err
+	}
+
 	switch p.current.Type {
 	case TokenInterface:
-		return p.parseInterface()
+		return p.parseInterface(gate, externalID)
 	case TokenWorld:
-		return p.parseWorld()
+		return p.parseWorld(gate, externalID)
 	case TokenKeywordType:
-		return p.parseTypeDef()
+		return p.parseTypeDef(gate, externalID)
 	case TokenUse:
-		return p.parseUse()
+		return p.parseUse(gate, externalID)
 	case TokenEOF:
 		return nil, nil
 	default:
@@ -118,8 +231,8 @@ func (p *Parser) parsePackageItem() (PackageItem, error) {
 	}
 }
 
-// parseInterface parses "interface Name { ... }".
-func (p *Parser) parseInterface() (*Interface, error) {
+// parseInterface parses "interface Name { ... }", including any leading gate.
+func (p *Parser) parseInterface(gate Gate, externalID string) (*Interface, error) {
 	if !p.expect(TokenInterface) {
 		return nil, p.errorf("expected 'interface'")
 	}
@@ -152,22 +265,60 @@ func (p *Parser) parseInterface() (*Interface, error) {
 	}
 	p.advance()
 
-	return &Interface{Name: name, Items: items}, nil
+	return &Interface{Name: name, Items: items, Gate: gate, ExternalID: externalID}, nil
 }
 
-// parseInterfaceItem parses an item inside an interface.
+// parseInlineInterfaceBody parses "interface { ... }" as used inline within
+// an import or export item.
+func (p *Parser) parseInlineInterfaceBody() ([]InterfaceItem, error) {
+	if !p.expect(TokenInterface) {
+		return nil, p.errorf("expected 'interface'")
+	}
+	p.advance()
+
+	if !p.expect(TokenLBrace) {
+		return nil, p.errorf("expected '{' after 'interface'")
+	}
+	p.advance()
+
+	var items []InterfaceItem
+	for p.current.Type != TokenRBrace && p.current.Type != TokenEOF {
+		item, err := p.parseInterfaceItem()
+		if err != nil {
+			return nil, err
+		}
+		if item != nil {
+			items = append(items, item)
+		}
+	}
+
+	if !p.expect(TokenRBrace) {
+		return nil, p.errorf("expected '}' to close inline interface")
+	}
+	p.advance()
+
+	return items, nil
+}
+
+// parseInterfaceItem parses an item inside an interface, including any
+// leading gate.
 func (p *Parser) parseInterfaceItem() (InterfaceItem, error) {
+	gate, externalID, err := p.parseAttributes()
+	if err != nil {
+		return nil, err
+	}
+
 	switch p.current.Type {
 	case TokenKeywordType:
-		return p.parseTypeDef()
+		return p.parseTypeDef(gate, externalID)
 	case TokenRecord, TokenVariant, TokenEnum, TokenFlags, TokenResource:
 		// Shorthand syntax for type definitions: record Name { ... } instead of type Name = record { ... }
-		return p.parseShorthandTypeDef()
+		return p.parseShorthandTypeDef(gate, externalID)
 	case TokenUse:
-		return p.parseUse()
+		return p.parseUse(gate, externalID)
 	case TokenIdent:
 		// Could be a function definition like "add: func(...)"
-		return p.parseInterfaceFunc()
+		return p.parseInterfaceFunc(gate, externalID)
 	case TokenRBrace, TokenEOF:
 		return nil, nil
 	default:
@@ -175,8 +326,9 @@ func (p *Parser) parseInterfaceItem() (InterfaceItem, error) {
 	}
 }
 
-// parseInterfaceFunc parses a function definition in an interface.
-func (p *Parser) parseInterfaceFunc() (InterfaceItem, error) {
+// parseInterfaceFunc parses a named function item in an interface:
+// "name: func(...) -> result;".
+func (p *Parser) parseInterfaceFunc(gate Gate, externalID string) (InterfaceItem, error) {
 	if p.current.Type != TokenIdent {
 		return nil, p.errorf("expected function name")
 	}
@@ -188,7 +340,7 @@ func (p *Parser) parseInterfaceFunc() (InterfaceItem, error) {
 	}
 	p.advance()
 
-	_, err := p.parseFunc()
+	fn, err := p.parseFunc()
 	if err != nil {
 		return nil, err
 	}
@@ -198,12 +350,11 @@ func (p *Parser) parseInterfaceFunc() (InterfaceItem, error) {
 	}
 	p.advance()
 
-	// For now, store as a TypeDef with a Func body (placeholder)
-	return &TypeDef{Name: name, Type: &TypeAlias{Target: TypeRef{Kind: "func", Name: name}}}, nil
+	return &InterfaceFunc{Name: name, Func: *fn, Gate: gate, ExternalID: externalID}, nil
 }
 
-// parseWorld parses "world Name { ... }".
-func (p *Parser) parseWorld() (*World, error) {
+// parseWorld parses "world Name { ... }", including any leading gate.
+func (p *Parser) parseWorld(gate Gate, externalID string) (*World, error) {
 	if !p.expect(TokenWorld) {
 		return nil, p.errorf("expected 'world'")
 	}
@@ -236,25 +387,30 @@ func (p *Parser) parseWorld() (*World, error) {
 	}
 	p.advance()
 
-	return &World{Name: name, Items: items}, nil
+	return &World{Name: name, Items: items, Gate: gate, ExternalID: externalID}, nil
 }
 
-// parseWorldItem parses an item inside a world.
+// parseWorldItem parses an item inside a world, including any leading gate.
 func (p *Parser) parseWorldItem() (WorldItem, error) {
+	gate, externalID, err := p.parseAttributes()
+	if err != nil {
+		return nil, err
+	}
+
 	switch p.current.Type {
 	case TokenKeywordType:
-		return p.parseTypeDef()
+		return p.parseTypeDef(gate, externalID)
 	case TokenRecord, TokenVariant, TokenEnum, TokenFlags, TokenResource:
 		// Shorthand syntax for type definitions
-		return p.parseShorthandTypeDef()
+		return p.parseShorthandTypeDef(gate, externalID)
 	case TokenImport:
-		return p.parseImport()
+		return p.parseImport(gate, externalID)
 	case TokenExport:
-		return p.parseExport()
+		return p.parseExport(gate, externalID)
 	case TokenUse:
-		return p.parseUse()
+		return p.parseUse(gate, externalID)
 	case TokenInclude:
-		return p.parseInclude()
+		return p.parseInclude(gate, externalID)
 	case TokenRBrace, TokenEOF:
 		return nil, nil
 	default:
@@ -262,8 +418,8 @@ func (p *Parser) parseWorldItem() (WorldItem, error) {
 	}
 }
 
-// parseTypeDef parses "type Name = Type;" or "record Name { ... }" etc.
-func (p *Parser) parseTypeDef() (*TypeDef, error) {
+// parseTypeDef parses "type Name = Type;", including any leading gate.
+func (p *Parser) parseTypeDef(gate Gate, externalID string) (*TypeDef, error) {
 	if !p.expect(TokenKeywordType) {
 		return nil, p.errorf("expected 'type'")
 	}
@@ -278,7 +434,13 @@ func (p *Parser) parseTypeDef() (*TypeDef, error) {
 	// Check what kind of type definition this is
 	if p.current.Type == TokenEq {
 		// Type alias (or type definition with = keyword)
-		return p.parseTypeAlias(name)
+		td, err := p.parseTypeAlias(name)
+		if err != nil {
+			return nil, err
+		}
+		td.Gate = gate
+		td.ExternalID = externalID
+		return td, nil
 	}
 
 	return nil, p.errorf("unexpected token after type name: %s", p.current.Type)
@@ -300,30 +462,9 @@ func (p *Parser) parseTypeAlias(name string) (*TypeDef, error) {
 		}
 		p.advance()
 
-		var fields []RecordField
-		for p.current.Type != TokenRBrace && p.current.Type != TokenEOF {
-			if !p.isIdentifierToken() {
-				return nil, p.errorf("expected field name in record")
-			}
-			fieldName := p.current.Text
-			p.advance()
-
-			if !p.expect(TokenColon) {
-				return nil, p.errorf("expected ':' after field name")
-			}
-			p.advance()
-
-			typeRef, err := p.parseType()
-			if err != nil {
-				return nil, err
-			}
-			fields = append(fields, RecordField{Name: fieldName, Type: typeRef})
-
-			if p.current.Type == TokenComma {
-				p.advance()
-			} else if p.current.Type != TokenRBrace {
-				return nil, p.errorf("expected ',' or '}' in record fields")
-			}
+		fields, err := p.parseRecordFields()
+		if err != nil {
+			return nil, err
 		}
 
 		if !p.expect(TokenRBrace) {
@@ -345,36 +486,9 @@ func (p *Parser) parseTypeAlias(name string) (*TypeDef, error) {
 		}
 		p.advance()
 
-		var cases []VariantCase
-		for p.current.Type != TokenRBrace && p.current.Type != TokenEOF {
-			if !p.isIdentifierToken() {
-				return nil, p.errorf("expected case name in variant")
-			}
-			caseName := p.current.Text
-			p.advance()
-
-			var typeRef *TypeRef
-			if p.current.Type == TokenLParen {
-				p.advance()
-				t, err := p.parseType()
-				if err != nil {
-					return nil, err
-				}
-				typeRef = &t
-
-				if !p.expect(TokenRParen) {
-					return nil, p.errorf("expected ')' after variant case type")
-				}
-				p.advance()
-			}
-
-			cases = append(cases, VariantCase{Name: caseName, Type: typeRef})
-
-			if p.current.Type == TokenComma {
-				p.advance()
-			} else if p.current.Type != TokenRBrace {
-				return nil, p.errorf("expected ',' or '}' in variant cases")
-			}
+		cases, err := p.parseVariantCases()
+		if err != nil {
+			return nil, err
 		}
 
 		if !p.expect(TokenRBrace) {
@@ -396,19 +510,9 @@ func (p *Parser) parseTypeAlias(name string) (*TypeDef, error) {
 		}
 		p.advance()
 
-		var cases []string
-		for p.current.Type != TokenRBrace && p.current.Type != TokenEOF {
-			if !p.isIdentifierToken() {
-				return nil, p.errorf("expected case name in enum")
-			}
-			cases = append(cases, p.current.Text)
-			p.advance()
-
-			if p.current.Type == TokenComma {
-				p.advance()
-			} else if p.current.Type != TokenRBrace {
-				return nil, p.errorf("expected ',' or '}' in enum cases")
-			}
+		cases, err := p.parseEnumCases()
+		if err != nil {
+			return nil, err
 		}
 
 		if !p.expect(TokenRBrace) {
@@ -430,19 +534,9 @@ func (p *Parser) parseTypeAlias(name string) (*TypeDef, error) {
 		}
 		p.advance()
 
-		var flags []string
-		for p.current.Type != TokenRBrace && p.current.Type != TokenEOF {
-			if !p.isIdentifierToken() {
-				return nil, p.errorf("expected flag name in flags")
-			}
-			flags = append(flags, p.current.Text)
-			p.advance()
-
-			if p.current.Type == TokenComma {
-				p.advance()
-			} else if p.current.Type != TokenRBrace {
-				return nil, p.errorf("expected ',' or '}' in flags")
-			}
+		flags, err := p.parseFlagsList()
+		if err != nil {
+			return nil, err
 		}
 
 		if !p.expect(TokenRBrace) {
@@ -473,25 +567,17 @@ func (p *Parser) parseTypeAlias(name string) (*TypeDef, error) {
 	}
 }
 
-// parseShorthandTypeDef parses shorthand type definitions: record Name { ... }, etc.
+// parseShorthandTypeDef parses shorthand type definitions: record Name { ... },
+// variant Name { ... }, enum Name { ... }, flags Name { ... },
+// resource Name { ... } (or the bodyless "resource Name;").
 // This handles the syntax where the keyword and name come first, without "type ... =".
-func (p *Parser) parseShorthandTypeDef() (*TypeDef, error) {
-	var keyword TokenType
-	switch p.current.Type {
-	case TokenRecord:
-		keyword = TokenRecord
-	case TokenVariant:
-		keyword = TokenVariant
-	case TokenEnum:
-		keyword = TokenEnum
-	case TokenFlags:
-		keyword = TokenFlags
-	case TokenResource:
-		keyword = TokenResource
+func (p *Parser) parseShorthandTypeDef(gate Gate, externalID string) (*TypeDef, error) {
+	keyword := p.current.Type
+	switch keyword {
+	case TokenRecord, TokenVariant, TokenEnum, TokenFlags, TokenResource:
 	default:
 		return nil, p.errorf("expected record/variant/enum/flags/resource")
 	}
-
 	p.advance()
 
 	if !p.isIdentifierToken() {
@@ -500,293 +586,273 @@ func (p *Parser) parseShorthandTypeDef() (*TypeDef, error) {
 	name := p.current.Text
 	p.advance()
 
+	// Bodyless resource declaration: "resource name;"
+	if keyword == TokenResource && p.current.Type == TokenSemicolon {
+		p.advance()
+		return &TypeDef{Name: name, Type: &Resource{}, Gate: gate, ExternalID: externalID}, nil
+	}
+
 	if !p.expect(TokenLBrace) {
 		return nil, p.errorf("expected '{' after type name")
 	}
 	p.advance()
 
+	var body TypeDefBody
 	switch keyword {
 	case TokenRecord:
-		var fields []RecordField
-		for p.current.Type != TokenRBrace && p.current.Type != TokenEOF {
-			if !p.isIdentifierToken() {
-				return nil, p.errorf("expected field name in record")
-			}
-			fieldName := p.current.Text
-			p.advance()
-
-			if !p.expect(TokenColon) {
-				return nil, p.errorf("expected ':' after field name")
-			}
-			p.advance()
-
-			typeRef, err := p.parseType()
-			if err != nil {
-				return nil, err
-			}
-			fields = append(fields, RecordField{Name: fieldName, Type: typeRef})
-
-			if p.current.Type == TokenComma {
-				p.advance()
-			} else if p.current.Type != TokenRBrace {
-				return nil, p.errorf("expected ',' or '}' in record fields")
-			}
+		fields, err := p.parseRecordFields()
+		if err != nil {
+			return nil, err
 		}
+		body = &Record{Fields: fields}
 
-		if !p.expect(TokenRBrace) {
-			return nil, p.errorf("expected '}' to close record")
+	case TokenVariant:
+		cases, err := p.parseVariantCases()
+		if err != nil {
+			return nil, err
+		}
+		body = &Variant{Cases: cases}
+
+	case TokenEnum:
+		cases, err := p.parseEnumCases()
+		if err != nil {
+			return nil, err
+		}
+		body = &Enum{Cases: cases}
+
+	case TokenFlags:
+		flags, err := p.parseFlagsList()
+		if err != nil {
+			return nil, err
+		}
+		body = &Flags{Flags: flags}
+
+	case TokenResource:
+		methods, err := p.parseResourceMethods()
+		if err != nil {
+			return nil, err
+		}
+		body = &Resource{Methods: methods}
+	}
+
+	if !p.expect(TokenRBrace) {
+		return nil, p.errorf("expected '}' to close %s", keyword)
+	}
+	p.advance()
+
+	// Semicolon is optional in shorthand syntax
+	if p.current.Type == TokenSemicolon {
+		p.advance()
+	}
+
+	return &TypeDef{Name: name, Type: body, Gate: gate, ExternalID: externalID}, nil
+}
+
+// parseRecordFields parses comma-separated "name: type" fields up to (but not
+// consuming) the closing '}'.
+func (p *Parser) parseRecordFields() ([]RecordField, error) {
+	var fields []RecordField
+	for p.current.Type != TokenRBrace && p.current.Type != TokenEOF {
+		if !p.isIdentifierToken() {
+			return nil, p.errorf("expected field name in record")
+		}
+		fieldName := p.current.Text
+		p.advance()
+
+		if !p.expect(TokenColon) {
+			return nil, p.errorf("expected ':' after field name")
 		}
 		p.advance()
 
-		// Semicolon is optional in shorthand syntax
-		if p.current.Type == TokenSemicolon {
+		typeRef, err := p.parseType()
+		if err != nil {
+			return nil, err
+		}
+		fields = append(fields, RecordField{Name: fieldName, Type: typeRef})
+
+		if p.current.Type == TokenComma {
+			p.advance()
+		} else if p.current.Type != TokenRBrace {
+			return nil, p.errorf("expected ',' or '}' in record fields")
+		}
+	}
+	return fields, nil
+}
+
+// parseVariantCases parses comma-separated "name" or "name(type)" cases up to
+// (but not consuming) the closing '}'.
+func (p *Parser) parseVariantCases() ([]VariantCase, error) {
+	var cases []VariantCase
+	for p.current.Type != TokenRBrace && p.current.Type != TokenEOF {
+		if !p.isIdentifierToken() {
+			return nil, p.errorf("expected case name in variant")
+		}
+		caseName := p.current.Text
+		p.advance()
+
+		var typeRef *TypeRef
+		if p.current.Type == TokenLParen {
+			p.advance()
+			t, err := p.parseType()
+			if err != nil {
+				return nil, err
+			}
+			typeRef = &t
+
+			if !p.expect(TokenRParen) {
+				return nil, p.errorf("expected ')' after variant case type")
+			}
 			p.advance()
 		}
 
-		return &TypeDef{Name: name, Type: &Record{Fields: fields}}, nil
+		cases = append(cases, VariantCase{Name: caseName, Type: typeRef})
 
-	case TokenVariant:
-		var cases []VariantCase
-		for p.current.Type != TokenRBrace && p.current.Type != TokenEOF {
-			if !p.isIdentifierToken() {
-				return nil, p.errorf("expected case name in variant")
-			}
-			caseName := p.current.Text
+		if p.current.Type == TokenComma {
+			p.advance()
+		} else if p.current.Type != TokenRBrace {
+			return nil, p.errorf("expected ',' or '}' in variant cases")
+		}
+	}
+	return cases, nil
+}
+
+// parseEnumCases parses comma-separated case names up to (but not consuming)
+// the closing '}'.
+func (p *Parser) parseEnumCases() ([]string, error) {
+	var cases []string
+	for p.current.Type != TokenRBrace && p.current.Type != TokenEOF {
+		if !p.isIdentifierToken() {
+			return nil, p.errorf("expected case name in enum")
+		}
+		cases = append(cases, p.current.Text)
+		p.advance()
+
+		if p.current.Type == TokenComma {
+			p.advance()
+		} else if p.current.Type != TokenRBrace {
+			return nil, p.errorf("expected ',' or '}' in enum cases")
+		}
+	}
+	return cases, nil
+}
+
+// parseFlagsList parses comma-separated flag names up to (but not consuming)
+// the closing '}'.
+func (p *Parser) parseFlagsList() ([]string, error) {
+	var flags []string
+	for p.current.Type != TokenRBrace && p.current.Type != TokenEOF {
+		if !p.isIdentifierToken() {
+			return nil, p.errorf("expected flag name in flags")
+		}
+		flags = append(flags, p.current.Text)
+		p.advance()
+
+		if p.current.Type == TokenComma {
+			p.advance()
+		} else if p.current.Type != TokenRBrace {
+			return nil, p.errorf("expected ',' or '}' in flags")
+		}
+	}
+	return flags, nil
+}
+
+// parseResourceMethods parses the body of a resource:
+//
+//	resource-method ::= func-item
+//	                  | id ':' 'static' func-type ';'
+//	                  | 'constructor' param-list result-list? ';'
+//
+// each optionally preceded by a gate/external-id, up to (but not consuming)
+// the closing '}'.
+func (p *Parser) parseResourceMethods() ([]ResourceMethod, error) {
+	var methods []ResourceMethod
+	for p.current.Type != TokenRBrace && p.current.Type != TokenEOF {
+		gate, externalID, err := p.parseAttributes()
+		if err != nil {
+			return nil, err
+		}
+
+		if p.current.Type == TokenConstructor {
 			p.advance()
 
-			var typeRef *TypeRef
-			if p.current.Type == TokenLParen {
+			params, err := p.parseParamList()
+			if err != nil {
+				return nil, err
+			}
+
+			var result *TypeRef
+			if p.current.Type == TokenArrow {
 				p.advance()
 				t, err := p.parseType()
 				if err != nil {
 					return nil, err
 				}
-				typeRef = &t
-
-				if !p.expect(TokenRParen) {
-					return nil, p.errorf("expected ')' after variant case type")
-				}
-				p.advance()
+				result = &t
 			}
 
-			cases = append(cases, VariantCase{Name: caseName, Type: typeRef})
-
-			if p.current.Type == TokenComma {
-				p.advance()
-			} else if p.current.Type != TokenRBrace {
-				return nil, p.errorf("expected ',' or '}' in variant cases")
+			if !p.expect(TokenSemicolon) {
+				return nil, p.errorf("expected ';' after constructor")
 			}
+			p.advance()
+
+			methods = append(methods, ResourceMethod{
+				Name:          "constructor",
+				IsConstructor: true,
+				Func:          Func{Params: params, Result: result},
+				Gate:          gate,
+				ExternalID:    externalID,
+			})
+			continue
 		}
 
-		if !p.expect(TokenRBrace) {
-			return nil, p.errorf("expected '}' to close variant")
+		if !p.isIdentifierToken() {
+			return nil, p.errorf("expected method name, 'constructor', or '}' in resource body")
+		}
+		methodName := p.current.Text
+		p.advance()
+
+		if !p.expect(TokenColon) {
+			return nil, p.errorf("expected ':' after resource method name")
 		}
 		p.advance()
 
-		// Semicolon is optional in shorthand syntax
-		if p.current.Type == TokenSemicolon {
+		isStatic := false
+		if p.current.Type == TokenStatic {
+			isStatic = true
 			p.advance()
 		}
 
-		return &TypeDef{Name: name, Type: &Variant{Cases: cases}}, nil
-
-	case TokenEnum:
-		var cases []string
-		for p.current.Type != TokenRBrace && p.current.Type != TokenEOF {
-			if !p.isIdentifierToken() {
-				return nil, p.errorf("expected case name in enum")
-			}
-			cases = append(cases, p.current.Text)
-			p.advance()
-
-			if p.current.Type == TokenComma {
-				p.advance()
-			} else if p.current.Type != TokenRBrace {
-				return nil, p.errorf("expected ',' or '}' in enum cases")
-			}
+		fn, err := p.parseFunc()
+		if err != nil {
+			return nil, err
 		}
 
-		if !p.expect(TokenRBrace) {
-			return nil, p.errorf("expected '}' to close enum")
+		if !p.expect(TokenSemicolon) {
+			return nil, p.errorf("expected ';' after resource method")
 		}
 		p.advance()
 
-		// Semicolon is optional in shorthand syntax
-		if p.current.Type == TokenSemicolon {
-			p.advance()
-		}
-
-		return &TypeDef{Name: name, Type: &Enum{Cases: cases}}, nil
-
-	case TokenFlags:
-		var flags []string
-		for p.current.Type != TokenRBrace && p.current.Type != TokenEOF {
-			if !p.isIdentifierToken() {
-				return nil, p.errorf("expected flag name in flags")
-			}
-			flags = append(flags, p.current.Text)
-			p.advance()
-
-			if p.current.Type == TokenComma {
-				p.advance()
-			} else if p.current.Type != TokenRBrace {
-				return nil, p.errorf("expected ',' or '}' in flags")
-			}
-		}
-
-		if !p.expect(TokenRBrace) {
-			return nil, p.errorf("expected '}' to close flags")
-		}
-		p.advance()
-
-		// Semicolon is optional in shorthand syntax
-		if p.current.Type == TokenSemicolon {
-			p.advance()
-		}
-
-		return &TypeDef{Name: name, Type: &Flags{Flags: flags}}, nil
-
-	case TokenResource:
-		// Resource with methods - not fully implemented
-		// Skip to closing brace
-		for p.current.Type != TokenRBrace && p.current.Type != TokenEOF {
-			p.advance()
-		}
-		if !p.expect(TokenRBrace) {
-			return nil, p.errorf("expected '}' to close resource")
-		}
-		p.advance()
-
-		// Semicolon is optional in shorthand syntax
-		if p.current.Type == TokenSemicolon {
-			p.advance()
-		}
-
-		return &TypeDef{Name: name, Type: &Resource{Methods: nil}, Unsupported: "resource with methods not yet supported"}, nil
-
-	default:
-		return nil, p.errorf("unexpected aggregate type keyword")
+		methods = append(methods, ResourceMethod{
+			Name:       methodName,
+			IsStatic:   isStatic,
+			Func:       *fn,
+			Gate:       gate,
+			ExternalID: externalID,
+		})
 	}
+	return methods, nil
 }
 
-// parseAggregateType parses record/variant/enum/flags definitions.
-// Ambiguity: The grammar doesn't clearly differentiate from context.
-// For now, we'll parse the fields and infer the type.
-func (p *Parser) parseAggregateType(name string) (*TypeDef, error) {
-	if !p.expect(TokenLBrace) {
-		return nil, p.errorf("expected '{'")
-	}
-	p.advance()
-
-	// Peek ahead to determine the type
-	// Records have "name: type" fields
-	// Variants have "name" or "name(type)" cases
-	// Enums have "name" cases
-	// Flags have "name" flags
-	// We'll parse as a generic structure and infer.
-
-	var fields []RecordField
-	var variantCases []VariantCase
-	var enumCases []string
-	var flagItems []string
-	var isRecord, isVariant, isEnum, isFlags bool
-
-	for p.current.Type != TokenRBrace && p.current.Type != TokenEOF {
-		if p.current.Type != TokenIdent {
-			return nil, p.errorf("expected identifier in aggregate type")
-		}
-		fieldName := p.current.Text
-		p.advance()
-
-		if p.current.Type == TokenColon {
-			// It's a record field: "name: type"
-			isRecord = true
-			p.advance()
-			typeRef, err := p.parseType()
-			if err != nil {
-				return nil, err
-			}
-			fields = append(fields, RecordField{Name: fieldName, Type: typeRef})
-		} else if p.current.Type == TokenLParen {
-			// It's a variant case with data: "name(type)"
-			isVariant = true
-			p.advance()
-			typeRef, err := p.parseType()
-			if err != nil {
-				return nil, err
-			}
-			if !p.expect(TokenRParen) {
-				return nil, p.errorf("expected ')' after variant case type")
-			}
-			p.advance()
-			variantCases = append(variantCases, VariantCase{Name: fieldName, Type: &typeRef})
-		} else {
-			// It's an enum case or variant case without data or flag
-			// We'll default to enum if no other context
-			enumCases = append(enumCases, fieldName)
-			isEnum = true
-		}
-
-		if p.current.Type == TokenComma {
-			p.advance()
-		} else if p.current.Type != TokenRBrace {
-			return nil, p.errorf("expected ',' or '}' in aggregate type")
-		}
-	}
-
-	if !p.expect(TokenRBrace) {
-		return nil, p.errorf("expected '}' to close aggregate type")
-	}
-	p.advance()
-
-	if !p.expect(TokenSemicolon) {
-		return nil, p.errorf("expected ';' after aggregate type")
-	}
-	p.advance()
-
-	var typeBody TypeDefBody
-	if isRecord && len(fields) > 0 {
-		typeBody = &Record{Fields: fields}
-	} else if isVariant && len(variantCases) > 0 {
-		typeBody = &Variant{Cases: variantCases}
-	} else if isEnum && len(enumCases) > 0 {
-		typeBody = &Enum{Cases: enumCases}
-	} else if isFlags {
-		typeBody = &Flags{Flags: flagItems}
-	} else {
-		// Default to enum if we have cases
-		if len(enumCases) > 0 {
-			typeBody = &Enum{Cases: enumCases}
-		} else {
-			return nil, p.errorf("could not determine aggregate type kind for %s", name)
-		}
-	}
-
-	return &TypeDef{Name: name, Type: typeBody}, nil
-}
-
-// parseFunc parses a function signature: "async? func (param-list) result-list".
-func (p *Parser) parseFunc() (*Func, error) {
-	async := false
-	if p.current.Type == TokenAsync {
-		async = true
-		p.advance()
-	}
-
-	if !p.expect(TokenFunc) {
-		return nil, p.errorf("expected 'func'")
-	}
-	p.advance()
-
-	// Parse parameters
+// parseParamList parses "(name: type, ...)".
+func (p *Parser) parseParamList() ([]FuncParam, error) {
 	if !p.expect(TokenLParen) {
-		return nil, p.errorf("expected '(' in function signature")
+		return nil, p.errorf("expected '(' in parameter list")
 	}
 	p.advance()
 
 	var params []FuncParam
 	for p.current.Type != TokenRParen && p.current.Type != TokenEOF {
-		if p.current.Type != TokenIdent {
+		if !p.isIdentifierToken() {
 			return nil, p.errorf("expected parameter name")
 		}
 		paramName := p.current.Text
@@ -814,6 +880,27 @@ func (p *Parser) parseFunc() (*Func, error) {
 		return nil, p.errorf("expected ')' to close parameter list")
 	}
 	p.advance()
+
+	return params, nil
+}
+
+// parseFunc parses a function signature: "async? func (param-list) result-list".
+func (p *Parser) parseFunc() (*Func, error) {
+	async := false
+	if p.current.Type == TokenAsync {
+		async = true
+		p.advance()
+	}
+
+	if !p.expect(TokenFunc) {
+		return nil, p.errorf("expected 'func'")
+	}
+	p.advance()
+
+	params, err := p.parseParamList()
+	if err != nil {
+		return nil, err
+	}
 
 	// Parse optional return type
 	var resultType *TypeRef
@@ -1133,7 +1220,7 @@ func (p *Parser) parseOwnType() (TypeRef, error) {
 	}
 	p.advance()
 
-	if p.current.Type != TokenIdent {
+	if !p.isIdentifierToken() {
 		return TypeRef{}, p.errorf("expected resource name in own<>")
 	}
 	resourceName := p.current.Text
@@ -1159,7 +1246,7 @@ func (p *Parser) parseBorrowType() (TypeRef, error) {
 	}
 	p.advance()
 
-	if p.current.Type != TokenIdent {
+	if !p.isIdentifierToken() {
 		return TypeRef{}, p.errorf("expected resource name in borrow<>")
 	}
 	resourceName := p.current.Text
@@ -1173,31 +1260,59 @@ func (p *Parser) parseBorrowType() (TypeRef, error) {
 	return TypeRef{Kind: "borrow", Name: resourceName}, nil
 }
 
-// parseUse parses "use path.{names};" or "use path as name;".
-func (p *Parser) parseUse() (*Use, error) {
+// parseUsePath parses a use-path:
+//
+//	use-path ::= id
+//	           | id ':' id '/' id ('@' valid-semver)?
+func (p *Parser) parseUsePath() (string, error) {
+	if !p.isIdentifierToken() {
+		return "", p.errorf("expected identifier in path")
+	}
+	var b strings.Builder
+	b.WriteString(p.current.Text)
+	p.advance()
+
+	for p.current.Type == TokenColon || p.current.Type == TokenSlash {
+		b.WriteString(p.current.Text)
+		p.advance()
+		if !p.isIdentifierToken() {
+			return "", p.errorf("expected identifier in path")
+		}
+		b.WriteString(p.current.Text)
+		p.advance()
+	}
+
+	if p.current.Type == TokenAt {
+		b.WriteString("@")
+		p.advance()
+		if p.current.Type != TokenVersion && !p.isIdentifierToken() {
+			return "", p.errorf("expected version after '@' in path")
+		}
+		b.WriteString(p.current.Text)
+		p.advance()
+	}
+
+	return b.String(), nil
+}
+
+// parseUse parses "use path.{names};" or "use path as name;", including any
+// leading gate.
+func (p *Parser) parseUse(gate Gate, externalID string) (*Use, error) {
 	if !p.expect(TokenUse) {
 		return nil, p.errorf("expected 'use'")
 	}
 	p.advance()
 
-	// Parse path (can include identifiers or keywords)
-	var pathParts []string
-	for p.isIdentifierToken() || p.current.Type == TokenColon || p.current.Type == TokenSlash || p.current.Type == TokenAt {
-		if p.isIdentifierToken() {
-			pathParts = append(pathParts, p.current.Text)
-			p.advance()
-		} else {
-			pathParts = append(pathParts, p.current.Text)
-			p.advance()
-		}
+	path, err := p.parseUsePath()
+	if err != nil {
+		return nil, err
 	}
 
-	path := strings.Join(pathParts, "")
-	use := &Use{Path: path, Names: make(map[string]string)}
+	use := &Use{Path: path, Names: make(map[string]string), Gate: gate, ExternalID: externalID}
 
 	if p.current.Type == TokenDot {
 		p.advance()
-		if p.current.Type != TokenLBrace {
+		if !p.expect(TokenLBrace) {
 			return nil, p.errorf("expected '{' after '.' in use statement")
 		}
 		p.advance()
@@ -1250,15 +1365,16 @@ func (p *Parser) parseUse() (*Use, error) {
 	return use, nil
 }
 
-// parseImport parses "import name : func-type;" or "import name : interface { ... };"
-func (p *Parser) parseImport() (*Import, error) {
+// parseImport parses "import name : func-type;" or "import name : interface { ... };",
+// including any leading gate.
+func (p *Parser) parseImport(gate Gate, externalID string) (*Import, error) {
 	if !p.expect(TokenImport) {
 		return nil, p.errorf("expected 'import'")
 	}
 	p.advance()
 
 	if p.current.Type != TokenIdent {
-		return nil, p.errorf("expected import name")
+		return nil, fmt.Errorf("line %d: import of a bare package path (without 'name:') is not yet supported", p.current.Line)
 	}
 	name := p.current.Text
 	p.advance()
@@ -1268,37 +1384,51 @@ func (p *Parser) parseImport() (*Import, error) {
 	}
 	p.advance()
 
-	// Could be a func type or an interface or a use path
+	// Could be a func type ("func(...) -> T;", semicolon-terminated) or an
+	// inline interface ("interface { ... }", no trailing semicolon).
 	var importType ImportType
-	if p.current.Type == TokenFunc {
+	switch p.current.Type {
+	case TokenFunc, TokenAsync:
 		fn, err := p.parseFunc()
 		if err != nil {
 			return nil, err
 		}
 		importType = &ImportFunc{Func: *fn}
-	} else if p.current.Type == TokenInterface {
-		return nil, fmt.Errorf("line %d: inline interface in import not yet supported", p.current.Line)
-	} else {
-		return nil, p.errorf("expected 'func' or interface in import")
+
+		if !p.expect(TokenSemicolon) {
+			return nil, p.errorf("expected ';' after import")
+		}
+		p.advance()
+	case TokenInterface:
+		items, err := p.parseInlineInterfaceBody()
+		if err != nil {
+			return nil, err
+		}
+		importType = &ImportInterface{Items: items}
+	default:
+		// Neither 'func' nor 'interface' follows "name:". In practice this
+		// means "name" was actually the first segment of a bare package
+		// path (e.g. "import wasi:io/streams@0.2.0;"), since the lexer
+		// tokenizes that leading namespace exactly like a local import
+		// name; the ':' we just consumed is the path separator, not the
+		// "name:" declarator. Report the specific, actionable error
+		// instead of a generic "expected 'func' or 'interface'".
+		return nil, fmt.Errorf("line %d: import of a bare package path (without 'name:') is not yet supported", p.current.Line)
 	}
 
-	if !p.expect(TokenSemicolon) {
-		return nil, p.errorf("expected ';' after import")
-	}
-	p.advance()
-
-	return &Import{Name: name, Type: importType}, nil
+	return &Import{Name: name, Type: importType, Gate: gate, ExternalID: externalID}, nil
 }
 
-// parseExport parses "export name : func-type;" or "export name : interface { ... };"
-func (p *Parser) parseExport() (*Export, error) {
+// parseExport parses "export name : func-type;" or "export name : interface { ... };",
+// including any leading gate.
+func (p *Parser) parseExport(gate Gate, externalID string) (*Export, error) {
 	if !p.expect(TokenExport) {
 		return nil, p.errorf("expected 'export'")
 	}
 	p.advance()
 
 	if p.current.Type != TokenIdent {
-		return nil, p.errorf("expected export name")
+		return nil, fmt.Errorf("line %d: export of a bare package path (without 'name:') is not yet supported", p.current.Line)
 	}
 	name := p.current.Text
 	p.advance()
@@ -1308,53 +1438,87 @@ func (p *Parser) parseExport() (*Export, error) {
 	}
 	p.advance()
 
+	// Could be a func type ("func(...) -> T;", semicolon-terminated) or an
+	// inline interface ("interface { ... }", no trailing semicolon).
 	var exportType ExportType
-	if p.current.Type == TokenFunc {
+	switch p.current.Type {
+	case TokenFunc, TokenAsync:
 		fn, err := p.parseFunc()
 		if err != nil {
 			return nil, err
 		}
 		exportType = &ExportFunc{Func: *fn}
-	} else if p.current.Type == TokenInterface {
-		return nil, fmt.Errorf("line %d: inline interface in export not yet supported", p.current.Line)
-	} else {
-		return nil, p.errorf("expected 'func' or interface in export")
+
+		if !p.expect(TokenSemicolon) {
+			return nil, p.errorf("expected ';' after export")
+		}
+		p.advance()
+	case TokenInterface:
+		items, err := p.parseInlineInterfaceBody()
+		if err != nil {
+			return nil, err
+		}
+		exportType = &ExportInterface{Items: items}
+	default:
+		// See the matching comment in parseImport: this is reached for a
+		// bare package-path export (e.g. "export wasi:io/streams@0.2.0;"),
+		// not just a plain syntax error.
+		return nil, fmt.Errorf("line %d: export of a bare package path (without 'name:') is not yet supported", p.current.Line)
 	}
 
-	if !p.expect(TokenSemicolon) {
-		return nil, p.errorf("expected ';' after export")
-	}
-	p.advance()
-
-	return &Export{Name: name, Type: exportType}, nil
+	return &Export{Name: name, Type: exportType, Gate: gate, ExternalID: externalID}, nil
 }
 
-// parseInclude parses "include path;" or "include path with { renames };"
-func (p *Parser) parseInclude() (WorldItem, error) {
+// parseInclude parses "include path;" or "include path with { renames };",
+// including any leading gate.
+func (p *Parser) parseInclude(gate Gate, externalID string) (WorldItem, error) {
 	if !p.expect(TokenInclude) {
 		return nil, p.errorf("expected 'include'")
 	}
 	p.advance()
 
-	// Parse path (for now, just skip it and return nil to mark as unsupported)
-	for p.current.Type == TokenIdent || p.current.Type == TokenColon || p.current.Type == TokenSlash {
-		p.advance()
+	path, err := p.parseUsePath()
+	if err != nil {
+		return nil, err
 	}
 
+	renames := make(map[string]string)
 	if p.current.Type == TokenWith {
 		p.advance()
-		if p.current.Type != TokenLBrace {
+		if !p.expect(TokenLBrace) {
 			return nil, p.errorf("expected '{' after 'with'")
 		}
 		p.advance()
 
-		// Skip the rename list
 		for p.current.Type != TokenRBrace && p.current.Type != TokenEOF {
+			if !p.isIdentifierToken() {
+				return nil, p.errorf("expected identifier in include rename list")
+			}
+			original := p.current.Text
 			p.advance()
+
+			if !p.expect(TokenAs) {
+				return nil, p.errorf("expected 'as' in include rename")
+			}
+			p.advance()
+
+			if !p.isIdentifierToken() {
+				return nil, p.errorf("expected alias after 'as'")
+			}
+			alias := p.current.Text
+			p.advance()
+
+			renames[original] = alias
+
+			if p.current.Type == TokenComma {
+				p.advance()
+			} else if p.current.Type != TokenRBrace {
+				return nil, p.errorf("expected ',' or '}' in include rename list")
+			}
 		}
 
 		if !p.expect(TokenRBrace) {
-			return nil, p.errorf("expected '}'")
+			return nil, p.errorf("expected '}' to close include rename list")
 		}
 		p.advance()
 	}
@@ -1364,8 +1528,7 @@ func (p *Parser) parseInclude() (WorldItem, error) {
 	}
 	p.advance()
 
-	// Return a marker that include is unsupported for now
-	return &TypeDef{Name: "include", Unsupported: "include statement not yet supported"}, nil
+	return &Include{Path: path, Renames: renames, Gate: gate, ExternalID: externalID}, nil
 }
 
 // Helper methods
@@ -1403,7 +1566,7 @@ func (p *Parser) isIdentifierToken() bool {
 	}
 }
 
-func (p *Parser) errorf(format string, args ...interface{}) error {
+func (p *Parser) errorf(format string, args ...any) error {
 	msg := fmt.Sprintf(format, args...)
 	return fmt.Errorf("%s:%d:%d: %s", p.filename, p.current.Line, p.current.Column, msg)
 }

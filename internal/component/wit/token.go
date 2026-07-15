@@ -302,11 +302,20 @@ func (lex *Lexer) readString() string {
 	return result
 }
 
-// readVersion reads a semantic version or integer.
+// readVersion reads a semantic version or integer. A '.' is only consumed as
+// part of the version when followed by a digit, so that constructs like
+// "pkg@0.2.8.{name}" (a version immediately followed by a use-names list)
+// don't have their trailing '.' swallowed into the version text.
 func (lex *Lexer) readVersion() string {
 	start := lex.pos
-	for lex.pos < len(lex.input) && (unicode.IsDigit(lex.ch) || lex.ch == '.' || lex.ch == '-' || lex.ch == '+') {
-		lex.advance()
+	for lex.pos < len(lex.input) {
+		if unicode.IsDigit(lex.ch) || lex.ch == '-' || lex.ch == '+' {
+			lex.advance()
+		} else if lex.ch == '.' && unicode.IsDigit(lex.peek()) {
+			lex.advance()
+		} else {
+			break
+		}
 	}
 	return lex.input[start:lex.pos]
 }

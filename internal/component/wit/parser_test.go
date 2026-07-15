@@ -279,7 +279,8 @@ interface i {
 	}
 }
 
-// TestRealWASIStreamsWIT tests parsing a real WASI interface.
+// TestRealWASIStreamsWIT tests parsing the real, vendored wasi:io streams.wit
+// with zero errors, including gate attributes and resource methods.
 func TestRealWASIStreamsWIT(t *testing.T) {
 	// Load the real WASI streams.wit
 	data, err := testdata.ReadFile("testdata/streams.wit")
@@ -290,14 +291,6 @@ func TestRealWASIStreamsWIT(t *testing.T) {
 	src := string(data)
 	pkg, err := Parse("streams.wit", src)
 	if err != nil {
-		// This is okay if we don't support all constructs yet
-		// Check if the error is about an unsupported construct
-		if strings.Contains(err.Error(), "not yet supported") ||
-			strings.Contains(err.Error(), "unexpected") ||
-			strings.Contains(err.Error(), "inline") {
-			t.Logf("WASI streams.wit parse failed with unsupported construct (expected): %v", err)
-			return
-		}
 		t.Fatalf("Failed to parse WASI streams.wit: %v", err)
 	}
 
@@ -305,12 +298,156 @@ func TestRealWASIStreamsWIT(t *testing.T) {
 		t.Fatal("Package is nil")
 	}
 
-	// Basic validation - should have parsed something
-	if pkg.Name == "" {
-		t.Error("Package name is empty")
+	if pkg.Name != "wasi:io@0.2.8" {
+		t.Errorf("Package name is %q, expected %q", pkg.Name, "wasi:io@0.2.8")
+	}
+
+	if len(pkg.Items) != 1 {
+		t.Fatalf("Expected 1 top-level item (interface streams), got %d", len(pkg.Items))
+	}
+
+	iface, ok := pkg.Items[0].(*Interface)
+	if !ok {
+		t.Fatalf("Expected Interface, got %T", pkg.Items[0])
+	}
+	if iface.Name != "streams" {
+		t.Errorf("Interface name is %q, expected %q", iface.Name, "streams")
+	}
+	if len(iface.Gate) != 1 || iface.Gate[0].Kind != "since" || iface.Gate[0].Version != "0.2.0" {
+		t.Errorf("Interface gate = %+v, expected a single @since(version = 0.2.0)", iface.Gate)
+	}
+
+	var uses, variants, resources int
+	var inputStream, outputStream *Resource
+	for _, item := range iface.Items {
+		switch v := item.(type) {
+		case *Use:
+			uses++
+			if len(v.Gate) != 1 || v.Gate[0].Kind != "since" {
+				t.Errorf("use %q missing @since gate: %+v", v.Path, v.Gate)
+			}
+		case *TypeDef:
+			switch body := v.Type.(type) {
+			case *Variant:
+				variants++
+				if v.Name != "stream-error" || len(body.Cases) != 2 {
+					t.Errorf("unexpected variant %q with %d cases", v.Name, len(body.Cases))
+				}
+			case *Resource:
+				resources++
+				switch v.Name {
+				case "input-stream":
+					inputStream = body
+				case "output-stream":
+					outputStream = body
+				default:
+					t.Errorf("unexpected resource %q", v.Name)
+				}
+			default:
+				t.Errorf("unexpected TypeDef body %T for %q", body, v.Name)
+			}
+		default:
+			t.Errorf("unexpected interface item %T", item)
+		}
+	}
+
+	if uses != 2 {
+		t.Errorf("expected 2 use statements, got %d", uses)
+	}
+	if variants != 1 {
+		t.Errorf("expected 1 variant, got %d", variants)
+	}
+	if resources != 2 {
+		t.Errorf("expected 2 resources, got %d", resources)
+	}
+
+	if inputStream == nil {
+		t.Fatal("input-stream resource not found")
+	}
+	if len(inputStream.Methods) != 5 {
+		t.Errorf("input-stream has %d methods, expected 5", len(inputStream.Methods))
+	}
+	for _, m := range inputStream.Methods {
+		if len(m.Gate) != 1 || m.Gate[0].Kind != "since" || m.Gate[0].Version != "0.2.0" {
+			t.Errorf("input-stream method %q missing @since gate: %+v", m.Name, m.Gate)
+		}
+	}
+
+	if outputStream == nil {
+		t.Fatal("output-stream resource not found")
+	}
+	if len(outputStream.Methods) != 10 {
+		t.Errorf("output-stream has %d methods, expected 10", len(outputStream.Methods))
+	}
+
+	// splice/blocking-splice take a borrow<input-stream> parameter.
+	var found bool
+	for _, m := range outputStream.Methods {
+		if m.Name == "splice" {
+			found = true
+			if len(m.Func.Params) != 2 || m.Func.Params[0].Type.Kind != "borrow" || m.Func.Params[0].Type.Name != "input-stream" {
+				t.Errorf("splice params = %+v, expected first param borrow<input-stream>", m.Func.Params)
+			}
+		}
+	}
+	if !found {
+		t.Error("splice method not found on output-stream")
 	}
 
 	t.Logf("Successfully parsed WASI streams.wit: package=%s, items=%d", pkg.Name, len(pkg.Items))
+}
+
+// TestRealWASIRandomWIT tests parsing the real, vendored wasi:random random.wit
+// with zero errors, as a second independent real-world WASI 0.2 fixture.
+func TestRealWASIRandomWIT(t *testing.T) {
+	data, err := testdata.ReadFile("testdata/random.wit")
+	if err != nil {
+		t.Fatalf("Failed to read random.wit: %v", err)
+	}
+
+	src := string(data)
+	pkg, err := Parse("random.wit", src)
+	if err != nil {
+		t.Fatalf("Failed to parse WASI random.wit: %v", err)
+	}
+
+	if pkg == nil {
+		t.Fatal("Package is nil")
+	}
+	if pkg.Name != "wasi:random@0.2.8" {
+		t.Errorf("Package name is %q, expected %q", pkg.Name, "wasi:random@0.2.8")
+	}
+
+	if len(pkg.Items) != 1 {
+		t.Fatalf("Expected 1 top-level item (interface random), got %d", len(pkg.Items))
+	}
+
+	iface, ok := pkg.Items[0].(*Interface)
+	if !ok {
+		t.Fatalf("Expected Interface, got %T", pkg.Items[0])
+	}
+	if iface.Name != "random" {
+		t.Errorf("Interface name is %q, expected %q", iface.Name, "random")
+	}
+	if len(iface.Gate) != 1 || iface.Gate[0].Kind != "since" || iface.Gate[0].Version != "0.2.0" {
+		t.Errorf("Interface gate = %+v, expected a single @since(version = 0.2.0)", iface.Gate)
+	}
+	if len(iface.Items) != 2 {
+		t.Fatalf("Expected 2 interface items, got %d", len(iface.Items))
+	}
+
+	fn, ok := iface.Items[0].(*InterfaceFunc)
+	if !ok {
+		t.Fatalf("Expected InterfaceFunc, got %T", iface.Items[0])
+	}
+	if fn.Name != "get-random-bytes" {
+		t.Errorf("first func name is %q, expected %q", fn.Name, "get-random-bytes")
+	}
+	if fn.Func.Result == nil || fn.Func.Result.Kind != "list" {
+		t.Errorf("get-random-bytes result = %v, expected list<u8>", fn.Func.Result)
+	}
+
+	t.Logf("Successfully parsed WASI random.wit: package=%s, items=%d", pkg.Name, len(pkg.Items))
 }
 
 // TestPackageDeclaration tests package name parsing.
@@ -523,6 +660,239 @@ func TestInvalidSyntax(t *testing.T) {
 	}
 }
 
+// TestResourceConstructorAndStatic tests resource constructors and static
+// methods, which aren't exercised by streams.wit or random.wit.
+func TestResourceConstructorAndStatic(t *testing.T) {
+	src := `package test:test;
+interface i {
+  resource blob {
+    constructor(init: list<u8>);
+    write: func(bytes: list<u8>);
+    read: func(n: u32) -> list<u8>;
+    merge: static func(lhs: borrow<blob>, rhs: borrow<blob>) -> blob;
+  }
+  resource blob2 {
+    constructor(init: list<u8>) -> result<blob2>;
+  }
+}`
+
+	pkg, err := Parse("test.wit", src)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	iface := pkg.Items[0].(*Interface)
+	blobDef, ok := iface.Items[0].(*TypeDef)
+	if !ok || blobDef.Name != "blob" {
+		t.Fatalf("expected TypeDef 'blob', got %T", iface.Items[0])
+	}
+	blob, ok := blobDef.Type.(*Resource)
+	if !ok {
+		t.Fatalf("expected Resource, got %T", blobDef.Type)
+	}
+	if len(blob.Methods) != 4 {
+		t.Fatalf("expected 4 methods on blob, got %d", len(blob.Methods))
+	}
+
+	ctor := blob.Methods[0]
+	if !ctor.IsConstructor || ctor.Name != "constructor" || len(ctor.Func.Params) != 1 {
+		t.Errorf("unexpected constructor: %+v", ctor)
+	}
+	if ctor.Func.Result != nil {
+		t.Errorf("infallible constructor should have nil result, got %v", ctor.Func.Result)
+	}
+
+	write := blob.Methods[1]
+	if write.Name != "write" || write.IsStatic || write.IsConstructor {
+		t.Errorf("unexpected write method: %+v", write)
+	}
+
+	merge := blob.Methods[3]
+	if merge.Name != "merge" || !merge.IsStatic || merge.IsConstructor {
+		t.Errorf("unexpected merge method: %+v", merge)
+	}
+	if len(merge.Func.Params) != 2 || merge.Func.Result == nil || merge.Func.Result.Name != "blob" {
+		t.Errorf("unexpected merge signature: %+v", merge.Func)
+	}
+
+	blob2Def := iface.Items[1].(*TypeDef)
+	blob2 := blob2Def.Type.(*Resource)
+	fallibleCtor := blob2.Methods[0]
+	if fallibleCtor.Func.Result == nil || fallibleCtor.Func.Result.Kind != "result" {
+		t.Errorf("fallible constructor should return result<blob2>, got %v", fallibleCtor.Func.Result)
+	}
+}
+
+// TestStackedGates tests multiple gate attributes stacked on one item, per
+// the WIT.md example ("@since(...) @deprecated(...) e: func();").
+func TestStackedGates(t *testing.T) {
+	src := `package test:test;
+interface foo {
+  a: func();
+
+  @since(version = 0.2.1)
+  b: func();
+
+  @unstable(feature = fancier-foo)
+  d: func();
+
+  @since(version = 0.2.0)
+  @deprecated(version = 0.2.2)
+  e: func();
+}`
+
+	pkg, err := Parse("test.wit", src)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	iface := pkg.Items[0].(*Interface)
+	if len(iface.Items) != 4 {
+		t.Fatalf("expected 4 funcs, got %d", len(iface.Items))
+	}
+
+	a := iface.Items[0].(*InterfaceFunc)
+	if len(a.Gate) != 0 {
+		t.Errorf("a should have no gate, got %+v", a.Gate)
+	}
+
+	b := iface.Items[1].(*InterfaceFunc)
+	if len(b.Gate) != 1 || b.Gate[0].Kind != "since" || b.Gate[0].Version != "0.2.1" {
+		t.Errorf("unexpected gate on b: %+v", b.Gate)
+	}
+
+	d := iface.Items[2].(*InterfaceFunc)
+	if len(d.Gate) != 1 || d.Gate[0].Kind != "unstable" || d.Gate[0].Feature != "fancier-foo" {
+		t.Errorf("unexpected gate on d: %+v", d.Gate)
+	}
+
+	e := iface.Items[3].(*InterfaceFunc)
+	if len(e.Gate) != 2 {
+		t.Fatalf("expected 2 stacked gates on e, got %d: %+v", len(e.Gate), e.Gate)
+	}
+	if e.Gate[0].Kind != "since" || e.Gate[0].Version != "0.2.0" {
+		t.Errorf("unexpected first gate on e: %+v", e.Gate[0])
+	}
+	if e.Gate[1].Kind != "deprecated" || e.Gate[1].Version != "0.2.2" {
+		t.Errorf("unexpected second gate on e: %+v", e.Gate[1])
+	}
+}
+
+// TestWorldItems tests inline world items: import func, export interface,
+// use, and include.
+func TestWorldItems(t *testing.T) {
+	src := `package test:test;
+
+interface console {
+  log: func(msg: string);
+}
+
+world my-world {
+  use console.{log};
+
+  import slugify: func(text: string) -> string;
+
+  export run: func() -> result<_, string>;
+
+  export handler: interface {
+    handle: func(req: string) -> string;
+  }
+
+  include other-world with { a as a1, b as b1 };
+}`
+
+	pkg, err := Parse("test.wit", src)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	if len(pkg.Items) != 2 {
+		t.Fatalf("expected 2 top-level items, got %d", len(pkg.Items))
+	}
+
+	world, ok := pkg.Items[1].(*World)
+	if !ok {
+		t.Fatalf("expected World, got %T", pkg.Items[1])
+	}
+	if len(world.Items) != 5 {
+		t.Fatalf("expected 5 world items, got %d", len(world.Items))
+	}
+
+	if _, ok := world.Items[0].(*Use); !ok {
+		t.Errorf("world.Items[0] is %T, expected *Use", world.Items[0])
+	}
+
+	imp, ok := world.Items[1].(*Import)
+	if !ok {
+		t.Fatalf("world.Items[1] is %T, expected *Import", world.Items[1])
+	}
+	if imp.Name != "slugify" {
+		t.Errorf("import name = %q, expected %q", imp.Name, "slugify")
+	}
+	if _, ok := imp.Type.(*ImportFunc); !ok {
+		t.Errorf("import type = %T, expected *ImportFunc", imp.Type)
+	}
+
+	exp, ok := world.Items[2].(*Export)
+	if !ok {
+		t.Fatalf("world.Items[2] is %T, expected *Export", world.Items[2])
+	}
+	if exp.Name != "run" {
+		t.Errorf("export name = %q, expected %q", exp.Name, "run")
+	}
+
+	handlerExp, ok := world.Items[3].(*Export)
+	if !ok {
+		t.Fatalf("world.Items[3] is %T, expected *Export", world.Items[3])
+	}
+	handlerIface, ok := handlerExp.Type.(*ExportInterface)
+	if !ok {
+		t.Fatalf("handler export type = %T, expected *ExportInterface", handlerExp.Type)
+	}
+	if len(handlerIface.Items) != 1 {
+		t.Errorf("inline handler interface has %d items, expected 1", len(handlerIface.Items))
+	}
+
+	inc, ok := world.Items[4].(*Include)
+	if !ok {
+		t.Fatalf("world.Items[4] is %T, expected *Include", world.Items[4])
+	}
+	if inc.Path != "other-world" {
+		t.Errorf("include path = %q, expected %q", inc.Path, "other-world")
+	}
+	if inc.Renames["a"] != "a1" || inc.Renames["b"] != "b1" {
+		t.Errorf("unexpected include renames: %+v", inc.Renames)
+	}
+}
+
+// TestVersionedUsePath tests a use-path with an "@version" segment
+// immediately followed by ".{names}", which previously tripped a lexer bug
+// where the version scanner greedily consumed the following '.' (e.g.
+// "wasi:io/poll@0.2.8.{pollable}" from real wasi-clocks WIT).
+func TestVersionedUsePath(t *testing.T) {
+	src := `package test:test;
+interface i {
+  use wasi:io/poll@0.2.8.{pollable};
+}`
+
+	pkg, err := Parse("test.wit", src)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	iface := pkg.Items[0].(*Interface)
+	use, ok := iface.Items[0].(*Use)
+	if !ok {
+		t.Fatalf("expected Use, got %T", iface.Items[0])
+	}
+	if use.Path != "wasi:io/poll@0.2.8" {
+		t.Errorf("use path = %q, expected %q", use.Path, "wasi:io/poll@0.2.8")
+	}
+	if use.Names["pollable"] != "pollable" {
+		t.Errorf("unexpected use names: %+v", use.Names)
+	}
+}
+
 // BenchmarkParser benchmarks parsing a typical WIT file.
 func BenchmarkParser(b *testing.B) {
 	src := `package example:test@0.1.0;
@@ -555,4 +925,3 @@ world calculator {
 		_, _ = Parse("benchmark.wit", src)
 	}
 }
-
