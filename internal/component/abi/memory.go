@@ -210,16 +210,25 @@ func loadString(mem []byte, ptr uint32) (Value, error) {
 		return nil, err
 	}
 
-	strPtrVal := strPtr.(uint32)
-	strLenVal := strLen.(uint32)
-
-	// UTF-8: byte length is the code unit length
-	if uint32(len(mem)) < strPtrVal+strLenVal {
-		return nil, fmt.Errorf("loadString: string buffer overflow at ptr=%d len=%d mem_len=%d", strPtrVal, strLenVal, len(mem))
+	s, err := loadStringFromRange(mem, strPtr.(uint32), strLen.(uint32))
+	if err != nil {
+		return nil, err
 	}
-
-	s := string(mem[strPtrVal : strPtrVal+strLenVal])
 	return s, nil
+}
+
+// loadStringFromRange reads a UTF-8 string of byteLen bytes starting at ptr.
+// This mirrors the canonical ABI's load_string_from_range() (definitions.py).
+// It is factored out of loadString so that the flat-ABI path (liftFlatString,
+// where ptr/len arrive as two separate core values instead of already being
+// packed together in memory) can reuse the exact same bytes-to-string logic
+// instead of a second implementation.
+func loadStringFromRange(mem []byte, ptr, byteLen uint32) (string, error) {
+	// UTF-8: byte length is the code unit length.
+	if uint32(len(mem)) < ptr+byteLen {
+		return "", fmt.Errorf("loadStringFromRange: string buffer overflow at ptr=%d len=%d mem_len=%d", ptr, byteLen, len(mem))
+	}
+	return string(mem[ptr : ptr+byteLen]), nil
 }
 
 func loadList(mem []byte, ptr uint32, elemType bintype.TypeDesc, resolve Resolver) (Value, error) {
@@ -236,10 +245,16 @@ func loadList(mem []byte, ptr uint32, elemType bintype.TypeDesc, resolve Resolve
 		return nil, err
 	}
 
-	listPtrVal := listPtr.(uint32)
-	listLenVal := listLen.(uint32)
+	return loadListFromRange(mem, listPtr.(uint32), listLen.(uint32), elemType, resolve)
+}
 
-	// Load each element
+// loadListFromRange reads `length` elements of elemType starting at ptr.
+// This mirrors the canonical ABI's load_list_from_range() (definitions.py).
+// It is factored out of loadList so that the flat-ABI path (liftFlatList,
+// where ptr/len arrive as two separate core values instead of already being
+// packed together in memory) can reuse the exact same element-loading loop
+// instead of a second implementation.
+func loadListFromRange(mem []byte, ptr, length uint32, elemType bintype.TypeDesc, resolve Resolver) ([]Value, error) {
 	elemSize, err := Size(elemType, resolve)
 	if err != nil {
 		return nil, err
@@ -251,21 +266,21 @@ func loadList(mem []byte, ptr uint32, elemType bintype.TypeDesc, resolve Resolve
 	}
 
 	// Check bounds
-	byteLen := listLenVal * elemSize
-	if uint32(len(mem)) < listPtrVal+byteLen {
-		return nil, fmt.Errorf("loadList: list buffer overflow at ptr=%d len=%d mem_len=%d", listPtrVal, byteLen, len(mem))
+	byteLen := length * elemSize
+	if uint32(len(mem)) < ptr+byteLen {
+		return nil, fmt.Errorf("loadListFromRange: list buffer overflow at ptr=%d len=%d mem_len=%d", ptr, byteLen, len(mem))
 	}
 
 	// Check alignment
-	if listPtrVal != Align(listPtrVal, elemAlign) {
-		return nil, fmt.Errorf("loadList: list pointer %d not aligned to %d", listPtrVal, elemAlign)
+	if ptr != Align(ptr, elemAlign) {
+		return nil, fmt.Errorf("loadListFromRange: list pointer %d not aligned to %d", ptr, elemAlign)
 	}
 
-	result := make([]Value, listLenVal)
-	for i := range listLenVal {
-		v, err := loadValue(mem, listPtrVal+i*elemSize, elemType, resolve)
+	result := make([]Value, length)
+	for i := range length {
+		v, err := loadValue(mem, ptr+i*elemSize, elemType, resolve)
 		if err != nil {
-			return nil, fmt.Errorf("loadList[%d]: %w", i, err)
+			return nil, fmt.Errorf("loadListFromRange[%d]: %w", i, err)
 		}
 		result[i] = v
 	}
@@ -714,21 +729,10 @@ func storeInt(mem []byte, ptr uint32, v any, nbytes uint32) error {
 func storeString(mem []byte, ptr uint32, s string, realloc Realloc) error {
 	ptrSize := uint32(4) // assuming 32-bit pointers
 
-	// Allocate memory for string bytes (UTF-8)
-	strBytes := []byte(s)
-	byteLen := uint32(len(strBytes))
-
-	newPtr, err := realloc(0, 0, 1, byteLen)
+	newPtr, byteLen, err := allocStoreString(mem, s, realloc)
 	if err != nil {
-		return fmt.Errorf("storeString: realloc failed: %w", err)
+		return fmt.Errorf("storeString: %w", err)
 	}
-
-	if uint32(len(mem)) < newPtr+byteLen {
-		return fmt.Errorf("storeString: allocated memory out of bounds: ptr=%d size=%d", newPtr, byteLen)
-	}
-
-	// Copy string bytes to memory
-	copy(mem[newPtr:newPtr+byteLen], strBytes)
 
 	// Store pointer and length
 	if err := storeInt(mem, ptr, newPtr, ptrSize); err != nil {
@@ -741,6 +745,33 @@ func storeString(mem []byte, ptr uint32, s string, realloc Realloc) error {
 	return nil
 }
 
+// allocStoreString allocates room for the UTF-8 bytes of s via realloc,
+// copies them into mem, and returns (dataPtr, byteLen). This mirrors the
+// canonical ABI's store_string_into_range() (definitions.py). It is shared
+// by storeString (the Store/Load path, which additionally writes the
+// (ptr,len) pair into memory at a record/list slot) and lowerFlatString (the
+// flat ABI path, which returns (ptr,len) directly as core values) so there
+// is exactly one implementation of "allocate + copy string bytes".
+func allocStoreString(mem []byte, s string, realloc Realloc) (uint32, uint32, error) {
+	// Allocate memory for string bytes (UTF-8)
+	strBytes := []byte(s)
+	byteLen := uint32(len(strBytes))
+
+	newPtr, err := realloc(0, 0, 1, byteLen)
+	if err != nil {
+		return 0, 0, fmt.Errorf("realloc failed: %w", err)
+	}
+
+	if uint32(len(mem)) < newPtr+byteLen {
+		return 0, 0, fmt.Errorf("allocated memory out of bounds: ptr=%d size=%d", newPtr, byteLen)
+	}
+
+	// Copy string bytes to memory
+	copy(mem[newPtr:newPtr+byteLen], strBytes)
+
+	return newPtr, byteLen, nil
+}
+
 func storeList(mem []byte, ptr uint32, v Value, elemType bintype.TypeDesc, resolve Resolver, realloc Realloc) error {
 	list, ok := v.([]Value)
 	if !ok {
@@ -749,48 +780,57 @@ func storeList(mem []byte, ptr uint32, v Value, elemType bintype.TypeDesc, resol
 
 	ptrSize := uint32(4) // assuming 32-bit pointers
 
-	if len(list) == 0 {
-		// Empty list: store (0, 0)
-		if err := storeInt(mem, ptr, uint32(0), ptrSize); err != nil {
-			return err
-		}
-		return storeInt(mem, ptr+ptrSize, uint32(0), ptrSize)
-	}
-
-	// Allocate memory for list elements
-	elemSize, err := Size(elemType, resolve)
+	newPtr, length, err := allocStoreList(mem, list, elemType, resolve, realloc)
 	if err != nil {
-		return err
-	}
-
-	elemAlign, err := Alignment(elemType, resolve)
-	if err != nil {
-		return err
-	}
-
-	byteLen := uint32(len(list)) * elemSize
-	newPtr, err := realloc(0, 0, elemAlign, byteLen)
-	if err != nil {
-		return fmt.Errorf("storeList: realloc failed: %w", err)
-	}
-
-	if uint32(len(mem)) < newPtr+byteLen {
-		return fmt.Errorf("storeList: allocated memory out of bounds: ptr=%d size=%d", newPtr, byteLen)
-	}
-
-	// Store each element
-	for i, elem := range list {
-		elemPtr := newPtr + uint32(i)*elemSize
-		if err := storeValue(mem, elemPtr, elemType, elem, resolve, realloc); err != nil {
-			return fmt.Errorf("storeList[%d]: %w", i, err)
-		}
+		return fmt.Errorf("storeList: %w", err)
 	}
 
 	// Store list pointer and length
 	if err := storeInt(mem, ptr, newPtr, ptrSize); err != nil {
 		return err
 	}
-	return storeInt(mem, ptr+ptrSize, uint32(len(list)), ptrSize)
+	return storeInt(mem, ptr+ptrSize, length, ptrSize)
+}
+
+// allocStoreList allocates room for len(list) elements of elemType via
+// realloc, stores each element into the allocated region, and returns
+// (dataPtr, length). This mirrors the canonical ABI's
+// store_list_into_range() (definitions.py). It is shared by storeList (the
+// Store/Load path, which additionally writes the (ptr,len) pair into memory
+// at a record/list slot) and lowerFlatList (the flat ABI path, which returns
+// (ptr,len) directly as core values) so there is exactly one implementation
+// of "allocate + store list elements".
+func allocStoreList(mem []byte, list []Value, elemType bintype.TypeDesc, resolve Resolver, realloc Realloc) (uint32, uint32, error) {
+	// Allocate memory for list elements
+	elemSize, err := Size(elemType, resolve)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	elemAlign, err := Alignment(elemType, resolve)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	byteLen := uint32(len(list)) * elemSize
+	newPtr, err := realloc(0, 0, elemAlign, byteLen)
+	if err != nil {
+		return 0, 0, fmt.Errorf("realloc failed: %w", err)
+	}
+
+	if uint32(len(mem)) < newPtr+byteLen {
+		return 0, 0, fmt.Errorf("allocated memory out of bounds: ptr=%d size=%d", newPtr, byteLen)
+	}
+
+	// Store each element
+	for i, elem := range list {
+		elemPtr := newPtr + uint32(i)*elemSize
+		if err := storeValue(mem, elemPtr, elemType, elem, resolve, realloc); err != nil {
+			return 0, 0, fmt.Errorf("[%d]: %w", i, err)
+		}
+	}
+
+	return newPtr, uint32(len(list)), nil
 }
 
 func storeRecord(mem []byte, ptr uint32, v Value, desc bintype.RecordDesc, resolve Resolver, realloc Realloc) error {

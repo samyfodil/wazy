@@ -1,0 +1,186 @@
+{
+  "types": [
+    {"name": "u32_val", "type": {"kind": "primitive", "prim": "u32"}},
+    {"name": "s32_val", "type": {"kind": "primitive", "prim": "s32"}},
+    {"name": "u64_val", "type": {"kind": "primitive", "prim": "u64"}},
+    {"name": "s64_val", "type": {"kind": "primitive", "prim": "s64"}},
+    {"name": "f32_val", "type": {"kind": "primitive", "prim": "f32"}},
+    {"name": "f64_val", "type": {"kind": "primitive", "prim": "f64"}},
+    {"name": "bool_val", "type": {"kind": "primitive", "prim": "bool"}},
+    {"name": "u8_val", "type": {"kind": "primitive", "prim": "u8"}},
+    {"name": "s8_val", "type": {"kind": "primitive", "prim": "s8"}},
+    {"name": "u16_val", "type": {"kind": "primitive", "prim": "u16"}},
+    {"name": "s16_val", "type": {"kind": "primitive", "prim": "s16"}},
+    {"name": "char_val", "type": {"kind": "primitive", "prim": "char"}},
+    {
+      "name": "simple_record",
+      "type": {
+        "kind": "record",
+        "fields": [
+          {"name": "a", "type": {"kind": "primitive", "prim": "u32"}},
+          {"name": "b", "type": {"kind": "primitive", "prim": "s32"}}
+        ]
+      }
+    },
+    {
+      "name": "simple_variant",
+      "type": {
+        "kind": "variant",
+        "cases": [
+          {"name": "none"},
+          {"name": "some", "type": {"kind": "primitive", "prim": "u32"}}
+        ]
+      }
+    },
+    {
+      "name": "variant_mixed_flat",
+      "type": {
+        "kind": "variant",
+        "cases": [
+          {"name": "a_u32", "type": {"kind": "primitive", "prim": "u32"}},
+          {"name": "b_f32", "type": {"kind": "primitive", "prim": "f32"}},
+          {"name": "c_u64", "type": {"kind": "primitive", "prim": "u64"}}
+        ]
+      }
+    },
+    {
+      "name": "simple_option",
+      "type": {
+        "kind": "option",
+        "elem": {"kind": "primitive", "prim": "u32"}
+      }
+    },
+    {
+      "name": "simple_result",
+      "type": {
+        "kind": "result",
+        "ok": {"kind": "primitive", "prim": "u32"},
+        "err": {"kind": "primitive", "prim": "s32"}
+      }
+    },
+    {
+      "name": "simple_tuple",
+      "type": {
+        "kind": "tuple",
+        "elems": [
+          {"kind": "primitive", "prim": "u32"},
+          {"kind": "primitive", "prim": "s32"}
+        ]
+      }
+    },
+    {
+      "name": "simple_flags",
+      "type": {
+        "kind": "flags",
+        "names": ["a", "b", "c"]
+      }
+    },
+    {
+      "name": "simple_enum",
+      "type": {
+        "kind": "enum",
+        "names": ["red", "green", "blue"]
+      }
+    },
+    {"name": "string_val", "type": {"kind": "primitive", "prim": "string"}},
+    {
+      "name": "list_u32",
+      "type": {
+        "kind": "list",
+        "elem": {"kind": "primitive", "prim": "u32"}
+      }
+    },
+    {
+      "name": "list_string",
+      "type": {
+        "kind": "list",
+        "elem": {"kind": "primitive", "prim": "string"}
+      }
+    },
+    {
+      "name": "record_string_u32",
+      "type": {
+        "kind": "record",
+        "fields": [
+          {"name": "a", "type": {"kind": "primitive", "prim": "string"}},
+          {"name": "b", "type": {"kind": "primitive", "prim": "u32"}}
+        ]
+      }
+    },
+    {
+      "name": "option_string",
+      "type": {
+        "kind": "option",
+        "elem": {"kind": "primitive", "prim": "string"}
+      }
+    },
+    {
+      "name": "result_string_u32",
+      "type": {
+        "kind": "result",
+        "ok": {"kind": "primitive", "prim": "string"},
+        "err": {"kind": "primitive", "prim": "u32"}
+      }
+    },
+    {
+      "name": "tuple_list_u32",
+      "type": {
+        "kind": "tuple",
+        "elems": [
+          {"kind": "ref", "name": "list_u32"},
+          {"kind": "primitive", "prim": "u32"}
+        ]
+      }
+    }
+  ],
+  "values": [
+    {"type": "u32_val", "name": "u32_zero", "value": 0},
+    {"type": "u32_val", "name": "u32_max", "value": 4294967295},
+    {"type": "s32_val", "name": "s32_zero", "value": 0},
+    {"type": "s32_val", "name": "s32_pos", "value": 1000},
+    {"type": "s32_val", "name": "s32_neg", "value": -1000},
+    {"type": "u64_val", "name": "u64_zero", "value": 0},
+    {"type": "u64_val", "name": "u64_max", "value": 9007199254740991},
+    {"type": "s64_val", "name": "s64_zero", "value": 0},
+    {"type": "s64_val", "name": "s64_pos", "value": 1000000000000},
+    {"type": "s64_val", "name": "s64_neg", "value": -1000000000000},
+    {"type": "f32_val", "name": "f32_zero", "value": 0.0},
+    {"type": "f32_val", "name": "f32_pos", "value": 3.14},
+    {"type": "f32_val", "name": "f32_neg", "value": -2.71},
+    {"type": "f64_val", "name": "f64_zero", "value": 0.0},
+    {"type": "f64_val", "name": "f64_pos", "value": 3.141592653589793},
+    {"type": "f64_val", "name": "f64_neg", "value": -2.718281828459045},
+    {"type": "bool_val", "name": "bool_true", "value": true},
+    {"type": "bool_val", "name": "bool_false", "value": false},
+    {"type": "u8_val", "name": "u8_zero", "value": 0},
+    {"type": "u8_val", "name": "u8_max", "value": 255},
+    {"type": "s8_val", "name": "s8_pos", "value": 100},
+    {"type": "s8_val", "name": "s8_neg", "value": -100},
+    {"type": "u16_val", "name": "u16_mid", "value": 32768},
+    {"type": "s16_val", "name": "s16_neg", "value": -1000},
+    {"type": "char_val", "name": "char_a", "value": 97},
+    {"type": "simple_record", "name": "record_vals", "value": [42, -100]},
+    {"type": "simple_variant", "name": "variant_none", "value": {"none": null}},
+    {"type": "simple_variant", "name": "variant_some", "value": {"some": 123}},
+    {"type": "variant_mixed_flat", "name": "variant_u32", "value": {"a_u32": 456}},
+    {"type": "variant_mixed_flat", "name": "variant_f32", "value": {"b_f32": 1.5}},
+    {"type": "variant_mixed_flat", "name": "variant_u64", "value": {"c_u64": 789012345}},
+    {"type": "simple_option", "name": "option_none", "value": null},
+    {"type": "simple_option", "name": "option_some", "value": 999},
+    {"type": "simple_result", "name": "result_ok", "value": {"ok": 777}},
+    {"type": "simple_result", "name": "result_err", "value": {"err": -555}},
+    {"type": "simple_tuple", "name": "tuple_vals", "value": [1234, 5678]},
+    {"type": "simple_flags", "name": "flags_zero", "value": 0},
+    {"type": "simple_flags", "name": "flags_all", "value": 7},
+    {"type": "simple_enum", "name": "enum_red", "value": 0},
+    {"type": "simple_enum", "name": "enum_green", "value": 1},
+    {"type": "simple_enum", "name": "enum_blue", "value": 2},
+    {"type": "string_val", "name": "string_hello", "value": "hello"},
+    {"type": "list_u32", "name": "list_u32_vals", "value": [1, 2, 3]},
+    {"type": "list_string", "name": "list_string_vals", "value": ["ab", "cd"]},
+    {"type": "record_string_u32", "name": "record_string_u32_vals", "value": ["greet", 42]},
+    {"type": "option_string", "name": "option_string_some", "value": "opt"},
+    {"type": "result_string_u32", "name": "result_string_u32_ok", "value": {"ok": "res"}},
+    {"type": "tuple_list_u32", "name": "tuple_list_u32_vals", "value": [[7, 8, 9], 3]}
+  ]
+}
