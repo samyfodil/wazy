@@ -1,0 +1,16 @@
+package example:test@0.1.0;
+
+interface math {
+  type big-int = list<u8>;
+  type point = record { x: s32, y: s32 };
+  type color = variant { red, green, blue, custom(string) };
+  type direction = enum { north, south, east, west };
+  type permissions = flags { read, write, execute };
+
+  add: func(a: u32, b: u32) -> u32;
+  process: func(p: point) -> result<color, string>;
+}
+
+world command {
+  export run: func() -> result<_, string>;
+}
