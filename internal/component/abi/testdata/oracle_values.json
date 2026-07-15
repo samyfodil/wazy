@@ -1,0 +1,204 @@
+{
+  "values": [
+    {
+      "name": "bool_true",
+      "type": {"kind": "primitive", "prim": "bool"},
+      "value": true
+    },
+    {
+      "name": "bool_false",
+      "type": {"kind": "primitive", "prim": "bool"},
+      "value": false
+    },
+    {
+      "name": "u8_zero",
+      "type": {"kind": "primitive", "prim": "u8"},
+      "value": 0
+    },
+    {
+      "name": "u8_max",
+      "type": {"kind": "primitive", "prim": "u8"},
+      "value": 255
+    },
+    {
+      "name": "u16_mid",
+      "type": {"kind": "primitive", "prim": "u16"},
+      "value": 12345
+    },
+    {
+      "name": "u32_mid",
+      "type": {"kind": "primitive", "prim": "u32"},
+      "value": 123456789
+    },
+    {
+      "name": "u64_large",
+      "type": {"kind": "primitive", "prim": "u64"},
+      "value": 1234567890123456
+    },
+    {
+      "name": "s8_neg",
+      "type": {"kind": "primitive", "prim": "s8"},
+      "value": -42
+    },
+    {
+      "name": "s16_neg",
+      "type": {"kind": "primitive", "prim": "s16"},
+      "value": -12345
+    },
+    {
+      "name": "s32_neg",
+      "type": {"kind": "primitive", "prim": "s32"},
+      "value": -123456789
+    },
+    {
+      "name": "s64_neg",
+      "type": {"kind": "primitive", "prim": "s64"},
+      "value": -1234567890123456
+    },
+    {
+      "name": "f32_pi",
+      "type": {"kind": "primitive", "prim": "f32"},
+      "value": 3.5
+    },
+    {
+      "name": "f64_pi",
+      "type": {"kind": "primitive", "prim": "f64"},
+      "value": 3.141592653589793
+    },
+    {
+      "name": "char_a",
+      "type": {"kind": "primitive", "prim": "char"},
+      "value": 97
+    },
+    {
+      "name": "char_emoji",
+      "type": {"kind": "primitive", "prim": "char"},
+      "value": 128512
+    },
+    {
+      "name": "string_hello",
+      "type": {"kind": "primitive", "prim": "string"},
+      "value": "hello"
+    },
+    {
+      "name": "string_empty",
+      "type": {"kind": "primitive", "prim": "string"},
+      "value": ""
+    },
+    {
+      "name": "string_unicode",
+      "type": {"kind": "primitive", "prim": "string"},
+      "value": "café"
+    },
+    {
+      "name": "list_u32_empty",
+      "type": {"kind": "list", "elem": {"kind": "primitive", "prim": "u32"}},
+      "value": []
+    },
+    {
+      "name": "list_u32_simple",
+      "type": {"kind": "list", "elem": {"kind": "primitive", "prim": "u32"}},
+      "value": [1, 2, 3]
+    },
+    {
+      "name": "record_pair_u32",
+      "type": {
+        "kind": "record",
+        "fields": [
+          {"name": "x", "type": {"kind": "primitive", "prim": "u32"}},
+          {"name": "y", "type": {"kind": "primitive", "prim": "u32"}}
+        ]
+      },
+      "value": [10, 20]
+    },
+    {
+      "name": "record_mixed",
+      "type": {
+        "kind": "record",
+        "fields": [
+          {"name": "a", "type": {"kind": "primitive", "prim": "u8"}},
+          {"name": "b", "type": {"kind": "primitive", "prim": "u32"}},
+          {"name": "c", "type": {"kind": "primitive", "prim": "u8"}}
+        ]
+      },
+      "value": [1, 42, 2]
+    },
+    {
+      "name": "tuple_triple",
+      "type": {
+        "kind": "tuple",
+        "elems": [
+          {"kind": "primitive", "prim": "u32"},
+          {"kind": "primitive", "prim": "u32"},
+          {"kind": "primitive", "prim": "u32"}
+        ]
+      },
+      "value": [100, 200, 300]
+    },
+    {
+      "name": "variant_none",
+      "type": {
+        "kind": "variant",
+        "cases": [
+          {"name": "a", "type": {"kind": "primitive", "prim": "u32"}},
+          {"name": "b", "type": null}
+        ]
+      },
+      "value": {"disc": 1, "payload": null}
+    },
+    {
+      "name": "variant_some",
+      "type": {
+        "kind": "variant",
+        "cases": [
+          {"name": "a", "type": {"kind": "primitive", "prim": "u32"}},
+          {"name": "b", "type": {"kind": "primitive", "prim": "u32"}}
+        ]
+      },
+      "value": {"disc": 0, "payload": 42}
+    },
+    {
+      "name": "flags_two",
+      "type": {"kind": "flags", "names": ["read", "write"]},
+      "value": 3
+    },
+    {
+      "name": "flags_eight",
+      "type": {"kind": "flags", "names": ["a", "b", "c", "d", "e", "f", "g", "h"]},
+      "value": 5
+    },
+    {
+      "name": "enum_middle",
+      "type": {"kind": "enum", "cases": ["red", "green", "blue"]},
+      "value": 1
+    },
+    {
+      "name": "option_none",
+      "type": {"kind": "option", "elem": {"kind": "primitive", "prim": "u32"}},
+      "value": null
+    },
+    {
+      "name": "option_some",
+      "type": {"kind": "option", "elem": {"kind": "primitive", "prim": "u32"}},
+      "value": 123
+    },
+    {
+      "name": "result_ok",
+      "type": {
+        "kind": "result",
+        "ok": {"kind": "primitive", "prim": "u32"},
+        "err": {"kind": "primitive", "prim": "u32"}
+      },
+      "value": {"isErr": false, "payload": 42}
+    },
+    {
+      "name": "result_err",
+      "type": {
+        "kind": "result",
+        "ok": {"kind": "primitive", "prim": "u32"},
+        "err": {"kind": "primitive", "prim": "u32"}
+      },
+      "value": {"isErr": true, "payload": 99}
+    }
+  ]
+}

@@ -1,0 +1,221 @@
+{
+  "bool_false": {
+    "loaded_value": false,
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "bool_true": {
+    "loaded_value": true,
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "char_a": {
+    "loaded_value": 97,
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "char_emoji": {
+    "loaded_value": 128512,
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "enum_middle": {
+    "loaded_value": 1,
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "f32_pi": {
+    "loaded_value": 3.5,
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "f64_pi": {
+    "loaded_value": 3.141592653589793,
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "flags_eight": {
+    "loaded_value": 5,
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "flags_two": {
+    "loaded_value": 3,
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "list_u32_empty": {
+    "loaded_value": [],
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "list_u32_simple": {
+    "loaded_value": [
+      1024,
+      3,
+      3
+    ],
+    "mem_hex": "000400000300000003000000",
+    "mem_len": 12,
+    "ptr": 1024
+  },
+  "option_none": {
+    "loaded_value": null,
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "option_some": {
+    "loaded_value": 123,
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "record_mixed": {
+    "loaded_value": [
+      1,
+      42,
+      2
+    ],
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "record_pair_u32": {
+    "loaded_value": [
+      10,
+      20
+    ],
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "result_err": {
+    "loaded_value": {
+      "isErr": true,
+      "payload": 99
+    },
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "result_ok": {
+    "loaded_value": {
+      "isErr": false,
+      "payload": 42
+    },
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "s16_neg": {
+    "loaded_value": -12345,
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "s32_neg": {
+    "loaded_value": -123456789,
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "s64_neg": {
+    "loaded_value": -1234567890123456,
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "s8_neg": {
+    "loaded_value": -42,
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "string_empty": {
+    "loaded_value": "",
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "string_hello": {
+    "loaded_value": "\u0000\u0004\u0000\u0000\u0005",
+    "mem_hex": "0004000005",
+    "mem_len": 5,
+    "ptr": 1024
+  },
+  "string_unicode": {
+    "loaded_value": "\u0000\u0004\u0000\u0000\u0005",
+    "mem_hex": "0004000005",
+    "mem_len": 5,
+    "ptr": 1024
+  },
+  "tuple_triple": {
+    "loaded_value": [
+      100,
+      200,
+      300
+    ],
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "u16_mid": {
+    "loaded_value": 12345,
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "u32_mid": {
+    "loaded_value": 123456789,
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "u64_large": {
+    "loaded_value": 1234567890123456,
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "u8_max": {
+    "loaded_value": 255,
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "u8_zero": {
+    "loaded_value": 0,
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "variant_none": {
+    "loaded_value": {
+      "disc": 1,
+      "payload": null
+    },
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "variant_some": {
+    "loaded_value": {
+      "disc": 0,
+      "payload": 42
+    },
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  }
+}
