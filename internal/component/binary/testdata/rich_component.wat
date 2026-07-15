@@ -1,0 +1,16 @@
+(component
+  (type $color (enum "red" "green" "blue"))
+  (type $point (record (field "x" s32) (field "y" s32)))
+  (type $maybe (option string))
+  (type $res (result u32 (error string)))
+  (type $nums (list u64))
+  (type $shape (variant (case "circle" f64) (case "empty")))
+  (type $flags (flags "a" "b" "c"))
+  (import "test:pkg/api" (instance $api
+    (export "make" (func (param "c" $color) (param "p" $point) (result $res)))
+  ))
+  (core module $m (func (export "run")))
+  (core instance $ci (instantiate $m))
+  (func $run (canon lift (core func $ci "run")))
+  (export "run" (func $run))
+)
