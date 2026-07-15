@@ -3,7 +3,6 @@ package interpreter
 import (
 	"fmt"
 	"math"
-	"strings"
 )
 
 // unsignedInt represents unsigned 32-bit or 64-bit integers.
@@ -1206,14 +1205,18 @@ const (
 //
 // Note: This is a form of union type as it can store fields needed for any operation. Hence, most fields are opaque and
 // only relevant when in context of its kind.
+// unionOperation is 32 bytes: the variable-length payload a few ops need (the
+// old `Us []uint64`, dead for ~95% of ops -- see I8) has been moved out to a
+// per-function side table (compiledFunction.sideTable). Ops that need it store
+// the side-table index in U3 (all such ops -- BrTable, V128Shuffle,
+// TailCallReturnCallIndirect, ReturnCallRef -- leave U3 otherwise free). This
+// keeps the hot `body []unionOperation` dispatch array dense.
 type unionOperation struct {
 	// Kind determines how to interpret the other fields in this struct.
-	Kind   operationKind
-	B1, B2 byte
-	B3     bool
-	U1, U2 uint64
-	U3     uint64
-	Us     []uint64
+	Kind       operationKind
+	B1, B2     byte
+	B3         bool
+	U1, U2, U3 uint64
 }
 
 // String implements fmt.Stringer.
@@ -1268,16 +1271,9 @@ func (o unionOperation) String() string {
 		return fmt.Sprintf("%s %s, %s", o.Kind, thenTarget, elseTarget)
 
 	case operationKindBrTable:
-		var targets []string
-		var defaultLabel label
-		if len(o.Us) > 0 {
-			targets = make([]string, len(o.Us)-1)
-			for i, t := range o.Us[1:] {
-				targets[i] = label(t).String()
-			}
-			defaultLabel = label(o.Us[0])
-		}
-		return fmt.Sprintf("%s [%s] %s", o.Kind, strings.Join(targets, ","), defaultLabel)
+		// The targets/ranges live in the function's side table (index U3), which
+		// this value-receiver method can't reach; print the index for debugging.
+		return fmt.Sprintf("%s sideTable[%d]", o.Kind, o.U3)
 
 	case operationKindCallIndirect:
 		return fmt.Sprintf("%s: type=%d, table=%d", o.Kind, o.U1, o.U2)
@@ -1554,11 +1550,10 @@ func newOperationBrIf(thenTarget, elseTarget label, thenDrop inclusiveRange) uni
 // For example, assume we have operations like {default: L_DEFAULT, targets: [L0, L1, L2]}.
 // If "index" >= len(defaults), then branch into the L_DEFAULT label.
 // Otherwise, we enter label of targets[index].
-func newOperationBrTable(targetLabelsAndRanges []uint64) unionOperation {
-	return unionOperation{
-		Kind: operationKindBrTable,
-		Us:   targetLabelsAndRanges,
-	}
+// newOperationBrTable builds the BrTable op; the caller stores the
+// targetLabelsAndRanges in the side table and sets U3 to its index.
+func newOperationBrTable() unionOperation {
+	return unionOperation{Kind: operationKindBrTable}
 }
 
 // NewOperationCall is a constructor for unionOperation with operationKindCall.
@@ -2554,9 +2549,11 @@ func newOperationV128Splat(shape shape) unionOperation {
 	return unionOperation{Kind: operationKindV128Splat, B1: shape}
 }
 
-// NewOperationV128Shuffle is a constructor for unionOperation with operationKindV128Shuffle.
-func newOperationV128Shuffle(lanes []uint64) unionOperation {
-	return unionOperation{Kind: operationKindV128Shuffle, Us: lanes}
+// NewOperationV128Shuffle is a constructor for unionOperation with
+// operationKindV128Shuffle; the caller stores the 16 lanes in the side table
+// and sets U3 to its index.
+func newOperationV128Shuffle() unionOperation {
+	return unionOperation{Kind: operationKindV128Shuffle}
 }
 
 // NewOperationV128Swizzle is a constructor for unionOperation with operationKindV128Swizzle.
@@ -3229,8 +3226,11 @@ func newOperationTailCallReturnCall(functionIndex uint32) unionOperation {
 // This corresponds to
 //
 //	wasm.OpcodeTailCallReturnCallIndirect.
-func newOperationTailCallReturnCallIndirect(typeIndex, tableIndex uint32, dropDepth inclusiveRange, l label) unionOperation {
-	return unionOperation{Kind: operationKindTailCallReturnCallIndirect, U1: uint64(typeIndex), U2: uint64(tableIndex), Us: []uint64{dropDepth.AsU64(), uint64(l)}}
+//
+// The [dropDepth, label] payload goes in the side table (U3 = its index), set
+// by the caller.
+func newOperationTailCallReturnCallIndirect(typeIndex, tableIndex uint32) unionOperation {
+	return unionOperation{Kind: operationKindTailCallReturnCallIndirect, U1: uint64(typeIndex), U2: uint64(tableIndex)}
 }
 
 // newOperationThrow is a constructor for unionOperation with operationKindThrow.
@@ -3251,9 +3251,10 @@ func newOperationCallRef(typeIndex uint32) unionOperation {
 }
 
 // newOperationReturnCallRef is a constructor for operationKindReturnCallRef.
-// U1 = type index, U2 = table index (unused), Us = [dropDepth, label].
-func newOperationReturnCallRef(typeIndex uint32, dropDepth inclusiveRange, l label) unionOperation {
-	return unionOperation{Kind: operationKindReturnCallRef, U1: uint64(typeIndex), Us: []uint64{dropDepth.AsU64(), uint64(l)}}
+// U1 = type index; the [dropDepth, label] payload goes in the side table
+// (U3 = its index), set by the caller.
+func newOperationReturnCallRef(typeIndex uint32) unionOperation {
+	return unionOperation{Kind: operationKindReturnCallRef, U1: uint64(typeIndex)}
 }
 
 // newOperationRefAsNonNull is a constructor for operationKindRefAsNonNull.

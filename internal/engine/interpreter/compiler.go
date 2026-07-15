@@ -243,6 +243,13 @@ type compilationResult struct {
 	// Non nil only when the given Wasm module has the DWARF section.
 	IROperationSourceOffsetsInWasmBinary []uint64
 
+	// SideTable holds the variable-length uint64 payloads for the few ops that
+	// need one (BrTable targets/ranges, V128Shuffle lanes, tail-call
+	// [dropDepth,label]); such an op stores its index here in U3. Keeping it out
+	// of unionOperation shrinks that struct 56->32 B (see I8). Appended to via
+	// addSideTable; reset per function in Next().
+	SideTable [][]uint64
+
 	// UsesMemory is true if this function might use memory.
 	UsesMemory bool
 	// PendingExceptionTable holds unresolved exception table entries, built during
@@ -332,6 +339,7 @@ func (c *compiler) Next() (*compilationResult, error) {
 	c.result.IROperationSourceOffsetsInWasmBinary = c.result.IROperationSourceOffsetsInWasmBinary[:0]
 	c.result.UsesMemory = false
 	c.result.PendingExceptionTable = c.result.PendingExceptionTable[:0]
+	c.result.SideTable = c.result.SideTable[:0]
 	// Reset the previous states.
 	c.pc = 0
 	c.currentOpPC = 0
@@ -761,7 +769,9 @@ operatorSwitch:
 		defaultLabel := defaultTargetFrame.asLabel()
 		targetLabels[s] = uint64(defaultLabel)
 		targetLabels[s+1] = defaultTargetDrop.AsU64()
-		c.emit(newOperationBrTable(targetLabels))
+		op := newOperationBrTable()
+		op.U3 = c.addSideTable(targetLabels)
+		c.emit(op)
 
 		// br_table operation is stack-polymorphic, and mark the state as unreachable.
 		// That means subsequent instructions in the current control frame are "unreachable"
@@ -2190,7 +2200,8 @@ operatorSwitch:
 			for i := uint64(0); i < 16; i++ {
 				lanes[i] = uint64(c.body[c.pc+i])
 			}
-			op := newOperationV128Shuffle(lanes)
+			op := newOperationV128Shuffle()
+			op.U3 = c.addSideTable(lanes)
 			c.emit(op)
 			c.pc += 15
 		case wasm.OpcodeVecV128AnyTrue:
@@ -3534,7 +3545,9 @@ operatorSwitch:
 
 		functionFrame := c.controlFrames.functionFrame()
 		dropRange := c.getFrameDropRange(functionFrame, false)
-		c.emit(newOperationTailCallReturnCallIndirect(typeIndex, tableIndex, dropRange, functionFrame.asLabel()))
+		op := newOperationTailCallReturnCallIndirect(typeIndex, tableIndex)
+		op.U3 = c.addSideTable([]uint64{dropRange.AsU64(), uint64(functionFrame.asLabel())})
+		c.emit(op)
 
 		// Return operation is stack-polymorphic, and mark the state as unreachable.
 		// That means subsequent instructions in the current control frame are "unreachable"
@@ -3547,7 +3560,9 @@ operatorSwitch:
 	case wasm.OpcodeReturnCallRef:
 		functionFrame := c.controlFrames.functionFrame()
 		dropRange := c.getFrameDropRange(functionFrame, false)
-		c.emit(newOperationReturnCallRef(index, dropRange, functionFrame.asLabel()))
+		op := newOperationReturnCallRef(index)
+		op.U3 = c.addSideTable([]uint64{dropRange.AsU64(), uint64(functionFrame.asLabel())})
+		c.emit(op)
 		c.markUnreachable()
 
 	case wasm.OpcodeRefAsNonNull:
@@ -3716,6 +3731,15 @@ func (c *compiler) stackPush(ts unsignedType) {
 }
 
 // emit adds the operations into the result.
+// addSideTable appends a variable-length op payload to the current function's
+// side table and returns its index (to be stored in the op's U3). us is owned
+// by the side table after this call.
+func (c *compiler) addSideTable(us []uint64) uint64 {
+	idx := uint64(len(c.result.SideTable))
+	c.result.SideTable = append(c.result.SideTable, us)
+	return idx
+}
+
 func (c *compiler) emit(op unionOperation) {
 	if !c.unreachableState.on {
 		switch op.Kind {

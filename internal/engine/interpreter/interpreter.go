@@ -361,8 +361,13 @@ type callFrame struct {
 }
 
 type compiledFunction struct {
-	source              *wasm.Module
-	body                []unionOperation
+	source *wasm.Module
+	body   []unionOperation
+	// sideTable holds the variable-length uint64 payloads moved out of
+	// unionOperation (I8): BrTable targets/ranges, V128Shuffle lanes, and
+	// tail-call [dropDepth,label]. An op that needs one stores its index here in
+	// U3. Kept parallel to body so body stays a dense 32-B/op array.
+	sideTable           [][]uint64
 	exceptionTable      []exceptionTableEntry
 	listener            experimental.FunctionListener
 	offsetsInWasmBinary []uint64
@@ -598,6 +603,12 @@ func (e *engine) NewModuleEngine(module *wasm.Module, instance *wasm.ModuleInsta
 func (e *engine) lowerIR(ir *compilationResult, ret *compiledFunction) error {
 	// Copy the body from the result.
 	ret.body = slices.Clone(ir.Operations)
+	// Clone the side table's outer slice (ir.SideTable is reused/reset per
+	// function in Next()); the inner []uint64 entries are freshly made per
+	// function so sharing their backing is safe, matching how ret.body shares
+	// operand backing with ir.Operations. Label resolution below mutates these
+	// entries in place.
+	ret.sideTable = slices.Clone(ir.SideTable)
 	// Also copy the offsets if necessary.
 	if offsets := ir.IROperationSourceOffsetsInWasmBinary; len(offsets) > 0 {
 		ret.offsetsInWasmBinary = slices.Clone(offsets)
@@ -634,12 +645,14 @@ func (e *engine) lowerIR(ir *compilationResult, ret *compiledFunction) error {
 			e.setLabelAddress(&op.U1, label(op.U1), labelAddressResolutions)
 			e.setLabelAddress(&op.U2, label(op.U2), labelAddressResolutions)
 		case operationKindBrTable:
-			for j := 0; j < len(op.Us); j += 2 {
-				target := op.Us[j]
-				e.setLabelAddress(&op.Us[j], label(target), labelAddressResolutions)
+			us := ret.sideTable[op.U3]
+			for j := 0; j < len(us); j += 2 {
+				target := us[j]
+				e.setLabelAddress(&us[j], label(target), labelAddressResolutions)
 			}
 		case operationKindTailCallReturnCallIndirect:
-			e.setLabelAddress(&op.Us[1], label(op.Us[1]), labelAddressResolutions)
+			us := ret.sideTable[op.U3]
+			e.setLabelAddress(&us[1], label(us[1]), labelAddressResolutions)
 		case operationKindBrOnNull:
 			e.setLabelAddress(&op.U1, label(op.U1), labelAddressResolutions)
 			e.setLabelAddress(&op.U2, label(op.U2), labelAddressResolutions)
@@ -647,7 +660,8 @@ func (e *engine) lowerIR(ir *compilationResult, ret *compiledFunction) error {
 			e.setLabelAddress(&op.U1, label(op.U1), labelAddressResolutions)
 			e.setLabelAddress(&op.U2, label(op.U2), labelAddressResolutions)
 		case operationKindReturnCallRef:
-			e.setLabelAddress(&op.Us[1], label(op.Us[1]), labelAddressResolutions)
+			us := ret.sideTable[op.U3]
+			e.setLabelAddress(&us[1], label(us[1]), labelAddressResolutions)
 		}
 	}
 
@@ -1184,14 +1198,15 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 				pc = op.U2
 			}
 		case operationKindBrTable:
+			us := frame.f.parent.sideTable[op.U3]
 			v := ce.popValue()
-			defaultAt := uint64(len(op.Us))/2 - 1
+			defaultAt := uint64(len(us))/2 - 1
 			if v > defaultAt {
 				v = defaultAt
 			}
 			v *= 2
-			ce.drop(op.Us[v+1])
-			pc = op.Us[v]
+			ce.drop(us[v+1])
+			pc = us[v]
 		case operationKindCall:
 			frame.pc = pc // sync: callee may snapshot/throw/trap; traces read this frame's pc
 			frameUnwound := ce.callWithUnwind(ctx, f.moduleInstance, &functions[op.U1])
@@ -2109,9 +2124,10 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 					continue
 				}
 				// Return
-				ce.drop(op.Us[0])
+				us := frame.f.parent.sideTable[op.U3]
+				ce.drop(us[0])
 				// Jump to the function frame (return)
-				pc = op.Us[1]
+				pc = us[1]
 				continue
 			}
 
@@ -2152,8 +2168,9 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 					body = frame.f.parent.body
 					continue
 				}
-				ce.drop(op.Us[0])
-				pc = op.Us[1]
+				us := frame.f.parent.sideTable[op.U3]
+				ce.drop(us[0])
+				pc = us[1]
 				continue
 			}
 
@@ -3049,7 +3066,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 	case operationKindV128Shuffle:
 		xHi, xLo, yHi, yLo := ce.popValue(), ce.popValue(), ce.popValue(), ce.popValue()
 		var newVal [16]byte
-		for i, l := range op.Us {
+		for i, l := range frame.f.parent.sideTable[op.U3] {
 			if l < 8 {
 				newVal[i] = byte(yLo >> (l * 8))
 			} else if l < 16 {

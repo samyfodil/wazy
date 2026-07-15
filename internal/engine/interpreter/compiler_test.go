@@ -1684,9 +1684,9 @@ func TestCompile_Vec(t *testing.T) {
 				wasm.OpcodeDrop,
 				wasm.OpcodeEnd,
 			},
-			expected: newOperationV128Shuffle([]uint64{
-				1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-			}),
+			// The 16 lanes now live in the function's side table (index 0);
+			// their values are exercised end-to-end by the simd spectests.
+			expected:             newOperationV128Shuffle(),
 			needDropBeforeReturn: true,
 		},
 		{
