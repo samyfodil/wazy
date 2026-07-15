@@ -154,6 +154,16 @@ Rules:
   before they're considered done.
 - The differential ABI oracle is non-negotiable; it is the safety net.
 
+### Coverage gate (hard requirement)
+Every package must reach **>=90% statement coverage** (`go test -cover`) before its
+work is committed, and every fail-loud error branch must have a test that triggers
+it. Self-authored happy-path tests are not enough — they missed 3 real ABI bugs
+(sizeList, alignmentList, joinCoreTypes) because the fixtures only used list<u32>.
+Coverage is measured, not assumed: happy path + every error path + boundary cases
+(discriminant/flags boundaries, spill-to-memory, nested/empty aggregates). The
+differential oracle covers ABI correctness; table-driven tests + real wasm-tools
+fixtures cover the parsers. A commit that drops a package below the bar is blocked.
+
 ---
 
 ## Deferred (see TODOS.md)
