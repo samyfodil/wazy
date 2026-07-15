@@ -265,7 +265,11 @@ func alignmentFlagsNumLabels(numLabels int) (uint32, error) {
 }
 
 func alignmentEnum(desc binary.EnumDesc) (uint32, error) {
-	return alignmentFlagsNumLabels(len(desc.Cases))
+	discType := DiscriminantType(len(desc.Cases))
+	if discType == "" {
+		return 0, fmt.Errorf("invalid enum: %d cases", len(desc.Cases))
+	}
+	return alignmentPrimitive(discType)
 }
 
 func alignmentOption(desc binary.OptionDesc, resolve Resolver) (uint32, error) {
@@ -441,7 +445,28 @@ func sizeFlagsNumLabels(numLabels int) (uint32, error) {
 }
 
 func sizeEnum(desc binary.EnumDesc) (uint32, error) {
-	return sizeFlagsNumLabels(len(desc.Cases))
+	return sizeEnumNumCases(len(desc.Cases))
+}
+
+// sizeEnumNumCases returns the byte width of an enum discriminant for
+// numCases cases -- mirroring DiscriminantType's u8/u16/u32 sizing (used
+// for a variant's discriminant), NOT sizeFlagsNumLabels/
+// alignmentFlagsNumLabels's 32-label cap. That cap is a `flags`-specific
+// constraint (flags pack N boolean labels into ceil(N/32) i32 core words,
+// and this package only supports the single-word case); an enum's core
+// representation is always exactly one discriminant value no matter how
+// many cases it has (bounded only by u32, per DiscriminantType), so
+// reusing the flags helper here was wrong -- it rejected any enum with
+// more than 32 cases, including real WASI 0.2 types like
+// wasi:filesystem/types' 37-case `error-code`. Shared by sizeEnum here and
+// memory.go's loadEnum/storeEnum, which used to call sizeFlagsNumLabels
+// directly for the same reason.
+func sizeEnumNumCases(numCases int) (uint32, error) {
+	discType := DiscriminantType(numCases)
+	if discType == "" {
+		return 0, fmt.Errorf("invalid enum: %d cases", numCases)
+	}
+	return sizePrimitive(discType)
 }
 
 func sizeOption(desc binary.OptionDesc, resolve Resolver) (uint32, error) {

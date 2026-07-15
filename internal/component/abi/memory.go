@@ -409,7 +409,7 @@ func loadFlags(mem []byte, ptr uint32, desc bintype.FlagsDesc) (Value, error) {
 }
 
 func loadEnum(mem []byte, ptr uint32, desc bintype.EnumDesc) (Value, error) {
-	enumSize, err := sizeFlagsNumLabels(len(desc.Cases))
+	enumSize, err := sizeEnumNumCases(len(desc.Cases))
 	if err != nil {
 		return nil, err
 	}
@@ -978,7 +978,7 @@ func storeEnum(mem []byte, ptr uint32, v Value, desc bintype.EnumDesc) error {
 		return fmt.Errorf("storeEnum: case index %d out of range [0,%d)", caseIdx, len(desc.Cases))
 	}
 
-	enumSize, err := sizeFlagsNumLabels(len(desc.Cases))
+	enumSize, err := sizeEnumNumCases(len(desc.Cases))
 	if err != nil {
 		return err
 	}

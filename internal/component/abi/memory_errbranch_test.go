@@ -393,10 +393,15 @@ func TestLoadVariantPayloadLoadError(t *testing.T) {
 }
 
 // ---------- enum size error ----------
+//
+// Unlike flags, an enum's discriminant size has no upper case-count bound
+// (see sizeEnumNumCases' doc in layout.go) -- 33, or wasi:filesystem/
+// types' real 37-case error-code, is a perfectly valid enum. The only
+// invalid case count is zero.
 
 func TestLoadEnumInvalidLabels(t *testing.T) {
 	mem := make([]byte, 8)
-	desc := bintype.EnumDesc{Cases: make([]string, 33)} // >32 labels -> size error
+	desc := bintype.EnumDesc{Cases: make([]string, 0)}
 	if _, err := loadEnum(mem, 0, desc); err == nil {
 		t.Error("expected error for loadEnum invalid label count")
 	}
@@ -404,8 +409,7 @@ func TestLoadEnumInvalidLabels(t *testing.T) {
 
 func TestStoreEnumInvalidLabels(t *testing.T) {
 	mem := make([]byte, 8)
-	desc := bintype.EnumDesc{Cases: make([]string, 33)}
-	// index 0 is < len, so range check passes; size computation fails
+	desc := bintype.EnumDesc{Cases: make([]string, 0)}
 	if err := storeEnum(mem, 0, uint32(0), desc); err == nil {
 		t.Error("expected error for storeEnum invalid label count")
 	}

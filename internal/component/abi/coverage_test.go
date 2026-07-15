@@ -255,18 +255,44 @@ func TestInvalidFlagsCounts(t *testing.T) {
 	}
 }
 
+// TestInvalidEnumCounts checks the one genuinely invalid enum case count
+// (zero: an enum must have at least one case, mirroring DiscriminantType's
+// own numCases<=0 check). Unlike flags, an enum's core representation is a
+// single discriminant value no matter how many cases it has (bounded only
+// by u32) -- so, unlike TestInvalidFlagsCounts above, there is no
+// upper-bound case to check here; n=33 (or wasi:filesystem/types' real
+// 37-case error-code) is valid. See sizeEnumNumCases' doc in layout.go.
 func TestInvalidEnumCounts(t *testing.T) {
-	for _, n := range []int{0, 33} {
-		enum := binary.EnumDesc{Cases: make([]string, n)}
-		if _, err := Size(enum, noResolver); err == nil {
-			t.Errorf("Size(enum n=%d): expected error", n)
-		}
-		if _, err := Alignment(enum, noResolver); err == nil {
-			t.Errorf("Alignment(enum n=%d): expected error", n)
-		}
-		if _, err := Flatten(enum, noResolver); err == nil {
-			t.Errorf("Flatten(enum n=%d): expected error", n)
-		}
+	enum := binary.EnumDesc{Cases: make([]string, 0)}
+	if _, err := Size(enum, noResolver); err == nil {
+		t.Error("Size(enum n=0): expected error")
+	}
+	if _, err := Alignment(enum, noResolver); err == nil {
+		t.Error("Alignment(enum n=0): expected error")
+	}
+	if _, err := Flatten(enum, noResolver); err == nil {
+		t.Error("Flatten(enum n=0): expected error")
+	}
+}
+
+// TestValidLargeEnumCount proves an enum well beyond flags' 32-label cap
+// (which never applied to enum in the first place -- see
+// TestInvalidEnumCounts' doc) sizes/aligns/flattens successfully. 37
+// matches wasi:filesystem/types' real `error-code` enum.
+func TestValidLargeEnumCount(t *testing.T) {
+	enum := binary.EnumDesc{Cases: make([]string, 37)}
+	if _, err := Size(enum, noResolver); err != nil {
+		t.Errorf("Size(enum n=37): unexpected error: %v", err)
+	}
+	if _, err := Alignment(enum, noResolver); err != nil {
+		t.Errorf("Alignment(enum n=37): unexpected error: %v", err)
+	}
+	flat, err := Flatten(enum, noResolver)
+	if err != nil {
+		t.Errorf("Flatten(enum n=37): unexpected error: %v", err)
+	}
+	if want := []string{"i32"}; len(flat) != 1 || flat[0] != want[0] {
+		t.Errorf("Flatten(enum n=37) = %v, want %v", flat, want)
 	}
 }
 

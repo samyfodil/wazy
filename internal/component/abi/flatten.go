@@ -240,8 +240,15 @@ func flattenFlagsNumLabels(numLabels int) ([]string, error) {
 	return []string{"i32"}, nil
 }
 
+// flattenEnum flattens an enum to always exactly one core "i32" value,
+// regardless of how many cases it has (an enum discriminant is a single
+// value, unlike flags' multi-word bitset -- see sizeEnumNumCases' doc for
+// why this must not reuse flattenFlagsNumLabels's 32-label cap).
 func flattenEnum(desc binary.EnumDesc) ([]string, error) {
-	return flattenFlagsNumLabels(len(desc.Cases))
+	if len(desc.Cases) <= 0 {
+		return nil, fmt.Errorf("invalid enum: %d cases", len(desc.Cases))
+	}
+	return []string{"i32"}, nil
 }
 
 func flattenOption(desc binary.OptionDesc, resolve Resolver) ([]string, error) {

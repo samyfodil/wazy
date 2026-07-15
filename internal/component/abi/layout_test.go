@@ -254,6 +254,13 @@ func TestFlagsSize(t *testing.T) {
 
 // --- Enum Tests ---
 
+// TestEnumAlignment checks the discriminant-width boundaries an enum's
+// alignment mirrors DiscriminantType's (u8 up to 256 cases, u16 up to
+// 65536, u32 beyond) -- NOT flags' 8/16/32-label tiers (an enum's core
+// representation is always a single discriminant value regardless of case
+// count, unlike flags' multi-word bitset; see sizeEnumNumCases' doc in
+// layout.go). n=37 is wasi:filesystem/types' real `error-code` enum,
+// which a buggy flags-shaped bound used to reject outright.
 func TestEnumAlignment(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -262,10 +269,15 @@ func TestEnumAlignment(t *testing.T) {
 	}{
 		{"1", 1, 1},
 		{"8", 8, 1},
-		{"9", 9, 2},
-		{"16", 16, 2},
-		{"17", 17, 4},
-		{"32", 32, 4},
+		{"9", 9, 1},
+		{"16", 16, 1},
+		{"17", 17, 1},
+		{"32", 32, 1},
+		{"37", 37, 1},
+		{"256", 256, 1},
+		{"257", 257, 2},
+		{"65536", 65536, 2},
+		{"65537", 65537, 4},
 	}
 
 	for _, tt := range tests {
