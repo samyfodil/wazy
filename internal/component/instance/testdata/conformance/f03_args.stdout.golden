@@ -1,0 +1,7 @@
+argc = 4
+arg[0] = 10
+arg[1] = 20
+arg[2] = hello
+arg[3] = 5
+integer sum = 35
+joined = 10 20 hello 5

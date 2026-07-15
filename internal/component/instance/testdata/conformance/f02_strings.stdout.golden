@@ -1,0 +1,12 @@
+word count = 9
+joined with dashes = the-quick-brown-fox-jumps-over-the-lazy-dog
+replaced = the slow brown fox jumps over the energetic dog
+reversed = god yzal eht revo spmuj xof nworb kciuq eht
+upper = THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG
+unicode = héllo wörld — café — naïve — 日本語 — emoji: 🎉🚀✨
+unicode char count = 45
+unicode byte count = 71
+unicode reversed = ✨🚀🎉 :ijome — 語本日 — evïan — éfac — dlröw olléh
+sorted words = brown,dog,fox,jumps,lazy,over,quick,the,the
+trimmed = [padded string]
+csv fields = 5 -> ["a", "b", "", "c", ""]

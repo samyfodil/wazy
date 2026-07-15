@@ -2,6 +2,7 @@ package instance
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"strings"
@@ -49,6 +50,11 @@ import (
 //     startup does invoke get-environment/get-directories, so they must
 //     behave correctly, not just instantiate; real_args.component.wasm (see
 //     real_args_test.go) additionally calls get-arguments to echo argv.
+//   - wasi:random/random.get-random-bytes: real randomness from
+//     crypto/rand -- discovered via conformance_test.go's f05_collections
+//     fixture, whose std::collections::HashMap construction reaches this
+//     through wasi_snapshot_preview1's random_get (see getRandomBytes's
+//     doc for why a fake/deterministic source would be the wrong fix).
 //
 // get-directories, in turn, returns a real preopened root descriptor
 // ("/") backed by WASIConfig.FS, and wasi_fs.go registers real
@@ -139,6 +145,9 @@ const (
 	wasiIfaceTerminalStdout  = "wasi:cli/terminal-stdout@0.2.3"
 	wasiIfaceTerminalStderr  = "wasi:cli/terminal-stderr@0.2.3"
 	wasiIfaceError           = "wasi:io/error@0.2.3"
+
+	// Added for wasi:random -- see getRandomBytes's doc.
+	wasiIfaceRandom = "wasi:random/random@0.2.3"
 )
 
 // WASIConfig configures the WASI 0.2 host implementation WithWASI builds.
@@ -279,6 +288,40 @@ func WithWASI(cfg WASIConfig) []Option {
 		return []abi.Value{args}, nil
 	}
 
+	// getRandomBytes implements wasi:random/random.get-random-bytes(len:
+	// u64) -> list<u8>, real (non-deterministic) randomness from
+	// crypto/rand -- a discovered dependency, not a stdio/run() path func:
+	// Rust's std::collections::HashMap seeds its SipHash keys by calling
+	// this (via wasi_snapshot_preview1's random_get -> the preview1-to-
+	// preview2 adapter) the first time a HashMap is constructed, even
+	// though no guest fixture ever prints the random bytes themselves --
+	// only their effect (an unpredictable but internally-consistent
+	// iteration order, which a real program must not rely on; every
+	// fixture that uses a HashMap sorts keys before printing precisely
+	// because get-random-bytes' output is never meant to be
+	// deterministic). A fixed/deterministic source would therefore satisfy
+	// conformance today, but would misrepresent wasi:random/random as
+	// something wazy can only fake; crypto/rand is the genuine
+	// implementation.
+	getRandomBytes := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("wasi:random/random.get-random-bytes: expected 1 arg (len), got %d", len(args))
+		}
+		n, ok := args[0].(uint64)
+		if !ok {
+			return nil, fmt.Errorf("wasi:random/random.get-random-bytes: len: expected uint64, got %T", args[0])
+		}
+		buf := make([]byte, n)
+		if _, err := rand.Read(buf); err != nil {
+			return nil, fmt.Errorf("wasi:random/random.get-random-bytes: %w", err)
+		}
+		out := make([]abi.Value, len(buf))
+		for i, b := range buf {
+			out[i] = uint32(b)
+		}
+		return []abi.Value{out}, nil
+	}
+
 	// writeSink resolves an output-stream rep to "how to write buf against
 	// it": either a stdio io.Writer (writerForRep) or one of wasi_fs.go's
 	// file-write streams (fs.writeStreamWrite) -- the two rep ranges never
@@ -380,6 +423,10 @@ func WithWASI(cfg WASIConfig) []Option {
 			nil, []binary.TypeDesc{binary.ListDesc{Element: binary.TypeRef{Primitive: "string"}}}),
 
 		withImportCustom(wasiIfaceEnvironment, "get-environment", getEnvironment, envFD, envResolve),
+
+		WithImport(wasiIfaceRandom, "get-random-bytes", getRandomBytes,
+			[]binary.TypeDesc{binary.PrimitiveDesc{Prim: "u64"}},
+			[]binary.TypeDesc{binary.ListDesc{Element: binary.TypeRef{Primitive: "u8"}}}),
 
 		withImportCustom(wasiIfaceStreams, "[method]output-stream.check-write", checkWrite, checkWriteFD, checkWriteResolve),
 		withImportCustom(wasiIfaceStreams, "[method]output-stream.write", write, writeFD, writeResolve),

@@ -1,0 +1,10 @@
+sorted+deduped = [-4, 0, 1, 2, 3, 5, 8, 9]
+len = 8
+sum = 24
+apples -> 3
+bananas -> 7
+cherries -> 12
+dates -> 1
+total = 23
+evens = [-4, 0, 2, 8]
+doubled = [-8, 0, 2, 4, 6, 10, 16, 18]

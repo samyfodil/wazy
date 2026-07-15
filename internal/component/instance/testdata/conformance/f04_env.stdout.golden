@@ -1,0 +1,7 @@
+WAZY_NAME = wazy
+WAZY_COUNT = 42
+WAZY_MISSING = <unset>
+PATH_LIKE = /usr/bin
+wazy var count = 2
+sorted: WAZY_COUNT=42
+sorted: WAZY_NAME=wazy
