@@ -118,6 +118,44 @@ func TestWASI_GetEnvironment_Empty(t *testing.T) {
 	}
 }
 
+func TestWASI_GetArguments(t *testing.T) {
+	fn := wasiHostFunc(t, WASIConfig{Args: []string{"a", "b", "c"}}, wasiIfaceEnvironment, "get-arguments")
+	results, err := fn(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("get-arguments: %#v", results)
+	}
+	args, ok := results[0].([]abi.Value)
+	if !ok {
+		t.Fatalf("get-arguments: expected []abi.Value, got %T", results[0])
+	}
+	// wasiArgv0 is prepended (see getArguments's doc) so a guest that skips
+	// argv[0] (the Unix/WASI convention) sees exactly the configured Args.
+	want := []string{wasiArgv0, "a", "b", "c"}
+	if len(args) != len(want) {
+		t.Fatalf("get-arguments: got %d arg(s), want %d: %#v", len(args), len(want), args)
+	}
+	for i, w := range want {
+		if args[i].(string) != w {
+			t.Fatalf("arg[%d] = %q, want %q", i, args[i], w)
+		}
+	}
+}
+
+func TestWASI_GetArguments_Empty(t *testing.T) {
+	fn := wasiHostFunc(t, WASIConfig{}, wasiIfaceEnvironment, "get-arguments")
+	results, err := fn(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := results[0].([]abi.Value)
+	if len(args) != 1 || args[0].(string) != wasiArgv0 {
+		t.Fatalf("get-arguments: got %#v, want just [%q] (wasiArgv0)", args, wasiArgv0)
+	}
+}
+
 func TestWASI_GetDirectories(t *testing.T) {
 	fn := wasiHostFunc(t, WASIConfig{}, wasiIfacePreopens, "get-directories")
 	results, err := fn(context.Background(), nil)

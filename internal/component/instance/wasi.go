@@ -38,15 +38,17 @@ import (
 //     "written" from "written and flushed"); blocking-flush is a no-op
 //     success; check-write always reports a large budget (2^40 bytes),
 //     since there is no real backpressure to model against a Go io.Writer.
-//   - wasi:cli/exit.exit, wasi:cli/environment.get-environment,
-//     wasi:filesystem/preopens.get-directories: real, WIT-correct
-//     implementations, but exit always fails the call (see wasiExit's doc)
-//     since wazy has no process to actually terminate, and get-environment/
-//     get-directories return whatever WASIConfig.Env holds (empty by
-//     default) / an empty list (no preopened directories) respectively --
-//     these are not on run()'s stdio path but real_hello's WASICalls (see
-//     graph.go) shows the CLI adapter's startup does invoke them, so they
-//     must behave correctly, not just instantiate.
+//   - wasi:cli/exit.exit, wasi:cli/environment.{get-environment,
+//     get-arguments}, wasi:filesystem/preopens.get-directories: real,
+//     WIT-correct implementations, but exit always fails the call (see
+//     wasiExit's doc) since wazy has no process to actually terminate, and
+//     get-environment/get-arguments/get-directories return whatever
+//     WASIConfig.Env/Args hold (empty by default) / an empty list (no
+//     preopened directories) respectively -- these are not on run()'s stdio
+//     path but real_hello's WASICalls (see graph.go) shows the CLI adapter's
+//     startup does invoke get-environment/get-directories, so they must
+//     behave correctly, not just instantiate; real_args.component.wasm (see
+//     real_args_test.go) additionally calls get-arguments to echo argv.
 //
 // Deliberately left unregistered -- see WithWASI's doc -- are
 // wasi:filesystem/types' filesystem-error-code and the four
@@ -70,6 +72,11 @@ import (
 // two list<tuple<...>> results), so this file builds their binary.FuncDesc
 // and abi.Resolver directly with typeTable (below) and registers them via
 // withImportCustom (host_import.go) instead of the public WithImport.
+// get-arguments' list<string> result, by contrast, has no nested composite
+// (its element is a bare primitive TypeRef, embeddable inline) and so is
+// registered through the public WithImport below like any ordinary import,
+// exercising the same list/string lowering through synthFuncDesc's simpler
+// path instead.
 
 // Resource type tags this file's handle table entries are minted under --
 // see resource.go's handleTable. These are opaque to the guest and only
@@ -82,6 +89,13 @@ const (
 	wasiErrorResType        uint32 = 3
 	wasiDescriptorResType   uint32 = 4
 )
+
+// wasiArgv0 is the synthetic argv[0] (program name) wasi:cli/environment.
+// get-arguments prepends ahead of WASIConfig.Args -- see getArguments's doc.
+// wazy has no real process/binary path to report, and no observed guest
+// behavior (real_args.component.wasm included) inspects its value, only its
+// presence as a slot to skip.
+const wasiArgv0 = "wazy"
 
 // Fixed host-side reps for the two output-stream instances WithWASI
 // supports. Unlike a general resource (which can have arbitrarily many live
@@ -123,14 +137,16 @@ type WASIConfig struct {
 	// Env holds "KEY=VALUE" pairs (matching os.Environ()'s format) returned
 	// by get-environment, split into the WIT list<tuple<string,string>>
 	// shape. A malformed entry (no "=") is skipped rather than failing the
-	// whole call.
+	// whole call. Order is preserved (get-environment lowers Env in order).
 	Env []string
 
-	// Args is accepted for API completeness (a wasi:cli/command world often
-	// also imports wasi:cli/environment's get-arguments) but is unused by
-	// this file: real_hello.component.wasm's decoded imports (see
-	// TestRealHello_RunReachesWASI) do not include get-arguments, so there is
-	// nothing to wire it to yet.
+	// Args holds the command-line arguments, NOT including argv[0] (the
+	// program name): wasi:cli/environment's get-arguments prepends a fixed
+	// synthetic argv[0] (wasiArgv0) ahead of Args, matching the
+	// wasi_snapshot_preview1 args_get convention that argv[0] is the program
+	// name -- so a guest that does std::env::args().skip(1) (as
+	// real_args.component.wasm does) sees exactly Args, in order, lowered
+	// into the WIT list<string> shape.
 	Args []string
 }
 
@@ -198,6 +214,23 @@ func WithWASI(cfg WASIConfig) []Option {
 			pairs = append(pairs, []abi.Value{k, v})
 		}
 		return []abi.Value{pairs}, nil
+	}
+
+	getArguments := func(context.Context, []abi.Value) ([]abi.Value, error) {
+		// wasi:cli/environment.get-arguments returns the full argv, per the
+		// wasi_snapshot_preview1 args_get convention argv[0] carries over
+		// from: element 0 is the program name, and a guest following the
+		// Unix convention (e.g. Rust's std::env::args().skip(1), which is
+		// exactly what real_args.component.wasm does) skips it to get the
+		// real arguments. WASIConfig.Args holds only those real arguments
+		// (argv[1:]), so wasiArgv0 is prepended here to give guests that
+		// convention something to skip.
+		args := make([]abi.Value, 0, len(cfg.Args)+1)
+		args = append(args, wasiArgv0)
+		for _, a := range cfg.Args {
+			args = append(args, a)
+		}
+		return []abi.Value{args}, nil
 	}
 
 	getDirectories := func(context.Context, []abi.Value) ([]abi.Value, error) {
@@ -271,6 +304,9 @@ func WithWASI(cfg WASIConfig) []Option {
 			nil, []binary.TypeDesc{binary.OwnDesc{ResourceType: wasiOutputStreamResType}}),
 		WithImport(wasiIfaceExit, "exit", exit,
 			[]binary.TypeDesc{binary.ResultDesc{}}, nil),
+
+		WithImport(wasiIfaceEnvironment, "get-arguments", getArguments,
+			nil, []binary.TypeDesc{binary.ListDesc{Element: binary.TypeRef{Primitive: "string"}}}),
 
 		withImportCustom(wasiIfaceEnvironment, "get-environment", getEnvironment, envFD, envResolve),
 		withImportCustom(wasiIfacePreopens, "get-directories", getDirectories, dirFD, dirResolve),
