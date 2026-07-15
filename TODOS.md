@@ -6,6 +6,12 @@
 - **Context:** ~8–10k LOC on top of the p2 runtime. Reference: Wasmtime + `bytecodealliance/wasip3-prototyping`, and the async section of the component-model `definitions.py`. Zero pure-Go prior art. Highest-variance part is async correctness debugging.
 - **Depends on / blocked by:** p2 CM runtime shipped and solid (milestones 1–4). Also blocked on the 0.3 spec settling — as of 2026-07 Wasmtime still marks its p3 support experimental/unstable. Do NOT start early; spec churn will waste the work.
 
+## AliasDef must retain the core-sort discriminator
+- **What:** `decodeAliasSection` in `internal/component/binary/decoder.go` parses past the one-byte core:sort discriminator (func/table/mem/global) on a core-export alias but doesn't store it on `AliasDef`. The instance engine currently assumes every core-export alias is a func alias.
+- **Why:** True for every component the current milestone can instantiate (canon lift only references core funcs), but breaks the moment a component mixes core func aliases with core memory/table/global aliases — the engine would misresolve the core-func index space.
+- **Context:** Add a `CoreSort byte` field to `AliasDef`, populate it in `decodeAliasSection`, and have `internal/component/instance` filter aliases by CoreSort==func when building the core-func index space. Surfaced during M3.2.
+- **Depends on / blocked by:** Do before a milestone that instantiates a component with an exported memory/table (i.e. real WASI guests that use `canon lower` with a memory option).
+
 ## Audit inherited interface bugs (http body, fs/sockets)
 - **What:** During the interface-salvage lane, give the parts carried over from `wazero-wasip2` a dedicated correctness audit: the known http-body-loss bug, and the filesystem + sockets interfaces their README flags as un-reviewed (esp. resource release).
 - **Why:** These are silent data bugs (dropped response bodies, leaked/mis-released handles) that won't surface in a hello-world demo but will bite real guests in production.
