@@ -55,12 +55,80 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
+	"sync"
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
 )
+
+// uint64SlicePool and coreValueSlicePool pool the []uint64/[]abi.CoreValue
+// scratch buffers invoke/liftResult build to shuttle a call's flattened core
+// values (see invoke's stack and liftResult's coreResults) -- both are pure
+// scratch, fully consumed synchronously within the call that builds them
+// (see their use sites for why each is safe to release the moment it's
+// done), so reusing one buffer across calls instead of allocating fresh
+// avoids a per-call allocation on the hottest part of the component call
+// path.
+//
+// Pooled rather than cached per-boundExport/per-Instance: a sync.Pool's
+// Get always hands back a buffer no other goroutine holds a reference to,
+// so concurrent Call/CallExport calls against the same Instance (or even
+// the same boundExport) never share one -- there is no shared mutable state
+// for -race to catch here, unlike a per-boundExport field would be. Pool
+// values are stored as pointers-to-slice (not slices directly), per the
+// standard sync.Pool idiom: storing a slice value in the `any`-typed pool
+// would itself box-allocate on every Put.
+var (
+	uint64SlicePool = sync.Pool{
+		New: func() any {
+			s := make([]uint64, 0, 8)
+			return &s
+		},
+	}
+	coreValueSlicePool = sync.Pool{
+		New: func() any {
+			s := make([]abi.CoreValue, 0, 8)
+			return &s
+		},
+	}
+)
+
+// getUint64Slice returns a pooled []uint64 of exactly length n, ready to
+// index/fill; putUint64Slice returns it (paired one-to-one) for reuse.
+func getUint64Slice(n int) *[]uint64 {
+	p := uint64SlicePool.Get().(*[]uint64)
+	if cap(*p) < n {
+		*p = make([]uint64, n)
+	} else {
+		*p = (*p)[:n]
+	}
+	return p
+}
+
+func putUint64Slice(p *[]uint64) {
+	*p = (*p)[:0]
+	uint64SlicePool.Put(p)
+}
+
+// getCoreValueSlice/putCoreValueSlice are getUint64Slice/putUint64Slice's
+// []abi.CoreValue counterpart.
+func getCoreValueSlice(n int) *[]abi.CoreValue {
+	p := coreValueSlicePool.Get().(*[]abi.CoreValue)
+	if cap(*p) < n {
+		*p = make([]abi.CoreValue, n)
+	} else {
+		*p = (*p)[:n]
+	}
+	return p
+}
+
+func putCoreValueSlice(p *[]abi.CoreValue) {
+	*p = (*p)[:0]
+	coreValueSlicePool.Put(p)
+}
 
 // Instance is an instantiated WebAssembly component: the set of instantiated
 // core/host modules plus, for each component-level exported function, the
@@ -70,6 +138,13 @@ type Instance struct {
 
 	// exports maps a component export name to the binding that backs it.
 	exports map[string]*boundExport
+
+	// instanceExports indexes exports a second way, by instance name then
+	// member name, for CallExport's fast path -- see buildInstanceExportIndex
+	// and CallExport. Built once at bind time from exports (nil if none of
+	// exports' keys follow the "instance#member" convention); never mutated
+	// afterward, so concurrent CallExport calls read it safely with no lock.
+	instanceExports map[string]map[string]instanceExportEntry
 
 	// closers are every module instantiated for this component (core guest
 	// modules and synthetic host modules), closed in reverse order by Close.
@@ -411,7 +486,7 @@ func instantiateComponent(ctx context.Context, r wazy.Runtime, comp *binary.Comp
 		exports[name] = be
 	}
 
-	return &Instance{resolve: resolve, exports: exports, closers: []api.Module{core}, resources: newHandleTable()}, nil
+	return &Instance{resolve: resolve, exports: exports, instanceExports: buildInstanceExportIndex(exports), closers: []api.Module{core}, resources: newHandleTable()}, nil
 }
 
 // coreModuleBytes returns the slice of componentBytes holding an embedded core
@@ -531,6 +606,20 @@ func (in *Instance) Call(ctx context.Context, exportName string, args ...abi.Val
 // spellings work, since instance members are bound into the same exports
 // map as plain func exports.
 func (in *Instance) CallExport(ctx context.Context, instanceName, memberName string, args ...abi.Value) ([]abi.Value, error) {
+	// Fast path: two map reads against instanceExports, no string
+	// concatenation -- instanceExportKey's "instance#member" join is a fresh
+	// allocation on every call otherwise, and this is the hot path for every
+	// WIT-exports-an-interface component (see the package doc). Falls back
+	// to the exact same Call(instanceExportKey(...)) this always did when
+	// the pair isn't found there (e.g. a no-import component, whose exports
+	// never carry "#"-joined keys, or a genuinely missing export), so the
+	// not-found error text is byte-identical to before this fast path
+	// existed.
+	if members, ok := in.instanceExports[instanceName]; ok {
+		if entry, ok := members[memberName]; ok {
+			return in.invoke(ctx, entry.be, entry.name, args)
+		}
+	}
 	return in.Call(ctx, instanceExportKey(instanceName, memberName), args...)
 }
 
@@ -539,6 +628,42 @@ func (in *Instance) CallExport(ctx context.Context, instanceName, memberName str
 // name with "#".
 func instanceExportKey(instanceName, memberName string) string {
 	return instanceName + "#" + memberName
+}
+
+// instanceExportEntry pairs a boundExport with the exact "instance#member"
+// string it was bound under in the flat exports map (reused verbatim, not
+// rebuilt) -- see buildInstanceExportIndex.
+type instanceExportEntry struct {
+	be   *boundExport
+	name string
+}
+
+// buildInstanceExportIndex partitions exports into a two-level index keyed
+// by instance name then member name, for every entry whose key follows the
+// instanceExportKey "instance#member" convention (i.e. contains "#"). It
+// lets CallExport look up a boundExport with two map reads and no string
+// concatenation. Built once at bind time (called from every site that
+// constructs an Instance); entries with no "#" (plain func exports) are
+// simply omitted, since CallExport is never used to reach them directly.
+func buildInstanceExportIndex(exports map[string]*boundExport) map[string]map[string]instanceExportEntry {
+	var out map[string]map[string]instanceExportEntry
+	for key, be := range exports {
+		i := strings.IndexByte(key, '#')
+		if i < 0 {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]map[string]instanceExportEntry)
+		}
+		instanceName, memberName := key[:i], key[i+1:]
+		members := out[instanceName]
+		if members == nil {
+			members = make(map[string]instanceExportEntry)
+			out[instanceName] = members
+		}
+		members[memberName] = instanceExportEntry{be: be, name: key}
+	}
+	return out
 }
 
 func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName string, args []abi.Value) ([]abi.Value, error) {
@@ -560,20 +685,39 @@ func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName stri
 	mem, memAvailable := memoryBytesOf(be.mod)
 	realloc := cachedReallocOf(ctx, be)
 
-	coreArgs, err := in.lowerParams(be, args, mem, memAvailable, realloc, exportName)
+	// coreArgsPtr's buffer, like stack below, is pure scratch local to this
+	// call (lowerParams only ever appends into it; nothing downstream of
+	// invoke retains it), so it's fetched from the pool empty (len 0, cap
+	// from a prior call) and handed to lowerParams to append into directly,
+	// instead of lowerParams allocating its own backing array.
+	coreArgsPtr := coreValueSlicePool.Get().(*[]abi.CoreValue)
+	*coreArgsPtr = (*coreArgsPtr)[:0]
+	coreArgs, err := in.lowerParams(be, args, mem, memAvailable, realloc, exportName, *coreArgsPtr)
 	if err != nil {
+		coreValueSlicePool.Put(coreArgsPtr)
 		return nil, err
 	}
+	*coreArgsPtr = coreArgs
 	if len(coreArgs) != len(be.coreParamsWant) {
+		putCoreValueSlice(coreArgsPtr)
 		return nil, fmt.Errorf("component/instance: export %q: parameter list flattens to %d core value(s) but the core signature expects %d; whole-parameter-list spilling to memory is not supported by this milestone", exportName, len(coreArgs), len(be.coreParamsWant))
 	}
 
-	stack := make([]uint64, len(coreArgs))
+	// stack is pure scratch: it only exists to hand coreArgs' bits to
+	// be.coreFn.Call as a []uint64, and the native engine's callEngine.Call
+	// copies params into its own buffer before doing anything else (see
+	// call_engine.go), so nothing retains a reference to it once Call
+	// returns -- safe to pool rather than allocate fresh every call. See
+	// uint64SlicePool's doc for the concurrency argument.
+	stackPtr := getUint64Slice(len(coreArgs))
+	stack := *stackPtr
 	for i, cv := range coreArgs {
 		stack[i] = cv.Bits
 	}
+	putCoreValueSlice(coreArgsPtr) // coreArgs' bits are now copied into stack; done with it
 
 	rawResults, err := be.coreFn.Call(ctx, stack...)
+	putUint64Slice(stackPtr)
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: export %q: call core func %q: %w", exportName, be.funcName, err)
 	}
@@ -591,9 +735,15 @@ func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName stri
 		if be.postReturnFn == nil {
 			return nil, fmt.Errorf("component/instance: export %q: post-return core func %q not found", exportName, be.postReturnFuncName)
 		}
-		prArgs := make([]uint64, len(rawResults))
-		copy(prArgs, rawResults)
-		if _, err := be.postReturnFn.Call(ctx, prArgs...); err != nil {
+		// Pooled for the same reason as stack above: pure scratch, copied
+		// from rawResults only to satisfy Call's variadic signature, and
+		// released the moment Call returns since callEngine.Call copies
+		// params into its own buffer before doing anything else.
+		prArgsPtr := getUint64Slice(len(rawResults))
+		copy(*prArgsPtr, rawResults)
+		_, err := be.postReturnFn.Call(ctx, (*prArgsPtr)...)
+		putUint64Slice(prArgsPtr)
+		if err != nil {
 			return nil, fmt.Errorf("component/instance: export %q: post-return %q: %w", exportName, be.postReturnFuncName, err)
 		}
 	}
@@ -604,8 +754,13 @@ func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName stri
 // lowerParams lowers each component-level argument into its flattened core
 // values, in parameter order, using be's precomputed per-param type/
 // usesMemory/error (see finalizeBoundExport) instead of recomputing them.
-func (in *Instance) lowerParams(be *boundExport, args []abi.Value, mem []byte, memAvailable bool, realloc abi.Realloc, exportName string) ([]abi.CoreValue, error) {
-	var coreArgs []abi.CoreValue
+// dst is the (possibly pool-provided, possibly nil) buffer to append into --
+// see invoke's coreArgsPtr -- so lowerParams itself never has to allocate
+// the backing array; callers that don't care (e.g. tests exercising an
+// error branch directly) can just pass nil, which behaves exactly like the
+// old var coreArgs []abi.CoreValue starting point.
+func (in *Instance) lowerParams(be *boundExport, args []abi.Value, mem []byte, memAvailable bool, realloc abi.Realloc, exportName string, dst []abi.CoreValue) ([]abi.CoreValue, error) {
+	coreArgs := dst
 	for i, p := range be.fd.Params {
 		if err := be.paramErrs[i]; err != nil {
 			return nil, fmt.Errorf("component/instance: export %q param %d (%s): %w", exportName, i, p.Name, err)
@@ -684,12 +839,19 @@ func (in *Instance) liftResult(be *boundExport, rawResults []uint64, mem []byte,
 		return nil, fmt.Errorf("component/instance: export %q: core func returned %d value(s), expected %d", exportName, len(rawResults), len(flatKinds))
 	}
 
-	coreResults := make([]abi.CoreValue, len(rawResults))
+	// coreResults is pure scratch, discarded as soon as abi.LiftFlat returns
+	// -- LiftFlat only ever reads through it (via a CoreValueIter) to
+	// produce val, a plain lifted Go value that never aliases the
+	// CoreValue slice or its backing array -- so it's safe to pool. See
+	// coreValueSlicePool's doc for the concurrency argument.
+	coreResultsPtr := getCoreValueSlice(len(rawResults))
+	coreResults := *coreResultsPtr
 	for i, u := range rawResults {
 		coreResults[i] = abi.CoreValue{Kind: flatKinds[i], Bits: u}
 	}
 
 	val, err := abi.LiftFlat(coreResults, rt, in.resolve, mem)
+	putCoreValueSlice(coreResultsPtr)
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: export %q result: lift: %w", exportName, err)
 	}

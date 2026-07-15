@@ -324,6 +324,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	return &Instance{
 		resolve:         resolve,
 		exports:         exports,
+		instanceExports: buildInstanceExportIndex(exports),
 		closers:         closers,
 		resources:       resources,
 		coreModuleCount: coreModuleCount,

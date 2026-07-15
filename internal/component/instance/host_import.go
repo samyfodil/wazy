@@ -396,7 +396,7 @@ func instantiateWithImports(ctx context.Context, r wazy.Runtime, comp *binary.Co
 		return fail(err)
 	}
 
-	return &Instance{resolve: resolve, exports: exports, closers: closers, resources: resources}, nil
+	return &Instance{resolve: resolve, exports: exports, instanceExports: buildInstanceExportIndex(exports), closers: closers, resources: resources}, nil
 }
 
 // moduleNameFor picks the wazy module name to register a real core instance

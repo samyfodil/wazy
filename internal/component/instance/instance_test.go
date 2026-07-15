@@ -700,7 +700,7 @@ func TestLowerParams_ResolveError(t *testing.T) {
 	fd := binary.FuncDesc{Params: []binary.FuncParam{{Name: "bad", Type: binary.TypeRef{}}}}
 	be := &boundExport{mod: inst.exports["run"].mod, funcName: "run", fd: fd}
 	finalizeBoundExport(be, inst.resolve)
-	_, err = inst.lowerParams(be, []any{uint32(1)}, nil, false, reallocOf(ctx, inst.exports["run"].mod), "x")
+	_, err = inst.lowerParams(be, []any{uint32(1)}, nil, false, reallocOf(ctx, inst.exports["run"].mod), "x", nil)
 	requireErrContains(t, err, "type reference has neither")
 }
 
@@ -719,7 +719,7 @@ func TestLowerParams_LowerFlatError(t *testing.T) {
 	be := &boundExport{mod: inst.exports["run"].mod, funcName: "run", fd: fd}
 	finalizeBoundExport(be, inst.resolve)
 	// A string where a u32 is expected: LowerFlat itself should reject it.
-	_, err = inst.lowerParams(be, []any{"not a u32"}, nil, false, reallocOf(ctx, inst.exports["run"].mod), "x")
+	_, err = inst.lowerParams(be, []any{"not a u32"}, nil, false, reallocOf(ctx, inst.exports["run"].mod), "x", nil)
 	requireErrContains(t, err, "lower:")
 }
 

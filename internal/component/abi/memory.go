@@ -194,6 +194,22 @@ func loadInt(mem []byte, ptr uint32, nbytes uint32, signed bool) (Value, error) 
 	}
 }
 
+// readU32LE reads an unsigned, little-endian 4-byte integer at ptr, exactly
+// like loadInt(mem, ptr, 4, false) but returning a raw uint32 instead of a
+// boxed Value. Factored out for loadString's own ptr/len fields, which are
+// consumed as unboxed uint32s one line later (see loadString) -- boxing them
+// into Value only to immediately type-assert back out is a wasted allocation
+// on every string load, the hottest allocation on the string round-trip
+// path. Error text matches loadInt's for the same failure so callers
+// (including loadString) see identical messages.
+func readU32LE(mem []byte, ptr uint32) (uint32, error) {
+	const nbytes = 4
+	if uint32(len(mem)) < ptr+nbytes {
+		return 0, fmt.Errorf("loadInt: buffer overflow at ptr=%d nbytes=%d mem_len=%d", ptr, nbytes, len(mem))
+	}
+	return binary.LittleEndian.Uint32(mem[ptr : ptr+nbytes]), nil
+}
+
 // loadString reads a string (ptr, length in UTF-8 bytes) from memory.
 // Currently supports UTF-8 only.
 func loadString(mem []byte, ptr uint32) (Value, error) {
@@ -201,16 +217,16 @@ func loadString(mem []byte, ptr uint32) (Value, error) {
 	// For now, assuming 32-bit pointers (4 bytes each)
 	ptrSize := uint32(4)
 
-	strPtr, err := loadInt(mem, ptr, ptrSize, false)
+	strPtr, err := readU32LE(mem, ptr)
 	if err != nil {
 		return nil, err
 	}
-	strLen, err := loadInt(mem, ptr+ptrSize, ptrSize, false)
+	strLen, err := readU32LE(mem, ptr+ptrSize)
 	if err != nil {
 		return nil, err
 	}
 
-	s, err := loadStringFromRange(mem, strPtr.(uint32), strLen.(uint32))
+	s, err := loadStringFromRange(mem, strPtr, strLen)
 	if err != nil {
 		return nil, err
 	}

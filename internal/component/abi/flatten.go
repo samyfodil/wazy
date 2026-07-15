@@ -117,23 +117,43 @@ func FlattenFunc(f binary.FuncDesc, resolve Resolver, context string) (params []
 
 // ------- Primitive Flattening -------
 
+// Shared, read-only flat-type-name slices returned by flattenPrimitive and
+// flattenList. Every element of the flat ABI is content-only ("i32"/"i64"/
+// "f32"/"f64" string constants describing a *type*, never call-specific
+// data), so every call site with a given primitive/list shape can safely
+// share one underlying array instead of allocating a fresh literal each
+// time -- this is the single hottest allocation on the component call path
+// (flattenPrimitive is called on every LowerFlat/LiftFlat/Flatten for a
+// scalar param or result). Each slice's len == cap, so any accidental
+// append by a caller reallocates rather than mutating the shared array; no
+// caller indexes into a Flatten result and assigns through it (verified:
+// every consumer only appends into a *different* accumulator slice or reads
+// by index).
+var (
+	flatKindsI32        = []string{"i32"}
+	flatKindsI64        = []string{"i64"}
+	flatKindsF32        = []string{"f32"}
+	flatKindsF64        = []string{"f64"}
+	flatKindsStringPtrs = []string{"i32", "i32"}
+)
+
 func flattenPrimitive(prim string) ([]string, error) {
 	switch prim {
 	case "bool":
-		return []string{"i32"}, nil
+		return flatKindsI32, nil
 	case "u8", "u16", "u32", "s8", "s16", "s32":
-		return []string{"i32"}, nil
+		return flatKindsI32, nil
 	case "s64", "u64":
-		return []string{"i64"}, nil
+		return flatKindsI64, nil
 	case "f32":
-		return []string{"f32"}, nil
+		return flatKindsF32, nil
 	case "f64":
-		return []string{"f64"}, nil
+		return flatKindsF64, nil
 	case "char":
-		return []string{"i32"}, nil
+		return flatKindsI32, nil
 	case "string":
 		// String = pointer + length (both as i32 pointers)
-		return []string{"i32", "i32"}, nil
+		return flatKindsStringPtrs, nil
 	default:
 		return nil, fmt.Errorf("unknown primitive type: %s", prim)
 	}
@@ -144,7 +164,7 @@ func flattenPrimitive(prim string) ([]string, error) {
 func flattenList(_ binary.ListDesc, _ Resolver) ([]string, error) {
 	// Dynamic list: pointer + length (as i32 + i32)
 	// Note: we don't use elemFlat for dynamic lists; fixed-length lists would use it.
-	return []string{"i32", "i32"}, nil
+	return flatKindsStringPtrs, nil
 }
 
 func flattenRecord(desc binary.RecordDesc, resolve Resolver) ([]string, error) {
