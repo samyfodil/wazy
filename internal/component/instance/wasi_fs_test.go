@@ -237,22 +237,313 @@ func TestWasiFS_OpenAt_AbsolutePathRejected(t *testing.T) {
 	}
 }
 
-func TestWasiFS_OpenAt_CreateUnsupported(t *testing.T) {
-	c, resources := wasiFSConfig(t, WASIConfig{})
+// TestWasiFS_OpenAt_Create_CreatesEntry proves open-at honors the create
+// open-flag against a path WASIConfig.FS doesn't already have: the call
+// succeeds (not error-code::read-only, this package's old, now-superseded
+// behavior before write support existed) and the new path becomes visible
+// in the same host fs map, as an empty regular file, immediately -- mirrors
+// a real open(2) with O_CREAT making the directory entry exist right away.
+func TestWasiFS_OpenAt_Create_CreatesEntry(t *testing.T) {
+	fs := map[string][]byte{}
+	c, resources := wasiFSConfig(t, WASIConfig{FS: fs})
 	rootHandle := rootDescriptorHandle(t, c)
 	rootRep := rootHandleRep(t, resources, rootHandle)
 
 	openAt := wasiFSFn(t, c, wasiIfaceFilesystemTypes, "[method]descriptor.open-at")
 	results, err := openAt(context.Background(), []abi.Value{
-		rootRep, uint32(0), "new.txt", wasiOpenFlagCreate, uint32(0),
+		rootRep, uint32(0), "new.txt", wasiOpenFlagCreate, wasiDescFlagWrite,
 	})
 	if err != nil {
 		t.Fatalf("open-at: %v", err)
 	}
 	rv := results[0].(abi.ResultValue)
-	if !rv.IsErr || rv.Payload.(uint32) != wasiErrorCodeReadOnly {
-		t.Fatalf("open-at(create): got %#v, want Err(read-only)", rv)
+	if rv.IsErr {
+		t.Fatalf("open-at(create): got %#v, want Ok", rv)
 	}
+	content, ok := fs["/new.txt"]
+	if !ok {
+		t.Fatal(`open-at(create): fs["/new.txt"] absent, want a new empty entry`)
+	}
+	if len(content) != 0 {
+		t.Fatalf("open-at(create): fs[\"/new.txt\"] = %v, want empty", content)
+	}
+
+	fileHandle := rv.Payload.(uint32)
+	fileRep, err := resources.Rep(wasiDescriptorResType, fileHandle)
+	if err != nil {
+		t.Fatalf("resolve opened file handle: %v", err)
+	}
+	getType := wasiFSFn(t, c, wasiIfaceFilesystemTypes, "[method]descriptor.get-type")
+	gtResults, err := getType(context.Background(), []abi.Value{fileRep})
+	if err != nil {
+		t.Fatalf("get-type: %v", err)
+	}
+	gtrv := gtResults[0].(abi.ResultValue)
+	if gtrv.IsErr || gtrv.Payload.(uint32) != wasiDescriptorTypeRegularFile {
+		t.Fatalf("get-type: got %#v, want Ok(regular-file)", gtrv)
+	}
+}
+
+// TestWasiFS_OpenAt_Truncate proves the truncate open-flag resets an
+// existing, writably-opened entry's content to empty -- and that a
+// truncate request against a descriptor NOT opened for writing is not
+// honored (matching a real OS's O_TRUNC|O_RDONLY combination doing
+// nothing).
+func TestWasiFS_OpenAt_Truncate(t *testing.T) {
+	fs := map[string][]byte{"/f": []byte("original contents")}
+	c, resources := wasiFSConfig(t, WASIConfig{FS: fs})
+	rootHandle := rootDescriptorHandle(t, c)
+	rootRep := rootHandleRep(t, resources, rootHandle)
+	openAt := wasiFSFn(t, c, wasiIfaceFilesystemTypes, "[method]descriptor.open-at")
+
+	// Truncate without the write descriptor-flag: not honored.
+	_, err := openAt(context.Background(), []abi.Value{
+		rootRep, uint32(0), "f", wasiOpenFlagTruncate, uint32(0),
+	})
+	if err != nil {
+		t.Fatalf("open-at(truncate, read-only): %v", err)
+	}
+	if string(fs["/f"]) != "original contents" {
+		t.Fatalf(`open-at(truncate, read-only): fs["/f"] = %q, want unchanged`, fs["/f"])
+	}
+
+	// Truncate with the write descriptor-flag: content resets to empty.
+	_, err = openAt(context.Background(), []abi.Value{
+		rootRep, uint32(0), "f", wasiOpenFlagTruncate, wasiDescFlagWrite,
+	})
+	if err != nil {
+		t.Fatalf("open-at(truncate, write): %v", err)
+	}
+	if len(fs["/f"]) != 0 {
+		t.Fatalf(`open-at(truncate, write): fs["/f"] = %v, want empty`, fs["/f"])
+	}
+}
+
+// TestWasiFS_WriteViaStream_WritesAndCommits drives open-at(create,write)
+// -> write-via-stream -> [method]output-stream.write end to end, proving
+// the bytes land in the host fs map (not just some internal buffer) and
+// that blocking-flush against the resulting stream succeeds as a no-op
+// (this package has no internal buffering to actually flush -- see
+// writeStreamWrite's doc).
+func TestWasiFS_WriteViaStream_WritesAndCommits(t *testing.T) {
+	fs := map[string][]byte{}
+	c, resources := wasiFSConfig(t, WASIConfig{FS: fs})
+	rootHandle := rootDescriptorHandle(t, c)
+	rootRep := rootHandleRep(t, resources, rootHandle)
+
+	openAt := wasiFSFn(t, c, wasiIfaceFilesystemTypes, "[method]descriptor.open-at")
+	openResults, err := openAt(context.Background(), []abi.Value{
+		rootRep, uint32(0), "out.txt", wasiOpenFlagCreate, wasiDescFlagWrite,
+	})
+	if err != nil {
+		t.Fatalf("open-at: %v", err)
+	}
+	fileRep := rootHandleRep(t, resources, openResults[0].(abi.ResultValue).Payload.(uint32))
+
+	writeViaStream := wasiFSFn(t, c, wasiIfaceFilesystemTypes, "[method]descriptor.write-via-stream")
+	wvsResults, err := writeViaStream(context.Background(), []abi.Value{fileRep, uint64(0)})
+	if err != nil {
+		t.Fatalf("write-via-stream: %v", err)
+	}
+	wvsrv := wvsResults[0].(abi.ResultValue)
+	if wvsrv.IsErr {
+		t.Fatalf("write-via-stream: unexpected Err: %#v", wvsrv.Payload)
+	}
+	streamHandle := wvsrv.Payload.(uint32)
+	streamRep, err := resources.Rep(wasiOutputStreamResType, streamHandle)
+	if err != nil {
+		t.Fatalf("resolve output-stream handle: %v", err)
+	}
+
+	write := wasiFSFn(t, c, wasiIfaceStreams, "[method]output-stream.write")
+	wResults, err := write(context.Background(), []abi.Value{streamRep, wasiListFromBytes([]byte("hello "))})
+	if err != nil {
+		t.Fatalf("output-stream.write: %v", err)
+	}
+	if wResults[0].(abi.ResultValue).IsErr {
+		t.Fatalf("output-stream.write: unexpected Err: %#v", wResults[0])
+	}
+	// A second write, at the stream's now-advanced cursor, must append
+	// rather than overwrite from position 0.
+	_, err = write(context.Background(), []abi.Value{streamRep, wasiListFromBytes([]byte("world"))})
+	if err != nil {
+		t.Fatalf("output-stream.write (2nd): %v", err)
+	}
+	if got := string(fs["/out.txt"]); got != "hello world" {
+		t.Fatalf(`fs["/out.txt"] = %q, want "hello world"`, got)
+	}
+
+	blockingFlush := wasiFSFn(t, c, wasiIfaceStreams, "[method]output-stream.blocking-flush")
+	bfResults, err := blockingFlush(context.Background(), []abi.Value{streamRep})
+	if err != nil {
+		t.Fatalf("blocking-flush: %v", err)
+	}
+	if bfResults[0].(abi.ResultValue).IsErr {
+		t.Fatalf("blocking-flush: unexpected Err: %#v", bfResults[0])
+	}
+
+	checkWrite := wasiFSFn(t, c, wasiIfaceStreams, "[method]output-stream.check-write")
+	cwResults, err := checkWrite(context.Background(), []abi.Value{streamRep})
+	if err != nil {
+		t.Fatalf("check-write: %v", err)
+	}
+	if cwResults[0].(abi.ResultValue).IsErr {
+		t.Fatalf("check-write: unexpected Err: %#v", cwResults[0])
+	}
+}
+
+// TestWasiFS_AppendViaStream proves append-via-stream seeds its stream's
+// write cursor at the file's current length, not 0 -- distinct from
+// write-via-stream(0), and exercised directly since no fixture this
+// package runs actually calls it (std::fs::write always truncates instead
+// -- see this file's package doc).
+func TestWasiFS_AppendViaStream(t *testing.T) {
+	fs := map[string][]byte{"/f": []byte("existing-")}
+	c, resources := wasiFSConfig(t, WASIConfig{FS: fs})
+	rootHandle := rootDescriptorHandle(t, c)
+	rootRep := rootHandleRep(t, resources, rootHandle)
+
+	openAt := wasiFSFn(t, c, wasiIfaceFilesystemTypes, "[method]descriptor.open-at")
+	openResults, err := openAt(context.Background(), []abi.Value{
+		rootRep, uint32(0), "f", uint32(0), wasiDescFlagWrite,
+	})
+	if err != nil {
+		t.Fatalf("open-at: %v", err)
+	}
+	fileRep := rootHandleRep(t, resources, openResults[0].(abi.ResultValue).Payload.(uint32))
+
+	appendViaStream := wasiFSFn(t, c, wasiIfaceFilesystemTypes, "[method]descriptor.append-via-stream")
+	avsResults, err := appendViaStream(context.Background(), []abi.Value{fileRep})
+	if err != nil {
+		t.Fatalf("append-via-stream: %v", err)
+	}
+	avsrv := avsResults[0].(abi.ResultValue)
+	if avsrv.IsErr {
+		t.Fatalf("append-via-stream: unexpected Err: %#v", avsrv.Payload)
+	}
+	streamRep, err := resources.Rep(wasiOutputStreamResType, avsrv.Payload.(uint32))
+	if err != nil {
+		t.Fatalf("resolve output-stream handle: %v", err)
+	}
+
+	write := wasiFSFn(t, c, wasiIfaceStreams, "[method]output-stream.write")
+	_, err = write(context.Background(), []abi.Value{streamRep, wasiListFromBytes([]byte("appended"))})
+	if err != nil {
+		t.Fatalf("output-stream.write: %v", err)
+	}
+	if got := string(fs["/f"]); got != "existing-appended" {
+		t.Fatalf(`fs["/f"] = %q, want "existing-appended"`, got)
+	}
+}
+
+// TestWasiFS_WriteViaStream_ReadOnlyDescriptor proves write-via-stream (and
+// append-via-stream) refuse a descriptor that wasn't opened with the write
+// descriptor-flag, rather than silently allowing the write anyway.
+func TestWasiFS_WriteViaStream_ReadOnlyDescriptor(t *testing.T) {
+	c, resources := wasiFSConfig(t, WASIConfig{FS: map[string][]byte{"/f": []byte("x")}})
+	rootHandle := rootDescriptorHandle(t, c)
+	rootRep := rootHandleRep(t, resources, rootHandle)
+
+	openAt := wasiFSFn(t, c, wasiIfaceFilesystemTypes, "[method]descriptor.open-at")
+	openResults, err := openAt(context.Background(), []abi.Value{rootRep, uint32(0), "f", uint32(0), uint32(0)})
+	if err != nil {
+		t.Fatalf("open-at: %v", err)
+	}
+	fileRep := rootHandleRep(t, resources, openResults[0].(abi.ResultValue).Payload.(uint32))
+
+	writeViaStream := wasiFSFn(t, c, wasiIfaceFilesystemTypes, "[method]descriptor.write-via-stream")
+	wvsResults, err := writeViaStream(context.Background(), []abi.Value{fileRep, uint64(0)})
+	if err != nil {
+		t.Fatalf("write-via-stream: %v", err)
+	}
+	wvsrv := wvsResults[0].(abi.ResultValue)
+	if !wvsrv.IsErr || wvsrv.Payload.(uint32) != wasiErrorCodeReadOnly {
+		t.Fatalf("write-via-stream (read-only descriptor): got %#v, want Err(read-only)", wvsrv)
+	}
+
+	appendViaStream := wasiFSFn(t, c, wasiIfaceFilesystemTypes, "[method]descriptor.append-via-stream")
+	avsResults, err := appendViaStream(context.Background(), []abi.Value{fileRep})
+	if err != nil {
+		t.Fatalf("append-via-stream: %v", err)
+	}
+	avsrv := avsResults[0].(abi.ResultValue)
+	if !avsrv.IsErr || avsrv.Payload.(uint32) != wasiErrorCodeReadOnly {
+		t.Fatalf("append-via-stream (read-only descriptor): got %#v, want Err(read-only)", avsrv)
+	}
+}
+
+// TestWasiFS_WriteViaStream_OnDirectory proves write-via-stream/
+// append-via-stream against the root directory descriptor fail with
+// is-directory, mirroring read-via-stream's own directory guard
+// (TestWasiFS_OpenAt_OnNonDirectory).
+func TestWasiFS_WriteViaStream_OnDirectory(t *testing.T) {
+	c, resources := wasiFSConfig(t, WASIConfig{})
+	rootHandle := rootDescriptorHandle(t, c)
+	rootRep := rootHandleRep(t, resources, rootHandle)
+
+	writeViaStream := wasiFSFn(t, c, wasiIfaceFilesystemTypes, "[method]descriptor.write-via-stream")
+	wvsResults, err := writeViaStream(context.Background(), []abi.Value{rootRep, uint64(0)})
+	if err != nil {
+		t.Fatalf("write-via-stream (on root dir): %v", err)
+	}
+	wvsrv := wvsResults[0].(abi.ResultValue)
+	if !wvsrv.IsErr || wvsrv.Payload.(uint32) != wasiErrorCodeIsDirectory {
+		t.Fatalf("write-via-stream (on root dir): got %#v, want Err(is-directory)", wvsrv)
+	}
+
+	appendViaStream := wasiFSFn(t, c, wasiIfaceFilesystemTypes, "[method]descriptor.append-via-stream")
+	avsResults, err := appendViaStream(context.Background(), []abi.Value{rootRep})
+	if err != nil {
+		t.Fatalf("append-via-stream (on root dir): %v", err)
+	}
+	avsrv := avsResults[0].(abi.ResultValue)
+	if !avsrv.IsErr || avsrv.Payload.(uint32) != wasiErrorCodeIsDirectory {
+		t.Fatalf("append-via-stream (on root dir): got %#v, want Err(is-directory)", avsrv)
+	}
+}
+
+// TestWasiFS_NilFS_CreateAndWriteStillWork proves a nil WASIConfig.FS (the
+// documented "no map for writes to land in that the caller could observe"
+// case -- see WASIConfig.FS's doc) still lets create/write succeed within
+// the run itself, via wasi_fs.go's lazily-allocated internal map, rather
+// than panicking on a nil map write.
+func TestWasiFS_NilFS_CreateAndWriteStillWork(t *testing.T) {
+	c, resources := wasiFSConfig(t, WASIConfig{FS: nil})
+	rootHandle := rootDescriptorHandle(t, c)
+	rootRep := rootHandleRep(t, resources, rootHandle)
+
+	openAt := wasiFSFn(t, c, wasiIfaceFilesystemTypes, "[method]descriptor.open-at")
+	openResults, err := openAt(context.Background(), []abi.Value{
+		rootRep, uint32(0), "new.txt", wasiOpenFlagCreate, wasiDescFlagWrite,
+	})
+	if err != nil {
+		t.Fatalf("open-at(create) against nil FS: %v", err)
+	}
+	if openResults[0].(abi.ResultValue).IsErr {
+		t.Fatalf("open-at(create) against nil FS: got %#v, want Ok", openResults[0])
+	}
+}
+
+// TestWasiFS_UnknownWriteStreamRep proves [method]output-stream.write,
+// check-write, and blocking-flush fail loud on a rep that names neither a
+// stdio stream nor a live file-write stream, rather than silently no-oping
+// -- all three report it the same way (writerForRep's "does not name a
+// stdout/stderr stream", see wasi.go's writeSink doc for why write's
+// dispatch preserves that wording instead of fs.writeStreamWrite's own).
+func TestWasiFS_UnknownWriteStreamRep(t *testing.T) {
+	c, _ := wasiFSConfig(t, WASIConfig{})
+
+	write := wasiFSFn(t, c, wasiIfaceStreams, "[method]output-stream.write")
+	_, err := write(context.Background(), []abi.Value{uint32(99999), wasiListFromBytes([]byte("x"))})
+	requireErrContains(t, err, "does not name a stdout/stderr stream")
+
+	checkWrite := wasiFSFn(t, c, wasiIfaceStreams, "[method]output-stream.check-write")
+	_, err = checkWrite(context.Background(), []abi.Value{uint32(99999)})
+	requireErrContains(t, err, "does not name a stdout/stderr stream")
+
+	blockingFlush := wasiFSFn(t, c, wasiIfaceStreams, "[method]output-stream.blocking-flush")
+	_, err = blockingFlush(context.Background(), []abi.Value{uint32(99999)})
+	requireErrContains(t, err, "does not name a stdout/stderr stream")
 }
 
 func TestWasiFS_OpenAt_OnNonDirectory(t *testing.T) {
@@ -378,6 +669,22 @@ func TestWasiFS_ArgValidation(t *testing.T) {
 			[]abi.Value{uint32(1), uint32(0), uint32(0), uint32(0), uint32(0)}, "path: expected string"},
 		{"open-at bad open-flags type", wasiIfaceFilesystemTypes, "[method]descriptor.open-at",
 			[]abi.Value{uint32(1), uint32(0), "p", "bad", uint32(0)}, "open-flags: expected uint32"},
+		{"open-at bad flags type", wasiIfaceFilesystemTypes, "[method]descriptor.open-at",
+			[]abi.Value{uint32(1), uint32(0), "p", uint32(0), "bad"}, "flags: expected uint32"},
+		{"write-via-stream wrong arg count", wasiIfaceFilesystemTypes, "[method]descriptor.write-via-stream",
+			[]abi.Value{uint32(1)}, "expected 2 args"},
+		{"write-via-stream bad self type", wasiIfaceFilesystemTypes, "[method]descriptor.write-via-stream",
+			[]abi.Value{"bad", uint64(0)}, "self: expected uint32"},
+		{"write-via-stream bad offset type", wasiIfaceFilesystemTypes, "[method]descriptor.write-via-stream",
+			[]abi.Value{uint32(1), "bad"}, "offset: expected uint64"},
+		{"append-via-stream wrong arg count", wasiIfaceFilesystemTypes, "[method]descriptor.append-via-stream",
+			nil, "expected 1 arg"},
+		{"append-via-stream bad self type", wasiIfaceFilesystemTypes, "[method]descriptor.append-via-stream",
+			[]abi.Value{"bad"}, "self: expected uint32"},
+		{"output-stream.write wrong arg count", wasiIfaceStreams, "[method]output-stream.write",
+			[]abi.Value{uint32(1)}, "expected 2 args"},
+		{"output-stream.write bad self type", wasiIfaceStreams, "[method]output-stream.write",
+			[]abi.Value{"bad", wasiListFromBytes(nil)}, "self: expected uint32"},
 		{"get-type wrong arg count", wasiIfaceFilesystemTypes, "[method]descriptor.get-type",
 			nil, "expected 1 arg"},
 		{"get-type bad self type", wasiIfaceFilesystemTypes, "[method]descriptor.get-type",
@@ -413,6 +720,18 @@ func TestWasiFS_ArgValidation(t *testing.T) {
 			requireErrContains(t, err, tt.wantErr)
 		})
 	}
+}
+
+// TestWasiFS_WriteStreamWrite_UnknownRep exercises wasiFS.writeStreamWrite's
+// own "does not name a live stream" guard directly: wasi.go's writeSink
+// (WithWASI's [method]output-stream.write dispatch) always checks
+// writeStreamNode itself first, so that guard is otherwise unreachable
+// through the registered HostFunc -- see writeSink's doc for why it
+// deliberately keeps writerForRep's wording instead of surfacing this one.
+func TestWasiFS_WriteStreamWrite_UnknownRep(t *testing.T) {
+	fs := newWasiFS(nil)
+	err := fs.writeStreamWrite(99999, []byte("x"))
+	requireErrContains(t, err, "does not name a live stream")
 }
 
 func TestWasiFS_GetResources_NotInitialized(t *testing.T) {

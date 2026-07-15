@@ -170,9 +170,22 @@ type WASIConfig struct {
 	// virtual paths (e.g. "/greeting.txt", matching what a guest's
 	// std::fs::read_to_string("/greeting.txt") resolves to internally: its
 	// path relative to the "/" preopen, i.e. "greeting.txt", joined back
-	// onto "/"); values are that file's contents. A nil/empty FS is a
-	// valid, empty filesystem: every open-at fails with
-	// error-code::no-entry, exactly as a real empty directory would.
+	// onto "/"); values are that file's contents. An empty (but non-nil) FS
+	// is a valid, empty filesystem: every open-at without the create flag
+	// fails with error-code::no-entry, exactly as a real empty directory
+	// would.
+	//
+	// A guest that writes a file (e.g. std::fs::write) mutates this same
+	// map in place -- open-at(create) adds the new entry, and every
+	// subsequent write commits straight into it (see wasi_fs.go's
+	// fsFileSet) -- so a caller that passes a non-nil map here can read the
+	// written file straight back out of that same map after the call
+	// returns, no extra plumbing needed. A nil FS cannot be written back to
+	// (there is no map for the guest's writes to land in that the caller
+	// could later observe): wasi_fs.go lazily allocates its own internal
+	// map in that case so create/write still succeed within the run, but a
+	// caller that wants to see what a guest wrote must pass a non-nil
+	// (possibly empty) map instead of nil.
 	FS map[string][]byte
 }
 
@@ -189,6 +202,13 @@ func WithWASI(cfg WASIConfig) []Option {
 	if stderr == nil {
 		stderr = io.Discard
 	}
+
+	// fs is shared with wasi_fs.go's wasiFilesystemOptions: output-stream is
+	// one resource/handle namespace spanning both the two fixed stdio reps
+	// below and the dynamically-minted write-via-stream/append-via-stream
+	// reps wasi_fs.go's descriptor methods hand out (see writeSink's doc),
+	// so both halves of that dispatch need the same *wasiFS.
+	fs := newWasiFS(cfg.FS)
 
 	writerForRep := func(rep uint32) (io.Writer, error) {
 		switch rep {
@@ -259,6 +279,30 @@ func WithWASI(cfg WASIConfig) []Option {
 		return []abi.Value{args}, nil
 	}
 
+	// writeSink resolves an output-stream rep to "how to write buf against
+	// it": either a stdio io.Writer (writerForRep) or one of wasi_fs.go's
+	// file-write streams (fs.writeStreamWrite) -- the two rep ranges never
+	// collide (see newWasiFS's doc: its write-stream rep counter starts at
+	// 3, leaving wasiStdoutRep(1)/wasiStderrRep(2) exclusively stdio's), so
+	// trying stdio first and falling back to fs is unambiguous. A rep
+	// neither side recognizes is a genuinely unknown output-stream handle;
+	// writerForRep's own "does not name a stdout/stderr stream" error is
+	// returned for that case (matching checkWrite/blockingFlush's identical
+	// fallback below) rather than fs's differently-worded "does not name a
+	// live stream", so all three output-stream methods report an unknown
+	// rep the same way.
+	writeSink := func(rep uint32, buf []byte) error {
+		w, werr := writerForRep(rep)
+		if werr != nil {
+			if _, found := fs.writeStreamNode(rep); !found {
+				return werr
+			}
+			return fs.writeStreamWrite(rep, buf)
+		}
+		_, err := w.Write(buf)
+		return err
+	}
+
 	checkWrite := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
 		if len(args) != 1 {
 			return nil, fmt.Errorf("[method]output-stream.check-write: expected 1 arg (self), got %d", len(args))
@@ -268,10 +312,13 @@ func WithWASI(cfg WASIConfig) []Option {
 			return nil, fmt.Errorf("[method]output-stream.check-write: self: expected uint32 rep, got %T", args[0])
 		}
 		if _, err := writerForRep(rep); err != nil {
-			return nil, err
+			if _, found := fs.writeStreamNode(rep); !found {
+				return nil, err
+			}
 		}
 		// A large, fixed budget: there is no real backpressure to model
-		// against a Go io.Writer, so this never has to make the guest wait.
+		// against a Go io.Writer or an in-memory file, so this never has to
+		// make the guest wait.
 		return []abi.Value{abi.ResultValue{IsErr: false, Payload: uint64(1) << 40}}, nil
 	}
 
@@ -283,15 +330,11 @@ func WithWASI(cfg WASIConfig) []Option {
 		if !ok {
 			return nil, fmt.Errorf("[method]output-stream.write: self: expected uint32 rep, got %T", args[0])
 		}
-		w, err := writerForRep(rep)
-		if err != nil {
-			return nil, err
-		}
 		buf, err := wasiBytesFromList(args[1])
 		if err != nil {
 			return nil, fmt.Errorf("[method]output-stream.write: contents: %w", err)
 		}
-		if _, err := w.Write(buf); err != nil {
+		if err := writeSink(rep, buf); err != nil {
 			return nil, fmt.Errorf("[method]output-stream.write: %w", err)
 		}
 		return []abi.Value{abi.ResultValue{IsErr: false, Payload: nil}}, nil
@@ -306,7 +349,14 @@ func WithWASI(cfg WASIConfig) []Option {
 			return nil, fmt.Errorf("[method]output-stream.blocking-flush: self: expected uint32 rep, got %T", args[0])
 		}
 		if _, err := writerForRep(rep); err != nil {
-			return nil, err
+			// No internal buffering on either side (stdio writes straight
+			// through to the configured io.Writer; fs writes commit
+			// straight into fs.files -- see writeStreamWrite's doc), so
+			// flushing a file-write stream has nothing to do beyond
+			// confirming rep actually names one.
+			if _, found := fs.writeStreamNode(rep); !found {
+				return nil, err
+			}
 		}
 		return []abi.Value{abi.ResultValue{IsErr: false, Payload: nil}}, nil
 	}
@@ -336,7 +386,7 @@ func WithWASI(cfg WASIConfig) []Option {
 		withImportCustom(wasiIfaceStreams, "[method]output-stream.blocking-write-and-flush", write, writeFD, writeResolve),
 		withImportCustom(wasiIfaceStreams, "[method]output-stream.blocking-flush", blockingFlush, blockingFlushFD, blockingFlushResolve),
 	}
-	return append(opts, wasiFilesystemOptions(cfg)...)
+	return append(opts, wasiFilesystemOptions(fs)...)
 }
 
 // wasiBytesFromList converts a lifted list<u8> (see abi.Value's doc: list<T>

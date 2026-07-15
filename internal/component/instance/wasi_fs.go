@@ -53,11 +53,23 @@ import (
 //   - wasi:cli/terminal-stdout.get-terminal-stdout
 //   - wasi:cli/terminal-stderr.get-terminal-stderr
 //
-// (write-via-stream and append-via-stream are declared imports -- part of
-// the whole wasi:filesystem/types interface a wasi:cli/command world
-// imports as a unit -- but read_to_string's read-only path never actually
-// calls them; they are deliberately left as the graph engine's automatic
-// trap-stub fallback, which fails loud by name if that ever changes.)
+// (write-via-stream and append-via-stream were, at that point, declared
+// imports left to the graph engine's automatic trap-stub fallback --
+// read_to_string's read-only path never calls them. The write path,
+// discovered the same way against testdata/real_transform.component.wasm
+// (`std::fs::write("/output.txt", s.to_uppercase())`), reaches exactly one
+// additional descriptor method beyond the read list above:
+// [method]descriptor.write-via-stream, followed by
+// [method]output-stream.write against the own<output-stream> it returns
+// (registered in wasi.go, alongside stdout/stderr's, since output-stream is
+// one shared resource/handle namespace across stdio and filesystem writers
+// -- see wasi.go's writeSink dispatch). append-via-stream is never actually
+// invoked by this fixture -- std::fs::write opens with O_CREAT|O_TRUNC,
+// never O_APPEND -- but this package still registers a real implementation
+// for it below (sharing write-via-stream's own [method]output-stream.write
+// path once minted, differing only in the stream's starting offset), rather
+// than leaving a func this close to write-via-stream's own semantics as a
+// landmine for the next guest that does call it.)
 //
 // # Nested own<T> handles
 //
@@ -139,22 +151,59 @@ const (
 // ever produced.
 const wasiStreamErrClosed uint32 = 1
 
-// wasi:filesystem/types' open-flags flag bit this package inspects (bit 0,
-// per its WIT declaration order create/directory/exclusive/truncate): a
-// create request against a path this read-only in-memory filesystem
-// doesn't already have is answered with error-code::read-only rather than
-// silently creating nothing or crashing.
-const wasiOpenFlagCreate uint32 = 1 << 0
+// wasi:filesystem/types' open-flags flag bits this package inspects, per
+// their WIT declaration order create/directory/exclusive/truncate: create
+// (bit 0) makes open-at create a missing path's FS entry instead of failing
+// with error-code::no-entry, and truncate (bit 3) resets an existing
+// (writable) entry's content to empty. directory/exclusive are not
+// inspected -- this in-memory filesystem has no directory-vs-file open
+// ambiguity beyond isDir, and no concurrent opener to race against for
+// exclusive to matter.
+const (
+	wasiOpenFlagCreate   uint32 = 1 << 0
+	wasiOpenFlagTruncate uint32 = 1 << 3
+)
+
+// wasi:filesystem/types' descriptor-flags bit this package inspects (bit 1,
+// per its WIT declaration order
+// read/write/file-integrity-sync/data-integrity-sync/requested-write-sync/
+// mutate-directory): a descriptor opened with the write bit set is the one
+// [method]descriptor.write-via-stream/append-via-stream may be called
+// against; every other descriptor (including the single preopened root
+// directory) is write-via-stream-ineligible, matching a real OS refusing to
+// write through a read-only fd.
+const wasiDescFlagWrite uint32 = 1 << 1
 
 // fsDescNode is one live wasi:filesystem/types `descriptor` this package's
 // handle table (wasiFS.descs, keyed by rep) tracks: either the single
 // preopened root directory (isDir true, path "/"), or a regular file
 // opened under it (isDir false, path the full virtual path used to look it
-// up in wasiFS.files, content its bytes).
+// up in wasiFS.files, content its bytes at open time -- read-via-stream's
+// only consumer -- which may go stale if the same path is written after
+// this descriptor was opened; nothing in this package's fixtures opens a
+// path for both reading and writing through two different descriptors, so
+// that staleness is never actually observed). writable records whether
+// open-at's descriptor-flags carried the write bit (wasiDescFlagWrite),
+// gating write-via-stream/append-via-stream.
 type fsDescNode struct {
-	isDir   bool
-	path    string
-	content []byte
+	isDir    bool
+	path     string
+	content  []byte
+	writable bool
+}
+
+// fsWriteStreamNode is one live wasi:io/streams `output-stream` writing into
+// an in-memory file's bytes: path names the fs.files entry it commits into
+// (looked up fresh on every write, so it always sees the latest bytes even
+// if another stream on the same path wrote first), pos is the next write
+// offset (mirrors a real file descriptor's write cursor: write-via-stream
+// seeds it at a fixed offset, append-via-stream seeds it at the file's
+// current length). mu guards pos and serializes the read-modify-write
+// against fs.files -- mirrors fsStreamNode's mu doc.
+type fsWriteStreamNode struct {
+	mu   sync.Mutex
+	path string
+	pos  int
 }
 
 // fsStreamNode is one live wasi:io/streams `input-stream` reading from an
@@ -170,38 +219,74 @@ type fsStreamNode struct {
 }
 
 // wasiFS holds the mutable state wasi_fs.go's host funcs close over: the
-// configured (read-only, immutable after construction) virtual filesystem,
-// the live descriptor/input-stream rep tables, and a reference to the
-// owning Instance's resource handle table (resources) -- set once via
-// withResourcesHook, see this file's package doc's "Nested own<T> handles"
-// section for why these closures cannot get it any other way.
+// configured virtual filesystem (files -- no longer read-only once
+// write-via-stream/append-via-stream are registered, see fsFileGet/
+// fsFileSet), the live descriptor/input-stream/output-stream rep tables,
+// and a reference to the owning Instance's resource handle table
+// (resources) -- set once via withResourcesHook, see this file's package
+// doc's "Nested own<T> handles" section for why these closures cannot get
+// it any other way.
 type wasiFS struct {
+	mu    sync.Mutex
 	files map[string][]byte
 
-	mu         sync.Mutex
-	resources  *handleTable
-	descs      map[uint32]*fsDescNode
-	nextDesc   uint32
-	streams    map[uint32]*fsStreamNode
-	nextStream uint32
+	resources    *handleTable
+	descs        map[uint32]*fsDescNode
+	nextDesc     uint32
+	streams      map[uint32]*fsStreamNode
+	nextStream   uint32
+	writeStreams map[uint32]*fsWriteStreamNode
+	nextWriteRep uint32
 }
 
 // newWasiFS returns a wasiFS backed by files (WASIConfig.FS; a nil map
-// behaves as an empty filesystem -- every open-at fails with
-// error-code::no-entry). Rep numbering for both descs and streams starts
-// at 1, mirroring handleTable's own "0 is never allocated" convention
-// (resource.go), though the two counters are independent of both each
-// other and the handleTable's own handle numbering -- a rep is this
-// package's private key into wasiFS's own maps, meaningful only together
-// with which map (descs vs streams) it is looked up in.
+// behaves as an empty, unwritable-back filesystem -- fsFileSet lazily
+// allocates its own internal map in that case so create/write still work
+// within the run, but since that internal map is never the caller's own nil
+// variable, a caller that wants to observe writes after run() must pass a
+// non-nil (possibly empty) map, matching this package's doc comment on
+// WASIConfig.FS). Rep numbering for descs, (read-)streams, and writeStreams
+// each starts at 1, mirroring handleTable's own "0 is never allocated"
+// convention (resource.go); the three counters are independent of each
+// other, of wasiStdoutRep/wasiStderrRep (wasi.go), and of the handleTable's
+// own handle numbering -- a rep is this package's private key into wasiFS's
+// own maps, meaningful only together with which map it is looked up in.
+// writeStreams' reps additionally never collide with wasiStdoutRep(1)/
+// wasiStderrRep(2) because they share the same output-stream handle
+// namespace (wasiOutputStreamResType) wasi.go's write/check-write/
+// blocking-flush dispatch on: nextWriteRep starts at 3 for exactly that
+// reason.
 func newWasiFS(files map[string][]byte) *wasiFS {
 	return &wasiFS{
-		files:      files,
-		descs:      make(map[uint32]*fsDescNode),
-		nextDesc:   1,
-		streams:    make(map[uint32]*fsStreamNode),
-		nextStream: 1,
+		files:        files,
+		descs:        make(map[uint32]*fsDescNode),
+		nextDesc:     1,
+		streams:      make(map[uint32]*fsStreamNode),
+		nextStream:   1,
+		writeStreams: make(map[uint32]*fsWriteStreamNode),
+		nextWriteRep: 3,
 	}
+}
+
+// fsFileGet returns files[path] and whether it was present, guarded by mu
+// (files may now be concurrently written by fsFileSet -- see wasiFS's doc).
+func (w *wasiFS) fsFileGet(path string) ([]byte, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	b, ok := w.files[path]
+	return b, ok
+}
+
+// fsFileSet commits content as path's new bytes, lazily allocating w.files
+// if the configured WASIConfig.FS was nil (see newWasiFS's doc for why that
+// case cannot write back to the caller).
+func (w *wasiFS) fsFileSet(path string, content []byte) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.files == nil {
+		w.files = make(map[string][]byte)
+	}
+	w.files[path] = content
 }
 
 // setResources implements withResourcesHook's callback: it runs once, right
@@ -273,6 +358,61 @@ func (w *wasiFS) streamNode(rep uint32) (*fsStreamNode, error) {
 	return s, nil
 }
 
+// newWriteStreamRep mints a fresh output-stream rep naming s and returns it
+// -- see newWasiFS's doc for why numbering starts at 3, not 1.
+func (w *wasiFS) newWriteStreamRep(s *fsWriteStreamNode) uint32 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	rep := w.nextWriteRep
+	w.nextWriteRep++
+	w.writeStreams[rep] = s
+	return rep
+}
+
+// writeStreamNode resolves rep to its fsWriteStreamNode, reporting found=
+// false (not an error) if rep does not name a live file-write stream --
+// callers use this to distinguish "not one of mine" (fall through to
+// wasi.go's stdout/stderr dispatch) from a genuinely unknown rep (which
+// wasi.go's writeSink then reports as the fail-loud error).
+func (w *wasiFS) writeStreamNode(rep uint32) (*fsWriteStreamNode, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	s, ok := w.writeStreams[rep]
+	return s, ok
+}
+
+// writeStreamWrite appends buf into the file the write-stream named by rep
+// targets, starting at that stream's current write cursor, and advances the
+// cursor by len(buf). Growing the underlying content past its current
+// length (including past a positive starting offset, e.g. a first write
+// through write-via-stream(offset) seeded beyond the file's current end)
+// zero-fills the gap, mirroring a sparse-write real filesystem. Every write
+// commits straight into fs.files (via fsFileSet) -- there is no internal
+// buffering to distinguish "written" from "written and flushed" (mirrors
+// wasi.go's write/blocking-write-and-flush sharing one implementation for
+// the same reason), so [method]output-stream.blocking-flush against one of
+// these reps has nothing left to do beyond confirming the rep is live.
+func (w *wasiFS) writeStreamWrite(rep uint32, buf []byte) error {
+	s, ok := w.writeStreamNode(rep)
+	if !ok {
+		return fmt.Errorf("wasi:io/streams: output-stream rep %d does not name a live stream", rep)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cur, _ := w.fsFileGet(s.path)
+	end := s.pos + len(buf)
+	if end > len(cur) {
+		grown := make([]byte, end)
+		copy(grown, cur)
+		cur = grown
+	}
+	copy(cur[s.pos:end], buf)
+	w.fsFileSet(s.path, cur)
+	s.pos = end
+	return nil
+}
+
 // wasiJoinFSPath joins a directory descriptor's virtual path (dir, always
 // either "/" or a path this package itself produced) with a guest-supplied
 // relative path component (rel), the same way [method]descriptor.open-at
@@ -307,11 +447,14 @@ func wasiListFromBytes(buf []byte) []abi.Value {
 // [method]input-stream.{read,blocking-read}, and the three
 // wasi:cli/terminal-* get-terminal-* funcs -- everything WithWASI (wasi.go)
 // needs beyond its own stdio-only surface to run a guest that actually
-// reads a file. cfg.FS backs the single preopened root directory ("/");
-// see newWasiFS's doc for its rep-numbering convention.
-func wasiFilesystemOptions(cfg WASIConfig) []Option {
-	fs := newWasiFS(cfg.FS)
-
+// reads and writes a file. fs (its files field backs the single preopened
+// root directory "/") is constructed by WithWASI itself (not here) and
+// shared with wasi.go's output-stream write/check-write/blocking-flush
+// dispatch, since output-stream is one resource/handle namespace spanning
+// both stdio and the write-via-stream/append-via-stream streams this file
+// mints -- see wasi.go's writeSink doc for why that dispatch lives there
+// instead of here.
+func wasiFilesystemOptions(fs *wasiFS) []Option {
 	getDirectories := func(context.Context, []abi.Value) ([]abi.Value, error) {
 		resources, err := fs.getResources()
 		if err != nil {
@@ -354,12 +497,12 @@ func wasiFilesystemOptions(cfg WASIConfig) []Option {
 		if !ok {
 			return nil, fmt.Errorf("[method]descriptor.open-at: open-flags: expected uint32, got %T", args[3])
 		}
+		descFlags, ok := args[4].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]descriptor.open-at: flags: expected uint32, got %T", args[4])
+		}
 		// path-flags (args[1]) is ignored: this in-memory filesystem has no
-		// symlinks, so symlink-follow has nothing to do. flags (args[4],
-		// descriptor-flags for the resulting descriptor) is likewise
-		// ignored: every descriptor this package hands out is read-only
-		// regardless of what the guest requested, since there is no write
-		// path to gate.
+		// symlinks, so symlink-follow has nothing to do.
 
 		node, err := fs.descNode(selfRep)
 		if err != nil {
@@ -372,22 +515,31 @@ func wasiFilesystemOptions(cfg WASIConfig) []Option {
 		if !ok {
 			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeNotPermitted}}, nil
 		}
-		content, found := fs.files[full]
-		if !found {
-			if openFlags&wasiOpenFlagCreate != 0 {
-				// A real host filesystem could honor create against a
-				// missing path; this one is a fixed, read-only snapshot of
-				// WASIConfig.FS, so creation is unsupported rather than
-				// silently a no-op.
-				return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeReadOnly}}, nil
-			}
+		writable := descFlags&wasiDescFlagWrite != 0
+		content, found := fs.fsFileGet(full)
+		switch {
+		case !found && openFlags&wasiOpenFlagCreate != 0:
+			// create: the path gets a brand-new, empty FS entry (mirroring
+			// O_CREAT against a missing path), committed immediately -- a
+			// real open(2) with O_CREAT makes the directory entry exist
+			// right away, even before any byte is ever written to it.
+			content = []byte{}
+			fs.fsFileSet(full, content)
+		case !found:
 			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeNoEntry}}, nil
+		case openFlags&wasiOpenFlagTruncate != 0 && writable:
+			// truncate: an existing, writable entry's content resets to
+			// empty (O_TRUNC); a truncate request against a descriptor that
+			// wasn't even opened for writing is not honored, matching a
+			// real OS's O_TRUNC|O_RDONLY combination doing nothing useful.
+			content = []byte{}
+			fs.fsFileSet(full, content)
 		}
 		resources, err := fs.getResources()
 		if err != nil {
 			return nil, err
 		}
-		rep := fs.newDescRep(&fsDescNode{isDir: false, path: full, content: content})
+		rep := fs.newDescRep(&fsDescNode{isDir: false, path: full, content: content, writable: writable})
 		handle := resources.NewOwn(wasiDescriptorResType, rep)
 		return []abi.Value{abi.ResultValue{IsErr: false, Payload: handle}}, nil
 	}
@@ -433,12 +585,12 @@ func wasiFilesystemOptions(cfg WASIConfig) []Option {
 		// the option is none, the platform doesn't maintain a ... timestamp
 		// for this file").
 		rec := []abi.Value{
-			t,                     // type
-			uint64(1),             // link-count
+			t,                         // type
+			uint64(1),                 // link-count
 			uint64(len(node.content)), // size
-			nil,                   // data-access-timestamp
-			nil,                   // data-modification-timestamp
-			nil,                   // status-change-timestamp
+			nil,                       // data-access-timestamp
+			nil,                       // data-modification-timestamp
+			nil,                       // status-change-timestamp
 		}
 		return []abi.Value{abi.ResultValue{IsErr: false, Payload: rec}}, nil
 	}
@@ -471,6 +623,65 @@ func wasiFilesystemOptions(cfg WASIConfig) []Option {
 		}
 		rep := fs.newStreamRep(&fsStreamNode{data: node.content[offset:]})
 		handle := resources.NewOwn(wasiInputStreamResType, rep)
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: handle}}, nil
+	}
+
+	writeViaStream := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 2 {
+			return nil, fmt.Errorf("[method]descriptor.write-via-stream: expected 2 args (self, offset), got %d", len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]descriptor.write-via-stream: self: expected uint32 rep, got %T", args[0])
+		}
+		offset, ok := args[1].(uint64)
+		if !ok {
+			return nil, fmt.Errorf("[method]descriptor.write-via-stream: offset: expected uint64, got %T", args[1])
+		}
+		node, err := fs.descNode(selfRep)
+		if err != nil {
+			return nil, fmt.Errorf("[method]descriptor.write-via-stream: %w", err)
+		}
+		if node.isDir {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeIsDirectory}}, nil
+		}
+		if !node.writable {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeReadOnly}}, nil
+		}
+		resources, err := fs.getResources()
+		if err != nil {
+			return nil, err
+		}
+		rep := fs.newWriteStreamRep(&fsWriteStreamNode{path: node.path, pos: int(offset)})
+		handle := resources.NewOwn(wasiOutputStreamResType, rep)
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: handle}}, nil
+	}
+
+	appendViaStream := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("[method]descriptor.append-via-stream: expected 1 arg (self), got %d", len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]descriptor.append-via-stream: self: expected uint32 rep, got %T", args[0])
+		}
+		node, err := fs.descNode(selfRep)
+		if err != nil {
+			return nil, fmt.Errorf("[method]descriptor.append-via-stream: %w", err)
+		}
+		if node.isDir {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeIsDirectory}}, nil
+		}
+		if !node.writable {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeReadOnly}}, nil
+		}
+		resources, err := fs.getResources()
+		if err != nil {
+			return nil, err
+		}
+		cur, _ := fs.fsFileGet(node.path)
+		rep := fs.newWriteStreamRep(&fsWriteStreamNode{path: node.path, pos: len(cur)})
+		handle := resources.NewOwn(wasiOutputStreamResType, rep)
 		return []abi.Value{abi.ResultValue{IsErr: false, Payload: handle}}, nil
 	}
 
@@ -545,6 +756,8 @@ func wasiFilesystemOptions(cfg WASIConfig) []Option {
 	getTypeFD, getTypeResolve := wasiGetTypeSig()
 	statFD, statResolve := wasiStatSig()
 	readViaStreamFD, readViaStreamResolve := wasiReadViaStreamSig()
+	writeViaStreamFD, writeViaStreamResolve := wasiWriteViaStreamSig()
+	appendViaStreamFD, appendViaStreamResolve := wasiAppendViaStreamSig()
 	metadataHashFD, metadataHashResolve := wasiMetadataHashSig()
 	inReadFD, inReadResolve := wasiInputStreamReadSig()
 	inBlockingReadFD, inBlockingReadResolve := wasiInputStreamReadSig()
@@ -574,6 +787,8 @@ func wasiFilesystemOptions(cfg WASIConfig) []Option {
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.get-type", getType, getTypeFD, getTypeResolve),
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.stat", stat, statFD, statResolve),
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.read-via-stream", readViaStream, readViaStreamFD, readViaStreamResolve),
+		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.write-via-stream", writeViaStream, writeViaStreamFD, writeViaStreamResolve),
+		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.append-via-stream", appendViaStream, appendViaStreamFD, appendViaStreamResolve),
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.metadata-hash", metadataHash, metadataHashFD, metadataHashResolve),
 
 		withImportCustom(wasiIfaceStreams, "[method]input-stream.read", streamRead, inReadFD, inReadResolve),
@@ -735,6 +950,41 @@ func wasiReadViaStreamSig() (binary.FuncDesc, abi.Resolver) {
 			{Name: "self", Type: selfRef},
 			{Name: "offset", Type: binary.TypeRef{Primitive: "u64"}},
 		},
+		Results: binary.FuncResults{Unnamed: &resultRef},
+	}
+	return fd, tbl.resolver()
+}
+
+// wasiWriteViaStreamSig builds the FuncDesc/resolver for
+// [method]descriptor.write-via-stream(self: borrow<descriptor>, offset:
+// filesize) -> result<own<output-stream>, error-code>.
+func wasiWriteViaStreamSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiDescriptorResType})
+	okRef := tbl.add(binary.OwnDesc{ResourceType: wasiOutputStreamResType})
+	errRef := wasiErrorCodeType(tbl)
+	resultRef := tbl.add(binary.ResultDesc{Ok: &okRef, Err: &errRef})
+	fd := binary.FuncDesc{
+		Params: []binary.FuncParam{
+			{Name: "self", Type: selfRef},
+			{Name: "offset", Type: binary.TypeRef{Primitive: "u64"}},
+		},
+		Results: binary.FuncResults{Unnamed: &resultRef},
+	}
+	return fd, tbl.resolver()
+}
+
+// wasiAppendViaStreamSig builds the FuncDesc/resolver for
+// [method]descriptor.append-via-stream(self: borrow<descriptor>) ->
+// result<own<output-stream>, error-code>.
+func wasiAppendViaStreamSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiDescriptorResType})
+	okRef := tbl.add(binary.OwnDesc{ResourceType: wasiOutputStreamResType})
+	errRef := wasiErrorCodeType(tbl)
+	resultRef := tbl.add(binary.ResultDesc{Ok: &okRef, Err: &errRef})
+	fd := binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}},
 		Results: binary.FuncResults{Unnamed: &resultRef},
 	}
 	return fd, tbl.resolver()
