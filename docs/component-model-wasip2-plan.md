@@ -10,11 +10,16 @@ Scope decision: **Real p2 CM runtime** — load arbitrary off-the-shelf `.compon
 - **Canonical ABI** — layout + memory store/load + flat lift/lower, all diff-verified against `definitions.py` (the differential oracle).
 - **Instantiate + call**, both directions — exports lifted, host imports lowered; resources (own/borrow handle tables), streams, post-return, spilled args/results.
 - **General multi-module instantiation graph** — the CLI guest's 4 core modules + 17 core instances + preview1 adapter wire and execute.
-- **WASI 0.2 host layer** (`WithWASI`) — cli/io-streams/environment/preopens; `real_hello.component.wasm` (genuine cargo/rustc reactor `real_adder` + the full `wasi:cli/command` hello-world) **run for real**, verified genuine (string flows from guest memory, not a Go literal).
-- 4 packages, all >=90% coverage; ~14 real bugs caught by the oracle + independent verification.
+- **WASI 0.2 host layer** (`WithWASI`) — cli/io-streams/environment/preopens/filesystem. Real rustc guests run and are verified genuine (values flow through guest memory, varied inputs, not Go literals):
+  - `real_adder` — add + `greet(string)->string`
+  - `real_hello` — the full `wasi:cli/command` prints "hello world"
+  - `real_args` — echoes args + env (host->guest `list<string>`/`list<tuple>`)
+  - `real_readfile` — reads a file from a host FS
+  - `real_transform` — reads `/input.txt`, uppercases, writes `/output.txt`
+- 4 packages, all >=90% coverage; ~16 real bugs caught by the oracle + independent verification (incl. enum >32 cases, nested own/borrow resolution).
 
 ## Remaining for a production WASI runtime (not started; deliberate)
-- WASI interface **breadth**: real filesystem read/write, sockets, clocks, actual stdin, args — beyond the hello-world critical path.
+- WASI interface **breadth left**: sockets, clocks (real now), actual stdin input — the common file/cli/env surface is done.
 - **Conformance**: run the official component-model + WASI 0.2 suites; burn down.
 - Decoder gaps in TODOS.md (resourcetype rep mislabel, type-sort *export* index tracking).
 - The **performance** pass (plan was compliance-first; optimization deferred).
