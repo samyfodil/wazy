@@ -393,13 +393,15 @@ func decodeCoreInstanceSection(buf []byte, offset int, sectionSize uint32) ([]Co
 
 			args := make([]CoreInstantiateArg, argCount)
 			for j := range argCount {
-				name, off, err := readExternName(buf, offset)
+				// A core instantiate-arg name is a plain core:name (label),
+				// not an externname; see the core inline-export note above.
+				name, off, err := readLabel(buf, offset)
 				if err != nil {
 					return nil, off, fmt.Errorf("instance[%d] arg[%d] name: %w", i, j, err)
 				}
 				offset = off
 
-				// Each arg has a 0x12 prefix byte
+				// Each arg has a 0x12 prefix byte (the instance sort)
 				if offset >= len(buf) || buf[offset] != 0x12 {
 					return nil, offset, fmt.Errorf("instance[%d] arg[%d]: expected 0x12 prefix", i, j)
 				}
@@ -424,19 +426,34 @@ func decodeCoreInstanceSection(buf []byte, offset int, sectionSize uint32) ([]Co
 
 			exports := make([]CoreInlineExport, exportCount)
 			for j := range exportCount {
-				name, off, err := readExternName(buf, offset)
+				// A core inline-export name is a plain core:name (label), not
+				// an import/export externname (which carries a 0x00/0x01 kind
+				// byte). Using readExternName here mis-reads the label's length
+				// prefix as a kind byte and rejects the whole section.
+				name, off, err := readLabel(buf, offset)
 				if err != nil {
 					return nil, off, fmt.Errorf("instance[%d] export[%d] name: %w", i, j, err)
 				}
 				offset = off
 
-				sort, idx, off, err := readSortidx(buf, offset)
-				if err != nil {
-					return nil, off, fmt.Errorf("instance[%d] export[%d] sortidx: %w", i, j, err)
+				// A core inline export carries a core:sortidx: a single
+				// core:sort byte (0x00 func, 0x01 table, 0x02 memory, 0x03
+				// global, ...) followed by a u32 index. This is NOT the
+				// component-level sortidx that readSortidx parses (which
+				// prefixes the core sort with a 0x00 discriminator); using
+				// readSortidx here over-reads the section by one byte.
+				if offset >= len(buf) {
+					return nil, offset, ErrTruncatedBinary
 				}
-				offset = off
+				coreSort := buf[offset]
+				offset++
+				idx, n, err := leb128.LoadUint32(buf[offset:])
+				if err != nil {
+					return nil, offset, fmt.Errorf("instance[%d] export[%d] index: %w", i, j, err)
+				}
+				offset += int(n)
 
-				exports[j] = CoreInlineExport{Name: name, Sort: sort, CoreSortIdx: idx}
+				exports[j] = CoreInlineExport{Name: name, Sort: coreSort, CoreSortIdx: idx}
 			}
 			instance.Exports = exports
 
