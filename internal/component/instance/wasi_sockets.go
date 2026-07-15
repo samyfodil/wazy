@@ -105,6 +105,11 @@ const (
 	wasiNetworkResType   uint32 = 8
 	wasiTCPSocketResType uint32 = 9
 	wasiPollableResType  uint32 = 10
+
+	// UDP resource tags -- see this file's "wasi:sockets/udp" section below.
+	wasiUDPSocketResType              uint32 = 11
+	wasiIncomingDatagramStreamResType uint32 = 12
+	wasiOutgoingDatagramStreamResType uint32 = 13
 )
 
 // wasiNetworkRep is the one host-side rep wasi:sockets/instance-network.
@@ -175,6 +180,8 @@ const (
 	wasiIfaceSocketsNetwork      = "wasi:sockets/network@0.2.3"
 	wasiIfaceSocketsTCP          = "wasi:sockets/tcp@0.2.3"
 	wasiIfaceSocketsTCPCreateSoc = "wasi:sockets/tcp-create-socket@0.2.3"
+	wasiIfaceSocketsUDP          = "wasi:sockets/udp@0.2.3"
+	wasiIfaceSocketsUDPCreateSoc = "wasi:sockets/udp-create-socket@0.2.3"
 )
 
 // tcpSockNode is one live wasi:sockets/tcp `tcp-socket`: family records the
@@ -214,6 +221,48 @@ type sockOutStream struct {
 	conn net.Conn
 }
 
+// udpSockNode is one live wasi:sockets/udp `udp-socket`: family records the
+// ip-address-family create-udp-socket was called with (mirrors tcpSockNode's
+// family field -- see its doc, never inspected beyond being stored);
+// pconn/bindErr hold start-bind's outcome (see this file's "wasi:sockets/udp"
+// section doc for why the real net.ListenPacket happens synchronously inside
+// start-bind, mirroring tcpSockNode's conn/dialErr); started/finished gate
+// against calling start-bind/finish-bind more than once, exactly like
+// tcpSockNode's own fields.
+type udpSockNode struct {
+	mu       sync.Mutex
+	family   uint32
+	pconn    net.PacketConn
+	bindErr  error
+	started  bool
+	finished bool
+}
+
+// incomingDatagramStream is one live wasi:sockets/udp `incoming-datagram-
+// stream` -- [method]udp-socket.stream's own<incoming-datagram-stream> half.
+// pconn is the same net.PacketConn the owning udp-socket bound in start-bind
+// (shared with the sibling outgoingDatagramStream minted by the same stream()
+// call); remote, when non-nil, restricts receive to datagrams sent from that
+// exact peer (the "connected" mode `stream(some(remote-address))` requests --
+// see udp.wit's `stream` doc), discarding anything else, mirroring a real
+// connected UDP socket's kernel-side filtering.
+type incomingDatagramStream struct {
+	mu     sync.Mutex
+	pconn  net.PacketConn
+	remote *net.UDPAddr
+}
+
+// outgoingDatagramStream is incomingDatagramStream's send half, sharing the
+// same pconn. remote, when non-nil, is both the one address `send` accepts a
+// per-datagram remote-address of (or omits it and gets this default) --
+// mirrors incomingDatagramStream's own remote field, and udp.wit's own
+// `stream` doc for the "connected" mode's send-side restriction.
+type outgoingDatagramStream struct {
+	mu     sync.Mutex
+	pconn  net.PacketConn
+	remote *net.UDPAddr
+}
+
 // wasiSockets holds the mutable state this file's host funcs close over:
 // dial is the injected connector (WASIConfig.Dialer, defaulted to a real
 // net.Dial in WithWASI -- see WASIConfig.Dialer's doc), resources is the
@@ -225,8 +274,9 @@ type sockOutStream struct {
 // (see this file's package doc's "Rep numbering" section for why one
 // shared, disjoint-based counter is safe across all three).
 type wasiSockets struct {
-	mu   sync.Mutex
-	dial func(network, address string) (net.Conn, error)
+	mu           sync.Mutex
+	dial         func(network, address string) (net.Conn, error)
+	listenPacket func(network, address string) (net.PacketConn, error)
 
 	resources *handleTable
 
@@ -234,6 +284,11 @@ type wasiSockets struct {
 	tcpSocks   map[uint32]*tcpSockNode
 	inStreams  map[uint32]*sockInStream
 	outStreams map[uint32]*sockOutStream
+
+	// UDP rep tables -- see this file's "wasi:sockets/udp" section doc.
+	udpSocks  map[uint32]*udpSockNode
+	inDgrams  map[uint32]*incomingDatagramStream
+	outDgrams map[uint32]*outgoingDatagramStream
 }
 
 // wasiSockRepBase is wasiSockets.nextRep's starting value -- see this
@@ -241,15 +296,20 @@ type wasiSockets struct {
 // disjoint from wasi_fs.go's and wasi.go's own rep spaces.
 const wasiSockRepBase uint32 = 1 << 20
 
-// newWasiSockets returns a wasiSockets that dials through dial (never nil
-// by the time WithWASI constructs one -- see its own doc).
-func newWasiSockets(dial func(network, address string) (net.Conn, error)) *wasiSockets {
+// newWasiSockets returns a wasiSockets that dials through dial and listens
+// through listenPacket (neither ever nil by the time WithWASI constructs one
+// -- see WASIConfig.Dialer/ListenPacket's own docs).
+func newWasiSockets(dial func(network, address string) (net.Conn, error), listenPacket func(network, address string) (net.PacketConn, error)) *wasiSockets {
 	return &wasiSockets{
-		dial:       dial,
-		tcpSocks:   make(map[uint32]*tcpSockNode),
-		inStreams:  make(map[uint32]*sockInStream),
-		outStreams: make(map[uint32]*sockOutStream),
-		nextRep:    wasiSockRepBase,
+		dial:         dial,
+		listenPacket: listenPacket,
+		tcpSocks:     make(map[uint32]*tcpSockNode),
+		inStreams:    make(map[uint32]*sockInStream),
+		outStreams:   make(map[uint32]*sockOutStream),
+		udpSocks:     make(map[uint32]*udpSockNode),
+		inDgrams:     make(map[uint32]*incomingDatagramStream),
+		outDgrams:    make(map[uint32]*outgoingDatagramStream),
+		nextRep:      wasiSockRepBase,
 	}
 }
 
@@ -308,6 +368,32 @@ func (s *wasiSockets) outStreamNode(rep uint32) (*sockOutStream, bool) {
 	return n, ok
 }
 
+// udpSockNode resolves rep to a live udp-socket, mirroring tcpSockNode.
+func (s *wasiSockets) udpSockNode(rep uint32) (*udpSockNode, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n, ok := s.udpSocks[rep]
+	return n, ok
+}
+
+// inDatagramStreamNode resolves rep to a live incoming-datagram-stream,
+// mirroring inStreamNode.
+func (s *wasiSockets) inDatagramStreamNode(rep uint32) (*incomingDatagramStream, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n, ok := s.inDgrams[rep]
+	return n, ok
+}
+
+// outDatagramStreamNode resolves rep to a live outgoing-datagram-stream,
+// mirroring outStreamNode.
+func (s *wasiSockets) outDatagramStreamNode(rep uint32) (*outgoingDatagramStream, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n, ok := s.outDgrams[rep]
+	return n, ok
+}
+
 // read performs a real, blocking net.Conn.Read against s's connection, up
 // to wasiSockMaxReadChunk bytes even if length requests more (see its own
 // doc), and shapes the result as [method]input-stream.read's
@@ -351,6 +437,111 @@ func (s *sockOutStream) write(buf []byte) error {
 	defer s.mu.Unlock()
 	_, err := s.conn.Write(buf)
 	return err
+}
+
+// receive performs a real, blocking net.PacketConn.ReadFrom against s's
+// socket -- exactly the same deliberate "block for real inside the operation
+// that has data to wait for, rather than truly implementing async wait-then-
+// retry" simplification this file's package doc documents for TCP's
+// sockInStream.read (see its "Blocking, single-shot" section), now applied
+// to UDP's own receive: udp.wit documents receive as required to never block
+// and never report would-block, an async contract this single-threaded host
+// has no task scheduler to honor faithfully -- a guest's compiled glue
+// bridges that contract onto a real recv by looping receive+subscribe+
+// [method]pollable.block (a no-op, see wasiPollableRep's doc) until data
+// shows up; blocking for real here still produces exactly the sequence that
+// loop expects to observe (immediately, once data is genuinely available),
+// just without the CPU spin its outer loop would otherwise do while polling
+// a host that could truly report "not yet" -- and a maxResults of 0 (a
+// legitimate zero-length probe, per udp.wit's own doc) is honored literally
+// as an immediate, non-blocking empty result, since there is nothing to wait
+// for in that case at all.
+//
+// s.remote, when set (this socket's `stream` was called with
+// some(remote-address) -- see udp.wit's own "connected" mode doc), discards
+// any datagram not sent from that exact peer and keeps reading, mirroring a
+// real connected UDP socket's kernel-side filtering; an unconnected stream
+// (s.remote == nil) accepts from anyone, exactly like a real unconnected UDP
+// socket's recvfrom.
+func (s *incomingDatagramStream) receive(maxResults uint64) ([]abi.Value, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if maxResults == 0 {
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: []abi.Value{}}}, nil
+	}
+	buf := make([]byte, wasiSockMaxReadChunk)
+	for {
+		n, raddr, err := s.pconn.ReadFrom(buf)
+		if err != nil {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiUDPErrToCode(err)}}, nil
+		}
+		udpAddr, ok := raddr.(*net.UDPAddr)
+		if !ok {
+			return nil, fmt.Errorf("[method]incoming-datagram-stream.receive: sender address: expected *net.UDPAddr, got %T", raddr)
+		}
+		if s.remote != nil && !(udpAddr.IP.Equal(s.remote.IP) && udpAddr.Port == s.remote.Port) {
+			continue // not from the connected peer -- discard and keep waiting, see doc
+		}
+		remoteVal, err := wasiIPSocketAddrFromUDPAddr(udpAddr)
+		if err != nil {
+			return nil, fmt.Errorf("[method]incoming-datagram-stream.receive: %w", err)
+		}
+		datagram := []abi.Value{wasiListFromBytes(append([]byte(nil), buf[:n]...)), remoteVal}
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: []abi.Value{datagram}}}, nil
+	}
+}
+
+// send performs a real net.PacketConn.WriteTo per datagram in datagrams (the
+// lifted list<outgoing-datagram>, each a 2-field record: data list<u8>,
+// remote-address option<ip-socket-address> -- see abi.Value's doc: record ->
+// []Value, option -> nil or the inner value directly), resolving each
+// datagram's own remote-address when present, or falling back to s.remote
+// (the "connected" mode default -- see udp.wit's `send` doc) when absent.
+// Per send's own documented contract, sending stops at the first failure but
+// only reports an error if NOTHING was sent yet (sent == 0); otherwise the
+// count of datagrams actually written is reported Ok, matching "this
+// function never returns an error [if] at least one datagram has been sent
+// successfully".
+func (s *outgoingDatagramStream) send(datagrams []abi.Value) ([]abi.Value, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var sent uint64
+	var lastErr error
+sendLoop:
+	for i, dv := range datagrams {
+		rec, ok := dv.([]abi.Value)
+		if !ok || len(rec) != 2 {
+			return nil, fmt.Errorf("[method]outgoing-datagram-stream.send: datagrams[%d]: expected a 2-field record, got %#v", i, dv)
+		}
+		data, err := wasiBytesFromList(rec[0])
+		if err != nil {
+			return nil, fmt.Errorf("[method]outgoing-datagram-stream.send: datagrams[%d].data: %w", i, err)
+		}
+		addr := s.remote
+		if rec[1] != nil {
+			addrStr, err := wasiIPSocketAddrToString(rec[1])
+			if err != nil {
+				return nil, fmt.Errorf("[method]outgoing-datagram-stream.send: datagrams[%d].remote-address: %w", i, err)
+			}
+			addr, err = net.ResolveUDPAddr("udp", addrStr)
+			if err != nil {
+				return nil, fmt.Errorf("[method]outgoing-datagram-stream.send: datagrams[%d].remote-address: resolve %q: %w", i, addrStr, err)
+			}
+		}
+		if addr == nil {
+			lastErr = fmt.Errorf("no remote-address given and stream has no default (unconnected)")
+			break sendLoop
+		}
+		if _, err := s.pconn.WriteTo(data, addr); err != nil {
+			lastErr = err
+			break sendLoop
+		}
+		sent++
+	}
+	if sent == 0 && lastErr != nil {
+		return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiUDPErrToCode(lastErr)}}, nil
+	}
+	return []abi.Value{abi.ResultValue{IsErr: false, Payload: sent}}, nil
 }
 
 // wasiTCPDialErrToCode maps a net.Dial error to the closest wasi:sockets
@@ -434,6 +625,61 @@ func wasiIPSocketAddrToString(v abi.Value) (string, error) {
 	default:
 		return "", fmt.Errorf("ip-socket-address: unknown variant case %d", vv.Disc)
 	}
+}
+
+// wasiIPSocketAddrFromUDPAddr converts a real *net.UDPAddr (a datagram's
+// sender, from net.PacketConn.ReadFrom) into the wasi:sockets/network
+// `ip-socket-address` variant shape (see abi.Value's doc), the reverse
+// direction of wasiIPSocketAddrToString -- needed because, unlike TCP (which
+// only ever consumes an ip-socket-address the guest supplies, for
+// start-connect), UDP's [method]incoming-datagram-stream.receive must
+// PRODUCE one: every received datagram's own sender address. IPv6's
+// scope-id field is always reported 0: net.UDPAddr's own scope is a string
+// zone name (an interface name, e.g. "eth0"), not the numeric interface
+// index ip-socket-address's scope-id field expects, and no fixture this
+// package runs ever exercises a scoped (link-local) IPv6 address to make
+// that translation worth building.
+func wasiIPSocketAddrFromUDPAddr(addr *net.UDPAddr) (abi.Value, error) {
+	if ip4 := addr.IP.To4(); ip4 != nil {
+		rec := []abi.Value{
+			uint32(addr.Port),
+			[]abi.Value{uint32(ip4[0]), uint32(ip4[1]), uint32(ip4[2]), uint32(ip4[3])},
+		}
+		return abi.VariantValue{Disc: 0, Payload: rec}, nil
+	}
+	ip16 := addr.IP.To16()
+	if ip16 == nil {
+		return nil, fmt.Errorf("wasiIPSocketAddrFromUDPAddr: %v is neither a valid IPv4 nor IPv6 address", addr.IP)
+	}
+	parts := make([]abi.Value, 8)
+	for i := 0; i < 8; i++ {
+		parts[i] = uint32(uint16(ip16[i*2])<<8 | uint16(ip16[i*2+1]))
+	}
+	rec := []abi.Value{
+		uint32(addr.Port),
+		uint32(0), // flow-info: not modeled by net.UDPAddr
+		parts,
+		uint32(0), // scope-id: see doc above
+	}
+	return abi.VariantValue{Disc: 1, Payload: rec}, nil
+}
+
+// wasiUDPErrToCode maps a real UDP bind/send/receive error to the closest
+// wasi:sockets error-code case -- mirrors wasiTCPDialErrToCode's doc for why
+// only the distinctions this package's own fixtures can actually produce are
+// discriminated, with anything else falling back to wasiSockErrUnknown.
+func wasiUDPErrToCode(err error) uint32 {
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return wasiSockErrAddressInUse
+	}
+	if errors.Is(err, syscall.EADDRNOTAVAIL) {
+		return wasiSockErrAddressNotBindable
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return wasiSockErrTimeout
+	}
+	return wasiSockErrUnknown
 }
 
 // wasiSocketOptions returns the Options implementing wasi:sockets/
@@ -655,6 +901,372 @@ func wasiSocketOptions(sockets *wasiSockets) []Option {
 	}
 }
 
+// # wasi:sockets/udp
+//
+// wasiUDPSocketOptions mirrors wasiSocketOptions above, but for UDP: a real
+// wasi:sockets/udp + wasi:sockets/udp-create-socket implementation backed by
+// net.PacketConn (WASIConfig.ListenPacket, defaulted to net.ListenPacket in
+// WithWASI -- see its doc), only registered when WASIConfig.AllowUDP opts
+// in.
+//
+// # Discovery
+//
+// Built the same way wasi_sockets.go's TCP half originally was (see this
+// file's top-of-file package doc): running testdata/real_udp.component.wasm
+// (a genuine rustc wasm32-wasip2 guest built from `std::net::UdpSocket::
+// bind` + `send_to` + `recv_from` + print -- confirmed to work end-to-end
+// under a real `wasmtime run -S inherit-network` against a scratch Go UDP
+// server before any of this implementation existed) against a host with
+// wasi:sockets/tcp registered but wasi:sockets/udp deliberately left
+// unregistered traps loud, one call at a time, naming exactly the sequence
+// a real bind+send_to+recv_from run reaches:
+//
+//   - wasi:sockets/udp-create-socket.create-udp-socket
+//   - wasi:sockets/udp [method]udp-socket.{start-bind,finish-bind,%stream,
+//     subscribe}
+//   - wasi:sockets/udp [method]outgoing-datagram-stream.{check-send,send,
+//     subscribe}
+//   - wasi:sockets/udp [method]incoming-datagram-stream.{receive,subscribe}
+//   - wasi:io/poll [method]pollable.block (already registered by
+//     wasiSocketOptions -- UDP's pollable is the exact same always-ready
+//     singleton, see wasiPollableRep's doc, so no separate registration is
+//     needed for it here)
+//
+// # Blocking, single-shot bind/send/receive model
+//
+// Mirrors TCP's own documented simplification (see this file's package
+// doc's "Blocking, single-shot connect/read/write model" section) applied
+// to UDP's own async shape: start-bind performs the real, blocking
+// net.ListenPacket synchronously and records the outcome on the udp-socket
+// node before returning, so finish-bind never has anything to report but
+// the already-settled Ok/Err; every pollable this half mints is the same
+// always-ready singleton wasiSocketOptions' TCP half already registers
+// [method]pollable.block for. The one place this genuinely differs from
+// TCP: udp.wit's own receive is documented to never block and never report
+// would-block (an explicitly non-blocking, poll-then-retry contract) --
+// incomingDatagramStream.receive's own doc explains why blocking for real
+// inside receive is still the correct choice for this single-threaded host.
+func wasiUDPSocketOptions(sockets *wasiSockets) []Option {
+	// instance-network is registered here too, not just by wasiSocketOptions'
+	// TCP half: WASIConfig.AllowUDP may be set independently of AllowTCP
+	// (see its own doc), and [method]udp-socket.start-bind takes a
+	// borrow<network> arg exactly like [method]tcp-socket.start-connect
+	// does -- a guest that only ever touches UDP still needs
+	// wasi:sockets/instance-network.instance-network registered. Both
+	// halves register the identical closure/tag under the identical
+	// iface+name key when AllowTCP and AllowUDP are both set; the config
+	// map just keeps whichever was registered last, which is harmless since
+	// both are the exact same behavior (see wasiNetworkRep's doc: there is
+	// only ever one network).
+	instanceNetwork := func(context.Context, []abi.Value) ([]abi.Value, error) {
+		return []abi.Value{wasiNetworkRep}, nil
+	}
+
+	// pollableBlock/poll are likewise re-registered here (identical bodies
+	// to wasiSocketOptions' own, see their docs there): AllowUDP may be set
+	// without AllowTCP, and udp-socket/datagram-stream subscribe() mints
+	// the exact same always-ready pollable singleton TCP's own subscribe
+	// methods do (wasiPollableRep), which a UDP-only guest's compiled glue
+	// still calls [method]pollable.block/poll against while bridging
+	// start-bind/receive's async contract onto a blocking call (see
+	// incomingDatagramStream.receive's own doc).
+	pollableBlock := func(context.Context, []abi.Value) ([]abi.Value, error) {
+		return nil, nil
+	}
+	poll := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("wasi:io/poll.poll: expected 1 arg (in), got %d", len(args))
+		}
+		list, ok := args[0].([]abi.Value)
+		if !ok {
+			return nil, fmt.Errorf("wasi:io/poll.poll: in: expected list<borrow<pollable>> ([]abi.Value), got %T", args[0])
+		}
+		resources, err := sockets.getResources()
+		if err != nil {
+			return nil, err
+		}
+		out := make([]abi.Value, 0, len(list))
+		for i, v := range list {
+			h, ok := v.(uint32)
+			if !ok {
+				return nil, fmt.Errorf("wasi:io/poll.poll: in[%d]: expected uint32 handle, got %T", i, v)
+			}
+			if _, err := resources.Rep(wasiPollableResType, h); err != nil {
+				return nil, fmt.Errorf("wasi:io/poll.poll: in[%d]: %w", i, err)
+			}
+			out = append(out, uint32(i))
+		}
+		return []abi.Value{out}, nil
+	}
+
+	createUDPSocket := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("wasi:sockets/udp-create-socket.create-udp-socket: expected 1 arg (address-family), got %d", len(args))
+		}
+		fam, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("wasi:sockets/udp-create-socket.create-udp-socket: address-family: expected uint32, got %T", args[0])
+		}
+		resources, err := sockets.getResources()
+		if err != nil {
+			return nil, err
+		}
+		rep := sockets.allocRep()
+		sockets.mu.Lock()
+		sockets.udpSocks[rep] = &udpSockNode{family: fam}
+		sockets.mu.Unlock()
+		handle := resources.NewOwn(wasiUDPSocketResType, rep)
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: handle}}, nil
+	}
+
+	udpStartBind := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 3 {
+			return nil, fmt.Errorf("[method]udp-socket.start-bind: expected 3 args (self, network, local-address), got %d", len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]udp-socket.start-bind: self: expected uint32 rep, got %T", args[0])
+		}
+		// args[1] (network, borrow<network>) -- see startConnect's identical
+		// comment above: this package has exactly one network, nothing
+		// further to inspect.
+		addr, err := wasiIPSocketAddrToString(args[2])
+		if err != nil {
+			return nil, fmt.Errorf("[method]udp-socket.start-bind: local-address: %w", err)
+		}
+		node, ok := sockets.udpSockNode(selfRep)
+		if !ok {
+			return nil, fmt.Errorf("[method]udp-socket.start-bind: udp-socket rep %d does not name a live socket", selfRep)
+		}
+		node.mu.Lock()
+		defer node.mu.Unlock()
+		if node.started {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiSockErrConcurrencyConflict}}, nil
+		}
+		node.started = true
+		// See this func's doc's "Blocking, single-shot" section: the real,
+		// blocking bind happens right here, synchronously -- finish-bind
+		// (below) only ever reports this already-settled outcome.
+		node.pconn, node.bindErr = sockets.listenPacket("udp", addr)
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: nil}}, nil
+	}
+
+	udpFinishBind := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("[method]udp-socket.finish-bind: expected 1 arg (self), got %d", len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]udp-socket.finish-bind: self: expected uint32 rep, got %T", args[0])
+		}
+		node, ok := sockets.udpSockNode(selfRep)
+		if !ok {
+			return nil, fmt.Errorf("[method]udp-socket.finish-bind: udp-socket rep %d does not name a live socket", selfRep)
+		}
+		node.mu.Lock()
+		defer node.mu.Unlock()
+		if !node.started {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiSockErrNotInProgress}}, nil
+		}
+		if node.finished {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiSockErrNotInProgress}}, nil
+		}
+		node.finished = true
+		if node.bindErr != nil {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiUDPErrToCode(node.bindErr)}}, nil
+		}
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: nil}}, nil
+	}
+
+	udpStream := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 2 {
+			return nil, fmt.Errorf("[method]udp-socket.stream: expected 2 args (self, remote-address), got %d", len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]udp-socket.stream: self: expected uint32 rep, got %T", args[0])
+		}
+		node, ok := sockets.udpSockNode(selfRep)
+		if !ok {
+			return nil, fmt.Errorf("[method]udp-socket.stream: udp-socket rep %d does not name a live socket", selfRep)
+		}
+		node.mu.Lock()
+		if node.pconn == nil {
+			node.mu.Unlock()
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiSockErrInvalidState}}, nil
+		}
+		pconn := node.pconn
+		node.mu.Unlock()
+
+		var remote *net.UDPAddr
+		if args[1] != nil { // option<ip-socket-address>: nil (none) or the variant directly (see abi.Value's doc)
+			addrStr, err := wasiIPSocketAddrToString(args[1])
+			if err != nil {
+				return nil, fmt.Errorf("[method]udp-socket.stream: remote-address: %w", err)
+			}
+			remote, err = net.ResolveUDPAddr("udp", addrStr)
+			if err != nil {
+				return nil, fmt.Errorf("[method]udp-socket.stream: remote-address: resolve %q: %w", addrStr, err)
+			}
+		}
+
+		resources, err := sockets.getResources()
+		if err != nil {
+			return nil, err
+		}
+		inRep := sockets.allocRep()
+		outRep := sockets.allocRep()
+		sockets.mu.Lock()
+		sockets.inDgrams[inRep] = &incomingDatagramStream{pconn: pconn, remote: remote}
+		sockets.outDgrams[outRep] = &outgoingDatagramStream{pconn: pconn, remote: remote}
+		sockets.mu.Unlock()
+		// tuple<own<incoming-datagram-stream>,own<outgoing-datagram-stream>>
+		// -- see finishConnect's identical comment above: both handles are
+		// minted directly here since host_import.go's generic
+		// allocHandleResult only auto-converts a top-level own/borrow.
+		inHandle := resources.NewOwn(wasiIncomingDatagramStreamResType, inRep)
+		outHandle := resources.NewOwn(wasiOutgoingDatagramStreamResType, outRep)
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: []abi.Value{inHandle, outHandle}}}, nil
+	}
+
+	udpSubscribe := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("[method]udp-socket.subscribe: expected 1 arg (self), got %d", len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]udp-socket.subscribe: self: expected uint32 rep, got %T", args[0])
+		}
+		if _, ok := sockets.udpSockNode(selfRep); !ok {
+			return nil, fmt.Errorf("[method]udp-socket.subscribe: udp-socket rep %d does not name a live socket", selfRep)
+		}
+		return []abi.Value{wasiPollableRep}, nil
+	}
+
+	incomingReceive := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 2 {
+			return nil, fmt.Errorf("[method]incoming-datagram-stream.receive: expected 2 args (self, max-results), got %d", len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]incoming-datagram-stream.receive: self: expected uint32 rep, got %T", args[0])
+		}
+		maxResults, ok := args[1].(uint64)
+		if !ok {
+			return nil, fmt.Errorf("[method]incoming-datagram-stream.receive: max-results: expected uint64, got %T", args[1])
+		}
+		node, ok := sockets.inDatagramStreamNode(selfRep)
+		if !ok {
+			return nil, fmt.Errorf("[method]incoming-datagram-stream.receive: incoming-datagram-stream rep %d does not name a live stream", selfRep)
+		}
+		return node.receive(maxResults)
+	}
+
+	incomingSubscribe := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("[method]incoming-datagram-stream.subscribe: expected 1 arg (self), got %d", len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]incoming-datagram-stream.subscribe: self: expected uint32 rep, got %T", args[0])
+		}
+		if _, ok := sockets.inDatagramStreamNode(selfRep); !ok {
+			return nil, fmt.Errorf("[method]incoming-datagram-stream.subscribe: incoming-datagram-stream rep %d does not name a live stream", selfRep)
+		}
+		return []abi.Value{wasiPollableRep}, nil
+	}
+
+	outgoingCheckSend := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("[method]outgoing-datagram-stream.check-send: expected 1 arg (self), got %d", len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]outgoing-datagram-stream.check-send: self: expected uint32 rep, got %T", args[0])
+		}
+		if _, ok := sockets.outDatagramStreamNode(selfRep); !ok {
+			return nil, fmt.Errorf("[method]outgoing-datagram-stream.check-send: outgoing-datagram-stream rep %d does not name a live stream", selfRep)
+		}
+		// A large, fixed budget: there is no real backpressure to model
+		// against a net.PacketConn -- mirrors wasi.go's checkWrite doc for
+		// the identical reasoning on the TCP/stdio output-stream side.
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: uint64(1) << 20}}, nil
+	}
+
+	outgoingSend := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 2 {
+			return nil, fmt.Errorf("[method]outgoing-datagram-stream.send: expected 2 args (self, datagrams), got %d", len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]outgoing-datagram-stream.send: self: expected uint32 rep, got %T", args[0])
+		}
+		datagrams, ok := args[1].([]abi.Value)
+		if !ok {
+			return nil, fmt.Errorf("[method]outgoing-datagram-stream.send: datagrams: expected list<outgoing-datagram> ([]abi.Value), got %T", args[1])
+		}
+		node, ok := sockets.outDatagramStreamNode(selfRep)
+		if !ok {
+			return nil, fmt.Errorf("[method]outgoing-datagram-stream.send: outgoing-datagram-stream rep %d does not name a live stream", selfRep)
+		}
+		return node.send(datagrams)
+	}
+
+	outgoingSubscribe := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("[method]outgoing-datagram-stream.subscribe: expected 1 arg (self), got %d", len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]outgoing-datagram-stream.subscribe: self: expected uint32 rep, got %T", args[0])
+		}
+		if _, ok := sockets.outDatagramStreamNode(selfRep); !ok {
+			return nil, fmt.Errorf("[method]outgoing-datagram-stream.subscribe: outgoing-datagram-stream rep %d does not name a live stream", selfRep)
+		}
+		return []abi.Value{wasiPollableRep}, nil
+	}
+
+	instNetFD, instNetResolve := wasiInstanceNetworkSig()
+	blockFD, blockResolve := wasiPollableBlockSig()
+	pollFD, pollResolve := wasiPollSig()
+	createUDPFD, createUDPResolve := wasiCreateUDPSocketSig()
+	startBindFD, startBindResolve := wasiUDPStartBindSig()
+	finishBindFD, finishBindResolve := wasiUDPFinishBindSig()
+	streamFD, streamResolve := wasiUDPStreamSig()
+	udpSubFD, udpSubResolve := wasiSubscribeSig(wasiUDPSocketResType)
+	receiveFD, receiveResolve := wasiIncomingReceiveSig()
+	inDgramSubFD, inDgramSubResolve := wasiSubscribeSig(wasiIncomingDatagramStreamResType)
+	checkSendFD, checkSendResolve := wasiOutgoingCheckSendSig()
+	sendFD, sendResolve := wasiOutgoingSendSig()
+	outDgramSubFD, outDgramSubResolve := wasiSubscribeSig(wasiOutgoingDatagramStreamResType)
+
+	return []Option{
+		withResourcesHook(sockets.setResources),
+
+		// See withResourceTag's doc (host_import.go) -- same reasoning as
+		// wasiSocketOptions' identical block for TCP's own resources.
+		withResourceTag(wasiIfaceSocketsNetwork, "network", wasiNetworkResType),
+		withResourceTag(wasiIfacePoll, "pollable", wasiPollableResType),
+		withResourceTag(wasiIfaceSocketsUDP, "udp-socket", wasiUDPSocketResType),
+		withResourceTag(wasiIfaceSocketsUDP, "incoming-datagram-stream", wasiIncomingDatagramStreamResType),
+		withResourceTag(wasiIfaceSocketsUDP, "outgoing-datagram-stream", wasiOutgoingDatagramStreamResType),
+
+		withImportCustom(wasiIfaceSocketsInstanceNet, "instance-network", instanceNetwork, instNetFD, instNetResolve),
+		withImportCustom(wasiIfacePoll, "[method]pollable.block", pollableBlock, blockFD, blockResolve),
+		withImportCustom(wasiIfacePoll, "poll", poll, pollFD, pollResolve),
+		withImportCustom(wasiIfaceSocketsUDPCreateSoc, "create-udp-socket", createUDPSocket, createUDPFD, createUDPResolve),
+		withImportCustom(wasiIfaceSocketsUDP, "[method]udp-socket.start-bind", udpStartBind, startBindFD, startBindResolve),
+		withImportCustom(wasiIfaceSocketsUDP, "[method]udp-socket.finish-bind", udpFinishBind, finishBindFD, finishBindResolve),
+		withImportCustom(wasiIfaceSocketsUDP, "[method]udp-socket.stream", udpStream, streamFD, streamResolve),
+		withImportCustom(wasiIfaceSocketsUDP, "[method]udp-socket.subscribe", udpSubscribe, udpSubFD, udpSubResolve),
+		withImportCustom(wasiIfaceSocketsUDP, "[method]incoming-datagram-stream.receive", incomingReceive, receiveFD, receiveResolve),
+		withImportCustom(wasiIfaceSocketsUDP, "[method]incoming-datagram-stream.subscribe", incomingSubscribe, inDgramSubFD, inDgramSubResolve),
+		withImportCustom(wasiIfaceSocketsUDP, "[method]outgoing-datagram-stream.check-send", outgoingCheckSend, checkSendFD, checkSendResolve),
+		withImportCustom(wasiIfaceSocketsUDP, "[method]outgoing-datagram-stream.send", outgoingSend, sendFD, sendResolve),
+		withImportCustom(wasiIfaceSocketsUDP, "[method]outgoing-datagram-stream.subscribe", outgoingSubscribe, outDgramSubFD, outDgramSubResolve),
+	}
+}
+
 // wasiIPv4AddressType interns wasi:sockets/network's `ipv4-address`
 // (`type ipv4-address = tuple<u8,u8,u8,u8>`) into tbl and returns its
 // TypeRef.
@@ -828,6 +1440,168 @@ func wasiPollSig() (binary.FuncDesc, abi.Resolver) {
 	fd := binary.FuncDesc{
 		Params:  []binary.FuncParam{{Name: "in", Type: listRef}},
 		Results: binary.FuncResults{Unnamed: &outListRef},
+	}
+	return fd, tbl.resolver()
+}
+
+// wasiIncomingDatagramType interns wasi:sockets/udp's `record
+// incoming-datagram { data: list<u8>, remote-address: ip-socket-address }`
+// into tbl and returns its TypeRef, in exact WIT declaration order.
+func wasiIncomingDatagramType(tbl *typeTable) binary.TypeRef {
+	dataRef := tbl.add(binary.ListDesc{Element: binary.TypeRef{Primitive: "u8"}})
+	addrRef := wasiIPSocketAddressType(tbl)
+	return tbl.add(binary.RecordDesc{Fields: []binary.RecordField{
+		{Name: "data", Type: dataRef},
+		{Name: "remote-address", Type: addrRef},
+	}})
+}
+
+// wasiOutgoingDatagramType interns wasi:sockets/udp's `record
+// outgoing-datagram { data: list<u8>, remote-address:
+// option<ip-socket-address> }` into tbl and returns its TypeRef, in exact
+// WIT declaration order.
+func wasiOutgoingDatagramType(tbl *typeTable) binary.TypeRef {
+	dataRef := tbl.add(binary.ListDesc{Element: binary.TypeRef{Primitive: "u8"}})
+	addrRef := wasiIPSocketAddressType(tbl)
+	optAddrRef := tbl.add(binary.OptionDesc{Element: addrRef})
+	return tbl.add(binary.RecordDesc{Fields: []binary.RecordField{
+		{Name: "data", Type: dataRef},
+		{Name: "remote-address", Type: optAddrRef},
+	}})
+}
+
+// wasiCreateUDPSocketSig builds the FuncDesc/resolver for
+// wasi:sockets/udp-create-socket.create-udp-socket(address-family:
+// ip-address-family) -> result<own<udp-socket>, error-code>.
+func wasiCreateUDPSocketSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	famRef := wasiIPAddressFamilyType(tbl)
+	okRef := tbl.add(binary.OwnDesc{ResourceType: wasiUDPSocketResType})
+	errRef := wasiSocketsErrorCodeType(tbl)
+	resultRef := tbl.add(binary.ResultDesc{Ok: &okRef, Err: &errRef})
+	fd := binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "address-family", Type: famRef}},
+		Results: binary.FuncResults{Unnamed: &resultRef},
+	}
+	return fd, tbl.resolver()
+}
+
+// wasiUDPStartBindSig builds the FuncDesc/resolver for
+// [method]udp-socket.start-bind(self: borrow<udp-socket>, network:
+// borrow<network>, local-address: ip-socket-address) -> result<_,
+// error-code>.
+func wasiUDPStartBindSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiUDPSocketResType})
+	netRef := tbl.add(binary.BorrowDesc{ResourceType: wasiNetworkResType})
+	addrRef := wasiIPSocketAddressType(tbl)
+	errRef := wasiSocketsErrorCodeType(tbl)
+	resultRef := tbl.add(binary.ResultDesc{Err: &errRef})
+	fd := binary.FuncDesc{
+		Params: []binary.FuncParam{
+			{Name: "self", Type: selfRef},
+			{Name: "network", Type: netRef},
+			{Name: "local-address", Type: addrRef},
+		},
+		Results: binary.FuncResults{Unnamed: &resultRef},
+	}
+	return fd, tbl.resolver()
+}
+
+// wasiUDPFinishBindSig builds the FuncDesc/resolver for
+// [method]udp-socket.finish-bind(self: borrow<udp-socket>) -> result<_,
+// error-code>.
+func wasiUDPFinishBindSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiUDPSocketResType})
+	errRef := wasiSocketsErrorCodeType(tbl)
+	resultRef := tbl.add(binary.ResultDesc{Err: &errRef})
+	fd := binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}},
+		Results: binary.FuncResults{Unnamed: &resultRef},
+	}
+	return fd, tbl.resolver()
+}
+
+// wasiUDPStreamSig builds the FuncDesc/resolver for
+// [method]udp-socket.%stream(self: borrow<udp-socket>, remote-address:
+// option<ip-socket-address>) -> result<tuple<own<incoming-datagram-stream>,
+// own<outgoing-datagram-stream>>, error-code>.
+func wasiUDPStreamSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiUDPSocketResType})
+	addrRef := wasiIPSocketAddressType(tbl)
+	optAddrRef := tbl.add(binary.OptionDesc{Element: addrRef})
+	inRef := tbl.add(binary.OwnDesc{ResourceType: wasiIncomingDatagramStreamResType})
+	outRef := tbl.add(binary.OwnDesc{ResourceType: wasiOutgoingDatagramStreamResType})
+	tupleRef := tbl.add(binary.TupleDesc{Elements: []binary.TypeRef{inRef, outRef}})
+	errRef := wasiSocketsErrorCodeType(tbl)
+	resultRef := tbl.add(binary.ResultDesc{Ok: &tupleRef, Err: &errRef})
+	fd := binary.FuncDesc{
+		Params: []binary.FuncParam{
+			{Name: "self", Type: selfRef},
+			{Name: "remote-address", Type: optAddrRef},
+		},
+		Results: binary.FuncResults{Unnamed: &resultRef},
+	}
+	return fd, tbl.resolver()
+}
+
+// wasiIncomingReceiveSig builds the FuncDesc/resolver for
+// [method]incoming-datagram-stream.receive(self:
+// borrow<incoming-datagram-stream>, max-results: u64) ->
+// result<list<incoming-datagram>, error-code>.
+func wasiIncomingReceiveSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiIncomingDatagramStreamResType})
+	datagramRef := wasiIncomingDatagramType(tbl)
+	listRef := tbl.add(binary.ListDesc{Element: datagramRef})
+	errRef := wasiSocketsErrorCodeType(tbl)
+	resultRef := tbl.add(binary.ResultDesc{Ok: &listRef, Err: &errRef})
+	fd := binary.FuncDesc{
+		Params: []binary.FuncParam{
+			{Name: "self", Type: selfRef},
+			{Name: "max-results", Type: binary.TypeRef{Primitive: "u64"}},
+		},
+		Results: binary.FuncResults{Unnamed: &resultRef},
+	}
+	return fd, tbl.resolver()
+}
+
+// wasiOutgoingCheckSendSig builds the FuncDesc/resolver for
+// [method]outgoing-datagram-stream.check-send(self:
+// borrow<outgoing-datagram-stream>) -> result<u64, error-code>.
+func wasiOutgoingCheckSendSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiOutgoingDatagramStreamResType})
+	errRef := wasiSocketsErrorCodeType(tbl)
+	okRef := binary.TypeRef{Primitive: "u64"}
+	resultRef := tbl.add(binary.ResultDesc{Ok: &okRef, Err: &errRef})
+	fd := binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}},
+		Results: binary.FuncResults{Unnamed: &resultRef},
+	}
+	return fd, tbl.resolver()
+}
+
+// wasiOutgoingSendSig builds the FuncDesc/resolver for
+// [method]outgoing-datagram-stream.send(self:
+// borrow<outgoing-datagram-stream>, datagrams: list<outgoing-datagram>) ->
+// result<u64, error-code>.
+func wasiOutgoingSendSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiOutgoingDatagramStreamResType})
+	datagramRef := wasiOutgoingDatagramType(tbl)
+	datagramsRef := tbl.add(binary.ListDesc{Element: datagramRef})
+	errRef := wasiSocketsErrorCodeType(tbl)
+	okRef := binary.TypeRef{Primitive: "u64"}
+	resultRef := tbl.add(binary.ResultDesc{Ok: &okRef, Err: &errRef})
+	fd := binary.FuncDesc{
+		Params: []binary.FuncParam{
+			{Name: "self", Type: selfRef},
+			{Name: "datagrams", Type: datagramsRef},
+		},
+		Results: binary.FuncResults{Unnamed: &resultRef},
 	}
 	return fd, tbl.resolver()
 }

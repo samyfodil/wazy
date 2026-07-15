@@ -225,6 +225,24 @@ type WASIConfig struct {
 	// addresses), without needing any change to wasi_sockets.go itself.
 	// Has no effect unless AllowTCP is also true.
 	Dialer func(network, address string) (net.Conn, error)
+
+	// AllowUDP opts into a real wasi:sockets (UDP-only) + wasi:io/poll host
+	// implementation -- see wasi_sockets.go's package doc's UDP section.
+	// False (the default) leaves wasi:sockets/udp*
+	// entirely unregistered, so the graph engine's own automatic trap-stub
+	// fallback fails loud, naming the specific iface+func, the moment a
+	// guest actually calls into UDP sockets. Independent of AllowTCP: a
+	// caller may enable one, both, or neither.
+	AllowUDP bool
+
+	// ListenPacket, when non-nil, replaces the real net.ListenPacket
+	// WithWASI otherwise uses to satisfy a guest's wasi:sockets/udp
+	// [method]udp-socket.start-bind -- see wasi_sockets.go's udpStartBind.
+	// Mirrors Dialer's role for TCP: a test that wants a real UDP exchange
+	// against a scratch server it controls can inject a ListenPacket that
+	// enforces loopback-only binds, without needing any change to
+	// wasi_sockets.go itself. Has no effect unless AllowUDP is also true.
+	ListenPacket func(network, address string) (net.PacketConn, error)
 }
 
 // WithWASI returns the Options that register a WASI 0.2 host implementation
@@ -267,7 +285,11 @@ func WithWASI(cfg WASIConfig) []Option {
 	if dial == nil {
 		dial = func(network, address string) (net.Conn, error) { return net.Dial(network, address) }
 	}
-	sockets := newWasiSockets(dial)
+	listenPacket := cfg.ListenPacket
+	if listenPacket == nil {
+		listenPacket = func(network, address string) (net.PacketConn, error) { return net.ListenPacket(network, address) }
+	}
+	sockets := newWasiSockets(dial, listenPacket)
 
 	// stdinBytes is the entirety of WASIConfig.Stdin, read once up front
 	// (mirrors read-via-stream's own model: an fsDescNode's content is a
@@ -531,6 +553,9 @@ func WithWASI(cfg WASIConfig) []Option {
 	opts = append(opts, wasiFilesystemOptions(fs, sockets)...)
 	if cfg.AllowTCP {
 		opts = append(opts, wasiSocketOptions(sockets)...)
+	}
+	if cfg.AllowUDP {
+		opts = append(opts, wasiUDPSocketOptions(sockets)...)
 	}
 	return opts
 }
