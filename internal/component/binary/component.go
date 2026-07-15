@@ -62,6 +62,15 @@ type Component struct {
 	// Canons describe canonical lift/lower bindings (section 8).
 	Canons []Canon
 
+	// CoreFuncSpace is the component's full core func index space, in
+	// declaration order across the (possibly interleaved) alias and canon
+	// sections -- see corefuncspace.go. Empty for a Component not produced by
+	// Decode (e.g. a hand-built binary.Component in a test), matching
+	// TypeSpace's convention; callers needing the core func index space fall
+	// back to treating Aliases/Canons as already correctly ordered in that
+	// case.
+	CoreFuncSpace []CoreFuncSpaceEntry
+
 	// Start is the optional start section that specifies startup behavior (section 9).
 	Start *Start
 

@@ -80,7 +80,32 @@ type Instance struct {
 	// always non-nil, even for instances with no resource canons, so callers
 	// never need a nil check.
 	resources *handleTable
+
+	// coreModuleCount is the number of EMBEDDED core modules (binary.Component
+	// CoreModules, instantiated via a Kind == 0x00 "instantiate" core
+	// instance) this Instance wired up -- set only by the general graph
+	// engine (graph.go); zero for the simpler single-module paths, which
+	// callers can already infer have exactly one. See CoreModuleCount.
+	coreModuleCount int
+
+	// wasiCalls records, in the order the graph engine wired them, the
+	// "iface.func" name of every canon lower it resolved (WASI or not) --
+	// set only by the general graph engine. See WASICalls.
+	wasiCalls []string
 }
+
+// CoreModuleCount returns the number of embedded core modules (real,
+// non-synthetic core wasm binaries from the component's CoreModules section)
+// this Instance instantiated. Only meaningful for a component instantiated
+// via the general graph engine (graph.go), i.e. one with more than one
+// embedded core module; see needsGraphPath.
+func (in *Instance) CoreModuleCount() int { return in.coreModuleCount }
+
+// WASICalls returns the "iface.func" name of every canon-lower this
+// Instance's graph engine wired up, in the order they were declared in the
+// component binary. Only meaningful for a component instantiated via the
+// general graph engine (graph.go).
+func (in *Instance) WASICalls() []string { return in.wasiCalls }
 
 // boundExport binds a component export to the core function that implements
 // it and to the module that provides the linear memory / cabi_realloc used to
@@ -115,10 +140,71 @@ func Instantiate(ctx context.Context, r wazy.Runtime, componentBytes []byte, opt
 
 	cfg := newConfig(opts)
 
+	if needsGraphPath(comp) {
+		return instantiateGraph(ctx, r, comp, componentBytes, cfg)
+	}
 	if needsImportPath(comp) {
 		return instantiateWithImports(ctx, r, comp, componentBytes, cfg)
 	}
 	return instantiateComponent(ctx, r, comp, componentBytes)
+}
+
+// needsGraphPath reports whether comp needs the general multi-core-module
+// instantiation graph engine (graph.go) rather than instantiateWithImports.
+//
+// instantiateWithImports already tolerates more than one embedded core
+// module (it walks comp.CoreInstances generically, Kind 0x00 or 0x01, with
+// no count restriction) -- e.g. log_hello.wasm, a wit-bindgen-produced
+// fixture with a main module plus a small preview1-to-preview2 adapter
+// module, already exercises that and is proven working. What it cannot
+// represent is:
+//
+//   - an inline-export core instance regrouping anything other than a func
+//     (a memory or table alias) -- see graph.go's shim-based mechanism, or
+//   - a core func index space where canon-produced funcs (lower,
+//     resource.*) and core-level func aliases genuinely interleave --
+//     instantiateWithImports assumes every canon-produced func occupies a
+//     lower index than every alias-produced func (see its doc), which
+//     CoreFuncSpace's declaration-order tracking can now check precisely.
+//
+// So this checks exactly those two structural properties, rather than
+// something coarser like core-module count: a coarser check would reroute
+// already-working fixtures like log_hello to the newer, less battle-tested
+// engine for no reason, at real regression risk. Only a component that
+// actually needs the generalization (e.g. real_hello.component.wasm, a
+// genuine wasip2 CLI adapter graph) trips this.
+func needsGraphPath(comp *binary.Component) bool {
+	for _, ci := range comp.CoreInstances {
+		if ci.Kind != 0x01 {
+			continue
+		}
+		for _, e := range ci.Exports {
+			if e.Sort != 0x00 { // not a func: memory/table/global/...
+				return true
+			}
+		}
+	}
+	return !coreFuncSpacePartitioned(comp.CoreFuncSpace)
+}
+
+// coreFuncSpacePartitioned reports whether space fits instantiateWithImports'
+// assumption: every CoreFuncFromCanon entry occupies a lower index than
+// every CoreFuncFromAlias entry (either group may be empty). An empty space
+// (no Decode-populated CoreFuncSpace, e.g. a hand-built test Component, or a
+// component with no core func aliases/canons at all) trivially fits.
+func coreFuncSpacePartitioned(space []binary.CoreFuncSpaceEntry) bool {
+	sawAlias := false
+	for _, e := range space {
+		switch e.Kind {
+		case binary.CoreFuncFromAlias:
+			sawAlias = true
+		case binary.CoreFuncFromCanon:
+			if sawAlias {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // needsImportPath reports whether comp needs the general, host-import-capable

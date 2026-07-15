@@ -156,12 +156,19 @@ func decodeComponent(buf []byte) (*Component, error) {
 			offset = newOffset
 			aliasBase := uint32(len(c.Aliases))
 			c.Aliases = append(c.Aliases, aliases...)
-			// Type-sort aliases (sort 0x03) occupy the next index in the
-			// component's full type index space, interleaved with
-			// type-section deftypes and imported types -- see typespace.go.
 			for j, al := range aliases {
+				// Type-sort aliases (sort 0x03) occupy the next index in the
+				// component's full type index space, interleaved with
+				// type-section deftypes and imported types -- see typespace.go.
 				if al.Sort == 0x03 {
 					c.TypeSpace = append(c.TypeSpace, TypeSpaceEntry{Kind: TypeSpaceAlias, Alias: aliasBase + uint32(j)})
+				}
+				// A core-level func alias (sort 0x00 core, core:sort 0x00
+				// func) occupies the next index in the component's core func
+				// index space, interleaved with canon-produced core funcs --
+				// see corefuncspace.go.
+				if al.Sort == 0x00 && al.CoreSort == 0x00 {
+					c.CoreFuncSpace = append(c.CoreFuncSpace, CoreFuncSpaceEntry{Kind: CoreFuncFromAlias, Alias: aliasBase + uint32(j)})
 				}
 			}
 
@@ -186,7 +193,18 @@ func decodeComponent(buf []byte) (*Component, error) {
 				return nil, fmt.Errorf("canon section: %w", err)
 			}
 			offset = newOffset
+			canonBase := uint32(len(c.Canons))
 			c.Canons = append(c.Canons, canons...)
+			// A canon that produces a new core func (lower, or one of the
+			// three resource canons) occupies the next index in the
+			// component's core func index space, interleaved with
+			// core-level func aliases -- see corefuncspace.go.
+			for j, cn := range canons {
+				switch cn.Kind {
+				case 0x01, 0x02, 0x03, 0x04:
+					c.CoreFuncSpace = append(c.CoreFuncSpace, CoreFuncSpaceEntry{Kind: CoreFuncFromCanon, Canon: canonBase + uint32(j)})
+				}
+			}
 
 		case 9: // Start section
 			start, newOffset, err := decodeStartSection(buf, offset, sectionSize)
