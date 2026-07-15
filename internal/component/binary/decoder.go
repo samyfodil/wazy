@@ -533,7 +533,13 @@ func decodeInstanceSection(buf []byte, offset int, sectionSize uint32) ([]Instan
 
 			args := make([]InstantiateArg, argCount)
 			for j := range argCount {
-				name, off, err := readExternName(buf, offset)
+				// A component instantiate-arg name is `instantiatearg ::= n:<name>
+				// si:<sortidx>` where `name ::= n:<core:name>` -- i.e. a plain
+				// label (len + utf8), NOT an externname (which carries a
+				// 0x00/0x01/0x02 kind-byte prefix). Same class of fix as the
+				// core:instantiatearg case above; using readExternName here
+				// mis-reads the label's length-prefix low byte as a kind byte.
+				name, off, err := readLabel(buf, offset)
 				if err != nil {
 					return nil, off, fmt.Errorf("instance[%d] arg[%d] name: %w", i, j, err)
 				}

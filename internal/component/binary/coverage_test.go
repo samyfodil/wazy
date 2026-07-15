@@ -2427,12 +2427,12 @@ func TestInstanceWithArgs(t *testing.T) {
 	buf := preamble()
 	// Section 5: instance with arguments
 	instBody := []byte{
-		0x01,               // count = 1
-		0x00,               // kind = instantiate
-		0x00,               // componentIdx = 0
-		0x01,               // argCount = 1
-		0x00, 0x01, 'x',    // arg name: kind=0x00, len=1, "x"
-		0x01, 0x00,         // arg sortidx: sort=func, idx=0
+		0x01,       // count = 1
+		0x00,       // kind = instantiate
+		0x00,       // componentIdx = 0
+		0x01,       // argCount = 1
+		0x01, 'x',  // arg name: a plain label (len=1, "x"), not an externname
+		0x01, 0x00, // arg sortidx: sort=func, idx=0
 	}
 	buf = append(buf, 0x05, byte(len(instBody)))
 	buf = append(buf, instBody...)
@@ -2443,6 +2443,121 @@ func TestInstanceWithArgs(t *testing.T) {
 	}
 	if len(c.Instances) != 1 || len(c.Instances[0].Args) != 1 {
 		t.Errorf("instance with args not decoded correctly")
+	}
+	if c.Instances[0].Args[0].Name != "x" {
+		t.Errorf("instance arg name: got %q, want %q", c.Instances[0].Args[0].Name, "x")
+	}
+}
+
+func TestDecodeInstance_TruncatedArgName(t *testing.T) {
+	buf := preamble()
+	instBody := []byte{
+		0x01, // count = 1
+		0x00, // kind = instantiate
+		0x00, // componentIdx = 0
+		0x01, // argCount = 1
+		0x05, // arg name: label len=5 (but only provide 0 bytes)
+	}
+	buf = append(buf, 0x05, byte(len(instBody)))
+	buf = append(buf, instBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected truncation error for instance arg name")
+	}
+}
+
+func TestDecodeInstance_TruncatedArgSortidx(t *testing.T) {
+	buf := preamble()
+	instBody := []byte{
+		0x01,      // count = 1
+		0x00,      // kind = instantiate
+		0x00,      // componentIdx = 0
+		0x01,      // argCount = 1
+		0x01, 'x', // arg name: label len=1, "x"
+		// missing sortidx
+	}
+	buf = append(buf, 0x05, byte(len(instBody)))
+	buf = append(buf, instBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected truncation error for instance arg sortidx")
+	}
+}
+
+func TestDecodeInstance_InlineExports(t *testing.T) {
+	buf := preamble()
+	instBody := []byte{
+		0x01,            // count = 1
+		0x01,            // kind = inline exports
+		0x01,            // exportCount = 1
+		0x00, 0x01, 'x', // export name: externname kind=0x00, len=1, "x"
+		0x01, 0x00, // export sortidx: sort=func, idx=0
+	}
+	buf = append(buf, 0x05, byte(len(instBody)))
+	buf = append(buf, instBody...)
+
+	c, err := Decode(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if len(c.Instances) != 1 || c.Instances[0].Kind != 0x01 || len(c.Instances[0].Exports) != 1 {
+		t.Fatalf("inline exports not decoded correctly: %+v", c.Instances)
+	}
+	if got := c.Instances[0].Exports[0].Name; got != "x" {
+		t.Errorf("inline export name: got %q, want %q", got, "x")
+	}
+}
+
+func TestDecodeInstance_TruncatedExportCount(t *testing.T) {
+	buf := preamble()
+	instBody := []byte{
+		0x01, // count = 1
+		0x01, // kind = inline exports
+		// missing exportCount
+	}
+	buf = append(buf, 0x05, byte(len(instBody)))
+	buf = append(buf, instBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected truncation error for instance export count")
+	}
+}
+
+func TestDecodeInstance_TruncatedInlineExportName(t *testing.T) {
+	buf := preamble()
+	instBody := []byte{
+		0x01,       // count = 1
+		0x01,       // kind = inline exports
+		0x01,       // exportCount = 1
+		0x00, 0x05, // name: kind=0x00, len=5 (but only provide 0 bytes)
+	}
+	buf = append(buf, 0x05, byte(len(instBody)))
+	buf = append(buf, instBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected truncation error for instance inline export name")
+	}
+}
+
+func TestDecodeInstance_TruncatedInlineExportSortidx(t *testing.T) {
+	buf := preamble()
+	instBody := []byte{
+		0x01,            // count = 1
+		0x01,            // kind = inline exports
+		0x01,            // exportCount = 1
+		0x00, 0x01, 'x', // name: kind=0x00, len=1, "x"
+		// missing sortidx
+	}
+	buf = append(buf, 0x05, byte(len(instBody)))
+	buf = append(buf, instBody...)
+
+	_, err := Decode(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("expected truncation error for instance inline export sortidx")
 	}
 }
 

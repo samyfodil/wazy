@@ -128,6 +128,104 @@ func TestDecodeRichComponent(t *testing.T) {
 	}
 }
 
+// real_hello.component.wasm is a genuine wasm32-wasip2 `wasi:cli/command`
+// component produced by rustc/cargo-component (prints "hello world"), not a
+// synthetic fixture assembled from a hand-written .wat. It lives under the
+// instance package's testdata (shared with the runtime E2E tests) rather
+// than binary/testdata.
+//
+// Ground truth per `wasm-tools component wit` / `wasm-tools objdump`:
+//   - 10 component imports, all instance-sort (0x05): wasi:cli/{environment,
+//     exit,stdin,stdout,stderr}, wasi:io/{error,streams},
+//     wasi:clocks/wall-clock, wasi:filesystem/{types,preopens} (each @0.2.3).
+//   - 1 component export, instance-sort (0x05): wasi:cli/run@0.2.3.
+//   - 4 core modules (the main guest module plus three adapter/shim modules
+//     produced by the component tooling), each starting with the core-wasm
+//     magic number.
+//   - 20 canonical-function definitions: 1 lift (kind 0x00), 15 lowers (kind
+//     0x01), 4 resource.drop (kind 0x03).
+//   - A trailing nested component definition (section id 4, the adapter
+//     shim) that this decoder does not fully parse and records as a
+//     RawSection with an exact byte range instead.
+func TestDecodeRealGuest(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "instance", "testdata", "real_hello.component.wasm"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	c, err := Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("Decode real_hello.component.wasm: %v", err)
+	}
+
+	wantImports := []string{
+		"wasi:cli/environment@0.2.3",
+		"wasi:cli/exit@0.2.3",
+		"wasi:io/error@0.2.3",
+		"wasi:io/streams@0.2.3",
+		"wasi:cli/stdin@0.2.3",
+		"wasi:cli/stdout@0.2.3",
+		"wasi:cli/stderr@0.2.3",
+		"wasi:clocks/wall-clock@0.2.3",
+		"wasi:filesystem/types@0.2.3",
+		"wasi:filesystem/preopens@0.2.3",
+	}
+	if len(c.Imports) != len(wantImports) {
+		t.Fatalf("imports: got %d, want %d (%+v)", len(c.Imports), len(wantImports), c.Imports)
+	}
+	for i, want := range wantImports {
+		if c.Imports[i].Name != want {
+			t.Errorf("import[%d] name: got %q, want %q", i, c.Imports[i].Name, want)
+		}
+		if c.Imports[i].ExternType != 0x05 { // instance
+			t.Errorf("import[%d] %q sort: got %#x, want 0x05 (instance)", i, c.Imports[i].Name, c.Imports[i].ExternType)
+		}
+	}
+
+	if len(c.Exports) != 1 {
+		t.Fatalf("exports: got %d, want 1 (%+v)", len(c.Exports), c.Exports)
+	}
+	if c.Exports[0].Name != "wasi:cli/run@0.2.3" {
+		t.Errorf("export name: got %q, want %q", c.Exports[0].Name, "wasi:cli/run@0.2.3")
+	}
+	if c.Exports[0].ExternType != 0x05 { // instance
+		t.Errorf("export sort: got %#x, want 0x05 (instance)", c.Exports[0].ExternType)
+	}
+
+	if len(c.CoreModules) != 4 {
+		t.Fatalf("core modules: got %d, want 4 (%+v)", len(c.CoreModules), c.CoreModules)
+	}
+	coreMagic := []byte{0x00, 0x61, 0x73, 0x6d}
+	for i, m := range c.CoreModules {
+		if m.Offset+4 > len(data) || !bytes.Equal(data[m.Offset:m.Offset+4], coreMagic) {
+			t.Errorf("core module[%d] at offset %d does not start with core-wasm magic", i, m.Offset)
+		}
+	}
+
+	var lifts, lowers, resourceDrops int
+	for _, cn := range c.Canons {
+		switch cn.Kind {
+		case 0x00:
+			lifts++
+		case 0x01:
+			lowers++
+		case 0x03:
+			resourceDrops++
+		}
+	}
+	if lifts != 1 {
+		t.Errorf("canon lifts: got %d, want 1", lifts)
+	}
+	if lowers != 15 {
+		t.Errorf("canon lowers: got %d, want 15", lowers)
+	}
+	if resourceDrops != 4 {
+		t.Errorf("canon resource.drops: got %d, want 4", resourceDrops)
+	}
+	if len(c.Canons) != lifts+lowers+resourceDrops {
+		t.Errorf("canons: got %d total, want exactly lift+lower+resource.drop (%d)", len(c.Canons), lifts+lowers+resourceDrops)
+	}
+}
+
 func TestDecodeInvalidMagic(t *testing.T) {
 	if _, err := Decode(bytes.NewReader([]byte{0x00, 0x01, 0x02, 0x03})); err == nil {
 		t.Fatal("expected invalid magic to be rejected")
