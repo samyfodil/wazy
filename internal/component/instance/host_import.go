@@ -38,6 +38,12 @@ type config struct {
 	// withImportCustom) use for that same resource. See withResourceTag's
 	// doc for why this mapping needs to exist at all.
 	resourceTags map[importKey]uint32
+
+	// compileCache, when set via WithCompileCache, is consulted by every
+	// embedded-core-module instantiation (instantiateCoreModule,
+	// compilecache.go) instead of always recompiling. Nil (the default)
+	// preserves the exact prior always-recompile behavior.
+	compileCache *CompileCache
 }
 
 type importKey struct {
@@ -82,6 +88,22 @@ func newConfig(opts []Option) *config {
 func WithImport(iface, name string, fn HostFunc, params, results []binary.TypeDesc) Option {
 	return func(c *config) {
 		c.imports[importKey{iface: iface, name: name}] = &hostImport{fn: fn, params: params, results: results}
+	}
+}
+
+// WithCompileCache opts Instantiate into reusing already-compiled core
+// modules from cache instead of recompiling (re-JITting) them on every call.
+// Pass the SAME *CompileCache across repeated Instantiate calls for the SAME
+// component (and the same Runtime -- see CompileCache's doc for the
+// Runtime-pairing rule) to skip redundant compilation of its embedded core
+// modules; the first Instantiate against a given component populates the
+// cache, later ones hit it.
+//
+// Omitting this option (the default) preserves the exact prior behavior:
+// every Instantiate call recompiles its core modules from scratch.
+func WithCompileCache(cache *CompileCache) Option {
+	return func(c *config) {
+		c.compileCache = cache
 	}
 }
 
@@ -320,7 +342,7 @@ func instantiateWithImports(ctx context.Context, r wazy.Runtime, comp *binary.Co
 			if err != nil {
 				return fail(err)
 			}
-			mod, err := r.InstantiateWithConfig(ctx, coreBytes, wazy.NewModuleConfig().WithName(name))
+			mod, err := instantiateCoreModule(ctx, r, cfg, coreBytes, wazy.NewModuleConfig().WithName(name))
 			if err != nil {
 				return fail(fmt.Errorf("component/instance: instantiate core module %d as %q: %w", ci.ModuleIdx, name, err))
 			}

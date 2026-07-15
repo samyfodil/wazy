@@ -172,7 +172,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		}
 	}
 
-	neededTypes, err := discoverNeededFuncTypes(ctx, r, comp, componentBytes, emptyNameTarget)
+	neededTypes, err := discoverNeededFuncTypes(ctx, r, cfg, comp, componentBytes, emptyNameTarget)
 	if err != nil {
 		return nil, err
 	}
@@ -273,7 +273,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			// function table not yet filled in at this point in the graph --
 			// see shim.go's doc) once the whole graph is wired, not something
 			// that should run eagerly as a side effect of wiring it in.
-			mod, err := r.InstantiateWithConfig(ctx, coreBytes, wazy.NewModuleConfig().WithName(name).WithStartFunctions())
+			mod, err := instantiateCoreModule(ctx, r, cfg, coreBytes, wazy.NewModuleConfig().WithName(name).WithStartFunctions())
 			if err != nil {
 				return fail(fmt.Errorf("component/instance: instantiate core module %d as %q: %w", ci.ModuleIdx, name, err))
 			}
@@ -356,7 +356,16 @@ func moduleNameForGraph(coreInstanceIdx int, refNames []string, emptyNameTarget 
 // every func it imports, keyed by (module name, field name). See this
 // file's package doc (step 5) for why this is the only available source of
 // truth for a lowered import's core-level type.
-func discoverNeededFuncTypes(ctx context.Context, r wazy.Runtime, comp *binary.Component, componentBytes []byte, emptyNameTarget string) (map[string]map[string]coreFuncSig, error) {
+//
+// When cfg carries a CompileCache, this probe compile goes through it too
+// (same coreBytes as the real instantiation loop below uses, so it's either
+// a genuine cache warm-up -- reused a few lines later -- or, on a repeat
+// Instantiate of the same component, an outright cache hit) and the
+// CompiledModule is left open, owned by the cache, instead of closed
+// immediately. With no cache, behavior is unchanged: a throwaway compile,
+// closed right after its ImportedFunctions() are read.
+func discoverNeededFuncTypes(ctx context.Context, r wazy.Runtime, cfg *config, comp *binary.Component, componentBytes []byte, emptyNameTarget string) (map[string]map[string]coreFuncSig, error) {
+	cached := cfg != nil && cfg.compileCache != nil
 	out := make(map[string]map[string]coreFuncSig)
 	for i, cm := range comp.CoreModules {
 		coreBytes, err := coreModuleBytes(cm, componentBytes)
@@ -369,7 +378,12 @@ func discoverNeededFuncTypes(ctx context.Context, r wazy.Runtime, comp *binary.C
 				return nil, fmt.Errorf("component/instance: core module %d: %w", i, err)
 			}
 		}
-		compiled, err := r.CompileModule(ctx, coreBytes)
+		var compiled wazy.CompiledModule
+		if cached {
+			compiled, err = cfg.compileCache.getOrCompile(ctx, r, coreBytes)
+		} else {
+			compiled, err = r.CompileModule(ctx, coreBytes)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("component/instance: core module %d: discover import types: %w", i, err)
 		}
@@ -380,8 +394,10 @@ func discoverNeededFuncTypes(ctx context.Context, r wazy.Runtime, comp *binary.C
 			}
 			out[modName][fieldName] = coreFuncSig{params: fd.ParamTypes(), results: fd.ResultTypes()}
 		}
-		if err := compiled.Close(ctx); err != nil {
-			return nil, fmt.Errorf("component/instance: core module %d: %w", i, err)
+		if !cached {
+			if err := compiled.Close(ctx); err != nil {
+				return nil, fmt.Errorf("component/instance: core module %d: %w", i, err)
+			}
 		}
 	}
 	return out, nil

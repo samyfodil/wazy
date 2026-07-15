@@ -94,6 +94,67 @@ func BenchmarkInstantiateHello(b *testing.B) {
 	}
 }
 
+// BenchmarkInstantiateCached is BenchmarkInstantiate's WithCompileCache
+// counterpart: one CompileCache and one Runtime are reused across all b.N
+// iterations (instead of recompiling real_adder's embedded core module from
+// scratch every time), isolating the cost CompileCache removes -- compare
+// its ns/op and allocs/op directly against BenchmarkInstantiate's.
+func BenchmarkInstantiateCached(b *testing.B) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+	cache := NewCompileCache()
+	defer cache.Close(ctx)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		inst, err := Instantiate(ctx, r, realAdderWasm, WithCompileCache(cache))
+		if err != nil {
+			b.Fatalf("Instantiate: %v", err)
+		}
+		b.StopTimer()
+		if err := inst.Close(ctx); err != nil {
+			b.Fatalf("Close: %v", err)
+		}
+		b.StartTimer()
+	}
+}
+
+// BenchmarkInstantiateHelloCached is BenchmarkInstantiateHello's
+// WithCompileCache counterpart: one CompileCache and, unlike
+// BenchmarkInstantiateHello, one Runtime are reused across all b.N
+// iterations -- the private-host-module leak BenchmarkInstantiateHello's doc
+// describes (which forced a fresh Runtime every iteration) is fixed (see
+// TestRealHello_ReinstantiateAfterCloseOnSameRuntime), so a cached repeat
+// Instantiate+Close cycle on one Runtime is safe here. This is the biggest
+// expected win: real_hello has 4 embedded core modules recompiled from
+// scratch on every uncached Instantiate (3 via instantiateGraph's real
+// instantiation loop, all 4 again via discoverNeededFuncTypes' probe compile
+// -- see that function's doc), all served from cache after the first
+// iteration warms it.
+func BenchmarkInstantiateHelloCached(b *testing.B) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+	cache := NewCompileCache()
+	defer cache.Close(ctx)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		inst, err := Instantiate(ctx, r, realHelloWasm, WithCompileCache(cache))
+		if err != nil {
+			b.Fatalf("Instantiate: %v", err)
+		}
+		b.StopTimer()
+		if err := inst.Close(ctx); err != nil {
+			b.Fatalf("Close: %v", err)
+		}
+		b.StartTimer()
+	}
+}
+
 // BenchmarkCallAdd isolates per-call ABI overhead for the simplest possible
 // signature -- add(u32,u32)->u32, no memory involved -- on a single
 // pre-instantiated real_adder Instance: lowerParams (abi.LowerFlat x2),
