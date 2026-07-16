@@ -268,17 +268,21 @@ func TestGraph_BindInstanceExport_MemberNotFuncSkipped(t *testing.T) {
 
 // ------- direct unit tests for the lower-level graph.go helpers -------
 
-func TestModuleNameForGraph(t *testing.T) {
-	if got, err := moduleNameForGraph(3, nil, "", "wazy:component/"); err != nil || got != "wazy:component/core3" {
-		t.Fatalf("got (%q, %v), want (\"wazy:component/core3\", nil)", got, err)
+func TestModuleKeyForGraph(t *testing.T) {
+	// Unreferenced -> synthesized core%d key.
+	if got, err := moduleKeyForGraph(3, nil, "anon"); err != nil || got != "core3" {
+		t.Fatalf("got (%q, %v), want (\"core3\", nil)", got, err)
 	}
-	if got, err := moduleNameForGraph(3, []string{"foo"}, "", "wazy:component/"); err != nil || got != "foo" {
+	// A non-empty refName is the raw name consumers import -- no prefix (the key
+	// lives only in the component's private resolver map, never the registry).
+	if got, err := moduleKeyForGraph(3, []string{"foo"}, "anon"); err != nil || got != "foo" {
 		t.Fatalf("got (%q, %v), want (\"foo\", nil)", got, err)
 	}
-	if got, err := moduleNameForGraph(3, []string{""}, "wazy:component/anon3", "wazy:component/"); err != nil || got != "wazy:component/anon3" {
-		t.Fatalf("got (%q, %v), want (\"wazy:component/anon3\", nil)", got, err)
+	// The sole "" ref maps to the (stable) emptyNameTarget key.
+	if got, err := moduleKeyForGraph(3, []string{""}, "anon-import"); err != nil || got != "anon-import" {
+		t.Fatalf("got (%q, %v), want (\"anon-import\", nil)", got, err)
 	}
-	if _, err := moduleNameForGraph(3, []string{"a", "b"}, "", "wazy:component/"); err == nil {
+	if _, err := moduleKeyForGraph(3, []string{"a", "b"}, "anon"); err == nil {
 		t.Fatal("expected an error for 2 ref names")
 	}
 }

@@ -155,16 +155,16 @@ func TestCompileCache_HelloPrintsHelloWorld(t *testing.T) {
 		t.Fatalf("stdout = %q, want %q (stderr: %q)", got, "hello world\n", stderr.String())
 	}
 
-	// real_hello has 4 embedded core modules, but one imports the empty module
-	// name and is rewritten to the per-instantiation-unique emptyNameTarget
-	// (see rewriteEmptyImportModuleName). That module deliberately bypasses the
-	// cache -- its bytes differ every instantiation, so caching them would grow
-	// the cache without ever hitting -- leaving exactly 3 cacheable modules.
+	// real_hello has 4 embedded core modules; the cache holds exactly that many
+	// entries. The one module that imports the empty module name is rewritten to
+	// the STABLE graphEmptyImportKey (not a per-instantiation name), so its bytes
+	// are identical every instantiation and it caches like the rest -- see
+	// instantiateGraph's anonymous-instantiation model.
 	cache.mu.Lock()
 	n := len(cache.byKey)
 	cache.mu.Unlock()
-	if n != 3 {
-		t.Fatalf("cache entries after Instantiate(real_hello): got %d, want 3 (4 core modules, 1 empty-import-rewritten module bypasses the cache)", n)
+	if n != 4 {
+		t.Fatalf("cache entries after Instantiate(real_hello): got %d, want 4 (one per embedded core module)", n)
 	}
 }
 

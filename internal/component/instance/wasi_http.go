@@ -851,10 +851,14 @@ func wasiHTTPOptions(h *wasiHTTP) []Option {
 // (no http support, guest didn't set a response, guest signaled an error-code)
 // is reported as 500.
 func (in *Instance) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "read request body: "+err.Error(), http.StatusBadRequest)
-		return
+	var body []byte
+	if r.Body != nil { // a bodyless request (e.g. a bridged GET) leaves Body nil
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read request body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		body = b
 	}
 	status, header, respBody, err := in.serveHTTP(r.Context(), r.Method, r.URL, r.Header, body)
 	if err != nil {

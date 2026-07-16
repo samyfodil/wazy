@@ -181,3 +181,49 @@ func mustURL(s string) *url.URL {
 	}
 	return u
 }
+
+// componentBridge routes an outbound request from one component into another
+// component's incoming-handler, both live on the same Runtime.
+type componentBridge struct{ server *Instance }
+
+func (c componentBridge) RoundTrip(r *http.Request) (*http.Response, error) {
+	rec := httptest.NewRecorder()
+	c.server.ServeHTTP(rec, r)
+	return rec.Result(), nil
+}
+
+// TestOneComponentCallsAnotherOnOneRuntime wires two different real components
+// together on a single Runtime: the outgoing (client) component's outbound
+// request is bridged into the incoming (server) component's incoming-handler.
+// Component A's guest execution drives component B's guest execution, both
+// instantiated on the same Runtime at once, and A returns what B produced --
+// the multi-instance property end to end through real guest code on both sides.
+func TestOneComponentCallsAnotherOnOneRuntime(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	server, err := Instantiate(ctx, r, realHTTPIncomingWasm, WithWASI(WASIConfig{EnableHTTP: true})...)
+	if err != nil {
+		t.Fatalf("Instantiate server: %v", err)
+	}
+	defer server.Close(ctx)
+
+	client := &http.Client{Transport: componentBridge{server: server}}
+	caller, err := Instantiate(ctx, r, realHTTPOutgoingWasm, WithWASI(WASIConfig{EnableHTTP: true, HTTPClient: client})...)
+	if err != nil {
+		t.Fatalf("Instantiate caller on the same Runtime as server: %v", err)
+	}
+	defer caller.Close(ctx)
+
+	status, _, body, err := caller.serveHTTP(ctx, "GET", mustURL("/trigger"), http.Header{}, nil)
+	if err != nil {
+		t.Fatalf("serveHTTP: %v", err)
+	}
+	if status != 200 {
+		t.Errorf("status = %d, want 200", status)
+	}
+	if got, want := string(body), "method=Method::Get path=/backend\n"; got != want {
+		t.Errorf("body = %q, want %q (B's output, returned through A)", got, want)
+	}
+}

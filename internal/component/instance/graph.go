@@ -6,9 +6,19 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
+	"github.com/samyfodil/wazy/internal/expctxkeys"
 )
+
+// graphEmptyImportKey is the stable resolver key the graph rewrites a guest's
+// empty import module name to (the decoder rejects an empty name outright). It
+// is per-COMPONENT-constant, not per-instantiation: the ImportResolver maps it
+// to this instance's anon target, so the rewritten bytes stay identical across
+// instantiations and keep hitting the compile cache. It is never registered as
+// a global module name (the anon target is anonymous), so it cannot collide.
+const graphEmptyImportKey = "wazy:component/empty-import"
 
 // This file implements the general multi-core-module instantiation graph
 // engine: a component with more than one embedded core module (binary.Decode
@@ -55,7 +65,7 @@ import (
 //      - Kind 0x00 (instantiate): instantiate the named embedded core
 //        module for real via Runtime.InstantiateWithConfig, registered under
 //        the wazy name its "with" args reference it by (or a synthesized
-//        name if none do -- see moduleNameForGraph). Its own imports resolve
+//        key if none do -- see moduleKeyForGraph). Its own imports resolve
 //        automatically, by that same by-name mechanism, against whichever
 //        earlier core instances (real or shim) were registered under the
 //        names it imports from.
@@ -162,13 +172,18 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	}
 
 	// wit-component's wasip2 CLI adapter groups its shared indirect-call
-	// table under the empty-string "with" name -- see importrewrite.go.
-	// Find it (there is at most one in every fixture this targets; a second
-	// would collide when registered, failing loud at instantiation).
+	// table under the empty-string "with" name -- see importrewrite.go. Find
+	// it (there is at most one per component). It gets a STABLE resolver key,
+	// not a per-instantiation name: the guest's empty import is rewritten to
+	// this constant (the decoder rejects an empty import module name), and the
+	// ImportResolver maps it to the anon instance. Stable => the rewritten
+	// guest bytes are identical every instantiation, so the compile cache still
+	// hits (unlike a per-instance name, which would bypass it), and nothing is
+	// registered under it globally (the module is anonymous).
 	emptyNameTarget := ""
 	for k := range comp.CoreInstances {
 		if names := refNames[uint32(k)]; len(names) == 1 && names[0] == "" {
-			emptyNameTarget = fmt.Sprintf("%sanon%d", synthPrefix, k)
+			emptyNameTarget = graphEmptyImportKey
 			break
 		}
 	}
@@ -246,11 +261,42 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		return mod, nil
 	}
 
+	// keyToInst is this component instance's private import environment: a
+	// per-instantiation map from an internal wiring name (a raw "with" name
+	// like wasi:io/streams@0.2.12, the empty-import key, or a synthesized
+	// core%d) to the instance that provides it. Its embedded modules and shims
+	// are instantiated ANONYMOUSLY (WithName("")), so they never enter the
+	// Runtime's global registry and never collide across components; all of
+	// their internal imports resolve through this map via the ImportResolver
+	// instead. This is wasmtime's model: a component's internal wiring lives in
+	// its own instance graph, not a shared global namespace. keys[k] holds each
+	// instance's key so a later shim can name its sources.
+	keys := make([]string, len(comp.CoreInstances))
+	keyToInst := map[string]api.Module{}
+	// Chain to a caller-supplied ImportResolver, if any: the graph owns only
+	// its own internal names, so a name it doesn't provide falls through to the
+	// caller's resolver (then the global registry), never shadowing it.
+	parentResolver, _ := ctx.Value(expctxkeys.ImportResolverKey{}).(experimental.ImportResolver)
+	instCtx := experimental.WithImportResolver(ctx, func(name string) api.Module {
+		if m := keyToInst[name]; m != nil {
+			return m
+		}
+		if parentResolver != nil {
+			return parentResolver(name)
+		}
+		return nil
+	})
+
 	for k, ci := range comp.CoreInstances {
-		name, nerr := moduleNameForGraph(k, refNames[uint32(k)], emptyNameTarget, synthPrefix)
+		// key is BOTH this instance's resolver key and the name a consumer
+		// declares to import it: the raw "with" name, the empty-import key, or
+		// a synthesized core%d (see moduleKeyForGraph). It is also the groupName
+		// for neededTypes lookups (the consumer-declared name).
+		key, nerr := moduleKeyForGraph(k, refNames[uint32(k)], emptyNameTarget)
 		if nerr != nil {
 			return fail(nerr)
 		}
+		keys[k] = key
 
 		switch ci.Kind {
 		case 0x00: // instantiate a real embedded core module
@@ -261,35 +307,38 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			if err != nil {
 				return fail(err)
 			}
-			// rewritten: this module's bytes now carry the per-instantiation
-			// emptyNameTarget, so it must bypass the compile cache (see
-			// instantiateCoreModuleCacheable).
-			rewritten := false
+			// Rewrite the empty import module name (the decoder rejects it) to
+			// the STABLE emptyNameTarget, which the resolver maps. Stable => the
+			// rewritten bytes are identical every instantiation, so the compile
+			// cache still hits.
 			if emptyNameTarget != "" {
-				coreBytes, rewritten, err = rewriteEmptyImportModuleName(coreBytes, emptyNameTarget)
+				coreBytes, _, err = rewriteEmptyImportModuleName(coreBytes, emptyNameTarget)
 				if err != nil {
 					return fail(fmt.Errorf("component/instance: core instance %d: %w", k, err))
 				}
 			}
-			// WithStartFunctions() (no args) clears wazy's default "run _start
-			// on instantiate": per the Component Model, an embedded core
-			// module's own _start is an internal implementation detail some
-			// other core module invokes (often indirectly, through a shared
-			// function table not yet filled in at this point in the graph --
-			// see shim.go's doc) once the whole graph is wired, not something
-			// that should run eagerly as a side effect of wiring it in.
-			mod, err := instantiateCoreModuleCacheable(ctx, r, cfg, coreBytes, wazy.NewModuleConfig().WithName(name).WithStartFunctions(), !rewritten)
+			// WithName("") makes the module anonymous (not registered in the
+			// global name map -- see store_module_list.go's registerModule); its
+			// imports resolve through instCtx's resolver, and other modules
+			// import it by its key, not a global name. WithStartFunctions()
+			// clears wazy's default "run _start on instantiate": an embedded
+			// core module's own _start is invoked later by another module once
+			// the graph is wired (see shim.go), not eagerly here.
+			mod, err := instantiateCoreModule(instCtx, r, cfg, coreBytes, wazy.NewModuleConfig().WithName("").WithStartFunctions())
 			if err != nil {
-				return fail(fmt.Errorf("component/instance: instantiate core module %d as %q: %w", ci.ModuleIdx, name, err))
+				return fail(fmt.Errorf("component/instance: instantiate core module %d (key %q): %w", ci.ModuleIdx, key, err))
 			}
 			instMods[k] = mod
+			keyToInst[key] = mod
 			closers = append(closers, mod)
 			coreModuleCount++
 
 		case 0x01: // inline exports: a passthrough shim regrouping earlier items
 			items := make([]shimItem, 0, len(ci.Exports))
 			for _, e := range ci.Exports {
-				item, wasiCall, privMod, err := resolveInlineExportItem(ctx, r, comp, cfg, resources, e, coreMemSpace, coreTableSpace, instMods, neededTypes, name, nextPrivateName, coreFuncTarget, coreMemTarget)
+				// key doubles as groupName (the consumer-declared name) for
+				// neededTypes lookups; keys names the shim's alias sources.
+				item, wasiCall, privMod, err := resolveInlineExportItem(ctx, r, comp, cfg, resources, e, coreMemSpace, coreTableSpace, instMods, keys, neededTypes, key, nextPrivateName, coreFuncTarget, coreMemTarget)
 				if err != nil {
 					return fail(fmt.Errorf("component/instance: core instance %d: %w", k, err))
 				}
@@ -309,11 +358,14 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			if err != nil {
 				return fail(fmt.Errorf("component/instance: core instance %d: %w", k, err))
 			}
-			mod, err := r.InstantiateWithConfig(ctx, shimBytes, wazy.NewModuleConfig().WithName(name).WithStartFunctions())
+			// Anonymous like the embedded modules above; consumers import it by
+			// its key via the resolver, not by a global name.
+			mod, err := r.InstantiateWithConfig(instCtx, shimBytes, wazy.NewModuleConfig().WithName("").WithStartFunctions())
 			if err != nil {
-				return fail(fmt.Errorf("component/instance: instantiate regrouping shim for core instance %d as %q: %w", k, name, err))
+				return fail(fmt.Errorf("component/instance: instantiate regrouping shim for core instance %d (key %q): %w", k, key, err))
 			}
 			instMods[k] = mod
+			keyToInst[key] = mod
 			closers = append(closers, mod)
 
 		default:
@@ -338,18 +390,23 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	}, nil
 }
 
-// moduleNameForGraph is moduleNameFor's graph-engine counterpart: identical
+// moduleKeyForGraph is moduleNameFor's graph-engine counterpart: identical
 // except that a sole "" ref name (see importrewrite.go) maps to
 // emptyNameTarget instead of the literal empty string, since wazy's module
 // registry cannot resolve an empty-named module by import.
-func moduleNameForGraph(coreInstanceIdx int, refNames []string, emptyNameTarget, synthPrefix string) (string, error) {
+func moduleKeyForGraph(coreInstanceIdx int, refNames []string, emptyNameTarget string) (string, error) {
 	switch len(refNames) {
 	case 0:
-		return fmt.Sprintf("%score%d", synthPrefix, coreInstanceIdx), nil
+		// Unreferenced (e.g. the root): nothing imports it, so any distinct key
+		// works; core%d is unique within this component.
+		return fmt.Sprintf("core%d", coreInstanceIdx), nil
 	case 1:
 		if refNames[0] == "" {
 			return emptyNameTarget, nil
 		}
+		// The raw "with" name is exactly what consumers import; the resolver
+		// maps it to this (anonymous) instance. No prefix: the key lives only
+		// in this component's private resolver map, never the global registry.
 		return refNames[0], nil
 	default:
 		return "", fmt.Errorf("component/instance: core instance %d is referenced under %d names (%v); a core module can only be registered under one name", coreInstanceIdx, len(refNames), refNames)
@@ -428,9 +485,13 @@ func discoverNeededFuncTypes(ctx context.Context, r wazy.Runtime, cfg *config, c
 // otherwise leak it (and, on Runtime reuse, permanently occupy its private
 // name -- see bench_test.go's BenchmarkInstantiateHello doc for the bug this
 // closes).
+// keys names each already-instantiated core instance under its resolver key
+// (see instantiateGraph): a shim imports an anonymous alias source (embedded
+// module or earlier shim) by that key, not by mod.Name() -- which is "" for an
+// anonymous module.
 func resolveInlineExportItem(
 	ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, resources *handleTable,
-	e binary.CoreInlineExport, coreMemSpace, coreTableSpace []aliasTarget, instMods map[int]api.Module,
+	e binary.CoreInlineExport, coreMemSpace, coreTableSpace []aliasTarget, instMods map[int]api.Module, keys []string,
 	neededTypes map[string]map[string]coreFuncSig, groupName string, nextPrivateName func() string,
 	coreFuncTarget func(int) (api.Module, string, error), coreMemTarget func(int) (api.Module, error),
 ) (shimItem, string, api.Module, error) {
@@ -452,7 +513,7 @@ func resolveInlineExportItem(
 				return shimItem{}, "", nil, fmt.Errorf("inline export %q: core instance %d (%q) has no exported function %q", e.Name, al.InstanceIdx, mod.Name(), al.Name)
 			}
 			def := fn.Definition()
-			return shimItem{Sort: shimSortFunc, FromModule: mod.Name(), FromName: al.Name, ExportName: e.Name, Params: def.ParamTypes(), Results: def.ResultTypes()}, "", nil, nil
+			return shimItem{Sort: shimSortFunc, FromModule: keys[int(al.InstanceIdx)], FromName: al.Name, ExportName: e.Name, Params: def.ParamTypes(), Results: def.ResultTypes()}, "", nil, nil
 
 		case binary.CoreFuncFromCanon:
 			canon := comp.Canons[entry.Canon]
@@ -476,22 +537,22 @@ func resolveInlineExportItem(
 			return shimItem{}, "", nil, fmt.Errorf("inline export %q references core memory %d, out of range of the %d-entry core memory index space", e.Name, e.CoreSortIdx, len(coreMemSpace))
 		}
 		at := coreMemSpace[e.CoreSortIdx]
-		mod, ok := instMods[int(at.instIdx)]
+		_, ok := instMods[int(at.instIdx)]
 		if !ok {
 			return shimItem{}, "", nil, fmt.Errorf("inline export %q: core memory %d targets core instance %d, which was not instantiated", e.Name, e.CoreSortIdx, at.instIdx)
 		}
-		return shimItem{Sort: shimSortMemory, FromModule: mod.Name(), FromName: at.name, ExportName: e.Name}, "", nil, nil
+		return shimItem{Sort: shimSortMemory, FromModule: keys[int(at.instIdx)], FromName: at.name, ExportName: e.Name}, "", nil, nil
 
 	case 0x01: // table
 		if int(e.CoreSortIdx) >= len(coreTableSpace) {
 			return shimItem{}, "", nil, fmt.Errorf("inline export %q references core table %d, out of range of the %d-entry core table index space", e.Name, e.CoreSortIdx, len(coreTableSpace))
 		}
 		at := coreTableSpace[e.CoreSortIdx]
-		mod, ok := instMods[int(at.instIdx)]
+		_, ok := instMods[int(at.instIdx)]
 		if !ok {
 			return shimItem{}, "", nil, fmt.Errorf("inline export %q: core table %d targets core instance %d, which was not instantiated", e.Name, e.CoreSortIdx, at.instIdx)
 		}
-		return shimItem{Sort: shimSortTable, FromModule: mod.Name(), FromName: at.name, ExportName: e.Name}, "", nil, nil
+		return shimItem{Sort: shimSortTable, FromModule: keys[int(at.instIdx)], FromName: at.name, ExportName: e.Name}, "", nil, nil
 
 	default:
 		return shimItem{}, "", nil, fmt.Errorf("inline export %q has unsupported core:sort %#x; only func (0x00), table (0x01), and memory (0x02) are supported by the graph engine", e.Name, e.Sort)
