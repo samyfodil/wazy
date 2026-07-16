@@ -2185,6 +2185,42 @@
           "f31"
         ]
       }
+    },
+    {
+      "name": "big_u64",
+      "type": {
+        "kind": "primitive",
+        "prim": "u64"
+      }
+    },
+    {
+      "name": "big_s64",
+      "type": {
+        "kind": "primitive",
+        "prim": "s64"
+      }
+    },
+    {
+      "name": "record_bigints",
+      "type": {
+        "kind": "record",
+        "fields": [
+          {
+            "name": "u",
+            "type": {
+              "kind": "primitive",
+              "prim": "u64"
+            }
+          },
+          {
+            "name": "s",
+            "type": {
+              "kind": "primitive",
+              "prim": "s64"
+            }
+          }
+        ]
+      }
     }
   ],
   "values": [
@@ -2764,6 +2800,34 @@
       "type": "flags32",
       "name": "flags32_hi",
       "value": 2147483649
+    },
+    {
+      "type": "big_u64",
+      "name": "u64_max",
+      "value": "0xffffffffffffffff"
+    },
+    {
+      "type": "big_u64",
+      "name": "u64_hi",
+      "value": "12297829382473034410"
+    },
+    {
+      "type": "big_s64",
+      "name": "s64_min",
+      "value": "-9223372036854775808"
+    },
+    {
+      "type": "big_s64",
+      "name": "s64_max",
+      "value": "9223372036854775807"
+    },
+    {
+      "type": "record_bigints",
+      "name": "rb_vals",
+      "value": [
+        "0xdeadbeefcafef00d",
+        "-9007199254740993"
+      ]
     }
   ]
 }

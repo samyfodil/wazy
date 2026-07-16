@@ -1298,5 +1298,69 @@
     ],
     "mem_base": 1024,
     "mem_hex": ""
+  },
+  {
+    "name": "u64_max",
+    "type": "big_u64",
+    "core_vals": [
+      {
+        "kind": "i64",
+        "bits": 18446744073709551615
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "u64_hi",
+    "type": "big_u64",
+    "core_vals": [
+      {
+        "kind": "i64",
+        "bits": 12297829382473034410
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "s64_min",
+    "type": "big_s64",
+    "core_vals": [
+      {
+        "kind": "i64",
+        "bits": 9223372036854775808
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "s64_max",
+    "type": "big_s64",
+    "core_vals": [
+      {
+        "kind": "i64",
+        "bits": 9223372036854775807
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "rb_vals",
+    "type": "record_bigints",
+    "core_vals": [
+      {
+        "kind": "i64",
+        "bits": 16045690984503111693
+      },
+      {
+        "kind": "i64",
+        "bits": 18437736874454810623
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
   }
 ]

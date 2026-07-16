@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"reflect"
+	"strconv"
 	"testing"
 
 	"github.com/samyfodil/wazy/internal/component/binary"
@@ -632,11 +633,27 @@ func convertTestPrimitive(rawValue any, prim string) (Value, error) {
 		}
 
 	case "u64":
+		// A JSON string carries an exact value the float64 form would round
+		// (u64 > 2^53); ParseUint with base 0 accepts "0x..."/decimal.
+		if s, ok := rawValue.(string); ok {
+			u, err := strconv.ParseUint(s, 0, 64)
+			if err != nil {
+				return nil, fmt.Errorf("u64 %q: %w", s, err)
+			}
+			return u, nil
+		}
 		if v, ok := rawValue.(float64); ok {
 			return uint64(v), nil
 		}
 
 	case "s64":
+		if s, ok := rawValue.(string); ok {
+			i, err := strconv.ParseInt(s, 0, 64)
+			if err != nil {
+				return nil, fmt.Errorf("s64 %q: %w", s, err)
+			}
+			return i, nil
+		}
 		if v, ok := rawValue.(float64); ok {
 			return int64(v), nil
 		}

@@ -166,9 +166,9 @@ def convert_value(raw_value, t):
         case ref.BoolType():
             return bool(raw_value)
         case ref.U8Type() | ref.U16Type() | ref.U32Type() | ref.U64Type():
-            return int(raw_value)
+            return int(raw_value, 0) if isinstance(raw_value, str) else int(raw_value)
         case ref.S8Type() | ref.S16Type() | ref.S32Type() | ref.S64Type():
-            return int(raw_value)
+            return int(raw_value, 0) if isinstance(raw_value, str) else int(raw_value)
         case ref.F32Type() | ref.F64Type():
             return float(raw_value)
         case ref.CharType():

@@ -85,6 +85,11 @@ COMPLEX_TYPES = [
     ("record_bool_char_str", rec(("flag", BOOL), ("ch", CHAR), ("label", STR))),
     # flags near the 32-bit boundary (32 flags = still one i32)
     ("flags32", flags(*[f"f{i}" for i in range(32)])),
+    # exact big u64/s64 values (> 2^53, given as strings so the JSON harness
+    # doesn't round them through float64)
+    ("big_u64", U64),
+    ("big_s64", S64),
+    ("record_bigints", rec(("u", U64), ("s", S64))),
 ]
 
 COMPLEX_VALUES = [
@@ -120,6 +125,12 @@ COMPLEX_VALUES = [
     ("option_result", "or_none", None),
     ("record_bool_char_str", "rbcs_vals", [True, 0x1F600, "emoji"]),
     ("flags32", "flags32_hi", 0x80000001),
+    # big ints as exact strings (int > 2^53 loses precision as a JSON number)
+    ("big_u64", "u64_max", "0xffffffffffffffff"),
+    ("big_u64", "u64_hi", "12297829382473034410"),
+    ("big_s64", "s64_min", "-9223372036854775808"),
+    ("big_s64", "s64_max", "9223372036854775807"),
+    ("record_bigints", "rb_vals", ["0xdeadbeefcafef00d", "-9007199254740993"]),
 ]
 
 
