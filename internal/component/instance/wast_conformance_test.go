@@ -29,15 +29,17 @@ import (
 //         flags/option as args, returns their concatenation -- pure ABI in+out.
 // strings: string edge cases + assert_trap for out-of-bounds / invalid utf-8.
 func TestWastConformance(t *testing.T) {
-	// concat + strings are the canonical-ABI value suites (all value kinds in
-	// and out, plus string utf-8/bounds traps). Not vendored: post-return
-	// (needs the module_definition/module_instance linking model + reentrance-
-	// trap builtins) and multiple-resources (nested-component composition with
-	// fused resource canons) -- both large features beyond this single-
-	// component runtime, not ABI bugs.
-	// types adds integer->bool/u8/s8/u16/s16 lift-narrowing (masking and sign
-	// extension) edge cases.
-	for _, suite := range []string{"concat", "strings", "types"} {
+	// The canonical-ABI value/type suites this single-component runtime runs
+	// end to end: concat (every value kind in and out), strings (utf-8 + bounds
+	// traps), types (integer lift-narrowing: masking and sign extension), and
+	// simple (a component that imports another component). Not vendored --
+	// every runnable invoke in them is gated behind a feature beyond a single-
+	// component runtime, not an ABI bug: post-return (module_definition/
+	// module_instance linking + reentrance-trap builtins), multiple-resources +
+	// wasmtime/fused (nested-component composition / fused adapters that
+	// re-export a nested instance's func), wasmtime/resources (host-provided
+	// imported-resource constructors), and linking/* (multi-component linking).
+	for _, suite := range []string{"concat", "strings", "types", "simple"} {
 		t.Run(suite, func(t *testing.T) {
 			runWastSuite(t, suite)
 		})
@@ -119,7 +121,13 @@ func runWastSuite(t *testing.T, suite string) {
 				continue
 			}
 			want := expectedWast(t, in, c.Action.Field, c.Expected)
-			if !reflect.DeepEqual(got, want) {
+			// Element-wise so a no-result invoke's nil vs. an empty []Value
+			// don't spuriously differ under DeepEqual.
+			mismatch := len(got) != len(want)
+			for i := 0; !mismatch && i < len(want); i++ {
+				mismatch = !reflect.DeepEqual(got[i], want[i])
+			}
+			if mismatch {
 				t.Errorf("line %d: %s = %#v, want %#v", c.Line, c.Action.Field, got, want)
 			}
 		}
