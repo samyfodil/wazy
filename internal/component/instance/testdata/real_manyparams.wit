@@ -1,0 +1,7 @@
+package example:edge;
+world edge {
+  export sum20: func(
+    a: u32, b: u32, c: u32, d: u32, e: u32, f: u32, g: u32, h: u32, i: u32, j: u32,
+    k: u32, l: u32, m: u32, n: u32, o: u32, p: u32, q: u32, r: u32, s: u32, t: u32,
+  ) -> u32;
+}

@@ -248,6 +248,14 @@ type boundExport struct {
 	// Computed from comp at bind time -- see finalizeBoundExport.
 	paramResolveHandle []bool
 
+	// paramsSpill is true when the whole parameter list flattens beyond
+	// MaxFlatParams: FlattenFunc collapses the core signature to a single i32
+	// pointer, so lowerParams stores the entire list to memory as paramTuple
+	// (a tuple of the param types) instead of lowering each param. paramTuple
+	// is set only when paramsSpill.
+	paramsSpill bool
+	paramTuple  binary.TupleDesc
+
 	hasResult        bool
 	tooManyResults   int // > 0: fd declares this many (>1) named results
 	resultType       binary.TypeDesc
@@ -397,6 +405,29 @@ func finalizeBoundExport(be *boundExport, resolve abi.Resolver, abiCache *Compil
 			}
 		}
 	}
+
+	// Whole-parameter-list spill: when the params flatten beyond MaxFlatParams,
+	// FlattenFunc collapsed coreParamsWant to a single i32 pointer, so
+	// lowerParams stores the whole list to memory as a tuple (see
+	// boundExportABI.paramsSpill).
+	rawFlat := 0
+	for _, pt := range be.paramTypes {
+		if pt == nil {
+			continue
+		}
+		if fl, err := abi.Flatten(pt, resolve); err == nil {
+			rawFlat += len(fl)
+		}
+	}
+	if rawFlat > abi.MaxFlatParams {
+		be.paramsSpill = true
+		elems := make([]binary.TypeRef, len(be.fd.Params))
+		for i, p := range be.fd.Params {
+			elems[i] = p.Type
+		}
+		be.paramTuple = binary.TupleDesc{Elements: elems}
+	}
+
 	be.resultType, be.resultUsesMemory, be.resultFlatKinds, be.resultErr = m.resultType, m.resultUsesMemory, m.resultFlatKinds, m.resultErr
 }
 
@@ -453,6 +484,16 @@ func needsGraphPath(comp *binary.Component) bool {
 			if e.Sort != 0x00 { // not a func: memory/table/global/...
 				return true
 			}
+		}
+	}
+	// A top-level core alias of anything but a func (memory/table/global --
+	// CoreSort != 0x00) is beyond the trivial path, which handles only core
+	// func aliases; the graph engine wires these (coreMemSpace/coreTableSpace).
+	// A pure-compute cargo-component guest still aliases its own memory this
+	// way, so without this it would wrongly route to instantiateComponent.
+	for _, al := range comp.Aliases {
+		if al.Sort == 0x00 && al.CoreSort != 0x00 {
+			return true
 		}
 	}
 	return !coreFuncSpacePartitioned(comp.CoreFuncSpace)
@@ -887,6 +928,36 @@ func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName stri
 func (in *Instance) lowerParams(be *boundExport, args []abi.Value, mem []byte, memAvailable bool, realloc abi.Realloc, exportName string, dst []abi.CoreValue) ([]abi.CoreValue, error) {
 	coreArgs := dst
 	var err error
+
+	// Whole-parameter-list spill: the core func takes a single pointer to the
+	// param list stored in memory as a tuple (see boundExport.paramsSpill).
+	if be.paramsSpill {
+		if !memAvailable {
+			return nil, fmt.Errorf("component/instance: export %q parameter list spills to memory (flattens beyond the flat limit), but the core module exports no memory", exportName)
+		}
+		if len(args) != len(be.fd.Params) {
+			return nil, fmt.Errorf("component/instance: export %q: got %d args, want %d", exportName, len(args), len(be.fd.Params))
+		}
+		// Resolve any guest-owned own/borrow handles to reps before storing.
+		tupleVal := make([]abi.Value, len(args))
+		for i := range args {
+			if err := be.paramErrs[i]; err != nil {
+				return nil, fmt.Errorf("component/instance: export %q param %d: %w", exportName, i, err)
+			}
+			tupleVal[i] = args[i]
+			if i < len(be.paramResolveHandle) && be.paramResolveHandle[i] {
+				if tupleVal[i], err = resolveHandleArg(in.resources, be.paramTypes[i], args[i]); err != nil {
+					return nil, fmt.Errorf("component/instance: export %q param %d: %w", exportName, i, err)
+				}
+			}
+		}
+		ptr, err := abi.SpillValue(tupleVal, be.paramTuple, mem, in.resolve, realloc)
+		if err != nil {
+			return nil, fmt.Errorf("component/instance: export %q: spill parameter list: %w", exportName, err)
+		}
+		return append(coreArgs, abi.NewCoreValueI32(ptr)), nil
+	}
+
 	for i, p := range be.fd.Params {
 		if err := be.paramErrs[i]; err != nil {
 			return nil, fmt.Errorf("component/instance: export %q param %d (%s): %w", exportName, i, p.Name, err)

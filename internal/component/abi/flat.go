@@ -563,6 +563,16 @@ func lowerFlatResult(v Value, desc binary.ResultDesc, resolve Resolver, realloc 
 	return result, nil
 }
 
+// SpillValue stores v (of type t) to a freshly realloc'd region of linear
+// memory and returns the pointer -- the Canonical ABI's spill-to-memory path,
+// exported so the instance layer can spill a whole parameter list (as a tuple)
+// when it flattens beyond MaxFlatParams and the core func takes a single
+// pointer instead. Equivalent to what LowerFlatInto does internally for a
+// single spilling value.
+func SpillValue(v Value, t binary.TypeDesc, mem []byte, resolve Resolver, realloc Realloc) (uint32, error) {
+	return spillValue(v, t, mem, resolve, realloc)
+}
+
 // spillValue stores a value to memory and returns the pointer.
 func spillValue(v Value, t binary.TypeDesc, mem []byte, resolve Resolver, realloc Realloc) (uint32, error) {
 	align, err := Alignment(t, resolve)
