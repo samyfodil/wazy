@@ -64,6 +64,25 @@ type config struct {
 	// runs that dtor. Both nil for a flat instantiation.
 	resCanon         func(uint32) uint32
 	importedResDtors map[uint32]func() api.Function
+
+	// hostResDtors maps a HOST-provided resource's tag (see resourceTags) to a
+	// Go destructor run when the GUEST drops an own<R> of that resource via
+	// canon resource.drop -- e.g. an embedder tracking outstanding host objects.
+	// Keyed by tag so the drop canon (which resolves the guest's imported
+	// resource index to that tag) finds it. Set via withHostResourceDtor.
+	hostResDtors map[uint32]func(ctx context.Context, rep uint32) error
+}
+
+// withHostResourceDtor registers a Go destructor for a host-provided resource,
+// run when the guest drops an own<R> of it. tag is the same ResourceType the
+// resource's host funcs and withResourceTag use.
+func withHostResourceDtor(tag uint32, fn func(ctx context.Context, rep uint32) error) Option {
+	return func(c *config) {
+		if c.hostResDtors == nil {
+			c.hostResDtors = make(map[uint32]func(ctx context.Context, rep uint32) error)
+		}
+		c.hostResDtors[tag] = fn
+	}
 }
 
 type importKey struct {
@@ -500,10 +519,17 @@ func buildHostWrapper(iface, funcName string, hi *hostImport, resources *handleT
 		if memOverride != nil {
 			memMod = memOverride
 		}
-		args, err := liftHostArgs(fd, resolve, stack, memMod, resources)
+		args, lent, err := liftHostArgs(fd, resolve, stack, memMod, resources)
 		if err != nil {
 			panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
 		}
+		// Release each borrow<T> arg's lend now that the call is about to run
+		// and complete -- borrow lifetime is exactly this call.
+		defer func() {
+			for _, l := range lent {
+				_ = resources.Unlend(l.tag, l.handle) //nolint:errcheck // best-effort release
+			}
+		}()
 		results, err := hi.fn(ctx, args)
 		if err != nil {
 			panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
@@ -592,41 +618,61 @@ func flattenResultRefs(fd binary.FuncDesc, resolve abi.Resolver) ([]string, erro
 // function then resolves that handle to the host rep it names via resources,
 // so the HostFunc receives the rep, not the raw handle -- see
 // resolveHandleArg.
-func liftHostArgs(fd binary.FuncDesc, resolve abi.Resolver, stack []uint64, mod api.Module, resources *handleTable) ([]abi.Value, error) {
+func liftHostArgs(fd binary.FuncDesc, resolve abi.Resolver, stack []uint64, mod api.Module, resources *handleTable) ([]abi.Value, []lentHandle, error) {
 	mem, memAvailable := memoryBytesOf(mod)
 	args := make([]abi.Value, len(fd.Params))
+	var lent []lentHandle
 	pos := 0
 	for i, p := range fd.Params {
 		pt, err := resolveTypeRef(&p.Type, resolve)
 		if err != nil {
-			return nil, fmt.Errorf("param %d: %w", i, err)
+			return nil, lent, fmt.Errorf("param %d: %w", i, err)
 		}
 		flat, err := abi.Flatten(pt, resolve)
 		if err != nil {
-			return nil, fmt.Errorf("param %d: %w", i, err)
+			return nil, lent, fmt.Errorf("param %d: %w", i, err)
 		}
 		if usesMemory(pt, resolve) && !memAvailable {
-			return nil, fmt.Errorf("param %d requires linear memory (string/list), but the calling module has none", i)
+			return nil, lent, fmt.Errorf("param %d requires linear memory (string/list), but the calling module has none", i)
 		}
 		cvs := make([]abi.CoreValue, len(flat))
 		for k := range flat {
 			if pos+k >= len(stack) {
-				return nil, fmt.Errorf("param %d: core stack underflow (need %d values, have %d)", i, pos+len(flat), len(stack))
+				return nil, lent, fmt.Errorf("param %d: core stack underflow (need %d values, have %d)", i, pos+len(flat), len(stack))
 			}
 			cvs[k] = abi.CoreValue{Kind: flat[k], Bits: stack[pos+k]}
 		}
 		v, err := abi.LiftFlat(cvs, pt, resolve, mem)
 		if err != nil {
-			return nil, fmt.Errorf("param %d: lift: %w", i, err)
+			return nil, lent, fmt.Errorf("param %d: lift: %w", i, err)
+		}
+		// Lifting a borrow<T> arg lends the resource for the call's duration, so
+		// taking an own<T> of the SAME resource later in this arg list (or the
+		// call) traps -- "cannot remove owned resource while borrowed". The lend
+		// is released after the call (see the wrapper's Unlend). Done before
+		// resolveHandleArg so a same-arg-list own-take sees the lend.
+		if bd, ok := pt.(binary.BorrowDesc); ok {
+			if h, ok := v.(uint32); ok {
+				if err := resources.Lend(bd.ResourceType, h); err == nil {
+					lent = append(lent, lentHandle{bd.ResourceType, h})
+				}
+			}
 		}
 		v, err = resolveHandleArg(resources, nil, pt, v)
 		if err != nil {
-			return nil, fmt.Errorf("param %d: %w", i, err)
+			return nil, lent, fmt.Errorf("param %d: %w", i, err)
 		}
 		args[i] = v
 		pos += len(flat)
 	}
-	return args, nil
+	return args, lent, nil
+}
+
+// lentHandle records a borrow<T> arg's resource lend so the host wrapper can
+// release it (Unlend) once the call returns.
+type lentHandle struct {
+	tag    uint32
+	handle uint32
 }
 
 // resolveHandleArg translates a lifted own<T>/borrow<T> argument -- a bare

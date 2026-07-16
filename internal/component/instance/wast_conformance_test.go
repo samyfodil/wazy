@@ -3,6 +3,7 @@ package instance
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -43,7 +44,7 @@ func TestWastConformance(t *testing.T) {
 	// component instantiate-args, canon-produced exports), post-return
 	// (module_definition/module_instance linking + reentrance-trap builtins),
 	// and linking/* (multi top-level component linking).
-	for _, suite := range []string{"concat", "strings", "types", "simple", "fused", "multiple-resources"} {
+	for _, suite := range []string{"concat", "strings", "types", "simple", "fused", "multiple-resources", "resources"} {
 		t.Run(suite, func(t *testing.T) {
 			runWastSuite(t, suite)
 		})
@@ -97,7 +98,15 @@ func runWastSuite(t *testing.T, suite string) {
 			if in != nil {
 				in.Close(ctx)
 			}
-			in, err = Instantiate(ctx, r, wasm, WithWASI(WASIConfig{})...)
+			opts := WithWASI(WASIConfig{})
+			if suite == "resources" {
+				// wasmtime/resources.wast imports a `host` instance that exports
+				// a resource type + its constructor/methods -- the embedder (the
+				// test runner) must supply it, exactly as wasmtime does. Fresh
+				// state per module.
+				opts = append(opts, hostResourceOpts()...)
+			}
+			in, err = Instantiate(ctx, r, wasm, opts...)
 			if err != nil {
 				// A type-only validation module wazy's M1 decoder can't yet
 				// handle (e.g. "core type in instance type"). Log the gap and
@@ -410,4 +419,74 @@ func parseIntStr(raw json.RawMessage) (int64, error) {
 		return 0, err
 	}
 	return strconv.ParseInt(s, 10, 64)
+}
+
+// hostResTag is the ResourceType tag the harness gives the wasmtime/resources
+// test's `host.resource1`. Above any guest type index and WASI constant, below
+// the composition's synthetic-index base.
+const hostResTag uint32 = 0x000F_0000
+
+// hostResourceOpts supplies the `host` instance wasmtime/resources.wast imports:
+// a `resource1` whose rep is an opaque u32, a constructor that mints it, and the
+// static/method funcs the various modules call. State (drop count + last-dropped
+// rep) is fresh per call. A resource with an opaque-integer rep is the whole
+// point of these tests, so the host impl is trivial: the rep IS the value.
+func hostResourceOpts() []Option {
+	var drops, lastDrop uint32
+	lastDrop = ^uint32(0) // -1 before any drop
+	u32 := binary.PrimitiveDesc{Prim: "u32"}
+	own := binary.OwnDesc{ResourceType: hostResTag}
+	borrow := binary.BorrowDesc{ResourceType: hostResTag}
+	as := func(v abi.Value) uint32 { u, _ := v.(uint32); return u }
+
+	return []Option{
+		withResourceTag("host", "resource1", hostResTag),
+		// constructor(r) -> own<resource1> with rep=r (wazy mints the handle).
+		WithImport("host", "[constructor]resource1",
+			func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+				return []abi.Value{as(args[0])}, nil
+			}, []binary.TypeDesc{u32}, []binary.TypeDesc{own}),
+		// static assert(r: own, rep): r's rep must equal rep (r consumed).
+		WithImport("host", "[static]resource1.assert",
+			func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+				if as(args[0]) != as(args[1]) {
+					return nil, fmt.Errorf("host resource1.assert: rep %d != %d", as(args[0]), as(args[1]))
+				}
+				return nil, nil
+			}, []binary.TypeDesc{own, u32}, nil),
+		WithImport("host", "[static]resource1.drops",
+			func(_ context.Context, _ []abi.Value) ([]abi.Value, error) {
+				return []abi.Value{drops}, nil
+			}, nil, []binary.TypeDesc{u32}),
+		WithImport("host", "[static]resource1.last-drop",
+			func(_ context.Context, _ []abi.Value) ([]abi.Value, error) {
+				return []abi.Value{lastDrop}, nil
+			}, nil, []binary.TypeDesc{u32}),
+		// method simple(self: borrow, rep): self's rep must equal rep.
+		WithImport("host", "[method]resource1.simple",
+			func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+				if as(args[0]) != as(args[1]) {
+					return nil, fmt.Errorf("host resource1.simple: rep %d != %d", as(args[0]), as(args[1]))
+				}
+				return nil, nil
+			}, []binary.TypeDesc{borrow, u32}, nil),
+		// method take-borrow(self: borrow, b: borrow): both read-only, no-op.
+		WithImport("host", "[method]resource1.take-borrow",
+			func(_ context.Context, _ []abi.Value) ([]abi.Value, error) { return nil, nil },
+			[]binary.TypeDesc{borrow, borrow}, nil),
+		// method take-own(self: borrow, b: own): host takes ownership of b and
+		// drops it (b consumed by lift_own; count it).
+		WithImport("host", "[method]resource1.take-own",
+			func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+				drops++
+				lastDrop = as(args[1])
+				return nil, nil
+			}, []binary.TypeDesc{borrow, own}, nil),
+		// The guest dropping an own<resource1> runs the host destructor.
+		withHostResourceDtor(hostResTag, func(_ context.Context, rep uint32) error {
+			drops++
+			lastDrop = rep
+			return nil
+		}),
+	}
 }

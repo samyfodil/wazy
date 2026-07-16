@@ -299,7 +299,7 @@ func TestLiftHostArgs_String(t *testing.T) {
 	if !mem.WriteString(0, "hi") {
 		t.Fatal("write failed")
 	}
-	args, err := liftHostArgs(fd, resolve, []uint64{0, 2}, mod, newHandleTable())
+	args, _, err := liftHostArgs(fd, resolve, []uint64{0, 2}, mod, newHandleTable())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +311,7 @@ func TestLiftHostArgs_String(t *testing.T) {
 func TestLiftHostArgs_StackUnderflow(t *testing.T) {
 	_, mod := memModule(t)
 	fd, resolve := synthFuncDesc([]binary.TypeDesc{binary.PrimitiveDesc{Prim: "string"}}, nil)
-	if _, err := liftHostArgs(fd, resolve, []uint64{0}, mod, newHandleTable()); err == nil {
+	if _, _, err := liftHostArgs(fd, resolve, []uint64{0}, mod, newHandleTable()); err == nil {
 		t.Fatal("expected stack underflow error")
 	}
 }
@@ -325,7 +325,7 @@ func TestLiftHostArgs_NeedsMemoryNone(t *testing.T) {
 		t.Fatal(err)
 	}
 	fd, resolve := synthFuncDesc([]binary.TypeDesc{binary.PrimitiveDesc{Prim: "string"}}, nil)
-	if _, err := liftHostArgs(fd, resolve, []uint64{0, 0}, mod, newHandleTable()); err == nil {
+	if _, _, err := liftHostArgs(fd, resolve, []uint64{0, 0}, mod, newHandleTable()); err == nil {
 		t.Fatal("expected memory-required error")
 	}
 }

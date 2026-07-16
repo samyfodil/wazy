@@ -1,6 +1,7 @@
 package instance
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
@@ -78,36 +79,45 @@ type handleTable struct {
 	// and dense per instance rather than monotonically growing.
 	free []uint32
 
-	// dtors maps a resource type tag to a LAZY resolver for the guest destructor
-	// that owns it, so canon resource.drop runs it (an importer dropping an
-	// own<R> it received runs the DEFINER's dtor). The resolver is lazy because
-	// a dtor is registered before the core module that a `start` section will
-	// drop from is instantiated -- the dtor's own module may not be up yet at
-	// registration, but always is by the time a drop actually resolves it.
-	// Returns nil if the dtor can't be resolved (then drop just removes the
-	// entry). nil map means no destructors.
-	dtors map[uint32]func() api.Function
+	// dtors maps a resource type tag to the destructor run when a handle of that
+	// tag is dropped by canon resource.drop. A GUEST-defined resource's dtor
+	// invokes its core func (registered lazily -- see resourceDtor -- because the
+	// dtor's own module may not be instantiated when a `start` section triggers
+	// the first drop); a HOST-provided resource's dtor is a Go callback (drop
+	// accounting). nil callback means drop just removes the entry.
+	dtors map[uint32]func(ctx context.Context, rep uint32) error
 }
 
-// registerDtor records a lazy destructor resolver for a resource type tag.
-func (t *handleTable) registerDtor(typeIdx uint32, resolve func() api.Function) {
+// registerDtor records the destructor callback for a resource type tag.
+func (t *handleTable) registerDtor(typeIdx uint32, dtor func(ctx context.Context, rep uint32) error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.dtors == nil {
-		t.dtors = make(map[uint32]func() api.Function)
+		t.dtors = make(map[uint32]func(ctx context.Context, rep uint32) error)
 	}
-	t.dtors[typeIdx] = resolve
+	t.dtors[typeIdx] = dtor
 }
 
-// dtorFor resolves the destructor registered for a resource type tag, or nil.
-func (t *handleTable) dtorFor(typeIdx uint32) api.Function {
+// dtorFor returns the destructor callback registered for a resource type tag,
+// or nil.
+func (t *handleTable) dtorFor(typeIdx uint32) func(ctx context.Context, rep uint32) error {
 	t.mu.Lock()
-	resolve := t.dtors[typeIdx]
-	t.mu.Unlock()
-	if resolve == nil {
-		return nil
+	defer t.mu.Unlock()
+	return t.dtors[typeIdx]
+}
+
+// resourceDtor wraps a lazily-resolved guest destructor core func as a dtor
+// callback. resolve is called at drop time (its module is up by then); a nil
+// resolution means the dtor can't run, so the drop just removes the entry.
+func resourceDtor(resolve func() api.Function) func(context.Context, uint32) error {
+	return func(ctx context.Context, rep uint32) error {
+		fn := resolve()
+		if fn == nil {
+			return nil
+		}
+		_, err := fn.Call(ctx, uint64(rep))
+		return err
 	}
-	return resolve()
 }
 
 // newHandleTable returns an empty handleTable, ready to allocate handles

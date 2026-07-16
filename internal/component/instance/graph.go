@@ -214,7 +214,12 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	resources := newHandleTable()
 	// A composed sub-instance inherits the destructors for the resources it
 	// imports from a sibling, keyed by the table tag its own resource.drop uses.
-	for tag, fn := range cfg.importedResDtors {
+	for tag, resolve := range cfg.importedResDtors {
+		resources.registerDtor(tag, resourceDtor(resolve))
+	}
+	// Host-provided resources: the embedder's Go destructor runs when the guest
+	// drops an own<R> of a host resource.
+	for tag, fn := range cfg.hostResDtors {
 		resources.registerDtor(tag, fn)
 	}
 	runResourceHooks(cfg, resources)
@@ -323,7 +328,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		if cfg.resCanon != nil {
 			tag = cfg.resCanon(defIdx)
 		}
-		resources.registerDtor(tag, resolve)
+		resources.registerDtor(tag, resourceDtor(resolve))
 	}
 
 	for k, ci := range comp.CoreInstances {
@@ -1006,7 +1011,7 @@ func resourceCanonHostFuncGraph(comp *binary.Component, cfg *config, resources *
 				panic(fmt.Errorf("component/instance: resource.drop (type %d): %w", typeIdx, err))
 			}
 			if dtor != nil {
-				if _, err := dtor.Call(ctx, uint64(rep)); err != nil {
+				if err := dtor(ctx, rep); err != nil {
 					panic(fmt.Errorf("component/instance: resource.drop (type %d): destructor: %w", typeIdx, err))
 				}
 			}

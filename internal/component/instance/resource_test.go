@@ -334,7 +334,7 @@ func TestLiftHostArgs_OwnHandle(t *testing.T) {
 	h := tbl.NewOwn(1, 42)
 
 	fd, resolve := synthFuncDesc([]binary.TypeDesc{binary.OwnDesc{ResourceType: 1}}, nil)
-	args, err := liftHostArgs(fd, resolve, []uint64{uint64(h)}, mod, tbl)
+	args, _, err := liftHostArgs(fd, resolve, []uint64{uint64(h)}, mod, tbl)
 	if err != nil {
 		t.Fatalf("liftHostArgs: %v", err)
 	}
@@ -353,7 +353,7 @@ func TestLiftHostArgs_BorrowHandle(t *testing.T) {
 	h := tbl.NewOwn(1, 42)
 
 	fd, resolve := synthFuncDesc([]binary.TypeDesc{binary.BorrowDesc{ResourceType: 1}}, nil)
-	args, err := liftHostArgs(fd, resolve, []uint64{uint64(h)}, mod, tbl)
+	args, _, err := liftHostArgs(fd, resolve, []uint64{uint64(h)}, mod, tbl)
 	if err != nil {
 		t.Fatalf("liftHostArgs: %v", err)
 	}
@@ -370,7 +370,7 @@ func TestLiftHostArgs_UnknownHandle(t *testing.T) {
 	_, mod := memModule(t)
 	tbl := newHandleTable()
 	fd, resolve := synthFuncDesc([]binary.TypeDesc{binary.OwnDesc{ResourceType: 1}}, nil)
-	if _, err := liftHostArgs(fd, resolve, []uint64{999}, mod, tbl); err == nil {
+	if _, _, err := liftHostArgs(fd, resolve, []uint64{999}, mod, tbl); err == nil {
 		t.Fatal("expected an error lifting an unknown handle")
 	}
 }
