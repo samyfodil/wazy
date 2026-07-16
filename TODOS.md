@@ -12,7 +12,9 @@
   - **outgoing-handler (client):** a real rustc guest makes outbound requests via a Go `http.Client` (`WASIConfig.HTTPClient`); vs `wasmtime serve -S cli -S inherit-network` against a scratch backend (`real_http_outgoing.component.wasm`).
   - Implemented in `wasi_http.go`: the `wasi:http/types` subset a wit-bindgen proxy guest calls (request line read, response write, and the full client path incl. future/incoming-response/incoming-body). Future is synchronous (Do blocks) so subscribe/get are immediate; incoming-body.stream + response body-write both reuse the wasi:io/streams path.
 - **Done (incoming request readback):** `incoming-request.headers` + `fields.get` (header read) and `incoming-request.consume` + `incoming-body.stream` (request body), vs `wasmtime serve` (`real_http_request.component.wasm`).
-- **Remaining (minor breadth, fail-loud until implemented):** response/request trailers, per-request `request-options` (timeouts), and outgoing-request bodies (POST from a client guest). Same discovery-driven pattern — implement when a real guest calls them.
+- **Done (outgoing request bodies):** `outgoing-request.body` → the outbound POST body path, vs wasmtime (`real_http_post.component.wasm`).
+- **Done (request-options):** `request-options` ctor + `set-connect-timeout`/`set-first-byte-timeout`; `outgoing-handler.handle` applies the timeout as a request deadline (`real_http_reqopts.component.wasm`).
+- **Remaining — trailers only (niche, fail-loud):** HTTP trailing headers. Response side: `outgoing-body.finish(Some(trailers))` (currently rejects non-nil trailers). Incoming side: `incoming-body.finish` → `future-trailers` → `future-trailers.get`. Rarely used by real proxy guests (mostly grpc-over-h2 status); implement on demand. Everything else a real-world handler needs (both directions, headers read/write, bodies read/write, timeouts) is done.
 - **Depends on / blocked by:** none technical.
 
 ## Minor interface breadth
