@@ -25,7 +25,7 @@ type config struct {
 	imports map[importKey]*hostImport
 
 	// resourceHooks are invoked with the Instance's *handleTable as soon as
-	// it exists (graph.go/instantiateWithImports, right after
+	// it exists (graph.go's instantiateGraph, right after
 	// newHandleTable()), letting an Option's host func closures capture a
 	// reference to the same table generic lift/lower already threads
 	// through -- see withResourcesHook's doc for why a HostFunc sometimes
@@ -158,8 +158,7 @@ func withResourcesHook(hook func(*handleTable)) Option {
 
 // runResourceHooks invokes every hook cfg registered via withResourcesHook
 // against resources. Called once per Instantiate, immediately after
-// newHandleTable(), by both instantiation paths that support host imports
-// (graph.go's instantiateGraph and this file's instantiateWithImports).
+// newHandleTable() by the graph engine (graph.go's instantiateGraph).
 func runResourceHooks(cfg *config, resources *handleTable) {
 	for _, hook := range cfg.resourceHooks {
 		hook(resources)
@@ -432,9 +431,9 @@ func shimFuncImportNames(nested *binary.Component) []string {
 // its WASI imports through an indirect call-table trampoline module (see
 // graph.go's package doc) that has no memory of its own, so relying on the
 // runtime caller would silently read/write nothing (see
-// canonMemoryAndRealloc). The simpler, single-hop instantiateWithImports
-// path (resolveLoweredImport) always passes nil, nil, since there the
-// runtime caller already is the right module.
+// canonMemoryAndRealloc). A lowered import whose consumer is a real core
+// module with its own memory passes nil, nil, since there the runtime caller
+// already is the right module.
 func buildHostWrapper(iface, funcName string, hi *hostImport, resources *handleTable, memOverride api.Module, reallocOverride api.Function) (api.GoModuleFunction, []api.ValueType, []api.ValueType, error) {
 	var fd binary.FuncDesc
 	var resolve abi.Resolver

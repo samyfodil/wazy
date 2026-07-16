@@ -15,7 +15,7 @@ import (
 //
 // # Why this exists
 //
-// The general Component Model instantiation graph (see instantiateWithImports
+// The general Component Model instantiation graph (see instantiateGraph
 // in host_import.go) regroups already-defined core items under new names via
 // "inline-export" core instances (core:instance kind 0x01) -- e.g. a real
 // guest module's own "memory" export gets re-grouped, alone, into a synthetic

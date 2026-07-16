@@ -351,7 +351,7 @@ func needsGraphPath(comp *binary.Component) bool {
 	return !coreFuncSpacePartitioned(comp.CoreFuncSpace)
 }
 
-// coreFuncSpacePartitioned reports whether space fits instantiateWithImports'
+// coreFuncSpacePartitioned reports whether space fits the simple partitioned
 // assumption: every CoreFuncFromCanon entry occupies a lower index than
 // every CoreFuncFromAlias entry (either group may be empty). An empty space
 // (no Decode-populated CoreFuncSpace, e.g. a hand-built test Component, or a
@@ -372,7 +372,7 @@ func coreFuncSpacePartitioned(space []binary.CoreFuncSpaceEntry) bool {
 }
 
 // needsImportPath reports whether comp needs the general, host-import-capable
-// instantiation path (instantiateWithImports) rather than instantiateComponent's
+// instantiation path (the graph engine) rather than instantiateComponent's
 // strict "one core module, one no-argument core instance, only canon lift"
 // shape. Beyond components with real WIT imports, this also covers
 // self-contained components that still need the general core-instance wiring

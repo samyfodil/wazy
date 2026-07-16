@@ -22,7 +22,7 @@ import (
 
 // BenchmarkInstantiate measures Instantiate(real_adder) end to end: component
 // decode, embedded core module compile+instantiate, and the export -> canon
-// lift -> core func binding wiring (instance.go's instantiateWithImports,
+// lift -> core func binding wiring (graph.go's instantiateGraph,
 // since real_adder declares a nested re-export shim -- see needsImportPath).
 func BenchmarkInstantiate(b *testing.B) {
 	ctx := context.Background()

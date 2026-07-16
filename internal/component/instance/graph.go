@@ -32,7 +32,7 @@ const graphEmptyImportKey = "wazy:component/empty-import"
 // # Algorithm
 //
 // 1. Build the component func index space (compFuncAliases + liftCanonIdxs)
-//    exactly like instantiateWithImports -- this is unaffected by the
+//    the standard construction -- this is unaffected by the
 //    core-level generalization below (see its doc for why aliases always
 //    precede lifts structurally).
 // 2. Build the core memory and core table index spaces by filtering
@@ -91,11 +91,9 @@ const graphEmptyImportKey = "wazy:component/empty-import"
 //    absolute core func index through comp.CoreFuncSpace, exactly as step 6
 //    resolved each inline-export entry.
 //
-// The component-level (WIT interface) host-import path (instantiateWithImports
-// in host_import.go) and the single-module path (instantiateComponent in
-// instance.go) are both left completely unmodified: this file adds a new,
-// independent routing branch (needsGraphPath) rather than folding into
-// either, so every existing test and fixture is provably unaffected.
+// The trivial single-module, no-import path (instantiateComponent in
+// instance.go) is handled separately; every other component -- host-import or
+// multi-core -- is instantiated here (see Instantiate's routing).
 
 // coreFuncSig is a core-level (i32/i64/f32/f64) function signature,
 // discovered from a real embedded core module's own import declaration --
@@ -121,7 +119,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	synthPrefix := nextSynthNamePrefix()
 
 	// Component func index space: identical construction to
-	// instantiateWithImports -- see that function's doc for why component
+	// the host-import path -- see instantiateComponent's package doc for why component
 	// func aliases always precede lifts structurally, which this reuses
 	// unchanged.
 	var compFuncAliases []aliasTarget
@@ -700,7 +698,7 @@ func canonMemoryAndRealloc(canon binary.Canon, coreMemTarget func(int) (api.Modu
 // resourceCanonHostFunc's doc), keyed by canon.TypeIdx as an opaque tag, but
 // tolerates comp.ResolveType failing on canon.TypeIdx with the
 // binary.ResolveType-documented "alias exports ... from [an imported]
-// instance" gap: unlike instantiateWithImports' fixtures (which only declare
+// instance" gap: unlike simpler fixtures (which only declare
 // resource types locally), a real wasip2 CLI adapter's resource canons
 // almost always tag a resource type owned by an *imported* WASI interface
 // (e.g. wasi:filesystem/types' "descriptor") whose nested type declarations
@@ -757,7 +755,7 @@ func resourceCanonHostFuncGraph(comp *binary.Component, cfg *config, resources *
 // directly, an instance export -- the WIT-exports-an-interface shape --
 // through its re-export shim), but resolves a core func index via
 // coreFuncTarget instead of the flat (coreFuncAliases, numProducedCoreFuncs)
-// partition instantiateWithImports uses, since the graph engine's core func
+// partition simpler components rely on, since the graph engine's core func
 // index space can genuinely interleave alias- and canon-produced entries.
 func bindImportExportsGraph(comp *binary.Component, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver) (map[string]*boundExport, error) {
 	exports := make(map[string]*boundExport, len(comp.Exports))
