@@ -6,39 +6,37 @@
 - **Context:** ~8–10k LOC on top of the p2 runtime. Reference: Wasmtime + `bytecodealliance/wasip3-prototyping`, and the async section of the component-model `definitions.py`. Zero pure-Go prior art. Highest-variance part is async correctness debugging.
 - **Depends on / blocked by:** p2 CM runtime shipped and solid (done). Also blocked on the 0.3 spec settling — as of 2026-07 Wasmtime still marks its p3 support experimental/unstable. Do NOT start early; spec churn will waste the work.
 
-## Internal nested-component composition (the fused-adapter shape)
-- **What:** Instantiate nested component *definitions* declared inside one
-  component binary (`comp.Instances` + `comp.NestedComponents`) and link them:
-  component `$c2` imports an instance that sibling `$c1` provides, `canon lower`s
-  it into a core func, and the outer aliases `$c2`'s export and re-exports it.
-  Distinct from the runtime-level multi-component already done (separate
-  top-level components on one Runtime) — here it is *inside* a single binary.
-- **Why:** The last feature gating the official `component-model` conformance
-  suites this runtime can't yet pass: `wasmtime/fused.wast` (roundtrip),
-  `resources/multiple-resources.wast`, part of `wasmtime/resources.wast`, and
-  `linking/*`. Symptom today: bind rejects with "export resolves to an imported
-  func rather than a lift" (`graph.go` `bindFuncExportGraph`), because the
-  outer export's `componentFunc` resolves to a func alias targeting a nested
-  component instance (`aliasTarget{instIdx,name}`) that is never instantiated.
-- **Approach (reuses existing machinery):** a sibling's lifted export is exactly
-  a *host import* for the importer — the canon-lower + `buildHostWrapper` path
-  already lowers a host func into a core import. So: (1) a recursive
-  `instantiateGraph` entry taking a decoded `*binary.Component` + a
-  provided-imports map (instead of only `componentBytes`); (2) process
-  `comp.Instances` in order — resolve each instantiate-arg (sibling instance /
-  func / core module), recursively instantiate `NestedComponents[ComponentIdx]`
-  with those args satisfying its imports; (3) in `componentFunc`/
-  `bindFuncExportGraph`, resolve a func alias to a nested instance by delegating
-  to that sub-Instance's boundExport. Today's trivial pass-through-shim path
-  (`validateShimComponent`, `bindInstanceExportGraph`) becomes the degenerate
-  case of this.
-- **Cost / risk:** ~400–800 LOC in the graph engine (the most delicate code:
-  compile-cache keying, empty-import rewrite, host-import resolution all thread
-  through). High regression risk to the currently-green single-component
-  runtime — do it as a deliberate, well-tested unit (recursive instantiation +
-  cross-component func linking + resource-across-components), not a cram. The
-  `.wast` conformance harness (`wast_conformance_test.go`) is the ready-made
-  acceptance gate: unskip fused/resources/multiple-resources as each lands.
+## Internal nested-component composition — func linking DONE; resource identity remains
+- **DONE (func linking, commit cd793ee):** A component binary that declares
+  nested component *definitions* (`comp.Instances` + `comp.NestedComponents`),
+  instantiates them, and links a sibling's export into another's import now runs.
+  `wasmtime/fused.wast` passes (`fused.18` roundtrip across the char boundary
+  values). Mechanism: a sibling's lifted export is wired into the importer as a
+  delegating `hostImport` (customFD/customResolve from the provider's
+  boundExport), so the existing canon-lower/`buildHostWrapper` path lowers calls
+  unchanged; an outer export aliasing a nested instance's func re-exposes that
+  sub-Instance's boundExport. Scoped to the composition shape via a func-alias-
+  to-local-instance reachability check, so WASI/shim components are untouched.
+  `binary.Component.Bytes` + `Instance.subInstances` added. See
+  [[wazy-wast-conformance]].
+- **REMAINING (resource identity across composed components):** gates
+  `resources/multiple-resources.wast` and parts of `wasmtime/resources.wast`.
+  These now *instantiate and run* through the composition path, then fail:
+  `borrow<3> arg: handle 2 belongs to resource type 1, not 3`. Each component
+  numbers its resource types independently, so when a resource handle crosses a
+  fused-adapter boundary (through the delegating host import) its type tag is in
+  the wrong component's index space. Needs cross-instance handle transfer —
+  translate the resource type tag (and possibly the handle, between the two
+  instances' `handleTable`s) at the boundary, per the Canonical ABI's
+  lift_own/lower_own. This is exactly the "No cross-instance handle transfer"
+  ceiling documented in `resource.go`; the fused-adapter linking that surfaces
+  it is now in place, so this is the next concrete unit.
+- **Also deeper fused sub-features** (each skips a `fused.wast` module, logged):
+  pass-through shim with empty export names, >16 flat params on an imported func
+  (whole-param spilling for a lowered import), func/type instantiate-args,
+  self-referential nesting.
+- **Acceptance gate:** the `.wast` harness (`wast_conformance_test.go`) — unskip
+  multiple-resources/resources as resource identity lands.
 - **Depends on / blocked by:** none technical; it is purely scope.
 
 ## wasi:http — DONE (both sides), minor breadth remaining

@@ -29,16 +29,20 @@ import (
 //         flags/option as args, returns their concatenation -- pure ABI in+out.
 // strings: string edge cases + assert_trap for out-of-bounds / invalid utf-8.
 func TestWastConformance(t *testing.T) {
-	// The canonical-ABI value/type suites this single-component runtime runs
-	// end to end: concat (every value kind in and out), strings (utf-8 + bounds
-	// traps), types (integer lift-narrowing: masking and sign extension), and
-	// simple (a component that imports another component). Not vendored --
-	// every runnable invoke in them is gated behind a feature beyond a single-
-	// component runtime, not an ABI bug: post-return (module_definition/
-	// module_instance linking + reentrance-trap builtins), multiple-resources +
-	// wasmtime/fused (nested-component composition / fused adapters that
-	// re-export a nested instance's func), wasmtime/resources (host-provided
-	// imported-resource constructors), and linking/* (multi-component linking).
+	// Official component-model suites this runtime runs end to end: concat
+	// (every value kind in and out), strings (utf-8 + bounds traps), types
+	// (integer lift-narrowing: masking and sign extension), simple (a component
+	// that imports another component), and fused (nested-component composition
+	// -- a component that instantiates nested components and links a sibling's
+	// export into another's import via a fused adapter). Not vendored -- their
+	// runnable invokes gate on features not yet built (not ABI bugs):
+	// multiple-resources + parts of wasmtime/resources (resource identity ACROSS
+	// composed components -- each component numbers its resource types
+	// independently, so a handle must be translated as it crosses a fused-
+	// adapter boundary; the "no cross-instance handle transfer" ceiling in
+	// resource.go), post-return (module_definition/module_instance linking +
+	// reentrance-trap builtins), and linking/* (multi top-level component
+	// linking).
 	for _, suite := range []string{"concat", "strings", "types", "simple", "fused"} {
 		t.Run(suite, func(t *testing.T) {
 			runWastSuite(t, suite)
