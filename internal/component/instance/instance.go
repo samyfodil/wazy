@@ -238,6 +238,7 @@ type boundExport struct {
 	paramTypes      []binary.TypeDesc
 	paramUsesMemory []bool
 	paramErrs       []error
+	paramSteps      []abi.LowerStep
 
 	hasResult        bool
 	tooManyResults   int // > 0: fd declares this many (>1) named results
@@ -272,6 +273,7 @@ type boundExportABI struct {
 	paramTypes      []binary.TypeDesc
 	paramUsesMemory []bool
 	paramErrs       []error
+	paramSteps      []abi.LowerStep // compiled per-param lower plan (see abi.CompileLower)
 
 	hasResult        bool
 	tooManyResults   int
@@ -292,6 +294,7 @@ func computeBoundExportABI(fd binary.FuncDesc, resolve abi.Resolver) *boundExpor
 	m.paramTypes = make([]binary.TypeDesc, len(fd.Params))
 	m.paramUsesMemory = make([]bool, len(fd.Params))
 	m.paramErrs = make([]error, len(fd.Params))
+	m.paramSteps = make([]abi.LowerStep, len(fd.Params))
 	for i, p := range fd.Params {
 		pt, err := resolveTypeRef(&p.Type, resolve)
 		if err != nil {
@@ -300,6 +303,15 @@ func computeBoundExportABI(fd binary.FuncDesc, resolve abi.Resolver) *boundExpor
 		}
 		m.paramTypes[i] = pt
 		m.paramUsesMemory[i] = usesMemory(pt, resolve)
+		// Compile the per-param lower plan once (the spill decision's Flatten
+		// happens here, not per call). A compile error is recorded like a
+		// resolve error -- surfaced at call time via paramErrs.
+		step, err := abi.CompileLower(pt, resolve)
+		if err != nil {
+			m.paramErrs[i] = err
+			continue
+		}
+		m.paramSteps[i] = step
 	}
 
 	resultRefs := funcResultTypeRefs(fd)
@@ -344,7 +356,7 @@ func finalizeBoundExport(be *boundExport, resolve abi.Resolver, abiCache *Compil
 	}
 
 	be.coreParamsWant, be.coreResultsWant, be.flattenErr = m.coreParamsWant, m.coreResultsWant, m.flattenErr
-	be.paramTypes, be.paramUsesMemory, be.paramErrs = m.paramTypes, m.paramUsesMemory, m.paramErrs
+	be.paramTypes, be.paramUsesMemory, be.paramErrs, be.paramSteps = m.paramTypes, m.paramUsesMemory, m.paramErrs, m.paramSteps
 	be.hasResult, be.tooManyResults = m.hasResult, m.tooManyResults
 	be.resultType, be.resultUsesMemory, be.resultFlatKinds, be.resultErr = m.resultType, m.resultUsesMemory, m.resultFlatKinds, m.resultErr
 }
@@ -840,11 +852,13 @@ func (in *Instance) lowerParams(be *boundExport, args []abi.Value, mem []byte, m
 		if err := be.paramErrs[i]; err != nil {
 			return nil, fmt.Errorf("component/instance: export %q param %d (%s): %w", exportName, i, p.Name, err)
 		}
-		pt := be.paramTypes[i]
 		if be.paramUsesMemory[i] && !memAvailable {
 			return nil, fmt.Errorf("component/instance: export %q param %d (%s) requires linear memory (string/list), but the core module exports no memory", exportName, i, p.Name)
 		}
-		coreArgs, err = abi.LowerFlatInto(coreArgs, args[i], pt, in.resolve, realloc, mem)
+		// Compiled per-param plan (abi.CompileLower), equivalent to
+		// abi.LowerFlatInto(coreArgs, args[i], be.paramTypes[i], ...) but with
+		// the type-switch/Flatten/intermediate-slice precomputed at bind time.
+		coreArgs, err = be.paramSteps[i].Lower(coreArgs, args[i], realloc, mem)
 		if err != nil {
 			return nil, fmt.Errorf("component/instance: export %q param %d (%s): lower: %w", exportName, i, p.Name, err)
 		}
