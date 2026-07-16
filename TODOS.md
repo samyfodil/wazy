@@ -6,10 +6,12 @@
 - **Context:** ~8–10k LOC on top of the p2 runtime. Reference: Wasmtime + `bytecodealliance/wasip3-prototyping`, and the async section of the component-model `definitions.py`. Zero pure-Go prior art. Highest-variance part is async correctness debugging.
 - **Depends on / blocked by:** p2 CM runtime shipped and solid (done). Also blocked on the 0.3 spec settling — as of 2026-07 Wasmtime still marks its p3 support experimental/unstable. Do NOT start early; spec churn will waste the work.
 
-## wasi:http — server side DONE, client side remaining
-- **Done (incoming-handler):** a real rustc `wasi:http/incoming-handler` guest runs on wazy and responds to HTTP requests, verified byte-identical vs `wasmtime serve -S cli` (`wasi_http.go`, `real_http_test.go`, fixture `real_http_incoming.component.wasm`). `(*Instance).ServeHTTP` is a net/http.Handler; enable with `WithWASI(WASIConfig{EnableHTTP: true})`. Implemented `wasi:http/types`: incoming-request.{method, path-with-query}, fields ctor+set, outgoing-response ctor+set-status-code+body, outgoing-body.{write, finish}, response-outparam.set (+ full error-code variant). Body writes reuse the wasi:io/streams output-stream path.
-- **Remaining (outgoing-handler, client side):** `wasi:http/outgoing-handler.handle` + `outgoing-request`, `request-options`, `future-incoming-response`, `incoming-response`, `incoming-body` — bridge to a Go `http.Client`. Also on the incoming side, not yet: request header readback, incoming-request.consume (request body), response trailers.
-- **Context:** same differential discipline — build a real rustc guest that makes an outbound request (verify vs `wasmtime serve` against a scratch backend), implement the client resources against `net/http`, reuse the resource table + streams (incoming-body's input-stream can reuse fsStreamNode like stdin does). Poll/future may be needed for `future-incoming-response.get`.
+## wasi:http — DONE (both sides), minor breadth remaining
+- **Done — full `wasi:http/proxy` world runs.** Both directions verified differentially vs wasmtime:
+  - **incoming-handler (server):** a real rustc guest responds to HTTP; vs `wasmtime serve -S cli` (`real_http_incoming.component.wasm`). `(*Instance).ServeHTTP` is a net/http.Handler; enable with `WithWASI(WASIConfig{EnableHTTP: true})`.
+  - **outgoing-handler (client):** a real rustc guest makes outbound requests via a Go `http.Client` (`WASIConfig.HTTPClient`); vs `wasmtime serve -S cli -S inherit-network` against a scratch backend (`real_http_outgoing.component.wasm`).
+  - Implemented in `wasi_http.go`: the `wasi:http/types` subset a wit-bindgen proxy guest calls (request line read, response write, and the full client path incl. future/incoming-response/incoming-body). Future is synchronous (Do blocks) so subscribe/get are immediate; incoming-body.stream + response body-write both reuse the wasi:io/streams path.
+- **Remaining (minor breadth, fail-loud until implemented):** request/response header READBACK on the incoming side, `incoming-request.consume` (inbound request body), response/request trailers, and per-request `request-options` (timeouts). Same discovery-driven pattern — implement when a real guest calls them.
 - **Depends on / blocked by:** none technical.
 
 ## Minor interface breadth
