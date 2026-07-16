@@ -62,6 +62,7 @@ const (
 	wasiHTTPIncomingResponseResType uint32 = 21
 	wasiHTTPIncomingBodyResType     uint32 = 22
 	wasiHTTPRequestOptionsResType   uint32 = 23
+	wasiHTTPFutureTrailersResType   uint32 = 24
 )
 
 // Interface names are registered version-tolerantly (mkImportKey strips the
@@ -90,7 +91,8 @@ type httpIncomingRequest struct {
 	pathQ    string // path plus "?"+rawquery, e.g. "/hello?x=1"
 	headers  http.Header
 	body     []byte
-	consumed bool // incoming-request.consume may be called only once
+	trailers http.Header // request trailers (r.Trailer), read via future-trailers
+	consumed bool        // incoming-request.consume may be called only once
 }
 
 // httpFields is the host state behind a fields resource: an ordered,
@@ -113,6 +115,9 @@ type httpOutgoingResponse struct {
 type httpOutgoingBody struct {
 	buf      bytes.Buffer
 	finished bool
+	// trailers holds the option<trailers> a guest passes to
+	// outgoing-body.finish (nil when it finishes with None, the common case).
+	trailers *httpFields
 }
 
 // httpCapture is the slot a response-outparam names: what the guest set.
@@ -156,11 +161,12 @@ type wasiHTTP struct {
 	// [method]input-stream.blocking-read path. Set in WithWASI.
 	newInputStreamRep func(data []byte) uint32
 
-	outRequests map[uint32]*httpOutgoingRequest
-	futures     map[uint32]*httpFuture
-	inResponses map[uint32]*httpIncomingResponse
-	inBodies    map[uint32]*httpIncomingBody
-	reqOptions  map[uint32]*httpRequestOptions
+	outRequests    map[uint32]*httpOutgoingRequest
+	futures        map[uint32]*httpFuture
+	inResponses    map[uint32]*httpIncomingResponse
+	inBodies       map[uint32]*httpIncomingBody
+	reqOptions     map[uint32]*httpRequestOptions
+	futureTrailers map[uint32]*httpFutureTrailers
 }
 
 // httpRequestOptions is the host state behind a request-options resource. Only
@@ -207,6 +213,16 @@ type httpIncomingResponse struct {
 type httpIncomingBody struct {
 	body        []byte
 	streamTaken bool
+	trailers    http.Header // carried from the request, read via future-trailers
+}
+
+// httpFutureTrailers is the host state behind a future-trailers resource
+// (incoming-body.finish's result): the trailers are already resolved
+// synchronously (this host does no real async I/O), so get returns them
+// immediately. taken guards get against being called more than once.
+type httpFutureTrailers struct {
+	trailers http.Header
+	taken    bool
 }
 
 func newWasiHTTP() *wasiHTTP {
@@ -224,6 +240,7 @@ func newWasiHTTP() *wasiHTTP {
 		inResponses:    make(map[uint32]*httpIncomingResponse),
 		inBodies:       make(map[uint32]*httpIncomingBody),
 		reqOptions:     make(map[uint32]*httpRequestOptions),
+		futureTrailers: make(map[uint32]*httpFutureTrailers),
 	}
 }
 
@@ -417,8 +434,9 @@ func (h *wasiHTTP) incomingRequestConsume(_ context.Context, args []abi.Value) (
 	}
 	req.consumed = true
 	body := req.body
+	trailers := req.trailers
 	h.mu.Unlock()
-	bodyRep := h.newInBodyRep(&httpIncomingBody{body: body})
+	bodyRep := h.newInBodyRep(&httpIncomingBody{body: body, trailers: trailers})
 	handle := res.NewOwn(wasiHTTPIncomingBodyResType, bodyRep)
 	return []abi.Value{abi.ResultValue{IsErr: false, Payload: handle}}, nil
 }
@@ -629,14 +647,35 @@ func (h *wasiHTTP) outgoingBodyFinish(_ context.Context, args []abi.Value) ([]ab
 	if !ok {
 		return nil, fmt.Errorf("[static]outgoing-body.finish: this: expected uint32 rep, got %T", args[0])
 	}
-	// trailers: option<own<trailers>>; nil (None) is all a normal guest sends.
+	// trailers: option<own<trailers>>. None (nil) is the common case; Some
+	// carries an own<fields> handle nested inside the option, which
+	// liftHostArgs does NOT auto-resolve (only top-level own/borrow args are),
+	// so it arrives as a handle to TakeOwn here -- mirroring
+	// response-outparam.set's own nested-own handling.
+	var trailers *httpFields
 	if args[1] != nil {
-		return nil, fmt.Errorf("[static]outgoing-body.finish: response trailers are not supported by this milestone")
+		handle, ok := args[1].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[static]outgoing-body.finish: trailers: expected uint32 handle, got %T", args[1])
+		}
+		res, err := h.getResources()
+		if err != nil {
+			return nil, err
+		}
+		trailerRep, err := res.TakeOwn(wasiHTTPFieldsResType, handle)
+		if err != nil {
+			return nil, fmt.Errorf("[static]outgoing-body.finish: trailers: %w", err)
+		}
+		h.mu.Lock()
+		trailers = h.fields[trailerRep]
+		delete(h.fields, trailerRep)
+		h.mu.Unlock()
 	}
 	h.mu.Lock()
 	body, ok := h.bodies[rep]
 	if ok {
 		body.finished = true
+		body.trailers = trailers
 	}
 	h.mu.Unlock()
 	if !ok {
@@ -948,6 +987,36 @@ func httpOutgoingBodyFinishSig() (binary.FuncDesc, abi.Resolver) {
 	}, tbl.resolver()
 }
 
+// httpIncomingBodyFinishSig builds the FuncDesc/resolver for
+// [static]incoming-body.finish(this: own<incoming-body>) ->
+// own<future-trailers>.
+func httpIncomingBodyFinishSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	thisRef := tbl.add(binary.OwnDesc{ResourceType: wasiHTTPIncomingBodyResType})
+	ftRef := tbl.add(binary.OwnDesc{ResourceType: wasiHTTPFutureTrailersResType})
+	return binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "this", Type: thisRef}},
+		Results: binary.FuncResults{Unnamed: &ftRef},
+	}, tbl.resolver()
+}
+
+// httpFutureTrailersGetSig builds the FuncDesc/resolver for
+// [method]future-trailers.get(self: borrow<future-trailers>) ->
+// option<result<result<option<trailers>, error-code>>>.
+func httpFutureTrailersGetSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiHTTPFutureTrailersResType})
+	optTrailersRef := tbl.add(binary.OptionDesc{Element: tbl.add(binary.OwnDesc{ResourceType: wasiHTTPFieldsResType})})
+	errRef := httpErrorCodeType(tbl)
+	innerRef := tbl.add(binary.ResultDesc{Ok: &optTrailersRef, Err: &errRef})
+	outerRef := tbl.add(binary.ResultDesc{Ok: &innerRef})
+	optOuterRef := tbl.add(binary.OptionDesc{Element: outerRef})
+	return binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}},
+		Results: binary.FuncResults{Unnamed: &optOuterRef},
+	}, tbl.resolver()
+}
+
 func httpResponseOutparamSetSig() (binary.FuncDesc, abi.Resolver) {
 	tbl := &typeTable{}
 	paramRef := tbl.add(binary.OwnDesc{ResourceType: wasiHTTPResponseOutparamResType})
@@ -979,6 +1048,9 @@ func wasiHTTPOptions(h *wasiHTTP) []Option {
 	reqHeadersFD, reqHeadersR := httpIncomingRequestHeadersSig()
 	reqConsumeFD, reqConsumeR := httpIncomingRequestConsumeSig()
 	fieldsGetFD, fieldsGetR := httpFieldsGetSig()
+	inBodyFinishFD, inBodyFinishR := httpIncomingBodyFinishSig()
+	ftSubFD, ftSubR := wasiSubscribeSig(wasiHTTPFutureTrailersResType)
+	ftGetFD, ftGetR := httpFutureTrailersGetSig()
 
 	return []Option{
 		withResourcesHook(func(t *handleTable) {
@@ -991,7 +1063,11 @@ func wasiHTTPOptions(h *wasiHTTP) []Option {
 		withResourceTag(wasiIfaceHTTPTypes, "outgoing-response", wasiHTTPOutgoingResponseResType),
 		withResourceTag(wasiIfaceHTTPTypes, "outgoing-body", wasiHTTPOutgoingBodyResType),
 		withResourceTag(wasiIfaceHTTPTypes, "response-outparam", wasiHTTPResponseOutparamResType),
+		withResourceTag(wasiIfaceHTTPTypes, "future-trailers", wasiHTTPFutureTrailersResType),
 
+		withImportCustom(wasiIfaceHTTPTypes, "[static]incoming-body.finish", h.incomingBodyFinish, inBodyFinishFD, inBodyFinishR),
+		withImportCustom(wasiIfaceHTTPTypes, "[method]future-trailers.subscribe", h.futureTrailersSubscribe, ftSubFD, ftSubR),
+		withImportCustom(wasiIfaceHTTPTypes, "[method]future-trailers.get", h.futureTrailersGet, ftGetFD, ftGetR),
 		withImportCustom(wasiIfaceHTTPTypes, "[method]incoming-request.method", h.incomingRequestMethod, methodFD, methodR),
 		withImportCustom(wasiIfaceHTTPTypes, "[method]incoming-request.path-with-query", h.incomingRequestPathWithQuery, pathFD, pathR),
 		withImportCustom(wasiIfaceHTTPTypes, "[method]incoming-request.headers", h.incomingRequestHeaders, reqHeadersFD, reqHeadersR),
@@ -1025,7 +1101,7 @@ func (in *Instance) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		body = b
 	}
-	status, header, respBody, err := in.serveHTTP(r.Context(), r.Method, r.URL, r.Header, body)
+	status, header, respBody, trailer, err := in.serveHTTP(r.Context(), r.Method, r.URL, r.Header, body, r.Trailer)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1035,21 +1111,32 @@ func (in *Instance) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.Header().Add(k, v)
 		}
 	}
+	// Declare trailer names up front (net/http requires this before
+	// WriteHeader for a trailer to be sent), then set their values after the
+	// body -- the standard Go server-side trailer protocol.
+	for k := range trailer {
+		w.Header().Add("Trailer", k)
+	}
 	w.WriteHeader(int(status))
 	_, _ = w.Write(respBody)
+	for k, vs := range trailer {
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
 }
 
 // serveHTTP is ServeHTTP's core: it mints the incoming-request +
 // response-outparam resources, invokes the guest's exported handle, and reads
 // back the response the guest set. Split out (taking already-decomposed request
 // parts) so tests can drive one request without a live net/http server.
-func (in *Instance) serveHTTP(ctx context.Context, method string, u *url.URL, headers http.Header, reqBody []byte) (status uint16, respHeader http.Header, respBody []byte, err error) {
+func (in *Instance) serveHTTP(ctx context.Context, method string, u *url.URL, headers http.Header, reqBody []byte, reqTrailer http.Header) (status uint16, respHeader http.Header, respBody []byte, respTrailer http.Header, err error) {
 	if in.httpHost == nil {
-		return 0, nil, nil, fmt.Errorf("component/instance: ServeHTTP: instance was not created with WithWASI(WASIConfig{EnableHTTP: true})")
+		return 0, nil, nil, nil, fmt.Errorf("component/instance: ServeHTTP: instance was not created with WithWASI(WASIConfig{EnableHTTP: true})")
 	}
 	handlerInstance, ok := in.findExportInstance(wasiIfaceHTTPIncomingHandler)
 	if !ok {
-		return 0, nil, nil, fmt.Errorf("component/instance: ServeHTTP: component does not export %s", wasiIfaceHTTPIncomingHandler)
+		return 0, nil, nil, nil, fmt.Errorf("component/instance: ServeHTTP: component does not export %s", wasiIfaceHTTPIncomingHandler)
 	}
 
 	pathQ := u.Path
@@ -1059,7 +1146,7 @@ func (in *Instance) serveHTTP(ctx context.Context, method string, u *url.URL, he
 	if u.RawQuery != "" {
 		pathQ += "?" + u.RawQuery
 	}
-	req := &httpIncomingRequest{method: strings.ToUpper(method), pathQ: pathQ, headers: headers.Clone(), body: reqBody}
+	req := &httpIncomingRequest{method: strings.ToUpper(method), pathQ: pathQ, headers: headers.Clone(), body: reqBody, trailers: reqTrailer.Clone()}
 	reqRep := in.httpHost.newIncomingRep(req)
 	reqHandle := in.resources.NewOwn(wasiHTTPIncomingRequestResType, reqRep)
 
@@ -1068,13 +1155,13 @@ func (in *Instance) serveHTTP(ctx context.Context, method string, u *url.URL, he
 	outHandle := in.resources.NewOwn(wasiHTTPResponseOutparamResType, outRep)
 
 	if _, err := in.CallExport(ctx, handlerInstance, "handle", reqHandle, outHandle); err != nil {
-		return 0, nil, nil, fmt.Errorf("component/instance: ServeHTTP: guest handle: %w", err)
+		return 0, nil, nil, nil, fmt.Errorf("component/instance: ServeHTTP: guest handle: %w", err)
 	}
 	if !capture.set {
-		return 0, nil, nil, fmt.Errorf("component/instance: ServeHTTP: guest handle returned without setting a response")
+		return 0, nil, nil, nil, fmt.Errorf("component/instance: ServeHTTP: guest handle returned without setting a response")
 	}
 	if capture.isErr {
-		return 0, nil, nil, fmt.Errorf("component/instance: ServeHTTP: guest set response error-code (discriminant %d)", capture.errDisc)
+		return 0, nil, nil, nil, fmt.Errorf("component/instance: ServeHTTP: guest set response error-code (discriminant %d)", capture.errDisc)
 	}
 	resp := capture.resp
 	hdr := http.Header{}
@@ -1083,10 +1170,17 @@ func (in *Instance) serveHTTP(ctx context.Context, method string, u *url.URL, he
 			hdr.Add(name, string(resp.headers.values[i]))
 		}
 	}
+	var trailer http.Header
 	if resp.body != nil {
 		respBody = resp.body.buf.Bytes()
+		if resp.body.trailers != nil {
+			trailer = http.Header{}
+			for i, name := range resp.body.trailers.names {
+				trailer.Add(name, string(resp.body.trailers.values[i]))
+			}
+		}
 	}
-	return resp.status, hdr, respBody, nil
+	return resp.status, hdr, respBody, trailer, nil
 }
 
 // findExportInstance returns the full exported-instance name whose
@@ -1601,6 +1695,118 @@ func (h *wasiHTTP) incomingBodyStream(_ context.Context, args []abi.Value) ([]ab
 	streamRep := mint(body)
 	handle := res.NewOwn(wasiInputStreamResType, streamRep)
 	return []abi.Value{abi.ResultValue{IsErr: false, Payload: handle}}, nil
+}
+
+func (h *wasiHTTP) newFutureTrailersRep(f *httpFutureTrailers) uint32 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	rep := h.nextRep
+	h.nextRep++
+	h.futureTrailers[rep] = f
+	return rep
+}
+
+// incomingBodyFinish implements [static]incoming-body.finish(this:
+// incoming-body) -> future-trailers (std's IncomingBody::finish). The body's
+// trailers (carried from the request/response) are already resolved, so the
+// returned future-trailers is immediately ready.
+func (h *wasiHTTP) incomingBodyFinish(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("[static]incoming-body.finish: expected 1 arg (this), got %d", len(args))
+	}
+	// this: own<incoming-body> lifted to its rep (ownership consumed).
+	rep, ok := args[0].(uint32)
+	if !ok {
+		return nil, fmt.Errorf("[static]incoming-body.finish: this: expected uint32 rep, got %T", args[0])
+	}
+	h.mu.Lock()
+	b, ok := h.inBodies[rep]
+	var trailers http.Header
+	if ok {
+		trailers = b.trailers
+		delete(h.inBodies, rep)
+	}
+	h.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("[static]incoming-body.finish: rep %d does not name a live incoming-body", rep)
+	}
+	ftRep := h.newFutureTrailersRep(&httpFutureTrailers{trailers: trailers})
+	// Top-level own<future-trailers> result: auto-wrapped by allocHandleResult.
+	return []abi.Value{ftRep}, nil
+}
+
+// futureTrailersSubscribe implements [method]future-trailers.subscribe(self)
+// -> pollable: the trailers are already resolved, so it returns the
+// always-ready pollable (the central poll host treats it as immediately ready).
+func (h *wasiHTTP) futureTrailersSubscribe(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("[method]future-trailers.subscribe: expected 1 arg (self), got %d", len(args))
+	}
+	rep, ok := args[0].(uint32)
+	if !ok {
+		return nil, fmt.Errorf("[method]future-trailers.subscribe: self: expected uint32 rep, got %T", args[0])
+	}
+	h.mu.Lock()
+	_, ok = h.futureTrailers[rep]
+	h.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("[method]future-trailers.subscribe: rep %d does not name a live future-trailers", rep)
+	}
+	return []abi.Value{wasiPollableRep}, nil
+}
+
+// futureTrailersGet implements [method]future-trailers.get(self) ->
+// option<result<result<option<trailers>, error-code>>>. The trailers are
+// already resolved, so it always returns Some on the first call (None means
+// "not ready yet", which never happens here); the outer result's Err arm
+// signals "already gotten" on a second call. The inner
+// result<option<trailers>, error-code> is Ok(Some(fields)) when the
+// request/response carried trailers, else Ok(None).
+func (h *wasiHTTP) futureTrailersGet(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("[method]future-trailers.get: expected 1 arg (self), got %d", len(args))
+	}
+	rep, ok := args[0].(uint32)
+	if !ok {
+		return nil, fmt.Errorf("[method]future-trailers.get: self: expected uint32 rep, got %T", args[0])
+	}
+	res, err := h.getResources()
+	if err != nil {
+		return nil, err
+	}
+	h.mu.Lock()
+	ft, ok := h.futureTrailers[rep]
+	if !ok {
+		h.mu.Unlock()
+		return nil, fmt.Errorf("[method]future-trailers.get: rep %d does not name a live future-trailers", rep)
+	}
+	if ft.taken {
+		h.mu.Unlock()
+		// option some( result err ) -- "already gotten".
+		return []abi.Value{abi.ResultValue{IsErr: true}}, nil
+	}
+	ft.taken = true
+	trailers := ft.trailers
+	h.mu.Unlock()
+
+	// Build the option<trailers> inner value: Some(fields handle) or None (nil).
+	var trailersOpt abi.Value
+	if len(trailers) > 0 {
+		f := &httpFields{}
+		for name, vals := range trailers {
+			for _, v := range vals {
+				f.names = append(f.names, strings.ToLower(name))
+				f.values = append(f.values, []byte(v))
+			}
+		}
+		fieldsRep := h.newFieldsRep(f)
+		// Nested own<trailers> (inside option/result): mint the handle directly.
+		trailersOpt = res.NewOwn(wasiHTTPFieldsResType, fieldsRep)
+	}
+	// option some( result ok( result ok( option<trailers> ) ) )
+	inner := abi.ResultValue{IsErr: false, Payload: trailersOpt}
+	outer := abi.ResultValue{IsErr: false, Payload: inner}
+	return []abi.Value{outer}, nil
 }
 
 // ---- outgoing WIT type descriptors + signatures ----

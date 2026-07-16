@@ -55,7 +55,7 @@ func TestRealHTTP_IncomingHandler(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse path: %v", err)
 			}
-			status, hdr, body, err := inst.serveHTTP(ctx, tc.method, u, http.Header{}, nil)
+			status, hdr, body, _, err := inst.serveHTTP(ctx, tc.method, u, http.Header{}, nil, nil)
 			if err != nil {
 				t.Fatalf("serveHTTP: %v", err)
 			}
@@ -115,7 +115,7 @@ func TestRealHTTP_NotEnabled(t *testing.T) {
 	defer inst.Close(ctx)
 
 	u, _ := url.Parse("/x")
-	_, _, _, err = inst.serveHTTP(ctx, "GET", u, http.Header{}, nil)
+	_, _, _, _, err = inst.serveHTTP(ctx, "GET", u, http.Header{}, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "EnableHTTP") {
 		t.Fatalf("expected an EnableHTTP error, got %v", err)
 	}
@@ -162,7 +162,7 @@ func TestRealHTTP_OutgoingHandler(t *testing.T) {
 	}
 	defer inst.Close(ctx)
 
-	status, _, body, err := inst.serveHTTP(ctx, "GET", mustURL("/trigger"), http.Header{}, nil)
+	status, _, body, _, err := inst.serveHTTP(ctx, "GET", mustURL("/trigger"), http.Header{}, nil, nil)
 	if err != nil {
 		t.Fatalf("serveHTTP: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestOneComponentCallsAnotherOnOneRuntime(t *testing.T) {
 	}
 	defer caller.Close(ctx)
 
-	status, _, body, err := caller.serveHTTP(ctx, "GET", mustURL("/trigger"), http.Header{}, nil)
+	status, _, body, _, err := caller.serveHTTP(ctx, "GET", mustURL("/trigger"), http.Header{}, nil, nil)
 	if err != nil {
 		t.Fatalf("serveHTTP: %v", err)
 	}
@@ -263,7 +263,7 @@ func TestRealHTTP_RequestHeadersAndBody(t *testing.T) {
 			if tc.body != "" {
 				body = []byte(tc.body)
 			}
-			status, _, respBody, err := inst.serveHTTP(ctx, tc.method, mustURL(tc.path), hdr, body)
+			status, _, respBody, _, err := inst.serveHTTP(ctx, tc.method, mustURL(tc.path), hdr, body, nil)
 			if err != nil {
 				t.Fatalf("serveHTTP: %v", err)
 			}
@@ -310,7 +310,7 @@ func TestRealHTTP_OutgoingRequestBody(t *testing.T) {
 	}
 	defer inst.Close(ctx)
 
-	status, _, body, err := inst.serveHTTP(ctx, "GET", mustURL("/trigger"), http.Header{}, nil)
+	status, _, body, _, err := inst.serveHTTP(ctx, "GET", mustURL("/trigger"), http.Header{}, nil, nil)
 	if err != nil {
 		t.Fatalf("serveHTTP: %v", err)
 	}
@@ -342,7 +342,7 @@ func TestRealHTTP_RequestOptions(t *testing.T) {
 	}
 	defer inst.Close(ctx)
 
-	status, _, body, err := inst.serveHTTP(ctx, "GET", mustURL("/trigger"), http.Header{}, nil)
+	status, _, body, _, err := inst.serveHTTP(ctx, "GET", mustURL("/trigger"), http.Header{}, nil, nil)
 	if err != nil {
 		t.Fatalf("serveHTTP: %v", err)
 	}

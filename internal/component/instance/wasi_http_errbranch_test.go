@@ -214,10 +214,90 @@ func TestHTTP_OutgoingBody(t *testing.T) {
 	reqErr(t, err, "expected 2 args")
 	_, err = h.outgoingBodyFinish(context.Background(), []abi.Value{"x", nil})
 	reqErr(t, err, "this: expected uint32 rep")
-	_, err = h.outgoingBodyFinish(context.Background(), []abi.Value{bodyRep, uint32(1)})
-	reqErr(t, err, "trailers are not supported")
+	// A Some(trailers) with a bogus (wrong-type) handle fails to resolve.
+	_, err = h.outgoingBodyFinish(context.Background(), []abi.Value{bodyRep, uint32(999999)})
+	reqErr(t, err, "trailers:")
 	_, err = h.outgoingBodyFinish(context.Background(), []abi.Value{uint32(999), nil})
 	reqErr(t, err, "does not name a live outgoing-body")
+
+	// A Some(trailers) with a real fields handle attaches the trailers.
+	body2 := &httpOutgoingBody{}
+	body2Rep := h.newBodyRep(body2)
+	trFields := h.newFieldsRep(&httpFields{names: []string{"x-t"}, values: [][]byte{[]byte("v")}})
+	trHandle := tbl.NewOwn(wasiHTTPFieldsResType, trFields)
+	if _, err := h.outgoingBodyFinish(context.Background(), []abi.Value{body2Rep, trHandle}); err != nil {
+		t.Fatalf("finish with trailers: %v", err)
+	}
+	if body2.trailers == nil || len(body2.trailers.names) != 1 || body2.trailers.names[0] != "x-t" {
+		t.Fatalf("trailers not attached: %+v", body2.trailers)
+	}
+}
+
+// TestHTTP_FutureTrailers covers the request/response-trailer read path
+// (incoming-body.finish -> future-trailers -> get) directly, including the
+// with-trailers, without-trailers, already-gotten, and error branches.
+func TestHTTP_FutureTrailers(t *testing.T) {
+	h := newTestHTTP()
+
+	// incoming-body.finish carries the body's trailers into a future-trailers.
+	inRep := h.newInBodyRep(&httpIncomingBody{trailers: http.Header{"X-T": {"val"}}})
+	res, err := h.incomingBodyFinish(context.Background(), []abi.Value{inRep})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ftRep := res[0].(uint32)
+
+	// subscribe -> always-ready pollable.
+	if _, err := h.futureTrailersSubscribe(context.Background(), []abi.Value{ftRep}); err != nil {
+		t.Fatal(err)
+	}
+
+	// get -> Some(Ok(Ok(Some(fields)))).
+	res, err = h.futureTrailersGet(context.Background(), []abi.Value{ftRep})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outer := res[0].(abi.ResultValue)
+	if outer.IsErr {
+		t.Fatal("first get should be Ok, not already-gotten")
+	}
+	inner := outer.Payload.(abi.ResultValue)
+	if inner.IsErr || inner.Payload == nil {
+		t.Fatalf("inner result should be Ok(Some(fields)), got %+v", inner)
+	}
+	// second get -> already-gotten (outer Err).
+	res, _ = h.futureTrailersGet(context.Background(), []abi.Value{ftRep})
+	if !res[0].(abi.ResultValue).IsErr {
+		t.Fatal("second get should be Err (already gotten)")
+	}
+
+	// no-trailers body -> Ok(Ok(None)).
+	noRep := h.newInBodyRep(&httpIncomingBody{})
+	fres, _ := h.incomingBodyFinish(context.Background(), []abi.Value{noRep})
+	res, _ = h.futureTrailersGet(context.Background(), []abi.Value{fres[0].(uint32)})
+	if inner := res[0].(abi.ResultValue).Payload.(abi.ResultValue); inner.IsErr || inner.Payload != nil {
+		t.Fatalf("no-trailers get should be Ok(None), got %+v", inner)
+	}
+
+	// error branches
+	_, err = h.incomingBodyFinish(context.Background(), nil)
+	reqErr(t, err, "expected 1 arg")
+	_, err = h.incomingBodyFinish(context.Background(), []abi.Value{"x"})
+	reqErr(t, err, "expected uint32 rep")
+	_, err = h.incomingBodyFinish(context.Background(), []abi.Value{uint32(99999)})
+	reqErr(t, err, "does not name a live incoming-body")
+	_, err = h.futureTrailersGet(context.Background(), nil)
+	reqErr(t, err, "expected 1 arg")
+	_, err = h.futureTrailersGet(context.Background(), []abi.Value{"x"})
+	reqErr(t, err, "expected uint32 rep")
+	_, err = h.futureTrailersGet(context.Background(), []abi.Value{uint32(99999)})
+	reqErr(t, err, "does not name a live future-trailers")
+	_, err = h.futureTrailersSubscribe(context.Background(), nil)
+	reqErr(t, err, "expected 1 arg")
+	_, err = h.futureTrailersSubscribe(context.Background(), []abi.Value{"x"})
+	reqErr(t, err, "expected uint32 rep")
+	_, err = h.futureTrailersSubscribe(context.Background(), []abi.Value{uint32(99999)})
+	reqErr(t, err, "does not name a live future-trailers")
 }
 
 func TestHTTP_ResponseOutparamSet(t *testing.T) {
@@ -265,7 +345,7 @@ func TestHTTP_ServeHTTP_NoExport(t *testing.T) {
 	// An instance with an http host but no incoming-handler export fails loud.
 	in := &Instance{httpHost: newTestHTTP(), resources: newHandleTable(), instanceExports: map[string]map[string]instanceExportEntry{}}
 	u, _ := url.Parse("/x")
-	_, _, _, err := in.serveHTTP(context.Background(), "GET", u, http.Header{}, nil)
+	_, _, _, _, err := in.serveHTTP(context.Background(), "GET", u, http.Header{}, nil, nil)
 	reqErr(t, err, "does not export")
 }
 
