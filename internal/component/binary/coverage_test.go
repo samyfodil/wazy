@@ -108,12 +108,12 @@ func TestExtendedComponentFixture(t *testing.T) {
 	if !ok {
 		t.Fatalf("type[5] descriptor: got %T, want ResourceDesc", c.Types[5].Descriptor)
 	}
-	if res.Rep.Primitive != "bool" {
-		// Per `wasm-tools print`, "(rep i32)" is on the wire as the raw
-		// primvaltype byte 0x7f -- the same byte this grammar assigns to
-		// "bool" -- since i32 is not itself a distinct primvaltype code;
-		// resource reps are always encoded this way in the current spec.
-		t.Errorf("resource rep: got %q, want bool (wire byte 0x7f)", res.Rep.Primitive)
+	if res.Rep.Primitive != "i32" {
+		// "(rep i32)" is on the wire as byte 0x7f, which is i32 in the CORE
+		// valtype table (a resource rep is a core type). It is decoded with
+		// coreValtypeName, not the component primvaltype table where 0x7f
+		// would mean bool.
+		t.Errorf("resource rep: got %q, want i32", res.Rep.Primitive)
 	}
 	if res.Dtor == nil {
 		t.Error("resource dtor: got nil, want a destructor function index")

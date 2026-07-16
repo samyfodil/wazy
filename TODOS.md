@@ -18,12 +18,6 @@
 - **Context:** build an ordered type-index-space model in the decoder: interleave type-section entries, type-sort alias defs (export/core-export/outer targets), and imported types in declaration order, so an index resolves to the right entry. The instance engine's canon/export resolution then indexes that space instead of `comp.Types`. Surfaced in M4.2 (worked around by giving each import its own local resource type).
 - **Depends on / blocked by:** relates to [[the AliasDef core-sort discriminator item]] — do both before attempting a real componentized guest.
 
-## readResourcetypeDesc mislabels the rep valtype
-- **What:** `binary/descriptor.go` `readResourcetypeDesc` decodes a resource's `rep` (a core type, `i32` = byte 0x7f) through the component-level primitive table, where 0x7f means `bool` — so `ResourceDesc.Rep` prints as "bool".
-- **Why:** harmless today (the handle table and resource canons treat reps as raw uint32 at the ABI boundary and never read `ResourceDesc.Rep`), but wrong and will mislead anything that inspects resource rep types semantically.
-- **Context:** the resourcetype rep is a core valtype, not a component valtype — decode it with the core-type reader. Surfaced during M4.1.
-- **Depends on / blocked by:** none; low priority.
-
 ## Audit inherited interface bugs (http body, fs/sockets)
 - **What:** During the interface-salvage lane, give the parts carried over from `wazero-wasip2` a dedicated correctness audit: the known http-body-loss bug, and the filesystem + sockets interfaces their README flags as un-reviewed (esp. resource release).
 - **Why:** These are silent data bugs (dropped response bodies, leaked/mis-released handles) that won't surface in a hello-world demo but will bite real guests in production.

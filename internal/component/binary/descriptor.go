@@ -460,12 +460,19 @@ func readDefvaltypeDesc(buf []byte, off int, tag byte) (TypeDesc, int, error) {
 	return desc, off, err
 }
 
-// readResourcetypeDesc reads a resourcetype: rep valtype then dtor option.
+// readResourcetypeDesc reads a resourcetype: a core:valtype rep then a dtor
+// option. The rep is a CORE type (a single byte, i32=0x7f in practice), NOT a
+// component valtype -- so 0x7f here means i32, not bool.
 func readResourcetypeDesc(buf []byte, off int) (ResourceDesc, int, error) {
-	rep, off, err := readValTypeRef(buf, off)
+	if off >= len(buf) {
+		return ResourceDesc{}, off, ErrTruncatedBinary
+	}
+	repName, err := coreValtypeName(buf[off])
 	if err != nil {
 		return ResourceDesc{}, off, err
 	}
+	rep := TypeRef{Primitive: repName}
+	off++
 	if off >= len(buf) {
 		return ResourceDesc{}, off, ErrTruncatedBinary
 	}
@@ -483,6 +490,26 @@ func readResourcetypeDesc(buf []byte, off int) (ResourceDesc, int, error) {
 		return ResourceDesc{}, off, fmt.Errorf("resourcetype: invalid destructor tag %#x", dtor)
 	}
 	return ResourceDesc{Rep: rep, Dtor: dtorIdx}, off, nil
+}
+
+// coreValtypeName maps a core:valtype byte to its name. Core numeric types use
+// a different table than component primvaltypes (e.g. 0x7f is i32 in core wasm
+// but bool in the component model).
+func coreValtypeName(b byte) (string, error) {
+	switch b {
+	case 0x7f:
+		return "i32", nil
+	case 0x7e:
+		return "i64", nil
+	case 0x7d:
+		return "f32", nil
+	case 0x7c:
+		return "f64", nil
+	case 0x7b:
+		return "v128", nil
+	default:
+		return "", fmt.Errorf("resourcetype: invalid core rep valtype %#x", b)
+	}
 }
 
 // readInstanceDeclDesc consumes one instancedecl and may contribute to the

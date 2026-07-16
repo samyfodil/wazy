@@ -408,3 +408,37 @@ func TestDescriptorFuncResults(t *testing.T) {
 		t.Errorf("first named result: got %q, want x", results2.Named[0].Name)
 	}
 }
+
+// TestReadResourcetypeDesc_RepIsCoreType checks that a resourcetype's rep is
+// decoded as a CORE valtype (i32 for 0x7f), not a component valtype (where
+// 0x7f would be bool). Body = rep-valtype-byte + dtor-option.
+func TestReadResourcetypeDesc_RepIsCoreType(t *testing.T) {
+	// rep i32 (0x7f), no destructor (0x00)
+	rd, off, err := readResourcetypeDesc([]byte{0x7f, 0x00}, 0)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if rd.Rep.Primitive != "i32" {
+		t.Errorf("rep: got %q, want i32 (0x7f is i32 in core wasm, not bool)", rd.Rep.Primitive)
+	}
+	if rd.Dtor != nil {
+		t.Errorf("dtor: got %v, want none", rd.Dtor)
+	}
+	if off != 2 {
+		t.Errorf("offset: got %d, want 2", off)
+	}
+
+	// rep i32, destructor funcidx 5 (0x01 0x05)
+	rd, _, err = readResourcetypeDesc([]byte{0x7f, 0x01, 0x05}, 0)
+	if err != nil {
+		t.Fatalf("decode with dtor: %v", err)
+	}
+	if rd.Dtor == nil || *rd.Dtor != 5 {
+		t.Errorf("dtor: got %v, want 5", rd.Dtor)
+	}
+
+	// invalid core rep valtype must fail loud
+	if _, _, err := readResourcetypeDesc([]byte{0x72, 0x00}, 0); err == nil {
+		t.Error("expected error on invalid core rep valtype 0x72")
+	}
+}
