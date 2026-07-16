@@ -227,3 +227,52 @@ func TestOneComponentCallsAnotherOnOneRuntime(t *testing.T) {
 		t.Errorf("body = %q, want %q (B's output, returned through A)", got, want)
 	}
 }
+
+//go:embed testdata/real_http_request.component.wasm
+var realHTTPRequestWasm []byte
+
+// TestRealHTTP_RequestHeadersAndBody runs a real rustc wasi:http/incoming-handler
+// guest that reads a request header (incoming-request.headers + fields.get) and
+// the request body (incoming-request.consume + incoming-body.stream +
+// input-stream.blocking-read), echoing "echo=<x-echo> body=<body>". Expected
+// output is what `wasmtime serve -S cli` produced for the same fixture.
+func TestRealHTTP_RequestHeadersAndBody(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	inst, err := Instantiate(ctx, r, realHTTPRequestWasm, WithWASI(WASIConfig{EnableHTTP: true})...)
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	defer inst.Close(ctx)
+
+	cases := []struct {
+		name, method, path, echo, body, want string
+	}{
+		{"header+body", "POST", "/p", "hello-header", "the-request-body", "echo=hello-header body=the-request-body\n"},
+		{"neither", "GET", "/x", "", "", "echo=<none> body=\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hdr := http.Header{}
+			if tc.echo != "" {
+				hdr.Set("x-echo", tc.echo)
+			}
+			var body []byte
+			if tc.body != "" {
+				body = []byte(tc.body)
+			}
+			status, _, respBody, err := inst.serveHTTP(ctx, tc.method, mustURL(tc.path), hdr, body)
+			if err != nil {
+				t.Fatalf("serveHTTP: %v", err)
+			}
+			if status != 200 {
+				t.Errorf("status = %d, want 200", status)
+			}
+			if string(respBody) != tc.want {
+				t.Errorf("body = %q, want %q", respBody, tc.want)
+			}
+		})
+	}
+}

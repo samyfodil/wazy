@@ -40,6 +40,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 
@@ -84,9 +85,11 @@ var httpMethodCases = []string{
 // httpIncomingRequest is the host state behind an incoming-request resource:
 // the inbound request serveHTTP synthesized for the guest to read.
 type httpIncomingRequest struct {
-	method  string // uppercase HTTP method (e.g. "GET")
-	pathQ   string // path plus "?"+rawquery, e.g. "/hello?x=1"
-	headers http.Header
+	method   string // uppercase HTTP method (e.g. "GET")
+	pathQ    string // path plus "?"+rawquery, e.g. "/hello?x=1"
+	headers  http.Header
+	body     []byte
+	consumed bool // incoming-request.consume may be called only once
 }
 
 // httpFields is the host state behind a fields resource: an ordered,
@@ -332,6 +335,116 @@ func (h *wasiHTTP) incomingRequestPathWithQuery(_ context.Context, args []abi.Va
 	}
 	// option<string>: Some(path) is the string itself; None is nil.
 	return []abi.Value{req.pathQ}, nil
+}
+
+// incomingRequestHeaders returns the request's headers as an own<fields>
+// (wasi:http/types `headers` = fields). The guest reads them with fields.get.
+func (h *wasiHTTP) incomingRequestHeaders(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("[method]incoming-request.headers: expected 1 arg (self), got %d", len(args))
+	}
+	rep, ok := args[0].(uint32)
+	if !ok {
+		return nil, fmt.Errorf("[method]incoming-request.headers: self: expected uint32 rep, got %T", args[0])
+	}
+	h.mu.Lock()
+	req, ok := h.incoming[rep]
+	h.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("[method]incoming-request.headers: rep %d does not name a live incoming-request", rep)
+	}
+	f := &httpFields{}
+	// http.Header is a map, so its iteration order is non-deterministic; sort by
+	// header name (canonical) so fields.get and any entries() are stable. Values
+	// within a name keep their order.
+	names := make([]string, 0, len(req.headers))
+	for name := range req.headers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		for _, v := range req.headers[name] {
+			f.names = append(f.names, strings.ToLower(name))
+			f.values = append(f.values, []byte(v))
+		}
+	}
+	rep2 := h.newFieldsRep(f)
+	// Top-level own<fields> result: allocHandleResult wraps the bare rep.
+	return []abi.Value{rep2}, nil
+}
+
+// incomingRequestConsume returns the request body as an own<incoming-body>
+// (result<own<incoming-body>>). May be called only once. The returned body is
+// read via incoming-body.stream + input-stream.blocking-read (shared with the
+// outgoing/client path).
+func (h *wasiHTTP) incomingRequestConsume(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("[method]incoming-request.consume: expected 1 arg (self), got %d", len(args))
+	}
+	rep, ok := args[0].(uint32)
+	if !ok {
+		return nil, fmt.Errorf("[method]incoming-request.consume: self: expected uint32 rep, got %T", args[0])
+	}
+	res, err := h.getResources()
+	if err != nil {
+		return nil, err
+	}
+	h.mu.Lock()
+	req, ok := h.incoming[rep]
+	if !ok {
+		h.mu.Unlock()
+		return nil, fmt.Errorf("[method]incoming-request.consume: rep %d does not name a live incoming-request", rep)
+	}
+	if req.consumed {
+		h.mu.Unlock()
+		// result<own<incoming-body>>: the body can only be taken once.
+		return []abi.Value{abi.ResultValue{IsErr: true}}, nil
+	}
+	req.consumed = true
+	body := req.body
+	h.mu.Unlock()
+	bodyRep := h.newInBodyRep(&httpIncomingBody{body: body})
+	handle := res.NewOwn(wasiHTTPIncomingBodyResType, bodyRep)
+	return []abi.Value{abi.ResultValue{IsErr: false, Payload: handle}}, nil
+}
+
+func (h *wasiHTTP) fieldsGet(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("[method]fields.get: expected 2 args (self, name), got %d", len(args))
+	}
+	rep, ok := args[0].(uint32)
+	if !ok {
+		return nil, fmt.Errorf("[method]fields.get: self: expected uint32 rep, got %T", args[0])
+	}
+	name, ok := args[1].(string)
+	if !ok {
+		return nil, fmt.Errorf("[method]fields.get: name: expected string, got %T", args[1])
+	}
+	h.mu.Lock()
+	f, ok := h.fields[rep]
+	h.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("[method]fields.get: rep %d does not name a live fields", rep)
+	}
+	// list<field-value> = list<list<u8>>: every value stored under name (header
+	// names compare case-insensitively).
+	lname := strings.ToLower(name)
+	var out []abi.Value
+	for i, n := range f.names {
+		if strings.ToLower(n) == lname {
+			out = append(out, bytesToU8List(f.values[i]))
+		}
+	}
+	return []abi.Value{out}, nil
+}
+
+// bytesToU8List renders b as a lowered list<u8> (each byte a uint32 element).
+func bytesToU8List(b []byte) []abi.Value {
+	out := make([]abi.Value, len(b))
+	for i, x := range b {
+		out[i] = uint32(x)
+	}
+	return out
 }
 
 func (h *wasiHTTP) fieldsConstructor(_ context.Context, args []abi.Value) ([]abi.Value, error) {
@@ -713,6 +826,37 @@ func httpFieldsConstructorSig() (binary.FuncDesc, abi.Resolver) {
 	return binary.FuncDesc{Results: binary.FuncResults{Unnamed: &ownRef}}, tbl.resolver()
 }
 
+func httpIncomingRequestHeadersSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiHTTPIncomingRequestResType})
+	ownRef := tbl.add(binary.OwnDesc{ResourceType: wasiHTTPFieldsResType})
+	return binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}},
+		Results: binary.FuncResults{Unnamed: &ownRef},
+	}, tbl.resolver()
+}
+
+func httpIncomingRequestConsumeSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiHTTPIncomingRequestResType})
+	okRef := tbl.add(binary.OwnDesc{ResourceType: wasiHTTPIncomingBodyResType})
+	resRef := tbl.add(binary.ResultDesc{Ok: &okRef})
+	return binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}},
+		Results: binary.FuncResults{Unnamed: &resRef},
+	}, tbl.resolver()
+}
+
+func httpFieldsGetSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiHTTPFieldsResType})
+	listRef := tbl.add(binary.ListDesc{Element: tbl.add(binary.ListDesc{Element: binary.TypeRef{Primitive: "u8"}})})
+	return binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}, {Name: "name", Type: binary.TypeRef{Primitive: "string"}}},
+		Results: binary.FuncResults{Unnamed: &listRef},
+	}, tbl.resolver()
+}
+
 func httpFieldsSetSig() (binary.FuncDesc, abi.Resolver) {
 	tbl := &typeTable{}
 	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiHTTPFieldsResType})
@@ -817,6 +961,9 @@ func wasiHTTPOptions(h *wasiHTTP) []Option {
 	writeFD, writeR := httpOutgoingBodyWriteSig()
 	finishFD, finishR := httpOutgoingBodyFinishSig()
 	setFD, setR := httpResponseOutparamSetSig()
+	reqHeadersFD, reqHeadersR := httpIncomingRequestHeadersSig()
+	reqConsumeFD, reqConsumeR := httpIncomingRequestConsumeSig()
+	fieldsGetFD, fieldsGetR := httpFieldsGetSig()
 
 	return []Option{
 		withResourcesHook(func(t *handleTable) {
@@ -832,7 +979,10 @@ func wasiHTTPOptions(h *wasiHTTP) []Option {
 
 		withImportCustom(wasiIfaceHTTPTypes, "[method]incoming-request.method", h.incomingRequestMethod, methodFD, methodR),
 		withImportCustom(wasiIfaceHTTPTypes, "[method]incoming-request.path-with-query", h.incomingRequestPathWithQuery, pathFD, pathR),
+		withImportCustom(wasiIfaceHTTPTypes, "[method]incoming-request.headers", h.incomingRequestHeaders, reqHeadersFD, reqHeadersR),
+		withImportCustom(wasiIfaceHTTPTypes, "[method]incoming-request.consume", h.incomingRequestConsume, reqConsumeFD, reqConsumeR),
 		withImportCustom(wasiIfaceHTTPTypes, "[constructor]fields", h.fieldsConstructor, fieldsCtorFD, fieldsCtorR),
+		withImportCustom(wasiIfaceHTTPTypes, "[method]fields.get", h.fieldsGet, fieldsGetFD, fieldsGetR),
 		withImportCustom(wasiIfaceHTTPTypes, "[method]fields.set", h.fieldsSet, fieldsSetFD, fieldsSetR),
 		withImportCustom(wasiIfaceHTTPTypes, "[constructor]outgoing-response", h.outgoingResponseConstructor, respCtorFD, respCtorR),
 		withImportCustom(wasiIfaceHTTPTypes, "[method]outgoing-response.set-status-code", h.outgoingResponseSetStatusCode, statusFD, statusR),
@@ -894,7 +1044,7 @@ func (in *Instance) serveHTTP(ctx context.Context, method string, u *url.URL, he
 	if u.RawQuery != "" {
 		pathQ += "?" + u.RawQuery
 	}
-	req := &httpIncomingRequest{method: strings.ToUpper(method), pathQ: pathQ, headers: headers.Clone()}
+	req := &httpIncomingRequest{method: strings.ToUpper(method), pathQ: pathQ, headers: headers.Clone(), body: reqBody}
 	reqRep := in.httpHost.newIncomingRep(req)
 	reqHandle := in.resources.NewOwn(wasiHTTPIncomingRequestResType, reqRep)
 

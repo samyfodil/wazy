@@ -577,3 +577,85 @@ func TestHTTP_PollNoOps(t *testing.T) {
 		t.Fatal("expected type error")
 	}
 }
+
+func TestHTTP_IncomingRequestHeaders(t *testing.T) {
+	h := newTestHTTP()
+	hdr := http.Header{}
+	hdr.Add("X-Echo", "v1")
+	hdr.Add("X-Echo", "v2")
+	hdr.Set("A-Header", "a")
+	rep := h.newIncomingRep(&httpIncomingRequest{headers: hdr})
+	res, err := h.incomingRequestHeaders(context.Background(), []abi.Value{rep})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fRep := res[0].(uint32)
+	f := h.fields[fRep]
+	// sorted by name; x-echo keeps v1 then v2; names lower-cased.
+	got := map[string][]string{}
+	for i, n := range f.names {
+		got[n] = append(got[n], string(f.values[i]))
+	}
+	if len(got["x-echo"]) != 2 || got["x-echo"][0] != "v1" || got["x-echo"][1] != "v2" {
+		t.Fatalf("x-echo = %v", got["x-echo"])
+	}
+	if got["a-header"][0] != "a" {
+		t.Fatalf("a-header = %v", got["a-header"])
+	}
+	_, err = h.incomingRequestHeaders(context.Background(), nil)
+	reqErr(t, err, "expected 1 arg")
+	_, err = h.incomingRequestHeaders(context.Background(), []abi.Value{"x"})
+	reqErr(t, err, "expected uint32 rep")
+	_, err = h.incomingRequestHeaders(context.Background(), []abi.Value{uint32(999)})
+	reqErr(t, err, "does not name a live incoming-request")
+}
+
+func TestHTTP_IncomingRequestConsume(t *testing.T) {
+	h := newTestHTTP()
+	rep := h.newIncomingRep(&httpIncomingRequest{body: []byte("hi")})
+	res, err := h.incomingRequestConsume(context.Background(), []abi.Value{rep})
+	if err != nil || res[0].(abi.ResultValue).IsErr {
+		t.Fatalf("consume = %v, %v", res, err)
+	}
+	// second consume -> Err (body already taken)
+	res, _ = h.incomingRequestConsume(context.Background(), []abi.Value{rep})
+	if !res[0].(abi.ResultValue).IsErr {
+		t.Fatal("second consume should be Err")
+	}
+	_, err = h.incomingRequestConsume(context.Background(), nil)
+	reqErr(t, err, "expected 1 arg")
+	_, err = h.incomingRequestConsume(context.Background(), []abi.Value{"x"})
+	reqErr(t, err, "expected uint32 rep")
+	_, err = h.incomingRequestConsume(context.Background(), []abi.Value{uint32(999)})
+	reqErr(t, err, "does not name a live incoming-request")
+}
+
+func TestHTTP_FieldsGet(t *testing.T) {
+	h := newTestHTTP()
+	rep := h.newFieldsRep(&httpFields{names: []string{"x-a", "x-a", "x-b"}, values: [][]byte{[]byte("1"), []byte("2"), []byte("3")}})
+	// case-insensitive; multiple values in order.
+	res, err := h.fieldsGet(context.Background(), []abi.Value{rep, "X-A"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := res[0].([]abi.Value)
+	if len(list) != 2 {
+		t.Fatalf("x-a values = %d, want 2", len(list))
+	}
+	if b, _ := wasiBytesFromList(list[0]); string(b) != "1" {
+		t.Fatalf("first value = %q", b)
+	}
+	// missing -> empty list
+	res, _ = h.fieldsGet(context.Background(), []abi.Value{rep, "nope"})
+	if len(res[0].([]abi.Value)) != 0 {
+		t.Fatal("missing header should be empty list")
+	}
+	_, err = h.fieldsGet(context.Background(), []abi.Value{rep})
+	reqErr(t, err, "expected 2 args")
+	_, err = h.fieldsGet(context.Background(), []abi.Value{"x", "n"})
+	reqErr(t, err, "self: expected uint32 rep")
+	_, err = h.fieldsGet(context.Background(), []abi.Value{rep, 7})
+	reqErr(t, err, "name: expected string")
+	_, err = h.fieldsGet(context.Background(), []abi.Value{uint32(999), "n"})
+	reqErr(t, err, "does not name a live fields")
+}
