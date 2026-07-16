@@ -15,27 +15,33 @@
   instance's func re-exposes that sub-Instance's boundExport. Scoped via a
   func-alias-to-local-instance reachability check so WASI/shim components are
   untouched. `binary.Component.Bytes` + `Instance.subInstances` added.
-- **DONE (cross-component resources, commit e866814):** `resources/multiple-
-  resources.wast` passes (run → 42). A resource DEFINED in one nested component
-  and IMPORTED + used (created, borrowed, dropped with its destructor) by a
-  sibling has one identity across both. Three coupled pieces, all gated behind
-  the composition path (`resCanon`/`sharedResources` nil → prior behavior):
-  (1) composed sub-instances share ONE handle table, so a handle from the
-  definer is directly valid in the importer; (2) a per-component canonicalizer
-  (`resCanon` = base + `Component.ResourceDefIndex`, or the sibling's global id
-  for an imported resource) maps each component's differing local resource
-  indices to one shared-table tag — threaded into the resource canons and
-  `resolveHandleArg`; (3) the definer's destructor is resolved at instantiation
-  (`Instance.resourceDtors`), registered on the shared table by global id, and
-  run by canon `resource.drop` (which previously ran no destructor). A delegating
-  import presents resources as opaque u32 (`resourcesToU32FD`) so handles pass
-  through untouched. See `composition.go` and [[wazy-wast-conformance]].
-- **REMAINING (further wasmtime/resources sub-features):** that suite mixes
-  patterns beyond a guest-defined resource: HOST-provided imported-resource
-  *constructors* (the embedder supplies a resource impl the guest imports — a
-  `[constructor]resource1` trap stub today), component (not instance)
-  instantiate-args, and exporting a canon-produced func (`[constructor]t`).
-  Each is its own scoped feature; none is an ABI bug.
+- **DONE (cross-component resources, commits e866814 + 82ce821):** `resources/
+  multiple-resources.wast` passes (run → 42). A resource DEFINED in one nested
+  component and IMPORTED + used (created, borrowed, dropped with its destructor)
+  by a sibling works, with the spec-correct per-instance model:
+  - Each sub-instance has its OWN handle table (two instances of one component
+    number handles independently — wasmtime/resources.wast res.16). A resource
+    CROSSING a delegating import is transferred by REP (lift_own/lower_own): the
+    importer wrapper reduces its handle to the rep, the shim re-mints in the
+    provider's table for the provider call (`repToProviderHandle`), provider
+    results reduce back to reps (`providerHandleToRep`).
+  - The delegating import re-points the provider's signature to the IMPORTER's
+    own resource type indices (`translateResourceFD` synthesizes own<importerIdx>
+    / borrow<importerIdx> + a resolver), so the importer mints under its own
+    index — consistent with its resource.drop.
+  - `Component.ResourceDefIndex` reduces a resource's deftype/export-alias
+    indices to one tag (`resCanon`). The definer's dtor is resolved at
+    instantiation (`Instance.resourceDtors`) and registered on the IMPORTER's
+    table under the tag its resource.drop uses (`cfg.importedResDtors`); canon
+    resource.drop runs it (previously ran none).
+  - handleTable gained the reference Table's free list (dropped index reused
+    before the counter grows). See `composition.go` + [[wazy-wast-conformance]].
+- **REMAINING (further wasmtime/resources sub-features, each its own feature):**
+  HOST-provided imported resources — a component does `import "host" (instance
+  ...)` exporting `resource1` + `[constructor]resource1` + `[static]resource1.
+  assert`, which the EMBEDDER must supply (needs a WithResource-style host API +
+  the specific test resource); component (not instance) instantiate-args; and
+  exporting a canon-produced func (`[constructor]t`). None is an ABI bug.
 - **Also deeper fused sub-features** (each skips a `fused.wast` module, logged):
   pass-through shim with empty export names, >16 flat params on an imported func
   (whole-param spilling for a lowered import), func/type instantiate-args,
