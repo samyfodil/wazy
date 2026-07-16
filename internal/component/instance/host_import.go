@@ -3,6 +3,7 @@ package instance
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
@@ -51,6 +52,21 @@ type importKey struct {
 	name  string
 }
 
+// mkImportKey builds an importKey with the interface name's "@x.y.z" version
+// suffix stripped, so host-import matching tolerates the wasi 0.2.x patch
+// version a guest was built against. wazy registers one implementation per
+// interface; a guest built with a newer wasi crate imports e.g.
+// "wasi:io/streams@0.2.12" where the older fixtures import "@0.2.3", but the
+// 0.2.x ABI for a given interface is frozen, so they resolve to the same impl.
+// All importKey construction (both registration and lookup) goes through here
+// so the two sides always agree.
+func mkImportKey(iface, name string) importKey {
+	if i := strings.IndexByte(iface, '@'); i >= 0 {
+		iface = iface[:i]
+	}
+	return importKey{iface: iface, name: name}
+}
+
 // hostImport is a single registered import: its Go implementation plus the
 // WIT parameter and result types the caller declared for it. The types are
 // supplied by the caller because the binary decoder does not retain the func
@@ -87,7 +103,7 @@ func newConfig(opts []Option) *config {
 // binary.PrimitiveDesc{Prim: "string"}).
 func WithImport(iface, name string, fn HostFunc, params, results []binary.TypeDesc) Option {
 	return func(c *config) {
-		c.imports[importKey{iface: iface, name: name}] = &hostImport{fn: fn, params: params, results: results}
+		c.imports[mkImportKey(iface, name)] = &hostImport{fn: fn, params: params, results: results}
 	}
 }
 
@@ -189,7 +205,7 @@ func runResourceHooks(cfg *config, resources *handleTable) {
 // unchanged -- exactly today's existing, working behavior.
 func withResourceTag(iface, name string, tag uint32) Option {
 	return func(c *config) {
-		c.resourceTags[importKey{iface: iface, name: name}] = tag
+		c.resourceTags[mkImportKey(iface, name)] = tag
 	}
 }
 
@@ -202,7 +218,7 @@ func effectiveResourceTypeIdx(comp *binary.Component, cfg *config, typeIdx uint3
 	if !ok {
 		return typeIdx
 	}
-	if tag, ok := cfg.resourceTags[importKey{iface: iface, name: name}]; ok {
+	if tag, ok := cfg.resourceTags[mkImportKey(iface, name)]; ok {
 		return tag
 	}
 	return typeIdx
@@ -482,7 +498,7 @@ func resolveLoweredImport(comp *binary.Component, cfg *config, resources *handle
 	if err != nil {
 		return hostFuncDef{}, fmt.Errorf("component/instance: inline export %q: %w", name, err)
 	}
-	hi, ok := cfg.imports[importKey{iface: iface, name: at.name}]
+	hi, ok := cfg.imports[mkImportKey(iface, at.name)]
 	if !ok {
 		return hostFuncDef{}, fmt.Errorf("component/instance: no host implementation provided for import %q func %q (use WithImport)", iface, at.name)
 	}

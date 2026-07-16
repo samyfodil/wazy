@@ -417,6 +417,28 @@ func TestModuleNameFor(t *testing.T) {
 	}
 }
 
+// TestMkImportKeyVersionTolerant proves host-import matching ignores the wasi
+// 0.2.x patch version: a guest built against @0.2.12 resolves against an impl
+// registered under @0.2.3 (or any other patch), and an unversioned name is
+// left untouched.
+func TestMkImportKeyVersionTolerant(t *testing.T) {
+	a := mkImportKey("wasi:io/streams@0.2.3", "write")
+	b := mkImportKey("wasi:io/streams@0.2.12", "write")
+	if a != b {
+		t.Fatalf("version-tolerant match failed: %v != %v", a, b)
+	}
+	if a.iface != "wasi:io/streams" {
+		t.Fatalf("version not stripped: %q", a.iface)
+	}
+	if got := mkImportKey("test:pkg/host", "log"); got.iface != "test:pkg/host" {
+		t.Fatalf("unversioned name altered: %q", got.iface)
+	}
+	// Different interface or func must still differ.
+	if mkImportKey("wasi:io/streams@0.2.3", "write") == mkImportKey("wasi:io/streams@0.2.3", "read") {
+		t.Fatal("distinct func names collapsed")
+	}
+}
+
 func TestImportInterfaceName(t *testing.T) {
 	comp := &binary.Component{Imports: []binary.Import{
 		{Name: "test:pkg/host", ExternType: 0x05},

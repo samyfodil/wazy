@@ -28,7 +28,7 @@ func wasiFSConfig(t *testing.T, cfg WASIConfig) (*config, *handleTable) {
 
 func wasiFSFn(t *testing.T, c *config, iface, name string) HostFunc {
 	t.Helper()
-	hi, ok := c.imports[importKey{iface: iface, name: name}]
+	hi, ok := c.imports[mkImportKey(iface, name)]
 	if !ok {
 		t.Fatalf("WithWASI did not register %q %q", iface, name)
 	}

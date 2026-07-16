@@ -27,7 +27,7 @@ func wasiHostFunc(t *testing.T, cfg WASIConfig, iface, name string) HostFunc {
 	// helper -- extracting a HostFunc directly, without instantiating a
 	// guest -- otherwise would not.
 	runResourceHooks(c, newHandleTable())
-	hi, ok := c.imports[importKey{iface: iface, name: name}]
+	hi, ok := c.imports[mkImportKey(iface, name)]
 	if !ok {
 		t.Fatalf("WithWASI did not register %q %q", iface, name)
 	}

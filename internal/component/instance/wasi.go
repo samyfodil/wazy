@@ -705,6 +705,6 @@ func wasiGetDirectoriesSig() (binary.FuncDesc, abi.Resolver) {
 // Used only within this package by WithWASI.
 func withImportCustom(iface, name string, fn HostFunc, fd binary.FuncDesc, resolve abi.Resolver) Option {
 	return func(c *config) {
-		c.imports[importKey{iface: iface, name: name}] = &hostImport{fn: fn, customFD: &fd, customResolve: resolve}
+		c.imports[mkImportKey(iface, name)] = &hostImport{fn: fn, customFD: &fd, customResolve: resolve}
 	}
 }

@@ -544,7 +544,7 @@ func buildCanonHostModule(
 		}
 		wasiCall = iface + "." + at.name
 
-		if hi, ok := cfg.imports[importKey{iface: iface, name: at.name}]; ok {
+		if hi, ok := cfg.imports[mkImportKey(iface, at.name)]; ok {
 			memMod, reallocFn, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
 			if merr != nil {
 				return nil, "", nil, nil, "", fmt.Errorf("import %q func %q: %w", iface, at.name, merr)
