@@ -17,7 +17,10 @@
 - **Why:** we implement the interface methods real guests actually call; the rest are fail-loud trap-stubs. Closing these widens the set of guests that run out of the box.
 - **Context:** same pattern as the existing sockets/fs work — discover the calls a real guest makes, implement against a Go backing, test behaviorally / vs wasmtime.
 
-## Two different components can't be live on one Runtime at once
-- **What:** Both components default their synthesized root core-module name to `wazy:component/core0`, so instantiating a second distinct component on the same `wazy.Runtime` collides ("already instantiated").
-- **Why:** fine for one-component-per-runtime (the normal case, and what `CompileCache` reuse targets), but blocks multi-component / multi-tenant reuse of a single Runtime.
-- **Context:** derive the synthesized module name from the component identity (bytes hash) instead of a fixed constant. Surfaced during the compile-cache perf work. Also note: `CompileCache`↔`Runtime` pairing is caller-enforced (documented, not checked).
+## Per-call realloc closure alloc (deferred — low ROI)
+- **What:** `invoke` builds a fresh `abi.Realloc` closure (capturing `ctx`) on every call. It stays on the stack for calls that never touch memory (CallAdd), but escapes to the heap on any string/list parameter (one alloc/call, e.g. CallGreet).
+- **Why deferred:** killing it means threading `ctx` through `abi.Realloc` and ~20 store/lower functions in abi (memory.go + flat.go) so the closure can be built once at bind time. That's a wide signature sweep for a single alloc on the string path — poor ratio next to the two wins already taken (lift-iterator pool + top-level-primitive fast path: CallAdd 5→2 allocs, ~245→177 ns/op). Revisit only if string-heavy call profiles demand it.
+
+## Two live instances of the *same* component on one Runtime (minor)
+- **What:** synthesized names are now namespaced per component (bytes hash, `synthNamePrefix`), so *different* components coexist on one Runtime. But two *live* instances of the *same* component still collide on identical synthesized names.
+- **Why:** the documented one-component-at-a-time reuse the `CompileCache` targets; rare in practice. Would need a per-instantiation salt (counter/uuid) on top of the bytes hash, kept compatible with the compile cache. Also note: `CompileCache`↔`Runtime` pairing is caller-enforced (documented, not checked).
