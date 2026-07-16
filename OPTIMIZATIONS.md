@@ -154,6 +154,19 @@ memory without copying; fd table lookup is lock-free inlined bitmask; WASI binds
 
 ---
 
+## Component runtime (`internal/component`)
+
+The WASI 0.2 component layer sits above the core engine; its hot paths are
+Instantiate (serverless: a fresh instance per request) and per-call marshalling
+(long-lived instance). Wins here are measured by **allocs/op** (deterministic,
+load-independent) on `internal/component/instance` `BenchmarkInstantiate*` /
+`BenchmarkCall*`.
+
+- **CM1. CompileCache only cached compiled core modules — the component binary was re-parsed every Instantiate** — **RESOLVED.** `binary.Decode` ran on every `Instantiate`, and `finalizeBoundExport` re-flattened/re-resolved every export's ABI, even though both are pure functions of the immutable component. CompileCache now also caches (a) the decoded `*binary.Component` keyed by the component bytes (`getOrDecode`; hit path uses the `map[string(byteslice)]` no-copy idiom so a hit allocates nothing, crucial for tens-of-KB components), and (b) per-export ABI metadata (`*boundExportABI`: flatten + type-resolution) keyed by the shared comp pointer + func index (`abiFor`). Both are immutable and shared read-only across all Instances (and concurrent instantiations — `-race` clean). Split `finalizeBoundExport` into the pure `computeBoundExportABI` (cacheable) + per-instance handle resolution. **Measured** (allocs/op, deterministic): `InstantiateCached` **199 → 79 (−60%)**; `InstantiateHelloCached` 3588 → 3037, −66 KB/op. The residual instantiate allocs are inherent per-instance engine work (`Store.instantiate`, `FunctionInstanceReference`, `NewFunction`, `buildGlobals`, `moduleConfig.clone`, per-instance export index) — each instance genuinely needs its own module instance/globals/function refs. Gated on a `CompileCache` (no cache ⇒ decode + compute fresh, unchanged). Oracle + 35/35 conformance green.
+- **CM2. Per-call `abi.Realloc` closure escapes on string/list params** (`instance.go` `reallocOfFunc`) — the closure captures per-call `ctx`, so it heap-allocates once per call that touches memory (e.g. CallGreet). **DEFERRED (poor ROI).** Killing it means either threading `ctx` through `abi.Realloc` + ~20 store/lower functions (a wide signature sweep for 1 alloc), or binding the closure at bind time with a fixed `ctx` (correctness depends on the engine not reading `ctx` during a `cabi_realloc` call — plausible but unverified). 1 of CallGreet's 8 allocs; the rest (result string, param string, engine result slice, caller `[]abi.Value`) are largely semantically required. Revisit only if a string-heavy call profile demands it.
+
+---
+
 ## Suggested attack order
 
 1. **Cheap + certain, no design work**: A2 (bufio, one line), R3 (maps.Clone guard), I4/A7 (snapshotter latch), H5 (defer split), W11, C13 (`clear()`), gofunc `reflect.ValueOf` swap.
