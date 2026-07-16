@@ -284,6 +284,7 @@ func decodeComponent(buf []byte) (*Component, error) {
 	}
 
 	c.Decoded = true
+	c.Bytes = buf
 	return c, nil
 }
 

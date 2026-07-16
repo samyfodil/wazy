@@ -486,20 +486,20 @@ var errBoom = errors.New("boom")
 
 func TestBindFuncExportGraph_ComponentFuncError(t *testing.T) {
 	componentFunc := func(uint32) (bool, int, aliasTarget, error) { return false, 0, aliasTarget{}, errBoom }
-	_, err := bindFuncExportGraph(&binary.Component{}, 0, componentFunc, nil, nil, "x", nil)
+	_, err := bindFuncExportGraph(&binary.Component{}, 0, componentFunc, nil, nil, "x", nil, nil)
 	requireErrContains(t, err, "boom")
 }
 
 func TestBindFuncExportGraph_ResolvesToImport(t *testing.T) {
 	componentFunc := func(uint32) (bool, int, aliasTarget, error) { return false, 0, aliasTarget{}, nil }
-	_, err := bindFuncExportGraph(&binary.Component{}, 0, componentFunc, nil, nil, "x", nil)
+	_, err := bindFuncExportGraph(&binary.Component{}, 0, componentFunc, nil, nil, "x", nil, nil)
 	requireErrContains(t, err, "resolves to an imported func")
 }
 
 func TestBindFuncExportGraph_ResolveTypeError(t *testing.T) {
 	comp := &binary.Component{Canons: []binary.Canon{{Kind: 0x00, TypeIdx: 99}}}
 	componentFunc := func(uint32) (bool, int, aliasTarget, error) { return true, 0, aliasTarget{}, nil }
-	_, err := bindFuncExportGraph(comp, 0, componentFunc, nil, nil, "x", nil)
+	_, err := bindFuncExportGraph(comp, 0, componentFunc, nil, nil, "x", nil, nil)
 	requireErrContains(t, err, "lift references type")
 }
 
@@ -509,7 +509,7 @@ func TestBindFuncExportGraph_NotFuncType(t *testing.T) {
 		Canons: []binary.Canon{{Kind: 0x00, TypeIdx: 0}},
 	}
 	componentFunc := func(uint32) (bool, int, aliasTarget, error) { return true, 0, aliasTarget{}, nil }
-	_, err := bindFuncExportGraph(comp, 0, componentFunc, nil, nil, "x", nil)
+	_, err := bindFuncExportGraph(comp, 0, componentFunc, nil, nil, "x", nil, nil)
 	requireErrContains(t, err, "is not a func type")
 }
 
@@ -521,7 +521,7 @@ func TestBindFuncExportGraph_CoreFuncTargetError(t *testing.T) {
 	}
 	componentFunc := func(uint32) (bool, int, aliasTarget, error) { return true, 0, aliasTarget{}, nil }
 	coreFuncTarget := func(int) (api.Module, string, error) { return nil, "", errBoom }
-	_, err := bindFuncExportGraph(comp, 0, componentFunc, coreFuncTarget, nil, "x", nil)
+	_, err := bindFuncExportGraph(comp, 0, componentFunc, coreFuncTarget, nil, "x", nil, nil)
 	requireErrContains(t, err, "boom")
 }
 
@@ -540,7 +540,7 @@ func TestBindFuncExportGraph_PostReturnError(t *testing.T) {
 		}
 		return nil, "", errBoom // the post-return lookup
 	}
-	_, err := bindFuncExportGraph(comp, 0, componentFunc, coreFuncTarget, nil, "x", nil)
+	_, err := bindFuncExportGraph(comp, 0, componentFunc, coreFuncTarget, nil, "x", nil, nil)
 	requireErrContains(t, err, "boom")
 }
 

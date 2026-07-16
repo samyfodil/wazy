@@ -39,7 +39,7 @@ func TestWastConformance(t *testing.T) {
 	// wasmtime/fused (nested-component composition / fused adapters that
 	// re-export a nested instance's func), wasmtime/resources (host-provided
 	// imported-resource constructors), and linking/* (multi-component linking).
-	for _, suite := range []string{"concat", "strings", "types", "simple"} {
+	for _, suite := range []string{"concat", "strings", "types", "simple", "fused"} {
 		t.Run(suite, func(t *testing.T) {
 			runWastSuite(t, suite)
 		})

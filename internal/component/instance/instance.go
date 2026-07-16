@@ -151,6 +151,13 @@ type Instance struct {
 	// modules and synthetic host modules), closed in reverse order by Close.
 	closers []api.Module
 
+	// subInstances are recursively-instantiated nested component instances
+	// (comp.Instances) whose exports this component links to or re-exports --
+	// the fused-adapter / nested-composition shape. They own their own core
+	// modules, so Close must close them too (their boundExports we re-expose
+	// stay valid until then). Empty for a flat single-component instance.
+	subInstances []*Instance
+
 	// resources is this instance's resource handle table (see resource.go),
 	// shared by every resource type the instance declares or imports. It is
 	// always non-nil, even for instances with no resource canons, so callers
@@ -1320,6 +1327,11 @@ func (in *Instance) Close(ctx context.Context) error {
 	var firstErr error
 	for i := len(in.closers) - 1; i >= 0; i-- {
 		if err := in.closers[i].Close(ctx); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	for _, sub := range in.subInstances {
+		if err := sub.Close(ctx); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

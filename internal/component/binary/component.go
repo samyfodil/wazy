@@ -84,6 +84,12 @@ type Component struct {
 	// Used for sections we don't fully decode yet (e.g., core-type, component decls).
 	RawSections []RawSection
 
+	// Bytes is the complete binary this component was decoded from (the whole
+	// buffer for a top-level component; the section-4 sub-slice for a nested
+	// one). CoreModule.Offset/Size index into it, so recursively instantiating
+	// a NestedComponents entry needs its own Bytes, not the parent's.
+	Bytes []byte
+
 	// Decoded is set true by Decode. It distinguishes a component that went
 	// through the binary decoder (whose CoreFuncSpace/ComponentFuncSpace/
 	// TypeSpace are authoritative -- an empty CoreFuncSpace genuinely means no

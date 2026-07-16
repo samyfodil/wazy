@@ -3,6 +3,7 @@ package instance
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
@@ -390,8 +391,22 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		}
 	}
 
-	exports, err := bindImportExportsGraph(comp, componentFunc, coreFuncTarget, resolve, cfg.compileCache)
+	// Recursively instantiate any nested component instances (comp.Instances,
+	// the fused-adapter / nested-composition shape) and link siblings, before
+	// binding exports -- an outer export may alias a nested instance's export.
+	compInstances, subInstances, err := instantiateNestedInstances(ctx, r, comp, cfg)
 	if err != nil {
+		return fail(err)
+	}
+	closeSubs := func() {
+		for _, s := range subInstances {
+			s.Close(ctx) //nolint:errcheck // best-effort cleanup on an error path
+		}
+	}
+
+	exports, err := bindImportExportsGraph(comp, componentFunc, coreFuncTarget, resolve, cfg.compileCache, compInstances)
+	if err != nil {
+		closeSubs()
 		return fail(err)
 	}
 
@@ -400,6 +415,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		exports:         exports,
 		instanceExports: buildInstanceExportIndex(exports),
 		closers:         closers,
+		subInstances:    subInstances,
 		resources:       resources,
 		coreModuleCount: coreModuleCount,
 		wasiCalls:       wasiCalls,
@@ -411,6 +427,136 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			return !imported
 		},
 	}, nil
+}
+
+// instantiateNestedInstances recursively instantiates comp.Instances -- the
+// nested-component-composition shape, where one component binary declares
+// nested component *definitions*, instantiates them, and links a sibling's
+// export into a later sibling's import (the fused-adapter test shape). It
+// returns a map from component-instance index (imported instances first, then
+// comp.Instances) to the sub-Instance, plus the sub-Instances in creation order
+// for Close.
+//
+// The key reuse: a sibling's lifted export is exactly a host import for the
+// importer, so it is wired in as a delegating hostImport and the existing
+// canon-lower/buildHostWrapper path lowers calls to it unchanged. Kind 0x01
+// (inline-export) instances are the pass-through-shim shape handled in
+// bindInstanceExportGraph, not here.
+func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config) (map[int]*Instance, []*Instance, error) {
+	if len(comp.Instances) == 0 {
+		return nil, nil, nil
+	}
+	numImported := 0
+	for _, im := range comp.Imports {
+		if im.ExternType == 0x05 { // instance
+			numImported++
+		}
+	}
+
+	// Only the composition shape is handled here: a func alias (Sort 0x01,
+	// export) targeting a LOCAL component instance (one of comp.Instances,
+	// index >= numImported) means that instance's export is re-exported as a
+	// func and must be instantiated. A nested instance referenced only by an
+	// instance export stays with bindInstanceExportGraph (the shim path, which
+	// rejects a genuinely-complex shim). Absent any such alias, do nothing --
+	// preserving the exact prior behavior for every WASI/shim component.
+	needed := make(map[int]bool)
+	for _, al := range comp.Aliases {
+		if al.Sort == 0x01 && al.TargetKind == 0x00 && int(al.InstanceIdx) >= numImported {
+			needed[int(al.InstanceIdx)] = true
+		}
+	}
+	if len(needed) == 0 {
+		return nil, nil, nil
+	}
+	// Pull in transitive dependencies: a needed instance's instance-args name
+	// earlier (forward-declared) siblings it links, which must exist first.
+	for i := len(comp.Instances) - 1; i >= 0; i-- {
+		if !needed[numImported+i] {
+			continue
+		}
+		for _, arg := range comp.Instances[i].Args {
+			if arg.Sort == 0x05 {
+				needed[int(arg.SortIdx)] = true
+			}
+		}
+	}
+
+	byIdx := make(map[int]*Instance, len(comp.Instances))
+	var order []*Instance
+	failClose := func() {
+		for _, s := range order {
+			s.Close(ctx) //nolint:errcheck // best-effort cleanup on an error path
+		}
+	}
+	for i, inst := range comp.Instances {
+		compInstIdx := numImported + i
+		if !needed[compInstIdx] || inst.Kind != 0x00 {
+			continue
+		}
+		if int(inst.ComponentIdx) >= len(comp.NestedComponents) {
+			failClose()
+			return nil, nil, fmt.Errorf("component/instance: component instance %d references nested component %d, out of range of %d", compInstIdx, inst.ComponentIdx, len(comp.NestedComponents))
+		}
+		nested := comp.NestedComponents[inst.ComponentIdx]
+
+		// A pure re-export shim (no core module/canon of its own) is seen
+		// through by bindInstanceExportGraph -- it just re-exports funcs passed
+		// as instantiate-args, which are this component's own canon lifts. Don't
+		// recursively instantiate it here (its args are funcs, not siblings);
+		// only a nested component with its own core module/canons (the fused-
+		// adapter shape) needs real instantiation and sibling linking.
+		if validateShimComponent(nested) == nil {
+			continue
+		}
+
+		// Build the nested component's import environment from the instantiate
+		// args. An instance arg names a sibling sub-Instance; each of its
+		// plain-func exports satisfies the nested component's instance import of
+		// the same (arg) name, matched by func name.
+		subCfg := &config{imports: map[importKey]*hostImport{}, compileCache: cfg.compileCache}
+		for _, arg := range inst.Args {
+			if arg.Sort != 0x05 { // instance
+				failClose()
+				return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q: only instance args are supported (got sort %#x)", compInstIdx, arg.Name, arg.Sort)
+			}
+			sib, ok := byIdx[int(arg.SortIdx)]
+			if !ok {
+				failClose()
+				return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q references instance %d, which is not a prior nested instantiation", compInstIdx, arg.Name, arg.SortIdx)
+			}
+			for name, be := range sib.exports {
+				if strings.ContainsRune(name, '#') { // interface-member export, not a plain func
+					continue
+				}
+				subCfg.imports[mkImportKey(arg.Name, name)] = delegatingHostImport(sib, name, be)
+			}
+		}
+
+		sub, err := instantiateGraph(ctx, r, nested, nested.Bytes, subCfg)
+		if err != nil {
+			failClose()
+			return nil, nil, fmt.Errorf("component/instance: nested component instance %d: %w", compInstIdx, err)
+		}
+		byIdx[compInstIdx] = sub
+		order = append(order, sub)
+	}
+	return byIdx, order, nil
+}
+
+// delegatingHostImport wraps a sibling sub-Instance's exported func as a host
+// import: calling it re-enters the sibling's own lift/lower. customFD/
+// customResolve come from the provider's boundExport, so buildHostWrapper marshals
+// against the real (possibly nested) signature -- the decoder does not retain
+// the importer's copy of the type.
+func delegatingHostImport(sub *Instance, exportName string, be *boundExport) *hostImport {
+	return &hostImport{
+		fn: func(ctx context.Context, args []abi.Value) ([]abi.Value, error) {
+			return sub.invoke(ctx, be, exportName, args)
+		},
+		customFD:      &be.fd,
+		customResolve: sub.resolve,
+	}
 }
 
 // moduleKeyForGraph is moduleNameFor's graph-engine counterpart: identical
@@ -782,12 +928,12 @@ func resourceCanonHostFuncGraph(comp *binary.Component, cfg *config, resources *
 // coreFuncTarget instead of the flat (coreFuncAliases, numProducedCoreFuncs)
 // partition simpler components rely on, since the graph engine's core func
 // index space can genuinely interleave alias- and canon-produced entries.
-func bindImportExportsGraph(comp *binary.Component, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver, abiCache *CompileCache) (map[string]*boundExport, error) {
+func bindImportExportsGraph(comp *binary.Component, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver, abiCache *CompileCache, compInstances map[int]*Instance) (map[string]*boundExport, error) {
 	exports := make(map[string]*boundExport, len(comp.Exports))
 	for _, exp := range comp.Exports {
 		switch exp.ExternType {
 		case 0x01: // func
-			be, err := bindFuncExportGraph(comp, exp.ExternIndex, componentFunc, coreFuncTarget, resolve, exp.Name, abiCache)
+			be, err := bindFuncExportGraph(comp, exp.ExternIndex, componentFunc, coreFuncTarget, resolve, exp.Name, abiCache, compInstances)
 			if err != nil {
 				return nil, err
 			}
@@ -812,12 +958,22 @@ func bindImportExportsGraph(comp *binary.Component, componentFunc func(uint32) (
 
 // bindFuncExportGraph is bindFuncExport's graph-engine counterpart -- see
 // bindImportExportsGraph.
-func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver, diagName string, abiCache *CompileCache) (*boundExport, error) {
-	isLift, liftCanonIdx, _, err := componentFunc(funcIdx)
+func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver, diagName string, abiCache *CompileCache, compInstances map[int]*Instance) (*boundExport, error) {
+	isLift, liftCanonIdx, at, err := componentFunc(funcIdx)
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: export %q: %w", diagName, err)
 	}
 	if !isLift {
+		// A func alias to a nested component instance we recursively
+		// instantiated (the fused-adapter shape): re-expose that sub-Instance's
+		// already-bound export directly. It stays valid because the sub-Instance
+		// is held in subInstances and closed with this one.
+		if sub, ok := compInstances[int(at.instIdx)]; ok {
+			if be, ok := sub.exports[at.name]; ok {
+				return be, nil
+			}
+			return nil, fmt.Errorf("component/instance: export %q: nested component instance %d has no export %q", diagName, at.instIdx, at.name)
+		}
 		return nil, fmt.Errorf("component/instance: export %q resolves to an imported func rather than a lift; only lifted funcs may be exported", diagName)
 	}
 	canon := comp.Canons[liftCanonIdx]
@@ -957,7 +1113,9 @@ func bindInstanceExportGraph(comp *binary.Component, exp binary.Export, componen
 			return fmt.Errorf("component/instance: %s: instantiate-arg %q has non-func sort %#x", diagName, importName, arg.Sort)
 		}
 
-		be, err := bindFuncExportGraph(comp, arg.SortIdx, componentFunc, coreFuncTarget, resolve, diagName, abiCache)
+		// A shim's instantiate-arg funcs are this component's own canon lifts,
+		// never nested-instance aliases, so no compInstances are needed here.
+		be, err := bindFuncExportGraph(comp, arg.SortIdx, componentFunc, coreFuncTarget, resolve, diagName, abiCache, nil)
 		if err != nil {
 			return err
 		}
