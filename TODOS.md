@@ -43,6 +43,15 @@
      lift_own/lower_own handle transfer at the boundary (the "No cross-instance
      handle transfer" ceiling in `resource.go`). That decoder work is the root
      dependency; it is a large, foundational feature, not a boundary patch.
+  3. Even with #1 and #2, `multiple-resources` also needs canon `resource.drop`
+     to RUN the resource's destructor (it currently just removes the table
+     entry — the "No destructors" ceiling in `resource.go`), because the test
+     asserts a `num-live` count that the R1/R2 dtors decrement. wazy runs a dtor
+     for a HOST-initiated drop (`DropResource`) but not for a guest's own canon
+     `resource.drop`; thread the dtor into `resourceCanonHostFuncGraph`.
+  So this one suite is really three coupled ceilings (imported-instance-type
+  decode + cross-instance handle transfer + destructor-on-drop) — the full
+  resource-composition-and-lifecycle story, a deliberate multi-part project.
 - **Also deeper fused sub-features** (each skips a `fused.wast` module, logged):
   pass-through shim with empty export names, >16 flat params on an imported func
   (whole-param spilling for a lowered import), func/type instantiate-args,
