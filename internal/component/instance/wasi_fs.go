@@ -332,6 +332,14 @@ type wasiFS struct {
 	mu    sync.Mutex
 	files map[string][]byte
 
+	// dirs holds paths of EXPLICITLY-created directories (create-directory-at)
+	// that hold no files yet -- the synthetic-directory model (see fsIsDir)
+	// otherwise cannot represent an empty directory, so create_dir followed by
+	// remove_file leaving an empty dir the guest then remove_dir's would be
+	// invisible. A path here plus any file living under it both make fsIsDir
+	// true; a file is never simultaneously a dir.
+	dirs map[string]bool
+
 	resources    *handleTable
 	descs        map[uint32]*fsDescNode
 	nextDesc     uint32
@@ -363,6 +371,7 @@ type wasiFS struct {
 func newWasiFS(files map[string][]byte) *wasiFS {
 	return &wasiFS{
 		files:        files,
+		dirs:         make(map[string]bool),
 		descs:        make(map[uint32]*fsDescNode),
 		nextDesc:     1,
 		streams:      make(map[uint32]*fsStreamNode),
@@ -408,6 +417,127 @@ func (w *wasiFS) fsFileDelete(path string) bool {
 	return true
 }
 
+// fsSelfPathArgs parses the common (self: borrow<descriptor>, path: string)
+// method args and resolves the descriptor, which must be a directory. On a
+// non-directory it returns errVal (a ready-to-return not-directory result) and
+// a nil node; on an arg/lookup error it returns a Go error. Shared by
+// create-directory-at and remove-directory-at.
+func fsSelfPathArgs(method string, fs *wasiFS, args []abi.Value) (node *fsDescNode, path string, errVal []abi.Value, err error) {
+	if len(args) != 2 {
+		return nil, "", nil, fmt.Errorf("[method]descriptor.%s: expected 2 args (self, path), got %d", method, len(args))
+	}
+	selfRep, ok := args[0].(uint32)
+	if !ok {
+		return nil, "", nil, fmt.Errorf("[method]descriptor.%s: self: expected uint32 rep, got %T", method, args[0])
+	}
+	path, ok = args[1].(string)
+	if !ok {
+		return nil, "", nil, fmt.Errorf("[method]descriptor.%s: path: expected string, got %T", method, args[1])
+	}
+	node, err = fs.descNode(selfRep)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("[method]descriptor.%s: %w", method, err)
+	}
+	if !node.isDir {
+		return nil, "", []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeNotDirectory}}, nil
+	}
+	return node, path, nil, nil
+}
+
+// fsDirCreate records path as an explicit empty directory
+// (create-directory-at). Returns nil on success, or wasiErrorCodeExist if path
+// already names a file or directory.
+func (w *wasiFS) fsDirCreate(path string) *uint32 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, isFile := w.files[path]; isFile || w.isDirLocked(path) {
+		c := uint32(wasiErrorCodeExist)
+		return &c
+	}
+	w.dirs[path] = true
+	return nil
+}
+
+// fsDirRemove removes an empty directory (remove-directory-at). Returns nil on
+// success, wasiErrorCodeNotDirectory if path is not a directory, or
+// wasiErrorCodeNotEmpty if it still holds children.
+func (w *wasiFS) fsDirRemove(path string) *uint32 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.isDirLocked(path) {
+		c := uint32(wasiErrorCodeNotDirectory)
+		return &c
+	}
+	if w.hasChildrenLocked(path) {
+		c := uint32(wasiErrorCodeNotEmpty)
+		return &c
+	}
+	delete(w.dirs, path)
+	return nil
+}
+
+// fsRename moves oldPath to newPath (rename-at), whether it is a file or a
+// directory subtree. Returns nil on success, wasiErrorCodeNoEntry if oldPath
+// does not exist, or wasiErrorCodeExist if newPath is already occupied.
+func (w *wasiFS) fsRename(oldPath, newPath string) *uint32 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if oldPath == newPath {
+		return nil
+	}
+	if content, isFile := w.files[oldPath]; isFile {
+		if _, exists := w.files[newPath]; exists || w.isDirLocked(newPath) {
+			c := uint32(wasiErrorCodeExist)
+			return &c
+		}
+		delete(w.files, oldPath)
+		w.files[newPath] = content
+		return nil
+	}
+	if w.isDirLocked(oldPath) {
+		if _, exists := w.files[newPath]; exists || w.isDirLocked(newPath) {
+			c := uint32(wasiErrorCodeExist)
+			return &c
+		}
+		// Move the whole subtree: every file/dir under oldPath/ is re-keyed
+		// under newPath/, and the directory marker itself moves. Collect the
+		// moves first -- mutating a map while ranging over it (adding keys) is
+		// undefined.
+		oldPrefix := oldPath + "/"
+		type kv struct {
+			k string
+			v []byte
+		}
+		var fileMoves []kv
+		for k, v := range w.files {
+			if strings.HasPrefix(k, oldPrefix) {
+				fileMoves = append(fileMoves, kv{k, v})
+			}
+		}
+		for _, m := range fileMoves {
+			delete(w.files, m.k)
+			w.files[newPath+"/"+m.k[len(oldPrefix):]] = m.v
+		}
+		var dirMoves []string
+		for d := range w.dirs {
+			if d == oldPath || strings.HasPrefix(d, oldPrefix) {
+				dirMoves = append(dirMoves, d)
+			}
+		}
+		for _, d := range dirMoves {
+			delete(w.dirs, d)
+			if d == oldPath {
+				w.dirs[newPath] = true
+			} else {
+				w.dirs[newPath+"/"+d[len(oldPrefix):]] = true
+			}
+		}
+		return nil
+	}
+	c := uint32(wasiErrorCodeNoEntry)
+	return &c
+}
+
 // fsIsDir reports whether path names a directory in this package's
 // synthetic directory model: the root "/" always is one (even with zero
 // files, e.g. f33_createlist's fixture starts from an empty fs.files
@@ -423,12 +553,42 @@ func (w *wasiFS) fsIsDir(path string) bool {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	return w.isDirLocked(path)
+}
+
+// isDirLocked is fsIsDir's body, minus the "/" special case, assuming w.mu is
+// already held -- so the create/remove/rename helpers can check dir-ness while
+// holding the lock for an atomic mutation.
+func (w *wasiFS) isDirLocked(path string) bool {
+	if path == "/" {
+		return true
+	}
 	if _, isFile := w.files[path]; isFile {
 		return false
+	}
+	if w.dirs[path] {
+		return true
 	}
 	prefix := path + "/"
 	for k := range w.files {
 		if strings.HasPrefix(k, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasChildrenLocked reports whether any file or explicit dir lives strictly
+// under path (w.mu must be held) -- remove-directory-at's emptiness check.
+func (w *wasiFS) hasChildrenLocked(path string) bool {
+	prefix := path + "/"
+	for k := range w.files {
+		if strings.HasPrefix(k, prefix) {
+			return true
+		}
+	}
+	for d := range w.dirs {
+		if strings.HasPrefix(d, prefix) {
 			return true
 		}
 	}
@@ -468,6 +628,22 @@ func (w *wasiFS) fsListDirEntries(dir string) []fsDirEntry {
 			continue
 		}
 		out = append(out, fsDirEntry{name: rest, isDir: false})
+	}
+	// Explicitly-created directories directly under dir that hold no files
+	// (invisible to the file-prefix scan above) still list, e.g. an empty
+	// create_dir'd subdir.
+	for d := range w.dirs {
+		if !strings.HasPrefix(d, prefix) || d == prefix {
+			continue
+		}
+		rest := d[len(prefix):]
+		if strings.IndexByte(rest, '/') >= 0 {
+			continue // deeper than an immediate child
+		}
+		if !seenDirs[rest] {
+			seenDirs[rest] = true
+			out = append(out, fsDirEntry{name: rest, isDir: true})
+		}
 	}
 	return out
 }
@@ -1015,6 +1191,146 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []Option {
 		return []abi.Value{abi.ResultValue{IsErr: false, Payload: nil}}, nil
 	}
 
+	// createDirectoryAt implements [method]descriptor.create-directory-at(self,
+	// path) -> result<_, error-code> (std::fs::create_dir). Records an explicit
+	// empty directory (see fsDirCreate / the dirs set).
+	createDirectoryAt := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		node, path, errVal, err := fsSelfPathArgs("create-directory-at", fs, args)
+		if err != nil || errVal != nil {
+			return errVal, err
+		}
+		full, ok := wasiJoinFSPath(node.path, path)
+		if !ok {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeNotPermitted}}, nil
+		}
+		if code := fs.fsDirCreate(full); code != nil {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: *code}}, nil
+		}
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: nil}}, nil
+	}
+
+	// removeDirectoryAt implements [method]descriptor.remove-directory-at(self,
+	// path) -> result<_, error-code> (std::fs::remove_dir): removes an empty
+	// directory.
+	removeDirectoryAt := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		node, path, errVal, err := fsSelfPathArgs("remove-directory-at", fs, args)
+		if err != nil || errVal != nil {
+			return errVal, err
+		}
+		full, ok := wasiJoinFSPath(node.path, path)
+		if !ok {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeNotPermitted}}, nil
+		}
+		if code := fs.fsDirRemove(full); code != nil {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: *code}}, nil
+		}
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: nil}}, nil
+	}
+
+	// renameAt implements [method]descriptor.rename-at(self, old-path,
+	// new-descriptor: borrow<descriptor>, new-path) -> result<_, error-code>
+	// (std::fs::rename): moves a file or directory subtree.
+	renameAt := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 4 {
+			return nil, fmt.Errorf("[method]descriptor.rename-at: expected 4 args (self, old-path, new-descriptor, new-path), got %d", len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]descriptor.rename-at: self: expected uint32 rep, got %T", args[0])
+		}
+		oldPath, ok := args[1].(string)
+		if !ok {
+			return nil, fmt.Errorf("[method]descriptor.rename-at: old-path: expected string, got %T", args[1])
+		}
+		newDescRep, ok := args[2].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]descriptor.rename-at: new-descriptor: expected uint32 rep, got %T", args[2])
+		}
+		newPath, ok := args[3].(string)
+		if !ok {
+			return nil, fmt.Errorf("[method]descriptor.rename-at: new-path: expected string, got %T", args[3])
+		}
+		selfNode, err := fs.descNode(selfRep)
+		if err != nil {
+			return nil, fmt.Errorf("[method]descriptor.rename-at: %w", err)
+		}
+		newNode, err := fs.descNode(newDescRep)
+		if err != nil {
+			return nil, fmt.Errorf("[method]descriptor.rename-at: new-descriptor: %w", err)
+		}
+		if !selfNode.isDir || !newNode.isDir {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeNotDirectory}}, nil
+		}
+		oldFull, ok1 := wasiJoinFSPath(selfNode.path, oldPath)
+		newFull, ok2 := wasiJoinFSPath(newNode.path, newPath)
+		if !ok1 || !ok2 {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeNotPermitted}}, nil
+		}
+		if code := fs.fsRename(oldFull, newFull); code != nil {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: *code}}, nil
+		}
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: nil}}, nil
+	}
+
+	// linkAt implements [method]descriptor.link-at(self, old-path-flags,
+	// old-path, new-descriptor, new-path) -> result<_, error-code>
+	// (std::fs::hard_link). This in-memory model has no inode layer, so a hard
+	// link is realized as a content copy: reading new-path returns old-path's
+	// bytes. ponytail: shared-inode mutation visibility is not modeled (a write
+	// through one link would not be seen through the other); add a refcounted
+	// inode table only if a real guest ever depends on that.
+	linkAt := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 5 {
+			return nil, fmt.Errorf("[method]descriptor.link-at: expected 5 args (self, old-path-flags, old-path, new-descriptor, new-path), got %d", len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]descriptor.link-at: self: expected uint32 rep, got %T", args[0])
+		}
+		// args[1] old-path-flags (symlink-follow flags) is not inspected: this
+		// model has no symlinks, so there is nothing to follow or not.
+		oldPath, ok := args[2].(string)
+		if !ok {
+			return nil, fmt.Errorf("[method]descriptor.link-at: old-path: expected string, got %T", args[2])
+		}
+		newDescRep, ok := args[3].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]descriptor.link-at: new-descriptor: expected uint32 rep, got %T", args[3])
+		}
+		newPath, ok := args[4].(string)
+		if !ok {
+			return nil, fmt.Errorf("[method]descriptor.link-at: new-path: expected string, got %T", args[4])
+		}
+		selfNode, err := fs.descNode(selfRep)
+		if err != nil {
+			return nil, fmt.Errorf("[method]descriptor.link-at: %w", err)
+		}
+		newNode, err := fs.descNode(newDescRep)
+		if err != nil {
+			return nil, fmt.Errorf("[method]descriptor.link-at: new-descriptor: %w", err)
+		}
+		if !selfNode.isDir || !newNode.isDir {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeNotDirectory}}, nil
+		}
+		oldFull, ok1 := wasiJoinFSPath(selfNode.path, oldPath)
+		newFull, ok2 := wasiJoinFSPath(newNode.path, newPath)
+		if !ok1 || !ok2 {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeNotPermitted}}, nil
+		}
+		content, isFile := fs.fsFileGet(oldFull)
+		if !isFile {
+			if fs.fsIsDir(oldFull) {
+				return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeNotPermitted}}, nil
+			}
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeNoEntry}}, nil
+		}
+		if _, exists := fs.fsFileGet(newFull); exists || fs.fsIsDir(newFull) {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeExist}}, nil
+		}
+		fs.fsFileSet(newFull, append([]byte(nil), content...))
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: nil}}, nil
+	}
+
 	readViaStream := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
 		if len(args) != 2 {
 			return nil, fmt.Errorf("[method]descriptor.read-via-stream: expected 2 args (self, offset), got %d", len(args))
@@ -1231,6 +1547,10 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []Option {
 	readDirectoryFD, readDirectoryResolve := wasiReadDirectorySig()
 	readDirEntryFD, readDirEntryResolve := wasiReadDirectoryEntrySig()
 	unlinkFileAtFD, unlinkFileAtResolve := wasiUnlinkFileAtSig()
+	createDirAtFD, createDirAtResolve := wasiUnlinkFileAtSig()
+	removeDirAtFD, removeDirAtResolve := wasiUnlinkFileAtSig()
+	renameAtFD, renameAtResolve := wasiRenameAtSig()
+	linkAtFD, linkAtResolve := wasiLinkAtSig()
 	readViaStreamFD, readViaStreamResolve := wasiReadViaStreamSig()
 	writeViaStreamFD, writeViaStreamResolve := wasiWriteViaStreamSig()
 	appendViaStreamFD, appendViaStreamResolve := wasiAppendViaStreamSig()
@@ -1268,6 +1588,10 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []Option {
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.read-directory", readDirectory, readDirectoryFD, readDirectoryResolve),
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]directory-entry-stream.read-directory-entry", readDirectoryEntry, readDirEntryFD, readDirEntryResolve),
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.unlink-file-at", unlinkFileAt, unlinkFileAtFD, unlinkFileAtResolve),
+		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.create-directory-at", createDirectoryAt, createDirAtFD, createDirAtResolve),
+		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.remove-directory-at", removeDirectoryAt, removeDirAtFD, removeDirAtResolve),
+		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.rename-at", renameAt, renameAtFD, renameAtResolve),
+		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.link-at", linkAt, linkAtFD, linkAtResolve),
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.read-via-stream", readViaStream, readViaStreamFD, readViaStreamResolve),
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.write-via-stream", writeViaStream, writeViaStreamFD, writeViaStreamResolve),
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.append-via-stream", appendViaStream, appendViaStreamFD, appendViaStreamResolve),
@@ -1500,6 +1824,52 @@ func wasiUnlinkFileAtSig() (binary.FuncDesc, abi.Resolver) {
 		Params: []binary.FuncParam{
 			{Name: "self", Type: selfRef},
 			{Name: "path", Type: binary.TypeRef{Primitive: "string"}},
+		},
+		Results: binary.FuncResults{Unnamed: &resultRef},
+	}
+	return fd, tbl.resolver()
+}
+
+// wasiRenameAtSig builds the FuncDesc/resolver for
+// [method]descriptor.rename-at(self: borrow<descriptor>, old-path: string,
+// new-descriptor: borrow<descriptor>, new-path: string) -> result<_,
+// error-code>.
+func wasiRenameAtSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiDescriptorResType})
+	newDescRef := tbl.add(binary.BorrowDesc{ResourceType: wasiDescriptorResType})
+	errRef := wasiErrorCodeType(tbl)
+	resultRef := tbl.add(binary.ResultDesc{Err: &errRef})
+	fd := binary.FuncDesc{
+		Params: []binary.FuncParam{
+			{Name: "self", Type: selfRef},
+			{Name: "old-path", Type: binary.TypeRef{Primitive: "string"}},
+			{Name: "new-descriptor", Type: newDescRef},
+			{Name: "new-path", Type: binary.TypeRef{Primitive: "string"}},
+		},
+		Results: binary.FuncResults{Unnamed: &resultRef},
+	}
+	return fd, tbl.resolver()
+}
+
+// wasiLinkAtSig builds the FuncDesc/resolver for [method]descriptor.link-at(
+// self: borrow<descriptor>, old-path-flags: path-flags, old-path: string,
+// new-descriptor: borrow<descriptor>, new-path: string) -> result<_,
+// error-code>.
+func wasiLinkAtSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiDescriptorResType})
+	pathFlagsRef := tbl.add(binary.FlagsDesc{Names: []string{"symlink-follow"}})
+	newDescRef := tbl.add(binary.BorrowDesc{ResourceType: wasiDescriptorResType})
+	errRef := wasiErrorCodeType(tbl)
+	resultRef := tbl.add(binary.ResultDesc{Err: &errRef})
+	fd := binary.FuncDesc{
+		Params: []binary.FuncParam{
+			{Name: "self", Type: selfRef},
+			{Name: "old-path-flags", Type: pathFlagsRef},
+			{Name: "old-path", Type: binary.TypeRef{Primitive: "string"}},
+			{Name: "new-descriptor", Type: newDescRef},
+			{Name: "new-path", Type: binary.TypeRef{Primitive: "string"}},
 		},
 		Results: binary.FuncResults{Unnamed: &resultRef},
 	}
