@@ -1,28 +1,37 @@
 package instance
 
-// This file implements the server (incoming-handler) side of the WASI 0.2
-// wasi:http/proxy world: enough of wasi:http/types for a real rustc
-// wasm32-wasip2 component that EXPORTS wasi:http/incoming-handler to receive an
-// HTTP request and write a response. Unlike the rest of WithWASI (which
-// registers host functions the guest imports and calls), the incoming-handler
-// is an EXPORT the host calls: serveHTTP synthesizes the incoming-request +
-// response-outparam resources, invokes the guest's `handle`, and reads back
-// whatever the guest set on the outparam.
+// This file implements both sides of the WASI 0.2 wasi:http/proxy world:
 //
-// The response body is written through wasi:io/streams' output-stream, which
-// WithWASI already implements (the same path stdout uses): outgoing-body.write
-// mints an output-stream rep backed by the body buffer, and writeSink (wasi.go)
-// gains an http fallback so the guest's blocking-write-and-flush lands in it.
+//   - Server (incoming-handler): a component that EXPORTS
+//     wasi:http/incoming-handler receives an HTTP request and writes a
+//     response. Unlike the rest of WithWASI (host funcs the guest imports and
+//     calls), the incoming-handler is an EXPORT the host calls: serveHTTP
+//     synthesizes the incoming-request + response-outparam resources, invokes
+//     the guest's `handle`, and reads back whatever the guest set on the
+//     outparam. The response body is written through wasi:io/streams'
+//     output-stream (the same path stdout uses): outgoing-body.write mints an
+//     output-stream rep backed by the body buffer, and writeSink (wasi.go)
+//     gains an http fallback so blocking-write-and-flush lands in it.
 //
-// # Scope (ponytail: this is the incoming milestone, not all of wasi:http)
+//   - Client (outgoing-handler): a component that IMPORTS
+//     wasi:http/outgoing-handler makes an outbound request. handle builds a
+//     Go *http.Request from the outgoing-request and dispatches it through the
+//     configured http.Client (WASIConfig.HTTPClient). Because Do is
+//     synchronous, the future-incoming-response is already resolved -- subscribe
+//     returns the shared always-ready pollable, get returns the response
+//     immediately. incoming-body.stream reuses the fs input-stream path so the
+//     guest's blocking-read of the response body needs no new machinery.
 //
-// Implemented: incoming-request.{method, path-with-query}; fields
-// constructor + set; outgoing-response constructor + set-status-code + body;
-// outgoing-body.{write, finish}; response-outparam.set. This is exactly what a
-// wit-bindgen incoming-handler guest calls to read the request line and write a
-// response. Not yet implemented (fail loud when a guest reaches for them):
-// request/response headers readback, incoming-request.consume (request body),
-// trailers, and the entire outgoing-handler (client) side.
+// # Scope (ponytail)
+//
+// Implemented: the wasi:http/types subset a wit-bindgen proxy guest actually
+// calls -- request line read (incoming-request.{method, path-with-query}),
+// response write (fields, outgoing-response, outgoing-body, response-outparam),
+// and the full client path (outgoing-request set-*, outgoing-handler.handle,
+// future-incoming-response, incoming-response, incoming-body). Not yet (fail
+// loud when reached): request/response header readback on the incoming side,
+// incoming-request.consume (request body), trailers, and per-request
+// request-options (timeouts).
 
 import (
 	"bytes"
@@ -46,6 +55,11 @@ const (
 	wasiHTTPOutgoingResponseResType uint32 = 16
 	wasiHTTPOutgoingBodyResType     uint32 = 17
 	wasiHTTPResponseOutparamResType uint32 = 18
+	wasiHTTPOutgoingRequestResType  uint32 = 19
+	wasiHTTPFutureResType           uint32 = 20
+	wasiHTTPIncomingResponseResType uint32 = 21
+	wasiHTTPIncomingBodyResType     uint32 = 22
+	wasiHTTPRequestOptionsResType   uint32 = 23
 )
 
 // Interface names are registered version-tolerantly (mkImportKey strips the
@@ -53,6 +67,7 @@ const (
 const (
 	wasiIfaceHTTPTypes           = "wasi:http/types@0.2.0"
 	wasiIfaceHTTPIncomingHandler = "wasi:http/incoming-handler"
+	wasiIfaceHTTPOutgoingHandler = "wasi:http/outgoing-handler@0.2.0"
 )
 
 // httpBodyStreamRepBase keeps outgoing-body output-stream reps disjoint from fs
@@ -125,6 +140,56 @@ type wasiHTTP struct {
 
 	nextBodyStream uint32
 	bodyStreams    map[uint32]*httpOutgoingBody
+
+	// --- outgoing (client) side ---
+
+	// client is the http.Client outgoing-handler.handle dispatches through.
+	// Set from WASIConfig in WithWASI (default http.DefaultClient); a test can
+	// inject one whose Transport reaches a scratch backend.
+	client *http.Client
+	// newInputStreamRep mints an fs-backed input-stream rep over data (see
+	// wasi_fs.go's fsStreamNode) so incoming-body.stream reuses the existing
+	// [method]input-stream.blocking-read path. Set in WithWASI.
+	newInputStreamRep func(data []byte) uint32
+
+	outRequests map[uint32]*httpOutgoingRequest
+	futures     map[uint32]*httpFuture
+	inResponses map[uint32]*httpIncomingResponse
+	inBodies    map[uint32]*httpIncomingBody
+}
+
+// httpOutgoingRequest is the host state behind an outgoing-request resource,
+// built up by the set-* methods before outgoing-handler.handle sends it.
+type httpOutgoingRequest struct {
+	method    string // uppercase, default "GET"
+	scheme    string // "http"/"https"/other, default "http"
+	authority string
+	pathQ     string // default "/"
+	headers   *httpFields
+	// ponytail: no request body -- outgoing-request.body isn't implemented
+	// (proxy guests forwarding a GET don't set one); add when a guest POSTs.
+}
+
+// httpFuture is the host state behind a future-incoming-response: the outcome
+// of a (synchronous, already-completed) outbound request.
+type httpFuture struct {
+	respRep uint32 // rep of the incoming-response, if errCode == 0
+	errCode uint32 // non-zero -> the request failed with this error-code disc
+	taken   bool   // get returns the outcome once, then None
+}
+
+// httpIncomingResponse is the host state behind an incoming-response resource.
+type httpIncomingResponse struct {
+	status  uint16
+	headers *httpFields
+	body    []byte
+	consumed bool
+}
+
+// httpIncomingBody is the host state behind an incoming-body resource.
+type httpIncomingBody struct {
+	body        []byte
+	streamTaken bool
 }
 
 func newWasiHTTP() *wasiHTTP {
@@ -137,6 +202,10 @@ func newWasiHTTP() *wasiHTTP {
 		outparams:      make(map[uint32]*httpCapture),
 		nextBodyStream: httpBodyStreamRepBase,
 		bodyStreams:    make(map[uint32]*httpOutgoingBody),
+		outRequests:    make(map[uint32]*httpOutgoingRequest),
+		futures:        make(map[uint32]*httpFuture),
+		inResponses:    make(map[uint32]*httpIncomingResponse),
+		inBodies:       make(map[uint32]*httpIncomingBody),
 	}
 }
 
@@ -866,4 +935,570 @@ func (in *Instance) findExportInstance(prefix string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// ================= outgoing (client) side =================
+
+func (h *wasiHTTP) newOutRequestRep(r *httpOutgoingRequest) uint32 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	rep := h.nextRep
+	h.nextRep++
+	h.outRequests[rep] = r
+	return rep
+}
+
+func (h *wasiHTTP) newFutureRep(f *httpFuture) uint32 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	rep := h.nextRep
+	h.nextRep++
+	h.futures[rep] = f
+	return rep
+}
+
+func (h *wasiHTTP) newInResponseRep(r *httpIncomingResponse) uint32 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	rep := h.nextRep
+	h.nextRep++
+	h.inResponses[rep] = r
+	return rep
+}
+
+func (h *wasiHTTP) newInBodyRep(b *httpIncomingBody) uint32 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	rep := h.nextRep
+	h.nextRep++
+	h.inBodies[rep] = b
+	return rep
+}
+
+func (h *wasiHTTP) outgoingRequestConstructor(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("[constructor]outgoing-request: expected 1 arg (headers), got %d", len(args))
+	}
+	rep, ok := args[0].(uint32)
+	if !ok {
+		return nil, fmt.Errorf("[constructor]outgoing-request: headers: expected uint32 rep, got %T", args[0])
+	}
+	h.mu.Lock()
+	f := h.fields[rep]
+	if f == nil {
+		f = &httpFields{}
+	}
+	delete(h.fields, rep)
+	h.mu.Unlock()
+	reqRep := h.newOutRequestRep(&httpOutgoingRequest{method: "GET", scheme: "http", pathQ: "/", headers: f})
+	return []abi.Value{reqRep}, nil
+}
+
+// outRequest resolves an outgoing-request rep or returns a wrong-rep error.
+func (h *wasiHTTP) outRequest(rep uint32, fn string) (*httpOutgoingRequest, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	r, ok := h.outRequests[rep]
+	if !ok {
+		return nil, fmt.Errorf("%s: rep %d does not name a live outgoing-request", fn, rep)
+	}
+	return r, nil
+}
+
+func (h *wasiHTTP) outgoingRequestSetMethod(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("[method]outgoing-request.set-method: expected 2 args, got %d", len(args))
+	}
+	rep, ok := args[0].(uint32)
+	if !ok {
+		return nil, fmt.Errorf("[method]outgoing-request.set-method: self: expected uint32 rep, got %T", args[0])
+	}
+	vv, ok := args[1].(abi.VariantValue)
+	if !ok {
+		return nil, fmt.Errorf("[method]outgoing-request.set-method: method: expected variant, got %T", args[1])
+	}
+	r, err := h.outRequest(rep, "[method]outgoing-request.set-method")
+	if err != nil {
+		return nil, err
+	}
+	if int(vv.Disc) < len(httpMethodCases) {
+		r.method = httpMethodCases[vv.Disc]
+	} else if s, ok := vv.Payload.(string); ok {
+		r.method = strings.ToUpper(s)
+	}
+	return []abi.Value{abi.ResultValue{IsErr: false}}, nil
+}
+
+// optString extracts a lowered option<string> (nil = None, string = Some).
+func optString(v abi.Value) (string, bool) {
+	s, ok := v.(string)
+	return s, ok
+}
+
+func (h *wasiHTTP) outgoingRequestSetPathWithQuery(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+	rep, err := httpSelfRep(args, "[method]outgoing-request.set-path-with-query")
+	if err != nil {
+		return nil, err
+	}
+	r, err := h.outRequest(rep, "[method]outgoing-request.set-path-with-query")
+	if err != nil {
+		return nil, err
+	}
+	if s, ok := optString(args[1]); ok {
+		r.pathQ = s
+	}
+	return []abi.Value{abi.ResultValue{IsErr: false}}, nil
+}
+
+func (h *wasiHTTP) outgoingRequestSetScheme(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+	rep, err := httpSelfRep(args, "[method]outgoing-request.set-scheme")
+	if err != nil {
+		return nil, err
+	}
+	r, err := h.outRequest(rep, "[method]outgoing-request.set-scheme")
+	if err != nil {
+		return nil, err
+	}
+	if args[1] != nil { // Some(scheme)
+		vv, ok := args[1].(abi.VariantValue)
+		if !ok {
+			return nil, fmt.Errorf("[method]outgoing-request.set-scheme: scheme: expected variant, got %T", args[1])
+		}
+		switch vv.Disc {
+		case 0:
+			r.scheme = "http"
+		case 1:
+			r.scheme = "https"
+		default:
+			if s, ok := vv.Payload.(string); ok {
+				r.scheme = strings.ToLower(s)
+			}
+		}
+	}
+	return []abi.Value{abi.ResultValue{IsErr: false}}, nil
+}
+
+func (h *wasiHTTP) outgoingRequestSetAuthority(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+	rep, err := httpSelfRep(args, "[method]outgoing-request.set-authority")
+	if err != nil {
+		return nil, err
+	}
+	r, err := h.outRequest(rep, "[method]outgoing-request.set-authority")
+	if err != nil {
+		return nil, err
+	}
+	if s, ok := optString(args[1]); ok {
+		r.authority = s
+	}
+	return []abi.Value{abi.ResultValue{IsErr: false}}, nil
+}
+
+// httpSelfRep validates a (self, arg) 2-arg method whose self is a resource rep.
+func httpSelfRep(args []abi.Value, fn string) (uint32, error) {
+	if len(args) != 2 {
+		return 0, fmt.Errorf("%s: expected 2 args, got %d", fn, len(args))
+	}
+	rep, ok := args[0].(uint32)
+	if !ok {
+		return 0, fmt.Errorf("%s: self: expected uint32 rep, got %T", fn, args[0])
+	}
+	return rep, nil
+}
+
+// outgoingHandlerHandle sends the outgoing-request through the host http.Client
+// and returns a future-incoming-response (already resolved, since the Do is
+// synchronous). result<own<future-incoming-response>, error-code>.
+func (h *wasiHTTP) outgoingHandlerHandle(ctx context.Context, args []abi.Value) ([]abi.Value, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("wasi:http/outgoing-handler.handle: expected 2 args (request, options), got %d", len(args))
+	}
+	// request: own<outgoing-request> lifted to its rep (ownership consumed).
+	reqRep, ok := args[0].(uint32)
+	if !ok {
+		return nil, fmt.Errorf("wasi:http/outgoing-handler.handle: request: expected uint32 rep, got %T", args[0])
+	}
+	// args[1] is option<request-options>; None (nil) is all this milestone
+	// supports -- a Some(request-options) handle would need per-request timeouts.
+	if args[1] != nil {
+		return nil, fmt.Errorf("wasi:http/outgoing-handler.handle: request-options are not supported by this milestone")
+	}
+	res, err := h.getResources()
+	if err != nil {
+		return nil, err
+	}
+
+	h.mu.Lock()
+	r, ok := h.outRequests[reqRep]
+	delete(h.outRequests, reqRep)
+	client := h.client
+	h.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("wasi:http/outgoing-handler.handle: request rep %d does not name a live outgoing-request", reqRep)
+	}
+	if client == nil {
+		client = http.DefaultClient
+	}
+
+	fut := &httpFuture{}
+	pathQ := r.pathQ
+	if pathQ == "" {
+		pathQ = "/"
+	}
+	rawURL := r.scheme + "://" + r.authority + pathQ
+	hreq, err := http.NewRequestWithContext(ctx, r.method, rawURL, nil)
+	if err != nil {
+		// Malformed request: report as HTTP-request-URI-invalid (disc 19).
+		fut.errCode = 19
+	} else {
+		if r.headers != nil {
+			for i, name := range r.headers.names {
+				hreq.Header.Add(name, string(r.headers.values[i]))
+			}
+		}
+		hresp, derr := client.Do(hreq)
+		if derr != nil {
+			// Connection failure: connection-refused (disc 6).
+			fut.errCode = 6
+		} else {
+			bodyBytes, _ := io.ReadAll(hresp.Body)
+			_ = hresp.Body.Close()
+			respHeaders := &httpFields{}
+			for name, vs := range hresp.Header {
+				for _, v := range vs {
+					respHeaders.names = append(respHeaders.names, strings.ToLower(name))
+					respHeaders.values = append(respHeaders.values, []byte(v))
+				}
+			}
+			//nolint:gosec // HTTP status codes are always within uint16 range.
+			respRep := h.newInResponseRep(&httpIncomingResponse{status: uint16(hresp.StatusCode), headers: respHeaders, body: bodyBytes})
+			fut.respRep = respRep
+		}
+	}
+	futRep := h.newFutureRep(fut)
+	handle := res.NewOwn(wasiHTTPFutureResType, futRep)
+	return []abi.Value{abi.ResultValue{IsErr: false, Payload: handle}}, nil
+}
+
+func (h *wasiHTTP) futureSubscribe(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("[method]future-incoming-response.subscribe: expected 1 arg (self), got %d", len(args))
+	}
+	if _, ok := args[0].(uint32); !ok {
+		return nil, fmt.Errorf("[method]future-incoming-response.subscribe: self: expected uint32 rep, got %T", args[0])
+	}
+	res, err := h.getResources()
+	if err != nil {
+		return nil, err
+	}
+	// Every future is already resolved (Do is synchronous), so subscribe hands
+	// back the shared always-ready pollable (see wasiPollableRep). Top-level
+	// own<pollable> result -> return the handle (this is a nested-free result).
+	handle := res.NewOwn(wasiPollableResType, wasiPollableRep)
+	return []abi.Value{handle}, nil
+}
+
+func (h *wasiHTTP) futureGet(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("[method]future-incoming-response.get: expected 1 arg (self), got %d", len(args))
+	}
+	rep, ok := args[0].(uint32)
+	if !ok {
+		return nil, fmt.Errorf("[method]future-incoming-response.get: self: expected uint32 rep, got %T", args[0])
+	}
+	res, err := h.getResources()
+	if err != nil {
+		return nil, err
+	}
+	h.mu.Lock()
+	fut, ok := h.futures[rep]
+	if !ok {
+		h.mu.Unlock()
+		return nil, fmt.Errorf("[method]future-incoming-response.get: rep %d does not name a live future", rep)
+	}
+	if fut.taken {
+		h.mu.Unlock()
+		// option<...>: None -- the outcome has already been retrieved.
+		return []abi.Value{nil}, nil
+	}
+	fut.taken = true
+	errCode, respRep := fut.errCode, fut.respRep
+	h.mu.Unlock()
+
+	// Shape: option<result<result<incoming-response, error-code>>>. The outer
+	// result models "future already retrieved" (Err) -- always Ok here. The
+	// inner result carries the incoming-response or the transport error-code.
+	var inner abi.ResultValue
+	if errCode != 0 {
+		inner = abi.ResultValue{IsErr: true, Payload: abi.VariantValue{Disc: errCode}}
+	} else {
+		handle := res.NewOwn(wasiHTTPIncomingResponseResType, respRep)
+		inner = abi.ResultValue{IsErr: false, Payload: handle}
+	}
+	outer := abi.ResultValue{IsErr: false, Payload: inner}
+	return []abi.Value{outer}, nil // Some(outer)
+}
+
+func (h *wasiHTTP) incomingResponseStatus(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("[method]incoming-response.status: expected 1 arg (self), got %d", len(args))
+	}
+	rep, ok := args[0].(uint32)
+	if !ok {
+		return nil, fmt.Errorf("[method]incoming-response.status: self: expected uint32 rep, got %T", args[0])
+	}
+	h.mu.Lock()
+	r, ok := h.inResponses[rep]
+	h.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("[method]incoming-response.status: rep %d does not name a live incoming-response", rep)
+	}
+	return []abi.Value{uint32(r.status)}, nil
+}
+
+func (h *wasiHTTP) incomingResponseConsume(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("[method]incoming-response.consume: expected 1 arg (self), got %d", len(args))
+	}
+	rep, ok := args[0].(uint32)
+	if !ok {
+		return nil, fmt.Errorf("[method]incoming-response.consume: self: expected uint32 rep, got %T", args[0])
+	}
+	res, err := h.getResources()
+	if err != nil {
+		return nil, err
+	}
+	h.mu.Lock()
+	r, ok := h.inResponses[rep]
+	if !ok {
+		h.mu.Unlock()
+		return nil, fmt.Errorf("[method]incoming-response.consume: rep %d does not name a live incoming-response", rep)
+	}
+	if r.consumed {
+		h.mu.Unlock()
+		return []abi.Value{abi.ResultValue{IsErr: true}}, nil // body already taken
+	}
+	r.consumed = true
+	body := r.body
+	h.mu.Unlock()
+	bodyRep := h.newInBodyRep(&httpIncomingBody{body: body})
+	handle := res.NewOwn(wasiHTTPIncomingBodyResType, bodyRep)
+	return []abi.Value{abi.ResultValue{IsErr: false, Payload: handle}}, nil
+}
+
+func (h *wasiHTTP) incomingBodyStream(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("[method]incoming-body.stream: expected 1 arg (self), got %d", len(args))
+	}
+	rep, ok := args[0].(uint32)
+	if !ok {
+		return nil, fmt.Errorf("[method]incoming-body.stream: self: expected uint32 rep, got %T", args[0])
+	}
+	res, err := h.getResources()
+	if err != nil {
+		return nil, err
+	}
+	h.mu.Lock()
+	b, ok := h.inBodies[rep]
+	if !ok {
+		h.mu.Unlock()
+		return nil, fmt.Errorf("[method]incoming-body.stream: rep %d does not name a live incoming-body", rep)
+	}
+	if b.streamTaken {
+		h.mu.Unlock()
+		return []abi.Value{abi.ResultValue{IsErr: true}}, nil // stream can only be taken once
+	}
+	b.streamTaken = true
+	body := b.body
+	mint := h.newInputStreamRep
+	h.mu.Unlock()
+	if mint == nil {
+		return nil, fmt.Errorf("[method]incoming-body.stream: no input-stream backing configured")
+	}
+	// Reuse the fs-backed input-stream path: the returned rep is served by the
+	// already-registered [method]input-stream.blocking-read (fs.streamRead),
+	// including EOF (stream-error::closed) once the guest reads all the bytes.
+	streamRep := mint(body)
+	handle := res.NewOwn(wasiInputStreamResType, streamRep)
+	return []abi.Value{abi.ResultValue{IsErr: false, Payload: handle}}, nil
+}
+
+// ---- outgoing WIT type descriptors + signatures ----
+
+// httpSchemeType interns the wasi:http/types `scheme` variant {HTTP, HTTPS,
+// other(string)} into tbl.
+func httpSchemeType(tbl *typeTable) binary.TypeRef {
+	strRef := binary.TypeRef{Primitive: "string"}
+	return tbl.add(binary.VariantDesc{Cases: []binary.VariantCase{
+		{Name: "HTTP"}, {Name: "HTTPS"}, {Name: "other", Type: &strRef},
+	}})
+}
+
+func httpOutgoingRequestConstructorSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	headersRef := tbl.add(binary.OwnDesc{ResourceType: wasiHTTPFieldsResType})
+	ownRef := tbl.add(binary.OwnDesc{ResourceType: wasiHTTPOutgoingRequestResType})
+	return binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "headers", Type: headersRef}},
+		Results: binary.FuncResults{Unnamed: &ownRef},
+	}, tbl.resolver()
+}
+
+func httpSetMethodSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiHTTPOutgoingRequestResType})
+	methodRef := httpMethodType(tbl)
+	resRef := tbl.add(binary.ResultDesc{})
+	return binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}, {Name: "method", Type: methodRef}},
+		Results: binary.FuncResults{Unnamed: &resRef},
+	}, tbl.resolver()
+}
+
+// httpSetOptStringSig builds set-path-with-query / set-authority: (self:
+// borrow<outgoing-request>, v: option<string>) -> result.
+func httpSetOptStringSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiHTTPOutgoingRequestResType})
+	optRef := tbl.add(binary.OptionDesc{Element: binary.TypeRef{Primitive: "string"}})
+	resRef := tbl.add(binary.ResultDesc{})
+	return binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}, {Name: "v", Type: optRef}},
+		Results: binary.FuncResults{Unnamed: &resRef},
+	}, tbl.resolver()
+}
+
+func httpSetSchemeSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiHTTPOutgoingRequestResType})
+	optRef := tbl.add(binary.OptionDesc{Element: httpSchemeType(tbl)})
+	resRef := tbl.add(binary.ResultDesc{})
+	return binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}, {Name: "scheme", Type: optRef}},
+		Results: binary.FuncResults{Unnamed: &resRef},
+	}, tbl.resolver()
+}
+
+func httpOutgoingHandlerSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	reqRef := tbl.add(binary.OwnDesc{ResourceType: wasiHTTPOutgoingRequestResType})
+	optRef := tbl.add(binary.OptionDesc{Element: tbl.add(binary.OwnDesc{ResourceType: wasiHTTPRequestOptionsResType})})
+	okRef := tbl.add(binary.OwnDesc{ResourceType: wasiHTTPFutureResType})
+	errRef := httpErrorCodeType(tbl)
+	resRef := tbl.add(binary.ResultDesc{Ok: &okRef, Err: &errRef})
+	return binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "request", Type: reqRef}, {Name: "options", Type: optRef}},
+		Results: binary.FuncResults{Unnamed: &resRef},
+	}, tbl.resolver()
+}
+
+func httpFutureGetSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiHTTPFutureResType})
+	respRef := tbl.add(binary.OwnDesc{ResourceType: wasiHTTPIncomingResponseResType})
+	errRef := httpErrorCodeType(tbl)
+	innerRef := tbl.add(binary.ResultDesc{Ok: &respRef, Err: &errRef})
+	outerRef := tbl.add(binary.ResultDesc{Ok: &innerRef})
+	optRef := tbl.add(binary.OptionDesc{Element: outerRef})
+	return binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}},
+		Results: binary.FuncResults{Unnamed: &optRef},
+	}, tbl.resolver()
+}
+
+func httpIncomingResponseStatusSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiHTTPIncomingResponseResType})
+	statusRef := binary.TypeRef{Primitive: "u16"}
+	return binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}},
+		Results: binary.FuncResults{Unnamed: &statusRef},
+	}, tbl.resolver()
+}
+
+func httpIncomingResponseConsumeSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiHTTPIncomingResponseResType})
+	okRef := tbl.add(binary.OwnDesc{ResourceType: wasiHTTPIncomingBodyResType})
+	resRef := tbl.add(binary.ResultDesc{Ok: &okRef})
+	return binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}},
+		Results: binary.FuncResults{Unnamed: &resRef},
+	}, tbl.resolver()
+}
+
+func httpIncomingBodyStreamSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiHTTPIncomingBodyResType})
+	okRef := tbl.add(binary.OwnDesc{ResourceType: wasiInputStreamResType})
+	resRef := tbl.add(binary.ResultDesc{Ok: &okRef})
+	return binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}},
+		Results: binary.FuncResults{Unnamed: &resRef},
+	}, tbl.resolver()
+}
+
+// wasiHTTPOutgoingOptions registers the client-side (outgoing-handler) host
+// funcs plus the wasi:io/poll pollable.block/poll a synchronous future still
+// makes the guest call. Registered only when EnableHTTP; the pollable funcs are
+// no-ops here (every future this package mints is already resolved), matching
+// the always-ready model wasi_sockets.go uses.
+func wasiHTTPOutgoingOptions(h *wasiHTTP) []Option {
+	reqCtorFD, reqCtorR := httpOutgoingRequestConstructorSig()
+	methodFD, methodR := httpSetMethodSig()
+	pathFD, pathR := httpSetOptStringSig()
+	authFD, authR := httpSetOptStringSig()
+	schemeFD, schemeR := httpSetSchemeSig()
+	handleFD, handleR := httpOutgoingHandlerSig()
+	subFD, subR := wasiSubscribeSig(wasiHTTPFutureResType)
+	getFD, getR := httpFutureGetSig()
+	statusFD, statusR := httpIncomingResponseStatusSig()
+	consumeFD, consumeR := httpIncomingResponseConsumeSig()
+	streamFD, streamR := httpIncomingBodyStreamSig()
+	blockFD, blockR := wasiPollableBlockSig()
+	pollFD, pollR := wasiPollSig()
+
+	return []Option{
+		withResourceTag(wasiIfaceHTTPTypes, "outgoing-request", wasiHTTPOutgoingRequestResType),
+		withResourceTag(wasiIfaceHTTPTypes, "future-incoming-response", wasiHTTPFutureResType),
+		withResourceTag(wasiIfaceHTTPTypes, "incoming-response", wasiHTTPIncomingResponseResType),
+		withResourceTag(wasiIfaceHTTPTypes, "incoming-body", wasiHTTPIncomingBodyResType),
+		withResourceTag(wasiIfaceHTTPTypes, "request-options", wasiHTTPRequestOptionsResType),
+		withResourceTag(wasiIfacePoll, "pollable", wasiPollableResType),
+
+		withImportCustom(wasiIfaceHTTPTypes, "[constructor]outgoing-request", h.outgoingRequestConstructor, reqCtorFD, reqCtorR),
+		withImportCustom(wasiIfaceHTTPTypes, "[method]outgoing-request.set-method", h.outgoingRequestSetMethod, methodFD, methodR),
+		withImportCustom(wasiIfaceHTTPTypes, "[method]outgoing-request.set-path-with-query", h.outgoingRequestSetPathWithQuery, pathFD, pathR),
+		withImportCustom(wasiIfaceHTTPTypes, "[method]outgoing-request.set-scheme", h.outgoingRequestSetScheme, schemeFD, schemeR),
+		withImportCustom(wasiIfaceHTTPTypes, "[method]outgoing-request.set-authority", h.outgoingRequestSetAuthority, authFD, authR),
+		withImportCustom(wasiIfaceHTTPOutgoingHandler, "handle", h.outgoingHandlerHandle, handleFD, handleR),
+		withImportCustom(wasiIfaceHTTPTypes, "[method]future-incoming-response.subscribe", h.futureSubscribe, subFD, subR),
+		withImportCustom(wasiIfaceHTTPTypes, "[method]future-incoming-response.get", h.futureGet, getFD, getR),
+		withImportCustom(wasiIfaceHTTPTypes, "[method]incoming-response.status", h.incomingResponseStatus, statusFD, statusR),
+		withImportCustom(wasiIfaceHTTPTypes, "[method]incoming-response.consume", h.incomingResponseConsume, consumeFD, consumeR),
+		withImportCustom(wasiIfaceHTTPTypes, "[method]incoming-body.stream", h.incomingBodyStream, streamFD, streamR),
+		withImportCustom(wasiIfacePoll, "[method]pollable.block", httpPollableBlock, blockFD, blockR),
+		withImportCustom(wasiIfacePoll, "poll", httpPoll, pollFD, pollR),
+	}
+}
+
+// httpPollableBlock implements wasi:io/poll [method]pollable.block: every
+// pollable the http host mints is already ready (outgoing-handler.handle
+// resolves synchronously), so block is an immediate no-op.
+func httpPollableBlock(context.Context, []abi.Value) ([]abi.Value, error) { return nil, nil }
+
+// httpPoll implements wasi:io/poll.poll(in: list<borrow<pollable>>) ->
+// list<u32>: reports every input index ready, matching the always-ready model.
+func httpPoll(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("wasi:io/poll.poll: expected 1 arg (in), got %d", len(args))
+	}
+	list, ok := args[0].([]abi.Value)
+	if !ok {
+		return nil, fmt.Errorf("wasi:io/poll.poll: in: expected list, got %T", args[0])
+	}
+	out := make([]abi.Value, 0, len(list))
+	for i := range list {
+		out = append(out, uint32(i))
+	}
+	return []abi.Value{out}, nil
 }

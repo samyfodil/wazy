@@ -2,6 +2,7 @@ package instance
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -118,4 +119,65 @@ func TestRealHTTP_NotEnabled(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "EnableHTTP") {
 		t.Fatalf("expected an EnableHTTP error, got %v", err)
 	}
+}
+
+//go:embed testdata/real_http_outgoing.component.wasm
+var realHTTPOutgoingWasm []byte
+
+// backendRoundTripper serves the same fixed body the real backend returned when
+// the golden was captured under `wasmtime serve -S cli -S inherit-network`
+// (127.0.0.1:8912 -> "hello-from-backend\n"), so wazy's outbound path is
+// exercised hermetically -- no real socket, deterministic, matching the golden.
+type backendRoundTripper struct{ t *testing.T }
+
+func (b backendRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Host != "127.0.0.1:8912" || r.URL.Path != "/backend" || r.Method != "GET" {
+		b.t.Errorf("unexpected outbound request: %s %s", r.Method, r.URL)
+	}
+	return &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": []string{"text/plain; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader("hello-from-backend\n")),
+	}, nil
+}
+
+// TestRealHTTP_OutgoingHandler runs a real rustc wasm32-wasip2 component that,
+// on each request, makes an OUTBOUND HTTP GET via wasi:http/outgoing-handler
+// and echoes the fetched body back. The expected body is exactly what
+// `wasmtime serve -S cli -S inherit-network` produced for the same fixture
+// against the same backend (differential golden). This verifies the client-side
+// ABI end to end: outgoing-request build-up (set-method/scheme/authority/
+// path), outgoing-handler.handle -> http.Client, future-incoming-response
+// subscribe/get, incoming-response.consume, incoming-body.stream, and the
+// reused input-stream blocking-read.
+func TestRealHTTP_OutgoingHandler(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	client := &http.Client{Transport: backendRoundTripper{t: t}}
+	inst, err := Instantiate(ctx, r, realHTTPOutgoingWasm, WithWASI(WASIConfig{EnableHTTP: true, HTTPClient: client})...)
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	defer inst.Close(ctx)
+
+	status, _, body, err := inst.serveHTTP(ctx, "GET", mustURL("/trigger"), http.Header{}, nil)
+	if err != nil {
+		t.Fatalf("serveHTTP: %v", err)
+	}
+	if status != 200 {
+		t.Errorf("status = %d, want 200", status)
+	}
+	if string(body) != "hello-from-backend\n" {
+		t.Errorf("body = %q, want %q", body, "hello-from-backend\n")
+	}
+}
+
+func mustURL(s string) *url.URL {
+	u, err := url.Parse(s)
+	if err != nil {
+		panic(err)
+	}
+	return u
 }

@@ -311,3 +311,269 @@ func TestHTTP_FindExportInstance(t *testing.T) {
 		t.Fatal("unexpected match")
 	}
 }
+
+// ---- outgoing (client) side error branches ----
+
+func TestHTTP_OutgoingRequest(t *testing.T) {
+	h := newTestHTTP()
+	fRep := h.newFieldsRep(&httpFields{})
+	res, err := h.outgoingRequestConstructor(context.Background(), []abi.Value{fRep})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep := res[0].(uint32)
+	if r := h.outRequests[rep]; r.method != "GET" || r.scheme != "http" || r.pathQ != "/" {
+		t.Fatalf("defaults = %#v", r)
+	}
+	// unknown fields rep falls back to empty headers
+	if _, err := h.outgoingRequestConstructor(context.Background(), []abi.Value{uint32(999)}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = h.outgoingRequestConstructor(context.Background(), nil)
+	reqErr(t, err, "expected 1 arg")
+	_, err = h.outgoingRequestConstructor(context.Background(), []abi.Value{"x"})
+	reqErr(t, err, "expected uint32 rep")
+
+	// set-method: standard + "other"
+	if _, err := h.outgoingRequestSetMethod(context.Background(), []abi.Value{rep, abi.VariantValue{Disc: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	if h.outRequests[rep].method != "POST" {
+		t.Fatalf("method = %q", h.outRequests[rep].method)
+	}
+	if _, err := h.outgoingRequestSetMethod(context.Background(), []abi.Value{rep, abi.VariantValue{Disc: 9, Payload: "propfind"}}); err != nil {
+		t.Fatal(err)
+	}
+	if h.outRequests[rep].method != "PROPFIND" {
+		t.Fatalf("other method = %q", h.outRequests[rep].method)
+	}
+	_, err = h.outgoingRequestSetMethod(context.Background(), []abi.Value{rep})
+	reqErr(t, err, "expected 2 args")
+	_, err = h.outgoingRequestSetMethod(context.Background(), []abi.Value{"x", abi.VariantValue{}})
+	reqErr(t, err, "self: expected uint32 rep")
+	_, err = h.outgoingRequestSetMethod(context.Background(), []abi.Value{rep, "notavariant"})
+	reqErr(t, err, "method: expected variant")
+	_, err = h.outgoingRequestSetMethod(context.Background(), []abi.Value{uint32(999), abi.VariantValue{}})
+	reqErr(t, err, "does not name a live outgoing-request")
+
+	// set-path-with-query (Some + None)
+	if _, err := h.outgoingRequestSetPathWithQuery(context.Background(), []abi.Value{rep, "/p?x=1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.outgoingRequestSetPathWithQuery(context.Background(), []abi.Value{rep, nil}); err != nil {
+		t.Fatal(err)
+	}
+	if h.outRequests[rep].pathQ != "/p?x=1" {
+		t.Fatalf("path = %q (None should not overwrite)", h.outRequests[rep].pathQ)
+	}
+	_, err = h.outgoingRequestSetPathWithQuery(context.Background(), []abi.Value{rep})
+	reqErr(t, err, "expected 2 args")
+
+	// set-authority
+	if _, err := h.outgoingRequestSetAuthority(context.Background(), []abi.Value{rep, "h:1"}); err != nil {
+		t.Fatal(err)
+	}
+	if h.outRequests[rep].authority != "h:1" {
+		t.Fatal("authority not set")
+	}
+	_, err = h.outgoingRequestSetAuthority(context.Background(), []abi.Value{uint32(999), "h"})
+	reqErr(t, err, "does not name a live outgoing-request")
+
+	// set-scheme: HTTP, HTTPS, other, None
+	for disc, want := range map[uint32]string{0: "http", 1: "https"} {
+		if _, err := h.outgoingRequestSetScheme(context.Background(), []abi.Value{rep, abi.VariantValue{Disc: disc}}); err != nil {
+			t.Fatal(err)
+		}
+		if h.outRequests[rep].scheme != want {
+			t.Fatalf("scheme disc %d = %q, want %q", disc, h.outRequests[rep].scheme, want)
+		}
+	}
+	if _, err := h.outgoingRequestSetScheme(context.Background(), []abi.Value{rep, abi.VariantValue{Disc: 2, Payload: "WS"}}); err != nil {
+		t.Fatal(err)
+	}
+	if h.outRequests[rep].scheme != "ws" {
+		t.Fatalf("other scheme = %q", h.outRequests[rep].scheme)
+	}
+	if _, err := h.outgoingRequestSetScheme(context.Background(), []abi.Value{rep, nil}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = h.outgoingRequestSetScheme(context.Background(), []abi.Value{rep, "notavariant"})
+	reqErr(t, err, "scheme: expected variant")
+	_, err = h.outgoingRequestSetScheme(context.Background(), []abi.Value{uint32(999), nil})
+	reqErr(t, err, "does not name a live outgoing-request")
+}
+
+type failRT struct{}
+
+func (failRT) RoundTrip(*http.Request) (*http.Response, error) { return nil, io.ErrUnexpectedEOF }
+
+func TestHTTP_OutgoingHandlerHandle(t *testing.T) {
+	h := newTestHTTP()
+	h.client = &http.Client{Transport: backendRT{}}
+
+	mk := func(method, scheme, authority, path string) uint32 {
+		return h.newOutRequestRep(&httpOutgoingRequest{method: method, scheme: scheme, authority: authority, pathQ: path, headers: &httpFields{names: []string{"x-test"}, values: [][]byte{[]byte("1")}}})
+	}
+	// success
+	res, err := h.outgoingHandlerHandle(context.Background(), []abi.Value{mk("GET", "http", "h", "/ok"), nil})
+	if err != nil || res[0].(abi.ResultValue).IsErr {
+		t.Fatalf("handle = %v, %v", res, err)
+	}
+	futHandle := res[0].(abi.ResultValue).Payload.(uint32)
+	tbl, _ := h.getResources()
+	futRep, _ := tbl.Rep(wasiHTTPFutureResType, futHandle)
+	if h.futures[futRep].errCode != 0 {
+		t.Fatal("expected a successful future")
+	}
+
+	// connection failure -> future carries connection-refused (disc 6)
+	h.client = &http.Client{Transport: failRT{}}
+	res, _ = h.outgoingHandlerHandle(context.Background(), []abi.Value{mk("GET", "http", "h", "/x"), nil})
+	fh := res[0].(abi.ResultValue).Payload.(uint32)
+	fr, _ := tbl.Rep(wasiHTTPFutureResType, fh)
+	if h.futures[fr].errCode != 6 {
+		t.Fatalf("errCode = %d, want 6", h.futures[fr].errCode)
+	}
+
+	// malformed method -> NewRequest error -> URI-invalid (disc 19)
+	res, _ = h.outgoingHandlerHandle(context.Background(), []abi.Value{mk("BAD METHOD", "http", "h", "/x"), nil})
+	fh = res[0].(abi.ResultValue).Payload.(uint32)
+	fr, _ = tbl.Rep(wasiHTTPFutureResType, fh)
+	if h.futures[fr].errCode != 19 {
+		t.Fatalf("errCode = %d, want 19", h.futures[fr].errCode)
+	}
+
+	_, err = h.outgoingHandlerHandle(context.Background(), []abi.Value{mk("GET", "http", "h", "/x")})
+	reqErr(t, err, "expected 2 args")
+	_, err = h.outgoingHandlerHandle(context.Background(), []abi.Value{"x", nil})
+	reqErr(t, err, "request: expected uint32 rep")
+	_, err = h.outgoingHandlerHandle(context.Background(), []abi.Value{mk("GET", "http", "h", "/x"), uint32(1)})
+	reqErr(t, err, "request-options are not supported")
+	_, err = h.outgoingHandlerHandle(context.Background(), []abi.Value{uint32(999), nil})
+	reqErr(t, err, "does not name a live outgoing-request")
+}
+
+type backendRT struct{}
+
+func (backendRT) RoundTrip(*http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("ok"))}, nil
+}
+
+func TestHTTP_FutureAndResponse(t *testing.T) {
+	h := newTestHTTP()
+	tbl, _ := h.getResources()
+	// subscribe
+	fRep := h.newFutureRep(&httpFuture{})
+	if _, err := h.futureSubscribe(context.Background(), []abi.Value{fRep}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := h.futureSubscribe(context.Background(), nil)
+	reqErr(t, err, "expected 1 arg")
+	_, err = h.futureSubscribe(context.Background(), []abi.Value{"x"})
+	reqErr(t, err, "expected uint32 rep")
+
+	// get: Ok path, then None (taken)
+	respRep := h.newInResponseRep(&httpIncomingResponse{status: 200, body: []byte("hi")})
+	okFut := h.newFutureRep(&httpFuture{respRep: respRep})
+	res, err := h.futureGet(context.Background(), []abi.Value{okFut})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outer := res[0].(abi.ResultValue)
+	inner := outer.Payload.(abi.ResultValue)
+	if inner.IsErr {
+		t.Fatal("inner should be Ok")
+	}
+	res, _ = h.futureGet(context.Background(), []abi.Value{okFut})
+	if res[0] != nil {
+		t.Fatal("second get should be None")
+	}
+	// get: Err path (transport error-code)
+	errFut := h.newFutureRep(&httpFuture{errCode: 6})
+	res, _ = h.futureGet(context.Background(), []abi.Value{errFut})
+	inner = res[0].(abi.ResultValue).Payload.(abi.ResultValue)
+	if !inner.IsErr || inner.Payload.(abi.VariantValue).Disc != 6 {
+		t.Fatalf("err future inner = %#v", inner)
+	}
+	_, err = h.futureGet(context.Background(), nil)
+	reqErr(t, err, "expected 1 arg")
+	_, err = h.futureGet(context.Background(), []abi.Value{"x"})
+	reqErr(t, err, "expected uint32 rep")
+	_, err = h.futureGet(context.Background(), []abi.Value{uint32(999)})
+	reqErr(t, err, "does not name a live future")
+
+	// incoming-response.status
+	sres, err := h.incomingResponseStatus(context.Background(), []abi.Value{respRep})
+	if err != nil || sres[0].(uint32) != 200 {
+		t.Fatalf("status = %v, %v", sres, err)
+	}
+	_, err = h.incomingResponseStatus(context.Background(), nil)
+	reqErr(t, err, "expected 1 arg")
+	_, err = h.incomingResponseStatus(context.Background(), []abi.Value{"x"})
+	reqErr(t, err, "expected uint32 rep")
+	_, err = h.incomingResponseStatus(context.Background(), []abi.Value{uint32(999)})
+	reqErr(t, err, "does not name a live incoming-response")
+
+	// consume: Ok, then Err (already consumed)
+	cres, err := h.incomingResponseConsume(context.Background(), []abi.Value{respRep})
+	if err != nil || cres[0].(abi.ResultValue).IsErr {
+		t.Fatalf("consume = %v, %v", cres, err)
+	}
+	bodyHandle := cres[0].(abi.ResultValue).Payload.(uint32)
+	cres, _ = h.incomingResponseConsume(context.Background(), []abi.Value{respRep})
+	if !cres[0].(abi.ResultValue).IsErr {
+		t.Fatal("second consume should be Err")
+	}
+	_, err = h.incomingResponseConsume(context.Background(), nil)
+	reqErr(t, err, "expected 1 arg")
+	_, err = h.incomingResponseConsume(context.Background(), []abi.Value{"x"})
+	reqErr(t, err, "expected uint32 rep")
+	_, err = h.incomingResponseConsume(context.Background(), []abi.Value{uint32(999)})
+	reqErr(t, err, "does not name a live incoming-response")
+
+	// incoming-body.stream: needs a backing minter
+	bodyRep, _ := tbl.Rep(wasiHTTPIncomingBodyResType, bodyHandle)
+	streams := map[uint32][]byte{}
+	next := uint32(1)
+	h.newInputStreamRep = func(b []byte) uint32 { r := next; next++; streams[r] = b; return r }
+	stres, err := h.incomingBodyStream(context.Background(), []abi.Value{bodyRep})
+	if err != nil || stres[0].(abi.ResultValue).IsErr {
+		t.Fatalf("stream = %v, %v", stres, err)
+	}
+	stres, _ = h.incomingBodyStream(context.Background(), []abi.Value{bodyRep})
+	if !stres[0].(abi.ResultValue).IsErr {
+		t.Fatal("second stream should be Err")
+	}
+	_, err = h.incomingBodyStream(context.Background(), nil)
+	reqErr(t, err, "expected 1 arg")
+	_, err = h.incomingBodyStream(context.Background(), []abi.Value{"x"})
+	reqErr(t, err, "expected uint32 rep")
+	_, err = h.incomingBodyStream(context.Background(), []abi.Value{uint32(999)})
+	reqErr(t, err, "does not name a live incoming-body")
+
+	// no backing configured -> fail loud
+	h.newInputStreamRep = nil
+	nbRep := h.newInBodyRep(&httpIncomingBody{body: []byte("x")})
+	_, err = h.incomingBodyStream(context.Background(), []abi.Value{nbRep})
+	reqErr(t, err, "no input-stream backing")
+}
+
+func TestHTTP_PollNoOps(t *testing.T) {
+	if _, err := httpPollableBlock(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	res, err := httpPoll(context.Background(), []abi.Value{[]abi.Value{uint32(7), uint32(8)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := res[0].([]abi.Value)
+	if len(out) != 2 || out[0].(uint32) != 0 || out[1].(uint32) != 1 {
+		t.Fatalf("poll ready indices = %v", out)
+	}
+	if _, err := httpPoll(context.Background(), nil); err == nil {
+		t.Fatal("expected arg-count error")
+	}
+	if _, err := httpPoll(context.Background(), []abi.Value{"notalist"}); err == nil {
+		t.Fatal("expected type error")
+	}
+}

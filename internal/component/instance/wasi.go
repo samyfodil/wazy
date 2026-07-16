@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"strings"
 
 	"github.com/samyfodil/wazy/internal/component/abi"
@@ -251,6 +252,12 @@ type WASIConfig struct {
 	// exported handle. False (the default) leaves wasi:http unregistered, so a
 	// non-http component is completely unaffected.
 	EnableHTTP bool
+
+	// HTTPClient, when non-nil, is the client wasi:http/outgoing-handler.handle
+	// dispatches a guest's outbound requests through. Nil uses
+	// http.DefaultClient. A test can inject one whose Transport reaches a
+	// scratch backend. Has no effect unless EnableHTTP is also true.
+	HTTPClient *http.Client
 }
 
 // WithWASI returns the Options that register a WASI 0.2 host implementation
@@ -579,7 +586,15 @@ func WithWASI(cfg WASIConfig) []Option {
 		opts = append(opts, wasiUDPSocketOptions(sockets)...)
 	}
 	if cfg.EnableHTTP {
+		httphost.client = cfg.HTTPClient
+		// incoming-body.stream reuses the fs input-stream path: mint an
+		// fsStreamNode over the response bytes, served by the already-registered
+		// [method]input-stream.blocking-read (fs.streamRead), EOF included.
+		httphost.newInputStreamRep = func(b []byte) uint32 {
+			return fs.newStreamRep(&fsStreamNode{data: b})
+		}
 		opts = append(opts, wasiHTTPOptions(httphost)...)
+		opts = append(opts, wasiHTTPOutgoingOptions(httphost)...)
 	}
 	return opts
 }
