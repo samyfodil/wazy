@@ -310,7 +310,11 @@ func TestBindInstanceExport_NotPureShim(t *testing.T) {
 	requireErrContains(t, err, "out of scope for this milestone")
 }
 
-func TestBindInstanceExport_MemberNotFunc(t *testing.T) {
+// TestBindInstanceExport_MemberNotFuncSkipped proves a non-func member of an
+// exported interface (a type/value/instance re-export -- e.g. the resource
+// types wasi:http/incoming-handler `use`s) is skipped, not rejected: binding
+// succeeds and simply produces no boundExport for it.
+func TestBindInstanceExport_MemberNotFuncSkipped(t *testing.T) {
 	comp := &binary.Component{
 		Instances: []binary.Instance{{Kind: 0x00, ComponentIdx: 0}},
 		NestedComponents: []*binary.Component{{
@@ -318,8 +322,13 @@ func TestBindInstanceExport_MemberNotFunc(t *testing.T) {
 		}},
 	}
 	exp := binary.Export{Name: "inst", ExternType: 0x05, ExternIndex: 0}
-	err := bindInstanceExport(comp, exp, noopComponentFunc, nil, nil, 0, nil, map[string]*boundExport{})
-	requireErrContains(t, err, "only func members are supported")
+	exports := map[string]*boundExport{}
+	if err := bindInstanceExport(comp, exp, noopComponentFunc, nil, nil, 0, nil, exports); err != nil {
+		t.Fatalf("expected non-func member to be skipped, got error: %v", err)
+	}
+	if len(exports) != 0 {
+		t.Fatalf("expected no bound exports, got %d", len(exports))
+	}
 }
 
 func TestBindInstanceExport_MemberFuncIdxOutOfRange(t *testing.T) {

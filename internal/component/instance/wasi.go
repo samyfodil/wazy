@@ -243,6 +243,14 @@ type WASIConfig struct {
 	// enforces loopback-only binds, without needing any change to
 	// wasi_sockets.go itself. Has no effect unless AllowUDP is also true.
 	ListenPacket func(network, address string) (net.PacketConn, error)
+
+	// EnableHTTP, when true, registers the wasi:http/types host functions a
+	// component that EXPORTS wasi:http/incoming-handler needs (see
+	// wasi_http.go). The guest is then driven via (*Instance).ServeHTTP, which
+	// synthesizes each inbound request's resources and calls the guest's
+	// exported handle. False (the default) leaves wasi:http unregistered, so a
+	// non-http component is completely unaffected.
+	EnableHTTP bool
 }
 
 // WithWASI returns the Options that register a WASI 0.2 host implementation
@@ -290,6 +298,14 @@ func WithWASI(cfg WASIConfig) []Option {
 		listenPacket = func(network, address string) (net.PacketConn, error) { return net.ListenPacket(network, address) }
 	}
 	sockets := newWasiSockets(dial, listenPacket)
+
+	// httphost backs wasi:http server support (wasi_http.go), gated behind
+	// cfg.EnableHTTP. Always constructed so writeSink/checkWrite/blockingFlush
+	// can consult its outgoing-body output-streams as a dispatch fallback
+	// without a nil check; when EnableHTTP is false, wasiHTTPOptions is never
+	// added, so its bodyStreams map simply stays empty and every fallback
+	// lookup reports "not found" -- exactly as before this existed.
+	httphost := newWasiHTTP()
 
 	// stdinBytes is the entirety of WASIConfig.Stdin, read once up front
 	// (mirrors read-via-stream's own model: an fsDescNode's content is a
@@ -455,6 +471,9 @@ func WithWASI(cfg WASIConfig) []Option {
 		if s, found := sockets.outStreamNode(rep); found {
 			return s.write(buf)
 		}
+		if found, err := httphost.bodyStreamWrite(rep, buf); found {
+			return err
+		}
 		return werr
 	}
 
@@ -469,7 +488,9 @@ func WithWASI(cfg WASIConfig) []Option {
 		if _, err := writerForRep(rep); err != nil {
 			if _, found := fs.writeStreamNode(rep); !found {
 				if _, found := sockets.outStreamNode(rep); !found {
-					return nil, err
+					if !httphost.isBodyStreamRep(rep) {
+						return nil, err
+					}
 				}
 			}
 		}
@@ -556,6 +577,9 @@ func WithWASI(cfg WASIConfig) []Option {
 	}
 	if cfg.AllowUDP {
 		opts = append(opts, wasiUDPSocketOptions(sockets)...)
+	}
+	if cfg.EnableHTTP {
+		opts = append(opts, wasiHTTPOptions(httphost)...)
 	}
 	return opts
 }

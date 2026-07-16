@@ -45,6 +45,11 @@ type config struct {
 	// compilecache.go) instead of always recompiling. Nil (the default)
 	// preserves the exact prior always-recompile behavior.
 	compileCache *CompileCache
+
+	// httpHost, when non-nil (set by WithWASI when WASIConfig.EnableHTTP is
+	// true), is the wasi:http server state. It is copied onto the Instance so
+	// (*Instance).ServeHTTP can drive the guest's exported incoming-handler.
+	httpHost *wasiHTTP
 }
 
 type importKey struct {
@@ -121,6 +126,13 @@ func WithCompileCache(cache *CompileCache) Option {
 	return func(c *config) {
 		c.compileCache = cache
 	}
+}
+
+// withHTTPHost records the wasi:http server state on the config so the two
+// instantiation paths that support host imports can copy it onto the Instance
+// (for ServeHTTP). Set by wasiHTTPOptions.
+func withHTTPHost(h *wasiHTTP) Option {
+	return func(c *config) { c.httpHost = h }
 }
 
 // withResourcesHook registers hook to run against the Instance's
@@ -435,7 +447,7 @@ func instantiateWithImports(ctx context.Context, r wazy.Runtime, comp *binary.Co
 		return fail(err)
 	}
 
-	return &Instance{resolve: resolve, exports: exports, instanceExports: buildInstanceExportIndex(exports), closers: closers, resources: resources}, nil
+	return &Instance{resolve: resolve, exports: exports, instanceExports: buildInstanceExportIndex(exports), closers: closers, resources: resources, httpHost: cfg.httpHost}, nil
 }
 
 // moduleNameFor picks the wazy module name to register a real core instance
@@ -726,7 +738,11 @@ func bindInstanceExport(comp *binary.Component, exp binary.Export, componentFunc
 	for _, member := range nested.Exports {
 		diagName := instanceExportKey(exp.Name, member.Name)
 		if member.ExternType != 0x01 { // func
-			return fmt.Errorf("component/instance: export %q member %q has extern kind %s (%#x); only func members are supported", exp.Name, member.Name, api.ExternTypeName(member.ExternType), member.ExternType)
+			// Non-func members are type/value/instance re-exports (e.g. an
+			// interface re-exporting the resource types it `use`s) -- skip
+			// them; only func members become boundExports. See
+			// bindInstanceExportGraph's identical skip.
+			continue
 		}
 		if int(member.ExternIndex) >= len(shimFuncImports) {
 			return fmt.Errorf("component/instance: %s: func index %d out of range of the shim's %d func import(s)", diagName, member.ExternIndex, len(shimFuncImports))

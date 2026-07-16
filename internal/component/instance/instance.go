@@ -168,6 +168,11 @@ type Instance struct {
 	// "iface.func" name of every canon lower it resolved (WASI or not) --
 	// set only by the general graph engine. See WASICalls.
 	wasiCalls []string
+
+	// httpHost is the wasi:http server state, non-nil only when the component
+	// was instantiated with WithWASI(WASIConfig{EnableHTTP: true}). ServeHTTP
+	// drives the guest's exported incoming-handler through it.
+	httpHost *wasiHTTP
 }
 
 // CoreModuleCount returns the number of embedded core modules (real,

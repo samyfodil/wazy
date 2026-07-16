@@ -254,11 +254,16 @@ func TestGraph_BindInstanceExport_NotPureShim(t *testing.T) {
 	requireErrContains(t, err, "not a pure re-export shim")
 }
 
-func TestGraph_BindInstanceExport_MemberNotFunc(t *testing.T) {
+// TestGraph_BindInstanceExport_MemberNotFuncSkipped proves a non-func member
+// of an exported interface is skipped (a type/value/instance re-export, e.g.
+// the resource types wasi:http/incoming-handler `use`s), not rejected --
+// instantiation still succeeds.
+func TestGraph_BindInstanceExport_MemberNotFuncSkipped(t *testing.T) {
 	comp := decodeRealHello(t)
 	comp.NestedComponents[0].Exports[0].ExternType = 0x02
-	_, err := runGraph(t, comp)
-	requireErrContains(t, err, "only func members are supported")
+	if _, err := runGraph(t, comp); err != nil {
+		t.Fatalf("expected non-func member to be skipped, got error: %v", err)
+	}
 }
 
 // ------- direct unit tests for the lower-level graph.go helpers -------

@@ -330,6 +330,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		resources:       resources,
 		coreModuleCount: coreModuleCount,
 		wasiCalls:       wasiCalls,
+		httpHost:        cfg.httpHost,
 	}, nil
 }
 
@@ -812,7 +813,12 @@ func bindInstanceExportGraph(comp *binary.Component, exp binary.Export, componen
 	for _, member := range nested.Exports {
 		diagName := instanceExportKey(exp.Name, member.Name)
 		if member.ExternType != 0x01 { // func
-			return fmt.Errorf("component/instance: export %q member %q has extern kind %s (%#x); only func members are supported", exp.Name, member.Name, api.ExternTypeName(member.ExternType), member.ExternType)
+			// A non-func member of an exported interface is a type/value/
+			// instance re-export -- e.g. wasi:http/incoming-handler re-exports
+			// the incoming-request and response-outparam resource types it
+			// `use`s from wasi:http/types. These are non-callable metadata, so
+			// skip them; only func members become boundExports.
+			continue
 		}
 		if int(member.ExternIndex) >= len(shimFuncImports) {
 			return fmt.Errorf("component/instance: %s: func index %d out of range of the shim's %d func import(s)", diagName, member.ExternIndex, len(shimFuncImports))
