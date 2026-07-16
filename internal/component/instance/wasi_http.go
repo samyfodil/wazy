@@ -1767,8 +1767,6 @@ func wasiHTTPOutgoingOptions(h *wasiHTTP) []Option {
 	reqBodyFD, reqBodyR := httpOutgoingRequestBodySig()
 	optCtorFD, optCtorR := httpRequestOptionsConstructorSig()
 	setTimeoutFD, setTimeoutR := httpSetTimeoutSig()
-	blockFD, blockR := wasiPollableBlockSig()
-	pollFD, pollR := wasiPollSig()
 
 	return []Option{
 		withResourceTag(wasiIfaceHTTPTypes, "outgoing-request", wasiHTTPOutgoingRequestResType),
@@ -1776,7 +1774,7 @@ func wasiHTTPOutgoingOptions(h *wasiHTTP) []Option {
 		withResourceTag(wasiIfaceHTTPTypes, "incoming-response", wasiHTTPIncomingResponseResType),
 		withResourceTag(wasiIfaceHTTPTypes, "incoming-body", wasiHTTPIncomingBodyResType),
 		withResourceTag(wasiIfaceHTTPTypes, "request-options", wasiHTTPRequestOptionsResType),
-		withResourceTag(wasiIfacePoll, "pollable", wasiPollableResType),
+		// (The pollable tag + block/poll are registered centrally, see wasi_poll.go.)
 
 		withImportCustom(wasiIfaceHTTPTypes, "[constructor]outgoing-request", h.outgoingRequestConstructor, reqCtorFD, reqCtorR),
 		withImportCustom(wasiIfaceHTTPTypes, "[method]outgoing-request.body", h.outgoingRequestBody, reqBodyFD, reqBodyR),
@@ -1793,29 +1791,6 @@ func wasiHTTPOutgoingOptions(h *wasiHTTP) []Option {
 		withImportCustom(wasiIfaceHTTPTypes, "[method]incoming-response.status", h.incomingResponseStatus, statusFD, statusR),
 		withImportCustom(wasiIfaceHTTPTypes, "[method]incoming-response.consume", h.incomingResponseConsume, consumeFD, consumeR),
 		withImportCustom(wasiIfaceHTTPTypes, "[method]incoming-body.stream", h.incomingBodyStream, streamFD, streamR),
-		withImportCustom(wasiIfacePoll, "[method]pollable.block", httpPollableBlock, blockFD, blockR),
-		withImportCustom(wasiIfacePoll, "poll", httpPoll, pollFD, pollR),
 	}
 }
 
-// httpPollableBlock implements wasi:io/poll [method]pollable.block: every
-// pollable the http host mints is already ready (outgoing-handler.handle
-// resolves synchronously), so block is an immediate no-op.
-func httpPollableBlock(context.Context, []abi.Value) ([]abi.Value, error) { return nil, nil }
-
-// httpPoll implements wasi:io/poll.poll(in: list<borrow<pollable>>) ->
-// list<u32>: reports every input index ready, matching the always-ready model.
-func httpPoll(_ context.Context, args []abi.Value) ([]abi.Value, error) {
-	if len(args) != 1 {
-		return nil, fmt.Errorf("wasi:io/poll.poll: expected 1 arg (in), got %d", len(args))
-	}
-	list, ok := args[0].([]abi.Value)
-	if !ok {
-		return nil, fmt.Errorf("wasi:io/poll.poll: in: expected list, got %T", args[0])
-	}
-	out := make([]abi.Value, 0, len(list))
-	for i := range list {
-		out = append(out, uint32(i))
-	}
-	return []abi.Value{out}, nil
-}

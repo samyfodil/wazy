@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
@@ -267,6 +268,13 @@ type WASIConfig struct {
 	// http.DefaultClient. A test can inject one whose Transport reaches a
 	// scratch backend. Has no effect unless EnableHTTP is also true.
 	HTTPClient *http.Client
+
+	// WallClock, when non-nil, is the source wasi:clocks/wall-clock.now reads
+	// the current time from. Nil uses time.Now. It is the one injectable clock
+	// surface (monotonic-clock stays real so std::thread::sleep genuinely
+	// elapses -- see wasi_poll.go): a test pins WallClock to a fixed instant to
+	// assert a guest's printed wall time deterministically.
+	WallClock func() time.Time
 }
 
 // WithWASI returns the Options that register a WASI 0.2 host implementation
@@ -318,6 +326,12 @@ func WithWASI(cfg WASIConfig) []Option {
 		listen = func(network, address string) (net.Listener, error) { return net.Listen(network, address) }
 	}
 	sockets := newWasiSockets(dial, listenPacket, listen)
+
+	wallClock := cfg.WallClock
+	if wallClock == nil {
+		wallClock = time.Now
+	}
+	pollHost := newWasiPoll(wallClock)
 
 	// httphost backs wasi:http server support (wasi_http.go), gated behind
 	// cfg.EnableHTTP. Always constructed so writeSink/checkWrite/blockingFlush
@@ -591,6 +605,12 @@ func WithWASI(cfg WASIConfig) []Option {
 		withImportCustom(wasiIfaceStreams, "[method]output-stream.blocking-write-and-flush", write, writeFD, writeResolve),
 		withImportCustom(wasiIfaceStreams, "[method]output-stream.blocking-flush", blockingFlush, blockingFlushFD, blockingFlushResolve),
 	}
+	// wasi:io/poll (timer-aware block/poll + the pollable resource tag) and
+	// wasi:clocks are registered unconditionally: they are shared by sockets,
+	// http, and clocks alike, so one central timer-aware implementation
+	// (wasi_poll.go) replaces the former per-interface no-op copies. Harmless
+	// when a guest imports none of them (the host funcs simply go uncalled).
+	opts = append(opts, wasiClockPollOptions(pollHost)...)
 	opts = append(opts, wasiFilesystemOptions(fs, sockets)...)
 	if cfg.AllowTCP {
 		opts = append(opts, wasiSocketOptions(sockets)...)

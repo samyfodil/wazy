@@ -562,26 +562,6 @@ func TestHTTP_FutureAndResponse(t *testing.T) {
 	reqErr(t, err, "no input-stream backing")
 }
 
-func TestHTTP_PollNoOps(t *testing.T) {
-	if _, err := httpPollableBlock(context.Background(), nil); err != nil {
-		t.Fatal(err)
-	}
-	res, err := httpPoll(context.Background(), []abi.Value{[]abi.Value{uint32(7), uint32(8)}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	out := res[0].([]abi.Value)
-	if len(out) != 2 || out[0].(uint32) != 0 || out[1].(uint32) != 1 {
-		t.Fatalf("poll ready indices = %v", out)
-	}
-	if _, err := httpPoll(context.Background(), nil); err == nil {
-		t.Fatal("expected arg-count error")
-	}
-	if _, err := httpPoll(context.Background(), []abi.Value{"notalist"}); err == nil {
-		t.Fatal("expected type error")
-	}
-}
-
 func TestHTTP_IncomingRequestHeaders(t *testing.T) {
 	h := newTestHTTP()
 	hdr := http.Header{}

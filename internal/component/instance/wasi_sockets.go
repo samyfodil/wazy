@@ -1077,52 +1077,6 @@ func wasiSocketOptions(sockets *wasiSockets) []Option {
 		return []abi.Value{wasiPollableRep}, nil
 	}
 
-	// pollableBlock implements [method]pollable.block(self:
-	// borrow<pollable>) -> () -- self is already resolved/validated by
-	// liftHostArgs; see this file's package doc's "Blocking, single-shot"
-	// section for why every pollable this package mints is already ready,
-	// making block() unconditionally an immediate no-op.
-	pollableBlock := func(context.Context, []abi.Value) ([]abi.Value, error) {
-		return nil, nil
-	}
-
-	// poll implements the free wasi:io/poll.poll(in: list<borrow<pollable>>)
-	// -> list<u32> func -- WIT-complete even though this package's own
-	// real_tcp fixture never calls it at runtime (see this file's package
-	// doc). in's borrow<pollable> elements are nested inside a list, so
-	// (like finish-connect's nested own<T> results) liftHostArgs/
-	// resolveHandleArg never touches them -- this closure resolves each
-	// handle to a rep itself, purely to validate it names a live pollable
-	// (trap loud on a bogus handle, matching every other borrow<T>
-	// resolution in this package), and reports every index ready: see
-	// wasiPollableRep's doc for why there is no non-ready pollable this
-	// package could ever mint.
-	poll := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
-		if len(args) != 1 {
-			return nil, fmt.Errorf("wasi:io/poll.poll: expected 1 arg (in), got %d", len(args))
-		}
-		list, ok := args[0].([]abi.Value)
-		if !ok {
-			return nil, fmt.Errorf("wasi:io/poll.poll: in: expected list<borrow<pollable>> ([]abi.Value), got %T", args[0])
-		}
-		resources, err := sockets.getResources()
-		if err != nil {
-			return nil, err
-		}
-		out := make([]abi.Value, 0, len(list))
-		for i, v := range list {
-			h, ok := v.(uint32)
-			if !ok {
-				return nil, fmt.Errorf("wasi:io/poll.poll: in[%d]: expected uint32 handle, got %T", i, v)
-			}
-			if _, err := resources.Rep(wasiPollableResType, h); err != nil {
-				return nil, fmt.Errorf("wasi:io/poll.poll: in[%d]: %w", i, err)
-			}
-			out = append(out, uint32(i))
-		}
-		return []abi.Value{out}, nil
-	}
-
 	instNetFD, instNetResolve := wasiInstanceNetworkSig()
 	createTCPFD, createTCPResolve := wasiCreateTCPSocketSig()
 	startConnectFD, startConnectResolve := wasiTCPStartConnectSig()
@@ -1138,20 +1092,18 @@ func wasiSocketOptions(sockets *wasiSockets) []Option {
 	tcpSubFD, tcpSubResolve := wasiSubscribeSig(wasiTCPSocketResType)
 	inSubFD, inSubResolve := wasiSubscribeSig(wasiInputStreamResType)
 	outSubFD, outSubResolve := wasiSubscribeSig(wasiOutputStreamResType)
-	blockFD, blockResolve := wasiPollableBlockSig()
-	pollFD, pollResolve := wasiPollSig()
 
 	return []Option{
 		withResourcesHook(sockets.setResources),
 
 		// See withResourceTag's doc (host_import.go): without these, a
-		// guest that drops an owned network/tcp-socket/pollable handle
-		// trips the handle table's cross-type-confusion check, exactly the
-		// same failure mode wasi_fs.go's own withResourceTag calls guard
-		// against for descriptor/input-stream/output-stream/error.
+		// guest that drops an owned network/tcp-socket handle trips the
+		// handle table's cross-type-confusion check, exactly the same
+		// failure mode wasi_fs.go's own withResourceTag calls guard against
+		// for descriptor/input-stream/output-stream/error. (The pollable tag
+		// + block/poll are registered centrally -- see wasi_poll.go.)
 		withResourceTag(wasiIfaceSocketsNetwork, "network", wasiNetworkResType),
 		withResourceTag(wasiIfaceSocketsTCP, "tcp-socket", wasiTCPSocketResType),
-		withResourceTag(wasiIfacePoll, "pollable", wasiPollableResType),
 
 		withImportCustom(wasiIfaceSocketsInstanceNet, "instance-network", instanceNetwork, instNetFD, instNetResolve),
 		withImportCustom(wasiIfaceSocketsTCPCreateSoc, "create-tcp-socket", createTCPSocket, createTCPFD, createTCPResolve),
@@ -1168,8 +1120,6 @@ func wasiSocketOptions(sockets *wasiSockets) []Option {
 		withImportCustom(wasiIfaceSocketsTCP, "[method]tcp-socket.subscribe", tcpSubscribe, tcpSubFD, tcpSubResolve),
 		withImportCustom(wasiIfaceStreams, "[method]input-stream.subscribe", streamSubscribe, inSubFD, inSubResolve),
 		withImportCustom(wasiIfaceStreams, "[method]output-stream.subscribe", streamSubscribe, outSubFD, outSubResolve),
-		withImportCustom(wasiIfacePoll, "[method]pollable.block", pollableBlock, blockFD, blockResolve),
-		withImportCustom(wasiIfacePoll, "poll", poll, pollFD, pollResolve),
 	}
 }
 
@@ -1232,43 +1182,6 @@ func wasiUDPSocketOptions(sockets *wasiSockets) []Option {
 	// only ever one network).
 	instanceNetwork := func(context.Context, []abi.Value) ([]abi.Value, error) {
 		return []abi.Value{wasiNetworkRep}, nil
-	}
-
-	// pollableBlock/poll are likewise re-registered here (identical bodies
-	// to wasiSocketOptions' own, see their docs there): AllowUDP may be set
-	// without AllowTCP, and udp-socket/datagram-stream subscribe() mints
-	// the exact same always-ready pollable singleton TCP's own subscribe
-	// methods do (wasiPollableRep), which a UDP-only guest's compiled glue
-	// still calls [method]pollable.block/poll against while bridging
-	// start-bind/receive's async contract onto a blocking call (see
-	// incomingDatagramStream.receive's own doc).
-	pollableBlock := func(context.Context, []abi.Value) ([]abi.Value, error) {
-		return nil, nil
-	}
-	poll := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
-		if len(args) != 1 {
-			return nil, fmt.Errorf("wasi:io/poll.poll: expected 1 arg (in), got %d", len(args))
-		}
-		list, ok := args[0].([]abi.Value)
-		if !ok {
-			return nil, fmt.Errorf("wasi:io/poll.poll: in: expected list<borrow<pollable>> ([]abi.Value), got %T", args[0])
-		}
-		resources, err := sockets.getResources()
-		if err != nil {
-			return nil, err
-		}
-		out := make([]abi.Value, 0, len(list))
-		for i, v := range list {
-			h, ok := v.(uint32)
-			if !ok {
-				return nil, fmt.Errorf("wasi:io/poll.poll: in[%d]: expected uint32 handle, got %T", i, v)
-			}
-			if _, err := resources.Rep(wasiPollableResType, h); err != nil {
-				return nil, fmt.Errorf("wasi:io/poll.poll: in[%d]: %w", i, err)
-			}
-			out = append(out, uint32(i))
-		}
-		return []abi.Value{out}, nil
 	}
 
 	createUDPSocket := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
@@ -1499,8 +1412,6 @@ func wasiUDPSocketOptions(sockets *wasiSockets) []Option {
 	}
 
 	instNetFD, instNetResolve := wasiInstanceNetworkSig()
-	blockFD, blockResolve := wasiPollableBlockSig()
-	pollFD, pollResolve := wasiPollSig()
 	createUDPFD, createUDPResolve := wasiCreateUDPSocketSig()
 	startBindFD, startBindResolve := wasiUDPStartBindSig()
 	finishBindFD, finishBindResolve := wasiUDPFinishBindSig()
@@ -1516,16 +1427,14 @@ func wasiUDPSocketOptions(sockets *wasiSockets) []Option {
 		withResourcesHook(sockets.setResources),
 
 		// See withResourceTag's doc (host_import.go) -- same reasoning as
-		// wasiSocketOptions' identical block for TCP's own resources.
+		// wasiSocketOptions' identical block for TCP's own resources. (The
+		// pollable tag + block/poll are registered centrally, see wasi_poll.go.)
 		withResourceTag(wasiIfaceSocketsNetwork, "network", wasiNetworkResType),
-		withResourceTag(wasiIfacePoll, "pollable", wasiPollableResType),
 		withResourceTag(wasiIfaceSocketsUDP, "udp-socket", wasiUDPSocketResType),
 		withResourceTag(wasiIfaceSocketsUDP, "incoming-datagram-stream", wasiIncomingDatagramStreamResType),
 		withResourceTag(wasiIfaceSocketsUDP, "outgoing-datagram-stream", wasiOutgoingDatagramStreamResType),
 
 		withImportCustom(wasiIfaceSocketsInstanceNet, "instance-network", instanceNetwork, instNetFD, instNetResolve),
-		withImportCustom(wasiIfacePoll, "[method]pollable.block", pollableBlock, blockFD, blockResolve),
-		withImportCustom(wasiIfacePoll, "poll", poll, pollFD, pollResolve),
 		withImportCustom(wasiIfaceSocketsUDPCreateSoc, "create-udp-socket", createUDPSocket, createUDPFD, createUDPResolve),
 		withImportCustom(wasiIfaceSocketsUDP, "[method]udp-socket.start-bind", udpStartBind, startBindFD, startBindResolve),
 		withImportCustom(wasiIfaceSocketsUDP, "[method]udp-socket.finish-bind", udpFinishBind, finishBindFD, finishBindResolve),
