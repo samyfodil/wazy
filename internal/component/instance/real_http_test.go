@@ -321,3 +321,35 @@ func TestRealHTTP_OutgoingRequestBody(t *testing.T) {
 		t.Errorf("body = %q, want %q (the request body echoed by the backend)", body, "client-post-body")
 	}
 }
+
+//go:embed testdata/real_http_reqopts.component.wasm
+var realHTTPReqOptsWasm []byte
+
+// TestRealHTTP_RequestOptions runs a real rustc client guest that sets
+// request-options (connect + first-byte timeouts) before its outbound request.
+// Previously such a guest trapped ("request-options are not supported"); now
+// handle accepts them and applies the timeout as a request deadline (which the
+// fast local RoundTripper never hits). The guest returns the backend body.
+func TestRealHTTP_RequestOptions(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	client := &http.Client{Transport: backendRoundTripper{t: t}}
+	inst, err := Instantiate(ctx, r, realHTTPReqOptsWasm, WithWASI(WASIConfig{EnableHTTP: true, HTTPClient: client})...)
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	defer inst.Close(ctx)
+
+	status, _, body, err := inst.serveHTTP(ctx, "GET", mustURL("/trigger"), http.Header{}, nil)
+	if err != nil {
+		t.Fatalf("serveHTTP: %v", err)
+	}
+	if status != 200 {
+		t.Errorf("status = %d, want 200", status)
+	}
+	if string(body) != "hello-from-backend\n" {
+		t.Errorf("body = %q, want %q", body, "hello-from-backend\n")
+	}
+}

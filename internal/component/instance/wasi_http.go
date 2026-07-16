@@ -43,6 +43,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
@@ -159,6 +160,15 @@ type wasiHTTP struct {
 	futures     map[uint32]*httpFuture
 	inResponses map[uint32]*httpIncomingResponse
 	inBodies    map[uint32]*httpIncomingBody
+	reqOptions  map[uint32]*httpRequestOptions
+}
+
+// httpRequestOptions is the host state behind a request-options resource. Only
+// the timeouts a real client guest sets are tracked; applied as an overall
+// request deadline (Go's http.Client doesn't split connect vs first-byte).
+type httpRequestOptions struct {
+	connectTimeout   time.Duration // 0 = unset
+	firstByteTimeout time.Duration // 0 = unset
 }
 
 // httpOutgoingRequest is the host state behind an outgoing-request resource,
@@ -213,6 +223,7 @@ func newWasiHTTP() *wasiHTTP {
 		futures:        make(map[uint32]*httpFuture),
 		inResponses:    make(map[uint32]*httpIncomingResponse),
 		inBodies:       make(map[uint32]*httpIncomingBody),
+		reqOptions:     make(map[uint32]*httpRequestOptions),
 	}
 }
 
@@ -1285,6 +1296,54 @@ func (h *wasiHTTP) outgoingRequestBody(_ context.Context, args []abi.Value) ([]a
 	return []abi.Value{abi.ResultValue{IsErr: false, Payload: handle}}, nil
 }
 
+func (h *wasiHTTP) newReqOptionsRep(o *httpRequestOptions) uint32 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	rep := h.nextRep
+	h.nextRep++
+	h.reqOptions[rep] = o
+	return rep
+}
+
+func (h *wasiHTTP) requestOptionsConstructor(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+	if len(args) != 0 {
+		return nil, fmt.Errorf("[constructor]request-options: expected 0 args, got %d", len(args))
+	}
+	rep := h.newReqOptionsRep(&httpRequestOptions{})
+	return []abi.Value{rep}, nil // top-level own<request-options>
+}
+
+// requestOptionsSetTimeout implements set-connect-timeout / set-first-byte-timeout
+// (both self: borrow<request-options>, duration: option<u64 ns> -> result).
+func (h *wasiHTTP) requestOptionsSetTimeout(fn string, connect bool) HostFunc {
+	return func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 2 {
+			return nil, fmt.Errorf("%s: expected 2 args (self, duration), got %d", fn, len(args))
+		}
+		rep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("%s: self: expected uint32 rep, got %T", fn, args[0])
+		}
+		h.mu.Lock()
+		o, ok := h.reqOptions[rep]
+		if ok && args[1] != nil { // Some(duration): u64 nanoseconds
+			if ns, okd := args[1].(uint64); okd {
+				d := time.Duration(ns) //nolint:gosec // ns is a wasm-supplied duration
+				if connect {
+					o.connectTimeout = d
+				} else {
+					o.firstByteTimeout = d
+				}
+			}
+		}
+		h.mu.Unlock()
+		if !ok {
+			return nil, fmt.Errorf("%s: rep %d does not name a live request-options", fn, rep)
+		}
+		return []abi.Value{abi.ResultValue{IsErr: false}}, nil
+	}
+}
+
 // httpSelfRep validates a (self, arg) 2-arg method whose self is a resource rep.
 func httpSelfRep(args []abi.Value, fn string) (uint32, error) {
 	if len(args) != 2 {
@@ -1309,14 +1368,34 @@ func (h *wasiHTTP) outgoingHandlerHandle(ctx context.Context, args []abi.Value) 
 	if !ok {
 		return nil, fmt.Errorf("wasi:http/outgoing-handler.handle: request: expected uint32 rep, got %T", args[0])
 	}
-	// args[1] is option<request-options>; None (nil) is all this milestone
-	// supports -- a Some(request-options) handle would need per-request timeouts.
-	if args[1] != nil {
-		return nil, fmt.Errorf("wasi:http/outgoing-handler.handle: request-options are not supported by this milestone")
-	}
 	res, err := h.getResources()
 	if err != nil {
 		return nil, err
+	}
+
+	// args[1] is option<own<request-options>>. Some(handle): consume it and
+	// apply its timeout as an overall request deadline.
+	var timeout time.Duration
+	if args[1] != nil {
+		optHandle, ok := args[1].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("wasi:http/outgoing-handler.handle: options: expected request-options handle, got %T", args[1])
+		}
+		optRep, err := res.TakeOwn(wasiHTTPRequestOptionsResType, optHandle)
+		if err != nil {
+			return nil, fmt.Errorf("wasi:http/outgoing-handler.handle: request-options handle: %w", err)
+		}
+		h.mu.Lock()
+		if o := h.reqOptions[optRep]; o != nil {
+			// Go's http.Client has no separate connect/first-byte timeout; use
+			// the larger as the overall deadline.
+			timeout = o.connectTimeout
+			if o.firstByteTimeout > timeout {
+				timeout = o.firstByteTimeout
+			}
+		}
+		delete(h.reqOptions, optRep)
+		h.mu.Unlock()
 	}
 
 	h.mu.Lock()
@@ -1341,7 +1420,13 @@ func (h *wasiHTTP) outgoingHandlerHandle(ctx context.Context, args []abi.Value) 
 	if r.body != nil {
 		reqBody = bytes.NewReader(r.body.buf.Bytes())
 	}
-	hreq, err := http.NewRequestWithContext(ctx, r.method, rawURL, reqBody)
+	reqCtx := ctx
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		reqCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	hreq, err := http.NewRequestWithContext(reqCtx, r.method, rawURL, reqBody)
 	if err != nil {
 		// Malformed request: report as HTTP-request-URI-invalid (disc 19).
 		fut.errCode = 19
@@ -1550,6 +1635,24 @@ func httpOutgoingRequestBodySig() (binary.FuncDesc, abi.Resolver) {
 	}, tbl.resolver()
 }
 
+func httpRequestOptionsConstructorSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	ownRef := tbl.add(binary.OwnDesc{ResourceType: wasiHTTPRequestOptionsResType})
+	return binary.FuncDesc{Results: binary.FuncResults{Unnamed: &ownRef}}, tbl.resolver()
+}
+
+// httpSetTimeoutSig: (self: borrow<request-options>, duration: option<u64 ns>) -> result.
+func httpSetTimeoutSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiHTTPRequestOptionsResType})
+	durRef := tbl.add(binary.OptionDesc{Element: binary.TypeRef{Primitive: "u64"}})
+	resRef := tbl.add(binary.ResultDesc{})
+	return binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}, {Name: "duration", Type: durRef}},
+		Results: binary.FuncResults{Unnamed: &resRef},
+	}, tbl.resolver()
+}
+
 func httpSetMethodSig() (binary.FuncDesc, abi.Resolver) {
 	tbl := &typeTable{}
 	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiHTTPOutgoingRequestResType})
@@ -1662,6 +1765,8 @@ func wasiHTTPOutgoingOptions(h *wasiHTTP) []Option {
 	consumeFD, consumeR := httpIncomingResponseConsumeSig()
 	streamFD, streamR := httpIncomingBodyStreamSig()
 	reqBodyFD, reqBodyR := httpOutgoingRequestBodySig()
+	optCtorFD, optCtorR := httpRequestOptionsConstructorSig()
+	setTimeoutFD, setTimeoutR := httpSetTimeoutSig()
 	blockFD, blockR := wasiPollableBlockSig()
 	pollFD, pollR := wasiPollSig()
 
@@ -1675,6 +1780,9 @@ func wasiHTTPOutgoingOptions(h *wasiHTTP) []Option {
 
 		withImportCustom(wasiIfaceHTTPTypes, "[constructor]outgoing-request", h.outgoingRequestConstructor, reqCtorFD, reqCtorR),
 		withImportCustom(wasiIfaceHTTPTypes, "[method]outgoing-request.body", h.outgoingRequestBody, reqBodyFD, reqBodyR),
+		withImportCustom(wasiIfaceHTTPTypes, "[constructor]request-options", h.requestOptionsConstructor, optCtorFD, optCtorR),
+		withImportCustom(wasiIfaceHTTPTypes, "[method]request-options.set-connect-timeout", h.requestOptionsSetTimeout("[method]request-options.set-connect-timeout", true), setTimeoutFD, setTimeoutR),
+		withImportCustom(wasiIfaceHTTPTypes, "[method]request-options.set-first-byte-timeout", h.requestOptionsSetTimeout("[method]request-options.set-first-byte-timeout", false), setTimeoutFD, setTimeoutR),
 		withImportCustom(wasiIfaceHTTPTypes, "[method]outgoing-request.set-method", h.outgoingRequestSetMethod, methodFD, methodR),
 		withImportCustom(wasiIfaceHTTPTypes, "[method]outgoing-request.set-path-with-query", h.outgoingRequestSetPathWithQuery, pathFD, pathR),
 		withImportCustom(wasiIfaceHTTPTypes, "[method]outgoing-request.set-scheme", h.outgoingRequestSetScheme, schemeFD, schemeR),

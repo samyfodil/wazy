@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/samyfodil/wazy/internal/component/abi"
 )
@@ -447,8 +448,11 @@ func TestHTTP_OutgoingHandlerHandle(t *testing.T) {
 	reqErr(t, err, "expected 2 args")
 	_, err = h.outgoingHandlerHandle(context.Background(), []abi.Value{"x", nil})
 	reqErr(t, err, "request: expected uint32 rep")
-	_, err = h.outgoingHandlerHandle(context.Background(), []abi.Value{mk("GET", "http", "h", "/x"), uint32(1)})
-	reqErr(t, err, "request-options are not supported")
+	// A non-nil options that isn't a live request-options handle fails loud.
+	_, err = h.outgoingHandlerHandle(context.Background(), []abi.Value{mk("GET", "http", "h", "/x"), "notahandle"})
+	reqErr(t, err, "options: expected request-options handle")
+	_, err = h.outgoingHandlerHandle(context.Background(), []abi.Value{mk("GET", "http", "h", "/x"), uint32(999)})
+	reqErr(t, err, "request-options handle")
 	_, err = h.outgoingHandlerHandle(context.Background(), []abi.Value{uint32(999), nil})
 	reqErr(t, err, "does not name a live outgoing-request")
 }
@@ -681,4 +685,37 @@ func TestHTTP_OutgoingRequestBody(t *testing.T) {
 	reqErr(t, err, "expected uint32 rep")
 	_, err = h.outgoingRequestBody(context.Background(), []abi.Value{uint32(999)})
 	reqErr(t, err, "does not name a live outgoing-request")
+}
+
+func TestHTTP_RequestOptions(t *testing.T) {
+	h := newTestHTTP()
+	res, err := h.requestOptionsConstructor(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep := res[0].(uint32)
+	_, err = h.requestOptionsConstructor(context.Background(), []abi.Value{uint32(1)})
+	reqErr(t, err, "expected 0 args")
+
+	setConn := h.requestOptionsSetTimeout("set-connect-timeout", true)
+	setFB := h.requestOptionsSetTimeout("set-first-byte-timeout", false)
+	if _, err := setConn(context.Background(), []abi.Value{rep, uint64(3000000000)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setFB(context.Background(), []abi.Value{rep, uint64(7000000000)}); err != nil {
+		t.Fatal(err)
+	}
+	if h.reqOptions[rep].connectTimeout != 3*time.Second || h.reqOptions[rep].firstByteTimeout != 7*time.Second {
+		t.Fatalf("timeouts = %v", h.reqOptions[rep])
+	}
+	// None (nil) leaves it unset (no panic).
+	if _, err := setConn(context.Background(), []abi.Value{rep, nil}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = setConn(context.Background(), []abi.Value{rep})
+	reqErr(t, err, "expected 2 args")
+	_, err = setConn(context.Background(), []abi.Value{"x", uint64(1)})
+	reqErr(t, err, "self: expected uint32 rep")
+	_, err = setConn(context.Background(), []abi.Value{uint32(999), uint64(1)})
+	reqErr(t, err, "does not name a live request-options")
 }
