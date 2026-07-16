@@ -1,0 +1,15 @@
+package example:res;
+
+interface counters {
+  resource counter {
+    constructor(start: u32);
+    increment: func() -> u32;
+    add: func(n: u32) -> u32;
+    get: func() -> u32;
+  }
+  make: func(start: u32) -> counter;
+}
+
+world res {
+  export counters;
+}

@@ -240,6 +240,14 @@ type boundExport struct {
 	paramErrs       []error
 	paramSteps      []abi.LowerStep
 
+	// paramResolveHandle[i] is true when param i is an own/borrow of a
+	// GUEST-owned (locally-defined) resource: calling the guest export must
+	// convert the host's handle to the guest's rep (the guest method's core
+	// func takes the rep). False for a host-owned resource (WASI/http), where
+	// the guest receives the handle it later passes back to host methods.
+	// Computed from comp at bind time -- see finalizeBoundExport.
+	paramResolveHandle []bool
+
 	hasResult        bool
 	tooManyResults   int // > 0: fd declares this many (>1) named results
 	resultType       binary.TypeDesc
@@ -337,6 +345,19 @@ func computeBoundExportABI(fd binary.FuncDesc, resolve abi.Resolver) *boundExpor
 	return m
 }
 
+// resourceTypeIdxOf returns the resource type index of an own<T>/borrow<T>
+// type descriptor, and ok=false for anything else.
+func resourceTypeIdxOf(t binary.TypeDesc) (uint32, bool) {
+	switch d := t.(type) {
+	case binary.OwnDesc:
+		return d.ResourceType, true
+	case binary.BorrowDesc:
+		return d.ResourceType, true
+	default:
+		return 0, false
+	}
+}
+
 // finalizeBoundExport resolves be's per-instance core func handles and populates
 // its ABI metadata (from abiCache when non-nil, else computed fresh). funcIdx
 // keys the cache within comp -- see the boundExport doc and CompileCache.abiFor.
@@ -358,6 +379,24 @@ func finalizeBoundExport(be *boundExport, resolve abi.Resolver, abiCache *Compil
 	be.coreParamsWant, be.coreResultsWant, be.flattenErr = m.coreParamsWant, m.coreResultsWant, m.flattenErr
 	be.paramTypes, be.paramUsesMemory, be.paramErrs, be.paramSteps = m.paramTypes, m.paramUsesMemory, m.paramErrs, m.paramSteps
 	be.hasResult, be.tooManyResults = m.hasResult, m.tooManyResults
+
+	// A guest export whose own/borrow param names a GUEST-owned resource
+	// receives the rep, not the handle (see boundExportABI.paramResolveHandle).
+	// resolveImportedResourceName reports a HOST-owned resource (an
+	// imported-instance alias); its negation is guest-owned. comp is nil on the
+	// trivial no-import path, which has no guest-owned resource params.
+	if comp != nil {
+		be.paramResolveHandle = make([]bool, len(be.paramTypes))
+		for i, pt := range be.paramTypes {
+			rt, ok := resourceTypeIdxOf(pt)
+			if !ok {
+				continue
+			}
+			if _, _, imported := resolveImportedResourceName(comp, rt); !imported {
+				be.paramResolveHandle[i] = true
+			}
+		}
+	}
 	be.resultType, be.resultUsesMemory, be.resultFlatKinds, be.resultErr = m.resultType, m.resultUsesMemory, m.resultFlatKinds, m.resultErr
 }
 
@@ -855,10 +894,20 @@ func (in *Instance) lowerParams(be *boundExport, args []abi.Value, mem []byte, m
 		if be.paramUsesMemory[i] && !memAvailable {
 			return nil, fmt.Errorf("component/instance: export %q param %d (%s) requires linear memory (string/list), but the core module exports no memory", exportName, i, p.Name)
 		}
+		argVal := args[i]
+		// A guest-owned own/borrow resource arg: convert the host's handle to
+		// the guest's rep (the guest's method core func takes the rep). See
+		// boundExportABI.paramResolveHandle.
+		if i < len(be.paramResolveHandle) && be.paramResolveHandle[i] {
+			argVal, err = resolveHandleArg(in.resources, be.paramTypes[i], argVal)
+			if err != nil {
+				return nil, fmt.Errorf("component/instance: export %q param %d (%s): %w", exportName, i, p.Name, err)
+			}
+		}
 		// Compiled per-param plan (abi.CompileLower), equivalent to
 		// abi.LowerFlatInto(coreArgs, args[i], be.paramTypes[i], ...) but with
 		// the type-switch/Flatten/intermediate-slice precomputed at bind time.
-		coreArgs, err = be.paramSteps[i].Lower(coreArgs, args[i], realloc, mem)
+		coreArgs, err = be.paramSteps[i].Lower(coreArgs, argVal, realloc, mem)
 		if err != nil {
 			return nil, fmt.Errorf("component/instance: export %q param %d (%s): lower: %w", exportName, i, p.Name, err)
 		}
