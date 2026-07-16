@@ -1051,6 +1051,49 @@ func TestReadInstanceDeclDesc(t *testing.T) {
 		}
 	})
 
+	t.Run("core type: func type with params/results", func(t *testing.T) {
+		// 0x60 functype, 1 param i32 (0x7f), 1 result i32.
+		buf := []byte{0x60, 0x01, 0x7f, 0x01, 0x7f}
+		off, err := readCoretypeDef(buf, 0)
+		if err != nil {
+			t.Fatalf("readCoretypeDef: %v", err)
+		}
+		if off != len(buf) {
+			t.Errorf("off=%d, want %d", off, len(buf))
+		}
+	})
+
+	t.Run("core type: module type with import/type/alias/export decls", func(t *testing.T) {
+		buf := []byte{
+			0x50, 0x04, // module type, 4 decls
+			0x00, 0x00, 0x00, 0x00, 0x00, // import: nm "" nm "" importdesc(func 0)
+			0x01, 0x60, 0x00, 0x00, // type: empty func type
+			0x02, 0x00, 0x01, 0x00, 0x00, // alias: sort 0x00, outer(0x01) ct 0 idx 0
+			0x03, 0x00, 0x00, 0x00, // export: nm "" importdesc(func 0)
+		}
+		off, err := readCoretypeDef(buf, 0)
+		if err != nil {
+			t.Fatalf("readCoretypeDef: %v", err)
+		}
+		if off != len(buf) {
+			t.Errorf("off=%d, want %d", off, len(buf))
+		}
+	})
+
+	t.Run("core type: invalid tags", func(t *testing.T) {
+		if _, err := readCoretypeDef([]byte{0x7f}, 0); err == nil {
+			t.Error("expected an error for an invalid core:type tag")
+		}
+		// module type with an invalid moduledecl tag.
+		if _, err := readCoretypeDef([]byte{0x50, 0x01, 0x7f}, 0); err == nil {
+			t.Error("expected an error for an invalid coremoduledecl tag")
+		}
+		// import with an unsupported (non-func) importdesc sort.
+		if _, err := readCoretypeDef([]byte{0x50, 0x01, 0x00, 0x00, 0x00, 0x02}, 0); err == nil {
+			t.Error("expected an error for an unsupported core:importdesc sort")
+		}
+	})
+
 	t.Run("invalid tag", func(t *testing.T) {
 		buf := []byte{0xff}
 		_, err := readInstanceDeclDesc(buf, 0)

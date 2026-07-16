@@ -117,6 +117,16 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		if im.ExternType == 0x03 {
 			continue
 		}
+		// A top-level func import (0x01) -- a nested component parameterized by a
+		// func, satisfied by a `(with "x" (func ...))` instantiate-arg wired into
+		// cfg.imports (see instantiateNestedInstances), keyed by the import name.
+		// Only allowed when actually provided; an unsatisfied func import is still
+		// rejected (a top-level component importing a func wazy can't supply).
+		if im.ExternType == 0x01 {
+			if _, ok := cfg.imports[mkImportKey(im.Name, "")]; ok {
+				continue
+			}
+		}
 		if im.ExternType != 0x05 { // instance
 			return nil, fmt.Errorf("component/instance: import %q has extern kind %s (%#x); only instance imports are supported", im.Name, api.ExternTypeName(im.ExternType), im.ExternType)
 		}
@@ -591,47 +601,86 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 			compileCache:     cfg.compileCache,
 			resCanon:         nested.ResourceDefIndex, // reduce a resource's deftype/export-alias indices to one tag
 			importedResDtors: map[uint32]func() api.Function{},
+			hostResDtors:     map[uint32]func(context.Context, uint32) error{},
 		}
+		// typeArgTags maps a resource type the nested component IMPORTS (by its
+		// own type-import TypeSpace index) to the composition-global tag the outer
+		// provides for it -- so the nested component's own<r>/borrow<r>/
+		// resource.drop tag the shared handle table consistently with the
+		// provider (a host resource passed in as a `(with "r" (type ...))` arg).
+		typeArgTags := map[uint32]uint32{}
 		for _, arg := range inst.Args {
-			if arg.Sort != 0x05 { // instance
-				failClose()
-				return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q: only instance args are supported (got sort %#x)", compInstIdx, arg.Name, arg.Sort)
-			}
-			sib, ok := byIdx[int(arg.SortIdx)]
-			if !ok {
-				failClose()
-				return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q references instance %d, which is not a prior nested instantiation", compInstIdx, arg.Name, arg.SortIdx)
-			}
-			// Line up the sibling's exported resources with the nested
-			// component's imports of the same name: provider resource index ->
-			// importer resource index, plus the definer's dtor under the
-			// importer's drop tag.
-			importerResIdx := importedResourceIndices(nested, arg.Name)
-			provDefToName := map[uint32]string{}
-			if sib.comp != nil {
-				for rname, sibDef := range exportedResourceDefs(sib.comp) {
-					provDefToName[sibDef] = rname
-					if dIdx, ok := importerResIdx[rname]; ok {
-						tag := nested.ResourceDefIndex(dIdx)
-						if dtor := sib.resourceDtors[sibDef]; dtor != nil {
-							subCfg.importedResDtors[tag] = dtor
+			switch arg.Sort {
+			case 0x05: // instance: a sibling sub-Instance
+				sib, ok := byIdx[int(arg.SortIdx)]
+				if !ok {
+					failClose()
+					return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q references instance %d, which is not a prior nested instantiation", compInstIdx, arg.Name, arg.SortIdx)
+				}
+				// Line up the sibling's exported resources with the nested
+				// component's imports of the same name, plus the definer's dtor.
+				importerResIdx := importedResourceIndices(nested, arg.Name)
+				provDefToName := map[uint32]string{}
+				if sib.comp != nil {
+					for rname, sibDef := range exportedResourceDefs(sib.comp) {
+						provDefToName[sibDef] = rname
+						if dIdx, ok := importerResIdx[rname]; ok {
+							tag := nested.ResourceDefIndex(dIdx)
+							if dtor := sib.resourceDtors[sibDef]; dtor != nil {
+								subCfg.importedResDtors[tag] = dtor
+							}
 						}
 					}
 				}
-			}
-			provToImp := func(provIdx uint32) (uint32, bool) {
-				name, ok := provDefToName[sib.canonTag(provIdx)]
-				if !ok {
-					return 0, false
+				provToImp := func(provIdx uint32) (uint32, bool) {
+					name, ok := provDefToName[sib.canonTag(provIdx)]
+					if !ok {
+						return 0, false
+					}
+					dIdx, ok := importerResIdx[name]
+					return dIdx, ok
 				}
-				dIdx, ok := importerResIdx[name]
-				return dIdx, ok
-			}
-			for name, be := range sib.exports {
-				if strings.ContainsRune(name, '#') { // interface-member export, not a plain func
-					continue
+				for name, be := range sib.exports {
+					if strings.ContainsRune(name, '#') { // interface-member export, not a plain func
+						continue
+					}
+					subCfg.imports[mkImportKey(arg.Name, name)] = delegatingHostImport(sib, name, be, provToImp)
 				}
-				subCfg.imports[mkImportKey(arg.Name, name)] = delegatingHostImport(sib, name, be, provToImp)
+
+			case 0x01: // func: satisfy the nested component's func import of the
+				// same name with the host import the outer's aliased func names.
+				hi, err := outerFuncArgHostImport(comp, cfg, arg.SortIdx)
+				if err != nil {
+					failClose()
+					return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q: %w", compInstIdx, arg.Name, err)
+				}
+				subCfg.imports[mkImportKey(arg.Name, "")] = hi
+
+			case 0x03: // type: pass a resource type in. Tag the nested component's
+				// import of it with the outer's tag for the same resource, and
+				// carry the host destructor.
+				tag := effectiveResourceTypeIdx(comp, cfg, arg.SortIdx)
+				if idx, ok := importedTypeIndex(nested, arg.Name); ok {
+					typeArgTags[idx] = tag
+				}
+				if dtor := cfg.hostResDtors[tag]; dtor != nil {
+					subCfg.hostResDtors[tag] = dtor
+				}
+
+			default:
+				failClose()
+				return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q: unsupported sort %#x", compInstIdx, arg.Name, arg.Sort)
+			}
+		}
+		// If any type args mapped a nested type import to an outer tag, layer that
+		// over the default deftype/export-alias canonicalizer.
+		if len(typeArgTags) > 0 {
+			base := nested.ResourceDefIndex
+			subCfg.resCanon = func(idx uint32) uint32 {
+				if t, ok := typeArgTags[idx]; ok {
+					return t
+				}
+				return base(idx)
 			}
 		}
 
@@ -881,48 +930,49 @@ func buildCanonHostModule(
 
 	switch canon.Kind {
 	case 0x01: // lower
-		var compFuncAliases []aliasTarget
-		for _, al := range comp.Aliases {
-			if al.Sort == 0x01 && al.TargetKind == 0x00 {
-				compFuncAliases = append(compFuncAliases, aliasTarget{instIdx: al.InstanceIdx, name: al.Name})
-			}
+		// Resolve the lowered func through the authoritative component func
+		// index space, which includes func IMPORTS (a top-level func import a
+		// nested component is parameterized by) as well as instance-export
+		// aliases -- the older aliases+lifts reconstruction miscounts when an
+		// import precedes them.
+		fi := canon.FuncIdx
+		if int(fi) >= len(comp.ComponentFuncSpace) {
+			return nil, "", nil, nil, "", fmt.Errorf("lower func index %d out of range of the component func index space", fi)
 		}
-		var liftCanonIdxs []int
-		for i, cn := range comp.Canons {
-			if cn.Kind == 0x00 {
-				liftCanonIdxs = append(liftCanonIdxs, i)
+		fe := comp.ComponentFuncSpace[fi]
+		var iface, fname string
+		switch fe.Kind {
+		case binary.ComponentFuncFromImport:
+			if int(fe.Import) >= len(comp.Imports) {
+				return nil, "", nil, nil, "", fmt.Errorf("lower func index %d: import out of range", fi)
 			}
-		}
-		componentFunc := func(idx uint32) (isLift bool, liftCanonIdx int, at aliasTarget, err error) {
-			if int(idx) < len(compFuncAliases) {
-				return false, 0, compFuncAliases[idx], nil
+			im := comp.Imports[fe.Import]
+			if im.ExternType != 0x01 { // func
+				return nil, "", nil, nil, "", fmt.Errorf("lower func index %d: import %q is not a func", fi, im.Name)
 			}
-			li := int(idx) - len(compFuncAliases)
-			if li < len(liftCanonIdxs) {
-				return true, liftCanonIdxs[li], aliasTarget{}, nil
+			// A top-level func import is keyed by its own name (no interface).
+			iface, fname = im.Name, ""
+		case binary.ComponentFuncFromAlias:
+			al := comp.Aliases[fe.Alias]
+			if al.Sort != 0x01 || al.TargetKind != 0x00 {
+				return nil, "", nil, nil, "", fmt.Errorf("lower func index %d: unsupported alias %#x/%#x", fi, al.Sort, al.TargetKind)
 			}
-			return false, 0, aliasTarget{}, fmt.Errorf("component func index %d out of range of the component func index space (%d aliases + %d lifts)", idx, len(compFuncAliases), len(liftCanonIdxs))
-		}
-
-		isLift, _, at, ferr := componentFunc(canon.FuncIdx)
-		if ferr != nil {
-			return nil, "", nil, nil, "", ferr
-		}
-		if isLift {
+			var ierr error
+			if iface, ierr = importInterfaceName(comp, al.InstanceIdx); ierr != nil {
+				return nil, "", nil, nil, "", ierr
+			}
+			fname = al.Name
+		default:
 			return nil, "", nil, nil, "", fmt.Errorf("lowers a lifted (exported) func rather than an import; unsupported")
 		}
-		iface, ierr := importInterfaceName(comp, at.instIdx)
-		if ierr != nil {
-			return nil, "", nil, nil, "", ierr
-		}
-		wasiCall = iface + "." + at.name
+		wasiCall = iface + "." + fname
 
-		if hi, ok := cfg.imports[mkImportKey(iface, at.name)]; ok {
+		if hi, ok := cfg.imports[mkImportKey(iface, fname)]; ok {
 			memMod, reallocFn, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
 			if merr != nil {
-				return nil, "", nil, nil, "", fmt.Errorf("import %q func %q: %w", iface, at.name, merr)
+				return nil, "", nil, nil, "", fmt.Errorf("import %q func %q: %w", iface, fname, merr)
 			}
-			fn, hiParams, hiResults, herr := buildHostWrapper(iface, at.name, hi, resources, memMod, reallocFn)
+			fn, hiParams, hiResults, herr := buildHostWrapper(iface, fname, hi, resources, memMod, reallocFn)
 			if herr != nil {
 				return nil, "", nil, nil, "", herr
 			}
@@ -931,9 +981,9 @@ func buildCanonHostModule(
 		} else {
 			sig, ok := neededTypes[groupName][entryName]
 			if !ok {
-				return nil, "", nil, nil, "", fmt.Errorf("cannot determine the core-level signature for lowered import %q %q: no consumer declares module %q field %q", iface, at.name, groupName, entryName)
+				return nil, "", nil, nil, "", fmt.Errorf("cannot determine the core-level signature for lowered import %q %q: no consumer declares module %q field %q", iface, fname, groupName, entryName)
 			}
-			trapIface, trapName := iface, at.name
+			trapIface, trapName := iface, fname
 			fn := api.GoModuleFunc(func(context.Context, api.Module, []uint64) {
 				panic(fmt.Errorf("component/instance: WASI %s.%s not implemented (trap stub)", trapIface, trapName))
 			})

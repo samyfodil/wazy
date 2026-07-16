@@ -169,6 +169,50 @@ func translateResourceFD(fd binary.FuncDesc, providerResolve abi.Resolver, trans
 	return out, resolve
 }
 
+// outerFuncArgHostImport resolves a `(with "x" (func N))` component instantiate-
+// arg to the host import it names: N is a func alias into an imported instance
+// (e.g. the host's [constructor]resource1), whose Go implementation the caller
+// registered via WithImport. Used to pass a host func into a nested component
+// that imports it.
+func outerFuncArgHostImport(comp *binary.Component, cfg *config, funcIdx uint32) (*hostImport, error) {
+	if int(funcIdx) >= len(comp.ComponentFuncSpace) {
+		return nil, fmt.Errorf("func arg index %d out of range of the component func index space", funcIdx)
+	}
+	e := comp.ComponentFuncSpace[funcIdx]
+	if e.Kind != binary.ComponentFuncFromAlias || int(e.Alias) >= len(comp.Aliases) {
+		return nil, fmt.Errorf("func arg index %d is not an instance-export alias", funcIdx)
+	}
+	al := comp.Aliases[e.Alias]
+	if al.Sort != 0x01 || al.TargetKind != 0x00 {
+		return nil, fmt.Errorf("func arg index %d is a %#x/%#x alias, not a func export alias", funcIdx, al.Sort, al.TargetKind)
+	}
+	iface, err := importInterfaceName(comp, al.InstanceIdx)
+	if err != nil {
+		return nil, err
+	}
+	hi, ok := cfg.imports[mkImportKey(iface, al.Name)]
+	if !ok {
+		return nil, fmt.Errorf("no host import registered for %q %q", iface, al.Name)
+	}
+	return hi, nil
+}
+
+// importedTypeIndex returns the TypeSpace index of a component's top-level type
+// import by name (a `(import "r" (type (sub resource)))`), for wiring a
+// `(with "r" (type ...))` instantiate-arg to the nested component's use of it.
+func importedTypeIndex(comp *binary.Component, importName string) (uint32, bool) {
+	for idx := range comp.TypeSpace {
+		e := comp.TypeSpace[idx]
+		if e.Kind != binary.TypeSpaceImport || int(e.Import) >= len(comp.Imports) {
+			continue
+		}
+		if im := comp.Imports[e.Import]; im.Name == importName && im.ExternType == 0x03 {
+			return uint32(idx), true
+		}
+	}
+	return 0, false
+}
+
 // canonTag applies a component's resource-type canonicalizer (identity if nil).
 func (in *Instance) canonTag(idx uint32) uint32 {
 	if in.resCanon != nil {
