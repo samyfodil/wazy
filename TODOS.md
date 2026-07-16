@@ -21,16 +21,28 @@
   [[wazy-wast-conformance]].
 - **REMAINING (resource identity across composed components):** gates
   `resources/multiple-resources.wast` and parts of `wasmtime/resources.wast`.
-  These now *instantiate and run* through the composition path, then fail:
-  `borrow<3> arg: handle 2 belongs to resource type 1, not 3`. Each component
-  numbers its resource types independently, so when a resource handle crosses a
-  fused-adapter boundary (through the delegating host import) its type tag is in
-  the wrong component's index space. Needs cross-instance handle transfer —
-  translate the resource type tag (and possibly the handle, between the two
-  instances' `handleTable`s) at the boundary, per the Canonical ABI's
-  lift_own/lower_own. This is exactly the "No cross-instance handle transfer"
-  ceiling documented in `resource.go`; the fused-adapter linking that surfaces
-  it is now in place, so this is the next concrete unit.
+  These now *instantiate and run* through the composition path, then fail on a
+  resource handle crossing the fused-adapter boundary. Two coupled problems,
+  both traced:
+  1. *Within a component*, `resource.new` tags a handle by the resource's
+     DEFINITION type index while `own<R>`/`borrow<R>` in a lifted signature use
+     the EXPORT-ALIAS index (export-introduces-alias) — the same resource, two
+     indices. Fixable with a resource-type canonicalizer on the handleTable
+     (`Component.ResourceDefIndex` → tag by the defining index). Prototyped and
+     works, but reverted: unexercised by any committed test on its own (it only
+     matters together with #2), so it was speculative to ship alone.
+  2. *Across the boundary* is the real blocker. The delegating host import gives
+     the importer's host wrapper the PROVIDER's `customFD` (the decoder does not
+     retain the func signatures inside an imported instance type — the
+     documented limitation the composition sidesteps for non-resource funcs).
+     So the provider's resource type indices get injected into the importer's
+     type space, where they are meaningless, and the importer re-mints handles
+     treating a rep as a handle. Cleanly fixing this needs the decoder to
+     structurally decode imported-instance-type func signatures so each
+     component knows ITS OWN resource indices for imported funcs — then rep-based
+     lift_own/lower_own handle transfer at the boundary (the "No cross-instance
+     handle transfer" ceiling in `resource.go`). That decoder work is the root
+     dependency; it is a large, foundational feature, not a boundary patch.
 - **Also deeper fused sub-features** (each skips a `fused.wast` module, logged):
   pass-through shim with empty export names, >16 flat params on an imported func
   (whole-param spilling for a lowered import), func/type instantiate-args,
