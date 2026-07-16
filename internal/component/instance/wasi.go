@@ -157,7 +157,9 @@ const (
 	wasiIfaceError           = "wasi:io/error@0.2.3"
 
 	// Added for wasi:random -- see getRandomBytes's doc.
-	wasiIfaceRandom = "wasi:random/random@0.2.3"
+	wasiIfaceRandom         = "wasi:random/random@0.2.3"
+	wasiIfaceRandomInsecure = "wasi:random/insecure@0.2.3"
+	wasiIfaceRandomSeed     = "wasi:random/insecure-seed@0.2.3"
 )
 
 // WASIConfig configures the WASI 0.2 host implementation WithWASI builds.
@@ -494,6 +496,76 @@ func WithWASI(cfg WASIConfig) []Option {
 		return []abi.Value{out}, nil
 	}
 
+	// getRandomBytesN is get-random-bytes' body, shared with the insecure
+	// variant (both list<u8> from crypto/rand -- providing genuine randomness
+	// for the "insecure" interface is stronger than required, hence compliant).
+	getRandomBytesN := func(name string, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("%s: expected 1 arg (len), got %d", name, len(args))
+		}
+		n, ok := args[0].(uint64)
+		if !ok {
+			return nil, fmt.Errorf("%s: len: expected uint64, got %T", name, args[0])
+		}
+		buf := make([]byte, n)
+		if _, err := rand.Read(buf); err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		out := make([]abi.Value, len(buf))
+		for i, b := range buf {
+			out[i] = uint32(b)
+		}
+		return []abi.Value{out}, nil
+	}
+
+	getInsecureRandomBytes := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		return getRandomBytesN("wasi:random/insecure.get-insecure-random-bytes", args)
+	}
+
+	// randU64 reads a u64 from crypto/rand -- backs get-random-u64 and
+	// get-insecure-random-u64.
+	randU64 := func(name string) (uint64, error) {
+		var b [8]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return 0, fmt.Errorf("%s: %w", name, err)
+		}
+		var u uint64
+		for i := 0; i < 8; i++ {
+			u |= uint64(b[i]) << (8 * i)
+		}
+		return u, nil
+	}
+
+	getRandomU64 := func(_ context.Context, _ []abi.Value) ([]abi.Value, error) {
+		u, err := randU64("wasi:random/random.get-random-u64")
+		if err != nil {
+			return nil, err
+		}
+		return []abi.Value{u}, nil
+	}
+
+	getInsecureRandomU64 := func(_ context.Context, _ []abi.Value) ([]abi.Value, error) {
+		u, err := randU64("wasi:random/insecure.get-insecure-random-u64")
+		if err != nil {
+			return nil, err
+		}
+		return []abi.Value{u}, nil
+	}
+
+	// insecureSeed implements wasi:random/insecure-seed.insecure-seed() ->
+	// tuple<u64, u64> (a 128-bit seed for a guest's own insecure PRNG).
+	insecureSeed := func(_ context.Context, _ []abi.Value) ([]abi.Value, error) {
+		lo, err := randU64("wasi:random/insecure-seed.insecure-seed")
+		if err != nil {
+			return nil, err
+		}
+		hi, err := randU64("wasi:random/insecure-seed.insecure-seed")
+		if err != nil {
+			return nil, err
+		}
+		return []abi.Value{[]abi.Value{lo, hi}}, nil
+	}
+
 	// writeSink resolves an output-stream rep to "how to write buf against
 	// it": a stdio io.Writer (writerForRep), one of wasi_fs.go's file-write
 	// streams (fs.writeStreamWrite), or -- when WASIConfig.AllowTCP is set
@@ -614,6 +686,15 @@ func WithWASI(cfg WASIConfig) []Option {
 		WithImport(wasiIfaceRandom, "get-random-bytes", getRandomBytes,
 			[]binary.TypeDesc{binary.PrimitiveDesc{Prim: "u64"}},
 			[]binary.TypeDesc{binary.ListDesc{Element: binary.TypeRef{Primitive: "u8"}}}),
+		WithImport(wasiIfaceRandom, "get-random-u64", getRandomU64,
+			nil, []binary.TypeDesc{binary.PrimitiveDesc{Prim: "u64"}}),
+		WithImport(wasiIfaceRandomInsecure, "get-insecure-random-bytes", getInsecureRandomBytes,
+			[]binary.TypeDesc{binary.PrimitiveDesc{Prim: "u64"}},
+			[]binary.TypeDesc{binary.ListDesc{Element: binary.TypeRef{Primitive: "u8"}}}),
+		WithImport(wasiIfaceRandomInsecure, "get-insecure-random-u64", getInsecureRandomU64,
+			nil, []binary.TypeDesc{binary.PrimitiveDesc{Prim: "u64"}}),
+		WithImport(wasiIfaceRandomSeed, "insecure-seed", insecureSeed,
+			nil, []binary.TypeDesc{binary.TupleDesc{Elements: []binary.TypeRef{{Primitive: "u64"}, {Primitive: "u64"}}}}),
 
 		withImportCustom(wasiIfaceStreams, "[method]output-stream.check-write", checkWrite, checkWriteFD, checkWriteResolve),
 		withImportCustom(wasiIfaceStreams, "[method]output-stream.write", write, writeFD, writeResolve),

@@ -1472,6 +1472,38 @@ func wasiUDPSocketOptions(sockets *wasiSockets) []Option {
 		return []abi.Value{wasiPollableRep}, nil
 	}
 
+	// udpLocalAddress implements [method]udp-socket.local-address(self) ->
+	// result<ip-socket-address, error-code>: the bound net.PacketConn's local
+	// address (a server guest prints it to learn its ephemeral :0 port).
+	udpLocalAddress := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("[method]udp-socket.local-address: expected 1 arg (self), got %d", len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]udp-socket.local-address: self: expected uint32 rep, got %T", args[0])
+		}
+		node, ok := sockets.udpSockNode(selfRep)
+		if !ok {
+			return nil, fmt.Errorf("[method]udp-socket.local-address: udp-socket rep %d does not name a live socket", selfRep)
+		}
+		node.mu.Lock()
+		pconn := node.pconn
+		node.mu.Unlock()
+		if pconn == nil {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiSockErrInvalidState}}, nil
+		}
+		udpAddr, ok := pconn.LocalAddr().(*net.UDPAddr)
+		if !ok {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiSockErrInvalidState}}, nil
+		}
+		v, err := wasiIPSocketAddrFromUDPAddr(udpAddr)
+		if err != nil {
+			return nil, fmt.Errorf("[method]udp-socket.local-address: %w", err)
+		}
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: v}}, nil
+	}
+
 	incomingReceive := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
 		if len(args) != 2 {
 			return nil, fmt.Errorf("[method]incoming-datagram-stream.receive: expected 2 args (self, max-results), got %d", len(args))
@@ -1561,6 +1593,7 @@ func wasiUDPSocketOptions(sockets *wasiSockets) []Option {
 	finishBindFD, finishBindResolve := wasiUDPFinishBindSig()
 	streamFD, streamResolve := wasiUDPStreamSig()
 	udpSubFD, udpSubResolve := wasiSubscribeSig(wasiUDPSocketResType)
+	udpLocalAddrFD, udpLocalAddrResolve := wasiLocalAddressSig(wasiUDPSocketResType)
 	receiveFD, receiveResolve := wasiIncomingReceiveSig()
 	inDgramSubFD, inDgramSubResolve := wasiSubscribeSig(wasiIncomingDatagramStreamResType)
 	checkSendFD, checkSendResolve := wasiOutgoingCheckSendSig()
@@ -1584,6 +1617,7 @@ func wasiUDPSocketOptions(sockets *wasiSockets) []Option {
 		withImportCustom(wasiIfaceSocketsUDP, "[method]udp-socket.finish-bind", udpFinishBind, finishBindFD, finishBindResolve),
 		withImportCustom(wasiIfaceSocketsUDP, "[method]udp-socket.stream", udpStream, streamFD, streamResolve),
 		withImportCustom(wasiIfaceSocketsUDP, "[method]udp-socket.subscribe", udpSubscribe, udpSubFD, udpSubResolve),
+		withImportCustom(wasiIfaceSocketsUDP, "[method]udp-socket.local-address", udpLocalAddress, udpLocalAddrFD, udpLocalAddrResolve),
 		withImportCustom(wasiIfaceSocketsUDP, "[method]incoming-datagram-stream.receive", incomingReceive, receiveFD, receiveResolve),
 		withImportCustom(wasiIfaceSocketsUDP, "[method]incoming-datagram-stream.subscribe", incomingSubscribe, inDgramSubFD, inDgramSubResolve),
 		withImportCustom(wasiIfaceSocketsUDP, "[method]outgoing-datagram-stream.check-send", outgoingCheckSend, checkSendFD, checkSendResolve),
@@ -1787,8 +1821,17 @@ func wasiTCPAcceptSig() (binary.FuncDesc, abi.Resolver) {
 // [method]tcp-socket.local-address(self: borrow<tcp-socket>) ->
 // result<ip-socket-address, error-code>.
 func wasiTCPLocalAddressSig() (binary.FuncDesc, abi.Resolver) {
+	return wasiLocalAddressSig(wasiTCPSocketResType)
+}
+
+// wasiLocalAddressSig builds the FuncDesc/resolver for a `local-address(self:
+// borrow<selfResType>) -> result<ip-socket-address, error-code>` method --
+// shared by tcp-socket (local + remote) and udp-socket, which differ only in
+// the borrowed self type (using the wrong type trips the handle table's
+// cross-type-confusion check).
+func wasiLocalAddressSig(selfResType uint32) (binary.FuncDesc, abi.Resolver) {
 	tbl := &typeTable{}
-	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiTCPSocketResType})
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: selfResType})
 	addrRef := wasiIPSocketAddressType(tbl)
 	errRef := wasiSocketsErrorCodeType(tbl)
 	resultRef := tbl.add(binary.ResultDesc{Ok: &addrRef, Err: &errRef})
