@@ -318,11 +318,13 @@ func Instantiate(ctx context.Context, r wazy.Runtime, componentBytes []byte, opt
 
 	cfg := newConfig(opts)
 
-	if needsGraphPath(comp) {
+	if needsGraphPath(comp) || needsImportPath(comp) {
+		// The graph engine handles every host-import shape the old
+		// instantiateWithImports did, and it instantiates internals anonymously
+		// so components compose on one Runtime without name collisions -- see
+		// instantiateGraph. instantiateComponent stays only for the trivial
+		// single-module, no-import, no-canon-lower case.
 		return instantiateGraph(ctx, r, comp, componentBytes, cfg)
-	}
-	if needsImportPath(comp) {
-		return instantiateWithImports(ctx, r, comp, componentBytes, cfg)
 	}
 	return instantiateComponent(ctx, r, comp, componentBytes)
 }

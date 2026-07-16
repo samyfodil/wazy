@@ -911,19 +911,59 @@ func TestLogHello(t *testing.T) {
 	}
 }
 
-// TestLogHello_MissingHostImpl fails loud when no host implementation is
-// registered for an import the component lowers and calls.
+// TestTwoLogHelloCoexist proves two single-core host-import components (the
+// path that used to be instantiateWithImports, now routed through the graph
+// engine) coexist on one Runtime. Before internals were instantiated
+// anonymously, the second collided on its "libc" core-module "with" name.
+func TestTwoLogHelloCoexist(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	var aCalls, bCalls int
+	mk := func(n *int) *Instance {
+		fn := func(context.Context, []abi.Value) ([]abi.Value, error) { *n++; return nil, nil }
+		inst, err := Instantiate(ctx, r, logHelloWasm, stringLogOpt(fn))
+		if err != nil {
+			t.Fatalf("Instantiate: %v", err)
+		}
+		return inst
+	}
+	a := mk(&aCalls)
+	defer a.Close(ctx)
+	b := mk(&bCalls) // previously: module[libc] has already been instantiated
+	defer b.Close(ctx)
+
+	if _, err := a.Call(ctx, "run"); err != nil {
+		t.Fatalf("a.run: %v", err)
+	}
+	if _, err := b.Call(ctx, "run"); err != nil {
+		t.Fatalf("b.run: %v", err)
+	}
+	if aCalls != 1 || bCalls != 1 {
+		t.Fatalf("each instance's own log should fire once: a=%d b=%d", aCalls, bCalls)
+	}
+}
+
+// TestLogHello_MissingHostImpl fails loud when an import the component lowers is
+// actually CALLED with no host implementation registered. Instantiation itself
+// succeeds -- the graph engine wires an unimplemented import to a trap stub (an
+// import you never call is fine, matching wasmtime) -- and the error surfaces
+// when "run" invokes the missing log import.
 func TestLogHello_MissingHostImpl(t *testing.T) {
 	ctx := context.Background()
 	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)
 
-	_, err := Instantiate(ctx, r, logHelloWasm) // no WithImport
-	if err == nil {
-		t.Fatal("expected an error with no host implementation, got nil")
+	inst, err := Instantiate(ctx, r, logHelloWasm) // no WithImport
+	if err != nil {
+		t.Fatalf("Instantiate should succeed (trap stub for the unimplemented import): %v", err)
 	}
-	if !strings.Contains(err.Error(), "no host implementation") {
-		t.Fatalf("expected error to mention the missing host implementation, got: %v", err)
+	defer inst.Close(ctx)
+
+	_, err = inst.Call(ctx, "run")
+	if err == nil {
+		t.Fatal("expected calling run to fail loud on the unimplemented log import, got nil")
 	}
 }
 
