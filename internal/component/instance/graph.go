@@ -791,6 +791,11 @@ func bindImportExportsGraph(comp *binary.Component, componentFunc func(uint32) (
 				return nil, err
 			}
 
+		case 0x03: // type: a component re-exporting its named types (rec-t,
+			// var-t, ...) for the WIT interface. No runtime binding -- skip,
+			// mirroring the type-import skip. Only func/instance are callable.
+			continue
+
 		default:
 			return nil, fmt.Errorf("component/instance: export %q has extern kind %s (%#x); only func and instance exports are supported", exp.Name, api.ExternTypeName(exp.ExternType), exp.ExternType)
 		}
@@ -828,7 +833,12 @@ func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc f
 		return nil, fmt.Errorf("component/instance: export %q: %w", diagName, err)
 	}
 
-	be := &boundExport{mod: mod, funcName: name, fd: fd, postReturnFuncName: postReturnName}
+	reallocName, err := resolveReallocFuncGraph(canon, coreFuncTarget, mod)
+	if err != nil {
+		return nil, fmt.Errorf("component/instance: export %q: %w", diagName, err)
+	}
+
+	be := &boundExport{mod: mod, funcName: name, fd: fd, postReturnFuncName: postReturnName, reallocFuncName: reallocName}
 	finalizeBoundExport(be, resolve, abiCache, comp, funcIdx)
 	return be, nil
 }
@@ -849,6 +859,28 @@ func resolvePostReturnFuncGraph(canon binary.Canon, coreFuncTarget func(int) (ap
 		}
 		if mod != liftMod {
 			return "", fmt.Errorf("post-return core func targets a different core instance than the lift's own core func; cross-instance post-return is not supported")
+		}
+		return name, nil
+	}
+	return "", nil
+}
+
+// resolveReallocFuncGraph resolves the canon lift's realloc option (CanonOpt
+// kind 0x04) to its core export name, mirroring resolvePostReturnFuncGraph. It
+// requires the realloc func to live on the same core instance as the lift's
+// own core func (the boundExport lowers params against that one module's
+// memory). Returns "" when the lift declares no realloc option.
+func resolveReallocFuncGraph(canon binary.Canon, coreFuncTarget func(int) (api.Module, string, error), liftMod api.Module) (string, error) {
+	for _, opt := range canon.Opts {
+		if opt.Kind != 0x04 { // realloc
+			continue
+		}
+		mod, name, err := coreFuncTarget(int(opt.Idx))
+		if err != nil {
+			return "", fmt.Errorf("realloc %w", err)
+		}
+		if mod != liftMod {
+			return "", fmt.Errorf("realloc core func targets a different core instance than the lift's own core func; cross-instance realloc is not supported")
 		}
 		return name, nil
 	}

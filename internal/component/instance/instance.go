@@ -212,6 +212,16 @@ type boundExport struct {
 	// allocated (e.g. a returned string's backing bytes).
 	postReturnFuncName string
 
+	// reallocFuncName is the core export naming the canon lift's realloc option
+	// (CanonOpt kind 0x04), used to grow guest memory when lowering params
+	// (strings/lists) into it. The spec lets a component name this func
+	// anything -- wasm-tools' own components export it as "realloc", not the
+	// "cabi_realloc" that cargo-component/wit-bindgen guests happen to use --
+	// so it is resolved from the canon opt, not a fixed name. Empty for the
+	// trivial single-module path (no canon opts decoded), where
+	// finalizeBoundExport falls back to "cabi_realloc".
+	reallocFuncName string
+
 	// coreFn/postReturnFn/reallocFn are api.Function handles resolved ONCE,
 	// at bind time (see finalizeBoundExport), instead of via a fresh
 	// mod.ExportedFunction lookup on every invoke() call. This matters
@@ -571,7 +581,11 @@ func finalizeBoundExport(be *boundExport, resolve abi.Resolver, abiCache *Compil
 	if be.postReturnFuncName != "" {
 		be.postReturnFn = be.mod.ExportedFunction(be.postReturnFuncName)
 	}
-	be.reallocFn = be.mod.ExportedFunction("cabi_realloc")
+	reallocName := be.reallocFuncName
+	if reallocName == "" {
+		reallocName = "cabi_realloc"
+	}
+	be.reallocFn = be.mod.ExportedFunction(reallocName)
 
 	var m *boundExportABI
 	if abiCache != nil && comp != nil {

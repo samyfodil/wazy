@@ -257,8 +257,12 @@ func decodeComponent(buf []byte) (*Component, error) {
 			// Exporting a func (sort func 0x01) creates a new component func
 			// index aliasing the exported func -- see componentfuncspace.go.
 			for j, ex := range exports {
-				if ex.ExternType == 0x01 {
+				switch ex.ExternType {
+				case 0x01: // func export: introduces a component func index
 					c.ComponentFuncSpace = append(c.ComponentFuncSpace, ComponentFuncSpaceEntry{Kind: ComponentFuncFromExport, Export: exportBase + uint32(j)})
+				case 0x03: // type export: introduces a type index aliasing the
+					// exported type ("export introduces an alias").
+					c.TypeSpace = append(c.TypeSpace, TypeSpaceEntry{Kind: TypeSpaceExport, Export: exportBase + uint32(j)})
 				}
 			}
 

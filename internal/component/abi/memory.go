@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"unicode/utf8"
 
 	bintype "github.com/samyfodil/wazy/internal/component/binary"
 )
@@ -244,7 +245,14 @@ func loadStringFromRange(mem []byte, ptr, byteLen uint32) (string, error) {
 	if uint32(len(mem)) < ptr+byteLen {
 		return "", fmt.Errorf("loadStringFromRange: string buffer overflow at ptr=%d len=%d mem_len=%d", ptr, byteLen, len(mem))
 	}
-	return string(mem[ptr : ptr+byteLen]), nil
+	b := mem[ptr : ptr+byteLen]
+	// The canonical ABI's load_string_from_range traps on malformed UTF-8
+	// (invalid bytes or an incomplete trailing sequence) rather than lifting a
+	// lossy string -- definitions.py decodes with 'strict' and errors out.
+	if !utf8.Valid(b) {
+		return "", fmt.Errorf("loadStringFromRange: invalid utf-8 in string at ptr=%d len=%d", ptr, byteLen)
+	}
+	return string(b), nil
 }
 
 func loadList(mem []byte, ptr uint32, elemType bintype.TypeDesc, resolve Resolver) (Value, error) {

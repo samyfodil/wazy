@@ -11,13 +11,13 @@ import "fmt"
 // names a type (section 10, ExternType == 0x03). Canon TypeIdx and
 // export/instance type references index this full space, not Types alone.
 //
-// A component export whose sort is type also introduces a new type index
-// (an alias of whatever it exports) per the spec; this decoder does not yet
-// track that as a TypeSpace contributor (no fixture exercises it and no
-// export-sort-type case is decoded structurally beyond its ascribed-type
-// bytes) -- a resolution against an index past an unhandled type export will
-// fail loud via the out-of-range or unresolved-alias errors below rather
-// than silently misresolving.
+// A component export whose sort is type (section 11, ExternType 0x03) also
+// introduces a new type index -- an alias of whatever it exports -- per the
+// spec ("export introduces an alias"). It is tracked as a TypeSpaceExport
+// contributor, resolving through to the exported sortidx's type index; a WIT
+// component that re-exports its named types (rec-t, var-t, ...) interleaves
+// these exports with type-section deftypes, shifting every later type index,
+// so omitting them misresolves the first func type declared after one.
 //
 // TypeSpace is built incrementally by decodeComponent as it walks sections in
 // file order (see the case 6/7/10 branches), so it is correct even when
@@ -36,6 +36,10 @@ const (
 	// TypeSpaceImport marks an entry produced by an import whose externdesc
 	// names a type (id 10, ExternType == 0x03).
 	TypeSpaceImport
+	// TypeSpaceExport marks an entry produced by an export whose sort is type
+	// (id 11, ExternType == 0x03) -- "export introduces an alias" of the
+	// exported type.
+	TypeSpaceExport
 )
 
 // TypeSpaceEntry is one entry in the component's full type index space.
@@ -51,6 +55,9 @@ type TypeSpaceEntry struct {
 
 	// Import is the index into Imports, valid when Kind == TypeSpaceImport.
 	Import uint32
+
+	// Export is the index into Exports, valid when Kind == TypeSpaceExport.
+	Export uint32
 }
 
 // maxTypeAliasDepth bounds alias-chain following in ResolveType so a
@@ -136,6 +143,15 @@ func (c *Component) resolveTypeDepth(idx uint32, depth int) (TypeDesc, error) {
 			return nil, fmt.Errorf("type index %d: internal error: alias index %d out of range of %d aliases", idx, entry.Alias, len(c.Aliases))
 		}
 		return c.resolveAlias(c.Aliases[entry.Alias], idx, depth)
+
+	case TypeSpaceExport:
+		// An "export introduces an alias" entry: it aliases the type named by
+		// the export's sortidx, which is itself an index into this same
+		// TypeSpace. Resolve through to it.
+		if int(entry.Export) >= len(c.Exports) {
+			return nil, fmt.Errorf("type index %d: internal error: export index %d out of range of %d exports", idx, entry.Export, len(c.Exports))
+		}
+		return c.resolveTypeDepth(c.Exports[entry.Export].ExternIndex, depth+1)
 
 	default:
 		return nil, fmt.Errorf("type index %d: unknown type-space entry kind %d", idx, entry.Kind)
