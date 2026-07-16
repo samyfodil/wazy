@@ -253,7 +253,13 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	// snapshot) and the Component Model's index spaces are strictly
 	// forward-declared: anything a core instance k's canon opts reference
 	// must already have been instantiated by earlier iterations.
-	coreFuncTarget := func(cfi int) (api.Module, string, error) {
+	// canonMods caches the single-func host module built for a canon-produced
+	// core func resolved directly (not via an inline-export group) -- e.g. an
+	// exported [constructor]t that lifts a `canon resource.new` core func.
+	canonMods := map[int]api.Module{}
+	var coreMemTarget func(idx int) (api.Module, error)
+	var coreFuncTarget func(cfi int) (api.Module, string, error)
+	coreFuncTarget = func(cfi int) (api.Module, string, error) {
 		if cfi < 0 || cfi >= len(comp.CoreFuncSpace) {
 			return nil, "", fmt.Errorf("core func index %d out of range of the %d-entry core func index space", cfi, len(comp.CoreFuncSpace))
 		}
@@ -267,7 +273,39 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			}
 			return mod, al.Name, nil
 		case binary.CoreFuncFromCanon:
-			return nil, "", fmt.Errorf("core func index %d is a canon-produced func (lower/resource.*) rather than a real core export; unsupported", cfi)
+			// A canon-produced core func (resource.new/drop/rep or lower)
+			// resolved directly -- build its host module once. This is the same
+			// machinery resolveInlineExportItem uses for a canon consumed by a
+			// core module's import, applied when the canon func is lifted/aliased
+			// directly instead (an exported resource constructor).
+			if mod, ok := canonMods[int(entry.Canon)]; ok {
+				return mod, "f", nil
+			}
+			if int(entry.Canon) >= len(comp.Canons) {
+				return nil, "", fmt.Errorf("core func index %d: canon index %d out of range", cfi, entry.Canon)
+			}
+			privName := nextPrivateName()
+			hostMod, name, params, results, _, err := buildCanonHostModule(ctx, r, comp, cfg, resources, comp.Canons[entry.Canon], neededTypes, "", privName, privName, coreMemTarget, coreFuncTarget)
+			if err != nil {
+				return nil, "", fmt.Errorf("core func index %d: %w", cfi, err)
+			}
+			// A host module forbids ExportedFunction (it is meant to be imported
+			// by core wasm, not called directly), but a boundExport calls its
+			// core func that way. Wrap it in a one-func passthrough shim -- a
+			// real core module importing the host func and re-exporting it -- so
+			// the lift can call it. The host module registers globally by name,
+			// so the shim's import resolves via ctx.
+			shimBytes, err := buildPassthroughShim([]shimItem{{Sort: shimSortFunc, FromModule: privName, FromName: name, ExportName: "f", Params: params, Results: results}})
+			if err != nil {
+				return nil, "", fmt.Errorf("core func index %d: shim: %w", cfi, err)
+			}
+			shim, err := r.InstantiateWithConfig(ctx, shimBytes, wazy.NewModuleConfig().WithName("").WithStartFunctions())
+			if err != nil {
+				return nil, "", fmt.Errorf("core func index %d: instantiate canon shim: %w", cfi, err)
+			}
+			canonMods[int(entry.Canon)] = shim
+			closers = append(closers, hostMod, shim)
+			return shim, "f", nil
 		default:
 			return nil, "", fmt.Errorf("core func index %d: unknown core func space entry kind %d", cfi, entry.Kind)
 		}
@@ -277,7 +315,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	// space -- used only by canonMemoryAndRealloc (via buildCanonHostModule)
 	// to resolve a canon lower's own "memory" CanonOpt. Safe to define here
 	// for the same forward-declaration reason as coreFuncTarget above.
-	coreMemTarget := func(idx int) (api.Module, error) {
+	coreMemTarget = func(idx int) (api.Module, error) {
 		if idx < 0 || idx >= len(coreMemSpace) {
 			return nil, fmt.Errorf("core memory index %d out of range of the %d-entry core memory index space", idx, len(coreMemSpace))
 		}

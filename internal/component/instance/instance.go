@@ -483,10 +483,19 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		return v, nil
 	}
 	switch d := t.(type) {
-	case binary.OwnDesc, binary.BorrowDesc:
+	case binary.OwnDesc:
+		// own<T> is ALWAYS a handle to the receiver -- it manages the resource's
+		// lifecycle (resource.rep/resource.drop on it). Never reduced to a rep,
+		// even for a guest-defined resource (unlike borrow below). Keep as-is.
+		_ = d
+		return v, nil
+	case binary.BorrowDesc:
+		// borrow<T> of a resource the RECEIVER defines is passed as the rep (the
+		// guest owns the rep meaning and reads it directly); a borrow of a
+		// host/imported resource keeps its handle so the guest can call back.
 		rt, _ := resourceTypeIdxOf(t)
 		if in.isGuestResource == nil || !in.isGuestResource(rt) {
-			return v, nil // host-owned: keep the handle
+			return v, nil
 		}
 		return resolveHandleArg(in.resources, in.resCanon, t, v)
 
