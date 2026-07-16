@@ -47,3 +47,4 @@ zig-out/
 
 # Netlify CLI local state
 .netlify/
+.gstack/
