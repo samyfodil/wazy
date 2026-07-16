@@ -1233,6 +1233,13 @@ func wasiSocketOptions(sockets *wasiSockets) []Option {
 	resolveNextFD, resolveNextResolve := wasiResolveNextAddressSig()
 	resolveSubFD, resolveSubResolve := wasiSubscribeSig(wasiResolveStreamResType)
 
+	// tcpSetOpt builds the Option for one no-op tcp-socket option setter (see
+	// wasiSocketSetOptOK).
+	tcpSetOpt := func(name, prim string) Option {
+		fd, r := wasiSocketSetOptSig(wasiTCPSocketResType, prim)
+		return withImportCustom(wasiIfaceSocketsTCP, name, wasiSocketSetOptOK, fd, r)
+	}
+
 	return []Option{
 		withResourcesHook(sockets.setResources),
 
@@ -1261,6 +1268,13 @@ func wasiSocketOptions(sockets *wasiSockets) []Option {
 		withImportCustom(wasiIfaceSocketsTCP, "[method]tcp-socket.local-address", localAddress, localAddrFD, localAddrResolve),
 		withImportCustom(wasiIfaceSocketsTCP, "[method]tcp-socket.remote-address", remoteAddress, remoteAddrFD, remoteAddrResolve),
 		withImportCustom(wasiIfaceSocketsTCP, "[method]tcp-socket.set-listen-backlog-size", setListenBacklogSize, setBacklogFD, setBacklogResolve),
+		tcpSetOpt("[method]tcp-socket.set-keep-alive-enabled", "bool"),
+		tcpSetOpt("[method]tcp-socket.set-keep-alive-idle-time", "u64"),
+		tcpSetOpt("[method]tcp-socket.set-keep-alive-interval", "u64"),
+		tcpSetOpt("[method]tcp-socket.set-keep-alive-count", "u32"),
+		tcpSetOpt("[method]tcp-socket.set-hop-limit", "u8"),
+		tcpSetOpt("[method]tcp-socket.set-receive-buffer-size", "u64"),
+		tcpSetOpt("[method]tcp-socket.set-send-buffer-size", "u64"),
 		withImportCustom(wasiIfaceSocketsTCP, "[method]tcp-socket.subscribe", tcpSubscribe, tcpSubFD, tcpSubResolve),
 		withImportCustom(wasiIfaceStreams, "[method]input-stream.subscribe", streamSubscribe, inSubFD, inSubResolve),
 		withImportCustom(wasiIfaceStreams, "[method]output-stream.subscribe", streamSubscribe, outSubFD, outSubResolve),
@@ -1600,6 +1614,11 @@ func wasiUDPSocketOptions(sockets *wasiSockets) []Option {
 	sendFD, sendResolve := wasiOutgoingSendSig()
 	outDgramSubFD, outDgramSubResolve := wasiSubscribeSig(wasiOutgoingDatagramStreamResType)
 
+	udpSetOpt := func(name, prim string) Option {
+		fd, r := wasiSocketSetOptSig(wasiUDPSocketResType, prim)
+		return withImportCustom(wasiIfaceSocketsUDP, name, wasiSocketSetOptOK, fd, r)
+	}
+
 	return []Option{
 		withResourcesHook(sockets.setResources),
 
@@ -1618,6 +1637,9 @@ func wasiUDPSocketOptions(sockets *wasiSockets) []Option {
 		withImportCustom(wasiIfaceSocketsUDP, "[method]udp-socket.stream", udpStream, streamFD, streamResolve),
 		withImportCustom(wasiIfaceSocketsUDP, "[method]udp-socket.subscribe", udpSubscribe, udpSubFD, udpSubResolve),
 		withImportCustom(wasiIfaceSocketsUDP, "[method]udp-socket.local-address", udpLocalAddress, udpLocalAddrFD, udpLocalAddrResolve),
+		udpSetOpt("[method]udp-socket.set-unicast-hop-limit", "u8"),
+		udpSetOpt("[method]udp-socket.set-receive-buffer-size", "u64"),
+		udpSetOpt("[method]udp-socket.set-send-buffer-size", "u64"),
 		withImportCustom(wasiIfaceSocketsUDP, "[method]incoming-datagram-stream.receive", incomingReceive, receiveFD, receiveResolve),
 		withImportCustom(wasiIfaceSocketsUDP, "[method]incoming-datagram-stream.subscribe", incomingSubscribe, inDgramSubFD, inDgramSubResolve),
 		withImportCustom(wasiIfaceSocketsUDP, "[method]outgoing-datagram-stream.check-send", outgoingCheckSend, checkSendFD, checkSendResolve),
@@ -1822,6 +1844,36 @@ func wasiTCPAcceptSig() (binary.FuncDesc, abi.Resolver) {
 // result<ip-socket-address, error-code>.
 func wasiTCPLocalAddressSig() (binary.FuncDesc, abi.Resolver) {
 	return wasiLocalAddressSig(wasiTCPSocketResType)
+}
+
+// wasiSocketSetOptSig builds the FuncDesc/resolver for a socket option setter
+// `set-*(self: borrow<selfResType>, value: paramPrim) -> result<_,
+// error-code>` -- the shape every tcp-socket/udp-socket setsockopt-style method
+// shares (only the borrowed self type and the value's primitive differ).
+func wasiSocketSetOptSig(selfResType uint32, paramPrim string) (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: selfResType})
+	errRef := wasiSocketsErrorCodeType(tbl)
+	resultRef := tbl.add(binary.ResultDesc{Err: &errRef})
+	fd := binary.FuncDesc{
+		Params: []binary.FuncParam{
+			{Name: "self", Type: selfRef},
+			{Name: "value", Type: binary.TypeRef{Primitive: paramPrim}},
+		},
+		Results: binary.FuncResults{Unnamed: &resultRef},
+	}
+	return fd, tbl.resolver()
+}
+
+// wasiSocketSetOptOK is the shared no-op body for every socket option setter:
+// these are best-effort advisory hints (keep-alive, buffer sizes, hop limits)
+// the WASI sockets spec permits a host to ignore, and Go's net package exposes
+// no portable knob for most of them, so wazy accepts and ignores them (returns
+// Ok) rather than trapping -- keeping any real guest that tweaks socket options
+// running. ponytail: wire net.Dialer/ListenConfig knobs only if a guest ever
+// depends on an option actually taking effect.
+func wasiSocketSetOptOK(context.Context, []abi.Value) ([]abi.Value, error) {
+	return []abi.Value{abi.ResultValue{IsErr: false, Payload: nil}}, nil
 }
 
 // wasiLocalAddressSig builds the FuncDesc/resolver for a `local-address(self:

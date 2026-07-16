@@ -144,6 +144,19 @@ func TestWasiIPAddressValue(t *testing.T) {
 	})
 }
 
+// TestWasiSocketSetOptOK covers the shared no-op socket-option-setter body:
+// it accepts any args and reports Ok (the WASI spec permits ignoring these
+// best-effort hints -- see wasiSocketSetOptOK's doc).
+func TestWasiSocketSetOptOK(t *testing.T) {
+	res, err := wasiSocketSetOptOK(context.Background(), []abi.Value{uint32(1), uint64(65536)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rv := res[0].(abi.ResultValue); rv.IsErr {
+		t.Fatalf("set-opt should report Ok, got %#v", rv)
+	}
+}
+
 // TestWasiTCPListenErrToCode covers the listen/accept error mapper. It reuses
 // the UDP mapper (bind/accept share the same failure modes -- see its doc), so
 // this proves the address-in-use and generic-fallback ends of that reuse: a
