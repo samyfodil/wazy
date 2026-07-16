@@ -320,6 +320,7 @@ type boundExport struct {
 	resultType       binary.TypeDesc
 	resultUsesMemory bool
 	resultFlatKinds  []string
+	resultStep       abi.LiftStep // compiled result-lift plan (see abi.CompileLift)
 	resultErr        error
 }
 
@@ -355,6 +356,7 @@ type boundExportABI struct {
 	resultType       binary.TypeDesc
 	resultUsesMemory bool
 	resultFlatKinds  []string
+	resultStep       abi.LiftStep
 	resultErr        error
 }
 
@@ -408,6 +410,12 @@ func computeBoundExportABI(fd binary.FuncDesc, resolve abi.Resolver) *boundExpor
 			return m
 		}
 		m.resultFlatKinds = flatKinds
+		step, err := abi.CompileLift(rt, resolve)
+		if err != nil {
+			m.resultErr = err
+			return m
+		}
+		m.resultStep = step
 	}
 	return m
 }
@@ -689,6 +697,7 @@ func finalizeBoundExport(be *boundExport, resolve abi.Resolver, abiCache *Compil
 	}
 
 	be.resultType, be.resultUsesMemory, be.resultFlatKinds, be.resultErr = m.resultType, m.resultUsesMemory, m.resultFlatKinds, m.resultErr
+	be.resultStep = m.resultStep
 }
 
 // Instantiate decodes componentBytes as a WebAssembly component, instantiates
@@ -1330,7 +1339,11 @@ func (in *Instance) liftResult(be *boundExport, rawResults []uint64, mem []byte,
 		coreResults[i] = abi.CoreValue{Kind: flatKinds[i], Bits: u}
 	}
 
-	val, err := abi.LiftFlat(coreResults, rt, in.resolve, mem)
+	// Dispatch through the compiled result plan: a scalar lifts directly from
+	// coreResults[0] (no Flatten re-check, no iterator); an aggregate that still
+	// fits the flat-result limit keeps the tree-walk. (The spilled result above
+	// stays a direct Load -- resultStep would only call the same Load.)
+	val, err := be.resultStep.Lift(coreResults, mem)
 	putCoreValueSlice(coreResultsPtr)
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: export %q result: lift: %w", exportName, err)

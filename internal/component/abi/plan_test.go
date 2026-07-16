@@ -74,6 +74,61 @@ func TestLowerStepMatchesLowerFlatInto(t *testing.T) {
 	}
 }
 
+// TestLiftStepMatchesLiftFlat is the equivalence oracle for the compiled result
+// lift: for every flat (non-spilled, i.e. flattening to <= MaxFlatResults) type
+// in the battery, CompileLift + LiftStep.Lift must produce the same Go value as
+// the tree-walking LiftFlat. The spilled kinds (string/list/aggregate that
+// flattens past one core value) delegate to the same Load LiftStep calls, so
+// they are trivially equivalent and covered end-to-end by the instance tests.
+// Since LiftFlat is oracle-verified against definitions.py, this transitively
+// holds the compiled lift to the spec.
+func TestLiftStepMatchesLiftFlat(t *testing.T) {
+	goldenEntries := loadFlatOracleGolden(t)
+	battery := loadFlatOracleBattery(t)
+
+	for _, entry := range goldenEntries {
+		desc, ok := battery.descByName[entry.Type]
+		if !ok {
+			continue
+		}
+		flat, err := Flatten(desc, battery.resolve)
+		if err != nil || len(flat) > MaxFlatResults {
+			continue // spilled results delegate to Load; only the flat path diverges
+		}
+		t.Run(entry.Name, func(t *testing.T) {
+			rawValue := battery.valueMap[fmt.Sprintf("%s:%s", entry.Type, entry.Name)]
+			v, err := convertTestValue(rawValue, desc, battery.resolve)
+			if err != nil {
+				t.Fatalf("convert: %v", err)
+			}
+			// Lower to the flat core values the guest would return, using a
+			// throwaway allocator (flat results here carry no memory backing).
+			mem := make([]byte, 65536)
+			core, err := LowerFlat(v, desc, battery.resolve, ReallocFunc(newBumpAllocator(1024).realloc), mem)
+			if err != nil {
+				t.Fatalf("LowerFlat: %v", err)
+			}
+
+			refVal, refErr := LiftFlat(core, desc, battery.resolve, mem)
+			step, compErr := CompileLift(desc, battery.resolve)
+			if compErr != nil {
+				t.Fatalf("CompileLift: %v", compErr)
+			}
+			planVal, planErr := step.Lift(core, mem)
+
+			if (refErr == nil) != (planErr == nil) {
+				t.Fatalf("error mismatch: LiftFlat err=%v, plan err=%v", refErr, planErr)
+			}
+			if refErr != nil {
+				return
+			}
+			if fmt.Sprintf("%#v", planVal) != fmt.Sprintf("%#v", refVal) {
+				t.Errorf("lift mismatch: plan %#v, ref %#v", planVal, refVal)
+			}
+		})
+	}
+}
+
 // TestLowerStepErrorParity checks the leaf-kind error branches produce the same
 // message shape as the tree-walk (a wrong Go type for a primitive/string/handle
 // param).

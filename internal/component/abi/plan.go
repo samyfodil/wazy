@@ -109,3 +109,78 @@ func (s *LowerStep) Lower(dst []CoreValue, v Value, realloc Realloc, mem []byte)
 		return append(dst, flat...), nil
 	}
 }
+
+// LiftStep is the result-side counterpart of LowerStep: a plan compiled once at
+// bind time to lift one top-level result value of a fixed type from the core
+// values the guest returned. LiftFlat, on every call, re-Flattens the descriptor
+// (to decide the result spill) and type-switches through liftFlatImpl even for a
+// scalar result. A LiftStep precomputes the spill decision and dispatches
+// directly: a scalar primitive is lifted from its one core value with no
+// iterator and no Flatten; own/borrow is a bare i32 handle; a result that
+// flattens past MaxFlatResults (a string, list, or multi-field aggregate) is
+// loaded from the pointer the guest returned; only a genuinely flat aggregate
+// (enum/flags/option-of-scalar that still fits one core value) keeps the
+// tree-walk, now without the redundant Flatten. Immutable after CompileLift and
+// safe to share across instances.
+type LiftStep struct {
+	kind    liftKind
+	prim    string          // kind==liftPrimitive
+	t       binary.TypeDesc // kind==liftSpilled/liftFlatAgg
+	resolve Resolver        // kind==liftSpilled/liftFlatAgg
+}
+
+type liftKind uint8
+
+const (
+	liftPrimitive liftKind = iota // scalar primitive -> one core value
+	liftHandle                    // own/borrow -> one i32 handle
+	liftSpilled                   // flattens past MaxFlatResults -> Load(t) from a returned pointer
+	liftFlatAgg                   // aggregate that still fits within MaxFlatResults core values
+)
+
+// CompileLift builds the LiftStep for an already-resolved top-level result type
+// t. The result spill threshold is MaxFlatResults (unlike CompileLower's
+// MaxFlatParams), so a string result -- which flattens to (ptr,len) -- spills to
+// a single returned pointer and is lifted via Load, matching liftResult's own
+// spill path. A compile error surfaces the same message LiftFlat's Flatten would.
+func CompileLift(t binary.TypeDesc, resolve Resolver) (LiftStep, error) {
+	switch d := t.(type) {
+	case binary.PrimitiveDesc:
+		if d.Prim == "string" {
+			return LiftStep{kind: liftSpilled, t: t, resolve: resolve}, nil
+		}
+		return LiftStep{kind: liftPrimitive, prim: d.Prim}, nil
+	case binary.OwnDesc, binary.BorrowDesc:
+		return LiftStep{kind: liftHandle}, nil
+	default:
+		flat, err := Flatten(t, resolve)
+		if err != nil {
+			return LiftStep{}, err
+		}
+		if len(flat) > MaxFlatResults {
+			return LiftStep{kind: liftSpilled, t: t, resolve: resolve}, nil
+		}
+		return LiftStep{kind: liftFlatAgg, t: t, resolve: resolve}, nil
+	}
+}
+
+// Lift produces the Go result value from the guest's returned core values,
+// exactly as liftResult's LiftFlat/Load did -- byte-for-byte equivalent
+// (differential-oracle verified), without the per-call Flatten / type-switch on
+// the scalar and spilled paths. coreResults holds the guest's flat results
+// (already kind-tagged by liftResult); mem is the guest linear memory.
+func (s *LiftStep) Lift(coreResults []CoreValue, mem []byte) (Value, error) {
+	switch s.kind {
+	case liftPrimitive:
+		return liftScalarPrimitive(coreResults[0], s.prim)
+	case liftHandle:
+		return coreResults[0].AsI32(), nil
+	case liftSpilled:
+		return Load(mem, coreResults[0].AsI32(), s.t, s.resolve)
+	default: // liftFlatAgg
+		vi := getCoreValueIter(coreResults)
+		val, err := liftFlatImpl(vi, s.t, s.resolve, mem)
+		putCoreValueIter(vi)
+		return val, err
+	}
+}

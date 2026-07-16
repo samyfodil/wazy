@@ -698,98 +698,56 @@ func liftFlatImpl(vi valueIter, t binary.TypeDesc, resolve Resolver, mem []byte)
 // case (strings must load their UTF-8 bytes from linear memory even in the
 // flat ABI).
 func liftFlatPrimitive(vi valueIter, prim string, mem []byte) (Value, error) {
+	// A string is the only primitive that reads more than one core value
+	// (ptr, len) and loads from memory; every other primitive is a single
+	// scalar core value, lifted by liftScalarPrimitive.
+	if prim == "string" {
+		return liftFlatString(vi, mem)
+	}
+	cv, err := vi.Next()
+	if err != nil {
+		return nil, err
+	}
+	return liftScalarPrimitive(cv, prim)
+}
+
+// liftScalarPrimitive lifts a single (non-string) primitive from one core value
+// -- the direct path the compiled LiftStep uses for a scalar result, with no
+// iterator and no Flatten. Kept byte-for-byte equivalent to the per-case logic
+// liftFlatPrimitive used inline.
+func liftScalarPrimitive(cv CoreValue, prim string) (Value, error) {
 	switch prim {
 	case "bool":
-		cv, err := vi.Next()
-		if err != nil {
-			return nil, err
-		}
 		return cv.AsI32() != 0, nil
-
 	case "u8":
-		cv, err := vi.Next()
-		if err != nil {
-			return nil, err
-		}
 		return cv.AsI32() & 0xFF, nil
-
 	case "u16":
-		cv, err := vi.Next()
-		if err != nil {
-			return nil, err
-		}
 		return cv.AsI32() & 0xFFFF, nil
-
 	case "u32":
-		cv, err := vi.Next()
-		if err != nil {
-			return nil, err
-		}
 		return cv.AsI32(), nil
-
 	case "u64":
-		cv, err := vi.Next()
-		if err != nil {
-			return nil, err
-		}
 		return cv.AsI64(), nil
-
 	case "s8":
-		cv, err := vi.Next()
-		if err != nil {
-			return nil, err
-		}
 		i := cv.AsI32() & 0xFF
 		if i >= 0x80 {
 			return int32(int8(i)), nil
 		}
 		return int32(i), nil
-
 	case "s16":
-		cv, err := vi.Next()
-		if err != nil {
-			return nil, err
-		}
 		i := cv.AsI32() & 0xFFFF
 		if i >= 0x8000 {
 			return int32(int16(i)), nil
 		}
 		return int32(i), nil
-
 	case "s32":
-		cv, err := vi.Next()
-		if err != nil {
-			return nil, err
-		}
 		return int32(cv.AsI32()), nil
-
 	case "s64":
-		cv, err := vi.Next()
-		if err != nil {
-			return nil, err
-		}
-		// Just cast the u64 to i64; Go's bit representation will do the right thing
 		return int64(cv.AsI64()), nil
-
 	case "f32":
-		cv, err := vi.Next()
-		if err != nil {
-			return nil, err
-		}
 		return cv.AsF32(), nil
-
 	case "f64":
-		cv, err := vi.Next()
-		if err != nil {
-			return nil, err
-		}
 		return cv.AsF64(), nil
-
 	case "char":
-		cv, err := vi.Next()
-		if err != nil {
-			return nil, err
-		}
 		i := cv.AsI32()
 		if i >= 0x110000 {
 			return nil, fmt.Errorf("liftFlat char: value %d out of range", i)
@@ -798,10 +756,6 @@ func liftFlatPrimitive(vi valueIter, prim string, mem []byte) (Value, error) {
 			return nil, fmt.Errorf("liftFlat char: surrogate half %d not allowed", i)
 		}
 		return rune(i), nil
-
-	case "string":
-		return liftFlatString(vi, mem)
-
 	default:
 		return nil, fmt.Errorf("liftFlat: unknown primitive type %s", prim)
 	}
