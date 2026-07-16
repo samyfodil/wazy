@@ -9,7 +9,7 @@ import (
 // TestLowerFlatVariants tests lowering of variant types.
 func TestLowerFlatVariants(t *testing.T) {
 	resolve := func(idx uint32) binary.TypeDesc { return nil }
-	realloc := func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil }
+	realloc := ReallocFunc(func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil })
 	mem := make([]byte, 65536)
 
 	tests := []struct {
@@ -77,7 +77,7 @@ func TestLowerFlatVariants(t *testing.T) {
 // TestLowerFlatRecords tests lowering of record types.
 func TestLowerFlatRecords(t *testing.T) {
 	resolve := func(idx uint32) binary.TypeDesc { return nil }
-	realloc := func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil }
+	realloc := ReallocFunc(func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil })
 	mem := make([]byte, 65536)
 
 	tests := []struct {
@@ -133,7 +133,7 @@ func TestLowerFlatRecords(t *testing.T) {
 // TestLowerFlatTuples tests lowering of tuple types.
 func TestLowerFlatTuples(t *testing.T) {
 	resolve := func(idx uint32) binary.TypeDesc { return nil }
-	realloc := func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil }
+	realloc := ReallocFunc(func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil })
 	mem := make([]byte, 65536)
 
 	tests := []struct {
@@ -181,7 +181,7 @@ func TestLowerFlatTuples(t *testing.T) {
 // TestLowerFlatOptions tests lowering of option types.
 func TestLowerFlatOptions(t *testing.T) {
 	resolve := func(idx uint32) binary.TypeDesc { return nil }
-	realloc := func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil }
+	realloc := ReallocFunc(func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil })
 	mem := make([]byte, 65536)
 
 	tests := []struct {
@@ -230,7 +230,7 @@ func TestLowerFlatOptions(t *testing.T) {
 // TestLowerFlatResults tests lowering of result types.
 func TestLowerFlatResults(t *testing.T) {
 	resolve := func(idx uint32) binary.TypeDesc { return nil }
-	realloc := func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil }
+	realloc := ReallocFunc(func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil })
 	mem := make([]byte, 65536)
 
 	tests := []struct {

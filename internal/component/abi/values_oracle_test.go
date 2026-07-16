@@ -415,7 +415,7 @@ func TestValuesOracleRoundTrip(t *testing.T) {
 			alloc := NewBumpAllocator(1024)
 
 			// Store the value
-			if err := Store(mem, 1024, typeDesc, value, resolve, alloc.Alloc); err != nil {
+			if err := Store(mem, 1024, typeDesc, value, resolve, ReallocFunc(alloc.Alloc)); err != nil {
 				t.Fatalf("Store: %v", err)
 			}
 

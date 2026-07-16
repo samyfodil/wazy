@@ -133,7 +133,7 @@ func TestLowerFlatErrors(t *testing.T) {
 	}
 
 	resolve := func(idx uint32) binary.TypeDesc { return nil }
-	realloc := func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil }
+	realloc := ReallocFunc(func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil })
 	mem := make([]byte, 1024)
 
 	for _, tt := range tests {
@@ -149,7 +149,7 @@ func TestLowerFlatErrors(t *testing.T) {
 // TestLowerFlatSignedEdgeCases tests edge cases for signed integer conversion.
 func TestLowerFlatSignedEdgeCases(t *testing.T) {
 	resolve := func(idx uint32) binary.TypeDesc { return nil }
-	realloc := func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil }
+	realloc := ReallocFunc(func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil })
 	mem := make([]byte, 1024)
 
 	tests := []struct {
@@ -212,7 +212,7 @@ func TestLowerFlatSignedEdgeCases(t *testing.T) {
 // TestLowerFlatFloatSpecialValues tests special float values (NaN, Inf).
 func TestLowerFlatFloatSpecialValues(t *testing.T) {
 	resolve := func(idx uint32) binary.TypeDesc { return nil }
-	realloc := func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil }
+	realloc := ReallocFunc(func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil })
 	mem := make([]byte, 1024)
 
 	tests := []struct {
@@ -314,7 +314,7 @@ func TestLiftFlatErrors(t *testing.T) {
 // TestLowerFlatLiftFlatRoundTrip tests round-trip conversion for various types.
 func TestLowerFlatLiftFlatRoundTrip(t *testing.T) {
 	resolve := func(idx uint32) binary.TypeDesc { return nil }
-	realloc := func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil }
+	realloc := ReallocFunc(func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil })
 	mem := make([]byte, 65536)
 
 	tests := []struct {

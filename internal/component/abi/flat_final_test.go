@@ -44,7 +44,7 @@ func TestLiftFlatCharInvalid(t *testing.T) {
 // TestLowerFlatUnsupportedType tests unsupported types.
 func TestLowerFlatUnsupportedType(t *testing.T) {
 	resolve := func(idx uint32) binary.TypeDesc { return nil }
-	realloc := func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil }
+	realloc := ReallocFunc(func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil })
 	mem := make([]byte, 1024)
 
 	tests := []struct {
@@ -139,7 +139,7 @@ func TestLiftFlatUnsupportedType(t *testing.T) {
 // TestLowerFlatVariantWithPayload tests variant lowering with various payload types.
 func TestLowerFlatVariantWithPayload(t *testing.T) {
 	resolve := func(idx uint32) binary.TypeDesc { return nil }
-	realloc := func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil }
+	realloc := ReallocFunc(func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil })
 	mem := make([]byte, 65536)
 
 	tests := []struct {
@@ -250,7 +250,7 @@ func TestCoercingValueIterConsumption(t *testing.T) {
 // TestLowerFlatVariantMultipleCases tests variant with multiple cases.
 func TestLowerFlatVariantMultipleCases(t *testing.T) {
 	resolve := func(idx uint32) binary.TypeDesc { return nil }
-	realloc := func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil }
+	realloc := ReallocFunc(func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil })
 	mem := make([]byte, 65536)
 
 	variantType := binary.VariantDesc{
@@ -323,7 +323,7 @@ func TestLiftFlatVariantMultipleCases(t *testing.T) {
 // TestLowerFlatTupleMultipleTypes tests tuple with multiple different types.
 func TestLowerFlatTupleMultipleTypes(t *testing.T) {
 	resolve := func(idx uint32) binary.TypeDesc { return nil }
-	realloc := func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil }
+	realloc := ReallocFunc(func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil })
 	mem := make([]byte, 65536)
 
 	tupleType := binary.TupleDesc{

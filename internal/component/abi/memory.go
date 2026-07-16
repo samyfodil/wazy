@@ -1,6 +1,7 @@
 package abi
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"math"
@@ -9,12 +10,39 @@ import (
 	bintype "github.com/samyfodil/wazy/internal/component/binary"
 )
 
-// Realloc is a memory allocator function used by Store to allocate dynamic memory.
-// It should behave like the WebAssembly memory.grow/realloc: given an existing
-// (origPtr, origSize), it must allocate newSize bytes aligned to align bytes,
-// returning the new pointer. If align is 1, the returned pointer is not aligned.
-// For grow operations, origPtr is 0 and origSize is 0.
-type Realloc func(origPtr, origSize, align, newSize uint32) (uint32, error)
+// Realloc is the guest memory allocator used when lowering strings/lists into
+// linear memory. It behaves like the WebAssembly memory.grow/realloc: given an
+// existing (origPtr, origSize), it allocates newSize bytes aligned to align,
+// returning the new pointer (unaligned when align == 1); for a fresh grow,
+// origPtr and origSize are 0.
+//
+// It is a struct rather than a bare func so it can carry the call context WITHOUT
+// a per-call closure: the Call func is built once at bind time (it captures only
+// the core cabi_realloc function), and Ctx is filled in per call. A zero Call
+// means the module exports no cabi_realloc, and grow fails loud. Passed by value
+// through the lower/store tree; it stays on the stack (nothing retains it).
+type Realloc struct {
+	Ctx  context.Context
+	Call func(ctx context.Context, origPtr, origSize, align, newSize uint32) (uint32, error)
+}
+
+// Grow performs one allocation, threading Ctx into the cached Call.
+func (r Realloc) Grow(origPtr, origSize, align, newSize uint32) (uint32, error) {
+	if r.Call == nil {
+		return 0, fmt.Errorf("component/abi: memory allocation requires a \"cabi_realloc\" export on the core module, which is not present")
+	}
+	return r.Call(r.Ctx, origPtr, origSize, align, newSize)
+}
+
+// ReallocFunc adapts a context-free allocator into a Realloc (the ctx is
+// ignored). For simple in-memory allocators -- notably tests -- that don't need
+// the call context.
+func ReallocFunc(fn func(origPtr, origSize, align, newSize uint32) (uint32, error)) Realloc {
+	if fn == nil {
+		return Realloc{}
+	}
+	return Realloc{Call: func(_ context.Context, o, os, a, n uint32) (uint32, error) { return fn(o, os, a, n) }}
+}
 
 // Load reads a value of the given type from memory at the given pointer.
 // This mirrors the canonical ABI load() function.
@@ -781,7 +809,7 @@ func allocStoreString(mem []byte, s string, realloc Realloc) (uint32, uint32, er
 	strBytes := []byte(s)
 	byteLen := uint32(len(strBytes))
 
-	newPtr, err := realloc(0, 0, 1, byteLen)
+	newPtr, err := realloc.Grow(0, 0, 1, byteLen)
 	if err != nil {
 		return 0, 0, fmt.Errorf("realloc failed: %w", err)
 	}
@@ -837,7 +865,7 @@ func allocStoreList(mem []byte, list []Value, elemType bintype.TypeDesc, resolve
 	}
 
 	byteLen := uint32(len(list)) * elemSize
-	newPtr, err := realloc(0, 0, elemAlign, byteLen)
+	newPtr, err := realloc.Grow(0, 0, elemAlign, byteLen)
 	if err != nil {
 		return 0, 0, fmt.Errorf("realloc failed: %w", err)
 	}

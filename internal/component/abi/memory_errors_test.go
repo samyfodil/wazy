@@ -88,9 +88,9 @@ func TestLoadErrorCases(t *testing.T) {
 }
 
 func TestStoreErrorCases(t *testing.T) {
-	mockRealloc := func(origPtr, origSize, align, newSize uint32) (uint32, error) {
+	mockRealloc := ReallocFunc(func(origPtr, origSize, align, newSize uint32) (uint32, error) {
 		return 1024, nil // Simple allocator
-	}
+	})
 
 	tests := []struct {
 		name    string
@@ -220,7 +220,7 @@ func TestStorePrimitiveWrongTypes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.prim, func(t *testing.T) {
 			mem := make([]byte, 100)
-			err := storePrimitive(mem, 0, tt.prim, tt.value, func(_, _, _, _ uint32) (uint32, error) { return 0, nil })
+			err := storePrimitive(mem, 0, tt.prim, tt.value, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
 			if err == nil {
 				t.Errorf("expected error for storing %v as %s", tt.value, tt.prim)
 			}
@@ -239,7 +239,7 @@ func TestRecordFieldMismatch(t *testing.T) {
 
 	// Wrong number of fields
 	value := []Value{uint32(1)} // only 1 field, need 2
-	err := storeRecord(mem, 0, value, desc, nil, func(_, _, _, _ uint32) (uint32, error) { return 0, nil })
+	err := storeRecord(mem, 0, value, desc, nil, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
 	if err == nil {
 		t.Error("expected error for record field count mismatch")
 	}
@@ -256,7 +256,7 @@ func TestTupleElementMismatch(t *testing.T) {
 
 	// Wrong number of elements
 	value := []Value{uint32(1)} // only 1 element, need 2
-	err := storeTuple(mem, 0, value, desc, nil, func(_, _, _, _ uint32) (uint32, error) { return 0, nil })
+	err := storeTuple(mem, 0, value, desc, nil, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
 	if err == nil {
 		t.Error("expected error for tuple element count mismatch")
 	}
@@ -267,7 +267,7 @@ func TestListWrongType(t *testing.T) {
 	desc := bintype.ListDesc{Element: bintype.TypeRef{Primitive: "u32"}}
 
 	// Pass a non-list value
-	err := storeList(mem, 0, "not a list", desc, nil, func(_, _, _, _ uint32) (uint32, error) { return 0, nil })
+	err := storeList(mem, 0, "not a list", desc, nil, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
 	if err == nil {
 		t.Error("expected error for storing non-list value")
 	}
@@ -281,7 +281,7 @@ func TestResultWrongType(t *testing.T) {
 	}
 
 	// Pass a non-ResultValue
-	err := storeResult(mem, 0, "not a result", desc, nil, func(_, _, _, _ uint32) (uint32, error) { return 0, nil })
+	err := storeResult(mem, 0, "not a result", desc, nil, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
 	if err == nil {
 		t.Error("expected error for storing non-result value")
 	}
@@ -295,7 +295,7 @@ func TestResultIsErrWrongType(t *testing.T) {
 	}
 
 	// Pass a result-like map with wrong isErr type
-	err := storeResult(mem, 0, map[string]any{"isErr": "not bool"}, desc, nil, func(_, _, _, _ uint32) (uint32, error) { return 0, nil })
+	err := storeResult(mem, 0, map[string]any{"isErr": "not bool"}, desc, nil, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
 	if err == nil {
 		t.Error("expected error for result with non-bool isErr")
 	}
@@ -412,7 +412,7 @@ func TestStoreRecordFieldTypeError(t *testing.T) {
 	}
 
 	value := []Value{uint32(1)}
-	err := storeRecord(mem, 0, value, desc, badResolve, func(_, _, _, _ uint32) (uint32, error) { return 0, nil })
+	err := storeRecord(mem, 0, value, desc, badResolve, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
 	if err == nil {
 		t.Error("expected error for bad resolver in store record")
 	}
@@ -430,7 +430,7 @@ func TestStoreListFieldTypeError(t *testing.T) {
 	}
 
 	value := []Value{uint32(1)} // Non-empty list to trigger resolver call
-	err := storeList(mem, 0, value, desc, badResolve, func(_, _, _, _ uint32) (uint32, error) { return 0, nil })
+	err := storeList(mem, 0, value, desc, badResolve, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
 	if err == nil {
 		t.Error("expected error for bad resolver in store list")
 	}
@@ -438,7 +438,7 @@ func TestStoreListFieldTypeError(t *testing.T) {
 
 func TestStoreF32WrongType(t *testing.T) {
 	mem := make([]byte, 100)
-	err := storePrimitive(mem, 0, "f32", "not float", func(_, _, _, _ uint32) (uint32, error) { return 0, nil })
+	err := storePrimitive(mem, 0, "f32", "not float", ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
 	if err == nil {
 		t.Error("expected error for storing non-float as f32")
 	}
@@ -446,7 +446,7 @@ func TestStoreF32WrongType(t *testing.T) {
 
 func TestStoreF64WrongType(t *testing.T) {
 	mem := make([]byte, 100)
-	err := storePrimitive(mem, 0, "f64", "not float", func(_, _, _, _ uint32) (uint32, error) { return 0, nil })
+	err := storePrimitive(mem, 0, "f64", "not float", ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
 	if err == nil {
 		t.Error("expected error for storing non-float as f64")
 	}
@@ -454,7 +454,7 @@ func TestStoreF64WrongType(t *testing.T) {
 
 func TestStoreStringWrongType(t *testing.T) {
 	mem := make([]byte, 100)
-	err := storePrimitive(mem, 0, "string", 42, func(_, _, _, _ uint32) (uint32, error) { return 0, nil })
+	err := storePrimitive(mem, 0, "string", 42, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
 	if err == nil {
 		t.Error("expected error for storing non-string as string")
 	}
@@ -491,7 +491,7 @@ func TestTupleLengthMismatch(t *testing.T) {
 	}
 
 	value := []Value{uint32(1)} // Only 1 element
-	err := storeTuple(mem, 0, value, desc, nil, func(_, _, _, _ uint32) (uint32, error) { return 0, nil })
+	err := storeTuple(mem, 0, value, desc, nil, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
 	if err == nil {
 		t.Error("expected error for tuple element count mismatch in store")
 	}
@@ -531,7 +531,7 @@ func TestStoreOptWithMissingPayloadType(t *testing.T) {
 	}
 
 	// Store some value (not nil) which triggers storing discriminant 1
-	err := storeOption(mem, 0, uint32(42), desc, nil, func(_, _, _, _ uint32) (uint32, error) { return 0, nil })
+	err := storeOption(mem, 0, uint32(42), desc, nil, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
 	if err != nil {
 		// This might succeed depending on alignment, so check if it actually stored
 		t.Logf("storeOption succeeded or failed: %v", err)

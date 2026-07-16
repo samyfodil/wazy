@@ -270,6 +270,12 @@ type boundExport struct {
 	postReturnFn api.Function
 	reallocFn    api.Function
 
+	// reallocCall is the ctx-free realloc callback built once from reallocFn
+	// (finalizeBoundExport), so invoke's per-call abi.Realloc is a stack struct
+	// literal rather than a fresh closure. nil when the module exports no
+	// cabi_realloc (then abi.Realloc.grow fails loud).
+	reallocCall func(context.Context, uint32, uint32, uint32, uint32) (uint32, error)
+
 	// The fields below cache fd's ABI flattening / type resolution, computed
 	// once at bind time (finalizeBoundExport) instead of on every invoke()
 	// call -- fd is immutable once bound, so LowerFlat/LiftFlat.
@@ -280,6 +286,13 @@ type boundExport struct {
 	// caching existed -- see finalizeBoundExport's doc.
 	coreParamsWant, coreResultsWant []string
 	flattenErr                      error
+
+	// coreResultCount is the core func's actual declared result count (from its
+	// signature), resolved once at bind time. invoke slices the CallWithStack
+	// buffer to exactly this many results so liftResult's length checks still
+	// catch a core-vs-component result-count mismatch (which Call's returned
+	// slice used to surface).
+	coreResultCount int
 
 	paramTypes      []binary.TypeDesc
 	paramUsesMemory []bool
@@ -624,6 +637,10 @@ func finalizeBoundExport(be *boundExport, resolve abi.Resolver, abiCache *Compil
 		reallocName = "cabi_realloc"
 	}
 	be.reallocFn = be.mod.ExportedFunction(reallocName)
+	be.reallocCall = coreReallocCall(be.reallocFn)
+	if be.coreFn != nil {
+		be.coreResultCount = len(be.coreFn.Definition().ResultTypes())
+	}
 
 	var m *boundExportABI
 	if abiCache != nil && comp != nil {
@@ -1118,21 +1135,36 @@ func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName stri
 	// call_engine.go), so nothing retains a reference to it once Call
 	// returns -- safe to pool rather than allocate fresh every call. See
 	// uint64SlicePool's doc for the concurrency argument.
-	stackPtr := getUint64Slice(len(coreArgs))
+	// CallWithStack reads params from and writes results into the SAME buffer,
+	// so it saves the result-slice allocation Call makes on every call (see
+	// api.Function). Size the pooled buffer to max(params, results); the guest
+	// reads only the first len(coreArgs) as params and overwrites the first
+	// numResults with results, so stale pool bytes past the params are harmless.
+	// Use the core func's ACTUAL result count (not the component's expected)
+	// so liftResult still detects a mismatch; a valid component has them equal.
+	numResults := be.coreResultCount
+	stackLen := len(coreArgs)
+	if numResults > stackLen {
+		stackLen = numResults
+	}
+	stackPtr := getUint64Slice(stackLen)
 	stack := *stackPtr
 	for i, cv := range coreArgs {
 		stack[i] = cv.Bits
 	}
 	putCoreValueSlice(coreArgsPtr) // coreArgs' bits are now copied into stack; done with it
 
-	rawResults, err := be.coreFn.Call(ctx, stack...)
-	putUint64Slice(stackPtr)
-	if err != nil {
+	if err := be.coreFn.CallWithStack(ctx, stack); err != nil {
+		putUint64Slice(stackPtr)
 		return nil, fmt.Errorf("component/instance: export %q: call core func %q: %w", exportName, be.funcName, err)
 	}
+	// rawResults ALIASES the pooled stack, so stack must not be returned to the
+	// pool until liftResult (and post-return) have finished reading it.
+	rawResults := stack[:numResults]
 
 	results, err := in.liftResult(be, rawResults, mem, memAvailable, exportName)
 	if err != nil {
+		putUint64Slice(stackPtr)
 		return nil, err
 	}
 
@@ -1142,21 +1174,18 @@ func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName stri
 	// flat core values the lift produced.
 	if be.postReturnFuncName != "" {
 		if be.postReturnFn == nil {
+			putUint64Slice(stackPtr)
 			return nil, fmt.Errorf("component/instance: export %q: post-return core func %q not found", exportName, be.postReturnFuncName)
 		}
-		// Pooled for the same reason as stack above: pure scratch, copied
-		// from rawResults only to satisfy Call's variadic signature, and
-		// released the moment Call returns since callEngine.Call copies
-		// params into its own buffer before doing anything else.
-		prArgsPtr := getUint64Slice(len(rawResults))
-		copy(*prArgsPtr, rawResults)
-		_, err := be.postReturnFn.Call(ctx, (*prArgsPtr)...)
-		putUint64Slice(prArgsPtr)
-		if err != nil {
+		// post-return takes the same flat results as params; CallWithStack lets
+		// it reuse rawResults' own buffer (the guest reads params, writes none).
+		if err := be.postReturnFn.CallWithStack(ctx, rawResults); err != nil {
+			putUint64Slice(stackPtr)
 			return nil, fmt.Errorf("component/instance: export %q: post-return %q: %w", exportName, be.postReturnFuncName, err)
 		}
 	}
 
+	putUint64Slice(stackPtr)
 	return results, nil
 }
 
@@ -1395,50 +1424,47 @@ func memoryBytesOf(mod api.Module) (buf []byte, ok bool) {
 }
 
 // reallocOf returns the abi.Realloc backed by mod's "cabi_realloc" export, or
-// one that fails loudly if mod doesn't export it.
+// one that fails loudly (Call == nil) if mod doesn't export it.
 func reallocOf(ctx context.Context, mod api.Module) abi.Realloc {
-	fn := mod.ExportedFunction("cabi_realloc")
-	if fn == nil {
-		return func(uint32, uint32, uint32, uint32) (uint32, error) {
-			return 0, fmt.Errorf("component/instance: memory allocation requires a %q export on the core module, which is not present", "cabi_realloc")
-		}
-	}
-	return reallocOfFunc(ctx, fn)
+	return abi.Realloc{Ctx: ctx, Call: coreReallocCall(mod.ExportedFunction("cabi_realloc"))}
 }
 
-// cachedReallocOf is reallocOf's boundExport-caching counterpart: it builds
-// the abi.Realloc from be.reallocFn -- resolved once at bind time by
-// finalizeBoundExport -- instead of a fresh mod.ExportedFunction("cabi_realloc")
-// lookup on every invoke() call. Preserves reallocOf's exact lazy-failure
-// message/semantics when the module exports no cabi_realloc (be.reallocFn ==
-// nil): the error only surfaces if the returned Realloc is actually invoked.
+// cachedReallocOf is reallocOf's boundExport-caching counterpart: the ctx-free
+// Call func is built ONCE at bind time (be.reallocCall, see finalizeBoundExport)
+// so this per-invoke construction is a stack struct literal -- no closure
+// allocation on the hot lowering path. A nil be.reallocCall (module exports no
+// cabi_realloc) makes Realloc.grow fail loud, matching reallocOf.
 func cachedReallocOf(ctx context.Context, be *boundExport) abi.Realloc {
-	if be.reallocFn == nil {
-		return func(uint32, uint32, uint32, uint32) (uint32, error) {
-			return 0, fmt.Errorf("component/instance: memory allocation requires a %q export on the core module, which is not present", "cabi_realloc")
-		}
-	}
-	return reallocOfFunc(ctx, be.reallocFn)
+	return abi.Realloc{Ctx: ctx, Call: be.reallocCall}
 }
 
-// reallocOfFunc returns the abi.Realloc that calls fn -- an already-resolved
-// api.Function -- with the standard cabi_realloc(origPtr, origSize, align,
-// newSize) -> newPtr signature. Factored out of reallocOf so a caller that
-// has already resolved the exact realloc func to call (e.g. buildHostWrapper,
-// via a canon lower's own "realloc" CanonOpt rather than a fixed "cabi_realloc"
-// name on the runtime caller -- see its doc) can reuse the same call/error
-// handling without going through mod.ExportedFunction("cabi_realloc") again.
-func reallocOfFunc(ctx context.Context, fn api.Function) abi.Realloc {
-	return func(origPtr, origSize, align, newSize uint32) (uint32, error) {
-		res, err := fn.Call(ctx, uint64(origPtr), uint64(origSize), uint64(align), uint64(newSize))
-		if err != nil {
+// coreReallocCall wraps an already-resolved cabi_realloc api.Function as the
+// ctx-taking Call an abi.Realloc holds -- built once (captures only fn), reused
+// across calls. Returns nil if fn is nil (no realloc export), which
+// Realloc.grow reports as "not present".
+func coreReallocCall(fn api.Function) func(context.Context, uint32, uint32, uint32, uint32) (uint32, error) {
+	if fn == nil {
+		return nil
+	}
+	return func(ctx context.Context, origPtr, origSize, align, newSize uint32) (uint32, error) {
+		// CallWithStack into a fixed 4-slot buffer (4 params, 1 result) avoids
+		// the result-slice allocation Call makes on each realloc -- one per
+		// string/list lowered into guest memory.
+		var buf [4]uint64
+		buf[0], buf[1], buf[2], buf[3] = uint64(origPtr), uint64(origSize), uint64(align), uint64(newSize)
+		if err := fn.CallWithStack(ctx, buf[:]); err != nil {
 			return 0, fmt.Errorf("cabi_realloc: %w", err)
 		}
-		if len(res) != 1 {
-			return 0, fmt.Errorf("cabi_realloc returned %d value(s), expected 1", len(res))
-		}
-		return uint32(res[0]), nil
+		return uint32(buf[0]), nil
 	}
+}
+
+// reallocOfFunc builds an abi.Realloc for a caller that already resolved the
+// exact realloc func to call (e.g. buildHostWrapper, via a canon lower's own
+// "realloc" CanonOpt). Unlike the guest-export path it builds the Call closure
+// per use, which is fine off the guest-call hot path.
+func reallocOfFunc(ctx context.Context, fn api.Function) abi.Realloc {
+	return abi.Realloc{Ctx: ctx, Call: coreReallocCall(fn)}
 }
 
 // funcResultTypeRefs normalizes FuncResults (unnamed-or-named) into a slice of

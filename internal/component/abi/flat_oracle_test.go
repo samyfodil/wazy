@@ -215,7 +215,7 @@ func TestFlatOracleLowerFlat(t *testing.T) {
 			mem := make([]byte, 65536)
 			alloc := newBumpAllocator(entry.MemBase)
 
-			result, err := LowerFlat(v, desc, battery.resolve, alloc.realloc, mem)
+			result, err := LowerFlat(v, desc, battery.resolve, ReallocFunc(alloc.realloc), mem)
 			if err != nil {
 				t.Fatalf("LowerFlat: %v", err)
 			}

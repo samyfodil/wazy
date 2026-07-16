@@ -335,7 +335,7 @@ func TestLowerHostResults(t *testing.T) {
 	fd, resolve := synthFuncDesc(nil, []binary.TypeDesc{binary.PrimitiveDesc{Prim: "u32"}})
 
 	stack := make([]uint64, 1)
-	if err := lowerHostResults(ctx, fd, resolve, []abi.Value{uint32(7)}, stack, mod, newHandleTable(), -1, nil); err != nil {
+	if err := lowerHostResults(ctx, fd, resolve, []abi.Value{uint32(7)}, stack, mod, newHandleTable(), -1, abi.Realloc{}); err != nil {
 		t.Fatal(err)
 	}
 	if stack[0] != 7 {
@@ -343,13 +343,13 @@ func TestLowerHostResults(t *testing.T) {
 	}
 
 	// count mismatch
-	if err := lowerHostResults(ctx, fd, resolve, nil, stack, mod, newHandleTable(), -1, nil); err == nil {
+	if err := lowerHostResults(ctx, fd, resolve, nil, stack, mod, newHandleTable(), -1, abi.Realloc{}); err == nil {
 		t.Fatal("expected count-mismatch error")
 	}
 
 	// zero results is a no-op
 	fdEmpty, resEmpty := synthFuncDesc(nil, nil)
-	if err := lowerHostResults(ctx, fdEmpty, resEmpty, nil, nil, mod, newHandleTable(), -1, nil); err != nil {
+	if err := lowerHostResults(ctx, fdEmpty, resEmpty, nil, nil, mod, newHandleTable(), -1, abi.Realloc{}); err != nil {
 		t.Fatalf("zero results: %v", err)
 	}
 
@@ -357,7 +357,7 @@ func TestLowerHostResults(t *testing.T) {
 	fdMulti, resMulti := synthFuncDesc(nil, []binary.TypeDesc{
 		binary.PrimitiveDesc{Prim: "u32"}, binary.PrimitiveDesc{Prim: "u32"},
 	})
-	if err := lowerHostResults(ctx, fdMulti, resMulti, []abi.Value{uint32(1), uint32(2)}, make([]uint64, 2), mod, newHandleTable(), -1, nil); err == nil {
+	if err := lowerHostResults(ctx, fdMulti, resMulti, []abi.Value{uint32(1), uint32(2)}, make([]uint64, 2), mod, newHandleTable(), -1, abi.Realloc{}); err == nil {
 		t.Fatal("expected multiple-results error")
 	}
 }
@@ -379,7 +379,7 @@ func TestLowerHostResults_Spilled(t *testing.T) {
 	const outPtr = 64
 	stack := []uint64{outPtr}
 	rv := []abi.Value{[]abi.Value{uint64(11), uint64(22)}}
-	if err := lowerHostResults(ctx, fd, resolve, rv, stack, mod, newHandleTable(), 0, nil); err != nil {
+	if err := lowerHostResults(ctx, fd, resolve, rv, stack, mod, newHandleTable(), 0, abi.Realloc{}); err != nil {
 		t.Fatal(err)
 	}
 	if stack[0] != outPtr {
@@ -420,7 +420,7 @@ func TestLowerHostResults_SpilledNeedsMemory(t *testing.T) {
 	}}
 	fd, resolve := synthFuncDesc(nil, []binary.TypeDesc{rec})
 	rv := []abi.Value{[]abi.Value{uint64(1), uint64(2)}}
-	err = lowerHostResults(ctx, fd, resolve, rv, []uint64{0}, mod, newHandleTable(), 0, nil)
+	err = lowerHostResults(ctx, fd, resolve, rv, []uint64{0}, mod, newHandleTable(), 0, abi.Realloc{})
 	requireErrContains(t, err, "no memory")
 }
 
@@ -433,7 +433,7 @@ func TestLowerHostResults_NeedsMemoryNone(t *testing.T) {
 		t.Fatal(err)
 	}
 	fd, resolve := synthFuncDesc(nil, []binary.TypeDesc{binary.PrimitiveDesc{Prim: "string"}})
-	if err := lowerHostResults(ctx, fd, resolve, []abi.Value{"x"}, make([]uint64, 2), mod, newHandleTable(), -1, nil); err == nil {
+	if err := lowerHostResults(ctx, fd, resolve, []abi.Value{"x"}, make([]uint64, 2), mod, newHandleTable(), -1, abi.Realloc{}); err == nil {
 		t.Fatal("expected memory-required error")
 	}
 }

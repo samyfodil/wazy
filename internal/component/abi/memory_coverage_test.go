@@ -180,7 +180,7 @@ func TestStoreAllPrimitives(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mem := make([]byte, 100)
-			err := storePrimitive(mem, 0, tt.prim, tt.value, func(_, _, _, _ uint32) (uint32, error) { return 0, nil })
+			err := storePrimitive(mem, 0, tt.prim, tt.value, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
 			if err != nil {
 				t.Errorf("Store failed: %v", err)
 				return
@@ -206,7 +206,7 @@ func TestRecordWithMultipleFields(t *testing.T) {
 	resolve := func(idx uint32) bintype.TypeDesc { return nil }
 	value := []Value{uint32(1), uint32(0x12345678), uint32(0x1234)}
 
-	err := storeRecord(mem, 0, value, desc, resolve, func(_, _, _, _ uint32) (uint32, error) { return 0, nil })
+	err := storeRecord(mem, 0, value, desc, resolve, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
 	if err != nil {
 		t.Errorf("storeRecord failed: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestTupleWithMultipleElements(t *testing.T) {
 	resolve := func(idx uint32) bintype.TypeDesc { return nil }
 	value := []Value{uint32(1), uint32(0x12345678), uint32(0x1234)}
 
-	err := storeTuple(mem, 0, value, desc, resolve, func(_, _, _, _ uint32) (uint32, error) { return 0, nil })
+	err := storeTuple(mem, 0, value, desc, resolve, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
 	if err != nil {
 		t.Errorf("storeTuple failed: %v", err)
 	}
@@ -267,7 +267,7 @@ func TestVariantWithPayload(t *testing.T) {
 
 	// Test case 0 with payload
 	value := VariantValue{Disc: 0, Payload: uint32(42)}
-	err := storeVariant(mem, 0, value, desc, resolve, func(_, _, _, _ uint32) (uint32, error) { return 0, nil })
+	err := storeVariant(mem, 0, value, desc, resolve, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
 	if err != nil {
 		t.Errorf("storeVariant case 0 failed: %v", err)
 	}
@@ -287,9 +287,9 @@ func TestVariantWithPayload(t *testing.T) {
 func TestEmptyString(t *testing.T) {
 	mem := make([]byte, 100)
 
-	err := storeString(mem, 0, "", func(_, _, _, _ uint32) (uint32, error) {
+	err := storeString(mem, 0, "", ReallocFunc(func(_, _, _, _ uint32) (uint32, error) {
 		return 100, nil
-	})
+	}))
 	if err != nil {
 		t.Errorf("storeString empty failed: %v", err)
 	}

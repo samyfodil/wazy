@@ -586,7 +586,7 @@ func spillValue(v Value, t binary.TypeDesc, mem []byte, resolve Resolver, reallo
 	}
 
 	// Allocate memory.
-	ptr, err := realloc(0, 0, align, size)
+	ptr, err := realloc.Grow(0, 0, align, size)
 	if err != nil {
 		return 0, fmt.Errorf("spillValue: realloc failed: %w", err)
 	}

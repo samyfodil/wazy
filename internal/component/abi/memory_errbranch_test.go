@@ -11,12 +11,12 @@ import (
 func u32ptr(v uint32) *uint32 { return &v }
 
 // okRealloc is a realloc that always succeeds at a fixed address.
-func okRealloc(_, _, _, _ uint32) (uint32, error) { return 4096, nil }
+var okRealloc = ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 4096, nil })
 
 // failRealloc always returns an error.
-func failRealloc(_, _, _, _ uint32) (uint32, error) {
+var failRealloc = ReallocFunc(func(_, _, _, _ uint32) (uint32, error) {
 	return 0, errFake
-}
+})
 
 var errFake = &fakeErr{}
 
@@ -104,7 +104,7 @@ func TestStoreStringReallocFails(t *testing.T) {
 func TestStoreStringAllocOutOfBounds(t *testing.T) {
 	mem := make([]byte, 10)
 	// realloc returns a pointer past the end of mem
-	badRealloc := func(_, _, _, _ uint32) (uint32, error) { return 1000, nil }
+	badRealloc := ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 1000, nil })
 	if err := storeString(mem, 0, "hello", badRealloc); err == nil {
 		t.Error("expected error for storeString alloc out of bounds")
 	}
@@ -159,7 +159,7 @@ func TestStoreListReallocFails(t *testing.T) {
 
 func TestStoreListAllocOutOfBounds(t *testing.T) {
 	mem := make([]byte, 20)
-	badRealloc := func(_, _, _, _ uint32) (uint32, error) { return 1000, nil }
+	badRealloc := ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 1000, nil })
 	err := storeList(mem, 0, []Value{uint32(1)}, bintype.PrimitiveDesc{Prim: "u32"}, nil, badRealloc)
 	if err == nil {
 		t.Error("expected error for storeList alloc out of bounds")

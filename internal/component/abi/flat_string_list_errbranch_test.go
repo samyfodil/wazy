@@ -26,7 +26,7 @@ func TestLowerFlatStringReallocFails(t *testing.T) {
 
 func TestLowerFlatStringAllocOutOfBounds(t *testing.T) {
 	mem := make([]byte, 4)
-	badRealloc := func(_, _, _, _ uint32) (uint32, error) { return 1000, nil }
+	badRealloc := ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 1000, nil })
 	_, err := lowerFlatString("hello", badRealloc, mem)
 	if err == nil {
 		t.Error("expected error for lowerFlatString alloc out of bounds")
@@ -61,7 +61,7 @@ func TestLowerFlatListReallocFails(t *testing.T) {
 
 func TestLowerFlatListAllocOutOfBounds(t *testing.T) {
 	mem := make([]byte, 4)
-	badRealloc := func(_, _, _, _ uint32) (uint32, error) { return 1000, nil }
+	badRealloc := ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 1000, nil })
 	_, err := lowerFlatList([]Value{uint32(1)}, binary.PrimitiveDesc{Prim: "u32"}, nil, badRealloc, mem)
 	if err == nil {
 		t.Error("expected error for lowerFlatList alloc out of bounds")

@@ -39,7 +39,7 @@ func TestLowerStepMatchesLowerFlatInto(t *testing.T) {
 			// Reference path: tree-walking LowerFlat.
 			refMem := make([]byte, 65536)
 			refAlloc := newBumpAllocator(entry.MemBase)
-			refCore, refErr := LowerFlat(v, desc, battery.resolve, refAlloc.realloc, refMem)
+			refCore, refErr := LowerFlat(v, desc, battery.resolve, ReallocFunc(refAlloc.realloc), refMem)
 
 			// Compiled path: CompileLower once, then LowerStep.Lower.
 			step, compErr := CompileLower(desc, battery.resolve)
@@ -48,7 +48,7 @@ func TestLowerStepMatchesLowerFlatInto(t *testing.T) {
 			}
 			planMem := make([]byte, 65536)
 			planAlloc := newBumpAllocator(entry.MemBase)
-			planCore, planErr := step.Lower(nil, v, planAlloc.realloc, planMem)
+			planCore, planErr := step.Lower(nil, v, ReallocFunc(planAlloc.realloc), planMem)
 
 			// Errors must agree (both nil here -- these are all happy-path values).
 			if (refErr == nil) != (planErr == nil) {
@@ -83,7 +83,7 @@ func TestLowerStepErrorParity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: CompileLower: %v", name, err)
 		}
-		_, err = step.Lower(nil, badVal, func(_, _, _, _ uint32) (uint32, error) { return 1024, nil }, make([]byte, 4096))
+		_, err = step.Lower(nil, badVal, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 1024, nil }), make([]byte, 4096))
 		if err == nil {
 			t.Fatalf("%s: expected an error for a wrong-typed value", name)
 		}
@@ -101,7 +101,7 @@ func TestLowerStepErrorParity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompileLower bogus prim: %v", err)
 	}
-	if _, err := badStep.Lower(nil, uint32(0), nil, nil); err == nil {
+	if _, err := badStep.Lower(nil, uint32(0), Realloc{}, nil); err == nil {
 		t.Fatal("expected an error lowering an unknown primitive")
 	}
 }
@@ -125,7 +125,7 @@ func TestLowerStepSpill(t *testing.T) {
 	}
 
 	refMem := make([]byte, 65536)
-	refCore, refErr := LowerFlat(val, desc, resolve, newBumpAllocator(1024).realloc, refMem)
+	refCore, refErr := LowerFlat(val, desc, resolve, ReallocFunc(newBumpAllocator(1024).realloc), refMem)
 	if refErr != nil {
 		t.Fatalf("LowerFlat spill: %v", refErr)
 	}
@@ -138,7 +138,7 @@ func TestLowerStepSpill(t *testing.T) {
 		t.Fatalf("expected a spilling composite step, got kind=%d spills=%v", step.kind, step.spills)
 	}
 	planMem := make([]byte, 65536)
-	planCore, err := step.Lower(nil, val, newBumpAllocator(1024).realloc, planMem)
+	planCore, err := step.Lower(nil, val, ReallocFunc(newBumpAllocator(1024).realloc), planMem)
 	if err != nil {
 		t.Fatalf("Lower spill: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestLowerStepSpill(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompileLower own: %v", err)
 	}
-	if _, err := hstep.Lower(nil, "notahandle", nil, nil); err == nil || !bytes.Contains([]byte(err.Error()), []byte("handle expected uint32")) {
+	if _, err := hstep.Lower(nil, "notahandle", Realloc{}, nil); err == nil || !bytes.Contains([]byte(err.Error()), []byte("handle expected uint32")) {
 		t.Fatalf("handle error parity: got %v", err)
 	}
 }

@@ -773,7 +773,7 @@ func lowerHostResults(ctx context.Context, fd binary.FuncDesc, resolve abi.Resol
 	if err != nil {
 		return fmt.Errorf("result: %w", err)
 	}
-	if realloc == nil {
+	if realloc.Call == nil {
 		realloc = reallocOf(ctx, mod)
 	}
 

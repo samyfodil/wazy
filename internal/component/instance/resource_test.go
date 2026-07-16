@@ -381,7 +381,7 @@ func TestLowerHostResults_OwnHandle(t *testing.T) {
 	fd, resolve := synthFuncDesc(nil, []binary.TypeDesc{binary.OwnDesc{ResourceType: 2}})
 
 	stack := make([]uint64, 1)
-	if err := lowerHostResults(ctx, fd, resolve, []abi.Value{uint32(55)}, stack, mod, tbl, -1, nil); err != nil {
+	if err := lowerHostResults(ctx, fd, resolve, []abi.Value{uint32(55)}, stack, mod, tbl, -1, abi.Realloc{}); err != nil {
 		t.Fatalf("lowerHostResults: %v", err)
 	}
 	h := uint32(stack[0])
@@ -397,7 +397,7 @@ func TestLowerHostResults_BorrowHandle(t *testing.T) {
 	fd, resolve := synthFuncDesc(nil, []binary.TypeDesc{binary.BorrowDesc{ResourceType: 2}})
 
 	stack := make([]uint64, 1)
-	if err := lowerHostResults(ctx, fd, resolve, []abi.Value{uint32(66)}, stack, mod, tbl, -1, nil); err != nil {
+	if err := lowerHostResults(ctx, fd, resolve, []abi.Value{uint32(66)}, stack, mod, tbl, -1, abi.Realloc{}); err != nil {
 		t.Fatalf("lowerHostResults: %v", err)
 	}
 	h := uint32(stack[0])

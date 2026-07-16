@@ -677,7 +677,7 @@ func TestReallocFn_Success(t *testing.T) {
 	defer inst.Close(ctx)
 
 	realloc := reallocOf(ctx, inst.exports["run"].mod)
-	ptr, err := realloc(0, 0, 4, 8)
+	ptr, err := realloc.Grow(0, 0, 4, 8)
 	if err != nil {
 		t.Fatalf("realloc: %v", err)
 	}
@@ -826,7 +826,7 @@ func TestReallocFn_NoExport(t *testing.T) {
 	defer inst.Close(ctx)
 
 	realloc := reallocOf(ctx, inst.exports["run"].mod)
-	if _, err := realloc(0, 0, 4, 8); err == nil {
+	if _, err := realloc.Grow(0, 0, 4, 8); err == nil {
 		t.Fatal("expected an error calling realloc with no cabi_realloc export, got nil")
 	}
 }

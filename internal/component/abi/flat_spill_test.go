@@ -27,11 +27,11 @@ func TestLowerFlatSpilling(t *testing.T) {
 
 	resolve := func(idx uint32) binary.TypeDesc { return nil }
 	allocCount := 0
-	realloc := func(origPtr, origSize, align, newSize uint32) (uint32, error) {
+	realloc := ReallocFunc(func(origPtr, origSize, align, newSize uint32) (uint32, error) {
 		allocCount++
 		// Return sequential memory addresses
 		return uint32(1024 + allocCount*256), nil
-	}
+	})
 	mem := make([]byte, 65536)
 
 	// When the type is too large to fit in flat params, LowerFlat should spill and return a pointer.
@@ -246,7 +246,7 @@ func TestLowerFlatWithResolverErrors(t *testing.T) {
 	resolve := func(idx uint32) binary.TypeDesc {
 		return nil // Simulate resolver error
 	}
-	realloc := func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil }
+	realloc := ReallocFunc(func(origPtr, origSize, align, newSize uint32) (uint32, error) { return 0, nil })
 	mem := make([]byte, 1024)
 
 	_, err := LowerFlat(value, recordWithRef, resolve, realloc, mem)
