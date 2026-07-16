@@ -1021,11 +1021,33 @@ func TestReadInstanceDeclDesc(t *testing.T) {
 		}
 	})
 
-	t.Run("core type unsupported", func(t *testing.T) {
-		buf := []byte{0x00}
-		_, err := readInstanceDeclDesc(buf, 0)
-		if err == nil || !strings.Contains(err.Error(), "unsupported (M1): core type in instance type") {
-			t.Errorf("got err=%v, want core-type-in-instance-type unsupported error", err)
+	t.Run("core type: empty module type", func(t *testing.T) {
+		// instancedecl 0x00 core:type, then core:moduletype 0x50 with 0 decls.
+		buf := []byte{0x00, 0x50, 0x00}
+		off, err := readInstanceDeclDesc(buf, 0)
+		if err != nil {
+			t.Fatalf("readInstanceDeclDesc: %v", err)
+		}
+		if off != len(buf) {
+			t.Errorf("off=%d, want %d", off, len(buf))
+		}
+	})
+
+	t.Run("core type: empty func type", func(t *testing.T) {
+		// instancedecl 0x00 core:type, then core:functype 0x60 with 0 params/results.
+		buf := []byte{0x00, 0x60, 0x00, 0x00}
+		off, err := readInstanceDeclDesc(buf, 0)
+		if err != nil {
+			t.Fatalf("readInstanceDeclDesc: %v", err)
+		}
+		if off != len(buf) {
+			t.Errorf("off=%d, want %d", off, len(buf))
+		}
+	})
+
+	t.Run("core type: truncated", func(t *testing.T) {
+		if _, err := readInstanceDeclDesc([]byte{0x00}, 0); err == nil {
+			t.Error("expected an error for a truncated core:type")
 		}
 	})
 

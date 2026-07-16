@@ -534,11 +534,162 @@ func readInstanceDeclDesc(buf []byte, off int) (int, error) {
 		return off2, err
 	case 0x02: // alias
 		return readAlias(buf, off)
-	case 0x00: // core:type
-		return off, fmt.Errorf("unsupported (M1): core type in instance type")
+	case 0x00: // core:type -- a core func/module type defined inline in the
+		// instance or component type. It carries no runtime obligation (these
+		// type-only validation shapes are opaque tags -- see the package doc);
+		// consume its bytes to stay synchronized.
+		return readCoretypeDef(buf, off)
 	default:
 		return off, fmt.Errorf("instancedecl: invalid tag %#x", tag)
 	}
+}
+
+// readCoretypeDef consumes one core:type definition -- a core func type (0x60)
+// or a core module type (0x50) -- to keep the decoder synchronized when one
+// appears inside an instance/component type. It parses the grammar rather than
+// guessing a length, so a non-empty module type (imports/exports/nested types/
+// aliases) is consumed correctly too.
+func readCoretypeDef(buf []byte, off int) (int, error) {
+	if off >= len(buf) {
+		return off, ErrTruncatedBinary
+	}
+	tag := buf[off]
+	off++
+	switch tag {
+	case 0x60: // core:functype = vec(valtype) params, vec(valtype) results
+		var err error
+		if off, err = readCoreValtypeVec(buf, off); err != nil {
+			return off, err
+		}
+		return readCoreValtypeVec(buf, off)
+	case 0x50: // core:moduletype = vec(core:moduledecl)
+		count, n, err := leb128.LoadUint32(buf[off:])
+		if err != nil {
+			return off, err
+		}
+		off += int(n)
+		for i := uint32(0); i < count; i++ {
+			if off, err = readCoreModuleDecl(buf, off); err != nil {
+				return off, fmt.Errorf("coremoduledecl[%d]: %w", i, err)
+			}
+		}
+		return off, nil
+	default:
+		return off, fmt.Errorf("core:type: invalid tag %#x", tag)
+	}
+}
+
+// readCoreValtypeVec consumes vec(core:valtype); each core valtype is a single
+// byte (0x7f i32 … 0x7b v128, plus reference-type bytes), so the whole vector
+// is count single bytes.
+func readCoreValtypeVec(buf []byte, off int) (int, error) {
+	count, n, err := leb128.LoadUint32(buf[off:])
+	if err != nil {
+		return off, err
+	}
+	off += int(n)
+	if off+int(count) > len(buf) {
+		return off, ErrTruncatedBinary
+	}
+	return off + int(count), nil
+}
+
+// readCoreModuleDecl consumes one core:moduledecl inside a core module type:
+// an import (0x00), a nested core type (0x01), a core alias (0x02), or an
+// export (0x03).
+func readCoreModuleDecl(buf []byte, off int) (int, error) {
+	if off >= len(buf) {
+		return off, ErrTruncatedBinary
+	}
+	tag := buf[off]
+	off++
+	switch tag {
+	case 0x00: // import: nm nm core:importdesc
+		var err error
+		if off, err = skipName(buf, off); err != nil {
+			return off, err
+		}
+		if off, err = skipName(buf, off); err != nil {
+			return off, err
+		}
+		return readCoreImportdesc(buf, off)
+	case 0x01: // type: core:type (recursive)
+		return readCoretypeDef(buf, off)
+	case 0x02: // alias: core:alias -- sort byte + target; consumed conservatively
+		return readCoreModuleAlias(buf, off)
+	case 0x03: // export: nm core:importdesc
+		var err error
+		if off, err = skipName(buf, off); err != nil {
+			return off, err
+		}
+		return readCoreImportdesc(buf, off)
+	default:
+		return off, fmt.Errorf("coremoduledecl: invalid tag %#x", tag)
+	}
+}
+
+// readCoreImportdesc consumes a core:importdesc = sort byte + typeidx (func
+// 0x00, table 0x01, memory 0x02, global 0x03, tag 0x04). Table/memory/global
+// carry a small inline type rather than an index, but these type-only shapes
+// only ever use func imports/exports in practice; a non-func desc fails loud.
+func readCoreImportdesc(buf []byte, off int) (int, error) {
+	if off >= len(buf) {
+		return off, ErrTruncatedBinary
+	}
+	sort := buf[off]
+	off++
+	switch sort {
+	case 0x00: // func: typeidx
+		_, n, err := leb128.LoadUint32(buf[off:])
+		if err != nil {
+			return off, err
+		}
+		return off + int(n), nil
+	default:
+		return off, fmt.Errorf("core:importdesc: unsupported sort %#x", sort)
+	}
+}
+
+// readCoreModuleAlias consumes a core:alias inside a core module type: a sort
+// byte then a target (0x00 export: instanceidx + name, 0x01 outer: ct + idx).
+func readCoreModuleAlias(buf []byte, off int) (int, error) {
+	if off >= len(buf) {
+		return off, ErrTruncatedBinary
+	}
+	off++ // sort byte
+	if off >= len(buf) {
+		return off, ErrTruncatedBinary
+	}
+	target := buf[off]
+	off++
+	switch target {
+	case 0x01: // outer: ct idx
+		_, n, err := leb128.LoadUint32(buf[off:])
+		if err != nil {
+			return off, err
+		}
+		off += int(n)
+		_, n, err = leb128.LoadUint32(buf[off:])
+		if err != nil {
+			return off, err
+		}
+		return off + int(n), nil
+	default:
+		return off, fmt.Errorf("core:alias: unsupported target %#x", target)
+	}
+}
+
+// skipName consumes a name = vec(byte) (leb length + that many bytes).
+func skipName(buf []byte, off int) (int, error) {
+	n, m, err := leb128.LoadUint32(buf[off:])
+	if err != nil {
+		return off, err
+	}
+	off += int(m)
+	if off+int(n) > len(buf) {
+		return off, ErrTruncatedBinary
+	}
+	return off + int(n), nil
 }
 
 // readInstancetypeDesc reads an instance type: vec(instancedecl).
