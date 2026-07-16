@@ -78,28 +78,36 @@ type handleTable struct {
 	// and dense per instance rather than monotonically growing.
 	free []uint32
 
-	// dtors maps a resource type tag to the guest destructor that owns it, so an
-	// importer dropping an own<R> it received runs the DEFINER's dtor. Populated
-	// per composed sub-instance's table (see instantiateNestedInstances); canon
-	// resource.drop runs the entry for the dropped handle's tag. nil means none.
-	dtors map[uint32]api.Function
+	// dtors maps a resource type tag to a LAZY resolver for the guest destructor
+	// that owns it, so canon resource.drop runs it (an importer dropping an
+	// own<R> it received runs the DEFINER's dtor). The resolver is lazy because
+	// a dtor is registered before the core module that a `start` section will
+	// drop from is instantiated -- the dtor's own module may not be up yet at
+	// registration, but always is by the time a drop actually resolves it.
+	// Returns nil if the dtor can't be resolved (then drop just removes the
+	// entry). nil map means no destructors.
+	dtors map[uint32]func() api.Function
 }
 
-// registerDtor records the destructor for a resource type tag on this table.
-func (t *handleTable) registerDtor(typeIdx uint32, fn api.Function) {
+// registerDtor records a lazy destructor resolver for a resource type tag.
+func (t *handleTable) registerDtor(typeIdx uint32, resolve func() api.Function) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.dtors == nil {
-		t.dtors = make(map[uint32]api.Function)
+		t.dtors = make(map[uint32]func() api.Function)
 	}
-	t.dtors[typeIdx] = fn
+	t.dtors[typeIdx] = resolve
 }
 
-// dtorFor returns the destructor registered for a resource type tag, or nil.
+// dtorFor resolves the destructor registered for a resource type tag, or nil.
 func (t *handleTable) dtorFor(typeIdx uint32) api.Function {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.dtors[typeIdx]
+	resolve := t.dtors[typeIdx]
+	t.mu.Unlock()
+	if resolve == nil {
+		return nil
+	}
+	return resolve()
 }
 
 // newHandleTable returns an empty handleTable, ready to allocate handles

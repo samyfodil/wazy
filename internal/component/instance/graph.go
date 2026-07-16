@@ -310,6 +310,22 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		return nil
 	})
 
+	// Register each of this component's OWN resource destructors on its table
+	// BEFORE instantiating core modules -- a core module's `start` section runs
+	// during its instantiation and may drop a resource, which must run the dtor.
+	// The dtor resolver is lazy (its own module may not be up yet here). The tag
+	// matches the resource canon path: cfg.resCanon in a composition, else the
+	// raw definition index. This is what makes a guest's own resource.drop run
+	// its dtor (previously only host-initiated DropResource did).
+	instanceDtors := resolveDefinedResourceDtors(comp, coreFuncTarget)
+	for defIdx, resolve := range instanceDtors {
+		tag := defIdx
+		if cfg.resCanon != nil {
+			tag = cfg.resCanon(defIdx)
+		}
+		resources.registerDtor(tag, resolve)
+	}
+
 	for k, ci := range comp.CoreInstances {
 		// key is BOTH this instance's resolver key and the name a consumer
 		// declares to import it: the raw "with" name, the empty-import key, or
@@ -421,7 +437,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		instanceExports: buildInstanceExportIndex(exports),
 		closers:         closers,
 		subInstances:    subInstances,
-		resourceDtors:   resolveDefinedResourceDtors(comp, coreFuncTarget),
+		resourceDtors:   instanceDtors,
 		resCanon:        cfg.resCanon,
 		comp:            comp,
 		resources:       resources,
@@ -531,7 +547,7 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 			imports:          map[importKey]*hostImport{},
 			compileCache:     cfg.compileCache,
 			resCanon:         nested.ResourceDefIndex, // reduce a resource's deftype/export-alias indices to one tag
-			importedResDtors: map[uint32]api.Function{},
+			importedResDtors: map[uint32]func() api.Function{},
 		}
 		for _, arg := range inst.Args {
 			if arg.Sort != 0x05 { // instance

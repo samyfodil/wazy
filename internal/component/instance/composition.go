@@ -34,8 +34,8 @@ import (
 // dtor whose core func can't be resolved is skipped rather than failing
 // instantiation (it simply won't run on drop). Returns nil when the component
 // defines no destructor-bearing resource.
-func resolveDefinedResourceDtors(comp *binary.Component, coreFuncTarget func(int) (api.Module, string, error)) map[uint32]api.Function {
-	var out map[uint32]api.Function
+func resolveDefinedResourceDtors(comp *binary.Component, coreFuncTarget func(int) (api.Module, string, error)) map[uint32]func() api.Function {
+	var out map[uint32]func() api.Function
 	for idx, entry := range comp.TypeSpace {
 		if entry.Kind != binary.TypeSpaceDef || int(entry.Def) >= len(comp.Types) {
 			continue
@@ -44,18 +44,19 @@ func resolveDefinedResourceDtors(comp *binary.Component, coreFuncTarget func(int
 		if !ok || rd.Dtor == nil {
 			continue
 		}
-		mod, name, err := coreFuncTarget(int(*rd.Dtor))
-		if err != nil {
-			continue
-		}
-		fn := mod.ExportedFunction(name)
-		if fn == nil {
-			continue
-		}
+		dtorIdx := int(*rd.Dtor)
 		if out == nil {
-			out = make(map[uint32]api.Function)
+			out = make(map[uint32]func() api.Function)
 		}
-		out[uint32(idx)] = fn
+		// Lazy: the dtor's core module may not be instantiated at registration
+		// (it is by drop time -- see handleTable.dtors).
+		out[uint32(idx)] = func() api.Function {
+			mod, name, err := coreFuncTarget(dtorIdx)
+			if err != nil {
+				return nil
+			}
+			return mod.ExportedFunction(name)
+		}
 	}
 	return out
 }

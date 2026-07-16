@@ -165,7 +165,7 @@ type Instance struct {
 	// (the sibling's resource.drop must run this destructor -- the definer's --
 	// since an imported `sub resource` carries no dtor of its own). Empty for a
 	// component that defines no resources with destructors.
-	resourceDtors map[uint32]api.Function
+	resourceDtors map[uint32]func() api.Function
 
 	// resCanon maps this instance's local resource type indices to the
 	// composition-global id used as the shared handle table's tag. Non-nil only

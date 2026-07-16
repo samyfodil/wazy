@@ -62,8 +62,8 @@ type config struct {
 	// maps the table tag of a resource this component imports to the DEFINER's
 	// destructor, so this component's resource.drop of an own<R> it received
 	// runs that dtor. Both nil for a flat instantiation.
-	resCanon        func(uint32) uint32
-	importedResDtors map[uint32]api.Function
+	resCanon         func(uint32) uint32
+	importedResDtors map[uint32]func() api.Function
 }
 
 type importKey struct {
