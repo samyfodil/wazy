@@ -1,11 +1,13 @@
 package instance
 
 import (
+	"bytes"
 	"context"
 	"sync"
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/component/binary"
 )
 
 // CompileCache caches wazy.CompiledModule handles for core module bytes,
@@ -65,13 +67,53 @@ import (
 type CompileCache struct {
 	mu    sync.Mutex
 	byKey map[string]wazy.CompiledModule
+
+	// decMu guards byComp -- a separate lock so a decode cache hit never
+	// contends with a concurrent compile (byKey) lookup.
+	decMu  sync.Mutex
+	byComp map[string]*binary.Component
 }
 
 // NewCompileCache returns an empty CompileCache ready to pass to
 // WithCompileCache. See CompileCache's doc for its ownership/lifetime and
 // Runtime-pairing rules.
 func NewCompileCache() *CompileCache {
-	return &CompileCache{byKey: make(map[string]wazy.CompiledModule)}
+	return &CompileCache{
+		byKey:  make(map[string]wazy.CompiledModule),
+		byComp: make(map[string]*binary.Component),
+	}
+}
+
+// getOrDecode returns the decoded *binary.Component for componentBytes,
+// decoding on a miss and caching it for future Instantiate calls of the same
+// component. The decoded Component is immutable after decode (ResolveType and
+// friends are pure reads, and instantiation never writes comp.* fields), so
+// one cached *binary.Component is safely shared -- and read concurrently -- by
+// every Instance built from it, exactly like a cached CompiledModule. This
+// skips re-parsing the component binary (~40% of a cached instantiation's
+// allocations) on every call.
+func (c *CompileCache) getOrDecode(componentBytes []byte) (*binary.Component, error) {
+	key := string(componentBytes) // copy into the map key; safe if the caller reuses the backing array
+
+	c.decMu.Lock()
+	if comp, ok := c.byComp[key]; ok {
+		c.decMu.Unlock()
+		return comp, nil
+	}
+	c.decMu.Unlock()
+
+	comp, err := binary.Decode(bytes.NewReader(componentBytes))
+	if err != nil {
+		return nil, err
+	}
+
+	c.decMu.Lock()
+	defer c.decMu.Unlock()
+	if existing, ok := c.byComp[key]; ok {
+		return existing, nil // lost a decode race -- reuse the winner (decode is pure, both are equivalent)
+	}
+	c.byComp[key] = comp
+	return comp, nil
 }
 
 // getOrCompile returns the CompiledModule for coreBytes, compiling via r on

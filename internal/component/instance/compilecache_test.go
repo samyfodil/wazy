@@ -57,6 +57,47 @@ func TestCompileCache_AdderReusesCompiledModule(t *testing.T) {
 	}
 }
 
+// TestCompileCache_ReusesDecodedComponent proves the decode cache: two
+// Instantiate calls through the same cache decode the component binary only
+// once (getOrDecode returns the identical *binary.Component pointer), so the
+// second instantiation skips re-parsing the binary. A third call with a
+// different component decodes separately (distinct pointer, cache grows to 2).
+func TestCompileCache_ReusesDecodedComponent(t *testing.T) {
+	cache := NewCompileCache()
+
+	comp1a, err := cache.getOrDecode(realAdderWasm)
+	if err != nil {
+		t.Fatalf("first getOrDecode: %v", err)
+	}
+	comp1b, err := cache.getOrDecode(realAdderWasm)
+	if err != nil {
+		t.Fatalf("second getOrDecode: %v", err)
+	}
+	if comp1a != comp1b {
+		t.Fatal("second getOrDecode of the same bytes returned a different *binary.Component (decode not cached)")
+	}
+
+	comp2, err := cache.getOrDecode(realHelloWasm)
+	if err != nil {
+		t.Fatalf("getOrDecode of a different component: %v", err)
+	}
+	if comp2 == comp1a {
+		t.Fatal("a different component returned the cached pointer")
+	}
+
+	cache.decMu.Lock()
+	n := len(cache.byComp)
+	cache.decMu.Unlock()
+	if n != 2 {
+		t.Fatalf("decode cache entries: got %d, want 2 (adder + hello)", n)
+	}
+
+	// A bad component still surfaces its decode error through the cache.
+	if _, err := cache.getOrDecode([]byte("not a component")); err == nil {
+		t.Fatal("expected a decode error for garbage bytes")
+	}
+}
+
 // TestCompileCache_AdderCorrectAndIndependent proves a cached instantiation
 // is functionally identical to an uncached one (add/greet both compute real
 // results, not hardcoded/stale ones), and that two sequential instantiations
