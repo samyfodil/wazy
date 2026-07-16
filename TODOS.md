@@ -6,6 +6,41 @@
 - **Context:** ~8–10k LOC on top of the p2 runtime. Reference: Wasmtime + `bytecodealliance/wasip3-prototyping`, and the async section of the component-model `definitions.py`. Zero pure-Go prior art. Highest-variance part is async correctness debugging.
 - **Depends on / blocked by:** p2 CM runtime shipped and solid (done). Also blocked on the 0.3 spec settling — as of 2026-07 Wasmtime still marks its p3 support experimental/unstable. Do NOT start early; spec churn will waste the work.
 
+## Internal nested-component composition (the fused-adapter shape)
+- **What:** Instantiate nested component *definitions* declared inside one
+  component binary (`comp.Instances` + `comp.NestedComponents`) and link them:
+  component `$c2` imports an instance that sibling `$c1` provides, `canon lower`s
+  it into a core func, and the outer aliases `$c2`'s export and re-exports it.
+  Distinct from the runtime-level multi-component already done (separate
+  top-level components on one Runtime) — here it is *inside* a single binary.
+- **Why:** The last feature gating the official `component-model` conformance
+  suites this runtime can't yet pass: `wasmtime/fused.wast` (roundtrip),
+  `resources/multiple-resources.wast`, part of `wasmtime/resources.wast`, and
+  `linking/*`. Symptom today: bind rejects with "export resolves to an imported
+  func rather than a lift" (`graph.go` `bindFuncExportGraph`), because the
+  outer export's `componentFunc` resolves to a func alias targeting a nested
+  component instance (`aliasTarget{instIdx,name}`) that is never instantiated.
+- **Approach (reuses existing machinery):** a sibling's lifted export is exactly
+  a *host import* for the importer — the canon-lower + `buildHostWrapper` path
+  already lowers a host func into a core import. So: (1) a recursive
+  `instantiateGraph` entry taking a decoded `*binary.Component` + a
+  provided-imports map (instead of only `componentBytes`); (2) process
+  `comp.Instances` in order — resolve each instantiate-arg (sibling instance /
+  func / core module), recursively instantiate `NestedComponents[ComponentIdx]`
+  with those args satisfying its imports; (3) in `componentFunc`/
+  `bindFuncExportGraph`, resolve a func alias to a nested instance by delegating
+  to that sub-Instance's boundExport. Today's trivial pass-through-shim path
+  (`validateShimComponent`, `bindInstanceExportGraph`) becomes the degenerate
+  case of this.
+- **Cost / risk:** ~400–800 LOC in the graph engine (the most delicate code:
+  compile-cache keying, empty-import rewrite, host-import resolution all thread
+  through). High regression risk to the currently-green single-component
+  runtime — do it as a deliberate, well-tested unit (recursive instantiation +
+  cross-component func linking + resource-across-components), not a cram. The
+  `.wast` conformance harness (`wast_conformance_test.go`) is the ready-made
+  acceptance gate: unskip fused/resources/multiple-resources as each lands.
+- **Depends on / blocked by:** none technical; it is purely scope.
+
 ## wasi:http — DONE (both sides), minor breadth remaining
 - **Done — full `wasi:http/proxy` world runs.** Both directions verified differentially vs wasmtime:
   - **incoming-handler (server):** a real rustc guest responds to HTTP; vs `wasmtime serve -S cli` (`real_http_incoming.component.wasm`). `(*Instance).ServeHTTP` is a net/http.Handler; enable with `WithWASI(WASIConfig{EnableHTTP: true})`.
