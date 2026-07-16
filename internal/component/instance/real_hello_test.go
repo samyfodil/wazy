@@ -163,10 +163,11 @@ func TestRealHello_ReinstantiateAfterCloseOnSameRuntime(t *testing.T) {
 	}
 }
 
-// TestTwoDistinctComponentsOnOneRuntime guards the multi-tenant case: two
-// *different* components live at once on a single Runtime. Before synthesized
-// module names were namespaced per component (synthNamePrefix), both defaulted
-// their unreferenced root core module to "wazy:component/core0", so the second
+// TestTwoDistinctComponentsOnOneRuntime guards the baseline runtime property
+// that a single Runtime hosts many independent component instances: two
+// *different* components live at once. Before synthesized module names were
+// made unique per instantiation (nextSynthNamePrefix), both defaulted their
+// unreferenced root core module to "wazy:component/core0", so the second
 // Instantiate failed with "already instantiated". real_adder takes the
 // host-import path and real_hello the graph path, so this exercises both.
 func TestTwoDistinctComponentsOnOneRuntime(t *testing.T) {
@@ -194,5 +195,48 @@ func TestTwoDistinctComponentsOnOneRuntime(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].(uint32) != 5 {
 		t.Fatalf("adder add(2,3) = %v, want 5", got)
+	}
+}
+
+// TestSameComponentTwiceLiveOnOneRuntime guards the other half of that
+// property: the SAME component, instantiated twice, yields two independent
+// live instances on one Runtime. Synthesized names are unique per
+// instantiation (not per component), so identical bytes no longer collide.
+// Both instances are exercised, and each is independently callable after the
+// other is closed -- proving they are genuinely separate instances, not
+// aliases of one.
+func TestSameComponentTwiceLiveOnOneRuntime(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	a, err := Instantiate(ctx, r, realAdderWasm)
+	if err != nil {
+		t.Fatalf("Instantiate #1: %v", err)
+	}
+	b, err := Instantiate(ctx, r, realAdderWasm)
+	if err != nil {
+		t.Fatalf("Instantiate #2 (same component, both live): %v", err)
+	}
+
+	add := func(who string, inst *Instance, x, y, want uint32) {
+		got, err := inst.CallExport(ctx, "component:adder/calc", "add", x, y)
+		if err != nil {
+			t.Fatalf("%s add: %v", who, err)
+		}
+		if len(got) != 1 || got[0].(uint32) != want {
+			t.Fatalf("%s add(%d,%d) = %v, want %d", who, x, y, got, want)
+		}
+	}
+	add("a", a, 2, 3, 5)
+	add("b", b, 10, 20, 30)
+
+	// Closing one must not disturb the other.
+	if err := a.Close(ctx); err != nil {
+		t.Fatalf("close a: %v", err)
+	}
+	add("b-after-a-closed", b, 1, 1, 2)
+	if err := b.Close(ctx); err != nil {
+		t.Fatalf("close b: %v", err)
 	}
 }

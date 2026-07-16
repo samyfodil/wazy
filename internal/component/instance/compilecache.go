@@ -131,7 +131,15 @@ func (c *CompileCache) Close(ctx context.Context) error {
 // exactly r.InstantiateWithConfig(ctx, coreBytes, moduleCfg) -- byte-for-byte
 // the behavior every call site here had before CompileCache existed.
 func instantiateCoreModule(ctx context.Context, r wazy.Runtime, cfg *config, coreBytes []byte, moduleCfg wazy.ModuleConfig) (api.Module, error) {
-	if cfg == nil || cfg.compileCache == nil {
+	return instantiateCoreModuleCacheable(ctx, r, cfg, coreBytes, moduleCfg, true)
+}
+
+// instantiateCoreModuleCacheable is instantiateCoreModule with an explicit
+// cacheable flag. Pass false when coreBytes carry a per-instantiation-unique
+// name (an empty-import rewrite -- see rewriteEmptyImportModuleName's changed
+// return): such bytes are never reused, so caching them only grows the cache.
+func instantiateCoreModuleCacheable(ctx context.Context, r wazy.Runtime, cfg *config, coreBytes []byte, moduleCfg wazy.ModuleConfig, cacheable bool) (api.Module, error) {
+	if !cacheable || cfg == nil || cfg.compileCache == nil {
 		return r.InstantiateWithConfig(ctx, coreBytes, moduleCfg)
 	}
 	compiled, err := cfg.compileCache.getOrCompile(ctx, r, coreBytes)

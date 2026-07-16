@@ -286,7 +286,7 @@ func instantiateWithImports(ctx context.Context, r wazy.Runtime, comp *binary.Co
 	}
 
 	resolve := typeResolver(comp)
-	synthPrefix := synthNamePrefix(componentBytes)
+	synthPrefix := nextSynthNamePrefix()
 
 	// Component func index space: component-func aliases (into imported
 	// instances) occupy the low indices, followed by lifted funcs. See the

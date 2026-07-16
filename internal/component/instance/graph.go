@@ -108,7 +108,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	}
 
 	resolve := typeResolver(comp)
-	synthPrefix := synthNamePrefix(componentBytes)
+	synthPrefix := nextSynthNamePrefix()
 
 	// Component func index space: identical construction to
 	// instantiateWithImports -- see that function's doc for why component
@@ -261,8 +261,12 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			if err != nil {
 				return fail(err)
 			}
+			// rewritten: this module's bytes now carry the per-instantiation
+			// emptyNameTarget, so it must bypass the compile cache (see
+			// instantiateCoreModuleCacheable).
+			rewritten := false
 			if emptyNameTarget != "" {
-				coreBytes, err = rewriteEmptyImportModuleName(coreBytes, emptyNameTarget)
+				coreBytes, rewritten, err = rewriteEmptyImportModuleName(coreBytes, emptyNameTarget)
 				if err != nil {
 					return fail(fmt.Errorf("component/instance: core instance %d: %w", k, err))
 				}
@@ -274,7 +278,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			// function table not yet filled in at this point in the graph --
 			// see shim.go's doc) once the whole graph is wired, not something
 			// that should run eagerly as a side effect of wiring it in.
-			mod, err := instantiateCoreModule(ctx, r, cfg, coreBytes, wazy.NewModuleConfig().WithName(name).WithStartFunctions())
+			mod, err := instantiateCoreModuleCacheable(ctx, r, cfg, coreBytes, wazy.NewModuleConfig().WithName(name).WithStartFunctions(), !rewritten)
 			if err != nil {
 				return fail(fmt.Errorf("component/instance: instantiate core module %d as %q: %w", ci.ModuleIdx, name, err))
 			}
@@ -374,14 +378,19 @@ func discoverNeededFuncTypes(ctx context.Context, r wazy.Runtime, cfg *config, c
 		if err != nil {
 			return nil, err
 		}
+		rewritten := false
 		if emptyNameTarget != "" {
-			coreBytes, err = rewriteEmptyImportModuleName(coreBytes, emptyNameTarget)
+			coreBytes, rewritten, err = rewriteEmptyImportModuleName(coreBytes, emptyNameTarget)
 			if err != nil {
 				return nil, fmt.Errorf("component/instance: core module %d: %w", i, err)
 			}
 		}
+		// A rewritten module's bytes carry the per-instantiation emptyNameTarget,
+		// so it must not go through the cache (it would never be reused -- see
+		// instantiateCoreModuleCacheable); compile it as a throwaway.
+		useCache := cached && !rewritten
 		var compiled wazy.CompiledModule
-		if cached {
+		if useCache {
 			compiled, err = cfg.compileCache.getOrCompile(ctx, r, coreBytes)
 		} else {
 			compiled, err = r.CompileModule(ctx, coreBytes)
@@ -396,7 +405,7 @@ func discoverNeededFuncTypes(ctx context.Context, r wazy.Runtime, cfg *config, c
 			}
 			out[modName][fieldName] = coreFuncSig{params: fd.ParamTypes(), results: fd.ResultTypes()}
 		}
-		if !cached {
+		if !useCache {
 			if err := compiled.Close(ctx); err != nil {
 				return nil, fmt.Errorf("component/instance: core module %d: %w", i, err)
 			}

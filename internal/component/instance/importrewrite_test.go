@@ -3,20 +3,20 @@ package instance
 import "testing"
 
 func TestRewriteEmptyImportModuleName_TooShort(t *testing.T) {
-	_, err := rewriteEmptyImportModuleName([]byte{0x00, 0x61}, "x")
+	_, _, err := rewriteEmptyImportModuleName([]byte{0x00, 0x61}, "x")
 	requireErrContains(t, err, "too short")
 }
 
 func TestRewriteEmptyImportModuleName_TruncatedSectionSize(t *testing.T) {
 	// A valid preamble followed by a section id with no size byte at all.
 	buf := append([]byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}, 0x02)
-	_, err := rewriteEmptyImportModuleName(buf, "x")
+	_, _, err := rewriteEmptyImportModuleName(buf, "x")
 	requireErrContains(t, err, "read size")
 }
 
 func TestRewriteEmptyImportModuleName_SectionSizeExceedsBuffer(t *testing.T) {
 	buf := append([]byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}, 0x02, 0x7f) // size 127, no body
-	_, err := rewriteEmptyImportModuleName(buf, "x")
+	_, _, err := rewriteEmptyImportModuleName(buf, "x")
 	requireErrContains(t, err, "exceeds remaining bytes")
 }
 
@@ -24,7 +24,7 @@ func TestRewriteEmptyImportModuleName_PassesThroughNonImportSections(t *testing.
 	// magic+version, then a type section (id 1) with 1 byte of (fake, opaque
 	// to this function) body, which must survive unchanged.
 	buf := append([]byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}, 0x01, 0x01, 0x60)
-	out, err := rewriteEmptyImportModuleName(buf, "x")
+	out, _, err := rewriteEmptyImportModuleName(buf, "x")
 	if err != nil {
 		t.Fatalf("rewrite: %v", err)
 	}
@@ -39,26 +39,26 @@ func TestRewriteEmptyImportModuleName_PassesThroughNonImportSections(t *testing.
 }
 
 func TestRewriteImportSectionBody_BadCount(t *testing.T) {
-	_, err := rewriteImportSectionBody([]byte{}, "x")
+	_, _, err := rewriteImportSectionBody([]byte{}, "x")
 	requireErrContains(t, err, "read count")
 }
 
 func TestRewriteImportSectionBody_BadModuleName(t *testing.T) {
 	// count=1, then a name whose declared length exceeds the buffer.
-	_, err := rewriteImportSectionBody([]byte{0x01, 0x05, 'a'}, "x")
+	_, _, err := rewriteImportSectionBody([]byte{0x01, 0x05, 'a'}, "x")
 	requireErrContains(t, err, "module name")
 }
 
 func TestRewriteImportSectionBody_BadFieldName(t *testing.T) {
 	// count=1, module name "" (len 0), then a field name whose declared
 	// length exceeds the buffer.
-	_, err := rewriteImportSectionBody([]byte{0x01, 0x00, 0x05, 'a'}, "x")
+	_, _, err := rewriteImportSectionBody([]byte{0x01, 0x00, 0x05, 'a'}, "x")
 	requireErrContains(t, err, "field name")
 }
 
 func TestRewriteImportSectionBody_BadImportDesc(t *testing.T) {
 	// count=1, module "" , field "f", then an unsupported importdesc kind.
-	_, err := rewriteImportSectionBody([]byte{0x01, 0x00, 0x01, 'f', 0x99}, "x")
+	_, _, err := rewriteImportSectionBody([]byte{0x01, 0x00, 0x01, 'f', 0x99}, "x")
 	requireErrContains(t, err, "unsupported importdesc kind")
 }
 

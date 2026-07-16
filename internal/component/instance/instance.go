@@ -55,9 +55,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"hash/fnv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
@@ -495,24 +495,30 @@ func instantiateComponent(ctx context.Context, r wazy.Runtime, comp *binary.Comp
 	return &Instance{resolve: resolve, exports: exports, instanceExports: buildInstanceExportIndex(exports), closers: []api.Module{core}, resources: newHandleTable()}, nil
 }
 
-// synthNamePrefix derives the per-component namespace under which wazy
-// registers the module names it *synthesizes* -- the root core%d, the
-// empty-import anon%d, and the private priv%d host modules -- as opposed to the
-// names baked into the guest's own imports (which must be used verbatim, see
-// moduleNameFor). Without this, two different components each default their
-// unreferenced root to "wazy:component/core0" and the second Instantiate on the
-// same Runtime fails with "already instantiated".
+// synthInstanceCounter numbers instantiations so each gets a globally-unique
+// synthesized-name namespace. A plain process-global monotonic counter is
+// enough: it never repeats within a process, which is all uniqueness on a
+// Runtime's module registry requires.
+var synthInstanceCounter atomic.Uint64
+
+// nextSynthNamePrefix returns a fresh, unique namespace under which one
+// instantiation registers the module names wazy *synthesizes* -- the root
+// core%d, the empty-import anon%d, and the private priv%d host modules -- as
+// opposed to the names baked into the guest's own imports (which must be used
+// verbatim, see moduleNameFor).
 //
-// The prefix is a hash of the component bytes: stable for a given component (so
-// a re-instantiation after Close reuses the same names, and the compile cache
-// -- keyed on core-module bytes, not these names -- is unaffected) and distinct
-// across components. Two *live* instances of the *same* component on one
-// Runtime still collide; that is the documented one-component-at-a-time reuse
-// the compile cache targets, out of scope here.
-func synthNamePrefix(componentBytes []byte) string {
-	h := fnv.New64a()
-	_, _ = h.Write(componentBytes)
-	return fmt.Sprintf("wazy:component/%016x/", h.Sum64())
+// The namespace is per-INSTANTIATION, not per-component: every call to
+// Instantiate gets its own, so a Runtime can hold arbitrarily many live
+// component instances at once -- distinct components AND multiple instances of
+// the same component -- without their synthesized names colliding (each
+// component's unreferenced root would otherwise default to the same
+// "wazy:component/core0"). This is compatible with CompileCache because a
+// module's registered name binds at InstantiateModule time (WithName), not at
+// compile time; the cache keys on the core-module bytes, which don't include
+// the name, so the same cached CompiledModule is freely re-registered under a
+// new unique name each instantiation.
+func nextSynthNamePrefix() string {
+	return fmt.Sprintf("wazy:component/i%d/", synthInstanceCounter.Add(1))
 }
 
 // coreModuleBytes returns the slice of componentBytes holding an embedded core

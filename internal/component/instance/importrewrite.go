@@ -31,26 +31,34 @@ import (
 // registers that grouping under an ordinary synthesized name and rewrites
 // the one real core module that imports it (via this function) to ask for
 // that name instead of "" before instantiating it.
-func rewriteEmptyImportModuleName(moduleBytes []byte, newName string) ([]byte, error) {
+// The returned changed reports whether any empty import module name was
+// actually rewritten. It lets the caller keep the result out of the
+// compile cache: newName is per-instantiation unique (see nextSynthNamePrefix),
+// so a rewritten module's bytes -- and thus its byte-keyed cache entry -- differ
+// every instantiation, which would grow the cache without ever hitting. A
+// module with no empty import re-encodes byte-identically (changed == false) and
+// still caches normally.
+func rewriteEmptyImportModuleName(moduleBytes []byte, newName string) ([]byte, bool, error) {
 	const preambleLen = 8 // magic (4) + version (4)
 	if len(moduleBytes) < preambleLen {
-		return nil, fmt.Errorf("component/instance: rewriteEmptyImportModuleName: module is only %d bytes, too short for a wasm preamble", len(moduleBytes))
+		return nil, false, fmt.Errorf("component/instance: rewriteEmptyImportModuleName: module is only %d bytes, too short for a wasm preamble", len(moduleBytes))
 	}
 
 	var out bytes.Buffer
 	out.Write(moduleBytes[:preambleLen])
 
+	changed := false
 	offset := preambleLen
 	for offset < len(moduleBytes) {
 		id := moduleBytes[offset]
 		offset++
 		size, n, err := leb128.LoadUint32(moduleBytes[offset:])
 		if err != nil {
-			return nil, fmt.Errorf("component/instance: rewriteEmptyImportModuleName: section %d: read size: %w", id, err)
+			return nil, false, fmt.Errorf("component/instance: rewriteEmptyImportModuleName: section %d: read size: %w", id, err)
 		}
 		offset += int(n)
 		if offset+int(size) > len(moduleBytes) {
-			return nil, fmt.Errorf("component/instance: rewriteEmptyImportModuleName: section %d: size %d exceeds remaining bytes", id, size)
+			return nil, false, fmt.Errorf("component/instance: rewriteEmptyImportModuleName: section %d: size %d exceeds remaining bytes", id, size)
 		}
 		body := moduleBytes[offset : offset+int(size)]
 		offset += int(size)
@@ -62,59 +70,62 @@ func rewriteEmptyImportModuleName(moduleBytes []byte, newName string) ([]byte, e
 			continue
 		}
 
-		newBody, err := rewriteImportSectionBody(body, newName)
+		newBody, sectionChanged, err := rewriteImportSectionBody(body, newName)
 		if err != nil {
-			return nil, fmt.Errorf("component/instance: rewriteEmptyImportModuleName: %w", err)
+			return nil, false, fmt.Errorf("component/instance: rewriteEmptyImportModuleName: %w", err)
 		}
+		changed = changed || sectionChanged
 		out.WriteByte(id)
 		out.Write(leb128.EncodeUint32(uint32(len(newBody))))
 		out.Write(newBody)
 	}
-	return out.Bytes(), nil
+	return out.Bytes(), changed, nil
 }
 
 // rewriteImportSectionBody rewrites every "" module name within a core wasm
 // import section's already-sliced body (vec(import), not including the
 // section id/size header) to newName.
-func rewriteImportSectionBody(body []byte, newName string) ([]byte, error) {
+func rewriteImportSectionBody(body []byte, newName string) ([]byte, bool, error) {
 	offset := 0
 	count, n, err := leb128.LoadUint32(body[offset:])
 	if err != nil {
-		return nil, fmt.Errorf("import section: read count: %w", err)
+		return nil, false, fmt.Errorf("import section: read count: %w", err)
 	}
 	offset += int(n)
 
 	var out bytes.Buffer
 	out.Write(leb128.EncodeUint32(count))
 
+	changed := false
 	for i := range count {
 		modName, off, err := readCoreWasmName(body, offset)
 		if err != nil {
-			return nil, fmt.Errorf("import[%d] module name: %w", i, err)
+			return nil, false, fmt.Errorf("import[%d] module name: %w", i, err)
 		}
 		offset = off
 
 		fieldName, off, err := readCoreWasmName(body, offset)
 		if err != nil {
-			return nil, fmt.Errorf("import[%d] field name: %w", i, err)
+			return nil, false, fmt.Errorf("import[%d] field name: %w", i, err)
 		}
 		offset = off
 
 		descStart := offset
 		off, err = skipImportDesc(body, offset)
 		if err != nil {
-			return nil, fmt.Errorf("import[%d] (%q.%q): %w", i, modName, fieldName, err)
+			return nil, false, fmt.Errorf("import[%d] (%q.%q): %w", i, modName, fieldName, err)
 		}
 		offset = off
 
 		if modName == "" {
 			modName = newName
+			changed = true
 		}
 		writeName(&out, modName)
 		writeName(&out, fieldName)
 		out.Write(body[descStart:offset])
 	}
-	return out.Bytes(), nil
+	return out.Bytes(), changed, nil
 }
 
 // readCoreWasmName reads a plain core-wasm name (uleb32 length + raw utf8
