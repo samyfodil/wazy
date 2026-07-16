@@ -6,59 +6,41 @@
 - **Context:** ~8–10k LOC on top of the p2 runtime. Reference: Wasmtime + `bytecodealliance/wasip3-prototyping`, and the async section of the component-model `definitions.py`. Zero pure-Go prior art. Highest-variance part is async correctness debugging.
 - **Depends on / blocked by:** p2 CM runtime shipped and solid (done). Also blocked on the 0.3 spec settling — as of 2026-07 Wasmtime still marks its p3 support experimental/unstable. Do NOT start early; spec churn will waste the work.
 
-## Internal nested-component composition — func linking DONE; resource identity remains
+## Internal nested-component composition — func linking + cross-component resources DONE
 - **DONE (func linking, commit cd793ee):** A component binary that declares
   nested component *definitions* (`comp.Instances` + `comp.NestedComponents`),
-  instantiates them, and links a sibling's export into another's import now runs.
-  `wasmtime/fused.wast` passes (`fused.18` roundtrip across the char boundary
-  values). Mechanism: a sibling's lifted export is wired into the importer as a
-  delegating `hostImport` (customFD/customResolve from the provider's
-  boundExport), so the existing canon-lower/`buildHostWrapper` path lowers calls
-  unchanged; an outer export aliasing a nested instance's func re-exposes that
-  sub-Instance's boundExport. Scoped to the composition shape via a func-alias-
-  to-local-instance reachability check, so WASI/shim components are untouched.
-  `binary.Component.Bytes` + `Instance.subInstances` added. See
-  [[wazy-wast-conformance]].
-- **REMAINING (resource identity across composed components):** gates
-  `resources/multiple-resources.wast` and parts of `wasmtime/resources.wast`.
-  These now *instantiate and run* through the composition path, then fail on a
-  resource handle crossing the fused-adapter boundary. Two coupled problems,
-  both traced:
-  1. *Within a component*, `resource.new` tags a handle by the resource's
-     DEFINITION type index while `own<R>`/`borrow<R>` in a lifted signature use
-     the EXPORT-ALIAS index (export-introduces-alias) — the same resource, two
-     indices. Fixable with a resource-type canonicalizer on the handleTable
-     (`Component.ResourceDefIndex` → tag by the defining index). Prototyped and
-     works, but reverted: unexercised by any committed test on its own (it only
-     matters together with #2), so it was speculative to ship alone.
-  2. *Across the boundary* is the real blocker. The delegating host import gives
-     the importer's host wrapper the PROVIDER's `customFD` (the decoder does not
-     retain the func signatures inside an imported instance type — the
-     documented limitation the composition sidesteps for non-resource funcs).
-     So the provider's resource type indices get injected into the importer's
-     type space, where they are meaningless, and the importer re-mints handles
-     treating a rep as a handle. Cleanly fixing this needs the decoder to
-     structurally decode imported-instance-type func signatures so each
-     component knows ITS OWN resource indices for imported funcs — then rep-based
-     lift_own/lower_own handle transfer at the boundary (the "No cross-instance
-     handle transfer" ceiling in `resource.go`). That decoder work is the root
-     dependency; it is a large, foundational feature, not a boundary patch.
-  3. Even with #1 and #2, `multiple-resources` also needs canon `resource.drop`
-     to RUN the resource's destructor (it currently just removes the table
-     entry — the "No destructors" ceiling in `resource.go`), because the test
-     asserts a `num-live` count that the R1/R2 dtors decrement. wazy runs a dtor
-     for a HOST-initiated drop (`DropResource`) but not for a guest's own canon
-     `resource.drop`; thread the dtor into `resourceCanonHostFuncGraph`.
-  So this one suite is really three coupled ceilings (imported-instance-type
-  decode + cross-instance handle transfer + destructor-on-drop) — the full
-  resource-composition-and-lifecycle story, a deliberate multi-part project.
+  instantiates them, and links a sibling's export into another's import runs.
+  `wasmtime/fused.wast` passes. A sibling's lifted export is wired into the
+  importer as a delegating `hostImport`; an outer export aliasing a nested
+  instance's func re-exposes that sub-Instance's boundExport. Scoped via a
+  func-alias-to-local-instance reachability check so WASI/shim components are
+  untouched. `binary.Component.Bytes` + `Instance.subInstances` added.
+- **DONE (cross-component resources, commit e866814):** `resources/multiple-
+  resources.wast` passes (run → 42). A resource DEFINED in one nested component
+  and IMPORTED + used (created, borrowed, dropped with its destructor) by a
+  sibling has one identity across both. Three coupled pieces, all gated behind
+  the composition path (`resCanon`/`sharedResources` nil → prior behavior):
+  (1) composed sub-instances share ONE handle table, so a handle from the
+  definer is directly valid in the importer; (2) a per-component canonicalizer
+  (`resCanon` = base + `Component.ResourceDefIndex`, or the sibling's global id
+  for an imported resource) maps each component's differing local resource
+  indices to one shared-table tag — threaded into the resource canons and
+  `resolveHandleArg`; (3) the definer's destructor is resolved at instantiation
+  (`Instance.resourceDtors`), registered on the shared table by global id, and
+  run by canon `resource.drop` (which previously ran no destructor). A delegating
+  import presents resources as opaque u32 (`resourcesToU32FD`) so handles pass
+  through untouched. See `composition.go` and [[wazy-wast-conformance]].
+- **REMAINING (further wasmtime/resources sub-features):** that suite mixes
+  patterns beyond a guest-defined resource: HOST-provided imported-resource
+  *constructors* (the embedder supplies a resource impl the guest imports — a
+  `[constructor]resource1` trap stub today), component (not instance)
+  instantiate-args, and exporting a canon-produced func (`[constructor]t`).
+  Each is its own scoped feature; none is an ABI bug.
 - **Also deeper fused sub-features** (each skips a `fused.wast` module, logged):
   pass-through shim with empty export names, >16 flat params on an imported func
   (whole-param spilling for a lowered import), func/type instantiate-args,
   self-referential nesting.
-- **Acceptance gate:** the `.wast` harness (`wast_conformance_test.go`) — unskip
-  multiple-resources/resources as resource identity lands.
-- **Depends on / blocked by:** none technical; it is purely scope.
+- **Acceptance gate:** the `.wast` harness (`wast_conformance_test.go`).
 
 ## wasi:http — DONE (both sides), minor breadth remaining
 - **Done — full `wasi:http/proxy` world runs.** Both directions verified differentially vs wasmtime:
