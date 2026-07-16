@@ -13,6 +13,27 @@ import (
 //
 // This mirrors the canonical ABI lower_flat() function.
 func LowerFlat(v Value, t binary.TypeDesc, resolve Resolver, realloc Realloc, mem []byte) ([]CoreValue, error) {
+	return LowerFlatInto(nil, v, t, resolve, realloc, mem)
+}
+
+// LowerFlatInto is LowerFlat that appends into dst instead of allocating a
+// fresh result slice, returning the extended slice (append semantics). It lets
+// the per-call hot path (instance.lowerParams) lower a whole parameter list
+// straight into one pooled buffer rather than allocating a small slice per
+// parameter and copying. LowerFlat is the dst==nil case.
+func LowerFlatInto(dst []CoreValue, v Value, t binary.TypeDesc, resolve Resolver, realloc Realloc, mem []byte) ([]CoreValue, error) {
+	// Fast path: a top-level non-string primitive flattens to exactly one core
+	// value and can never spill (MaxFlatParams is far above 1), so append it
+	// directly -- no intermediate one-element slice, no Flatten/spill re-check.
+	// This is the common case for numeric and char parameters.
+	if p, ok := t.(binary.PrimitiveDesc); ok && p.Prim != "string" {
+		cv, err := lowerPrimitiveCore(v, p.Prim)
+		if err != nil {
+			return nil, err
+		}
+		return append(dst, cv), nil
+	}
+
 	flat, err := lowerFlatImpl(v, t, resolve, realloc, mem)
 	if err != nil {
 		return nil, err
@@ -30,10 +51,10 @@ func LowerFlat(v Value, t binary.TypeDesc, resolve Resolver, realloc Realloc, me
 		if err != nil {
 			return nil, err
 		}
-		return []CoreValue{NewCoreValueI32(ptr)}, nil
+		return append(dst, NewCoreValueI32(ptr)), nil
 	}
 
-	return flat, nil
+	return append(dst, flat...), nil
 }
 
 // lowerFlatImpl recursively lowers a value to its flat representation.
@@ -93,23 +114,45 @@ func lowerFlatImpl(v Value, t binary.TypeDesc, resolve Resolver, realloc Realloc
 // the string case (strings must allocate and copy their UTF-8 bytes into
 // linear memory even in the flat ABI).
 func lowerFlatPrimitive(v Value, prim string, realloc Realloc, mem []byte) ([]CoreValue, error) {
+	if prim == "string" {
+		s, ok := v.(string)
+		if !ok {
+			return nil, fmt.Errorf("lowerFlat string: expected string, got %T", v)
+		}
+		return lowerFlatString(s, realloc, mem)
+	}
+	cv, err := lowerPrimitiveCore(v, prim)
+	if err != nil {
+		return nil, err
+	}
+	return []CoreValue{cv}, nil
+}
+
+// lowerPrimitiveCore lowers every non-string primitive to its single core
+// value. Strings are the one primitive that flattens to two core values
+// (ptr, len) and must allocate into linear memory (see lowerFlatString), so
+// they are excluded here; passing "string" is a programming error. Split out
+// of lowerFlatPrimitive so the hot path (LowerFlatInto) can append a top-level
+// primitive parameter straight into its destination buffer without the
+// one-element []CoreValue{...} slice lowerFlatPrimitive would otherwise return.
+func lowerPrimitiveCore(v Value, prim string) (CoreValue, error) {
 	switch prim {
 	case "bool":
 		b, ok := v.(bool)
 		if !ok {
-			return nil, fmt.Errorf("lowerFlat bool: expected bool, got %T", v)
+			return CoreValue{}, fmt.Errorf("lowerFlat bool: expected bool, got %T", v)
 		}
 		var val uint32
 		if b {
 			val = 1
 		}
-		return []CoreValue{NewCoreValueI32(val)}, nil
+		return NewCoreValueI32(val), nil
 
 	case "u8", "u16", "u32":
 		if u, ok := v.(uint32); ok {
-			return []CoreValue{NewCoreValueI32(u)}, nil
+			return NewCoreValueI32(u), nil
 		}
-		return nil, fmt.Errorf("lowerFlat %s: expected uint32, got %T", prim, v)
+		return CoreValue{}, fmt.Errorf("lowerFlat %s: expected uint32, got %T", prim, v)
 
 	case "s8", "s16", "s32":
 		if i, ok := v.(int32); ok {
@@ -118,15 +161,15 @@ func lowerFlatPrimitive(v Value, prim string, realloc Realloc, mem []byte) ([]Co
 			if i < 0 {
 				i += (1 << coreBits)
 			}
-			return []CoreValue{NewCoreValueI32(uint32(i))}, nil
+			return NewCoreValueI32(uint32(i)), nil
 		}
-		return nil, fmt.Errorf("lowerFlat %s: expected int32, got %T", prim, v)
+		return CoreValue{}, fmt.Errorf("lowerFlat %s: expected int32, got %T", prim, v)
 
 	case "u64":
 		if u, ok := v.(uint64); ok {
-			return []CoreValue{NewCoreValueI64(u)}, nil
+			return NewCoreValueI64(u), nil
 		}
-		return nil, fmt.Errorf("lowerFlat u64: expected uint64, got %T", v)
+		return CoreValue{}, fmt.Errorf("lowerFlat u64: expected uint64, got %T", v)
 
 	case "s64":
 		if i, ok := v.(int64); ok {
@@ -135,42 +178,39 @@ func lowerFlatPrimitive(v Value, prim string, realloc Realloc, mem []byte) ([]Co
 			if i < 0 {
 				i += (1 << coreBits)
 			}
-			return []CoreValue{NewCoreValueI64(uint64(i))}, nil
+			return NewCoreValueI64(uint64(i)), nil
 		}
-		return nil, fmt.Errorf("lowerFlat s64: expected int64, got %T", v)
+		return CoreValue{}, fmt.Errorf("lowerFlat s64: expected int64, got %T", v)
 
 	case "f32":
 		if f, ok := v.(float32); ok {
-			return []CoreValue{NewCoreValueF32(f)}, nil
+			return NewCoreValueF32(f), nil
 		}
-		return nil, fmt.Errorf("lowerFlat f32: expected float32, got %T", v)
+		return CoreValue{}, fmt.Errorf("lowerFlat f32: expected float32, got %T", v)
 
 	case "f64":
 		if f, ok := v.(float64); ok {
-			return []CoreValue{NewCoreValueF64(f)}, nil
+			return NewCoreValueF64(f), nil
 		}
-		return nil, fmt.Errorf("lowerFlat f64: expected float64, got %T", v)
+		return CoreValue{}, fmt.Errorf("lowerFlat f64: expected float64, got %T", v)
 
 	case "char":
 		if r, ok := v.(rune); ok {
 			if r < 0 || r >= 0x110000 {
-				return nil, fmt.Errorf("lowerFlat char: value %d out of range", r)
+				return CoreValue{}, fmt.Errorf("lowerFlat char: value %d out of range", r)
 			}
 			if r >= 0xD800 && r <= 0xDFFF {
-				return nil, fmt.Errorf("lowerFlat char: surrogate half %d not allowed", r)
+				return CoreValue{}, fmt.Errorf("lowerFlat char: surrogate half %d not allowed", r)
 			}
-			return []CoreValue{NewCoreValueI32(uint32(r))}, nil
+			return NewCoreValueI32(uint32(r)), nil
 		}
-		return nil, fmt.Errorf("lowerFlat char: expected rune, got %T", v)
+		return CoreValue{}, fmt.Errorf("lowerFlat char: expected rune, got %T", v)
 
 	case "string":
-		if s, ok := v.(string); ok {
-			return lowerFlatString(s, realloc, mem)
-		}
-		return nil, fmt.Errorf("lowerFlat string: expected string, got %T", v)
+		return CoreValue{}, fmt.Errorf("lowerPrimitiveCore: string is not a single core value")
 
 	default:
-		return nil, fmt.Errorf("lowerFlat: unknown primitive type %s", prim)
+		return CoreValue{}, fmt.Errorf("lowerFlat: unknown primitive type %s", prim)
 	}
 }
 

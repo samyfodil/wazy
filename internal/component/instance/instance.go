@@ -761,6 +761,7 @@ func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName stri
 // old var coreArgs []abi.CoreValue starting point.
 func (in *Instance) lowerParams(be *boundExport, args []abi.Value, mem []byte, memAvailable bool, realloc abi.Realloc, exportName string, dst []abi.CoreValue) ([]abi.CoreValue, error) {
 	coreArgs := dst
+	var err error
 	for i, p := range be.fd.Params {
 		if err := be.paramErrs[i]; err != nil {
 			return nil, fmt.Errorf("component/instance: export %q param %d (%s): %w", exportName, i, p.Name, err)
@@ -769,11 +770,10 @@ func (in *Instance) lowerParams(be *boundExport, args []abi.Value, mem []byte, m
 		if be.paramUsesMemory[i] && !memAvailable {
 			return nil, fmt.Errorf("component/instance: export %q param %d (%s) requires linear memory (string/list), but the core module exports no memory", exportName, i, p.Name)
 		}
-		flat, err := abi.LowerFlat(args[i], pt, in.resolve, realloc, mem)
+		coreArgs, err = abi.LowerFlatInto(coreArgs, args[i], pt, in.resolve, realloc, mem)
 		if err != nil {
 			return nil, fmt.Errorf("component/instance: export %q param %d (%s): lower: %w", exportName, i, p.Name, err)
 		}
-		coreArgs = append(coreArgs, flat...)
 	}
 	return coreArgs, nil
 }
