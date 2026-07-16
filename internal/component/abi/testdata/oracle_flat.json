@@ -1,24 +1,108 @@
 {
   "types": [
-    {"name": "u32_val", "type": {"kind": "primitive", "prim": "u32"}},
-    {"name": "s32_val", "type": {"kind": "primitive", "prim": "s32"}},
-    {"name": "u64_val", "type": {"kind": "primitive", "prim": "u64"}},
-    {"name": "s64_val", "type": {"kind": "primitive", "prim": "s64"}},
-    {"name": "f32_val", "type": {"kind": "primitive", "prim": "f32"}},
-    {"name": "f64_val", "type": {"kind": "primitive", "prim": "f64"}},
-    {"name": "bool_val", "type": {"kind": "primitive", "prim": "bool"}},
-    {"name": "u8_val", "type": {"kind": "primitive", "prim": "u8"}},
-    {"name": "s8_val", "type": {"kind": "primitive", "prim": "s8"}},
-    {"name": "u16_val", "type": {"kind": "primitive", "prim": "u16"}},
-    {"name": "s16_val", "type": {"kind": "primitive", "prim": "s16"}},
-    {"name": "char_val", "type": {"kind": "primitive", "prim": "char"}},
+    {
+      "name": "u32_val",
+      "type": {
+        "kind": "primitive",
+        "prim": "u32"
+      }
+    },
+    {
+      "name": "s32_val",
+      "type": {
+        "kind": "primitive",
+        "prim": "s32"
+      }
+    },
+    {
+      "name": "u64_val",
+      "type": {
+        "kind": "primitive",
+        "prim": "u64"
+      }
+    },
+    {
+      "name": "s64_val",
+      "type": {
+        "kind": "primitive",
+        "prim": "s64"
+      }
+    },
+    {
+      "name": "f32_val",
+      "type": {
+        "kind": "primitive",
+        "prim": "f32"
+      }
+    },
+    {
+      "name": "f64_val",
+      "type": {
+        "kind": "primitive",
+        "prim": "f64"
+      }
+    },
+    {
+      "name": "bool_val",
+      "type": {
+        "kind": "primitive",
+        "prim": "bool"
+      }
+    },
+    {
+      "name": "u8_val",
+      "type": {
+        "kind": "primitive",
+        "prim": "u8"
+      }
+    },
+    {
+      "name": "s8_val",
+      "type": {
+        "kind": "primitive",
+        "prim": "s8"
+      }
+    },
+    {
+      "name": "u16_val",
+      "type": {
+        "kind": "primitive",
+        "prim": "u16"
+      }
+    },
+    {
+      "name": "s16_val",
+      "type": {
+        "kind": "primitive",
+        "prim": "s16"
+      }
+    },
+    {
+      "name": "char_val",
+      "type": {
+        "kind": "primitive",
+        "prim": "char"
+      }
+    },
     {
       "name": "simple_record",
       "type": {
         "kind": "record",
         "fields": [
-          {"name": "a", "type": {"kind": "primitive", "prim": "u32"}},
-          {"name": "b", "type": {"kind": "primitive", "prim": "s32"}}
+          {
+            "name": "a",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "b",
+            "type": {
+              "kind": "primitive",
+              "prim": "s32"
+            }
+          }
         ]
       }
     },
@@ -27,8 +111,16 @@
       "type": {
         "kind": "variant",
         "cases": [
-          {"name": "none"},
-          {"name": "some", "type": {"kind": "primitive", "prim": "u32"}}
+          {
+            "name": "none"
+          },
+          {
+            "name": "some",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          }
         ]
       }
     },
@@ -37,9 +129,27 @@
       "type": {
         "kind": "variant",
         "cases": [
-          {"name": "a_u32", "type": {"kind": "primitive", "prim": "u32"}},
-          {"name": "b_f32", "type": {"kind": "primitive", "prim": "f32"}},
-          {"name": "c_u64", "type": {"kind": "primitive", "prim": "u64"}}
+          {
+            "name": "a_u32",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "b_f32",
+            "type": {
+              "kind": "primitive",
+              "prim": "f32"
+            }
+          },
+          {
+            "name": "c_u64",
+            "type": {
+              "kind": "primitive",
+              "prim": "u64"
+            }
+          }
         ]
       }
     },
@@ -47,15 +157,24 @@
       "name": "simple_option",
       "type": {
         "kind": "option",
-        "elem": {"kind": "primitive", "prim": "u32"}
+        "elem": {
+          "kind": "primitive",
+          "prim": "u32"
+        }
       }
     },
     {
       "name": "simple_result",
       "type": {
         "kind": "result",
-        "ok": {"kind": "primitive", "prim": "u32"},
-        "err": {"kind": "primitive", "prim": "s32"}
+        "ok": {
+          "kind": "primitive",
+          "prim": "u32"
+        },
+        "err": {
+          "kind": "primitive",
+          "prim": "s32"
+        }
       }
     },
     {
@@ -63,8 +182,14 @@
       "type": {
         "kind": "tuple",
         "elems": [
-          {"kind": "primitive", "prim": "u32"},
-          {"kind": "primitive", "prim": "s32"}
+          {
+            "kind": "primitive",
+            "prim": "u32"
+          },
+          {
+            "kind": "primitive",
+            "prim": "s32"
+          }
         ]
       }
     },
@@ -72,29 +197,49 @@
       "name": "simple_flags",
       "type": {
         "kind": "flags",
-        "names": ["a", "b", "c"]
+        "names": [
+          "a",
+          "b",
+          "c"
+        ]
       }
     },
     {
       "name": "simple_enum",
       "type": {
         "kind": "enum",
-        "names": ["red", "green", "blue"]
+        "names": [
+          "red",
+          "green",
+          "blue"
+        ]
       }
     },
-    {"name": "string_val", "type": {"kind": "primitive", "prim": "string"}},
+    {
+      "name": "string_val",
+      "type": {
+        "kind": "primitive",
+        "prim": "string"
+      }
+    },
     {
       "name": "list_u32",
       "type": {
         "kind": "list",
-        "elem": {"kind": "primitive", "prim": "u32"}
+        "elem": {
+          "kind": "primitive",
+          "prim": "u32"
+        }
       }
     },
     {
       "name": "list_string",
       "type": {
         "kind": "list",
-        "elem": {"kind": "primitive", "prim": "string"}
+        "elem": {
+          "kind": "primitive",
+          "prim": "string"
+        }
       }
     },
     {
@@ -102,8 +247,20 @@
       "type": {
         "kind": "record",
         "fields": [
-          {"name": "a", "type": {"kind": "primitive", "prim": "string"}},
-          {"name": "b", "type": {"kind": "primitive", "prim": "u32"}}
+          {
+            "name": "a",
+            "type": {
+              "kind": "primitive",
+              "prim": "string"
+            }
+          },
+          {
+            "name": "b",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          }
         ]
       }
     },
@@ -111,15 +268,24 @@
       "name": "option_string",
       "type": {
         "kind": "option",
-        "elem": {"kind": "primitive", "prim": "string"}
+        "elem": {
+          "kind": "primitive",
+          "prim": "string"
+        }
       }
     },
     {
       "name": "result_string_u32",
       "type": {
         "kind": "result",
-        "ok": {"kind": "primitive", "prim": "string"},
-        "err": {"kind": "primitive", "prim": "u32"}
+        "ok": {
+          "kind": "primitive",
+          "prim": "string"
+        },
+        "err": {
+          "kind": "primitive",
+          "prim": "u32"
+        }
       }
     },
     {
@@ -127,60 +293,2477 @@
       "type": {
         "kind": "tuple",
         "elems": [
-          {"kind": "ref", "name": "list_u32"},
-          {"kind": "primitive", "prim": "u32"}
+          {
+            "kind": "ref",
+            "name": "list_u32"
+          },
+          {
+            "kind": "primitive",
+            "prim": "u32"
+          }
+        ]
+      }
+    },
+    {
+      "name": "mixed_align_record",
+      "type": {
+        "kind": "record",
+        "fields": [
+          {
+            "name": "a",
+            "type": {
+              "kind": "primitive",
+              "prim": "u8"
+            }
+          },
+          {
+            "name": "b",
+            "type": {
+              "kind": "primitive",
+              "prim": "u64"
+            }
+          },
+          {
+            "name": "c",
+            "type": {
+              "kind": "primitive",
+              "prim": "u8"
+            }
+          },
+          {
+            "name": "d",
+            "type": {
+              "kind": "primitive",
+              "prim": "u16"
+            }
+          },
+          {
+            "name": "e",
+            "type": {
+              "kind": "primitive",
+              "prim": "u8"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "variant_f32_u32",
+      "type": {
+        "kind": "variant",
+        "cases": [
+          {
+            "name": "f",
+            "type": {
+              "kind": "primitive",
+              "prim": "f32"
+            }
+          },
+          {
+            "name": "u",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "variant_f64_u64",
+      "type": {
+        "kind": "variant",
+        "cases": [
+          {
+            "name": "f",
+            "type": {
+              "kind": "primitive",
+              "prim": "f64"
+            }
+          },
+          {
+            "name": "u",
+            "type": {
+              "kind": "primitive",
+              "prim": "u64"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "variant_ragged_pair",
+      "type": {
+        "kind": "tuple",
+        "elems": [
+          {
+            "kind": "primitive",
+            "prim": "u64"
+          },
+          {
+            "kind": "primitive",
+            "prim": "f64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "variant_ragged",
+      "type": {
+        "kind": "variant",
+        "cases": [
+          {
+            "name": "empty"
+          },
+          {
+            "name": "one",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "pair",
+            "type": {
+              "kind": "ref",
+              "name": "variant_ragged_pair"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "nested_record_pt",
+      "type": {
+        "kind": "record",
+        "fields": [
+          {
+            "name": "x",
+            "type": {
+              "kind": "primitive",
+              "prim": "s32"
+            }
+          },
+          {
+            "name": "y",
+            "type": {
+              "kind": "primitive",
+              "prim": "s32"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "nested_record_tag",
+      "type": {
+        "kind": "enum",
+        "names": [
+          "red",
+          "green",
+          "blue"
+        ]
+      }
+    },
+    {
+      "name": "nested_record_data",
+      "type": {
+        "kind": "list",
+        "elem": {
+          "kind": "primitive",
+          "prim": "u32"
+        }
+      }
+    },
+    {
+      "name": "nested_record",
+      "type": {
+        "kind": "record",
+        "fields": [
+          {
+            "name": "pt",
+            "type": {
+              "kind": "ref",
+              "name": "nested_record_pt"
+            }
+          },
+          {
+            "name": "tag",
+            "type": {
+              "kind": "ref",
+              "name": "nested_record_tag"
+            }
+          },
+          {
+            "name": "data",
+            "type": {
+              "kind": "ref",
+              "name": "nested_record_data"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "variant_composite_pt",
+      "type": {
+        "kind": "record",
+        "fields": [
+          {
+            "name": "x",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "y",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "variant_composite_names",
+      "type": {
+        "kind": "list",
+        "elem": {
+          "kind": "primitive",
+          "prim": "string"
+        }
+      }
+    },
+    {
+      "name": "variant_composite_pair",
+      "type": {
+        "kind": "tuple",
+        "elems": [
+          {
+            "kind": "primitive",
+            "prim": "u64"
+          },
+          {
+            "kind": "primitive",
+            "prim": "f64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "variant_composite",
+      "type": {
+        "kind": "variant",
+        "cases": [
+          {
+            "name": "empty"
+          },
+          {
+            "name": "pt",
+            "type": {
+              "kind": "ref",
+              "name": "variant_composite_pt"
+            }
+          },
+          {
+            "name": "names",
+            "type": {
+              "kind": "ref",
+              "name": "variant_composite_names"
+            }
+          },
+          {
+            "name": "pair",
+            "type": {
+              "kind": "ref",
+              "name": "variant_composite_pair"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "list_of_records_e_nums",
+      "type": {
+        "kind": "list",
+        "elem": {
+          "kind": "primitive",
+          "prim": "u32"
+        }
+      }
+    },
+    {
+      "name": "list_of_records_e",
+      "type": {
+        "kind": "record",
+        "fields": [
+          {
+            "name": "name",
+            "type": {
+              "kind": "primitive",
+              "prim": "string"
+            }
+          },
+          {
+            "name": "nums",
+            "type": {
+              "kind": "ref",
+              "name": "list_of_records_e_nums"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "list_of_records",
+      "type": {
+        "kind": "list",
+        "elem": {
+          "kind": "ref",
+          "name": "list_of_records_e"
+        }
+      }
+    },
+    {
+      "name": "list_of_lists_e",
+      "type": {
+        "kind": "list",
+        "elem": {
+          "kind": "primitive",
+          "prim": "u32"
+        }
+      }
+    },
+    {
+      "name": "list_of_lists",
+      "type": {
+        "kind": "list",
+        "elem": {
+          "kind": "ref",
+          "name": "list_of_lists_e"
+        }
+      }
+    },
+    {
+      "name": "result_rec_var_ok",
+      "type": {
+        "kind": "record",
+        "fields": [
+          {
+            "name": "code",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          },
+          {
+            "name": "msg",
+            "type": {
+              "kind": "primitive",
+              "prim": "string"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "result_rec_var_err",
+      "type": {
+        "kind": "variant",
+        "cases": [
+          {
+            "name": "io"
+          },
+          {
+            "name": "bad",
+            "type": {
+              "kind": "primitive",
+              "prim": "string"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "result_rec_var",
+      "type": {
+        "kind": "result",
+        "ok": {
+          "kind": "ref",
+          "name": "result_rec_var_ok"
+        },
+        "err": {
+          "kind": "ref",
+          "name": "result_rec_var_err"
+        }
+      }
+    },
+    {
+      "name": "result_only_err",
+      "type": {
+        "kind": "result",
+        "err": {
+          "kind": "primitive",
+          "prim": "string"
+        }
+      }
+    },
+    {
+      "name": "option_list_string_o",
+      "type": {
+        "kind": "list",
+        "elem": {
+          "kind": "primitive",
+          "prim": "string"
+        }
+      }
+    },
+    {
+      "name": "option_list_string",
+      "type": {
+        "kind": "option",
+        "elem": {
+          "kind": "ref",
+          "name": "option_list_string_o"
+        }
+      }
+    },
+    {
+      "name": "record_of_variants_a",
+      "type": {
+        "kind": "variant",
+        "cases": [
+          {
+            "name": "n"
+          },
+          {
+            "name": "v",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "record_of_variants_b",
+      "type": {
+        "kind": "variant",
+        "cases": [
+          {
+            "name": "s",
+            "type": {
+              "kind": "primitive",
+              "prim": "string"
+            }
+          },
+          {
+            "name": "t",
+            "type": {
+              "kind": "primitive",
+              "prim": "u64"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "record_of_variants",
+      "type": {
+        "kind": "record",
+        "fields": [
+          {
+            "name": "a",
+            "type": {
+              "kind": "ref",
+              "name": "record_of_variants_a"
+            }
+          },
+          {
+            "name": "b",
+            "type": {
+              "kind": "ref",
+              "name": "record_of_variants_b"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "deeply_nested_a_b_c_e",
+      "type": {
+        "kind": "result",
+        "ok": {
+          "kind": "primitive",
+          "prim": "u32"
+        },
+        "err": {
+          "kind": "primitive",
+          "prim": "string"
+        }
+      }
+    },
+    {
+      "name": "deeply_nested_a_b_c",
+      "type": {
+        "kind": "list",
+        "elem": {
+          "kind": "ref",
+          "name": "deeply_nested_a_b_c_e"
+        }
+      }
+    },
+    {
+      "name": "deeply_nested_a_b",
+      "type": {
+        "kind": "record",
+        "fields": [
+          {
+            "name": "c",
+            "type": {
+              "kind": "ref",
+              "name": "deeply_nested_a_b_c"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "deeply_nested_a",
+      "type": {
+        "kind": "record",
+        "fields": [
+          {
+            "name": "b",
+            "type": {
+              "kind": "ref",
+              "name": "deeply_nested_a_b"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "deeply_nested",
+      "type": {
+        "kind": "record",
+        "fields": [
+          {
+            "name": "a",
+            "type": {
+              "kind": "ref",
+              "name": "deeply_nested_a"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "big_enum",
+      "type": {
+        "kind": "enum",
+        "names": [
+          "c0",
+          "c1",
+          "c2",
+          "c3",
+          "c4",
+          "c5",
+          "c6",
+          "c7",
+          "c8",
+          "c9",
+          "c10",
+          "c11",
+          "c12",
+          "c13",
+          "c14",
+          "c15",
+          "c16",
+          "c17",
+          "c18",
+          "c19",
+          "c20",
+          "c21",
+          "c22",
+          "c23",
+          "c24",
+          "c25",
+          "c26",
+          "c27",
+          "c28",
+          "c29",
+          "c30",
+          "c31",
+          "c32",
+          "c33",
+          "c34",
+          "c35",
+          "c36",
+          "c37",
+          "c38",
+          "c39",
+          "c40",
+          "c41",
+          "c42",
+          "c43",
+          "c44",
+          "c45",
+          "c46",
+          "c47",
+          "c48",
+          "c49",
+          "c50",
+          "c51",
+          "c52",
+          "c53",
+          "c54",
+          "c55",
+          "c56",
+          "c57",
+          "c58",
+          "c59",
+          "c60",
+          "c61",
+          "c62",
+          "c63",
+          "c64",
+          "c65",
+          "c66",
+          "c67",
+          "c68",
+          "c69",
+          "c70",
+          "c71",
+          "c72",
+          "c73",
+          "c74",
+          "c75",
+          "c76",
+          "c77",
+          "c78",
+          "c79",
+          "c80",
+          "c81",
+          "c82",
+          "c83",
+          "c84",
+          "c85",
+          "c86",
+          "c87",
+          "c88",
+          "c89",
+          "c90",
+          "c91",
+          "c92",
+          "c93",
+          "c94",
+          "c95",
+          "c96",
+          "c97",
+          "c98",
+          "c99",
+          "c100",
+          "c101",
+          "c102",
+          "c103",
+          "c104",
+          "c105",
+          "c106",
+          "c107",
+          "c108",
+          "c109",
+          "c110",
+          "c111",
+          "c112",
+          "c113",
+          "c114",
+          "c115",
+          "c116",
+          "c117",
+          "c118",
+          "c119",
+          "c120",
+          "c121",
+          "c122",
+          "c123",
+          "c124",
+          "c125",
+          "c126",
+          "c127",
+          "c128",
+          "c129",
+          "c130",
+          "c131",
+          "c132",
+          "c133",
+          "c134",
+          "c135",
+          "c136",
+          "c137",
+          "c138",
+          "c139",
+          "c140",
+          "c141",
+          "c142",
+          "c143",
+          "c144",
+          "c145",
+          "c146",
+          "c147",
+          "c148",
+          "c149",
+          "c150",
+          "c151",
+          "c152",
+          "c153",
+          "c154",
+          "c155",
+          "c156",
+          "c157",
+          "c158",
+          "c159",
+          "c160",
+          "c161",
+          "c162",
+          "c163",
+          "c164",
+          "c165",
+          "c166",
+          "c167",
+          "c168",
+          "c169",
+          "c170",
+          "c171",
+          "c172",
+          "c173",
+          "c174",
+          "c175",
+          "c176",
+          "c177",
+          "c178",
+          "c179",
+          "c180",
+          "c181",
+          "c182",
+          "c183",
+          "c184",
+          "c185",
+          "c186",
+          "c187",
+          "c188",
+          "c189",
+          "c190",
+          "c191",
+          "c192",
+          "c193",
+          "c194",
+          "c195",
+          "c196",
+          "c197",
+          "c198",
+          "c199",
+          "c200",
+          "c201",
+          "c202",
+          "c203",
+          "c204",
+          "c205",
+          "c206",
+          "c207",
+          "c208",
+          "c209",
+          "c210",
+          "c211",
+          "c212",
+          "c213",
+          "c214",
+          "c215",
+          "c216",
+          "c217",
+          "c218",
+          "c219",
+          "c220",
+          "c221",
+          "c222",
+          "c223",
+          "c224",
+          "c225",
+          "c226",
+          "c227",
+          "c228",
+          "c229",
+          "c230",
+          "c231",
+          "c232",
+          "c233",
+          "c234",
+          "c235",
+          "c236",
+          "c237",
+          "c238",
+          "c239",
+          "c240",
+          "c241",
+          "c242",
+          "c243",
+          "c244",
+          "c245",
+          "c246",
+          "c247",
+          "c248",
+          "c249",
+          "c250",
+          "c251",
+          "c252",
+          "c253",
+          "c254",
+          "c255",
+          "c256",
+          "c257",
+          "c258",
+          "c259",
+          "c260",
+          "c261",
+          "c262",
+          "c263",
+          "c264",
+          "c265",
+          "c266",
+          "c267",
+          "c268",
+          "c269",
+          "c270",
+          "c271",
+          "c272",
+          "c273",
+          "c274",
+          "c275",
+          "c276",
+          "c277",
+          "c278",
+          "c279",
+          "c280",
+          "c281",
+          "c282",
+          "c283",
+          "c284",
+          "c285",
+          "c286",
+          "c287",
+          "c288",
+          "c289",
+          "c290",
+          "c291",
+          "c292",
+          "c293",
+          "c294",
+          "c295",
+          "c296",
+          "c297",
+          "c298",
+          "c299"
+        ]
+      }
+    },
+    {
+      "name": "big_variant",
+      "type": {
+        "kind": "variant",
+        "cases": [
+          {
+            "name": "c0"
+          },
+          {
+            "name": "c1"
+          },
+          {
+            "name": "c2"
+          },
+          {
+            "name": "c3"
+          },
+          {
+            "name": "c4"
+          },
+          {
+            "name": "c5"
+          },
+          {
+            "name": "c6"
+          },
+          {
+            "name": "c7"
+          },
+          {
+            "name": "c8"
+          },
+          {
+            "name": "c9"
+          },
+          {
+            "name": "c10"
+          },
+          {
+            "name": "c11"
+          },
+          {
+            "name": "c12"
+          },
+          {
+            "name": "c13"
+          },
+          {
+            "name": "c14"
+          },
+          {
+            "name": "c15"
+          },
+          {
+            "name": "c16"
+          },
+          {
+            "name": "c17"
+          },
+          {
+            "name": "c18"
+          },
+          {
+            "name": "c19"
+          },
+          {
+            "name": "c20"
+          },
+          {
+            "name": "c21"
+          },
+          {
+            "name": "c22"
+          },
+          {
+            "name": "c23"
+          },
+          {
+            "name": "c24"
+          },
+          {
+            "name": "c25"
+          },
+          {
+            "name": "c26"
+          },
+          {
+            "name": "c27"
+          },
+          {
+            "name": "c28"
+          },
+          {
+            "name": "c29"
+          },
+          {
+            "name": "c30"
+          },
+          {
+            "name": "c31"
+          },
+          {
+            "name": "c32"
+          },
+          {
+            "name": "c33"
+          },
+          {
+            "name": "c34"
+          },
+          {
+            "name": "c35"
+          },
+          {
+            "name": "c36"
+          },
+          {
+            "name": "c37"
+          },
+          {
+            "name": "c38"
+          },
+          {
+            "name": "c39"
+          },
+          {
+            "name": "c40"
+          },
+          {
+            "name": "c41"
+          },
+          {
+            "name": "c42"
+          },
+          {
+            "name": "c43"
+          },
+          {
+            "name": "c44"
+          },
+          {
+            "name": "c45"
+          },
+          {
+            "name": "c46"
+          },
+          {
+            "name": "c47"
+          },
+          {
+            "name": "c48"
+          },
+          {
+            "name": "c49"
+          },
+          {
+            "name": "c50"
+          },
+          {
+            "name": "c51"
+          },
+          {
+            "name": "c52"
+          },
+          {
+            "name": "c53"
+          },
+          {
+            "name": "c54"
+          },
+          {
+            "name": "c55"
+          },
+          {
+            "name": "c56"
+          },
+          {
+            "name": "c57"
+          },
+          {
+            "name": "c58"
+          },
+          {
+            "name": "c59"
+          },
+          {
+            "name": "c60"
+          },
+          {
+            "name": "c61"
+          },
+          {
+            "name": "c62"
+          },
+          {
+            "name": "c63"
+          },
+          {
+            "name": "c64"
+          },
+          {
+            "name": "c65"
+          },
+          {
+            "name": "c66"
+          },
+          {
+            "name": "c67"
+          },
+          {
+            "name": "c68"
+          },
+          {
+            "name": "c69"
+          },
+          {
+            "name": "c70"
+          },
+          {
+            "name": "c71"
+          },
+          {
+            "name": "c72"
+          },
+          {
+            "name": "c73"
+          },
+          {
+            "name": "c74"
+          },
+          {
+            "name": "c75"
+          },
+          {
+            "name": "c76"
+          },
+          {
+            "name": "c77"
+          },
+          {
+            "name": "c78"
+          },
+          {
+            "name": "c79"
+          },
+          {
+            "name": "c80"
+          },
+          {
+            "name": "c81"
+          },
+          {
+            "name": "c82"
+          },
+          {
+            "name": "c83"
+          },
+          {
+            "name": "c84"
+          },
+          {
+            "name": "c85"
+          },
+          {
+            "name": "c86"
+          },
+          {
+            "name": "c87"
+          },
+          {
+            "name": "c88"
+          },
+          {
+            "name": "c89"
+          },
+          {
+            "name": "c90"
+          },
+          {
+            "name": "c91"
+          },
+          {
+            "name": "c92"
+          },
+          {
+            "name": "c93"
+          },
+          {
+            "name": "c94"
+          },
+          {
+            "name": "c95"
+          },
+          {
+            "name": "c96"
+          },
+          {
+            "name": "c97"
+          },
+          {
+            "name": "c98"
+          },
+          {
+            "name": "c99"
+          },
+          {
+            "name": "c100"
+          },
+          {
+            "name": "c101"
+          },
+          {
+            "name": "c102"
+          },
+          {
+            "name": "c103"
+          },
+          {
+            "name": "c104"
+          },
+          {
+            "name": "c105"
+          },
+          {
+            "name": "c106"
+          },
+          {
+            "name": "c107"
+          },
+          {
+            "name": "c108"
+          },
+          {
+            "name": "c109"
+          },
+          {
+            "name": "c110"
+          },
+          {
+            "name": "c111"
+          },
+          {
+            "name": "c112"
+          },
+          {
+            "name": "c113"
+          },
+          {
+            "name": "c114"
+          },
+          {
+            "name": "c115"
+          },
+          {
+            "name": "c116"
+          },
+          {
+            "name": "c117"
+          },
+          {
+            "name": "c118"
+          },
+          {
+            "name": "c119"
+          },
+          {
+            "name": "c120"
+          },
+          {
+            "name": "c121"
+          },
+          {
+            "name": "c122"
+          },
+          {
+            "name": "c123"
+          },
+          {
+            "name": "c124"
+          },
+          {
+            "name": "c125"
+          },
+          {
+            "name": "c126"
+          },
+          {
+            "name": "c127"
+          },
+          {
+            "name": "c128"
+          },
+          {
+            "name": "c129"
+          },
+          {
+            "name": "c130"
+          },
+          {
+            "name": "c131"
+          },
+          {
+            "name": "c132"
+          },
+          {
+            "name": "c133"
+          },
+          {
+            "name": "c134"
+          },
+          {
+            "name": "c135"
+          },
+          {
+            "name": "c136"
+          },
+          {
+            "name": "c137"
+          },
+          {
+            "name": "c138"
+          },
+          {
+            "name": "c139"
+          },
+          {
+            "name": "c140"
+          },
+          {
+            "name": "c141"
+          },
+          {
+            "name": "c142"
+          },
+          {
+            "name": "c143"
+          },
+          {
+            "name": "c144"
+          },
+          {
+            "name": "c145"
+          },
+          {
+            "name": "c146"
+          },
+          {
+            "name": "c147"
+          },
+          {
+            "name": "c148"
+          },
+          {
+            "name": "c149"
+          },
+          {
+            "name": "c150"
+          },
+          {
+            "name": "c151"
+          },
+          {
+            "name": "c152"
+          },
+          {
+            "name": "c153"
+          },
+          {
+            "name": "c154"
+          },
+          {
+            "name": "c155"
+          },
+          {
+            "name": "c156"
+          },
+          {
+            "name": "c157"
+          },
+          {
+            "name": "c158"
+          },
+          {
+            "name": "c159"
+          },
+          {
+            "name": "c160"
+          },
+          {
+            "name": "c161"
+          },
+          {
+            "name": "c162"
+          },
+          {
+            "name": "c163"
+          },
+          {
+            "name": "c164"
+          },
+          {
+            "name": "c165"
+          },
+          {
+            "name": "c166"
+          },
+          {
+            "name": "c167"
+          },
+          {
+            "name": "c168"
+          },
+          {
+            "name": "c169"
+          },
+          {
+            "name": "c170"
+          },
+          {
+            "name": "c171"
+          },
+          {
+            "name": "c172"
+          },
+          {
+            "name": "c173"
+          },
+          {
+            "name": "c174"
+          },
+          {
+            "name": "c175"
+          },
+          {
+            "name": "c176"
+          },
+          {
+            "name": "c177"
+          },
+          {
+            "name": "c178"
+          },
+          {
+            "name": "c179"
+          },
+          {
+            "name": "c180"
+          },
+          {
+            "name": "c181"
+          },
+          {
+            "name": "c182"
+          },
+          {
+            "name": "c183"
+          },
+          {
+            "name": "c184"
+          },
+          {
+            "name": "c185"
+          },
+          {
+            "name": "c186"
+          },
+          {
+            "name": "c187"
+          },
+          {
+            "name": "c188"
+          },
+          {
+            "name": "c189"
+          },
+          {
+            "name": "c190"
+          },
+          {
+            "name": "c191"
+          },
+          {
+            "name": "c192"
+          },
+          {
+            "name": "c193"
+          },
+          {
+            "name": "c194"
+          },
+          {
+            "name": "c195"
+          },
+          {
+            "name": "c196"
+          },
+          {
+            "name": "c197"
+          },
+          {
+            "name": "c198"
+          },
+          {
+            "name": "c199"
+          },
+          {
+            "name": "c200"
+          },
+          {
+            "name": "c201"
+          },
+          {
+            "name": "c202"
+          },
+          {
+            "name": "c203"
+          },
+          {
+            "name": "c204"
+          },
+          {
+            "name": "c205"
+          },
+          {
+            "name": "c206"
+          },
+          {
+            "name": "c207"
+          },
+          {
+            "name": "c208"
+          },
+          {
+            "name": "c209"
+          },
+          {
+            "name": "c210"
+          },
+          {
+            "name": "c211"
+          },
+          {
+            "name": "c212"
+          },
+          {
+            "name": "c213"
+          },
+          {
+            "name": "c214"
+          },
+          {
+            "name": "c215"
+          },
+          {
+            "name": "c216"
+          },
+          {
+            "name": "c217"
+          },
+          {
+            "name": "c218"
+          },
+          {
+            "name": "c219"
+          },
+          {
+            "name": "c220"
+          },
+          {
+            "name": "c221"
+          },
+          {
+            "name": "c222"
+          },
+          {
+            "name": "c223"
+          },
+          {
+            "name": "c224"
+          },
+          {
+            "name": "c225"
+          },
+          {
+            "name": "c226"
+          },
+          {
+            "name": "c227"
+          },
+          {
+            "name": "c228"
+          },
+          {
+            "name": "c229"
+          },
+          {
+            "name": "c230"
+          },
+          {
+            "name": "c231"
+          },
+          {
+            "name": "c232"
+          },
+          {
+            "name": "c233"
+          },
+          {
+            "name": "c234"
+          },
+          {
+            "name": "c235"
+          },
+          {
+            "name": "c236"
+          },
+          {
+            "name": "c237"
+          },
+          {
+            "name": "c238"
+          },
+          {
+            "name": "c239"
+          },
+          {
+            "name": "c240"
+          },
+          {
+            "name": "c241"
+          },
+          {
+            "name": "c242"
+          },
+          {
+            "name": "c243"
+          },
+          {
+            "name": "c244"
+          },
+          {
+            "name": "c245"
+          },
+          {
+            "name": "c246"
+          },
+          {
+            "name": "c247"
+          },
+          {
+            "name": "c248"
+          },
+          {
+            "name": "c249"
+          },
+          {
+            "name": "c250"
+          },
+          {
+            "name": "c251"
+          },
+          {
+            "name": "c252"
+          },
+          {
+            "name": "c253"
+          },
+          {
+            "name": "c254"
+          },
+          {
+            "name": "c255"
+          },
+          {
+            "name": "c256"
+          },
+          {
+            "name": "c257"
+          },
+          {
+            "name": "c258"
+          },
+          {
+            "name": "c259"
+          },
+          {
+            "name": "c260"
+          },
+          {
+            "name": "c261"
+          },
+          {
+            "name": "c262"
+          },
+          {
+            "name": "c263"
+          },
+          {
+            "name": "c264"
+          },
+          {
+            "name": "c265"
+          },
+          {
+            "name": "c266"
+          },
+          {
+            "name": "c267"
+          },
+          {
+            "name": "c268"
+          },
+          {
+            "name": "c269"
+          },
+          {
+            "name": "c270"
+          },
+          {
+            "name": "c271"
+          },
+          {
+            "name": "c272"
+          },
+          {
+            "name": "c273"
+          },
+          {
+            "name": "c274"
+          },
+          {
+            "name": "c275"
+          },
+          {
+            "name": "c276"
+          },
+          {
+            "name": "c277"
+          },
+          {
+            "name": "c278"
+          },
+          {
+            "name": "c279"
+          },
+          {
+            "name": "c280"
+          },
+          {
+            "name": "c281"
+          },
+          {
+            "name": "c282"
+          },
+          {
+            "name": "c283"
+          },
+          {
+            "name": "c284"
+          },
+          {
+            "name": "c285"
+          },
+          {
+            "name": "c286"
+          },
+          {
+            "name": "c287"
+          },
+          {
+            "name": "c288"
+          },
+          {
+            "name": "c289"
+          },
+          {
+            "name": "c290"
+          },
+          {
+            "name": "c291"
+          },
+          {
+            "name": "c292"
+          },
+          {
+            "name": "c293"
+          },
+          {
+            "name": "c294"
+          },
+          {
+            "name": "c295"
+          },
+          {
+            "name": "c296"
+          },
+          {
+            "name": "c297"
+          },
+          {
+            "name": "c298"
+          },
+          {
+            "name": "c299"
+          }
+        ]
+      }
+    },
+    {
+      "name": "option_result_o_ok",
+      "type": {
+        "kind": "tuple",
+        "elems": [
+          {
+            "kind": "primitive",
+            "prim": "u32"
+          },
+          {
+            "kind": "primitive",
+            "prim": "string"
+          }
+        ]
+      }
+    },
+    {
+      "name": "option_result_o",
+      "type": {
+        "kind": "result",
+        "ok": {
+          "kind": "ref",
+          "name": "option_result_o_ok"
+        },
+        "err": {
+          "kind": "primitive",
+          "prim": "u64"
+        }
+      }
+    },
+    {
+      "name": "option_result",
+      "type": {
+        "kind": "option",
+        "elem": {
+          "kind": "ref",
+          "name": "option_result_o"
+        }
+      }
+    },
+    {
+      "name": "record_bool_char_str",
+      "type": {
+        "kind": "record",
+        "fields": [
+          {
+            "name": "flag",
+            "type": {
+              "kind": "primitive",
+              "prim": "bool"
+            }
+          },
+          {
+            "name": "ch",
+            "type": {
+              "kind": "primitive",
+              "prim": "char"
+            }
+          },
+          {
+            "name": "label",
+            "type": {
+              "kind": "primitive",
+              "prim": "string"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "flags32",
+      "type": {
+        "kind": "flags",
+        "names": [
+          "f0",
+          "f1",
+          "f2",
+          "f3",
+          "f4",
+          "f5",
+          "f6",
+          "f7",
+          "f8",
+          "f9",
+          "f10",
+          "f11",
+          "f12",
+          "f13",
+          "f14",
+          "f15",
+          "f16",
+          "f17",
+          "f18",
+          "f19",
+          "f20",
+          "f21",
+          "f22",
+          "f23",
+          "f24",
+          "f25",
+          "f26",
+          "f27",
+          "f28",
+          "f29",
+          "f30",
+          "f31"
         ]
       }
     }
   ],
   "values": [
-    {"type": "u32_val", "name": "u32_zero", "value": 0},
-    {"type": "u32_val", "name": "u32_max", "value": 4294967295},
-    {"type": "s32_val", "name": "s32_zero", "value": 0},
-    {"type": "s32_val", "name": "s32_pos", "value": 1000},
-    {"type": "s32_val", "name": "s32_neg", "value": -1000},
-    {"type": "u64_val", "name": "u64_zero", "value": 0},
-    {"type": "u64_val", "name": "u64_max", "value": 9007199254740991},
-    {"type": "s64_val", "name": "s64_zero", "value": 0},
-    {"type": "s64_val", "name": "s64_pos", "value": 1000000000000},
-    {"type": "s64_val", "name": "s64_neg", "value": -1000000000000},
-    {"type": "f32_val", "name": "f32_zero", "value": 0.0},
-    {"type": "f32_val", "name": "f32_pos", "value": 3.14},
-    {"type": "f32_val", "name": "f32_neg", "value": -2.71},
-    {"type": "f64_val", "name": "f64_zero", "value": 0.0},
-    {"type": "f64_val", "name": "f64_pos", "value": 3.141592653589793},
-    {"type": "f64_val", "name": "f64_neg", "value": -2.718281828459045},
-    {"type": "bool_val", "name": "bool_true", "value": true},
-    {"type": "bool_val", "name": "bool_false", "value": false},
-    {"type": "u8_val", "name": "u8_zero", "value": 0},
-    {"type": "u8_val", "name": "u8_max", "value": 255},
-    {"type": "s8_val", "name": "s8_pos", "value": 100},
-    {"type": "s8_val", "name": "s8_neg", "value": -100},
-    {"type": "u16_val", "name": "u16_mid", "value": 32768},
-    {"type": "s16_val", "name": "s16_neg", "value": -1000},
-    {"type": "char_val", "name": "char_a", "value": 97},
-    {"type": "simple_record", "name": "record_vals", "value": [42, -100]},
-    {"type": "simple_variant", "name": "variant_none", "value": {"none": null}},
-    {"type": "simple_variant", "name": "variant_some", "value": {"some": 123}},
-    {"type": "variant_mixed_flat", "name": "variant_u32", "value": {"a_u32": 456}},
-    {"type": "variant_mixed_flat", "name": "variant_f32", "value": {"b_f32": 1.5}},
-    {"type": "variant_mixed_flat", "name": "variant_u64", "value": {"c_u64": 789012345}},
-    {"type": "simple_option", "name": "option_none", "value": null},
-    {"type": "simple_option", "name": "option_some", "value": 999},
-    {"type": "simple_result", "name": "result_ok", "value": {"ok": 777}},
-    {"type": "simple_result", "name": "result_err", "value": {"err": -555}},
-    {"type": "simple_tuple", "name": "tuple_vals", "value": [1234, 5678]},
-    {"type": "simple_flags", "name": "flags_zero", "value": 0},
-    {"type": "simple_flags", "name": "flags_all", "value": 7},
-    {"type": "simple_enum", "name": "enum_red", "value": 0},
-    {"type": "simple_enum", "name": "enum_green", "value": 1},
-    {"type": "simple_enum", "name": "enum_blue", "value": 2},
-    {"type": "string_val", "name": "string_hello", "value": "hello"},
-    {"type": "list_u32", "name": "list_u32_vals", "value": [1, 2, 3]},
-    {"type": "list_string", "name": "list_string_vals", "value": ["ab", "cd"]},
-    {"type": "record_string_u32", "name": "record_string_u32_vals", "value": ["greet", 42]},
-    {"type": "option_string", "name": "option_string_some", "value": "opt"},
-    {"type": "result_string_u32", "name": "result_string_u32_ok", "value": {"ok": "res"}},
-    {"type": "tuple_list_u32", "name": "tuple_list_u32_vals", "value": [[7, 8, 9], 3]}
+    {
+      "type": "u32_val",
+      "name": "u32_zero",
+      "value": 0
+    },
+    {
+      "type": "u32_val",
+      "name": "u32_max",
+      "value": 4294967295
+    },
+    {
+      "type": "s32_val",
+      "name": "s32_zero",
+      "value": 0
+    },
+    {
+      "type": "s32_val",
+      "name": "s32_pos",
+      "value": 1000
+    },
+    {
+      "type": "s32_val",
+      "name": "s32_neg",
+      "value": -1000
+    },
+    {
+      "type": "u64_val",
+      "name": "u64_zero",
+      "value": 0
+    },
+    {
+      "type": "u64_val",
+      "name": "u64_max",
+      "value": 9007199254740991
+    },
+    {
+      "type": "s64_val",
+      "name": "s64_zero",
+      "value": 0
+    },
+    {
+      "type": "s64_val",
+      "name": "s64_pos",
+      "value": 1000000000000
+    },
+    {
+      "type": "s64_val",
+      "name": "s64_neg",
+      "value": -1000000000000
+    },
+    {
+      "type": "f32_val",
+      "name": "f32_zero",
+      "value": 0.0
+    },
+    {
+      "type": "f32_val",
+      "name": "f32_pos",
+      "value": 3.14
+    },
+    {
+      "type": "f32_val",
+      "name": "f32_neg",
+      "value": -2.71
+    },
+    {
+      "type": "f64_val",
+      "name": "f64_zero",
+      "value": 0.0
+    },
+    {
+      "type": "f64_val",
+      "name": "f64_pos",
+      "value": 3.141592653589793
+    },
+    {
+      "type": "f64_val",
+      "name": "f64_neg",
+      "value": -2.718281828459045
+    },
+    {
+      "type": "bool_val",
+      "name": "bool_true",
+      "value": true
+    },
+    {
+      "type": "bool_val",
+      "name": "bool_false",
+      "value": false
+    },
+    {
+      "type": "u8_val",
+      "name": "u8_zero",
+      "value": 0
+    },
+    {
+      "type": "u8_val",
+      "name": "u8_max",
+      "value": 255
+    },
+    {
+      "type": "s8_val",
+      "name": "s8_pos",
+      "value": 100
+    },
+    {
+      "type": "s8_val",
+      "name": "s8_neg",
+      "value": -100
+    },
+    {
+      "type": "u16_val",
+      "name": "u16_mid",
+      "value": 32768
+    },
+    {
+      "type": "s16_val",
+      "name": "s16_neg",
+      "value": -1000
+    },
+    {
+      "type": "char_val",
+      "name": "char_a",
+      "value": 97
+    },
+    {
+      "type": "simple_record",
+      "name": "record_vals",
+      "value": [
+        42,
+        -100
+      ]
+    },
+    {
+      "type": "simple_variant",
+      "name": "variant_none",
+      "value": {
+        "none": null
+      }
+    },
+    {
+      "type": "simple_variant",
+      "name": "variant_some",
+      "value": {
+        "some": 123
+      }
+    },
+    {
+      "type": "variant_mixed_flat",
+      "name": "variant_u32",
+      "value": {
+        "a_u32": 456
+      }
+    },
+    {
+      "type": "variant_mixed_flat",
+      "name": "variant_f32",
+      "value": {
+        "b_f32": 1.5
+      }
+    },
+    {
+      "type": "variant_mixed_flat",
+      "name": "variant_u64",
+      "value": {
+        "c_u64": 789012345
+      }
+    },
+    {
+      "type": "simple_option",
+      "name": "option_none",
+      "value": null
+    },
+    {
+      "type": "simple_option",
+      "name": "option_some",
+      "value": 999
+    },
+    {
+      "type": "simple_result",
+      "name": "result_ok",
+      "value": {
+        "ok": 777
+      }
+    },
+    {
+      "type": "simple_result",
+      "name": "result_err",
+      "value": {
+        "err": -555
+      }
+    },
+    {
+      "type": "simple_tuple",
+      "name": "tuple_vals",
+      "value": [
+        1234,
+        5678
+      ]
+    },
+    {
+      "type": "simple_flags",
+      "name": "flags_zero",
+      "value": 0
+    },
+    {
+      "type": "simple_flags",
+      "name": "flags_all",
+      "value": 7
+    },
+    {
+      "type": "simple_enum",
+      "name": "enum_red",
+      "value": 0
+    },
+    {
+      "type": "simple_enum",
+      "name": "enum_green",
+      "value": 1
+    },
+    {
+      "type": "simple_enum",
+      "name": "enum_blue",
+      "value": 2
+    },
+    {
+      "type": "string_val",
+      "name": "string_hello",
+      "value": "hello"
+    },
+    {
+      "type": "list_u32",
+      "name": "list_u32_vals",
+      "value": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "type": "list_string",
+      "name": "list_string_vals",
+      "value": [
+        "ab",
+        "cd"
+      ]
+    },
+    {
+      "type": "record_string_u32",
+      "name": "record_string_u32_vals",
+      "value": [
+        "greet",
+        42
+      ]
+    },
+    {
+      "type": "option_string",
+      "name": "option_string_some",
+      "value": "opt"
+    },
+    {
+      "type": "result_string_u32",
+      "name": "result_string_u32_ok",
+      "value": {
+        "ok": "res"
+      }
+    },
+    {
+      "type": "tuple_list_u32",
+      "name": "tuple_list_u32_vals",
+      "value": [
+        [
+          7,
+          8,
+          9
+        ],
+        3
+      ]
+    },
+    {
+      "type": "mixed_align_record",
+      "name": "mixed_align_vals",
+      "value": [
+        255,
+        1099511627775,
+        1,
+        4096,
+        7
+      ]
+    },
+    {
+      "type": "variant_f32_u32",
+      "name": "vfu_f",
+      "value": {
+        "f": 3.5
+      }
+    },
+    {
+      "type": "variant_f32_u32",
+      "name": "vfu_u",
+      "value": {
+        "u": 123456
+      }
+    },
+    {
+      "type": "variant_f64_u64",
+      "name": "vfu64_f",
+      "value": {
+        "f": 2.718281828
+      }
+    },
+    {
+      "type": "variant_f64_u64",
+      "name": "vfu64_u",
+      "value": {
+        "u": 9876543210
+      }
+    },
+    {
+      "type": "variant_ragged",
+      "name": "vr_empty",
+      "value": {
+        "empty": null
+      }
+    },
+    {
+      "type": "variant_ragged",
+      "name": "vr_one",
+      "value": {
+        "one": 77
+      }
+    },
+    {
+      "type": "variant_ragged",
+      "name": "vr_pair",
+      "value": {
+        "pair": [
+          100,
+          6.25
+        ]
+      }
+    },
+    {
+      "type": "nested_record",
+      "name": "nr_vals",
+      "value": [
+        [
+          -3,
+          9
+        ],
+        1,
+        [
+          10,
+          20,
+          30
+        ]
+      ]
+    },
+    {
+      "type": "variant_composite",
+      "name": "vc_pt",
+      "value": {
+        "pt": [
+          4,
+          5
+        ]
+      }
+    },
+    {
+      "type": "variant_composite",
+      "name": "vc_names",
+      "value": {
+        "names": [
+          "alpha",
+          "beta",
+          "gamma"
+        ]
+      }
+    },
+    {
+      "type": "variant_composite",
+      "name": "vc_pair",
+      "value": {
+        "pair": [
+          42,
+          1.5
+        ]
+      }
+    },
+    {
+      "type": "variant_composite",
+      "name": "vc_empty",
+      "value": {
+        "empty": null
+      }
+    },
+    {
+      "type": "list_of_records",
+      "name": "lor_vals",
+      "value": [
+        [
+          "a",
+          [
+            1,
+            2
+          ]
+        ],
+        [
+          "bb",
+          []
+        ],
+        [
+          "ccc",
+          [
+            9
+          ]
+        ]
+      ]
+    },
+    {
+      "type": "list_of_lists",
+      "name": "lol_vals",
+      "value": [
+        [
+          1,
+          2
+        ],
+        [],
+        [
+          3,
+          4,
+          5
+        ]
+      ]
+    },
+    {
+      "type": "result_rec_var",
+      "name": "rrv_ok",
+      "value": {
+        "ok": [
+          200,
+          "OK"
+        ]
+      }
+    },
+    {
+      "type": "result_rec_var",
+      "name": "rrv_err",
+      "value": {
+        "err": {
+          "bad": "nope"
+        }
+      }
+    },
+    {
+      "type": "result_rec_var",
+      "name": "rrv_err_io",
+      "value": {
+        "err": {
+          "io": null
+        }
+      }
+    },
+    {
+      "type": "result_only_err",
+      "name": "roe_err",
+      "value": {
+        "err": "boom"
+      }
+    },
+    {
+      "type": "option_list_string",
+      "name": "ols_some",
+      "value": [
+        "x",
+        "yy",
+        "zzz"
+      ]
+    },
+    {
+      "type": "option_list_string",
+      "name": "ols_none",
+      "value": null
+    },
+    {
+      "type": "record_of_variants",
+      "name": "rov_vals",
+      "value": [
+        {
+          "v": 8
+        },
+        {
+          "s": "hi"
+        }
+      ]
+    },
+    {
+      "type": "deeply_nested",
+      "name": "dn_vals",
+      "value": [
+        [
+          [
+            [
+              {
+                "ok": 1
+              },
+              {
+                "err": "e"
+              },
+              {
+                "ok": 999
+              }
+            ]
+          ]
+        ]
+      ]
+    },
+    {
+      "type": "big_enum",
+      "name": "be_first",
+      "value": 0
+    },
+    {
+      "type": "big_enum",
+      "name": "be_299",
+      "value": 299
+    },
+    {
+      "type": "big_variant",
+      "name": "bv_first",
+      "value": {
+        "c0": null
+      }
+    },
+    {
+      "type": "big_variant",
+      "name": "bv_299",
+      "value": {
+        "c299": null
+      }
+    },
+    {
+      "type": "option_result",
+      "name": "or_some_ok",
+      "value": {
+        "ok": [
+          7,
+          "seven"
+        ]
+      }
+    },
+    {
+      "type": "option_result",
+      "name": "or_some_err",
+      "value": {
+        "err": 42
+      }
+    },
+    {
+      "type": "option_result",
+      "name": "or_none",
+      "value": null
+    },
+    {
+      "type": "record_bool_char_str",
+      "name": "rbcs_vals",
+      "value": [
+        true,
+        128512,
+        "emoji"
+      ]
+    },
+    {
+      "type": "flags32",
+      "name": "flags32_hi",
+      "value": 2147483649
+    }
   ]
 }

@@ -34,12 +34,12 @@ func LowerFlatInto(dst []CoreValue, v Value, t binary.TypeDesc, resolve Resolver
 		return append(dst, cv), nil
 	}
 
-	flat, err := lowerFlatImpl(v, t, resolve, realloc, mem)
-	if err != nil {
-		return nil, err
-	}
-
-	// Check if flattened type exceeds MAX_FLAT_PARAMS; if so, spill to memory.
+	// Decide spill BEFORE lowering: Flatten needs only the type. A value that
+	// spills is stored to memory by spillValue, so doing lowerFlatImpl first
+	// (as this used to) would flatten -- and realloc+copy every string/list in
+	// it -- only to throw that away and re-store via spillValue: wasted work
+	// AND leaked allocations that shift the bump allocator. (LowerStep.Lower
+	// makes the same spill-first decision; found via the complex ABI battery.)
 	flatTypes, err := Flatten(t, resolve)
 	if err != nil {
 		return nil, err
@@ -54,6 +54,10 @@ func LowerFlatInto(dst []CoreValue, v Value, t binary.TypeDesc, resolve Resolver
 		return append(dst, NewCoreValueI32(ptr)), nil
 	}
 
+	flat, err := lowerFlatImpl(v, t, resolve, realloc, mem)
+	if err != nil {
+		return nil, err
+	}
 	return append(dst, flat...), nil
 }
 
@@ -894,24 +898,14 @@ func liftFlatVariant(vi valueIter, desc binary.VariantDesc, resolve Resolver, me
 		}
 	}
 
-	// Create a coercing iterator that reinterprets values.
-	// vi must be a *CoreValueIter at this point (not a coercingValueIter from recursion).
-	coreVI, ok := vi.(*CoreValueIter)
-	if !ok {
-		// Fallback: if it's not a CoreValueIter, try to unwrap it as a coercingValueIter
-		if coerceVI2, ok := vi.(*coercingValueIter); ok {
-			coreVI = coerceVI2.underlying
-		} else {
-			return nil, fmt.Errorf("liftFlat variant: unexpected valueIter type %T", vi)
-		}
-	}
-
+	// Read the case payload THROUGH vi (which may itself be an enclosing
+	// coercingValueIter), so a nested variant/result advances every level's
+	// consumption count -- see coercingValueIter's doc.
 	coerceVI := &coercingValueIter{
-		underlying:  coreVI,
-		joinedFlat:  joinedFlat,
-		caseFlat:    caseFlat,
-		casePayload: nil,
-		idx:         0,
+		underlying: vi,
+		joinedFlat: joinedFlat,
+		caseFlat:   caseFlat,
+		idx:        0,
 	}
 
 	// Lift the case payload using the coercing iterator (implements valueIter).
@@ -943,30 +937,31 @@ func liftFlatVariant(vi valueIter, desc binary.VariantDesc, resolve Resolver, me
 	}, nil
 }
 
-// coercingValueIter wraps a CoreValueIter and applies coercions for variant payloads.
+// coercingValueIter wraps another valueIter (a raw *CoreValueIter, or -- when a
+// variant/result nests inside another -- an enclosing coercingValueIter) and
+// applies the per-position join coercion for a variant/result case payload.
+//
+// underlying is a valueIter, NOT a concrete *CoreValueIter, precisely so these
+// compose: a variant whose active case is itself a variant/result reads its
+// payload THROUGH the enclosing coercingValueIter, one value at a time, so
+// every level's idx advances in lockstep with the raw values actually consumed.
+// (The previous version held a *CoreValueIter and unwrapped every nested
+// variant/result back to the raw iterator, which read the raw values without
+// advancing the enclosing level's idx -- so the enclosing "consume remaining
+// joined padding" over-read the exhausted iterator: CoreValueIter index out of
+// range, e.g. result<record, variant> lifting the variant err arm.)
 type coercingValueIter struct {
-	underlying  *CoreValueIter
-	joinedFlat  []string
-	caseFlat    []string
-	casePayload []CoreValue
-	idx         int
+	underlying valueIter
+	joinedFlat []string
+	caseFlat   []string
+	idx        int
 }
 
-// Next returns the next coerced CoreValue.
+// Next reads one value from the underlying iterator and coerces it from the
+// joined core type stored at this position back to the case's own core type.
 func (cvi *coercingValueIter) Next() (CoreValue, error) {
 	if cvi.idx >= len(cvi.caseFlat) {
 		return CoreValue{}, fmt.Errorf("coercingValueIter: index out of range")
-	}
-
-	// If we haven't read the case payload yet, read all of it upfront.
-	if len(cvi.casePayload) == 0 {
-		for range cvi.caseFlat {
-			cv, err := cvi.underlying.Next()
-			if err != nil {
-				return CoreValue{}, err
-			}
-			cvi.casePayload = append(cvi.casePayload, cv)
-		}
 	}
 
 	// have is the type actually stored at this joined position (what the
@@ -978,10 +973,12 @@ func (cvi *coercingValueIter) Next() (CoreValue, error) {
 	// deCoerceValue a no-op and CoreValue.AsI32() panics on an i64.
 	have := cvi.joinedFlat[cvi.idx]
 	want := cvi.caseFlat[cvi.idx]
-	cv := cvi.casePayload[cvi.idx]
 	cvi.idx++
 
-	// Apply coercion.
+	cv, err := cvi.underlying.Next()
+	if err != nil {
+		return CoreValue{}, err
+	}
 	return deCoerceValue(cv, have, want), nil
 }
 
@@ -1140,17 +1137,11 @@ func liftFlatResult(vi valueIter, desc binary.ResultDesc, resolve Resolver, mem 
 		}
 	}
 
-	coreVI, ok := vi.(*CoreValueIter)
-	if !ok {
-		if coerceVI2, ok := vi.(*coercingValueIter); ok {
-			coreVI = coerceVI2.underlying
-		} else {
-			return nil, fmt.Errorf("liftFlat result: unexpected valueIter type %T", vi)
-		}
-	}
-
+	// Read the arm payload THROUGH vi (which may be an enclosing
+	// coercingValueIter) so nested variant/result levels compose -- see
+	// coercingValueIter's doc.
 	coerceVI := &coercingValueIter{
-		underlying: coreVI,
+		underlying: vi,
 		joinedFlat: joinedFlat,
 		caseFlat:   armFlatTypes,
 	}

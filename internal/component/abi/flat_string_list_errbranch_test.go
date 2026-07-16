@@ -375,12 +375,22 @@ type mockValueIter struct{}
 func (mockValueIter) Next() (CoreValue, error) { return NewCoreValueI32(0), nil }
 func (mockValueIter) Done() bool               { return true }
 
-func TestLiftFlatResultUnexpectedIterType(t *testing.T) {
+// TestLiftFlatResultComposesArbitraryIter verifies liftFlatResult accepts any
+// valueIter (not just a *CoreValueIter), which is what lets nested
+// variant/result payloads compose through an enclosing coercingValueIter -- the
+// fix for the "CoreValueIter index out of range" bug on result<record,variant>.
+// mockValueIter yields a 0 discriminant (Ok arm) then a 0 u32; lifting must
+// succeed and read through the generic iterator without a type-assertion error.
+func TestLiftFlatResultComposesArbitraryIter(t *testing.T) {
 	mem := make([]byte, 100)
 	okRef := binary.TypeRef{Primitive: "u32"}
-	_, err := liftFlatResult(mockValueIter{}, binary.ResultDesc{Ok: &okRef}, nil, mem)
-	if err == nil || !strings.Contains(err.Error(), "unexpected valueIter type") {
-		t.Errorf("expected unexpected-iterator-type error, got %v", err)
+	v, err := liftFlatResult(mockValueIter{}, binary.ResultDesc{Ok: &okRef}, nil, mem)
+	if err != nil {
+		t.Fatalf("liftFlatResult with a generic valueIter should succeed, got %v", err)
+	}
+	rv, ok := v.(ResultValue)
+	if !ok || rv.IsErr || rv.Payload != uint32(0) {
+		t.Fatalf("result = %#v, want Ok(u32 0)", v)
 	}
 }
 

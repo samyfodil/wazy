@@ -221,11 +221,10 @@ func TestCoercingValueIterConsumption(t *testing.T) {
 	// values really are i32, so claiming a mismatched "i64" wire type here
 	// would make deCoerceValue try to read them as i64 and panic.
 	cvi := &coercingValueIter{
-		underlying:  vi,
-		joinedFlat:  []string{"i32", "i32", "i32"},
-		caseFlat:    []string{"i32", "i32", "i32"},
-		casePayload: nil,
-		idx:         0,
+		underlying: vi,
+		joinedFlat: []string{"i32", "i32", "i32"},
+		caseFlat:   []string{"i32", "i32", "i32"},
+		idx:        0,
 	}
 
 	// Consume all values

@@ -662,5 +662,641 @@
     ],
     "mem_base": 1024,
     "mem_hex": "070000000800000009000000"
+  },
+  {
+    "name": "mixed_align_vals",
+    "type": "mixed_align_record",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 255
+      },
+      {
+        "kind": "i64",
+        "bits": 1099511627775
+      },
+      {
+        "kind": "i32",
+        "bits": 1
+      },
+      {
+        "kind": "i32",
+        "bits": 4096
+      },
+      {
+        "kind": "i32",
+        "bits": 7
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "vfu_f",
+    "type": "variant_f32_u32",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 0
+      },
+      {
+        "kind": "i32",
+        "bits": 1080033280
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "vfu_u",
+    "type": "variant_f32_u32",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 1
+      },
+      {
+        "kind": "i32",
+        "bits": 123456
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "vfu64_f",
+    "type": "variant_f64_u64",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 0
+      },
+      {
+        "kind": "i64",
+        "bits": 4613303445313851803
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "vfu64_u",
+    "type": "variant_f64_u64",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 1
+      },
+      {
+        "kind": "i64",
+        "bits": 9876543210
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "vr_empty",
+    "type": "variant_ragged",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 0
+      },
+      {
+        "kind": "i64",
+        "bits": 0
+      },
+      {
+        "kind": "f64",
+        "bits": 0
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "vr_one",
+    "type": "variant_ragged",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 1
+      },
+      {
+        "kind": "i64",
+        "bits": 77
+      },
+      {
+        "kind": "f64",
+        "bits": 0
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "vr_pair",
+    "type": "variant_ragged",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 2
+      },
+      {
+        "kind": "i64",
+        "bits": 100
+      },
+      {
+        "kind": "f64",
+        "bits": 4618722892845154304
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "nr_vals",
+    "type": "nested_record",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 4294967293
+      },
+      {
+        "kind": "i32",
+        "bits": 9
+      },
+      {
+        "kind": "i32",
+        "bits": 1
+      },
+      {
+        "kind": "i32",
+        "bits": 1024
+      },
+      {
+        "kind": "i32",
+        "bits": 3
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": "0a000000140000001e000000"
+  },
+  {
+    "name": "vc_pt",
+    "type": "variant_composite",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 1
+      },
+      {
+        "kind": "i64",
+        "bits": 4
+      },
+      {
+        "kind": "i64",
+        "bits": 5
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "vc_names",
+    "type": "variant_composite",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 2
+      },
+      {
+        "kind": "i64",
+        "bits": 1024
+      },
+      {
+        "kind": "i64",
+        "bits": 3
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": "18040000050000001d040000040000002104000005000000616c7068616265746167616d6d61"
+  },
+  {
+    "name": "vc_pair",
+    "type": "variant_composite",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 3
+      },
+      {
+        "kind": "i64",
+        "bits": 42
+      },
+      {
+        "kind": "i64",
+        "bits": 4609434218613702656
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "vc_empty",
+    "type": "variant_composite",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 0
+      },
+      {
+        "kind": "i64",
+        "bits": 0
+      },
+      {
+        "kind": "i64",
+        "bits": 0
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "lor_vals",
+    "type": "list_of_records",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 1024
+      },
+      {
+        "kind": "i32",
+        "bits": 3
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": "300400000100000034040000020000003c04000002000000400400000000000040040000030000004404000001000000610000000100000002000000626200006363630009000000"
+  },
+  {
+    "name": "lol_vals",
+    "type": "list_of_lists",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 1024
+      },
+      {
+        "kind": "i32",
+        "bits": 3
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": "1804000002000000200400000000000020040000030000000100000002000000030000000400000005000000"
+  },
+  {
+    "name": "rrv_ok",
+    "type": "result_rec_var",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 0
+      },
+      {
+        "kind": "i32",
+        "bits": 200
+      },
+      {
+        "kind": "i32",
+        "bits": 1024
+      },
+      {
+        "kind": "i32",
+        "bits": 2
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": "4f4b"
+  },
+  {
+    "name": "rrv_err",
+    "type": "result_rec_var",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 1
+      },
+      {
+        "kind": "i32",
+        "bits": 1
+      },
+      {
+        "kind": "i32",
+        "bits": 1024
+      },
+      {
+        "kind": "i32",
+        "bits": 4
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": "6e6f7065"
+  },
+  {
+    "name": "rrv_err_io",
+    "type": "result_rec_var",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 1
+      },
+      {
+        "kind": "i32",
+        "bits": 0
+      },
+      {
+        "kind": "i32",
+        "bits": 0
+      },
+      {
+        "kind": "i32",
+        "bits": 0
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "roe_err",
+    "type": "result_only_err",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 1
+      },
+      {
+        "kind": "i32",
+        "bits": 1024
+      },
+      {
+        "kind": "i32",
+        "bits": 4
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": "626f6f6d"
+  },
+  {
+    "name": "ols_some",
+    "type": "option_list_string",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 1
+      },
+      {
+        "kind": "i32",
+        "bits": 1024
+      },
+      {
+        "kind": "i32",
+        "bits": 3
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": "180400000100000019040000020000001b040000030000007879797a7a7a"
+  },
+  {
+    "name": "ols_none",
+    "type": "option_list_string",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 0
+      },
+      {
+        "kind": "i32",
+        "bits": 0
+      },
+      {
+        "kind": "i32",
+        "bits": 0
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "rov_vals",
+    "type": "record_of_variants",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 1
+      },
+      {
+        "kind": "i32",
+        "bits": 8
+      },
+      {
+        "kind": "i32",
+        "bits": 0
+      },
+      {
+        "kind": "i64",
+        "bits": 1024
+      },
+      {
+        "kind": "i32",
+        "bits": 2
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": "6869"
+  },
+  {
+    "name": "dn_vals",
+    "type": "deeply_nested",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 1024
+      },
+      {
+        "kind": "i32",
+        "bits": 3
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": "00000000010000000000000001000000240400000100000000000000e70300000000000065"
+  },
+  {
+    "name": "be_first",
+    "type": "big_enum",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 0
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "be_299",
+    "type": "big_enum",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 299
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "bv_first",
+    "type": "big_variant",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 0
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "bv_299",
+    "type": "big_variant",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 299
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "or_some_ok",
+    "type": "option_result",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 1
+      },
+      {
+        "kind": "i32",
+        "bits": 0
+      },
+      {
+        "kind": "i64",
+        "bits": 7
+      },
+      {
+        "kind": "i32",
+        "bits": 1024
+      },
+      {
+        "kind": "i32",
+        "bits": 5
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": "736576656e"
+  },
+  {
+    "name": "or_some_err",
+    "type": "option_result",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 1
+      },
+      {
+        "kind": "i32",
+        "bits": 1
+      },
+      {
+        "kind": "i64",
+        "bits": 42
+      },
+      {
+        "kind": "i32",
+        "bits": 0
+      },
+      {
+        "kind": "i32",
+        "bits": 0
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "or_none",
+    "type": "option_result",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 0
+      },
+      {
+        "kind": "i32",
+        "bits": 0
+      },
+      {
+        "kind": "i64",
+        "bits": 0
+      },
+      {
+        "kind": "i32",
+        "bits": 0
+      },
+      {
+        "kind": "i32",
+        "bits": 0
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "rbcs_vals",
+    "type": "record_bool_char_str",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 1
+      },
+      {
+        "kind": "i32",
+        "bits": 128512
+      },
+      {
+        "kind": "i32",
+        "bits": 1024
+      },
+      {
+        "kind": "i32",
+        "bits": 5
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": "656d6f6a69"
+  },
+  {
+    "name": "flags32_hi",
+    "type": "flags32",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 2147483649
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
   }
 ]
