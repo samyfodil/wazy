@@ -162,3 +162,37 @@ func TestRealHello_ReinstantiateAfterCloseOnSameRuntime(t *testing.T) {
 		t.Fatalf("second Close: %v", err)
 	}
 }
+
+// TestTwoDistinctComponentsOnOneRuntime guards the multi-tenant case: two
+// *different* components live at once on a single Runtime. Before synthesized
+// module names were namespaced per component (synthNamePrefix), both defaulted
+// their unreferenced root core module to "wazy:component/core0", so the second
+// Instantiate failed with "already instantiated". real_adder takes the
+// host-import path and real_hello the graph path, so this exercises both.
+func TestTwoDistinctComponentsOnOneRuntime(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	adder, err := Instantiate(ctx, r, realAdderWasm)
+	if err != nil {
+		t.Fatalf("Instantiate adder: %v", err)
+	}
+	defer adder.Close(ctx)
+
+	hello, err := Instantiate(ctx, r, realHelloWasm, WithWASI(WASIConfig{})...)
+	if err != nil {
+		t.Fatalf("Instantiate hello on the same Runtime as adder: %v", err)
+	}
+	defer hello.Close(ctx)
+
+	// Both must still be callable -- names being unique isn't enough; the
+	// wiring must resolve to the right module. Exercise adder's export.
+	got, err := adder.CallExport(ctx, "component:adder/calc", "add", uint32(2), uint32(3))
+	if err != nil {
+		t.Fatalf("adder add after co-instantiation: %v", err)
+	}
+	if len(got) != 1 || got[0].(uint32) != 5 {
+		t.Fatalf("adder add(2,3) = %v, want 5", got)
+	}
+}

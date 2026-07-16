@@ -406,13 +406,13 @@ func TestImports_LiftTypeNotFunc(t *testing.T) {
 // ------- pure helper unit tests -------
 
 func TestModuleNameFor(t *testing.T) {
-	if n, err := moduleNameFor(2, nil); err != nil || n != "wazy:component/core2" {
+	if n, err := moduleNameFor(2, nil, "wazy:component/"); err != nil || n != "wazy:component/core2" {
 		t.Fatalf("root: got %q, %v", n, err)
 	}
-	if n, err := moduleNameFor(0, []string{"libc"}); err != nil || n != "libc" {
+	if n, err := moduleNameFor(0, []string{"libc"}, "wazy:component/"); err != nil || n != "libc" {
 		t.Fatalf("single: got %q, %v", n, err)
 	}
-	if _, err := moduleNameFor(0, []string{"a", "b"}); err == nil {
+	if _, err := moduleNameFor(0, []string{"a", "b"}, "wazy:component/"); err == nil {
 		t.Fatal("expected error for multiple names")
 	}
 }

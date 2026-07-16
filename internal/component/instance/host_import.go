@@ -258,6 +258,7 @@ func instantiateWithImports(ctx context.Context, r wazy.Runtime, comp *binary.Co
 	}
 
 	resolve := typeResolver(comp)
+	synthPrefix := synthNamePrefix(componentBytes)
 
 	// Component func index space: component-func aliases (into imported
 	// instances) occupy the low indices, followed by lifted funcs. See the
@@ -338,7 +339,7 @@ func instantiateWithImports(ctx context.Context, r wazy.Runtime, comp *binary.Co
 			if err != nil {
 				return fail(err)
 			}
-			name, err := moduleNameFor(k, refNames[uint32(k)])
+			name, err := moduleNameFor(k, refNames[uint32(k)], synthPrefix)
 			if err != nil {
 				return fail(err)
 			}
@@ -425,10 +426,10 @@ func instantiateWithImports(ctx context.Context, r wazy.Runtime, comp *binary.Co
 // under. An instance referenced by exactly one instantiate-arg name takes
 // that name (so a dependent module's by-name import resolves); an unreferenced
 // instance (the root) gets a synthesized unique name.
-func moduleNameFor(coreInstanceIdx int, refNames []string) (string, error) {
+func moduleNameFor(coreInstanceIdx int, refNames []string, synthPrefix string) (string, error) {
 	switch len(refNames) {
 	case 0:
-		return fmt.Sprintf("wazy:component/core%d", coreInstanceIdx), nil
+		return fmt.Sprintf("%score%d", synthPrefix, coreInstanceIdx), nil
 	case 1:
 		return refNames[0], nil
 	default:

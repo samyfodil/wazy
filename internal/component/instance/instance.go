@@ -55,6 +55,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"hash/fnv"
 	"strings"
 	"sync"
 
@@ -487,6 +488,26 @@ func instantiateComponent(ctx context.Context, r wazy.Runtime, comp *binary.Comp
 	}
 
 	return &Instance{resolve: resolve, exports: exports, instanceExports: buildInstanceExportIndex(exports), closers: []api.Module{core}, resources: newHandleTable()}, nil
+}
+
+// synthNamePrefix derives the per-component namespace under which wazy
+// registers the module names it *synthesizes* -- the root core%d, the
+// empty-import anon%d, and the private priv%d host modules -- as opposed to the
+// names baked into the guest's own imports (which must be used verbatim, see
+// moduleNameFor). Without this, two different components each default their
+// unreferenced root to "wazy:component/core0" and the second Instantiate on the
+// same Runtime fails with "already instantiated".
+//
+// The prefix is a hash of the component bytes: stable for a given component (so
+// a re-instantiation after Close reuses the same names, and the compile cache
+// -- keyed on core-module bytes, not these names -- is unaffected) and distinct
+// across components. Two *live* instances of the *same* component on one
+// Runtime still collide; that is the documented one-component-at-a-time reuse
+// the compile cache targets, out of scope here.
+func synthNamePrefix(componentBytes []byte) string {
+	h := fnv.New64a()
+	_, _ = h.Write(componentBytes)
+	return fmt.Sprintf("wazy:component/%016x/", h.Sum64())
 }
 
 // coreModuleBytes returns the slice of componentBytes holding an embedded core

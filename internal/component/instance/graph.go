@@ -108,6 +108,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	}
 
 	resolve := typeResolver(comp)
+	synthPrefix := synthNamePrefix(componentBytes)
 
 	// Component func index space: identical construction to
 	// instantiateWithImports -- see that function's doc for why component
@@ -167,7 +168,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	emptyNameTarget := ""
 	for k := range comp.CoreInstances {
 		if names := refNames[uint32(k)]; len(names) == 1 && names[0] == "" {
-			emptyNameTarget = fmt.Sprintf("wazy:component/anon%d", k)
+			emptyNameTarget = fmt.Sprintf("%sanon%d", synthPrefix, k)
 			break
 		}
 	}
@@ -196,7 +197,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	privateHostModCount := 0
 	nextPrivateName := func() string {
 		privateHostModCount++
-		return fmt.Sprintf("wazy:component/priv%d", privateHostModCount)
+		return fmt.Sprintf("%spriv%d", synthPrefix, privateHostModCount)
 	}
 
 	// coreFuncTarget resolves an absolute core func index to the module that
@@ -246,7 +247,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	}
 
 	for k, ci := range comp.CoreInstances {
-		name, nerr := moduleNameForGraph(k, refNames[uint32(k)], emptyNameTarget)
+		name, nerr := moduleNameForGraph(k, refNames[uint32(k)], emptyNameTarget, synthPrefix)
 		if nerr != nil {
 			return fail(nerr)
 		}
@@ -336,10 +337,10 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 // except that a sole "" ref name (see importrewrite.go) maps to
 // emptyNameTarget instead of the literal empty string, since wazy's module
 // registry cannot resolve an empty-named module by import.
-func moduleNameForGraph(coreInstanceIdx int, refNames []string, emptyNameTarget string) (string, error) {
+func moduleNameForGraph(coreInstanceIdx int, refNames []string, emptyNameTarget, synthPrefix string) (string, error) {
 	switch len(refNames) {
 	case 0:
-		return fmt.Sprintf("wazy:component/core%d", coreInstanceIdx), nil
+		return fmt.Sprintf("%score%d", synthPrefix, coreInstanceIdx), nil
 	case 1:
 		if refNames[0] == "" {
 			return emptyNameTarget, nil

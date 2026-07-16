@@ -264,16 +264,16 @@ func TestGraph_BindInstanceExport_MemberNotFunc(t *testing.T) {
 // ------- direct unit tests for the lower-level graph.go helpers -------
 
 func TestModuleNameForGraph(t *testing.T) {
-	if got, err := moduleNameForGraph(3, nil, ""); err != nil || got != "wazy:component/core3" {
+	if got, err := moduleNameForGraph(3, nil, "", "wazy:component/"); err != nil || got != "wazy:component/core3" {
 		t.Fatalf("got (%q, %v), want (\"wazy:component/core3\", nil)", got, err)
 	}
-	if got, err := moduleNameForGraph(3, []string{"foo"}, ""); err != nil || got != "foo" {
+	if got, err := moduleNameForGraph(3, []string{"foo"}, "", "wazy:component/"); err != nil || got != "foo" {
 		t.Fatalf("got (%q, %v), want (\"foo\", nil)", got, err)
 	}
-	if got, err := moduleNameForGraph(3, []string{""}, "wazy:component/anon3"); err != nil || got != "wazy:component/anon3" {
+	if got, err := moduleNameForGraph(3, []string{""}, "wazy:component/anon3", "wazy:component/"); err != nil || got != "wazy:component/anon3" {
 		t.Fatalf("got (%q, %v), want (\"wazy:component/anon3\", nil)", got, err)
 	}
-	if _, err := moduleNameForGraph(3, []string{"a", "b"}, ""); err == nil {
+	if _, err := moduleNameForGraph(3, []string{"a", "b"}, "", "wazy:component/"); err == nil {
 		t.Fatal("expected an error for 2 ref names")
 	}
 }
