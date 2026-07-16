@@ -1,5 +1,4 @@
 package example:res;
-
 interface counters {
   resource counter {
     constructor(start: u32);
@@ -8,8 +7,7 @@ interface counters {
     get: func() -> u32;
   }
   make: func(start: u32) -> counter;
+  // nested borrow<counter> inside a list param
+  sum-all: func(cs: list<borrow<counter>>) -> u32;
 }
-
-world res {
-  export counters;
-}
+world res { export counters; }

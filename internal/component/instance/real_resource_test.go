@@ -82,6 +82,13 @@ func TestRealResource(t *testing.T) {
 	if got := u32(call("[method]counter.get", h)); got != 16 {
 		t.Errorf("first counter after second's use = %d, want 16 (isolation)", got)
 	}
+
+	// sum-all(list<borrow<counter>>) exercises resource handles NESTED inside a
+	// composite param: each borrow handle in the list must be resolved to the
+	// guest's rep (resolveArgHandles), not just top-level own/borrow. 16 + 101.
+	if got := u32(call("sum-all", []abi.Value{h, h2})); got != 117 {
+		t.Errorf("sum-all([16,101]) = %d, want 117 (nested borrow resolution)", got)
+	}
 	// (Host-initiated `[resource-drop]counter` -- a resource.drop canon export,
 	// not a lift -- plus destructor invocation is a separate feature wazy does
 	// not yet bind; the handles are released when the instance is closed.)

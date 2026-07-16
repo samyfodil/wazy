@@ -173,6 +173,13 @@ type Instance struct {
 	// was instantiated with WithWASI(WASIConfig{EnableHTTP: true}). ServeHTTP
 	// drives the guest's exported incoming-handler through it.
 	httpHost *wasiHTTP
+
+	// isGuestResource reports whether a component resource type index names a
+	// GUEST-owned (locally-defined) resource, as opposed to a host-owned one
+	// imported from an instance. Set by the graph engine (from comp); nil on
+	// the trivial no-import path (no guest resources). Used by resolveArgHandles
+	// to decide whether an own/borrow arg's handle must be converted to a rep.
+	isGuestResource func(resourceTypeIdx uint32) bool
 }
 
 // CoreModuleCount returns the number of embedded core modules (real,
@@ -240,13 +247,13 @@ type boundExport struct {
 	paramErrs       []error
 	paramSteps      []abi.LowerStep
 
-	// paramResolveHandle[i] is true when param i is an own/borrow of a
-	// GUEST-owned (locally-defined) resource: calling the guest export must
-	// convert the host's handle to the guest's rep (the guest method's core
-	// func takes the rep). False for a host-owned resource (WASI/http), where
-	// the guest receives the handle it later passes back to host methods.
-	// Computed from comp at bind time -- see finalizeBoundExport.
-	paramResolveHandle []bool
+	// paramHasResource[i] is true when param i's type contains an own/borrow
+	// at ANY depth (top-level, or nested in a record/list/variant/...). Calling
+	// a guest export must then walk the arg value and convert every GUEST-owned
+	// resource handle to the guest's rep (resolveArgHandles); a HOST-owned
+	// resource keeps its handle. Gating on this flag avoids walking args with no
+	// resources at all. Computed from the type structure at bind time.
+	paramHasResource []bool
 
 	// paramsSpill is true when the whole parameter list flattens beyond
 	// MaxFlatParams: FlattenFunc collapses the core signature to a single i32
@@ -366,6 +373,195 @@ func resourceTypeIdxOf(t binary.TypeDesc) (uint32, bool) {
 	}
 }
 
+// maxResourceWalkDepth guards typeContainsResource/resolveArgHandles against a
+// pathological (cyclic) type graph; real WIT nesting is shallow.
+const maxResourceWalkDepth = 64
+
+// typeContainsResource reports whether t's type tree contains an own/borrow at
+// any depth. Used to gate the per-call resolveArgHandles walk to args that
+// actually carry a resource handle.
+func typeContainsResource(t binary.TypeDesc, resolve abi.Resolver, depth int) bool {
+	if depth > maxResourceWalkDepth {
+		return false
+	}
+	switch d := t.(type) {
+	case binary.OwnDesc, binary.BorrowDesc:
+		return true
+	case binary.ListDesc:
+		return typeRefContainsResource(&d.Element, resolve, depth)
+	case binary.OptionDesc:
+		return typeRefContainsResource(&d.Element, resolve, depth)
+	case binary.RecordDesc:
+		for i := range d.Fields {
+			if typeRefContainsResource(&d.Fields[i].Type, resolve, depth) {
+				return true
+			}
+		}
+	case binary.TupleDesc:
+		for i := range d.Elements {
+			if typeRefContainsResource(&d.Elements[i], resolve, depth) {
+				return true
+			}
+		}
+	case binary.VariantDesc:
+		for i := range d.Cases {
+			if d.Cases[i].Type != nil && typeRefContainsResource(d.Cases[i].Type, resolve, depth) {
+				return true
+			}
+		}
+	case binary.ResultDesc:
+		if d.Ok != nil && typeRefContainsResource(d.Ok, resolve, depth) {
+			return true
+		}
+		if d.Err != nil && typeRefContainsResource(d.Err, resolve, depth) {
+			return true
+		}
+	}
+	return false
+}
+
+func typeRefContainsResource(ref *binary.TypeRef, resolve abi.Resolver, depth int) bool {
+	t, err := resolveTypeRef(ref, resolve)
+	if err != nil {
+		return false
+	}
+	return typeContainsResource(t, resolve, depth+1)
+}
+
+// resolveArgHandles walks an argument value against its type and replaces every
+// GUEST-owned own/borrow HANDLE with the guest's REP (the guest's core func
+// takes reps for resources it owns). HOST-owned resources (in.isGuestResource
+// false) keep their handle -- the guest holds it to call host methods back.
+// The value is rebuilt (not mutated in place) only along paths that carry a
+// resource; leaf and resource-free subtrees are returned unchanged. Own handles
+// use TakeOwn (ownership transfers to the guest), borrow handles use Rep.
+func (in *Instance) resolveArgHandles(v abi.Value, t binary.TypeDesc) (abi.Value, error) {
+	return in.resolveArgHandlesDepth(v, t, 0)
+}
+
+func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth int) (abi.Value, error) {
+	if depth > maxResourceWalkDepth {
+		return v, nil
+	}
+	switch d := t.(type) {
+	case binary.OwnDesc, binary.BorrowDesc:
+		rt, _ := resourceTypeIdxOf(t)
+		if in.isGuestResource == nil || !in.isGuestResource(rt) {
+			return v, nil // host-owned: keep the handle
+		}
+		return resolveHandleArg(in.resources, t, v)
+
+	case binary.ListDesc:
+		list, ok := v.([]abi.Value)
+		if !ok {
+			return v, nil
+		}
+		et, err := resolveTypeRef(&d.Element, in.resolve)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]abi.Value, len(list))
+		for i, e := range list {
+			if out[i], err = in.resolveArgHandlesDepth(e, et, depth+1); err != nil {
+				return nil, err
+			}
+		}
+		return out, nil
+
+	case binary.RecordDesc:
+		fields, ok := v.([]abi.Value)
+		if !ok {
+			return v, nil
+		}
+		out := make([]abi.Value, len(fields))
+		copy(out, fields)
+		for i := range d.Fields {
+			if i >= len(out) {
+				break
+			}
+			ft, err := resolveTypeRef(&d.Fields[i].Type, in.resolve)
+			if err != nil {
+				return nil, err
+			}
+			if out[i], err = in.resolveArgHandlesDepth(out[i], ft, depth+1); err != nil {
+				return nil, err
+			}
+		}
+		return out, nil
+
+	case binary.TupleDesc:
+		elems, ok := v.([]abi.Value)
+		if !ok {
+			return v, nil
+		}
+		out := make([]abi.Value, len(elems))
+		copy(out, elems)
+		for i := range d.Elements {
+			if i >= len(out) {
+				break
+			}
+			et, err := resolveTypeRef(&d.Elements[i], in.resolve)
+			if err != nil {
+				return nil, err
+			}
+			if out[i], err = in.resolveArgHandlesDepth(out[i], et, depth+1); err != nil {
+				return nil, err
+			}
+		}
+		return out, nil
+
+	case binary.OptionDesc:
+		if v == nil {
+			return nil, nil
+		}
+		et, err := resolveTypeRef(&d.Element, in.resolve)
+		if err != nil {
+			return nil, err
+		}
+		return in.resolveArgHandlesDepth(v, et, depth+1)
+
+	case binary.VariantDesc:
+		vv, ok := v.(abi.VariantValue)
+		if !ok || int(vv.Disc) >= len(d.Cases) || d.Cases[vv.Disc].Type == nil || vv.Payload == nil {
+			return v, nil
+		}
+		ct, err := resolveTypeRef(d.Cases[vv.Disc].Type, in.resolve)
+		if err != nil {
+			return nil, err
+		}
+		p, err := in.resolveArgHandlesDepth(vv.Payload, ct, depth+1)
+		if err != nil {
+			return nil, err
+		}
+		return abi.VariantValue{Disc: vv.Disc, Payload: p}, nil
+
+	case binary.ResultDesc:
+		rv, ok := v.(abi.ResultValue)
+		if !ok || rv.Payload == nil {
+			return v, nil
+		}
+		armRef := d.Ok
+		if rv.IsErr {
+			armRef = d.Err
+		}
+		if armRef == nil {
+			return v, nil
+		}
+		at, err := resolveTypeRef(armRef, in.resolve)
+		if err != nil {
+			return nil, err
+		}
+		p, err := in.resolveArgHandlesDepth(rv.Payload, at, depth+1)
+		if err != nil {
+			return nil, err
+		}
+		return abi.ResultValue{IsErr: rv.IsErr, Payload: p}, nil
+
+	default:
+		return v, nil
+	}
+}
+
 // finalizeBoundExport resolves be's per-instance core func handles and populates
 // its ABI metadata (from abiCache when non-nil, else computed fresh). funcIdx
 // keys the cache within comp -- see the boundExport doc and CompileCache.abiFor.
@@ -388,20 +584,15 @@ func finalizeBoundExport(be *boundExport, resolve abi.Resolver, abiCache *Compil
 	be.paramTypes, be.paramUsesMemory, be.paramErrs, be.paramSteps = m.paramTypes, m.paramUsesMemory, m.paramErrs, m.paramSteps
 	be.hasResult, be.tooManyResults = m.hasResult, m.tooManyResults
 
-	// A guest export whose own/borrow param names a GUEST-owned resource
-	// receives the rep, not the handle (see boundExportABI.paramResolveHandle).
-	// resolveImportedResourceName reports a HOST-owned resource (an
-	// imported-instance alias); its negation is guest-owned. comp is nil on the
-	// trivial no-import path, which has no guest-owned resource params.
+	// A guest export whose param contains a resource handle (at any depth) may
+	// need each GUEST-owned handle converted to its rep at call time -- see
+	// boundExportABI.paramHasResource and resolveArgHandles. comp is nil on the
+	// trivial no-import path, which has no guest-owned resources.
 	if comp != nil {
-		be.paramResolveHandle = make([]bool, len(be.paramTypes))
+		be.paramHasResource = make([]bool, len(be.paramTypes))
 		for i, pt := range be.paramTypes {
-			rt, ok := resourceTypeIdxOf(pt)
-			if !ok {
-				continue
-			}
-			if _, _, imported := resolveImportedResourceName(comp, rt); !imported {
-				be.paramResolveHandle[i] = true
+			if pt != nil {
+				be.paramHasResource[i] = typeContainsResource(pt, resolve, 0)
 			}
 		}
 	}
@@ -945,8 +1136,8 @@ func (in *Instance) lowerParams(be *boundExport, args []abi.Value, mem []byte, m
 				return nil, fmt.Errorf("component/instance: export %q param %d: %w", exportName, i, err)
 			}
 			tupleVal[i] = args[i]
-			if i < len(be.paramResolveHandle) && be.paramResolveHandle[i] {
-				if tupleVal[i], err = resolveHandleArg(in.resources, be.paramTypes[i], args[i]); err != nil {
+			if i < len(be.paramHasResource) && be.paramHasResource[i] {
+				if tupleVal[i], err = in.resolveArgHandles(args[i], be.paramTypes[i]); err != nil {
 					return nil, fmt.Errorf("component/instance: export %q param %d: %w", exportName, i, err)
 				}
 			}
@@ -966,11 +1157,11 @@ func (in *Instance) lowerParams(be *boundExport, args []abi.Value, mem []byte, m
 			return nil, fmt.Errorf("component/instance: export %q param %d (%s) requires linear memory (string/list), but the core module exports no memory", exportName, i, p.Name)
 		}
 		argVal := args[i]
-		// A guest-owned own/borrow resource arg: convert the host's handle to
-		// the guest's rep (the guest's method core func takes the rep). See
-		// boundExportABI.paramResolveHandle.
-		if i < len(be.paramResolveHandle) && be.paramResolveHandle[i] {
-			argVal, err = resolveHandleArg(in.resources, be.paramTypes[i], argVal)
+		// Convert every guest-owned own/borrow handle in this arg (at any
+		// depth) to the guest's rep -- the guest's core func takes reps for
+		// resources it owns. See resolveArgHandles.
+		if i < len(be.paramHasResource) && be.paramHasResource[i] {
+			argVal, err = in.resolveArgHandles(argVal, be.paramTypes[i])
 			if err != nil {
 				return nil, fmt.Errorf("component/instance: export %q param %d (%s): %w", exportName, i, p.Name, err)
 			}
