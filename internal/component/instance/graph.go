@@ -120,8 +120,15 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			return nil, fmt.Errorf("component/instance: import %q has extern kind %s (%#x); only instance imports are supported", im.Name, api.ExternTypeName(im.ExternType), im.ExternType)
 		}
 	}
-	if len(comp.CoreFuncSpace) == 0 && (len(comp.Aliases) > 0 || len(comp.Canons) > 0) {
-		return nil, fmt.Errorf("component/instance: the graph engine requires a component decoded via binary.Decode (comp.CoreFuncSpace is empty, but aliases/canons are present); hand-built binary.Component values are not supported by this path")
+	// A hand-built (non-decoded) Component with aliases/canons never had its
+	// core func index space built, so the graph engine can't resolve a core
+	// func through it -- reject those. A genuinely decoded component whose
+	// CoreFuncSpace is empty is fine: it just has no core-func-producing
+	// aliases/canons (e.g. a purely type-level nested component that only
+	// aliases and re-exports a type), and the graph path never does a
+	// CoreFuncSpace lookup for it.
+	if !comp.Decoded && (len(comp.Aliases) > 0 || len(comp.Canons) > 0) {
+		return nil, fmt.Errorf("component/instance: the graph engine requires a component decoded via binary.Decode (hand-built binary.Component values with aliases/canons are not supported by this path)")
 	}
 
 	resolve := typeResolver(comp)

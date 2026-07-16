@@ -83,6 +83,15 @@ type Component struct {
 	// RawSections tracks sections we parse the header for but skip the body.
 	// Used for sections we don't fully decode yet (e.g., core-type, component decls).
 	RawSections []RawSection
+
+	// Decoded is set true by Decode. It distinguishes a component that went
+	// through the binary decoder (whose CoreFuncSpace/ComponentFuncSpace/
+	// TypeSpace are authoritative -- an empty CoreFuncSpace genuinely means no
+	// core-func-producing aliases/canons) from a hand-built Component value
+	// (the common shape in tests, which never populates those index spaces).
+	// The graph engine uses it to tell "legitimately no core funcs" from "index
+	// spaces were never built"; see graph.go.
+	Decoded bool
 }
 
 // Type represents a value type in the component type section.

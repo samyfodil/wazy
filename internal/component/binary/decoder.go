@@ -283,6 +283,7 @@ func decodeComponent(buf []byte) (*Component, error) {
 		}
 	}
 
+	c.Decoded = true
 	return c, nil
 }
 
