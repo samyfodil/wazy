@@ -228,6 +228,15 @@ type WASIConfig struct {
 	// Has no effect unless AllowTCP is also true.
 	Dialer func(network, address string) (net.Conn, error)
 
+	// ResolveIP, when non-nil, replaces net.DefaultResolver.LookupIP as the
+	// source wasi:sockets/ip-name-lookup.resolve-addresses resolves a hostname
+	// through -- see wasi_sockets.go's resolveAddresses. A test injects one
+	// returning fixed IPs so a real name-resolving guest can be asserted
+	// deterministically without touching real DNS. Has no effect unless
+	// AllowTCP is also true (name resolution is part of the network surface,
+	// gated by the same opt-in as the network resource it borrows).
+	ResolveIP func(ctx context.Context, name string) ([]net.IP, error)
+
 	// Listen, when non-nil, replaces the real net.Listen WithWASI otherwise
 	// uses to satisfy a guest's wasi:sockets/tcp [method]tcp-socket.start-bind
 	// on a socket the guest then listens on -- see wasi_sockets.go's
@@ -325,7 +334,13 @@ func WithWASI(cfg WASIConfig) []Option {
 	if listen == nil {
 		listen = func(network, address string) (net.Listener, error) { return net.Listen(network, address) }
 	}
-	sockets := newWasiSockets(dial, listenPacket, listen)
+	resolveIP := cfg.ResolveIP
+	if resolveIP == nil {
+		resolveIP = func(ctx context.Context, name string) ([]net.IP, error) {
+			return net.DefaultResolver.LookupIP(ctx, "ip", name)
+		}
+	}
+	sockets := newWasiSockets(dial, listenPacket, listen, resolveIP)
 
 	wallClock := cfg.WallClock
 	if wallClock == nil {

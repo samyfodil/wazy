@@ -111,6 +111,39 @@ func TestWasiTCPDialErrToCode(t *testing.T) {
 	})
 }
 
+// TestWasiIPAddressValue covers wasiIPAddressValue's ipv4/ipv6 happy paths plus
+// its invalid-IP error branch (ip-name-lookup's resolve-next-address builds
+// these from real net.IPs, so a nil/malformed IP is the only error path).
+func TestWasiIPAddressValue(t *testing.T) {
+	t.Run("ipv4", func(t *testing.T) {
+		v, err := wasiIPAddressValue(net.IPv4(192, 168, 1, 5))
+		if err != nil {
+			t.Fatal(err)
+		}
+		vv := v.(abi.VariantValue)
+		p := vv.Payload.([]abi.Value)
+		if vv.Disc != 0 || len(p) != 4 || p[0].(uint32) != 192 || p[3].(uint32) != 5 {
+			t.Fatalf("ipv4 -> %#v", vv)
+		}
+	})
+	t.Run("ipv6", func(t *testing.T) {
+		v, err := wasiIPAddressValue(net.ParseIP("::1"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		vv := v.(abi.VariantValue)
+		p := vv.Payload.([]abi.Value)
+		if vv.Disc != 1 || len(p) != 8 || p[7].(uint32) != 1 {
+			t.Fatalf("ipv6 -> %#v", vv)
+		}
+	})
+	t.Run("invalid", func(t *testing.T) {
+		if _, err := wasiIPAddressValue(net.IP{1, 2, 3}); err == nil {
+			t.Fatal("expected error for a malformed IP")
+		}
+	})
+}
+
 // TestWasiTCPListenErrToCode covers the listen/accept error mapper. It reuses
 // the UDP mapper (bind/accept share the same failure modes -- see its doc), so
 // this proves the address-in-use and generic-fallback ends of that reuse: a

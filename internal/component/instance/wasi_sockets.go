@@ -110,6 +110,10 @@ const (
 	wasiUDPSocketResType              uint32 = 11
 	wasiIncomingDatagramStreamResType uint32 = 12
 	wasiOutgoingDatagramStreamResType uint32 = 13
+
+	// resolve-address-stream tag -- see this file's "wasi:sockets/
+	// ip-name-lookup" section below.
+	wasiResolveStreamResType uint32 = 14
 )
 
 // wasiNetworkRep is the one host-side rep wasi:sockets/instance-network.
@@ -182,6 +186,7 @@ const (
 	wasiIfaceSocketsTCPCreateSoc = "wasi:sockets/tcp-create-socket@0.2.3"
 	wasiIfaceSocketsUDP          = "wasi:sockets/udp@0.2.3"
 	wasiIfaceSocketsUDPCreateSoc = "wasi:sockets/udp-create-socket@0.2.3"
+	wasiIfaceSocketsIPNameLookup = "wasi:sockets/ip-name-lookup@0.2.3"
 )
 
 // tcpSockNode is one live wasi:sockets/tcp `tcp-socket`: family records the
@@ -230,6 +235,19 @@ type sockInStream struct {
 type sockOutStream struct {
 	mu   sync.Mutex
 	conn net.Conn
+}
+
+// resolveAddrStream is one live wasi:sockets/ip-name-lookup
+// `resolve-address-stream`: resolve-addresses does the real DNS lookup
+// synchronously (mirroring the blocking/single-shot model TCP connect uses --
+// see this file's package doc) and reports a lookup failure right there as the
+// result's Err case, so a successfully-minted stream always holds resolved
+// IPs; each resolve-next-address pops the next one, returning None once
+// exhausted.
+type resolveAddrStream struct {
+	mu   sync.Mutex
+	ips  []net.IP
+	next int
 }
 
 // udpSockNode is one live wasi:sockets/udp `udp-socket`: family records the
@@ -289,13 +307,15 @@ type wasiSockets struct {
 	dial         func(network, address string) (net.Conn, error)
 	listenPacket func(network, address string) (net.PacketConn, error)
 	listen       func(network, address string) (net.Listener, error)
+	resolveIP    func(ctx context.Context, name string) ([]net.IP, error)
 
 	resources *handleTable
 
-	nextRep    uint32
-	tcpSocks   map[uint32]*tcpSockNode
-	inStreams  map[uint32]*sockInStream
-	outStreams map[uint32]*sockOutStream
+	nextRep       uint32
+	tcpSocks      map[uint32]*tcpSockNode
+	inStreams     map[uint32]*sockInStream
+	outStreams    map[uint32]*sockOutStream
+	resolveStream map[uint32]*resolveAddrStream
 
 	// UDP rep tables -- see this file's "wasi:sockets/udp" section doc.
 	udpSocks  map[uint32]*udpSockNode
@@ -312,18 +332,20 @@ const wasiSockRepBase uint32 = 1 << 20
 // through listenPacket, and binds+listens TCP through listen (none ever nil
 // by the time WithWASI constructs one -- see WASIConfig.Dialer/ListenPacket/
 // Listen's own docs).
-func newWasiSockets(dial func(network, address string) (net.Conn, error), listenPacket func(network, address string) (net.PacketConn, error), listen func(network, address string) (net.Listener, error)) *wasiSockets {
+func newWasiSockets(dial func(network, address string) (net.Conn, error), listenPacket func(network, address string) (net.PacketConn, error), listen func(network, address string) (net.Listener, error), resolveIP func(ctx context.Context, name string) ([]net.IP, error)) *wasiSockets {
 	return &wasiSockets{
-		dial:         dial,
-		listenPacket: listenPacket,
-		listen:       listen,
-		tcpSocks:     make(map[uint32]*tcpSockNode),
-		inStreams:    make(map[uint32]*sockInStream),
-		outStreams:   make(map[uint32]*sockOutStream),
-		udpSocks:     make(map[uint32]*udpSockNode),
-		inDgrams:     make(map[uint32]*incomingDatagramStream),
-		outDgrams:    make(map[uint32]*outgoingDatagramStream),
-		nextRep:      wasiSockRepBase,
+		dial:          dial,
+		listenPacket:  listenPacket,
+		listen:        listen,
+		resolveIP:     resolveIP,
+		tcpSocks:      make(map[uint32]*tcpSockNode),
+		inStreams:     make(map[uint32]*sockInStream),
+		outStreams:    make(map[uint32]*sockOutStream),
+		resolveStream: make(map[uint32]*resolveAddrStream),
+		udpSocks:      make(map[uint32]*udpSockNode),
+		inDgrams:      make(map[uint32]*incomingDatagramStream),
+		outDgrams:     make(map[uint32]*outgoingDatagramStream),
+		nextRep:       wasiSockRepBase,
 	}
 }
 
@@ -379,6 +401,14 @@ func (s *wasiSockets) outStreamNode(rep uint32) (*sockOutStream, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n, ok := s.outStreams[rep]
+	return n, ok
+}
+
+// resolveStreamNode resolves rep to a live resolve-address-stream.
+func (s *wasiSockets) resolveStreamNode(rep uint32) (*resolveAddrStream, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n, ok := s.resolveStream[rep]
 	return n, ok
 }
 
@@ -685,6 +715,38 @@ func wasiIPSocketAddrFromIPPort(ip net.IP, port int) (abi.Value, error) {
 		uint32(0), // scope-id: see wasiIPSocketAddrFromUDPAddr's doc
 	}
 	return abi.VariantValue{Disc: 1, Payload: rec}, nil
+}
+
+// wasiIPAddressValue builds the wasi:sockets/network `ip-address` variant value
+// (ipv4(tuple<u8,u8,u8,u8>) | ipv6(tuple<u16 x8>)) from a net.IP -- the
+// address-only shape resolve-next-address returns (no port, unlike
+// ip-socket-address).
+func wasiIPAddressValue(ip net.IP) (abi.Value, error) {
+	if ip4 := ip.To4(); ip4 != nil {
+		return abi.VariantValue{Disc: 0, Payload: []abi.Value{
+			uint32(ip4[0]), uint32(ip4[1]), uint32(ip4[2]), uint32(ip4[3]),
+		}}, nil
+	}
+	ip16 := ip.To16()
+	if ip16 == nil {
+		return nil, fmt.Errorf("wasiIPAddressValue: %v is neither a valid IPv4 nor IPv6 address", ip)
+	}
+	parts := make([]abi.Value, 8)
+	for i := 0; i < 8; i++ {
+		parts[i] = uint32(uint16(ip16[i*2])<<8 | uint16(ip16[i*2+1]))
+	}
+	return abi.VariantValue{Disc: 1, Payload: parts}, nil
+}
+
+// wasiIPAddressType interns wasi:sockets/network's `variant ip-address {
+// ipv4(ipv4-address), ipv6(ipv6-address) }` into tbl and returns its TypeRef.
+func wasiIPAddressType(tbl *typeTable) binary.TypeRef {
+	v4 := wasiIPv4AddressType(tbl)
+	v6 := wasiIPv6AddressType(tbl)
+	return tbl.add(binary.VariantDesc{Cases: []binary.VariantCase{
+		{Name: "ipv4", Type: &v4},
+		{Name: "ipv6", Type: &v6},
+	}})
 }
 
 // wasiUDPErrToCode maps a real UDP bind/send/receive error to the closest
@@ -1064,6 +1126,81 @@ func wasiSocketOptions(sockets *wasiSockets) []Option {
 		return []abi.Value{abi.ResultValue{IsErr: false, Payload: nil}}, nil
 	}
 
+	// resolveAddresses implements wasi:sockets/ip-name-lookup.resolve-addresses(
+	// network: borrow<network>, name: string) -> result<resolve-address-stream,
+	// error-code>. The real DNS lookup happens synchronously here (see
+	// resolveAddrStream's doc); a failure is reported as the Err case. args[0]
+	// (network) is validated live upstream, not inspected (one network -- see
+	// wasiNetworkRep).
+	resolveAddresses := func(ctx context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 2 {
+			return nil, fmt.Errorf("wasi:sockets/ip-name-lookup.resolve-addresses: expected 2 args (network, name), got %d", len(args))
+		}
+		name, ok := args[1].(string)
+		if !ok {
+			return nil, fmt.Errorf("wasi:sockets/ip-name-lookup.resolve-addresses: name: expected string, got %T", args[1])
+		}
+		resources, err := sockets.getResources()
+		if err != nil {
+			return nil, err
+		}
+		ips, lookupErr := sockets.resolveIP(ctx, name)
+		if lookupErr != nil {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiSockErrNameUnresolvable}}, nil
+		}
+		rep := sockets.allocRep()
+		sockets.mu.Lock()
+		sockets.resolveStream[rep] = &resolveAddrStream{ips: ips}
+		sockets.mu.Unlock()
+		handle := resources.NewOwn(wasiResolveStreamResType, rep)
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: handle}}, nil
+	}
+
+	// resolveNextAddress implements [method]resolve-address-stream.
+	// resolve-next-address(self) -> result<option<ip-address>, error-code>:
+	// pops the next resolved IP as some(ip-address), or none once exhausted.
+	resolveNextAddress := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("[method]resolve-address-stream.resolve-next-address: expected 1 arg (self), got %d", len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]resolve-address-stream.resolve-next-address: self: expected uint32 rep, got %T", args[0])
+		}
+		node, ok := sockets.resolveStreamNode(selfRep)
+		if !ok {
+			return nil, fmt.Errorf("[method]resolve-address-stream.resolve-next-address: rep %d does not name a live resolve-address-stream", selfRep)
+		}
+		node.mu.Lock()
+		defer node.mu.Unlock()
+		if node.next >= len(node.ips) {
+			// option none: abi models option -> nil payload inside the Ok.
+			return []abi.Value{abi.ResultValue{IsErr: false, Payload: nil}}, nil
+		}
+		ip := node.ips[node.next]
+		node.next++
+		addr, err := wasiIPAddressValue(ip)
+		if err != nil {
+			return nil, fmt.Errorf("[method]resolve-address-stream.resolve-next-address: %w", err)
+		}
+		// option some(ip-address): the inner value directly (see abi.Value doc).
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: addr}}, nil
+	}
+
+	resolveSubscribe := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("[method]resolve-address-stream.subscribe: expected 1 arg (self), got %d", len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]resolve-address-stream.subscribe: self: expected uint32 rep, got %T", args[0])
+		}
+		if _, ok := sockets.resolveStreamNode(selfRep); !ok {
+			return nil, fmt.Errorf("[method]resolve-address-stream.subscribe: rep %d does not name a live resolve-address-stream", selfRep)
+		}
+		return []abi.Value{wasiPollableRep}, nil
+	}
+
 	// streamSubscribe backs both [method]input-stream.subscribe and
 	// [method]output-stream.subscribe: self is already resolved (and
 	// validated live) by liftHostArgs before this closure runs, and every
@@ -1092,6 +1229,9 @@ func wasiSocketOptions(sockets *wasiSockets) []Option {
 	tcpSubFD, tcpSubResolve := wasiSubscribeSig(wasiTCPSocketResType)
 	inSubFD, inSubResolve := wasiSubscribeSig(wasiInputStreamResType)
 	outSubFD, outSubResolve := wasiSubscribeSig(wasiOutputStreamResType)
+	resolveFD, resolveResolve := wasiResolveAddressesSig()
+	resolveNextFD, resolveNextResolve := wasiResolveNextAddressSig()
+	resolveSubFD, resolveSubResolve := wasiSubscribeSig(wasiResolveStreamResType)
 
 	return []Option{
 		withResourcesHook(sockets.setResources),
@@ -1104,8 +1244,12 @@ func wasiSocketOptions(sockets *wasiSockets) []Option {
 		// + block/poll are registered centrally -- see wasi_poll.go.)
 		withResourceTag(wasiIfaceSocketsNetwork, "network", wasiNetworkResType),
 		withResourceTag(wasiIfaceSocketsTCP, "tcp-socket", wasiTCPSocketResType),
+		withResourceTag(wasiIfaceSocketsIPNameLookup, "resolve-address-stream", wasiResolveStreamResType),
 
 		withImportCustom(wasiIfaceSocketsInstanceNet, "instance-network", instanceNetwork, instNetFD, instNetResolve),
+		withImportCustom(wasiIfaceSocketsIPNameLookup, "resolve-addresses", resolveAddresses, resolveFD, resolveResolve),
+		withImportCustom(wasiIfaceSocketsIPNameLookup, "[method]resolve-address-stream.resolve-next-address", resolveNextAddress, resolveNextFD, resolveNextResolve),
+		withImportCustom(wasiIfaceSocketsIPNameLookup, "[method]resolve-address-stream.subscribe", resolveSubscribe, resolveSubFD, resolveSubResolve),
 		withImportCustom(wasiIfaceSocketsTCPCreateSoc, "create-tcp-socket", createTCPSocket, createTCPFD, createTCPResolve),
 		withImportCustom(wasiIfaceSocketsTCP, "[method]tcp-socket.start-connect", startConnect, startConnectFD, startConnectResolve),
 		withImportCustom(wasiIfaceSocketsTCP, "[method]tcp-socket.finish-connect", finishConnect, finishConnectFD, finishConnectResolve),
@@ -1668,6 +1812,42 @@ func wasiTCPSetListenBacklogSig() (binary.FuncDesc, abi.Resolver) {
 			{Name: "self", Type: selfRef},
 			{Name: "value", Type: binary.TypeRef{Primitive: "u64"}},
 		},
+		Results: binary.FuncResults{Unnamed: &resultRef},
+	}
+	return fd, tbl.resolver()
+}
+
+// wasiResolveAddressesSig builds the FuncDesc/resolver for
+// wasi:sockets/ip-name-lookup.resolve-addresses(network: borrow<network>,
+// name: string) -> result<own<resolve-address-stream>, error-code>.
+func wasiResolveAddressesSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	netRef := tbl.add(binary.BorrowDesc{ResourceType: wasiNetworkResType})
+	okRef := tbl.add(binary.OwnDesc{ResourceType: wasiResolveStreamResType})
+	errRef := wasiSocketsErrorCodeType(tbl)
+	resultRef := tbl.add(binary.ResultDesc{Ok: &okRef, Err: &errRef})
+	fd := binary.FuncDesc{
+		Params: []binary.FuncParam{
+			{Name: "network", Type: netRef},
+			{Name: "name", Type: binary.TypeRef{Primitive: "string"}},
+		},
+		Results: binary.FuncResults{Unnamed: &resultRef},
+	}
+	return fd, tbl.resolver()
+}
+
+// wasiResolveNextAddressSig builds the FuncDesc/resolver for
+// [method]resolve-address-stream.resolve-next-address(self:
+// borrow<resolve-address-stream>) -> result<option<ip-address>, error-code>.
+func wasiResolveNextAddressSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiResolveStreamResType})
+	addrRef := wasiIPAddressType(tbl)
+	optRef := tbl.add(binary.OptionDesc{Element: addrRef})
+	errRef := wasiSocketsErrorCodeType(tbl)
+	resultRef := tbl.add(binary.ResultDesc{Ok: &optRef, Err: &errRef})
+	fd := binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}},
 		Results: binary.FuncResults{Unnamed: &resultRef},
 	}
 	return fd, tbl.resolver()
