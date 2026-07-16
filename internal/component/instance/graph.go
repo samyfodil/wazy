@@ -211,7 +211,12 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		return nil, err
 	}
 
-	resources := newHandleTable()
+	// A composition's sub-instances share one handle table (set via cfg by
+	// instantiateNestedInstances); a flat instantiation makes its own.
+	resources := cfg.sharedResources
+	if resources == nil {
+		resources = newHandleTable()
+	}
 	runResourceHooks(cfg, resources)
 	instMods := make(map[int]api.Module, len(comp.CoreInstances))
 	var closers []api.Module
@@ -394,7 +399,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	// Recursively instantiate any nested component instances (comp.Instances,
 	// the fused-adapter / nested-composition shape) and link siblings, before
 	// binding exports -- an outer export may alias a nested instance's export.
-	compInstances, subInstances, err := instantiateNestedInstances(ctx, r, comp, cfg)
+	compInstances, subInstances, err := instantiateNestedInstances(ctx, r, comp, cfg, resources)
 	if err != nil {
 		return fail(err)
 	}
@@ -416,6 +421,10 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		instanceExports: buildInstanceExportIndex(exports),
 		closers:         closers,
 		subInstances:    subInstances,
+		resourceDtors:   resolveDefinedResourceDtors(comp, coreFuncTarget),
+		resCanon:        cfg.resCanon,
+		resBase:         cfg.resBase,
+		comp:            comp,
 		resources:       resources,
 		coreModuleCount: coreModuleCount,
 		wasiCalls:       wasiCalls,
@@ -442,7 +451,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 // canon-lower/buildHostWrapper path lowers calls to it unchanged. Kind 0x01
 // (inline-export) instances are the pass-through-shim shape handled in
 // bindInstanceExportGraph, not here.
-func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config) (map[int]*Instance, []*Instance, error) {
+func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, sharedTable *handleTable) (map[int]*Instance, []*Instance, error) {
 	if len(comp.Instances) == 0 {
 		return nil, nil, nil
 	}
@@ -451,6 +460,16 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 		if im.ExternType == 0x05 { // instance
 			numImported++
 		}
+	}
+
+	// The composition-wide base allocator: each recursively-instantiated
+	// sub-component gets a distinct global-id base so their resource ids never
+	// collide in the shared table. Created once at the top of a composition and
+	// propagated down.
+	baseNext := cfg.resBaseNext
+	if baseNext == nil {
+		var b uint32
+		baseNext = &b
 	}
 
 	// Only the composition shape is handled here: a func alias (Sort 0x01,
@@ -510,11 +529,25 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 			continue
 		}
 
+		// Assign this sub-component its global-id base and share the one table.
+		*baseNext++
+		base := *baseNext * resBaseStride
+
 		// Build the nested component's import environment from the instantiate
 		// args. An instance arg names a sibling sub-Instance; each of its
 		// plain-func exports satisfies the nested component's instance import of
-		// the same (arg) name, matched by func name.
-		subCfg := &config{imports: map[importKey]*hostImport{}, compileCache: cfg.compileCache}
+		// the same (arg) name, matched by func name. A resource the sibling
+		// EXPORTS is lined up with the nested component's import of the same name
+		// so both agree on one global id, and the sibling's (definer's) dtor is
+		// registered under that id for the nested component's resource.drop.
+		subCfg := &config{
+			imports:         map[importKey]*hostImport{},
+			compileCache:    cfg.compileCache,
+			sharedResources: sharedTable,
+			resBase:         base,
+			resBaseNext:     baseNext,
+		}
+		importedGlobalID := map[importKey]uint32{}
 		for _, arg := range inst.Args {
 			if arg.Sort != 0x05 { // instance
 				failClose()
@@ -531,7 +564,18 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 				}
 				subCfg.imports[mkImportKey(arg.Name, name)] = delegatingHostImport(sib, name, be)
 			}
+			// Resource identity + destructor across the boundary.
+			if sib.comp != nil {
+				for rname, sibDef := range exportedResourceDefs(sib.comp) {
+					gid := sib.resBase + sibDef
+					importedGlobalID[mkImportKey(arg.Name, rname)] = gid
+					if dtor := sib.resourceDtors[sibDef]; dtor != nil {
+						sharedTable.registerDtor(gid, dtor)
+					}
+				}
+			}
 		}
+		subCfg.resCanon = makeResCanon(nested, base, importedGlobalID)
 
 		sub, err := instantiateGraph(ctx, r, nested, nested.Bytes, subCfg)
 		if err != nil {
@@ -546,15 +590,21 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 
 // delegatingHostImport wraps a sibling sub-Instance's exported func as a host
 // import: calling it re-enters the sibling's own lift/lower. customFD/
-// customResolve come from the provider's boundExport, so buildHostWrapper marshals
-// against the real (possibly nested) signature -- the decoder does not retain
-// the importer's copy of the type.
+// customResolve come from the provider's boundExport, so buildHostWrapper
+// marshals against the real (possibly nested) signature -- the decoder does not
+// retain the importer's copy of the type. A resource handle in the signature is
+// presented to the importer's wrapper as an opaque u32 (resourcesToU32FD) so it
+// passes straight through: the shared handle table makes the provider's handle
+// directly valid in the importer, and re-minting it under the importer's own
+// resource index (which lives in a different type space) is neither needed nor
+// correct.
 func delegatingHostImport(sub *Instance, exportName string, be *boundExport) *hostImport {
+	fd := resourcesToU32FD(be.fd, sub.resolve)
 	return &hostImport{
 		fn: func(ctx context.Context, args []abi.Value) ([]abi.Value, error) {
 			return sub.invoke(ctx, be, exportName, args)
 		},
-		customFD:      &be.fd,
+		customFD:      &fd,
 		customResolve: sub.resolve,
 	}
 }
@@ -887,6 +937,9 @@ func resourceCanonHostFuncGraph(comp *binary.Component, cfg *config, resources *
 		}
 	}
 	typeIdx := effectiveResourceTypeIdx(comp, cfg, canon.TypeIdx)
+	if cfg.resCanon != nil { // composition: tag by the global id siblings agree on
+		typeIdx = cfg.resCanon(canon.TypeIdx)
+	}
 
 	switch canon.Kind {
 	case 0x02: // resource.new: rep:i32 -> handle:i32
@@ -897,10 +950,25 @@ func resourceCanonHostFuncGraph(comp *binary.Component, cfg *config, resources *
 		return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32}, results: []api.ValueType{api.ValueTypeI32}}, nil
 
 	case 0x03: // resource.drop: handle:i32 -> ()
-		fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
+		fn := api.GoModuleFunc(func(ctx context.Context, _ api.Module, stack []uint64) {
 			h := api.DecodeU32(stack[0])
+			// Read the rep before dropping so the destructor (if any) can run
+			// against it -- an importer dropping an own<R> it received runs the
+			// DEFINER's dtor, registered on the shared table by global tag.
+			dtor := resources.dtorFor(typeIdx)
+			var rep uint32
+			if dtor != nil {
+				if r, err := resources.Rep(typeIdx, h); err == nil {
+					rep = r
+				}
+			}
 			if err := resources.Drop(typeIdx, h); err != nil {
 				panic(fmt.Errorf("component/instance: resource.drop (type %d): %w", typeIdx, err))
+			}
+			if dtor != nil {
+				if _, err := dtor.Call(ctx, uint64(rep)); err != nil {
+					panic(fmt.Errorf("component/instance: resource.drop (type %d): destructor: %w", typeIdx, err))
+				}
 			}
 		})
 		return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32}, results: nil}, nil

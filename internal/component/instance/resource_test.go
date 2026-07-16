@@ -198,7 +198,7 @@ func TestResolveHandleArg_Own(t *testing.T) {
 	tbl := newHandleTable()
 	h := tbl.NewOwn(3, 77)
 
-	v, err := resolveHandleArg(tbl, binary.OwnDesc{ResourceType: 3}, h)
+	v, err := resolveHandleArg(tbl, nil, binary.OwnDesc{ResourceType: 3}, h)
 	if err != nil {
 		t.Fatalf("resolveHandleArg: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestResolveHandleArg_Borrow(t *testing.T) {
 	tbl := newHandleTable()
 	h := tbl.NewOwn(3, 77)
 
-	v, err := resolveHandleArg(tbl, binary.BorrowDesc{ResourceType: 3}, h)
+	v, err := resolveHandleArg(tbl, nil, binary.BorrowDesc{ResourceType: 3}, h)
 	if err != nil {
 		t.Fatalf("resolveHandleArg: %v", err)
 	}
@@ -230,17 +230,17 @@ func TestResolveHandleArg_Borrow(t *testing.T) {
 
 func TestResolveHandleArg_WrongGoType(t *testing.T) {
 	tbl := newHandleTable()
-	if _, err := resolveHandleArg(tbl, binary.OwnDesc{ResourceType: 1}, "not-a-handle"); err == nil {
+	if _, err := resolveHandleArg(tbl, nil, binary.OwnDesc{ResourceType: 1}, "not-a-handle"); err == nil {
 		t.Fatal("expected an error for a non-uint32 own arg")
 	}
-	if _, err := resolveHandleArg(tbl, binary.BorrowDesc{ResourceType: 1}, "not-a-handle"); err == nil {
+	if _, err := resolveHandleArg(tbl, nil, binary.BorrowDesc{ResourceType: 1}, "not-a-handle"); err == nil {
 		t.Fatal("expected an error for a non-uint32 borrow arg")
 	}
 }
 
 func TestResolveHandleArg_PassThrough(t *testing.T) {
 	tbl := newHandleTable()
-	v, err := resolveHandleArg(tbl, binary.PrimitiveDesc{Prim: "u32"}, uint32(5))
+	v, err := resolveHandleArg(tbl, nil, binary.PrimitiveDesc{Prim: "u32"}, uint32(5))
 	if err != nil {
 		t.Fatalf("resolveHandleArg: %v", err)
 	}

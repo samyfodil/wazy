@@ -3,6 +3,8 @@ package instance
 import (
 	"fmt"
 	"sync"
+
+	"github.com/samyfodil/wazy/api"
 )
 
 // resourceEntry is one live handle in a handleTable: the host-side
@@ -68,6 +70,30 @@ type handleTable struct {
 	mu      sync.Mutex
 	entries map[uint32]*resourceEntry
 	next    uint32
+
+	// dtors maps a (composition-global) resource type tag to the defining
+	// component's guest destructor. Populated only for a composition's shared
+	// table (see instantiateNestedInstances); canon resource.drop runs the
+	// entry for the dropped handle's tag so an importer dropping an own<R> it
+	// received runs the DEFINER's dtor. nil/absent means no destructor.
+	dtors map[uint32]api.Function
+}
+
+// registerDtor records the destructor for a resource type tag on this table.
+func (t *handleTable) registerDtor(typeIdx uint32, fn api.Function) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.dtors == nil {
+		t.dtors = make(map[uint32]api.Function)
+	}
+	t.dtors[typeIdx] = fn
+}
+
+// dtorFor returns the destructor registered for a resource type tag, or nil.
+func (t *handleTable) dtorFor(typeIdx uint32) api.Function {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.dtors[typeIdx]
 }
 
 // newHandleTable returns an empty handleTable, ready to allocate handles

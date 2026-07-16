@@ -158,6 +158,31 @@ type Instance struct {
 	// stay valid until then). Empty for a flat single-component instance.
 	subInstances []*Instance
 
+	// resourceDtors maps a canonical resource DEFINITION type index (this
+	// component's own TypeSpace index of a ResourceDesc that declares a dtor) to
+	// the resolved guest destructor core func. Populated at instantiation. Used
+	// when this component's resources are imported by a sibling in a composition
+	// (the sibling's resource.drop must run this destructor -- the definer's --
+	// since an imported `sub resource` carries no dtor of its own). Empty for a
+	// component that defines no resources with destructors.
+	resourceDtors map[uint32]api.Function
+
+	// resCanon maps this instance's local resource type indices to the
+	// composition-global id used as the shared handle table's tag. Non-nil only
+	// for a sub-instance of a composition; nil means tag by raw index (the flat
+	// single-component / WASI behavior). Threaded into resolveHandleArg so
+	// borrow/own args to this component's own methods tag consistently with the
+	// resource canons.
+	resCanon func(uint32) uint32
+
+	// resBase is this instance's global resource-id base (its defined resource
+	// with definition index d has global id resBase+d), and comp is the decoded
+	// component it was instantiated from. Both are read by a parent composition
+	// when wiring this instance's exported resources into a sibling's imports.
+	// resBase is 0 and comp may be nil for instances not part of a composition.
+	resBase uint32
+	comp    *binary.Component
+
 	// resources is this instance's resource handle table (see resource.go),
 	// shared by every resource type the instance declares or imports. It is
 	// always non-nil, even for instances with no resource canons, so callers
@@ -466,7 +491,7 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		if in.isGuestResource == nil || !in.isGuestResource(rt) {
 			return v, nil // host-owned: keep the handle
 		}
-		return resolveHandleArg(in.resources, t, v)
+		return resolveHandleArg(in.resources, in.resCanon, t, v)
 
 	case binary.ListDesc:
 		list, ok := v.([]abi.Value)

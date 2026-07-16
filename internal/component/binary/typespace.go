@@ -95,6 +95,48 @@ func (c *Component) ResolveType(idx uint32) (TypeDesc, error) {
 	return c.resolveTypeDepth(idx, 0)
 }
 
+// ResourceDefIndex maps a resource type index to the canonical index where the
+// resource is DEFINED (or the root import it names), following the same
+// TypeSpace links ResolveType does: export-introduces-alias, self "outer" type
+// alias, and an `eq`-bounded type import. A resource is commonly named by
+// several indices in one component -- the deftype that defines it AND the export
+// alias created when it is exported -- while canon resource.new/drop/rep use the
+// deftype and own<R>/borrow<R> in a lifted signature use the export alias.
+// Reducing every alias of one resource to this single index gives a stable
+// per-component identity. Returns idx unchanged for anything it cannot resolve
+// further (a plain import, an opaque alias, or a hand-built Component with no
+// TypeSpace) -- which is the right stable tag for those.
+func (c *Component) ResourceDefIndex(idx uint32) uint32 {
+	return c.resourceDefIndexDepth(idx, 0)
+}
+
+func (c *Component) resourceDefIndexDepth(idx uint32, depth int) uint32 {
+	if depth > maxTypeAliasDepth || int(idx) >= len(c.TypeSpace) {
+		return idx
+	}
+	switch entry := c.TypeSpace[idx]; entry.Kind {
+	case TypeSpaceExport:
+		if int(entry.Export) < len(c.Exports) {
+			return c.resourceDefIndexDepth(c.Exports[entry.Export].ExternIndex, depth+1)
+		}
+	case TypeSpaceImport:
+		if int(entry.Import) < len(c.Imports) {
+			if im := c.Imports[entry.Import]; im.TypeEqBound {
+				return c.resourceDefIndexDepth(im.TypeEqIndex, depth+1)
+			}
+		}
+	case TypeSpaceAlias:
+		if int(entry.Alias) < len(c.Aliases) {
+			// A self "outer" type alias (OuterCount 0) names another index in
+			// this same TypeSpace -- follow it, as resolveTypeDepth does.
+			if al := c.Aliases[entry.Alias]; al.Sort == 0x03 && al.TargetKind == 0x02 && al.OuterCount == 0 {
+				return c.resourceDefIndexDepth(al.OuterIndex, depth+1)
+			}
+		}
+	}
+	return idx
+}
+
 func (c *Component) resolveTypeDepth(idx uint32, depth int) (TypeDesc, error) {
 	if depth > maxTypeAliasDepth {
 		return nil, fmt.Errorf("type index %d: alias chain exceeds depth %d (cycle?)", idx, maxTypeAliasDepth)

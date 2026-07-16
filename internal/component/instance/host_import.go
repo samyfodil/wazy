@@ -49,6 +49,22 @@ type config struct {
 	// true), is the wasi:http server state. It is copied onto the Instance so
 	// (*Instance).ServeHTTP can drive the guest's exported incoming-handler.
 	httpHost *wasiHTTP
+
+	// sharedResources and resCanon are set only when this instantiation is a
+	// nested sub-component of a composition (see instantiateNestedInstances).
+	// sharedResources is the one handle table every composed sub-instance
+	// shares; resCanon maps this sub-instance's local resource type indices to
+	// the composition-global id it and its siblings agree on. Both nil for a
+	// flat instantiation, which then makes its own table and tags by raw index.
+	sharedResources *handleTable
+	resCanon        func(uint32) uint32
+
+	// resBase is this sub-instance's global-id base (its own defined resources
+	// get ids resBase+defIndex); resBaseNext is the composition-wide allocator
+	// that hands out a distinct base to each sub-instance. Both zero/nil for a
+	// flat instantiation.
+	resBase     uint32
+	resBaseNext *uint32
 }
 
 type importKey struct {
@@ -604,7 +620,7 @@ func liftHostArgs(fd binary.FuncDesc, resolve abi.Resolver, stack []uint64, mod 
 		if err != nil {
 			return nil, fmt.Errorf("param %d: lift: %w", i, err)
 		}
-		v, err = resolveHandleArg(resources, pt, v)
+		v, err = resolveHandleArg(resources, nil, pt, v)
 		if err != nil {
 			return nil, fmt.Errorf("param %d: %w", i, err)
 		}
@@ -620,14 +636,20 @@ func liftHostArgs(fd binary.FuncDesc, resolve abi.Resolver, stack []uint64, mod 
 // to the host, mirroring lift_own); borrow only reads it (lift_borrow),
 // leaving the handle valid in the guest's table. Any other type passes v
 // through unchanged.
-func resolveHandleArg(resources *handleTable, pt binary.TypeDesc, v abi.Value) (abi.Value, error) {
+func resolveHandleArg(resources *handleTable, canon func(uint32) uint32, pt binary.TypeDesc, v abi.Value) (abi.Value, error) {
+	tag := func(rt uint32) uint32 {
+		if canon != nil {
+			return canon(rt)
+		}
+		return rt
+	}
 	switch d := pt.(type) {
 	case binary.OwnDesc:
 		h, ok := v.(uint32)
 		if !ok {
 			return nil, fmt.Errorf("own<%d> arg: expected a uint32 handle, got %T", d.ResourceType, v)
 		}
-		rep, err := resources.TakeOwn(d.ResourceType, h)
+		rep, err := resources.TakeOwn(tag(d.ResourceType), h)
 		if err != nil {
 			return nil, fmt.Errorf("own<%d> arg: %w", d.ResourceType, err)
 		}
@@ -637,7 +659,7 @@ func resolveHandleArg(resources *handleTable, pt binary.TypeDesc, v abi.Value) (
 		if !ok {
 			return nil, fmt.Errorf("borrow<%d> arg: expected a uint32 handle, got %T", d.ResourceType, v)
 		}
-		rep, err := resources.Rep(d.ResourceType, h)
+		rep, err := resources.Rep(tag(d.ResourceType), h)
 		if err != nil {
 			return nil, fmt.Errorf("borrow<%d> arg: %w", d.ResourceType, err)
 		}

@@ -32,18 +32,18 @@ func TestWastConformance(t *testing.T) {
 	// Official component-model suites this runtime runs end to end: concat
 	// (every value kind in and out), strings (utf-8 + bounds traps), types
 	// (integer lift-narrowing: masking and sign extension), simple (a component
-	// that imports another component), and fused (nested-component composition
-	// -- a component that instantiates nested components and links a sibling's
-	// export into another's import via a fused adapter). Not vendored -- their
-	// runnable invokes gate on features not yet built (not ABI bugs):
-	// multiple-resources + parts of wasmtime/resources (resource identity ACROSS
-	// composed components -- each component numbers its resource types
-	// independently, so a handle must be translated as it crosses a fused-
-	// adapter boundary; the "no cross-instance handle transfer" ceiling in
-	// resource.go), post-return (module_definition/module_instance linking +
-	// reentrance-trap builtins), and linking/* (multi top-level component
-	// linking).
-	for _, suite := range []string{"concat", "strings", "types", "simple", "fused"} {
+	// that imports another component), fused (nested-component composition -- a
+	// component that instantiates nested components and links a sibling's export
+	// into another's import via a fused adapter), and multiple-resources (a
+	// resource DEFINED in one nested component, IMPORTED and used -- created,
+	// borrowed, dropped with its destructor -- by a sibling: cross-component
+	// resource identity + handle sharing + destructor routing). Not vendored --
+	// their runnable invokes gate on features not yet built (not ABI bugs):
+	// parts of wasmtime/resources (HOST-provided imported-resource constructors,
+	// component instantiate-args, canon-produced exports), post-return
+	// (module_definition/module_instance linking + reentrance-trap builtins),
+	// and linking/* (multi top-level component linking).
+	for _, suite := range []string{"concat", "strings", "types", "simple", "fused", "multiple-resources"} {
 		t.Run(suite, func(t *testing.T) {
 			runWastSuite(t, suite)
 		})
