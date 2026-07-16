@@ -30,19 +30,19 @@ import (
 //         flags/option as args, returns their concatenation -- pure ABI in+out.
 // strings: string edge cases + assert_trap for out-of-bounds / invalid utf-8.
 func TestWastConformance(t *testing.T) {
-	// Every official component-model suite this runtime runs end to end: concat
-	// (every value kind in and out), strings (utf-8 + bounds traps), types
-	// (integer lift-narrowing), simple (a component importing another), fused
-	// (nested-component composition), multiple-resources (a resource defined in
-	// one nested component, imported/used/dropped-with-dtor by a sibling), and
-	// resources (guest + HOST-provided resources: constructors, methods, own/
-	// borrow transfer, destructor drop-counting, and borrow-lend traps). Modules
-	// a suite can't yet run are logged and skipped (see runWastSuite): the
-	// remaining resources modules need component -- not instance -- instantiate-
-	// args (res.17) and exporting a canon-produced func (res.25), and types.1
-	// needs a nested instance/component type-decl grammar the decoder doesn't
-	// fully parse. Not vendored: post-return (module_definition/module_instance
-	// linking + reentrance-trap builtins) and linking/* (multi top-level linking).
+	// Every official component-model suite this runtime runs end to end, with
+	// ZERO skipped modules: concat (every value kind in and out), strings
+	// (utf-8 + bounds traps), types (integer lift-narrowing + nested type-decl
+	// grammar), simple (a component importing another), fused (nested-component
+	// composition), multiple-resources (a resource defined in one nested
+	// component, imported/used/dropped-with-dtor by a sibling), and resources
+	// (guest + HOST-provided resources: constructors, methods, own/borrow
+	// transfer, destructor drop-counting, borrow-lend traps, exported canon
+	// constructors, and type/func instantiate-args). runWastSuite still logs and
+	// skips a module it can't instantiate (none currently), so a future
+	// regression surfaces as a skip rather than a silent pass. Not vendored:
+	// post-return (module_definition/module_instance linking + reentrance-trap
+	// builtins) and linking/* (multi top-level component linking).
 	for _, suite := range []string{"concat", "strings", "types", "simple", "fused", "multiple-resources", "resources"} {
 		t.Run(suite, func(t *testing.T) {
 			runWastSuite(t, suite)

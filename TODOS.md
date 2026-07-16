@@ -54,11 +54,18 @@
   "cannot remove owned resource while borrowed". The harness supplies the test's
   `host` resource1 (constructor/assert/drops/last-drop/methods/take-own), the
   test-runner plumbing wasmtime provides.
-- **REMAINING (2 resources.wast modules skip, logged; distinct engine features,
-  not ABI bugs):** component (not instance) instantiate-args (res.17, arg sort
-  0x03) and exporting a canon-produced func (res.25, `[constructor]t` lifted
-  directly from a resource canon rather than a real core export).
-- **Also deeper fused sub-features** (each skips a `fused.wast` module, logged):
+- **DONE (zero skips, commits 679cf3a + 1483b08 + beeeba3):** every vendored
+  module in all 7 official suites now runs -- no skips.
+  - types.1: decoder parses core:type definitions (func/module types) inside an
+    instance/component type (679cf3a).
+  - res.25: export a canon-produced func (a `[constructor]t` = lift(resource.new))
+    by building its canon host module on demand and wrapping it in a passthrough
+    shim; plus the own<T>-arg convention fix (own is a handle, only borrow of a
+    receiver-defined resource is a rep) (1483b08).
+  - res.17: component instantiate-args (type 0x03 + func 0x01) and top-level
+    func imports, so a resource-type-and-constructor-parameterized nested
+    component instantiates against the host resource (beeeba3).
+- **Historic fused sub-features** (all now run; the reworks fixed them):
   pass-through shim with empty export names, >16 flat params on an imported func
   (whole-param spilling for a lowered import), func/type instantiate-args,
   self-referential nesting.
