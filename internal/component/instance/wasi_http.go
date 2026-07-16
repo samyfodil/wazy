@@ -169,8 +169,12 @@ type httpOutgoingRequest struct {
 	authority string
 	pathQ     string // default "/"
 	headers   *httpFields
-	// ponytail: no request body -- outgoing-request.body isn't implemented
-	// (proxy guests forwarding a GET don't set one); add when a guest POSTs.
+	// body is set by outgoing-request.body(); its accumulated bytes (written by
+	// the guest through the shared output-stream path) become the outbound
+	// request body when outgoing-handler.handle sends it. Nil for a bodyless
+	// request (e.g. a forwarded GET).
+	body      *httpOutgoingBody
+	bodyTaken bool
 }
 
 // httpFuture is the host state behind a future-incoming-response: the outcome
@@ -1247,6 +1251,40 @@ func (h *wasiHTTP) outgoingRequestSetAuthority(_ context.Context, args []abi.Val
 	return []abi.Value{abi.ResultValue{IsErr: false}}, nil
 }
 
+// outgoingRequestBody returns an own<outgoing-body> the guest writes the
+// outbound request body into (via the shared output-stream path). Its bytes are
+// sent as the request body by outgoing-handler.handle. result<own<outgoing-body>>.
+func (h *wasiHTTP) outgoingRequestBody(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("[method]outgoing-request.body: expected 1 arg (self), got %d", len(args))
+	}
+	rep, ok := args[0].(uint32)
+	if !ok {
+		return nil, fmt.Errorf("[method]outgoing-request.body: self: expected uint32 rep, got %T", args[0])
+	}
+	res, err := h.getResources()
+	if err != nil {
+		return nil, err
+	}
+	h.mu.Lock()
+	r, ok := h.outRequests[rep]
+	if !ok {
+		h.mu.Unlock()
+		return nil, fmt.Errorf("[method]outgoing-request.body: rep %d does not name a live outgoing-request", rep)
+	}
+	if r.bodyTaken {
+		h.mu.Unlock()
+		return []abi.Value{abi.ResultValue{IsErr: true}}, nil // body can only be taken once
+	}
+	r.bodyTaken = true
+	body := &httpOutgoingBody{}
+	r.body = body
+	h.mu.Unlock()
+	bodyRep := h.newBodyRep(body)
+	handle := res.NewOwn(wasiHTTPOutgoingBodyResType, bodyRep)
+	return []abi.Value{abi.ResultValue{IsErr: false, Payload: handle}}, nil
+}
+
 // httpSelfRep validates a (self, arg) 2-arg method whose self is a resource rep.
 func httpSelfRep(args []abi.Value, fn string) (uint32, error) {
 	if len(args) != 2 {
@@ -1299,7 +1337,11 @@ func (h *wasiHTTP) outgoingHandlerHandle(ctx context.Context, args []abi.Value) 
 		pathQ = "/"
 	}
 	rawURL := r.scheme + "://" + r.authority + pathQ
-	hreq, err := http.NewRequestWithContext(ctx, r.method, rawURL, nil)
+	var reqBody io.Reader
+	if r.body != nil {
+		reqBody = bytes.NewReader(r.body.buf.Bytes())
+	}
+	hreq, err := http.NewRequestWithContext(ctx, r.method, rawURL, reqBody)
 	if err != nil {
 		// Malformed request: report as HTTP-request-URI-invalid (disc 19).
 		fut.errCode = 19
@@ -1497,6 +1539,17 @@ func httpOutgoingRequestConstructorSig() (binary.FuncDesc, abi.Resolver) {
 	}, tbl.resolver()
 }
 
+func httpOutgoingRequestBodySig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiHTTPOutgoingRequestResType})
+	okRef := tbl.add(binary.OwnDesc{ResourceType: wasiHTTPOutgoingBodyResType})
+	resRef := tbl.add(binary.ResultDesc{Ok: &okRef})
+	return binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}},
+		Results: binary.FuncResults{Unnamed: &resRef},
+	}, tbl.resolver()
+}
+
 func httpSetMethodSig() (binary.FuncDesc, abi.Resolver) {
 	tbl := &typeTable{}
 	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiHTTPOutgoingRequestResType})
@@ -1608,6 +1661,7 @@ func wasiHTTPOutgoingOptions(h *wasiHTTP) []Option {
 	statusFD, statusR := httpIncomingResponseStatusSig()
 	consumeFD, consumeR := httpIncomingResponseConsumeSig()
 	streamFD, streamR := httpIncomingBodyStreamSig()
+	reqBodyFD, reqBodyR := httpOutgoingRequestBodySig()
 	blockFD, blockR := wasiPollableBlockSig()
 	pollFD, pollR := wasiPollSig()
 
@@ -1620,6 +1674,7 @@ func wasiHTTPOutgoingOptions(h *wasiHTTP) []Option {
 		withResourceTag(wasiIfacePoll, "pollable", wasiPollableResType),
 
 		withImportCustom(wasiIfaceHTTPTypes, "[constructor]outgoing-request", h.outgoingRequestConstructor, reqCtorFD, reqCtorR),
+		withImportCustom(wasiIfaceHTTPTypes, "[method]outgoing-request.body", h.outgoingRequestBody, reqBodyFD, reqBodyR),
 		withImportCustom(wasiIfaceHTTPTypes, "[method]outgoing-request.set-method", h.outgoingRequestSetMethod, methodFD, methodR),
 		withImportCustom(wasiIfaceHTTPTypes, "[method]outgoing-request.set-path-with-query", h.outgoingRequestSetPathWithQuery, pathFD, pathR),
 		withImportCustom(wasiIfaceHTTPTypes, "[method]outgoing-request.set-scheme", h.outgoingRequestSetScheme, schemeFD, schemeR),

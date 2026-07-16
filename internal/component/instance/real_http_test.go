@@ -276,3 +276,48 @@ func TestRealHTTP_RequestHeadersAndBody(t *testing.T) {
 		})
 	}
 }
+
+//go:embed testdata/real_http_post.component.wasm
+var realHTTPPostWasm []byte
+
+// echoBodyRoundTripper reads the outbound request body and echoes it back, the
+// same behavior the scratch backend had when the golden was captured under
+// `wasmtime serve -S cli -S inherit-network`.
+type echoBodyRoundTripper struct{ t *testing.T }
+
+func (b echoBodyRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.Method != "POST" || r.URL.Path != "/echo" {
+		b.t.Errorf("unexpected outbound request: %s %s", r.Method, r.URL)
+	}
+	body, _ := io.ReadAll(r.Body)
+	return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(string(body)))}, nil
+}
+
+// TestRealHTTP_OutgoingRequestBody runs a real rustc client guest that makes an
+// outbound POST with a request body (outgoing-request.body -> outgoing-body ->
+// output-stream write), then echoes the backend's response. Verifies the
+// outbound request-body path end to end; expected result is what the echo
+// backend returned under `wasmtime serve`.
+func TestRealHTTP_OutgoingRequestBody(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	client := &http.Client{Transport: echoBodyRoundTripper{t: t}}
+	inst, err := Instantiate(ctx, r, realHTTPPostWasm, WithWASI(WASIConfig{EnableHTTP: true, HTTPClient: client})...)
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	defer inst.Close(ctx)
+
+	status, _, body, err := inst.serveHTTP(ctx, "GET", mustURL("/trigger"), http.Header{}, nil)
+	if err != nil {
+		t.Fatalf("serveHTTP: %v", err)
+	}
+	if status != 200 {
+		t.Errorf("status = %d, want 200", status)
+	}
+	if string(body) != "client-post-body" {
+		t.Errorf("body = %q, want %q (the request body echoed by the backend)", body, "client-post-body")
+	}
+}

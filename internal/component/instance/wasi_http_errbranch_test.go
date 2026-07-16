@@ -659,3 +659,26 @@ func TestHTTP_FieldsGet(t *testing.T) {
 	_, err = h.fieldsGet(context.Background(), []abi.Value{uint32(999), "n"})
 	reqErr(t, err, "does not name a live fields")
 }
+
+func TestHTTP_OutgoingRequestBody(t *testing.T) {
+	h := newTestHTTP()
+	rep := h.newOutRequestRep(&httpOutgoingRequest{method: "POST", scheme: "http", pathQ: "/"})
+	res, err := h.outgoingRequestBody(context.Background(), []abi.Value{rep})
+	if err != nil || res[0].(abi.ResultValue).IsErr {
+		t.Fatalf("body() = %v, %v", res, err)
+	}
+	if h.outRequests[rep].body == nil {
+		t.Fatal("outgoing-request.body should set r.body")
+	}
+	// second body() -> Err (already taken)
+	res, _ = h.outgoingRequestBody(context.Background(), []abi.Value{rep})
+	if !res[0].(abi.ResultValue).IsErr {
+		t.Fatal("second body() should be Err")
+	}
+	_, err = h.outgoingRequestBody(context.Background(), nil)
+	reqErr(t, err, "expected 1 arg")
+	_, err = h.outgoingRequestBody(context.Background(), []abi.Value{"x"})
+	reqErr(t, err, "expected uint32 rep")
+	_, err = h.outgoingRequestBody(context.Background(), []abi.Value{uint32(999)})
+	reqErr(t, err, "does not name a live outgoing-request")
+}
