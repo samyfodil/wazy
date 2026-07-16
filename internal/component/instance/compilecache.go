@@ -72,6 +72,13 @@ type CompileCache struct {
 	// contends with a concurrent compile (byKey) lookup.
 	decMu  sync.Mutex
 	byComp map[string]*binary.Component
+
+	// abiMu guards byABI -- per-export ABI metadata (flatten/type-resolution),
+	// keyed by the shared *binary.Component pointer (stable across
+	// instantiations because byComp returns the same pointer) and the export's
+	// component func index.
+	abiMu sync.Mutex
+	byABI map[*binary.Component]map[uint32]*boundExportABI
 }
 
 // NewCompileCache returns an empty CompileCache ready to pass to
@@ -81,7 +88,44 @@ func NewCompileCache() *CompileCache {
 	return &CompileCache{
 		byKey:  make(map[string]wazy.CompiledModule),
 		byComp: make(map[string]*binary.Component),
+		byABI:  make(map[*binary.Component]map[uint32]*boundExportABI),
 	}
+}
+
+// abiFor returns the cached per-export ABI metadata for (comp, funcIdx),
+// computing it via compute() on a miss and storing it for future
+// instantiations. The metadata is a pure function of the immutable component,
+// so one cached *boundExportABI is safely shared (read-only during invoke) by
+// every Instance built from comp. Keyed by the comp POINTER, which is stable
+// across instantiations only because getOrDecode hands back the same cached
+// *binary.Component -- so abiFor is meaningful only alongside the decode cache
+// (finalizeBoundExport passes a nil cache otherwise). compute() runs outside
+// the lock; a rare miss race recomputes (pure, harmless) and the first stored
+// wins.
+func (c *CompileCache) abiFor(comp *binary.Component, funcIdx uint32, compute func() *boundExportABI) *boundExportABI {
+	c.abiMu.Lock()
+	if m := c.byABI[comp]; m != nil {
+		if a, ok := m[funcIdx]; ok {
+			c.abiMu.Unlock()
+			return a
+		}
+	}
+	c.abiMu.Unlock()
+
+	a := compute()
+
+	c.abiMu.Lock()
+	defer c.abiMu.Unlock()
+	m := c.byABI[comp]
+	if m == nil {
+		m = make(map[uint32]*boundExportABI)
+		c.byABI[comp] = m
+	}
+	if existing, ok := m[funcIdx]; ok {
+		return existing // lost a race -- both are equivalent (compute is pure)
+	}
+	m[funcIdx] = a
+	return a
 }
 
 // getOrDecode returns the decoded *binary.Component for componentBytes,
@@ -93,10 +137,12 @@ func NewCompileCache() *CompileCache {
 // skips re-parsing the component binary (~40% of a cached instantiation's
 // allocations) on every call.
 func (c *CompileCache) getOrDecode(componentBytes []byte) (*binary.Component, error) {
-	key := string(componentBytes) // copy into the map key; safe if the caller reuses the backing array
-
+	// The hit path uses the map[string(byteslice)] idiom, which the Go compiler
+	// lowers to a no-copy lookup -- so a cache hit allocates nothing (crucial:
+	// componentBytes can be tens of KB). The full string key is materialized
+	// only on the store (miss) path.
 	c.decMu.Lock()
-	if comp, ok := c.byComp[key]; ok {
+	if comp, ok := c.byComp[string(componentBytes)]; ok {
 		c.decMu.Unlock()
 		return comp, nil
 	}
@@ -107,6 +153,7 @@ func (c *CompileCache) getOrDecode(componentBytes []byte) (*binary.Component, er
 		return nil, err
 	}
 
+	key := string(componentBytes) // copy into the map key; safe if the caller reuses the backing array
 	c.decMu.Lock()
 	defer c.decMu.Unlock()
 	if existing, ok := c.byComp[key]; ok {

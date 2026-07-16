@@ -98,6 +98,42 @@ func TestCompileCache_ReusesDecodedComponent(t *testing.T) {
 	}
 }
 
+// TestCompileCache_ReusesABIMetadata proves the ABI-metadata cache: abiFor
+// returns the same *boundExportABI for the same (comp, funcIdx), computing only
+// once (the compute closure runs a single time), and computes separately for a
+// different funcIdx. This is what lets a cached instantiation skip
+// re-flattening/re-resolving each export's ABI.
+func TestCompileCache_ReusesABIMetadata(t *testing.T) {
+	cache := NewCompileCache()
+	comp := &binary.Component{} // pointer identity is all abiFor keys on
+
+	computes := 0
+	mk := func() *boundExportABI { computes++; return &boundExportABI{hasResult: true} }
+
+	a1 := cache.abiFor(comp, 0, mk)
+	a2 := cache.abiFor(comp, 0, mk)
+	if a1 != a2 {
+		t.Fatal("abiFor returned different metadata for the same (comp, funcIdx)")
+	}
+	if computes != 1 {
+		t.Fatalf("compute ran %d times, want 1 (second call should hit the cache)", computes)
+	}
+
+	b := cache.abiFor(comp, 1, mk)
+	if b == a1 {
+		t.Fatal("a different funcIdx returned the same cached metadata")
+	}
+	if computes != 2 {
+		t.Fatalf("compute ran %d times after a new funcIdx, want 2", computes)
+	}
+
+	// A different component keys separately even at the same funcIdx.
+	comp2 := &binary.Component{}
+	if cache.abiFor(comp2, 0, mk) == a1 {
+		t.Fatal("a different component returned the first component's cached metadata")
+	}
+}
+
 // TestCompileCache_AdderCorrectAndIndependent proves a cached instantiation
 // is functionally identical to an uncached one (add/greet both compute real
 // results, not hardcoded/stale ones), and that two sequential instantiations

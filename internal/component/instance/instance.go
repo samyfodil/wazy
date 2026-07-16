@@ -259,48 +259,94 @@ type boundExport struct {
 // lookup/resolve would have. This keeps bind-time behavior (and every
 // existing error-surfaces-from-Call test) unchanged while still doing the
 // resolution/computation only once rather than on every invoke() call.
-func finalizeBoundExport(be *boundExport, resolve abi.Resolver) {
+// boundExportABI is the ABI flattening/type-resolution half of a boundExport's
+// finalized metadata -- everything finalizeBoundExport computes EXCEPT the
+// per-instance core func handles. It is a pure function of (fd, resolve), both
+// derived from the immutable component, so it is identical across every
+// instantiation of the same component and can be cached and shared (read-only
+// during invoke) -- see CompileCache.abiFor.
+type boundExportABI struct {
+	coreParamsWant, coreResultsWant []string
+	flattenErr                      error
+
+	paramTypes      []binary.TypeDesc
+	paramUsesMemory []bool
+	paramErrs       []error
+
+	hasResult        bool
+	tooManyResults   int
+	resultType       binary.TypeDesc
+	resultUsesMemory bool
+	resultFlatKinds  []string
+	resultErr        error
+}
+
+// computeBoundExportABI does the flatten/resolve work finalizeBoundExport used
+// to do inline. Pure (no per-instance state); resolution/flatten errors are
+// recorded in the returned struct rather than surfaced, preserving
+// finalizeBoundExport's deliberate "never fails, surfaces at call time" contract.
+func computeBoundExportABI(fd binary.FuncDesc, resolve abi.Resolver) *boundExportABI {
+	m := &boundExportABI{}
+	m.coreParamsWant, m.coreResultsWant, m.flattenErr = abi.FlattenFunc(fd, resolve, "lift")
+
+	m.paramTypes = make([]binary.TypeDesc, len(fd.Params))
+	m.paramUsesMemory = make([]bool, len(fd.Params))
+	m.paramErrs = make([]error, len(fd.Params))
+	for i, p := range fd.Params {
+		pt, err := resolveTypeRef(&p.Type, resolve)
+		if err != nil {
+			m.paramErrs[i] = err
+			continue
+		}
+		m.paramTypes[i] = pt
+		m.paramUsesMemory[i] = usesMemory(pt, resolve)
+	}
+
+	resultRefs := funcResultTypeRefs(fd)
+	switch {
+	case len(resultRefs) > 1:
+		m.tooManyResults = len(resultRefs)
+	case len(resultRefs) == 1:
+		m.hasResult = true
+		rt, err := resolveTypeRef(&resultRefs[0], resolve)
+		if err != nil {
+			m.resultErr = err
+			return m
+		}
+		m.resultType = rt
+		m.resultUsesMemory = usesMemory(rt, resolve)
+		flatKinds, err := abi.Flatten(rt, resolve)
+		if err != nil {
+			m.resultErr = err
+			return m
+		}
+		m.resultFlatKinds = flatKinds
+	}
+	return m
+}
+
+// finalizeBoundExport resolves be's per-instance core func handles and populates
+// its ABI metadata (from abiCache when non-nil, else computed fresh). funcIdx
+// keys the cache within comp -- see the boundExport doc and CompileCache.abiFor.
+// abiCache/comp are nil for the trivial single-module path (which has no cache).
+func finalizeBoundExport(be *boundExport, resolve abi.Resolver, abiCache *CompileCache, comp *binary.Component, funcIdx uint32) {
 	be.coreFn = be.mod.ExportedFunction(be.funcName)
 	if be.postReturnFuncName != "" {
 		be.postReturnFn = be.mod.ExportedFunction(be.postReturnFuncName)
 	}
 	be.reallocFn = be.mod.ExportedFunction("cabi_realloc")
 
-	be.coreParamsWant, be.coreResultsWant, be.flattenErr = abi.FlattenFunc(be.fd, resolve, "lift")
-
-	be.paramTypes = make([]binary.TypeDesc, len(be.fd.Params))
-	be.paramUsesMemory = make([]bool, len(be.fd.Params))
-	be.paramErrs = make([]error, len(be.fd.Params))
-	for i, p := range be.fd.Params {
-		pt, err := resolveTypeRef(&p.Type, resolve)
-		if err != nil {
-			be.paramErrs[i] = err
-			continue
-		}
-		be.paramTypes[i] = pt
-		be.paramUsesMemory[i] = usesMemory(pt, resolve)
+	var m *boundExportABI
+	if abiCache != nil && comp != nil {
+		m = abiCache.abiFor(comp, funcIdx, func() *boundExportABI { return computeBoundExportABI(be.fd, resolve) })
+	} else {
+		m = computeBoundExportABI(be.fd, resolve)
 	}
 
-	resultRefs := funcResultTypeRefs(be.fd)
-	switch {
-	case len(resultRefs) > 1:
-		be.tooManyResults = len(resultRefs)
-	case len(resultRefs) == 1:
-		be.hasResult = true
-		rt, err := resolveTypeRef(&resultRefs[0], resolve)
-		if err != nil {
-			be.resultErr = err
-			return
-		}
-		be.resultType = rt
-		be.resultUsesMemory = usesMemory(rt, resolve)
-		flatKinds, err := abi.Flatten(rt, resolve)
-		if err != nil {
-			be.resultErr = err
-			return
-		}
-		be.resultFlatKinds = flatKinds
-	}
+	be.coreParamsWant, be.coreResultsWant, be.flattenErr = m.coreParamsWant, m.coreResultsWant, m.flattenErr
+	be.paramTypes, be.paramUsesMemory, be.paramErrs = m.paramTypes, m.paramUsesMemory, m.paramErrs
+	be.hasResult, be.tooManyResults = m.hasResult, m.tooManyResults
+	be.resultType, be.resultUsesMemory, be.resultFlatKinds, be.resultErr = m.resultType, m.resultUsesMemory, m.resultFlatKinds, m.resultErr
 }
 
 // Instantiate decodes componentBytes as a WebAssembly component, instantiates
@@ -484,7 +530,7 @@ func instantiateComponent(ctx context.Context, r wazy.Runtime, comp *binary.Comp
 			funcName: coreFuncIdx[canon.CoreFuncIdx],
 			fd:       td.(binary.FuncDesc), // validated by validateCanons
 		}
-		finalizeBoundExport(be, resolve)
+		finalizeBoundExport(be, resolve, nil, nil, 0) // trivial path: no CompileCache
 		exports[name] = be
 	}
 

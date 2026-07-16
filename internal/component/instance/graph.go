@@ -371,7 +371,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		}
 	}
 
-	exports, err := bindImportExportsGraph(comp, componentFunc, coreFuncTarget, resolve)
+	exports, err := bindImportExportsGraph(comp, componentFunc, coreFuncTarget, resolve, cfg.compileCache)
 	if err != nil {
 		return fail(err)
 	}
@@ -757,19 +757,19 @@ func resourceCanonHostFuncGraph(comp *binary.Component, cfg *config, resources *
 // coreFuncTarget instead of the flat (coreFuncAliases, numProducedCoreFuncs)
 // partition simpler components rely on, since the graph engine's core func
 // index space can genuinely interleave alias- and canon-produced entries.
-func bindImportExportsGraph(comp *binary.Component, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver) (map[string]*boundExport, error) {
+func bindImportExportsGraph(comp *binary.Component, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver, abiCache *CompileCache) (map[string]*boundExport, error) {
 	exports := make(map[string]*boundExport, len(comp.Exports))
 	for _, exp := range comp.Exports {
 		switch exp.ExternType {
 		case 0x01: // func
-			be, err := bindFuncExportGraph(comp, exp.ExternIndex, componentFunc, coreFuncTarget, resolve, exp.Name)
+			be, err := bindFuncExportGraph(comp, exp.ExternIndex, componentFunc, coreFuncTarget, resolve, exp.Name, abiCache)
 			if err != nil {
 				return nil, err
 			}
 			exports[exp.Name] = be
 
 		case 0x05: // instance
-			if err := bindInstanceExportGraph(comp, exp, componentFunc, coreFuncTarget, resolve, exports); err != nil {
+			if err := bindInstanceExportGraph(comp, exp, componentFunc, coreFuncTarget, resolve, exports, abiCache); err != nil {
 				return nil, err
 			}
 
@@ -782,7 +782,7 @@ func bindImportExportsGraph(comp *binary.Component, componentFunc func(uint32) (
 
 // bindFuncExportGraph is bindFuncExport's graph-engine counterpart -- see
 // bindImportExportsGraph.
-func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver, diagName string) (*boundExport, error) {
+func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver, diagName string, abiCache *CompileCache) (*boundExport, error) {
 	isLift, liftCanonIdx, _, err := componentFunc(funcIdx)
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: export %q: %w", diagName, err)
@@ -811,7 +811,7 @@ func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc f
 	}
 
 	be := &boundExport{mod: mod, funcName: name, fd: fd, postReturnFuncName: postReturnName}
-	finalizeBoundExport(be, resolve)
+	finalizeBoundExport(be, resolve, abiCache, comp, funcIdx)
 	return be, nil
 }
 
@@ -840,7 +840,7 @@ func resolvePostReturnFuncGraph(canon binary.Canon, coreFuncTarget func(int) (ap
 // bindInstanceExportGraph is bindInstanceExport's graph-engine counterpart --
 // identical resolution of the re-export-shim shape (see host_import.go's
 // doc), but calling bindFuncExportGraph for each member.
-func bindInstanceExportGraph(comp *binary.Component, exp binary.Export, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver, exports map[string]*boundExport) error {
+func bindInstanceExportGraph(comp *binary.Component, exp binary.Export, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver, exports map[string]*boundExport, abiCache *CompileCache) error {
 	// The component-level "instance" sort index space is every imported
 	// instance (comp.Imports with ExternType == 0x05), in import order,
 	// followed by every locally-instantiated one (comp.Instances) -- unlike
@@ -900,7 +900,7 @@ func bindInstanceExportGraph(comp *binary.Component, exp binary.Export, componen
 			return fmt.Errorf("component/instance: %s: instantiate-arg %q has non-func sort %#x", diagName, importName, arg.Sort)
 		}
 
-		be, err := bindFuncExportGraph(comp, arg.SortIdx, componentFunc, coreFuncTarget, resolve, diagName)
+		be, err := bindFuncExportGraph(comp, arg.SortIdx, componentFunc, coreFuncTarget, resolve, diagName, abiCache)
 		if err != nil {
 			return err
 		}
