@@ -1257,6 +1257,48 @@ func (in *Instance) liftResult(be *boundExport, rawResults []uint64, mem []byte,
 	return []abi.Value{val}, nil
 }
 
+// DropResource drops an own<resource> handle the host received from a guest
+// export (e.g. one returned by a constructor or factory func), completing the
+// resource lifecycle: it runs the guest's destructor if the component defines
+// one, then removes the handle so the slot is freed and any later use of that
+// handle fails loud. iface/resourceName name the resource (e.g.
+// "example:res/counters", "counter"). Dropping a borrow, an unknown handle, or
+// one with outstanding lends fails loud.
+//
+// The destructor is the guest core func the component exports as
+// "<iface>#[dtor]<resourceName>" (wit-component emits it for every
+// guest-defined resource); if no such export exists the handle is still
+// removed. Host-owned resources (WASI/http) are not dropped this way -- the
+// host owns their lifecycle directly.
+func (in *Instance) DropResource(ctx context.Context, iface, resourceName string, handle uint32) error {
+	rep, err := in.resources.DropOwned(handle)
+	if err != nil {
+		return fmt.Errorf("component/instance: DropResource %s/%s handle %d: %w", iface, resourceName, handle, err)
+	}
+	// Run the guest destructor (frees the guest's backing object) if the guest
+	// core module exports one. in.closers also holds synthetic HOST modules,
+	// on which ExportedFunction panics, so the lookup is guarded.
+	dtorName := iface + "#[dtor]" + resourceName
+	for _, mod := range in.closers {
+		if fn := safeExportedFunction(mod, dtorName); fn != nil {
+			if _, err := fn.Call(ctx, uint64(rep)); err != nil {
+				return fmt.Errorf("component/instance: DropResource %s/%s: destructor: %w", iface, resourceName, err)
+			}
+			break
+		}
+	}
+	return nil
+}
+
+// safeExportedFunction returns mod's exported function named name, or nil --
+// including when mod is a host module (whose ExportedFunction panics by
+// contract). Used to probe guest core modules for a resource destructor without
+// tracking which closers are guest vs host.
+func safeExportedFunction(mod api.Module, name string) (fn api.Function) {
+	defer func() { _ = recover() }()
+	return mod.ExportedFunction(name)
+}
+
 // Close releases every module instantiated for this component (in reverse
 // order of instantiation). It does not close the Runtime passed to
 // Instantiate, which the caller owns.

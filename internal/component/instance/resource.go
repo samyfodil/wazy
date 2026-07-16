@@ -169,6 +169,28 @@ func (t *handleTable) Drop(typeIdx, h uint32) error {
 	return nil
 }
 
+// DropOwned removes an owning handle by handle alone (the resource type is not
+// known to the caller -- a host dropping a guest resource it received), first
+// returning the rep so the caller can run the guest destructor against it. It
+// fails loud if the handle is unknown, is a borrow, or has outstanding lends
+// (the same guards as Drop). The removal happens only on success.
+func (t *handleTable) DropOwned(h uint32) (rep uint32, err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	e, ok := t.entries[h]
+	if !ok {
+		return 0, fmt.Errorf("handle %d does not name a live resource", h)
+	}
+	if !e.own {
+		return 0, fmt.Errorf("handle %d is a borrow, not an own handle", h)
+	}
+	if e.lendCount != 0 {
+		return 0, fmt.Errorf("handle %d has %d outstanding borrow(s), cannot drop", h, e.lendCount)
+	}
+	delete(t.entries, h)
+	return e.rep, nil
+}
+
 // Lend increments h's outstanding-lend count, blocking TakeOwn/Drop until
 // released via Unlend. This is the accounting primitive canon_resource_drop
 // and lift_own check (`trap_if(h.num_lends != 0)`); see the handleTable doc

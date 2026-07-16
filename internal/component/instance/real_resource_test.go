@@ -89,7 +89,25 @@ func TestRealResource(t *testing.T) {
 	if got := u32(call("sum-all", []abi.Value{h, h2})); got != 117 {
 		t.Errorf("sum-all([16,101]) = %d, want 117 (nested borrow resolution)", got)
 	}
-	// (Host-initiated `[resource-drop]counter` -- a resource.drop canon export,
-	// not a lift -- plus destructor invocation is a separate feature wazy does
-	// not yet bind; the handles are released when the instance is closed.)
+
+	// Host-initiated drop: runs the guest destructor and removes the handle.
+	hv := h.(uint32)
+	if err := inst.DropResource(ctx, iface, "counter", hv); err != nil {
+		t.Fatalf("DropResource: %v", err)
+	}
+	// The dropped handle must no longer be usable (use-after-drop fails loud).
+	if _, err := inst.CallExport(ctx, iface, "[method]counter.get", hv); err == nil {
+		t.Error("get on a dropped handle should fail, got nil")
+	}
+	// Double-drop fails loud.
+	if err := inst.DropResource(ctx, iface, "counter", hv); err == nil {
+		t.Error("double drop should fail, got nil")
+	}
+	// A borrow (non-own) handle can't be DropResource'd; and h2 still works.
+	if got := u32(call("[method]counter.get", h2)); got != 101 {
+		t.Errorf("h2 after dropping h = %d, want 101", got)
+	}
+	if err := inst.DropResource(ctx, iface, "counter", h2.(uint32)); err != nil {
+		t.Fatalf("DropResource h2: %v", err)
+	}
 }
