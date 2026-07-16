@@ -43,17 +43,21 @@
   (`handleTable.dtors` is `func() api.Function`). Proven by
   `TestRealOwnResourceDtorOnDrop` (wasmtime/resources.wast module 20: free list +
   own-dtor drop-counting). res.3/16/18/20 of that suite now run correctly.
-- **REMAINING (wasmtime/resources — three distinct features, none an ABI bug):**
-  1. HOST-provided resources (res.10/21/22): a component `import "host" (instance
-     ...)` exporting `resource1` + `[constructor]resource1` + `[static]resource1.
-     {assert,drops,last-drop}` + `[method]`s + `take-own`. The EMBEDDER must
-     supply a stateful host resource (rep store, drop counting via a HOST dtor on
-     guest drop, ownership transfer). wazy's engine already does host-provided
-     resources for WASI; this needs a `WithResource`-style API + the specific
-     test resource wired in the harness.
-  2. Component (not instance) instantiate-args (res.17, arg sort 0x03).
-  3. Exporting a canon-produced func (res.25, `[constructor]t` lifted directly
-     from a resource canon rather than a real core export).
+- **DONE (host-provided resources + borrow-lend, commit 28bcdde):**
+  wasmtime/resources.wast now passes -- the 7th and last official suite the
+  harness runs, so all 7 pass. A guest dropping an own<R> of a HOST-provided
+  resource runs a Go destructor (`withHostResourceDtor` / `cfg.hostResDtors`);
+  `handleTable.dtors` is now `func(ctx, rep) error` so guest core-func dtors
+  (lazy) and host Go dtors share one path. Borrow-lend: lifting a borrow<T>
+  host-call arg lends the resource for the call's duration (released after via
+  `liftHostArgs`'s returned lends), so an own<T> take of the same resource traps
+  "cannot remove owned resource while borrowed". The harness supplies the test's
+  `host` resource1 (constructor/assert/drops/last-drop/methods/take-own), the
+  test-runner plumbing wasmtime provides.
+- **REMAINING (2 resources.wast modules skip, logged; distinct engine features,
+  not ABI bugs):** component (not instance) instantiate-args (res.17, arg sort
+  0x03) and exporting a canon-produced func (res.25, `[constructor]t` lifted
+  directly from a resource canon rather than a real core export).
 - **Also deeper fused sub-features** (each skips a `fused.wast` module, logged):
   pass-through shim with empty export names, >16 flat params on an imported func
   (whole-param spilling for a lowered import), func/type instantiate-args,

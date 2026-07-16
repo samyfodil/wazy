@@ -30,20 +30,19 @@ import (
 //         flags/option as args, returns their concatenation -- pure ABI in+out.
 // strings: string edge cases + assert_trap for out-of-bounds / invalid utf-8.
 func TestWastConformance(t *testing.T) {
-	// Official component-model suites this runtime runs end to end: concat
+	// Every official component-model suite this runtime runs end to end: concat
 	// (every value kind in and out), strings (utf-8 + bounds traps), types
-	// (integer lift-narrowing: masking and sign extension), simple (a component
-	// that imports another component), fused (nested-component composition -- a
-	// component that instantiates nested components and links a sibling's export
-	// into another's import via a fused adapter), and multiple-resources (a
-	// resource DEFINED in one nested component, IMPORTED and used -- created,
-	// borrowed, dropped with its destructor -- by a sibling: cross-component
-	// resource identity + handle sharing + destructor routing). Not vendored --
-	// their runnable invokes gate on features not yet built (not ABI bugs):
-	// parts of wasmtime/resources (HOST-provided imported-resource constructors,
-	// component instantiate-args, canon-produced exports), post-return
-	// (module_definition/module_instance linking + reentrance-trap builtins),
-	// and linking/* (multi top-level component linking).
+	// (integer lift-narrowing), simple (a component importing another), fused
+	// (nested-component composition), multiple-resources (a resource defined in
+	// one nested component, imported/used/dropped-with-dtor by a sibling), and
+	// resources (guest + HOST-provided resources: constructors, methods, own/
+	// borrow transfer, destructor drop-counting, and borrow-lend traps). Modules
+	// a suite can't yet run are logged and skipped (see runWastSuite): the
+	// remaining resources modules need component -- not instance -- instantiate-
+	// args (res.17) and exporting a canon-produced func (res.25), and types.1
+	// needs a nested instance/component type-decl grammar the decoder doesn't
+	// fully parse. Not vendored: post-return (module_definition/module_instance
+	// linking + reentrance-trap builtins) and linking/* (multi top-level linking).
 	for _, suite := range []string{"concat", "strings", "types", "simple", "fused", "multiple-resources", "resources"} {
 		t.Run(suite, func(t *testing.T) {
 			runWastSuite(t, suite)
