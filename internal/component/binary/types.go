@@ -92,46 +92,55 @@ func readExternName(buf []byte, off int) (string, int, error) {
 // readExterndesc consumes an externdesc (used by import/export/instance/
 // component decls) and returns the sort byte. Core module uses the two-byte
 // prefix 0x00 0x11.
-func readExterndesc(buf []byte, off int) (sort byte, _ int, err error) {
+// readExterndesc reads one externdesc, returning its sort byte plus, for a
+// type-sort import/export whose bound is `eq <typeidx>` (bound 0x00), that
+// referenced type index in idx with hasIdx=true -- so an `import "point"
+// (type (eq N))` (what wit-component/cargo-component emit for a world's
+// exported types) can be resolved through to type N rather than treated as an
+// opaque import. hasIdx is false for a `sub` type bound (0x01, an opaque
+// resource) and for the non-type sorts (whose own typeidx is not returned;
+// callers that need it decode it themselves).
+func readExterndesc(buf []byte, off int) (sort byte, idx uint32, hasIdx bool, _ int, err error) {
 	if off >= len(buf) {
-		return 0, off, ErrTruncatedBinary
+		return 0, 0, false, off, ErrTruncatedBinary
 	}
 	sort = buf[off]
 	off++
 	switch sort {
 	case 0x00: // core:type — expect 0x11 then core typeidx
 		if off >= len(buf) || buf[off] != 0x11 {
-			return sort, off, fmt.Errorf("externdesc: expected core module type prefix 0x11")
+			return sort, 0, false, off, fmt.Errorf("externdesc: expected core module type prefix 0x11")
 		}
 		off++
 		_, n, e := leb128.LoadUint32(buf[off:])
 		if e != nil {
-			return sort, off, e
+			return sort, 0, false, off, e
 		}
 		off += int(n)
 	case 0x01, 0x04, 0x05: // func, component, instance: typeidx
 		_, n, e := leb128.LoadUint32(buf[off:])
 		if e != nil {
-			return sort, off, e
+			return sort, 0, false, off, e
 		}
 		off += int(n)
 	case 0x03: // type bound: 0x00 typeidx (eq) | 0x01 (sub)
 		if off >= len(buf) {
-			return sort, off, ErrTruncatedBinary
+			return sort, 0, false, off, ErrTruncatedBinary
 		}
 		bound := buf[off]
 		off++
 		if bound == 0x00 {
-			_, n, e := leb128.LoadUint32(buf[off:])
+			eqIdx, n, e := leb128.LoadUint32(buf[off:])
 			if e != nil {
-				return sort, off, e
+				return sort, 0, false, off, e
 			}
 			off += int(n)
+			return sort, eqIdx, true, off, nil
 		}
 	default:
-		return sort, off, fmt.Errorf("unsupported (M1): externdesc sort %#x", sort)
+		return sort, 0, false, off, fmt.Errorf("unsupported (M1): externdesc sort %#x", sort)
 	}
-	return sort, off, nil
+	return sort, 0, false, off, nil
 }
 
 // readSort consumes a sort byte; the core sort (0x00) carries one extra
@@ -199,7 +208,7 @@ func readComponentDecl(buf []byte, off int) (int, error) {
 		if err != nil {
 			return off2, err
 		}
-		_, off2, err = readExterndesc(buf, off2)
+		_, _, _, off2, err = readExterndesc(buf, off2)
 		return off2, err
 	}
 	return readInstanceDeclDesc(buf, off)

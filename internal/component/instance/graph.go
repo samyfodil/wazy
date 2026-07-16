@@ -107,6 +107,15 @@ type coreFuncSig struct {
 // engine -- see this file's package doc for the algorithm.
 func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Component, componentBytes []byte, cfg *config) (*Instance, error) {
 	for _, im := range comp.Imports {
+		// Type imports (extern sort 0x03) carry no runtime obligation -- they
+		// are type-equality constraints (e.g. cargo-component re-imports a
+		// world's `use`d types: `import "point" (type (eq N))`), resolved from
+		// the component's own type space, with nothing for the host to provide.
+		// The instance-index space (importInterfaceName, host_import.go) already
+		// counts only 0x05 imports, so skipping these here keeps indexing intact.
+		if im.ExternType == 0x03 {
+			continue
+		}
 		if im.ExternType != 0x05 { // instance
 			return nil, fmt.Errorf("component/instance: import %q has extern kind %s (%#x); only instance imports are supported", im.Name, api.ExternTypeName(im.ExternType), im.ExternType)
 		}
@@ -118,31 +127,34 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	resolve := typeResolver(comp)
 	synthPrefix := nextSynthNamePrefix()
 
-	// Component func index space: identical construction to
-	// the host-import path -- see instantiateComponent's package doc for why component
-	// func aliases always precede lifts structurally, which this reuses
-	// unchanged.
-	var compFuncAliases []aliasTarget
-	for _, al := range comp.Aliases {
-		if al.Sort == 0x01 && al.TargetKind == 0x00 {
-			compFuncAliases = append(compFuncAliases, aliasTarget{instIdx: al.InstanceIdx, name: al.Name})
+	// Component func index space, in definition order across sections (func
+	// imports / func aliases / canon lifts / func exports) -- see
+	// binary.ComponentFuncSpace. The previous ad-hoc [aliases]++[lifts]
+	// reconstruction ignored func imports and export-created entries, so a
+	// component whose func exports interleave with its lifts (standard
+	// cargo-component/wit-bindgen output) bound every export to the wrong lift.
+	var componentFunc func(idx uint32) (isLift bool, liftCanonIdx int, at aliasTarget, err error)
+	componentFunc = func(idx uint32) (isLift bool, liftCanonIdx int, at aliasTarget, err error) {
+		if int(idx) >= len(comp.ComponentFuncSpace) {
+			return false, 0, aliasTarget{}, fmt.Errorf("component func index %d out of range of the %d-entry component func index space", idx, len(comp.ComponentFuncSpace))
 		}
-	}
-	var liftCanonIdxs []int
-	for i, cn := range comp.Canons {
-		if cn.Kind == 0x00 {
-			liftCanonIdxs = append(liftCanonIdxs, i)
+		e := comp.ComponentFuncSpace[idx]
+		switch e.Kind {
+		case binary.ComponentFuncFromCanonLift:
+			return true, int(e.Canon), aliasTarget{}, nil
+		case binary.ComponentFuncFromAlias:
+			al := comp.Aliases[e.Alias]
+			if al.TargetKind != 0x00 { // only export-aliases of imported/nested instances are bindable
+				return false, 0, aliasTarget{}, fmt.Errorf("component func index %d is a %#x-kind func alias; only instance-export func aliases are supported", idx, al.TargetKind)
+			}
+			return false, 0, aliasTarget{instIdx: al.InstanceIdx, name: al.Name}, nil
+		case binary.ComponentFuncFromExport:
+			// A func export aliases the func it exports; resolve through to it
+			// (that func -- typically a lift -- appears earlier, so no cycle).
+			return componentFunc(comp.Exports[e.Export].ExternIndex)
+		default: // ComponentFuncFromImport
+			return false, 0, aliasTarget{}, fmt.Errorf("component func index %d names an imported func; component-level func imports are not supported", idx)
 		}
-	}
-	componentFunc := func(idx uint32) (isLift bool, liftCanonIdx int, at aliasTarget, err error) {
-		if int(idx) < len(compFuncAliases) {
-			return false, 0, compFuncAliases[idx], nil
-		}
-		li := int(idx) - len(compFuncAliases)
-		if li < len(liftCanonIdxs) {
-			return true, liftCanonIdxs[li], aliasTarget{}, nil
-		}
-		return false, 0, aliasTarget{}, fmt.Errorf("component func index %d out of range of the component func index space (%d aliases + %d lifts)", idx, len(compFuncAliases), len(liftCanonIdxs))
 	}
 
 	// Core memory and table index spaces: no canon ever produces either, so

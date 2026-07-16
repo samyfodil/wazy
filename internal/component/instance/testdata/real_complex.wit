@@ -1,0 +1,37 @@
+package example:complex;
+
+world complex {
+  record point { x: s32, y: s32 }
+
+  variant shape {
+    circle(u32),
+    rect(point),
+    poly(list<point>),
+    empty,
+  }
+
+  enum color { red, green, blue }
+
+  record item {
+    name: string,
+    tags: list<string>,
+    pos: point,
+    tint: color,
+  }
+
+  flags perms { read, write, exec }
+
+  record summary {
+    count: u32,
+    total-area: u64,
+    labels: list<string>,
+    first: option<point>,
+    status: result<string, u32>,
+  }
+
+  export area-of: func(s: shape) -> u32;
+  export classify: func(items: list<item>) -> summary;
+  export toggle: func(p: perms) -> perms;
+  export pick: func(items: list<item>, idx: u32) -> option<item>;
+  export divide: func(a: u32, b: u32) -> result<u32, string>;
+}

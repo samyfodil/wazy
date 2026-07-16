@@ -28,6 +28,12 @@ type Component struct {
 	// Exports contains the export bindings.
 	Exports []Export
 
+	// ComponentFuncSpace is the component's func index space, one entry per
+	// func-producing definition (func import / func alias / canon lift / func
+	// export) in overall declaration order across sections. See
+	// componentfuncspace.go.
+	ComponentFuncSpace []ComponentFuncSpaceEntry
+
 	// CoreModules are embedded core wasm modules (section 1).
 	CoreModules []CoreModule
 
@@ -107,6 +113,15 @@ type Import struct {
 
 	// ExternIndex is the index into the appropriate namespace (e.g., component index, function index).
 	ExternIndex uint32
+
+	// TypeEqIndex, valid when ExternType == 0x03 (type) and TypeEqBound is
+	// true, is the component type index this type import is declared equal to
+	// (an `import "x" (type (eq N))` bound, what wit-component/cargo-component
+	// emit for a world's exported types). Such an import resolves through to
+	// type N -- see typespace.go's resolveTypeDepth -- rather than being
+	// opaque. A `sub` (resource) type bound leaves TypeEqBound false.
+	TypeEqIndex uint32
+	TypeEqBound bool
 }
 
 // Export represents a component export binding.

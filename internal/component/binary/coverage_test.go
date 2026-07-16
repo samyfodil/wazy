@@ -611,7 +611,7 @@ func TestReadExterndescSorts(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, err := readExterndesc(tt.buf, 0)
+			_, _, _, _, err := readExterndesc(tt.buf, 0)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("readExterndesc(%v) err=%v, wantErr=%v", tt.buf, err, tt.wantErr)
 			}

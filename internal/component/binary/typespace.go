@@ -119,7 +119,15 @@ func (c *Component) resolveTypeDepth(idx uint32, depth int) (TypeDesc, error) {
 	case TypeSpaceImport:
 		name := "?"
 		if int(entry.Import) < len(c.Imports) {
-			name = c.Imports[entry.Import].Name
+			im := c.Imports[entry.Import]
+			name = im.Name
+			// A type import with an `eq N` bound is declared equal to the
+			// component type N (wit-component/cargo-component re-import a
+			// world's exported types this way), so resolve through to it rather
+			// than treating it as opaque.
+			if im.TypeEqBound {
+				return c.resolveTypeDepth(im.TypeEqIndex, depth+1)
+			}
 		}
 		return nil, fmt.Errorf("type index %d names an imported type (import %q); its structural definition is not decoded by this milestone", idx, name)
 

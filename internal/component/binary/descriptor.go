@@ -530,7 +530,7 @@ func readInstanceDeclDesc(buf []byte, off int) (int, error) {
 		if err != nil {
 			return off2, err
 		}
-		_, off2, err = readExterndesc(buf, off2)
+		_, _, _, off2, err = readExterndesc(buf, off2)
 		return off2, err
 	case 0x02: // alias
 		return readAlias(buf, off)

@@ -170,6 +170,12 @@ func decodeComponent(buf []byte) (*Component, error) {
 				if al.Sort == 0x00 && al.CoreSort == 0x00 {
 					c.CoreFuncSpace = append(c.CoreFuncSpace, CoreFuncSpaceEntry{Kind: CoreFuncFromAlias, Alias: aliasBase + uint32(j)})
 				}
+				// A component-level func alias (sort 0x01) occupies the next
+				// index in the component func index space -- see
+				// componentfuncspace.go.
+				if al.Sort == 0x01 {
+					c.ComponentFuncSpace = append(c.ComponentFuncSpace, ComponentFuncSpaceEntry{Kind: ComponentFuncFromAlias, Alias: aliasBase + uint32(j)})
+				}
 			}
 
 		case 7: // Type section
@@ -203,6 +209,8 @@ func decodeComponent(buf []byte) (*Component, error) {
 				switch cn.Kind {
 				case 0x01, 0x02, 0x03, 0x04:
 					c.CoreFuncSpace = append(c.CoreFuncSpace, CoreFuncSpaceEntry{Kind: CoreFuncFromCanon, Canon: canonBase + uint32(j)})
+				case 0x00: // canon lift -> a new COMPONENT func (componentfuncspace.go)
+					c.ComponentFuncSpace = append(c.ComponentFuncSpace, ComponentFuncSpaceEntry{Kind: ComponentFuncFromCanonLift, Canon: canonBase + uint32(j)})
 				}
 			}
 
@@ -231,6 +239,11 @@ func decodeComponent(buf []byte) (*Component, error) {
 				if im.ExternType == 0x03 {
 					c.TypeSpace = append(c.TypeSpace, TypeSpaceEntry{Kind: TypeSpaceImport, Import: importBase + uint32(j)})
 				}
+				// A func import (sort func 0x01) occupies the next index in the
+				// component func index space -- see componentfuncspace.go.
+				if im.ExternType == 0x01 {
+					c.ComponentFuncSpace = append(c.ComponentFuncSpace, ComponentFuncSpaceEntry{Kind: ComponentFuncFromImport, Import: importBase + uint32(j)})
+				}
 			}
 
 		case 11: // Export section
@@ -239,7 +252,15 @@ func decodeComponent(buf []byte) (*Component, error) {
 				return nil, fmt.Errorf("export section: %w", err)
 			}
 			offset = newOffset
+			exportBase := uint32(len(c.Exports))
 			c.Exports = append(c.Exports, exports...)
+			// Exporting a func (sort func 0x01) creates a new component func
+			// index aliasing the exported func -- see componentfuncspace.go.
+			for j, ex := range exports {
+				if ex.ExternType == 0x01 {
+					c.ComponentFuncSpace = append(c.ComponentFuncSpace, ComponentFuncSpaceEntry{Kind: ComponentFuncFromExport, Export: exportBase + uint32(j)})
+				}
+			}
 
 		default:
 			// Record and skip unknown/unimplemented sections. Same
@@ -308,12 +329,16 @@ func decodeImportSection(buf []byte, offset int, sectionSize uint32) ([]Import, 
 		if err != nil {
 			return nil, off, fmt.Errorf("import[%d] name: %w", i, err)
 		}
-		sort, off2, err := readExterndesc(buf, off)
+		sort, eqIdx, hasEq, off2, err := readExterndesc(buf, off)
 		if err != nil {
 			return nil, off2, fmt.Errorf("import[%d] externdesc: %w", i, err)
 		}
 		offset = off2
 		imports[i] = Import{Name: name, ExternType: sort}
+		if sort == 0x03 && hasEq { // type import with an `eq N` bound
+			imports[i].TypeEqIndex = eqIdx
+			imports[i].TypeEqBound = true
+		}
 	}
 
 	if bytesRead := offset - sectionStart; bytesRead > int(sectionSize) {
@@ -355,7 +380,7 @@ func decodeExportSection(buf []byte, offset int, sectionSize uint32) ([]Export, 
 		case 0x00:
 			// no ascribed type
 		case 0x01:
-			if _, off2, err = readExterndesc(buf, off2); err != nil {
+			if _, _, _, off2, err = readExterndesc(buf, off2); err != nil {
 				return nil, off2, fmt.Errorf("export[%d] ascribed type: %w", i, err)
 			}
 		default:
