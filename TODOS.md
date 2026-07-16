@@ -36,12 +36,24 @@
     resource.drop runs it (previously ran none).
   - handleTable gained the reference Table's free list (dropped index reused
     before the counter grows). See `composition.go` + [[wazy-wast-conformance]].
-- **REMAINING (further wasmtime/resources sub-features, each its own feature):**
-  HOST-provided imported resources — a component does `import "host" (instance
-  ...)` exporting `resource1` + `[constructor]resource1` + `[static]resource1.
-  assert`, which the EMBEDDER must supply (needs a WithResource-style host API +
-  the specific test resource); component (not instance) instantiate-args; and
-  exporting a canon-produced func (`[constructor]t`). None is an ABI bug.
+- **DONE (guest own-resource destructors, commit ba62606):** canon
+  `resource.drop` now runs a component's OWN destructor (previously only a
+  host-initiated `DropResource` ran one). Registered before core modules
+  instantiate (a `start` may drop mid-graph) via a lazy resolver
+  (`handleTable.dtors` is `func() api.Function`). Proven by
+  `TestRealOwnResourceDtorOnDrop` (wasmtime/resources.wast module 20: free list +
+  own-dtor drop-counting). res.3/16/18/20 of that suite now run correctly.
+- **REMAINING (wasmtime/resources — three distinct features, none an ABI bug):**
+  1. HOST-provided resources (res.10/21/22): a component `import "host" (instance
+     ...)` exporting `resource1` + `[constructor]resource1` + `[static]resource1.
+     {assert,drops,last-drop}` + `[method]`s + `take-own`. The EMBEDDER must
+     supply a stateful host resource (rep store, drop counting via a HOST dtor on
+     guest drop, ownership transfer). wazy's engine already does host-provided
+     resources for WASI; this needs a `WithResource`-style API + the specific
+     test resource wired in the harness.
+  2. Component (not instance) instantiate-args (res.17, arg sort 0x03).
+  3. Exporting a canon-produced func (res.25, `[constructor]t` lifted directly
+     from a resource canon rather than a real core export).
 - **Also deeper fused sub-features** (each skips a `fused.wast` module, logged):
   pass-through shim with empty export names, >16 flat params on an imported func
   (whole-param spilling for a lowered import), func/type instantiate-args,
