@@ -227,6 +227,15 @@ type WASIConfig struct {
 	// Has no effect unless AllowTCP is also true.
 	Dialer func(network, address string) (net.Conn, error)
 
+	// Listen, when non-nil, replaces the real net.Listen WithWASI otherwise
+	// uses to satisfy a guest's wasi:sockets/tcp [method]tcp-socket.start-bind
+	// on a socket the guest then listens on -- see wasi_sockets.go's
+	// tcpStartBind/tcpAccept. Mirrors Dialer's role but for the server
+	// direction: a test that wants to drive a real listening guest connects to
+	// the net.Listener this returns (its Addr reveals the bound ephemeral
+	// port). Has no effect unless AllowTCP is also true.
+	Listen func(network, address string) (net.Listener, error)
+
 	// AllowUDP opts into a real wasi:sockets (UDP-only) + wasi:io/poll host
 	// implementation -- see wasi_sockets.go's package doc's UDP section.
 	// False (the default) leaves wasi:sockets/udp*
@@ -304,7 +313,11 @@ func WithWASI(cfg WASIConfig) []Option {
 	if listenPacket == nil {
 		listenPacket = func(network, address string) (net.PacketConn, error) { return net.ListenPacket(network, address) }
 	}
-	sockets := newWasiSockets(dial, listenPacket)
+	listen := cfg.Listen
+	if listen == nil {
+		listen = func(network, address string) (net.Listener, error) { return net.Listen(network, address) }
+	}
+	sockets := newWasiSockets(dial, listenPacket, listen)
 
 	// httphost backs wasi:http server support (wasi_http.go), gated behind
 	// cfg.EnableHTTP. Always constructed so writeSink/checkWrite/blockingFlush

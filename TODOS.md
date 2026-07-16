@@ -18,7 +18,8 @@
 - **Depends on / blocked by:** none technical.
 
 ## Minor interface breadth
-- **What:** server-side sockets (`tcp.start-listen`/`finish-listen`/`accept`, `udp` bind-and-serve beyond current client/datagram support), `wasi:sockets/ip-name-lookup` (DNS), full `wasi:clocks` (real monotonic/wall-clock where a guest prints time — needs a deterministic/injectable clock to conformance-test), filesystem symlinks/rename.
+- **Done — server-side TCP sockets (listen/accept):** a real rustc `TcpListener::bind`→`accept`→echo guest now listens through wazy's own host; a Go client connects to it and gets its payload back uppercased (`real_tcp_listen.component.wasm`, `TestRealTCPListen`, two varied payloads proving real data flow). Implemented in `wasi_sockets.go`: `[method]tcp-socket.{start-bind,finish-bind,start-listen,finish-listen,accept,local-address,remote-address,set-listen-backlog-size}`. `start-bind` does the real `net.Listen` synchronously (same blocking/single-shot model as `start-connect`); `accept` blocks in `net.Listener.Accept` and mints the `tuple<own<tcp-socket>,own<input-stream>,own<output-stream>>`. New `WASIConfig.Listen` hook (defaults to `net.Listen`; a test injects one to learn the bound ephemeral port), gated by `AllowTCP`. `set-listen-backlog-size` is a documented no-op (OS default backlog).
+- **Remaining:** `udp` bind-and-serve beyond current client/datagram support, `wasi:sockets/ip-name-lookup` (DNS), full `wasi:clocks` (real monotonic/wall-clock where a guest prints time — needs a deterministic/injectable clock to conformance-test), filesystem symlinks/rename.
 - **Why:** we implement the interface methods real guests actually call; the rest are fail-loud trap-stubs. Closing these widens the set of guests that run out of the box.
 - **Context:** same pattern as the existing sockets/fs work — discover the calls a real guest makes, implement against a Go backing, test behaviorally / vs wasmtime.
 

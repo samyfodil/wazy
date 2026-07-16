@@ -111,6 +111,34 @@ func TestWasiTCPDialErrToCode(t *testing.T) {
 	})
 }
 
+// TestWasiTCPListenErrToCode covers the listen/accept error mapper. It reuses
+// the UDP mapper (bind/accept share the same failure modes -- see its doc), so
+// this proves the address-in-use and generic-fallback ends of that reuse: a
+// real double-bind to the same address yields address-in-use, and an arbitrary
+// error falls back to unknown.
+func TestWasiTCPListenErrToCode(t *testing.T) {
+	t.Run("address in use", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ln.Close()
+		_, bindErr := net.Listen("tcp", ln.Addr().String())
+		if bindErr == nil {
+			t.Fatal("expected an address-in-use error re-binding the same address, got nil")
+		}
+		if got := wasiTCPListenErrToCode(bindErr); got != wasiSockErrAddressInUse {
+			t.Fatalf("wasiTCPListenErrToCode(%v) = %d, want wasiSockErrAddressInUse (%d)", bindErr, got, wasiSockErrAddressInUse)
+		}
+	})
+
+	t.Run("generic error falls back to unknown", func(t *testing.T) {
+		if got := wasiTCPListenErrToCode(errors.New("some other failure")); got != wasiSockErrUnknown {
+			t.Fatalf("wasiTCPListenErrToCode(generic) = %d, want wasiSockErrUnknown (%d)", got, wasiSockErrUnknown)
+		}
+	})
+}
+
 // TestRealTCP_ConnectionRefused proves the connection-refused path end to
 // end through a real guest: dialing a port nothing listens on makes
 // start-connect's synchronous net.Dial fail, finish-connect reports

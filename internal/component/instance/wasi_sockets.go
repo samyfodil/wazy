@@ -201,6 +201,17 @@ type tcpSockNode struct {
 	dialErr  error
 	started  bool
 	finished bool
+
+	// Server-side (listen) fields, the reverse of conn/dialErr: start-bind
+	// performs the real net.Listen synchronously (see this file's package
+	// doc's "Blocking, single-shot" section -- the same shape connect uses),
+	// recording listener/bindErr; finish-bind/start-listen/finish-listen only
+	// ever report that already-settled outcome. A single tcp-socket is used
+	// for EITHER connect OR bind+listen, never both, so these never coexist
+	// with conn/dialErr on the same node. An accepted socket (accept's
+	// own<tcp-socket> half) records its conn here too, for local/remote-address.
+	listener net.Listener
+	bindErr  error
 }
 
 // sockInStream is one live wasi:io/streams `input-stream` backed by a real
@@ -277,6 +288,7 @@ type wasiSockets struct {
 	mu           sync.Mutex
 	dial         func(network, address string) (net.Conn, error)
 	listenPacket func(network, address string) (net.PacketConn, error)
+	listen       func(network, address string) (net.Listener, error)
 
 	resources *handleTable
 
@@ -296,13 +308,15 @@ type wasiSockets struct {
 // disjoint from wasi_fs.go's and wasi.go's own rep spaces.
 const wasiSockRepBase uint32 = 1 << 20
 
-// newWasiSockets returns a wasiSockets that dials through dial and listens
-// through listenPacket (neither ever nil by the time WithWASI constructs one
-// -- see WASIConfig.Dialer/ListenPacket's own docs).
-func newWasiSockets(dial func(network, address string) (net.Conn, error), listenPacket func(network, address string) (net.PacketConn, error)) *wasiSockets {
+// newWasiSockets returns a wasiSockets that dials through dial, binds UDP
+// through listenPacket, and binds+listens TCP through listen (none ever nil
+// by the time WithWASI constructs one -- see WASIConfig.Dialer/ListenPacket/
+// Listen's own docs).
+func newWasiSockets(dial func(network, address string) (net.Conn, error), listenPacket func(network, address string) (net.PacketConn, error), listen func(network, address string) (net.Listener, error)) *wasiSockets {
 	return &wasiSockets{
 		dial:         dial,
 		listenPacket: listenPacket,
+		listen:       listen,
 		tcpSocks:     make(map[uint32]*tcpSockNode),
 		inStreams:    make(map[uint32]*sockInStream),
 		outStreams:   make(map[uint32]*sockOutStream),
@@ -640,26 +654,35 @@ func wasiIPSocketAddrToString(v abi.Value) (string, error) {
 // package runs ever exercises a scoped (link-local) IPv6 address to make
 // that translation worth building.
 func wasiIPSocketAddrFromUDPAddr(addr *net.UDPAddr) (abi.Value, error) {
-	if ip4 := addr.IP.To4(); ip4 != nil {
+	return wasiIPSocketAddrFromIPPort(addr.IP, addr.Port)
+}
+
+// wasiIPSocketAddrFromIPPort is wasiIPSocketAddrFromUDPAddr's transport-agnostic
+// core, shared with TCP's [method]tcp-socket.local-address (which reads a real
+// net.Listener.Addr / net.Conn.LocalAddr *net.TCPAddr) -- see
+// wasiIPSocketAddrFromUDPAddr's doc for the flow-info/scope-id=0 rationale,
+// which applies identically here.
+func wasiIPSocketAddrFromIPPort(ip net.IP, port int) (abi.Value, error) {
+	if ip4 := ip.To4(); ip4 != nil {
 		rec := []abi.Value{
-			uint32(addr.Port),
+			uint32(port),
 			[]abi.Value{uint32(ip4[0]), uint32(ip4[1]), uint32(ip4[2]), uint32(ip4[3])},
 		}
 		return abi.VariantValue{Disc: 0, Payload: rec}, nil
 	}
-	ip16 := addr.IP.To16()
+	ip16 := ip.To16()
 	if ip16 == nil {
-		return nil, fmt.Errorf("wasiIPSocketAddrFromUDPAddr: %v is neither a valid IPv4 nor IPv6 address", addr.IP)
+		return nil, fmt.Errorf("wasiIPSocketAddrFromIPPort: %v is neither a valid IPv4 nor IPv6 address", ip)
 	}
 	parts := make([]abi.Value, 8)
 	for i := 0; i < 8; i++ {
 		parts[i] = uint32(uint16(ip16[i*2])<<8 | uint16(ip16[i*2+1]))
 	}
 	rec := []abi.Value{
-		uint32(addr.Port),
-		uint32(0), // flow-info: not modeled by net.UDPAddr
+		uint32(port),
+		uint32(0), // flow-info: not modeled by net.Addr
 		parts,
-		uint32(0), // scope-id: see doc above
+		uint32(0), // scope-id: see wasiIPSocketAddrFromUDPAddr's doc
 	}
 	return abi.VariantValue{Disc: 1, Payload: rec}, nil
 }
@@ -680,6 +703,33 @@ func wasiUDPErrToCode(err error) uint32 {
 		return wasiSockErrTimeout
 	}
 	return wasiSockErrUnknown
+}
+
+// tcpListenerNode parses a single-self-arg method's args (self:
+// borrow<tcp-socket>) and resolves the live node, sharing the boilerplate
+// across start-listen/finish-listen/accept. method names the caller for error
+// messages (e.g. "accept").
+func tcpListenerNode(sockets *wasiSockets, method string, args []abi.Value) (*tcpSockNode, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("[method]tcp-socket.%s: expected 1 arg (self), got %d", method, len(args))
+	}
+	selfRep, ok := args[0].(uint32)
+	if !ok {
+		return nil, fmt.Errorf("[method]tcp-socket.%s: self: expected uint32 rep, got %T", method, args[0])
+	}
+	node, ok := sockets.tcpSockNode(selfRep)
+	if !ok {
+		return nil, fmt.Errorf("[method]tcp-socket.%s: tcp-socket rep %d does not name a live socket", method, selfRep)
+	}
+	return node, nil
+}
+
+// wasiTCPListenErrToCode maps a real net.Listen/Accept error to the closest
+// wasi:sockets error-code. The bind/accept failure modes are the same ones
+// wasiUDPErrToCode already discriminates (address-in-use / not-bindable /
+// timeout, else unknown), so it reuses that mapper -- see its doc.
+func wasiTCPListenErrToCode(err error) uint32 {
+	return wasiUDPErrToCode(err)
 }
 
 // wasiSocketOptions returns the Options implementing wasi:sockets/
@@ -808,6 +858,212 @@ func wasiSocketOptions(sockets *wasiSockets) []Option {
 		return []abi.Value{wasiPollableRep}, nil
 	}
 
+	// startBind performs the real net.Listen synchronously (see startConnect's
+	// mirror-image comment and this file's "Blocking, single-shot" doc):
+	// wasi:sockets's bind/listen split is async, but this host settles the
+	// whole listen right here, so finish-bind/start-listen/finish-listen below
+	// are pure already-settled reporters. args: self (borrow<tcp-socket>),
+	// network (borrow<network>, validated live but not otherwise inspected --
+	// see startConnect), local-address (ip-socket-address).
+	startBind := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 3 {
+			return nil, fmt.Errorf("[method]tcp-socket.start-bind: expected 3 args (self, network, local-address), got %d", len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]tcp-socket.start-bind: self: expected uint32 rep, got %T", args[0])
+		}
+		addr, err := wasiIPSocketAddrToString(args[2])
+		if err != nil {
+			return nil, fmt.Errorf("[method]tcp-socket.start-bind: local-address: %w", err)
+		}
+		node, ok := sockets.tcpSockNode(selfRep)
+		if !ok {
+			return nil, fmt.Errorf("[method]tcp-socket.start-bind: tcp-socket rep %d does not name a live socket", selfRep)
+		}
+		node.mu.Lock()
+		defer node.mu.Unlock()
+		if node.started || node.listener != nil {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiSockErrConcurrencyConflict}}, nil
+		}
+		node.started = true
+		node.listener, node.bindErr = sockets.listen("tcp", addr)
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: nil}}, nil
+	}
+
+	finishBind := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("[method]tcp-socket.finish-bind: expected 1 arg (self), got %d", len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]tcp-socket.finish-bind: self: expected uint32 rep, got %T", args[0])
+		}
+		node, ok := sockets.tcpSockNode(selfRep)
+		if !ok {
+			return nil, fmt.Errorf("[method]tcp-socket.finish-bind: tcp-socket rep %d does not name a live socket", selfRep)
+		}
+		node.mu.Lock()
+		defer node.mu.Unlock()
+		if !node.started {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiSockErrNotInProgress}}, nil
+		}
+		if node.bindErr != nil {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiTCPListenErrToCode(node.bindErr)}}, nil
+		}
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: nil}}, nil
+	}
+
+	// startListen/finishListen are already-settled reporters: net.Listen (in
+	// start-bind) already put the socket in the listening state, so both just
+	// confirm the bind succeeded. A socket that never bound (no listener,
+	// no bindErr) is in the wrong state for listen.
+	startListen := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		node, err := tcpListenerNode(sockets, "start-listen", args)
+		if err != nil {
+			return nil, err
+		}
+		node.mu.Lock()
+		defer node.mu.Unlock()
+		if node.listener == nil {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiSockErrInvalidState}}, nil
+		}
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: nil}}, nil
+	}
+
+	finishListen := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		node, err := tcpListenerNode(sockets, "finish-listen", args)
+		if err != nil {
+			return nil, err
+		}
+		node.mu.Lock()
+		defer node.mu.Unlock()
+		if node.listener == nil {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiSockErrInvalidState}}, nil
+		}
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: nil}}, nil
+	}
+
+	// accept blocks for real in net.Listener.Accept (the same deliberate
+	// synchronous block sockInStream.read/incoming-datagram-stream.receive use
+	// -- see this file's "Blocking, single-shot" doc). It mints the tuple<
+	// own<tcp-socket>, own<input-stream>, own<output-stream>>: the accepted
+	// tcp-socket wraps the accepted net.Conn (for local/remote-address), and
+	// the two streams read/write that same conn, exactly as finish-connect
+	// mints its own stream pair over one conn.
+	accept := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		node, err := tcpListenerNode(sockets, "accept", args)
+		if err != nil {
+			return nil, err
+		}
+		node.mu.Lock()
+		ln := node.listener
+		node.mu.Unlock()
+		if ln == nil {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiSockErrInvalidState}}, nil
+		}
+		conn, aerr := ln.Accept()
+		if aerr != nil {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiTCPListenErrToCode(aerr)}}, nil
+		}
+		resources, err := sockets.getResources()
+		if err != nil {
+			return nil, err
+		}
+		sockRep := sockets.allocRep()
+		inRep := sockets.allocRep()
+		outRep := sockets.allocRep()
+		sockets.mu.Lock()
+		sockets.tcpSocks[sockRep] = &tcpSockNode{conn: conn}
+		sockets.inStreams[inRep] = &sockInStream{conn: conn}
+		sockets.outStreams[outRep] = &sockOutStream{conn: conn}
+		sockets.mu.Unlock()
+		// tuple<own,own,own> nested in the Ok payload -- minted directly here,
+		// like finish-connect (allocHandleResult only auto-wraps a top-level
+		// own/borrow result).
+		sockHandle := resources.NewOwn(wasiTCPSocketResType, sockRep)
+		inHandle := resources.NewOwn(wasiInputStreamResType, inRep)
+		outHandle := resources.NewOwn(wasiOutputStreamResType, outRep)
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: []abi.Value{sockHandle, inHandle, outHandle}}}, nil
+	}
+
+	// localAddress reports the bound address of a listening socket (its
+	// net.Listener.Addr, e.g. the ephemeral port a bind-to-:0 guest asks for
+	// back) or, for an accepted socket, its net.Conn.LocalAddr.
+	localAddress := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("[method]tcp-socket.local-address: expected 1 arg (self), got %d", len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]tcp-socket.local-address: self: expected uint32 rep, got %T", args[0])
+		}
+		node, ok := sockets.tcpSockNode(selfRep)
+		if !ok {
+			return nil, fmt.Errorf("[method]tcp-socket.local-address: tcp-socket rep %d does not name a live socket", selfRep)
+		}
+		node.mu.Lock()
+		var netAddr net.Addr
+		switch {
+		case node.listener != nil:
+			netAddr = node.listener.Addr()
+		case node.conn != nil:
+			netAddr = node.conn.LocalAddr()
+		}
+		node.mu.Unlock()
+		tcpAddr, ok := netAddr.(*net.TCPAddr)
+		if !ok {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiSockErrInvalidState}}, nil
+		}
+		v, err := wasiIPSocketAddrFromIPPort(tcpAddr.IP, tcpAddr.Port)
+		if err != nil {
+			return nil, fmt.Errorf("[method]tcp-socket.local-address: %w", err)
+		}
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: v}}, nil
+	}
+
+	// remoteAddress reports an accepted socket's peer (net.Conn.RemoteAddr) --
+	// the address a listening guest's accept() returns alongside the socket
+	// (rust prints it as "accepted from ..."). A listener socket has no peer,
+	// so it reports invalid-state.
+	remoteAddress := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("[method]tcp-socket.remote-address: expected 1 arg (self), got %d", len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]tcp-socket.remote-address: self: expected uint32 rep, got %T", args[0])
+		}
+		node, ok := sockets.tcpSockNode(selfRep)
+		if !ok {
+			return nil, fmt.Errorf("[method]tcp-socket.remote-address: tcp-socket rep %d does not name a live socket", selfRep)
+		}
+		node.mu.Lock()
+		conn := node.conn
+		node.mu.Unlock()
+		if conn == nil {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiSockErrInvalidState}}, nil
+		}
+		tcpAddr, ok := conn.RemoteAddr().(*net.TCPAddr)
+		if !ok {
+			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiSockErrInvalidState}}, nil
+		}
+		v, err := wasiIPSocketAddrFromIPPort(tcpAddr.IP, tcpAddr.Port)
+		if err != nil {
+			return nil, fmt.Errorf("[method]tcp-socket.remote-address: %w", err)
+		}
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: v}}, nil
+	}
+
+	// setListenBacklogSize is a no-op that reports Ok: net.Listen uses the
+	// OS default backlog and this host exposes no knob to change it, but a
+	// guest (rust std sets a default backlog during bind) only needs the call
+	// to succeed. ponytail: no-op; wire net.ListenConfig if a guest ever
+	// depends on the backlog value.
+	setListenBacklogSize := func(context.Context, []abi.Value) ([]abi.Value, error) {
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: nil}}, nil
+	}
+
 	// streamSubscribe backs both [method]input-stream.subscribe and
 	// [method]output-stream.subscribe: self is already resolved (and
 	// validated live) by liftHostArgs before this closure runs, and every
@@ -871,6 +1127,14 @@ func wasiSocketOptions(sockets *wasiSockets) []Option {
 	createTCPFD, createTCPResolve := wasiCreateTCPSocketSig()
 	startConnectFD, startConnectResolve := wasiTCPStartConnectSig()
 	finishConnectFD, finishConnectResolve := wasiTCPFinishConnectSig()
+	startBindFD, startBindResolve := wasiTCPStartBindSig()
+	finishBindFD, finishBindResolve := wasiTCPSelfResultSig()
+	startListenFD, startListenResolve := wasiTCPSelfResultSig()
+	finishListenFD, finishListenResolve := wasiTCPSelfResultSig()
+	acceptFD, acceptResolve := wasiTCPAcceptSig()
+	localAddrFD, localAddrResolve := wasiTCPLocalAddressSig()
+	remoteAddrFD, remoteAddrResolve := wasiTCPLocalAddressSig()
+	setBacklogFD, setBacklogResolve := wasiTCPSetListenBacklogSig()
 	tcpSubFD, tcpSubResolve := wasiSubscribeSig(wasiTCPSocketResType)
 	inSubFD, inSubResolve := wasiSubscribeSig(wasiInputStreamResType)
 	outSubFD, outSubResolve := wasiSubscribeSig(wasiOutputStreamResType)
@@ -893,6 +1157,14 @@ func wasiSocketOptions(sockets *wasiSockets) []Option {
 		withImportCustom(wasiIfaceSocketsTCPCreateSoc, "create-tcp-socket", createTCPSocket, createTCPFD, createTCPResolve),
 		withImportCustom(wasiIfaceSocketsTCP, "[method]tcp-socket.start-connect", startConnect, startConnectFD, startConnectResolve),
 		withImportCustom(wasiIfaceSocketsTCP, "[method]tcp-socket.finish-connect", finishConnect, finishConnectFD, finishConnectResolve),
+		withImportCustom(wasiIfaceSocketsTCP, "[method]tcp-socket.start-bind", startBind, startBindFD, startBindResolve),
+		withImportCustom(wasiIfaceSocketsTCP, "[method]tcp-socket.finish-bind", finishBind, finishBindFD, finishBindResolve),
+		withImportCustom(wasiIfaceSocketsTCP, "[method]tcp-socket.start-listen", startListen, startListenFD, startListenResolve),
+		withImportCustom(wasiIfaceSocketsTCP, "[method]tcp-socket.finish-listen", finishListen, finishListenFD, finishListenResolve),
+		withImportCustom(wasiIfaceSocketsTCP, "[method]tcp-socket.accept", accept, acceptFD, acceptResolve),
+		withImportCustom(wasiIfaceSocketsTCP, "[method]tcp-socket.local-address", localAddress, localAddrFD, localAddrResolve),
+		withImportCustom(wasiIfaceSocketsTCP, "[method]tcp-socket.remote-address", remoteAddress, remoteAddrFD, remoteAddrResolve),
+		withImportCustom(wasiIfaceSocketsTCP, "[method]tcp-socket.set-listen-backlog-size", setListenBacklogSize, setBacklogFD, setBacklogResolve),
 		withImportCustom(wasiIfaceSocketsTCP, "[method]tcp-socket.subscribe", tcpSubscribe, tcpSubFD, tcpSubResolve),
 		withImportCustom(wasiIfaceStreams, "[method]input-stream.subscribe", streamSubscribe, inSubFD, inSubResolve),
 		withImportCustom(wasiIfaceStreams, "[method]output-stream.subscribe", streamSubscribe, outSubFD, outSubResolve),
@@ -1397,6 +1669,96 @@ func wasiTCPFinishConnectSig() (binary.FuncDesc, abi.Resolver) {
 	resultRef := tbl.add(binary.ResultDesc{Ok: &tupleRef, Err: &errRef})
 	fd := binary.FuncDesc{
 		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}},
+		Results: binary.FuncResults{Unnamed: &resultRef},
+	}
+	return fd, tbl.resolver()
+}
+
+// wasiTCPStartBindSig builds the FuncDesc/resolver for
+// [method]tcp-socket.start-bind(self: borrow<tcp-socket>, network:
+// borrow<network>, local-address: ip-socket-address) -> result<_, error-code>.
+func wasiTCPStartBindSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiTCPSocketResType})
+	netRef := tbl.add(binary.BorrowDesc{ResourceType: wasiNetworkResType})
+	addrRef := wasiIPSocketAddressType(tbl)
+	errRef := wasiSocketsErrorCodeType(tbl)
+	resultRef := tbl.add(binary.ResultDesc{Err: &errRef})
+	fd := binary.FuncDesc{
+		Params: []binary.FuncParam{
+			{Name: "self", Type: selfRef},
+			{Name: "network", Type: netRef},
+			{Name: "local-address", Type: addrRef},
+		},
+		Results: binary.FuncResults{Unnamed: &resultRef},
+	}
+	return fd, tbl.resolver()
+}
+
+// wasiTCPSelfResultSig builds the FuncDesc/resolver for a `method(self:
+// borrow<tcp-socket>) -> result<_, error-code>` method -- shared by
+// finish-bind, start-listen, and finish-listen (identical signatures).
+func wasiTCPSelfResultSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiTCPSocketResType})
+	errRef := wasiSocketsErrorCodeType(tbl)
+	resultRef := tbl.add(binary.ResultDesc{Err: &errRef})
+	fd := binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}},
+		Results: binary.FuncResults{Unnamed: &resultRef},
+	}
+	return fd, tbl.resolver()
+}
+
+// wasiTCPAcceptSig builds the FuncDesc/resolver for
+// [method]tcp-socket.accept(self: borrow<tcp-socket>) ->
+// result<tuple<own<tcp-socket>, own<input-stream>, own<output-stream>>,
+// error-code>.
+func wasiTCPAcceptSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiTCPSocketResType})
+	sockRef := tbl.add(binary.OwnDesc{ResourceType: wasiTCPSocketResType})
+	inRef := tbl.add(binary.OwnDesc{ResourceType: wasiInputStreamResType})
+	outRef := tbl.add(binary.OwnDesc{ResourceType: wasiOutputStreamResType})
+	tupleRef := tbl.add(binary.TupleDesc{Elements: []binary.TypeRef{sockRef, inRef, outRef}})
+	errRef := wasiSocketsErrorCodeType(tbl)
+	resultRef := tbl.add(binary.ResultDesc{Ok: &tupleRef, Err: &errRef})
+	fd := binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}},
+		Results: binary.FuncResults{Unnamed: &resultRef},
+	}
+	return fd, tbl.resolver()
+}
+
+// wasiTCPLocalAddressSig builds the FuncDesc/resolver for
+// [method]tcp-socket.local-address(self: borrow<tcp-socket>) ->
+// result<ip-socket-address, error-code>.
+func wasiTCPLocalAddressSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiTCPSocketResType})
+	addrRef := wasiIPSocketAddressType(tbl)
+	errRef := wasiSocketsErrorCodeType(tbl)
+	resultRef := tbl.add(binary.ResultDesc{Ok: &addrRef, Err: &errRef})
+	fd := binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}},
+		Results: binary.FuncResults{Unnamed: &resultRef},
+	}
+	return fd, tbl.resolver()
+}
+
+// wasiTCPSetListenBacklogSig builds the FuncDesc/resolver for
+// [method]tcp-socket.set-listen-backlog-size(self: borrow<tcp-socket>,
+// value: u64) -> result<_, error-code>.
+func wasiTCPSetListenBacklogSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiTCPSocketResType})
+	errRef := wasiSocketsErrorCodeType(tbl)
+	resultRef := tbl.add(binary.ResultDesc{Err: &errRef})
+	fd := binary.FuncDesc{
+		Params: []binary.FuncParam{
+			{Name: "self", Type: selfRef},
+			{Name: "value", Type: binary.TypeRef{Primitive: "u64"}},
+		},
 		Results: binary.FuncResults{Unnamed: &resultRef},
 	}
 	return fd, tbl.resolver()
