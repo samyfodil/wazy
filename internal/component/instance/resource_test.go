@@ -46,6 +46,28 @@ func TestHandleTable_HandleNumberingStartsAtOne(t *testing.T) {
 	}
 }
 
+// TestHandleTable_FreeListReuse: a dropped handle's index is reclaimed by the
+// next allocation before the counter grows, matching the reference Table's free
+// list. A guest may rely on this dense numbering (e.g. component-model
+// wasmtime/resources.wast asserts resource.new returns 1 again after a drop).
+func TestHandleTable_FreeListReuse(t *testing.T) {
+	tbl := newHandleTable()
+	h1 := tbl.NewOwn(0, 10) // 1
+	h2 := tbl.NewOwn(0, 20) // 2
+	if h1 != 1 || h2 != 2 {
+		t.Fatalf("handles = %d,%d want 1,2", h1, h2)
+	}
+	if err := tbl.Drop(0, h1); err != nil { // free 1
+		t.Fatal(err)
+	}
+	if h := tbl.NewOwn(0, 30); h != 1 { // reuse 1
+		t.Fatalf("after drop, next handle = %d, want reused 1", h)
+	}
+	if h := tbl.NewOwn(0, 40); h != 3 { // free list empty -> grow
+		t.Fatalf("next fresh handle = %d, want 3", h)
+	}
+}
+
 func TestHandleTable_DropAfterDropFails(t *testing.T) {
 	tbl := newHandleTable()
 	h := tbl.NewOwn(1, 1)

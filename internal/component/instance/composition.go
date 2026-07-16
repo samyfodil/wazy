@@ -1,6 +1,8 @@
 package instance
 
 import (
+	"fmt"
+
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
@@ -81,68 +83,152 @@ func exportedResourceDefs(comp *binary.Component) map[string]uint32 {
 	return out
 }
 
-// resourcesToU32FD returns a copy of fd with every top-level own<R>/borrow<R>
-// param and result replaced by a plain u32, so a delegating import's host
-// wrapper treats a resource handle as an opaque integer and passes it through
-// (the shared handle table makes the provider's handle directly valid in the
-// importer) instead of re-minting it under a foreign resource index. Non-
-// resource types are left untouched. resolve identifies which refs are handles.
-func resourcesToU32FD(fd binary.FuncDesc, resolve abi.Resolver) binary.FuncDesc {
-	u32 := func(ref binary.TypeRef) binary.TypeRef {
-		if isHandleRef(ref, resolve) {
-			return binary.TypeRef{Primitive: "u32"}
+// importedResourceIndices returns, for a component, each resource it IMPORTS
+// through the instance named importName mapped to the local TypeSpace index that
+// names it (a type-sort export alias into that imported instance). That index is
+// the one the importer's own resource.drop / own<R> / borrow<R> reference.
+func importedResourceIndices(comp *binary.Component, importName string) map[string]uint32 {
+	var out map[string]uint32
+	for idx := range comp.TypeSpace {
+		iface, name, ok := resolveImportedResourceName(comp, uint32(idx))
+		if !ok || iface != importName {
+			continue
 		}
-		return ref
-	}
-	out := binary.FuncDesc{Params: make([]binary.FuncParam, len(fd.Params))}
-	for i, p := range fd.Params {
-		out.Params[i] = binary.FuncParam{Name: p.Name, Type: u32(p.Type)}
-	}
-	if fd.Results.Unnamed != nil {
-		r := u32(*fd.Results.Unnamed)
-		out.Results.Unnamed = &r
-	} else if len(fd.Results.Named) > 0 {
-		out.Results.Named = make([]binary.FuncResult, len(fd.Results.Named))
-		for i, r := range fd.Results.Named {
-			out.Results.Named[i] = binary.FuncResult{Name: r.Name, Type: u32(r.Type)}
+		if out == nil {
+			out = make(map[string]uint32)
+		}
+		if _, seen := out[name]; !seen {
+			out[name] = uint32(idx)
 		}
 	}
 	return out
 }
 
-// isHandleRef reports whether a TypeRef resolves to an own<R>/borrow<R> handle.
-func isHandleRef(ref binary.TypeRef, resolve abi.Resolver) bool {
-	td, err := resolveTypeRef(&ref, resolve)
-	if err != nil {
-		return false
+// translateResourceIdxBase is where synthetic type indices for translated
+// own/borrow types start -- well above any real component type index, so the
+// custom resolver can tell a synthesized entry from a passed-through provider
+// index.
+const translateResourceIdxBase = 1 << 24
+
+// translateResourceFD returns a copy of fd with every top-level own<R>/borrow<R>
+// param and result re-pointed from the PROVIDER's resource type index to the
+// IMPORTER's (via translate, matched by name), plus a resolver that resolves the
+// rewritten types. Each translated handle becomes a fresh synthetic type index
+// backed by an own<importerIdx>/borrow<importerIdx> the returned resolver
+// serves; anything else keeps its provider ref and resolves through
+// providerResolve. The importer's host wrapper then mints/looks up the crossing
+// handle in ITS OWN table under ITS OWN resource index -- consistent with the
+// importer's resource.drop and with per-instance handle numbering.
+func translateResourceFD(fd binary.FuncDesc, providerResolve abi.Resolver, translate func(uint32) (uint32, bool)) (binary.FuncDesc, abi.Resolver) {
+	synth := map[uint32]binary.TypeDesc{}
+	next := uint32(translateResourceIdxBase)
+	tr := func(ref binary.TypeRef) binary.TypeRef {
+		td, err := resolveTypeRef(&ref, providerResolve)
+		if err != nil {
+			return ref
+		}
+		var desc binary.TypeDesc
+		switch d := td.(type) {
+		case binary.OwnDesc:
+			if dIdx, ok := translate(d.ResourceType); ok {
+				desc = binary.OwnDesc{ResourceType: dIdx}
+			}
+		case binary.BorrowDesc:
+			if dIdx, ok := translate(d.ResourceType); ok {
+				desc = binary.BorrowDesc{ResourceType: dIdx}
+			}
+		}
+		if desc == nil {
+			return ref
+		}
+		idx := next
+		next++
+		synth[idx] = desc
+		return binary.TypeRef{TypeIndex: &idx}
 	}
-	switch td.(type) {
-	case binary.OwnDesc, binary.BorrowDesc:
-		return true
+	out := binary.FuncDesc{Params: make([]binary.FuncParam, len(fd.Params))}
+	for i, p := range fd.Params {
+		out.Params[i] = binary.FuncParam{Name: p.Name, Type: tr(p.Type)}
+	}
+	if fd.Results.Unnamed != nil {
+		r := tr(*fd.Results.Unnamed)
+		out.Results.Unnamed = &r
+	} else if len(fd.Results.Named) > 0 {
+		out.Results.Named = make([]binary.FuncResult, len(fd.Results.Named))
+		for i, r := range fd.Results.Named {
+			out.Results.Named[i] = binary.FuncResult{Name: r.Name, Type: tr(r.Type)}
+		}
+	}
+	resolve := func(idx uint32) binary.TypeDesc {
+		if d, ok := synth[idx]; ok {
+			return d
+		}
+		return providerResolve(idx)
+	}
+	return out, resolve
+}
+
+// canonTag applies a component's resource-type canonicalizer (identity if nil).
+func (in *Instance) canonTag(idx uint32) uint32 {
+	if in.resCanon != nil {
+		return in.resCanon(idx)
+	}
+	return idx
+}
+
+// repToProviderHandle mints, in the provider's own table, the handle its
+// exported func expects for an own<R>/borrow<R> param -- from the rep the
+// importer's host wrapper handed across the boundary (it had already reduced its
+// own handle to the rep via lift_own/lift_borrow). Non-handle params pass
+// through. Mirrors lower_own/lower_borrow into the provider's table.
+func repToProviderHandle(sub *Instance, desc binary.TypeDesc, v abi.Value) (abi.Value, error) {
+	switch d := desc.(type) {
+	case binary.OwnDesc:
+		rep, ok := v.(uint32)
+		if !ok {
+			return nil, fmt.Errorf("delegated own<%d> arg: expected a uint32 rep, got %T", d.ResourceType, v)
+		}
+		return sub.resources.NewOwn(sub.canonTag(d.ResourceType), rep), nil
+	case binary.BorrowDesc:
+		rep, ok := v.(uint32)
+		if !ok {
+			return nil, fmt.Errorf("delegated borrow<%d> arg: expected a uint32 rep, got %T", d.ResourceType, v)
+		}
+		return sub.resources.NewBorrow(sub.canonTag(d.ResourceType), rep), nil
 	default:
-		return false
+		return v, nil
 	}
 }
 
-// resBaseStride spaces each sub-instance's global resource ids apart so a
-// component's local resource indices (small) never collide with another's after
-// the base offset is applied. Well above any real per-component type-index
-// count and below the synthetic WASI resource constants.
-const resBaseStride = 0x1_0000
-
-// makeResCanon builds a component's local-resource-index -> global-id
-// canonicalizer for a composition. base offsets this component's own defined
-// resources; importedGlobalID maps a resource this component imports (by the
-// interface+name it imports it under) to the global id the DEFINING sibling
-// already uses. comp is needed to tell an import from a local definition and to
-// reduce aliases to a definition index.
-func makeResCanon(comp *binary.Component, base uint32, importedGlobalID map[importKey]uint32) func(uint32) uint32 {
-	return func(localIdx uint32) uint32 {
-		if iface, name, ok := resolveImportedResourceName(comp, localIdx); ok {
-			if gid, ok := importedGlobalID[mkImportKey(iface, name)]; ok {
-				return gid
-			}
+// providerHandleToRep reduces an own<R>/borrow<R> result the provider returned
+// (a handle in ITS table) back to the rep, for the importer's host wrapper to
+// lower into the importer's own table (lower_own/lower_borrow). own consumes the
+// provider handle (lift_own); borrow only reads it. Non-handle results pass
+// through.
+func providerHandleToRep(sub *Instance, desc binary.TypeDesc, v abi.Value) (abi.Value, error) {
+	switch d := desc.(type) {
+	case binary.OwnDesc:
+		h, ok := v.(uint32)
+		if !ok {
+			return nil, fmt.Errorf("delegated own<%d> result: expected a uint32 handle, got %T", d.ResourceType, v)
 		}
-		return base + comp.ResourceDefIndex(localIdx)
+		return sub.resources.TakeOwn(sub.canonTag(d.ResourceType), h)
+	case binary.BorrowDesc:
+		h, ok := v.(uint32)
+		if !ok {
+			return nil, fmt.Errorf("delegated borrow<%d> result: expected a uint32 handle, got %T", d.ResourceType, v)
+		}
+		return sub.resources.Rep(sub.canonTag(d.ResourceType), h)
+	default:
+		return v, nil
 	}
+}
+
+// resultDescs returns a boundExport's result TypeDescs (one for the single
+// unnamed/first result form these compositions use).
+func resultDescs(be *boundExport) []binary.TypeDesc {
+	if be.hasResult {
+		return []binary.TypeDesc{be.resultType}
+	}
+	return nil
 }

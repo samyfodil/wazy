@@ -50,21 +50,20 @@ type config struct {
 	// (*Instance).ServeHTTP can drive the guest's exported incoming-handler.
 	httpHost *wasiHTTP
 
-	// sharedResources and resCanon are set only when this instantiation is a
+	// resCanon and importedResDtors are set only when this instantiation is a
 	// nested sub-component of a composition (see instantiateNestedInstances).
-	// sharedResources is the one handle table every composed sub-instance
-	// shares; resCanon maps this sub-instance's local resource type indices to
-	// the composition-global id it and its siblings agree on. Both nil for a
-	// flat instantiation, which then makes its own table and tags by raw index.
-	sharedResources *handleTable
+	// Every sub-instance has its OWN handle table (per the spec -- resource
+	// tables are per-instance, so two instances of one component number handles
+	// independently); a resource CROSSING a delegating import is transferred by
+	// rep (lift_own/lower_own), not by a shared table.
+	//
+	// resCanon reduces this component's several type indices for one resource
+	// (a deftype and its export alias) to a single table tag. importedResDtors
+	// maps the table tag of a resource this component imports to the DEFINER's
+	// destructor, so this component's resource.drop of an own<R> it received
+	// runs that dtor. Both nil for a flat instantiation.
 	resCanon        func(uint32) uint32
-
-	// resBase is this sub-instance's global-id base (its own defined resources
-	// get ids resBase+defIndex); resBaseNext is the composition-wide allocator
-	// that hands out a distinct base to each sub-instance. Both zero/nil for a
-	// flat instantiation.
-	resBase     uint32
-	resBaseNext *uint32
+	importedResDtors map[uint32]api.Function
 }
 
 type importKey struct {

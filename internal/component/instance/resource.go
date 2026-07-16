@@ -71,11 +71,17 @@ type handleTable struct {
 	entries map[uint32]*resourceEntry
 	next    uint32
 
-	// dtors maps a (composition-global) resource type tag to the defining
-	// component's guest destructor. Populated only for a composition's shared
-	// table (see instantiateNestedInstances); canon resource.drop runs the
-	// entry for the dropped handle's tag so an importer dropping an own<R> it
-	// received runs the DEFINER's dtor. nil/absent means no destructor.
+	// free holds handle indices returned by Drop/TakeOwn, reused before next is
+	// bumped -- mirroring the reference Table's free list (definitions.py's
+	// Table.free). A guest may rely on this: e.g. the first resource.new after a
+	// drop reclaims the just-freed index, so index numbering is deterministic
+	// and dense per instance rather than monotonically growing.
+	free []uint32
+
+	// dtors maps a resource type tag to the guest destructor that owns it, so an
+	// importer dropping an own<R> it received runs the DEFINER's dtor. Populated
+	// per composed sub-instance's table (see instantiateNestedInstances); canon
+	// resource.drop runs the entry for the dropped handle's tag. nil means none.
 	dtors map[uint32]api.Function
 }
 
@@ -105,8 +111,14 @@ func newHandleTable() *handleTable {
 func (t *handleTable) add(typeIdx, rep uint32, own bool) uint32 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	h := t.next
-	t.next++
+	var h uint32
+	if n := len(t.free); n > 0 { // reuse a freed index (reference Table.free)
+		h = t.free[n-1]
+		t.free = t.free[:n-1]
+	} else {
+		h = t.next
+		t.next++
+	}
 	t.entries[h] = &resourceEntry{typeIdx: typeIdx, rep: rep, own: own}
 	return h
 }
@@ -170,6 +182,7 @@ func (t *handleTable) TakeOwn(typeIdx, h uint32) (uint32, error) {
 		return 0, fmt.Errorf("handle %d has %d outstanding borrow(s)", h, e.lendCount)
 	}
 	delete(t.entries, h)
+	t.free = append(t.free, h)
 	return e.rep, nil
 }
 
@@ -192,6 +205,7 @@ func (t *handleTable) Drop(typeIdx, h uint32) error {
 		return fmt.Errorf("handle %d has %d outstanding borrow(s), cannot drop", h, e.lendCount)
 	}
 	delete(t.entries, h)
+	t.free = append(t.free, h)
 	return nil
 }
 
@@ -214,6 +228,7 @@ func (t *handleTable) DropOwned(h uint32) (rep uint32, err error) {
 		return 0, fmt.Errorf("handle %d has %d outstanding borrow(s), cannot drop", h, e.lendCount)
 	}
 	delete(t.entries, h)
+	t.free = append(t.free, h)
 	return e.rep, nil
 }
 

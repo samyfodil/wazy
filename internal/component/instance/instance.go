@@ -175,13 +175,10 @@ type Instance struct {
 	// resource canons.
 	resCanon func(uint32) uint32
 
-	// resBase is this instance's global resource-id base (its defined resource
-	// with definition index d has global id resBase+d), and comp is the decoded
-	// component it was instantiated from. Both are read by a parent composition
-	// when wiring this instance's exported resources into a sibling's imports.
-	// resBase is 0 and comp may be nil for instances not part of a composition.
-	resBase uint32
-	comp    *binary.Component
+	// comp is the decoded component this instance was instantiated from, read by
+	// a parent composition when wiring this instance's exported resources into a
+	// sibling's imports. nil for instances not part of a composition.
+	comp *binary.Component
 
 	// resources is this instance's resource handle table (see resource.go),
 	// shared by every resource type the instance declares or imports. It is
