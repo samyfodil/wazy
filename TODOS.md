@@ -11,7 +11,8 @@
   - **incoming-handler (server):** a real rustc guest responds to HTTP; vs `wasmtime serve -S cli` (`real_http_incoming.component.wasm`). `(*Instance).ServeHTTP` is a net/http.Handler; enable with `WithWASI(WASIConfig{EnableHTTP: true})`.
   - **outgoing-handler (client):** a real rustc guest makes outbound requests via a Go `http.Client` (`WASIConfig.HTTPClient`); vs `wasmtime serve -S cli -S inherit-network` against a scratch backend (`real_http_outgoing.component.wasm`).
   - Implemented in `wasi_http.go`: the `wasi:http/types` subset a wit-bindgen proxy guest calls (request line read, response write, and the full client path incl. future/incoming-response/incoming-body). Future is synchronous (Do blocks) so subscribe/get are immediate; incoming-body.stream + response body-write both reuse the wasi:io/streams path.
-- **Remaining (minor breadth, fail-loud until implemented):** request/response header READBACK on the incoming side, `incoming-request.consume` (inbound request body), response/request trailers, and per-request `request-options` (timeouts). Same discovery-driven pattern — implement when a real guest calls them.
+- **Done (incoming request readback):** `incoming-request.headers` + `fields.get` (header read) and `incoming-request.consume` + `incoming-body.stream` (request body), vs `wasmtime serve` (`real_http_request.component.wasm`).
+- **Remaining (minor breadth, fail-loud until implemented):** response/request trailers, per-request `request-options` (timeouts), and outgoing-request bodies (POST from a client guest). Same discovery-driven pattern — implement when a real guest calls them.
 - **Depends on / blocked by:** none technical.
 
 ## Minor interface breadth
