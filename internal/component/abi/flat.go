@@ -569,9 +569,13 @@ func LiftFlat(vals []CoreValue, t binary.TypeDesc, resolve Resolver, mem []byte)
 		return Load(mem, ptr, t, resolve)
 	}
 
-	// Non-spilled: lift from the core values.
-	vi := NewCoreValueIter(vals)
-	return liftFlatImpl(vi, t, resolve, mem)
+	// Non-spilled: lift from the core values. The iterator is pooled (it
+	// escapes into liftFlatImpl as a valueIter interface, so a fresh one would
+	// allocate every call); nothing retains it past liftFlatImpl's return.
+	vi := getCoreValueIter(vals)
+	val, err := liftFlatImpl(vi, t, resolve, mem)
+	putCoreValueIter(vi)
+	return val, err
 }
 
 // valueIter is an interface for iterators that provide CoreValues.

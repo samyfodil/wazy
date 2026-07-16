@@ -3,6 +3,7 @@ package abi
 import (
 	"fmt"
 	"math"
+	"sync"
 )
 
 // CoreValue represents a single core WebAssembly value in the flat ABI.
@@ -80,6 +81,29 @@ type CoreValueIter struct {
 // NewCoreValueIter creates a new iterator over a slice of CoreValues.
 func NewCoreValueIter(values []CoreValue) *CoreValueIter {
 	return &CoreValueIter{values: values, i: 0}
+}
+
+var coreValueIterPool = sync.Pool{New: func() any { return new(CoreValueIter) }}
+
+// getCoreValueIter returns a pooled iterator over values. It exists so LiftFlat
+// doesn't heap-allocate a fresh *CoreValueIter on every call: the iterator
+// escapes (it's passed as the valueIter interface into the recursive
+// liftFlatImpl), so without pooling every lift pays one allocation just to walk
+// its own flat values. Return it with putCoreValueIter once lifting is done.
+func getCoreValueIter(values []CoreValue) *CoreValueIter {
+	it := coreValueIterPool.Get().(*CoreValueIter)
+	it.values, it.i = values, 0
+	return it
+}
+
+// putCoreValueIter returns an iterator to the pool. Safe only once nothing
+// retains it -- LiftFlat's lifted result never aliases the iterator or its
+// backing slice, so it's released the moment liftFlatImpl returns. The values
+// reference is cleared so a pooled-but-idle iterator doesn't pin that slice's
+// backing array (itself often pooled by the caller).
+func putCoreValueIter(it *CoreValueIter) {
+	it.values = nil
+	coreValueIterPool.Put(it)
 }
 
 // Next returns the next CoreValue and advances the iterator.
