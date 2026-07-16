@@ -329,30 +329,14 @@ func Instantiate(ctx context.Context, r wazy.Runtime, componentBytes []byte, opt
 	return instantiateComponent(ctx, r, comp, componentBytes)
 }
 
-// needsGraphPath reports whether comp needs the general multi-core-module
-// instantiation graph engine (graph.go) rather than instantiateWithImports.
-//
-// instantiateWithImports already tolerates more than one embedded core
-// module (it walks comp.CoreInstances generically, Kind 0x00 or 0x01, with
-// no count restriction) -- e.g. log_hello.wasm, a wit-bindgen-produced
-// fixture with a main module plus a small preview1-to-preview2 adapter
-// module, already exercises that and is proven working. What it cannot
-// represent is:
-//
-//   - an inline-export core instance regrouping anything other than a func
-//     (a memory or table alias) -- see graph.go's shim-based mechanism, or
-//   - a core func index space where canon-produced funcs (lower,
-//     resource.*) and core-level func aliases genuinely interleave --
-//     instantiateWithImports assumes every canon-produced func occupies a
-//     lower index than every alias-produced func (see its doc), which
-//     CoreFuncSpace's declaration-order tracking can now check precisely.
-//
-// So this checks exactly those two structural properties, rather than
-// something coarser like core-module count: a coarser check would reroute
-// already-working fixtures like log_hello to the newer, less battle-tested
-// engine for no reason, at real regression risk. Only a component that
-// actually needs the generalization (e.g. real_hello.component.wasm, a
-// genuine wasip2 CLI adapter graph) trips this.
+// needsGraphPath and needsImportPath together select the graph engine
+// (instantiateGraph) for any component that has host imports or a non-trivial
+// core structure; a component matching neither is the trivial single-embedded-
+// module, no-import case that instantiateComponent handles. needsGraphPath in
+// particular flags the two structural properties the graph engine's shim
+// mechanism exists for: an inline-export core instance regrouping a memory or
+// table (not just funcs), and a core func index space where canon-produced
+// funcs (lower, resource.*) and core-level func aliases interleave.
 func needsGraphPath(comp *binary.Component) bool {
 	for _, ci := range comp.CoreInstances {
 		if ci.Kind != 0x01 {
