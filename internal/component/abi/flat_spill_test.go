@@ -226,8 +226,8 @@ func TestCoreValueIterDone(t *testing.T) {
 	}
 
 	// After consuming all values, should be done
-	vi.Next()
-	vi.Next()
+	_, _ = vi.Next()
+	_, _ = vi.Next()
 	if !vi.Done() {
 		t.Error("expected Done() after consuming all values")
 	}

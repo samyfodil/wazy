@@ -436,15 +436,15 @@ func TestCoreValueIter(t *testing.T) {
 	}
 
 	// Skip some values
-	vi.Next()
-	vi.Next()
+	_, _ = vi.Next()
+	_, _ = vi.Next()
 
 	// Test Done
 	if vi.Done() {
 		t.Error("expected !Done(), got Done()")
 	}
 
-	vi.Next()
+	_, _ = vi.Next()
 	if !vi.Done() {
 		t.Error("expected Done(), got !Done()")
 	}
