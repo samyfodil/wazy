@@ -4,7 +4,6 @@ import (
 	"context"
 	"sync"
 	"testing"
-	"unsafe"
 
 	"github.com/samyfodil/wazy/internal/testing/require"
 )
@@ -20,33 +19,44 @@ import (
 func TestMemoryPool_NoBleed(t *testing.T) {
 	memSec := &Memory{Min: 2, Cap: 2, Max: 2}
 	owner := &mockModuleEngine{}
+	capBytes := MemoryPagesToBytesNum(2)
 
+	// Part 1 (recycle path): an owner's Close returns its Buffer to the pool and
+	// clears the field, so a stale post-Close read can't observe a future
+	// tenant's data.
 	first := NewMemoryInstance(memSec, nil, owner)
-	require.Equal(t, int(MemoryPagesToBytesNum(2)), len(first.Buffer))
-
-	// Write a recognizable, non-zero pattern across the *entire* backing
-	// array (not just len, since cap == len here anyway given Min == Cap).
-	firstAddr := unsafe.Pointer(unsafe.SliceData(first.Buffer))
+	require.Equal(t, int(capBytes), len(first.Buffer))
 	for i := range first.Buffer {
 		first.Buffer[i] = 0xAA
 	}
-
-	// Close the owning module: this must recycle first.Buffer into the pool.
 	m := &ModuleInstance{MemoryInstance: first, Engine: owner}
 	require.NoError(t, m.ensureResourcesClosed(context.Background()))
-	require.Nil(t, first.Buffer, "owner's Buffer field must be cleared once pooled, so a stale post-Close read can't observe a future tenant's data")
+	require.Nil(t, first.Buffer, "owner's Buffer field must be cleared once pooled")
 
-	// Instantiate a memory of the exact same shape again: this should reuse
-	// the pooled backing array (same underlying allocation)...
-	second := NewMemoryInstance(memSec, nil, owner)
-	secondAddr := unsafe.Pointer(unsafe.SliceData(second.Buffer))
-	require.Equal(t, firstAddr, secondAddr, "expected the pool to actually hand back the same backing array -- otherwise this test isn't exercising reuse at all")
-
-	// ...but it MUST be entirely zeroed, with no trace of the first
-	// instance's data.
-	for i, b := range second.Buffer {
+	// Part 2 (the actual no-bleed property): getPooledMemoryBuffer MUST hand back
+	// a zeroed buffer, so guest data can never bleed across instances. The pool
+	// now holds only dirty buffers -- first.Buffer (0xAA, recycled above) plus the
+	// 0xBB one put here -- so whichever getPooledMemoryBuffer returns was dirty and
+	// must come back clear()'d. This asserts the invariant directly, without the
+	// flaky "same backing array" check (sync.Pool may hand back either dirty
+	// buffer, or drop one on GC -- non-deterministic under -race / slow emulation).
+	// Retry put->get until the pool returns a buffer: under -race's aggressive GC,
+	// sync.Pool can drop a just-put buffer, so a single get may miss. A fresh put
+	// each attempt makes this converge in a couple of iterations (GC can't drop
+	// every one), keeping the test deterministic without a flaky nil-check.
+	var got []byte
+	for try := 0; got == nil && try < 1000; try++ {
+		dirty := make([]byte, capBytes)
+		for i := range dirty {
+			dirty[i] = 0xBB
+		}
+		putPooledMemoryBuffer(dirty)
+		got = getPooledMemoryBuffer(capBytes)
+	}
+	require.NotNil(t, got, "pool returned no buffer across many put/get attempts")
+	for i, b := range got[:cap(got)] {
 		if b != 0 {
-			t.Fatalf("byte %d of reused memory is %#x, want 0 (data bled across instances)", i, b)
+			t.Fatalf("byte %d of a reacquired (previously dirty) buffer is %#x, want 0 (data bled across tenants)", i, b)
 		}
 	}
 }
@@ -224,7 +234,7 @@ func poolImportSetup(t *testing.T, n int) (*MemoryInstance, *ModuleInstance, []*
 	s.nameToModule[moduleName] = owner
 
 	importers := make([]*ModuleInstance, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		imp := &ModuleInstance{s: s, Engine: &mockModuleEngine{resolveImportsCalled: map[Index]Index{}}}
 		err := imp.resolveImports(context.Background(), &Module{
 			ImportPerModule: map[string][]*Import{
@@ -240,28 +250,20 @@ func poolImportSetup(t *testing.T, n int) (*MemoryInstance, *ModuleInstance, []*
 
 // TestMemoryPool_LastImporterCloseRecycles: with an importer still live, the
 // owner's Close must NOT recycle; the LAST importer's Close (after the owner
-// closed) must, and the reused buffer must be zeroed (no bleed via the import
-// path).
+// closed) must. Recycling is observed deterministically via mem.Buffer being
+// claimed (nil) -- that means it was handed to putPooledMemoryBuffer. The pool's
+// zero-on-acquire (no cross-instance bleed) is the same code path for any recycle
+// and is covered by TestMemoryPool_NoBleed; asserting the pool hands back this
+// exact backing array is intentionally omitted, as sync.Pool may drop it on GC
+// (non-deterministic under -race / slow emulation).
 func TestMemoryPool_LastImporterCloseRecycles(t *testing.T) {
 	mem, owner, imps := poolImportSetup(t, 1)
-	addr := unsafe.Pointer(unsafe.SliceData(mem.Buffer))
-	for i := range mem.Buffer {
-		mem.Buffer[i] = 0xCC
-	}
 
 	require.NoError(t, owner.ensureResourcesClosed(context.Background()))
 	require.NotNil(t, mem.Buffer, "owner close with a live importer must not recycle")
 
 	require.NoError(t, imps[0].ensureResourcesClosed(context.Background()))
 	require.Nil(t, mem.Buffer, "last importer close after owner close must recycle")
-
-	second := NewMemoryInstance(&Memory{Min: 1, Cap: 1, Max: 1}, nil, &mockModuleEngine{})
-	require.Equal(t, addr, unsafe.Pointer(unsafe.SliceData(second.Buffer)), "expected the pool to hand back the recycled backing array")
-	for i, b := range second.Buffer {
-		if b != 0 {
-			t.Fatalf("byte %d of reused memory is %#x, want 0 (data bled across instances via the import path)", i, b)
-		}
-	}
 }
 
 // TestMemoryPool_ImporterThenOwnerCloseRecycles: the other close order. The
@@ -297,7 +299,7 @@ func TestMemoryPool_TwoImportersRecycleOnLast(t *testing.T) {
 // makes recycling single-shot regardless of order -- so under -race this must
 // stay clean and end with Buffer claimed exactly once (nil).
 func TestMemoryPool_ConcurrentOwnerImporterCloseRace(t *testing.T) {
-	for iter := 0; iter < 300; iter++ {
+	for range 300 {
 		mem, owner, imps := poolImportSetup(t, 3)
 		closers := append([]*ModuleInstance{owner}, imps...)
 		var wg sync.WaitGroup
