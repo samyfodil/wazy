@@ -1,6 +1,10 @@
 package instance
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/samyfodil/wazy/internal/component/abi"
+)
 
 // This file transliterates the Canonical ABI's Waitable / WaitableSet /
 // Subtask (testdata/definitions.py ~745-900) for wazy's single-active-task
@@ -100,6 +104,17 @@ func (w *waitable) dropWaitable() {
 // the handle table (entryWaitableSet).
 type waitableSet struct {
 	elems []*waitable
+
+	// numWaiting mirrors WaitableSet.num_waiting: how many drivers are
+	// currently blocked in wait_for_event_and against this set. Bracketed
+	// (++/--) around every sched.drive call that can observe this set --
+	// invokeAsyncCallback's callbackWait arm and waitable-set.wait
+	// (async_builtins.go) -- so dropSet's trap_if(num_waiting > 0) is a real
+	// check, not always-zero bookkeeping: with one task it can only be
+	// nonzero during a NESTED drive (the callback loop's own WAIT is itself
+	// pumping the scheduler when a queued thunk turns around and drops the
+	// very set it's blocked on), which is a real, if unusual, program.
+	numWaiting int
 }
 
 func (*waitableSet) entryKind() entryKind { return entryWaitableSet }
@@ -146,11 +161,19 @@ func (s *waitableSet) poll() eventTuple {
 	return s.getPendingEvent()
 }
 
-// dropSet mirrors WaitableSet.drop: trap if anything still joined. (num_waiting
-// collapses -- the sole task is never itself waiting when it drops a set.)
+// dropSet mirrors WaitableSet.drop: trap if anything still joined, or if a
+// driver is currently blocked waiting on this set (see numWaiting's doc --
+// unreachable while dropSet itself runs on the one driving goroutine calling
+// in, since nothing can be BOTH inside sched.drive(this set) AND calling
+// waitable-set.drop(this set) at once, but kept for oracle parity, exactly
+// like the reference keeps the check even though its own single-process
+// deterministic profile rarely exercises it).
 func (s *waitableSet) dropSet() error {
 	if len(s.elems) > 0 {
 		return fmt.Errorf("waitable-set.drop: %d waitable(s) still joined to the set", len(s.elems))
+	}
+	if s.numWaiting > 0 {
+		return fmt.Errorf("waitable-set.drop: %d waiter(s) still blocked on the set", s.numWaiting)
 	}
 	return nil
 }
@@ -179,6 +202,15 @@ type subtask struct {
 	state       subtaskState
 	lenders     []*resourceEntry
 	flatResults []uint64
+
+	// applyResolve lowers an async host import's results into the guest
+	// memory captured at call time (through the retptr an async-lowered
+	// import's core signature always carries for a non-empty result -- see
+	// async_host_import.go's buildAsyncHostWrapper) and flips state to
+	// RETURNED. Set by buildAsyncHostWrapper for a host-import subtask;
+	// nil for anything else (no other subtask source exists yet -- Phase
+	// 2/3 add guest->guest lowers and streams/futures).
+	applyResolve func(results []abi.Value) error
 }
 
 func (*subtask) entryKind() entryKind     { return entrySubtask }

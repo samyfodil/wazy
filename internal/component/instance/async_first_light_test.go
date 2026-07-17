@@ -106,10 +106,17 @@ func TestExitWithoutReturnAsync(t *testing.T) {
 	requireErrContains(t, err, "callback returned EXIT before task.return resolved")
 }
 
-// TestWaitUnsupportedAsync pins the Phase 1c boundary: "run" returns WAIT
-// (code=2) on its first call, which invokeAsyncCallback must reject with a
-// clear "not yet supported" error rather than attempting to drive a
-// scheduler that doesn't exist yet.
+// TestWaitUnsupportedAsync pins canon_lift's WAIT branch trap_if(not
+// isinstance(wset, WaitableSet)): "run" returns WAIT (code=2, si=2) on its
+// first call, but si=2 never names a live waitable set (nothing in this
+// fixture ever creates one) -- the WAIT driver (invokeAsyncCallback's
+// callbackWait arm, docs/component-model-async-runtime-design.md §1.3) must
+// reject that with a clear kind-mismatch trap, not attempt to drive a
+// scheduler against a bogus handle. (Named for the pre-Phase-1c era when
+// WAIT itself was unimplemented; kept as-is since the fixture and its
+// assertion are still the same shape -- TestAwaitAsyncImport, in
+// async_await_import_test.go, exercises the REAL WAIT path end to end,
+// against a genuine waitable set.)
 func TestWaitUnsupportedAsync(t *testing.T) {
 	ctx := context.Background()
 	r := wazy.NewRuntime(ctx)
@@ -122,7 +129,7 @@ func TestWaitUnsupportedAsync(t *testing.T) {
 	defer inst.Close(ctx)
 
 	_, err = inst.Call(ctx, "run-async")
-	requireErrContains(t, err, "not yet supported (Phase 1c)")
+	requireErrContains(t, err, "handle 2 is not a waitable set")
 }
 
 // TestInvalidCallbackCodeAsync pins unpack_callback_result's

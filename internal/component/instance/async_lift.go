@@ -2,6 +2,7 @@ package instance
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/samyfodil/wazy/internal/component/abi"
@@ -37,11 +38,15 @@ func unpackCallbackResult(packed uint32) (callbackCode, uint32, error) {
 // wazy's single-active-task MVP -- see
 // docs/component-model-async-runtime-design.md §1.3.
 //
-// Only the degenerate path this milestone targets is exercised end to end:
-// a callback that returns EXIT on its very first call, after the core
-// func's FIRST call has already invoked task.return. WAIT is decoded and
-// dispatched but always fails loud -- waitable sets and the scheduler drive
-// that would satisfy a WAIT land in Phase 1c.
+// EXIT and YIELD were the only reachable codes as of Phase 1b (a callback
+// that resolves without ever waiting). WAIT (Phase 1c,
+// docs/component-model-async-runtime-design.md §1.3) drives the instance's
+// scheduler (sched.go) until the named waitable set has a pending event --
+// installed by an async host import's deferred Resolve
+// (async_host_import.go) or a subtask otherwise reaching RETURNED -- or
+// traps if the run queue drains first: with exactly one task and no
+// concurrent host activity, an empty queue with the predicate still false is
+// a permanent deadlock, never a transient one.
 func (in *Instance) invokeAsyncCallback(ctx context.Context, be *boundExport, exportName string, args []abi.Value) ([]abi.Value, error) {
 	fd := be.fd
 	if len(args) != len(fd.Params) {
@@ -131,9 +136,10 @@ func (in *Instance) invokeAsyncCallback(ctx context.Context, be *boundExport, ex
 		// Reference: release exclusive for the duration of the suspension,
 		// re-acquire before invoking the callback. With one task this is
 		// pure bookkeeping (nothing else could ever run in between), but
-		// the set/clear SITES are kept verbatim so Phase 1c's CallAsync
-		// drops in without reshaping this loop.
+		// the set/clear SITES are kept verbatim so CallAsync drops in
+		// without reshaping this loop.
 		in.exclusiveHeld = false
+		ev := eventTuple{code: eventNone}
 		switch code {
 		case callbackYield:
 			// wait_until(lambda: not exclusive) under the deterministic
@@ -143,14 +149,29 @@ func (in *Instance) invokeAsyncCallback(ctx context.Context, be *boundExport, ex
 				return nil, fmt.Errorf("component/instance: export %q: %w", exportName, err)
 			}
 		case callbackWait:
-			return nil, fmt.Errorf("component/instance: export %q: async WAIT (waitable-set %d) not yet supported (Phase 1c)", exportName, si)
+			e, ok := in.resources.getEntry(si)
+			ws, isWS := e.(*waitableSet)
+			if !ok || !isWS { // trap_if(not isinstance(wset, WaitableSet))
+				return nil, fmt.Errorf("component/instance: export %q: callback WAIT: handle %d is not a waitable set", exportName, si)
+			}
+			// wait_for_event_and(lambda: not exclusive, ...): the
+			// "not exclusive" conjunct is vacuously true (just cleared
+			// above); the real predicate is has_pending_event.
+			ws.numWaiting++
+			derr := in.sched.drive(ws.hasPendingEvent)
+			ws.numWaiting--
+			if derr != nil {
+				if errors.Is(derr, errAsyncDeadlock) {
+					return nil, fmt.Errorf("component/instance: export %q: deadlock: guest is WAITing on waitable-set %d but it has no pending event and the run queue is empty; an import resolved externally requires CallAsync (not yet implemented)", exportName, si)
+				}
+				return nil, fmt.Errorf("component/instance: export %q: %w", exportName, derr)
+			}
+			ev = ws.getPendingEvent() // FIFO first-with-event
 		}
 		in.exclusiveHeld = true
 
-		// [packed] = callback(event_code, p1, p2). Only EventCode.NONE
-		// (0,0,0) is reachable in this milestone -- YIELD is the only
-		// non-EXIT code that doesn't already return above.
-		cbStack[0], cbStack[1], cbStack[2] = 0, 0, 0
+		// [packed] = callback(event_code, p1, p2).
+		cbStack[0], cbStack[1], cbStack[2] = uint64(ev.code), uint64(ev.p1), uint64(ev.p2)
 		if err := be.callbackFn.CallWithStack(ctx, cbStack[:]); err != nil {
 			return nil, fmt.Errorf("component/instance: export %q: callback %q: %w", exportName, be.callbackFuncName, err)
 		}

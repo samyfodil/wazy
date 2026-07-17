@@ -1063,12 +1063,43 @@ func computeCanonHostFunc(
 		}
 		wasiCall = iface + "." + fname
 
+		// isAsyncLower is CanonOpt kind 0x06 (async), the lower side of the
+		// same bit bindFuncExportGraph checks for a lift (isAsyncLift):
+		// docs/component-model-async-runtime-design.md §2. A lower with this
+		// option creates a Subtask instead of calling straight through --
+		// see buildAsyncHostWrapper.
+		isAsyncLower := false
+		for _, opt := range canon.Opts {
+			if opt.Kind == 0x06 {
+				isAsyncLower = true
+				break
+			}
+		}
+
 		if hi, ok := cfg.imports[mkImportKey(iface, fname)]; ok {
+			// A sync-registered (WithImport) or async-registered
+			// (WithAsyncImport) import may only back a lower that agrees --
+			// see WithAsyncImport's doc. hi.fn/hi.asyncFn are mutually
+			// exclusive (set by exactly one of the two registration Options).
+			if isAsyncLower && hi.asyncFn == nil {
+				return hostFuncDef{}, "", fmt.Errorf("import %q func %q is lowered with the async option, but was registered via WithImport; register it with WithAsyncImport instead", iface, fname)
+			}
+			if !isAsyncLower && hi.fn == nil {
+				return hostFuncDef{}, "", fmt.Errorf("import %q func %q is lowered synchronously, but was registered via WithAsyncImport; register it with WithImport instead", iface, fname)
+			}
+
 			memMod, reallocFn, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
 			if merr != nil {
 				return hostFuncDef{}, "", fmt.Errorf("import %q func %q: %w", iface, fname, merr)
 			}
-			fn, hiParams, hiResults, herr := buildHostWrapper(iface, fname, hi, resources, memMod, reallocFn)
+			var fn api.GoModuleFunction
+			var hiParams, hiResults []api.ValueType
+			var herr error
+			if isAsyncLower {
+				fn, hiParams, hiResults, herr = buildAsyncHostWrapper(in, iface, fname, hi, resources, memMod, reallocFn)
+			} else {
+				fn, hiParams, hiResults, herr = buildHostWrapper(iface, fname, hi, resources, memMod, reallocFn)
+			}
 			if herr != nil {
 				return hostFuncDef{}, "", herr
 			}
@@ -1129,6 +1160,12 @@ func computeCanonHostFunc(
 
 	case binary.CanonKindWaitableSetNew:
 		def = waitableSetNewHostFunc(in)
+
+	case binary.CanonKindWaitableSetWait:
+		def = waitableSetWaitHostFunc(in)
+
+	case binary.CanonKindWaitableSetPoll:
+		def = waitableSetPollHostFunc(in)
 
 	case binary.CanonKindWaitableSetDrop:
 		def = waitableSetDropHostFunc(in)

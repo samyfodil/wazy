@@ -2,6 +2,7 @@ package instance
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 
@@ -59,6 +60,82 @@ func waitableSetNewHostFunc(in *Instance) hostFuncDef {
 		stack[0] = uint64(in.resources.addEntry(&waitableSet{}))
 	})
 	return hostFuncDef{fn: fn, params: nil, results: []api.ValueType{api.ValueTypeI32}}
+}
+
+// requireWaitableSet resolves si to a *waitableSet in in.resources -- the
+// trap_if(not isinstance(wset, WaitableSet)) shared by wait/poll/drop
+// (definitions.py's canon_waitable_set_wait/poll/drop, ~2410-2443).
+func requireWaitableSet(in *Instance, builtin string, si uint32) *waitableSet {
+	e, ok := in.resources.getEntry(si)
+	ws, isWS := e.(*waitableSet)
+	if !ok || !isWS {
+		panic(fmt.Errorf("component/instance: %s: handle %d is not a waitable set", builtin, si))
+	}
+	return ws
+}
+
+// storeEvent is the reference's unpack_event (definitions.py ~2418): write
+// ev's (p1,p2) at ptr/ptr+4 in mod's memory and return the event code. Shared
+// by waitable-set.wait/poll.
+func storeEvent(mod api.Module, builtin string, ptr uint32, ev eventTuple) eventCode {
+	mem, memAvailable := memoryBytesOf(mod)
+	if !memAvailable {
+		panic(fmt.Errorf("component/instance: %s: calling module has no memory", builtin))
+	}
+	u32 := binary.PrimitiveDesc{Prim: "u32"}
+	if err := abi.Store(mem, ptr, u32, ev.p1, nil, abi.Realloc{}); err != nil {
+		panic(fmt.Errorf("component/instance: %s: store event p1: %w", builtin, err))
+	}
+	if err := abi.Store(mem, ptr+4, u32, ev.p2, nil, abi.Realloc{}); err != nil {
+		panic(fmt.Errorf("component/instance: %s: store event p2: %w", builtin, err))
+	}
+	return ev.code
+}
+
+// waitableSetWaitHostFunc backs waitable-set.wait (CanonKindWaitableSetWait,
+// 0x20) -- canon_waitable_set_wait, definitions.py ~2410. Core sig
+// (si:i32, ptr:i32) -> i32: block until the named waitable set has a pending
+// event (a nested drive of the instance scheduler -- sched.go -- exactly the
+// mechanism invokeAsyncCallback's callbackWait arm uses; the reference's
+// callback-lift implicit thread is a genuine Thread that can itself call a
+// blocking wait builtin and suspend, so this is legal from callback code
+// too, not just from a would-be sync/stackful task), write its (p1,p2) at
+// ptr/ptr+4, and return the event code. Cancellable is always false in this
+// milestone -- no task can be cancelled yet (see the design doc's Q3 table).
+func waitableSetWaitHostFunc(in *Instance) hostFuncDef {
+	fn := api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+		requireMayLeave(in, "waitable-set.wait")
+		si := api.DecodeU32(stack[0])
+		ptr := api.DecodeU32(stack[1])
+		ws := requireWaitableSet(in, "waitable-set.wait", si)
+
+		ws.numWaiting++
+		err := in.sched.drive(ws.hasPendingEvent)
+		ws.numWaiting--
+		if err != nil {
+			if errors.Is(err, errAsyncDeadlock) {
+				panic(fmt.Errorf("component/instance: waitable-set.wait: deadlock: waitable-set %d has no pending event and the run queue is empty; an import resolved externally requires CallAsync (not yet implemented)", si))
+			}
+			panic(fmt.Errorf("component/instance: waitable-set.wait: %w", err))
+		}
+		stack[0] = uint64(storeEvent(mod, "waitable-set.wait", ptr, ws.getPendingEvent()))
+	})
+	return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, results: []api.ValueType{api.ValueTypeI32}}
+}
+
+// waitableSetPollHostFunc backs waitable-set.poll (CanonKindWaitableSetPoll,
+// 0x21) -- canon_waitable_set_poll, definitions.py ~2427. Same as wait but
+// non-blocking: returns EventCode.NONE immediately when nothing is pending
+// instead of driving the scheduler.
+func waitableSetPollHostFunc(in *Instance) hostFuncDef {
+	fn := api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+		requireMayLeave(in, "waitable-set.poll")
+		si := api.DecodeU32(stack[0])
+		ptr := api.DecodeU32(stack[1])
+		ws := requireWaitableSet(in, "waitable-set.poll", si)
+		stack[0] = uint64(storeEvent(mod, "waitable-set.poll", ptr, ws.poll()))
+	})
+	return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, results: []api.ValueType{api.ValueTypeI32}}
 }
 
 // waitableSetDropHostFunc backs waitable-set.drop (CanonKindWaitableSetDrop,

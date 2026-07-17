@@ -347,6 +347,23 @@ func (t *handleTable) Lend(typeIdx, h uint32) error {
 	return nil
 }
 
+// entryForLend resolves handle h (of resource type typeIdx) to its
+// *resourceEntry for a caller that will manage a lend's lifetime itself via
+// subtask.addLender/deliverResolve, rather than releasing it through Unlend
+// keyed by (typeIdx, handle) once the immediate call returns -- the sync host
+// import wrapper's pattern (buildHostWrapper's defer Unlend). An async host
+// import's borrow<T> arg must instead stay lent until its subtask's resolve
+// is DELIVERED (liftAsyncHostArgsPlanned, async_host_import.go), which can be
+// long after this call returns, so the caller needs the live *resourceEntry
+// pointer to release later rather than a (typeIdx, handle) pair that could,
+// by then, name a different handle entirely (index reuse via the free list).
+// Does not touch lendCount itself -- the caller increments it via addLender.
+func (t *handleTable) entryForLend(typeIdx, h uint32) (*resourceEntry, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.lookup(typeIdx, h)
+}
+
 // Unlend reverses a Lend. Fails loud if h has no outstanding lends to
 // release.
 func (t *handleTable) Unlend(typeIdx, h uint32) error {

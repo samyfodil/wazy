@@ -109,8 +109,17 @@ func mkImportKey(iface, name string) importKey {
 // WIT parameter and result types the caller declared for it. The types are
 // supplied by the caller because the binary decoder does not retain the func
 // signatures declared inside an imported instance type (see the package doc).
+//
+// fn and asyncFn are mutually exclusive: WithImport sets fn (nil asyncFn);
+// WithAsyncImport (async_host_import.go) sets asyncFn (nil fn). Which one is
+// set must agree with whether the CONSUMING canon lower carries the async
+// option -- graph.go's computeCanonHostFunc checks this at bind time and
+// fails loud on a mismatch, since calling a sync HostFunc through the async
+// calling convention (or vice versa) would silently misinterpret the core
+// stack.
 type hostImport struct {
 	fn      HostFunc
+	asyncFn AsyncHostFunc
 	params  []binary.TypeDesc
 	results []binary.TypeDesc
 
