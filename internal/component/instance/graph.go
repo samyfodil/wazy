@@ -244,6 +244,17 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	}
 
 	resources := newHandleTable()
+	// in is allocated NOW (instead of built as a struct literal at the end
+	// of this function, as the trivial paths still do) so the async
+	// builtins (task.return, context.get/set, backpressure.inc/dec -- see
+	// async_builtins.go) wired into the core-instance loop below can close
+	// over a stable *Instance directly, exactly the way they close over
+	// resources. Every other field is filled in below, in the same places
+	// the old struct literal set them; the struct literal at the bottom of
+	// this function became field assignments on this same pointer instead
+	// of a fresh allocation. mayEnter/mayLeave start true -- see their doc
+	// on Instance.
+	in := &Instance{resolve: resolve, resources: resources, mayEnter: true, mayLeave: true}
 	// A composed sub-instance inherits the destructors for the resources it
 	// imports from a sibling, keyed by the table tag its own resource.drop uses.
 	for tag, resolve := range cfg.importedResDtors {
@@ -317,7 +328,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 				return nil, "", fmt.Errorf("core func index %d: canon index %d out of range", cfi, entry.Canon)
 			}
 			privName := nextPrivateName()
-			hostMod, name, params, results, _, err := buildCanonHostModule(ctx, r, comp, cfg, resources, comp.Canons[entry.Canon], neededTypes, "", privName, privName, coreMemTarget, coreFuncTarget)
+			hostMod, name, params, results, _, err := buildCanonHostModule(ctx, r, comp, cfg, resources, in, comp.Canons[entry.Canon], neededTypes, "", privName, privName, coreMemTarget, coreFuncTarget)
 			if err != nil {
 				return nil, "", fmt.Errorf("core func index %d: %w", cfi, err)
 			}
@@ -456,7 +467,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 					if int(centry.Canon) >= len(comp.Canons) {
 						return fail(fmt.Errorf("component/instance: core instance %d: inline export %q references canon %d, out of range", k, e.Name, centry.Canon))
 					}
-					def, wasiCall, cerr := computeCanonHostFunc(ctx, r, comp, cfg, resources, comp.Canons[centry.Canon], neededTypes, key, e.Name, coreMemTarget, coreFuncTarget)
+					def, wasiCall, cerr := computeCanonHostFunc(ctx, r, comp, cfg, resources, in, comp.Canons[centry.Canon], neededTypes, key, e.Name, coreMemTarget, coreFuncTarget)
 					if cerr != nil {
 						return fail(fmt.Errorf("component/instance: core instance %d: inline export %q: %w", k, e.Name, cerr))
 					}
@@ -471,7 +482,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 				}
 				// key doubles as groupName (the consumer-declared name) for
 				// neededTypes lookups; keys names the shim's alias sources.
-				item, wasiCall, privMod, err := resolveInlineExportItem(ctx, r, comp, cfg, resources, e, coreMemSpace, coreTableSpace, instMods, keys, neededTypes, key, nextPrivateName, coreFuncTarget, coreMemTarget)
+				item, wasiCall, privMod, err := resolveInlineExportItem(ctx, r, comp, cfg, resources, in, e, coreMemSpace, coreTableSpace, instMods, keys, neededTypes, key, nextPrivateName, coreFuncTarget, coreMemTarget)
 				if err != nil {
 					return fail(fmt.Errorf("component/instance: core instance %d: %w", k, err))
 				}
@@ -557,26 +568,26 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		return fail(err)
 	}
 
-	return &Instance{
-		resolve:         resolve,
-		exports:         exports,
-		instanceExports: buildInstanceExportIndex(exports),
-		closers:         closers,
-		subInstances:    subInstances,
-		resourceDtors:   instanceDtors,
-		resCanon:        cfg.resCanon,
-		comp:            comp,
-		resources:       resources,
-		coreModuleCount: coreModuleCount,
-		wasiCalls:       wasiCalls,
-		httpHost:        cfg.httpHost,
-		// A resource type index is guest-owned unless it aliases an imported
-		// instance's export (a host-provided resource) -- see resolveArgHandles.
-		isGuestResource: func(rt uint32) bool {
-			_, _, imported := resolveImportedResourceName(comp, rt)
-			return !imported
-		},
-	}, nil
+	// The remaining fields are filled in on the SAME *Instance the async
+	// builtins above already closed over (see in's allocation, near the top
+	// of this function) -- not a fresh struct literal.
+	in.exports = exports
+	in.instanceExports = buildInstanceExportIndex(exports)
+	in.closers = closers
+	in.subInstances = subInstances
+	in.resourceDtors = instanceDtors
+	in.resCanon = cfg.resCanon
+	in.comp = comp
+	in.coreModuleCount = coreModuleCount
+	in.wasiCalls = wasiCalls
+	in.httpHost = cfg.httpHost
+	// A resource type index is guest-owned unless it aliases an imported
+	// instance's export (a host-provided resource) -- see resolveArgHandles.
+	in.isGuestResource = func(rt uint32) bool {
+		_, _, imported := resolveImportedResourceName(comp, rt)
+		return !imported
+	}
+	return in, nil
 }
 
 // instantiateNestedInstances recursively instantiates comp.Instances -- the
@@ -921,7 +932,7 @@ func discoverNeededFuncTypes(r wazy.Runtime, comp *binary.Component, componentBy
 // module or earlier shim) by that key, not by mod.Name() -- which is "" for an
 // anonymous module.
 func resolveInlineExportItem(
-	ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, resources *handleTable,
+	ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, resources *handleTable, in *Instance,
 	e binary.CoreInlineExport, coreMemSpace, coreTableSpace []aliasTarget, instMods map[int]api.Module, keys []string,
 	neededTypes map[string]map[string]coreFuncSig, groupName string, nextPrivateName func() string,
 	coreFuncTarget func(int) (api.Module, string, error), coreMemTarget func(int) (api.Module, error),
@@ -948,7 +959,7 @@ func resolveInlineExportItem(
 
 		case binary.CoreFuncFromCanon:
 			canon := comp.Canons[entry.Canon]
-			mod, exportName, params, results, wasiCall, err := buildCanonHostModule(ctx, r, comp, cfg, resources, canon, neededTypes, groupName, e.Name, nextPrivateName(), coreMemTarget, coreFuncTarget)
+			mod, exportName, params, results, wasiCall, err := buildCanonHostModule(ctx, r, comp, cfg, resources, in, canon, neededTypes, groupName, e.Name, nextPrivateName(), coreMemTarget, coreFuncTarget)
 			if err != nil {
 				return shimItem{}, "", nil, fmt.Errorf("inline export %q: %w", e.Name, err)
 			}
@@ -1009,7 +1020,7 @@ func resolveInlineExportItem(
 // canon. See buildCanonHostModule's (removed) doc, preserved below, for the
 // lower/trap-stub/resource behaviors.
 func computeCanonHostFunc(
-	ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, resources *handleTable,
+	ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, resources *handleTable, in *Instance,
 	canon binary.Canon, neededTypes map[string]map[string]coreFuncSig, groupName, entryName string,
 	coreMemTarget func(int) (api.Module, error), coreFuncTarget func(int) (api.Module, string, error),
 ) (def hostFuncDef, wasiCall string, err error) {
@@ -1082,6 +1093,52 @@ func computeCanonHostFunc(
 			return hostFuncDef{}, "", rerr
 		}
 
+	// --- MVP async builtins (docs/component-model-async-runtime-design.md
+	// §1.5) -- wired the same way as a resource canon above: a fixed-i32
+	// core func closing over the *Instance, no reflection/WithFunc. See
+	// async_builtins.go. Every other async canon kind (waitable-set.*,
+	// subtask.*, stream.*, future.*, error-context.*, task.cancel) is Phase
+	// 1c/2/3 and still falls through to the default "does not produce a
+	// core func" error below.
+	case binary.CanonKindTaskReturn:
+		var terr error
+		def, terr = taskReturnHostFuncGraph(in, canon)
+		if terr != nil {
+			return hostFuncDef{}, "", terr
+		}
+
+	case binary.CanonKindContextGet:
+		var cerr error
+		def, cerr = contextGetHostFuncGraph(in, canon)
+		if cerr != nil {
+			return hostFuncDef{}, "", cerr
+		}
+
+	case binary.CanonKindContextSet:
+		var cerr error
+		def, cerr = contextSetHostFuncGraph(in, canon)
+		if cerr != nil {
+			return hostFuncDef{}, "", cerr
+		}
+
+	case binary.CanonKindBackpressureInc:
+		def = backpressureIncHostFuncGraph(in)
+
+	case binary.CanonKindBackpressureDec:
+		def = backpressureDecHostFuncGraph(in)
+
+	case binary.CanonKindWaitableSetNew:
+		def = waitableSetNewHostFunc(in)
+
+	case binary.CanonKindWaitableSetDrop:
+		def = waitableSetDropHostFunc(in)
+
+	case binary.CanonKindWaitableJoin:
+		def = waitableJoinHostFunc(in)
+
+	case binary.CanonKindSubtaskDrop:
+		def = subtaskDropHostFunc(in)
+
 	default:
 		return hostFuncDef{}, "", fmt.Errorf("references a canon of kind %#x, which does not produce a core func", canon.Kind)
 	}
@@ -1123,11 +1180,11 @@ func buildMergedCanonHostModule(ctx context.Context, r wazy.Runtime, privateName
 // use). The graph's inline-export loop instead uses computeCanonHostFunc +
 // buildMergedCanonHostModule to pack a whole group's canon funcs into one module.
 func buildCanonHostModule(
-	ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, resources *handleTable,
+	ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, resources *handleTable, in *Instance,
 	canon binary.Canon, neededTypes map[string]map[string]coreFuncSig, groupName, entryName, privateName string,
 	coreMemTarget func(int) (api.Module, error), coreFuncTarget func(int) (api.Module, string, error),
 ) (mod api.Module, exportName string, params, results []api.ValueType, wasiCall string, err error) {
-	def, wasiCall, err := computeCanonHostFunc(ctx, r, comp, cfg, resources, canon, neededTypes, groupName, entryName, coreMemTarget, coreFuncTarget)
+	def, wasiCall, err := computeCanonHostFunc(ctx, r, comp, cfg, resources, in, canon, neededTypes, groupName, entryName, coreMemTarget, coreFuncTarget)
 	if err != nil {
 		return nil, "", nil, nil, "", err
 	}
@@ -1308,12 +1365,15 @@ func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc f
 		return nil, fmt.Errorf("component/instance: export %q resolves to an imported func rather than a lift; only lifted funcs may be exported", diagName)
 	}
 	canon := comp.Canons[liftCanonIdx]
-	// Phase 0: an async lift (CanonOpt kind 0x06) decodes fine but has no
-	// runtime yet -- fail loud rather than silently binding it as synchronous.
-	// Phase 1's invokeAsyncCallback routing replaces this guard.
+	// isAsyncLift is CanonOpt kind 0x06 (async): decoded fully since Phase 0,
+	// but only the async+callback combination has a runtime this phase --
+	// see the isAsyncLift branch below, after the core func/postReturn/
+	// realloc options (identical for both shapes) are resolved.
+	isAsyncLift := false
 	for _, opt := range canon.Opts {
-		if opt.Kind == 0x06 { // async
-			return nil, fmt.Errorf("component/instance: export %q: async canon lift is not yet supported", diagName)
+		if opt.Kind == 0x06 {
+			isAsyncLift = true
+			break
 		}
 	}
 	td, err := comp.ResolveType(canon.TypeIdx)
@@ -1340,7 +1400,24 @@ func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc f
 		return nil, fmt.Errorf("component/instance: export %q: %w", diagName, err)
 	}
 
+	callbackName, err := resolveCallbackFuncGraph(canon, coreFuncTarget, mod)
+	if err != nil {
+		return nil, fmt.Errorf("component/instance: export %q: %w", diagName, err)
+	}
+	if isAsyncLift && callbackName == "" {
+		// Async without a callback is a STACKFUL lift (the guest suspends
+		// mid-frame via a fiber/continuation): out of scope for this
+		// milestone (docs/component-model-async-runtime-design.md targets
+		// callback lifts only). Async+callback is handled below by routing
+		// through invokeAsyncCallback instead.
+		return nil, fmt.Errorf("component/instance: export %q: stackful async lift (no callback) is not yet supported", diagName)
+	}
+
 	be := &boundExport{mod: mod, funcName: name, fd: fd, postReturnFuncName: postReturnName, reallocFuncName: reallocName}
+	if isAsyncLift {
+		be.asyncCallback = true
+		be.callbackFuncName = callbackName
+	}
 	finalizeBoundExport(be, resolve, abiCache, comp, funcIdx)
 	return be, nil
 }
@@ -1383,6 +1460,30 @@ func resolveReallocFuncGraph(canon binary.Canon, coreFuncTarget func(int) (api.M
 		}
 		if mod != liftMod {
 			return "", fmt.Errorf("realloc core func targets a different core instance than the lift's own core func; cross-instance realloc is not supported")
+		}
+		return name, nil
+	}
+	return "", nil
+}
+
+// resolveCallbackFuncGraph resolves an async lift's callback option
+// (CanonOpt kind 0x07) to its core export name, mirroring
+// resolvePostReturnFuncGraph/resolveReallocFuncGraph exactly (same
+// same-core-instance requirement -- invokeAsyncCallback calls be.callbackFn
+// on be.mod, so a callback targeting a different core instance would need
+// cross-instance calling this package doesn't support). Returns "" when the
+// lift declares no callback option (a stackful async lift, or a sync lift).
+func resolveCallbackFuncGraph(canon binary.Canon, coreFuncTarget func(int) (api.Module, string, error), liftMod api.Module) (string, error) {
+	for _, opt := range canon.Opts {
+		if opt.Kind != 0x07 { // callback
+			continue
+		}
+		mod, name, err := coreFuncTarget(int(opt.Idx))
+		if err != nil {
+			return "", fmt.Errorf("callback %w", err)
+		}
+		if mod != liftMod {
+			return "", fmt.Errorf("callback core func targets a different core instance than the lift's own core func; cross-instance callback is not supported")
 		}
 		return name, nil
 	}

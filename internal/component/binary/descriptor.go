@@ -152,6 +152,11 @@ func (FutureDesc) Kind() string { return "future" }
 type FuncDesc struct {
 	Params  []FuncParam
 	Results FuncResults
+	// Async is true for an `async func` component-func type (deftype tag 0x43,
+	// vs the synchronous 0x40). A canon lift/lower's own async CanonOpt (0x06)
+	// is separate; the Canonical ABI requires the two to agree, but that
+	// cross-check is a validation concern, not decode.
+	Async bool
 }
 
 func (FuncDesc) isTypeDesc()  {}
@@ -756,6 +761,10 @@ func readDeftypeDesc(buf []byte, off int) (TypeDesc, int, error) {
 	switch {
 	case tag == 0x40:
 		d, off, err := readFunctypeDesc(buf, off)
+		return d, off, err
+	case tag == 0x43: // async func: same grammar as 0x40, marked async.
+		d, off, err := readFunctypeDesc(buf, off)
+		d.Async = true
 		return d, off, err
 	case tag == 0x41:
 		// Component type: consume but do not fully represent in M1.

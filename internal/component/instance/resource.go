@@ -19,7 +19,9 @@ import (
 type entryKind uint8
 
 const (
-	entryResource entryKind = iota
+	entryResource    entryKind = iota
+	entryWaitableSet           // *waitableSet (canon waitable-set.new)
+	entrySubtask               // *subtask, itself a Waitable (async-lowered call in flight)
 )
 
 // tableEntry is anything a handleTable slot can hold. resourceEntry is the
@@ -184,6 +186,32 @@ func (t *handleTable) addEntry(e tableEntry) uint32 {
 func (t *handleTable) entryAt(h uint32) (tableEntry, bool) {
 	e, ok := t.entries[h]
 	return e, ok
+}
+
+// getEntry returns the entry at h without removing it (reference Table.get),
+// taking the lock itself. Unlike entryAt, safe to call without holding t.mu.
+func (t *handleTable) getEntry(h uint32) (tableEntry, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	e, ok := t.entries[h]
+	return e, ok
+}
+
+// removeEntry removes and returns the entry at h (reference Table.remove),
+// pushing h onto the free list for guest-observable reuse. Used by the async
+// builtins that retire a table entry regardless of kind (waitable-set.drop,
+// subtask.drop); resource handles retire through Drop/DropOwned, which also
+// enforce their own-only/lend guards.
+func (t *handleTable) removeEntry(h uint32) (tableEntry, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	e, ok := t.entries[h]
+	if !ok {
+		return nil, false
+	}
+	delete(t.entries, h)
+	t.free = append(t.free, h)
+	return e, true
 }
 
 // NewOwn allocates a new owning handle for rep under resource type typeIdx.

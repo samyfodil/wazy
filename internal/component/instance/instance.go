@@ -209,6 +209,47 @@ type Instance struct {
 	// the trivial no-import path (no guest resources). Used by resolveArgHandles
 	// to decide whether an own/borrow arg's handle must be converted to a rep.
 	isGuestResource func(resourceTypeIdx uint32) bool
+
+	// --- Async runtime state (docs/component-model-async-runtime-design.md
+	// §1.2). Every field below is untouched (stays at its zero value) by a
+	// component with no async export, so a sync-only Instance pays two bool
+	// initializations and nothing else. ---
+
+	// sched is the single instance-wide scheduler used while an async task
+	// is active -- see sched's doc and invokeAsyncCallback.
+	sched sched
+
+	// activeTask is non-nil for the duration of invokeAsyncCallback: the
+	// task currently on the (single, implicit) async call stack. The
+	// task.return/context.get/context.set builtins resolve "current task"
+	// through this field (mirroring the reference's current_task()), since
+	// they are ordinary core funcs with no other way to reach the call in
+	// progress. nil outside an async call, and always nil for a purely
+	// synchronous Instance.
+	activeTask *task
+
+	// exclusiveHeld mirrors the reference's inst.exclusive_thread (collapsed
+	// to a bool: there is at most one task, so "who holds it" is always
+	// activeTask when held). See task.go's enterTask/exitTask and
+	// invokeAsyncCallback's callback loop for the set/clear sites.
+	exclusiveHeld bool
+
+	// backpressure mirrors the reference's inst.backpressure -- incremented/
+	// decremented by the backpressure.inc/dec builtins. It survives across
+	// calls (a guest that raises it and returns leaves it raised for the
+	// NEXT Call), which is why it lives on Instance rather than task.
+	backpressure int
+
+	// mayEnter/mayLeave mirror the reference's inst.may_enter/may_leave --
+	// real trap-bearing gates: mayEnter guards re-entrant Call into an
+	// async export from within another call on the same Instance (Store
+	// .lift's trap_if(!may_enter_from)); mayLeave guards every async
+	// builtin (their trap_if(!may_leave)). Initialized true (see
+	// instantiateGraph); this milestone never toggles mayLeave false
+	// anywhere (that only matters once a sync post-return context needs to
+	// reject async builtins, which first-light's shape never exercises).
+	mayEnter bool
+	mayLeave bool
 }
 
 // CoreModuleCount returns the number of embedded core modules (real,
@@ -250,6 +291,21 @@ type boundExport struct {
 	// trivial single-module path (no canon opts decoded), where
 	// finalizeBoundExport falls back to "cabi_realloc".
 	reallocFuncName string
+
+	// asyncCallback is true when this export is an async lift with a
+	// callback option (CanonOpt kind 0x06 async + 0x07 callback) -- see
+	// bindFuncExportGraph. invoke() routes such an export to
+	// invokeAsyncCallback instead of the synchronous path. An async lift
+	// WITHOUT a callback (stackful async) is rejected at bind time; there is
+	// no third boundExport shape.
+	asyncCallback bool
+
+	// callbackFuncName/callbackFn are the async lift's callback option
+	// (CanonOpt kind 0x07) resolved exactly like postReturnFuncName/
+	// postReturnFn above: a core export name, resolved to an api.Function
+	// once at bind time. Meaningful only when asyncCallback is true.
+	callbackFuncName string
+	callbackFn       api.Function
 
 	// coreFn/postReturnFn/reallocFn are api.Function handles resolved ONCE,
 	// at bind time (see finalizeBoundExport), instead of via a fresh
@@ -674,6 +730,9 @@ func finalizeBoundExport(be *boundExport, resolve abi.Resolver, abiCache *Compil
 	be.coreFn = be.mod.ExportedFunction(be.funcName)
 	if be.postReturnFuncName != "" {
 		be.postReturnFn = be.mod.ExportedFunction(be.postReturnFuncName)
+	}
+	if be.callbackFuncName != "" {
+		be.callbackFn = be.mod.ExportedFunction(be.callbackFuncName)
 	}
 	reallocName := be.reallocFuncName
 	if reallocName == "" {
@@ -1113,6 +1172,9 @@ func buildInstanceExportIndex(exports map[string]*boundExport) map[string]map[st
 }
 
 func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName string, args []abi.Value) ([]abi.Value, error) {
+	if be.asyncCallback {
+		return in.invokeAsyncCallback(ctx, be, exportName, args)
+	}
 	fd := be.fd
 	if len(args) != len(fd.Params) {
 		return nil, fmt.Errorf("component/instance: export %q takes %d parameter(s), got %d", exportName, len(fd.Params), len(args))

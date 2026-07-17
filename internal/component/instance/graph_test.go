@@ -328,7 +328,7 @@ func TestBuildCanonHostModule_LowersLiftedFunc(t *testing.T) {
 	ctx := context.Background()
 	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)
-	_, _, _, _, _, err := buildCanonHostModule(ctx, r, comp, newConfig(nil), newHandleTable(), canon, nil, "g", "e", "p", nil, nil)
+	_, _, _, _, _, err := buildCanonHostModule(ctx, r, comp, newConfig(nil), newHandleTable(), nil, canon, nil, "g", "e", "p", nil, nil)
 	requireErrContains(t, err, "lowers a lifted")
 }
 
@@ -353,7 +353,7 @@ func TestBuildCanonHostModule_ImportInterfaceNameError(t *testing.T) {
 	ctx := context.Background()
 	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)
-	_, _, _, _, _, err := buildCanonHostModule(ctx, r, comp, newConfig(nil), newHandleTable(), canon, nil, "g", "e", "p", nil, nil)
+	_, _, _, _, _, err := buildCanonHostModule(ctx, r, comp, newConfig(nil), newHandleTable(), nil, canon, nil, "g", "e", "p", nil, nil)
 	requireErrContains(t, err, "out of range")
 }
 
@@ -368,7 +368,7 @@ func TestBuildCanonHostModule_WithImportOverride(t *testing.T) {
 	hostFn := func(context.Context, []abi.Value) ([]abi.Value, error) { return nil, nil }
 	cfg := newConfig([]Option{WithImport("wasi:cli/stderr@0.2.3", "get-stderr", hostFn, nil, nil)})
 
-	mod, exportName, _, _, wasiCall, err := buildCanonHostModule(ctx, r, comp, cfg, newHandleTable(), canon, nil, "g", "e", "wazy:component/testpriv1", nil, nil)
+	mod, exportName, _, _, wasiCall, err := buildCanonHostModule(ctx, r, comp, cfg, newHandleTable(), nil, canon, nil, "g", "e", "wazy:component/testpriv1", nil, nil)
 	if err != nil {
 		t.Fatalf("buildCanonHostModule: %v", err)
 	}
@@ -388,7 +388,7 @@ func TestBuildCanonHostModule_UnsupportedCanonKind(t *testing.T) {
 	ctx := context.Background()
 	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)
-	_, _, _, _, _, err := buildCanonHostModule(ctx, r, comp, newConfig(nil), newHandleTable(), binary.Canon{Kind: 0xff}, nil, "g", "e", "p", nil, nil)
+	_, _, _, _, _, err := buildCanonHostModule(ctx, r, comp, newConfig(nil), newHandleTable(), nil, binary.Canon{Kind: 0xff}, nil, "g", "e", "p", nil, nil)
 	requireErrContains(t, err, "does not produce a core func")
 }
 
@@ -523,6 +523,18 @@ func TestBindFuncExportGraph_CoreFuncTargetError(t *testing.T) {
 	coreFuncTarget := func(int) (api.Module, string, error) { return nil, "", errBoom }
 	_, err := bindFuncExportGraph(comp, 0, componentFunc, coreFuncTarget, nil, "x", nil, nil)
 	requireErrContains(t, err, "boom")
+}
+
+func TestBindFuncExportGraph_AsyncNoCallback(t *testing.T) {
+	fd := binary.FuncDesc{}
+	comp := &binary.Component{
+		Types:  []binary.Type{{Descriptor: fd}},
+		Canons: []binary.Canon{{Kind: 0x00, TypeIdx: 0, CoreFuncIdx: 0, Opts: []binary.CanonOpt{{Kind: 0x06}}}}, // async, no callback opt
+	}
+	componentFunc := func(uint32) (bool, int, aliasTarget, error) { return true, 0, aliasTarget{}, nil }
+	coreFuncTarget := func(int) (api.Module, string, error) { return nil, "main", nil }
+	_, err := bindFuncExportGraph(comp, 0, componentFunc, coreFuncTarget, nil, "x", nil, nil)
+	requireErrContains(t, err, "stackful async lift (no callback) is not yet supported")
 }
 
 func TestBindFuncExportGraph_PostReturnError(t *testing.T) {
