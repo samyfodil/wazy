@@ -420,7 +420,19 @@ func (m *ModuleInstance) resolveImports(ctx context.Context, module *Module) (er
 		var importedModule *ModuleInstance
 		if resolveImport != nil {
 			if v := resolveImport(moduleName); v != nil {
-				importedModule = v.(*ModuleInstance)
+				switch mi := v.(type) {
+				case *ModuleInstance:
+					importedModule = mi
+				case interface{ UnwrapModuleInstance() *ModuleInstance }:
+					// A host module is a wrapper (wazy.hostModuleInstance) over its
+					// *ModuleInstance; unwrap to the same object the store's own
+					// module lookup would return for it. Lets the component graph
+					// resolve a host module through the ImportResolver under a
+					// stable key instead of its per-instantiation global name.
+					importedModule = mi.UnwrapModuleInstance()
+				default:
+					return fmt.Errorf("import resolver returned an unsupported module type %T for %q", v, moduleName)
+				}
 			}
 		}
 		if importedModule == nil {

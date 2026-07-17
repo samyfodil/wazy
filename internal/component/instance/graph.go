@@ -485,14 +485,32 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			}
 			// Build the group's one shared host module for all its canon funcs,
 			// then point each canon shim item at its "f<j>" export.
+			cacheableShim := true
 			if len(canonDefs) > 0 {
 				hostMod, herr := buildMergedCanonHostModule(ctx, r, nextPrivateName(), canonDefs)
 				if herr != nil {
 					return fail(fmt.Errorf("component/instance: core instance %d: %w", k, herr))
 				}
 				closers = append(closers, hostMod)
+				// Reference the merged module by a COMPONENT-CONSTANT resolver key
+				// (so the shim bytes are stable and cacheable), registering its
+				// UNWRAPPED *wasm.ModuleInstance in keyToInst -- resolveImports
+				// type-asserts to that (a host module is a wrapper over it). Defensive
+				// fallback: on a key collision or a non-wrapper module, use the
+				// per-instantiation global name and mark the shim uncacheable.
+				groupKey := canonGroupKey(k)
+				u, isWrapper := hostMod.(interface {
+					UnwrapModuleInstance() *wasm.ModuleInstance
+				})
+				fromModule := groupKey
+				if _, collides := keyToInst[groupKey]; isWrapper && !collides {
+					keyToInst[groupKey] = u.UnwrapModuleInstance()
+				} else {
+					fromModule = hostMod.Name()
+					cacheableShim = false
+				}
 				for j, idx := range canonItemIdx {
-					items[idx].FromModule = hostMod.Name()
+					items[idx].FromModule = fromModule
 					items[idx].FromName = canonExportName(j)
 				}
 			}
@@ -501,8 +519,13 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 				return fail(fmt.Errorf("component/instance: core instance %d: %w", k, err))
 			}
 			// Anonymous like the embedded modules above; consumers import it by
-			// its key via the resolver, not by a global name.
-			mod, err := r.InstantiateWithConfig(instCtx, shimBytes, wazy.NewModuleConfig().WithName("").WithStartFunctions())
+			// its key via the resolver, not by a global name. Every FromModule is
+			// now component-constant (embedded-module keys + the stable canon-group
+			// key), so shimBytes are identical every instantiation -- route through
+			// the CompileCache (a warm cache then skips re-encoding + recompiling
+			// each shim). cacheableShim is false only in the defensive canon-key
+			// fallback above, where the bytes are not stable.
+			mod, err := instantiateCoreModuleCacheable(instCtx, r, cfg, shimBytes, wazy.NewModuleConfig().WithName("").WithStartFunctions(), cacheableShim)
 			if err != nil {
 				return fail(fmt.Errorf("component/instance: instantiate regrouping shim for core instance %d (key %q): %w", k, key, err))
 			}
@@ -1070,6 +1093,13 @@ func computeCanonHostFunc(
 // canon func packed into a group's shared host module. Stable within a build so
 // the passthrough shim can import each func by name.
 func canonExportName(i int) string { return fmt.Sprintf("f%d", i) }
+
+// canonGroupKey is the COMPONENT-CONSTANT resolver key under which core instance
+// k's merged canon host module is registered in keyToInst. Using a stable key
+// for the shim's FromModule (rather than the host module's per-instantiation
+// global name) keeps the group's passthrough-shim bytes identical every
+// instantiation, so the compile cache hits instead of recompiling the shim.
+func canonGroupKey(k int) string { return fmt.Sprintf("wazy:canon-group/%d", k) }
 
 // buildMergedCanonHostModule instantiates ONE Go host module named privateName
 // exporting every def in defs (func i under canonExportName(i) = "f<i>"),

@@ -232,17 +232,72 @@ func TestCompileCache_HelloPrintsHelloWorld(t *testing.T) {
 		t.Fatalf("stdout = %q, want %q (stderr: %q)", got, "hello world\n", stderr.String())
 	}
 
-	// real_hello has 4 embedded core modules; the cache holds exactly that many
-	// entries. The one module that imports the empty module name is rewritten to
-	// the STABLE graphEmptyImportKey (not a per-instantiation name), so its bytes
-	// are identical every instantiation and it caches like the rest -- see
-	// instantiateGraph's anonymous-instantiation model.
+	// real_hello caches its 4 embedded core modules AND its ~13 regrouping shims
+	// (their FromModule refs are all component-constant now -- embedded-module keys
+	// plus the stable canon-group keys -- so shimBytes are identical every
+	// instantiation; see instantiateGraph). The exact count is an implementation
+	// detail; what matters is that a SECOND Instantiate of the same component on
+	// the same cache adds NOTHING -- every core-module AND shim compile is a hit.
 	cache.mu.Lock()
-	n := len(cache.byKey)
+	n1 := len(cache.byKey)
 	cache.mu.Unlock()
-	if n != 4 {
-		t.Fatalf("cache entries after Instantiate(real_hello): got %d, want 4 (one per embedded core module)", n)
+	if n1 <= 4 {
+		t.Fatalf("cache entries after Instantiate(real_hello): got %d, want > 4 (core modules AND shims should cache)", n1)
 	}
+
+	inst2, err := Instantiate(ctx, r, realHelloWasm, opts...)
+	if err != nil {
+		t.Fatalf("second Instantiate: %v", err)
+	}
+	defer inst2.Close(ctx)
+	cache.mu.Lock()
+	n2 := len(cache.byKey)
+	cache.mu.Unlock()
+	if n2 != n1 {
+		t.Fatalf("cache grew on re-instantiate: %d -> %d; some shim/core bytes are not stable (cache miss)", n1, n2)
+	}
+}
+
+// TestCompileCache_TwoHelloLiveShareShims proves the item-6 stable-key shim
+// caching is concurrency-safe. Two real_hello instances are LIVE at once on one
+// Runtime and one CompileCache: they share the cached shim CompiledModules
+// (bytes are stable), yet each shim must resolve ITS OWN merged canon host
+// module -- both register under the SAME component-constant canon-group key but
+// in SEPARATE per-instance resolver maps (keyToInst). The host modules keep
+// per-instantiation-unique global names, so nothing collides in the store. Both
+// instances must independently print "hello world".
+func TestCompileCache_TwoHelloLiveShareShims(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+	cache := NewCompileCache()
+	defer cache.Close(ctx)
+
+	newInst := func(who string) (*Instance, *bytes.Buffer) {
+		var stdout, stderr bytes.Buffer
+		opts := append([]Option{WithCompileCache(cache)}, WithWASI(WASIConfig{Stdout: &stdout, Stderr: &stderr})...)
+		in, err := Instantiate(ctx, r, realHelloWasm, opts...)
+		if err != nil {
+			t.Fatalf("%s Instantiate: %v", who, err)
+		}
+		return in, &stdout
+	}
+
+	a, aOut := newInst("a")
+	defer a.Close(ctx)
+	b, bOut := newInst("b") // both live simultaneously
+	defer b.Close(ctx)
+
+	call := func(who string, in *Instance, out *bytes.Buffer) {
+		if _, err := in.Call(ctx, "wasi:cli/run@0.2.3#run"); err != nil {
+			t.Fatalf("%s run: %v", who, err)
+		}
+		if got := out.String(); got != "hello world\n" {
+			t.Fatalf("%s stdout = %q, want %q", who, got, "hello world\n")
+		}
+	}
+	call("a", a, aOut)
+	call("b", b, bOut)
 }
 
 // TestCompileCache_HelloReinstantiateAfterCloseOnSameRuntime is

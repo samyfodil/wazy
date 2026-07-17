@@ -329,6 +329,18 @@ func (h hostModuleInstance) ExportedFunction(name string) api.Function {
 	panic("calling ExportedFunction is forbidden on host modules. See the note on ExportedFunction interface")
 }
 
+// UnwrapModuleInstance returns the raw *wasm.ModuleInstance this host module
+// wraps, for internal import-resolution wiring only: registering a host module
+// in an experimental.ImportResolver hands ModuleInstance.resolveImports a value
+// it type-asserts to *wasm.ModuleInstance, which this wrapper is not. The method
+// signature names an internal type, so code outside this module cannot express
+// the interface to call it -- the public ExportedFunction-forbidden guarantee is
+// unaffected. (resolveImports links via internal module state, not
+// ExportedFunction, so a resolver-provided host module is never called that way.)
+func (h hostModuleInstance) UnwrapModuleInstance() *wasm.ModuleInstance {
+	return h.Module.(*wasm.ModuleInstance)
+}
+
 // Instantiate implements HostModuleBuilder.Instantiate
 func (b *hostModuleBuilder) Instantiate(ctx context.Context) (api.Module, error) {
 	if compiled, err := b.Compile(ctx); err != nil {
