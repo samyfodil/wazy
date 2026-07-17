@@ -566,3 +566,27 @@ func TestResolvePostReturnFuncGraph_CrossInstanceMismatch(t *testing.T) {
 	_, err = resolvePostReturnFuncGraph(canon, coreFuncTarget, modA)
 	requireErrContains(t, err, "cross-instance post-return")
 }
+
+// TestDiscoverNeededFuncTypes_BadImportTypeIndex covers the malformed-input
+// guard on the decode-only discovery path. A core module whose func import
+// declares a type index past its type section decodes fine (the decoder does
+// not cross-check the index), so discoverNeededFuncTypes must catch it with a
+// clean error rather than let the out-of-range index reach a slice index panic
+// -- the old compile-based discovery got this validation from the compiler; the
+// decode-only path adds an explicit bounds check.
+func TestDiscoverNeededFuncTypes_BadImportTypeIndex(t *testing.T) {
+	// Minimal core module: one empty func type, then a func import "m"."f"
+	// declaring type index 5 -- out of range of the 1-entry type section.
+	coreBytes := []byte{
+		0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // magic + version
+		0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type section: 1 func type () -> ()
+		0x02, 0x07, 0x01, 0x01, 'm', 0x01, 'f', 0x00, 0x05, // import m.f func, typeidx 5
+	}
+	comp := &binary.Component{CoreModules: []binary.CoreModule{{Offset: 0, Size: len(coreBytes)}}}
+
+	r := wazy.NewRuntime(context.Background())
+	defer r.Close(context.Background())
+
+	_, err := discoverNeededFuncTypes(r, comp, coreBytes, "")
+	requireErrContains(t, err, "out of range of the")
+}

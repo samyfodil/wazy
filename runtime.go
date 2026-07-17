@@ -225,6 +225,21 @@ func (r *runtime) Module(moduleName string) api.Module {
 	return m
 }
 
+// DecodeModuleNoCompile decodes a core module's structure (type/import/etc.
+// sections) using this runtime's exact decode settings, WITHOUT native codegen
+// or validation. The component instantiate path uses it to read an embedded
+// core module's import signatures cheaply, instead of throwaway-compiling the
+// module a second time just to learn them (the real compile happens once, in
+// the instantiation loop). Not part of the Runtime interface -- reached via a
+// type assertion from internal/component/instance.
+//
+// dwarf/custom sections are skipped (unneeded for import discovery), and the
+// memory limit is the absolute max so a large declared memory never wrongly
+// fails discovery -- the real compile still enforces this runtime's true limit.
+func (r *runtime) DecodeModuleNoCompile(bin []byte) (*wasm.Module, error) {
+	return binaryformat.DecodeModule(bin, r.enabledFeatures, wasm.MemoryLimitPages, false, false, false)
+}
+
 // CompileModule implements Runtime.CompileModule
 func (r *runtime) CompileModule(ctx context.Context, binary []byte) (CompiledModule, error) {
 	if err := r.failIfClosed(); err != nil {

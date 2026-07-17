@@ -11,6 +11,7 @@ import (
 	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
 	"github.com/samyfodil/wazy/internal/expctxkeys"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 // graphEmptyImportKey is the stable resolver key the graph rewrites a guest's
@@ -216,7 +217,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		}
 	}
 
-	neededTypes, err := discoverNeededFuncTypes(ctx, r, cfg, comp, componentBytes, emptyNameTarget)
+	neededTypes, err := discoverNeededFuncTypes(r, comp, componentBytes, emptyNameTarget)
 	if err != nil {
 		return nil, err
 	}
@@ -764,58 +765,59 @@ func moduleKeyForGraph(coreInstanceIdx int, refNames []string, emptyNameTarget s
 	}
 }
 
-// discoverNeededFuncTypes pre-compiles every embedded core module (applying
-// the empty-import-name rewrite first, since wazy's own decoder rejects an
-// empty import module name outright) and records the core-level signature of
-// every func it imports, keyed by (module name, field name). See this
-// file's package doc (step 5) for why this is the only available source of
-// truth for a lowered import's core-level type.
+// discoverNeededFuncTypes decodes every embedded core module (applying the
+// empty-import-name rewrite first, since wazy's own decoder rejects an empty
+// import module name outright) and records the core-level signature of every
+// func it imports, keyed by (module name, field name). See this file's package
+// doc (step 5) for why this is the only available source of truth for a lowered
+// import's core-level type.
 //
-// When cfg carries a CompileCache, this probe compile goes through it too
-// (same coreBytes as the real instantiation loop below uses, so it's either
-// a genuine cache warm-up -- reused a few lines later -- or, on a repeat
-// Instantiate of the same component, an outright cache hit) and the
-// CompiledModule is left open, owned by the cache, instead of closed
-// immediately. With no cache, behavior is unchanged: a throwaway compile,
-// closed right after its ImportedFunctions() are read.
-func discoverNeededFuncTypes(ctx context.Context, r wazy.Runtime, cfg *config, comp *binary.Component, componentBytes []byte, emptyNameTarget string) (map[string]map[string]coreFuncSig, error) {
-	cached := cfg != nil && cfg.compileCache != nil
+// It decodes ONLY -- no native codegen. An import's module/field/type index is
+// present in the decoded structure directly, so the full compile this used to
+// do here was pure waste: every embedded core module got compiled twice per
+// instantiation (once as a throwaway just to read imports, once for real in the
+// loop below). Reading TypeSection by the import's own type index, with an
+// explicit bounds check, also sidesteps buildFunctionDefinitions (only safe
+// after validation, which a decode-only pass skips). The real, single compile
+// -- cache-aware -- still happens in instantiateCoreModuleCacheable.
+func discoverNeededFuncTypes(r wazy.Runtime, comp *binary.Component, componentBytes []byte, emptyNameTarget string) (map[string]map[string]coreFuncSig, error) {
+	dec, ok := r.(interface {
+		DecodeModuleNoCompile(bin []byte) (*wasm.Module, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("component/instance: runtime %T cannot decode core modules for import discovery", r)
+	}
 	out := make(map[string]map[string]coreFuncSig)
 	for i, cm := range comp.CoreModules {
 		coreBytes, err := coreModuleBytes(cm, componentBytes)
 		if err != nil {
 			return nil, err
 		}
-		rewritten := false
 		if emptyNameTarget != "" {
-			coreBytes, rewritten, err = rewriteEmptyImportModuleName(coreBytes, emptyNameTarget)
+			coreBytes, _, err = rewriteEmptyImportModuleName(coreBytes, emptyNameTarget)
 			if err != nil {
 				return nil, fmt.Errorf("component/instance: core module %d: %w", i, err)
 			}
 		}
-		// A rewritten module's bytes carry the per-instantiation emptyNameTarget,
-		// so it must not go through the cache (it would never be reused -- see
-		// instantiateCoreModuleCacheable); compile it as a throwaway.
-		useCache := cached && !rewritten
-		var compiled wazy.CompiledModule
-		if useCache {
-			compiled, err = cfg.compileCache.getOrCompile(ctx, r, coreBytes)
-		} else {
-			compiled, err = r.CompileModule(ctx, coreBytes)
-		}
+		mod, err := dec.DecodeModuleNoCompile(coreBytes)
 		if err != nil {
 			return nil, fmt.Errorf("component/instance: core module %d: discover import types: %w", i, err)
 		}
-		for _, fd := range compiled.ImportedFunctions() {
-			modName, fieldName, _ := fd.Import()
-			if out[modName] == nil {
-				out[modName] = make(map[string]coreFuncSig)
+		for j := range mod.ImportSection {
+			imp := &mod.ImportSection[j]
+			if imp.Type != wasm.ExternTypeFunc {
+				continue
 			}
-			out[modName][fieldName] = coreFuncSig{params: fd.ParamTypes(), results: fd.ResultTypes()}
-		}
-		if !useCache {
-			if err := compiled.Close(ctx); err != nil {
-				return nil, fmt.Errorf("component/instance: core module %d: %w", i, err)
+			if int(imp.DescFunc) >= len(mod.TypeSection) {
+				return nil, fmt.Errorf("component/instance: core module %d: import %q.%q references type index %d, out of range of the %d-entry type section", i, imp.Module, imp.Name, imp.DescFunc, len(mod.TypeSection))
+			}
+			ft := &mod.TypeSection[imp.DescFunc]
+			if out[imp.Module] == nil {
+				out[imp.Module] = make(map[string]coreFuncSig)
+			}
+			out[imp.Module][imp.Name] = coreFuncSig{
+				params:  wasm.ToApiValueType(ft.Params),
+				results: wasm.ToApiValueType(ft.Results),
 			}
 		}
 	}
