@@ -246,6 +246,20 @@ test:
 	@cd internal/version/testdata && go test $(go_test_options) ./...
 	@cd internal/integration_test/fuzz/wazylib && CGO_ENABLED=0 WASM_BINARY_PATH=testdata/test.wasm go test ./...
 
+.PHONY: test.arm64
+test.arm64: ## Run the suite for the arm64 compiler backend under qemu-user
+	# -one-insn-per-tb works around a qemu-user (<=8.2.2) multi-insn-TB self-modifying-code
+	# bug that flaky-SIGSEGVs (~30%) on wazy's JIT'd code. Needs qemu-aarch64-static. See
+	# CONTRIBUTING.md. Slower emulation, so a longer timeout than the host `test` target.
+	@GOARCH=arm64 CGO_ENABLED=0 go test -timeout 90m -exec 'qemu-aarch64-static -one-insn-per-tb' ./...
+
+.PHONY: test.interp
+test.interp: ## Run the suite against the interpreter engine (riscv64 cross-run, no compiler)
+	# A non-amd64/arm64 GOARCH auto-selects the interpreter; qemu-riscv64 runs it (no JIT, no
+	# flag needed). Compiler-codegen tests self-skip via platform.CompilerSupported(). Needs
+	# qemu-riscv64-static.
+	@GOARCH=riscv64 CGO_ENABLED=0 go test -timeout 60m -exec qemu-riscv64-static ./...
+
 .PHONY: coverage
 # replace spaces with commas
 coverpkg = $(shell echo $(main_packages) | tr ' ' ',')
