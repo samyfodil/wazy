@@ -1,0 +1,20 @@
+(component
+  (core module $m
+    (import "canon" "task.return" (func $tr (param i32)))
+    (memory (export "mem") 1)
+    (func (export "run") (param $args i32) (result i32)
+      (call $tr (i32.const 42))
+      (i32.const 0)) ;; EXIT
+    (func (export "cb") (param i32 i32 i32) (result i32)
+      (i32.const 0)) ;; EXIT
+    (func (export "ra") (param i32 i32 i32 i32) (result i32) unreachable))
+  (type $ft (func (result u32)))
+  (canon task.return (result u32) (core func $tr))
+  (core instance $i (instantiate $m (with "canon" (instance (export "task.return" (func $tr))))))
+  (alias core export $i "run" (core func $run))
+  (alias core export $i "cb" (core func $cb))
+  (alias core export $i "mem" (core memory $mem))
+  (alias core export $i "ra" (core func $ra))
+  (canon lift (core func $run) (memory $mem) (realloc $ra) async (callback $cb) (func $lifted (type $ft)))
+  (export "run-async" (func $lifted))
+)
