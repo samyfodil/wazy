@@ -337,7 +337,7 @@ func TestBuildCanonHostModule_ImportInterfaceNameError(t *testing.T) {
 	canon := comp.Canons[4]
 	// Redirect the lower's target alias to reference an out-of-range
 	// imported-instance index.
-	var aliasIdx = -1
+	aliasIdx := -1
 	for i, al := range comp.Aliases {
 		if al.Sort == 0x01 && al.TargetKind == 0x00 {
 			aliasIdx = i

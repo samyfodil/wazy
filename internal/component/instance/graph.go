@@ -1022,51 +1022,51 @@ func computeCanonHostFunc(
 		// import precedes them.
 		fi := canon.FuncIdx
 		if int(fi) >= len(comp.ComponentFuncSpace) {
-			return hostFuncDef{}, "",fmt.Errorf("lower func index %d out of range of the component func index space", fi)
+			return hostFuncDef{}, "", fmt.Errorf("lower func index %d out of range of the component func index space", fi)
 		}
 		fe := comp.ComponentFuncSpace[fi]
 		var iface, fname string
 		switch fe.Kind {
 		case binary.ComponentFuncFromImport:
 			if int(fe.Import) >= len(comp.Imports) {
-				return hostFuncDef{}, "",fmt.Errorf("lower func index %d: import out of range", fi)
+				return hostFuncDef{}, "", fmt.Errorf("lower func index %d: import out of range", fi)
 			}
 			im := comp.Imports[fe.Import]
 			if im.ExternType != 0x01 { // func
-				return hostFuncDef{}, "",fmt.Errorf("lower func index %d: import %q is not a func", fi, im.Name)
+				return hostFuncDef{}, "", fmt.Errorf("lower func index %d: import %q is not a func", fi, im.Name)
 			}
 			// A top-level func import is keyed by its own name (no interface).
 			iface, fname = im.Name, ""
 		case binary.ComponentFuncFromAlias:
 			al := comp.Aliases[fe.Alias]
 			if al.Sort != 0x01 || al.TargetKind != 0x00 {
-				return hostFuncDef{}, "",fmt.Errorf("lower func index %d: unsupported alias %#x/%#x", fi, al.Sort, al.TargetKind)
+				return hostFuncDef{}, "", fmt.Errorf("lower func index %d: unsupported alias %#x/%#x", fi, al.Sort, al.TargetKind)
 			}
 			var ierr error
 			if iface, ierr = importInterfaceName(comp, al.InstanceIdx); ierr != nil {
-				return hostFuncDef{}, "",ierr
+				return hostFuncDef{}, "", ierr
 			}
 			fname = al.Name
 		default:
-			return hostFuncDef{}, "",fmt.Errorf("lowers a lifted (exported) func rather than an import; unsupported")
+			return hostFuncDef{}, "", fmt.Errorf("lowers a lifted (exported) func rather than an import; unsupported")
 		}
 		wasiCall = iface + "." + fname
 
 		if hi, ok := cfg.imports[mkImportKey(iface, fname)]; ok {
 			memMod, reallocFn, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
 			if merr != nil {
-				return hostFuncDef{}, "",fmt.Errorf("import %q func %q: %w", iface, fname, merr)
+				return hostFuncDef{}, "", fmt.Errorf("import %q func %q: %w", iface, fname, merr)
 			}
 			fn, hiParams, hiResults, herr := buildHostWrapper(iface, fname, hi, resources, memMod, reallocFn)
 			if herr != nil {
-				return hostFuncDef{}, "",herr
+				return hostFuncDef{}, "", herr
 			}
 			def = hostFuncDef{fn: fn, params: hiParams, results: hiResults}
 			wasiCall = "" // caller-provided, not a trap stub
 		} else {
 			sig, ok := neededTypes[groupName][entryName]
 			if !ok {
-				return hostFuncDef{}, "",fmt.Errorf("cannot determine the core-level signature for lowered import %q %q: no consumer declares module %q field %q", iface, fname, groupName, entryName)
+				return hostFuncDef{}, "", fmt.Errorf("cannot determine the core-level signature for lowered import %q %q: no consumer declares module %q field %q", iface, fname, groupName, entryName)
 			}
 			trapIface, trapName := iface, fname
 			fn := api.GoModuleFunc(func(context.Context, api.Module, []uint64) {
@@ -1079,7 +1079,7 @@ func computeCanonHostFunc(
 		var rerr error
 		def, rerr = resourceCanonHostFuncGraph(comp, cfg, resources, entryName, canon)
 		if rerr != nil {
-			return hostFuncDef{}, "",rerr
+			return hostFuncDef{}, "", rerr
 		}
 
 	default:

@@ -47,8 +47,10 @@ func TestBuildPassthroughShim_FuncPassthroughCallsRealFunc(t *testing.T) {
 	}
 
 	shimBytes, err := buildPassthroughShim([]shimItem{
-		{Sort: shimSortFunc, FromModule: "src", FromName: "add", ExportName: "renamed-add",
-			Params: []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, Results: []api.ValueType{api.ValueTypeI32}},
+		{
+			Sort: shimSortFunc, FromModule: "src", FromName: "add", ExportName: "renamed-add",
+			Params: []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, Results: []api.ValueType{api.ValueTypeI32},
+		},
 	})
 	if err != nil {
 		t.Fatalf("buildPassthroughShim: %v", err)

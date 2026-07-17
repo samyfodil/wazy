@@ -61,21 +61,21 @@ const (
 	TokenBorrow
 
 	// Punctuation
-	TokenLParen      // (
-	TokenRParen      // )
-	TokenLBrace      // {
-	TokenRBrace      // }
-	TokenLAngle      // <
-	TokenRAngle      // >
-	TokenColon       // :
-	TokenSemicolon   // ;
-	TokenComma       // ,
-	TokenDot         // .
-	TokenEq          // =
-	TokenArrow       // ->
-	TokenSlash       // /
-	TokenAt          // @
-	TokenStar        // *
+	TokenLParen    // (
+	TokenRParen    // )
+	TokenLBrace    // {
+	TokenRBrace    // }
+	TokenLAngle    // <
+	TokenRAngle    // >
+	TokenColon     // :
+	TokenSemicolon // ;
+	TokenComma     // ,
+	TokenDot       // .
+	TokenEq        // =
+	TokenArrow     // ->
+	TokenSlash     // /
+	TokenAt        // @
+	TokenStar      // *
 
 	// Feature gates
 	TokenUnstable

@@ -222,7 +222,8 @@ func readOptValTypeRef(buf []byte, off int) (*TypeRef, int, error) {
 func readLabelValtypeVecDesc(buf []byte, off int) ([]struct {
 	Name string
 	Type TypeRef
-}, int, error) {
+}, int, error,
+) {
 	count, n, err := leb128.LoadUint32(buf[off:])
 	if err != nil {
 		return nil, off, err

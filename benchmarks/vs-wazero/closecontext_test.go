@@ -6,8 +6,9 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/samyfodil/wazy"
 	"github.com/tetratelabs/wazero"
+
+	"github.com/samyfodil/wazy"
 )
 
 // spinWasm exports "spin" (param i64 n) (result i64): a tight countdown loop

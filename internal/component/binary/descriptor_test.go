@@ -9,15 +9,16 @@ import (
 
 // TestRichComponent_Descriptors verifies the descriptor model against rich_component.wasm.
 // Ground truth (via `wasm-tools print`):
-//   type0 enum[red,green,blue]
-//   type1 record{x:s32,y:s32}
-//   type2 option<string>
-//   type3 result<u32,string>
-//   type4 list<u64>
-//   type5 variant{circle:f64, empty}
-//   type6 flags[a,b,c]
-//   type7 instance
-//   type8 func
+//
+//	type0 enum[red,green,blue]
+//	type1 record{x:s32,y:s32}
+//	type2 option<string>
+//	type3 result<u32,string>
+//	type4 list<u64>
+//	type5 variant{circle:f64, empty}
+//	type6 flags[a,b,c]
+//	type7 instance
+//	type8 func
 func TestRichComponent_Descriptors(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("testdata", "rich_component.wasm"))
 	if err != nil {
@@ -220,8 +221,9 @@ func TestRichComponent_Descriptors(t *testing.T) {
 
 // TestHostComponent_Descriptors verifies the descriptor model against host_component.wasm.
 // Ground truth (via `wasm-tools print`):
-//   type0 instance with funcs log(string)->() and level()->(u32)
-//   type1 func()->(u32)
+//
+//	type0 instance with funcs log(string)->() and level()->(u32)
+//	type1 func()->(u32)
 func TestHostComponent_Descriptors(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("testdata", "host_component.wasm"))
 	if err != nil {

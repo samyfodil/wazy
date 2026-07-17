@@ -5,8 +5,9 @@ import (
 	"testing"
 
 	wasmtime "github.com/bytecodealliance/wasmtime-go/v34"
-	"github.com/samyfodil/wazy"
 	"github.com/tetratelabs/wazero"
+
+	"github.com/samyfodil/wazy"
 )
 
 // Three-way in-process comparison: wazy vs wazero vs wasmtime (Cranelift,

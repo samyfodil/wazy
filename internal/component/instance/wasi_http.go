@@ -203,9 +203,9 @@ type httpFuture struct {
 
 // httpIncomingResponse is the host state behind an incoming-response resource.
 type httpIncomingResponse struct {
-	status  uint16
-	headers *httpFields
-	body    []byte
+	status   uint16
+	headers  *httpFields
+	body     []byte
 	consumed bool
 }
 
@@ -1999,4 +1999,3 @@ func wasiHTTPOutgoingOptions(h *wasiHTTP) []Option {
 		withImportCustom(wasiIfaceHTTPTypes, "[method]incoming-body.stream", h.incomingBodyStream, streamFD, streamR),
 	}
 }
-

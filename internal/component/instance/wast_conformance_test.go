@@ -27,7 +27,9 @@ import (
 // reference suite, not our own oracle.
 //
 // concat: takes bool/all int widths/char/string/list/tuple/record/variant/enum/
-//         flags/option as args, returns their concatenation -- pure ABI in+out.
+//
+//	flags/option as args, returns their concatenation -- pure ABI in+out.
+//
 // strings: string edge cases + assert_trap for out-of-bounds / invalid utf-8.
 func TestWastConformance(t *testing.T) {
 	// Every official component-model suite this runtime runs end to end, with

@@ -4,8 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/samyfodil/wazy"
 	"github.com/tetratelabs/wazero"
+
+	"github.com/samyfodil/wazy"
 )
 
 // BenchmarkExecute3Heavy runs the SAME kernels/wasm as BenchmarkExecute3 but
