@@ -477,7 +477,7 @@ func shimFuncImportNames(nested *binary.Component) []string {
 // canonMemoryAndRealloc). A lowered import whose consumer is a real core
 // module with its own memory passes nil, nil, since there the runtime caller
 // already is the right module.
-func buildHostWrapper(iface, funcName string, hi *hostImport, resources *handleTable, memOverride api.Module, reallocOverride api.Function) (api.GoModuleFunction, []api.ValueType, []api.ValueType, error) {
+func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, resources *handleTable, memOverride api.Module, reallocOverride api.Function) (api.GoModuleFunction, []api.ValueType, []api.ValueType, error) {
 	var fd binary.FuncDesc
 	var resolve abi.Resolver
 	if hi.customFD != nil {
@@ -543,7 +543,7 @@ func buildHostWrapper(iface, funcName string, hi *hostImport, resources *handleT
 		if memOverride != nil {
 			memMod = memOverride
 		}
-		args, lent, err := liftHostArgsPlanned(paramPlans, resolve, stack, memMod, resources)
+		args, lent, err := liftHostArgsPlanned(in, paramPlans, resolve, stack, memMod, resources)
 		if err != nil {
 			panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
 		}
@@ -554,7 +554,17 @@ func buildHostWrapper(iface, funcName string, hi *hostImport, resources *handleT
 				_ = resources.Unlend(l.tag, l.handle) //nolint:errcheck // best-effort release
 			}
 		}()
+		// Bracket the actual Go call: this is one of requireSchedulable's
+		// (stream_host.go) two "provably on the driving goroutine" cases --
+		// a StreamWriter/StreamReader/FutureWriter/FutureReader call made
+		// synchronously from inside a sync host import is legal.
+		if in != nil {
+			in.inHostCall++
+		}
 		results, err := hi.fn(ctx, args)
+		if in != nil {
+			in.inHostCall--
+		}
 		if err != nil {
 			panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
 		}
@@ -657,6 +667,9 @@ func buildHostParamPlans(fd binary.FuncDesc, resolve abi.Resolver) ([]hostParamP
 		if err != nil {
 			return nil, fmt.Errorf("param %d: %w", i, err)
 		}
+		if typeContainsAsyncValueNested(pt, resolve, 0) {
+			return nil, fmt.Errorf("param %d: stream/future/error-context nested inside a composite type is not supported by this milestone", i)
+		}
 		flat, err := abi.Flatten(pt, resolve)
 		if err != nil {
 			return nil, fmt.Errorf("param %d: %w", i, err)
@@ -675,12 +688,12 @@ func buildHostParamPlans(fd binary.FuncDesc, resolve abi.Resolver) ([]hostParamP
 // and non-hot callers) that builds the param plans then defers to
 // liftHostArgsPlanned; the hot guest->host wrapper builds the plans once at bind
 // time instead (see buildHostWrapper).
-func liftHostArgs(fd binary.FuncDesc, resolve abi.Resolver, stack []uint64, mod api.Module, resources *handleTable) ([]abi.Value, []lentHandle, error) {
+func liftHostArgs(in *Instance, fd binary.FuncDesc, resolve abi.Resolver, stack []uint64, mod api.Module, resources *handleTable) ([]abi.Value, []lentHandle, error) {
 	plans, err := buildHostParamPlans(fd, resolve)
 	if err != nil {
 		return nil, nil, err
 	}
-	return liftHostArgsPlanned(plans, resolve, stack, mod, resources)
+	return liftHostArgsPlanned(in, plans, resolve, stack, mod, resources)
 }
 
 // liftHostArgsPlanned is liftHostArgs with the per-param resolve/flatten/
@@ -689,7 +702,7 @@ func liftHostArgs(fd binary.FuncDesc, resolve abi.Resolver, stack []uint64, mod 
 // then resolves that handle to the host rep it names via resources, so the
 // HostFunc receives the rep, not the raw handle -- see resolveHandleArg.
 // resolve is still needed for LiftFlat's composite tree-walk.
-func liftHostArgsPlanned(plans []hostParamPlan, resolve abi.Resolver, stack []uint64, mod api.Module, resources *handleTable) ([]abi.Value, []lentHandle, error) {
+func liftHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.Resolver, stack []uint64, mod api.Module, resources *handleTable) ([]abi.Value, []lentHandle, error) {
 	mem, memAvailable := memoryBytesOf(mod)
 	args := make([]abi.Value, len(plans))
 	var lent []lentHandle
@@ -722,7 +735,7 @@ func liftHostArgsPlanned(plans []hostParamPlan, resolve abi.Resolver, stack []ui
 				}
 			}
 		}
-		v, err = resolveHandleArg(resources, nil, pp.pt, v)
+		v, err = resolveHandleArg(in, resources, nil, pp.pt, v)
 		if err != nil {
 			return nil, lent, fmt.Errorf("param %d: %w", i, err)
 		}
@@ -745,7 +758,13 @@ type lentHandle struct {
 // to the host, mirroring lift_own); borrow only reads it (lift_borrow),
 // leaving the handle valid in the guest's table. Any other type passes v
 // through unchanged.
-func resolveHandleArg(resources *handleTable, canon func(uint32) uint32, pt binary.TypeDesc, v abi.Value) (abi.Value, error) {
+//
+// in is the owning Instance, threaded through only so a StreamDesc/FutureDesc
+// case (Phase 2) can build a *StreamReader/*FutureReader that knows which
+// instance's scheduler it belongs to (requireSchedulable, stream_host.go).
+// nil is safe: requireSchedulable treats a nil Instance as unchecked, which
+// only pure resource-handle unit tests (no stream/future args) ever hit.
+func resolveHandleArg(in *Instance, resources *handleTable, canon func(uint32) uint32, pt binary.TypeDesc, v abi.Value) (abi.Value, error) {
 	tag := func(rt uint32) uint32 {
 		if canon != nil {
 			return canon(rt)
@@ -773,6 +792,75 @@ func resolveHandleArg(resources *handleTable, canon func(uint32) uint32, pt bina
 			return nil, fmt.Errorf("borrow<%d> arg: %w", d.ResourceType, err)
 		}
 		return rep, nil
+
+	case binary.StreamDesc:
+		// A stream<T> import ARG lift takes (removes) the guest's readable
+		// end and hands the host a *StreamReader wrapping its shared object
+		// -- the host is now "the other end" (design doc §2.2/§3.1). Needs
+		// an *Instance for the reader's requireSchedulable bracket, so this
+		// case is a no-op when resources belongs to a resources-only test
+		// harness with no owning Instance (inst is nil): callers that reach
+		// this path for real always have one (liftHostArgsPlanned/
+		// liftAsyncHostArgsPlanned pass the owning Instance via resolveHandleArgInst).
+		h, ok := v.(uint32)
+		if !ok {
+			return nil, fmt.Errorf("stream arg: expected a uint32 handle, got %T", v)
+		}
+		var elemDesc binary.TypeDesc
+		if d.Element != nil {
+			var eerr error
+			var resolveFn abi.Resolver
+			if in != nil {
+				resolveFn = in.resolve
+			}
+			if elemDesc, eerr = resolveTypeRef(d.Element, resolveFn); eerr != nil {
+				return nil, fmt.Errorf("stream arg: element type: %w", eerr)
+			}
+		}
+		shared, err := takeReadableStreamEnd(resources, elemDesc, h)
+		if err != nil {
+			return nil, fmt.Errorf("stream arg: %w", err)
+		}
+		return &StreamReader{in: in, shared: shared, state: copyIdle}, nil
+
+	case binary.FutureDesc:
+		h, ok := v.(uint32)
+		if !ok {
+			return nil, fmt.Errorf("future arg: expected a uint32 handle, got %T", v)
+		}
+		var elemDesc binary.TypeDesc
+		if d.Element != nil {
+			var eerr error
+			var resolveFn abi.Resolver
+			if in != nil {
+				resolveFn = in.resolve
+			}
+			if elemDesc, eerr = resolveTypeRef(d.Element, resolveFn); eerr != nil {
+				return nil, fmt.Errorf("future arg: element type: %w", eerr)
+			}
+		}
+		shared, err := takeReadableFutureEnd(resources, elemDesc, h)
+		if err != nil {
+			return nil, fmt.Errorf("future arg: %w", err)
+		}
+		return &FutureReader{in: in, shared: shared, state: copyIdle}, nil
+
+	case binary.PrimitiveDesc:
+		if d.Prim != "error-context" {
+			return v, nil
+		}
+		h, ok := v.(uint32)
+		if !ok {
+			return nil, fmt.Errorf("error-context arg: expected a uint32 handle, got %T", v)
+		}
+		// Lift is a GET, not a remove: the sender keeps its own handle.
+		raw, ok2 := resources.getEntry(h)
+		ec, isEC := raw.(*errorContext)
+		if !ok2 || !isEC {
+			return nil, fmt.Errorf("error-context arg: handle %d is not an error-context", h)
+		}
+		return ec, nil
+
 	default:
 		return v, nil
 	}
@@ -796,6 +884,50 @@ func allocHandleResult(resources *handleTable, rt binary.TypeDesc, v abi.Value) 
 			return nil, fmt.Errorf("borrow<%d> result: expected a uint32 rep, got %T", d.ResourceType, v)
 		}
 		return resources.NewBorrow(d.ResourceType, rep), nil
+
+	case binary.StreamDesc:
+		// An import's stream<T> RESULT: the host CREATED the stream (via
+		// NewStream, whose second return value is the *sharedStream
+		// identity) and hands it to the guest -- mint a fresh readable end
+		// in the guest's table (mirrors lower_stream). Also accepts a
+		// *StreamReader directly (a reader the host is transferring away),
+		// per the design doc's "(or a writer-created reader arg)" note.
+		var shared *sharedStream
+		switch sv := v.(type) {
+		case *sharedStream:
+			shared = sv
+		case *StreamReader:
+			shared = sv.shared
+		default:
+			return nil, fmt.Errorf("stream result: expected a *sharedStream (from NewStream) or *StreamReader, got %T", v)
+		}
+		return resources.addEntry(&streamEnd{side: sideReadable, state: copyIdle, shared: shared}), nil
+
+	case binary.FutureDesc:
+		var shared *sharedFuture
+		switch sv := v.(type) {
+		case *sharedFuture:
+			shared = sv
+		case *FutureReader:
+			shared = sv.shared
+		default:
+			return nil, fmt.Errorf("future result: expected a *sharedFuture (from NewFuture) or *FutureReader, got %T", v)
+		}
+		return resources.addEntry(&futureEnd{side: sideReadable, state: copyIdle, shared: shared}), nil
+
+	case binary.PrimitiveDesc:
+		if d.Prim != "error-context" {
+			return v, nil
+		}
+		switch ev := v.(type) {
+		case *errorContext:
+			return resources.addEntry(ev), nil
+		case string:
+			return resources.addEntry(&errorContext{debugMessage: ev}), nil
+		default:
+			return nil, fmt.Errorf("error-context result: expected a *errorContext or string, got %T", v)
+		}
+
 	default:
 		return v, nil
 	}
@@ -835,6 +967,9 @@ func buildHostResultPlan(fd binary.FuncDesc, resolve abi.Resolver) (resultCount 
 	rt, err = resolveTypeRef(&refs[0], resolve)
 	if err != nil {
 		return resultCount, nil, false, fmt.Errorf("result: %w", err)
+	}
+	if typeContainsAsyncValueNested(rt, resolve, 0) {
+		return resultCount, nil, false, fmt.Errorf("result: stream/future/error-context nested inside a composite type is not supported by this milestone")
 	}
 	return resultCount, rt, usesMemory(rt, resolve), nil
 }

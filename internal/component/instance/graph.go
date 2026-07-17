@@ -1098,7 +1098,7 @@ func computeCanonHostFunc(
 			if isAsyncLower {
 				fn, hiParams, hiResults, herr = buildAsyncHostWrapper(in, iface, fname, hi, resources, memMod, reallocFn)
 			} else {
-				fn, hiParams, hiResults, herr = buildHostWrapper(iface, fname, hi, resources, memMod, reallocFn)
+				fn, hiParams, hiResults, herr = buildHostWrapper(in, iface, fname, hi, resources, memMod, reallocFn)
 			}
 			if herr != nil {
 				return hostFuncDef{}, "", herr
@@ -1175,6 +1175,39 @@ func computeCanonHostFunc(
 
 	case binary.CanonKindSubtaskDrop:
 		def = subtaskDropHostFunc(in)
+
+	// --- Phase 2: streams/futures/error-context
+	// (docs/component-model-async-phase2-design.md) -- wired the same way as
+	// the MVP async builtins above: a fixed-i32 core func closing over the
+	// *Instance, no reflection/WithFunc. See stream_builtins.go/errorcontext.go.
+	case binary.CanonKindStreamNew, binary.CanonKindStreamRead, binary.CanonKindStreamWrite,
+		binary.CanonKindStreamCancelRead, binary.CanonKindStreamCancelWrite,
+		binary.CanonKindStreamDropReadable, binary.CanonKindStreamDropWritable,
+		binary.CanonKindFutureNew, binary.CanonKindFutureRead, binary.CanonKindFutureWrite,
+		binary.CanonKindFutureCancelRead, binary.CanonKindFutureCancelWrite,
+		binary.CanonKindFutureDropReadable, binary.CanonKindFutureDropWritable:
+		var serr error
+		def, serr = streamFutureCanonHostFunc(comp, in, canon, coreMemTarget, coreFuncTarget)
+		if serr != nil {
+			return hostFuncDef{}, "", serr
+		}
+
+	case binary.CanonKindErrorContextNew:
+		memMod, _, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
+		if merr != nil {
+			return hostFuncDef{}, "", merr
+		}
+		def = errorContextNewHostFunc(in, memMod)
+
+	case binary.CanonKindErrorContextDebugMessage:
+		memMod, reallocFn, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
+		if merr != nil {
+			return hostFuncDef{}, "", merr
+		}
+		def = errorContextDebugMessageHostFunc(in, memMod, reallocFn)
+
+	case binary.CanonKindErrorContextDrop:
+		def = errorContextDropHostFunc(in)
 
 	default:
 		return hostFuncDef{}, "", fmt.Errorf("references a canon of kind %#x, which does not produce a core func", canon.Kind)

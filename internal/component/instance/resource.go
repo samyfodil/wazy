@@ -19,9 +19,12 @@ import (
 type entryKind uint8
 
 const (
-	entryResource    entryKind = iota
-	entryWaitableSet           // *waitableSet (canon waitable-set.new)
-	entrySubtask               // *subtask, itself a Waitable (async-lowered call in flight)
+	entryResource     entryKind = iota
+	entryWaitableSet            // *waitableSet (canon waitable-set.new)
+	entrySubtask                // *subtask, itself a Waitable (async-lowered call in flight)
+	entryStreamEnd              // *streamEnd (Phase 2)
+	entryFutureEnd              // *futureEnd (Phase 2)
+	entryErrorContext           // *errorContext (Phase 2)
 )
 
 // tableEntry is anything a handleTable slot can hold. resourceEntry is the

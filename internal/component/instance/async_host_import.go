@@ -188,7 +188,7 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 		}
 
 		st := newSubtask()
-		args, aerr := liftAsyncHostArgsPlanned(paramPlans, resolve, stack, memMod, resources, st)
+		args, aerr := liftAsyncHostArgsPlanned(in, paramPlans, resolve, stack, memMod, resources, st)
 		if aerr != nil {
 			panic(fmt.Errorf("component/instance: async import %q %q: %w", iface, funcName, aerr))
 		}
@@ -229,7 +229,14 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 		}
 
 		ac := &AsyncCall{in: in, st: st, inCall: true}
-		if ferr := hi.asyncFn(ctx, args, ac); ferr != nil {
+		// Bracket the actual Go call -- see buildHostWrapper's identical
+		// comment (host_import.go): this is what lets a Write/Read/Set/Get
+		// called synchronously from inside an AsyncHostFunc invocation pass
+		// requireSchedulable (stream_host.go).
+		in.inHostCall++
+		ferr := hi.asyncFn(ctx, args, ac)
+		in.inHostCall--
+		if ferr != nil {
 			panic(fmt.Errorf("component/instance: async import %q %q: %w", iface, funcName, ferr))
 		}
 		ac.inCall = false
@@ -256,7 +263,7 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 // stay lent until the subtask's SUBTASK event is delivered, which can be
 // long after this call returns (see subtask.deliverResolve, called from the
 // pending-event closure AsyncCall.Resolve installs).
-func liftAsyncHostArgsPlanned(plans []hostParamPlan, resolve abi.Resolver, stack []uint64, mod api.Module, resources *handleTable, st *subtask) ([]abi.Value, error) {
+func liftAsyncHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.Resolver, stack []uint64, mod api.Module, resources *handleTable, st *subtask) ([]abi.Value, error) {
 	mem, memAvailable := memoryBytesOf(mod)
 	args := make([]abi.Value, len(plans))
 	pos := 0
@@ -288,7 +295,7 @@ func liftAsyncHostArgsPlanned(plans []hostParamPlan, resolve abi.Resolver, stack
 				}
 			}
 		}
-		v, err = resolveHandleArg(resources, nil, pp.pt, v)
+		v, err = resolveHandleArg(in, resources, nil, pp.pt, v)
 		if err != nil {
 			return nil, fmt.Errorf("param %d: %w", i, err)
 		}

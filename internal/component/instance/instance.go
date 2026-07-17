@@ -250,6 +250,16 @@ type Instance struct {
 	// reject async builtins, which first-light's shape never exercises).
 	mayEnter bool
 	mayLeave bool
+
+	// inHostCall counts nested host-import invocations currently on the Go
+	// call stack (bracketed by buildHostWrapper/buildAsyncHostWrapper). Along
+	// with sched.pumping, it is how requireSchedulable (stream_host.go)
+	// proves a StreamWriter/StreamReader/FutureWriter/FutureReader call is
+	// happening on the instance's driving goroutine rather than from an
+	// arbitrary concurrent goroutine (docs/component-model-async-phase2-design.md
+	// §3.2). Phase 2 addition; always 0 for a component with no async host
+	// import in flight.
+	inHostCall int
 }
 
 // CoreModuleCount returns the number of embedded core modules (real,
@@ -439,6 +449,14 @@ func computeBoundExportABI(fd binary.FuncDesc, resolve abi.Resolver) *boundExpor
 			continue
 		}
 		m.paramTypes[i] = pt
+		if typeContainsAsyncValueNested(pt, resolve, 0) {
+			// Phase 2 bind-time ceiling: a stream/future/error-context
+			// nested inside a composite param is refused loudly rather than
+			// silently passed through as a bare uint32 (see
+			// typeContainsAsyncValueNested's doc).
+			m.paramErrs[i] = fmt.Errorf("param %d: stream/future/error-context nested inside a composite type is not supported by this milestone", i)
+			continue
+		}
 		m.paramUsesMemory[i] = usesMemory(pt, resolve)
 		// Compile the per-param lower plan once (the spill decision's Flatten
 		// happens here, not per call). A compile error is recorded like a
@@ -494,6 +512,10 @@ func computeBoundExportABI(fd binary.FuncDesc, resolve abi.Resolver) *boundExpor
 			return m
 		}
 		m.resultType = rt
+		if typeContainsAsyncValueNested(rt, resolve, 0) {
+			m.resultErr = fmt.Errorf("result: stream/future/error-context nested inside a composite type is not supported by this milestone")
+			return m
+		}
 		m.resultUsesMemory = usesMemory(rt, resolve)
 		flatKinds, err := abi.Flatten(rt, resolve)
 		if err != nil {
@@ -538,6 +560,15 @@ func typeContainsResource(t binary.TypeDesc, resolve abi.Resolver, depth int) bo
 	switch d := t.(type) {
 	case binary.OwnDesc, binary.BorrowDesc:
 		return true
+	case binary.StreamDesc, binary.FutureDesc:
+		// Phase 2: a stream/future value needs the exact same per-arg
+		// handle-table translation resource own/borrow gets (see
+		// resolveArgHandlesDepth's StreamDesc/FutureDesc cases below) --
+		// reusing paramHasResource's existing gate/plumbing rather than
+		// adding a parallel bind-time flag array.
+		return true
+	case binary.PrimitiveDesc:
+		return d.Prim == "error-context" // same reasoning, for error-context
 	case binary.ListDesc:
 		return typeRefContainsResource(&d.Element, resolve, depth)
 	case binary.OptionDesc:
@@ -579,6 +610,69 @@ func typeRefContainsResource(ref *binary.TypeRef, resolve abi.Resolver, depth in
 	return typeContainsResource(t, resolve, depth+1)
 }
 
+// typeContainsAsyncValueNested reports whether t contains a stream/future/
+// error-context type STRICTLY BELOW the top level -- the Phase 2 bind-time
+// ceiling (docs/component-model-async-phase2-design.md §2.2): the abi layer
+// lifts these as bare uint32 handles with no table transfer, which is
+// silently wrong once nested inside a record/list/variant/tuple/option/
+// result, so a bound export/import's param or result type may carry a
+// stream/future/error-context only at its own top level (depth == 0).
+func typeContainsAsyncValueNested(t binary.TypeDesc, resolve abi.Resolver, depth int) bool {
+	if depth > maxResourceWalkDepth {
+		return false
+	}
+	if depth > 0 {
+		switch d := t.(type) {
+		case binary.StreamDesc, binary.FutureDesc:
+			return true
+		case binary.PrimitiveDesc:
+			if d.Prim == "error-context" {
+				return true
+			}
+		}
+	}
+	switch d := t.(type) {
+	case binary.ListDesc:
+		return typeRefContainsAsyncValueNested(&d.Element, resolve, depth)
+	case binary.OptionDesc:
+		return typeRefContainsAsyncValueNested(&d.Element, resolve, depth)
+	case binary.RecordDesc:
+		for i := range d.Fields {
+			if typeRefContainsAsyncValueNested(&d.Fields[i].Type, resolve, depth) {
+				return true
+			}
+		}
+	case binary.TupleDesc:
+		for i := range d.Elements {
+			if typeRefContainsAsyncValueNested(&d.Elements[i], resolve, depth) {
+				return true
+			}
+		}
+	case binary.VariantDesc:
+		for i := range d.Cases {
+			if d.Cases[i].Type != nil && typeRefContainsAsyncValueNested(d.Cases[i].Type, resolve, depth) {
+				return true
+			}
+		}
+	case binary.ResultDesc:
+		if d.Ok != nil && typeRefContainsAsyncValueNested(d.Ok, resolve, depth) {
+			return true
+		}
+		if d.Err != nil && typeRefContainsAsyncValueNested(d.Err, resolve, depth) {
+			return true
+		}
+	}
+	return false
+}
+
+func typeRefContainsAsyncValueNested(ref *binary.TypeRef, resolve abi.Resolver, depth int) bool {
+	t, err := resolveTypeRef(ref, resolve)
+	if err != nil {
+		return false
+	}
+	return typeContainsAsyncValueNested(t, resolve, depth+1)
+}
+
 // resolveArgHandles walks an argument value against its type and replaces every
 // GUEST-owned own/borrow HANDLE with the guest's REP (the guest's core func
 // takes reps for resources it owns). HOST-owned resources (in.isGuestResource
@@ -609,7 +703,42 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		if in.isGuestResource == nil || !in.isGuestResource(rt) {
 			return v, nil
 		}
-		return resolveHandleArg(in.resources, in.resCanon, t, v)
+		return resolveHandleArg(in, in.resources, in.resCanon, t, v)
+
+	case binary.StreamDesc:
+		// A stream<T> Call/CallAsync arg arrives as the *sharedStream
+		// identity (returned by NewStream, or forwarded from a prior
+		// takeReadableStreamEnd) -- mint a fresh READABLE end for it in
+		// THIS (the callee's) table, mirroring lower_stream
+		// (docs/component-model-async-phase2-design.md §2.1/§3.1).
+		shared, ok := v.(*sharedStream)
+		if !ok {
+			return nil, fmt.Errorf("stream arg: expected a *sharedStream (from NewStream or a transferred readable end), got %T", v)
+		}
+		return in.resources.addEntry(&streamEnd{side: sideReadable, state: copyIdle, shared: shared}), nil
+
+	case binary.FutureDesc:
+		shared, ok := v.(*sharedFuture)
+		if !ok {
+			return nil, fmt.Errorf("future arg: expected a *sharedFuture (from NewFuture or a transferred readable end), got %T", v)
+		}
+		return in.resources.addEntry(&futureEnd{side: sideReadable, state: copyIdle, shared: shared}), nil
+
+	case binary.PrimitiveDesc:
+		if d.Prim != "error-context" {
+			return v, nil
+		}
+		// An error-context arg arrives either as an existing *errorContext
+		// (copy semantics: mint a second handle sharing it) or a bare string
+		// (host-authored message: wrap it fresh).
+		switch ev := v.(type) {
+		case *errorContext:
+			return in.resources.addEntry(ev), nil
+		case string:
+			return in.resources.addEntry(&errorContext{debugMessage: ev}), nil
+		default:
+			return nil, fmt.Errorf("error-context arg: expected a *errorContext or string, got %T", v)
+		}
 
 	case binary.ListDesc:
 		list, ok := v.([]abi.Value)

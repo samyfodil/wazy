@@ -77,6 +77,12 @@ func (w *waitable) getPendingEvent() eventTuple {
 	return ev()
 }
 
+// inWaitableSet mirrors Waitable.in_waitable_set: whether w is currently a
+// member of some waitableSet. Phase 2's copy builtins use this to trap a
+// synchronous copy/cancel on an end joined to a waitable set (stream.go /
+// stream_builtins.go), the same check waitable.join reads directly via wset.
+func (w *waitable) inWaitableSet() bool { return w.wset != nil }
+
 // join mirrors Waitable.join: move this waitable into wset (or out of any set
 // when wset is nil), keeping both sides' membership consistent.
 func (w *waitable) join(wset *waitableSet) {

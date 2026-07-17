@@ -228,7 +228,7 @@ func TestBuildHostWrapper_SpilledParams(t *testing.T) {
 	for i := 0; i < 17; i++ {
 		params = append(params, binary.PrimitiveDesc{Prim: "u32"})
 	}
-	_, _, _, err := buildHostWrapper("i", "f", &hostImport{fn: noopLog, params: params}, newHandleTable(), nil, nil)
+	_, _, _, err := buildHostWrapper(nil, "i", "f", &hostImport{fn: noopLog, params: params}, newHandleTable(), nil, nil)
 	requireErrContains(t, err, "whole-parameter-list spilling")
 }
 
@@ -244,7 +244,7 @@ func TestBuildHostWrapper_SpilledResults(t *testing.T) {
 		{Name: "a", Type: binary.TypeRef{Primitive: "u64"}},
 		{Name: "b", Type: binary.TypeRef{Primitive: "u64"}},
 	}}
-	fn, params, results, err := buildHostWrapper("i", "f", &hostImport{fn: noopLog, results: []binary.TypeDesc{rec}}, newHandleTable(), nil, nil)
+	fn, params, results, err := buildHostWrapper(nil, "i", "f", &hostImport{fn: noopLog, results: []binary.TypeDesc{rec}}, newHandleTable(), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +260,7 @@ func TestBuildHostWrapper_SpilledResults(t *testing.T) {
 }
 
 func TestBuildHostWrapper_Success(t *testing.T) {
-	fn, params, results, err := buildHostWrapper("i", "f",
+	fn, params, results, err := buildHostWrapper(nil, "i", "f",
 		&hostImport{fn: noopLog, params: []binary.TypeDesc{binary.PrimitiveDesc{Prim: "string"}}}, newHandleTable(), nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -299,7 +299,7 @@ func TestLiftHostArgs_String(t *testing.T) {
 	if !mem.WriteString(0, "hi") {
 		t.Fatal("write failed")
 	}
-	args, _, err := liftHostArgs(fd, resolve, []uint64{0, 2}, mod, newHandleTable())
+	args, _, err := liftHostArgs(nil, fd, resolve, []uint64{0, 2}, mod, newHandleTable())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +334,7 @@ func BenchmarkLiftHostArgs(b *testing.B) {
 	b.Run("perCallPlan", func(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			if _, _, err := liftHostArgs(fd, resolve, stack, mod, tbl); err != nil {
+			if _, _, err := liftHostArgs(nil, fd, resolve, stack, mod, tbl); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -347,7 +347,7 @@ func BenchmarkLiftHostArgs(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if _, _, err := liftHostArgsPlanned(plans, resolve, stack, mod, tbl); err != nil {
+			if _, _, err := liftHostArgsPlanned(nil, plans, resolve, stack, mod, tbl); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -357,7 +357,7 @@ func BenchmarkLiftHostArgs(b *testing.B) {
 func TestLiftHostArgs_StackUnderflow(t *testing.T) {
 	_, mod := memModule(t)
 	fd, resolve := synthFuncDesc([]binary.TypeDesc{binary.PrimitiveDesc{Prim: "string"}}, nil)
-	if _, _, err := liftHostArgs(fd, resolve, []uint64{0}, mod, newHandleTable()); err == nil {
+	if _, _, err := liftHostArgs(nil, fd, resolve, []uint64{0}, mod, newHandleTable()); err == nil {
 		t.Fatal("expected stack underflow error")
 	}
 }
@@ -371,7 +371,7 @@ func TestLiftHostArgs_NeedsMemoryNone(t *testing.T) {
 		t.Fatal(err)
 	}
 	fd, resolve := synthFuncDesc([]binary.TypeDesc{binary.PrimitiveDesc{Prim: "string"}}, nil)
-	if _, _, err := liftHostArgs(fd, resolve, []uint64{0, 0}, mod, newHandleTable()); err == nil {
+	if _, _, err := liftHostArgs(nil, fd, resolve, []uint64{0, 0}, mod, newHandleTable()); err == nil {
 		t.Fatal("expected memory-required error")
 	}
 }

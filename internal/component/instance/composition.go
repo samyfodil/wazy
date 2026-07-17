@@ -240,6 +240,25 @@ func repToProviderHandle(sub *Instance, desc binary.TypeDesc, v abi.Value) (abi.
 			return nil, fmt.Errorf("delegated borrow<%d> arg: expected a uint32 rep, got %T", d.ResourceType, v)
 		}
 		return sub.resources.NewBorrow(sub.canonTag(d.ResourceType), rep), nil
+
+	case binary.StreamDesc:
+		// The mirror of the TakeOwn/NewOwn lines above: the importer's own
+		// host wrapper already reduced its own handle to the *sharedStream
+		// identity (resolveHandleArg's StreamDesc case); mint the provider's
+		// own readable end for it.
+		shared, ok := v.(*sharedStream)
+		if !ok {
+			return nil, fmt.Errorf("delegated stream arg: expected a *sharedStream, got %T", v)
+		}
+		return sub.resources.addEntry(&streamEnd{side: sideReadable, state: copyIdle, shared: shared}), nil
+
+	case binary.FutureDesc:
+		shared, ok := v.(*sharedFuture)
+		if !ok {
+			return nil, fmt.Errorf("delegated future arg: expected a *sharedFuture, got %T", v)
+		}
+		return sub.resources.addEntry(&futureEnd{side: sideReadable, state: copyIdle, shared: shared}), nil
+
 	default:
 		return v, nil
 	}
@@ -264,6 +283,35 @@ func providerHandleToRep(sub *Instance, desc binary.TypeDesc, v abi.Value) (abi.
 			return nil, fmt.Errorf("delegated borrow<%d> result: expected a uint32 handle, got %T", d.ResourceType, v)
 		}
 		return sub.resources.Rep(sub.canonTag(d.ResourceType), h)
+
+	case binary.StreamDesc:
+		h, ok := v.(uint32)
+		if !ok {
+			return nil, fmt.Errorf("delegated stream result: expected a uint32 handle, got %T", v)
+		}
+		var elemDesc binary.TypeDesc
+		if d.Element != nil {
+			var eerr error
+			if elemDesc, eerr = resolveTypeRef(d.Element, sub.resolve); eerr != nil {
+				return nil, fmt.Errorf("delegated stream result: element type: %w", eerr)
+			}
+		}
+		return takeReadableStreamEnd(sub.resources, elemDesc, h)
+
+	case binary.FutureDesc:
+		h, ok := v.(uint32)
+		if !ok {
+			return nil, fmt.Errorf("delegated future result: expected a uint32 handle, got %T", v)
+		}
+		var elemDesc binary.TypeDesc
+		if d.Element != nil {
+			var eerr error
+			if elemDesc, eerr = resolveTypeRef(d.Element, sub.resolve); eerr != nil {
+				return nil, fmt.Errorf("delegated future result: element type: %w", eerr)
+			}
+		}
+		return takeReadableFutureEnd(sub.resources, elemDesc, h)
+
 	default:
 		return v, nil
 	}
