@@ -67,6 +67,17 @@ type wastCmd struct {
 	} `json:"action"`
 	Expected []typedVal `json:"expected"`
 	Text     string     `json:"text"`
+
+	// Name, Instance, and Module are used only by the async suites' richer
+	// linking-model commands (see wast_async_conformance_test.go):
+	// module_definition carries Name (the definition it registers bytes
+	// under) and Filename; module_instance carries Instance (the name it
+	// registers the new *Instance under) and Module (the module_definition
+	// name to instantiate). The sync suites' module command also carries a
+	// Name field in its manifest JSON, unused here exactly as before.
+	Name     string `json:"name"`
+	Instance string `json:"instance"`
+	Module   string `json:"module"`
 }
 
 func runWastSuite(t *testing.T, suite string) {

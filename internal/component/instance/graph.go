@@ -747,8 +747,12 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 				}
 
 			case 0x01: // func: satisfy the nested component's func import of the
-				// same name with the host import the outer's aliased func names.
-				hi, err := outerFuncArgHostImport(comp, cfg, arg.SortIdx)
+				// same name with whatever the outer's aliased func names --
+				// either a host import (outerFuncArgImport falls back to
+				// importInterfaceName) or, just as often in the async
+				// suites' multi-nested-component .wast shape, a single named
+				// export of an earlier sibling nested instance (byIdx).
+				hi, err := outerFuncArgImport(comp, cfg, byIdx, numImported, arg.SortIdx)
 				if err != nil {
 					failClose()
 					return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q: %w", compInstIdx, arg.Name, err)

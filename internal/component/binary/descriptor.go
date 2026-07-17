@@ -486,6 +486,15 @@ func readDefvaltypeDesc(buf []byte, off int, tag byte) (TypeDesc, int, error) {
 		// Verified via `wasm-tools dump`: `66 01 7d` decodes as
 		// Stream(Some(Primitive(U8))).
 		elem, off2, e := readOptValTypeRef(buf, off)
+		if e == nil && elem != nil && elem.Primitive == "char" {
+			// `stream<char>` is a temporary spec-level limitation (a stream
+			// element must be re-encodable independent of its neighbors,
+			// which char's UTF-8 validation can't guarantee mid-stream);
+			// test/async/validate-no-stream-char.wast vendors it as
+			// assert_invalid. See
+			// https://github.com/WebAssembly/component-model/pull/607.
+			e = fmt.Errorf("`stream<char>` is not valid")
+		}
 		desc, off, err = StreamDesc{Element: elem}, off2, e
 	case 0x65: // future: option(valtype), same shape as stream.
 		// Verified via `wasm-tools dump`: `65 01 79` decodes as

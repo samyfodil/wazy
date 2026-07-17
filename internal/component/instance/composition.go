@@ -169,12 +169,26 @@ func translateResourceFD(fd binary.FuncDesc, providerResolve abi.Resolver, trans
 	return out, resolve
 }
 
-// outerFuncArgHostImport resolves a `(with "x" (func N))` component instantiate-
-// arg to the host import it names: N is a func alias into an imported instance
-// (e.g. the host's [constructor]resource1), whose Go implementation the caller
-// registered via WithImport. Used to pass a host func into a nested component
-// that imports it.
-func outerFuncArgHostImport(comp *binary.Component, cfg *config, funcIdx uint32) (*hostImport, error) {
+// outerFuncArgImport resolves a `(with "x" (func N))` component instantiate-
+// arg to whatever N's alias names: N is a func alias (Sort 0x01, TargetKind
+// 0x00 "export") into a component instance, and the component-instance index
+// space it's aliased against is combined -- top-level imported instances
+// first, then comp.Instances (the same space numImported/byIdx use; see
+// instantiateNestedInstances' doc). Two cases fall out of al.InstanceIdx
+// against numImported:
+//
+//   - < numImported: a genuine host import (e.g. the host's
+//     [constructor]resource1), whose Go implementation the caller registered
+//     via WithImport -- resolved via importInterfaceName exactly as before.
+//   - >= numImported: a single named export of an earlier sibling nested
+//     component instance (byIdx[InstanceIdx]) -- the async .wast suites'
+//     multi-nested-component composition shape uses this to feed one
+//     sibling's async-lifted export into a later sibling's plain func
+//     import (e.g. async-calls-sync.wast's `(alias export $async_inner1
+//     "blocking-call" (func ...))` then `(with "blocking-call" (func N))`).
+//     Wired identically to the whole-instance (arg.Sort == 0x05) case one
+//     export at a time: a delegatingHostImport plus its guestAsyncTarget.
+func outerFuncArgImport(comp *binary.Component, cfg *config, byIdx map[int]*Instance, numImported int, funcIdx uint32) (*hostImport, error) {
 	if int(funcIdx) >= len(comp.ComponentFuncSpace) {
 		return nil, fmt.Errorf("func arg index %d out of range of the component func index space", funcIdx)
 	}
@@ -185,6 +199,25 @@ func outerFuncArgHostImport(comp *binary.Component, cfg *config, funcIdx uint32)
 	al := comp.Aliases[e.Alias]
 	if al.Sort != 0x01 || al.TargetKind != 0x00 {
 		return nil, fmt.Errorf("func arg index %d is a %#x/%#x alias, not a func export alias", funcIdx, al.Sort, al.TargetKind)
+	}
+	if int(al.InstanceIdx) >= numImported {
+		sib, ok := byIdx[int(al.InstanceIdx)]
+		if !ok {
+			return nil, fmt.Errorf("func arg index %d aliases component instance %d, which is not a prior nested instantiation", funcIdx, al.InstanceIdx)
+		}
+		be, ok := sib.exports[al.Name]
+		if !ok {
+			return nil, fmt.Errorf("func arg index %d: sibling component instance %d has no export %q", funcIdx, al.InstanceIdx, al.Name)
+		}
+		// No resource-type wiring for a bare (non-instance) func arg -- a
+		// resource crossing this boundary would need its own `(with "r"
+		// (type ...))` arg, handled by the arg.Sort == 0x03 case alongside
+		// this one; provToImp is only consulted when the func signature
+		// itself has an own<R>/borrow<R> param or result.
+		provToImp := func(uint32) (uint32, bool) { return 0, false }
+		hi := delegatingHostImport(sib, al.Name, be, provToImp)
+		hi.asyncTarget = &guestAsyncTarget{sub: sib, be: be, exportName: al.Name, provToImp: provToImp}
+		return hi, nil
 	}
 	iface, err := importInterfaceName(comp, al.InstanceIdx)
 	if err != nil {
