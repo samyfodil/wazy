@@ -33,6 +33,7 @@ func TestTypeRefString(t *testing.T) {
 		{"bool", &TypeRef{Kind: "bool"}, "bool"},
 		{"char", &TypeRef{Kind: "char"}, "char"},
 		{"string", &TypeRef{Kind: "string"}, "string"},
+		{"error-context", &TypeRef{Kind: "error-context"}, "error-context"},
 		{"list with inner", &TypeRef{Kind: "list", Inner: u32}, "list<u32>"},
 		{"list without inner", &TypeRef{Kind: "list"}, "list"},
 		{"option with inner", &TypeRef{Kind: "option", Inner: str}, "option<string>"},
@@ -813,6 +814,36 @@ interface i {
 	s := iface.Items[1].(*TypeDef).Type.(*TypeAlias)
 	if s.Target.Kind != "stream" || s.Target.Inner != nil {
 		t.Errorf("unexpected stream type: %+v", s.Target)
+	}
+}
+
+// TestErrorContextType tests "error-context" both as a bare type alias
+// target and as a func parameter/result type -- the async ABI's third new
+// value-type kind alongside future/stream (TestFutureAndStreamBare covers
+// those). Unlike future/stream, error-context takes no type parameter.
+func TestErrorContextType(t *testing.T) {
+	src := `package t:t;
+interface i {
+  type e = error-context;
+  check: func(x: error-context) -> error-context;
+}`
+	pkg, err := Parse("error-context.wit", src)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	iface := pkg.Items[0].(*Interface)
+
+	alias := iface.Items[0].(*TypeDef).Type.(*TypeAlias)
+	if alias.Target.Kind != "error-context" {
+		t.Errorf("type alias target: got %+v, want error-context", alias.Target)
+	}
+
+	fn := iface.Items[1].(*InterfaceFunc).Func
+	if len(fn.Params) != 1 || fn.Params[0].Type.Kind != "error-context" {
+		t.Errorf("func param: got %+v, want error-context", fn.Params)
+	}
+	if fn.Result == nil || fn.Result.Kind != "error-context" {
+		t.Errorf("func result: got %+v, want error-context", fn.Result)
 	}
 }
 

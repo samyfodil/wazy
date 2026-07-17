@@ -48,7 +48,8 @@ func CompileLower(t binary.TypeDesc, resolve Resolver) (LowerStep, error) {
 			return LowerStep{kind: lowerKindString}, nil
 		}
 		return LowerStep{kind: lowerKindPrimitive, prim: d.Prim}, nil
-	case binary.OwnDesc, binary.BorrowDesc:
+	case binary.OwnDesc, binary.BorrowDesc, binary.StreamDesc, binary.FutureDesc:
+		// stream/future are opaque i32 handles, same plan as own/borrow.
 		return LowerStep{kind: lowerKindHandle}, nil
 	default:
 		flat, err := Flatten(t, resolve)
@@ -150,7 +151,8 @@ func CompileLift(t binary.TypeDesc, resolve Resolver) (LiftStep, error) {
 			return LiftStep{kind: liftSpilled, t: t, resolve: resolve}, nil
 		}
 		return LiftStep{kind: liftPrimitive, prim: d.Prim}, nil
-	case binary.OwnDesc, binary.BorrowDesc:
+	case binary.OwnDesc, binary.BorrowDesc, binary.StreamDesc, binary.FutureDesc:
+		// stream/future are opaque i32 handles, same plan as own/borrow.
 		return LiftStep{kind: liftHandle}, nil
 	default:
 		flat, err := Flatten(t, resolve)

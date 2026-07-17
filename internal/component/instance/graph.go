@@ -1308,6 +1308,14 @@ func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc f
 		return nil, fmt.Errorf("component/instance: export %q resolves to an imported func rather than a lift; only lifted funcs may be exported", diagName)
 	}
 	canon := comp.Canons[liftCanonIdx]
+	// Phase 0: an async lift (CanonOpt kind 0x06) decodes fine but has no
+	// runtime yet -- fail loud rather than silently binding it as synchronous.
+	// Phase 1's invokeAsyncCallback routing replaces this guard.
+	for _, opt := range canon.Opts {
+		if opt.Kind == 0x06 { // async
+			return nil, fmt.Errorf("component/instance: export %q: async canon lift is not yet supported", diagName)
+		}
+	}
 	td, err := comp.ResolveType(canon.TypeIdx)
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: export %q lift references type %d: %w", diagName, canon.TypeIdx, err)

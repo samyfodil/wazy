@@ -201,16 +201,18 @@ func decodeComponent(buf []byte) (*Component, error) {
 			offset = newOffset
 			canonBase := uint32(len(c.Canons))
 			c.Canons = append(c.Canons, canons...)
-			// A canon that produces a new core func (lower, or one of the
-			// three resource canons) occupies the next index in the
-			// component's core func index space, interleaved with
-			// core-level func aliases -- see corefuncspace.go.
+			// Every canon EXCEPT lift produces a new core func (lower, the
+			// three resource canons, and every async builtin: task.*,
+			// subtask.*, context.get/set, stream.*, future.*, error-context.*,
+			// waitable*, backpressure.*), occupying the next index in the
+			// component's core func index space, interleaved with core-level
+			// func aliases -- see corefuncspace.go. Only lift produces a new
+			// COMPONENT func instead (componentfuncspace.go).
 			for j, cn := range canons {
-				switch cn.Kind {
-				case 0x01, 0x02, 0x03, 0x04:
-					c.CoreFuncSpace = append(c.CoreFuncSpace, CoreFuncSpaceEntry{Kind: CoreFuncFromCanon, Canon: canonBase + uint32(j)})
-				case 0x00: // canon lift -> a new COMPONENT func (componentfuncspace.go)
+				if cn.Kind == CanonKindLift {
 					c.ComponentFuncSpace = append(c.ComponentFuncSpace, ComponentFuncSpaceEntry{Kind: ComponentFuncFromCanonLift, Canon: canonBase + uint32(j)})
+				} else {
+					c.CoreFuncSpace = append(c.CoreFuncSpace, CoreFuncSpaceEntry{Kind: CoreFuncFromCanon, Canon: canonBase + uint32(j)})
 				}
 			}
 
@@ -760,7 +762,7 @@ func decodeCanonSection(buf []byte, offset int, sectionSize uint32) ([]Canon, in
 		canon.Kind = kind
 
 		switch kind {
-		case 0x00: // lift: 0x00 coreidx opts typeidx
+		case CanonKindLift: // lift: 0x00 coreidx opts typeidx
 			if offset >= len(buf) || buf[offset] != 0x00 {
 				return nil, offset, fmt.Errorf("canon[%d]: expected 0x00 prefix for lift", i)
 			}
@@ -788,7 +790,7 @@ func decodeCanonSection(buf []byte, offset int, sectionSize uint32) ([]Canon, in
 			offset += int(n)
 			canon.TypeIdx = typeIdx
 
-		case 0x01: // lower: 0x01 funcidx opts
+		case CanonKindLower: // lower: 0x01 funcidx opts
 			if offset >= len(buf) || buf[offset] != 0x00 {
 				return nil, offset, fmt.Errorf("canon[%d]: expected 0x00 prefix for lower", i)
 			}
@@ -809,7 +811,7 @@ func decodeCanonSection(buf []byte, offset int, sectionSize uint32) ([]Canon, in
 			offset = off
 			canon.Opts = opts
 
-		case 0x02, 0x03, 0x04: // resource.new, resource.drop, resource.rep: typeidx
+		case CanonKindResourceNew, CanonKindResourceDrop, CanonKindResourceRep: // typeidx
 			typeIdx, n, err := leb128.LoadUint32(buf[offset:])
 			if err != nil {
 				return nil, offset, fmt.Errorf("canon[%d] type index: %w", i, err)
@@ -817,8 +819,123 @@ func decodeCanonSection(buf []byte, offset int, sectionSize uint32) ([]Canon, in
 			offset += int(n)
 			canon.TypeIdx = typeIdx
 
+		// --- Async builtins (Phase 0: decode + typing only, no execution) ---
+		// Byte layouts verified against wasm-tools 1.253 `wasm-tools dump` on
+		// internal/component/binary/testdata/async/*.wasm.
+
+		case CanonKindTaskCancel, CanonKindSubtaskDrop,
+			CanonKindWaitableSetNew, CanonKindWaitableSetDrop, CanonKindWaitableJoin,
+			CanonKindBackpressureInc, CanonKindBackpressureDec,
+			CanonKindErrorContextDrop:
+			// No payload.
+
+		case CanonKindSubtaskCancel: // subtask.cancel: async_:bool
+			async, off, err := decodeBool(buf, offset)
+			if err != nil {
+				return nil, off, fmt.Errorf("canon[%d] async_: %w", i, err)
+			}
+			offset = off
+			canon.Async = async
+
+		case CanonKindTaskReturn: // task.return: resultlist opts
+			// The result clause is encoded with the EXACT SAME grammar as a
+			// functype's result list (readResultListDesc), not a bare
+			// option<valtype> -- see Canon.TaskReturnResult's doc comment.
+			result, off, err := readResultListDesc(buf, offset)
+			if err != nil {
+				return nil, off, fmt.Errorf("canon[%d] task.return result: %w", i, err)
+			}
+			offset = off
+			canon.TaskReturnResult = result
+
+			opts, off, err := decodeCanonOpts(buf, offset)
+			if err != nil {
+				return nil, off, fmt.Errorf("canon[%d] opts: %w", i, err)
+			}
+			offset = off
+			canon.Opts = opts
+
+		case CanonKindContextGet, CanonKindContextSet: // ty:core:valtype slot:u32
+			if offset >= len(buf) {
+				return nil, offset, ErrTruncatedBinary
+			}
+			canon.CoreValType = buf[offset]
+			offset++
+
+			slot, n, err := leb128.LoadUint32(buf[offset:])
+			if err != nil {
+				return nil, offset, fmt.Errorf("canon[%d] context slot: %w", i, err)
+			}
+			offset += int(n)
+			canon.Slot = slot
+
+		case CanonKindStreamNew, CanonKindFutureNew,
+			CanonKindStreamDropReadable, CanonKindStreamDropWritable,
+			CanonKindFutureDropReadable, CanonKindFutureDropWritable: // ty:typeidx
+			typeIdx, n, err := leb128.LoadUint32(buf[offset:])
+			if err != nil {
+				return nil, offset, fmt.Errorf("canon[%d] type index: %w", i, err)
+			}
+			offset += int(n)
+			canon.TypeIdx = typeIdx
+
+		case CanonKindStreamRead, CanonKindStreamWrite,
+			CanonKindFutureRead, CanonKindFutureWrite: // ty:typeidx opts
+			typeIdx, n, err := leb128.LoadUint32(buf[offset:])
+			if err != nil {
+				return nil, offset, fmt.Errorf("canon[%d] type index: %w", i, err)
+			}
+			offset += int(n)
+			canon.TypeIdx = typeIdx
+
+			opts, off, err := decodeCanonOpts(buf, offset)
+			if err != nil {
+				return nil, off, fmt.Errorf("canon[%d] opts: %w", i, err)
+			}
+			offset = off
+			canon.Opts = opts
+
+		case CanonKindStreamCancelRead, CanonKindStreamCancelWrite,
+			CanonKindFutureCancelRead, CanonKindFutureCancelWrite: // ty:typeidx async_:bool
+			typeIdx, n, err := leb128.LoadUint32(buf[offset:])
+			if err != nil {
+				return nil, offset, fmt.Errorf("canon[%d] type index: %w", i, err)
+			}
+			offset += int(n)
+			canon.TypeIdx = typeIdx
+
+			async, off, err := decodeBool(buf, offset)
+			if err != nil {
+				return nil, off, fmt.Errorf("canon[%d] async_: %w", i, err)
+			}
+			offset = off
+			canon.Async = async
+
+		case CanonKindErrorContextNew, CanonKindErrorContextDebugMessage: // opts only
+			opts, off, err := decodeCanonOpts(buf, offset)
+			if err != nil {
+				return nil, off, fmt.Errorf("canon[%d] opts: %w", i, err)
+			}
+			offset = off
+			canon.Opts = opts
+
+		case CanonKindWaitableSetWait, CanonKindWaitableSetPoll: // cancellable:bool memory:u32
+			cancellable, off, err := decodeBool(buf, offset)
+			if err != nil {
+				return nil, off, fmt.Errorf("canon[%d] cancellable: %w", i, err)
+			}
+			offset = off
+			canon.Cancellable = cancellable
+
+			memIdx, n, err := leb128.LoadUint32(buf[offset:])
+			if err != nil {
+				return nil, offset, fmt.Errorf("canon[%d] memory index: %w", i, err)
+			}
+			offset += int(n)
+			canon.MemIdx = memIdx
+
 		default:
-			return nil, offset, fmt.Errorf("canon[%d]: unsupported (M1) kind %#x", i, kind)
+			return nil, offset, fmt.Errorf("canon[%d]: async canon kind %#x not yet supported", i, kind)
 		}
 
 		canons[i] = canon
@@ -828,6 +945,25 @@ func decodeCanonSection(buf []byte, offset int, sectionSize uint32) ([]Canon, in
 		return nil, offset, fmt.Errorf("canon section: read %d bytes but section is only %d", bytesRead, sectionSize)
 	}
 	return canons, offset, nil
+}
+
+// decodeBool reads a single bool byte (0x00 = false, 0x01 = true), used by
+// several async canon payloads (subtask.cancel's async_, waitable-set.wait/
+// poll's cancellable, stream/future cancel-read/-write's async_).
+func decodeBool(buf []byte, offset int) (bool, int, error) {
+	if offset >= len(buf) {
+		return false, offset, ErrTruncatedBinary
+	}
+	b := buf[offset]
+	offset++
+	switch b {
+	case 0x00:
+		return false, offset, nil
+	case 0x01:
+		return true, offset, nil
+	default:
+		return false, offset, fmt.Errorf("invalid bool byte %#x", b)
+	}
 }
 
 // decodeCanonOpts decodes vec(canonopt).

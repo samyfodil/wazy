@@ -100,7 +100,10 @@ func lowerFlatImpl(v Value, t binary.TypeDesc, resolve Resolver, realloc Realloc
 	case binary.ResultDesc:
 		return lowerFlatResult(v, desc, resolve, realloc, mem)
 
-	case binary.OwnDesc, binary.BorrowDesc:
+	case binary.OwnDesc, binary.BorrowDesc, binary.StreamDesc, binary.FutureDesc:
+		// stream/future values are opaque i32 handles, same lowering as
+		// own/borrow (see Flatten's comment on why the element type isn't
+		// touched here).
 		if h, ok := v.(uint32); ok {
 			return []CoreValue{NewCoreValueI32(h)}, nil
 		}
@@ -212,6 +215,13 @@ func lowerPrimitiveCore(v Value, prim string) (CoreValue, error) {
 
 	case "string":
 		return CoreValue{}, fmt.Errorf("lowerPrimitiveCore: string is not a single core value")
+
+	case "error-context":
+		// Opaque i32 handle -- same lowering as own/borrow.
+		if h, ok := v.(uint32); ok {
+			return NewCoreValueI32(h), nil
+		}
+		return CoreValue{}, fmt.Errorf("lowerFlat error-context: expected uint32 handle, got %T", v)
 
 	default:
 		return CoreValue{}, fmt.Errorf("lowerFlat: unknown primitive type %s", prim)
@@ -679,7 +689,9 @@ func liftFlatImpl(vi valueIter, t binary.TypeDesc, resolve Resolver, mem []byte)
 	case binary.ResultDesc:
 		return liftFlatResult(vi, desc, resolve, mem)
 
-	case binary.OwnDesc, binary.BorrowDesc:
+	case binary.OwnDesc, binary.BorrowDesc, binary.StreamDesc, binary.FutureDesc:
+		// stream/future values are opaque i32 handles, same lifting as
+		// own/borrow.
 		cv, err := vi.Next()
 		if err != nil {
 			return nil, err
@@ -756,6 +768,9 @@ func liftScalarPrimitive(cv CoreValue, prim string) (Value, error) {
 			return nil, fmt.Errorf("liftFlat char: surrogate half %d not allowed", i)
 		}
 		return rune(i), nil
+	case "error-context":
+		// Opaque i32 handle -- same lifting as own/borrow.
+		return cv.AsI32(), nil
 	default:
 		return nil, fmt.Errorf("liftFlat: unknown primitive type %s", prim)
 	}

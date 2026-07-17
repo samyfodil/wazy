@@ -53,8 +53,10 @@ func Alignment(t binary.TypeDesc, resolve Resolver) (uint32, error) {
 	case binary.ResultDesc:
 		return alignmentResult(desc, resolve)
 
-	// Handles
-	case binary.OwnDesc, binary.BorrowDesc:
+	// Handles. stream/future are opaque i32 handles, same as own/borrow (see
+	// Flatten's comment); error-context is a PrimitiveDesc and goes through
+	// alignmentPrimitive above.
+	case binary.OwnDesc, binary.BorrowDesc, binary.StreamDesc, binary.FutureDesc:
 		return 4, nil
 
 	// Unsupported types
@@ -94,8 +96,8 @@ func Size(t binary.TypeDesc, resolve Resolver) (uint32, error) {
 	case binary.ResultDesc:
 		return sizeResult(desc, resolve)
 
-	// Handles
-	case binary.OwnDesc, binary.BorrowDesc:
+	// Handles. Same treatment as Alignment above.
+	case binary.OwnDesc, binary.BorrowDesc, binary.StreamDesc, binary.FutureDesc:
 		return 4, nil
 
 	// Unsupported types
@@ -162,6 +164,9 @@ func alignmentPrimitive(prim string) (uint32, error) {
 		// String is pointer + length; alignment depends on pointer size
 		// For now assume 4-byte pointers (32-bit). Caller should pass resolver for config.
 		return 4, nil
+	case "error-context":
+		// Opaque i32 handle -- same alignment as own/borrow.
+		return 4, nil
 	default:
 		return 0, fmt.Errorf("unknown primitive type: %s", prim)
 	}
@@ -180,6 +185,9 @@ func sizePrimitive(prim string) (uint32, error) {
 	case "string":
 		// String is pointer + length (two words)
 		return 8, nil
+	case "error-context":
+		// Opaque i32 handle -- same size as own/borrow.
+		return 4, nil
 	default:
 		return 0, fmt.Errorf("unknown primitive type: %s", prim)
 	}

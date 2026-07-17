@@ -208,13 +208,99 @@ type CanonOpt struct {
 	Idx  uint32 // for options that carry an index
 }
 
+// CanonKind names the byte values Canon.Kind takes -- the first byte of each
+// entry in the canonical-function section (id 0x08). 0x00-0x04 were already
+// implemented; 0x05 and up are the Phase 0 async additions. Verified against
+// wasm-tools 1.253 (`wasm-tools dump`) on internal/component/binary/testdata/
+// async/*.wasm -- see decodeCanonSection and canonKindName.
+//
+// Kinds 0x07, 0x08, 0x0c, and 0x26+ (the thread.* builtins) are not in this
+// list: they are out of Phase 0 scope and fall through decodeCanonSection's
+// default case.
+const (
+	CanonKindLift         byte = 0x00
+	CanonKindLower        byte = 0x01
+	CanonKindResourceNew  byte = 0x02
+	CanonKindResourceDrop byte = 0x03
+	CanonKindResourceRep  byte = 0x04
+
+	CanonKindTaskCancel               byte = 0x05
+	CanonKindSubtaskCancel            byte = 0x06
+	CanonKindTaskReturn               byte = 0x09
+	CanonKindContextGet               byte = 0x0a
+	CanonKindContextSet               byte = 0x0b
+	CanonKindSubtaskDrop              byte = 0x0d
+	CanonKindStreamNew                byte = 0x0e
+	CanonKindStreamRead               byte = 0x0f
+	CanonKindStreamWrite              byte = 0x10
+	CanonKindStreamCancelRead         byte = 0x11
+	CanonKindStreamCancelWrite        byte = 0x12
+	CanonKindStreamDropReadable       byte = 0x13
+	CanonKindStreamDropWritable       byte = 0x14
+	CanonKindFutureNew                byte = 0x15
+	CanonKindFutureRead               byte = 0x16
+	CanonKindFutureWrite              byte = 0x17
+	CanonKindFutureCancelRead         byte = 0x18
+	CanonKindFutureCancelWrite        byte = 0x19
+	CanonKindFutureDropReadable       byte = 0x1a
+	CanonKindFutureDropWritable       byte = 0x1b
+	CanonKindErrorContextNew          byte = 0x1c
+	CanonKindErrorContextDebugMessage byte = 0x1d
+	CanonKindErrorContextDrop         byte = 0x1e
+	CanonKindWaitableSetNew           byte = 0x1f
+	CanonKindWaitableSetWait          byte = 0x20
+	CanonKindWaitableSetPoll          byte = 0x21
+	CanonKindWaitableSetDrop          byte = 0x22
+	CanonKindWaitableJoin             byte = 0x23
+	CanonKindBackpressureInc          byte = 0x24
+	CanonKindBackpressureDec          byte = 0x25
+)
+
 // Canon represents a canonical lift/lower binding (section 8).
 type Canon struct {
-	Kind        byte   // 0x00 = lift, 0x01 = lower, 0x02/0x03/0x04 = resource.*
+	Kind        byte   // one of the CanonKind* constants
 	CoreFuncIdx uint32 // used for lift (0x00)
 	FuncIdx     uint32 // used for lower (0x01) and for result indices in Start
 	Opts        []CanonOpt
-	TypeIdx     uint32 // used for lift
+	TypeIdx     uint32 // lift's type index; resource.*'s type index; the
+	// stream/future element typeidx for stream.{new,read,write,cancel-read,
+	// cancel-write,drop-readable,drop-writable} and future's seven twins.
+
+	// Async payload fields (Phase 0: decode + typing only, no execution).
+	// Each is meaningful only for the Kind(s) noted; zero value otherwise.
+
+	// Async is the async_:bool payload of subtask.cancel, stream.cancel-read/
+	// -write, and future.cancel-read/-write.
+	Async bool
+
+	// Cancellable is waitable-set.wait/poll's cancellable:bool payload.
+	Cancellable bool
+
+	// MemIdx is waitable-set.wait/poll's memory index. (error-context.new/
+	// debug-message also take a memory, but via the existing Opts memory
+	// option (0x03), same as lift/lower -- they don't need this field.)
+	MemIdx uint32
+
+	// CoreValType is context.get/context.set's `ty` payload: a single CORE
+	// valtype byte (e.g. 0x7f = i32), not a component valtype -- same
+	// encoding as ResourceDesc.Rep. See coreValtypeName.
+	CoreValType byte
+
+	// Slot is context.get/context.set's `slot` payload (a context-storage
+	// index, not a type or func index).
+	Slot uint32
+
+	// TaskReturnResult is task.return's result list. Verified via
+	// `wasm-tools dump`/round-trip probes (not just the fixtures) that this
+	// is encoded with the EXACT SAME grammar as a functype's result list
+	// (readResultListDesc): tag 0x00 + one valtype ("unnamed", e.g. `(result
+	// u32)`), or tag 0x01 + vec(labelvaltype) ("named", empty for a
+	// no-result task.return). This resolves the brief's flagged ambiguity:
+	// task.return's `(result ...)` clause is NOT a bare option<valtype> --
+	// bytes `09 00 79 00` decode as tag=0x00 (unnamed) valtype=0x79 (u32)
+	// then an empty opts vec, while a no-result task.return encodes as
+	// `09 01 00 00` (tag=0x01 named-list, count=0, then empty opts vec).
+	TaskReturnResult FuncResults
 }
 
 // AliasDef represents an alias binding (section 6).
@@ -403,18 +489,21 @@ func (c *Component) Dump(w io.Writer) error {
 		for i, cn := range c.Canons {
 			kindStr := ""
 			switch cn.Kind {
-			case 0x00:
+			case CanonKindLift:
 				kindStr = fmt.Sprintf("lift core func %d type %d", cn.CoreFuncIdx, cn.TypeIdx)
-			case 0x01:
+			case CanonKindLower:
 				kindStr = fmt.Sprintf("lower func %d", cn.FuncIdx)
-			case 0x02:
+			case CanonKindResourceNew:
 				kindStr = fmt.Sprintf("resource.new type %d", cn.TypeIdx)
-			case 0x03:
+			case CanonKindResourceDrop:
 				kindStr = fmt.Sprintf("resource.drop type %d", cn.TypeIdx)
-			case 0x04:
+			case CanonKindResourceRep:
 				kindStr = fmt.Sprintf("resource.rep type %d", cn.TypeIdx)
 			default:
-				kindStr = fmt.Sprintf("kind %#x", cn.Kind)
+				// Async builtins (0x05+): named but with no per-field dump
+				// yet -- Phase 0 is decode + typing only, so a name plus the
+				// raw kind byte is enough for now.
+				kindStr = fmt.Sprintf("%s (kind %#x)", canonKindName(cn.Kind), cn.Kind)
 			}
 			if _, err := fmt.Fprintf(w, "  [%d] %s\n", i, kindStr); err != nil {
 				return err
@@ -463,6 +552,87 @@ func externTypeName(t byte) string {
 		return "instance"
 	default:
 		return "unknown"
+	}
+}
+
+// canonKindName maps a Canon.Kind byte to its builtin name, for Dump and
+// decode error messages. Kinds not in the CanonKind* table (0x07, 0x08,
+// 0x0c, 0x26+) never reach here -- decodeCanonSection fails loud on them
+// before a Canon value exists.
+func canonKindName(k byte) string {
+	switch k {
+	case CanonKindLift:
+		return "lift"
+	case CanonKindLower:
+		return "lower"
+	case CanonKindResourceNew:
+		return "resource.new"
+	case CanonKindResourceDrop:
+		return "resource.drop"
+	case CanonKindResourceRep:
+		return "resource.rep"
+	case CanonKindTaskCancel:
+		return "task.cancel"
+	case CanonKindSubtaskCancel:
+		return "subtask.cancel"
+	case CanonKindTaskReturn:
+		return "task.return"
+	case CanonKindContextGet:
+		return "context.get"
+	case CanonKindContextSet:
+		return "context.set"
+	case CanonKindSubtaskDrop:
+		return "subtask.drop"
+	case CanonKindStreamNew:
+		return "stream.new"
+	case CanonKindStreamRead:
+		return "stream.read"
+	case CanonKindStreamWrite:
+		return "stream.write"
+	case CanonKindStreamCancelRead:
+		return "stream.cancel-read"
+	case CanonKindStreamCancelWrite:
+		return "stream.cancel-write"
+	case CanonKindStreamDropReadable:
+		return "stream.drop-readable"
+	case CanonKindStreamDropWritable:
+		return "stream.drop-writable"
+	case CanonKindFutureNew:
+		return "future.new"
+	case CanonKindFutureRead:
+		return "future.read"
+	case CanonKindFutureWrite:
+		return "future.write"
+	case CanonKindFutureCancelRead:
+		return "future.cancel-read"
+	case CanonKindFutureCancelWrite:
+		return "future.cancel-write"
+	case CanonKindFutureDropReadable:
+		return "future.drop-readable"
+	case CanonKindFutureDropWritable:
+		return "future.drop-writable"
+	case CanonKindErrorContextNew:
+		return "error-context.new"
+	case CanonKindErrorContextDebugMessage:
+		return "error-context.debug-message"
+	case CanonKindErrorContextDrop:
+		return "error-context.drop"
+	case CanonKindWaitableSetNew:
+		return "waitable-set.new"
+	case CanonKindWaitableSetWait:
+		return "waitable-set.wait"
+	case CanonKindWaitableSetPoll:
+		return "waitable-set.poll"
+	case CanonKindWaitableSetDrop:
+		return "waitable-set.drop"
+	case CanonKindWaitableJoin:
+		return "waitable.join"
+	case CanonKindBackpressureInc:
+		return "backpressure.inc"
+	case CanonKindBackpressureDec:
+		return "backpressure.dec"
+	default:
+		return fmt.Sprintf("canon kind %#x", k)
 	}
 }
 

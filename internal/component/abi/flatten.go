@@ -41,8 +41,13 @@ func Flatten(t binary.TypeDesc, resolve Resolver) ([]string, error) {
 	case binary.ResultDesc:
 		return flattenResult(desc, resolve)
 
-	// Handles
-	case binary.OwnDesc, binary.BorrowDesc:
+	// Handles. Async ABI stream/future values are opaque i32 handles too --
+	// like own/borrow, only the handle transfers here; the element type they
+	// carry (StreamDesc.Element/FutureDesc.Element) is not flattened (Phase 0
+	// has no stream/future runtime to move elements through). error-context
+	// is a PrimitiveDesc (see binary.isPrimValtype), so it flows through the
+	// PrimitiveDesc case above via flattenPrimitive, not this one.
+	case binary.OwnDesc, binary.BorrowDesc, binary.StreamDesc, binary.FutureDesc:
 		return []string{"i32"}, nil
 
 	// Unsupported
@@ -154,6 +159,10 @@ func flattenPrimitive(prim string) ([]string, error) {
 	case "string":
 		// String = pointer + length (both as i32 pointers)
 		return flatKindsStringPtrs, nil
+	case "error-context":
+		// error-context is an opaque i32 handle, exactly like own/borrow --
+		// see lowerPrimitiveCore/liftScalarPrimitive's "error-context" cases.
+		return flatKindsI32, nil
 	default:
 		return nil, fmt.Errorf("unknown primitive type: %s", prim)
 	}

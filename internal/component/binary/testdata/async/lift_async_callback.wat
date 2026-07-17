@@ -1,0 +1,16 @@
+(component
+  (core module $m
+    (func (export "cb") (param i32 i32 i32) (result i32) unreachable)
+    (func (export "run") (param i32) (result i32) unreachable)
+    (memory (export "mem") 1)
+    (func (export "ra") (param i32 i32 i32 i32) (result i32) unreachable)
+  )
+  (core instance $i (instantiate $m))
+  (alias core export $i "cb" (core func $cb))
+  (alias core export $i "run" (core func $run))
+  (alias core export $i "mem" (core memory $mem))
+  (alias core export $i "ra" (core func $ra))
+  (type $ft (func (param "x" u32) (result u32)))
+  (canon lift (core func $run) (memory $mem) (realloc $ra) async (callback $cb) (func $lifted (type $ft)))
+  (export "lifted" (func $lifted))
+)

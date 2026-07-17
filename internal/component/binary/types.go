@@ -20,11 +20,18 @@ import (
 //
 // Grammar reference: WebAssembly/component-model design/mvp/Binary.md.
 
-// primvaltype opcodes occupy 0x73..0x7f (encoded as negative s33 values).
-func isPrimValtype(b byte) bool { return b >= 0x73 && b <= 0x7f }
+// primvaltype opcodes occupy 0x73..0x7f (encoded as negative s33 values), plus
+// 0x64 (error-context) added by the async ABI -- confirmed terminal/payload-free
+// via `wasm-tools dump` on a func type with an error-context result: the type
+// is printed as `Primitive(ErrorContext)`, the same shape as bool/string, NOT
+// a defined type with a payload (contrast with future=0x65/stream=0x66, which
+// DO carry an `option<valtype>` payload -- see readDefvaltypeDesc).
+func isPrimValtype(b byte) bool { return (b >= 0x73 && b <= 0x7f) || b == 0x64 }
 
 func primName(b byte) string {
 	switch b {
+	case 0x64:
+		return "error-context"
 	case 0x7f:
 		return "bool"
 	case 0x7e:
