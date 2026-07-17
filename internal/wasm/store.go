@@ -523,7 +523,13 @@ func (m *ModuleInstance) resolveImports(ctx context.Context, module *Module) (er
 				// see memory_pool.go's doc for the full race argument.
 				importedMemory.Mux.Lock()
 				alreadyClosed := importedMemory.ownerClosed
-				importedMemory.imported = true
+				if !alreadyClosed {
+					// Register as a live importer; this importer's own Close
+					// decrements. Skipped when the owner already committed to
+					// closing, since the import fails just below and this
+					// ModuleInstance never Closes to balance the increment.
+					importedMemory.importers++
+				}
 				importedMemory.Mux.Unlock()
 				if alreadyClosed {
 					err = errorInvalidImport(i, fmt.Errorf("memory owner module was closed concurrently"))

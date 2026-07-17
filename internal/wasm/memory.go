@@ -64,18 +64,30 @@ type MemoryInstance struct {
 
 	expBuffer experimental.LinearMemory
 
-	// imported is true once this memory instance has been shared with
-	// another ModuleInstance via cross-module import resolution (see
-	// store.go's resolveImports, ExternTypeMemory case). Guarded by Mux.
+	// importers counts the live ModuleInstances -- other than the owner --
+	// that have imported this memory via cross-module resolution (see store.go's
+	// resolveImports, ExternTypeMemory case); each decrements it on its own
+	// Close. Guarded by Mux. (imported == importers > 0.)
 	//
-	// ownerClosed is true once the owning module's ensureResourcesClosed
-	// has run. Guarded by Mux.
+	// ownerClosed is true once the owning module's ensureResourcesClosed has
+	// run. Guarded by Mux.
 	//
-	// Together these let the owner's Close and a concurrent resolveImports
-	// agree, race-free, on whether it is safe to return Buffer to the
-	// linear-memory buffer pool (memory_pool.go) -- see that file's doc for
-	// the full safety argument.
-	imported, ownerClosed bool
+	// Together these let the owner's Close, an importer's Close, and a
+	// concurrent resolveImports agree, race-free, on when it is safe to return
+	// Buffer to the linear-memory buffer pool (memory_pool.go): only once the
+	// owner has closed AND importers has fallen to 0. Whichever close observes
+	// that last claims Buffer under Mux (sets it nil) and pools it, so it is
+	// recycled exactly once. See memory_pool.go's doc for the full argument.
+	importers   int
+	ownerClosed bool
+
+	// poolable is set once at construction: true exactly for a plain
+	// make([]byte)/pooled buffer (allocator == nil, not shared), the only kind
+	// that goes through the buffer pool. It is immutable, so both an owner's and
+	// an importer's Close read it without the Mux -- and it stays mutually
+	// exclusive with expBuffer (allocator-backed) and Shared memories, which are
+	// never pooled.
+	poolable bool
 }
 
 // NewMemoryInstance creates a new instance based on the parameters in the SectionIDMemory.
@@ -114,6 +126,9 @@ func NewMemoryInstance(memSec *Memory, allocator experimental.MemoryAllocator, m
 		Shared:            memSec.IsShared,
 		expBuffer:         expBuffer,
 		ownerModuleEngine: moduleEngine,
+		// Only a plain make([]byte)/pooled buffer is pool-eligible: not a custom
+		// allocator's buffer (expBuffer) and not shared (fixed max buffer).
+		poolable: allocator == nil && !memSec.IsShared,
 	}
 }
 

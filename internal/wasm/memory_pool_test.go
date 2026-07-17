@@ -86,9 +86,9 @@ func TestMemoryPool_ImportedMemoryNotRecycled(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, mem, importer.MemoryInstance)
-	require.True(t, mem.imported)
+	require.Equal(t, 1, mem.importers)
 
-	// Close the owner. Because mem.imported is true, this must NOT return
+	// Close the owner. Because an importer is still live (importers > 0), this must NOT return
 	// Buffer to the pool or clear it out from under the still-live importer.
 	require.NoError(t, owner.ensureResourcesClosed(context.Background()))
 	require.NotNil(t, mem.Buffer, "an imported memory's Buffer must survive its owner's Close")
@@ -201,4 +201,114 @@ func TestMemoryPool_ConcurrentCreateCloseRace(t *testing.T) {
 		}(g)
 	}
 	wg.Wait()
+}
+
+// poolImportSetup builds an owner ModuleInstance holding a fresh poolable
+// memory (registered in a store) and n importer ModuleInstances that have each
+// resolved it, so mem.importers == n. Used by the import-path recycling tests.
+func poolImportSetup(t *testing.T, n int) (*MemoryInstance, *ModuleInstance, []*ModuleInstance) {
+	t.Helper()
+	const moduleName, exportName = "test", "target"
+	memSec := &Memory{Min: 1, Cap: 1, Max: 1}
+	ownerEngine := &mockModuleEngine{}
+	mem := NewMemoryInstance(memSec, nil, ownerEngine)
+
+	s := newStore()
+	owner := &ModuleInstance{
+		MemoryInstance: mem,
+		Exports:        map[string]*Export{exportName: {Type: ExternTypeMemory}},
+		ModuleName:     moduleName,
+		Engine:         ownerEngine,
+		s:              s,
+	}
+	s.nameToModule[moduleName] = owner
+
+	importers := make([]*ModuleInstance, n)
+	for i := 0; i < n; i++ {
+		imp := &ModuleInstance{s: s, Engine: &mockModuleEngine{resolveImportsCalled: map[Index]Index{}}}
+		err := imp.resolveImports(context.Background(), &Module{
+			ImportPerModule: map[string][]*Import{
+				moduleName: {{Module: moduleName, Name: exportName, Type: ExternTypeMemory, DescMem: &Memory{Max: 1}}},
+			},
+		})
+		require.NoError(t, err)
+		importers[i] = imp
+	}
+	require.Equal(t, n, mem.importers)
+	return mem, owner, importers
+}
+
+// TestMemoryPool_LastImporterCloseRecycles: with an importer still live, the
+// owner's Close must NOT recycle; the LAST importer's Close (after the owner
+// closed) must, and the reused buffer must be zeroed (no bleed via the import
+// path).
+func TestMemoryPool_LastImporterCloseRecycles(t *testing.T) {
+	mem, owner, imps := poolImportSetup(t, 1)
+	addr := unsafe.Pointer(unsafe.SliceData(mem.Buffer))
+	for i := range mem.Buffer {
+		mem.Buffer[i] = 0xCC
+	}
+
+	require.NoError(t, owner.ensureResourcesClosed(context.Background()))
+	require.NotNil(t, mem.Buffer, "owner close with a live importer must not recycle")
+
+	require.NoError(t, imps[0].ensureResourcesClosed(context.Background()))
+	require.Nil(t, mem.Buffer, "last importer close after owner close must recycle")
+
+	second := NewMemoryInstance(&Memory{Min: 1, Cap: 1, Max: 1}, nil, &mockModuleEngine{})
+	require.Equal(t, addr, unsafe.Pointer(unsafe.SliceData(second.Buffer)), "expected the pool to hand back the recycled backing array")
+	for i, b := range second.Buffer {
+		if b != 0 {
+			t.Fatalf("byte %d of reused memory is %#x, want 0 (data bled across instances via the import path)", i, b)
+		}
+	}
+}
+
+// TestMemoryPool_ImporterThenOwnerCloseRecycles: the other close order. The
+// importer closes first (importers -> 0, but owner not closed yet => no
+// recycle), then the owner closes as the last closer => recycle.
+func TestMemoryPool_ImporterThenOwnerCloseRecycles(t *testing.T) {
+	mem, owner, imps := poolImportSetup(t, 1)
+
+	require.NoError(t, imps[0].ensureResourcesClosed(context.Background()))
+	require.NotNil(t, mem.Buffer, "importer close before the owner closes must not recycle")
+	require.Equal(t, 0, mem.importers)
+
+	require.NoError(t, owner.ensureResourcesClosed(context.Background()))
+	require.Nil(t, mem.Buffer, "owner close as the last closer must recycle")
+}
+
+// TestMemoryPool_TwoImportersRecycleOnLast: two importers; recycling waits for
+// BOTH plus the owner to close, whichever is last.
+func TestMemoryPool_TwoImportersRecycleOnLast(t *testing.T) {
+	mem, owner, imps := poolImportSetup(t, 2)
+
+	require.NoError(t, owner.ensureResourcesClosed(context.Background()))
+	require.NotNil(t, mem.Buffer, "two importers still live")
+	require.NoError(t, imps[0].ensureResourcesClosed(context.Background()))
+	require.NotNil(t, mem.Buffer, "one importer still live")
+	require.NoError(t, imps[1].ensureResourcesClosed(context.Background()))
+	require.Nil(t, mem.Buffer, "last importer closes after the owner => recycle")
+}
+
+// TestMemoryPool_ConcurrentOwnerImporterCloseRace hammers the owner and all
+// importers closing concurrently on one shared memory. Every access to the
+// shared MemoryInstance is under mem.Mux, and the Buffer != nil claim guard
+// makes recycling single-shot regardless of order -- so under -race this must
+// stay clean and end with Buffer claimed exactly once (nil).
+func TestMemoryPool_ConcurrentOwnerImporterCloseRace(t *testing.T) {
+	for iter := 0; iter < 300; iter++ {
+		mem, owner, imps := poolImportSetup(t, 3)
+		closers := append([]*ModuleInstance{owner}, imps...)
+		var wg sync.WaitGroup
+		wg.Add(len(closers))
+		for _, c := range closers {
+			go func(mi *ModuleInstance) {
+				defer wg.Done()
+				_ = mi.ensureResourcesClosed(context.Background())
+			}(c)
+		}
+		wg.Wait()
+		require.Nil(t, mem.Buffer, "after every closer, Buffer must be claimed exactly once")
+	}
 }

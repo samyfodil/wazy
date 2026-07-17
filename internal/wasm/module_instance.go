@@ -155,29 +155,53 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 		m.Sys = nil
 	}
 
-	if mem := m.MemoryInstance; mem != nil && mem.ownerModuleEngine == m.Engine {
-		mem.Mux.Lock()
-		alreadyClosed := mem.ownerClosed
-		mem.ownerClosed = true
-		imported := mem.imported
-		mem.Mux.Unlock()
+	if mem := m.MemoryInstance; mem != nil {
+		if mem.ownerModuleEngine == m.Engine {
+			// Owner close. Mark ownerClosed, and recycle Buffer to the pool now
+			// only if no importer is still live -- otherwise the LAST importer's
+			// Close recycles it (the importer branch below). The claim (take
+			// Buffer, set it nil) happens under Mux so exactly one close pools it.
+			// expBuffer (custom allocator) is owner-only and freed unconditionally,
+			// exactly as before; poolable is false for it and for shared memories.
+			mem.Mux.Lock()
+			mem.ownerClosed = true
+			var recycle []byte
+			if mem.poolable && mem.importers == 0 && mem.Buffer != nil {
+				recycle = mem.Buffer
+				// Drop our own reference so a stale post-Close read of this (now
+				// closed) MemoryInstance -- e.g. through an api.Memory the caller
+				// kept past Close, already a misuse -- sees an empty memory rather
+				// than whatever unrelated module the pool later hands this array to.
+				mem.Buffer = nil
+			}
+			mem.Mux.Unlock()
 
-		if mem.expBuffer != nil {
-			mem.expBuffer.Free()
-			mem.expBuffer = nil
-		} else if !alreadyClosed && !imported && !mem.Shared {
-			// Safe to recycle: this MemoryInstance was never shared with
-			// another ModuleInstance (see resolveImports' matching
-			// mem.Mux-guarded check in store.go), so no other live module
-			// can be holding a reference to Buffer. See memory_pool.go's
-			// doc for the full argument.
-			putPooledMemoryBuffer(mem.Buffer)
-			// Drop our own reference so that a stale post-Close read of this
-			// (now closed) MemoryInstance -- e.g. through an api.Memory the
-			// caller kept around past Close, which was already a misuse --
-			// observes an empty memory rather than whatever unrelated
-			// module's data the pool later hands the same backing array to.
-			mem.Buffer = nil
+			if mem.expBuffer != nil {
+				mem.expBuffer.Free()
+				mem.expBuffer = nil
+			} else if recycle != nil {
+				putPooledMemoryBuffer(recycle)
+			}
+		} else {
+			// Importer close (mem != nil and we are not the owner => this module
+			// imported the memory and incremented importers in resolveImports).
+			// Drop our reference; if we were the LAST importer and the owner has
+			// already closed, it deferred recycling to us -- pool Buffer now
+			// (claim under Mux, single-shot via the Buffer != nil guard). We never
+			// touch expBuffer/shared memories (poolable == false).
+			mem.Mux.Lock()
+			if mem.importers > 0 {
+				mem.importers--
+			}
+			var recycle []byte
+			if mem.ownerClosed && mem.importers == 0 && mem.poolable && mem.Buffer != nil {
+				recycle = mem.Buffer
+				mem.Buffer = nil
+			}
+			mem.Mux.Unlock()
+			if recycle != nil {
+				putPooledMemoryBuffer(recycle)
+			}
 		}
 	}
 

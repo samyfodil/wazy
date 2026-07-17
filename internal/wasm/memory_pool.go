@@ -15,19 +15,22 @@ import "sync"
 //
 // # Safety
 //
-// A buffer is only ever returned to this pool by a MemoryInstance's owning
-// module (see ensureResourcesClosed in module_instance.go), and only when
-// mem.imported is false: this exact MemoryInstance was never shared with
-// another ModuleInstance via cross-module import resolution (store.go's
-// resolveImports, ExternTypeMemory case). If it were shared, a still-live
-// importer ModuleInstance could still be reading/writing the same backing
-// array through its own (identical, aliased) MemoryInstance.Buffer -- pooling
-// it out from under that importer would let some unrelated, later-instantiated
-// module's data land in memory the importer believes is still its own, a
-// cross-tenant correctness and security bug. See resolveImports' handling of
-// mem.Mux/mem.imported/mem.ownerClosed for the race-free handshake that
-// makes checking "was this ever shared" safe against a concurrent import
-// resolution racing a concurrent Close of the owner.
+// A buffer is returned to this pool only once EVERY ModuleInstance that could
+// reach it is gone: the owning module has closed (mem.ownerClosed) AND every
+// importer has closed (mem.importers has fallen to 0). A MemoryInstance is
+// shared, unchanged, with each ModuleInstance that imports it (store.go's
+// resolveImports, ExternTypeMemory case, which increments mem.importers); each
+// such importer decrements on its own Close (ensureResourcesClosed in
+// module_instance.go). While any importer is still live, its (identical,
+// aliased) MemoryInstance.Buffer is the same backing array, so recycling it
+// then would let some unrelated, later-instantiated module's data land in
+// memory the importer believes is still its own -- a cross-tenant correctness
+// and security bug. So whichever close (owner or the last importer) observes
+// "owner closed AND importers == 0" claims Buffer under mem.Mux (takes it, sets
+// it nil) and pools it; the Buffer != nil claim guard makes that exactly-once
+// regardless of close order or concurrency. mem.Mux also serializes this
+// against a concurrent resolveImports (which refuses to increment once
+// ownerClosed is set -- see resolveImports and TestMemoryPool_ImportAfterOwnerClosed_Errors).
 //
 // Shared (memSec.IsShared, i.e. the wasm threads proposal's shared memory)
 // and custom-allocator (experimental.MemoryAllocator, tracked via expBuffer)
