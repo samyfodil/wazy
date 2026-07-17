@@ -514,12 +514,27 @@ func buildHostWrapper(iface, funcName string, hi *hostImport, resources *handleT
 		return nil, nil, nil, fmt.Errorf("component/instance: import %q func %q results: %w", iface, funcName, err)
 	}
 
+	// Precompute the lift/lower plans ONCE, at bind time: the per-param type
+	// resolution + flatten + memory/borrow facts, and the result type facts.
+	// These are invariant for a fixed import signature, so the per-call closure
+	// below skips them entirely (see liftHostArgsPlanned/lowerHostResultsPlanned)
+	// -- the guest->host WASI path is the highest-frequency ABI direction and was
+	// the only one still re-deriving all of this every call.
+	paramPlans, err := buildHostParamPlans(fd, resolve)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("component/instance: import %q func %q params: %w", iface, funcName, err)
+	}
+	resultCount, resultPT, resultUsesMem, err := buildHostResultPlan(fd, resolve)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("component/instance: import %q func %q results: %w", iface, funcName, err)
+	}
+
 	fn := api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 		memMod := mod
 		if memOverride != nil {
 			memMod = memOverride
 		}
-		args, lent, err := liftHostArgs(fd, resolve, stack, memMod, resources)
+		args, lent, err := liftHostArgsPlanned(paramPlans, resolve, stack, memMod, resources)
 		if err != nil {
 			panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
 		}
@@ -538,7 +553,7 @@ func buildHostWrapper(iface, funcName string, hi *hostImport, resources *handleT
 		if reallocOverride != nil {
 			realloc = reallocOfFunc(ctx, reallocOverride)
 		}
-		if err := lowerHostResults(ctx, fd, resolve, results, stack, memMod, resources, outPtrIdx, realloc); err != nil {
+		if err := lowerHostResultsPlanned(ctx, resultCount, resultPT, resultUsesMem, resolve, results, stack, memMod, resources, outPtrIdx, realloc); err != nil {
 			panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
 		}
 	})
@@ -611,38 +626,78 @@ func flattenResultRefs(fd binary.FuncDesc, resolve abi.Resolver) ([]string, erro
 	return out, nil
 }
 
-// liftHostArgs lifts the flat core arguments on the stack into component-level
-// argument values, per fd's parameter types, reading string/list backing data
-// from the calling module's memory. own<T>/borrow<T> params are lifted by abi
-// as a bare handle (uint32, per abi.Value's documented mapping); this
-// function then resolves that handle to the host rep it names via resources,
-// so the HostFunc receives the rep, not the raw handle -- see
-// resolveHandleArg.
-func liftHostArgs(fd binary.FuncDesc, resolve abi.Resolver, stack []uint64, mod api.Module, resources *handleTable) ([]abi.Value, []lentHandle, error) {
-	mem, memAvailable := memoryBytesOf(mod)
-	args := make([]abi.Value, len(fd.Params))
-	var lent []lentHandle
-	pos := 0
-	for i, p := range fd.Params {
-		pt, err := resolveTypeRef(&p.Type, resolve)
+// hostParamPlan is the bind-time-precomputed lift plan for one host-import
+// param: the type resolution, flattening, memory-need and borrow bookkeeping
+// that liftHostArgs otherwise re-derives on every guest->host call, hoisted out
+// of the hot path (buildHostWrapper computes these once; see liftHostArgsPlanned).
+type hostParamPlan struct {
+	pt       binary.TypeDesc
+	flat     []string // precomputed abi.Flatten(pt)
+	usesMem  bool
+	isBorrow bool
+	borrowRT uint32 // valid when isBorrow
+}
+
+// buildHostParamPlans precomputes the per-param lift plan for fd. Errors
+// (type-resolve / flatten) surface here at bind time, exactly where
+// flattenRefs already validates the same params.
+func buildHostParamPlans(fd binary.FuncDesc, resolve abi.Resolver) ([]hostParamPlan, error) {
+	plans := make([]hostParamPlan, len(fd.Params))
+	for i := range fd.Params {
+		pt, err := resolveTypeRef(&fd.Params[i].Type, resolve)
 		if err != nil {
-			return nil, lent, fmt.Errorf("param %d: %w", i, err)
+			return nil, fmt.Errorf("param %d: %w", i, err)
 		}
 		flat, err := abi.Flatten(pt, resolve)
 		if err != nil {
-			return nil, lent, fmt.Errorf("param %d: %w", i, err)
+			return nil, fmt.Errorf("param %d: %w", i, err)
 		}
-		if usesMemory(pt, resolve) && !memAvailable {
+		pp := hostParamPlan{pt: pt, flat: flat, usesMem: usesMemory(pt, resolve)}
+		if bd, ok := pt.(binary.BorrowDesc); ok {
+			pp.isBorrow, pp.borrowRT = true, bd.ResourceType
+		}
+		plans[i] = pp
+	}
+	return plans, nil
+}
+
+// liftHostArgs lifts the flat core arguments on the stack into component-level
+// argument values, per fd's parameter types. Convenience entry (used by tests
+// and non-hot callers) that builds the param plans then defers to
+// liftHostArgsPlanned; the hot guest->host wrapper builds the plans once at bind
+// time instead (see buildHostWrapper).
+func liftHostArgs(fd binary.FuncDesc, resolve abi.Resolver, stack []uint64, mod api.Module, resources *handleTable) ([]abi.Value, []lentHandle, error) {
+	plans, err := buildHostParamPlans(fd, resolve)
+	if err != nil {
+		return nil, nil, err
+	}
+	return liftHostArgsPlanned(plans, resolve, stack, mod, resources)
+}
+
+// liftHostArgsPlanned is liftHostArgs with the per-param resolve/flatten/
+// memory/borrow facts precomputed (plans). own<T>/borrow<T> params are lifted
+// by abi as a bare handle (uint32, per abi.Value's documented mapping); this
+// then resolves that handle to the host rep it names via resources, so the
+// HostFunc receives the rep, not the raw handle -- see resolveHandleArg.
+// resolve is still needed for LiftFlat's composite tree-walk.
+func liftHostArgsPlanned(plans []hostParamPlan, resolve abi.Resolver, stack []uint64, mod api.Module, resources *handleTable) ([]abi.Value, []lentHandle, error) {
+	mem, memAvailable := memoryBytesOf(mod)
+	args := make([]abi.Value, len(plans))
+	var lent []lentHandle
+	pos := 0
+	for i := range plans {
+		pp := &plans[i]
+		if pp.usesMem && !memAvailable {
 			return nil, lent, fmt.Errorf("param %d requires linear memory (string/list), but the calling module has none", i)
 		}
-		cvs := make([]abi.CoreValue, len(flat))
-		for k := range flat {
+		cvs := make([]abi.CoreValue, len(pp.flat))
+		for k := range pp.flat {
 			if pos+k >= len(stack) {
-				return nil, lent, fmt.Errorf("param %d: core stack underflow (need %d values, have %d)", i, pos+len(flat), len(stack))
+				return nil, lent, fmt.Errorf("param %d: core stack underflow (need %d values, have %d)", i, pos+len(pp.flat), len(stack))
 			}
-			cvs[k] = abi.CoreValue{Kind: flat[k], Bits: stack[pos+k]}
+			cvs[k] = abi.CoreValue{Kind: pp.flat[k], Bits: stack[pos+k]}
 		}
-		v, err := abi.LiftFlat(cvs, pt, resolve, mem)
+		v, err := abi.LiftFlat(cvs, pp.pt, resolve, mem)
 		if err != nil {
 			return nil, lent, fmt.Errorf("param %d: lift: %w", i, err)
 		}
@@ -651,19 +706,19 @@ func liftHostArgs(fd binary.FuncDesc, resolve abi.Resolver, stack []uint64, mod 
 		// call) traps -- "cannot remove owned resource while borrowed". The lend
 		// is released after the call (see the wrapper's Unlend). Done before
 		// resolveHandleArg so a same-arg-list own-take sees the lend.
-		if bd, ok := pt.(binary.BorrowDesc); ok {
+		if pp.isBorrow {
 			if h, ok := v.(uint32); ok {
-				if err := resources.Lend(bd.ResourceType, h); err == nil {
-					lent = append(lent, lentHandle{bd.ResourceType, h})
+				if err := resources.Lend(pp.borrowRT, h); err == nil {
+					lent = append(lent, lentHandle{pp.borrowRT, h})
 				}
 			}
 		}
-		v, err = resolveHandleArg(resources, nil, pt, v)
+		v, err = resolveHandleArg(resources, nil, pp.pt, v)
 		if err != nil {
 			return nil, lent, fmt.Errorf("param %d: %w", i, err)
 		}
 		args[i] = v
-		pos += len(flat)
+		pos += len(pp.flat)
 	}
 	return args, lent, nil
 }
@@ -750,23 +805,47 @@ func allocHandleResult(resources *handleTable, rt binary.TypeDesc, v abi.Value) 
 // multi-module graph may need to supply the canon's own declared realloc
 // rather than deriving one from mod).
 func lowerHostResults(ctx context.Context, fd binary.FuncDesc, resolve abi.Resolver, results []abi.Value, stack []uint64, mod api.Module, resources *handleTable, outPtrIdx int, realloc abi.Realloc) error {
-	refs := funcResultTypeRefs(fd)
-	if len(results) != len(refs) {
-		return fmt.Errorf("returned %d result(s), but the import declares %d", len(results), len(refs))
+	resultCount, rt, resultUsesMem, err := buildHostResultPlan(fd, resolve)
+	if err != nil {
+		return err
 	}
-	if len(refs) == 0 {
+	return lowerHostResultsPlanned(ctx, resultCount, rt, resultUsesMem, resolve, results, stack, mod, resources, outPtrIdx, realloc)
+}
+
+// buildHostResultPlan precomputes the result-lower facts for fd: the declared
+// result count, and (when exactly one) the resolved result type and whether it
+// needs linear memory. resultCount 0 or >1 is left for lowerHostResultsPlanned
+// to handle at call time, exactly as before (the >1 case is a milestone limit,
+// not a bind-time error).
+func buildHostResultPlan(fd binary.FuncDesc, resolve abi.Resolver) (resultCount int, rt binary.TypeDesc, usesMem bool, err error) {
+	refs := funcResultTypeRefs(fd)
+	resultCount = len(refs)
+	if resultCount != 1 {
+		return resultCount, nil, false, nil
+	}
+	rt, err = resolveTypeRef(&refs[0], resolve)
+	if err != nil {
+		return resultCount, nil, false, fmt.Errorf("result: %w", err)
+	}
+	return resultCount, rt, usesMemory(rt, resolve), nil
+}
+
+// lowerHostResultsPlanned is lowerHostResults with the result count / resolved
+// type / memory-need precomputed (see buildHostResultPlan). resolve is still
+// needed for LowerFlat/Store's composite tree-walk.
+func lowerHostResultsPlanned(ctx context.Context, resultCount int, rt binary.TypeDesc, resultUsesMem bool, resolve abi.Resolver, results []abi.Value, stack []uint64, mod api.Module, resources *handleTable, outPtrIdx int, realloc abi.Realloc) error {
+	if len(results) != resultCount {
+		return fmt.Errorf("returned %d result(s), but the import declares %d", len(results), resultCount)
+	}
+	if resultCount == 0 {
 		return nil
 	}
-	if len(refs) > 1 {
-		return fmt.Errorf("declares %d results; multiple host-func results are not supported by this milestone", len(refs))
+	if resultCount > 1 {
+		return fmt.Errorf("declares %d results; multiple host-func results are not supported by this milestone", resultCount)
 	}
 
-	rt, err := resolveTypeRef(&refs[0], resolve)
-	if err != nil {
-		return fmt.Errorf("result: %w", err)
-	}
 	mem, memAvailable := memoryBytesOf(mod)
-	if usesMemory(rt, resolve) && !memAvailable {
+	if resultUsesMem && !memAvailable {
 		return fmt.Errorf("result requires linear memory (string/list), but the calling module has none")
 	}
 	resultVal, err := allocHandleResult(resources, rt, results[0])

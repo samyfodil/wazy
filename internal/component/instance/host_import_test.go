@@ -308,6 +308,52 @@ func TestLiftHostArgs_String(t *testing.T) {
 	}
 }
 
+// BenchmarkLiftHostArgs measures the guest->host arg-lift on a representative
+// WASI-shaped signature (string + u32), comparing the per-call-plan path
+// (liftHostArgs, which re-resolves + re-flattens every param every call) with
+// the bind-time-precomputed path the hot wrapper now uses
+// (buildHostParamPlans once, then liftHostArgsPlanned). The alloc delta is the
+// per-call win.
+func BenchmarkLiftHostArgs(b *testing.B) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+	mod, err := r.InstantiateWithConfig(ctx, strmodCoreWasm, wazy.NewModuleConfig().WithName("m"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	mod.Memory().WriteString(0, "hi")
+
+	fd, resolve := synthFuncDesc([]binary.TypeDesc{
+		binary.PrimitiveDesc{Prim: "string"},
+		binary.PrimitiveDesc{Prim: "u32"},
+	}, nil)
+	stack := []uint64{0, 2, 7} // (ptr, len) for the string, then the u32
+	tbl := newHandleTable()
+
+	b.Run("perCallPlan", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if _, _, err := liftHostArgs(fd, resolve, stack, mod, tbl); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("precomputedPlan", func(b *testing.B) {
+		plans, err := buildHostParamPlans(fd, resolve)
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if _, _, err := liftHostArgsPlanned(plans, resolve, stack, mod, tbl); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
 func TestLiftHostArgs_StackUnderflow(t *testing.T) {
 	_, mod := memModule(t)
 	fd, resolve := synthFuncDesc([]binary.TypeDesc{binary.PrimitiveDesc{Prim: "string"}}, nil)
