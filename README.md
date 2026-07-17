@@ -35,13 +35,40 @@ wazy.HostFunc2(builder, func(ctx context.Context, mod api.Module, x, y uint32) u
 
 `HostFunc0`–`HostFunc8` and `HostProc0`–`HostProc8` cover most functions. `WithGoModuleFunction` handles the rest. All zero-allocation.
 
+## The Component Model and WASI 0.2
+
+wazy runs [WebAssembly Component Model][cm] components and [WASI 0.2][wasi] — genuine `wasm32-wasip2` binaries (rustc, wasm-tools), not just core modules and not hand-written `.wat`. Upstream [wazero][wazero] targets neither. This works today, exercised by real rustc components and the official component-model test suites:
+
+- **The Canonical ABI** — lift and lower for every value type (primitives, `string`, `list`, `record`, `variant`, `enum`, `flags`, `option`, `result`, `tuple`) and `own`/`borrow` resource handles (drop/rep, cross-instance borrows), verified byte-for-byte against the `wasm-tools` value suites.
+- **WASI 0.2 host interfaces** — `wasi:cli` (run, stdio, environment, exit), `wasi:clocks`, `wasi:filesystem`, `wasi:io` (streams, poll, error), `wasi:random`, `wasi:sockets` (TCP/UDP and DNS), and `wasi:http` (both the incoming-handler server and the outgoing-handler client).
+- **Multi-module component graphs** — nested instances, canonical lowering of host imports, resource lifetimes, and the wasip2 adapter wiring, so a real rustc `wasi:cli/command` runs end to end and prints `hello world`.
+
+Embed and run a component through the [`component`](component) package:
+
+```go
+r := wazy.NewRuntime(ctx)
+defer r.Close(ctx)
+
+inst, err := component.Instantiate(ctx, r, componentWasm,
+	component.WithWASI(component.WASIConfig{Stdout: os.Stdout})...)
+if err != nil {
+	return err
+}
+defer inst.Close(ctx)
+
+// A wasi:cli/command component: run its entry point.
+_, err = inst.Call(ctx, "wasi:cli/run@0.2.3#run")
+```
+
+Call an interface export directly with `inst.CallExport("component:adder/calc", "add", uint32(2), uint32(3))`, or serve a `wasi:http/incoming-handler` component straight to `net/http` — `*component.Instance` satisfies `http.Handler`. The API is young and, like the rest of wazy, makes no stability promise. [WASI 0.3][wasi] and async are the next target.
+
 ## Moving fast
 
-wazy is an actively developed performance fork. It is built for where WebAssembly is going: WASI 0.3 and the Component Model, which upstream does not target.
+wazy is an actively developed performance fork, built for the modern Wasm platform upstream does not target — the Component Model and WASI 0.2 today (above), WASI 0.3 and async next.
 
 That choice has a cost. wazy makes no API-stability promise. It has already broken compatibility with wazero, including host-function registration, and will do so again when that makes the runtime faster or moves it toward the Component Model.
 
-If you want a mature, stability-guaranteed runtime with a large user base, use [wazero][wazero]. If you want a fast runtime moving toward the modern Wasm platform, use wazy.
+If you want a mature, stability-guaranteed runtime with a large user base, use [wazero][wazero]. If you want a fast runtime on the modern Wasm platform, use wazy.
 
 ## Two engines
 
@@ -69,3 +96,5 @@ Apache 2.0. See [LICENSE](LICENSE).
 [1]: https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/
 [2]: https://www.w3.org/TR/2022/WD-wasm-core-2-20220419/
 [wazero]: https://github.com/tetratelabs/wazero
+[cm]: https://component-model.bytecodealliance.org/
+[wasi]: https://wasi.dev/
