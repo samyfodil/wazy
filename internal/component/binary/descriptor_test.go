@@ -2,8 +2,6 @@ package binary
 
 import (
 	"bytes"
-	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -20,7 +18,7 @@ import (
 //	type7 instance
 //	type8 func
 func TestRichComponent_Descriptors(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("testdata", "rich_component.wasm"))
+	data, err := fixtureFS.ReadFile("testdata/rich_component.wasm")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
@@ -225,7 +223,7 @@ func TestRichComponent_Descriptors(t *testing.T) {
 //	type0 instance with funcs log(string)->() and level()->(u32)
 //	type1 func()->(u32)
 func TestHostComponent_Descriptors(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("testdata", "host_component.wasm"))
+	data, err := fixtureFS.ReadFile("testdata/host_component.wasm")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}

@@ -3,8 +3,6 @@ package binary
 import (
 	"bytes"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -30,7 +28,7 @@ import (
 //	export "allprims" (type 0), "t" (type 1), "nested" (type 3),
 //	       "r" (type 5), "many" (func)
 func TestExtendedComponentFixture(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("testdata", "extended_component.wasm"))
+	data, err := fixtureFS.ReadFile("testdata/extended_component.wasm")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
@@ -178,7 +176,7 @@ func TestExtendedComponentFixture(t *testing.T) {
 // (bare, err-only, ok-only, both) against a real component assembled by
 // wasm-tools from testdata/result_variants.wat.
 func TestResultVariantsFixture(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("testdata", "result_variants.wasm"))
+	data, err := fixtureFS.ReadFile("testdata/result_variants.wasm")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
@@ -2009,7 +2007,7 @@ func TestDecodeCanonWithOptions(t *testing.T) {
 }
 
 func TestHOSTComponentWithCanonAndAlias(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("testdata", "host_component.wasm"))
+	data, err := fixtureFS.ReadFile("testdata/host_component.wasm")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
@@ -2049,7 +2047,7 @@ func TestHOSTComponentWithCanonAndAlias(t *testing.T) {
 }
 
 func TestExtendedComponentWithCanonAndAliases(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("testdata", "extended_component.wasm"))
+	data, err := fixtureFS.ReadFile("testdata/extended_component.wasm")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}

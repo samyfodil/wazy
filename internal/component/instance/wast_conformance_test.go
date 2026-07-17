@@ -5,8 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"os"
-	"path/filepath"
+	"path"
 	"reflect"
 	"strconv"
 	"testing"
@@ -71,8 +70,8 @@ type wastCmd struct {
 }
 
 func runWastSuite(t *testing.T, suite string) {
-	dir := filepath.Join("testdata", "wast", suite)
-	raw, err := os.ReadFile(filepath.Join(dir, suite+".json"))
+	dir := path.Join("testdata", "wast", suite)
+	raw, err := wastFS.ReadFile(path.Join(dir, suite+".json"))
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)
 	}
@@ -92,7 +91,7 @@ func runWastSuite(t *testing.T, suite string) {
 	for _, c := range manifest.Commands {
 		switch c.Type {
 		case "module":
-			wasm, err := os.ReadFile(filepath.Join(dir, c.Filename))
+			wasm, err := wastFS.ReadFile(path.Join(dir, c.Filename))
 			if err != nil {
 				t.Fatalf("line %d: read %s: %v", c.Line, c.Filename, err)
 			}
