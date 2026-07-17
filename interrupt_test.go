@@ -7,8 +7,18 @@ import (
 	"time"
 
 	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/testing/require"
 )
+
+// requireCompiler skips a compiler-codegen-specific test on a GOARCH with no
+// compiler backend (anything but amd64/arm64), where NewRuntimeConfigCompiler
+// would panic "unsupported architecture" (isa_other.go) on the first compile.
+func requireCompiler(t *testing.T) {
+	if !platform.CompilerSupported() {
+		t.Skip("compiler engine not supported on this GOARCH")
+	}
+}
 
 // infLoopWasm exports "loop_forever" = (loop (br 0)): a tight native loop with
 // no host calls, so its only scheduler/GC yield point is the loop-header
@@ -36,6 +46,7 @@ var spinWasm = []byte{
 // the interrupt check a tight loop blocks GC for its entire duration.
 func TestInterruptCheck_GCNotBlockedAndInterrupts(t *testing.T) {
 	ctx := context.Background()
+	requireCompiler(t)
 	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler().WithCloseOnContextDone(true))
 	defer r.Close(ctx)
 	mod, err := r.Instantiate(ctx, infLoopWasm)
@@ -71,6 +82,7 @@ func TestInterruptCheck_GCNotBlockedAndInterrupts(t *testing.T) {
 // computes correct loop results.
 func TestInterruptCheck_CounterPathCorrect(t *testing.T) {
 	ctx := context.Background()
+	requireCompiler(t)
 	for _, interval := range []uint64{0, 1, 8, 64} {
 		r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler().WithCloseOnContextDone(true))
 		cctx := wazy.WithInterruptCheckInterval(ctx, interval)
@@ -90,6 +102,7 @@ func TestInterruptCheck_CounterPathCorrect(t *testing.T) {
 // compiled variants, enabling re-lower-by-recompile).
 func TestInterruptCheck_Validation(t *testing.T) {
 	ctx := context.Background()
+	requireCompiler(t)
 	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler().WithCloseOnContextDone(true))
 	defer r.Close(ctx)
 

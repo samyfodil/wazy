@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
@@ -15,7 +16,18 @@ var interruptWasm []byte
 func TestSetInterruptCheckInterval(t *testing.T) {
 	ctx := context.Background()
 
+	// The compiler subtests below force NewRuntimeConfigCompiler; on a GOARCH
+	// without a compiler backend (anything but amd64/arm64 -- e.g. a riscv64
+	// interpreter run) compiling panics "unsupported architecture" (isa_other.go).
+	// Skip them there; the interpreter subtest at the end still runs everywhere.
+	requireCompiler := func(t *testing.T) {
+		if !platform.CompilerSupported() {
+			t.Skip("compiler engine not supported on this GOARCH; interpreter-only run")
+		}
+	}
+
 	t.Run("retunes and stays cancellable", func(t *testing.T) {
+		requireCompiler(t)
 		r := NewRuntimeWithConfig(ctx, NewRuntimeConfigCompiler().WithCloseOnContextDone(true))
 		defer r.Close(ctx)
 		mod, err := r.Instantiate(ctx, interruptWasm)
@@ -37,6 +49,7 @@ func TestSetInterruptCheckInterval(t *testing.T) {
 	})
 
 	t.Run("rejects invalid interval", func(t *testing.T) {
+		requireCompiler(t)
 		r := NewRuntimeWithConfig(ctx, NewRuntimeConfigCompiler().WithCloseOnContextDone(true))
 		defer r.Close(ctx)
 		mod, err := r.Instantiate(ctx, interruptWasm)
@@ -47,6 +60,7 @@ func TestSetInterruptCheckInterval(t *testing.T) {
 	})
 
 	t.Run("errors when module not compiled with close-on-context-done", func(t *testing.T) {
+		requireCompiler(t)
 		r := NewRuntimeWithConfig(ctx, NewRuntimeConfigCompiler())
 		defer r.Close(ctx)
 		mod, err := r.Instantiate(ctx, interruptWasm)
@@ -57,6 +71,7 @@ func TestSetInterruptCheckInterval(t *testing.T) {
 	})
 
 	t.Run("interval survives the file cache", func(t *testing.T) {
+		requireCompiler(t)
 		// A module reloaded from the on-disk cache must retain its compiled
 		// interval (serialized in the cache blob), not reset to 0 — otherwise the
 		// setter would wrongly reject it as "not compiled for it".
