@@ -9,7 +9,9 @@ import (
 // Go host funcs closing over *Instance), the same way the task.return /
 // context.* builtins are tested -- no wasm needed.
 
-func newAsyncInst() *Instance { return &Instance{mayLeave: true, resources: newHandleTable()} }
+func newAsyncInst() *Instance {
+	return &Instance{sched: &sched{}, mayLeave: true, resources: newHandleTable()}
+}
 
 func callBuiltin(def hostFuncDef, stack ...uint64) []uint64 {
 	buf := make([]uint64, 4)
@@ -32,7 +34,7 @@ func TestWaitableSetNewHostFunc(t *testing.T) {
 }
 
 func TestWaitableSetNew_MayLeaveFalseTraps(t *testing.T) {
-	in := &Instance{mayLeave: false, resources: newHandleTable()}
+	in := &Instance{sched: &sched{}, mayLeave: false, resources: newHandleTable()}
 	requirePanicContains(t, "may not be left", func() { callBuiltin(waitableSetNewHostFunc(in), 0) })
 }
 

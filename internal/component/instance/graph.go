@@ -254,7 +254,12 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	// this function became field assignments on this same pointer instead
 	// of a fresh allocation. mayEnter/mayLeave start true -- see their doc
 	// on Instance.
-	in := &Instance{resolve: resolve, resources: resources, mayEnter: true, mayLeave: true}
+	sh := cfg.sharedSched
+	if sh == nil { // this instantiation is its own composition-tree root
+		sh = &sched{}
+		cfg.sharedSched = sh // propagated to every subCfg by instantiateNestedInstances below
+	}
+	in := &Instance{resolve: resolve, resources: resources, mayEnter: true, mayLeave: true, sched: sh}
 	// A composed sub-instance inherits the destructors for the resources it
 	// imports from a sibling, keyed by the table tag its own resource.drop uses.
 	for tag, resolve := range cfg.importedResDtors {
@@ -686,6 +691,7 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 			resCanon:         nested.ResourceDefIndex, // reduce a resource's deftype/export-alias indices to one tag
 			importedResDtors: map[uint32]func() api.Function{},
 			hostResDtors:     map[uint32]func(context.Context, uint32) error{},
+			sharedSched:      cfg.sharedSched, // see instantiateGraph's "sh" resolution below
 		}
 		// typeArgTags maps a resource type the nested component IMPORTS (by its
 		// own type-import TypeSpace index) to the composition-global tag the outer
@@ -728,7 +734,16 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 					if strings.ContainsRune(name, '#') { // interface-member export, not a plain func
 						continue
 					}
-					subCfg.imports[mkImportKey(arg.Name, name)] = delegatingHostImport(sib, name, be, provToImp)
+					hi := delegatingHostImport(sib, name, be, provToImp) // sync arm, unchanged
+					// Register the async arm too (Phase 3, docs/component-
+					// model-async-phase3-design.md §3.1): an async lower
+					// through this import now routes to sib's export as a
+					// guestTask instead of bind-failing with "register it
+					// with WithAsyncImport instead" -- see
+					// computeCanonHostFunc's lower case and
+					// buildAsyncHostWrapper's callee arm.
+					hi.asyncTarget = &guestAsyncTarget{sub: sib, be: be, exportName: name, provToImp: provToImp}
+					subCfg.imports[mkImportKey(arg.Name, name)] = hi
 				}
 
 			case 0x01: // func: satisfy the nested component's func import of the
@@ -790,17 +805,39 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 // provider call; own/borrow results (provider handles) are reduced back to reps
 // for the importer wrapper. Non-resource params pass straight through -- the
 // fused-adapter (char roundtrip) case leaves the signature unchanged.
+//
+// hasBorrowParam is computed once here (a paramDescs walk), not per call: a
+// cross-instance borrow<R> param needs a call-scoped mint (Phase 3, docs/
+// component-model-async-phase3-design.md §4.1 site 1/site 3) -- the
+// PROVIDER's borrow handle is minted scoped to a scope-only *task built
+// fresh for this one call (never entered, no be, no gt: it exists purely to
+// carry numBorrows, mirroring the reference sync-lift's own trap_if
+// (num_borrows > 0) at task exit, which wazy's sync invoke() has no task of
+// its own to run). A func with no borrow param skips the scope entirely
+// (scope stays nil; repToProviderHandle then takes its unscoped NewBorrow
+// fallback, unreachable here since no BorrowDesc param exists to trigger it).
 func delegatingHostImport(sub *Instance, exportName string, be *boundExport, provToImp func(uint32) (uint32, bool)) *hostImport {
 	fd, importerResolve := translateResourceFD(be.fd, sub.resolve, provToImp)
 	paramDescs := be.paramTypes
 	resDescs := resultDescs(be)
+	hasBorrowParam := false
+	for _, d := range paramDescs {
+		if _, ok := d.(binary.BorrowDesc); ok {
+			hasBorrowParam = true
+			break
+		}
+	}
 	return &hostImport{
 		fn: func(ctx context.Context, args []abi.Value) ([]abi.Value, error) {
+			var scope *task
+			if hasBorrowParam {
+				scope = &task{inst: sub}
+			}
 			in := make([]abi.Value, len(args))
 			for i, a := range args {
 				var err error
 				if i < len(paramDescs) {
-					a, err = repToProviderHandle(sub, paramDescs[i], a)
+					a, err = repToProviderHandle(sub, paramDescs[i], a, scope)
 					if err != nil {
 						return nil, err
 					}
@@ -810,6 +847,13 @@ func delegatingHostImport(sub *Instance, exportName string, be *boundExport, pro
 			out, err := sub.invoke(ctx, be, exportName, in)
 			if err != nil {
 				return nil, err
+			}
+			// Sync-callee exit trap (§4.1 site 3): the reference's sync
+			// canon_lift calls task.return_ itself, so its trap_if
+			// (num_borrows > 0) covers this; wazy's sync invoke() has no
+			// task, so the delegate supplies the equivalent check here.
+			if scope != nil && scope.numBorrows > 0 {
+				return nil, fmt.Errorf("component/instance: %s: callee returned still holding %d borrowed handle(s)", exportName, scope.numBorrows)
 			}
 			for i := range out {
 				if i < len(resDescs) {
@@ -1081,7 +1125,10 @@ func computeCanonHostFunc(
 			// (WithAsyncImport) import may only back a lower that agrees --
 			// see WithAsyncImport's doc. hi.fn/hi.asyncFn are mutually
 			// exclusive (set by exactly one of the two registration Options).
-			if isAsyncLower && hi.asyncFn == nil {
+			// A composition delegate (hi.asyncTarget != nil, Phase 3 §3.1)
+			// satisfies an async lower too -- it routes to the sibling's
+			// export as a guestTask instead of a Go AsyncHostFunc.
+			if isAsyncLower && hi.asyncFn == nil && hi.asyncTarget == nil {
 				return hostFuncDef{}, "", fmt.Errorf("import %q func %q is lowered with the async option, but was registered via WithImport; register it with WithAsyncImport instead", iface, fname)
 			}
 			if !isAsyncLower && hi.fn == nil {
@@ -1117,7 +1164,7 @@ func computeCanonHostFunc(
 			def = hostFuncDef{fn: fn, params: sig.params, results: sig.results}
 		}
 
-	case 0x02, 0x03, 0x04: // resource.new, resource.drop, resource.rep
+	case 0x02, 0x03, 0x04, binary.CanonKindResourceDropAsync: // resource.new, resource.drop (sync/async), resource.rep
 		var rerr error
 		def, rerr = resourceCanonHostFuncGraph(comp, cfg, resources, entryName, canon)
 		if rerr != nil {
@@ -1131,6 +1178,12 @@ func computeCanonHostFunc(
 	// subtask.*, stream.*, future.*, error-context.*, task.cancel) is Phase
 	// 1c/2/3 and still falls through to the default "does not produce a
 	// core func" error below.
+	case binary.CanonKindTaskCancel:
+		def = taskCancelHostFuncGraph(in)
+
+	case binary.CanonKindSubtaskCancel:
+		def = subtaskCancelHostFuncGraph(in, canon)
+
 	case binary.CanonKindTaskReturn:
 		var terr error
 		def, terr = taskReturnHostFuncGraph(in, canon)
@@ -1162,10 +1215,10 @@ func computeCanonHostFunc(
 		def = waitableSetNewHostFunc(in)
 
 	case binary.CanonKindWaitableSetWait:
-		def = waitableSetWaitHostFunc(in)
+		def = waitableSetWaitHostFunc(in, canon)
 
 	case binary.CanonKindWaitableSetPoll:
-		def = waitableSetPollHostFunc(in)
+		def = waitableSetPollHostFunc(in, canon)
 
 	case binary.CanonKindWaitableSetDrop:
 		def = waitableSetDropHostFunc(in)
@@ -1339,17 +1392,30 @@ func resourceCanonHostFuncGraph(comp *binary.Component, cfg *config, resources *
 		})
 		return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32}, results: []api.ValueType{api.ValueTypeI32}}, nil
 
-	case 0x03: // resource.drop: handle:i32 -> ()
+	case 0x03, binary.CanonKindResourceDropAsync: // resource.drop (sync 0x03 / async 0x07): handle:i32 -> ()
 		fn := api.GoModuleFunc(func(ctx context.Context, _ api.Module, stack []uint64) {
 			h := api.DecodeU32(stack[0])
-			// Read the rep before dropping so the destructor (if any) can run
-			// against it -- an importer dropping an own<R> it received runs the
-			// DEFINER's dtor, registered on the shared table by global tag.
-			dtor := resources.dtorFor(typeIdx)
+			// Own/borrow dispatch BEFORE any destructor lookup (Phase 3): a
+			// borrow drop (handleTable.Drop's borrow arm) must never run the
+			// resource's dtor -- only the own arm does. Read the rep before
+			// dropping so the destructor (if any) can run against it -- an
+			// importer dropping an own<R> it received runs the DEFINER's
+			// dtor, registered on the shared table by global tag.
+			//
+			// resource.drop async (kind 0x07) decodes identically and is
+			// executed synchronously here: the pinned reference's
+			// canon_resource_drop has no async branch at all (it lifts the
+			// dtor with async_=False unconditionally) -- see
+			// docs/component-model-async-phase3-design.md §4.4.
+			own, ownErr := resources.IsOwn(typeIdx, h)
+			var dtor func(context.Context, uint32) error
 			var rep uint32
-			if dtor != nil {
-				if r, err := resources.Rep(typeIdx, h); err == nil {
-					rep = r
+			if ownErr == nil && own {
+				dtor = resources.dtorFor(typeIdx)
+				if dtor != nil {
+					if r, err := resources.Rep(typeIdx, h); err == nil {
+						rep = r
+					}
 				}
 			}
 			if err := resources.Drop(typeIdx, h); err != nil {

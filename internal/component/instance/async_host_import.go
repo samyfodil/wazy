@@ -83,14 +83,78 @@ func (ac *AsyncCall) Resolve(results []abi.Value) {
 	if err := ac.st.applyResolve(results); err != nil {
 		panic(fmt.Errorf("component/instance: async import: %w", err))
 	}
+	ac.installParkedPendingEventIfNeeded()
+}
+
+// OnCancel registers fn as the reference's Subtask.on_cancel for this call
+// (Phase 3, docs/component-model-async-phase3-design.md §2.4): fn runs
+// synchronously inside the guest's subtask.cancel. fn may Resolve/
+// ResolveCancelled synchronously (the guest then sees the final state,
+// never BLOCKED) or later via Defer (an async cancel then returns BLOCKED;
+// a sync cancel blocks on the scheduler until fn's eventual Resolve/
+// ResolveCancelled). Must be called before the AsyncHostFunc returns -- it
+// sets a field on the subtask the wrapper has already constructed.
+//
+// An import that never calls OnCancel leaves the subtask's onCancel nil:
+// subtask.cancel then just records the request and otherwise ignores it --
+// spec-legal (a callee may ignore cancellation; the subtask still resolves
+// whenever the import eventually completes normally via Resolve).
+func (ac *AsyncCall) OnCancel(fn func()) {
+	ac.st.onCancel = func() error { fn(); return nil }
+}
+
+// ResolveCancelled resolves the call as cancelled (reference on_resolve
+// (None), definitions.py ~2258-2264): always CANCELLED_BEFORE_RETURNED --
+// a host-import subtask is never STARTING (buildAsyncHostWrapper lifts args
+// eagerly, before the AsyncHostFunc -- and therefore any OnCancel hook --
+// ever runs), so it has necessarily already STARTED by the time a
+// cancellation can be requested. Same one-shot + same-goroutine discipline
+// as Resolve; same parked-path pending-event installation. Panics if called
+// without cancellationRequested (the reference asserts a None result
+// implies cancellation_requested).
+func (ac *AsyncCall) ResolveCancelled() {
+	if ac.resolved {
+		panic(fmt.Errorf("component/instance: async import: Resolve/ResolveCancelled called twice"))
+	}
+	if !ac.inCall && !ac.in.sched.pumping {
+		panic(fmt.Errorf("component/instance: async import: ResolveCancelled called outside the instance scheduler; external completion requires CallAsync (not yet implemented)"))
+	}
+	if !ac.st.cancellationRequested {
+		panic(fmt.Errorf("component/instance: async import: ResolveCancelled called without a prior subtask.cancel request"))
+	}
+	ac.resolved = true
+	ac.st.resolve(subtaskCancelledBeforeReturned, nil)
+	ac.installParkedPendingEventIfNeeded()
+}
+
+// installSubtaskEvent installs st's SUBTASK pending-event closure once it is
+// both resolved and parked at table index si -- the guest<->guest callee
+// wrapper's counterpart to AsyncCall.installParkedPendingEventIfNeeded
+// (async_lift.go's buildAsyncHostWrapper callee arm, §3.2's on_resolve).
+// Both the delivered state (p2) and deliver_resolve (lend release) are
+// evaluated at DELIVERY (Waitable.getPendingEvent), matching
+// installParkedPendingEventIfNeeded and the reference exactly.
+func installSubtaskEvent(st *subtask, si uint32) {
+	st.setPendingEvent(func() eventTuple {
+		if st.resolved() && !st.resolveDelivered() {
+			st.deliverResolve()
+		}
+		return eventTuple{code: eventSubtask, p1: si, p2: uint32(st.state)}
+	})
+}
+
+// installParkedPendingEventIfNeeded is Resolve/ResolveCancelled's shared
+// epilogue: the immediate fast path (still inCall) needs nothing more --
+// the wrapper's own epilogue observes st.resolved() -- but a call already
+// parked in the table (reference on_progress/subtask_event) needs its
+// pending-event closure installed so the next WAIT driver's predicate check
+// sees it. Both the delivered state (p2) and deliver_resolve (lend release)
+// are evaluated at DELIVERY (Waitable.getPendingEvent), matching the
+// reference exactly, not here at resolve time.
+func (ac *AsyncCall) installParkedPendingEventIfNeeded() {
 	if ac.inCall {
 		return // the wrapper's epilogue sees st.resolved() and takes the immediate path
 	}
-	// Parked: reference on_progress/subtask_event -- install the
-	// pending-event closure. Both the delivered state (p2) and
-	// deliver_resolve (lend release) are evaluated at DELIVERY
-	// (Waitable.getPendingEvent), matching the reference exactly, not here
-	// at resolve time.
 	st, si := ac.st, ac.subtaski
 	st.setPendingEvent(func() eventTuple {
 		if st.resolved() && !st.resolveDelivered() {
@@ -188,16 +252,20 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 		}
 
 		st := newSubtask()
-		args, aerr := liftAsyncHostArgsPlanned(in, paramPlans, resolve, stack, memMod, resources, st)
-		if aerr != nil {
-			panic(fmt.Errorf("component/instance: async import %q %q: %w", iface, funcName, aerr))
-		}
+
+		// applyResolve is shared by both arms below: given RESULT VALUES
+		// already reduced to the IMPORTER's own representation (a bare rep
+		// for an own/borrow result -- exactly what a Go AsyncHostFunc's
+		// Resolve receives directly, and what the guest<->guest callee arm's
+		// onResolve produces via mapResultsFromProvider), lower them into
+		// the calling module's memory through retPtr and flip state to
+		// RETURNED. Fetched fresh (mem/realloc), not captured at call time:
+		// memory may have grown between the call and this resolve (possibly
+		// much later, after a Defer round-trip or a parked guestTask).
 		var retPtr uint32
 		if outPtrIdx >= 0 {
 			retPtr = api.DecodeU32(stack[outPtrIdx])
 		}
-		st.state = subtaskStarted // on_start complete (args lifted)
-
 		st.applyResolve = func(vals []abi.Value) error {
 			if len(vals) != resultCount {
 				return fmt.Errorf("async import %q %q: Resolve got %d result(s), the import declares %d", iface, funcName, len(vals), resultCount)
@@ -206,9 +274,6 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 				st.resolve(subtaskReturned, nil)
 				return nil
 			}
-			// Fetched fresh, not captured at call time: memory may have
-			// grown between the call and this resolve (possibly much
-			// later, after a Defer round-trip).
 			mem, memAvailable := memoryBytesOf(memMod)
 			if resultUsesMem && !memAvailable {
 				return fmt.Errorf("async import %q %q: result requires linear memory (string/list), but the calling module has none", iface, funcName)
@@ -227,6 +292,74 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 			st.resolve(subtaskReturned, nil)
 			return nil
 		}
+
+		if tgt := hi.asyncTarget; tgt != nil {
+			// Guest<->guest callee arm (Phase 3, docs/component-model-
+			// async-phase3-design.md §3.2): the reference canon_lower
+			// callee protocol (~2246-2271), transliterated. Args are
+			// snapshotted from the flat core stack now but LIFTED lazily,
+			// inside on_start -- the reference lifts caller args lazily
+			// too (~2250-2254), observable when B's entry parks under
+			// backpressure and A mutates its own arg buffer before B
+			// actually starts.
+			flat := append([]uint64(nil), stack[:flatParamWidth]...)
+
+			onStart := func(calleeTask *task) ([]abi.Value, error) {
+				args, aerr := liftAsyncHostArgsPlanned(in, paramPlans, resolve, flat, memMod, resources, st)
+				if aerr != nil {
+					return nil, fmt.Errorf("async lower %q %q: %w", iface, funcName, aerr)
+				}
+				st.state = subtaskStarted // on_start complete (STARTING -> STARTED, ~2250)
+				return mapArgsToProvider(tgt, args, calleeTask)
+			}
+
+			onResolve := func(vals []abi.Value, cancelled bool) error {
+				if cancelled {
+					// reference on_resolve(None) (~2258-2264): STARTING ->
+					// CANCELLED_BEFORE_STARTED, else CANCELLED_BEFORE_RETURNED.
+					if st.state == subtaskStarting {
+						st.resolve(subtaskCancelledBeforeStarted, nil)
+					} else {
+						st.resolve(subtaskCancelledBeforeReturned, nil)
+					}
+				} else {
+					mapped, merr := mapResultsFromProvider(tgt, vals)
+					if merr != nil {
+						return fmt.Errorf("async lower %q %q: %w", iface, funcName, merr)
+					}
+					if aerr := st.applyResolve(mapped); aerr != nil {
+						return aerr
+					}
+				}
+				if si := st.subtaski(); si != 0 { // already parked: install like AsyncCall.Resolve's parked arm
+					installSubtaskEvent(st, si)
+				}
+				return nil
+			}
+
+			onCancel, operr := tgt.sub.startAsyncExportTask(ctx, tgt.be, tgt.exportName, onStart, onResolve)
+			if operr != nil {
+				panic(fmt.Errorf("component/instance: async lower %q %q: %w", iface, funcName, operr))
+			}
+			st.onCancel = onCancel // reference: subtask.on_cancel = callee(...) (~2270)
+
+			if st.resolved() { // immediate path: B ran to EXIT without parking
+				st.deliverResolve()
+				stack[0] = uint64(uint32(st.state)) // RETURNED (CANCELLED_* impossible: nothing could cancel before a handle exists)
+				return
+			}
+			subtaski := resources.addEntry(st)
+			st.setSubtaski(subtaski)
+			stack[0] = uint64(uint32(st.state)) | uint64(subtaski)<<4 // STARTING or STARTED
+			return
+		}
+
+		// Plain host-import arm (unchanged from Phase 1/2).
+		args, aerr := liftAsyncHostArgsPlanned(in, paramPlans, resolve, stack, memMod, resources, st)
+		if aerr != nil {
+			panic(fmt.Errorf("component/instance: async import %q %q: %w", iface, funcName, aerr))
+		}
+		st.state = subtaskStarted // on_start complete (args lifted)
 
 		ac := &AsyncCall{in: in, st: st, inCall: true}
 		// Bracket the actual Go call -- see buildHostWrapper's identical
@@ -250,9 +383,53 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 		}
 		subtaski := resources.addEntry(st)
 		ac.subtaski = subtaski
+		st.setSubtaski(subtaski)
 		stack[0] = uint64(uint32(st.state)) | uint64(subtaski)<<4
 	})
 	return fn, apiParams, apiResults, nil
+}
+
+// mapArgsToProvider is repToProviderHandle applied across a whole (already-
+// lifted, importer-side) arg list, for the guest<->guest callee arm's
+// on_start (Phase 3, docs/component-model-async-phase3-design.md §3.2) --
+// composition.go's delegatingHostImport does the identical mapping for the
+// sync arm. calleeTask is B's real task (it already exists by the time
+// on_start runs, unlike the sync delegate's throwaway scope-only task),
+// so a cross-instance borrow<T> arg is minted call-scoped against it.
+func mapArgsToProvider(tgt *guestAsyncTarget, args []abi.Value, calleeTask *task) ([]abi.Value, error) {
+	paramDescs := tgt.be.paramTypes
+	out := make([]abi.Value, len(args))
+	for i, a := range args {
+		if i < len(paramDescs) {
+			var err error
+			if a, err = repToProviderHandle(tgt.sub, paramDescs[i], a, calleeTask); err != nil {
+				return nil, err
+			}
+		}
+		out[i] = a
+	}
+	return out, nil
+}
+
+// mapResultsFromProvider is providerHandleToRep applied across a whole
+// (provider-side) result list, for the guest<->guest callee arm's
+// on_resolve -- the result-side mirror of mapArgsToProvider. The output
+// feeds st.applyResolve exactly as a Go AsyncHostFunc's Resolve results do
+// (a bare rep for an own/borrow result), so the two arms share the same
+// lowering-into-memory code.
+func mapResultsFromProvider(tgt *guestAsyncTarget, vals []abi.Value) ([]abi.Value, error) {
+	resDescs := resultDescs(tgt.be)
+	out := make([]abi.Value, len(vals))
+	for i, v := range vals {
+		if i < len(resDescs) {
+			var err error
+			if v, err = providerHandleToRep(tgt.sub, resDescs[i], v); err != nil {
+				return nil, err
+			}
+		}
+		out[i] = v
+	}
+	return out, nil
 }
 
 // liftAsyncHostArgsPlanned is liftHostArgsPlanned's async-lower counterpart:

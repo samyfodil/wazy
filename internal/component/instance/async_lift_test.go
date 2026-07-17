@@ -92,14 +92,23 @@ func TestInvokeAsyncCallback_NotReenterable(t *testing.T) {
 	requireErrContains(t, err, "not reenterable")
 }
 
-func TestInvokeAsyncCallback_EnterTaskError(t *testing.T) {
+// TestInvokeAsyncCallback_BackpressureParksThenDeadlocks pins Phase 3's
+// forced change: entry no longer traps on backpressure (Phase 1's
+// enterTask) -- it PARKS the guestTask at parkEntry (tryEnter fails,
+// task.go), exactly like a genuinely busy instance. With nothing else ever
+// able to clear the backpressure counter in this test, the scheduler drive
+// finds no ready parked task and no runq work, so it surfaces the same
+// deadlock shape a stuck WAIT would (errAsyncDeadlock, wrapped with export
+// context) -- see guest_task.go's ready() parkEntry arm and sched.step.
+func TestInvokeAsyncCallback_BackpressureParksThenDeadlocks(t *testing.T) {
 	inst, be := firstLightAsyncExport(t)
-	inst.backpressure = 1 // enterTask rejects entry while backpressure is held
+	inst.backpressure = 1 // tryEnter parks entry; nothing clears backpressure
 	_, err := inst.invokeAsyncCallback(context.Background(), be, "run-async", nil)
-	requireErrContains(t, err, "backpressure")
-	// mayEnter must still be restored (the defer runs even on this error path).
+	requireErrContains(t, err, "deadlock")
+	// mayEnter is untouched by a parked-at-entry task: guest code never ran
+	// (enterRun/leaveRun never bracketed anything).
 	if !inst.mayEnter {
-		t.Fatal("mayEnter was left false after an enterTask failure")
+		t.Fatal("mayEnter was left false by a task that never actually entered")
 	}
 }
 

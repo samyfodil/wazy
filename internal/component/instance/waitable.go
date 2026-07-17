@@ -52,6 +52,14 @@ type eventTuple struct {
 type waitable struct {
 	pendingEvent func() eventTuple
 	wset         *waitableSet
+
+	// syncWaiter mirrors Waitable.has_sync_waiter (Phase 3, retiring the
+	// Phase-1/2 "no sync waiters exist" collapse -- docs/component-model-
+	// async-phase3-design.md §2.2/§5): true while a SYNCHRONOUS
+	// subtask.cancel (async_=false) is blocked in the scheduler drive
+	// waiting for this waitable to resolve (wait_for_pending_event, ~776).
+	// waitableJoinHostFunc's trap_if(has_sync_waiter) reads it directly.
+	syncWaiter bool
 }
 
 // waitableEntry is a table entry that embeds a waitable (subtask now;
@@ -217,7 +225,42 @@ type subtask struct {
 	// nil for anything else (no other subtask source exists yet -- Phase
 	// 2/3 add guest->guest lowers and streams/futures).
 	applyResolve func(results []abi.Value) error
+
+	// onCancel mirrors Subtask.on_cancel (Phase 3): the callee's cancel
+	// entry, called synchronously by the subtask.cancel builtin. For a
+	// guest<->guest async-lowered call this is the callee task's
+	// requestCancellation (async_lift.go's startAsyncExportTask); for a host
+	// import it is whatever AsyncCall.OnCancel registered, or nil if the
+	// import registered none (a callee that ignores cancellation --
+	// spec-legal, see AsyncCall.OnCancel's doc). nil for a subtask that has
+	// already resolved by the time cancel is called (nothing left to
+	// cancel).
+	onCancel func() error
+
+	// cancellationRequested mirrors Subtask.cancellation_requested: set the
+	// first time subtask.cancel is called on this subtask; a second call
+	// traps (canon_subtask_cancel's trap_if(cancellation_requested)).
+	cancellationRequested bool
+
+	// si is this subtask's OWN table index, once it has been parked there
+	// (buildAsyncHostWrapper's/the guest<->guest callee wrapper's epilogue
+	// -- resources.addEntry(st) -- sets it via setSubtaski right after
+	// allocating). 0 until then (0 is never a valid handle). The guest<->
+	// guest callee wrapper's onResolve closure (async_host_import.go's
+	// buildAsyncHostWrapper) needs this to know, when it fires, whether the
+	// subtask is still on the immediate/inCall fast path (si == 0, nothing
+	// to install an event for -- the wrapper's own epilogue handles it) or
+	// already parked (si != 0, install the pending-event closure itself) --
+	// the same distinction AsyncCall.subtaski/inCall draws for a host
+	// import, but this subtask has no AsyncCall wrapping it.
+	si uint32
 }
+
+// subtaski returns this subtask's own table index (0 if not yet parked).
+func (s *subtask) subtaski() uint32 { return s.si }
+
+// setSubtaski records this subtask's own table index once parked.
+func (s *subtask) setSubtaski(i uint32) { s.si = i }
 
 func (*subtask) entryKind() entryKind     { return entrySubtask }
 func (s *subtask) waitablePtr() *waitable { return &s.waitable }

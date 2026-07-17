@@ -214,15 +214,19 @@ type CanonOpt struct {
 // wasm-tools 1.253 (`wasm-tools dump`) on internal/component/binary/testdata/
 // async/*.wasm -- see decodeCanonSection and canonKindName.
 //
-// Kinds 0x07, 0x08, 0x0c, and 0x26+ (the thread.* builtins) are not in this
-// list: they are out of Phase 0 scope and fall through decodeCanonSection's
-// default case.
+// Kinds 0x08, 0x0c, and 0x26+ (the thread.* builtins) are not in this list:
+// they are out of scope and fall through decodeCanonSection's default case.
+// 0x07 (resource.drop async) was added in Phase 3 -- see
+// docs/component-model-async-phase3-design.md §4.4; its payload (a single
+// typeidx) is byte-identical to 0x03's, verified against fresh wasm-tools
+// output the same way as every other kind in this table.
 const (
-	CanonKindLift         byte = 0x00
-	CanonKindLower        byte = 0x01
-	CanonKindResourceNew  byte = 0x02
-	CanonKindResourceDrop byte = 0x03
-	CanonKindResourceRep  byte = 0x04
+	CanonKindLift              byte = 0x00
+	CanonKindLower             byte = 0x01
+	CanonKindResourceNew       byte = 0x02
+	CanonKindResourceDrop      byte = 0x03
+	CanonKindResourceRep       byte = 0x04
+	CanonKindResourceDropAsync byte = 0x07
 
 	CanonKindTaskCancel               byte = 0x05
 	CanonKindSubtaskCancel            byte = 0x06
@@ -556,8 +560,8 @@ func externTypeName(t byte) string {
 }
 
 // canonKindName maps a Canon.Kind byte to its builtin name, for Dump and
-// decode error messages. Kinds not in the CanonKind* table (0x07, 0x08,
-// 0x0c, 0x26+) never reach here -- decodeCanonSection fails loud on them
+// decode error messages. Kinds not in the CanonKind* table (0x08, 0x0c,
+// 0x26+) never reach here -- decodeCanonSection fails loud on them
 // before a Canon value exists.
 func canonKindName(k byte) string {
 	switch k {
@@ -571,6 +575,8 @@ func canonKindName(k byte) string {
 		return "resource.drop"
 	case CanonKindResourceRep:
 		return "resource.rep"
+	case CanonKindResourceDropAsync:
+		return "resource.drop (async)"
 	case CanonKindTaskCancel:
 		return "task.cancel"
 	case CanonKindSubtaskCancel:

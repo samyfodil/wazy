@@ -114,7 +114,7 @@ func TestSharedStream_ZeroLengthRead_NoElifAsymmetry(t *testing.T) {
 }
 
 func TestSharedStream_SameInstanceNonNumericTrap(t *testing.T) {
-	inst := &Instance{}
+	inst := &Instance{sched: &sched{}}
 	s := &sharedStream{numeric: false}
 	wbuf := newHostReadBuffer(u32vals(1))
 	if err := s.write(inst, wbuf, func(func()) {}, func(copyResult) {}); err != nil {
@@ -128,7 +128,7 @@ func TestSharedStream_SameInstanceNonNumericTrap(t *testing.T) {
 }
 
 func TestSharedStream_SameInstanceNumericAllowed(t *testing.T) {
-	inst := &Instance{}
+	inst := &Instance{sched: &sched{}}
 	s := &sharedStream{numeric: true}
 	wbuf := newHostReadBuffer(u32vals(9))
 	if err := s.write(inst, wbuf, func(func()) {}, func(copyResult) {}); err != nil {
@@ -523,7 +523,7 @@ func TestTakeReadableStreamEnd_Traps(t *testing.T) {
 
 func TestErrorContext_NewDebugMessageDrop(t *testing.T) {
 	ctx, mod := memModule(t)
-	in := &Instance{mayLeave: true, resources: newHandleTable(), resolve: func(uint32) binary.TypeDesc { return nil }}
+	in := &Instance{sched: &sched{}, mayLeave: true, resources: newHandleTable(), resolve: func(uint32) binary.TypeDesc { return nil }}
 
 	mem := mod.Memory()
 	msg := "boom"
@@ -595,7 +595,7 @@ func TestErrorContext_NewDebugMessageDrop(t *testing.T) {
 // ---- Instance.NewStream / NewFuture and the host API ----
 
 func TestNewStream_ResourceInElementRefused(t *testing.T) {
-	in := &Instance{}
+	in := &Instance{sched: &sched{}}
 	_, _, err := in.NewStream(binary.OwnDesc{ResourceType: 0})
 	if err == nil {
 		t.Fatal("expected refusal: resource handle in stream element")
@@ -603,7 +603,7 @@ func TestNewStream_ResourceInElementRefused(t *testing.T) {
 }
 
 func TestStreamWriterReader_HostHostRendezvous(t *testing.T) {
-	in := &Instance{}
+	in := &Instance{sched: &sched{}}
 	sw, readableVal, err := in.NewStream(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -628,20 +628,20 @@ func TestStreamWriterReader_HostHostRendezvous(t *testing.T) {
 }
 
 func TestStreamWriter_WriteTwicePanics(t *testing.T) {
-	in := &Instance{}
+	in := &Instance{sched: &sched{}}
 	sw, _, _ := in.NewStream(nil)
 	sw.Write(u32vals(1), func(CopyResult, uint32) {}) // parks
 	requirePanicContains(t, "previous Write", func() { sw.Write(u32vals(2), func(CopyResult, uint32) {}) })
 }
 
 func TestFutureWriter_CloseBeforeSetPanics(t *testing.T) {
-	in := &Instance{}
+	in := &Instance{sched: &sched{}}
 	fw, _, _ := in.NewFuture(nil)
 	requirePanicContains(t, "before Set completed", func() { fw.Close() })
 }
 
 func TestFutureWriter_SetThenClose(t *testing.T) {
-	in := &Instance{}
+	in := &Instance{sched: &sched{}}
 	fw, readableVal, _ := in.NewFuture(nil)
 	shared := readableVal.(*sharedFuture)
 	fr := &FutureReader{in: in, shared: shared, state: copyIdle}
@@ -661,22 +661,22 @@ func TestFutureWriter_SetThenClose(t *testing.T) {
 }
 
 func TestRequireSchedulable_RawGoroutinePanics(t *testing.T) {
-	in := &Instance{activeTask: &task{}}
+	in := &Instance{sched: &sched{}, activeTask: &task{}}
 	requirePanicContains(t, "outside the instance scheduler", func() { in.requireSchedulable("test op") })
 }
 
 func TestRequireSchedulable_NoActiveTaskAllowed(t *testing.T) {
-	in := &Instance{}
+	in := &Instance{sched: &sched{}}
 	in.requireSchedulable("test op") // no active task: allowed, must not panic
 }
 
 func TestRequireSchedulable_InHostCallAllowed(t *testing.T) {
-	in := &Instance{activeTask: &task{}, inHostCall: 1}
+	in := &Instance{sched: &sched{}, activeTask: &task{}, inHostCall: 1}
 	in.requireSchedulable("test op") // bracketed by a host import: allowed
 }
 
 func TestRequireSchedulable_PumpingAllowed(t *testing.T) {
-	in := &Instance{activeTask: &task{}}
+	in := &Instance{sched: &sched{}, activeTask: &task{}}
 	in.sched.pumping = true
 	in.requireSchedulable("test op")
 }

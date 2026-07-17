@@ -34,19 +34,15 @@ func unpackCallbackResult(packed uint32) (callbackCode, uint32, error) {
 
 // invokeAsyncCallback is invoke's counterpart for an async lift with a
 // callback (CanonOpt kind 0x06 async + 0x07 callback): the canon_lift
-// callback-loop driver (definitions.py ~2172-2197), transliterated for
-// wazy's single-active-task MVP -- see
-// docs/component-model-async-runtime-design.md §1.3.
-//
-// EXIT and YIELD were the only reachable codes as of Phase 1b (a callback
-// that resolves without ever waiting). WAIT (Phase 1c,
-// docs/component-model-async-runtime-design.md §1.3) drives the instance's
-// scheduler (sched.go) until the named waitable set has a pending event --
-// installed by an async host import's deferred Resolve
-// (async_host_import.go) or a subtask otherwise reaching RETURNED -- or
-// traps if the run queue drains first: with exactly one task and no
-// concurrent host activity, an empty queue with the predicate still false is
-// a permanent deadlock, never a transient one.
+// callback-loop driver (definitions.py ~2172-2197), transliterated for wazy
+// -- see docs/component-model-async-runtime-design.md §1.3 (Phase 1/2) and
+// docs/component-model-async-phase3-design.md §1.4 (Phase 3: the loop body
+// now lives on guestTask, guest_task.go, as a parkable state machine instead
+// of a Go-frame-held loop; this func starts one and drives the instance's
+// scheduler until it's done -- bit-identical host-entry behavior to Phase
+// 1/2 for every export that never actually parks past its own drive, and
+// for one that does, the SAME FIFO drive that used to run nested now runs
+// here instead).
 func (in *Instance) invokeAsyncCallback(ctx context.Context, be *boundExport, exportName string, args []abi.Value) ([]abi.Value, error) {
 	fd := be.fd
 	if len(args) != len(fd.Params) {
@@ -65,123 +61,73 @@ func (in *Instance) invokeAsyncCallback(ctx context.Context, be *boundExport, ex
 		return nil, fmt.Errorf("component/instance: export %q: core func %q returns %d value(s); an async lift with a callback must return a single packed i32", exportName, be.funcName, be.coreResultCount)
 	}
 
-	// Store.lift's prologue: trap_if(!may_enter_from) + enter_from/leave_to.
+	// Store.lift's prologue: trap_if(!may_enter_from). Unlike Phase 1/2,
+	// mayEnter is NOT held false for the whole call below -- it now brackets
+	// only the guest code actually being on the stack (task.go's
+	// enterRun/leaveRun), so a second entry into THIS instance while this
+	// task is merely parked (not running) can succeed, exactly as the
+	// reference allows.
 	if !in.mayEnter {
 		return nil, fmt.Errorf("component/instance: export %q: instance is not reenterable", exportName)
 	}
-	in.mayEnter = false
-	defer func() { in.mayEnter = true }()
 
 	t := &task{inst: in, be: be}
-	t.onResolve = func(vals []abi.Value) { t.result = vals }
-	if err := in.enterTask(t); err != nil {
-		return nil, fmt.Errorf("component/instance: export %q: %w", exportName, err)
+	t.onResolve = func(vals []abi.Value, cancelled bool) { t.result, t.cancelled = vals, cancelled }
+	gt := &guestTask{
+		t: t, in: in, be: be, ctx: ctx, exportName: exportName,
+		onStart: func() ([]abi.Value, error) { return args, nil },
 	}
-	defer in.exitTask()
+	t.gt = gt
 
-	mem, memAvailable := memoryBytesOf(be.mod)
-	realloc := cachedReallocOf(ctx, be)
-
-	// on_start: lower params exactly as the sync path (invoke's identical
-	// pooling discipline -- see its doc for why this is safe to pool).
-	coreArgsPtr := coreValueSlicePool.Get().(*[]abi.CoreValue)
-	*coreArgsPtr = (*coreArgsPtr)[:0]
-	t.state = taskStarted
-	coreArgs, err := in.lowerParams(be, args, mem, memAvailable, realloc, exportName, *coreArgsPtr)
-	if err != nil {
-		coreValueSlicePool.Put(coreArgsPtr)
+	if err := gt.start(); err != nil {
 		return nil, err
 	}
-	*coreArgsPtr = coreArgs
-	if len(coreArgs) != len(be.coreParamsWant) {
-		putCoreValueSlice(coreArgsPtr)
-		return nil, fmt.Errorf("component/instance: export %q: parameter list flattens to %d core value(s) but the core signature expects %d; whole-parameter-list spilling to memory is not supported by this milestone", exportName, len(coreArgs), len(be.coreParamsWant))
-	}
-
-	// The first core call returns a single packed i32 (an async lift with a
-	// callback always flattens its result to exactly one core value -- see
-	// docs/component-model-async-runtime-design.md §1.3); size the stack to
-	// whichever's larger of the lowered params or the core func's own
-	// declared result count, exactly like invoke()'s stack sizing.
-	numResults := be.coreResultCount
-	stackLen := len(coreArgs)
-	if numResults > stackLen {
-		stackLen = numResults
-	}
-	stackPtr := getUint64Slice(stackLen)
-	stack := *stackPtr
-	for i, cv := range coreArgs {
-		stack[i] = cv.Bits
-	}
-	putCoreValueSlice(coreArgsPtr)
-
-	if err := be.coreFn.CallWithStack(ctx, stack); err != nil {
-		putUint64Slice(stackPtr)
-		return nil, fmt.Errorf("component/instance: export %q: call core func %q: %w", exportName, be.funcName, err)
-	}
-	packed := uint32(stack[0])
-	putUint64Slice(stackPtr)
-
-	// The callback loop: canon_lift lines ~2172-2197.
-	var cbStack [3]uint64
-	for {
-		code, si, cerr := unpackCallbackResult(packed)
-		if cerr != nil {
-			return nil, fmt.Errorf("component/instance: export %q: %w", exportName, cerr)
+	if err := in.sched.drive(func() bool { return gt.done }); err != nil {
+		if errors.Is(err, errAsyncDeadlock) {
+			return nil, fmt.Errorf("component/instance: export %q: deadlock: the async task is suspended but the run queue is empty and no parked task is ready; an import resolved externally requires CallAsync (not yet implemented)", exportName)
 		}
-		if code == callbackExit {
-			break
-		}
-
-		// Reference: release exclusive for the duration of the suspension,
-		// re-acquire before invoking the callback. With one task this is
-		// pure bookkeeping (nothing else could ever run in between), but
-		// the set/clear SITES are kept verbatim so CallAsync drops in
-		// without reshaping this loop.
-		in.exclusiveHeld = false
-		ev := eventTuple{code: eventNone}
-		switch code {
-		case callbackYield:
-			// wait_until(lambda: not exclusive) under the deterministic
-			// profile parks for exactly one scheduler round: everything
-			// already queued runs, then the yielder resumes with NONE.
-			if err := in.sched.pumpSnapshot(); err != nil {
-				return nil, fmt.Errorf("component/instance: export %q: %w", exportName, err)
-			}
-		case callbackWait:
-			e, ok := in.resources.getEntry(si)
-			ws, isWS := e.(*waitableSet)
-			if !ok || !isWS { // trap_if(not isinstance(wset, WaitableSet))
-				return nil, fmt.Errorf("component/instance: export %q: callback WAIT: handle %d is not a waitable set", exportName, si)
-			}
-			// wait_for_event_and(lambda: not exclusive, ...): the
-			// "not exclusive" conjunct is vacuously true (just cleared
-			// above); the real predicate is has_pending_event.
-			ws.numWaiting++
-			derr := in.sched.drive(ws.hasPendingEvent)
-			ws.numWaiting--
-			if derr != nil {
-				if errors.Is(derr, errAsyncDeadlock) {
-					return nil, fmt.Errorf("component/instance: export %q: deadlock: guest is WAITing on waitable-set %d but it has no pending event and the run queue is empty; an import resolved externally requires CallAsync (not yet implemented)", exportName, si)
-				}
-				return nil, fmt.Errorf("component/instance: export %q: %w", exportName, derr)
-			}
-			ev = ws.getPendingEvent() // FIFO first-with-event
-		}
-		in.exclusiveHeld = true
-
-		// [packed] = callback(event_code, p1, p2).
-		cbStack[0], cbStack[1], cbStack[2] = uint64(ev.code), uint64(ev.p1), uint64(ev.p2)
-		if err := be.callbackFn.CallWithStack(ctx, cbStack[:]); err != nil {
-			return nil, fmt.Errorf("component/instance: export %q: callback %q: %w", exportName, be.callbackFuncName, err)
-		}
-		packed = uint32(cbStack[0])
+		return nil, err
 	}
-
-	// exit_implicit_thread -> unregister_thread: trap_if(state != RESOLVED).
-	// This is the "async export forgot to call task.return" trap.
-	if t.state != taskResolved {
-		return nil, fmt.Errorf("component/instance: export %q: callback returned EXIT before task.return resolved the task", exportName)
+	if gt.err != nil {
+		return nil, gt.err
 	}
 	return t.result, nil
+}
+
+// startAsyncExportTask starts be (an async callback lift of THIS instance)
+// as a guestTask whose results flow to onResolve instead of a host caller
+// (Phase 3 guest<->guest async lower, docs/component-model-async-phase3-
+// design.md §3.2): the Store.lift func_inst + canon_lift front half
+// (~587-595 + ~2144-2207) on the CALLEE instance -- the same machinery
+// invokeAsyncCallback sits on, minus the drive (this instance's *sched is
+// shared with the whole composition tree -- Instance.sched's doc -- so
+// whoever eventually drives that shared scheduler to completion resumes
+// this task; it is never driven here). Returns the task's
+// requestCancellation as the caller's subtask.on_cancel (reference ~2207).
+func (in *Instance) startAsyncExportTask(ctx context.Context, be *boundExport, exportName string,
+	onStart func(*task) ([]abi.Value, error), onResolve func([]abi.Value, bool) error,
+) (onCancel func() error, err error) {
+	// trap_if(not inst.may_enter_from(caller)) (~590): mayEnter is true here
+	// in every reachable interleaving (the caller's own guest code is
+	// running, so by construction it cannot also be running on THIS
+	// instance unless this instance IS the caller re-entering itself --
+	// exactly the case mayEnter guards), kept as a real trap for parity.
+	if !in.mayEnter {
+		return nil, fmt.Errorf("component/instance: export %q: instance is not reenterable", exportName)
+	}
+	t := &task{inst: in, be: be}
+	t.onResolve = func(vals []abi.Value, cancelled bool) {
+		if e := onResolve(vals, cancelled); e != nil {
+			panic(fmt.Errorf("component/instance: export %q: %w", exportName, e))
+		}
+	}
+	gt := &guestTask{
+		t: t, in: in, be: be, ctx: ctx, exportName: exportName,
+		onStart: func() ([]abi.Value, error) { return onStart(t) },
+	}
+	t.gt = gt
+	if err := gt.start(); err != nil { // may run to EXIT, may park at entry/WAIT
+		return nil, err
+	}
+	return t.requestCancellation, nil
 }

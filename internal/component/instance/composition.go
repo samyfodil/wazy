@@ -226,7 +226,25 @@ func (in *Instance) canonTag(idx uint32) uint32 {
 // importer's host wrapper handed across the boundary (it had already reduced its
 // own handle to the rep via lift_own/lift_borrow). Non-handle params pass
 // through. Mirrors lower_own/lower_borrow into the provider's table.
-func repToProviderHandle(sub *Instance, desc binary.TypeDesc, v abi.Value) (abi.Value, error) {
+//
+// scope is the reference lower_borrow's minting arm (~1809-1815) call scope
+// (Phase 3, docs/component-model-async-phase3-design.md §4.1): the
+// composition delegate's borrow handle is minted call-scoped
+// (handleTable.NewBorrowScoped) so the callee can drop it and its exit is
+// trapped if it doesn't -- but ONLY when the PROVIDER is not itself the
+// resource's owning instance. When the provider DOES own the resource
+// (sub.isGuestResource(tag) true), this is exactly the reference's
+// same-instance exemption (lower_borrow ~1811: `if cx.inst is t.rt.impl:
+// return rep` -- cx.inst here IS sub, the callee instance being lowered
+// into): the provider's own sync invoke()/resolveArgHandles path
+// immediately reduces this same minted handle back to a rep via a
+// read-only Rep() lookup (never a drop) for its own guest-owned-resource
+// core call, so the callee's core code never even observes a handle to
+// drop -- scoping it would trap on EVERY such call. §4.2's #1 hazard is
+// this exact case, just reached from the opposite direction (a provider
+// FORWARDING a resource it does not itself own, a deeper re-export chain,
+// is the only shape that genuinely needs the call-scoped mint below).
+func repToProviderHandle(sub *Instance, desc binary.TypeDesc, v abi.Value, scope *task) (abi.Value, error) {
 	switch d := desc.(type) {
 	case binary.OwnDesc:
 		rep, ok := v.(uint32)
@@ -239,7 +257,12 @@ func repToProviderHandle(sub *Instance, desc binary.TypeDesc, v abi.Value) (abi.
 		if !ok {
 			return nil, fmt.Errorf("delegated borrow<%d> arg: expected a uint32 rep, got %T", d.ResourceType, v)
 		}
-		return sub.resources.NewBorrow(sub.canonTag(d.ResourceType), rep), nil
+		tag := sub.canonTag(d.ResourceType)
+		providerOwnsIt := sub.isGuestResource != nil && sub.isGuestResource(tag)
+		if scope != nil && !providerOwnsIt {
+			return sub.resources.NewBorrowScoped(tag, rep, scope), nil
+		}
+		return sub.resources.NewBorrow(tag, rep), nil
 
 	case binary.StreamDesc:
 		// The mirror of the TakeOwn/NewOwn lines above: the importer's own

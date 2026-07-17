@@ -38,7 +38,7 @@ func TestContextValType(t *testing.T) {
 }
 
 func TestContextGetSetHostFuncGraph_BadCoreValType(t *testing.T) {
-	in := &Instance{mayLeave: true}
+	in := &Instance{sched: &sched{}, mayLeave: true}
 	if _, err := contextGetHostFuncGraph(in, binary.Canon{CoreValType: 0x7d}); err == nil {
 		t.Fatal("contextGetHostFuncGraph: expected an error for a non-i32/i64 core valtype")
 	}
@@ -52,7 +52,7 @@ func TestContextGetSetHostFuncGraph_BadCoreValType(t *testing.T) {
 // pinning the "current task" wiring: set writes task.ctxStorage[slot], get
 // reads it back.
 func TestContextGetSetRoundTrip(t *testing.T) {
-	in := &Instance{mayLeave: true}
+	in := &Instance{sched: &sched{}, mayLeave: true}
 	tk := &task{}
 	in.activeTask = tk
 
@@ -90,7 +90,7 @@ func TestContextGetSetRoundTrip(t *testing.T) {
 }
 
 func TestContextGetSetSlotOutOfRange(t *testing.T) {
-	in := &Instance{mayLeave: true, activeTask: &task{}}
+	in := &Instance{sched: &sched{}, mayLeave: true, activeTask: &task{}}
 	getDef, err := contextGetHostFuncGraph(in, binary.Canon{CoreValType: 0x7f, Slot: 5})
 	if err != nil {
 		t.Fatalf("contextGetHostFuncGraph: %v", err)
@@ -109,21 +109,21 @@ func TestContextGetSetSlotOutOfRange(t *testing.T) {
 }
 
 func TestRequireActiveTask_NoActiveTaskPanics(t *testing.T) {
-	in := &Instance{mayLeave: true}
+	in := &Instance{sched: &sched{}, mayLeave: true}
 	requirePanicContains(t, "called outside an active async task", func() {
 		requireActiveTask(in, "task.return")
 	})
 }
 
 func TestRequireActiveTask_MayLeaveFalsePanics(t *testing.T) {
-	in := &Instance{mayLeave: false, activeTask: &task{}}
+	in := &Instance{sched: &sched{}, mayLeave: false, activeTask: &task{}}
 	requirePanicContains(t, "may not be left", func() {
 		requireActiveTask(in, "task.return")
 	})
 }
 
 func TestBackpressureIncDec(t *testing.T) {
-	in := &Instance{mayLeave: true, activeTask: &task{}}
+	in := &Instance{sched: &sched{}, mayLeave: true, activeTask: &task{}}
 	inc := backpressureIncHostFuncGraph(in)
 	dec := backpressureDecHostFuncGraph(in)
 
@@ -138,7 +138,7 @@ func TestBackpressureIncDec(t *testing.T) {
 }
 
 func TestBackpressureDecUnderflowPanics(t *testing.T) {
-	in := &Instance{mayLeave: true, activeTask: &task{}}
+	in := &Instance{sched: &sched{}, mayLeave: true, activeTask: &task{}}
 	dec := backpressureDecHostFuncGraph(in)
 	requirePanicContains(t, "underflow", func() {
 		dec.fn.Call(context.Background(), nil, nil)
@@ -146,7 +146,7 @@ func TestBackpressureDecUnderflowPanics(t *testing.T) {
 }
 
 func TestBackpressureIncOverflowPanics(t *testing.T) {
-	in := &Instance{mayLeave: true, activeTask: &task{}, backpressure: 1<<16 - 1}
+	in := &Instance{sched: &sched{}, mayLeave: true, activeTask: &task{}, backpressure: 1<<16 - 1}
 	inc := backpressureIncHostFuncGraph(in)
 	requirePanicContains(t, "overflow", func() {
 		inc.fn.Call(context.Background(), nil, nil)
@@ -160,7 +160,7 @@ func u32TypeIdxResolver(t binary.TypeDesc) abi.Resolver {
 }
 
 func TestTaskReturnHostFuncGraph_NoResult(t *testing.T) {
-	in := &Instance{mayLeave: true, resolve: u32TypeIdxResolver(nil)}
+	in := &Instance{sched: &sched{}, mayLeave: true, resolve: u32TypeIdxResolver(nil)}
 	def, err := taskReturnHostFuncGraph(in, binary.Canon{})
 	if err != nil {
 		t.Fatalf("taskReturnHostFuncGraph: %v", err)
@@ -170,7 +170,7 @@ func TestTaskReturnHostFuncGraph_NoResult(t *testing.T) {
 	}
 
 	var got []abi.Value
-	tk := &task{onResolve: func(vals []abi.Value) { got = vals }}
+	tk := &task{onResolve: func(vals []abi.Value, _ bool) { got = vals }}
 	in.activeTask = tk
 	def.fn.Call(context.Background(), nil, nil)
 	if tk.state != taskResolved {
@@ -184,7 +184,7 @@ func TestTaskReturnHostFuncGraph_NoResult(t *testing.T) {
 func TestTaskReturnHostFuncGraph_U32Result(t *testing.T) {
 	u32Ref := binary.TypeRef{Primitive: "u32"}
 	canon := binary.Canon{TaskReturnResult: binary.FuncResults{Unnamed: &u32Ref}}
-	in := &Instance{mayLeave: true, resolve: u32TypeIdxResolver(nil)}
+	in := &Instance{sched: &sched{}, mayLeave: true, resolve: u32TypeIdxResolver(nil)}
 	def, err := taskReturnHostFuncGraph(in, canon)
 	if err != nil {
 		t.Fatalf("taskReturnHostFuncGraph: %v", err)
@@ -196,7 +196,7 @@ func TestTaskReturnHostFuncGraph_U32Result(t *testing.T) {
 	var got []abi.Value
 	tk := &task{
 		be:        &boundExport{resultType: binary.PrimitiveDesc{Prim: "u32"}},
-		onResolve: func(vals []abi.Value) { got = vals },
+		onResolve: func(vals []abi.Value, _ bool) { got = vals },
 	}
 	in.activeTask = tk
 	def.fn.Call(context.Background(), nil, []uint64{42})
@@ -213,7 +213,7 @@ func TestTaskReturnHostFuncGraph_U32Result(t *testing.T) {
 func TestTaskReturnHostFuncGraph_ResultTypeMismatchPanics(t *testing.T) {
 	u32Ref := binary.TypeRef{Primitive: "u32"}
 	canon := binary.Canon{TaskReturnResult: binary.FuncResults{Unnamed: &u32Ref}}
-	in := &Instance{mayLeave: true, resolve: u32TypeIdxResolver(nil)}
+	in := &Instance{sched: &sched{}, mayLeave: true, resolve: u32TypeIdxResolver(nil)}
 	def, err := taskReturnHostFuncGraph(in, canon)
 	if err != nil {
 		t.Fatalf("taskReturnHostFuncGraph: %v", err)
@@ -232,7 +232,7 @@ func TestTaskReturnHostFuncGraph_MultipleNamedResultsError(t *testing.T) {
 		{Name: "a", Type: binary.TypeRef{Primitive: "u32"}},
 		{Name: "b", Type: binary.TypeRef{Primitive: "u32"}},
 	}}}
-	in := &Instance{resolve: u32TypeIdxResolver(nil)}
+	in := &Instance{sched: &sched{}, resolve: u32TypeIdxResolver(nil)}
 	_, err := taskReturnHostFuncGraph(in, canon)
 	requireErrContains(t, err, "multiple task.return results")
 }
@@ -244,7 +244,7 @@ func TestTaskReturnHostFuncGraph_FlattenError(t *testing.T) {
 	// FuncDesc outright ("cannot flatten unsupported type") -- a result type
 	// task.return could never legally declare, exercised here directly since
 	// no real fixture produces it.
-	in := &Instance{resolve: func(uint32) binary.TypeDesc { return binary.FuncDesc{} }}
+	in := &Instance{sched: &sched{}, resolve: func(uint32) binary.TypeDesc { return binary.FuncDesc{} }}
 	_, err := taskReturnHostFuncGraph(in, canon)
 	requireErrContains(t, err, "flatten result type")
 }
@@ -260,7 +260,7 @@ func TestTaskReturnHostFuncGraph_SpillsNoMemoryPanics(t *testing.T) {
 	}
 	tupleRef := binary.TypeRef{TypeIndex: idxPtr(0)}
 	canon := binary.Canon{TaskReturnResult: binary.FuncResults{Unnamed: &tupleRef}}
-	in := &Instance{mayLeave: true, resolve: func(uint32) binary.TypeDesc {
+	in := &Instance{sched: &sched{}, mayLeave: true, resolve: func(uint32) binary.TypeDesc {
 		return binary.TupleDesc{Elements: elems}
 	}}
 	def, err := taskReturnHostFuncGraph(in, canon)
@@ -279,7 +279,7 @@ func TestTaskReturnHostFuncGraph_SpillsNoMemoryPanics(t *testing.T) {
 func TestTaskReturnHostFuncGraph_ResolveTypeError(t *testing.T) {
 	badRef := binary.TypeRef{TypeIndex: idxPtr(0)} // no primitive, and the resolver below returns nil
 	canon := binary.Canon{TaskReturnResult: binary.FuncResults{Unnamed: &badRef}}
-	in := &Instance{resolve: func(uint32) binary.TypeDesc { return nil }}
+	in := &Instance{sched: &sched{}, resolve: func(uint32) binary.TypeDesc { return nil }}
 	_, err := taskReturnHostFuncGraph(in, canon)
 	requireErrContains(t, err, "resolve result type")
 }
@@ -289,36 +289,45 @@ func TestTaskReturnHostFuncGraph_ResolveTypeError(t *testing.T) {
 // today only via a directly-constructed task since nothing in this
 // milestone increments numBorrows yet (Phase 3 borrow scopes).
 func TestReturnValues_NumBorrowsTraps(t *testing.T) {
-	tk := &task{numBorrows: 1, onResolve: func([]abi.Value) {}}
+	tk := &task{numBorrows: 1, onResolve: func([]abi.Value, bool) {}}
 	err := tk.returnValues(nil)
 	requireErrContains(t, err, "borrowed handle")
 }
 
-func TestEnterTask_ReentrantTraps(t *testing.T) {
-	in := &Instance{}
+// TestTryEnter_SecondCallerParksInsteadOfTrapping pins Phase 3's forced
+// change #4 (docs/component-model-async-phase3-design.md §6 #4): a second
+// entry into a busy instance no longer traps with "reentrant async call" --
+// tryEnter simply reports false (park at entry), exactly like a genuinely
+// backpressured entry would. This replaces the retired
+// TestEnterTask_ReentrantTraps.
+func TestTryEnter_SecondCallerParksInsteadOfTrapping(t *testing.T) {
+	in := &Instance{sched: &sched{}}
 	first := &task{}
-	if err := in.enterTask(first); err != nil {
-		t.Fatalf("enterTask (first): %v", err)
+	if !in.tryEnter(first) {
+		t.Fatal("tryEnter(first) = false, want true (nothing else active)")
 	}
 	second := &task{}
-	err := in.enterTask(second)
-	requireErrContains(t, err, "reentrant async call")
-}
-
-func TestEnterTask_BackpressureTraps(t *testing.T) {
-	in := &Instance{backpressure: 1}
-	err := in.enterTask(&task{})
-	requireErrContains(t, err, "backpressure")
-}
-
-func TestExitTask_ClearsState(t *testing.T) {
-	in := &Instance{}
-	tk := &task{}
-	if err := in.enterTask(tk); err != nil {
-		t.Fatalf("enterTask: %v", err)
+	if in.tryEnter(second) {
+		t.Fatal("tryEnter(second) = true, want false (instance already entered)")
 	}
-	in.exitTask()
-	if in.activeTask != nil || in.exclusiveHeld {
-		t.Fatalf("exitTask left activeTask=%v exclusiveHeld=%v, want (nil, false)", in.activeTask, in.exclusiveHeld)
+}
+
+func TestTryEnter_BackpressureParks(t *testing.T) {
+	in := &Instance{sched: &sched{}, backpressure: 1}
+	if in.tryEnter(&task{}) {
+		t.Fatal("tryEnter = true, want false (backpressure held)")
+	}
+}
+
+func TestEnterRunLeaveRun_ClearsState(t *testing.T) {
+	in := &Instance{sched: &sched{}, mayEnter: true}
+	tk := &task{}
+	in.enterRun(tk)
+	if in.activeTask != tk || !in.exclusiveHeld || in.mayEnter {
+		t.Fatalf("enterRun: activeTask=%v exclusiveHeld=%v mayEnter=%v", in.activeTask, in.exclusiveHeld, in.mayEnter)
+	}
+	in.leaveRun()
+	if in.activeTask != nil || in.exclusiveHeld || !in.mayEnter {
+		t.Fatalf("leaveRun left activeTask=%v exclusiveHeld=%v mayEnter=%v, want (nil, false, true)", in.activeTask, in.exclusiveHeld, in.mayEnter)
 	}
 }

@@ -215,9 +215,23 @@ type Instance struct {
 	// component with no async export, so a sync-only Instance pays two bool
 	// initializations and nothing else. ---
 
-	// sched is the single instance-wide scheduler used while an async task
-	// is active -- see sched's doc and invokeAsyncCallback.
-	sched sched
+	// sched is the scheduler used while an async task is active -- see
+	// sched's doc and invokeAsyncCallback. A *pointer*, not a value (Phase 3
+	// forced change #1, docs/component-model-async-phase3-design.md §0):
+	// cross-instance resumption (guest<->guest async lower, §3) requires
+	// that A's WAIT drive can resume B's parked task, so every Instance in
+	// one composition TREE shares the same *sched, created by the root
+	// instantiation and inherited by instantiateNestedInstances via
+	// subCfg.sharedSched. A flat (non-composed) instance is its own tree
+	// root and behaves exactly as before this change (its own private
+	// scheduler, just heap-allocated instead of inline).
+	sched *sched
+
+	// numWaitingToEnter counts guestTasks currently parked at parkEntry on
+	// this instance (Phase 3, mirrors the reference's FIFO fairness at
+	// ~492-495): a later caller may not enter ahead of an earlier one still
+	// waiting for backpressure/exclusive to clear. See task.go's tryEnter.
+	numWaitingToEnter int
 
 	// activeTask is non-nil for the duration of invokeAsyncCallback: the
 	// task currently on the (single, implicit) async call stack. The
@@ -1094,7 +1108,7 @@ func instantiateComponent(ctx context.Context, r wazy.Runtime, comp *binary.Comp
 		exports[name] = be
 	}
 
-	return &Instance{resolve: resolve, exports: exports, instanceExports: buildInstanceExportIndex(exports), closers: []api.Module{core}, resources: newHandleTable()}, nil
+	return &Instance{resolve: resolve, exports: exports, instanceExports: buildInstanceExportIndex(exports), closers: []api.Module{core}, resources: newHandleTable(), sched: &sched{}, mayEnter: true, mayLeave: true}, nil
 }
 
 // synthInstanceCounter numbers instantiations so each gets a globally-unique

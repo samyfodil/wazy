@@ -112,7 +112,7 @@ func TestCopyElementsMemmove_OutOfBoundsTraps(t *testing.T) {
 // ---- stream_host.go: Close/Cancel paths ----
 
 func TestStreamWriter_CloseAndCancel(t *testing.T) {
-	in := &Instance{}
+	in := &Instance{sched: &sched{}}
 	sw, readableVal, _ := in.NewStream(nil)
 	sr := &StreamReader{in: in, shared: readableVal.(*sharedStream), state: copyIdle}
 
@@ -144,7 +144,7 @@ func TestStreamWriter_CloseAndCancel(t *testing.T) {
 }
 
 func TestStreamReader_CloseAndCancel(t *testing.T) {
-	in := &Instance{}
+	in := &Instance{sched: &sched{}}
 	sw, readableVal, _ := in.NewStream(nil)
 	sr := &StreamReader{in: in, shared: readableVal.(*sharedStream), state: copyIdle}
 
@@ -171,7 +171,7 @@ func TestStreamReader_CloseAndCancel(t *testing.T) {
 }
 
 func TestFutureReader_CloseAndCancel(t *testing.T) {
-	in := &Instance{}
+	in := &Instance{sched: &sched{}}
 	fw, readableVal, _ := in.NewFuture(nil)
 	fr := &FutureReader{in: in, shared: readableVal.(*sharedFuture), state: copyIdle}
 
@@ -198,14 +198,14 @@ func TestFutureReader_CloseAndCancel(t *testing.T) {
 }
 
 func TestFutureWriter_SetTwicePanics(t *testing.T) {
-	in := &Instance{}
+	in := &Instance{sched: &sched{}}
 	fw, _, _ := in.NewFuture(nil)
 	fw.Set(uint32(1), func(CopyResult) {}) // parks
 	requirePanicContains(t, "more than once", func() { fw.Set(uint32(2), func(CopyResult) {}) })
 }
 
 func TestFutureReader_GetTwicePanics(t *testing.T) {
-	in := &Instance{}
+	in := &Instance{sched: &sched{}}
 	_, readableVal, _ := in.NewFuture(nil)
 	fr := &FutureReader{in: in, shared: readableVal.(*sharedFuture), state: copyIdle}
 	fr.Get(func(CopyResult, abi.Value) {}) // parks
@@ -303,10 +303,10 @@ func TestTypeContainsAsyncValueNested(t *testing.T) {
 // ---- composition seams: repToProviderHandle / providerHandleToRep ----
 
 func TestComposition_StreamFutureSeams(t *testing.T) {
-	sub := &Instance{resources: newHandleTable(), resolve: func(uint32) binary.TypeDesc { return nil }}
+	sub := &Instance{sched: &sched{}, resources: newHandleTable(), resolve: func(uint32) binary.TypeDesc { return nil }}
 
 	shared := &sharedStream{numeric: true}
-	h, err := repToProviderHandle(sub, binary.StreamDesc{}, shared)
+	h, err := repToProviderHandle(sub, binary.StreamDesc{}, shared, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +323,7 @@ func TestComposition_StreamFutureSeams(t *testing.T) {
 	}
 
 	sf := &sharedFuture{numeric: true}
-	hf, err := repToProviderHandle(sub, binary.FutureDesc{}, sf)
+	hf, err := repToProviderHandle(sub, binary.FutureDesc{}, sf, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,10 +336,10 @@ func TestComposition_StreamFutureSeams(t *testing.T) {
 	}
 
 	// Type-mismatch traps.
-	if _, err := repToProviderHandle(sub, binary.StreamDesc{}, "not-a-stream"); err == nil {
+	if _, err := repToProviderHandle(sub, binary.StreamDesc{}, "not-a-stream", nil); err == nil {
 		t.Fatal("expected a trap: wrong Go type for a stream arg")
 	}
-	if _, err := repToProviderHandle(sub, binary.FutureDesc{}, "not-a-future"); err == nil {
+	if _, err := repToProviderHandle(sub, binary.FutureDesc{}, "not-a-future", nil); err == nil {
 		t.Fatal("expected a trap: wrong Go type for a future arg")
 	}
 	if _, err := providerHandleToRep(sub, binary.StreamDesc{}, "not-a-handle"); err == nil {
@@ -417,7 +417,7 @@ func TestAllocHandleResult_StreamFutureErrorContext(t *testing.T) {
 	}
 
 	// *StreamReader / *FutureReader forwarding form.
-	in := &Instance{}
+	in := &Instance{sched: &sched{}}
 	_, readableVal, _ := in.NewStream(nil)
 	sr := &StreamReader{in: in, shared: readableVal.(*sharedStream), state: copyIdle}
 	vr, err := allocHandleResult(tbl, binary.StreamDesc{}, sr)
@@ -572,7 +572,7 @@ func TestFutureCancel(t *testing.T) {
 }
 
 func TestErrorContextNew_TrapsWithoutMemory(t *testing.T) {
-	in := &Instance{mayLeave: true, resources: newHandleTable()}
+	in := &Instance{sched: &sched{}, mayLeave: true, resources: newHandleTable()}
 	newFn := errorContextNewHostFunc(in, nil)
 	requirePanicContains(t, "no memory", func() {
 		newFn.fn.Call(context.Background(), nil, []uint64{0, 4, 0, 0})
@@ -581,7 +581,7 @@ func TestErrorContextNew_TrapsWithoutMemory(t *testing.T) {
 
 func TestErrorContextDebugMessage_WrongKindTraps(t *testing.T) {
 	ctx, mod := memModule(t)
-	in := &Instance{mayLeave: true, resources: newHandleTable()}
+	in := &Instance{sched: &sched{}, mayLeave: true, resources: newHandleTable()}
 	h := in.resources.addEntry(&resourceEntry{})
 	dmFn := errorContextDebugMessageHostFunc(in, nil, nil)
 	requirePanicContains(t, "is not an error-context", func() {
@@ -590,7 +590,7 @@ func TestErrorContextDebugMessage_WrongKindTraps(t *testing.T) {
 }
 
 func TestErrorContextDrop_WrongKindTraps(t *testing.T) {
-	in := &Instance{mayLeave: true, resources: newHandleTable()}
+	in := &Instance{sched: &sched{}, mayLeave: true, resources: newHandleTable()}
 	h := in.resources.addEntry(&resourceEntry{})
 	dropFn := errorContextDropHostFunc(in)
 	requirePanicContains(t, "is not an error-context", func() {
@@ -723,7 +723,7 @@ func TestSideName(t *testing.T) {
 }
 
 func TestNewStream_WithConcreteElement(t *testing.T) {
-	in := &Instance{}
+	in := &Instance{sched: &sched{}}
 	sw, readableVal, err := in.NewStream(binary.PrimitiveDesc{Prim: "u8"})
 	if err != nil {
 		t.Fatal(err)
@@ -842,7 +842,7 @@ func TestResolveNewElem_SizeAndAlignmentErrors(t *testing.T) {
 }
 
 func TestErrorContextDebugMessage_TrapsWithoutMemory(t *testing.T) {
-	in := &Instance{mayLeave: true, resources: newHandleTable()}
+	in := &Instance{sched: &sched{}, mayLeave: true, resources: newHandleTable()}
 	h := in.resources.addEntry(&errorContext{debugMessage: "x"})
 	dmFn := errorContextDebugMessageHostFunc(in, nil, nil)
 	requirePanicContains(t, "no memory", func() {

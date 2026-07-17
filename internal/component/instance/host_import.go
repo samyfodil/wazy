@@ -71,6 +71,15 @@ type config struct {
 	// Keyed by tag so the drop canon (which resolves the guest's imported
 	// resource index to that tag) finds it. Set via withHostResourceDtor.
 	hostResDtors map[uint32]func(ctx context.Context, rep uint32) error
+
+	// sharedSched, when set, is the *sched every Instance of one composition
+	// TREE shares (Phase 3 forced change #1 -- see Instance.sched's doc).
+	// instantiateNestedInstances sets it on every subCfg it builds, to the
+	// root instantiation's own in.sched, so a sibling's guestTask can be
+	// parked and later resumed by ANY instance in the tree's scheduler
+	// drive. nil for a flat (non-composed) instantiation, which then becomes
+	// its own tree root (instantiateGraph allocates a fresh *sched).
+	sharedSched *sched
 }
 
 // withHostResourceDtor registers a Go destructor for a host-provided resource,
@@ -133,6 +142,35 @@ type hostImport struct {
 	// always leaves it nil.
 	customFD      *binary.FuncDesc
 	customResolve abi.Resolver
+
+	// asyncTarget, when set, routes an async-lowered call through this
+	// import to a GUEST EXPORT of a sibling composition instance instead of
+	// a Go AsyncHostFunc (Phase 3 guest<->guest async lower, docs/component-
+	// model-async-phase3-design.md §3.1): delegatingHostImport
+	// (composition.go/graph.go) sets both fn (the sync arm, unchanged) and
+	// asyncTarget on the SAME hostImport, so a sibling's export can be
+	// lowered either synchronously or asynchronously depending on what the
+	// IMPORTER's own canon lower declares -- graph.go's computeCanonHostFunc
+	// picks the arm. asyncFn and asyncTarget are mutually exclusive in
+	// practice (a plain WithAsyncImport-registered hostImport never sets
+	// asyncTarget, and delegatingHostImport never sets asyncFn), but nothing
+	// enforces that beyond call-site discipline -- buildAsyncHostWrapper
+	// checks asyncTarget first.
+	asyncTarget *guestAsyncTarget
+}
+
+// guestAsyncTarget names the sibling composition instance/export an async
+// lower through a delegating import (composition.go's delegatingHostImport)
+// ultimately calls into (Phase 3, docs/component-model-async-phase3-design.md
+// §3.1). provToImp is the same PROVIDER-resource-def -> IMPORTER-type-index
+// mapping delegatingHostImport's sync arm uses, needed here too since
+// mapArgsToProvider (async_host_import.go) performs the identical own/borrow
+// crossing repToProviderHandle/providerHandleToRep do for the sync path.
+type guestAsyncTarget struct {
+	sub        *Instance
+	be         *boundExport
+	exportName string
+	provToImp  func(uint32) (uint32, bool)
 }
 
 func newConfig(opts []Option) *config {

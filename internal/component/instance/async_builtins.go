@@ -100,17 +100,33 @@ func storeEvent(mod api.Module, builtin string, ptr uint32, ev eventTuple) event
 // callback-lift implicit thread is a genuine Thread that can itself call a
 // blocking wait builtin and suspend, so this is legal from callback code
 // too, not just from a would-be sync/stackful task), write its (p1,p2) at
-// ptr/ptr+4, and return the event code. Cancellable is always false in this
-// milestone -- no task can be cancelled yet (see the design doc's Q3 table).
-func waitableSetWaitHostFunc(in *Instance) hostFuncDef {
+// ptr/ptr+4, and return the event code.
+//
+// canon carries the cancellable:bool payload finally threaded through here
+// (Phase 3, docs/component-model-async-phase3-design.md §2.3): when
+// cancellable and this task has a delivered-or-deliverable cancellation
+// pending, the drive predicate also wakes on that, and TASK_CANCELLED is
+// stored instead of a set event -- deliverPendingCancel is checked at THIS
+// suspension's prologue exactly where the reference's wait_until does
+// (~404). A blocking wait's cancel wake cannot resume synchronously the way
+// a parked callback loop's does (this builtin has live Go frames beneath
+// it -- see task.go's requestCancellation doc); it is instead a genuinely
+// PENDING_CANCEL task whose own drive predicate below picks the
+// cancellation up at the next scheduler check.
+func waitableSetWaitHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
+	cancellable := canon.Cancellable
 	fn := api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 		requireMayLeave(in, "waitable-set.wait")
 		si := api.DecodeU32(stack[0])
 		ptr := api.DecodeU32(stack[1])
 		ws := requireWaitableSet(in, "waitable-set.wait", si)
+		t := requireActiveTask(in, "waitable-set.wait")
 
+		pred := func() bool {
+			return ws.hasPendingEvent() || (cancellable && t.cancelDeliverable())
+		}
 		ws.numWaiting++
-		err := in.sched.drive(ws.hasPendingEvent)
+		err := in.sched.drive(pred)
 		ws.numWaiting--
 		if err != nil {
 			if errors.Is(err, errAsyncDeadlock) {
@@ -118,7 +134,13 @@ func waitableSetWaitHostFunc(in *Instance) hostFuncDef {
 			}
 			panic(fmt.Errorf("component/instance: waitable-set.wait: %w", err))
 		}
-		stack[0] = uint64(storeEvent(mod, "waitable-set.wait", ptr, ws.getPendingEvent()))
+		var ev eventTuple
+		if cancellable && t.deliverPendingCancel(true) {
+			ev = eventTuple{code: eventTaskCancelled}
+		} else {
+			ev = ws.getPendingEvent()
+		}
+		stack[0] = uint64(storeEvent(mod, "waitable-set.wait", ptr, ev))
 	})
 	return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, results: []api.ValueType{api.ValueTypeI32}}
 }
@@ -126,13 +148,21 @@ func waitableSetWaitHostFunc(in *Instance) hostFuncDef {
 // waitableSetPollHostFunc backs waitable-set.poll (CanonKindWaitableSetPoll,
 // 0x21) -- canon_waitable_set_poll, definitions.py ~2427. Same as wait but
 // non-blocking: returns EventCode.NONE immediately when nothing is pending
-// instead of driving the scheduler.
-func waitableSetPollHostFunc(in *Instance) hostFuncDef {
+// instead of driving the scheduler. The poll(cancellable) prologue (~834):
+// if cancellable and a cancellation is deliverable, TASK_CANCELLED is
+// returned immediately, before even checking the set.
+func waitableSetPollHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
+	cancellable := canon.Cancellable
 	fn := api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 		requireMayLeave(in, "waitable-set.poll")
 		si := api.DecodeU32(stack[0])
 		ptr := api.DecodeU32(stack[1])
 		ws := requireWaitableSet(in, "waitable-set.poll", si)
+		t := requireActiveTask(in, "waitable-set.poll")
+		if cancellable && t.deliverPendingCancel(true) {
+			stack[0] = uint64(storeEvent(mod, "waitable-set.poll", ptr, eventTuple{code: eventTaskCancelled}))
+			return
+		}
 		stack[0] = uint64(storeEvent(mod, "waitable-set.poll", ptr, ws.poll()))
 	})
 	return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, results: []api.ValueType{api.ValueTypeI32}}
@@ -163,8 +193,11 @@ func waitableSetDropHostFunc(in *Instance) hostFuncDef {
 
 // waitableJoinHostFunc backs waitable.join (CanonKindWaitableJoin, 0x23) --
 // canon_waitable_join, definitions.py ~2440. Core sig (wi:i32, si:i32) -> ():
-// move waitable wi into set si, or out of any set when si == 0. (The
-// has_sync_waiter trap collapses -- no sync waiters exist in this milestone.)
+// move waitable wi into set si, or out of any set when si == 0. Phase 3
+// retires the Phase-1/2 "no sync waiters exist" collapse: a synchronous
+// subtask.cancel (async_builtins.go's subtaskCancelHostFuncGraph) can now
+// leave a waitable with a real sync waiter across scheduler steps, so
+// trap_if(has_sync_waiter) (~2452) is a real check.
 func waitableJoinHostFunc(in *Instance) hostFuncDef {
 	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		requireMayLeave(in, "waitable.join")
@@ -173,6 +206,9 @@ func waitableJoinHostFunc(in *Instance) hostFuncDef {
 		we, isW := e.(waitableEntry)
 		if !ok || !isW {
 			panic(fmt.Errorf("component/instance: waitable.join: handle %d is not a waitable", wi))
+		}
+		if we.waitablePtr().syncWaiter { // trap_if(w.has_sync_waiter)
+			panic(fmt.Errorf("component/instance: waitable.join: handle %d has a synchronous subtask.cancel blocked on it", wi))
 		}
 		if si == 0 {
 			we.waitablePtr().join(nil)
@@ -207,6 +243,88 @@ func subtaskDropHostFunc(in *Instance) hostFuncDef {
 		in.resources.removeEntry(h)
 	})
 	return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32}, results: nil}
+}
+
+// taskCancelHostFuncGraph backs task.cancel (CanonKindTaskCancel, 0x05) --
+// canon_task_cancel, definitions.py ~2391. Core sig () -> (): the guest ACKs
+// a cancellation the host previously delivered to this task's callback as a
+// TASK_CANCELLED event (docs/component-model-async-phase3-design.md §2.1).
+func taskCancelHostFuncGraph(in *Instance) hostFuncDef {
+	fn := api.GoModuleFunc(func(context.Context, api.Module, []uint64) {
+		t := requireActiveTask(in, "task.cancel") // may_leave + current_task (~2393-2395)
+		// trap_if(not task.opts.async_) (~2396): every task this package
+		// creates is an async callback lift, so the trap is structurally
+		// unreachable -- asserted here for oracle parity.
+		if t.be != nil && !t.be.asyncCallback {
+			panic(fmt.Errorf("component/instance: task.cancel: called on a non-async task"))
+		}
+		if err := t.cancelResolve(); err != nil {
+			panic(fmt.Errorf("component/instance: %w", err))
+		}
+	})
+	return hostFuncDef{fn: fn, params: nil, results: nil}
+}
+
+// subtaskCancelHostFuncGraph backs subtask.cancel (CanonKindSubtaskCancel,
+// 0x06) -- canon_subtask_cancel, definitions.py ~2465-2486, transliterated
+// line for line. Core sig (i:i32) -> i32. Reuses blockedSentinel (stream.go)
+// -- the reference's BLOCKED = 0xffff_ffff constant is shared by
+// subtask.cancel and stream/future cancel alike.
+func subtaskCancelHostFuncGraph(in *Instance, canon binary.Canon) hostFuncDef {
+	async := canon.Async
+	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
+		requireMayLeave(in, "subtask.cancel")
+		i := api.DecodeU32(stack[0])
+		e, ok := in.resources.getEntry(i)
+		st, isSub := e.(*subtask)
+		if !ok || !isSub { // trap_if(not isinstance(subtask, Subtask))
+			panic(fmt.Errorf("component/instance: subtask.cancel: handle %d is not a subtask", i))
+		}
+		if st.resolveDelivered() { // trap_if(subtask.resolve_delivered())
+			panic(fmt.Errorf("component/instance: subtask.cancel: handle %d has already had its resolve delivered", i))
+		}
+		if st.cancellationRequested { // trap_if(subtask.cancellation_requested)
+			panic(fmt.Errorf("component/instance: subtask.cancel: handle %d: cancellation already requested", i))
+		}
+		if st.inWaitableSet() && !async { // trap_if(in_waitable_set() and not async_)
+			panic(fmt.Errorf("component/instance: subtask.cancel: handle %d is joined to a waitable set; a synchronous cancel is not allowed", i))
+		}
+
+		if !st.resolved() {
+			st.cancellationRequested = true
+			if st.onCancel != nil { // nil only for a host import with no OnCancel hook (§2.4)
+				if err := st.onCancel(); err != nil {
+					panic(fmt.Errorf("component/instance: subtask.cancel: %w", err))
+				}
+			}
+			if !st.resolved() {
+				if async {
+					stack[0] = blockedSentinel
+					return
+				}
+				// wait_for_pending_event (~776): a synchronous cancel
+				// blocks the scheduler drive until the subtask resolves.
+				st.syncWaiter = true
+				derr := in.sched.drive(st.hasPendingEvent)
+				st.syncWaiter = false
+				if derr != nil {
+					if errors.Is(derr, errAsyncDeadlock) {
+						panic(fmt.Errorf("component/instance: subtask.cancel: deadlock: subtask %d's synchronous cancel is waiting on a subtask that nothing can resolve", i))
+					}
+					panic(fmt.Errorf("component/instance: subtask.cancel: %w", derr))
+				}
+			}
+		}
+		// Resolved-with-undelivered-event fast path (~2473-2474) falls
+		// through to here too: a cancel of an already-resolved-but-
+		// undelivered subtask just delivers, returning its state.
+		ev := st.getPendingEvent() // asserts SUBTASK/i/state (~2483-2484); delivers lend release
+		if ev.code != eventSubtask || ev.p1 != i {
+			panic(fmt.Errorf("component/instance: subtask.cancel: BUG: delivered event (%v,%d,%d) does not name subtask %d", ev.code, ev.p1, ev.p2, i))
+		}
+		stack[0] = uint64(uint32(st.state))
+	})
+	return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32}, results: []api.ValueType{api.ValueTypeI32}}
 }
 
 // taskReturnHostFuncGraph builds the core func backing a task.return canon

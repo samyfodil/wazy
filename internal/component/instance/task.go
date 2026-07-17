@@ -7,37 +7,49 @@ import (
 )
 
 // taskState is the Canonical ABI's Task.State (testdata/definitions.py's
-// Task.State), restricted to what a callback-lift task can actually reach in
-// this milestone: INITIAL -> STARTED -> RESOLVED. PENDING_CANCEL and
-// CANCEL_DELIVERED are reserved (Phase 3 cancellation) purely so the
-// numbering already matches the reference when that lands -- nothing in this
-// package ever sets a task to either value yet.
+// Task.State). Phase 3 makes every state reachable -- see
+// docs/component-model-async-phase3-design.md §2.1/§2.5.
 type taskState uint8
 
 const (
 	taskInitial taskState = iota
 	taskStarted
-	taskPendingCancel   // Phase 3; unreachable in this milestone
-	taskCancelDelivered // Phase 3; unreachable in this milestone
+	taskPendingCancel
+	taskCancelDelivered
 	taskResolved
 )
 
 // task mirrors the Canonical ABI's Task (definitions.py's Task, ~450) for
 // exactly one shape: a callback lift's implicit thread, which never has a
 // live suspended core frame -- every suspension is a normal core function
-// return (see invokeAsyncCallback) -- so "implicit thread" and "task"
-// collapse into one Go value, unlike the reference's separate Task/Thread
-// objects (docs/component-model-async-runtime-design.md §1.2).
+// return, remembered as parked guestTask state instead (see guest_task.go)
+// -- so "implicit thread" and "task" collapse into one Go value, unlike the
+// reference's separate Task/Thread objects
+// (docs/component-model-async-runtime-design.md §1.2,
+// docs/component-model-async-phase3-design.md §0).
 type task struct {
 	inst  *Instance
 	be    *boundExport // the async export's binding; task.return validates its result against be's declared result type
 	state taskState
 
-	// numBorrows mirrors Task.num_borrows: always 0 until Phase 3 borrow
-	// scopes exist, but task.return's trap_if(num_borrows > 0) and the
-	// exit-time assert are wired against it now (see returnValues and
-	// invokeAsyncCallback) so Phase 3 only has to start incrementing it.
+	// gt is this task's guestTask (the parkable state machine driving its
+	// callback loop). Set by startGuestTask/invokeAsyncCallback before the
+	// task is ever entered; never nil for a task this package creates --
+	// every async task has exactly one guestTask (Phase 3, §2.1).
+	gt *guestTask
+
+	// numBorrows mirrors Task.num_borrows: incremented by
+	// handleTable.NewBorrowScoped for every borrow<T> handle minted, scoped
+	// to this task, by a cross-instance composition call (composition.go);
+	// decremented by handleTable.Drop's borrow arm. task.return/task.cancel
+	// trap_if(num_borrows > 0) below enforce the exit-time invariant.
 	numBorrows int
+
+	// cancelled records whether this task resolved via a delivered
+	// cancellation (task.cancel) rather than a normal task.return -- Phase
+	// 3's forced onResolve signature change (§6 #2): resolving-as-cancelled
+	// must be distinguishable from "returned with an empty result".
+	cancelled bool
 
 	// ctxStorage mirrors the one load-bearing field of the reference's
 	// Thread.storage: wit-bindgen's generated async executor stashes its
@@ -47,16 +59,22 @@ type task struct {
 	// the context.get/set builtins -- see async_builtins.go).
 	ctxStorage [2]uint64
 
-	// onResolve receives the result lifted by the task.return builtin. Kept
-	// as a closure (not an inlined result field) so a later guest->guest
-	// lower or CallAsync can plug in without reshaping task.return --
-	// invokeAsyncCallback sets this to capture into result.
-	onResolve func(vals []abi.Value)
+	// onResolve receives the result lifted by the task.return builtin (or
+	// nil + cancelled=true from task.cancel). Kept as a closure (not an
+	// inlined result field) so a guest->guest lower or a future CallAsync
+	// can plug in without reshaping task.return -- invokeAsyncCallback sets
+	// this to capture into result; startAsyncExportTask's onResolve bridges
+	// into the caller's subtask instead (async_lift.go).
+	onResolve func(vals []abi.Value, cancelled bool)
 	result    []abi.Value
 }
 
 // returnValues is the reference Task.return_, called by the task.return
-// builtin (canon_task_return, definitions.py ~2380).
+// builtin (canon_task_return, definitions.py ~2380). Unchanged by Phase 3
+// besides the onResolve signature: after CANCEL_DELIVERED, task.return
+// remains legal (the guest may finish normally instead of acking a
+// cancellation) -- there is no state guard here besides RESOLVED, matching
+// the reference.
 func (t *task) returnValues(vals []abi.Value) error {
 	if t.state == taskResolved { // trap_if(state == RESOLVED)
 		return fmt.Errorf("task.return: task already resolved")
@@ -64,35 +82,133 @@ func (t *task) returnValues(vals []abi.Value) error {
 	if t.numBorrows > 0 { // trap_if(num_borrows > 0)
 		return fmt.Errorf("task.return: %d borrowed handle(s) still lent to subtasks", t.numBorrows)
 	}
-	t.onResolve(vals)
+	t.onResolve(vals, false)
 	t.state = taskResolved
 	return nil
 }
 
-// enterTask is the reference Task.enter_implicit_thread, minus the green
-// thread: with exactly one task active at a time (Instance.activeTask),
-// every condition that would BLOCK entry in the reference (backpressure
-// held, exclusive held by another task, waiters queued) is a permanent
-// deadlock -- nothing concurrent exists to ever clear it -- so it traps
-// instead of parking. Phase 3/CallAsync, which makes concurrent entry
-// meaningful, replaces this trap with the reference's real wait.
-func (in *Instance) enterTask(t *task) error {
-	if in.activeTask != nil || in.exclusiveHeld {
-		return fmt.Errorf("reentrant async call while a task is active (needs CallAsync, not yet implemented)")
+// cancelDeliverable mirrors the reference's inline check at every cancellable
+// suspension point (definitions.py ~404): a PENDING_CANCEL task is ready to
+// have its cancellation delivered.
+func (t *task) cancelDeliverable() bool { return t.state == taskPendingCancel }
+
+// deliverPendingCancel mirrors Task.deliver_pending_cancel (~545): if
+// cancellable and a cancellation is pending, flip to CANCEL_DELIVERED and
+// report true (the caller then delivers TASK_CANCELLED instead of the
+// suspension's normal event).
+func (t *task) deliverPendingCancel(cancellable bool) bool {
+	if cancellable && t.state == taskPendingCancel {
+		t.state = taskCancelDelivered
+		return true
 	}
-	if in.backpressure > 0 {
-		return fmt.Errorf("async export entry blocked by backpressure (%d) with no concurrent task to clear it", in.backpressure)
+	return false
+}
+
+// cancelResolve is Task.cancel (~563): the guest ACKs a delivered
+// cancellation via the task.cancel builtin.
+func (t *task) cancelResolve() error {
+	if t.state != taskCancelDelivered {
+		return fmt.Errorf("task.cancel: no cancellation has been delivered to this task")
 	}
-	in.activeTask = t
-	in.exclusiveHeld = true // needs_exclusive() is always true for a callback lift (reference Task.needs_exclusive)
+	if t.numBorrows > 0 {
+		return fmt.Errorf("task.cancel: %d borrowed handle(s) still held", t.numBorrows)
+	}
+	t.onResolve(nil, true)
+	t.cancelled = true
+	t.state = taskResolved
 	return nil
 }
 
-// exitTask is the reference Task.exit_implicit_thread's state-clearing half.
-// The unregister_thread "trap_if(state != RESOLVED)" check lives in
-// invokeAsyncCallback instead, since it needs to return an error rather than
-// just clear state.
-func (in *Instance) exitTask() {
+// cancelUnentered is the parkEntry+cancelWake landing (guest_task.go's
+// resumeReady): request_cancellation already advanced the task to
+// CANCEL_DELIVERED without ever running guest code (the task was still
+// parked at entry, INITIAL). Resolve it the same way task.cancel would.
+func (t *task) cancelUnentered() error { return t.cancelResolve() }
+
+// requestCancellation transliterates Task.request_cancellation
+// (definitions.py ~527-543): called by canon_subtask_cancel via
+// subtask.onCancel (the only Phase-3 caller), and it is exactly the func a
+// future public CallAsync's cancel handle would call.
+//
+// Two collapse notes (docs/component-model-async-phase3-design.md §2.1):
+//
+//   - The reference excludes the implicit thread from candidates when
+//     another thread holds the instance's exclusive (~535-536); with exactly
+//     one thread per task and exclusiveHeld false at every park, the
+//     "!t.inst.exclusiveHeld" conjunct below is the whole surviving check --
+//     it can only be true here if a DIFFERENT task of the same instance is
+//     running, in which case the parked target isn't resumable and PENDING_
+//     CANCEL is correct, exactly as the reference would take.
+//   - Deviation (blocking-builtin park): a task suspended inside the
+//     blocking waitable-set.wait builtin has live Go frames beneath it, so
+//     it cannot be resumed synchronously from here -- its drive predicate
+//     (async_builtins.go) includes cancelDeliverable(), so PENDING_CANCEL is
+//     set and it wakes at the drive loop's next check. Parked CALLBACK tasks
+//     (the only shape wit-bindgen/the oracle's deterministic scenarios
+//     drive) resume inline here, matching the reference exactly.
+func (t *task) requestCancellation() error {
+	switch t.state {
+	case taskInitial: // parked at entry, on_start never ran (~529-531)
+		t.state = taskCancelDelivered
+		t.gt.cancelWake = true
+		return t.gt.resumeReady() // -> cancelUnentered -> on_resolve(nil,true)
+	case taskStarted:
+		if t.gt.park != parkNone && t.gt.cancellable && !t.inst.exclusiveHeld && t.inst.mayEnter {
+			t.state = taskCancelDelivered
+			// cancelWake forces an unconditional TASK_CANCELLED delivery on
+			// this resume (reference: thread.resume(Cancelled.TRUE) hands
+			// wait_until its return value directly, bypassing the normal
+			// ready_and_has_event predicate entirely -- ~538-541); without
+			// it resumeReady's parkWait/parkYield arms would fall through to
+			// deliverPendingCancel, which only fires from a PENDING_CANCEL
+			// state and would wrongly try to read a real (nonexistent)
+			// pending event here.
+			t.gt.cancelWake = true
+			return t.gt.resumeReady()
+		}
+		t.state = taskPendingCancel // (~543)
+		return nil
+	default:
+		panic("BUG: request_cancellation on a resolved task")
+	}
+}
+
+// hasBackpressure mirrors the reference's inst.has_backpressure() (~489):
+// needs_exclusive() is always true for a callback lift, so the "or
+// needs_exclusive() and exclusive_thread is not None" disjunct collapses to
+// just exclusiveHeld.
+func (in *Instance) hasBackpressure() bool {
+	return in.backpressure > 0 || in.exclusiveHeld
+}
+
+// tryEnter is the reference Task.enter_implicit_thread's non-blocking
+// attempt (~485-503): returns entered=false when the task must park at
+// parkEntry instead (see guestTask.start, guest_task.go). numWaitingToEnter
+// mirrors the reference's FIFO fairness (~492-495): a later caller may not
+// jump ahead of an earlier one already parked waiting to enter.
+func (in *Instance) tryEnter(t *task) (entered bool) {
+	if in.hasBackpressure() || in.numWaitingToEnter > 0 {
+		return false
+	}
+	in.activeTask = t
+	in.exclusiveHeld = true
+	return true
+}
+
+// enterRun/leaveRun bracket a task's guest code actually being on the stack
+// (docs/component-model-async-phase3-design.md §1.2): mayEnter is false only
+// between an enterRun and its matching leaveRun, unlike Phase 1/2's
+// invokeAsyncCallback which held it false for the whole call. This is what
+// lets a second entry into a busy-but-PARKED instance succeed (gated by
+// exclusive/backpressure parking, not by mayEnter).
+func (in *Instance) enterRun(t *task) {
+	in.mayEnter = false
+	in.activeTask = t
+	in.exclusiveHeld = true
+}
+
+func (in *Instance) leaveRun() {
 	in.exclusiveHeld = false
 	in.activeTask = nil
+	in.mayEnter = true
 }

@@ -811,7 +811,7 @@ func decodeCanonSection(buf []byte, offset int, sectionSize uint32) ([]Canon, in
 			offset = off
 			canon.Opts = opts
 
-		case CanonKindResourceNew, CanonKindResourceDrop, CanonKindResourceRep: // typeidx
+		case CanonKindResourceNew, CanonKindResourceDrop, CanonKindResourceRep, CanonKindResourceDropAsync: // typeidx
 			typeIdx, n, err := leb128.LoadUint32(buf[offset:])
 			if err != nil {
 				return nil, offset, fmt.Errorf("canon[%d] type index: %w", i, err)

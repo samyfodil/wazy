@@ -43,6 +43,14 @@ type resourceEntry struct {
 	rep       uint32
 	own       bool
 	lendCount int
+
+	// borrowScope mirrors ResourceHandle.borrow_scope (Phase 3): the callee
+	// task this borrow handle is scoped to. nil for every own handle, and
+	// for a borrow handle minted via NewBorrow (host-minted, unscoped -- see
+	// NewBorrow's doc and the handleTable doc comment's retained-deviation
+	// entry). Non-nil only for a borrow minted via NewBorrowScoped -- the
+	// composition delegate's cross-instance lower_borrow (composition.go).
+	borrowScope *task
 }
 
 // entryKind implements tableEntry.
@@ -75,23 +83,27 @@ func (*resourceEntry) entryKind() entryKind { return entryResource }
 //     is no operation that moves a handle, or the rep it names, to another
 //     Instance's table.
 //
-//   - No borrow_scope / Task lifetime tracking. The spec ties a borrow
-//     handle's lend accounting to the enclosing call ("Task"/"Subtask"):
-//     lifting a borrow<T> argument increments the *lent-from* handle's
-//     num_lends for the duration of that one call, and releases it
-//     automatically when the call returns. wazy does not model calls as
-//     Tasks, so this package cannot safely auto-release a lend at "the end
-//     of the call" -- there is no such hook. Lend/Unlend below exist and are
-//     tested (so the accounting primitive is ready), but nothing in the
-//     lift/lower or canon wiring calls Lend automatically; a lend, once
-//     taken, must be released explicitly via Unlend.
+//   - No borrow_scope / Task lifetime tracking for LEND accounting (the
+//     num_lends bookkeeping above): lifting a borrow<T> HOST-IMPORT argument
+//     increments the *lent-from* handle's num_lends for the duration of that
+//     one call, and releases it automatically when the call returns. wazy
+//     does not model a host-import call as a Task, so this package cannot
+//     safely auto-release that lend at "the end of the call" -- there is no
+//     such hook. Lend/Unlend below exist and are tested (so the accounting
+//     primitive is ready), but nothing in the host-import lift/lower wiring
+//     calls Lend automatically; a lend, once taken, must be released
+//     explicitly via Unlend (async host imports instead use
+//     subtask.addLender/deliverResolve -- see async_host_import.go).
 //
-//   - Dropping a borrow handle is rejected outright, rather than the spec's
-//     "release the loan" behavor (canon_resource_drop's `else:
-//     h.borrow_scope.num_borrows -= 1` branch). Without call-scoped
-//     tracking this package cannot correctly identify *which* loan a given
-//     borrow handle corresponds to, so the safe, fail-loud choice is to
-//     refuse the operation rather than guess.
+//   - Host-minted borrows are deliberately unscoped (Phase 3's retained
+//     deviation, docs/component-model-async-phase3-design.md §4.3): a
+//     GUEST-facing borrow<T> handle minted for a cross-instance composition
+//     call IS call-scoped (resourceEntry.borrowScope, NewBorrowScoped,
+//     Drop's borrow arm below -- the reference's `lower_borrow` +
+//     `canon_resource_drop`'s borrow arm), but a borrow<T> handle the HOST
+//     mints directly (WASI results, resource hooks -- NewBorrow) is not tied
+//     to any call and the guest holds it long-term; dropping one is refused
+//     rather than guessed at (see Drop's borrowScope == nil arm).
 //
 //   - No destructors. canon_resource_drop's dtor-call step (running the
 //     resource type's declared destructor when a fully-owned handle is
@@ -229,6 +241,22 @@ func (t *handleTable) NewOwn(typeIdx, rep uint32) uint32 { return t.add(typeIdx,
 // host that minted it is responsible for its lifetime.
 func (t *handleTable) NewBorrow(typeIdx, rep uint32) uint32 { return t.add(typeIdx, rep, false) }
 
+// NewBorrowScoped mints a borrow handle in THIS (the callee's) table, scoped
+// to scope -- mirrors lower_borrow's minting arm (definitions.py ~1813-1815).
+// Unlike NewBorrow, this handle CAN be dropped by the guest (Drop's borrow
+// arm below); dropping it releases the loan by decrementing scope.numBorrows,
+// and scope's own exit (task.return / task.cancel) traps if any minted-here
+// borrow is still outstanding when the callee tries to resolve. scope must be
+// non-nil -- a nil scope would be indistinguishable from a host-minted
+// unscoped borrow (see NewBorrow), silently defeating the exit trap.
+func (t *handleTable) NewBorrowScoped(typeIdx, rep uint32, scope *task) uint32 {
+	if scope == nil {
+		panic("BUG: NewBorrowScoped called with a nil scope")
+	}
+	scope.numBorrows++
+	return t.addEntry(&resourceEntry{typeIdx: typeIdx, rep: rep, own: false, borrowScope: scope})
+}
+
 // lookup resolves handle h, requiring it to exist, name a resourceEntry (as
 // opposed to some other entryKind a later phase adds), and belong to
 // resource type typeIdx. Callers must hold t.mu.
@@ -286,10 +314,18 @@ func (t *handleTable) TakeOwn(typeIdx, h uint32) (uint32, error) {
 }
 
 // Drop removes handle h (mirrors canon_resource_drop). It fails loud if the
-// handle is unknown, belongs to a different resource type, has outstanding
-// lends, or -- see the handleTable doc comment's ceiling list -- is a borrow
-// handle (this package does not implement releasing a loan, so it refuses
-// rather than silently doing nothing).
+// handle is unknown, belongs to a different resource type, or has
+// outstanding lends -- checked before the own/borrow split, matching the
+// reference's own check order (definitions.py canon_resource_drop ~2314,
+// before its own/else branch at ~2317-2324) -- so a lent-out borrow cannot be
+// dropped out from under its lender.
+//
+// A borrow handle (Phase 3) is then dropped by releasing its call scope's
+// loan (borrowScope.numBorrows--) rather than running a destructor -- see
+// resourceCanonHostFuncGraph's drop case, which must ask IsOwn before doing
+// any dtor lookup so a borrow drop never runs the owning resource's dtor. A
+// host-minted, unscoped borrow (NewBorrow, borrowScope == nil) still cannot
+// be dropped through this table -- see the handleTable doc comment.
 func (t *handleTable) Drop(typeIdx, h uint32) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -297,15 +333,36 @@ func (t *handleTable) Drop(typeIdx, h uint32) error {
 	if err != nil {
 		return err
 	}
-	if !e.own {
-		return fmt.Errorf("handle %d is a borrow; borrow handles cannot be dropped by the receiver (not supported by this milestone)", h)
-	}
 	if e.lendCount != 0 {
 		return fmt.Errorf("handle %d has %d outstanding borrow(s), cannot drop", h, e.lendCount)
+	}
+	if !e.own {
+		if e.borrowScope == nil {
+			return fmt.Errorf("handle %d is a borrow with no owning call scope; host-minted borrows cannot be dropped by the guest", h)
+		}
+		e.borrowScope.numBorrows--
+		delete(t.entries, h)
+		t.free = append(t.free, h)
+		return nil
 	}
 	delete(t.entries, h)
 	t.free = append(t.free, h)
 	return nil
+}
+
+// IsOwn reports whether handle h (of resource type typeIdx) is an owning
+// handle, without consuming or otherwise mutating it. Used by
+// resourceCanonHostFuncGraph's drop case to decide own/borrow dispatch
+// BEFORE any destructor lookup -- see Drop's doc: a borrow drop must never
+// run the resource's dtor.
+func (t *handleTable) IsOwn(typeIdx, h uint32) (bool, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	e, err := t.lookup(typeIdx, h)
+	if err != nil {
+		return false, err
+	}
+	return e.own, nil
 }
 
 // DropOwned removes an owning handle by handle alone (the resource type is not
