@@ -5,8 +5,9 @@ import (
 	_ "embed"
 	"testing"
 
-	"github.com/samyfodil/wazy"
 	"github.com/tetratelabs/wazero"
+
+	"github.com/samyfodil/wazy"
 )
 
 // dispatchWasm is a call_indirect dispatch kernel (see testdata/dispatch.wat):

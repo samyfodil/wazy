@@ -5,8 +5,9 @@ import (
 	_ "embed"
 	"testing"
 
-	"github.com/samyfodil/wazy"
 	"github.com/tetratelabs/wazero"
+
+	"github.com/samyfodil/wazy"
 )
 
 // dynAddrWasm is a hot loop of dynamic-address i32 loads (see

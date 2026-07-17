@@ -3,8 +3,6 @@ package binary
 import (
 	"bytes"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -30,7 +28,7 @@ import (
 //	export "allprims" (type 0), "t" (type 1), "nested" (type 3),
 //	       "r" (type 5), "many" (func)
 func TestExtendedComponentFixture(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("testdata", "extended_component.wasm"))
+	data, err := fixtureFS.ReadFile("testdata/extended_component.wasm")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
@@ -55,9 +53,19 @@ func TestExtendedComponentFixture(t *testing.T) {
 		t.Fatalf("type[0] descriptor: got %T, want RecordDesc", c.Types[0].Descriptor)
 	}
 	wantFields := []struct{ name, prim string }{
-		{"a", "bool"}, {"b", "s8"}, {"c", "u8"}, {"d", "s16"}, {"e", "u16"},
-		{"f", "s32"}, {"g", "u32"}, {"h", "s64"}, {"i", "u64"},
-		{"j", "f32"}, {"k", "f64"}, {"l", "char"}, {"m", "string"},
+		{"a", "bool"},
+		{"b", "s8"},
+		{"c", "u8"},
+		{"d", "s16"},
+		{"e", "u16"},
+		{"f", "s32"},
+		{"g", "u32"},
+		{"h", "s64"},
+		{"i", "u64"},
+		{"j", "f32"},
+		{"k", "f64"},
+		{"l", "char"},
+		{"m", "string"},
 	}
 	if len(rec.Fields) != len(wantFields) {
 		t.Fatalf("record fields: got %d, want %d", len(rec.Fields), len(wantFields))
@@ -168,7 +176,7 @@ func TestExtendedComponentFixture(t *testing.T) {
 // (bare, err-only, ok-only, both) against a real component assembled by
 // wasm-tools from testdata/result_variants.wat.
 func TestResultVariantsFixture(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("testdata", "result_variants.wasm"))
+	data, err := fixtureFS.ReadFile("testdata/result_variants.wasm")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
@@ -1521,10 +1529,20 @@ func TestSectionIDNameAllValues(t *testing.T) {
 		id   byte
 		want string
 	}{
-		{0, "Custom"}, {1, "CoreModule"}, {2, "CoreInstance"}, {3, "CoreType"},
-		{4, "Component"}, {5, "Instance"}, {6, "Alias"}, {7, "Type"},
-		{8, "Canonical"}, {9, "Start"}, {10, "Import"}, {11, "Export"},
-		{12, "Value"}, {200, "Unknown"},
+		{0, "Custom"},
+		{1, "CoreModule"},
+		{2, "CoreInstance"},
+		{3, "CoreType"},
+		{4, "Component"},
+		{5, "Instance"},
+		{6, "Alias"},
+		{7, "Type"},
+		{8, "Canonical"},
+		{9, "Start"},
+		{10, "Import"},
+		{11, "Export"},
+		{12, "Value"},
+		{200, "Unknown"},
 	}
 	for _, tt := range tests {
 		if got := sectionIDName(tt.id); got != tt.want {
@@ -1609,10 +1627,10 @@ func TestDecodeCoreInstance_Instantiate(t *testing.T) {
 	// 0x00 moduleIdx vec(args)
 	// instantiatearg: 0x00 len(name) name 0x12 instanceidx
 	coreInstBody := []byte{
-		0x01,       // count = 1
-		0x00,       // kind = instantiate
-		0x00,       // moduleIdx = 0
-		0x00,       // argCount = 0
+		0x01, // count = 1
+		0x00, // kind = instantiate
+		0x00, // moduleIdx = 0
+		0x00, // argCount = 0
 	}
 	buf = append(buf, 0x02, byte(len(coreInstBody)))
 	buf = append(buf, coreInstBody...)
@@ -1649,9 +1667,9 @@ func TestDecodeCoreInstance_InlineExports(t *testing.T) {
 
 	// Section 2: core instance with inline exports
 	coreInstBody := []byte{
-		0x01,                   // count = 1
-		0x01,                   // kind = inline exports
-		0x00,                   // exportCount = 0
+		0x01, // count = 1
+		0x01, // kind = inline exports
+		0x00, // exportCount = 0
 	}
 	buf = append(buf, 0x02, byte(len(coreInstBody)))
 	buf = append(buf, coreInstBody...)
@@ -1672,8 +1690,8 @@ func TestDecodeCoreInstance_InvalidKind(t *testing.T) {
 	buf = append(buf, coreModuleBody...)
 
 	coreInstBody := []byte{
-		0x01,       // count = 1
-		0xff,       // kind = invalid
+		0x01, // count = 1
+		0xff, // kind = invalid
 	}
 	buf = append(buf, 0x02, byte(len(coreInstBody)))
 	buf = append(buf, coreInstBody...)
@@ -1688,10 +1706,10 @@ func TestDecodeInstance(t *testing.T) {
 	buf := preamble()
 	// Section 5: instance
 	instBody := []byte{
-		0x01,       // count = 1
-		0x00,       // kind = instantiate
-		0x00,       // componentIdx = 0
-		0x00,       // argCount = 0
+		0x01, // count = 1
+		0x00, // kind = instantiate
+		0x00, // componentIdx = 0
+		0x00, // argCount = 0
 	}
 	buf = append(buf, 0x05, byte(len(instBody)))
 	buf = append(buf, instBody...)
@@ -1710,11 +1728,11 @@ func TestDecodeAlias(t *testing.T) {
 	// Section 6: alias (export target)
 	// sort=0x01 (func), target=0x00 (export), instanceidx=0, name="f"
 	aliasBody := []byte{
-		0x01,               // count = 1
-		0x01,               // sort = func
-		0x00,               // target kind = export
-		0x00,               // instance index = 0
-		0x01, 'f',          // label: len=1, "f"
+		0x01,      // count = 1
+		0x01,      // sort = func
+		0x00,      // target kind = export
+		0x00,      // instance index = 0
+		0x01, 'f', // label: len=1, "f"
 	}
 	buf = append(buf, 0x06, byte(len(aliasBody)))
 	buf = append(buf, aliasBody...)
@@ -1737,12 +1755,12 @@ func TestDecodeAlias_CoreExport(t *testing.T) {
 	// Section 6: alias with core export
 	// sort=0x00 (core) + discriminator, target=0x01 (core export)
 	aliasBody := []byte{
-		0x01,               // count = 1
-		0x00,               // sort = core
-		0x01,               // discriminator = func
-		0x01,               // target kind = core export
-		0x00,               // instance index = 0
-		0x01, 'f',          // label
+		0x01,      // count = 1
+		0x00,      // sort = core
+		0x01,      // discriminator = func
+		0x01,      // target kind = core export
+		0x00,      // instance index = 0
+		0x01, 'f', // label
 	}
 	buf = append(buf, 0x06, byte(len(aliasBody)))
 	buf = append(buf, aliasBody...)
@@ -1765,11 +1783,11 @@ func TestDecodeAlias_Outer(t *testing.T) {
 	// Section 6: alias with outer target
 	// sort=0x01 (func), target=0x02 (outer)
 	aliasBody := []byte{
-		0x01,               // count = 1
-		0x01,               // sort = func
-		0x02,               // target kind = outer
-		0x01,               // outer count = 1
-		0x00,               // outer index = 0
+		0x01, // count = 1
+		0x01, // sort = func
+		0x02, // target kind = outer
+		0x01, // outer count = 1
+		0x00, // outer index = 0
 	}
 	buf = append(buf, 0x06, byte(len(aliasBody)))
 	buf = append(buf, aliasBody...)
@@ -1791,12 +1809,12 @@ func TestDecodeCanon_Lift(t *testing.T) {
 	// Section 8: canon with lift
 	// 0x00 0x00 coreidx opts typeidx
 	canonBody := []byte{
-		0x01,           // count = 1
-		0x00,           // kind = lift
-		0x00,           // prefix
-		0x00,           // core func idx = 0
-		0x00,           // opt count = 0
-		0x00,           // type idx = 0
+		0x01, // count = 1
+		0x00, // kind = lift
+		0x00, // prefix
+		0x00, // core func idx = 0
+		0x00, // opt count = 0
+		0x00, // type idx = 0
 	}
 	buf = append(buf, 0x08, byte(len(canonBody)))
 	buf = append(buf, canonBody...)
@@ -1818,11 +1836,11 @@ func TestDecodeCanon_Lower(t *testing.T) {
 	buf := preamble()
 	// Section 8: canon with lower
 	canonBody := []byte{
-		0x01,           // count = 1
-		0x01,           // kind = lower
-		0x00,           // prefix
-		0x00,           // func idx = 0
-		0x00,           // opt count = 0
+		0x01, // count = 1
+		0x01, // kind = lower
+		0x00, // prefix
+		0x00, // func idx = 0
+		0x00, // opt count = 0
 	}
 	buf = append(buf, 0x08, byte(len(canonBody)))
 	buf = append(buf, canonBody...)
@@ -1840,9 +1858,9 @@ func TestDecodeCanon_Resource(t *testing.T) {
 	buf := preamble()
 	// Section 8: canon with resource.new
 	canonBody := []byte{
-		0x01,           // count = 1
-		0x02,           // kind = resource.new
-		0x00,           // type idx = 0
+		0x01, // count = 1
+		0x02, // kind = resource.new
+		0x00, // type idx = 0
 	}
 	buf = append(buf, 0x08, byte(len(canonBody)))
 	buf = append(buf, canonBody...)
@@ -1859,8 +1877,8 @@ func TestDecodeCanon_Resource(t *testing.T) {
 func TestDecodeCanon_UnsupportedKind(t *testing.T) {
 	buf := preamble()
 	canonBody := []byte{
-		0x01,           // count = 1
-		0xff,           // kind = unsupported
+		0x01, // count = 1
+		0xff, // kind = unsupported
 	}
 	buf = append(buf, 0x08, byte(len(canonBody)))
 	buf = append(buf, canonBody...)
@@ -1876,9 +1894,9 @@ func TestDecodeStart(t *testing.T) {
 	// Section 9: start
 	// funcidx vec(valueidx) resultcount
 	startBody := []byte{
-		0x00,           // func idx = 0
-		0x00,           // arg count = 0
-		0x00,           // result count = 0
+		0x00, // func idx = 0
+		0x00, // arg count = 0
+		0x00, // result count = 0
 	}
 	buf = append(buf, 0x09, byte(len(startBody)))
 	buf = append(buf, startBody...)
@@ -1896,10 +1914,10 @@ func TestDecodeStart_WithArgsAndResults(t *testing.T) {
 	buf := preamble()
 	// Section 9: start with args and results
 	startBody := []byte{
-		0x00,           // func idx = 0
-		0x02,           // arg count = 2
-		0x00, 0x01,     // args: 0, 1
-		0x02,           // result count = 2
+		0x00,       // func idx = 0
+		0x02,       // arg count = 2
+		0x00, 0x01, // args: 0, 1
+		0x02, // result count = 2
 	}
 	buf = append(buf, 0x09, byte(len(startBody)))
 	buf = append(buf, startBody...)
@@ -1967,14 +1985,14 @@ func TestDecodeCanonWithOptions(t *testing.T) {
 	buf := preamble()
 	// Section 8: canon with options
 	canonBody := []byte{
-		0x01,           // count = 1
-		0x00,           // kind = lift
-		0x00,           // prefix
-		0x00,           // core func idx = 0
-		0x02,           // opt count = 2
-		0x00,           // opt[0] kind = utf8 (no data)
-		0x03, 0x00,     // opt[1] kind = memory, idx = 0
-		0x00,           // type idx = 0
+		0x01,       // count = 1
+		0x00,       // kind = lift
+		0x00,       // prefix
+		0x00,       // core func idx = 0
+		0x02,       // opt count = 2
+		0x00,       // opt[0] kind = utf8 (no data)
+		0x03, 0x00, // opt[1] kind = memory, idx = 0
+		0x00, // type idx = 0
 	}
 	buf = append(buf, 0x08, byte(len(canonBody)))
 	buf = append(buf, canonBody...)
@@ -1989,7 +2007,7 @@ func TestDecodeCanonWithOptions(t *testing.T) {
 }
 
 func TestHOSTComponentWithCanonAndAlias(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("testdata", "host_component.wasm"))
+	data, err := fixtureFS.ReadFile("testdata/host_component.wasm")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
@@ -2029,7 +2047,7 @@ func TestHOSTComponentWithCanonAndAlias(t *testing.T) {
 }
 
 func TestExtendedComponentWithCanonAndAliases(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("testdata", "extended_component.wasm"))
+	data, err := fixtureFS.ReadFile("testdata/extended_component.wasm")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
@@ -2086,12 +2104,12 @@ func TestDecodeCoreInstance_MissingPrefix(t *testing.T) {
 
 	// Core instance instantiate arg missing the 0x12 prefix
 	coreInstBody := []byte{
-		0x01,       // count = 1
-		0x00,       // kind = instantiate
-		0x00,       // moduleIdx = 0
-		0x01,       // argCount = 1
-		0x00, 0x01, 'x',   // name: kind=0x00, len=1, "x"
-		0x13,       // WRONG: should be 0x12
+		0x01,            // count = 1
+		0x00,            // kind = instantiate
+		0x00,            // moduleIdx = 0
+		0x01,            // argCount = 1
+		0x00, 0x01, 'x', // name: kind=0x00, len=1, "x"
+		0x13, // WRONG: should be 0x12
 	}
 	buf = append(buf, 0x02, byte(len(coreInstBody)))
 	buf = append(buf, coreInstBody...)
@@ -2126,9 +2144,9 @@ func TestDecodeCoreInstance_TruncatedInlineExportName(t *testing.T) {
 func TestDecodeInstance_Truncated(t *testing.T) {
 	buf := preamble()
 	instBody := []byte{
-		0x01,       // count = 1
-		0x00,       // kind = instantiate
-		0x00,       // componentIdx = 0
+		0x01, // count = 1
+		0x00, // kind = instantiate
+		0x00, // componentIdx = 0
 		// missing argCount
 	}
 	buf = append(buf, 0x05, byte(len(instBody)))
@@ -2143,9 +2161,9 @@ func TestDecodeInstance_Truncated(t *testing.T) {
 func TestDecodeAlias_InvalidTargetKind(t *testing.T) {
 	buf := preamble()
 	aliasBody := []byte{
-		0x01,       // count = 1
-		0x01,       // sort = func
-		0x03,       // target kind = invalid
+		0x01, // count = 1
+		0x01, // sort = func
+		0x03, // target kind = invalid
 	}
 	buf = append(buf, 0x06, byte(len(aliasBody)))
 	buf = append(buf, aliasBody...)
@@ -2159,9 +2177,9 @@ func TestDecodeAlias_InvalidTargetKind(t *testing.T) {
 func TestDecodeAlias_TruncatedInstanceIndex(t *testing.T) {
 	buf := preamble()
 	aliasBody := []byte{
-		0x01,       // count = 1
-		0x01,       // sort = func
-		0x00,       // target kind = export
+		0x01, // count = 1
+		0x01, // sort = func
+		0x00, // target kind = export
 		// missing instance index
 	}
 	buf = append(buf, 0x06, byte(len(aliasBody)))
@@ -2176,11 +2194,11 @@ func TestDecodeAlias_TruncatedInstanceIndex(t *testing.T) {
 func TestDecodeAlias_TruncatedName(t *testing.T) {
 	buf := preamble()
 	aliasBody := []byte{
-		0x01,       // count = 1
-		0x01,       // sort = func
-		0x00,       // target kind = export
-		0x00,       // instance index = 0
-		0x05, 'a',  // label: len=5, but only provide 1 byte
+		0x01,      // count = 1
+		0x01,      // sort = func
+		0x00,      // target kind = export
+		0x00,      // instance index = 0
+		0x05, 'a', // label: len=5, but only provide 1 byte
 	}
 	buf = append(buf, 0x06, byte(len(aliasBody)))
 	buf = append(buf, aliasBody...)
@@ -2194,9 +2212,9 @@ func TestDecodeAlias_TruncatedName(t *testing.T) {
 func TestDecodeAlias_TruncatedOuterCount(t *testing.T) {
 	buf := preamble()
 	aliasBody := []byte{
-		0x01,       // count = 1
-		0x01,       // sort = func
-		0x02,       // target kind = outer
+		0x01, // count = 1
+		0x01, // sort = func
+		0x02, // target kind = outer
 		// missing outer count
 	}
 	buf = append(buf, 0x06, byte(len(aliasBody)))
@@ -2211,9 +2229,9 @@ func TestDecodeAlias_TruncatedOuterCount(t *testing.T) {
 func TestDecodeCanon_LiftInvalidPrefix(t *testing.T) {
 	buf := preamble()
 	canonBody := []byte{
-		0x01,       // count = 1
-		0x00,       // kind = lift
-		0x01,       // WRONG: should be 0x00
+		0x01, // count = 1
+		0x00, // kind = lift
+		0x01, // WRONG: should be 0x00
 	}
 	buf = append(buf, 0x08, byte(len(canonBody)))
 	buf = append(buf, canonBody...)
@@ -2227,9 +2245,9 @@ func TestDecodeCanon_LiftInvalidPrefix(t *testing.T) {
 func TestDecodeCanon_LowerInvalidPrefix(t *testing.T) {
 	buf := preamble()
 	canonBody := []byte{
-		0x01,       // count = 1
-		0x01,       // kind = lower
-		0x01,       // WRONG: should be 0x00
+		0x01, // count = 1
+		0x01, // kind = lower
+		0x01, // WRONG: should be 0x00
 	}
 	buf = append(buf, 0x08, byte(len(canonBody)))
 	buf = append(buf, canonBody...)
@@ -2243,12 +2261,12 @@ func TestDecodeCanon_LowerInvalidPrefix(t *testing.T) {
 func TestDecodeCanonOpts_UnsupportedKind(t *testing.T) {
 	buf := preamble()
 	canonBody := []byte{
-		0x01,       // count = 1
-		0x00,       // kind = lift
-		0x00,       // prefix
-		0x00,       // core func idx = 0
-		0x01,       // opt count = 1
-		0xff,       // opt kind = unsupported
+		0x01, // count = 1
+		0x00, // kind = lift
+		0x00, // prefix
+		0x00, // core func idx = 0
+		0x01, // opt count = 1
+		0xff, // opt kind = unsupported
 	}
 	buf = append(buf, 0x08, byte(len(canonBody)))
 	buf = append(buf, canonBody...)
@@ -2262,12 +2280,12 @@ func TestDecodeCanonOpts_UnsupportedKind(t *testing.T) {
 func TestDecodeCanonOpts_TruncatedIndex(t *testing.T) {
 	buf := preamble()
 	canonBody := []byte{
-		0x01,       // count = 1
-		0x00,       // kind = lift
-		0x00,       // prefix
-		0x00,       // core func idx = 0
-		0x01,       // opt count = 1
-		0x03,       // opt kind = memory (needs index)
+		0x01, // count = 1
+		0x00, // kind = lift
+		0x00, // prefix
+		0x00, // core func idx = 0
+		0x01, // opt count = 1
+		0x03, // opt kind = memory (needs index)
 		// missing index
 	}
 	buf = append(buf, 0x08, byte(len(canonBody)))
@@ -2326,19 +2344,19 @@ func TestCanonWithAllOptTypes(t *testing.T) {
 	buf := preamble()
 	// Section 8: canon with all supported opt types
 	canonBody := []byte{
-		0x01,           // count = 1
-		0x00,           // kind = lift
-		0x00,           // prefix
-		0x00,           // core func idx = 0
-		0x07,           // opt count = 7
-		0x00,           // utf8
-		0x01,           // utf16
-		0x02,           // latin1+utf16
-		0x03, 0x00,     // memory, idx=0
-		0x04, 0x00,     // realloc, idx=0
-		0x05, 0x00,     // post-return, idx=0
-		0x06,           // async (no index)
-		0x00,           // type idx = 0
+		0x01,       // count = 1
+		0x00,       // kind = lift
+		0x00,       // prefix
+		0x00,       // core func idx = 0
+		0x07,       // opt count = 7
+		0x00,       // utf8
+		0x01,       // utf16
+		0x02,       // latin1+utf16
+		0x03, 0x00, // memory, idx=0
+		0x04, 0x00, // realloc, idx=0
+		0x05, 0x00, // post-return, idx=0
+		0x06, // async (no index)
+		0x00, // type idx = 0
 	}
 	buf = append(buf, 0x08, byte(len(canonBody)))
 	buf = append(buf, canonBody...)
@@ -2355,9 +2373,9 @@ func TestCanonWithAllOptTypes(t *testing.T) {
 func TestDecodeStartWithTruncatedArgs(t *testing.T) {
 	buf := preamble()
 	startBody := []byte{
-		0x00,           // func idx = 0
-		0x02,           // arg count = 2
-		0x00,           // arg[0] = 0
+		0x00, // func idx = 0
+		0x02, // arg count = 2
+		0x00, // arg[0] = 0
 		// missing arg[1]
 	}
 	buf = append(buf, 0x09, byte(len(startBody)))
@@ -2372,8 +2390,8 @@ func TestDecodeStartWithTruncatedArgs(t *testing.T) {
 func TestDecodeStartWithTruncatedResultCount(t *testing.T) {
 	buf := preamble()
 	startBody := []byte{
-		0x00,           // func idx = 0
-		0x00,           // arg count = 0
+		0x00, // func idx = 0
+		0x00, // arg count = 0
 		// missing result count
 	}
 	buf = append(buf, 0x09, byte(len(startBody)))
@@ -2476,8 +2494,8 @@ func TestDecodeCanonTruncatedKind(t *testing.T) {
 func TestInstance_InvalidKind(t *testing.T) {
 	buf := preamble()
 	instBody := []byte{
-		0x01,       // count = 1
-		0xff,       // kind = invalid
+		0x01, // count = 1
+		0xff, // kind = invalid
 	}
 	buf = append(buf, 0x05, byte(len(instBody)))
 	buf = append(buf, instBody...)
@@ -2492,11 +2510,11 @@ func TestInstanceWithArgs(t *testing.T) {
 	buf := preamble()
 	// Section 5: instance with arguments
 	instBody := []byte{
-		0x01,       // count = 1
-		0x00,       // kind = instantiate
-		0x00,       // componentIdx = 0
-		0x01,       // argCount = 1
-		0x01, 'x',  // arg name: a plain label (len=1, "x"), not an externname
+		0x01,      // count = 1
+		0x00,      // kind = instantiate
+		0x00,      // componentIdx = 0
+		0x01,      // argCount = 1
+		0x01, 'x', // arg name: a plain label (len=1, "x"), not an externname
 		0x01, 0x00, // arg sortidx: sort=func, idx=0
 	}
 	buf = append(buf, 0x05, byte(len(instBody)))

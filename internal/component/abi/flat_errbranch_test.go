@@ -153,11 +153,11 @@ func TestLowerFlatSignedEdgeCases(t *testing.T) {
 	mem := make([]byte, 1024)
 
 	tests := []struct {
-		name          string
-		value         Value
-		typeDesc      binary.TypeDesc
-		expectedBits  uint64
-		expectedKind  string
+		name         string
+		value        Value
+		typeDesc     binary.TypeDesc
+		expectedBits uint64
+		expectedKind string
 	}{
 		{
 			name:         "s32 negative minimum",
@@ -216,10 +216,10 @@ func TestLowerFlatFloatSpecialValues(t *testing.T) {
 	mem := make([]byte, 1024)
 
 	tests := []struct {
-		name          string
-		value         Value
-		typeDesc      binary.TypeDesc
-		expectedKind  string
+		name         string
+		value        Value
+		typeDesc     binary.TypeDesc
+		expectedKind string
 	}{
 		{
 			name:         "f32 positive infinity",
@@ -436,15 +436,15 @@ func TestCoreValueIter(t *testing.T) {
 	}
 
 	// Skip some values
-	vi.Next()
-	vi.Next()
+	_, _ = vi.Next()
+	_, _ = vi.Next()
 
 	// Test Done
 	if vi.Done() {
 		t.Error("expected !Done(), got Done()")
 	}
 
-	vi.Next()
+	_, _ = vi.Next()
 	if !vi.Done() {
 		t.Error("expected Done(), got !Done()")
 	}

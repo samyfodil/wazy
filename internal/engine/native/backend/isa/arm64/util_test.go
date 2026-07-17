@@ -99,8 +99,8 @@ func (m *mockCompiler) Emit8Bytes(b uint64) {
 	m.buf = append(m.buf, byte(b), byte(b>>8), byte(b>>16), byte(b>>24), byte(b>>32), byte(b>>40), byte(b>>48), byte(b>>56))
 }
 
-func (m *mockCompiler) Encode()     {}
-func (m *mockCompiler) Buf() []byte { return m.buf }
+func (m *mockCompiler) Encode()         {}
+func (m *mockCompiler) Buf() []byte     { return m.buf }
 func (m *mockCompiler) TakeBuf() []byte { b := m.buf; m.buf = nil; return b }
 func (m *mockCompiler) TypeOf(v regalloc.VReg) (ret ssa.Type) {
 	return m.typeOf[v.ID()]

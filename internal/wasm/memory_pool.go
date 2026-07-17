@@ -61,7 +61,7 @@ func getPooledMemoryBuffer(capBytes uint64) []byte {
 	if got == nil {
 		return nil
 	}
-	buf := got.([]byte)
+	buf := *got.(*[]byte)
 	// Linear memory must start all-zero: clear the whole capacity, not just
 	// the length, since Grow can later expose more of it without its own
 	// zeroing pass.
@@ -79,5 +79,9 @@ func putPooledMemoryBuffer(buf []byte) {
 		return
 	}
 	v, _ := memoryBufferPools.LoadOrStore(capBytes, &sync.Pool{})
-	v.(*sync.Pool).Put(buf[:cap(buf)])
+	// Store *[]byte, not []byte: sync.Pool.Put([]byte) boxes the slice header
+	// into interface{}, which heap-allocates it (staticcheck SA6002) -- the
+	// opposite of what a pool that exists to avoid allocations wants.
+	full := buf[:cap(buf)]
+	v.(*sync.Pool).Put(&full)
 }

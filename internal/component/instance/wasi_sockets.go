@@ -7,7 +7,6 @@ import (
 	"net"
 	"strings"
 	"sync"
-	"syscall"
 
 	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
@@ -597,7 +596,7 @@ sendLoop:
 // back to wasiSockErrUnknown rather than guessing a more specific case
 // that might not actually apply.
 func wasiTCPDialErrToCode(err error) uint32 {
-	if errors.Is(err, syscall.ECONNREFUSED) {
+	if errors.Is(err, errConnRefused) {
 		return wasiSockErrConnectionRefused
 	}
 	var netErr net.Error
@@ -754,10 +753,10 @@ func wasiIPAddressType(tbl *typeTable) binary.TypeRef {
 // only the distinctions this package's own fixtures can actually produce are
 // discriminated, with anything else falling back to wasiSockErrUnknown.
 func wasiUDPErrToCode(err error) uint32 {
-	if errors.Is(err, syscall.EADDRINUSE) {
+	if errors.Is(err, errAddrInUse) {
 		return wasiSockErrAddressInUse
 	}
-	if errors.Is(err, syscall.EADDRNOTAVAIL) {
+	if errors.Is(err, errAddrNotAvail) {
 		return wasiSockErrAddressNotBindable
 	}
 	var netErr net.Error

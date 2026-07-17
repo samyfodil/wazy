@@ -161,29 +161,29 @@ type CoreModule struct {
 
 // CoreInstantiateArg represents an argument to instantiate a core module.
 type CoreInstantiateArg struct {
-	Name       string
+	Name        string
 	InstanceIdx uint32
 }
 
 // CoreInlineExport represents an inlined export in a core instance.
 type CoreInlineExport struct {
-	Name       string
-	Sort       byte // core:sort: 0x00 func, 0x01 table, 0x02 memory, 0x03 global, 0x04 tag, 0x10 type, 0x11 module, 0x12 instance
+	Name        string
+	Sort        byte // core:sort: 0x00 func, 0x01 table, 0x02 memory, 0x03 global, 0x04 tag, 0x10 type, 0x11 module, 0x12 instance
 	CoreSortIdx uint32
 }
 
 // CoreInstance represents a core module instantiation (section 2).
 type CoreInstance struct {
-	Kind       byte // 0x00 = instantiate, 0x01 = inline exports
-	ModuleIdx  uint32 // used if Kind == 0x00
-	Args       []CoreInstantiateArg
-	Exports    []CoreInlineExport
+	Kind      byte   // 0x00 = instantiate, 0x01 = inline exports
+	ModuleIdx uint32 // used if Kind == 0x00
+	Args      []CoreInstantiateArg
+	Exports   []CoreInlineExport
 }
 
 // InstantiateArg represents an argument to instantiate a component.
 type InstantiateArg struct {
-	Name  string
-	Sort  byte
+	Name    string
+	Sort    byte
 	SortIdx uint32
 }
 
@@ -196,21 +196,21 @@ type InlineExport struct {
 
 // Instance represents a component instance (section 5).
 type Instance struct {
-	Kind       byte // 0x00 = instantiate, 0x01 = inline exports
+	Kind         byte   // 0x00 = instantiate, 0x01 = inline exports
 	ComponentIdx uint32 // used if Kind == 0x00
-	Args       []InstantiateArg
-	Exports    []InlineExport
+	Args         []InstantiateArg
+	Exports      []InlineExport
 }
 
 // CanonOpt represents a canonical option.
 type CanonOpt struct {
-	Kind byte // 0x00-0x07 (and potentially more)
+	Kind byte   // 0x00-0x07 (and potentially more)
 	Idx  uint32 // for options that carry an index
 }
 
 // Canon represents a canonical lift/lower binding (section 8).
 type Canon struct {
-	Kind        byte // 0x00 = lift, 0x01 = lower, 0x02/0x03/0x04 = resource.*
+	Kind        byte   // 0x00 = lift, 0x01 = lower, 0x02/0x03/0x04 = resource.*
 	CoreFuncIdx uint32 // used for lift (0x00)
 	FuncIdx     uint32 // used for lower (0x01) and for result indices in Start
 	Opts        []CanonOpt
@@ -219,12 +219,12 @@ type Canon struct {
 
 // AliasDef represents an alias binding (section 6).
 type AliasDef struct {
-	Sort          byte // sort of the aliased item: 0x00 = core, 0x01 = func, 0x02 = value, 0x03 = type, 0x04 = component, 0x05 = instance
-	TargetKind    byte // 0x00 = export, 0x01 = core export, 0x02 = outer
-	InstanceIdx   uint32 // for export/core export targets
-	Name          string // for export/core export targets
-	OuterCount    uint32 // for outer targets
-	OuterIndex    uint32 // for outer targets
+	Sort        byte   // sort of the aliased item: 0x00 = core, 0x01 = func, 0x02 = value, 0x03 = type, 0x04 = component, 0x05 = instance
+	TargetKind  byte   // 0x00 = export, 0x01 = core export, 0x02 = outer
+	InstanceIdx uint32 // for export/core export targets
+	Name        string // for export/core export targets
+	OuterCount  uint32 // for outer targets
+	OuterIndex  uint32 // for outer targets
 
 	// CoreSort is the core:sort discriminator byte that follows Sort when
 	// Sort == 0x00 (i.e. this alias names a core-level item): 0x00 func,
@@ -244,8 +244,8 @@ type AliasDef struct {
 
 // Start represents the start section (section 9).
 type Start struct {
-	FuncIdx    uint32
-	Args       []uint32
+	FuncIdx     uint32
+	Args        []uint32
 	ResultCount uint32
 }
 

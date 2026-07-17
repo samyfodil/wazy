@@ -103,15 +103,15 @@ type (
 	compiledModule struct {
 		*executables
 		// functionOffsets maps a local function index to the offset in the executable.
-		functionOffsets           []int
-		parent                    *engine
-		module                    *wasm.Module
-		ensureTermination         bool
+		functionOffsets   []int
+		parent            *engine
+		module            *wasm.Module
+		ensureTermination bool
 		// interruptCheckInterval is the (power-of-two) loop-header interrupt-check
 		// interval this module was compiled under. Seeds execCtx.interruptCheckMask
 		// (= interval-1) per callEngine so the amortized check's mask is a runtime
 		// value rather than a baked constant, allowing per-run/per-loop retuning.
-		interruptCheckInterval uint64
+		interruptCheckInterval    uint64
 		listeners                 []experimental.FunctionListener
 		listenerBeforeTrampolines []*byte
 		listenerAfterTrampolines  []*byte

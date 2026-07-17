@@ -2,14 +2,13 @@ package instance
 
 import (
 	"context"
+	_ "embed"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
-
-	_ "embed"
 
 	"github.com/samyfodil/wazy"
 )

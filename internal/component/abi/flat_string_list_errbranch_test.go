@@ -120,7 +120,7 @@ func TestLiftFlatListOutOfBounds(t *testing.T) {
 func TestLiftFlatListElementError(t *testing.T) {
 	mem := make([]byte, 16)
 	// Invalid char code point (>= 0x110000) at ptr=0.
-	storeInt(mem, 0, uint32(0x110000), 4)
+	_ = storeInt(mem, 0, uint32(0x110000), 4)
 	vi := NewCoreValueIter([]CoreValue{NewCoreValueI32(0), NewCoreValueI32(1)})
 	_, err := liftFlatList(vi, binary.PrimitiveDesc{Prim: "char"}, nil, mem)
 	if err == nil || !strings.Contains(err.Error(), "liftFlatList") {

@@ -2,8 +2,6 @@ package binary
 
 import (
 	"bytes"
-	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -12,7 +10,7 @@ import (
 // the inline-export form (vec of core:name -> core:sortidx). These are the
 // paths whose decoders were fixed to use core-level name/sortidx readers.
 func TestDecodeInstantiationGraph_CoreInstanceForms(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("testdata", "log_hello.wasm"))
+	data, err := fixtureFS.ReadFile("testdata/log_hello.wasm")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}

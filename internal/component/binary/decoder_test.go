@@ -2,8 +2,6 @@ package binary
 
 import (
 	"bytes"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -20,7 +18,7 @@ import (
 // (instance sort 0x05), 1 export (func sort 0x01).
 func loadFixture(t *testing.T) *Component {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join("testdata", "host_component.wasm"))
+	data, err := fixtureFS.ReadFile("testdata/host_component.wasm")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
@@ -103,7 +101,7 @@ func TestDecodeRealComponent_Dump(t *testing.T) {
 // inside an instance type. Ground truth: top-level types enum, record, option,
 // result, list, variant, flags, then an instance type (with aliases) and a func.
 func TestDecodeRichComponent(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("testdata", "rich_component.wasm"))
+	data, err := fixtureFS.ReadFile("testdata/rich_component.wasm")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
@@ -130,9 +128,9 @@ func TestDecodeRichComponent(t *testing.T) {
 
 // real_hello.component.wasm is a genuine wasm32-wasip2 `wasi:cli/command`
 // component produced by rustc/cargo-component (prints "hello world"), not a
-// synthetic fixture assembled from a hand-written .wat. It lives under the
-// instance package's testdata (shared with the runtime E2E tests) rather
-// than binary/testdata.
+// synthetic fixture assembled from a hand-written .wat. A copy is vendored in
+// binary/testdata (embedded via fixtureFS) so the compiled test binary can read
+// it from the repo root, as the scratch/BSD CI jobs run it.
 //
 // Ground truth per `wasm-tools component wit` / `wasm-tools objdump`:
 //   - 10 component imports, all instance-sort (0x05): wasi:cli/{environment,
@@ -148,7 +146,7 @@ func TestDecodeRichComponent(t *testing.T) {
 //     shim) that this decoder does not fully parse and records as a
 //     RawSection with an exact byte range instead.
 func TestDecodeRealGuest(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "instance", "testdata", "real_hello.component.wasm"))
+	data, err := fixtureFS.ReadFile("testdata/real_hello.component.wasm")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}

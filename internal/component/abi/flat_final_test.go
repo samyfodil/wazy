@@ -148,7 +148,7 @@ func TestLowerFlatVariantWithPayload(t *testing.T) {
 		typeDesc binary.TypeDesc
 	}{
 		{
-			name: "variant with u64 payload",
+			name:  "variant with u64 payload",
 			value: VariantValue{Disc: 0, Payload: uint64(123456789)},
 			typeDesc: binary.VariantDesc{
 				Cases: []binary.VariantCase{
@@ -158,7 +158,7 @@ func TestLowerFlatVariantWithPayload(t *testing.T) {
 			},
 		},
 		{
-			name: "variant with f64 payload",
+			name:  "variant with f64 payload",
 			value: VariantValue{Disc: 1, Payload: float64(3.14159)},
 			typeDesc: binary.VariantDesc{
 				Cases: []binary.VariantCase{

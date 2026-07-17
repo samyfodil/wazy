@@ -10,6 +10,14 @@ import (
 	"github.com/samyfodil/wazy/sys"
 )
 
+// fdPoller is implemented by files that can expose a raw descriptor for
+// batched polling. osFile and the stdio/fs wrappers around it implement it.
+// Defined here (untagged) so non-poll platforms still compile — only the batch
+// poll implementation in poll_batch.go is platform-gated.
+type fdPoller interface {
+	pollFd() (fd uintptr, ok bool)
+}
+
 func NewStdioFile(stdin bool, f fs.File) (experimentalsys.File, error) {
 	// Return constant stat, which has fake times, but keep the underlying
 	// file mode. Fake times are needed to pass wasi-testsuite.

@@ -5,8 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"os"
-	"path/filepath"
+	"path"
 	"reflect"
 	"strconv"
 	"testing"
@@ -27,7 +26,9 @@ import (
 // reference suite, not our own oracle.
 //
 // concat: takes bool/all int widths/char/string/list/tuple/record/variant/enum/
-//         flags/option as args, returns their concatenation -- pure ABI in+out.
+//
+//	flags/option as args, returns their concatenation -- pure ABI in+out.
+//
 // strings: string edge cases + assert_trap for out-of-bounds / invalid utf-8.
 func TestWastConformance(t *testing.T) {
 	// Every official component-model suite this runtime runs end to end, with
@@ -69,8 +70,8 @@ type wastCmd struct {
 }
 
 func runWastSuite(t *testing.T, suite string) {
-	dir := filepath.Join("testdata", "wast", suite)
-	raw, err := os.ReadFile(filepath.Join(dir, suite+".json"))
+	dir := path.Join("testdata", "wast", suite)
+	raw, err := wastFS.ReadFile(path.Join(dir, suite+".json"))
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)
 	}
@@ -90,7 +91,7 @@ func runWastSuite(t *testing.T, suite string) {
 	for _, c := range manifest.Commands {
 		switch c.Type {
 		case "module":
-			wasm, err := os.ReadFile(filepath.Join(dir, c.Filename))
+			wasm, err := wastFS.ReadFile(path.Join(dir, c.Filename))
 			if err != nil {
 				t.Fatalf("line %d: read %s: %v", c.Line, c.Filename, err)
 			}

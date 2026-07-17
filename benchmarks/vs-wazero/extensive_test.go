@@ -6,8 +6,9 @@ import (
 	"os"
 	"testing"
 
-	"github.com/samyfodil/wazy"
 	"github.com/tetratelabs/wazero"
+
+	"github.com/samyfodil/wazy"
 )
 
 // caseWorkloads are real TinyGo-compiled exports of caseWasm. The memory-heavy

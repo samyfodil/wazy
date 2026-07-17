@@ -1,14 +1,8 @@
-//go:build windows || linux || darwin
+//go:build linux || darwin
 
 package sysfs
 
 import "github.com/samyfodil/wazy/experimental/sys"
-
-// fdPoller is implemented by files that can expose a raw descriptor for
-// batched polling. osFile and the stdio/fs wrappers around it implement it.
-type fdPoller interface {
-	pollFd() (fd uintptr, ok bool)
-}
 
 // PollReadiness polls files for POLLIN readiness with a single _poll syscall
 // over all of them, so it returns as soon as ANY file is ready — the any-ready

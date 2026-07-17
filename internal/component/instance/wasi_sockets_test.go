@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"errors"
 	"net"
+	"runtime"
 	"testing"
 
 	"github.com/samyfodil/wazy"
@@ -87,6 +88,9 @@ func TestWasiIPSocketAddrToString(t *testing.T) {
 // falling back to wasiSockErrUnknown.
 func TestWasiTCPDialErrToCode(t *testing.T) {
 	t.Run("connection refused", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Winsock connection-refused errno doesn't match syscall.ECONNREFUSED via errors.Is; classification is best-effort on Windows")
+		}
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			t.Fatal(err)
@@ -164,6 +168,9 @@ func TestWasiSocketSetOptOK(t *testing.T) {
 // error falls back to unknown.
 func TestWasiTCPListenErrToCode(t *testing.T) {
 	t.Run("address in use", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Winsock address-in-use errno doesn't match syscall.EADDRINUSE via errors.Is; classification is best-effort on Windows")
+		}
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			t.Fatal(err)

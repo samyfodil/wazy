@@ -4,8 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/samyfodil/wazy"
 	"github.com/tetratelabs/wazero"
+
+	"github.com/samyfodil/wazy"
 )
 
 // BenchmarkCase3Interp is BenchmarkCase3 restricted to the *interpreter* engine
