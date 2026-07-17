@@ -88,6 +88,9 @@ func Test_poll(t *testing.T) {
 // blocking fd, PollReadiness returns the ready one promptly rather than blocking
 // on the empty fd for the full timeout (the bug a sequential loop had).
 func TestPollReadiness(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("batched PollReadiness is linux/darwin only; Windows uses the sequential fallback")
+	}
 	ra, wa, err := os.Pipe()
 	require.NoError(t, err)
 	defer ra.Close()

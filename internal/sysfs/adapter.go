@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path"
+	"runtime"
 
 	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
 	"github.com/samyfodil/wazy/sys"
@@ -38,8 +39,11 @@ func (a *AdaptFS) Lstat(path string) (sys.Stat_t, experimentalsys.Errno) {
 
 // Stat implements the same method as documented on sys.FS
 func (a *AdaptFS) Stat(path string) (sys.Stat_t, experimentalsys.Errno) {
-	// ponytail: fs.StatFS avoids the open+fstat+close round trip (W2).
-	if statFS, ok := a.FS.(fs.StatFS); ok {
+	// ponytail: fs.StatFS avoids the open+fstat+close round trip (W2). Skipped on
+	// Windows, where NewStat_t(info) can't fill Dev/Ino from a plain FileInfo —
+	// only the handle-based open path (GetFileInformationByHandle) has them.
+	// runtime.GOOS is a compile-time constant, so this branch folds away off Windows.
+	if statFS, ok := a.FS.(fs.StatFS); ok && runtime.GOOS != "windows" {
 		info, err := statFS.Stat(cleanPath(path))
 		if errno := experimentalsys.UnwrapOSError(err); errno != 0 {
 			return sys.Stat_t{}, errno
