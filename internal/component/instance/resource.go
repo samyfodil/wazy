@@ -8,6 +8,26 @@ import (
 	"github.com/samyfodil/wazy/api"
 )
 
+// entryKind discriminates the kinds of values a handleTable can hold. Today
+// there is exactly one (entryResource); the Canonical ABI's single
+// per-instance handle table (testdata/definitions.py's `ComponentInstance
+// .handles`, typed `Table[ResourceHandle | Waitable | WaitableSet |
+// ErrorContext]`) also holds waitables, waitable sets, error contexts, and
+// stream/future ends in that same index space. Those kinds are added by
+// later Phase 1 work, not here -- entryKind exists now so the table's shape
+// does not have to change again when they land.
+type entryKind uint8
+
+const (
+	entryResource entryKind = iota
+)
+
+// tableEntry is anything a handleTable slot can hold. resourceEntry is the
+// only implementer today.
+type tableEntry interface {
+	entryKind() entryKind
+}
+
 // resourceEntry is one live handle in a handleTable: the host-side
 // representation it refers to, whether the handle owns that representation
 // (as opposed to merely borrowing it), and how many outstanding loans have
@@ -20,14 +40,20 @@ type resourceEntry struct {
 	lendCount int
 }
 
-// handleTable is a per-instance table mapping an i32 handle to a
-// resourceEntry, mirroring the Canonical ABI's `Table` + `ResourceHandle`
-// (testdata/definitions.py's Table/ResourceHandle and the canon_resource_*
-// functions). One handleTable is shared by every resource type declared or
-// used by a single Instance; entries are tagged with the resource type they
-// belong to (comp.Types index of the ResourceDesc) so cross-type handle
-// confusion (canon_resource_rep/drop's `trap_if(h.rt is not rt)`) is
-// detected.
+// entryKind implements tableEntry.
+func (*resourceEntry) entryKind() entryKind { return entryResource }
+
+// handleTable is a per-instance table mapping an i32 handle to a tableEntry,
+// mirroring the Canonical ABI's `Table` (testdata/definitions.py's Table and
+// the canon_resource_* functions) -- the reference's single index space that
+// also holds waitables, waitable sets, error contexts, and stream/future ends
+// (see entryKind). Only resourceEntry exists today; add and lookup below
+// deal exclusively in resourceEntry, so nothing else here changes behavior
+// until a later Phase 1 change starts storing other kinds. One handleTable is
+// shared by every resource type declared or used by a single Instance;
+// resourceEntry values are tagged with the resource type they belong to
+// (comp.Types index of the ResourceDesc) so cross-type handle confusion
+// (canon_resource_rep/drop's `trap_if(h.rt is not rt)`) is detected.
 //
 // Handle numbering starts at 1 (0 is never allocated), matching the
 // reference Table, which reserves index 0 by seeding its backing array with
@@ -69,7 +95,7 @@ type resourceEntry struct {
 //     the rep names.
 type handleTable struct {
 	mu      sync.Mutex
-	entries map[uint32]*resourceEntry
+	entries map[uint32]tableEntry
 	next    uint32
 
 	// free holds handle indices returned by Drop/TakeOwn, reused before next is
@@ -123,10 +149,21 @@ func resourceDtor(resolve func() api.Function) func(context.Context, uint32) err
 // newHandleTable returns an empty handleTable, ready to allocate handles
 // starting at 1.
 func newHandleTable() *handleTable {
-	return &handleTable{entries: make(map[uint32]*resourceEntry), next: 1}
+	return &handleTable{entries: make(map[uint32]tableEntry), next: 1}
 }
 
+// add allocates a new resourceEntry via addEntry. It is a thin, kind-specific
+// wrapper: every entry kind the table can hold shares the same allocation
+// (free-list) policy, implemented once in addEntry.
 func (t *handleTable) add(typeIdx, rep uint32, own bool) uint32 {
+	return t.addEntry(&resourceEntry{typeIdx: typeIdx, rep: rep, own: own})
+}
+
+// addEntry allocates a handle index -- reusing a freed index first (reference
+// Table.free), else bumping next -- and stores e under it. This is the one
+// place index allocation happens, so later entry kinds reuse it instead of
+// duplicating the free-list logic add used to inline.
+func (t *handleTable) addEntry(e tableEntry) uint32 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	var h uint32
@@ -137,8 +174,16 @@ func (t *handleTable) add(typeIdx, rep uint32, own bool) uint32 {
 		h = t.next
 		t.next++
 	}
-	t.entries[h] = &resourceEntry{typeIdx: typeIdx, rep: rep, own: own}
+	t.entries[h] = e
 	return h
+}
+
+// entryAt returns the raw table entry at handle h, regardless of kind, or
+// false if h is not currently allocated. Like lookup, callers must hold
+// t.mu.
+func (t *handleTable) entryAt(h uint32) (tableEntry, bool) {
+	e, ok := t.entries[h]
+	return e, ok
 }
 
 // NewOwn allocates a new owning handle for rep under resource type typeIdx.
@@ -153,12 +198,17 @@ func (t *handleTable) NewOwn(typeIdx, rep uint32) uint32 { return t.add(typeIdx,
 // host that minted it is responsible for its lifetime.
 func (t *handleTable) NewBorrow(typeIdx, rep uint32) uint32 { return t.add(typeIdx, rep, false) }
 
-// lookup resolves handle h, requiring it to exist and belong to resource
-// type typeIdx. Callers must hold t.mu.
+// lookup resolves handle h, requiring it to exist, name a resourceEntry (as
+// opposed to some other entryKind a later phase adds), and belong to
+// resource type typeIdx. Callers must hold t.mu.
 func (t *handleTable) lookup(typeIdx, h uint32) (*resourceEntry, error) {
-	e, ok := t.entries[h]
+	raw, ok := t.entryAt(h)
 	if !ok {
 		return nil, fmt.Errorf("unknown handle %d", h)
+	}
+	e, ok := raw.(*resourceEntry)
+	if !ok {
+		return nil, fmt.Errorf("handle %d is not a resource handle", h)
 	}
 	if e.typeIdx != typeIdx {
 		return nil, fmt.Errorf("handle %d belongs to resource type %d, not %d", h, e.typeIdx, typeIdx)
@@ -235,9 +285,13 @@ func (t *handleTable) Drop(typeIdx, h uint32) error {
 func (t *handleTable) DropOwned(h uint32) (rep uint32, err error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	e, ok := t.entries[h]
+	raw, ok := t.entryAt(h)
 	if !ok {
 		return 0, fmt.Errorf("handle %d does not name a live resource", h)
+	}
+	e, ok := raw.(*resourceEntry)
+	if !ok {
+		return 0, fmt.Errorf("handle %d is not a resource handle", h)
 	}
 	if !e.own {
 		return 0, fmt.Errorf("handle %d is a borrow, not an own handle", h)
