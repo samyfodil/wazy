@@ -441,7 +441,34 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 
 		case 0x01: // inline exports: a passthrough shim regrouping earlier items
 			items := make([]shimItem, 0, len(ci.Exports))
+			// Every canon-produced func in THIS group is packed into ONE shared
+			// host module (built once, below) rather than a module per canon.
+			// canonItemIdx[j] is the items[] slot of the j-th collected canon def,
+			// wired to the merged module's "f<j>" export after it is built.
+			var canonDefs []hostFuncDef
+			var canonItemIdx []int
 			for _, e := range ci.Exports {
+				// Intercept an in-range canon func entry: compute its host func
+				// now, defer the module build so the whole group shares one module.
+				if e.Sort == 0x00 && int(e.CoreSortIdx) < len(comp.CoreFuncSpace) &&
+					comp.CoreFuncSpace[e.CoreSortIdx].Kind == binary.CoreFuncFromCanon {
+					centry := comp.CoreFuncSpace[e.CoreSortIdx]
+					if int(centry.Canon) >= len(comp.Canons) {
+						return fail(fmt.Errorf("component/instance: core instance %d: inline export %q references canon %d, out of range", k, e.Name, centry.Canon))
+					}
+					def, wasiCall, cerr := computeCanonHostFunc(ctx, r, comp, cfg, resources, comp.Canons[centry.Canon], neededTypes, key, e.Name, coreMemTarget, coreFuncTarget)
+					if cerr != nil {
+						return fail(fmt.Errorf("component/instance: core instance %d: inline export %q: %w", k, e.Name, cerr))
+					}
+					if wasiCall != "" {
+						wasiCalls = append(wasiCalls, wasiCall)
+					}
+					canonItemIdx = append(canonItemIdx, len(items))
+					// FromModule/FromName are filled once the merged module exists.
+					items = append(items, shimItem{Sort: shimSortFunc, ExportName: e.Name, Params: def.params, Results: def.results})
+					canonDefs = append(canonDefs, def)
+					continue
+				}
 				// key doubles as groupName (the consumer-declared name) for
 				// neededTypes lookups; keys names the shim's alias sources.
 				item, wasiCall, privMod, err := resolveInlineExportItem(ctx, r, comp, cfg, resources, e, coreMemSpace, coreTableSpace, instMods, keys, neededTypes, key, nextPrivateName, coreFuncTarget, coreMemTarget)
@@ -453,11 +480,20 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 					wasiCalls = append(wasiCalls, wasiCall)
 				}
 				if privMod != nil {
-					// A canon-produced core func's own private host module
-					// (see resolveInlineExportItem's doc): the shim below
-					// only imports from it, so it must be tracked here too
-					// or Instance.Close leaks it.
 					closers = append(closers, privMod)
+				}
+			}
+			// Build the group's one shared host module for all its canon funcs,
+			// then point each canon shim item at its "f<j>" export.
+			if len(canonDefs) > 0 {
+				hostMod, herr := buildMergedCanonHostModule(ctx, r, nextPrivateName(), canonDefs)
+				if herr != nil {
+					return fail(fmt.Errorf("component/instance: core instance %d: %w", k, herr))
+				}
+				closers = append(closers, hostMod)
+				for j, idx := range canonItemIdx {
+					items[idx].FromModule = hostMod.Name()
+					items[idx].FromName = canonExportName(j)
 				}
 			}
 			shimBytes, err := buildPassthroughShim(items)
@@ -942,13 +978,18 @@ func resolveInlineExportItem(
 // commits to -- and which panics naming the WASI iface+func, returned as
 // wasiCall for Instance.WASICalls (empty for a resource canon or a
 // caller-overridden lower).
-func buildCanonHostModule(
+// computeCanonHostFunc resolves one core-func-producing canon (a lower, or one
+// of the three resource canons) to the Go host func that backs it, WITHOUT
+// instantiating a module for it -- the caller batches every canon func in an
+// inline-export group into a single host module (see buildMergedCanonHostModule),
+// instead of paying a separate builder + compile + instantiate + sys.Context per
+// canon. See buildCanonHostModule's (removed) doc, preserved below, for the
+// lower/trap-stub/resource behaviors.
+func computeCanonHostFunc(
 	ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, resources *handleTable,
-	canon binary.Canon, neededTypes map[string]map[string]coreFuncSig, groupName, entryName, privateName string,
+	canon binary.Canon, neededTypes map[string]map[string]coreFuncSig, groupName, entryName string,
 	coreMemTarget func(int) (api.Module, error), coreFuncTarget func(int) (api.Module, string, error),
-) (mod api.Module, exportName string, params, results []api.ValueType, wasiCall string, err error) {
-	var def hostFuncDef
-
+) (def hostFuncDef, wasiCall string, err error) {
 	switch canon.Kind {
 	case 0x01: // lower
 		// Resolve the lowered func through the authoritative component func
@@ -958,51 +999,51 @@ func buildCanonHostModule(
 		// import precedes them.
 		fi := canon.FuncIdx
 		if int(fi) >= len(comp.ComponentFuncSpace) {
-			return nil, "", nil, nil, "", fmt.Errorf("lower func index %d out of range of the component func index space", fi)
+			return hostFuncDef{}, "",fmt.Errorf("lower func index %d out of range of the component func index space", fi)
 		}
 		fe := comp.ComponentFuncSpace[fi]
 		var iface, fname string
 		switch fe.Kind {
 		case binary.ComponentFuncFromImport:
 			if int(fe.Import) >= len(comp.Imports) {
-				return nil, "", nil, nil, "", fmt.Errorf("lower func index %d: import out of range", fi)
+				return hostFuncDef{}, "",fmt.Errorf("lower func index %d: import out of range", fi)
 			}
 			im := comp.Imports[fe.Import]
 			if im.ExternType != 0x01 { // func
-				return nil, "", nil, nil, "", fmt.Errorf("lower func index %d: import %q is not a func", fi, im.Name)
+				return hostFuncDef{}, "",fmt.Errorf("lower func index %d: import %q is not a func", fi, im.Name)
 			}
 			// A top-level func import is keyed by its own name (no interface).
 			iface, fname = im.Name, ""
 		case binary.ComponentFuncFromAlias:
 			al := comp.Aliases[fe.Alias]
 			if al.Sort != 0x01 || al.TargetKind != 0x00 {
-				return nil, "", nil, nil, "", fmt.Errorf("lower func index %d: unsupported alias %#x/%#x", fi, al.Sort, al.TargetKind)
+				return hostFuncDef{}, "",fmt.Errorf("lower func index %d: unsupported alias %#x/%#x", fi, al.Sort, al.TargetKind)
 			}
 			var ierr error
 			if iface, ierr = importInterfaceName(comp, al.InstanceIdx); ierr != nil {
-				return nil, "", nil, nil, "", ierr
+				return hostFuncDef{}, "",ierr
 			}
 			fname = al.Name
 		default:
-			return nil, "", nil, nil, "", fmt.Errorf("lowers a lifted (exported) func rather than an import; unsupported")
+			return hostFuncDef{}, "",fmt.Errorf("lowers a lifted (exported) func rather than an import; unsupported")
 		}
 		wasiCall = iface + "." + fname
 
 		if hi, ok := cfg.imports[mkImportKey(iface, fname)]; ok {
 			memMod, reallocFn, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
 			if merr != nil {
-				return nil, "", nil, nil, "", fmt.Errorf("import %q func %q: %w", iface, fname, merr)
+				return hostFuncDef{}, "",fmt.Errorf("import %q func %q: %w", iface, fname, merr)
 			}
 			fn, hiParams, hiResults, herr := buildHostWrapper(iface, fname, hi, resources, memMod, reallocFn)
 			if herr != nil {
-				return nil, "", nil, nil, "", herr
+				return hostFuncDef{}, "",herr
 			}
 			def = hostFuncDef{fn: fn, params: hiParams, results: hiResults}
 			wasiCall = "" // caller-provided, not a trap stub
 		} else {
 			sig, ok := neededTypes[groupName][entryName]
 			if !ok {
-				return nil, "", nil, nil, "", fmt.Errorf("cannot determine the core-level signature for lowered import %q %q: no consumer declares module %q field %q", iface, fname, groupName, entryName)
+				return hostFuncDef{}, "",fmt.Errorf("cannot determine the core-level signature for lowered import %q %q: no consumer declares module %q field %q", iface, fname, groupName, entryName)
 			}
 			trapIface, trapName := iface, fname
 			fn := api.GoModuleFunc(func(context.Context, api.Module, []uint64) {
@@ -1015,18 +1056,56 @@ func buildCanonHostModule(
 		var rerr error
 		def, rerr = resourceCanonHostFuncGraph(comp, cfg, resources, entryName, canon)
 		if rerr != nil {
-			return nil, "", nil, nil, "", rerr
+			return hostFuncDef{}, "",rerr
 		}
 
 	default:
-		return nil, "", nil, nil, "", fmt.Errorf("references a canon of kind %#x, which does not produce a core func", canon.Kind)
+		return hostFuncDef{}, "", fmt.Errorf("references a canon of kind %#x, which does not produce a core func", canon.Kind)
 	}
 
+	return def, wasiCall, nil
+}
+
+// canonExportName is the export name buildMergedCanonHostModule gives the i-th
+// canon func packed into a group's shared host module. Stable within a build so
+// the passthrough shim can import each func by name.
+func canonExportName(i int) string { return fmt.Sprintf("f%d", i) }
+
+// buildMergedCanonHostModule instantiates ONE Go host module named privateName
+// exporting every def in defs (func i under canonExportName(i) = "f<i>"),
+// instead of a separate module per canon func. All canon funcs of one inline-
+// export group share a module this way, cutting the per-canon builder + compile
+// + instantiate + sys.Context down to one per group.
+func buildMergedCanonHostModule(ctx context.Context, r wazy.Runtime, privateName string, defs []hostFuncDef) (api.Module, error) {
+	b := r.NewHostModuleBuilder(privateName)
+	for i, def := range defs {
+		b = b.NewFunctionBuilder().WithGoModuleFunction(def.fn, def.params, def.results).Export(canonExportName(i))
+	}
+	hostMod, err := b.Instantiate(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("instantiate private host func module %q (%d canon func(s)): %w", privateName, len(defs), err)
+	}
+	return hostMod, nil
+}
+
+// buildCanonHostModule builds a single-func private host module for one canon,
+// exporting it as "f" (the isolated-canon shape the canonMods path and tests
+// use). The graph's inline-export loop instead uses computeCanonHostFunc +
+// buildMergedCanonHostModule to pack a whole group's canon funcs into one module.
+func buildCanonHostModule(
+	ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, resources *handleTable,
+	canon binary.Canon, neededTypes map[string]map[string]coreFuncSig, groupName, entryName, privateName string,
+	coreMemTarget func(int) (api.Module, error), coreFuncTarget func(int) (api.Module, string, error),
+) (mod api.Module, exportName string, params, results []api.ValueType, wasiCall string, err error) {
+	def, wasiCall, err := computeCanonHostFunc(ctx, r, comp, cfg, resources, canon, neededTypes, groupName, entryName, coreMemTarget, coreFuncTarget)
+	if err != nil {
+		return nil, "", nil, nil, "", err
+	}
 	b := r.NewHostModuleBuilder(privateName)
 	b = b.NewFunctionBuilder().WithGoModuleFunction(def.fn, def.params, def.results).Export("f")
-	hostMod, berr := b.Instantiate(ctx)
-	if berr != nil {
-		return nil, "", nil, nil, "", fmt.Errorf("instantiate private host func module %q: %w", privateName, berr)
+	hostMod, err := b.Instantiate(ctx)
+	if err != nil {
+		return nil, "", nil, nil, "", fmt.Errorf("instantiate private host func module %q: %w", privateName, err)
 	}
 	return hostMod, "f", def.params, def.results, wasiCall, nil
 }
