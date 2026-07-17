@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"os"
 	"reflect"
 	"strconv"
 	"testing"
@@ -71,7 +70,7 @@ func (v flatOracleCoreValue) toCoreValue() CoreValue {
 
 func loadFlatOracleGolden(t *testing.T) []flatOracleGoldenEntry {
 	t.Helper()
-	data, err := os.ReadFile("testdata/oracle_flat_golden.json")
+	data, err := oracleTestdata.ReadFile("testdata/oracle_flat_golden.json")
 	if err != nil {
 		t.Fatalf("failed to load oracle_flat_golden.json: %v", err)
 	}
@@ -97,7 +96,7 @@ type flatOracleBattery struct {
 
 func loadFlatOracleBattery(t *testing.T) flatOracleBattery {
 	t.Helper()
-	data, err := os.ReadFile("testdata/oracle_flat.json")
+	data, err := oracleTestdata.ReadFile("testdata/oracle_flat.json")
 	if err != nil {
 		t.Fatalf("failed to load oracle_flat.json: %v", err)
 	}

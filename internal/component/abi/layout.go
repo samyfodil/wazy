@@ -110,7 +110,7 @@ func Size(t binary.TypeDesc, resolve Resolver) (uint32, error) {
 // DiscriminantType returns the core type used to encode a variant discriminant.
 // This mirrors the canonical ABI discriminant_type() function.
 func DiscriminantType(numCases int) string {
-	if numCases <= 0 || numCases > math.MaxUint32 {
+	if numCases <= 0 || uint64(numCases) > math.MaxUint32 {
 		return "" // invalid
 	}
 	// Compute ceil(log2(numCases) / 8)

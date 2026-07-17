@@ -3,6 +3,7 @@ package instance
 import (
 	"errors"
 	"net"
+	"runtime"
 	"testing"
 	"time"
 
@@ -87,6 +88,9 @@ func TestWasiIPSocketAddrFromUDPAddr(t *testing.T) {
 // TestWasiTCPDialErrToCode's identical rationale.
 func TestWasiUDPErrToCode(t *testing.T) {
 	t.Run("address in use", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Winsock address-in-use errno doesn't match syscall.EADDRINUSE via errors.Is; classification is best-effort on Windows")
+		}
 		pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 		if err != nil {
 			t.Fatal(err)

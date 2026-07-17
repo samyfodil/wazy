@@ -20,7 +20,6 @@ package abi
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"testing"
 
 	"github.com/samyfodil/wazy/internal/component/binary"
@@ -264,7 +263,7 @@ func buildFuncDesc(raw json.RawMessage, nameToIndex map[string]uint32) (binary.F
 // ------- The oracle test itself -------
 
 func TestOracleAgainstReference(t *testing.T) {
-	typesData, err := os.ReadFile("testdata/oracle_types.json")
+	typesData, err := oracleTestdata.ReadFile("testdata/oracle_types.json")
 	if err != nil {
 		t.Fatalf("reading oracle_types.json: %v", err)
 	}
@@ -276,7 +275,7 @@ func TestOracleAgainstReference(t *testing.T) {
 		t.Fatal("oracle_types.json battery is empty")
 	}
 
-	goldenData, err := os.ReadFile("testdata/oracle_golden.json")
+	goldenData, err := oracleTestdata.ReadFile("testdata/oracle_golden.json")
 	if err != nil {
 		t.Fatalf("reading oracle_golden.json: %v", err)
 	}

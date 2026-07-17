@@ -19,7 +19,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"os"
 	"testing"
 
 	bintype "github.com/samyfodil/wazy/internal/component/binary"
@@ -337,12 +336,12 @@ func jsonToPrimitive(jsonVal any, prim string) (Value, error) {
 }
 
 func TestValuesOracleRoundTrip(t *testing.T) {
-	typesData, err := os.ReadFile("testdata/oracle_values.json")
+	typesData, err := oracleTestdata.ReadFile("testdata/oracle_values.json")
 	if err != nil {
 		t.Fatalf("reading oracle_values.json: %v", err)
 	}
 
-	goldenData, err := os.ReadFile("testdata/oracle_values_golden.json")
+	goldenData, err := oracleTestdata.ReadFile("testdata/oracle_values_golden.json")
 	if err != nil {
 		t.Fatalf("reading oracle_values_golden.json: %v", err)
 	}
