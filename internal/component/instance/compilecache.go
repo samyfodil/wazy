@@ -79,6 +79,23 @@ type CompileCache struct {
 	// component func index.
 	abiMu sync.Mutex
 	byABI map[*binary.Component]map[uint32]*boundExportABI
+
+	// planMu guards byPlan -- the graph import-discovery result (decoded import
+	// signatures + per-core-module rewritten bytes), keyed by the shared
+	// *binary.Component pointer. Pure over the immutable component, so it is
+	// computed once and reused across instantiations (see graphPlanFor).
+	planMu sync.Mutex
+	byPlan map[*binary.Component]*graphPlan
+}
+
+// graphPlan is the cached, per-component output of the graph import-discovery
+// pass: the core-level import signatures every lowered import needs, plus each
+// embedded core module's bytes after the empty-import-name rewrite (identical
+// every instantiation, so the main instantiation loop reuses them instead of
+// re-slicing and re-rewriting). Immutable after graphPlanFor stores it.
+type graphPlan struct {
+	neededTypes map[string]map[string]coreFuncSig
+	rewritten   [][]byte // indexed by core module index; ready to compile/instantiate
 }
 
 // NewCompileCache returns an empty CompileCache ready to pass to
@@ -89,6 +106,7 @@ func NewCompileCache() *CompileCache {
 		byKey:  make(map[string]wazy.CompiledModule),
 		byComp: make(map[string]*binary.Component),
 		byABI:  make(map[*binary.Component]map[uint32]*boundExportABI),
+		byPlan: make(map[*binary.Component]*graphPlan),
 	}
 }
 
@@ -126,6 +144,34 @@ func (c *CompileCache) abiFor(comp *binary.Component, funcIdx uint32, compute fu
 	}
 	m[funcIdx] = a
 	return a
+}
+
+// graphPlanFor returns the cached graphPlan for comp, computing it once on a
+// miss via compute. compute may fail (decode/rewrite of a malformed embedded
+// core module); a failure is returned to the caller and NOT cached (it is
+// deterministic and would recur, but the instantiation fails anyway). Mirrors
+// abiFor's lock/recheck-on-store shape; a miss race computes at most twice and
+// both results are equivalent (compute is pure over the immutable component).
+func (c *CompileCache) graphPlanFor(comp *binary.Component, compute func() (*graphPlan, error)) (*graphPlan, error) {
+	c.planMu.Lock()
+	if p, ok := c.byPlan[comp]; ok {
+		c.planMu.Unlock()
+		return p, nil
+	}
+	c.planMu.Unlock()
+
+	p, err := compute()
+	if err != nil {
+		return nil, err
+	}
+
+	c.planMu.Lock()
+	defer c.planMu.Unlock()
+	if existing, ok := c.byPlan[comp]; ok {
+		return existing, nil // lost a race -- both are equivalent (compute is pure)
+	}
+	c.byPlan[comp] = p
+	return p, nil
 }
 
 // getOrDecode returns the decoded *binary.Component for componentBytes,
@@ -166,10 +212,13 @@ func (c *CompileCache) getOrDecode(componentBytes []byte) (*binary.Component, er
 // getOrCompile returns the CompiledModule for coreBytes, compiling via r on
 // a miss and storing the result for future callers. See CompileCache's doc.
 func (c *CompileCache) getOrCompile(ctx context.Context, r wazy.Runtime, coreBytes []byte) (wazy.CompiledModule, error) {
-	key := string(coreBytes) // copies into the map key; safe even if the caller's coreBytes backing array is reused/mutated later
-
+	// Look up with map[string(coreBytes)] -- the compiler elides the []byte->string
+	// copy for a map index expression, so a cache HIT (the steady state) allocates
+	// nothing. The key is only materialized on the miss/store path below, exactly
+	// as getOrDecode does. (Previously this copied the whole module bytes on every
+	// hit, ~250 KB/op on the real_hello graph.)
 	c.mu.Lock()
-	if cm, ok := c.byKey[key]; ok {
+	if cm, ok := c.byKey[string(coreBytes)]; ok {
 		c.mu.Unlock()
 		return cm, nil
 	}
@@ -180,6 +229,7 @@ func (c *CompileCache) getOrCompile(ctx context.Context, r wazy.Runtime, coreByt
 		return nil, err
 	}
 
+	key := string(coreBytes) // copy into the map key; safe if the caller reuses the backing array
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if existing, ok := c.byKey[key]; ok {

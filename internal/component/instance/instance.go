@@ -351,6 +351,10 @@ type boundExportABI struct {
 	paramErrs       []error
 	paramSteps      []abi.LowerStep // compiled per-param lower plan (see abi.CompileLower)
 
+	paramHasResource []bool           // param i's type contains an own/borrow (pure; applied only on the graph path)
+	paramsSpill      bool             // params flatten beyond MaxFlatParams -> stored to memory as a tuple
+	paramTuple       binary.TupleDesc // the whole-param-list tuple, valid when paramsSpill
+
 	hasResult        bool
 	tooManyResults   int
 	resultType       binary.TypeDesc
@@ -389,6 +393,37 @@ func computeBoundExportABI(fd binary.FuncDesc, resolve abi.Resolver) *boundExpor
 			continue
 		}
 		m.paramSteps[i] = step
+	}
+
+	// paramHasResource[i]: does param i's type contain an own/borrow at any
+	// depth (drives resolveArgHandles at call time)? Pure over (fd, resolve);
+	// finalizeBoundExport applies it only on the graph path.
+	m.paramHasResource = make([]bool, len(m.paramTypes))
+	for i, pt := range m.paramTypes {
+		if pt != nil {
+			m.paramHasResource[i] = typeContainsResource(pt, resolve, 0)
+		}
+	}
+
+	// Whole-parameter-list spill: when the params flatten beyond MaxFlatParams,
+	// FlattenFunc collapsed coreParamsWant to a single i32 pointer, so lowerParams
+	// stores the whole list to memory as a tuple.
+	rawFlat := 0
+	for _, pt := range m.paramTypes {
+		if pt == nil {
+			continue
+		}
+		if fl, err := abi.Flatten(pt, resolve); err == nil {
+			rawFlat += len(fl)
+		}
+	}
+	if rawFlat > abi.MaxFlatParams {
+		m.paramsSpill = true
+		elems := make([]binary.TypeRef, len(fd.Params))
+		for i, p := range fd.Params {
+			elems[i] = p.Type
+		}
+		m.paramTuple = binary.TupleDesc{Elements: elems}
 	}
 
 	resultRefs := funcResultTypeRefs(fd)
@@ -664,37 +699,13 @@ func finalizeBoundExport(be *boundExport, resolve abi.Resolver, abiCache *Compil
 	// A guest export whose param contains a resource handle (at any depth) may
 	// need each GUEST-owned handle converted to its rep at call time -- see
 	// boundExportABI.paramHasResource and resolveArgHandles. comp is nil on the
-	// trivial no-import path, which has no guest-owned resources.
+	// trivial no-import path, which has no guest-owned resources, so the
+	// (cached, pure) paramHasResource is applied only when comp != nil.
 	if comp != nil {
-		be.paramHasResource = make([]bool, len(be.paramTypes))
-		for i, pt := range be.paramTypes {
-			if pt != nil {
-				be.paramHasResource[i] = typeContainsResource(pt, resolve, 0)
-			}
-		}
+		be.paramHasResource = m.paramHasResource
 	}
-
-	// Whole-parameter-list spill: when the params flatten beyond MaxFlatParams,
-	// FlattenFunc collapsed coreParamsWant to a single i32 pointer, so
-	// lowerParams stores the whole list to memory as a tuple (see
-	// boundExportABI.paramsSpill).
-	rawFlat := 0
-	for _, pt := range be.paramTypes {
-		if pt == nil {
-			continue
-		}
-		if fl, err := abi.Flatten(pt, resolve); err == nil {
-			rawFlat += len(fl)
-		}
-	}
-	if rawFlat > abi.MaxFlatParams {
-		be.paramsSpill = true
-		elems := make([]binary.TypeRef, len(be.fd.Params))
-		for i, p := range be.fd.Params {
-			elems[i] = p.Type
-		}
-		be.paramTuple = binary.TupleDesc{Elements: elems}
-	}
+	// Whole-parameter-list spill (see boundExportABI.paramsSpill) -- cached.
+	be.paramsSpill, be.paramTuple = m.paramsSpill, m.paramTuple
 
 	be.resultType, be.resultUsesMemory, be.resultFlatKinds, be.resultErr = m.resultType, m.resultUsesMemory, m.resultFlatKinds, m.resultErr
 	be.resultStep = m.resultStep

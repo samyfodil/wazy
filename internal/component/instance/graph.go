@@ -217,7 +217,28 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		}
 	}
 
-	neededTypes, err := discoverNeededFuncTypes(r, comp, componentBytes, emptyNameTarget)
+	// Import-discovery + the empty-name rewrite are pure over the immutable
+	// component, so cache them per component when a CompileCache is present;
+	// otherwise compute once for this instantiation. Either way the main loop
+	// below reuses rewrittenCore instead of re-slicing/re-rewriting.
+	var neededTypes map[string]map[string]coreFuncSig
+	var rewrittenCore [][]byte
+	var err error
+	if cfg.compileCache != nil {
+		var plan *graphPlan
+		plan, err = cfg.compileCache.graphPlanFor(comp, func() (*graphPlan, error) {
+			nt, rw, derr := discoverNeededFuncTypes(r, comp, componentBytes, emptyNameTarget)
+			if derr != nil {
+				return nil, derr
+			}
+			return &graphPlan{neededTypes: nt, rewritten: rw}, nil
+		})
+		if err == nil {
+			neededTypes, rewrittenCore = plan.neededTypes, plan.rewritten
+		}
+	} else {
+		neededTypes, rewrittenCore, err = discoverNeededFuncTypes(r, comp, componentBytes, emptyNameTarget)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -396,20 +417,12 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			if int(ci.ModuleIdx) >= len(comp.CoreModules) {
 				return fail(fmt.Errorf("component/instance: core instance %d references core module %d, out of range of %d modules", k, ci.ModuleIdx, len(comp.CoreModules)))
 			}
-			coreBytes, err := coreModuleBytes(comp.CoreModules[ci.ModuleIdx], componentBytes)
-			if err != nil {
-				return fail(err)
-			}
-			// Rewrite the empty import module name (the decoder rejects it) to
-			// the STABLE emptyNameTarget, which the resolver maps. Stable => the
-			// rewritten bytes are identical every instantiation, so the compile
-			// cache still hits.
-			if emptyNameTarget != "" {
-				coreBytes, _, err = rewriteEmptyImportModuleName(coreBytes, emptyNameTarget)
-				if err != nil {
-					return fail(fmt.Errorf("component/instance: core instance %d: %w", k, err))
-				}
-			}
+			// rewrittenCore[ci.ModuleIdx] already holds this module's bytes after
+			// coreModuleBytes + the (stable) empty-import-name rewrite, computed
+			// once in discovery above (and cached per component). Reusing it drops
+			// the per-instantiation re-slice + re-rewrite. Stable bytes => the
+			// compile cache still hits.
+			coreBytes := rewrittenCore[ci.ModuleIdx]
 			// WithName("") makes the module anonymous (not registered in the
 			// global name map -- see store_module_list.go's registerModule); its
 			// imports resolve through instCtx's resolver, and other modules
@@ -780,28 +793,34 @@ func moduleKeyForGraph(coreInstanceIdx int, refNames []string, emptyNameTarget s
 // explicit bounds check, also sidesteps buildFunctionDefinitions (only safe
 // after validation, which a decode-only pass skips). The real, single compile
 // -- cache-aware -- still happens in instantiateCoreModuleCacheable.
-func discoverNeededFuncTypes(r wazy.Runtime, comp *binary.Component, componentBytes []byte, emptyNameTarget string) (map[string]map[string]coreFuncSig, error) {
+func discoverNeededFuncTypes(r wazy.Runtime, comp *binary.Component, componentBytes []byte, emptyNameTarget string) (map[string]map[string]coreFuncSig, [][]byte, error) {
 	dec, ok := r.(interface {
 		DecodeModuleNoCompile(bin []byte) (*wasm.Module, error)
 	})
 	if !ok {
-		return nil, fmt.Errorf("component/instance: runtime %T cannot decode core modules for import discovery", r)
+		return nil, nil, fmt.Errorf("component/instance: runtime %T cannot decode core modules for import discovery", r)
 	}
 	out := make(map[string]map[string]coreFuncSig)
+	// rewritten[i] is core module i's bytes after coreModuleBytes + the empty-
+	// import-name rewrite -- the exact bytes the main instantiation loop needs,
+	// captured here (the rewrite already happens for discovery) so the loop
+	// reuses them instead of re-slicing and re-rewriting every instantiation.
+	rewritten := make([][]byte, len(comp.CoreModules))
 	for i, cm := range comp.CoreModules {
 		coreBytes, err := coreModuleBytes(cm, componentBytes)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if emptyNameTarget != "" {
 			coreBytes, _, err = rewriteEmptyImportModuleName(coreBytes, emptyNameTarget)
 			if err != nil {
-				return nil, fmt.Errorf("component/instance: core module %d: %w", i, err)
+				return nil, nil, fmt.Errorf("component/instance: core module %d: %w", i, err)
 			}
 		}
+		rewritten[i] = coreBytes
 		mod, err := dec.DecodeModuleNoCompile(coreBytes)
 		if err != nil {
-			return nil, fmt.Errorf("component/instance: core module %d: discover import types: %w", i, err)
+			return nil, nil, fmt.Errorf("component/instance: core module %d: discover import types: %w", i, err)
 		}
 		for j := range mod.ImportSection {
 			imp := &mod.ImportSection[j]
@@ -809,7 +828,7 @@ func discoverNeededFuncTypes(r wazy.Runtime, comp *binary.Component, componentBy
 				continue
 			}
 			if int(imp.DescFunc) >= len(mod.TypeSection) {
-				return nil, fmt.Errorf("component/instance: core module %d: import %q.%q references type index %d, out of range of the %d-entry type section", i, imp.Module, imp.Name, imp.DescFunc, len(mod.TypeSection))
+				return nil, nil, fmt.Errorf("component/instance: core module %d: import %q.%q references type index %d, out of range of the %d-entry type section", i, imp.Module, imp.Name, imp.DescFunc, len(mod.TypeSection))
 			}
 			ft := &mod.TypeSection[imp.DescFunc]
 			if out[imp.Module] == nil {
@@ -821,7 +840,7 @@ func discoverNeededFuncTypes(r wazy.Runtime, comp *binary.Component, componentBy
 			}
 		}
 	}
-	return out, nil
+	return out, rewritten, nil
 }
 
 // resolveInlineExportItem resolves one CoreInlineExport entry (func, memory,

@@ -587,6 +587,6 @@ func TestDiscoverNeededFuncTypes_BadImportTypeIndex(t *testing.T) {
 	r := wazy.NewRuntime(context.Background())
 	defer r.Close(context.Background())
 
-	_, err := discoverNeededFuncTypes(r, comp, coreBytes, "")
+	_, _, err := discoverNeededFuncTypes(r, comp, coreBytes, "")
 	requireErrContains(t, err, "out of range of the")
 }
