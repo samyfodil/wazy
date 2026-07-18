@@ -51,7 +51,18 @@ type eventTuple struct {
 // read at delivery, not at arming).
 type waitable struct {
 	pendingEvent func() eventTuple
-	wset         *waitableSet
+
+	// pendingSub is the closure-free fast path for the common pending event:
+	// a subtask's own resolution (async_host_import.go's two install sites,
+	// the async-import WAIT hot path). Storing (subtask, index) instead of a
+	// func() eventTuple avoids a per-WAIT heap closure. Mutually exclusive
+	// with pendingEvent by construction (a subtask never arms a stream/future
+	// event on itself, and vice versa); getPendingEvent/hasPendingEvent honor
+	// both. Evaluated at DELIVERY exactly like the thunk it replaces.
+	pendingSub   *subtask
+	pendingSubSi uint32
+
+	wset *waitableSet
 
 	// syncWaiter mirrors Waitable.has_sync_waiter (Phase 3, retiring the
 	// Phase-1/2 "no sync waiters exist" collapse -- docs/component-model-
@@ -74,12 +85,28 @@ type waitableEntry interface {
 // setPendingEvent mirrors Waitable.set_pending_event.
 func (w *waitable) setPendingEvent(ev func() eventTuple) { w.pendingEvent = ev }
 
+// setPendingSubtaskEvent arms the closure-free subtask-resolution event (see
+// pendingSub). st is the subtask carrying this waitable; si its table index.
+func (w *waitable) setPendingSubtaskEvent(st *subtask, si uint32) {
+	w.pendingSub, w.pendingSubSi = st, si
+}
+
 // hasPendingEvent mirrors Waitable.has_pending_event.
-func (w *waitable) hasPendingEvent() bool { return w.pendingEvent != nil }
+func (w *waitable) hasPendingEvent() bool { return w.pendingEvent != nil || w.pendingSub != nil }
 
 // getPendingEvent mirrors Waitable.get_pending_event: take and clear the
-// deferred event, evaluating the thunk now.
+// deferred event, evaluating it now. The closure-free subtask fast path
+// reproduces installSubtaskEvent's exact body (deliver-on-read, then the
+// eventSubtask tuple with the live state).
 func (w *waitable) getPendingEvent() eventTuple {
+	if st := w.pendingSub; st != nil {
+		si := w.pendingSubSi
+		w.pendingSub, w.pendingSubSi = nil, 0
+		if st.resolved() && !st.resolveDelivered() {
+			st.deliverResolve()
+		}
+		return eventTuple{code: eventSubtask, p1: si, p2: uint32(st.state)}
+	}
 	ev := w.pendingEvent
 	w.pendingEvent = nil
 	return ev()

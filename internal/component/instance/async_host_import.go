@@ -135,12 +135,7 @@ func (ac *AsyncCall) ResolveCancelled() {
 // evaluated at DELIVERY (Waitable.getPendingEvent), matching
 // installParkedPendingEventIfNeeded and the reference exactly.
 func installSubtaskEvent(st *subtask, si uint32) {
-	st.setPendingEvent(func() eventTuple {
-		if st.resolved() && !st.resolveDelivered() {
-			st.deliverResolve()
-		}
-		return eventTuple{code: eventSubtask, p1: si, p2: uint32(st.state)}
-	})
+	st.setPendingSubtaskEvent(st, si) // closure-free; body lives in getPendingEvent
 }
 
 // installParkedPendingEventIfNeeded is Resolve/ResolveCancelled's shared
@@ -156,12 +151,7 @@ func (ac *AsyncCall) installParkedPendingEventIfNeeded() {
 		return // the wrapper's epilogue sees st.resolved() and takes the immediate path
 	}
 	st, si := ac.st, ac.subtaski
-	st.setPendingEvent(func() eventTuple {
-		if st.resolved() && !st.resolveDelivered() {
-			st.deliverResolve()
-		}
-		return eventTuple{code: eventSubtask, p1: si, p2: uint32(st.state)}
-	})
+	st.setPendingSubtaskEvent(st, si) // closure-free; body lives in getPendingEvent
 }
 
 // Defer enqueues fn on the instance's deterministic FIFO run queue
