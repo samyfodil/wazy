@@ -139,6 +139,11 @@
 
         ;; (stream.write $tx $bufp 4) will succeed without blocking
         (local.set $bufp (i32.const 16))
+        ;; LOCAL FIX (WebAssembly/component-model#679): the upstream fixture omits this
+        ;; store, so $D writes zero-initialized memory and $C.set's `== 0x89abcdef`
+        ;; assertion (line 62) traps in every conforming impl (the reference included).
+        ;; Mirrors $C.get's own store at line 37. Remove when #679 merges + we re-vendor.
+        (i32.store (local.get $bufp) (i32.const 0x89abcdef))
         (local.set $ret (call $stream.write (local.get $tx) (local.get $bufp) (i32.const 4)))
         (if (i32.ne (i32.const 0x40 (; COMPLETED=0 | (4<<4) ;)) (local.get $ret))
           (then unreachable))
