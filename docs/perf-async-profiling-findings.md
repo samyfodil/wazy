@@ -13,7 +13,12 @@ benchmark-harness closures, not runtime → ~9 runtime).
 ### STATUS (perf/component-model-async)
 - **Tranche 1 DONE (8f80319):** FirstLight 4→1, AwaitImport 11→8. co-alloc frame + method-value + result buffer.
 - **Tranche 1.5 DONE (0c1f679):** closure-free subtask pending-event. AwaitImport 8→7.
-- **Tranche 2 DEFERRED (measure-first):** pooling below. Its payoff is latency/GC-pressure, NOT
+- **S1–S3 DONE (d6c5384):** applyResolve→method, AsyncCall embedded in subtask, onCancel
+  destructured. AwaitImport 7→**5** allocs (2 of the 5 are irremovable benchmark host-fn
+  closures → runtime floor **3**). Session total: FirstLight **4→1**, AwaitImport **11→5**.
+- **S4 / Tranche 2 DEFERRED (measure-first):** callbackFrame + subtask/waitableSet pooling below.
+  Fable confirmed S4 is alloc-NEUTRAL for non-void results (trades an alloc for a 16B copy); its
+  only payoff is latency, unmeasurable under load. Not shipping pooling blind. Its payoff is latency/GC-pressure, NOT
   alloc-count-visible value — verify on a QUIET machine (wall-clock benchstat) before shipping,
   and stress the reset-on-resolve lifecycle under -race (a subtask returned to a pool while a
   parked guestTask still references it = corruption). Do NOT ship blind under load.
