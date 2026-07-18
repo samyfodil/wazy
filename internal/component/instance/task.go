@@ -71,6 +71,16 @@ type task struct {
 	// instead, saving the forwarding closure's allocation on that hot path.
 	onResolve func(vals []abi.Value, cancelled bool)
 	result    []abi.Value
+
+	// syncImplicit marks the implicit Task of a PLAIN SYNC canon lift
+	// (invokeEntered): the reference's Task for a not-opts.async_ lift
+	// (definitions.py:2155-2164). It has no gt/st (blocker() == nil), never
+	// enters the scheduler, and is torn down when invokeEntered returns. Its
+	// ONE semantic difference from a callback task between segments: it may
+	// NEVER block -- blockingTask traps on it (the spec's sync-task-block
+	// trap, "cannot block a synchronous task before returning") instead of
+	// taking the nested-drive arm.
+	syncImplicit bool
 }
 
 // taskBlocker is the mid-call suspension capability (Feature 1,
@@ -283,7 +293,7 @@ func (in *Instance) enterRun(t *task) {
 
 func (in *Instance) leaveRun() {
 	in.exclusiveHeld, in.exclusiveOwner = false, nil
-	in.activeTask = nil
+	in.activeTask = in.syncBase // nil pre-implicit-task: identical to the old `= nil`
 	in.mayEnter = true
 }
 
@@ -296,6 +306,6 @@ func (in *Instance) leaveRun() {
 // reference's wait_until never touches exclusive_thread; only the callback
 // loop releases it around WAIT/YIELD).
 func (in *Instance) suspendRun() {
-	in.activeTask = nil
+	in.activeTask = in.syncBase // nil pre-implicit-task: identical to the old `= nil`
 	in.mayEnter = true
 }

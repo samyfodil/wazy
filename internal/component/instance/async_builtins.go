@@ -64,7 +64,7 @@ func requireActiveTask(in *Instance, builtin string) *task {
 // re-derive it.
 func blockingTask(in *Instance, builtin string) (t *task, blk taskBlocker) {
 	t = in.activeTask
-	if t == nil {
+	if t == nil || t.syncImplicit { // the spec's sync-task-block trap
 		panic(fmt.Errorf("component/instance: %s: cannot block a synchronous task before returning", builtin))
 	}
 	return t, t.blocker()
@@ -166,6 +166,7 @@ func storeEvent(mod api.Module, builtin string, ptr uint32, ev eventTuple) event
 // PENDING_CANCEL task whose own drive predicate below picks the
 // cancellation up at the next scheduler check.
 func waitableSetWaitHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
+	in.syncTaskNeeded = true
 	cancellable := canon.Cancellable
 	fn := api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 		requireMayLeave(in, "waitable-set.wait")
@@ -225,6 +226,7 @@ func waitableSetWaitHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 // if cancellable and a cancellation is deliverable, TASK_CANCELLED is
 // returned immediately, before even checking the set.
 func waitableSetPollHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
+	in.syncTaskNeeded = true
 	cancellable := canon.Cancellable
 	fn := api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 		requireMayLeave(in, "waitable-set.poll")
@@ -323,6 +325,7 @@ func subtaskDropHostFunc(in *Instance) hostFuncDef {
 // a cancellation the host previously delivered to this task's callback as a
 // TASK_CANCELLED event (docs/component-model-async-phase3-design.md §2.1).
 func taskCancelHostFuncGraph(in *Instance) hostFuncDef {
+	in.syncTaskNeeded = true
 	fn := api.GoModuleFunc(func(context.Context, api.Module, []uint64) {
 		t := requireActiveTask(in, "task.cancel") // may_leave + current_task (~2393-2395)
 		// trap_if(not task.opts.async_) (~2396): true for a callback lift
@@ -443,6 +446,7 @@ func subtaskCancelHostFuncGraph(in *Instance, canon binary.Canon) hostFuncDef {
 // resolved at CALL time (in.activeTask), since -- unlike a lift's own core
 // func -- task.return is not statically tied to one export.
 func taskReturnHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, error) {
+	in.syncTaskNeeded = true
 	resolve := in.resolve
 	resultRefs := funcResultTypeRefs(binary.FuncDesc{Results: canon.TaskReturnResult})
 	if len(resultRefs) > 1 {
@@ -474,6 +478,9 @@ func taskReturnHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, err
 
 	fn := api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 		t := requireActiveTask(in, "task.return")
+		if t.syncImplicit { // trap_if(not task.opts.async_), definitions.py ~2383
+			panic(fmt.Errorf("component/instance: task.return: called on a synchronous task"))
+		}
 		if resultType != nil && t.be != nil && !reflect.DeepEqual(resultType, t.be.resultType) {
 			// trap_if(result_type != task.ft.result)
 			panic(fmt.Errorf("component/instance: task.return: result type does not match the active task's declared result type"))
@@ -539,6 +546,7 @@ func contextValType(b byte) (api.ValueType, error) {
 // slot and the core valtype are static (baked into the canon at bind time,
 // not runtime arguments): the core signature is `() -> t`.
 func contextGetHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, error) {
+	in.syncTaskNeeded = true
 	vt, err := contextValType(canon.CoreValType)
 	if err != nil {
 		return hostFuncDef{}, fmt.Errorf("component/instance: context.get: %w", err)
@@ -558,6 +566,7 @@ func contextGetHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, err
 // (CanonKindContextSet, 0x0b) -- canon_context_set, definitions.py ~2347.
 // Core signature is `(v: t) -> ()`.
 func contextSetHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, error) {
+	in.syncTaskNeeded = true
 	vt, err := contextValType(canon.CoreValType)
 	if err != nil {
 		return hostFuncDef{}, fmt.Errorf("component/instance: context.set: %w", err)
@@ -580,6 +589,7 @@ func contextSetHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, err
 // which some vintages use instead, is not decoded -- see decodeCanonOpts
 // and the design doc's §4 point 5 "vintage drift").
 func backpressureIncHostFuncGraph(in *Instance) hostFuncDef {
+	in.syncTaskNeeded = true
 	fn := api.GoModuleFunc(func(context.Context, api.Module, []uint64) {
 		requireActiveTask(in, "backpressure.inc")
 		in.backpressure++
@@ -591,6 +601,7 @@ func backpressureIncHostFuncGraph(in *Instance) hostFuncDef {
 }
 
 func backpressureDecHostFuncGraph(in *Instance) hostFuncDef {
+	in.syncTaskNeeded = true
 	fn := api.GoModuleFunc(func(context.Context, api.Module, []uint64) {
 		requireActiveTask(in, "backpressure.dec")
 		in.backpressure--

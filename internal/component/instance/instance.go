@@ -310,6 +310,26 @@ type Instance struct {
 	// WAITs only) never pay a goroutine.
 	mayBlockSync bool
 
+	// syncTaskNeeded is set at graph-bind time when this instance wires any
+	// canon builtin that resolves the CURRENT TASK at call time (task.return,
+	// task.cancel, context.get/set, backpressure.inc/dec, waitable-set.wait/
+	// poll -- the requireActiveTask/blockingTask family, async_builtins.go).
+	// Only then does invokeEntered install an implicit sync task (the
+	// reference's canon_lift creates a Task for EVERY call,
+	// definitions.py:2144-2202; current_task() always resolves, :315-316).
+	// False for every component with no such canon -- the sync call path
+	// stays byte-identical (no activeTask write, no allocation, concurrent
+	// sync Call stays race-free).
+	syncTaskNeeded bool
+
+	// syncBase is the innermost implicit sync task currently beneath this
+	// instance's call stack (nil when none). leaveRun/suspendRun restore
+	// activeTask to it instead of nil, so an async bracket that runs NESTED
+	// under a sync call (a nested sched.drive resuming one of THIS
+	// instance's parked tasks) cannot strand the sync caller task-less. Always
+	// nil for every pre-implicit-task flow, making the restore a no-op there.
+	syncBase *task
+
 	// poisoned is true once an unhandled trap has ever escaped a call into
 	// this instance (any error surfacing from guest code actually running --
 	// a core `unreachable`, or a canonical-ABI trap_if failing mid-call, from
@@ -1617,6 +1637,22 @@ func wrapUnreachableTrap(err error) error {
 // surface AS be.coreFn.CallWithStack failing, so this narrower rule still
 // covers everything that suite (or the spec) requires here.
 func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportName string, args []abi.Value) ([]abi.Value, error) {
+	if in.syncTaskNeeded {
+		// The reference's canon_lift constructs a Task for EVERY call,
+		// including a not-opts.async_ sync lift (definitions.py:2144-2202);
+		// current_task() always resolves (:315-316). Install/restore around
+		// the whole body (before lowerParams: a guest cabi_realloc invoked
+		// during lowering may legally call context.get) so a nested
+		// guest->guest sync call on this same Instance
+		// (invokeEntered -> delegatingHostImport.fn -> invoke ->
+		// invokeEntered) still resolves the innermost task, and the caller's
+		// task is restored on return -- including through the two poisoning
+		// error returns below, via defer.
+		t := &task{inst: in, be: be, state: taskStarted, syncImplicit: true}
+		prevActive, prevBase := in.activeTask, in.syncBase
+		in.activeTask, in.syncBase = t, t
+		defer func() { in.activeTask, in.syncBase = prevActive, prevBase }()
+	}
 	mem, memAvailable := memoryBytesOf(be.mod)
 	realloc := cachedReallocOf(ctx, be)
 

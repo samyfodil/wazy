@@ -397,6 +397,27 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 			}
 			st.onCancel = onCancel // reference: subtask.on_cancel = callee(...) (~2270)
 
+			// If the CALLER is a plain sync lift (invokeEntered: activeTask nil
+			// or a syncImplicit task) there is no scheduler driver above this
+			// call to resume the callee -- unlike a callback/stackful caller,
+			// whose own invoke frame runs sched.drive/drainReady when it returns
+			// (async_lift.go:95/111/151/163). startAsyncExportTask deliberately
+			// never drives ("whoever eventually drives that shared scheduler
+			// resumes this task", async_lift.go:177), so a callee that parks on
+			// an ALREADY-ready waitable-set.wait (big-interleaving-test's
+			// $Testee.await, reached via this guest<->guest async-lower from
+			// $Driver.run's sync lift) would otherwise sit forever and return a
+			// spurious STARTED instead of RETURNED. Drain to quiescence here for
+			// exactly that driverless-caller case; a real-task caller is left
+			// bit-identical (its driver is above), so no currently-green
+			// guest<->guest suite's scheduling order changes.
+			if t := in.activeTask; t == nil || t.syncImplicit {
+				if err := in.sched.drainReady(); err != nil {
+					in.reapParkedGoroutines()
+					panic(fmt.Errorf("component/instance: async lower %q %q: %w", iface, funcName, err))
+				}
+			}
+
 			if st.resolved() { // immediate path: B ran to EXIT without parking
 				st.deliverResolve()
 				stack[0] = uint64(uint32(st.state)) // RETURNED (CANCELLED_* impossible: nothing could cancel before a handle exists)
