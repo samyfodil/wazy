@@ -390,9 +390,15 @@ func streamCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 				stack[0] = uint64(blockedSentinel) // [BLOCKED]
 				return
 			}
-			// Sync copy: wait_for_pending_event => drive the scheduler
-			// until THIS end has an event.
-			if derr := in.sched.drive(e.hasPendingEvent); derr != nil {
+			// Sync copy: wait_for_pending_event -- split by calling context
+			// (docs/component-model-async-stackful-design.md §4.2): a
+			// stackful caller parks the goroutine (letting the peer's task,
+			// resumable only by the outer driver once our frames yield the
+			// baton, make progress); everyone else keeps the Phase 1-3
+			// nested scheduler drive.
+			if st := activeStackfulTask(in); st != nil {
+				st.block(e.hasPendingEvent, false)
+			} else if derr := in.sched.drive(e.hasPendingEvent); derr != nil {
 				panic(wrapSchedErr(name, derr))
 			}
 		}
@@ -479,7 +485,10 @@ func futureCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 				stack[0] = uint64(blockedSentinel)
 				return
 			}
-			if derr := in.sched.drive(e.hasPendingEvent); derr != nil {
+			// See streamCopyHostFunc's identical split.
+			if st := activeStackfulTask(in); st != nil {
+				st.block(e.hasPendingEvent, false)
+			} else if derr := in.sched.drive(e.hasPendingEvent); derr != nil {
 				panic(wrapSchedErr(name, derr))
 			}
 		}
@@ -606,7 +615,10 @@ func cancelCopyHostFunc(in *Instance, isFuture bool, side endSide, evCode eventC
 					stack[0] = uint64(blockedSentinel)
 					return
 				}
-				if derr := in.sched.drive(hasPending); derr != nil {
+				// See streamCopyHostFunc's identical split.
+				if st := activeStackfulTask(in); st != nil {
+					st.block(hasPending, false)
+				} else if derr := in.sched.drive(hasPending); derr != nil {
 					panic(wrapSchedErr(name, derr))
 				}
 			}

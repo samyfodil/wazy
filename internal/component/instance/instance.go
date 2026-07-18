@@ -248,6 +248,19 @@ type Instance struct {
 	// invokeAsyncCallback's callback loop for the set/clear sites.
 	exclusiveHeld bool
 
+	// exclusiveOwner is WHICH task holds exclusiveHeld -- nil iff
+	// !exclusiveHeld (docs/component-model-async-stackful-design.md §5).
+	// A pure-callback composition never observes it (exclusiveOwner is
+	// always either nil or the one running task, so every existing
+	// "!exclusiveHeld" conjunct evaluates identically whether or not it
+	// also checks ownership); it becomes load-bearing only once a stackful
+	// task HOLDS its own exclusive across its own suspension (unlike the
+	// callback loop, which releases it around every WAIT/YIELD) -- a
+	// parked callback task in the SAME instance must still treat that as
+	// "held by someone else", while the stackful task's own re-entry
+	// attempts must not deadlock against itself.
+	exclusiveOwner *task
+
 	// backpressure mirrors the reference's inst.backpressure -- incremented/
 	// decremented by the backpressure.inc/dec builtins. It survives across
 	// calls (a guest that raises it and returns leaves it raised for the
@@ -316,13 +329,43 @@ type boundExport struct {
 	// finalizeBoundExport falls back to "cabi_realloc".
 	reallocFuncName string
 
+	// home is the *Instance this export's async runtime state (activeTask,
+	// exclusiveHeld, mayEnter, numWaitingToEnter, ...) actually lives on --
+	// set only when this boundExport was reached by re-exporting a NESTED
+	// component instance's export directly through a func alias
+	// (bindFuncExportGraph's isLift==false branch), rather than bound by a
+	// real `canon lift` against the Instance that will eventually dispatch
+	// it. nil in the overwhelmingly common case (an export's home IS
+	// whatever Instance calls invoke() on it), where invoke() uses itself.
+	// Needed because sched is the only per-composition-tree-shared async
+	// field; activeTask/exclusiveHeld/mayEnter/numWaitingToEnter are
+	// per-Instance, so a root component that only wraps and re-exports a
+	// nested component's async export (the async .wast suites' standard
+	// shape: an outer anonymous component instantiating $C/$D and
+	// `(alias export $d "run")`-ing $D's export back out) must dispatch
+	// invokeAsyncCallback/invokeStackful against $D's OWN Instance, not the
+	// root's -- every blocking builtin's closure was bound against $D's
+	// Instance at $D's own instantiation time.
+	home *Instance
+
 	// asyncCallback is true when this export is an async lift with a
 	// callback option (CanonOpt kind 0x06 async + 0x07 callback) -- see
 	// bindFuncExportGraph. invoke() routes such an export to
-	// invokeAsyncCallback instead of the synchronous path. An async lift
-	// WITHOUT a callback (stackful async) is rejected at bind time; there is
-	// no third boundExport shape.
+	// invokeAsyncCallback instead of the synchronous path.
 	asyncCallback bool
+
+	// stackful is true when this export is a STACKFUL lift
+	// (docs/component-model-async-stackful-design.md §9): either an
+	// async-TYPED func's canon lift with no callback option
+	// (stackfulAsyncOpts also true -- the async-no-callback sub-shape,
+	// results via task.return), or a canon lift with NO async option at
+	// all of an async-TYPED func (stackfulAsyncOpts false -- the sync-opts
+	// sub-shape, results lifted from flat core results; this is the shape
+	// every stackful conformance suite exercises). invoke() routes such an
+	// export to invokeStackful instead of the plain synchronous path.
+	// asyncCallback and stackful are mutually exclusive.
+	stackful          bool
+	stackfulAsyncOpts bool
 
 	// callbackFuncName/callbackFn are the async lift's callback option
 	// (CanonOpt kind 0x07) resolved exactly like postReturnFuncName/
@@ -1315,8 +1358,20 @@ func buildInstanceExportIndex(exports map[string]*boundExport) map[string]map[st
 }
 
 func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName string, args []abi.Value) ([]abi.Value, error) {
+	// A boundExport reached by re-exporting a nested instance's export
+	// through a func alias carries its own async home (be.home's doc) --
+	// dispatch the async paths against THAT Instance, not the caller's; the
+	// plain sync path below never touches per-Instance async state, so it's
+	// unaffected either way.
+	target := in
+	if be.home != nil {
+		target = be.home
+	}
 	if be.asyncCallback {
-		return in.invokeAsyncCallback(ctx, be, exportName, args)
+		return target.invokeAsyncCallback(ctx, be, exportName, args)
+	}
+	if be.stackful {
+		return target.invokeStackful(ctx, be, exportName, args)
 	}
 	fd := be.fd
 	if len(args) != len(fd.Params) {
@@ -1613,6 +1668,16 @@ func safeExportedFunction(mod api.Module, name string) (fn api.Function) {
 // order of instantiation). It does not close the Runtime passed to
 // Instantiate, which the caller owns.
 func (in *Instance) Close(ctx context.Context) error {
+	// Reap every parked stackful goroutine in the shared scheduler BEFORE
+	// closing core modules (docs/component-model-async-stackful-design.md
+	// §8): aborting a parked stackful task unwinds guest frames still
+	// inside the engine, which needs the core modules to still be alive.
+	// sched is shared per composition tree, so whichever Close in the tree
+	// runs first reaps all of them; later calls (subInstances' own Close,
+	// below) find nothing left to reap.
+	if in.sched != nil {
+		in.reapStackful()
+	}
 	var firstErr error
 	for i := len(in.closers) - 1; i >= 0; i-- {
 		if err := in.closers[i].Close(ctx); err != nil && firstErr == nil {

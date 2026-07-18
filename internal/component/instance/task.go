@@ -32,11 +32,13 @@ type task struct {
 	be    *boundExport // the async export's binding; task.return validates its result against be's declared result type
 	state taskState
 
-	// gt is this task's guestTask (the parkable state machine driving its
-	// callback loop). Set by startGuestTask/invokeAsyncCallback before the
-	// task is ever entered; never nil for a task this package creates --
-	// every async task has exactly one guestTask (Phase 3, §2.1).
+	// Exactly one of gt/st is non-nil for a task this package creates: gt
+	// for a callback lift (guest_task.go), st for a stackful lift
+	// (stackful_task.go, docs/component-model-async-stackful-design.md §2).
+	// The oracle's hand-built task keeps gt non-nil, so every existing
+	// branch it exercises is unchanged.
 	gt *guestTask
+	st *stackfulTask
 
 	// numBorrows mirrors Task.num_borrows: incremented by
 	// handleTable.NewBorrowScoped for every borrow<T> handle minted, scoped
@@ -156,13 +158,37 @@ func (t *task) cancelUnentered() error { return t.cancelResolve() }
 //     set and it wakes at the drive loop's next check. Parked CALLBACK tasks
 //     (the only shape wit-bindgen/the oracle's deterministic scenarios
 //     drive) resume inline here, matching the reference exactly.
+//
+// The st arms generalize the two above for a stackfulTask
+// (docs/component-model-async-stackful-design.md §7): sparkEntry's landing
+// is identical (cancelUnentered via cancelWake+resumeReady); the sparkBlock
+// arm's readiness conjunct widens from "!exclusiveHeld" to "not held by a
+// DIFFERENT task" (heldByOther) -- the reference's "exclusive_thread not in
+// {None, implicit_thread}" (~535): a stackful task parked while holding ITS
+// OWN exclusive (needs_exclusive, held across its own suspensions -- task.go
+// enterRun/suspendRun's doc) is still cancellable in place; only a
+// DIFFERENT task's ownership blocks the synchronous resume.
 func (t *task) requestCancellation() error {
 	switch t.state {
 	case taskInitial: // parked at entry, on_start never ran (~529-531)
 		t.state = taskCancelDelivered
+		if t.st != nil {
+			t.st.cancelWake = true
+			return t.st.resumeReady() // -> cancelUnentered -> on_resolve(nil,true)
+		}
 		t.gt.cancelWake = true
 		return t.gt.resumeReady() // -> cancelUnentered -> on_resolve(nil,true)
 	case taskStarted:
+		if t.st != nil {
+			heldByOther := t.inst.exclusiveHeld && t.inst.exclusiveOwner != t
+			if t.st.park == sparkBlock && t.st.cancellable && !heldByOther && t.inst.mayEnter {
+				t.state = taskCancelDelivered
+				t.st.cancelWake = true
+				return t.st.resumeReady() // baton -> goroutine with resumeCancelled
+			}
+			t.state = taskPendingCancel
+			return nil
+		}
 		if t.gt.park != parkNone && t.gt.cancellable && !t.inst.exclusiveHeld && t.inst.mayEnter {
 			t.state = taskCancelDelivered
 			// cancelWake forces an unconditional TASK_CANCELLED delivery on
@@ -201,7 +227,7 @@ func (in *Instance) tryEnter(t *task) (entered bool) {
 		return false
 	}
 	in.activeTask = t
-	in.exclusiveHeld = true
+	in.exclusiveHeld, in.exclusiveOwner = true, t
 	return true
 }
 
@@ -214,11 +240,24 @@ func (in *Instance) tryEnter(t *task) (entered bool) {
 func (in *Instance) enterRun(t *task) {
 	in.mayEnter = false
 	in.activeTask = t
-	in.exclusiveHeld = true
+	in.exclusiveHeld, in.exclusiveOwner = true, t
 }
 
 func (in *Instance) leaveRun() {
-	in.exclusiveHeld = false
+	in.exclusiveHeld, in.exclusiveOwner = false, nil
+	in.activeTask = nil
+	in.mayEnter = true
+}
+
+// suspendRun is a STACKFUL park (docs/component-model-async-stackful-
+// design.md §5): guest frames stay live on the parked goroutine, but the
+// task is not RUNNING -- entry gating falls to exclusiveHeld/backpressure
+// (tryEnter parks newcomers), not to a mayEnter trap. Unlike leaveRun,
+// exclusiveHeld/exclusiveOwner are deliberately KEPT: a sync-opts stackful
+// task needs_exclusive() and holds it across its OWN suspensions (the
+// reference's wait_until never touches exclusive_thread; only the callback
+// loop releases it around WAIT/YIELD).
+func (in *Instance) suspendRun() {
 	in.activeTask = nil
 	in.mayEnter = true
 }

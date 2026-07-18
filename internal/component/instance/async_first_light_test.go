@@ -150,18 +150,28 @@ func TestInvalidCallbackCodeAsync(t *testing.T) {
 	requireErrContains(t, err, "invalid callback code")
 }
 
-// TestStackfulAsyncNoCallbackFailsLoud pins the OTHER half of Phase 1b's
-// bind-time routing: an async lift with NO callback option (stackful async,
-// which suspends mid-frame via a fiber/continuation) is out of scope for
-// this milestone and must keep failing loud at bind time -- see
-// bindFuncExportGraph. TestBindFuncExportGraph_AsyncNoCallback covers the
-// same trap against a hand-built binary.Component; this is the real
-// wasm-tools-encoded end-to-end confirmation.
-func TestStackfulAsyncNoCallbackFailsLoud(t *testing.T) {
+// TestStackfulAsyncNoCallbackRuns pins the OTHER half of the stackful lift's
+// bind-time routing (docs/component-model-async-stackful-design.md §9): an
+// async lift with NO callback option (the async-no-callback sub-shape) now
+// binds and routes through invokeStackful instead of failing loud at bind
+// time -- see bindFuncExportGraph. TestBindFuncExportGraph_AsyncNoCallback
+// covers the same binding against a hand-built binary.Component; this is
+// the real wasm-tools-encoded end-to-end confirmation. The fixture predates
+// invokeStackful (authored only to pin the old bind-time rejection) and its
+// core "run" signature doesn't actually match its declared func type's flat
+// params, so the call traps -- proving the export actually reached the
+// stackful path (no more bind-time rejection), not that it succeeds cleanly.
+func TestStackfulAsyncNoCallbackRuns(t *testing.T) {
 	ctx := context.Background()
 	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)
 
-	_, err := Instantiate(ctx, r, stackfulNoCallbackAsyncWasm)
-	requireErrContains(t, err, "stackful async lift (no callback) is not yet supported")
+	inst, err := Instantiate(ctx, r, stackfulNoCallbackAsyncWasm)
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	defer inst.Close(ctx)
+	if _, err := inst.Call(ctx, "run-stackful"); err == nil {
+		t.Fatal("expected an error calling the export (fixture's core signature doesn't match its func type), got nil")
+	}
 }

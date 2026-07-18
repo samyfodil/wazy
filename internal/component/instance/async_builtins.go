@@ -39,6 +39,50 @@ func requireActiveTask(in *Instance, builtin string) *task {
 	return t
 }
 
+// blockingTask classifies the calling context of a builtin that can
+// genuinely suspend (waitable-set.wait, a blocking stream/future copy wait,
+// a synchronous subtask.cancel's wait) --
+// docs/component-model-async-stackful-design.md §4:
+//
+//   - st != nil: a stackful task's guest code -- suspend by parking the
+//     goroutine (st.block).
+//   - st == nil, t != nil: a callback task's guest/callback code on the
+//     driving goroutine -- suspend by NESTED sched.drive (Phase 1-3
+//     behavior, kept as-is: wait-during-callback stays green).
+//   - t == nil: a synchronous context (a core module's instantiation-time
+//     start function, or a plain sync lift of a sync-TYPED func, or a
+//     top-level call to a boundExport this package never wires an
+//     activeTask for) -- the spec's sync-task-block trap.
+//
+// Every call site already calls requireMayLeave separately before reaching
+// here (preserving each builtin's existing may_leave-before-anything-else
+// check order against its own error-path tests), so blockingTask does not
+// re-derive it.
+func blockingTask(in *Instance, builtin string) (t *task, st *stackfulTask) {
+	t = in.activeTask
+	if t == nil {
+		panic(fmt.Errorf("component/instance: %s: cannot block a synchronous task before returning", builtin))
+	}
+	return t, t.st
+}
+
+// activeStackfulTask returns the calling context's *stackfulTask, or nil if
+// there is none -- either because no task is active at all, or an active
+// task is a callback task. Unlike blockingTask, it never traps on a
+// task-less context: stream/future sync copy waits and a synchronous
+// subtask.cancel's wait have never required an active task (only
+// requireMayLeave), so -- unlike waitable-set.wait, which DOES adopt
+// blockingTask's eager "cannot block a synchronous task" trap (dont-
+// block-start's case 1 requires it) -- these sites only add the STACKFUL
+// park arm and otherwise keep their existing task-less-OK nested-drive
+// behavior (docs/component-model-async-stackful-design.md §4.2).
+func activeStackfulTask(in *Instance) *stackfulTask {
+	if t := in.activeTask; t != nil {
+		return t.st
+	}
+	return nil
+}
+
 // requireMayLeave resolves the reference's current_instance() prologue's
 // trap_if(!may_leave), shared by the handle-table async builtins that operate
 // on the instance's table rather than a specific task (waitable-set.*,
@@ -122,25 +166,44 @@ func waitableSetWaitHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 		si := api.DecodeU32(stack[0])
 		ptr := api.DecodeU32(stack[1])
 		ws := requireWaitableSet(in, "waitable-set.wait", si)
-		t := requireActiveTask(in, "waitable-set.wait")
+		t, st := blockingTask(in, "waitable-set.wait")
 
 		pred := func() bool {
 			return ws.hasPendingEvent() || (cancellable && t.cancelDeliverable())
 		}
-		ws.numWaiting++
-		err := in.sched.drive(pred)
-		ws.numWaiting--
-		if err != nil {
-			if errors.Is(err, errAsyncDeadlock) {
-				panic(fmt.Errorf("component/instance: waitable-set.wait: deadlock: waitable-set %d has no pending event and the run queue is empty; an import resolved externally requires CallAsync (not yet implemented)", si))
-			}
-			panic(fmt.Errorf("component/instance: waitable-set.wait: %w", err))
-		}
+
 		var ev eventTuple
-		if cancellable && t.deliverPendingCancel(true) {
-			ev = eventTuple{code: eventTaskCancelled}
+		if st != nil {
+			// Stackful arm (docs/component-model-async-stackful-design.md
+			// §4.1): park the goroutine -- wait_for_event_and (~818). No
+			// deadlock error surfaces HERE; if nothing can ever wake st, it
+			// simply stays parked and the deadlock is detected by whoever
+			// drives the shared scheduler (invokeStackful maps
+			// errAsyncDeadlock to the spec's exact trap text).
+			ws.numWaiting++
+			cancelled := st.block(pred, cancellable)
+			ws.numWaiting--
+			if cancelled || (cancellable && t.deliverPendingCancel(true)) {
+				ev = eventTuple{code: eventTaskCancelled}
+			} else {
+				ev = ws.getPendingEvent()
+			}
 		} else {
-			ev = ws.getPendingEvent()
+			// Callback-task arm: unchanged nested drive (Phase 1-3).
+			ws.numWaiting++
+			err := in.sched.drive(pred)
+			ws.numWaiting--
+			if err != nil {
+				if errors.Is(err, errAsyncDeadlock) {
+					panic(fmt.Errorf("component/instance: waitable-set.wait: deadlock: waitable-set %d has no pending event and the run queue is empty; an import resolved externally requires CallAsync (not yet implemented)", si))
+				}
+				panic(fmt.Errorf("component/instance: waitable-set.wait: %w", err))
+			}
+			if cancellable && t.deliverPendingCancel(true) {
+				ev = eventTuple{code: eventTaskCancelled}
+			} else {
+				ev = ws.getPendingEvent()
+			}
 		}
 		stack[0] = uint64(storeEvent(mod, "waitable-set.wait", ptr, ev))
 	})
@@ -254,10 +317,14 @@ func subtaskDropHostFunc(in *Instance) hostFuncDef {
 func taskCancelHostFuncGraph(in *Instance) hostFuncDef {
 	fn := api.GoModuleFunc(func(context.Context, api.Module, []uint64) {
 		t := requireActiveTask(in, "task.cancel") // may_leave + current_task (~2393-2395)
-		// trap_if(not task.opts.async_) (~2396): every task this package
-		// creates is an async callback lift, so the trap is structurally
-		// unreachable -- asserted here for oracle parity.
-		if t.be != nil && !t.be.asyncCallback {
+		// trap_if(not task.opts.async_) (~2396): true for a callback lift
+		// and the stackful async-no-callback sub-shape (both genuinely
+		// opts.async_); a sync-opts stackful task is NOT opts.async_ (it
+		// calls task.return_ itself and resolves by returning, per
+		// needs_exclusive's doc, docs/component-model-async-stackful-
+		// design.md §7) -- widened from the callback-only oracle-parity
+		// check to also allow the async-no-callback sub-shape.
+		if t.be != nil && !t.be.asyncCallback && !(t.be.stackful && t.be.stackfulAsyncOpts) {
 			panic(fmt.Errorf("component/instance: task.cancel: called on a non-async task"))
 		}
 		if err := t.cancelResolve(); err != nil {
@@ -325,17 +392,25 @@ func subtaskCancelHostFuncGraph(in *Instance, canon binary.Canon) hostFuncDef {
 					stack[0] = blockedSentinel
 					return
 				}
-				// wait_for_pending_event (~776): a synchronous cancel
-				// blocks the scheduler drive until the subtask resolves.
+				// wait_for_pending_event (~776): a synchronous cancel blocks
+				// until the subtask resolves -- split by calling context
+				// (docs/component-model-async-stackful-design.md §4.2): a
+				// stackful caller parks the goroutine; everyone else keeps
+				// the Phase 1-3 nested scheduler drive (activeStackfulTask,
+				// unlike blockingTask, never traps a task-less context --
+				// subtask.cancel has never required an active task).
+				sft := activeStackfulTask(in)
 				st.syncWaiter = true
-				derr := in.sched.drive(st.hasPendingEvent)
-				st.syncWaiter = false
-				if derr != nil {
+				if sft != nil {
+					sft.block(st.hasPendingEvent, false)
+				} else if derr := in.sched.drive(st.hasPendingEvent); derr != nil {
+					st.syncWaiter = false
 					if errors.Is(derr, errAsyncDeadlock) {
 						panic(fmt.Errorf("component/instance: subtask.cancel: deadlock: subtask %d's synchronous cancel is waiting on a subtask that nothing can resolve", i))
 					}
 					panic(fmt.Errorf("component/instance: subtask.cancel: %w", derr))
 				}
+				st.syncWaiter = false
 			}
 		}
 		// Resolved-with-undelivered-event fast path (~2473-2474) falls

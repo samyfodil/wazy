@@ -592,6 +592,35 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 				_ = resources.Unlend(l.tag, l.handle) //nolint:errcheck // best-effort release
 			}
 		}()
+		// A sync canon lower whose callee is an async lift (callback or
+		// stackful) is a potential block (docs/component-model-async-
+		// stackful-design.md §4.3): a composition delegate
+		// (hi.asyncTarget != nil, composition.go's delegatingHostImport)
+		// reached from a core module's instantiation-time start function
+		// must trap BEFORE the callee's core code ever runs -- the
+		// callee's own blockingTask check fires too late (only once its
+		// core code actually reaches a blocking builtin, or not at all if
+		// it never does). Scoped to the instantiation window
+		// (in.sched.instantiating) so host-entry sync invokes of an async
+		// export keep today's drive-and-deadlock-detect behavior; zero
+		// blast radius outside Instantiate.
+		var stackfulCaller *stackfulTask
+		if tgt := hi.asyncTarget; in != nil && tgt != nil && (tgt.be.asyncCallback || tgt.be.stackful) {
+			if in.sched.instantiating && in.activeTask == nil {
+				panic(fmt.Errorf("component/instance: host import %q %q: cannot block a synchronous task before returning", iface, funcName))
+			}
+			// §4.4: when the CALLER is itself a stackful task, route through
+			// startDelegatedFromStackful (parks instead of driving) rather
+			// than hi.fn's nested sched.drive, which would frame-hold the
+			// caller's own continuation beneath the callee's suspension --
+			// async-calls-sync's confirmed livelock. A host-entry sync call
+			// or a callback-caller's own nested drive is unaffected (t.st
+			// nil there) and keeps using hi.fn exactly as before.
+			if t := in.activeTask; t != nil {
+				stackfulCaller = t.st
+			}
+		}
+
 		// Bracket the actual Go call: this is one of requireSchedulable's
 		// (stream_host.go) two "provably on the driving goroutine" cases --
 		// a StreamWriter/StreamReader/FutureWriter/FutureReader call made
@@ -599,7 +628,12 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 		if in != nil {
 			in.inHostCall++
 		}
-		results, err := hi.fn(ctx, args)
+		var results []abi.Value
+		if stackfulCaller != nil {
+			results, err = startDelegatedFromStackful(ctx, stackfulCaller, hi.asyncTarget, args)
+		} else {
+			results, err = hi.fn(ctx, args)
+		}
 		if in != nil {
 			in.inHostCall--
 		}

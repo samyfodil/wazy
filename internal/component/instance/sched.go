@@ -13,25 +13,45 @@ var errAsyncDeadlock = errors.New("async deadlock: no runnable work")
 // (docs/component-model-async-runtime-design.md §0/§1.1,
 // docs/component-model-async-phase3-design.md §0). It is not a full thread
 // scheduler: runq entries are host-side completion thunks (deferred async
-// import resolutions); parked entries are guestTasks suspended mid callback-
-// loop (guest_task.go) waiting on backpressure, a waitable set, or a yield
-// round. Phase 3 shares ONE *sched per composition tree (Instance.sched's
-// doc) so a guest<->guest async lower's WAIT drive on the caller side can
-// resume the callee's parked task.
+// import resolutions); parked entries are tasks suspended mid callback-loop
+// (guest_task.go) or mid stackful-lift core call (stackful_task.go) waiting
+// on backpressure, a waitable set, or a yield round. Phase 3 shares ONE
+// *sched per composition tree (Instance.sched's doc) so a guest<->guest
+// async lower's WAIT drive on the caller side can resume the callee's
+// parked task.
 type sched struct {
 	runq []schedThunk
 
-	// pumping is true while a thunk from runq -- or a parked guestTask's
+	// pumping is true while a thunk from runq -- or a parked task's
 	// resumeReady -- is executing. AsyncCall.Resolve checks it to tell
 	// "called from inside the scheduler" (legal) apart from "called from an
 	// arbitrary goroutine" (not, without CallAsync).
 	pumping bool
 
-	// parked holds every guestTask currently suspended (guest_task.go),
+	// parked holds every task currently suspended -- a callback lift's
+	// *guestTask (guest_task.go) or a stackful lift's *stackfulTask
+	// (stackful_task.go's docs/component-model-async-stackful-design.md §3),
 	// in registration order -- step resumes the first one whose ready()
 	// predicate holds, which is the deterministic profile's own resume
 	// order (plan §6's random.choice -> first monkeypatch).
-	parked []*guestTask
+	parked []parkedTask
+
+	// instantiating is true while the root Instantiate is running core-module
+	// start functions (docs/component-model-async-stackful-design.md §4.3).
+	// One flag on the SHARED sched (one per composition tree) so every
+	// sub-Instance's builtins/wrappers see it -- a sync-lowered call from a
+	// start function to an async lift must trap eagerly, before the
+	// callee's core code ever runs, only during this window.
+	instantiating bool
+}
+
+// parkedTask is what sched can park/resume: a callback guestTask (its parked
+// state is plain Go fields) or a stackfulTask (its parked state is a live
+// goroutine blocked on its resume channel) --
+// docs/component-model-async-stackful-design.md §3.
+type parkedTask interface {
+	ready() bool
+	resumeReady() error
 }
 
 // schedThunk is one runq entry: exactly one of fe/fv is set. Storing both as
@@ -65,15 +85,15 @@ func (s *sched) enqueue(f func() error) { s.runq = append(s.runq, schedThunk{fe:
 // value, not captured by a new closure.
 func (s *sched) enqueueVoid(f func()) { s.runq = append(s.runq, schedThunk{fv: f}) }
 
-// park registers gt as suspended; step/pumpSnapshot may resume it once its
+// park registers pt as suspended; step/pumpSnapshot may resume it once its
 // ready() predicate holds.
-func (s *sched) park(gt *guestTask) { s.parked = append(s.parked, gt) }
+func (s *sched) park(pt parkedTask) { s.parked = append(s.parked, pt) }
 
-// unpark removes gt from the parked set (by identity). A no-op if gt is not
+// unpark removes pt from the parked set (by identity). A no-op if pt is not
 // currently parked (defensive; every caller unparks exactly once).
-func (s *sched) unpark(gt *guestTask) {
+func (s *sched) unpark(pt parkedTask) {
 	for i, p := range s.parked {
-		if p == gt {
+		if p == pt {
 			s.parked = append(s.parked[:i], s.parked[i+1:]...)
 			return
 		}
@@ -81,7 +101,7 @@ func (s *sched) unpark(gt *guestTask) {
 }
 
 // step pops and runs one runq thunk, or -- if the queue is empty -- resumes
-// the first ready parked guestTask. progressed=false means neither had any
+// the first ready parked task. progressed=false means neither had any
 // work to do.
 func (s *sched) step() (progressed bool, err error) {
 	if len(s.runq) > 0 {
@@ -100,10 +120,10 @@ func (s *sched) step() (progressed bool, err error) {
 		s.pumping = false
 		return true, err
 	}
-	for _, gt := range s.parked {
-		if gt.ready() {
+	for _, pt := range s.parked {
+		if pt.ready() {
 			s.pumping = true
-			err = gt.resumeReady()
+			err = pt.resumeReady()
 			s.pumping = false
 			return true, err
 		}
@@ -141,21 +161,21 @@ func (s *sched) pumpSnapshot() error {
 			return err
 		}
 	}
-	readyNow := make([]*guestTask, 0, len(s.parked))
-	for _, gt := range s.parked {
-		if gt.ready() {
-			readyNow = append(readyNow, gt)
+	readyNow := make([]parkedTask, 0, len(s.parked))
+	for _, pt := range s.parked {
+		if pt.ready() {
+			readyNow = append(readyNow, pt)
 		}
 	}
-	for _, gt := range readyNow {
-		// gt may have been unparked/reparked by an earlier iteration of
+	for _, pt := range readyNow {
+		// pt may have been unparked/reparked by an earlier iteration of
 		// this very loop (e.g. a resumed task's own progress unparks a
 		// third task) -- re-check membership+ready before resuming.
-		if !s.isParked(gt) || !gt.ready() {
+		if !s.isParked(pt) || !pt.ready() {
 			continue
 		}
 		s.pumping = true
-		err := gt.resumeReady()
+		err := pt.resumeReady()
 		s.pumping = false
 		if err != nil {
 			return err
@@ -164,10 +184,10 @@ func (s *sched) pumpSnapshot() error {
 	return nil
 }
 
-// isParked reports whether gt is currently in s.parked.
-func (s *sched) isParked(gt *guestTask) bool {
+// isParked reports whether pt is currently in s.parked.
+func (s *sched) isParked(pt parkedTask) bool {
 	for _, p := range s.parked {
-		if p == gt {
+		if p == pt {
 			return true
 		}
 	}

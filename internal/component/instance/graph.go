@@ -417,6 +417,21 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		resources.registerDtor(tag, resourceDtor(resolve))
 	}
 
+	// sched.instantiating brackets exactly the window in which THIS
+	// component's core modules are instantiated -- including any core wasm
+	// `start` section, which the underlying engine runs synchronously as
+	// part of instantiateCoreModule below (docs/component-model-async-
+	// stackful-design.md §4.3). A sync-lowered call from a start function to
+	// an async lift must trap eagerly, before the callee's core code ever
+	// runs; the flag lives on the shared *sched (one per composition tree)
+	// so a sibling nested component's already-instantiated async export
+	// sees it too. Recursing into a NESTED component's own instantiateGraph
+	// call (instantiateNestedInstances, below) brackets ITS OWN core-
+	// instance loop the same way, so this is correctly scoped per component
+	// even though sched.instantiating is one shared bool: core-instance
+	// loops across the tree run strictly sequentially, never concurrently.
+	sh.instantiating = true
+	defer func() { sh.instantiating = false }()
 	for k, ci := range comp.CoreInstances {
 		// key is BOTH this instance's resolver key and the name a consumer
 		// declares to import it: the raw "with" name, the empty-import key, or
@@ -619,17 +634,35 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 		}
 	}
 
-	// Only the composition shape is handled here: a func alias (Sort 0x01,
-	// export) targeting a LOCAL component instance (one of comp.Instances,
-	// index >= numImported) means that instance's export is re-exported as a
-	// func and must be instantiated. A nested instance referenced only by an
-	// instance export stays with bindInstanceExportGraph (the shim path, which
-	// rejects a genuinely-complex shim). Absent any such alias, do nothing --
-	// preserving the exact prior behavior for every WASI/shim component.
+	// A component instance re-exported directly as an INSTANCE (the WIT-
+	// exports-an-interface shim shape, comp.Exports' ExternType==0x05) is
+	// bindInstanceExportGraph's exclusive responsibility -- it does its own
+	// instantiation/validation there (nested-component-index bounds,
+	// pure-shim shape) and must keep being the ONLY consumer for that shape;
+	// don't preempt it here. Per bindInstanceExportGraph's own arithmetic,
+	// such an export's ExternIndex IS the component-instance index directly
+	// (numImportedInstances + localIdx, matching this func's compInstIdx).
+	exportedAsInstance := make(map[int]bool)
+	for _, exp := range comp.Exports {
+		if exp.ExternType == 0x05 {
+			exportedAsInstance[int(exp.ExternIndex)] = true
+		}
+	}
+
+	// Every OTHER local "instantiate a component" entry (Kind 0x00) must
+	// actually be instantiated, per spec, for its observable instantiation-
+	// time side effects (a core module's `start` section) -- regardless of
+	// whether anything later aliases one of its exports.
+	// dont-block-start.wast's second case is exactly this shape: $D is
+	// instantiated purely so its start function runs (and traps); nothing
+	// ever references $D's exports (it has none). needed therefore
+	// defaults to every local Kind==0x00 instance not already claimed by
+	// bindInstanceExportGraph above.
 	needed := make(map[int]bool)
-	for _, al := range comp.Aliases {
-		if al.Sort == 0x01 && al.TargetKind == 0x00 && int(al.InstanceIdx) >= numImported {
-			needed[int(al.InstanceIdx)] = true
+	for i, inst := range comp.Instances {
+		compInstIdx := numImported + i
+		if inst.Kind == 0x00 && !exportedAsInstance[compInstIdx] {
+			needed[compInstIdx] = true
 		}
 	}
 	if len(needed) == 0 {
@@ -871,6 +904,79 @@ func delegatingHostImport(sub *Instance, exportName string, be *boundExport, pro
 		customFD:      &fd,
 		customResolve: importerResolve,
 	}
+}
+
+// startDelegatedFromStackful is delegatingHostImport's arg/result resource
+// mapping, run for a SYNC-lowered call whose callee is an async lift
+// (callback or stackful) AND whose caller is itself a stackful task
+// (docs/component-model-async-stackful-design.md §4.4): instead of
+// sub.invoke's nested sched.drive (delegatingHostImport's fn, which would
+// frame-hold the caller's own continuation beneath the callee's suspension
+// -- exactly async-calls-sync's confirmed livelock), it starts the callee as
+// an async export task and PARKS the calling stackful goroutine
+// (thread.wait_until(subtask.resolved), ~2273-2275) instead of driving,
+// letting the shared scheduler make progress on whatever else is queued
+// while this task waits. host_import.go's buildHostWrapper calls this in
+// place of hi.fn when it detects this exact shape; everything else
+// (host-entry sync calls, a callback-caller's own nested drive) keeps using
+// hi.fn unchanged.
+func startDelegatedFromStackful(ctx context.Context, st *stackfulTask, tgt *guestAsyncTarget, args []abi.Value) ([]abi.Value, error) {
+	sub, be, exportName := tgt.sub, tgt.be, tgt.exportName
+	paramDescs := be.paramTypes
+	resDescs := resultDescs(be)
+	hasBorrowParam := false
+	for _, d := range paramDescs {
+		if _, ok := d.(binary.BorrowDesc); ok {
+			hasBorrowParam = true
+			break
+		}
+	}
+	var scope *task
+	if hasBorrowParam {
+		scope = &task{inst: sub}
+	}
+	in := make([]abi.Value, len(args))
+	for i, a := range args {
+		var err error
+		if i < len(paramDescs) {
+			a, err = repToProviderHandle(sub, paramDescs[i], a, scope)
+			if err != nil {
+				return nil, err
+			}
+		}
+		in[i] = a
+	}
+
+	var resolved bool
+	var res []abi.Value
+	onStart := func(*task) ([]abi.Value, error) { return in, nil }
+	onResolve := func(vals []abi.Value, cancelled bool) error {
+		// cancelled can't be true here: nothing requests cancellation of an
+		// anonymous sync-lower subtask (there is no handle to cancel it by).
+		res, resolved = vals, true
+		return nil
+	}
+	if _, err := sub.startAsyncExportTask(ctx, be, exportName, onStart, onResolve); err != nil {
+		return nil, err
+	}
+	if !resolved {
+		st.block(func() bool { return resolved }, false) // non-cancellable, per ~2275
+	}
+
+	if scope != nil && scope.numBorrows > 0 {
+		return nil, fmt.Errorf("component/instance: %s: callee returned still holding %d borrowed handle(s)", exportName, scope.numBorrows)
+	}
+	out := make([]abi.Value, len(res))
+	for i, v := range res {
+		if i < len(resDescs) {
+			var err error
+			if v, err = providerHandleToRep(sub, resDescs[i], v); err != nil {
+				return nil, err
+			}
+		}
+		out[i] = v
+	}
+	return out, nil
 }
 
 // moduleKeyForGraph is moduleNameFor's graph-engine counterpart: identical
@@ -1498,6 +1604,20 @@ func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc f
 		// is held in subInstances and closed with this one.
 		if sub, ok := compInstances[int(at.instIdx)]; ok {
 			if be, ok := sub.exports[at.name]; ok {
+				// An async export's runtime state (activeTask, exclusiveHeld,
+				// ...) lives on sub, not on whatever Instance eventually
+				// calls invoke() on this re-exported boundExport -- see
+				// boundExport.home's doc. Copy (never mutate the shared be)
+				// so sub's own exports map -- and any OTHER alias chain
+				// reusing the same be -- is unaffected. Only set home when
+				// it isn't already set: a MULTI-level re-export (sub's own
+				// export was itself bound by re-exporting one of ITS
+				// children) must keep pointing at the deepest true owner.
+				if (be.asyncCallback || be.stackful) && be.home == nil {
+					homeBE := *be
+					homeBE.home = sub
+					return &homeBE, nil
+				}
 				return be, nil
 			}
 			return nil, fmt.Errorf("component/instance: export %q: nested component instance %d has no export %q", diagName, at.instIdx, at.name)
@@ -1544,19 +1664,26 @@ func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc f
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: export %q: %w", diagName, err)
 	}
-	if isAsyncLift && callbackName == "" {
-		// Async without a callback is a STACKFUL lift (the guest suspends
-		// mid-frame via a fiber/continuation): out of scope for this
-		// milestone (docs/component-model-async-runtime-design.md targets
-		// callback lifts only). Async+callback is handled below by routing
-		// through invokeAsyncCallback instead.
-		return nil, fmt.Errorf("component/instance: export %q: stackful async lift (no callback) is not yet supported", diagName)
-	}
 
 	be := &boundExport{mod: mod, funcName: name, fd: fd, postReturnFuncName: postReturnName, reallocFuncName: reallocName}
-	if isAsyncLift {
+	switch {
+	case isAsyncLift && callbackName != "":
 		be.asyncCallback = true
 		be.callbackFuncName = callbackName
+	case isAsyncLift && callbackName == "":
+		// Async without a callback is the STACKFUL lift's async-no-callback
+		// sub-shape (docs/component-model-async-stackful-design.md §0/§9):
+		// the core func returns nothing, and results flow through the
+		// task.return builtin -- routed through invokeStackful/
+		// startStackfulExportTask instead of the plain sync path.
+		be.stackful, be.stackfulAsyncOpts = true, true
+	case !isAsyncLift && fd.Async:
+		// A sync (no `async` canon opt) lift of an async-TYPED func is the
+		// STACKFUL lift's sync-opts sub-shape: results are lifted straight
+		// from the flat core results and the runtime calls task.return_
+		// itself (~2158-2159) -- every stackful conformance suite exercises
+		// this shape.
+		be.stackful = true
 	}
 	finalizeBoundExport(be, resolve, abiCache, comp, funcIdx)
 	return be, nil

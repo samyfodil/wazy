@@ -525,16 +525,30 @@ func TestBindFuncExportGraph_CoreFuncTargetError(t *testing.T) {
 	requireErrContains(t, err, "boom")
 }
 
+// TestBindFuncExportGraph_AsyncNoCallback pins the async-no-callback
+// STACKFUL sub-shape's binding (docs/component-model-async-stackful-
+// design.md §9): a canon lift with the async opt but no callback opt is
+// no longer rejected -- it binds be.stackful/be.stackfulAsyncOpts instead,
+// routed through invokeStackful.
 func TestBindFuncExportGraph_AsyncNoCallback(t *testing.T) {
+	_, mod := memModule(t)
 	fd := binary.FuncDesc{}
 	comp := &binary.Component{
 		Types:  []binary.Type{{Descriptor: fd}},
 		Canons: []binary.Canon{{Kind: 0x00, TypeIdx: 0, CoreFuncIdx: 0, Opts: []binary.CanonOpt{{Kind: 0x06}}}}, // async, no callback opt
 	}
 	componentFunc := func(uint32) (bool, int, aliasTarget, error) { return true, 0, aliasTarget{}, nil }
-	coreFuncTarget := func(int) (api.Module, string, error) { return nil, "main", nil }
-	_, err := bindFuncExportGraph(comp, 0, componentFunc, coreFuncTarget, nil, "x", nil, nil)
-	requireErrContains(t, err, "stackful async lift (no callback) is not yet supported")
+	coreFuncTarget := func(int) (api.Module, string, error) { return mod, "main", nil }
+	be, err := bindFuncExportGraph(comp, 0, componentFunc, coreFuncTarget, nil, "x", nil, nil)
+	if err != nil {
+		t.Fatalf("bindFuncExportGraph: %v", err)
+	}
+	if !be.stackful || !be.stackfulAsyncOpts {
+		t.Fatalf("be.stackful=%v be.stackfulAsyncOpts=%v, want both true", be.stackful, be.stackfulAsyncOpts)
+	}
+	if be.asyncCallback {
+		t.Fatal("be.asyncCallback should be false for the no-callback sub-shape")
+	}
 }
 
 func TestBindFuncExportGraph_PostReturnError(t *testing.T) {

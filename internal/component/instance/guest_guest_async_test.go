@@ -225,7 +225,7 @@ func TestGuestGuestAsyncLower_CancelAcksViaTaskCancel(t *testing.T) {
 		t.Fatalf("B.activeTask = %v, want nil (B's task resolved)", bInst.activeTask)
 	}
 	for _, p := range bInst.sched.parked {
-		if p.t.inst == bInst {
+		if gt, ok := p.(*guestTask); ok && gt.t.inst == bInst {
 			t.Fatal("B still has a parked guestTask after being cancelled and acking")
 		}
 	}

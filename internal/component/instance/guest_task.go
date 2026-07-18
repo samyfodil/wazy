@@ -67,6 +67,15 @@ type guestTask struct {
 // predicate (docs/component-model-async-phase3-design.md §1.1): whether
 // sched.step may resume this parked task right now.
 func (gt *guestTask) ready() bool {
+	// held mirrors the reference's "exclusive_thread not in {None, self}"
+	// (docs/component-model-async-stackful-design.md §5): exclusiveOwner
+	// distinguishes "this instance's exclusive is free" from "held by a
+	// DIFFERENT task" now that a stackful task can hold its own exclusive
+	// across its own park. Identity-preserving for a pure-callback
+	// composition (exclusiveOwner is always either nil or the one running
+	// task there, so this evaluates exactly like the old bare
+	// !gt.in.exclusiveHeld check).
+	held := gt.in.exclusiveHeld && gt.in.exclusiveOwner != gt.t
 	switch gt.park {
 	case parkEntry:
 		return !gt.in.hasBackpressure()
@@ -74,10 +83,10 @@ func (gt *guestTask) ready() bool {
 		// wait_for_event_and(lambda: not exclusive, ...) -- the conjunct is
 		// load-bearing now (another task of the same instance may hold the
 		// callee's exclusive).
-		return !gt.in.exclusiveHeld &&
+		return !held &&
 			(gt.cancelWake || gt.t.cancelDeliverable() || gt.wset.hasPendingEvent())
 	case parkYield:
-		return !gt.in.exclusiveHeld
+		return !held
 	}
 	return false
 }
