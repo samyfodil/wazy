@@ -1,7 +1,11 @@
-# Proposal: `CallAsync` — host-side non-blocking component calls
+# `CallAsync` — host-side non-blocking component calls
 
-Status: **proposal / not implemented.** Scoping the cost of a non-blocking
-counterpart to `Instance.Call`.
+Status: **implemented (first slice).** A working `Instance.CallAsync` /
+`PendingCall` ships alongside this document; an async export that awaits an
+import completed from another goroutine runs end to end, verified under `-race`
+with the existing async suite (all 31 conformance suites) still green. The
+design below is what was built; the "Implemented" section at the end records the
+exact surface and current limits.
 
 ## Motivation
 
@@ -187,3 +191,53 @@ the critical path and easy to defer.
 Not a research problem — the design is already implied by the existing
 `AsyncCall` / `sched` seams. It's a focused systems change with a sharp,
 testable blast radius.
+
+## Implemented
+
+The first slice landed (`internal/component/instance/callasync.go`, plus small
+edits to `async_host_import.go`, `sched.go`, `instance.go`, and the public
+`component` alias). It followed the plan above with one refinement.
+
+Surface:
+
+```go
+func (in *Instance) CallAsync(ctx, export string, args ...abi.Value) (*PendingCall, error)
+func (p *PendingCall) Done() <-chan struct{}
+func (p *PendingCall) Await(ctx context.Context) ([]abi.Value, error)
+func (p *PendingCall) Cancel(ctx context.Context) error
+```
+
+How hop A actually works: an `Instance` gains an `asyncActive` atomic, an `amu`
+mutex, a `sync.Cond`, and a `mailbox []asyncCompletion`. While a `CallAsync` is
+outstanding, `AsyncCall.Resolve` from an off-driver goroutine appends to the
+mailbox under `amu` (a pure queue op — it touches no scheduler state) and
+signals the cond; the sole driver (`CallAsync`'s initial pump, or `Await`)
+drains and applies completions on its own goroutine via `sched.driveToQuiescence`
+(a non-erroring `drive` that stops at a park instead of raising
+`errAsyncDeadlock`). Single-runnable is preserved exactly: one goroutine ever
+drives; external `Resolve` only enqueues.
+
+The refinement over the sketch: the driver-vs-external discriminator is the
+**per-`AsyncCall` `inCall` flag** (made `atomic.Bool`), not `sched.pumping`.
+Because `inCall` is per-call, a truly-external `Resolve` always reads it false —
+its host invocation has already returned — so a synchronous in-call `Resolve`
+still takes the inline RETURNED fast path while an external one queues, with no
+goroutine-identity check and no race (proven by the immediate + external tests
+both passing under `-race`). This sidesteps the "external reads `pumping` true
+mid-drive" hazard the sketch left open.
+
+The **pay-nothing guarantee** holds: with `asyncActive` false, `Resolve` takes
+its exact previous branch and the synchronous `Call` path is byte-for-byte
+unchanged — no driver goroutine, no lock, no cond. The mailbox/actor machinery
+exists only while a `CallAsync` is live.
+
+Current limits (each a clean follow-up, none load-bearing):
+
+- One outstanding `CallAsync` per `Instance` at a time.
+- The export must be an async (callback) lift; stackful-lift `CallAsync` is not
+  wired yet.
+- `Cancel` is a hard abort (reap + resolve the handle with an error), not a
+  graceful Component Model `task.cancel` delivered to the guest.
+- `runtime.coro` for hop B is **not** used — the channel/cond baton is fine;
+  it remains the optional latency-only swap described above.
+

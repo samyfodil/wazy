@@ -43,6 +43,10 @@ import (
 // also satisfies http.Handler via ServeHTTP.
 type Instance = instance.Instance
 
+// PendingCall is a live CallAsync invocation, suspended awaiting external
+// import completions. See Instance.CallAsync.
+type PendingCall = instance.PendingCall
+
 // Option configures Instantiate. WithWASI and WithCompileCache produce Options.
 type Option = instance.Option
 

@@ -3,6 +3,7 @@ package instance
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/component/abi"
@@ -48,9 +49,14 @@ const maxFlatAsyncParams = 4
 // CallAsync's job, not yet implemented (see the design doc's §2.5 "truly
 // external completion").
 type AsyncCall struct {
-	in       *Instance
-	st       *subtask
-	inCall   bool // true while the AsyncHostFunc invocation is on the stack
+	in *Instance
+	st *subtask
+	// inCall is true while the AsyncHostFunc invocation is on the stack. It is
+	// per-AsyncCall, so a truly-external Resolve (from a goroutine the host
+	// spawned) always reads it false: this call's host invocation has returned
+	// by the time that goroutine fires, whatever else the driver is doing.
+	// atomic so that external read is race-free against the driver's Store.
+	inCall   atomic.Bool
 	resolved bool
 }
 
@@ -68,10 +74,17 @@ type AsyncCall struct {
 //     call time) and installs the SUBTASK pending-event closure, so the
 //     next WAIT driver's predicate check sees it.
 func (ac *AsyncCall) Resolve(results []abi.Value) {
+	if ac.in.asyncActive.Load() && !ac.inCall.Load() {
+		// CallAsync mode, off-driver completion (hop A): hand it to the driver's
+		// mailbox. A synchronous inCall resolve falls through to the inline path
+		// below so it still takes the RETURNED fast path.
+		ac.in.queueExternalCompletion(asyncCompletion{ac: ac, results: results})
+		return
+	}
 	if ac.resolved {
 		panic(fmt.Errorf("component/instance: async import: Resolve called twice"))
 	}
-	if !ac.inCall && !ac.in.sched.pumping {
+	if !ac.inCall.Load() && !ac.in.sched.pumping {
 		// Structural single-threadedness guard, no goroutine-ID hacks: the
 		// only legal Resolve call sites are inside the import call itself,
 		// or inside a scheduler thunk -- both provably on the driving
@@ -112,10 +125,14 @@ func (ac *AsyncCall) OnCancel(fn func()) {
 // without cancellationRequested (the reference asserts a None result
 // implies cancellation_requested).
 func (ac *AsyncCall) ResolveCancelled() {
+	if ac.in.asyncActive.Load() && !ac.inCall.Load() {
+		ac.in.queueExternalCompletion(asyncCompletion{ac: ac, cancelled: true})
+		return
+	}
 	if ac.resolved {
 		panic(fmt.Errorf("component/instance: async import: Resolve/ResolveCancelled called twice"))
 	}
-	if !ac.inCall && !ac.in.sched.pumping {
+	if !ac.inCall.Load() && !ac.in.sched.pumping {
 		panic(fmt.Errorf("component/instance: async import: ResolveCancelled called outside the instance scheduler; external completion requires CallAsync (not yet implemented)"))
 	}
 	if !ac.st.cancellationRequested {
@@ -146,7 +163,7 @@ func installSubtaskEvent(st *subtask, si uint32) {
 // are evaluated at DELIVERY (Waitable.getPendingEvent), matching the
 // reference exactly, not here at resolve time.
 func (ac *AsyncCall) installParkedPendingEventIfNeeded() {
-	if ac.inCall {
+	if ac.inCall.Load() {
 		return // the wrapper's epilogue sees st.resolved() and takes the immediate path
 	}
 	st := ac.st
@@ -470,7 +487,8 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 		st.state = subtaskStarted // on_start complete (args lifted)
 
 		ac := &st.ac
-		ac.in, ac.st, ac.inCall = in, st, true
+		ac.in, ac.st = in, st
+		ac.inCall.Store(true)
 		// Bracket the actual Go call -- see buildHostWrapper's identical
 		// comment (host_import.go): this is what lets a Write/Read/Set/Get
 		// called synchronously from inside an AsyncHostFunc invocation pass
@@ -481,7 +499,7 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 		if ferr != nil {
 			panic(fmt.Errorf("component/instance: async import %q %q: %w", iface, funcName, ferr))
 		}
-		ac.inCall = false
+		ac.inCall.Store(false)
 
 		if st.resolved() {
 			// Immediate fast path (reference: "if subtask.resolved(): ...

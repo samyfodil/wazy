@@ -148,6 +148,27 @@ func (s *sched) drive(pred func() bool) error {
 	return nil
 }
 
+// driveToQuiescence pumps the queue and ready parked tasks until pred holds
+// (returns done=true) or no work remains (done=false: the task is parked
+// awaiting input a future step cannot supply -- for CallAsync, an external
+// import completion). Unlike drive, an empty runq with pred still false is NOT
+// an error here (that "deadlock" is exactly the point where CallAsync hands
+// control back to the host).
+func (s *sched) driveToQuiescence(pred func() bool) (done bool, err error) {
+	for {
+		if pred() {
+			return true, nil
+		}
+		progressed, e := s.step()
+		if e != nil {
+			return false, e
+		}
+		if !progressed {
+			return false, nil
+		}
+	}
+}
+
 // drainReady runs every already-ready parked task (and any thunks their
 // progress enqueues) to quiescence -- the reference Store.tick loop's
 // "keep ticking after the sync caller's own task completes" behavior
