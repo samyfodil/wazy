@@ -551,7 +551,8 @@ func taskReturnHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, err
 				if err != nil {
 					panic(fmt.Errorf("component/instance: task.return: load spilled result: %w", err))
 				}
-				result = []abi.Value{val}
+				t.resultBuf[0] = val
+				result = t.resultBuf[:1]
 			} else {
 				// Pooled (getCoreValueSlice/putCoreValueSlice, instance.go):
 				// coreVals is pure scratch, fully consumed synchronously by
@@ -568,7 +569,8 @@ func taskReturnHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, err
 				if err != nil {
 					panic(fmt.Errorf("component/instance: task.return: lift result: %w", err))
 				}
-				result = []abi.Value{val}
+				t.resultBuf[0] = val
+				result = t.resultBuf[:1]
 			}
 		}
 
