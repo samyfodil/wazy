@@ -10,7 +10,17 @@ guest CallWithStack, no wazy-side time sink) — revisit CPU profiling when the 
 `BenchmarkCallAsyncAwaitImport` (full WAIT path): **11 allocs / 973 B** (2 of the 11 are
 benchmark-harness closures, not runtime → ~9 runtime).
 
-### Tranche 1 (shared per-call, in progress — task #17)
+### STATUS (perf/component-model-async)
+- **Tranche 1 DONE (8f80319):** FirstLight 4→1, AwaitImport 11→8. co-alloc frame + method-value + result buffer.
+- **Tranche 1.5 DONE (0c1f679):** closure-free subtask pending-event. AwaitImport 8→7.
+- **Tranche 2 DEFERRED (measure-first):** pooling below. Its payoff is latency/GC-pressure, NOT
+  alloc-count-visible value — verify on a QUIET machine (wall-clock benchstat) before shipping,
+  and stress the reset-on-resolve lifecycle under -race (a subtask returned to a pool while a
+  parked guestTask still references it = corruption). Do NOT ship blind under load.
+- `applyResolve` closure (async_host_import.go:298) folds into Tranche 2 (store retPtr/memMod on
+  the subtask + a bind-time resolveConfig pointer; drop the per-call closure).
+
+### Tranche 1 (shared per-call — DONE 8f80319)
 - `async_lift.go:84-85` — `&task{}` + `&guestTask{}` always paired → **co-allocate (2→1)**
 - `guest_task.go:239` — `gt.firstRunBody` bound-method value escapes into `runSegment(fn)` → **−1**
 - `async_builtins.go:571` — `[]abi.Value{val}` task.return 1-elem slice → **inline [1]abi.Value (−1)**
