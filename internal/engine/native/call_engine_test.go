@@ -36,6 +36,7 @@ func TestCallEngine_growStack(t *testing.T) {
 		}
 		c := &callEngine{
 			stack:    s,
+			eng:      &engine{}, // growStack now sources the new buffer from the pool
 			stackTop: uintptr(unsafe.Pointer(&s[15])),
 			execCtx: executionContext{
 				// stackGrowRequiredSize is large enough here (rather than
@@ -53,7 +54,12 @@ func TestCallEngine_growStack(t *testing.T) {
 		}
 		newSP, newFp, err := c.growStack()
 		require.NoError(t, err)
-		require.Equal(t, 1000+32*2+16, len(c.stack))
+		// growStack now acquires the new buffer from the shared stack pool
+		// (stack_pool.go) rather than make()-ing it at exactly newLen, so it is
+		// the smallest pool class >= newLen (here class 0 = stackPoolBaseSize) --
+		// the extra headroom is harmless. Assert the invariant (>= newLen), not
+		// an exact length.
+		require.True(t, len(c.stack) >= 1000+32*2+16)
 
 		require.True(t, c.stackTop%16 == 0)
 		require.Equal(t, &c.stack[backend.StackBoundsCheckMarginBytes], c.execCtx.stackBottomPtr)
