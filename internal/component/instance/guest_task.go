@@ -48,7 +48,16 @@ type guestTask struct {
 	cancellable bool         // is the current park a cancellable suspension?
 	cancelWake  bool         // request_cancellation resumed us with Cancelled.TRUE (§2.2)
 
-	onStart func() ([]abi.Value, error) // reference OnStart: produce lifted args (lazily!)
+	// onStart, when non-nil, is the reference OnStart: produce lifted args
+	// (lazily!) -- used by startAsyncExportTask, where args must be lifted
+	// from the CALLER's memory only once the callee actually starts (see the
+	// package doc). nil is the default sink used by invokeAsyncCallback's
+	// plain host-entry call, whose args are already lifted component-level
+	// values by the time invokeAsyncCallback runs (no laziness needed):
+	// firstRun reads them straight from args instead, saving the trivial
+	// forwarding closure's allocation on that hot path.
+	onStart func() ([]abi.Value, error)
+	args    []abi.Value // used when onStart == nil
 	done    bool
 	err     error           // a trap during a scheduler-driven resume, reported to the finisher
 	finish  func(err error) // notifies whoever started us (host entry or async lower)
@@ -99,10 +108,13 @@ func (gt *guestTask) firstRun() error {
 	gt.in.enterRun(gt.t)
 	be, t := gt.be, gt.t
 
-	args, err := gt.onStart()
-	if err != nil {
-		gt.in.leaveRun()
-		return gt.fail(err)
+	args := gt.args
+	if gt.onStart != nil {
+		var err error
+		if args, err = gt.onStart(); err != nil {
+			gt.in.leaveRun()
+			return gt.fail(err)
+		}
 	}
 
 	mem, memAvailable := memoryBytesOf(be.mod)
@@ -197,13 +209,21 @@ func (gt *guestTask) resumeReady() error {
 // body, reparented here (docs/component-model-async-phase3-design.md §1.3).
 func (gt *guestTask) runLoop(ev eventTuple) error {
 	gt.in.enterRun(gt.t)
-	var cbStack [3]uint64
+	// Pooled (getUint64Slice/putUint64Slice, instance.go), not a stack
+	// array: CallWithStack's interface call makes escape analysis treat a
+	// local [3]uint64 as heap-escaping, exactly the allocation invoke's own
+	// coreArgs/stack buffers already avoid this way.
+	cbStackPtr := getUint64Slice(3)
+	cbStack := *cbStackPtr
 	cbStack[0], cbStack[1], cbStack[2] = uint64(ev.code), uint64(ev.p1), uint64(ev.p2)
-	if err := gt.be.callbackFn.CallWithStack(gt.ctx, cbStack[:]); err != nil {
+	if err := gt.be.callbackFn.CallWithStack(gt.ctx, cbStack); err != nil {
+		putUint64Slice(cbStackPtr)
 		gt.in.leaveRun()
 		return gt.fail(fmt.Errorf("component/instance: export %q: callback %q: %w", gt.exportName, gt.be.callbackFuncName, err))
 	}
-	return gt.advance(uint32(cbStack[0]))
+	packed := uint32(cbStack[0])
+	putUint64Slice(cbStackPtr)
+	return gt.advance(packed)
 }
 
 // advance interprets one packed callback-loop result: EXIT finishes the

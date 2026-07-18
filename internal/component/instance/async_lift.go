@@ -71,11 +71,17 @@ func (in *Instance) invokeAsyncCallback(ctx context.Context, be *boundExport, ex
 		return nil, fmt.Errorf("component/instance: export %q: instance is not reenterable", exportName)
 	}
 
+	// t.onResolve/gt.onStart are left nil: task.returnValues/cancelResolve
+	// and guestTask.firstRun both fall back to writing straight into
+	// t.result/t.cancelled and reading gt.args directly (see their docs) --
+	// args is already a lifted component-level value list by the time this
+	// host-entry call runs (no lazy-lift indirection needed), so the
+	// trivial forwarding closures Phase 1/2 built here would only exist to
+	// adapt a shape this call never actually needs.
 	t := &task{inst: in, be: be}
-	t.onResolve = func(vals []abi.Value, cancelled bool) { t.result, t.cancelled = vals, cancelled }
 	gt := &guestTask{
 		t: t, in: in, be: be, ctx: ctx, exportName: exportName,
-		onStart: func() ([]abi.Value, error) { return args, nil },
+		args: args,
 	}
 	t.gt = gt
 

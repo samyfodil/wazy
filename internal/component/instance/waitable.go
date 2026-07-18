@@ -119,6 +119,15 @@ func (w *waitable) dropWaitable() {
 type waitableSet struct {
 	elems []*waitable
 
+	// elemsBuf is inline backing storage for elems' common case (one member
+	// -- a single subtask joined so its WAIT can be awaited): initialized by
+	// waitableSetNewHostFunc as elems[:0], so the first join() writes into
+	// this array instead of triggering append's heap-allocated growth. A
+	// set that ever holds more than one member transparently spills to a
+	// heap-allocated backing array the moment the second element is
+	// appended, same as any slice outgrowing its capacity.
+	elemsBuf [1]*waitable
+
 	// numWaiting mirrors WaitableSet.num_waiting: how many drivers are
 	// currently blocked in wait_for_event_and against this set. Bracketed
 	// (++/--) around every sched.drive call that can observe this set --

@@ -57,7 +57,9 @@ func requireMayLeave(in *Instance, builtin string) {
 func waitableSetNewHostFunc(in *Instance) hostFuncDef {
 	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		requireMayLeave(in, "waitable-set.new")
-		stack[0] = uint64(in.resources.addEntry(&waitableSet{}))
+		ws := &waitableSet{}
+		ws.elems = ws.elemsBuf[:0] // see elemsBuf's doc: avoids join()'s first-append allocation for the common single-member set
+		stack[0] = uint64(in.resources.addEntry(ws))
 	})
 	return hostFuncDef{fn: fn, params: nil, results: []api.ValueType{api.ValueTypeI32}}
 }
@@ -406,11 +408,18 @@ func taskReturnHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, err
 				}
 				result = []abi.Value{val}
 			} else {
-				coreVals := make([]abi.CoreValue, len(flatKinds))
+				// Pooled (getCoreValueSlice/putCoreValueSlice, instance.go):
+				// coreVals is pure scratch, fully consumed synchronously by
+				// LiftFlat below (its doc: "nothing retains it past
+				// liftFlatImpl's return") -- same pattern invoke's own
+				// coreArgs buffer already uses.
+				coreValsPtr := getCoreValueSlice(len(flatKinds))
+				coreVals := *coreValsPtr
 				for i, k := range flatKinds {
 					coreVals[i] = abi.CoreValue{Kind: k, Bits: stack[i]}
 				}
 				val, err := abi.LiftFlat(coreVals, resultType, resolve, mem)
+				putCoreValueSlice(coreValsPtr)
 				if err != nil {
 					panic(fmt.Errorf("component/instance: task.return: lift result: %w", err))
 				}

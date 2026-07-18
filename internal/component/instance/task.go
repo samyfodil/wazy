@@ -59,12 +59,14 @@ type task struct {
 	// the context.get/set builtins -- see async_builtins.go).
 	ctxStorage [2]uint64
 
-	// onResolve receives the result lifted by the task.return builtin (or
-	// nil + cancelled=true from task.cancel). Kept as a closure (not an
-	// inlined result field) so a guest->guest lower or a future CallAsync
-	// can plug in without reshaping task.return -- invokeAsyncCallback sets
-	// this to capture into result; startAsyncExportTask's onResolve bridges
-	// into the caller's subtask instead (async_lift.go).
+	// onResolve, when non-nil, receives the result lifted by the task.return
+	// builtin (or nil + cancelled=true from task.cancel), so a guest->guest
+	// lower or a future CallAsync can plug in without reshaping task.return
+	// -- startAsyncExportTask's onResolve bridges into the caller's subtask
+	// this way (async_lift.go). nil is the default sink used by
+	// invokeAsyncCallback's plain host-entry call (no forwarding needed):
+	// returnValues/cancelResolve write straight into result/cancelled below
+	// instead, saving the forwarding closure's allocation on that hot path.
 	onResolve func(vals []abi.Value, cancelled bool)
 	result    []abi.Value
 }
@@ -82,7 +84,11 @@ func (t *task) returnValues(vals []abi.Value) error {
 	if t.numBorrows > 0 { // trap_if(num_borrows > 0)
 		return fmt.Errorf("task.return: %d borrowed handle(s) still lent to subtasks", t.numBorrows)
 	}
-	t.onResolve(vals, false)
+	if t.onResolve != nil {
+		t.onResolve(vals, false)
+	} else {
+		t.result, t.cancelled = vals, false
+	}
 	t.state = taskResolved
 	return nil
 }
@@ -113,7 +119,11 @@ func (t *task) cancelResolve() error {
 	if t.numBorrows > 0 {
 		return fmt.Errorf("task.cancel: %d borrowed handle(s) still held", t.numBorrows)
 	}
-	t.onResolve(nil, true)
+	if t.onResolve != nil {
+		t.onResolve(nil, true)
+	} else {
+		t.result = nil
+	}
 	t.cancelled = true
 	t.state = taskResolved
 	return nil

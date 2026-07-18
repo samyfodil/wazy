@@ -19,7 +19,7 @@ var errAsyncDeadlock = errors.New("async deadlock: no runnable work")
 // doc) so a guest<->guest async lower's WAIT drive on the caller side can
 // resume the callee's parked task.
 type sched struct {
-	runq []func() error
+	runq []schedThunk
 
 	// pumping is true while a thunk from runq -- or a parked guestTask's
 	// resumeReady -- is executing. AsyncCall.Resolve checks it to tell
@@ -34,8 +34,36 @@ type sched struct {
 	parked []*guestTask
 }
 
+// schedThunk is one runq entry: exactly one of fe/fv is set. Storing both as
+// plain fields (rather than a single func() error) lets AsyncCall.Defer
+// (async_host_import.go) enqueue its func() directly -- fv -- with no
+// wrapping closure; enqueue's generic func() error callers (mostly tests
+// exercising sched's own error-propagation contract) still get fe. A
+// schedThunk value lives inline in runq's backing array, so appending one
+// costs no allocation beyond the slice's own (amortized, see step's reuse of
+// the backing array).
+type schedThunk struct {
+	fe func() error
+	fv func()
+}
+
+func (t schedThunk) run() error {
+	if t.fv != nil {
+		t.fv()
+		return nil
+	}
+	return t.fe()
+}
+
 // enqueue appends a completion thunk to the FIFO run queue.
-func (s *sched) enqueue(f func() error) { s.runq = append(s.runq, f) }
+func (s *sched) enqueue(f func() error) { s.runq = append(s.runq, schedThunk{fe: f}) }
+
+// enqueueVoid appends a completion thunk that never fails -- AsyncCall.Defer's
+// case, and the only production caller. Distinct from enqueue purely to avoid
+// wrapping fn in a func() error adapter closure (a real per-call allocation
+// on the async-import hot path): fn is stored directly in the schedThunk
+// value, not captured by a new closure.
+func (s *sched) enqueueVoid(f func()) { s.runq = append(s.runq, schedThunk{fv: f}) }
 
 // park registers gt as suspended; step/pumpSnapshot may resume it once its
 // ready() predicate holds.
@@ -57,11 +85,18 @@ func (s *sched) unpark(gt *guestTask) {
 // work to do.
 func (s *sched) step() (progressed bool, err error) {
 	if len(s.runq) > 0 {
-		f := s.runq[0]
-		s.runq[0] = nil
-		s.runq = s.runq[1:]
+		th := s.runq[0]
+		// Shift the remaining entries down in place (not s.runq[1:]) so the
+		// backing array's capacity survives the pop: a re-slice-from-front
+		// would advance the slice header past freed capacity, forcing the
+		// next enqueue to grow (reallocate) even though this array has
+		// plenty of room. The queue is typically 0-1 entries deep (one
+		// deferred completion at a time), so the shift is O(1) in practice.
+		n := copy(s.runq, s.runq[1:])
+		s.runq[n] = schedThunk{} // drop the trailing duplicate's func refs
+		s.runq = s.runq[:n]
 		s.pumping = true
-		err = f()
+		err = th.run()
 		s.pumping = false
 		return true, err
 	}

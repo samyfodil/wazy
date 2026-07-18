@@ -169,8 +169,12 @@ func (ac *AsyncCall) installParkedPendingEventIfNeeded() {
 // the blocking wait builtin. This is how an MVP async import defers
 // completion without OS concurrency -- including multi-hop chains (Defer
 // inside Defer) to exercise multiple scheduler-drive rounds.
+//
+// Uses enqueueVoid, not enqueue: fn is stored directly on the runq entry
+// instead of being wrapped in a func() error adapter closure, so a Deferred
+// completion costs exactly fn's own allocation (if any), not two.
 func (ac *AsyncCall) Defer(fn func()) {
-	ac.in.sched.enqueue(func() error { fn(); return nil })
+	ac.in.sched.enqueueVoid(fn)
 }
 
 // AsyncHostFunc starts one async import call (reference: the FuncInst callee
@@ -282,9 +286,19 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 			if herr != nil {
 				return fmt.Errorf("async import %q %q: result: %w", iface, funcName, herr)
 			}
-			realloc := reallocOf(ctx, memMod)
-			if reallocOverride != nil {
-				realloc = reallocOfFunc(ctx, reallocOverride)
+			// Resolving "cabi_realloc" (a module export lookup, allocating on
+			// both the found and not-found paths -- ModuleInstance.getExport)
+			// is only useful when Store might actually grow guest memory for
+			// this result (a string/list); a plain-value result (e.g. u32)
+			// never calls realloc.grow, so skip the lookup entirely then --
+			// resultUsesMem is precomputed at bind time (this func's caller),
+			// so this is a cheap branch, not a re-derivation.
+			var realloc abi.Realloc
+			if resultUsesMem {
+				realloc = reallocOf(ctx, memMod)
+				if reallocOverride != nil {
+					realloc = reallocOfFunc(ctx, reallocOverride)
+				}
 			}
 			if serr := abi.Store(mem, retPtr, resultType, resultVal, resolve, realloc); serr != nil {
 				return fmt.Errorf("async import %q %q: result: store: %w", iface, funcName, serr)
