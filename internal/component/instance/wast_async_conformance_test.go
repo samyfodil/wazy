@@ -262,20 +262,23 @@ func TestAsyncWastConformance(t *testing.T) {
 //     after fixes #4/#5 landed (both are stream/composition-path fixes,
 //     unrelated to sched.drive/guestTask park-resume, and this suite must
 //     stay hard-gated behind a real timeout even to reproduce -- see the
-//     skip's own text). A plausible-but-UNVERIFIED lead for whoever picks
-//     this up: cancel-subtask's newly-root-caused gap above (a no-callback
-//     "stackful" async lift, reached via guest<->guest delegation, has no
-//     correct implementation -- startAsyncExportTask always drives the
-//     callee through guestTask's callback-loop machinery) may be the SAME
-//     underlying mechanism here if async-calls-sync's "blocking-call"/
-//     "sync-func" chain also delegates into a no-callback async export;
-//     that would make this a genuine infinite RETRY of the same
-//     misinterpreted-return/blocked-drive path rather than a one-shot
-//     deadlock trap (i.e. sched.drive keeps finding "progress" in the form
-//     of a callback-loop misinterpretation instead of hitting
-//     errAsyncDeadlock cleanly) -- but this suite's actual wast/module
-//     shape was not inspected this session to confirm it, so treat this as
-//     a lead, not a finding.
+//     skip's own text). Root cause NARROWED (a later session): the earlier
+//     "no-callback stackful lift" lead is DISPROVEN -- async-calls-sync.wast's
+//     lifts (blocking-call/unblock/sync-func) all carry `async (callback ...)`,
+//     so it is not the stackful gap. It is also NOT unbounded recursion: a
+//     temporary re-entry-depth guard on startAsyncExportTask (trap past depth
+//     512) did NOT fire before the 15s timeout, so the Go stack stays bounded
+//     -- confirming a genuine LIVELOCK (sched.drive spins, step() keeps
+//     returning progressed=true, but the awaited condition never converges),
+//     not a deadlock the trap should catch. The distinguishing feature is
+//     CONCURRENCY: the .wast's own header says $AsyncOuter.run "asynchronously
+//     calls sync-func twice CONCURRENTLY", and the two concurrent subtasks +
+//     the blocking-call/unblock handshake form a cycle the single-threaded
+//     FIFO scheduler does not drive to convergence. Fixing it needs the
+//     concurrent-task convergence model (the same deferred CallAsync/parked-
+//     concurrency territory), not a sched.drive tweak -- so it stays a real
+//     bug whose fix is gated behind a deferred feature, hard-pre-skipped so it
+//     can never hang go test ./....
 //   - empty-wait: after the elemSz==0 fix (#1 above), the suite gets
 //     further but still fails. Checked against the actual compiled
 //     $D "run" export (`wasm-tools print empty-wait.0.wasm`): its func
