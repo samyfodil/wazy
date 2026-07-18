@@ -60,11 +60,22 @@ defer inst.Close(ctx)
 _, err = inst.Call(ctx, "wasi:cli/run@0.2.3#run")
 ```
 
-Call an interface export directly with `inst.CallExport("component:adder/calc", "add", uint32(2), uint32(3))`, or serve a `wasi:http/incoming-handler` component straight to `net/http` — `*component.Instance` satisfies `http.Handler`. The API is young and, like the rest of wazy, makes no stability promise. [WASI 0.3][wasi] and async are the next target.
+Call an interface export directly with `inst.CallExport("component:adder/calc", "add", uint32(2), uint32(3))`, or serve a `wasi:http/incoming-handler` component straight to `net/http` — `*component.Instance` satisfies `http.Handler`. The API is young and, like the rest of wazy, makes no stability promise.
+
+## Async — the Component Model async ABI (WASI 0.3)
+
+wazy runs the Component Model's async ABI: components that suspend, await, and resume — the model [WASI 0.3][wasi] is built on. Upstream [wazero][wazero] has none of it, and no other pure-Go runtime does either.
+
+- **Callback and stackful lift** — both async lift shapes. A guest task that returns WAIT/YIELD is driven by a deterministic per-composition scheduler; a stackful task suspends on a goroutine with an unbuffered-channel baton, so exactly one runs at a time — race-free by construction, verified under `-race`.
+- **Streams and futures** — `stream<T>`/`future<T>` with rendezvous copy and per-element `own<R>` resource transfer, synchronous and asynchronous read/write, and cancellation.
+- **Task lifecycle** — subtasks, cancellation, backpressure, context-local storage, and borrow scopes that hold across async calls.
+- **`thread.*`** — a cooperative fiber runtime (`thread.new-indirect`, `yield`, `suspend`, `yield-then-resume`) built on the same goroutine-plus-baton primitive.
+
+It passes **all 31 official Component Model async `.wast` conformance suites** (one carries a fixture fix filed upstream as [component-model#679][pr679]), cross-checked by a differential trace-oracle that byte-compares wazy against the spec reference (`definitions.py`). Goroutines and channels back futures, streams, and threads naturally — the one place Go's substrate is an asset over the hand-written event loops other runtimes need.
 
 ## Moving fast
 
-wazy is an actively developed performance fork, built for the modern Wasm platform upstream does not target — the Component Model and WASI 0.2 today (above), WASI 0.3 and async next.
+wazy is an actively developed performance fork, built for the modern Wasm platform upstream does not target — the Component Model, WASI 0.2, and the async ABI today (above), with the full WASI 0.3 host-interface surface next.
 
 That choice has a cost. wazy makes no API-stability promise. It has already broken compatibility with wazero, including host-function registration, and will do so again when that makes the runtime faster or moves it toward the Component Model.
 
@@ -98,3 +109,4 @@ Apache 2.0. See [LICENSE](LICENSE).
 [wazero]: https://github.com/tetratelabs/wazero
 [cm]: https://component-model.bytecodealliance.org/
 [wasi]: https://wasi.dev/
+[pr679]: https://github.com/WebAssembly/component-model/pull/679

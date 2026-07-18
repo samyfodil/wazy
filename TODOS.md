@@ -1,10 +1,9 @@
 # TODOS
 
-## WASI 0.3 / async component-model follow-on
-- **What:** Add the native async ABI on top of the real WASI 0.2 Component Model runtime: `future<T>`/`stream<T>`, task/subtask lifecycle, a host event loop, and reworked async interfaces (`wasi:io` is deleted in 0.3, folded into the Canonical ABI).
-- **Why:** Would make wazy the only pure-Go runtime that can run async 0.3 components. Go's goroutines+channels back futures/streams more naturally than Wasmtime's Rust event loop — the one place wazy's substrate is an asset.
-- **Context:** ~8–10k LOC on top of the p2 runtime. Reference: Wasmtime + `bytecodealliance/wasip3-prototyping`, and the async section of the component-model `definitions.py`. Zero pure-Go prior art. Highest-variance part is async correctness debugging.
-- **Depends on / blocked by:** p2 CM runtime shipped and solid (done). Also blocked on the 0.3 spec settling — as of 2026-07 Wasmtime still marks its p3 support experimental/unstable. Do NOT start early; spec churn will waste the work.
+## Component Model async ABI — DONE
+- **DONE (the async ABI on top of the WASI 0.2 CM runtime):** callback and stackful lift, `future<T>`/`stream<T>` (rendezvous copy, per-element `own<R>` transfer, sync + async read/write, cancellation), task/subtask lifecycle (cancellation, backpressure, context storage, borrow scopes), a deterministic per-composition scheduler, and a `thread.*` cooperative fiber runtime (`new-indirect`/`yield`/`suspend`/`yield-then-resume`). Goroutines + an unbuffered-channel baton give exactly-one-runnable semantics (race-free, verified under `-race`) — the substrate advantage the plan predicted.
+- **Conformance:** all 31 official Component Model async `.wast` suites pass (0 skip, 0 fail), cross-checked by a differential trace-oracle vs the spec reference (`definitions.py`). One suite (`sync-streams`) carries a fixture fix filed upstream as WebAssembly/component-model#679 — the runtime itself needed no change. Design docs: `docs/component-model-async-*.md`.
+- **Follow-on still open:** the full WASI 0.3 host-interface surface (the reworked `wasi:io`/`wasi:sockets`/`wasi:http` 0.3 worlds folded into the async ABI) once the 0.3 spec settles — Wasmtime still marks its p3 support experimental as of 2026-07. The async ABI substrate is ready for it.
 
 ## Internal nested-component composition — func linking + cross-component resources DONE
 - **DONE (func linking, commit cd793ee):** A component binary that declares
