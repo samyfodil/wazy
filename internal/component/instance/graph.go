@@ -1683,7 +1683,7 @@ func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc f
 		return nil, fmt.Errorf("component/instance: export %q: %w", diagName, err)
 	}
 
-	reallocName, err := resolveReallocFuncGraph(canon, coreFuncTarget, mod)
+	reallocMod, reallocName, err := resolveReallocFuncGraph(canon, coreFuncTarget, mod)
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: export %q: %w", diagName, err)
 	}
@@ -1693,7 +1693,7 @@ func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc f
 		return nil, fmt.Errorf("component/instance: export %q: %w", diagName, err)
 	}
 
-	be := &boundExport{mod: mod, funcName: name, fd: fd, postReturnFuncName: postReturnName, reallocFuncName: reallocName}
+	be := &boundExport{mod: mod, funcName: name, fd: fd, postReturnFuncName: postReturnName, reallocFuncName: reallocName, reallocMod: reallocMod}
 	switch {
 	case isAsyncLift && callbackName != "":
 		be.asyncCallback = true
@@ -1740,25 +1740,38 @@ func resolvePostReturnFuncGraph(canon binary.Canon, coreFuncTarget func(int) (ap
 }
 
 // resolveReallocFuncGraph resolves the canon lift's realloc option (CanonOpt
-// kind 0x04) to its core export name, mirroring resolvePostReturnFuncGraph. It
-// requires the realloc func to live on the same core instance as the lift's
-// own core func (the boundExport lowers params against that one module's
-// memory). Returns "" when the lift declares no realloc option.
-func resolveReallocFuncGraph(canon binary.Canon, coreFuncTarget func(int) (api.Module, string, error), liftMod api.Module) (string, error) {
+// kind 0x04) to its target module and core export name, mirroring
+// resolvePostReturnFuncGraph except that -- unlike post-return/callback --
+// the realloc option's target is legally allowed to live on a DIFFERENT core
+// instance than the lift's own core func: the ABI only requires realloc grow/
+// allocate in the same memory object the lift's params are lowered into
+// (memoryBytesOf(be.mod), which already resolves cross-instance for an
+// IMPORTED memory), not that it be co-located with the core func itself. The
+// `cross-abi-calls` suite's $C puts memory+realloc on a dedicated $Memory
+// core instance and only imports (not re-exports) the memory into $Core,
+// which hosts the lift's own core func -- see
+// docs/component-model-async-final3-fable.md Feature 2.
+//
+// Returns (nil, "", nil) when the lift declares no realloc option (the
+// caller then falls back to be.mod/"cabi_realloc"). Returns (nil, name, nil)
+// -- reallocMod nil -- for the common same-instance case, so
+// finalizeBoundExport's be.mod fallback is exercised unchanged. Only returns
+// a non-nil mod when the option's target genuinely differs from liftMod.
+func resolveReallocFuncGraph(canon binary.Canon, coreFuncTarget func(int) (api.Module, string, error), liftMod api.Module) (api.Module, string, error) {
 	for _, opt := range canon.Opts {
 		if opt.Kind != 0x04 { // realloc
 			continue
 		}
 		mod, name, err := coreFuncTarget(int(opt.Idx))
 		if err != nil {
-			return "", fmt.Errorf("realloc %w", err)
+			return nil, "", fmt.Errorf("realloc %w", err)
 		}
-		if mod != liftMod {
-			return "", fmt.Errorf("realloc core func targets a different core instance than the lift's own core func; cross-instance realloc is not supported")
+		if mod == liftMod {
+			mod = nil // same-instance: keep the be.mod fallback (status quo)
 		}
-		return name, nil
+		return mod, name, nil
 	}
-	return "", nil
+	return nil, "", nil
 }
 
 // resolveCallbackFuncGraph resolves an async lift's callback option

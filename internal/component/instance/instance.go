@@ -380,6 +380,17 @@ type boundExport struct {
 	// finalizeBoundExport falls back to "cabi_realloc".
 	reallocFuncName string
 
+	// reallocMod is the core instance that exports reallocFuncName, when the
+	// canon lift's realloc option targets a DIFFERENT core instance than the
+	// lift's own core func (legal per the ABI: the option is a plain core
+	// func index, not required to co-locate with the lift's core func --
+	// cross-abi-calls.wast's $Memory/$Core split). nil means reallocFuncName
+	// (if any) lives on mod, the common case. The memory itself needs no
+	// twin field: mod reaches the shared memory through its own (imported)
+	// memory index space, and lowering reads bytes via memoryBytesOf(mod) as
+	// today -- see resolveReallocFuncGraph's doc.
+	reallocMod api.Module
+
 	// home is the *Instance this export's async runtime state (activeTask,
 	// exclusiveHeld, mayEnter, numWaitingToEnter, ...) actually lives on --
 	// set only when this boundExport was reached by re-exporting a NESTED
@@ -974,9 +985,13 @@ func finalizeBoundExport(be *boundExport, resolve abi.Resolver, abiCache *Compil
 	}
 	reallocName := be.reallocFuncName
 	if reallocName == "" {
-		reallocName = "cabi_realloc"
+		reallocName = "cabi_realloc" // fallback stays be.mod-only by construction (no opt => no reallocMod)
 	}
-	be.reallocFn = be.mod.ExportedFunction(reallocName)
+	rmod := be.mod
+	if be.reallocMod != nil {
+		rmod = be.reallocMod
+	}
+	be.reallocFn = rmod.ExportedFunction(reallocName)
 	be.reallocCall = coreReallocCall(be.reallocFn)
 	if be.coreFn != nil {
 		be.coreResultCount = len(be.coreFn.Definition().ResultTypes())
