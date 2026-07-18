@@ -44,6 +44,16 @@ func TestInstruction_format_encode(t *testing.T) {
 			wantFormat: "movabsq $8589934592, %r14",
 		},
 		{
+			// C19: a u32-range 64-bit const (here 0x80000000, in [2^31, 2^32) so
+			// it does NOT sign-extend) encodes as the 6-byte `mov r32, imm32`
+			// (REX.B + 0xb8 + imm32, zero-extends to 64 bits), not a 10-byte
+			// movabsq. Format still labels it movabsq (semantic, like the
+			// sign-extend case below).
+			setup:      func(i *instruction) { i.asImm(r14VReg, 0x80000000, true) },
+			want:       "41be00000080",
+			wantFormat: "movabsq $2147483648, %r14",
+		},
+		{
 			setup: func(i *instruction) {
 				v := -126
 				i.asImm(r14VReg, uint64(int64(v)), true)

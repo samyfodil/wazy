@@ -18,8 +18,25 @@ func (i *instruction) encode(c backend.Compiler) (needsLabelResolution bool) {
 		dst := regEncodings[i.op2.reg().RealReg()]
 		con := i.u1
 		if i.b1 { // 64 bit.
-			if lower32willSignExtendTo64(con) {
-				// Sign extend mov(imm32).
+			if con <= 0xffffffff {
+				// C19: the value fits in 32 bits, so `mov r32, imm32` (0xb8),
+				// which zero-extends its result to the full 64-bit register on
+				// x86-64, materializes the identical 64-bit value in 5-6 bytes
+				// -- shorter than both the REX.W sign-extended `mov r/m64, imm32`
+				// (7 bytes, used below for large sign-extending consts like -1)
+				// and `movabsq` (10 bytes). Covers all of [0, 2^32), including the
+				// [2^31, 2^32) range that does NOT sign-extend and previously
+				// forced a 10-byte movabsq. Identical encoding to the 32-bit
+				// (!i.b1) arm below.
+				if dst.rexBit() > 0 {
+					c.EmitByte(rexEncodingDefault | 0x1)
+				}
+				c.EmitByte(0xb8 | dst.encoding())
+				c.Emit4Bytes(uint32(con))
+			} else if lower32willSignExtendTo64(con) {
+				// Sign extend mov(imm32) -- a 64-bit value whose low 32 bits
+				// sign-extend to it (e.g. -1 = 0xffffffffffffffff), so imm32
+				// suffices with REX.W.
 				encodeRegReg(c,
 					legacyPrefixesNone,
 					0xc7, 1,
