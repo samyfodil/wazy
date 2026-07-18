@@ -937,6 +937,36 @@ func decodeCanonSection(buf []byte, offset int, sectionSize uint32) ([]Canon, in
 			offset += int(n)
 			canon.MemIdx = memIdx
 
+		// --- thread.* builtins (decode only -- see CanonKindThreadYield's
+		// doc: no execution support exists; these five are decoded so a
+		// component that merely DECLARES one, or traps before ever calling
+		// it, doesn't fail loud at decode time for no reason). ---
+
+		case CanonKindThreadIndex: // thread.index: no payload
+
+		case CanonKindThreadNewIndirect: // thread.new-indirect: ft:typeidx tbl:core:tableidx
+			ft, n, err := leb128.LoadUint32(buf[offset:])
+			if err != nil {
+				return nil, offset, fmt.Errorf("canon[%d] thread.new-indirect functype index: %w", i, err)
+			}
+			offset += int(n)
+			canon.TypeIdx = ft
+
+			tbl, n2, err := leb128.LoadUint32(buf[offset:])
+			if err != nil {
+				return nil, offset, fmt.Errorf("canon[%d] thread.new-indirect table index: %w", i, err)
+			}
+			offset += int(n2)
+			canon.TableIdx = tbl
+
+		case CanonKindThreadYield, CanonKindThreadSuspend, CanonKindThreadYieldThenResume: // cancel?:bool
+			cancel, off, err := decodeBool(buf, offset)
+			if err != nil {
+				return nil, off, fmt.Errorf("canon[%d] cancel?: %w", i, err)
+			}
+			offset = off
+			canon.Cancellable = cancel
+
 		default:
 			return nil, offset, fmt.Errorf("canon[%d]: async canon kind %#x not yet supported", i, kind)
 		}

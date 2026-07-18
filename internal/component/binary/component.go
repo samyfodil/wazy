@@ -214,12 +214,27 @@ type CanonOpt struct {
 // wasm-tools 1.253 (`wasm-tools dump`) on internal/component/binary/testdata/
 // async/*.wasm -- see decodeCanonSection and canonKindName.
 //
-// Kinds 0x08, 0x0c, and 0x26+ (the thread.* builtins) are not in this list:
-// they are out of scope and fall through decodeCanonSection's default case.
 // 0x07 (resource.drop async) was added in Phase 3 -- see
 // docs/component-model-async-phase3-design.md §4.4; its payload (a single
 // typeidx) is byte-identical to 0x03's, verified against fresh wasm-tools
 // output the same way as every other kind in this table.
+//
+// CanonKindThreadYield/Index/NewIndirect/Suspend/YieldThenResume are the five
+// thread.* builtins actually exercised by the vendored async .wast suites
+// (cancellable, sync-barges-in, trap-if-sync-and-waitable-set, trap-if-
+// block-and-sync); their opcodes and payload grammars are taken from the
+// component-model spec's design/mvp/Binary.md canon-definitions EBNF (the
+// 🧵/🔀 threads-proposal entries), cross-checked against `wasm-tools dump`
+// on those four fixtures. The REMAINING thread.* opcodes (0x28 resume-later,
+// 0x2a/0x2c/0x2d suspend/yield-then-promote, 0x40-0x42 spawn-ref/spawn-
+// indirect/available-parallelism) are deliberately NOT added here: no
+// vendored suite decodes one, so their byte layouts are unverified against
+// a real fixture -- add them (and their decode case) only once a suite that
+// actually needs them shows up. Decoding these five is NOT the same as
+// implementing thread.* execution (no runtime support exists for any of
+// them -- see stream_builtins.go/async_builtins.go's absence of a
+// thread.yield/thread.new-indirect host func); every suite that reaches one
+// at CALL time (not just decode) still traps or hangs on its own, real gap.
 const (
 	CanonKindLift              byte = 0x00
 	CanonKindLower             byte = 0x01
@@ -233,6 +248,7 @@ const (
 	CanonKindTaskReturn               byte = 0x09
 	CanonKindContextGet               byte = 0x0a
 	CanonKindContextSet               byte = 0x0b
+	CanonKindThreadYield              byte = 0x0c
 	CanonKindSubtaskDrop              byte = 0x0d
 	CanonKindStreamNew                byte = 0x0e
 	CanonKindStreamRead               byte = 0x0f
@@ -258,6 +274,10 @@ const (
 	CanonKindWaitableJoin             byte = 0x23
 	CanonKindBackpressureInc          byte = 0x24
 	CanonKindBackpressureDec          byte = 0x25
+	CanonKindThreadIndex              byte = 0x26
+	CanonKindThreadNewIndirect        byte = 0x27
+	CanonKindThreadSuspend            byte = 0x29
+	CanonKindThreadYieldThenResume    byte = 0x2b
 )
 
 // Canon represents a canonical lift/lower binding (section 8).
@@ -277,8 +297,14 @@ type Canon struct {
 	// -write, and future.cancel-read/-write.
 	Async bool
 
-	// Cancellable is waitable-set.wait/poll's cancellable:bool payload.
+	// Cancellable is waitable-set.wait/poll's cancellable:bool payload, and
+	// (decode-only -- see CanonKindThreadYield's doc) thread.yield/thread.
+	// suspend/thread.yield-then-resume's identically-shaped cancel:bool.
 	Cancellable bool
+
+	// TableIdx is thread.new-indirect's tbl:<core:tableidx> payload
+	// (decode-only). TypeIdx doubles as its ft:<typeidx> payload.
+	TableIdx uint32
 
 	// MemIdx is waitable-set.wait/poll's memory index. (error-context.new/
 	// debug-message also take a memory, but via the existing Opts memory
@@ -637,6 +663,16 @@ func canonKindName(k byte) string {
 		return "backpressure.inc"
 	case CanonKindBackpressureDec:
 		return "backpressure.dec"
+	case CanonKindThreadYield:
+		return "thread.yield"
+	case CanonKindThreadIndex:
+		return "thread.index"
+	case CanonKindThreadNewIndirect:
+		return "thread.new-indirect"
+	case CanonKindThreadSuspend:
+		return "thread.suspend"
+	case CanonKindThreadYieldThenResume:
+		return "thread.yield-then-resume"
 	default:
 		return fmt.Sprintf("canon kind %#x", k)
 	}
