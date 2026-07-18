@@ -12,6 +12,10 @@ that upstream wazero does not support:
    Component Model *async* (callback-ABI) export. From the embedder it is called
    exactly like a synchronous export; the async scheduler is driven transparently
    underneath, and the call returns once the task completes.
+4. **A thread** — `thread.wasm` (source: [`testdata/thread.wat`](testdata/thread.wat))
+   spawns a Component Model thread with `thread.new-indirect` and hands control to
+   it with `thread.yield-then-resume`; the worker thread resolves the task. It is
+   still a single blocking `Call` from Go.
 
 Run it:
 
@@ -23,6 +27,7 @@ go run .
 component:adder/calc add(2, 3) = 5
 wasi:cli hello: hello world
 async run-async() = 42
+thread (spawn + resume) = 99
 ```
 
 The `.wasm` files under [`testdata`](testdata) are the same real component

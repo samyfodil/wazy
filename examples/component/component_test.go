@@ -13,5 +13,6 @@ func Test_main(t *testing.T) {
 	require.Equal(t, `component:adder/calc add(2, 3) = 5
 wasi:cli hello: hello world
 async run-async() = 42
+thread (spawn + resume) = 99
 `, stdout)
 }

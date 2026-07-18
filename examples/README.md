@@ -10,7 +10,8 @@ The following example projects can help you practice WebAssembly with wazy:
 * [import-go](import-go) - how to define, import and call a Go-defined function
   from a WebAssembly-defined function.
 * [component](component) - how to run WebAssembly Component Model components,
-  a WASI 0.2 `wasi:cli/command`, and a component that uses the async ABI.
+  a WASI 0.2 `wasi:cli/command`, a component that uses the async ABI, and one
+  that spawns a Component Model thread.
 * [concurrent-instantiation](concurrent-instantiation) - how to instantiate multiple Wasm instances per Goroutine concurrently.
 * [multiple-results](multiple-results) - how to return more than one result
   from WebAssembly or Go-defined functions.
