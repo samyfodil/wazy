@@ -343,9 +343,12 @@ func decodeImportSection(buf []byte, offset int, sectionSize uint32) ([]Import, 
 		}
 		offset = off2
 		imports[i] = Import{Name: name, ExternType: sort}
-		if sort == 0x03 && hasEq { // type import with an `eq N` bound
+		switch {
+		case sort == 0x03 && hasEq: // type import with an `eq N` bound
 			imports[i].TypeEqIndex = eqIdx
 			imports[i].TypeEqBound = true
+		case sort == 0x01 && hasEq: // func import: eqIdx is the func's own type index
+			imports[i].ExternIndex = eqIdx
 		}
 	}
 

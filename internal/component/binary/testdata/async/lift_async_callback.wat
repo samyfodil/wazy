@@ -10,7 +10,7 @@
   (alias core export $i "run" (core func $run))
   (alias core export $i "mem" (core memory $mem))
   (alias core export $i "ra" (core func $ra))
-  (type $ft (func (param "x" u32) (result u32)))
+  (type $ft (func async (param "x" u32) (result u32)))
   (canon lift (core func $run) (memory $mem) (realloc $ra) async (callback $cb) (func $lifted (type $ft)))
   (export "lifted" (func $lifted))
 )

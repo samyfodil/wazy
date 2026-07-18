@@ -177,6 +177,7 @@ func (st *stackfulTask) run() error {
 	if err := be.coreFn.CallWithStack(st.ctx, stack); err != nil {
 		putUint64Slice(stackPtr)
 		in.leaveRun()
+		in.poisoned = true // guest code actually ran and trapped -- see fail's doc
 		return st.fail(fmt.Errorf("component/instance: export %q: call core func %q: %w", st.exportName, be.funcName, err))
 	}
 
@@ -215,6 +216,7 @@ func (st *stackfulTask) run() error {
 		if err := be.postReturnFn.CallWithStack(st.ctx, rawResults); err != nil {
 			putUint64Slice(stackPtr)
 			in.leaveRun()
+			in.poisoned = true // guest code actually ran and trapped -- see fail's doc
 			return st.fail(fmt.Errorf("component/instance: export %q: post-return %q: %w", st.exportName, be.postReturnFuncName, err))
 		}
 	}
@@ -224,6 +226,9 @@ func (st *stackfulTask) run() error {
 	return nil
 }
 
+// fail records a trap. Like guestTask.fail, it does NOT itself poison st.in
+// -- see that doc; only run's be.coreFn.CallWithStack and be.postReturnFn.
+// CallWithStack (guest code that actually ran) set st.in.poisoned = true.
 func (st *stackfulTask) fail(err error) error {
 	st.err = err
 	if st.finish != nil {

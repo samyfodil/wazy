@@ -175,6 +175,22 @@ type Instance struct {
 	// resource canons.
 	resCanon func(uint32) uint32
 
+	// resourceOrigin maps a canonicalized (post-resCanon) local resource tag
+	// this instance IMPORTS to the resourceIdentity of the sub-instance that
+	// ultimately DEFINES it -- populated (only for resources actually
+	// received through a composition instantiate-arg) by
+	// instantiateNestedInstances, regardless of whether this instance itself
+	// re-exports the resource under any name. See originOf and
+	// translateResourceFD's use of it: a provider's resource type index that
+	// isn't among ITS OWN exports (e.g. a component that merely re-uses a
+	// resource it imported from a further sibling, never re-exporting it,
+	// like $D in drop-cross-task-borrow.wast) still needs to be recognized as
+	// "the same resource" as whatever local tag a THIRD sibling imports it
+	// under -- name-matching against exportedResourceDefs alone can't see
+	// that, since the provider's own exports never mention the resource by
+	// name. nil for an instance that imports no resources via composition.
+	resourceOrigin map[uint32]resourceIdentity
+
 	// comp is the decoded component this instance was instantiated from, read by
 	// a parent composition when wiring this instance's exported resources into a
 	// sibling's imports. nil for instances not part of a composition.
@@ -278,6 +294,20 @@ type Instance struct {
 	mayEnter bool
 	mayLeave bool
 
+	// poisoned is true once an unhandled trap has ever escaped a call into
+	// this instance (any error surfacing from guest code actually running --
+	// a core `unreachable`, or a canonical-ABI trap_if failing mid-call, from
+	// EITHER the plain sync invoke() path or an async task's fail() --
+	// permanently blocking every later entry with "cannot enter component
+	// instance", per the spec's Store poisoning invariant. Unlike mayEnter
+	// (which enterRun/leaveRun/suspendRun toggle back and forth as a task
+	// merely runs/parks/resumes), poisoned is sticky: nothing ever resets it
+	// back to false once set -- see invokeEntered's defer,
+	// guestTask.fail/stackfulTask.fail, and every mayEnter check in
+	// async_lift.go, all of which now check poisoned first. Initialized
+	// false; never true for an instance that has never had a call fail.
+	poisoned bool
+
 	// inHostCall counts nested host-import invocations currently on the Go
 	// call stack (bracketed by buildHostWrapper/buildAsyncHostWrapper). Along
 	// with sched.pumping, it is how requireSchedulable (stream_host.go)
@@ -309,6 +339,27 @@ type boundExport struct {
 	mod      api.Module      // exports funcName; its Memory() backs lower/lift
 	funcName string          // core export name to call
 	fd       binary.FuncDesc // component-level func type (lift signature)
+
+	// resolve is the type resolver fd's own TypeRefs were resolved through at
+	// bind time (finalizeBoundExport) -- i.e. the DEFINING component's own
+	// comp.ResolveType, not necessarily whatever Instance ends up dispatching
+	// this export. Every production lower/lift path (paramSteps, resultType,
+	// paramTypes -- all precomputed once by finalizeBoundExport) already
+	// bakes this in and never needs it again at call time; it is carried
+	// here purely so ANY caller that must resolve one of fd's nested TypeRefs
+	// itself (list/record/variant element types, walked lazily) uses the
+	// SAME resolver those precomputed fields were built with, instead of
+	// defaulting to the CALLING Instance's own comp.ResolveType -- wrong the
+	// moment this boundExport was reached via a func alias re-exporting a
+	// SIBLING component's export (bindFuncExportGraph's isLift==false path,
+	// e.g. big-interleaving-test.wast's top-level `(alias export $driver
+	// "run" (func $run))`): $run's fd carries $Driver's OWN internal type
+	// indices (a list<command> param's TypeRef reaches deep into $Driver's
+	// TypeSpace), meaningless against the aliasing component's ($Tester's)
+	// much smaller TypeSpace. See wast_conformance_test.go's wastConvert,
+	// the one place outside finalizeBoundExport that resolves an fd TypeRef
+	// on demand (to turn a spec-test JSON fixture into an abi.Value).
+	resolve abi.Resolver
 
 	// postReturnFuncName is the core export to call, on mod, after lifting
 	// the result -- the canon lift's post-return option (CanonOpt kind
@@ -913,6 +964,7 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 // keys the cache within comp -- see the boundExport doc and CompileCache.abiFor.
 // abiCache/comp are nil for the trivial single-module path (which has no cache).
 func finalizeBoundExport(be *boundExport, resolve abi.Resolver, abiCache *CompileCache, comp *binary.Component, funcIdx uint32) {
+	be.resolve = resolve
 	be.coreFn = be.mod.ExportedFunction(be.funcName)
 	if be.postReturnFuncName != "" {
 		be.postReturnFn = be.mod.ExportedFunction(be.postReturnFuncName)
@@ -979,6 +1031,18 @@ func Instantiate(ctx context.Context, r wazy.Runtime, componentBytes []byte, opt
 	}
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: decode component: %w", err)
+	}
+	// A pure component-level well-formedness check (validate-no-async-abi-
+	// for-sync-type.wast): every canon's `async` option must agree with the
+	// func TYPE it lifts/lowers. Deliberately run BEFORE dispatching to
+	// either instantiation path (which each reject an unregistered/
+	// unsatisfiable import first) -- the spec expects this rejected
+	// regardless of whether any host import is ever provided, e.g. `(import
+	// "f" (func $f)) (canon lower (func $f) async)` with no WithImport("f")
+	// registered at all must still fail with THIS text, not "only instance
+	// imports are supported".
+	if err := validateAsyncCanonOptsAgreeWithTypes(comp); err != nil {
+		return nil, err
 	}
 
 	if needsGraphPath(comp) || needsImportPath(comp) {
@@ -1230,6 +1294,74 @@ func buildCoreFuncIndexSpace(comp *binary.Component) ([]string, error) {
 	return coreFuncIdx, nil
 }
 
+// validateAsyncCanonOptsAgreeWithTypes checks, for every canon lift (kind
+// 0x00) or lower (kind 0x01) in comp, that its `async` CanonOpt (kind 0x06)
+// implies the func type it lifts/lowers is itself declared `async func`
+// (binary.FuncDesc.Async) -- the spec's validate-no-async-abi-for-sync-
+// type.wast requirement, checked here (Instantiate, before either
+// instantiation path runs) since it is a pure structural property of the
+// component, independent of whether any host import is ever satisfied.
+//
+// One-directional: only "async option present, type not async" is rejected.
+// The reverse -- an async-typed func lifted/lowered with NO async option at
+// all (the "stackful" sync-opts shape every stackful conformance suite
+// exercises, e.g. an async-typed export whose canon lift has no async/
+// callback option) -- stays legal and is not touched by this check.
+//
+// A lower's func type is resolvable only when canon.FuncIdx names a
+// top-level func IMPORT (ComponentFuncFromImport) -- a func ALIAS
+// (ComponentFuncFromAlias, e.g. `canon lower (func $sibling "x") async`)
+// targets another component instance's export, whose declared type isn't
+// part of THIS component's own TypeSpace/Imports and so can't be resolved
+// here; no vendored suite exercises an async-mismatched alias lower, so
+// that shape is silently skipped (not rejected, not asserted valid) rather
+// than guessed at.
+func validateAsyncCanonOptsAgreeWithTypes(comp *binary.Component) error {
+	for i, cn := range comp.Canons {
+		if cn.Kind != 0x00 && cn.Kind != 0x01 {
+			continue
+		}
+		isAsync := false
+		for _, opt := range cn.Opts {
+			if opt.Kind == 0x06 {
+				isAsync = true
+				break
+			}
+		}
+		if !isAsync {
+			continue
+		}
+
+		var fd binary.FuncDesc
+		var resolved bool
+		switch cn.Kind {
+		case 0x00: // lift: canon.TypeIdx names the func type directly
+			if td, err := comp.ResolveType(cn.TypeIdx); err == nil {
+				fd, resolved = td.(binary.FuncDesc)
+			}
+		case 0x01: // lower: canon.FuncIdx names a component-func-space entry
+			if int(cn.FuncIdx) >= len(comp.ComponentFuncSpace) {
+				continue
+			}
+			fe := comp.ComponentFuncSpace[cn.FuncIdx]
+			if fe.Kind != binary.ComponentFuncFromImport || int(fe.Import) >= len(comp.Imports) {
+				continue
+			}
+			im := comp.Imports[fe.Import]
+			if im.ExternType != 0x01 { // func
+				continue
+			}
+			if td, err := comp.ResolveType(im.ExternIndex); err == nil {
+				fd, resolved = td.(binary.FuncDesc)
+			}
+		}
+		if resolved && !fd.Async {
+			return fmt.Errorf("component/instance: canon[%d]: the `async` canonical option requires an async function type", i)
+		}
+	}
+	return nil
+}
+
 // validateCanons checks that every canon in a no-import component is a
 // supported "canon lift" whose core func index and type index are in range.
 func validateCanons(comp *binary.Component, coreFuncIdx []string) error {
@@ -1373,6 +1505,18 @@ func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName stri
 	if be.stackful {
 		return target.invokeStackful(ctx, be, exportName, args)
 	}
+	// target.poisoned mirrors the async paths' own check (async_lift.go) --
+	// a sync export gets no enterRun/leaveRun bracketing (mayEnter never
+	// applies to it), but it still must stay permanently un-enterable once
+	// ANY earlier call (sync or async) has let a trap escape target, per the
+	// spec's Store poisoning invariant (see Instance.poisoned's doc). Placed
+	// before the param-count/bind-shape checks below, same as async_lift.go's
+	// mayEnter/poisoned check precedes ITS own param-count check -- a
+	// poisoned instance refuses entry outright, independent of whether this
+	// particular call would otherwise even be well-formed.
+	if target.poisoned {
+		return nil, fmt.Errorf("component/instance: export %q: cannot enter component instance", exportName)
+	}
 	fd := be.fd
 	if len(args) != len(fd.Params) {
 		return nil, fmt.Errorf("component/instance: export %q takes %d parameter(s), got %d", exportName, len(fd.Params), len(args))
@@ -1387,7 +1531,30 @@ func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName stri
 	if be.flattenErr != nil {
 		return nil, fmt.Errorf("component/instance: export %q: flatten func type: %w", exportName, be.flattenErr)
 	}
+	return target.invokeEntered(ctx, be, exportName, args)
+}
 
+// invokeEntered is invoke's actual call body, split out purely for
+// readability at the poisoning boundary (see the two explicit in.poisoned =
+// true sites below, at the ONLY two points this export's own guest code
+// actually runs: be.coreFn.CallWithStack and be.postReturnFn.CallWithStack).
+//
+// Deliberately NOT poisoning on every error here (an earlier version used a
+// single defer to poison on ANY non-nil err, which is closer to the
+// reference's literal try/except scope around the whole call but proved too
+// broad in practice: real_resource_test.go's TestRealResource calls
+// [method]counter.get on a handle it just dropped, EXPECTS that one call to
+// fail (lowerParams -> resolveArgHandles rejects the stale handle before
+// core code ever runs), and then keeps calling OTHER, still-valid handles on
+// the SAME instance -- broad poisoning permanently broke every later call.
+// A host-side ABI/argument validation failure (lowerParams, resolveArgHandles,
+// the coreArgs-count static check, liftResult) never actually enters guest
+// code, so -- unlike a real trap escaping a CallWithStack -- it must not
+// poison; matches builtin-trap-poisons-instance's own two poisoning cases
+// (an `unreachable` and a busy-stream host-builtin trap), both of which
+// surface AS be.coreFn.CallWithStack failing, so this narrower rule still
+// covers everything that suite (or the spec) requires here.
+func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportName string, args []abi.Value) ([]abi.Value, error) {
 	mem, memAvailable := memoryBytesOf(be.mod)
 	realloc := cachedReallocOf(ctx, be)
 
@@ -1436,6 +1603,7 @@ func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName stri
 
 	if err := be.coreFn.CallWithStack(ctx, stack); err != nil {
 		putUint64Slice(stackPtr)
+		in.poisoned = true // guest code actually ran and trapped -- see this func's doc
 		return nil, fmt.Errorf("component/instance: export %q: call core func %q: %w", exportName, be.funcName, err)
 	}
 	// rawResults ALIASES the pooled stack, so stack must not be returned to the
@@ -1461,6 +1629,7 @@ func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName stri
 		// it reuse rawResults' own buffer (the guest reads params, writes none).
 		if err := be.postReturnFn.CallWithStack(ctx, rawResults); err != nil {
 			putUint64Slice(stackPtr)
+			in.poisoned = true // guest code actually ran and trapped -- see this func's doc
 			return nil, fmt.Errorf("component/instance: export %q: post-return %q: %w", exportName, be.postReturnFuncName, err)
 		}
 	}

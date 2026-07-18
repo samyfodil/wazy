@@ -254,6 +254,31 @@ func (in *Instance) canonTag(idx uint32) uint32 {
 	return idx
 }
 
+// resourceIdentity is a composition-wide-unique key for one resource: the
+// sub-Instance that (as far as this composition's wiring can trace) DEFINES
+// it, plus that definer's own canonicalized local tag. Two local resource
+// tags -- possibly on two different sub-Instances, possibly reached through
+// different alias/import paths -- name the same underlying resource exactly
+// when their resourceIdentity values are equal (directly comparable via ==,
+// since def is a stable *Instance pointer once instantiated).
+type resourceIdentity struct {
+	def *Instance
+	tag uint32
+}
+
+// originOf resolves tag (already canonicalized via in.canonTag) to its
+// resourceIdentity: the entry in in.resourceOrigin if this instance received
+// the resource through a composition arg, else tag is self-defining (in
+// itself is the definer -- covers both a component's own locally-declared
+// resource and any tag this mechanism doesn't have further origin info for,
+// which is the correct stable identity for either case).
+func (in *Instance) originOf(tag uint32) resourceIdentity {
+	if o, ok := in.resourceOrigin[tag]; ok {
+		return o
+	}
+	return resourceIdentity{def: in, tag: tag}
+}
+
 // repToProviderHandle mints, in the provider's own table, the handle its
 // exported func expects for an own<R>/borrow<R> param -- from the rep the
 // importer's host wrapper handed across the boundary (it had already reduced its

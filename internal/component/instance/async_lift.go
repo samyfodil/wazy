@@ -66,9 +66,12 @@ func (in *Instance) invokeAsyncCallback(ctx context.Context, be *boundExport, ex
 	// only the guest code actually being on the stack (task.go's
 	// enterRun/leaveRun), so a second entry into THIS instance while this
 	// task is merely parked (not running) can succeed, exactly as the
-	// reference allows.
-	if !in.mayEnter {
-		return nil, fmt.Errorf("component/instance: export %q: instance is not reenterable", exportName)
+	// reference allows. poisoned, unlike mayEnter, is sticky (see its doc on
+	// Instance): once any earlier call's guestTask/stackfulTask.fail has run,
+	// every later entry is refused permanently, matching the reference's
+	// Store poisoning invariant.
+	if in.poisoned || !in.mayEnter {
+		return nil, fmt.Errorf("component/instance: export %q: cannot enter component instance", exportName)
 	}
 
 	// t.onResolve/gt.onStart are left nil: task.returnValues/cancelResolve
@@ -118,8 +121,8 @@ func (in *Instance) invokeStackful(ctx context.Context, be *boundExport, exportN
 	if be.flattenErr != nil {
 		return nil, fmt.Errorf("component/instance: export %q: flatten func type: %w", exportName, be.flattenErr)
 	}
-	if !in.mayEnter { // Store.lift's prologue: trap_if(!may_enter_from)
-		return nil, fmt.Errorf("component/instance: export %q: instance is not reenterable", exportName)
+	if in.poisoned || !in.mayEnter { // Store.lift's prologue: trap_if(!may_enter_from)
+		return nil, fmt.Errorf("component/instance: export %q: cannot enter component instance", exportName)
 	}
 
 	t := &task{inst: in, be: be}
@@ -175,8 +178,8 @@ func (in *Instance) startAsyncExportTask(ctx context.Context, be *boundExport, e
 	// running, so by construction it cannot also be running on THIS
 	// instance unless this instance IS the caller re-entering itself --
 	// exactly the case mayEnter guards), kept as a real trap for parity.
-	if !in.mayEnter {
-		return nil, fmt.Errorf("component/instance: export %q: instance is not reenterable", exportName)
+	if in.poisoned || !in.mayEnter {
+		return nil, fmt.Errorf("component/instance: export %q: cannot enter component instance", exportName)
 	}
 	t := &task{inst: in, be: be}
 	t.onResolve = func(vals []abi.Value, cancelled bool) {
@@ -209,8 +212,8 @@ func (in *Instance) startAsyncExportTask(ctx context.Context, be *boundExport, e
 func (in *Instance) startStackfulExportTask(ctx context.Context, be *boundExport, exportName string,
 	onStart func(*task) ([]abi.Value, error), onResolve func([]abi.Value, bool) error,
 ) (onCancel func() error, err error) {
-	if !in.mayEnter {
-		return nil, fmt.Errorf("component/instance: export %q: instance is not reenterable", exportName)
+	if in.poisoned || !in.mayEnter {
+		return nil, fmt.Errorf("component/instance: export %q: cannot enter component instance", exportName)
 	}
 	t := &task{inst: in, be: be}
 	t.onResolve = func(vals []abi.Value, cancelled bool) {

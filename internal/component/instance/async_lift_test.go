@@ -89,7 +89,7 @@ func TestInvokeAsyncCallback_NotReenterable(t *testing.T) {
 	inst, be := firstLightAsyncExport(t)
 	inst.mayEnter = false
 	_, err := inst.invokeAsyncCallback(context.Background(), be, "run-async", nil)
-	requireErrContains(t, err, "not reenterable")
+	requireErrContains(t, err, "cannot enter component instance")
 }
 
 // TestInvokeAsyncCallback_BackpressureParksThenDeadlocks pins Phase 3's

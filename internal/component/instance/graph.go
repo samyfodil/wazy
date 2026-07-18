@@ -597,6 +597,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	in.subInstances = subInstances
 	in.resourceDtors = instanceDtors
 	in.resCanon = cfg.resCanon
+	in.resourceOrigin = cfg.resourceOrigin
 	in.comp = comp
 	in.coreModuleCount = coreModuleCount
 	in.wasiCalls = wasiCalls
@@ -723,6 +724,7 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 			compileCache:     cfg.compileCache,
 			resCanon:         nested.ResourceDefIndex, // reduce a resource's deftype/export-alias indices to one tag
 			importedResDtors: map[uint32]func() api.Function{},
+			resourceOrigin:   map[uint32]resourceIdentity{},
 			hostResDtors:     map[uint32]func(context.Context, uint32) error{},
 			sharedSched:      cfg.sharedSched, // see instantiateGraph's "sh" resolution below
 		}
@@ -741,7 +743,13 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 					return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q references instance %d, which is not a prior nested instantiation", compInstIdx, arg.Name, arg.SortIdx)
 				}
 				// Line up the sibling's exported resources with the nested
-				// component's imports of the same name, plus the definer's dtor.
+				// component's imports of the same name, plus the definer's dtor
+				// and its composition-wide resourceIdentity (so a LATER sibling
+				// that imports the very same resource through sib -- without sib
+				// itself re-exporting it by name, e.g. dont-drop's `(borrow $R)`
+				// param in drop-cross-task-borrow.wast, where $D never exports
+				// "R" at all -- can still recognize it as the same resource; see
+				// provToImp below and resourceIdentity's doc).
 				importerResIdx := importedResourceIndices(nested, arg.Name)
 				provDefToName := map[uint32]string{}
 				if sib.comp != nil {
@@ -752,10 +760,27 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 							if dtor := sib.resourceDtors[sibDef]; dtor != nil {
 								subCfg.importedResDtors[tag] = dtor
 							}
+							subCfg.resourceOrigin[tag] = sib.originOf(sibDef)
 						}
 					}
 				}
+				// provToImp translates a resource type index as it appears in
+				// sib's OWN func descriptors (e.g. sib's borrow<R> param) to
+				// nested's local resource tag for the SAME underlying resource.
+				// Try resourceIdentity first: it matches even when sib itself
+				// never re-exports the resource under any name (sib merely
+				// reuses a resource it imports from a further sibling) -- the
+				// name-based provDefToName/importerResIdx pair (populated only
+				// from sib's OWN exports) can't see that case at all. Fall back
+				// to the name-based path for anything resourceIdentity doesn't
+				// (yet) cover, preserving prior behavior exactly when it applied.
 				provToImp := func(provIdx uint32) (uint32, bool) {
+					origin := sib.originOf(sib.canonTag(provIdx))
+					for dIdx, o := range subCfg.resourceOrigin {
+						if o == origin {
+							return dIdx, true
+						}
+					}
 					name, ok := provDefToName[sib.canonTag(provIdx)]
 					if !ok {
 						return 0, false
@@ -1190,6 +1215,22 @@ func computeCanonHostFunc(
 			return hostFuncDef{}, "", fmt.Errorf("lower func index %d out of range of the component func index space", fi)
 		}
 		fe := comp.ComponentFuncSpace[fi]
+
+		// isAsyncLower is CanonOpt kind 0x06 (async), the lower side of the
+		// same bit bindFuncExportGraph checks for a lift (isAsyncLift):
+		// docs/component-model-async-runtime-design.md §2. A lower with this
+		// option creates a Subtask instead of calling straight through --
+		// see buildAsyncHostWrapper. Computed before the fe.Kind switch below
+		// so the ComponentFuncFromImport case can validate it against the
+		// import's own declared type (validate-no-async-abi-for-sync-type.wast).
+		isAsyncLower := false
+		for _, opt := range canon.Opts {
+			if opt.Kind == 0x06 {
+				isAsyncLower = true
+				break
+			}
+		}
+
 		var iface, fname string
 		switch fe.Kind {
 		case binary.ComponentFuncFromImport:
@@ -1216,19 +1257,6 @@ func computeCanonHostFunc(
 			return hostFuncDef{}, "", fmt.Errorf("lowers a lifted (exported) func rather than an import; unsupported")
 		}
 		wasiCall = iface + "." + fname
-
-		// isAsyncLower is CanonOpt kind 0x06 (async), the lower side of the
-		// same bit bindFuncExportGraph checks for a lift (isAsyncLift):
-		// docs/component-model-async-runtime-design.md §2. A lower with this
-		// option creates a Subtask instead of calling straight through --
-		// see buildAsyncHostWrapper.
-		isAsyncLower := false
-		for _, opt := range canon.Opts {
-			if opt.Kind == 0x06 {
-				isAsyncLower = true
-				break
-			}
-		}
 
 		if hi, ok := cfg.imports[mkImportKey(iface, fname)]; ok {
 			// A sync-registered (WithImport) or async-registered

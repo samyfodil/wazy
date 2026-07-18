@@ -8,7 +8,7 @@
       (call $tr (i32.const 7))
       (i32.const 0)) ;; EXIT
     (func (export "ra") (param i32 i32 i32 i32) (result i32) unreachable))
-  (type $ft (func (result u32)))
+  (type $ft (func async (result u32)))
   (canon task.return (result u32) (core func $tr))
   (core instance $i (instantiate $m (with "canon" (instance (export "task.return" (func $tr))))))
   (alias core export $i "run" (core func $run))

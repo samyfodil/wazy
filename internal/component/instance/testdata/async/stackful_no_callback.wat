@@ -3,7 +3,7 @@
     (memory (export "mem") 1)
     (func (export "run") (param i32) unreachable)
     (func (export "ra") (param i32 i32 i32 i32) (result i32) unreachable))
-  (type $ft (func (result u32)))
+  (type $ft (func async (result u32)))
   (core instance $i (instantiate $m))
   (alias core export $i "run" (core func $run))
   (alias core export $i "mem" (core memory $mem))

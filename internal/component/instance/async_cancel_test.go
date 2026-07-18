@@ -485,5 +485,5 @@ func TestStartAsyncExportTask_NotReenterableTraps(t *testing.T) {
 	_, err = b.startAsyncExportTask(ctx, be, "run-async",
 		func(*task) ([]abi.Value, error) { return nil, nil },
 		func([]abi.Value, bool) error { return nil })
-	requireErrContains(t, err, "not reenterable")
+	requireErrContains(t, err, "cannot enter component instance")
 }

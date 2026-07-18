@@ -65,6 +65,14 @@ type config struct {
 	resCanon         func(uint32) uint32
 	importedResDtors map[uint32]func() api.Function
 
+	// resourceOrigin is copied onto the resulting Instance's own field of the
+	// same name (see its doc on Instance) -- populated by
+	// instantiateNestedInstances as it wires each instantiate-arg, tracing a
+	// resource this component receives back to the sibling that ultimately
+	// defines it. nil for a flat instantiation, same as resCanon/
+	// importedResDtors.
+	resourceOrigin map[uint32]resourceIdentity
+
 	// hostResDtors maps a HOST-provided resource's tag (see resourceTags) to a
 	// Go destructor run when the GUEST drops an own<R> of that resource via
 	// canon resource.drop -- e.g. an embedder tracking outstanding host objects.

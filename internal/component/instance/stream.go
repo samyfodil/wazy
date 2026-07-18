@@ -353,27 +353,34 @@ func copyElementsMemmove(dst, src *guestBuffer, n uint32) error {
 	if n == 0 {
 		return nil
 	}
-	dstMem, ok := memoryBytesOf(dst.memMod)
-	if !ok {
-		return fmt.Errorf("stream copy: destination module has no memory")
-	}
-	srcMem, ok := memoryBytesOf(src.memMod)
-	if !ok {
-		return fmt.Errorf("stream copy: source module has no memory")
-	}
 	nb := n * dst.elemSz
-	dp, sp := dst.ptr, src.ptr
 	// A bare stream/future (elem == nil, elemSz == 0) carries no payload
 	// bytes at all -- nb == 0 regardless of n or the pointer values, which
 	// per the reference (newGuestBuffer's "elem != nil && length > 0" guard,
 	// mirrored here) are never actually dereferenced and so must not be
-	// bounds-checked either. Suites like empty-wait/wait-during-callback
-	// deliberately pass a garbage pointer (0xdeadbeef) to future.read/
-	// future.write on an elementless `future`; skipping straight past the
-	// checks (and the copy itself, which would otherwise slice out of
-	// range) matches that. copyElements' n==0 short-circuit above doesn't
-	// cover this: n can be > 0 while elemSz (and so nb) is 0.
+	// bounds-checked (or even have their module's memory looked up: a
+	// canon future.read/write for an elementless future declares no memory
+	// option at all, since none is ever needed -- e.g.
+	// drop-cross-task-borrow.wast's `(type $FT (future))` -- so memMod can
+	// be nil here, and looking it up unconditionally would spuriously trap
+	// with "destination/source module has no memory" on a copy that never
+	// touches memory in the first place). Suites like empty-wait/
+	// wait-during-callback deliberately pass a garbage pointer (0xdeadbeef)
+	// to future.read/future.write on an elementless `future`; skipping
+	// straight past the memory lookup, and the copy itself (which would
+	// otherwise slice out of range), matches that. copyElements' n==0
+	// short-circuit above doesn't cover this: n can be > 0 while elemSz
+	// (and so nb) is 0.
 	if nb > 0 {
+		dstMem, ok := memoryBytesOf(dst.memMod)
+		if !ok {
+			return fmt.Errorf("stream copy: destination module has no memory")
+		}
+		srcMem, ok := memoryBytesOf(src.memMod)
+		if !ok {
+			return fmt.Errorf("stream copy: source module has no memory")
+		}
+		dp, sp := dst.ptr, src.ptr
 		if uint64(dp)+uint64(nb) > uint64(len(dstMem)) {
 			return fmt.Errorf("stream copy: destination bounds: ptr=%d n=%d elemSz=%d mem_len=%d", dp, n, dst.elemSz, len(dstMem))
 		}
