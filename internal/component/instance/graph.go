@@ -1424,6 +1424,9 @@ func computeCanonHostFunc(
 	// subtask.*, stream.*, future.*, error-context.*, task.cancel) is Phase
 	// 1c/2/3 and still falls through to the default "does not produce a
 	// core func" error below.
+	case binary.CanonKindThreadYield:
+		def = threadYieldHostFunc(in, canon)
+
 	case binary.CanonKindTaskCancel:
 		def = taskCancelHostFuncGraph(in)
 
