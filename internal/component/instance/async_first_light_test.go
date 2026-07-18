@@ -147,7 +147,7 @@ func TestInvalidCallbackCodeAsync(t *testing.T) {
 	defer inst.Close(ctx)
 
 	_, err = inst.Call(ctx, "run-async")
-	requireErrContains(t, err, "invalid callback code")
+	requireErrContains(t, err, "unsupported callback code")
 }
 
 // TestStackfulAsyncNoCallbackRuns pins the OTHER half of the stackful lift's

@@ -89,6 +89,38 @@ func activeBlocker(in *Instance) taskBlocker {
 	return nil
 }
 
+// requireNotSyncImplicit is activeBlocker's counterpart for subtask.cancel's
+// and stream/future copy's SYNC (non-async) variant (design
+// docs/component-model-async-threads-design-fable.md §8.3, added alongside
+// thread.go's Stage C): narrower than blockingTask -- it traps a REAL
+// syncImplicit task (this instance's syncTaskNeeded was set by SOME canon --
+// e.g. binding a thread.* canon, or task.return/context.get/set/
+// backpressure.inc/dec/waitable-set.wait/poll elsewhere in the SAME
+// instance -- and invokeEntered wrapped this particular sync lift in an
+// actual Task object per the reference's canon_lift, definitions.py
+// ~2144-2202) with "cannot block a synchronous task before returning", but
+// leaves a genuinely TASK-LESS context (activeTask == nil -- this instance
+// never needed task tracking at all) on the pre-existing task-less-OK
+// nested-drive fallback (activeBlocker's historical behavior, Phase 1-3):
+// stream/future copy operations and a synchronous subtask.cancel have never
+// required an active task, unlike waitable-set.wait/thread.suspend's
+// blockingTask (whose eager task-less trap dont-block-start's own case 1
+// requires). trap-if-block-and-sync's trap-if-sync-cancel/trap-if-sync-
+// stream-*/trap-if-sync-future-* (wast:318-334) all run inside $D, which
+// DOES bind thread.* canons -- so their syncTaskNeeded is unconditionally
+// true and every one of their plain sync lifts gets a real syncImplicit
+// task, tripping this trap regardless of the (deliberately invalid) handle
+// each assert passes; a plain sync-only component that binds none of those
+// canons (e.g. stream_phase2_acceptance_test.go's guest-writes/host-reads
+// shapes) stays activeTask == nil and keeps nested-driving exactly as
+// before.
+func requireNotSyncImplicit(in *Instance, builtin string) taskBlocker {
+	if t := in.activeTask; t != nil && t.syncImplicit {
+		panic(fmt.Errorf("component/instance: %s: cannot block a synchronous task before returning", builtin))
+	}
+	return activeBlocker(in)
+}
+
 // requireMayLeave resolves the reference's current_instance() prologue's
 // trap_if(!may_leave), shared by the handle-table async builtins that operate
 // on the instance's table rather than a specific task (waitable-set.*,
@@ -354,6 +386,20 @@ func subtaskCancelHostFuncGraph(in *Instance, canon binary.Canon) hostFuncDef {
 	async := canon.Async
 	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		requireMayLeave(in, "subtask.cancel")
+		// The SYNC (non-async) variant needs requireNotSyncImplicit's
+		// classification (its own doc; design docs/component-model-async-
+		// threads-design-fable.md §8.3), checked BEFORE resolving the
+		// handle: trap-if-block-and-sync's trap-if-sync-cancel (wast:318)
+		// uses a deliberately INVALID handle yet still expects "cannot block
+		// a synchronous task before returning" (a real syncImplicit task --
+		// $D there binds thread.* canons) rather than a handle-validity
+		// trap, so the ordering matters. A genuinely task-less caller (no
+		// canon in this instance ever needed task tracking) keeps the
+		// pre-existing nested-drive fallback.
+		var earlyBlk taskBlocker
+		if !async {
+			earlyBlk = requireNotSyncImplicit(in, "subtask.cancel")
+		}
 		i := api.DecodeU32(stack[0])
 		e, ok := in.resources.getEntry(i)
 		st, isSub := e.(*subtask)
@@ -407,12 +453,12 @@ func subtaskCancelHostFuncGraph(in *Instance, canon binary.Canon) hostFuncDef {
 				// until the subtask resolves -- split by calling context
 				// (docs/component-model-async-stackful-design.md §4.2,
 				// generalized by Feature 1 §1.4): a stackful caller, or a
-				// promoted callback task's live segment, parks; everyone
-				// else keeps the Phase 1-3 nested scheduler drive
-				// (activeBlocker, unlike blockingTask, never traps a
-				// task-less context -- subtask.cancel has never required an
-				// active task).
-				blk := activeBlocker(in)
+				// promoted callback task's live segment, parks; an
+				// unpromoted callback task's nil earlyBlk still falls back
+				// to the Phase 1-3 nested scheduler drive (the task-less/
+				// syncImplicit case already trapped above, at earlyBlk's
+				// resolution).
+				blk := earlyBlk
 				st.syncWaiter = true
 				if blk != nil {
 					blk.block(st.hasPendingEvent, false)

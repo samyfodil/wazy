@@ -81,6 +81,14 @@ type task struct {
 	// trap, "cannot block a synchronous task before returning") instead of
 	// taking the nested-drive arm.
 	syncImplicit bool
+
+	// implicitThreadIdx is this task's lazily-allocated slot in
+	// in.threads (design §4.3): 0 means "never registered" (thread.index
+	// was never called on this task); non-zero is the index
+	// threadIndexHostFunc returned and will keep returning. See thread.go's
+	// threadIndexHostFunc doc for why registration is lazy rather than
+	// eager (deviation §11.4).
+	implicitThreadIdx uint32
 }
 
 // taskBlocker is the mid-call suspension capability (Feature 1,

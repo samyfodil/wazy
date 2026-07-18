@@ -307,6 +307,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	canonMods := map[int]api.Module{}
 	var coreMemTarget func(idx int) (api.Module, error)
 	var coreFuncTarget func(cfi int) (api.Module, string, error)
+	var coreTableTarget func(idx int) (api.Module, string, error)
 	coreFuncTarget = func(cfi int) (api.Module, string, error) {
 		if cfi < 0 || cfi >= len(comp.CoreFuncSpace) {
 			return nil, "", fmt.Errorf("core func index %d out of range of the %d-entry core func index space", cfi, len(comp.CoreFuncSpace))
@@ -333,7 +334,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 				return nil, "", fmt.Errorf("core func index %d: canon index %d out of range", cfi, entry.Canon)
 			}
 			privName := nextPrivateName()
-			hostMod, name, params, results, _, err := buildCanonHostModule(ctx, r, comp, cfg, resources, in, comp.Canons[entry.Canon], neededTypes, "", privName, privName, coreMemTarget, coreFuncTarget)
+			hostMod, name, params, results, _, err := buildCanonHostModule(ctx, r, comp, cfg, resources, in, comp.Canons[entry.Canon], neededTypes, "", privName, privName, coreMemTarget, coreFuncTarget, coreTableTarget)
 			if err != nil {
 				return nil, "", fmt.Errorf("core func index %d: %w", cfi, err)
 			}
@@ -373,6 +374,23 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			return nil, fmt.Errorf("core memory index %d targets core instance %d, which was not instantiated", idx, at.instIdx)
 		}
 		return mod, nil
+	}
+
+	// coreTableTarget is coreFuncTarget's counterpart for the core TABLE index
+	// space -- used only by thread.new-indirect's bind path (§4.4/thread.go's
+	// threadNewIndirectHostFunc) to resolve its `tbl:<core:tableidx>` payload
+	// to the module that owns the table and the export name to look it up
+	// under. Same forward-declaration safety as coreMemTarget above.
+	coreTableTarget = func(idx int) (api.Module, string, error) {
+		if idx < 0 || idx >= len(coreTableSpace) {
+			return nil, "", fmt.Errorf("core table index %d out of range of the %d-entry core table index space", idx, len(coreTableSpace))
+		}
+		at := coreTableSpace[idx]
+		mod, ok := instMods[int(at.instIdx)]
+		if !ok {
+			return nil, "", fmt.Errorf("core table index %d targets core instance %d, which was not instantiated", idx, at.instIdx)
+		}
+		return mod, at.name, nil
 	}
 
 	// keyToInst is this component instance's private import environment: a
@@ -487,7 +505,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 					if int(centry.Canon) >= len(comp.Canons) {
 						return fail(fmt.Errorf("component/instance: core instance %d: inline export %q references canon %d, out of range", k, e.Name, centry.Canon))
 					}
-					def, wasiCall, cerr := computeCanonHostFunc(ctx, r, comp, cfg, resources, in, comp.Canons[centry.Canon], neededTypes, key, e.Name, coreMemTarget, coreFuncTarget)
+					def, wasiCall, cerr := computeCanonHostFunc(ctx, r, comp, cfg, resources, in, comp.Canons[centry.Canon], neededTypes, key, e.Name, coreMemTarget, coreFuncTarget, coreTableTarget)
 					if cerr != nil {
 						return fail(fmt.Errorf("component/instance: core instance %d: inline export %q: %w", k, e.Name, cerr))
 					}
@@ -502,7 +520,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 				}
 				// key doubles as groupName (the consumer-declared name) for
 				// neededTypes lookups; keys names the shim's alias sources.
-				item, wasiCall, privMod, err := resolveInlineExportItem(ctx, r, comp, cfg, resources, in, e, coreMemSpace, coreTableSpace, instMods, keys, neededTypes, key, nextPrivateName, coreFuncTarget, coreMemTarget)
+				item, wasiCall, privMod, err := resolveInlineExportItem(ctx, r, comp, cfg, resources, in, e, coreMemSpace, coreTableSpace, instMods, keys, neededTypes, key, nextPrivateName, coreFuncTarget, coreMemTarget, coreTableTarget)
 				if err != nil {
 					return fail(fmt.Errorf("component/instance: core instance %d: %w", k, err))
 				}
@@ -1153,6 +1171,7 @@ func resolveInlineExportItem(
 	e binary.CoreInlineExport, coreMemSpace, coreTableSpace []aliasTarget, instMods map[int]api.Module, keys []string,
 	neededTypes map[string]map[string]coreFuncSig, groupName string, nextPrivateName func() string,
 	coreFuncTarget func(int) (api.Module, string, error), coreMemTarget func(int) (api.Module, error),
+	coreTableTarget func(int) (api.Module, string, error),
 ) (shimItem, string, api.Module, error) {
 	switch e.Sort {
 	case 0x00: // func
@@ -1176,7 +1195,7 @@ func resolveInlineExportItem(
 
 		case binary.CoreFuncFromCanon:
 			canon := comp.Canons[entry.Canon]
-			mod, exportName, params, results, wasiCall, err := buildCanonHostModule(ctx, r, comp, cfg, resources, in, canon, neededTypes, groupName, e.Name, nextPrivateName(), coreMemTarget, coreFuncTarget)
+			mod, exportName, params, results, wasiCall, err := buildCanonHostModule(ctx, r, comp, cfg, resources, in, canon, neededTypes, groupName, e.Name, nextPrivateName(), coreMemTarget, coreFuncTarget, coreTableTarget)
 			if err != nil {
 				return shimItem{}, "", nil, fmt.Errorf("inline export %q: %w", e.Name, err)
 			}
@@ -1240,6 +1259,7 @@ func computeCanonHostFunc(
 	ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, resources *handleTable, in *Instance,
 	canon binary.Canon, neededTypes map[string]map[string]coreFuncSig, groupName, entryName string,
 	coreMemTarget func(int) (api.Module, error), coreFuncTarget func(int) (api.Module, string, error),
+	coreTableTarget func(int) (api.Module, string, error),
 ) (def hostFuncDef, wasiCall string, err error) {
 	switch canon.Kind {
 	case 0x01: // lower
@@ -1427,6 +1447,19 @@ func computeCanonHostFunc(
 	case binary.CanonKindThreadYield:
 		def = threadYieldHostFunc(in, canon)
 
+	case binary.CanonKindThreadIndex:
+		def = threadIndexHostFunc(in)
+
+	case binary.CanonKindThreadSuspend:
+		def = threadSuspendHostFunc(in, canon)
+
+	case binary.CanonKindThreadNewIndirect:
+		var terr error
+		def, terr = threadNewIndirectHostFunc(in, canon, neededTypes, groupName, entryName, coreTableTarget)
+		if terr != nil {
+			return hostFuncDef{}, "", terr
+		}
+
 	case binary.CanonKindTaskCancel:
 		def = taskCancelHostFuncGraph(in)
 
@@ -1555,8 +1588,9 @@ func buildCanonHostModule(
 	ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, resources *handleTable, in *Instance,
 	canon binary.Canon, neededTypes map[string]map[string]coreFuncSig, groupName, entryName, privateName string,
 	coreMemTarget func(int) (api.Module, error), coreFuncTarget func(int) (api.Module, string, error),
+	coreTableTarget func(int) (api.Module, string, error),
 ) (mod api.Module, exportName string, params, results []api.ValueType, wasiCall string, err error) {
-	def, wasiCall, err := computeCanonHostFunc(ctx, r, comp, cfg, resources, in, canon, neededTypes, groupName, entryName, coreMemTarget, coreFuncTarget)
+	def, wasiCall, err := computeCanonHostFunc(ctx, r, comp, cfg, resources, in, canon, neededTypes, groupName, entryName, coreMemTarget, coreFuncTarget, coreTableTarget)
 	if err != nil {
 		return nil, "", nil, nil, "", err
 	}
@@ -1752,7 +1786,29 @@ func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc f
 				// it isn't already set: a MULTI-level re-export (sub's own
 				// export was itself bound by re-exporting one of ITS
 				// children) must keep pointing at the deepest true owner.
-				if (be.asyncCallback || be.stackful) && be.home == nil {
+				//
+				// sub.syncTaskNeeded (added alongside thread.go's Stage C):
+				// a plain SYNC lift also needs home whenever sub itself binds
+				// a canon that resolves the current task at call time
+				// (task.return/context.get/set/backpressure.inc/dec/
+				// waitable-set.wait/poll, or a thread.* canon) -- invokeEntered
+				// installs the syncImplicit task on whichever Instance
+				// eventually calls it (target, sched.go's dispatch), but the
+				// host func closures backing those canons were bound to sub
+				// directly (graph.go's computeCanonHostFunc closes over sub,
+				// not whatever outer component re-exports it by alias) and
+				// read sub.activeTask -- so without this, the syncImplicit
+				// task lands on the WRONG Instance (the outer re-exporter,
+				// whose own syncTaskNeeded is unrelated) and sub.activeTask
+				// stays nil. trap-if-block-and-sync's poll-is-fine (wast:300,
+				// reached through exactly this $Tester -> alias -> $D shape)
+				// is the first suite to exercise a re-exported sync lift whose
+				// OWN instance has syncTaskNeeded=true. Gated on
+				// sub.syncTaskNeeded (not unconditional) to keep the
+				// "overwhelmingly common case" (a plain sync lift with no
+				// such canon) allocation-free, matching this doc's original
+				// intent.
+				if (be.asyncCallback || be.stackful || sub.syncTaskNeeded) && be.home == nil {
 					homeBE := *be
 					homeBE.home = sub
 					return &homeBE, nil

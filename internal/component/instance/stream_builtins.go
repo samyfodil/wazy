@@ -405,6 +405,19 @@ func streamCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 	}
 	fn := api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 		requireMayLeave(in, name)
+		// The SYNC (non-async) variant needs requireNotSyncImplicit's
+		// classification (its own doc), checked BEFORE resolving the handle:
+		// trap-if-block-and-sync's trap-if-sync-stream-read/write
+		// (wast:320/322) use deliberately INVALID handles yet still expect
+		// "cannot block a synchronous task before returning" (a real
+		// syncImplicit task) rather than a handle-validity trap, so the
+		// ordering matters. The async variant is never genuinely blocking
+		// (BLOCKED is returned immediately) and is legal from any context,
+		// so it skips this entirely.
+		var blk taskBlocker
+		if !async {
+			blk = requireNotSyncImplicit(in, name)
+		}
 		i, ptr, n := api.DecodeU32(stack[0]), api.DecodeU32(stack[1]), api.DecodeU32(stack[2])
 
 		e := requireStreamEnd(in, name, i, side, elemDesc)
@@ -489,8 +502,10 @@ func streamCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 			// (docs/component-model-async-final3-fable.md Feature 1): a
 			// promoted callback task's blk is now non-nil here, so it parks
 			// instead of nested-driving and frame-holding its own caller's
-			// continuation.
-			if blk := activeBlocker(in); blk != nil {
+			// continuation. blk was already resolved above (task-less/
+			// syncImplicit already trapped there); an unpromoted callback
+			// task's nil blk still falls back to the nested drive.
+			if blk != nil {
 				blk.block(e.hasPendingEvent, false)
 			} else if derr := in.sched.drive(e.hasPendingEvent); derr != nil {
 				panic(wrapSchedErr(name, derr))
@@ -513,6 +528,11 @@ func futureCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 	}
 	fn := api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 		requireMayLeave(in, name)
+		// See streamCopyHostFunc's identical early requireNotSyncImplicit classification.
+		var blk taskBlocker
+		if !async {
+			blk = requireNotSyncImplicit(in, name)
+		}
 		i, ptr := api.DecodeU32(stack[0]), api.DecodeU32(stack[1])
 
 		e := requireFutureEnd(in, name, i, side, elemDesc)
@@ -579,8 +599,8 @@ func futureCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 				stack[0] = uint64(blockedSentinel)
 				return
 			}
-			// See streamCopyHostFunc's identical split.
-			if blk := activeBlocker(in); blk != nil {
+			// See streamCopyHostFunc's identical split (blk resolved above).
+			if blk != nil {
 				blk.block(e.hasPendingEvent, false)
 			} else if derr := in.sched.drive(e.hasPendingEvent); derr != nil {
 				panic(wrapSchedErr(name, derr))
@@ -667,6 +687,11 @@ func cancelCopyHostFunc(in *Instance, isFuture bool, side endSide, evCode eventC
 
 	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		requireMayLeave(in, name)
+		// See streamCopyHostFunc's identical early requireNotSyncImplicit classification.
+		var blk taskBlocker
+		if !async {
+			blk = requireNotSyncImplicit(in, name)
+		}
 		i := api.DecodeU32(stack[0])
 
 		var w *waitable
@@ -716,8 +741,8 @@ func cancelCopyHostFunc(in *Instance, isFuture bool, side endSide, evCode eventC
 					stack[0] = uint64(blockedSentinel)
 					return
 				}
-				// See streamCopyHostFunc's identical split.
-				if blk := activeBlocker(in); blk != nil {
+				// See streamCopyHostFunc's identical split (blk resolved above).
+				if blk != nil {
 					blk.block(hasPending, false)
 				} else if derr := in.sched.drive(hasPending); derr != nil {
 					panic(wrapSchedErr(name, derr))

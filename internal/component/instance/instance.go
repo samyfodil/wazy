@@ -330,6 +330,15 @@ type Instance struct {
 	// nil for every pre-implicit-task flow, making the restore a no-op there.
 	syncBase *task
 
+	// threads is this instance's thread.* index space (design
+	// docs/component-model-async-threads-design-fable.md §3/§4.3/§12 Stage
+	// C): the reference's inst.threads (definitions.py:201/:509). Stage C
+	// only ever populates it lazily via thread.index's implicitThreadMarker
+	// slot (thread.go); Stage D's spawned guestThreads share the same table.
+	// Always its zero value (empty) for every instance that never binds a
+	// thread.* canon.
+	threads threadTable
+
 	// poisoned is true once an unhandled trap has ever escaped a call into
 	// this instance (any error surfacing from guest code actually running --
 	// a core `unreachable`, or a canonical-ABI trap_if failing mid-call, from

@@ -27,7 +27,7 @@ const (
 func unpackCallbackResult(packed uint32) (callbackCode, uint32, error) {
 	code := packed & 0xf
 	if code > uint32(callbackMax) {
-		return 0, 0, fmt.Errorf("invalid callback code %d (packed %#x)", code, packed)
+		return 0, 0, fmt.Errorf("unsupported callback code %d (packed %#x)", code, packed)
 	}
 	return callbackCode(code), packed >> 4, nil
 }

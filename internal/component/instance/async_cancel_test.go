@@ -209,8 +209,19 @@ func TestRequestCancellation_ResolvedPanics(t *testing.T) {
 
 // ------- subtask.cancel builtin -------
 
+// newCancelTestInstance's activeTask is a benign non-nil, non-syncImplicit
+// task (t.blocker() == nil, matching the "unpromoted callback task" arm).
+// subtaskCancelHostFuncGraph's SYNC (non-async) variant traps a REAL
+// syncImplicit task with "cannot block a synchronous task before returning"
+// (requireNotSyncImplicit, design docs/component-model-async-threads-design-
+// fable.md §8.3, trap-if-block-and-sync's trap-if-sync-cancel) but leaves a
+// genuinely task-less caller on the pre-existing nested-drive fallback --
+// this benign task exercises that same fallback arm (kept explicit, rather
+// than relying on activeTask's zero value, so the tests below read the same
+// regardless of which arm is currently wired). See
+// TestSubtaskCancelHostFunc_SyncTaskCannotBlock below for the actual trap.
 func newCancelTestInstance() *Instance {
-	return &Instance{sched: &sched{}, mayLeave: true, resources: newHandleTable()}
+	return &Instance{sched: &sched{}, mayLeave: true, resources: newHandleTable(), activeTask: &task{}}
 }
 
 func TestSubtaskCancelHostFunc_UnknownHandleTraps(t *testing.T) {
@@ -375,6 +386,27 @@ func TestSubtaskCancelHostFunc_SyncDeadlockTraps(t *testing.T) {
 	def := subtaskCancelHostFuncGraph(in, binary.Canon{Async: false})
 	requirePanicContains(t, "deadlock", func() {
 		def.fn.Call(context.Background(), nil, []uint64{uint64(h)})
+	})
+}
+
+// TestSubtaskCancelHostFunc_SyncTaskCannotBlock pins the early
+// requireNotSyncImplicit classification added alongside thread.go's Stage C
+// (design §8.3): the SYNC (non-async) variant of subtask.cancel traps
+// "cannot block a synchronous task before returning" for a REAL syncImplicit
+// task (this instance's syncTaskNeeded was set by some other canon, e.g.
+// binding a thread.* canon -- invokeEntered's syncImplicit task, instance.go
+// ~1651) BEFORE ever resolving the handle -- matching trap-if-block-and-
+// sync's trap-if-sync-cancel, whose $D binds thread.* canons and deliberately
+// passes an INVALID handle (0xdeadbeef), yet still expects this exact trap,
+// not a handle-validity one. A genuinely TASK-LESS caller (no such canon
+// anywhere in the instance) is a DIFFERENT case -- see
+// TestSubtaskCancelHostFunc_UnknownHandleTraps, which keeps the pre-existing
+// nested-drive-eligible behavior via newCancelTestInstance's benign task.
+func TestSubtaskCancelHostFunc_SyncTaskCannotBlock(t *testing.T) {
+	in := &Instance{sched: &sched{}, mayLeave: true, resources: newHandleTable(), activeTask: &task{syncImplicit: true}}
+	def := subtaskCancelHostFuncGraph(in, binary.Canon{Async: false})
+	requirePanicContains(t, "cannot block a synchronous task before returning", func() {
+		def.fn.Call(context.Background(), nil, []uint64{0xdeadbeef})
 	})
 }
 

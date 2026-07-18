@@ -673,7 +673,20 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 		// blast radius outside Instantiate.
 		var blockingCaller taskBlocker
 		if tgt := hi.asyncTarget; in != nil && tgt != nil && (tgt.be.asyncCallback || tgt.be.stackful) {
-			if in.sched.instantiating && in.activeTask == nil {
+			// t.syncImplicit (a REAL plain-sync-lift call chain, installed by
+			// invokeEntered whenever this instance's syncTaskNeeded is set --
+			// e.g. by binding a thread.* canon, design
+			// docs/component-model-async-threads-design-fable.md §8.3) always
+			// traps here, matching blockingTask's own classification
+			// uniformly: trap-if-block-and-sync's trap-if-sync-call-async1/2
+			// (wast:290/292) are plain sync lifts reaching exactly this sync-
+			// lower-into-async-lift site. activeTask == nil (no task at all --
+			// syncTaskNeeded was never set for this instance) is narrower: it
+			// only traps during the instantiation window (a start func can
+			// never block); outside instantiation a host-entry sync call with
+			// no task keeps the pre-existing drive-and-deadlock-detect
+			// behavior other suites rely on.
+			if t := in.activeTask; (t != nil && t.syncImplicit) || (in.sched.instantiating && t == nil) {
 				panic(fmt.Errorf("component/instance: host import %q %q: cannot block a synchronous task before returning", iface, funcName))
 			}
 			// §4.4 (generalized by Feature 1 §1.4): when the CALLER is

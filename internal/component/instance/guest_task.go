@@ -435,7 +435,7 @@ func (gt *guestTask) advance(packed uint32) error {
 
 	default:
 		gt.in.leaveRun()
-		return gt.fail(fmt.Errorf("component/instance: export %q: invalid callback code %d", gt.exportName, code))
+		return gt.fail(fmt.Errorf("component/instance: export %q: unsupported callback code %d", gt.exportName, code))
 	}
 }
 
