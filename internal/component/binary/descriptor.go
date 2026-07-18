@@ -126,10 +126,37 @@ type BorrowDesc struct {
 func (BorrowDesc) isTypeDesc()  {}
 func (BorrowDesc) Kind() string { return "borrow" }
 
+// StreamDesc represents a `stream<T>` (or bare `stream` with no element)
+// async-ABI type. Element is nil for the bare form. Phase 0 treats a stream
+// value as an opaque i32 handle throughout the ABI layer (like own/borrow);
+// Element is recorded for completeness but not otherwise consumed until
+// stream/future runtime support lands.
+type StreamDesc struct {
+	Element *TypeRef // nil if the stream carries no element type
+}
+
+func (StreamDesc) isTypeDesc()  {}
+func (StreamDesc) Kind() string { return "stream" }
+
+// FutureDesc represents a `future<T>` (or bare `future` with no element)
+// async-ABI type. Element is nil for the bare form. Same opaque-handle
+// treatment as StreamDesc.
+type FutureDesc struct {
+	Element *TypeRef // nil if the future carries no element type
+}
+
+func (FutureDesc) isTypeDesc()  {}
+func (FutureDesc) Kind() string { return "future" }
+
 // FuncDesc represents a function type.
 type FuncDesc struct {
 	Params  []FuncParam
 	Results FuncResults
+	// Async is true for an `async func` component-func type (deftype tag 0x43,
+	// vs the synchronous 0x40). A canon lift/lower's own async CanonOpt (0x06)
+	// is separate; the Canonical ABI requires the two to agree, but that
+	// cross-check is a validation concern, not decode.
+	Async bool
 }
 
 func (FuncDesc) isTypeDesc()  {}
@@ -455,6 +482,25 @@ func readDefvaltypeDesc(buf []byte, off int, tag byte) (TypeDesc, int, error) {
 			return nil, off, e
 		}
 		desc, off, err = BorrowDesc{ResourceType: idx}, off+int(off2), nil
+	case 0x66: // stream: option(valtype) -- 0x00 none, 0x01 <valtype> some.
+		// Verified via `wasm-tools dump`: `66 01 7d` decodes as
+		// Stream(Some(Primitive(U8))).
+		elem, off2, e := readOptValTypeRef(buf, off)
+		if e == nil && elem != nil && elem.Primitive == "char" {
+			// `stream<char>` is a temporary spec-level limitation (a stream
+			// element must be re-encodable independent of its neighbors,
+			// which char's UTF-8 validation can't guarantee mid-stream);
+			// test/async/validate-no-stream-char.wast vendors it as
+			// assert_invalid. See
+			// https://github.com/WebAssembly/component-model/pull/607.
+			e = fmt.Errorf("`stream<char>` is not valid")
+		}
+		desc, off, err = StreamDesc{Element: elem}, off2, e
+	case 0x65: // future: option(valtype), same shape as stream.
+		// Verified via `wasm-tools dump`: `65 01 79` decodes as
+		// Future(Some(Primitive(U32))).
+		elem, off2, e := readOptValTypeRef(buf, off)
+		desc, off, err = FutureDesc{Element: elem}, off2, e
 	default:
 		return nil, off, fmt.Errorf("unsupported (M1): defvaltype tag %#x", tag)
 	}
@@ -724,6 +770,10 @@ func readDeftypeDesc(buf []byte, off int) (TypeDesc, int, error) {
 	switch {
 	case tag == 0x40:
 		d, off, err := readFunctypeDesc(buf, off)
+		return d, off, err
+	case tag == 0x43: // async func: same grammar as 0x40, marked async.
+		d, off, err := readFunctypeDesc(buf, off)
+		d.Async = true
 		return d, off, err
 	case tag == 0x41:
 		// Component type: consume but do not fully represent in M1.

@@ -244,6 +244,22 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	}
 
 	resources := newHandleTable()
+	// in is allocated NOW (instead of built as a struct literal at the end
+	// of this function, as the trivial paths still do) so the async
+	// builtins (task.return, context.get/set, backpressure.inc/dec -- see
+	// async_builtins.go) wired into the core-instance loop below can close
+	// over a stable *Instance directly, exactly the way they close over
+	// resources. Every other field is filled in below, in the same places
+	// the old struct literal set them; the struct literal at the bottom of
+	// this function became field assignments on this same pointer instead
+	// of a fresh allocation. mayEnter/mayLeave start true -- see their doc
+	// on Instance.
+	sh := cfg.sharedSched
+	if sh == nil { // this instantiation is its own composition-tree root
+		sh = &sched{}
+		cfg.sharedSched = sh // propagated to every subCfg by instantiateNestedInstances below
+	}
+	in := &Instance{resolve: resolve, resources: resources, mayEnter: true, mayLeave: true, sched: sh}
 	// A composed sub-instance inherits the destructors for the resources it
 	// imports from a sibling, keyed by the table tag its own resource.drop uses.
 	for tag, resolve := range cfg.importedResDtors {
@@ -291,6 +307,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	canonMods := map[int]api.Module{}
 	var coreMemTarget func(idx int) (api.Module, error)
 	var coreFuncTarget func(cfi int) (api.Module, string, error)
+	var coreTableTarget func(idx int) (api.Module, string, error)
 	coreFuncTarget = func(cfi int) (api.Module, string, error) {
 		if cfi < 0 || cfi >= len(comp.CoreFuncSpace) {
 			return nil, "", fmt.Errorf("core func index %d out of range of the %d-entry core func index space", cfi, len(comp.CoreFuncSpace))
@@ -317,7 +334,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 				return nil, "", fmt.Errorf("core func index %d: canon index %d out of range", cfi, entry.Canon)
 			}
 			privName := nextPrivateName()
-			hostMod, name, params, results, _, err := buildCanonHostModule(ctx, r, comp, cfg, resources, comp.Canons[entry.Canon], neededTypes, "", privName, privName, coreMemTarget, coreFuncTarget)
+			hostMod, name, params, results, _, err := buildCanonHostModule(ctx, r, comp, cfg, resources, in, comp.Canons[entry.Canon], neededTypes, "", privName, privName, coreMemTarget, coreFuncTarget, coreTableTarget)
 			if err != nil {
 				return nil, "", fmt.Errorf("core func index %d: %w", cfi, err)
 			}
@@ -357,6 +374,23 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			return nil, fmt.Errorf("core memory index %d targets core instance %d, which was not instantiated", idx, at.instIdx)
 		}
 		return mod, nil
+	}
+
+	// coreTableTarget is coreFuncTarget's counterpart for the core TABLE index
+	// space -- used only by thread.new-indirect's bind path (§4.4/thread.go's
+	// threadNewIndirectHostFunc) to resolve its `tbl:<core:tableidx>` payload
+	// to the module that owns the table and the export name to look it up
+	// under. Same forward-declaration safety as coreMemTarget above.
+	coreTableTarget = func(idx int) (api.Module, string, error) {
+		if idx < 0 || idx >= len(coreTableSpace) {
+			return nil, "", fmt.Errorf("core table index %d out of range of the %d-entry core table index space", idx, len(coreTableSpace))
+		}
+		at := coreTableSpace[idx]
+		mod, ok := instMods[int(at.instIdx)]
+		if !ok {
+			return nil, "", fmt.Errorf("core table index %d targets core instance %d, which was not instantiated", idx, at.instIdx)
+		}
+		return mod, at.name, nil
 	}
 
 	// keyToInst is this component instance's private import environment: a
@@ -401,6 +435,21 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		resources.registerDtor(tag, resourceDtor(resolve))
 	}
 
+	// sched.instantiating brackets exactly the window in which THIS
+	// component's core modules are instantiated -- including any core wasm
+	// `start` section, which the underlying engine runs synchronously as
+	// part of instantiateCoreModule below (docs/component-model-async-
+	// stackful-design.md §4.3). A sync-lowered call from a start function to
+	// an async lift must trap eagerly, before the callee's core code ever
+	// runs; the flag lives on the shared *sched (one per composition tree)
+	// so a sibling nested component's already-instantiated async export
+	// sees it too. Recursing into a NESTED component's own instantiateGraph
+	// call (instantiateNestedInstances, below) brackets ITS OWN core-
+	// instance loop the same way, so this is correctly scoped per component
+	// even though sched.instantiating is one shared bool: core-instance
+	// loops across the tree run strictly sequentially, never concurrently.
+	sh.instantiating = true
+	defer func() { sh.instantiating = false }()
 	for k, ci := range comp.CoreInstances {
 		// key is BOTH this instance's resolver key and the name a consumer
 		// declares to import it: the raw "with" name, the empty-import key, or
@@ -456,7 +505,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 					if int(centry.Canon) >= len(comp.Canons) {
 						return fail(fmt.Errorf("component/instance: core instance %d: inline export %q references canon %d, out of range", k, e.Name, centry.Canon))
 					}
-					def, wasiCall, cerr := computeCanonHostFunc(ctx, r, comp, cfg, resources, comp.Canons[centry.Canon], neededTypes, key, e.Name, coreMemTarget, coreFuncTarget)
+					def, wasiCall, cerr := computeCanonHostFunc(ctx, r, comp, cfg, resources, in, comp.Canons[centry.Canon], neededTypes, key, e.Name, coreMemTarget, coreFuncTarget, coreTableTarget)
 					if cerr != nil {
 						return fail(fmt.Errorf("component/instance: core instance %d: inline export %q: %w", k, e.Name, cerr))
 					}
@@ -471,7 +520,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 				}
 				// key doubles as groupName (the consumer-declared name) for
 				// neededTypes lookups; keys names the shim's alias sources.
-				item, wasiCall, privMod, err := resolveInlineExportItem(ctx, r, comp, cfg, resources, e, coreMemSpace, coreTableSpace, instMods, keys, neededTypes, key, nextPrivateName, coreFuncTarget, coreMemTarget)
+				item, wasiCall, privMod, err := resolveInlineExportItem(ctx, r, comp, cfg, resources, in, e, coreMemSpace, coreTableSpace, instMods, keys, neededTypes, key, nextPrivateName, coreFuncTarget, coreMemTarget, coreTableTarget)
 				if err != nil {
 					return fail(fmt.Errorf("component/instance: core instance %d: %w", k, err))
 				}
@@ -541,7 +590,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	// Recursively instantiate any nested component instances (comp.Instances,
 	// the fused-adapter / nested-composition shape) and link siblings, before
 	// binding exports -- an outer export may alias a nested instance's export.
-	compInstances, subInstances, err := instantiateNestedInstances(ctx, r, comp, cfg)
+	compInstances, subInstances, err := instantiateNestedInstances(ctx, r, comp, cfg, in, componentFunc, coreFuncTarget, resolve)
 	if err != nil {
 		return fail(err)
 	}
@@ -551,32 +600,61 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		}
 	}
 
+	// Resolve every deferred sibling delegate a canon lower's forward
+	// reference queued while the core-instance loop above ran (see
+	// cfg.pendingDelegates' doc) -- every sibling it could possibly need now
+	// exists (instantiateNestedInstances just returned them). Nothing has
+	// dereferenced pd.tgt.sub/.be yet (both hi.fn's and hi.asyncTarget's
+	// closures only read tgt at actual guest-call time, which can't happen
+	// before this Instantiate call returns), so filling them in now is
+	// always in time. Also re-runs the Feature 1 promotion-gate check
+	// computeCanonHostFunc's SYNC-lower arm had to skip (tgt.be wasn't known
+	// yet there) -- see that check's own doc.
+	for _, pd := range cfg.pendingDelegates {
+		sib, ok := compInstances[pd.instIdx]
+		if !ok {
+			closeSubs()
+			return fail(fmt.Errorf("component/instance: component instance %d, referenced by an earlier canon lower, was never instantiated", pd.instIdx))
+		}
+		be, ok := sib.exports[pd.exportName]
+		if !ok {
+			closeSubs()
+			return fail(fmt.Errorf("component/instance: component instance %d has no export %q, referenced by an earlier canon lower", pd.instIdx, pd.exportName))
+		}
+		pd.tgt.sub, pd.tgt.be = sib, be
+		if !pd.isAsyncLower && (be.asyncCallback || be.stackful) {
+			in.mayBlockSync = true
+		}
+	}
+	cfg.pendingDelegates = nil
+
 	exports, err := bindImportExportsGraph(comp, componentFunc, coreFuncTarget, resolve, cfg.compileCache, compInstances)
 	if err != nil {
 		closeSubs()
 		return fail(err)
 	}
 
-	return &Instance{
-		resolve:         resolve,
-		exports:         exports,
-		instanceExports: buildInstanceExportIndex(exports),
-		closers:         closers,
-		subInstances:    subInstances,
-		resourceDtors:   instanceDtors,
-		resCanon:        cfg.resCanon,
-		comp:            comp,
-		resources:       resources,
-		coreModuleCount: coreModuleCount,
-		wasiCalls:       wasiCalls,
-		httpHost:        cfg.httpHost,
-		// A resource type index is guest-owned unless it aliases an imported
-		// instance's export (a host-provided resource) -- see resolveArgHandles.
-		isGuestResource: func(rt uint32) bool {
-			_, _, imported := resolveImportedResourceName(comp, rt)
-			return !imported
-		},
-	}, nil
+	// The remaining fields are filled in on the SAME *Instance the async
+	// builtins above already closed over (see in's allocation, near the top
+	// of this function) -- not a fresh struct literal.
+	in.exports = exports
+	in.instanceExports = buildInstanceExportIndex(exports)
+	in.closers = closers
+	in.subInstances = subInstances
+	in.resourceDtors = instanceDtors
+	in.resCanon = cfg.resCanon
+	in.resourceOrigin = cfg.resourceOrigin
+	in.comp = comp
+	in.coreModuleCount = coreModuleCount
+	in.wasiCalls = wasiCalls
+	in.httpHost = cfg.httpHost
+	// A resource type index is guest-owned unless it aliases an imported
+	// instance's export (a host-provided resource) -- see resolveArgHandles.
+	in.isGuestResource = func(rt uint32) bool {
+		_, _, imported := resolveImportedResourceName(comp, rt)
+		return !imported
+	}
+	return in, nil
 }
 
 // instantiateNestedInstances recursively instantiates comp.Instances -- the
@@ -592,7 +670,15 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 // canon-lower/buildHostWrapper path lowers calls to it unchanged. Kind 0x01
 // (inline-export) instances are the pass-through-shim shape handled in
 // bindInstanceExportGraph, not here.
-func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config) (map[int]*Instance, []*Instance, error) {
+//
+// in/componentFunc/coreFuncTarget/resolve are the OUTER component's own
+// (already fully core-instance-instantiated, since this runs after that
+// loop) Instance and static-resolution closures -- threaded through purely
+// so outerFuncArgImport can build a delegating hostImport for a `(with "x"
+// (func N))` arg naming the outer's OWN local func (a plain canon lift, not
+// an alias at all -- trap-on-reenter.wast's shape) exactly like it already
+// does for a sibling's export.
+func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, in *Instance, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver) (map[int]*Instance, []*Instance, error) {
 	if len(comp.Instances) == 0 {
 		return nil, nil, nil
 	}
@@ -603,17 +689,35 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 		}
 	}
 
-	// Only the composition shape is handled here: a func alias (Sort 0x01,
-	// export) targeting a LOCAL component instance (one of comp.Instances,
-	// index >= numImported) means that instance's export is re-exported as a
-	// func and must be instantiated. A nested instance referenced only by an
-	// instance export stays with bindInstanceExportGraph (the shim path, which
-	// rejects a genuinely-complex shim). Absent any such alias, do nothing --
-	// preserving the exact prior behavior for every WASI/shim component.
+	// A component instance re-exported directly as an INSTANCE (the WIT-
+	// exports-an-interface shim shape, comp.Exports' ExternType==0x05) is
+	// bindInstanceExportGraph's exclusive responsibility -- it does its own
+	// instantiation/validation there (nested-component-index bounds,
+	// pure-shim shape) and must keep being the ONLY consumer for that shape;
+	// don't preempt it here. Per bindInstanceExportGraph's own arithmetic,
+	// such an export's ExternIndex IS the component-instance index directly
+	// (numImportedInstances + localIdx, matching this func's compInstIdx).
+	exportedAsInstance := make(map[int]bool)
+	for _, exp := range comp.Exports {
+		if exp.ExternType == 0x05 {
+			exportedAsInstance[int(exp.ExternIndex)] = true
+		}
+	}
+
+	// Every OTHER local "instantiate a component" entry (Kind 0x00) must
+	// actually be instantiated, per spec, for its observable instantiation-
+	// time side effects (a core module's `start` section) -- regardless of
+	// whether anything later aliases one of its exports.
+	// dont-block-start.wast's second case is exactly this shape: $D is
+	// instantiated purely so its start function runs (and traps); nothing
+	// ever references $D's exports (it has none). needed therefore
+	// defaults to every local Kind==0x00 instance not already claimed by
+	// bindInstanceExportGraph above.
 	needed := make(map[int]bool)
-	for _, al := range comp.Aliases {
-		if al.Sort == 0x01 && al.TargetKind == 0x00 && int(al.InstanceIdx) >= numImported {
-			needed[int(al.InstanceIdx)] = true
+	for i, inst := range comp.Instances {
+		compInstIdx := numImported + i
+		if inst.Kind == 0x00 && !exportedAsInstance[compInstIdx] {
+			needed[compInstIdx] = true
 		}
 	}
 	if len(needed) == 0 {
@@ -674,7 +778,9 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 			compileCache:     cfg.compileCache,
 			resCanon:         nested.ResourceDefIndex, // reduce a resource's deftype/export-alias indices to one tag
 			importedResDtors: map[uint32]func() api.Function{},
+			resourceOrigin:   map[uint32]resourceIdentity{},
 			hostResDtors:     map[uint32]func(context.Context, uint32) error{},
+			sharedSched:      cfg.sharedSched, // see instantiateGraph's "sh" resolution below
 		}
 		// typeArgTags maps a resource type the nested component IMPORTS (by its
 		// own type-import TypeSpace index) to the composition-global tag the outer
@@ -691,7 +797,13 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 					return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q references instance %d, which is not a prior nested instantiation", compInstIdx, arg.Name, arg.SortIdx)
 				}
 				// Line up the sibling's exported resources with the nested
-				// component's imports of the same name, plus the definer's dtor.
+				// component's imports of the same name, plus the definer's dtor
+				// and its composition-wide resourceIdentity (so a LATER sibling
+				// that imports the very same resource through sib -- without sib
+				// itself re-exporting it by name, e.g. dont-drop's `(borrow $R)`
+				// param in drop-cross-task-borrow.wast, where $D never exports
+				// "R" at all -- can still recognize it as the same resource; see
+				// provToImp below and resourceIdentity's doc).
 				importerResIdx := importedResourceIndices(nested, arg.Name)
 				provDefToName := map[uint32]string{}
 				if sib.comp != nil {
@@ -702,10 +814,27 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 							if dtor := sib.resourceDtors[sibDef]; dtor != nil {
 								subCfg.importedResDtors[tag] = dtor
 							}
+							subCfg.resourceOrigin[tag] = sib.originOf(sibDef)
 						}
 					}
 				}
+				// provToImp translates a resource type index as it appears in
+				// sib's OWN func descriptors (e.g. sib's borrow<R> param) to
+				// nested's local resource tag for the SAME underlying resource.
+				// Try resourceIdentity first: it matches even when sib itself
+				// never re-exports the resource under any name (sib merely
+				// reuses a resource it imports from a further sibling) -- the
+				// name-based provDefToName/importerResIdx pair (populated only
+				// from sib's OWN exports) can't see that case at all. Fall back
+				// to the name-based path for anything resourceIdentity doesn't
+				// (yet) cover, preserving prior behavior exactly when it applied.
 				provToImp := func(provIdx uint32) (uint32, bool) {
+					origin := sib.originOf(sib.canonTag(provIdx))
+					for dIdx, o := range subCfg.resourceOrigin {
+						if o == origin {
+							return dIdx, true
+						}
+					}
 					name, ok := provDefToName[sib.canonTag(provIdx)]
 					if !ok {
 						return 0, false
@@ -717,12 +846,25 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 					if strings.ContainsRune(name, '#') { // interface-member export, not a plain func
 						continue
 					}
-					subCfg.imports[mkImportKey(arg.Name, name)] = delegatingHostImport(sib, name, be, provToImp)
+					hi := delegatingHostImport(sib, name, be, provToImp) // sync arm, unchanged
+					// Register the async arm too (Phase 3, docs/component-
+					// model-async-phase3-design.md §3.1): an async lower
+					// through this import now routes to sib's export as a
+					// guestTask instead of bind-failing with "register it
+					// with WithAsyncImport instead" -- see
+					// computeCanonHostFunc's lower case and
+					// buildAsyncHostWrapper's callee arm.
+					hi.asyncTarget = &guestAsyncTarget{sub: sib, be: be, exportName: name, provToImp: provToImp}
+					subCfg.imports[mkImportKey(arg.Name, name)] = hi
 				}
 
 			case 0x01: // func: satisfy the nested component's func import of the
-				// same name with the host import the outer's aliased func names.
-				hi, err := outerFuncArgHostImport(comp, cfg, arg.SortIdx)
+				// same name with whatever the outer's aliased func names --
+				// either a host import (outerFuncArgImport falls back to
+				// importInterfaceName) or, just as often in the async
+				// suites' multi-nested-component .wast shape, a single named
+				// export of an earlier sibling nested instance (byIdx).
+				hi, err := outerFuncArgImport(comp, cfg, in, byIdx, numImported, arg.SortIdx, componentFunc, coreFuncTarget, resolve)
 				if err != nil {
 					failClose()
 					return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q: %w", compInstIdx, arg.Name, err)
@@ -779,17 +921,39 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 // provider call; own/borrow results (provider handles) are reduced back to reps
 // for the importer wrapper. Non-resource params pass straight through -- the
 // fused-adapter (char roundtrip) case leaves the signature unchanged.
+//
+// hasBorrowParam is computed once here (a paramDescs walk), not per call: a
+// cross-instance borrow<R> param needs a call-scoped mint (Phase 3, docs/
+// component-model-async-phase3-design.md §4.1 site 1/site 3) -- the
+// PROVIDER's borrow handle is minted scoped to a scope-only *task built
+// fresh for this one call (never entered, no be, no gt: it exists purely to
+// carry numBorrows, mirroring the reference sync-lift's own trap_if
+// (num_borrows > 0) at task exit, which wazy's sync invoke() has no task of
+// its own to run). A func with no borrow param skips the scope entirely
+// (scope stays nil; repToProviderHandle then takes its unscoped NewBorrow
+// fallback, unreachable here since no BorrowDesc param exists to trigger it).
 func delegatingHostImport(sub *Instance, exportName string, be *boundExport, provToImp func(uint32) (uint32, bool)) *hostImport {
 	fd, importerResolve := translateResourceFD(be.fd, sub.resolve, provToImp)
 	paramDescs := be.paramTypes
 	resDescs := resultDescs(be)
+	hasBorrowParam := false
+	for _, d := range paramDescs {
+		if _, ok := d.(binary.BorrowDesc); ok {
+			hasBorrowParam = true
+			break
+		}
+	}
 	return &hostImport{
 		fn: func(ctx context.Context, args []abi.Value) ([]abi.Value, error) {
+			var scope *task
+			if hasBorrowParam {
+				scope = &task{inst: sub}
+			}
 			in := make([]abi.Value, len(args))
 			for i, a := range args {
 				var err error
 				if i < len(paramDescs) {
-					a, err = repToProviderHandle(sub, paramDescs[i], a)
+					a, err = repToProviderHandle(sub, paramDescs[i], a, scope)
 					if err != nil {
 						return nil, err
 					}
@@ -799,6 +963,13 @@ func delegatingHostImport(sub *Instance, exportName string, be *boundExport, pro
 			out, err := sub.invoke(ctx, be, exportName, in)
 			if err != nil {
 				return nil, err
+			}
+			// Sync-callee exit trap (§4.1 site 3): the reference's sync
+			// canon_lift calls task.return_ itself, so its trap_if
+			// (num_borrows > 0) covers this; wazy's sync invoke() has no
+			// task, so the delegate supplies the equivalent check here.
+			if scope != nil && scope.numBorrows > 0 {
+				return nil, fmt.Errorf("component/instance: %s: borrow handles still remain at the end of the call (%d still held)", exportName, scope.numBorrows)
 			}
 			for i := range out {
 				if i < len(resDescs) {
@@ -812,6 +983,81 @@ func delegatingHostImport(sub *Instance, exportName string, be *boundExport, pro
 		customFD:      &fd,
 		customResolve: importerResolve,
 	}
+}
+
+// startDelegatedFromBlocker is delegatingHostImport's arg/result resource
+// mapping, run for a SYNC-lowered call whose callee is an async lift
+// (callback or stackful) AND whose caller has a live taskBlocker -- a
+// stackful task, or (Feature 1, docs/component-model-async-final3-fable.md
+// §1.4) a PROMOTED callback task currently inside a segment
+// (docs/component-model-async-stackful-design.md §4.4, generalized): instead
+// of sub.invoke's nested sched.drive (delegatingHostImport's fn, which would
+// frame-hold the caller's own continuation beneath the callee's suspension
+// -- exactly async-calls-sync's confirmed livelock), it starts the callee as
+// an async export task and PARKS the caller (thread.wait_until(subtask.
+// resolved), ~2273-2275) instead of driving, letting the shared scheduler
+// make progress on whatever else is queued while this task waits.
+// host_import.go's buildHostWrapper calls this in place of hi.fn when it
+// detects this exact shape; everything else (host-entry sync calls, a
+// non-promoted callback-caller's own nested drive) keeps using hi.fn
+// unchanged.
+func startDelegatedFromBlocker(ctx context.Context, blk taskBlocker, tgt *guestAsyncTarget, args []abi.Value) ([]abi.Value, error) {
+	sub, be, exportName := tgt.sub, tgt.be, tgt.exportName
+	paramDescs := be.paramTypes
+	resDescs := resultDescs(be)
+	hasBorrowParam := false
+	for _, d := range paramDescs {
+		if _, ok := d.(binary.BorrowDesc); ok {
+			hasBorrowParam = true
+			break
+		}
+	}
+	var scope *task
+	if hasBorrowParam {
+		scope = &task{inst: sub}
+	}
+	in := make([]abi.Value, len(args))
+	for i, a := range args {
+		var err error
+		if i < len(paramDescs) {
+			a, err = repToProviderHandle(sub, paramDescs[i], a, scope)
+			if err != nil {
+				return nil, err
+			}
+		}
+		in[i] = a
+	}
+
+	var resolved bool
+	var res []abi.Value
+	onStart := func(*task) ([]abi.Value, error) { return in, nil }
+	onResolve := func(vals []abi.Value, cancelled bool) error {
+		// cancelled can't be true here: nothing requests cancellation of an
+		// anonymous sync-lower subtask (there is no handle to cancel it by).
+		res, resolved = vals, true
+		return nil
+	}
+	if _, err := sub.startAsyncExportTask(ctx, be, exportName, onStart, onResolve); err != nil {
+		return nil, err
+	}
+	if !resolved {
+		blk.block(func() bool { return resolved }, false) // non-cancellable, per ~2275
+	}
+
+	if scope != nil && scope.numBorrows > 0 {
+		return nil, fmt.Errorf("component/instance: %s: borrow handles still remain at the end of the call (%d still held)", exportName, scope.numBorrows)
+	}
+	out := make([]abi.Value, len(res))
+	for i, v := range res {
+		if i < len(resDescs) {
+			var err error
+			if v, err = providerHandleToRep(sub, resDescs[i], v); err != nil {
+				return nil, err
+			}
+		}
+		out[i] = v
+	}
+	return out, nil
 }
 
 // moduleKeyForGraph is moduleNameFor's graph-engine counterpart: identical
@@ -921,10 +1167,11 @@ func discoverNeededFuncTypes(r wazy.Runtime, comp *binary.Component, componentBy
 // module or earlier shim) by that key, not by mod.Name() -- which is "" for an
 // anonymous module.
 func resolveInlineExportItem(
-	ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, resources *handleTable,
+	ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, resources *handleTable, in *Instance,
 	e binary.CoreInlineExport, coreMemSpace, coreTableSpace []aliasTarget, instMods map[int]api.Module, keys []string,
 	neededTypes map[string]map[string]coreFuncSig, groupName string, nextPrivateName func() string,
 	coreFuncTarget func(int) (api.Module, string, error), coreMemTarget func(int) (api.Module, error),
+	coreTableTarget func(int) (api.Module, string, error),
 ) (shimItem, string, api.Module, error) {
 	switch e.Sort {
 	case 0x00: // func
@@ -948,7 +1195,7 @@ func resolveInlineExportItem(
 
 		case binary.CoreFuncFromCanon:
 			canon := comp.Canons[entry.Canon]
-			mod, exportName, params, results, wasiCall, err := buildCanonHostModule(ctx, r, comp, cfg, resources, canon, neededTypes, groupName, e.Name, nextPrivateName(), coreMemTarget, coreFuncTarget)
+			mod, exportName, params, results, wasiCall, err := buildCanonHostModule(ctx, r, comp, cfg, resources, in, canon, neededTypes, groupName, e.Name, nextPrivateName(), coreMemTarget, coreFuncTarget, coreTableTarget)
 			if err != nil {
 				return shimItem{}, "", nil, fmt.Errorf("inline export %q: %w", e.Name, err)
 			}
@@ -1009,9 +1256,10 @@ func resolveInlineExportItem(
 // canon. See buildCanonHostModule's (removed) doc, preserved below, for the
 // lower/trap-stub/resource behaviors.
 func computeCanonHostFunc(
-	ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, resources *handleTable,
+	ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, resources *handleTable, in *Instance,
 	canon binary.Canon, neededTypes map[string]map[string]coreFuncSig, groupName, entryName string,
 	coreMemTarget func(int) (api.Module, error), coreFuncTarget func(int) (api.Module, string, error),
+	coreTableTarget func(int) (api.Module, string, error),
 ) (def hostFuncDef, wasiCall string, err error) {
 	switch canon.Kind {
 	case 0x01: // lower
@@ -1025,7 +1273,24 @@ func computeCanonHostFunc(
 			return hostFuncDef{}, "", fmt.Errorf("lower func index %d out of range of the component func index space", fi)
 		}
 		fe := comp.ComponentFuncSpace[fi]
+
+		// isAsyncLower is CanonOpt kind 0x06 (async), the lower side of the
+		// same bit bindFuncExportGraph checks for a lift (isAsyncLift):
+		// docs/component-model-async-runtime-design.md §2. A lower with this
+		// option creates a Subtask instead of calling straight through --
+		// see buildAsyncHostWrapper. Computed before the fe.Kind switch below
+		// so the ComponentFuncFromImport case can validate it against the
+		// import's own declared type (validate-no-async-abi-for-sync-type.wast).
+		isAsyncLower := false
+		for _, opt := range canon.Opts {
+			if opt.Kind == 0x06 {
+				isAsyncLower = true
+				break
+			}
+		}
+
 		var iface, fname string
+		var hi *hostImport // pre-built below for a deferred-sibling lower; nil otherwise (looked up from cfg.imports)
 		switch fe.Kind {
 		case binary.ComponentFuncFromImport:
 			if int(fe.Import) >= len(comp.Imports) {
@@ -1042,6 +1307,57 @@ func computeCanonHostFunc(
 			if al.Sort != 0x01 || al.TargetKind != 0x00 {
 				return hostFuncDef{}, "", fmt.Errorf("lower func index %d: unsupported alias %#x/%#x", fi, al.Sort, al.TargetKind)
 			}
+			numImported := 0
+			for _, im := range comp.Imports {
+				if im.ExternType == 0x05 {
+					numImported++
+				}
+			}
+			if int(al.InstanceIdx) >= numImported {
+				// A canon lower wired directly into the outer component's
+				// own core-instance graph, referencing a LOCALLY nested
+				// component instantiate's export -- trap-on-reenter.wast's
+				// shape. That sibling may not be instantiated yet (this
+				// core-instance loop runs before instantiateNestedInstances
+				// does, see instantiateGraph's doc), so its live
+				// *Instance/*boundExport aren't available here -- only its
+				// static shape is, which is all THIS bind-time step needs
+				// (the wasm shim's core func type must be fixed now
+				// regardless). See cfg.pendingDelegates' doc for how the
+				// live sibling is filled in once it exists, always before
+				// any guest call could reach this func.
+				localIdx := int(al.InstanceIdx) - numImported
+				if localIdx < 0 || localIdx >= len(comp.Instances) {
+					return hostFuncDef{}, "", fmt.Errorf("lower func index %d: component instance %d out of range of %d locally-instantiated instance(s)", fi, al.InstanceIdx, len(comp.Instances))
+				}
+				instRef := comp.Instances[localIdx]
+				if instRef.Kind != 0x00 || int(instRef.ComponentIdx) >= len(comp.NestedComponents) {
+					return hostFuncDef{}, "", fmt.Errorf("lower func index %d: component instance %d is not a real nested component instantiation", fi, al.InstanceIdx)
+				}
+				nested := comp.NestedComponents[instRef.ComponentIdx]
+				sfd, sresolve, serr := resolveStaticExportFuncDesc(nested, al.Name)
+				if serr != nil {
+					return hostFuncDef{}, "", fmt.Errorf("lower func index %d: sibling component instance %d export %q: %w", fi, al.InstanceIdx, al.Name, serr)
+				}
+				// No resource-type wiring for a bare (non-instance) func
+				// alias -- matches outerFuncArgImport's identical case.
+				provToImp := func(uint32) (uint32, bool) { return 0, false }
+				tgt := &guestAsyncTarget{exportName: al.Name, provToImp: provToImp}
+				hi = delegatingHostImportDeferred(tgt, sfd, sresolve)
+				// A canon lower declared directly in the OUTER component's
+				// own core-instance graph, targeting a locally-instantiated
+				// child's export -- a direct static parent<->child lineage
+				// delegate (see hostImport.lineage's doc). Refused at call
+				// time. Distinct from the sibling-to-sibling delegates built
+				// via instantiate-args (arg.Sort == 0x05, outerFuncArgImport's
+				// sibling-alias arm), which are never flagged.
+				hi.lineage = true
+				cfg.pendingDelegates = append(cfg.pendingDelegates, &pendingSiblingDelegate{
+					instIdx: int(al.InstanceIdx), exportName: al.Name, tgt: tgt, isAsyncLower: isAsyncLower,
+				})
+				iface, fname = fmt.Sprintf("component-instance-%d", al.InstanceIdx), al.Name
+				break
+			}
 			var ierr error
 			if iface, ierr = importInterfaceName(comp, al.InstanceIdx); ierr != nil {
 				return hostFuncDef{}, "", ierr
@@ -1051,13 +1367,52 @@ func computeCanonHostFunc(
 			return hostFuncDef{}, "", fmt.Errorf("lowers a lifted (exported) func rather than an import; unsupported")
 		}
 		wasiCall = iface + "." + fname
+		if hi == nil {
+			hi = cfg.imports[mkImportKey(iface, fname)]
+		}
 
-		if hi, ok := cfg.imports[mkImportKey(iface, fname)]; ok {
+		if hi != nil {
+			// A sync-registered (WithImport) or async-registered
+			// (WithAsyncImport) import may only back a lower that agrees --
+			// see WithAsyncImport's doc. hi.fn/hi.asyncFn are mutually
+			// exclusive (set by exactly one of the two registration Options).
+			// A composition delegate (hi.asyncTarget != nil, Phase 3 §3.1)
+			// satisfies an async lower too -- it routes to the sibling's
+			// export as a guestTask instead of a Go AsyncHostFunc.
+			if isAsyncLower && hi.asyncFn == nil && hi.asyncTarget == nil {
+				return hostFuncDef{}, "", fmt.Errorf("import %q func %q is lowered with the async option, but was registered via WithImport; register it with WithAsyncImport instead", iface, fname)
+			}
+			if !isAsyncLower && hi.fn == nil {
+				return hostFuncDef{}, "", fmt.Errorf("import %q func %q is lowered synchronously, but was registered via WithAsyncImport; register it with WithImport instead", iface, fname)
+			}
+
 			memMod, reallocFn, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
 			if merr != nil {
 				return hostFuncDef{}, "", fmt.Errorf("import %q func %q: %w", iface, fname, merr)
 			}
-			fn, hiParams, hiResults, herr := buildHostWrapper(iface, fname, hi, resources, memMod, reallocFn)
+			// Feature 1 promotion gate (docs/component-model-async-final3-
+			// fable.md §1.1): a SYNC lower whose target is an async lift
+			// (callback or stackful) is the other mid-core-call blocking
+			// site -- buildHostWrapper's own §4.4 routing (host_import.go)
+			// tests this exact condition at call time; mirrored here at bind
+			// time so a promoted callback task's segment (guestTask.block)
+			// can park at it instead of nested-driving/livelocking. Flagged
+			// on the IMPORTING instance (in), which is whose callback tasks
+			// might reach this sync-lowered call site. Skipped for a
+			// deferred sibling (hi.asyncTarget.be still nil here) --
+			// instantiateGraph re-runs this exact check once tgt.be is
+			// known, right after resolving cfg.pendingDelegates.
+			if !isAsyncLower && hi.asyncTarget != nil && hi.asyncTarget.be != nil && (hi.asyncTarget.be.asyncCallback || hi.asyncTarget.be.stackful) {
+				in.mayBlockSync = true
+			}
+			var fn api.GoModuleFunction
+			var hiParams, hiResults []api.ValueType
+			var herr error
+			if isAsyncLower {
+				fn, hiParams, hiResults, herr = buildAsyncHostWrapper(in, iface, fname, hi, resources, memMod, reallocFn)
+			} else {
+				fn, hiParams, hiResults, herr = buildHostWrapper(in, iface, fname, hi, resources, memMod, reallocFn)
+			}
 			if herr != nil {
 				return hostFuncDef{}, "", herr
 			}
@@ -1075,12 +1430,122 @@ func computeCanonHostFunc(
 			def = hostFuncDef{fn: fn, params: sig.params, results: sig.results}
 		}
 
-	case 0x02, 0x03, 0x04: // resource.new, resource.drop, resource.rep
+	case 0x02, 0x03, 0x04, binary.CanonKindResourceDropAsync: // resource.new, resource.drop (sync/async), resource.rep
 		var rerr error
 		def, rerr = resourceCanonHostFuncGraph(comp, cfg, resources, entryName, canon)
 		if rerr != nil {
 			return hostFuncDef{}, "", rerr
 		}
+
+	// --- MVP async builtins (docs/component-model-async-runtime-design.md
+	// §1.5) -- wired the same way as a resource canon above: a fixed-i32
+	// core func closing over the *Instance, no reflection/WithFunc. See
+	// async_builtins.go. Every other async canon kind (waitable-set.*,
+	// subtask.*, stream.*, future.*, error-context.*, task.cancel) is Phase
+	// 1c/2/3 and still falls through to the default "does not produce a
+	// core func" error below.
+	case binary.CanonKindThreadYield:
+		def = threadYieldHostFunc(in, canon)
+
+	case binary.CanonKindThreadIndex:
+		def = threadIndexHostFunc(in)
+
+	case binary.CanonKindThreadSuspend:
+		def = threadSuspendHostFunc(in, canon)
+
+	case binary.CanonKindThreadNewIndirect:
+		var terr error
+		def, terr = threadNewIndirectHostFunc(in, canon, neededTypes, groupName, entryName, coreTableTarget)
+		if terr != nil {
+			return hostFuncDef{}, "", terr
+		}
+
+	case binary.CanonKindThreadYieldThenResume:
+		def = threadYieldThenResumeHostFunc(in, canon)
+
+	case binary.CanonKindTaskCancel:
+		def = taskCancelHostFuncGraph(in)
+
+	case binary.CanonKindSubtaskCancel:
+		def = subtaskCancelHostFuncGraph(in, canon)
+
+	case binary.CanonKindTaskReturn:
+		var terr error
+		def, terr = taskReturnHostFuncGraph(in, canon)
+		if terr != nil {
+			return hostFuncDef{}, "", terr
+		}
+
+	case binary.CanonKindContextGet:
+		var cerr error
+		def, cerr = contextGetHostFuncGraph(in, canon)
+		if cerr != nil {
+			return hostFuncDef{}, "", cerr
+		}
+
+	case binary.CanonKindContextSet:
+		var cerr error
+		def, cerr = contextSetHostFuncGraph(in, canon)
+		if cerr != nil {
+			return hostFuncDef{}, "", cerr
+		}
+
+	case binary.CanonKindBackpressureInc:
+		def = backpressureIncHostFuncGraph(in)
+
+	case binary.CanonKindBackpressureDec:
+		def = backpressureDecHostFuncGraph(in)
+
+	case binary.CanonKindWaitableSetNew:
+		def = waitableSetNewHostFunc(in)
+
+	case binary.CanonKindWaitableSetWait:
+		def = waitableSetWaitHostFunc(in, canon)
+
+	case binary.CanonKindWaitableSetPoll:
+		def = waitableSetPollHostFunc(in, canon)
+
+	case binary.CanonKindWaitableSetDrop:
+		def = waitableSetDropHostFunc(in)
+
+	case binary.CanonKindWaitableJoin:
+		def = waitableJoinHostFunc(in)
+
+	case binary.CanonKindSubtaskDrop:
+		def = subtaskDropHostFunc(in)
+
+	// --- Phase 2: streams/futures/error-context
+	// (docs/component-model-async-phase2-design.md) -- wired the same way as
+	// the MVP async builtins above: a fixed-i32 core func closing over the
+	// *Instance, no reflection/WithFunc. See stream_builtins.go/errorcontext.go.
+	case binary.CanonKindStreamNew, binary.CanonKindStreamRead, binary.CanonKindStreamWrite,
+		binary.CanonKindStreamCancelRead, binary.CanonKindStreamCancelWrite,
+		binary.CanonKindStreamDropReadable, binary.CanonKindStreamDropWritable,
+		binary.CanonKindFutureNew, binary.CanonKindFutureRead, binary.CanonKindFutureWrite,
+		binary.CanonKindFutureCancelRead, binary.CanonKindFutureCancelWrite,
+		binary.CanonKindFutureDropReadable, binary.CanonKindFutureDropWritable:
+		var serr error
+		def, serr = streamFutureCanonHostFunc(comp, in, canon, coreMemTarget, coreFuncTarget)
+		if serr != nil {
+			return hostFuncDef{}, "", serr
+		}
+
+	case binary.CanonKindErrorContextNew:
+		memMod, _, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
+		if merr != nil {
+			return hostFuncDef{}, "", merr
+		}
+		def = errorContextNewHostFunc(in, memMod)
+
+	case binary.CanonKindErrorContextDebugMessage:
+		memMod, reallocFn, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
+		if merr != nil {
+			return hostFuncDef{}, "", merr
+		}
+		def = errorContextDebugMessageHostFunc(in, memMod, reallocFn)
+
+	case binary.CanonKindErrorContextDrop:
+		def = errorContextDropHostFunc(in)
 
 	default:
 		return hostFuncDef{}, "", fmt.Errorf("references a canon of kind %#x, which does not produce a core func", canon.Kind)
@@ -1123,11 +1588,12 @@ func buildMergedCanonHostModule(ctx context.Context, r wazy.Runtime, privateName
 // use). The graph's inline-export loop instead uses computeCanonHostFunc +
 // buildMergedCanonHostModule to pack a whole group's canon funcs into one module.
 func buildCanonHostModule(
-	ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, resources *handleTable,
+	ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, resources *handleTable, in *Instance,
 	canon binary.Canon, neededTypes map[string]map[string]coreFuncSig, groupName, entryName, privateName string,
 	coreMemTarget func(int) (api.Module, error), coreFuncTarget func(int) (api.Module, string, error),
+	coreTableTarget func(int) (api.Module, string, error),
 ) (mod api.Module, exportName string, params, results []api.ValueType, wasiCall string, err error) {
-	def, wasiCall, err := computeCanonHostFunc(ctx, r, comp, cfg, resources, canon, neededTypes, groupName, entryName, coreMemTarget, coreFuncTarget)
+	def, wasiCall, err := computeCanonHostFunc(ctx, r, comp, cfg, resources, in, canon, neededTypes, groupName, entryName, coreMemTarget, coreFuncTarget, coreTableTarget)
 	if err != nil {
 		return nil, "", nil, nil, "", err
 	}
@@ -1212,17 +1678,30 @@ func resourceCanonHostFuncGraph(comp *binary.Component, cfg *config, resources *
 		})
 		return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32}, results: []api.ValueType{api.ValueTypeI32}}, nil
 
-	case 0x03: // resource.drop: handle:i32 -> ()
+	case 0x03, binary.CanonKindResourceDropAsync: // resource.drop (sync 0x03 / async 0x07): handle:i32 -> ()
 		fn := api.GoModuleFunc(func(ctx context.Context, _ api.Module, stack []uint64) {
 			h := api.DecodeU32(stack[0])
-			// Read the rep before dropping so the destructor (if any) can run
-			// against it -- an importer dropping an own<R> it received runs the
-			// DEFINER's dtor, registered on the shared table by global tag.
-			dtor := resources.dtorFor(typeIdx)
+			// Own/borrow dispatch BEFORE any destructor lookup (Phase 3): a
+			// borrow drop (handleTable.Drop's borrow arm) must never run the
+			// resource's dtor -- only the own arm does. Read the rep before
+			// dropping so the destructor (if any) can run against it -- an
+			// importer dropping an own<R> it received runs the DEFINER's
+			// dtor, registered on the shared table by global tag.
+			//
+			// resource.drop async (kind 0x07) decodes identically and is
+			// executed synchronously here: the pinned reference's
+			// canon_resource_drop has no async branch at all (it lifts the
+			// dtor with async_=False unconditionally) -- see
+			// docs/component-model-async-phase3-design.md §4.4.
+			own, ownErr := resources.IsOwn(typeIdx, h)
+			var dtor func(context.Context, uint32) error
 			var rep uint32
-			if dtor != nil {
-				if r, err := resources.Rep(typeIdx, h); err == nil {
-					rep = r
+			if ownErr == nil && own {
+				dtor = resources.dtorFor(typeIdx)
+				if dtor != nil {
+					if r, err := resources.Rep(typeIdx, h); err == nil {
+						rep = r
+					}
 				}
 			}
 			if err := resources.Drop(typeIdx, h); err != nil {
@@ -1301,6 +1780,42 @@ func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc f
 		// is held in subInstances and closed with this one.
 		if sub, ok := compInstances[int(at.instIdx)]; ok {
 			if be, ok := sub.exports[at.name]; ok {
+				// An async export's runtime state (activeTask, exclusiveHeld,
+				// ...) lives on sub, not on whatever Instance eventually
+				// calls invoke() on this re-exported boundExport -- see
+				// boundExport.home's doc. Copy (never mutate the shared be)
+				// so sub's own exports map -- and any OTHER alias chain
+				// reusing the same be -- is unaffected. Only set home when
+				// it isn't already set: a MULTI-level re-export (sub's own
+				// export was itself bound by re-exporting one of ITS
+				// children) must keep pointing at the deepest true owner.
+				//
+				// sub.syncTaskNeeded (added alongside thread.go's Stage C):
+				// a plain SYNC lift also needs home whenever sub itself binds
+				// a canon that resolves the current task at call time
+				// (task.return/context.get/set/backpressure.inc/dec/
+				// waitable-set.wait/poll, or a thread.* canon) -- invokeEntered
+				// installs the syncImplicit task on whichever Instance
+				// eventually calls it (target, sched.go's dispatch), but the
+				// host func closures backing those canons were bound to sub
+				// directly (graph.go's computeCanonHostFunc closes over sub,
+				// not whatever outer component re-exports it by alias) and
+				// read sub.activeTask -- so without this, the syncImplicit
+				// task lands on the WRONG Instance (the outer re-exporter,
+				// whose own syncTaskNeeded is unrelated) and sub.activeTask
+				// stays nil. trap-if-block-and-sync's poll-is-fine (wast:300,
+				// reached through exactly this $Tester -> alias -> $D shape)
+				// is the first suite to exercise a re-exported sync lift whose
+				// OWN instance has syncTaskNeeded=true. Gated on
+				// sub.syncTaskNeeded (not unconditional) to keep the
+				// "overwhelmingly common case" (a plain sync lift with no
+				// such canon) allocation-free, matching this doc's original
+				// intent.
+				if (be.asyncCallback || be.stackful || sub.syncTaskNeeded) && be.home == nil {
+					homeBE := *be
+					homeBE.home = sub
+					return &homeBE, nil
+				}
 				return be, nil
 			}
 			return nil, fmt.Errorf("component/instance: export %q: nested component instance %d has no export %q", diagName, at.instIdx, at.name)
@@ -1308,6 +1823,17 @@ func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc f
 		return nil, fmt.Errorf("component/instance: export %q resolves to an imported func rather than a lift; only lifted funcs may be exported", diagName)
 	}
 	canon := comp.Canons[liftCanonIdx]
+	// isAsyncLift is CanonOpt kind 0x06 (async): decoded fully since Phase 0,
+	// but only the async+callback combination has a runtime this phase --
+	// see the isAsyncLift branch below, after the core func/postReturn/
+	// realloc options (identical for both shapes) are resolved.
+	isAsyncLift := false
+	for _, opt := range canon.Opts {
+		if opt.Kind == 0x06 {
+			isAsyncLift = true
+			break
+		}
+	}
 	td, err := comp.ResolveType(canon.TypeIdx)
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: export %q lift references type %d: %w", diagName, canon.TypeIdx, err)
@@ -1327,12 +1853,36 @@ func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc f
 		return nil, fmt.Errorf("component/instance: export %q: %w", diagName, err)
 	}
 
-	reallocName, err := resolveReallocFuncGraph(canon, coreFuncTarget, mod)
+	reallocMod, reallocName, err := resolveReallocFuncGraph(canon, coreFuncTarget, mod)
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: export %q: %w", diagName, err)
 	}
 
-	be := &boundExport{mod: mod, funcName: name, fd: fd, postReturnFuncName: postReturnName, reallocFuncName: reallocName}
+	callbackName, err := resolveCallbackFuncGraph(canon, coreFuncTarget, mod)
+	if err != nil {
+		return nil, fmt.Errorf("component/instance: export %q: %w", diagName, err)
+	}
+
+	be := &boundExport{mod: mod, funcName: name, fd: fd, postReturnFuncName: postReturnName, reallocFuncName: reallocName, reallocMod: reallocMod}
+	switch {
+	case isAsyncLift && callbackName != "":
+		be.asyncCallback = true
+		be.callbackFuncName = callbackName
+	case isAsyncLift && callbackName == "":
+		// Async without a callback is the STACKFUL lift's async-no-callback
+		// sub-shape (docs/component-model-async-stackful-design.md §0/§9):
+		// the core func returns nothing, and results flow through the
+		// task.return builtin -- routed through invokeStackful/
+		// startStackfulExportTask instead of the plain sync path.
+		be.stackful, be.stackfulAsyncOpts = true, true
+	case !isAsyncLift && fd.Async:
+		// A sync (no `async` canon opt) lift of an async-TYPED func is the
+		// STACKFUL lift's sync-opts sub-shape: results are lifted straight
+		// from the flat core results and the runtime calls task.return_
+		// itself (~2158-2159) -- every stackful conformance suite exercises
+		// this shape.
+		be.stackful = true
+	}
 	finalizeBoundExport(be, resolve, abiCache, comp, funcIdx)
 	return be, nil
 }
@@ -1360,21 +1910,58 @@ func resolvePostReturnFuncGraph(canon binary.Canon, coreFuncTarget func(int) (ap
 }
 
 // resolveReallocFuncGraph resolves the canon lift's realloc option (CanonOpt
-// kind 0x04) to its core export name, mirroring resolvePostReturnFuncGraph. It
-// requires the realloc func to live on the same core instance as the lift's
-// own core func (the boundExport lowers params against that one module's
-// memory). Returns "" when the lift declares no realloc option.
-func resolveReallocFuncGraph(canon binary.Canon, coreFuncTarget func(int) (api.Module, string, error), liftMod api.Module) (string, error) {
+// kind 0x04) to its target module and core export name, mirroring
+// resolvePostReturnFuncGraph except that -- unlike post-return/callback --
+// the realloc option's target is legally allowed to live on a DIFFERENT core
+// instance than the lift's own core func: the ABI only requires realloc grow/
+// allocate in the same memory object the lift's params are lowered into
+// (memoryBytesOf(be.mod), which already resolves cross-instance for an
+// IMPORTED memory), not that it be co-located with the core func itself. The
+// `cross-abi-calls` suite's $C puts memory+realloc on a dedicated $Memory
+// core instance and only imports (not re-exports) the memory into $Core,
+// which hosts the lift's own core func -- see
+// docs/component-model-async-final3-fable.md Feature 2.
+//
+// Returns (nil, "", nil) when the lift declares no realloc option (the
+// caller then falls back to be.mod/"cabi_realloc"). Returns (nil, name, nil)
+// -- reallocMod nil -- for the common same-instance case, so
+// finalizeBoundExport's be.mod fallback is exercised unchanged. Only returns
+// a non-nil mod when the option's target genuinely differs from liftMod.
+func resolveReallocFuncGraph(canon binary.Canon, coreFuncTarget func(int) (api.Module, string, error), liftMod api.Module) (api.Module, string, error) {
 	for _, opt := range canon.Opts {
 		if opt.Kind != 0x04 { // realloc
 			continue
 		}
 		mod, name, err := coreFuncTarget(int(opt.Idx))
 		if err != nil {
-			return "", fmt.Errorf("realloc %w", err)
+			return nil, "", fmt.Errorf("realloc %w", err)
+		}
+		if mod == liftMod {
+			mod = nil // same-instance: keep the be.mod fallback (status quo)
+		}
+		return mod, name, nil
+	}
+	return nil, "", nil
+}
+
+// resolveCallbackFuncGraph resolves an async lift's callback option
+// (CanonOpt kind 0x07) to its core export name, mirroring
+// resolvePostReturnFuncGraph/resolveReallocFuncGraph exactly (same
+// same-core-instance requirement -- invokeAsyncCallback calls be.callbackFn
+// on be.mod, so a callback targeting a different core instance would need
+// cross-instance calling this package doesn't support). Returns "" when the
+// lift declares no callback option (a stackful async lift, or a sync lift).
+func resolveCallbackFuncGraph(canon binary.Canon, coreFuncTarget func(int) (api.Module, string, error), liftMod api.Module) (string, error) {
+	for _, opt := range canon.Opts {
+		if opt.Kind != 0x07 { // callback
+			continue
+		}
+		mod, name, err := coreFuncTarget(int(opt.Idx))
+		if err != nil {
+			return "", fmt.Errorf("callback %w", err)
 		}
 		if mod != liftMod {
-			return "", fmt.Errorf("realloc core func targets a different core instance than the lift's own core func; cross-instance realloc is not supported")
+			return "", fmt.Errorf("callback core func targets a different core instance than the lift's own core func; cross-instance callback is not supported")
 		}
 		return name, nil
 	}
@@ -1405,6 +1992,34 @@ func bindInstanceExportGraph(comp *binary.Component, exp binary.Export, componen
 		return fmt.Errorf("component/instance: export %q references instance %d, out of range of %d imported + %d locally-instantiated instance(s)", exp.Name, exp.ExternIndex, numImportedInstances, len(comp.Instances))
 	}
 	inst := comp.Instances[localIdx]
+	if inst.Kind == 0x01 { // inline exports: no nested component/shim at all
+		// The WIT-tooling pattern this exercises (big-interleaving-test.wast's
+		// `(instance $types (export "event-kind" (type $driver "event-kind"))
+		// ...)`) is a synthetic instance built purely by re-listing existing
+		// sort entries -- almost always types, re-exported for external
+		// binding-generator consumption, never invoked by any wasm code. Bind
+		// only the func members (mirroring bindImportExportsGraph's own
+		// ExternType==0x01/0x03 split just above); every other sort (type,
+		// value, nested instance, component) is non-callable metadata with
+		// nothing to bind, exactly like a plain top-level type re-export.
+		for _, member := range inst.Exports {
+			if member.Sort != 0x01 { // func
+				continue
+			}
+			diagName := instanceExportKey(exp.Name, member.Name)
+			// compInstances nil: same best-effort scope as the Kind==0x00 shim
+			// path below (its own doc: "never nested-instance aliases") -- an
+			// inline-export instance's func member aliasing a NESTED
+			// instance's export (rather than this component's own canon
+			// lift) is unexercised by any suite and out of scope here too.
+			be, err := bindFuncExportGraph(comp, member.SortIdx, componentFunc, coreFuncTarget, resolve, diagName, abiCache, nil)
+			if err != nil {
+				return err
+			}
+			exports[diagName] = be
+		}
+		return nil
+	}
 	if inst.Kind != 0x00 {
 		return fmt.Errorf("component/instance: export %q instance %d is not a component instantiation (kind %#x); inline-export instances are not supported", exp.Name, exp.ExternIndex, inst.Kind)
 	}

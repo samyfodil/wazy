@@ -1884,8 +1884,8 @@ func TestDecodeCanon_UnsupportedKind(t *testing.T) {
 	buf = append(buf, canonBody...)
 
 	_, err := Decode(bytes.NewReader(buf))
-	if err == nil || !strings.Contains(err.Error(), "unsupported (M1)") {
-		t.Fatalf("expected unsupported kind error, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "async canon kind") || !strings.Contains(err.Error(), "not yet supported") {
+		t.Fatalf("expected async canon kind error, got: %v", err)
 	}
 }
 

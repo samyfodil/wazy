@@ -267,7 +267,7 @@ func (t *TypeRef) String() string {
 		return fmt.Sprintf("UNSUPPORTED(%s)", t.Unsupported)
 	}
 	switch t.Kind {
-	case "u8", "u16", "u32", "u64", "s8", "s16", "s32", "s64", "f32", "f64", "bool", "char", "string":
+	case "u8", "u16", "u32", "u64", "s8", "s16", "s32", "s64", "f32", "f64", "bool", "char", "string", "error-context":
 		return t.Kind
 	case "list":
 		if t.Inner != nil {

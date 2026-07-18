@@ -6,5 +6,5 @@ import "embed"
 // scratch/BSD CI jobs run the compiled binary from the repo root, where a
 // relative os.ReadFile("testdata/...") can't find them.
 //
-//go:embed testdata/*.wasm
+//go:embed testdata/*.wasm testdata/async/*.wasm
 var fixtureFS embed.FS

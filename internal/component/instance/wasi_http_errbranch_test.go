@@ -343,7 +343,7 @@ func TestHTTP_ResponseOutparamSet(t *testing.T) {
 
 func TestHTTP_ServeHTTP_NoExport(t *testing.T) {
 	// An instance with an http host but no incoming-handler export fails loud.
-	in := &Instance{httpHost: newTestHTTP(), resources: newHandleTable(), instanceExports: map[string]map[string]instanceExportEntry{}}
+	in := &Instance{sched: &sched{}, httpHost: newTestHTTP(), resources: newHandleTable(), instanceExports: map[string]map[string]instanceExportEntry{}}
 	u, _ := url.Parse("/x")
 	_, _, _, _, err := in.serveHTTP(context.Background(), "GET", u, http.Header{}, nil, nil)
 	reqErr(t, err, "does not export")
@@ -353,7 +353,7 @@ func TestHTTP_ServeHTTP_NoExport(t *testing.T) {
 // failure as a 500 rather than a bogus success: an instance with no
 // incoming-handler export makes serveHTTP fail, which ServeHTTP turns into 500.
 func TestHTTP_ServeHTTP_500(t *testing.T) {
-	in := &Instance{httpHost: newTestHTTP(), resources: newHandleTable(), instanceExports: map[string]map[string]instanceExportEntry{}}
+	in := &Instance{sched: &sched{}, httpHost: newTestHTTP(), resources: newHandleTable(), instanceExports: map[string]map[string]instanceExportEntry{}}
 	req := httptest.NewRequest("GET", "/x", nil)
 	rec := httptest.NewRecorder()
 	in.ServeHTTP(rec, req)
@@ -372,7 +372,7 @@ func (errReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
 // TestHTTP_ServeHTTP_BadBody proves a request whose body fails to read is
 // reported as 400, not silently forwarded with an empty body.
 func TestHTTP_ServeHTTP_BadBody(t *testing.T) {
-	in := &Instance{httpHost: newTestHTTP(), resources: newHandleTable(), instanceExports: map[string]map[string]instanceExportEntry{}}
+	in := &Instance{sched: &sched{}, httpHost: newTestHTTP(), resources: newHandleTable(), instanceExports: map[string]map[string]instanceExportEntry{}}
 	req := httptest.NewRequest("POST", "/x", errReader{})
 	rec := httptest.NewRecorder()
 	in.ServeHTTP(rec, req)
@@ -382,7 +382,7 @@ func TestHTTP_ServeHTTP_BadBody(t *testing.T) {
 }
 
 func TestHTTP_FindExportInstance(t *testing.T) {
-	in := &Instance{instanceExports: map[string]map[string]instanceExportEntry{
+	in := &Instance{sched: &sched{}, instanceExports: map[string]map[string]instanceExportEntry{
 		"wasi:http/incoming-handler@0.2.12": nil,
 	}}
 	if name, ok := in.findExportInstance("wasi:http/incoming-handler"); !ok || name != "wasi:http/incoming-handler@0.2.12" {

@@ -67,6 +67,17 @@ type wastCmd struct {
 	} `json:"action"`
 	Expected []typedVal `json:"expected"`
 	Text     string     `json:"text"`
+
+	// Name, Instance, and Module are used only by the async suites' richer
+	// linking-model commands (see wast_async_conformance_test.go):
+	// module_definition carries Name (the definition it registers bytes
+	// under) and Filename; module_instance carries Instance (the name it
+	// registers the new *Instance under) and Module (the module_definition
+	// name to instantiate). The sync suites' module command also carries a
+	// Name field in its manifest JSON, unused here exactly as before.
+	Name     string `json:"name"`
+	Instance string `json:"instance"`
+	Module   string `json:"module"`
 }
 
 func runWastSuite(t *testing.T, suite string) {
@@ -162,7 +173,7 @@ func invokeWast(ctx context.Context, in *Instance, field string, args []typedVal
 	}
 	vals := make([]abi.Value, len(args))
 	for i, a := range args {
-		v, err := in.wastConvert(be.paramTypes[i], a)
+		v, err := in.wastConvert(be.resolve, be.paramTypes[i], a)
 		if err != nil {
 			return nil, err
 		}
@@ -180,7 +191,7 @@ func expectedWast(t *testing.T, in *Instance, field string, exp []typedVal) []ab
 	for i, e := range exp {
 		// Single-result functions carry their type in resultType; the suites
 		// here never declare multiple named results.
-		v, err := in.wastConvert(be.resultType, e)
+		v, err := in.wastConvert(be.resolve, be.resultType, e)
 		if err != nil {
 			t.Fatalf("%s: convert expected[%d]: %v", field, i, err)
 		}
@@ -196,8 +207,21 @@ func errNoExport(f string) error    { return noExportErr(f) }
 
 // wastConvert turns one typed spec-test JSON value into the abi.Value wazy's
 // lower/lift use, driven by the declared component type (needed to map variant/
-// enum/flags labels to indices).
-func (in *Instance) wastConvert(desc binary.TypeDesc, tv typedVal) (abi.Value, error) {
+// enum/flags labels to indices). resolve MUST be the resolver desc's own
+// (possibly nested, via a TypeRef) types were declared against -- normally
+// the target boundExport's own be.resolve, NOT necessarily in.resolve: an
+// export reached by aliasing a SIBLING component's export (bindFuncExportGraph's
+// isLift==false path, e.g. big-interleaving-test.wast's top-level `(alias
+// export $driver "run" (func $run))`) carries fd/paramTypes/resultType with
+// TypeRefs into the ALIASED (owning) component's OWN TypeSpace, which is a
+// different index space than in's own -- see boundExport.resolve's doc.
+// Falls back to in.resolve when resolve is nil, matching every call site
+// before be.resolve started being threaded through (kept only as a defensive
+// fallback; a real boundExport always has resolve set by finalizeBoundExport).
+func (in *Instance) wastConvert(resolve abi.Resolver, desc binary.TypeDesc, tv typedVal) (abi.Value, error) {
+	if resolve == nil {
+		resolve = in.resolve
+	}
 	switch d := desc.(type) {
 	case binary.PrimitiveDesc:
 		return convertPrim(d.Prim, tv.Value)
@@ -209,7 +233,7 @@ func (in *Instance) wastConvert(desc binary.TypeDesc, tv typedVal) (abi.Value, e
 		}
 		out := make([]abi.Value, len(d.Fields))
 		for i, f := range d.Fields {
-			ft, err := resolveTypeRef(&f.Type, in.resolve)
+			ft, err := resolveTypeRef(&f.Type, resolve)
 			if err != nil {
 				return nil, err
 			}
@@ -217,7 +241,7 @@ func (in *Instance) wastConvert(desc binary.TypeDesc, tv typedVal) (abi.Value, e
 			if err := json.Unmarshal(pairs[i][1], &inner); err != nil {
 				return nil, err
 			}
-			if out[i], err = in.wastConvert(ft, inner); err != nil {
+			if out[i], err = in.wastConvert(resolve, ft, inner); err != nil {
 				return nil, err
 			}
 		}
@@ -230,11 +254,11 @@ func (in *Instance) wastConvert(desc binary.TypeDesc, tv typedVal) (abi.Value, e
 		}
 		out := make([]abi.Value, len(d.Elements))
 		for i := range d.Elements {
-			et, err := resolveTypeRef(&d.Elements[i], in.resolve)
+			et, err := resolveTypeRef(&d.Elements[i], resolve)
 			if err != nil {
 				return nil, err
 			}
-			if out[i], err = in.wastConvert(et, elems[i]); err != nil {
+			if out[i], err = in.wastConvert(resolve, et, elems[i]); err != nil {
 				return nil, err
 			}
 		}
@@ -245,13 +269,13 @@ func (in *Instance) wastConvert(desc binary.TypeDesc, tv typedVal) (abi.Value, e
 		if err != nil {
 			return nil, err
 		}
-		et, err := resolveTypeRef(&d.Element, in.resolve)
+		et, err := resolveTypeRef(&d.Element, resolve)
 		if err != nil {
 			return nil, err
 		}
 		out := make([]abi.Value, len(elems))
 		for i := range elems {
-			if out[i], err = in.wastConvert(et, elems[i]); err != nil {
+			if out[i], err = in.wastConvert(resolve, et, elems[i]); err != nil {
 				return nil, err
 			}
 		}
@@ -271,11 +295,11 @@ func (in *Instance) wastConvert(desc binary.TypeDesc, tv typedVal) (abi.Value, e
 			}
 			var payload abi.Value
 			if cs.Type != nil && raw.Payload != nil {
-				ct, err := resolveTypeRef(cs.Type, in.resolve)
+				ct, err := resolveTypeRef(cs.Type, resolve)
 				if err != nil {
 					return nil, err
 				}
-				if payload, err = in.wastConvert(ct, *raw.Payload); err != nil {
+				if payload, err = in.wastConvert(resolve, ct, *raw.Payload); err != nil {
 					return nil, err
 				}
 			}
@@ -318,11 +342,11 @@ func (in *Instance) wastConvert(desc binary.TypeDesc, tv typedVal) (abi.Value, e
 		if err := json.Unmarshal(tv.Value, &inner); err != nil {
 			return nil, err
 		}
-		et, err := resolveTypeRef(&d.Element, in.resolve)
+		et, err := resolveTypeRef(&d.Element, resolve)
 		if err != nil {
 			return nil, err
 		}
-		return in.wastConvert(et, inner)
+		return in.wastConvert(resolve, et, inner)
 
 	case binary.ResultDesc:
 		var raw map[string]*typedVal
@@ -332,11 +356,11 @@ func (in *Instance) wastConvert(desc binary.TypeDesc, tv typedVal) (abi.Value, e
 		mk := func(ref *TypeRefAlias, tvp *typedVal, isErr bool) (abi.Value, error) {
 			var payload abi.Value
 			if ref != nil && tvp != nil {
-				rt, err := resolveTypeRef((*binary.TypeRef)(ref), in.resolve)
+				rt, err := resolveTypeRef((*binary.TypeRef)(ref), resolve)
 				if err != nil {
 					return nil, err
 				}
-				if payload, err = in.wastConvert(rt, *tvp); err != nil {
+				if payload, err = in.wastConvert(resolve, rt, *tvp); err != nil {
 					return nil, err
 				}
 			}

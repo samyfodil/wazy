@@ -8,8 +8,10 @@ package binary
 // Per the component-model binary format, the core func index space is
 // populated, in declaration order, by every core-level func alias (section
 // 6, Sort == 0x00 core, CoreSort == 0x00 func) AND every canon that produces
-// a brand new core func: lower (0x01), resource.new (0x02), resource.drop
-// (0x03), resource.rep (0x04) (section 8). These two producers can interleave
+// a brand new core func: every Canon.Kind except lift (0x00) -- lower
+// (0x01), the three resource canons (0x02-0x04), and every async builtin
+// (task.*, subtask.*, context.get/set, stream.*, future.*, error-context.*,
+// waitable*, backpressure.*; section 8). These two producers can interleave
 // arbitrarily -- e.g. a canon resource.drop can sit between two core-func
 // aliases that were declared before and after it -- which the decoder's flat
 // Aliases and Canons slices, each populated independently by their own
@@ -34,8 +36,8 @@ const (
 	// (section 6, Sort == 0x00, CoreSort == 0x00).
 	CoreFuncFromAlias CoreFuncSpaceEntryKind = iota
 	// CoreFuncFromCanon marks an entry produced by a canon that yields a new
-	// core func: lower (0x01), resource.new (0x02), resource.drop (0x03), or
-	// resource.rep (0x04).
+	// core func: every Canon.Kind except lift (0x00) -- see decodeComponent's
+	// canon-section case.
 	CoreFuncFromCanon
 )
 

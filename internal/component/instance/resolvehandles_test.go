@@ -30,6 +30,7 @@ func TestResolveArgHandles(t *testing.T) {
 	ref := func(i uint32) binary.TypeRef { return binary.TypeRef{TypeIndex: &[]uint32{i}[0]} }
 
 	in := &Instance{
+		sched:           &sched{},
 		resolve:         resolve,
 		resources:       tbl,
 		isGuestResource: func(r uint32) bool { return r == guestRes },
@@ -103,7 +104,7 @@ func TestDropResourceErrors(t *testing.T) {
 	tbl := newHandleTable()
 	borrowH := tbl.NewBorrow(1, 100)
 	ownH := tbl.NewOwn(1, 200)
-	in := &Instance{resources: tbl}
+	in := &Instance{sched: &sched{}, resources: tbl}
 	ctx := t.Context()
 
 	if err := in.DropResource(ctx, "i", "r", 99999); err == nil {

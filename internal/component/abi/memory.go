@@ -104,7 +104,8 @@ func loadValue(mem []byte, ptr uint32, t bintype.TypeDesc, resolve Resolver) (Va
 	case bintype.ResultDesc:
 		return loadResult(mem, ptr, desc, resolve)
 
-	case bintype.OwnDesc, bintype.BorrowDesc:
+	case bintype.OwnDesc, bintype.BorrowDesc, bintype.StreamDesc, bintype.FutureDesc:
+		// stream/future values are opaque i32 handles, same load as own/borrow.
 		return loadInt(mem, ptr, 4, false)
 
 	default:
@@ -174,6 +175,10 @@ func loadPrimitive(mem []byte, ptr uint32, prim string) (Value, error) {
 
 	case "string":
 		return loadString(mem, ptr)
+
+	case "error-context":
+		// Opaque i32 handle -- same load as own/borrow.
+		return loadInt(mem, ptr, 4, false)
 
 	default:
 		return nil, fmt.Errorf("load: unknown primitive %s", prim)
@@ -643,7 +648,9 @@ func storeValue(mem []byte, ptr uint32, t bintype.TypeDesc, v Value, resolve Res
 	case bintype.ResultDesc:
 		return storeResult(mem, ptr, v, desc, resolve, realloc)
 
-	case bintype.OwnDesc, bintype.BorrowDesc:
+	case bintype.OwnDesc, bintype.BorrowDesc, bintype.StreamDesc, bintype.FutureDesc:
+		// stream/future values are opaque i32 handles, same store as
+		// own/borrow.
 		if h, ok := v.(uint32); ok {
 			return storeInt(mem, ptr, h, 4)
 		}
@@ -734,6 +741,13 @@ func storePrimitive(mem []byte, ptr uint32, prim string, v Value, realloc Reallo
 			return storeString(mem, ptr, s, realloc)
 		}
 		return fmt.Errorf("store string: expected string, got %T", v)
+
+	case "error-context":
+		// Opaque i32 handle -- same store as own/borrow.
+		if h, ok := v.(uint32); ok {
+			return storeInt(mem, ptr, h, 4)
+		}
+		return fmt.Errorf("store error-context: expected uint32 handle, got %T", v)
 
 	default:
 		return fmt.Errorf("store: unknown primitive %s", prim)

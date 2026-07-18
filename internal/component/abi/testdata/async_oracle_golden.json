@@ -1,0 +1,1364 @@
+{
+  "scenarios": {
+    "backpressure-underflow-traps": {
+      "table": null,
+      "trace": [
+        {
+          "kind": "trap",
+          "op": 0
+        }
+      ]
+    },
+    "double-task-return": {
+      "table": null,
+      "trace": [
+        {
+          "cancelled": false,
+          "kind": "task-resolve",
+          "op": 0,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": []
+        },
+        {
+          "kind": "trap",
+          "op": 1
+        }
+      ]
+    },
+    "drop-stale-index-traps": {
+      "table": null,
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": [
+            1
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 1,
+          "vals": []
+        },
+        {
+          "kind": "trap",
+          "op": 2
+        }
+      ]
+    },
+    "future-once": {
+      "table": null,
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": [
+            1,
+            2
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 2,
+          "vals": [
+            4294967295
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 3,
+          "vals": [
+            0
+          ]
+        },
+        {
+          "bytes": "2a000000",
+          "kind": "mem",
+          "op": 4
+        },
+        {
+          "kind": "ret",
+          "op": 5,
+          "vals": [
+            3
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 6,
+          "vals": []
+        },
+        {
+          "code": 5,
+          "kind": "event",
+          "op": 7,
+          "p1": 2,
+          "p2": 0
+        },
+        {
+          "kind": "trap",
+          "op": 8
+        }
+      ]
+    },
+    "host-cancel-blocking-wait": {
+      "table": [],
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 1,
+          "vals": [
+            1
+          ]
+        },
+        {
+          "code": 6,
+          "kind": "event",
+          "op": 2,
+          "p1": 0,
+          "p2": 0
+        },
+        {
+          "kind": "ret",
+          "op": 3,
+          "vals": []
+        },
+        {
+          "cancelled": true,
+          "kind": "task-resolve",
+          "op": 4,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 4,
+          "vals": []
+        }
+      ]
+    },
+    "host-cancel-uncancellable-then-poll": {
+      "table": [],
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": [
+            17
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 1,
+          "vals": [
+            2
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 2,
+          "vals": []
+        },
+        {
+          "code": 1,
+          "kind": "event",
+          "op": 3,
+          "p1": 1,
+          "p2": 2
+        },
+        {
+          "bytes": "05000000",
+          "kind": "mem",
+          "op": 4
+        },
+        {
+          "kind": "ret",
+          "op": 5,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 6,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 7,
+          "vals": [
+            17
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 8,
+          "vals": []
+        },
+        {
+          "code": 1,
+          "kind": "event",
+          "op": 9,
+          "p1": 1,
+          "p2": 2
+        },
+        {
+          "bytes": "09000000",
+          "kind": "mem",
+          "op": 10
+        },
+        {
+          "kind": "ret",
+          "op": 11,
+          "vals": []
+        },
+        {
+          "code": 6,
+          "kind": "event",
+          "op": 12,
+          "p1": 0,
+          "p2": 0
+        },
+        {
+          "kind": "ret",
+          "op": 13,
+          "vals": []
+        },
+        {
+          "cancelled": true,
+          "kind": "task-resolve",
+          "op": 14,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 14,
+          "vals": []
+        }
+      ]
+    },
+    "import-deferred-wait": {
+      "table": [],
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": [
+            17
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 1,
+          "vals": [
+            2
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 2,
+          "vals": []
+        },
+        {
+          "code": 1,
+          "kind": "event",
+          "op": 3,
+          "p1": 1,
+          "p2": 2
+        },
+        {
+          "bytes": "2a000000",
+          "kind": "mem",
+          "op": 4
+        },
+        {
+          "kind": "ret",
+          "op": 5,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 6,
+          "vals": []
+        },
+        {
+          "cancelled": false,
+          "kind": "task-resolve",
+          "op": 7,
+          "vals": [
+            7
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 7,
+          "vals": []
+        }
+      ]
+    },
+    "import-immediate": {
+      "table": [],
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": [
+            2
+          ]
+        },
+        {
+          "bytes": "2a000000",
+          "kind": "mem",
+          "op": 1
+        },
+        {
+          "cancelled": false,
+          "kind": "task-resolve",
+          "op": 2,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 2,
+          "vals": []
+        }
+      ]
+    },
+    "import-two-fifo": {
+      "table": [],
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": [
+            17
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 1,
+          "vals": [
+            33
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 2,
+          "vals": [
+            3
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 3,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 4,
+          "vals": []
+        },
+        {
+          "code": 1,
+          "kind": "event",
+          "op": 5,
+          "p1": 1,
+          "p2": 2
+        },
+        {
+          "bytes": "0a000000",
+          "kind": "mem",
+          "op": 6
+        },
+        {
+          "code": 1,
+          "kind": "event",
+          "op": 7,
+          "p1": 2,
+          "p2": 2
+        },
+        {
+          "bytes": "14000000",
+          "kind": "mem",
+          "op": 8
+        },
+        {
+          "kind": "ret",
+          "op": 9,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 10,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 11,
+          "vals": []
+        },
+        {
+          "cancelled": false,
+          "kind": "task-resolve",
+          "op": 12,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 12,
+          "vals": []
+        }
+      ]
+    },
+    "import-two-sets-poll": {
+      "table": [],
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": [
+            17
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 1,
+          "vals": [
+            33
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 2,
+          "vals": [
+            3
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 3,
+          "vals": [
+            4
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 4,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 5,
+          "vals": []
+        },
+        {
+          "code": 1,
+          "kind": "event",
+          "op": 6,
+          "p1": 2,
+          "p2": 2
+        },
+        {
+          "code": 1,
+          "kind": "event",
+          "op": 7,
+          "p1": 1,
+          "p2": 2
+        },
+        {
+          "bytes": "0a000000",
+          "kind": "mem",
+          "op": 8
+        },
+        {
+          "bytes": "14000000",
+          "kind": "mem",
+          "op": 9
+        },
+        {
+          "kind": "ret",
+          "op": 10,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 11,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 12,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 13,
+          "vals": []
+        },
+        {
+          "cancelled": false,
+          "kind": "task-resolve",
+          "op": 14,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 14,
+          "vals": []
+        }
+      ]
+    },
+    "join-rejoin-leave": {
+      "table": [
+        {
+          "index": 1,
+          "kind": "subtask",
+          "state": 1
+        }
+      ],
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": [
+            17
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 1,
+          "vals": [
+            2
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 2,
+          "vals": [
+            3
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 3,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 4,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 5,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 6,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 7,
+          "vals": []
+        },
+        {
+          "cancelled": false,
+          "kind": "task-resolve",
+          "op": 8,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 8,
+          "vals": []
+        }
+      ]
+    },
+    "join-set-as-waitable-traps": {
+      "table": null,
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": [
+            1
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 1,
+          "vals": [
+            2
+          ]
+        },
+        {
+          "kind": "trap",
+          "op": 2
+        }
+      ]
+    },
+    "misc-context-ec": {
+      "table": [],
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 1,
+          "vals": [
+            99
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 2,
+          "vals": [
+            0
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 3,
+          "vals": [
+            1
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 4,
+          "vals": [
+            2
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 5,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 6,
+          "vals": [
+            1
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 7,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 8,
+          "vals": []
+        },
+        {
+          "cancelled": false,
+          "kind": "task-resolve",
+          "op": 9,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 9,
+          "vals": []
+        }
+      ]
+    },
+    "poll-empty-none": {
+      "table": [],
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": [
+            1
+          ]
+        },
+        {
+          "code": 0,
+          "kind": "event",
+          "op": 1,
+          "p1": 0,
+          "p2": 0
+        },
+        {
+          "kind": "ret",
+          "op": 2,
+          "vals": []
+        },
+        {
+          "cancelled": false,
+          "kind": "task-resolve",
+          "op": 3,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 3,
+          "vals": []
+        }
+      ]
+    },
+    "stream-cancel-read": {
+      "table": [
+        {
+          "copy": "idle",
+          "index": 1,
+          "kind": "stream-read"
+        },
+        {
+          "copy": "idle",
+          "index": 2,
+          "kind": "stream-write"
+        }
+      ],
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": [
+            1,
+            2
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 1,
+          "vals": [
+            4294967295
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 2,
+          "vals": [
+            2
+          ]
+        },
+        {
+          "cancelled": false,
+          "kind": "task-resolve",
+          "op": 3,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 3,
+          "vals": []
+        }
+      ]
+    },
+    "stream-drop-readable-while-copying-traps": {
+      "table": null,
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": [
+            1,
+            2
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 1,
+          "vals": [
+            4294967295
+          ]
+        },
+        {
+          "kind": "trap",
+          "op": 2
+        }
+      ]
+    },
+    "stream-drop-writable-then-read-dropped": {
+      "table": [],
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": [
+            1,
+            2
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 1,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 2,
+          "vals": [
+            1
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 3,
+          "vals": []
+        },
+        {
+          "cancelled": false,
+          "kind": "task-resolve",
+          "op": 4,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 4,
+          "vals": []
+        }
+      ]
+    },
+    "stream-rendezvous": {
+      "table": [],
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": [
+            1,
+            2
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 2,
+          "vals": [
+            4294967295
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 3,
+          "vals": [
+            48
+          ]
+        },
+        {
+          "bytes": "010203",
+          "kind": "mem",
+          "op": 4
+        },
+        {
+          "kind": "ret",
+          "op": 5,
+          "vals": [
+            3
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 6,
+          "vals": []
+        },
+        {
+          "code": 3,
+          "kind": "event",
+          "op": 7,
+          "p1": 2,
+          "p2": 48
+        },
+        {
+          "kind": "ret",
+          "op": 8,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 9,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 10,
+          "vals": []
+        },
+        {
+          "cancelled": false,
+          "kind": "task-resolve",
+          "op": 11,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 11,
+          "vals": []
+        }
+      ]
+    },
+    "stream-zero-length-write-handshake": {
+      "table": [
+        {
+          "copy": "copying",
+          "index": 1,
+          "kind": "stream-read"
+        },
+        {
+          "copy": "idle",
+          "index": 2,
+          "kind": "stream-write"
+        }
+      ],
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": [
+            1,
+            2
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 1,
+          "vals": [
+            4294967295
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 2,
+          "vals": [
+            0
+          ]
+        },
+        {
+          "cancelled": false,
+          "kind": "task-resolve",
+          "op": 3,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 3,
+          "vals": []
+        }
+      ]
+    },
+    "subtask-cancel-async-blocked": {
+      "table": [],
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": [
+            17
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 1,
+          "vals": [
+            4294967295
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 2,
+          "vals": [
+            2
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 3,
+          "vals": []
+        },
+        {
+          "code": 1,
+          "kind": "event",
+          "op": 4,
+          "p1": 1,
+          "p2": 2
+        },
+        {
+          "bytes": "05000000",
+          "kind": "mem",
+          "op": 5
+        },
+        {
+          "kind": "ret",
+          "op": 6,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 7,
+          "vals": []
+        },
+        {
+          "cancelled": false,
+          "kind": "task-resolve",
+          "op": 8,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 8,
+          "vals": []
+        }
+      ]
+    },
+    "subtask-cancel-racing-completion": {
+      "table": [],
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": [
+            17
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 1,
+          "vals": [
+            33
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 2,
+          "vals": [
+            3
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 3,
+          "vals": []
+        },
+        {
+          "code": 1,
+          "kind": "event",
+          "op": 4,
+          "p1": 2,
+          "p2": 2
+        },
+        {
+          "bytes": "02000000",
+          "kind": "mem",
+          "op": 5
+        },
+        {
+          "kind": "ret",
+          "op": 6,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 7,
+          "vals": [
+            2
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 8,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 9,
+          "vals": []
+        },
+        {
+          "cancelled": false,
+          "kind": "task-resolve",
+          "op": 10,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 10,
+          "vals": []
+        }
+      ]
+    },
+    "subtask-cancel-sync-cancelled": {
+      "table": [],
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": [
+            17
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 1,
+          "vals": [
+            4
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 2,
+          "vals": []
+        },
+        {
+          "cancelled": false,
+          "kind": "task-resolve",
+          "op": 3,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 3,
+          "vals": []
+        }
+      ]
+    },
+    "subtask-cancel-twice": {
+      "table": null,
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": [
+            17
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 1,
+          "vals": [
+            4294967295
+          ]
+        },
+        {
+          "kind": "trap",
+          "op": 2
+        }
+      ]
+    },
+    "subtask-drop-unresolved": {
+      "table": null,
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": [
+            17
+          ]
+        },
+        {
+          "kind": "trap",
+          "op": 1
+        }
+      ]
+    },
+    "task-cancel-undelivered": {
+      "table": null,
+      "trace": [
+        {
+          "kind": "trap",
+          "op": 0
+        }
+      ]
+    },
+    "thread-yield-basic": {
+      "table": [],
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": [
+            0
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 1,
+          "vals": [
+            0
+          ]
+        },
+        {
+          "cancelled": false,
+          "kind": "task-resolve",
+          "op": 2,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 2,
+          "vals": []
+        }
+      ]
+    },
+    "thread-yield-cancel-interplay": {
+      "table": [],
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 1,
+          "vals": [
+            0
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 2,
+          "vals": [
+            0
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 3,
+          "vals": [
+            1
+          ]
+        },
+        {
+          "cancelled": true,
+          "kind": "task-resolve",
+          "op": 4,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 4,
+          "vals": []
+        }
+      ]
+    },
+    "wait-empty-deadlock": {
+      "table": null,
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": [
+            1
+          ]
+        },
+        {
+          "deadlock": true,
+          "kind": "trap",
+          "op": 1
+        }
+      ]
+    },
+    "wrong-handle-kind-wait": {
+      "table": null,
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": [
+            17
+          ]
+        },
+        {
+          "kind": "trap",
+          "op": 1
+        }
+      ]
+    },
+    "ws-drop-nonempty": {
+      "table": null,
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": [
+            17
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 1,
+          "vals": [
+            2
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 2,
+          "vals": []
+        },
+        {
+          "kind": "trap",
+          "op": 3
+        }
+      ]
+    },
+    "ws-new-drop-reuse": {
+      "table": [],
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": [
+            1
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 1,
+          "vals": [
+            2
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 2,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 3,
+          "vals": [
+            1
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 4,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 5,
+          "vals": []
+        },
+        {
+          "cancelled": false,
+          "kind": "task-resolve",
+          "op": 6,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 6,
+          "vals": []
+        }
+      ]
+    }
+  },
+  "scenarios_sha256": "14c1f650a26cf623a67c1a73c5ebc2abd345505f14cc5ac053d51987e42e05ba"
+}

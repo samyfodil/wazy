@@ -976,6 +976,9 @@ func (p *Parser) parseType() (TypeRef, error) {
 		return p.parseOwnType()
 	case TokenBorrow:
 		return p.parseBorrowType()
+	case TokenErrorContext:
+		p.advance()
+		return TypeRef{Kind: "error-context"}, nil
 	case TokenIdent:
 		name := p.current.Text
 		p.advance()
@@ -1557,7 +1560,7 @@ func (p *Parser) isIdentifierToken() bool {
 		TokenConstructor, TokenStatic, TokenBool, TokenS8, TokenS16, TokenS32, TokenS64,
 		TokenU8, TokenU16, TokenU32, TokenU64, TokenF32, TokenF64, TokenChar,
 		TokenString_Keyword, TokenList, TokenOption, TokenResult, TokenTuple, TokenMap,
-		TokenFuture, TokenStream, TokenOwn, TokenBorrow, TokenInclude, TokenWith,
+		TokenFuture, TokenStream, TokenOwn, TokenBorrow, TokenErrorContext, TokenInclude, TokenWith,
 		TokenFeature, TokenVersion_Keyword, TokenUnstable, TokenSince, TokenDeprecated,
 		TokenExternalID:
 		return true

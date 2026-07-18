@@ -59,6 +59,7 @@ const (
 	TokenStream
 	TokenOwn
 	TokenBorrow
+	TokenErrorContext // "error-context": the async ABI's terminal error-context type
 
 	// Punctuation
 	TokenLParen    // (
@@ -436,6 +437,8 @@ func keywordType(text string) TokenType {
 		return TokenOwn
 	case "borrow":
 		return TokenBorrow
+	case "error-context":
+		return TokenErrorContext
 	case "include":
 		return TokenInclude
 	case "with":
@@ -540,6 +543,8 @@ func (tt TokenType) String() string {
 		return "own"
 	case TokenBorrow:
 		return "borrow"
+	case TokenErrorContext:
+		return "error-context"
 	case TokenLParen:
 		return "("
 	case TokenRParen:

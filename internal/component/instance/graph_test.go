@@ -233,11 +233,35 @@ func TestGraph_BindInstanceExport_OutOfRange(t *testing.T) {
 	requireErrContains(t, err, "out of range of")
 }
 
-func TestGraph_BindInstanceExport_InlineKindUnsupported(t *testing.T) {
+// TestGraph_BindInstanceExport_UnsupportedInstanceKindTraps pins the
+// still-rejected case: an Instance.Kind that is neither 0x00 (instantiate)
+// nor 0x01 (inline exports, supported since this session's big-interleaving-
+// test fix below) -- unreachable through a real decode (the decoder only
+// ever produces 0x00/0x01), but kept as a defensive fail-loud guard against a
+// future/malformed extension.
+func TestGraph_BindInstanceExport_UnsupportedInstanceKindTraps(t *testing.T) {
 	comp := decodeRealHello(t)
-	comp.Instances[0].Kind = 0x01
+	comp.Instances[0].Kind = 0x02
 	_, err := runGraph(t, comp)
 	requireErrContains(t, err, "not a component instantiation")
+}
+
+// TestGraph_BindInstanceExport_InlineKindTypeOnlyBinds pins Instance.Kind ==
+// 0x01 (inline exports): a synthetic instance built purely by re-listing
+// existing sort entries, no nested-component instantiation at all (the WIT-
+// tooling pattern big-interleaving-test.wast's `(instance $types (export
+// "event-kind" (type $driver "event-kind")) ...)` uses to re-export types for
+// external binding-generator consumption). A type-sort member has nothing
+// callable to bind, so it's skipped -- mirroring bindImportExportsGraph's own
+// ExternType==0x03 skip for a plain top-level type re-export -- and
+// instantiation succeeds.
+func TestGraph_BindInstanceExport_InlineKindTypeOnlyBinds(t *testing.T) {
+	comp := decodeRealHello(t)
+	comp.Instances[0].Kind = 0x01
+	comp.Instances[0].Exports = []binary.InlineExport{{Name: "some-type", Sort: 0x03, SortIdx: 0}}
+	if _, err := runGraph(t, comp); err != nil {
+		t.Fatalf("expected an inline-export instance with only a type member to bind (skip) cleanly, got error: %v", err)
+	}
 }
 
 func TestGraph_BindInstanceExport_NestedComponentOutOfRange(t *testing.T) {
@@ -328,7 +352,7 @@ func TestBuildCanonHostModule_LowersLiftedFunc(t *testing.T) {
 	ctx := context.Background()
 	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)
-	_, _, _, _, _, err := buildCanonHostModule(ctx, r, comp, newConfig(nil), newHandleTable(), canon, nil, "g", "e", "p", nil, nil)
+	_, _, _, _, _, err := buildCanonHostModule(ctx, r, comp, newConfig(nil), newHandleTable(), nil, canon, nil, "g", "e", "p", nil, nil, nil)
 	requireErrContains(t, err, "lowers a lifted")
 }
 
@@ -353,7 +377,7 @@ func TestBuildCanonHostModule_ImportInterfaceNameError(t *testing.T) {
 	ctx := context.Background()
 	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)
-	_, _, _, _, _, err := buildCanonHostModule(ctx, r, comp, newConfig(nil), newHandleTable(), canon, nil, "g", "e", "p", nil, nil)
+	_, _, _, _, _, err := buildCanonHostModule(ctx, r, comp, newConfig(nil), newHandleTable(), nil, canon, nil, "g", "e", "p", nil, nil, nil)
 	requireErrContains(t, err, "out of range")
 }
 
@@ -368,7 +392,7 @@ func TestBuildCanonHostModule_WithImportOverride(t *testing.T) {
 	hostFn := func(context.Context, []abi.Value) ([]abi.Value, error) { return nil, nil }
 	cfg := newConfig([]Option{WithImport("wasi:cli/stderr@0.2.3", "get-stderr", hostFn, nil, nil)})
 
-	mod, exportName, _, _, wasiCall, err := buildCanonHostModule(ctx, r, comp, cfg, newHandleTable(), canon, nil, "g", "e", "wazy:component/testpriv1", nil, nil)
+	mod, exportName, _, _, wasiCall, err := buildCanonHostModule(ctx, r, comp, cfg, newHandleTable(), nil, canon, nil, "g", "e", "wazy:component/testpriv1", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildCanonHostModule: %v", err)
 	}
@@ -388,7 +412,7 @@ func TestBuildCanonHostModule_UnsupportedCanonKind(t *testing.T) {
 	ctx := context.Background()
 	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)
-	_, _, _, _, _, err := buildCanonHostModule(ctx, r, comp, newConfig(nil), newHandleTable(), binary.Canon{Kind: 0xff}, nil, "g", "e", "p", nil, nil)
+	_, _, _, _, _, err := buildCanonHostModule(ctx, r, comp, newConfig(nil), newHandleTable(), nil, binary.Canon{Kind: 0xff}, nil, "g", "e", "p", nil, nil, nil)
 	requireErrContains(t, err, "does not produce a core func")
 }
 
@@ -523,6 +547,32 @@ func TestBindFuncExportGraph_CoreFuncTargetError(t *testing.T) {
 	coreFuncTarget := func(int) (api.Module, string, error) { return nil, "", errBoom }
 	_, err := bindFuncExportGraph(comp, 0, componentFunc, coreFuncTarget, nil, "x", nil, nil)
 	requireErrContains(t, err, "boom")
+}
+
+// TestBindFuncExportGraph_AsyncNoCallback pins the async-no-callback
+// STACKFUL sub-shape's binding (docs/component-model-async-stackful-
+// design.md §9): a canon lift with the async opt but no callback opt is
+// no longer rejected -- it binds be.stackful/be.stackfulAsyncOpts instead,
+// routed through invokeStackful.
+func TestBindFuncExportGraph_AsyncNoCallback(t *testing.T) {
+	_, mod := memModule(t)
+	fd := binary.FuncDesc{}
+	comp := &binary.Component{
+		Types:  []binary.Type{{Descriptor: fd}},
+		Canons: []binary.Canon{{Kind: 0x00, TypeIdx: 0, CoreFuncIdx: 0, Opts: []binary.CanonOpt{{Kind: 0x06}}}}, // async, no callback opt
+	}
+	componentFunc := func(uint32) (bool, int, aliasTarget, error) { return true, 0, aliasTarget{}, nil }
+	coreFuncTarget := func(int) (api.Module, string, error) { return mod, "main", nil }
+	be, err := bindFuncExportGraph(comp, 0, componentFunc, coreFuncTarget, nil, "x", nil, nil)
+	if err != nil {
+		t.Fatalf("bindFuncExportGraph: %v", err)
+	}
+	if !be.stackful || !be.stackfulAsyncOpts {
+		t.Fatalf("be.stackful=%v be.stackfulAsyncOpts=%v, want both true", be.stackful, be.stackfulAsyncOpts)
+	}
+	if be.asyncCallback {
+		t.Fatal("be.asyncCallback should be false for the no-callback sub-shape")
+	}
 }
 
 func TestBindFuncExportGraph_PostReturnError(t *testing.T) {

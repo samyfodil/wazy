@@ -223,13 +223,81 @@ func TestFlattenRefsAndResults(t *testing.T) {
 }
 
 func TestBuildHostWrapper_SpilledParams(t *testing.T) {
-	// 17 u32 params flatten to 17 i32, exceeding MaxFlatParams (16).
+	// 17 u32 params flatten to 17 i32, exceeding MaxFlatParams (16) --
+	// buildHostWrapper supports this via the Canonical ABI's whole-
+	// parameter-list spill (a single i32 pointer into the calling module's
+	// memory, holding the params stored as a tuple) rather than rejecting
+	// it -- see liftHostArgsSpilled for the actual memory-read path and
+	// TestLiftHostArgsSpilled_RoundTrip for a real end-to-end call.
 	var params []binary.TypeDesc
 	for i := 0; i < 17; i++ {
 		params = append(params, binary.PrimitiveDesc{Prim: "u32"})
 	}
-	_, _, _, err := buildHostWrapper("i", "f", &hostImport{fn: noopLog, params: params}, newHandleTable(), nil, nil)
-	requireErrContains(t, err, "whole-parameter-list spilling")
+	fn, apiParams, _, err := buildHostWrapper(nil, "i", "f", &hostImport{fn: noopLog, params: params}, newHandleTable(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fn == nil {
+		t.Fatal("nil wrapper")
+	}
+	if len(apiParams) != 1 || apiParams[0] != api.ValueTypeI32 {
+		t.Fatalf("params: %#v, want a single i32 pointer", apiParams)
+	}
+}
+
+// TestLiftHostArgsSpilled_RoundTrip proves the spilled-param READ path
+// itself (not just buildHostWrapper's signature computation, see
+// TestBuildHostWrapper_SpilledParams above): abi.Store writes a 17-element
+// tuple into memory at a fixed pointer exactly like a real spilling guest
+// would (mirroring TestLowerHostResults_Spilled's own fixed-pointer style,
+// which avoids needing a "cabi_realloc" export this test's bare core module
+// doesn't have), then liftHostArgsSpilled reads it back through the pointer
+// and must recover every element, in order, including running the
+// borrow-lend/resolveHandleArg per-param post-processing
+// liftHostArgsPlanned's non-spilled path already gets.
+func TestLiftHostArgsSpilled_RoundTrip(t *testing.T) {
+	_, mod := memModule(t)
+	var params []binary.TypeDesc
+	want := make([]abi.Value, 17)
+	for i := range want {
+		params = append(params, binary.PrimitiveDesc{Prim: "u32"})
+		want[i] = uint32(1000 + i)
+	}
+	fd, resolve := synthFuncDesc(params, nil)
+	plans, err := buildHostParamPlans(fd, resolve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	elems := make([]binary.TypeRef, len(fd.Params))
+	for i, p := range fd.Params {
+		elems[i] = p.Type
+	}
+	tupleDesc := binary.TupleDesc{Elements: elems}
+
+	memBytes, ok := memoryBytesOf(mod)
+	if !ok {
+		t.Fatal("expected memory")
+	}
+	const ptr = 64
+	if err := abi.Store(memBytes, ptr, tupleDesc, want, resolve, abi.Realloc{}); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+
+	args, lent, err := liftHostArgsSpilled(nil, plans, tupleDesc, resolve, ptr, mod, newHandleTable())
+	if err != nil {
+		t.Fatalf("liftHostArgsSpilled: %v", err)
+	}
+	if len(lent) != 0 {
+		t.Fatalf("lent: %#v, want none (no borrow params)", lent)
+	}
+	if len(args) != len(want) {
+		t.Fatalf("args: got %d, want %d", len(args), len(want))
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("args[%d] = %#v, want %#v", i, args[i], want[i])
+		}
+	}
 }
 
 func TestBuildHostWrapper_SpilledResults(t *testing.T) {
@@ -244,7 +312,7 @@ func TestBuildHostWrapper_SpilledResults(t *testing.T) {
 		{Name: "a", Type: binary.TypeRef{Primitive: "u64"}},
 		{Name: "b", Type: binary.TypeRef{Primitive: "u64"}},
 	}}
-	fn, params, results, err := buildHostWrapper("i", "f", &hostImport{fn: noopLog, results: []binary.TypeDesc{rec}}, newHandleTable(), nil, nil)
+	fn, params, results, err := buildHostWrapper(nil, "i", "f", &hostImport{fn: noopLog, results: []binary.TypeDesc{rec}}, newHandleTable(), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +328,7 @@ func TestBuildHostWrapper_SpilledResults(t *testing.T) {
 }
 
 func TestBuildHostWrapper_Success(t *testing.T) {
-	fn, params, results, err := buildHostWrapper("i", "f",
+	fn, params, results, err := buildHostWrapper(nil, "i", "f",
 		&hostImport{fn: noopLog, params: []binary.TypeDesc{binary.PrimitiveDesc{Prim: "string"}}}, newHandleTable(), nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -299,7 +367,7 @@ func TestLiftHostArgs_String(t *testing.T) {
 	if !mem.WriteString(0, "hi") {
 		t.Fatal("write failed")
 	}
-	args, _, err := liftHostArgs(fd, resolve, []uint64{0, 2}, mod, newHandleTable())
+	args, _, err := liftHostArgs(nil, fd, resolve, []uint64{0, 2}, mod, newHandleTable())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +402,7 @@ func BenchmarkLiftHostArgs(b *testing.B) {
 	b.Run("perCallPlan", func(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			if _, _, err := liftHostArgs(fd, resolve, stack, mod, tbl); err != nil {
+			if _, _, err := liftHostArgs(nil, fd, resolve, stack, mod, tbl); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -347,7 +415,7 @@ func BenchmarkLiftHostArgs(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if _, _, err := liftHostArgsPlanned(plans, resolve, stack, mod, tbl); err != nil {
+			if _, _, err := liftHostArgsPlanned(nil, plans, resolve, stack, mod, tbl); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -357,7 +425,7 @@ func BenchmarkLiftHostArgs(b *testing.B) {
 func TestLiftHostArgs_StackUnderflow(t *testing.T) {
 	_, mod := memModule(t)
 	fd, resolve := synthFuncDesc([]binary.TypeDesc{binary.PrimitiveDesc{Prim: "string"}}, nil)
-	if _, _, err := liftHostArgs(fd, resolve, []uint64{0}, mod, newHandleTable()); err == nil {
+	if _, _, err := liftHostArgs(nil, fd, resolve, []uint64{0}, mod, newHandleTable()); err == nil {
 		t.Fatal("expected stack underflow error")
 	}
 }
@@ -371,7 +439,7 @@ func TestLiftHostArgs_NeedsMemoryNone(t *testing.T) {
 		t.Fatal(err)
 	}
 	fd, resolve := synthFuncDesc([]binary.TypeDesc{binary.PrimitiveDesc{Prim: "string"}}, nil)
-	if _, _, err := liftHostArgs(fd, resolve, []uint64{0, 0}, mod, newHandleTable()); err == nil {
+	if _, _, err := liftHostArgs(nil, fd, resolve, []uint64{0, 0}, mod, newHandleTable()); err == nil {
 		t.Fatal("expected memory-required error")
 	}
 }

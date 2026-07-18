@@ -54,6 +54,7 @@ package instance
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -63,6 +64,7 @@ import (
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
+	"github.com/samyfodil/wazy/internal/wasmruntime"
 )
 
 // uint64SlicePool and coreValueSlicePool pool the []uint64/[]abi.CoreValue
@@ -175,6 +177,22 @@ type Instance struct {
 	// resource canons.
 	resCanon func(uint32) uint32
 
+	// resourceOrigin maps a canonicalized (post-resCanon) local resource tag
+	// this instance IMPORTS to the resourceIdentity of the sub-instance that
+	// ultimately DEFINES it -- populated (only for resources actually
+	// received through a composition instantiate-arg) by
+	// instantiateNestedInstances, regardless of whether this instance itself
+	// re-exports the resource under any name. See originOf and
+	// translateResourceFD's use of it: a provider's resource type index that
+	// isn't among ITS OWN exports (e.g. a component that merely re-uses a
+	// resource it imported from a further sibling, never re-exporting it,
+	// like $D in drop-cross-task-borrow.wast) still needs to be recognized as
+	// "the same resource" as whatever local tag a THIRD sibling imports it
+	// under -- name-matching against exportedResourceDefs alone can't see
+	// that, since the provider's own exports never mention the resource by
+	// name. nil for an instance that imports no resources via composition.
+	resourceOrigin map[uint32]resourceIdentity
+
 	// comp is the decoded component this instance was instantiated from, read by
 	// a parent composition when wiring this instance's exported resources into a
 	// sibling's imports. nil for instances not part of a composition.
@@ -209,6 +227,152 @@ type Instance struct {
 	// the trivial no-import path (no guest resources). Used by resolveArgHandles
 	// to decide whether an own/borrow arg's handle must be converted to a rep.
 	isGuestResource func(resourceTypeIdx uint32) bool
+
+	// --- Async runtime state (docs/component-model-async-runtime-design.md
+	// §1.2). Every field below is untouched (stays at its zero value) by a
+	// component with no async export, so a sync-only Instance pays two bool
+	// initializations and nothing else. ---
+
+	// sched is the scheduler used while an async task is active -- see
+	// sched's doc and invokeAsyncCallback. A *pointer*, not a value (Phase 3
+	// forced change #1, docs/component-model-async-phase3-design.md §0):
+	// cross-instance resumption (guest<->guest async lower, §3) requires
+	// that A's WAIT drive can resume B's parked task, so every Instance in
+	// one composition TREE shares the same *sched, created by the root
+	// instantiation and inherited by instantiateNestedInstances via
+	// subCfg.sharedSched. A flat (non-composed) instance is its own tree
+	// root and behaves exactly as before this change (its own private
+	// scheduler, just heap-allocated instead of inline).
+	sched *sched
+
+	// numWaitingToEnter counts guestTasks currently parked at parkEntry on
+	// this instance (Phase 3, mirrors the reference's FIFO fairness at
+	// ~492-495): a later caller may not enter ahead of an earlier one still
+	// waiting for backpressure/exclusive to clear. See task.go's tryEnter.
+	numWaitingToEnter int
+
+	// activeTask is non-nil for the duration of invokeAsyncCallback: the
+	// task currently on the (single, implicit) async call stack. The
+	// task.return/context.get/context.set builtins resolve "current task"
+	// through this field (mirroring the reference's current_task()), since
+	// they are ordinary core funcs with no other way to reach the call in
+	// progress. nil outside an async call, and always nil for a purely
+	// synchronous Instance.
+	activeTask *task
+
+	// exclusiveHeld mirrors the reference's inst.exclusive_thread (collapsed
+	// to a bool: there is at most one task, so "who holds it" is always
+	// activeTask when held). See task.go's enterTask/exitTask and
+	// invokeAsyncCallback's callback loop for the set/clear sites.
+	exclusiveHeld bool
+
+	// exclusiveOwner is WHICH task holds exclusiveHeld -- nil iff
+	// !exclusiveHeld (docs/component-model-async-stackful-design.md §5).
+	// A pure-callback composition never observes it (exclusiveOwner is
+	// always either nil or the one running task, so every existing
+	// "!exclusiveHeld" conjunct evaluates identically whether or not it
+	// also checks ownership); it becomes load-bearing only once a stackful
+	// task HOLDS its own exclusive across its own suspension (unlike the
+	// callback loop, which releases it around every WAIT/YIELD) -- a
+	// parked callback task in the SAME instance must still treat that as
+	// "held by someone else", while the stackful task's own re-entry
+	// attempts must not deadlock against itself.
+	exclusiveOwner *task
+
+	// backpressure mirrors the reference's inst.backpressure -- incremented/
+	// decremented by the backpressure.inc/dec builtins. It survives across
+	// calls (a guest that raises it and returns leaves it raised for the
+	// NEXT Call), which is why it lives on Instance rather than task.
+	backpressure int
+
+	// mayEnter/mayLeave mirror the reference's inst.may_enter/may_leave --
+	// real trap-bearing gates: mayEnter guards re-entrant Call into an
+	// async export from within another call on the same Instance (Store
+	// .lift's trap_if(!may_enter_from)); mayLeave guards every async
+	// builtin (their trap_if(!may_leave)). Initialized true (see
+	// instantiateGraph); this milestone never toggles mayLeave false
+	// anywhere (that only matters once a sync post-return context needs to
+	// reject async builtins, which first-light's shape never exercises).
+	mayEnter bool
+	mayLeave bool
+
+	// mayBlockSync is set at graph-bind time when this instance's core
+	// module(s) can reach a MID-CORE-CALL blocking site from a callback
+	// task: a SYNC (no async opt) stream/future copy canon, or a sync
+	// canon-lowered import whose target is an async lift (callback or
+	// stackful). Callback tasks of such an instance, when started by a
+	// GUEST caller (startAsyncExportTask, never invokeAsyncCallback's
+	// host-entry call), run their core/callback invocations on a
+	// per-segment goroutine (guestTask.promoted) so those sites can park
+	// instead of nested-driving the shared scheduler -- see guestTask.block
+	// and docs/component-model-async-final3-fable.md §1. Instances without
+	// such sites (the overwhelmingly common case: async lowers + callback
+	// WAITs only) never pay a goroutine.
+	mayBlockSync bool
+
+	// syncTaskNeeded is set at graph-bind time when this instance wires any
+	// canon builtin that resolves the CURRENT TASK at call time (task.return,
+	// task.cancel, context.get/set, backpressure.inc/dec, waitable-set.wait/
+	// poll -- the requireActiveTask/blockingTask family, async_builtins.go).
+	// Only then does invokeEntered install an implicit sync task (the
+	// reference's canon_lift creates a Task for EVERY call,
+	// definitions.py:2144-2202; current_task() always resolves, :315-316).
+	// False for every component with no such canon -- the sync call path
+	// stays byte-identical (no activeTask write, no allocation, concurrent
+	// sync Call stays race-free).
+	syncTaskNeeded bool
+
+	// syncBase is the innermost implicit sync task currently beneath this
+	// instance's call stack (nil when none). leaveRun/suspendRun restore
+	// activeTask to it instead of nil, so an async bracket that runs NESTED
+	// under a sync call (a nested sched.drive resuming one of THIS
+	// instance's parked tasks) cannot strand the sync caller task-less. Always
+	// nil for every pre-implicit-task flow, making the restore a no-op there.
+	syncBase *task
+
+	// threads is this instance's thread.* index space (design
+	// docs/component-model-async-threads-design-fable.md §3/§4.3/§12 Stage
+	// C): the reference's inst.threads (definitions.py:201/:509). Stage C
+	// only ever populates it lazily via thread.index's implicitThreadMarker
+	// slot (thread.go); Stage D's spawned guestThreads share the same table.
+	// Always its zero value (empty) for every instance that never binds a
+	// thread.* canon.
+	threads threadTable
+
+	// activeThread is non-nil exactly while a SPAWNED guestThread's goroutine
+	// holds the baton (design §5.2): set at guestThread.run's entry and
+	// around guestThread.block's park, cleared at guestThread.run's exit and
+	// while parked. nil means the current thread is the implicit thread of
+	// activeTask (or no thread at all) -- the overwhelmingly common case,
+	// including every one of the 29 non-thread.new-indirect-execution suites,
+	// where this field is permanently nil. Baton-serialized: only the
+	// goroutine holding the baton ever reads or writes it -- same discipline
+	// as activeTask itself (task.go's enterRun/suspendRun).
+	activeThread *guestThread
+
+	// poisoned is true once an unhandled trap has ever escaped a call into
+	// this instance (any error surfacing from guest code actually running --
+	// a core `unreachable`, or a canonical-ABI trap_if failing mid-call, from
+	// EITHER the plain sync invoke() path or an async task's fail() --
+	// permanently blocking every later entry with "cannot enter component
+	// instance", per the spec's Store poisoning invariant. Unlike mayEnter
+	// (which enterRun/leaveRun/suspendRun toggle back and forth as a task
+	// merely runs/parks/resumes), poisoned is sticky: nothing ever resets it
+	// back to false once set -- see invokeEntered's defer,
+	// guestTask.fail/stackfulTask.fail, and every mayEnter check in
+	// async_lift.go, all of which now check poisoned first. Initialized
+	// false; never true for an instance that has never had a call fail.
+	poisoned bool
+
+	// inHostCall counts nested host-import invocations currently on the Go
+	// call stack (bracketed by buildHostWrapper/buildAsyncHostWrapper). Along
+	// with sched.pumping, it is how requireSchedulable (stream_host.go)
+	// proves a StreamWriter/StreamReader/FutureWriter/FutureReader call is
+	// happening on the instance's driving goroutine rather than from an
+	// arbitrary concurrent goroutine (docs/component-model-async-phase2-design.md
+	// §3.2). Phase 2 addition; always 0 for a component with no async host
+	// import in flight.
+	inHostCall int
 }
 
 // CoreModuleCount returns the number of embedded core modules (real,
@@ -232,6 +396,27 @@ type boundExport struct {
 	funcName string          // core export name to call
 	fd       binary.FuncDesc // component-level func type (lift signature)
 
+	// resolve is the type resolver fd's own TypeRefs were resolved through at
+	// bind time (finalizeBoundExport) -- i.e. the DEFINING component's own
+	// comp.ResolveType, not necessarily whatever Instance ends up dispatching
+	// this export. Every production lower/lift path (paramSteps, resultType,
+	// paramTypes -- all precomputed once by finalizeBoundExport) already
+	// bakes this in and never needs it again at call time; it is carried
+	// here purely so ANY caller that must resolve one of fd's nested TypeRefs
+	// itself (list/record/variant element types, walked lazily) uses the
+	// SAME resolver those precomputed fields were built with, instead of
+	// defaulting to the CALLING Instance's own comp.ResolveType -- wrong the
+	// moment this boundExport was reached via a func alias re-exporting a
+	// SIBLING component's export (bindFuncExportGraph's isLift==false path,
+	// e.g. big-interleaving-test.wast's top-level `(alias export $driver
+	// "run" (func $run))`): $run's fd carries $Driver's OWN internal type
+	// indices (a list<command> param's TypeRef reaches deep into $Driver's
+	// TypeSpace), meaningless against the aliasing component's ($Tester's)
+	// much smaller TypeSpace. See wast_conformance_test.go's wastConvert,
+	// the one place outside finalizeBoundExport that resolves an fd TypeRef
+	// on demand (to turn a spec-test JSON fixture into an abi.Value).
+	resolve abi.Resolver
+
 	// postReturnFuncName is the core export to call, on mod, after lifting
 	// the result -- the canon lift's post-return option (CanonOpt kind
 	// 0x05). Empty when the lift declares no post-return. Per
@@ -250,6 +435,62 @@ type boundExport struct {
 	// trivial single-module path (no canon opts decoded), where
 	// finalizeBoundExport falls back to "cabi_realloc".
 	reallocFuncName string
+
+	// reallocMod is the core instance that exports reallocFuncName, when the
+	// canon lift's realloc option targets a DIFFERENT core instance than the
+	// lift's own core func (legal per the ABI: the option is a plain core
+	// func index, not required to co-locate with the lift's core func --
+	// cross-abi-calls.wast's $Memory/$Core split). nil means reallocFuncName
+	// (if any) lives on mod, the common case. The memory itself needs no
+	// twin field: mod reaches the shared memory through its own (imported)
+	// memory index space, and lowering reads bytes via memoryBytesOf(mod) as
+	// today -- see resolveReallocFuncGraph's doc.
+	reallocMod api.Module
+
+	// home is the *Instance this export's async runtime state (activeTask,
+	// exclusiveHeld, mayEnter, numWaitingToEnter, ...) actually lives on --
+	// set only when this boundExport was reached by re-exporting a NESTED
+	// component instance's export directly through a func alias
+	// (bindFuncExportGraph's isLift==false branch), rather than bound by a
+	// real `canon lift` against the Instance that will eventually dispatch
+	// it. nil in the overwhelmingly common case (an export's home IS
+	// whatever Instance calls invoke() on it), where invoke() uses itself.
+	// Needed because sched is the only per-composition-tree-shared async
+	// field; activeTask/exclusiveHeld/mayEnter/numWaitingToEnter are
+	// per-Instance, so a root component that only wraps and re-exports a
+	// nested component's async export (the async .wast suites' standard
+	// shape: an outer anonymous component instantiating $C/$D and
+	// `(alias export $d "run")`-ing $D's export back out) must dispatch
+	// invokeAsyncCallback/invokeStackful against $D's OWN Instance, not the
+	// root's -- every blocking builtin's closure was bound against $D's
+	// Instance at $D's own instantiation time.
+	home *Instance
+
+	// asyncCallback is true when this export is an async lift with a
+	// callback option (CanonOpt kind 0x06 async + 0x07 callback) -- see
+	// bindFuncExportGraph. invoke() routes such an export to
+	// invokeAsyncCallback instead of the synchronous path.
+	asyncCallback bool
+
+	// stackful is true when this export is a STACKFUL lift
+	// (docs/component-model-async-stackful-design.md §9): either an
+	// async-TYPED func's canon lift with no callback option
+	// (stackfulAsyncOpts also true -- the async-no-callback sub-shape,
+	// results via task.return), or a canon lift with NO async option at
+	// all of an async-TYPED func (stackfulAsyncOpts false -- the sync-opts
+	// sub-shape, results lifted from flat core results; this is the shape
+	// every stackful conformance suite exercises). invoke() routes such an
+	// export to invokeStackful instead of the plain synchronous path.
+	// asyncCallback and stackful are mutually exclusive.
+	stackful          bool
+	stackfulAsyncOpts bool
+
+	// callbackFuncName/callbackFn are the async lift's callback option
+	// (CanonOpt kind 0x07) resolved exactly like postReturnFuncName/
+	// postReturnFn above: a core export name, resolved to an api.Function
+	// once at bind time. Meaningful only when asyncCallback is true.
+	callbackFuncName string
+	callbackFn       api.Function
 
 	// coreFn/postReturnFn/reallocFn are api.Function handles resolved ONCE,
 	// at bind time (see finalizeBoundExport), instead of via a fresh
@@ -383,6 +624,14 @@ func computeBoundExportABI(fd binary.FuncDesc, resolve abi.Resolver) *boundExpor
 			continue
 		}
 		m.paramTypes[i] = pt
+		if typeContainsAsyncValueNested(pt, resolve, 0) {
+			// Phase 2 bind-time ceiling: a stream/future/error-context
+			// nested inside a composite param is refused loudly rather than
+			// silently passed through as a bare uint32 (see
+			// typeContainsAsyncValueNested's doc).
+			m.paramErrs[i] = fmt.Errorf("param %d: stream/future/error-context nested inside a composite type is not supported by this milestone", i)
+			continue
+		}
 		m.paramUsesMemory[i] = usesMemory(pt, resolve)
 		// Compile the per-param lower plan once (the spill decision's Flatten
 		// happens here, not per call). A compile error is recorded like a
@@ -438,6 +687,10 @@ func computeBoundExportABI(fd binary.FuncDesc, resolve abi.Resolver) *boundExpor
 			return m
 		}
 		m.resultType = rt
+		if typeContainsAsyncValueNested(rt, resolve, 0) {
+			m.resultErr = fmt.Errorf("result: stream/future/error-context nested inside a composite type is not supported by this milestone")
+			return m
+		}
 		m.resultUsesMemory = usesMemory(rt, resolve)
 		flatKinds, err := abi.Flatten(rt, resolve)
 		if err != nil {
@@ -482,6 +735,15 @@ func typeContainsResource(t binary.TypeDesc, resolve abi.Resolver, depth int) bo
 	switch d := t.(type) {
 	case binary.OwnDesc, binary.BorrowDesc:
 		return true
+	case binary.StreamDesc, binary.FutureDesc:
+		// Phase 2: a stream/future value needs the exact same per-arg
+		// handle-table translation resource own/borrow gets (see
+		// resolveArgHandlesDepth's StreamDesc/FutureDesc cases below) --
+		// reusing paramHasResource's existing gate/plumbing rather than
+		// adding a parallel bind-time flag array.
+		return true
+	case binary.PrimitiveDesc:
+		return d.Prim == "error-context" // same reasoning, for error-context
 	case binary.ListDesc:
 		return typeRefContainsResource(&d.Element, resolve, depth)
 	case binary.OptionDesc:
@@ -523,6 +785,69 @@ func typeRefContainsResource(ref *binary.TypeRef, resolve abi.Resolver, depth in
 	return typeContainsResource(t, resolve, depth+1)
 }
 
+// typeContainsAsyncValueNested reports whether t contains a stream/future/
+// error-context type STRICTLY BELOW the top level -- the Phase 2 bind-time
+// ceiling (docs/component-model-async-phase2-design.md §2.2): the abi layer
+// lifts these as bare uint32 handles with no table transfer, which is
+// silently wrong once nested inside a record/list/variant/tuple/option/
+// result, so a bound export/import's param or result type may carry a
+// stream/future/error-context only at its own top level (depth == 0).
+func typeContainsAsyncValueNested(t binary.TypeDesc, resolve abi.Resolver, depth int) bool {
+	if depth > maxResourceWalkDepth {
+		return false
+	}
+	if depth > 0 {
+		switch d := t.(type) {
+		case binary.StreamDesc, binary.FutureDesc:
+			return true
+		case binary.PrimitiveDesc:
+			if d.Prim == "error-context" {
+				return true
+			}
+		}
+	}
+	switch d := t.(type) {
+	case binary.ListDesc:
+		return typeRefContainsAsyncValueNested(&d.Element, resolve, depth)
+	case binary.OptionDesc:
+		return typeRefContainsAsyncValueNested(&d.Element, resolve, depth)
+	case binary.RecordDesc:
+		for i := range d.Fields {
+			if typeRefContainsAsyncValueNested(&d.Fields[i].Type, resolve, depth) {
+				return true
+			}
+		}
+	case binary.TupleDesc:
+		for i := range d.Elements {
+			if typeRefContainsAsyncValueNested(&d.Elements[i], resolve, depth) {
+				return true
+			}
+		}
+	case binary.VariantDesc:
+		for i := range d.Cases {
+			if d.Cases[i].Type != nil && typeRefContainsAsyncValueNested(d.Cases[i].Type, resolve, depth) {
+				return true
+			}
+		}
+	case binary.ResultDesc:
+		if d.Ok != nil && typeRefContainsAsyncValueNested(d.Ok, resolve, depth) {
+			return true
+		}
+		if d.Err != nil && typeRefContainsAsyncValueNested(d.Err, resolve, depth) {
+			return true
+		}
+	}
+	return false
+}
+
+func typeRefContainsAsyncValueNested(ref *binary.TypeRef, resolve abi.Resolver, depth int) bool {
+	t, err := resolveTypeRef(ref, resolve)
+	if err != nil {
+		return false
+	}
+	return typeContainsAsyncValueNested(t, resolve, depth+1)
+}
+
 // resolveArgHandles walks an argument value against its type and replaces every
 // GUEST-owned own/borrow HANDLE with the guest's REP (the guest's core func
 // takes reps for resources it owns). HOST-owned resources (in.isGuestResource
@@ -549,11 +874,53 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		// borrow<T> of a resource the RECEIVER defines is passed as the rep (the
 		// guest owns the rep meaning and reads it directly); a borrow of a
 		// host/imported resource keeps its handle so the guest can call back.
+		if ar, ok := v.(alreadyProviderRep); ok {
+			// repToProviderHandle (composition.go) already reduced this to a
+			// bare rep -- the reference's same-instance lower_borrow
+			// exemption minted no handle at all, so there is nothing left
+			// to look up here. See alreadyProviderRep's doc.
+			return uint32(ar), nil
+		}
 		rt, _ := resourceTypeIdxOf(t)
 		if in.isGuestResource == nil || !in.isGuestResource(rt) {
 			return v, nil
 		}
-		return resolveHandleArg(in.resources, in.resCanon, t, v)
+		return resolveHandleArg(in, in.resources, in.resCanon, t, v)
+
+	case binary.StreamDesc:
+		// A stream<T> Call/CallAsync arg arrives as the *sharedStream
+		// identity (returned by NewStream, or forwarded from a prior
+		// takeReadableStreamEnd) -- mint a fresh READABLE end for it in
+		// THIS (the callee's) table, mirroring lower_stream
+		// (docs/component-model-async-phase2-design.md §2.1/§3.1).
+		shared, ok := v.(*sharedStream)
+		if !ok {
+			return nil, fmt.Errorf("stream arg: expected a *sharedStream (from NewStream or a transferred readable end), got %T", v)
+		}
+		return in.resources.addEntry(&streamEnd{side: sideReadable, state: copyIdle, shared: shared}), nil
+
+	case binary.FutureDesc:
+		shared, ok := v.(*sharedFuture)
+		if !ok {
+			return nil, fmt.Errorf("future arg: expected a *sharedFuture (from NewFuture or a transferred readable end), got %T", v)
+		}
+		return in.resources.addEntry(&futureEnd{side: sideReadable, state: copyIdle, shared: shared}), nil
+
+	case binary.PrimitiveDesc:
+		if d.Prim != "error-context" {
+			return v, nil
+		}
+		// An error-context arg arrives either as an existing *errorContext
+		// (copy semantics: mint a second handle sharing it) or a bare string
+		// (host-authored message: wrap it fresh).
+		switch ev := v.(type) {
+		case *errorContext:
+			return in.resources.addEntry(ev), nil
+		case string:
+			return in.resources.addEntry(&errorContext{debugMessage: ev}), nil
+		default:
+			return nil, fmt.Errorf("error-context arg: expected a *errorContext or string, got %T", v)
+		}
 
 	case binary.ListDesc:
 		list, ok := v.([]abi.Value)
@@ -671,15 +1038,23 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 // keys the cache within comp -- see the boundExport doc and CompileCache.abiFor.
 // abiCache/comp are nil for the trivial single-module path (which has no cache).
 func finalizeBoundExport(be *boundExport, resolve abi.Resolver, abiCache *CompileCache, comp *binary.Component, funcIdx uint32) {
+	be.resolve = resolve
 	be.coreFn = be.mod.ExportedFunction(be.funcName)
 	if be.postReturnFuncName != "" {
 		be.postReturnFn = be.mod.ExportedFunction(be.postReturnFuncName)
 	}
+	if be.callbackFuncName != "" {
+		be.callbackFn = be.mod.ExportedFunction(be.callbackFuncName)
+	}
 	reallocName := be.reallocFuncName
 	if reallocName == "" {
-		reallocName = "cabi_realloc"
+		reallocName = "cabi_realloc" // fallback stays be.mod-only by construction (no opt => no reallocMod)
 	}
-	be.reallocFn = be.mod.ExportedFunction(reallocName)
+	rmod := be.mod
+	if be.reallocMod != nil {
+		rmod = be.reallocMod
+	}
+	be.reallocFn = rmod.ExportedFunction(reallocName)
 	be.reallocCall = coreReallocCall(be.reallocFn)
 	if be.coreFn != nil {
 		be.coreResultCount = len(be.coreFn.Definition().ResultTypes())
@@ -734,6 +1109,18 @@ func Instantiate(ctx context.Context, r wazy.Runtime, componentBytes []byte, opt
 	}
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: decode component: %w", err)
+	}
+	// A pure component-level well-formedness check (validate-no-async-abi-
+	// for-sync-type.wast): every canon's `async` option must agree with the
+	// func TYPE it lifts/lowers. Deliberately run BEFORE dispatching to
+	// either instantiation path (which each reject an unregistered/
+	// unsatisfiable import first) -- the spec expects this rejected
+	// regardless of whether any host import is ever provided, e.g. `(import
+	// "f" (func $f)) (canon lower (func $f) async)` with no WithImport("f")
+	// registered at all must still fail with THIS text, not "only instance
+	// imports are supported".
+	if err := validateAsyncCanonOptsAgreeWithTypes(comp); err != nil {
+		return nil, err
 	}
 
 	if needsGraphPath(comp) || needsImportPath(comp) {
@@ -906,7 +1293,7 @@ func instantiateComponent(ctx context.Context, r wazy.Runtime, comp *binary.Comp
 		exports[name] = be
 	}
 
-	return &Instance{resolve: resolve, exports: exports, instanceExports: buildInstanceExportIndex(exports), closers: []api.Module{core}, resources: newHandleTable()}, nil
+	return &Instance{resolve: resolve, exports: exports, instanceExports: buildInstanceExportIndex(exports), closers: []api.Module{core}, resources: newHandleTable(), sched: &sched{}, mayEnter: true, mayLeave: true}, nil
 }
 
 // synthInstanceCounter numbers instantiations so each gets a globally-unique
@@ -983,6 +1370,74 @@ func buildCoreFuncIndexSpace(comp *binary.Component) ([]string, error) {
 		coreFuncIdx = append(coreFuncIdx, al.Name)
 	}
 	return coreFuncIdx, nil
+}
+
+// validateAsyncCanonOptsAgreeWithTypes checks, for every canon lift (kind
+// 0x00) or lower (kind 0x01) in comp, that its `async` CanonOpt (kind 0x06)
+// implies the func type it lifts/lowers is itself declared `async func`
+// (binary.FuncDesc.Async) -- the spec's validate-no-async-abi-for-sync-
+// type.wast requirement, checked here (Instantiate, before either
+// instantiation path runs) since it is a pure structural property of the
+// component, independent of whether any host import is ever satisfied.
+//
+// One-directional: only "async option present, type not async" is rejected.
+// The reverse -- an async-typed func lifted/lowered with NO async option at
+// all (the "stackful" sync-opts shape every stackful conformance suite
+// exercises, e.g. an async-typed export whose canon lift has no async/
+// callback option) -- stays legal and is not touched by this check.
+//
+// A lower's func type is resolvable only when canon.FuncIdx names a
+// top-level func IMPORT (ComponentFuncFromImport) -- a func ALIAS
+// (ComponentFuncFromAlias, e.g. `canon lower (func $sibling "x") async`)
+// targets another component instance's export, whose declared type isn't
+// part of THIS component's own TypeSpace/Imports and so can't be resolved
+// here; no vendored suite exercises an async-mismatched alias lower, so
+// that shape is silently skipped (not rejected, not asserted valid) rather
+// than guessed at.
+func validateAsyncCanonOptsAgreeWithTypes(comp *binary.Component) error {
+	for i, cn := range comp.Canons {
+		if cn.Kind != 0x00 && cn.Kind != 0x01 {
+			continue
+		}
+		isAsync := false
+		for _, opt := range cn.Opts {
+			if opt.Kind == 0x06 {
+				isAsync = true
+				break
+			}
+		}
+		if !isAsync {
+			continue
+		}
+
+		var fd binary.FuncDesc
+		var resolved bool
+		switch cn.Kind {
+		case 0x00: // lift: canon.TypeIdx names the func type directly
+			if td, err := comp.ResolveType(cn.TypeIdx); err == nil {
+				fd, resolved = td.(binary.FuncDesc)
+			}
+		case 0x01: // lower: canon.FuncIdx names a component-func-space entry
+			if int(cn.FuncIdx) >= len(comp.ComponentFuncSpace) {
+				continue
+			}
+			fe := comp.ComponentFuncSpace[cn.FuncIdx]
+			if fe.Kind != binary.ComponentFuncFromImport || int(fe.Import) >= len(comp.Imports) {
+				continue
+			}
+			im := comp.Imports[fe.Import]
+			if im.ExternType != 0x01 { // func
+				continue
+			}
+			if td, err := comp.ResolveType(im.ExternIndex); err == nil {
+				fd, resolved = td.(binary.FuncDesc)
+			}
+		}
+		if resolved && !fd.Async {
+			return fmt.Errorf("component/instance: canon[%d]: the `async` canonical option requires an async function type", i)
+		}
+	}
+	return nil
 }
 
 // validateCanons checks that every canon in a no-import component is a
@@ -1113,6 +1568,33 @@ func buildInstanceExportIndex(exports map[string]*boundExport) map[string]map[st
 }
 
 func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName string, args []abi.Value) ([]abi.Value, error) {
+	// A boundExport reached by re-exporting a nested instance's export
+	// through a func alias carries its own async home (be.home's doc) --
+	// dispatch the async paths against THAT Instance, not the caller's; the
+	// plain sync path below never touches per-Instance async state, so it's
+	// unaffected either way.
+	target := in
+	if be.home != nil {
+		target = be.home
+	}
+	if be.asyncCallback {
+		return target.invokeAsyncCallback(ctx, be, exportName, args)
+	}
+	if be.stackful {
+		return target.invokeStackful(ctx, be, exportName, args)
+	}
+	// target.poisoned mirrors the async paths' own check (async_lift.go) --
+	// a sync export gets no enterRun/leaveRun bracketing (mayEnter never
+	// applies to it), but it still must stay permanently un-enterable once
+	// ANY earlier call (sync or async) has let a trap escape target, per the
+	// spec's Store poisoning invariant (see Instance.poisoned's doc). Placed
+	// before the param-count/bind-shape checks below, same as async_lift.go's
+	// mayEnter/poisoned check precedes ITS own param-count check -- a
+	// poisoned instance refuses entry outright, independent of whether this
+	// particular call would otherwise even be well-formed.
+	if target.poisoned {
+		return nil, fmt.Errorf("component/instance: export %q: cannot enter component instance", exportName)
+	}
 	fd := be.fd
 	if len(args) != len(fd.Params) {
 		return nil, fmt.Errorf("component/instance: export %q takes %d parameter(s), got %d", exportName, len(fd.Params), len(args))
@@ -1127,7 +1609,70 @@ func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName stri
 	if be.flattenErr != nil {
 		return nil, fmt.Errorf("component/instance: export %q: flatten func type: %w", exportName, be.flattenErr)
 	}
+	return target.invokeEntered(ctx, be, exportName, args)
+}
 
+// wrapUnreachableTrap prepends wasmtime's canonical unreachable-trap wording
+// ("wasm trap: wasm `unreachable` instruction executed") ahead of wazy's own
+// core-engine message (wasmruntime.ErrRuntimeUnreachable, formatted by
+// wasmdebug as "wasm error: unreachable\nwasm stack trace:\n\t...") when err
+// is (or wraps) that specific trap. Every other error is returned unchanged.
+//
+// This exists solely to satisfy the async conformance suites' one assertion
+// that pins the verbatim wasmtime phrase (component-model/test/async/
+// builtin-trap-poisons-instance.wast:9) -- the spec's JSON fixtures encode
+// wasmtime's own trap text as the expected substring, and this is truthful
+// (the guest DID execute an unreachable instruction; that IS a wasm trap) --
+// it does not change wazy's own message, only adds the wasmtime-recognizable
+// prefix in front of it, so every other assert_trap pinning the short
+// "unreachable" substring (every other suite) keeps matching too. Scoped
+// narrowly to this one call site rather than wasmdebug's global formatter
+// (used by every wazy caller, not just component-model) to avoid rippling
+// this cosmetic convention difference beyond what this suite needs.
+func wrapUnreachableTrap(err error) error {
+	if errors.Is(err, wasmruntime.ErrRuntimeUnreachable) {
+		return fmt.Errorf("wasm trap: wasm `unreachable` instruction executed: %w", err)
+	}
+	return err
+}
+
+// invokeEntered is invoke's actual call body, split out purely for
+// readability at the poisoning boundary (see the two explicit in.poisoned =
+// true sites below, at the ONLY two points this export's own guest code
+// actually runs: be.coreFn.CallWithStack and be.postReturnFn.CallWithStack).
+//
+// Deliberately NOT poisoning on every error here (an earlier version used a
+// single defer to poison on ANY non-nil err, which is closer to the
+// reference's literal try/except scope around the whole call but proved too
+// broad in practice: real_resource_test.go's TestRealResource calls
+// [method]counter.get on a handle it just dropped, EXPECTS that one call to
+// fail (lowerParams -> resolveArgHandles rejects the stale handle before
+// core code ever runs), and then keeps calling OTHER, still-valid handles on
+// the SAME instance -- broad poisoning permanently broke every later call.
+// A host-side ABI/argument validation failure (lowerParams, resolveArgHandles,
+// the coreArgs-count static check, liftResult) never actually enters guest
+// code, so -- unlike a real trap escaping a CallWithStack -- it must not
+// poison; matches builtin-trap-poisons-instance's own two poisoning cases
+// (an `unreachable` and a busy-stream host-builtin trap), both of which
+// surface AS be.coreFn.CallWithStack failing, so this narrower rule still
+// covers everything that suite (or the spec) requires here.
+func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportName string, args []abi.Value) ([]abi.Value, error) {
+	if in.syncTaskNeeded {
+		// The reference's canon_lift constructs a Task for EVERY call,
+		// including a not-opts.async_ sync lift (definitions.py:2144-2202);
+		// current_task() always resolves (:315-316). Install/restore around
+		// the whole body (before lowerParams: a guest cabi_realloc invoked
+		// during lowering may legally call context.get) so a nested
+		// guest->guest sync call on this same Instance
+		// (invokeEntered -> delegatingHostImport.fn -> invoke ->
+		// invokeEntered) still resolves the innermost task, and the caller's
+		// task is restored on return -- including through the two poisoning
+		// error returns below, via defer.
+		t := &task{inst: in, be: be, state: taskStarted, syncImplicit: true}
+		prevActive, prevBase := in.activeTask, in.syncBase
+		in.activeTask, in.syncBase = t, t
+		defer func() { in.activeTask, in.syncBase = prevActive, prevBase }()
+	}
 	mem, memAvailable := memoryBytesOf(be.mod)
 	realloc := cachedReallocOf(ctx, be)
 
@@ -1176,6 +1721,8 @@ func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName stri
 
 	if err := be.coreFn.CallWithStack(ctx, stack); err != nil {
 		putUint64Slice(stackPtr)
+		in.poisoned = true // guest code actually ran and trapped -- see this func's doc
+		err = wrapUnreachableTrap(err)
 		return nil, fmt.Errorf("component/instance: export %q: call core func %q: %w", exportName, be.funcName, err)
 	}
 	// rawResults ALIASES the pooled stack, so stack must not be returned to the
@@ -1201,6 +1748,7 @@ func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName stri
 		// it reuse rawResults' own buffer (the guest reads params, writes none).
 		if err := be.postReturnFn.CallWithStack(ctx, rawResults); err != nil {
 			putUint64Slice(stackPtr)
+			in.poisoned = true // guest code actually ran and trapped -- see this func's doc
 			return nil, fmt.Errorf("component/instance: export %q: post-return %q: %w", exportName, be.postReturnFuncName, err)
 		}
 	}
@@ -1330,6 +1878,9 @@ func (in *Instance) liftResult(be *boundExport, rawResults []uint64, mem []byte,
 		if err != nil {
 			return nil, fmt.Errorf("component/instance: export %q result: load spilled result: %w", exportName, err)
 		}
+		if err := in.validateLiftedStreamFutureResult(rt, val, exportName); err != nil {
+			return nil, err
+		}
 		return []abi.Value{val}, nil
 	}
 	if len(flatKinds) != len(be.coreResultsWant) {
@@ -1359,7 +1910,61 @@ func (in *Instance) liftResult(be *boundExport, rawResults []uint64, mem []byte,
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: export %q result: lift: %w", exportName, err)
 	}
+	if err := in.validateLiftedStreamFutureResult(rt, val, exportName); err != nil {
+		return nil, err
+	}
 	return []abi.Value{val}, nil
+}
+
+// validateLiftedStreamFutureResult applies lift_async_value's trap_if(state
+// != IDLE)/trap_if(in_waitable_set()) checks (definitions.py ~1519) to a
+// top-level export's RESULT when its declared type is a bare stream<T>/
+// future<T> -- the one crossing liftResult's generic flat/spilled lift paths
+// above don't otherwise validate (they treat StreamDesc/FutureDesc exactly
+// like OwnDesc/BorrowDesc: an opaque i32, per abi.liftFlatImpl). Unlike
+// takeReadableStreamEnd/takeReadableFutureEnd (used for the arg-crossing and
+// guest<->guest delegated-result paths, composition.go/host_import.go, where
+// ownership of the table slot genuinely transfers to the other side), this
+// does NOT remove the handle from the guest's own table -- matching wazy's
+// existing convention for a top-level own<T> result (also left in the table,
+// for the host to manage explicitly via DropResource/ResourceRep-style
+// accessors) rather than the reference's unconditional handles.remove(i).
+func (in *Instance) validateLiftedStreamFutureResult(rt binary.TypeDesc, val abi.Value, exportName string) error {
+	switch d := rt.(type) {
+	case binary.StreamDesc:
+		h, ok := val.(uint32)
+		if !ok {
+			return nil // not a handle-shaped value (shouldn't happen; let the caller's own bookkeeping catch it)
+		}
+		var elemDesc binary.TypeDesc
+		if d.Element != nil {
+			ed, err := resolveTypeRef(d.Element, in.resolve)
+			if err != nil {
+				return fmt.Errorf("component/instance: export %q result: stream element type: %w", exportName, err)
+			}
+			elemDesc = ed
+		}
+		if _, err := peekReadableStreamEnd(in, in.resources, elemDesc, h); err != nil {
+			return fmt.Errorf("component/instance: export %q result: %w", exportName, err)
+		}
+	case binary.FutureDesc:
+		h, ok := val.(uint32)
+		if !ok {
+			return nil
+		}
+		var elemDesc binary.TypeDesc
+		if d.Element != nil {
+			ed, err := resolveTypeRef(d.Element, in.resolve)
+			if err != nil {
+				return fmt.Errorf("component/instance: export %q result: future element type: %w", exportName, err)
+			}
+			elemDesc = ed
+		}
+		if _, err := peekReadableFutureEnd(in, in.resources, elemDesc, h); err != nil {
+			return fmt.Errorf("component/instance: export %q result: %w", exportName, err)
+		}
+	}
+	return nil
 }
 
 // DropResource drops an own<resource> handle the host received from a guest
@@ -1408,6 +2013,17 @@ func safeExportedFunction(mod api.Module, name string) (fn api.Function) {
 // order of instantiation). It does not close the Runtime passed to
 // Instantiate, which the caller owns.
 func (in *Instance) Close(ctx context.Context) error {
+	// Reap every parked goroutine (stackful task or promoted callback-task
+	// segment) in the shared scheduler BEFORE closing core modules
+	// (docs/component-model-async-stackful-design.md §8, Feature 1
+	// docs/component-model-async-final3-fable.md §1.5): aborting a parked
+	// task unwinds guest frames still inside the engine, which needs the
+	// core modules to still be alive. sched is shared per composition tree,
+	// so whichever Close in the tree runs first reaps all of them; later
+	// calls (subInstances' own Close, below) find nothing left to reap.
+	if in.sched != nil {
+		in.reapParkedGoroutines()
+	}
 	var firstErr error
 	for i := len(in.closers) - 1; i >= 0; i-- {
 		if err := in.closers[i].Close(ctx); err != nil && firstErr == nil {

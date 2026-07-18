@@ -20,11 +20,18 @@ import (
 //
 // Grammar reference: WebAssembly/component-model design/mvp/Binary.md.
 
-// primvaltype opcodes occupy 0x73..0x7f (encoded as negative s33 values).
-func isPrimValtype(b byte) bool { return b >= 0x73 && b <= 0x7f }
+// primvaltype opcodes occupy 0x73..0x7f (encoded as negative s33 values), plus
+// 0x64 (error-context) added by the async ABI -- confirmed terminal/payload-free
+// via `wasm-tools dump` on a func type with an error-context result: the type
+// is printed as `Primitive(ErrorContext)`, the same shape as bool/string, NOT
+// a defined type with a payload (contrast with future=0x65/stream=0x66, which
+// DO carry an `option<valtype>` payload -- see readDefvaltypeDesc).
+func isPrimValtype(b byte) bool { return (b >= 0x73 && b <= 0x7f) || b == 0x64 }
 
 func primName(b byte) string {
 	switch b {
+	case 0x64:
+		return "error-context"
 	case 0x7f:
 		return "bool"
 	case 0x7e:
@@ -97,9 +104,14 @@ func readExternName(buf []byte, off int) (string, int, error) {
 // referenced type index in idx with hasIdx=true -- so an `import "point"
 // (type (eq N))` (what wit-component/cargo-component emit for a world's
 // exported types) can be resolved through to type N rather than treated as an
-// opaque import. hasIdx is false for a `sub` type bound (0x01, an opaque
-// resource) and for the non-type sorts (whose own typeidx is not returned;
-// callers that need it decode it themselves).
+// opaque import. hasIdx is also true for a func-sort (0x01) externdesc, whose
+// idx is the func's own type index -- decodeImportSection needs it (on
+// Import.ExternIndex) to resolve a top-level func import's declared type
+// (e.g. checking its Async bit against a canon lower's async option -- see
+// validateAsyncOptAgreesWithType). hasIdx is false for a `sub` type bound
+// (0x01, an opaque resource) and for component/instance sorts (0x04/0x05,
+// whose own typeidx no caller currently needs; decode it yourself if that
+// changes).
 func readExterndesc(buf []byte, off int) (sort byte, idx uint32, hasIdx bool, _ int, err error) {
 	if off >= len(buf) {
 		return 0, 0, false, off, ErrTruncatedBinary
@@ -117,7 +129,14 @@ func readExterndesc(buf []byte, off int) (sort byte, idx uint32, hasIdx bool, _ 
 			return sort, 0, false, off, e
 		}
 		off += int(n)
-	case 0x01, 0x04, 0x05: // func, component, instance: typeidx
+	case 0x01: // func: typeidx
+		fIdx, n, e := leb128.LoadUint32(buf[off:])
+		if e != nil {
+			return sort, 0, false, off, e
+		}
+		off += int(n)
+		return sort, fIdx, true, off, nil
+	case 0x04, 0x05: // component, instance: typeidx
 		_, n, e := leb128.LoadUint32(buf[off:])
 		if e != nil {
 			return sort, 0, false, off, e

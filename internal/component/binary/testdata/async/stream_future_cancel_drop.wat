@@ -1,0 +1,12 @@
+(component
+  (core module $m (memory (export "mem") 1))
+  (core instance $i (instantiate $m))
+  (type $st (stream u8))
+  (type $ft (future u32))
+  (canon stream.cancel-read $st (core func $scr))
+  (canon stream.cancel-write $st (core func $scw))
+  (canon future.cancel-read $ft (core func $fcr))
+  (canon future.cancel-write $ft (core func $fcw))
+  (canon future.drop-readable $ft (core func $fdr))
+  (canon future.drop-writable $ft (core func $fdw))
+)
