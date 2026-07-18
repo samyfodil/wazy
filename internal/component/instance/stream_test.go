@@ -483,17 +483,17 @@ func TestTakeReadableStreamEnd_Traps(t *testing.T) {
 	r, w := newBareStreamEnds(in)
 
 	// Transferring the WRITABLE end (not readable) traps.
-	if _, err := takeReadableStreamEnd(in.resources, nil, w); err == nil {
+	if _, err := takeReadableStreamEnd(in, in.resources, nil, w); err == nil {
 		t.Fatal("expected a trap transferring a writable end as readable")
 	}
 	// Elem type mismatch traps.
-	if _, err := takeReadableStreamEnd(in.resources, binary.PrimitiveDesc{Prim: "u32"}, r); err == nil {
+	if _, err := takeReadableStreamEnd(in, in.resources, binary.PrimitiveDesc{Prim: "u32"}, r); err == nil {
 		t.Fatal("expected an element-type-mismatch trap")
 	}
 	// A COPYING (in-flight) readable end cannot be transferred.
 	asyncRead := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, true, nil, nil)
 	callBuiltin(asyncRead, uint64(r), 0, 1)
-	if _, err := takeReadableStreamEnd(in.resources, nil, r); err == nil {
+	if _, err := takeReadableStreamEnd(in, in.resources, nil, r); err == nil {
 		t.Fatal("expected a trap transferring a COPYING readable end")
 	}
 
@@ -501,14 +501,14 @@ func TestTakeReadableStreamEnd_Traps(t *testing.T) {
 	r2, _ := newBareStreamEnds(in)
 	set := uint32(callBuiltin(waitableSetNewHostFunc(in), 0)[0])
 	callBuiltin(waitableJoinHostFunc(in), uint64(r2), uint64(set))
-	if _, err := takeReadableStreamEnd(in.resources, nil, r2); err == nil {
+	if _, err := takeReadableStreamEnd(in, in.resources, nil, r2); err == nil {
 		t.Fatal("expected a trap transferring a waitable-set-joined readable end")
 	}
 
 	// A genuinely idle, unjoined readable end transfers cleanly and is
 	// removed from the table.
 	r3, _ := newBareStreamEnds(in)
-	shared, err := takeReadableStreamEnd(in.resources, nil, r3)
+	shared, err := takeReadableStreamEnd(in, in.resources, nil, r3)
 	if err != nil {
 		t.Fatalf("clean transfer failed: %v", err)
 	}

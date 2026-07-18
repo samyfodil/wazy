@@ -2,6 +2,7 @@ package instance
 
 import (
 	"fmt"
+	"reflect"
 
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/component/abi"
@@ -279,12 +280,58 @@ func (in *Instance) originOf(tag uint32) resourceIdentity {
 	return resourceIdentity{def: in, tag: tag}
 }
 
+// elemTypesCompatible compares a stream/future element type carried by two
+// (possibly different) instances -- Feature 3, docs/component-model-async-
+// final3-fable.md §3.3. aIn/bIn are the instances whose resolver/TypeSpace a/b's
+// type indices are relative to (nil for a host-created stream/future).
+//
+// A plain reflect.DeepEqual on the two binary.TypeDesc values is WRONG for an
+// own<R> element the moment R crosses an instance boundary: composition
+// (aliasing, re-exporting) gives the SAME underlying resource a different
+// LOCAL TypeSpace index on every instance that names it (a producer's own
+// $R vs. a consumer's imported alias of it -- see passing-resources.wast),
+// so aIn's OwnDesc{ResourceType: 3} and bIn's OwnDesc{ResourceType: 7} can
+// name the identical resource despite unequal raw indices.
+//
+// Only own<R> needs this: stream_builtins.go's resolveStreamOrFutureElem
+// bind-time ceiling already guarantees every OTHER element shape reaching
+// this compare is entirely handle-free (borrow is rejected anywhere in the
+// element; own is rejected below the top level), so DeepEqual is always
+// correct for them regardless of which instance defined them -- a
+// non-resource type's shape carries no instance-local index that
+// composition can rename.
+func elemTypesCompatible(aIn *Instance, a binary.TypeDesc, bIn *Instance, b binary.TypeDesc) bool {
+	ao, aOk := a.(binary.OwnDesc)
+	bo, bOk := b.(binary.OwnDesc)
+	if aOk && bOk && aIn != nil && bIn != nil {
+		return aIn.originOf(aIn.canonTag(ao.ResourceType)) == bIn.originOf(bIn.canonTag(bo.ResourceType))
+	}
+	return reflect.DeepEqual(a, b)
+}
+
 // repToProviderHandle mints, in the provider's own table, the handle its
 // exported func expects for an own<R>/borrow<R> param -- from the rep the
 // importer's host wrapper handed across the boundary (it had already reduced its
 // own handle to the rep via lift_own/lift_borrow). Non-handle params pass
 // through. Mirrors lower_own/lower_borrow into the provider's table.
 //
+// alreadyProviderRep marks a value repToProviderHandle already reduced to a
+// bare host rep because the PROVIDER instance itself owns the resource --
+// the reference's lower_borrow same-instance exemption (definitions.py
+// ~1811: `if cx.inst is t.rt.impl: return rep`), which mints NO handle at
+// all. resolveArgHandlesDepth's BorrowDesc arm (instance.go) checks for this
+// wrapper before doing its own handle->rep table lookup, so the provider's
+// normal call pipeline doesn't try to treat an already-a-rep value as a
+// handle index, AND -- the point that actually matters observably -- so no
+// synthetic, permanently-undroppable handle is left sitting in the
+// provider's own table (a real, spec-observable difference: passing-
+// resources.wast's fail-accessing-res1 probes the provider's table state
+// after a same-instance-borrow call exactly like this one, and a leaked
+// handle can silently occupy a LATER-freed index, e.g. one Feature 3's own
+// per-element stream transfer just freed via TakeOwn, making a supposedly
+// removed handle appear to resolve again).
+type alreadyProviderRep uint32
+
 // scope is the reference lower_borrow's minting arm (~1809-1815) call scope
 // (Phase 3, docs/component-model-async-phase3-design.md §4.1): the
 // composition delegate's borrow handle is minted call-scoped
@@ -292,16 +339,8 @@ func (in *Instance) originOf(tag uint32) resourceIdentity {
 // trapped if it doesn't -- but ONLY when the PROVIDER is not itself the
 // resource's owning instance. When the provider DOES own the resource
 // (sub.isGuestResource(tag) true), this is exactly the reference's
-// same-instance exemption (lower_borrow ~1811: `if cx.inst is t.rt.impl:
-// return rep` -- cx.inst here IS sub, the callee instance being lowered
-// into): the provider's own sync invoke()/resolveArgHandles path
-// immediately reduces this same minted handle back to a rep via a
-// read-only Rep() lookup (never a drop) for its own guest-owned-resource
-// core call, so the callee's core code never even observes a handle to
-// drop -- scoping it would trap on EVERY such call. §4.2's #1 hazard is
-// this exact case, just reached from the opposite direction (a provider
-// FORWARDING a resource it does not itself own, a deeper re-export chain,
-// is the only shape that genuinely needs the call-scoped mint below).
+// same-instance exemption described above: NO handle is minted at all, the
+// rep passes straight through as alreadyProviderRep.
 func repToProviderHandle(sub *Instance, desc binary.TypeDesc, v abi.Value, scope *task) (abi.Value, error) {
 	switch d := desc.(type) {
 	case binary.OwnDesc:
@@ -317,7 +356,10 @@ func repToProviderHandle(sub *Instance, desc binary.TypeDesc, v abi.Value, scope
 		}
 		tag := sub.canonTag(d.ResourceType)
 		providerOwnsIt := sub.isGuestResource != nil && sub.isGuestResource(tag)
-		if scope != nil && !providerOwnsIt {
+		if providerOwnsIt {
+			return alreadyProviderRep(rep), nil
+		}
+		if scope != nil {
 			return sub.resources.NewBorrowScoped(tag, rep, scope), nil
 		}
 		return sub.resources.NewBorrow(tag, rep), nil
@@ -394,7 +436,7 @@ func providerHandleToRep(sub *Instance, desc binary.TypeDesc, v abi.Value) (abi.
 				return nil, fmt.Errorf("delegated stream result: element type: %w", eerr)
 			}
 		}
-		return takeReadableStreamEnd(sub.resources, elemDesc, h)
+		return takeReadableStreamEnd(sub, sub.resources, elemDesc, h)
 
 	case binary.FutureDesc:
 		h, ok := v.(uint32)
@@ -408,7 +450,7 @@ func providerHandleToRep(sub *Instance, desc binary.TypeDesc, v abi.Value) (abi.
 				return nil, fmt.Errorf("delegated future result: element type: %w", eerr)
 			}
 		}
-		return takeReadableFutureEnd(sub.resources, elemDesc, h)
+		return takeReadableFutureEnd(sub, sub.resources, elemDesc, h)
 
 	default:
 		return v, nil

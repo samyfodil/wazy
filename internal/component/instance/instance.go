@@ -818,6 +818,13 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		// borrow<T> of a resource the RECEIVER defines is passed as the rep (the
 		// guest owns the rep meaning and reads it directly); a borrow of a
 		// host/imported resource keeps its handle so the guest can call back.
+		if ar, ok := v.(alreadyProviderRep); ok {
+			// repToProviderHandle (composition.go) already reduced this to a
+			// bare rep -- the reference's same-instance lower_borrow
+			// exemption minted no handle at all, so there is nothing left
+			// to look up here. See alreadyProviderRep's doc.
+			return uint32(ar), nil
+		}
 		rt, _ := resourceTypeIdxOf(t)
 		if in.isGuestResource == nil || !in.isGuestResource(rt) {
 			return v, nil
@@ -1840,7 +1847,7 @@ func (in *Instance) validateLiftedStreamFutureResult(rt binary.TypeDesc, val abi
 			}
 			elemDesc = ed
 		}
-		if _, err := peekReadableStreamEnd(in.resources, elemDesc, h); err != nil {
+		if _, err := peekReadableStreamEnd(in, in.resources, elemDesc, h); err != nil {
 			return fmt.Errorf("component/instance: export %q result: %w", exportName, err)
 		}
 	case binary.FutureDesc:
@@ -1856,7 +1863,7 @@ func (in *Instance) validateLiftedStreamFutureResult(rt binary.TypeDesc, val abi
 			}
 			elemDesc = ed
 		}
-		if _, err := peekReadableFutureEnd(in.resources, elemDesc, h); err != nil {
+		if _, err := peekReadableFutureEnd(in, in.resources, elemDesc, h); err != nil {
 			return fmt.Errorf("component/instance: export %q result: %w", exportName, err)
 		}
 	}

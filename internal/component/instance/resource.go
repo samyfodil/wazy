@@ -263,7 +263,7 @@ func (t *handleTable) NewBorrowScoped(typeIdx, rep uint32, scope *task) uint32 {
 func (t *handleTable) lookup(typeIdx, h uint32) (*resourceEntry, error) {
 	raw, ok := t.entryAt(h)
 	if !ok {
-		return nil, fmt.Errorf("unknown handle %d", h)
+		return nil, fmt.Errorf("unknown handle index %d", h)
 	}
 	e, ok := raw.(*resourceEntry)
 	if !ok {

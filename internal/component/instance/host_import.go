@@ -897,7 +897,7 @@ func resolveHandleArg(in *Instance, resources *handleTable, canon func(uint32) u
 				return nil, fmt.Errorf("stream arg: element type: %w", eerr)
 			}
 		}
-		shared, err := takeReadableStreamEnd(resources, elemDesc, h)
+		shared, err := takeReadableStreamEnd(in, resources, elemDesc, h)
 		if err != nil {
 			return nil, fmt.Errorf("stream arg: %w", err)
 		}
@@ -919,7 +919,7 @@ func resolveHandleArg(in *Instance, resources *handleTable, canon func(uint32) u
 				return nil, fmt.Errorf("future arg: element type: %w", eerr)
 			}
 		}
-		shared, err := takeReadableFutureEnd(resources, elemDesc, h)
+		shared, err := takeReadableFutureEnd(in, resources, elemDesc, h)
 		if err != nil {
 			return nil, fmt.Errorf("future arg: %w", err)
 		}

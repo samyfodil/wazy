@@ -24,26 +24,26 @@ func TestNewGuestBuffer_Traps(t *testing.T) {
 	_, mod := memModule(t)
 	u32 := binary.PrimitiveDesc{Prim: "u32"}
 
-	if _, err := newGuestBuffer(mod, abi.Realloc{}, nil, u32, 4, 4, true, 0, maxBufferLen+1); err == nil {
+	if _, err := newGuestBuffer(nil, mod, abi.Realloc{}, nil, u32, 4, 4, true, 0, maxBufferLen+1); err == nil {
 		t.Fatal("expected a trap: length exceeds maxBufferLen")
 	}
-	if _, err := newGuestBuffer(mod, abi.Realloc{}, nil, u32, 4, 4, true, 1 /* misaligned */, 2); err == nil {
+	if _, err := newGuestBuffer(nil, mod, abi.Realloc{}, nil, u32, 4, 4, true, 1 /* misaligned */, 2); err == nil {
 		t.Fatal("expected a trap: misaligned pointer")
 	}
 	// Way out of bounds against the module's actual (small) memory.
-	if _, err := newGuestBuffer(mod, abi.Realloc{}, nil, u32, 4, 4, true, 0, 1<<20); err == nil {
+	if _, err := newGuestBuffer(nil, mod, abi.Realloc{}, nil, u32, 4, 4, true, 0, 1<<20); err == nil {
 		t.Fatal("expected a trap: out of bounds")
 	}
 	// A bare (nil elem) buffer never touches memory, so it succeeds even
 	// with an absurd length/ptr.
-	buf, err := newGuestBuffer(mod, abi.Realloc{}, nil, nil, 0, 0, true, 0, 5)
+	buf, err := newGuestBuffer(nil, mod, abi.Realloc{}, nil, nil, 0, 0, true, 0, 5)
 	if err != nil {
 		t.Fatalf("bare buffer should not trap: %v", err)
 	}
 	if buf.isZeroLength() {
 		t.Fatal("length 5 buffer reports zero-length")
 	}
-	empty, err := newGuestBuffer(mod, abi.Realloc{}, nil, nil, 0, 0, true, 0, 0)
+	empty, err := newGuestBuffer(nil, mod, abi.Realloc{}, nil, nil, 0, 0, true, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,11 +64,11 @@ func TestCopyElementsMemmove_NumericFastPath(t *testing.T) {
 		t.Fatal("seed write failed")
 	}
 	u8 := binary.PrimitiveDesc{Prim: "u8"}
-	src, err := newGuestBuffer(mod, abi.Realloc{}, nil, u8, 1, 1, true, 0, 4)
+	src, err := newGuestBuffer(nil, mod, abi.Realloc{}, nil, u8, 1, 1, true, 0, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dst, err := newGuestBuffer(mod, abi.Realloc{}, nil, u8, 1, 1, true, 100, 4)
+	dst, err := newGuestBuffer(nil, mod, abi.Realloc{}, nil, u8, 1, 1, true, 100, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -554,7 +554,13 @@ func TestResolveStreamOrFutureElem_Bare(t *testing.T) {
 	}
 }
 
-func TestResolveStreamOrFutureElem_ResourceInElementRefused(t *testing.T) {
+// TestResolveStreamOrFutureElem_TopLevelOwnAllowed is Feature 3's positive
+// case (docs/component-model-async-final3-fable.md §3.2): a TOP-LEVEL
+// own<R> stream element is now allowed -- the per-element transfer lives in
+// guestBuffer.read/write (stream.go), not here; this only checks the
+// bind-time ceiling itself passes and reports the right (non-numeric)
+// shape.
+func TestResolveStreamOrFutureElem_TopLevelOwnAllowed(t *testing.T) {
 	ownRef := binary.TypeRef{TypeIndex: uintPtr(0)}
 	comp := &binary.Component{Types: []binary.Type{
 		{Kind: "stream", Descriptor: binary.StreamDesc{Element: &ownRef}},
@@ -565,8 +571,82 @@ func TestResolveStreamOrFutureElem_ResourceInElementRefused(t *testing.T) {
 		}
 		return nil
 	}
+	elem, elemSz, _, numeric, err := resolveStreamOrFutureElem(comp, resolve, false, 0)
+	if err != nil {
+		t.Fatalf("top-level own<T> should be allowed: %v", err)
+	}
+	if _, ok := elem.(binary.OwnDesc); !ok {
+		t.Fatalf("expected elem to resolve to OwnDesc, got %T", elem)
+	}
+	if elemSz != 4 {
+		t.Errorf("own<T> elemSz = %d, want 4 (flat i32 handle)", elemSz)
+	}
+	if numeric {
+		t.Error("own<T> must NOT be numeric -- the memmove fast path would corrupt handle transfer")
+	}
+}
+
+// TestResolveStreamOrFutureElem_BorrowRefused: a borrow<T> stream/future
+// element is refused anywhere (spec: a borrow's scoped lifetime can't
+// survive an async, unbounded-duration stream/future transfer) -- both at
+// the top level and nested inside a record.
+func TestResolveStreamOrFutureElem_BorrowRefused(t *testing.T) {
+	t.Run("top-level", func(t *testing.T) {
+		borrowRef := binary.TypeRef{TypeIndex: uintPtr(0)}
+		comp := &binary.Component{Types: []binary.Type{
+			{Kind: "stream", Descriptor: binary.StreamDesc{Element: &borrowRef}},
+		}}
+		resolve := func(idx uint32) binary.TypeDesc {
+			if idx == 0 {
+				return binary.BorrowDesc{ResourceType: 1}
+			}
+			return nil
+		}
+		if _, _, _, _, err := resolveStreamOrFutureElem(comp, resolve, false, 0); err == nil {
+			t.Fatal("expected refusal: top-level borrow<T> stream element")
+		}
+	})
+	t.Run("nested-in-record", func(t *testing.T) {
+		recRef := binary.TypeRef{TypeIndex: uintPtr(0)}
+		comp := &binary.Component{Types: []binary.Type{
+			{Kind: "stream", Descriptor: binary.StreamDesc{Element: &recRef}},
+		}}
+		fieldRef := binary.TypeRef{TypeIndex: uintPtr(1)}
+		resolve := func(idx uint32) binary.TypeDesc {
+			switch idx {
+			case 0:
+				return binary.RecordDesc{Fields: []binary.RecordField{{Name: "f", Type: fieldRef}}}
+			case 1:
+				return binary.BorrowDesc{ResourceType: 2}
+			}
+			return nil
+		}
+		if _, _, _, _, err := resolveStreamOrFutureElem(comp, resolve, false, 0); err == nil {
+			t.Fatal("expected refusal: borrow<T> nested inside a stream element record field")
+		}
+	})
+}
+
+// TestResolveStreamOrFutureElem_NestedOwnRefused: own<T> below the TOP
+// LEVEL (e.g. a record field) is still a real, documented deferral -- this
+// milestone's per-element transfer only walks the top-level value.
+func TestResolveStreamOrFutureElem_NestedOwnRefused(t *testing.T) {
+	recRef := binary.TypeRef{TypeIndex: uintPtr(0)}
+	comp := &binary.Component{Types: []binary.Type{
+		{Kind: "stream", Descriptor: binary.StreamDesc{Element: &recRef}},
+	}}
+	fieldRef := binary.TypeRef{TypeIndex: uintPtr(1)}
+	resolve := func(idx uint32) binary.TypeDesc {
+		switch idx {
+		case 0:
+			return binary.RecordDesc{Fields: []binary.RecordField{{Name: "f", Type: fieldRef}}}
+		case 1:
+			return binary.OwnDesc{ResourceType: 2}
+		}
+		return nil
+	}
 	if _, _, _, _, err := resolveStreamOrFutureElem(comp, resolve, false, 0); err == nil {
-		t.Fatal("expected refusal: own<T> inside a stream element")
+		t.Fatal("expected refusal: own<T> nested inside a stream element record field")
 	}
 }
 
@@ -704,28 +784,28 @@ func TestTakeReadableFutureEnd_Traps(t *testing.T) {
 	in := newAsyncInst()
 	r, w := newBareFutureEnds(in)
 
-	if _, err := takeReadableFutureEnd(in.resources, nil, w); err == nil {
+	if _, err := takeReadableFutureEnd(in, in.resources, nil, w); err == nil {
 		t.Fatal("expected a trap transferring a writable future end as readable")
 	}
-	if _, err := takeReadableFutureEnd(in.resources, binary.PrimitiveDesc{Prim: "u32"}, r); err == nil {
+	if _, err := takeReadableFutureEnd(in, in.resources, binary.PrimitiveDesc{Prim: "u32"}, r); err == nil {
 		t.Fatal("expected an element-type-mismatch trap")
 	}
 
 	readFn := futureCopyHostFunc(in, sideReadable, eventFutureRead, nil, 0, 0, true, true, nil, nil)
 	callBuiltin(readFn, uint64(r), 0)
-	if _, err := takeReadableFutureEnd(in.resources, nil, r); err == nil {
+	if _, err := takeReadableFutureEnd(in, in.resources, nil, r); err == nil {
 		t.Fatal("expected a trap transferring a COPYING readable future end")
 	}
 
 	r2, _ := newBareFutureEnds(in)
 	set := uint32(callBuiltin(waitableSetNewHostFunc(in), 0)[0])
 	callBuiltin(waitableJoinHostFunc(in), uint64(r2), uint64(set))
-	if _, err := takeReadableFutureEnd(in.resources, nil, r2); err == nil {
+	if _, err := takeReadableFutureEnd(in, in.resources, nil, r2); err == nil {
 		t.Fatal("expected a trap transferring a waitable-set-joined readable future end")
 	}
 
 	r3, _ := newBareFutureEnds(in)
-	shared, err := takeReadableFutureEnd(in.resources, nil, r3)
+	shared, err := takeReadableFutureEnd(in, in.resources, nil, r3)
 	if err != nil {
 		t.Fatalf("clean transfer failed: %v", err)
 	}
@@ -736,14 +816,14 @@ func TestTakeReadableFutureEnd_Traps(t *testing.T) {
 		t.Fatal("transferred handle should be removed from the sender's table")
 	}
 	// Unknown handle.
-	if _, err := takeReadableFutureEnd(in.resources, nil, 999999); err == nil {
+	if _, err := takeReadableFutureEnd(in, in.resources, nil, 999999); err == nil {
 		t.Fatal("expected a trap: unknown future handle")
 	}
 }
 
 func TestTakeReadableStreamEnd_UnknownHandle(t *testing.T) {
 	in := newAsyncInst()
-	if _, err := takeReadableStreamEnd(in.resources, nil, 999999); err == nil {
+	if _, err := takeReadableStreamEnd(in, in.resources, nil, 999999); err == nil {
 		t.Fatal("expected a trap: unknown stream handle")
 	}
 }

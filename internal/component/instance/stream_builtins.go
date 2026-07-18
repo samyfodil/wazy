@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/component/abi"
@@ -85,6 +84,64 @@ func elemRefContainsResourceHandle(ref *binary.TypeRef, resolve abi.Resolver, de
 	return elemContainsResourceHandle(t, resolve, depth+1)
 }
 
+// elemContainsBorrowHandle is elemContainsResourceHandle's borrow-only twin
+// (Feature 3, docs/component-model-async-final3-fable.md §3.2): the spec
+// unconditionally disallows a borrow anywhere in a stream/future element
+// type (a borrow's lifetime cannot outlive the call that lent it, which a
+// stream/future's async, unbounded-duration transfer can never guarantee),
+// so this walk exists to reject it with a spec-grounded message, kept
+// separate from own's own (allowed at the top level -- see
+// resolveStreamOrFutureElem) so the two ceilings can be told apart.
+func elemContainsBorrowHandle(t binary.TypeDesc, resolve abi.Resolver, depth int) bool {
+	if depth > maxResourceWalkDepth {
+		return false
+	}
+	switch d := t.(type) {
+	case binary.BorrowDesc:
+		return true
+	case binary.OwnDesc:
+		return false
+	case binary.ListDesc:
+		return elemRefContainsBorrowHandle(&d.Element, resolve, depth)
+	case binary.OptionDesc:
+		return elemRefContainsBorrowHandle(&d.Element, resolve, depth)
+	case binary.RecordDesc:
+		for i := range d.Fields {
+			if elemRefContainsBorrowHandle(&d.Fields[i].Type, resolve, depth) {
+				return true
+			}
+		}
+	case binary.TupleDesc:
+		for i := range d.Elements {
+			if elemRefContainsBorrowHandle(&d.Elements[i], resolve, depth) {
+				return true
+			}
+		}
+	case binary.VariantDesc:
+		for i := range d.Cases {
+			if d.Cases[i].Type != nil && elemRefContainsBorrowHandle(d.Cases[i].Type, resolve, depth) {
+				return true
+			}
+		}
+	case binary.ResultDesc:
+		if d.Ok != nil && elemRefContainsBorrowHandle(d.Ok, resolve, depth) {
+			return true
+		}
+		if d.Err != nil && elemRefContainsBorrowHandle(d.Err, resolve, depth) {
+			return true
+		}
+	}
+	return false
+}
+
+func elemRefContainsBorrowHandle(ref *binary.TypeRef, resolve abi.Resolver, depth int) bool {
+	t, err := resolveTypeRef(ref, resolve)
+	if err != nil {
+		return false
+	}
+	return elemContainsBorrowHandle(t, resolve, depth+1)
+}
+
 // resolveStreamOrFutureElem resolves canon.TypeIdx (which names the
 // stream<T>/future<T> TYPE ITSELF, confirmed against wasm-tools 1.253's
 // StreamNew{ty:0}/FutureNew{ty:1} encoding -- see
@@ -117,7 +174,20 @@ func resolveStreamOrFutureElem(comp *binary.Component, resolve abi.Resolver, isF
 	if err != nil {
 		return nil, 0, 0, false, fmt.Errorf("element type: %w", err)
 	}
-	if elemContainsResourceHandle(elem, resolve, 0) {
+	// Feature 3 (docs/component-model-async-final3-fable.md §3.2): a
+	// TOP-LEVEL own<R> element is allowed -- the per-element transfer below
+	// (guestBuffer.read/write) mints/takes it in the writer's/reader's own
+	// handle table at rendezvous time, exactly the reference's Buffer
+	// lift/lower semantics. A borrow anywhere is still rejected (spec:
+	// invalid in a stream/future element type, its scoped lifetime can't
+	// survive an async, unbounded-duration transfer). own at depth > 0
+	// (e.g. stream<record{own R}>) is still rejected too -- a real,
+	// documented deferral: this milestone's transfer only walks the
+	// TOP-LEVEL value, not arbitrary nested own leaves.
+	if elemContainsBorrowHandle(elem, resolve, 0) {
+		return nil, 0, 0, false, fmt.Errorf("stream/future element type contains a borrow handle, which the component-model spec disallows")
+	}
+	if _, isOwn := elem.(binary.OwnDesc); !isOwn && elemContainsResourceHandle(elem, resolve, 0) {
 		return nil, 0, 0, false, fmt.Errorf("stream/future element type contains an own/borrow resource handle, which is not supported by this milestone")
 	}
 	elemSz, err = abi.Size(elem, resolve)
@@ -240,7 +310,7 @@ func requireStreamEnd(in *Instance, name string, i uint32, side endSide, elemDes
 	if se.side != side {
 		panic(fmt.Errorf("component/instance: %s: handle %d is not a %s stream end", name, i, sideName(side)))
 	}
-	if !reflect.DeepEqual(se.shared.elem, elemDesc) {
+	if !elemTypesCompatible(se.shared.elemIn, se.shared.elem, in, elemDesc) {
 		panic(fmt.Errorf("component/instance: %s: handle %d: stream element type mismatch", name, i))
 	}
 	return se
@@ -256,7 +326,7 @@ func requireFutureEnd(in *Instance, name string, i uint32, side endSide, elemDes
 	if fe.side != side {
 		panic(fmt.Errorf("component/instance: %s: handle %d is not a %s future end", name, i, sideName(side)))
 	}
-	if !reflect.DeepEqual(fe.shared.elem, elemDesc) {
+	if !elemTypesCompatible(fe.shared.elemIn, fe.shared.elem, in, elemDesc) {
 		panic(fmt.Errorf("component/instance: %s: handle %d: future element type mismatch", name, i))
 	}
 	return fe
@@ -278,7 +348,7 @@ func wrapSchedErr(name string, err error) error {
 func streamNewHostFunc(in *Instance, elemDesc binary.TypeDesc, elemSz, align uint32, numeric bool) hostFuncDef {
 	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		requireMayLeave(in, "stream.new")
-		shared := &sharedStream{elem: elemDesc, elemSz: elemSz, align: align, numeric: numeric}
+		shared := &sharedStream{elem: elemDesc, elemSz: elemSz, align: align, numeric: numeric, elemIn: in}
 		ri := in.resources.addEntry(&streamEnd{side: sideReadable, state: copyIdle, shared: shared})
 		wi := in.resources.addEntry(&streamEnd{side: sideWritable, state: copyIdle, shared: shared})
 		stack[0] = uint64(ri) | uint64(wi)<<32
@@ -291,7 +361,7 @@ func streamNewHostFunc(in *Instance, elemDesc binary.TypeDesc, elemSz, align uin
 func futureNewHostFunc(in *Instance, elemDesc binary.TypeDesc, elemSz, align uint32, numeric bool) hostFuncDef {
 	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		requireMayLeave(in, "future.new")
-		shared := &sharedFuture{elem: elemDesc, elemSz: elemSz, align: align, numeric: numeric}
+		shared := &sharedFuture{elem: elemDesc, elemSz: elemSz, align: align, numeric: numeric, elemIn: in}
 		ri := in.resources.addEntry(&futureEnd{side: sideReadable, state: copyIdle, shared: shared})
 		wi := in.resources.addEntry(&futureEnd{side: sideWritable, state: copyIdle, shared: shared})
 		stack[0] = uint64(ri) | uint64(wi)<<32
@@ -343,7 +413,7 @@ func streamCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 			realloc = reallocOf(ctx, m)
 		}
 
-		buf, err := newGuestBuffer(m, realloc, in.resolve, elemDesc, elemSz, align, numeric, ptr, n)
+		buf, err := newGuestBuffer(in, m, realloc, in.resolve, elemDesc, elemSz, align, numeric, ptr, n)
 		if err != nil {
 			panic(fmt.Errorf("component/instance: %s: %w", name, err))
 		}
@@ -446,7 +516,7 @@ func futureCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 			realloc = reallocOf(ctx, m)
 		}
 
-		buf, err := newGuestBuffer(m, realloc, in.resolve, elemDesc, elemSz, align, numeric, ptr, 1)
+		buf, err := newGuestBuffer(in, m, realloc, in.resolve, elemDesc, elemSz, align, numeric, ptr, 1)
 		if err != nil {
 			panic(fmt.Errorf("component/instance: %s: %w", name, err))
 		}

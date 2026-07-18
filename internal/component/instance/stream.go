@@ -3,7 +3,6 @@ package instance
 import (
 	"errors"
 	"fmt"
-	"reflect"
 
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/component/abi"
@@ -63,6 +62,20 @@ type guestBuffer struct {
 	elemSz  uint32          // 0 when elem == nil
 	numeric bool            // noneOrNumberType(elem) -- the memmove fast path
 
+	// inst is the owning Instance -- its handle table + resource-type
+	// canonicalizer, needed only for ownElem's per-element transfer below.
+	// nil for a host-driven copy that never allocates a guestBuffer with a
+	// resource element (guestBuffer is always instance-owned in practice;
+	// nil is defensive, not a real call shape).
+	inst *Instance
+
+	// ownElem is non-nil exactly when elem is a TOP-LEVEL own<R> (Feature 3,
+	// docs/component-model-async-final3-fable.md §3.4) -- the per-element
+	// transfer arm in read/write below. nil for every other element shape
+	// (including a bare stream/future and every numeric/non-resource
+	// element), so those keep today's exact byte-for-byte behavior.
+	ownElem *binary.OwnDesc
+
 	ptr      uint32 // advances elemSz per element copied
 	length   uint32
 	progress uint32
@@ -74,7 +87,7 @@ type guestBuffer struct {
 //	if elem != nil && length > 0:
 //	  trap_if(ptr != align_to(ptr, alignment(elem)))
 //	  trap_if(ptr + length*elemSz > len(mem))   // checked against CURRENT mem
-func newGuestBuffer(memMod api.Module, realloc abi.Realloc, resolve abi.Resolver, elem binary.TypeDesc, elemSz, align uint32, numeric bool, ptr, length uint32) (*guestBuffer, error) {
+func newGuestBuffer(inst *Instance, memMod api.Module, realloc abi.Realloc, resolve abi.Resolver, elem binary.TypeDesc, elemSz, align uint32, numeric bool, ptr, length uint32) (*guestBuffer, error) {
 	if length > maxBufferLen {
 		return nil, fmt.Errorf("stream/future buffer: length %d exceeds the maximum (%d)", length, maxBufferLen)
 	}
@@ -94,7 +107,11 @@ func newGuestBuffer(memMod api.Module, realloc abi.Realloc, resolve abi.Resolver
 			return nil, fmt.Errorf("stream/future buffer: bounds: ptr=%d length=%d elemSz=%d mem_len=%d", ptr, length, elemSz, len(mem))
 		}
 	}
-	return &guestBuffer{memMod: memMod, realloc: realloc, resolve: resolve, elem: elem, elemSz: elemSz, numeric: numeric, ptr: ptr, length: length}, nil
+	var ownElem *binary.OwnDesc
+	if od, ok := elem.(binary.OwnDesc); ok {
+		ownElem = &od
+	}
+	return &guestBuffer{memMod: memMod, realloc: realloc, resolve: resolve, elem: elem, elemSz: elemSz, numeric: numeric, inst: inst, ownElem: ownElem, ptr: ptr, length: length}, nil
 }
 
 func (b *guestBuffer) remain() uint32     { return b.length - b.progress }
@@ -119,6 +136,27 @@ func (b *guestBuffer) read(n uint32) ([]abi.Value, error) {
 		if err != nil {
 			return nil, fmt.Errorf("stream/future buffer read: element %d: %w", i, err)
 		}
+		// Feature 3 (docs/component-model-async-final3-fable.md §3.4): an
+		// own<R> element is loaded as a bare uint32 HANDLE in THIS
+		// (writer's) table (abi.Load's own-as-i32 mapping) -- reduce it to
+		// the host-level rep intermediate here, at rendezvous time, exactly
+		// where the reference's Buffer lift step does it. TakeOwn removes
+		// the handle from the writer's table (ownership transfers to
+		// whichever side calls write() with the returned rep) and enforces
+		// the usual own/lend invariants -- a lent-out handle traps mid-copy,
+		// leaving elements 0..i-1 already transferred (reference-matching
+		// partial-transfer behavior).
+		if b.ownElem != nil {
+			h, ok := v.(uint32)
+			if !ok {
+				return nil, fmt.Errorf("stream/future buffer read: element %d: own<%d>: expected a uint32 handle, got %T", i, b.ownElem.ResourceType, v)
+			}
+			rep, terr := b.inst.resources.TakeOwn(b.inst.canonTag(b.ownElem.ResourceType), h)
+			if terr != nil {
+				return nil, fmt.Errorf("stream/future buffer read: element %d: own<%d>: %w", i, b.ownElem.ResourceType, terr)
+			}
+			v = rep
+		}
 		out[i] = v
 		b.ptr += b.elemSz
 	}
@@ -138,6 +176,18 @@ func (b *guestBuffer) write(vs []abi.Value) error {
 		return fmt.Errorf("stream/future buffer write: calling module has no memory")
 	}
 	for i, v := range vs {
+		// Feature 3: the mirror of read's transfer arm above -- v is the
+		// host-level rep intermediate (either just TakeOwn-reduced by the
+		// writer-side read() in the SAME rendezvous copy, or a host-supplied
+		// rep for a host<->guest stream); mint a fresh own handle in THIS
+		// (reader's) table before storing it as the guest-visible i32.
+		if b.ownElem != nil {
+			rep, ok := v.(uint32)
+			if !ok {
+				return fmt.Errorf("stream/future buffer write: element %d: own<%d>: expected a uint32 rep, got %T", i, b.ownElem.ResourceType, v)
+			}
+			v = b.inst.resources.NewOwn(b.inst.canonTag(b.ownElem.ResourceType), rep)
+		}
 		if err := abi.Store(mem, b.ptr, b.elem, v, b.resolve, b.realloc); err != nil {
 			return fmt.Errorf("stream/future buffer write: element %d: %w", i, err)
 		}
@@ -204,6 +254,21 @@ type sharedStream struct {
 	elemSz  uint32
 	align   uint32
 	numeric bool // noneOrNumberType(elem)
+
+	// elemIn is the Instance whose resolver/TypeSpace elem's type indices
+	// (e.g. an OwnDesc's ResourceType) are relative to -- the instance that
+	// executed the `canon stream.new` that created this sharedStream. nil
+	// for a HOST-created stream (host streams carry no resource-identity
+	// concern -- see stream.go's guestBuffer.ownElem doc). Needed only for
+	// elemTypesCompatible's resource-identity compare (Feature 3,
+	// docs/component-model-async-final3-fable.md §3.3): a plain
+	// reflect.DeepEqual on elem false-mismatches an own<R> descriptor whose
+	// ResourceType index is a different LOCAL name for the same underlying
+	// resource on two different instances (e.g. the producer's own $R vs. a
+	// consumer's imported alias of it) -- see passing-resources.wast, whose
+	// $Consumer imports the stream's readable end under its own local type
+	// index for $R.
+	elemIn *Instance
 
 	dropped bool
 
@@ -560,6 +625,9 @@ type sharedFuture struct {
 	align   uint32
 	numeric bool
 
+	// elemIn is sharedStream.elemIn's twin -- see its doc.
+	elemIn *Instance
+
 	dropped           bool
 	pendingInst       *Instance
 	pendingBuffer     copyBuffer
@@ -649,7 +717,13 @@ func (f *sharedFuture) drop() {
 // never removes those either), a stream/future result handle stays valid in
 // the guest's OWN table for the host to manage explicitly afterward, so only
 // the validation -- not the removal -- applies there.
-func peekReadableStreamEnd(t *handleTable, elemDesc binary.TypeDesc, i uint32) (*streamEnd, error) {
+//
+// in is the instance whose TypeSpace elemDesc's indices are relative to
+// (nil for a resources-only test harness with no owning Instance) -- passed
+// through to elemTypesCompatible so an own<R> element compares by resource
+// IDENTITY, not raw local type index (Feature 3, see elemTypesCompatible's
+// doc, composition.go).
+func peekReadableStreamEnd(in *Instance, t *handleTable, elemDesc binary.TypeDesc, i uint32) (*streamEnd, error) {
 	raw, ok := t.getEntry(i)
 	if !ok {
 		return nil, fmt.Errorf("unknown stream handle %d", i)
@@ -661,7 +735,7 @@ func peekReadableStreamEnd(t *handleTable, elemDesc binary.TypeDesc, i uint32) (
 	if se.side != sideReadable {
 		return nil, fmt.Errorf("handle %d is not a READABLE stream end", i)
 	}
-	if !reflect.DeepEqual(se.shared.elem, elemDesc) {
+	if !elemTypesCompatible(se.shared.elemIn, se.shared.elem, in, elemDesc) {
 		return nil, fmt.Errorf("handle %d: stream element type mismatch", i)
 	}
 	if se.state != copyIdle {
@@ -677,8 +751,8 @@ func peekReadableStreamEnd(t *handleTable, elemDesc binary.TypeDesc, i uint32) (
 // i from t, trapping unless it is a readable stream end of elem type
 // elemDesc, idle, and not joined to a waitable set. Returns the shared
 // object -- the lifted host-level value.
-func takeReadableStreamEnd(t *handleTable, elemDesc binary.TypeDesc, i uint32) (*sharedStream, error) {
-	se, err := peekReadableStreamEnd(t, elemDesc, i)
+func takeReadableStreamEnd(in *Instance, t *handleTable, elemDesc binary.TypeDesc, i uint32) (*sharedStream, error) {
+	se, err := peekReadableStreamEnd(in, t, elemDesc, i)
 	if err != nil {
 		return nil, err
 	}
@@ -687,7 +761,7 @@ func takeReadableStreamEnd(t *handleTable, elemDesc binary.TypeDesc, i uint32) (
 }
 
 // peekReadableFutureEnd is peekReadableStreamEnd's future twin.
-func peekReadableFutureEnd(t *handleTable, elemDesc binary.TypeDesc, i uint32) (*futureEnd, error) {
+func peekReadableFutureEnd(in *Instance, t *handleTable, elemDesc binary.TypeDesc, i uint32) (*futureEnd, error) {
 	raw, ok := t.getEntry(i)
 	if !ok {
 		return nil, fmt.Errorf("unknown future handle %d", i)
@@ -699,7 +773,7 @@ func peekReadableFutureEnd(t *handleTable, elemDesc binary.TypeDesc, i uint32) (
 	if fe.side != sideReadable {
 		return nil, fmt.Errorf("handle %d is not a READABLE future end", i)
 	}
-	if !reflect.DeepEqual(fe.shared.elem, elemDesc) {
+	if !elemTypesCompatible(fe.shared.elemIn, fe.shared.elem, in, elemDesc) {
 		return nil, fmt.Errorf("handle %d: future element type mismatch", i)
 	}
 	if fe.state != copyIdle {
@@ -712,8 +786,8 @@ func peekReadableFutureEnd(t *handleTable, elemDesc binary.TypeDesc, i uint32) (
 }
 
 // takeReadableFutureEnd is takeReadableStreamEnd's future twin.
-func takeReadableFutureEnd(t *handleTable, elemDesc binary.TypeDesc, i uint32) (*sharedFuture, error) {
-	fe, err := peekReadableFutureEnd(t, elemDesc, i)
+func takeReadableFutureEnd(in *Instance, t *handleTable, elemDesc binary.TypeDesc, i uint32) (*sharedFuture, error) {
+	fe, err := peekReadableFutureEnd(in, t, elemDesc, i)
 	if err != nil {
 		return nil, err
 	}
