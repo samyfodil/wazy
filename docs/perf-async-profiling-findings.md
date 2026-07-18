@@ -49,6 +49,14 @@ benchmark-harness closures, not runtime → ~9 runtime).
 Diffuse; lower priority than the per-call path but worth a pass for embedders instantiating many
 components.
 
+**INVESTIGATED (low ROI, not pursued):** the Instantiate allocs are diffuse (largest single site
+~2.2%) and mostly INHERENT: per-instance WASI sys state (stdio/walltime/nanotime/randsource),
+config isolation (moduleConfig.clone is intentional per-instance), and the WASI host module being
+rebuilt per instantiate (a deep engine/builder-layer change, outside internal/component/instance).
+`buildInstanceExportIndex` is already lazy (0 alloc when a component has no `instance#member`
+exports) and its map-of-maps is the right structure. No clean CM-layer win here; the real lever
+would be caching the compiled WASI host module across instantiations (engine work, separate effort).
+
 ## Coverage gap
 No benchmark exercises the thread.* path (thread.yield / new-indirect / yield-then-resume). Add one
 before optimizing that path so its allocs are measurable.
