@@ -19,6 +19,19 @@ const (
 	callbackMax   callbackCode = 2
 )
 
+// callbackFrame co-allocates a task and its guestTask in one heap object:
+// every callback-lift construction site (invokeAsyncCallback,
+// startAsyncExportTask) always builds exactly one task+guestTask pair, so
+// giving them separate `&task{}`/`&guestTask{}` allocations doubles the
+// per-call malloc count for no reason -- t and gt remain independently
+// addressable (*task/*guestTask are threaded all over this package) and
+// their pointers stay stable for the frame's lifetime; co-allocation only
+// means one malloc backs both, freed together once both become unreachable.
+type callbackFrame struct {
+	t  task
+	gt guestTask
+}
+
 // unpackCallbackResult is the reference's unpack_callback_result: code is
 // the packed value's low nibble (trap_if(code > MAX)); the waitable-set
 // index is the rest, shifted down. The reference also asserts
@@ -81,11 +94,11 @@ func (in *Instance) invokeAsyncCallback(ctx context.Context, be *boundExport, ex
 	// host-entry call runs (no lazy-lift indirection needed), so the
 	// trivial forwarding closures Phase 1/2 built here would only exist to
 	// adapt a shape this call never actually needs.
-	t := &task{inst: in, be: be}
-	gt := &guestTask{
-		t: t, in: in, be: be, ctx: ctx, exportName: exportName,
-		args: args,
-	}
+	fr := &callbackFrame{}
+	t, gt := &fr.t, &fr.gt
+	t.inst, t.be = in, be
+	gt.t, gt.in, gt.be, gt.ctx, gt.exportName = t, in, be, ctx, exportName
+	gt.args = args
 	t.gt = gt
 
 	if err := gt.start(); err != nil {
@@ -175,11 +188,14 @@ func (in *Instance) invokeStackful(ctx context.Context, be *boundExport, exportN
 // invokeAsyncCallback sits on, minus the drive (this instance's *sched is
 // shared with the whole composition tree -- Instance.sched's doc -- so
 // whoever eventually drives that shared scheduler to completion resumes
-// this task; it is never driven here). Returns the task's
-// requestCancellation as the caller's subtask.on_cancel (reference ~2207).
+// this task; it is never driven here). Returns the started task itself
+// (not a bound requestCancellation method value -- avoids a per-call alloc
+// on this guest<->guest path); the caller stores it as the subtask's
+// cancelTask and calls calleeTask.requestCancellation() from
+// subtask.runOnCancel (reference ~2207: subtask.on_cancel = callee(...)).
 func (in *Instance) startAsyncExportTask(ctx context.Context, be *boundExport, exportName string,
 	onStart func(*task) ([]abi.Value, error), onResolve func([]abi.Value, bool) error,
-) (onCancel func() error, err error) {
+) (calleeTask *task, err error) {
 	// Dispatch on the callee's shape (docs/component-model-async-stackful-
 	// design.md §6.2): a STACKFUL callee (no callback option) must be
 	// driven through stackfulTask -- its inline waitable-set.wait (or any
@@ -198,35 +214,35 @@ func (in *Instance) startAsyncExportTask(ctx context.Context, be *boundExport, e
 	if in.poisoned || !in.mayEnter {
 		return nil, fmt.Errorf("component/instance: export %q: cannot enter component instance", exportName)
 	}
-	t := &task{inst: in, be: be}
+	fr := &callbackFrame{}
+	t, gt := &fr.t, &fr.gt
+	t.inst, t.be = in, be
 	t.onResolve = func(vals []abi.Value, cancelled bool) {
 		if e := onResolve(vals, cancelled); e != nil {
 			panic(fmt.Errorf("component/instance: export %q: %w", exportName, e))
 		}
 	}
-	gt := &guestTask{
-		t: t, in: in, be: be, ctx: ctx, exportName: exportName,
-		onStart: func() ([]abi.Value, error) { return onStart(t) },
-		// Feature 1 (docs/component-model-async-final3-fable.md §1.1): a
-		// GUEST-caller-started callback task (this func, never
-		// invokeAsyncCallback's host-entry call) on an instance flagged
-		// mayBlockSync runs its core/callback invocations on a per-segment
-		// goroutine, so a mid-core-call blocking site reached from this
-		// task's own guest code can park (gt.block) instead of nested-
-		// driving the shared scheduler -- the fix for a callback task
-		// blocking on its own sync caller's continuation (sync-streams,
-		// async-calls-sync run2). Instances that never bind a sync
-		// stream/future copy or a sync-lowered-to-async-lift import
-		// (mayBlockSync stays false -- the overwhelmingly common case) pay
-		// zero goroutines: promoted is false and runSegment/runLoop take
-		// their exact pre-Feature-1 inline path.
-		promoted: in.mayBlockSync,
-	}
+	gt.t, gt.in, gt.be, gt.ctx, gt.exportName = t, in, be, ctx, exportName
+	gt.onStart = func() ([]abi.Value, error) { return onStart(t) }
+	// Feature 1 (docs/component-model-async-final3-fable.md §1.1): a
+	// GUEST-caller-started callback task (this func, never
+	// invokeAsyncCallback's host-entry call) on an instance flagged
+	// mayBlockSync runs its core/callback invocations on a per-segment
+	// goroutine, so a mid-core-call blocking site reached from this
+	// task's own guest code can park (gt.block) instead of nested-
+	// driving the shared scheduler -- the fix for a callback task
+	// blocking on its own sync caller's continuation (sync-streams,
+	// async-calls-sync run2). Instances that never bind a sync
+	// stream/future copy or a sync-lowered-to-async-lift import
+	// (mayBlockSync stays false -- the overwhelmingly common case) pay
+	// zero goroutines: promoted is false and runSegment/runLoop take
+	// their exact pre-Feature-1 inline path.
+	gt.promoted = in.mayBlockSync
 	t.gt = gt
 	if err := gt.start(); err != nil { // may run to EXIT, may park at entry/WAIT
 		return nil, err
 	}
-	return t.requestCancellation, nil
+	return t, nil
 }
 
 // startStackfulExportTask is startAsyncExportTask with guestTask swapped for
@@ -236,13 +252,14 @@ func (in *Instance) startAsyncExportTask(ctx context.Context, be *boundExport, e
 // caller's goroutine (the immediate path async_host_import.go's
 // buildAsyncHostWrapper already handles via st.resolved(), read off
 // t.state == taskResolved by the caller) or park at sparkEntry/sparkBlock,
-// returning t.requestCancellation as onCancel. Result values flow through
-// task.returnValues -> t.onResolve -> the wrapper's own onResolve closure --
-// for a sync-opts callee it's run() itself that calls returnValues after
-// lifting flat results, so the wrapper needs zero changes.
+// returning t (the caller runs t.requestCancellation as onCancel). Result
+// values flow through task.returnValues -> t.onResolve -> the wrapper's own
+// onResolve closure -- for a sync-opts callee it's run() itself that calls
+// returnValues after lifting flat results, so the wrapper needs zero
+// changes.
 func (in *Instance) startStackfulExportTask(ctx context.Context, be *boundExport, exportName string,
 	onStart func(*task) ([]abi.Value, error), onResolve func([]abi.Value, bool) error,
-) (onCancel func() error, err error) {
+) (calleeTask *task, err error) {
 	if in.poisoned || !in.mayEnter {
 		return nil, fmt.Errorf("component/instance: export %q: cannot enter component instance", exportName)
 	}
@@ -261,5 +278,5 @@ func (in *Instance) startStackfulExportTask(ctx context.Context, be *boundExport
 	if err := st.startTask(); err != nil { // may run to completion, may park at sparkEntry/sparkBlock
 		return nil, err
 	}
-	return t.requestCancellation, nil
+	return t, nil
 }

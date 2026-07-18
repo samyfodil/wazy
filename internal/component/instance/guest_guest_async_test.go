@@ -252,7 +252,7 @@ func TestGuestGuestAsyncLower_BlockedThenLaterResolves(t *testing.T) {
 	st := newSubtask()
 	st.state = subtaskStarted
 	resolved := false
-	st.onCancel = func() error {
+	st.onCancelHook = func() {
 		// The callee ignores the cancellation request (spec-legal): it
 		// stays unresolved for now, and resolves later via its own normal
 		// completion path (a Deferred thunk here, standing in for whatever
@@ -263,7 +263,6 @@ func TestGuestGuestAsyncLower_BlockedThenLaterResolves(t *testing.T) {
 			installSubtaskEvent(st, st.subtaski())
 			return nil
 		})
-		return nil
 	}
 	h := aResources.addEntry(st)
 	st.setSubtaski(h)

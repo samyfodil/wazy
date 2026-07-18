@@ -50,8 +50,7 @@ const maxFlatAsyncParams = 4
 type AsyncCall struct {
 	in       *Instance
 	st       *subtask
-	subtaski uint32 // set once the subtask is parked in the table; 0 until then (0 is never a valid handle)
-	inCall   bool   // true while the AsyncHostFunc invocation is on the stack
+	inCall   bool // true while the AsyncHostFunc invocation is on the stack
 	resolved bool
 }
 
@@ -100,7 +99,7 @@ func (ac *AsyncCall) Resolve(results []abi.Value) {
 // spec-legal (a callee may ignore cancellation; the subtask still resolves
 // whenever the import eventually completes normally via Resolve).
 func (ac *AsyncCall) OnCancel(fn func()) {
-	ac.st.onCancel = func() error { fn(); return nil }
+	ac.st.onCancelHook = fn
 }
 
 // ResolveCancelled resolves the call as cancelled (reference on_resolve
@@ -135,12 +134,7 @@ func (ac *AsyncCall) ResolveCancelled() {
 // evaluated at DELIVERY (Waitable.getPendingEvent), matching
 // installParkedPendingEventIfNeeded and the reference exactly.
 func installSubtaskEvent(st *subtask, si uint32) {
-	st.setPendingEvent(func() eventTuple {
-		if st.resolved() && !st.resolveDelivered() {
-			st.deliverResolve()
-		}
-		return eventTuple{code: eventSubtask, p1: si, p2: uint32(st.state)}
-	})
+	st.setPendingSubtaskEvent(st, si) // closure-free; body lives in getPendingEvent
 }
 
 // installParkedPendingEventIfNeeded is Resolve/ResolveCancelled's shared
@@ -155,13 +149,8 @@ func (ac *AsyncCall) installParkedPendingEventIfNeeded() {
 	if ac.inCall {
 		return // the wrapper's epilogue sees st.resolved() and takes the immediate path
 	}
-	st, si := ac.st, ac.subtaski
-	st.setPendingEvent(func() eventTuple {
-		if st.resolved() && !st.resolveDelivered() {
-			st.deliverResolve()
-		}
-		return eventTuple{code: eventSubtask, p1: si, p2: uint32(st.state)}
-	})
+	st := ac.st
+	st.setPendingSubtaskEvent(st, st.subtaski()) // closure-free; body lives in getPendingEvent
 }
 
 // Defer enqueues fn on the instance's deterministic FIFO run queue
@@ -175,6 +164,73 @@ func (ac *AsyncCall) installParkedPendingEventIfNeeded() {
 // completion costs exactly fn's own allocation (if any), not two.
 func (ac *AsyncCall) Defer(fn func()) {
 	ac.in.sched.enqueueVoid(fn)
+}
+
+// asyncResolveCfg is the bind-time half of a host-import subtask's resolve:
+// one per async-lowered import binding, built once in buildAsyncHostWrapper
+// (amortized), shared by every call through that binding. Immutable after
+// bind. Replaces the per-call `st.applyResolve = func(...) {...}` closure
+// (which captured all of these plus the per-call retPtr/memMod/ctx) with a
+// single shared allocation plus scalar/pointer stores on the subtask (see
+// subtask.applyResolve, waitable.go).
+type asyncResolveCfg struct {
+	iface, funcName string
+	resultCount     int
+	resultType      binary.TypeDesc
+	resultUsesMem   bool
+	resolve         abi.Resolver
+	resources       *handleTable
+	reallocOverride api.Function
+}
+
+// applyResolve replaces the per-call closure formerly assigned in
+// buildAsyncHostWrapper: lower vals into the calling module's memory through
+// the retptr captured at call time and flip state to RETURNED. Behavior is
+// byte-identical to the old closure body; mem/realloc are still fetched
+// fresh here, not at call time (memory may have grown since). resolveFn, if
+// set (test injection / future alternate source), takes priority.
+func (st *subtask) applyResolve(vals []abi.Value) error {
+	if st.resolveFn != nil {
+		return st.resolveFn(vals)
+	}
+	cfg := st.resolveCfg
+	if cfg == nil {
+		panic("BUG: applyResolve on a subtask with no resolve source")
+	}
+	if len(vals) != cfg.resultCount {
+		return fmt.Errorf("async import %q %q: Resolve got %d result(s), the import declares %d", cfg.iface, cfg.funcName, len(vals), cfg.resultCount)
+	}
+	if cfg.resultCount == 0 {
+		st.resolve(subtaskReturned, nil)
+		return nil
+	}
+	mem, memAvailable := memoryBytesOf(st.memMod)
+	if cfg.resultUsesMem && !memAvailable {
+		return fmt.Errorf("async import %q %q: result requires linear memory (string/list), but the calling module has none", cfg.iface, cfg.funcName)
+	}
+	resultVal, herr := allocHandleResult(cfg.resources, cfg.resultType, vals[0])
+	if herr != nil {
+		return fmt.Errorf("async import %q %q: result: %w", cfg.iface, cfg.funcName, herr)
+	}
+	// Resolving "cabi_realloc" (a module export lookup, allocating on both
+	// the found and not-found paths -- ModuleInstance.getExport) is only
+	// useful when Store might actually grow guest memory for this result (a
+	// string/list); a plain-value result (e.g. u32) never calls
+	// realloc.grow, so skip the lookup entirely then -- resultUsesMem is
+	// precomputed at bind time, so this is a cheap branch, not a
+	// re-derivation.
+	var realloc abi.Realloc
+	if cfg.resultUsesMem {
+		realloc = reallocOf(st.resolveCtx, st.memMod)
+		if cfg.reallocOverride != nil {
+			realloc = reallocOfFunc(st.resolveCtx, cfg.reallocOverride)
+		}
+	}
+	if serr := abi.Store(mem, st.retPtr, cfg.resultType, resultVal, cfg.resolve, realloc); serr != nil {
+		return fmt.Errorf("async import %q %q: result: store: %w", cfg.iface, cfg.funcName, serr)
+	}
+	st.resolve(subtaskReturned, nil)
+	return nil
 }
 
 // AsyncHostFunc starts one async import call (reference: the FuncInst callee
@@ -271,6 +327,15 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 	}
 	apiResults := []api.ValueType{api.ValueTypeI32} // always exactly the packed Subtask.State
 
+	// cfg is the bind-time half of every call's applyResolve, built ONCE
+	// here (not per call) and shared by every invocation of this binding --
+	// see asyncResolveCfg's doc and subtask.applyResolve (this file).
+	cfg := &asyncResolveCfg{
+		iface: iface, funcName: funcName,
+		resultCount: resultCount, resultType: resultType, resultUsesMem: resultUsesMem,
+		resolve: resolve, resources: resources, reallocOverride: reallocOverride,
+	}
+
 	fn := api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 		if hi.lineage {
 			panic(fmt.Errorf("component/instance: async lower %q %q: wasm trap: cannot enter component instance", iface, funcName))
@@ -282,54 +347,16 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 
 		st := newSubtask()
 
-		// applyResolve is shared by both arms below: given RESULT VALUES
-		// already reduced to the IMPORTER's own representation (a bare rep
-		// for an own/borrow result -- exactly what a Go AsyncHostFunc's
-		// Resolve receives directly, and what the guest<->guest callee arm's
-		// onResolve produces via mapResultsFromProvider), lower them into
-		// the calling module's memory through retPtr and flip state to
-		// RETURNED. Fetched fresh (mem/realloc), not captured at call time:
-		// memory may have grown between the call and this resolve (possibly
+		// Per-call wiring for st.applyResolve (the method, waitable.go/this
+		// file): cfg is the bind-time half (built once above); retPtr/memMod
+		// are captured now (retPtr decoded from the core stack, memMod may be
+		// mem/memOverride); resolveCtx is used for reallocOf at resolve time,
+		// fetched fresh there (not captured at call time) since memory may
+		// have grown between the call and the eventual resolve (possibly
 		// much later, after a Defer round-trip or a parked guestTask).
-		var retPtr uint32
+		st.resolveCfg, st.memMod, st.resolveCtx = cfg, memMod, ctx
 		if outPtrIdx >= 0 {
-			retPtr = api.DecodeU32(stack[outPtrIdx])
-		}
-		st.applyResolve = func(vals []abi.Value) error {
-			if len(vals) != resultCount {
-				return fmt.Errorf("async import %q %q: Resolve got %d result(s), the import declares %d", iface, funcName, len(vals), resultCount)
-			}
-			if resultCount == 0 {
-				st.resolve(subtaskReturned, nil)
-				return nil
-			}
-			mem, memAvailable := memoryBytesOf(memMod)
-			if resultUsesMem && !memAvailable {
-				return fmt.Errorf("async import %q %q: result requires linear memory (string/list), but the calling module has none", iface, funcName)
-			}
-			resultVal, herr := allocHandleResult(resources, resultType, vals[0])
-			if herr != nil {
-				return fmt.Errorf("async import %q %q: result: %w", iface, funcName, herr)
-			}
-			// Resolving "cabi_realloc" (a module export lookup, allocating on
-			// both the found and not-found paths -- ModuleInstance.getExport)
-			// is only useful when Store might actually grow guest memory for
-			// this result (a string/list); a plain-value result (e.g. u32)
-			// never calls realloc.grow, so skip the lookup entirely then --
-			// resultUsesMem is precomputed at bind time (this func's caller),
-			// so this is a cheap branch, not a re-derivation.
-			var realloc abi.Realloc
-			if resultUsesMem {
-				realloc = reallocOf(ctx, memMod)
-				if reallocOverride != nil {
-					realloc = reallocOfFunc(ctx, reallocOverride)
-				}
-			}
-			if serr := abi.Store(mem, retPtr, resultType, resultVal, resolve, realloc); serr != nil {
-				return fmt.Errorf("async import %q %q: result: store: %w", iface, funcName, serr)
-			}
-			st.resolve(subtaskReturned, nil)
-			return nil
+			st.retPtr = api.DecodeU32(stack[outPtrIdx])
 		}
 
 		if tgt := hi.asyncTarget; tgt != nil {
@@ -391,11 +418,11 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 				return nil
 			}
 
-			onCancel, operr := tgt.sub.startAsyncExportTask(ctx, tgt.be, tgt.exportName, onStart, onResolve)
+			calleeTask, operr := tgt.sub.startAsyncExportTask(ctx, tgt.be, tgt.exportName, onStart, onResolve)
 			if operr != nil {
 				panic(fmt.Errorf("component/instance: async lower %q %q: %w", iface, funcName, operr))
 			}
-			st.onCancel = onCancel // reference: subtask.on_cancel = callee(...) (~2270)
+			st.cancelTask = calleeTask // reference: subtask.on_cancel = callee(...) (~2270)
 
 			// If the CALLER is a plain sync lift (invokeEntered: activeTask nil
 			// or a syncImplicit task) there is no scheduler driver above this
@@ -442,7 +469,8 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 		}
 		st.state = subtaskStarted // on_start complete (args lifted)
 
-		ac := &AsyncCall{in: in, st: st, inCall: true}
+		ac := &st.ac
+		ac.in, ac.st, ac.inCall = in, st, true
 		// Bracket the actual Go call -- see buildHostWrapper's identical
 		// comment (host_import.go): this is what lets a Write/Read/Set/Get
 		// called synchronously from inside an AsyncHostFunc invocation pass
@@ -463,7 +491,6 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 			return
 		}
 		subtaski := resources.addEntry(st)
-		ac.subtaski = subtaski
 		st.setSubtaski(subtaski)
 		stack[0] = uint64(uint32(st.state)) | uint64(subtaski)<<4
 	})

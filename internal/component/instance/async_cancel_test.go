@@ -163,7 +163,7 @@ func TestRequestCancellation_StartedInlineResume(t *testing.T) {
 
 	var resolvedVals []abi.Value
 	var resolvedCancelled bool
-	onCancel, err := b.startAsyncExportTask(ctx, be, "run-async",
+	calleeTask, err := b.startAsyncExportTask(ctx, be, "run-async",
 		func(*task) ([]abi.Value, error) { return nil, nil },
 		func(vals []abi.Value, cancelled bool) error {
 			resolvedVals, resolvedCancelled = vals, cancelled
@@ -176,8 +176,8 @@ func TestRequestCancellation_StartedInlineResume(t *testing.T) {
 		t.Fatal("task resolved before any cancel was requested")
 	}
 
-	if err := onCancel(); err != nil {
-		t.Fatalf("onCancel (requestCancellation): %v", err)
+	if err := calleeTask.requestCancellation(); err != nil {
+		t.Fatalf("requestCancellation: %v", err)
 	}
 	if !resolvedCancelled || resolvedVals != nil {
 		t.Fatalf("onResolve(vals=%v, cancelled=%v), want (nil, true)", resolvedVals, resolvedCancelled)
@@ -300,7 +300,7 @@ func TestSubtaskCancelHostFunc_AsyncBlocked(t *testing.T) {
 	st := newSubtask()
 	st.state = subtaskStarted
 	onCancelCalled := false
-	st.onCancel = func() error { onCancelCalled = true; return nil } // callee ignores the request, stays unresolved
+	st.onCancelHook = func() { onCancelCalled = true } // callee ignores the request, stays unresolved
 	h := in.resources.addEntry(st)
 	def := subtaskCancelHostFuncGraph(in, binary.Canon{Async: true})
 	stack := []uint64{uint64(h)}
@@ -322,13 +322,12 @@ func TestSubtaskCancelHostFunc_AsyncResolvesImmediately(t *testing.T) {
 	st.state = subtaskStarted
 	h := in.resources.addEntry(st)
 	st.setSubtaski(h)
-	st.onCancel = func() error {
+	st.onCancelHook = func() {
 		// A real onCancel (host import ResolveCancelled, or the guest<->
 		// guest callee arm's onResolve) always installs the pending event
 		// once resolved -- see installSubtaskEvent's callers.
 		st.resolve(subtaskCancelledBeforeReturned, nil)
 		installSubtaskEvent(st, st.subtaski())
-		return nil
 	}
 	def := subtaskCancelHostFuncGraph(in, binary.Canon{Async: true})
 	stack := []uint64{uint64(h)}
@@ -362,7 +361,7 @@ func TestSubtaskCancelHostFunc_SyncBlocksThenResolves(t *testing.T) {
 	st.state = subtaskStarted
 	h := in.resources.addEntry(st)
 	st.setSubtaski(h)
-	st.onCancel = func() error {
+	st.onCancelHook = func() {
 		// Defer the resolution onto the scheduler -- the sync cancel's
 		// drive(st.hasPendingEvent) must pump it.
 		in.sched.enqueue(func() error {
@@ -370,7 +369,6 @@ func TestSubtaskCancelHostFunc_SyncBlocksThenResolves(t *testing.T) {
 			installSubtaskEvent(st, st.subtaski())
 			return nil
 		})
-		return nil
 	}
 	def := subtaskCancelHostFuncGraph(in, binary.Canon{Async: false})
 	stack := []uint64{uint64(h)}
@@ -384,7 +382,7 @@ func TestSubtaskCancelHostFunc_SyncDeadlockTraps(t *testing.T) {
 	in := newCancelTestInstance()
 	st := newSubtask()
 	st.state = subtaskStarted
-	st.onCancel = func() error { return nil } // never resolves, nothing queued
+	st.onCancelHook = func() {} // never resolves, nothing queued
 	h := in.resources.addEntry(st)
 	def := subtaskCancelHostFuncGraph(in, binary.Canon{Async: false})
 	requirePanicContains(t, "deadlock", func() {

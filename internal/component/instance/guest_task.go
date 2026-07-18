@@ -236,7 +236,19 @@ func (gt *guestTask) start() error {
 
 // firstRun runs firstRunBody inline (unpromoted task) or on a fresh segment
 // goroutine (promoted) via runSegment -- see guestTask.promoted's doc.
-func (gt *guestTask) firstRun() error { return gt.runSegment(gt.firstRunBody) }
+// Mirrors runLoop's inline-vs-runSegment split (below): calling
+// gt.firstRunBody() directly on the unpromoted path (instead of always
+// going through runSegment(gt.firstRunBody)) avoids a bound-method-value
+// allocation -- runSegment's promoted branch passes fn to a goroutine
+// (`go seg.main(fn)`), so escape analysis pins ANY argument ever passed to
+// runSegment's fn parameter to the heap, even along the call sites that hit
+// the non-promoted early return. Only the promoted branch still pays for it.
+func (gt *guestTask) firstRun() error {
+	if !gt.promoted {
+		return gt.firstRunBody()
+	}
+	return gt.runSegment(gt.firstRunBody)
+}
 
 // firstRunBody is task.start() -> lower params -> core call -> advance(packed),
 // the Phase-1/2 invokeAsyncCallback prologue verbatim (arg lowering, pooled

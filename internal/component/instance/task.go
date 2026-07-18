@@ -72,6 +72,21 @@ type task struct {
 	onResolve func(vals []abi.Value, cancelled bool)
 	result    []abi.Value
 
+	// resultBuf is an inline 1-element backing array for the common
+	// single-result task.return call (taskReturnHostFuncGraph,
+	// async_builtins.go): a task.return with a declared result type always
+	// produces exactly one abi.Value (multi-result task.return is rejected
+	// at bind time -- taskReturnHostFuncGraph's "multiple task.return
+	// results are not supported" error), so `t.resultBuf[0] = val;
+	// result = t.resultBuf[:1]` avoids a `[]abi.Value{val}` heap allocation
+	// per call. Aliasing the task's own field is safe: a task is never
+	// reused/pooled and task.return traps if called twice
+	// (trap_if(state==RESOLVED) in returnValues below), so nothing ever
+	// overwrites resultBuf after the one call that populates it, and the
+	// returned slice header keeps this task (hence resultBuf's backing
+	// array) reachable for exactly as long as anything still holds it.
+	resultBuf [1]abi.Value
+
 	// syncImplicit marks the implicit Task of a PLAIN SYNC canon lift
 	// (invokeEntered): the reference's Task for a not-opts.async_ lift
 	// (definitions.py:2155-2164). It has no gt/st (blocker() == nil), never
