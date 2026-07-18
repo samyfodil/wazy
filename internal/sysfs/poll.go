@@ -2,9 +2,7 @@
 
 package sysfs
 
-import (
-	"github.com/samyfodil/wazy/experimental/sys"
-)
+import "github.com/samyfodil/wazy/sys"
 
 // poll implements `Poll` as documented on sys.File via a file descriptor.
 func poll(fd uintptr, flag sys.Pflag, timeoutMillis int32) (ready bool, errno sys.Errno) {

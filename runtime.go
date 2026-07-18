@@ -6,7 +6,6 @@ import (
 	"sync/atomic"
 
 	"github.com/samyfodil/wazy/api"
-	experimentalapi "github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/engine/interpreter"
 	"github.com/samyfodil/wazy/internal/engine/native"
 	"github.com/samyfodil/wazy/internal/expctxkeys"
@@ -280,7 +279,7 @@ func (r *runtime) CompileModule(ctx context.Context, binary []byte) (CompiledMod
 	// non-hot-path feature) we keep the original validate-first ordering and
 	// forgo the cache-hit validation skip; the engine's own CompileModule
 	// still resolves a cached artifact cheaply on its internal probe.
-	var listeners []experimentalapi.FunctionListener
+	var listeners []api.FunctionListener
 	var hasCompiled bool
 	if ctx.Value(expctxkeys.FunctionListenerFactoryKey{}) == nil {
 		internal.AssignModuleID(binary, nil, r.ensureTermination, interruptCheckInterval)
@@ -362,15 +361,15 @@ func (r *runtime) CompileModule(ctx context.Context, binary []byte) (CompiledMod
 	return c, nil
 }
 
-func buildFunctionListeners(ctx context.Context, internal *wasm.Module) ([]experimentalapi.FunctionListener, error) {
+func buildFunctionListeners(ctx context.Context, internal *wasm.Module) ([]api.FunctionListener, error) {
 	// Test to see if internal code are using an experimental feature.
 	fnlf := ctx.Value(expctxkeys.FunctionListenerFactoryKey{})
 	if fnlf == nil {
 		return nil, nil
 	}
-	factory := fnlf.(experimentalapi.FunctionListenerFactory)
+	factory := fnlf.(api.FunctionListenerFactory)
 	importCount := internal.ImportFunctionCount
-	listeners := make([]experimentalapi.FunctionListener, len(internal.FunctionSection))
+	listeners := make([]api.FunctionListener, len(internal.FunctionSection))
 	for i := 0; i < len(listeners); i++ {
 		listeners[i] = factory.NewFunctionListener(internal.FunctionDefinition(uint32(i) + importCount))
 	}
@@ -458,7 +457,7 @@ func (r *runtime) InstantiateModule(
 		return nil, err
 	}
 
-	if closeNotifier, ok := ctx.Value(expctxkeys.CloseNotifierKey{}).(experimentalapi.CloseNotifier); ok {
+	if closeNotifier, ok := ctx.Value(expctxkeys.CloseNotifierKey{}).(api.CloseNotifier); ok {
 		mod.(*wasm.ModuleInstance).CloseNotifier = closeNotifier
 	}
 

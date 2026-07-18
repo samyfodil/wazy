@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental/wazytest"
 	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/wazytest"
 )
 
 func Test_callOnPanic(t *testing.T) {

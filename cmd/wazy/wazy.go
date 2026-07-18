@@ -17,14 +17,13 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
-	"github.com/samyfodil/wazy/experimental/logging"
 	"github.com/samyfodil/wazy/experimental/sock"
-	"github.com/samyfodil/wazy/experimental/sysfs"
 	"github.com/samyfodil/wazy/imports/wasi_snapshot_preview1"
 	internalsys "github.com/samyfodil/wazy/internal/sys"
 	"github.com/samyfodil/wazy/internal/version"
+	"github.com/samyfodil/wazy/logging"
 	"github.com/samyfodil/wazy/sys"
+	"github.com/samyfodil/wazy/sysfs"
 )
 
 func main() {
@@ -137,7 +136,7 @@ func doCompile(args []string, stdErr io.Writer) int {
 		*workers = maxProcs
 	}
 
-	ctx = experimental.WithCompilationWorkers(ctx, *workers)
+	ctx = api.WithCompilationWorkers(ctx, *workers)
 
 	rt := wazy.NewRuntimeWithConfig(ctx, c)
 	defer rt.Close(ctx)
@@ -301,7 +300,7 @@ func doRun(args []string, stdOut io.Writer, stdErr logging.Writer) int {
 		*workers = maxProcs
 	}
 
-	compilationCtx = experimental.WithCompilationWorkers(compilationCtx, *workers)
+	compilationCtx = api.WithCompilationWorkers(compilationCtx, *workers)
 
 	if timeout > 0 {
 		newCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -475,7 +474,7 @@ func detectImports(imports []api.FunctionDefinition) importMode {
 
 func maybeHostLogging(ctx context.Context, scopes logging.LogScopes, stdErr logging.Writer) context.Context {
 	if scopes != 0 {
-		return experimental.WithFunctionListenerFactory(ctx, logging.NewHostLoggingListenerFactory(stdErr, scopes))
+		return api.WithFunctionListenerFactory(ctx, logging.NewHostLoggingListenerFactory(stdErr, scopes))
 	}
 	return ctx
 }

@@ -2,7 +2,7 @@
 
 package sysfs
 
-import "github.com/samyfodil/wazy/experimental/sys"
+import "github.com/samyfodil/wazy/sys"
 
 // PollReadiness polls files for POLLIN readiness with a single _poll syscall
 // over all of them, so it returns as soon as ANY file is ready — the any-ready

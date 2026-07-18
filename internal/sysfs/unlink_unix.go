@@ -5,7 +5,7 @@ package sysfs
 import (
 	"syscall"
 
-	"github.com/samyfodil/wazy/experimental/sys"
+	"github.com/samyfodil/wazy/sys"
 )
 
 func unlink(name string) (errno sys.Errno) {

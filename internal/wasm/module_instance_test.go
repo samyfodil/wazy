@@ -8,12 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samyfodil/wazy/experimental/sys"
 	internalsys "github.com/samyfodil/wazy/internal/sys"
 	"github.com/samyfodil/wazy/internal/sysfs"
 	testfs "github.com/samyfodil/wazy/internal/testing/fs"
 	"github.com/samyfodil/wazy/internal/testing/hammer"
 	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/sys"
 )
 
 func TestModuleInstance_String(t *testing.T) {

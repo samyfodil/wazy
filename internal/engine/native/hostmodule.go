@@ -5,11 +5,10 @@ import (
 	"unsafe"
 
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/wasm"
 )
 
-func buildHostModuleOpaque(m *wasm.Module, listeners []experimental.FunctionListener) moduleContextOpaque {
+func buildHostModuleOpaque(m *wasm.Module, listeners []api.FunctionListener) moduleContextOpaque {
 	size := len(m.CodeSection)*16 + 32
 	ret := newAlignedOpaque(size)
 
@@ -52,7 +51,7 @@ func hostModuleFromOpaque(opaqueBegin uintptr) *wasm.Module {
 	return *(**wasm.Module)(unsafe.Pointer(&opaqueViewOverSlice[0]))
 }
 
-func hostModuleListenersSliceFromOpaque(opaqueBegin uintptr) []experimental.FunctionListener {
+func hostModuleListenersSliceFromOpaque(opaqueBegin uintptr) []api.FunctionListener {
 	var opaqueViewOverSlice []byte
 	sh := (*sliceHeader)(unsafe.Pointer(&opaqueViewOverSlice))
 	sh.Data = opaqueBegin
@@ -62,7 +61,7 @@ func hostModuleListenersSliceFromOpaque(opaqueBegin uintptr) []experimental.Func
 	b := binary.LittleEndian.Uint64(opaqueViewOverSlice[8:])
 	l := binary.LittleEndian.Uint64(opaqueViewOverSlice[16:])
 	c := binary.LittleEndian.Uint64(opaqueViewOverSlice[24:])
-	var ret []experimental.FunctionListener
+	var ret []api.FunctionListener
 	sh = (*sliceHeader)(unsafe.Pointer(&ret))
 	sh.Data = uintptr(b)
 	sh.Len = int(l)

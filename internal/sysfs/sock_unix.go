@@ -6,8 +6,8 @@ import (
 	"net"
 	"syscall"
 
-	"github.com/samyfodil/wazy/experimental/sys"
 	socketapi "github.com/samyfodil/wazy/internal/sock"
+	"github.com/samyfodil/wazy/sys"
 )
 
 // MSG_PEEK is the constant syscall.MSG_PEEK

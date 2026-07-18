@@ -12,7 +12,6 @@ import (
 	"unsafe"
 
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/expctxkeys"
 	"github.com/samyfodil/wazy/internal/filecache"
 	"github.com/samyfodil/wazy/internal/internalapi"
@@ -369,7 +368,7 @@ type compiledFunction struct {
 	// U3. Kept parallel to body so body stays a dense 32-B/op array.
 	sideTable           [][]uint64
 	exceptionTable      []exceptionTableEntry
-	listener            experimental.FunctionListener
+	listener            api.FunctionListener
 	offsetsInWasmBinary []uint64
 	hostFn              interface{}
 	ensureTermination   bool
@@ -405,8 +404,8 @@ type snapshot struct {
 	ce *callEngine
 }
 
-// Snapshot implements the same method as documented on experimental.Snapshotter.
-func (ce *callEngine) Snapshot() experimental.Snapshot {
+// Snapshot implements the same method as documented on api.Snapshotter.
+func (ce *callEngine) Snapshot() api.Snapshot {
 	return &snapshot{
 		stack:  slices.Clone(ce.stack),
 		frames: slices.Clone(ce.frames),
@@ -414,7 +413,7 @@ func (ce *callEngine) Snapshot() experimental.Snapshot {
 	}
 }
 
-// Restore implements the same method as documented on experimental.Snapshot.
+// Restore implements the same method as documented on api.Snapshot.
 func (s *snapshot) Restore(ret []uint64) {
 	s.ret = ret
 	panic(s)
@@ -440,7 +439,7 @@ func (s *snapshot) Error() string {
 		"exported function invocation than snapshot"
 }
 
-// stackIterator implements experimental.StackIterator.
+// stackIterator implements api.StackIterator.
 type stackIterator struct {
 	stack   []uint64
 	frames  []callFrame
@@ -464,7 +463,7 @@ func (si *stackIterator) clear() {
 	si.fn = nil
 }
 
-// Next implements the same method as documented on experimental.StackIterator.
+// Next implements the same method as documented on api.StackIterator.
 func (si *stackIterator) Next() bool {
 	if !si.started {
 		si.started = true
@@ -484,29 +483,29 @@ func (si *stackIterator) Next() bool {
 }
 
 // Function implements the same method as documented on
-// experimental.StackIterator.
-func (si *stackIterator) Function() experimental.InternalFunction {
+// api.StackIterator.
+func (si *stackIterator) Function() api.InternalFunction {
 	return internalFunction{si.fn}
 }
 
 // ProgramCounter implements the same method as documented on
-// experimental.StackIterator.
-func (si *stackIterator) ProgramCounter() experimental.ProgramCounter {
-	return experimental.ProgramCounter(si.pc)
+// api.StackIterator.
+func (si *stackIterator) ProgramCounter() api.ProgramCounter {
+	return api.ProgramCounter(si.pc)
 }
 
-// internalFunction implements experimental.InternalFunction.
+// internalFunction implements api.InternalFunction.
 type internalFunction struct{ *function }
 
 // Definition implements the same method as documented on
-// experimental.InternalFunction.
+// api.InternalFunction.
 func (f internalFunction) Definition() api.FunctionDefinition {
 	return f.definition()
 }
 
 // SourceOffsetForPC implements the same method as documented on
-// experimental.InternalFunction.
-func (f internalFunction) SourceOffsetForPC(pc experimental.ProgramCounter) uint64 {
+// api.InternalFunction.
+func (f internalFunction) SourceOffsetForPC(pc api.ProgramCounter) uint64 {
 	offsetsMap := f.parent.offsetsInWasmBinary
 	if uint64(pc) < uint64(len(offsetsMap)) {
 		return offsetsMap[pc]
@@ -524,13 +523,13 @@ const callFrameStackSize = 0
 // CompileModule itself does on a cache hit, exposed so callers can make that
 // check before CompileModule (see wasm.Engine.HasCompiledModule's docs on the
 // reference-acquisition contract this establishes).
-func (e *engine) HasCompiledModule(module *wasm.Module, _ []experimental.FunctionListener, _ bool) (bool, error) {
+func (e *engine) HasCompiledModule(module *wasm.Module, _ []api.FunctionListener, _ bool) (bool, error) {
 	_, ok := e.getCompiledFunctions(module, true)
 	return ok, nil
 }
 
 // CompileModule implements the same method as documented on wasm.Engine.
-func (e *engine) CompileModule(_ context.Context, module *wasm.Module, listeners []experimental.FunctionListener, ensureTermination bool) error {
+func (e *engine) CompileModule(_ context.Context, module *wasm.Module, listeners []api.FunctionListener, ensureTermination bool) error {
 	if _, ok := e.getCompiledFunctions(module, true); ok { // cache hit!
 		return nil
 	}
@@ -542,7 +541,7 @@ func (e *engine) CompileModule(_ context.Context, module *wasm.Module, listeners
 	}
 	imported := module.ImportFunctionCount
 	for i := range module.CodeSection {
-		var lsn experimental.FunctionListener
+		var lsn api.FunctionListener
 		if i < len(listeners) {
 			lsn = listeners[i]
 		}
@@ -1046,7 +1045,7 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 // functionListenerInvocation captures arguments needed to perform function
 // listener invocations when unwinding the call stack.
 type functionListenerInvocation struct {
-	experimental.FunctionListener
+	api.FunctionListener
 	def api.FunctionDefinition
 }
 
@@ -5337,7 +5336,7 @@ func i32Abs(v uint32) uint32 {
 	}
 }
 
-func (ce *callEngine) callNativeFuncWithListener(ctx context.Context, m *wasm.ModuleInstance, f *function, fnl experimental.FunctionListener) context.Context {
+func (ce *callEngine) callNativeFuncWithListener(ctx context.Context, m *wasm.ModuleInstance, f *function, fnl api.FunctionListener) context.Context {
 	def, typ := f.definition(), f.funcType
 
 	ce.stackIterator.reset(ce.stack, ce.frames, f)

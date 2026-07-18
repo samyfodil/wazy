@@ -5,8 +5,8 @@ import (
 	"path"
 	"testing"
 
-	"github.com/samyfodil/wazy/experimental/sys"
 	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/sys"
 )
 
 func TestUnlink(t *testing.T) {

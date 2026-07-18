@@ -5,7 +5,6 @@ import (
 	"io"
 
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/ieee754"
 	"github.com/samyfodil/wazy/internal/leb128"
 	"github.com/samyfodil/wazy/internal/wasm"
@@ -27,7 +26,7 @@ func decodeConstantExpression(buf []byte, offset int, enabledFeatures api.CoreFe
 			offset += int(n)
 		case wasm.OpcodeI32Add, wasm.OpcodeI32Sub, wasm.OpcodeI32Mul:
 			// No immediate to read.
-			if !enabledFeatures.IsEnabled(experimental.CoreFeaturesExtendedConst) {
+			if !enabledFeatures.IsEnabled(api.CoreFeatureExtendedConst) {
 				return offset, fmt.Errorf("%v is not supported in a constant expression as feature \"extended-const\" is disabled", wasm.InstructionName(opcode))
 			}
 		case wasm.OpcodeI64Const:
@@ -37,7 +36,7 @@ func decodeConstantExpression(buf []byte, offset int, enabledFeatures api.CoreFe
 			offset += int(n)
 		case wasm.OpcodeI64Add, wasm.OpcodeI64Sub, wasm.OpcodeI64Mul:
 			// No immediate to read.
-			if !enabledFeatures.IsEnabled(experimental.CoreFeaturesExtendedConst) {
+			if !enabledFeatures.IsEnabled(api.CoreFeatureExtendedConst) {
 				return offset, fmt.Errorf("%v is not supported in a constant expression as feature \"extended-const\" is disabled", wasm.InstructionName(opcode))
 			}
 		case wasm.OpcodeF32Const:

@@ -3,9 +3,9 @@ package wazy
 import (
 	"io/fs"
 
-	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
-	"github.com/samyfodil/wazy/internal/sys"
+	internalsys "github.com/samyfodil/wazy/internal/sys"
 	"github.com/samyfodil/wazy/internal/sysfs"
+	"github.com/samyfodil/wazy/sys"
 )
 
 // FSConfig configures filesystem paths the embedding host allows the wasm
@@ -133,7 +133,7 @@ type FSConfig interface {
 
 type fsConfig struct {
 	// fs are the currently configured filesystems.
-	fs []experimentalsys.FS
+	fs []sys.FS
 	// guestPaths are the user-supplied names of the filesystems, retained for
 	// error messages and fmt.Stringer.
 	guestPaths []string
@@ -150,7 +150,7 @@ func NewFSConfig() FSConfig {
 // clone makes a deep copy of this module config.
 func (c *fsConfig) clone() *fsConfig {
 	ret := *c // copy except slice and maps which share a ref
-	ret.fs = make([]experimentalsys.FS, 0, len(c.fs))
+	ret.fs = make([]sys.FS, 0, len(c.fs))
 	ret.fs = append(ret.fs, c.fs...)
 	ret.guestPaths = make([]string, 0, len(c.guestPaths))
 	ret.guestPaths = append(ret.guestPaths, c.guestPaths...)
@@ -173,7 +173,7 @@ func (c *fsConfig) WithReadOnlyDirMount(dir, guestPath string) FSConfig {
 
 // WithFSMount implements FSConfig.WithFSMount
 func (c *fsConfig) WithFSMount(fs fs.FS, guestPath string) FSConfig {
-	var adapted experimentalsys.FS
+	var adapted sys.FS
 	if fs != nil {
 		adapted = &sysfs.AdaptFS{FS: fs}
 	}
@@ -181,11 +181,11 @@ func (c *fsConfig) WithFSMount(fs fs.FS, guestPath string) FSConfig {
 }
 
 // WithSysFSMount implements sysfs.FSConfig
-func (c *fsConfig) WithSysFSMount(fs experimentalsys.FS, guestPath string) FSConfig {
-	if _, ok := fs.(experimentalsys.UnimplementedFS); ok {
+func (c *fsConfig) WithSysFSMount(fs sys.FS, guestPath string) FSConfig {
+	if _, ok := fs.(sys.UnimplementedFS); ok {
 		return c // don't add fake paths.
 	}
-	cleaned := sys.StripPrefixesAndTrailingSlash(guestPath)
+	cleaned := internalsys.StripPrefixesAndTrailingSlash(guestPath)
 	ret := c.clone()
 	if i, ok := ret.guestPathToFS[cleaned]; ok {
 		ret.fs[i] = fs
@@ -200,12 +200,12 @@ func (c *fsConfig) WithSysFSMount(fs experimentalsys.FS, guestPath string) FSCon
 
 // preopens returns the possible nil index-correlated preopened filesystems
 // with guest paths.
-func (c *fsConfig) preopens() ([]experimentalsys.FS, []string) {
+func (c *fsConfig) preopens() ([]sys.FS, []string) {
 	preopenCount := len(c.fs)
 	if preopenCount == 0 {
 		return nil, nil
 	}
-	fs := make([]experimentalsys.FS, len(c.fs))
+	fs := make([]sys.FS, len(c.fs))
 	copy(fs, c.fs)
 	guestPaths := make([]string, len(c.guestPaths))
 	copy(guestPaths, c.guestPaths)

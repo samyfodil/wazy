@@ -9,12 +9,11 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
-	"github.com/samyfodil/wazy/experimental/logging"
 	"github.com/samyfodil/wazy/imports/wasi_snapshot_preview1"
 	"github.com/samyfodil/wazy/internal/testing/proxy"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/internal/wasip1"
+	"github.com/samyfodil/wazy/logging"
 	"github.com/samyfodil/wazy/sys"
 )
 
@@ -94,7 +93,7 @@ func requireProxyModuleWithContext(ctx context.Context, t *testing.T, config waz
 	var log bytes.Buffer
 
 	// Set context to one that has an experimental listener
-	ctx = experimental.WithFunctionListenerFactory(ctx,
+	ctx = api.WithFunctionListenerFactory(ctx,
 		proxy.NewLoggingListenerFactory(&log, logging.LogScopeAll))
 
 	r := wazy.NewRuntime(ctx)
@@ -123,7 +122,7 @@ func requireErrnoNosys(t *testing.T, funcName string, params ...uint64) string {
 	var log bytes.Buffer
 
 	// Set context to one that has an experimental listener
-	ctx := experimental.WithFunctionListenerFactory(testCtx,
+	ctx := api.WithFunctionListenerFactory(testCtx,
 		proxy.NewLoggingListenerFactory(&log, logging.LogScopeAll))
 
 	r := wazy.NewRuntime(ctx)

@@ -4,7 +4,7 @@ import (
 	"os"
 	"syscall"
 
-	"github.com/samyfodil/wazy/experimental/sys"
+	"github.com/samyfodil/wazy/sys"
 )
 
 func rename(from, to string) sys.Errno {

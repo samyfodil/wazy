@@ -10,7 +10,7 @@ import (
 	"io"
 	"unsafe"
 
-	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
 	"github.com/samyfodil/wazy/internal/filecache"
 	"github.com/samyfodil/wazy/internal/platform"
@@ -47,7 +47,7 @@ func (e *engine) addCompiledModule(module *wasm.Module, cm *compiledModule) (c *
 	return
 }
 
-func (e *engine) getCompiledModule(module *wasm.Module, listeners []experimental.FunctionListener, ensureTermination bool) (cm *compiledModule, ok bool, err error) {
+func (e *engine) getCompiledModule(module *wasm.Module, listeners []api.FunctionListener, ensureTermination bool) (cm *compiledModule, ok bool, err error) {
 	cm, ok = e.getCompiledModuleFromMemory(module, true)
 	if ok {
 		return

@@ -9,7 +9,6 @@ import (
 	"unsafe"
 
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
@@ -1016,7 +1015,7 @@ func requireChannelEmpty(t *testing.T, ch chan string) {
 	}
 }
 
-func sliceAllocator(cap, max uint64) experimental.LinearMemory {
+func sliceAllocator(cap, max uint64) api.LinearMemory {
 	return &sliceBuffer{make([]byte, cap), max}
 }
 

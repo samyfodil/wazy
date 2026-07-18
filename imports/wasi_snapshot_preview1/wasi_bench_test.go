@@ -8,13 +8,13 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
-	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
 	"github.com/samyfodil/wazy/imports/wasi_snapshot_preview1"
 	"github.com/samyfodil/wazy/internal/sys"
 	"github.com/samyfodil/wazy/internal/testing/proxy"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/internal/wasip1"
 	"github.com/samyfodil/wazy/internal/wasm"
+	sysapi "github.com/samyfodil/wazy/sys"
 )
 
 // configArgsEnviron ensures the result data are the same between args and ENV.
@@ -203,7 +203,7 @@ func Benchmark_fdReaddir(b *testing.B) {
 				preopenFile, ok := fsc.LookupFile(sys.FdPreopen)
 				require.True(b, ok)
 				preopen := preopenFile.FS
-				fd, errno := fsc.OpenFile(preopen, ".", experimentalsys.O_RDONLY, 0)
+				fd, errno := fsc.OpenFile(preopen, ".", sysapi.O_RDONLY, 0)
 				if errno != 0 {
 					b.Fatal(errno)
 				}
@@ -315,7 +315,7 @@ func Benchmark_pathFilestat(b *testing.B) {
 				preopenFile, ok := fsc.LookupFile(sys.FdPreopen)
 				require.True(b, ok)
 				preopen := preopenFile.FS
-				fd, errno := fsc.OpenFile(preopen, "zig", experimentalsys.O_RDONLY, 0)
+				fd, errno := fsc.OpenFile(preopen, "zig", sysapi.O_RDONLY, 0)
 				if errno != 0 {
 					b.Fatal(errno)
 				}

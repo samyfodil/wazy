@@ -12,7 +12,7 @@ type EnableSnapshotterKey struct{}
 type SnapshotterKey struct{}
 
 // SnapshotterEnabled is a process-wide latch set once the first context
-// carrying EnableSnapshotterKey is created (see experimental.WithSnapshotter).
+// carrying EnableSnapshotterKey is created (see api.WithSnapshotter).
 // The snapshotter is an experimental, opt-in feature that almost no caller
 // enables, yet every wasm entry and every interpreted call instruction used
 // to pay for a ctx.Value(EnableSnapshotterKey{}) lookup (a walk of the

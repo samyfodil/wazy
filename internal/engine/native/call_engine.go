@@ -8,7 +8,6 @@ import (
 	"unsafe"
 
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/engine/native/backend"
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
 	"github.com/samyfodil/wazy/internal/expctxkeys"
@@ -385,7 +384,7 @@ func (c *callEngine) Call(ctx context.Context, params ...uint64) ([]uint64, erro
 	return paramResultSlice[:c.numberOfResults], nil
 }
 
-func (c *callEngine) addFrame(builder wasmdebug.ErrorBuilder, addr uintptr) (def api.FunctionDefinition, listener experimental.FunctionListener) {
+func (c *callEngine) addFrame(builder wasmdebug.ErrorBuilder, addr uintptr) (def api.FunctionDefinition, listener api.FunctionListener) {
 	eng := c.parent.parent.parent
 	cm := eng.compiledModuleOfAddr(addr)
 	if cm == nil {
@@ -510,7 +509,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		if r != nil {
 			type listenerForAbort struct {
 				def api.FunctionDefinition
-				lsn experimental.FunctionListener
+				lsn api.FunctionListener
 			}
 
 			var listeners []listenerForAbort
@@ -1237,12 +1236,12 @@ func (c *callEngine) cloneStackInto(newStack []byte) (newSP, newFP, newTop uintp
 	return
 }
 
-func (c *callEngine) stackIterator(onHostCall bool) experimental.StackIterator {
+func (c *callEngine) stackIterator(onHostCall bool) api.StackIterator {
 	c.stackIteratorImpl.reset(c, onHostCall)
 	return &c.stackIteratorImpl
 }
 
-// stackIterator implements experimental.StackIterator.
+// stackIterator implements api.StackIterator.
 type stackIterator struct {
 	retAddrs      []uintptr
 	retAddrCursor int
@@ -1264,7 +1263,7 @@ func (si *stackIterator) reset(c *callEngine, onHostCall bool) {
 	si.eng = c.parent.parent.parent
 }
 
-// Next implements the same method as documented on experimental.StackIterator.
+// Next implements the same method as documented on api.StackIterator.
 func (si *stackIterator) Next() bool {
 	if si.retAddrCursor >= len(si.retAddrs) {
 		return false
@@ -1283,29 +1282,29 @@ func (si *stackIterator) Next() bool {
 	return false
 }
 
-// ProgramCounter implements the same method as documented on experimental.StackIterator.
-func (si *stackIterator) ProgramCounter() experimental.ProgramCounter {
-	return experimental.ProgramCounter(si.pc)
+// ProgramCounter implements the same method as documented on api.StackIterator.
+func (si *stackIterator) ProgramCounter() api.ProgramCounter {
+	return api.ProgramCounter(si.pc)
 }
 
-// Function implements the same method as documented on experimental.StackIterator.
-func (si *stackIterator) Function() experimental.InternalFunction {
+// Function implements the same method as documented on api.StackIterator.
+func (si *stackIterator) Function() api.InternalFunction {
 	return si
 }
 
-// Definition implements the same method as documented on experimental.InternalFunction.
+// Definition implements the same method as documented on api.InternalFunction.
 func (si *stackIterator) Definition() api.FunctionDefinition {
 	return si.currentDef
 }
 
-// SourceOffsetForPC implements the same method as documented on experimental.InternalFunction.
-func (si *stackIterator) SourceOffsetForPC(pc experimental.ProgramCounter) uint64 {
+// SourceOffsetForPC implements the same method as documented on api.InternalFunction.
+func (si *stackIterator) SourceOffsetForPC(pc api.ProgramCounter) uint64 {
 	upc := uintptr(pc)
 	cm := si.eng.compiledModuleOfAddr(upc)
 	return cm.getSourceOffset(upc)
 }
 
-// snapshot implements experimental.Snapshot
+// snapshot implements api.Snapshot
 type snapshot struct {
 	sp, fp, top    uintptr
 	returnAddress  *byte
@@ -1315,8 +1314,8 @@ type snapshot struct {
 	c              *callEngine
 }
 
-// Snapshot implements the same method as documented on experimental.Snapshotter.
-func (c *callEngine) Snapshot() experimental.Snapshot {
+// Snapshot implements the same method as documented on api.Snapshotter.
+func (c *callEngine) Snapshot() api.Snapshot {
 	returnAddress := c.execCtx.goCallReturnAddress
 	oldTop, oldSp := c.stackTop, uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall))
 	newSP, newFP, newTop, newStack := c.cloneStack(uintptr(len(c.stack)) + 16)
@@ -1332,7 +1331,7 @@ func (c *callEngine) Snapshot() experimental.Snapshot {
 	}
 }
 
-// Restore implements the same method as documented on experimental.Snapshot.
+// Restore implements the same method as documented on api.Snapshot.
 func (s *snapshot) Restore(ret []uint64) {
 	s.ret = ret
 	panic(s)

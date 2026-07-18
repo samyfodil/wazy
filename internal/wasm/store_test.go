@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/internalapi"
 	"github.com/samyfodil/wazy/internal/sys"
 	"github.com/samyfodil/wazy/internal/testing/hammer"
@@ -438,12 +437,12 @@ func (e *mockEngine) Close() error {
 }
 
 // CompileModule implements the same method as documented on wasm.Engine.
-func (e *mockEngine) CompileModule(context.Context, *Module, []experimental.FunctionListener, bool) error {
+func (e *mockEngine) CompileModule(context.Context, *Module, []api.FunctionListener, bool) error {
 	return nil
 }
 
 // HasCompiledModule implements the same method as documented on wasm.Engine.
-func (e *mockEngine) HasCompiledModule(*Module, []experimental.FunctionListener, bool) (bool, error) {
+func (e *mockEngine) HasCompiledModule(*Module, []api.FunctionListener, bool) (bool, error) {
 	return false, nil
 }
 

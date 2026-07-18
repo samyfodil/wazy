@@ -2352,7 +2352,7 @@ func TestModule_funcValidation_RefTypes(t *testing.T) {
 		},
 		{
 			name: "ref.null (concrete type) - typed-function-references enabled",
-			flag: api.CoreFeatureReferenceTypes | experimental.CoreFeaturesTypedFunctionReferences,
+			flag: api.CoreFeatureReferenceTypes | api.CoreFeatureTypedFunctionReferences,
 			body: []byte{
 				OpcodeRefNull, 0x00, // type index 0
 				OpcodeDrop, OpcodeEnd,
@@ -4906,7 +4906,7 @@ func TestValidation_LegacyExceptionHandlingOpcodes(t *testing.T) {
 				CodeSection:     []Code{{Body: []byte{tc.opcode, OpcodeEnd}}},
 			}
 			t.Run("with EH enabled", func(t *testing.T) {
-				err := m.validateFunction(&stacks{}, api.CoreFeaturesV2|experimental.CoreFeaturesExceptionHandling,
+				err := m.validateFunction(&stacks{}, api.CoreFeaturesV2|api.CoreFeatureExceptionHandling,
 					0, []Index{0}, nil, nil, nil, nil, nil, bytes.NewReader(nil))
 				require.Error(t, err)
 				require.Contains(t, err.Error(), "legacy exception handling instruction")

@@ -7,13 +7,13 @@ import (
 	"testing"
 
 	"github.com/samyfodil/wazy"
-	"github.com/samyfodil/wazy/experimental"
-	"github.com/samyfodil/wazy/experimental/logging"
+	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/imports/wasi_snapshot_preview1"
 	internal "github.com/samyfodil/wazy/internal/emscripten"
 	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/internal/wasm"
+	"github.com/samyfodil/wazy/logging"
 )
 
 const (
@@ -44,7 +44,7 @@ func TestGrow(t *testing.T) {
 	var log bytes.Buffer
 
 	// Set context to one that has an experimental listener
-	ctx := experimental.WithFunctionListenerFactory(testCtx,
+	ctx := api.WithFunctionListenerFactory(testCtx,
 		logging.NewHostLoggingListenerFactory(&log, logging.LogScopeMemory))
 
 	r := wazy.NewRuntime(ctx)
@@ -345,7 +345,7 @@ func TestInstantiateForModule(t *testing.T) {
 	var log bytes.Buffer
 
 	// Set context to one that has an experimental listener
-	ctx := experimental.WithFunctionListenerFactory(testCtx, logging.NewLoggingListenerFactory(&log))
+	ctx := api.WithFunctionListenerFactory(testCtx, logging.NewLoggingListenerFactory(&log))
 
 	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)

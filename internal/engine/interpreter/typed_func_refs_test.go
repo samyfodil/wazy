@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/internal/wasm"
 )
@@ -84,7 +83,7 @@ func TestCompile_LocalSetWithMultipleConcreteRefLocals(t *testing.T) {
 		module.TypeSection[i].CacheNumInUint64()
 	}
 
-	features := api.CoreFeaturesV2 | experimental.CoreFeaturesTypedFunctionReferences | experimental.CoreFeaturesTailCall
+	features := api.CoreFeaturesV2 | api.CoreFeatureTypedFunctionReferences | api.CoreFeatureTailCall
 	c, err := newCompiler(features, 0, module, false)
 	require.NoError(t, err)
 

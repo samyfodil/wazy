@@ -12,7 +12,6 @@ import (
 	"sync"
 
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/wasmdebug"
 )
 
@@ -215,7 +214,7 @@ const (
 // interruptCheckInterval is folded in because it changes generated code (loop
 // interrupt-check lowering), so distinct intervals must map to distinct
 // compiled artifacts / cache entries.
-func (m *Module) AssignModuleID(wasm []byte, listeners []experimental.FunctionListener, withEnsureTermination bool, interruptCheckInterval uint64) {
+func (m *Module) AssignModuleID(wasm []byte, listeners []api.FunctionListener, withEnsureTermination bool, interruptCheckInterval uint64) {
 	h := sha256.New()
 	h.Write(wasm)
 	// Use the pre-allocated space backed by m.ID below.
@@ -810,7 +809,7 @@ func (m *Module) resolveConstExprGlobalType(enabledFeatures api.CoreFeatures, se
 	// In version 3.0, this restriction is removed, and all globals prior to the current one are allowed.
 	// To avoid implementing too many flags, this relaxation is gated behind the CoreFeaturesExtendedConst flag,
 	// which includes other related extensions in constant expressions.
-	if !enabledFeatures.IsEnabled(experimental.CoreFeaturesExtendedConst) {
+	if !enabledFeatures.IsEnabled(api.CoreFeatureExtendedConst) {
 		return 0, fmt.Errorf("%s[%d] (global.get %d): out of range of imported globals", SectionIDName(sectionID), sectionIdx, idx)
 	}
 
@@ -849,7 +848,7 @@ func paramNames(localNames IndirectNameMap, funcIdx uint32, paramLen int) []stri
 	return nil
 }
 
-func (m *ModuleInstance) buildMemory(module *Module, allocator experimental.MemoryAllocator) {
+func (m *ModuleInstance) buildMemory(module *Module, allocator api.MemoryAllocator) {
 	memSec := module.MemorySection
 	if memSec != nil {
 		m.MemoryInstance = NewMemoryInstance(memSec, allocator, m.Engine)

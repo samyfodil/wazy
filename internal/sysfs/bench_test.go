@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samyfodil/wazy/experimental/sys"
+	"github.com/samyfodil/wazy/sys"
 )
 
 func BenchmarkFsFileUtimesNs(b *testing.B) {

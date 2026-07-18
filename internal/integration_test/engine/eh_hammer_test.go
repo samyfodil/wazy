@@ -7,7 +7,6 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/internal/wasm"
@@ -28,9 +27,9 @@ func TestEHParallelCompilation(t *testing.T) {
 	for _, workers := range []int{2, 4, 8} {
 		workers := workers
 		t.Run(fmt.Sprintf("workers=%d", workers), func(t *testing.T) {
-			ctx := experimental.WithCompilationWorkers(context.Background(), workers)
+			ctx := api.WithCompilationWorkers(context.Background(), workers)
 			cfg := wazy.NewRuntimeConfigCompiler().
-				WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling)
+				WithCoreFeatures(api.CoreFeaturesV2 | api.CoreFeatureExceptionHandling)
 			r := wazy.NewRuntimeWithConfig(ctx, cfg)
 			defer r.Close(ctx)
 

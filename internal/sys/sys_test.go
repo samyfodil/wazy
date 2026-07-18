@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
 	"github.com/samyfodil/wazy/internal/fstest"
 	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/sysfs"
@@ -22,7 +21,7 @@ func TestContext_WalltimeNanos(t *testing.T) {
 func TestDefaultSysContext(t *testing.T) {
 	testFS := &sysfs.AdaptFS{FS: fstest.FS}
 
-	sysCtx, err := NewContext(0, nil, nil, nil, nil, nil, nil, nil, 0, nil, 0, nil, nil, []experimentalsys.FS{testFS}, []string{"/"}, nil)
+	sysCtx, err := NewContext(0, nil, nil, nil, nil, nil, nil, nil, 0, nil, 0, nil, nil, []sys.FS{testFS}, []string{"/"}, nil)
 	require.NoError(t, err)
 
 	require.Nil(t, sysCtx.Args())

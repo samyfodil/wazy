@@ -16,7 +16,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/samyfodil/wazy/experimental/sys"
+	"github.com/samyfodil/wazy/sys"
 )
 
 // TestingT is an interface wrapper of functions used in TestingT

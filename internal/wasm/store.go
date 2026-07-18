@@ -8,7 +8,6 @@ import (
 	"sync/atomic"
 
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/expctxkeys"
 	"github.com/samyfodil/wazy/internal/internalapi"
 	internalsys "github.com/samyfodil/wazy/internal/sys"
@@ -125,7 +124,7 @@ type (
 		Source *Module
 
 		// CloseNotifier is an experimental hook called once on close.
-		CloseNotifier experimental.CloseNotifier
+		CloseNotifier api.CloseNotifier
 	}
 
 	// DataInstance holds bytes corresponding to the data segment in a module.
@@ -364,7 +363,7 @@ func (s *Store) instantiate(
 		return nil, err
 	}
 
-	allocator, _ := ctx.Value(expctxkeys.MemoryAllocatorKey{}).(experimental.MemoryAllocator)
+	allocator, _ := ctx.Value(expctxkeys.MemoryAllocatorKey{}).(api.MemoryAllocator)
 
 	m.buildGlobals(module, m.Engine.FunctionInstanceReference)
 	m.buildTags(module)
@@ -414,7 +413,7 @@ func (s *Store) instantiate(
 
 func (m *ModuleInstance) resolveImports(ctx context.Context, module *Module) (err error) {
 	// Check if ctx contains an ImportResolver.
-	resolveImport, _ := ctx.Value(expctxkeys.ImportResolverKey{}).(experimental.ImportResolver)
+	resolveImport, _ := ctx.Value(expctxkeys.ImportResolverKey{}).(api.ImportResolver)
 
 	for moduleName, imports := range module.ImportPerModule {
 		var importedModule *ModuleInstance

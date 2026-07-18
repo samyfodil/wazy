@@ -26,7 +26,6 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/internal/wasmruntime"
@@ -68,7 +67,7 @@ var ehCatchOutsideWasm []byte
 // TestExceptionHandlingInterpreter runs EH tests only for the interpreter.
 func TestExceptionHandlingInterpreter(t *testing.T) {
 	cfg := wazy.NewRuntimeConfigInterpreter().
-		WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling)
+		WithCoreFeatures(api.CoreFeaturesV2 | api.CoreFeatureExceptionHandling)
 	runEHTests(t, cfg)
 }
 
@@ -78,7 +77,7 @@ func TestExceptionHandlingCompiler(t *testing.T) {
 		t.Skip()
 	}
 	cfg := wazy.NewRuntimeConfigCompiler().
-		WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling)
+		WithCoreFeatures(api.CoreFeaturesV2 | api.CoreFeatureExceptionHandling)
 	runEHTests(t, cfg)
 }
 
@@ -355,7 +354,7 @@ func TestExceptionHandlingCompilationCache(t *testing.T) {
 			cache1, err := wazy.NewCompilationCacheWithDir(cacheDir)
 			require.NoError(t, err)
 			cfg1 := wazy.NewRuntimeConfigCompiler().
-				WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling).
+				WithCoreFeatures(api.CoreFeaturesV2 | api.CoreFeatureExceptionHandling).
 				WithCompilationCache(cache1)
 			r1 := wazy.NewRuntimeWithConfig(ctx, cfg1)
 			mod1, err := r1.InstantiateWithConfig(ctx, tc.wasm,
@@ -372,7 +371,7 @@ func TestExceptionHandlingCompilationCache(t *testing.T) {
 			cache2, err := wazy.NewCompilationCacheWithDir(cacheDir)
 			require.NoError(t, err)
 			cfg2 := wazy.NewRuntimeConfigCompiler().
-				WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling).
+				WithCoreFeatures(api.CoreFeaturesV2 | api.CoreFeatureExceptionHandling).
 				WithCompilationCache(cache2)
 			r2 := wazy.NewRuntimeWithConfig(ctx, cfg2)
 			mod2, err := r2.InstantiateWithConfig(ctx, tc.wasm,

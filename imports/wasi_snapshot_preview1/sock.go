@@ -4,11 +4,11 @@ import (
 	"context"
 
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental/sys"
 	socketapi "github.com/samyfodil/wazy/internal/sock"
 	"github.com/samyfodil/wazy/internal/sysfs"
 	"github.com/samyfodil/wazy/internal/wasip1"
 	"github.com/samyfodil/wazy/internal/wasm"
+	"github.com/samyfodil/wazy/sys"
 )
 
 // sockAccept is the WASI function named SockAcceptName which accepts a new

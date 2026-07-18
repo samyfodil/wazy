@@ -7,7 +7,6 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/integration_test/spectest"
 	"github.com/samyfodil/wazy/internal/platform"
 )
@@ -16,7 +15,7 @@ import (
 //go:embed testdata/*.json
 var testcases embed.FS
 
-const enabledFeatures = api.CoreFeaturesV2 | experimental.CoreFeaturesExtendedConst
+const enabledFeatures = api.CoreFeaturesV2 | api.CoreFeatureExtendedConst
 
 func TestCompiler(t *testing.T) {
 	if !platform.CompilerSupported() {

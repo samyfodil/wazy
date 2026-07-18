@@ -7,7 +7,7 @@ import (
 	"syscall"
 	"unsafe"
 
-	"github.com/samyfodil/wazy/experimental/sys"
+	"github.com/samyfodil/wazy/sys"
 )
 
 func openFile(path string, oflag sys.Oflag, perm fs.FileMode) (*os.File, sys.Errno) {

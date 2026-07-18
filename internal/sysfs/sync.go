@@ -5,7 +5,7 @@ package sysfs
 import (
 	"os"
 
-	"github.com/samyfodil/wazy/experimental/sys"
+	"github.com/samyfodil/wazy/sys"
 )
 
 func fsync(f *os.File) sys.Errno {

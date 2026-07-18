@@ -15,12 +15,12 @@ import (
 	"testing"
 
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental/logging"
 	"github.com/samyfodil/wazy/imports/wasi_snapshot_preview1"
 	"github.com/samyfodil/wazy/internal/internalapi"
 	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/internal/version"
+	"github.com/samyfodil/wazy/logging"
 	"github.com/samyfodil/wazy/sys"
 )
 

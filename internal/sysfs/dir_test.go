@@ -8,10 +8,10 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/samyfodil/wazy/experimental/sys"
 	"github.com/samyfodil/wazy/internal/fstest"
 	"github.com/samyfodil/wazy/internal/sysfs"
 	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/sys"
 )
 
 func TestFSFileReaddir(t *testing.T) {

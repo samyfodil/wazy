@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/samyfodil/wazy/api"
-	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
 	"github.com/samyfodil/wazy/internal/filecache"
 	"github.com/samyfodil/wazy/internal/internalapi"
 	"github.com/samyfodil/wazy/internal/platform"
@@ -869,7 +868,7 @@ func (c *moduleConfig) toSysContext() (sysCtx *internalsys.Context, err error) {
 		environ = append(environ, result)
 	}
 
-	var fs []experimentalsys.FS
+	var fs []sys.FS
 	var guestPaths []string
 	if f, ok := c.fsConfig.(*fsConfig); ok {
 		fs, guestPaths = f.preopens()

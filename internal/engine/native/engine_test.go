@@ -8,7 +8,7 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/internal/wasm"
@@ -48,7 +48,7 @@ func (f fakeFinalizer) setFinalizer(obj interface{}, finalizer interface{}) {
 func TestEngine_CompileModule(t *testing.T) {
 	for _, concurrency := range []int{1, 4} {
 		t.Run(fmt.Sprintf("concurrency_%d", concurrency), func(t *testing.T) {
-			ctx := experimental.WithCompilationWorkers(context.Background(), concurrency)
+			ctx := api.WithCompilationWorkers(context.Background(), concurrency)
 			e := NewEngine(ctx, 0, nil).(*engine)
 			ff := fakeFinalizer{}
 			e.setFinalizer = ff.setFinalizer

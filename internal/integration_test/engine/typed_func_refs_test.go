@@ -7,7 +7,6 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
 	"github.com/samyfodil/wazy/internal/testing/require"
@@ -24,7 +23,7 @@ func typedFuncRefsConfigs() []struct {
 		config wazy.RuntimeConfig
 	}{
 		{"interpreter", wazy.NewRuntimeConfigInterpreter().WithCoreFeatures(
-			api.CoreFeaturesV2 | experimental.CoreFeaturesTypedFunctionReferences,
+			api.CoreFeaturesV2 | api.CoreFeatureTypedFunctionReferences,
 		)},
 	}
 	if platform.CompilerSupported() {
@@ -32,7 +31,7 @@ func typedFuncRefsConfigs() []struct {
 			name   string
 			config wazy.RuntimeConfig
 		}{"compiler", wazy.NewRuntimeConfigCompiler().WithCoreFeatures(
-			api.CoreFeaturesV2 | experimental.CoreFeaturesTypedFunctionReferences,
+			api.CoreFeaturesV2 | api.CoreFeatureTypedFunctionReferences,
 		)})
 	}
 	return configs
@@ -52,7 +51,7 @@ func TestCallRefWithConcreteRefLocals(t *testing.T) {
 		config wazy.RuntimeConfig
 	}{
 		{"interpreter", wazy.NewRuntimeConfigInterpreter().WithCoreFeatures(
-			api.CoreFeaturesV2 | experimental.CoreFeaturesTypedFunctionReferences | experimental.CoreFeaturesTailCall,
+			api.CoreFeaturesV2 | api.CoreFeatureTypedFunctionReferences | api.CoreFeatureTailCall,
 		)},
 	}
 	if platform.CompilerSupported() {
@@ -60,7 +59,7 @@ func TestCallRefWithConcreteRefLocals(t *testing.T) {
 			name   string
 			config wazy.RuntimeConfig
 		}{"compiler", wazy.NewRuntimeConfigCompiler().WithCoreFeatures(
-			api.CoreFeaturesV2 | experimental.CoreFeaturesTypedFunctionReferences | experimental.CoreFeaturesTailCall,
+			api.CoreFeaturesV2 | api.CoreFeatureTypedFunctionReferences | api.CoreFeatureTailCall,
 		)})
 	}
 

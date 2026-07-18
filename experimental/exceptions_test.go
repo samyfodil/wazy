@@ -7,7 +7,6 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
@@ -18,7 +17,7 @@ func TestCppExceptions(t *testing.T) {
 	ctx := context.Background()
 
 	cfg := wazy.NewRuntimeConfig().
-		WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling)
+		WithCoreFeatures(api.CoreFeaturesV2 | api.CoreFeatureExceptionHandling)
 
 	r := wazy.NewRuntimeWithConfig(ctx, cfg)
 	defer r.Close(ctx)

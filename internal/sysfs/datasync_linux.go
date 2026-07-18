@@ -4,7 +4,7 @@ import (
 	"os"
 	"syscall"
 
-	"github.com/samyfodil/wazy/experimental/sys"
+	"github.com/samyfodil/wazy/sys"
 )
 
 func datasync(f *os.File) sys.Errno {

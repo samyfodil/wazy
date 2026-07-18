@@ -545,7 +545,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			// br_table instruction is stack-polymorphic.
 			valueTypeStack.unreachable()
 		} else if op == OpcodeThrow {
-			if err := enabledFeatures.RequireEnabled(experimental.CoreFeaturesExceptionHandling); err != nil {
+			if err := enabledFeatures.RequireEnabled(api.CoreFeatureExceptionHandling); err != nil {
 				return fmt.Errorf("%s invalid as %v", OpcodeThrowName, err)
 			}
 			pc++
@@ -567,7 +567,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			// throw is stack-polymorphic (never returns).
 			valueTypeStack.unreachable()
 		} else if op == OpcodeThrowRef {
-			if err := enabledFeatures.RequireEnabled(experimental.CoreFeaturesExceptionHandling); err != nil {
+			if err := enabledFeatures.RequireEnabled(api.CoreFeatureExceptionHandling); err != nil {
 				return fmt.Errorf("%s invalid as %v", OpcodeThrowRefName, err)
 			}
 			if err := valueTypeStack.popAndVerifyType(ValueTypeExnref); err != nil {
@@ -576,7 +576,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			// throw_ref is stack-polymorphic (never returns).
 			valueTypeStack.unreachable()
 		} else if op == OpcodeTryTable {
-			if err := enabledFeatures.RequireEnabled(experimental.CoreFeaturesExceptionHandling); err != nil {
+			if err := enabledFeatures.RequireEnabled(api.CoreFeatureExceptionHandling); err != nil {
 				return fmt.Errorf("%s invalid as %v", OpcodeTryTableName, err)
 			}
 			bt, num, err := decodeBlockTypeFast(m.TypeSection, body, pc+1, enabledFeatures, br)
@@ -763,7 +763,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				valueTypeStack.unreachable()
 			}
 		} else if op == OpcodeCallRef || op == OpcodeReturnCallRef {
-			if err := enabledFeatures.RequireEnabled(experimental.CoreFeaturesTypedFunctionReferences); err != nil {
+			if err := enabledFeatures.RequireEnabled(api.CoreFeatureTypedFunctionReferences); err != nil {
 				return fmt.Errorf("%s invalid as %v", instructionNames[op], err)
 			}
 			pc++
@@ -1019,7 +1019,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 					valueTypeStack.push(ValueTypeExnref)
 				default:
 					// Concrete type index encoded as LEB128 u32.
-					if err := enabledFeatures.RequireEnabled(experimental.CoreFeaturesTypedFunctionReferences); err != nil {
+					if err := enabledFeatures.RequireEnabled(api.CoreFeatureTypedFunctionReferences); err != nil {
 						return fmt.Errorf("ref.null with concrete type invalid as %v", err)
 					}
 					br.Reset(body[pc:])
@@ -1051,14 +1051,14 @@ func (m *Module) validateFunctionWithMaxStackValues(
 					return fmt.Errorf("undeclared function index %d for ref.func", index)
 				}
 				pc += num - 1
-				if enabledFeatures.IsEnabled(experimental.CoreFeaturesTypedFunctionReferences) {
+				if enabledFeatures.IsEnabled(api.CoreFeatureTypedFunctionReferences) {
 					valueTypeStack.push(ValueTypeConcreteRef(functions[index], false))
 				} else {
 					valueTypeStack.push(ValueTypeFuncref)
 				}
 			}
 		} else if op == OpcodeRefAsNonNull {
-			if err := enabledFeatures.RequireEnabled(experimental.CoreFeaturesTypedFunctionReferences); err != nil {
+			if err := enabledFeatures.RequireEnabled(api.CoreFeatureTypedFunctionReferences); err != nil {
 				return fmt.Errorf("%s invalid as %v", OpcodeRefAsNonNullName, err)
 			}
 			tp, err := valueTypeStack.pop()
@@ -1073,7 +1073,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				valueTypeStack.push(tp.AsNonNullable())
 			}
 		} else if op == OpcodeBrOnNull {
-			if err := enabledFeatures.RequireEnabled(experimental.CoreFeaturesTypedFunctionReferences); err != nil {
+			if err := enabledFeatures.RequireEnabled(api.CoreFeatureTypedFunctionReferences); err != nil {
 				return fmt.Errorf("%s invalid as %v", OpcodeBrOnNullName, err)
 			}
 			pc++
@@ -1113,7 +1113,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				valueTypeStack.push(tp)
 			}
 		} else if op == OpcodeBrOnNonNull {
-			if err := enabledFeatures.RequireEnabled(experimental.CoreFeaturesTypedFunctionReferences); err != nil {
+			if err := enabledFeatures.RequireEnabled(api.CoreFeatureTypedFunctionReferences); err != nil {
 				return fmt.Errorf("%s invalid as %v", OpcodeBrOnNonNullName, err)
 			}
 			pc++
@@ -2286,7 +2286,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			// unreachable instruction is stack-polymorphic.
 			valueTypeStack.unreachable()
 		} else if op == OpcodeNop {
-		} else if enabledFeatures.IsEnabled(experimental.CoreFeaturesExceptionHandling) &&
+		} else if enabledFeatures.IsEnabled(api.CoreFeatureExceptionHandling) &&
 			(op == OpcodeLegacyTry || op == OpcodeLegacyCatch || op == OpcodeLegacyRethrow ||
 				op == OpcodeLegacyDelegate || op == OpcodeLegacyCatchAll) {
 			return fmt.Errorf("legacy exception handling instruction 0x%x not supported; recompile with wasm-opt --translate-to-exnref", op)
@@ -2399,7 +2399,7 @@ func (sts *stacks) validateReturnCall(
 	enabledFeatures api.CoreFeatures,
 	calleeFuncType, callerFuncType *FunctionType,
 ) error {
-	if err := enabledFeatures.RequireEnabled(experimental.CoreFeaturesTailCall); err != nil {
+	if err := enabledFeatures.RequireEnabled(api.CoreFeatureTailCall); err != nil {
 		return fmt.Errorf("%s invalid as %v", opName, err)
 	}
 	if len(calleeFuncType.Results) != len(callerFuncType.Results) {
