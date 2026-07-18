@@ -60,7 +60,7 @@ defer inst.Close(ctx)
 _, err = inst.Call(ctx, "wasi:cli/run@0.2.3#run")
 ```
 
-Call an interface export directly with `inst.CallExport("component:adder/calc", "add", uint32(2), uint32(3))`, or serve a `wasi:http/incoming-handler` component straight to `net/http` — `*component.Instance` satisfies `http.Handler`. The API is young and, like the rest of wazy, makes no stability promise.
+Call an interface export directly with `inst.CallExport("component:adder/calc", "add", uint32(2), uint32(3))`, or serve a `wasi:http/incoming-handler` component straight to `net/http` — `*component.Instance` satisfies `http.Handler`. The API is young and, like the rest of wazy, makes no stability promise. See [`examples/component`](examples/component) for a runnable interface-export call, a WASI 0.2 command, and an async export end to end.
 
 ## Async — the Component Model async ABI (WASI 0.3)
 
@@ -72,6 +72,8 @@ wazy runs the Component Model's async ABI: components that suspend, await, and r
 - **`thread.*`** — a cooperative fiber runtime (`thread.new-indirect`, `yield`, `suspend`, `yield-then-resume`) built on the same goroutine-plus-baton primitive.
 
 It passes **all 31 official Component Model async `.wast` conformance suites** (one carries a fixture fix filed upstream as [component-model#679][pr679]), cross-checked by a differential trace-oracle that byte-compares wazy against the spec reference (`definitions.py`). Goroutines and channels back futures, streams, and threads naturally — the one place Go's substrate is an asset over the hand-written event loops other runtimes need.
+
+An async export is called exactly like a synchronous one — the scheduler runs underneath and `Call` returns when the task completes. [`examples/component`](examples/component) runs one end to end.
 
 ## Moving fast
 
