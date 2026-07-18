@@ -103,6 +103,12 @@ r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigInterpreter())
 
 The fastest way in is an [example](examples/README.md). The [basic one](examples/basic) extends a Go program with an addition function written in WebAssembly.
 
+## Users
+
+- [taubyte/tau](https://github.com/taubyte/tau) — the open-source platform behind Taubyte clouds runs WebAssembly workloads on wazy.
+
+Using wazy in production? [Open a PR](https://github.com/samyfodil/wazy/pulls) to add yourself.
+
 ## Credit
 
 wazy started from [wazero][wazero]'s code (Copyright 2020-2023 wazero authors) and still draws on its WebAssembly semantics, WASI implementation, and compliance and fuzzing test suites. We do not intend to keep wazero's API compatibility or its architecture. The goals are pure Go, performance, and conformance to the standard. See [RATIONALE.md](RATIONALE.md) for wazero's original design rationale and [LICENSE](LICENSE) for the Apache 2.0 license.
