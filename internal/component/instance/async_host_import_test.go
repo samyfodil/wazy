@@ -301,7 +301,7 @@ func ptrU32(v uint32) *uint32 { return &v }
 
 func TestAsyncCall_Resolve_TwiceTraps(t *testing.T) {
 	st := newSubtask()
-	st.applyResolve = func([]abi.Value) error { return nil }
+	st.resolveFn = func([]abi.Value) error { return nil }
 	ac := &AsyncCall{in: &Instance{sched: &sched{}}, st: st, inCall: true}
 	ac.Resolve(nil)
 	requirePanicContains(t, "Resolve called twice", func() { ac.Resolve(nil) })
@@ -309,16 +309,55 @@ func TestAsyncCall_Resolve_TwiceTraps(t *testing.T) {
 
 func TestAsyncCall_Resolve_OutsideSchedulerTraps(t *testing.T) {
 	st := newSubtask()
-	st.applyResolve = func([]abi.Value) error { return nil }
+	st.resolveFn = func([]abi.Value) error { return nil }
 	ac := &AsyncCall{in: &Instance{sched: &sched{}}, st: st} // inCall=false, sched.pumping=false
 	requirePanicContains(t, "external completion requires CallAsync", func() { ac.Resolve(nil) })
 }
 
 func TestAsyncCall_Resolve_ApplyResolveErrorTraps(t *testing.T) {
 	st := newSubtask()
-	st.applyResolve = func([]abi.Value) error { return errors.New("bad result") }
+	st.resolveFn = func([]abi.Value) error { return errors.New("bad result") }
 	ac := &AsyncCall{in: &Instance{sched: &sched{}}, st: st, inCall: true}
 	requirePanicContains(t, "bad result", func() { ac.Resolve(nil) })
+}
+
+// ------- subtask.applyResolve: resolveFn priority / no-source panic -------
+
+// TestSubtask_ApplyResolve_ResolveFnTakesPriorityOverCfg pins the priority
+// order the method documents: resolveFn (a test injection / future
+// alternate source) is checked BEFORE resolveCfg, even when both are set --
+// a production subtask never has both, but the dispatch order itself is the
+// contract under test here.
+func TestSubtask_ApplyResolve_ResolveFnTakesPriorityOverCfg(t *testing.T) {
+	st := newSubtask()
+	st.resolveCfg = &asyncResolveCfg{resultCount: 0}
+	called := false
+	st.resolveFn = func([]abi.Value) error { called = true; return nil }
+	if err := st.applyResolve(nil); err != nil {
+		t.Fatalf("applyResolve: %v", err)
+	}
+	if !called {
+		t.Fatal("resolveFn was not invoked even though it was set")
+	}
+}
+
+// TestSubtask_ApplyResolve_NoSourcePanics pins the BUG guard: a subtask
+// built without newSubtask's production wiring (buildAsyncHostWrapper never
+// ran) has neither resolveFn nor resolveCfg set, and applyResolve must fail
+// loud rather than nil-deref or silently no-op.
+func TestSubtask_ApplyResolve_NoSourcePanics(t *testing.T) {
+	st := newSubtask()
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected a panic, got none")
+		}
+		msg, ok := r.(string)
+		if !ok || msg != "BUG: applyResolve on a subtask with no resolve source" {
+			t.Fatalf("panic = %#v, want the BUG string", r)
+		}
+	}()
+	_ = st.applyResolve(nil)
 }
 
 // ------- AsyncCall.OnCancel / ResolveCancelled -------
@@ -328,11 +367,11 @@ func TestAsyncCall_OnCancel_SetsSubtaskOnCancel(t *testing.T) {
 	ac := &AsyncCall{in: &Instance{sched: &sched{}}, st: st}
 	called := false
 	ac.OnCancel(func() { called = true })
-	if st.onCancel == nil {
-		t.Fatal("OnCancel did not set st.onCancel")
+	if !st.hasOnCancel() {
+		t.Fatal("OnCancel did not set st.onCancelHook")
 	}
-	if err := st.onCancel(); err != nil {
-		t.Fatalf("st.onCancel(): %v", err)
+	if err := st.runOnCancel(); err != nil {
+		t.Fatalf("st.runOnCancel(): %v", err)
 	}
 	if !called {
 		t.Fatal("the registered fn was not invoked")
@@ -363,7 +402,8 @@ func TestAsyncCall_ResolveCancelled_Immediate(t *testing.T) {
 func TestAsyncCall_ResolveCancelled_Parked(t *testing.T) {
 	st := newSubtask()
 	st.cancellationRequested = true
-	ac := &AsyncCall{in: &Instance{sched: &sched{}}, st: st, subtaski: 5}
+	st.setSubtaski(5)
+	ac := &AsyncCall{in: &Instance{sched: &sched{}}, st: st}
 	ac.in.sched.pumping = true // "called from a scheduler thunk"
 	ac.ResolveCancelled()
 	if !st.hasPendingEvent() {

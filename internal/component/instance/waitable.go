@@ -1,8 +1,10 @@
 package instance
 
 import (
+	"context"
 	"fmt"
 
+	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/component/abi"
 )
 
@@ -253,25 +255,60 @@ type subtask struct {
 	lenders     []*resourceEntry
 	flatResults []uint64
 
-	// applyResolve lowers an async host import's results into the guest
-	// memory captured at call time (through the retptr an async-lowered
-	// import's core signature always carries for a non-empty result -- see
-	// async_host_import.go's buildAsyncHostWrapper) and flips state to
-	// RETURNED. Set by buildAsyncHostWrapper for a host-import subtask;
-	// nil for anything else (no other subtask source exists yet -- Phase
-	// 2/3 add guest->guest lowers and streams/futures).
-	applyResolve func(results []abi.Value) error
+	// resolveFn is a test-injection / future-alternate-source override for
+	// applyResolve; nil in production (the resolveCfg path below is used).
+	// Checked first by the applyResolve method.
+	resolveFn func(results []abi.Value) error
 
-	// onCancel mirrors Subtask.on_cancel (Phase 3): the callee's cancel
-	// entry, called synchronously by the subtask.cancel builtin. For a
-	// guest<->guest async-lowered call this is the callee task's
-	// requestCancellation (async_lift.go's startAsyncExportTask); for a host
-	// import it is whatever AsyncCall.OnCancel registered, or nil if the
-	// import registered none (a callee that ignores cancellation --
-	// spec-legal, see AsyncCall.OnCancel's doc). nil for a subtask that has
-	// already resolved by the time cancel is called (nothing left to
-	// cancel).
-	onCancel func() error
+	// resolveCfg is the bind-time half of a host-import subtask's resolve:
+	// one per async-lowered import binding, built once in
+	// buildAsyncHostWrapper (amortized), shared by every call through that
+	// binding. Immutable after bind. nil for anything else (no other
+	// subtask source exists yet -- Phase 2/3 add guest->guest lowers and
+	// streams/futures).
+	resolveCfg *asyncResolveCfg
+
+	// retPtr is the per-call trailing out-pointer, decoded from the core
+	// stack at call time (buildAsyncHostWrapper).
+	retPtr uint32
+
+	// memMod is the per-call CALLING module (or memOverride) captured at
+	// call time.
+	memMod api.Module
+
+	// resolveCtx is the per-call context used for reallocOf at resolve
+	// time.
+	resolveCtx context.Context
+
+	// ac is the AsyncCall handed to a plain host import's AsyncHostFunc,
+	// co-allocated here so the (subtask, AsyncCall) pair costs one malloc
+	// instead of two (async_host_import.go's buildAsyncHostWrapper takes
+	// &st.ac instead of &AsyncCall{...}). Unused (zero value) for a
+	// guest<->guest subtask (the tgt arm returns before an AsyncCall would
+	// be built) and for test-built subtasks that never go through the
+	// wrapper.
+	ac AsyncCall
+
+	// onCancelHook and cancelTask together replace the single onCancel func()
+	// error field (mirroring Subtask.on_cancel, Phase 3): mutually
+	// exclusive, and dispatched by hasOnCancel/runOnCancel below.
+	//
+	// onCancelHook is AsyncCall.OnCancel's user fn, stored directly (no
+	// error-adapting wrapper closure). Set only on a host-import subtask
+	// whose AsyncHostFunc called OnCancel; nil if the import registered
+	// none (a callee that ignores cancellation -- spec-legal, see
+	// AsyncCall.OnCancel's doc).
+	onCancelHook func()
+
+	// cancelTask is the guest<->guest callee's task (async_lift.go's
+	// startAsyncExportTask/startStackfulExportTask): runOnCancel calls its
+	// requestCancellation directly, with no method-value closure. Set only
+	// on the guest<->guest callee arm (async_host_import.go's
+	// buildAsyncHostWrapper).
+	//
+	// Both fields are nil for a subtask that has already resolved by the
+	// time cancel is called (nothing left to cancel).
+	cancelTask *task
 
 	// cancellationRequested mirrors Subtask.cancellation_requested: set the
 	// first time subtask.cancel is called on this subtask; a second call
@@ -297,6 +334,22 @@ func (s *subtask) subtaski() uint32 { return s.si }
 
 // setSubtaski records this subtask's own table index once parked.
 func (s *subtask) setSubtaski(i uint32) { s.si = i }
+
+// hasOnCancel replaces the `st.onCancel != nil` gate
+// (async_builtins.go's subtaskCancelHostFuncGraph).
+func (s *subtask) hasOnCancel() bool { return s.cancelTask != nil || s.onCancelHook != nil }
+
+// runOnCancel is Subtask.on_cancel's invocation (canon_subtask_cancel,
+// async_builtins.go's subtaskCancelHostFuncGraph): runs synchronously on the
+// driving goroutine under the sched.pumping bracket its caller already
+// holds.
+func (s *subtask) runOnCancel() error {
+	if s.cancelTask != nil {
+		return s.cancelTask.requestCancellation()
+	}
+	s.onCancelHook()
+	return nil
+}
 
 func (*subtask) entryKind() entryKind     { return entrySubtask }
 func (s *subtask) waitablePtr() *waitable { return &s.waitable }

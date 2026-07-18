@@ -425,9 +425,9 @@ func subtaskCancelHostFuncGraph(in *Instance, canon binary.Canon) hostFuncDef {
 
 		if !st.resolved() {
 			st.cancellationRequested = true
-			if st.onCancel != nil { // nil only for a host import with no OnCancel hook (§2.4)
+			if st.hasOnCancel() { // false only for a host import with no OnCancel hook (§2.4)
 				// Bracket with sched.pumping exactly like sched.step's own
-				// thunk/resumeReady dispatch (sched.go): st.onCancel runs
+				// thunk/resumeReady dispatch (sched.go): st.runOnCancel runs
 				// synchronously HERE, on the one driving goroutine, not from
 				// inside a queued runq thunk -- but AsyncCall.OnCancel's doc
 				// explicitly promises the callee may call
@@ -445,7 +445,7 @@ func subtaskCancelHostFuncGraph(in *Instance, canon binary.Canon) hostFuncDef {
 				// driving goroutine, synchronously, exactly where sched.step
 				// itself would be.
 				in.sched.pumping = true
-				cerr := st.onCancel()
+				cerr := st.runOnCancel()
 				in.sched.pumping = false
 				if cerr != nil {
 					panic(fmt.Errorf("component/instance: subtask.cancel: %w", cerr))

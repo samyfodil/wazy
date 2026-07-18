@@ -188,11 +188,14 @@ func (in *Instance) invokeStackful(ctx context.Context, be *boundExport, exportN
 // invokeAsyncCallback sits on, minus the drive (this instance's *sched is
 // shared with the whole composition tree -- Instance.sched's doc -- so
 // whoever eventually drives that shared scheduler to completion resumes
-// this task; it is never driven here). Returns the task's
-// requestCancellation as the caller's subtask.on_cancel (reference ~2207).
+// this task; it is never driven here). Returns the started task itself
+// (not a bound requestCancellation method value -- avoids a per-call alloc
+// on this guest<->guest path); the caller stores it as the subtask's
+// cancelTask and calls calleeTask.requestCancellation() from
+// subtask.runOnCancel (reference ~2207: subtask.on_cancel = callee(...)).
 func (in *Instance) startAsyncExportTask(ctx context.Context, be *boundExport, exportName string,
 	onStart func(*task) ([]abi.Value, error), onResolve func([]abi.Value, bool) error,
-) (onCancel func() error, err error) {
+) (calleeTask *task, err error) {
 	// Dispatch on the callee's shape (docs/component-model-async-stackful-
 	// design.md §6.2): a STACKFUL callee (no callback option) must be
 	// driven through stackfulTask -- its inline waitable-set.wait (or any
@@ -239,7 +242,7 @@ func (in *Instance) startAsyncExportTask(ctx context.Context, be *boundExport, e
 	if err := gt.start(); err != nil { // may run to EXIT, may park at entry/WAIT
 		return nil, err
 	}
-	return t.requestCancellation, nil
+	return t, nil
 }
 
 // startStackfulExportTask is startAsyncExportTask with guestTask swapped for
@@ -249,13 +252,14 @@ func (in *Instance) startAsyncExportTask(ctx context.Context, be *boundExport, e
 // caller's goroutine (the immediate path async_host_import.go's
 // buildAsyncHostWrapper already handles via st.resolved(), read off
 // t.state == taskResolved by the caller) or park at sparkEntry/sparkBlock,
-// returning t.requestCancellation as onCancel. Result values flow through
-// task.returnValues -> t.onResolve -> the wrapper's own onResolve closure --
-// for a sync-opts callee it's run() itself that calls returnValues after
-// lifting flat results, so the wrapper needs zero changes.
+// returning t (the caller runs t.requestCancellation as onCancel). Result
+// values flow through task.returnValues -> t.onResolve -> the wrapper's own
+// onResolve closure -- for a sync-opts callee it's run() itself that calls
+// returnValues after lifting flat results, so the wrapper needs zero
+// changes.
 func (in *Instance) startStackfulExportTask(ctx context.Context, be *boundExport, exportName string,
 	onStart func(*task) ([]abi.Value, error), onResolve func([]abi.Value, bool) error,
-) (onCancel func() error, err error) {
+) (calleeTask *task, err error) {
 	if in.poisoned || !in.mayEnter {
 		return nil, fmt.Errorf("component/instance: export %q: cannot enter component instance", exportName)
 	}
@@ -274,5 +278,5 @@ func (in *Instance) startStackfulExportTask(ctx context.Context, be *boundExport
 	if err := st.startTask(); err != nil { // may run to completion, may park at sparkEntry/sparkBlock
 		return nil, err
 	}
-	return t.requestCancellation, nil
+	return t, nil
 }

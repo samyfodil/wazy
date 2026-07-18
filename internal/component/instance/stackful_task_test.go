@@ -77,12 +77,12 @@ func TestStackfulReap_CloseReapsParkedGoroutine(t *testing.T) {
 
 	onStart := func(*task) ([]abi.Value, error) { return nil, nil }
 	onResolve := func([]abi.Value, bool) error { return nil }
-	onCancel, err := home.startStackfulExportTask(context.Background(), be, "f", onStart, onResolve)
+	calleeTask, err := home.startStackfulExportTask(context.Background(), be, "f", onStart, onResolve)
 	if err != nil {
 		t.Fatalf("startStackfulExportTask: %v", err)
 	}
-	if onCancel == nil {
-		t.Fatal("startStackfulExportTask: onCancel is nil")
+	if calleeTask == nil {
+		t.Fatal("startStackfulExportTask: calleeTask is nil")
 	}
 
 	during := numGoroutineStable(t)
@@ -181,7 +181,7 @@ func TestStackfulTask_CancelAtSparkEntry(t *testing.T) {
 		secondCancelled = cancelled
 		return nil
 	}
-	onCancel2, err := home.startStackfulExportTask(context.Background(), be, "f", onStart2, onResolve2)
+	calleeTask2, err := home.startStackfulExportTask(context.Background(), be, "f", onStart2, onResolve2)
 	if err != nil {
 		t.Fatalf("second startStackfulExportTask: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestStackfulTask_CancelAtSparkEntry(t *testing.T) {
 		t.Fatal("BUG in test setup: no stackfulTask parked at sparkEntry")
 	}
 
-	if err := onCancel2(); err != nil {
+	if err := calleeTask2.requestCancellation(); err != nil {
 		t.Fatalf("requestCancellation: %v", err)
 	}
 	if !secondCancelled {
