@@ -640,13 +640,13 @@ func TestFutureCopy_EndNotIdleAndJoinedSetTraps(t *testing.T) {
 	r, _ := newBareFutureEnds(in)
 	readFn := futureCopyHostFunc(in, sideReadable, eventFutureRead, nil, 0, 0, true, true, nil, nil)
 	callBuiltin(readFn, uint64(r), 0)
-	requirePanicContains(t, "not idle", func() { callBuiltin(readFn, uint64(r), 0) })
+	requirePanicContains(t, "cannot have concurrent operations active on a future/stream", func() { callBuiltin(readFn, uint64(r), 0) })
 
 	r2, _ := newBareFutureEnds(in)
 	set := uint32(callBuiltin(waitableSetNewHostFunc(in), 0)[0])
 	callBuiltin(waitableJoinHostFunc(in), uint64(r2), uint64(set))
 	syncRead := futureCopyHostFunc(in, sideReadable, eventFutureRead, nil, 0, 0, true, false, nil, nil)
-	requirePanicContains(t, "joined to a waitable set", func() { callBuiltin(syncRead, uint64(r2), 0) })
+	requirePanicContains(t, "waitable cannot be used synchronously while added to a waitable set", func() { callBuiltin(syncRead, uint64(r2), 0) })
 }
 
 func TestFutureCopy_DeadlockOnEmptyRunq(t *testing.T) {

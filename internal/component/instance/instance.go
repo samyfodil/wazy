@@ -1590,6 +1590,9 @@ func (in *Instance) liftResult(be *boundExport, rawResults []uint64, mem []byte,
 		if err != nil {
 			return nil, fmt.Errorf("component/instance: export %q result: load spilled result: %w", exportName, err)
 		}
+		if err := in.validateLiftedStreamFutureResult(rt, val, exportName); err != nil {
+			return nil, err
+		}
 		return []abi.Value{val}, nil
 	}
 	if len(flatKinds) != len(be.coreResultsWant) {
@@ -1619,7 +1622,61 @@ func (in *Instance) liftResult(be *boundExport, rawResults []uint64, mem []byte,
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: export %q result: lift: %w", exportName, err)
 	}
+	if err := in.validateLiftedStreamFutureResult(rt, val, exportName); err != nil {
+		return nil, err
+	}
 	return []abi.Value{val}, nil
+}
+
+// validateLiftedStreamFutureResult applies lift_async_value's trap_if(state
+// != IDLE)/trap_if(in_waitable_set()) checks (definitions.py ~1519) to a
+// top-level export's RESULT when its declared type is a bare stream<T>/
+// future<T> -- the one crossing liftResult's generic flat/spilled lift paths
+// above don't otherwise validate (they treat StreamDesc/FutureDesc exactly
+// like OwnDesc/BorrowDesc: an opaque i32, per abi.liftFlatImpl). Unlike
+// takeReadableStreamEnd/takeReadableFutureEnd (used for the arg-crossing and
+// guest<->guest delegated-result paths, composition.go/host_import.go, where
+// ownership of the table slot genuinely transfers to the other side), this
+// does NOT remove the handle from the guest's own table -- matching wazy's
+// existing convention for a top-level own<T> result (also left in the table,
+// for the host to manage explicitly via DropResource/ResourceRep-style
+// accessors) rather than the reference's unconditional handles.remove(i).
+func (in *Instance) validateLiftedStreamFutureResult(rt binary.TypeDesc, val abi.Value, exportName string) error {
+	switch d := rt.(type) {
+	case binary.StreamDesc:
+		h, ok := val.(uint32)
+		if !ok {
+			return nil // not a handle-shaped value (shouldn't happen; let the caller's own bookkeeping catch it)
+		}
+		var elemDesc binary.TypeDesc
+		if d.Element != nil {
+			ed, err := resolveTypeRef(d.Element, in.resolve)
+			if err != nil {
+				return fmt.Errorf("component/instance: export %q result: stream element type: %w", exportName, err)
+			}
+			elemDesc = ed
+		}
+		if _, err := peekReadableStreamEnd(in.resources, elemDesc, h); err != nil {
+			return fmt.Errorf("component/instance: export %q result: %w", exportName, err)
+		}
+	case binary.FutureDesc:
+		h, ok := val.(uint32)
+		if !ok {
+			return nil
+		}
+		var elemDesc binary.TypeDesc
+		if d.Element != nil {
+			ed, err := resolveTypeRef(d.Element, in.resolve)
+			if err != nil {
+				return fmt.Errorf("component/instance: export %q result: future element type: %w", exportName, err)
+			}
+			elemDesc = ed
+		}
+		if _, err := peekReadableFutureEnd(in.resources, elemDesc, h); err != nil {
+			return fmt.Errorf("component/instance: export %q result: %w", exportName, err)
+		}
+	}
+	return nil
 }
 
 // DropResource drops an own<resource> handle the host received from a guest

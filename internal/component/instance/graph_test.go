@@ -233,11 +233,35 @@ func TestGraph_BindInstanceExport_OutOfRange(t *testing.T) {
 	requireErrContains(t, err, "out of range of")
 }
 
-func TestGraph_BindInstanceExport_InlineKindUnsupported(t *testing.T) {
+// TestGraph_BindInstanceExport_UnsupportedInstanceKindTraps pins the
+// still-rejected case: an Instance.Kind that is neither 0x00 (instantiate)
+// nor 0x01 (inline exports, supported since this session's big-interleaving-
+// test fix below) -- unreachable through a real decode (the decoder only
+// ever produces 0x00/0x01), but kept as a defensive fail-loud guard against a
+// future/malformed extension.
+func TestGraph_BindInstanceExport_UnsupportedInstanceKindTraps(t *testing.T) {
 	comp := decodeRealHello(t)
-	comp.Instances[0].Kind = 0x01
+	comp.Instances[0].Kind = 0x02
 	_, err := runGraph(t, comp)
 	requireErrContains(t, err, "not a component instantiation")
+}
+
+// TestGraph_BindInstanceExport_InlineKindTypeOnlyBinds pins Instance.Kind ==
+// 0x01 (inline exports): a synthetic instance built purely by re-listing
+// existing sort entries, no nested-component instantiation at all (the WIT-
+// tooling pattern big-interleaving-test.wast's `(instance $types (export
+// "event-kind" (type $driver "event-kind")) ...)` uses to re-export types for
+// external binding-generator consumption). A type-sort member has nothing
+// callable to bind, so it's skipped -- mirroring bindImportExportsGraph's own
+// ExternType==0x03 skip for a plain top-level type re-export -- and
+// instantiation succeeds.
+func TestGraph_BindInstanceExport_InlineKindTypeOnlyBinds(t *testing.T) {
+	comp := decodeRealHello(t)
+	comp.Instances[0].Kind = 0x01
+	comp.Instances[0].Exports = []binary.InlineExport{{Name: "some-type", Sort: 0x03, SortIdx: 0}}
+	if _, err := runGraph(t, comp); err != nil {
+		t.Fatalf("expected an inline-export instance with only a type member to bind (skip) cleanly, got error: %v", err)
+	}
 }
 
 func TestGraph_BindInstanceExport_NestedComponentOutOfRange(t *testing.T) {

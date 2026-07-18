@@ -890,7 +890,7 @@ func delegatingHostImport(sub *Instance, exportName string, be *boundExport, pro
 			// (num_borrows > 0) covers this; wazy's sync invoke() has no
 			// task, so the delegate supplies the equivalent check here.
 			if scope != nil && scope.numBorrows > 0 {
-				return nil, fmt.Errorf("component/instance: %s: callee returned still holding %d borrowed handle(s)", exportName, scope.numBorrows)
+				return nil, fmt.Errorf("component/instance: %s: borrow handles still remain at the end of the call (%d still held)", exportName, scope.numBorrows)
 			}
 			for i := range out {
 				if i < len(resDescs) {
@@ -964,7 +964,7 @@ func startDelegatedFromStackful(ctx context.Context, st *stackfulTask, tgt *gues
 	}
 
 	if scope != nil && scope.numBorrows > 0 {
-		return nil, fmt.Errorf("component/instance: %s: callee returned still holding %d borrowed handle(s)", exportName, scope.numBorrows)
+		return nil, fmt.Errorf("component/instance: %s: borrow handles still remain at the end of the call (%d still held)", exportName, scope.numBorrows)
 	}
 	out := make([]abi.Value, len(res))
 	for i, v := range res {
@@ -1781,6 +1781,34 @@ func bindInstanceExportGraph(comp *binary.Component, exp binary.Export, componen
 		return fmt.Errorf("component/instance: export %q references instance %d, out of range of %d imported + %d locally-instantiated instance(s)", exp.Name, exp.ExternIndex, numImportedInstances, len(comp.Instances))
 	}
 	inst := comp.Instances[localIdx]
+	if inst.Kind == 0x01 { // inline exports: no nested component/shim at all
+		// The WIT-tooling pattern this exercises (big-interleaving-test.wast's
+		// `(instance $types (export "event-kind" (type $driver "event-kind"))
+		// ...)`) is a synthetic instance built purely by re-listing existing
+		// sort entries -- almost always types, re-exported for external
+		// binding-generator consumption, never invoked by any wasm code. Bind
+		// only the func members (mirroring bindImportExportsGraph's own
+		// ExternType==0x01/0x03 split just above); every other sort (type,
+		// value, nested instance, component) is non-callable metadata with
+		// nothing to bind, exactly like a plain top-level type re-export.
+		for _, member := range inst.Exports {
+			if member.Sort != 0x01 { // func
+				continue
+			}
+			diagName := instanceExportKey(exp.Name, member.Name)
+			// compInstances nil: same best-effort scope as the Kind==0x00 shim
+			// path below (its own doc: "never nested-instance aliases") -- an
+			// inline-export instance's func member aliasing a NESTED
+			// instance's export (rather than this component's own canon
+			// lift) is unexercised by any suite and out of scope here too.
+			be, err := bindFuncExportGraph(comp, member.SortIdx, componentFunc, coreFuncTarget, resolve, diagName, abiCache, nil)
+			if err != nil {
+				return err
+			}
+			exports[diagName] = be
+		}
+		return nil
+	}
 	if inst.Kind != 0x00 {
 		return fmt.Errorf("component/instance: export %q instance %d is not a component instantiation (kind %#x); inline-export instances are not supported", exp.Name, exp.ExternIndex, inst.Kind)
 	}

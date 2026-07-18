@@ -44,7 +44,7 @@ func TestTaskCancelHostFunc_NumBorrowsTraps(t *testing.T) {
 	tk := &task{state: taskCancelDelivered, numBorrows: 1}
 	in := &Instance{sched: &sched{}, mayLeave: true, activeTask: tk}
 	def := taskCancelHostFuncGraph(in)
-	requirePanicContains(t, "borrowed handle", func() {
+	requirePanicContains(t, "borrow handles still remain", func() {
 		def.fn.Call(context.Background(), nil, nil)
 	})
 }

@@ -84,7 +84,7 @@ func (t *task) returnValues(vals []abi.Value) error {
 		return fmt.Errorf("task.return: task already resolved")
 	}
 	if t.numBorrows > 0 { // trap_if(num_borrows > 0)
-		return fmt.Errorf("task.return: %d borrowed handle(s) still lent to subtasks", t.numBorrows)
+		return fmt.Errorf("task.return: borrow handles still remain at the end of the call (%d still lent to subtasks)", t.numBorrows)
 	}
 	if t.onResolve != nil {
 		t.onResolve(vals, false)
@@ -119,7 +119,7 @@ func (t *task) cancelResolve() error {
 		return fmt.Errorf("task.cancel: no cancellation has been delivered to this task")
 	}
 	if t.numBorrows > 0 {
-		return fmt.Errorf("task.cancel: %d borrowed handle(s) still held", t.numBorrows)
+		return fmt.Errorf("task.cancel: borrow handles still remain at the end of the call (%d still held)", t.numBorrows)
 	}
 	if t.onResolve != nil {
 		t.onResolve(nil, true)

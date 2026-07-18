@@ -193,10 +193,10 @@ func (s *waitableSet) poll() eventTuple {
 // deterministic profile rarely exercises it).
 func (s *waitableSet) dropSet() error {
 	if len(s.elems) > 0 {
-		return fmt.Errorf("waitable-set.drop: %d waitable(s) still joined to the set", len(s.elems))
+		return fmt.Errorf("waitable-set.drop: cannot drop waitable set with waiters (%d waitable(s) still joined)", len(s.elems))
 	}
 	if s.numWaiting > 0 {
-		return fmt.Errorf("waitable-set.drop: %d waiter(s) still blocked on the set", s.numWaiting)
+		return fmt.Errorf("waitable-set.drop: cannot drop waitable set with waiters (%d waiter(s) still blocked)", s.numWaiting)
 	}
 	return nil
 }
@@ -316,7 +316,7 @@ func (s *subtask) resolveDelivered() bool { return s.lenders == nil }
 // dropSubtask mirrors Subtask.drop: trap unless the resolve has been delivered.
 func (s *subtask) dropSubtask() error {
 	if !s.resolveDelivered() {
-		return fmt.Errorf("subtask.drop: subtask not yet resolved-and-delivered")
+		return fmt.Errorf("subtask.drop: cannot drop a subtask which has not yet resolved")
 	}
 	s.dropWaitable()
 	return nil

@@ -257,7 +257,7 @@ func (s *sharedStream) write(inst *Instance, src copyBuffer, onCopy onCopyFn, on
 		// copy of a non-numeric element would alias the source and
 		// destination memory mid-lift. inst==nil (host side) never trips it.
 		if inst != nil && inst == s.pendingInst && !s.numeric {
-			return errors.New("stream: intra-instance copy of a non-numeric element type (spec restriction)")
+			return errors.New("cannot read from and write to intra-component stream (element type requires cross-memory lift/lower, spec restriction)")
 		}
 		if s.pendingBuffer.remain() > 0 {
 			if src.remain() > 0 {
@@ -301,7 +301,7 @@ func (s *sharedStream) read(inst *Instance, dst copyBuffer, onCopy onCopyFn, onC
 
 	default:
 		if inst != nil && inst == s.pendingInst && !s.numeric {
-			return errors.New("stream: intra-instance copy of a non-numeric element type (spec restriction)")
+			return errors.New("cannot read from and write to intra-component stream (element type requires cross-memory lift/lower, spec restriction)")
 		}
 		if s.pendingBuffer.remain() > 0 {
 			if dst.remain() > 0 {
@@ -425,6 +425,66 @@ const (
 	copyDone
 )
 
+// copyNotIdleTrapText is the spec's trap_if(state != IDLE) wording for a
+// stream/future READ/WRITE builtin call (stream_copy/future_copy's own entry
+// guard, stream_builtins.go's streamCopyHostFunc/futureCopyHostFunc), which
+// depends on WHY state isn't IDLE:
+//
+//   - COPYING/CANCELLING: a prior copy on this same end is still in flight or
+//     its result undelivered -- the spec calls this "concurrent operations"
+//     regardless of stream-vs-future or readable-vs-writable (verified
+//     against big-interleaving-test.wast's "cannot have concurrent
+//     operations active on a future/stream").
+//   - DONE: a prior copy already delivered its TERMINAL result -- this end's
+//     own successful completion (future only; a stream's successful copies
+//     return to IDLE, never DONE -- see streamCopyHostFunc's streamEvent) or
+//     the counterpart's DROPPED notification -- and the wording is scenario-
+//     specific (trap-if-done.wast), by (future|stream) x (readable|writable).
+func copyNotIdleTrapText(isFuture bool, side endSide, state copyState) string {
+	if state != copyDone { // COPYING or CANCELLING
+		return "cannot have concurrent operations active on a future/stream"
+	}
+	switch {
+	case isFuture && side == sideWritable:
+		// A future's writable end reaches DONE either by completing its own
+		// write or by observing the reader dropped before it ever wrote --
+		// the spec's assert_trap text for both scenarios is this same
+		// (longer) string, of which the shorter "cannot write to future
+		// after previous write succeeded" is a substring, so one wording
+		// covers both.
+		return "cannot write to future after previous write succeeded or readable end dropped"
+	case isFuture:
+		return "cannot read from future after previous read succeeded"
+	case side == sideWritable:
+		// A stream's writable end only ever reaches DONE via the reader
+		// dropping (a successful write returns to IDLE, not DONE -- streams
+		// are multi-shot).
+		return "cannot write to stream after being notified that the readable end dropped"
+	default:
+		return "cannot read from stream after being notified that the writable end dropped"
+	}
+}
+
+// liftNotIdleTrapText is copyNotIdleTrapText's twin for the LIFT boundary
+// (lift_async_value's identical trap_if(state != IDLE), reached whenever a
+// readable stream/future end crosses a canonical-ABI boundary as a value --
+// an argument being lifted into a callee, or a top-level export's RESULT
+// being lifted back out to the host -- see takeReadableStreamEnd/
+// takeReadableFutureEnd (arg/result-crossing callers) and instance.go's
+// liftResult (top-level result)). Only the readable side is ever lifted (a
+// component-level stream<T>/future<T> type always denotes the readable
+// handle), so there is no writable-side case here; the DONE wording matches
+// trap-if-done.wast's "lift" scenarios specifically.
+func liftNotIdleTrapText(isFuture bool, state copyState) string {
+	if state != copyDone {
+		return "cannot have concurrent operations active on a future/stream"
+	}
+	if isFuture {
+		return "cannot lift future after previous read succeeded"
+	}
+	return "cannot lift stream after being notified that the writable end dropped"
+}
+
 // endSide discriminates readable vs writable (the reference uses distinct
 // classes; one Go struct + side field keeps the table's type-switch flat).
 type endSide uint8
@@ -526,7 +586,7 @@ func (f *sharedFuture) read(inst *Instance, dst copyBuffer, onCopyDone onCopyDon
 		return nil
 	}
 	if inst != nil && inst == f.pendingInst && !f.numeric {
-		return errors.New("future: intra-instance copy of a non-numeric element type (spec restriction)")
+		return errors.New("cannot read from and write to intra-component future (element type requires cross-memory lift/lower, spec restriction)")
 	}
 	// pendingBuffer is a parked WRITER's source; copy it into dst then
 	// complete both sides.
@@ -549,7 +609,7 @@ func (f *sharedFuture) write(inst *Instance, src copyBuffer, onCopyDone onCopyDo
 		return nil
 	}
 	if inst != nil && inst == f.pendingInst && !f.numeric {
-		return errors.New("future: intra-instance copy of a non-numeric element type (spec restriction)")
+		return errors.New("cannot read from and write to intra-component future (element type requires cross-memory lift/lower, spec restriction)")
 	}
 	// pendingBuffer is a parked READER's destination.
 	if err := copyElements(f.numeric, f.pendingBuffer, src, 1); err != nil {
@@ -572,11 +632,17 @@ func (f *sharedFuture) drop() {
 	}
 }
 
-// takeReadableStreamEnd transliterates lift_async_value for a stream: REMOVE
-// i from t, trapping unless it is a readable stream end of elem type
-// elemDesc, idle, and not joined to a waitable set. Returns the shared
-// object -- the lifted host-level value.
-func takeReadableStreamEnd(t *handleTable, elemDesc binary.TypeDesc, i uint32) (*sharedStream, error) {
+// peekReadableStreamEnd validates handle i the way lift_async_value does for
+// a stream (readable end, matching elem type, IDLE, not joined to a waitable
+// set) WITHOUT removing it from t -- the split takeReadableStreamEnd needs
+// (it DOES remove, for the arg/delegated-result crossings where ownership of
+// the table slot genuinely transfers to the other side) from what
+// instance.go's liftResult needs for a top-level export RESULT: per wazy's
+// existing convention for own<T>/borrow<T> top-level results (liftResult
+// never removes those either), a stream/future result handle stays valid in
+// the guest's OWN table for the host to manage explicitly afterward, so only
+// the validation -- not the removal -- applies there.
+func peekReadableStreamEnd(t *handleTable, elemDesc binary.TypeDesc, i uint32) (*streamEnd, error) {
 	raw, ok := t.getEntry(i)
 	if !ok {
 		return nil, fmt.Errorf("unknown stream handle %d", i)
@@ -592,17 +658,29 @@ func takeReadableStreamEnd(t *handleTable, elemDesc binary.TypeDesc, i uint32) (
 		return nil, fmt.Errorf("handle %d: stream element type mismatch", i)
 	}
 	if se.state != copyIdle {
-		return nil, fmt.Errorf("handle %d: stream end is not idle (in-flight copy)", i)
+		return nil, fmt.Errorf("handle %d: %s", i, liftNotIdleTrapText(false, se.state))
 	}
 	if se.inWaitableSet() {
-		return nil, fmt.Errorf("handle %d: stream end is joined to a waitable set", i)
+		return nil, fmt.Errorf("handle %d: cannot lift stream while it's in a waitable set", i)
+	}
+	return se, nil
+}
+
+// takeReadableStreamEnd transliterates lift_async_value for a stream: REMOVE
+// i from t, trapping unless it is a readable stream end of elem type
+// elemDesc, idle, and not joined to a waitable set. Returns the shared
+// object -- the lifted host-level value.
+func takeReadableStreamEnd(t *handleTable, elemDesc binary.TypeDesc, i uint32) (*sharedStream, error) {
+	se, err := peekReadableStreamEnd(t, elemDesc, i)
+	if err != nil {
+		return nil, err
 	}
 	t.removeEntry(i)
 	return se.shared, nil
 }
 
-// takeReadableFutureEnd is takeReadableStreamEnd's future twin.
-func takeReadableFutureEnd(t *handleTable, elemDesc binary.TypeDesc, i uint32) (*sharedFuture, error) {
+// peekReadableFutureEnd is peekReadableStreamEnd's future twin.
+func peekReadableFutureEnd(t *handleTable, elemDesc binary.TypeDesc, i uint32) (*futureEnd, error) {
 	raw, ok := t.getEntry(i)
 	if !ok {
 		return nil, fmt.Errorf("unknown future handle %d", i)
@@ -618,10 +696,19 @@ func takeReadableFutureEnd(t *handleTable, elemDesc binary.TypeDesc, i uint32) (
 		return nil, fmt.Errorf("handle %d: future element type mismatch", i)
 	}
 	if fe.state != copyIdle {
-		return nil, fmt.Errorf("handle %d: future end is not idle (in-flight copy)", i)
+		return nil, fmt.Errorf("handle %d: %s", i, liftNotIdleTrapText(true, fe.state))
 	}
 	if fe.inWaitableSet() {
-		return nil, fmt.Errorf("handle %d: future end is joined to a waitable set", i)
+		return nil, fmt.Errorf("handle %d: cannot lift future while it's in a waitable set", i)
+	}
+	return fe, nil
+}
+
+// takeReadableFutureEnd is takeReadableStreamEnd's future twin.
+func takeReadableFutureEnd(t *handleTable, elemDesc binary.TypeDesc, i uint32) (*sharedFuture, error) {
+	fe, err := peekReadableFutureEnd(t, elemDesc, i)
+	if err != nil {
+		return nil, err
 	}
 	t.removeEntry(i)
 	return fe.shared, nil

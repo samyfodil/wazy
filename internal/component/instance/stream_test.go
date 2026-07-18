@@ -264,8 +264,9 @@ func TestStreamCopy_EndNotIdleTraps(t *testing.T) {
 	if uint32(out[0]) != blockedSentinel {
 		t.Fatalf("first async read: got %#x, want BLOCKED", out[0])
 	}
-	// Second read while the first is still COPYING must trap "not idle".
-	requirePanicContains(t, "not idle", func() { callBuiltin(readFn, uint64(r), 0, 5) })
+	// Second read while the first is still COPYING must trap "concurrent
+	// operations".
+	requirePanicContains(t, "cannot have concurrent operations active on a future/stream", func() { callBuiltin(readFn, uint64(r), 0, 5) })
 }
 
 func TestStreamCopy_SyncOnJoinedSetTraps(t *testing.T) {
@@ -274,7 +275,7 @@ func TestStreamCopy_SyncOnJoinedSetTraps(t *testing.T) {
 	set := uint32(callBuiltin(waitableSetNewHostFunc(in), 0)[0])
 	callBuiltin(waitableJoinHostFunc(in), uint64(r), uint64(set))
 	syncRead := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, false /*async*/, nil, nil)
-	requirePanicContains(t, "joined to a waitable set", func() { callBuiltin(syncRead, uint64(r), 0, 1) })
+	requirePanicContains(t, "waitable cannot be used synchronously while added to a waitable set", func() { callBuiltin(syncRead, uint64(r), 0, 1) })
 }
 
 func TestStreamCopy_DeadlockOnEmptyRunq(t *testing.T) {
@@ -342,7 +343,7 @@ func TestStreamDrop_UndeliveredCompletion_TrapsCopyingNotAssert(t *testing.T) {
 	}
 
 	dropFn := streamDropHostFunc(in, sideReadable, nil)
-	requirePanicContains(t, "in-flight or undelivered copy", func() { callBuiltin(dropFn, uint64(r)) })
+	requirePanicContains(t, "cannot remove busy stream", func() { callBuiltin(dropFn, uint64(r)) })
 
 	// NOW deliver the event (as a real wait/poll would) and confirm the
 	// state flips to IDLE at that point, and drop succeeds afterward.
@@ -449,7 +450,7 @@ func TestFutureDrop_WritableRequiresDone(t *testing.T) {
 	in := newAsyncInst()
 	_, w := newBareFutureEnds(in)
 	dropFn := futureDropHostFunc(in, sideWritable, nil)
-	requirePanicContains(t, "must complete its write", func() { callBuiltin(dropFn, uint64(w)) })
+	requirePanicContains(t, "cannot drop future write end without first writing a value", func() { callBuiltin(dropFn, uint64(w)) })
 }
 
 func TestFutureCopy_WriteDroppedAfterReaderClose(t *testing.T) {

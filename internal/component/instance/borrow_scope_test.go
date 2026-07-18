@@ -133,7 +133,7 @@ func TestReturnValues_ScopedBorrowOutstandingTraps(t *testing.T) {
 	tk := &task{}
 	tbl.NewBorrowScoped(1, 7, tk)
 	err := tk.returnValues(nil)
-	requireErrContains(t, err, "borrowed handle")
+	requireErrContains(t, err, "borrow handles still remain")
 }
 
 func TestCancelResolve_ScopedBorrowOutstandingTraps(t *testing.T) {
@@ -141,7 +141,7 @@ func TestCancelResolve_ScopedBorrowOutstandingTraps(t *testing.T) {
 	tk := &task{state: taskCancelDelivered}
 	tbl.NewBorrowScoped(1, 7, tk)
 	err := tk.cancelResolve()
-	requireErrContains(t, err, "borrowed handle")
+	requireErrContains(t, err, "borrow handles still remain")
 }
 
 // TestReturnValues_ScopedBorrowDroppedSucceeds is the companion: dropping

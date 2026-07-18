@@ -320,10 +320,10 @@ func streamCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 
 		e := requireStreamEnd(in, name, i, side, elemDesc)
 		if e.state != copyIdle {
-			panic(fmt.Errorf("component/instance: %s: stream end %d is not idle", name, i))
+			panic(fmt.Errorf("component/instance: %s: stream end %d: %s", name, i, copyNotIdleTrapText(false, side, e.state)))
 		}
 		if e.inWaitableSet() && !async {
-			panic(fmt.Errorf("component/instance: %s: synchronous copy on a stream end joined to a waitable set", name))
+			panic(fmt.Errorf("component/instance: %s: stream end %d: waitable cannot be used synchronously while added to a waitable set", name, i))
 		}
 
 		m := memMod
@@ -423,10 +423,10 @@ func futureCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 
 		e := requireFutureEnd(in, name, i, side, elemDesc)
 		if e.state != copyIdle {
-			panic(fmt.Errorf("component/instance: %s: future end %d is not idle", name, i))
+			panic(fmt.Errorf("component/instance: %s: future end %d: %s", name, i, copyNotIdleTrapText(true, side, e.state)))
 		}
 		if e.inWaitableSet() && !async {
-			panic(fmt.Errorf("component/instance: %s: synchronous copy on a future end joined to a waitable set", name))
+			panic(fmt.Errorf("component/instance: %s: future end %d: waitable cannot be used synchronously while added to a waitable set", name, i))
 		}
 
 		m := memMod
@@ -512,8 +512,15 @@ func streamDropHostFunc(in *Instance, side endSide, elemDesc binary.TypeDesc) ho
 		e := requireStreamEnd(in, name, i, side, elemDesc)
 		if e.copying() { // CopyEnd.drop: covers the undelivered-event case too
 			// (state flips only at delivery -- a completed-but-undelivered
-			// copy is still COPYING here).
-			panic(fmt.Errorf("component/instance: %s: stream end %d has an in-flight or undelivered copy", name, i))
+			// copy is still COPYING here). Spec text differs by side: dropping
+			// the READABLE end of a busy stream is "cannot remove busy
+			// stream" (drop-stream.wast's drop-while-reading); the WRITABLE
+			// end is "cannot drop busy stream" (drop-while-writing).
+			verb := "drop"
+			if side == sideReadable {
+				verb = "remove"
+			}
+			panic(fmt.Errorf("component/instance: %s: stream end %d: cannot %s busy stream", name, i, verb))
 		}
 		e.shared.drop() // counterpart's parked copy => DROPPED event
 		e.dropWaitable()
@@ -538,10 +545,10 @@ func futureDropHostFunc(in *Instance, side endSide, elemDesc binary.TypeDesc) ho
 		i := api.DecodeU32(stack[0])
 		e := requireFutureEnd(in, name, i, side, elemDesc)
 		if side == sideWritable && e.state != copyDone {
-			panic(fmt.Errorf("component/instance: %s: writable future end %d must complete its write (or observe DROPPED) before dropping", name, i))
+			panic(fmt.Errorf("component/instance: %s: future end %d: cannot drop future write end without first writing a value", name, i))
 		}
 		if e.copying() {
-			panic(fmt.Errorf("component/instance: %s: future end %d has an in-flight or undelivered copy", name, i))
+			panic(fmt.Errorf("component/instance: %s: future end %d: cannot have concurrent operations active on a future/stream", name, i))
 		}
 		e.shared.drop()
 		e.dropWaitable()
@@ -593,7 +600,7 @@ func cancelCopyHostFunc(in *Instance, isFuture bool, side endSide, evCode eventC
 			panic(fmt.Errorf("component/instance: %s: end %d is not COPYING", name, i))
 		}
 		if w.inWaitableSet() && !async {
-			panic(fmt.Errorf("component/instance: %s: synchronous cancel on an end joined to a waitable set", name))
+			panic(fmt.Errorf("component/instance: %s: end %d: waitable cannot be used synchronously while added to a waitable set", name, i))
 		}
 		*state = copyCancelling
 

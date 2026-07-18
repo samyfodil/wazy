@@ -332,7 +332,7 @@
         {"op": "stream.read", "end": {"$": "r"}, "ptr": 4096, "n": 4, "async": true},
         {"op": "stream.drop-readable", "end": {"$": "r"}}
       ],
-      "go_trap_contains": "in-flight or undelivered"
+      "go_trap_contains": "cannot remove busy stream"
     },
     {
       "name": "stream-cancel-read",
@@ -360,7 +360,7 @@
         {"op": "waitable-set.wait", "set": {"$": "s"}, "cancellable": false},
         {"op": "future.write", "end": {"$": "w"}, "ptr": 4096, "async": true}
       ],
-      "go_trap_contains": "not idle"
+      "go_trap_contains": "cannot write to future after previous write succeeded"
     },
     {
       "name": "misc-context-ec",

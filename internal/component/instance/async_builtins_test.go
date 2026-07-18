@@ -291,7 +291,7 @@ func TestTaskReturnHostFuncGraph_ResolveTypeError(t *testing.T) {
 func TestReturnValues_NumBorrowsTraps(t *testing.T) {
 	tk := &task{numBorrows: 1, onResolve: func([]abi.Value, bool) {}}
 	err := tk.returnValues(nil)
-	requireErrContains(t, err, "borrowed handle")
+	requireErrContains(t, err, "borrow handles still remain")
 }
 
 // TestTryEnter_SecondCallerParksInsteadOfTrapping pins Phase 3's forced
