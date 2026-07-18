@@ -30,7 +30,7 @@ const (
 	parkNone  guestParkKind = iota
 	parkEntry               // Task.enter_implicit_thread's backpressure wait (~492-498)
 	parkWait                // callback WAIT on a waitable set (~2185-2188)
-	parkYield                // callback YIELD (~2179-2184)
+	parkYield               // callback YIELD (~2179-2184)
 
 	// parkBlocked: suspended MID-CORE-CALL inside a blocking builtin (a sync
 	// stream/future copy, or a sync-lowered call to an async callee) --
@@ -117,8 +117,10 @@ func (gt *guestTask) runSegment(fn func() error) error {
 	if !gt.promoted {
 		return fn()
 	}
-	seg := &guestSegment{gt: gt,
-		resumeCh: make(chan resumeMode), yieldCh: make(chan struct{})}
+	seg := &guestSegment{
+		gt:       gt,
+		resumeCh: make(chan resumeMode), yieldCh: make(chan struct{}),
+	}
 	gt.seg = seg
 	go seg.main(fn)
 	return seg.handoff(resumeNormal)
@@ -168,8 +170,8 @@ func (gt *guestTask) block(ready func() bool, cancellable bool) (cancelled bool)
 	seg := gt.seg
 	gt.park, gt.cancellable = parkBlocked, cancellable
 	seg.parkReady = ready
-	gt.in.suspendRun()       // activeTask=nil, mayEnter=true; exclusive KEPT
-	gt.in.sched.park(gt)     // safe: we hold the baton
+	gt.in.suspendRun()   // activeTask=nil, mayEnter=true; exclusive KEPT
+	gt.in.sched.park(gt) // safe: we hold the baton
 	seg.yieldCh <- struct{}{}
 	mode := <-seg.resumeCh
 	if mode == resumeAbort {

@@ -222,8 +222,24 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 	for _, pp := range paramPlans {
 		flatParamWidth += len(pp.flat)
 	}
-	if flatParamWidth > maxFlatAsyncParams {
-		return nil, nil, nil, fmt.Errorf("component/instance: async import %q func %q has %d flat param(s), exceeding the async flat limit (%d); spilling params to memory is not supported by this milestone", iface, funcName, flatParamWidth, maxFlatAsyncParams)
+	// Whole-parameter-list spill (mirrors the sync LIFT side's identical
+	// threshold check, instance.go's computeBoundExportABI): beyond
+	// maxFlatAsyncParams, FlattenFunc's async arm collapses the core
+	// signature to a single i32 pointer into the CALLING module's memory,
+	// holding the whole param list stored as a tuple -- exactly what
+	// cross-abi-calls.wast's guest side already emits unconditionally
+	// (`(import "" "async-5-param" (func $async-5-param (param i32) (result
+	// i32)))`, confirmed against the vendored fixture) regardless of whether
+	// wazy understood it. paramTupleDesc's Elements reuse fd.Params' own
+	// TypeRefs directly, same construction as paramTuple above.
+	paramsSpill := flatParamWidth > maxFlatAsyncParams
+	var paramTupleDesc binary.TupleDesc
+	if paramsSpill {
+		elems := make([]binary.TypeRef, len(fd.Params))
+		for i, p := range fd.Params {
+			elems[i] = p.Type
+		}
+		paramTupleDesc = binary.TupleDesc{Elements: elems}
 	}
 
 	resultCount, resultType, resultUsesMem, err := buildHostResultPlan(fd, resolve)
@@ -234,9 +250,15 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 		return nil, nil, nil, fmt.Errorf("component/instance: async import %q func %q declares %d results; multiple async-import results are not supported by this milestone", iface, funcName, resultCount)
 	}
 
-	coreParamKinds := make([]string, 0, flatParamWidth+1)
-	for _, pp := range paramPlans {
-		coreParamKinds = append(coreParamKinds, pp.flat...)
+	var coreParamKinds []string
+	if paramsSpill {
+		coreParamKinds = make([]string, 0, 2)
+		coreParamKinds = append(coreParamKinds, "i32") // pointer to the whole spilled param tuple
+	} else {
+		coreParamKinds = make([]string, 0, flatParamWidth+1)
+		for _, pp := range paramPlans {
+			coreParamKinds = append(coreParamKinds, pp.flat...)
+		}
 	}
 	outPtrIdx := -1
 	if resultCount == 1 {
@@ -315,11 +337,26 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 			// inside on_start -- the reference lifts caller args lazily
 			// too (~2250-2254), observable when B's entry parks under
 			// backpressure and A mutates its own arg buffer before B
-			// actually starts.
-			flat := append([]uint64(nil), stack[:flatParamWidth]...)
+			// actually starts. A spilled param list is snapshotted as just
+			// its one pointer -- the memory it points into is the CALLER's,
+			// read (not copied) lazily inside on_start exactly like the
+			// non-spilled flat case reads its snapshotted core values lazily.
+			var flat []uint64
+			var argPtr uint32
+			if paramsSpill {
+				argPtr = api.DecodeU32(stack[0])
+			} else {
+				flat = append([]uint64(nil), stack[:flatParamWidth]...)
+			}
 
 			onStart := func(calleeTask *task) ([]abi.Value, error) {
-				args, aerr := liftAsyncHostArgsPlanned(in, paramPlans, resolve, flat, memMod, resources, st)
+				var args []abi.Value
+				var aerr error
+				if paramsSpill {
+					args, aerr = liftAsyncHostArgsSpilled(in, paramPlans, paramTupleDesc, resolve, argPtr, memMod, resources, st)
+				} else {
+					args, aerr = liftAsyncHostArgsPlanned(in, paramPlans, resolve, flat, memMod, resources, st)
+				}
 				if aerr != nil {
 					return nil, fmt.Errorf("async lower %q %q: %w", iface, funcName, aerr)
 				}
@@ -369,7 +406,13 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 		}
 
 		// Plain host-import arm (unchanged from Phase 1/2).
-		args, aerr := liftAsyncHostArgsPlanned(in, paramPlans, resolve, stack, memMod, resources, st)
+		var args []abi.Value
+		var aerr error
+		if paramsSpill {
+			args, aerr = liftAsyncHostArgsSpilled(in, paramPlans, paramTupleDesc, resolve, api.DecodeU32(stack[0]), memMod, resources, st)
+		} else {
+			args, aerr = liftAsyncHostArgsPlanned(in, paramPlans, resolve, stack, memMod, resources, st)
+		}
 		if aerr != nil {
 			panic(fmt.Errorf("component/instance: async import %q %q: %w", iface, funcName, aerr))
 		}
@@ -444,6 +487,50 @@ func mapResultsFromProvider(tgt *guestAsyncTarget, vals []abi.Value) ([]abi.Valu
 		out[i] = v
 	}
 	return out, nil
+}
+
+// liftAsyncHostArgsSpilled is liftAsyncHostArgsPlanned's counterpart for a
+// param list that flattens beyond maxFlatAsyncParams (see paramsSpill's
+// construction in buildAsyncHostWrapper): the core func's one real param is
+// a pointer into the CALLING module's memory holding the whole param list
+// stored as a tuple, mirroring the sync LIFT side's whole-parameter-list
+// spill (boundExport.paramsSpill/lowerParams's abi.SpillValue) in reverse --
+// this reads the tuple back out of memory instead of writing it, since this
+// wrapper is the LOWER side receiving a caller's already-spilled args.
+// Per-param post-processing (borrow lending, resolveHandleArg) is identical
+// to liftAsyncHostArgsPlanned's, just sourced from the loaded tuple's
+// elements instead of per-plan LiftFlat calls.
+func liftAsyncHostArgsSpilled(in *Instance, plans []hostParamPlan, tupleDesc binary.TupleDesc, resolve abi.Resolver, ptr uint32, mod api.Module, resources *handleTable, st *subtask) ([]abi.Value, error) {
+	mem, memAvailable := memoryBytesOf(mod)
+	if !memAvailable {
+		return nil, fmt.Errorf("parameter list spills to memory (flattens beyond the async flat limit), but the calling module has no memory")
+	}
+	tupleVal, err := abi.Load(mem, ptr, tupleDesc, resolve)
+	if err != nil {
+		return nil, fmt.Errorf("spilled parameter list: %w", err)
+	}
+	raw, ok := tupleVal.([]abi.Value)
+	if !ok || len(raw) != len(plans) {
+		return nil, fmt.Errorf("spilled parameter list: expected %d value(s), got %T", len(plans), tupleVal)
+	}
+	args := make([]abi.Value, len(plans))
+	for i := range plans {
+		pp := &plans[i]
+		v := raw[i]
+		if pp.isBorrow {
+			if h, ok := v.(uint32); ok {
+				if entry, eerr := resources.entryForLend(pp.borrowRT, h); eerr == nil {
+					st.addLender(entry)
+				}
+			}
+		}
+		v, err = resolveHandleArg(in, resources, nil, pp.pt, v)
+		if err != nil {
+			return nil, fmt.Errorf("param %d: %w", i, err)
+		}
+		args[i] = v
+	}
+	return args, nil
 }
 
 // liftAsyncHostArgsPlanned is liftHostArgsPlanned's async-lower counterpart:

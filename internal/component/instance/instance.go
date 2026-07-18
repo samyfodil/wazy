@@ -54,6 +54,7 @@ package instance
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -63,6 +64,7 @@ import (
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
+	"github.com/samyfodil/wazy/internal/wasmruntime"
 )
 
 // uint64SlicePool and coreValueSlicePool pool the []uint64/[]abi.CoreValue
@@ -1570,6 +1572,30 @@ func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName stri
 	return target.invokeEntered(ctx, be, exportName, args)
 }
 
+// wrapUnreachableTrap prepends wasmtime's canonical unreachable-trap wording
+// ("wasm trap: wasm `unreachable` instruction executed") ahead of wazy's own
+// core-engine message (wasmruntime.ErrRuntimeUnreachable, formatted by
+// wasmdebug as "wasm error: unreachable\nwasm stack trace:\n\t...") when err
+// is (or wraps) that specific trap. Every other error is returned unchanged.
+//
+// This exists solely to satisfy the async conformance suites' one assertion
+// that pins the verbatim wasmtime phrase (component-model/test/async/
+// builtin-trap-poisons-instance.wast:9) -- the spec's JSON fixtures encode
+// wasmtime's own trap text as the expected substring, and this is truthful
+// (the guest DID execute an unreachable instruction; that IS a wasm trap) --
+// it does not change wazy's own message, only adds the wasmtime-recognizable
+// prefix in front of it, so every other assert_trap pinning the short
+// "unreachable" substring (every other suite) keeps matching too. Scoped
+// narrowly to this one call site rather than wasmdebug's global formatter
+// (used by every wazy caller, not just component-model) to avoid rippling
+// this cosmetic convention difference beyond what this suite needs.
+func wrapUnreachableTrap(err error) error {
+	if errors.Is(err, wasmruntime.ErrRuntimeUnreachable) {
+		return fmt.Errorf("wasm trap: wasm `unreachable` instruction executed: %w", err)
+	}
+	return err
+}
+
 // invokeEntered is invoke's actual call body, split out purely for
 // readability at the poisoning boundary (see the two explicit in.poisoned =
 // true sites below, at the ONLY two points this export's own guest code
@@ -1640,6 +1666,7 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 	if err := be.coreFn.CallWithStack(ctx, stack); err != nil {
 		putUint64Slice(stackPtr)
 		in.poisoned = true // guest code actually ran and trapped -- see this func's doc
+		err = wrapUnreachableTrap(err)
 		return nil, fmt.Errorf("component/instance: export %q: call core func %q: %w", exportName, be.funcName, err)
 	}
 	// rawResults ALIASES the pooled stack, so stack must not be returned to the

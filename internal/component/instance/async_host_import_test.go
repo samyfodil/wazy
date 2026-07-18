@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
 )
@@ -17,14 +18,77 @@ import (
 
 // ------- buildAsyncHostWrapper: bind-time errors -------
 
-func TestBuildAsyncHostWrapper_TooManyParams(t *testing.T) {
+func TestBuildAsyncHostWrapper_SpilledParams(t *testing.T) {
+	// 5 u32 flat params > maxFlatAsyncParams (4) -- buildAsyncHostWrapper
+	// supports this via the whole-parameter-list spill (a single i32
+	// pointer into the calling module's memory) rather than rejecting it --
+	// see liftAsyncHostArgsSpilled for the actual memory-read path and
+	// TestLiftAsyncHostArgsSpilled_RoundTrip for a real end-to-end read.
 	var params []binary.TypeDesc
-	for range 5 { // 5 u32 flat params > maxFlatAsyncParams (4)
+	for range 5 {
 		params = append(params, binary.PrimitiveDesc{Prim: "u32"})
 	}
 	hi := &hostImport{asyncFn: func(context.Context, []abi.Value, *AsyncCall) error { return nil }, params: params}
-	_, _, _, err := buildAsyncHostWrapper(&Instance{sched: &sched{}}, "i", "f", hi, newHandleTable(), nil, nil)
-	requireErrContains(t, err, "exceeding the async flat limit")
+	fn, apiParams, _, err := buildAsyncHostWrapper(&Instance{sched: &sched{}}, "i", "f", hi, newHandleTable(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fn == nil {
+		t.Fatal("nil wrapper")
+	}
+	if len(apiParams) != 1 || apiParams[0] != api.ValueTypeI32 {
+		t.Fatalf("params: %#v, want a single i32 pointer", apiParams)
+	}
+}
+
+// TestLiftAsyncHostArgsSpilled_RoundTrip proves the spilled-param READ path
+// itself (not just buildAsyncHostWrapper's signature computation, see
+// TestBuildAsyncHostWrapper_SpilledParams above) -- the async-lower twin of
+// TestLiftHostArgsSpilled_RoundTrip (host_import_test.go): abi.Store writes
+// a 5-element tuple into memory at a fixed pointer exactly like a real
+// spilling guest would, then liftAsyncHostArgsSpilled reads it back through
+// the pointer and must recover every element, in order.
+func TestLiftAsyncHostArgsSpilled_RoundTrip(t *testing.T) {
+	_, mod := memModule(t)
+	var params []binary.TypeDesc
+	want := make([]abi.Value, 5)
+	for i := range want {
+		params = append(params, binary.PrimitiveDesc{Prim: "u32"})
+		want[i] = uint32(2000 + i)
+	}
+	fd, resolve := synthFuncDesc(params, nil)
+	plans, err := buildHostParamPlans(fd, resolve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	elems := make([]binary.TypeRef, len(fd.Params))
+	for i, p := range fd.Params {
+		elems[i] = p.Type
+	}
+	tupleDesc := binary.TupleDesc{Elements: elems}
+
+	memBytes, ok := memoryBytesOf(mod)
+	if !ok {
+		t.Fatal("expected memory")
+	}
+	const ptr = 64
+	if err := abi.Store(memBytes, ptr, tupleDesc, want, resolve, abi.Realloc{}); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+
+	st := newSubtask()
+	args, err := liftAsyncHostArgsSpilled(nil, plans, tupleDesc, resolve, ptr, mod, newHandleTable(), st)
+	if err != nil {
+		t.Fatalf("liftAsyncHostArgsSpilled: %v", err)
+	}
+	if len(args) != len(want) {
+		t.Fatalf("args: got %d, want %d", len(args), len(want))
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("args[%d] = %#v, want %#v", i, args[i], want[i])
+		}
+	}
 }
 
 func TestBuildAsyncHostWrapper_TooManyResults(t *testing.T) {

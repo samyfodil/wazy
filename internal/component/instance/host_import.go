@@ -88,6 +88,21 @@ type config struct {
 	// drive. nil for a flat (non-composed) instantiation, which then becomes
 	// its own tree root (instantiateGraph allocates a fresh *sched).
 	sharedSched *sched
+
+	// pendingDelegates accumulates a canon lower's forward reference to a
+	// nested sibling component instance that had not yet been instantiated
+	// at the point THIS instance's own core-instance loop needed to bind it
+	// -- trap-on-reenter.wast's shape: a top-level canon lower, wired
+	// directly into the outer component's own core-instance graph (built by
+	// instantiateGraph's CoreInstances loop), references a LATER-declared
+	// nested component instantiate's export (only instantiated afterward, by
+	// instantiateNestedInstances). computeCanonHostFunc appends here instead
+	// of failing outright; instantiateGraph resolves every entry (filling in
+	// its tgt.sub/tgt.be) immediately after instantiateNestedInstances
+	// returns, then clears this slice -- see resolveStaticExportFuncDesc and
+	// delegatingHostImportDeferred (composition.go). Always nil outside that
+	// one shape.
+	pendingDelegates []*pendingSiblingDelegate
 }
 
 // withHostResourceDtor registers a Go destructor for a host-provided resource,
@@ -536,8 +551,24 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("component/instance: import %q func %q params: %w", iface, funcName, err)
 	}
-	if len(rawParams) > abi.MaxFlatParams {
-		return nil, nil, nil, fmt.Errorf("component/instance: import %q func %q has %d flat params, exceeding the flat limit; whole-parameter-list spilling is not supported by this milestone", iface, funcName, len(rawParams))
+	// Whole-parameter-list spill: beyond MaxFlatParams, abi.FlattenFunc
+	// (below) already collapses the core signature to a single i32 pointer
+	// into the CALLING module's memory holding the whole param list stored
+	// as a tuple (its own "Apply spill-to-memory rules" step) -- the guest
+	// side already emits exactly this ABI unconditionally, so the only gap
+	// was this wrapper's own arg-reading closure never understanding it (see
+	// paramsSpill below and liftHostArgsSpilled). paramTupleDesc's Elements
+	// reuse fd.Params' own TypeRefs directly, the same construction
+	// instance.go's computeBoundExportABI uses for its (lift-direction)
+	// paramTuple.
+	paramsSpill := len(rawParams) > abi.MaxFlatParams
+	var paramTupleDesc binary.TupleDesc
+	if paramsSpill {
+		elems := make([]binary.TypeRef, len(fd.Params))
+		for i, p := range fd.Params {
+			elems[i] = p.Type
+		}
+		paramTupleDesc = binary.TupleDesc{Elements: elems}
 	}
 	rawResults, err := flattenResultRefs(fd, resolve)
 	if err != nil {
@@ -549,11 +580,17 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 	// extra i32 out-pointer parameter -- a buffer it already allocated -- and
 	// expects the full (non-flat) value Store()d there, with no core return
 	// values at all. outPtrIdx names that parameter's position on the
-	// incoming stack (the flat width of the real params, since the
-	// out-pointer is appended after them); -1 means no spilling is needed.
+	// incoming stack (the flat width of the real params -- ONE slot when
+	// paramsSpill, since the whole list already collapsed to its own
+	// pointer -- since the out-pointer is appended after them); -1 means no
+	// spilling is needed.
 	outPtrIdx := -1
 	if len(rawResults) > abi.MaxFlatResults {
-		outPtrIdx = len(rawParams)
+		if paramsSpill {
+			outPtrIdx = 1
+		} else {
+			outPtrIdx = len(rawParams)
+		}
 	}
 
 	coreParams, coreResults, err := abi.FlattenFunc(fd, resolve, "lower")
@@ -589,7 +626,13 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 		if memOverride != nil {
 			memMod = memOverride
 		}
-		args, lent, err := liftHostArgsPlanned(in, paramPlans, resolve, stack, memMod, resources)
+		var args []abi.Value
+		var lent []lentHandle
+		if paramsSpill {
+			args, lent, err = liftHostArgsSpilled(in, paramPlans, paramTupleDesc, resolve, api.DecodeU32(stack[0]), memMod, resources)
+		} else {
+			args, lent, err = liftHostArgsPlanned(in, paramPlans, resolve, stack, memMod, resources)
+		}
 		if err != nil {
 			panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
 		}
@@ -824,6 +867,52 @@ func liftHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.Resolv
 		}
 		args[i] = v
 		pos += len(pp.flat)
+	}
+	return args, lent, nil
+}
+
+// liftHostArgsSpilled is liftHostArgsPlanned's counterpart for a param list
+// that flattens beyond abi.MaxFlatParams (see paramsSpill's construction in
+// buildHostWrapper): the core func's one real param is a pointer into the
+// CALLING module's memory holding the whole param list stored as a tuple,
+// mirroring the LIFT side's whole-parameter-list spill (boundExport.
+// paramsSpill/lowerParams's abi.SpillValue) in reverse -- this reads the
+// tuple back out of memory instead of writing it, since this wrapper is the
+// LOWER side receiving a caller's already-spilled args. Per-param
+// post-processing (borrow lend, resolveHandleArg) is identical to
+// liftHostArgsPlanned's, just sourced from the loaded tuple's elements
+// instead of per-plan LiftFlat calls -- see async_host_import.go's
+// liftAsyncHostArgsSpilled for the async-lower twin of this function.
+func liftHostArgsSpilled(in *Instance, plans []hostParamPlan, tupleDesc binary.TupleDesc, resolve abi.Resolver, ptr uint32, mod api.Module, resources *handleTable) ([]abi.Value, []lentHandle, error) {
+	mem, memAvailable := memoryBytesOf(mod)
+	if !memAvailable {
+		return nil, nil, fmt.Errorf("parameter list spills to memory (flattens beyond the flat limit), but the calling module has no memory")
+	}
+	tupleVal, err := abi.Load(mem, ptr, tupleDesc, resolve)
+	if err != nil {
+		return nil, nil, fmt.Errorf("spilled parameter list: %w", err)
+	}
+	raw, ok := tupleVal.([]abi.Value)
+	if !ok || len(raw) != len(plans) {
+		return nil, nil, fmt.Errorf("spilled parameter list: expected %d value(s), got %T", len(plans), tupleVal)
+	}
+	args := make([]abi.Value, len(plans))
+	var lent []lentHandle
+	for i := range plans {
+		pp := &plans[i]
+		v := raw[i]
+		if pp.isBorrow {
+			if h, ok := v.(uint32); ok {
+				if err := resources.Lend(pp.borrowRT, h); err == nil {
+					lent = append(lent, lentHandle{pp.borrowRT, h})
+				}
+			}
+		}
+		v, err = resolveHandleArg(in, resources, nil, pp.pt, v)
+		if err != nil {
+			return nil, lent, fmt.Errorf("param %d: %w", i, err)
+		}
+		args[i] = v
 	}
 	return args, lent, nil
 }
