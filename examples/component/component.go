@@ -46,6 +46,13 @@ var threadWasm []byte
 //go:embed testdata/await_import.wasm
 var awaitImportWasm []byte
 
+// multithread.wasm (source: testdata/multithread.wat) spawns FIVE Component
+// Model threads over one shared array: four mappers double their own chunk and
+// a reducer sums the result. Map-reduce, 2*(1+..+8) = 72.
+//
+//go:embed testdata/multithread.wasm
+var multiThreadWasm []byte
+
 // main shows the things wazy's component package does that wazero does not: call
 // a component interface export, run a WASI 0.2 command, run the async ABI, spawn
 // a Component Model thread, and drive a component with CallAsync whose import
@@ -60,6 +67,7 @@ func main() {
 	fmt.Println(runWASICommand(ctx, r))
 	fmt.Println(runAsyncExport(ctx, r))
 	fmt.Println(runThreadExport(ctx, r))
+	fmt.Println(runMultiThread(ctx, r))
 	fmt.Println(runCallAsync(ctx, r))
 }
 
@@ -127,6 +135,23 @@ func runThreadExport(ctx context.Context, r wazy.Runtime) string {
 		log.Panicf("call thread run-async: %v", err)
 	}
 	return fmt.Sprintf("thread (spawn + resume) = %d", got[0].(uint32))
+}
+
+// runMultiThread spawns five Component Model threads over one shared array: four
+// mappers each double their 2-element chunk, then a reducer sums the whole
+// (doubled) array — a cooperative map-reduce entirely inside the guest.
+func runMultiThread(ctx context.Context, r wazy.Runtime) string {
+	inst, err := component.Instantiate(ctx, r, multiThreadWasm)
+	if err != nil {
+		log.Panicf("instantiate multithread: %v", err)
+	}
+	defer inst.Close(ctx)
+
+	got, err := inst.Call(ctx, "run-async")
+	if err != nil {
+		log.Panicf("call multithread run-async: %v", err)
+	}
+	return fmt.Sprintf("multithread map-reduce (4 mappers + reducer) = %d", got[0].(uint32))
 }
 
 // runCallAsync drives a component with CallAsync: the guest awaits an async

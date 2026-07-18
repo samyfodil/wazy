@@ -1,6 +1,6 @@
 # Component Model & async
 
-This example runs five things through the [`component`](../../component) package
+This example runs six things through the [`component`](../../component) package
 that upstream wazero does not support:
 
 1. **An interface export** — instantiate `adder.wasm` and call
@@ -16,7 +16,15 @@ that upstream wazero does not support:
    spawns a Component Model thread with `thread.new-indirect` and hands control to
    it with `thread.yield-then-resume`; the worker thread resolves the task. It is
    still a single blocking `Call` from Go.
-5. **CallAsync** — `await_import.wasm` awaits an async import `get() -> u32`. The
+5. **Multi-threaded map-reduce** — `multithread.wasm` (source:
+   [`testdata/multithread.wat`](testdata/multithread.wat)) spawns **five** Component
+   Model threads over one shared array: four mappers each double their 2-element
+   chunk, then a reducer sums the doubled array (`2*(1+..+8) = 72`). Real
+   multi-threaded array processing, cooperatively scheduled inside the guest.
+   (CM `thread.*` is currently only reachable from hand-authored `.wat` — no Rust
+   toolchain emits it, and wazy does not implement `wasi-threads` spawn, so this
+   is the genuine article for CM threads.)
+6. **CallAsync** — `await_import.wasm` awaits an async import `get() -> u32`. The
    host registers it with `component.WithAsyncImport` and completes it **from
    another goroutine** (real I/O in a real host). `inst.CallAsync` returns a
    `PendingCall` the moment the guest parks; `PendingCall.Await` resumes it once
@@ -33,6 +41,7 @@ component:adder/calc add(2, 3) = 5
 wasi:cli hello: hello world
 async run-async() = 42
 thread (spawn + resume) = 99
+multithread map-reduce (4 mappers + reducer) = 72
 callasync run-async() = 42 (was parked until the external goroutine resolved)
 ```
 
