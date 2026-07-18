@@ -272,6 +272,9 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 	apiResults := []api.ValueType{api.ValueTypeI32} // always exactly the packed Subtask.State
 
 	fn := api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+		if hi.lineage {
+			panic(fmt.Errorf("component/instance: async lower %q %q: wasm trap: cannot enter component instance", iface, funcName))
+		}
 		memMod := mod
 		if memOverride != nil {
 			memMod = memOverride

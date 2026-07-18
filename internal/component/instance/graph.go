@@ -1324,6 +1324,14 @@ func computeCanonHostFunc(
 				provToImp := func(uint32) (uint32, bool) { return 0, false }
 				tgt := &guestAsyncTarget{exportName: al.Name, provToImp: provToImp}
 				hi = delegatingHostImportDeferred(tgt, sfd, sresolve)
+				// A canon lower declared directly in the OUTER component's
+				// own core-instance graph, targeting a locally-instantiated
+				// child's export -- a direct static parent<->child lineage
+				// delegate (see hostImport.lineage's doc). Refused at call
+				// time. Distinct from the sibling-to-sibling delegates built
+				// via instantiate-args (arg.Sort == 0x05, outerFuncArgImport's
+				// sibling-alias arm), which are never flagged.
+				hi.lineage = true
 				cfg.pendingDelegates = append(cfg.pendingDelegates, &pendingSiblingDelegate{
 					instIdx: int(al.InstanceIdx), exportName: al.Name, tgt: tgt, isAsyncLower: isAsyncLower,
 				})

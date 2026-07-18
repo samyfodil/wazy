@@ -180,6 +180,19 @@ type hostImport struct {
 	// enforces that beyond call-site discipline -- buildAsyncHostWrapper
 	// checks asyncTarget first.
 	asyncTarget *guestAsyncTarget
+
+	// lineage marks a composition delegate that crosses a DIRECT static
+	// parent<->child instantiation boundary: the outer's own local lift
+	// handed to a child as a func instantiate-arg (outerFuncArgImport's
+	// ComponentFuncFromCanonLift arm), or the outer's own canon lower of a
+	// locally-nested child's export (computeCanonHostFunc's local-sibling
+	// lower arm). The Component Model reference will eventually permit some
+	// of these (entering_set ancestor exclusion, definitions.py:220-248),
+	// but the conformance suite pins wasmtime's current behavior --
+	// trap-on-reenter.wast's own "for now, trap on parent-to-child /
+	// child-to-parent" -- so the call-time wrappers refuse them with the
+	// spec's exact re-entrancy trap text.
+	lineage bool
 }
 
 // guestAsyncTarget names the sibling composition instance/export an async
@@ -622,6 +635,9 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 	}
 
 	fn := api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+		if hi.lineage {
+			panic(fmt.Errorf("component/instance: host import %q %q: wasm trap: cannot enter component instance", iface, funcName))
+		}
 		memMod := mod
 		if memOverride != nil {
 			memMod = memOverride

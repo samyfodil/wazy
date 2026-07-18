@@ -224,6 +224,11 @@ func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, byIdx
 		provToImp := func(uint32) (uint32, bool) { return 0, false }
 		hi := delegatingHostImport(in, diagName, be, provToImp)
 		hi.asyncTarget = &guestAsyncTarget{sub: in, be: be, exportName: diagName, provToImp: provToImp}
+		// This func arg names the outer component's OWN local func, handed
+		// down to a directly-nested child as a `(with "x" (func N))`
+		// instantiate-arg -- a direct static parent<->child lineage delegate
+		// (see hostImport.lineage's doc). Refused at call time.
+		hi.lineage = true
 		return hi, nil
 	}
 	if int(e.Alias) >= len(comp.Aliases) {
