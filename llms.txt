@@ -1,8 +1,8 @@
 # wazy
 
-> A fast, pure-Go WebAssembly runtime: zero dependencies, no CGO. Embeds Wasm compiled from Rust, C/C++, TinyGo, Zig, and more, and runs it with an optimizing amd64/arm64 compiler or a portable interpreter. Derived from wazero; focused on performance and WASI/WebAssembly standards conformance.
+> A fast, pure-Go WebAssembly runtime: zero dependencies, no CGO. Embeds Wasm compiled from Rust, C/C++, TinyGo, Zig, and more, and runs it with an optimizing amd64/arm64 compiler or a portable interpreter. Derived from wazero; focused on performance and standards conformance. Beyond core Wasm it runs the WebAssembly Component Model, WASI 0.2, and the Component Model async ABI (the WASI 0.3 model — streams, futures, tasks, threads) — none of which upstream wazero targets.
 
-wazy is a Go library: `go get github.com/samyfodil/wazy`. The public API lives in the root package, with `api/` for shared types and `experimental/` for unstable features. WASI preview1 is provided by `imports/wasi_snapshot_preview1`.
+wazy is a Go library: `go get github.com/samyfodil/wazy`. The public API lives in the root package, with `api/` for shared types and `experimental/` for unstable features. WASI preview1 is provided by `imports/wasi_snapshot_preview1`; the Component Model, WASI 0.2 host interfaces, and the async ABI live in the `component` package. The async runtime passes all 31 official Component Model async `.wast` conformance suites.
 
 ## Documentation
 
@@ -19,6 +19,7 @@ wazy is a Go library: `go get github.com/samyfodil/wazy`. The public API lives i
 - [Optimizing compiler](internal/engine/native): amd64/arm64 JIT backend.
 - [Interpreter](internal/engine/interpreter): portable fallback engine.
 - [WASI preview1](imports/wasi_snapshot_preview1): WASI host module.
+- [Component Model + WASI 0.2 + async](component): Component Model runtime (Canonical ABI, resources, multi-module graphs), WASI 0.2 host interfaces, and the async ABI (streams, futures, tasks, `thread.*`).
 - [CLI](cmd/wazy): command-line runner.
 
 ## Optional
