@@ -4,10 +4,10 @@ import (
 	"os"
 	"testing"
 
-	"github.com/samyfodil/wazy/experimental/sys"
 	"github.com/samyfodil/wazy/internal/sock"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/internal/wasip1"
+	"github.com/samyfodil/wazy/sys"
 )
 
 func Test_getExtendedWasiFiletype(t *testing.T) {

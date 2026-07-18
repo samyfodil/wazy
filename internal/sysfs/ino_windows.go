@@ -4,12 +4,11 @@ import (
 	"io/fs"
 	"path"
 
-	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
 	"github.com/samyfodil/wazy/sys"
 )
 
 // inoFromFileInfo uses stat to get the inode information of the file.
-func inoFromFileInfo(dirPath string, info fs.FileInfo) (ino sys.Inode, errno experimentalsys.Errno) {
+func inoFromFileInfo(dirPath string, info fs.FileInfo) (ino sys.Inode, errno sys.Errno) {
 	if v, ok := info.Sys().(*sys.Stat_t); ok {
 		return v.Ino, 0
 	}

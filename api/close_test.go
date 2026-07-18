@@ -1,0 +1,44 @@
+package api_test
+
+import (
+	"context"
+	"testing"
+
+	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/expctxkeys"
+	"github.com/samyfodil/wazy/internal/testing/require"
+)
+
+type arbitrary struct{}
+
+// testCtx is an arbitrary, non-default context. Non-nil also prevents linter errors.
+var testCtx = context.WithValue(context.Background(), arbitrary{}, "arbitrary")
+
+func TestWithCloseNotifier(t *testing.T) {
+	tests := []struct {
+		name         string
+		notification api.CloseNotifier
+		expected     bool
+	}{
+		{
+			name:     "returns input when notification nil",
+			expected: false,
+		},
+		{
+			name:         "decorates with notification",
+			notification: api.CloseNotifyFunc(func(context.Context, uint32) {}),
+			expected:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		tc := tt
+		t.Run(tc.name, func(t *testing.T) {
+			if decorated := api.WithCloseNotifier(testCtx, tc.notification); tc.expected {
+				require.NotNil(t, decorated.Value(expctxkeys.CloseNotifierKey{}))
+			} else {
+				require.Same(t, testCtx, decorated)
+			}
+		})
+	}
+}

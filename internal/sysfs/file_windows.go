@@ -5,9 +5,8 @@ import (
 	"syscall"
 	"unsafe"
 
+	"github.com/samyfodil/wazy/sys"
 	"golang.org/x/sys/windows"
-
-	"github.com/samyfodil/wazy/experimental/sys"
 )
 
 const (

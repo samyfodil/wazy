@@ -5,11 +5,11 @@ import (
 	"time"
 
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental/sys"
 	internalsys "github.com/samyfodil/wazy/internal/sys"
 	"github.com/samyfodil/wazy/internal/sysfs"
 	"github.com/samyfodil/wazy/internal/wasip1"
 	"github.com/samyfodil/wazy/internal/wasm"
+	"github.com/samyfodil/wazy/sys"
 )
 
 // pollOneoff is the WASI function named PollOneoffName that concurrently

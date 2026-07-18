@@ -4,9 +4,9 @@ import (
 	"context"
 
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental/sys"
 	"github.com/samyfodil/wazy/internal/wasip1"
 	"github.com/samyfodil/wazy/internal/wasm"
+	"github.com/samyfodil/wazy/sys"
 )
 
 // clockResGet is the WASI function named ClockResGetName that returns the

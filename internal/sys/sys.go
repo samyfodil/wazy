@@ -7,7 +7,6 @@ import (
 	"net"
 	"time"
 
-	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
 	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/sys"
 )
@@ -113,8 +112,8 @@ func (c *Context) RandSource() io.Reader {
 // sys.FS.
 //
 // Note: This is only used for testing.
-func DefaultContext(fs experimentalsys.FS) *Context {
-	if sysCtx, err := NewContext(0, nil, nil, nil, nil, nil, nil, nil, 0, nil, 0, nil, nil, []experimentalsys.FS{fs}, []string{""}, nil); err != nil {
+func DefaultContext(fs sys.FS) *Context {
+	if sysCtx, err := NewContext(0, nil, nil, nil, nil, nil, nil, nil, 0, nil, 0, nil, nil, []sys.FS{fs}, []string{""}, nil); err != nil {
 		panic(fmt.Errorf("BUG: DefaultContext should never error: %w", err))
 	} else {
 		return sysCtx
@@ -135,7 +134,7 @@ func NewContext(
 	nanotimeResolution sys.ClockResolution,
 	nanosleep sys.Nanosleep,
 	osyield sys.Osyield,
-	fs []experimentalsys.FS, guestPaths []string,
+	fs []sys.FS, guestPaths []string,
 	tcpListeners []*net.TCPListener,
 ) (sysCtx *Context, err error) {
 	sysCtx = &Context{args: args, environ: environ}

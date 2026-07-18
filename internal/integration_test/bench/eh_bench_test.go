@@ -18,7 +18,6 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/internal/wasm"
@@ -104,7 +103,7 @@ func TestEHBenchModules(t *testing.T) {
 func instantiateEHBenchModule(tb testing.TB, bin []byte) api.Module {
 	ctx := context.Background()
 	cfg := wazy.NewRuntimeConfigCompiler().
-		WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling)
+		WithCoreFeatures(api.CoreFeaturesV2 | api.CoreFeatureExceptionHandling)
 	r := wazy.NewRuntimeWithConfig(ctx, cfg)
 	tb.Cleanup(func() { r.Close(ctx) })
 	mod, err := r.Instantiate(ctx, bin)

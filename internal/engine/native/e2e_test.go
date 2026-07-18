@@ -11,13 +11,13 @@ import (
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/experimental"
-	"github.com/samyfodil/wazy/experimental/logging"
 	"github.com/samyfodil/wazy/internal/engine/native/testcases"
 	"github.com/samyfodil/wazy/internal/leb128"
 	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
 	"github.com/samyfodil/wazy/internal/testing/dwarftestdata"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/internal/wasm"
+	"github.com/samyfodil/wazy/logging"
 )
 
 const (
@@ -843,7 +843,7 @@ func TestE2E(t *testing.T) {
 		{
 			name:     "tail_call_return_call",
 			m:        testcases.FibonacciTailRecursive.Module,
-			features: api.CoreFeaturesV2 | experimental.CoreFeaturesTailCall,
+			features: api.CoreFeaturesV2 | api.CoreFeatureTailCall,
 			calls: []callCase{
 				{params: []uint64{10, 0, 1}, expResults: []uint64{55}},
 				{params: []uint64{20, 0, 1}, expResults: []uint64{6765}},
@@ -853,7 +853,7 @@ func TestE2E(t *testing.T) {
 		{
 			name:     "tail_call_return_call_count",
 			m:        testcases.CountTailRecursive.Module,
-			features: api.CoreFeaturesV2 | experimental.CoreFeaturesTailCall,
+			features: api.CoreFeaturesV2 | api.CoreFeatureTailCall,
 			calls: []callCase{
 				{params: []uint64{1000_000_000, 0}, expResults: []uint64{1000_000_000}},
 			},
@@ -861,7 +861,7 @@ func TestE2E(t *testing.T) {
 		{
 			name:     "tail_call_return_call_count_acc",
 			m:        testcases.CountTailRecursiveTwoResults.Module,
-			features: api.CoreFeaturesV2 | experimental.CoreFeaturesTailCall,
+			features: api.CoreFeaturesV2 | api.CoreFeatureTailCall,
 			calls: []callCase{
 				{params: []uint64{1000_000_000, 0}, expResults: []uint64{0, 1000_000_000}},
 			},
@@ -869,7 +869,7 @@ func TestE2E(t *testing.T) {
 		{
 			name:     "tail_call_compatible_signatures",
 			m:        testcases.TailCallCompatibleSignatures.Module,
-			features: api.CoreFeaturesV2 | experimental.CoreFeaturesTailCall,
+			features: api.CoreFeaturesV2 | api.CoreFeatureTailCall,
 			calls: []callCase{
 				// entry(a, b, c, d) -> tail_caller(a, b, c + d) -> tail_callee(a + (c + d), b) -> helper(a + (c + d), b) -> (a + c + d) * b
 				{params: []uint64{2, 3, 4, 5}, expResults: []uint64{(2 + 4 + 5) * 3}}, // (2 + 4 + 5) * 3 = 33
@@ -879,7 +879,7 @@ func TestE2E(t *testing.T) {
 		{
 			name:     "tail_call_more_params",
 			m:        testcases.TailCallMoreParams.Module,
-			features: api.CoreFeaturesV2 | experimental.CoreFeaturesTailCall,
+			features: api.CoreFeaturesV2 | api.CoreFeatureTailCall,
 			calls: []callCase{
 				// entry() -> tail_caller() -> tail_callee(1,2,3,4,5,6,7,8,9)
 				// tail_callee returns (1+2+3+4, 5+6+7+8+9) = (10, 35)
@@ -889,7 +889,7 @@ func TestE2E(t *testing.T) {
 		{
 			name:     "tail_call_sqlite_pattern",
 			m:        testcases.TailCallManyParams.Module,
-			features: api.CoreFeaturesV2 | experimental.CoreFeaturesTailCall,
+			features: api.CoreFeaturesV2 | api.CoreFeatureTailCall,
 			calls: []callCase{
 				// entry(1,2,3,4,5,6,7) -> caller(1,2,3,4,5,6,7) -> callee(1,2,3,(4&31)|128,0,5,6,7)
 				// callee returns 1+2+3+((4&31)|128)+0+5+6+7 = 1+2+3+132+0+5+6+7 = 156
@@ -900,43 +900,43 @@ func TestE2E(t *testing.T) {
 		{
 			name:     "throw_only",
 			m:        testcases.ThrowOnly.Module,
-			features: api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling,
+			features: api.CoreFeaturesV2 | api.CoreFeatureExceptionHandling,
 			calls:    []callCase{{expErr: "uncaught exception"}},
 		},
 		{
 			name:     "throw_with_param",
 			m:        testcases.ThrowWithParam.Module,
-			features: api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling,
+			features: api.CoreFeaturesV2 | api.CoreFeatureExceptionHandling,
 			calls:    []callCase{{params: []uint64{42}, expErr: "uncaught exception"}},
 		},
 		{
 			name:     "try_table_catch_all_empty",
 			m:        testcases.TryTableCatchAllEmpty.Module,
-			features: api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling,
+			features: api.CoreFeaturesV2 | api.CoreFeatureExceptionHandling,
 			calls:    []callCase{{expResults: []uint64{42}}},
 		},
 		{
 			name:     "try_table_catch_all_throw",
 			m:        testcases.TryTableCatchAllThrow.Module,
-			features: api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling,
+			features: api.CoreFeaturesV2 | api.CoreFeatureExceptionHandling,
 			calls:    []callCase{{expResults: []uint64{42}}},
 		},
 		{
 			name:     "try_table_catch_throw",
 			m:        testcases.TryTableCatchThrow.Module,
-			features: api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling,
+			features: api.CoreFeaturesV2 | api.CoreFeatureExceptionHandling,
 			calls:    []callCase{{expResults: []uint64{23}}},
 		},
 		{
 			name:     "try_table_catch_param_throw",
 			m:        testcases.TryTableCatchParamThrow.Module,
-			features: api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling,
+			features: api.CoreFeaturesV2 | api.CoreFeatureExceptionHandling,
 			calls:    []callCase{{params: []uint64{42}, expResults: []uint64{42}}},
 		},
 		{
 			name:     "try_table_catch_many_param_throw",
 			m:        testcases.TryTableCatchManyParamThrow.Module,
-			features: api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling,
+			features: api.CoreFeaturesV2 | api.CoreFeatureExceptionHandling,
 			calls:    []callCase{{params: []uint64{1, 2, 3, 4, 5}, expResults: []uint64{1, 2, 3, 4, 5}}},
 		},
 		{
@@ -946,7 +946,7 @@ func TestE2E(t *testing.T) {
 			// param=1: return_call $target (tail call) → returns 99.
 			name:     "try_table_catch_with_return_call",
 			m:        testcases.TryTableCatchWithReturnCall.Module,
-			features: api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling | experimental.CoreFeaturesTailCall,
+			features: api.CoreFeaturesV2 | api.CoreFeatureExceptionHandling | api.CoreFeatureTailCall,
 			calls: []callCase{
 				{params: []uint64{0}, expResults: []uint64{42}}, // throw path: catch handler intact → 42
 				{params: []uint64{1}, expResults: []uint64{99}}, // tail-call path: return_call $target → 99
@@ -1031,7 +1031,7 @@ func TestE2E(t *testing.T) {
 
 func TestE2E_host_functions(t *testing.T) {
 	var buf bytes.Buffer
-	ctx := experimental.WithFunctionListenerFactory(context.Background(), logging.NewLoggingListenerFactory(&buf))
+	ctx := api.WithFunctionListenerFactory(context.Background(), logging.NewLoggingListenerFactory(&buf))
 
 	for _, tc := range []struct {
 		name string
@@ -1345,7 +1345,7 @@ wasm stack trace:
 func TestListener_local(t *testing.T) {
 	var buf bytes.Buffer
 	config := wazy.NewRuntimeConfigCompiler()
-	ctx := experimental.WithFunctionListenerFactory(context.Background(), logging.NewLoggingListenerFactory(&buf))
+	ctx := api.WithFunctionListenerFactory(context.Background(), logging.NewLoggingListenerFactory(&buf))
 
 	r := wazy.NewRuntimeWithConfig(ctx, config)
 	defer func() {
@@ -1373,7 +1373,7 @@ func TestListener_local(t *testing.T) {
 func TestListener_imported(t *testing.T) {
 	var buf bytes.Buffer
 	config := wazy.NewRuntimeConfigCompiler()
-	ctx := experimental.WithFunctionListenerFactory(context.Background(), logging.NewLoggingListenerFactory(&buf))
+	ctx := api.WithFunctionListenerFactory(context.Background(), logging.NewLoggingListenerFactory(&buf))
 
 	r := wazy.NewRuntimeWithConfig(ctx, config)
 	defer func() {
@@ -1424,7 +1424,7 @@ func TestListener_long(t *testing.T) {
 
 	var buf bytes.Buffer
 	config := wazy.NewRuntimeConfigCompiler()
-	ctx := experimental.WithFunctionListenerFactory(context.Background(), logging.NewLoggingListenerFactory(&buf))
+	ctx := api.WithFunctionListenerFactory(context.Background(), logging.NewLoggingListenerFactory(&buf))
 
 	r := wazy.NewRuntimeWithConfig(ctx, config)
 	defer func() {
@@ -1474,7 +1474,7 @@ func TestListener_long_as_is(t *testing.T) {
 
 	var buf bytes.Buffer
 	config := wazy.NewRuntimeConfigCompiler()
-	ctx := experimental.WithFunctionListenerFactory(context.Background(), logging.NewLoggingListenerFactory(&buf))
+	ctx := api.WithFunctionListenerFactory(context.Background(), logging.NewLoggingListenerFactory(&buf))
 
 	r := wazy.NewRuntimeWithConfig(ctx, config)
 	defer func() {
@@ -1523,7 +1523,7 @@ func TestListener_long_many_consts(t *testing.T) {
 
 	var buf bytes.Buffer
 	config := wazy.NewRuntimeConfigCompiler()
-	ctx := experimental.WithFunctionListenerFactory(context.Background(), logging.NewLoggingListenerFactory(&buf))
+	ctx := api.WithFunctionListenerFactory(context.Background(), logging.NewLoggingListenerFactory(&buf))
 
 	r := wazy.NewRuntimeWithConfig(ctx, config)
 	defer func() {

@@ -6,11 +6,10 @@ import (
 	"io/fs"
 	"syscall"
 
-	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
 	"github.com/samyfodil/wazy/sys"
 )
 
-func inoFromFileInfo(_ string, info fs.FileInfo) (sys.Inode, experimentalsys.Errno) {
+func inoFromFileInfo(_ string, info fs.FileInfo) (sys.Inode, sys.Errno) {
 	switch v := info.Sys().(type) {
 	case *sys.Stat_t:
 		return v.Ino, 0

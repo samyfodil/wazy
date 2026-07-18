@@ -5,10 +5,10 @@ import (
 	"io/fs"
 	"net"
 
-	"github.com/samyfodil/wazy/experimental/sys"
 	"github.com/samyfodil/wazy/internal/descriptor"
 	socketapi "github.com/samyfodil/wazy/internal/sock"
 	"github.com/samyfodil/wazy/internal/sysfs"
+	"github.com/samyfodil/wazy/sys"
 )
 
 const (

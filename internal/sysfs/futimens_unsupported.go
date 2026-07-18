@@ -2,9 +2,7 @@
 
 package sysfs
 
-import (
-	"github.com/samyfodil/wazy/experimental/sys"
-)
+import "github.com/samyfodil/wazy/sys"
 
 func utimens(path string, atim, mtim int64) sys.Errno {
 	return chtimes(path, atim, mtim)

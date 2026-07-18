@@ -10,7 +10,6 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
 	"github.com/samyfodil/wazy/internal/testing/nodiff"
 	"github.com/samyfodil/wazy/internal/wasm"
@@ -117,7 +116,7 @@ func test_signal_stack() {
 		},
 	})
 	ctx := context.Background()
-	config := wazy.NewRuntimeConfigCompiler().WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesTailCall)
+	config := wazy.NewRuntimeConfigCompiler().WithCoreFeatures(api.CoreFeaturesV2 | api.CoreFeatureTailCall)
 
 	r := wazy.NewRuntimeWithConfig(ctx, config)
 	module, err := r.Instantiate(ctx, bin)

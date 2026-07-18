@@ -8,7 +8,6 @@ import (
 	"syscall"
 	"unsafe"
 
-	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
 	"github.com/samyfodil/wazy/sys"
 )
 
@@ -109,7 +108,7 @@ const (
 // A zero Errno is success. Notably, unlike os.File on Linux, this never
 // returns io.EOF: like the rest of this package's Readdir implementations,
 // running out of entries just yields a shorter (possibly empty) slice.
-func (f *osFile) readdirGetdents(n int) (dirents []experimentalsys.Dirent, errno experimentalsys.Errno) {
+func (f *osFile) readdirGetdents(n int) (dirents []sys.Dirent, errno sys.Errno) {
 	if f.closed {
 		// os.File.Readdir (the non-Linux path) returns EBADF after Close via
 		// os.File's own closed guard, never touching the raw descriptor. The
@@ -118,7 +117,7 @@ func (f *osFile) readdirGetdents(n int) (dirents []experimentalsys.Dirent, errno
 		// here to preserve that behavior and avoid reading an unrelated fd.
 		// (f.direntsEOF may also be stale-true from a pre-Close drain, which
 		// would otherwise short-circuit to a bogus empty success.)
-		return nil, experimentalsys.EBADF
+		return nil, sys.EBADF
 	}
 
 	readAll := n <= 0
@@ -154,7 +153,7 @@ func (f *osFile) readdirGetdents(n int) (dirents []experimentalsys.Dirent, errno
 // the result into f.bufferedDirents, growing/reusing f.direntBuf as needed.
 // It sets f.direntsEOF once the underlying directory is fully drained (a
 // zero-length read).
-func (f *osFile) fillBufferedDirents() experimentalsys.Errno {
+func (f *osFile) fillBufferedDirents() sys.Errno {
 	f.acquireDirentBuf()
 
 	// Note: this uses f.fd directly, the same raw descriptor already cached
@@ -163,7 +162,7 @@ func (f *osFile) fillBufferedDirents() experimentalsys.Errno {
 	// (redundantly) force the descriptor back into blocking mode.
 	n, err := syscall.ReadDirent(int(f.fd), f.direntBuf)
 	if err != nil {
-		return experimentalsys.UnwrapOSError(err)
+		return sys.UnwrapOSError(err)
 	}
 	if n <= 0 {
 		f.direntsEOF = true
@@ -183,7 +182,7 @@ func (f *osFile) fillBufferedDirents() experimentalsys.Errno {
 // os.File.Readdir does (those are synthesized separately by
 // internal/sys.DirentCache). dirPath is the directory's real path, used
 // only to lstat entries whose d_type is DT_UNKNOWN.
-func parseDirents(buf []byte, dirPath string, dst []experimentalsys.Dirent) ([]experimentalsys.Dirent, experimentalsys.Errno) {
+func parseDirents(buf []byte, dirPath string, dst []sys.Dirent) ([]sys.Dirent, sys.Errno) {
 	for len(buf) > 0 {
 		if uintptr(len(buf)) < direntNameOff {
 			break // truncated record: shouldn't happen, but don't panic.
@@ -223,7 +222,7 @@ func parseDirents(buf []byte, dirPath string, dst []experimentalsys.Dirent) ([]e
 			// does via its own direntType/newUnixDirent lazy-stat path.
 			st, lerrno := lstat(path.Join(dirPath, name))
 			if lerrno != 0 {
-				if lerrno == experimentalsys.ENOENT {
+				if lerrno == sys.ENOENT {
 					// The file disappeared between getdents64 and lstat;
 					// skip it, the same way os.File.Readdir does.
 					continue
@@ -233,7 +232,7 @@ func parseDirents(buf []byte, dirPath string, dst []experimentalsys.Dirent) ([]e
 			typ = st.Mode.Type()
 		}
 
-		dst = append(dst, experimentalsys.Dirent{Name: name, Ino: sys.Inode(ino), Type: typ})
+		dst = append(dst, sys.Dirent{Name: name, Ino: sys.Inode(ino), Type: typ})
 	}
 	return dst, 0
 }
@@ -258,7 +257,7 @@ func indexNUL(b []byte) int {
 
 // direntTypeToFileMode converts a getdents64 d_type value (the DT_*
 // constants in the syscall package) to the fs.FileMode bits used by
-// experimentalsys.Dirent.Type. This mirrors the mapping the Go runtime
+// sys.Dirent.Type. This mirrors the mapping the Go runtime
 // uses internally to implement os.DirEntry.Type() (see os.direntType in
 // $GOROOT/src/os/dirent_linux.go), which is also what the pre-existing
 // FileInfo-based path here ends up producing via info.Mode().Type().

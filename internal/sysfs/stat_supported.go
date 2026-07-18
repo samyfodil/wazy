@@ -9,7 +9,6 @@ import (
 	"io/fs"
 	"os"
 
-	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
 	"github.com/samyfodil/wazy/sys"
 )
 
@@ -19,22 +18,22 @@ import (
 // Note: this is only used in tests
 const dirNlinkIncludesDot = true
 
-func lstat(path string) (sys.Stat_t, experimentalsys.Errno) {
+func lstat(path string) (sys.Stat_t, sys.Errno) {
 	if info, err := os.Lstat(path); err != nil {
-		return sys.Stat_t{}, experimentalsys.UnwrapOSError(err)
+		return sys.Stat_t{}, sys.UnwrapOSError(err)
 	} else {
 		return sys.NewStat_t(info), 0
 	}
 }
 
-func stat(path string) (sys.Stat_t, experimentalsys.Errno) {
+func stat(path string) (sys.Stat_t, sys.Errno) {
 	if info, err := os.Stat(path); err != nil {
-		return sys.Stat_t{}, experimentalsys.UnwrapOSError(err)
+		return sys.Stat_t{}, sys.UnwrapOSError(err)
 	} else {
 		return sys.NewStat_t(info), 0
 	}
 }
 
-func statFile(f fs.File) (sys.Stat_t, experimentalsys.Errno) {
+func statFile(f fs.File) (sys.Stat_t, sys.Errno) {
 	return defaultStatFile(f)
 }

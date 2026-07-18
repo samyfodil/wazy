@@ -2,7 +2,7 @@
 
 package sysfs
 
-import "github.com/samyfodil/wazy/experimental/sys"
+import "github.com/samyfodil/wazy/sys"
 
 const supportedSyscallOflag = sys.Oflag(0)
 

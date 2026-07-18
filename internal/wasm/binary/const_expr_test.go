@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/internal/wasm"
 )
@@ -83,7 +82,7 @@ func TestDecodeConstantExpression(t *testing.T) {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
 			var actual wasm.ConstantExpression
 			_, err := decodeConstantExpression(tc.in, 0,
-				api.CoreFeatureBulkMemoryOperations|api.CoreFeatureSIMD|experimental.CoreFeaturesExtendedConst, &actual)
+				api.CoreFeatureBulkMemoryOperations|api.CoreFeatureSIMD|api.CoreFeatureExtendedConst, &actual)
 			require.NoError(t, err)
 			require.Equal(t, tc.exp, actual)
 		})

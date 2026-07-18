@@ -283,12 +283,12 @@ func (m *ModuleInstance) ExportedGlobal(name string) api.Global {
 	return constantGlobal{g: g}
 }
 
-// NumGlobal implements experimental.InternalModule.
+// NumGlobal implements api.InternalModule.
 func (m *ModuleInstance) NumGlobal() int {
 	return len(m.Globals)
 }
 
-// Global implements experimental.InternalModule.
+// Global implements api.InternalModule.
 func (m *ModuleInstance) Global(idx int) api.Global {
 	return constantGlobal{g: m.Globals[idx]}
 }

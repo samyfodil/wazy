@@ -5,7 +5,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/samyfodil/wazy/experimental/sys"
+	"github.com/samyfodil/wazy/sys"
 )
 
 func TestEqualErrno(t *testing.T) {

@@ -7,7 +7,6 @@ import (
 	"unsafe"
 
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
 	"github.com/samyfodil/wazy/internal/internalapi"
 	"github.com/samyfodil/wazy/internal/wasm"
@@ -25,7 +24,7 @@ type (
 		opaque                 moduleContextOpaque
 		localFunctionInstances []*functionInstance
 		importedFunctions      []importedFunction
-		listeners              []experimental.FunctionListener
+		listeners              []api.FunctionListener
 	}
 
 	functionInstance struct {

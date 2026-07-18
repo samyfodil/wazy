@@ -3,28 +3,27 @@ package proxy
 import (
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
-	"github.com/samyfodil/wazy/experimental/logging"
 	"github.com/samyfodil/wazy/internal/leb128"
 	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
 	"github.com/samyfodil/wazy/internal/wasm"
+	"github.com/samyfodil/wazy/logging"
 )
 
 const proxyModuleName = "internal/testing/proxy/proxy.go"
 
 // NewLoggingListenerFactory is like logging.NewHostLoggingListenerFactory,
 // except it skips logging proxying functions from NewModuleBinary.
-func NewLoggingListenerFactory(writer logging.Writer, scopes logging.LogScopes) experimental.FunctionListenerFactory {
+func NewLoggingListenerFactory(writer logging.Writer, scopes logging.LogScopes) api.FunctionListenerFactory {
 	return &loggingListenerFactory{logging.NewHostLoggingListenerFactory(writer, scopes)}
 }
 
 type loggingListenerFactory struct {
-	delegate experimental.FunctionListenerFactory
+	delegate api.FunctionListenerFactory
 }
 
 // NewFunctionListener implements the same method as documented on
-// experimental.FunctionListener.
-func (f *loggingListenerFactory) NewFunctionListener(fnd api.FunctionDefinition) experimental.FunctionListener {
+// api.FunctionListener.
+func (f *loggingListenerFactory) NewFunctionListener(fnd api.FunctionDefinition) api.FunctionListener {
 	if fnd.ModuleName() == proxyModuleName {
 		return nil // don't log proxy stuff
 	}

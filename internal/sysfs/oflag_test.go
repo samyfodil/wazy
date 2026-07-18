@@ -4,8 +4,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/samyfodil/wazy/experimental/sys"
 	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/sys"
 )
 
 // Test_toOsOpenFlag doesn't use subtests to reduce volume of verbose output,

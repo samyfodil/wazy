@@ -4,20 +4,20 @@ import (
 	"syscall"
 	"unsafe"
 
-	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
+	"github.com/samyfodil/wazy/sys"
 )
 
 const _UTIME_OMIT = -2
 
-func utimens(path string, atim, mtim int64) experimentalsys.Errno {
+func utimens(path string, atim, mtim int64) sys.Errno {
 	times := timesToTimespecs(atim, mtim)
 	if times == nil {
 		return 0
 	}
-	return experimentalsys.UnwrapOSError(syscall.UtimesNano(path, times[:]))
+	return sys.UnwrapOSError(syscall.UtimesNano(path, times[:]))
 }
 
-func futimens(fd uintptr, atim, mtim int64) experimentalsys.Errno {
+func futimens(fd uintptr, atim, mtim int64) sys.Errno {
 	times := timesToTimespecs(atim, mtim)
 	if times == nil {
 		return 0
@@ -26,7 +26,7 @@ func futimens(fd uintptr, atim, mtim int64) experimentalsys.Errno {
 
 	// Warning: futimens only exists since High Sierra (10.13).
 	_, _, e1 := syscall_syscall6(libc_futimens_trampoline_addr, fd, uintptr(_p0), 0, 0, 0, 0)
-	return experimentalsys.UnwrapOSError(e1)
+	return sys.UnwrapOSError(e1)
 }
 
 // libc_futimens_trampoline_addr is the address of the

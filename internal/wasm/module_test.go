@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/leb128"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/internal/u32"
@@ -1055,7 +1054,7 @@ func TestModule_declaredFunctionIndexes(t *testing.T) {
 	for _, tt := range tests {
 		tc := tt
 		t.Run(tc.name, func(t *testing.T) {
-			actual, err := tc.mod.declaredFunctionIndexes(api.CoreFeaturesV2 | experimental.CoreFeaturesExtendedConst)
+			actual, err := tc.mod.declaredFunctionIndexes(api.CoreFeaturesV2 | api.CoreFeatureExtendedConst)
 			if tc.expErr != "" {
 				require.EqualError(t, err, tc.expErr)
 			} else {
@@ -1067,7 +1066,7 @@ func TestModule_declaredFunctionIndexes(t *testing.T) {
 }
 
 func TestModule_AssignModuleID(t *testing.T) {
-	getID := func(bin []byte, lsns []experimental.FunctionListener, withEnsureTermination bool) ModuleID {
+	getID := func(bin []byte, lsns []api.FunctionListener, withEnsureTermination bool) ModuleID {
 		m := Module{}
 		m.AssignModuleID(bin, lsns, withEnsureTermination, 0)
 		return m.ID
@@ -1080,60 +1079,60 @@ func TestModule_AssignModuleID(t *testing.T) {
 	for i, tc := range []struct {
 		bin                   []byte
 		withEnsureTermination bool
-		listeners             []experimental.FunctionListener
+		listeners             []api.FunctionListener
 	}{
 		{bin: []byte{1, 2, 3}, withEnsureTermination: false},
 		{bin: []byte{1, 2, 3}, withEnsureTermination: true},
 		{
 			bin:                   []byte{1, 2, 3},
-			listeners:             []experimental.FunctionListener{ml},
+			listeners:             []api.FunctionListener{ml},
 			withEnsureTermination: false,
 		},
 		{
 			bin:                   []byte{1, 2, 3},
-			listeners:             []experimental.FunctionListener{ml},
+			listeners:             []api.FunctionListener{ml},
 			withEnsureTermination: true,
 		},
 		{
 			bin:                   []byte{1, 2, 3},
-			listeners:             []experimental.FunctionListener{nil, ml},
+			listeners:             []api.FunctionListener{nil, ml},
 			withEnsureTermination: true,
 		},
 		{
 			bin:                   []byte{1, 2, 3},
-			listeners:             []experimental.FunctionListener{ml, ml},
+			listeners:             []api.FunctionListener{ml, ml},
 			withEnsureTermination: true,
 		},
 		{bin: []byte{1, 2, 3, 4}, withEnsureTermination: false},
 		{bin: []byte{1, 2, 3, 4}, withEnsureTermination: true},
 		{
 			bin:                   []byte{1, 2, 3, 4},
-			listeners:             []experimental.FunctionListener{ml},
+			listeners:             []api.FunctionListener{ml},
 			withEnsureTermination: false,
 		},
 		{
 			bin:                   []byte{1, 2, 3, 4},
-			listeners:             []experimental.FunctionListener{ml},
+			listeners:             []api.FunctionListener{ml},
 			withEnsureTermination: true,
 		},
 		{
 			bin:                   []byte{1, 2, 3, 4},
-			listeners:             []experimental.FunctionListener{nil},
+			listeners:             []api.FunctionListener{nil},
 			withEnsureTermination: true,
 		},
 		{
 			bin:                   []byte{1, 2, 3, 4},
-			listeners:             []experimental.FunctionListener{nil, ml},
+			listeners:             []api.FunctionListener{nil, ml},
 			withEnsureTermination: true,
 		},
 		{
 			bin:                   []byte{1, 2, 3, 4},
-			listeners:             []experimental.FunctionListener{ml, ml},
+			listeners:             []api.FunctionListener{ml, ml},
 			withEnsureTermination: true,
 		},
 		{
 			bin:                   []byte{1, 2, 3, 4},
-			listeners:             []experimental.FunctionListener{ml, ml},
+			listeners:             []api.FunctionListener{ml, ml},
 			withEnsureTermination: false,
 		},
 	} {
@@ -1146,7 +1145,7 @@ func TestModule_AssignModuleID(t *testing.T) {
 
 type mockListener struct{}
 
-func (m mockListener) Before(context.Context, api.Module, api.FunctionDefinition, []uint64, experimental.StackIterator) {
+func (m mockListener) Before(context.Context, api.Module, api.FunctionDefinition, []uint64, api.StackIterator) {
 }
 
 func (m mockListener) After(context.Context, api.Module, api.FunctionDefinition, []uint64) {}

@@ -9,7 +9,6 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
-	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
 	"github.com/samyfodil/wazy/internal/sys"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/internal/wasip1"
@@ -161,7 +160,7 @@ func Test_pollOneoff_Stdin(t *testing.T) {
 		name                                   string
 		in, out, nsubscriptions, resultNevents uint32
 		mem                                    []byte // at offset in
-		stdin                                  experimentalsys.File
+		stdin                                  sysapi.File
 		expectedErrno                          wasip1.Errno
 		expectedMem                            []byte // at offset out
 		expectedLog                            string
@@ -442,7 +441,7 @@ func Test_pollOneoff_Stdin(t *testing.T) {
 	}
 }
 
-func setStdin(t *testing.T, mod api.Module, stdin experimentalsys.File) {
+func setStdin(t *testing.T, mod api.Module, stdin sysapi.File) {
 	fsc := mod.(*wasm.ModuleInstance).Sys.FS()
 	f, ok := fsc.LookupFile(sys.FdStdin)
 	require.True(t, ok)
@@ -596,15 +595,15 @@ func Test_pollOneoff_NonStdinPollUnsupported(t *testing.T) {
 
 	tests := []struct {
 		name string
-		file experimentalsys.File
+		file sysapi.File
 	}{
 		{
 			name: "file does not implement Pollable",
-			file: experimentalsys.UnimplementedFile{},
+			file: sysapi.UnimplementedFile{},
 		},
 		{
 			name: "file Poll returns ENOSYS",
-			file: &pollableFile{errno: experimentalsys.ENOSYS},
+			file: &pollableFile{errno: sysapi.ENOSYS},
 		},
 	}
 
@@ -761,7 +760,7 @@ func requirePollOpenFile(t *testing.T, mod api.Module, name string) int32 {
 	fsc := mod.(*wasm.ModuleInstance).Sys.FS()
 	preopen, ok := fsc.LookupFile(sys.FdPreopen)
 	require.True(t, ok)
-	fd, errno := fsc.OpenFile(preopen.FS, name, experimentalsys.O_RDONLY, 0)
+	fd, errno := fsc.OpenFile(preopen.FS, name, sysapi.O_RDONLY, 0)
 	require.EqualErrno(t, 0, errno)
 	return fd
 }
@@ -824,7 +823,7 @@ var fdReadSub = fdReadSubFd(byte(sys.FdStdin))
 type ttyStat struct{}
 
 // Stat implements the same method as documented on sys.File
-func (ttyStat) Stat() (sysapi.Stat_t, experimentalsys.Errno) {
+func (ttyStat) Stat() (sysapi.Stat_t, sysapi.Errno) {
 	return sysapi.Stat_t{
 		Mode:  fs.ModeDevice | fs.ModeCharDevice,
 		Nlink: 1,
@@ -842,9 +841,9 @@ type neverReadyTtyStdinFile struct {
 }
 
 // Poll implements the same method as documented on sys.File
-func (neverReadyTtyStdinFile) Poll(flag experimentalsys.Pflag, timeoutMillis int32) (ready bool, errno experimentalsys.Errno) {
-	if flag != experimentalsys.POLLIN {
-		return false, experimentalsys.ENOTSUP
+func (neverReadyTtyStdinFile) Poll(flag sysapi.Pflag, timeoutMillis int32) (ready bool, errno sysapi.Errno) {
+	if flag != sysapi.POLLIN {
+		return false, sysapi.ENOTSUP
 	}
 	switch {
 	case timeoutMillis <= 0:
@@ -861,26 +860,26 @@ type pollStdinFile struct {
 }
 
 // Poll implements the same method as documented on sys.File
-func (p *pollStdinFile) Poll(flag experimentalsys.Pflag, timeoutMillis int32) (ready bool, errno experimentalsys.Errno) {
-	if flag != experimentalsys.POLLIN {
-		return false, experimentalsys.ENOTSUP
+func (p *pollStdinFile) Poll(flag sysapi.Pflag, timeoutMillis int32) (ready bool, errno sysapi.Errno) {
+	if flag != sysapi.POLLIN {
+		return false, sysapi.ENOTSUP
 	}
 	return p.ready, 0
 }
 
 type pollableFile struct {
-	experimentalsys.UnimplementedFile
+	sysapi.UnimplementedFile
 
 	ready    bool
-	errno    experimentalsys.Errno
+	errno    sysapi.Errno
 	sleep    time.Duration
 	timeouts []int32
 }
 
-// Poll implements the same method as documented on experimentalsys.Pollable
-func (p *pollableFile) Poll(flag experimentalsys.Pflag, timeoutMillis int32) (ready bool, errno experimentalsys.Errno) {
-	if flag != experimentalsys.POLLIN {
-		return false, experimentalsys.ENOTSUP
+// Poll implements the same method as documented on sysapi.Pollable
+func (p *pollableFile) Poll(flag sysapi.Pflag, timeoutMillis int32) (ready bool, errno sysapi.Errno) {
+	if flag != sysapi.POLLIN {
+		return false, sysapi.ENOTSUP
 	}
 	p.timeouts = append(p.timeouts, timeoutMillis)
 	if p.sleep > 0 {

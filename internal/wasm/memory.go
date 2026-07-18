@@ -11,7 +11,6 @@ import (
 	"unsafe"
 
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/internalapi"
 	"github.com/samyfodil/wazy/internal/wasmruntime"
 )
@@ -62,7 +61,7 @@ type MemoryInstance struct {
 	// ownerModuleEngine is the module engine that owns this memory instance.
 	ownerModuleEngine ModuleEngine
 
-	expBuffer experimental.LinearMemory
+	expBuffer api.LinearMemory
 
 	// importers counts the live ModuleInstances -- other than the owner --
 	// that have imported this memory via cross-module resolution (see store.go's
@@ -91,13 +90,13 @@ type MemoryInstance struct {
 }
 
 // NewMemoryInstance creates a new instance based on the parameters in the SectionIDMemory.
-func NewMemoryInstance(memSec *Memory, allocator experimental.MemoryAllocator, moduleEngine ModuleEngine) *MemoryInstance {
+func NewMemoryInstance(memSec *Memory, allocator api.MemoryAllocator, moduleEngine ModuleEngine) *MemoryInstance {
 	minBytes := MemoryPagesToBytesNum(memSec.Min)
 	capBytes := MemoryPagesToBytesNum(memSec.Cap)
 	maxBytes := MemoryPagesToBytesNum(memSec.Max)
 
 	var buffer []byte
-	var expBuffer experimental.LinearMemory
+	var expBuffer api.LinearMemory
 	if allocator != nil {
 		expBuffer = allocator.Allocate(capBytes, maxBytes)
 		buffer = expBuffer.Reallocate(minBytes)

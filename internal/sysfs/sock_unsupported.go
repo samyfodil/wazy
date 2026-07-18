@@ -6,8 +6,8 @@ import (
 	"net"
 	"syscall"
 
-	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
 	socketapi "github.com/samyfodil/wazy/internal/sock"
+	"github.com/samyfodil/wazy/sys"
 )
 
 // MSG_PEEK is a filler value.
@@ -22,28 +22,28 @@ type unsupportedSockFile struct {
 }
 
 // Accept implements the same method as documented on socketapi.TCPSock
-func (f *unsupportedSockFile) Accept() (socketapi.TCPConn, experimentalsys.Errno) {
-	return nil, experimentalsys.ENOSYS
+func (f *unsupportedSockFile) Accept() (socketapi.TCPConn, sys.Errno) {
+	return nil, sys.ENOSYS
 }
 
-func _pollSock(conn syscall.Conn, flag experimentalsys.Pflag, timeoutMillis int32) (bool, experimentalsys.Errno) {
-	return false, experimentalsys.ENOTSUP
+func _pollSock(conn syscall.Conn, flag sys.Pflag, timeoutMillis int32) (bool, sys.Errno) {
+	return false, sys.ENOTSUP
 }
 
-func setNonblockSocket(fd uintptr, enabled bool) experimentalsys.Errno {
-	return experimentalsys.ENOTSUP
+func setNonblockSocket(fd uintptr, enabled bool) sys.Errno {
+	return sys.ENOTSUP
 }
 
-func readSocket(fd uintptr, buf []byte) (int, experimentalsys.Errno) {
-	return -1, experimentalsys.ENOTSUP
+func readSocket(fd uintptr, buf []byte) (int, sys.Errno) {
+	return -1, sys.ENOTSUP
 }
 
-func writeSocket(fd uintptr, buf []byte) (int, experimentalsys.Errno) {
-	return -1, experimentalsys.ENOTSUP
+func writeSocket(fd uintptr, buf []byte) (int, sys.Errno) {
+	return -1, sys.ENOTSUP
 }
 
-func recvfrom(fd uintptr, buf []byte, flags int32) (n int, errno experimentalsys.Errno) {
-	return -1, experimentalsys.ENOTSUP
+func recvfrom(fd uintptr, buf []byte, flags int32) (n int, errno sys.Errno) {
+	return -1, sys.ENOTSUP
 }
 
 // syscallConnControl extracts a syscall.RawConn from the given syscall.Conn and applies
@@ -52,17 +52,17 @@ func recvfrom(fd uintptr, buf []byte, flags int32) (n int, errno experimentalsys
 // syscallConnControl streamlines the pattern of extracting the syscall.Rawconn,
 // invoking its syscall.RawConn.Control method, then handling properly the errors that may occur
 // within fn or returned by syscall.RawConn.Control itself.
-func syscallConnControl(conn syscall.Conn, fn func(fd uintptr) (int, experimentalsys.Errno)) (n int, errno experimentalsys.Errno) {
-	return -1, experimentalsys.ENOTSUP
+func syscallConnControl(conn syscall.Conn, fn func(fd uintptr) (int, sys.Errno)) (n int, errno sys.Errno) {
+	return -1, sys.ENOTSUP
 }
 
 // Accept implements the same method as documented on socketapi.TCPSock
-func (f *tcpListenerFile) Accept() (socketapi.TCPConn, experimentalsys.Errno) {
-	return nil, experimentalsys.ENOSYS
+func (f *tcpListenerFile) Accept() (socketapi.TCPConn, sys.Errno) {
+	return nil, sys.ENOSYS
 }
 
-// Shutdown implements the same method as documented on experimentalsys.Conn
-func (f *tcpConnFile) Shutdown(how int) experimentalsys.Errno {
+// Shutdown implements the same method as documented on sys.Conn
+func (f *tcpConnFile) Shutdown(how int) sys.Errno {
 	// FIXME: can userland shutdown listeners?
 	var err error
 	switch how {
@@ -73,7 +73,7 @@ func (f *tcpConnFile) Shutdown(how int) experimentalsys.Errno {
 	case socketapi.SHUT_RDWR:
 		return f.close()
 	default:
-		return experimentalsys.EINVAL
+		return sys.EINVAL
 	}
-	return experimentalsys.UnwrapOSError(err)
+	return sys.UnwrapOSError(err)
 }

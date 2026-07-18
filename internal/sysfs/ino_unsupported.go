@@ -5,11 +5,10 @@ package sysfs
 import (
 	"io/fs"
 
-	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
 	"github.com/samyfodil/wazy/sys"
 )
 
-func inoFromFileInfo(_ string, info fs.FileInfo) (sys.Inode, experimentalsys.Errno) {
+func inoFromFileInfo(_ string, info fs.FileInfo) (sys.Inode, sys.Errno) {
 	if v, ok := info.Sys().(*sys.Stat_t); ok {
 		return v.Ino, 0
 	}

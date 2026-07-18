@@ -147,6 +147,30 @@ const (
 	// Update experimental/features.go when adding elements here.
 )
 
+// The following features are defined as standalone constants (not part of
+// the iota block above) so that adding them does not change the bit values
+// of features defined later in the iota block. Bit CoreFeatureSIMD<<1 is
+// reserved for experimental.CoreFeaturesThreads, which remains experimental.
+
+// CoreFeatureTailCall enables tail call instructions ("tail-call").
+const CoreFeatureTailCall CoreFeatures = CoreFeatureSIMD << 2
+
+// CoreFeatureExtendedConst enables extended constant expressions.
+//   - Enables i32.add/sub/mul and i64.add/sub/mul in constant expressions.
+//   - Enables references to any previous global index in constant expressions,
+//     instead of just imported globals.
+//
+// See https://github.com/WebAssembly/extended-const for further details.
+const CoreFeatureExtendedConst CoreFeatures = CoreFeatureSIMD << 3
+
+// CoreFeatureExceptionHandling enables exception handling instructions.
+// See https://github.com/WebAssembly/exception-handling for further details.
+const CoreFeatureExceptionHandling CoreFeatures = CoreFeatureSIMD << 4
+
+// CoreFeatureTypedFunctionReferences enables typed function references.
+// See https://github.com/WebAssembly/function-references for further details.
+const CoreFeatureTypedFunctionReferences CoreFeatures = CoreFeatureSIMD << 5
+
 // SetEnabled enables or disables the feature or group of features.
 func (f CoreFeatures) SetEnabled(feature CoreFeatures, val bool) CoreFeatures {
 	if val {
@@ -209,19 +233,15 @@ func featureName(f CoreFeatures) string {
 	case CoreFeatureSIMD:
 		// match https://github.com/WebAssembly/spec/blob/wg-2.0.draft1/proposals/simd/SIMD.md
 		return "simd"
-	// The cases below cover features defined in the experimental package
-	// (experimental.CoreFeaturesThreads, CoreFeaturesTailCall,
-	// experimental.CoreFeaturesExtendedConst, experimental.CoreFeaturesExceptionHandling).
-	// They cannot be imported here (circular dependency), so we match by value.
-	case CoreFeatureSIMD << 1: // experimental.CoreFeaturesThreads
+	case CoreFeatureSIMD << 1: // experimental.CoreFeaturesThreads (still experimental)
 		return "threads"
-	case CoreFeatureSIMD << 2: // experimental.CoreFeaturesTailCall
+	case CoreFeatureTailCall:
 		return "tail-call"
-	case CoreFeatureSIMD << 3: // experimental.CoreFeaturesExtendedConst
+	case CoreFeatureExtendedConst:
 		return "extended-const"
-	case CoreFeatureSIMD << 4: // experimental.CoreFeaturesExceptionHandling
+	case CoreFeatureExceptionHandling:
 		return "exception-handling"
-	case CoreFeatureSIMD << 5: // experimental.CoreFeaturesTypedFunctionReferences
+	case CoreFeatureTypedFunctionReferences:
 		return "typed-function-references"
 	}
 	return ""

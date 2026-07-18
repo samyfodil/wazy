@@ -13,7 +13,6 @@ import (
 	"unsafe"
 
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/engine/native/backend"
 	"github.com/samyfodil/wazy/internal/engine/native/frontend"
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
@@ -112,7 +111,7 @@ type (
 		// (= interval-1) per callEngine so the amortized check's mask is a runtime
 		// value rather than a baked constant, allowing per-run/per-loop retuning.
 		interruptCheckInterval    uint64
-		listeners                 []experimental.FunctionListener
+		listeners                 []api.FunctionListener
 		listenerBeforeTrampolines []*byte
 		listenerAfterTrampolines  []*byte
 
@@ -173,7 +172,7 @@ func NewEngine(ctx context.Context, _ api.CoreFeatures, fc filecache.Cache) wasm
 }
 
 // HasCompiledModule implements wasm.Engine.
-func (e *engine) HasCompiledModule(module *wasm.Module, listeners []experimental.FunctionListener, ensureTermination bool) (bool, error) {
+func (e *engine) HasCompiledModule(module *wasm.Module, listeners []api.FunctionListener, ensureTermination bool) (bool, error) {
 	if nativeapi.PerfMapEnabled {
 		nativeapi.PerfMap.Lock()
 		defer nativeapi.PerfMap.Unlock()
@@ -183,7 +182,7 @@ func (e *engine) HasCompiledModule(module *wasm.Module, listeners []experimental
 }
 
 // CompileModule implements wasm.Engine.
-func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listeners []experimental.FunctionListener, ensureTermination bool) (err error) {
+func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listeners []api.FunctionListener, ensureTermination bool) (err error) {
 	if nativeapi.PerfMapEnabled {
 		nativeapi.PerfMap.Lock()
 		defer nativeapi.PerfMap.Unlock()
@@ -265,7 +264,7 @@ func (exec *executables) compileEntryPreambles(m *wasm.Module, machine backend.M
 	}
 }
 
-func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listeners []experimental.FunctionListener, ensureTermination bool) (*compiledModule, error) {
+func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listeners []api.FunctionListener, ensureTermination bool) (*compiledModule, error) {
 	if module.IsHostModule {
 		return e.compileHostModule(ctx, module, listeners)
 	}
@@ -310,7 +309,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 		indexes = nativeapi.DeterministicCompilationVerifierRandomizeIndexes(ctx)
 	}
 
-	if workers := experimental.GetCompilationWorkers(ctx); workers <= 1 {
+	if workers := api.GetCompilationWorkers(ctx); workers <= 1 {
 		// Compile with a single goroutine.
 		fe := frontend.NewFrontendCompiler(module, ssaBuilder, &cm.offsets, ensureTermination, withListener, needSourceInfo)
 		fe.SetInterruptCheckInterval(interruptCheckInterval)
@@ -730,7 +729,7 @@ func buildEhEntries(pending []frontend.EhPendingEntry, blockOffsets []backend.Co
 	return out
 }
 
-func (e *engine) compileHostModule(ctx context.Context, module *wasm.Module, listeners []experimental.FunctionListener) (*compiledModule, error) {
+func (e *engine) compileHostModule(ctx context.Context, module *wasm.Module, listeners []api.FunctionListener) (*compiledModule, error) {
 	machine := newMachine()
 	be := backend.NewCompiler(ctx, machine, ssa.NewBuilder())
 

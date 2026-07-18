@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 )
 
 // Engine is a Store-scoped mechanism to compile functions declared or imported by a module.
@@ -14,7 +13,7 @@ type Engine interface {
 	Close() (err error)
 
 	// CompileModule implements the same method as documented on wasm.Engine.
-	CompileModule(ctx context.Context, module *Module, listeners []experimental.FunctionListener, ensureTermination bool) error
+	CompileModule(ctx context.Context, module *Module, listeners []api.FunctionListener, ensureTermination bool) error
 
 	// HasCompiledModule reports whether this engine already holds a compiled
 	// artifact for module (identified by module.ID - see Module.AssignModuleID),
@@ -45,7 +44,7 @@ type Engine interface {
 	// This exists so wazy.Runtime.CompileModule can skip the expensive
 	// per-function-body validation pass on a cache hit: see the TRUST MODEL
 	// note at that call site.
-	HasCompiledModule(module *Module, listeners []experimental.FunctionListener, ensureTermination bool) (bool, error)
+	HasCompiledModule(module *Module, listeners []api.FunctionListener, ensureTermination bool) (bool, error)
 
 	// CompiledModuleCount is exported for testing, to track the size of the compilation cache.
 	CompiledModuleCount() uint32

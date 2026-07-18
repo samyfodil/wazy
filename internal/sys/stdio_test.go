@@ -6,18 +6,18 @@ import (
 	"strings"
 	"testing"
 
-	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
 	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/sys"
 )
 
-// pollableReader is a mock io.Reader that implements experimentalsys.Pollable.
+// pollableReader is a mock io.Reader that implements sys.Pollable.
 type pollableReader struct {
 	*strings.Reader
 	pollReady bool
-	pollErrno experimentalsys.Errno
+	pollErrno sys.Errno
 }
 
-func (r *pollableReader) Poll(flag experimentalsys.Pflag, timeoutMillis int32) (bool, experimentalsys.Errno) {
+func (r *pollableReader) Poll(flag sys.Pflag, timeoutMillis int32) (bool, sys.Errno) {
 	return r.pollReady, r.pollErrno
 }
 
@@ -31,20 +31,20 @@ func TestStdinFilePoll_Pollable(t *testing.T) {
 	f := &StdinFile{Reader: pr}
 
 	// When the reader implements Pollable, Poll delegates to it.
-	ready, errno := f.Poll(experimentalsys.POLLIN, timeout)
+	ready, errno := f.Poll(sys.POLLIN, timeout)
 	require.EqualErrno(t, 0, errno)
 	require.True(t, ready)
 
 	// A Pollable reader can also handle POLLOUT.
-	ready, errno = f.Poll(experimentalsys.POLLOUT, timeout)
+	ready, errno = f.Poll(sys.POLLOUT, timeout)
 	require.EqualErrno(t, 0, errno)
 	require.True(t, ready)
 
 	// When the Pollable returns an error, it propagates.
 	pr.pollReady = false
-	pr.pollErrno = experimentalsys.ENOTSUP
-	ready, errno = f.Poll(experimentalsys.POLLIN, timeout)
-	require.EqualErrno(t, experimentalsys.ENOTSUP, errno)
+	pr.pollErrno = sys.ENOTSUP
+	ready, errno = f.Poll(sys.POLLIN, timeout)
+	require.EqualErrno(t, sys.ENOTSUP, errno)
 	require.False(t, ready)
 }
 
@@ -55,13 +55,13 @@ func TestStdinFilePoll_NonPollable(t *testing.T) {
 	f := &StdinFile{Reader: strings.NewReader("data")}
 
 	// POLLIN returns ready because we assume the reader has data.
-	ready, errno := f.Poll(experimentalsys.POLLIN, timeout)
+	ready, errno := f.Poll(sys.POLLIN, timeout)
 	require.EqualErrno(t, 0, errno)
 	require.True(t, ready)
 
 	// POLLOUT is not supported without a Pollable implementation.
-	ready, errno = f.Poll(experimentalsys.POLLOUT, timeout)
-	require.EqualErrno(t, experimentalsys.ENOTSUP, errno)
+	ready, errno = f.Poll(sys.POLLOUT, timeout)
+	require.EqualErrno(t, sys.ENOTSUP, errno)
 	require.False(t, ready)
 }
 

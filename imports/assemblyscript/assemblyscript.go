@@ -35,7 +35,6 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
-	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
 	. "github.com/samyfodil/wazy/internal/assemblyscript"
 	internalsys "github.com/samyfodil/wazy/internal/sys"
 	"github.com/samyfodil/wazy/internal/wasm"
@@ -225,7 +224,7 @@ var traceStderr = traceStdout.WithGoModuleFunc(func(_ context.Context, mod api.M
 //	(import "env" "trace" (func $~lib/builtins/trace (param i32 i32 f64 f64 f64 f64 f64)))
 //
 // See https://github.com/AssemblyScript/assemblyscript/blob/fa14b3b03bd4607efa52aaff3132bea0c03a7989/std/assembly/wasi/index.ts#L61
-func traceTo(mod api.Module, params []uint64, file experimentalsys.File) {
+func traceTo(mod api.Module, params []uint64, file sys.File) {
 	message := uint32(params[0])
 	nArgs := uint32(params[1])
 	arg0 := api.DecodeF64(params[2])

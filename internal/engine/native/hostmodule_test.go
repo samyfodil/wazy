@@ -6,7 +6,6 @@ import (
 	"unsafe"
 
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/internal/wasm"
 )
@@ -70,7 +69,7 @@ func Test_buildHostModuleOpaque(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		m         *wasm.Module
-		listeners []experimental.FunctionListener
+		listeners []api.FunctionListener
 	}{
 		{
 			name: "no listeners",
@@ -91,7 +90,7 @@ func Test_buildHostModuleOpaque(t *testing.T) {
 					{GoFunc: goFn()},
 				},
 			},
-			listeners: make([]experimental.FunctionListener, 50),
+			listeners: make([]api.FunctionListener, 50),
 		},
 	} {
 		tc := tc

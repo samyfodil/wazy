@@ -13,10 +13,10 @@ import (
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/experimental"
-	"github.com/samyfodil/wazy/experimental/logging"
 	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/internal/wasm"
+	"github.com/samyfodil/wazy/logging"
 )
 
 // We haven't had public APIs for referencing all the imported entries from wazy.CompiledModule,
@@ -50,7 +50,7 @@ func RequireNoDiffT(t *testing.T, wasmBin []byte, checkMemory, loggingCheck bool
 
 // RequireNoDiff ensures that the behavior is the same between the compiler and the interpreter for any given binary.
 func RequireNoDiff(wasmBin []byte, checkMemory, loggingCheck bool, requireNoError func(err error)) {
-	const features = api.CoreFeaturesV2 | experimental.CoreFeaturesThreads | experimental.CoreFeaturesTailCall | experimental.CoreFeaturesExtendedConst | experimental.CoreFeaturesExceptionHandling | experimental.CoreFeaturesTypedFunctionReferences
+	const features = api.CoreFeaturesV2 | experimental.CoreFeaturesThreads | api.CoreFeatureTailCall | api.CoreFeatureExtendedConst | api.CoreFeatureExceptionHandling | api.CoreFeatureTypedFunctionReferences
 	compiler := wazy.NewRuntimeWithConfig(context.Background(), wazy.NewRuntimeConfigCompiler().WithCoreFeatures(features))
 	interpreter := wazy.NewRuntimeWithConfig(context.Background(), wazy.NewRuntimeConfigInterpreter().WithCoreFeatures(features))
 	defer compiler.Close(context.Background())
@@ -60,8 +60,8 @@ func RequireNoDiff(wasmBin []byte, checkMemory, loggingCheck bool, requireNoErro
 	var interPreterLoggingBuf, compilerLoggingBuf bytes.Buffer
 	var errorDuringInvocation bool
 	if loggingCheck {
-		interpreterCtx = experimental.WithFunctionListenerFactory(interpreterCtx, logging.NewLoggingListenerFactory(&interPreterLoggingBuf))
-		compilerCtx = experimental.WithFunctionListenerFactory(compilerCtx, logging.NewLoggingListenerFactory(&compilerLoggingBuf))
+		interpreterCtx = api.WithFunctionListenerFactory(interpreterCtx, logging.NewLoggingListenerFactory(&interPreterLoggingBuf))
+		compilerCtx = api.WithFunctionListenerFactory(compilerCtx, logging.NewLoggingListenerFactory(&compilerLoggingBuf))
 		defer func() {
 			if !errorDuringInvocation {
 				if !bytes.Equal(compilerLoggingBuf.Bytes(), interPreterLoggingBuf.Bytes()) {

@@ -6,7 +6,6 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/engine/native/testcases"
 	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
 	"github.com/samyfodil/wazy/internal/testing/require"
@@ -27,7 +26,7 @@ func TestE2E_tail_call_import(t *testing.T) {
 		{"default", wazy.NewRuntimeConfig()},
 	} {
 
-		config := tc.cfg.WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesTailCall)
+		config := tc.cfg.WithCoreFeatures(api.CoreFeaturesV2 | api.CoreFeatureTailCall)
 
 		t.Run(tc.name, func(t *testing.T) {
 			r := wazy.NewRuntimeWithConfig(ctx, config)
@@ -134,7 +133,7 @@ func TestE2E_tail_call_import_indirect(t *testing.T) {
 		{"default", wazy.NewRuntimeConfig()},
 	} {
 
-		config := tc.cfg.WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesTailCall)
+		config := tc.cfg.WithCoreFeatures(api.CoreFeaturesV2 | api.CoreFeatureTailCall)
 
 		t.Run(tc.name, func(t *testing.T) {
 			r := wazy.NewRuntimeWithConfig(ctx, config)

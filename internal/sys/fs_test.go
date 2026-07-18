@@ -10,10 +10,10 @@ import (
 	"testing"
 	gofstest "testing/fstest"
 
-	"github.com/samyfodil/wazy/experimental/sys"
 	"github.com/samyfodil/wazy/internal/sysfs"
 	testfs "github.com/samyfodil/wazy/internal/testing/fs"
 	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/sys"
 )
 
 //go:embed testdata

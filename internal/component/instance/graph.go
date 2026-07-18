@@ -7,7 +7,6 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
 	"github.com/samyfodil/wazy/internal/expctxkeys"
@@ -408,8 +407,8 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	// Chain to a caller-supplied ImportResolver, if any: the graph owns only
 	// its own internal names, so a name it doesn't provide falls through to the
 	// caller's resolver (then the global registry), never shadowing it.
-	parentResolver, _ := ctx.Value(expctxkeys.ImportResolverKey{}).(experimental.ImportResolver)
-	instCtx := experimental.WithImportResolver(ctx, func(name string) api.Module {
+	parentResolver, _ := ctx.Value(expctxkeys.ImportResolverKey{}).(api.ImportResolver)
+	instCtx := api.WithImportResolver(ctx, func(name string) api.Module {
 		if m := keyToInst[name]; m != nil {
 			return m
 		}

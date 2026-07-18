@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samyfodil/wazy/experimental/sys"
 	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/sys"
 )
 
 func TestUtimens(t *testing.T) {

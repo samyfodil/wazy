@@ -2,7 +2,7 @@
 
 package sysfs
 
-import "github.com/samyfodil/wazy/experimental/sys"
+import "github.com/samyfodil/wazy/sys"
 
 // PollReadiness has no batched implementation off linux/darwin: the Windows
 // _poll returns only a ready count, not per-fd revents, so it can't drive the

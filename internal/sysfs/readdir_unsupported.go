@@ -2,9 +2,7 @@
 
 package sysfs
 
-import (
-	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
-)
+import "github.com/samyfodil/wazy/sys"
 
 // direntGetdentsSupported is false on every platform except Linux. See the
 // docs on this constant in readdir_linux.go for why Linux has a dedicated
@@ -15,8 +13,8 @@ const direntGetdentsSupported = false
 // readdirGetdents is never invoked outside Linux, since osFile.Readdir
 // only calls it when direntGetdentsSupported is true. It exists only so
 // osFile.Readdir compiles on every platform.
-func (f *osFile) readdirGetdents(int) ([]experimentalsys.Dirent, experimentalsys.Errno) {
-	return nil, experimentalsys.ENOSYS
+func (f *osFile) readdirGetdents(int) ([]sys.Dirent, sys.Errno) {
+	return nil, sys.ENOSYS
 }
 
 // releaseDirentBuf is a no-op outside Linux: f.direntBuf is always nil on

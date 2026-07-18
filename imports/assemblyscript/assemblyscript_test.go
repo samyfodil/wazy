@@ -14,14 +14,13 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
-	. "github.com/samyfodil/wazy/experimental"
-	"github.com/samyfodil/wazy/experimental/logging"
-	"github.com/samyfodil/wazy/experimental/wazytest"
 	. "github.com/samyfodil/wazy/internal/assemblyscript"
 	"github.com/samyfodil/wazy/internal/testing/proxy"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/internal/u64"
+	"github.com/samyfodil/wazy/logging"
 	"github.com/samyfodil/wazy/sys"
+	"github.com/samyfodil/wazy/wazytest"
 )
 
 type arbitrary struct{}
@@ -428,7 +427,7 @@ func requireProxyModule(t *testing.T, fns FunctionExporter, config wazy.ModuleCo
 	var log bytes.Buffer
 
 	// Set context to one that has an experimental listener
-	ctx := WithFunctionListenerFactory(testCtx,
+	ctx := api.WithFunctionListenerFactory(testCtx,
 		proxy.NewLoggingListenerFactory(&log, scopes))
 
 	r := wazy.NewRuntime(ctx)

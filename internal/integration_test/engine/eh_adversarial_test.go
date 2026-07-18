@@ -22,7 +22,6 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/internal/wasm"
@@ -46,7 +45,7 @@ func runEHAdvBothEngines(t *testing.T, bin []byte, fn string, args []uint64, wan
 		return res[0], true
 	}
 
-	base := api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling
+	base := api.CoreFeaturesV2 | api.CoreFeatureExceptionHandling
 	interpRes, _ := call(wazy.NewRuntimeConfigInterpreter().WithCoreFeatures(base))
 	require.Equal(t, want, interpRes, "interpreter (oracle) result")
 

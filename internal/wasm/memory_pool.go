@@ -33,7 +33,7 @@ import "sync"
 // ownerClosed is set -- see resolveImports and TestMemoryPool_ImportAfterOwnerClosed_Errors).
 //
 // Shared (memSec.IsShared, i.e. the wasm threads proposal's shared memory)
-// and custom-allocator (experimental.MemoryAllocator, tracked via expBuffer)
+// and custom-allocator (api.MemoryAllocator, tracked via expBuffer)
 // memories never go through this pool at all -- see NewMemoryInstance and
 // ensureResourcesClosed, which gate pooling to exactly the plain
 // make([]byte, minBytes, capBytes) case.

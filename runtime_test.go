@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/filecache"
 	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
@@ -265,7 +264,7 @@ func TestRuntime_CompileModule_CacheHitSkipsFunctionBodyValidation(t *testing.T)
 // the FunctionDefinition-building path in CompileModule.
 type nilListenerFactory struct{}
 
-func (nilListenerFactory) NewFunctionListener(api.FunctionDefinition) experimental.FunctionListener {
+func (nilListenerFactory) NewFunctionListener(api.FunctionDefinition) api.FunctionListener {
 	return nil
 }
 
@@ -279,7 +278,7 @@ func (nilListenerFactory) NewFunctionListener(api.FunctionDefinition) experiment
 // keeps the validate-first ordering whenever a factory is present, so such a
 // module must surface a clean validation error, never panic.
 func TestRuntime_CompileModule_ListenerFactoryInvalidModule(t *testing.T) {
-	ctx := experimental.WithFunctionListenerFactory(testCtx, nilListenerFactory{})
+	ctx := api.WithFunctionListenerFactory(testCtx, nilListenerFactory{})
 
 	t.Run("out-of-range function type index", func(t *testing.T) {
 		// Decodes (code count == function count) but func[0]'s type index (5)
@@ -955,13 +954,13 @@ type mockEngine struct {
 }
 
 // HasCompiledModule implements the same method as documented on wasm.Engine.
-func (e *mockEngine) HasCompiledModule(module *wasm.Module, _ []experimental.FunctionListener, _ bool) (bool, error) {
+func (e *mockEngine) HasCompiledModule(module *wasm.Module, _ []api.FunctionListener, _ bool) (bool, error) {
 	e.hasCompiledModuleCalls++
 	return e.precompiledIDs[module.ID], nil
 }
 
 // CompileModule implements the same method as documented on wasm.Engine.
-func (e *mockEngine) CompileModule(_ context.Context, module *wasm.Module, _ []experimental.FunctionListener, _ bool) error {
+func (e *mockEngine) CompileModule(_ context.Context, module *wasm.Module, _ []api.FunctionListener, _ bool) error {
 	e.compileModuleCalls++
 	e.cachedModules[module] = struct{}{}
 	return nil

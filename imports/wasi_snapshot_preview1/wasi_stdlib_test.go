@@ -20,7 +20,6 @@ import (
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
 	experimentalsock "github.com/samyfodil/wazy/experimental/sock"
-	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
 	"github.com/samyfodil/wazy/imports/wasi_snapshot_preview1"
 	"github.com/samyfodil/wazy/internal/fstest"
 	internalsys "github.com/samyfodil/wazy/internal/sys"
@@ -279,7 +278,7 @@ func Test_Poll(t *testing.T) {
 	tests := []struct {
 		name            string
 		args            []string
-		stdin           experimentalsys.File
+		stdin           sys.File
 		expectedOutput  string
 		expectedTimeout time.Duration
 	}{

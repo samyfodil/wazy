@@ -4,18 +4,18 @@ import (
 	"os"
 	"testing"
 
-	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
 	"github.com/samyfodil/wazy/internal/fstest"
 	"github.com/samyfodil/wazy/internal/sys"
 	"github.com/samyfodil/wazy/internal/sysfs"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/internal/wasip1"
+	sysapi "github.com/samyfodil/wazy/sys"
 )
 
 func Test_maxDirents(t *testing.T) {
 	tests := []struct {
 		name                 string
-		dirents              []experimentalsys.Dirent
+		dirents              []sysapi.Dirent
 		bufLen               uint32
 		expectedBufToWrite   uint32
 		expectedDirentCount  int
@@ -107,9 +107,9 @@ func Test_maxDirents(t *testing.T) {
 }
 
 var (
-	testDirents = func() []experimentalsys.Dirent {
+	testDirents = func() []sysapi.Dirent {
 		dPath := "dir"
-		d, errno := sysfs.OpenFSFile(fstest.FS, dPath, experimentalsys.O_RDONLY, 0)
+		d, errno := sysfs.OpenFSFile(fstest.FS, dPath, sysapi.O_RDONLY, 0)
 		if errno != 0 {
 			panic(errno)
 		}
@@ -147,7 +147,7 @@ var (
 func Test_writeDirents(t *testing.T) {
 	tests := []struct {
 		name         string
-		dirents      []experimentalsys.Dirent
+		dirents      []sysapi.Dirent
 		entryCount   int
 		truncatedLen uint32
 		expected     []byte
@@ -207,61 +207,61 @@ func Test_openFlags(t *testing.T) {
 		name                      string
 		dirflags, oflags, fdflags uint16
 		rights                    uint32
-		expectedOpenFlags         experimentalsys.Oflag
+		expectedOpenFlags         sysapi.Oflag
 	}{
 		{
 			name:              "oflags=0",
-			expectedOpenFlags: experimentalsys.O_NOFOLLOW | experimentalsys.O_RDONLY,
+			expectedOpenFlags: sysapi.O_NOFOLLOW | sysapi.O_RDONLY,
 		},
 		{
 			name:              "oflags=O_CREAT",
 			oflags:            wasip1.O_CREAT,
-			expectedOpenFlags: experimentalsys.O_NOFOLLOW | experimentalsys.O_RDWR | experimentalsys.O_CREAT,
+			expectedOpenFlags: sysapi.O_NOFOLLOW | sysapi.O_RDWR | sysapi.O_CREAT,
 		},
 		{
 			name:              "oflags=O_DIRECTORY",
 			oflags:            wasip1.O_DIRECTORY,
-			expectedOpenFlags: experimentalsys.O_NOFOLLOW | experimentalsys.O_DIRECTORY,
+			expectedOpenFlags: sysapi.O_NOFOLLOW | sysapi.O_DIRECTORY,
 		},
 		{
 			name:              "oflags=O_EXCL",
 			oflags:            wasip1.O_EXCL,
-			expectedOpenFlags: experimentalsys.O_NOFOLLOW | experimentalsys.O_RDONLY | experimentalsys.O_EXCL,
+			expectedOpenFlags: sysapi.O_NOFOLLOW | sysapi.O_RDONLY | sysapi.O_EXCL,
 		},
 		{
 			name:              "oflags=O_TRUNC",
 			oflags:            wasip1.O_TRUNC,
-			expectedOpenFlags: experimentalsys.O_NOFOLLOW | experimentalsys.O_RDWR | experimentalsys.O_TRUNC,
+			expectedOpenFlags: sysapi.O_NOFOLLOW | sysapi.O_RDWR | sysapi.O_TRUNC,
 		},
 		{
 			name:              "fdflags=FD_APPEND",
 			fdflags:           wasip1.FD_APPEND,
-			expectedOpenFlags: experimentalsys.O_NOFOLLOW | experimentalsys.O_RDWR | experimentalsys.O_APPEND,
+			expectedOpenFlags: sysapi.O_NOFOLLOW | sysapi.O_RDWR | sysapi.O_APPEND,
 		},
 		{
 			name:              "oflags=O_TRUNC|O_CREAT",
 			oflags:            wasip1.O_TRUNC | wasip1.O_CREAT,
-			expectedOpenFlags: experimentalsys.O_NOFOLLOW | experimentalsys.O_RDWR | experimentalsys.O_TRUNC | experimentalsys.O_CREAT,
+			expectedOpenFlags: sysapi.O_NOFOLLOW | sysapi.O_RDWR | sysapi.O_TRUNC | sysapi.O_CREAT,
 		},
 		{
 			name:              "dirflags=LOOKUP_SYMLINK_FOLLOW",
 			dirflags:          wasip1.LOOKUP_SYMLINK_FOLLOW,
-			expectedOpenFlags: experimentalsys.O_RDONLY,
+			expectedOpenFlags: sysapi.O_RDONLY,
 		},
 		{
 			name:              "rights=FD_READ",
 			rights:            wasip1.RIGHT_FD_READ,
-			expectedOpenFlags: experimentalsys.O_NOFOLLOW | experimentalsys.O_RDONLY,
+			expectedOpenFlags: sysapi.O_NOFOLLOW | sysapi.O_RDONLY,
 		},
 		{
 			name:              "rights=FD_WRITE",
 			rights:            wasip1.RIGHT_FD_WRITE,
-			expectedOpenFlags: experimentalsys.O_NOFOLLOW | experimentalsys.O_WRONLY,
+			expectedOpenFlags: sysapi.O_NOFOLLOW | sysapi.O_WRONLY,
 		},
 		{
 			name:              "rights=FD_READ|FD_WRITE",
 			rights:            wasip1.RIGHT_FD_READ | wasip1.RIGHT_FD_WRITE,
-			expectedOpenFlags: experimentalsys.O_NOFOLLOW | experimentalsys.O_RDWR,
+			expectedOpenFlags: sysapi.O_NOFOLLOW | sysapi.O_RDWR,
 		},
 	}
 

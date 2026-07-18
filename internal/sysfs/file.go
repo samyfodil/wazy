@@ -6,7 +6,6 @@ import (
 	"os"
 	"time"
 
-	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
 	"github.com/samyfodil/wazy/sys"
 )
 
@@ -18,7 +17,7 @@ type fdPoller interface {
 	pollFd() (fd uintptr, ok bool)
 }
 
-func NewStdioFile(stdin bool, f fs.File) (experimentalsys.File, error) {
+func NewStdioFile(stdin bool, f fs.File) (sys.File, error) {
 	// Return constant stat, which has fake times, but keep the underlying
 	// file mode. Fake times are needed to pass wasi-testsuite.
 	// https://github.com/WebAssembly/wasi-testsuite/blob/af57727/tests/rust/src/bin/fd_filestat_get.rs#L1-L19
@@ -28,13 +27,13 @@ func NewStdioFile(stdin bool, f fs.File) (experimentalsys.File, error) {
 	} else {
 		mode = st.Mode()
 	}
-	var flag experimentalsys.Oflag
+	var flag sys.Oflag
 	if stdin {
-		flag = experimentalsys.O_RDONLY
+		flag = sys.O_RDONLY
 	} else {
-		flag = experimentalsys.O_WRONLY
+		flag = sys.O_WRONLY
 	}
-	var file experimentalsys.File
+	var file sys.File
 	if of, ok := f.(*os.File); ok {
 		// This is ok because functions that need path aren't used by stdioFile
 		file = newOsFile("", flag, 0, of)
@@ -44,11 +43,11 @@ func NewStdioFile(stdin bool, f fs.File) (experimentalsys.File, error) {
 	return &stdioFile{File: file, st: sys.Stat_t{Mode: mode, Nlink: 1}}, nil
 }
 
-func OpenFile(path string, flag experimentalsys.Oflag, perm fs.FileMode) (*os.File, experimentalsys.Errno) {
+func OpenFile(path string, flag sys.Oflag, perm fs.FileMode) (*os.File, sys.Errno) {
 	return openFile(path, flag, perm)
 }
 
-func OpenOSFile(path string, flag experimentalsys.Oflag, perm fs.FileMode) (experimentalsys.File, experimentalsys.Errno) {
+func OpenOSFile(path string, flag sys.Oflag, perm fs.FileMode) (sys.File, sys.Errno) {
 	f, errno := OpenFile(path, flag, perm)
 	if errno != 0 {
 		return nil, errno
@@ -56,12 +55,12 @@ func OpenOSFile(path string, flag experimentalsys.Oflag, perm fs.FileMode) (expe
 	return newOsFile(path, flag, perm, f), 0
 }
 
-func OpenFSFile(fs fs.FS, path string, flag experimentalsys.Oflag, perm fs.FileMode) (experimentalsys.File, experimentalsys.Errno) {
-	if flag&experimentalsys.O_DIRECTORY != 0 && flag&(experimentalsys.O_WRONLY|experimentalsys.O_RDWR) != 0 {
-		return nil, experimentalsys.EISDIR // invalid to open a directory writeable
+func OpenFSFile(fs fs.FS, path string, flag sys.Oflag, perm fs.FileMode) (sys.File, sys.Errno) {
+	if flag&sys.O_DIRECTORY != 0 && flag&(sys.O_WRONLY|sys.O_RDWR) != 0 {
+		return nil, sys.EISDIR // invalid to open a directory writeable
 	}
 	f, err := fs.Open(path)
-	if errno := experimentalsys.UnwrapOSError(err); errno != 0 {
+	if errno := sys.UnwrapOSError(err); errno != 0 {
 		return nil, errno
 	}
 	// Don't return an os.File because the path is not absolute. osFile needs
@@ -70,35 +69,35 @@ func OpenFSFile(fs fs.FS, path string, flag experimentalsys.Oflag, perm fs.FileM
 }
 
 type stdioFile struct {
-	experimentalsys.File
+	sys.File
 	st sys.Stat_t
 }
 
-// IsNonblock implements experimentalsys.PollableFile by forwarding to the
+// IsNonblock implements sys.PollableFile by forwarding to the
 // underlying file if it supports it.
 func (f *stdioFile) IsNonblock() bool {
-	if pf, ok := f.File.(experimentalsys.PollableFile); ok {
+	if pf, ok := f.File.(sys.PollableFile); ok {
 		return pf.IsNonblock()
 	}
 	return false
 }
 
-// SetNonblock implements experimentalsys.PollableFile by forwarding to the
+// SetNonblock implements sys.PollableFile by forwarding to the
 // underlying file if it supports it.
-func (f *stdioFile) SetNonblock(enable bool) experimentalsys.Errno {
-	if pf, ok := f.File.(experimentalsys.PollableFile); ok {
+func (f *stdioFile) SetNonblock(enable bool) sys.Errno {
+	if pf, ok := f.File.(sys.PollableFile); ok {
 		return pf.SetNonblock(enable)
 	}
-	return experimentalsys.ENOSYS
+	return sys.ENOSYS
 }
 
-// Poll implements experimentalsys.Pollable by forwarding to the underlying file
+// Poll implements sys.Pollable by forwarding to the underlying file
 // if it supports polling.
-func (f *stdioFile) Poll(flag experimentalsys.Pflag, timeoutMillis int32) (ready bool, errno experimentalsys.Errno) {
-	if p, ok := f.File.(experimentalsys.Pollable); ok {
+func (f *stdioFile) Poll(flag sys.Pflag, timeoutMillis int32) (ready bool, errno sys.Errno) {
+	if p, ok := f.File.(sys.Pollable); ok {
 		return p.Poll(flag, timeoutMillis)
 	}
-	return false, experimentalsys.ENOSYS
+	return false, sys.ENOSYS
 }
 
 // pollFd forwards fdPoller to the underlying file for batched polling (W3).
@@ -110,7 +109,7 @@ func (f *stdioFile) pollFd() (uintptr, bool) {
 }
 
 // SetAppend implements File.SetAppend
-func (f *stdioFile) SetAppend(bool) experimentalsys.Errno {
+func (f *stdioFile) SetAppend(bool) sys.Errno {
 	// Ignore for stdio.
 	return 0
 }
@@ -121,12 +120,12 @@ func (f *stdioFile) IsAppend() bool {
 }
 
 // Stat implements File.Stat
-func (f *stdioFile) Stat() (sys.Stat_t, experimentalsys.Errno) {
+func (f *stdioFile) Stat() (sys.Stat_t, sys.Errno) {
 	return f.st, 0
 }
 
 // Close implements File.Close
-func (f *stdioFile) Close() experimentalsys.Errno {
+func (f *stdioFile) Close() sys.Errno {
 	return 0
 }
 
@@ -134,7 +133,7 @@ func (f *stdioFile) Close() experimentalsys.Errno {
 // implementation. Notably, this does not have access to the full file path.
 // so certain operations can't be supported, such as inode lookups on Windows.
 type fsFile struct {
-	experimentalsys.UnimplementedFile
+	sys.UnimplementedFile
 
 	// fs is the file-system that opened the file, or nil when wrapped for
 	// pre-opens like stdio.
@@ -176,7 +175,7 @@ type cachedStat struct {
 
 // cachedStat returns the cacheable parts of sys.Stat_t or an error if they
 // couldn't be retrieved.
-func (f *fsFile) cachedStat() (dev uint64, ino sys.Inode, isDir bool, errno experimentalsys.Errno) {
+func (f *fsFile) cachedStat() (dev uint64, ino sys.Inode, isDir bool, errno sys.Errno) {
 	if !f.cachedSt.valid {
 		if _, errno = f.Stat(); errno != 0 {
 			return
@@ -186,19 +185,19 @@ func (f *fsFile) cachedStat() (dev uint64, ino sys.Inode, isDir bool, errno expe
 }
 
 // Dev implements the same method as documented on sys.File
-func (f *fsFile) Dev() (uint64, experimentalsys.Errno) {
+func (f *fsFile) Dev() (uint64, sys.Errno) {
 	dev, _, _, errno := f.cachedStat()
 	return dev, errno
 }
 
 // Ino implements the same method as documented on sys.File
-func (f *fsFile) Ino() (sys.Inode, experimentalsys.Errno) {
+func (f *fsFile) Ino() (sys.Inode, sys.Errno) {
 	_, ino, _, errno := f.cachedStat()
 	return ino, errno
 }
 
 // IsDir implements the same method as documented on sys.File
-func (f *fsFile) IsDir() (bool, experimentalsys.Errno) {
+func (f *fsFile) IsDir() (bool, sys.Errno) {
 	_, _, isDir, errno := f.cachedStat()
 	return isDir, errno
 }
@@ -209,28 +208,28 @@ func (f *fsFile) IsAppend() bool {
 }
 
 // SetAppend implements the same method as documented on sys.File
-func (f *fsFile) SetAppend(bool) (errno experimentalsys.Errno) {
-	return fileError(f, f.closed, experimentalsys.ENOSYS)
+func (f *fsFile) SetAppend(bool) (errno sys.Errno) {
+	return fileError(f, f.closed, sys.ENOSYS)
 }
 
 // Stat implements the same method as documented on sys.File
-func (f *fsFile) Stat() (sys.Stat_t, experimentalsys.Errno) {
+func (f *fsFile) Stat() (sys.Stat_t, sys.Errno) {
 	if f.closed {
-		return sys.Stat_t{}, experimentalsys.EBADF
+		return sys.Stat_t{}, sys.EBADF
 	}
 
 	st, errno := statFile(f.file)
 	switch errno {
 	case 0:
 		f.cachedSt = cachedStat{dev: st.Dev, ino: st.Ino, isDir: st.Mode&fs.ModeDir == fs.ModeDir, valid: true}
-	case experimentalsys.EIO:
-		errno = experimentalsys.EBADF
+	case sys.EIO:
+		errno = sys.EBADF
 	}
 	return st, errno
 }
 
 // Read implements the same method as documented on sys.File
-func (f *fsFile) Read(buf []byte) (n int, errno experimentalsys.Errno) {
+func (f *fsFile) Read(buf []byte) (n int, errno sys.Errno) {
 	if n, errno = read(f.file, buf); errno != 0 {
 		// Defer validation overhead until we've already had an error.
 		errno = fileError(f, f.closed, errno)
@@ -239,7 +238,7 @@ func (f *fsFile) Read(buf []byte) (n int, errno experimentalsys.Errno) {
 }
 
 // Pread implements the same method as documented on sys.File
-func (f *fsFile) Pread(buf []byte, off int64) (n int, errno experimentalsys.Errno) {
+func (f *fsFile) Pread(buf []byte, off int64) (n int, errno sys.Errno) {
 	if ra, ok := f.file.(io.ReaderAt); ok {
 		if n, errno = pread(ra, buf, off); errno != 0 {
 			// Defer validation overhead until we've already had an error.
@@ -253,7 +252,7 @@ func (f *fsFile) Pread(buf []byte, off int64) (n int, errno experimentalsys.Errn
 		// Determine the current position in the file, as we need to revert it.
 		currentOffset, err := rs.Seek(0, io.SeekCurrent)
 		if err != nil {
-			return 0, fileError(f, f.closed, experimentalsys.UnwrapOSError(err))
+			return 0, fileError(f, f.closed, sys.UnwrapOSError(err))
 		}
 
 		// Put the read position back when complete.
@@ -262,23 +261,23 @@ func (f *fsFile) Pread(buf []byte, off int64) (n int, errno experimentalsys.Errn
 		// If the current offset isn't in sync with this reader, move it.
 		if off != currentOffset {
 			if _, err = rs.Seek(off, io.SeekStart); err != nil {
-				return 0, fileError(f, f.closed, experimentalsys.UnwrapOSError(err))
+				return 0, fileError(f, f.closed, sys.UnwrapOSError(err))
 			}
 		}
 
 		n, err = rs.Read(buf)
-		if errno = experimentalsys.UnwrapOSError(err); errno != 0 {
+		if errno = sys.UnwrapOSError(err); errno != 0 {
 			// Defer validation overhead until we've already had an error.
 			errno = fileError(f, f.closed, errno)
 		}
 	} else {
-		errno = experimentalsys.ENOSYS // unsupported
+		errno = sys.ENOSYS // unsupported
 	}
 	return
 }
 
 // Seek implements the same method as documented on sys.File
-func (f *fsFile) Seek(offset int64, whence int) (newOffset int64, errno experimentalsys.Errno) {
+func (f *fsFile) Seek(offset int64, whence int) (newOffset int64, errno sys.Errno) {
 	// If this is a directory, and we're attempting to seek to position zero,
 	// we have to re-open the file to ensure the directory state is reset.
 	var isDir bool
@@ -295,7 +294,7 @@ func (f *fsFile) Seek(offset int64, whence int) (newOffset int64, errno experime
 			errno = fileError(f, f.closed, errno)
 		}
 	} else {
-		errno = experimentalsys.ENOSYS // unsupported
+		errno = sys.ENOSYS // unsupported
 	}
 	return
 }
@@ -304,12 +303,12 @@ func (f *fsFile) Seek(offset int64, whence int) (newOffset int64, errno experime
 //
 // Notably, this uses readdirFile or fs.ReadDirFile if available. This does not
 // return inodes on windows.
-func (f *fsFile) Readdir(n int) (dirents []experimentalsys.Dirent, errno experimentalsys.Errno) {
+func (f *fsFile) Readdir(n int) (dirents []sys.Dirent, errno sys.Errno) {
 	// Windows lets you Readdir after close, FS.File also may not implement
 	// close in a meaningful way. read our closed field to return consistent
 	// results.
 	if f.closed {
-		errno = experimentalsys.EBADF
+		errno = sys.EBADF
 		return
 	}
 
@@ -337,45 +336,45 @@ func (f *fsFile) Readdir(n int) (dirents []experimentalsys.Dirent, errno experim
 		if errno = adjustReaddirErr(f, f.closed, e); errno != 0 {
 			return
 		}
-		dirents = make([]experimentalsys.Dirent, 0, len(entries))
+		dirents = make([]sys.Dirent, 0, len(entries))
 		for _, e := range entries {
 			// By default, we don't attempt to read inode data
-			dirents = append(dirents, experimentalsys.Dirent{Name: e.Name(), Type: e.Type()})
+			dirents = append(dirents, sys.Dirent{Name: e.Name(), Type: e.Type()})
 		}
 	} else {
-		errno = experimentalsys.EBADF // not a directory
+		errno = sys.EBADF // not a directory
 	}
 	return
 }
 
 // Write implements the same method as documented on sys.File.
-func (f *fsFile) Write(buf []byte) (n int, errno experimentalsys.Errno) {
+func (f *fsFile) Write(buf []byte) (n int, errno sys.Errno) {
 	if w, ok := f.file.(io.Writer); ok {
 		if n, errno = write(w, buf); errno != 0 {
 			// Defer validation overhead until we've already had an error.
 			errno = fileError(f, f.closed, errno)
 		}
 	} else {
-		errno = experimentalsys.ENOSYS // unsupported
+		errno = sys.ENOSYS // unsupported
 	}
 	return
 }
 
 // Pwrite implements the same method as documented on sys.File.
-func (f *fsFile) Pwrite(buf []byte, off int64) (n int, errno experimentalsys.Errno) {
+func (f *fsFile) Pwrite(buf []byte, off int64) (n int, errno sys.Errno) {
 	if wa, ok := f.file.(io.WriterAt); ok {
 		if n, errno = pwrite(wa, buf, off); errno != 0 {
 			// Defer validation overhead until we've already had an error.
 			errno = fileError(f, f.closed, errno)
 		}
 	} else {
-		errno = experimentalsys.ENOSYS // unsupported
+		errno = sys.ENOSYS // unsupported
 	}
 	return
 }
 
 // Close implements the same method as documented on sys.File.
-func (f *fsFile) Close() experimentalsys.Errno {
+func (f *fsFile) Close() sys.Errno {
 	if f.closed {
 		return 0
 	}
@@ -383,8 +382,8 @@ func (f *fsFile) Close() experimentalsys.Errno {
 	return f.close()
 }
 
-func (f *fsFile) close() experimentalsys.Errno {
-	return experimentalsys.UnwrapOSError(f.file.Close())
+func (f *fsFile) close() sys.Errno {
+	return sys.UnwrapOSError(f.file.Close())
 }
 
 // nonblocker is a subset of PollableFile for checking non-blocking mode on
@@ -392,10 +391,10 @@ func (f *fsFile) close() experimentalsys.Errno {
 // signatures (error vs Errno), so we use this narrower interface.
 type nonblocker interface {
 	IsNonblock() bool
-	SetNonblock(enable bool) experimentalsys.Errno
+	SetNonblock(enable bool) sys.Errno
 }
 
-// IsNonblock implements experimentalsys.PollableFile by forwarding to the
+// IsNonblock implements sys.PollableFile by forwarding to the
 // underlying fs.File if it supports it.
 func (f *fsFile) IsNonblock() bool {
 	if nb, ok := f.file.(nonblocker); ok {
@@ -404,29 +403,29 @@ func (f *fsFile) IsNonblock() bool {
 	return false
 }
 
-// SetNonblock implements experimentalsys.PollableFile by forwarding to the
+// SetNonblock implements sys.PollableFile by forwarding to the
 // underlying fs.File if it supports it.
-func (f *fsFile) SetNonblock(enable bool) experimentalsys.Errno {
+func (f *fsFile) SetNonblock(enable bool) sys.Errno {
 	if nb, ok := f.file.(nonblocker); ok {
 		return nb.SetNonblock(enable)
 	}
 	if !enable {
 		return 0 // disabling nonblock on a file that doesn't support it is a no-op
 	}
-	return experimentalsys.ENOSYS
+	return sys.ENOSYS
 }
 
-// Poll implements experimentalsys.Pollable by forwarding to the underlying
+// Poll implements sys.Pollable by forwarding to the underlying
 // fs.File if it supports polling.
 //
 // Note: fsFile cannot implement PollableFile because fs.File and
-// experimentalsys.File have conflicting Close signatures (error vs Errno),
+// sys.File have conflicting Close signatures (error vs Errno),
 // so no type can satisfy both. Pollable has no such conflict.
-func (f *fsFile) Poll(flag experimentalsys.Pflag, timeoutMillis int32) (ready bool, errno experimentalsys.Errno) {
-	if p, ok := f.file.(experimentalsys.Pollable); ok {
+func (f *fsFile) Poll(flag sys.Pflag, timeoutMillis int32) (ready bool, errno sys.Errno) {
+	if p, ok := f.file.(sys.Pollable); ok {
 		return p.Poll(flag, timeoutMillis)
 	}
-	return false, experimentalsys.ENOSYS
+	return false, sys.ENOSYS
 }
 
 // pollFd forwards fdPoller to the underlying file for batched polling (W3).
@@ -438,7 +437,7 @@ func (f *fsFile) pollFd() (uintptr, bool) {
 }
 
 // dirError is used for commands that work against a directory, but not a file.
-func dirError(f experimentalsys.File, isClosed bool, errno experimentalsys.Errno) experimentalsys.Errno {
+func dirError(f sys.File, isClosed bool, errno sys.Errno) sys.Errno {
 	if vErrno := validate(f, isClosed, false, true); vErrno != 0 {
 		return vErrno
 	}
@@ -446,7 +445,7 @@ func dirError(f experimentalsys.File, isClosed bool, errno experimentalsys.Errno
 }
 
 // fileError is used for commands that work against a file, but not a directory.
-func fileError(f experimentalsys.File, isClosed bool, errno experimentalsys.Errno) experimentalsys.Errno {
+func fileError(f sys.File, isClosed bool, errno sys.Errno) sys.Errno {
 	if vErrno := validate(f, isClosed, true, false); vErrno != 0 {
 		return vErrno
 	}
@@ -454,9 +453,9 @@ func fileError(f experimentalsys.File, isClosed bool, errno experimentalsys.Errn
 }
 
 // validate is used to making syscalls which will fail.
-func validate(f experimentalsys.File, isClosed, wantFile, wantDir bool) experimentalsys.Errno {
+func validate(f sys.File, isClosed, wantFile, wantDir bool) sys.Errno {
 	if isClosed {
-		return experimentalsys.EBADF
+		return sys.EBADF
 	}
 
 	isDir, errno := f.IsDir()
@@ -465,54 +464,54 @@ func validate(f experimentalsys.File, isClosed, wantFile, wantDir bool) experime
 	}
 
 	if wantFile && isDir {
-		return experimentalsys.EISDIR
+		return sys.EISDIR
 	} else if wantDir && !isDir {
-		return experimentalsys.ENOTDIR
+		return sys.ENOTDIR
 	}
 	return 0
 }
 
-func read(r io.Reader, buf []byte) (n int, errno experimentalsys.Errno) {
+func read(r io.Reader, buf []byte) (n int, errno sys.Errno) {
 	if len(buf) == 0 {
 		return 0, 0 // less overhead on zero-length reads.
 	}
 
 	n, err := r.Read(buf)
-	return n, experimentalsys.UnwrapOSError(err)
+	return n, sys.UnwrapOSError(err)
 }
 
-func pread(ra io.ReaderAt, buf []byte, off int64) (n int, errno experimentalsys.Errno) {
+func pread(ra io.ReaderAt, buf []byte, off int64) (n int, errno sys.Errno) {
 	if len(buf) == 0 {
 		return 0, 0 // less overhead on zero-length reads.
 	}
 
 	n, err := ra.ReadAt(buf, off)
-	return n, experimentalsys.UnwrapOSError(err)
+	return n, sys.UnwrapOSError(err)
 }
 
-func seek(s io.Seeker, offset int64, whence int) (int64, experimentalsys.Errno) {
+func seek(s io.Seeker, offset int64, whence int) (int64, sys.Errno) {
 	if uint(whence) > io.SeekEnd {
-		return 0, experimentalsys.EINVAL // negative or exceeds the largest valid whence
+		return 0, sys.EINVAL // negative or exceeds the largest valid whence
 	}
 
 	newOffset, err := s.Seek(offset, whence)
-	return newOffset, experimentalsys.UnwrapOSError(err)
+	return newOffset, sys.UnwrapOSError(err)
 }
 
-func (f *fsFile) rewindDir() experimentalsys.Errno {
+func (f *fsFile) rewindDir() sys.Errno {
 	// Reopen the directory to rewind it.
 	file, err := f.fs.Open(f.name)
 	if err != nil {
-		return experimentalsys.UnwrapOSError(err)
+		return sys.UnwrapOSError(err)
 	}
 	fi, err := file.Stat()
 	if err != nil {
-		return experimentalsys.UnwrapOSError(err)
+		return sys.UnwrapOSError(err)
 	}
 	// Can't check if it's still the same file,
 	// but is it still a directory, at least?
 	if !fi.IsDir() {
-		return experimentalsys.ENOTDIR
+		return sys.ENOTDIR
 	}
 	// Only update f on success.
 	_ = f.file.Close()
@@ -526,13 +525,13 @@ type readdirFile interface {
 }
 
 // readdir uses readdirFile.Readdir, special casing windows when path !="".
-func readdir(f readdirFile, path string, n int) (dirents []experimentalsys.Dirent, errno experimentalsys.Errno) {
+func readdir(f readdirFile, path string, n int) (dirents []sys.Dirent, errno sys.Errno) {
 	fis, e := f.Readdir(n)
-	if errno = experimentalsys.UnwrapOSError(e); errno != 0 {
+	if errno = sys.UnwrapOSError(e); errno != 0 {
 		return
 	}
 
-	dirents = make([]experimentalsys.Dirent, 0, len(fis))
+	dirents = make([]sys.Dirent, 0, len(fis))
 
 	// linux/darwin won't have to fan out to lstat, but windows will.
 	var ino sys.Inode
@@ -543,32 +542,32 @@ func readdir(f readdirFile, path string, n int) (dirents []experimentalsys.Diren
 		if ino, errno = inoFromFileInfo(path, t); errno != 0 {
 			return
 		}
-		dirents = append(dirents, experimentalsys.Dirent{Name: t.Name(), Ino: ino, Type: t.Mode().Type()})
+		dirents = append(dirents, sys.Dirent{Name: t.Name(), Ino: ino, Type: t.Mode().Type()})
 	}
 	return
 }
 
-func write(w io.Writer, buf []byte) (n int, errno experimentalsys.Errno) {
+func write(w io.Writer, buf []byte) (n int, errno sys.Errno) {
 	if len(buf) == 0 {
 		return 0, 0 // less overhead on zero-length writes.
 	}
 
 	n, err := w.Write(buf)
-	return n, experimentalsys.UnwrapOSError(err)
+	return n, sys.UnwrapOSError(err)
 }
 
-func pwrite(w io.WriterAt, buf []byte, off int64) (n int, errno experimentalsys.Errno) {
+func pwrite(w io.WriterAt, buf []byte, off int64) (n int, errno sys.Errno) {
 	if len(buf) == 0 {
 		return 0, 0 // less overhead on zero-length writes.
 	}
 
 	n, err := w.WriteAt(buf, off)
-	return n, experimentalsys.UnwrapOSError(err)
+	return n, sys.UnwrapOSError(err)
 }
 
-func chtimes(path string, atim, mtim int64) (errno experimentalsys.Errno) { //nolint:unused
+func chtimes(path string, atim, mtim int64) (errno sys.Errno) { //nolint:unused
 	// When both inputs are omitted, there is nothing to change.
-	if atim == experimentalsys.UTIME_OMIT && mtim == experimentalsys.UTIME_OMIT {
+	if atim == sys.UTIME_OMIT && mtim == sys.UTIME_OMIT {
 		return
 	}
 
@@ -577,24 +576,24 @@ func chtimes(path string, atim, mtim int64) (errno experimentalsys.Errno) { //no
 	// - https://github.com/golang/go/issues/32558.
 	// - https://go-review.googlesource.com/c/go/+/219638 (unmerged)
 	var st sys.Stat_t
-	if atim == experimentalsys.UTIME_OMIT || mtim == experimentalsys.UTIME_OMIT {
+	if atim == sys.UTIME_OMIT || mtim == sys.UTIME_OMIT {
 		if st, errno = stat(path); errno != 0 {
 			return
 		}
 	}
 
 	var atime, mtime time.Time
-	if atim == experimentalsys.UTIME_OMIT {
+	if atim == sys.UTIME_OMIT {
 		atime = epochNanosToTime(st.Atim)
 		mtime = epochNanosToTime(mtim)
-	} else if mtim == experimentalsys.UTIME_OMIT {
+	} else if mtim == sys.UTIME_OMIT {
 		atime = epochNanosToTime(atim)
 		mtime = epochNanosToTime(st.Mtim)
 	} else {
 		atime = epochNanosToTime(atim)
 		mtime = epochNanosToTime(mtim)
 	}
-	return experimentalsys.UnwrapOSError(os.Chtimes(path, atime, mtime))
+	return sys.UnwrapOSError(os.Chtimes(path, atime, mtime))
 }
 
 func epochNanosToTime(epochNanos int64) time.Time { //nolint:unused

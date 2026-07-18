@@ -7,7 +7,6 @@ import (
 	"io"
 
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/leb128"
 	"github.com/samyfodil/wazy/internal/wasm"
 	"github.com/samyfodil/wazy/internal/wasmdebug"
@@ -129,7 +128,7 @@ func DecodeModule(
 		case wasm.SectionIDMemory:
 			m.MemorySection, offset, err = decodeMemorySection(binary, offset, enabledFeatures, memSizer, memoryLimitPages)
 		case wasm.SectionIDTag:
-			if err := enabledFeatures.RequireEnabled(experimental.CoreFeaturesExceptionHandling); err != nil {
+			if err := enabledFeatures.RequireEnabled(api.CoreFeatureExceptionHandling); err != nil {
 				return nil, fmt.Errorf("tag section not supported as %v", err)
 			}
 			m.TagSection, offset, err = decodeTagSection(binary, offset)

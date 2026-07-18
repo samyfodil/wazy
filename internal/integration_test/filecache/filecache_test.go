@@ -12,14 +12,13 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
-	"github.com/samyfodil/wazy/experimental/logging"
 	"github.com/samyfodil/wazy/internal/integration_test/spectest"
 	v1 "github.com/samyfodil/wazy/internal/integration_test/spectest/v1"
 	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/internal/wasm"
+	"github.com/samyfodil/wazy/logging"
 )
 
 func TestFileCache_compiler(t *testing.T) {
@@ -117,7 +116,7 @@ func testListeners(t *testing.T, config wazy.RuntimeConfig) {
 		dir := t.TempDir()
 
 		out := bytes.NewBuffer(nil)
-		ctxWithListener := experimental.WithFunctionListenerFactory(
+		ctxWithListener := api.WithFunctionListenerFactory(
 			context.Background(), logging.NewLoggingListenerFactory(out))
 
 		{
@@ -163,7 +162,7 @@ func testListeners(t *testing.T, config wazy.RuntimeConfig) {
 			rc := config.WithCompilationCache(cc)
 
 			out := bytes.NewBuffer(nil)
-			ctxWithListener := experimental.WithFunctionListenerFactory(
+			ctxWithListener := api.WithFunctionListenerFactory(
 				context.Background(), logging.NewLoggingListenerFactory(out))
 			r := wazy.NewRuntimeWithConfig(ctxWithListener, rc)
 			_, err = r.CompileModule(ctxWithListener, wasmBin)
@@ -200,7 +199,7 @@ func testListeners(t *testing.T, config wazy.RuntimeConfig) {
 
 		// Then compile with listeners -> run it.
 		out := bytes.NewBuffer(nil)
-		ctxWithListener := experimental.WithFunctionListenerFactory(
+		ctxWithListener := api.WithFunctionListenerFactory(
 			context.Background(), logging.NewLoggingListenerFactory(out))
 
 		cc, err := wazy.NewCompilationCacheWithDir(dir)

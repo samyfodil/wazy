@@ -5,7 +5,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/samyfodil/wazy/experimental/sys"
+	"github.com/samyfodil/wazy/sys"
 )
 
 var (

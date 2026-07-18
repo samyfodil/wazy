@@ -11,7 +11,6 @@ import (
 	"syscall"
 	"testing"
 
-	experimentalsys "github.com/samyfodil/wazy/experimental/sys"
 	"github.com/samyfodil/wazy/internal/fstest"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/sys"
@@ -21,14 +20,14 @@ func TestAdaptFS_MkDir(t *testing.T) {
 	testFS := &AdaptFS{FS: os.DirFS(t.TempDir())}
 
 	err := testFS.Mkdir("mkdir", fs.ModeDir)
-	require.EqualErrno(t, experimentalsys.ENOSYS, err)
+	require.EqualErrno(t, sys.ENOSYS, err)
 }
 
 func TestAdaptFS_Chmod(t *testing.T) {
 	testFS := &AdaptFS{FS: os.DirFS(t.TempDir())}
 
 	err := testFS.Chmod("chmod", fs.ModeDir)
-	require.EqualErrno(t, experimentalsys.ENOSYS, err)
+	require.EqualErrno(t, sys.ENOSYS, err)
 }
 
 func TestAdaptFS_Rename(t *testing.T) {
@@ -48,7 +47,7 @@ func TestAdaptFS_Rename(t *testing.T) {
 	require.NoError(t, err)
 
 	err = testFS.Rename(file1, file2)
-	require.EqualErrno(t, experimentalsys.ENOSYS, err)
+	require.EqualErrno(t, sys.ENOSYS, err)
 }
 
 func TestAdaptFS_Rmdir(t *testing.T) {
@@ -60,7 +59,7 @@ func TestAdaptFS_Rmdir(t *testing.T) {
 	require.NoError(t, os.Mkdir(realPath, 0o700))
 
 	err := testFS.Rmdir(path)
-	require.EqualErrno(t, experimentalsys.ENOSYS, err)
+	require.EqualErrno(t, sys.ENOSYS, err)
 }
 
 func TestAdaptFS_Unlink(t *testing.T) {
@@ -72,7 +71,7 @@ func TestAdaptFS_Unlink(t *testing.T) {
 	require.NoError(t, os.WriteFile(realPath, []byte{}, 0o600))
 
 	err := testFS.Unlink(path)
-	require.EqualErrno(t, experimentalsys.ENOSYS, err)
+	require.EqualErrno(t, sys.ENOSYS, err)
 }
 
 func TestAdaptFS_UtimesNano(t *testing.T) {
@@ -83,8 +82,8 @@ func TestAdaptFS_UtimesNano(t *testing.T) {
 	realPath := joinPath(tmpDir, path)
 	require.NoError(t, os.WriteFile(realPath, []byte{}, 0o600))
 
-	err := testFS.Utimens(path, experimentalsys.UTIME_OMIT, experimentalsys.UTIME_OMIT)
-	require.EqualErrno(t, experimentalsys.ENOSYS, err)
+	err := testFS.Utimens(path, sys.UTIME_OMIT, sys.UTIME_OMIT)
+	require.EqualErrno(t, sys.ENOSYS, err)
 }
 
 func TestAdaptFS_Open_Read(t *testing.T) {
@@ -100,10 +99,10 @@ func TestAdaptFS_Open_Read(t *testing.T) {
 	testOpen_Read(t, testFS, true, runtime.GOOS != "windows")
 
 	t.Run("path outside root invalid", func(t *testing.T) {
-		_, err := testFS.OpenFile("../foo", experimentalsys.O_RDONLY, 0)
+		_, err := testFS.OpenFile("../foo", sys.O_RDONLY, 0)
 
 		// sys.FS doesn't allow relative path lookups
-		require.EqualErrno(t, experimentalsys.EINVAL, err)
+		require.EqualErrno(t, sys.EINVAL, err)
 	})
 }
 

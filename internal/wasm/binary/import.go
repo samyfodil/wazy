@@ -57,7 +57,7 @@ func decodeImport(
 	case wasm.ExternTypeGlobal:
 		ret.DescGlobal, offset, err = decodeGlobalType(buf, offset)
 	case wasm.ExternTypeTag:
-		if err = enabledFeatures.RequireEnabled(api.CoreFeatureSIMD << 4); err != nil { // CoreFeaturesExceptionHandling
+		if err = enabledFeatures.RequireEnabled(api.CoreFeatureExceptionHandling); err != nil {
 			err = fmt.Errorf("tag imports require exception handling feature: %w", err)
 			break
 		}

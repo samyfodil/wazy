@@ -331,7 +331,7 @@ func (h hostModuleInstance) ExportedFunction(name string) api.Function {
 
 // UnwrapModuleInstance returns the raw *wasm.ModuleInstance this host module
 // wraps, for internal import-resolution wiring only: registering a host module
-// in an experimental.ImportResolver hands ModuleInstance.resolveImports a value
+// in an api.ImportResolver hands ModuleInstance.resolveImports a value
 // it type-asserts to *wasm.ModuleInstance, which this wrapper is not. The method
 // signature names an internal type, so code outside this module cannot express
 // the interface to call it -- the public ExportedFunction-forbidden guarantee is

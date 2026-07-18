@@ -16,9 +16,6 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/experimental"
-	"github.com/samyfodil/wazy/experimental/logging"
-	"github.com/samyfodil/wazy/experimental/table"
 	"github.com/samyfodil/wazy/internal/leb128"
 	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
@@ -28,7 +25,9 @@ import (
 	"github.com/samyfodil/wazy/internal/wasm/binary"
 	"github.com/samyfodil/wazy/internal/wasmdebug"
 	"github.com/samyfodil/wazy/internal/wasmruntime"
+	"github.com/samyfodil/wazy/logging"
 	"github.com/samyfodil/wazy/sys"
+	"github.com/samyfodil/wazy/table"
 )
 
 type testCase struct {
@@ -1344,7 +1343,7 @@ func testModuleMemory(t *testing.T, r wazy.Runtime) {
 
 func testTwoIndirection(t *testing.T, r wazy.Runtime) {
 	var buf bytes.Buffer
-	ctx := experimental.WithFunctionListenerFactory(testCtx, logging.NewLoggingListenerFactory(&buf))
+	ctx := api.WithFunctionListenerFactory(testCtx, logging.NewLoggingListenerFactory(&buf))
 	b := r.NewHostModuleBuilder("host")
 	wazy.HostFunc1(b.NewFunctionBuilder(), func(_ context.Context, m api.Module, d uint32) uint32 {
 		if d == math.MaxUint32 {
@@ -1482,10 +1481,10 @@ func testBeforeListenerGlobals(t *testing.T, r wazy.Runtime) {
 	}
 
 	fnListener := &fnListener{
-		beforeFn: func(ctx context.Context, mod api.Module, def api.FunctionDefinition, params []uint64, si experimental.StackIterator) {
+		beforeFn: func(ctx context.Context, mod api.Module, def api.FunctionDefinition, params []uint64, si api.StackIterator) {
 			require.True(t, len(expectedGlobals) > 0)
 
-			imod := mod.(experimental.InternalModule)
+			imod := mod.(api.InternalModule)
 			expected := expectedGlobals[0]
 
 			require.Equal(t, len(expected.values), imod.NumGlobal())
@@ -1528,7 +1527,7 @@ func testBeforeListenerGlobals(t *testing.T, r wazy.Runtime) {
 		ExportSection: []wasm.Export{{Name: "f", Type: wasm.ExternTypeFunc, Index: 0}},
 	})
 
-	ctx := experimental.WithFunctionListenerFactory(testCtx, fnListener)
+	ctx := api.WithFunctionListenerFactory(testCtx, fnListener)
 	inst, err := r.Instantiate(ctx, buf)
 	require.NoError(t, err)
 
@@ -1569,7 +1568,7 @@ func testBeforeListenerStackIterator(t *testing.T, r wazy.Runtime) {
 	}
 
 	fnListener := &fnListener{
-		beforeFn: func(ctx context.Context, mod api.Module, def api.FunctionDefinition, params []uint64, si experimental.StackIterator) {
+		beforeFn: func(ctx context.Context, mod api.Module, def api.FunctionDefinition, params []uint64, si api.StackIterator) {
 			require.True(t, len(expectedCallstacks) > 0)
 			expectedCallstack := expectedCallstacks[0]
 			for si.Next() {
@@ -1582,7 +1581,7 @@ func testBeforeListenerStackIterator(t *testing.T, r wazy.Runtime) {
 		},
 	}
 
-	ctx := experimental.WithFunctionListenerFactory(testCtx, fnListener)
+	ctx := api.WithFunctionListenerFactory(testCtx, fnListener)
 	f4 := func(x int32) int32 {
 		return x + 100
 	}
@@ -1679,7 +1678,7 @@ func testListenerStackIteratorOffset(t *testing.T, r wazy.Runtime) {
 
 	var tape [][]frame
 	fnListener := &fnListener{
-		beforeFn: func(ctx context.Context, mod api.Module, def api.FunctionDefinition, params []uint64, si experimental.StackIterator) {
+		beforeFn: func(ctx context.Context, mod api.Module, def api.FunctionDefinition, params []uint64, si api.StackIterator) {
 			var stack []frame
 			for si.Next() {
 				fn := si.Function()
@@ -1689,7 +1688,7 @@ func testListenerStackIteratorOffset(t *testing.T, r wazy.Runtime) {
 			tape = append(tape, stack)
 		},
 	}
-	ctx := experimental.WithFunctionListenerFactory(testCtx, fnListener)
+	ctx := api.WithFunctionListenerFactory(testCtx, fnListener)
 
 	// Minimal DWARF info section to make debug/dwarf.New() happy.
 	// Necessary to make the compiler emit source offset maps.
@@ -1805,33 +1804,33 @@ func testListenerStackIteratorOffset(t *testing.T, r wazy.Runtime) {
 	require.Zero(t, len(expectedStacks), "expected more stacks")
 }
 
-// fnListener implements both experimental.FunctionListenerFactory and experimental.FunctionListener for testing.
+// fnListener implements both api.FunctionListenerFactory and api.FunctionListener for testing.
 type fnListener struct {
-	beforeFn func(context.Context, api.Module, api.FunctionDefinition, []uint64, experimental.StackIterator)
+	beforeFn func(context.Context, api.Module, api.FunctionDefinition, []uint64, api.StackIterator)
 	afterFn  func(context.Context, api.Module, api.FunctionDefinition, []uint64)
 	abortFn  func(context.Context, api.Module, api.FunctionDefinition, any)
 }
 
-// NewFunctionListener implements experimental.FunctionListenerFactory.
-func (f *fnListener) NewFunctionListener(api.FunctionDefinition) experimental.FunctionListener {
+// NewFunctionListener implements api.FunctionListenerFactory.
+func (f *fnListener) NewFunctionListener(api.FunctionDefinition) api.FunctionListener {
 	return f
 }
 
-// Before implements experimental.FunctionListener.
-func (f *fnListener) Before(ctx context.Context, mod api.Module, def api.FunctionDefinition, params []uint64, stackIterator experimental.StackIterator) {
+// Before implements api.FunctionListener.
+func (f *fnListener) Before(ctx context.Context, mod api.Module, def api.FunctionDefinition, params []uint64, stackIterator api.StackIterator) {
 	if f.beforeFn != nil {
 		f.beforeFn(ctx, mod, def, params, stackIterator)
 	}
 }
 
-// After implements experimental.FunctionListener.
+// After implements api.FunctionListener.
 func (f *fnListener) After(ctx context.Context, mod api.Module, def api.FunctionDefinition, results []uint64) {
 	if f.afterFn != nil {
 		f.afterFn(ctx, mod, def, results)
 	}
 }
 
-// Abort implements experimental.FunctionListener.
+// Abort implements api.FunctionListener.
 func (f *fnListener) Abort(ctx context.Context, mod api.Module, def api.FunctionDefinition, err error) {
 	if f.abortFn != nil {
 		f.abortFn(ctx, mod, def, err)
@@ -2023,7 +2022,7 @@ func testManyParamsResultsCallManyConsts(t *testing.T, r wazy.Runtime) {
 
 func testManyParamsResultsCallManyConstsListener(t *testing.T, r wazy.Runtime) {
 	var buf bytes.Buffer
-	ctx := experimental.WithFunctionListenerFactory(context.Background(), logging.NewLoggingListenerFactory(&buf))
+	ctx := api.WithFunctionListenerFactory(context.Background(), logging.NewLoggingListenerFactory(&buf))
 
 	bin, _ := manyParamsResultsMod()
 	mod, err := r.Instantiate(ctx, bin)
@@ -2092,7 +2091,7 @@ func testManyParamsResultsDoubler(t *testing.T, r wazy.Runtime) {
 
 func testManyParamsResultsDoublerListener(t *testing.T, r wazy.Runtime) {
 	var buf bytes.Buffer
-	ctx := experimental.WithFunctionListenerFactory(context.Background(), logging.NewLoggingListenerFactory(&buf))
+	ctx := api.WithFunctionListenerFactory(context.Background(), logging.NewLoggingListenerFactory(&buf))
 
 	bin, params := manyParamsResultsMod()
 	mod, err := r.Instantiate(ctx, bin)
@@ -2152,7 +2151,7 @@ func testManyParamsResultsSwapper(t *testing.T, r wazy.Runtime) {
 
 func testManyParamsResultsSwapperListener(t *testing.T, r wazy.Runtime) {
 	var buf bytes.Buffer
-	ctx := experimental.WithFunctionListenerFactory(context.Background(), logging.NewLoggingListenerFactory(&buf))
+	ctx := api.WithFunctionListenerFactory(context.Background(), logging.NewLoggingListenerFactory(&buf))
 
 	bin, params := manyParamsResultsMod()
 	mod, err := r.Instantiate(ctx, bin)
@@ -2207,7 +2206,7 @@ func testManyParamsResultsMain(t *testing.T, r wazy.Runtime) {
 
 func testManyParamsResultsMainListener(t *testing.T, r wazy.Runtime) {
 	var buf bytes.Buffer
-	ctx := experimental.WithFunctionListenerFactory(context.Background(), logging.NewLoggingListenerFactory(&buf))
+	ctx := api.WithFunctionListenerFactory(context.Background(), logging.NewLoggingListenerFactory(&buf))
 
 	bin, params := manyParamsResultsMod()
 	mod, err := r.Instantiate(ctx, bin)
@@ -2256,7 +2255,7 @@ func testManyParamsResultsCallManyConstsAndPickLastVector(t *testing.T, r wazy.R
 
 func testManyParamsResultsCallManyConstsAndPickLastVectorListener(t *testing.T, r wazy.Runtime) {
 	var buf bytes.Buffer
-	ctx := experimental.WithFunctionListenerFactory(context.Background(), logging.NewLoggingListenerFactory(&buf))
+	ctx := api.WithFunctionListenerFactory(context.Background(), logging.NewLoggingListenerFactory(&buf))
 
 	bin, _ := manyParamsResultsMod()
 	mod, err := r.Instantiate(ctx, bin)

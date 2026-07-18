@@ -5,7 +5,7 @@ package sysfs
 import (
 	"syscall"
 
-	"github.com/samyfodil/wazy/experimental/sys"
+	"github.com/samyfodil/wazy/sys"
 )
 
 func setNonblock(fd uintptr, enable bool) sys.Errno {

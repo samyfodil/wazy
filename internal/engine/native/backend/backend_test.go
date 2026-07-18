@@ -2400,7 +2400,7 @@ L4 (SSA Block: blk4):
 				t.Fail()
 			}
 
-			err := tc.m.Validate(api.CoreFeaturesV2 | experimental.CoreFeaturesThreads | experimental.CoreFeaturesTailCall | experimental.CoreFeaturesExceptionHandling)
+			err := tc.m.Validate(api.CoreFeaturesV2 | experimental.CoreFeaturesThreads | api.CoreFeatureTailCall | api.CoreFeatureExceptionHandling)
 			require.NoError(t, err)
 
 			ssab := ssa.NewBuilder()
