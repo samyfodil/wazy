@@ -293,8 +293,29 @@ func subtaskCancelHostFuncGraph(in *Instance, canon binary.Canon) hostFuncDef {
 		if !st.resolved() {
 			st.cancellationRequested = true
 			if st.onCancel != nil { // nil only for a host import with no OnCancel hook (§2.4)
-				if err := st.onCancel(); err != nil {
-					panic(fmt.Errorf("component/instance: subtask.cancel: %w", err))
+				// Bracket with sched.pumping exactly like sched.step's own
+				// thunk/resumeReady dispatch (sched.go): st.onCancel runs
+				// synchronously HERE, on the one driving goroutine, not from
+				// inside a queued runq thunk -- but AsyncCall.OnCancel's doc
+				// explicitly promises the callee may call
+				// Resolve/ResolveCancelled SYNCHRONOUSLY from inside fn
+				// (async_host_import.go), and those methods' single-
+				// threadedness guard only recognizes "inCall" (the ORIGINAL
+				// AsyncHostFunc invocation, long since returned by the time
+				// a later subtask.cancel fires) or "sched.pumping" as proof
+				// of running on the driving goroutine. Without this bracket
+				// every synchronous OnCancel->Resolve/ResolveCancelled call
+				// (a real, documented, spec-legal shape -- e.g. a host
+				// import that completes cancellation immediately rather
+				// than deferring it) panics "called outside the instance
+				// scheduler", which is wrong: we ARE on the instance's one
+				// driving goroutine, synchronously, exactly where sched.step
+				// itself would be.
+				in.sched.pumping = true
+				cerr := st.onCancel()
+				in.sched.pumping = false
+				if cerr != nil {
+					panic(fmt.Errorf("component/instance: subtask.cancel: %w", cerr))
 				}
 			}
 			if !st.resolved() {

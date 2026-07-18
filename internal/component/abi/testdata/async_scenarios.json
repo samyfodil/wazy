@@ -1,0 +1,392 @@
+{
+  "scenarios": [
+    {
+      "name": "ws-new-drop-reuse",
+      "desc": "waitable-set index allocation is LIFO free-list reuse: new(1), new(2), drop(1), new -> reuses 1.",
+      "task_result": null,
+      "ops": [
+        {"op": "waitable-set.new", "as": "s1"},
+        {"op": "waitable-set.new", "as": "s2"},
+        {"op": "waitable-set.drop", "set": {"$": "s1"}},
+        {"op": "waitable-set.new", "as": "s3"},
+        {"op": "waitable-set.drop", "set": {"$": "s3"}},
+        {"op": "waitable-set.drop", "set": {"$": "s2"}},
+        {"op": "task.return", "vals": []}
+      ]
+    },
+    {
+      "name": "poll-empty-none",
+      "desc": "waitable-set.poll on a set with nothing joined returns (NONE,0,0) without blocking.",
+      "task_result": null,
+      "ops": [
+        {"op": "waitable-set.new", "as": "s1"},
+        {"op": "waitable-set.poll", "set": {"$": "s1"}, "cancellable": false},
+        {"op": "waitable-set.drop", "set": {"$": "s1"}},
+        {"op": "task.return", "vals": []}
+      ]
+    },
+    {
+      "name": "join-rejoin-leave",
+      "desc": "a subtask joins set A, rejoins set B (implicit leave of A), then leaves via join(_,0); final table pins the still-unresolved subtask.",
+      "task_result": null,
+      "ops": [
+        {"op": "import.call", "as": "c1", "behavior": "never", "result": null},
+        {"op": "waitable-set.new", "as": "sA"},
+        {"op": "waitable-set.new", "as": "sB"},
+        {"op": "waitable.join", "w": {"$": "c1"}, "set": {"$": "sA"}},
+        {"op": "waitable.join", "w": {"$": "c1"}, "set": {"$": "sB"}},
+        {"op": "waitable.join", "w": {"$": "c1"}, "set": 0},
+        {"op": "waitable-set.drop", "set": {"$": "sA"}},
+        {"op": "waitable-set.drop", "set": {"$": "sB"}},
+        {"op": "task.return", "vals": []}
+      ]
+    },
+    {
+      "name": "import-immediate",
+      "desc": "resolve_after:0 resolves inside the call itself -> ret [RETURNED] (2), no table entry; the result is still delivered through the retptr.",
+      "task_result": null,
+      "ops": [
+        {"op": "import.call", "as": "c1", "resolve_after": 0, "result": 42, "behavior": "resolve"},
+        {"op": "mem.check", "ptr": 512, "len": 4},
+        {"op": "task.return", "vals": []}
+      ]
+    },
+    {
+      "name": "import-deferred-wait",
+      "desc": "one deferred async import (resolve_after:1), joined to a set, waited on -> SUBTASK event, retptr result observed via mem.check, subtask+set dropped, task.return.",
+      "task_result": "u32",
+      "ops": [
+        {"op": "import.call", "as": "c1", "resolve_after": 1, "result": 42, "behavior": "resolve"},
+        {"op": "waitable-set.new", "as": "s1"},
+        {"op": "waitable.join", "w": {"$": "c1"}, "set": {"$": "s1"}},
+        {"op": "waitable-set.wait", "set": {"$": "s1"}, "cancellable": false},
+        {"op": "mem.check", "ptr": 512, "len": 4},
+        {"op": "subtask.drop", "sub": {"$": "c1"}},
+        {"op": "waitable-set.drop", "set": {"$": "s1"}},
+        {"op": "task.return", "vals": [7]}
+      ]
+    },
+    {
+      "name": "import-two-fifo",
+      "desc": "two deferred imports (after:1, after:2) joined to ONE set -> wait delivers A then B, in (after, registration-order) order.",
+      "task_result": null,
+      "ops": [
+        {"op": "import.call", "as": "a", "resolve_after": 1, "result": 10, "behavior": "resolve"},
+        {"op": "import.call", "as": "b", "resolve_after": 2, "result": 20, "behavior": "resolve"},
+        {"op": "waitable-set.new", "as": "s"},
+        {"op": "waitable.join", "w": {"$": "a"}, "set": {"$": "s"}},
+        {"op": "waitable.join", "w": {"$": "b"}, "set": {"$": "s"}},
+        {"op": "waitable-set.wait", "set": {"$": "s"}, "cancellable": false},
+        {"op": "mem.check", "ptr": 512, "len": 4},
+        {"op": "waitable-set.wait", "set": {"$": "s"}, "cancellable": false},
+        {"op": "mem.check", "ptr": 528, "len": 4},
+        {"op": "subtask.drop", "sub": {"$": "a"}},
+        {"op": "subtask.drop", "sub": {"$": "b"}},
+        {"op": "waitable-set.drop", "set": {"$": "s"}},
+        {"op": "task.return", "vals": []}
+      ]
+    },
+    {
+      "name": "import-two-sets-poll",
+      "desc": "A and B in DIFFERENT sets: waiting on B's set pays enough rounds to also resolve A (globally ordered), so a later poll on A's set observes it with no extra round.",
+      "task_result": null,
+      "ops": [
+        {"op": "import.call", "as": "a", "resolve_after": 1, "result": 10, "behavior": "resolve"},
+        {"op": "import.call", "as": "b", "resolve_after": 2, "result": 20, "behavior": "resolve"},
+        {"op": "waitable-set.new", "as": "s1"},
+        {"op": "waitable-set.new", "as": "s2"},
+        {"op": "waitable.join", "w": {"$": "a"}, "set": {"$": "s1"}},
+        {"op": "waitable.join", "w": {"$": "b"}, "set": {"$": "s2"}},
+        {"op": "waitable-set.wait", "set": {"$": "s2"}, "cancellable": false},
+        {"op": "waitable-set.poll", "set": {"$": "s1"}, "cancellable": false},
+        {"op": "mem.check", "ptr": 512, "len": 4},
+        {"op": "mem.check", "ptr": 528, "len": 4},
+        {"op": "subtask.drop", "sub": {"$": "a"}},
+        {"op": "subtask.drop", "sub": {"$": "b"}},
+        {"op": "waitable-set.drop", "set": {"$": "s1"}},
+        {"op": "waitable-set.drop", "set": {"$": "s2"}},
+        {"op": "task.return", "vals": []}
+      ]
+    },
+    {
+      "name": "double-task-return",
+      "desc": "a second task.return on an already-resolved task traps.",
+      "task_result": null,
+      "ops": [
+        {"op": "task.return", "vals": []},
+        {"op": "task.return", "vals": []}
+      ],
+      "go_trap_contains": "already resolved"
+    },
+    {
+      "name": "task-cancel-undelivered",
+      "desc": "task.cancel with no cancellation ever delivered traps.",
+      "task_result": null,
+      "ops": [
+        {"op": "task.cancel"}
+      ],
+      "go_trap_contains": "no cancellation"
+    },
+    {
+      "name": "host-cancel-blocking-wait",
+      "desc": "a cancellable wait on an empty set + host.cancel-root(after:1) delivers TASK_CANCELLED synchronously (the task's one thread is cancellable and resumable); task.cancel then resolves it.",
+      "task_result": null,
+      "ops": [
+        {"op": "host.cancel-root", "after": 1},
+        {"op": "waitable-set.new", "as": "s"},
+        {"op": "waitable-set.wait", "set": {"$": "s"}, "cancellable": true},
+        {"op": "waitable-set.drop", "set": {"$": "s"}},
+        {"op": "task.cancel"}
+      ]
+    },
+    {
+      "name": "host-cancel-uncancellable-then-poll",
+      "desc": "a non-cancellable wait absorbs the cancellation request as PENDING_CANCEL (no cancellable thread to resume); a later cancellable poll delivers TASK_CANCELLED via the deliver_pending_cancel prologue, without ever driving the scheduler again.",
+      "task_result": null,
+      "ops": [
+        {"op": "import.call", "as": "c", "resolve_after": 1, "result": 5, "behavior": "resolve"},
+        {"op": "waitable-set.new", "as": "s"},
+        {"op": "waitable.join", "w": {"$": "c"}, "set": {"$": "s"}},
+        {"op": "waitable-set.wait", "set": {"$": "s"}, "cancellable": false},
+        {"op": "mem.check", "ptr": 512, "len": 4},
+        {"op": "subtask.drop", "sub": {"$": "c"}},
+        {"op": "host.cancel-root", "after": 2},
+        {"op": "import.call", "as": "d", "resolve_after": 3, "result": 9, "behavior": "resolve"},
+        {"op": "waitable.join", "w": {"$": "d"}, "set": {"$": "s"}},
+        {"op": "waitable-set.wait", "set": {"$": "s"}, "cancellable": false},
+        {"op": "mem.check", "ptr": 528, "len": 4},
+        {"op": "subtask.drop", "sub": {"$": "d"}},
+        {"op": "waitable-set.poll", "set": {"$": "s"}, "cancellable": true},
+        {"op": "waitable-set.drop", "set": {"$": "s"}},
+        {"op": "task.cancel"}
+      ]
+    },
+    {
+      "name": "wait-empty-deadlock",
+      "desc": "waiting on an empty set with nothing queued can never become ready -> normalized deadlock trap (design doc §2.3).",
+      "task_result": null,
+      "ops": [
+        {"op": "waitable-set.new", "as": "s"},
+        {"op": "waitable-set.wait", "set": {"$": "s"}, "cancellable": false}
+      ],
+      "go_trap_contains": "deadlock"
+    },
+    {
+      "name": "ws-drop-nonempty",
+      "desc": "dropping a waitable-set with a joined (unresolved) subtask still in it traps.",
+      "task_result": null,
+      "ops": [
+        {"op": "import.call", "as": "c", "behavior": "never", "result": null},
+        {"op": "waitable-set.new", "as": "s"},
+        {"op": "waitable.join", "w": {"$": "c"}, "set": {"$": "s"}},
+        {"op": "waitable-set.drop", "set": {"$": "s"}}
+      ],
+      "go_trap_contains": "still joined"
+    },
+    {
+      "name": "wrong-handle-kind-wait",
+      "desc": "waitable-set.wait on a handle that names a subtask (not a waitable set) traps.",
+      "task_result": null,
+      "ops": [
+        {"op": "import.call", "as": "c", "behavior": "never", "result": null},
+        {"op": "waitable-set.wait", "set": {"$": "c"}, "cancellable": false}
+      ],
+      "go_trap_contains": "is not a waitable set"
+    },
+    {
+      "name": "join-set-as-waitable-traps",
+      "desc": "waitable.join with a waitable-set handle passed as the WAITABLE argument traps (a waitable-set is not itself a Waitable).",
+      "task_result": null,
+      "ops": [
+        {"op": "waitable-set.new", "as": "s1"},
+        {"op": "waitable-set.new", "as": "s2"},
+        {"op": "waitable.join", "w": {"$": "s1"}, "set": {"$": "s2"}}
+      ],
+      "go_trap_contains": "is not a waitable"
+    },
+    {
+      "name": "drop-stale-index-traps",
+      "desc": "dropping a handle index that was already removed traps (the table no longer has any entry, of any kind, at that index).",
+      "task_result": null,
+      "ops": [
+        {"op": "waitable-set.new", "as": "s1"},
+        {"op": "waitable-set.drop", "set": {"$": "s1"}},
+        {"op": "subtask.drop", "sub": 1}
+      ],
+      "go_trap_contains": "is not a subtask"
+    },
+    {
+      "name": "subtask-drop-unresolved",
+      "desc": "dropping a subtask that never resolved (behavior:never) traps: resolve was never delivered.",
+      "task_result": null,
+      "ops": [
+        {"op": "import.call", "as": "c", "behavior": "never", "result": null},
+        {"op": "subtask.drop", "sub": {"$": "c"}}
+      ],
+      "go_trap_contains": "not yet resolved"
+    },
+    {
+      "name": "subtask-cancel-async-blocked",
+      "desc": "behavior:ignore-cancel (resolve_after:2): an async cancel returns BLOCKED (the callee ignores cancellation), and the subtask still resolves normally at its scheduled round -- completion wins.",
+      "task_result": null,
+      "ops": [
+        {"op": "import.call", "as": "c", "resolve_after": 2, "result": 5, "behavior": "ignore-cancel"},
+        {"op": "subtask.cancel", "sub": {"$": "c"}, "async": true},
+        {"op": "waitable-set.new", "as": "s"},
+        {"op": "waitable.join", "w": {"$": "c"}, "set": {"$": "s"}},
+        {"op": "waitable-set.wait", "set": {"$": "s"}, "cancellable": false},
+        {"op": "mem.check", "ptr": 512, "len": 4},
+        {"op": "subtask.drop", "sub": {"$": "c"}},
+        {"op": "waitable-set.drop", "set": {"$": "s"}},
+        {"op": "task.return", "vals": []}
+      ]
+    },
+    {
+      "name": "subtask-cancel-sync-cancelled",
+      "desc": "behavior:cancel-resolves-cancelled: a synchronous cancel resolves the subtask as CANCELLED_BEFORE_RETURNED (4) immediately (onCancel calls ResolveCancelled synchronously).",
+      "task_result": null,
+      "ops": [
+        {"op": "import.call", "as": "c", "behavior": "cancel-resolves-cancelled", "result": null},
+        {"op": "subtask.cancel", "sub": {"$": "c"}, "async": false},
+        {"op": "subtask.drop", "sub": {"$": "c"}},
+        {"op": "task.return", "vals": []}
+      ]
+    },
+    {
+      "name": "subtask-cancel-racing-completion",
+      "desc": "import A (after:1) resolves while the guest is paying rounds waiting on a DIFFERENT import B's set; cancelling A afterward hits the resolved-but-undelivered fast path -- ret [RETURNED] (2), never BLOCKED.",
+      "task_result": null,
+      "ops": [
+        {"op": "import.call", "as": "a", "resolve_after": 1, "result": 1, "behavior": "resolve"},
+        {"op": "import.call", "as": "b", "resolve_after": 2, "result": 2, "behavior": "resolve"},
+        {"op": "waitable-set.new", "as": "s"},
+        {"op": "waitable.join", "w": {"$": "b"}, "set": {"$": "s"}},
+        {"op": "waitable-set.wait", "set": {"$": "s"}, "cancellable": false},
+        {"op": "mem.check", "ptr": 528, "len": 4},
+        {"op": "subtask.drop", "sub": {"$": "b"}},
+        {"op": "subtask.cancel", "sub": {"$": "a"}, "async": false},
+        {"op": "subtask.drop", "sub": {"$": "a"}},
+        {"op": "waitable-set.drop", "set": {"$": "s"}},
+        {"op": "task.return", "vals": []}
+      ]
+    },
+    {
+      "name": "subtask-cancel-twice",
+      "desc": "cancelling the same subtask twice traps the second time (cancellation_requested).",
+      "task_result": null,
+      "ops": [
+        {"op": "import.call", "as": "c", "behavior": "never", "result": null},
+        {"op": "subtask.cancel", "sub": {"$": "c"}, "async": true},
+        {"op": "subtask.cancel", "sub": {"$": "c"}, "async": true}
+      ],
+      "go_trap_contains": "cancellation already requested"
+    },
+    {
+      "name": "stream-rendezvous",
+      "desc": "an async write parks (BLOCKED), a sync read on the other end completes the rendezvous immediately; the writer's own COMPLETED event is retrieved later via join+wait; both ends dropped.",
+      "task_result": null,
+      "ops": [
+        {"op": "stream.new", "elem": "u8", "as_read": "r", "as_write": "w"},
+        {"op": "mem.write", "ptr": 4096, "bytes": "010203"},
+        {"op": "stream.write", "end": {"$": "w"}, "ptr": 4096, "n": 3, "async": true},
+        {"op": "stream.read", "end": {"$": "r"}, "ptr": 4352, "n": 3, "async": false},
+        {"op": "mem.check", "ptr": 4352, "len": 3},
+        {"op": "waitable-set.new", "as": "s"},
+        {"op": "waitable.join", "w": {"$": "w"}, "set": {"$": "s"}},
+        {"op": "waitable-set.wait", "set": {"$": "s"}, "cancellable": false},
+        {"op": "stream.drop-writable", "end": {"$": "w"}},
+        {"op": "stream.drop-readable", "end": {"$": "r"}},
+        {"op": "waitable-set.drop", "set": {"$": "s"}},
+        {"op": "task.return", "vals": []}
+      ]
+    },
+    {
+      "name": "stream-zero-length-write-handshake",
+      "desc": "a zero-length async read parks first; a zero-length sync write against it COMPLETEs the write WITHOUT waking the parked reader (the write-side zero-length elif, stream.go's documented asymmetry) -- final table pins the reader still COPYING and the writer IDLE.",
+      "task_result": null,
+      "ops": [
+        {"op": "stream.new", "elem": "u8", "as_read": "r", "as_write": "w"},
+        {"op": "stream.read", "end": {"$": "r"}, "ptr": 4096, "n": 0, "async": true},
+        {"op": "stream.write", "end": {"$": "w"}, "ptr": 4096, "n": 0, "async": false},
+        {"op": "task.return", "vals": []}
+      ]
+    },
+    {
+      "name": "stream-drop-writable-then-read-dropped",
+      "desc": "dropping the writable end while idle, then a read against the (now dropped) shared stream returns DROPPED.",
+      "task_result": null,
+      "ops": [
+        {"op": "stream.new", "elem": "u8", "as_read": "r", "as_write": "w"},
+        {"op": "stream.drop-writable", "end": {"$": "w"}},
+        {"op": "stream.read", "end": {"$": "r"}, "ptr": 4096, "n": 4, "async": false},
+        {"op": "stream.drop-readable", "end": {"$": "r"}},
+        {"op": "task.return", "vals": []}
+      ]
+    },
+    {
+      "name": "stream-drop-readable-while-copying-traps",
+      "desc": "dropping a stream end with an in-flight (parked) copy traps.",
+      "task_result": null,
+      "ops": [
+        {"op": "stream.new", "elem": "u8", "as_read": "r", "as_write": "w"},
+        {"op": "stream.read", "end": {"$": "r"}, "ptr": 4096, "n": 4, "async": true},
+        {"op": "stream.drop-readable", "end": {"$": "r"}}
+      ],
+      "go_trap_contains": "in-flight or undelivered"
+    },
+    {
+      "name": "stream-cancel-read",
+      "desc": "an async read parks (BLOCKED), then a synchronous cancel-read completes it as CANCELLED (packed 2|0<<4); final table pins the end back to idle.",
+      "task_result": null,
+      "ops": [
+        {"op": "stream.new", "elem": "u8", "as_read": "r", "as_write": "w"},
+        {"op": "stream.read", "end": {"$": "r"}, "ptr": 4096, "n": 4, "async": true},
+        {"op": "stream.cancel-read", "end": {"$": "r"}, "async": false},
+        {"op": "task.return", "vals": []}
+      ]
+    },
+    {
+      "name": "future-once",
+      "desc": "a future's single-element rendezvous: async write parks, sync read completes it with the value; the writer's COMPLETED event is retrieved via join+wait; a SECOND write on the (now DONE, not idle) writable end traps.",
+      "task_result": null,
+      "ops": [
+        {"op": "future.new", "elem": "u32", "as_read": "r", "as_write": "w"},
+        {"op": "mem.write", "ptr": 4096, "bytes": "2a000000"},
+        {"op": "future.write", "end": {"$": "w"}, "ptr": 4096, "async": true},
+        {"op": "future.read", "end": {"$": "r"}, "ptr": 4352, "async": false},
+        {"op": "mem.check", "ptr": 4352, "len": 4},
+        {"op": "waitable-set.new", "as": "s"},
+        {"op": "waitable.join", "w": {"$": "w"}, "set": {"$": "s"}},
+        {"op": "waitable-set.wait", "set": {"$": "s"}, "cancellable": false},
+        {"op": "future.write", "end": {"$": "w"}, "ptr": 4096, "async": true}
+      ],
+      "go_trap_contains": "not idle"
+    },
+    {
+      "name": "misc-context-ec",
+      "desc": "context.get/set slot round-trip plus error-context new/drop index-allocation coverage (interleaved with other kinds elsewhere); messages are deliberately empty since DETERMINISTIC_PROFILE forces the reference's error-context content to '' while wazy always loads the real bytes -- content itself is NOT part of this oracle's diffed surface (see the design doc's honest-scope notes), so every message here is zero-length to keep both sides trivially equal.",
+      "task_result": null,
+      "ops": [
+        {"op": "context.set", "slot": 0, "val": 99},
+        {"op": "context.get", "slot": 0},
+        {"op": "context.get", "slot": 1},
+        {"op": "error-context.new", "as": "e1", "ptr": 8192, "len": 0},
+        {"op": "error-context.new", "as": "e2", "ptr": 8192, "len": 0},
+        {"op": "error-context.drop", "ec": {"$": "e1"}},
+        {"op": "error-context.new", "as": "e3", "ptr": 8192, "len": 0},
+        {"op": "error-context.drop", "ec": {"$": "e2"}},
+        {"op": "error-context.drop", "ec": {"$": "e3"}},
+        {"op": "task.return", "vals": []}
+      ]
+    },
+    {
+      "name": "backpressure-underflow-traps",
+      "desc": "backpressure.dec below zero traps.",
+      "task_result": null,
+      "ops": [
+        {"op": "backpressure.dec"}
+      ],
+      "go_trap_contains": "underflow"
+    }
+  ]
+}
