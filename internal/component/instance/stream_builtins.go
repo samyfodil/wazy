@@ -359,12 +359,21 @@ func streamCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 			return eventTuple{code: evCode, p1: i, p2: packCopyResult(result, buf.progressed())}
 		}
 		onCopy := func(reclaim func()) { // partial progress: COMPLETED + live reclaim
+			// LIVE (still cancellable) only when OUR buffer still has unfilled
+			// capacity after this rendezvous -- an onCopy that happened to
+			// fully satisfy us (buf.remain() == 0, e.g. a write sized to
+			// exactly match our read) is just as FINAL as onCopyDone, even
+			// though it arrived via the same pre-copy-remain()>0 branch in
+			// sharedStream.write/read. See streamEnd.livePending's doc.
+			e.livePending = buf.remain() > 0
 			e.setPendingEvent(func() eventTuple { return streamEvent(copyCompleted, reclaim) })
 		}
 		onCopyDone := func(result copyResult) {
+			e.livePending = false // final -- see streamEnd.livePending's doc
 			e.setPendingEvent(func() eventTuple { return streamEvent(result, func() {}) })
 		}
 
+		e.livePending = false
 		e.state = copyCopying
 		var cerr error
 		if side == sideReadable {
@@ -554,16 +563,19 @@ func cancelCopyHostFunc(in *Instance, isFuture bool, side endSide, evCode eventC
 		var state *copyState
 		var sharedCancel func()
 		var hasPending func() bool
+		var livePending func() bool
 		var getPending func() eventTuple
 
 		if isFuture {
 			e := requireFutureEnd(in, name, i, side, elemDesc)
 			w, state = &e.waitable, &e.state
 			sharedCancel, hasPending, getPending = e.shared.cancel, e.hasPendingEvent, e.getPendingEvent
+			livePending = func() bool { return false } // futures have no partial-progress notion
 		} else {
 			e := requireStreamEnd(in, name, i, side, elemDesc)
 			w, state = &e.waitable, &e.state
 			sharedCancel, hasPending, getPending = e.shared.cancel, e.hasPendingEvent, e.getPendingEvent
+			livePending = func() bool { return e.livePending }
 		}
 
 		// has_sync_waiter conjunct omitted (Phase 1 convention: no sync
@@ -576,7 +588,17 @@ func cancelCopyHostFunc(in *Instance, isFuture bool, side endSide, evCode eventC
 		}
 		*state = copyCancelling
 
-		if !hasPending() { // no completion racing us
+		// !hasPending(): no completion racing us at all. livePending():
+		// something IS pending, but only as a LIVE, still-reclaimable
+		// partial-progress notification (streamEnd.livePending's doc) --
+		// cancel must still be allowed to supersede it with CANCELLED,
+		// exactly as a genuinely uncontested cancel would. A FINAL pending
+		// event (onCopyDone-installed: our own immediate completion, or a
+		// buffer-exhausted rendezvous that already reset the shared object's
+		// bookkeeping for us) is left alone -- sharedCancel would otherwise
+		// risk hitting whichever DIFFERENT party the shared object considers
+		// pending by now.
+		if !hasPending() || livePending() {
 			sharedCancel() // resetAndNotifyPending(CANCELLED) fires OUR
 			// parked buffer's onCopyDone => installs OUR pending event
 			if !hasPending() { // host end deferred its cancel ack (§3)

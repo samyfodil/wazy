@@ -305,16 +305,39 @@ func TestTypeContainsAsyncValueNested(t *testing.T) {
 func TestComposition_StreamFutureSeams(t *testing.T) {
 	sub := &Instance{sched: &sched{}, resources: newHandleTable(), resolve: func(uint32) binary.TypeDesc { return nil }}
 
+	// repToProviderHandle(stream/future) does NOT mint a handle in the
+	// provider's table -- it hands the raw *sharedStream/*sharedFuture
+	// identity straight through (unwrapping a *StreamReader/*FutureReader
+	// when that's the shape an already-lifted arg arrives in). The provider's
+	// OWN resolveArgHandles (instance.go), reached moments later via
+	// sub.invoke's lowerParams or the async callee's onStart->lowerParams,
+	// is the ONE place that actually mints the readable end into the
+	// callee's table -- see composition.go's repToProviderHandle doc
+	// (asyncSuite doc fix #4, wast_async_conformance_test.go).
 	shared := &sharedStream{numeric: true}
 	h, err := repToProviderHandle(sub, binary.StreamDesc{}, shared, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	hi, ok := h.(uint32)
-	if !ok {
-		t.Fatalf("repToProviderHandle(stream) = %T, want uint32", h)
+	if h.(*sharedStream) != shared {
+		t.Fatal("repToProviderHandle(stream) did not pass the *sharedStream identity through unchanged")
 	}
-	back, err := providerHandleToRep(sub, binary.StreamDesc{}, hi)
+	// The *StreamReader wrapper resolveHandleArg (host_import.go) builds for
+	// an already-lifted arg must also unwrap to the same identity.
+	hReader, err := repToProviderHandle(sub, binary.StreamDesc{}, &StreamReader{shared: shared}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hReader.(*sharedStream) != shared {
+		t.Fatal("repToProviderHandle(stream) did not unwrap a *StreamReader to its *sharedStream identity")
+	}
+
+	// providerHandleToRep is the mirror-image seam for a PROVIDER RESULT (a
+	// real handle the provider minted in its own table, e.g. via
+	// streamNewHostFunc) -- reduce it back to the *sharedStream identity for
+	// the importer's own lowering.
+	mintedStream := sub.resources.addEntry(&streamEnd{side: sideReadable, state: copyIdle, shared: shared})
+	back, err := providerHandleToRep(sub, binary.StreamDesc{}, mintedStream)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +350,19 @@ func TestComposition_StreamFutureSeams(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	backF, err := providerHandleToRep(sub, binary.FutureDesc{}, hf.(uint32))
+	if hf.(*sharedFuture) != sf {
+		t.Fatal("repToProviderHandle(future) did not pass the *sharedFuture identity through unchanged")
+	}
+	hfReader, err := repToProviderHandle(sub, binary.FutureDesc{}, &FutureReader{shared: sf}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hfReader.(*sharedFuture) != sf {
+		t.Fatal("repToProviderHandle(future) did not unwrap a *FutureReader to its *sharedFuture identity")
+	}
+
+	mintedFuture := sub.resources.addEntry(&futureEnd{side: sideReadable, state: copyIdle, shared: sf})
+	backF, err := providerHandleToRep(sub, binary.FutureDesc{}, mintedFuture)
 	if err != nil {
 		t.Fatal(err)
 	}

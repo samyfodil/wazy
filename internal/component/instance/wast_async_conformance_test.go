@@ -61,9 +61,9 @@ func TestAsyncWastConformance(t *testing.T) {
 // wazy feature -- confirmed either by direct inspection of
 // internal/component (zero matches for the spec's exact trap string) or by
 // actually running the suite and observing the real failure mode (never
-// guessed from the manifest's trap text alone). Three concrete bugs were
-// found and fixed while building this harness -- see their commit-worthy
-// doc comments at the call sites for detail:
+// guessed from the manifest's trap text alone). Five concrete bugs were
+// found and fixed while building/hardening this harness -- see their
+// commit-worthy doc comments at the call sites for detail:
 //
 //  1. stream.go's copyElementsMemmove bounds-checked an elementless
 //     stream/future copy (elemSz == 0, e.g. `(type (future))`) against its
@@ -93,6 +93,62 @@ func TestAsyncWastConformance(t *testing.T) {
 //     char's UTF-8 validity check can't guarantee mid-stream). Fixed by
 //     rejecting a char element at decode time. validate-no-stream-char now
 //     passes.
+//  4. composition.go's repToProviderHandle's StreamDesc/FutureDesc cases
+//     expected the delegated arg to already BE the raw *sharedStream/
+//     *sharedFuture identity, but the value actually flowing through a
+//     guest<->guest delegated call (liftAsyncHostArgsPlanned's
+//     resolveHandleArg, host_import.go) is a *StreamReader/*FutureReader --
+//     the wrapper shape a real Go AsyncHostFunc consumes, built for the
+//     "host is the other end" case, not this composition path. Compounding
+//     that: repToProviderHandle also MINTED a handle in the provider's own
+//     table right there (sub.resources.addEntry), but the provider's own
+//     resolveArgHandles (instance.go), reached moments later via
+//     sub.invoke's lowerParams (sync arm) or the async callee's
+//     onStart->lowerParams (async arm), does that SAME minting itself from
+//     the raw shared identity -- so pre-minting handed that second pass an
+//     already-a-handle uint32 where it expects the *sharedStream, tripping
+//     the exact "expected a *sharedStream, got uint32" trap. Fixed by (a)
+//     unwrapping *StreamReader/*FutureReader to their .shared field and (b)
+//     passing that raw shared identity straight through instead of
+//     pre-minting -- mirroring how the sync arm's resolveArgHandles is the
+//     ONE place a readable end is actually minted into the callee's table.
+//     This is genuinely THE delegation type-mismatch bug named in every
+//     "bug:"-labeled skip below; fixing it unblocks the args-crossing path
+//     for both cancel-subtask and partial-stream-copies (each then hits its
+//     own, separate, deeper gap -- see below) and is what makes cancel-
+//     stream's $C.start-stream's stream RESULT (a plain sync delegated
+//     call, different from these two suites' ARG-crossing shape but
+//     exercising the same repToProviderHandle/providerHandleToRep pairing)
+//     keep working.
+//  5. stream_builtins.go's cancelCopyHostFunc (cancel_copy) skipped calling
+//     shared.cancel() whenever e.hasPendingEvent() was already true --
+//     correct when that pending event is FINAL (an immediate completion, or
+//     a buffer-exhausted rendezvous that already reset the shared object's
+//     own bookkeeping), but streamCopyHostFunc's onCopy closure (a peer's
+//     rendezvous making PARTIAL progress against a still-open buffer, e.g.
+//     a 4-byte write satisfying part of a 100-byte pending read) ALSO sets
+//     e.hasPendingEvent() true, for a notification the shared object still
+//     considers LIVE/reclaimable (sharedStream.write/read's `pendingBuffer.
+//     remain() > 0` branch never resets pending_buffer/pending_on_copy_done
+//     -- only the peer's OWN onCopyDone does). A cancel racing that live
+//     notification was silently swallowing it and replaying the stale
+//     COMPLETED event instead of superseding it with CANCELLED, e.g.
+//     cancel-stream.wast's "call $write4 [4 bytes into a 100-byte pending
+//     read]; cancel-read; expect CANCELLED|(4<<4)" got COMPLETED|(4<<4)
+//     instead -- confirmed root-caused via instrumented tracing (call/
+//     return logging added and removed during investigation), independent
+//     of and unrelated to fix #4 above (this suite never crosses a
+//     delegation boundary with a stream/future ARG at all -- start-stream's
+//     stream is a plain sync RESULT). Fixed by adding streamEnd.livePending
+//     (set true by onCopy, false by onCopyDone, reset false at the top of
+//     every fresh copy) and having cancelCopyHostFunc call shared.cancel()
+//     whenever `!hasPending() || livePending()`; futureEnd has no such flag
+//     since future.{read,write} copy exactly one element atomically (no
+//     partial-progress notion, so no onCopy call exists to race). Verified
+//     against async_scenarios.json's stream-cancel-read oracle scenario
+//     (an uncontested cancel, unaffected since livePending() is always
+//     false there) and the full oracle/resources/multiple-resources .wast
+//     suites -- all stay green. cancel-stream now passes.
 //
 // Remaining skips, by root cause:
 //
@@ -139,13 +195,53 @@ func TestAsyncWastConformance(t *testing.T) {
 //     resolved externally requires CallAsync (not yet implemented)" --
 //     exactly the "public CallAsync" deferred feature named in this task's
 //     brief.
-//   - cancel-subtask, partial-stream-copies: after fix #2, Instantiate
-//     succeeds but the call fails with "delegated future/stream arg:
-//     expected a *sharedFuture/*sharedStream, got
-//     *instance.FutureReader/StreamReader" -- passing a stream/future
-//     handle THROUGH a delegatingHostImport sibling-wiring boundary (the
-//     very path fix #2 completes) isn't fully wired for ownership transfer;
-//     a real, separate gap fix #2 exposes rather than causes.
+//   - cancel-subtask: fixes #2 and #4 land Instantiate AND get $D.run past
+//     both delegated calls' arg/result crossing (the "f" call -- callback-
+//     based async lift, subtask.cancel dance -- fully passes now). It then
+//     traps calling $C's "g" (`(func (export "g") async (param "fut" $FT)
+//     (result u32)) (canon lift (core func $cm "g")))` -- an async lift
+//     declared async at the TYPE level but with NO `callback` option on its
+//     `canon lift`, i.e. a "stackful" export whose core code blocks
+//     synchronously via waitable-set.wait mid-body with no callback
+//     re-entry point). A top-level (non-delegated) call to such an export
+//     dispatches through plain sync invoke() (instance.go's
+//     `if be.asyncCallback {...}` gate on boundExport.asyncCallback, false
+//     here). But startAsyncExportTask (async_lift.go), used UNCONDITIONALLY
+//     by every guest<->guest delegated async lower regardless of whether
+//     the target actually has a callback, always drives the target through
+//     guestTask's callback-loop machinery (guest_task.go's firstRun calls
+//     be.coreFn.CallWithStack then interprets stack[0] as a PACKED
+//     CALLBACK-LOOP CODE) -- correct only for a callback-based lift. For a
+//     no-callback target this is doubly wrong: it would misinterpret the
+//     export's real i32 result as a packed code if the call ever returned,
+//     and -- what actually fires first here -- the export's inline
+//     waitable-set.wait blocks for real (waiting on a future D's OWN code
+//     will only write AFTER this delegated call returns), which can only be
+//     satisfied by driving the shared scheduler's run queue
+//     (async_builtins.go); since D's own task is synchronously stuck inside
+//     this very call (wazy has no true fiber/stack-switch), nothing can
+//     make progress, and the SAME deadlock guard sync-streams/zero-length
+//     already hit reports "an import resolved externally requires
+//     CallAsync (not yet implemented)". This is the identical deferred
+//     CallAsync/true-stackful-coroutine gap, reached through a THIRD door
+//     (a no-callback async export invoked across a guest<->guest
+//     delegation boundary) -- confirmed by re-running after fix #4 landed
+//     (delegation itself no longer errors; this is what surfaces next).
+//   - partial-stream-copies: fixes #2 and #4 land Instantiate and the
+//     stream ARG crossing itself (no more "delegated stream arg" error).
+//     $D.run then traps directly (not inside a callee) on its OWN
+//     waitable-set.wait with "called outside an active async task" --
+//     $D's "run" export (like cancel-subtask's "g" above) is an async-TYPED
+//     `canon lift` with no `callback` option, so the top-level call
+//     dispatches through plain sync invoke() (no guestTask, no active task
+//     recorded), and invoke()'s core code then calls the waitable-set.wait
+//     builtin directly from that task-less sync context. Exactly the same
+//     missing synchronous-task-may-not-block tracking as dont-block-start/
+//     empty-wait/deadlock (see their entries below) -- a pre-existing gap
+//     fix #4 exposes rather than causes, confirmed unrelated to the
+//     delegation fix by re-running after #4 landed (the delegated stream
+//     arg no longer errors; this is what surfaces next, before $D.run ever
+//     reaches a delegated call).
 //   - deadlock: after fix #2, Instantiate succeeds and a real trap does
 //     fire, but with the wrong text -- "waitable-set.wait: called outside
 //     an active async task" instead of the spec's "wasm trap: deadlock
@@ -161,8 +257,25 @@ func TestAsyncWastConformance(t *testing.T) {
 //     hangs indefinitely (confirmed via `timeout 15 go test`, ~100% CPU,
 //     no progress) rather than resolving or trapping -- a real scheduler
 //     livelock in the self-referential blocking-call -> sync-func ->
-//     blocking-call chain. Left unfixed (out of this session's scope) and
-//     deliberately pre-skipped so it can never hang go test ./....
+//     blocking-call chain. Left unfixed (still pre-skipped this session,
+//     deliberately, so it can never hang go test ./...); NOT re-attempted
+//     after fixes #4/#5 landed (both are stream/composition-path fixes,
+//     unrelated to sched.drive/guestTask park-resume, and this suite must
+//     stay hard-gated behind a real timeout even to reproduce -- see the
+//     skip's own text). A plausible-but-UNVERIFIED lead for whoever picks
+//     this up: cancel-subtask's newly-root-caused gap above (a no-callback
+//     "stackful" async lift, reached via guest<->guest delegation, has no
+//     correct implementation -- startAsyncExportTask always drives the
+//     callee through guestTask's callback-loop machinery) may be the SAME
+//     underlying mechanism here if async-calls-sync's "blocking-call"/
+//     "sync-func" chain also delegates into a no-callback async export;
+//     that would make this a genuine infinite RETRY of the same
+//     misinterpreted-return/blocked-drive path rather than a one-shot
+//     deadlock trap (i.e. sched.drive keeps finding "progress" in the form
+//     of a callback-loop misinterpretation instead of hitting
+//     errAsyncDeadlock cleanly) -- but this suite's actual wast/module
+//     shape was not inspected this session to confirm it, so treat this as
+//     a lead, not a finding.
 //   - empty-wait: after the elemSz==0 fix (#1 above), the suite gets
 //     further but still fails. Checked against the actual compiled
 //     $D "run" export (`wasm-tools print empty-wait.0.wasm`): its func
@@ -179,16 +292,6 @@ func TestAsyncWastConformance(t *testing.T) {
 //     (requireActiveTask) does trap it, but with the generic "called
 //     outside an active async task" instead of a dedicated
 //     blocking-in-sync-context trap.
-//   - cancel-stream: a real "unreachable" trap fires directly inside the
-//     test's own $D.run (not inside a callee, per the wasm stack trace),
-//     i.e. one of run's many inline stream.read/stream.cancel-read/
-//     stream.write status-code equality assertions doesn't match wazy's
-//     actual return value. stream.cancel-read/write ARE implemented
-//     (stream_builtins.go's cancelCopyHostFunc), so this is a real,
-//     likely-narrow behavioral bug in their partial-copy/cancel-race
-//     status-code semantics -- not root-caused to a single line within
-//     this session's budget, so left as an honest skip rather than a
-//     guessed fix.
 //
 // Every other suite is run for real with strict assertions (including a
 // trap-text substring match, stricter than the sync harness which only
@@ -204,8 +307,8 @@ var asyncWastSuites = []asyncSuite{
 	{name: "big-interleaving-test", skipReason: "deferred: stream/subtask busy-state protocol traps (concurrent-op guard, busy-drop) not implemented -- see asyncSuite doc"},
 	{name: "builtin-trap-poisons-instance", skipReason: "deferred: instance-poisoning-after-trap ('cannot enter component instance') not implemented -- wazy's mayEnter guard is transient, cleared by leaveRun on every exit path including traps"},
 	{name: "cancellable", skipReason: "deferred: decode fails, 'async canon kind 0xc not yet supported' -- pre-existing, documented out-of-scope decoder gap, unrelated to this session's async work"},
-	{name: "cancel-stream", skipReason: "bug: real 'unreachable' trap inside the test's own inline stream.read/cancel-read/write status-code assertions -- not root-caused this session, see asyncSuite doc"},
-	{name: "cancel-subtask", skipReason: "bug: cross-component future delegation through a sibling host-import wiring is incomplete ('delegated future arg: expected a *sharedFuture, got *instance.FutureReader') -- exposed by, not caused by, the graph.go composition fix in this change"},
+	{name: "cancel-stream"},
+	{name: "cancel-subtask", skipReason: "deferred: past the delegation-arg fix (asyncSuite doc fix #4), traps calling C's no-callback 'g' export -- startAsyncExportTask always drives a delegated async lower through guestTask's callback-loop machinery, which is only correct for a callback-based lift; a no-callback ('stackful') target's inline waitable-set.wait can only be satisfied by driving the shared scheduler, which deadlocks since the caller is synchronously stuck in this very call -- the same CallAsync/true-stackful-coroutine gap as sync-streams/zero-length, reached through a third door -- see asyncSuite doc"},
 	{name: "closed-stream"},
 	{name: "cross-abi-calls", skipReason: "deferred: its largest-arity signatures hit graph.go's pre-existing, explicit 'cross-instance realloc is not supported' limitation"},
 	{name: "cross-task-future"},
@@ -217,7 +320,7 @@ var asyncWastSuites = []asyncSuite{
 	{name: "drop-waitable-set", skipReason: "deferred: waitable-set-with-waiters drop trap not implemented"},
 	{name: "empty-wait", skipReason: "deferred: 'run' is a plain sync lift (of an async-TYPED func) whose core code blocks synchronously via waitable-set.wait -- the same missing synchronous-task-may-not-block tracking as dont-block-start, reached through a sync lift instead of instantiation-time start -- see asyncSuite doc"},
 	{name: "futures-must-write", skipReason: "deferred: future write-end must-write-before-drop trap not implemented"},
-	{name: "partial-stream-copies", skipReason: "bug: cross-component stream delegation through a sibling host-import wiring is incomplete ('delegated stream arg: expected a *sharedStream, got *instance.StreamReader') -- exposed by, not caused by, the graph.go composition fix in this change"},
+	{name: "partial-stream-copies", skipReason: "deferred: past the delegation-arg fix (asyncSuite doc fix #4), $D.run traps on its OWN inline waitable-set.wait with 'called outside an active async task' -- 'run' is a no-callback async-typed lift, so the top-level call is plain sync invoke() with no active task recorded; same missing synchronous-task-may-not-block tracking as dont-block-start/empty-wait/deadlock -- see asyncSuite doc"},
 	{name: "passing-resources", skipReason: "deferred: handle-table lifecycle trap ('unknown handle index') for this cross-task-transfer shape not implemented"},
 	{name: "same-component-stream-future", skipReason: "deferred: intra-component read/write-own-stream trap not implemented"},
 	{name: "sync-barges-in", skipReason: "deferred: decode fails, 'async canon kind 0xc not yet supported' -- same pre-existing decoder gap as cancellable"},

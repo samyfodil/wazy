@@ -440,6 +440,32 @@ type streamEnd struct {
 	side   endSide
 	state  copyState
 	shared *sharedStream
+
+	// livePending is true while this end's pendingEvent is a LIVE, still-
+	// reclaimable notification -- installed by streamCopyHostFunc's onCopy
+	// closure when a peer's rendezvous left OUR buffer with unfilled
+	// capacity (buf.remain() > 0 immediately after the copy: sharedStream.
+	// write/read's `pendingBuffer.remain() > 0` and zero-length-handshake
+	// branches never reset their own pending bookkeeping -- only ours does,
+	// via set_pending_event -- see stream.go's write/read doc). A cancel
+	// arriving before we retrieve that notification must still be allowed to
+	// supersede it (component-model's cancel_copy: a copy that only made
+	// partial progress -- didn't fill our request -- is still cancellable).
+	// Contrast a rendezvous that happens to fill our buffer EXACTLY (buf.
+	// remain() == 0 right after the same onCopy call): that is just as FINAL
+	// as one installed by onCopyDone (our own immediate completion, or a
+	// buffer-exhausted rendezvous that already reset the shared object's own
+	// bookkeeping for us) even though it arrives through the identical
+	// pre-copy `remain() > 0` branch -- cancelCopyHostFunc must leave a
+	// FINAL notification alone: the shared object may already consider a
+	// DIFFERENT party pending by then, and blindly cancelling would hit that
+	// party's copy instead of ours. Reset false at the top of every fresh
+	// copy (state -> COPYING) so no stale flag survives across calls;
+	// futureEnd has no equivalent field since future.{read,write} have no
+	// partial-progress notion (a future carries exactly one element, copied
+	// atomically -- always fully "fills", so onCopy is never even called for
+	// a future; only onCopyDone is).
+	livePending bool
 }
 
 func (*streamEnd) entryKind() entryKind     { return entryStreamEnd }

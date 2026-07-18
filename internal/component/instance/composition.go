@@ -298,22 +298,39 @@ func repToProviderHandle(sub *Instance, desc binary.TypeDesc, v abi.Value, scope
 		return sub.resources.NewBorrow(tag, rep), nil
 
 	case binary.StreamDesc:
-		// The mirror of the TakeOwn/NewOwn lines above: the importer's own
-		// host wrapper already reduced its own handle to the *sharedStream
-		// identity (resolveHandleArg's StreamDesc case); mint the provider's
-		// own readable end for it.
-		shared, ok := v.(*sharedStream)
-		if !ok {
+		// Unlike own/borrow above, a stream<T> arg is NOT minted into the
+		// provider's table here: the provider's own resolveArgHandles
+		// (instance.go), reached moments later via sub.invoke's lowerParams
+		// (sync arm) or the async callee's onStart->lowerParams (async arm,
+		// startAsyncExportTask), does that same minting itself from the raw
+		// *sharedStream identity -- that's the ONE place a readable end is
+		// created in the callee's table (mirrors lower_stream). Minting here
+		// too would hand that second resolveArgHandles pass an already-a-
+		// handle uint32 where it expects the *sharedStream, which is exactly
+		// what the "expected a *sharedStream, got uint32" trap catches.
+		// So this case only needs to unwrap the *StreamReader the importer's
+		// own resolveHandleArg (host_import.go) wrapped the identity in (the
+		// shape a real Go AsyncHostFunc consumes, not what this guest<->guest
+		// composition path needs) and hand the bare *sharedStream onward.
+		switch sv := v.(type) {
+		case *sharedStream:
+			return sv, nil
+		case *StreamReader:
+			return sv.shared, nil
+		default:
 			return nil, fmt.Errorf("delegated stream arg: expected a *sharedStream, got %T", v)
 		}
-		return sub.resources.addEntry(&streamEnd{side: sideReadable, state: copyIdle, shared: shared}), nil
 
 	case binary.FutureDesc:
-		shared, ok := v.(*sharedFuture)
-		if !ok {
+		// Mirrors the StreamDesc case immediately above -- see its comment.
+		switch sv := v.(type) {
+		case *sharedFuture:
+			return sv, nil
+		case *FutureReader:
+			return sv.shared, nil
+		default:
 			return nil, fmt.Errorf("delegated future arg: expected a *sharedFuture, got %T", v)
 		}
-		return sub.resources.addEntry(&futureEnd{side: sideReadable, state: copyIdle, shared: shared}), nil
 
 	default:
 		return v, nil
