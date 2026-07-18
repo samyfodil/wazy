@@ -14,7 +14,7 @@ wazy is compliant with the WebAssembly Core Specification [1.0][1] and [2.0][2].
 
 ## Fast
 
-wazy is faster than [wazero][wazero], the runtime it descends from, on the paths that set real throughput and latency — and its native compiler runs compute code on par with [wasmtime][wasmtime]'s Cranelift, in pure Go with no CGO. Measured against upstream on the same hardware:
+wazy is faster than [wazero][wazero], the runtime it descends from, on the paths that set real throughput and latency — and it is on par with [wasmtime][wasmtime] on conformance, standards support, and speed, in pure Go with no CGO. Measured against upstream on the same hardware:
 
 - **Host calls up to ~15x faster**, with zero allocations. Calling a Go function from Wasm is the hot path for WASI and for any host API you expose. wazy's typed host functions run at native-call speed.
 - **Compiled execution 4–18% faster** on real TinyGo workloads (geomean ~6% vs `wazero@main`). Memory-heavy code leads — string manipulation −18%, array reversal −14%, base64 −12% — with recursive fibonacci −4%. The compiler also allocates less per module (up to −17% on real Rust/Zig/C output).
