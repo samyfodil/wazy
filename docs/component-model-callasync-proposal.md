@@ -231,9 +231,19 @@ its exact previous branch and the synchronous `Call` path is byte-for-byte
 unchanged — no driver goroutine, no lock, no cond. The mailbox/actor machinery
 exists only while a `CallAsync` is live.
 
+Public surface: `CallAsync` / `PendingCall` and async-import registration are
+exposed through the `component` package — `component.WithAsyncImport`,
+`component.AsyncCall`, `component.AsyncHostFunc`, `component.Value`,
+`component.TypeDesc` / `component.PrimitiveDesc` (and `component.WithImport` for
+the sync counterpart). A public end-to-end `-race` test drives an async import
+completed from another goroutine through this surface.
+
 Current limits (each a clean follow-up, none load-bearing):
 
 - One outstanding `CallAsync` per `Instance` at a time.
+- Only `PrimitiveDesc` is aliased publicly so far (covers bool/ints/floats/char/
+  string import signatures); the richer descriptors exist internally and can be
+  re-exported as needed.
 - The export must be an async (callback) lift; stackful-lift `CallAsync` is not
   wired yet.
 - `Cancel` is a hard abort (reap + resolve the handle with an error), not a
