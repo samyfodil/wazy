@@ -30,7 +30,16 @@ const (
 	parkNone  guestParkKind = iota
 	parkEntry               // Task.enter_implicit_thread's backpressure wait (~492-498)
 	parkWait                // callback WAIT on a waitable set (~2185-2188)
-	parkYield               // callback YIELD (~2179-2184)
+	parkYield                // callback YIELD (~2179-2184)
+
+	// parkBlocked: suspended MID-CORE-CALL inside a blocking builtin (a sync
+	// stream/future copy, or a sync-lowered call to an async callee) --
+	// Feature 1, docs/component-model-async-final3-fable.md §1. Live guest
+	// frames sit on a segment goroutine at <-seg.resumeCh; the counterpart
+	// of stackfulTask's sparkBlock. Reachable only for a PROMOTED guestTask
+	// (gt.promoted), i.e. one started by startAsyncExportTask on an
+	// instance flagged mayBlockSync -- see gt.block.
+	parkBlocked
 )
 
 // guestTask is the reference's Task + its implicit Thread, collapsed for
@@ -61,6 +70,115 @@ type guestTask struct {
 	done    bool
 	err     error           // a trap during a scheduler-driven resume, reported to the finisher
 	finish  func(err error) // notifies whoever started us (host entry or async lower)
+
+	// promoted: core/callback invocations run via runSegment on a fresh
+	// baton goroutine, so a blocking builtin reached INSIDE the call can
+	// park this task (parkBlocked) with live frames while the caller's
+	// goroutine (and eventually the root driver) continues. Set at
+	// construction (startAsyncExportTask only, gated on the starting
+	// instance's mayBlockSync), never mutated after. Left false for
+	// invokeAsyncCallback's host-entry call -- see docs/component-model-
+	// async-final3-fable.md §1.9's honest flag #1.
+	promoted bool
+
+	// seg is the live segment, non-nil exactly while a segment goroutine
+	// exists: from runSegment's spawn until the segment's fn returns
+	// (frame-free park, EXIT, or trap). It stays non-nil across a
+	// parkBlocked suspension (the goroutine is alive inside gt.block).
+	// Always nil for an unpromoted task.
+	seg *guestSegment
+}
+
+// guestSegment is one run of a promoted guestTask's core code: a goroutine
+// executing exactly one fn (firstRunBody's body, or one runLoopBody
+// invocation), plus the same baton-channel pair stackfulTask uses
+// (resumeMode/errStackfulAbort, stackful_task.go). Segments are
+// per-invocation: a task that parks frame-free (WAIT/YIELD) costs no
+// goroutine while parked; only a parkBlocked task pins one -- see
+// docs/component-model-async-final3-fable.md §1.2.
+type guestSegment struct {
+	gt       *guestTask
+	resumeCh chan resumeMode // driver -> goroutine
+	yieldCh  chan struct{}   // goroutine -> driver
+	err      error           // fn's result, valid once gt.seg == nil
+	panicVal any             // non-trap panic on the goroutine; re-panicked on the driver
+
+	// parkReady is parkBlocked's predicate (mirrors stackfulTask.parkReady),
+	// set by gt.block for the duration of one parkBlocked suspension.
+	parkReady func() bool
+}
+
+// runSegment executes fn inline (unpromoted task -- bit-identical to every
+// currently-green suite) or on a fresh baton goroutine (promoted). Returns
+// fn's error once the segment finishes, or nil if the segment PARKED
+// mid-call (gt is then in sched.parked at parkBlocked and the goroutine is
+// alive at <-resumeCh inside gt.block).
+func (gt *guestTask) runSegment(fn func() error) error {
+	if !gt.promoted {
+		return fn()
+	}
+	seg := &guestSegment{gt: gt,
+		resumeCh: make(chan resumeMode), yieldCh: make(chan struct{})}
+	gt.seg = seg
+	go seg.main(fn)
+	return seg.handoff(resumeNormal)
+}
+
+// main is the segment goroutine body -- mirrors stackfulTask.main.
+func (s *guestSegment) main(fn func() error) {
+	mode := <-s.resumeCh // first baton
+	defer func() {
+		if r := recover(); r != nil && r != any(errStackfulAbort) {
+			s.panicVal = r // real bug: surface on the driver, never swallow
+		}
+		s.gt.seg = nil          // segment over (fn returned or panicked)
+		s.yieldCh <- struct{}{} // final handoff
+	}()
+	if mode == resumeAbort {
+		return // reaped before ever running
+	}
+	s.err = fn()
+}
+
+// handoff hands the baton to the segment goroutine and waits for it back.
+// Runs on whatever goroutine currently owns the baton (the starter on the
+// first handoff; sched.step's caller on resumes).
+func (s *guestSegment) handoff(mode resumeMode) error {
+	s.resumeCh <- mode
+	<-s.yieldCh
+	if s.gt.seg == nil { // finished
+		if s.panicVal != nil {
+			panic(s.panicVal)
+		}
+		return s.err // nil on success/frame-free park; non-nil = trap (already gt.fail-ed)
+	}
+	return nil // parked at parkBlocked; block() already re-registered gt in sched.parked
+}
+
+// block suspends the calling PROMOTED guestTask mid-core-call until ready()
+// holds (or a cancel wake). MUST be called on the segment goroutine (i.e.
+// from a builtin invoked by this task's guest code). Counterpart of
+// stackfulTask.block; the exclusive stays HELD across the park (reference
+// wait_until never releases it -- only the callback loop's frame-free WAIT
+// does, via leaveRun in advance).
+func (gt *guestTask) block(ready func() bool, cancellable bool) (cancelled bool) {
+	if gt.t.deliverPendingCancel(cancellable) {
+		return true
+	}
+	seg := gt.seg
+	gt.park, gt.cancellable = parkBlocked, cancellable
+	seg.parkReady = ready
+	gt.in.suspendRun()       // activeTask=nil, mayEnter=true; exclusive KEPT
+	gt.in.sched.park(gt)     // safe: we hold the baton
+	seg.yieldCh <- struct{}{}
+	mode := <-seg.resumeCh
+	if mode == resumeAbort {
+		panic(errStackfulAbort) // unwinds guest frames via the engine's recover
+	}
+	gt.park, gt.cancellable = parkNone, false
+	seg.parkReady = nil
+	gt.in.enterRun(gt.t)
+	return mode == resumeCancelled
 }
 
 // ready mirrors the reference's per-park wait_for_event_and/wait_until
@@ -87,6 +205,14 @@ func (gt *guestTask) ready() bool {
 			(gt.cancelWake || gt.t.cancelDeliverable() || gt.wset.hasPendingEvent())
 	case parkYield:
 		return !held
+	case parkBlocked:
+		// No !held conjunct, mirroring stackfulTask.ready's sparkBlock case:
+		// gt itself still holds its instance's exclusive across its own
+		// parkBlocked suspension (suspendRun deliberately keeps
+		// exclusiveHeld/exclusiveOwner==gt.t), so held would always
+		// evaluate false here anyway -- gating on it would only risk a
+		// self-deadlock if that invariant ever shifted.
+		return gt.cancelWake || gt.t.cancelDeliverable() || gt.seg.parkReady()
 	}
 	return false
 }
@@ -106,14 +232,21 @@ func (gt *guestTask) start() error {
 	return gt.firstRun()
 }
 
-// firstRun is task.start() -> lower params -> core call -> advance(packed),
+// firstRun runs firstRunBody inline (unpromoted task) or on a fresh segment
+// goroutine (promoted) via runSegment -- see guestTask.promoted's doc.
+func (gt *guestTask) firstRun() error { return gt.runSegment(gt.firstRunBody) }
+
+// firstRunBody is task.start() -> lower params -> core call -> advance(packed),
 // the Phase-1/2 invokeAsyncCallback prologue verbatim (arg lowering, pooled
 // stacks, packed i32), reparented here. on_start is called HERE, not at
 // canon_lower/bind time: the reference lifts caller args lazily (~2250-
 // 2254), observable when a parked entry reads the caller's memory only once
 // the callee actually starts (the caller may have mutated its arg buffer in
-// the meantime under backpressure -- §3.3's acceptance trace).
-func (gt *guestTask) firstRun() error {
+// the meantime under backpressure -- §3.3's acceptance trace). For a
+// PROMOTED task this runs on the segment goroutine (see runSegment) --
+// onStart's caller-memory read is then legal because the baton serializes
+// it: the starter is blocked in seg.handoff while this goroutine runs.
+func (gt *guestTask) firstRunBody() error {
 	gt.in.enterRun(gt.t)
 	be, t := gt.be, gt.t
 
@@ -210,14 +343,38 @@ func (gt *guestTask) resumeReady() error {
 		gt.cancelWake = false
 		gt.in.sched.unpark(gt)
 		return gt.runLoop(ev)
+
+	case parkBlocked:
+		// Feature 1: the segment goroutine is still alive, blocked inside
+		// gt.block's <-seg.resumeCh -- hand the baton back directly (no new
+		// segment) rather than starting a fresh invocation, mirroring
+		// stackfulTask.resumeReady's sparkBlock arm.
+		gt.in.sched.unpark(gt)
+		mode := resumeNormal
+		if gt.cancelWake {
+			gt.cancelWake, mode = false, resumeCancelled
+		}
+		return gt.seg.handoff(mode)
 	}
 	return fmt.Errorf("component/instance: BUG: resumeReady on a guestTask with no park state")
 }
 
-// runLoop delivers ev to the callback core func, then hands the packed
+// runLoop runs runLoopBody(ev) inline (unpromoted task) or on a fresh
+// segment goroutine (promoted) via runSegment -- avoids the closure
+// allocation on the unpromoted hot path.
+func (gt *guestTask) runLoop(ev eventTuple) error {
+	if !gt.promoted {
+		return gt.runLoopBody(ev)
+	}
+	return gt.runSegment(func() error { return gt.runLoopBody(ev) })
+}
+
+// runLoopBody delivers ev to the callback core func, then hands the packed
 // result to advance -- the Phase-1/2 callback-invocation half of the loop
 // body, reparented here (docs/component-model-async-phase3-design.md §1.3).
-func (gt *guestTask) runLoop(ev eventTuple) error {
+// For a PROMOTED task this runs on a fresh segment goroutine each
+// invocation (see runLoop/runSegment).
+func (gt *guestTask) runLoopBody(ev eventTuple) error {
 	gt.in.enterRun(gt.t)
 	// Pooled (getUint64Slice/putUint64Slice, instance.go), not a stack
 	// array: CallWithStack's interface call makes escape analysis treat a

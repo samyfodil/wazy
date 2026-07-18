@@ -250,7 +250,16 @@ func streamFutureCanonHostFunc(comp *binary.Component, in *Instance, canon binar
 		if canon.Kind == binary.CanonKindStreamWrite {
 			side, evCode = sideWritable, eventStreamWrite
 		}
-		return streamCopyHostFunc(in, side, evCode, elemDesc, elemSz, align, numeric, hasAsyncOpt(canon), memMod, reallocFn), nil
+		async := hasAsyncOpt(canon)
+		if !async {
+			// Feature 1 promotion gate (docs/component-model-async-final3-
+			// fable.md §1.1): a SYNC stream/write is a mid-core-call blocking
+			// site (streamCopyHostFunc's wait_for_pending_event) that a
+			// promoted callback task's segment can park at instead of
+			// nested-driving. See guestTask.promoted.
+			in.mayBlockSync = true
+		}
+		return streamCopyHostFunc(in, side, evCode, elemDesc, elemSz, align, numeric, async, memMod, reallocFn), nil
 
 	case binary.CanonKindFutureRead, binary.CanonKindFutureWrite:
 		memMod, reallocFn, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
@@ -261,12 +270,19 @@ func streamFutureCanonHostFunc(comp *binary.Component, in *Instance, canon binar
 		if canon.Kind == binary.CanonKindFutureWrite {
 			side, evCode = sideWritable, eventFutureWrite
 		}
-		return futureCopyHostFunc(in, side, evCode, elemDesc, elemSz, align, numeric, hasAsyncOpt(canon), memMod, reallocFn), nil
+		async := hasAsyncOpt(canon)
+		if !async {
+			in.mayBlockSync = true // see the stream.read/write case above
+		}
+		return futureCopyHostFunc(in, side, evCode, elemDesc, elemSz, align, numeric, async, memMod, reallocFn), nil
 
 	case binary.CanonKindStreamCancelRead, binary.CanonKindStreamCancelWrite:
 		side, evCode := sideReadable, eventStreamRead
 		if canon.Kind == binary.CanonKindStreamCancelWrite {
 			side, evCode = sideWritable, eventStreamWrite
+		}
+		if !canon.Async {
+			in.mayBlockSync = true // see the stream.read/write case above
 		}
 		return cancelCopyHostFunc(in, false, side, evCode, elemDesc, canon.Async), nil
 
@@ -274,6 +290,9 @@ func streamFutureCanonHostFunc(comp *binary.Component, in *Instance, canon binar
 		side, evCode := sideReadable, eventFutureRead
 		if canon.Kind == binary.CanonKindFutureCancelWrite {
 			side, evCode = sideWritable, eventFutureWrite
+		}
+		if !canon.Async {
+			in.mayBlockSync = true // see the stream.read/write case above
 		}
 		return cancelCopyHostFunc(in, true, side, evCode, elemDesc, canon.Async), nil
 
@@ -461,13 +480,18 @@ func streamCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 				return
 			}
 			// Sync copy: wait_for_pending_event -- split by calling context
-			// (docs/component-model-async-stackful-design.md §4.2): a
-			// stackful caller parks the goroutine (letting the peer's task,
-			// resumable only by the outer driver once our frames yield the
-			// baton, make progress); everyone else keeps the Phase 1-3
-			// nested scheduler drive.
-			if st := activeStackfulTask(in); st != nil {
-				st.block(e.hasPendingEvent, false)
+			// (docs/component-model-async-stackful-design.md §4.2,
+			// generalized by Feature 1 §1.4): a stackful caller, or a
+			// promoted callback task's live segment, parks (letting the
+			// peer's task, resumable only by the outer driver once our
+			// frames yield the baton, make progress); everyone else keeps
+			// the Phase 1-3 nested scheduler drive. THE fix for sync-streams
+			// (docs/component-model-async-final3-fable.md Feature 1): a
+			// promoted callback task's blk is now non-nil here, so it parks
+			// instead of nested-driving and frame-holding its own caller's
+			// continuation.
+			if blk := activeBlocker(in); blk != nil {
+				blk.block(e.hasPendingEvent, false)
 			} else if derr := in.sched.drive(e.hasPendingEvent); derr != nil {
 				panic(wrapSchedErr(name, derr))
 			}
@@ -556,8 +580,8 @@ func futureCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 				return
 			}
 			// See streamCopyHostFunc's identical split.
-			if st := activeStackfulTask(in); st != nil {
-				st.block(e.hasPendingEvent, false)
+			if blk := activeBlocker(in); blk != nil {
+				blk.block(e.hasPendingEvent, false)
 			} else if derr := in.sched.drive(e.hasPendingEvent); derr != nil {
 				panic(wrapSchedErr(name, derr))
 			}
@@ -693,8 +717,8 @@ func cancelCopyHostFunc(in *Instance, isFuture bool, side endSide, evCode eventC
 					return
 				}
 				// See streamCopyHostFunc's identical split.
-				if st := activeStackfulTask(in); st != nil {
-					st.block(hasPending, false)
+				if blk := activeBlocker(in); blk != nil {
+					blk.block(hasPending, false)
 				} else if derr := in.sched.drive(hasPending); derr != nil {
 					panic(wrapSchedErr(name, derr))
 				}

@@ -294,6 +294,20 @@ type Instance struct {
 	mayEnter bool
 	mayLeave bool
 
+	// mayBlockSync is set at graph-bind time when this instance's core
+	// module(s) can reach a MID-CORE-CALL blocking site from a callback
+	// task: a SYNC (no async opt) stream/future copy canon, or a sync
+	// canon-lowered import whose target is an async lift (callback or
+	// stackful). Callback tasks of such an instance, when started by a
+	// GUEST caller (startAsyncExportTask, never invokeAsyncCallback's
+	// host-entry call), run their core/callback invocations on a
+	// per-segment goroutine (guestTask.promoted) so those sites can park
+	// instead of nested-driving the shared scheduler -- see guestTask.block
+	// and docs/component-model-async-final3-fable.md §1. Instances without
+	// such sites (the overwhelmingly common case: async lowers + callback
+	// WAITs only) never pay a goroutine.
+	mayBlockSync bool
+
 	// poisoned is true once an unhandled trap has ever escaped a call into
 	// this instance (any error surfacing from guest code actually running --
 	// a core `unreachable`, or a canonical-ABI trap_if failing mid-call, from
@@ -1916,15 +1930,16 @@ func safeExportedFunction(mod api.Module, name string) (fn api.Function) {
 // order of instantiation). It does not close the Runtime passed to
 // Instantiate, which the caller owns.
 func (in *Instance) Close(ctx context.Context) error {
-	// Reap every parked stackful goroutine in the shared scheduler BEFORE
-	// closing core modules (docs/component-model-async-stackful-design.md
-	// §8): aborting a parked stackful task unwinds guest frames still
-	// inside the engine, which needs the core modules to still be alive.
-	// sched is shared per composition tree, so whichever Close in the tree
-	// runs first reaps all of them; later calls (subInstances' own Close,
-	// below) find nothing left to reap.
+	// Reap every parked goroutine (stackful task or promoted callback-task
+	// segment) in the shared scheduler BEFORE closing core modules
+	// (docs/component-model-async-stackful-design.md §8, Feature 1
+	// docs/component-model-async-final3-fable.md §1.5): aborting a parked
+	// task unwinds guest frames still inside the engine, which needs the
+	// core modules to still be alive. sched is shared per composition tree,
+	// so whichever Close in the tree runs first reaps all of them; later
+	// calls (subInstances' own Close, below) find nothing left to reap.
 	if in.sched != nil {
-		in.reapStackful()
+		in.reapParkedGoroutines()
 	}
 	var firstErr error
 	for i := len(in.closers) - 1; i >= 0; i-- {

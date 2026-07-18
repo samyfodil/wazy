@@ -931,21 +931,23 @@ func delegatingHostImport(sub *Instance, exportName string, be *boundExport, pro
 	}
 }
 
-// startDelegatedFromStackful is delegatingHostImport's arg/result resource
+// startDelegatedFromBlocker is delegatingHostImport's arg/result resource
 // mapping, run for a SYNC-lowered call whose callee is an async lift
-// (callback or stackful) AND whose caller is itself a stackful task
-// (docs/component-model-async-stackful-design.md §4.4): instead of
-// sub.invoke's nested sched.drive (delegatingHostImport's fn, which would
+// (callback or stackful) AND whose caller has a live taskBlocker -- a
+// stackful task, or (Feature 1, docs/component-model-async-final3-fable.md
+// §1.4) a PROMOTED callback task currently inside a segment
+// (docs/component-model-async-stackful-design.md §4.4, generalized): instead
+// of sub.invoke's nested sched.drive (delegatingHostImport's fn, which would
 // frame-hold the caller's own continuation beneath the callee's suspension
 // -- exactly async-calls-sync's confirmed livelock), it starts the callee as
-// an async export task and PARKS the calling stackful goroutine
-// (thread.wait_until(subtask.resolved), ~2273-2275) instead of driving,
-// letting the shared scheduler make progress on whatever else is queued
-// while this task waits. host_import.go's buildHostWrapper calls this in
-// place of hi.fn when it detects this exact shape; everything else
-// (host-entry sync calls, a callback-caller's own nested drive) keeps using
-// hi.fn unchanged.
-func startDelegatedFromStackful(ctx context.Context, st *stackfulTask, tgt *guestAsyncTarget, args []abi.Value) ([]abi.Value, error) {
+// an async export task and PARKS the caller (thread.wait_until(subtask.
+// resolved), ~2273-2275) instead of driving, letting the shared scheduler
+// make progress on whatever else is queued while this task waits.
+// host_import.go's buildHostWrapper calls this in place of hi.fn when it
+// detects this exact shape; everything else (host-entry sync calls, a
+// non-promoted callback-caller's own nested drive) keeps using hi.fn
+// unchanged.
+func startDelegatedFromBlocker(ctx context.Context, blk taskBlocker, tgt *guestAsyncTarget, args []abi.Value) ([]abi.Value, error) {
 	sub, be, exportName := tgt.sub, tgt.be, tgt.exportName
 	paramDescs := be.paramTypes
 	resDescs := resultDescs(be)
@@ -985,7 +987,7 @@ func startDelegatedFromStackful(ctx context.Context, st *stackfulTask, tgt *gues
 		return nil, err
 	}
 	if !resolved {
-		st.block(func() bool { return resolved }, false) // non-cancellable, per ~2275
+		blk.block(func() bool { return resolved }, false) // non-cancellable, per ~2275
 	}
 
 	if scope != nil && scope.numBorrows > 0 {
@@ -1276,6 +1278,18 @@ func computeCanonHostFunc(
 			memMod, reallocFn, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
 			if merr != nil {
 				return hostFuncDef{}, "", fmt.Errorf("import %q func %q: %w", iface, fname, merr)
+			}
+			// Feature 1 promotion gate (docs/component-model-async-final3-
+			// fable.md §1.1): a SYNC lower whose target is an async lift
+			// (callback or stackful) is the other mid-core-call blocking
+			// site -- buildHostWrapper's own §4.4 routing (host_import.go)
+			// tests this exact condition at call time; mirrored here at bind
+			// time so a promoted callback task's segment (guestTask.block)
+			// can park at it instead of nested-driving/livelocking. Flagged
+			// on the IMPORTING instance (in), which is whose callback tasks
+			// might reach this sync-lowered call site.
+			if !isAsyncLower && hi.asyncTarget != nil && (hi.asyncTarget.be.asyncCallback || hi.asyncTarget.be.stackful) {
+				in.mayBlockSync = true
 			}
 			var fn api.GoModuleFunction
 			var hiParams, hiResults []api.ValueType

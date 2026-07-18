@@ -326,34 +326,56 @@ func (st *stackfulTask) handoff(mode resumeMode) error {
 	return nil // parked again: block() already re-registered st in sched.parked
 }
 
-// reapStackful aborts every parked stackful task in the shared scheduler
-// (docs/component-model-async-stackful-design.md §8). Runs on the driver
-// (the baton is necessarily free here: nothing is running). Abort makes
-// block() panic errStackfulAbort on the goroutine; the engine's recover
-// degrades it to a call error through the guest frames; main()'s recover
-// swallows the sentinel; the final yield completes the handoff -- so this
-// func never returns until every parked stackful goroutine has fully
-// unwound and exited. Not called concurrently with a live driver by
-// construction (Close and invokeStackful's error paths only).
-func (in *Instance) reapStackful() {
+// reapParkedGoroutines aborts every parked task in the shared scheduler that
+// pins a live goroutine -- a *stackfulTask (docs/component-model-async-
+// stackful-design.md §8) or a PROMOTED *guestTask parked at parkBlocked
+// (Feature 1, docs/component-model-async-final3-fable.md §1.5: a promoted
+// composition can now strand parked segment goroutines under a
+// callback-rooted invoke too, not just a stackful-rooted one). Runs on the
+// driver (the baton is necessarily free here: nothing is running). Abort
+// makes block() panic errStackfulAbort on the goroutine; the engine's
+// recover degrades it to a call error through the guest frames; main()'s
+// recover swallows the sentinel; the final yield completes the handoff --
+// so this func never returns until every parked goroutine has fully unwound
+// and exited. Not called concurrently with a live driver by construction
+// (Close and invoke*'s error paths only).
+func (in *Instance) reapParkedGoroutines() {
 	for {
-		var victim *stackfulTask
+		var vst *stackfulTask
+		var vgt *guestTask
 		for _, p := range in.sched.parked {
-			if st, ok := p.(*stackfulTask); ok {
-				victim = st
+			switch v := p.(type) {
+			case *stackfulTask:
+				vst = v
+			case *guestTask:
+				if v.seg != nil { // parkBlocked with a live goroutine; frame-free parks hold nothing
+					vgt = v
+				}
+			}
+			if vst != nil || vgt != nil {
 				break
 			}
 		}
-		if victim == nil {
+		switch {
+		case vst != nil:
+			in.sched.unpark(vst)
+			if vst.park == sparkEntry { // no goroutine yet -- nothing to unwind
+				vst.done = true
+				vst.park = sparkNone
+				continue
+			}
+			vst.resumeCh <- resumeAbort
+			<-vst.yieldCh // goroutine has fully unwound; done == true
+
+		case vgt != nil:
+			in.sched.unpark(vgt)
+			seg := vgt.seg
+			seg.resumeCh <- resumeAbort // block() panics errStackfulAbort -> engine recover ->
+			<-seg.yieldCh               // fn returns an error -> seg.main's deferred yield
+			// seg is nil now; goroutine fully unwound.
+
+		default:
 			return
 		}
-		in.sched.unpark(victim)
-		if victim.park == sparkEntry { // no goroutine yet -- nothing to unwind
-			victim.done = true
-			victim.park = sparkNone
-			continue
-		}
-		victim.resumeCh <- resumeAbort
-		<-victim.yieldCh // goroutine has fully unwound; done == true
 	}
 }

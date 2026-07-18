@@ -73,6 +73,28 @@ type task struct {
 	result    []abi.Value
 }
 
+// taskBlocker is the mid-call suspension capability (Feature 1,
+// docs/component-model-async-final3-fable.md §1.4): implemented by
+// *stackfulTask (goroutine always live once started) and by a PROMOTED
+// *guestTask while a segment goroutine is live (t.gt.seg != nil). Blocking
+// builtins and the sync-lower delegate use it instead of testing t.st
+// directly, so both suspension flavors share one call site.
+type taskBlocker interface {
+	block(ready func() bool, cancellable bool) (cancelled bool)
+}
+
+// blocker returns t's live mid-call suspension primitive, or nil (then the
+// caller keeps the Phase 1-3 nested drive / trap behavior it already had).
+func (t *task) blocker() taskBlocker {
+	if t.st != nil {
+		return t.st
+	}
+	if t.gt != nil && t.gt.seg != nil {
+		return t.gt
+	}
+	return nil
+}
+
 // returnValues is the reference Task.return_, called by the task.return
 // builtin (canon_task_return, definitions.py ~2380). Unchanged by Phase 3
 // besides the onResolve signature: after CANCEL_DELIVERED, task.return
@@ -185,6 +207,22 @@ func (t *task) requestCancellation() error {
 				t.state = taskCancelDelivered
 				t.st.cancelWake = true
 				return t.st.resumeReady() // baton -> goroutine with resumeCancelled
+			}
+			t.state = taskPendingCancel
+			return nil
+		}
+		if t.gt.park == parkBlocked {
+			// Feature 1 (docs/component-model-async-final3-fable.md §1.6):
+			// a parkBlocked resume is a BATON HANDOFF (the segment goroutine
+			// is alive at <-seg.resumeCh), exactly like the t.st arm above
+			// -- it must NOT be resumed the way a frame-free WAIT/YIELD is
+			// (those just re-run inline via resumeReady's own dispatch).
+			// Mirrors the t.st arm's heldByOther/cancellable/mayEnter gate.
+			heldByOther := t.inst.exclusiveHeld && t.inst.exclusiveOwner != t
+			if t.gt.cancellable && !heldByOther && t.inst.mayEnter {
+				t.state = taskCancelDelivered
+				t.gt.cancelWake = true
+				return t.gt.resumeReady() // -> gt.seg.handoff(resumeCancelled)
 			}
 			t.state = taskPendingCancel
 			return nil

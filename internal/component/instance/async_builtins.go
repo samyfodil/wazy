@@ -42,13 +42,17 @@ func requireActiveTask(in *Instance, builtin string) *task {
 // blockingTask classifies the calling context of a builtin that can
 // genuinely suspend (waitable-set.wait, a blocking stream/future copy wait,
 // a synchronous subtask.cancel's wait) --
-// docs/component-model-async-stackful-design.md §4:
+// docs/component-model-async-stackful-design.md §4, generalized by Feature 1
+// (docs/component-model-async-final3-fable.md §1.4) from a stackful-only
+// check to taskBlocker (stackful OR a promoted callback task's live
+// segment):
 //
-//   - st != nil: a stackful task's guest code -- suspend by parking the
-//     goroutine (st.block).
-//   - st == nil, t != nil: a callback task's guest/callback code on the
-//     driving goroutine -- suspend by NESTED sched.drive (Phase 1-3
-//     behavior, kept as-is: wait-during-callback stays green).
+//   - blk != nil: suspend via blk.block -- a stackful task's goroutine, or
+//     a promoted callback task's live segment goroutine.
+//   - blk == nil, t != nil: a callback task's guest/callback code on the
+//     driving goroutine, NOT promoted (or promoted but between segments) --
+//     suspend by NESTED sched.drive (Phase 1-3 behavior, kept as-is:
+//     wait-during-callback stays green).
 //   - t == nil: a synchronous context (a core module's instantiation-time
 //     start function, or a plain sync lift of a sync-TYPED func, or a
 //     top-level call to a boundExport this package never wires an
@@ -58,27 +62,29 @@ func requireActiveTask(in *Instance, builtin string) *task {
 // here (preserving each builtin's existing may_leave-before-anything-else
 // check order against its own error-path tests), so blockingTask does not
 // re-derive it.
-func blockingTask(in *Instance, builtin string) (t *task, st *stackfulTask) {
+func blockingTask(in *Instance, builtin string) (t *task, blk taskBlocker) {
 	t = in.activeTask
 	if t == nil {
 		panic(fmt.Errorf("component/instance: %s: cannot block a synchronous task before returning", builtin))
 	}
-	return t, t.st
+	return t, t.blocker()
 }
 
-// activeStackfulTask returns the calling context's *stackfulTask, or nil if
-// there is none -- either because no task is active at all, or an active
-// task is a callback task. Unlike blockingTask, it never traps on a
-// task-less context: stream/future sync copy waits and a synchronous
-// subtask.cancel's wait have never required an active task (only
-// requireMayLeave), so -- unlike waitable-set.wait, which DOES adopt
-// blockingTask's eager "cannot block a synchronous task" trap (dont-
-// block-start's case 1 requires it) -- these sites only add the STACKFUL
-// park arm and otherwise keep their existing task-less-OK nested-drive
-// behavior (docs/component-model-async-stackful-design.md §4.2).
-func activeStackfulTask(in *Instance) *stackfulTask {
+// activeBlocker returns the calling context's taskBlocker, or nil if there
+// is none -- either because no task is active at all, or an active task's
+// suspension capability isn't live right now (a callback task that is
+// either unpromoted, or promoted but not currently inside a segment).
+// Unlike blockingTask, it never traps on a task-less context: stream/future
+// sync copy waits and a synchronous subtask.cancel's wait have never
+// required an active task (only requireMayLeave), so -- unlike
+// waitable-set.wait, which DOES adopt blockingTask's eager "cannot block a
+// synchronous task" trap (dont-block-start's case 1 requires it) -- these
+// sites only add the blocking park arm and otherwise keep their existing
+// task-less-OK nested-drive behavior (docs/component-model-async-stackful-
+// design.md §4.2, generalized by Feature 1 §1.4).
+func activeBlocker(in *Instance) taskBlocker {
 	if t := in.activeTask; t != nil {
-		return t.st
+		return t.blocker()
 	}
 	return nil
 }
@@ -166,22 +172,24 @@ func waitableSetWaitHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 		si := api.DecodeU32(stack[0])
 		ptr := api.DecodeU32(stack[1])
 		ws := requireWaitableSet(in, "waitable-set.wait", si)
-		t, st := blockingTask(in, "waitable-set.wait")
+		t, blk := blockingTask(in, "waitable-set.wait")
 
 		pred := func() bool {
 			return ws.hasPendingEvent() || (cancellable && t.cancelDeliverable())
 		}
 
 		var ev eventTuple
-		if st != nil {
-			// Stackful arm (docs/component-model-async-stackful-design.md
-			// §4.1): park the goroutine -- wait_for_event_and (~818). No
-			// deadlock error surfaces HERE; if nothing can ever wake st, it
-			// simply stays parked and the deadlock is detected by whoever
-			// drives the shared scheduler (invokeStackful maps
+		if blk != nil {
+			// Blocking arm (docs/component-model-async-stackful-design.md
+			// §4.1, generalized by Feature 1 §1.4): park -- a stackful
+			// task's goroutine, or a promoted callback task's live segment
+			// goroutine -- wait_for_event_and (~818). No deadlock error
+			// surfaces HERE; if nothing can ever wake it, it simply stays
+			// parked and the deadlock is detected by whoever drives the
+			// shared scheduler (invokeStackful/invokeAsyncCallback map
 			// errAsyncDeadlock to the spec's exact trap text).
 			ws.numWaiting++
-			cancelled := st.block(pred, cancellable)
+			cancelled := blk.block(pred, cancellable)
 			ws.numWaiting--
 			if cancelled || (cancellable && t.deliverPendingCancel(true)) {
 				ev = eventTuple{code: eventTaskCancelled}
@@ -394,15 +402,17 @@ func subtaskCancelHostFuncGraph(in *Instance, canon binary.Canon) hostFuncDef {
 				}
 				// wait_for_pending_event (~776): a synchronous cancel blocks
 				// until the subtask resolves -- split by calling context
-				// (docs/component-model-async-stackful-design.md §4.2): a
-				// stackful caller parks the goroutine; everyone else keeps
-				// the Phase 1-3 nested scheduler drive (activeStackfulTask,
-				// unlike blockingTask, never traps a task-less context --
-				// subtask.cancel has never required an active task).
-				sft := activeStackfulTask(in)
+				// (docs/component-model-async-stackful-design.md §4.2,
+				// generalized by Feature 1 §1.4): a stackful caller, or a
+				// promoted callback task's live segment, parks; everyone
+				// else keeps the Phase 1-3 nested scheduler drive
+				// (activeBlocker, unlike blockingTask, never traps a
+				// task-less context -- subtask.cancel has never required an
+				// active task).
+				blk := activeBlocker(in)
 				st.syncWaiter = true
-				if sft != nil {
-					sft.block(st.hasPendingEvent, false)
+				if blk != nil {
+					blk.block(st.hasPendingEvent, false)
 				} else if derr := in.sched.drive(st.hasPendingEvent); derr != nil {
 					st.syncWaiter = false
 					if errors.Is(derr, errAsyncDeadlock) {

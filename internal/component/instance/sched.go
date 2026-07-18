@@ -148,6 +148,29 @@ func (s *sched) drive(pred func() bool) error {
 	return nil
 }
 
+// drainReady runs every already-ready parked task (and any thunks their
+// progress enqueues) to quiescence -- the reference Store.tick loop's
+// "keep ticking after the sync caller's own task completes" behavior
+// (Feature 1, docs/component-model-async-final3-fable.md §1.5), so e.g.
+// sync-streams' promoted $C.get/$C.set run to EXIT (and their segment
+// goroutines exit) before the host-entry invoke that drove $D returns.
+// Stops at the first no-progress round; permanently-unready tasks stay
+// parked (they may legitimately wake on a LATER invoke -- reference threads
+// persist across ticks) and are reaped only at Close/an invoke error path.
+// A no-op whenever nothing is ready, so every currently-green suite where
+// the drive already quiesced everything sees zero behavior change.
+func (s *sched) drainReady() error {
+	for {
+		progressed, err := s.step()
+		if err != nil {
+			return err
+		}
+		if !progressed {
+			return nil
+		}
+	}
+}
+
 // pumpSnapshot runs exactly the thunks queued at entry, not ones they
 // enqueue, THEN resumes each guestTask that was already ready at entry,
 // once each: one deterministic scheduler round, used by CallbackCode.YIELD

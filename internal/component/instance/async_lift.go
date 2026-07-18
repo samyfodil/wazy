@@ -89,16 +89,28 @@ func (in *Instance) invokeAsyncCallback(ctx context.Context, be *boundExport, ex
 	t.gt = gt
 
 	if err := gt.start(); err != nil {
+		in.reapParkedGoroutines() // a trap may strand OTHER parked promoted segments (delegated callees)
 		return nil, err
 	}
 	if err := in.sched.drive(func() bool { return gt.done }); err != nil {
+		in.reapParkedGoroutines()
 		if errors.Is(err, errAsyncDeadlock) {
 			return nil, fmt.Errorf("component/instance: export %q: deadlock: the async task is suspended but the run queue is empty and no parked task is ready; an import resolved externally requires CallAsync (not yet implemented)", exportName)
 		}
 		return nil, err
 	}
 	if gt.err != nil {
+		in.reapParkedGoroutines()
 		return nil, gt.err
+	}
+	// Feature 1 (docs/component-model-async-final3-fable.md §1.5): drain
+	// every already-ready parked task to quiescence before returning --
+	// e.g. sync-streams' promoted $C.get/$C.set run to EXIT (and their
+	// segment goroutines exit) here, not left dangling past this invoke's
+	// return. A no-op whenever nothing is ready.
+	if err := in.sched.drainReady(); err != nil {
+		in.reapParkedGoroutines()
+		return nil, err
 	}
 	return t.result, nil
 }
@@ -133,19 +145,24 @@ func (in *Instance) invokeStackful(ctx context.Context, be *boundExport, exportN
 	t.st = st
 
 	if err := st.startTask(); err != nil {
-		in.reapStackful() // a trap may strand OTHER parked stackful tasks (delegated callees)
+		in.reapParkedGoroutines() // a trap may strand OTHER parked tasks (delegated callees)
 		return nil, err
 	}
 	if err := in.sched.drive(func() bool { return st.done }); err != nil {
-		in.reapStackful()
+		in.reapParkedGoroutines()
 		if errors.Is(err, errAsyncDeadlock) {
 			return nil, fmt.Errorf("component/instance: export %q: wasm trap: deadlock detected: event loop cannot make further progress", exportName)
 		}
 		return nil, err
 	}
 	if st.err != nil {
-		in.reapStackful()
+		in.reapParkedGoroutines()
 		return nil, st.err
+	}
+	// See invokeAsyncCallback's identical drainReady call.
+	if err := in.sched.drainReady(); err != nil {
+		in.reapParkedGoroutines()
+		return nil, err
 	}
 	return t.result, nil
 }
@@ -190,6 +207,20 @@ func (in *Instance) startAsyncExportTask(ctx context.Context, be *boundExport, e
 	gt := &guestTask{
 		t: t, in: in, be: be, ctx: ctx, exportName: exportName,
 		onStart: func() ([]abi.Value, error) { return onStart(t) },
+		// Feature 1 (docs/component-model-async-final3-fable.md §1.1): a
+		// GUEST-caller-started callback task (this func, never
+		// invokeAsyncCallback's host-entry call) on an instance flagged
+		// mayBlockSync runs its core/callback invocations on a per-segment
+		// goroutine, so a mid-core-call blocking site reached from this
+		// task's own guest code can park (gt.block) instead of nested-
+		// driving the shared scheduler -- the fix for a callback task
+		// blocking on its own sync caller's continuation (sync-streams,
+		// async-calls-sync run2). Instances that never bind a sync
+		// stream/future copy or a sync-lowered-to-async-lift import
+		// (mayBlockSync stays false -- the overwhelmingly common case) pay
+		// zero goroutines: promoted is false and runSegment/runLoop take
+		// their exact pre-Feature-1 inline path.
+		promoted: in.mayBlockSync,
 	}
 	t.gt = gt
 	if err := gt.start(); err != nil { // may run to EXIT, may park at entry/WAIT

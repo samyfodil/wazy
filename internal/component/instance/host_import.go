@@ -612,20 +612,23 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 		// (in.sched.instantiating) so host-entry sync invokes of an async
 		// export keep today's drive-and-deadlock-detect behavior; zero
 		// blast radius outside Instantiate.
-		var stackfulCaller *stackfulTask
+		var blockingCaller taskBlocker
 		if tgt := hi.asyncTarget; in != nil && tgt != nil && (tgt.be.asyncCallback || tgt.be.stackful) {
 			if in.sched.instantiating && in.activeTask == nil {
 				panic(fmt.Errorf("component/instance: host import %q %q: cannot block a synchronous task before returning", iface, funcName))
 			}
-			// §4.4: when the CALLER is itself a stackful task, route through
-			// startDelegatedFromStackful (parks instead of driving) rather
-			// than hi.fn's nested sched.drive, which would frame-hold the
-			// caller's own continuation beneath the callee's suspension --
+			// §4.4 (generalized by Feature 1 §1.4): when the CALLER is
+			// itself a stackful task, OR a promoted callback task currently
+			// inside a segment, route through startDelegatedFromBlocker
+			// (parks instead of driving) rather than hi.fn's nested
+			// sched.drive, which would frame-hold the caller's own
+			// continuation beneath the callee's suspension --
 			// async-calls-sync's confirmed livelock. A host-entry sync call
-			// or a callback-caller's own nested drive is unaffected (t.st
-			// nil there) and keeps using hi.fn exactly as before.
+			// or a non-promoted callback-caller's own nested drive is
+			// unaffected (t.blocker() nil there) and keeps using hi.fn
+			// exactly as before.
 			if t := in.activeTask; t != nil {
-				stackfulCaller = t.st
+				blockingCaller = t.blocker()
 			}
 		}
 
@@ -637,8 +640,8 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 			in.inHostCall++
 		}
 		var results []abi.Value
-		if stackfulCaller != nil {
-			results, err = startDelegatedFromStackful(ctx, stackfulCaller, hi.asyncTarget, args)
+		if blockingCaller != nil {
+			results, err = startDelegatedFromBlocker(ctx, blockingCaller, hi.asyncTarget, args)
 		} else {
 			results, err = hi.fn(ctx, args)
 		}
