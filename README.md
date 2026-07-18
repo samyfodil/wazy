@@ -75,14 +75,12 @@ It passes **all 31 official Component Model async `.wast` conformance suites** (
 
 ## Moving fast
 
-[wazero][wazero] is a mature, well-run project that prioritizes API stability and a scope centered on core modules and WASI 0.1 — the right call for its large user base. wazy makes different trade-offs: it targets the modern Wasm platform (Component Model, WASI 0.2, the async ABI today, above; the full WASI 0.3 host-interface surface next) and lands performance work continuously rather than waiting on a release cadence.
+wazy targets the modern Wasm platform (Component Model, WASI 0.2, the async ABI today, above; the full WASI 0.3 host-interface surface next) and lands performance work continuously rather than waiting on a release cadence. [wazero][wazero], the runtime it descends from, is a mature, well-run project that prioritizes API stability and a scope centered on core modules and WASI 0.1 — the right call for its large user base. wazy makes different trade-offs.
 
 Two things make that pace possible:
 
 - **We ship fast.** wazy makes no API-stability promise. It has already broken compatibility with wazero, including host-function registration, and will do so again whenever that makes the runtime faster or moves it toward the Component Model. Correctness is guarded by the conformance and fuzzing suites, not by freezing the API.
-- **We accept AI contributions.** Machine-generated changes are welcome on equal footing with human ones — the bar is the same for both: they pass the full spec-conformance, differential, and fuzzing suites, and they make the runtime measurably better. Much of wazy's optimization and Component Model work was built this way.
-
-If you want a mature, stability-guaranteed runtime with a large user base, use [wazero][wazero]. If you want a fast runtime that keeps pace with the modern Wasm platform — and performs like a native one — use wazy.
+- **We accept AI contributions.** Machine-generated changes are welcome on equal footing with human ones — the bar is the same for both: they pass the full spec-conformance, differential, and fuzzing suites, and they make the runtime measurably better.
 
 ## Two engines
 
