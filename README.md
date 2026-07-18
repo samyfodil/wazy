@@ -14,16 +14,20 @@ wazy is compliant with the WebAssembly Core Specification [1.0][1] and [2.0][2].
 
 ## Fast
 
-wazy is faster than [wazero][wazero], the runtime it descends from, on the paths that set real throughput and latency — and it is on par with [wasmtime][wasmtime] on conformance, standards support, and speed, in pure Go with no CGO. Measured against upstream on the same hardware:
+wazy is faster than [wazero][wazero], the runtime it descends from, on the paths that set real throughput and latency — and it is on par with [wasmtime][wasmtime] on conformance, standards support, and speed, in pure Go with no CGO.
+
+### vs wazero
+
+Measured on the same hardware:
 
 - **Host calls up to ~15x faster**, with zero allocations. Calling a Go function from Wasm is the hot path for WASI and for any host API you expose. wazy's typed host functions run at native-call speed.
 - **Compiled execution 4–18% faster** on real TinyGo workloads (geomean ~6% vs `wazero@main`). Memory-heavy code leads — string manipulation −18%, array reversal −14%, base64 −12% — with recursive fibonacci −4%. The compiler also allocates less per module (up to −17% on real Rust/Zig/C output).
-- **Interruptible loops stay cheap.** `WithCloseOnContextDone` (deadline and cancellation enforcement) amortizes its per-loop safety check instead of paying a Go round-trip on every iteration. On a realistic loop that calls a host function each iteration it adds **~5%** (vs upstream's ~75%); on the real fibonacci it runs **~12x faster** than upstream, and on a tight compute loop **~13x**. The overhead scales to the loop body, so only near-empty compute kernels pay a real tax — tunable per compile with `wazy.WithInterruptCheckInterval`. Opt in with `WithCloseOnContextDone(true)` when embedding untrusted or unbounded guests.
+- **Interruptible loops stay cheap.** `WithCloseOnContextDone` (deadline and cancellation enforcement) amortizes its per-loop safety check instead of paying a Go round-trip on every iteration. On a realistic loop that calls a host function each iteration it adds **~5%** (vs wazero's ~75%); on the real fibonacci it runs **~12x faster** than wazero, and on a tight compute loop **~13x**. The overhead scales to the loop body, so only near-empty compute kernels pay a real tax — tunable per compile with `wazy.WithInterruptCheckInterval`. Opt in with `WithCloseOnContextDone(true)` when embedding untrusted or unbounded guests.
 - **Cold start**: decode, validate, compile, instantiate, substantially faster, with far fewer allocations.
 - **Interpreter ~30% faster**, with per-call heap allocation eliminated. A benchmark that allocated 1.35M times now allocates twice.
 - **~87% less memory per call** for the common request-per-call pattern.
 
-Methodology and per-optimization numbers are in [OPTIMIZATIONS.md](OPTIMIZATIONS.md). The head-to-head suite lives in [`benchmarks/vs-wazero`](benchmarks/vs-wazero) — `cd benchmarks/vs-wazero && go test -bench .` runs the same workloads (compile, execution, host calls) on wazy and upstream side by side. The same harness carries a **three-way comparison against wasmtime** (`BenchmarkExecute3`, `BenchmarkCompile3`): run it yourself and see wazy's native execution hold its own against Cranelift on the compute kernels — no numbers to take on faith.
+Methodology and per-optimization numbers are in [OPTIMIZATIONS.md](OPTIMIZATIONS.md). The head-to-head suite lives in [`benchmarks/vs-wazero`](benchmarks/vs-wazero) — `cd benchmarks/vs-wazero && go test -bench .` runs the same workloads (compile, execution, host calls) on wazy and wazero side by side. The same harness carries a **three-way comparison against wasmtime** (`BenchmarkExecute3`, `BenchmarkCompile3`): run it yourself and see wazy's native execution hold its own against Cranelift on the compute kernels — no numbers to take on faith.
 
 The host-call speedup comes from dropping reflection. Instead of the usual `reflect`-per-call path, which is ~14x slower, typed generic helpers derive the Wasm signature from Go's types at compile time:
 
@@ -37,7 +41,7 @@ wazy.HostFunc2(builder, func(ctx context.Context, mod api.Module, x, y uint32) u
 
 ## The Component Model and WASI 0.2
 
-wazy runs [WebAssembly Component Model][cm] components and [WASI 0.2][wasi] — genuine `wasm32-wasip2` binaries (rustc, wasm-tools), not just core modules and not hand-written `.wat`. Upstream [wazero][wazero] targets neither. This works today, exercised by real rustc components and the official component-model test suites:
+wazy runs [WebAssembly Component Model][cm] components and [WASI 0.2][wasi] — genuine `wasm32-wasip2` binaries (rustc, wasm-tools), not just core modules and not hand-written `.wat`. [wazero][wazero] targets neither. This works today, exercised by real rustc components and the official component-model test suites:
 
 - **The Canonical ABI** — lift and lower for every value type (primitives, `string`, `list`, `record`, `variant`, `enum`, `flags`, `option`, `result`, `tuple`) and `own`/`borrow` resource handles (drop/rep, cross-instance borrows), verified byte-for-byte against the `wasm-tools` value suites.
 - **WASI 0.2 host interfaces** — `wasi:cli` (run, stdio, environment, exit), `wasi:clocks`, `wasi:filesystem`, `wasi:io` (streams, poll, error), `wasi:random`, `wasi:sockets` (TCP/UDP and DNS), and `wasi:http` (both the incoming-handler server and the outgoing-handler client).
@@ -64,7 +68,7 @@ Call an interface export directly with `inst.CallExport("component:adder/calc", 
 
 ## Async — the Component Model async ABI (WASI 0.3)
 
-wazy runs the Component Model's async ABI: components that suspend, await, and resume — the model [WASI 0.3][wasi] is built on. Upstream [wazero][wazero] has none of it, and no other pure-Go runtime does either.
+wazy runs the Component Model's async ABI: components that suspend, await, and resume — the model [WASI 0.3][wasi] is built on. [wazero][wazero] has none of it, and no other pure-Go runtime does either.
 
 - **Callback and stackful lift** — both async lift shapes. A guest task that returns WAIT/YIELD is driven by a deterministic per-composition scheduler; a stackful task suspends on a goroutine with an unbuffered-channel baton, so exactly one runs at a time — race-free by construction, verified under `-race`.
 - **Streams and futures** — `stream<T>`/`future<T>` with rendezvous copy and per-element `own<R>` resource transfer, synchronous and asynchronous read/write, and cancellation.
