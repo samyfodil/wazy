@@ -32,6 +32,11 @@ type (
 		preambleExecutable *byte
 		// parent is the *moduleEngine from which this callEngine is created.
 		parent *moduleEngine
+		// eng is the *engine that owns the shared stack pool (== parent.parent.
+		// parent). Cached here by callWithStack's non-guard setup so growStack /
+		// the grow loop can acquire and release stack buffers without re-walking
+		// the parent chain (and so unit tests can wire a bare engine).
+		eng *engine
 		// indexInModule is the index of the function in the module.
 		indexInModule wasm.Index
 		// sizeOfParamResultSlice is the size of the parameter/result slice.
@@ -453,6 +458,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		// buffer is handed back to the pool for some other goroutine to
 		// reuse.
 		eng := c.parent.parent.parent
+		c.eng = eng // so growStack / the grow loop can reach the pool
 		var stackBoxed *[]byte
 		c.stack, stackBoxed = eng.acquireStack(c.requiredInitialStackSize())
 		c.stackTop = alignedStackTop(c.stack)
@@ -566,17 +572,39 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			oldTop := c.stackTop
 			oldStack := c.stack
 			var newsp, newfp uintptr
+			pooled := false
 			if nativeapi.StackGuardCheckEnabled {
 				newsp, newfp, err = c.growStackWithGuarded()
 			} else {
 				newsp, newfp, err = c.growStack()
+				pooled = true // non-guard path buffers come from / go back to the stack pool
 			}
 			if err != nil {
 				return err
 			}
 			adjustClonedStack(oldsp, oldTop, newsp, newfp, c.stackTop)
-			// Old stack must be alive until the new stack is adjusted.
-			runtime.KeepAlive(oldStack)
+			if pooled {
+				// oldStack is dead here: adjustClonedStack only reads/writes the
+				// NEW buffer (translating the copied frame pointers), using the
+				// old addresses purely as arithmetic bounds -- it never
+				// dereferences oldStack. growStack replaced c.stack/c.stackTop and
+				// reset stackBottomPtr to the new buffer, and execution resumes on
+				// newsp/newfp below. So recycle oldStack into the stack pool
+				// instead of dropping it to GC: growStack DOUBLES on every grow, so
+				// a deep-growth guest would otherwise allocate AND discard every
+				// intermediate buffer of the doubling sequence (measured at 2.12 GB
+				// across the spec suite's stack-overflow tests). releaseStack keeps
+				// oldStack alive across the pool hand-off, subsuming the KeepAlive
+				// the GC-only path below still needs. The final (grown) buffer is
+				// released once more by callWithStack's defer -- each buffer in the
+				// chain is released exactly once. Guard-check builds never pool
+				// (init's debug path make()s the buffer), so they keep the
+				// GC path.
+				c.eng.releaseStack(oldStack, nil)
+			} else {
+				// Old stack must be alive until the new stack is adjusted.
+				runtime.KeepAlive(oldStack)
+			}
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr, newsp, newfp)
 		case nativeapi.ExitCodeGrowMemory:
@@ -1146,14 +1174,42 @@ func (c *callEngine) growStack() (newSP, newFP uintptr, err error) {
 	}
 
 	newLen := 2*currentLen + c.execCtx.stackGrowRequiredSize + 16 // Stack might be aligned to 16 bytes, so add 16 bytes just in case.
-	newSP, newFP, c.stackTop, c.stack = c.cloneStack(newLen)
+
+	// Source the new buffer from the stack pool rather than make()-ing it fresh,
+	// so a deep-growth guest reuses the buffers released by callWithStack's grow
+	// loop (growStack doubles, so without this every intermediate buffer of the
+	// doubling sequence is allocated once and discarded -- 2.12 GB across the
+	// spec suite's stack-overflow tests). acquireStack returns a buffer of the
+	// smallest class >= newLen; the extra headroom is harmless. Guard-check
+	// builds keep make() -- their buffers are never pooled (CheckStackGuardPage
+	// needs the guard region to still be all-zero, which a reused buffer can't
+	// promise), matching init's debug path.
+	var newStack []byte
+	if nativeapi.StackGuardCheckEnabled {
+		newStack = make([]byte, newLen)
+	} else {
+		newStack, _ = c.eng.acquireStack(int(newLen))
+	}
+	newSP, newFP, c.stackTop = c.cloneStackInto(newStack)
+	c.stack = newStack
 	c.execCtx.stackBottomPtr = stackCheckLimitPtr(c.stack, 0)
 	return
 }
 
+// cloneStack allocates a fresh buffer of length l and copies the live stack
+// into it. Used by the experimental Snapshotter (doRestore's counterpart),
+// which retains the returned buffer long-term and so must NOT draw it from the
+// transient stack pool; growStack instead sources its buffer from the pool and
+// calls cloneStackInto directly.
 func (c *callEngine) cloneStack(l uintptr) (newSP, newFP, newTop uintptr, newStack []byte) {
 	newStack = make([]byte, l)
+	newSP, newFP, newTop = c.cloneStackInto(newStack)
+	return
+}
 
+// cloneStackInto copies the live stack into newStack (already allocated, and at
+// least the current stack's used size) and returns the relocated SP/FP/top.
+func (c *callEngine) cloneStackInto(newStack []byte) (newSP, newFP, newTop uintptr) {
 	relSp := c.stackTop - uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall))
 	relFp := c.stackTop - c.execCtx.framePointerBeforeGoCall
 
