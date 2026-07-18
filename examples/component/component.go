@@ -31,17 +31,25 @@ var helloWasm []byte
 //go:embed testdata/async_first_light.wasm
 var asyncWasm []byte
 
-// thread.wasm exports `run-async`, a stackful async function whose core `run`
-// spawns a worker *thread* with `thread.new-indirect` and hands control to it
-// with `thread.yield-then-resume`. The worker calls `task.return(99)`. See
-// testdata/thread.wat for the source.
+// thread.wasm (source: testdata/thread.wat) spawns a Component Model *thread*
+// with `thread.new-indirect` and hands control to it with
+// `thread.yield-then-resume`; the worker thread resolves the task with
+// `task.return(99)`.
 //
 //go:embed testdata/thread.wasm
 var threadWasm []byte
 
-// main shows the three things wazy's component package does that upstream
-// wazero does not: call a component interface export, run a WASI 0.2 command,
-// and run a component that uses the async ABI.
+// await_import.wasm exports `run-async`, which awaits an async import
+// `get() -> u32`. It is the component driven by the CallAsync demo: the host
+// completes `get` from another goroutine.
+//
+//go:embed testdata/await_import.wasm
+var awaitImportWasm []byte
+
+// main shows the things wazy's component package does that wazero does not: call
+// a component interface export, run a WASI 0.2 command, run the async ABI, spawn
+// a Component Model thread, and drive a component with CallAsync whose import
+// completes on another goroutine.
 func main() {
 	ctx := context.Background()
 
@@ -52,6 +60,7 @@ func main() {
 	fmt.Println(runWASICommand(ctx, r))
 	fmt.Println(runAsyncExport(ctx, r))
 	fmt.Println(runThreadExport(ctx, r))
+	fmt.Println(runCallAsync(ctx, r))
 }
 
 // callInterfaceExport instantiates a component and calls one of its interface
@@ -105,7 +114,7 @@ func runAsyncExport(ctx context.Context, r wazy.Runtime) string {
 
 // runThreadExport calls an export that spawns a Component Model thread
 // (thread.new-indirect + thread.yield-then-resume). The worker thread resolves
-// the task; from the embedder it is still just one blocking Call.
+// the task; from the embedder it is still one blocking Call.
 func runThreadExport(ctx context.Context, r wazy.Runtime) string {
 	inst, err := component.Instantiate(ctx, r, threadWasm)
 	if err != nil {
@@ -118,4 +127,50 @@ func runThreadExport(ctx context.Context, r wazy.Runtime) string {
 		log.Panicf("call thread run-async: %v", err)
 	}
 	return fmt.Sprintf("thread (spawn + resume) = %d", got[0].(uint32))
+}
+
+// runCallAsync drives a component with CallAsync: the guest awaits an async
+// import that completes from ANOTHER goroutine (real I/O in a real host), after
+// the import call returned — the flow a blocking Call cannot express. CallAsync
+// returns a PendingCall the moment the guest parks; Await resumes it once the
+// external Resolve lands.
+func runCallAsync(ctx context.Context, r wazy.Runtime) string {
+	release := make(chan struct{})
+	// The "get() -> u32" import defers its result to a goroutine.
+	getImport := component.WithAsyncImport("get", "",
+		func(_ context.Context, _ []component.Value, call *component.AsyncCall) error {
+			go func() {
+				<-release // stand-in for I/O finishing on some other goroutine
+				call.Resolve([]component.Value{uint32(42)})
+			}()
+			return nil
+		},
+		nil, // no params
+		[]component.TypeDesc{component.PrimitiveDesc{Prim: "u32"}}, // -> u32
+	)
+
+	inst, err := component.Instantiate(ctx, r, awaitImportWasm, getImport)
+	if err != nil {
+		log.Panicf("instantiate await_import: %v", err)
+	}
+	defer inst.Close(ctx)
+
+	p, err := inst.CallAsync(ctx, "run-async")
+	if err != nil {
+		log.Panicf("CallAsync: %v", err)
+	}
+	// The call is parked here, awaiting the external import — the host is free.
+	pending := ""
+	select {
+	case <-p.Done():
+	default:
+		pending = " (was parked until the external goroutine resolved)"
+	}
+
+	close(release) // let the other goroutine complete the import
+	got, err := p.Await(ctx)
+	if err != nil {
+		log.Panicf("Await: %v", err)
+	}
+	return fmt.Sprintf("callasync run-async() = %d%s", got[0].(uint32), pending)
 }
