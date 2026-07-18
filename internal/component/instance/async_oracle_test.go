@@ -462,6 +462,13 @@ func runAsyncOracleScenario(t *testing.T, sc asyncScenario) (trace []asyncTraceE
 			taskCancelDef.fn.Call(ctx, mod, nil)
 			appendRet(k, nil)
 
+		case "thread.yield":
+			cancellable := opBool(op, "cancellable", false)
+			def := threadYieldHostFunc(in, binary.Canon{Cancellable: cancellable})
+			stack := []uint64{0}
+			def.fn.Call(ctx, mod, stack)
+			appendRet(k, []uint32{uint32(stack[0])})
+
 		case "host.cancel-root":
 			after := opInt(op, "after")
 			deferSchedRounds(in.sched, after, func() {

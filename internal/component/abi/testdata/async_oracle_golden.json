@@ -1174,6 +1174,78 @@
         }
       ]
     },
+    "thread-yield-basic": {
+      "table": [],
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": [
+            0
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 1,
+          "vals": [
+            0
+          ]
+        },
+        {
+          "cancelled": false,
+          "kind": "task-resolve",
+          "op": 2,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 2,
+          "vals": []
+        }
+      ]
+    },
+    "thread-yield-cancel-interplay": {
+      "table": [],
+      "trace": [
+        {
+          "kind": "ret",
+          "op": 0,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 1,
+          "vals": [
+            0
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 2,
+          "vals": [
+            0
+          ]
+        },
+        {
+          "kind": "ret",
+          "op": 3,
+          "vals": [
+            1
+          ]
+        },
+        {
+          "cancelled": true,
+          "kind": "task-resolve",
+          "op": 4,
+          "vals": []
+        },
+        {
+          "kind": "ret",
+          "op": 4,
+          "vals": []
+        }
+      ]
+    },
     "wait-empty-deadlock": {
       "table": null,
       "trace": [
@@ -1288,5 +1360,5 @@
       ]
     }
   },
-  "scenarios_sha256": "3140a9ae04a10d1228d744993d2ab8704b0f3ec45d80ac35861674be088319b8"
+  "scenarios_sha256": "14c1f650a26cf623a67c1a73c5ebc2abd345505f14cc5ac053d51987e42e05ba"
 }

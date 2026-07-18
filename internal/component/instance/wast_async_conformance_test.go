@@ -309,7 +309,7 @@ var asyncWastSuites = []asyncSuite{
 	{name: "async-calls-sync"},
 	{name: "big-interleaving-test"},
 	{name: "builtin-trap-poisons-instance"},
-	{name: "cancellable", skipReason: "deferred: decoding thread.yield (canon kind 0x0c, cancel?:bool payload) is now implemented (binary/decoder.go, verified against this fixture's own bytes), so Instantiate gets past the old decode-time rejection -- but it then fails at BIND time, 'core instance 1: inline export \"thread.yield-cancellable\": references a canon of kind 0xc, which does not produce a core func' (graph.go's computeCanonHostFunc has no case for it). This suite's own $C.yield-cancel/yield-cancel-pending exports call thread.yield-cancellable from CALLBACK-lifted core code expecting it to suspend the task mid-call and later resume with a real return value (CANCELLED vs not) -- exactly the true multi-fiber \"thread of execution\" primitive the spec's threads-proposal canons model, which wazy's callback-loop task model (run-to-completion between EXIT/YIELD/WAIT packed codes) cannot express without a genuine coroutine/fiber runtime for callback-lifted exports (stackful exports have real goroutine-based suspend/resume, but $C's blocking exports here are callback-lifted, not stackful). A real, deliberately out-of-scope gap -- do not implement thread.* execution to force this"},
+	{name: "cancellable"},
 	{name: "cancel-stream"},
 	{name: "cancel-subtask"},
 	{name: "closed-stream"},

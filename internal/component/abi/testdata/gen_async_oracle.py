@@ -350,6 +350,11 @@ def run_scenario(sc):
             ref.canon_task_cancel()
             trace.append({"op": k, "kind": "ret", "vals": []})
 
+        elif kind == "thread.yield":
+            cancellable = op.get("cancellable", False)
+            cancelled = ref.canon_thread_yield(cancellable)[0]
+            trace.append({"op": k, "kind": "ret", "vals": [int(cancelled)]})
+
         elif kind == "host.cancel-root":
             register_deferred(op["after"], lambda: on_cancel_root())
             trace.append({"op": k, "kind": "ret", "vals": []})

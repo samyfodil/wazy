@@ -162,6 +162,28 @@
       ]
     },
     {
+      "name": "thread-yield-basic",
+      "desc": "thread.yield (canon_thread_yield / Thread.yield_ = wait_until(always-ready)) from the implicit thread's unpromoted-callback context: non-cancellable and cancellable both return NOT cancelled (0) when nothing is pending -- a bare cooperative round-trip, no park survives to be observed.",
+      "task_result": null,
+      "ops": [
+        {"op": "thread.yield", "cancellable": false},
+        {"op": "thread.yield", "cancellable": true},
+        {"op": "task.return", "vals": []}
+      ]
+    },
+    {
+      "name": "thread-yield-cancel-interplay",
+      "desc": "cancel-interplay matrix cancellable.wast exercises end-to-end (design doc component-model-async-threads-design-fable.md SS8.2): host.cancel-root(after:1) leaves the request PENDING (thread.yield's unpromoted-callback arm has no live park for request_cancellation to hand off to, so it always falls to the PENDING_CANCEL arm -- definitions.py ~543); a NON-cancellable yield's deliver_pending_cancel prologue explicitly does NOT consume it (returns 0, pending survives, wast:76-96's yield-cancel-pending shape); a later CANCELLABLE yield's prologue then consumes it (returns 1, wast:42-50's yield-cancel shape) without ever parking; task.cancel acks the delivered cancellation.",
+      "task_result": null,
+      "ops": [
+        {"op": "host.cancel-root", "after": 1},
+        {"op": "thread.yield", "cancellable": false},
+        {"op": "thread.yield", "cancellable": false},
+        {"op": "thread.yield", "cancellable": true},
+        {"op": "task.cancel"}
+      ]
+    },
+    {
       "name": "wait-empty-deadlock",
       "desc": "waiting on an empty set with nothing queued can never become ready -> normalized deadlock trap (design doc §2.3).",
       "task_result": null,
