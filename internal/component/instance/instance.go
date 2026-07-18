@@ -339,6 +339,17 @@ type Instance struct {
 	// thread.* canon.
 	threads threadTable
 
+	// activeThread is non-nil exactly while a SPAWNED guestThread's goroutine
+	// holds the baton (design §5.2): set at guestThread.run's entry and
+	// around guestThread.block's park, cleared at guestThread.run's exit and
+	// while parked. nil means the current thread is the implicit thread of
+	// activeTask (or no thread at all) -- the overwhelmingly common case,
+	// including every one of the 29 non-thread.new-indirect-execution suites,
+	// where this field is permanently nil. Baton-serialized: only the
+	// goroutine holding the baton ever reads or writes it -- same discipline
+	// as activeTask itself (task.go's enterRun/suspendRun).
+	activeThread *guestThread
+
 	// poisoned is true once an unhandled trap has ever escaped a call into
 	// this instance (any error surfacing from guest code actually running --
 	// a core `unreachable`, or a canonical-ABI trap_if failing mid-call, from

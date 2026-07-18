@@ -67,7 +67,12 @@ func blockingTask(in *Instance, builtin string) (t *task, blk taskBlocker) {
 	if t == nil || t.syncImplicit { // the spec's sync-task-block trap
 		panic(fmt.Errorf("component/instance: %s: cannot block a synchronous task before returning", builtin))
 	}
-	return t, t.blocker()
+	// design docs/component-model-async-threads-design-fable.md §5.2: prefer
+	// a SPAWNED guestThread's own baton over the task's implicit-thread
+	// blocker -- in.activeThread is nil unless a guestThread goroutine
+	// currently holds the baton (never true for these 29 suites' code
+	// paths), in which case it (not t.blocker()) is who must park.
+	return t, in.currentBlocker()
 }
 
 // activeBlocker returns the calling context's taskBlocker, or nil if there
@@ -83,10 +88,12 @@ func blockingTask(in *Instance, builtin string) (t *task, blk taskBlocker) {
 // task-less-OK nested-drive behavior (docs/component-model-async-stackful-
 // design.md §4.2, generalized by Feature 1 §1.4).
 func activeBlocker(in *Instance) taskBlocker {
-	if t := in.activeTask; t != nil {
-		return t.blocker()
-	}
-	return nil
+	// design docs/component-model-async-threads-design-fable.md §5.2: this is
+	// the load-bearing preference for trap-if-sync-and-waitable-set -- a
+	// spawned guestThread's own sync future/stream copy must park ITSELF
+	// (in.activeThread), not the task's implicit thread (which is itself
+	// separately parked elsewhere; parking it twice would corrupt its baton).
+	return in.currentBlocker()
 }
 
 // requireNotSyncImplicit is activeBlocker's counterpart for subtask.cancel's
@@ -315,7 +322,7 @@ func waitableJoinHostFunc(in *Instance) hostFuncDef {
 			panic(fmt.Errorf("component/instance: waitable.join: handle %d is not a waitable", wi))
 		}
 		if we.waitablePtr().syncWaiter { // trap_if(w.has_sync_waiter)
-			panic(fmt.Errorf("component/instance: waitable.join: handle %d has a synchronous subtask.cancel blocked on it", wi))
+			panic(fmt.Errorf("component/instance: waitable.join: handle %d: waitable cannot be used synchronously while added to a waitable set", wi))
 		}
 		if si == 0 {
 			we.waitablePtr().join(nil)
@@ -413,7 +420,7 @@ func subtaskCancelHostFuncGraph(in *Instance, canon binary.Canon) hostFuncDef {
 			panic(fmt.Errorf("component/instance: subtask.cancel: handle %d: cancellation already requested", i))
 		}
 		if st.inWaitableSet() && !async { // trap_if(in_waitable_set() and not async_)
-			panic(fmt.Errorf("component/instance: subtask.cancel: handle %d is joined to a waitable set; a synchronous cancel is not allowed", i))
+			panic(fmt.Errorf("component/instance: subtask.cancel: handle %d: waitable cannot be used synchronously while added to a waitable set", i))
 		}
 
 		if !st.resolved() {

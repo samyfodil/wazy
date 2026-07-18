@@ -89,6 +89,16 @@ type task struct {
 	// threadIndexHostFunc doc for why registration is lazy rather than
 	// eager (deviation §11.4).
 	implicitThreadIdx uint32
+
+	// liveThreads counts this task's currently-registered SPAWNED
+	// guestThreads (design §3/§12 Stage D: the reference's Task.threads list
+	// length, definitions.py:467, :505-525) -- incremented by
+	// thread.new-indirect's registration, decremented by guestThread.run's
+	// unregister tail (or reapParkedGoroutines' never-spawned reap arm) --
+	// used only for the reference's last-thread-unresolved trap (a spawned
+	// thread's run() checks it; see thread.go's doc). Always 0 for a task
+	// that never spawns a thread.
+	liveThreads int
 }
 
 // taskBlocker is the mid-call suspension capability (Feature 1,

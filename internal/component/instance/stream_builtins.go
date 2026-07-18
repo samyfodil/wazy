@@ -505,11 +505,19 @@ func streamCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 			// continuation. blk was already resolved above (task-less/
 			// syncImplicit already trapped there); an unpromoted callback
 			// task's nil blk still falls back to the nested drive.
+			// syncWaiter brackets the block (design docs/component-model-
+			// async-threads-design-fable.md §6.2, reference Waitable.
+			// wait_for_pending_event, definitions.py:775-779): a spawned
+			// guestThread parked here across scheduler steps must be visible
+			// to waitable.join's/subtask.cancel's in-set trap (§6.3).
+			e.waitablePtr().syncWaiter = true
 			if blk != nil {
 				blk.block(e.hasPendingEvent, false)
 			} else if derr := in.sched.drive(e.hasPendingEvent); derr != nil {
+				e.waitablePtr().syncWaiter = false
 				panic(wrapSchedErr(name, derr))
 			}
+			e.waitablePtr().syncWaiter = false
 		}
 		ev := e.getPendingEvent() // runs streamEvent: reclaims + flips state
 		stack[0] = uint64(ev.p2)
@@ -599,12 +607,16 @@ func futureCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 				stack[0] = uint64(blockedSentinel)
 				return
 			}
-			// See streamCopyHostFunc's identical split (blk resolved above).
+			// See streamCopyHostFunc's identical split (blk resolved above)
+			// and identical syncWaiter bracket (§6.2).
+			e.waitablePtr().syncWaiter = true
 			if blk != nil {
 				blk.block(e.hasPendingEvent, false)
 			} else if derr := in.sched.drive(e.hasPendingEvent); derr != nil {
+				e.waitablePtr().syncWaiter = false
 				panic(wrapSchedErr(name, derr))
 			}
+			e.waitablePtr().syncWaiter = false
 		}
 		ev := e.getPendingEvent()
 		stack[0] = uint64(ev.p2)
@@ -741,12 +753,16 @@ func cancelCopyHostFunc(in *Instance, isFuture bool, side endSide, evCode eventC
 					stack[0] = uint64(blockedSentinel)
 					return
 				}
-				// See streamCopyHostFunc's identical split (blk resolved above).
+				// See streamCopyHostFunc's identical split (blk resolved
+				// above) and identical syncWaiter bracket (§6.2).
+				w.syncWaiter = true
 				if blk != nil {
 					blk.block(hasPending, false)
 				} else if derr := in.sched.drive(hasPending); derr != nil {
+					w.syncWaiter = false
 					panic(wrapSchedErr(name, derr))
 				}
+				w.syncWaiter = false
 			}
 		}
 		ev := getPending() // flips state via the event thunk

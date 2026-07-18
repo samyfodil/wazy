@@ -270,7 +270,10 @@ func TestSubtaskCancelHostFunc_InWaitableSetAndNotAsyncTraps(t *testing.T) {
 	st.join(&waitableSet{})
 	h := in.resources.addEntry(st)
 	def := subtaskCancelHostFuncGraph(in, binary.Canon{Async: false})
-	requirePanicContains(t, "joined to a waitable set", func() {
+	// design docs/component-model-async-threads-design-fable.md §6.3: the
+	// trap text was reworded to the spec phrase trap-if-sync-and-waitable-set
+	// asserts verbatim.
+	requirePanicContains(t, "waitable cannot be used synchronously while added to a waitable set", func() {
 		def.fn.Call(context.Background(), nil, []uint64{uint64(h)})
 	})
 }
@@ -428,7 +431,9 @@ func TestWaitableJoin_SyncWaiterTraps(t *testing.T) {
 	h := in.resources.addEntry(st)
 	set := in.resources.addEntry(&waitableSet{})
 	def := waitableJoinHostFunc(in)
-	requirePanicContains(t, "synchronous subtask.cancel", func() {
+	// design docs/component-model-async-threads-design-fable.md §6.3: reworded
+	// to the spec phrase trap-if-sync-and-waitable-set asserts verbatim.
+	requirePanicContains(t, "waitable cannot be used synchronously while added to a waitable set", func() {
 		def.fn.Call(context.Background(), nil, []uint64{uint64(h), uint64(set)})
 	})
 }

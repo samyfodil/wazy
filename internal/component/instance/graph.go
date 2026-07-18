@@ -1460,6 +1460,9 @@ func computeCanonHostFunc(
 			return hostFuncDef{}, "", terr
 		}
 
+	case binary.CanonKindThreadYieldThenResume:
+		def = threadYieldThenResumeHostFunc(in, canon)
+
 	case binary.CanonKindTaskCancel:
 		def = taskCancelHostFuncGraph(in)
 
