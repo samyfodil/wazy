@@ -2,9 +2,9 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/samyfodil/wazy.svg)](https://pkg.go.dev/github.com/samyfodil/wazy) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-A fast WebAssembly runtime for Go: zero dependencies, no CGO, pure Go.
+A fast WebAssembly runtime for Go: zero dependencies, no CGO, pure Go — with execution on par with [wasmtime][wasmtime], plus the Component Model, WASI 0.2, and the WASI 0.3 async ABI running today.
 
-wazy embeds WebAssembly in your Go application. Run code compiled from Rust, C, C++, TinyGo, Zig, and anything else that targets Wasm. No external toolchain. No cgo. Nothing to install at runtime. It is built for speed and developed aggressively.
+wazy embeds WebAssembly in your Go application. Run code compiled from Rust, C, C++, TinyGo, Zig, and anything else that targets Wasm. No external toolchain. No cgo. Nothing to install at runtime. It is built for speed and developed aggressively — pure-Go convenience without giving up native-runtime performance, and it targets the modern Wasm platform: core modules, [components][cm], WASI 0.2, and the WASI 0.3 async ABI ([below](#async--the-component-model-async-abi-wasi-03)).
 
 ```bash
 go get github.com/samyfodil/wazy@latest
@@ -14,7 +14,7 @@ wazy is compliant with the WebAssembly Core Specification [1.0][1] and [2.0][2].
 
 ## Fast
 
-wazy is measurably faster than [wazero][wazero], the runtime it descends from, on the paths that set real throughput and latency. Measured against upstream on the same hardware:
+wazy is faster than [wazero][wazero], the runtime it descends from, on the paths that set real throughput and latency — and its native compiler runs compute code on par with [wasmtime][wasmtime]'s Cranelift, in pure Go with no CGO. Measured against upstream on the same hardware:
 
 - **Host calls up to ~15x faster**, with zero allocations. Calling a Go function from Wasm is the hot path for WASI and for any host API you expose. wazy's typed host functions run at native-call speed.
 - **Compiled execution 4–18% faster** on real TinyGo workloads (geomean ~6% vs `wazero@main`). Memory-heavy code leads — string manipulation −18%, array reversal −14%, base64 −12% — with recursive fibonacci −4%. The compiler also allocates less per module (up to −17% on real Rust/Zig/C output).
@@ -23,7 +23,7 @@ wazy is measurably faster than [wazero][wazero], the runtime it descends from, o
 - **Interpreter ~30% faster**, with per-call heap allocation eliminated. A benchmark that allocated 1.35M times now allocates twice.
 - **~87% less memory per call** for the common request-per-call pattern.
 
-Methodology and per-optimization numbers are in [OPTIMIZATIONS.md](OPTIMIZATIONS.md). The head-to-head suite lives in [`benchmarks/vs-wazero`](benchmarks/vs-wazero) — `cd benchmarks/vs-wazero && go test -bench .` runs the same workloads (compile, execution, host calls) on wazy and upstream side by side.
+Methodology and per-optimization numbers are in [OPTIMIZATIONS.md](OPTIMIZATIONS.md). The head-to-head suite lives in [`benchmarks/vs-wazero`](benchmarks/vs-wazero) — `cd benchmarks/vs-wazero && go test -bench .` runs the same workloads (compile, execution, host calls) on wazy and upstream side by side. The same harness carries a **three-way comparison against wasmtime** (`BenchmarkExecute3`, `BenchmarkCompile3`): run it yourself and see wazy's native execution hold its own against Cranelift on the compute kernels — no numbers to take on faith.
 
 The host-call speedup comes from dropping reflection. Instead of the usual `reflect`-per-call path, which is ~14x slower, typed generic helpers derive the Wasm signature from Go's types at compile time:
 
@@ -75,11 +75,14 @@ It passes **all 31 official Component Model async `.wast` conformance suites** (
 
 ## Moving fast
 
-wazy is an actively developed performance fork, built for the modern Wasm platform upstream does not target — the Component Model, WASI 0.2, and the async ABI today (above), with the full WASI 0.3 host-interface surface next.
+[wazero][wazero] is a mature, well-run project that prioritizes API stability and a scope centered on core modules and WASI 0.1 — the right call for its large user base. wazy makes different trade-offs: it targets the modern Wasm platform (Component Model, WASI 0.2, the async ABI today, above; the full WASI 0.3 host-interface surface next) and lands performance work continuously rather than waiting on a release cadence.
 
-That choice has a cost. wazy makes no API-stability promise. It has already broken compatibility with wazero, including host-function registration, and will do so again when that makes the runtime faster or moves it toward the Component Model.
+Two things make that pace possible:
 
-If you want a mature, stability-guaranteed runtime with a large user base, use [wazero][wazero]. If you want a fast runtime on the modern Wasm platform, use wazy.
+- **We ship fast.** wazy makes no API-stability promise. It has already broken compatibility with wazero, including host-function registration, and will do so again whenever that makes the runtime faster or moves it toward the Component Model. Correctness is guarded by the conformance and fuzzing suites, not by freezing the API.
+- **We accept AI contributions.** Machine-generated changes are welcome on equal footing with human ones — the bar is the same for both: they pass the full spec-conformance, differential, and fuzzing suites, and they make the runtime measurably better. Much of wazy's optimization and Component Model work was built this way.
+
+If you want a mature, stability-guaranteed runtime with a large user base, use [wazero][wazero]. If you want a fast runtime that keeps pace with the modern Wasm platform — and performs like a native one — use wazy.
 
 ## Two engines
 
@@ -107,6 +110,7 @@ Apache 2.0. See [LICENSE](LICENSE).
 [1]: https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/
 [2]: https://www.w3.org/TR/2022/WD-wasm-core-2-20220419/
 [wazero]: https://github.com/tetratelabs/wazero
+[wasmtime]: https://github.com/bytecodealliance/wasmtime
 [cm]: https://component-model.bytecodealliance.org/
 [wasi]: https://wasi.dev/
 [pr679]: https://github.com/WebAssembly/component-model/pull/679
