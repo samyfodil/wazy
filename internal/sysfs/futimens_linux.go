@@ -4,8 +4,9 @@ import (
 	"syscall"
 	"unsafe"
 
-	"github.com/samyfodil/wazy/sys"
 	"golang.org/x/sys/unix"
+
+	"github.com/samyfodil/wazy/sys"
 )
 
 const _UTIME_OMIT = unix.UTIME_OMIT
