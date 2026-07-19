@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="400" viewBox="0 0 1200 400" role="img" aria-labelledby="title desc">
+  <title id="title">Wazy logo</title>
+  <desc id="desc">A geometric gradient W symbol followed by the Wazy wordmark.</desc>
+  <defs>
+    <linearGradient id="leftGradient" x1="0%" y1="0%" x2="90%" y2="100%">
+      <stop offset="0%" stop-color="#86A9FF"/>
+      <stop offset="50%" stop-color="#5264F3"/>
+      <stop offset="100%" stop-color="#2519A8"/>
+    </linearGradient>
+    <linearGradient id="centerGradient" x1="0%" y1="10%" x2="100%" y2="95%">
+      <stop offset="0%" stop-color="#5184FF"/>
+      <stop offset="52%" stop-color="#2AA8F6"/>
+      <stop offset="100%" stop-color="#61E5ED"/>
+    </linearGradient>
+    <linearGradient id="rightGradient" x1="18%" y1="0%" x2="82%" y2="100%">
+      <stop offset="0%" stop-color="#20F1EF"/>
+      <stop offset="52%" stop-color="#14C1CB"/>
+      <stop offset="100%" stop-color="#087B91"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="400" fill="#07090E"/>
+  <g>
+    <polygon points="140,200 220,90 300,200 220,310" fill="url(#leftGradient)"/>
+    <polygon points="380,200 460,90 540,200 460,310" fill="url(#rightGradient)"/>
+    <polygon points="220,310 300,200 380,200 460,310 380,310 340,252 300,310" fill="url(#centerGradient)"/>
+  </g>
+  <path d="M614.52 275.0H630.1L650.4300000000001 206.79000000000002L670.38 275.0H686.15L724.15 169.74H697.17L677.98 233.96L660.69 169.74H640.55L622.88 233.96L604.07 169.74H576.9Z M839.85 169.74H816.67V183.8C807.9300000000001 172.20999999999998 797.48 167.26999999999998 782.28 167.26999999999998C751.12 167.26999999999998 728.7 190.64 728.7 222.75C728.7 254.48 750.93 277.47 781.71 277.47C796.53 277.47 806.6 272.91 816.67 261.32V275.0H839.85ZM784.94 190.45C802.99 190.45 815.91 203.94 815.91 223.13C815.91 230.73 812.87 239.47 808.31 244.79C803.1800000000001 251.06 795.01 254.29 785.32 254.29C766.89 254.29 754.16 241.75 754.16 223.32C754.16 204.13 766.89 190.45 784.94 190.45Z M848.1999999999999 275.0H928.38V252.39H878.41L924.77 192.35V169.74H853.52V192.35H894.56L848.1999999999999 252.39Z M947.75 310.15H974.92L1035.72 169.74H1006.4599999999999L981.1899999999999 237.95L957.8199999999999 169.74H928.9399999999999L967.51 265.12Z" fill="#F7F8FA"/>
+</svg>

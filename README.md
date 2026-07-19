@@ -1,4 +1,9 @@
-# wazy
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/wazy-logo-dark.svg">
+    <img alt="wazy" src=".github/assets/wazy-logo-light.svg" width="360">
+  </picture>
+</p>
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/samyfodil/wazy.svg)](https://pkg.go.dev/github.com/samyfodil/wazy) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
