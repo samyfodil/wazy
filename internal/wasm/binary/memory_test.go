@@ -19,6 +19,7 @@ func Test_newMemorySizer(t *testing.T) {
 	tests := []struct {
 		name                                       string
 		memoryCapacityFromMax                      bool
+		memoryCapacityReservePages                 uint32
 		limit                                      uint32
 		min                                        uint32
 		max                                        *uint32
@@ -60,14 +61,15 @@ func Test_newMemorySizer(t *testing.T) {
 			expectedMax:      ten,
 		},
 		{
-			name:                  "min 0, max 10 memoryCapacityFromMax",
-			limit:                 defaultLimit,
-			memoryCapacityFromMax: true,
-			min:                   zero,
-			max:                   &ten,
-			expectedMin:           zero,
-			expectedCapacity:      ten,
-			expectedMax:           ten,
+			name:                       "min 0, max 10 memoryCapacityFromMax",
+			limit:                      defaultLimit,
+			memoryCapacityFromMax:      true,
+			memoryCapacityReservePages: 2,
+			min:                        zero,
+			max:                        &ten,
+			expectedMin:                zero,
+			expectedCapacity:           ten,
+			expectedMax:                ten,
 		},
 		{
 			name:             "min 10, no max",
@@ -76,6 +78,35 @@ func Test_newMemorySizer(t *testing.T) {
 			expectedMin:      10,
 			expectedCapacity: 10,
 			expectedMax:      200,
+		},
+		{
+			name:                       "min 10, reserve 20, no max",
+			memoryCapacityReservePages: 20,
+			limit:                      200,
+			min:                        10,
+			expectedMin:                10,
+			expectedCapacity:           30,
+			expectedMax:                200,
+		},
+		{
+			name:                       "reserve capped at encoded max",
+			memoryCapacityReservePages: 20,
+			limit:                      defaultLimit,
+			min:                        0,
+			max:                        &ten,
+			expectedMin:                0,
+			expectedCapacity:           10,
+			expectedMax:                10,
+		},
+		{
+			name:                       "reserve capped at runtime limit",
+			memoryCapacityReservePages: 20,
+			limit:                      5,
+			min:                        0,
+			max:                        &ten,
+			expectedMin:                0,
+			expectedCapacity:           5,
+			expectedMax:                5,
 		},
 		{
 			name:                  "min 10, no max memoryCapacityFromMax",
@@ -109,7 +140,7 @@ func Test_newMemorySizer(t *testing.T) {
 	for _, tt := range tests {
 		tc := tt
 		t.Run(tc.name, func(t *testing.T) {
-			sizer := newMemorySizer(tc.limit, tc.memoryCapacityFromMax)
+			sizer := newMemorySizer(tc.limit, tc.memoryCapacityFromMax, tc.memoryCapacityReservePages)
 			min, capacity, max := sizer(tc.min, tc.max)
 			require.Equal(t, tc.expectedMin, min)
 			require.Equal(t, tc.expectedCapacity, capacity)
@@ -192,7 +223,7 @@ func TestMemoryType(t *testing.T) {
 			if tc.input.IsShared {
 				features = features.SetEnabled(experimental.CoreFeaturesThreads, true)
 			}
-			decoded, _, err := decodeMemory(b, 0, features, newMemorySizer(tmax, false), tmax)
+			decoded, _, err := decodeMemory(b, 0, features, newMemorySizer(tmax, false, 0), tmax)
 			require.NoError(t, err)
 			require.Equal(t, decoded, expectedDecoded)
 		})
@@ -247,7 +278,7 @@ func TestDecodeMemoryType_Errors(t *testing.T) {
 				// Allow test to work if threads is ever added to default features by explicitly removing threads features
 				features = features.SetEnabled(experimental.CoreFeaturesThreads, false)
 			}
-			_, _, err := decodeMemory(tc.input, 0, features, newMemorySizer(max, false), max)
+			_, _, err := decodeMemory(tc.input, 0, features, newMemorySizer(max, false, 0), max)
 			require.EqualError(t, err, tc.expectedErr)
 		})
 	}

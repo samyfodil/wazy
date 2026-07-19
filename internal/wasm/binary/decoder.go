@@ -18,7 +18,8 @@ func DecodeModule(
 	binary []byte,
 	enabledFeatures api.CoreFeatures,
 	memoryLimitPages uint32,
-	memoryCapacityFromMax,
+	memoryCapacityFromMax bool,
+	memoryCapacityReservePages uint32,
 	dwarfEnabled, storeCustomSections bool,
 ) (*wasm.Module, error) {
 	// Magic number.
@@ -31,7 +32,7 @@ func DecodeModule(
 		return nil, ErrInvalidVersion
 	}
 
-	memSizer := newMemorySizer(memoryLimitPages, memoryCapacityFromMax)
+	memSizer := newMemorySizer(memoryLimitPages, memoryCapacityFromMax, memoryCapacityReservePages)
 
 	m := &wasm.Module{}
 	// arena batches every string decoded for this module (import/export/custom/name-section strings) into a few
@@ -213,9 +214,9 @@ func checkSectionOrder(current, previous wasm.SectionID) (byte, bool) {
 // memorySizer derives min, capacity and max pages from decoded wasm.
 type memorySizer func(minPages uint32, maxPages *uint32) (min uint32, capacity uint32, max uint32)
 
-// newMemorySizer sets capacity to minPages unless max is defined and
-// memoryCapacityFromMax is true.
-func newMemorySizer(memoryLimitPages uint32, memoryCapacityFromMax bool) memorySizer {
+// newMemorySizer sets capacity to the initial size plus the configured reserve,
+// capped at the effective maximum. memoryCapacityFromMax overrides the reserve.
+func newMemorySizer(memoryLimitPages uint32, memoryCapacityFromMax bool, memoryCapacityReservePages uint32) memorySizer {
 	return func(minPages uint32, maxPages *uint32) (min, capacity, max uint32) {
 		if maxPages != nil {
 			if memoryCapacityFromMax {
@@ -227,13 +228,23 @@ func newMemorySizer(memoryLimitPages uint32, memoryCapacityFromMax bool) memoryS
 			}
 			// This is a valid value, but it goes over the run-time limit: return the limit.
 			if *maxPages > memoryLimitPages {
-				return minPages, minPages, memoryLimitPages
+				return minPages, memoryCapacity(minPages, memoryLimitPages, memoryCapacityReservePages), memoryLimitPages
 			}
-			return minPages, minPages, *maxPages
+			return minPages, memoryCapacity(minPages, *maxPages, memoryCapacityReservePages), *maxPages
 		}
 		if memoryCapacityFromMax {
 			return minPages, memoryLimitPages, memoryLimitPages
 		}
-		return minPages, minPages, memoryLimitPages
+		return minPages, memoryCapacity(minPages, memoryLimitPages, memoryCapacityReservePages), memoryLimitPages
 	}
+}
+
+func memoryCapacity(minPages, maxPages, reservePages uint32) uint32 {
+	if maxPages <= minPages {
+		return minPages
+	}
+	if reservePages >= maxPages-minPages {
+		return maxPages
+	}
+	return minPages + reservePages
 }

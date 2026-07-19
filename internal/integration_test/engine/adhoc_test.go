@@ -1745,7 +1745,7 @@ func testListenerStackIteratorOffset(t *testing.T, r wazy.Runtime) {
 		},
 		CustomSections: []*wasm.CustomSection{{Name: ".debug_info", Data: minimalDWARFInfo}},
 	})
-	decoded, err := binary.DecodeModule(encoded, api.CoreFeaturesV2, 0, false, true, true)
+	decoded, err := binary.DecodeModule(encoded, api.CoreFeaturesV2, 0, false, 0, true, true)
 	require.NoError(t, err)
 
 	f1offset := decoded.CodeSection[0].BodyOffsetInCodeSection

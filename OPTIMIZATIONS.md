@@ -229,8 +229,15 @@ the first cold iteration). These numbers identify surfaces to investigate, not a
   clearing. **Measured** on a core-pinned i9-12900HK (n=8): a compiled function performing 100
   in-capacity `memory.grow 0` operations improves **2.441 µs → 109.0 ns (−95.5%, 22.4×)**, with
   **0 B/op, 0 allocs/op** unchanged. The isolated Go fallback case exposing 16 already-reserved
-  pages improves **15.12 µs → 927 ns (−93.9%, 16.3×)**, also zero-allocation. Six order-alternated,
-  core-pinned compile pairs across TinyGo, Rust, Zig, Zig-cc, and Cargo were neutral
+  pages improves **15.12 µs → 927 ns (−93.9%, 16.3×)**, also zero-allocation. An optimized
+  rustc/LLVM fixture that retains 64 allocations of 64 KiB improves **11.83 → 10.40 µs/op
+  (−12.0%, 1.14×)** when capacity is fully reserved. Its reserve sweep shows why capacity is now
+  tunable with `WithMemoryCapacityReservePages`: 0, 64, and 128 extra pages take **2.23 ms,
+  1.01 ms, and 8.80 µs/op**, respectively, as timed growth allocation falls from **21.3 MB to
+  6.65 MB to zero**. The default remains zero because 128 pages reserve 8 MiB per instance; the
+  right tradeoff is workload-specific. The Rust source and 17 KiB compiled Wasm are checked in as
+  reproducible benchmark testdata. Six order-alternated, core-pinned compile pairs across TinyGo,
+  Rust, Zig, Zig-cc, and Cargo were neutral
   (**−0.78% geomean**, noise); only modules containing the expanded grow lowering add 1–4 compile
   allocations. End-to-end tests cover successful positive and zero growth, immediate host-visible
   size/write access, exact-Max failure, custom-allocator fallback, and re-exported imported memory.

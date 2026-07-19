@@ -50,6 +50,15 @@ func TestRuntimeConfig(t *testing.T) {
 			},
 		},
 		{
+			name: "memoryCapacityReservePages",
+			with: func(c RuntimeConfig) RuntimeConfig {
+				return c.WithMemoryCapacityReservePages(64)
+			},
+			expected: &runtimeConfig{
+				memoryCapacityReservePages: 64,
+			},
+		},
+		{
 			name: "WithDebugInfoEnabled",
 			with: func(c RuntimeConfig) RuntimeConfig {
 				return c.WithDebugInfoEnabled(false)
