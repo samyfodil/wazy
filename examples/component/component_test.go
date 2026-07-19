@@ -7,12 +7,14 @@ import (
 	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
-// Test_main ensures `go run .` prints the three component results.
+// Test_main ensures `go run .` prints the six component results.
 func Test_main(t *testing.T) {
 	stdout, _ := maintester.TestMain(t, main, "component")
 	require.Equal(t, `component:adder/calc add(2, 3) = 5
 wasi:cli hello: hello world
 async run-async() = 42
 thread (spawn + resume) = 99
+multithread map-reduce (4 mappers + reducer) = 72
+callasync run-async() = 42 (was parked until the external goroutine resolved)
 `, stdout)
 }

@@ -302,7 +302,8 @@ func ptrU32(v uint32) *uint32 { return &v }
 func TestAsyncCall_Resolve_TwiceTraps(t *testing.T) {
 	st := newSubtask()
 	st.resolveFn = func([]abi.Value) error { return nil }
-	ac := &AsyncCall{in: &Instance{sched: &sched{}}, st: st, inCall: true}
+	ac := &AsyncCall{in: &Instance{sched: &sched{}}, st: st}
+	ac.inCall.Store(true)
 	ac.Resolve(nil)
 	requirePanicContains(t, "Resolve called twice", func() { ac.Resolve(nil) })
 }
@@ -317,7 +318,8 @@ func TestAsyncCall_Resolve_OutsideSchedulerTraps(t *testing.T) {
 func TestAsyncCall_Resolve_ApplyResolveErrorTraps(t *testing.T) {
 	st := newSubtask()
 	st.resolveFn = func([]abi.Value) error { return errors.New("bad result") }
-	ac := &AsyncCall{in: &Instance{sched: &sched{}}, st: st, inCall: true}
+	ac := &AsyncCall{in: &Instance{sched: &sched{}}, st: st}
+	ac.inCall.Store(true)
 	requirePanicContains(t, "bad result", func() { ac.Resolve(nil) })
 }
 
@@ -380,14 +382,16 @@ func TestAsyncCall_OnCancel_SetsSubtaskOnCancel(t *testing.T) {
 
 func TestAsyncCall_ResolveCancelled_RequiresCancellationRequested(t *testing.T) {
 	st := newSubtask()
-	ac := &AsyncCall{in: &Instance{sched: &sched{}}, st: st, inCall: true}
+	ac := &AsyncCall{in: &Instance{sched: &sched{}}, st: st}
+	ac.inCall.Store(true)
 	requirePanicContains(t, "without a prior subtask.cancel request", func() { ac.ResolveCancelled() })
 }
 
 func TestAsyncCall_ResolveCancelled_Immediate(t *testing.T) {
 	st := newSubtask()
 	st.cancellationRequested = true
-	ac := &AsyncCall{in: &Instance{sched: &sched{}}, st: st, inCall: true}
+	ac := &AsyncCall{in: &Instance{sched: &sched{}}, st: st}
+	ac.inCall.Store(true)
 	ac.ResolveCancelled()
 	if st.state != subtaskCancelledBeforeReturned {
 		t.Fatalf("state = %v, want subtaskCancelledBeforeReturned", st.state)
@@ -418,7 +422,8 @@ func TestAsyncCall_ResolveCancelled_Parked(t *testing.T) {
 func TestAsyncCall_ResolveCancelled_TwiceTraps(t *testing.T) {
 	st := newSubtask()
 	st.cancellationRequested = true
-	ac := &AsyncCall{in: &Instance{sched: &sched{}}, st: st, inCall: true}
+	ac := &AsyncCall{in: &Instance{sched: &sched{}}, st: st}
+	ac.inCall.Store(true)
 	ac.ResolveCancelled()
 	requirePanicContains(t, "called twice", func() { ac.ResolveCancelled() })
 }

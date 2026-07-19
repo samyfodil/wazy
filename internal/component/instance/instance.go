@@ -139,6 +139,13 @@ func putCoreValueSlice(p *[]abi.CoreValue) {
 type Instance struct {
 	resolve abi.Resolver
 
+	// --- CallAsync (host-side non-blocking calls, callasync.go) ---
+	asyncActive atomic.Bool       // a CallAsync is outstanding; external AsyncCall.Resolve queues instead of erroring
+	amu         sync.Mutex        // guards mailbox, pending, PendingCall.closed, and acond
+	acond       *sync.Cond        // signalled on a queued completion or on finish
+	mailbox     []asyncCompletion // external completions awaiting the driver
+	pending     *PendingCall      // the outstanding CallAsync, if any
+
 	// exports maps a component export name to the binding that backs it.
 	exports map[string]*boundExport
 
@@ -2013,6 +2020,12 @@ func safeExportedFunction(mod api.Module, name string) (fn api.Function) {
 // order of instantiation). It does not close the Runtime passed to
 // Instantiate, which the caller owns.
 func (in *Instance) Close(ctx context.Context) error {
+	in.amu.Lock()
+	p := in.pending
+	in.amu.Unlock()
+	if p != nil {
+		in.finishAsync(p, nil, errCallAsyncCancelled)
+	}
 	// Reap every parked goroutine (stackful task or promoted callback-task
 	// segment) in the shared scheduler BEFORE closing core modules
 	// (docs/component-model-async-stackful-design.md §8, Feature 1
