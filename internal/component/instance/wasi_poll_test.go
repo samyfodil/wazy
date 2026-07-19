@@ -81,12 +81,15 @@ func TestPoll_BlockTimerSleeps(t *testing.T) {
 		t.Fatal(err)
 	}
 	rep := res[0].(uint32)
-	start := time.Now()
+	deadline, ok := p.deadlineOf(rep)
+	if !ok {
+		t.Fatal("timer deadline not found")
+	}
 	if _, err := p.block(context.Background(), []abi.Value{rep}); err != nil {
 		t.Fatal(err)
 	}
-	if elapsed := time.Since(start); elapsed < 40*time.Millisecond {
-		t.Fatalf("block returned in %v, want >= 40ms (timer must sleep)", elapsed)
+	if returnedAt := time.Now(); returnedAt.Before(deadline) {
+		t.Fatalf("block returned at %v, before timer deadline %v", returnedAt, deadline)
 	}
 }
 
@@ -145,15 +148,18 @@ func TestPoll_PollBlocksUntilTimer(t *testing.T) {
 	r1, _ := p.subscribeDuration(context.Background(), []abi.Value{uint64(60 * time.Millisecond)})
 	r2, _ := p.subscribeDuration(context.Background(), []abi.Value{uint64(20 * time.Millisecond)})
 	h1 := pollHandle(t, p, r1[0].(uint32))
-	h2 := pollHandle(t, p, r2[0].(uint32))
-	start := time.Now()
+	soonerRep := r2[0].(uint32)
+	h2 := pollHandle(t, p, soonerRep)
+	soonerDeadline, ok := p.deadlineOf(soonerRep)
+	if !ok {
+		t.Fatal("sooner timer deadline not found")
+	}
 	res, err := p.poll(context.Background(), []abi.Value{[]abi.Value{h1, h2}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	elapsed := time.Since(start)
-	if elapsed < 20*time.Millisecond {
-		t.Fatalf("poll returned in %v, want >= 20ms (blocked on sooner timer)", elapsed)
+	if returnedAt := time.Now(); returnedAt.Before(soonerDeadline) {
+		t.Fatalf("poll returned at %v, before sooner timer deadline %v", returnedAt, soonerDeadline)
 	}
 	out := res[0].([]abi.Value)
 	// The 20ms timer (index 1) must be ready; the 60ms one (index 0) not yet.
