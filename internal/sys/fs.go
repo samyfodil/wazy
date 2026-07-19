@@ -4,6 +4,7 @@ import (
 	"io"
 	"io/fs"
 	"net"
+	"sync/atomic"
 
 	"github.com/samyfodil/wazy/internal/descriptor"
 	socketapi "github.com/samyfodil/wazy/internal/sock"
@@ -52,8 +53,29 @@ type FileEntry struct {
 	// File is always non-nil.
 	File sys.File
 
+	// cachedStatMode is one plus the immutable file-type portion of
+	// File.Stat().Mode. Zero means uncached. Descriptor flags and the rest of
+	// the stat record remain uncached.
+	cachedStatMode atomic.Uint32
+
 	// direntCache is nil until DirentCache was called.
 	direntCache *DirentCache
+}
+
+// CachedStatMode returns the file-type portion of File.Stat().Mode, caching it
+// for the lifetime of this entry. A descriptor's file type cannot change while
+// it is open; closing and reusing its number creates a new FileEntry.
+func (f *FileEntry) CachedStatMode() (fs.FileMode, sys.Errno) {
+	if cached := f.cachedStatMode.Load(); cached != 0 {
+		return fs.FileMode(cached - 1), 0
+	}
+	st, errno := f.File.Stat()
+	if errno != 0 {
+		return 0, errno
+	}
+	mode := st.Mode.Type()
+	f.cachedStatMode.Store(uint32(mode) + 1)
+	return mode, 0
 }
 
 // DirentCache gets or creates a DirentCache for this file or returns an error.
