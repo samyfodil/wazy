@@ -230,8 +230,10 @@ the first cold iteration). These numbers identify surfaces to investigate, not a
   in-capacity `memory.grow 0` operations improves **2.441 µs → 109.0 ns (−95.5%, 22.4×)**, with
   **0 B/op, 0 allocs/op** unchanged. The isolated Go fallback case exposing 16 already-reserved
   pages improves **15.12 µs → 927 ns (−93.9%, 16.3×)**, also zero-allocation. An optimized
-  rustc/LLVM fixture that retains 64 allocations of 64 KiB improves **11.83 → 10.40 µs/op
-  (−12.0%, 1.14×)** when capacity is fully reserved. Its reserve sweep shows why capacity is now
+  rustc/LLVM fixture that retains 64 allocations of 64 KiB improves **12.65 → 10.49 µs/op
+  (−17.1%, 1.21× median; −15.9% paired geomean)** versus the exact pre-PR commit when capacity is
+  fully reserved. Allocations remain 5/op, while Go allocation volume falls from about 10.83 to
+  10.45 KiB/op. Its reserve sweep shows why capacity is now
   tunable with `WithMemoryCapacityReservePages`: 0, 16, 64, and 128 extra pages take **2.40 ms,
   1.54 ms, 1.58 ms, and 9.40 µs/op**, respectively. Go fallback growth reapplies the reserve to its
   new logical size, capped by the module/runtime maximum. The default remains zero because 128
