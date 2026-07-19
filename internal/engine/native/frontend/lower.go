@@ -1157,7 +1157,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 				Return()
 
 			memSizeInBytes = builder.AllocateInstruction().
-				AsLoad(memInstPtr, memoryInstanceBufSizeOffset, ssa.TypeI32).
+				AsLoad(memInstPtr, memoryInstanceSizeOffset, ssa.TypeI32).
 				Insert(builder).
 				Return()
 		} else {
@@ -1182,21 +1182,12 @@ func (c *Compiler) lowerCurrentOpcode() {
 			break
 		}
 
-		c.storeCallerModuleContext()
-
 		pages := state.pop()
-		memoryGrowPtr := builder.AllocateInstruction().
-			AsLoad(c.execCtxPtrValue,
-				nativeapi.ExecutionContextOffsetMemoryGrowTrampolineAddress.U32(),
-				ssa.TypeI64,
-			).Insert(builder).Return()
-
-		args := c.allocateVarLengthValues(2, c.execCtxPtrValue, pages)
-		callGrowRet := builder.
-			AllocateInstruction().
-			AsCallIndirect(memoryGrowPtr, &c.memoryGrowSig, args).
-			Insert(builder).Return()
-		state.push(callGrowRet)
+		if c.offset.LocalMemoryBegin >= 0 && !c.memoryShared {
+			state.push(c.lowerLocalMemoryGrow(pages))
+		} else {
+			state.push(c.lowerMemoryGrowCall(pages))
+		}
 
 		// After the memory grow, reload the cached memory base and len.
 		c.reloadMemoryBaseLen()
@@ -4615,6 +4606,91 @@ func (c *Compiler) reloadMemoryBaseLen() {
 	c.resetAbsoluteAddressInSafeBounds()
 }
 
+func (c *Compiler) lowerMemoryGrowCall(pages ssa.Value) ssa.Value {
+	builder := c.ssaBuilder
+	c.storeCallerModuleContext()
+	memoryGrowPtr := builder.AllocateInstruction().
+		AsLoad(c.execCtxPtrValue,
+			nativeapi.ExecutionContextOffsetMemoryGrowTrampolineAddress.U32(),
+			ssa.TypeI64,
+		).Insert(builder).Return()
+	args := c.allocateVarLengthValues(2, c.execCtxPtrValue, pages)
+	return builder.AllocateInstruction().
+		AsCallIndirect(memoryGrowPtr, &c.memoryGrowSig, args).
+		Insert(builder).Return()
+}
+
+// lowerLocalMemoryGrow keeps growth within an ordinary memory's reserved
+// capacity in native code. Growth that needs allocation, and all custom
+// allocator growth (nativeGrowCap == 0), uses the existing Go trampoline.
+func (c *Compiler) lowerLocalMemoryGrow(pages ssa.Value) ssa.Value {
+	builder := c.ssaBuilder
+	checkCapacityBlk := builder.AllocateBasicBlock()
+	fastBlk := builder.AllocateBasicBlock()
+	slowBlk := builder.AllocateBasicBlock()
+	failBlk := builder.AllocateBasicBlock()
+	followingBlk := builder.AllocateBasicBlock()
+	result := followingBlk.AddParam(builder, ssa.TypeI32)
+
+	currentLen := c.getMemoryLenValue(false)
+	pageShift := builder.AllocateInstruction().AsIconst64(wasm.MemoryPageSizeInBits).Insert(builder).Return()
+	currentPages64 := builder.AllocateInstruction().AsUshr(currentLen, pageShift).Insert(builder).Return()
+	currentPages := builder.AllocateInstruction().AsIreduce(currentPages64, ssa.TypeI32).Insert(builder).Return()
+	pages64 := builder.AllocateInstruction().AsUExtend(pages, 32, 64).Insert(builder).Return()
+	newPages := builder.AllocateInstruction().AsIadd(currentPages64, pages64).Insert(builder).Return()
+	maxPages := builder.AllocateInstruction().AsIconst64(uint64(c.memoryMaxPages)).Insert(builder).Return()
+	overMax := builder.AllocateInstruction().
+		AsIcmp(newPages, maxPages, ssa.IntegerCmpCondUnsignedGreaterThan).Insert(builder).Return()
+	builder.AllocateInstruction().AsBrnz(overMax, ssa.ValuesNil, failBlk).Insert(builder)
+	builder.AllocateInstruction().AsJump(ssa.ValuesNil, checkCapacityBlk).Insert(builder)
+
+	builder.SetCurrentBlock(checkCapacityBlk)
+	moduleInstance := builder.AllocateInstruction().
+		AsLoad(c.moduleCtxPtrValue, c.offset.ModuleInstanceOffset.U32(), ssa.TypeI64).
+		Insert(builder).Return()
+	memoryInstance := builder.AllocateInstruction().
+		AsLoad(moduleInstance, moduleInstanceMemoryOffset, ssa.TypeI64).
+		Insert(builder).Return()
+	capacity := builder.AllocateInstruction().
+		AsLoad(memoryInstance, memoryInstanceNativeGrowCapOffset, ssa.TypeI64).
+		Insert(builder).Return()
+	newLen := builder.AllocateInstruction().AsIshl(newPages, pageShift).Insert(builder).Return()
+	withinCapacity := builder.AllocateInstruction().
+		AsIcmp(capacity, newLen, ssa.IntegerCmpCondUnsignedGreaterThanOrEqual).Insert(builder).Return()
+	builder.AllocateInstruction().AsBrnz(withinCapacity, ssa.ValuesNil, fastBlk).Insert(builder)
+	builder.AllocateInstruction().AsJump(ssa.ValuesNil, slowBlk).Insert(builder)
+	builder.Seal(checkCapacityBlk)
+
+	builder.SetCurrentBlock(fastBlk)
+	// Keep both logical-size views synchronized. The backing allocation and Go
+	// slice header are immutable on this path.
+	builder.AllocateInstruction().
+		AsStore(ssa.OpcodeStore, newLen, c.moduleCtxPtrValue, c.offset.LocalMemoryLen().U32()).
+		Insert(builder)
+	builder.AllocateInstruction().
+		AsStore(ssa.OpcodeStore, newLen, memoryInstance, memoryInstanceSizeOffset).
+		Insert(builder)
+	builder.AllocateInstruction().
+		AsJump(c.allocateVarLengthValues(1, currentPages), followingBlk).Insert(builder)
+	builder.Seal(fastBlk)
+
+	builder.SetCurrentBlock(slowBlk)
+	slowResult := c.lowerMemoryGrowCall(pages)
+	builder.AllocateInstruction().
+		AsJump(c.allocateVarLengthValues(1, slowResult), followingBlk).Insert(builder)
+	builder.Seal(slowBlk)
+
+	builder.SetCurrentBlock(failBlk)
+	failed := builder.AllocateInstruction().AsIconst32(0xffffffff).Insert(builder).Return()
+	builder.AllocateInstruction().
+		AsJump(c.allocateVarLengthValues(1, failed), followingBlk).Insert(builder)
+	builder.Seal(failBlk)
+
+	builder.SetCurrentBlock(followingBlk)
+	builder.Seal(followingBlk)
+	return result
+}
+
 func (c *Compiler) setWasmGlobalValue(index wasm.Index, v ssa.Value) {
 	variable := c.globalVariables[index]
 	opaqueOffset := c.offset.GlobalInstanceOffset(index)
@@ -4669,9 +4745,11 @@ func (c *Compiler) getWasmGlobalValue(index wasm.Index, forceLoad bool) ssa.Valu
 }
 
 const (
-	memoryInstanceBufOffset     = 0
-	memoryInstanceBufSizeOffset = memoryInstanceBufOffset + 8
+	memoryInstanceBufOffset    = 0
+	moduleInstanceMemoryOffset = 48
 )
+
+var memoryInstanceNativeGrowCapOffset, memoryInstanceSizeOffset = wasm.MemoryInstanceNativeGrowOffsets()
 
 func (c *Compiler) getMemoryBaseValue(forceReload bool) ssa.Value {
 	builder := c.ssaBuilder
@@ -4722,11 +4800,11 @@ func (c *Compiler) getMemoryLenValue(forceReload bool) ssa.Value {
 
 		loadBufSizePtr := builder.AllocateInstruction()
 		if c.memoryShared {
-			sizeOffset := builder.AllocateInstruction().AsIconst64(memoryInstanceBufSizeOffset).Insert(builder).Return()
+			sizeOffset := builder.AllocateInstruction().AsIconst64(uint64(memoryInstanceSizeOffset)).Insert(builder).Return()
 			addr := builder.AllocateInstruction().AsIadd(memInstPtr, sizeOffset).Insert(builder).Return()
 			loadBufSizePtr.AsAtomicLoad(addr, 8, ssa.TypeI64)
 		} else {
-			loadBufSizePtr.AsLoad(memInstPtr, memoryInstanceBufSizeOffset, ssa.TypeI64)
+			loadBufSizePtr.AsLoad(memInstPtr, memoryInstanceSizeOffset, ssa.TypeI64)
 		}
 		builder.InsertInstruction(loadBufSizePtr)
 

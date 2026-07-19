@@ -1275,9 +1275,9 @@ blk0: (v0:i64, v1:i64)
 	v5:i64 = Load v1, 0x8
 	v6:i64 = Load v5, 0x0
 	v7:i64 = Load v1, 0x8
-	v8:i64 = Load v7, 0x8
+	v8:i64 = Load v7, 0x30
 	v9:i64 = Load v1, 0x8
-	v10:i32 = Load v9, 0x8
+	v10:i32 = Load v9, 0x30
 	v11:i32 = Iconst_32 0x10
 	v12:i32 = Ushr v10, v11
 	v13:i32 = Iconst_32 0xa
@@ -1287,7 +1287,7 @@ blk0: (v0:i64, v1:i64)
 	v16:i64 = Load v1, 0x8
 	v17:i64 = Load v16, 0x0
 	v18:i64 = Load v1, 0x8
-	v19:i64 = Load v18, 0x8
+	v19:i64 = Load v18, 0x30
 	Store v1, v0, 0x8
 	v20:i64 = Load v1, 0x18
 	v21:i64 = Load v1, 0x20
@@ -1295,9 +1295,9 @@ blk0: (v0:i64, v1:i64)
 	v23:i64 = Load v1, 0x8
 	v24:i64 = Load v23, 0x0
 	v25:i64 = Load v1, 0x8
-	v26:i64 = Load v25, 0x8
+	v26:i64 = Load v25, 0x30
 	v27:i64 = Load v1, 0x8
-	v28:i32 = Load v27, 0x8
+	v28:i32 = Load v27, 0x30
 	v29:i32 = Iconst_32 0x10
 	v30:i32 = Ushr v28, v29
 	Jump blk_ret, v4, v12, v22, v30
@@ -1313,7 +1313,7 @@ blk0: (v0:i64, v1:i64)
 	v3:i64 = Load v1, 0x20
 	v4:i32 = CallIndirect v2:sig0, v0, v3
 	v9:i64 = Load v1, 0x8
-	v10:i32 = Load v9, 0x8
+	v10:i32 = Load v9, 0x30
 	v11:i32 = Iconst_32 0x10
 	v12:i32 = Ushr v10, v11
 	v13:i32 = Iconst_32 0xa
@@ -1325,7 +1325,7 @@ blk0: (v0:i64, v1:i64)
 	v21:i64 = Load v1, 0x20
 	v22:i32 = CallIndirect v20:sig0, v0, v21
 	v27:i64 = Load v1, 0x8
-	v28:i32 = Load v27, 0x8
+	v28:i32 = Load v27, 0x30
 	v29:i32 = Iconst_32 0x10
 	v30:i32 = Ushr v28, v29
 	Jump blk_ret, v4, v12, v22, v30
@@ -1340,21 +1340,86 @@ signatures:
 
 blk0: (v0:i64, v1:i64)
 	v2:i32 = Iconst_32 0x1
+	v4:i64 = Uload32 v1, 0x10
+	v5:i64 = Iconst_64 0x10
+	v6:i64 = Ushr v4, v5
+	v7:i32 = Ireduce v6
+	v8:i64 = UExtend v2, 32->64
+	v9:i64 = Iadd v6, v8
+	v10:i64 = Iconst_64 0x2
+	v11:i32 = Icmp gt_u, v9, v10
+	Brnz v11, blk4
+	Jump blk1
+
+blk1: () <-- (blk0)
+	v12:i64 = Load v1, 0x0
+	v13:i64 = Load v12, 0x30
+	v14:i64 = Load v13, 0x28
+	v15:i64 = Ishl v9, v5
+	v16:i32 = Icmp ge_u, v14, v15
+	Brnz v16, blk2
+	Jump blk3
+
+blk2: () <-- (blk1)
+	Store v15, v1, 0x10
+	Store v15, v13, 0x30
+	Jump blk5, v7
+
+blk3: () <-- (blk1)
 	Store v1, v0, 0x8
-	v3:i64 = Load v0, 0x48
-	v4:i32 = CallIndirect v3:sig1, v0, v2
-	v5:i64 = Load v1, 0x8
-	v6:i64 = Uload32 v1, 0x10
-	v7:i32 = Load v1, 0x10
-	v8:i32 = Iconst_32 0x10
-	v9:i32 = Ushr v7, v8
-	v10:i32 = Iconst_32 0x1
+	v17:i64 = Load v0, 0x48
+	v18:i32 = CallIndirect v17:sig1, v0, v2
+	Jump blk5, v18
+
+blk4: () <-- (blk0)
+	v19:i32 = Iconst_32 0xffffffff
+	Jump blk5, v19
+
+blk5: (v3:i32) <-- (blk2,blk3,blk4)
+	v20:i64 = Load v1, 0x8
+	v21:i64 = Uload32 v1, 0x10
+	v22:i32 = Load v1, 0x10
+	v23:i32 = Iconst_32 0x10
+	v24:i32 = Ushr v22, v23
+	v25:i32 = Iconst_32 0x1
+	v27:i64 = Iconst_64 0x10
+	v28:i64 = Ushr v21, v27
+	v29:i32 = Ireduce v28
+	v30:i64 = UExtend v25, 32->64
+	v31:i64 = Iadd v28, v30
+	v32:i64 = Iconst_64 0x2
+	v33:i32 = Icmp gt_u, v31, v32
+	Brnz v33, blk9
+	Jump blk6
+
+blk6: () <-- (blk5)
+	v34:i64 = Load v1, 0x0
+	v35:i64 = Load v34, 0x30
+	v36:i64 = Load v35, 0x28
+	v37:i64 = Ishl v31, v27
+	v38:i32 = Icmp ge_u, v36, v37
+	Brnz v38, blk7
+	Jump blk8
+
+blk7: () <-- (blk6)
+	Store v37, v1, 0x10
+	Store v37, v35, 0x30
+	Jump blk10, v29
+
+blk8: () <-- (blk6)
 	Store v1, v0, 0x8
-	v11:i64 = Load v0, 0x48
-	v12:i32 = CallIndirect v11:sig1, v0, v10
-	v13:i64 = Load v1, 0x8
-	v14:i64 = Uload32 v1, 0x10
-	Jump blk_ret, v4, v9, v12
+	v39:i64 = Load v0, 0x48
+	v40:i32 = CallIndirect v39:sig1, v0, v25
+	Jump blk10, v40
+
+blk9: () <-- (blk5)
+	v41:i32 = Iconst_32 0xffffffff
+	Jump blk10, v41
+
+blk10: (v26:i32) <-- (blk7,blk8,blk9)
+	v42:i64 = Load v1, 0x8
+	v43:i64 = Uload32 v1, 0x10
+	Jump blk_ret, v3, v24, v26
 `,
 			expAfterPasses: `
 signatures:
@@ -1362,17 +1427,83 @@ signatures:
 
 blk0: (v0:i64, v1:i64)
 	v2:i32 = Iconst_32 0x1
+	v4:i64 = Uload32 v1, 0x10
+	v5:i64 = Iconst_64 0x10
+	v6:i64 = Ushr v4, v5
+	v7:i32 = Ireduce v6
+	v8:i64 = UExtend v2, 32->64
+	v9:i64 = Iadd v6, v8
+	v10:i64 = Iconst_64 0x2
+	v11:i32 = Icmp gt_u, v9, v10
+	Brnz v11, blk4
+	Jump fallthrough
+
+blk1: () <-- (blk0)
+	v12:i64 = Load v1, 0x0
+	v13:i64 = Load v12, 0x30
+	v14:i64 = Load v13, 0x28
+	v15:i64 = Ishl v9, v5
+	v16:i32 = Icmp ge_u, v14, v15
+	Brz v16, blk3
+	Jump fallthrough
+
+blk2: () <-- (blk1)
+	Store v15, v1, 0x10
+	Store v15, v13, 0x30
+	Jump blk5, v7
+
+blk3: () <-- (blk1)
 	Store v1, v0, 0x8
-	v3:i64 = Load v0, 0x48
-	v4:i32 = CallIndirect v3:sig1, v0, v2
-	v7:i32 = Load v1, 0x10
-	v8:i32 = Iconst_32 0x10
-	v9:i32 = Ushr v7, v8
-	v10:i32 = Iconst_32 0x1
+	v17:i64 = Load v0, 0x48
+	v18:i32 = CallIndirect v17:sig1, v0, v2
+	Jump blk5, v18
+
+blk4: () <-- (blk0)
+	v19:i32 = Iconst_32 0xffffffff
+	Jump fallthrough, v19
+
+blk5: (v3:i32) <-- (blk2,blk3,blk4)
+	v21:i64 = Uload32 v1, 0x10
+	v22:i32 = Load v1, 0x10
+	v23:i32 = Iconst_32 0x10
+	v24:i32 = Ushr v22, v23
+	v25:i32 = Iconst_32 0x1
+	v27:i64 = Iconst_64 0x10
+	v28:i64 = Ushr v21, v27
+	v29:i32 = Ireduce v28
+	v30:i64 = UExtend v25, 32->64
+	v31:i64 = Iadd v28, v30
+	v32:i64 = Iconst_64 0x2
+	v33:i32 = Icmp gt_u, v31, v32
+	Brnz v33, blk9
+	Jump fallthrough
+
+blk6: () <-- (blk5)
+	v34:i64 = Load v1, 0x0
+	v35:i64 = Load v34, 0x30
+	v36:i64 = Load v35, 0x28
+	v37:i64 = Ishl v31, v27
+	v38:i32 = Icmp ge_u, v36, v37
+	Brz v38, blk8
+	Jump fallthrough
+
+blk7: () <-- (blk6)
+	Store v37, v1, 0x10
+	Store v37, v35, 0x30
+	Jump blk10, v29
+
+blk8: () <-- (blk6)
 	Store v1, v0, 0x8
-	v11:i64 = Load v0, 0x48
-	v12:i32 = CallIndirect v11:sig1, v0, v10
-	Jump blk_ret, v4, v9, v12
+	v39:i64 = Load v0, 0x48
+	v40:i32 = CallIndirect v39:sig1, v0, v25
+	Jump blk10, v40
+
+blk9: () <-- (blk5)
+	v41:i32 = Iconst_32 0xffffffff
+	Jump fallthrough, v41
+
+blk10: (v26:i32) <-- (blk7,blk8,blk9)
+	Jump blk_ret, v3, v24, v26
 `,
 		},
 		{

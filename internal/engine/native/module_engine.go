@@ -262,10 +262,10 @@ func (m *moduleEngine) putLocalMemory() {
 	mem := m.module.MemoryInstance
 	offset := m.parent.offsets.LocalMemoryBegin
 
-	s := uint64(len(mem.Buffer))
+	s := mem.ByteSize()
 	var b uint64
-	if len(mem.Buffer) > 0 {
-		b = uint64(uintptr(unsafe.Pointer(&mem.Buffer[0])))
+	if data := unsafe.SliceData(mem.Buffer); data != nil {
+		b = uint64(uintptr(unsafe.Pointer(data)))
 	}
 	binary.LittleEndian.PutUint64(m.opaque[offset:], b)
 	binary.LittleEndian.PutUint64(m.opaque[offset+8:], s)

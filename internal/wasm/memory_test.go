@@ -80,6 +80,9 @@ func TestMemoryInstance_Grow_Size(t *testing.T) {
 			require.True(t, ok)
 			require.Equal(t, uint32(5), res)
 			require.Equal(t, uint32(9), m.Pages())
+			if !tc.expAllocator && !tc.failAllocator {
+				require.Equal(t, min(memoryBytesNumToPages(uint64(cap(m.Buffer))), m.Max), m.Cap)
+			}
 
 			res, ok = m.Grow(0)
 			require.True(t, ok)
@@ -104,10 +107,10 @@ func TestMemoryInstance_Grow_Size(t *testing.T) {
 			// So in total, the memoryGrown should be called 3 times.
 			require.Equal(t, 3, me.memoryGrown)
 
-			if tc.capEqualsMax { // Ensure the capacity isn't more than max.
+			// Ordinary growth uses an explicit capacity policy clamped to Max. It
+			// does not depend on append's capacity growth policy.
+			if !tc.expAllocator && !tc.failAllocator {
 				require.Equal(t, maxBytes, uint64(cap(m.Buffer)))
-			} else { // Slice doubles, so it should have a higher capacity than max.
-				require.True(t, maxBytes < uint64(cap(m.Buffer)))
 			}
 		})
 	}
@@ -121,6 +124,82 @@ func TestMemoryInstance_NegativeDelta(t *testing.T) {
 	// If the negative page size is given, current_page+delta might overflow, and it can result in accidentally shrinking the memory,
 	// which is obviously not spec compliant.
 	require.False(t, ok)
+}
+
+func TestMemoryInstance_GrowReservesCapacityAfterFallback(t *testing.T) {
+	me := &mockModuleEngine{}
+	m := NewMemoryInstance(&Memory{Min: 1, Cap: 3, Max: 10, IsMaxEncoded: true}, nil, me)
+	require.Equal(t, uint32(2), m.growReservePages)
+	require.Equal(t, MemoryPagesToBytesNum(3), uint64(len(m.backing)))
+
+	// The initial reserve handles this without allocation.
+	oldBuffer := unsafe.SliceData(m.Buffer)
+	oldPages, ok := m.Grow(2)
+	require.True(t, ok)
+	require.Equal(t, uint32(1), oldPages)
+	require.Equal(t, oldBuffer, unsafe.SliceData(m.Buffer))
+
+	// Exceeding capacity allocates new-size+reserve, not merely new-size.
+	oldPages, ok = m.Grow(1)
+	require.True(t, ok)
+	require.Equal(t, uint32(3), oldPages)
+	require.Equal(t, uint32(4), m.Pages())
+	require.Equal(t, uint32(6), m.Cap)
+	require.Equal(t, MemoryPagesToBytesNum(6), uint64(len(m.backing)))
+	require.Equal(t, MemoryPagesToBytesNum(m.Cap), m.nativeGrowCap)
+
+	// Neither the logical size nor recorded native capacity can exceed Max.
+	_, ok = m.Grow(m.Max - m.Pages())
+	require.True(t, ok)
+	require.Equal(t, m.Max, m.Pages())
+	require.Equal(t, m.Max, m.Cap)
+	require.Equal(t, MemoryPagesToBytesNum(m.Max), m.nativeGrowCap)
+}
+
+func BenchmarkMemoryInstanceGrow(b *testing.B) {
+	const finalPages = uint32(17)
+	me := &mockModuleEngine{}
+	b.Run("reserved_capacity", func(b *testing.B) {
+		buffer := make([]byte, MemoryPagesToBytesNum(finalPages))
+		m := &MemoryInstance{Max: finalPages, ownerModuleEngine: me}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			// Model a memory with an explicit known-zero backing allocation.
+			m.Buffer, m.backing, m.Cap = buffer[:MemoryPageSize], buffer, finalPages
+			m.sizeBytes = uint64(MemoryPageSize)
+			for pages := uint32(1); pages < finalPages; pages++ {
+				if _, ok := m.Grow(1); !ok {
+					b.Fatal("memory grow failed")
+				}
+			}
+		}
+	})
+	for _, tc := range []struct {
+		name  string
+		delta uint32
+		grows int
+	}{
+		{name: "one_page_at_a_time", delta: 1, grows: int(finalPages - 1)},
+		{name: "single_grow", delta: finalPages - 1, grows: 1},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				m := &MemoryInstance{
+					Buffer:            make([]byte, MemoryPageSize),
+					Cap:               1,
+					Max:               finalPages,
+					ownerModuleEngine: me,
+				}
+				for j := 0; j < tc.grows; j++ {
+					if _, ok := m.Grow(tc.delta); !ok {
+						b.Fatal("memory grow failed")
+					}
+				}
+			}
+		})
+	}
 }
 
 func TestMemoryInstance_ReadByte(t *testing.T) {
@@ -873,6 +952,25 @@ func TestNewMemoryInstance_Shared(t *testing.T) {
 			require.True(t, m.Shared)
 		})
 	}
+}
+
+func TestNewMemoryInstance_NativeGrowCap(t *testing.T) {
+	mem := &Memory{Min: 1, Cap: 4, Max: 8, IsMaxEncoded: true}
+	me := &mockModuleEngine{}
+
+	ordinary := NewMemoryInstance(mem, nil, me)
+	require.Equal(t, MemoryPagesToBytesNum(4), ordinary.nativeGrowCap)
+
+	allocator := api.MemoryAllocatorFunc(func(cap, max uint64) api.LinearMemory {
+		return sliceAllocator(cap, max)
+	})
+	custom := NewMemoryInstance(mem, allocator, me)
+	require.Equal(t, uint64(0), custom.nativeGrowCap)
+
+	sharedMem := *mem
+	sharedMem.IsShared = true
+	shared := NewMemoryInstance(&sharedMem, nil, me)
+	require.Equal(t, uint64(0), shared.nativeGrowCap)
 }
 
 func TestMemoryInstance_WaitNotifyOnce(t *testing.T) {

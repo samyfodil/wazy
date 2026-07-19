@@ -14,7 +14,7 @@ import (
 )
 
 func TestDWARFLines_Line_Zig(t *testing.T) {
-	mod, err := binary.DecodeModule(dwarftestdata.ZigWasm, api.CoreFeaturesV2, wasm.MemoryLimitPages, false, true, false)
+	mod, err := binary.DecodeModule(dwarftestdata.ZigWasm, api.CoreFeaturesV2, wasm.MemoryLimitPages, false, 0, true, false)
 	require.NoError(t, err)
 	require.NotNil(t, mod.DWARFLines)
 
@@ -76,7 +76,7 @@ func TestDWARFLines_Line_Rust(t *testing.T) {
 	if len(dwarftestdata.RustWasm) == 0 {
 		t.Skip()
 	}
-	mod, err := binary.DecodeModule(dwarftestdata.RustWasm, api.CoreFeaturesV2, wasm.MemoryLimitPages, false, true, false)
+	mod, err := binary.DecodeModule(dwarftestdata.RustWasm, api.CoreFeaturesV2, wasm.MemoryLimitPages, false, 0, true, false)
 	require.NoError(t, err)
 	require.NotNil(t, mod.DWARFLines)
 
@@ -163,7 +163,7 @@ func TestDWARFLines_Line_Rust(t *testing.T) {
 }
 
 func TestDWARFLines_Line_TinyGo(t *testing.T) {
-	mod, err := binary.DecodeModule(dwarftestdata.TinyGoWasm, api.CoreFeaturesV2, wasm.MemoryLimitPages, false, true, false)
+	mod, err := binary.DecodeModule(dwarftestdata.TinyGoWasm, api.CoreFeaturesV2, wasm.MemoryLimitPages, false, 0, true, false)
 	require.NoError(t, err)
 	require.NotNil(t, mod.DWARFLines)
 

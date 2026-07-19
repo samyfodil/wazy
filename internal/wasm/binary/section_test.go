@@ -103,7 +103,7 @@ func TestMemorySection(t *testing.T) {
 		tc := tt
 
 		t.Run(tc.name, func(t *testing.T) {
-			memories, _, err := decodeMemorySection(tc.input, 0, api.CoreFeaturesV2, newMemorySizer(max, false), max)
+			memories, _, err := decodeMemorySection(tc.input, 0, api.CoreFeaturesV2, newMemorySizer(max, false, 0), max)
 			require.NoError(t, err)
 			require.Equal(t, tc.expected, memories)
 		})
@@ -133,7 +133,7 @@ func TestMemorySection_Errors(t *testing.T) {
 		tc := tt
 
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, err := decodeMemorySection(tc.input, 0, api.CoreFeaturesV2, newMemorySizer(max, false), max)
+			_, _, err := decodeMemorySection(tc.input, 0, api.CoreFeaturesV2, newMemorySizer(max, false, 0), max)
 			require.EqualError(t, err, tc.expectedErr)
 		})
 	}

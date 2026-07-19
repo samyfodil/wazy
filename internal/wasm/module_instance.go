@@ -167,12 +167,13 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 			mem.ownerClosed = true
 			var recycle []byte
 			if mem.poolable && mem.importers == 0 && mem.Buffer != nil {
-				recycle = mem.Buffer
+				recycle = mem.allocatedBuffer()[:mem.byteSize()]
 				// Drop our own reference so a stale post-Close read of this (now
 				// closed) MemoryInstance -- e.g. through an api.Memory the caller
 				// kept past Close, already a misuse -- sees an empty memory rather
 				// than whatever unrelated module the pool later hands this array to.
 				mem.Buffer = nil
+				mem.backing = nil
 			}
 			mem.Mux.Unlock()
 
@@ -195,8 +196,9 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 			}
 			var recycle []byte
 			if mem.ownerClosed && mem.importers == 0 && mem.poolable && mem.Buffer != nil {
-				recycle = mem.Buffer
+				recycle = mem.allocatedBuffer()[:mem.byteSize()]
 				mem.Buffer = nil
+				mem.backing = nil
 			}
 			mem.Mux.Unlock()
 			if recycle != nil {

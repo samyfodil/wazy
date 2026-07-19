@@ -76,6 +76,20 @@ type RuntimeConfig interface {
 	// results in allocating 4GB. See the doc on WithMemoryLimitPages for detail.
 	WithMemoryCapacityFromMax(memoryCapacityFromMax bool) RuntimeConfig
 
+	// WithMemoryCapacityReservePages allocates a backing reserve beyond a memory's
+	// initial size. This can make memory.grow cheaper without reserving the
+	// memory's entire maximum. Go fallback growth reapplies the reserve to the
+	// new logical size. Capacity is capped by both the module maximum and
+	// WithMemoryLimitPages. The logical size is tracked separately from this
+	// backing allocation. The default is zero fixed pages; ordinary fallback
+	// growth still uses deterministic geometric doubling.
+	//
+	// This example reserves up to 4MB beyond each memory's initial size:
+	//	rConfig = wazy.NewRuntimeConfig().WithMemoryCapacityReservePages(64)
+	//
+	// WithMemoryCapacityFromMax(true) takes precedence over this setting.
+	WithMemoryCapacityReservePages(memoryCapacityReservePages uint32) RuntimeConfig
+
 	// WithDebugInfoEnabled toggles DWARF based stack traces in the face of
 	// runtime errors. Defaults to true.
 	//
@@ -180,15 +194,16 @@ func NewRuntimeConfig() RuntimeConfig {
 type newEngine func(context.Context, api.CoreFeatures, filecache.Cache) wasm.Engine
 
 type runtimeConfig struct {
-	enabledFeatures       api.CoreFeatures
-	memoryLimitPages      uint32
-	memoryCapacityFromMax bool
-	engineKind            engineKind
-	dwarfDisabled         bool // negative as defaults to enabled
-	newEngine             newEngine
-	cache                 CompilationCache
-	storeCustomSections   bool
-	ensureTermination     bool
+	enabledFeatures            api.CoreFeatures
+	memoryLimitPages           uint32
+	memoryCapacityFromMax      bool
+	memoryCapacityReservePages uint32
+	engineKind                 engineKind
+	dwarfDisabled              bool // negative as defaults to enabled
+	newEngine                  newEngine
+	cache                      CompilationCache
+	storeCustomSections        bool
+	ensureTermination          bool
 }
 
 // engineLessConfig helps avoid copy/pasting the wrong defaults.
@@ -286,6 +301,13 @@ func (c *runtimeConfig) WithCompilationCache(ca CompilationCache) RuntimeConfig 
 func (c *runtimeConfig) WithMemoryCapacityFromMax(memoryCapacityFromMax bool) RuntimeConfig {
 	ret := c.clone()
 	ret.memoryCapacityFromMax = memoryCapacityFromMax
+	return ret
+}
+
+// WithMemoryCapacityReservePages implements RuntimeConfig.WithMemoryCapacityReservePages.
+func (c *runtimeConfig) WithMemoryCapacityReservePages(memoryCapacityReservePages uint32) RuntimeConfig {
+	ret := c.clone()
+	ret.memoryCapacityReservePages = memoryCapacityReservePages
 	return ret
 }
 

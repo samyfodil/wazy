@@ -61,6 +61,34 @@ func TestMemoryPool_NoBleed(t *testing.T) {
 	}
 }
 
+func TestMemoryPool_NoBleedWithUnexposedReserve(t *testing.T) {
+	const logicalPages, capacityPages = uint32(1), uint32(37)
+	logicalBytes := MemoryPagesToBytesNum(logicalPages)
+	capacityBytes := MemoryPagesToBytesNum(capacityPages)
+
+	// A pooled buffer whose dirty logical prefix (len) sits below an unexposed,
+	// known-zero reserve (up to cap) must come back fully zeroed. len(dirty)
+	// records the only prefix the guest could have modified; the remaining
+	// capacity was never exposed. Retry put->get until the pool returns a buffer:
+	// sync.Pool can drop a just-put buffer on a concurrent GC, so a single get may
+	// miss (same idiom as TestMemoryPool_NoBleed).
+	var got []byte
+	for try := 0; got == nil && try < 1000; try++ {
+		dirty := make([]byte, logicalBytes, capacityBytes)
+		for i := range dirty {
+			dirty[i] = 0xaa
+		}
+		putPooledMemoryBuffer(dirty)
+		got = getPooledMemoryBuffer(capacityBytes)
+	}
+	require.NotNil(t, got, "pool returned no buffer across many put/get attempts")
+	for i, value := range got {
+		if value != 0 {
+			t.Fatalf("byte %d of reacquired reserved memory is %#x, want zero", i, value)
+		}
+	}
+}
+
 // TestMemoryPool_ImportedMemoryNotRecycled proves that a memory instance
 // which was ever shared with another ModuleInstance via cross-module import
 // resolution is never returned to the pool when its owner closes, even

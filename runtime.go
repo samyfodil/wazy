@@ -178,26 +178,28 @@ func NewRuntimeWithConfig(ctx context.Context, rConfig RuntimeConfig) Runtime {
 	}
 	store := wasm.NewStore(config.enabledFeatures, engine)
 	return &runtime{
-		cache:                 cacheImpl,
-		store:                 store,
-		enabledFeatures:       config.enabledFeatures,
-		memoryLimitPages:      config.memoryLimitPages,
-		memoryCapacityFromMax: config.memoryCapacityFromMax,
-		dwarfDisabled:         config.dwarfDisabled,
-		storeCustomSections:   config.storeCustomSections,
-		ensureTermination:     config.ensureTermination,
+		cache:                      cacheImpl,
+		store:                      store,
+		enabledFeatures:            config.enabledFeatures,
+		memoryLimitPages:           config.memoryLimitPages,
+		memoryCapacityFromMax:      config.memoryCapacityFromMax,
+		memoryCapacityReservePages: config.memoryCapacityReservePages,
+		dwarfDisabled:              config.dwarfDisabled,
+		storeCustomSections:        config.storeCustomSections,
+		ensureTermination:          config.ensureTermination,
 	}
 }
 
 // runtime allows decoupling of public interfaces from internal representation.
 type runtime struct {
-	store                 *wasm.Store
-	cache                 *cache
-	enabledFeatures       api.CoreFeatures
-	memoryLimitPages      uint32
-	memoryCapacityFromMax bool
-	dwarfDisabled         bool
-	storeCustomSections   bool
+	store                      *wasm.Store
+	cache                      *cache
+	enabledFeatures            api.CoreFeatures
+	memoryLimitPages           uint32
+	memoryCapacityFromMax      bool
+	memoryCapacityReservePages uint32
+	dwarfDisabled              bool
+	storeCustomSections        bool
 
 	// closed is the pointer used both to guard moduleEngine.CloseWithExitCode and to store the exit code.
 	//
@@ -236,7 +238,7 @@ func (r *runtime) Module(moduleName string) api.Module {
 // memory limit is the absolute max so a large declared memory never wrongly
 // fails discovery -- the real compile still enforces this runtime's true limit.
 func (r *runtime) DecodeModuleNoCompile(bin []byte) (*wasm.Module, error) {
-	return binaryformat.DecodeModule(bin, r.enabledFeatures, wasm.MemoryLimitPages, false, false, false)
+	return binaryformat.DecodeModule(bin, r.enabledFeatures, wasm.MemoryLimitPages, false, 0, false, false)
 }
 
 // CompileModule implements Runtime.CompileModule
@@ -246,7 +248,8 @@ func (r *runtime) CompileModule(ctx context.Context, binary []byte) (CompiledMod
 	}
 
 	internal, err := binaryformat.DecodeModule(binary, r.enabledFeatures,
-		r.memoryLimitPages, r.memoryCapacityFromMax, !r.dwarfDisabled, r.storeCustomSections)
+		r.memoryLimitPages, r.memoryCapacityFromMax, r.memoryCapacityReservePages,
+		!r.dwarfDisabled, r.storeCustomSections)
 	if err != nil {
 		return nil, err
 	}
