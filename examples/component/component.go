@@ -31,6 +31,14 @@ var helloWasm []byte
 //go:embed testdata/async_first_light.wasm
 var asyncWasm []byte
 
+// thread.wasm exports `run-async`, a stackful async function whose core `run`
+// spawns a worker *thread* with `thread.new-indirect` and hands control to it
+// with `thread.yield-then-resume`. The worker calls `task.return(99)`. See
+// testdata/thread.wat for the source.
+//
+//go:embed testdata/thread.wasm
+var threadWasm []byte
+
 // main shows the three things wazy's component package does that upstream
 // wazero does not: call a component interface export, run a WASI 0.2 command,
 // and run a component that uses the async ABI.
@@ -43,6 +51,7 @@ func main() {
 	fmt.Println(callInterfaceExport(ctx, r))
 	fmt.Println(runWASICommand(ctx, r))
 	fmt.Println(runAsyncExport(ctx, r))
+	fmt.Println(runThreadExport(ctx, r))
 }
 
 // callInterfaceExport instantiates a component and calls one of its interface
@@ -92,4 +101,21 @@ func runAsyncExport(ctx context.Context, r wazy.Runtime) string {
 		log.Panicf("call run-async: %v", err)
 	}
 	return fmt.Sprintf("async run-async() = %d", got[0].(uint32))
+}
+
+// runThreadExport calls an export that spawns a Component Model thread
+// (thread.new-indirect + thread.yield-then-resume). The worker thread resolves
+// the task; from the embedder it is still just one blocking Call.
+func runThreadExport(ctx context.Context, r wazy.Runtime) string {
+	inst, err := component.Instantiate(ctx, r, threadWasm)
+	if err != nil {
+		log.Panicf("instantiate thread: %v", err)
+	}
+	defer inst.Close(ctx)
+
+	got, err := inst.Call(ctx, "run-async")
+	if err != nil {
+		log.Panicf("call thread run-async: %v", err)
+	}
+	return fmt.Sprintf("thread (spawn + resume) = %d", got[0].(uint32))
 }

@@ -77,7 +77,7 @@ wazy runs the Component Model's async ABI: components that suspend, await, and r
 
 It passes **all 31 official Component Model async `.wast` conformance suites** (one carries a fixture fix filed upstream as [component-model#679][pr679]), cross-checked by a differential trace-oracle that byte-compares wazy against the spec reference (`definitions.py`). Goroutines and channels back futures, streams, and threads naturally — the one place Go's substrate is an asset over the hand-written event loops other runtimes need.
 
-An async export is called exactly like a synchronous one — the scheduler runs underneath and `Call` returns when the task completes. [`examples/component`](examples/component) runs one end to end.
+An async export is called exactly like a synchronous one — the scheduler runs underneath and `Call` returns when the task completes. [`examples/component`](examples/component) runs an async export and a thread-spawning component (`thread.new-indirect` + `thread.yield-then-resume`) end to end.
 
 ## Moving fast
 
