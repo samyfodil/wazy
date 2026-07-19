@@ -194,12 +194,13 @@ func fdFdstatGetFn(_ context.Context, mod api.Module, params []uint64) sysapi.Er
 	}
 
 	var fdflags uint16
-	var st sysapi.Stat_t
 	var errno sysapi.Errno
 	f, ok := fsc.LookupFile(fd)
 	if !ok {
 		return sysapi.EBADF
-	} else if st, errno = f.File.Stat(); errno != 0 {
+	}
+	statMode, errno := f.CachedStatMode()
+	if errno != 0 {
 		return errno
 	} else if f.File.IsAppend() {
 		fdflags |= wasip1.FD_APPEND
@@ -211,7 +212,7 @@ func fdFdstatGetFn(_ context.Context, mod api.Module, params []uint64) sysapi.Er
 
 	var fsRightsBase uint32
 	var fsRightsInheriting uint32
-	fileType := getExtendedWasiFiletype(f.File, st.Mode)
+	fileType := getExtendedWasiFiletype(f.File, statMode)
 
 	switch fileType {
 	case wasip1.FILETYPE_DIRECTORY:

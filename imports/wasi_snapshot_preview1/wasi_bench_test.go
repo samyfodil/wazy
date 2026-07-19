@@ -121,6 +121,47 @@ func Benchmark_fdRead(b *testing.B) {
 	}
 }
 
+func Benchmark_fdFdstatGet(b *testing.B) {
+	r := wazy.NewRuntime(testCtx)
+	defer r.Close(testCtx)
+
+	mod, err := instantiateProxyModule(r, wazy.NewModuleConfig().WithFSConfig(
+		wazy.NewFSConfig().WithDirMount("testdata", ""),
+	))
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	fsc := mod.(*wasm.ModuleInstance).Sys.FS()
+	preopenFile, ok := fsc.LookupFile(sys.FdPreopen)
+	if !ok {
+		b.Fatal("preopen file not found")
+	}
+	fd, errno := fsc.OpenFile(preopenFile.FS, "zig/wasi.zig", sysapi.O_RDONLY, 0)
+	if errno != 0 {
+		b.Fatal(errno)
+	}
+	defer func() {
+		if errno := fsc.CloseFile(fd); errno != 0 {
+			b.Errorf("close benchmark file: %s", errno)
+		}
+	}()
+
+	fn := mod.ExportedFunction(wasip1.FdFdstatGetName)
+	stack := make([]uint64, 2)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		stack[0], stack[1] = uint64(fd), 0
+		if err = fn.CallWithStack(testCtx, stack); err != nil {
+			b.Fatal(err)
+		}
+		if stack[0] != 0 {
+			b.Fatalf("fd_fdstat_get errno: %d", stack[0])
+		}
+	}
+}
+
 //go:embed testdata
 var testdata embed.FS
 

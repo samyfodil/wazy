@@ -19,6 +19,44 @@ import (
 //go:embed testdata
 var testdata embed.FS
 
+type countingStatFile struct {
+	sys.UnimplementedFile
+	mode  fs.FileMode
+	errno sys.Errno
+	calls int
+}
+
+func (f *countingStatFile) Stat() (sys.Stat_t, sys.Errno) {
+	f.calls++
+	return sys.Stat_t{Mode: f.mode}, f.errno
+}
+
+func TestFileEntry_CachedStatMode(t *testing.T) {
+	f := &countingStatFile{mode: fs.ModeDir | 0o755}
+	entry := &FileEntry{File: f}
+
+	mode, errno := entry.CachedStatMode()
+	require.EqualErrno(t, 0, errno)
+	require.Equal(t, fs.ModeDir, mode)
+
+	mode, errno = entry.CachedStatMode()
+	require.EqualErrno(t, 0, errno)
+	require.Equal(t, fs.ModeDir, mode)
+	require.Equal(t, 1, f.calls)
+
+	// Failed stats aren't cached, so a later successful retry can establish the
+	// descriptor's type.
+	f = &countingStatFile{mode: fs.ModeSocket, errno: sys.EIO}
+	entry = &FileEntry{File: f}
+	_, errno = entry.CachedStatMode()
+	require.EqualErrno(t, sys.EIO, errno)
+	f.errno = 0
+	mode, errno = entry.CachedStatMode()
+	require.EqualErrno(t, 0, errno)
+	require.Equal(t, fs.ModeSocket, mode)
+	require.Equal(t, 2, f.calls)
+}
+
 func TestNewFSContext(t *testing.T) {
 	embedFS, err := fs.Sub(testdata, "testdata")
 	require.NoError(t, err)
