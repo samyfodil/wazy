@@ -1250,6 +1250,108 @@ func TestE2E_reexported_memory(t *testing.T) {
 	require.Equal(t, uint32(11), mem.Size()/65536)
 }
 
+func TestE2E_memoryGrowWithinReservedCapacity(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntimeWithConfig(ctx,
+		wazy.NewRuntimeConfigCompiler().WithMemoryCapacityFromMax(true))
+	t.Cleanup(func() { require.NoError(t, r.Close(ctx)) })
+
+	m := &wasm.Module{
+		TypeSection: []wasm.FunctionType{{
+			Params:  []wasm.ValueType{i32},
+			Results: []wasm.ValueType{i32},
+		}},
+		FunctionSection: []wasm.Index{0},
+		MemorySection:   &wasm.Memory{Min: 1, Cap: 3, Max: 3, IsMaxEncoded: true},
+		ExportSection: []wasm.Export{
+			{Name: "grow", Type: wasm.ExternTypeFunc, Index: 0},
+			{Name: "memory", Type: wasm.ExternTypeMemory, Index: 0},
+		},
+		CodeSection: []wasm.Code{{Body: []byte{
+			wasm.OpcodeLocalGet, 0,
+			wasm.OpcodeMemoryGrow, 0,
+			wasm.OpcodeEnd,
+		}}},
+	}
+	mod, err := r.Instantiate(ctx, binaryencoding.EncodeModule(m))
+	require.NoError(t, err)
+	grow := mod.ExportedFunction("grow")
+	memory := mod.Memory()
+	require.Equal(t, uint32(wasm.MemoryPageSize), memory.Size())
+
+	results, err := grow.Call(ctx, 1)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), results[0])
+	require.Equal(t, uint32(2*wasm.MemoryPageSize), memory.Size())
+	value, ok := memory.ReadByte(2*wasm.MemoryPageSize - 1)
+	require.True(t, ok)
+	require.Equal(t, byte(0), value)
+	require.True(t, memory.WriteByte(2*wasm.MemoryPageSize-1, 0xaa))
+
+	results, err = grow.Call(ctx, 0)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), results[0])
+	require.Equal(t, uint32(2*wasm.MemoryPageSize), memory.Size())
+
+	results, err = grow.Call(ctx, 1)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), results[0])
+	require.Equal(t, uint32(3*wasm.MemoryPageSize), memory.Size())
+
+	results, err = grow.Call(ctx, 1)
+	require.NoError(t, err)
+	require.Equal(t, uint64(0xffffffff), results[0])
+	require.Equal(t, uint32(3*wasm.MemoryPageSize), memory.Size())
+}
+
+type countingLinearMemory struct {
+	buf         []byte
+	reallocates int
+}
+
+func (m *countingLinearMemory) Reallocate(size uint64) []byte {
+	m.reallocates++
+	if size > uint64(cap(m.buf)) {
+		return nil
+	}
+	return m.buf[:size]
+}
+
+func (m *countingLinearMemory) Free() {}
+
+func TestE2E_memoryGrowCustomAllocatorUsesGo(t *testing.T) {
+	var linear *countingLinearMemory
+	allocator := api.MemoryAllocatorFunc(func(cap, _ uint64) api.LinearMemory {
+		linear = &countingLinearMemory{buf: make([]byte, cap)}
+		return linear
+	})
+	ctx := api.WithMemoryAllocator(context.Background(), allocator)
+	r := wazy.NewRuntimeWithConfig(ctx,
+		wazy.NewRuntimeConfigCompiler().WithMemoryCapacityFromMax(true))
+	t.Cleanup(func() { require.NoError(t, r.Close(ctx)) })
+	m := &wasm.Module{
+		TypeSection: []wasm.FunctionType{{
+			Params:  []wasm.ValueType{i32},
+			Results: []wasm.ValueType{i32},
+		}},
+		FunctionSection: []wasm.Index{0},
+		MemorySection:   &wasm.Memory{Min: 1, Cap: 3, Max: 3, IsMaxEncoded: true},
+		ExportSection:   []wasm.Export{{Name: "grow", Type: wasm.ExternTypeFunc, Index: 0}},
+		CodeSection: []wasm.Code{{Body: []byte{
+			wasm.OpcodeLocalGet, 0,
+			wasm.OpcodeMemoryGrow, 0,
+			wasm.OpcodeEnd,
+		}}},
+	}
+	mod, err := r.Instantiate(ctx, binaryencoding.EncodeModule(m))
+	require.NoError(t, err)
+	require.Equal(t, 1, linear.reallocates)
+	results, err := mod.ExportedFunction("grow").Call(ctx, 1)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), results[0])
+	require.Equal(t, 2, linear.reallocates)
+}
+
 func TestStackUnwind_panic_in_host(t *testing.T) {
 	unreachable := &wasm.Module{
 		ImportFunctionCount: 1,

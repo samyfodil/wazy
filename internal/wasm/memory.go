@@ -46,6 +46,10 @@ type MemoryInstance struct {
 	Buffer        []byte
 	Min, Cap, Max uint32
 	Shared        bool
+	// nativeGrowCap is the byte length that the native engine may expose
+	// without calling back into Go. It is zero for shared and custom-allocator
+	// memories, whose growth must always use Grow.
+	nativeGrowCap uint64
 	// definition is known at compile time.
 	definition api.MemoryDefinition
 
@@ -117,17 +121,23 @@ func NewMemoryInstance(memSec *Memory, allocator api.MemoryAllocator, moduleEngi
 	} else {
 		buffer = make([]byte, minBytes, capBytes)
 	}
+	poolable := allocator == nil && !memSec.IsShared
+	nativeGrowCap := uint64(0)
+	if poolable {
+		nativeGrowCap = MemoryPagesToBytesNum(memoryBytesNumToPages(uint64(cap(buffer))))
+	}
 	return &MemoryInstance{
 		Buffer:            buffer,
 		Min:               memSec.Min,
 		Cap:               memoryBytesNumToPages(uint64(cap(buffer))),
 		Max:               memSec.Max,
 		Shared:            memSec.IsShared,
+		nativeGrowCap:     nativeGrowCap,
 		expBuffer:         expBuffer,
 		ownerModuleEngine: moduleEngine,
 		// Only a plain make([]byte)/pooled buffer is pool-eligible: not a custom
 		// allocator's buffer (expBuffer) and not shared (fixed max buffer).
-		poolable: allocator == nil && !memSec.IsShared,
+		poolable: poolable,
 	}
 }
 
@@ -293,7 +303,12 @@ func (m *MemoryInstance) Grow(delta uint32) (result uint32, ok bool) {
 			panic("shared memory cannot be grown, this is a bug in wazy")
 		}
 		m.Buffer = append(m.Buffer, make([]byte, MemoryPagesToBytesNum(delta))...)
-		m.Cap = newPages
+		// append often reserves more backing storage than requested. Record all
+		// complete pages that can be exposed without another append, capped at
+		// the WebAssembly maximum. The unexposed capacity is known-zero: it came
+		// from Go's allocator, or from a pool buffer that was cleared in full.
+		m.Cap = min(memoryBytesNumToPages(uint64(cap(m.Buffer))), m.Max)
+		m.nativeGrowCap = MemoryPagesToBytesNum(m.Cap)
 	} else { // We already have the capacity we need.
 		if m.Shared {
 			// We assume grow is called under a guest lock.
@@ -363,6 +378,12 @@ func atomicStoreLength(slice *[]byte, length uintptr) {
 // memoryBytesNumToPages converts the given number of bytes into the number of pages.
 func memoryBytesNumToPages(bytesNum uint64) (pages uint32) {
 	return uint32(bytesNum >> MemoryPageSizeInBits)
+}
+
+// MemoryInstanceNativeGrowCapOffset returns the byte offset of nativeGrowCap
+// for the native compiler's generated memory.grow fast path.
+func MemoryInstanceNativeGrowCapOffset() uint32 {
+	return uint32(unsafe.Offsetof(MemoryInstance{}.nativeGrowCap))
 }
 
 // hasSize returns true if Len is sufficient for byteCount at the given offset.

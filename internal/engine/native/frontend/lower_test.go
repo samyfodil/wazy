@@ -11,6 +11,9 @@ import (
 func Test_Offsets(t *testing.T) {
 	var memInstance wasm.MemoryInstance
 	require.Equal(t, int(unsafe.Offsetof(memInstance.Buffer)), memoryInstanceBufOffset)
+	require.Equal(t, wasm.MemoryInstanceNativeGrowCapOffset(), memoryInstanceNativeGrowCapOffset)
+	var moduleInstance wasm.ModuleInstance
+	require.Equal(t, int(unsafe.Offsetof(moduleInstance.MemoryInstance)), moduleInstanceMemoryOffset)
 	var tableInstance wasm.TableInstance
 	require.Equal(t, int(unsafe.Offsetof(tableInstance.References)), tableInstanceBaseAddressOffset)
 
