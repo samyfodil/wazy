@@ -264,6 +264,8 @@ jobs:
           key: integration-test-libsodium-${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ hashFiles('**/go.sum', 'Makefile') }}
 
       - name: Download test binaries
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: make libsodium
 
       - name: Run test binaries
