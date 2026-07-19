@@ -260,6 +260,24 @@ the first cold iteration). These numbers identify surfaces to investigate, not a
   broader than the likely remaining win. Impact: low-medium interpreter execution; certain code
   density win, runtime magnitude unknown.
 
+- **F9. Eliminate bounds checks hidden by redundant PHIs — RESOLVED.** The frontend already carries
+  checked-address facts across blocks, but it runs before redundant-PHI elimination: an address
+  forwarded unchanged through an if/else merge initially has a new SSA ID, so the frontend emits
+  another check. A narrow post-PHI pass now recognizes wazy's linear-memory check sequence and
+  removes a check only when the same resolved i32 base has a dominating check with an equal or
+  larger access end. The proof remains valid across calls and `memory.grow` because SSA values are
+  immutable and WebAssembly memories never shrink. Per-block strongest bounds are stored in reused
+  builder scratch and queried up the immediate-dominator chain; this avoids a general CSE/GVN pass.
+  **Measured:** the focused compiled-Wasm PHI kernel improves **3.75 → 2.14 µs/op (−43%)** across 12
+  interleaved core-pinned pairs, with 0 allocs/op unchanged. Serialized compiled output shrinks
+  **440 → 320 bytes (−27%)** for the kernel and **93,289 → 90,464 bytes (−3.0%)** for the real TinyGo
+  case module. Eight interleaved compile pairs across TinyGo, Rust, Zig, Zig-cc, and Cargo are neutral
+  to slightly better overall (**−0.59% geomean**; individual −4.18% to +1.89%); allocation changes
+  are within ±12 per module. Existing case exports are execution-neutral because their newly removed
+  checks are cold. Unit coverage includes same-block and post-alias dominance, non-dominating sibling
+  paths, and weaker-check rejection; the end-to-end kernel covers the exact boundary and required OOB
+  trap.
+
 ### Superseded lead found during the scan
 
 - **C27 follow-up is no longer open.** After the per-block trap-context dedup described above,

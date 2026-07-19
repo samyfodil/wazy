@@ -185,10 +185,12 @@ type builder struct {
 	loopNestingForestRoots []BasicBlock
 
 	// The followings are used for optimization passes/deterministic compilation.
-	instStack       []*Instruction
-	blkStack        []*basicBlock
-	blkStack2       []*basicBlock
-	redundantParams []redundantParam
+	instStack                 []*Instruction
+	blkStack                  []*basicBlock
+	blkStack2                 []*basicBlock
+	redundantParams           []redundantParam
+	dominatedMemoryBounds     []dominatedMemoryBound
+	dominatedMemoryBoundHeads []int
 
 	// blockIterCur is used to implement blockIteratorBegin and blockIteratorNext.
 	blockIterCur int
@@ -288,6 +290,8 @@ func (b *builder) Init(s *Signature) {
 	}
 
 	b.redundantParams = b.redundantParams[:0]
+	b.dominatedMemoryBounds = b.dominatedMemoryBounds[:0]
+	b.dominatedMemoryBoundHeads = b.dominatedMemoryBoundHeads[:0]
 	b.blkStack = b.blkStack[:0]
 	b.blkStack2 = b.blkStack2[:0]
 	b.dominators = b.dominators[:0]

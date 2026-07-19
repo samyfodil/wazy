@@ -25,6 +25,7 @@ func (b *builder) runPreBlockLayoutPasses() {
 	// The result of passCalculateImmediateDominators will be used by various passes below.
 	passCalculateImmediateDominators(b)
 	passRedundantPhiEliminationOpt(b)
+	passDominatedMemoryBoundsEliminationOpt(b)
 
 	// Note: wazy intentionally does NOT run middle-end "language compiler"
 	// optimizations here (constant folding, algebraic identities, CSE,
@@ -46,6 +47,111 @@ func (b *builder) runPreBlockLayoutPasses() {
 	// passDeadCodeEliminationOpt could be more accurate if we do this after other optimizations.
 	passDeadCodeEliminationOpt(b)
 	b.donePreBlockLayoutPasses = true
+}
+
+type dominatedMemoryBound struct {
+	base ValueID
+	ceil uint64
+	next int
+}
+
+// passDominatedMemoryBoundsEliminationOpt removes a linear-memory bounds check
+// when a stronger check of the same address dominates it. Redundant PHIs must
+// be eliminated first so addresses forwarded unchanged through block parameters
+// resolve to the same SSA value.
+func passDominatedMemoryBoundsEliminationOpt(b *builder) {
+	blockCount := b.basicBlocksPool.Allocated()
+	if cap(b.dominatedMemoryBoundHeads) < blockCount {
+		b.dominatedMemoryBoundHeads = make([]int, blockCount)
+	} else {
+		b.dominatedMemoryBoundHeads = b.dominatedMemoryBoundHeads[:blockCount]
+	}
+	for i := range b.dominatedMemoryBoundHeads {
+		b.dominatedMemoryBoundHeads[i] = -1
+	}
+	b.dominatedMemoryBounds = b.dominatedMemoryBounds[:0]
+
+	for _, blk := range b.reversePostOrderedBasicBlocks {
+		for cur := blk.rootInstr; cur != nil; {
+			next := cur.next
+			base, ceil, ok := memoryBoundsCheckData(b, cur)
+			if ok && b.hasDominatingMemoryBound(blk, base, ceil) {
+				blk.removeInstruction(cur)
+			} else if ok {
+				b.recordDominatingMemoryBound(blk, base, ceil)
+			}
+			cur = next
+		}
+	}
+}
+
+func memoryBoundsCheckData(b *builder, instr *Instruction) (base ValueID, ceil uint64, ok bool) {
+	if instr.opcode != OpcodeExitIfTrueWithCode {
+		return
+	}
+	_, condition, code := instr.ExitIfTrueWithCodeData()
+	if code != nativeapi.ExitCodeMemoryOutOfBounds {
+		return
+	}
+	cmp := b.InstructionOfValue(b.resolveAlias(condition))
+	if cmp == nil || cmp.opcode != OpcodeIcmp {
+		return
+	}
+	_, end, cond := cmp.IcmpData()
+	if cond != IntegerCmpCondUnsignedLessThan {
+		return
+	}
+	add := b.InstructionOfValue(b.resolveAlias(end))
+	if add == nil || add.opcode != OpcodeIadd {
+		return
+	}
+	x, y := add.Arg2()
+	var extended Value
+	if constant := b.InstructionOfValue(b.resolveAlias(y)); constant != nil && constant.Constant() {
+		extended, ceil = x, uint64(constant.ConstantVal())
+	} else if constant := b.InstructionOfValue(b.resolveAlias(x)); constant != nil && constant.Constant() {
+		extended, ceil = y, uint64(constant.ConstantVal())
+	} else {
+		return
+	}
+	extend := b.InstructionOfValue(b.resolveAlias(extended))
+	if extend == nil || extend.opcode != OpcodeUExtend {
+		return
+	}
+	from, to, _ := extend.ExtendData()
+	if from != 32 || to != 64 {
+		return
+	}
+	return b.resolveAlias(extend.Arg()).ID(), ceil, true
+}
+
+func (b *builder) hasDominatingMemoryBound(blk *basicBlock, base ValueID, ceil uint64) bool {
+	for {
+		for i := b.dominatedMemoryBoundHeads[blk.id]; i >= 0; i = b.dominatedMemoryBounds[i].next {
+			bound := &b.dominatedMemoryBounds[i]
+			if bound.base == base && bound.ceil >= ceil {
+				return true
+			}
+		}
+		idom := b.dominators[blk.id]
+		if idom == blk {
+			return false
+		}
+		blk = idom
+	}
+}
+
+func (b *builder) recordDominatingMemoryBound(blk *basicBlock, base ValueID, ceil uint64) {
+	head := b.dominatedMemoryBoundHeads[blk.id]
+	for i := head; i >= 0; i = b.dominatedMemoryBounds[i].next {
+		bound := &b.dominatedMemoryBounds[i]
+		if bound.base == base {
+			bound.ceil = max(bound.ceil, ceil)
+			return
+		}
+	}
+	b.dominatedMemoryBounds = append(b.dominatedMemoryBounds, dominatedMemoryBound{base: base, ceil: ceil, next: head})
+	b.dominatedMemoryBoundHeads[blk.id] = len(b.dominatedMemoryBounds) - 1
 }
 
 func (b *builder) runBlockLayoutPass() {
