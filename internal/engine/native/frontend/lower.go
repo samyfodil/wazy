@@ -4372,11 +4372,63 @@ func (c *Compiler) constUpperBoundU32(v ssa.Value) (uint64, bool) {
 	return 0, false
 }
 
-// recordMaskedSafeBound materializes the absolute address for a bounds-check-
+// staticUpperBoundU32 returns a static inclusive upper bound for the unsigned
+// 32-bit value v. Keep this deliberately narrow: add only instruction shapes
+// whose bound follows directly from WebAssembly integer semantics.
+func (c *Compiler) staticUpperBoundU32(v ssa.Value) (uint64, bool) {
+	return c.staticUpperBoundU32Depth(v, 0)
+}
+
+func (c *Compiler) staticUpperBoundU32Depth(v ssa.Value, depth int) (uint64, bool) {
+	if depth > 4 {
+		return 0, false
+	}
+	def := c.ssaBuilder.InstructionOfValue(v)
+	if def == nil {
+		return 0, false
+	}
+	if def.Constant() {
+		return uint64(uint32(def.ConstantVal())), true
+	}
+
+	x, y := def.Arg2()
+	switch def.Opcode() {
+	case ssa.OpcodeBand:
+		xBound, xOK := c.staticUpperBoundU32Depth(x, depth+1)
+		yBound, yOK := c.staticUpperBoundU32Depth(y, depth+1)
+		if xOK && yOK {
+			return min(xBound, yBound), true
+		} else if xOK {
+			return xBound, true
+		}
+		return yBound, yOK
+	case ssa.OpcodeUrem:
+		if divisor, ok := c.constUpperBoundU32(y); ok && divisor != 0 {
+			return divisor - 1, true
+		}
+	case ssa.OpcodeIadd:
+		xBound, xOK := c.staticUpperBoundU32Depth(x, depth+1)
+		yBound, yOK := c.staticUpperBoundU32Depth(y, depth+1)
+		if xOK && yOK && xBound+yBound <= uint64(^uint32(0)) {
+			return xBound + yBound, true
+		}
+	case ssa.OpcodeIshl:
+		xBound, xOK := c.staticUpperBoundU32Depth(x, depth+1)
+		shift, shiftOK := c.constUpperBoundU32(y)
+		if xOK && shiftOK {
+			shift &= 31 // WebAssembly masks i32 shift counts to five bits.
+			if xBound <= uint64(^uint32(0))>>shift {
+				return xBound << shift, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// recordRangeSafeBound materializes the absolute address for a bounds-check-
 // elided access (if not already computed) and records the known-safe bound so
-// subsequent accesses off the same base reuse it. Shared by the masked-base
-// elision path.
-func (c *Compiler) recordMaskedSafeBound(baseAddr ssa.Value, baseAddrID ssa.ValueID, ceil uint64, address ssa.Value) ssa.Value {
+// subsequent accesses off the same base reuse it.
+func (c *Compiler) recordRangeSafeBound(baseAddr ssa.Value, baseAddrID ssa.ValueID, ceil uint64, address ssa.Value) ssa.Value {
 	builder := c.ssaBuilder
 	if !address.Valid() {
 		memBase := c.getMemoryBaseValue(false)
@@ -4432,23 +4484,14 @@ func (c *Compiler) memOpSetup(baseAddr ssa.Value, constOffset, operationSizeInBy
 		}
 	}
 
-	// A base address of the form (x & C) is bounded above by the constant mask C:
-	// only bits set in C can be set in the result, so the result is <= C as an
-	// unsigned value. Hence if C + ceil <= min it can never be out of bounds --
-	// the same "min is a permanent static lower bound" reasoning as the constant
-	// case above. This covers the ubiquitous masked-index idiom (hash slot
-	// h & (n-1), ring-buffer i & mask, & 0x…) that a constant-only check cannot.
-	// Mirrors the constant case's 32-bit-address assumption (uint32 truncation).
-	if def := builder.InstructionOfValue(baseAddr); def != nil && def.Opcode() == ssa.OpcodeBand {
-		x, y := def.Arg2()
-		mask, ok := c.constUpperBoundU32(x)
-		if !ok {
-			mask, ok = c.constUpperBoundU32(y)
-		}
-		if ok && mask+ceil <= c.memoryMinSizeInBytes {
-			address = c.recordMaskedSafeBound(baseAddr, baseAddrID, ceil, address)
-			return
-		}
+	// A statically bounded base whose maximum access end lies within the
+	// memory's minimum can never be out of bounds. This includes x & C (at most
+	// C), x % C for a non-zero constant C (at most C-1), and non-wrapping add or
+	// constant-shift address composition. Mirrors the constant case's 32-bit-
+	// address assumption.
+	if upperBound, ok := c.staticUpperBoundU32(baseAddr); ok && upperBound+ceil <= c.memoryMinSizeInBytes {
+		address = c.recordRangeSafeBound(baseAddr, baseAddrID, ceil, address)
+		return
 	}
 
 	ceilConst := builder.AllocateInstruction()
