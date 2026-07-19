@@ -107,10 +107,10 @@ func TestMemoryInstance_Grow_Size(t *testing.T) {
 			// So in total, the memoryGrown should be called 3 times.
 			require.Equal(t, 3, me.memoryGrown)
 
-			if tc.capEqualsMax { // Ensure the capacity isn't more than max.
+			// Ordinary growth uses an explicit capacity policy clamped to Max. It
+			// does not depend on append's capacity growth policy.
+			if !tc.expAllocator && !tc.failAllocator {
 				require.Equal(t, maxBytes, uint64(cap(m.Buffer)))
-			} else { // Slice doubles, so it should have a higher capacity than max.
-				require.True(t, maxBytes < uint64(cap(m.Buffer)))
 			}
 		})
 	}
@@ -130,6 +130,7 @@ func TestMemoryInstance_GrowReservesCapacityAfterFallback(t *testing.T) {
 	me := &mockModuleEngine{}
 	m := NewMemoryInstance(&Memory{Min: 1, Cap: 3, Max: 10, IsMaxEncoded: true}, nil, me)
 	require.Equal(t, uint32(2), m.growReservePages)
+	require.Equal(t, MemoryPagesToBytesNum(3), uint64(len(m.backing)))
 
 	// The initial reserve handles this without allocation.
 	oldBuffer := unsafe.SliceData(m.Buffer)
@@ -143,8 +144,8 @@ func TestMemoryInstance_GrowReservesCapacityAfterFallback(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, uint32(3), oldPages)
 	require.Equal(t, uint32(4), m.Pages())
-	require.True(t, m.Cap >= 6)
-	require.True(t, m.Cap <= m.Max)
+	require.Equal(t, uint32(6), m.Cap)
+	require.Equal(t, MemoryPagesToBytesNum(6), uint64(len(m.backing)))
 	require.Equal(t, MemoryPagesToBytesNum(m.Cap), m.nativeGrowCap)
 
 	// Neither the logical size nor recorded native capacity can exceed Max.
@@ -164,10 +165,9 @@ func BenchmarkMemoryInstanceGrow(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			// Model the state immediately after append reserved more pages than
-			// the grow requested: the backing array has spare zero capacity, but
-			// Cap records only the currently visible page.
-			m.Buffer, m.Cap = buffer[:MemoryPageSize], 1
+			// Model a memory with an explicit known-zero backing allocation.
+			m.Buffer, m.backing, m.Cap = buffer[:MemoryPageSize], buffer, finalPages
+			m.sizeBytes = uint64(MemoryPageSize)
 			for pages := uint32(1); pages < finalPages; pages++ {
 				if _, ok := m.Grow(1); !ok {
 					b.Fatal("memory grow failed")

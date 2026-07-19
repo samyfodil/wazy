@@ -76,11 +76,13 @@ type RuntimeConfig interface {
 	// results in allocating 4GB. See the doc on WithMemoryLimitPages for detail.
 	WithMemoryCapacityFromMax(memoryCapacityFromMax bool) RuntimeConfig
 
-	// WithMemoryCapacityReservePages reserves capacity beyond a memory's
+	// WithMemoryCapacityReservePages allocates a backing reserve beyond a memory's
 	// initial size. This can make memory.grow cheaper without reserving the
 	// memory's entire maximum. Go fallback growth reapplies the reserve to the
 	// new logical size. Capacity is capped by both the module maximum and
-	// WithMemoryLimitPages. The default is zero pages.
+	// WithMemoryLimitPages. The logical size is tracked separately from this
+	// backing allocation. The default is zero fixed pages; ordinary fallback
+	// growth still uses a small deterministic geometric reserve.
 	//
 	// This example reserves up to 4MB beyond each memory's initial size:
 	//	rConfig = wazy.NewRuntimeConfig().WithMemoryCapacityReservePages(64)

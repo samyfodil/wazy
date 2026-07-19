@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"testing"
+	"unsafe"
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
@@ -1277,12 +1278,20 @@ func TestE2E_memoryGrowWithinReservedCapacity(t *testing.T) {
 	require.NoError(t, err)
 	grow := mod.ExportedFunction("grow")
 	memory := mod.Memory()
+	memoryInstance := memory.(*wasm.MemoryInstance)
+	initialBufferLen, initialBufferCap := len(memoryInstance.Buffer), cap(memoryInstance.Buffer)
+	initialBufferData := unsafe.SliceData(memoryInstance.Buffer)
 	require.Equal(t, uint32(wasm.MemoryPageSize), memory.Size())
 
 	results, err := grow.Call(ctx, 1)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), results[0])
 	require.Equal(t, uint32(2*wasm.MemoryPageSize), memory.Size())
+	// The native fast path changes only the explicit logical size. Go retains
+	// sole ownership of both slice-header words and the backing allocation.
+	require.Equal(t, initialBufferLen, len(memoryInstance.Buffer))
+	require.Equal(t, initialBufferCap, cap(memoryInstance.Buffer))
+	require.Equal(t, initialBufferData, unsafe.SliceData(memoryInstance.Buffer))
 	value, ok := memory.ReadByte(2*wasm.MemoryPageSize - 1)
 	require.True(t, ok)
 	require.Equal(t, byte(0), value)

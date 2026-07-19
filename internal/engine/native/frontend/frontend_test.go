@@ -1275,9 +1275,9 @@ blk0: (v0:i64, v1:i64)
 	v5:i64 = Load v1, 0x8
 	v6:i64 = Load v5, 0x0
 	v7:i64 = Load v1, 0x8
-	v8:i64 = Load v7, 0x8
+	v8:i64 = Load v7, 0x30
 	v9:i64 = Load v1, 0x8
-	v10:i32 = Load v9, 0x8
+	v10:i32 = Load v9, 0x30
 	v11:i32 = Iconst_32 0x10
 	v12:i32 = Ushr v10, v11
 	v13:i32 = Iconst_32 0xa
@@ -1287,7 +1287,7 @@ blk0: (v0:i64, v1:i64)
 	v16:i64 = Load v1, 0x8
 	v17:i64 = Load v16, 0x0
 	v18:i64 = Load v1, 0x8
-	v19:i64 = Load v18, 0x8
+	v19:i64 = Load v18, 0x30
 	Store v1, v0, 0x8
 	v20:i64 = Load v1, 0x18
 	v21:i64 = Load v1, 0x20
@@ -1295,9 +1295,9 @@ blk0: (v0:i64, v1:i64)
 	v23:i64 = Load v1, 0x8
 	v24:i64 = Load v23, 0x0
 	v25:i64 = Load v1, 0x8
-	v26:i64 = Load v25, 0x8
+	v26:i64 = Load v25, 0x30
 	v27:i64 = Load v1, 0x8
-	v28:i32 = Load v27, 0x8
+	v28:i32 = Load v27, 0x30
 	v29:i32 = Iconst_32 0x10
 	v30:i32 = Ushr v28, v29
 	Jump blk_ret, v4, v12, v22, v30
@@ -1313,7 +1313,7 @@ blk0: (v0:i64, v1:i64)
 	v3:i64 = Load v1, 0x20
 	v4:i32 = CallIndirect v2:sig0, v0, v3
 	v9:i64 = Load v1, 0x8
-	v10:i32 = Load v9, 0x8
+	v10:i32 = Load v9, 0x30
 	v11:i32 = Iconst_32 0x10
 	v12:i32 = Ushr v10, v11
 	v13:i32 = Iconst_32 0xa
@@ -1325,7 +1325,7 @@ blk0: (v0:i64, v1:i64)
 	v21:i64 = Load v1, 0x20
 	v22:i32 = CallIndirect v20:sig0, v0, v21
 	v27:i64 = Load v1, 0x8
-	v28:i32 = Load v27, 0x8
+	v28:i32 = Load v27, 0x30
 	v29:i32 = Iconst_32 0x10
 	v30:i32 = Ushr v28, v29
 	Jump blk_ret, v4, v12, v22, v30
@@ -1362,7 +1362,7 @@ blk1: () <-- (blk0)
 
 blk2: () <-- (blk1)
 	Store v15, v1, 0x10
-	Store v15, v13, 0x8
+	Store v15, v13, 0x30
 	Jump blk5, v7
 
 blk3: () <-- (blk1)
@@ -1403,7 +1403,7 @@ blk6: () <-- (blk5)
 
 blk7: () <-- (blk6)
 	Store v37, v1, 0x10
-	Store v37, v35, 0x8
+	Store v37, v35, 0x30
 	Jump blk10, v29
 
 blk8: () <-- (blk6)
@@ -1449,7 +1449,7 @@ blk1: () <-- (blk0)
 
 blk2: () <-- (blk1)
 	Store v15, v1, 0x10
-	Store v15, v13, 0x8
+	Store v15, v13, 0x30
 	Jump blk5, v7
 
 blk3: () <-- (blk1)
@@ -1489,7 +1489,7 @@ blk6: () <-- (blk5)
 
 blk7: () <-- (blk6)
 	Store v37, v1, 0x10
-	Store v37, v35, 0x8
+	Store v37, v35, 0x30
 	Jump blk10, v29
 
 blk8: () <-- (blk6)

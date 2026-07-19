@@ -39,11 +39,10 @@ import "sync"
 // make([]byte, minBytes, capBytes) case.
 //
 // Every buffer handed out by getPooledMemoryBuffer is fully zeroed across its
-// entire capacity (not just the requested length) before being returned,
-// because wasm linear memory MUST start all-zero, and MemoryInstance.Grow can
-// later re-slice into previously-hidden capacity without any further
-// zeroing pass of its own (see Grow's "we already have the capacity we
-// need" branch).
+// entire capacity, because wasm linear memory MUST start all-zero. Only the
+// logically exposed prefix can have been written, so the pool records that
+// prefix in len(buf) and clears only it. The unexposed reserve remains
+// known-zero without touching its lazily backed pages.
 var memoryBufferPools sync.Map // map[uint64]*sync.Pool, keyed by cap(buffer) in bytes.
 
 // getPooledMemoryBuffer returns a zeroed buffer with cap() == capBytes from
@@ -62,17 +61,17 @@ func getPooledMemoryBuffer(capBytes uint64) []byte {
 		return nil
 	}
 	buf := *got.(*[]byte)
-	// Linear memory must start all-zero: clear the whole capacity, not just
-	// the length, since Grow can later expose more of it without its own
-	// zeroing pass.
-	clear(buf[:cap(buf)])
-	return buf
+	// Only this prefix was logically visible and therefore writable. Bytes
+	// above len(buf) were never addressable and remain zero by construction.
+	clear(buf)
+	return buf[:cap(buf)]
 }
 
-// putPooledMemoryBuffer returns buf to the pool, bucketed by its capacity,
-// for reuse by a future MemoryInstance of the same shape. See the package
-// doc above for the safety argument the caller (ensureResourcesClosed) must
-// uphold before calling this.
+// putPooledMemoryBuffer returns buf to the pool, bucketed by its capacity, for
+// reuse by a future MemoryInstance of the same shape. len(buf) must be the
+// logically exposed (and potentially dirty) prefix; cap(buf) is the complete
+// known-zero backing allocation. See the package doc above for the ownership
+// safety argument the caller must uphold before calling this.
 func putPooledMemoryBuffer(buf []byte) {
 	capBytes := uint64(cap(buf))
 	if capBytes == 0 {
@@ -82,6 +81,5 @@ func putPooledMemoryBuffer(buf []byte) {
 	// Store *[]byte, not []byte: sync.Pool.Put([]byte) boxes the slice header
 	// into interface{}, which heap-allocates it (staticcheck SA6002) -- the
 	// opposite of what a pool that exists to avoid allocations wants.
-	full := buf[:cap(buf)]
-	v.(*sync.Pool).Put(&full)
+	v.(*sync.Pool).Put(&buf)
 }

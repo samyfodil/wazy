@@ -1157,7 +1157,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 				Return()
 
 			memSizeInBytes = builder.AllocateInstruction().
-				AsLoad(memInstPtr, memoryInstanceBufSizeOffset, ssa.TypeI32).
+				AsLoad(memInstPtr, memoryInstanceSizeOffset, ssa.TypeI32).
 				Insert(builder).
 				Return()
 		} else {
@@ -4662,13 +4662,13 @@ func (c *Compiler) lowerLocalMemoryGrow(pages ssa.Value) ssa.Value {
 	builder.Seal(checkCapacityBlk)
 
 	builder.SetCurrentBlock(fastBlk)
-	// Keep both views synchronized: generated code reads the cached module
-	// context length, while host APIs and imported modules read Buffer.len.
+	// Keep both logical-size views synchronized. The backing allocation and Go
+	// slice header are immutable on this path.
 	builder.AllocateInstruction().
 		AsStore(ssa.OpcodeStore, newLen, c.moduleCtxPtrValue, c.offset.LocalMemoryLen().U32()).
 		Insert(builder)
 	builder.AllocateInstruction().
-		AsStore(ssa.OpcodeStore, newLen, memoryInstance, memoryInstanceBufSizeOffset).
+		AsStore(ssa.OpcodeStore, newLen, memoryInstance, memoryInstanceSizeOffset).
 		Insert(builder)
 	builder.AllocateInstruction().
 		AsJump(c.allocateVarLengthValues(1, currentPages), followingBlk).Insert(builder)
@@ -4745,12 +4745,11 @@ func (c *Compiler) getWasmGlobalValue(index wasm.Index, forceLoad bool) ssa.Valu
 }
 
 const (
-	memoryInstanceBufOffset     = 0
-	memoryInstanceBufSizeOffset = memoryInstanceBufOffset + 8
-	moduleInstanceMemoryOffset  = 48
+	memoryInstanceBufOffset    = 0
+	moduleInstanceMemoryOffset = 48
 )
 
-var memoryInstanceNativeGrowCapOffset = wasm.MemoryInstanceNativeGrowCapOffset()
+var memoryInstanceNativeGrowCapOffset, memoryInstanceSizeOffset = wasm.MemoryInstanceNativeGrowOffsets()
 
 func (c *Compiler) getMemoryBaseValue(forceReload bool) ssa.Value {
 	builder := c.ssaBuilder
@@ -4801,11 +4800,11 @@ func (c *Compiler) getMemoryLenValue(forceReload bool) ssa.Value {
 
 		loadBufSizePtr := builder.AllocateInstruction()
 		if c.memoryShared {
-			sizeOffset := builder.AllocateInstruction().AsIconst64(memoryInstanceBufSizeOffset).Insert(builder).Return()
+			sizeOffset := builder.AllocateInstruction().AsIconst64(uint64(memoryInstanceSizeOffset)).Insert(builder).Return()
 			addr := builder.AllocateInstruction().AsIadd(memInstPtr, sizeOffset).Insert(builder).Return()
 			loadBufSizePtr.AsAtomicLoad(addr, 8, ssa.TypeI64)
 		} else {
-			loadBufSizePtr.AsLoad(memInstPtr, memoryInstanceBufSizeOffset, ssa.TypeI64)
+			loadBufSizePtr.AsLoad(memInstPtr, memoryInstanceSizeOffset, ssa.TypeI64)
 		}
 		builder.InsertInstruction(loadBufSizePtr)
 

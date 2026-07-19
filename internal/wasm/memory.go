@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -51,9 +50,17 @@ type MemoryInstance struct {
 	// without calling back into Go. It is zero for shared and custom-allocator
 	// memories, whose growth must always use Grow.
 	nativeGrowCap uint64
+	// sizeBytes is the logical byte length visible to Wasm and host APIs. The
+	// native engine may update this scalar after checked in-capacity growth;
+	// Buffer's slice header is only mutated by Go.
+	sizeBytes uint64
 	// growReservePages is the configured spare capacity to allocate after a Go
 	// fallback grows this memory's backing buffer.
 	growReservePages uint32
+	// backing is the explicitly allocated region. Buffer remains the Go-owned
+	// logical view, while native code may expose bytes up to len(backing) by
+	// updating sizeBytes without mutating either slice header.
+	backing []byte
 	// definition is known at compile time.
 	definition api.MemoryDefinition
 
@@ -103,7 +110,7 @@ func NewMemoryInstance(memSec *Memory, allocator api.MemoryAllocator, moduleEngi
 	capBytes := MemoryPagesToBytesNum(memSec.Cap)
 	maxBytes := MemoryPagesToBytesNum(memSec.Max)
 
-	var buffer []byte
+	var buffer, backing []byte
 	var expBuffer api.LinearMemory
 	if allocator != nil {
 		expBuffer = allocator.Allocate(capBytes, maxBytes)
@@ -121,9 +128,11 @@ func NewMemoryInstance(memSec *Memory, allocator api.MemoryAllocator, moduleEngi
 		// 	* https://github.com/golang/go/blob/go1.24.0/src/runtime/malloc.go#L1059
 		buffer = make([]byte, minBytes, maxBytes)
 	} else if pooled := getPooledMemoryBuffer(capBytes); pooled != nil {
-		buffer = pooled[:minBytes]
+		backing = pooled[:capBytes]
+		buffer = backing[:minBytes]
 	} else {
-		buffer = make([]byte, minBytes, capBytes)
+		backing = make([]byte, capBytes)
+		buffer = backing[:minBytes]
 	}
 	poolable := allocator == nil && !memSec.IsShared
 	growReservePages := uint32(0)
@@ -132,15 +141,17 @@ func NewMemoryInstance(memSec *Memory, allocator api.MemoryAllocator, moduleEngi
 	}
 	nativeGrowCap := uint64(0)
 	if poolable {
-		nativeGrowCap = MemoryPagesToBytesNum(memoryBytesNumToPages(uint64(cap(buffer))))
+		nativeGrowCap = uint64(len(backing))
 	}
 	return &MemoryInstance{
 		Buffer:            buffer,
+		backing:           backing,
 		Min:               memSec.Min,
 		Cap:               memoryBytesNumToPages(uint64(cap(buffer))),
 		Max:               memSec.Max,
 		Shared:            memSec.IsShared,
 		nativeGrowCap:     nativeGrowCap,
+		sizeBytes:         minBytes,
 		growReservePages:  growReservePages,
 		expBuffer:         expBuffer,
 		ownerModuleEngine: moduleEngine,
@@ -157,7 +168,13 @@ func (m *MemoryInstance) Definition() api.MemoryDefinition {
 
 // Size implements the same method as documented on api.Memory.
 func (m *MemoryInstance) Size() uint32 {
-	return uint32(len(m.Buffer))
+	return uint32(m.byteSize())
+}
+
+// ByteSize returns the logical memory size without the uint32 truncation
+// required by api.Memory.Size at the four-gibibyte WebAssembly limit.
+func (m *MemoryInstance) ByteSize() uint64 {
+	return m.byteSize()
 }
 
 // ReadByte implements the same method as documented on api.Memory.
@@ -165,7 +182,7 @@ func (m *MemoryInstance) ReadByte(offset uint32) (byte, bool) {
 	if !m.hasSize(offset, 1) {
 		return 0, false
 	}
-	return m.Buffer[offset], true
+	return m.visibleBuffer()[offset], true
 }
 
 // ReadUint16Le implements the same method as documented on api.Memory.
@@ -173,7 +190,7 @@ func (m *MemoryInstance) ReadUint16Le(offset uint32) (uint16, bool) {
 	if !m.hasSize(offset, 2) {
 		return 0, false
 	}
-	return binary.LittleEndian.Uint16(m.Buffer[offset : offset+2]), true
+	return binary.LittleEndian.Uint16(m.visibleBuffer()[offset : offset+2]), true
 }
 
 // ReadUint32Le implements the same method as documented on api.Memory.
@@ -209,7 +226,7 @@ func (m *MemoryInstance) Read(offset, byteCount uint32) ([]byte, bool) {
 	if !m.hasSize(offset, uint64(byteCount)) {
 		return nil, false
 	}
-	return m.Buffer[offset : offset+byteCount : offset+byteCount], true
+	return m.visibleBuffer()[offset : offset+byteCount : offset+byteCount], true
 }
 
 // WriteByte implements the same method as documented on api.Memory.
@@ -217,7 +234,7 @@ func (m *MemoryInstance) WriteByte(offset uint32, v byte) bool {
 	if !m.hasSize(offset, 1) {
 		return false
 	}
-	m.Buffer[offset] = v
+	m.visibleBuffer()[offset] = v
 	return true
 }
 
@@ -226,7 +243,7 @@ func (m *MemoryInstance) WriteUint16Le(offset uint32, v uint16) bool {
 	if !m.hasSize(offset, 2) {
 		return false
 	}
-	binary.LittleEndian.PutUint16(m.Buffer[offset:], v)
+	binary.LittleEndian.PutUint16(m.visibleBuffer()[offset:], v)
 	return true
 }
 
@@ -255,7 +272,7 @@ func (m *MemoryInstance) Write(offset uint32, val []byte) bool {
 	if !m.hasSize(offset, uint64(len(val))) {
 		return false
 	}
-	copy(m.Buffer[offset:], val)
+	copy(m.visibleBuffer()[offset:], val)
 	return true
 }
 
@@ -264,7 +281,7 @@ func (m *MemoryInstance) WriteString(offset uint32, val string) bool {
 	if !m.hasSize(offset, uint64(len(val))) {
 		return false
 	}
-	copy(m.Buffer[offset:], val)
+	copy(m.visibleBuffer()[offset:], val)
 	return true
 }
 
@@ -311,32 +328,31 @@ func (m *MemoryInstance) Grow(delta uint32) (result uint32, ok bool) {
 		if m.Shared {
 			panic("shared memory cannot be grown, this is a bug in wazy")
 		}
+		newCapPages := newPages
 		if m.growReservePages == 0 {
-			m.Buffer = append(m.Buffer, make([]byte, MemoryPagesToBytesNum(delta))...)
+			// Make the default growth policy explicit instead of inheriting the
+			// Go runtime's slice-capacity policy. Growing by 25 percent keeps
+			// repeated small grows amortized without retaining a large fixed
+			// reserve on every instance.
+			geometricCapPages := m.Cap + (m.Cap+3)/4
+			if geometricCapPages > newCapPages {
+				newCapPages = geometricCapPages
+			}
+		} else if m.growReservePages >= m.Max-newPages {
+			newCapPages = m.Max
 		} else {
-			newCapPages := newPages
-			if m.growReservePages >= m.Max-newPages {
-				newCapPages = m.Max
-			} else {
-				newCapPages += m.growReservePages
-			}
-			newLenBytes := MemoryPagesToBytesNum(newPages)
-			newCapBytes := MemoryPagesToBytesNum(newCapPages)
-			if newCapBytesInt := int(newCapBytes); newCapBytesInt >= 0 && uint64(newCapBytesInt) == newCapBytes {
-				m.Buffer = slices.Grow(m.Buffer, newCapBytesInt-len(m.Buffer))
-				m.Buffer = m.Buffer[:newLenBytes]
-			} else {
-				// A 32-bit host cannot represent the requested reserve. Preserve
-				// the existing growth behavior, which will fail naturally if even
-				// the new logical size cannot fit in an int-sized slice.
-				m.Buffer = append(m.Buffer, make([]byte, MemoryPagesToBytesNum(delta))...)
-			}
+			newCapPages += m.growReservePages
 		}
-		// Record all complete pages that can be exposed without another
-		// allocation. With an explicit reserve this is newPages+reserve; without
-		// one it includes any spare capacity chosen by append. The unexposed
-		// capacity is known-zero because it came from Go's allocator.
-		m.Cap = min(memoryBytesNumToPages(uint64(cap(m.Buffer))), m.Max)
+		if newCapPages > m.Max {
+			newCapPages = m.Max
+		}
+		newLenBytes := MemoryPagesToBytesNum(newPages)
+		newCapBytes := MemoryPagesToBytesNum(newCapPages)
+		newBacking := make([]byte, newCapBytes)
+		copy(newBacking, m.visibleBuffer())
+		m.backing = newBacking
+		m.Buffer = newBacking[:newLenBytes]
+		m.Cap = newCapPages
 		m.nativeGrowCap = MemoryPagesToBytesNum(m.Cap)
 	} else { // We already have the capacity we need.
 		if m.Shared {
@@ -345,8 +361,13 @@ func (m *MemoryInstance) Grow(delta uint32) (result uint32, ok bool) {
 			// so use atomic to make the new length visible across threads.
 			atomicStoreLength(&m.Buffer, uintptr(MemoryPagesToBytesNum(newPages)))
 		} else {
-			m.Buffer = m.Buffer[:MemoryPagesToBytesNum(newPages)]
+			m.Buffer = m.allocatedBuffer()[:MemoryPagesToBytesNum(newPages)]
 		}
+	}
+	if m.Shared {
+		atomic.StoreUint64(&m.sizeBytes, MemoryPagesToBytesNum(newPages))
+	} else {
+		m.sizeBytes = MemoryPagesToBytesNum(newPages)
 	}
 	m.ownerModuleEngine.MemoryGrown()
 	return currentPages, true
@@ -354,7 +375,7 @@ func (m *MemoryInstance) Grow(delta uint32) (result uint32, ok bool) {
 
 // Pages implements the same method as documented on api.Memory.
 func (m *MemoryInstance) Pages() (result uint32) {
-	return memoryBytesNumToPages(uint64(len(m.Buffer)))
+	return memoryBytesNumToPages(m.byteSize())
 }
 
 // PagesToUnitOfBytes converts the pages to a human-readable form similar to what's specified. e.g. 1 -> "64Ki"
@@ -409,17 +430,43 @@ func memoryBytesNumToPages(bytesNum uint64) (pages uint32) {
 	return uint32(bytesNum >> MemoryPageSizeInBits)
 }
 
-// MemoryInstanceNativeGrowCapOffset returns the byte offset of nativeGrowCap
-// for the native compiler's generated memory.grow fast path.
-func MemoryInstanceNativeGrowCapOffset() uint32 {
-	return uint32(unsafe.Offsetof(MemoryInstance{}.nativeGrowCap))
+// MemoryInstanceNativeGrowOffsets returns the byte offsets of the native grow
+// capacity and logical size for the native compiler's memory.grow fast path.
+func MemoryInstanceNativeGrowOffsets() (capacity, size uint32) {
+	return uint32(unsafe.Offsetof(MemoryInstance{}.nativeGrowCap)),
+		uint32(unsafe.Offsetof(MemoryInstance{}.sizeBytes))
 }
 
 // hasSize returns true if Len is sufficient for byteCount at the given offset.
 //
 // Note: This is always fine, because memory can grow, but never shrink.
 func (m *MemoryInstance) hasSize(offset uint32, byteCount uint64) bool {
-	return uint64(offset)+byteCount <= uint64(len(m.Buffer)) // uint64 prevents overflow on add
+	return uint64(offset)+byteCount <= m.byteSize() // uint64 prevents overflow on add
+}
+
+func (m *MemoryInstance) byteSize() uint64 {
+	if m.Shared {
+		if size := atomic.LoadUint64(&m.sizeBytes); size != 0 || len(m.Buffer) == 0 {
+			return size
+		}
+		return uint64(len(m.Buffer))
+	}
+	if m.sizeBytes != 0 || len(m.Buffer) == 0 {
+		return m.sizeBytes
+	}
+	// Preserve support for internal/tests constructing MemoryInstance literals.
+	return uint64(len(m.Buffer))
+}
+
+func (m *MemoryInstance) visibleBuffer() []byte {
+	return m.allocatedBuffer()[:m.byteSize()]
+}
+
+func (m *MemoryInstance) allocatedBuffer() []byte {
+	if m.backing != nil {
+		return m.backing
+	}
+	return m.Buffer[:cap(m.Buffer)]
 }
 
 // readUint32Le implements ReadUint32Le without using a context. This is extracted as both ints and floats are stored in
@@ -428,7 +475,7 @@ func (m *MemoryInstance) readUint32Le(offset uint32) (uint32, bool) {
 	if !m.hasSize(offset, 4) {
 		return 0, false
 	}
-	return binary.LittleEndian.Uint32(m.Buffer[offset:]), true
+	return binary.LittleEndian.Uint32(m.visibleBuffer()[offset:]), true
 }
 
 // readUint64Le implements ReadUint64Le without using a context. This is extracted as both ints and floats are stored in
@@ -437,7 +484,7 @@ func (m *MemoryInstance) readUint64Le(offset uint32) (uint64, bool) {
 	if !m.hasSize(offset, 8) {
 		return 0, false
 	}
-	return binary.LittleEndian.Uint64(m.Buffer[offset:]), true
+	return binary.LittleEndian.Uint64(m.visibleBuffer()[offset:]), true
 }
 
 // writeUint32Le implements WriteUint32Le without using a context. This is extracted as both ints and floats are stored
@@ -446,7 +493,7 @@ func (m *MemoryInstance) writeUint32Le(offset uint32, v uint32) bool {
 	if !m.hasSize(offset, 4) {
 		return false
 	}
-	binary.LittleEndian.PutUint32(m.Buffer[offset:], v)
+	binary.LittleEndian.PutUint32(m.visibleBuffer()[offset:], v)
 	return true
 }
 
@@ -456,7 +503,7 @@ func (m *MemoryInstance) writeUint64Le(offset uint32, v uint64) bool {
 	if !m.hasSize(offset, 8) {
 		return false
 	}
-	binary.LittleEndian.PutUint64(m.Buffer[offset:], v)
+	binary.LittleEndian.PutUint64(m.visibleBuffer()[offset:], v)
 	return true
 }
 

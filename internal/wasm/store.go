@@ -502,7 +502,7 @@ func (m *ModuleInstance) resolveImports(ctx context.Context, module *Module) (er
 				expected := i.DescMem
 				importedMemory := importedModule.MemoryInstance
 
-				if expected.Min > memoryBytesNumToPages(uint64(len(importedMemory.Buffer))) {
+				if expected.Min > importedMemory.Pages() {
 					err = errorMinSizeMismatch(i, expected.Min, importedMemory.Min)
 					return
 				}

@@ -219,14 +219,20 @@ the first cold iteration). These numbers identify surfaces to investigate, not a
 - **F3. Make ordinary `memory.grow` capacity-aware — RESOLVED.** Ordinary local memories now keep
   growth within already-reserved capacity entirely in generated native code. The lowering computes
   the new page count in i64, rejects values above the WebAssembly maximum, compares the requested
-  byte length with an explicit `nativeGrowCap`, and updates both views of the logical size: the
-  module-context length used by generated bounds checks and `MemoryInstance.Buffer.len` used by host
-  APIs. Only growth requiring backing allocation exits through the existing Go trampoline. Shared,
+  byte length with an explicit `nativeGrowCap`, and updates two scalar views of the logical size:
+  the module-context length used by generated bounds checks and `MemoryInstance.sizeBytes` used by
+  host APIs and importing modules. Native code never mutates a Go slice header. Ordinary memories
+  retain an explicitly sized backing region (`logical size + configured reserve`), while `Buffer`
+  remains a Go-owned logical view; only growth requiring a new backing allocation exits through the
+  existing Go trampoline. Shared,
   imported, and custom-allocator memories deliberately retain the Go path; `nativeGrowCap` is zero
   for allocator-backed memories. This is explicit checked growth, not guard-page/SIGSEGV recovery.
-  The Go fallback also records the complete page-aligned capacity returned by `append` (capped at
-  the Wasm maximum), so later calls can expose known-zero allocator/pool capacity without redundant
-  clearing. **Measured** on a core-pinned i9-12900HK (n=8): a compiled function performing 100
+  The Go fallback explicitly allocates the new logical size plus the configured page reserve,
+  capped at the Wasm maximum. With no fixed reserve configured, it uses an explicit 25% geometric
+  policy to keep repeated small grows amortized. Correctness and native capacity accounting no
+  longer depend on Go's slice-capacity growth policy. Later calls can expose that known-zero backing
+  region without redundant clearing. **Measured** on a core-pinned i9-12900HK (n=8): a compiled
+  function performing 100
   in-capacity `memory.grow 0` operations improves **2.441 µs → 109.0 ns (−95.5%, 22.4×)**, with
   **0 B/op, 0 allocs/op** unchanged. The isolated Go fallback case exposing 16 already-reserved
   pages improves **15.12 µs → 927 ns (−93.9%, 16.3×)**, also zero-allocation. An optimized
@@ -249,7 +255,8 @@ the first cold iteration). These numbers identify surfaces to investigate, not a
   compile pairs across TinyGo, Rust, Zig, Zig-cc, and Cargo were neutral
   (**−0.78% geomean**, noise); only modules containing the expanded grow lowering add 1–4 compile
   allocations. End-to-end tests cover successful positive and zero growth, immediate host-visible
-  size/write access, exact-Max failure, custom-allocator fallback, and re-exported imported memory.
+  size/write access, an unchanged Go slice header across native growth, exact-Max failure,
+  custom-allocator fallback, and re-exported imported memory.
 
 - **F4. Cache WASI descriptor file type — RESOLVED; see W6.** The lazy cache preserved dynamic
   descriptor flags and removed the repeated stat syscall/allocation. Interleaved measurement:
