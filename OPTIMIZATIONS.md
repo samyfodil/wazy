@@ -240,10 +240,13 @@ the first cold iteration). These numbers identify surfaces to investigate, not a
   workload threshold and eliminates it. Go fallback growth reapplies the reserve to its new logical
   size, capped by the module/runtime maximum. The default remains zero because large reserves cost
   substantial virtual capacity per instance; the right tradeoff is workload-specific. The Rust
-  source and 17 KiB
-  compiled Wasm are checked in as reproducible benchmark testdata. Six order-alternated,
-  core-pinned compile pairs across TinyGo,
-  Rust, Zig, Zig-cc, and Cargo were neutral
+  source and 17 KiB compiled Wasm also include a control that performs one million sequential 2 MiB
+  allocations with a 128-page reserve. Because each allocation is freed immediately, Rust reuses
+  the same block after the initial growth: the exact pre-PR comparison is **19.51 → 19.77 ms/op**
+  (**+0.6% paired geomean**, noise), with bytes and allocations unchanged. This confirms that the
+  optimization accelerates `memory.grow`, not allocator operations that do not grow memory. Both
+  workloads live in the checked-in Rust source and compiled Wasm. Six order-alternated, core-pinned
+  compile pairs across TinyGo, Rust, Zig, Zig-cc, and Cargo were neutral
   (**−0.78% geomean**, noise); only modules containing the expanded grow lowering add 1–4 compile
   allocations. End-to-end tests cover successful positive and zero growth, immediate host-visible
   size/write access, exact-Max failure, custom-allocator fallback, and re-exported imported memory.

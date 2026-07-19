@@ -33,3 +33,23 @@ pub extern "C" fn allocate(chunk_size: usize, chunks: usize) -> u64 {
         })
         .sum()
 }
+
+// allocate_repeated measures allocator throughput without retaining each
+// allocation. The allocator reuses the same block after the first iteration,
+// so a large iteration count intentionally dilutes memory.grow overhead.
+#[no_mangle]
+pub extern "C" fn allocate_repeated(chunk_size: usize, allocations: usize) -> u64 {
+    let mut checksum = 0_u64;
+    for allocation in 0..allocations {
+        let mut bytes = Vec::<MaybeUninit<u8>>::with_capacity(chunk_size);
+        unsafe { bytes.set_len(chunk_size) };
+        bytes[0].write(allocation as u8);
+        bytes[chunk_size - 1].write((allocation >> 8) as u8);
+        std::hint::black_box(&mut bytes);
+        checksum += unsafe {
+            u64::from(bytes[0].assume_init())
+                + u64::from(bytes[bytes.len() - 1].assume_init())
+        };
+    }
+    checksum
+}
