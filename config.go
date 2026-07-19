@@ -82,7 +82,7 @@ type RuntimeConfig interface {
 	// new logical size. Capacity is capped by both the module maximum and
 	// WithMemoryLimitPages. The logical size is tracked separately from this
 	// backing allocation. The default is zero fixed pages; ordinary fallback
-	// growth still uses a small deterministic geometric reserve.
+	// growth still uses deterministic geometric doubling.
 	//
 	// This example reserves up to 4MB beyond each memory's initial size:
 	//	rConfig = wazy.NewRuntimeConfig().WithMemoryCapacityReservePages(64)

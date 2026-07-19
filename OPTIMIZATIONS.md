@@ -228,7 +228,7 @@ the first cold iteration). These numbers identify surfaces to investigate, not a
   imported, and custom-allocator memories deliberately retain the Go path; `nativeGrowCap` is zero
   for allocator-backed memories. This is explicit checked growth, not guard-page/SIGSEGV recovery.
   The Go fallback explicitly allocates the new logical size plus the configured page reserve,
-  capped at the Wasm maximum. With no fixed reserve configured, it uses an explicit 25% geometric
+  capped at the Wasm maximum. With no fixed reserve configured, it uses explicit geometric doubling
   policy to keep repeated small grows amortized. Correctness and native capacity accounting no
   longer depend on Go's slice-capacity growth policy. Later calls can expose that known-zero backing
   region without redundant clearing. **Measured** on a core-pinned i9-12900HK (n=8): a compiled
@@ -241,7 +241,9 @@ the first cold iteration). These numbers identify surfaces to investigate, not a
   fully reserved. Allocations remain 5/op, while Go allocation volume falls from about 11.39 to
   10.45 KiB/op. The fixture grows from 17 to exactly 530 pages. Its reserve sweep shows why capacity
   is now tunable with `WithMemoryCapacityReservePages`: 0, 64, 128, 512, and 513 extra pages take
-  **21.22 ms, 14.81 ms, 11.36 ms, 8.20 ms, and 29.45 µs/op**, respectively. A 512-page reserve is
+  **7.89–8.05 ms (current explicit doubling), 14.81 ms, 11.36 ms, 8.20 ms, and
+  29.45 µs/op**, respectively. The original append-driven zero-reserve result was 21.22 ms. A
+  512-page reserve is
   deliberately one page short and still requires backing allocation; 513 pages crosses the
   workload threshold and eliminates it. Go fallback growth reapplies the reserve to its new logical
   size, capped by the module/runtime maximum. The default remains zero because large reserves cost

@@ -331,10 +331,10 @@ func (m *MemoryInstance) Grow(delta uint32) (result uint32, ok bool) {
 		newCapPages := newPages
 		if m.growReservePages == 0 {
 			// Make the default growth policy explicit instead of inheriting the
-			// Go runtime's slice-capacity policy. Growing by 25 percent keeps
-			// repeated small grows amortized without retaining a large fixed
-			// reserve on every instance.
-			geometricCapPages := m.Cap + (m.Cap+3)/4
+			// Go runtime's slice-capacity policy. Doubling minimizes repeated
+			// full-memory copies; the spare region stays lazily backed and the
+			// result is clamped to the WebAssembly maximum below.
+			geometricCapPages := m.Cap * 2
 			if geometricCapPages > newCapPages {
 				newCapPages = geometricCapPages
 			}
