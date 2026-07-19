@@ -188,16 +188,25 @@ the first cold iteration). These numbers identify surfaces to investigate, not a
 
 ### Ranked new or enriched candidates
 
-- **F1. Extend native value-range proofs beyond constants and masks** — `frontend/lower.go`
-  `memOpSetup` currently elides a memory bounds check for a constant base and for `x & C`. Add a
-  small, deliberately-whitelisted unsigned upper-bound evaluator for shapes producers already
-  emit: `x % C` gives `< C`; right shifts reduce the maximum; `min(x,C)` and suitable loop
-  induction variables can also establish a bound. If `upperBound + offset + accessSize <=
-  memoryMin`, reuse the C21/C25 path. **Why first:** C25's masked-address proof turned the dynaddr
-  kernel from behind wasmtime to ahead of it; the same check sequence is at stake here. **Risk:**
-  high correctness sensitivity at the 32-bit wrap boundary. Start with unsigned remainder by a
-  non-zero constant, add dedicated safe/OOB E2E cases, then run spec v1/v2 + threads on both ISAs.
-  Impact: high on bounded-index memory kernels, otherwise zero; likely.
+- **F1. Extend native value-range proofs beyond constants and masks — PARTIAL/RESOLVED (`urem`).**
+  `memOpSetup` now recognizes `x % C` for a non-zero i32 constant and uses the inclusive unsigned
+  upper bound `C-1`; when `C-1 + offset + accessSize <= memoryMin`, it reuses the C21/C25
+  bounds-check-elision path. The evaluator remains deliberately whitelisted (constant, `x & C`,
+  and `x % C`, plus non-wrapping `i32.add`/constant `i32.shl` address composition). Right shifts,
+  `min`, and induction variables remain future candidates rather than broadening the proof surface
+  without workloads. The initial handwritten kernel measured **32.214 → 28.441 µs/op (−11.71%)**,
+  but that is only a ceiling: a scan of the existing TinyGo/Rust/Zig/Zig-cc corpus found no
+  remainder used as an address. The acceptance workload is therefore optimized Rust 1.90/LLVM
+  output for a `% 8191` byte-index loop; LLVM emits `load8(base + urem)` and unrolls it twice.
+  **Measured** with ten interleaved before/after pairs, core-pinned, 1 s/sample: geometric mean
+  **5.670 → 5.548 µs/op (−2.15%, 1.02× faster)**, with every pair improving and **0 B/op,
+  0 allocs/op** unchanged. **Compile cost:** ten interleaved 1 s pairs across real TinyGo, Rust,
+  Zig, Zig-cc, and Cargo modules measured **9.850 → 9.807 ms geomean (−0.44%, noise)**; individual
+  deltas ranged from −1.46% to +0.53%, with allocation counts unchanged. The frontend golden proves
+  the producer-shaped safe case drops the memory-length load/compare/trap branch; E2E cases cover
+  the exact memory-minimum boundary, scaled typed-array addressing, an oversized divisor that must
+  retain the check and trap, `0xffffffff`, 32-bit add/shift-overflow rejection, and a zero divisor
+  that must still trap at `urem`.
 
 - **F2. Static hot-trace block layout** — `ssa/pass_blk_layouts.go` currently uses DFS reverse
   postorder plus two loop-header branch-inversion heuristics, despite already having loop nesting
@@ -262,8 +271,8 @@ the first cold iteration). These numbers identify surfaces to investigate, not a
 
 1. Contained, high-confidence gates: F3 (`memory.grow` accounting), then F5 (Await
    background-context fast path). F4 is complete; see W6.
-2. Highest execution upside: F1 (range proofs), then F2 (block layout), each landed only after
-   representative before/after benchmarks.
+2. Highest execution upside: F2 (block layout). F1's `urem` case is complete; extend it only when
+   another producer-shaped range idiom has a representative benchmark.
 3. Cold-start/code-size cleanup: F6 and F7.
 4. Higher-risk residual: F8 interpreter compaction.
 

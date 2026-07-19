@@ -1455,6 +1455,28 @@ var (
 		},
 	}
 
+	MemoryLoadURem = TestCase{
+		Name: "memory_load_urem",
+		Module: &wasm.Module{
+			TypeSection: []wasm.FunctionType{{
+				Params:  []wasm.ValueType{i32},
+				Results: []wasm.ValueType{i32},
+			}},
+			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
+			MemorySection:   &wasm.Memory{Min: 17},
+			FunctionSection: []wasm.Index{0},
+			CodeSection: []wasm.Code{{Body: []byte{
+				wasm.OpcodeLocalGet, 0,
+				wasm.OpcodeI32Const, 0xfd, 0xff, 0x03, // 65533
+				wasm.OpcodeI32RemU,
+				wasm.OpcodeI32Const, 0x80, 0x80, 0xc0, 0x00, // 1048576
+				wasm.OpcodeI32Add,
+				wasm.OpcodeI32Load, 0x2, 0x0,
+				wasm.OpcodeEnd,
+			}}},
+		},
+	}
+
 	MemorySizeGrow = TestCase{
 		Name: "memory_size_grow",
 		Module: &wasm.Module{

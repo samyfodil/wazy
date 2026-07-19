@@ -1043,6 +1043,21 @@ blk0: (v0:i64, v1:i64, v2:i32)
 `,
 		},
 		{
+			name: "memory_load_urem", m: testcases.MemoryLoadURem.Module,
+			exp: `
+blk0: (v0:i64, v1:i64, v2:i32)
+	v3:i32 = Iconst_32 0xfffd
+	v4:i32 = Urem v2, v3
+	v5:i32 = Iconst_32 0x100000
+	v6:i32 = Iadd v4, v5
+	v7:i64 = Load v1, 0x8
+	v8:i64 = UExtend v6, 32->64
+	v9:i64 = Iadd v7, v8
+	v10:i32 = Load v9, 0x0
+	Jump blk_ret, v10
+`,
+		},
+		{
 			name: "memory_load_basic2", m: testcases.MemoryLoadBasic2.Module,
 			exp: `
 signatures:
