@@ -232,11 +232,13 @@ the first cold iteration). These numbers identify surfaces to investigate, not a
   pages improves **15.12 µs → 927 ns (−93.9%, 16.3×)**, also zero-allocation. An optimized
   rustc/LLVM fixture that retains 64 allocations of 64 KiB improves **11.83 → 10.40 µs/op
   (−12.0%, 1.14×)** when capacity is fully reserved. Its reserve sweep shows why capacity is now
-  tunable with `WithMemoryCapacityReservePages`: 0, 64, and 128 extra pages take **2.23 ms,
-  1.01 ms, and 8.80 µs/op**, respectively, as timed growth allocation falls from **21.3 MB to
-  6.65 MB to zero**. The default remains zero because 128 pages reserve 8 MiB per instance; the
-  right tradeoff is workload-specific. The Rust source and 17 KiB compiled Wasm are checked in as
-  reproducible benchmark testdata. Six order-alternated, core-pinned compile pairs across TinyGo,
+  tunable with `WithMemoryCapacityReservePages`: 0, 16, 64, and 128 extra pages take **2.40 ms,
+  1.54 ms, 1.58 ms, and 9.40 µs/op**, respectively. Go fallback growth reapplies the reserve to its
+  new logical size, capped by the module/runtime maximum. The default remains zero because 128
+  pages reserve 8 MiB per instance; the right tradeoff is workload-specific, and reserves below a
+  workload's growth threshold still pay for backing allocation. The Rust source and 17 KiB
+  compiled Wasm are checked in as reproducible benchmark testdata. Six order-alternated,
+  core-pinned compile pairs across TinyGo,
   Rust, Zig, Zig-cc, and Cargo were neutral
   (**−0.78% geomean**, noise); only modules containing the expanded grow lowering add 1–4 compile
   allocations. End-to-end tests cover successful positive and zero growth, immediate host-visible

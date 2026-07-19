@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -50,6 +51,9 @@ type MemoryInstance struct {
 	// without calling back into Go. It is zero for shared and custom-allocator
 	// memories, whose growth must always use Grow.
 	nativeGrowCap uint64
+	// growReservePages is the configured spare capacity to allocate after a Go
+	// fallback grows this memory's backing buffer.
+	growReservePages uint32
 	// definition is known at compile time.
 	definition api.MemoryDefinition
 
@@ -122,6 +126,10 @@ func NewMemoryInstance(memSec *Memory, allocator api.MemoryAllocator, moduleEngi
 		buffer = make([]byte, minBytes, capBytes)
 	}
 	poolable := allocator == nil && !memSec.IsShared
+	growReservePages := uint32(0)
+	if memSec.Cap > memSec.Min {
+		growReservePages = memSec.Cap - memSec.Min
+	}
 	nativeGrowCap := uint64(0)
 	if poolable {
 		nativeGrowCap = MemoryPagesToBytesNum(memoryBytesNumToPages(uint64(cap(buffer))))
@@ -133,6 +141,7 @@ func NewMemoryInstance(memSec *Memory, allocator api.MemoryAllocator, moduleEngi
 		Max:               memSec.Max,
 		Shared:            memSec.IsShared,
 		nativeGrowCap:     nativeGrowCap,
+		growReservePages:  growReservePages,
 		expBuffer:         expBuffer,
 		ownerModuleEngine: moduleEngine,
 		// Only a plain make([]byte)/pooled buffer is pool-eligible: not a custom
@@ -302,11 +311,31 @@ func (m *MemoryInstance) Grow(delta uint32) (result uint32, ok bool) {
 		if m.Shared {
 			panic("shared memory cannot be grown, this is a bug in wazy")
 		}
-		m.Buffer = append(m.Buffer, make([]byte, MemoryPagesToBytesNum(delta))...)
-		// append often reserves more backing storage than requested. Record all
-		// complete pages that can be exposed without another append, capped at
-		// the WebAssembly maximum. The unexposed capacity is known-zero: it came
-		// from Go's allocator, or from a pool buffer that was cleared in full.
+		if m.growReservePages == 0 {
+			m.Buffer = append(m.Buffer, make([]byte, MemoryPagesToBytesNum(delta))...)
+		} else {
+			newCapPages := newPages
+			if m.growReservePages >= m.Max-newPages {
+				newCapPages = m.Max
+			} else {
+				newCapPages += m.growReservePages
+			}
+			newLenBytes := MemoryPagesToBytesNum(newPages)
+			newCapBytes := MemoryPagesToBytesNum(newCapPages)
+			if newCapBytesInt := int(newCapBytes); newCapBytesInt >= 0 && uint64(newCapBytesInt) == newCapBytes {
+				m.Buffer = slices.Grow(m.Buffer, newCapBytesInt-len(m.Buffer))
+				m.Buffer = m.Buffer[:newLenBytes]
+			} else {
+				// A 32-bit host cannot represent the requested reserve. Preserve
+				// the existing growth behavior, which will fail naturally if even
+				// the new logical size cannot fit in an int-sized slice.
+				m.Buffer = append(m.Buffer, make([]byte, MemoryPagesToBytesNum(delta))...)
+			}
+		}
+		// Record all complete pages that can be exposed without another
+		// allocation. With an explicit reserve this is newPages+reserve; without
+		// one it includes any spare capacity chosen by append. The unexposed
+		// capacity is known-zero because it came from Go's allocator.
 		m.Cap = min(memoryBytesNumToPages(uint64(cap(m.Buffer))), m.Max)
 		m.nativeGrowCap = MemoryPagesToBytesNum(m.Cap)
 	} else { // We already have the capacity we need.

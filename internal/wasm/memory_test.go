@@ -126,6 +126,35 @@ func TestMemoryInstance_NegativeDelta(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestMemoryInstance_GrowReservesCapacityAfterFallback(t *testing.T) {
+	me := &mockModuleEngine{}
+	m := NewMemoryInstance(&Memory{Min: 1, Cap: 3, Max: 10, IsMaxEncoded: true}, nil, me)
+	require.Equal(t, uint32(2), m.growReservePages)
+
+	// The initial reserve handles this without allocation.
+	oldBuffer := unsafe.SliceData(m.Buffer)
+	oldPages, ok := m.Grow(2)
+	require.True(t, ok)
+	require.Equal(t, uint32(1), oldPages)
+	require.Equal(t, oldBuffer, unsafe.SliceData(m.Buffer))
+
+	// Exceeding capacity allocates new-size+reserve, not merely new-size.
+	oldPages, ok = m.Grow(1)
+	require.True(t, ok)
+	require.Equal(t, uint32(3), oldPages)
+	require.Equal(t, uint32(4), m.Pages())
+	require.True(t, m.Cap >= 6)
+	require.True(t, m.Cap <= m.Max)
+	require.Equal(t, MemoryPagesToBytesNum(m.Cap), m.nativeGrowCap)
+
+	// Neither the logical size nor recorded native capacity can exceed Max.
+	_, ok = m.Grow(m.Max - m.Pages())
+	require.True(t, ok)
+	require.Equal(t, m.Max, m.Pages())
+	require.Equal(t, m.Max, m.Cap)
+	require.Equal(t, MemoryPagesToBytesNum(m.Max), m.nativeGrowCap)
+}
+
 func BenchmarkMemoryInstanceGrow(b *testing.B) {
 	const finalPages = uint32(17)
 	me := &mockModuleEngine{}

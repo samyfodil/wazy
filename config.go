@@ -78,8 +78,9 @@ type RuntimeConfig interface {
 
 	// WithMemoryCapacityReservePages reserves capacity beyond a memory's
 	// initial size. This can make memory.grow cheaper without reserving the
-	// memory's entire maximum. The capacity is capped at the effective maximum.
-	// The default is zero pages.
+	// memory's entire maximum. Go fallback growth reapplies the reserve to the
+	// new logical size. Capacity is capped by both the module maximum and
+	// WithMemoryLimitPages. The default is zero pages.
 	//
 	// This example reserves up to 4MB beyond each memory's initial size:
 	//	rConfig = wazy.NewRuntimeConfig().WithMemoryCapacityReservePages(64)
