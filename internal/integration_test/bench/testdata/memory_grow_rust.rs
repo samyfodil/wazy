@@ -3,7 +3,7 @@
 //   rustc testdata/memory_grow_rust.rs --edition 2021 \
 //     --target wasm32-unknown-unknown --crate-type cdylib -C opt-level=3 \
 //     -C panic=abort -C link-arg=--initial-memory=1114112 \
-//     -C link-arg=--max-memory=16777216 -C strip=symbols \
+//     -C link-arg=--max-memory=67108864 -C strip=symbols \
 //     -o testdata/memory_grow_rust.wasm
 //
 // Keep every allocation live until the checksum is complete. This prevents the

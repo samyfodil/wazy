@@ -19,8 +19,10 @@ var memoryGrowRustWasm []byte
 
 const (
 	rustAllocationChunkSize = 64 << 10
-	rustAllocationChunks    = 64
-	rustAllocationChecksum  = rustAllocationChunks * (rustAllocationChunks - 1) / 2
+	rustAllocationChunks    = 512
+	// allocate sums the low byte and next byte of each chunk index.
+	rustAllocationChecksum   = 65536
+	rustAllocationFinalPages = 530
 )
 
 func BenchmarkMemoryGrowNativeFastPath(b *testing.B) {
@@ -87,6 +89,8 @@ func TestMemoryGrowRustAllocatorFixture(t *testing.T) {
 	}
 	if grownSize := mod.Memory().Size(); grownSize <= initialSize {
 		t.Fatalf("Rust allocator did not grow memory: initial=%d, final=%d", initialSize, grownSize)
+	} else if want, have := uint32(rustAllocationFinalPages), grownSize/wasm.MemoryPageSize; want != have {
+		t.Fatalf("unexpected final memory pages: want=%d, have=%d", want, have)
 	}
 }
 
@@ -102,6 +106,8 @@ func BenchmarkMemoryGrowRustAllocator(b *testing.B) {
 		{name: "reserve_pages=16", config: wazy.NewRuntimeConfigCompiler().WithMemoryCapacityReservePages(16)},
 		{name: "reserve_pages=64", config: wazy.NewRuntimeConfigCompiler().WithMemoryCapacityReservePages(64)},
 		{name: "reserve_pages=128", config: wazy.NewRuntimeConfigCompiler().WithMemoryCapacityReservePages(128)},
+		{name: "reserve_pages=512", config: wazy.NewRuntimeConfigCompiler().WithMemoryCapacityReservePages(512)},
+		{name: "reserve_pages=513", config: wazy.NewRuntimeConfigCompiler().WithMemoryCapacityReservePages(513)},
 		{name: "reserve_max", config: wazy.NewRuntimeConfigCompiler().WithMemoryCapacityFromMax(true)},
 	} {
 		b.Run(tc.name, func(b *testing.B) {

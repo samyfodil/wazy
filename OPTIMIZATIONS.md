@@ -230,15 +230,17 @@ the first cold iteration). These numbers identify surfaces to investigate, not a
   in-capacity `memory.grow 0` operations improves **2.441 µs → 109.0 ns (−95.5%, 22.4×)**, with
   **0 B/op, 0 allocs/op** unchanged. The isolated Go fallback case exposing 16 already-reserved
   pages improves **15.12 µs → 927 ns (−93.9%, 16.3×)**, also zero-allocation. An optimized
-  rustc/LLVM fixture that retains 64 allocations of 64 KiB improves **12.65 → 10.49 µs/op
-  (−17.1%, 1.21× median; −15.9% paired geomean)** versus the exact pre-PR commit when capacity is
-  fully reserved. Allocations remain 5/op, while Go allocation volume falls from about 10.83 to
-  10.45 KiB/op. Its reserve sweep shows why capacity is now
-  tunable with `WithMemoryCapacityReservePages`: 0, 16, 64, and 128 extra pages take **2.40 ms,
-  1.54 ms, 1.58 ms, and 9.40 µs/op**, respectively. Go fallback growth reapplies the reserve to its
-  new logical size, capped by the module/runtime maximum. The default remains zero because 128
-  pages reserve 8 MiB per instance; the right tradeoff is workload-specific, and reserves below a
-  workload's growth threshold still pay for backing allocation. The Rust source and 17 KiB
+  rustc/LLVM fixture that retains 512 allocations of 64 KiB improves **39.16 → 29.86 µs/op
+  (−23.8%, 1.31× median; −23.3% paired geomean)** versus the exact pre-PR commit when capacity is
+  fully reserved. Allocations remain 5/op, while Go allocation volume falls from about 11.39 to
+  10.45 KiB/op. The fixture grows from 17 to exactly 530 pages. Its reserve sweep shows why capacity
+  is now tunable with `WithMemoryCapacityReservePages`: 0, 64, 128, 512, and 513 extra pages take
+  **21.22 ms, 14.81 ms, 11.36 ms, 8.20 ms, and 29.45 µs/op**, respectively. A 512-page reserve is
+  deliberately one page short and still requires backing allocation; 513 pages crosses the
+  workload threshold and eliminates it. Go fallback growth reapplies the reserve to its new logical
+  size, capped by the module/runtime maximum. The default remains zero because large reserves cost
+  substantial virtual capacity per instance; the right tradeoff is workload-specific. The Rust
+  source and 17 KiB
   compiled Wasm are checked in as reproducible benchmark testdata. Six order-alternated,
   core-pinned compile pairs across TinyGo,
   Rust, Zig, Zig-cc, and Cargo were neutral
