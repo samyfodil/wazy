@@ -278,6 +278,27 @@ the first cold iteration). These numbers identify surfaces to investigate, not a
   paths, and weaker-check rejection; the end-to-end kernel covers the exact boundary and required OOB
   trap.
 
+- **F10. Hoist loop-invariant bounds checks to loop preheaders — REJECTED.** A prototype ran after
+  redundant-PHI elimination and F9's dominance pass. It accepted only natural loop headers with one
+  non-backedge predecessor ending in an unconditional jump, required the address and execution
+  context to dominate that preheader, and hoisted only the header's first trap/side effect so that
+  zero-trip behavior and trap ordering could not change. The frontend defines the memory-length
+  value in loop headers, so the prototype cloned only the canonical non-shared `Uload32` length load
+  immediately before the preheader jump; shared-memory/atomic lengths were deliberately excluded.
+  This preserves explicit WebAssembly bounds checking and does not depend on recovering from native
+  `SIGSEGV`. The producer scan found only **8 qualifying checks in TinyGo** and **none in the sampled
+  Rust, Zig, Zig-cc, or Cargo modules**. The pinned case workloads showed no reliable execution win:
+  medians moved by approximately +1.5% for string manipulation, +7.4% for reverse-array, and −0.5%
+  for matrix multiplication, while the unchanged Fibonacci control moved +1.6%. Meanwhile the
+  whole-SSA bookkeeping was decisively too expensive: median compile time increased **25.63 →
+  60.31 ms for TinyGo (+135%)**, **3.43 → 8.13 ms for Rust (+137%)**, **2.49 → 5.56 ms for Zig
+  (+124%)**, **24.39 → 51.24 ms for Zig-cc (+110%)**, and **34.27 → 65.75 ms for Cargo (+92%)**.
+  The qualifying TinyGo checks are evidently cold in the current execution workloads, so firing is
+  not evidence of benefit. The prototype was removed. **Do not retry this as a general SSA pass.**
+  Revisit only if frontend lowering can carry loop-invariance facts at negligible compile cost and a
+  producer-shaped hot benchmark demonstrates value. Rust-style advancing addresses require a
+  separate induction-variable/trip-count range proof; they are not loop-invariant hoisting.
+
 ### Superseded lead found during the scan
 
 - **C27 follow-up is no longer open.** After the per-block trap-context dedup described above,
@@ -292,7 +313,8 @@ the first cold iteration). These numbers identify surfaces to investigate, not a
 2. Highest execution upside: F2 (block layout). F1's `urem` case is complete; extend it only when
    another producer-shaped range idiom has a representative benchmark.
 3. Cold-start/code-size cleanup: F6 and F7.
-4. Higher-risk residual: F8 interpreter compaction.
+4. Higher-risk residual: F8 interpreter compaction. F10 is rejected unless its explicit revisit
+   conditions are met.
 
 For every item, add the benchmark before the implementation and preserve the repository's rule:
 allocation counts are acceptable under load, but wall-clock conclusions require interleaved,
