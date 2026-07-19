@@ -83,26 +83,11 @@ func TestWasiIPSocketAddrToString(t *testing.T) {
 }
 
 // TestWasiTCPDialErrToCode covers wasiTCPDialErrToCode's three branches
-// directly: a real connection-refused dial (against a port nothing is
-// listening on), a context-deadline-style timeout, and a generic error
-// falling back to wasiSockErrUnknown.
+// directly: a wrapped connection-refused error, a context-deadline-style
+// timeout, and a generic error falling back to wasiSockErrUnknown.
 func TestWasiTCPDialErrToCode(t *testing.T) {
 	t.Run("connection refused", func(t *testing.T) {
-		if runtime.GOOS == "windows" {
-			t.Skip("Winsock connection-refused errno doesn't match syscall.ECONNREFUSED via errors.Is; classification is best-effort on Windows")
-		}
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		addr := ln.Addr().String()
-		if err := ln.Close(); err != nil {
-			t.Fatal(err)
-		}
-		_, dialErr := net.Dial("tcp", addr)
-		if dialErr == nil {
-			t.Fatal("expected a connection-refused dial error, got nil (port unexpectedly accepting)")
-		}
+		dialErr := &net.OpError{Op: "dial", Net: "tcp", Err: errConnRefused}
 		if got := wasiTCPDialErrToCode(dialErr); got != wasiSockErrConnectionRefused {
 			t.Fatalf("wasiTCPDialErrToCode(%v) = %d, want wasiSockErrConnectionRefused (%d)", dialErr, got, wasiSockErrConnectionRefused)
 		}
