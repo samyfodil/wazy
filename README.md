@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/samyfodil/wazy.svg)](https://pkg.go.dev/github.com/samyfodil/wazy) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Go Reference](https://pkg.go.dev/badge/github.com/samyfodil/wazy.svg)](https://pkg.go.dev/github.com/samyfodil/wazy) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![GitHub stars](https://img.shields.io/github/stars/samyfodil/wazy?style=flat&logo=github)](https://github.com/samyfodil/wazy/stargazers)
 
 A fast WebAssembly runtime for Go: zero dependencies, no CGO, pure Go — with execution on par with [wasmtime][wasmtime], plus the Component Model, WASI 0.2, and the WASI 0.3 async ABI running today.
 
@@ -22,6 +22,13 @@ wazy is compliant with the WebAssembly Core Specification [1.0][1] and [2.0][2].
 wazy is faster than [wazero][wazero], the runtime it descends from, on the paths that set real throughput and latency — and it is on par with [wasmtime][wasmtime] on conformance, standards support, and speed, in pure Go with no CGO.
 
 ### vs wazero
+
+| Standard | wazy | wazero |
+| --- | :---: | :---: |
+| Core Wasm 1.0 / 2.0 | ✅ | ✅ |
+| WASI 0.1 &nbsp;(`wasip1`) | ✅ | ✅ |
+| WASI 0.2 · Component Model &nbsp;(`wasip2`) | ✅ | ❌ |
+| WASI 0.3 async ABI &nbsp;(`wasip3`) | ✅ | ❌ |
 
 Measured on the same hardware:
 
