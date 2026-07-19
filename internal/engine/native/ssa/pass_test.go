@@ -3,8 +3,112 @@ package ssa
 import (
 	"testing"
 
+	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
 	"github.com/samyfodil/wazy/internal/testing/require"
 )
+
+func insertMemoryBoundsCheck(b *builder, ctx, memoryLen, base Value, ceil uint64) *Instruction {
+	ceilValue := b.AllocateInstruction().AsIconst64(ceil).Insert(b).Return()
+	extended := b.AllocateInstruction().AsUExtend(base, 32, 64).Insert(b).Return()
+	end := b.AllocateInstruction().AsIadd(extended, ceilValue).Insert(b).Return()
+	condition := b.AllocateInstruction().AsIcmp(memoryLen, end, IntegerCmpCondUnsignedLessThan).Insert(b).Return()
+	return b.AllocateInstruction().AsExitIfTrueWithCode(ctx, condition, nativeapi.ExitCodeMemoryOutOfBounds).Insert(b)
+}
+
+func countMemoryBoundsChecks(b *builder) int {
+	count := 0
+	for blk := b.blockIteratorBegin(); blk != nil; blk = b.blockIteratorNext() {
+		for instr := blk.rootInstr; instr != nil; instr = instr.next {
+			if _, _, ok := memoryBoundsCheckData(b, instr); ok {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+func TestPassDominatedMemoryBoundsElimination(t *testing.T) {
+	t.Run("same block", func(t *testing.T) {
+		b := NewBuilder().(*builder)
+		entry := b.AllocateBasicBlock()
+		ctx, memoryLen, base := entry.AddParam(b, TypeI64), entry.AddParam(b, TypeI64), entry.AddParam(b, TypeI32)
+		b.SetCurrentBlock(entry)
+		insertMemoryBoundsCheck(b, ctx, memoryLen, base, 8)
+		insertMemoryBoundsCheck(b, ctx, memoryLen, base, 4)
+		b.AllocateInstruction().AsReturn(ValuesNil).Insert(b)
+		b.Seal(entry)
+		passCalculateImmediateDominators(b)
+
+		passDominatedMemoryBoundsEliminationOpt(b)
+		require.Equal(t, 1, countMemoryBoundsChecks(b))
+	})
+
+	t.Run("through alias in dominated block", func(t *testing.T) {
+		b := NewBuilder().(*builder)
+		entry, child := b.AllocateBasicBlock(), b.AllocateBasicBlock()
+		ctx, memoryLen, base := entry.AddParam(b, TypeI64), entry.AddParam(b, TypeI64), entry.AddParam(b, TypeI32)
+		b.SetCurrentBlock(entry)
+		insertMemoryBoundsCheck(b, ctx, memoryLen, base, 8)
+		b.AllocateInstruction().AsJump(ValuesNil, child).Insert(b)
+		b.Seal(entry)
+		b.SetCurrentBlock(child)
+		alias := b.allocateValue(TypeI32)
+		b.alias(alias, base)
+		insertMemoryBoundsCheck(b, ctx, memoryLen, alias, 4)
+		b.AllocateInstruction().AsReturn(ValuesNil).Insert(b)
+		b.Seal(child)
+		passCalculateImmediateDominators(b)
+
+		passDominatedMemoryBoundsEliminationOpt(b)
+		require.Equal(t, 1, countMemoryBoundsChecks(b))
+	})
+
+	t.Run("non-dominating sibling", func(t *testing.T) {
+		b := NewBuilder().(*builder)
+		entry, checked, unchecked, merge := b.AllocateBasicBlock(), b.AllocateBasicBlock(), b.AllocateBasicBlock(), b.AllocateBasicBlock()
+		ctx, memoryLen, base := entry.AddParam(b, TypeI64), entry.AddParam(b, TypeI64), entry.AddParam(b, TypeI32)
+		b.SetCurrentBlock(entry)
+		brz := b.AllocateInstruction()
+		brz.AsBrz(base, ValuesNil, checked)
+		brz.Insert(b)
+		b.AllocateInstruction().AsJump(ValuesNil, unchecked).Insert(b)
+		b.Seal(entry)
+		b.SetCurrentBlock(checked)
+		insertMemoryBoundsCheck(b, ctx, memoryLen, base, 8)
+		b.AllocateInstruction().AsJump(ValuesNil, merge).Insert(b)
+		b.Seal(checked)
+		b.SetCurrentBlock(unchecked)
+		b.AllocateInstruction().AsJump(ValuesNil, merge).Insert(b)
+		b.Seal(unchecked)
+		b.SetCurrentBlock(merge)
+		insertMemoryBoundsCheck(b, ctx, memoryLen, base, 4)
+		b.AllocateInstruction().AsReturn(ValuesNil).Insert(b)
+		b.Seal(merge)
+		passSortSuccessors(b)
+		passCalculateImmediateDominators(b)
+
+		passDominatedMemoryBoundsEliminationOpt(b)
+		require.Equal(t, 2, countMemoryBoundsChecks(b))
+	})
+
+	t.Run("weaker dominating check", func(t *testing.T) {
+		b := NewBuilder().(*builder)
+		entry, child := b.AllocateBasicBlock(), b.AllocateBasicBlock()
+		ctx, memoryLen, base := entry.AddParam(b, TypeI64), entry.AddParam(b, TypeI64), entry.AddParam(b, TypeI32)
+		b.SetCurrentBlock(entry)
+		insertMemoryBoundsCheck(b, ctx, memoryLen, base, 4)
+		b.AllocateInstruction().AsJump(ValuesNil, child).Insert(b)
+		b.Seal(entry)
+		b.SetCurrentBlock(child)
+		insertMemoryBoundsCheck(b, ctx, memoryLen, base, 8)
+		b.AllocateInstruction().AsReturn(ValuesNil).Insert(b)
+		b.Seal(child)
+		passCalculateImmediateDominators(b)
+
+		passDominatedMemoryBoundsEliminationOpt(b)
+		require.Equal(t, 2, countMemoryBoundsChecks(b))
+	})
+}
 
 func TestBuilder_passes(t *testing.T) {
 	for _, tc := range []struct {

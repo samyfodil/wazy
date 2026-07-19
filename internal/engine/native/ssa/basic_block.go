@@ -228,6 +228,19 @@ func (bb *basicBlock) insertInstruction(b *builder, next *Instruction) {
 	}
 }
 
+func (bb *basicBlock) removeInstruction(instr *Instruction) {
+	if instr.prev != nil {
+		instr.prev.next = instr.next
+	} else {
+		bb.rootInstr = instr.next
+	}
+	if instr.next != nil {
+		instr.next.prev = instr.prev
+	} else {
+		bb.currentInstr = instr.prev
+	}
+}
+
 // NumPreds implements BasicBlock.NumPreds.
 func (bb *basicBlock) NumPreds() int {
 	return len(bb.preds)
