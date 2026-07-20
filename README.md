@@ -5,6 +5,8 @@
   </picture>
 </p>
 
+<div align="center">
+
 [![Go Reference](https://pkg.go.dev/badge/github.com/samyfodil/wazy.svg)](https://pkg.go.dev/github.com/samyfodil/wazy) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![GitHub stars](https://img.shields.io/github/stars/samyfodil/wazy?style=flat&logo=github)](https://github.com/samyfodil/wazy/stargazers)
 
 | Standard | wazy | wazero |
@@ -13,6 +15,8 @@
 | WASI 0.1 &nbsp;(`wasip1`) | ✅ | ✅ |
 | WASI 0.2 · Component Model &nbsp;(`wasip2`) | ✅ | ❌ |
 | WASI 0.3 async ABI &nbsp;(`wasip3`) | ✅ | ❌ |
+
+</div>
 
 A fast WebAssembly runtime for Go: zero dependencies, no CGO, pure Go — with execution on par with [wasmtime][wasmtime], plus the Component Model, WASI 0.2, and the WASI 0.3 async ABI running today.
 
