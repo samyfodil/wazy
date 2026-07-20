@@ -1,0 +1,27 @@
+name: Docs
+on:
+  pull_request:
+    branches: [main]
+    paths: ['README.md']
+  push:
+    branches: [main]
+    paths: ['README.md']
+
+concurrency:
+  # https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#example-using-concurrency-to-cancel-any-in-progress-job-or-run
+  group: ${{ github.ref }}-${{ github.workflow }}-${{ github.actor }}
+  cancel-in-progress: true
+
+jobs:
+  links:
+    name: Link check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check README links
+        uses: lycheeverse/lychee-action@v2
+        with:
+          # accept rate-limit codes so a busy shields.io/pkg.go.dev doesn't red the build
+          args: --no-progress --max-retries 3 --accept 200,204,206,429 README.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

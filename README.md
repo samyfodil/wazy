@@ -1,6 +1,22 @@
-# wazy
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/wazy-logo-dark.svg">
+    <img alt="wazy" src=".github/assets/wazy-logo-light.svg" width="360">
+  </picture>
+</p>
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/samyfodil/wazy.svg)](https://pkg.go.dev/github.com/samyfodil/wazy) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+<div align="center">
+
+[![Go Reference](https://pkg.go.dev/badge/github.com/samyfodil/wazy.svg)](https://pkg.go.dev/github.com/samyfodil/wazy) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![GitHub stars](https://img.shields.io/github/stars/samyfodil/wazy?style=flat&logo=github)](https://github.com/samyfodil/wazy)
+
+| Standard | wazy | wazero |
+| --- | :---: | :---: |
+| Core Wasm 1.0 / 2.0 | ✅ | ✅ |
+| WASI 0.1 &nbsp;(`wasip1`) | ✅ | ✅ |
+| WASI 0.2 · Component Model &nbsp;(`wasip2`) | ✅ | ❌ |
+| WASI 0.3 async ABI &nbsp;(`wasip3`) | ✅ | ❌ |
+
+</div>
 
 A fast WebAssembly runtime for Go: zero dependencies, no CGO, pure Go — with execution on par with [wasmtime][wasmtime], plus the Component Model, WASI 0.2, and the WASI 0.3 async ABI running today.
 
@@ -20,12 +36,17 @@ wazy is faster than [wazero][wazero], the runtime it descends from, on the paths
 
 Measured on the same hardware:
 
-- **Host calls up to ~15x faster**, with zero allocations. Calling a Go function from Wasm is the hot path for WASI and for any host API you expose. wazy's typed host functions run at native-call speed.
-- **Compiled execution 4–18% faster** on real TinyGo workloads (geomean ~6% vs `wazero@main`). Memory-heavy code leads — string manipulation −18%, array reversal −14%, base64 −12% — with recursive fibonacci −4%. The compiler also allocates less per module (up to −17% on real Rust/Zig/C output).
-- **Interruptible loops stay cheap.** `WithCloseOnContextDone` (deadline and cancellation enforcement) amortizes its per-loop safety check instead of paying a Go round-trip on every iteration. On a realistic loop that calls a host function each iteration it adds **~5%** (vs wazero's ~75%); on the real fibonacci it runs **~12x faster** than wazero, and on a tight compute loop **~13x**. The overhead scales to the loop body, so only near-empty compute kernels pay a real tax — tunable per compile with `wazy.WithInterruptCheckInterval`. Opt in with `WithCloseOnContextDone(true)` when embedding untrusted or unbounded guests.
-- **Cold start**: decode, validate, compile, instantiate, substantially faster, with far fewer allocations.
-- **Interpreter ~30% faster**, with per-call heap allocation eliminated. A benchmark that allocated 1.35M times now allocates twice.
-- **~87% less memory per call** for the common request-per-call pattern.
+| Path | wazy vs wazero | What & why |
+| --- | :--: | --- |
+| **Host calls** (Go ↔ Wasm) | **up to ~15x** | Typed host functions run at native-call speed with zero allocations — no `reflect` per call. The hot path for WASI and any host API you expose. |
+| **`memory.grow`** (in-capacity) | **~22x** amd64 · 6.6x arm64 | Growth that fits an allocated reserve runs entirely in native code: no Go trampoline, no allocation, 0 allocs/op. wazero calls back into Go on every grow. Reserve with `WithMemoryCapacityReservePages`. |
+| **Interruptible loops** (`WithCloseOnContextDone`) | **~12–13x**; +5% vs +75% | The per-loop safety check is amortized, not a Go round-trip per iteration. Overhead scales to the loop body; tune with `WithInterruptCheckInterval`. |
+| **Interpreter** | **~30%** | Per-call heap allocation eliminated — a benchmark that allocated 1.35M times now allocates twice. |
+| **Compiled execution** | **4–18%** (geomean ~6%) | Memory-heavy code leads: strings −18%, array reversal −14%, base64 −12%. Also allocates up to −17% less per module on real Rust/Zig/C output. |
+| **Memory per call** | **~87% less** | The common request-per-call pattern. |
+| **Cold start** | substantial | Decode, validate, compile, instantiate — all faster, with far fewer allocations. |
+
+Deadline/cancellation enforcement and the `memory.grow` reserve are opt-in per compile (`WithCloseOnContextDone(true)`, `WithMemoryCapacityReservePages`); out-of-capacity and shared/imported memories keep the safe Go path.
 
 Methodology and per-optimization numbers are in [OPTIMIZATIONS.md](OPTIMIZATIONS.md). The head-to-head suite lives in [`benchmarks/vs-wazero`](benchmarks/vs-wazero) — `cd benchmarks/vs-wazero && go test -bench .` runs the same workloads (compile, execution, host calls) on wazy and wazero side by side. The same harness carries a **three-way comparison against wasmtime** (`BenchmarkExecute3`, `BenchmarkCompile3`): run it yourself and see wazy's native execution hold its own against Cranelift on the compute kernels — no numbers to take on faith.
 

@@ -2,12 +2,14 @@ name: Standard Library Integration Tests
 on:
   pull_request:
     branches: [main]
-    paths-ignore:  # ignore doc-only changes
+    paths-ignore:  # skip when only docs or image assets change
       - '**/*.md'
+      - '.github/assets/**'
   push:
     branches: [main]
-    paths-ignore:  # ignore doc-only changes
+    paths-ignore:  # skip when only docs or image assets change
       - '**/*.md'
+      - '.github/assets/**'
 
 defaults:
   run:  # use bash for all operating systems unless overridden
