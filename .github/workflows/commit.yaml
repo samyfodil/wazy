@@ -2,12 +2,14 @@ name: Test
 on:
   pull_request:
     branches: [main]
-    paths-ignore:  # ignore doc-only changes
+    paths-ignore:  # skip when only docs or image assets change
       - '**/*.md'
+      - '.github/assets/**'
   push:
     branches: [main]
-    paths-ignore:  # ignore doc-only changes
+    paths-ignore:  # skip when only docs or image assets change
       - '**/*.md'
+      - '.github/assets/**'
 
 env:  # Update this prior to requiring a higher minor version in go.mod
   GO_VERSION: "1.26"
