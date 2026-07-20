@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/samyfodil/wazy.svg)](https://pkg.go.dev/github.com/samyfodil/wazy) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![GitHub stars](https://img.shields.io/github/stars/samyfodil/wazy?style=flat&logo=github)](https://github.com/samyfodil/wazy/stargazers)
+[![Go Reference](https://pkg.go.dev/badge/github.com/samyfodil/wazy.svg)](https://pkg.go.dev/github.com/samyfodil/wazy) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![GitHub stars](https://img.shields.io/github/stars/samyfodil/wazy?style=flat&logo=github)](https://github.com/samyfodil/wazy)
 
 | Standard | wazy | wazero |
 | --- | :---: | :---: |
