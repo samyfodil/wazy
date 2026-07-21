@@ -338,9 +338,7 @@ func WithWASI(cfg WASIConfig) []Option {
 	}
 	resolveIP := cfg.ResolveIP
 	if resolveIP == nil {
-		resolveIP = func(ctx context.Context, name string) ([]net.IP, error) {
-			return net.DefaultResolver.LookupIP(ctx, "ip", name)
-		}
+		resolveIP = defaultResolveIP
 	}
 	sockets := newWasiSockets(dial, listenPacket, listen, resolveIP)
 

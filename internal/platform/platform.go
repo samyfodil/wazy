@@ -14,6 +14,9 @@ func CompilerSupported() bool {
 }
 
 func CompilerSupports(features api.CoreFeatures) bool {
+	if !nativeCompilerAvailable {
+		return false
+	}
 	if !compilerPlatformSupports(features) {
 		return false
 	}
