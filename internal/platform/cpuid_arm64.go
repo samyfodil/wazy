@@ -1,3 +1,5 @@
+//go:build !tinygo
+
 package platform
 
 import "golang.org/x/sys/cpu"

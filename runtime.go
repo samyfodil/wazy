@@ -7,7 +7,6 @@ import (
 
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/engine/interpreter"
-	"github.com/samyfodil/wazy/internal/engine/native"
 	"github.com/samyfodil/wazy/internal/expctxkeys"
 	"github.com/samyfodil/wazy/internal/platform"
 	internalsock "github.com/samyfodil/wazy/internal/sock"
@@ -161,7 +160,7 @@ func NewRuntimeWithConfig(ctx context.Context, rConfig RuntimeConfig) Runtime {
 	}
 	if configEngine == nil {
 		if configKind == engineKindCompiler {
-			configEngine = native.NewEngine
+			configEngine = nativeEngine
 		} else {
 			configEngine = interpreter.NewEngine
 		}
