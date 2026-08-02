@@ -779,19 +779,38 @@ func (w *wasiFS) writeStreamWrite(rep uint32, buf []byte) error {
 // preopened directory it already holds by its own POSIX "." convention
 // rather than special-casing "no rename needed").
 //
-// Escaping the mount with ".." is passed through, not rejected: that is
-// exactly what the same path does under wasi_snapshot_preview1, and
-// FSConfig.WithDirMount documents it ("The guest will have full access to
-// this directory including escaping it via relative path lookups like
-// '../../'"). A caller that needs a jail mounts a sys.FS that enforces one.
+// # Escaping
+//
+// rel may not escape the descriptor it is resolved against: it is cleaned
+// first (so "a/../b", which ends up going nowhere, is fine) and then checked
+// with io/fs.ValidPath, which rejects a rooted path and anything left
+// starting with "..". This is the same two-line rule
+// wasi_snapshot_preview1's atPath applies (imports/wasi_snapshot_preview1/
+// fs.go), for the same reason: a descriptor is a capability, and a guest
+// holding one for a subdirectory must not be able to walk up out of it --
+// not to the preopen root, and certainly not off the mount and into the
+// host filesystem. The WASI testsuite's interesting_paths cases are what
+// pinned that behavior for preview1; the check here is deliberately
+// identical so the two runtimes cannot disagree about what a guest may
+// reach.
+//
+// A trailing slash survives the clean (preview1 restores it the same way):
+// it is what makes opening "file/" -- a regular file named as a directory --
+// fail with ENOTDIR at the mount, rather than silently succeeding.
 func wasiJoinFSPath(dir, rel string) (joined string, ok bool) {
 	if rel == "." || rel == "" {
 		return dir, true
 	}
-	if strings.HasPrefix(rel, "/") {
+	hasTrailingSlash := strings.HasSuffix(rel, "/")
+	rel = path.Clean(rel)
+	if !iofs.ValidPath(rel) {
 		return "", false
 	}
-	return path.Join(dir, rel), true
+	joined = path.Join(dir, rel)
+	if hasTrailingSlash {
+		joined += "/" // path.Join cleans it off again, so restore it last
+	}
+	return joined, true
 }
 
 // wasiListFromBytes converts buf into the list<u8> shape abi.Value expects

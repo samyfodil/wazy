@@ -112,11 +112,20 @@ func TestWasiFS_JoinPath(t *testing.T) {
 		{".", "greeting.txt", "greeting.txt", true},
 		{".", "sub/greeting.txt", "sub/greeting.txt", true},
 		{"sub", "greeting.txt", "sub/greeting.txt", true},
-		{".", ".", ".", true},                 // "." names the directory itself
-		{"sub", "", "sub", true},              // so does ""
-		{"sub", "..", ".", true},              // ".." within the mount: cleaned
-		{".", "/greeting.txt", "", false},     // absolute rel: rejected
-		{".", "../escape", "../escape", true}, // escaping is the mount's call, not ours
+		{".", ".", ".", true},    // "." names the directory itself
+		{"sub", "", "sub", true}, // so does ""
+		{"sub", "a/../b", "sub/b", true},
+		{"sub", "./a", "sub/a", true},
+		{"sub", "file/", "sub/file/", true}, // trailing slash survives
+
+		// Escapes, all rejected -- see wasiJoinFSPath's "# Escaping".
+		{".", "/greeting.txt", "", false}, // rooted
+		{".", "..", "", false},
+		{".", "../escape", "", false},
+		{"sub", "..", "", false},           // up out of the descriptor...
+		{"sub", "../sibling", "", false},   // ...even when it stays on the mount
+		{".", "a/../../escape", "", false}, // escapes only after cleaning
+		{".", "sub/../../escape", "", false},
 	}
 	for _, tt := range tests {
 		got, ok := wasiJoinFSPath(tt.dir, tt.rel)

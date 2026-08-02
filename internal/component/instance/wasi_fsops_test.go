@@ -668,3 +668,88 @@ func TestWasiFS_FSMount(t *testing.T) {
 	requireErrCode(t, callFS(t, c, "[method]descriptor.unlink-file-at", rootRep, "greeting.txt"),
 		wasiErrorCodeUnsupported, "unlink-file-at on an io/fs.FS mount")
 }
+
+// TestWasiFS_EscapeRejected is the security test for the mount boundary: a
+// guest must not reach anything outside the directory it was given, whether
+// it walks up from the preopen root or from a subdirectory descriptor it
+// holds. The host file planted next to the mount is what a successful escape
+// would read, so an assertion that the call fails is also an assertion that
+// its contents never reached the guest.
+func TestWasiFS_EscapeRejected(t *testing.T) {
+	parent := t.TempDir()
+	if err := os.WriteFile(filepath.Join(parent, "secret.txt"), []byte("host secret"), 0o600); err != nil {
+		t.Fatalf("planting the host file: %v", err)
+	}
+	mount := filepath.Join(parent, "mount")
+	if err := os.MkdirAll(filepath.Join(mount, "sub"), 0o755); err != nil {
+		t.Fatalf("creating the mount: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mount, "sub", "ok.txt"), []byte("in-mount"), 0o644); err != nil {
+		t.Fatalf("seeding the mount: %v", err)
+	}
+
+	c, resources := wasiFSConfig(t, WASIConfig{FS: wazy.NewFSConfig().WithDirMount(mount, "/")})
+	rootRep := rootHandleRep(t, resources, rootDescriptorHandle(t, c))
+	subRep := openRep(t, c, resources, rootRep, "sub", wasiOpenFlagDirectory, 0)
+
+	// Sanity: the descriptors do work for paths that stay inside.
+	if got := readFileVia(t, c, resources, subRep, "ok.txt"); got != "in-mount" {
+		t.Fatalf("sub/ok.txt = %q, want %q", got, "in-mount")
+	}
+
+	for _, tt := range []struct {
+		name    string
+		dirRep  uint32
+		relPath string
+	}{
+		{"up from the preopen root", rootRep, "../secret.txt"},
+		{"up twice from the root", rootRep, "../../etc/passwd"},
+		{"up from a subdirectory descriptor", subRep, "../../secret.txt"},
+		{"up to the preopen from a subdirectory", subRep, ".."},
+		{"escaping only after cleaning", rootRep, "sub/../../secret.txt"},
+		{"rooted host path", rootRep, "/etc/passwd"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			// Every method that resolves a guest path must refuse it, not
+			// just open-at: a reader, a writer, a metadata probe, and a
+			// destructive one.
+			requireErrCode(t, callFS(t, c, "[method]descriptor.open-at", tt.dirRep, uint32(0), tt.relPath, uint32(0), uint32(0)),
+				wasiErrorCodeNotPermitted, "open-at("+tt.relPath+")")
+			requireErrCode(t, callFS(t, c, "[method]descriptor.open-at", tt.dirRep, uint32(0), tt.relPath, wasiOpenFlagCreate, wasiDescFlagWrite),
+				wasiErrorCodeNotPermitted, "open-at(create, "+tt.relPath+")")
+			requireErrCode(t, callFS(t, c, "[method]descriptor.stat-at", tt.dirRep, uint32(0), tt.relPath),
+				wasiErrorCodeNotPermitted, "stat-at("+tt.relPath+")")
+			requireErrCode(t, callFS(t, c, "[method]descriptor.metadata-hash-at", tt.dirRep, uint32(0), tt.relPath),
+				wasiErrorCodeNotPermitted, "metadata-hash-at("+tt.relPath+")")
+			requireErrCode(t, callFS(t, c, "[method]descriptor.unlink-file-at", tt.dirRep, tt.relPath),
+				wasiErrorCodeNotPermitted, "unlink-file-at("+tt.relPath+")")
+			requireErrCode(t, callFS(t, c, "[method]descriptor.create-directory-at", tt.dirRep, tt.relPath),
+				wasiErrorCodeNotPermitted, "create-directory-at("+tt.relPath+")")
+			requireErrCode(t, callFS(t, c, "[method]descriptor.rename-at", tt.dirRep, tt.relPath, rootRep, "landing"),
+				wasiErrorCodeNotPermitted, "rename-at(from "+tt.relPath+")")
+			requireErrCode(t, callFS(t, c, "[method]descriptor.link-at", tt.dirRep, uint32(0), tt.relPath, rootRep, "landing"),
+				wasiErrorCodeNotPermitted, "link-at(from "+tt.relPath+")")
+		})
+	}
+
+	// Nothing above created, moved, or removed anything outside the mount.
+	if got, err := os.ReadFile(filepath.Join(parent, "secret.txt")); err != nil || string(got) != "host secret" {
+		t.Fatalf("the host file outside the mount = (%q, %v), want it untouched", got, err)
+	}
+}
+
+// TestWasiFS_RelativeLinksThatStayInside proves the clamp is not blunt: a
+// path that walks up and back down without ever leaving the descriptor
+// resolves normally, which is what the WASI testsuite's interesting_paths
+// cases require.
+func TestWasiFS_RelativeLinksThatStayInside(t *testing.T) {
+	c, resources, rootRep, _ := fsOpsFixture(t, map[string][]byte{"/sub/deep/x.txt": []byte("reached")})
+
+	if got := readFileVia(t, c, resources, rootRep, "sub/deep/../deep/x.txt"); got != "reached" {
+		t.Fatalf("sub/deep/../deep/x.txt = %q, want %q", got, "reached")
+	}
+	subRep := openRep(t, c, resources, rootRep, "sub", wasiOpenFlagDirectory, 0)
+	if got := readFileVia(t, c, resources, subRep, "./deep/x.txt"); got != "reached" {
+		t.Fatalf("./deep/x.txt under sub = %q, want %q", got, "reached")
+	}
+}

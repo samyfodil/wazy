@@ -75,10 +75,19 @@ type FSConfig interface {
 	//
 	// # Isolation
 	//
-	// The guest will have full access to this directory including escaping it
-	// via relative path lookups like "../../". Full access includes operations
-	// such as creating or deleting files, limited to any host level access
-	// controls.
+	// The guest has full access to this directory -- creating, writing, and
+	// deleting files, limited only by host-level access controls -- but not
+	// to anything outside it: both runtimes reject a guest path that escapes
+	// the descriptor it is resolved against ("../../..." and rooted paths
+	// alike) before the path ever reaches this filesystem. See
+	// wasi_snapshot_preview1's atPath and, for components,
+	// internal/component/instance's wasiJoinFSPath, which apply the same
+	// path.Clean + fs.ValidPath rule.
+	//
+	// That check is lexical. A *symlink* inside `dir` that points outside it
+	// is still followed, since it is resolved by the host OS well below this
+	// layer -- so a directory holding symlinks you do not control is not
+	// safe to mount.
 	//
 	// # os.DirFS
 	//
