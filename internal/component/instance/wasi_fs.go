@@ -794,6 +794,17 @@ func (w *wasiFS) writeStreamWrite(rep uint32, buf []byte) error {
 // identical so the two runtimes cannot disagree about what a guest may
 // reach.
 //
+// This is unconditional: there is no mount option, config field, or build
+// tag that turns it off, and adding one was considered and rejected. The
+// component model never asks for it -- wasi:filesystem has no method or
+// flag that means "leave this directory", and a descriptor obtained from
+// preopens.get-directories is the only way a guest can name anything at
+// all, so escape is not a capability being withheld, it is one that was
+// never granted. Every guest this package runs (the conformance fixtures,
+// all real rustc wasm32-wasip2 binaries) works without it. If a future
+// guest genuinely needs to reach a second directory, the answer is a
+// second mount, not a hole in this one.
+//
 // A trailing slash survives the clean (preview1 restores it the same way):
 // it is what makes opening "file/" -- a regular file named as a directory --
 // fail with ENOTDIR at the mount, rather than silently succeeding.

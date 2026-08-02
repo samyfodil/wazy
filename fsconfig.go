@@ -82,7 +82,8 @@ type FSConfig interface {
 	// alike) before the path ever reaches this filesystem. See
 	// wasi_snapshot_preview1's atPath and, for components,
 	// internal/component/instance's wasiJoinFSPath, which apply the same
-	// path.Clean + fs.ValidPath rule.
+	// path.Clean + fs.ValidPath rule. There is no way to turn that off: to
+	// give a guest a second directory, add a second mount.
 	//
 	// That check is lexical. A *symlink* inside `dir` that points outside it
 	// is still followed, since it is resolved by the host OS well below this
