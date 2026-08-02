@@ -146,6 +146,16 @@ func TestWasiFS_RenameAt(t *testing.T) {
 
 	requireErrCode(t, callFS(t, c, "[method]descriptor.rename-at", rootRep, "/abs", rootRep, "x"),
 		wasiErrorCodeNotPermitted, `rename-at("/abs")`)
+
+	// Renaming onto a non-empty directory is not-empty, not exist. POSIX
+	// lets the host report that as either errno and platforms disagree
+	// (illumos says EEXIST, Linux and the BSDs say ENOTEMPTY), so sysfs
+	// normalizes it -- this asserts the guest sees one answer everywhere.
+	requireOk(t, callFS(t, c, "[method]descriptor.create-directory-at", rootRep, "occupied"), "create-directory-at(occupied)")
+	requireOk(t, callFS(t, c, "[method]descriptor.create-directory-at", rootRep, "occupied/child"), "create-directory-at(occupied/child)")
+	requireOk(t, callFS(t, c, "[method]descriptor.create-directory-at", rootRep, "mover"), "create-directory-at(mover)")
+	requireErrCode(t, callFS(t, c, "[method]descriptor.rename-at", rootRep, "mover", rootRep, "occupied"),
+		wasiErrorCodeNotEmpty, "rename-at onto a non-empty directory")
 }
 
 func TestWasiFS_LinkAt(t *testing.T) {
