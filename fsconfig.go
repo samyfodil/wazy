@@ -129,6 +129,18 @@ type FSConfig interface {
 	//
 	// See sys.NewStat_t for examples.
 	WithFSMount(fs fs.FS, guestPath string) FSConfig
+
+	// WithSysFSMount assigns a sys.FS file system for any paths beginning at
+	// `guestPath`.
+	//
+	// This is the writable counterpart to WithFSMount: io/fs.FS has no write
+	// surface at all, so a third-party filesystem the guest must be able to
+	// create, write, rename, or delete in implements sys.FS and mounts here.
+	//
+	// If the same `guestPath` was assigned before, this overrides its value,
+	// retaining the original precedence. See the documentation of FSConfig for
+	// more details on `guestPath`.
+	WithSysFSMount(fs sys.FS, guestPath string) FSConfig
 }
 
 type fsConfig struct {
@@ -171,7 +183,10 @@ func (c *fsConfig) WithReadOnlyDirMount(dir, guestPath string) FSConfig {
 	return c.WithSysFSMount(&sysfs.ReadFS{FS: sysfs.DirFS(dir)}, guestPath)
 }
 
-// WithFSMount implements FSConfig.WithFSMount
+// WithFSMount implements FSConfig.WithFSMount. Any io/fs.FS works:
+// os.DirFS, embed.FS, fstest.MapFS, or a third-party adapter such as
+// afero.NewIOFS -- all read-only, since io/fs.FS declares no write surface.
+// Use WithSysFSMount for a writable third-party filesystem.
 func (c *fsConfig) WithFSMount(fs fs.FS, guestPath string) FSConfig {
 	var adapted sys.FS
 	if fs != nil {
@@ -180,7 +195,8 @@ func (c *fsConfig) WithFSMount(fs fs.FS, guestPath string) FSConfig {
 	return c.WithSysFSMount(adapted, guestPath)
 }
 
-// WithSysFSMount implements sysfs.FSConfig
+// WithSysFSMount implements FSConfig.WithSysFSMount (and, identically,
+// sysfs.FSConfig's older type-assertion-only spelling of it).
 func (c *fsConfig) WithSysFSMount(fs sys.FS, guestPath string) FSConfig {
 	if _, ok := fs.(sys.UnimplementedFS); ok {
 		return c // don't add fake paths.
@@ -198,9 +214,15 @@ func (c *fsConfig) WithSysFSMount(fs sys.FS, guestPath string) FSConfig {
 	return ret
 }
 
-// preopens returns the possible nil index-correlated preopened filesystems
+// Preopens returns the possible nil index-correlated preopened filesystems
 // with guest paths.
-func (c *fsConfig) preopens() ([]sys.FS, []string) {
+//
+// It is exported (on an unexported type, so it stays out of FSConfig's own
+// documented surface) so packages outside wazy that build a guest filesystem
+// from an FSConfig -- component/instance's WASI 0.2 preopens.get-directories
+// -- can read the mounts back out via a type assertion, the same escape hatch
+// sysfs.FSConfig uses in the other direction.
+func (c *fsConfig) Preopens() ([]sys.FS, []string) {
 	preopenCount := len(c.fs)
 	if preopenCount == 0 {
 		return nil, nil

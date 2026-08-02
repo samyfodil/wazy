@@ -19,7 +19,7 @@ func ExampleAdaptFS() {
 	root := &sysfs.AdaptFS{FS: m}
 
 	moduleConfig = wazy.NewModuleConfig().
-		WithFSConfig(wazy.NewFSConfig().(sysfs.FSConfig).WithSysFSMount(root, "/"))
+		WithFSConfig(wazy.NewFSConfig().WithSysFSMount(root, "/"))
 
 	// Output:
 }
@@ -29,7 +29,7 @@ func ExampleDirFS() {
 	root := sysfs.DirFS(".")
 
 	moduleConfig = wazy.NewModuleConfig().
-		WithFSConfig(wazy.NewFSConfig().(sysfs.FSConfig).WithSysFSMount(root, "/"))
+		WithFSConfig(wazy.NewFSConfig().WithSysFSMount(root, "/"))
 
 	// Output:
 }
@@ -40,7 +40,7 @@ func ExampleReadFS() {
 	readOnly := &sysfs.ReadFS{FS: root}
 
 	moduleConfig = wazy.NewModuleConfig().
-		WithFSConfig(wazy.NewFSConfig().(sysfs.FSConfig).WithSysFSMount(readOnly, "/"))
+		WithFSConfig(wazy.NewFSConfig().WithSysFSMount(readOnly, "/"))
 
 	// Output:
 }

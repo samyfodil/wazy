@@ -421,7 +421,7 @@ func validateMounts(mounts sliceFlag, stdErr logging.Writer) (rc int, rootPath s
 			root = &sysfs.ReadFS{FS: root}
 		}
 
-		config = config.(sysfs.FSConfig).WithSysFSMount(root, guestPath)
+		config = config.WithSysFSMount(root, guestPath)
 
 		if internalsys.StripPrefixesAndTrailingSlash(guestPath) == "" {
 			rootPath = dir

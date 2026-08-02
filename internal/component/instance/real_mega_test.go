@@ -30,7 +30,7 @@ func TestRealMega(t *testing.T) {
 	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)
 
-	fs := map[string][]byte{"/in.txt": []byte("hello mega world")}
+	fsConfig, dir := fsConfigDir(t, map[string][]byte{"/in.txt": []byte("hello mega world")})
 	var stdout, stderr bytes.Buffer
 	inst, err := Instantiate(ctx, r, realMegaWasm, WithWASI(WASIConfig{
 		Stdout: &stdout,
@@ -38,7 +38,7 @@ func TestRealMega(t *testing.T) {
 		Stdin:  strings.NewReader("stdin data here\n"),
 		Args:   []string{"alpha", "beta"},
 		Env:    []string{"GREETING=hi"},
-		FS:     fs,
+		FS:     fsConfig,
 	})...)
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
@@ -61,7 +61,7 @@ func TestRealMega(t *testing.T) {
 	if stdout.String() != want {
 		t.Fatalf("stdout mismatch:\ngot:  %q\nwant: %q\nstderr: %q", stdout.String(), want, stderr.String())
 	}
-	if string(fs["/out.txt"]) != "HELLO MEGA WORLD" {
-		t.Fatalf(`fs["/out.txt"] = %q, want "HELLO MEGA WORLD" (guest write did not commit)`, fs["/out.txt"])
+	if got := hostRead(t, dir, "/out.txt"); got != "HELLO MEGA WORLD" {
+		t.Fatalf("/out.txt = %q, want \"HELLO MEGA WORLD\" (guest write did not commit)", got)
 	}
 }

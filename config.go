@@ -893,7 +893,7 @@ func (c *moduleConfig) toSysContext() (sysCtx *internalsys.Context, err error) {
 	var fs []sys.FS
 	var guestPaths []string
 	if f, ok := c.fsConfig.(*fsConfig); ok {
-		fs, guestPaths = f.preopens()
+		fs, guestPaths = f.Preopens()
 	}
 
 	var listeners []*net.TCPListener

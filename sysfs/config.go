@@ -5,12 +5,12 @@ import (
 	"github.com/samyfodil/wazy/sys"
 )
 
-// FSConfig extends wazy.FSConfig, allowing access to the experimental
-// sys.FS until it is moved to the "sys" package.
+// FSConfig is the type assertion that used to be the only way to reach
+// WithSysFSMount, back when sys.FS was still experimental.
+//
+// Deprecated: wazy.FSConfig declares WithSysFSMount directly now -- call it on
+// the wazy.FSConfig, no assertion needed. This interface remains so existing
+// `config.(sysfs.FSConfig).WithSysFSMount(...)` code keeps compiling.
 type FSConfig interface {
-	// WithSysFSMount assigns a sys.FS file system for any paths beginning at
-	// `guestPath`.
-	//
-	// This is an alternative to WithFSMount, allowing more features.
 	WithSysFSMount(fs sys.FS, guestPath string) wazy.FSConfig
 }

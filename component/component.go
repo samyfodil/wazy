@@ -54,8 +54,11 @@ type Option = instance.Option
 
 // WASIConfig selects and configures the WASI 0.2 host interfaces a component
 // sees: standard streams (Stdout/Stderr/Stdin), environment (Env), command-line
-// arguments (Args), and a preopened root filesystem (FS). The zero value wires
-// the interfaces with empty/None-returning defaults. See WithWASI.
+// arguments (Args), and the preopened filesystem mounts (FS, a wazy.FSConfig --
+// the same one the core wasi_snapshot_preview1 runtime takes, so one mount
+// configuration serves both worlds). The zero value wires the interfaces with
+// empty/None-returning defaults, including no preopened directories at all.
+// See WithWASI.
 type WASIConfig = instance.WASIConfig
 
 // CompileCache amortizes a component's decode and its embedded core modules'

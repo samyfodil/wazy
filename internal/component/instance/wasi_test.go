@@ -164,14 +164,15 @@ func TestWASI_GetArguments_Empty(t *testing.T) {
 	}
 }
 
-// TestWASI_GetDirectories proves get-directories returns exactly one
-// preopened root descriptor ("/"), backed by a real, resolvable own<
+// TestWASI_GetDirectories proves get-directories returns one preopened
+// descriptor per configured mount, each backed by a real, resolvable own<
 // descriptor> handle -- see wasi_fs.go's package doc for why an empty
-// result (this func's pre-filesystem behavior) makes a real guest's
+// result (what a nil WASIConfig.FS still produces) makes a real guest's
 // std::fs path fail before ever reaching a WASI call this package doesn't
 // implement.
 func TestWASI_GetDirectories(t *testing.T) {
-	fn := wasiHostFunc(t, WASIConfig{}, wasiIfacePreopens, "get-directories")
+	fsConfig, _ := fsConfigDir(t, nil)
+	fn := wasiHostFunc(t, WASIConfig{FS: fsConfig}, wasiIfacePreopens, "get-directories")
 	results, err := fn(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)

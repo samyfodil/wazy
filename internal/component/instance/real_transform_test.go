@@ -34,24 +34,23 @@ var realTransformWasm []byte
 
 // runRealTransform instantiates real_transform.component.wasm with fs
 // backing wasi:filesystem/preopens' one preopened root directory, calls
-// run(), and returns (fs, run()'s result, the Call error). fs is the exact
-// map passed in: open-at(create) and every subsequent write commit straight
-// into it (see wasi_fs.go's fsFileSet), so the caller can read
-// fs["/output.txt"] back after this returns without any extra plumbing --
-// see WASIConfig.FS's doc for why a non-nil map is required for that to
-// work. t.Fatal on an Instantiate error (a harness failure, not part of
-// what any individual test is proving).
-func runRealTransform(t *testing.T, fs map[string][]byte) (map[string][]byte, []abi.Value, error) {
+// run(), and returns (the host directory that mount is rooted at, run()'s
+// result, the Call error). The guest's writes go straight to that directory,
+// so the caller reads "/output.txt" back off disk with hostRead. t.Fatal on
+// an Instantiate error (a harness failure, not part of what any individual
+// test is proving).
+func runRealTransform(t *testing.T, files map[string][]byte) (string, []abi.Value, error) {
 	t.Helper()
 	ctx := context.Background()
 	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)
 
+	fsConfig, dir := fsConfigDir(t, files)
 	var stdout, stderr bytes.Buffer
 	inst, err := Instantiate(ctx, r, realTransformWasm, WithWASI(WASIConfig{
 		Stdout: &stdout,
 		Stderr: &stderr,
-		FS:     fs,
+		FS:     fsConfig,
 	})...)
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
@@ -60,7 +59,7 @@ func runRealTransform(t *testing.T, fs map[string][]byte) (map[string][]byte, []
 
 	results, callErr := inst.Call(ctx, "wasi:cli/run@0.2.3#run")
 	t.Logf("stdout: %q stderr: %q", stdout.String(), stderr.String())
-	return fs, results, callErr
+	return dir, results, callErr
 }
 
 // TestRealTransform is THE capstone milestone: a genuine, off-the-shelf
@@ -68,13 +67,13 @@ func runRealTransform(t *testing.T, fs map[string][]byte) (map[string][]byte, []
 // through wazy's WASI filesystem layer, transforms its contents in real
 // guest code (Rust's own str::to_uppercase, not anything this package
 // does), and really writes the result to a new file -- proven by
-// WASIConfig.FS containing "/output.txt" == the uppercased input after
-// run() returns, read back through the exact same host map the guest's
-// writes committed into (see runRealTransform's doc).
+// the mounted directory containing "/output.txt" == the uppercased input
+// after run() returns, read back off the very disk the guest's writes
+// committed to (see runRealTransform's doc).
 func TestRealTransform(t *testing.T) {
 	const in = "hello world"
 	const want = "HELLO WORLD"
-	fs, results, err := runRealTransform(t, map[string][]byte{"/input.txt": []byte(in)})
+	dir, results, err := runRealTransform(t, map[string][]byte{"/input.txt": []byte(in)})
 	if err != nil {
 		t.Fatalf("Call run(): %v", err)
 	}
@@ -92,19 +91,14 @@ func TestRealTransform(t *testing.T) {
 		t.Fatal("run() returned Err, want Ok")
 	}
 
-	got, ok := fs["/output.txt"]
-	if !ok {
-		t.Fatal(`fs["/output.txt"] absent after run(); the guest's std::fs::write never landed`)
-	}
-	if string(got) != want {
-		t.Fatalf(`fs["/output.txt"] = %q, want %q`, got, want)
+	if got := hostRead(t, dir, "/output.txt"); got != want {
+		t.Fatalf("/output.txt = %q, want %q", got, want)
 	}
 
-	// The input entry must survive untouched -- writing "/output.txt" must
-	// not clobber "/input.txt" (e.g. via a shared-slice aliasing bug between
-	// the two fs.files entries).
-	if string(fs["/input.txt"]) != in {
-		t.Fatalf(`fs["/input.txt"] = %q after run(), want unchanged %q`, fs["/input.txt"], in)
+	// The input file must survive untouched -- writing "/output.txt" must
+	// not clobber "/input.txt".
+	if got := hostRead(t, dir, "/input.txt"); got != in {
+		t.Fatalf("/input.txt = %q after run(), want unchanged %q", got, in)
 	}
 }
 
@@ -118,19 +112,16 @@ func TestRealTransform(t *testing.T) {
 func TestRealTransform_DifferentInput(t *testing.T) {
 	const in = "MixedCase 123, already Loud!"
 	const want = "MIXEDCASE 123, ALREADY LOUD!"
-	fs, _, err := runRealTransform(t, map[string][]byte{"/input.txt": []byte(in)})
+	dir, _, err := runRealTransform(t, map[string][]byte{"/input.txt": []byte(in)})
 	if err != nil {
 		t.Fatalf("Call run(): %v", err)
 	}
-	got, ok := fs["/output.txt"]
-	if !ok {
-		t.Fatal(`fs["/output.txt"] absent after run()`)
+	got := hostRead(t, dir, "/output.txt")
+	if got != want {
+		t.Fatalf("/output.txt = %q, want %q", got, want)
 	}
-	if string(got) != want {
-		t.Fatalf(`fs["/output.txt"] = %q, want %q`, got, want)
-	}
-	if string(got) == "HELLO WORLD" {
-		t.Fatal(`fs["/output.txt"] matches TestRealTransform's string; looks hardcoded rather than genuinely transformed from WASIConfig.FS`)
+	if got == "HELLO WORLD" {
+		t.Fatal(`/output.txt matches TestRealTransform's string; looks hardcoded rather than genuinely transformed from WASIConfig.FS`)
 	}
 }
 
@@ -140,14 +131,11 @@ func TestRealTransform_DifferentInput(t *testing.T) {
 // TestRealReadFile_MissingFile), surfacing as an unreachable trap before
 // std::fs::write is ever reached -- so "/output.txt" must never appear.
 func TestRealTransform_MissingInput(t *testing.T) {
-	fs := map[string][]byte{} // no "/input.txt" entry at all
-	_, _, err := runRealTransform(t, fs)
+	dir, _, err := runRealTransform(t, map[string][]byte{}) // an empty mount: no "/input.txt" at all
 	if err == nil {
 		t.Fatal("expected an error reading a file absent from WASIConfig.FS")
 	}
 	t.Logf("run() error (expected): %v", err)
 	requireErrContains(t, err, "unreachable")
-	if _, ok := fs["/output.txt"]; ok {
-		t.Fatalf(`fs["/output.txt"] = %q present despite the guest panicking before ever writing it`, fs["/output.txt"])
-	}
+	requireAbsent(t, dir, "/output.txt")
 }

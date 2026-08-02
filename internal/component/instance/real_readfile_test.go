@@ -34,17 +34,18 @@ var realReadfileWasm []byte
 // returns (stdout, run()'s result, the Call error). t.Fatal on an
 // Instantiate error (a harness failure, not part of what any individual
 // test is proving).
-func runRealReadFile(t *testing.T, fs map[string][]byte) (string, []abi.Value, error) {
+func runRealReadFile(t *testing.T, files map[string][]byte) (string, []abi.Value, error) {
 	t.Helper()
 	ctx := context.Background()
 	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)
 
+	fsConfig, _ := fsConfigDir(t, files)
 	var stdout, stderr bytes.Buffer
 	inst, err := Instantiate(ctx, r, realReadfileWasm, WithWASI(WASIConfig{
 		Stdout: &stdout,
 		Stderr: &stderr,
-		FS:     fs,
+		FS:     fsConfig,
 	})...)
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
