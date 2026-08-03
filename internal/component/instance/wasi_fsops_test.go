@@ -274,6 +274,183 @@ func listDir(t *testing.T, c *config, resources *handleTable, dirRep uint32) map
 	}
 }
 
+// descFlagsOf drives [method]descriptor.get-flags against descRep and
+// returns the raw descriptor-flags bitset it reports.
+func descFlagsOf(t *testing.T, c *config, descRep uint32, what string) uint32 {
+	t.Helper()
+	return requireOk(t, callFS(t, c, "[method]descriptor.get-flags", descRep), "get-flags("+what+")").(uint32)
+}
+
+// TestWasiFS_GetFlags pins the exact descriptor-flags bitset get-flags
+// reports for every way a descriptor can come into existence: it must be the
+// access mode the open actually used, and nothing else -- never a guess from
+// the path's own permissions, and never one of the four bits this package
+// does not claim (the three sync bits and mutate-directory, see
+// wasiDescFlagRead's doc).
+func TestWasiFS_GetFlags(t *testing.T) {
+	c, resources, rootRep, _ := fsOpsFixture(t, map[string][]byte{"/f": []byte("f"), "/sub/x": []byte("x")})
+
+	// A preopened root is readable and not writable -- see getDirectories for
+	// why `write` on a directory would be a claim this package cannot keep.
+	if got := descFlagsOf(t, c, rootRep, "the preopened root"); got != wasiDescFlagRead {
+		t.Errorf("get-flags(the preopened root) = %#b, want read (%#b)", got, wasiDescFlagRead)
+	}
+
+	for _, tt := range []struct {
+		name      string
+		descFlags uint32
+		want      uint32
+	}{
+		{"read-only", wasiDescFlagRead, wasiDescFlagRead},
+		{"write-only", wasiDescFlagWrite, wasiDescFlagWrite},
+		{"read-write", wasiDescFlagRead | wasiDescFlagWrite, wasiDescFlagRead | wasiDescFlagWrite},
+		// Empty descriptor-flags still open O_RDONLY, so the descriptor
+		// really is readable -- see openAt's switch.
+		{"neither bit requested", 0, wasiDescFlagRead},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rep := openRep(t, c, resources, rootRep, "f", 0, tt.descFlags)
+			if got := descFlagsOf(t, c, rep, tt.name); got != tt.want {
+				t.Fatalf("get-flags(a %s file descriptor) = %#b, want %#b", tt.name, got, tt.want)
+			}
+		})
+	}
+
+	// A directory descriptor reports read and never write, however it was
+	// asked for: the open is forced read-only either way.
+	for _, tt := range []struct {
+		name      string
+		descFlags uint32
+	}{
+		{"opened for reading", wasiDescFlagRead},
+		{"asking for write anyway", wasiDescFlagRead | wasiDescFlagWrite},
+	} {
+		t.Run("directory "+tt.name, func(t *testing.T) {
+			rep := openRep(t, c, resources, rootRep, "sub", wasiOpenFlagDirectory, tt.descFlags)
+			if got := descFlagsOf(t, c, rep, "sub"); got != wasiDescFlagRead {
+				t.Fatalf("get-flags(a directory descriptor %s) = %#b, want read (%#b)", tt.name, got, wasiDescFlagRead)
+			}
+		})
+	}
+
+	// get-flags never touches the mount: it answers for a descriptor whose
+	// path has since been removed exactly as it did before, which is what
+	// makes it a report about the descriptor and not about the file.
+	c2, resources2, rootRep2, dir2 := fsOpsFixture(t, map[string][]byte{"/gone": []byte("g")})
+	goneRep := openRep(t, c2, resources2, rootRep2, "gone", 0, wasiDescFlagRead|wasiDescFlagWrite)
+	if err := os.Remove(filepath.Join(dir2, "gone")); err != nil {
+		t.Fatalf("removing gone: %v", err)
+	}
+	if got := descFlagsOf(t, c2, goneRep, "a vanished path"); got != wasiDescFlagRead|wasiDescFlagWrite {
+		t.Fatalf("get-flags(a vanished path) = %#b, want read|write (%#b)", got, wasiDescFlagRead|wasiDescFlagWrite)
+	}
+}
+
+// TestWasiFS_Sync drives [method]descriptor.sync and its sibling
+// [method]descriptor.sync-data -- which share one implementation, so both
+// run the whole table -- across every descriptor shape fsSyncFunc
+// distinguishes: a directory (a real fsync of the directory), a file opened
+// for writing (a real fsync of the file, in the mode it was opened with),
+// and a file not opened for writing (Ok with no effect, per types.wit).
+func TestWasiFS_Sync(t *testing.T) {
+	for _, method := range []string{"[method]descriptor.sync", "[method]descriptor.sync-data"} {
+		t.Run(method, func(t *testing.T) {
+			c, resources, rootRep, dir := fsOpsFixture(t, map[string][]byte{"/f": []byte("payload"), "/d/x": []byte("x")})
+
+			rwRep := openRep(t, c, resources, rootRep, "f", 0, wasiDescFlagRead|wasiDescFlagWrite)
+			woRep := openRep(t, c, resources, rootRep, "f", 0, wasiDescFlagWrite)
+			roRep := openRep(t, c, resources, rootRep, "f", 0, wasiDescFlagRead)
+			dirRep := openRep(t, c, resources, rootRep, "d", wasiOpenFlagDirectory, wasiDescFlagRead)
+
+			for _, tt := range []struct {
+				name string
+				rep  uint32
+			}{
+				{"a read-write file descriptor", rwRep},
+				{"a write-only file descriptor", woRep},
+				{"a read-only file descriptor", roRep},
+				{"a directory descriptor", dirRep},
+				{"the preopened root", rootRep},
+			} {
+				requireOk(t, callFS(t, c, method, tt.rep), method+"("+tt.name+")")
+			}
+
+			// Bytes written through the descriptor are still there after the
+			// sync: syncing through a freshly opened handle is a flush, never
+			// a truncate or a reopen that could lose them (see fsSyncFunc).
+			writeVia(t, c, resources, rwRep, "synced!")
+			requireOk(t, callFS(t, c, method, rwRep), method+"(after a write)")
+			if got := hostRead(t, dir, "/f"); got != "synced!" {
+				t.Fatalf("/f after %s = %q, want %q", method, got, "synced!")
+			}
+
+			// The mount's own failure surfaces: with the file gone, the open
+			// this func has to do reports no-entry rather than claiming a
+			// successful sync of nothing.
+			if err := os.Remove(filepath.Join(dir, "f")); err != nil {
+				t.Fatalf("removing f: %v", err)
+			}
+			requireErrCode(t, callFS(t, c, method, rwRep), wasiErrorCodeNoEntry, method+"(a vanished file)")
+			// A descriptor not opened for writing never touches the mount, so
+			// it cannot report the mount's failure either -- it still answers
+			// Ok, which is the same "no effect" it always answered.
+			requireOk(t, callFS(t, c, method, roRep), method+"(a vanished file, read-only descriptor)")
+
+			if err := os.RemoveAll(filepath.Join(dir, "d")); err != nil {
+				t.Fatalf("removing d: %v", err)
+			}
+			requireErrCode(t, callFS(t, c, method, dirRep), wasiErrorCodeNoEntry, method+"(a vanished directory)")
+		})
+	}
+}
+
+// TestWasiFS_Sync_ReadOnlyMount covers the two answers a mount with no write
+// surface gives. A file descriptor there can never have been opened for
+// writing (the mount refuses a write-mode open outright), so sync is the
+// spec's "succeeds with no effect". A directory descriptor does genuinely
+// ask the mount to sync, and wazy's read-only layer answers EBADF for that
+// -- the same thing wazy's own preview1 fd_sync reports for the same mount,
+// so the two runtimes cannot disagree about it.
+func TestWasiFS_Sync_ReadOnlyMount(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "f"), []byte("f"), 0o644); err != nil {
+		t.Fatalf("seeding the mount: %v", err)
+	}
+	c, resources := wasiFSConfig(t, WASIConfig{FS: wazy.NewFSConfig().WithReadOnlyDirMount(dir, "/")})
+	rootRep := rootHandleRep(t, resources, rootDescriptorHandle(t, c))
+	fileRep := openRep(t, c, resources, rootRep, "f", 0, wasiDescFlagRead)
+
+	for _, method := range []string{"[method]descriptor.sync", "[method]descriptor.sync-data"} {
+		requireOk(t, callFS(t, c, method, fileRep), method+"(a read-only mount's file)")
+		requireErrCode(t, callFS(t, c, method, rootRep), wasiErrorCodeBadDescriptor,
+			method+"(a read-only mount's directory)")
+	}
+
+	// get-flags agrees: nothing on such a mount is ever writable.
+	if got := descFlagsOf(t, c, fileRep, "a read-only mount's file"); got != wasiDescFlagRead {
+		t.Fatalf("get-flags(a read-only mount's file) = %#b, want read (%#b)", got, wasiDescFlagRead)
+	}
+}
+
+// writeVia writes s through fileRep's own write-via-stream, the way a guest
+// does, so a test can assert on what a following sync did not disturb.
+func writeVia(t *testing.T, c *config, resources *handleTable, fileRep uint32, s string) {
+	t.Helper()
+	streamHandle := requireOk(t, callFS(t, c, "[method]descriptor.write-via-stream", fileRep, uint64(0)), "write-via-stream").(uint32)
+	streamRep, err := resources.Rep(wasiOutputStreamResType, streamHandle)
+	if err != nil {
+		t.Fatalf("resolve output-stream handle: %v", err)
+	}
+	results, err := wasiFSFn(t, c, wasiIfaceStreams, "[method]output-stream.write")(
+		context.Background(), []abi.Value{streamRep, wasiListFromBytes([]byte(s))})
+	if err != nil {
+		t.Fatalf("output-stream.write: %v", err)
+	}
+	if rv := results[0].(abi.ResultValue); rv.IsErr {
+		t.Fatalf("output-stream.write: unexpected Err: %#v", rv.Payload)
+	}
+}
+
 // TestFSErrorCode pins the errno -> error-code mapping, including the
 // catch-all: an errno with no specific counterpart must report `io` rather
 // than silently claiming something more specific.
@@ -356,6 +533,14 @@ func TestWasiFS_ArgValidation_AtMethods(t *testing.T) {
 		{"read-directory count", "[method]descriptor.read-directory", nil, "expected 1 arg"},
 		{"read-directory self", "[method]descriptor.read-directory", []abi.Value{"bad"}, "self: expected uint32"},
 
+		{"get-flags count", "[method]descriptor.get-flags", []abi.Value{uint32(1), uint32(2)}, "expected 1 arg"},
+		{"get-flags self", "[method]descriptor.get-flags", []abi.Value{"bad"}, "self: expected uint32"},
+
+		{"sync count", "[method]descriptor.sync", nil, "expected 1 arg"},
+		{"sync self", "[method]descriptor.sync", []abi.Value{"bad"}, "self: expected uint32"},
+		{"sync-data count", "[method]descriptor.sync-data", []abi.Value{uint32(1), uint32(2)}, "expected 1 arg"},
+		{"sync-data self", "[method]descriptor.sync-data", []abi.Value{"bad"}, "self: expected uint32"},
+
 		{"read-directory-entry count", "[method]directory-entry-stream.read-directory-entry", nil, "expected 1 arg"},
 		{"read-directory-entry self", "[method]directory-entry-stream.read-directory-entry", []abi.Value{"bad"}, "self: expected uint32"},
 
@@ -406,6 +591,9 @@ func TestWasiFS_UnknownReps(t *testing.T) {
 	}{
 		{"open-at", "[method]descriptor.open-at", []abi.Value{dead, uint32(0), "p", uint32(0), uint32(0)}, "does not name a live descriptor"},
 		{"stat", "[method]descriptor.stat", []abi.Value{dead}, "does not name a live descriptor"},
+		{"get-flags", "[method]descriptor.get-flags", []abi.Value{dead}, "does not name a live descriptor"},
+		{"sync", "[method]descriptor.sync", []abi.Value{dead}, "does not name a live descriptor"},
+		{"sync-data", "[method]descriptor.sync-data", []abi.Value{dead}, "does not name a live descriptor"},
 		{"stat-at", "[method]descriptor.stat-at", []abi.Value{dead, uint32(0), "p"}, "does not name a live descriptor"},
 		{"read-directory", "[method]descriptor.read-directory", []abi.Value{dead}, "does not name a live descriptor"},
 		{"unlink-file-at", "[method]descriptor.unlink-file-at", []abi.Value{dead, "p"}, "does not name a live descriptor"},

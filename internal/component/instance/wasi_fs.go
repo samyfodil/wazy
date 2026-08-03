@@ -151,6 +151,24 @@ import (
 // re-keying every entry beneath it by hand. Mkdir/Rmdir/Rename/Unlink/
 // Readdir on the mount do all of that correctly and for free.
 //
+// # Batch 5: descriptor flags and sync
+//
+// A real CPython (componentize-py) guest -- the first guest here that is not
+// a rustc binary -- reaches two descriptor methods no rustc fixture ever
+// did, both through the preview1-to-preview2 adapter rather than from
+// Python source directly:
+//
+//   - [method]descriptor.get-flags, the adapter's fd_fdstat_get: "was this
+//     descriptor opened for reading, for writing, or both?". Answered from
+//     what open-at recorded on the descriptor, never from the mount -- see
+//     getFlags.
+//   - [method]descriptor.sync, the adapter's fd_sync, which is os.fsync --
+//     pip calls it on every file it writes while installing a wheel. Its
+//     sibling [method]descriptor.sync-data (fd_datasync, os.fdatasync) is
+//     registered alongside it, sharing one implementation; see fsSyncFunc
+//     for both, and for what syncing means when a descriptor holds no
+//     cached fd.
+//
 // # Nested own<T> handles
 //
 // Every func below whose result nests an own<T> inside a result<>/list<>
@@ -266,14 +284,20 @@ const (
 	wasiOpenFlagTruncate  uint32 = 1 << 3
 )
 
-// wasi:filesystem/types' descriptor-flags bit this package inspects (bit 1,
-// per its WIT declaration order
+// wasi:filesystem/types' descriptor-flags bits this package handles (bits 0
+// and 1, per its WIT declaration order
 // read/write/file-integrity-sync/data-integrity-sync/requested-write-sync/
-// mutate-directory): a descriptor opened with the write bit set is the one
+// mutate-directory). A descriptor opened with the write bit set is the one
 // [method]descriptor.write-via-stream/append-via-stream may be called
-// against; every other descriptor (including the single preopened root
-// directory) is write-via-stream-ineligible, matching a real OS refusing to
-// write through a read-only fd.
+// against; every other descriptor (including the preopened root
+// directories) is write-via-stream-ineligible, matching a real OS refusing
+// to write through a read-only fd. Both bits are also remembered on the
+// descriptor node verbatim, since [method]descriptor.get-flags' whole job is
+// to report back how a descriptor was opened (see getFlags). The remaining
+// four bits are never set by this package: the three sync bits are
+// O_SYNC/O_DSYNC/O_RSYNC, which open-at does not request, and
+// mutate-directory is a promise only the mount could keep -- see
+// getDirectories.
 const (
 	wasiDescFlagRead  uint32 = 1 << 0
 	wasiDescFlagWrite uint32 = 1 << 1
@@ -294,8 +318,14 @@ type fsMount struct {
 // handle table (wasiFS.descs, keyed by rep) tracks: fs is the mount it lives
 // in and path is its location within that mount, relative to the mount root
 // ("." names the mount root itself, matching io/fs and sys.FS convention).
-// writable records whether open-at's descriptor-flags carried the write bit
-// (wasiDescFlagWrite), gating write-via-stream/append-via-stream.
+// readable/writable are the access mode the descriptor was opened with
+// (open-at's descriptor-flags, corrected where open-at overrode them -- see
+// its oflag switch): writable gates write-via-stream/append-via-stream and
+// picks the mode sync reopens with, and the pair is what
+// [method]descriptor.get-flags reports back. They are recorded at open time
+// rather than derived from the path's own mode on demand for the reason
+// fcntl(fd, F_GETFL) exists: a descriptor's flags say how it was opened, not
+// what its file happens to permit today.
 //
 // A descriptor holds no open sys.File: every operation opens the path, acts,
 // and closes again. ponytail: that is one extra open+close per stream chunk;
@@ -313,6 +343,7 @@ type fsDescNode struct {
 	mount    int
 	path     string
 	isDir    bool
+	readable bool
 	writable bool
 }
 
@@ -612,6 +643,84 @@ func fsSelfPathArgs(method string, fs *wasiFS, args []abi.Value) (node *fsDescNo
 	return node, path, nil, nil
 }
 
+// fsSyncFunc builds the HostFunc behind [method]descriptor.sync (syncFile =
+// sys.File.Sync, POSIX fsync) and its sibling [method]descriptor.sync-data
+// (sys.File.Datasync, POSIX fdatasync). The two differ in exactly that one
+// call, so method (the WIT name, for error text) and syncFile are the whole
+// difference between them.
+//
+// # Syncing without a cached fd
+//
+// A descriptor here holds no open sys.File (see fsDescNode), so this opens
+// the path, syncs, and closes -- fsyncing a handle opened moments ago, which
+// reads odd until you notice what fsync(2) actually names: the FILE, not the
+// descriptor. It flushes the inode's dirty pages and metadata, state shared
+// by every descriptor open on it, which is why fsync through a freshly
+// opened handle is indistinguishable from fsync through one held since the
+// guest's own open. Nothing is lost by not caching, either: this package
+// buffers no writes of its own (writeStreamWrite Pwrites straight to the
+// mount, see its doc), so a cached fd would have nothing extra to give the
+// kernel. That leaves caching purely a cost -- a host file handle per live
+// descriptor, leaked whenever a guest drops a handle without saying so or
+// aborts mid-call, which is the exact failure fsDescNode's no-open-file rule
+// exists to prevent. So: no cached fd, and no correctness debt from it.
+//
+// # What each kind of descriptor syncs
+//
+//   - A directory syncs for real, opened O_RDONLY|O_DIRECTORY. fsync on a
+//     directory fd is what makes a create/unlink/rename durable, so no-oping
+//     it would quietly break the one guest that does the right thing. (A
+//     read-only mount answers bad-descriptor here, since wazy's read-only
+//     layer has no sync surface at all -- the same answer wazy's own
+//     preview1 fd_sync gives for that mount, so the two runtimes agree.)
+//   - A file opened for writing syncs for real, in the access mode it was
+//     opened with (mirroring openAt's own O_RDWR/O_WRONLY choice) -- the
+//     case pip's os.fsync after writing a wheel's files actually hits.
+//   - A file NOT opened for writing answers Ok without touching the mount:
+//     types.wit says so outright ("This function succeeds with no effect if
+//     the file descriptor is not opened for writing"), and it is the only
+//     answer that is the same everywhere -- POSIX fsync(2) on a read-only fd
+//     is a successful no-op, but Windows' FlushFileBuffers refuses a handle
+//     without write access, so honoring the call literally would make one
+//     guest's os.fsync succeed on Linux and fail on Windows for no reason
+//     the guest could act on.
+func fsSyncFunc(fs *wasiFS, method string, syncFile func(sys.File) sys.Errno) HostFunc {
+	return func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("[method]descriptor.%s: expected 1 arg (self), got %d", method, len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]descriptor.%s: self: expected uint32 rep, got %T", method, args[0])
+		}
+		node, err := fs.descNode(selfRep)
+		if err != nil {
+			return nil, fmt.Errorf("[method]descriptor.%s: %w", method, err)
+		}
+		var oflag sys.Oflag
+		switch {
+		case node.isDir:
+			oflag = sys.O_RDONLY | sys.O_DIRECTORY
+		case !node.writable:
+			return []abi.Value{abi.ResultValue{IsErr: false, Payload: nil}}, nil // nothing this descriptor could have dirtied
+		case node.readable:
+			oflag = sys.O_RDWR
+		default:
+			oflag = sys.O_WRONLY
+		}
+		f, errno := node.fs.OpenFile(node.path, oflag, 0)
+		if errno != 0 {
+			return fsErrResult(errno), nil
+		}
+		errno = syncFile(f)
+		f.Close()
+		if errno != 0 {
+			return fsErrResult(errno), nil
+		}
+		return []abi.Value{abi.ResultValue{IsErr: false, Payload: nil}}, nil
+	}
+}
+
 // setResources implements withResourcesHook's callback: it runs once, right
 // after the owning Instance's handleTable is created and before any host
 // func can be invoked (see host_import.go's withResourcesHook doc).
@@ -868,7 +977,22 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []Option {
 		}
 		dirs := make([]abi.Value, 0, len(fs.mounts))
 		for i, m := range fs.mounts {
-			rep := fs.newDescRep(&fsDescNode{fs: m.fs, mount: i, path: ".", isDir: true})
+			// A preopen is readable and not writable, which is what
+			// [method]descriptor.get-flags reports for it. `read` is
+			// honest: the guest may list it, stat it, and open paths under
+			// it, which is every use a directory descriptor has here.
+			// `write` would not be: in descriptor-flags it means "this
+			// descriptor may be written through", i.e. write-via-stream/
+			// append-via-stream, and both answer is-directory against any
+			// directory descriptor -- the same thing a real open(2) does
+			// when asked for O_RDWR on a directory. The flag that would
+			// describe a *mutable* directory is mutate-directory, and this
+			// package deliberately claims that one for no descriptor: the
+			// mount alone decides whether a create/unlink/rename lands (a
+			// WithReadOnlyDirMount answers EROFS, a WithFSMount ENOSYS),
+			// and there is no race-free way to promise up front an answer
+			// only the mount can give.
+			rep := fs.newDescRep(&fsDescNode{fs: m.fs, mount: i, path: ".", isDir: true, readable: true})
 			handle := resources.NewOwn(wasiDescriptorResType, rep)
 			dirs = append(dirs, []abi.Value{handle, m.guestPath})
 		}
@@ -926,6 +1050,7 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []Option {
 			return []abi.Value{abi.ResultValue{IsErr: true, Payload: wasiErrorCodeNotPermitted}}, nil
 		}
 		writable := descFlags&wasiDescFlagWrite != 0
+		readable := descFlags&wasiDescFlagRead != 0
 		// The open is real: it is what applies create/truncate/exclusive and
 		// what reports a missing path, a read-only mount, or a permission
 		// problem as the errno the guest gets back. The handle itself is
@@ -936,18 +1061,37 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []Option {
 		// that asked for write-only (what std::fs::write does) gets O_WRONLY
 		// rather than an O_RDWR the mount might refuse on a file it is only
 		// allowed to write.
+		//
+		// readable/writable are then corrected to the mode the open
+		// actually used, which is what the descriptor records and what
+		// [method]descriptor.get-flags reports back (see getFlags): the two
+		// differ from the request only where this switch overrides it.
 		oflag := sys.O_RDONLY
 		switch {
-		case writable && descFlags&wasiDescFlagRead != 0:
+		case writable && readable:
 			oflag = sys.O_RDWR
 		case writable:
 			oflag = sys.O_WRONLY
+		default:
+			// Neither bit, or read alone: there is no mode below O_RDONLY to
+			// fall back to, so a descriptor opened with empty
+			// descriptor-flags is a readable one -- read-via-stream works
+			// through it, and saying otherwise would be a lie a guest could
+			// act on.
+			readable = true
 		}
 		if openFlags&wasiOpenFlagDirectory != 0 {
 			// A directory open (discovered via std::fs::read_dir("/"), whose
 			// first host call is exactly open-at(root, ".", DIRECTORY)) must
 			// stay read-only: a real open(2) refuses O_RDWR on a directory.
+			// The descriptor is therefore not a writable one whatever the
+			// guest asked for -- and a directory opened WITHOUT this flag but
+			// with the write bit never gets a descriptor at all, since the
+			// mount refuses a write-mode open of a directory outright
+			// (EISDIR on POSIX, whatever the platform says elsewhere), so no
+			// directory descriptor can ever report `write`.
 			oflag = sys.O_RDONLY | sys.O_DIRECTORY
+			readable, writable = true, false
 		} else {
 			if openFlags&wasiOpenFlagCreate != 0 {
 				oflag |= sys.O_CREAT
@@ -978,7 +1122,7 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []Option {
 		if err != nil {
 			return nil, err
 		}
-		rep := fs.newDescRep(&fsDescNode{fs: node.fs, mount: node.mount, path: full, isDir: isDir, writable: writable})
+		rep := fs.newDescRep(&fsDescNode{fs: node.fs, mount: node.mount, path: full, isDir: isDir, readable: readable, writable: writable})
 		handle := resources.NewOwn(wasiDescriptorResType, rep)
 		return []abi.Value{abi.ResultValue{IsErr: false, Payload: handle}}, nil
 	}
@@ -1001,6 +1145,67 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []Option {
 		}
 		return fsOkResult(fsDescriptorType(st.Mode)), nil
 	}
+
+	// getFlags implements [method]descriptor.get-flags(self:
+	// borrow<descriptor>) -> result<descriptor-flags, error-code>, which a
+	// real CPython (componentize-py) guest reaches through the
+	// preview1-to-preview2 adapter's fd_fdstat_get -- the host half of
+	// Python's os.fstat/io mode checks, and of every std that asks "was
+	// this opened for reading, for writing, or both?".
+	//
+	// The answer is read straight off the descriptor node, with no call to
+	// the mount: descriptor-flags describes how the descriptor was OPENED
+	// (the access mode open-at's `flags` argument resolved to), not what the
+	// underlying path would permit -- the same distinction fcntl(fd,
+	// F_GETFL) draws, and the reason a descriptor opened read-only on a
+	// writable file must still report only `read`. That also means this func
+	// has no error branch of its own: an unknown rep is the shared fail-loud
+	// descNode error, and everything else is Ok.
+	//
+	// Only read/write are ever reported. The three sync bits
+	// (file-integrity-sync, data-integrity-sync, requested-write-sync) are
+	// O_SYNC/O_DSYNC/O_RSYNC, which open-at never requests, and
+	// mutate-directory is deliberately claimed for no descriptor -- see
+	// getDirectories for why.
+	getFlags := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("[method]descriptor.get-flags: expected 1 arg (self), got %d", len(args))
+		}
+		selfRep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]descriptor.get-flags: self: expected uint32 rep, got %T", args[0])
+		}
+		node, err := fs.descNode(selfRep)
+		if err != nil {
+			return nil, fmt.Errorf("[method]descriptor.get-flags: %w", err)
+		}
+		var flags uint32
+		if node.readable {
+			flags |= wasiDescFlagRead
+		}
+		if node.writable {
+			flags |= wasiDescFlagWrite
+		}
+		return fsOkResult(flags), nil
+	}
+
+	// syncFn implements [method]descriptor.sync(self: borrow<descriptor>) ->
+	// result<_, error-code> -- Python's os.fsync, which a real CPython
+	// (componentize-py) guest reaches during a pip wheel install. (Named
+	// syncFn rather than sync only because this file imports the sync
+	// package.)
+	syncFn := fsSyncFunc(fs, "sync", sys.File.Sync)
+
+	// syncDataFn implements [method]descriptor.sync-data -- sync's sibling
+	// (POSIX fdatasync, Python's os.fdatasync), registered for the same
+	// reason append-via-stream is (see this file's package doc): no fixture
+	// calls it yet, but it is one Datasync call away from a func that is
+	// already here, and a guest that does call it would otherwise hit the
+	// graph engine's trap stub. sys.File's Datasync is a real fdatasync(2)
+	// on Linux and dispatches to a full fsync everywhere else
+	// (internal/sysfs) -- syncing more than asked is always a legal answer
+	// to "flush this file's data".
+	syncDataFn := fsSyncFunc(fs, "sync-data", sys.File.Datasync)
 
 	stat := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
 		if len(args) != 1 {
@@ -1553,6 +1758,9 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []Option {
 	fsErrFD, fsErrResolve := wasiFilesystemErrorCodeSig()
 	openAtFD, openAtResolve := wasiOpenAtSig()
 	getTypeFD, getTypeResolve := wasiGetTypeSig()
+	getFlagsFD, getFlagsResolve := wasiGetFlagsSig()
+	syncFD, syncResolve := wasiSyncSig()
+	syncDataFD, syncDataResolve := wasiSyncSig()
 	statFD, statResolve := wasiStatSig()
 	statAtFD, statAtResolve := wasiStatAtSig()
 	readDirectoryFD, readDirectoryResolve := wasiReadDirectorySig()
@@ -1594,6 +1802,9 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []Option {
 		withImportCustom(wasiIfaceFilesystemTypes, "filesystem-error-code", filesystemErrorCode, fsErrFD, fsErrResolve),
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.open-at", openAt, openAtFD, openAtResolve),
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.get-type", getType, getTypeFD, getTypeResolve),
+		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.get-flags", getFlags, getFlagsFD, getFlagsResolve),
+		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.sync", syncFn, syncFD, syncResolve),
+		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.sync-data", syncDataFn, syncDataFD, syncDataResolve),
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.stat", stat, statFD, statResolve),
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.stat-at", statAt, statAtFD, statAtResolve),
 		withImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.read-directory", readDirectory, readDirectoryFD, readDirectoryResolve),
@@ -1731,6 +1942,45 @@ func wasiGetTypeSig() (binary.FuncDesc, abi.Resolver) {
 	okRef := wasiDescriptorTypeType(tbl)
 	errRef := wasiErrorCodeType(tbl)
 	resultRef := tbl.add(binary.ResultDesc{Ok: &okRef, Err: &errRef})
+	fd := binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}},
+		Results: binary.FuncResults{Unnamed: &resultRef},
+	}
+	return fd, tbl.resolver()
+}
+
+// wasiGetFlagsSig builds the FuncDesc/resolver for
+// [method]descriptor.get-flags(self: borrow<descriptor>) ->
+// result<descriptor-flags, error-code>. descriptor-flags' field list is in
+// exact WIT declaration order, and must stay identical to open-at's own
+// (wasiOpenAtSig) -- it is the same WIT type, and wasiDescFlagRead/
+// wasiDescFlagWrite are positions in this list.
+func wasiGetFlagsSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiDescriptorResType})
+	okRef := tbl.add(binary.FlagsDesc{Names: []string{
+		"read", "write", "file-integrity-sync", "data-integrity-sync",
+		"requested-write-sync", "mutate-directory",
+	}})
+	errRef := wasiErrorCodeType(tbl)
+	resultRef := tbl.add(binary.ResultDesc{Ok: &okRef, Err: &errRef})
+	fd := binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}},
+		Results: binary.FuncResults{Unnamed: &resultRef},
+	}
+	return fd, tbl.resolver()
+}
+
+// wasiSyncSig builds the FuncDesc/resolver for
+// [method]descriptor.sync(self: borrow<descriptor>) -> result<_,
+// error-code> -- reused as-is for [method]descriptor.sync-data, which has
+// the identical WIT signature (see fsSyncFunc for why one Go builder
+// implements both).
+func wasiSyncSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiDescriptorResType})
+	errRef := wasiErrorCodeType(tbl)
+	resultRef := tbl.add(binary.ResultDesc{Err: &errRef})
 	fd := binary.FuncDesc{
 		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}},
 		Results: binary.FuncResults{Unnamed: &resultRef},
