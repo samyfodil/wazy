@@ -34,6 +34,12 @@ type Component struct {
 	// componentfuncspace.go.
 	ComponentFuncSpace []ComponentFuncSpaceEntry
 
+	// ComponentInstanceSpace is the component's instance index space, one
+	// entry per instance-producing definition (instance import / instance
+	// definition / instance alias / instance export) in overall declaration
+	// order across sections. See componentinstancespace.go.
+	ComponentInstanceSpace []ComponentInstanceSpaceEntry
+
 	// CoreModules are embedded core wasm modules (section 1).
 	CoreModules []CoreModule
 

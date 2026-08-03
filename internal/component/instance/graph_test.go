@@ -48,16 +48,30 @@ func TestGraph_RequiresCoreFuncSpace(t *testing.T) {
 	requireErrContains(t, err, "requires a component decoded via binary.Decode")
 }
 
-func TestGraph_ModuleNameFor_MultipleNames(t *testing.T) {
+// A source core instance bound under a SECOND consumer-declared name is legal
+// (a `with` name is local to the instantiation that declares it, not a
+// component-wide module name), and used to be rejected outright.
+func TestGraph_MultipleRefNamesAreLegal(t *testing.T) {
 	comp := decodeRealHello(t)
-	// core instance 14 (module1) already references instance 1 (via a
-	// different core instance's arg? no -- reference core instance 1 which
-	// core instance 2 already names "wasi_snapshot_preview1") under a
-	// second name too.
+	// core instance 14 (module1) already references core instance 1, which
+	// core instance 2 names "wasi_snapshot_preview1"; bind it under a second
+	// name too.
 	comp.CoreInstances[14].Args = append(comp.CoreInstances[14].Args,
 		binary.CoreInstantiateArg{Name: "second-name", InstanceIdx: 1})
+	in, err := runGraph(t, comp)
+	if err != nil {
+		t.Fatalf("a second ref name must not fail instantiation: %v", err)
+	}
+	in.Close(context.Background())
+}
+
+func TestGraph_InstantiateArgTargetsUninstantiatedCoreInstance(t *testing.T) {
+	comp := decodeRealHello(t)
+	// Point core instance 14's first arg at a core instance defined LATER,
+	// which the forward-declaration rule forbids.
+	comp.CoreInstances[14].Args[0].InstanceIdx = uint32(len(comp.CoreInstances) - 1)
 	_, err := runGraph(t, comp)
-	requireErrContains(t, err, "referenced under 2 names")
+	requireErrContains(t, err, "which was not instantiated")
 }
 
 func TestGraph_CoreModuleIdxOutOfRange(t *testing.T) {
@@ -83,9 +97,18 @@ func TestGraph_UnknownCoreInstanceKind(t *testing.T) {
 
 func TestGraph_InlineExportUnsupportedSort(t *testing.T) {
 	comp := decodeRealHello(t)
-	comp.CoreInstances[3].Exports[0].Sort = 0x03 // global: unsupported
+	comp.CoreInstances[3].Exports[0].Sort = 0x04 // tag: unsupported
 	_, err := runGraph(t, comp)
 	requireErrContains(t, err, "unsupported core:sort")
+}
+
+func TestGraph_InlineExportGlobalIdxOutOfRange(t *testing.T) {
+	comp := decodeRealHello(t)
+	// real_hello regroups no core globals at all, so any global index is out
+	// of range of its empty core global index space.
+	comp.CoreInstances[3].Exports[0].Sort = 0x03 // global
+	_, err := runGraph(t, comp)
+	requireErrContains(t, err, "out of range of the 0-entry core global index space")
 }
 
 func TestGraph_InlineExportFuncIdxOutOfRange(t *testing.T) {
@@ -294,20 +317,71 @@ func TestGraph_BindInstanceExport_MemberNotFuncSkipped(t *testing.T) {
 
 func TestModuleKeyForGraph(t *testing.T) {
 	// Unreferenced -> synthesized core%d key.
-	if got, err := moduleKeyForGraph(3, nil, "anon"); err != nil || got != "core3" {
-		t.Fatalf("got (%q, %v), want (\"core3\", nil)", got, err)
+	if got := moduleKeyForGraph(3, groupNamesForGraph(nil, "anon")); got != "core3" {
+		t.Fatalf("got %q, want \"core3\"", got)
 	}
 	// A non-empty refName is the raw name consumers import -- no prefix (the key
 	// lives only in the component's private resolver map, never the registry).
-	if got, err := moduleKeyForGraph(3, []string{"foo"}, "anon"); err != nil || got != "foo" {
-		t.Fatalf("got (%q, %v), want (\"foo\", nil)", got, err)
+	if got := moduleKeyForGraph(3, groupNamesForGraph([]string{"foo"}, "anon")); got != "foo" {
+		t.Fatalf("got %q, want \"foo\"", got)
 	}
-	// The sole "" ref maps to the (stable) emptyNameTarget key.
-	if got, err := moduleKeyForGraph(3, []string{""}, "anon-import"); err != nil || got != "anon-import" {
-		t.Fatalf("got (%q, %v), want (\"anon-import\", nil)", got, err)
+	// A "" ref maps to the (stable) emptyNameTarget key.
+	if got := moduleKeyForGraph(3, groupNamesForGraph([]string{""}, "anon-import")); got != "anon-import" {
+		t.Fatalf("got %q, want \"anon-import\"", got)
 	}
-	if _, err := moduleKeyForGraph(3, []string{"a", "b"}, "anon"); err == nil {
-		t.Fatal("expected an error for 2 ref names")
+	// Several ref names are legal (a source instance may be bound under more
+	// than one "with" name): the first is the fallback-resolver key, and ALL
+	// of them are group names for the neededTypes lookup. Identity is
+	// coreInstanceKey, so no name has to be unique.
+	names := groupNamesForGraph([]string{"a", "", "b"}, "anon-import")
+	if got, want := len(names), 3; got != want {
+		t.Fatalf("group names: got %d, want %d (%v)", got, want, names)
+	}
+	if names[1] != "anon-import" {
+		t.Errorf("group names: got %v, want the \"\" entry mapped to the empty-import key", names)
+	}
+	if got := moduleKeyForGraph(3, names); got != "a" {
+		t.Fatalf("got %q, want \"a\"", got)
+	}
+}
+
+func TestCoreInstanceKeyIsDistinctAndComponentConstant(t *testing.T) {
+	if a, b := coreInstanceKey(2), coreInstanceKey(3); a == b {
+		t.Fatalf("core instance keys collide: %q", a)
+	}
+	// Component-CONSTANT (a function of the static index alone) is what keeps
+	// a shim's bytes identical across instantiations -- OPTIMIZATIONS.md CM10.
+	if a, b := coreInstanceKey(12), coreInstanceKey(12); a != b {
+		t.Fatalf("core instance key is not stable: %q != %q", a, b)
+	}
+	if got, want := coreInstanceKey(12), "wazy:core-instance/12"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestQuoteNames(t *testing.T) {
+	if got, want := quoteNames(nil), "(none)"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if got, want := quoteNames([]string{"env"}), `"env"`; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if got, want := quoteNames([]string{"a", "b"}), `"a" or "b"`; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestLookupCoreFuncSig_TriesEveryGroupName(t *testing.T) {
+	needed := map[string]map[string]coreFuncSig{
+		"second": {"f": {params: []api.ValueType{api.ValueTypeI64}}},
+	}
+	// The first name declares nothing; the second does.
+	sig, ok := lookupCoreFuncSig(needed, []string{"first", "second"}, "f")
+	if !ok || len(sig.params) != 1 || sig.params[0] != api.ValueTypeI64 {
+		t.Fatalf("got (%+v, %v), want the \"second\" group's signature", sig, ok)
+	}
+	if _, ok := lookupCoreFuncSig(needed, []string{"first"}, "f"); ok {
+		t.Fatal("expected no match when no group name declares the field")
 	}
 }
 
@@ -352,7 +426,7 @@ func TestBuildCanonHostModule_LowersLiftedFunc(t *testing.T) {
 	ctx := context.Background()
 	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)
-	_, _, _, _, _, err := buildCanonHostModule(ctx, r, comp, newConfig(nil), newHandleTable(), nil, canon, nil, "g", "e", "p", nil, nil, nil)
+	_, _, _, _, _, err := buildCanonHostModule(ctx, r, comp, newConfig(nil), newHandleTable(), nil, canon, nil, []string{"g"}, "e", "p", nil, nil, nil)
 	requireErrContains(t, err, "lowers a lifted")
 }
 
@@ -377,7 +451,7 @@ func TestBuildCanonHostModule_ImportInterfaceNameError(t *testing.T) {
 	ctx := context.Background()
 	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)
-	_, _, _, _, _, err := buildCanonHostModule(ctx, r, comp, newConfig(nil), newHandleTable(), nil, canon, nil, "g", "e", "p", nil, nil, nil)
+	_, _, _, _, _, err := buildCanonHostModule(ctx, r, comp, newConfig(nil), newHandleTable(), nil, canon, nil, []string{"g"}, "e", "p", nil, nil, nil)
 	requireErrContains(t, err, "out of range")
 }
 
@@ -392,7 +466,7 @@ func TestBuildCanonHostModule_WithImportOverride(t *testing.T) {
 	hostFn := func(context.Context, []abi.Value) ([]abi.Value, error) { return nil, nil }
 	cfg := newConfig([]Option{WithImport("wasi:cli/stderr@0.2.3", "get-stderr", hostFn, nil, nil)})
 
-	mod, exportName, _, _, wasiCall, err := buildCanonHostModule(ctx, r, comp, cfg, newHandleTable(), nil, canon, nil, "g", "e", "wazy:component/testpriv1", nil, nil, nil)
+	mod, exportName, _, _, wasiCall, err := buildCanonHostModule(ctx, r, comp, cfg, newHandleTable(), nil, canon, nil, []string{"g"}, "e", "wazy:component/testpriv1", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildCanonHostModule: %v", err)
 	}
@@ -412,7 +486,7 @@ func TestBuildCanonHostModule_UnsupportedCanonKind(t *testing.T) {
 	ctx := context.Background()
 	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)
-	_, _, _, _, _, err := buildCanonHostModule(ctx, r, comp, newConfig(nil), newHandleTable(), nil, binary.Canon{Kind: 0xff}, nil, "g", "e", "p", nil, nil, nil)
+	_, _, _, _, _, err := buildCanonHostModule(ctx, r, comp, newConfig(nil), newHandleTable(), nil, binary.Canon{Kind: 0xff}, nil, []string{"g"}, "e", "p", nil, nil, nil)
 	requireErrContains(t, err, "does not produce a core func")
 }
 

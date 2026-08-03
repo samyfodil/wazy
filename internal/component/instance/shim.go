@@ -9,9 +9,10 @@ import (
 )
 
 // This file hand-encodes minimal core WebAssembly binaries for "passthrough
-// shim" modules: a module whose only job is to import a func/memory/table
-// from an already-instantiated real module (by its wazy-registered name) and
-// immediately re-export it, verbatim, under a (possibly different) name.
+// shim" modules: a module whose only job is to import a func/table/memory/
+// global from an already-instantiated real module (by its wazy-registered
+// name) and immediately re-export it, verbatim, under a (possibly different)
+// name.
 //
 // # Why this exists
 //
@@ -22,19 +23,22 @@ import (
 // instance that a *different* core module then imports as "env"."memory".
 //
 // wazy's public API has no way to build a *host* module (r.NewHostModuleBuilder)
-// that exports a memory or table: HostModuleBuilder only supports Go-backed
-// funcs (see builder.go), and api.Module has no Table() accessor at all (see
-// the "TODO: Table" note on api.Module). But per the Component Model's
-// "shared-everything" semantics, a re-grouped memory or table MUST be the
-// exact same underlying object as its source -- e.g. module1's adapter code
-// reads/writes offsets that module0's _start already computed, through
-// module1's own load/store instructions against an *imported* memory, so a
-// copy would silently desync the two modules' views of memory.
+// that exports a memory, table or global: HostModuleBuilder only supports
+// Go-backed funcs (see builder.go), and api.Module has no Table() accessor at
+// all (see the "TODO: Table" note on api.Module). But per the Component
+// Model's "shared-everything" semantics, a re-grouped memory, table or global
+// MUST be the exact same underlying object as its source -- e.g. module1's
+// adapter code reads/writes offsets that module0's _start already computed,
+// through module1's own load/store instructions against an *imported* memory,
+// so a copy would silently desync the two modules' views of memory. The same
+// goes for a shared-everything dynamic library's mutable `__stack_pointer`
+// global, which every linked core module must see (and update) as one object.
 //
 // A real (non-host) core module that imports an item and exports it right
 // back, unmodified, achieves this for free: wazy's own module-linking
 // resolves such an import by sharing the underlying MemoryInstance/
-// TableInstance object (see internal/wasm/store.go's resolveImports), exactly
+// TableInstance/GlobalInstance object (see internal/wasm/store.go's
+// resolveImports), exactly
 // like any two real wasm modules linked together. So rather than extend
 // wazy's public surface (a much larger change), this package hand-encodes the
 // (tiny, purely mechanical -- no instructions, no code section at all, since
@@ -51,13 +55,14 @@ import (
 
 // shimSort is the core:sort of one passthrough item, matching the
 // core-wasm-binary importdesc/exportdesc discriminator (funcs 0x00, tables
-// 0x01, memories 0x02).
+// 0x01, memories 0x02, globals 0x03).
 type shimSort byte
 
 const (
 	shimSortFunc   shimSort = 0x00
 	shimSortTable  shimSort = 0x01
 	shimSortMemory shimSort = 0x02
+	shimSortGlobal shimSort = 0x03
 )
 
 // shimItem is one passthrough entry: import (fromModule, fromName) and
@@ -66,13 +71,22 @@ const (
 // with no bounds (min 0, no max -- always satisfiable against any real
 // table, see buildPassthroughShim), and memories are always declared with no
 // bounds either, for the same reason.
+//
+// GlobalType/GlobalMutable are meaningful (and required) when Sort ==
+// shimSortGlobal. Unlike a table or memory, a global import is NOT satisfied
+// by a permissive declaration: store.go's resolveImports requires the declared
+// value type and mutability to match the source global EXACTLY, so both are
+// read off the live source global by the caller (see resolveInlineExportItem)
+// and reproduced verbatim here.
 type shimItem struct {
-	Sort       shimSort
-	FromModule string
-	FromName   string
-	ExportName string
-	Params     []api.ValueType // Sort == shimSortFunc only
-	Results    []api.ValueType // Sort == shimSortFunc only
+	Sort          shimSort
+	FromModule    string
+	FromName      string
+	ExportName    string
+	Params        []api.ValueType // Sort == shimSortFunc only
+	Results       []api.ValueType // Sort == shimSortFunc only
+	GlobalType    api.ValueType   // Sort == shimSortGlobal only
+	GlobalMutable bool            // Sort == shimSortGlobal only
 }
 
 // buildPassthroughShim encodes a minimal core wasm binary that imports every
@@ -94,7 +108,7 @@ func buildPassthroughShim(items []shimItem) ([]byte, error) {
 
 	var typeSec, importSec, exportSec bytes.Buffer
 	var typeCount, importCount, exportCount uint32
-	var funcIdx, tableIdx, memIdx uint32
+	var funcIdx, tableIdx, memIdx, globalIdx uint32
 
 	for i, it := range items {
 		if it.FromModule == "" || it.FromName == "" {
@@ -148,6 +162,27 @@ func buildPassthroughShim(items []shimItem) ([]byte, error) {
 			exportSec.Write(leb128.EncodeUint32(memIdx))
 			exportCount++
 			memIdx++
+
+		case shimSortGlobal:
+			if it.GlobalType == 0 {
+				return nil, fmt.Errorf("component/instance: buildPassthroughShim: item[%d] (global %q) has no value type", i, it.FromName)
+			}
+			writeName(&importSec, it.FromModule)
+			writeName(&importSec, it.FromName)
+			importSec.WriteByte(0x03)          // importdesc: global
+			importSec.WriteByte(it.GlobalType) // globaltype: valtype
+			if it.GlobalMutable {
+				importSec.WriteByte(0x01) // mut: var
+			} else {
+				importSec.WriteByte(0x00) // mut: const
+			}
+			importCount++
+
+			writeName(&exportSec, it.ExportName)
+			exportSec.WriteByte(0x03) // exportdesc: global
+			exportSec.Write(leb128.EncodeUint32(globalIdx))
+			exportCount++
+			globalIdx++
 
 		default:
 			return nil, fmt.Errorf("component/instance: buildPassthroughShim: item[%d] has unsupported sort %#x", i, it.Sort)

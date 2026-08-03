@@ -146,7 +146,15 @@ func decodeComponent(buf []byte) (*Component, error) {
 				return nil, fmt.Errorf("instance section: %w", err)
 			}
 			offset = newOffset
+			instanceBase := uint32(len(c.Instances))
 			c.Instances = append(c.Instances, instances...)
+			// Every instance definition occupies the next index in the
+			// component's instance index space, interleaved with instance
+			// imports, instance aliases and (critically) instance exports --
+			// see componentinstancespace.go.
+			for j := range instances {
+				c.ComponentInstanceSpace = append(c.ComponentInstanceSpace, ComponentInstanceSpaceEntry{Kind: ComponentInstanceFromDefinition, Instance: instanceBase + uint32(j)})
+			}
 
 		case 6: // Alias section
 			aliases, newOffset, err := decodeAliasSection(buf, offset, sectionSize)
@@ -175,6 +183,12 @@ func decodeComponent(buf []byte) (*Component, error) {
 				// componentfuncspace.go.
 				if al.Sort == 0x01 {
 					c.ComponentFuncSpace = append(c.ComponentFuncSpace, ComponentFuncSpaceEntry{Kind: ComponentFuncFromAlias, Alias: aliasBase + uint32(j)})
+				}
+				// A component-level instance alias (sort 0x05) occupies the
+				// next index in the component instance index space -- see
+				// componentinstancespace.go.
+				if al.Sort == 0x05 {
+					c.ComponentInstanceSpace = append(c.ComponentInstanceSpace, ComponentInstanceSpaceEntry{Kind: ComponentInstanceFromAlias, Alias: aliasBase + uint32(j)})
 				}
 			}
 
@@ -246,6 +260,12 @@ func decodeComponent(buf []byte) (*Component, error) {
 				if im.ExternType == 0x01 {
 					c.ComponentFuncSpace = append(c.ComponentFuncSpace, ComponentFuncSpaceEntry{Kind: ComponentFuncFromImport, Import: importBase + uint32(j)})
 				}
+				// An instance import (sort instance 0x05) occupies the next
+				// index in the component instance index space -- see
+				// componentinstancespace.go.
+				if im.ExternType == 0x05 {
+					c.ComponentInstanceSpace = append(c.ComponentInstanceSpace, ComponentInstanceSpaceEntry{Kind: ComponentInstanceFromImport, Import: importBase + uint32(j)})
+				}
 			}
 
 		case 11: // Export section
@@ -265,6 +285,10 @@ func decodeComponent(buf []byte) (*Component, error) {
 				case 0x03: // type export: introduces a type index aliasing the
 					// exported type ("export introduces an alias").
 					c.TypeSpace = append(c.TypeSpace, TypeSpaceEntry{Kind: TypeSpaceExport, Export: exportBase + uint32(j)})
+				case 0x05: // instance export: introduces an instance index
+					// aliasing the exported instance, shifting every LATER
+					// instance definition -- see componentinstancespace.go.
+					c.ComponentInstanceSpace = append(c.ComponentInstanceSpace, ComponentInstanceSpaceEntry{Kind: ComponentInstanceFromExport, Export: exportBase + uint32(j)})
 				}
 			}
 

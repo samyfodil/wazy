@@ -201,7 +201,7 @@ func translateResourceFD(fd binary.FuncDesc, providerResolve abi.Resolver, trans
 // then delegated to precisely like a sibling's export -- the outer's own
 // core func is always ready here (instantiateNestedInstances, this func's
 // only caller, runs after the core-instance loop that builds it).
-func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, byIdx map[int]*Instance, numImported int, funcIdx uint32, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver) (*hostImport, error) {
+func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, byIdx map[int]*Instance, funcIdx uint32, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver) (*hostImport, error) {
 	if int(funcIdx) >= len(comp.ComponentFuncSpace) {
 		return nil, fmt.Errorf("func arg index %d out of range of the component func index space", funcIdx)
 	}
@@ -238,7 +238,12 @@ func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, byIdx
 	if al.Sort != 0x01 || al.TargetKind != 0x00 {
 		return nil, fmt.Errorf("func arg index %d is a %#x/%#x alias, not a func export alias", funcIdx, al.Sort, al.TargetKind)
 	}
-	if int(al.InstanceIdx) >= numImported {
+	// A LOCAL instance definition names a sibling nested instantiation;
+	// anything else is an imported instance, resolved through
+	// importInterfaceName below. Resolved through the true component instance
+	// index space (see componentInstanceDef), not numImported arithmetic,
+	// since an interleaved instance export shifts every later definition.
+	if _, isLocal := componentInstanceDef(comp, al.InstanceIdx); isLocal {
 		sib, ok := byIdx[int(al.InstanceIdx)]
 		if !ok {
 			return nil, fmt.Errorf("func arg index %d aliases component instance %d, which is not a prior nested instantiation", funcIdx, al.InstanceIdx)
