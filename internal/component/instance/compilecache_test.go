@@ -266,6 +266,62 @@ func TestCompileCache_HelloPrintsHelloWorld(t *testing.T) {
 // in SEPARATE per-instance resolver maps (keyToInst). The host modules keep
 // per-instantiation-unique global names, so nothing collides in the store. Both
 // instances must independently print "hello world".
+// TestCompileCache_ShimBytesStableAcrossInstantiations pins the CM10 invariant
+// that core-instance identity keys (wazy:core-instance/<static index>, the
+// resolver key every passthrough shim names its alias sources by) must not
+// break: they are COMPONENT-CONSTANT, so a second Instantiate of the same
+// component produces byte-identical shim bytes and adds nothing to the compile
+// cache. A per-instantiation key (a global module name, say) would grow byKey
+// by one entry per shim on every Instantiate.
+func TestCompileCache_ShimBytesStableAcrossInstantiations(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+	cache := NewCompileCache()
+	defer cache.Close(ctx)
+
+	first, err := Instantiate(ctx, r, realHelloWasm, WithCompileCache(cache))
+	if err != nil {
+		t.Fatalf("first Instantiate: %v", err)
+	}
+	cache.mu.Lock()
+	n1 := len(cache.byKey)
+	cache.mu.Unlock()
+
+	second, err := Instantiate(ctx, r, realHelloWasm, WithCompileCache(cache))
+	if err != nil {
+		t.Fatalf("second Instantiate: %v", err)
+	}
+	cache.mu.Lock()
+	n2 := len(cache.byKey)
+	cache.mu.Unlock()
+
+	if n1 == 0 {
+		t.Fatal("cache is empty after the first Instantiate")
+	}
+	if n2 != n1 {
+		t.Errorf("compile cache grew from %d to %d entries on the second Instantiate; shim bytes are not component-constant", n1, n2)
+	}
+	// Every embedded core module AND every regrouping shim must be in there:
+	// real_hello has 4 core modules and a shim per inline-export core instance.
+	comp, err := binary.Decode(bytes.NewReader(realHelloWasm))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	shims := 0
+	for _, ci := range comp.CoreInstances {
+		if ci.Kind == 0x01 {
+			shims++
+		}
+	}
+	if want := len(comp.CoreModules) + shims; n1 != want {
+		t.Errorf("cache holds %d compiled modules, want %d (%d core modules + %d shims); a shim bypassed the cache", n1, want, len(comp.CoreModules), shims)
+	}
+
+	first.Close(ctx)
+	second.Close(ctx)
+}
+
 func TestCompileCache_TwoHelloLiveShareShims(t *testing.T) {
 	ctx := context.Background()
 	r := wazy.NewRuntime(ctx)

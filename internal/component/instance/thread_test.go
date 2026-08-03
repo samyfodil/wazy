@@ -363,7 +363,7 @@ func TestThreadNewIndirectHostFunc_BindThenNoActiveTaskPanics(t *testing.T) {
 		return mod, "t", nil
 	}
 
-	def, err := threadNewIndirectHostFunc(in, canon, neededTypes, "g", "e", coreTableTarget)
+	def, err := threadNewIndirectHostFunc(in, canon, neededTypes, []string{"g"}, "e", coreTableTarget)
 	if err != nil {
 		t.Fatalf("threadNewIndirectHostFunc bind: %v", err)
 	}
@@ -387,7 +387,7 @@ func TestThreadNewIndirectHostFunc_BadTableIndexFailsBind(t *testing.T) {
 	coreTableTarget := func(int) (api.Module, string, error) {
 		return nil, "", fmt.Errorf("test: table index out of range")
 	}
-	_, err := threadNewIndirectHostFunc(in, canon, nil, "g", "e", coreTableTarget)
+	_, err := threadNewIndirectHostFunc(in, canon, nil, []string{"g"}, "e", coreTableTarget)
 	if err == nil {
 		t.Fatal("expected a bind-time error for an unresolvable table index")
 	}
@@ -406,7 +406,7 @@ func TestThreadNewIndirectHostFunc_WrongSignatureFailsBind(t *testing.T) {
 		"g": {"e": {params: []api.ValueType{api.ValueTypeI32}, results: []api.ValueType{api.ValueTypeI32}}}, // wrong arity
 	}
 	coreTableTarget := func(int) (api.Module, string, error) { return mod, "t", nil }
-	_, err := threadNewIndirectHostFunc(in, canon, neededTypes, "g", "e", coreTableTarget)
+	_, err := threadNewIndirectHostFunc(in, canon, neededTypes, []string{"g"}, "e", coreTableTarget)
 	if err == nil {
 		t.Fatal("expected a bind-time error for a non-legal-shape consumer signature")
 	}
@@ -422,7 +422,7 @@ func TestThreadNewIndirectHostFunc_MissingSignatureFailsBind(t *testing.T) {
 	in := &Instance{sched: &sched{}, mayLeave: true}
 	canon := binary.Canon{Kind: binary.CanonKindThreadNewIndirect, TableIdx: 0}
 	coreTableTarget := func(int) (api.Module, string, error) { return mod, "t", nil }
-	_, err := threadNewIndirectHostFunc(in, canon, nil, "g", "e", coreTableTarget)
+	_, err := threadNewIndirectHostFunc(in, canon, nil, []string{"g"}, "e", coreTableTarget)
 	if err == nil {
 		t.Fatal("expected a bind-time error when neededTypes has no entry for this group/entry")
 	}
@@ -482,7 +482,7 @@ func bindThreadFuncTableNewIndirect(t *testing.T, in *Instance, mod api.Module) 
 		"g": {"e": {params: []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, results: []api.ValueType{api.ValueTypeI32}}},
 	}
 	coreTableTarget := func(int) (api.Module, string, error) { return mod, "t", nil }
-	def, err := threadNewIndirectHostFunc(in, canon, neededTypes, "g", "e", coreTableTarget)
+	def, err := threadNewIndirectHostFunc(in, canon, neededTypes, []string{"g"}, "e", coreTableTarget)
 	if err != nil {
 		t.Fatalf("threadNewIndirectHostFunc bind: %v", err)
 	}

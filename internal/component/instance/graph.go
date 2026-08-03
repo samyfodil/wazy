@@ -3,6 +3,7 @@ package instance
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/samyfodil/wazy"
@@ -65,11 +66,13 @@ const graphEmptyImportKey = "wazy:component/empty-import"
 //    core instance index space:
 //      - Kind 0x00 (instantiate): instantiate the named embedded core
 //        module for real via Runtime.InstantiateWithConfig, registered under
-//        the wazy name its "with" args reference it by (or a synthesized
-//        key if none do -- see moduleKeyForGraph). Its own imports resolve
-//        automatically, by that same by-name mechanism, against whichever
-//        earlier core instances (real or shim) were registered under the
-//        names it imports from.
+//        its own collision-free identity key (coreInstanceKey) plus, as a
+//        fallback, the wazy name its "with" args reference it by. Its own
+//        two-level imports resolve first against THIS instantiation's own
+//        "with" args (a `with` name is a binding local to one instantiate,
+//        per Binary.md -- the same name routinely designates different
+//        source instances elsewhere in the component), then through the
+//        graph-wide fallback map.
 //      - Kind 0x01 (inline exports): build a "passthrough shim" -- a tiny
 //        hand-encoded real core wasm module (see shim.go) that imports each
 //        entry from wherever it really originates and re-exports it under
@@ -79,12 +82,14 @@ const graphEmptyImportKey = "wazy:component/empty-import"
 //        canon that produces a brand-new core func (canon lower, or one of
 //        the three resource canons): the latter gets a fresh, uniquely
 //        named single-func Go host module built first (see
-//        resolveInlineExportFuncItem), and the shim imports *that*. A memory
-//        or table entry is always a pure alias -- no canon ever produces
-//        one -- resolved the same way, giving the shim's re-export the exact
-//        same underlying MemoryInstance/TableInstance identity as its
-//        source (see shim.go's doc for why this matters and how a real,
-//        import-then-export core module achieves it for free).
+//        resolveInlineExportFuncItem), and the shim imports *that*. A table,
+//        memory or global entry is always a pure alias -- no canon ever
+//        produces one -- resolved the same way, giving the shim's re-export
+//        the exact same underlying TableInstance/MemoryInstance/
+//        GlobalInstance identity as its source (see shim.go's doc for why
+//        this matters and how a real, import-then-export core module
+//        achieves it for free). Every alias source is named by
+//        coreInstanceKey, never by a consumer-declared name.
 // 7. Bind the component's own exports (func or instance-typed, the latter
 //    for a WIT world that exports an interface -- see host_import.go's
 //    bindInstanceExport, whose core-agnostic logic this package reuses
@@ -175,9 +180,10 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		}
 	}
 
-	// Core memory and table index spaces: no canon ever produces either, so
-	// filtering Aliases in the slice's own order is already correct.
-	var coreMemSpace, coreTableSpace []aliasTarget
+	// Core memory, table and global index spaces: no canon ever produces any
+	// of the three, so filtering Aliases in the slice's own order is already
+	// correct.
+	var coreMemSpace, coreTableSpace, coreGlobalSpace []aliasTarget
 	for _, al := range comp.Aliases {
 		if al.Sort != 0x00 || al.TargetKind != 0x01 {
 			continue
@@ -187,14 +193,39 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			coreMemSpace = append(coreMemSpace, aliasTarget{instIdx: al.InstanceIdx, name: al.Name})
 		case 0x01: // table
 			coreTableSpace = append(coreTableSpace, aliasTarget{instIdx: al.InstanceIdx, name: al.Name})
+		case 0x03: // global
+			coreGlobalSpace = append(coreGlobalSpace, aliasTarget{instIdx: al.InstanceIdx, name: al.Name})
 		}
 	}
 
+	// refNames records, per core instance, the DISTINCT consumer-declared
+	// "with" names other instantiations pass it under. A source instance may
+	// legally appear under several names (and, just as often in real
+	// wit-component/componentize-py output, several DIFFERENT source instances
+	// share one name -- "env" appears ten times in a componentize-py CPython
+	// component). Neither is a conflict: a `with` name is a binding local to
+	// the one instantiation that declares it (Binary.md: the first import name
+	// is looked up in THAT instantiation's named list of args), never a
+	// component-wide module name. These names are therefore used only for the
+	// neededTypes lookup below, which is genuinely keyed by the consumer-
+	// declared module name because that is how a real core module spells its
+	// import. Identity is carried by coreInstanceKey instead.
 	refNames := make(map[uint32][]string)
 	for _, ci := range comp.CoreInstances {
-		if ci.Kind == 0x00 {
-			for _, arg := range ci.Args {
-				refNames[arg.InstanceIdx] = append(refNames[arg.InstanceIdx], arg.Name)
+		if ci.Kind != 0x00 {
+			continue
+		}
+		for _, arg := range ci.Args {
+			names := refNames[arg.InstanceIdx]
+			dup := false
+			for _, n := range names {
+				if n == arg.Name {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				refNames[arg.InstanceIdx] = append(names, arg.Name)
 			}
 		}
 	}
@@ -209,10 +240,11 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	// hits (unlike a per-instance name, which would bypass it), and nothing is
 	// registered under it globally (the module is anonymous).
 	emptyNameTarget := ""
-	for k := range comp.CoreInstances {
-		if names := refNames[uint32(k)]; len(names) == 1 && names[0] == "" {
-			emptyNameTarget = graphEmptyImportKey
-			break
+	for _, names := range refNames {
+		for _, n := range names {
+			if n == "" {
+				emptyNameTarget = graphEmptyImportKey
+			}
 		}
 	}
 
@@ -333,7 +365,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 				return nil, "", fmt.Errorf("core func index %d: canon index %d out of range", cfi, entry.Canon)
 			}
 			privName := nextPrivateName()
-			hostMod, name, params, results, _, err := buildCanonHostModule(ctx, r, comp, cfg, resources, in, comp.Canons[entry.Canon], neededTypes, "", privName, privName, coreMemTarget, coreFuncTarget, coreTableTarget)
+			hostMod, name, params, results, _, err := buildCanonHostModule(ctx, r, comp, cfg, resources, in, comp.Canons[entry.Canon], neededTypes, nil, privName, privName, coreMemTarget, coreFuncTarget, coreTableTarget)
 			if err != nil {
 				return nil, "", fmt.Errorf("core func index %d: %w", cfi, err)
 			}
@@ -393,22 +425,34 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	}
 
 	// keyToInst is this component instance's private import environment: a
-	// per-instantiation map from an internal wiring name (a raw "with" name
-	// like wasi:io/streams@0.2.12, the empty-import key, or a synthesized
-	// core%d) to the instance that provides it. Its embedded modules and shims
-	// are instantiated ANONYMOUSLY (WithName("")), so they never enter the
-	// Runtime's global registry and never collide across components; all of
-	// their internal imports resolve through this map via the ImportResolver
-	// instead. This is wasmtime's model: a component's internal wiring lives in
-	// its own instance graph, not a shared global namespace. keys[k] holds each
-	// instance's key so a later shim can name its sources.
-	keys := make([]string, len(comp.CoreInstances))
+	// per-instantiation map from an internal wiring name to the instance that
+	// provides it. Its embedded modules and shims are instantiated
+	// ANONYMOUSLY (WithName("")), so they never enter the Runtime's global
+	// registry and never collide across components; all of their internal
+	// imports resolve through this map via the ImportResolver instead. This is
+	// wasmtime's model: a component's internal wiring lives in its own
+	// instance graph, not a shared global namespace.
+	//
+	// Two kinds of name live here:
+	//
+	//   - coreInstanceKey(k), the collision-free IDENTITY of core instance k.
+	//     Every instantiated core instance is registered under it, and every
+	//     passthrough shim names its alias sources by it. This is the only
+	//     key a shim ever uses, so a shim can never be handed the wrong
+	//     source instance.
+	//   - the consumer-declared "with" name (or the empty-import key, or a
+	//     synthesized core%d), kept as the graph-wide FALLBACK for a core
+	//     module import that its own instantiate-args do not name. Names are
+	//     NOT unique across a real component (see refNames), so this map is
+	//     last-writer-wins for them by construction -- which is exactly why
+	//     an instantiation resolves its own args locally first (see the loop
+	//     below) rather than trusting this map.
 	keyToInst := map[string]api.Module{}
 	// Chain to a caller-supplied ImportResolver, if any: the graph owns only
 	// its own internal names, so a name it doesn't provide falls through to the
 	// caller's resolver (then the global registry), never shadowing it.
 	parentResolver, _ := ctx.Value(expctxkeys.ImportResolverKey{}).(api.ImportResolver)
-	instCtx := api.WithImportResolver(ctx, func(name string) api.Module {
+	graphResolver := func(name string) api.Module {
 		if m := keyToInst[name]; m != nil {
 			return m
 		}
@@ -416,7 +460,8 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			return parentResolver(name)
 		}
 		return nil
-	})
+	}
+	instCtx := api.WithImportResolver(ctx, graphResolver)
 
 	// Register each of this component's OWN resource destructors on its table
 	// BEFORE instantiating core modules -- a core module's `start` section runs
@@ -450,15 +495,14 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	sh.instantiating = true
 	defer func() { sh.instantiating = false }()
 	for k, ci := range comp.CoreInstances {
-		// key is BOTH this instance's resolver key and the name a consumer
-		// declares to import it: the raw "with" name, the empty-import key, or
-		// a synthesized core%d (see moduleKeyForGraph). It is also the groupName
-		// for neededTypes lookups (the consumer-declared name).
-		key, nerr := moduleKeyForGraph(k, refNames[uint32(k)], emptyNameTarget)
-		if nerr != nil {
-			return fail(nerr)
-		}
-		keys[k] = key
+		// groupNames are the consumer-declared "with" names this instance is
+		// passed under -- the module names a real core module spells its
+		// imports of this group with, hence the neededTypes lookup keys. key
+		// is the first of them (or a synthesized core%d when nothing
+		// references this instance), used for the legacy graph-wide resolver
+		// registration and for diagnostics; identity is coreInstanceKey(k).
+		groupNames := groupNamesForGraph(refNames[uint32(k)], emptyNameTarget)
+		key := moduleKeyForGraph(k, groupNames)
 
 		switch ci.Kind {
 		case 0x00: // instantiate a real embedded core module
@@ -471,18 +515,58 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			// the per-instantiation re-slice + re-rewrite. Stable bytes => the
 			// compile cache still hits.
 			coreBytes := rewrittenCore[ci.ModuleIdx]
+			// This instantiation's OWN import environment. Per Binary.md, a
+			// two-level core import is resolved by looking the first name up
+			// "in the named list of core:instantiatearg" of THIS
+			// instantiation -- the args are local bindings, not entries in a
+			// component-wide namespace. Resolving them through the graph-wide
+			// map instead is wrong whenever one name is reused for different
+			// source instances (componentize-py passes ten different
+			// instances as "env") or one instance is bound under several
+			// names. The graph resolver stays as the fallback for a name the
+			// args don't cover.
+			//
+			// Every arg is validated here regardless; a local resolver is
+			// only built when at least one arg actually disagrees with what
+			// the graph-wide map would hand back, so a component with no
+			// name reuse (every fixture in this package, and every
+			// single-library wit-component guest) keeps the pre-existing,
+			// allocation-free path.
+			argCtx := instCtx
+			needLocal := false
+			for _, arg := range ci.Args {
+				src, ok := instMods[int(arg.InstanceIdx)]
+				if !ok {
+					return fail(fmt.Errorf("component/instance: core module %d instantiate arg %q references core instance %d, which was not instantiated", ci.ModuleIdx, arg.Name, arg.InstanceIdx))
+				}
+				if graphResolver(argImportName(arg.Name, emptyNameTarget)) != src {
+					needLocal = true
+				}
+			}
+			if needLocal {
+				args := ci.Args
+				argCtx = api.WithImportResolver(ctx, func(name string) api.Module {
+					for _, arg := range args {
+						if argImportName(arg.Name, emptyNameTarget) == name {
+							return instMods[int(arg.InstanceIdx)]
+						}
+					}
+					return graphResolver(name)
+				})
+			}
 			// WithName("") makes the module anonymous (not registered in the
 			// global name map -- see store_module_list.go's registerModule); its
-			// imports resolve through instCtx's resolver, and other modules
+			// imports resolve through argCtx's resolver, and other modules
 			// import it by its key, not a global name. WithStartFunctions()
 			// clears wazy's default "run _start on instantiate": an embedded
 			// core module's own _start is invoked later by another module once
 			// the graph is wired (see shim.go), not eagerly here.
-			mod, err := instantiateCoreModule(instCtx, r, cfg, coreBytes, wazy.NewModuleConfig().WithName("").WithStartFunctions())
+			mod, err := instantiateCoreModule(argCtx, r, cfg, coreBytes, wazy.NewModuleConfig().WithName("").WithStartFunctions())
 			if err != nil {
 				return fail(fmt.Errorf("component/instance: instantiate core module %d (key %q): %w", ci.ModuleIdx, key, err))
 			}
 			instMods[k] = mod
+			keyToInst[coreInstanceKey(k)] = mod
 			keyToInst[key] = mod
 			closers = append(closers, mod)
 			coreModuleCount++
@@ -504,7 +588,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 					if int(centry.Canon) >= len(comp.Canons) {
 						return fail(fmt.Errorf("component/instance: core instance %d: inline export %q references canon %d, out of range", k, e.Name, centry.Canon))
 					}
-					def, wasiCall, cerr := computeCanonHostFunc(ctx, r, comp, cfg, resources, in, comp.Canons[centry.Canon], neededTypes, key, e.Name, coreMemTarget, coreFuncTarget, coreTableTarget)
+					def, wasiCall, cerr := computeCanonHostFunc(ctx, r, comp, cfg, resources, in, comp.Canons[centry.Canon], neededTypes, groupNames, e.Name, coreMemTarget, coreFuncTarget, coreTableTarget)
 					if cerr != nil {
 						return fail(fmt.Errorf("component/instance: core instance %d: inline export %q: %w", k, e.Name, cerr))
 					}
@@ -517,9 +601,9 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 					canonDefs = append(canonDefs, def)
 					continue
 				}
-				// key doubles as groupName (the consumer-declared name) for
-				// neededTypes lookups; keys names the shim's alias sources.
-				item, wasiCall, privMod, err := resolveInlineExportItem(ctx, r, comp, cfg, resources, in, e, coreMemSpace, coreTableSpace, instMods, keys, neededTypes, key, nextPrivateName, coreFuncTarget, coreMemTarget, coreTableTarget)
+				// groupNames are the consumer-declared names for neededTypes
+				// lookups; the shim names its alias sources by coreInstanceKey.
+				item, wasiCall, privMod, err := resolveInlineExportItem(ctx, r, comp, cfg, resources, in, e, coreMemSpace, coreTableSpace, coreGlobalSpace, instMods, neededTypes, groupNames, nextPrivateName, coreFuncTarget, coreMemTarget, coreTableTarget)
 				if err != nil {
 					return fail(fmt.Errorf("component/instance: core instance %d: %w", k, err))
 				}
@@ -568,16 +652,17 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			}
 			// Anonymous like the embedded modules above; consumers import it by
 			// its key via the resolver, not by a global name. Every FromModule is
-			// now component-constant (embedded-module keys + the stable canon-group
-			// key), so shimBytes are identical every instantiation -- route through
-			// the CompileCache (a warm cache then skips re-encoding + recompiling
-			// each shim). cacheableShim is false only in the defensive canon-key
-			// fallback above, where the bytes are not stable.
+			// component-constant (coreInstanceKey(<static index>) + the stable
+			// canon-group key), so shimBytes are identical every instantiation --
+			// route through the CompileCache (a warm cache then skips re-encoding
+			// + recompiling each shim). cacheableShim is false only in the
+			// defensive canon-key fallback above, where the bytes are not stable.
 			mod, err := instantiateCoreModuleCacheable(instCtx, r, cfg, shimBytes, wazy.NewModuleConfig().WithName("").WithStartFunctions(), cacheableShim)
 			if err != nil {
 				return fail(fmt.Errorf("component/instance: instantiate regrouping shim for core instance %d (key %q): %w", k, key, err))
 			}
 			instMods[k] = mod
+			keyToInst[coreInstanceKey(k)] = mod
 			keyToInst[key] = mod
 			closers = append(closers, mod)
 
@@ -681,21 +766,19 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 	if len(comp.Instances) == 0 {
 		return nil, nil, nil
 	}
-	numImported := 0
-	for _, im := range comp.Imports {
-		if im.ExternType == 0x05 { // instance
-			numImported++
-		}
-	}
+	// spaceIdx[i] is the component instance index space slot comp.Instances[i]
+	// occupies -- NOT numImported+i, since an instance export interleaved
+	// between two instance definitions introduces an aliasing index of its own
+	// and shifts every later definition (see componentInstanceSpaceIndices).
+	spaceIdx := componentInstanceSpaceIndices(comp)
 
 	// A component instance re-exported directly as an INSTANCE (the WIT-
 	// exports-an-interface shim shape, comp.Exports' ExternType==0x05) is
 	// bindInstanceExportGraph's exclusive responsibility -- it does its own
 	// instantiation/validation there (nested-component-index bounds,
 	// pure-shim shape) and must keep being the ONLY consumer for that shape;
-	// don't preempt it here. Per bindInstanceExportGraph's own arithmetic,
-	// such an export's ExternIndex IS the component-instance index directly
-	// (numImportedInstances + localIdx, matching this func's compInstIdx).
+	// don't preempt it here. Such an export's ExternIndex IS a component-
+	// instance index, matching this func's compInstIdx.
 	exportedAsInstance := make(map[int]bool)
 	for _, exp := range comp.Exports {
 		if exp.ExternType == 0x05 {
@@ -714,7 +797,7 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 	// bindInstanceExportGraph above.
 	needed := make(map[int]bool)
 	for i, inst := range comp.Instances {
-		compInstIdx := numImported + i
+		compInstIdx := spaceIdx[i]
 		if inst.Kind == 0x00 && !exportedAsInstance[compInstIdx] {
 			needed[compInstIdx] = true
 		}
@@ -725,7 +808,7 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 	// Pull in transitive dependencies: a needed instance's instance-args name
 	// earlier (forward-declared) siblings it links, which must exist first.
 	for i := len(comp.Instances) - 1; i >= 0; i-- {
-		if !needed[numImported+i] {
+		if !needed[spaceIdx[i]] {
 			continue
 		}
 		for _, arg := range comp.Instances[i].Args {
@@ -743,7 +826,7 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 		}
 	}
 	for i, inst := range comp.Instances {
-		compInstIdx := numImported + i
+		compInstIdx := spaceIdx[i]
 		if !needed[compInstIdx] || inst.Kind != 0x00 {
 			continue
 		}
@@ -863,7 +946,7 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 				// importInterfaceName) or, just as often in the async
 				// suites' multi-nested-component .wast shape, a single named
 				// export of an earlier sibling nested instance (byIdx).
-				hi, err := outerFuncArgImport(comp, cfg, in, byIdx, numImported, arg.SortIdx, componentFunc, coreFuncTarget, resolve)
+				hi, err := outerFuncArgImport(comp, cfg, in, byIdx, arg.SortIdx, componentFunc, coreFuncTarget, resolve)
 				if err != nil {
 					failClose()
 					return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q: %w", compInstIdx, arg.Name, err)
@@ -1059,26 +1142,136 @@ func startDelegatedFromBlocker(ctx context.Context, blk taskBlocker, tgt *guestA
 	return out, nil
 }
 
-// moduleKeyForGraph is moduleNameFor's graph-engine counterpart: identical
-// except that a sole "" ref name (see importrewrite.go) maps to
-// emptyNameTarget instead of the literal empty string, since wazy's module
-// registry cannot resolve an empty-named module by import.
-func moduleKeyForGraph(coreInstanceIdx int, refNames []string, emptyNameTarget string) (string, error) {
-	switch len(refNames) {
-	case 0:
+// coreInstanceKey is the COMPONENT-CONSTANT, collision-free resolver key that
+// identifies core instance k inside one component's private import
+// environment (keyToInst -- see instantiateGraph). It is the identity a
+// passthrough shim names its alias sources by.
+//
+// A consumer-declared "with" name cannot serve as that identity: names are
+// local to the instantiation that declares them, so the same name routinely
+// designates DIFFERENT source instances within one component (a
+// componentize-py CPython component passes ten distinct instances as "env",
+// three as "wasi_snapshot_preview1", and five as "GOT.mem"), and one instance
+// may be bound under several names. Keying by index removes both hazards.
+//
+// The index is static per component, so this is component-constant exactly
+// like canonGroupKey and graphEmptyImportKey: the shim bytes that embed it
+// stay byte-identical across instantiations and keep hitting the CompileCache
+// (OPTIMIZATIONS.md CM10). The "wazy:" prefix cannot collide with a real
+// core:name from a component binary that wit-component or componentize-py
+// emits, and nothing is ever registered under it globally.
+//
+// The first coreInstanceKeyCacheSize keys are interned once per process
+// (a component-constant string for a static index), so registering every core
+// instance's identity costs no allocation on the instantiate path -- the
+// straightforward fmt.Sprintf here would add two allocations per core
+// instance to every Instantiate (OPTIMIZATIONS.md CM5/CM7/CM9's territory).
+func coreInstanceKey(k int) string {
+	if k >= 0 && k < len(coreInstanceKeyCache) {
+		return coreInstanceKeyCache[k]
+	}
+	return coreInstanceKeyPrefix + strconv.Itoa(k)
+}
+
+const (
+	coreInstanceKeyPrefix    = "wazy:core-instance/"
+	coreInstanceKeyCacheSize = 128 // > the 83 core instances of a componentize-py CPython component
+)
+
+var coreInstanceKeyCache = func() [coreInstanceKeyCacheSize]string {
+	var out [coreInstanceKeyCacheSize]string
+	for i := range out {
+		out[i] = coreInstanceKeyPrefix + strconv.Itoa(i)
+	}
+	return out
+}()
+
+// argImportName is the module name a core module actually spells an import
+// from the instance bound under the "with" name argName. It is argName
+// verbatim, except that "" maps to emptyNameTarget: wazy's decoder rejects an
+// empty core import module name outright, so such an import was rewritten to
+// that stable key before the module was ever decoded (see graphEmptyImportKey
+// and importrewrite.go).
+func argImportName(argName, emptyNameTarget string) string {
+	if argName == "" {
+		return emptyNameTarget
+	}
+	return argName
+}
+
+// groupNamesForGraph is the list of consumer-declared "with" names core
+// instance k is passed under, with a "" name mapped to emptyNameTarget (see
+// importrewrite.go: the decoder rejects an empty core import module name, so
+// the guest's bytes were rewritten to that stable key and neededTypes is
+// keyed by it). These are the module names a real core module spells its
+// imports of this group with, hence the neededTypes lookup keys -- see
+// lookupCoreFuncSig. Identity is coreInstanceKey, never one of these.
+func groupNamesForGraph(refNames []string, emptyNameTarget string) []string {
+	rewrite := false
+	for _, n := range refNames {
+		if n == "" {
+			rewrite = true
+			break
+		}
+	}
+	if !rewrite {
+		// The overwhelmingly common case: no copy, so the per-core-instance
+		// loop stays allocation-free.
+		return refNames
+	}
+	out := make([]string, 0, len(refNames))
+	for _, n := range refNames {
+		if n == "" {
+			n = emptyNameTarget
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// moduleKeyForGraph is the name core instance k is registered under in the
+// graph-wide FALLBACK resolver (and the one used in diagnostics): its first
+// consumer-declared name, or a synthesized core%d when nothing references it
+// (e.g. the root). It is deliberately NOT an identity -- see coreInstanceKey.
+func moduleKeyForGraph(coreInstanceIdx int, groupNames []string) string {
+	if len(groupNames) == 0 {
 		// Unreferenced (e.g. the root): nothing imports it, so any distinct key
 		// works; core%d is unique within this component.
-		return fmt.Sprintf("core%d", coreInstanceIdx), nil
-	case 1:
-		if refNames[0] == "" {
-			return emptyNameTarget, nil
+		return fmt.Sprintf("core%d", coreInstanceIdx)
+	}
+	return groupNames[0]
+}
+
+// lookupCoreFuncSig finds the core-level signature a consumer declared for a
+// canon-produced func re-exported as entryName from a group regrouped under
+// groupNames. Every name the group is passed under is tried: a single source
+// instance may legally be bound under several "with" names, and only one of
+// those consumers need declare the import.
+func lookupCoreFuncSig(neededTypes map[string]map[string]coreFuncSig, groupNames []string, entryName string) (coreFuncSig, bool) {
+	for _, g := range groupNames {
+		if sig, ok := neededTypes[g][entryName]; ok {
+			return sig, true
 		}
-		// The raw "with" name is exactly what consumers import; the resolver
-		// maps it to this (anonymous) instance. No prefix: the key lives only
-		// in this component's private resolver map, never the global registry.
-		return refNames[0], nil
+	}
+	return coreFuncSig{}, false
+}
+
+// quoteNames renders a group's consumer-declared names for a diagnostic:
+// `"env"` for the usual single-name case, `"a" or "b"` when a source instance
+// really is bound under several names, and `(none)` for an unreferenced group
+// (which is exactly why no consumer declared the signature).
+func quoteNames(names []string) string {
+	switch len(names) {
+	case 0:
+		return "(none)"
+	case 1:
+		return fmt.Sprintf("%q", names[0])
 	default:
-		return "", fmt.Errorf("component/instance: core instance %d is referenced under %d names (%v); a core module can only be registered under one name", coreInstanceIdx, len(refNames), refNames)
+		quoted := make([]string, len(names))
+		for i, n := range names {
+			quoted[i] = fmt.Sprintf("%q", n)
+		}
+		return strings.Join(quoted, " or ")
 	}
 }
 
@@ -1147,11 +1340,11 @@ func discoverNeededFuncTypes(r wazy.Runtime, comp *binary.Component, componentBy
 	return out, rewritten, nil
 }
 
-// resolveInlineExportItem resolves one CoreInlineExport entry (func, memory,
-// or table sort) to the shimItem that re-exports it. groupName is the wazy
-// module name the enclosing shim will be registered under -- used to look up
-// this entry's required core-level type in neededTypes when it's a canon-
-// produced func with no caller-supplied implementation. It returns the
+// resolveInlineExportItem resolves one CoreInlineExport entry (func, table,
+// memory, or global sort) to the shimItem that re-exports it. groupNames are
+// the consumer-declared module names the enclosing group is passed under --
+// used to look up this entry's required core-level type in neededTypes when
+// it's a canon-produced func with no caller-supplied implementation. It returns the
 // "iface.func" WASI call name when this entry is a canon lower, for
 // Instance.WASICalls -- empty otherwise -- and, when this entry is a
 // canon-produced func, the private host module buildCanonHostModule
@@ -1161,14 +1354,15 @@ func discoverNeededFuncTypes(r wazy.Runtime, comp *binary.Component, componentBy
 // otherwise leak it (and, on Runtime reuse, permanently occupy its private
 // name -- see bench_test.go's BenchmarkInstantiateHello doc for the bug this
 // closes).
-// keys names each already-instantiated core instance under its resolver key
-// (see instantiateGraph): a shim imports an anonymous alias source (embedded
-// module or earlier shim) by that key, not by mod.Name() -- which is "" for an
-// anonymous module.
+// A shim imports an anonymous alias source (embedded module or earlier shim)
+// by coreInstanceKey -- the source instance's collision-free identity -- not
+// by mod.Name() (which is "" for an anonymous module) and not by whichever
+// consumer-declared name happens to be bound to it (which is ambiguous, see
+// coreInstanceKey's doc).
 func resolveInlineExportItem(
 	ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, resources *handleTable, in *Instance,
-	e binary.CoreInlineExport, coreMemSpace, coreTableSpace []aliasTarget, instMods map[int]api.Module, keys []string,
-	neededTypes map[string]map[string]coreFuncSig, groupName string, nextPrivateName func() string,
+	e binary.CoreInlineExport, coreMemSpace, coreTableSpace, coreGlobalSpace []aliasTarget, instMods map[int]api.Module,
+	neededTypes map[string]map[string]coreFuncSig, groupNames []string, nextPrivateName func() string,
 	coreFuncTarget func(int) (api.Module, string, error), coreMemTarget func(int) (api.Module, error),
 	coreTableTarget func(int) (api.Module, string, error),
 ) (shimItem, string, api.Module, error) {
@@ -1190,11 +1384,11 @@ func resolveInlineExportItem(
 				return shimItem{}, "", nil, fmt.Errorf("inline export %q: core instance %d (%q) has no exported function %q", e.Name, al.InstanceIdx, mod.Name(), al.Name)
 			}
 			def := fn.Definition()
-			return shimItem{Sort: shimSortFunc, FromModule: keys[int(al.InstanceIdx)], FromName: al.Name, ExportName: e.Name, Params: def.ParamTypes(), Results: def.ResultTypes()}, "", nil, nil
+			return shimItem{Sort: shimSortFunc, FromModule: coreInstanceKey(int(al.InstanceIdx)), FromName: al.Name, ExportName: e.Name, Params: def.ParamTypes(), Results: def.ResultTypes()}, "", nil, nil
 
 		case binary.CoreFuncFromCanon:
 			canon := comp.Canons[entry.Canon]
-			mod, exportName, params, results, wasiCall, err := buildCanonHostModule(ctx, r, comp, cfg, resources, in, canon, neededTypes, groupName, e.Name, nextPrivateName(), coreMemTarget, coreFuncTarget, coreTableTarget)
+			mod, exportName, params, results, wasiCall, err := buildCanonHostModule(ctx, r, comp, cfg, resources, in, canon, neededTypes, groupNames, e.Name, nextPrivateName(), coreMemTarget, coreFuncTarget, coreTableTarget)
 			if err != nil {
 				return shimItem{}, "", nil, fmt.Errorf("inline export %q: %w", e.Name, err)
 			}
@@ -1218,7 +1412,7 @@ func resolveInlineExportItem(
 		if !ok {
 			return shimItem{}, "", nil, fmt.Errorf("inline export %q: core memory %d targets core instance %d, which was not instantiated", e.Name, e.CoreSortIdx, at.instIdx)
 		}
-		return shimItem{Sort: shimSortMemory, FromModule: keys[int(at.instIdx)], FromName: at.name, ExportName: e.Name}, "", nil, nil
+		return shimItem{Sort: shimSortMemory, FromModule: coreInstanceKey(int(at.instIdx)), FromName: at.name, ExportName: e.Name}, "", nil, nil
 
 	case 0x01: // table
 		if int(e.CoreSortIdx) >= len(coreTableSpace) {
@@ -1229,10 +1423,38 @@ func resolveInlineExportItem(
 		if !ok {
 			return shimItem{}, "", nil, fmt.Errorf("inline export %q: core table %d targets core instance %d, which was not instantiated", e.Name, e.CoreSortIdx, at.instIdx)
 		}
-		return shimItem{Sort: shimSortTable, FromModule: keys[int(at.instIdx)], FromName: at.name, ExportName: e.Name}, "", nil, nil
+		return shimItem{Sort: shimSortTable, FromModule: coreInstanceKey(int(at.instIdx)), FromName: at.name, ExportName: e.Name}, "", nil, nil
+
+	case 0x03: // global
+		// A core global is always a pure alias -- no canon produces one --
+		// resolved exactly like a memory or table, except that a global
+		// import must declare the source's EXACT value type and mutability
+		// (store.go's resolveImports rejects any mismatch, unlike the
+		// min/max limits it merely bounds-checks), so both are read off the
+		// live source global here and carried on the shim item.
+		//
+		// componentize-py's shared-everything dynamic linking makes this
+		// mandatory rather than exotic: every `libfoo.so` core module imports
+		// `__stack_pointer`, `__memory_base`/`__table_base` and its whole
+		// GOT.func/GOT.mem relocation table as core globals regrouped through
+		// inline-export instances.
+		if int(e.CoreSortIdx) >= len(coreGlobalSpace) {
+			return shimItem{}, "", nil, fmt.Errorf("inline export %q references core global %d, out of range of the %d-entry core global index space", e.Name, e.CoreSortIdx, len(coreGlobalSpace))
+		}
+		at := coreGlobalSpace[e.CoreSortIdx]
+		mod, ok := instMods[int(at.instIdx)]
+		if !ok {
+			return shimItem{}, "", nil, fmt.Errorf("inline export %q: core global %d targets core instance %d, which was not instantiated", e.Name, e.CoreSortIdx, at.instIdx)
+		}
+		g := mod.ExportedGlobal(at.name)
+		if g == nil {
+			return shimItem{}, "", nil, fmt.Errorf("inline export %q: core instance %d has no exported global %q", e.Name, at.instIdx, at.name)
+		}
+		_, mutable := g.(api.MutableGlobal)
+		return shimItem{Sort: shimSortGlobal, FromModule: coreInstanceKey(int(at.instIdx)), FromName: at.name, ExportName: e.Name, GlobalType: g.Type(), GlobalMutable: mutable}, "", nil, nil
 
 	default:
-		return shimItem{}, "", nil, fmt.Errorf("inline export %q has unsupported core:sort %#x; only func (0x00), table (0x01), and memory (0x02) are supported by the graph engine", e.Name, e.Sort)
+		return shimItem{}, "", nil, fmt.Errorf("inline export %q has unsupported core:sort %#x; only func (0x00), table (0x01), memory (0x02), and global (0x03) are supported by the graph engine", e.Name, e.Sort)
 	}
 }
 
@@ -1242,7 +1464,7 @@ func resolveInlineExportItem(
 // func under. A lower canon with a caller-supplied WithImport uses it
 // (reusing buildHostWrapper's full WIT-level lift/lower machinery,
 // unchanged); otherwise it becomes a trap stub whose core-level signature
-// comes from neededTypes[groupName][entryName] -- the type the real core
+// comes from neededTypes[<one of groupNames>][entryName] -- the type the real core
 // module that will eventually consume this group's re-export already
 // commits to -- and which panics naming the WASI iface+func, returned as
 // wasiCall for Instance.WASICalls (empty for a resource canon or a
@@ -1256,7 +1478,7 @@ func resolveInlineExportItem(
 // lower/trap-stub/resource behaviors.
 func computeCanonHostFunc(
 	ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, resources *handleTable, in *Instance,
-	canon binary.Canon, neededTypes map[string]map[string]coreFuncSig, groupName, entryName string,
+	canon binary.Canon, neededTypes map[string]map[string]coreFuncSig, groupNames []string, entryName string,
 	coreMemTarget func(int) (api.Module, error), coreFuncTarget func(int) (api.Module, string, error),
 	coreTableTarget func(int) (api.Module, string, error),
 ) (def hostFuncDef, wasiCall string, err error) {
@@ -1306,13 +1528,13 @@ func computeCanonHostFunc(
 			if al.Sort != 0x01 || al.TargetKind != 0x00 {
 				return hostFuncDef{}, "", fmt.Errorf("lower func index %d: unsupported alias %#x/%#x", fi, al.Sort, al.TargetKind)
 			}
-			numImported := 0
-			for _, im := range comp.Imports {
-				if im.ExternType == 0x05 {
-					numImported++
-				}
-			}
-			if int(al.InstanceIdx) >= numImported {
+			// A local instance definition, resolved through the true
+			// component instance index space (an instance export interleaved
+			// between two definitions shifts the later one -- see
+			// componentInstanceDef); anything else is an imported instance,
+			// handled by importInterfaceName below.
+			localIdx, isLocal := componentInstanceDef(comp, al.InstanceIdx)
+			if isLocal {
 				// A canon lower wired directly into the outer component's
 				// own core-instance graph, referencing a LOCALLY nested
 				// component instantiate's export -- trap-on-reenter.wast's
@@ -1325,10 +1547,6 @@ func computeCanonHostFunc(
 				// regardless). See cfg.pendingDelegates' doc for how the
 				// live sibling is filled in once it exists, always before
 				// any guest call could reach this func.
-				localIdx := int(al.InstanceIdx) - numImported
-				if localIdx < 0 || localIdx >= len(comp.Instances) {
-					return hostFuncDef{}, "", fmt.Errorf("lower func index %d: component instance %d out of range of %d locally-instantiated instance(s)", fi, al.InstanceIdx, len(comp.Instances))
-				}
 				instRef := comp.Instances[localIdx]
 				if instRef.Kind != 0x00 || int(instRef.ComponentIdx) >= len(comp.NestedComponents) {
 					return hostFuncDef{}, "", fmt.Errorf("lower func index %d: component instance %d is not a real nested component instantiation", fi, al.InstanceIdx)
@@ -1418,9 +1636,9 @@ func computeCanonHostFunc(
 			def = hostFuncDef{fn: fn, params: hiParams, results: hiResults}
 			wasiCall = "" // caller-provided, not a trap stub
 		} else {
-			sig, ok := neededTypes[groupName][entryName]
+			sig, ok := lookupCoreFuncSig(neededTypes, groupNames, entryName)
 			if !ok {
-				return hostFuncDef{}, "", fmt.Errorf("cannot determine the core-level signature for lowered import %q %q: no consumer declares module %q field %q", iface, fname, groupName, entryName)
+				return hostFuncDef{}, "", fmt.Errorf("cannot determine the core-level signature for lowered import %q %q: no consumer declares module %s field %q", iface, fname, quoteNames(groupNames), entryName)
 			}
 			trapIface, trapName := iface, fname
 			fn := api.GoModuleFunc(func(context.Context, api.Module, []uint64) {
@@ -1454,7 +1672,7 @@ func computeCanonHostFunc(
 
 	case binary.CanonKindThreadNewIndirect:
 		var terr error
-		def, terr = threadNewIndirectHostFunc(in, canon, neededTypes, groupName, entryName, coreTableTarget)
+		def, terr = threadNewIndirectHostFunc(in, canon, neededTypes, groupNames, entryName, coreTableTarget)
 		if terr != nil {
 			return hostFuncDef{}, "", terr
 		}
@@ -1588,11 +1806,11 @@ func buildMergedCanonHostModule(ctx context.Context, r wazy.Runtime, privateName
 // buildMergedCanonHostModule to pack a whole group's canon funcs into one module.
 func buildCanonHostModule(
 	ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, resources *handleTable, in *Instance,
-	canon binary.Canon, neededTypes map[string]map[string]coreFuncSig, groupName, entryName, privateName string,
+	canon binary.Canon, neededTypes map[string]map[string]coreFuncSig, groupNames []string, entryName, privateName string,
 	coreMemTarget func(int) (api.Module, error), coreFuncTarget func(int) (api.Module, string, error),
 	coreTableTarget func(int) (api.Module, string, error),
 ) (mod api.Module, exportName string, params, results []api.ValueType, wasiCall string, err error) {
-	def, wasiCall, err := computeCanonHostFunc(ctx, r, comp, cfg, resources, in, canon, neededTypes, groupName, entryName, coreMemTarget, coreFuncTarget, coreTableTarget)
+	def, wasiCall, err := computeCanonHostFunc(ctx, r, comp, cfg, resources, in, canon, neededTypes, groupNames, entryName, coreMemTarget, coreFuncTarget, coreTableTarget)
 	if err != nil {
 		return nil, "", nil, nil, "", err
 	}
@@ -1967,28 +2185,94 @@ func resolveCallbackFuncGraph(canon binary.Canon, coreFuncTarget func(int) (api.
 	return "", nil
 }
 
+// numImportedInstances counts the component's instance imports (extern sort
+// 0x05) -- the entries that lead the component instance index space in every
+// binary wit-component or componentize-py emits.
+func numImportedInstances(comp *binary.Component) int {
+	n := 0
+	for _, im := range comp.Imports {
+		if im.ExternType == 0x05 {
+			n++
+		}
+	}
+	return n
+}
+
+// componentInstanceDef resolves a component-level instance index to the index
+// in comp.Instances of the instance DEFINITION it names, following the alias
+// an `(export "x" (instance N))` introduces.
+//
+// It prefers the decoder's ComponentInstanceSpace, which records the real
+// cross-section declaration order (imports, definitions, aliases AND exports
+// -- see componentinstancespace.go). A hand-built Component has no such space,
+// so it falls back to the flat [imports] ++ [definitions] arithmetic that was
+// this package's only model before the space existed; that shape is exactly
+// what a hand-built fixture has.
+//
+// ok is false when the index names an imported instance, an alias this
+// decoder does not resolve structurally, or nothing at all.
+func componentInstanceDef(comp *binary.Component, idx uint32) (int, bool) {
+	if len(comp.ComponentInstanceSpace) > 0 {
+		return comp.ResolveComponentInstance(idx)
+	}
+	localIdx := int(idx) - numImportedInstances(comp)
+	if localIdx < 0 || localIdx >= len(comp.Instances) {
+		return 0, false
+	}
+	return localIdx, true
+}
+
+// componentInstanceSpaceIndices is componentInstanceDef's inverse: entry i is
+// the component instance index space slot comp.Instances[i] occupies. That is
+// the index other definitions (an instance-sort instantiate-arg, an
+// export/alias target) name it by, so it is the key instantiateNestedInstances
+// tracks sub-Instances under.
+func componentInstanceSpaceIndices(comp *binary.Component) []int {
+	out := make([]int, len(comp.Instances))
+	if len(comp.ComponentInstanceSpace) > 0 {
+		for i := range out {
+			out[i] = -1
+		}
+		for spaceIdx, e := range comp.ComponentInstanceSpace {
+			if e.Kind == binary.ComponentInstanceFromDefinition && int(e.Instance) < len(out) {
+				out[e.Instance] = spaceIdx
+			}
+		}
+		return out
+	}
+	base := numImportedInstances(comp)
+	for i := range out {
+		out[i] = base + i
+	}
+	return out
+}
+
 // bindInstanceExportGraph is bindInstanceExport's graph-engine counterpart --
 // identical resolution of the re-export-shim shape (see host_import.go's
 // doc), but calling bindFuncExportGraph for each member.
 func bindInstanceExportGraph(comp *binary.Component, exp binary.Export, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver, exports map[string]*boundExport, abiCache *CompileCache) error {
-	// The component-level "instance" sort index space is every imported
-	// instance (comp.Imports with ExternType == 0x05), in import order,
-	// followed by every locally-instantiated one (comp.Instances) -- unlike
-	// bindInstanceExport's fixtures (which never mix the two), a component
-	// like real_hello that both imports instances and instantiates its own
-	// nested re-export shim needs this offset to land on the right entry.
-	numImportedInstances := 0
-	for _, im := range comp.Imports {
-		if im.ExternType == 0x05 {
-			numImportedInstances++
+	// The component-level "instance" sort index space is NOT simply
+	// [imported instances] ++ [comp.Instances]: per Binary.md, "all exports
+	// (of all sorts) introduce a new index that aliases the exported
+	// definition", so every instance export the binary declares shifts the
+	// index of every LATER instance definition. wit-component emits exactly
+	// that interleaving -- `(instance ...) (export ...) (instance ...)
+	// (export ...)` -- for a component with more than one exported
+	// interface, which a real componentize-py CPython component has. The
+	// decoder's ComponentInstanceSpace records the true declaration order
+	// (see componentinstancespace.go); componentInstanceDef reads it, falling
+	// back to the flat arithmetic only for a hand-built Component that has no
+	// index space at all.
+	localIdx, ok := componentInstanceDef(comp, exp.ExternIndex)
+	if !ok {
+		if int(exp.ExternIndex) < len(comp.ComponentInstanceSpace) &&
+			comp.ComponentInstanceSpace[exp.ExternIndex].Kind == binary.ComponentInstanceFromImport {
+			return fmt.Errorf("component/instance: export %q references instance %d, which is an imported instance re-exported directly; unsupported", exp.Name, exp.ExternIndex)
 		}
-	}
-	localIdx := int(exp.ExternIndex) - numImportedInstances
-	if localIdx < 0 {
-		return fmt.Errorf("component/instance: export %q references instance %d, which is an imported instance re-exported directly; unsupported", exp.Name, exp.ExternIndex)
-	}
-	if localIdx >= len(comp.Instances) {
-		return fmt.Errorf("component/instance: export %q references instance %d, out of range of %d imported + %d locally-instantiated instance(s)", exp.Name, exp.ExternIndex, numImportedInstances, len(comp.Instances))
+		if len(comp.ComponentInstanceSpace) == 0 && int(exp.ExternIndex) < numImportedInstances(comp) {
+			return fmt.Errorf("component/instance: export %q references instance %d, which is an imported instance re-exported directly; unsupported", exp.Name, exp.ExternIndex)
+		}
+		return fmt.Errorf("component/instance: export %q references instance %d, out of range of %d imported + %d locally-instantiated instance(s)", exp.Name, exp.ExternIndex, numImportedInstances(comp), len(comp.Instances))
 	}
 	inst := comp.Instances[localIdx]
 	if inst.Kind == 0x01 { // inline exports: no nested component/shim at all

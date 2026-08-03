@@ -434,7 +434,7 @@ func threadSuspendHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 // something actually resumes this thread -- typically
 // thread.yield-then-resume, 0x2b).
 func threadNewIndirectHostFunc(
-	in *Instance, canon binary.Canon, neededTypes map[string]map[string]coreFuncSig, groupName, entryName string,
+	in *Instance, canon binary.Canon, neededTypes map[string]map[string]coreFuncSig, groupNames []string, entryName string,
 	coreTableTarget func(int) (api.Module, string, error),
 ) (hostFuncDef, error) {
 	in.syncTaskNeeded, in.mayBlockSync = true, true
@@ -461,9 +461,9 @@ func threadNewIndirectHostFunc(
 	// core type section. sig.params[0] is the func-table index (always i32);
 	// sig.params[1] is flatten(ft.param) -- the reference's ft is always
 	// exactly (i32)->() or (i64)->().
-	sig, sok := neededTypes[groupName][entryName]
+	sig, sok := lookupCoreFuncSig(neededTypes, groupNames, entryName)
 	if !sok {
-		return hostFuncDef{}, fmt.Errorf("thread.new-indirect: cannot determine the core-level signature: no consumer declares module %q field %q", groupName, entryName)
+		return hostFuncDef{}, fmt.Errorf("thread.new-indirect: cannot determine the core-level signature: no consumer declares module %s field %q", quoteNames(groupNames), entryName)
 	}
 	if len(sig.params) != 2 || sig.params[0] != api.ValueTypeI32 ||
 		(sig.params[1] != api.ValueTypeI32 && sig.params[1] != api.ValueTypeI64) ||
