@@ -274,6 +274,13 @@ func listDir(t *testing.T, c *config, resources *handleTable, dirRep uint32) map
 	}
 }
 
+// wasiDirDescFlags is the descriptor-flags bitset get-flags reports for
+// every directory descriptor, on any mount: readable (a guest lists, stats
+// and opens through it), not writable (write means write-via-stream, which
+// every directory descriptor refuses with is-directory), and mutable as a
+// directory.
+const wasiDirDescFlags = wasiDescFlagRead | wasiDescFlagMutateDirectory
+
 // descFlagsOf drives [method]descriptor.get-flags against descRep and
 // returns the raw descriptor-flags bitset it reports.
 func descFlagsOf(t *testing.T, c *config, descRep uint32, what string) uint32 {
@@ -282,18 +289,16 @@ func descFlagsOf(t *testing.T, c *config, descRep uint32, what string) uint32 {
 }
 
 // TestWasiFS_GetFlags pins the exact descriptor-flags bitset get-flags
-// reports for every way a descriptor can come into existence: it must be the
-// access mode the open actually used, and nothing else -- never a guess from
-// the path's own permissions, and never one of the four bits this package
-// does not claim (the three sync bits and mutate-directory, see
-// wasiDescFlagRead's doc).
+// reports for every way a descriptor can come into existence: the access
+// mode the open actually used, plus mutate-directory for a directory --
+// never a guess from the path's own permissions, and never one of the three
+// sync bits this package does not claim (see wasiDescFlagRead's doc).
 func TestWasiFS_GetFlags(t *testing.T) {
 	c, resources, rootRep, _ := fsOpsFixture(t, map[string][]byte{"/f": []byte("f"), "/sub/x": []byte("x")})
 
-	// A preopened root is readable and not writable -- see getDirectories for
-	// why `write` on a directory would be a claim this package cannot keep.
-	if got := descFlagsOf(t, c, rootRep, "the preopened root"); got != wasiDescFlagRead {
-		t.Errorf("get-flags(the preopened root) = %#b, want read (%#b)", got, wasiDescFlagRead)
+	// A preopened root is readable, not writable, and mutable as a directory.
+	if got := descFlagsOf(t, c, rootRep, "the preopened root"); got != wasiDirDescFlags {
+		t.Errorf("get-flags(the preopened root) = %#b, want read|mutate-directory (%#b)", got, wasiDirDescFlags)
 	}
 
 	for _, tt := range []struct {
@@ -310,14 +315,21 @@ func TestWasiFS_GetFlags(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			rep := openRep(t, c, resources, rootRep, "f", 0, tt.descFlags)
-			if got := descFlagsOf(t, c, rep, tt.name); got != tt.want {
+			got := descFlagsOf(t, c, rep, tt.name)
+			if got != tt.want {
 				t.Fatalf("get-flags(a %s file descriptor) = %#b, want %#b", tt.name, got, tt.want)
+			}
+			// mutate-directory is directory-scoped by definition: a
+			// regular-file descriptor must never carry it.
+			if got&wasiDescFlagMutateDirectory != 0 {
+				t.Fatalf("get-flags(a %s file descriptor) = %#b, want no mutate-directory bit", tt.name, got)
 			}
 		})
 	}
 
-	// A directory descriptor reports read and never write, however it was
-	// asked for: the open is forced read-only either way.
+	// A subdirectory descriptor reports read|mutate-directory and never
+	// write, however it was asked for: the open is forced read-only either
+	// way, and what a guest may do *inside* it is mutate-directory's job.
 	for _, tt := range []struct {
 		name      string
 		descFlags uint32
@@ -327,8 +339,8 @@ func TestWasiFS_GetFlags(t *testing.T) {
 	} {
 		t.Run("directory "+tt.name, func(t *testing.T) {
 			rep := openRep(t, c, resources, rootRep, "sub", wasiOpenFlagDirectory, tt.descFlags)
-			if got := descFlagsOf(t, c, rep, "sub"); got != wasiDescFlagRead {
-				t.Fatalf("get-flags(a directory descriptor %s) = %#b, want read (%#b)", tt.name, got, wasiDescFlagRead)
+			if got := descFlagsOf(t, c, rep, "sub"); got != wasiDirDescFlags {
+				t.Fatalf("get-flags(a directory descriptor %s) = %#b, want read|mutate-directory (%#b)", tt.name, got, wasiDirDescFlags)
 			}
 		})
 	}
@@ -405,15 +417,23 @@ func TestWasiFS_Sync(t *testing.T) {
 }
 
 // TestWasiFS_Sync_ReadOnlyMount covers the two answers a mount with no write
-// surface gives. A file descriptor there can never have been opened for
+// surface gives sync. A file descriptor there can never have been opened for
 // writing (the mount refuses a write-mode open outright), so sync is the
 // spec's "succeeds with no effect". A directory descriptor does genuinely
 // ask the mount to sync, and wazy's read-only layer answers EBADF for that
 // -- the same thing wazy's own preview1 fd_sync reports for the same mount,
 // so the two runtimes cannot disagree about it.
+//
+// It also pins what get-flags says about that mount, which is the opposite
+// posture on purpose: a descriptor-flags bit is advisory, so the directories
+// still advertise mutate-directory and let the mutation itself carry the
+// refusal.
 func TestWasiFS_Sync_ReadOnlyMount(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "f"), []byte("f"), 0o644); err != nil {
+		t.Fatalf("seeding the mount: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
 		t.Fatalf("seeding the mount: %v", err)
 	}
 	c, resources := wasiFSConfig(t, WASIConfig{FS: wazy.NewFSConfig().WithReadOnlyDirMount(dir, "/")})
@@ -426,9 +446,25 @@ func TestWasiFS_Sync_ReadOnlyMount(t *testing.T) {
 			method+"(a read-only mount's directory)")
 	}
 
-	// get-flags agrees: nothing on such a mount is ever writable.
+	// get-flags agrees no file on such a mount is ever writable...
 	if got := descFlagsOf(t, c, fileRep, "a read-only mount's file"); got != wasiDescFlagRead {
 		t.Fatalf("get-flags(a read-only mount's file) = %#b, want read (%#b)", got, wasiDescFlagRead)
+	}
+	// ...but its directory descriptor still advertises mutate-directory. A
+	// capability flag is advisory: the guest is told it may try, and the
+	// mutation itself reports the mount's real refusal (below), exactly as
+	// wazy's preview1 hands out dirRightsBase for this same mount. Hiding
+	// the flag would make a guest that gates on it skip the call entirely
+	// and see a read-only filesystem with no errno to explain it.
+	if got := descFlagsOf(t, c, rootRep, "a read-only mount's root"); got != wasiDirDescFlags {
+		t.Fatalf("get-flags(a read-only mount's root) = %#b, want read|mutate-directory (%#b)", got, wasiDirDescFlags)
+	}
+	requireErrCode(t, callFS(t, c, "[method]descriptor.create-directory-at", rootRep, "d"),
+		wasiErrorCodeReadOnly, "create-directory-at on a read-only mount")
+
+	subRep := openRep(t, c, resources, rootRep, "sub", wasiOpenFlagDirectory, wasiDescFlagRead)
+	if got := descFlagsOf(t, c, subRep, "a read-only mount's subdirectory"); got != wasiDirDescFlags {
+		t.Fatalf("get-flags(a read-only mount's subdirectory) = %#b, want read|mutate-directory (%#b)", got, wasiDirDescFlags)
 	}
 }
 

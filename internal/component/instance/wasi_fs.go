@@ -159,9 +159,11 @@ import (
 // Python source directly:
 //
 //   - [method]descriptor.get-flags, the adapter's fd_fdstat_get: "was this
-//     descriptor opened for reading, for writing, or both?". Answered from
-//     what open-at recorded on the descriptor, never from the mount -- see
-//     getFlags.
+//     descriptor opened for reading, for writing, or both, and may its
+//     contents be mutated?". The read/write answer comes from what open-at
+//     recorded on the descriptor, never from the mount; mutate-directory is
+//     advertised for every directory, mirroring the dirRightsBase posture
+//     wazy's own preview1 fd_fdstat_get already takes -- see getFlags.
 //   - [method]descriptor.sync, the adapter's fd_sync, which is os.fsync --
 //     pip calls it on every file it writes while installing a wheel. Its
 //     sibling [method]descriptor.sync-data (fd_datasync, os.fdatasync) is
@@ -284,23 +286,30 @@ const (
 	wasiOpenFlagTruncate  uint32 = 1 << 3
 )
 
-// wasi:filesystem/types' descriptor-flags bits this package handles (bits 0
-// and 1, per its WIT declaration order
+// wasi:filesystem/types' descriptor-flags bits this package handles (bits 0,
+// 1 and 5, per its WIT declaration order
 // read/write/file-integrity-sync/data-integrity-sync/requested-write-sync/
-// mutate-directory). A descriptor opened with the write bit set is the one
+// mutate-directory).
+//
+// A descriptor opened with the write bit set is the one
 // [method]descriptor.write-via-stream/append-via-stream may be called
 // against; every other descriptor (including the preopened root
 // directories) is write-via-stream-ineligible, matching a real OS refusing
-// to write through a read-only fd. Both bits are also remembered on the
+// to write through a read-only fd. Read and write are remembered on the
 // descriptor node verbatim, since [method]descriptor.get-flags' whole job is
-// to report back how a descriptor was opened (see getFlags). The remaining
-// four bits are never set by this package: the three sync bits are
-// O_SYNC/O_DSYNC/O_RSYNC, which open-at does not request, and
-// mutate-directory is a promise only the mount could keep -- see
-// getDirectories.
+// to report back how a descriptor was opened (see getFlags).
+//
+// mutate-directory is not stored: it is a property of being a directory, and
+// get-flags derives it from the node's isDir. It is reported for every
+// directory descriptor, whatever mount it came from -- see getFlags for the
+// advisory-capability reasoning and for its preview1 precedent.
+//
+// The three sync bits are never set: they are O_SYNC/O_DSYNC/O_RSYNC, which
+// open-at does not request.
 const (
-	wasiDescFlagRead  uint32 = 1 << 0
-	wasiDescFlagWrite uint32 = 1 << 1
+	wasiDescFlagRead            uint32 = 1 << 0
+	wasiDescFlagWrite           uint32 = 1 << 1
+	wasiDescFlagMutateDirectory uint32 = 1 << 5
 )
 
 // fsMount is one preopened directory: the sys.FS an FSConfig mount supplied,
@@ -977,21 +986,17 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []Option {
 		}
 		dirs := make([]abi.Value, 0, len(fs.mounts))
 		for i, m := range fs.mounts {
-			// A preopen is readable and not writable, which is what
-			// [method]descriptor.get-flags reports for it. `read` is
-			// honest: the guest may list it, stat it, and open paths under
-			// it, which is every use a directory descriptor has here.
-			// `write` would not be: in descriptor-flags it means "this
-			// descriptor may be written through", i.e. write-via-stream/
-			// append-via-stream, and both answer is-directory against any
-			// directory descriptor -- the same thing a real open(2) does
-			// when asked for O_RDWR on a directory. The flag that would
-			// describe a *mutable* directory is mutate-directory, and this
-			// package deliberately claims that one for no descriptor: the
-			// mount alone decides whether a create/unlink/rename lands (a
-			// WithReadOnlyDirMount answers EROFS, a WithFSMount ENOSYS),
-			// and there is no race-free way to promise up front an answer
-			// only the mount can give.
+			// A preopen is readable and not writable. `read` is honest: the
+			// guest may list it, stat it, and open paths under it, which is
+			// every use a directory descriptor has here. `write` would not
+			// be: in descriptor-flags it means "this descriptor may be
+			// written through", i.e. write-via-stream/append-via-stream, and
+			// both answer is-directory against any directory descriptor --
+			// the same thing a real open(2) does when asked for O_RDWR on a
+			// directory. Mutating what is *inside* the directory
+			// (create-directory-at, unlink-file-at, rename-at) is the
+			// separate mutate-directory flag, which get-flags reports for
+			// every directory descriptor including this one -- see getFlags.
 			rep := fs.newDescRep(&fsDescNode{fs: m.fs, mount: i, path: ".", isDir: true, readable: true})
 			handle := resources.NewOwn(wasiDescriptorResType, rep)
 			dirs = append(dirs, []abi.Value{handle, m.guestPath})
@@ -1162,11 +1167,38 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []Option {
 	// has no error branch of its own: an unknown rep is the shared fail-loud
 	// descNode error, and everything else is Ok.
 	//
-	// Only read/write are ever reported. The three sync bits
-	// (file-integrity-sync, data-integrity-sync, requested-write-sync) are
-	// O_SYNC/O_DSYNC/O_RSYNC, which open-at never requests, and
-	// mutate-directory is deliberately claimed for no descriptor -- see
-	// getDirectories for why.
+	// mutate-directory is reported for every directory descriptor, and for
+	// no other kind -- the flag is directory-scoped by definition (it
+	// governs create-directory-at/unlink-file-at/rename-at/link-at, all of
+	// which take a directory as self), so a regular-file descriptor
+	// carrying it would be meaningless.
+	//
+	// Crucially it is reported whatever mount the directory came from,
+	// including one that will refuse every mutation. A capability flag is
+	// advisory, not a guarantee of outcome: `write` on a file descriptor
+	// does not promise the next write beats ENOSPC either, and nobody reads
+	// it that way. wazy's own preview1 says exactly this already --
+	// fd_fdstat_get advertises dirRightsBase (RIGHT_PATH_CREATE_FILE,
+	// RIGHT_PATH_UNLINK_FILE, RIGHT_PATH_RENAME_SOURCE/TARGET, ...) for
+	// every directory descriptor unconditionally, WithReadOnlyDirMount or
+	// not, and lets the real operation return the real errno
+	// (imports/wasi_snapshot_preview1/fs.go's dirRightsBase). Since
+	// mutate-directory is WASI 0.2's successor to those rights, withholding
+	// it here would make wazy's two runtimes disagree about the same mount.
+	//
+	// The failure modes are not symmetric either. Reported on a read-only
+	// mount, a guest tries and gets error-code::read-only or ::unsupported
+	// from the operation itself: an errno it can print. Withheld, a guest
+	// that gates on the flag never calls at all, and the mount looks
+	// read-only with no errno anywhere to explain why -- and a guest gating
+	// on it is the concrete case here, since the preview1-to-preview2
+	// adapter synthesizes preview1 rights from this func's result, so a
+	// missing mutate-directory can become a missing RIGHT_PATH_CREATE_FILE
+	// and an ENOTCAPABLE raised inside the guest, before any host call.
+	//
+	// The three sync bits (file-integrity-sync, data-integrity-sync,
+	// requested-write-sync) are O_SYNC/O_DSYNC/O_RSYNC, which open-at never
+	// requests, so they are never reported.
 	getFlags := func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
 		if len(args) != 1 {
 			return nil, fmt.Errorf("[method]descriptor.get-flags: expected 1 arg (self), got %d", len(args))
@@ -1185,6 +1217,9 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []Option {
 		}
 		if node.writable {
 			flags |= wasiDescFlagWrite
+		}
+		if node.isDir {
+			flags |= wasiDescFlagMutateDirectory
 		}
 		return fsOkResult(flags), nil
 	}
