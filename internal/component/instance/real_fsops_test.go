@@ -38,12 +38,12 @@ func TestRealFSOps(t *testing.T) {
 	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)
 
-	fs := map[string][]byte{"/a.txt": []byte("hello-a")}
+	fsConfig, dir := fsConfigDir(t, map[string][]byte{"/a.txt": []byte("hello-a")})
 	var stdout, stderr bytes.Buffer
 	inst, err := Instantiate(ctx, r, realFSOpsWasm, WithWASI(WASIConfig{
 		Stdout: &stdout,
 		Stderr: &stderr,
-		FS:     fs,
+		FS:     fsConfig,
 	})...)
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
@@ -59,17 +59,14 @@ func TestRealFSOps(t *testing.T) {
 		t.Fatalf("guest stdout = %q, want %q (stderr: %q)", stdout.String(), want, stderr.String())
 	}
 
-	// The rename really moved the map entry.
-	if _, present := fs["/a.txt"]; present {
-		t.Fatalf(`fs["/a.txt"] still present after rename; rename-at did not remove the old key`)
+	// The rename really moved the file on the mount.
+	requireAbsent(t, dir, "/a.txt")
+	if got := hostRead(t, dir, "/b.txt"); got != "hello-a" {
+		t.Fatalf("/b.txt = %q, want \"hello-a\" (renamed bytes)", got)
 	}
-	if string(fs["/b.txt"]) != "hello-a" {
-		t.Fatalf(`fs["/b.txt"] = %q, want "hello-a" (renamed bytes)`, fs["/b.txt"])
-	}
-	// The created file was removed again.
-	if _, present := fs["/sub/c.txt"]; present {
-		t.Fatalf(`fs["/sub/c.txt"] still present; remove_file did not commit`)
-	}
+	// The created file and its directory were both removed again.
+	requireAbsent(t, dir, "/sub/c.txt")
+	requireAbsent(t, dir, "/sub")
 }
 
 // real_hardlink.component.wasm is a genuine rustc guest built from:
@@ -93,12 +90,12 @@ func TestRealHardLink(t *testing.T) {
 			r := wazy.NewRuntime(ctx)
 			defer r.Close(ctx)
 
-			fs := map[string][]byte{"/a.txt": []byte(content)}
+			fsConfig, dir := fsConfigDir(t, map[string][]byte{"/a.txt": []byte(content)})
 			var stdout, stderr bytes.Buffer
 			inst, err := Instantiate(ctx, r, realHardlinkWasm, WithWASI(WASIConfig{
 				Stdout: &stdout,
 				Stderr: &stderr,
-				FS:     fs,
+				FS:     fsConfig,
 			})...)
 			if err != nil {
 				t.Fatalf("Instantiate: %v", err)
@@ -111,8 +108,8 @@ func TestRealHardLink(t *testing.T) {
 			if want := "hard=" + content + "\n"; stdout.String() != want {
 				t.Fatalf("guest stdout = %q, want %q", stdout.String(), want)
 			}
-			if string(fs["/hard.txt"]) != content {
-				t.Fatalf(`fs["/hard.txt"] = %q, want %q (linked bytes)`, fs["/hard.txt"], content)
+			if got := hostRead(t, dir, "/hard.txt"); got != content {
+				t.Fatalf("/hard.txt = %q, want %q (linked bytes)", got, content)
 			}
 		})
 	}

@@ -60,7 +60,7 @@ func TestFSConfig(t *testing.T) {
 		tc := tt
 
 		t.Run(tc.name, func(t *testing.T) {
-			fs, guestPaths := tc.input.(*fsConfig).preopens()
+			fs, guestPaths := tc.input.(*fsConfig).Preopens()
 			require.Equal(t, tc.expectedFS, fs)
 			require.Equal(t, tc.expectedGuestPaths, guestPaths)
 		})

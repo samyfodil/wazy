@@ -278,7 +278,11 @@ type conformanceFixture struct {
 
 	args []string
 	env  []string
-	fs   map[string][]byte
+
+	// fs is the starting file tree, keyed by the absolute path the guest
+	// sees. It is materialized into a temp directory mounted at "/" (see
+	// TestConformance); a nil fs preopens nothing at all.
+	fs map[string][]byte
 
 	// stdin, when non-nil, is fed to the guest via WASIConfig.Stdin (as a
 	// bytes.Reader) -- the exact bytes wasmtime's golden was captured
@@ -318,6 +322,15 @@ func TestConformance(t *testing.T) {
 				stdin = bytes.NewReader(fx.stdin)
 			}
 
+			// A fixture's fs map declares the tree the golden was captured
+			// against; it is materialized into a temp dir mounted at "/",
+			// which is exactly what `wasmtime --dir` gave the golden run. A
+			// nil map means no --dir at all, hence no preopen.
+			var fsConfig wazy.FSConfig
+			if fx.fs != nil {
+				fsConfig, _ = fsConfigDir(t, fx.fs)
+			}
+
 			var stdout, stderr bytes.Buffer
 			inst, err := Instantiate(ctx, r, fx.wasm, WithWASI(WASIConfig{
 				Stdout: &stdout,
@@ -325,7 +338,7 @@ func TestConformance(t *testing.T) {
 				Stdin:  stdin,
 				Args:   fx.args,
 				Env:    fx.env,
-				FS:     fx.fs,
+				FS:     fsConfig,
 			})...)
 			if err != nil {
 				t.Fatalf("Instantiate: %v", err)

@@ -2,10 +2,64 @@ package instance
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/internal/component/abi"
 )
+
+// fsConfigDir materializes files (keyed by the absolute path the guest sees,
+// e.g. "/sub/a.txt") into a fresh temp directory and returns an FSConfig
+// mounting it at "/", plus the host directory itself so a test can assert on
+// disk what the guest wrote. It is how every fixture that used to declare a
+// map[string][]byte host filesystem now declares its starting tree.
+func fsConfigDir(t *testing.T, files map[string][]byte) (wazy.FSConfig, string) {
+	t.Helper()
+	dir := t.TempDir()
+	for guestPath, content := range files {
+		full := filepath.Join(dir, filepath.FromSlash(strings.TrimPrefix(guestPath, "/")))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatalf("mkdir for %s: %v", guestPath, err)
+		}
+		if err := os.WriteFile(full, content, 0o644); err != nil {
+			t.Fatalf("write %s: %v", guestPath, err)
+		}
+	}
+	return wazy.NewFSConfig().WithDirMount(dir, "/"), dir
+}
+
+// wasiFSConfigDir is wasiFSConfig over a single "/" mount holding files --
+// the shape almost every test in this file wants.
+func wasiFSConfigDir(t *testing.T, files map[string][]byte) (*config, *handleTable, string) {
+	t.Helper()
+	fsc, dir := fsConfigDir(t, files)
+	c, resources := wasiFSConfig(t, WASIConfig{FS: fsc})
+	return c, resources, dir
+}
+
+// hostRead reads back what the guest wrote at the guest-visible path p under
+// the mount rooted at dir.
+func hostRead(t *testing.T, dir, p string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(strings.TrimPrefix(p, "/"))))
+	if err != nil {
+		t.Fatalf("reading %s back from the mount: %v", p, err)
+	}
+	return string(b)
+}
+
+// requireAbsent fails unless the guest-visible path p is gone from the mount
+// rooted at dir.
+func requireAbsent(t *testing.T, dir, p string) {
+	t.Helper()
+	full := filepath.Join(dir, filepath.FromSlash(strings.TrimPrefix(p, "/")))
+	if _, err := os.Lstat(full); !os.IsNotExist(err) {
+		t.Fatalf("%s still present on the mount (Lstat err = %v), want removed", p, err)
+	}
+}
 
 // wasiFSConfig builds a WithWASI config the same way wasiHostFunc does, but
 // returns the whole *config plus the *handleTable runResourceHooks handed
@@ -55,10 +109,23 @@ func TestWasiFS_JoinPath(t *testing.T) {
 		want     string
 		wantOK   bool
 	}{
-		{"/", "greeting.txt", "/greeting.txt", true},
-		{"/", "sub/greeting.txt", "/sub/greeting.txt", true},
-		{"/sub", "greeting.txt", "/sub/greeting.txt", true},
-		{"/", "/greeting.txt", "", false}, // absolute rel: rejected
+		{".", "greeting.txt", "greeting.txt", true},
+		{".", "sub/greeting.txt", "sub/greeting.txt", true},
+		{"sub", "greeting.txt", "sub/greeting.txt", true},
+		{".", ".", ".", true},    // "." names the directory itself
+		{"sub", "", "sub", true}, // so does ""
+		{"sub", "a/../b", "sub/b", true},
+		{"sub", "./a", "sub/a", true},
+		{"sub", "file/", "sub/file/", true}, // trailing slash survives
+
+		// Escapes, all rejected -- see wasiJoinFSPath's "# Escaping".
+		{".", "/greeting.txt", "", false}, // rooted
+		{".", "..", "", false},
+		{".", "../escape", "", false},
+		{"sub", "..", "", false},           // up out of the descriptor...
+		{"sub", "../sibling", "", false},   // ...even when it stays on the mount
+		{".", "a/../../escape", "", false}, // escapes only after cleaning
+		{".", "sub/../../escape", "", false},
 	}
 	for _, tt := range tests {
 		got, ok := wasiJoinFSPath(tt.dir, tt.rel)
@@ -69,7 +136,7 @@ func TestWasiFS_JoinPath(t *testing.T) {
 }
 
 func TestWasiFS_GetDirectories_RootIsDirectory(t *testing.T) {
-	c, resources := wasiFSConfig(t, WASIConfig{})
+	c, resources, _ := wasiFSConfigDir(t, nil)
 	rootHandle := rootDescriptorHandle(t, c)
 
 	getType := wasiFSFn(t, c, wasiIfaceFilesystemTypes, "[method]descriptor.get-type")
@@ -102,7 +169,7 @@ func rootHandleRep(t *testing.T, resources *handleTable, handle uint32) uint32 {
 
 func TestWasiFS_OpenAt_FullChain(t *testing.T) {
 	const content = "chained open-at contents"
-	c, resources := wasiFSConfig(t, WASIConfig{FS: map[string][]byte{"/greeting.txt": []byte(content)}})
+	c, resources, _ := wasiFSConfigDir(t, map[string][]byte{"/greeting.txt": []byte(content)})
 	rootHandle := rootDescriptorHandle(t, c)
 	rootRep := rootHandleRep(t, resources, rootHandle)
 
@@ -202,7 +269,7 @@ func wasiBytesFromListT(t *testing.T, v abi.Value) []byte {
 }
 
 func TestWasiFS_OpenAt_NoEntry(t *testing.T) {
-	c, resources := wasiFSConfig(t, WASIConfig{})
+	c, resources, _ := wasiFSConfigDir(t, nil)
 	rootHandle := rootDescriptorHandle(t, c)
 	rootRep := rootHandleRep(t, resources, rootHandle)
 
@@ -220,7 +287,7 @@ func TestWasiFS_OpenAt_NoEntry(t *testing.T) {
 }
 
 func TestWasiFS_OpenAt_AbsolutePathRejected(t *testing.T) {
-	c, resources := wasiFSConfig(t, WASIConfig{FS: map[string][]byte{"/x": []byte("x")}})
+	c, resources, _ := wasiFSConfigDir(t, map[string][]byte{"/x": []byte("x")})
 	rootHandle := rootDescriptorHandle(t, c)
 	rootRep := rootHandleRep(t, resources, rootHandle)
 
@@ -244,8 +311,7 @@ func TestWasiFS_OpenAt_AbsolutePathRejected(t *testing.T) {
 // in the same host fs map, as an empty regular file, immediately -- mirrors
 // a real open(2) with O_CREAT making the directory entry exist right away.
 func TestWasiFS_OpenAt_Create_CreatesEntry(t *testing.T) {
-	fs := map[string][]byte{}
-	c, resources := wasiFSConfig(t, WASIConfig{FS: fs})
+	c, resources, dir := wasiFSConfigDir(t, nil)
 	rootHandle := rootDescriptorHandle(t, c)
 	rootRep := rootHandleRep(t, resources, rootHandle)
 
@@ -260,12 +326,8 @@ func TestWasiFS_OpenAt_Create_CreatesEntry(t *testing.T) {
 	if rv.IsErr {
 		t.Fatalf("open-at(create): got %#v, want Ok", rv)
 	}
-	content, ok := fs["/new.txt"]
-	if !ok {
-		t.Fatal(`open-at(create): fs["/new.txt"] absent, want a new empty entry`)
-	}
-	if len(content) != 0 {
-		t.Fatalf("open-at(create): fs[\"/new.txt\"] = %v, want empty", content)
+	if got := hostRead(t, dir, "/new.txt"); got != "" {
+		t.Fatalf("open-at(create): /new.txt = %q, want a new empty file", got)
 	}
 
 	fileHandle := rv.Payload.(uint32)
@@ -290,8 +352,7 @@ func TestWasiFS_OpenAt_Create_CreatesEntry(t *testing.T) {
 // honored (matching a real OS's O_TRUNC|O_RDONLY combination doing
 // nothing).
 func TestWasiFS_OpenAt_Truncate(t *testing.T) {
-	fs := map[string][]byte{"/f": []byte("original contents")}
-	c, resources := wasiFSConfig(t, WASIConfig{FS: fs})
+	c, resources, dir := wasiFSConfigDir(t, map[string][]byte{"/f": []byte("original contents")})
 	rootHandle := rootDescriptorHandle(t, c)
 	rootRep := rootHandleRep(t, resources, rootHandle)
 	openAt := wasiFSFn(t, c, wasiIfaceFilesystemTypes, "[method]descriptor.open-at")
@@ -303,8 +364,8 @@ func TestWasiFS_OpenAt_Truncate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open-at(truncate, read-only): %v", err)
 	}
-	if string(fs["/f"]) != "original contents" {
-		t.Fatalf(`open-at(truncate, read-only): fs["/f"] = %q, want unchanged`, fs["/f"])
+	if got := hostRead(t, dir, "/f"); got != "original contents" {
+		t.Fatalf("open-at(truncate, read-only): /f = %q, want unchanged", got)
 	}
 
 	// Truncate with the write descriptor-flag: content resets to empty.
@@ -314,8 +375,8 @@ func TestWasiFS_OpenAt_Truncate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open-at(truncate, write): %v", err)
 	}
-	if len(fs["/f"]) != 0 {
-		t.Fatalf(`open-at(truncate, write): fs["/f"] = %v, want empty`, fs["/f"])
+	if got := hostRead(t, dir, "/f"); got != "" {
+		t.Fatalf("open-at(truncate, write): /f = %q, want empty", got)
 	}
 }
 
@@ -326,8 +387,7 @@ func TestWasiFS_OpenAt_Truncate(t *testing.T) {
 // (this package has no internal buffering to actually flush -- see
 // writeStreamWrite's doc).
 func TestWasiFS_WriteViaStream_WritesAndCommits(t *testing.T) {
-	fs := map[string][]byte{}
-	c, resources := wasiFSConfig(t, WASIConfig{FS: fs})
+	c, resources, dir := wasiFSConfigDir(t, nil)
 	rootHandle := rootDescriptorHandle(t, c)
 	rootRep := rootHandleRep(t, resources, rootHandle)
 
@@ -369,8 +429,8 @@ func TestWasiFS_WriteViaStream_WritesAndCommits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("output-stream.write (2nd): %v", err)
 	}
-	if got := string(fs["/out.txt"]); got != "hello world" {
-		t.Fatalf(`fs["/out.txt"] = %q, want "hello world"`, got)
+	if got := hostRead(t, dir, "/out.txt"); got != "hello world" {
+		t.Fatalf("/out.txt = %q, want \"hello world\"", got)
 	}
 
 	blockingFlush := wasiFSFn(t, c, wasiIfaceStreams, "[method]output-stream.blocking-flush")
@@ -398,8 +458,7 @@ func TestWasiFS_WriteViaStream_WritesAndCommits(t *testing.T) {
 // package runs actually calls it (std::fs::write always truncates instead
 // -- see this file's package doc).
 func TestWasiFS_AppendViaStream(t *testing.T) {
-	fs := map[string][]byte{"/f": []byte("existing-")}
-	c, resources := wasiFSConfig(t, WASIConfig{FS: fs})
+	c, resources, dir := wasiFSConfigDir(t, map[string][]byte{"/f": []byte("existing-")})
 	rootHandle := rootDescriptorHandle(t, c)
 	rootRep := rootHandleRep(t, resources, rootHandle)
 
@@ -431,8 +490,8 @@ func TestWasiFS_AppendViaStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("output-stream.write: %v", err)
 	}
-	if got := string(fs["/f"]); got != "existing-appended" {
-		t.Fatalf(`fs["/f"] = %q, want "existing-appended"`, got)
+	if got := hostRead(t, dir, "/f"); got != "existing-appended" {
+		t.Fatalf("/f = %q, want \"existing-appended\"", got)
 	}
 }
 
@@ -440,7 +499,7 @@ func TestWasiFS_AppendViaStream(t *testing.T) {
 // append-via-stream) refuse a descriptor that wasn't opened with the write
 // descriptor-flag, rather than silently allowing the write anyway.
 func TestWasiFS_WriteViaStream_ReadOnlyDescriptor(t *testing.T) {
-	c, resources := wasiFSConfig(t, WASIConfig{FS: map[string][]byte{"/f": []byte("x")}})
+	c, resources, _ := wasiFSConfigDir(t, map[string][]byte{"/f": []byte("x")})
 	rootHandle := rootDescriptorHandle(t, c)
 	rootRep := rootHandleRep(t, resources, rootHandle)
 
@@ -477,7 +536,7 @@ func TestWasiFS_WriteViaStream_ReadOnlyDescriptor(t *testing.T) {
 // is-directory, mirroring read-via-stream's own directory guard
 // (TestWasiFS_OpenAt_OnNonDirectory).
 func TestWasiFS_WriteViaStream_OnDirectory(t *testing.T) {
-	c, resources := wasiFSConfig(t, WASIConfig{})
+	c, resources, _ := wasiFSConfigDir(t, nil)
 	rootHandle := rootDescriptorHandle(t, c)
 	rootRep := rootHandleRep(t, resources, rootHandle)
 
@@ -502,25 +561,142 @@ func TestWasiFS_WriteViaStream_OnDirectory(t *testing.T) {
 	}
 }
 
-// TestWasiFS_NilFS_CreateAndWriteStillWork proves a nil WASIConfig.FS (the
-// documented "no map for writes to land in that the caller could observe"
-// case -- see WASIConfig.FS's doc) still lets create/write succeed within
-// the run itself, via wasi_fs.go's lazily-allocated internal map, rather
-// than panicking on a nil map write.
-func TestWasiFS_NilFS_CreateAndWriteStillWork(t *testing.T) {
-	c, resources := wasiFSConfig(t, WASIConfig{FS: nil})
-	rootHandle := rootDescriptorHandle(t, c)
-	rootRep := rootHandleRep(t, resources, rootHandle)
+// TestWasiFS_NilFS_PreopensNothing proves a nil WASIConfig.FS grants the
+// guest no filesystem at all: get-directories returns an empty list, the
+// same thing wasmtime does without --dir (and the same thing this package
+// did before wasi_fs.go existed). The guest then fails on its own
+// "failed to find a pre-opened file descriptor" path -- there is no
+// descriptor for it to try anything against, which is the point.
+func TestWasiFS_NilFS_PreopensNothing(t *testing.T) {
+	c, _ := wasiFSConfig(t, WASIConfig{FS: nil})
 
+	getDirectories := wasiFSFn(t, c, wasiIfacePreopens, "get-directories")
+	results, err := getDirectories(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("get-directories: %v", err)
+	}
+	if dirs := results[0].([]abi.Value); len(dirs) != 0 {
+		t.Fatalf("get-directories with a nil FS: got %d preopens, want none", len(dirs))
+	}
+}
+
+// TestWasiFS_MultipleMounts proves each FSConfig mount becomes its own
+// preopened descriptor, reported under its own guest path and resolving into
+// its own filesystem -- the pycage shape (a root, a writable scratch, a
+// read-only package tree), where a bare "a.txt" must find a different file
+// depending on which preopen the guest resolved it against.
+func TestWasiFS_MultipleMounts(t *testing.T) {
+	rootDir, tmpDir, pkgDir := t.TempDir(), t.TempDir(), t.TempDir()
+	for dir, content := range map[string]string{rootDir: "from-root", tmpDir: "from-tmp", pkgDir: "from-pkg"} {
+		if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte(content), 0o644); err != nil {
+			t.Fatalf("seeding %s: %v", dir, err)
+		}
+	}
+	fsc := wazy.NewFSConfig().
+		WithDirMount(rootDir, "/").
+		WithDirMount(tmpDir, "/tmp").
+		WithReadOnlyDirMount(pkgDir, "/site-packages")
+	c, resources := wasiFSConfig(t, WASIConfig{FS: fsc})
+
+	getDirectories := wasiFSFn(t, c, wasiIfacePreopens, "get-directories")
+	results, err := getDirectories(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("get-directories: %v", err)
+	}
+	dirs := results[0].([]abi.Value)
+	if len(dirs) != 3 {
+		t.Fatalf("get-directories: got %d preopens, want 3", len(dirs))
+	}
+
+	wantPaths := []string{"/", "/tmp", "/site-packages"}
+	wantContent := []string{"from-root", "from-tmp", "from-pkg"}
+	for i, entry := range dirs {
+		e := entry.([]abi.Value)
+		if got := e[1].(string); got != wantPaths[i] {
+			t.Errorf("preopen %d: guest path = %q, want %q", i, got, wantPaths[i])
+		}
+		descRep := rootHandleRep(t, resources, e[0].(uint32))
+		if got := readFileVia(t, c, resources, descRep, "a.txt"); got != wantContent[i] {
+			t.Errorf("preopen %d (%s): a.txt = %q, want %q", i, wantPaths[i], got, wantContent[i])
+		}
+	}
+
+	// The read-only mount refuses a write: open-at with the write flag never
+	// gets far enough to hand back a writable descriptor. sysfs.ReadFS
+	// answers a write-mode open with ENOSYS (the same errno preview1 reports
+	// for one), which fsErrorCode carries through as error-code::unsupported.
 	openAt := wasiFSFn(t, c, wasiIfaceFilesystemTypes, "[method]descriptor.open-at")
-	openResults, err := openAt(context.Background(), []abi.Value{
-		rootRep, uint32(0), "new.txt", wasiOpenFlagCreate, wasiDescFlagWrite,
+	pkgRep := rootHandleRep(t, resources, dirs[2].([]abi.Value)[0].(uint32))
+	roResults, err := openAt(context.Background(), []abi.Value{
+		pkgRep, uint32(0), "new.txt", wasiOpenFlagCreate, wasiDescFlagWrite,
 	})
 	if err != nil {
-		t.Fatalf("open-at(create) against nil FS: %v", err)
+		t.Fatalf("open-at(create) on a read-only mount: %v", err)
 	}
-	if openResults[0].(abi.ResultValue).IsErr {
-		t.Fatalf("open-at(create) against nil FS: got %#v, want Ok", openResults[0])
+	rv := roResults[0].(abi.ResultValue)
+	if !rv.IsErr {
+		t.Fatalf("open-at(create) on a read-only mount: got Ok(%#v), want Err", rv.Payload)
+	}
+	if code := rv.Payload.(uint32); code != wasiErrorCodeUnsupported {
+		t.Fatalf("open-at(create) on a read-only mount: got error-code %d, want unsupported (%d)", code, wasiErrorCodeUnsupported)
+	}
+
+	// mkdir on the same mount is refused too, as EROFS -> read-only.
+	mkdirResults, err := wasiFSFn(t, c, wasiIfaceFilesystemTypes, "[method]descriptor.create-directory-at")(
+		context.Background(), []abi.Value{pkgRep, "newdir"})
+	if err != nil {
+		t.Fatalf("create-directory-at on a read-only mount: %v", err)
+	}
+	mrv := mkdirResults[0].(abi.ResultValue)
+	if !mrv.IsErr || mrv.Payload.(uint32) != wasiErrorCodeReadOnly {
+		t.Fatalf("create-directory-at on a read-only mount: got %#v, want Err(read-only)", mrv)
+	}
+}
+
+// readFileVia opens rel under the descriptor named by dirRep and reads it
+// whole, through the same open-at -> read-via-stream -> input-stream.read
+// chain a guest walks.
+func readFileVia(t *testing.T, c *config, resources *handleTable, dirRep uint32, rel string) string {
+	t.Helper()
+	ctx := context.Background()
+
+	openAt := wasiFSFn(t, c, wasiIfaceFilesystemTypes, "[method]descriptor.open-at")
+	openResults, err := openAt(ctx, []abi.Value{dirRep, uint32(0), rel, uint32(0), uint32(0)})
+	if err != nil {
+		t.Fatalf("open-at(%q): %v", rel, err)
+	}
+	orv := openResults[0].(abi.ResultValue)
+	if orv.IsErr {
+		t.Fatalf("open-at(%q): Err(%v)", rel, orv.Payload)
+	}
+	fileRep := rootHandleRep(t, resources, orv.Payload.(uint32))
+
+	readViaStream := wasiFSFn(t, c, wasiIfaceFilesystemTypes, "[method]descriptor.read-via-stream")
+	rvsResults, err := readViaStream(ctx, []abi.Value{fileRep, uint64(0)})
+	if err != nil {
+		t.Fatalf("read-via-stream(%q): %v", rel, err)
+	}
+	rvsrv := rvsResults[0].(abi.ResultValue)
+	if rvsrv.IsErr {
+		t.Fatalf("read-via-stream(%q): Err(%v)", rel, rvsrv.Payload)
+	}
+	streamRep, err := resources.Rep(wasiInputStreamResType, rvsrv.Payload.(uint32))
+	if err != nil {
+		t.Fatalf("resolve input-stream handle: %v", err)
+	}
+
+	read := wasiFSFn(t, c, wasiIfaceStreams, "[method]input-stream.read")
+	var out []byte
+	for {
+		rdResults, err := read(ctx, []abi.Value{streamRep, uint64(1024)})
+		if err != nil {
+			t.Fatalf("input-stream.read(%q): %v", rel, err)
+		}
+		rdrv := rdResults[0].(abi.ResultValue)
+		if rdrv.IsErr {
+			return string(out) // stream-error::closed == EOF
+		}
+		out = append(out, wasiBytesFromListT(t, rdrv.Payload)...)
 	}
 }
 
@@ -547,7 +723,7 @@ func TestWasiFS_UnknownWriteStreamRep(t *testing.T) {
 }
 
 func TestWasiFS_OpenAt_OnNonDirectory(t *testing.T) {
-	c, resources := wasiFSConfig(t, WASIConfig{FS: map[string][]byte{"/f": []byte("f")}})
+	c, resources, _ := wasiFSConfigDir(t, map[string][]byte{"/f": []byte("f")})
 	rootHandle := rootDescriptorHandle(t, c)
 	rootRep := rootHandleRep(t, resources, rootHandle)
 
@@ -612,7 +788,7 @@ func TestWasiFS_FilesystemErrorCode_AlwaysNone(t *testing.T) {
 }
 
 func TestWasiFS_MetadataHash(t *testing.T) {
-	c, resources := wasiFSConfig(t, WASIConfig{})
+	c, resources, _ := wasiFSConfigDir(t, nil)
 	rootHandle := rootDescriptorHandle(t, c)
 	rootRep := rootHandleRep(t, resources, rootHandle)
 
@@ -652,7 +828,7 @@ func TestWasiFS_GetTerminals_AlwaysNone(t *testing.T) {
 // Argument-shape validation: each closure fails loud on the wrong arg
 // count/type rather than panicking on a bad type assertion.
 func TestWasiFS_ArgValidation(t *testing.T) {
-	c, _ := wasiFSConfig(t, WASIConfig{FS: map[string][]byte{"/x": []byte("x")}})
+	c, _ := wasiFSConfig(t, WASIConfig{})
 
 	tests := []struct {
 		name    string

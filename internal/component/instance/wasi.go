@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
 )
@@ -54,8 +55,8 @@ import (
 //     WIT-correct implementations, but exit always fails the call (see
 //     wasiExit's doc) since wazy has no process to actually terminate, and
 //     get-environment/get-arguments/get-directories return whatever
-//     WASIConfig.Env/Args hold (empty by default) / an empty list (no
-//     preopened directories) respectively -- these are not on run()'s stdio
+//     WASIConfig.Env/Args/FS hold (all empty by default, so no preopened
+//     directories) respectively -- these are not on run()'s stdio
 //     path but real_hello's WASICalls (see graph.go) shows the CLI adapter's
 //     startup does invoke get-environment/get-directories, so they must
 //     behave correctly, not just instantiate; real_args.component.wasm (see
@@ -66,8 +67,8 @@ import (
 //     through wasi_snapshot_preview1's random_get (see getRandomBytes's
 //     doc for why a fake/deterministic source would be the wrong fix).
 //
-// get-directories, in turn, returns a real preopened root descriptor
-// ("/") backed by WASIConfig.FS, and wasi_fs.go registers real
+// get-directories, in turn, returns one real preopened descriptor per
+// WASIConfig.FS mount, and wasi_fs.go registers real
 // implementations for the wasi:filesystem/types + wasi:io/streams
 // input-stream + wasi:cli/terminal-* funcs a real guest's
 // std::fs::read_to_string reaches once it does -- see wasi_fs.go's package
@@ -186,28 +187,32 @@ type WASIConfig struct {
 	// into the WIT list<string> shape.
 	Args []string
 
-	// FS backs the single preopened root directory ("/") wasi:filesystem/
-	// preopens.get-directories returns -- see wasi_fs.go. Keys are full
-	// virtual paths (e.g. "/greeting.txt", matching what a guest's
-	// std::fs::read_to_string("/greeting.txt") resolves to internally: its
-	// path relative to the "/" preopen, i.e. "greeting.txt", joined back
-	// onto "/"); values are that file's contents. An empty (but non-nil) FS
-	// is a valid, empty filesystem: every open-at without the create flag
-	// fails with error-code::no-entry, exactly as a real empty directory
-	// would.
+	// FS supplies the preopened directories wasi:filesystem/
+	// preopens.get-directories returns -- see wasi_fs.go. It is the same
+	// wazy.FSConfig the core (wasi_snapshot_preview1) runtime takes, so one
+	// mount configuration serves both worlds:
 	//
-	// A guest that writes a file (e.g. std::fs::write) mutates this same
-	// map in place -- open-at(create) adds the new entry, and every
-	// subsequent write commits straight into it (see wasi_fs.go's
-	// fsFileSet) -- so a caller that passes a non-nil map here can read the
-	// written file straight back out of that same map after the call
-	// returns, no extra plumbing needed. A nil FS cannot be written back to
-	// (there is no map for the guest's writes to land in that the caller
-	// could later observe): wasi_fs.go lazily allocates its own internal
-	// map in that case so create/write still succeed within the run, but a
-	// caller that wants to see what a guest wrote must pass a non-nil
-	// (possibly empty) map instead of nil.
-	FS map[string][]byte
+	//	FS: wazy.NewFSConfig().
+	//		WithDirMount(root, "/").
+	//		WithDirMount(scratch, "/tmp").
+	//		WithFSMount(wheels, "/site-packages")
+	//
+	// Every mount becomes one preopened descriptor, reported under its guest
+	// path; the guest itself resolves an absolute path to the longest
+	// matching preopen (exactly as it does for preview1 fds), so mounts may
+	// nest freely. Reads, writes, directory listings, and metadata all go
+	// straight to the mounted sys.FS -- a WithDirMount is a real host
+	// directory, so what a guest writes is on disk when run() returns.
+	//
+	// A nil FS (the zero value) preopens nothing: get-directories returns an
+	// empty list, and a guest that tries to open a file panics on its own
+	// "failed to find a pre-opened file descriptor" path, exactly as it does
+	// under wasmtime with no --dir. A read-only mount (WithReadOnlyDirMount,
+	// or any WithFSMount, since io/fs.FS has no write surface) rejects every
+	// write with whatever its sys.FS reports -- error-code::unsupported for a
+	// write-mode open, read-only for a mutation like create-directory-at --
+	// the same errnos preview1 surfaces for the same mount.
+	FS wazy.FSConfig
 
 	// AllowTCP opts into a real wasi:sockets (TCP-only) + wasi:io/poll host
 	// implementation -- see wasi_sockets.go's package doc. False (the
@@ -311,7 +316,7 @@ func WithWASI(cfg WASIConfig) []Option {
 	// wasi_fs.go's fsStreamNode/streamNode/streamRead machinery (the exact
 	// path [method]descriptor.read-via-stream uses for file reads) instead
 	// of a separate stdin-only implementation.
-	fs := newWasiFS(cfg.FS)
+	fs := newWasiFS(fsMountsFromConfig(cfg.FS))
 
 	// sockets backs a real wasi:sockets (TCP-only) + wasi:io/poll
 	// implementation (wasi_sockets.go), gated behind cfg.AllowTCP (see
@@ -648,7 +653,7 @@ func WithWASI(cfg WASIConfig) []Option {
 		if _, err := writerForRep(rep); err != nil {
 			// No internal buffering on any side (stdio writes straight
 			// through to the configured io.Writer; fs writes commit
-			// straight into fs.files -- see writeStreamWrite's doc; socket
+			// straight to the mount -- see writeStreamWrite's doc; socket
 			// writes are unbuffered net.Conn.Write syscalls -- see
 			// sockOutStream.write's doc), so flushing has nothing to do
 			// beyond confirming rep actually names a live stream.
