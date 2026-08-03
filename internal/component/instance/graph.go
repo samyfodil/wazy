@@ -301,6 +301,9 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	for tag, fn := range cfg.hostResDtors {
 		resources.registerDtor(tag, fn)
 	}
+	// Give the table the WIT names behind the tags, so a handle error names
+	// the resource the guest asked for instead of an internal number.
+	resources.setResourceNames(cfg.resourceTags)
 	runResourceHooks(cfg, resources)
 	instMods := make(map[int]api.Module, len(comp.CoreInstances))
 	var closers []api.Module
