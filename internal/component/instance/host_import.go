@@ -976,21 +976,21 @@ func resolveHandleArg(in *Instance, resources *handleTable, canon func(uint32) u
 	case binary.OwnDesc:
 		h, ok := v.(uint32)
 		if !ok {
-			return nil, fmt.Errorf("own<%d> arg: expected a uint32 handle, got %T", d.ResourceType, v)
+			return nil, fmt.Errorf("own<%s> arg: expected a uint32 handle, got %T", resources.shortTypeName(tag(d.ResourceType)), v)
 		}
 		rep, err := resources.TakeOwn(tag(d.ResourceType), h)
 		if err != nil {
-			return nil, fmt.Errorf("own<%d> arg: %w", d.ResourceType, err)
+			return nil, fmt.Errorf("own<%s> arg: %w", resources.shortTypeName(tag(d.ResourceType)), err)
 		}
 		return rep, nil
 	case binary.BorrowDesc:
 		h, ok := v.(uint32)
 		if !ok {
-			return nil, fmt.Errorf("borrow<%d> arg: expected a uint32 handle, got %T", d.ResourceType, v)
+			return nil, fmt.Errorf("borrow<%s> arg: expected a uint32 handle, got %T", resources.shortTypeName(tag(d.ResourceType)), v)
 		}
 		rep, err := resources.Rep(tag(d.ResourceType), h)
 		if err != nil {
-			return nil, fmt.Errorf("borrow<%d> arg: %w", d.ResourceType, err)
+			return nil, fmt.Errorf("borrow<%s> arg: %w", resources.shortTypeName(tag(d.ResourceType)), err)
 		}
 		return rep, nil
 

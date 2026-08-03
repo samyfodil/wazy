@@ -571,3 +571,82 @@ func TestResourceRoundtrip_UnknownHandle(t *testing.T) {
 		t.Fatal("expected resource.drop of an unknown handle to fail")
 	}
 }
+
+// TestHandleTable_ErrorsNameTheResource pins the diagnostics a handle failure
+// produces. The messages exist to answer a specific question a bare tag
+// number cannot: a real componentize-py guest once called
+// wasi:sockets/tcp.start-bind with a network handle this runtime had never
+// issued, and the error said only "borrow<8> arg: unknown handle index 15",
+// which reads like a lifetime bug in the socket rather than what it was --
+// no network had ever been created at all.
+func TestHandleTable_ErrorsNameTheResource(t *testing.T) {
+	const networkTag, socketTag, untaggedTag = uint32(8), uint32(9), uint32(77)
+
+	newNamedTable := func() *handleTable {
+		tbl := newHandleTable()
+		tbl.setResourceNames(map[importKey]uint32{
+			mkImportKey("wasi:sockets/network@0.2.3", "network"): networkTag,
+			mkImportKey("wasi:sockets/tcp@0.2.3", "tcp-socket"):  socketTag,
+		})
+		return tbl
+	}
+
+	t.Run("none of that resource exist", func(t *testing.T) {
+		tbl := newNamedTable()
+		tbl.NewOwn(socketTag, 1) // a live handle, but of a different resource
+		_, err := tbl.Rep(networkTag, 15)
+		requireErrContains(t, err, "unknown handle index 15")
+		requireErrContains(t, err, "network (wasi:sockets/network)")
+		requireErrContains(t, err, "holds no handles of that resource")
+	})
+
+	t.Run("some exist, this one does not", func(t *testing.T) {
+		tbl := newNamedTable()
+		tbl.NewOwn(networkTag, 1)
+		tbl.NewOwn(networkTag, 2)
+		_, err := tbl.Rep(networkTag, 15)
+		requireErrContains(t, err, "2 handle(s) of that resource are live")
+		requireErrContains(t, err, "already dropped or never existed")
+	})
+
+	t.Run("dropped handle counts as gone", func(t *testing.T) {
+		tbl := newNamedTable()
+		h := tbl.NewOwn(networkTag, 1)
+		if _, err := tbl.TakeOwn(networkTag, h); err != nil {
+			t.Fatalf("TakeOwn: %v", err)
+		}
+		_, err := tbl.Rep(networkTag, h)
+		requireErrContains(t, err, "holds no handles of that resource")
+	})
+
+	t.Run("wrong resource names both sides", func(t *testing.T) {
+		tbl := newNamedTable()
+		h := tbl.NewOwn(socketTag, 1)
+		_, err := tbl.Rep(networkTag, h)
+		requireErrContains(t, err, "belongs to tcp-socket (wasi:sockets/tcp)")
+		requireErrContains(t, err, "not network (wasi:sockets/network)")
+	})
+
+	t.Run("unregistered tag falls back to its number", func(t *testing.T) {
+		tbl := newNamedTable()
+		_, err := tbl.Rep(untaggedTag, 3)
+		requireErrContains(t, err, "resource type 77")
+	})
+
+	t.Run("names are optional", func(t *testing.T) {
+		// A table that never had setResourceNames called (every unit test
+		// that builds one directly) must still produce a usable message.
+		tbl := newHandleTable()
+		_, err := tbl.Rep(networkTag, 1)
+		requireErrContains(t, err, "unknown handle index 1 for resource type 8")
+	})
+
+	t.Run("first registration wins", func(t *testing.T) {
+		tbl := newHandleTable()
+		tbl.setResourceNames(map[importKey]uint32{mkImportKey("a:b/c@1.0.0", "thing"): networkTag})
+		tbl.setResourceNames(map[importKey]uint32{mkImportKey("d:e/f@1.0.0", "other"): networkTag})
+		if got := tbl.typeName(networkTag); got != "thing (a:b/c)" {
+			t.Fatalf("typeName = %q, want the first registration to win", got)
+		}
+	})
+}

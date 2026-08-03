@@ -3,6 +3,7 @@ package instance
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/samyfodil/wazy/api"
@@ -129,6 +130,75 @@ type handleTable struct {
 	// the first drop); a HOST-provided resource's dtor is a Go callback (drop
 	// accounting). nil callback means drop just removes the entry.
 	dtors map[uint32]func(ctx context.Context, rep uint32) error
+
+	// names maps a resource type tag to the WIT name it was registered under
+	// (withResourceTag), used only to make this table's errors legible: a
+	// tag is an internal number that means nothing to someone reading a trap,
+	// whereas "network (wasi:sockets/network)" names the thing the guest
+	// actually asked for. Populated once per instance by setResourceNames;
+	// nil (every tag unnamed) is valid and degrades to bare numbers.
+	names map[uint32]string
+}
+
+// setResourceNames records tag -> WIT name for this table's error messages,
+// inverting the config's (iface, name) -> tag registrations. A tag registered
+// under several interfaces keeps the first name seen; the point is a legible
+// label, not a canonical one.
+func (t *handleTable) setResourceNames(tags map[importKey]uint32) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.names == nil {
+		t.names = make(map[uint32]string, len(tags))
+	}
+	for key, tag := range tags {
+		if _, taken := t.names[tag]; !taken {
+			t.names[tag] = fmt.Sprintf("%s (%s)", key.name, key.iface)
+		}
+	}
+}
+
+// typeName renders a resource type tag for an error message: its registered
+// WIT name when there is one, else the bare tag. Callers must NOT hold t.mu.
+func (t *handleTable) typeName(typeIdx uint32) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.typeNameLocked(typeIdx)
+}
+
+// shortTypeName is typeName without the interface qualifier, for a caller
+// that wraps an error this table already fully named -- so "borrow<network>
+// arg: unknown handle index 15 for network (wasi:sockets/network): ..." reads
+// once rather than twice.
+func (t *handleTable) shortTypeName(typeIdx uint32) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if n, ok := t.names[typeIdx]; ok {
+		if i := strings.IndexByte(n, ' '); i > 0 {
+			return n[:i]
+		}
+		return n
+	}
+	return fmt.Sprintf("resource type %d", typeIdx)
+}
+
+// typeNameLocked is typeName's body for callers already holding t.mu.
+func (t *handleTable) typeNameLocked(typeIdx uint32) string {
+	if n, ok := t.names[typeIdx]; ok {
+		return n
+	}
+	return fmt.Sprintf("resource type %d", typeIdx)
+}
+
+// liveCountLocked reports how many live handles this table holds for typeIdx.
+// Only ever called on an error path, so the scan costs nothing in practice.
+func (t *handleTable) liveCountLocked(typeIdx uint32) int {
+	n := 0
+	for _, raw := range t.entries {
+		if e, ok := raw.(*resourceEntry); ok && e.typeIdx == typeIdx {
+			n++
+		}
+	}
+	return n
 }
 
 // registerDtor records the destructor callback for a resource type tag.
@@ -263,14 +333,23 @@ func (t *handleTable) NewBorrowScoped(typeIdx, rep uint32, scope *task) uint32 {
 func (t *handleTable) lookup(typeIdx, h uint32) (*resourceEntry, error) {
 	raw, ok := t.entryAt(h)
 	if !ok {
-		return nil, fmt.Errorf("unknown handle index %d", h)
+		// Name the resource and say how many of them are live, because those
+		// two facts separate the three ways to get here and the reader cannot
+		// tell them apart from a bare index: none live at all means the guest
+		// passed a handle this component instance never issued; some live
+		// means it passed a stale or already-dropped one.
+		if live := t.liveCountLocked(typeIdx); live == 0 {
+			return nil, fmt.Errorf("unknown handle index %d for %s: this component instance holds no handles of that resource, so it was never returned by a host call here", h, t.typeNameLocked(typeIdx))
+		} else {
+			return nil, fmt.Errorf("unknown handle index %d for %s: %d handle(s) of that resource are live, so this one was already dropped or never existed", h, t.typeNameLocked(typeIdx), live)
+		}
 	}
 	e, ok := raw.(*resourceEntry)
 	if !ok {
-		return nil, fmt.Errorf("handle %d is not a resource handle", h)
+		return nil, fmt.Errorf("handle %d is not a resource handle (expected %s)", h, t.typeNameLocked(typeIdx))
 	}
 	if e.typeIdx != typeIdx {
-		return nil, fmt.Errorf("handle %d belongs to resource type %d, not %d", h, e.typeIdx, typeIdx)
+		return nil, fmt.Errorf("handle %d belongs to %s, not %s", h, t.typeNameLocked(e.typeIdx), t.typeNameLocked(typeIdx))
 	}
 	return e, nil
 }
