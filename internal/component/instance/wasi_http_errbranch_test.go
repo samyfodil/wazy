@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1039,27 +1040,79 @@ func TestHTTP_ResponseHeadersRoundTrip(t *testing.T) {
 		name := pair[0].(string)
 		seen[name] = append(seen[name], u8ListToString(t, pair[1]))
 	}
-	// Field keys arrive LOWER-CASED: wasi:http normalizes field-key that way
-	// (outgoingHandlerHandle does it when copying from http.Header), so a
-	// consumer must look up "content-type", never "Content-Type". Asserting
-	// the exact casing here is the point -- a case-sensitive lookup on the
-	// Go-style name silently finds nothing.
-	if _, wrongCase := seen["Content-Type"]; wrongCase {
-		t.Error("field keys are not lower-cased; consumers matching on the wasi:http convention would miss them")
+	// types.wit: entries come back "in the original casing", so the name is
+	// net/http's canonical form, NOT lower-cased.
+	if _, lowered := seen["content-type"]; lowered {
+		t.Error(`field name was lower-cased; types.wit requires the original casing`)
 	}
-	if got := seen["content-type"]; len(got) != 1 || got[0] != "application/vnd.pypi.simple.v1+json" {
-		t.Fatalf("content-type = %v, want the simple-index media type", got)
+	if got := seen["Content-Type"]; len(got) != 1 || got[0] != "application/vnd.pypi.simple.v1+json" {
+		t.Fatalf("Content-Type = %v, want the simple-index media type", got)
 	}
-	if got := seen["set-cookie"]; len(got) != 2 || got[0] != "a=1" || got[1] != "b=2" {
-		t.Fatalf("set-cookie = %v, want both values as separate entries", got)
+	if got := seen["Set-Cookie"]; len(got) != 2 || got[0] != "a=1" || got[1] != "b=2" {
+		t.Fatalf("Set-Cookie = %v, want both values in order as separate entries", got)
+	}
+
+	// types.wit also requires a stable serialization order: ranging a Go map
+	// would hand the guest a different order on each call.
+	first := entryNames(t, entries[0].([]abi.Value))
+	for i := 0; i < 20; i++ {
+		again, err := h.fieldsEntries(context.Background(), []abi.Value{hdrRes[0].(uint32)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := entryNames(t, again[0].([]abi.Value)); !slices.Equal(got, first) {
+			t.Fatalf("entries order is unstable: %v then %v", first, got)
+		}
 	}
 
 	// A received response's headers must refuse writes.
-	setRes, err := h.fieldsSet(context.Background(), []abi.Value{hdrRes[0].(uint32), "content-type", []abi.Value{bytesToU8List([]byte("text/plain"))}})
+	setRes, err := h.fieldsSet(context.Background(), []abi.Value{hdrRes[0].(uint32), "Content-Type", []abi.Value{bytesToU8List([]byte("text/plain"))}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if rv := setRes[0].(abi.ResultValue); !rv.IsErr || rv.Payload.(abi.VariantValue).Disc != httpHeaderErrorImmutable {
 		t.Fatalf("set on received headers = %#v, want Err(immutable)", rv)
+	}
+}
+
+// entryNames extracts the field names from an entries() result, in order.
+func entryNames(t *testing.T, entries []abi.Value) []string {
+	t.Helper()
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, e.([]abi.Value)[0].(string))
+	}
+	return out
+}
+
+// TestHTTP_FieldsSetIsCaseInsensitive pins types.wit's rule that field names
+// compare case-insensitively: setting "Content-Type" must REPLACE an existing
+// "content-type", not leave both behind.
+func TestHTTP_FieldsSetIsCaseInsensitive(t *testing.T) {
+	h := newTestHTTP()
+	rep := h.newFieldsRep(&httpFields{names: []string{"content-type"}, values: [][]byte{[]byte("text/plain")}})
+	if _, err := h.fieldsSet(context.Background(), []abi.Value{rep, "Content-Type", []abi.Value{bytesToU8List([]byte("text/html"))}}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := h.fieldsEntries(context.Background(), []abi.Value{rep})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := res[0].([]abi.Value)
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1 (the differently-cased name should have been replaced)", len(entries))
+	}
+	if got := u8ListToString(t, entries[0].([]abi.Value)[1]); got != "text/html" {
+		t.Fatalf("value = %q, want text/html", got)
+	}
+	// get must find it under either casing.
+	for _, probe := range []string{"content-type", "CONTENT-TYPE", "Content-Type"} {
+		got, err := h.fieldsGet(context.Background(), []abi.Value{rep, probe})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := len(got[0].([]abi.Value)); n != 1 {
+			t.Fatalf("get(%q) returned %d values, want 1", probe, n)
+		}
 	}
 }

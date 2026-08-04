@@ -484,6 +484,15 @@ func (h *wasiHTTP) fieldsGet(_ context.Context, args []abi.Value) ([]abi.Value, 
 // appeared three times yields three entries rather than one joined value.
 // Collapsing them is the caller's decision (and loses information -- Set-Cookie
 // must never be joined), so this does not make it here.
+//
+// ponytail: cost is linear in the TOTAL header bytes, with a ~16x memory
+// amplification, because abi.Value renders list<u8> as []abi.Value (one
+// interface word per byte -- see abi.Value's doc, and bytesToU8List, which
+// fields.get has always paid the same way). Measured: 8 headers x 32B is
+// ~10us/5KB, while a pathological 40 x 4096B is ~4.5ms/2.6MB. Real responses
+// sit at the low end (servers cap total headers around 8-16KB), so this is
+// left alone; a cheaper list<u8> would be an abi.Value-wide representation
+// change, not a fix here.
 func (h *wasiHTTP) fieldsEntries(_ context.Context, args []abi.Value) ([]abi.Value, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("[method]fields.entries: expected 1 arg (self), got %d", len(args))
@@ -569,11 +578,18 @@ func (h *wasiHTTP) fieldsSet(_ context.Context, args []abi.Value) ([]abi.Value, 
 	return []abi.Value{abi.ResultValue{IsErr: false, Payload: nil}}, nil
 }
 
+// dropName removes every entry whose name matches, compared case-
+// INSENSITIVELY: types.wit specifies that "field names should always be
+// treated as case insensitive by the `fields` resource for the purposes of
+// equality checking", so a set of "Content-Type" must replace an existing
+// "content-type" rather than leave a duplicate behind. fieldsGet already
+// compares this way.
 func (f *httpFields) dropName(name string) {
+	lname := strings.ToLower(name)
 	names := f.names[:0]
 	values := f.values[:0]
 	for i, n := range f.names {
-		if n == name {
+		if strings.ToLower(n) == lname {
 			continue
 		}
 		names = append(names, n)
@@ -1591,9 +1607,23 @@ func (h *wasiHTTP) outgoingHandlerHandle(ctx context.Context, args []abi.Value) 
 			// types.wit makes an incoming message's fields read-only (see
 			// incomingResponseHeaders).
 			respHeaders := &httpFields{immutable: true}
-			for name, vs := range hresp.Header {
-				for _, v := range vs {
-					respHeaders.names = append(respHeaders.names, strings.ToLower(name))
+			// types.wit requires entries "in the original casing and in the
+			// order in which they will be serialized for transport", so the
+			// name is stored as net/http gives it (canonical MIME casing --
+			// Go has already discarded the origin server's exact bytes, and
+			// its canonical form is far closer to the original than a forced
+			// lower-casing) and the names are sorted, because ranging a
+			// map would hand the guest a DIFFERENT order on every call.
+			// Values keep their relative order within a name, which is the
+			// part that actually carries meaning (Set-Cookie).
+			names := make([]string, 0, len(hresp.Header))
+			for name := range hresp.Header {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				for _, v := range hresp.Header[name] {
+					respHeaders.names = append(respHeaders.names, name)
 					respHeaders.values = append(respHeaders.values, []byte(v))
 				}
 			}
