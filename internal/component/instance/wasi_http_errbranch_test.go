@@ -779,3 +779,287 @@ func TestHTTP_RequestOptions(t *testing.T) {
 	_, err = setConn(context.Background(), []abi.Value{uint32(999), uint64(1)})
 	reqErr(t, err, "does not name a live request-options")
 }
+
+// TestHTTP_FieldsEntries covers [method]fields.entries: the wire shape it
+// reports, the duplicate-preserving behavior types.wit specifies, and its
+// fail-loud branches.
+func TestHTTP_FieldsEntries(t *testing.T) {
+	h := newTestHTTP()
+
+	t.Run("reports every pair, duplicates included", func(t *testing.T) {
+		rep := h.newFieldsRep(&httpFields{
+			names:  []string{"Content-Type", "Set-Cookie", "Set-Cookie"},
+			values: [][]byte{[]byte("text/html"), []byte("a=1"), []byte("b=2")},
+		})
+		res, err := h.fieldsEntries(context.Background(), []abi.Value{rep})
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries := res[0].([]abi.Value)
+		if len(entries) != 3 {
+			t.Fatalf("got %d entries, want 3 (duplicates must not be joined)", len(entries))
+		}
+		want := []struct{ name, value string }{
+			{"Content-Type", "text/html"},
+			{"Set-Cookie", "a=1"},
+			{"Set-Cookie", "b=2"},
+		}
+		for i, w := range want {
+			pair := entries[i].([]abi.Value)
+			if len(pair) != 2 {
+				t.Fatalf("entry %d: got %d tuple fields, want 2", i, len(pair))
+			}
+			if got := pair[0].(string); got != w.name {
+				t.Errorf("entry %d name = %q, want %q", i, got, w.name)
+			}
+			if got := u8ListToString(t, pair[1]); got != w.value {
+				t.Errorf("entry %d value = %q, want %q", i, got, w.value)
+			}
+		}
+	})
+
+	t.Run("empty fields", func(t *testing.T) {
+		rep := h.newFieldsRep(&httpFields{})
+		res, err := h.fieldsEntries(context.Background(), []abi.Value{rep})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if entries := res[0].([]abi.Value); len(entries) != 0 {
+			t.Fatalf("got %v, want no entries", entries)
+		}
+	})
+
+	t.Run("arg validation", func(t *testing.T) {
+		_, err := h.fieldsEntries(context.Background(), nil)
+		reqErr(t, err, "expected 1 arg")
+		_, err = h.fieldsEntries(context.Background(), []abi.Value{"bad"})
+		reqErr(t, err, "self: expected uint32")
+		_, err = h.fieldsEntries(context.Background(), []abi.Value{uint32(9999)})
+		reqErr(t, err, "does not name a live fields")
+	})
+}
+
+// u8ListToString reverses bytesToU8List for assertions.
+func u8ListToString(t *testing.T, v abi.Value) string {
+	t.Helper()
+	list, ok := v.([]abi.Value)
+	if !ok {
+		t.Fatalf("field-value: expected a list, got %T", v)
+	}
+	b := make([]byte, len(list))
+	for i, x := range list {
+		b[i] = byte(x.(uint32))
+	}
+	return string(b)
+}
+
+// TestHTTP_IncomingResponseHeaders covers [method]incoming-response.headers:
+// that it hands back the response's real headers (not a copy), that they are
+// immutable per types.wit, and its fail-loud branches.
+func TestHTTP_IncomingResponseHeaders(t *testing.T) {
+	h := newTestHTTP()
+
+	t.Run("returns the response's own headers", func(t *testing.T) {
+		headers := &httpFields{
+			names:     []string{"Content-Type"},
+			values:    [][]byte{[]byte("application/vnd.pypi.simple.v1+json")},
+			immutable: true,
+		}
+		respRep := h.newInResponseRep(&httpIncomingResponse{status: 200, headers: headers})
+		res, err := h.incomingResponseHeaders(context.Background(), []abi.Value{respRep})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fieldsRep := res[0].(uint32)
+
+		entries, err := h.fieldsEntries(context.Background(), []abi.Value{fieldsRep})
+		if err != nil {
+			t.Fatal(err)
+		}
+		pair := entries[0].([]abi.Value)[0].([]abi.Value)
+		if got := pair[0].(string); got != "Content-Type" {
+			t.Errorf("name = %q, want Content-Type", got)
+		}
+		if got := u8ListToString(t, pair[1]); got != "application/vnd.pypi.simple.v1+json" {
+			t.Errorf("value = %q", got)
+		}
+
+		// The rep must name the SAME fields object, not a copy: a header
+		// added host-side afterwards has to be visible through it.
+		headers.names = append(headers.names, "X-Late")
+		headers.values = append(headers.values, []byte("1"))
+		entries2, err := h.fieldsEntries(context.Background(), []abi.Value{fieldsRep})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := len(entries2[0].([]abi.Value)); n != 2 {
+			t.Fatalf("got %d entries after mutating the parent, want 2 (a copy was handed out)", n)
+		}
+	})
+
+	t.Run("headers are immutable", func(t *testing.T) {
+		respRep := h.newInResponseRep(&httpIncomingResponse{
+			status:  200,
+			headers: &httpFields{names: []string{"A"}, values: [][]byte{[]byte("1")}, immutable: true},
+		})
+		res, err := h.incomingResponseHeaders(context.Background(), []abi.Value{respRep})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fieldsRep := res[0].(uint32)
+
+		setRes, err := h.fieldsSet(context.Background(), []abi.Value{fieldsRep, "A", []abi.Value{bytesToU8List([]byte("2"))}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rv := setRes[0].(abi.ResultValue)
+		if !rv.IsErr {
+			t.Fatal("set on immutable headers succeeded, want header-error::immutable")
+		}
+		if vv := rv.Payload.(abi.VariantValue); vv.Disc != httpHeaderErrorImmutable {
+			t.Fatalf("got header-error case %d, want immutable (%d)", vv.Disc, httpHeaderErrorImmutable)
+		}
+		// ...and the value really did not change.
+		got, err := h.fieldsGet(context.Background(), []abi.Value{fieldsRep, "A"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v := u8ListToString(t, got[0].([]abi.Value)[0]); v != "1" {
+			t.Fatalf("value = %q after a refused set, want unchanged %q", v, "1")
+		}
+	})
+
+	t.Run("a fields the guest built stays mutable", func(t *testing.T) {
+		ctorRes, err := h.fieldsConstructor(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rep := ctorRes[0].(uint32)
+		setRes, err := h.fieldsSet(context.Background(), []abi.Value{rep, "A", []abi.Value{bytesToU8List([]byte("1"))}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if setRes[0].(abi.ResultValue).IsErr {
+			t.Fatal("set on a guest-constructed fields was refused")
+		}
+	})
+
+	t.Run("response with no headers still yields a readable fields", func(t *testing.T) {
+		respRep := h.newInResponseRep(&httpIncomingResponse{status: 204})
+		res, err := h.incomingResponseHeaders(context.Background(), []abi.Value{respRep})
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries, err := h.fieldsEntries(context.Background(), []abi.Value{res[0].(uint32)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := len(entries[0].([]abi.Value)); n != 0 {
+			t.Fatalf("got %d entries, want 0", n)
+		}
+	})
+
+	t.Run("arg validation", func(t *testing.T) {
+		_, err := h.incomingResponseHeaders(context.Background(), nil)
+		reqErr(t, err, "expected 1 arg")
+		_, err = h.incomingResponseHeaders(context.Background(), []abi.Value{"bad"})
+		reqErr(t, err, "self: expected uint32")
+		_, err = h.incomingResponseHeaders(context.Background(), []abi.Value{uint32(9999)})
+		reqErr(t, err, "does not name a live incoming-response")
+	})
+}
+
+// headerRT answers with the Content-Type a pip-style simple-index request
+// depends on, plus a repeated header, so the round trip below proves both
+// survive from a real *http.Response into guest-visible fields.
+type headerRT struct{}
+
+func (headerRT) RoundTrip(*http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: 200,
+		Header: http.Header{
+			"Content-Type": []string{"application/vnd.pypi.simple.v1+json"},
+			"Set-Cookie":   []string{"a=1", "b=2"},
+		},
+		Body: io.NopCloser(strings.NewReader("{}")),
+	}, nil
+}
+
+// TestHTTP_ResponseHeadersRoundTrip is the end-to-end proof for both new
+// methods: a real Go http.Response's headers reach the guest through
+// outgoing-handler.handle -> future.get -> incoming-response.headers ->
+// fields.entries. Without incoming-response.headers a guest can read a
+// response's status and body but never its Content-Type, which is what a pip
+// simple-index fetch dispatches on.
+func TestHTTP_ResponseHeadersRoundTrip(t *testing.T) {
+	h := newTestHTTP()
+	h.client = &http.Client{Transport: headerRT{}}
+	tbl, _ := h.getResources()
+
+	reqRep := h.newOutRequestRep(&httpOutgoingRequest{
+		method: "GET", scheme: "https", authority: "pypi.org", pathQ: "/simple/requests/",
+		headers: &httpFields{},
+	})
+	res, err := h.outgoingHandlerHandle(context.Background(), []abi.Value{reqRep, nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	futRep, err := tbl.Rep(wasiHTTPFutureResType, res[0].(abi.ResultValue).Payload.(uint32))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// future.get -> option<result<result<own<incoming-response>, error-code>>>
+	got, err := h.futureGet(context.Background(), []abi.Value{futRep})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outer := got[0].(abi.ResultValue) // the option's `some` payload
+	inner := outer.Payload.(abi.ResultValue)
+	if inner.IsErr {
+		t.Fatalf("request failed: %#v", inner.Payload)
+	}
+	respRep, err := tbl.Rep(wasiHTTPIncomingResponseResType, inner.Payload.(uint32))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hdrRes, err := h.incomingResponseHeaders(context.Background(), []abi.Value{respRep})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := h.fieldsEntries(context.Background(), []abi.Value{hdrRes[0].(uint32)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seen := map[string][]string{}
+	for _, e := range entries[0].([]abi.Value) {
+		pair := e.([]abi.Value)
+		name := pair[0].(string)
+		seen[name] = append(seen[name], u8ListToString(t, pair[1]))
+	}
+	// Field keys arrive LOWER-CASED: wasi:http normalizes field-key that way
+	// (outgoingHandlerHandle does it when copying from http.Header), so a
+	// consumer must look up "content-type", never "Content-Type". Asserting
+	// the exact casing here is the point -- a case-sensitive lookup on the
+	// Go-style name silently finds nothing.
+	if _, wrongCase := seen["Content-Type"]; wrongCase {
+		t.Error("field keys are not lower-cased; consumers matching on the wasi:http convention would miss them")
+	}
+	if got := seen["content-type"]; len(got) != 1 || got[0] != "application/vnd.pypi.simple.v1+json" {
+		t.Fatalf("content-type = %v, want the simple-index media type", got)
+	}
+	if got := seen["set-cookie"]; len(got) != 2 || got[0] != "a=1" || got[1] != "b=2" {
+		t.Fatalf("set-cookie = %v, want both values as separate entries", got)
+	}
+
+	// A received response's headers must refuse writes.
+	setRes, err := h.fieldsSet(context.Background(), []abi.Value{hdrRes[0].(uint32), "content-type", []abi.Value{bytesToU8List([]byte("text/plain"))}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rv := setRes[0].(abi.ResultValue); !rv.IsErr || rv.Payload.(abi.VariantValue).Disc != httpHeaderErrorImmutable {
+		t.Fatalf("set on received headers = %#v, want Err(immutable)", rv)
+	}
+}
