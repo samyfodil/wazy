@@ -101,6 +101,39 @@ type shimItem struct {
 // real item's actual size -- see the resolveImports bounds checks in
 // internal/wasm/store.go, which this deliberately relies on without needing
 // to duplicate their logic here.
+//
+// # Empty names
+//
+// ExportName and FromName may be "". A core wasm export/import field name is a
+// `name` -- an arbitrary UTF-8 byte sequence, with no non-empty requirement,
+// unique only within its module -- so "" is an ordinary name, not a missing
+// one. The core spec suite asserts this directly (names.wast: "Test that we can
+// use the empty string as a symbol", `(func (export "") ...)`), and wazy's core
+// engine passes it: Module.Exports and resolveImports are plain map lookups
+// with comma-ok, so "" never aliases "absent".
+//
+// This is not hypothetical. wit-component really emits it, in two shapes this
+// package must instantiate:
+//
+//   - the "start shim": to run a reactor's `_initialize` after the whole graph
+//     is wired, it emits a core module `(import "" "" (func)) (start 0)` fed by
+//     an inline-export core instance `(export "" (func $_initialize))` -- so
+//     both the import field name and this shim's ExportName are "". Every
+//     componentize-go component has one (see the wit-component 0.253 output in
+//     issue #25); wasmtime runs them.
+//   - the official component-model conformance suite's fused.wast (vendored as
+//     testdata/wast/fused/fused.{0,3}.wasm), whose nested components alias a
+//     core export literally named "" and re-group it under "".
+//
+// Only FromModule is required to be non-empty, and that is an internal
+// invariant rather than a wasm rule: the graph always names a shim's source by
+// a synthesized resolver key (coreInstanceKey / canonGroupKey / a private host
+// module name), never by a name the component chose, so "" there means the
+// caller built the item wrong. wazy's own decoder rejects an empty import
+// MODULE name (internal/wasm/module.go's validateImports, a deliberate wazero
+// carry-over -- graph.go rewrites component-supplied empty module names to
+// graphEmptyImportKey before decode for exactly that reason), so catching it
+// here yields a diagnostic that names the shim item instead of a decode error.
 func buildPassthroughShim(items []shimItem) ([]byte, error) {
 	if len(items) == 0 {
 		return nil, fmt.Errorf("component/instance: buildPassthroughShim: no items")
@@ -111,11 +144,8 @@ func buildPassthroughShim(items []shimItem) ([]byte, error) {
 	var funcIdx, tableIdx, memIdx, globalIdx uint32
 
 	for i, it := range items {
-		if it.FromModule == "" || it.FromName == "" {
-			return nil, fmt.Errorf("component/instance: buildPassthroughShim: item[%d] has an empty source module/name", i)
-		}
-		if it.ExportName == "" {
-			return nil, fmt.Errorf("component/instance: buildPassthroughShim: item[%d] has an empty export name", i)
+		if it.FromModule == "" {
+			return nil, fmt.Errorf("component/instance: buildPassthroughShim: item[%d] has an empty source module name", i)
 		}
 
 		switch it.Sort {

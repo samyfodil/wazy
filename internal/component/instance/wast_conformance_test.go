@@ -15,6 +15,28 @@ import (
 	"github.com/samyfodil/wazy/internal/component/binary"
 )
 
+// wastKnownSkips is the EXACT set of modules runWastSuite is still allowed to
+// fail to instantiate, per suite, with the gap each one pins. runWastSuite
+// fails when the observed set differs in either direction: a new entry is a
+// regression, and a stale entry means a gap closed and this list must shrink.
+//
+// It exists because the harness used to only t.Logf a skip. That made a real
+// bug invisible: issue #25 (buildPassthroughShim rejecting an empty export
+// name) silently skipped fused.0 and fused.3 -- the official suite reproduced
+// the reporter's failure all along, and the suite still reported PASS.
+var wastKnownSkips = map[string]map[string]string{
+	"types": {
+		"types.11.wasm": "component instantiate-arg of sort 0x4 (component type) is not resolved yet",
+	},
+	"fused": {
+		"fused.22.wasm": "a nested component's imported-instance func type is not in the importing component's type space",
+		"fused.23.wasm": "a nested component that defines no core module of its own (core instance references the parent's)",
+	},
+	"resources": {
+		"resources.14.wasm": "a component instantiate-arg naming an IMPORTED (not nested-instantiated) instance",
+	},
+}
+
 // TestWastConformance runs the official WebAssembly/component-model canonical-ABI
 // conformance suites (test/values/*.wast) through wazy. Each .wast was split by
 // `wasm-tools json-from-wast` into a spec-test manifest (module / assert_return /
@@ -31,19 +53,18 @@ import (
 //
 // strings: string edge cases + assert_trap for out-of-bounds / invalid utf-8.
 func TestWastConformance(t *testing.T) {
-	// Every official component-model suite this runtime runs end to end, with
-	// ZERO skipped modules: concat (every value kind in and out), strings
-	// (utf-8 + bounds traps), types (integer lift-narrowing + nested type-decl
-	// grammar), simple (a component importing another), fused (nested-component
-	// composition), multiple-resources (a resource defined in one nested
-	// component, imported/used/dropped-with-dtor by a sibling), and resources
-	// (guest + HOST-provided resources: constructors, methods, own/borrow
-	// transfer, destructor drop-counting, borrow-lend traps, exported canon
-	// constructors, and type/func instantiate-args). runWastSuite still logs and
-	// skips a module it can't instantiate (none currently), so a future
-	// regression surfaces as a skip rather than a silent pass. Not vendored:
-	// post-return (module_definition/module_instance linking + reentrance-trap
-	// builtins) and linking/* (multi top-level component linking).
+	// Every official component-model suite this runtime runs end to end: concat
+	// (every value kind in and out), strings (utf-8 + bounds traps), types
+	// (integer lift-narrowing + nested type-decl grammar), simple (a component
+	// importing another), fused (nested-component composition),
+	// multiple-resources (a resource defined in one nested component,
+	// imported/used/dropped-with-dtor by a sibling), and resources (guest +
+	// HOST-provided resources: constructors, methods, own/borrow transfer,
+	// destructor drop-counting, borrow-lend traps, exported canon constructors,
+	// and type/func instantiate-args). The only modules that may fail to
+	// instantiate are the ones wastKnownSkips names. Not vendored: post-return
+	// (module_definition/module_instance linking + reentrance-trap builtins) and
+	// linking/* (multi top-level component linking).
 	for _, suite := range []string{"concat", "strings", "types", "simple", "fused", "multiple-resources", "resources"} {
 		t.Run(suite, func(t *testing.T) {
 			runWastSuite(t, suite)
@@ -99,6 +120,7 @@ func runWastSuite(t *testing.T, suite string) {
 
 	var in *Instance // the "current" component (last `module` command)
 	assertsRun := 0
+	skipped := map[string]bool{}
 	for _, c := range manifest.Commands {
 		switch c.Type {
 		case "module":
@@ -119,12 +141,12 @@ func runWastSuite(t *testing.T, suite string) {
 			}
 			in, err = Instantiate(ctx, r, wasm, opts...)
 			if err != nil {
-				// A type-only validation module wazy's M1 decoder can't yet
-				// handle (e.g. "core type in instance type"). Log the gap and
-				// skip it -- following asserts on this module are skipped via
-				// the in==nil guard below; the zero-asserts check keeps a total
-				// breakage from passing silently.
+				// A gap wazy hasn't closed yet. Record it and skip the module --
+				// following asserts on it are skipped via the in==nil guard
+				// below. The wastKnownSkips reconciliation at the end of this
+				// function is what keeps that from passing silently.
 				t.Logf("SKIP module %s (line %d): %v", c.Filename, c.Line, err)
+				skipped[c.Filename] = true
 				in = nil
 			}
 
@@ -161,6 +183,16 @@ func runWastSuite(t *testing.T, suite string) {
 	}
 	if assertsRun == 0 {
 		t.Errorf("suite %s ran zero assertions -- every module failed to instantiate?", suite)
+	}
+	for f := range skipped {
+		if _, known := wastKnownSkips[suite][f]; !known {
+			t.Errorf("suite %s: %s newly fails to instantiate; see the SKIP log line above for the error", suite, f)
+		}
+	}
+	for f, why := range wastKnownSkips[suite] {
+		if !skipped[f] {
+			t.Errorf("suite %s: %s now instantiates (%s is fixed) -- drop it from wastKnownSkips", suite, f, why)
+		}
 	}
 }
 
