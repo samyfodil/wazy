@@ -5,6 +5,7 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"github.com/samyfodil/wazy/imports/wasip2"
 	"log"
 	"strings"
 
@@ -92,7 +93,7 @@ func callInterfaceExport(ctx context.Context, r wazy.Runtime) string {
 func runWASICommand(ctx context.Context, r wazy.Runtime) string {
 	var stdout bytes.Buffer
 	inst, err := component.Instantiate(ctx, r, helloWasm,
-		component.WithWASI(component.WASIConfig{Stdout: &stdout})...)
+		wasip2.With(wasip2.Config{Stdout: &stdout})...)
 	if err != nil {
 		log.Panicf("instantiate hello: %v", err)
 	}

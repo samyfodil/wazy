@@ -87,3 +87,73 @@ func (in *Instance) HostState(key any) any {
 	}
 	return in.hostState[key]
 }
+
+// InstanceExports returns the names of the interfaces this component
+// instance exports, as they appear in the binary (version suffix included).
+//
+// A host implementation needs this to find an export whose exact versioned
+// name it cannot know in advance: a component exporting
+// wasi:http/incoming-handler@0.2.3 and one exporting @0.2.0 are the same
+// interface to a host that wants to drive it. The caller matches on the
+// versionless prefix and uses the full name it finds here to Call.
+func (in *Instance) InstanceExports() []string {
+	out := make([]string, 0, len(in.instanceExports))
+	for name := range in.instanceExports {
+		out = append(out, name)
+	}
+	return out
+}
+
+// Resources returns this instance's handle table.
+//
+// WithResourcesHook covers the registration-time need (a host func minting a
+// handle nested in a result). This covers the other direction: a host that
+// DRIVES an exported interface must mint the own<T>/borrow<T> handles it
+// passes in, and only has the Instance to work from -- which is exactly what
+// wasi:http's server side does to hand the guest an incoming-request.
+func (in *Instance) Resources() *HandleTable { return in.resources }
+
+// Harness builds a host implementation's registered funcs without
+// instantiating a component, so they can be called directly. It backs the
+// public component/componenttest package -- see that package's doc for why
+// this exists.
+type Harness struct {
+	cfg       *config
+	resources *handleTable
+}
+
+// NewHarness applies opts and runs the resource hooks, exactly as
+// Instantiate would before any host func executes.
+func NewHarness(opts []Option) *Harness {
+	c := newConfig(opts)
+	res := newHandleTable()
+	res.setResourceNames(c.resourceTags)
+	runResourceHooks(c, res)
+	return &Harness{cfg: c, resources: res}
+}
+
+// Func returns the HostFunc registered for iface/name, or nil. iface is
+// matched with its version suffix stripped, matching registration.
+func (h *Harness) Func(iface, name string) HostFunc {
+	hi, ok := h.cfg.imports[mkImportKey(iface, name)]
+	if !ok {
+		return nil
+	}
+	return hi.fn
+}
+
+// Resources returns the handle table the hooks were given -- the same one a
+// real instantiation would hand out, so handles minted by a host func under
+// test can be resolved here.
+func (h *Harness) Resources() *HandleTable { return h.resources }
+
+// Registered returns every import these options registered, as
+// interface name -> func names. Interface names appear with their version
+// suffix already stripped, matching how registration keys them.
+func (h *Harness) Registered() map[string][]string {
+	out := map[string][]string{}
+	for key := range h.cfg.imports {
+		out[key.iface] = append(out[key.iface], key.name)
+	}
+	return out
+}

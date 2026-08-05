@@ -71,3 +71,8 @@ func WithHostResourceDtor(tag uint32, fn func(ctx context.Context, rep uint32) e
 func WithHostState(key, value any) Option {
 	return instance.WithHostState(key, value)
 }
+
+// InstanceExports is re-exported on Instance itself; see
+// instance.Instance.InstanceExports. Listed here so the host-implementation
+// surface is documented in one place: it is how a host finds an exported
+// interface whose version suffix it does not know in advance.

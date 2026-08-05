@@ -1,0 +1,355 @@
+package wasip2
+
+import (
+	"context"
+	_ "embed"
+	"github.com/samyfodil/wazy/component"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"testing"
+
+	"github.com/samyfodil/wazy"
+)
+
+//go:embed testdata/real_http_incoming.component.wasm
+var realHTTPIncomingWasm []byte
+
+// TestRealHTTP_IncomingHandler runs a real rustc wasm32-wasip2 component that
+// exports wasi:http/incoming-handler: on each request it reads the method and
+// path-with-query off the incoming-request and writes
+// "method=Method::<M> path=<pathQ>\n" as a text/plain 200 response. The
+// expected bodies are the exact output `wasmtime serve -S cli` produced for the
+// same fixture (differential golden -- same discipline as TestConformance),
+// verifying wazy's wasi:http/types ABI end to end: the exported handle is
+// called with synthesized incoming-request + response-outparam resources, the
+// guest's method()/path-with-query()/fields/outgoing-response/outgoing-body
+// calls are serviced, its body write lands through the shared output-stream
+// path, and response-outparam.set captures the response.
+func TestRealHTTP_IncomingHandler(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	inst, err := component.Instantiate(ctx, r, realHTTPIncomingWasm, WithWASI(WASIConfig{EnableHTTP: true})...)
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	defer inst.Close(ctx)
+
+	cases := []struct {
+		method, path, wantBody string
+	}{
+		{"GET", "/hello?x=1", "method=Method::Get path=/hello?x=1\n"},
+		{"GET", "/", "method=Method::Get path=/\n"},
+		{"POST", "/a/b/c", "method=Method::Post path=/a/b/c\n"},
+		{"DELETE", "/x?y=2&z=3", "method=Method::Delete path=/x?y=2&z=3\n"},
+		{"PUT", "/p", "method=Method::Put path=/p\n"},
+		{"PATCH", "/patch", "method=Method::Patch path=/patch\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			u, err := url.Parse(tc.path)
+			if err != nil {
+				t.Fatalf("parse path: %v", err)
+			}
+			status, hdr, body, _, err := serveHTTPCall(inst, ctx, tc.method, u, http.Header{}, nil, nil)
+			if err != nil {
+				t.Fatalf("serveHTTP: %v", err)
+			}
+			if status != 200 {
+				t.Errorf("status = %d, want 200", status)
+			}
+			if ct := hdr.Get("content-type"); ct != "text/plain" {
+				t.Errorf("content-type = %q, want text/plain", ct)
+			}
+			if string(body) != tc.wantBody {
+				t.Errorf("body = %q, want %q", body, tc.wantBody)
+			}
+		})
+	}
+}
+
+// TestRealHTTP_ServeHTTP proves the public net/http.Handler surface: the same
+// guest, driven through (*component.Instance).ServeHTTP against an httptest recorder,
+// produces the expected status/header/body.
+func TestRealHTTP_ServeHTTP(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	inst, err := component.Instantiate(ctx, r, realHTTPIncomingWasm, WithWASI(WASIConfig{EnableHTTP: true})...)
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	defer inst.Close(ctx)
+
+	req := httptest.NewRequest("GET", "/greet?name=wazy", nil)
+	rec := httptest.NewRecorder()
+	Handler(inst).ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("content-type"); ct != "text/plain" {
+		t.Errorf("content-type = %q, want text/plain", ct)
+	}
+	if got, want := rec.Body.String(), "method=Method::Get path=/greet?name=wazy\n"; got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
+// TestRealHTTP_NotEnabled proves ServeHTTP fails loud on an instance created
+// without EnableHTTP, rather than silently mis-serving.
+func TestRealHTTP_NotEnabled(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	inst, err := component.Instantiate(ctx, r, realHTTPIncomingWasm, WithWASI(WASIConfig{})...)
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	defer inst.Close(ctx)
+
+	u, _ := url.Parse("/x")
+	_, _, _, _, err = serveHTTPCall(inst, ctx, "GET", u, http.Header{}, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "EnableHTTP") {
+		t.Fatalf("expected an EnableHTTP error, got %v", err)
+	}
+}
+
+//go:embed testdata/real_http_outgoing.component.wasm
+var realHTTPOutgoingWasm []byte
+
+// backendRoundTripper serves the same fixed body the real backend returned when
+// the golden was captured under `wasmtime serve -S cli -S inherit-network`
+// (127.0.0.1:8912 -> "hello-from-backend\n"), so wazy's outbound path is
+// exercised hermetically -- no real socket, deterministic, matching the golden.
+type backendRoundTripper struct{ t *testing.T }
+
+func (b backendRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Host != "127.0.0.1:8912" || r.URL.Path != "/backend" || r.Method != "GET" {
+		b.t.Errorf("unexpected outbound request: %s %s", r.Method, r.URL)
+	}
+	return &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": []string{"text/plain; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader("hello-from-backend\n")),
+	}, nil
+}
+
+// TestRealHTTP_OutgoingHandler runs a real rustc wasm32-wasip2 component that,
+// on each request, makes an OUTBOUND HTTP GET via wasi:http/outgoing-handler
+// and echoes the fetched body back. The expected body is exactly what
+// `wasmtime serve -S cli -S inherit-network` produced for the same fixture
+// against the same backend (differential golden). This verifies the client-side
+// ABI end to end: outgoing-request build-up (set-method/scheme/authority/
+// path), outgoing-handler.handle -> http.Client, future-incoming-response
+// subscribe/get, incoming-response.consume, incoming-body.stream, and the
+// reused input-stream blocking-read.
+func TestRealHTTP_OutgoingHandler(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	client := &http.Client{Transport: backendRoundTripper{t: t}}
+	inst, err := component.Instantiate(ctx, r, realHTTPOutgoingWasm, WithWASI(WASIConfig{EnableHTTP: true, HTTPClient: client})...)
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	defer inst.Close(ctx)
+
+	status, _, body, _, err := serveHTTPCall(inst, ctx, "GET", mustURL("/trigger"), http.Header{}, nil, nil)
+	if err != nil {
+		t.Fatalf("serveHTTP: %v", err)
+	}
+	if status != 200 {
+		t.Errorf("status = %d, want 200", status)
+	}
+	if string(body) != "hello-from-backend\n" {
+		t.Errorf("body = %q, want %q", body, "hello-from-backend\n")
+	}
+}
+
+func mustURL(s string) *url.URL {
+	u, err := url.Parse(s)
+	if err != nil {
+		panic(err)
+	}
+	return u
+}
+
+// componentBridge routes an outbound request from one component into another
+// component's incoming-handler, both live on the same Runtime.
+type componentBridge struct{ server *component.Instance }
+
+func (c componentBridge) RoundTrip(r *http.Request) (*http.Response, error) {
+	rec := httptest.NewRecorder()
+	Handler(c.server).ServeHTTP(rec, r)
+	return rec.Result(), nil
+}
+
+// TestOneComponentCallsAnotherOnOneRuntime wires two different real components
+// together on a single Runtime: the outgoing (client) component's outbound
+// request is bridged into the incoming (server) component's incoming-handler.
+// Component A's guest execution drives component B's guest execution, both
+// instantiated on the same Runtime at once, and A returns what B produced --
+// the multi-instance property end to end through real guest code on both sides.
+func TestOneComponentCallsAnotherOnOneRuntime(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	server, err := component.Instantiate(ctx, r, realHTTPIncomingWasm, WithWASI(WASIConfig{EnableHTTP: true})...)
+	if err != nil {
+		t.Fatalf("Instantiate server: %v", err)
+	}
+	defer server.Close(ctx)
+
+	client := &http.Client{Transport: componentBridge{server: server}}
+	caller, err := component.Instantiate(ctx, r, realHTTPOutgoingWasm, WithWASI(WASIConfig{EnableHTTP: true, HTTPClient: client})...)
+	if err != nil {
+		t.Fatalf("Instantiate caller on the same Runtime as server: %v", err)
+	}
+	defer caller.Close(ctx)
+
+	status, _, body, _, err := serveHTTPCall(caller, ctx, "GET", mustURL("/trigger"), http.Header{}, nil, nil)
+	if err != nil {
+		t.Fatalf("serveHTTP: %v", err)
+	}
+	if status != 200 {
+		t.Errorf("status = %d, want 200", status)
+	}
+	if got, want := string(body), "method=Method::Get path=/backend\n"; got != want {
+		t.Errorf("body = %q, want %q (B's output, returned through A)", got, want)
+	}
+}
+
+//go:embed testdata/real_http_request.component.wasm
+var realHTTPRequestWasm []byte
+
+// TestRealHTTP_RequestHeadersAndBody runs a real rustc wasi:http/incoming-handler
+// guest that reads a request header (incoming-request.headers + fields.get) and
+// the request body (incoming-request.consume + incoming-body.stream +
+// input-stream.blocking-read), echoing "echo=<x-echo> body=<body>". Expected
+// output is what `wasmtime serve -S cli` produced for the same fixture.
+func TestRealHTTP_RequestHeadersAndBody(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	inst, err := component.Instantiate(ctx, r, realHTTPRequestWasm, WithWASI(WASIConfig{EnableHTTP: true})...)
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	defer inst.Close(ctx)
+
+	cases := []struct {
+		name, method, path, echo, body, want string
+	}{
+		{"header+body", "POST", "/p", "hello-header", "the-request-body", "echo=hello-header body=the-request-body\n"},
+		{"neither", "GET", "/x", "", "", "echo=<none> body=\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hdr := http.Header{}
+			if tc.echo != "" {
+				hdr.Set("x-echo", tc.echo)
+			}
+			var body []byte
+			if tc.body != "" {
+				body = []byte(tc.body)
+			}
+			status, _, respBody, _, err := serveHTTPCall(inst, ctx, tc.method, mustURL(tc.path), hdr, body, nil)
+			if err != nil {
+				t.Fatalf("serveHTTP: %v", err)
+			}
+			if status != 200 {
+				t.Errorf("status = %d, want 200", status)
+			}
+			if string(respBody) != tc.want {
+				t.Errorf("body = %q, want %q", respBody, tc.want)
+			}
+		})
+	}
+}
+
+//go:embed testdata/real_http_post.component.wasm
+var realHTTPPostWasm []byte
+
+// echoBodyRoundTripper reads the outbound request body and echoes it back, the
+// same behavior the scratch backend had when the golden was captured under
+// `wasmtime serve -S cli -S inherit-network`.
+type echoBodyRoundTripper struct{ t *testing.T }
+
+func (b echoBodyRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.Method != "POST" || r.URL.Path != "/echo" {
+		b.t.Errorf("unexpected outbound request: %s %s", r.Method, r.URL)
+	}
+	body, _ := io.ReadAll(r.Body)
+	return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(string(body)))}, nil
+}
+
+// TestRealHTTP_OutgoingRequestBody runs a real rustc client guest that makes an
+// outbound POST with a request body (outgoing-request.body -> outgoing-body ->
+// output-stream write), then echoes the backend's response. Verifies the
+// outbound request-body path end to end; expected result is what the echo
+// backend returned under `wasmtime serve`.
+func TestRealHTTP_OutgoingRequestBody(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	client := &http.Client{Transport: echoBodyRoundTripper{t: t}}
+	inst, err := component.Instantiate(ctx, r, realHTTPPostWasm, WithWASI(WASIConfig{EnableHTTP: true, HTTPClient: client})...)
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	defer inst.Close(ctx)
+
+	status, _, body, _, err := serveHTTPCall(inst, ctx, "GET", mustURL("/trigger"), http.Header{}, nil, nil)
+	if err != nil {
+		t.Fatalf("serveHTTP: %v", err)
+	}
+	if status != 200 {
+		t.Errorf("status = %d, want 200", status)
+	}
+	if string(body) != "client-post-body" {
+		t.Errorf("body = %q, want %q (the request body echoed by the backend)", body, "client-post-body")
+	}
+}
+
+//go:embed testdata/real_http_reqopts.component.wasm
+var realHTTPReqOptsWasm []byte
+
+// TestRealHTTP_RequestOptions runs a real rustc client guest that sets
+// request-options (connect + first-byte timeouts) before its outbound request.
+// Previously such a guest trapped ("request-options are not supported"); now
+// handle accepts them and applies the timeout as a request deadline (which the
+// fast local RoundTripper never hits). The guest returns the backend body.
+func TestRealHTTP_RequestOptions(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	client := &http.Client{Transport: backendRoundTripper{t: t}}
+	inst, err := component.Instantiate(ctx, r, realHTTPReqOptsWasm, WithWASI(WASIConfig{EnableHTTP: true, HTTPClient: client})...)
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	defer inst.Close(ctx)
+
+	status, _, body, _, err := serveHTTPCall(inst, ctx, "GET", mustURL("/trigger"), http.Header{}, nil, nil)
+	if err != nil {
+		t.Fatalf("serveHTTP: %v", err)
+	}
+	if status != 200 {
+		t.Errorf("status = %d, want 200", status)
+	}
+	if string(body) != "hello-from-backend\n" {
+		t.Errorf("body = %q, want %q", body, "hello-from-backend\n")
+	}
+}

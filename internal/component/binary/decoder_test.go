@@ -2,6 +2,7 @@ package binary
 
 import (
 	"bytes"
+	"github.com/samyfodil/wazy/internal/component/testfixtures"
 	"strings"
 	"testing"
 )
@@ -146,7 +147,8 @@ func TestDecodeRichComponent(t *testing.T) {
 //     shim) that this decoder does not fully parse and records as a
 //     RawSection with an exact byte range instead.
 func TestDecodeRealGuest(t *testing.T) {
-	data, err := fixtureFS.ReadFile("testdata/real_hello.component.wasm")
+	data := testfixtures.RealHello
+	var err error
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}

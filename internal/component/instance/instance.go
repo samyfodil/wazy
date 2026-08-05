@@ -223,11 +223,6 @@ type Instance struct {
 	// set only by the general graph engine. See WASICalls.
 	wasiCalls []string
 
-	// httpHost is the wasi:http server state, non-nil only when the component
-	// was instantiated with WithWASI(WASIConfig{EnableHTTP: true}). ServeHTTP
-	// drives the guest's exported incoming-handler through it.
-	httpHost *wasiHTTP
-
 	// hostState holds whatever host implementations registered via
 	// WithHostState -- see config.hostState.
 	hostState map[any]any
