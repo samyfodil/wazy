@@ -36,7 +36,6 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/internal/component/abi"
-	"github.com/samyfodil/wazy/internal/component/binary"
 	"github.com/samyfodil/wazy/internal/component/instance"
 )
 
@@ -96,16 +95,8 @@ func NewCompileCache() *CompileCache { return instance.NewCompileCache() }
 // Call/CallExport arguments and results and of host-import args/results.
 type Value = abi.Value
 
-// TypeDesc describes one WIT type in a host import's signature. Build the
-// concrete descriptors (PrimitiveDesc and friends) and pass them to WithImport /
-// WithAsyncImport as the params/results lists.
-type TypeDesc = binary.TypeDesc
-
-// PrimitiveDesc is a primitive WIT type: set Prim to one of "bool", "s8", "u8",
-// "s16", "u16", "s32", "u32", "s64", "u64", "f32", "f64", "char", or "string".
-// Richer descriptors (records, lists, variants, resources) exist internally and
-// can be exposed as needed.
-type PrimitiveDesc = binary.PrimitiveDesc
+// TypeDesc, PrimitiveDesc, and the rest of the WIT type vocabulary live in
+// types.go.
 
 // HostFunc implements a synchronous component import: it receives the lifted
 // arguments and returns the lifted results (or an error, which traps the guest

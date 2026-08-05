@@ -228,6 +228,10 @@ type Instance struct {
 	// drives the guest's exported incoming-handler through it.
 	httpHost *wasiHTTP
 
+	// hostState holds whatever host implementations registered via
+	// WithHostState -- see config.hostState.
+	hostState map[any]any
+
 	// isGuestResource reports whether a component resource type index names a
 	// GUEST-owned (locally-defined) resource, as opposed to a host-owned one
 	// imported from an instance. Set by the graph engine (from comp); nil on

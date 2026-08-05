@@ -50,6 +50,14 @@ type config struct {
 	// (*Instance).ServeHTTP can drive the guest's exported incoming-handler.
 	httpHost *wasiHTTP
 
+	// hostState carries opaque per-instance values a host implementation
+	// registered with WithHostState, handed to the Instance at
+	// instantiation. It exists because a host that implements a stateful
+	// interface (wasi:http's server side is the in-tree example) needs
+	// somewhere to hang state that lives exactly as long as one Instance,
+	// and cannot add a field to Instance from outside this package.
+	hostState map[any]any
+
 	// resCanon and importedResDtors are set only when this instantiation is a
 	// nested sub-component of a composition (see instantiateNestedInstances).
 	// Every sub-instance has its OWN handle table (per the spec -- resource
