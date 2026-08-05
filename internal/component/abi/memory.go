@@ -839,14 +839,9 @@ func allocStoreString(mem []byte, s string, realloc Realloc) (uint32, uint32, er
 }
 
 func storeList(mem []byte, ptr uint32, v Value, elemType bintype.TypeDesc, resolve Resolver, realloc Realloc) error {
-	list, ok := v.([]Value)
-	if !ok {
-		return fmt.Errorf("storeList: expected []Value, got %T", v)
-	}
-
 	ptrSize := uint32(4) // assuming 32-bit pointers
 
-	newPtr, length, err := allocStoreList(mem, list, elemType, resolve, realloc)
+	newPtr, length, err := allocStoreAnyList(mem, v, elemType, resolve, realloc)
 	if err != nil {
 		return fmt.Errorf("storeList: %w", err)
 	}
@@ -856,6 +851,51 @@ func storeList(mem []byte, ptr uint32, v Value, elemType bintype.TypeDesc, resol
 		return err
 	}
 	return storeInt(mem, ptr+ptrSize, length, ptrSize)
+}
+
+// allocStoreAnyList stores a list value that is EITHER the general
+// []Value shape or, for list<u8> only, a raw []byte -- see byteListValue.
+func allocStoreAnyList(mem []byte, v Value, elemType bintype.TypeDesc, resolve Resolver, realloc Realloc) (uint32, uint32, error) {
+	if b, ok := byteListValue(v, elemType); ok {
+		return allocStoreBytes(mem, b, realloc)
+	}
+	list, ok := v.([]Value)
+	if !ok {
+		return 0, 0, fmt.Errorf("expected []Value (or []byte for list<u8>), got %T", v)
+	}
+	return allocStoreList(mem, list, elemType, resolve, realloc)
+}
+
+// byteListValue reports whether v is a raw []byte being stored as a
+// `list<u8>`. Value's general shape for a list is []Value (one interface per
+// element), which for a byte list costs a machine word per BYTE -- ~16x the
+// data on 64-bit. Since a host func producing bytes (a file read, an HTTP
+// body, a header value) already holds a []byte, letting it hand that over
+// directly turns the whole lowering into one copy. []Value stays valid
+// everywhere; this is a fast path, not a replacement.
+func byteListValue(v Value, elemType bintype.TypeDesc) ([]byte, bool) {
+	b, ok := v.([]byte)
+	if !ok {
+		return nil, false
+	}
+	p, isPrim := elemType.(bintype.PrimitiveDesc)
+	return b, isPrim && p.Prim == "u8"
+}
+
+// allocStoreBytes is allocStoreList's list<u8> fast path: one realloc and one
+// copy, with no per-element dispatch. u8's size and alignment are both 1, so
+// the layout is identical to what the generic path would have produced.
+func allocStoreBytes(mem []byte, b []byte, realloc Realloc) (uint32, uint32, error) {
+	byteLen := uint32(len(b))
+	newPtr, err := realloc.Grow(0, 0, 1, byteLen)
+	if err != nil {
+		return 0, 0, fmt.Errorf("realloc failed: %w", err)
+	}
+	if uint32(len(mem)) < newPtr+byteLen {
+		return 0, 0, fmt.Errorf("allocated memory out of bounds: ptr=%d size=%d", newPtr, byteLen)
+	}
+	copy(mem[newPtr:newPtr+byteLen], b)
+	return newPtr, byteLen, nil
 }
 
 // allocStoreList allocates room for len(list) elements of elemType via

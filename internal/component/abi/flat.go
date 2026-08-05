@@ -254,12 +254,7 @@ func lowerFlatString(s string, realloc Realloc, mem []byte) ([]CoreValue, error)
 // store_list_into_range() -- the same allocate+store helper storeList uses
 // for the Store/Load path (see allocStoreList in memory.go).
 func lowerFlatList(v Value, elemType binary.TypeDesc, resolve Resolver, realloc Realloc, mem []byte) ([]CoreValue, error) {
-	list, ok := v.([]Value)
-	if !ok {
-		return nil, fmt.Errorf("lowerFlat list: expected []Value, got %T", v)
-	}
-
-	ptr, length, err := allocStoreList(mem, list, elemType, resolve, realloc)
+	ptr, length, err := allocStoreAnyList(mem, v, elemType, resolve, realloc)
 	if err != nil {
 		return nil, fmt.Errorf("lowerFlatList: %w", err)
 	}

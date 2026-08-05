@@ -100,6 +100,13 @@ type httpIncomingRequest struct {
 type httpFields struct {
 	names  []string
 	values [][]byte
+
+	// immutable marks a fields the guest may read but not modify. types.wit
+	// specifies the headers/trailers reachable from an *incoming* message
+	// this way ("a child of the incoming-response ... immutable"), and gives
+	// header-error a dedicated `immutable` case to report an attempted
+	// write. A fields the guest constructed itself is always mutable.
+	immutable bool
 }
 
 // httpOutgoingResponse is the host state behind an outgoing-response resource.
@@ -471,13 +478,51 @@ func (h *wasiHTTP) fieldsGet(_ context.Context, args []abi.Value) ([]abi.Value, 
 	return []abi.Value{out}, nil
 }
 
-// bytesToU8List renders b as a lowered list<u8> (each byte a uint32 element).
-func bytesToU8List(b []byte) []abi.Value {
-	out := make([]abi.Value, len(b))
-	for i, x := range b {
-		out[i] = uint32(x)
+// fieldsEntries implements [method]fields.entries -> list<tuple<field-key,
+// field-value>>. Every stored (name, value) pair is one entry, duplicates
+// included: types.wit's `entries` reports the wire shape, so a header that
+// appeared three times yields three entries rather than one joined value.
+// Collapsing them is the caller's decision (and loses information -- Set-Cookie
+// must never be joined), so this does not make it here.
+//
+// ponytail: cost is linear in the TOTAL header bytes, with a ~16x memory
+// amplification, because abi.Value renders list<u8> as []abi.Value (one
+// interface word per byte -- see abi.Value's doc, and bytesToU8List, which
+// fields.get has always paid the same way). Measured: 8 headers x 32B is
+// ~10us/5KB, while a pathological 40 x 4096B is ~4.5ms/2.6MB. Real responses
+// sit at the low end (servers cap total headers around 8-16KB), so this is
+// left alone; a cheaper list<u8> would be an abi.Value-wide representation
+// change, not a fix here.
+func (h *wasiHTTP) fieldsEntries(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("[method]fields.entries: expected 1 arg (self), got %d", len(args))
 	}
-	return out
+	rep, ok := args[0].(uint32)
+	if !ok {
+		return nil, fmt.Errorf("[method]fields.entries: self: expected uint32 rep, got %T", args[0])
+	}
+	h.mu.Lock()
+	f, ok := h.fields[rep]
+	var out []abi.Value
+	if ok {
+		out = make([]abi.Value, 0, len(f.names))
+		for i, n := range f.names {
+			// tuple<field-key, field-value> -> a 2-element []abi.Value.
+			out = append(out, []abi.Value{n, bytesToU8List(f.values[i])})
+		}
+	}
+	h.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("[method]fields.entries: rep %d does not name a live fields", rep)
+	}
+	return []abi.Value{out}, nil
+}
+
+// bytesToU8List renders b as a lowered list<u8>. The abi package lowers a
+// raw []byte for list<u8> with a single copy (byteListValue), so the bytes
+// are handed over as-is rather than boxed one interface per byte.
+func bytesToU8List(b []byte) abi.Value {
+	return b
 }
 
 func (h *wasiHTTP) fieldsConstructor(_ context.Context, args []abi.Value) ([]abi.Value, error) {
@@ -508,7 +553,8 @@ func (h *wasiHTTP) fieldsSet(_ context.Context, args []abi.Value) ([]abi.Value, 
 	}
 	h.mu.Lock()
 	f, ok := h.fields[rep]
-	if ok {
+	immutable := ok && f.immutable
+	if ok && !immutable {
 		// set replaces every existing value for name, then appends the new ones.
 		f.dropName(name)
 		for _, v := range values {
@@ -520,15 +566,28 @@ func (h *wasiHTTP) fieldsSet(_ context.Context, args []abi.Value) ([]abi.Value, 
 	if !ok {
 		return nil, fmt.Errorf("[method]fields.set: rep %d does not name a live fields", rep)
 	}
+	if immutable {
+		// header-error::immutable -- a fields borrowed from an incoming
+		// message is read-only, and types.wit asks for this exact case
+		// rather than a silent no-op or a trap.
+		return []abi.Value{abi.ResultValue{IsErr: true, Payload: abi.VariantValue{Disc: httpHeaderErrorImmutable}}}, nil
+	}
 	// result<_, header-error>: Ok.
 	return []abi.Value{abi.ResultValue{IsErr: false, Payload: nil}}, nil
 }
 
+// dropName removes every entry whose name matches, compared case-
+// INSENSITIVELY: types.wit specifies that "field names should always be
+// treated as case insensitive by the `fields` resource for the purposes of
+// equality checking", so a set of "Content-Type" must replace an existing
+// "content-type" rather than leave a duplicate behind. fieldsGet already
+// compares this way.
 func (f *httpFields) dropName(name string) {
+	lname := strings.ToLower(name)
 	names := f.names[:0]
 	values := f.values[:0]
 	for i, n := range f.names {
-		if n == name {
+		if strings.ToLower(n) == lname {
 			continue
 		}
 		names = append(names, n)
@@ -771,6 +830,9 @@ func httpMethodType(tbl *typeTable) binary.TypeRef {
 	cases = append(cases, binary.VariantCase{Name: "other", Type: &strRef})
 	return tbl.add(binary.VariantDesc{Cases: cases})
 }
+
+// header-error variant case indices, in types.wit declaration order.
+const httpHeaderErrorImmutable uint32 = 2
 
 // httpHeaderErrorType interns the `header-error` variant into tbl.
 func httpHeaderErrorType(tbl *typeTable) binary.TypeRef {
@@ -1039,6 +1101,7 @@ func wasiHTTPOptions(h *wasiHTTP) []Option {
 	pathFD, pathR := httpPathWithQuerySig()
 	fieldsCtorFD, fieldsCtorR := httpFieldsConstructorSig()
 	fieldsSetFD, fieldsSetR := httpFieldsSetSig()
+	fieldsEntriesFD, fieldsEntriesR := httpFieldsEntriesSig()
 	respCtorFD, respCtorR := httpOutgoingResponseConstructorSig()
 	statusFD, statusR := httpSetStatusCodeSig()
 	bodyFD, bodyR := httpOutgoingResponseBodySig()
@@ -1075,6 +1138,7 @@ func wasiHTTPOptions(h *wasiHTTP) []Option {
 		withImportCustom(wasiIfaceHTTPTypes, "[constructor]fields", h.fieldsConstructor, fieldsCtorFD, fieldsCtorR),
 		withImportCustom(wasiIfaceHTTPTypes, "[method]fields.get", h.fieldsGet, fieldsGetFD, fieldsGetR),
 		withImportCustom(wasiIfaceHTTPTypes, "[method]fields.set", h.fieldsSet, fieldsSetFD, fieldsSetR),
+		withImportCustom(wasiIfaceHTTPTypes, "[method]fields.entries", h.fieldsEntries, fieldsEntriesFD, fieldsEntriesR),
 		withImportCustom(wasiIfaceHTTPTypes, "[constructor]outgoing-response", h.outgoingResponseConstructor, respCtorFD, respCtorR),
 		withImportCustom(wasiIfaceHTTPTypes, "[method]outgoing-response.set-status-code", h.outgoingResponseSetStatusCode, statusFD, statusR),
 		withImportCustom(wasiIfaceHTTPTypes, "[method]outgoing-response.body", h.outgoingResponseBody, bodyFD, bodyR),
@@ -1537,10 +1601,27 @@ func (h *wasiHTTP) outgoingHandlerHandle(ctx context.Context, args []abi.Value) 
 		} else {
 			bodyBytes, _ := io.ReadAll(hresp.Body)
 			_ = hresp.Body.Close()
-			respHeaders := &httpFields{}
-			for name, vs := range hresp.Header {
-				for _, v := range vs {
-					respHeaders.names = append(respHeaders.names, strings.ToLower(name))
+			// immutable: these are the headers that actually arrived, and
+			// types.wit makes an incoming message's fields read-only (see
+			// incomingResponseHeaders).
+			respHeaders := &httpFields{immutable: true}
+			// types.wit requires entries "in the original casing and in the
+			// order in which they will be serialized for transport", so the
+			// name is stored as net/http gives it (canonical MIME casing --
+			// Go has already discarded the origin server's exact bytes, and
+			// its canonical form is far closer to the original than a forced
+			// lower-casing) and the names are sorted, because ranging a
+			// map would hand the guest a DIFFERENT order on every call.
+			// Values keep their relative order within a name, which is the
+			// part that actually carries meaning (Set-Cookie).
+			names := make([]string, 0, len(hresp.Header))
+			for name := range hresp.Header {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				for _, v := range hresp.Header[name] {
+					respHeaders.names = append(respHeaders.names, name)
 					respHeaders.values = append(respHeaders.values, []byte(v))
 				}
 			}
@@ -1628,6 +1709,41 @@ func (h *wasiHTTP) incomingResponseStatus(_ context.Context, args []abi.Value) (
 		return nil, fmt.Errorf("[method]incoming-response.status: rep %d does not name a live incoming-response", rep)
 	}
 	return []abi.Value{uint32(r.status)}, nil
+}
+
+// incomingResponseHeaders implements [method]incoming-response.headers ->
+// own<fields>. The returned fields is the response's OWN headers object, not a
+// copy: types.wit calls it "a child of the incoming-response", so a guest
+// reading it must see what actually arrived on the wire. It is marked
+// immutable at construction (see newInResponseRep's caller), so a guest that
+// tries to write through it gets header-error::immutable rather than silently
+// mutating a received message.
+//
+// The child-must-be-dropped-before-the-parent rule types.wit states is not
+// enforced: a guest that leaks the handle merely holds a rep whose parent is
+// gone, which costs nothing here and traps loudly on use.
+func (h *wasiHTTP) incomingResponseHeaders(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("[method]incoming-response.headers: expected 1 arg (self), got %d", len(args))
+	}
+	rep, ok := args[0].(uint32)
+	if !ok {
+		return nil, fmt.Errorf("[method]incoming-response.headers: self: expected uint32 rep, got %T", args[0])
+	}
+	h.mu.Lock()
+	r, ok := h.inResponses[rep]
+	h.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("[method]incoming-response.headers: rep %d does not name a live incoming-response", rep)
+	}
+	fields := r.headers
+	if fields == nil {
+		// A response synthesized without headers still owes the guest a
+		// readable (empty) fields rather than a trap.
+		fields = &httpFields{immutable: true}
+	}
+	// Top-level own<fields> result: allocHandleResult wraps this bare rep.
+	return []abi.Value{h.newFieldsRep(fields)}, nil
 }
 
 func (h *wasiHTTP) incomingResponseConsume(_ context.Context, args []abi.Value) ([]abi.Value, error) {
@@ -1931,6 +2047,35 @@ func httpIncomingResponseStatusSig() (binary.FuncDesc, abi.Resolver) {
 	}, tbl.resolver()
 }
 
+// httpFieldsEntriesSig builds [method]fields.entries(self: borrow<fields>) ->
+// list<tuple<field-key, field-value>>, i.e. list<tuple<string, list<u8>>> --
+// the first list<tuple<...>> result in this file. TupleDesc needs its own
+// interned TypeRef (its element types cannot be expressed inline), which is
+// exactly what typeTable is for.
+func httpFieldsEntriesSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiHTTPFieldsResType})
+	valueRef := tbl.add(binary.ListDesc{Element: binary.TypeRef{Primitive: "u8"}})
+	pairRef := tbl.add(binary.TupleDesc{Elements: []binary.TypeRef{{Primitive: "string"}, valueRef}})
+	listRef := tbl.add(binary.ListDesc{Element: pairRef})
+	return binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}},
+		Results: binary.FuncResults{Unnamed: &listRef},
+	}, tbl.resolver()
+}
+
+// httpIncomingResponseHeadersSig builds [method]incoming-response.headers(
+// self: borrow<incoming-response>) -> own<fields>.
+func httpIncomingResponseHeadersSig() (binary.FuncDesc, abi.Resolver) {
+	tbl := &typeTable{}
+	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiHTTPIncomingResponseResType})
+	headersRef := tbl.add(binary.OwnDesc{ResourceType: wasiHTTPFieldsResType})
+	return binary.FuncDesc{
+		Params:  []binary.FuncParam{{Name: "self", Type: selfRef}},
+		Results: binary.FuncResults{Unnamed: &headersRef},
+	}, tbl.resolver()
+}
+
 func httpIncomingResponseConsumeSig() (binary.FuncDesc, abi.Resolver) {
 	tbl := &typeTable{}
 	selfRef := tbl.add(binary.BorrowDesc{ResourceType: wasiHTTPIncomingResponseResType})
@@ -1968,6 +2113,7 @@ func wasiHTTPOutgoingOptions(h *wasiHTTP) []Option {
 	subFD, subR := wasiSubscribeSig(wasiHTTPFutureResType)
 	getFD, getR := httpFutureGetSig()
 	statusFD, statusR := httpIncomingResponseStatusSig()
+	respHeadersFD, respHeadersR := httpIncomingResponseHeadersSig()
 	consumeFD, consumeR := httpIncomingResponseConsumeSig()
 	streamFD, streamR := httpIncomingBodyStreamSig()
 	reqBodyFD, reqBodyR := httpOutgoingRequestBodySig()
@@ -1995,6 +2141,7 @@ func wasiHTTPOutgoingOptions(h *wasiHTTP) []Option {
 		withImportCustom(wasiIfaceHTTPTypes, "[method]future-incoming-response.subscribe", h.futureSubscribe, subFD, subR),
 		withImportCustom(wasiIfaceHTTPTypes, "[method]future-incoming-response.get", h.futureGet, getFD, getR),
 		withImportCustom(wasiIfaceHTTPTypes, "[method]incoming-response.status", h.incomingResponseStatus, statusFD, statusR),
+		withImportCustom(wasiIfaceHTTPTypes, "[method]incoming-response.headers", h.incomingResponseHeaders, respHeadersFD, respHeadersR),
 		withImportCustom(wasiIfaceHTTPTypes, "[method]incoming-response.consume", h.incomingResponseConsume, consumeFD, consumeR),
 		withImportCustom(wasiIfaceHTTPTypes, "[method]incoming-body.stream", h.incomingBodyStream, streamFD, streamR),
 	}

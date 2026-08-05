@@ -222,7 +222,21 @@ func (lex *Lexer) NextToken() Token {
 		tok.Type = TokenString
 		tok.Text = lex.readString()
 	default:
-		if isIdentStart(lex.ch) {
+		if lex.ch == '%' {
+			// WIT's explicit-identifier escape: "%type" names a field or
+			// function called "type" without colliding with the keyword.
+			// wasi:filesystem's descriptor-stat uses it (`%type:
+			// descriptor-type`), so a parser that rejects it cannot read the
+			// reference WASI definitions. The '%' is not part of the name.
+			lex.advance()
+			if !isIdentStart(lex.ch) {
+				tok.Type = TokenError
+				tok.Text = "expected an identifier after '%'"
+				break
+			}
+			tok.Text = lex.readIdent()
+			tok.Type = TokenIdent // never a keyword: that is the point of the escape
+		} else if isIdentStart(lex.ch) {
 			text := lex.readIdent()
 			tok.Text = text
 			tok.Type = keywordType(text)
