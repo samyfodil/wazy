@@ -734,9 +734,13 @@ func WithWASI(cfg WASIConfig) []Option {
 // wasiBytesFromList converts a lifted list<u8> (see abi.Value's doc: list<T>
 // -> []abi.Value, u8 -> uint32) into a []byte.
 func wasiBytesFromList(v abi.Value) ([]byte, error) {
+	if b, ok := v.([]byte); ok {
+		// The compact list<u8> shape (see wasiListFromBytes).
+		return b, nil
+	}
 	list, ok := v.([]abi.Value)
 	if !ok {
-		return nil, fmt.Errorf("expected list<u8> ([]abi.Value), got %T", v)
+		return nil, fmt.Errorf("expected list<u8> ([]abi.Value or []byte), got %T", v)
 	}
 	buf := make([]byte, len(list))
 	for i, b := range list {

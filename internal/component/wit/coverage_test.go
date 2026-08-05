@@ -406,13 +406,9 @@ func TestParseErrors(t *testing.T) {
 		{"use missing rbrace in names", "package t:t; use a.{x ;"},
 		{"use missing alias after as (bare)", "package t:t; use a as ;"},
 		{"use missing semicolon", "package t:t; use a"},
-
-		{"import bare path", "package t:t; world w { import wasi:io/streams; }"},
 		{"import missing colon", "package t:t; world w { import foo func(); }"},
 		{"import missing semicolon", "package t:t; world w { import foo: func() }"},
 		{"import bad body", "package t:t; world w { import foo: bogus; }"},
-
-		{"export bare path", "package t:t; world w { export wasi:io/streams; }"},
 		{"export missing colon", "package t:t; world w { export foo func(); }"},
 		{"export missing semicolon", "package t:t; world w { export foo: func() }"},
 		{"export bad body", "package t:t; world w { export foo: bogus; }"},
@@ -698,31 +694,76 @@ func TestNestedPackageDeclUnsupported(t *testing.T) {
 	}
 }
 
-// TestBarePackagePathImportExport verifies that importing/exporting a bare
-// package path (without "name:") is rejected with a clear, line-numbered
-// error, since this construct isn't yet supported.
+// TestBarePackagePathImportExport covers a world importing or exporting an
+// interface by bare package path or bare name -- "import wasi:io/streams;",
+// "import environment;" -- with no "name:" declarator. Both are legal WIT and
+// pervasive in the WASI worlds, so the reference definitions cannot be read
+// without them. A malformed body ("foo: bogus;") must still be an error,
+// which is what distinguishes a path (it names an interface inside a package,
+// so it always contains '/') from a typo.
 func TestBarePackagePathImportExport(t *testing.T) {
-	t.Run("import", func(t *testing.T) {
-		src := "package t:t; world w { import wasi:io/streams@0.2.0; }"
-		_, err := Parse("bare.wit", src)
-		if err == nil {
-			t.Fatal("expected error for bare package-path import")
-		}
-		if !strings.Contains(err.Error(), "not yet supported") {
-			t.Errorf("unexpected error: %v", err)
-		}
-	})
+	for _, tc := range []struct {
+		name, src, wantName string
+	}{
+		{"import path", "package t:t; world w { import wasi:io/streams@0.2.0; }", "wasi:io/streams@0.2.0"},
+		{"export path", "package t:t; world w { export wasi:io/streams@0.2.0; }", "wasi:io/streams@0.2.0"},
+		{"import bare name", "package t:t; world w { import environment; }", "environment"},
+		{"export bare name", "package t:t; world w { export run; }", "run"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pkg, err := Parse("bare.wit", tc.src)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			world := pkg.Items[0].(*World)
+			var got string
+			switch it := world.Items[0].(type) {
+			case *Import:
+				got = it.Name
+			case *Export:
+				got = it.Name
+			default:
+				t.Fatalf("world item = %T, want an Import or Export", it)
+			}
+			if got != tc.wantName {
+				t.Fatalf("name = %q, want %q", got, tc.wantName)
+			}
+		})
+	}
 
-	t.Run("export", func(t *testing.T) {
-		src := "package t:t; world w { export wasi:io/streams@0.2.0; }"
-		_, err := Parse("bare.wit", src)
-		if err == nil {
-			t.Fatal("expected error for bare package-path export")
-		}
-		if !strings.Contains(err.Error(), "not yet supported") {
-			t.Errorf("unexpected error: %v", err)
+	t.Run("malformed body is still an error", func(t *testing.T) {
+		for _, src := range []string{
+			"package t:t; world w { import foo: bogus; }",
+			"package t:t; world w { export foo: bogus; }",
+		} {
+			if _, err := Parse("bad.wit", src); err == nil {
+				t.Errorf("expected a parse error for %q", src)
+			}
 		}
 	})
+}
+
+// TestExplicitIdentifier covers WIT's "%name" escape, which lets a keyword be
+// used as a field or function name. wasi:filesystem's descriptor-stat relies
+// on it (`%type: descriptor-type`), so the reference definitions cannot be
+// read without it. The '%' is not part of the name.
+func TestExplicitIdentifier(t *testing.T) {
+	pkg, err := Parse("esc.wit", "package t:t; interface i { record r { %type: u32, %interface: string } }")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	iface := pkg.Items[0].(*Interface)
+	rec := iface.Items[0].(*TypeDef).Type.(*Record)
+	if len(rec.Fields) != 2 {
+		t.Fatalf("got %d fields, want 2", len(rec.Fields))
+	}
+	if rec.Fields[0].Name != "type" || rec.Fields[1].Name != "interface" {
+		t.Fatalf("field names = %q, %q; want \"type\", \"interface\" (the %% is not part of the name)", rec.Fields[0].Name, rec.Fields[1].Name)
+	}
+
+	if _, err := Parse("esc.wit", "package t:t; interface i { record r { %: u32 } }"); err == nil {
+		t.Error("expected an error for '%' with no identifier after it")
+	}
 }
 
 // TestUseWithAsAlias tests "use path as name;" (single-name alias form),

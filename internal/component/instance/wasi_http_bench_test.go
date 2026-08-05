@@ -59,3 +59,31 @@ func BenchmarkIncomingResponseHeaders(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkInputStreamRead measures the biggest consumer of the list<u8>
+// lowering: a file/body read, which may carry up to wasiMaxStreamRead bytes
+// in a single call.
+func BenchmarkInputStreamRead(b *testing.B) {
+	for _, size := range []int{4096, 65536, 1 << 20} {
+		b.Run(fmt.Sprintf("%dB", size), func(b *testing.B) {
+			payload := make([]byte, size)
+			t := &testing.T{}
+			c, resources, _ := wasiFSConfigDir(t, map[string][]byte{"/f": payload})
+			rootRep := rootHandleRep(t, resources, rootDescriptorHandle(t, c))
+			fileRep := openRep(t, c, resources, rootRep, "f", 0, 0)
+			read := wasiFSFn(t, c, wasiIfaceStreams, "[method]input-stream.read")
+			ctx := context.Background()
+			b.SetBytes(int64(size))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				rv := callFS(t, c, "[method]descriptor.read-via-stream", fileRep, uint64(0))
+				sh := rv.Payload.(uint32)
+				sRep, _ := resources.Rep(wasiInputStreamResType, sh)
+				if _, err := read(ctx, []abi.Value{sRep, uint64(size)}); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}

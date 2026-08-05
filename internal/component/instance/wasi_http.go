@@ -518,13 +518,11 @@ func (h *wasiHTTP) fieldsEntries(_ context.Context, args []abi.Value) ([]abi.Val
 	return []abi.Value{out}, nil
 }
 
-// bytesToU8List renders b as a lowered list<u8> (each byte a uint32 element).
-func bytesToU8List(b []byte) []abi.Value {
-	out := make([]abi.Value, len(b))
-	for i, x := range b {
-		out[i] = uint32(x)
-	}
-	return out
+// bytesToU8List renders b as a lowered list<u8>. The abi package lowers a
+// raw []byte for list<u8> with a single copy (byteListValue), so the bytes
+// are handed over as-is rather than boxed one interface per byte.
+func bytesToU8List(b []byte) abi.Value {
+	return b
 }
 
 func (h *wasiHTTP) fieldsConstructor(_ context.Context, args []abi.Value) ([]abi.Value, error) {

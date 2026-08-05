@@ -1377,10 +1377,17 @@ func (p *Parser) parseImport(gate Gate, externalID string) (*Import, error) {
 	p.advance()
 
 	if p.current.Type != TokenIdent {
-		return nil, fmt.Errorf("line %d: import of a bare package path (without 'name:') is not yet supported", p.current.Line)
+		return nil, p.errorf("expected an import name or package path")
 	}
 	name := p.current.Text
 	p.advance()
+
+	// "import environment;" -- a world importing an interface by bare name,
+	// with no type to declare. Legal WIT and common in the WASI worlds.
+	if p.current.Type == TokenSemicolon {
+		p.advance()
+		return &Import{Name: name, Gate: gate, ExternalID: externalID}, nil
+	}
 
 	if !p.expect(TokenColon) {
 		return nil, p.errorf("expected ':' after import name")
@@ -1414,12 +1421,48 @@ func (p *Parser) parseImport(gate Gate, externalID string) (*Import, error) {
 		// path (e.g. "import wasi:io/streams@0.2.0;"), since the lexer
 		// tokenizes that leading namespace exactly like a local import
 		// name; the ':' we just consumed is the path separator, not the
-		// "name:" declarator. Report the specific, actionable error
-		// instead of a generic "expected 'func' or 'interface'".
-		return nil, fmt.Errorf("line %d: import of a bare package path (without 'name:') is not yet supported", p.current.Line)
+		// "name:" declarator.
+		full, err := p.parseBarePathTail(name)
+		if err != nil {
+			return nil, err
+		}
+		return &Import{Name: full, Gate: gate, ExternalID: externalID}, nil
 	}
 
 	return &Import{Name: name, Type: importType, Gate: gate, ExternalID: externalID}, nil
+}
+
+// parseBarePathTail consumes the remainder of a bare package-path reference
+// in a world -- "wasi:io/error@0.2.12;" -- starting just after the ':' that
+// was mistaken for a "name:" declarator, and returns the full path text.
+// The reconstruction is token-wise, so incidental whitespace inside the path
+// is not preserved; nothing consumes these paths structurally (a world's
+// import list names interfaces that are resolved elsewhere), so the text is
+// for diagnostics and round-tripping only.
+func (p *Parser) parseBarePathTail(head string) (string, error) {
+	var b strings.Builder
+	b.WriteString(head)
+	b.WriteString(":")
+	sawSlash := false
+	for p.current.Type != TokenSemicolon {
+		if p.current.Type == TokenEOF {
+			return "", p.errorf("unterminated bare package path in world item")
+		}
+		if p.current.Type == TokenSlash {
+			sawSlash = true
+		}
+		b.WriteString(p.current.Text)
+		p.advance()
+	}
+	if !sawSlash {
+		// "foo: bogus;" is a malformed declarator, not a package path: a
+		// path always names an interface within a package
+		// ("ns:pkg/iface"). Without this the two are indistinguishable and
+		// a typo'd import body would parse silently.
+		return "", p.errorf("expected 'func' or 'interface' after ':', or a package path of the form ns:pkg/iface")
+	}
+	p.advance() // consume ';'
+	return b.String(), nil
 }
 
 // parseExport parses "export name : func-type;" or "export name : interface { ... };",
@@ -1431,10 +1474,16 @@ func (p *Parser) parseExport(gate Gate, externalID string) (*Export, error) {
 	p.advance()
 
 	if p.current.Type != TokenIdent {
-		return nil, fmt.Errorf("line %d: export of a bare package path (without 'name:') is not yet supported", p.current.Line)
+		return nil, p.errorf("expected an export name or package path")
 	}
 	name := p.current.Text
 	p.advance()
+
+	// "export run;" -- a world exporting an interface by bare name.
+	if p.current.Type == TokenSemicolon {
+		p.advance()
+		return &Export{Name: name, Gate: gate, ExternalID: externalID}, nil
+	}
 
 	if !p.expect(TokenColon) {
 		return nil, p.errorf("expected ':' after export name")
@@ -1466,7 +1515,11 @@ func (p *Parser) parseExport(gate Gate, externalID string) (*Export, error) {
 		// See the matching comment in parseImport: this is reached for a
 		// bare package-path export (e.g. "export wasi:io/streams@0.2.0;"),
 		// not just a plain syntax error.
-		return nil, fmt.Errorf("line %d: export of a bare package path (without 'name:') is not yet supported", p.current.Line)
+		full, err := p.parseBarePathTail(name)
+		if err != nil {
+			return nil, err
+		}
+		return &Export{Name: full, Gate: gate, ExternalID: externalID}, nil
 	}
 
 	return &Export{Name: name, Type: exportType, Gate: gate, ExternalID: externalID}, nil

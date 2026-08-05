@@ -945,12 +945,13 @@ func wasiJoinFSPath(dir, rel string) (joined string, ok bool) {
 // wasiListFromBytes converts buf into the list<u8> shape abi.Value expects
 // (see abi.Value's doc: list<T> -> []abi.Value, u8 -> uint32) -- the
 // lowering counterpart to wasi.go's wasiBytesFromList.
-func wasiListFromBytes(buf []byte) []abi.Value {
-	out := make([]abi.Value, len(buf))
-	for i, b := range buf {
-		out[i] = uint32(b)
-	}
-	return out
+func wasiListFromBytes(buf []byte) abi.Value {
+	// abi lowers a []byte directly for a list<u8> (one copy, see
+	// byteListValue in the abi package) instead of the general
+	// one-interface-per-element shape, which for a byte list costs a machine
+	// word per byte. That matters here: a single input-stream.read may carry
+	// up to wasiMaxStreamRead bytes.
+	return buf
 }
 
 // wasiFilesystemOptions returns the Options implementing

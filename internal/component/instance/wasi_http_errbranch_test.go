@@ -840,16 +840,13 @@ func TestHTTP_FieldsEntries(t *testing.T) {
 	})
 }
 
-// u8ListToString reverses bytesToU8List for assertions.
+// u8ListToString reverses a lowered list<u8> for assertions, accepting both
+// the compact []byte shape and the general one-interface-per-element one.
 func u8ListToString(t *testing.T, v abi.Value) string {
 	t.Helper()
-	list, ok := v.([]abi.Value)
-	if !ok {
-		t.Fatalf("field-value: expected a list, got %T", v)
-	}
-	b := make([]byte, len(list))
-	for i, x := range list {
-		b[i] = byte(x.(uint32))
+	b, err := wasiBytesFromList(v)
+	if err != nil {
+		t.Fatalf("field-value: %v", err)
 	}
 	return string(b)
 }
