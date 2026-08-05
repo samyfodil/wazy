@@ -51,7 +51,7 @@ jobs:
           esac
           set +e
           go test ./internal/component/instance/ \
-            -run 'TestAsyncWastConformance/trap-if-sync-and-waitable-set' \
+            -run 'TestAsyncWastConformance' \
             -timeout 55m $flags > out.log 2>&1
           rc=$?
           set -e

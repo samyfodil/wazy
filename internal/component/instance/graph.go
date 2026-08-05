@@ -290,7 +290,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		sh = &sched{}
 		cfg.sharedSched = sh // propagated to every subCfg by instantiateNestedInstances below
 	}
-	in := &Instance{resolve: resolve, resources: resources, mayEnter: true, mayLeave: true, sched: sh}
+	in := &Instance{resolve: resolve, resources: resources, mayEnter: true, mayLeave: true, sched: sh, reproPre: reproMagic, reproPost: reproMagic}
 	// A composed sub-instance inherits the destructors for the resources it
 	// imports from a sibling, keyed by the table tag its own resource.drop uses.
 	for tag, resolve := range cfg.importedResDtors {

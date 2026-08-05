@@ -140,9 +140,11 @@ type Instance struct {
 	resolve abi.Resolver
 
 	// --- CallAsync (host-side non-blocking calls, callasync.go) ---
-	asyncActive atomic.Bool       // a CallAsync is outstanding; external AsyncCall.Resolve queues instead of erroring
-	amu         sync.Mutex        // guards mailbox, pending, PendingCall.closed, and acond
-	acond       *sync.Cond        // signalled on a queued completion or on finish
+	asyncActive atomic.Bool // a CallAsync is outstanding; external AsyncCall.Resolve queues instead of erroring
+	reproPre    uint64      // REPRO canary: bracket amu to detect stray writes
+	amu         sync.Mutex  // guards mailbox, pending, PendingCall.closed, and acond
+	reproPost   uint64      // REPRO canary
+	acond       *sync.Cond  // signalled on a queued completion or on finish
 	mailbox     []asyncCompletion // external completions awaiting the driver
 	pending     *PendingCall      // the outstanding CallAsync, if any
 
@@ -730,6 +732,9 @@ func resourceTypeIdxOf(t binary.TypeDesc) (uint32, bool) {
 
 // maxResourceWalkDepth guards typeContainsResource/resolveArgHandles against a
 // pathological (cyclic) type graph; real WIT nesting is shallow.
+// reproMagic is the REPRO canary value bracketing Instance.amu.
+const reproMagic uint64 = 0x5A5AC0DEFACE5A5A
+
 const maxResourceWalkDepth = 64
 
 // typeContainsResource reports whether t's type tree contains an own/borrow at
@@ -1300,7 +1305,7 @@ func instantiateComponent(ctx context.Context, r wazy.Runtime, comp *binary.Comp
 		exports[name] = be
 	}
 
-	return &Instance{resolve: resolve, exports: exports, instanceExports: buildInstanceExportIndex(exports), closers: []api.Module{core}, resources: newHandleTable(), sched: &sched{}, mayEnter: true, mayLeave: true}, nil
+	return &Instance{resolve: resolve, exports: exports, instanceExports: buildInstanceExportIndex(exports), closers: []api.Module{core}, resources: newHandleTable(), sched: &sched{}, mayEnter: true, mayLeave: true, reproPre: reproMagic, reproPost: reproMagic}, nil
 }
 
 // synthInstanceCounter numbers instantiations so each gets a globally-unique
@@ -2020,6 +2025,12 @@ func safeExportedFunction(mod api.Module, name string) (fn api.Function) {
 // order of instantiation). It does not close the Runtime passed to
 // Instantiate, which the caller owns.
 func (in *Instance) Close(ctx context.Context) error {
+	// REPRO: validate the object BEFORE touching the mutex, so a corrupted
+	// Instance is reported here instead of throwing inside sync.
+	if in.reproPre != reproMagic || in.reproPost != reproMagic {
+		panic(fmt.Sprintf("REPRO: Instance %p corrupted: pre=%#x post=%#x (want %#x); closers=%d subs=%d comp=%p",
+			in, in.reproPre, in.reproPost, uint64(reproMagic), len(in.closers), len(in.subInstances), in.comp))
+	}
 	in.amu.Lock()
 	p := in.pending
 	in.amu.Unlock()
