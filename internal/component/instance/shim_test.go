@@ -236,18 +236,63 @@ func TestBuildPassthroughShim_NoItems(t *testing.T) {
 	}
 }
 
-func TestBuildPassthroughShim_EmptySourceName(t *testing.T) {
+func TestBuildPassthroughShim_EmptySourceModule(t *testing.T) {
+	// FromModule is the only name the graph synthesizes itself (a resolver key,
+	// never a component-chosen name), so "" there is a caller bug -- and wazy's
+	// decoder would otherwise reject it with a message that doesn't name the
+	// item. FromName/ExportName are component-chosen and may legitimately be ""
+	// (see TestBuildPassthroughShim_EmptyNamesRoundTrip).
 	if _, err := buildPassthroughShim([]shimItem{{Sort: shimSortFunc, FromModule: "", FromName: "x", ExportName: "y"}}); err == nil {
 		t.Fatal("expected an error for empty FromModule")
 	}
-	if _, err := buildPassthroughShim([]shimItem{{Sort: shimSortFunc, FromModule: "x", FromName: "", ExportName: "y"}}); err == nil {
-		t.Fatal("expected an error for empty FromName")
-	}
 }
 
-func TestBuildPassthroughShim_EmptyExportName(t *testing.T) {
-	if _, err := buildPassthroughShim([]shimItem{{Sort: shimSortFunc, FromModule: "x", FromName: "y", ExportName: ""}}); err == nil {
-		t.Fatal("expected an error for empty ExportName")
+// TestBuildPassthroughShim_EmptyNamesRoundTrip pins issue #25: "" is an
+// ordinary core wasm export/import field name, not a missing one, and every
+// componentize-go component contains one (wit-component's "start shim" groups
+// the guest's `_initialize` under the empty name). buildPassthroughShim used to
+// reject it outright; it must instead encode a module that really instantiates
+// and forwards the call.
+func TestBuildPassthroughShim_EmptyNamesRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	// A source module exporting "add" under the EMPTY name, so both the shim's
+	// FromName and its ExportName are "".
+	emptyNameSrc := []byte{
+		0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+		0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, // type (i32,i32)->i32
+		0x03, 0x02, 0x01, 0x00, // func 0: type 0
+		0x07, 0x04, 0x01, 0x00, 0x00, 0x00, // export "" func 0
+		0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b, // body
+	}
+	if _, err := r.InstantiateWithConfig(ctx, emptyNameSrc, wazy.NewModuleConfig().WithName("src-empty").WithStartFunctions()); err != nil {
+		t.Fatalf("instantiate src: %v", err)
+	}
+
+	shimBytes, err := buildPassthroughShim([]shimItem{{
+		Sort: shimSortFunc, FromModule: "src-empty", FromName: "", ExportName: "",
+		Params: []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, Results: []api.ValueType{api.ValueTypeI32},
+	}})
+	if err != nil {
+		t.Fatalf("buildPassthroughShim: %v", err)
+	}
+
+	shim, err := r.InstantiateWithConfig(ctx, shimBytes, wazy.NewModuleConfig().WithName("shim-empty").WithStartFunctions())
+	if err != nil {
+		t.Fatalf("instantiate shim: %v", err)
+	}
+	fn := shim.ExportedFunction("")
+	if fn == nil {
+		t.Fatal(`shim has no exported function ""`)
+	}
+	results, err := fn.Call(ctx, 2, 40)
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if len(results) != 1 || results[0] != 42 {
+		t.Fatalf(`shim ""(2,40) = %v, want [42]`, results)
 	}
 }
 

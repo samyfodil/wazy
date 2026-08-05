@@ -598,6 +598,150 @@ func TestSynthGraph_InlineExportGlobalUninstantiatedSource(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// 3b. the wit-component "start shim": empty export/import field names
+// ---------------------------------------------------------------------------
+
+// sideEffectModule exports, under funcName, a `(func)` that stores sentinel
+// into its mutable i32 global (exported as "g", initially 0) -- a stand-in for
+// a reactor's `_initialize`: nullary, observable only by its side effect, and
+// reached only through the start shim. funcName is "" in the tests that also
+// need the shim's SOURCE name to be empty.
+func sideEffectModule(sentinel int32, funcName string) []byte {
+	body := append(i32Const(sentinel), wasm.OpcodeGlobalSet, 0x00, wasm.OpcodeEnd)
+	return binaryencoding.EncodeModule(&wasm.Module{
+		TypeSection:     []wasm.FunctionType{{}},
+		FunctionSection: []wasm.Index{0},
+		GlobalSection: []wasm.Global{
+			{Type: wasm.GlobalType{ValType: wasm.ValueTypeI32, Mutable: true}, Init: wasm.NewConstantExpressionFromOpcode(wasm.OpcodeI32Const, leb128.EncodeInt32(0))},
+		},
+		CodeSection: []wasm.Code{{Body: body}},
+		ExportSection: []wasm.Export{
+			{Name: funcName, Type: wasm.ExternTypeFunc, Index: 0},
+			{Name: "g", Type: wasm.ExternTypeGlobal, Index: 0},
+		},
+	})
+}
+
+// startShimModule is wit-component's start shim verbatim: a core module whose
+// entire content is `(import "" "" (func)) (start 0)`. Both halves of the
+// import name are empty.
+func startShimModule() []byte {
+	start := wasm.Index(0)
+	return binaryencoding.EncodeModule(&wasm.Module{
+		TypeSection:         []wasm.FunctionType{{}},
+		ImportSection:       []wasm.Import{{Module: "", Name: "", Type: wasm.ExternTypeFunc, DescFunc: 0}},
+		ImportFunctionCount: 1,
+		StartSection:        &start,
+	})
+}
+
+// observeGlobalModule imports (fromModule, "g") as a mutable i32 global and
+// traps in its start function unless it holds want -- so the start shim having
+// merely instantiated is not enough; it must actually have RUN.
+func observeGlobalModule(fromModule string, want int32) []byte {
+	body := []byte{wasm.OpcodeGlobalGet, 0x00}
+	body = append(body, i32Const(want)...)
+	body = append(body, wasm.OpcodeI32Ne, wasm.OpcodeIf, 0x40, wasm.OpcodeUnreachable, wasm.OpcodeEnd, wasm.OpcodeEnd)
+	start := wasm.Index(0)
+	return binaryencoding.EncodeModule(&wasm.Module{
+		TypeSection:     []wasm.FunctionType{{}},
+		ImportSection:   []wasm.Import{{Module: fromModule, Name: "g", Type: wasm.ExternTypeGlobal, DescGlobal: wasm.GlobalType{ValType: wasm.ValueTypeI32, Mutable: true}}},
+		FunctionSection: []wasm.Index{0},
+		CodeSection:     []wasm.Code{{Body: body}},
+		StartSection:    &start,
+	})
+}
+
+// TestSynthGraph_EmptyNameStartShimRuns pins issue #25. Every componentize-go
+// component ends with wit-component's "start shim", which invokes the reactor's
+// `_initialize` once the whole graph is wired:
+//
+//	(core module $s (import "" "" (func)) (start 0))
+//	(core instance $args (export "" (func $_initialize)))
+//	(core instance (instantiate $s (with "" (instance $args))))
+//
+// An export/import field name in core wasm is a `name`: any UTF-8 sequence,
+// non-empty NOT required (names.wast asserts exactly this). buildPassthroughShim
+// nonetheless rejected `""` outright, so instantiation died with "item[0] has an
+// empty export name" before the guest ever ran -- and the same shape in the
+// official component-model suite (fused.0/fused.3) was being logged as a SKIP.
+//
+// This is the reporter's shape exactly: only the shim's EXPORT name is empty
+// (its source is the guest's ordinary "_initialize"). The observer core module
+// proves the start shim really executed rather than merely instantiating.
+func TestSynthGraph_EmptyNameStartShimRuns(t *testing.T) {
+	b := newCompBuilder()
+	b.coreModule(sideEffectModule(7, "_initialize")) // core module 0
+	b.coreModule(startShimModule())                  // core module 1
+	b.coreModule(observeGlobalModule("chk", 7))      // core module 2
+	b.coreInstances([]synthCoreInstance{
+		{moduleIdx: 0}, // 0: the provider
+		{inline: []synthInline{{name: "", sort: 0x00, idx: 0}}},  // 1: regroup _initialize under ""
+		{moduleIdx: 1, args: []synthArg{{"", 1}}},                // 2: the start shim; runs the func
+		{inline: []synthInline{{name: "g", sort: 0x03, idx: 0}}}, // 3: regroup the provider's global
+		{moduleIdx: 2, args: []synthArg{{"chk", 3}}},             // 4: traps unless the shim ran
+	})
+	b.coreAliases([]synthAlias{
+		{coreSort: 0x00, inst: 0, name: "_initialize"}, // core func 0
+		{coreSort: 0x03, inst: 0, name: "g"},           // core global 0
+	})
+
+	raw, comp := decodeSynth(t, b)
+	if got := comp.CoreInstances[1].Exports[0].Name; got != "" {
+		t.Fatalf("fixture: core instance 1 inline export name = %q, want empty", got)
+	}
+	in, err := runSynth(t, raw, comp)
+	if err != nil {
+		t.Fatalf("instantiate: %v", err)
+	}
+	in.Close(context.Background())
+}
+
+// The reporter's component binds TWO different core instances under the empty
+// "with" name (wit-component's fixup group and its start-shim group), and every
+// empty core import module name is rewritten to one shared graphEmptyImportKey
+// before decode -- so "" is a colliding consumer name like any other and must
+// still resolve per-instantiation, by identity. Each start shim writes a
+// different sentinel; each observer traps unless it sees its own.
+//
+// Here the providers export their func under "" as well, so this also covers
+// the other half of the dropped guard: a shim whose SOURCE name is empty, the
+// `(alias core export $m "")` that fused.0 aliases.
+func TestSynthGraph_TwoGroupsShareTheEmptyWithName(t *testing.T) {
+	b := newCompBuilder()
+	b.coreModule(sideEffectModule(11, ""))       // core module 0: provider A
+	b.coreModule(sideEffectModule(22, ""))       // core module 1: provider B
+	b.coreModule(startShimModule())              // core module 2
+	b.coreModule(observeGlobalModule("chk", 11)) // core module 3
+	b.coreModule(observeGlobalModule("chk", 22)) // core module 4
+	b.coreInstances([]synthCoreInstance{
+		{moduleIdx: 0}, // 0: provider A
+		{moduleIdx: 1}, // 1: provider B
+		{inline: []synthInline{{name: "", sort: 0x00, idx: 0}}},  // 2: A's ""-func, under ""
+		{inline: []synthInline{{name: "", sort: 0x00, idx: 1}}},  // 3: B's ""-func, ALSO under ""
+		{moduleIdx: 2, args: []synthArg{{"", 2}}},                // 4: start shim -> A
+		{moduleIdx: 2, args: []synthArg{{"", 3}}},                // 5: start shim -> B
+		{inline: []synthInline{{name: "g", sort: 0x03, idx: 0}}}, // 6: A's global
+		{inline: []synthInline{{name: "g", sort: 0x03, idx: 1}}}, // 7: B's global
+		{moduleIdx: 3, args: []synthArg{{"chk", 6}}},             // 8: must see 11
+		{moduleIdx: 4, args: []synthArg{{"chk", 7}}},             // 9: must see 22
+	})
+	b.coreAliases([]synthAlias{
+		{coreSort: 0x00, inst: 0, name: ""},  // core func 0
+		{coreSort: 0x00, inst: 1, name: ""},  // core func 1
+		{coreSort: 0x03, inst: 0, name: "g"}, // core global 0
+		{coreSort: 0x03, inst: 1, name: "g"}, // core global 1
+	})
+
+	raw, comp := decodeSynth(t, b)
+	in, err := runSynth(t, raw, comp)
+	if err != nil {
+		t.Fatalf("instantiate: %v", err)
+	}
+	in.Close(context.Background())
+}
+
+// ---------------------------------------------------------------------------
 // 4. several exported component instances, index space shifted by each export
 // ---------------------------------------------------------------------------
 
