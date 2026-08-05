@@ -36,12 +36,27 @@ jobs:
       # roughly 1 run in 15 in normal CI, so each shard needs many attempts.
       - name: stress the async wast suite
         shell: bash
+        env:
+          GOTRACEBACK: all
         run: |
           if [ "${{ matrix.mode }}" = "race" ]; then
             flags="-race -count=120"
           else
             flags="-count=400"
           fi
+          # Capture the whole log, then print the HEAD of the failure (the panic
+          # message + faulting stack) rather than tail, which truncated it to the
+          # unrelated goroutine dump on the first attempt.
+          set +e
           go test ./internal/component/instance/ \
             -run 'TestAsyncWastConformance' \
-            -timeout 40m $flags 2>&1 | tail -n 120
+            -timeout 40m $flags > out.log 2>&1
+          rc=$?
+          set -e
+          if [ $rc -ne 0 ]; then
+            echo "===== first 200 lines ====="
+            head -n 200 out.log
+            echo "===== REPRO markers ====="
+            grep -n "REPRO:" out.log || true
+          fi
+          exit $rc

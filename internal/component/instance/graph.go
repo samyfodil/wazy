@@ -989,6 +989,9 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 			failClose()
 			return nil, nil, fmt.Errorf("component/instance: nested component instance %d: %w", compInstIdx, err)
 		}
+		if sub == nil {
+			panic(fmt.Sprintf("REPRO: instantiateGraph returned (nil, nil) for nested component instance %d", compInstIdx))
+		}
 		byIdx[compInstIdx] = sub
 		order = append(order, sub)
 	}

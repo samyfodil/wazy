@@ -2043,7 +2043,10 @@ func (in *Instance) Close(ctx context.Context) error {
 			firstErr = err
 		}
 	}
-	for _, sub := range in.subInstances {
+	for si, sub := range in.subInstances {
+		if sub == nil {
+			panic(fmt.Sprintf("REPRO: subInstances[%d] of %d is nil (closers=%d comp=%p)", si, len(in.subInstances), len(in.closers), in.comp))
+		}
 		if err := sub.Close(ctx); err != nil && firstErr == nil {
 			firstErr = err
 		}
