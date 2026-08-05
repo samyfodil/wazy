@@ -1,0 +1,47 @@
+# TEMPORARY: reproduction harness for the intermittent Windows crash in
+# TestAsyncWastConformance/trap-if-sync-and-waitable-set. Deleted before this
+# branch merges -- it exists only to turn a ~1-in-15 CI flake into a signal we
+# can iterate on.
+name: zz-repro
+
+on:
+  push:
+    branches:
+      - fix/async-wast-close-crash
+  workflow_dispatch:
+
+jobs:
+  windows-stress:
+    name: windows stress ${{ matrix.shard }} (${{ matrix.mode }})
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+        mode: [race, plain]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+
+      - name: configure Pagefile
+        uses: al-cheb/configure-pagefile-action@v1.5
+        with:
+          minimum-size: 8GB
+          maximum-size: 16GB
+          disk-root: "D:"
+
+      # -count is deliberately large: the crash is a teardown race that lands
+      # roughly 1 run in 15 in normal CI, so each shard needs many attempts.
+      - name: stress the async wast suite
+        shell: bash
+        run: |
+          if [ "${{ matrix.mode }}" = "race" ]; then
+            flags="-race -count=120"
+          else
+            flags="-count=400"
+          fi
+          go test ./internal/component/instance/ \
+            -run 'TestAsyncWastConformance' \
+            -timeout 40m $flags 2>&1 | tail -n 120
