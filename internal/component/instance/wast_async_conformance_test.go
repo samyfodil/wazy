@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"path"
 	"reflect"
 	"strings"
@@ -358,7 +359,15 @@ func runAsyncWastSuite(t *testing.T, suite string) bool {
 	}
 
 	ctx := context.Background()
-	r := wazy.NewRuntime(ctx)
+	// REPRO: WAZY_REPRO_INTERPRETER=1 swaps the native (JIT) engine for the
+	// interpreter, to tell whether the teardown corruption originates in
+	// generated code (invisible to -race) or in this package's Go.
+	var r wazy.Runtime
+	if os.Getenv("WAZY_REPRO_INTERPRETER") == "1" {
+		r = wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigInterpreter())
+	} else {
+		r = wazy.NewRuntime(ctx)
+	}
 	defer r.Close(ctx)
 
 	defs := map[string][]byte{} // module_definition name -> wasm bytes

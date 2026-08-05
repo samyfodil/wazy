@@ -2,6 +2,13 @@
 # TestAsyncWastConformance/trap-if-sync-and-waitable-set. Deleted before this
 # branch merges -- it exists only to turn a ~1-in-15 CI flake into a signal we
 # can iterate on.
+#
+# The matrix is a discriminator, not just a stressor:
+#   native      - baseline, reproduces the crash
+#   interpreter - same test with the JIT swapped out. If the crash survives it
+#                 is in this package's Go; if it vanishes it is in generated code.
+#   clobber     - GODEBUG=clobberfree=1 + GOGC=1, so a use-after-free faults at
+#                 the culprit instead of at some later victim.
 name: zz-repro
 
 on:
@@ -12,13 +19,13 @@ on:
 
 jobs:
   windows-stress:
-    name: windows stress ${{ matrix.shard }} (${{ matrix.mode }})
+    name: win ${{ matrix.mode }} ${{ matrix.shard }}
     runs-on: windows-2025
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6]
-        mode: [race, plain]
+        shard: [1, 2, 3, 4]
+        mode: [native, interpreter, clobber]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -32,30 +39,25 @@ jobs:
           maximum-size: 16GB
           disk-root: "D:"
 
-      # -count is deliberately large: the crash is a teardown race that lands
-      # roughly 1 run in 15 in normal CI, so each shard needs many attempts.
       - name: stress the async wast suite
         shell: bash
         env:
           GOTRACEBACK: all
         run: |
-          if [ "${{ matrix.mode }}" = "race" ]; then
-            flags="-race -count=120"
-          else
-            flags="-count=400"
-          fi
-          # Capture the whole log, then print the HEAD of the failure (the panic
-          # message + faulting stack) rather than tail, which truncated it to the
-          # unrelated goroutine dump on the first attempt.
+          case "${{ matrix.mode }}" in
+            native)      flags="-count=2500" ;;
+            interpreter) flags="-count=2500"; export WAZY_REPRO_INTERPRETER=1 ;;
+            clobber)     flags="-count=1200"; export GODEBUG=clobberfree=1; export GOGC=1 ;;
+          esac
           set +e
           go test ./internal/component/instance/ \
-            -run 'TestAsyncWastConformance' \
-            -timeout 40m $flags > out.log 2>&1
+            -run 'TestAsyncWastConformance/trap-if-sync-and-waitable-set' \
+            -timeout 55m $flags > out.log 2>&1
           rc=$?
           set -e
           if [ $rc -ne 0 ]; then
-            echo "===== first 200 lines ====="
-            head -n 200 out.log
+            echo "===== head ====="
+            head -n 160 out.log
             echo "===== REPRO markers ====="
             grep -n "REPRO:" out.log || true
           fi
