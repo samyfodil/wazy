@@ -58,7 +58,15 @@ jobs:
       - name: stress the async wast suite
         shell: bash
         env:
-          GOTRACEBACK: all
+          # `system`, not `all`: `all` hides runtime-internal goroutines, and
+          # runfinq (the finalizer goroutine) is the ONLY other actor in this
+          # program. The native shard's "concurrent map read and map write" at
+          # engine_cache.go:115 fired while the reader held e.mux.Lock(), with
+          # every writer of that map also holding it and no concurrent writer
+          # anywhere in the `all` traceback -- exactly what an invisible
+          # finalizer goroutine (executablesFinalizer -> MunmapCodeSegment ->
+          # VirtualFree) would look like.
+          GOTRACEBACK: system
         run: |
           count="${{ github.event.inputs.count || '2500' }}"
           flags="-count=$count"
