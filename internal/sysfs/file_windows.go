@@ -106,7 +106,24 @@ func writeSocket(fd uintptr, buf []byte) (int, sys.Errno) {
 	var overlapped windows.Overlapped
 	errno := windows.WriteFile(windows.Handle(fd), buf, &done, &overlapped)
 	if errors.Is(errno, windows.ERROR_IO_PENDING) {
-		errno = syscall.EAGAIN
+		// The write is STILL IN FLIGHT here, and the kernel still holds
+		// pointers to all three of `overlapped`, `done` and `buf`: it writes
+		// the completion status into the OVERLAPPED, writes the transferred
+		// count into `done`, and keeps reading `buf`. Simply mapping this to
+		// EAGAIN and returning lets Go reuse that memory while the kernel is
+		// still writing to it -- a use-after-return the Go race detector and
+		// checkptr cannot see, because the write comes from the kernel rather
+		// than from Go code.
+		//
+		// Cancel and then WAIT for the operation to actually finish before
+		// these die, which is exactly what readSocket above already does.
+		if cerr := windows.CancelIo(windows.Handle(fd)); cerr != nil {
+			return 0, sys.UnwrapOSError(cerr) // fatal: CancelIo failed
+		}
+		errno = windows.GetOverlappedResult(windows.Handle(fd), &overlapped, &done, true)
+		if errors.Is(errno, windows.ERROR_OPERATION_ABORTED) {
+			return int(done), sys.EAGAIN // cancelled before it finished: the caller retries
+		}
 	}
 	return int(done), sys.UnwrapOSError(errno)
 }
