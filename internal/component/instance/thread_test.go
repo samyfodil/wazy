@@ -871,6 +871,61 @@ func TestGuestThread_ReapNeverSpawnedThread(t *testing.T) {
 	}
 }
 
+// TestGuestThread_ReapNeverSpawnedThreadCrossInstance pins the RECEIVER in
+// §6.4's never-spawned reap arm. The *sched is shared by the whole composition
+// tree (Instance.sched's doc), so the reaper and the thread's owner (vth.in ==
+// vth.t.inst) are different instances whenever a parent reaps a SUB's thread --
+// the shape every cross-instance async suite takes through async_lift.go's
+// trap-path reaps. Freeing vth.index on the reaper's own table (the bug) is
+// doubly wrong: the owner's slot leaks, and the reaper's unrelated slot at that
+// index is nil'd and pushed onto its free list, so one index is handed out
+// twice. TestGuestThread_ReapNeverSpawnedThread above cannot see any of this --
+// there reaper == owner, so the wrong receiver is the right one by accident.
+func TestGuestThread_ReapNeverSpawnedThreadCrossInstance(t *testing.T) {
+	parent := newAsyncInst()
+	sub := &Instance{sched: parent.sched, mayEnter: true, mayLeave: true, resources: newHandleTable()}
+
+	// The parent's own thread table is not empty: its running task registered
+	// an implicit-thread slot (thread.index, §4.3) -- one that threadTable.
+	// remove's doc promises is never freed.
+	parentTask := &task{state: taskStarted}
+	parentIdx := parent.threads.add(implicitThreadMarker{t: parentTask})
+
+	subTask := &task{state: taskStarted}
+	th := newSuspendedGuestThread(sub, subTask, nil) // never resumed: no goroutine
+	if th.index != parentIdx {
+		t.Fatalf("precondition: sub thread index %d != parent slot %d -- the two tables must collide for this test to mean anything", th.index, parentIdx)
+	}
+	if _, ok := sub.threads.getThread(th.index); !ok {
+		t.Fatal("precondition: th is not registered in the SUB's table")
+	}
+
+	parent.reapParkedGoroutines() // the parent reaps the sub's thread
+
+	if _, ok := sub.threads.getThread(th.index); ok {
+		t.Fatal("the sub's table slot is still live after reap: the arm freed vth.index on the reaper's table instead of the owner's")
+	}
+	if parent.threads.slots[parentIdx] == nil {
+		t.Fatalf("reap nil'd the parent's own thread slot %d, which belongs to an unrelated live task", parentIdx)
+	}
+	// The clinching consequence of freeing the wrong table: the parent's still-
+	// occupied slot is back on its free list, so the next registration aliases
+	// a live thread identity.
+	if idx := parent.threads.add(implicitThreadMarker{t: parentTask}); idx == parentIdx {
+		t.Fatalf("parent.threads.add handed out index %d twice -- it is still occupied", idx)
+	}
+
+	if !th.done {
+		t.Fatal("th.done = false after reap, want true")
+	}
+	if subTask.liveThreads != 0 {
+		t.Fatalf("subTask.liveThreads = %d after reap, want 0", subTask.liveThreads)
+	}
+	if parentTask.liveThreads != 0 {
+		t.Fatalf("parentTask.liveThreads = %d after reap, want 0 -- the arm decremented the wrong task", parentTask.liveThreads)
+	}
+}
+
 // TestGuestThread_RunLastThreadUnresolvedTraps pins the reference's
 // unregister_thread last-thread trap (§3's run doc, definitions.py:521-523):
 // the LAST spawned thread of a task exiting normally while the task itself

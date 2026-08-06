@@ -133,11 +133,14 @@ interpreter mode are all clean. A temporary Windows CI matrix (12 shards,
 half `-race -count=120`, half `-count=400`) reproduces it 1-2 shards per
 run, which is the only known way to iterate on it.
 
-**Not this.** Two real memory-safety bugs were found while investigating and
-are fixed (`FailIfClosed` re-running the deferred cleanup and
-over-decrementing `mem.importers`; a memory view captured before a guest
-call and used after it). Neither explains this crash — it predates both
-fixes and the suspected path is different.
+**Not this.** Three real bugs were found while investigating and are fixed
+(`FailIfClosed` re-running the deferred cleanup and over-decrementing
+`mem.importers`; a memory view captured before a guest call and used after
+it; `reapParkedGoroutines`' never-spawned arm freeing a thread-table slot on
+the *reaper's* instance instead of the thread owner's, so one thread index
+could be handed out twice). None explains this crash — it predates all
+three, and the third is inert on the crashing suite anyway, where the reaper
+and the thread's owner are the same instance.
 
 **Do not "fix" it defensively.** A `if sub == nil { continue }` in the
 `subInstances` loop makes the symptom disappear while leaving live-memory
