@@ -145,7 +145,7 @@ alive for the call. Don't spend time there again.
 
 **Reproducing.** It does not reproduce on Linux — ~10,000 iterations across
 plain, `-race`, `-cpu` variants, `clobberfree`, `gccheckmark`, and
-interpreter mode are all clean. `.github/workflows/win-corruption-repro.yaml`
+interpreter mode are all clean. `.github/workflows/zz-repro.yaml`
 (manual dispatch only) is the iteration vehicle: 4 modes × 4 Windows shards,
 which historically lands 1-2 crashed shards per run.
 

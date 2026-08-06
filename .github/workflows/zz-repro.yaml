@@ -21,7 +21,7 @@
 # "alloc unmarked" lines that eats the entire budget before the stack trace is
 # reached. So: always upload the raw log as an artifact (artifacts are not
 # truncated), and when inlining, strip the span dump first.
-name: win-corruption-repro
+name: zz-repro
 
 on:
   workflow_dispatch:
