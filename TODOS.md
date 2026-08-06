@@ -138,6 +138,34 @@ Note the GC's `elemsize=16` is therefore a *different* object — whatever
 `internal/component/instance` contains no `unsafe`, so with the JIT
 eliminated the corruptor is most likely in `internal/wasm`.
 
+**Every victim so far reads back as ZERO.** Not clobberfree's `0xdeadbeef`,
+not random garbage — zero, i.e. memory that was freed and re-handed-out as a
+fresh (zeroed) allocation. The known victims:
+
+- a slot in the `[]*Instance` `subInstances` backing array (nil receiver in
+  `Close`);
+- a `*compiledModuleWithCount`'s embedded `*compiledModule` (`addr=0x0`,
+  `addr=0x3`);
+- a `GoModuleFunc` value: `Exception 0xc0000005 PC=0x0` at `api/wasm.go:479`
+  from `(*guestTask).firstRunBody` — a host function whose closure was zero,
+  so the engine jumped to address 0;
+- an `*Instance`'s mutex word, and a map header's flags.
+
+An independent audit (Codex, xhigh) separately eliminated: the
+compiledModule refCount protocol (balanced for this suite), executable
+lifetime (every instantiated native `moduleEngine` holds a strong
+`*compiledModule`), and `TableInstance.involvingModuleInstances` retention
+through the merged-graph import path (the passthrough shim and `$m` both
+import the same table and are appended to the retention list before `$m`
+installs active elements). It also confirmed the interpreter reaches no Win32
+I/O and no executable mapping in this fixture.
+
+- **Not the Green Tea GC.** Go 1.26 made it the default and every symptom
+  here is a collector symptom, so this looked strong. It is wrong: a shard
+  running Go 1.26 with `GOEXPERIMENT=nogreenteagc` crashed. Go 1.25 (where
+  Green Tea is opt-in, so off) was clean across 4 shards in the same run, but
+  that proves nothing at this failure rate — the nogreentea crash is what
+  settles it. Disabling the collector does not prevent the bug.
 - **Not the executables finalizer / VirtualFree.** `executablesFinalizer`
   releasing JIT code with `MEM_RELEASE` (so Windows could hand the range back
   to Go's heap) was the best-looking theory: it fits every symptom and is
