@@ -255,11 +255,15 @@ It also means **any experiment that compares modes across shards is
 confounded**, which is how three hypotheses were wrongly closed. Compare
 modes only within one runner.
 
-Poisoned-ness tracks the CPU vendor. Across 48 fingerprinted runners: every
-poisoned one was an Intel Xeon (Platinum 8573C / Emerald Rapids, and 6973P-C
-/ Granite Rapids); all 40 AMD EPYC runners (7763, 9V74) were clean, as were
-the 8370C ones. One 8573C measured clean, so the SKU is not the whole story —
-microcode is the untested axis and the fingerprint now records it.
+Poisoned-ness tracks the CPU, but is NOT determined by the SKU. A census of
+199 fingerprinted runners: 174 AMD EPYC (7763 / 9V74 / 9V45) — **0 poisoned**;
+16 Intel Xeon Platinum 8573C — roughly **40%** poisoned, not all; 2 Intel Xeon
+6973P-C — both poisoned; 7 Intel Xeon Platinum 8370C — none. So the overall
+rate is about **4% of runners**, and something below the SKU (microcode, host)
+decides it among 8573Cs. Budget shards accordingly: at 4%, a 12-shard dispatch
+comes up empty ~60% of the time, which cost two dispatches before this was
+measured. An earlier "~1 in 8" estimate here was wrong — it came from small
+samples where poisoned shards were overrepresented.
 
 But the machine is not the bug. On a poisoned runner: `cpu.all=off` (every
 CPU-feature path in the Go runtime disabled) still crashes 19/25; a no-wazy

@@ -49,12 +49,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 12 shards. At roughly 1 runner in 8 poisoned, 8 shards lands zero
-        # too often (one dispatch came back all-AMD and produced no data at
-        # all), while the old 28-job dispatches exhausted the windows-2025 pool
-        # and failed in "Set up job". 12 is the middle: a clean shard exits in
-        # about a minute, so only the poisoned one costs anything.
-        shard: [1, 2, 3]
+        # 24 shards. The real poisoned rate is ~4% of runners, not the ~1-in-8
+        # first estimated from small samples: a census of 199 runners gives 174
+        # AMD (0 poisoned), 16x Xeon 8573C (~40% poisoned -- NOT all of them),
+        # 2x Xeon 6973P-C (both), 7x Xeon 8370C (none). At 4%, 12 shards misses
+        # entirely about 60% of the time, and two dispatches running did.
+        # Clean shards cost ~1 minute (probe, then exit), and the earlier pool
+        # exhaustion came from 12 long bisect jobs riding along -- now gated --
+        # not from shard count.
+        shard: [1, 2, 3, 4, 5, 6]
         mode: [a, b, c, d]
     steps:
       - uses: actions/checkout@v6
