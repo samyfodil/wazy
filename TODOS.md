@@ -128,7 +128,8 @@ Note the GC's `elemsize=16` is therefore a *different* object — whatever
 
 - **Not the JIT.** Swapping the native engine for the interpreter still
   crashes. So not codegen, not executable-memory lifetime, nothing in
-  `internal/engine/native`.
+  `internal/engine/native`. (Re-confirmed independently: an interpreter shard
+  crashed in the 16-shard run below, alongside native ones.)
 - **Not a data race.** The `-race` shard crashed with no race report.
 - `instantiateNestedInstances` cannot store a nil: it appends only after an
   explicit error check, and `subInstances` is written once and never
@@ -137,11 +138,31 @@ Note the GC's `elemsize=16` is therefore a *different* object — whatever
 `internal/component/instance` contains no `unsafe`, so with the JIT
 eliminated the corruptor is most likely in `internal/wasm`.
 
-**Ruled back in:** `internal/platform/time_windows.go`'s
-`uintptr(unsafe.Pointer(&counter))` into `LazyProc.Call` *looks* like the
-classic pointer-to-uintptr violation but is not one — `syscall.LazyProc.Call`
-is `//go:uintptrescapes`, which forces the operand to the heap and keeps it
-alive for the call. Don't spend time there again.
+- **Not the executables finalizer / VirtualFree.** `executablesFinalizer`
+  releasing JIT code with `MEM_RELEASE` (so Windows could hand the range back
+  to Go's heap) was the best-looking theory: it fits every symptom and is
+  invisible to `-race`. It is wrong. A 16-shard dispatch ran native with and
+  without the unmap under identical load and **both** crashed once, and the
+  interpreter — which never maps executable memory at all — crashed in the
+  same run. Don't rebuild this theory.
+- **Not `internal/platform/time_windows.go`.** Its
+  `uintptr(unsafe.Pointer(&counter))` into `LazyProc.Call` *looks* like the
+  classic pointer-to-uintptr violation but is not one:
+  `syscall.LazyProc.Call` is `//go:uintptrescapes`, which forces the operand
+  to the heap and keeps it alive for the call.
+
+**The crash is engine-independent, and the map crashes are victims, not
+races.** A 16-shard run crashed once each in native, interpreter, clobber and
+no-munmap — an even spread. Two of those are `concurrent map read and map
+write` on the engine's compiled-module map, at
+`interpreter.go:96` and `engine_cache.go:115`, both reached from
+`buildMergedCanonHostModule` (graph.go:1799). Neither is a real race: all
+accesses to both maps correctly hold the engine mutex, and under
+`GOTRACEBACK=system` (which, unlike `all`, shows runtime-internal goroutines)
+every one of the 9 live goroutines is accounted for and idle — the finalizer
+and cleanup goroutines included. So `hashWriting` was set on a corrupted map
+header. That map is simply the busiest allocation in the hot path, i.e. the
+likeliest victim.
 
 **Reproducing.** It does not reproduce on Linux — ~10,000 iterations across
 plain, `-race`, `-cpu` variants, `clobberfree`, `gccheckmark`, and
@@ -159,14 +180,21 @@ that way. The current workflow therefore uploads the raw log as an artifact
 unconditionally and strips the span dump before inlining anything. Fetch the
 artifact, not the job log.
 
-**Not this.** Three real bugs were found while investigating and are fixed
+**Not this.** Four real bugs were found while investigating and are fixed
 (`FailIfClosed` re-running the deferred cleanup and over-decrementing
 `mem.importers`; a memory view captured before a guest call and used after
 it; `reapParkedGoroutines`' never-spawned arm freeing a thread-table slot on
 the *reaper's* instance instead of the thread owner's, so one thread index
-could be handed out twice). None explains this crash — it predates all
-three, and the third is inert on the crashing suite anyway, where the reaper
-and the thread's owner are the same instance.
+could be handed out twice); and `writeSocket` in `internal/sysfs/
+file_windows.go` returning on `ERROR_IO_PENDING` while the kernel still held
+pointers to `&overlapped`, `&done` and `buf`, so the kernel wrote into Go
+memory after it was recycled. None explains this crash — it predates all
+four; the third is inert on the crashing suite, where the reaper and the
+thread's owner are the same instance; and the fourth needs socket I/O, which
+the async wast fixture never performs. The fourth is worth noting anyway: it
+is the exact *mechanism* this bug must have (a kernel-side write into
+recycled Go memory, invisible to `-race` and checkptr), so look for more
+Win32 calls that hand the kernel a pointer and return before it is done.
 
 **Do not "fix" it defensively.** A `if sub == nil { continue }` in the
 `subInstances` loop makes the symptom disappear while leaving live-memory

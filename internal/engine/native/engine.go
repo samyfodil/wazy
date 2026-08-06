@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
 	"runtime"
 	"slices"
 	"sort"
@@ -1110,20 +1109,7 @@ func sharedFunctionsFinalizer(sf *sharedFunctions) {
 	sf.listenerTrampolines = nil
 }
 
-// reproNoMunmap disables this finalizer's unmapping when WAZY_REPRO_NO_MUNMAP=1.
-// It is a discriminator for the open Windows heap corruption (TODOS.md's "##
-// OPEN BUG"): this finalizer runs on the GC's goroutine and calls VirtualFree
-// with MEM_RELEASE on Windows, which releases the whole reserved range so the
-// OS may hand it straight back to Go's own heap. If the crash disappears with
-// this set while the same shard crashes without it, the premature release is
-// the corrupting writer. Leaks executable memory by design -- test-only, never
-// set in normal operation.
-var reproNoMunmap = os.Getenv("WAZY_REPRO_NO_MUNMAP") == "1"
-
 func executablesFinalizer(exec *executables) {
-	if reproNoMunmap {
-		return
-	}
 	if len(exec.executable) > 0 {
 		if err := platform.MunmapCodeSegment(exec.executable); err != nil {
 			panic(err)
