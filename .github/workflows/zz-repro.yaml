@@ -37,6 +37,10 @@ on:
       starts_scale:
         description: "multiplier on each mode's process-start budget"
         default: "1"
+      run_bisect:
+        description: "also run the 12-shard bisect (already answered: a6c208d)"
+        type: boolean
+        default: false
 
 jobs:
   windows-stress:
@@ -213,6 +217,9 @@ jobs:
   # and only a poisoned one pays for the bisect (~6 steps over 41 commits).
   bisect:
     name: bisect ${{ matrix.shard }}
+    # Already answered (a6c208d), so this is off unless asked for. It was
+    # running on every dispatch and doubling the cost of each one.
+    if: ${{ github.event.inputs.run_bisect == 'true' }}
     runs-on: windows-2025
     strategy:
       fail-fast: false
