@@ -174,6 +174,33 @@ I/O and no executable mapping in this fixture.
   `syscall.LazyProc.Call` is `//go:uintptrescapes`, which forces the operand
   to the heap and keeps it alive for the call.
 
+**Bisected to `a6c208d`** ("perf(component): cut async per-call allocations
+(FirstLight 4->1, AwaitImport 11->5)", #4) — the first commit after the async
+runtime landed. Clean walk on a poisoned runner: `ee91a4e` 15/25, `e9c123e`
+22/25, `2011b15` 16/25, `b41d138` 19/25, `a6c208d` 17/25, with `53e8e4d`
+good.
+
+**Read that carefully: it EXPOSES, it does not necessarily cause.** `a6c208d`
+is pure Go with no `unsafe` in it — co-allocating task+guestTask in a
+`callbackFrame`, an inline `task.resultBuf [1]abi.Value`, and closure
+destructuring. Go is memory-safe, so none of that can corrupt a heap on its
+own; what it does is cut the async path from 4 allocations to 1, which moves
+every object's neighbours and changes when the GC runs. So it is the commit
+that made a latent defect visible. Reverting it would hide the bug, not fix
+it — don't.
+
+What it points at is the one class of pointer in this repo the GC cannot
+see, shared by BOTH engines (which matters, because the interpreter corrupts
+at the same rate): `wasm.TableInstance.References` is `[]uintptr`, and
+`functionFromUintptr` / `LookupFunction` resurrect a `*function` out of it,
+then read `tf.moduleInstance` — a real pointer — out of that. If the
+`involvingModuleInstances` retention edge is ever short, those `function`
+objects are collectable while the table still addresses them, and reading a
+pointer field out of one stores a pointer to freed memory into live memory.
+That is precisely "marked free object in span". Next step is to test that
+directly (make the resurrected references GC-visible and see whether the rate
+drops to zero on a poisoned runner) rather than to reason about it further.
+
 **A runner is either poisoned or clean — this is not a probability.** The
 single most important measurement so far. A dispatch that launched many short
 processes per shard produced: 15 shards with **0 crashes across 2888
@@ -186,6 +213,19 @@ first 100ms, and explains why a real Windows 10 laptop never reproduces.
 It also means **any experiment that compares modes across shards is
 confounded**, which is how three hypotheses were wrongly closed. Compare
 modes only within one runner.
+
+Poisoned-ness tracks the CPU vendor. Across 48 fingerprinted runners: every
+poisoned one was an Intel Xeon (Platinum 8573C / Emerald Rapids, and 6973P-C
+/ Granite Rapids); all 40 AMD EPYC runners (7763, 9V74) were clean, as were
+the 8370C ones. One 8573C measured clean, so the SKU is not the whole story —
+microcode is the untested axis and the fingerprint now records it.
+
+But the machine is not the bug. On a poisoned runner: `cpu.all=off` (every
+CPU-feature path in the Go runtime disabled) still crashes 19/25; a no-wazy
+control doing pointer-dense allocation, forced GC, goroutines on unbuffered
+channels and finalizers runs 0/40; `internal/wasm` runs 0/15; and
+`internal/engine/interpreter` runs 0/15 — while `internal/component/instance`
+runs 23/25. Intel exposes it; the defect is ours.
 
 **The map crashes are victims, not races.** `concurrent map read and map
 write` on the engine's compiled-module map, at `interpreter.go:96` and
