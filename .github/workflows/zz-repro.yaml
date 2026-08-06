@@ -192,3 +192,86 @@ jobs:
               tail -n 60 trimmed.log
             fi
           done
+
+  # A poisoned runner reproduces at ~92% per launch, which is a solid enough
+  # oracle to bisect with: 25 launches separate bad from good decisively. Most
+  # runners are clean, so shards self-select -- a clean one exits in seconds
+  # and only a poisoned one pays for the bisect (~6 steps over 41 commits).
+  bisect:
+    name: bisect ${{ matrix.shard }}
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0   # bisect needs real history
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+
+      - name: configure Pagefile
+        uses: al-cheb/configure-pagefile-action@v1.5
+        with:
+          minimum-size: 8GB
+          maximum-size: 16GB
+          disk-root: "D:"
+
+      - name: fingerprint
+        shell: pwsh
+        run: |
+          $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+          "cpu_name=$($cpu.Name)" | Tee-Object -FilePath fingerprint.txt
+          # Microcode revision: one 8573C runner was clean while five were
+          # poisoned, and this is the likeliest axis for that difference.
+          $k = "HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0"
+          $rev = (Get-ItemProperty $k -Name "Update Revision" -EA SilentlyContinue)."Update Revision"
+          "microcode=$(if ($rev) { [BitConverter]::ToString($rev) } else { 'unknown' })" |
+            Tee-Object -FilePath fingerprint.txt -Append
+
+      - name: probe, then bisect if this runner is poisoned
+        shell: bash
+        env:
+          GOTRACEBACK: system
+        run: |
+          set -u
+          RUN='TestAsyncWastConformance/trap-if-sync-and-waitable-set'
+          cp .github/bisect-pred.sh "$RUNNER_TEMP/pred.sh"
+          chmod +x "$RUNNER_TEMP/pred.sh"
+
+          go test -c -o "$RUNNER_TEMP/probe.exe" ./internal/component/instance/
+          c=0
+          for i in $(seq 1 25); do
+            set +e
+            "$RUNNER_TEMP/probe.exe" -test.run "$RUN" -test.count=1 -test.timeout=2m >/dev/null 2>&1
+            rc=$?
+            set -e
+            [ "$rc" -ne 0 ] && c=$((c+1))
+          done
+          echo "probe=$c/25" | tee -a bisect.txt
+          if [ "$c" -lt 5 ]; then
+            echo "CLEAN RUNNER -- no bisect here" | tee -a bisect.txt
+            exit 0
+          fi
+          echo "POISONED ($c/25) -- bisecting 53e8e4d..HEAD" | tee -a bisect.txt
+
+          git bisect start HEAD 53e8e4d 2>&1 | tee -a bisect.txt
+          set +e
+          git bisect run "$RUNNER_TEMP/pred.sh" 2>&1 | tee -a bisect.txt
+          set -e
+          git bisect log 2>&1 | tee -a bisect.txt
+          git bisect reset
+
+      - name: upload bisect result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bisect-${{ matrix.shard }}
+          path: |
+            bisect.txt
+            fingerprint.txt
+          retention-days: 14
+          if-no-files-found: ignore
+
