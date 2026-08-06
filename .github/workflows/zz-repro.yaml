@@ -167,9 +167,20 @@ jobs:
           # 27 commands -- one module_definition, then 13 module_instance /
           # assert_trap pairs -- so the smallest N that still crashes names the
           # exact command that makes the corruption reachable.
+          # The truncation sweep put the onset at N=7: N=3 and N=5 were 0/15,
+          # N=7 was 9/15, and it plateaus at 8-11/15 thereafter. N=7 is the
+          # third module_instance/assert_trap pair, i.e. the first STREAM
+          # assertion -- pairs 1 and 2 are future-read and future-write.
+          #
+          # But each pair also instantiates, and nothing closes until the suite
+          # ends, so "third assertion" and "three live instances" are
+          # confounded in a truncation sweep. WAZY_REPRO_ONLY_PAIR=k runs the
+          # module_definition plus ONLY the k'th pair, against exactly one
+          # instance, which separates them: a crash at k=3 alone means the
+          # stream assertion, a clean k=3 means it takes instance count.
           m=15
-          for k in 1 3 5 7 9 11 13 15 17 19 21 23 25 27; do
-            export WAZY_REPRO_MAX_CMDS=$k
+          for k in 1 2 3 4 5 6; do
+            export WAZY_REPRO_ONLY_PAIR=$k
             c=0
             for i in $(seq 1 $m); do
               set +e
@@ -177,8 +188,25 @@ jobs:
               rc=$?
               set -e
               if [ "$rc" -ne 0 ]; then
-                c=$((c+1)); [ "$c" -le 1 ] && cp run.log "crashes/cmds-$k.log"
+                c=$((c+1)); [ "$c" -le 1 ] && cp run.log "crashes/pair-$k.log"
               fi
+            done
+            unset WAZY_REPRO_ONLY_PAIR
+            echo "onlypair_$k=$c/$m" | tee -a rate.txt
+          done
+
+          # Re-run the truncation sweep too, skipping N=1 (which runs zero
+          # assertions and the harness reports as an error -- a false positive
+          # that read as 15/15 last time).
+          for k in 3 5 7 9; do
+            export WAZY_REPRO_MAX_CMDS=$k
+            c=0
+            for i in $(seq 1 $m); do
+              set +e
+              ./instance.test.exe -test.run "$RUN" -test.count=1 -test.timeout=30s > run.log 2>&1
+              rc=$?
+              set -e
+              [ "$rc" -ne 0 ] && c=$((c+1))
             done
             unset WAZY_REPRO_MAX_CMDS
             echo "maxcmds_$k=$c/$m" | tee -a rate.txt

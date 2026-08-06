@@ -422,9 +422,25 @@ func runAsyncWastSuite(t *testing.T, suite string) bool {
 		}
 	}
 
+	// WAZY_REPRO_ONLY_PAIR=k runs command 0 (the module_definition, which
+	// every instance needs) plus ONLY the k'th module_instance/assert_trap
+	// pair, 1-based. MAX_CMDS alone cannot separate "the k'th assertion is
+	// what breaks" from "k live instances is what breaks", because each pair
+	// instantiates and nothing is closed until the suite ends. This isolates
+	// one assertion against exactly one instance.
+	onlyPair := 0
+	if v := os.Getenv("WAZY_REPRO_ONLY_PAIR"); v != "" {
+		if n, convErr := strconv.Atoi(v); convErr == nil && n > 0 {
+			onlyPair = n
+		}
+	}
+
 	for ci, c := range manifest.Commands {
 		if ci >= maxCmds {
 			break
+		}
+		if onlyPair > 0 && ci != 0 && ci != 2*onlyPair-1 && ci != 2*onlyPair {
+			continue
 		}
 		switch c.Type {
 		case "module_definition":
