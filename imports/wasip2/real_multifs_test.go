@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
-	"github.com/samyfodil/wazy/component"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/component"
 )
 
 // real_multifs.component.wasm is a genuine rustc wasm32-wasip2 component

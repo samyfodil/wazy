@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
-	"github.com/samyfodil/wazy/component"
-	"github.com/samyfodil/wazy/internal/component/testfixtures"
 	"testing"
 
 	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/component"
 	"github.com/samyfodil/wazy/internal/component/abi"
+	"github.com/samyfodil/wazy/internal/component/testfixtures"
 )
 
 // real_hello.component.wasm is a genuine rustc wasm32-wasip2 wasi:cli/command

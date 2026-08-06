@@ -2,9 +2,10 @@ package binary
 
 import (
 	"bytes"
-	"github.com/samyfodil/wazy/internal/component/testfixtures"
 	"strings"
 	"testing"
+
+	"github.com/samyfodil/wazy/internal/component/testfixtures"
 )
 
 // host_component.wasm is a real component assembled by wasm-tools from

@@ -2,8 +2,6 @@ package wasip2
 
 import (
 	"context"
-	"github.com/samyfodil/wazy/component"
-	"github.com/samyfodil/wazy/component/componenttest"
 	iofs "io/fs"
 	"os"
 	"path/filepath"
@@ -11,6 +9,8 @@ import (
 	"testing/fstest"
 
 	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/component"
+	"github.com/samyfodil/wazy/component/componenttest"
 	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/sys"
 )

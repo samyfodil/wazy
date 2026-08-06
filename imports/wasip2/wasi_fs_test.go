@@ -2,14 +2,14 @@ package wasip2
 
 import (
 	"context"
-	"github.com/samyfodil/wazy/component"
-	"github.com/samyfodil/wazy/component/componenttest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/component"
+	"github.com/samyfodil/wazy/component/componenttest"
 	"github.com/samyfodil/wazy/internal/component/abi"
 )
 

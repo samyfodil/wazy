@@ -481,3 +481,39 @@ func TestModuleInstance_ensureResourcesClosed(t *testing.T) {
 		require.NotNil(t, mem.expBuffer)
 	})
 }
+
+// TestFailIfClosed_DeferredCleanupRunsOnce pins that the deferred resource
+// cleanup happens exactly once no matter how many times FailIfClosed is
+// called.
+//
+// FailIfClosed runs on every host-function entry. When a module was closed
+// via the deferred path (CloseModuleOnCanceledOrTimeout), it performs the
+// cleanup that close skipped -- and ensureResourcesClosed is NOT idempotent:
+// its importer branch decrements mem.importers. Re-running it under-counts
+// the live importers of a shared memory, so the count hits zero while a
+// module is still using it and the next close pools that buffer out from
+// under a live module.
+func TestFailIfClosed_DeferredCleanupRunsOnce(t *testing.T) {
+	mem := &MemoryInstance{Buffer: make([]byte, 8), Min: 1, Cap: 1, Max: 1, importers: 2}
+	m := &ModuleInstance{MemoryInstance: mem, Engine: &mockModuleEngine{}}
+
+	// Mark it closed via the deferred path: resources are NOT released yet.
+	// (setExitCode directly, rather than closeWithExitCodeWithoutClosingResource,
+	// which also wants a Store to deregister from.)
+	if !m.setExitCode(0, exitCodeFlagResourceNotClosed) {
+		t.Fatal("setExitCode")
+	}
+
+	// Every host-function entry calls this. It must do the deferred cleanup
+	// on the first call and nothing on the rest.
+	for i := 0; i < 5; i++ {
+		if err := m.FailIfClosed(); err == nil {
+			t.Fatal("FailIfClosed on a closed module must report the exit error")
+		}
+	}
+
+	if mem.importers != 1 {
+		t.Fatalf("importers = %d after 5 FailIfClosed calls, want 1: the deferred "+
+			"cleanup ran more than once, so a still-live importer's reference was dropped", mem.importers)
+	}
+}

@@ -1735,6 +1735,11 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 	// pool until liftResult (and post-return) have finished reading it.
 	rawResults := stack[:numResults]
 
+	// Re-fetch the memory view: the guest may have grown memory during the
+	// call, which replaces the backing array -- and the old one may already
+	// have gone back to the buffer pool, so lifting through the pre-call
+	// slice can read a buffer that now belongs to a different module.
+	mem, memAvailable = memoryBytesOf(be.mod)
 	results, err := in.liftResult(be, rawResults, mem, memAvailable, exportName)
 	if err != nil {
 		putUint64Slice(stackPtr)

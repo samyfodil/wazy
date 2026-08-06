@@ -5,12 +5,12 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
-	"github.com/samyfodil/wazy/imports/wasip2"
 	"log"
 	"strings"
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/component"
+	"github.com/samyfodil/wazy/imports/wasip2"
 )
 
 // adder.wasm is a Component Model component exporting the

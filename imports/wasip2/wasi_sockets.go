@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/samyfodil/wazy/component"
 	"net"
 	"strings"
 	"sync"
+
+	"github.com/samyfodil/wazy/component"
 )
 
 // This file extends wasi.go/wasi_fs.go's WASI 0.2 host surface with a real

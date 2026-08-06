@@ -4,12 +4,12 @@ import (
 	"context"
 	_ "embed"
 	"errors"
-	"github.com/samyfodil/wazy/component"
 	"net"
 	"runtime"
 	"testing"
 
 	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/component"
 	"github.com/samyfodil/wazy/internal/component/abi"
 )
 

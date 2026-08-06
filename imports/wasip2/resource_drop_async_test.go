@@ -3,10 +3,10 @@ package wasip2
 import (
 	"bytes"
 	"context"
-	"github.com/samyfodil/wazy/component"
 	"testing"
 
 	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/component"
 	"github.com/samyfodil/wazy/internal/component/binary"
 )
 

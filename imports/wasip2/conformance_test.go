@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
-	"github.com/samyfodil/wazy/component"
 	"io"
 	"testing"
 
 	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/component"
 	"github.com/samyfodil/wazy/internal/component/abi"
 )
 

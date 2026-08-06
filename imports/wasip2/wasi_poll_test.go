@@ -2,10 +2,10 @@ package wasip2
 
 import (
 	"context"
-	"github.com/samyfodil/wazy/component/componenttest"
 	"testing"
 	"time"
 
+	"github.com/samyfodil/wazy/component/componenttest"
 	"github.com/samyfodil/wazy/internal/component/abi"
 )
 

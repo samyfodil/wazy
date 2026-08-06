@@ -46,7 +46,6 @@ func TestCompileCache_TwoHelloLiveShareShims(t *testing.T) {
 	if n <= 4 {
 		t.Fatalf("cache entries with two live instances: got %d, want > 4 (core modules and shims both cached)", n)
 	}
-
 }
 
 // TestCompileCache_HelloReinstantiateAfterCloseOnSameRuntime is

@@ -3,9 +3,10 @@ package wasip2
 import (
 	"context"
 	"fmt"
-	"github.com/samyfodil/wazy/component"
 	"sync"
 	"time"
+
+	"github.com/samyfodil/wazy/component"
 )
 
 // wasiPoll is the shared wasi:io/poll + wasi:clocks host. It owns the single

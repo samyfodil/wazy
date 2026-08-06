@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
-	"github.com/samyfodil/wazy/component"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/component"
 )
 
 // real_udp.component.wasm is a genuine rustc wasm32-wasip2 component built

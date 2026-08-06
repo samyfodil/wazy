@@ -3,10 +3,10 @@ package wasip2
 import (
 	"context"
 	_ "embed"
-	"github.com/samyfodil/wazy/component"
 	"testing"
 
 	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/component"
 )
 
 // res20_own_dtor.component.wasm is wasmtime/resources.wast module 20: a single

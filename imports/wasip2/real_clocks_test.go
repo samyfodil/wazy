@@ -5,11 +5,11 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
-	"github.com/samyfodil/wazy/component"
 	"testing"
 	"time"
 
 	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/component"
 )
 
 // real_clocks.component.wasm is a genuine rustc wasm32-wasip2 component built

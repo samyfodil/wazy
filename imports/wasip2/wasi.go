@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
-	"github.com/samyfodil/wazy/component"
 	"io"
 	"net"
 	"net/http"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/component"
 )
 
 // This file implements a host WASI 0.2 ("wasip2") surface sufficient to run

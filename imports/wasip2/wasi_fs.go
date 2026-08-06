@@ -3,13 +3,13 @@ package wasip2
 import (
 	"context"
 	"fmt"
-	"github.com/samyfodil/wazy/component"
 	iofs "io/fs"
 	"path"
 	"strings"
 	"sync"
 
 	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/component"
 	"github.com/samyfodil/wazy/sys"
 )
 

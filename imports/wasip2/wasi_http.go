@@ -37,7 +37,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/samyfodil/wazy/component"
 	"io"
 	"net/http"
 	"net/url"
@@ -45,6 +44,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/samyfodil/wazy/component"
 )
 
 // Resource type tags for wasi:http/types resources. See resource.go; tags

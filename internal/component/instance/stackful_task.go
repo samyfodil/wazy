@@ -196,6 +196,11 @@ func (st *stackfulTask) run() error {
 
 	// sync-opts: lift flat results -> task.return_ -> post-return (~2156-2163).
 	rawResults := stack[:be.coreResultCount]
+	// Re-fetch the memory view: the guest may have grown memory while the task
+	// ran, replacing the backing array (and possibly pooling the old one), so
+	// the pre-call slice can no longer be trusted for lifting. Same reasoning
+	// as invoke's re-fetch in instance.go.
+	mem, memAvailable = memoryBytesOf(be.mod)
 	results, err := in.liftResult(be, rawResults, mem, memAvailable, st.exportName)
 	if err != nil {
 		putUint64Slice(stackPtr)

@@ -2,9 +2,6 @@ package wasip2
 
 import (
 	"context"
-	"github.com/samyfodil/wazy"
-	"github.com/samyfodil/wazy/component"
-	"github.com/samyfodil/wazy/component/componenttest"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/component"
+	"github.com/samyfodil/wazy/component/componenttest"
 	"github.com/samyfodil/wazy/internal/component/abi"
 )
 

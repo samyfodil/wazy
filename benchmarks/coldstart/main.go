@@ -10,10 +10,10 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/samyfodil/wazy/imports/wasip2"
 	"os"
 
 	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/imports/wasip2"
 	"github.com/samyfodil/wazy/internal/component/instance"
 )
 

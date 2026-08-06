@@ -3,7 +3,6 @@ package wasip2
 import (
 	"context"
 	_ "embed"
-	"github.com/samyfodil/wazy/component"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/component"
 )
 
 //go:embed testdata/real_http_incoming.component.wasm

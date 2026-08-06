@@ -3,12 +3,12 @@ package wasip2
 import (
 	"embed"
 	"fmt"
-	"github.com/samyfodil/wazy/component/componenttest"
 	"path"
 	"sort"
 	"strings"
 	"testing"
 
+	"github.com/samyfodil/wazy/component/componenttest"
 	"github.com/samyfodil/wazy/internal/component/wit"
 )
 

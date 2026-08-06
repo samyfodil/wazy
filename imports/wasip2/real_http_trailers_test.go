@@ -3,13 +3,13 @@ package wasip2
 import (
 	"context"
 	_ "embed"
-	"github.com/samyfodil/wazy/component"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/component"
 )
 
 // real_http_trailers.component.wasm is a genuine rustc wasm32-wasip2
