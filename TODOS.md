@@ -211,21 +211,30 @@ That is precisely "marked free object in span". Next step is to test that
 directly (make the resurrected references GC-visible and see whether the rate
 drops to zero on a poisoned runner) rather than to reason about it further.
 
-**The trigger is INSTANCE COUNT, threshold 3 — not any assertion.** Measured
-on four poisoned runners (2x 8573C, 2x 6973P-C), all agreeing. Repeating ONE
-harmless pair (`join-during-sync-future-read`, which is clean in isolation)
-gives: 2 instances 0-1/15, **3 instances 3-7/15**, 4-8 instances 4-10/15. And
-no single pair crashes alone (`onlypair_1..6` all 0/15) while a truncation
-sweep shows onset at three pairs. So which assertion runs is irrelevant; what
-matters is that three component instances have been created from the same
-definition and none closed.
+⚠️ **MEASURE ONLY AGAINST THE FULL SUITE. The reduced repro is
+layout-fragile.** `repeat3` + `GOGC=off` measured 7-8/15 on one build and
+0-1/15 on the next, across three poisoned runners, with **no logic change**
+between them — only added instrumentation (one call each on the
+memory-creation and memory-import paths, present even when disabled). So a
+candidate fix compared against the reduced repro will read as a success
+against an already-zero baseline; that is exactly how the pool kill-switch
+nearly passed. The full-suite probe stays at 17-21/25 on a poisoned runner —
+use it.
 
-Two readings of "three" remain to be separated, and a dispatch is in flight
-for it: (a) a real per-instance structure whose backing array reallocates on
-the third append — Go grows 1→2→4, so the 3rd frees the old array — or (b)
-merely enough allocation to trigger the FIRST GC, since at two instances the
-process may exit before any collection runs. Forcing collection at two
-instances (`GOGC=1`) tells them apart.
+**Recorded for the record, but no longer load-bearing** (it was real on the
+build that measured it, and did not transfer): the trigger looked like pure
+INSTANCE COUNT with threshold 3, measured on four poisoned runners. Repeating
+ONE harmless pair (`join-during-sync-future-read`, clean in isolation) gave 2
+instances 0-1/15, 3 instances 3-7/15, 4-8 instances 4-10/15, while no single
+pair crashed alone (`onlypair_1..6` all 0/15). The two readings of "three" —
+a per-instance structure reallocating on the third append (Go grows 1→2→4),
+versus merely enough allocation to trigger the first GC — were never
+separated, because the repro stopped reproducing first.
+
+What survives from that line of work is the tooling, which is worth reusing:
+`WAZY_REPRO_MAX_CMDS`, `WAZY_REPRO_ONLY_PAIR`, `WAZY_REPRO_PAIR_REPEAT` in
+the wast harness, and `WAZY_REPRO_NO_MEMPOOL` / `WAZY_REPRO_POOL_AUDIT` in
+`internal/wasm`.
 
 Note this retires the earlier "first STREAM assertion" reading. Instance count
 and assertion index are confounded in a truncation sweep, because every pair
