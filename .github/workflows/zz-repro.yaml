@@ -41,7 +41,15 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
-        mode: [native, interpreter, clobber, checkptr]
+        # native   - control: every crash so far (4 of 4) has been a native shard.
+        # nomunmap - native with executablesFinalizer's VirtualFree disabled.
+        #            THE discriminator: if native crashes and nomunmap does not,
+        #            the premature MEM_RELEASE is the corrupting writer.
+        # interp   - 8/8 clean so far; volume here settles whether the single
+        #            historical interpreter crash (which is what "Not the JIT"
+        #            rests on) was real or a one-off.
+        # clobber  - fault at the culprit rather than a later victim.
+        mode: [native, nomunmap, interpreter, clobber]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -72,9 +80,9 @@ jobs:
           flags="-count=$count"
           case "${{ matrix.mode }}" in
             native)      ;;
+            nomunmap)    export WAZY_REPRO_NO_MUNMAP=1 ;;
             interpreter) export WAZY_REPRO_INTERPRETER=1 ;;
             clobber)     flags="-count=1200"; export GODEBUG=clobberfree=1; export GOGC=1 ;;
-            checkptr)    flags="-count=400 -race" ;;
           esac
           set +e
           go test ./internal/component/instance/ \
