@@ -129,18 +129,38 @@ jobs:
             unset GODEBUG
           done
 
-          # Control: is this machine corrupting ANY Go program, or only wazy?
-          # .github/gcstress has no wazy in it -- just a pointer-dense heap and
-          # forced GCs. If it corrupts here too, the fault is not in this repo.
+          # Controls: is this machine corrupting ANY Go program, or only wazy?
+          # .github/gcstress has no wazy in it. "heap" (allocation + forced GC)
+          # already measured 0/40 on three poisoned runners, so allocation
+          # alone is not enough. "sched" adds what wazy actually does that heap
+          # does not: many goroutines handing a baton over unbuffered channels,
+          # plus finalizers -- the async scheduler's shape.
           go build -o gcstress.exe ./.github/gcstress
-          c=0
-          for i in $(seq 1 40); do
-            set +e; GOGC=1 ./gcstress.exe > ctl.log 2>&1; rc=$?; set -e
-            if [ "$rc" -ne 0 ]; then
-              c=$((c+1)); [ "$c" -le 2 ] && cp ctl.log "crashes/gcstress-$c.log"
-            fi
+          for m in heap sched; do
+            c=0
+            for i in $(seq 1 40); do
+              set +e; GOGC=1 ./gcstress.exe "$m" > ctl.log 2>&1; rc=$?; set -e
+              if [ "$rc" -ne 0 ]; then
+                c=$((c+1)); [ "$c" -le 2 ] && cp ctl.log "crashes/gcstress-$m-$c.log"
+              fi
+            done
+            echo "gcstress_${m}_no_wazy=$c/40" | tee -a rate.txt
           done
-          echo "gcstress_no_wazy=$c/40" | tee -a rate.txt
+
+          # Breadth: is the corruption specific to the component/async suite, or
+          # does any wazy workload do it on this box?
+          for pkg in internal/wasm internal/engine/interpreter; do
+            tag=$(echo "$pkg" | tr / -)
+            go test -c -o "pkg-$tag.exe" "./$pkg" 2>/dev/null || continue
+            c=0
+            for i in $(seq 1 15); do
+              set +e; ./"pkg-$tag.exe" -test.timeout=3m > pkg.log 2>&1; rc=$?; set -e
+              if [ "$rc" -ne 0 ]; then
+                c=$((c+1)); [ "$c" -le 1 ] && cp pkg.log "crashes/pkg-$tag-$c.log"
+              fi
+            done
+            echo "pkg_$tag=$c/15" | tee -a rate.txt
+          done
 
       - name: upload crash logs
         if: always()
