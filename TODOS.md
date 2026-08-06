@@ -160,37 +160,49 @@ import the same table and are appended to the retention list before `$m`
 installs active elements). It also confirmed the interpreter reaches no Win32
 I/O and no executable mapping in this fixture.
 
-- **Not the Green Tea GC.** Go 1.26 made it the default and every symptom
-  here is a collector symptom, so this looked strong. It is wrong: a shard
-  running Go 1.26 with `GOEXPERIMENT=nogreenteagc` crashed. Go 1.25 (where
-  Green Tea is opt-in, so off) was clean across 4 shards in the same run, but
-  that proves nothing at this failure rate — the nogreentea crash is what
-  settles it. Disabling the collector does not prevent the bug.
-- **Not the executables finalizer / VirtualFree.** `executablesFinalizer`
-  releasing JIT code with `MEM_RELEASE` (so Windows could hand the range back
-  to Go's heap) was the best-looking theory: it fits every symptom and is
-  invisible to `-race`. It is wrong. A 16-shard dispatch ran native with and
-  without the unmap under identical load and **both** crashed once, and the
-  interpreter — which never maps executable memory at all — crashed in the
-  same run. Don't rebuild this theory.
+- ⚠️ **RETRACTED: Green Tea GC, the executables finalizer, and
+  engine-independence.** Each was "ruled out" by a 16-shard dispatch in which
+  a shard running the mode still crashed. Those conclusions are **invalid**,
+  because crashes turn out to be a property of the RUNNER (see the poisoned-
+  runner note below), and every mode ran on a different runner. Those sweeps
+  compared machines, not modes. All three hypotheses are open again, and
+  `zz-repro.yaml` now probes a runner first and sweeps every mode on that one
+  box so the comparison is actually controlled.
 - **Not `internal/platform/time_windows.go`.** Its
   `uintptr(unsafe.Pointer(&counter))` into `LazyProc.Call` *looks* like the
   classic pointer-to-uintptr violation but is not one:
   `syscall.LazyProc.Call` is `//go:uintptrescapes`, which forces the operand
   to the heap and keeps it alive for the call.
 
-**The crash is engine-independent, and the map crashes are victims, not
-races.** A 16-shard run crashed once each in native, interpreter, clobber and
-no-munmap — an even spread. Two of those are `concurrent map read and map
-write` on the engine's compiled-module map, at
-`interpreter.go:96` and `engine_cache.go:115`, both reached from
-`buildMergedCanonHostModule` (graph.go:1799). Neither is a real race: all
-accesses to both maps correctly hold the engine mutex, and under
-`GOTRACEBACK=system` (which, unlike `all`, shows runtime-internal goroutines)
-every one of the 9 live goroutines is accounted for and idle — the finalizer
-and cleanup goroutines included. So `hashWriting` was set on a corrupted map
-header. That map is simply the busiest allocation in the hot path, i.e. the
-likeliest victim.
+**A runner is either poisoned or clean — this is not a probability.** The
+single most important measurement so far. A dispatch that launched many short
+processes per shard produced: 15 shards with **0 crashes across 2888
+launches**, and one shard with **3 crashes in its first 4 launches** (it
+stopped at 3 by design). So a given runner either reproduces almost every
+launch or never reproduces at all. That reframes "~1 CI run in 15" as the
+fraction of poisoned runners, explains why the crash always lands in the
+first 100ms, and explains why a real Windows 10 laptop never reproduces.
+
+It also means **any experiment that compares modes across shards is
+confounded**, which is how three hypotheses were wrongly closed. Compare
+modes only within one runner.
+
+**The map crashes are victims, not races.** `concurrent map read and map
+write` on the engine's compiled-module map, at `interpreter.go:96` and
+`engine_cache.go:115`, both reached from `buildMergedCanonHostModule`
+(graph.go:1799). Neither is a real race: all accesses to both maps correctly
+hold the engine mutex, and under `GOTRACEBACK=system` (which, unlike `all`,
+shows runtime-internal goroutines) every one of the 9 live goroutines is
+accounted for and idle — finalizer and cleanup included. So `hashWriting` was
+set on a corrupted map header. That map is simply the busiest allocation in
+the hot path, i.e. the likeliest victim.
+
+**A DEP violation is in the mix.** One crash is `Exception 0xc0000005` with
+first parameter `0x8` — attempted EXECUTE on non-executable memory — at
+`PC=0x7ffab0a8f940`, outside the wazy image entirely, unwinding from
+`DeleteCompiledModule`'s deferred unlock. Another is a wild
+`0xffffffffffffffff` fault in `Close`'s `closers` loop. Both from the same
+poisoned runner within four launches.
 
 **The unit of risk is a PROCESS START, not an iteration.** Every crash
 captured so far died between 0.01s and 0.115s — inside a `-count=2500` run,

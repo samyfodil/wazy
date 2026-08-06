@@ -8,16 +8,21 @@
 # gccheckmark, GOMAXPROCS 2, 48-way oversubscription and both Go 1.26 patch
 # levels, all clean. It needs this runner image.
 #
-# WHAT THIS MEASURES, and why it changed shape. Every crash captured so far
-# died between 0.01s and 0.115s -- inside a -count=2500 run, i.e. during its
-# FIRST iteration. The unit of risk is a PROCESS START, not an iteration:
-# 4 dispatches produced 9 crashes from ~64 starts, about 1 in 7. Cranking
-# -count bought nothing, because each shard was a single sample.
+# WHAT THIS MEASURES, and why it keeps changing shape.
 #
-# So each shard now launches MANY short processes and reports crashes/starts.
-# A dispatch yields a rate instead of a coin flip, which is what a bisect
-# needs as an oracle. The four modes differ only in -count, to calibrate
-# which value maximises the rate; once known, collapse to that one.
+# 1. Every crash dies between 0.01s and 0.115s -- inside a -count=2500 run,
+#    i.e. during its FIRST iteration. The unit of risk is a PROCESS START,
+#    not an iteration, so cranking -count bought nothing.
+# 2. Crashes are a property of the MACHINE, not a probability. In one
+#    dispatch a single shard crashed 3 times in its first 4 launches while
+#    the other 15 shards were clean across 2888 launches. Runners are either
+#    poisoned (crashes almost every launch) or clean (never crashes).
+#
+# (2) means comparing modes ACROSS shards compares machines, not modes --
+# which silently invalidated three earlier "discriminator" sweeps. So each
+# shard now PROBES its own runner first and only sweeps the modes if that
+# runner turns out to be poisoned, keeping every comparison on one box.
+# The fingerprint step exists to correlate poisoned-ness with CPU/host.
 #
 # Capture rule (learned the hard way): never inline `head` of a crash log. The
 # clobberfree crash OPENS with a GC span dump of hundreds of "alloc unmarked"
@@ -41,7 +46,7 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
-        mode: [c1, c5, c50, c500]
+        mode: [a, b, c, d]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -55,44 +60,73 @@ jobs:
           maximum-size: 16GB
           disk-root: "D:"
 
-      - name: measure the crash rate per process start
+      - name: fingerprint this runner
+        shell: pwsh
+        run: |
+          $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+          $os  = Get-CimInstance Win32_OperatingSystem
+          $cs  = Get-CimInstance Win32_ComputerSystem
+          @(
+            "cpu_name=$($cpu.Name)"
+            "cpu_id=$($cpu.ProcessorId)"
+            "cores=$($cpu.NumberOfCores) logical=$($cpu.NumberOfLogicalProcessors)"
+            "caption=$($os.Caption) build=$($os.BuildNumber) ver=$($os.Version)"
+            "manufacturer=$($cs.Manufacturer) model=$($cs.Model)"
+            "hypervisor=$($cs.HypervisorPresent)"
+            "ram_gb=$([math]::Round($cs.TotalPhysicalMemory/1GB,1))"
+          ) | Tee-Object -FilePath fingerprint.txt
+
+      - name: probe, then sweep every mode ON THIS SAME RUNNER
         shell: bash
         env:
-          # `system`, not `all`: `all` hides runtime-internal goroutines, and a
-          # finalizer goroutine was the thing we most needed to see. It is what
-          # showed that the "concurrent map read and map write" crashes have no
-          # concurrent writer at all.
           GOTRACEBACK: system
         run: |
           set -u
-          scale="${{ github.event.inputs.starts_scale || '1' }}"
-          case "${{ matrix.mode }}" in
-            c1)   COUNT=1;   STARTS=$((600 * scale)) ;;
-            c5)   COUNT=5;   STARTS=$((300 * scale)) ;;
-            c50)  COUNT=50;  STARTS=$((60  * scale)) ;;
-            c500) COUNT=500; STARTS=$((12  * scale)) ;;
-          esac
+          # Crash counts are a property of the MACHINE, not of a probability:
+          # one shard of a previous dispatch crashed 3 times in its first 4
+          # launches while 15 shards were clean across 2888 launches. So every
+          # mode must be compared on ONE runner -- comparing across shards
+          # compares machines, not modes, which invalidated the earlier sweeps.
           go version
-          # Build ONCE; every start then measures the runtime, not the compiler.
           go test -c -o instance.test.exe ./internal/component/instance/
           mkdir -p crashes
-          crashes=0
-          for i in $(seq 1 "$STARTS"); do
-            set +e
-            ./instance.test.exe \
-              -test.run 'TestAsyncWastConformance/trap-if-sync-and-waitable-set' \
-              -test.count="$COUNT" -test.timeout=5m > run.log 2>&1
-            rc=$?
-            set -e
-            if [ "$rc" -ne 0 ]; then
-              crashes=$((crashes + 1))
-              cp run.log "crashes/crash-$crashes.log"
-              # Three samples is plenty to characterise a mode; keep the shard short.
-              [ "$crashes" -ge 3 ] && break
-            fi
-          done
-          printf 'mode=%s count=%s starts=%s crashes=%s\n' \
-            "${{ matrix.mode }}" "$COUNT" "$i" "$crashes" | tee rate.txt
+          RUN='TestAsyncWastConformance/trap-if-sync-and-waitable-set'
+
+          launch() {  # launch <tag> <n>; echoes crash count
+            local tag="$1" n="$2" c=0 i
+            for i in $(seq 1 "$n"); do
+              set +e
+              ./instance.test.exe -test.run "$RUN" -test.count=1 -test.timeout=2m \
+                > "run.log" 2>&1
+              local rc=$?
+              set -e
+              if [ "$rc" -ne 0 ]; then
+                c=$((c+1))
+                [ "$c" -le 2 ] && cp run.log "crashes/$tag-$c.log"
+              fi
+            done
+            echo "$c"
+          }
+
+          probe=$(launch probe 25)
+          echo "probe=$probe/25" | tee -a rate.txt
+          if [ "$probe" -eq 0 ]; then
+            echo "CLEAN RUNNER -- skipping the sweep" | tee -a rate.txt
+            exit 0
+          fi
+          echo "POISONED RUNNER -- sweeping modes here" | tee -a rate.txt
+
+          n=25
+          echo "native=$(launch native $n)/$n" | tee -a rate.txt
+          export WAZY_REPRO_INTERPRETER=1
+          echo "interpreter=$(launch interp $n)/$n" | tee -a rate.txt
+          unset WAZY_REPRO_INTERPRETER
+          GOEXPERIMENT=nogreenteagc go test -c -o instance.test.exe ./internal/component/instance/
+          echo "nogreentea=$(launch nogreentea $n)/$n" | tee -a rate.txt
+          go test -c -o instance.test.exe ./internal/component/instance/
+          export GODEBUG=clobberfree=1 GOGC=1
+          echo "clobber=$(launch clobber $n)/$n" | tee -a rate.txt
+          unset GODEBUG GOGC
 
       - name: upload crash logs
         if: always()
@@ -102,6 +136,7 @@ jobs:
           path: |
             crashes/
             rate.txt
+            fingerprint.txt
           retention-days: 14
           if-no-files-found: ignore
 
