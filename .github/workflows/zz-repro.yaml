@@ -1,37 +1,37 @@
 # Diagnostic harness for the open Windows *Instance teardown corruption
 # (TODOS.md, "## OPEN BUG"). Manual-dispatch only -- it costs nothing until
-# someone asks for it, and it deliberately does NOT run on push.
+# someone asks for it, and it never fires on push.
 #
-# Why this exists rather than just re-running CI: the crash is ~1 CI run in 15
-# and does not reproduce on Linux at all (~10k iterations clean), so a Windows
-# runner under -count stress is the only known way to iterate on it.
+# Why CI rather than a local box: the bug does not reproduce on Linux at all
+# (~10k iterations clean), and it does not reproduce on a real Windows 10
+# laptop either -- ~1600 process starts across plain, GOGC=1, clobberfree,
+# gccheckmark, GOMAXPROCS 2, 48-way oversubscription and both Go 1.26 patch
+# levels, all clean. It needs this runner image.
 #
-# The matrix is a discriminator, not just a stressor:
-#   native      - baseline
-#   interpreter - the JIT swapped out. Has reproduced "inconsistent mutex
-#                 state", which is what rules out generated code.
-#   clobber     - GODEBUG=clobberfree=1 + GOGC=1, so a use-after-free faults at
-#                 the culprit rather than at some later victim.
-#   checkptr    - -race enables checkptr, which flags an unsafe.Pointer misuse
-#                 at the conversion site. The GC's own "marked free object"
-#                 message suggests exactly this.
+# WHAT THIS MEASURES, and why it changed shape. Every crash captured so far
+# died between 0.01s and 0.115s -- inside a -count=2500 run, i.e. during its
+# FIRST iteration. The unit of risk is a PROCESS START, not an iteration:
+# 4 dispatches produced 9 crashes from ~64 starts, about 1 in 7. Cranking
+# -count bought nothing, because each shard was a single sample.
 #
-# Capture rule (learned the hard way): a `head -n 160` of the output is useless
-# here, because the clobber shard's crash begins with a span dump of hundreds of
-# "alloc unmarked" lines that eats the entire budget before the stack trace is
-# reached. So: always upload the raw log as an artifact (artifacts are not
-# truncated), and when inlining, strip the span dump first.
+# So each shard now launches MANY short processes and reports crashes/starts.
+# A dispatch yields a rate instead of a coin flip, which is what a bisect
+# needs as an oracle. The four modes differ only in -count, to calibrate
+# which value maximises the rate; once known, collapse to that one.
+#
+# Capture rule (learned the hard way): never inline `head` of a crash log. The
+# clobberfree crash OPENS with a GC span dump of hundreds of "alloc unmarked"
+# lines, which ate the entire budget and threw away the stack trace behind it.
+# Upload raw logs as artifacts (not truncated) and strip the span dump before
+# inlining anything.
 name: zz-repro
 
 on:
   workflow_dispatch:
     inputs:
-      count:
-        description: "-count for the native/interpreter shards"
-        default: "2500"
-      shards:
-        description: "shards per mode (1-4)"
-        default: "4"
+      starts_scale:
+        description: "multiplier on each mode's process-start budget"
+        default: "1"
 
 jobs:
   windows-stress:
@@ -41,28 +41,12 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
-        # A 16-shard dispatch lands roughly 1-3 crashes, spread evenly across
-        # modes -- see TODOS.md for what that evenness already ruled out.
-        #
-        # native     - control.
-        # nogreentea - Go 1.26 with GOEXPERIMENT=nogreenteagc. Go 1.26 made the
-        #              Green Tea GC the default, and EVERY symptom here is a
-        #              collector symptom: the sweep-phase "marked free object in
-        #              span" zombie check, objects reading back freshly-zeroed
-        #              (freed then reallocated), a spuriously-set map
-        #              hashWriting flag with no concurrent writer. That is
-        #              invisible to -race and checkptr precisely because no Go
-        #              code performs the bad write -- the collector performs a
-        #              bad free.
-        # go125      - Go 1.25, where Green Tea is opt-in and therefore off.
-        #              Confirms nogreentea rather than trusting one toggle.
-        # clobber    - fault at the culprit rather than a later victim.
-        mode: [native, nogreentea, go125, clobber]
+        mode: [c1, c5, c50, c500]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: ${{ matrix.mode == 'go125' && '1.25' || '1.26' }}
+          go-version: "1.26"
 
       - name: configure Pagefile
         uses: al-cheb/configure-pagefile-action@v1.5
@@ -71,65 +55,71 @@ jobs:
           maximum-size: 16GB
           disk-root: "D:"
 
-      - name: stress the async wast suite
+      - name: measure the crash rate per process start
         shell: bash
         env:
-          # `system`, not `all`: `all` hides runtime-internal goroutines, and
-          # runfinq (the finalizer goroutine) is the ONLY other actor in this
-          # program. The native shard's "concurrent map read and map write" at
-          # engine_cache.go:115 fired while the reader held e.mux.Lock(), with
-          # every writer of that map also holding it and no concurrent writer
-          # anywhere in the `all` traceback -- exactly what an invisible
-          # finalizer goroutine (executablesFinalizer -> MunmapCodeSegment ->
-          # VirtualFree) would look like.
+          # `system`, not `all`: `all` hides runtime-internal goroutines, and a
+          # finalizer goroutine was the thing we most needed to see. It is what
+          # showed that the "concurrent map read and map write" crashes have no
+          # concurrent writer at all.
           GOTRACEBACK: system
         run: |
-          count="${{ github.event.inputs.count || '2500' }}"
-          flags="-count=$count"
+          set -u
+          scale="${{ github.event.inputs.starts_scale || '1' }}"
           case "${{ matrix.mode }}" in
-            native)      ;;
-            nogreentea)  export GOEXPERIMENT=nogreenteagc ;;
-            go125)       ;;   # Green Tea is opt-in on 1.25, so it is already off
-            clobber)     flags="-count=1200"; export GODEBUG=clobberfree=1; export GOGC=1 ;;
+            c1)   COUNT=1;   STARTS=$((600 * scale)) ;;
+            c5)   COUNT=5;   STARTS=$((300 * scale)) ;;
+            c50)  COUNT=50;  STARTS=$((60  * scale)) ;;
+            c500) COUNT=500; STARTS=$((12  * scale)) ;;
           esac
           go version
-          echo "GOEXPERIMENT=$(go env GOEXPERIMENT)"
-          set +e
-          go test ./internal/component/instance/ \
-            -run 'TestAsyncWastConformance/trap-if-sync-and-waitable-set' \
-            -timeout 55m $flags > out.log 2>&1
-          echo "rc=$?" | tee rc.txt
-          exit 0
+          # Build ONCE; every start then measures the runtime, not the compiler.
+          go test -c -o instance.test.exe ./internal/component/instance/
+          mkdir -p crashes
+          crashes=0
+          for i in $(seq 1 "$STARTS"); do
+            set +e
+            ./instance.test.exe \
+              -test.run 'TestAsyncWastConformance/trap-if-sync-and-waitable-set' \
+              -test.count="$COUNT" -test.timeout=5m > run.log 2>&1
+            rc=$?
+            set -e
+            if [ "$rc" -ne 0 ]; then
+              crashes=$((crashes + 1))
+              cp run.log "crashes/crash-$crashes.log"
+              # Three samples is plenty to characterise a mode; keep the shard short.
+              [ "$crashes" -ge 3 ] && break
+            fi
+          done
+          printf 'mode=%s count=%s starts=%s crashes=%s\n' \
+            "${{ matrix.mode }}" "$COUNT" "$i" "$crashes" | tee rate.txt
 
-      # Unconditional: a crash we cannot read is a run wasted, and the log is
-      # the entire product of this job.
-      - name: upload the raw log
+      - name: upload crash logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: out-${{ matrix.mode }}-${{ matrix.shard }}
           path: |
-            out.log
-            rc.txt
+            crashes/
+            rate.txt
           retention-days: 14
+          if-no-files-found: ignore
 
-      - name: summarize the failure
+      - name: summarize
         if: always()
         shell: bash
         run: |
-          rc=$(sed -n 's/^rc=//p' rc.txt)
-          if [ "$rc" = "0" ]; then echo "clean"; exit 0; fi
-          # Drop the GC span dump ("0x... alloc unmarked" / "free marked"),
-          # which is hundreds of lines long and carries no information beyond
-          # its first line -- it is what swallowed the stack trace last time.
-          grep -vE '^0x[0-9a-f]+ +(alloc|free) +(un)?marked$' out.log > trimmed.log
-          echo "===== crash region ====="
-          grep -nE 'fatal error|panic:|marked free object|inconsistent mutex|signal 0x|SIGSEGV' trimmed.log | head -20
-          echo "===== first 400 trimmed lines from the first crash marker ====="
-          start=$(grep -nE 'fatal error|panic:|marked free object' trimmed.log | head -1 | cut -d: -f1)
-          if [ -n "$start" ]; then
-            tail -n "+$start" trimmed.log | head -n 400
-          else
-            tail -n 200 trimmed.log
-          fi
-          exit 1
+          cat rate.txt 2>/dev/null || echo "no rate recorded"
+          for f in crashes/*.log; do
+            [ -e "$f" ] || continue
+            echo "===== $f ====="
+            # Strip the GC span dump; it is hundreds of uninformative lines and
+            # it is what swallowed the stack trace the first time round.
+            grep -vE '^0x[0-9a-f]+ +(alloc|free) +(un)?marked$' "$f" > trimmed.log
+            start=$(grep -nE 'fatal error|panic:|marked free object|Exception 0x' trimmed.log | head -1 | cut -d: -f1)
+            if [ -n "$start" ]; then
+              tail -n "+$start" trimmed.log | head -n 120
+            else
+              tail -n 60 trimmed.log
+            fi
+          done

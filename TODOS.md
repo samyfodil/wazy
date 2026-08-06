@@ -192,11 +192,25 @@ and cleanup goroutines included. So `hashWriting` was set on a corrupted map
 header. That map is simply the busiest allocation in the hot path, i.e. the
 likeliest victim.
 
+**The unit of risk is a PROCESS START, not an iteration.** Every crash
+captured so far died between 0.01s and 0.115s — inside a `-count=2500` run,
+i.e. during its FIRST iteration. Four dispatches produced 9 crashes from ~64
+starts: roughly 1 in 7. So cranking `-count` bought nothing; each shard was a
+single sample. `zz-repro.yaml` now launches many short processes per shard
+and reports crashes/starts, which turns a dispatch into a rate rather than a
+coin flip — the thing a bisect needs as an oracle.
+
 **Reproducing.** It does not reproduce on Linux — ~10,000 iterations across
 plain, `-race`, `-cpu` variants, `clobberfree`, `gccheckmark`, and
-interpreter mode are all clean. `.github/workflows/zz-repro.yaml`
-(manual dispatch only) is the iteration vehicle: 4 modes × 4 Windows shards,
-which historically lands 1-2 crashed shards per run.
+interpreter mode are all clean. It also does **not** reproduce on a real
+Windows 10 Pro (19045) laptop: ~1600 process starts across plain, `GOGC=1`,
+`clobberfree`, `gccheckmark`, `GOMAXPROCS=2`, 48-way oversubscription and
+both Go 1.26 patch levels, all clean, against CI's 1-in-7. Whatever the
+trigger is, it needs the `windows-2025` runner image. Note a cross-compiled
+`go test -c` binary runs standalone there (fixtures are `//go:embed`ed), so
+testing on a Windows box needs no Go install and no repo checkout — just
+`GOOS=windows go test -c` and copy the exe.
+`.github/workflows/zz-repro.yaml` (manual dispatch only) is the vehicle.
 
 **Read this before dispatching it again.** The previous harness inlined
 `head -n 160` of the failing log, and the clobber shard's crash *opens* with a
