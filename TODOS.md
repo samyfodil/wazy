@@ -168,6 +168,16 @@ I/O and no executable mapping in this fixture.
   compared machines, not modes. All three hypotheses are open again, and
   `zz-repro.yaml` now probes a runner first and sweeps every mode on that one
   box so the comparison is actually controlled.
+- **Not the linear-memory buffer pool.** It was the best-fitting theory of
+  the lot: `getPooledMemoryBuffer` is the only place that hands back a buffer
+  another holder might still reference AND zeroes it (`clear`), while every
+  victim reads back as zero; and `sync.Pool` being GC-drained explained the
+  otherwise-backwards GC result. It is wrong. `WAZY_REPRO_NO_MEMPOOL=1`
+  disables the pool entirely and the full suite measures **17/25 with it and
+  17/25 without it** on a poisoned runner. Separately,
+  `WAZY_REPRO_POOL_AUDIT=1` (a SET of live holders per memory, so a
+  double-close cannot fool it the way it fools the `importers` counter) is
+  clean across the whole repo, so the counter discipline holds too.
 - **Not `internal/platform/time_windows.go`.** Its
   `uintptr(unsafe.Pointer(&counter))` into `LazyProc.Call` *looks* like the
   classic pointer-to-uintptr violation but is not one:
