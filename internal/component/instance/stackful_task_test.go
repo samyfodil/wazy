@@ -29,7 +29,7 @@ func deadlockGoroutineFixture(t *testing.T) (*Instance, *boundExport) {
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
-	inst, err := Instantiate(ctx, r, wasm, WithWASI(WASIConfig{})...)
+	inst, err := Instantiate(ctx, r, wasm)
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestStackfulReap_InvokeStackfulReapsOnDeadlockTrap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
-	inst, err := Instantiate(ctx, r, wasm, WithWASI(WASIConfig{})...)
+	inst, err := Instantiate(ctx, r, wasm)
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}

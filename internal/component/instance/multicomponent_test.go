@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/samyfodil/wazy"
-	"github.com/samyfodil/wazy/internal/component/testfixtures"
 )
 
 // These two exercise the ENGINE's multi-component behavior on one Runtime --
@@ -13,8 +12,6 @@ import (
 // and adder guests only as convenient real components; nothing here is about
 // WASI, which is why they live with the engine rather than with the WASI
 // implementation.
-
-var realHelloWasm = testfixtures.RealHello
 
 func TestTwoDistinctComponentsOnOneRuntime(t *testing.T) {
 	ctx := context.Background()
@@ -27,7 +24,7 @@ func TestTwoDistinctComponentsOnOneRuntime(t *testing.T) {
 	}
 	defer adder.Close(ctx)
 
-	hello, err := Instantiate(ctx, r, realHelloWasm, WithWASI(WASIConfig{})...)
+	hello, err := Instantiate(ctx, r, realHelloWasm)
 	if err != nil {
 		t.Fatalf("Instantiate hello on the same Runtime as adder: %v", err)
 	}
@@ -65,7 +62,7 @@ func TestSameComponentTwiceLiveOnOneRuntime(t *testing.T) {
 		t.Fatalf("Instantiate #2 (same component, both live): %v", err)
 	}
 
-	add := func(who string, inst *component.Instance, x, y, want uint32) {
+	add := func(who string, inst *Instance, x, y, want uint32) {
 		got, err := inst.CallExport(ctx, "component:adder/calc", "add", x, y)
 		if err != nil {
 			t.Fatalf("%s add: %v", who, err)

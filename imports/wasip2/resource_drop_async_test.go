@@ -1,8 +1,9 @@
-package instance
+package wasip2
 
 import (
 	"bytes"
 	"context"
+	"github.com/samyfodil/wazy/component"
 	"testing"
 
 	"github.com/samyfodil/wazy"
@@ -70,7 +71,7 @@ func TestExecute_ResourceDropAsyncRunsDtor(t *testing.T) {
 	defer r.Close(ctx)
 
 	patched := patchResourceDropToAsync(t, res20OwnDtorWasm, 0xad, 0xaf)
-	inst, err := Instantiate(ctx, r, patched, WithWASI(WASIConfig{})...)
+	inst, err := component.Instantiate(ctx, r, patched)
 	if err != nil {
 		t.Fatalf("instantiate (start-section self-test failed under resource.drop async): %v", err)
 	}

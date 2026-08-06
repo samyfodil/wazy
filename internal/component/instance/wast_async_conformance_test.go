@@ -384,7 +384,7 @@ func runAsyncWastSuite(t *testing.T, suite string) bool {
 	}
 
 	instantiate := func(wasm []byte, line int) *Instance {
-		inst, err := Instantiate(ctx, r, wasm, WithWASI(WASIConfig{})...)
+		inst, err := Instantiate(ctx, r, wasm)
 		if err != nil {
 			t.Errorf("line %d: instantiate: %v", line, err)
 			ok = false
@@ -433,7 +433,7 @@ func runAsyncWastSuite(t *testing.T, suite string) bool {
 				// async/sync canon-opt mismatch) are only a bind-time
 				// concern -- give Instantiate a chance to reject it too
 				// before calling this a miss.
-				inst, err := Instantiate(ctx, r, wasm, WithWASI(WASIConfig{})...)
+				inst, err := Instantiate(ctx, r, wasm)
 				if inst != nil {
 					inst.Close(ctx)
 				}
@@ -453,7 +453,7 @@ func runAsyncWastSuite(t *testing.T, suite string) bool {
 				continue
 			}
 			assertsRun++
-			inst, err := Instantiate(ctx, r, wasm, WithWASI(WASIConfig{})...)
+			inst, err := Instantiate(ctx, r, wasm)
 			if inst != nil {
 				inst.Close(ctx)
 			}
