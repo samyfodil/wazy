@@ -194,10 +194,29 @@ jobs:
           # shared across instances -- notably the engine's compiled-module
           # cache, where two of the observed crashes actually landed, and which
           # every module_instance re-refcounts against the same definition.
+          # Settled on four poisoned runners: repeating ONE harmless pair
+          # (join-during-sync-future-read, clean in isolation) crashes at three
+          # instances and not at two --
+          #   repeat_2 0-1/15, repeat_3 3-7/15, repeat_4..8 4-10/15.
+          # So the trigger is pure INSTANCE COUNT, threshold 3; which assertion
+          # runs is irrelevant.
+          #
+          # "Three" has two very different readings and they must be separated:
+          #   (a) a real per-instance structure whose backing array reallocates
+          #       on the third append (Go grows 1->2->4, so the 3rd frees the
+          #       old array), or
+          #   (b) merely enough allocation to trigger the FIRST GC -- at two
+          #       instances the process may exit before any collection runs.
+          # Forcing collection at two instances tells them apart: if repeat_2
+          # crashes under GOGC=1 it is (b), a GC threshold; if repeat_2 stays
+          # clean under GOGC=1 while repeat_3 crashes with GC off, it is (a), a
+          # genuine count.
           m=15
           export WAZY_REPRO_ONLY_PAIR=1
-          for n in 2 3 4 6 8; do
+          for spec in "1:GOGC=1" "2:GOGC=1" "2:GOGC=off" "3:GOGC=off" "3:GOGC=1"; do
+            n=${spec%%:*}; gc=${spec##*:}
             export WAZY_REPRO_PAIR_REPEAT=$n
+            export GOGC=${gc#GOGC=}
             c=0
             for i in $(seq 1 $m); do
               set +e
@@ -205,11 +224,11 @@ jobs:
               rc=$?
               set -e
               if [ "$rc" -ne 0 ]; then
-                c=$((c+1)); [ "$c" -le 1 ] && cp run.log "crashes/repeat-$n.log"
+                c=$((c+1)); [ "$c" -le 1 ] && cp run.log "crashes/gc-n${n}-${gc#GOGC=}.log"
               fi
             done
-            unset WAZY_REPRO_PAIR_REPEAT
-            echo "pair1_repeat_$n=$c/$m" | tee -a rate.txt
+            unset WAZY_REPRO_PAIR_REPEAT GOGC
+            echo "repeat${n}_${gc}=$c/$m" | tee -a rate.txt
           done
           unset WAZY_REPRO_ONLY_PAIR
 
