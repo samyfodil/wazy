@@ -1,6 +1,7 @@
 package wasm
 
 import (
+	"fmt"
 	"os"
 	"sync"
 )
@@ -99,4 +100,71 @@ func putPooledMemoryBuffer(buf []byte) {
 	// into interface{}, which heap-allocates it (staticcheck SA6002) -- the
 	// opposite of what a pool that exists to avoid allocations wants.
 	v.(*sync.Pool).Put(&buf)
+}
+
+// --- reference audit (WAZY_REPRO_POOL_AUDIT=1) ---
+//
+// A buffer may be recycled only once every ModuleInstance that can reach it is
+// gone. The code decides that with a COUNTER (mem.importers) plus
+// mem.ownerClosed. A counter is precisely what a double-decrement corrupts,
+// and this one has been wrong before: commit 9755f90 fixed FailIfClosed
+// re-running the deferred cleanup and over-decrementing it. An over-decrement
+// reaches zero early and pools a buffer a live module is still pointing at,
+// and getPooledMemoryBuffer's clear() then zeroes memory that module is still
+// reading -- which is exactly the corruption signature in TODOS.md's OPEN BUG,
+// where every victim reads back as zero.
+//
+// So audit it with a SET of the live ModuleInstances holding each memory,
+// rather than a count. A set is idempotent: closing the same module twice
+// removes one entry, while the counter decrements twice. That makes this an
+// independent check of the counter rather than a restatement of it, and it
+// works on any platform, without waiting for the corruption to manifest.
+var (
+	reproPoolAudit = os.Getenv("WAZY_REPRO_POOL_AUDIT") == "1"
+	poolAuditMu    sync.Mutex
+	poolAuditRefs  = map[*MemoryInstance]map[*ModuleInstance]struct{}{}
+)
+
+// poolAuditHold records that mod can reach mem.
+func poolAuditHold(mem *MemoryInstance, mod *ModuleInstance) {
+	if !reproPoolAudit || mem == nil || mod == nil {
+		return
+	}
+	poolAuditMu.Lock()
+	set, ok := poolAuditRefs[mem]
+	if !ok {
+		set = map[*ModuleInstance]struct{}{}
+		poolAuditRefs[mem] = set
+	}
+	set[mod] = struct{}{}
+	poolAuditMu.Unlock()
+}
+
+// poolAuditRelease drops mod's hold on mem. Idempotent by construction, which
+// is the whole point: a second close of the same module is a no-op here while
+// it would decrement mem.importers a second time.
+func poolAuditRelease(mem *MemoryInstance, mod *ModuleInstance) {
+	if !reproPoolAudit || mem == nil || mod == nil {
+		return
+	}
+	poolAuditMu.Lock()
+	if set, ok := poolAuditRefs[mem]; ok {
+		delete(set, mod)
+	}
+	poolAuditMu.Unlock()
+}
+
+// poolAuditPut panics if any module can still reach mem at the moment its
+// buffer is handed back to the pool.
+func poolAuditPut(mem *MemoryInstance) {
+	if !reproPoolAudit || mem == nil {
+		return
+	}
+	poolAuditMu.Lock()
+	defer poolAuditMu.Unlock()
+	if n := len(poolAuditRefs[mem]); n != 0 {
+		panic(fmt.Sprintf("REPRO pool-audit: buffer pooled while %d module(s) can still reach it (mem.importers=%d ownerClosed=%v)",
+			n, mem.importers, mem.ownerClosed))
+	}
+	delete(poolAuditRefs, mem)
 }

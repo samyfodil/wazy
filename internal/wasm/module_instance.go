@@ -174,6 +174,7 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 			// Buffer, set it nil) happens under Mux so exactly one close pools it.
 			// expBuffer (custom allocator) is owner-only and freed unconditionally,
 			// exactly as before; poolable is false for it and for shared memories.
+			poolAuditRelease(mem, m)
 			mem.Mux.Lock()
 			mem.ownerClosed = true
 			var recycle []byte
@@ -192,6 +193,7 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 				mem.expBuffer.Free()
 				mem.expBuffer = nil
 			} else if recycle != nil {
+				poolAuditPut(mem)
 				putPooledMemoryBuffer(recycle)
 			}
 		} else {
@@ -201,6 +203,7 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 			// already closed, it deferred recycling to us -- pool Buffer now
 			// (claim under Mux, single-shot via the Buffer != nil guard). We never
 			// touch expBuffer/shared memories (poolable == false).
+			poolAuditRelease(mem, m)
 			mem.Mux.Lock()
 			if mem.importers > 0 {
 				mem.importers--
@@ -213,6 +216,7 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 			}
 			mem.Mux.Unlock()
 			if recycle != nil {
+				poolAuditPut(mem)
 				putPooledMemoryBuffer(recycle)
 			}
 		}

@@ -528,6 +528,7 @@ func (m *ModuleInstance) resolveImports(ctx context.Context, module *Module) (er
 					// closing, since the import fails just below and this
 					// ModuleInstance never Closes to balance the increment.
 					importedMemory.importers++
+					poolAuditHold(importedMemory, m)
 				}
 				importedMemory.Mux.Unlock()
 				if alreadyClosed {
