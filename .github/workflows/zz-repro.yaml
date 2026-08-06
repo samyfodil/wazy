@@ -211,12 +211,25 @@ jobs:
           # crashes under GOGC=1 it is (b), a GC threshold; if repeat_2 stays
           # clean under GOGC=1 while repeat_3 crashes with GC off, it is (a), a
           # genuine count.
+          # THE test. With the GC off the crash rate is 7-8/15 and with GOGC=1
+          # it is 0/15 -- backwards for a collector-driven use-after-free,
+          # because nothing is freed at all with GC off. But sync.Pool is
+          # DRAINED BY THE GC, so GOGC=off means maximum buffer reuse and
+          # GOGC=1 means Get almost always misses and every memory is freshly
+          # allocated. And getPooledMemoryBuffer is the only place in the
+          # codebase that hands back a buffer another holder might still
+          # reference AND explicitly zeroes it (clear) -- while every
+          # corruption victim on record reads back as zero.
+          #
+          # WAZY_REPRO_NO_MEMPOOL=1 disables the pool outright. If the rate
+          # goes to zero at three instances with the GC still off, the linear-
+          # memory buffer pool is the bug.
           m=15
-          export WAZY_REPRO_ONLY_PAIR=1
-          for spec in "1:GOGC=1" "2:GOGC=1" "2:GOGC=off" "3:GOGC=off" "3:GOGC=1"; do
-            n=${spec%%:*}; gc=${spec##*:}
-            export WAZY_REPRO_PAIR_REPEAT=$n
-            export GOGC=${gc#GOGC=}
+          export WAZY_REPRO_ONLY_PAIR=1 WAZY_REPRO_PAIR_REPEAT=3
+          for spec in "off:0" "off:1" "1:0"; do
+            gc=${spec%%:*}; nopool=${spec##*:}
+            export GOGC=$gc
+            [ "$nopool" = "1" ] && export WAZY_REPRO_NO_MEMPOOL=1 || unset WAZY_REPRO_NO_MEMPOOL
             c=0
             for i in $(seq 1 $m); do
               set +e
@@ -224,13 +237,12 @@ jobs:
               rc=$?
               set -e
               if [ "$rc" -ne 0 ]; then
-                c=$((c+1)); [ "$c" -le 1 ] && cp run.log "crashes/gc-n${n}-${gc#GOGC=}.log"
+                c=$((c+1)); [ "$c" -le 1 ] && cp run.log "crashes/pool-gc${gc}-nopool${nopool}.log"
               fi
             done
-            unset WAZY_REPRO_PAIR_REPEAT GOGC
-            echo "repeat${n}_${gc}=$c/$m" | tee -a rate.txt
+            echo "repeat3_GOGC=${gc}_nomempool=${nopool} -> $c/$m" | tee -a rate.txt
           done
-          unset WAZY_REPRO_ONLY_PAIR
+          unset GOGC WAZY_REPRO_NO_MEMPOOL WAZY_REPRO_ONLY_PAIR WAZY_REPRO_PAIR_REPEAT
 
       - name: upload crash logs
         if: always()

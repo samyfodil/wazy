@@ -1,6 +1,23 @@
 package wasm
 
-import "sync"
+import (
+	"os"
+	"sync"
+)
+
+// reproNoMemPool disables this pool entirely when WAZY_REPRO_NO_MEMPOOL=1, so
+// every linear memory gets a fresh make([]byte, ...) and no buffer is ever
+// recycled. It is a discriminator for the open Windows corruption in TODOS.md.
+//
+// Why this pool is the suspect: it is the only place in the codebase that
+// hands back a buffer another holder might still reference AND explicitly
+// zeroes it (the clear below), and every corruption victim on record reads
+// back as zero. It also explains the GC result -- with GOGC=off the crash rate
+// is 7-8/15 and with GOGC=1 it is 0/15, which is backwards for a
+// collector-driven use-after-free but exactly right here, because sync.Pool is
+// DRAINED BY THE GC: no GC means maximum reuse, constant GC means Get almost
+// always misses and every memory is freshly allocated.
+var reproNoMemPool = os.Getenv("WAZY_REPRO_NO_MEMPOOL") == "1"
 
 // memoryBufferPools holds free linear-memory buffers, bucketed by their
 // exact byte capacity, for reuse across MemoryInstance create/close cycles.
@@ -49,7 +66,7 @@ var memoryBufferPools sync.Map // map[uint64]*sync.Pool, keyed by cap(buffer) in
 // the pool, or nil if none is available -- the caller should fall back to
 // make([]byte, ...) in that case.
 func getPooledMemoryBuffer(capBytes uint64) []byte {
-	if capBytes == 0 {
+	if capBytes == 0 || reproNoMemPool {
 		return nil
 	}
 	v, ok := memoryBufferPools.Load(capBytes)
@@ -74,7 +91,7 @@ func getPooledMemoryBuffer(capBytes uint64) []byte {
 // safety argument the caller must uphold before calling this.
 func putPooledMemoryBuffer(buf []byte) {
 	capBytes := uint64(cap(buf))
-	if capBytes == 0 {
+	if capBytes == 0 || reproNoMemPool {
 		return
 	}
 	v, _ := memoryBufferPools.LoadOrStore(capBytes, &sync.Pool{})
