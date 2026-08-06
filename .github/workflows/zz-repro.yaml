@@ -114,19 +114,33 @@ jobs:
             echo "CLEAN RUNNER -- skipping the sweep" | tee -a rate.txt
             exit 0
           fi
-          echo "POISONED RUNNER -- sweeping modes here" | tee -a rate.txt
+          echo "POISONED RUNNER -- sweeping on this box" | tee -a rate.txt
 
+          # Poisoned-ness tracks the CPU: every Intel Xeon Platinum 8573C
+          # (Emerald Rapids) runner reproduces at ~80%, every AMD EPYC runner
+          # sits at 0%. The interpreter corrupts as readily as the JIT, so this
+          # is not wazy codegen -- it points at CPU-feature-gated code in the
+          # Go runtime (memmove / memclr / GC scan). GODEBUG=cpu.*=off disables
+          # those paths one at a time.
           n=25
-          echo "native=$(launch native $n)/$n" | tee -a rate.txt
-          export WAZY_REPRO_INTERPRETER=1
-          echo "interpreter=$(launch interp $n)/$n" | tee -a rate.txt
-          unset WAZY_REPRO_INTERPRETER
-          GOEXPERIMENT=nogreenteagc go test -c -o instance.test.exe ./internal/component/instance/
-          echo "nogreentea=$(launch nogreentea $n)/$n" | tee -a rate.txt
-          go test -c -o instance.test.exe ./internal/component/instance/
-          export GODEBUG=clobberfree=1 GOGC=1
-          echo "clobber=$(launch clobber $n)/$n" | tee -a rate.txt
-          unset GODEBUG GOGC
+          for feat in cpu.all=off cpu.avx512f=off cpu.avx2=off cpu.erms=off; do
+            export GODEBUG="$feat"
+            echo "$feat -> $(launch "${feat%%=*}-off" $n)/$n" | tee -a rate.txt
+            unset GODEBUG
+          done
+
+          # Control: is this machine corrupting ANY Go program, or only wazy?
+          # .github/gcstress has no wazy in it -- just a pointer-dense heap and
+          # forced GCs. If it corrupts here too, the fault is not in this repo.
+          go build -o gcstress.exe ./.github/gcstress
+          c=0
+          for i in $(seq 1 40); do
+            set +e; GOGC=1 ./gcstress.exe > ctl.log 2>&1; rc=$?; set -e
+            if [ "$rc" -ne 0 ]; then
+              c=$((c+1)); [ "$c" -le 2 ] && cp ctl.log "crashes/gcstress-$c.log"
+            fi
+          done
+          echo "gcstress_no_wazy=$c/40" | tee -a rate.txt
 
       - name: upload crash logs
         if: always()
