@@ -178,9 +178,22 @@ jobs:
           # module_definition plus ONLY the k'th pair, against exactly one
           # instance, which separates them: a crash at k=3 alone means the
           # stream assertion, a clean k=3 means it takes instance count.
+          # Settled on two poisoned runners: NO single assertion crashes in
+          # isolation (onlypair_1..6 all 0/15) while the truncation sweep still
+          # shows onset at three pairs (maxcmds_3 0/15, maxcmds_5 0-1/15,
+          # maxcmds_7 2-8/15). So it is the ACCUMULATION, not the stream
+          # assertion -- the stream reading was an ordering coincidence.
+          #
+          # Remaining question: is the trigger how MANY live instances have
+          # piled up, or WHICH assertions ran? Repeat one harmless pair n times.
+          # A crash means pure instance count, which points at whatever is
+          # shared across instances -- notably the engine's compiled-module
+          # cache, where two of the observed crashes actually landed, and which
+          # every module_instance re-refcounts against the same definition.
           m=15
-          for k in 1 2 3 4 5 6; do
-            export WAZY_REPRO_ONLY_PAIR=$k
+          export WAZY_REPRO_ONLY_PAIR=1
+          for n in 2 3 4 6 8; do
+            export WAZY_REPRO_PAIR_REPEAT=$n
             c=0
             for i in $(seq 1 $m); do
               set +e
@@ -188,29 +201,13 @@ jobs:
               rc=$?
               set -e
               if [ "$rc" -ne 0 ]; then
-                c=$((c+1)); [ "$c" -le 1 ] && cp run.log "crashes/pair-$k.log"
+                c=$((c+1)); [ "$c" -le 1 ] && cp run.log "crashes/repeat-$n.log"
               fi
             done
-            unset WAZY_REPRO_ONLY_PAIR
-            echo "onlypair_$k=$c/$m" | tee -a rate.txt
+            unset WAZY_REPRO_PAIR_REPEAT
+            echo "pair1_repeat_$n=$c/$m" | tee -a rate.txt
           done
-
-          # Re-run the truncation sweep too, skipping N=1 (which runs zero
-          # assertions and the harness reports as an error -- a false positive
-          # that read as 15/15 last time).
-          for k in 3 5 7 9; do
-            export WAZY_REPRO_MAX_CMDS=$k
-            c=0
-            for i in $(seq 1 $m); do
-              set +e
-              ./instance.test.exe -test.run "$RUN" -test.count=1 -test.timeout=30s > run.log 2>&1
-              rc=$?
-              set -e
-              [ "$rc" -ne 0 ] && c=$((c+1))
-            done
-            unset WAZY_REPRO_MAX_CMDS
-            echo "maxcmds_$k=$c/$m" | tee -a rate.txt
-          done
+          unset WAZY_REPRO_ONLY_PAIR
 
       - name: upload crash logs
         if: always()

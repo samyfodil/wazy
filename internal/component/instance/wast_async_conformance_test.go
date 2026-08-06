@@ -435,12 +435,30 @@ func runAsyncWastSuite(t *testing.T, suite string) bool {
 		}
 	}
 
-	for ci, c := range manifest.Commands {
+	// WAZY_REPRO_PAIR_REPEAT=n, with ONLY_PAIR set, runs that one pair n times
+	// instead of once. No single pair crashes in isolation but three different
+	// pairs do, so the open question is whether the trigger is how MANY live
+	// instances have accumulated or WHICH assertions ran. Repeating one
+	// harmless pair answers it: a crash means pure instance count.
+	pairRepeat := 1
+	if v := os.Getenv("WAZY_REPRO_PAIR_REPEAT"); v != "" {
+		if n, convErr := strconv.Atoi(v); convErr == nil && n > 1 {
+			pairRepeat = n
+		}
+	}
+
+	cmds := manifest.Commands
+	if onlyPair > 0 && 2*onlyPair < len(cmds) {
+		sel := []wastCmd{cmds[0]}
+		for r := 0; r < pairRepeat; r++ {
+			sel = append(sel, cmds[2*onlyPair-1], cmds[2*onlyPair])
+		}
+		cmds = sel
+	}
+
+	for ci, c := range cmds {
 		if ci >= maxCmds {
 			break
-		}
-		if onlyPair > 0 && ci != 0 && ci != 2*onlyPair-1 && ci != 2*onlyPair {
-			continue
 		}
 		switch c.Type {
 		case "module_definition":
