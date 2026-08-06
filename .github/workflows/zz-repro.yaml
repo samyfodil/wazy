@@ -42,13 +42,27 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4]
         # A 16-shard dispatch lands roughly 1-3 crashes, spread evenly across
-        # these modes -- see TODOS.md for what that evenness already ruled out.
-        mode: [native, interpreter, clobber, checkptr]
+        # modes -- see TODOS.md for what that evenness already ruled out.
+        #
+        # native     - control.
+        # nogreentea - Go 1.26 with GOEXPERIMENT=nogreenteagc. Go 1.26 made the
+        #              Green Tea GC the default, and EVERY symptom here is a
+        #              collector symptom: the sweep-phase "marked free object in
+        #              span" zombie check, objects reading back freshly-zeroed
+        #              (freed then reallocated), a spuriously-set map
+        #              hashWriting flag with no concurrent writer. That is
+        #              invisible to -race and checkptr precisely because no Go
+        #              code performs the bad write -- the collector performs a
+        #              bad free.
+        # go125      - Go 1.25, where Green Tea is opt-in and therefore off.
+        #              Confirms nogreentea rather than trusting one toggle.
+        # clobber    - fault at the culprit rather than a later victim.
+        mode: [native, nogreentea, go125, clobber]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          go-version: ${{ matrix.mode == 'go125' && '1.25' || '1.26' }}
 
       - name: configure Pagefile
         uses: al-cheb/configure-pagefile-action@v1.5
@@ -74,10 +88,12 @@ jobs:
           flags="-count=$count"
           case "${{ matrix.mode }}" in
             native)      ;;
-            interpreter) export WAZY_REPRO_INTERPRETER=1 ;;
+            nogreentea)  export GOEXPERIMENT=nogreenteagc ;;
+            go125)       ;;   # Green Tea is opt-in on 1.25, so it is already off
             clobber)     flags="-count=1200"; export GODEBUG=clobberfree=1; export GOGC=1 ;;
-            checkptr)    flags="-count=400 -race" ;;
           esac
+          go version
+          echo "GOEXPERIMENT=$(go env GOEXPERIMENT)"
           set +e
           go test ./internal/component/instance/ \
             -run 'TestAsyncWastConformance/trap-if-sync-and-waitable-set' \
