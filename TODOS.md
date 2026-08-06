@@ -201,6 +201,47 @@ That is precisely "marked free object in span". Next step is to test that
 directly (make the resurrected references GC-visible and see whether the rate
 drops to zero on a poisoned runner) rather than to reason about it further.
 
+**The locus is ONE suite, and it is the only one that spawns a thread.** On a
+poisoned runner, measured on that same box: `trap-if-block-and-sync` 0/25,
+`cross-abi-calls` 0/25, `big-interleaving-test` 0/25, and
+`trap-if-sync-and-waitable-set` 15-21/25. Replicated on two poisoned runners
+(a 6973P-C and an 8573C). Of the 31 async suites, this is the **only one that
+actually spawns a `guestThread` and parks it** — `trap-if-block-and-sync`
+imports `thread.new-indirect` but every call site is commented out (wast
+lines 131, 140, 145), so it exercises only the bind path. Every other suite's
+concurrency is the older, far more exercised `stackfulTask` /
+promoted-`guestTask` machinery. So the surface is `thread.go`'s spawned-thread
+path (Stage D), not the package.
+
+**The damage predates `Close`.** `WAZY_REPRO_ASSERT=1` makes `Close` panic,
+right after the reap, if any spawned-thread state outlived it — a thread
+still believing it is running, a `*guestThread` still in the table, or any
+park still pinning a live goroutine. On a poisoned runner it measured 17/25
+against a 21/25 probe **and never once fired**. So there is no leaked
+goroutine and no orphaned thread state; the invariant holds and memory is
+corrupt regardless. Do not re-check at teardown — crashes also occur during
+`Instantiate` and mid-guest-call, which should have been the tell.
+
+**Also dead: async preemption.** `GODEBUG=asyncpreemptoff=1` measured 12/25
+against a 15/25 probe. Go's Windows preemption is `SuspendThread` /
+`GetThreadContext` / `SetThreadContext`, mechanically unrelated to Linux's
+signal-based path, and the poisoned CPUs carry AMX (a much larger
+thread-context area) while the clean EPYCs do not — it fit every constraint
+on paper and is still wrong.
+
+**Also dead: pooled-buffer aliasing.** The three pools in this package were
+audited at the site where one crash actually landed
+(`(*guestTask).firstRunBody`): `packed` is copied out of `stack` *before*
+`putUint64Slice`, `lowerParams`'s result is re-anchored into `*coreArgsPtr`
+before its `Put`, and there is no `defer` on either `Put`, so an abort panic
+leaks the buffer rather than returning it early — the safe direction.
+
+**Next step, tooling already in place.** `WAZY_REPRO_MAX_CMDS=N` stops the
+wast harness after N manifest commands. This suite is 27 — one
+`module_definition`, then 13 `module_instance`/`assert_trap` pairs — so the
+smallest N that still crashes names the exact command that first makes the
+corruption reachable, turning "audit thread.go" into "audit this operation".
+
 **A runner is either poisoned or clean — this is not a probability.** The
 single most important measurement so far. A dispatch that launched many short
 processes per shard produced: 15 shards with **0 crashes across 2888
