@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -409,7 +410,22 @@ func runAsyncWastSuite(t *testing.T, suite string) bool {
 		return inst
 	}
 
-	for _, c := range manifest.Commands {
+	// WAZY_REPRO_MAX_CMDS=N stops the suite after N manifest commands, so the
+	// open Windows corruption (TODOS.md) can be bisected down to the command
+	// that first makes it reachable. The teardown assertion never fires, so
+	// the damage predates Close; narrowing by command is what is left. Unset
+	// (every normal run) this runs the whole manifest.
+	maxCmds := len(manifest.Commands)
+	if v := os.Getenv("WAZY_REPRO_MAX_CMDS"); v != "" {
+		if n, convErr := strconv.Atoi(v); convErr == nil && n >= 0 {
+			maxCmds = n
+		}
+	}
+
+	for ci, c := range manifest.Commands {
+		if ci >= maxCmds {
+			break
+		}
 		switch c.Type {
 		case "module_definition":
 			wasm, readOK := readWasm(c.Filename, c.Line)

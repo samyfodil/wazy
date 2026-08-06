@@ -148,38 +148,33 @@ jobs:
             unset GODEBUG
           done
 
-          # Locus test. Of all 31 async wast suites, only
-          # trap-if-sync-and-waitable-set actually spawns a guestThread and
-          # parks it -- trap-if-block-and-sync imports thread.new-indirect but
-          # every call site is commented out, so it only exercises the bind
-          # path. If the thread-spawning suite is the only one that crashes,
-          # the locus is guestThread's run/park/abort path (thread.go, Stage D)
-          # rather than anything shared by all async suites.
-          for suite in trap-if-block-and-sync cross-abi-calls big-interleaving-test; do
+          # Locus is settled: on a poisoned runner trap-if-block-and-sync,
+          # cross-abi-calls and big-interleaving-test are each 0/25 while this
+          # suite is 15-21/25. It is the only one of 31 that actually spawns a
+          # guestThread and parks it.
+          #
+          # The teardown assertion (above) never fires, so the damage predates
+          # Close. What is left is to narrow WITHIN the suite:
+          # WAZY_REPRO_MAX_CMDS=N stops after N manifest commands. The suite is
+          # 27 commands -- one module_definition, then 13 module_instance /
+          # assert_trap pairs -- so the smallest N that still crashes names the
+          # exact command that makes the corruption reachable.
+          m=15
+          for k in 1 3 5 7 9 11 13 15 17 19 21 23 25 27; do
+            export WAZY_REPRO_MAX_CMDS=$k
             c=0
-            for i in $(seq 1 $n); do
+            for i in $(seq 1 $m); do
               set +e
-              ./instance.test.exe -test.run "TestAsyncWastConformance/$suite" \
-                -test.count=1 -test.timeout=30s > run.log 2>&1
+              ./instance.test.exe -test.run "$RUN" -test.count=1 -test.timeout=30s > run.log 2>&1
               rc=$?
               set -e
               if [ "$rc" -ne 0 ]; then
-                c=$((c+1)); [ "$c" -le 1 ] && cp run.log "crashes/suite-$suite-$c.log"
+                c=$((c+1)); [ "$c" -le 1 ] && cp run.log "crashes/cmds-$k.log"
               fi
             done
-            echo "suite_$suite=$c/$n" | tee -a rate.txt
+            unset WAZY_REPRO_MAX_CMDS
+            echo "maxcmds_$k=$c/$m" | tee -a rate.txt
           done
-          # And the whole corpus, as an upper bound. Only 3 runs, tightly
-          # capped: this is the slowest thing here and it is a sanity check,
-          # not the measurement.
-          c=0
-          for i in $(seq 1 3); do
-            set +e
-            ./instance.test.exe -test.run TestAsyncWastConformance -test.count=1 -test.timeout=90s > run.log 2>&1
-            rc=$?; set -e
-            [ "$rc" -ne 0 ] && c=$((c+1))
-          done
-          echo "suite_ALL=$c/3" | tee -a rate.txt
 
       - name: upload crash logs
         if: always()
