@@ -49,11 +49,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 8 shards, not 16. Roughly 1 runner in 8 is poisoned, so 8 still
-        # expects one, and 28-job dispatches were exhausting the windows-2025
-        # pool -- most shards were failing in "Set up job" (runner allocation)
-        # rather than producing a measurement.
-        shard: [1, 2]
+        # 12 shards. At roughly 1 runner in 8 poisoned, 8 shards lands zero
+        # too often (one dispatch came back all-AMD and produced no data at
+        # all), while the old 28-job dispatches exhausted the windows-2025 pool
+        # and failed in "Set up job". 12 is the middle: a clean shard exits in
+        # about a minute, so only the poisoned one costs anything.
+        shard: [1, 2, 3]
         mode: [a, b, c, d]
     steps:
       - uses: actions/checkout@v6
