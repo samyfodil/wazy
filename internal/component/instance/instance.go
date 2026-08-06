@@ -2041,6 +2041,9 @@ func (in *Instance) Close(ctx context.Context) error {
 	if in.sched != nil {
 		in.reapParkedGoroutines()
 	}
+	if reproAssertThreads {
+		in.assertThreadsQuiescent("Close/after-reap")
+	}
 	var firstErr error
 	for i := len(in.closers) - 1; i >= 0; i-- {
 		if err := in.closers[i].Close(ctx); err != nil && firstErr == nil {

@@ -128,8 +128,21 @@ jobs:
           # CPU split: the poisoned parts (Emerald Rapids, Granite Rapids) have
           # AMX and therefore a much larger XSAVE/thread-context area, which
           # EPYC 7763/9V74 do not.
+          # asyncpreemptoff is dead: 12/25 against a 15/25 probe on a poisoned
+          # runner, i.e. unchanged. And the locus is now pinned -- on that same
+          # box trap-if-block-and-sync, cross-abi-calls and big-interleaving-test
+          # were each 0/25 while this suite was 15/25. It is the only one of the
+          # 31 that actually spawns a guestThread and parks it.
+          #
+          # So stop sweeping knobs and assert the invariant instead:
+          # WAZY_REPRO_ASSERT=1 makes Close panic if any spawned-thread state
+          # outlived the reap. A REPRO line in a crash log names the broken
+          # invariant directly instead of leaving it to be inferred.
           n=25
-          for g in asyncpreemptoff=1 gccheckmark=1 madvdontneed=1; do
+          export WAZY_REPRO_ASSERT=1
+          echo "assert=$(launch assert $n)/$n" | tee -a rate.txt
+          unset WAZY_REPRO_ASSERT
+          for g in gccheckmark=1; do
             export GODEBUG="$g"
             echo "GODEBUG=$g -> $(launch "godebug-${g%%=*}" $n)/$n" | tee -a rate.txt
             unset GODEBUG
