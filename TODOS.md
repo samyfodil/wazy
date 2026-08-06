@@ -94,6 +94,56 @@ Every method any off-the-shelf **stable-rust** wasm32-wasip2 guest can call is n
 - **Capstone:** `TestRealMega` — one guest crossing args/env/random-HashMap/stdin/filesystem/clocks, byte-exact vs wasmtime.
 - **Remaining fail-loud (by design):** `wasi:filesystem` symlink-at / readlink-at — symlink CREATION is nightly-only in rust std on wasip2 (`symlink_path` unstable), so no stable-rust guest reaches them. Implement if a non-rust guest ever needs them.
 
+## OPEN BUG: intermittent `*Instance` memory corruption on Windows teardown
+
+**Symptom.** `TestAsyncWastConformance/trap-if-sync-and-waitable-set` faults
+during teardown on `windows-2025`, roughly 1 CI run in 15, and passes on
+re-run. The crash is always at `instance.go`'s `in.amu.Lock()` in
+`(*Instance).Close`, reached from the `subInstances` loop.
+
+**It is memory corruption, not a nil pointer.** Three symptoms, one object:
+
+- `fatal error: sync: inconsistent mutex state` with a **valid, non-nil**
+  receiver — the object exists, its mutex word is garbage.
+- The same object printing as `0x0`, faulting at `addr=0x1`.
+- Under `GODEBUG=clobberfree=1`:
+  `runtime: marked free object in span ... elemsize=16` — the GC itself
+  finding an object freed while still referenced.
+
+The `FSContext` nil deref and the wild pointer inside
+`hostModuleInstance.Close` seen in earlier reports are downstream of this,
+not separate bugs.
+
+**Ruled out, with evidence:**
+
+- **Not the JIT.** Swapping the native engine for the interpreter still
+  crashes. So not codegen, not executable-memory lifetime, nothing in
+  `internal/engine/native`.
+- **Not a data race.** The `-race` shard crashed with no race report.
+- `instantiateNestedInstances` cannot store a nil: it appends only after an
+  explicit error check, and `subInstances` is written once and never
+  mutated. The bad pointer appears *after* the slice is built.
+
+`internal/component/instance` contains no `unsafe`, so with the JIT
+eliminated the corruptor is most likely in `internal/wasm`.
+
+**Reproducing.** It does not reproduce on Linux — ~10,000 iterations across
+plain, `-race`, `-cpu` variants, `clobberfree`, `gccheckmark`, and
+interpreter mode are all clean. A temporary Windows CI matrix (12 shards,
+half `-race -count=120`, half `-count=400`) reproduces it 1-2 shards per
+run, which is the only known way to iterate on it.
+
+**Not this.** Two real memory-safety bugs were found while investigating and
+are fixed (`FailIfClosed` re-running the deferred cleanup and
+over-decrementing `mem.importers`; a memory view captured before a guest
+call and used after it). Neither explains this crash — it predates both
+fixes and the suspected path is different.
+
+**Do not "fix" it defensively.** A `if sub == nil { continue }` in the
+`subInstances` loop makes the symptom disappear while leaving live-memory
+corruption in the engine. The next step is identifying the corrupting
+write, not silencing the reader.
+
 ## Per-call realloc closure alloc (deferred — low ROI)
 - **What:** `invoke` builds a fresh `abi.Realloc` closure (capturing `ctx`) on every call. It stays on the stack for calls that never touch memory (CallAdd), but escapes to the heap on any string/list parameter (one alloc/call, e.g. CallGreet).
 - **Why deferred:** killing it means threading `ctx` through `abi.Realloc` and ~20 store/lower functions in abi (memory.go + flat.go) so the closure can be built once at bind time. That's a wide signature sweep for a single alloc on the string path — poor ratio next to the two wins already taken (lift-iterator pool + top-level-primitive fast path: CallAdd 5→2 allocs, ~245→177 ns/op). Revisit only if string-heavy call profiles demand it.
