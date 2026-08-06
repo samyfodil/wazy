@@ -114,6 +114,16 @@ The `FSContext` nil deref and the wild pointer inside
 `hostModuleInstance.Close` seen in earlier reports are downstream of this,
 not separate bugs.
 
+**The receiver is a real object; the write lands inside it.** In the
+`inconsistent mutex state` trace the sub-instance is `0x33a5ad497740` and the
+mutex `lockSlow` faults on is `0x33a5ad49774c` — offset `0xc`, which is
+exactly `unsafe.Offsetof(Instance{}.amu)` (verify with a throwaway test;
+`unsafe.Sizeof(Instance{})` is 352). So this is not a garbage or stale
+`*Instance` pointer being dereferenced: it is a correctly-aligned, live
+`*Instance` whose 4-byte mutex word has been overwritten by a stray write.
+Note the GC's `elemsize=16` is therefore a *different* object — whatever
+16-byte allocation the same stray writer also hit.
+
 **Ruled out, with evidence:**
 
 - **Not the JIT.** Swapping the native engine for the interpreter still
@@ -127,11 +137,27 @@ not separate bugs.
 `internal/component/instance` contains no `unsafe`, so with the JIT
 eliminated the corruptor is most likely in `internal/wasm`.
 
+**Ruled back in:** `internal/platform/time_windows.go`'s
+`uintptr(unsafe.Pointer(&counter))` into `LazyProc.Call` *looks* like the
+classic pointer-to-uintptr violation but is not one — `syscall.LazyProc.Call`
+is `//go:uintptrescapes`, which forces the operand to the heap and keeps it
+alive for the call. Don't spend time there again.
+
 **Reproducing.** It does not reproduce on Linux — ~10,000 iterations across
 plain, `-race`, `-cpu` variants, `clobberfree`, `gccheckmark`, and
-interpreter mode are all clean. A temporary Windows CI matrix (12 shards,
-half `-race -count=120`, half `-count=400`) reproduces it 1-2 shards per
-run, which is the only known way to iterate on it.
+interpreter mode are all clean. `.github/workflows/win-corruption-repro.yaml`
+(manual dispatch only) is the iteration vehicle: 4 modes × 4 Windows shards,
+which historically lands 1-2 crashed shards per run.
+
+**Read this before dispatching it again.** The previous harness inlined
+`head -n 160` of the failing log, and the clobber shard's crash *opens* with a
+GC span dump of hundreds of `0x… alloc unmarked` lines — 159 of the 160
+captured lines were that dump, so the `fatal error` and stack trace right
+behind it were never printed. The clobber shard is precisely the one that
+faults at the culprit instead of at a later victim, and its evidence was lost
+that way. The current workflow therefore uploads the raw log as an artifact
+unconditionally and strips the span dump before inlining anything. Fetch the
+artifact, not the job log.
 
 **Not this.** Three real bugs were found while investigating and are fixed
 (`FailIfClosed` re-running the deferred cleanup and over-decrementing

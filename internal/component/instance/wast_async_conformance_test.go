@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"path"
 	"reflect"
 	"strings"
@@ -12,6 +13,20 @@ import (
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/internal/component/binary"
 )
+
+// newWastRuntime builds the runtime a suite runs on. WAZY_REPRO_INTERPRETER=1
+// swaps the native engine for the interpreter, which is what tells an
+// engine-independent bug apart from one in generated code -- see TODOS.md's
+// "## OPEN BUG" (the open Windows teardown corruption) and the
+// win-corruption-repro workflow's interpreter shard, which has reproduced that
+// crash with the JIT out of the picture. Unset (every normal run, CI included)
+// this is exactly wazy.NewRuntime.
+func newWastRuntime(ctx context.Context) wazy.Runtime {
+	if os.Getenv("WAZY_REPRO_INTERPRETER") == "1" {
+		return wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigInterpreter())
+	}
+	return wazy.NewRuntime(ctx)
+}
 
 // TestAsyncWastConformance runs the official WebAssembly/component-model
 // ASYNC conformance suites (test/async/*.wast) through wazy, mirroring
@@ -358,7 +373,7 @@ func runAsyncWastSuite(t *testing.T, suite string) bool {
 	}
 
 	ctx := context.Background()
-	r := wazy.NewRuntime(ctx)
+	r := newWastRuntime(ctx)
 	defer r.Close(ctx)
 
 	defs := map[string][]byte{} // module_definition name -> wasm bytes

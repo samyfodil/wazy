@@ -1,0 +1,109 @@
+# Diagnostic harness for the open Windows *Instance teardown corruption
+# (TODOS.md, "## OPEN BUG"). Manual-dispatch only -- it costs nothing until
+# someone asks for it, and it deliberately does NOT run on push.
+#
+# Why this exists rather than just re-running CI: the crash is ~1 CI run in 15
+# and does not reproduce on Linux at all (~10k iterations clean), so a Windows
+# runner under -count stress is the only known way to iterate on it.
+#
+# The matrix is a discriminator, not just a stressor:
+#   native      - baseline
+#   interpreter - the JIT swapped out. Has reproduced "inconsistent mutex
+#                 state", which is what rules out generated code.
+#   clobber     - GODEBUG=clobberfree=1 + GOGC=1, so a use-after-free faults at
+#                 the culprit rather than at some later victim.
+#   checkptr    - -race enables checkptr, which flags an unsafe.Pointer misuse
+#                 at the conversion site. The GC's own "marked free object"
+#                 message suggests exactly this.
+#
+# Capture rule (learned the hard way): a `head -n 160` of the output is useless
+# here, because the clobber shard's crash begins with a span dump of hundreds of
+# "alloc unmarked" lines that eats the entire budget before the stack trace is
+# reached. So: always upload the raw log as an artifact (artifacts are not
+# truncated), and when inlining, strip the span dump first.
+name: win-corruption-repro
+
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: "-count for the native/interpreter shards"
+        default: "2500"
+      shards:
+        description: "shards per mode (1-4)"
+        default: "4"
+
+jobs:
+  windows-stress:
+    name: win ${{ matrix.mode }} ${{ matrix.shard }}
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+        mode: [native, interpreter, clobber, checkptr]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+
+      - name: configure Pagefile
+        uses: al-cheb/configure-pagefile-action@v1.5
+        with:
+          minimum-size: 8GB
+          maximum-size: 16GB
+          disk-root: "D:"
+
+      - name: stress the async wast suite
+        shell: bash
+        env:
+          GOTRACEBACK: all
+        run: |
+          count="${{ github.event.inputs.count || '2500' }}"
+          flags="-count=$count"
+          case "${{ matrix.mode }}" in
+            native)      ;;
+            interpreter) export WAZY_REPRO_INTERPRETER=1 ;;
+            clobber)     flags="-count=1200"; export GODEBUG=clobberfree=1; export GOGC=1 ;;
+            checkptr)    flags="-count=400 -race" ;;
+          esac
+          set +e
+          go test ./internal/component/instance/ \
+            -run 'TestAsyncWastConformance/trap-if-sync-and-waitable-set' \
+            -timeout 55m $flags > out.log 2>&1
+          echo "rc=$?" | tee rc.txt
+          exit 0
+
+      # Unconditional: a crash we cannot read is a run wasted, and the log is
+      # the entire product of this job.
+      - name: upload the raw log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: out-${{ matrix.mode }}-${{ matrix.shard }}
+          path: |
+            out.log
+            rc.txt
+          retention-days: 14
+
+      - name: summarize the failure
+        if: always()
+        shell: bash
+        run: |
+          rc=$(sed -n 's/^rc=//p' rc.txt)
+          if [ "$rc" = "0" ]; then echo "clean"; exit 0; fi
+          # Drop the GC span dump ("0x... alloc unmarked" / "free marked"),
+          # which is hundreds of lines long and carries no information beyond
+          # its first line -- it is what swallowed the stack trace last time.
+          grep -vE '^0x[0-9a-f]+ +(alloc|free) +(un)?marked$' out.log > trimmed.log
+          echo "===== crash region ====="
+          grep -nE 'fatal error|panic:|marked free object|inconsistent mutex|signal 0x|SIGSEGV' trimmed.log | head -20
+          echo "===== first 400 trimmed lines from the first crash marker ====="
+          start=$(grep -nE 'fatal error|panic:|marked free object' trimmed.log | head -1 | cut -d: -f1)
+          if [ -n "$start" ]; then
+            tail -n "+$start" trimmed.log | head -n 400
+          else
+            tail -n 200 trimmed.log
+          fi
+          exit 1
