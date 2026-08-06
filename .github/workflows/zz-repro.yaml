@@ -116,51 +116,54 @@ jobs:
           fi
           echo "POISONED RUNNER -- sweeping on this box" | tee -a rate.txt
 
-          # Poisoned-ness tracks the CPU: every Intel Xeon Platinum 8573C
-          # (Emerald Rapids) runner reproduces at ~80%, every AMD EPYC runner
-          # sits at 0%. The interpreter corrupts as readily as the JIT, so this
-          # is not wazy codegen -- it points at CPU-feature-gated code in the
-          # Go runtime (memmove / memclr / GC scan). GODEBUG=cpu.*=off disables
-          # those paths one at a time.
+          # GODEBUG sweep. asyncpreemptoff is the headline: Go's async
+          # goroutine preemption on Windows is SuspendThread /
+          # GetThreadContext / SetThreadContext / ResumeThread, mechanically
+          # unrelated to the signal-based mechanism on Linux. That fits every
+          # constraint at once -- engine-independent (pure Go either way),
+          # silent on Linux (different mechanism), concentrated in the one
+          # package doing heavy goroutine churn and parking, and firing in the
+          # first 100ms (peak goroutine creation). It also lines up with the
+          # CPU split: the poisoned parts (Emerald Rapids, Granite Rapids) have
+          # AMX and therefore a much larger XSAVE/thread-context area, which
+          # EPYC 7763/9V74 do not.
           n=25
-          for feat in cpu.all=off cpu.avx512f=off cpu.avx2=off cpu.erms=off; do
-            export GODEBUG="$feat"
-            echo "$feat -> $(launch "${feat%%=*}-off" $n)/$n" | tee -a rate.txt
+          for g in asyncpreemptoff=1 gccheckmark=1 madvdontneed=1; do
+            export GODEBUG="$g"
+            echo "GODEBUG=$g -> $(launch "godebug-${g%%=*}" $n)/$n" | tee -a rate.txt
             unset GODEBUG
           done
 
-          # Controls: is this machine corrupting ANY Go program, or only wazy?
-          # .github/gcstress has no wazy in it. "heap" (allocation + forced GC)
-          # already measured 0/40 on three poisoned runners, so allocation
-          # alone is not enough. "sched" adds what wazy actually does that heap
-          # does not: many goroutines handing a baton over unbuffered channels,
-          # plus finalizers -- the async scheduler's shape.
-          go build -o gcstress.exe ./.github/gcstress
-          for m in heap sched; do
+          # Locus test. Of all 31 async wast suites, only
+          # trap-if-sync-and-waitable-set actually spawns a guestThread and
+          # parks it -- trap-if-block-and-sync imports thread.new-indirect but
+          # every call site is commented out, so it only exercises the bind
+          # path. If the thread-spawning suite is the only one that crashes,
+          # the locus is guestThread's run/park/abort path (thread.go, Stage D)
+          # rather than anything shared by all async suites.
+          for suite in trap-if-block-and-sync cross-abi-calls big-interleaving-test deadlock; do
             c=0
-            for i in $(seq 1 40); do
-              set +e; GOGC=1 ./gcstress.exe "$m" > ctl.log 2>&1; rc=$?; set -e
+            for i in $(seq 1 $n); do
+              set +e
+              ./instance.test.exe -test.run "TestAsyncWastConformance/$suite" \
+                -test.count=1 -test.timeout=2m > run.log 2>&1
+              rc=$?
+              set -e
               if [ "$rc" -ne 0 ]; then
-                c=$((c+1)); [ "$c" -le 2 ] && cp ctl.log "crashes/gcstress-$m-$c.log"
+                c=$((c+1)); [ "$c" -le 1 ] && cp run.log "crashes/suite-$suite-$c.log"
               fi
             done
-            echo "gcstress_${m}_no_wazy=$c/40" | tee -a rate.txt
+            echo "suite_$suite=$c/$n" | tee -a rate.txt
           done
-
-          # Breadth: is the corruption specific to the component/async suite, or
-          # does any wazy workload do it on this box?
-          for pkg in internal/wasm internal/engine/interpreter; do
-            tag=$(echo "$pkg" | tr / -)
-            go test -c -o "pkg-$tag.exe" "./$pkg" 2>/dev/null || continue
-            c=0
-            for i in $(seq 1 15); do
-              set +e; ./"pkg-$tag.exe" -test.timeout=3m > pkg.log 2>&1; rc=$?; set -e
-              if [ "$rc" -ne 0 ]; then
-                c=$((c+1)); [ "$c" -le 1 ] && cp pkg.log "crashes/pkg-$tag-$c.log"
-              fi
-            done
-            echo "pkg_$tag=$c/15" | tee -a rate.txt
+          # And the whole corpus, as an upper bound.
+          c=0
+          for i in $(seq 1 10); do
+            set +e
+            ./instance.test.exe -test.run TestAsyncWastConformance -test.count=1 -test.timeout=5m > run.log 2>&1
+            rc=$?; set -e
+            [ "$rc" -ne 0 ] && c=$((c+1))
           done
+          echo "suite_ALL=$c/10" | tee -a rate.txt
 
       - name: upload crash logs
         if: always()
