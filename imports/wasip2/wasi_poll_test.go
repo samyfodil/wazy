@@ -101,7 +101,13 @@ func TestPoll_BlockAlwaysReadyNoOp(t *testing.T) {
 	if _, err := p.block(context.Background(), []abi.Value{wasiPollableRep}); err != nil {
 		t.Fatal(err)
 	}
-	if elapsed := time.Since(start); elapsed > 20*time.Millisecond {
+	// The always-ready singleton carries no deadline, so a broken fast path
+	// would not sleep for a bounded time -- it would block until the context
+	// died, i.e. hang. That, not a few milliseconds, is the failure this
+	// guards against, so the budget only has to sit clear of scheduler noise
+	// on a loaded shared runner. The original 20ms did not: it flaked at
+	// 24.6ms on windows-2025 CI.
+	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("block on always-ready pollable took %v, want ~0", elapsed)
 	}
 	// arg errors
