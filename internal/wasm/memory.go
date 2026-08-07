@@ -143,7 +143,7 @@ func NewMemoryInstance(memSec *Memory, allocator api.MemoryAllocator, moduleEngi
 	if poolable {
 		nativeGrowCap = uint64(len(backing))
 	}
-	return &MemoryInstance{
+	mi := &MemoryInstance{
 		Buffer:            buffer,
 		backing:           backing,
 		Min:               memSec.Min,
@@ -159,6 +159,7 @@ func NewMemoryInstance(memSec *Memory, allocator api.MemoryAllocator, moduleEngi
 		// allocator's buffer (expBuffer) and not shared (fixed max buffer).
 		poolable: poolable,
 	}
+	return mi
 }
 
 // Definition implements the same method as documented on api.Memory.

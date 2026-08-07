@@ -17,7 +17,18 @@ func (m *ModuleInstance) FailIfClosed() (err error) {
 		case exitCodeFlagResourceNotClosed:
 			// This happens when this module is closed asynchronously in CloseModuleOnCanceledOrTimeout,
 			// and the closure of resources have been deferred here.
-			_ = m.ensureResourcesClosed(context.Background())
+			//
+			// Flip the flag FIRST, and only run the deferred cleanup if we won
+			// the CAS. ensureResourcesClosed is not idempotent -- its importer
+			// branch does mem.importers--, so running it twice under-counts the
+			// live importers of a shared memory. Once the count reaches zero
+			// early, the next importer's close pools the buffer while another
+			// module is still pointing at it, and two modules end up sharing
+			// one array. FailIfClosed is called on every host-function entry,
+			// so without this the cleanup re-ran on every call.
+			if m.Closed.CompareAndSwap(closed, closed&^uint64(exitCodeFlagResourceNotClosed)|exitCodeFlagResourceClosed) {
+				_ = m.ensureResourcesClosed(context.Background())
+			}
 		}
 		return sys.NewExitError(uint32(closed >> 32)) // Unpack the high order bits as the exit code.
 	}
@@ -163,6 +174,7 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 			// Buffer, set it nil) happens under Mux so exactly one close pools it.
 			// expBuffer (custom allocator) is owner-only and freed unconditionally,
 			// exactly as before; poolable is false for it and for shared memories.
+			poolAuditRelease(mem, m)
 			mem.Mux.Lock()
 			mem.ownerClosed = true
 			var recycle []byte
@@ -181,6 +193,7 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 				mem.expBuffer.Free()
 				mem.expBuffer = nil
 			} else if recycle != nil {
+				poolAuditPut(mem)
 				putPooledMemoryBuffer(recycle)
 			}
 		} else {
@@ -190,6 +203,7 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 			// already closed, it deferred recycling to us -- pool Buffer now
 			// (claim under Mux, single-shot via the Buffer != nil guard). We never
 			// touch expBuffer/shared memories (poolable == false).
+			poolAuditRelease(mem, m)
 			mem.Mux.Lock()
 			if mem.importers > 0 {
 				mem.importers--
@@ -202,6 +216,7 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 			}
 			mem.Mux.Unlock()
 			if recycle != nil {
+				poolAuditPut(mem)
 				putPooledMemoryBuffer(recycle)
 			}
 		}

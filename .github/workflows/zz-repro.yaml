@@ -1,0 +1,364 @@
+# Diagnostic harness for the open Windows *Instance teardown corruption
+# (TODOS.md, "## OPEN BUG"). Manual-dispatch only -- it costs nothing until
+# someone asks for it, and it never fires on push.
+#
+# Why CI rather than a local box: the bug does not reproduce on Linux at all
+# (~10k iterations clean), and it does not reproduce on a real Windows 10
+# laptop either -- ~1600 process starts across plain, GOGC=1, clobberfree,
+# gccheckmark, GOMAXPROCS 2, 48-way oversubscription and both Go 1.26 patch
+# levels, all clean. It needs this runner image.
+#
+# WHAT THIS MEASURES, and why it keeps changing shape.
+#
+# 1. Every crash dies between 0.01s and 0.115s -- inside a -count=2500 run,
+#    i.e. during its FIRST iteration. The unit of risk is a PROCESS START,
+#    not an iteration, so cranking -count bought nothing.
+# 2. Crashes are a property of the MACHINE, not a probability. In one
+#    dispatch a single shard crashed 3 times in its first 4 launches while
+#    the other 15 shards were clean across 2888 launches. Runners are either
+#    poisoned (crashes almost every launch) or clean (never crashes).
+#
+# (2) means comparing modes ACROSS shards compares machines, not modes --
+# which silently invalidated three earlier "discriminator" sweeps. So each
+# shard now PROBES its own runner first and only sweeps the modes if that
+# runner turns out to be poisoned, keeping every comparison on one box.
+# The fingerprint step exists to correlate poisoned-ness with CPU/host.
+#
+# Capture rule (learned the hard way): never inline `head` of a crash log. The
+# clobberfree crash OPENS with a GC span dump of hundreds of "alloc unmarked"
+# lines, which ate the entire budget and threw away the stack trace behind it.
+# Upload raw logs as artifacts (not truncated) and strip the span dump before
+# inlining anything.
+name: zz-repro
+
+on:
+  workflow_dispatch:
+    inputs:
+      starts_scale:
+        description: "multiplier on each mode's process-start budget"
+        default: "1"
+      run_bisect:
+        description: "also run the 12-shard bisect (already answered: a6c208d)"
+        type: boolean
+        default: false
+
+jobs:
+  windows-stress:
+    name: win ${{ matrix.mode }} ${{ matrix.shard }}
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        # 24 shards. The real poisoned rate is ~4% of runners, not the ~1-in-8
+        # first estimated from small samples: a census of 199 runners gives 174
+        # AMD (0 poisoned), 16x Xeon 8573C (~40% poisoned -- NOT all of them),
+        # 2x Xeon 6973P-C (both), 7x Xeon 8370C (none). At 4%, 12 shards misses
+        # entirely about 60% of the time, and two dispatches running did.
+        # Clean shards cost ~1 minute (probe, then exit), and the earlier pool
+        # exhaustion came from 12 long bisect jobs riding along -- now gated --
+        # not from shard count.
+        shard: [1, 2, 3, 4, 5, 6]
+        mode: [a, b, c, d]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+
+      - name: configure Pagefile
+        uses: al-cheb/configure-pagefile-action@v1.5
+        with:
+          minimum-size: 8GB
+          maximum-size: 16GB
+          disk-root: "D:"
+
+      - name: fingerprint this runner
+        shell: pwsh
+        run: |
+          $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+          $os  = Get-CimInstance Win32_OperatingSystem
+          $cs  = Get-CimInstance Win32_ComputerSystem
+          @(
+            "cpu_name=$($cpu.Name)"
+            "cpu_id=$($cpu.ProcessorId)"
+            "cores=$($cpu.NumberOfCores) logical=$($cpu.NumberOfLogicalProcessors)"
+            "caption=$($os.Caption) build=$($os.BuildNumber) ver=$($os.Version)"
+            "manufacturer=$($cs.Manufacturer) model=$($cs.Model)"
+            "hypervisor=$($cs.HypervisorPresent)"
+            "ram_gb=$([math]::Round($cs.TotalPhysicalMemory/1GB,1))"
+          ) | Tee-Object -FilePath fingerprint.txt
+
+      - name: probe, then sweep every mode ON THIS SAME RUNNER
+        timeout-minutes: 25
+        shell: bash
+        env:
+          GOTRACEBACK: system
+        run: |
+          set -u
+          # Crash counts are a property of the MACHINE, not of a probability:
+          # one shard of a previous dispatch crashed 3 times in its first 4
+          # launches while 15 shards were clean across 2888 launches. So every
+          # mode must be compared on ONE runner -- comparing across shards
+          # compares machines, not modes, which invalidated the earlier sweeps.
+          go version
+          go test -c -o instance.test.exe ./internal/component/instance/
+          mkdir -p crashes
+          RUN='TestAsyncWastConformance/trap-if-sync-and-waitable-set'
+
+          launch() {  # launch <tag> <n>; echoes crash count
+            local tag="$1" n="$2" c=0 i
+            for i in $(seq 1 "$n"); do
+              set +e
+              ./instance.test.exe -test.run "$RUN" -test.count=1 -test.timeout=30s \
+                > "run.log" 2>&1
+              local rc=$?
+              set -e
+              if [ "$rc" -ne 0 ]; then
+                c=$((c+1))
+                [ "$c" -le 2 ] && cp run.log "crashes/$tag-$c.log"
+              fi
+            done
+            echo "$c"
+          }
+
+          probe=$(launch probe 25)
+          echo "probe=$probe/25" | tee -a rate.txt
+          if [ "$probe" -eq 0 ]; then
+            echo "CLEAN RUNNER -- skipping the sweep" | tee -a rate.txt
+            exit 0
+          fi
+          echo "POISONED RUNNER -- sweeping on this box" | tee -a rate.txt
+
+          # GODEBUG sweep. asyncpreemptoff is the headline: Go's async
+          # goroutine preemption on Windows is SuspendThread /
+          # GetThreadContext / SetThreadContext / ResumeThread, mechanically
+          # unrelated to the signal-based mechanism on Linux. That fits every
+          # constraint at once -- engine-independent (pure Go either way),
+          # silent on Linux (different mechanism), concentrated in the one
+          # package doing heavy goroutine churn and parking, and firing in the
+          # first 100ms (peak goroutine creation). It also lines up with the
+          # CPU split: the poisoned parts (Emerald Rapids, Granite Rapids) have
+          # AMX and therefore a much larger XSAVE/thread-context area, which
+          # EPYC 7763/9V74 do not.
+          # asyncpreemptoff is dead: 12/25 against a 15/25 probe on a poisoned
+          # runner, i.e. unchanged. And the locus is now pinned -- on that same
+          # box trap-if-block-and-sync, cross-abi-calls and big-interleaving-test
+          # were each 0/25 while this suite was 15/25. It is the only one of the
+          # 31 that actually spawns a guestThread and parks it.
+          #
+          # So stop sweeping knobs and assert the invariant instead:
+          # WAZY_REPRO_ASSERT=1 makes Close panic if any spawned-thread state
+          # outlived the reap. A REPRO line in a crash log names the broken
+          # invariant directly instead of leaving it to be inferred.
+          n=25
+          export WAZY_REPRO_ASSERT=1
+          echo "assert=$(launch assert $n)/$n" | tee -a rate.txt
+          unset WAZY_REPRO_ASSERT
+          for g in gccheckmark=1; do
+            export GODEBUG="$g"
+            echo "GODEBUG=$g -> $(launch "godebug-${g%%=*}" $n)/$n" | tee -a rate.txt
+            unset GODEBUG
+          done
+
+          # Locus is settled: on a poisoned runner trap-if-block-and-sync,
+          # cross-abi-calls and big-interleaving-test are each 0/25 while this
+          # suite is 15-21/25. It is the only one of 31 that actually spawns a
+          # guestThread and parks it.
+          #
+          # The teardown assertion (above) never fires, so the damage predates
+          # Close. What is left is to narrow WITHIN the suite:
+          # WAZY_REPRO_MAX_CMDS=N stops after N manifest commands. The suite is
+          # 27 commands -- one module_definition, then 13 module_instance /
+          # assert_trap pairs -- so the smallest N that still crashes names the
+          # exact command that makes the corruption reachable.
+          # The truncation sweep put the onset at N=7: N=3 and N=5 were 0/15,
+          # N=7 was 9/15, and it plateaus at 8-11/15 thereafter. N=7 is the
+          # third module_instance/assert_trap pair, i.e. the first STREAM
+          # assertion -- pairs 1 and 2 are future-read and future-write.
+          #
+          # But each pair also instantiates, and nothing closes until the suite
+          # ends, so "third assertion" and "three live instances" are
+          # confounded in a truncation sweep. WAZY_REPRO_ONLY_PAIR=k runs the
+          # module_definition plus ONLY the k'th pair, against exactly one
+          # instance, which separates them: a crash at k=3 alone means the
+          # stream assertion, a clean k=3 means it takes instance count.
+          # Settled on two poisoned runners: NO single assertion crashes in
+          # isolation (onlypair_1..6 all 0/15) while the truncation sweep still
+          # shows onset at three pairs (maxcmds_3 0/15, maxcmds_5 0-1/15,
+          # maxcmds_7 2-8/15). So it is the ACCUMULATION, not the stream
+          # assertion -- the stream reading was an ordering coincidence.
+          #
+          # Remaining question: is the trigger how MANY live instances have
+          # piled up, or WHICH assertions ran? Repeat one harmless pair n times.
+          # A crash means pure instance count, which points at whatever is
+          # shared across instances -- notably the engine's compiled-module
+          # cache, where two of the observed crashes actually landed, and which
+          # every module_instance re-refcounts against the same definition.
+          # Settled on four poisoned runners: repeating ONE harmless pair
+          # (join-during-sync-future-read, clean in isolation) crashes at three
+          # instances and not at two --
+          #   repeat_2 0-1/15, repeat_3 3-7/15, repeat_4..8 4-10/15.
+          # So the trigger is pure INSTANCE COUNT, threshold 3; which assertion
+          # runs is irrelevant.
+          #
+          # "Three" has two very different readings and they must be separated:
+          #   (a) a real per-instance structure whose backing array reallocates
+          #       on the third append (Go grows 1->2->4, so the 3rd frees the
+          #       old array), or
+          #   (b) merely enough allocation to trigger the FIRST GC -- at two
+          #       instances the process may exit before any collection runs.
+          # Forcing collection at two instances tells them apart: if repeat_2
+          # crashes under GOGC=1 it is (b), a GC threshold; if repeat_2 stays
+          # clean under GOGC=1 while repeat_3 crashes with GC off, it is (a), a
+          # genuine count.
+          # Measure the kill-switch against the FULL SUITE, which is the only
+          # configuration that still reproduces.
+          #
+          # The reduced repro did not survive instrumentation. repeat3 +
+          # GOGC=off measured 7-8/15 one dispatch and 0-1/15 the next, with no
+          # logic change -- only the audit hooks, which add a call on the
+          # memory-creation and memory-import paths even when disabled. So the
+          # minimisation is layout-fragile, and a fix cannot be measured
+          # against a baseline that is already zero. The probe (full suite) is
+          # still 17-21/25 on a poisoned runner, so compare there.
+          #
+          # getPooledMemoryBuffer is still the prime suspect: it is the only
+          # place that hands back a buffer another holder might still reference
+          # AND zeroes it (clear), and every victim reads back as zero. The
+          # set-based reference audit says the importers counter is not
+          # over-decremented on any Linux-reachable path, so if the pool is
+          # still it, the stale reference is held by something that is not a
+          # ModuleInstance.
+          m=25
+          for nopool in 0 1; do
+            [ "$nopool" = "1" ] && export WAZY_REPRO_NO_MEMPOOL=1 || unset WAZY_REPRO_NO_MEMPOOL
+            c=0
+            for i in $(seq 1 $m); do
+              set +e
+              ./instance.test.exe -test.run "$RUN" -test.count=1 -test.timeout=30s > run.log 2>&1
+              rc=$?
+              set -e
+              if [ "$rc" -ne 0 ]; then
+                c=$((c+1)); [ "$c" -le 1 ] && cp run.log "crashes/fullsuite-nopool$nopool.log"
+              fi
+            done
+            echo "fullsuite_nomempool=$nopool -> $c/$m" | tee -a rate.txt
+          done
+          unset WAZY_REPRO_NO_MEMPOOL
+
+      - name: upload crash logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: out-${{ matrix.mode }}-${{ matrix.shard }}
+          path: |
+            crashes/
+            rate.txt
+            fingerprint.txt
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: summarize
+        if: always()
+        shell: bash
+        run: |
+          cat rate.txt 2>/dev/null || echo "no rate recorded"
+          for f in crashes/*.log; do
+            [ -e "$f" ] || continue
+            echo "===== $f ====="
+            # Strip the GC span dump; it is hundreds of uninformative lines and
+            # it is what swallowed the stack trace the first time round.
+            grep -vE '^0x[0-9a-f]+ +(alloc|free) +(un)?marked$' "$f" > trimmed.log
+            start=$(grep -nE 'fatal error|panic:|marked free object|Exception 0x' trimmed.log | head -1 | cut -d: -f1)
+            if [ -n "$start" ]; then
+              tail -n "+$start" trimmed.log | head -n 120
+            else
+              tail -n 60 trimmed.log
+            fi
+          done
+
+  # A poisoned runner reproduces at ~92% per launch, which is a solid enough
+  # oracle to bisect with: 25 launches separate bad from good decisively. Most
+  # runners are clean, so shards self-select -- a clean one exits in seconds
+  # and only a poisoned one pays for the bisect (~6 steps over 41 commits).
+  bisect:
+    name: bisect ${{ matrix.shard }}
+    # Already answered (a6c208d), so this is off unless asked for. It was
+    # running on every dispatch and doubling the cost of each one.
+    if: ${{ github.event.inputs.run_bisect == 'true' }}
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0   # bisect needs real history
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+
+      - name: configure Pagefile
+        uses: al-cheb/configure-pagefile-action@v1.5
+        with:
+          minimum-size: 8GB
+          maximum-size: 16GB
+          disk-root: "D:"
+
+      - name: fingerprint
+        shell: pwsh
+        run: |
+          $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+          "cpu_name=$($cpu.Name)" | Tee-Object -FilePath fingerprint.txt
+          # Microcode revision: one 8573C runner was clean while five were
+          # poisoned, and this is the likeliest axis for that difference.
+          $k = "HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0"
+          $rev = (Get-ItemProperty $k -Name "Update Revision" -EA SilentlyContinue)."Update Revision"
+          "microcode=$(if ($rev) { [BitConverter]::ToString($rev) } else { 'unknown' })" |
+            Tee-Object -FilePath fingerprint.txt -Append
+
+      - name: probe, then bisect if this runner is poisoned
+        shell: bash
+        env:
+          GOTRACEBACK: system
+        run: |
+          set -u
+          RUN='TestAsyncWastConformance/trap-if-sync-and-waitable-set'
+          cp .github/bisect-pred.sh "$RUNNER_TEMP/pred.sh"
+          chmod +x "$RUNNER_TEMP/pred.sh"
+
+          go test -c -o "$RUNNER_TEMP/probe.exe" ./internal/component/instance/
+          c=0
+          for i in $(seq 1 25); do
+            set +e
+            "$RUNNER_TEMP/probe.exe" -test.run "$RUN" -test.count=1 -test.timeout=30s >/dev/null 2>&1
+            rc=$?
+            set -e
+            [ "$rc" -ne 0 ] && c=$((c+1))
+          done
+          echo "probe=$c/25" | tee -a bisect.txt
+          if [ "$c" -lt 5 ]; then
+            echo "CLEAN RUNNER -- no bisect here" | tee -a bisect.txt
+            exit 0
+          fi
+          echo "POISONED ($c/25) -- bisecting 53e8e4d..HEAD" | tee -a bisect.txt
+
+          git bisect start HEAD 53e8e4d 2>&1 | tee -a bisect.txt
+          set +e
+          git bisect run "$RUNNER_TEMP/pred.sh" 2>&1 | tee -a bisect.txt
+          set -e
+          git bisect log 2>&1 | tee -a bisect.txt
+          git bisect reset
+
+      - name: upload bisect result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bisect-${{ matrix.shard }}
+          path: |
+            bisect.txt
+            fingerprint.txt
+          retention-days: 14
+          if-no-files-found: ignore
+

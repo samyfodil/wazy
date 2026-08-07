@@ -13,6 +13,7 @@ import (
 	"os"
 
 	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/imports/wasip2"
 	"github.com/samyfodil/wazy/internal/component/instance"
 )
 
@@ -37,7 +38,7 @@ func main() {
 	defer r.Close(ctx)
 
 	inst, err := instance.Instantiate(ctx, r, wasm,
-		instance.WithWASI(instance.WASIConfig{Stdout: os.Stdout, Stderr: os.Stderr})...)
+		wasip2.With(wasip2.Config{Stdout: os.Stdout, Stderr: os.Stderr})...)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "instantiate:", err)
 		os.Exit(1)

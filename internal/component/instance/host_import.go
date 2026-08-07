@@ -45,10 +45,13 @@ type config struct {
 	// preserves the exact prior always-recompile behavior.
 	compileCache *CompileCache
 
-	// httpHost, when non-nil (set by WithWASI when WASIConfig.EnableHTTP is
-	// true), is the wasi:http server state. It is copied onto the Instance so
-	// (*Instance).ServeHTTP can drive the guest's exported incoming-handler.
-	httpHost *wasiHTTP
+	// hostState carries opaque per-instance values a host implementation
+	// registered with WithHostState, handed to the Instance at
+	// instantiation. It exists because a host that implements a stateful
+	// interface (wasi:http's server side is the in-tree example) needs
+	// somewhere to hang state that lives exactly as long as one Instance,
+	// and cannot add a field to Instance from outside this package.
+	hostState map[any]any
 
 	// resCanon and importedResDtors are set only when this instantiation is a
 	// nested sub-component of a composition (see instantiateNestedInstances).
@@ -244,13 +247,6 @@ func WithCompileCache(cache *CompileCache) Option {
 	}
 }
 
-// withHTTPHost records the wasi:http server state on the config so the two
-// instantiation paths that support host imports can copy it onto the Instance
-// (for ServeHTTP). Set by wasiHTTPOptions.
-func withHTTPHost(h *wasiHTTP) Option {
-	return func(c *config) { c.httpHost = h }
-}
-
 // withResourcesHook registers hook to run against the Instance's
 // *handleTable as soon as it is created (before any host func is invoked).
 //
@@ -330,6 +326,16 @@ func runResourceHooks(cfg *config, resources *handleTable) {
 // package doesn't recognize (not registered, or genuinely guest-defined,
 // e.g. real_adder's own resource type) falls back to the raw TypeIdx
 // unchanged -- exactly today's existing, working behavior.
+// withImportCustom registers fn under iface/name with a caller-built
+// FuncDesc and Resolver, bypassing synthFuncDesc's flat-only synthesis. It
+// lives here rather than with any one host implementation because it reaches
+// into config's import map.
+func withImportCustom(iface, name string, fn HostFunc, fd binary.FuncDesc, resolve abi.Resolver) Option {
+	return func(c *config) {
+		c.imports[mkImportKey(iface, name)] = &hostImport{fn: fn, customFD: &fd, customResolve: resolve}
+	}
+}
+
 func withResourceTag(iface, name string, tag uint32) Option {
 	return func(c *config) {
 		c.resourceTags[mkImportKey(iface, name)] = tag

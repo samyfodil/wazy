@@ -852,6 +852,7 @@ func (m *ModuleInstance) buildMemory(module *Module, allocator api.MemoryAllocat
 	memSec := module.MemorySection
 	if memSec != nil {
 		m.MemoryInstance = NewMemoryInstance(memSec, allocator, m.Engine)
+		poolAuditHold(m.MemoryInstance, m)
 		m.MemoryInstance.definition = &module.MemoryDefinitionSection[0]
 	}
 }

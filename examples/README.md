@@ -12,6 +12,9 @@ The following example projects can help you practice WebAssembly with wazy:
 * [component](component) - how to run WebAssembly Component Model components,
   a WASI 0.2 `wasi:cli/command`, a component that uses the async ABI, and one
   that spawns a Component Model thread.
+* [custom-wit](custom-wit) - how to define your own WIT interface and implement
+  it host-side in Go, including a resource, `option`, and a
+  `result<list<string>, variant>`.
 * [concurrent-instantiation](concurrent-instantiation) - how to instantiate multiple Wasm instances per Goroutine concurrently.
 * [multiple-results](multiple-results) - how to return more than one result
   from WebAssembly or Go-defined functions.

@@ -8,6 +8,7 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/component"
+	"github.com/samyfodil/wazy/imports/wasip2"
 )
 
 //go:embed testdata/adder.wasm
@@ -47,7 +48,7 @@ func TestInstantiate_WASIHelloWorld(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	inst, err := component.Instantiate(ctx, r, helloWasm,
-		component.WithWASI(component.WASIConfig{Stdout: &stdout, Stderr: &stderr})...)
+		wasip2.With(wasip2.Config{Stdout: &stdout, Stderr: &stderr})...)
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}

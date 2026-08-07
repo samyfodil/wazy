@@ -1,0 +1,18 @@
+package acme:api@1.0.0;
+
+interface host {
+  resource counter {
+    constructor(start: u32);
+    bump: func(by: u32) -> u32;
+  }
+  record query { name: string, limit: u32 }
+  variant failure { not-found, denied(string) }
+  lookup: func(q: query) -> result<list<string>, failure>;
+  make: func(start: u32) -> counter;
+  use-it: func(c: borrow<counter>, by: u32) -> u32;
+}
+
+world app {
+  import host;
+  export run: func() -> string;
+}

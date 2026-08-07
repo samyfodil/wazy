@@ -107,6 +107,294 @@ Every method any off-the-shelf **stable-rust** wasm32-wasip2 guest can call is n
 - **Capstone:** `TestRealMega` — one guest crossing args/env/random-HashMap/stdin/filesystem/clocks, byte-exact vs wasmtime.
 - **Remaining fail-loud (by design):** `wasi:filesystem` symlink-at / readlink-at — symlink CREATION is nightly-only in rust std on wasip2 (`symlink_path` unstable), so no stable-rust guest reaches them. Implement if a non-rust guest ever needs them.
 
+## OPEN BUG: intermittent `*Instance` memory corruption on Windows teardown
+
+**Symptom.** `TestAsyncWastConformance/trap-if-sync-and-waitable-set` faults
+during teardown on `windows-2025`, roughly 1 CI run in 15, and passes on
+re-run. The crash is always at `instance.go`'s `in.amu.Lock()` in
+`(*Instance).Close`, reached from the `subInstances` loop.
+
+**It is memory corruption, not a nil pointer.** Three symptoms, one object:
+
+- `fatal error: sync: inconsistent mutex state` with a **valid, non-nil**
+  receiver — the object exists, its mutex word is garbage.
+- The same object printing as `0x0`, faulting at `addr=0x1`.
+- Under `GODEBUG=clobberfree=1`:
+  `runtime: marked free object in span ... elemsize=16` — the GC itself
+  finding an object freed while still referenced.
+
+The `FSContext` nil deref and the wild pointer inside
+`hostModuleInstance.Close` seen in earlier reports are downstream of this,
+not separate bugs.
+
+**The receiver is a real object; the write lands inside it.** In the
+`inconsistent mutex state` trace the sub-instance is `0x33a5ad497740` and the
+mutex `lockSlow` faults on is `0x33a5ad49774c` — offset `0xc`, which is
+exactly `unsafe.Offsetof(Instance{}.amu)` (verify with a throwaway test;
+`unsafe.Sizeof(Instance{})` is 352). So this is not a garbage or stale
+`*Instance` pointer being dereferenced: it is a correctly-aligned, live
+`*Instance` whose 4-byte mutex word has been overwritten by a stray write.
+Note the GC's `elemsize=16` is therefore a *different* object — whatever
+16-byte allocation the same stray writer also hit.
+
+**Ruled out, with evidence:**
+
+- **Not the JIT.** Swapping the native engine for the interpreter still
+  crashes. So not codegen, not executable-memory lifetime, nothing in
+  `internal/engine/native`. (Re-confirmed independently: an interpreter shard
+  crashed in the 16-shard run below, alongside native ones.)
+- **Not a data race.** The `-race` shard crashed with no race report.
+- `instantiateNestedInstances` cannot store a nil: it appends only after an
+  explicit error check, and `subInstances` is written once and never
+  mutated. The bad pointer appears *after* the slice is built.
+
+`internal/component/instance` contains no `unsafe`, so with the JIT
+eliminated the corruptor is most likely in `internal/wasm`.
+
+**Every victim so far reads back as ZERO.** Not clobberfree's `0xdeadbeef`,
+not random garbage — zero, i.e. memory that was freed and re-handed-out as a
+fresh (zeroed) allocation. The known victims:
+
+- a slot in the `[]*Instance` `subInstances` backing array (nil receiver in
+  `Close`);
+- a `*compiledModuleWithCount`'s embedded `*compiledModule` (`addr=0x0`,
+  `addr=0x3`);
+- a `GoModuleFunc` value: `Exception 0xc0000005 PC=0x0` at `api/wasm.go:479`
+  from `(*guestTask).firstRunBody` — a host function whose closure was zero,
+  so the engine jumped to address 0;
+- an `*Instance`'s mutex word, and a map header's flags.
+
+An independent audit (Codex, xhigh) separately eliminated: the
+compiledModule refCount protocol (balanced for this suite), executable
+lifetime (every instantiated native `moduleEngine` holds a strong
+`*compiledModule`), and `TableInstance.involvingModuleInstances` retention
+through the merged-graph import path (the passthrough shim and `$m` both
+import the same table and are appended to the retention list before `$m`
+installs active elements). It also confirmed the interpreter reaches no Win32
+I/O and no executable mapping in this fixture.
+
+- ⚠️ **RETRACTED: Green Tea GC, the executables finalizer, and
+  engine-independence.** Each was "ruled out" by a 16-shard dispatch in which
+  a shard running the mode still crashed. Those conclusions are **invalid**,
+  because crashes turn out to be a property of the RUNNER (see the poisoned-
+  runner note below), and every mode ran on a different runner. Those sweeps
+  compared machines, not modes. All three hypotheses are open again, and
+  `zz-repro.yaml` now probes a runner first and sweeps every mode on that one
+  box so the comparison is actually controlled.
+- **Not the linear-memory buffer pool.** It was the best-fitting theory of
+  the lot: `getPooledMemoryBuffer` is the only place that hands back a buffer
+  another holder might still reference AND zeroes it (`clear`), while every
+  victim reads back as zero; and `sync.Pool` being GC-drained explained the
+  otherwise-backwards GC result. It is wrong. `WAZY_REPRO_NO_MEMPOOL=1`
+  disables the pool entirely and the full suite measures **17/25 with it and
+  17/25 without it** on a poisoned runner. Separately,
+  `WAZY_REPRO_POOL_AUDIT=1` (a SET of live holders per memory, so a
+  double-close cannot fool it the way it fools the `importers` counter) is
+  clean across the whole repo, so the counter discipline holds too.
+- **Not `internal/platform/time_windows.go`.** Its
+  `uintptr(unsafe.Pointer(&counter))` into `LazyProc.Call` *looks* like the
+  classic pointer-to-uintptr violation but is not one:
+  `syscall.LazyProc.Call` is `//go:uintptrescapes`, which forces the operand
+  to the heap and keeps it alive for the call.
+
+**Bisected to `a6c208d`** ("perf(component): cut async per-call allocations
+(FirstLight 4->1, AwaitImport 11->5)", #4) — the first commit after the async
+runtime landed. Clean walk on a poisoned runner: `ee91a4e` 15/25, `e9c123e`
+22/25, `2011b15` 16/25, `b41d138` 19/25, `a6c208d` 17/25, with `53e8e4d`
+good.
+
+**Read that carefully: it EXPOSES, it does not necessarily cause.** `a6c208d`
+is pure Go with no `unsafe` in it — co-allocating task+guestTask in a
+`callbackFrame`, an inline `task.resultBuf [1]abi.Value`, and closure
+destructuring. Go is memory-safe, so none of that can corrupt a heap on its
+own; what it does is cut the async path from 4 allocations to 1, which moves
+every object's neighbours and changes when the GC runs. So it is the commit
+that made a latent defect visible. Reverting it would hide the bug, not fix
+it — don't.
+
+What it points at is the one class of pointer in this repo the GC cannot
+see, shared by BOTH engines (which matters, because the interpreter corrupts
+at the same rate): `wasm.TableInstance.References` is `[]uintptr`, and
+`functionFromUintptr` / `LookupFunction` resurrect a `*function` out of it,
+then read `tf.moduleInstance` — a real pointer — out of that. If the
+`involvingModuleInstances` retention edge is ever short, those `function`
+objects are collectable while the table still addresses them, and reading a
+pointer field out of one stores a pointer to freed memory into live memory.
+That is precisely "marked free object in span". Next step is to test that
+directly (make the resurrected references GC-visible and see whether the rate
+drops to zero on a poisoned runner) rather than to reason about it further.
+
+⚠️ **MEASURE ONLY AGAINST THE FULL SUITE. The reduced repro is
+layout-fragile.** `repeat3` + `GOGC=off` measured 7-8/15 on one build and
+0-1/15 on the next, across three poisoned runners, with **no logic change**
+between them — only added instrumentation (one call each on the
+memory-creation and memory-import paths, present even when disabled). So a
+candidate fix compared against the reduced repro will read as a success
+against an already-zero baseline; that is exactly how the pool kill-switch
+nearly passed. The full-suite probe stays at 17-21/25 on a poisoned runner —
+use it.
+
+**Recorded for the record, but no longer load-bearing** (it was real on the
+build that measured it, and did not transfer): the trigger looked like pure
+INSTANCE COUNT with threshold 3, measured on four poisoned runners. Repeating
+ONE harmless pair (`join-during-sync-future-read`, clean in isolation) gave 2
+instances 0-1/15, 3 instances 3-7/15, 4-8 instances 4-10/15, while no single
+pair crashed alone (`onlypair_1..6` all 0/15). The two readings of "three" —
+a per-instance structure reallocating on the third append (Go grows 1→2→4),
+versus merely enough allocation to trigger the first GC — were never
+separated, because the repro stopped reproducing first.
+
+What survives from that line of work is the tooling, which is worth reusing:
+`WAZY_REPRO_MAX_CMDS`, `WAZY_REPRO_ONLY_PAIR`, `WAZY_REPRO_PAIR_REPEAT` in
+the wast harness, and `WAZY_REPRO_NO_MEMPOOL` / `WAZY_REPRO_POOL_AUDIT` in
+`internal/wasm`.
+
+Note this retires the earlier "first STREAM assertion" reading. Instance count
+and assertion index are confounded in a truncation sweep, because every pair
+instantiates and nothing closes until the suite ends.
+
+**The locus is ONE suite, and it is the only one that spawns a thread.** On a
+poisoned runner, measured on that same box: `trap-if-block-and-sync` 0/25,
+`cross-abi-calls` 0/25, `big-interleaving-test` 0/25, and
+`trap-if-sync-and-waitable-set` 15-21/25. Replicated on two poisoned runners
+(a 6973P-C and an 8573C). Of the 31 async suites, this is the **only one that
+actually spawns a `guestThread` and parks it** — `trap-if-block-and-sync`
+imports `thread.new-indirect` but every call site is commented out (wast
+lines 131, 140, 145), so it exercises only the bind path. Every other suite's
+concurrency is the older, far more exercised `stackfulTask` /
+promoted-`guestTask` machinery. So the surface is `thread.go`'s spawned-thread
+path (Stage D), not the package.
+
+**The damage predates `Close`.** `WAZY_REPRO_ASSERT=1` makes `Close` panic,
+right after the reap, if any spawned-thread state outlived it — a thread
+still believing it is running, a `*guestThread` still in the table, or any
+park still pinning a live goroutine. On a poisoned runner it measured 17/25
+against a 21/25 probe **and never once fired**. So there is no leaked
+goroutine and no orphaned thread state; the invariant holds and memory is
+corrupt regardless. Do not re-check at teardown — crashes also occur during
+`Instantiate` and mid-guest-call, which should have been the tell.
+
+**Also dead: async preemption.** `GODEBUG=asyncpreemptoff=1` measured 12/25
+against a 15/25 probe. Go's Windows preemption is `SuspendThread` /
+`GetThreadContext` / `SetThreadContext`, mechanically unrelated to Linux's
+signal-based path, and the poisoned CPUs carry AMX (a much larger
+thread-context area) while the clean EPYCs do not — it fit every constraint
+on paper and is still wrong.
+
+**Also dead: pooled-buffer aliasing.** The three pools in this package were
+audited at the site where one crash actually landed
+(`(*guestTask).firstRunBody`): `packed` is copied out of `stack` *before*
+`putUint64Slice`, `lowerParams`'s result is re-anchored into `*coreArgsPtr`
+before its `Put`, and there is no `defer` on either `Put`, so an abort panic
+leaks the buffer rather than returning it early — the safe direction.
+
+**Next step, tooling already in place.** `WAZY_REPRO_MAX_CMDS=N` stops the
+wast harness after N manifest commands. This suite is 27 — one
+`module_definition`, then 13 `module_instance`/`assert_trap` pairs — so the
+smallest N that still crashes names the exact command that first makes the
+corruption reachable, turning "audit thread.go" into "audit this operation".
+
+**A runner is either poisoned or clean — this is not a probability.** The
+single most important measurement so far. A dispatch that launched many short
+processes per shard produced: 15 shards with **0 crashes across 2888
+launches**, and one shard with **3 crashes in its first 4 launches** (it
+stopped at 3 by design). So a given runner either reproduces almost every
+launch or never reproduces at all. That reframes "~1 CI run in 15" as the
+fraction of poisoned runners, explains why the crash always lands in the
+first 100ms, and explains why a real Windows 10 laptop never reproduces.
+
+It also means **any experiment that compares modes across shards is
+confounded**, which is how three hypotheses were wrongly closed. Compare
+modes only within one runner.
+
+Poisoned-ness tracks the CPU, but is NOT determined by the SKU. A census of
+199 fingerprinted runners: 174 AMD EPYC (7763 / 9V74 / 9V45) — **0 poisoned**;
+16 Intel Xeon Platinum 8573C — roughly **40%** poisoned, not all; 2 Intel Xeon
+6973P-C — both poisoned; 7 Intel Xeon Platinum 8370C — none. So the overall
+rate is about **4% of runners**, and something below the SKU (microcode, host)
+decides it among 8573Cs. Budget shards accordingly: at 4%, a 12-shard dispatch
+comes up empty ~60% of the time, which cost two dispatches before this was
+measured. An earlier "~1 in 8" estimate here was wrong — it came from small
+samples where poisoned shards were overrepresented.
+
+But the machine is not the bug. On a poisoned runner: `cpu.all=off` (every
+CPU-feature path in the Go runtime disabled) still crashes 19/25; a no-wazy
+control doing pointer-dense allocation, forced GC, goroutines on unbuffered
+channels and finalizers runs 0/40; `internal/wasm` runs 0/15; and
+`internal/engine/interpreter` runs 0/15 — while `internal/component/instance`
+runs 23/25. Intel exposes it; the defect is ours.
+
+**The map crashes are victims, not races.** `concurrent map read and map
+write` on the engine's compiled-module map, at `interpreter.go:96` and
+`engine_cache.go:115`, both reached from `buildMergedCanonHostModule`
+(graph.go:1799). Neither is a real race: all accesses to both maps correctly
+hold the engine mutex, and under `GOTRACEBACK=system` (which, unlike `all`,
+shows runtime-internal goroutines) every one of the 9 live goroutines is
+accounted for and idle — finalizer and cleanup included. So `hashWriting` was
+set on a corrupted map header. That map is simply the busiest allocation in
+the hot path, i.e. the likeliest victim.
+
+**A DEP violation is in the mix.** One crash is `Exception 0xc0000005` with
+first parameter `0x8` — attempted EXECUTE on non-executable memory — at
+`PC=0x7ffab0a8f940`, outside the wazy image entirely, unwinding from
+`DeleteCompiledModule`'s deferred unlock. Another is a wild
+`0xffffffffffffffff` fault in `Close`'s `closers` loop. Both from the same
+poisoned runner within four launches.
+
+**The unit of risk is a PROCESS START, not an iteration.** Every crash
+captured so far died between 0.01s and 0.115s — inside a `-count=2500` run,
+i.e. during its FIRST iteration. Four dispatches produced 9 crashes from ~64
+starts: roughly 1 in 7. So cranking `-count` bought nothing; each shard was a
+single sample. `zz-repro.yaml` now launches many short processes per shard
+and reports crashes/starts, which turns a dispatch into a rate rather than a
+coin flip — the thing a bisect needs as an oracle.
+
+**Reproducing.** It does not reproduce on Linux — ~10,000 iterations across
+plain, `-race`, `-cpu` variants, `clobberfree`, `gccheckmark`, and
+interpreter mode are all clean. It also does **not** reproduce on a real
+Windows 10 Pro (19045) laptop: ~1600 process starts across plain, `GOGC=1`,
+`clobberfree`, `gccheckmark`, `GOMAXPROCS=2`, 48-way oversubscription and
+both Go 1.26 patch levels, all clean. **That is fully explained by the CPU:
+the laptop is an i7-8565U (Whiskey Lake-U, 2018), which is not in the
+affected family** — even the Ice Lake Xeon 8370C measured 0/7. Don't retry a
+consumer machine; it needs Emerald Rapids or Granite Rapids silicon. Whatever the
+trigger is, it needs the `windows-2025` runner image. Note a cross-compiled
+`go test -c` binary runs standalone there (fixtures are `//go:embed`ed), so
+testing on a Windows box needs no Go install and no repo checkout — just
+`GOOS=windows go test -c` and copy the exe.
+`.github/workflows/zz-repro.yaml` (manual dispatch only) is the vehicle.
+
+**Read this before dispatching it again.** The previous harness inlined
+`head -n 160` of the failing log, and the clobber shard's crash *opens* with a
+GC span dump of hundreds of `0x… alloc unmarked` lines — 159 of the 160
+captured lines were that dump, so the `fatal error` and stack trace right
+behind it were never printed. The clobber shard is precisely the one that
+faults at the culprit instead of at a later victim, and its evidence was lost
+that way. The current workflow therefore uploads the raw log as an artifact
+unconditionally and strips the span dump before inlining anything. Fetch the
+artifact, not the job log.
+
+**Not this.** Four real bugs were found while investigating and are fixed
+(`FailIfClosed` re-running the deferred cleanup and over-decrementing
+`mem.importers`; a memory view captured before a guest call and used after
+it; `reapParkedGoroutines`' never-spawned arm freeing a thread-table slot on
+the *reaper's* instance instead of the thread owner's, so one thread index
+could be handed out twice); and `writeSocket` in `internal/sysfs/
+file_windows.go` returning on `ERROR_IO_PENDING` while the kernel still held
+pointers to `&overlapped`, `&done` and `buf`, so the kernel wrote into Go
+memory after it was recycled. None explains this crash — it predates all
+four; the third is inert on the crashing suite, where the reaper and the
+thread's owner are the same instance; and the fourth needs socket I/O, which
+the async wast fixture never performs. The fourth is worth noting anyway: it
+is the exact *mechanism* this bug must have (a kernel-side write into
+recycled Go memory, invisible to `-race` and checkptr), so look for more
+Win32 calls that hand the kernel a pointer and return before it is done.
+
+**Do not "fix" it defensively.** A `if sub == nil { continue }` in the
+`subInstances` loop makes the symptom disappear while leaving live-memory
+corruption in the engine. The next step is identifying the corrupting
+write, not silencing the reader.
+
 ## Per-call realloc closure alloc (deferred — low ROI)
 - **What:** `invoke` builds a fresh `abi.Realloc` closure (capturing `ctx`) on every call. It stays on the stack for calls that never touch memory (CallAdd), but escapes to the heap on any string/list parameter (one alloc/call, e.g. CallGreet).
 - **Why deferred:** killing it means threading `ctx` through `abi.Realloc` and ~20 store/lower functions in abi (memory.go + flat.go) so the closure can be built once at bind time. That's a wide signature sweep for a single alloc on the string path — poor ratio next to the two wins already taken (lift-iterator pool + top-level-primitive fast path: CallAdd 5→2 allocs, ~245→177 ns/op). Revisit only if string-heavy call profiles demand it.

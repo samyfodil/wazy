@@ -131,7 +131,7 @@ func runWastSuite(t *testing.T, suite string) {
 			if in != nil {
 				in.Close(ctx)
 			}
-			opts := WithWASI(WASIConfig{})
+			var opts []Option
 			if suite == "resources" {
 				// wasmtime/resources.wast imports a `host` instance that exports
 				// a resource type + its constructor/methods -- the embedder (the

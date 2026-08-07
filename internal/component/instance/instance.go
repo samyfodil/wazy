@@ -223,10 +223,9 @@ type Instance struct {
 	// set only by the general graph engine. See WASICalls.
 	wasiCalls []string
 
-	// httpHost is the wasi:http server state, non-nil only when the component
-	// was instantiated with WithWASI(WASIConfig{EnableHTTP: true}). ServeHTTP
-	// drives the guest's exported incoming-handler through it.
-	httpHost *wasiHTTP
+	// hostState holds whatever host implementations registered via
+	// WithHostState -- see config.hostState.
+	hostState map[any]any
 
 	// isGuestResource reports whether a component resource type index names a
 	// GUEST-owned (locally-defined) resource, as opposed to a host-owned one
@@ -1736,6 +1735,11 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 	// pool until liftResult (and post-return) have finished reading it.
 	rawResults := stack[:numResults]
 
+	// Re-fetch the memory view: the guest may have grown memory during the
+	// call, which replaces the backing array -- and the old one may already
+	// have gone back to the buffer pool, so lifting through the pre-call
+	// slice can read a buffer that now belongs to a different module.
+	mem, memAvailable = memoryBytesOf(be.mod)
 	results, err := in.liftResult(be, rawResults, mem, memAvailable, exportName)
 	if err != nil {
 		putUint64Slice(stackPtr)
@@ -2036,6 +2040,9 @@ func (in *Instance) Close(ctx context.Context) error {
 	// calls (subInstances' own Close, below) find nothing left to reap.
 	if in.sched != nil {
 		in.reapParkedGoroutines()
+	}
+	if reproAssertThreads {
+		in.assertThreadsQuiescent("Close/after-reap")
 	}
 	var firstErr error
 	for i := len(in.closers) - 1; i >= 0; i-- {

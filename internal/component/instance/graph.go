@@ -734,7 +734,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	in.comp = comp
 	in.coreModuleCount = coreModuleCount
 	in.wasiCalls = wasiCalls
-	in.httpHost = cfg.httpHost
+	in.hostState = cfg.hostState
 	// A resource type index is guest-owned unless it aliases an imported
 	// instance's export (a host-provided resource) -- see resolveArgHandles.
 	in.isGuestResource = func(rt uint32) bool {

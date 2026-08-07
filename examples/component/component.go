@@ -10,6 +10,7 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/component"
+	"github.com/samyfodil/wazy/imports/wasip2"
 )
 
 // adder.wasm is a Component Model component exporting the
@@ -92,7 +93,7 @@ func callInterfaceExport(ctx context.Context, r wazy.Runtime) string {
 func runWASICommand(ctx context.Context, r wazy.Runtime) string {
 	var stdout bytes.Buffer
 	inst, err := component.Instantiate(ctx, r, helloWasm,
-		component.WithWASI(component.WASIConfig{Stdout: &stdout})...)
+		wasip2.With(wasip2.Config{Stdout: &stdout})...)
 	if err != nil {
 		log.Panicf("instantiate hello: %v", err)
 	}

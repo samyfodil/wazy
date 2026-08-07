@@ -48,3 +48,4 @@ zig-out/
 # Netlify CLI local state
 .netlify/
 .gstack/
+.claude/worktrees/

@@ -196,6 +196,11 @@ func (st *stackfulTask) run() error {
 
 	// sync-opts: lift flat results -> task.return_ -> post-return (~2156-2163).
 	rawResults := stack[:be.coreResultCount]
+	// Re-fetch the memory view: the guest may have grown memory while the task
+	// ran, replacing the backing array (and possibly pooling the old one), so
+	// the pre-call slice can no longer be trusted for lifting. Same reasoning
+	// as invoke's re-fetch in instance.go.
+	mem, memAvailable = memoryBytesOf(be.mod)
 	results, err := in.liftResult(be, rawResults, mem, memAvailable, st.exportName)
 	if err != nil {
 		putUint64Slice(stackPtr)
@@ -384,7 +389,29 @@ func (in *Instance) reapParkedGoroutines() {
 			in.sched.unpark(vth)
 			if !vth.spawned { // never resumed: no goroutine exists to unwind, and
 				// run() (which normally does this bookkeeping) will never execute.
-				in.threads.remove(vth.index)
+				//
+				// vth.in, NOT in: the sched is shared across the whole
+				// composition tree, so the reaper is a different instance from
+				// the thread's owner whenever a parent reaps a sub's thread.
+				// Freeing vth.index on the reaper's own table would both leak
+				// the owner's slot AND hand the reaper's unrelated slot at that
+				// index out twice (threadTable.remove pushes it onto the free
+				// list). Same receiver as run's unregister tail (thread.go).
+				// vth.t is already the OWNING task (guestThread.t == the task
+				// that called thread.new-indirect, never anything reached
+				// through the reaper), so liveThreads-- needs no such fix.
+				//
+				// vth.parked stays true (SUSPENDED-looking) deliberately: the
+				// freed owner slot is the gate -- thread.yield-then-resume is
+				// the only path that can resume a suspended thread and it
+				// resolves through in.threads.getThread first, which now misses;
+				// the scheduler never sees it either (unparked above, and
+				// ready() is false for a nil parkReady). Clearing it here would
+				// also diverge from the spawned arm below, which leaves exactly
+				// the same residue on a reaped thread (its abort goes straight
+				// to resumeCh, bypassing resumeReady's clear). done is the
+				// terminal marker for both.
+				vth.in.threads.remove(vth.index)
 				vth.t.liveThreads--
 				vth.done = true
 				continue

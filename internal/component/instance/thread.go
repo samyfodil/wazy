@@ -3,11 +3,67 @@ package instance
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/component/binary"
 	"github.com/samyfodil/wazy/internal/wasm"
 )
+
+// reproAssertThreads gates the teardown invariant check below. It exists for
+// the open Windows corruption in TODOS.md, which a controlled sweep has now
+// localised to exactly one suite -- the only one of 31 that actually spawns a
+// guestThread and parks it. Off (every normal run) this costs one bool test
+// per Close.
+var reproAssertThreads = os.Getenv("WAZY_REPRO_ASSERT") == "1"
+
+// assertThreadsQuiescent reports spawned-thread state that outlived teardown.
+// Called from Close right after the reap, when nothing should be left: no
+// thread believing it is running, no *guestThread still in the table, and
+// nothing still parked on the shared scheduler.
+//
+// The point is to convert "memory is corrupt somewhere later" into "this
+// invariant was already false, here". A leaked goroutine still executing guest
+// code while its instance tears down would explain every symptom on record --
+// including the map crashes that looked raceless because the offending
+// goroutine had already gone.
+func (in *Instance) assertThreadsQuiescent(when string) {
+	if th := in.activeThread; th != nil {
+		panic(fmt.Sprintf("REPRO %s: activeThread still set: idx=%d spawned=%v done=%v parked=%v",
+			when, th.index, th.spawned, th.done, th.parked))
+	}
+	for i, slot := range in.threads.slots {
+		th, ok := slot.(*guestThread)
+		if !ok {
+			continue // nil, or a task's implicit-thread marker, which is never freed
+		}
+		panic(fmt.Sprintf("REPRO %s: thread slot %d still holds a *guestThread: spawned=%v done=%v parked=%v liveThreads=%d",
+			when, i, th.spawned, th.done, th.parked, th.t.liveThreads))
+	}
+	if in.sched == nil {
+		return
+	}
+	// Only a park that PINS A GOROUTINE matters. A frame-free park (a
+	// guestTask at WAIT/YIELD with no segment, a stackfulTask still at
+	// sparkEntry) holds nothing, and reapParkedGoroutines leaves those behind
+	// by design -- big-interleaving-test ends with exactly one.
+	for _, p := range in.sched.parked {
+		switch v := p.(type) {
+		case *stackfulTask:
+			if v.park != sparkEntry && !v.done {
+				panic(fmt.Sprintf("REPRO %s: stackfulTask goroutine survived the reap (park=%v done=%v)", when, v.park, v.done))
+			}
+		case *guestTask:
+			if v.seg != nil {
+				panic(fmt.Sprintf("REPRO %s: guestTask segment goroutine survived the reap", when))
+			}
+		case *guestThread:
+			if v.spawned && !v.done {
+				panic(fmt.Sprintf("REPRO %s: guestThread goroutine survived the reap: idx=%d parked=%v", when, v.index, v.parked))
+			}
+		}
+	}
+}
 
 // This file begins the thread.* execution runtime
 // (docs/component-model-async-threads-design-fable.md, "Stage A"): a

@@ -4,14 +4,30 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"path"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/internal/component/binary"
 )
+
+// newWastRuntime builds the runtime a suite runs on. WAZY_REPRO_INTERPRETER=1
+// swaps the native engine for the interpreter, which is what tells an
+// engine-independent bug apart from one in generated code -- see TODOS.md's
+// "## OPEN BUG" (the open Windows teardown corruption) and the
+// win-corruption-repro workflow's interpreter shard, which has reproduced that
+// crash with the JIT out of the picture. Unset (every normal run, CI included)
+// this is exactly wazy.NewRuntime.
+func newWastRuntime(ctx context.Context) wazy.Runtime {
+	if os.Getenv("WAZY_REPRO_INTERPRETER") == "1" {
+		return wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigInterpreter())
+	}
+	return wazy.NewRuntime(ctx)
+}
 
 // TestAsyncWastConformance runs the official WebAssembly/component-model
 // ASYNC conformance suites (test/async/*.wast) through wazy, mirroring
@@ -358,7 +374,7 @@ func runAsyncWastSuite(t *testing.T, suite string) bool {
 	}
 
 	ctx := context.Background()
-	r := wazy.NewRuntime(ctx)
+	r := newWastRuntime(ctx)
 	defer r.Close(ctx)
 
 	defs := map[string][]byte{} // module_definition name -> wasm bytes
@@ -384,7 +400,7 @@ func runAsyncWastSuite(t *testing.T, suite string) bool {
 	}
 
 	instantiate := func(wasm []byte, line int) *Instance {
-		inst, err := Instantiate(ctx, r, wasm, WithWASI(WASIConfig{})...)
+		inst, err := Instantiate(ctx, r, wasm)
 		if err != nil {
 			t.Errorf("line %d: instantiate: %v", line, err)
 			ok = false
@@ -394,7 +410,56 @@ func runAsyncWastSuite(t *testing.T, suite string) bool {
 		return inst
 	}
 
-	for _, c := range manifest.Commands {
+	// WAZY_REPRO_MAX_CMDS=N stops the suite after N manifest commands, so the
+	// open Windows corruption (TODOS.md) can be bisected down to the command
+	// that first makes it reachable. The teardown assertion never fires, so
+	// the damage predates Close; narrowing by command is what is left. Unset
+	// (every normal run) this runs the whole manifest.
+	maxCmds := len(manifest.Commands)
+	if v := os.Getenv("WAZY_REPRO_MAX_CMDS"); v != "" {
+		if n, convErr := strconv.Atoi(v); convErr == nil && n >= 0 {
+			maxCmds = n
+		}
+	}
+
+	// WAZY_REPRO_ONLY_PAIR=k runs command 0 (the module_definition, which
+	// every instance needs) plus ONLY the k'th module_instance/assert_trap
+	// pair, 1-based. MAX_CMDS alone cannot separate "the k'th assertion is
+	// what breaks" from "k live instances is what breaks", because each pair
+	// instantiates and nothing is closed until the suite ends. This isolates
+	// one assertion against exactly one instance.
+	onlyPair := 0
+	if v := os.Getenv("WAZY_REPRO_ONLY_PAIR"); v != "" {
+		if n, convErr := strconv.Atoi(v); convErr == nil && n > 0 {
+			onlyPair = n
+		}
+	}
+
+	// WAZY_REPRO_PAIR_REPEAT=n, with ONLY_PAIR set, runs that one pair n times
+	// instead of once. No single pair crashes in isolation but three different
+	// pairs do, so the open question is whether the trigger is how MANY live
+	// instances have accumulated or WHICH assertions ran. Repeating one
+	// harmless pair answers it: a crash means pure instance count.
+	pairRepeat := 1
+	if v := os.Getenv("WAZY_REPRO_PAIR_REPEAT"); v != "" {
+		if n, convErr := strconv.Atoi(v); convErr == nil && n > 1 {
+			pairRepeat = n
+		}
+	}
+
+	cmds := manifest.Commands
+	if onlyPair > 0 && 2*onlyPair < len(cmds) {
+		sel := []wastCmd{cmds[0]}
+		for r := 0; r < pairRepeat; r++ {
+			sel = append(sel, cmds[2*onlyPair-1], cmds[2*onlyPair])
+		}
+		cmds = sel
+	}
+
+	for ci, c := range cmds {
+		if ci >= maxCmds {
+			break
+		}
 		switch c.Type {
 		case "module_definition":
 			wasm, readOK := readWasm(c.Filename, c.Line)
@@ -433,7 +498,7 @@ func runAsyncWastSuite(t *testing.T, suite string) bool {
 				// async/sync canon-opt mismatch) are only a bind-time
 				// concern -- give Instantiate a chance to reject it too
 				// before calling this a miss.
-				inst, err := Instantiate(ctx, r, wasm, WithWASI(WASIConfig{})...)
+				inst, err := Instantiate(ctx, r, wasm)
 				if inst != nil {
 					inst.Close(ctx)
 				}
@@ -453,7 +518,7 @@ func runAsyncWastSuite(t *testing.T, suite string) bool {
 				continue
 			}
 			assertsRun++
-			inst, err := Instantiate(ctx, r, wasm, WithWASI(WASIConfig{})...)
+			inst, err := Instantiate(ctx, r, wasm)
 			if inst != nil {
 				inst.Close(ctx)
 			}
