@@ -341,7 +341,10 @@ plain, `-race`, `-cpu` variants, `clobberfree`, `gccheckmark`, and
 interpreter mode are all clean. It also does **not** reproduce on a real
 Windows 10 Pro (19045) laptop: ~1600 process starts across plain, `GOGC=1`,
 `clobberfree`, `gccheckmark`, `GOMAXPROCS=2`, 48-way oversubscription and
-both Go 1.26 patch levels, all clean, against CI's 1-in-7. Whatever the
+both Go 1.26 patch levels, all clean. **That is fully explained by the CPU:
+the laptop is an i7-8565U (Whiskey Lake-U, 2018), which is not in the
+affected family** — even the Ice Lake Xeon 8370C measured 0/7. Don't retry a
+consumer machine; it needs Emerald Rapids or Granite Rapids silicon. Whatever the
 trigger is, it needs the `windows-2025` runner image. Note a cross-compiled
 `go test -c` binary runs standalone there (fixtures are `//go:embed`ed), so
 testing on a Windows box needs no Go install and no repo checkout — just
