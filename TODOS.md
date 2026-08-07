@@ -53,8 +53,8 @@
   "cannot remove owned resource while borrowed". The harness supplies the test's
   `host` resource1 (constructor/assert/drops/last-drop/methods/take-own), the
   test-runner plumbing wasmtime provides.
-- **DONE (zero skips, commits 679cf3a + 1483b08 + beeeba3):** every vendored
-  module in all 7 official suites now runs -- no skips.
+- **DONE (commits 679cf3a + 1483b08 + beeeba3):** the modules those commits
+  targeted now run.
   - types.1: decoder parses core:type definitions (func/module types) inside an
     instance/component type (679cf3a).
   - res.25: export a canon-produced func (a `[constructor]t` = lift(resource.new))
@@ -64,11 +64,24 @@
   - res.17: component instantiate-args (type 0x03 + func 0x01) and top-level
     func imports, so a resource-type-and-constructor-parameterized nested
     component instantiates against the host resource (beeeba3).
+- **DONE (empty export names, issue #25):** a passthrough shim may re-export an
+  item under the EMPTY name -- an ordinary core wasm `name`, which
+  `buildPassthroughShim` used to reject outright. This is not an exotic case:
+  wit-component's "start shim" (`(import "" "" (func)) (start 0)` fed by an
+  inline-export group `(export "" (func $_initialize))`) is in EVERY
+  componentize-go component, so no such component could be instantiated at all.
+  fused.0 + fused.3 now run.
+- **REMAINING skips** (4, each pinned by name + reason in
+  `wastKnownSkips`): types.11 (instantiate-arg of sort 0x4), fused.22 (a nested
+  component's imported-instance func type absent from the importer's type
+  space), fused.23 (a nested component defining no core module of its own),
+  resources.14 (an instantiate-arg naming an IMPORTED instance).
 - **Historic fused sub-features** (all now run; the reworks fixed them):
-  pass-through shim with empty export names, >16 flat params on an imported func
-  (whole-param spilling for a lowered import), func/type instantiate-args,
-  self-referential nesting.
-- **Acceptance gate:** the `.wast` harness (`wast_conformance_test.go`).
+  \>16 flat params on an imported func (whole-param spilling for a lowered
+  import), func/type instantiate-args, self-referential nesting.
+- **Acceptance gate:** the `.wast` harness (`wast_conformance_test.go`), which
+  now reconciles the observed skip set against `wastKnownSkips` in both
+  directions -- a new skip fails, and so does a stale entry.
 
 ## wasi:http — DONE (both sides), minor breadth remaining
 - **Done — full `wasi:http/proxy` world runs.** Both directions verified differentially vs wasmtime:
