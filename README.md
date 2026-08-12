@@ -18,7 +18,7 @@
 
 </div>
 
-A fast WebAssembly runtime for Go: zero dependencies, no CGO, pure Go — with execution on par with [wasmtime][wasmtime], plus the Component Model, WASI 0.2, and the WASI 0.3 async ABI running today.
+A fast WebAssembly runtime for Go: zero dependencies, no CGO, pure Go — with execution on par with [wasmtime][wasmtime] and faster than [wazero][wazero], plus the Component Model, WASI 0.2, and the WASI 0.3 async ABI running today.
 
 wazy embeds WebAssembly in your Go application. Run code compiled from Rust, C, C++, TinyGo, Zig, and anything else that targets Wasm. No external toolchain. No cgo. Nothing to install at runtime. It is built for speed and developed aggressively — pure-Go convenience without giving up native-runtime performance, and it targets the modern Wasm platform: core modules, [components][cm], WASI 0.2, and the WASI 0.3 async ABI ([below](#async--the-component-model-async-abi-wasi-03)).
 
