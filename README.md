@@ -60,6 +60,29 @@ wazy.HostFunc2(builder, func(ctx context.Context, mod api.Module, x, y uint32) u
 
 `HostFunc0`–`HostFunc8` and `HostProc0`–`HostProc8` cover most functions. `WithGoModuleFunction` handles the rest. All zero-allocation.
 
+### At scale: a 6.5 MB Rust module
+
+The suite above is kernels — its largest guest is a 37 KB TinyGo module. [go-anydoc][anydoc], Go bindings for a Rust document converter, reports what happens two orders of magnitude up: a 6.5 MB `wasm32-wasip1` command module (Rust 1.88, `opt-level = 3`, `wasm-opt -O3`) with a deep call graph, run as a single instantiate — stdin in, stdout out, almost no host calls, and a long stretch of compute in between.
+
+Same `.wasm`, same input, same machine, byte-identical output:
+
+| Converting | wazero v1.12.0 | wazy | |
+| --- | :---: | :---: | :---: |
+| 1 KB docx, compiled | 0.4 ms | 0.62 ms | 0.6x |
+| 5 MB docx body, compiled | 0.86 s | 0.19 s | **4.5x** |
+| 7.5 MB PDF, compiled | 3.4 s | 0.75 s | **4.5x** |
+| 1 KB docx, interpreted | 3.5 ms | 2.7 ms | 1.3x |
+| 5 MB docx body, interpreted | 11.1 s | 8.6 s | 1.3x |
+| 7.5 MB PDF, interpreted | 41.4 s | 32.6 s | 1.3x |
+
+Long compute is where the compiler wins; a document small enough that instantiation dominates goes the other way. On the same 7.5 MB PDF against other runtimes: native Rust 0.28 s, wasmtime with Cranelift 0.37 s, **wazy 0.75 s**, wasmtime with Winch 0.90 s, wazero 3.4 s — ahead of a baseline native compiler while staying pure Go.
+
+The advantage tracks memory-access intensity, and [`benchmarks/vs-wazero`](benchmarks/vs-wazero) shows the same shape one scale down: `fibonacci` a wash, `reverse_array` +4%, `random_mat_mul` +15%, `base64` +24%, `string_manipulation` +27%, this module +350%. What a micro-kernel cannot surface is size — a real module with a large working set is where the gap opens up.
+
+Switching runtimes was one import change, since the API mirrors wazero's, and the port kept cross-compilation to riscv64, ppc64le, 386 and s390x.
+
+<sub>Apple M5 Pro (18-core), 48 GB, macOS 26.5, Go 1.26.1, `CGO_ENABLED=0`, wazy `v0.0.0-20260807033006-cd2607360a17`, against `anydoc.wasm` 6,542,355 bytes. Best of 3 for the large inputs, best of 20 for the small one, excluding `CompileModule`. Reported in [#29][i29].</sub>
+
 ## The Component Model and WASI 0.2
 
 wazy runs [WebAssembly Component Model][cm] components and [WASI 0.2][wasi] — genuine `wasm32-wasip2` binaries (rustc, wasm-tools), not just core modules and not hand-written `.wat`. [wazero][wazero] targets neither. This works today, exercised by real rustc components and the official component-model test suites:
@@ -145,3 +168,5 @@ Apache 2.0. See [LICENSE](LICENSE).
 [cm]: https://component-model.bytecodealliance.org/
 [wasi]: https://wasi.dev/
 [pr679]: https://github.com/WebAssembly/component-model/pull/679
+[anydoc]: https://github.com/xusenlin/go-anydoc
+[i29]: https://github.com/samyfodil/wazy/issues/29

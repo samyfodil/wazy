@@ -2,14 +2,16 @@ name: Test
 on:
   pull_request:
     branches: [main]
-    paths-ignore:  # skip when only docs or image assets change
+    paths-ignore:  # skip when only docs, image assets, or the link-checker change
       - '**/*.md'
       - '.github/assets/**'
+      - '.github/workflows/docs.yaml'
   push:
     branches: [main]
-    paths-ignore:  # skip when only docs or image assets change
+    paths-ignore:  # skip when only docs, image assets, or the link-checker change
       - '**/*.md'
       - '.github/assets/**'
+      - '.github/workflows/docs.yaml'
 
 env:  # Update this prior to requiring a higher minor version in go.mod
   GO_VERSION: "1.26"
