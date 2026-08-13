@@ -21,7 +21,9 @@ jobs:
       - name: Check README links
         uses: lycheeverse/lychee-action@v2
         with:
-          # accept rate-limit codes so a busy shields.io/pkg.go.dev doesn't red the build
-          args: --no-progress --max-retries 3 --accept 200,204,206,429 README.md
+          # accept rate-limit codes so a busy shields.io/pkg.go.dev doesn't red the
+          # build; give transient 5xx failures more time to clear with backoff
+          # instead of accepting 500 outright (which would mask a truly broken link)
+          args: --no-progress --max-retries 5 --retry-wait-time 3 --accept 200,204,206,429 README.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
