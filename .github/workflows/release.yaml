@@ -2,9 +2,10 @@ name: Release CLI
 on:
   pull_request:
     branches: [main]
-    paths-ignore:  # skip when only docs or image assets change
+    paths-ignore:  # skip when only docs, image assets, or the link-checker change
       - '**/*.md'
       - '.github/assets/**'
+      - '.github/workflows/docs.yaml'
   push:
     branches: [main]
     tags: 'v[0-9]+.[0-9]+.[0-9]+**'  # Ex. v0.2.0 v0.2.1-rc2

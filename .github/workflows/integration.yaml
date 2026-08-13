@@ -2,14 +2,16 @@ name: Standard Library Integration Tests
 on:
   pull_request:
     branches: [main]
-    paths-ignore:  # skip when only docs or image assets change
+    paths-ignore:  # skip when only docs, image assets, or the link-checker change
       - '**/*.md'
       - '.github/assets/**'
+      - '.github/workflows/docs.yaml'
   push:
     branches: [main]
-    paths-ignore:  # skip when only docs or image assets change
+    paths-ignore:  # skip when only docs, image assets, or the link-checker change
       - '**/*.md'
       - '.github/assets/**'
+      - '.github/workflows/docs.yaml'
 
 defaults:
   run:  # use bash for all operating systems unless overridden
