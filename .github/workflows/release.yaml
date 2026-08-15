@@ -138,8 +138,6 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v6
-        with:  # Ensure release_notes.sh can see prior commits
-          fetch-depth: 0
 
       - uses: actions/cache@v5
         id: cache
@@ -154,7 +152,7 @@ jobs:
         run: |
           ls dist
           tag="${GITHUB_REF#refs/tags/}"
-          ./.github/workflows/release_notes.sh ${tag} > release-notes.txt
-          gh release create ${tag} --draft --notes-file release-notes.txt --title ${GITHUB_REF#refs/tags/} ./dist/*
+          # Draft notes are GitHub's generated changelog; rewrite them by hand before publishing.
+          gh release create ${tag} --draft --generate-notes --title ${tag} ./dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
