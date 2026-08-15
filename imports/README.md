@@ -6,6 +6,8 @@ languages or shared compiler toolchains.
 * [AssemblyScript](assemblyscript) e.g. `asc X.ts --debug -b none -o X.wasm`
 * [Emscripten](emscripten) e.g. `em++ ... -s STANDALONE_WASM -o X.wasm X.cc`
 * [WASI](wasi_snapshot_preview1) e.g. `tinygo build -o X.wasm -target=wasi X.go`
+* [WASI-HTTP](wasi_http) e.g. a guest built against dev-wasm's client bindings,
+  the pre-standard HTTP ABI defined by `stealthrocket/wasi-go`
 
 Note: You may not see a language listed here because it either works without
 host imports, or it uses WASI.
