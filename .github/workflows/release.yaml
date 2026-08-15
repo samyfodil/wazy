@@ -134,6 +134,8 @@ jobs:
     needs: pre_release_test
     name: Release
     runs-on: ubuntu-24.04
+    permissions:  # the default workflow token is read-only; gh release create needs write
+      contents: write
     steps:
       - uses: actions/checkout@v6
         with:  # Ensure release_notes.sh can see prior commits
