@@ -13,7 +13,7 @@ import (
 // There are two ways to define a host function's implementation and its
 // WebAssembly signature:
 //
-//   - The strongly-typed HostFunc0-HostFunc8 and HostProc0-HostProc8 helpers
+//   - The strongly-typed HostFunc0-HostFunc16 and HostProc0-HostProc16 helpers
 //     (in the root wazy package) derive the WebAssembly signature from a Go
 //     function whose parameters and result are numeric (a HostValue),
 //     prefixed by context.Context and api.Module. They are chainable:
@@ -25,7 +25,7 @@ import (
 //   - WithGoModuleFunction (and WithGoFunction, when the calling module is not
 //     needed) take an explicit WebAssembly signature and read parameters from,
 //     and write results to, the raw stack. Use these for signatures the typed
-//     helpers cannot express: more than 8 parameters, multiple results, or no
+//     helpers cannot express: more than 16 parameters, multiple results, or no
 //     context.Context/api.Module prefix.
 //
 // # Memory
@@ -51,7 +51,7 @@ type HostFunctionBuilder interface {
 	// WithGoFunction registers a host function from an explicit WebAssembly
 	// signature and an api.GoFunction that reads parameters from, and writes
 	// results to, the raw stack. It is the lower-level counterpart to the
-	// typed HostFunc0-HostFunc8/HostProc0-HostProc8 helpers, and is the right
+	// typed HostFunc0-HostFunc16/HostProc0-HostProc16 helpers, and is the right
 	// tool when their fixed "numeric, ctx+mod prefix" shape does not fit.
 	//
 	// Here's an example addition function:
@@ -71,7 +71,7 @@ type HostFunctionBuilder interface {
 	// WithGoModuleFunction registers a host function from an explicit
 	// WebAssembly signature and an api.GoModuleFunction that reads parameters
 	// from, and writes results to, the raw stack. It is the lower-level
-	// counterpart to the typed HostFunc0-HostFunc8/HostProc0-HostProc8
+	// counterpart to the typed HostFunc0-HostFunc16/HostProc0-HostProc16
 	// helpers, and is the right tool when their fixed "numeric, ctx+mod
 	// prefix" shape does not fit.
 	//

@@ -58,7 +58,7 @@ wazy.HostFunc2(builder, func(ctx context.Context, mod api.Module, x, y uint32) u
 }).Export("add")
 ```
 
-`HostFunc0`–`HostFunc8` and `HostProc0`–`HostProc8` cover most functions. `WithGoModuleFunction` handles the rest. All zero-allocation.
+`HostFunc0`–`HostFunc16` and `HostProc0`–`HostProc16` cover most functions. `WithGoModuleFunction` handles the rest. All zero-allocation.
 
 ### At scale: a 6.5 MB Rust module
 
