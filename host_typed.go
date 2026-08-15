@@ -7,8 +7,8 @@ import (
 	"github.com/samyfodil/wazy/api"
 )
 
-// HostValue is the set of Go types that HostFunc0-HostFunc8 and
-// HostProc0-HostProc8 accept as a parameter or result. Each corresponds 1:1
+// HostValue is the set of Go types that HostFunc0-HostFunc16 and
+// HostProc0-HostProc16 accept as a parameter or result. Each corresponds 1:1
 // to a WebAssembly numeric api.ValueType:
 //
 //   - uint32, int32 map to api.ValueTypeI32
@@ -103,7 +103,7 @@ func encodeHostValue[T HostValue](v T) uint64 {
 // HostFunc0 defines a host function taking no parameters besides the
 // implicit context.Context and api.Module, returning a single HostValue.
 //
-// HostFunc0-HostFunc8 (and HostProc0-HostProc8 for functions that return
+// HostFunc0-HostFunc16 (and HostProc0-HostProc16 for functions that return
 // nothing) are the compile-time-typed way to register a host function whose
 // signature is "numeric-only, with a context.Context and api.Module prefix".
 // The WebAssembly api.ValueType signature is derived from Go's type system,
@@ -114,7 +114,7 @@ func encodeHostValue[T HostValue](v T) uint64 {
 // Use these when your function's arity is fixed at compile time and every
 // parameter and result is a HostValue. Reach for WithGoFunction or
 // WithGoModuleFunction directly when you need something these can't
-// express: more than 8 parameters, more than one result, a signature
+// express: more than 16 parameters, more than one result, a signature
 // without the context.Context/api.Module prefix, or fine control over the
 // raw stack.
 //
@@ -222,6 +222,162 @@ func HostFunc8[P1, P2, P3, P4, P5, P6, P7, P8, R HostValue](b HostFunctionBuilde
 	}), []api.ValueType{hostValueType[P1](), hostValueType[P2](), hostValueType[P3](), hostValueType[P4](), hostValueType[P5](), hostValueType[P6](), hostValueType[P7](), hostValueType[P8]()}, []api.ValueType{hostValueType[R]()})
 }
 
+// HostFunc9 is HostFunc0 with nine parameters. See HostFunc0.
+func HostFunc9[P1, P2, P3, P4, P5, P6, P7, P8, P9, R HostValue](b HostFunctionBuilder, fn func(context.Context, api.Module, P1, P2, P3, P4, P5, P6, P7, P8, P9) R) HostFunctionBuilder {
+	return b.WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+		p1 := decodeHostValue[P1](stack[0])
+		p2 := decodeHostValue[P2](stack[1])
+		p3 := decodeHostValue[P3](stack[2])
+		p4 := decodeHostValue[P4](stack[3])
+		p5 := decodeHostValue[P5](stack[4])
+		p6 := decodeHostValue[P6](stack[5])
+		p7 := decodeHostValue[P7](stack[6])
+		p8 := decodeHostValue[P8](stack[7])
+		p9 := decodeHostValue[P9](stack[8])
+		stack[0] = encodeHostValue(fn(ctx, mod, p1, p2, p3, p4, p5, p6, p7, p8, p9))
+	}), []api.ValueType{hostValueType[P1](), hostValueType[P2](), hostValueType[P3](), hostValueType[P4](), hostValueType[P5](), hostValueType[P6](), hostValueType[P7](), hostValueType[P8](), hostValueType[P9]()}, []api.ValueType{hostValueType[R]()})
+}
+
+// HostFunc10 is HostFunc0 with ten parameters. See HostFunc0.
+func HostFunc10[P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, R HostValue](b HostFunctionBuilder, fn func(context.Context, api.Module, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10) R) HostFunctionBuilder {
+	return b.WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+		p1 := decodeHostValue[P1](stack[0])
+		p2 := decodeHostValue[P2](stack[1])
+		p3 := decodeHostValue[P3](stack[2])
+		p4 := decodeHostValue[P4](stack[3])
+		p5 := decodeHostValue[P5](stack[4])
+		p6 := decodeHostValue[P6](stack[5])
+		p7 := decodeHostValue[P7](stack[6])
+		p8 := decodeHostValue[P8](stack[7])
+		p9 := decodeHostValue[P9](stack[8])
+		p10 := decodeHostValue[P10](stack[9])
+		stack[0] = encodeHostValue(fn(ctx, mod, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10))
+	}), []api.ValueType{hostValueType[P1](), hostValueType[P2](), hostValueType[P3](), hostValueType[P4](), hostValueType[P5](), hostValueType[P6](), hostValueType[P7](), hostValueType[P8](), hostValueType[P9](), hostValueType[P10]()}, []api.ValueType{hostValueType[R]()})
+}
+
+// HostFunc11 is HostFunc0 with eleven parameters. See HostFunc0.
+func HostFunc11[P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, R HostValue](b HostFunctionBuilder, fn func(context.Context, api.Module, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11) R) HostFunctionBuilder {
+	return b.WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+		p1 := decodeHostValue[P1](stack[0])
+		p2 := decodeHostValue[P2](stack[1])
+		p3 := decodeHostValue[P3](stack[2])
+		p4 := decodeHostValue[P4](stack[3])
+		p5 := decodeHostValue[P5](stack[4])
+		p6 := decodeHostValue[P6](stack[5])
+		p7 := decodeHostValue[P7](stack[6])
+		p8 := decodeHostValue[P8](stack[7])
+		p9 := decodeHostValue[P9](stack[8])
+		p10 := decodeHostValue[P10](stack[9])
+		p11 := decodeHostValue[P11](stack[10])
+		stack[0] = encodeHostValue(fn(ctx, mod, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11))
+	}), []api.ValueType{hostValueType[P1](), hostValueType[P2](), hostValueType[P3](), hostValueType[P4](), hostValueType[P5](), hostValueType[P6](), hostValueType[P7](), hostValueType[P8](), hostValueType[P9](), hostValueType[P10](), hostValueType[P11]()}, []api.ValueType{hostValueType[R]()})
+}
+
+// HostFunc12 is HostFunc0 with twelve parameters. See HostFunc0.
+func HostFunc12[P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, R HostValue](b HostFunctionBuilder, fn func(context.Context, api.Module, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12) R) HostFunctionBuilder {
+	return b.WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+		p1 := decodeHostValue[P1](stack[0])
+		p2 := decodeHostValue[P2](stack[1])
+		p3 := decodeHostValue[P3](stack[2])
+		p4 := decodeHostValue[P4](stack[3])
+		p5 := decodeHostValue[P5](stack[4])
+		p6 := decodeHostValue[P6](stack[5])
+		p7 := decodeHostValue[P7](stack[6])
+		p8 := decodeHostValue[P8](stack[7])
+		p9 := decodeHostValue[P9](stack[8])
+		p10 := decodeHostValue[P10](stack[9])
+		p11 := decodeHostValue[P11](stack[10])
+		p12 := decodeHostValue[P12](stack[11])
+		stack[0] = encodeHostValue(fn(ctx, mod, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12))
+	}), []api.ValueType{hostValueType[P1](), hostValueType[P2](), hostValueType[P3](), hostValueType[P4](), hostValueType[P5](), hostValueType[P6](), hostValueType[P7](), hostValueType[P8](), hostValueType[P9](), hostValueType[P10](), hostValueType[P11](), hostValueType[P12]()}, []api.ValueType{hostValueType[R]()})
+}
+
+// HostFunc13 is HostFunc0 with thirteen parameters. See HostFunc0.
+func HostFunc13[P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, R HostValue](b HostFunctionBuilder, fn func(context.Context, api.Module, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13) R) HostFunctionBuilder {
+	return b.WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+		p1 := decodeHostValue[P1](stack[0])
+		p2 := decodeHostValue[P2](stack[1])
+		p3 := decodeHostValue[P3](stack[2])
+		p4 := decodeHostValue[P4](stack[3])
+		p5 := decodeHostValue[P5](stack[4])
+		p6 := decodeHostValue[P6](stack[5])
+		p7 := decodeHostValue[P7](stack[6])
+		p8 := decodeHostValue[P8](stack[7])
+		p9 := decodeHostValue[P9](stack[8])
+		p10 := decodeHostValue[P10](stack[9])
+		p11 := decodeHostValue[P11](stack[10])
+		p12 := decodeHostValue[P12](stack[11])
+		p13 := decodeHostValue[P13](stack[12])
+		stack[0] = encodeHostValue(fn(ctx, mod, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13))
+	}), []api.ValueType{hostValueType[P1](), hostValueType[P2](), hostValueType[P3](), hostValueType[P4](), hostValueType[P5](), hostValueType[P6](), hostValueType[P7](), hostValueType[P8](), hostValueType[P9](), hostValueType[P10](), hostValueType[P11](), hostValueType[P12](), hostValueType[P13]()}, []api.ValueType{hostValueType[R]()})
+}
+
+// HostFunc14 is HostFunc0 with fourteen parameters. See HostFunc0.
+func HostFunc14[P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, R HostValue](b HostFunctionBuilder, fn func(context.Context, api.Module, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14) R) HostFunctionBuilder {
+	return b.WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+		p1 := decodeHostValue[P1](stack[0])
+		p2 := decodeHostValue[P2](stack[1])
+		p3 := decodeHostValue[P3](stack[2])
+		p4 := decodeHostValue[P4](stack[3])
+		p5 := decodeHostValue[P5](stack[4])
+		p6 := decodeHostValue[P6](stack[5])
+		p7 := decodeHostValue[P7](stack[6])
+		p8 := decodeHostValue[P8](stack[7])
+		p9 := decodeHostValue[P9](stack[8])
+		p10 := decodeHostValue[P10](stack[9])
+		p11 := decodeHostValue[P11](stack[10])
+		p12 := decodeHostValue[P12](stack[11])
+		p13 := decodeHostValue[P13](stack[12])
+		p14 := decodeHostValue[P14](stack[13])
+		stack[0] = encodeHostValue(fn(ctx, mod, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14))
+	}), []api.ValueType{hostValueType[P1](), hostValueType[P2](), hostValueType[P3](), hostValueType[P4](), hostValueType[P5](), hostValueType[P6](), hostValueType[P7](), hostValueType[P8](), hostValueType[P9](), hostValueType[P10](), hostValueType[P11](), hostValueType[P12](), hostValueType[P13](), hostValueType[P14]()}, []api.ValueType{hostValueType[R]()})
+}
+
+// HostFunc15 is HostFunc0 with fifteen parameters. See HostFunc0.
+func HostFunc15[P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, R HostValue](b HostFunctionBuilder, fn func(context.Context, api.Module, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15) R) HostFunctionBuilder {
+	return b.WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+		p1 := decodeHostValue[P1](stack[0])
+		p2 := decodeHostValue[P2](stack[1])
+		p3 := decodeHostValue[P3](stack[2])
+		p4 := decodeHostValue[P4](stack[3])
+		p5 := decodeHostValue[P5](stack[4])
+		p6 := decodeHostValue[P6](stack[5])
+		p7 := decodeHostValue[P7](stack[6])
+		p8 := decodeHostValue[P8](stack[7])
+		p9 := decodeHostValue[P9](stack[8])
+		p10 := decodeHostValue[P10](stack[9])
+		p11 := decodeHostValue[P11](stack[10])
+		p12 := decodeHostValue[P12](stack[11])
+		p13 := decodeHostValue[P13](stack[12])
+		p14 := decodeHostValue[P14](stack[13])
+		p15 := decodeHostValue[P15](stack[14])
+		stack[0] = encodeHostValue(fn(ctx, mod, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15))
+	}), []api.ValueType{hostValueType[P1](), hostValueType[P2](), hostValueType[P3](), hostValueType[P4](), hostValueType[P5](), hostValueType[P6](), hostValueType[P7](), hostValueType[P8](), hostValueType[P9](), hostValueType[P10](), hostValueType[P11](), hostValueType[P12](), hostValueType[P13](), hostValueType[P14](), hostValueType[P15]()}, []api.ValueType{hostValueType[R]()})
+}
+
+// HostFunc16 is HostFunc0 with sixteen parameters. See HostFunc0.
+func HostFunc16[P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, R HostValue](b HostFunctionBuilder, fn func(context.Context, api.Module, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16) R) HostFunctionBuilder {
+	return b.WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+		p1 := decodeHostValue[P1](stack[0])
+		p2 := decodeHostValue[P2](stack[1])
+		p3 := decodeHostValue[P3](stack[2])
+		p4 := decodeHostValue[P4](stack[3])
+		p5 := decodeHostValue[P5](stack[4])
+		p6 := decodeHostValue[P6](stack[5])
+		p7 := decodeHostValue[P7](stack[6])
+		p8 := decodeHostValue[P8](stack[7])
+		p9 := decodeHostValue[P9](stack[8])
+		p10 := decodeHostValue[P10](stack[9])
+		p11 := decodeHostValue[P11](stack[10])
+		p12 := decodeHostValue[P12](stack[11])
+		p13 := decodeHostValue[P13](stack[12])
+		p14 := decodeHostValue[P14](stack[13])
+		p15 := decodeHostValue[P15](stack[14])
+		p16 := decodeHostValue[P16](stack[15])
+		stack[0] = encodeHostValue(fn(ctx, mod, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16))
+	}), []api.ValueType{hostValueType[P1](), hostValueType[P2](), hostValueType[P3](), hostValueType[P4](), hostValueType[P5](), hostValueType[P6](), hostValueType[P7](), hostValueType[P8](), hostValueType[P9](), hostValueType[P10](), hostValueType[P11](), hostValueType[P12](), hostValueType[P13](), hostValueType[P14](), hostValueType[P15](), hostValueType[P16]()}, []api.ValueType{hostValueType[R]()})
+}
+
 // HostProc0 defines a host function with no result, taking no parameters
 // besides the implicit context.Context and api.Module. See HostFunc0 for
 // when to use this family of functions instead of WithGoModuleFunction.
@@ -321,4 +477,160 @@ func HostProc8[P1, P2, P3, P4, P5, P6, P7, P8 HostValue](b HostFunctionBuilder, 
 		p8 := decodeHostValue[P8](stack[7])
 		fn(ctx, mod, p1, p2, p3, p4, p5, p6, p7, p8)
 	}), []api.ValueType{hostValueType[P1](), hostValueType[P2](), hostValueType[P3](), hostValueType[P4](), hostValueType[P5](), hostValueType[P6](), hostValueType[P7](), hostValueType[P8]()}, nil)
+}
+
+// HostProc9 is HostProc0 with nine parameters. See HostFunc0 and HostProc0.
+func HostProc9[P1, P2, P3, P4, P5, P6, P7, P8, P9 HostValue](b HostFunctionBuilder, fn func(context.Context, api.Module, P1, P2, P3, P4, P5, P6, P7, P8, P9)) HostFunctionBuilder {
+	return b.WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+		p1 := decodeHostValue[P1](stack[0])
+		p2 := decodeHostValue[P2](stack[1])
+		p3 := decodeHostValue[P3](stack[2])
+		p4 := decodeHostValue[P4](stack[3])
+		p5 := decodeHostValue[P5](stack[4])
+		p6 := decodeHostValue[P6](stack[5])
+		p7 := decodeHostValue[P7](stack[6])
+		p8 := decodeHostValue[P8](stack[7])
+		p9 := decodeHostValue[P9](stack[8])
+		fn(ctx, mod, p1, p2, p3, p4, p5, p6, p7, p8, p9)
+	}), []api.ValueType{hostValueType[P1](), hostValueType[P2](), hostValueType[P3](), hostValueType[P4](), hostValueType[P5](), hostValueType[P6](), hostValueType[P7](), hostValueType[P8](), hostValueType[P9]()}, nil)
+}
+
+// HostProc10 is HostProc0 with ten parameters. See HostFunc0 and HostProc0.
+func HostProc10[P1, P2, P3, P4, P5, P6, P7, P8, P9, P10 HostValue](b HostFunctionBuilder, fn func(context.Context, api.Module, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10)) HostFunctionBuilder {
+	return b.WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+		p1 := decodeHostValue[P1](stack[0])
+		p2 := decodeHostValue[P2](stack[1])
+		p3 := decodeHostValue[P3](stack[2])
+		p4 := decodeHostValue[P4](stack[3])
+		p5 := decodeHostValue[P5](stack[4])
+		p6 := decodeHostValue[P6](stack[5])
+		p7 := decodeHostValue[P7](stack[6])
+		p8 := decodeHostValue[P8](stack[7])
+		p9 := decodeHostValue[P9](stack[8])
+		p10 := decodeHostValue[P10](stack[9])
+		fn(ctx, mod, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10)
+	}), []api.ValueType{hostValueType[P1](), hostValueType[P2](), hostValueType[P3](), hostValueType[P4](), hostValueType[P5](), hostValueType[P6](), hostValueType[P7](), hostValueType[P8](), hostValueType[P9](), hostValueType[P10]()}, nil)
+}
+
+// HostProc11 is HostProc0 with eleven parameters. See HostFunc0 and HostProc0.
+func HostProc11[P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11 HostValue](b HostFunctionBuilder, fn func(context.Context, api.Module, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11)) HostFunctionBuilder {
+	return b.WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+		p1 := decodeHostValue[P1](stack[0])
+		p2 := decodeHostValue[P2](stack[1])
+		p3 := decodeHostValue[P3](stack[2])
+		p4 := decodeHostValue[P4](stack[3])
+		p5 := decodeHostValue[P5](stack[4])
+		p6 := decodeHostValue[P6](stack[5])
+		p7 := decodeHostValue[P7](stack[6])
+		p8 := decodeHostValue[P8](stack[7])
+		p9 := decodeHostValue[P9](stack[8])
+		p10 := decodeHostValue[P10](stack[9])
+		p11 := decodeHostValue[P11](stack[10])
+		fn(ctx, mod, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11)
+	}), []api.ValueType{hostValueType[P1](), hostValueType[P2](), hostValueType[P3](), hostValueType[P4](), hostValueType[P5](), hostValueType[P6](), hostValueType[P7](), hostValueType[P8](), hostValueType[P9](), hostValueType[P10](), hostValueType[P11]()}, nil)
+}
+
+// HostProc12 is HostProc0 with twelve parameters. See HostFunc0 and HostProc0.
+func HostProc12[P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12 HostValue](b HostFunctionBuilder, fn func(context.Context, api.Module, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12)) HostFunctionBuilder {
+	return b.WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+		p1 := decodeHostValue[P1](stack[0])
+		p2 := decodeHostValue[P2](stack[1])
+		p3 := decodeHostValue[P3](stack[2])
+		p4 := decodeHostValue[P4](stack[3])
+		p5 := decodeHostValue[P5](stack[4])
+		p6 := decodeHostValue[P6](stack[5])
+		p7 := decodeHostValue[P7](stack[6])
+		p8 := decodeHostValue[P8](stack[7])
+		p9 := decodeHostValue[P9](stack[8])
+		p10 := decodeHostValue[P10](stack[9])
+		p11 := decodeHostValue[P11](stack[10])
+		p12 := decodeHostValue[P12](stack[11])
+		fn(ctx, mod, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12)
+	}), []api.ValueType{hostValueType[P1](), hostValueType[P2](), hostValueType[P3](), hostValueType[P4](), hostValueType[P5](), hostValueType[P6](), hostValueType[P7](), hostValueType[P8](), hostValueType[P9](), hostValueType[P10](), hostValueType[P11](), hostValueType[P12]()}, nil)
+}
+
+// HostProc13 is HostProc0 with thirteen parameters. See HostFunc0 and HostProc0.
+func HostProc13[P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13 HostValue](b HostFunctionBuilder, fn func(context.Context, api.Module, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13)) HostFunctionBuilder {
+	return b.WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+		p1 := decodeHostValue[P1](stack[0])
+		p2 := decodeHostValue[P2](stack[1])
+		p3 := decodeHostValue[P3](stack[2])
+		p4 := decodeHostValue[P4](stack[3])
+		p5 := decodeHostValue[P5](stack[4])
+		p6 := decodeHostValue[P6](stack[5])
+		p7 := decodeHostValue[P7](stack[6])
+		p8 := decodeHostValue[P8](stack[7])
+		p9 := decodeHostValue[P9](stack[8])
+		p10 := decodeHostValue[P10](stack[9])
+		p11 := decodeHostValue[P11](stack[10])
+		p12 := decodeHostValue[P12](stack[11])
+		p13 := decodeHostValue[P13](stack[12])
+		fn(ctx, mod, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13)
+	}), []api.ValueType{hostValueType[P1](), hostValueType[P2](), hostValueType[P3](), hostValueType[P4](), hostValueType[P5](), hostValueType[P6](), hostValueType[P7](), hostValueType[P8](), hostValueType[P9](), hostValueType[P10](), hostValueType[P11](), hostValueType[P12](), hostValueType[P13]()}, nil)
+}
+
+// HostProc14 is HostProc0 with fourteen parameters. See HostFunc0 and HostProc0.
+func HostProc14[P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14 HostValue](b HostFunctionBuilder, fn func(context.Context, api.Module, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14)) HostFunctionBuilder {
+	return b.WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+		p1 := decodeHostValue[P1](stack[0])
+		p2 := decodeHostValue[P2](stack[1])
+		p3 := decodeHostValue[P3](stack[2])
+		p4 := decodeHostValue[P4](stack[3])
+		p5 := decodeHostValue[P5](stack[4])
+		p6 := decodeHostValue[P6](stack[5])
+		p7 := decodeHostValue[P7](stack[6])
+		p8 := decodeHostValue[P8](stack[7])
+		p9 := decodeHostValue[P9](stack[8])
+		p10 := decodeHostValue[P10](stack[9])
+		p11 := decodeHostValue[P11](stack[10])
+		p12 := decodeHostValue[P12](stack[11])
+		p13 := decodeHostValue[P13](stack[12])
+		p14 := decodeHostValue[P14](stack[13])
+		fn(ctx, mod, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14)
+	}), []api.ValueType{hostValueType[P1](), hostValueType[P2](), hostValueType[P3](), hostValueType[P4](), hostValueType[P5](), hostValueType[P6](), hostValueType[P7](), hostValueType[P8](), hostValueType[P9](), hostValueType[P10](), hostValueType[P11](), hostValueType[P12](), hostValueType[P13](), hostValueType[P14]()}, nil)
+}
+
+// HostProc15 is HostProc0 with fifteen parameters. See HostFunc0 and HostProc0.
+func HostProc15[P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15 HostValue](b HostFunctionBuilder, fn func(context.Context, api.Module, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15)) HostFunctionBuilder {
+	return b.WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+		p1 := decodeHostValue[P1](stack[0])
+		p2 := decodeHostValue[P2](stack[1])
+		p3 := decodeHostValue[P3](stack[2])
+		p4 := decodeHostValue[P4](stack[3])
+		p5 := decodeHostValue[P5](stack[4])
+		p6 := decodeHostValue[P6](stack[5])
+		p7 := decodeHostValue[P7](stack[6])
+		p8 := decodeHostValue[P8](stack[7])
+		p9 := decodeHostValue[P9](stack[8])
+		p10 := decodeHostValue[P10](stack[9])
+		p11 := decodeHostValue[P11](stack[10])
+		p12 := decodeHostValue[P12](stack[11])
+		p13 := decodeHostValue[P13](stack[12])
+		p14 := decodeHostValue[P14](stack[13])
+		p15 := decodeHostValue[P15](stack[14])
+		fn(ctx, mod, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15)
+	}), []api.ValueType{hostValueType[P1](), hostValueType[P2](), hostValueType[P3](), hostValueType[P4](), hostValueType[P5](), hostValueType[P6](), hostValueType[P7](), hostValueType[P8](), hostValueType[P9](), hostValueType[P10](), hostValueType[P11](), hostValueType[P12](), hostValueType[P13](), hostValueType[P14](), hostValueType[P15]()}, nil)
+}
+
+// HostProc16 is HostProc0 with sixteen parameters. See HostFunc0 and HostProc0.
+func HostProc16[P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16 HostValue](b HostFunctionBuilder, fn func(context.Context, api.Module, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16)) HostFunctionBuilder {
+	return b.WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+		p1 := decodeHostValue[P1](stack[0])
+		p2 := decodeHostValue[P2](stack[1])
+		p3 := decodeHostValue[P3](stack[2])
+		p4 := decodeHostValue[P4](stack[3])
+		p5 := decodeHostValue[P5](stack[4])
+		p6 := decodeHostValue[P6](stack[5])
+		p7 := decodeHostValue[P7](stack[6])
+		p8 := decodeHostValue[P8](stack[7])
+		p9 := decodeHostValue[P9](stack[8])
+		p10 := decodeHostValue[P10](stack[9])
+		p11 := decodeHostValue[P11](stack[10])
+		p12 := decodeHostValue[P12](stack[11])
+		p13 := decodeHostValue[P13](stack[12])
+		p14 := decodeHostValue[P14](stack[13])
+		p15 := decodeHostValue[P15](stack[14])
+		p16 := decodeHostValue[P16](stack[15])
+		fn(ctx, mod, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16)
+	}), []api.ValueType{hostValueType[P1](), hostValueType[P2](), hostValueType[P3](), hostValueType[P4](), hostValueType[P5](), hostValueType[P6](), hostValueType[P7](), hostValueType[P8](), hostValueType[P9](), hostValueType[P10](), hostValueType[P11](), hostValueType[P12](), hostValueType[P13](), hostValueType[P14](), hostValueType[P15](), hostValueType[P16]()}, nil)
 }
