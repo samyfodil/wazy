@@ -220,7 +220,8 @@ func (h *host) newID() uint32 {
 // request is the server-side entry point, unimplemented here as upstream.
 // The parameters are an inbound request plus its HTTP options.
 func (h *host) request(context.Context, api.Module, uint32, uint32, uint32, uint32, uint32, uint32, uint32,
-	uint32, uint32, uint32, uint32, uint32, uint32, uint32) int32 {
+	uint32, uint32, uint32, uint32, uint32, uint32, uint32,
+) int32 {
 	return 0
 }
 

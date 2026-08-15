@@ -180,7 +180,8 @@ func TestHostFunc_equivalence(t *testing.T) {
 	// kind and place the widest ones last.
 	HostFunc12(b.NewFunctionBuilder(), func(_ context.Context, _ api.Module,
 		p1 uint32, p2 int32, p3 uint64, p4 int64, p5 float32, p6 float64,
-		p7 uintptr, p8 uint32, p9 int32, p10 int64, p11 float32, p12 float64) float64 {
+		p7 uintptr, p8 uint32, p9 int32, p10 int64, p11 float32, p12 float64,
+	) float64 {
 		return float64(p1) + float64(p2) + float64(p3) + float64(p4) + float64(p5) + p6 +
 			float64(p7) + float64(p8) + float64(p9) + float64(p10) + float64(p11) + p12
 	}).Export("mixed_12")
@@ -252,8 +253,10 @@ func TestHostFunc_equivalence(t *testing.T) {
 		{name: "u32_14", params: []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}},
 		{name: "u32_16", params: []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}},
 		// Distinct values per slot: a swapped pair would still XOR equal.
-		{name: "u32_16", params: []uint64{0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80,
-			0x100, 0x200, 0x400, 0x800, 0x1000, 0x2000, 0x4000, 0x8000}},
+		{name: "u32_16", params: []uint64{
+			0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80,
+			0x100, 0x200, 0x400, 0x800, 0x1000, 0x2000, 0x4000, 0x8000,
+		}},
 
 		{name: "mixed_12", params: []uint64{
 			0xFFFFFFFF,                    // uint32 max
