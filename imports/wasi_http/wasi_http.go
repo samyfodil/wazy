@@ -225,10 +225,16 @@ func (h *host) request(context.Context, api.Module, uint32, uint32, uint32, uint
 	return 0
 }
 
-// handle performs the outbound request named by the handle and returns a
-// handle to the response. Parameters b..hh are the HTTP options, which
-// upstream does not implement either.
-func (h *host) handle(ctx context.Context, _ api.Module, reqHandle, _, _, _, _, _, _, _ uint32) uint32 {
+// handle performs the outbound request named by reqHandle and returns a
+// handle to the response.
+//
+// The seven parameters after it are the request's HTTP options, flattened
+// positionally by the guest's bindings. wasi-go does not implement them
+// either, and they cannot simply be dropped: a guest imports this function
+// with exactly eight i32 parameters, so the host must declare eight to link.
+func (h *host) handle(ctx context.Context, _ api.Module, reqHandle,
+	_, _, _, _, _, _, _ uint32,
+) uint32 {
 	h.mu.Lock()
 	req, ok := h.requests[reqHandle]
 	h.mu.Unlock()
