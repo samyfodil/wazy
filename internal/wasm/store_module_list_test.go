@@ -62,6 +62,21 @@ func TestStore_deleteModule(t *testing.T) {
 		require.Equal(t, nameToModuleShrinkThreshold, s.nameToModuleCap)
 	})
 
+	// Store.Instantiate closes an instance whose name turned out to be taken.
+	// That close must not evict the module that owns the name.
+	t.Run("keeps the name owner", func(t *testing.T) {
+		s := newStore()
+		owner := &ModuleInstance{ModuleName: "m1"}
+		require.NoError(t, s.registerModule(owner))
+
+		rejected := &ModuleInstance{ModuleName: "m1"}
+		require.EqualError(t, s.registerModule(rejected), "module[m1] has already been instantiated")
+		require.NoError(t, s.deleteModule(rejected))
+
+		require.Equal(t, map[string]*ModuleInstance{"m1": owner}, s.nameToModule)
+		require.Equal(t, owner, s.moduleList)
+	})
+
 	t.Run("delete middle", func(t *testing.T) {
 		s := newStore()
 		one, two, three := &ModuleInstance{ModuleName: "1"}, &ModuleInstance{ModuleName: "2"}, &ModuleInstance{ModuleName: "3"}

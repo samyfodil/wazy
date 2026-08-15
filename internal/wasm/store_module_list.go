@@ -25,7 +25,11 @@ func (s *Store) deleteModule(m *ModuleInstance) error {
 	m.prev = nil
 	m.next = nil
 
-	if m.ModuleName != "" {
+	// Only the instance that owns the name may release it. An instance that
+	// never registered - Store.Instantiate closes one when the name was
+	// already taken - would otherwise evict the module that does own it,
+	// leaving that module live but unreachable and its name free to re-take.
+	if m.ModuleName != "" && s.nameToModule[m.ModuleName] == m {
 		delete(s.nameToModule, m.ModuleName)
 
 		// Shrink the map if it's allocated more than twice the size of the list
