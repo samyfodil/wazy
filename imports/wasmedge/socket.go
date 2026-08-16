@@ -5,7 +5,6 @@ import (
 	"net"
 	"os"
 	"strconv"
-	"syscall"
 	"time"
 
 	socketapi "github.com/samyfodil/wazy/internal/sock"
@@ -599,32 +598,10 @@ func toWasiErrno(err error) wasip1.Errno {
 	if errors.Is(err, net.ErrClosed) {
 		return wasip1.ErrnoBadf
 	}
-	var se syscall.Errno
-	if errors.As(err, &se) {
-		switch se {
-		case syscall.ECONNREFUSED:
-			return wasip1.ErrnoConnrefused
-		case syscall.ECONNRESET:
-			return wasip1.ErrnoConnreset
-		case syscall.ECONNABORTED:
-			return wasip1.ErrnoConnaborted
-		case syscall.EADDRINUSE:
-			return wasip1.ErrnoAddrinuse
-		case syscall.EADDRNOTAVAIL:
-			return wasip1.ErrnoAddrnotavail
-		case syscall.EHOSTUNREACH:
-			return wasip1.ErrnoHostunreach
-		case syscall.ENETUNREACH:
-			return wasip1.ErrnoNetunreach
-		case syscall.EPIPE:
-			return wasip1.ErrnoPipe
-		case syscall.EACCES:
-			return wasip1.ErrnoAcces
-		case syscall.EAGAIN:
-			return wasip1.ErrnoAgain
-		case syscall.EINVAL:
-			return wasip1.ErrnoInval
-		}
+	// Not every platform defines the socket errnos, so the mapping lives in a
+	// build-tagged file, as sys.syscallToErrno does.
+	if errno, ok := syscallToWasiErrno(err); ok {
+		return errno
 	}
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) {

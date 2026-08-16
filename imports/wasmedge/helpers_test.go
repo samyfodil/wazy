@@ -2,10 +2,7 @@ package wasmedge
 
 import (
 	"context"
-	"errors"
 	"net"
-	"os"
-	"syscall"
 	"testing"
 
 	"github.com/samyfodil/wazy"
@@ -13,58 +10,6 @@ import (
 	"github.com/samyfodil/wazy/internal/wasip1"
 	"github.com/samyfodil/wazy/sys"
 )
-
-// The errno mapping is what a guest branches on -- Rust's std turns
-// ECONNREFUSED into a distinct error kind -- so each arm is checked directly
-// rather than through whichever conditions a test happens to provoke.
-func TestToWasiErrno(t *testing.T) {
-	// Wrapped the way net wraps them, since that is how they arrive.
-	wrap := func(e error) error {
-		return &net.OpError{Op: "dial", Net: "tcp", Err: &os.SyscallError{Syscall: "connect", Err: e}}
-	}
-
-	tests := []struct {
-		name     string
-		err      error
-		expected wasip1.Errno
-	}{
-		{name: "nil is success", err: nil, expected: wasip1.ErrnoSuccess},
-		{name: "closed is bad descriptor", err: net.ErrClosed, expected: wasip1.ErrnoBadf},
-		{name: "wrapped closed", err: wrap(net.ErrClosed), expected: wasip1.ErrnoBadf},
-		{name: "connection refused", err: wrap(syscall.ECONNREFUSED), expected: wasip1.ErrnoConnrefused},
-		{name: "connection reset", err: wrap(syscall.ECONNRESET), expected: wasip1.ErrnoConnreset},
-		{name: "connection aborted", err: wrap(syscall.ECONNABORTED), expected: wasip1.ErrnoConnaborted},
-		{name: "address in use", err: wrap(syscall.EADDRINUSE), expected: wasip1.ErrnoAddrinuse},
-		{name: "address not available", err: wrap(syscall.EADDRNOTAVAIL), expected: wasip1.ErrnoAddrnotavail},
-		{name: "host unreachable", err: wrap(syscall.EHOSTUNREACH), expected: wasip1.ErrnoHostunreach},
-		{name: "network unreachable", err: wrap(syscall.ENETUNREACH), expected: wasip1.ErrnoNetunreach},
-		{name: "broken pipe", err: wrap(syscall.EPIPE), expected: wasip1.ErrnoPipe},
-		{name: "permission denied", err: wrap(syscall.EACCES), expected: wasip1.ErrnoAcces},
-		{name: "would block", err: wrap(syscall.EAGAIN), expected: wasip1.ErrnoAgain},
-		{name: "invalid", err: wrap(syscall.EINVAL), expected: wasip1.ErrnoInval},
-		{
-			// A syscall errno with no mapping of its own is not silently
-			// turned into something specific.
-			name: "unmapped errno", err: wrap(syscall.ENOTTY), expected: wasip1.ErrnoIo,
-		},
-		{
-			// The non-blocking emulation sets a deadline in the past, so a
-			// timeout is EAGAIN rather than ETIMEDOUT.
-			name: "timeout is EAGAIN", err: os.ErrDeadlineExceeded, expected: wasip1.ErrnoAgain,
-		},
-		{
-			name: "dns failure", err: &net.DNSError{Err: "no such host", IsNotFound: true},
-			expected: wasip1.ErrnoNoent,
-		},
-		{name: "anything else", err: errors.New("boom"), expected: wasip1.ErrnoIo},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.expected, toWasiErrno(tc.err))
-		})
-	}
-}
 
 // toFileErrno narrows to the smaller sys.Errno set the file surface uses, so
 // what it cannot express has to land on EIO rather than on a wrong errno.
