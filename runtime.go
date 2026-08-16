@@ -351,6 +351,7 @@ func (r *runtime) CompileModule(ctx context.Context, binary []byte) (CompiledMod
 		return nil, err
 	}
 	c.typeIDs = typeIDs
+	c.typeIDStore = r.store
 
 	if !hasCompiled {
 		// On a miss, CompileModule performs its own (single) probe of memory
@@ -449,8 +450,19 @@ func (r *runtime) InstantiateModule(
 		name = code.module.NameSection.ModuleName
 	}
 
+	// Type IDs are interned per store, in the order that store saw types, so code.typeIDs mean nothing to another
+	// store. A CompiledModule reaches one when two runtimes share a compilation cache, and import checks compare
+	// type IDs, so stale ones reject structurally identical signatures. Re-resolve in that case; when this is the
+	// store that assigned them, they are already this store's.
+	typeIDs := code.typeIDs
+	if code.typeIDStore != r.store {
+		if typeIDs, err = r.store.GetFunctionTypeIDs(code.module.TypeSection); err != nil {
+			return nil, err
+		}
+	}
+
 	// Instantiate the module.
-	mod, err = r.store.Instantiate(ctx, code.module, name, sysCtx, code.typeIDs)
+	mod, err = r.store.Instantiate(ctx, code.module, name, sysCtx, typeIDs)
 	if err != nil {
 		// If there was an error, don't leak the compiled module.
 		if code.closeWithModule {
