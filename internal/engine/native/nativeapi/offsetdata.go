@@ -64,9 +64,9 @@ const (
 	ExecutionContextOffsetThrowTrampolineAddress         Offset = 1192
 	ExecutionContextOffsetTryTableEnterTrampolineAddress Offset = 1200
 	ExecutionContextOffsetTryTableLeaveTrampolineAddress Offset = 1208
-	// ExecutionContextOffsetExceptionPtr holds the pointer to the Exception struct,
+	// ExecutionContextOffsetExceptionRef holds the exnref of the caught exception,
 	// used on the throw side and by catch_ref/catch_all_ref handlers.
-	ExecutionContextOffsetExceptionPtr Offset = 1216
+	ExecutionContextOffsetExceptionRef Offset = 1216
 	// ExecutionContextOffsetExceptionParamsPtr points into the Exception's
 	// Params slice backing array. Used by both throw (store params) and
 	// catch (load params) sides.

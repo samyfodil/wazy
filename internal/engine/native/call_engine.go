@@ -229,11 +229,14 @@ type (
 		tryTableEnterTrampolineAddress *byte
 		// tryTableLeaveTrampolineAddress holds the address of the try_table leave trampoline function.
 		tryTableLeaveTrampolineAddress *byte
-		// exceptionPtr holds the pointer to the Exception struct,
-		// used on the throw side (throwAlloc stores the new Exception)
-		// and on the catch side (catch_ref/catch_all_ref retrieve the exnref).
-		exceptionPtr uintptr
-		// exceptionParamsPtr points into exceptionPtr's Params slice
+		// exceptionRef holds the exnref of the caught exception, which
+		// catch_ref/catch_all_ref push. It is a handle into the store's
+		// exception table rather than a pointer to the Exception, because
+		// guest code may hold an exnref past this call and the collector
+		// cannot see a Go pointer parked in wasm state. See
+		// wasm.ExceptionTable.
+		exceptionRef uintptr
+		// exceptionParamsPtr points into the caught Exception's Params slice
 		// backing array. On the throw side, throwAlloc sets it so compiled
 		// code can store params at [ptr + i*8]. On the catch side, compiled
 		// handler blocks load params from the same pointer.
@@ -819,12 +822,15 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			tag := mod.Tags[tagIndex]
 			nParams := len(tag.Type.Params)
 			exn := &wasm.Exception{Tag: tag, Params: make([]uint64, nParams)}
-			c.pendingException = exn // GC root: keeps exn alive while compiled code writes params
+			c.pendingException = exn // keeps exn reachable while compiled code writes params
 			if nParams > 0 {
 				c.execCtx.exceptionParamsPtr = uintptr(unsafe.Pointer(&exn.Params[0]))
 			}
-			// Return the exnref to compiled code via the stack slot.
-			s[0] = uint64(uintptr(unsafe.Pointer(exn)))
+			// Return the exnref to compiled code via the stack slot. This is a handle into the store's table, not
+			// a pointer: guest code can hold an exnref for as long as it likes -- in a local, or an exnref-typed
+			// global that outlives this call -- and the collector cannot see a pointer parked there. See
+			// wasm.ExceptionTable.
+			s[0] = mod.ExceptionTable().Ref(exn)
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
@@ -834,9 +840,13 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			// against the per-function exception side table and transfers
 			// control directly to a matching landing pad -- see handleThrow.
 			s := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
-			// Read the Exception pointer directly from the uint64 value to avoid
-			// conversion from uintptr into unsafe.Pointer, which triggers checkptr.
-			exn := *(**wasm.Exception)(unsafe.Pointer(&s[0]))
+			exn, ok := c.callerModuleInstance().ExceptionTable().Lookup(s[0])
+			if !ok {
+				// An exnref this store never handed out. Guest code cannot forge one -- no instruction converts
+				// an integer to an exnref -- so this is a null or foreign handle, and resolving it would be a
+				// wild pointer. See wasm.ExceptionTable.
+				panic(wasmruntime.ErrRuntimeNullReference)
+			}
 			if !c.handleThrow(exn) {
 				panic(wasmruntime.ErrRuntimeUncaughtException)
 			}
@@ -1028,7 +1038,9 @@ func (c *callEngine) handleThrow(exn *wasm.Exception) bool {
 				if len(exn.Params) > 0 {
 					c.execCtx.exceptionParamsPtr = uintptr(unsafe.Pointer(&exn.Params[0]))
 				}
-				c.execCtx.exceptionPtr = uintptr(unsafe.Pointer(exn))
+				// catch_ref/catch_all_ref read this as the exnref they push. A handle, for the same reason the
+				// throw path returns one: guest code may keep it past this call. See wasm.ExceptionTable.
+				c.execCtx.exceptionRef = uintptr(mod.ExceptionTable().Ref(exn))
 				// The matched clause index, read by the compiled code at
 				// resumePC exactly where the non-throwing path reads -1.
 				c.execCtx.caughtExceptionClauseIdx = int64(ci)
