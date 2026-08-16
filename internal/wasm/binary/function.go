@@ -50,13 +50,12 @@ func decodeFunctionType(enabledFeatures api.CoreFeatures, buf []byte, offset int
 	ret.Params = paramTypes
 	ret.Results = resultTypes
 
-	// Eagerly cache the key here, while decoding is single-threaded. This is NOT deferred to first use because
-	// key() lazily populates FunctionType.string, and that first population can happen concurrently: the runtime
-	// call_indirect helpers reach it through Store.GetFunctionTypeID on a *shared* FunctionType — e.g.
-	// internal/emscripten (*InvokeFunc).Call and experimental/table.LookupFunction both call key() while
-	// executing guest code, which is multi-goroutine. Populating it now makes every later key()/String() a pure
-	// read of an already-set field. key() itself is cheap (single pre-sized Builder), so eager caching is cheap.
-	_ = ret.String()
+	// Cache the key here, while decoding is single-threaded and this type is not yet shared. The runtime
+	// call_indirect helpers reach key() through Store.GetFunctionTypeID on a *shared* FunctionType — e.g.
+	// internal/emscripten (*InvokeFunc).Call and table.LookupFunction both call it while executing guest code,
+	// which is multi-goroutine — so key() itself never writes. Populating it now makes every later key()/String()
+	// a pure read. key() is cheap (single pre-sized Builder), so eager caching is cheap.
+	ret.CacheKey()
 
 	return offset, nil
 }

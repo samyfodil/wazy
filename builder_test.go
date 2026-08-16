@@ -257,8 +257,9 @@ func requireHostModuleEquals(t *testing.T, expected, actual *wasm.Module) {
 	for i := range expected.TypeSection {
 		tp := &expected.TypeSection[i]
 		tp.CacheNumInUint64()
-		// When creating the compiled module, we get the type IDs for types, which results in caching type keys.
-		_ = tp.String()
+		// Host module assembly caches each type's key, so a later lookup from guest execution never writes to a
+		// shared FunctionType. See wasm.FunctionType.CacheKey.
+		tp.CacheKey()
 	}
 	require.Equal(t, expected.TypeSection, actual.TypeSection)
 	require.Equal(t, expected.ImportSection, actual.ImportSection)

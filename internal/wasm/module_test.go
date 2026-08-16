@@ -35,7 +35,16 @@ func TestFunctionType_String(t *testing.T) {
 		t.Run(tc.functype.String(), func(t *testing.T) {
 			require.Equal(t, tc.exp, tc.functype.String())
 			require.Equal(t, tc.exp, tc.functype.key())
+
+			// Reading the key must not write it: a FunctionType is shared
+			// across instances and read from guest execution on many
+			// goroutines. Only CacheKey, called while exclusively owned,
+			// populates it. See FunctionType.CacheKey.
+			require.Equal(t, "", tc.functype.string)
+
+			tc.functype.CacheKey()
 			require.Equal(t, tc.exp, tc.functype.string)
+			require.Equal(t, tc.exp, tc.functype.String())
 		})
 	}
 }

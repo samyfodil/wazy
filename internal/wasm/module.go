@@ -930,15 +930,34 @@ func (f *FunctionType) EqualsType(other *FunctionType) bool {
 	return f.RecGroupSize == other.RecGroupSize && f.RecGroupPosition == other.RecGroupPosition
 }
 
-// key gets or generates the key for Store.typeIDs. e.g. "i32_v" for one i32 parameter and no (void) result.
+// key gets the key for Store.typeIDs. e.g. "i32_v" for one i32 parameter and no (void) result.
 //
-// The key is built with a single pre-sized strings.Builder rather than repeated string += concatenation (which
-// reallocated on every operand). Grow is pre-computed from the operand name lengths so the no-rec-group case
-// allocates exactly once; a rec-group suffix (rare) may cost one extra grow.
+// This never writes to f. A FunctionType is shared by every instance created from one CompiledModule, and key()
+// is reached from guest execution -- internal/emscripten (*InvokeFunc).Call and table.LookupFunction both call it
+// while wasm is running, on any number of goroutines. Caching here would be a data race on f.string (the shape of
+// https://github.com/tetratelabs/wazero/issues/2520). Callers that own f exclusively -- the decoder, host module
+// assembly -- call CacheKey first, which makes this a pure read from then on.
 func (f *FunctionType) key() string {
 	if f.string != "" {
 		return f.string
 	}
+	return f.buildKey()
+}
+
+// CacheKey computes and stores key(), so later key()/String() calls are pure reads.
+//
+// Call this only while f is exclusively owned, i.e. before it is reachable from a second goroutine: during decode,
+// or as a host FunctionType is constructed. It is a no-op once the key is set.
+func (f *FunctionType) CacheKey() {
+	if f.string == "" {
+		f.string = f.buildKey()
+	}
+}
+
+// buildKey generates the key. It is built with a single pre-sized strings.Builder rather than repeated string +=
+// concatenation (which reallocated on every operand). Grow is pre-computed from the operand name lengths so the
+// no-rec-group case allocates exactly once; a rec-group suffix (rare) may cost one extra grow.
+func (f *FunctionType) buildKey() string {
 	// 3 covers the worst-case separators ("v_" + "v" when both operand lists are empty).
 	n := 3
 	for _, b := range f.Params {
@@ -966,8 +985,7 @@ func (f *FunctionType) key() string {
 	if f.RecGroupSize > 1 {
 		fmt.Fprintf(&sb, "|rec%d/%d", f.RecGroupPosition, f.RecGroupSize)
 	}
-	f.string = sb.String()
-	return f.string
+	return sb.String()
 }
 
 // String implements fmt.Stringer.

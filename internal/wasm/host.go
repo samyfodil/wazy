@@ -159,5 +159,8 @@ func (m *Module) maybeAddType(params, results []ValueType, enabledFeatures api.C
 
 	result := m.SectionElementCount(SectionIDType)
 	m.TypeSection = append(m.TypeSection, FunctionType{Params: params, Results: results})
+	// Cache the key while this host module is still being assembled, i.e. before any instance can reach it. See
+	// FunctionType.CacheKey.
+	m.TypeSection[len(m.TypeSection)-1].CacheKey()
 	return result, nil
 }

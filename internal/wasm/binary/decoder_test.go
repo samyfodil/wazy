@@ -123,10 +123,9 @@ func TestDecodeModule(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m, e := DecodeModule(binaryencoding.EncodeModule(tc.input), api.CoreFeaturesV1, wasm.MemoryLimitPages, false, 0, false, false)
 			require.NoError(t, e)
-			// Set the FunctionType keys on the input.
+			// Set the FunctionType keys on the input, as decoding does.
 			for i := range tc.input.TypeSection {
-				tp := &(tc.input.TypeSection)[i]
-				_ = tp.String()
+				tc.input.TypeSection[i].CacheKey()
 			}
 			if len(tc.input.ImportSection) > 0 {
 				expImportPerModule := make(map[string][]*wasm.Import)

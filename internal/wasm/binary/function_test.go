@@ -86,8 +86,8 @@ func TestFunctionType(t *testing.T) {
 			var actual wasm.FunctionType
 			_, err := decodeFunctionType(api.CoreFeaturesV2, b, 0, &valueTypeArena{}, &actual)
 			require.NoError(t, err)
-			// Set the FunctionType key on the input.
-			_ = tc.input.String()
+			// Set the FunctionType key on the input, as decoding does.
+			tc.input.CacheKey()
 			require.Equal(t, actual, tc.input)
 		})
 	}
