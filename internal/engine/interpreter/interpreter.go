@@ -191,7 +191,7 @@ type callEngine struct {
 
 // matchCatchClause checks whether a single catch clause matches the given exception.
 // Returns whether it matched and the values to push onto the stack.
-func matchCatchClause(kind byte, clauseTag *wasm.TagInstance, exn *wasm.Exception) (matched bool, values []uint64) {
+func matchCatchClause(exnRefOf func(*wasm.Exception) uint64, kind byte, clauseTag *wasm.TagInstance, exn *wasm.Exception) (matched bool, values []uint64) {
 	switch kind {
 	case wasm.CatchKindCatch:
 		if exn.Tag == clauseTag {
@@ -200,13 +200,13 @@ func matchCatchClause(kind byte, clauseTag *wasm.TagInstance, exn *wasm.Exceptio
 	case wasm.CatchKindCatchRef:
 		if exn.Tag == clauseTag {
 			values = slices.Clone(exn.Params)
-			values = append(values, uint64(uintptr(unsafe.Pointer(exn))))
+			values = append(values, exnRefOf(exn))
 			return true, values
 		}
 	case wasm.CatchKindCatchAll:
 		return true, nil
 	case wasm.CatchKindCatchAllRef:
-		return true, []uint64{uint64(uintptr(unsafe.Pointer(exn)))}
+		return true, []uint64{exnRefOf(exn)}
 	}
 	return false, nil
 }
@@ -230,7 +230,7 @@ func searchExceptionTable(exn *wasm.Exception, frame *callFrame) (*exceptionTabl
 			if clause.kind == wasm.CatchKindCatch || clause.kind == wasm.CatchKindCatchRef {
 				clauseTag = frame.f.moduleInstance.Tags[clause.tagIndex]
 			}
-			matched, values := matchCatchClause(clause.kind, clauseTag, exn)
+			matched, values := matchCatchClause(frame.f.moduleInstance.ExceptionTable().Ref, clause.kind, clauseTag, exn)
 			if matched {
 				return clause, values
 			}
@@ -2096,9 +2096,12 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			if v == 0 {
 				panic(wasmruntime.ErrRuntimeNullReference) // throw_ref on null exnref traps
 			}
-			// Read the Exception pointer directly from the uint64 value to avoid
-			// conversion from uintptr into unsafe.Pointer, which triggers checkptr.
-			exn := *(**wasm.Exception)(unsafe.Pointer(&v))
+			exn, ok := f.moduleInstance.ExceptionTable().Lookup(v)
+			if !ok {
+				// An exnref this store never handed out. Guest code cannot forge one, so this means a handle
+				// from another store; resolving it would be a wild pointer. See wasm.ExceptionTable.
+				panic(wasmruntime.ErrRuntimeNullReference)
+			}
 			if clause, values := searchExceptionTable(exn, frame); clause != nil {
 				ce.applyExceptionHandler(frame, clause, values)
 				pc = frame.pc // reload: handler set frame.pc to the catch target

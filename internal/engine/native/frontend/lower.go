@@ -5069,12 +5069,12 @@ func (c *Compiler) loadExceptionParams(tagType *wasm.FunctionType) []ssa.Value {
 }
 
 // loadExnRef loads the exnref (pointer to Exception) from the executionContext.
-// The dispatch loop writes it to exceptionPtr after matching a handler.
+// The dispatch loop writes it to exceptionRef after matching a handler.
 func (c *Compiler) loadExnRef() ssa.Value {
 	builder := c.ssaBuilder
 	return builder.AllocateInstruction().
 		AsLoad(c.execCtxPtrValue,
-			nativeapi.ExecutionContextOffsetExceptionPtr.U32(),
+			nativeapi.ExecutionContextOffsetExceptionRef.U32(),
 			ssa.TypeI64,
 		).Insert(builder).Return()
 }

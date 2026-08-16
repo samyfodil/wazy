@@ -77,7 +77,7 @@ func Test_ExecutionContextOffsets(t *testing.T) {
 	require.Equal(t, nativeapi.Offset(unsafe.Offsetof(execCtx.tryTableEnterTrampolineAddress)), nativeapi.ExecutionContextOffsetTryTableEnterTrampolineAddress)
 	require.Equal(t, nativeapi.Offset(unsafe.Offsetof(execCtx.tryTableLeaveTrampolineAddress)), nativeapi.ExecutionContextOffsetTryTableLeaveTrampolineAddress)
 	require.Equal(t, nativeapi.Offset(unsafe.Offsetof(execCtx.throwAllocTrampolineAddress)), nativeapi.ExecutionContextOffsetThrowAllocTrampolineAddress)
-	require.Equal(t, nativeapi.Offset(unsafe.Offsetof(execCtx.exceptionPtr)), nativeapi.ExecutionContextOffsetExceptionPtr)
+	require.Equal(t, nativeapi.Offset(unsafe.Offsetof(execCtx.exceptionRef)), nativeapi.ExecutionContextOffsetExceptionRef)
 	require.Equal(t, nativeapi.Offset(unsafe.Offsetof(execCtx.exceptionParamsPtr)), nativeapi.ExecutionContextOffsetExceptionParamsPtr)
 	require.Equal(t, nativeapi.Offset(unsafe.Offsetof(execCtx.caughtExceptionClauseIdx)), nativeapi.ExecutionContextOffsetCaughtExceptionClauseIdx)
 	require.Equal(t, nativeapi.Offset(unsafe.Offsetof(execCtx.localsSaveAreaPtr)), nativeapi.ExecutionContextOffsetLocalsSaveAreaPtr)

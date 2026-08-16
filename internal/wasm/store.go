@@ -53,6 +53,10 @@ type (
 		// do type-checks on indirect function calls.
 		typeIDs map[string]FunctionTypeID
 
+		// Exceptions hands out the exnref values guest code holds, and keeps the exceptions they name alive. It
+		// is per-Store because an exnref crosses module instances. See ExceptionTable.
+		Exceptions ExceptionTable
+
 		// functionMaxTypes represents the limit on the number of function types in a store.
 		// Note: this is fixed to 2^27 but have this a field for testability.
 		functionMaxTypes uint32
@@ -164,6 +168,13 @@ type (
 
 // The wazy specific limitations described at RATIONALE.md.
 const maximumFunctionTypes = 1 << 27
+
+// ExceptionTable returns the store-wide table naming live exceptions. Engines
+// use it to turn an Exception into the exnref guest code holds, and back. See
+// ExceptionTable.
+func (m *ModuleInstance) ExceptionTable() *ExceptionTable {
+	return &m.s.Exceptions
+}
 
 // GetFunctionTypeID is used by emscripten.
 func (m *ModuleInstance) GetFunctionTypeID(t *FunctionType) FunctionTypeID {
