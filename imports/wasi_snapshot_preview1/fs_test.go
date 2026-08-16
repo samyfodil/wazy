@@ -2480,6 +2480,40 @@ func Test_fdRenumber(t *testing.T) {
 `,
 		},
 		{
+			// The stdio slots are preopens, but they are streams rather than
+			// path-resolution roots, so renumbering onto one is allowed: this
+			// is what wasi-libc's freopen does, via dup3. See
+			// https://github.com/tetratelabs/wazero/issues/2518.
+			name:          "to=stdin",
+			from:          fileFD,
+			to:            sys.FdStdin,
+			expectedErrno: wasip1.ErrnoSuccess,
+			expectedLog: `
+==> wasi_snapshot_preview1.fd_renumber(fd=4,to=0)
+<== errno=ESUCCESS
+`,
+		},
+		{
+			name:          "to=stdout",
+			from:          fileFD,
+			to:            sys.FdStdout,
+			expectedErrno: wasip1.ErrnoSuccess,
+			expectedLog: `
+==> wasi_snapshot_preview1.fd_renumber(fd=4,to=1)
+<== errno=ESUCCESS
+`,
+		},
+		{
+			name:          "from=stderr",
+			from:          sys.FdStderr,
+			to:            fileFD,
+			expectedErrno: wasip1.ErrnoSuccess,
+			expectedLog: `
+==> wasi_snapshot_preview1.fd_renumber(fd=2,to=4)
+<== errno=ESUCCESS
+`,
+		},
+		{
 			name:          "file to dir",
 			from:          fileFD,
 			to:            dirFD,
