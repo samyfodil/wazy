@@ -157,6 +157,8 @@ Using wazy in production? [Open a PR](https://github.com/samyfodil/wazy/pulls) t
 
 wazy started from [wazero][wazero]'s code (Copyright 2020-2023 wazero authors) and still draws on its WebAssembly semantics, WASI implementation, and compliance and fuzzing test suites. We do not intend to keep wazero's API compatibility or its architecture. The goals are pure Go, performance, and conformance to the standard. See [RATIONALE.md](RATIONALE.md) for wazero's original design rationale and [LICENSE](LICENSE) for the Apache 2.0 license.
 
+[`imports/http_handler`](imports/http_handler) and its `nethttp` subpackage are a port of [http-wasm-host-go](https://github.com/http-wasm/http-wasm-host-go) (Apache 2.0), which is hard-typed to wazero: the ABI, the `Host` interface and the net/http adapter come from there, and its Technology Compatibility Kit is vendored to test them. [`imports/wasi_http`](imports/wasi_http) reimplements the pre-standard WASI-HTTP ABI from [wasi-go](https://github.com/stealthrocket/wasi-go) (Apache 2.0).
+
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE).

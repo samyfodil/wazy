@@ -8,6 +8,9 @@ languages or shared compiler toolchains.
 * [WASI](wasi_snapshot_preview1) e.g. `tinygo build -o X.wasm -target=wasi X.go`
 * [WASI-HTTP](wasi_http) e.g. a guest built against dev-wasm's client bindings,
   the pre-standard HTTP ABI defined by `stealthrocket/wasi-go`
+* [http-wasm](http_handler) e.g. an HTTP middleware guest built against any
+  http-wasm SDK; [`http_handler/nethttp`](http_handler/nethttp) wraps one as a
+  `net/http.Handler`
 
 Note: You may not see a language listed here because it either works without
 host imports, or it uses WASI.
