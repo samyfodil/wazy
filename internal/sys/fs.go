@@ -383,6 +383,18 @@ func (c *FSContext) SockAccept(sockFD int32, nonblock bool) (int32, sys.Errno) {
 	}
 }
 
+// InsertFile inserts f into the file table and returns its descriptor.
+//
+// This is how a host function that creates a descriptor from something other
+// than a path -- a socket, in particular -- hands it to the guest.
+func (c *FSContext) InsertFile(f sys.File) (int32, sys.Errno) {
+	fd, ok := c.openedFiles.Insert(&FileEntry{File: f})
+	if !ok {
+		return 0, sys.EBADF
+	}
+	return fd, 0
+}
+
 // CloseFile returns any error closing the existing file.
 func (c *FSContext) CloseFile(fd int32) (errno sys.Errno) {
 	f, ok := c.openedFiles.Lookup(fd)
