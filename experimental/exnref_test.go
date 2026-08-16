@@ -8,6 +8,7 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
@@ -30,16 +31,20 @@ var exnrefRetainedWasm []byte
 // on the large majority of runs in both engines.
 func TestExnRef_retainedAcrossCollection(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		config wazy.RuntimeConfig
+		name         string
+		needCompiler bool
+		config       func() wazy.RuntimeConfig
 	}{
-		{name: "compiler", config: wazy.NewRuntimeConfigCompiler()},
-		{name: "interpreter", config: wazy.NewRuntimeConfigInterpreter()},
+		{name: "compiler", needCompiler: true, config: wazy.NewRuntimeConfigCompiler},
+		{name: "interpreter", config: wazy.NewRuntimeConfigInterpreter},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.needCompiler && !platform.CompilerSupported() {
+				t.Skip("compiler not supported here, e.g. executable mmap is unavailable")
+			}
 			ctx := context.Background()
 			r := wazy.NewRuntimeWithConfig(ctx,
-				tc.config.WithCoreFeatures(api.CoreFeaturesV2|api.CoreFeatureExceptionHandling))
+				tc.config().WithCoreFeatures(api.CoreFeaturesV2|api.CoreFeatureExceptionHandling))
 			defer r.Close(ctx)
 
 			mod, err := r.Instantiate(ctx, exnrefRetainedWasm)
