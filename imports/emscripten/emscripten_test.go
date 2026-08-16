@@ -40,6 +40,14 @@ type arbitrary struct{}
 var testCtx = context.WithValue(context.Background(), arbitrary{}, "arbitrary")
 
 // TestGrow is an integration test until we have an Emscripten example.
+// cachedKey mirrors NewInvokeFunc, which caches its type's key up front so
+// that (*InvokeFunc).Call never writes to a shared FunctionType. See
+// https://github.com/tetratelabs/wazero/issues/2520.
+func cachedKey(ft *wasm.FunctionType) *wasm.FunctionType {
+	ft.CacheKey()
+	return ft
+}
+
 func TestGrow(t *testing.T) {
 	var log bytes.Buffer
 
@@ -138,42 +146,42 @@ func TestNewFunctionExporterForModule(t *testing.T) {
 					ExportName: "invoke_v",
 					ParamTypes: []wasm.ValueType{i32},
 					ParamNames: []string{"index"},
-					Code:       wasm.Code{GoFunc: &internal.InvokeFunc{FunctionType: &wasm.FunctionType{}}},
+					Code:       wasm.Code{GoFunc: &internal.InvokeFunc{FunctionType: cachedKey(&wasm.FunctionType{})}},
 				},
 				{
 					ExportName:  "invoke_i",
 					ParamTypes:  []wasm.ValueType{i32},
 					ParamNames:  []string{"index"},
 					ResultTypes: []wasm.ValueType{i32},
-					Code:        wasm.Code{GoFunc: &internal.InvokeFunc{FunctionType: &wasm.FunctionType{Results: []wasm.ValueType{i32}}}},
+					Code:        wasm.Code{GoFunc: &internal.InvokeFunc{FunctionType: cachedKey(&wasm.FunctionType{Results: []wasm.ValueType{i32}})}},
 				},
 				{
 					ExportName:  "invoke_p",
 					ParamTypes:  []wasm.ValueType{i32},
 					ParamNames:  []string{"index"},
 					ResultTypes: []wasm.ValueType{i32},
-					Code:        wasm.Code{GoFunc: &internal.InvokeFunc{FunctionType: &wasm.FunctionType{Results: []wasm.ValueType{i32}}}},
+					Code:        wasm.Code{GoFunc: &internal.InvokeFunc{FunctionType: cachedKey(&wasm.FunctionType{Results: []wasm.ValueType{i32}})}},
 				},
 				{
 					ExportName:  "invoke_j",
 					ParamTypes:  []wasm.ValueType{i32},
 					ParamNames:  []string{"index"},
 					ResultTypes: []wasm.ValueType{i64},
-					Code:        wasm.Code{GoFunc: &internal.InvokeFunc{FunctionType: &wasm.FunctionType{Results: []wasm.ValueType{i64}}}},
+					Code:        wasm.Code{GoFunc: &internal.InvokeFunc{FunctionType: cachedKey(&wasm.FunctionType{Results: []wasm.ValueType{i64}})}},
 				},
 				{
 					ExportName:  "invoke_f",
 					ParamTypes:  []wasm.ValueType{i32},
 					ParamNames:  []string{"index"},
 					ResultTypes: []wasm.ValueType{f32},
-					Code:        wasm.Code{GoFunc: &internal.InvokeFunc{FunctionType: &wasm.FunctionType{Results: []wasm.ValueType{f32}}}},
+					Code:        wasm.Code{GoFunc: &internal.InvokeFunc{FunctionType: cachedKey(&wasm.FunctionType{Results: []wasm.ValueType{f32}})}},
 				},
 				{
 					ExportName:  "invoke_d",
 					ParamTypes:  []wasm.ValueType{i32},
 					ParamNames:  []string{"index"},
 					ResultTypes: []wasm.ValueType{f64},
-					Code:        wasm.Code{GoFunc: &internal.InvokeFunc{FunctionType: &wasm.FunctionType{Results: []wasm.ValueType{f64}}}},
+					Code:        wasm.Code{GoFunc: &internal.InvokeFunc{FunctionType: cachedKey(&wasm.FunctionType{Results: []wasm.ValueType{f64}})}},
 				},
 			},
 		},
@@ -206,7 +214,7 @@ func TestNewFunctionExporterForModule(t *testing.T) {
 					ExportName: "invoke_v",
 					ParamTypes: []wasm.ValueType{i32},
 					ParamNames: []string{"index"},
-					Code:       wasm.Code{GoFunc: &internal.InvokeFunc{FunctionType: &wasm.FunctionType{}}},
+					Code:       wasm.Code{GoFunc: &internal.InvokeFunc{FunctionType: cachedKey(&wasm.FunctionType{})}},
 				},
 			},
 		},
@@ -232,7 +240,7 @@ func TestNewFunctionExporterForModule(t *testing.T) {
 					ExportName: "invoke_v",
 					ParamTypes: []wasm.ValueType{i32},
 					ParamNames: []string{"index"},
-					Code:       wasm.Code{GoFunc: &internal.InvokeFunc{FunctionType: &wasm.FunctionType{}}},
+					Code:       wasm.Code{GoFunc: &internal.InvokeFunc{FunctionType: cachedKey(&wasm.FunctionType{})}},
 				},
 				internal.NotifyMemoryGrowth,
 			},
@@ -256,7 +264,7 @@ func TestNewFunctionExporterForModule(t *testing.T) {
 					ExportName: "invoke_vi",
 					ParamTypes: []wasm.ValueType{i32, i32},
 					ParamNames: []string{"index", "a1"},
-					Code:       wasm.Code{GoFunc: &internal.InvokeFunc{FunctionType: &wasm.FunctionType{Params: []wasm.ValueType{i32}}}},
+					Code:       wasm.Code{GoFunc: &internal.InvokeFunc{FunctionType: cachedKey(&wasm.FunctionType{Params: []wasm.ValueType{i32}})}},
 				},
 			},
 		},
@@ -283,10 +291,10 @@ func TestNewFunctionExporterForModule(t *testing.T) {
 					ParamTypes:  []wasm.ValueType{i32, i32, i32, i32, i32},
 					ParamNames:  []string{"index", "a1", "a2", "a3", "a4"},
 					ResultTypes: []wasm.ValueType{i32},
-					Code: wasm.Code{GoFunc: &internal.InvokeFunc{FunctionType: &wasm.FunctionType{
+					Code: wasm.Code{GoFunc: &internal.InvokeFunc{FunctionType: cachedKey(&wasm.FunctionType{
 						Params:  []wasm.ValueType{i32, i32, i32, i32},
 						Results: []wasm.ValueType{i32},
-					}}},
+					})}},
 				},
 			},
 		},
@@ -311,9 +319,9 @@ func TestNewFunctionExporterForModule(t *testing.T) {
 					ExportName: "invoke_viiiddiiiiii",
 					ParamTypes: []wasm.ValueType{i32, i32, i32, i32, f64, f64, i32, i32, i32, i32, i32, i32},
 					ParamNames: []string{"index", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "a10", "a11"},
-					Code: wasm.Code{GoFunc: &internal.InvokeFunc{FunctionType: &wasm.FunctionType{
+					Code: wasm.Code{GoFunc: &internal.InvokeFunc{FunctionType: cachedKey(&wasm.FunctionType{
 						Params: []wasm.ValueType{i32, i32, i32, f64, f64, i32, i32, i32, i32, i32, i32},
-					}}},
+					})}},
 				},
 			},
 		},

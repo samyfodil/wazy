@@ -67,6 +67,9 @@ func NewInvokeFunc(importName string, params, results []api.ValueType) *wasm.Hos
 	if len(params) > 1 {
 		fn.FunctionType.Params = wasm.FromApiValueType(params[1:])
 	}
+	// This type is shared by every instance of the host module and is looked up by Call, from guest execution on
+	// any number of goroutines. Cache its key now, while it is still exclusively owned. See FunctionType.CacheKey.
+	fn.FunctionType.CacheKey()
 
 	// Now, make friendly parameter names.
 	paramNames := make([]string, len(params))

@@ -142,6 +142,13 @@ func TestNewHostModule(t *testing.T) {
 }
 
 func requireHostModuleEquals(t *testing.T, expected, actual *Module) {
+	// NewHostModule caches each type's key while the module is still exclusively owned, so that a later lookup
+	// from guest execution never writes to a shared FunctionType (see FunctionType.CacheKey). Do the same to the
+	// expectation, so these fixtures can stay plain literals.
+	for i := range expected.TypeSection {
+		expected.TypeSection[i].CacheKey()
+	}
+
 	// `require.Equal(t, expected, actual)` fails reflect pointers don't match, so brute compare:
 	require.Equal(t, expected.TypeSection, actual.TypeSection)
 	require.Equal(t, expected.ImportSection, actual.ImportSection)
