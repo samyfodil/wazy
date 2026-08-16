@@ -308,11 +308,26 @@ func (c *FSContext) OpenFile(fs sys.FS, path string, flag sys.Oflag, perm fs.Fil
 }
 
 // Renumber assigns the file pointed by the descriptor `from` to `to`.
+// isDirPreopen reports whether fd is a pre-opened *directory*, the thing
+// Renumber must refuse: removing one breaks path resolution for every relative
+// path underneath it.
+//
+// The stdio slots are registered as preopens too (see stdio.go), but they are
+// streams, not roots, and the WASI spec carves out nothing for them. Refusing
+// them breaks wasi-libc's freopen, which is open-then-dup3 with dup3 backed by
+// fd_renumber: freopen(path, mode, stdin) would fail, and musl's failure path
+// then closes the original stream, leaving the guest with no stdin at all.
+// wasmtime allows renumbering the stdio slots. See
+// https://github.com/tetratelabs/wazero/issues/2518.
+func isDirPreopen(f *FileEntry, fd int32) bool {
+	return f.IsPreopen && fd > FdStderr
+}
+
 func (c *FSContext) Renumber(from, to int32) sys.Errno {
 	fromFile, ok := c.openedFiles.Lookup(from)
 	if !ok || to < 0 {
 		return sys.EBADF
-	} else if fromFile.IsPreopen {
+	} else if isDirPreopen(fromFile, from) {
 		return sys.ENOTSUP
 	}
 
@@ -322,7 +337,7 @@ func (c *FSContext) Renumber(from, to int32) sys.Errno {
 	// https://github.com/WebAssembly/WASI/blob/snapshot-01/phases/snapshot/docs.md#-fd_renumberfd-fd-to-fd---errno
 	// https://github.com/bytecodealliance/wasmtime/blob/main/crates/wasi-common/src/snapshots/preview_1.rs#L531-L546
 	if toFile, ok := c.openedFiles.Lookup(to); ok {
-		if toFile.IsPreopen {
+		if isDirPreopen(toFile, to) {
 			return sys.ENOTSUP
 		}
 		_ = toFile.File.Close()

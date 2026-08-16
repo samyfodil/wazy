@@ -286,6 +286,38 @@ func TestFSContext_Renumber(t *testing.T) {
 		// Both are preopen.
 		require.Equal(t, sys.ENOTSUP, fsc.Renumber(3, 3))
 	})
+
+	// The stdio slots are registered as preopens, but they are streams, not
+	// roots. Refusing them breaks wasi-libc's freopen, whose dup3 is
+	// fd_renumber. See https://github.com/tetratelabs/wazero/issues/2518.
+	t.Run("stdio", func(t *testing.T) {
+		for _, stdioFd := range []int32{FdStdin, FdStdout, FdStderr} {
+			// A preopen, like a directory root, but renumberable.
+			stdio, ok := fsc.LookupFile(stdioFd)
+			require.True(t, ok)
+			require.True(t, stdio.IsPreopen)
+
+			// Renumbering onto it replaces it, which is what freopen needs.
+			fromFd, errno := fsc.OpenFile(dirFS, dirName, sys.O_RDONLY, 0)
+			require.EqualErrno(t, 0, errno)
+			opened, ok := fsc.LookupFile(fromFd)
+			require.True(t, ok)
+
+			require.EqualErrno(t, 0, fsc.Renumber(fromFd, stdioFd))
+
+			replaced, ok := fsc.LookupFile(stdioFd)
+			require.True(t, ok)
+			require.Equal(t, opened, replaced)
+
+			_, ok = fsc.LookupFile(fromFd)
+			require.False(t, ok)
+
+			// And renumbering it away works too: it is an ordinary stream.
+			require.EqualErrno(t, 0, fsc.Renumber(stdioFd, 200+stdioFd))
+			_, ok = fsc.LookupFile(stdioFd)
+			require.False(t, ok)
+		}
+	})
 }
 
 // This is similar to https://github.com/WebAssembly/wasi-testsuite/blob/ac32f57400cdcdd0425d3085c24fc7fc40011d1c/tests/rust/src/bin/fd_readdir.rs#L120
