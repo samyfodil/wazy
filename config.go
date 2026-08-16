@@ -388,6 +388,9 @@ type compiledModule struct {
 	// closeWithModule prevents leaking compiled code when a module is compiled implicitly.
 	closeWithModule bool
 	typeIDs         []wasm.FunctionTypeID
+	// typeIDStore is the store that assigned typeIDs. Type IDs are interned per store, in the order that store saw
+	// types, so they only mean anything to it -- see runtime.InstantiateModule.
+	typeIDStore *wasm.Store
 }
 
 // Name implements CompiledModule.Name
