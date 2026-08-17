@@ -64,6 +64,10 @@ func flatWidthCases() (map[string]binary.TypeDesc, Resolver) {
 		"flags":  binary.FlagsDesc{Names: []string{"x", "y"}},
 		"own":    binary.OwnDesc{ResourceType: 1},
 		"borrow": binary.BorrowDesc{ResourceType: 1},
+		// Async handles flatten as a bare i32 like own/borrow: the element
+		// type they carry is not flattened.
+		"stream": binary.StreamDesc{},
+		"future": binary.FutureDesc{},
 
 		"record":       binary.RecordDesc{Fields: []binary.RecordField{{Name: "a", Type: prim("u32")}}},
 		"record empty": binary.RecordDesc{},
@@ -184,21 +188,29 @@ func TestFlatWidthErrorsMatchFlatten(t *testing.T) {
 // reason it exists.
 func TestFlatWidthDoesNotAllocate(t *testing.T) {
 	cases, resolve := flatWidthCases()
+
+	// Every shape, not one: the flags and enum arms reach different helpers
+	// than the rest, so a single deep case would leave them unproven -- and
+	// they did in fact allocate until those helpers stopped returning fresh
+	// literals.
+	for name, desc := range cases {
+		t.Run(name, func(t *testing.T) {
+			// Warm any lazily built state so it is not counted.
+			if _, err := FlatWidth(desc, resolve); err != nil {
+				t.Fatal(err)
+			}
+			allocs := testing.AllocsPerRun(100, func() {
+				if _, err := FlatWidth(desc, resolve); err != nil {
+					t.Fatal(err)
+				}
+			})
+			if allocs != 0 {
+				t.Errorf("FlatWidth allocated %v objects per call, want 0", allocs)
+			}
+		})
+	}
+
 	desc := cases["deeply nested"]
-
-	// Warm any lazily built state so it is not counted.
-	if _, err := FlatWidth(desc, resolve); err != nil {
-		t.Fatal(err)
-	}
-
-	allocs := testing.AllocsPerRun(100, func() {
-		if _, err := FlatWidth(desc, resolve); err != nil {
-			t.Fatal(err)
-		}
-	})
-	if allocs != 0 {
-		t.Errorf("FlatWidth allocated %v objects per call, want 0", allocs)
-	}
 
 	// For contrast, and to document why this function exists at all.
 	flatAllocs := testing.AllocsPerRun(100, func() {
@@ -209,5 +221,5 @@ func TestFlatWidthDoesNotAllocate(t *testing.T) {
 	if flatAllocs == 0 {
 		t.Skip("Flatten no longer allocates; FlatWidth may be redundant")
 	}
-	t.Logf("Flatten allocates %v objects per call, FlatWidth %v", flatAllocs, allocs)
+	t.Logf("Flatten allocates %v objects per call for the same shape; FlatWidth 0", flatAllocs)
 }

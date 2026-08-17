@@ -6,6 +6,25 @@ import (
 	"github.com/samyfodil/wazy/internal/component/binary"
 )
 
+// maxFlatWidth bounds a flattened width.
+//
+// Widths are summed over a type graph the resolver hands back, and nothing
+// stops a malformed or hostile component from describing one that expands
+// exponentially -- a record of records, nested deeply enough. Unbounded
+// addition would wrap to a negative width and take the spill decision with
+// it, which is a corrupted lift rather than a rejected type. The bound is far
+// above any real signature (Flatten of such a type would be building a
+// multi-megabyte slice by then), so reaching it means the type is malformed.
+const maxFlatWidth = 1 << 20
+
+// addFlatWidth sums two widths, failing rather than wrapping.
+func addFlatWidth(a, b int) (int, error) {
+	if a > maxFlatWidth-b {
+		return 0, fmt.Errorf("flattened width exceeds %d core values", maxFlatWidth)
+	}
+	return a + b, nil
+}
+
 // FlatWidth returns how many core values t flattens to, without building the
 // flattened type list.
 //
@@ -35,7 +54,9 @@ func FlatWidth(t binary.TypeDesc, resolve Resolver) (int, error) {
 			if err != nil {
 				return 0, err
 			}
-			total += w
+			if total, err = addFlatWidth(total, w); err != nil {
+				return 0, err
+			}
 		}
 		return total, nil
 
@@ -46,7 +67,9 @@ func FlatWidth(t binary.TypeDesc, resolve Resolver) (int, error) {
 			if err != nil {
 				return 0, err
 			}
-			total += w
+			if total, err = addFlatWidth(total, w); err != nil {
+				return 0, err
+			}
 		}
 		return total, nil
 
@@ -70,14 +93,14 @@ func FlatWidth(t binary.TypeDesc, resolve Resolver) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		return disc + widest, nil
+		return addFlatWidth(disc, widest)
 
 	case binary.OptionDesc:
 		w, err := flatWidthRef(&desc.Element, resolve)
 		if err != nil {
 			return 0, err
 		}
-		return 1 + w, nil
+		return addFlatWidth(1, w)
 
 	case binary.ResultDesc:
 		var okW, errW int
@@ -95,7 +118,7 @@ func FlatWidth(t binary.TypeDesc, resolve Resolver) (int, error) {
 		if errW > okW {
 			okW = errW
 		}
-		return 1 + okW, nil
+		return addFlatWidth(1, okW)
 
 	case binary.FlagsDesc:
 		// Reuses flattenFlagsNumLabels rather than repeating its label cap,

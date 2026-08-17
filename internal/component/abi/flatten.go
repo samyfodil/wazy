@@ -209,38 +209,41 @@ func flattenVariant(desc binary.VariantDesc, resolve Resolver) ([]string, error)
 
 	// Collect all case payloads and join their types.
 	//
-	// The counts are known up front (FlatWidth builds nothing), so the two
-	// slices are allocated once at their final size, and the per-slot
-	// candidate list is one buffer reused down the slots rather than one
-	// allocation per slot. The join itself is unchanged.
+	// Each payload is flattened exactly once and the join width is taken
+	// from those results. Asking FlatWidth for the width first and
+	// flattening afterwards would walk every payload twice, and the two
+	// walks are only guaranteed to agree if the resolver returns the same
+	// descriptor both times -- which the public Resolver type does not
+	// promise. A wider second walk would then be silently truncated to the
+	// stale width, which is corrupted layout rather than an error.
+	//
+	// Counting the payload cases needs no resolution, so the slice holding
+	// them is still allocated once, and the per-slot candidate list is one
+	// buffer reused down the slots. The join itself is unchanged.
 	payloads := 0
+	for _, c := range desc.Cases {
+		if c.Type != nil {
+			payloads++
+		}
+	}
+
+	caseFlats := make([][]string, 0, payloads)
 	maxLen := 0
 	for _, c := range desc.Cases {
 		if c.Type == nil {
 			continue
 		}
-		w, err := flatWidthRef(c.Type, resolve)
+		ct, err := resolveType(c.Type, resolve)
 		if err != nil {
 			return nil, err
 		}
-		payloads++
-		if w > maxLen {
-			maxLen = w
+		cFlat, err := Flatten(ct, resolve)
+		if err != nil {
+			return nil, err
 		}
-	}
-
-	caseFlats := make([][]string, 0, payloads)
-	for _, c := range desc.Cases {
-		if c.Type != nil {
-			ct, err := resolveType(c.Type, resolve)
-			if err != nil {
-				return nil, err
-			}
-			cFlat, err := Flatten(ct, resolve)
-			if err != nil {
-				return nil, err
-			}
-			caseFlats = append(caseFlats, cFlat)
+		caseFlats = append(caseFlats, cFlat)
+		if len(cFlat) > maxLen {
+			maxLen = len(cFlat)
 		}
 	}
 

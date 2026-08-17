@@ -20,6 +20,11 @@ import (
 // that keeps the canonical ABI from quietly going back to deriving a type's
 // flattened layout on every call. Read the allocs column first; ns/op on a
 // shared machine is noise.
+//
+// The recorder is part of what it measures: about nine of the allocations
+// belong to httptest rather than to wazy, and they are left in rather than
+// tuned away, because a number that excludes the caller's own cost is a
+// number that flatters itself.
 func BenchmarkServeHTTP(b *testing.B) {
 	ctx := context.Background()
 	r := wazy.NewRuntime(ctx)
@@ -33,18 +38,20 @@ func BenchmarkServeHTTP(b *testing.B) {
 
 	h := Handler(inst)
 	req := httptest.NewRequest("GET", "/greet?name=wazy", nil)
-	rec := httptest.NewRecorder()
 
+	// A recorder per iteration, not one reset between them: a ResponseRecorder
+	// accumulates header and write state, so reusing it would let each
+	// iteration start from the last one's leftovers and measure something no
+	// real request does. It costs a few allocations of its own, which is the
+	// honest price of measuring a whole request.
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		rec.Body.Reset()
+		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
-	}
-	b.StopTimer()
-
-	// A benchmark measuring a request that failed would measure nothing.
-	if rec.Code != 200 {
-		b.Fatalf("status = %d, want 200", rec.Code)
+		if rec.Code != 200 {
+			b.StopTimer()
+			b.Fatalf("status = %d, want 200", rec.Code)
+		}
 	}
 }
