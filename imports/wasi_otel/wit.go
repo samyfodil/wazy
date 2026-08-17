@@ -1,6 +1,9 @@
 package wasi_otel
 
-import "github.com/samyfodil/wazy/component"
+import (
+	"github.com/samyfodil/wazy/component"
+	"github.com/samyfodil/wazy/imports/wasip2"
+)
 
 // The WIT type graph, interned into a component.TypeTable.
 //
@@ -41,11 +44,9 @@ func newCommonTypes() *commonTypes {
 	t := &commonTypes{tbl: component.NewTypeTable()}
 
 	// wasi:clocks/wall-clock's datetime, which the otel WIT uses rather than
-	// defining a time type of its own.
-	t.datetime = t.tbl.Record(
-		"seconds", component.Prim("u64"),
-		"nanoseconds", component.Prim("u32"),
-	)
+	// defining a time type of its own -- so it is taken from the package that
+	// already declares it rather than written out again here.
+	t.datetime = wasip2.DatetimeType(t.tbl)
 
 	t.keyValue = t.tbl.Record(
 		"key", component.Prim("string"),

@@ -1896,18 +1896,36 @@ func wasiErrorCodeType(tbl *typeTable) component.TypeRef {
 	}})
 }
 
-// wasiDatetimeType interns wasi:clocks/wall-clock's `datetime` record
-// (`record datetime { seconds: u64, nanoseconds: u32 }`) into tbl and
-// returns its TypeRef. This package never constructs a datetime value
-// (descriptor-stat's three timestamp fields are always `none` -- see
-// stat's doc), but the type must still resolve structurally for Flatten to
-// compute descriptor-stat's joined flat width, mirroring
-// wasi.go's wasiStreamErrorType doc.
-func wasiDatetimeType(tbl *typeTable) component.TypeRef {
-	return tbl.add(component.RecordDesc{Fields: []component.RecordField{
+// DatetimeDesc returns wasi:clocks/wall-clock's `datetime` record
+// (`record datetime { seconds: u64, nanoseconds: u32 }`).
+//
+// It is exported because datetime is not this package's type: any host
+// implementing a WIT interface that reuses it -- wasi:otel's spans and logs,
+// for instance -- needs the same record, and two hand-written copies of one
+// wire format is one copy too many. Use [DatetimeType] with a
+// component.TypeTable, or hand this to a table of your own.
+//
+// A datetime value is a record value of the two fields in order:
+// []component.Value{uint64(seconds), uint32(nanoseconds)}.
+func DatetimeDesc() component.RecordDesc {
+	return component.RecordDesc{Fields: []component.RecordField{
 		{Name: "seconds", Type: component.TypeRef{Primitive: "u64"}},
 		{Name: "nanoseconds", Type: component.TypeRef{Primitive: "u32"}},
-	}})
+	}}
+}
+
+// DatetimeType interns [DatetimeDesc] into tbl and returns its TypeRef.
+func DatetimeType(tbl *component.TypeTable) component.TypeRef {
+	return tbl.Add(DatetimeDesc())
+}
+
+// wasiDatetimeType interns the same record into this package's own table.
+// This package never constructs a datetime value (descriptor-stat's three
+// timestamp fields are always `none` -- see stat's doc), but the type must
+// still resolve structurally for Flatten to compute descriptor-stat's joined
+// flat width, mirroring wasi.go's wasiStreamErrorType doc.
+func wasiDatetimeType(tbl *typeTable) component.TypeRef {
+	return tbl.add(DatetimeDesc())
 }
 
 // wasiDescriptorStatType interns wasi:filesystem/types' `descriptor-stat`
