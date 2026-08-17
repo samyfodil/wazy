@@ -177,7 +177,13 @@ func flattenList(_ binary.ListDesc, _ Resolver) ([]string, error) {
 }
 
 func flattenRecord(desc binary.RecordDesc, resolve Resolver) ([]string, error) {
-	var flat []string
+	// The width is known without building anything, so the result is
+	// allocated once at its final size rather than grown field by field.
+	width, err := FlatWidth(desc, resolve)
+	if err != nil {
+		return nil, err
+	}
+	flat := make([]string, 0, width)
 	for _, f := range desc.Fields {
 		ft, err := resolveType(&f.Type, resolve)
 		if err != nil {
@@ -200,8 +206,29 @@ func flattenVariant(desc binary.VariantDesc, resolve Resolver) ([]string, error)
 		return nil, err
 	}
 
-	// Collect all case payloads and join their types
-	var caseFlats [][]string
+	// Collect all case payloads and join their types.
+	//
+	// The counts are known up front (FlatWidth builds nothing), so the two
+	// slices are allocated once at their final size, and the per-slot
+	// candidate list is one buffer reused down the slots rather than one
+	// allocation per slot. The join itself is unchanged.
+	payloads := 0
+	maxLen := 0
+	for _, c := range desc.Cases {
+		if c.Type == nil {
+			continue
+		}
+		w, err := flatWidthRef(c.Type, resolve)
+		if err != nil {
+			return nil, err
+		}
+		payloads++
+		if w > maxLen {
+			maxLen = w
+		}
+	}
+
+	caseFlats := make([][]string, 0, payloads)
 	for _, c := range desc.Cases {
 		if c.Type != nil {
 			ct, err := resolveType(c.Type, resolve)
@@ -216,33 +243,30 @@ func flattenVariant(desc binary.VariantDesc, resolve Resolver) ([]string, error)
 		}
 	}
 
-	// Join all case flats together by position
-	var joined []string
-	maxLen := 0
-	for _, cFlat := range caseFlats {
-		if len(cFlat) > maxLen {
-			maxLen = len(cFlat)
-		}
-	}
+	out := make([]string, 0, len(discFlat)+maxLen)
+	out = append(out, discFlat...)
 
+	candidates := make([]string, 0, payloads)
 	for i := 0; i < maxLen; i++ {
-		var candidates []string
+		candidates = candidates[:0]
 		for _, cFlat := range caseFlats {
 			if i < len(cFlat) {
 				candidates = append(candidates, cFlat[i])
 			}
 		}
 		if len(candidates) > 0 {
-			joined = append(joined, joinCoreTypes(candidates))
+			out = append(out, joinCoreTypes(candidates))
 		}
 	}
-
-	// Prepend discriminant
-	return append(discFlat, joined...), nil
+	return out, nil
 }
 
 func flattenTuple(desc binary.TupleDesc, resolve Resolver) ([]string, error) {
-	var flat []string
+	width, err := FlatWidth(desc, resolve)
+	if err != nil {
+		return nil, err
+	}
+	flat := make([]string, 0, width)
 	for _, elem := range desc.Elements {
 		et, err := resolveType(&elem, resolve)
 		if err != nil {
@@ -290,12 +314,10 @@ func flattenOption(desc binary.OptionDesc, resolve Resolver) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Discriminant (u8) + max(element)
-	// u8 flattens to i32, join with element
-	var candidates []string
-	candidates = append(candidates, "i32") // discriminant
-	candidates = append(candidates, elemFlat...)
-	return candidates, nil
+	// Discriminant (u8, which flattens to i32) followed by the element.
+	out := make([]string, 0, 1+len(elemFlat))
+	out = append(out, "i32")
+	return append(out, elemFlat...), nil
 }
 
 func flattenResult(desc binary.ResultDesc, resolve Resolver) ([]string, error) {
@@ -325,12 +347,17 @@ func flattenResult(desc binary.ResultDesc, resolve Resolver) ([]string, error) {
 		}
 	}
 
-	// Join ok and error flats by position
-	var joined []string
+	// Join ok and error flats by position, onto the discriminant (a u8, which
+	// flattens to i32). One allocation at the final size, and a two-element
+	// candidate buffer reused down the slots.
 	maxLen := max(len(errFlat), max(len(okFlat), 0))
 
+	out := make([]string, 0, 1+maxLen)
+	out = append(out, "i32")
+
+	var buf [2]string
 	for i := range maxLen {
-		var candidates []string
+		candidates := buf[:0]
 		if i < len(okFlat) {
 			candidates = append(candidates, okFlat[i])
 		}
@@ -338,12 +365,10 @@ func flattenResult(desc binary.ResultDesc, resolve Resolver) ([]string, error) {
 			candidates = append(candidates, errFlat[i])
 		}
 		if len(candidates) > 0 {
-			joined = append(joined, joinCoreTypes(candidates))
+			out = append(out, joinCoreTypes(candidates))
 		}
 	}
-
-	// Prepend discriminant (u8, flattens to i32)
-	return append([]string{"i32"}, joined...), nil
+	return out, nil
 }
 
 // ------- Helper: Join core types -------
