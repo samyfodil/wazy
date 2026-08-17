@@ -1,0 +1,12 @@
+package wasi:otel@0.2.0-rc.2;
+
+/// The world this fixture is built against: it imports the three wasi:otel
+/// interfaces and exports one function the host calls to drive them.
+world otelguest {
+    import types;
+    import tracing;
+    import metrics;
+    import logs;
+
+    export run: func() -> string;
+}

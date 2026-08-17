@@ -1,0 +1,15 @@
+[package]
+name = "outerguest"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.47.0"
+
+[profile.release]
+opt-level = "s"
+strip = true

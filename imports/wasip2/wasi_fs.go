@@ -10,6 +10,7 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/component"
+	"github.com/samyfodil/wazy/imports/wasip2/wit"
 	"github.com/samyfodil/wazy/sys"
 )
 
@@ -1896,18 +1897,16 @@ func wasiErrorCodeType(tbl *typeTable) component.TypeRef {
 	}})
 }
 
-// wasiDatetimeType interns wasi:clocks/wall-clock's `datetime` record
-// (`record datetime { seconds: u64, nanoseconds: u32 }`) into tbl and
-// returns its TypeRef. This package never constructs a datetime value
-// (descriptor-stat's three timestamp fields are always `none` -- see
-// stat's doc), but the type must still resolve structurally for Flatten to
-// compute descriptor-stat's joined flat width, mirroring
-// wasi.go's wasiStreamErrorType doc.
+// wasiDatetimeType interns wasi:clocks/wall-clock's `datetime` into tbl.
+//
+// The record itself is declared in the wit package, since wall-clock owns it
+// and this file is only a consumer: filesystem needs it for descriptor-stat's
+// three timestamp fields. Those are always `none` (see stat's doc), so this
+// package never constructs a datetime value, but the type must still resolve
+// structurally for Flatten to compute descriptor-stat's joined flat width,
+// mirroring wasi.go's wasiStreamErrorType doc.
 func wasiDatetimeType(tbl *typeTable) component.TypeRef {
-	return tbl.add(component.RecordDesc{Fields: []component.RecordField{
-		{Name: "seconds", Type: component.TypeRef{Primitive: "u64"}},
-		{Name: "nanoseconds", Type: component.TypeRef{Primitive: "u32"}},
-	}})
+	return tbl.add(wit.DatetimeDesc())
 }
 
 // wasiDescriptorStatType interns wasi:filesystem/types' `descriptor-stat`

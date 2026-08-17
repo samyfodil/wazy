@@ -1,0 +1,12 @@
+package wasi:otel@0.2.0-rc.2;
+
+/// The tracing interface as the guest SDKs still declare it, where the span
+/// context getter is named `outer-span-context` rather than the proposal's
+/// current `current-span-context`. A guest built with today's
+/// bytecodealliance/opentelemetry-wasi imports this name.
+world outerguest {
+    import types;
+    import tracing;
+
+    export run: func() -> string;
+}
