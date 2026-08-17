@@ -40,12 +40,14 @@ func LowerFlatInto(dst []CoreValue, v Value, t binary.TypeDesc, resolve Resolver
 	// it -- only to throw that away and re-store via spillValue: wasted work
 	// AND leaked allocations that shift the bump allocator. (LowerStep.Lower
 	// makes the same spill-first decision; found via the complex ABI battery.)
-	flatTypes, err := Flatten(t, resolve)
+	// Only the width decides the spill, so this asks for the count rather
+	// than building the flattened type list and measuring it.
+	flatWidth, err := FlatWidth(t, resolve)
 	if err != nil {
 		return nil, err
 	}
 
-	if len(flatTypes) > MaxFlatParams {
+	if flatWidth > MaxFlatParams {
 		// Spill: Store the value to memory and return a pointer.
 		ptr, err := spillValue(v, t, mem, resolve, realloc)
 		if err != nil {
@@ -614,12 +616,14 @@ func spillValue(v Value, t binary.TypeDesc, mem []byte, resolve Resolver, reallo
 //
 // This mirrors the canonical ABI lift_flat() function.
 func LiftFlat(vals []CoreValue, t binary.TypeDesc, resolve Resolver, mem []byte) (Value, error) {
-	flatTypes, err := Flatten(t, resolve)
+	// Only the width decides the spill, so this asks for the count rather
+	// than building the flattened type list and measuring it.
+	flatWidth, err := FlatWidth(t, resolve)
 	if err != nil {
 		return nil, err
 	}
 
-	if len(flatTypes) > MaxFlatParams {
+	if flatWidth > MaxFlatParams {
 		// Spilled: first value is a pointer to memory.
 		if len(vals) != 1 {
 			return nil, fmt.Errorf("LiftFlat: expected 1 value for spilled type, got %d", len(vals))
@@ -1049,11 +1053,11 @@ func liftFlatOption(vi valueIter, elemType binary.TypeDesc, resolve Resolver, me
 	switch disc {
 	case 0:
 		// None: consume and discard the padding.
-		elemFlatTypes, err := Flatten(elemType, resolve)
+		elemWidth, err := FlatWidth(elemType, resolve)
 		if err != nil {
 			return nil, err
 		}
-		for range elemFlatTypes {
+		for range elemWidth {
 			if _, err := vi.Next(); err != nil {
 				return nil, err
 			}
