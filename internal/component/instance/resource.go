@@ -123,6 +123,10 @@ type handleTable struct {
 	// and dense per instance rather than monotonically growing.
 	free []uint32
 
+	// slab is the unspent tail of the current resourceEntry batch (see
+	// newResourceEntry). Guarded by mu like everything else here.
+	slab []resourceEntry
+
 	// dtors maps a resource type tag to the destructor run when a handle of that
 	// tag is dropped by canon resource.drop. A GUEST-defined resource's dtor
 	// invokes its core func (registered lazily -- see resourceDtor -- because the
@@ -239,11 +243,43 @@ func newHandleTable() *handleTable {
 	return &handleTable{entries: make(map[uint32]tableEntry), next: 1}
 }
 
+// resourceEntrySlab is how many resourceEntry values newResourceEntry carves
+// from one allocation.
+//
+// A slab is not a free list: a slot is handed out once and never handed out
+// again, so a pointer into it names one entry for as long as anything holds it.
+// That matters because a lender keeps a *resourceEntry alive well past the call
+// that produced it (see entryForLend), which is exactly why these cannot be
+// recycled -- reuse would let one entry become another under a live pointer.
+// Batching only makes them cheaper to create, which is safe in a way that
+// reuse is not.
+//
+// The cost is that a slab stays alive while any one of its entries does. At
+// this size that is a few hundred bytes held by a straggler, against one
+// allocation per entry saved on a path that mints several per request.
+const resourceEntrySlab = 32
+
+// newResourceEntry returns the next unused entry, carving a fresh slab when
+// the current one is spent. Callers hold t.mu.
+func (t *handleTable) newResourceEntry(typeIdx, rep uint32, own bool) *resourceEntry {
+	if len(t.slab) == 0 {
+		t.slab = make([]resourceEntry, resourceEntrySlab)
+	}
+	e := &t.slab[0]
+	t.slab = t.slab[1:]
+	e.typeIdx, e.rep, e.own = typeIdx, rep, own
+	return e
+}
+
 // add allocates a new resourceEntry via addEntry. It is a thin, kind-specific
 // wrapper: every entry kind the table can hold shares the same allocation
 // (free-list) policy, implemented once in addEntry.
 func (t *handleTable) add(typeIdx, rep uint32, own bool) uint32 {
-	return t.addEntry(&resourceEntry{typeIdx: typeIdx, rep: rep, own: own})
+	// Carving the entry and installing it happen under one acquisition: both
+	// need the lock, and this is the hottest path onto the table.
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.addEntryLocked(t.newResourceEntry(typeIdx, rep, own))
 }
 
 // addEntry allocates a handle index -- reusing a freed index first (reference
@@ -253,6 +289,11 @@ func (t *handleTable) add(typeIdx, rep uint32, own bool) uint32 {
 func (t *handleTable) addEntry(e tableEntry) uint32 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	return t.addEntryLocked(e)
+}
+
+// addEntryLocked is addEntry's body, for callers that already hold t.mu.
+func (t *handleTable) addEntryLocked(e tableEntry) uint32 {
 	var h uint32
 	if n := len(t.free); n > 0 { // reuse a freed index (reference Table.free)
 		h = t.free[n-1]
