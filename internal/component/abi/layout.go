@@ -561,11 +561,28 @@ func sizeResult(desc binary.ResultDesc, resolve Resolver) (uint32, error) {
 
 // ------- Helper: resolveType -------
 
+// primDescs holds each primitive pre-boxed into the TypeDesc interface.
+// Returning binary.PrimitiveDesc{...} directly boxes a fresh value on every
+// call, and resolveType runs once per node of every type walk.
+var primDescs = func() map[string]binary.TypeDesc {
+	m := map[string]binary.TypeDesc{}
+	for _, p := range []string{
+		"bool", "s8", "u8", "s16", "u16", "s32", "u32", "s64", "u64",
+		"f32", "f64", "char", "string", "error-context",
+	} {
+		m[p] = binary.PrimitiveDesc{Prim: p}
+	}
+	return m
+}()
+
 func resolveType(ref *binary.TypeRef, resolve Resolver) (binary.TypeDesc, error) {
 	if ref == nil {
 		return nil, fmt.Errorf("nil type reference")
 	}
 	if ref.Primitive != "" {
+		if d, ok := primDescs[ref.Primitive]; ok {
+			return d, nil
+		}
 		return binary.PrimitiveDesc{Prim: ref.Primitive}, nil
 	}
 	if ref.TypeIndex != nil {
