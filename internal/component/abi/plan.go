@@ -34,6 +34,7 @@ type LowerStep struct {
 	t       binary.TypeDesc // kind==composite: the resolved type
 	resolve Resolver        // kind==composite: for the tree-walk body
 	spills  bool            // kind==composite: precomputed len(Flatten(t)) > MaxFlatParams
+	flat    []string        // kind==composite, non-spilling: Flatten(t), handed down the tree-walk
 }
 
 // CompileLower builds the LowerStep for an already-resolved top-level parameter
@@ -56,7 +57,10 @@ func CompileLower(t binary.TypeDesc, resolve Resolver) (LowerStep, error) {
 		if err != nil {
 			return LowerStep{}, err
 		}
-		return LowerStep{kind: lowerKindComposite, t: t, resolve: resolve, spills: len(flat) > MaxFlatParams}, nil
+		// The flat list computed for the spill decision is kept: Lower hands
+		// it down the tree-walk so a variant/result at the top of the tree
+		// doesn't re-Flatten itself on every call (see lowerFlatImpl's doc).
+		return LowerStep{kind: lowerKindComposite, t: t, resolve: resolve, spills: len(flat) > MaxFlatParams, flat: flat}, nil
 	}
 }
 
@@ -103,7 +107,7 @@ func (s *LowerStep) Lower(dst []CoreValue, v Value, realloc Realloc, mem []byte)
 			}
 			return append(dst, NewCoreValueI32(ptr)), nil
 		}
-		flat, err := lowerFlatImpl(v, s.t, s.resolve, realloc, mem)
+		flat, err := lowerFlatImpl(v, s.t, s.flat, s.resolve, realloc, mem)
 		if err != nil {
 			return nil, err
 		}
@@ -128,6 +132,7 @@ type LiftStep struct {
 	prim    string          // kind==liftPrimitive
 	t       binary.TypeDesc // kind==liftSpilled/liftFlatAgg
 	resolve Resolver        // kind==liftSpilled/liftFlatAgg
+	flat    []string        // kind==liftFlatAgg: Flatten(t), handed down the tree-walk
 }
 
 type liftKind uint8
@@ -162,7 +167,10 @@ func CompileLift(t binary.TypeDesc, resolve Resolver) (LiftStep, error) {
 		if len(flat) > MaxFlatResults {
 			return LiftStep{kind: liftSpilled, t: t, resolve: resolve}, nil
 		}
-		return LiftStep{kind: liftFlatAgg, t: t, resolve: resolve}, nil
+		// Keep the flat list computed for the spill decision: Lift hands it
+		// down the tree-walk so the aggregate doesn't re-Flatten itself on
+		// every call (see liftFlatImpl's doc).
+		return LiftStep{kind: liftFlatAgg, t: t, resolve: resolve, flat: flat}, nil
 	}
 }
 
@@ -181,7 +189,7 @@ func (s *LiftStep) Lift(coreResults []CoreValue, mem []byte) (Value, error) {
 		return Load(mem, coreResults[0].AsI32(), s.t, s.resolve)
 	default: // liftFlatAgg
 		vi := getCoreValueIter(coreResults)
-		val, err := liftFlatImpl(vi, s.t, s.resolve, mem)
+		val, err := liftFlatImpl(vi, s.t, s.flat, s.resolve, mem)
 		putCoreValueIter(vi)
 		return val, err
 	}

@@ -315,10 +315,11 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 		paramTupleDesc = binary.TupleDesc{Elements: elems}
 	}
 
-	resultCount, resultType, resultUsesMem, err := buildHostResultPlan(fd, resolve)
+	resultPlan, err := buildHostResultPlan(fd, resolve)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("component/instance: async import %q func %q results: %w", iface, funcName, err)
 	}
+	resultCount, resultType, resultUsesMem := resultPlan.count, resultPlan.rt, resultPlan.usesMem
 	if resultCount > 1 {
 		return nil, nil, nil, fmt.Errorf("component/instance: async import %q func %q declares %d results; multiple async-import results are not supported by this milestone", iface, funcName, resultCount)
 	}

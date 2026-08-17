@@ -635,9 +635,17 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("component/instance: import %q func %q params: %w", iface, funcName, err)
 	}
-	resultCount, resultPT, resultUsesMem, err := buildHostResultPlan(fd, resolve)
+	resultPlan, err := buildHostResultPlan(fd, resolve)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("component/instance: import %q func %q results: %w", iface, funcName, err)
+	}
+
+	// reallocOverride is fixed at bind time, so its ctx-free Call closure is
+	// built once here rather than letting reallocOfFunc mint a fresh closure
+	// inside every guest->host call below.
+	var overrideReallocCall reallocCall
+	if reallocOverride != nil {
+		overrideReallocCall = coreReallocCall(reallocOverride)
 	}
 
 	fn := api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
@@ -730,14 +738,14 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 			panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
 		}
 		var realloc abi.Realloc
-		if reallocOverride != nil {
-			realloc = reallocOfFunc(ctx, reallocOverride)
+		if overrideReallocCall != nil {
+			realloc = abi.Realloc{Ctx: ctx, Call: overrideReallocCall}
 		} else {
 			// Resolved through the instance's memo rather than left to
 			// lowerHostResultsPlanned's per-call reallocOf fallback.
 			realloc = in.reallocFor(ctx, memMod)
 		}
-		if err := lowerHostResultsPlanned(ctx, resultCount, resultPT, resultUsesMem, resolve, results, stack, memMod, resources, outPtrIdx, realloc); err != nil {
+		if err := lowerHostResultsPlanned(ctx, resultPlan, resolve, results, stack, memMod, resources, outPtrIdx, realloc); err != nil {
 			panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
 		}
 	})
@@ -877,14 +885,14 @@ func liftHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.Resolv
 		if pp.usesMem && !memAvailable {
 			return nil, lent, fmt.Errorf("param %d requires linear memory (string/list), but the calling module has none", i)
 		}
-		cvs := make([]abi.CoreValue, len(pp.flat))
-		for k := range pp.flat {
-			if pos+k >= len(stack) {
-				return nil, lent, fmt.Errorf("param %d: core stack underflow (need %d values, have %d)", i, pos+len(pp.flat), len(stack))
-			}
-			cvs[k] = abi.CoreValue{Kind: pp.flat[k], Bits: stack[pos+k]}
+		if pos+len(pp.flat) > len(stack) {
+			return nil, lent, fmt.Errorf("param %d: core stack underflow (need %d values, have %d)", i, pos+len(pp.flat), len(stack))
 		}
-		v, err := abi.LiftFlat(cvs, pp.pt, resolve, mem)
+		// LiftFlatKinds pairs the plan's flat kinds with the raw stack bits
+		// through a pooled iterator -- no per-param []CoreValue -- and hands
+		// pp.flat down the lift so a variant/result param doesn't re-Flatten
+		// itself per call.
+		v, err := abi.LiftFlatKinds(pp.flat, stack[pos:pos+len(pp.flat)], pp.pt, resolve, mem)
 		if err != nil {
 			return nil, lent, fmt.Errorf("param %d: lift: %w", i, err)
 		}
@@ -1157,53 +1165,68 @@ func allocHandleResult(resources *handleTable, rt binary.TypeDesc, v abi.Value) 
 // multi-module graph may need to supply the canon's own declared realloc
 // rather than deriving one from mod).
 func lowerHostResults(ctx context.Context, fd binary.FuncDesc, resolve abi.Resolver, results []abi.Value, stack []uint64, mod api.Module, resources *handleTable, outPtrIdx int, realloc abi.Realloc) error {
-	resultCount, rt, resultUsesMem, err := buildHostResultPlan(fd, resolve)
+	plan, err := buildHostResultPlan(fd, resolve)
 	if err != nil {
 		return err
 	}
-	return lowerHostResultsPlanned(ctx, resultCount, rt, resultUsesMem, resolve, results, stack, mod, resources, outPtrIdx, realloc)
+	return lowerHostResultsPlanned(ctx, plan, resolve, results, stack, mod, resources, outPtrIdx, realloc)
 }
 
-// buildHostResultPlan precomputes the result-lower facts for fd: the declared
-// result count, and (when exactly one) the resolved result type and whether it
-// needs linear memory. resultCount 0 or >1 is left for lowerHostResultsPlanned
-// to handle at call time, exactly as before (the >1 case is a milestone limit,
-// not a bind-time error).
-func buildHostResultPlan(fd binary.FuncDesc, resolve abi.Resolver) (resultCount int, rt binary.TypeDesc, usesMem bool, err error) {
+// hostResultPlan is the bind-time-precomputed lower plan for a host import's
+// results: the declared count and (when exactly one) the resolved result
+// type, whether it needs linear memory, and the compiled abi.LowerStep that
+// lowers it without re-deriving the type facts per call.
+type hostResultPlan struct {
+	count   int
+	rt      binary.TypeDesc // valid when count == 1
+	usesMem bool            // valid when count == 1
+	step    abi.LowerStep   // valid when count == 1
+}
+
+// buildHostResultPlan precomputes the result-lower facts for fd. A count of
+// 0 or >1 is left for lowerHostResultsPlanned to handle at call time, exactly
+// as before (the >1 case is a milestone limit, not a bind-time error).
+func buildHostResultPlan(fd binary.FuncDesc, resolve abi.Resolver) (hostResultPlan, error) {
 	refs := funcResultTypeRefs(fd)
-	resultCount = len(refs)
-	if resultCount != 1 {
-		return resultCount, nil, false, nil
+	plan := hostResultPlan{count: len(refs)}
+	if plan.count != 1 {
+		return plan, nil
 	}
-	rt, err = resolveTypeRef(&refs[0], resolve)
+	rt, err := resolveTypeRef(&refs[0], resolve)
 	if err != nil {
-		return resultCount, nil, false, fmt.Errorf("result: %w", err)
+		return plan, fmt.Errorf("result: %w", err)
 	}
 	if typeContainsAsyncValueNested(rt, resolve, 0) {
-		return resultCount, nil, false, fmt.Errorf("result: stream/future/error-context nested inside a composite type is not supported by this milestone")
+		return plan, fmt.Errorf("result: stream/future/error-context nested inside a composite type is not supported by this milestone")
 	}
-	return resultCount, rt, usesMemory(rt, resolve), nil
+	step, err := abi.CompileLower(rt, resolve)
+	if err != nil {
+		return plan, fmt.Errorf("result: %w", err)
+	}
+	plan.rt, plan.usesMem, plan.step = rt, usesMemory(rt, resolve), step
+	return plan, nil
 }
 
 // lowerHostResultsPlanned is lowerHostResults with the result count / resolved
-// type / memory-need precomputed (see buildHostResultPlan). resolve is still
-// needed for LowerFlat/Store's composite tree-walk.
-func lowerHostResultsPlanned(ctx context.Context, resultCount int, rt binary.TypeDesc, resultUsesMem bool, resolve abi.Resolver, results []abi.Value, stack []uint64, mod api.Module, resources *handleTable, outPtrIdx int, realloc abi.Realloc) error {
-	if len(results) != resultCount {
-		return fmt.Errorf("returned %d result(s), but the import declares %d", len(results), resultCount)
+// type / memory-need / lower step precomputed (see buildHostResultPlan).
+// resolve is still needed for Store's composite tree-walk on the out-pointer
+// path.
+func lowerHostResultsPlanned(ctx context.Context, plan hostResultPlan, resolve abi.Resolver, results []abi.Value, stack []uint64, mod api.Module, resources *handleTable, outPtrIdx int, realloc abi.Realloc) error {
+	if len(results) != plan.count {
+		return fmt.Errorf("returned %d result(s), but the import declares %d", len(results), plan.count)
 	}
-	if resultCount == 0 {
+	if plan.count == 0 {
 		return nil
 	}
-	if resultCount > 1 {
-		return fmt.Errorf("declares %d results; multiple host-func results are not supported by this milestone", resultCount)
+	if plan.count > 1 {
+		return fmt.Errorf("declares %d results; multiple host-func results are not supported by this milestone", plan.count)
 	}
 
 	mem, memAvailable := memoryBytesOf(mod)
-	if resultUsesMem && !memAvailable {
+	if plan.usesMem && !memAvailable {
 		return fmt.Errorf("result requires linear memory (string/list), but the calling module has none")
 	}
-	resultVal, err := allocHandleResult(resources, rt, results[0])
+	resultVal, err := allocHandleResult(resources, plan.rt, results[0])
 	if err != nil {
 		return fmt.Errorf("result: %w", err)
 	}
@@ -1219,13 +1242,17 @@ func lowerHostResultsPlanned(ctx context.Context, resultCount int, rt binary.Typ
 			return fmt.Errorf("result: out-pointer stack slot %d out of range (stack has %d value(s))", outPtrIdx, len(stack))
 		}
 		ptr := api.DecodeU32(stack[outPtrIdx])
-		if err := abi.Store(mem, ptr, rt, resultVal, resolve, realloc); err != nil {
+		if err := abi.Store(mem, ptr, plan.rt, resultVal, resolve, realloc); err != nil {
 			return fmt.Errorf("result: store spilled result: %w", err)
 		}
 		return nil
 	}
 
-	flat, err := abi.LowerFlat(resultVal, rt, resolve, realloc, mem)
+	// A result lowered flat here is at most MaxFlatResults core values wide
+	// (anything wider took the outPtrIdx path above), so a small fixed
+	// buffer covers it -- no per-call result slice.
+	var flatBuf [abi.MaxFlatResults]abi.CoreValue
+	flat, err := plan.step.Lower(flatBuf[:0], resultVal, realloc, mem)
 	if err != nil {
 		return fmt.Errorf("result: lower: %w", err)
 	}

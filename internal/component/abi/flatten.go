@@ -48,7 +48,7 @@ func Flatten(t binary.TypeDesc, resolve Resolver) ([]string, error) {
 	// is a PrimitiveDesc (see binary.isPrimValtype), so it flows through the
 	// PrimitiveDesc case above via flattenPrimitive, not this one.
 	case binary.OwnDesc, binary.BorrowDesc, binary.StreamDesc, binary.FutureDesc:
-		return []string{"i32"}, nil
+		return flatKindsI32, nil
 
 	// Unsupported
 	case binary.FuncDesc, binary.InstanceDesc, binary.ComponentDesc, binary.ResourceDesc:
@@ -122,8 +122,9 @@ func FlattenFunc(f binary.FuncDesc, resolve Resolver, context string) (params []
 
 // ------- Primitive Flattening -------
 
-// Shared, read-only flat-type-name slices returned by flattenPrimitive and
-// flattenList. Every element of the flat ABI is content-only ("i32"/"i64"/
+// Shared, read-only flat-type-name slices returned by flattenPrimitive,
+// flattenList, and every other single-i32 flattening (handles, flags, enums).
+// Every element of the flat ABI is content-only ("i32"/"i64"/
 // "f32"/"f64" string constants describing a *type*, never call-specific
 // data), so every call site with a given primitive/list shape can safely
 // share one underlying array instead of allocating a fresh literal each
@@ -290,7 +291,7 @@ func flattenFlagsNumLabels(numLabels int) ([]string, error) {
 		return nil, fmt.Errorf("invalid flags: %d labels", numLabels)
 	}
 	// Flags always flatten to a single i32
-	return []string{"i32"}, nil
+	return flatKindsI32, nil
 }
 
 // flattenEnum flattens an enum to always exactly one core "i32" value,
@@ -301,7 +302,7 @@ func flattenEnum(desc binary.EnumDesc) ([]string, error) {
 	if len(desc.Cases) <= 0 {
 		return nil, fmt.Errorf("invalid enum: %d cases", len(desc.Cases))
 	}
-	return []string{"i32"}, nil
+	return flatKindsI32, nil
 }
 
 func flattenOption(desc binary.OptionDesc, resolve Resolver) ([]string, error) {

@@ -3,6 +3,7 @@ package abi
 import (
 	"fmt"
 	"math"
+	"sync"
 
 	"github.com/samyfodil/wazy/internal/component/binary"
 )
@@ -56,7 +57,7 @@ func LowerFlatInto(dst []CoreValue, v Value, t binary.TypeDesc, resolve Resolver
 		return append(dst, NewCoreValueI32(ptr)), nil
 	}
 
-	flat, err := lowerFlatImpl(v, t, resolve, realloc, mem)
+	flat, err := lowerFlatImpl(v, t, nil, resolve, realloc, mem)
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +66,18 @@ func LowerFlatInto(dst []CoreValue, v Value, t binary.TypeDesc, resolve Resolver
 
 // lowerFlatImpl recursively lowers a value to its flat representation.
 // Does not handle spilling; that is done by LowerFlat.
-func lowerFlatImpl(v Value, t binary.TypeDesc, resolve Resolver, realloc Realloc, mem []byte) ([]CoreValue, error) {
+//
+// flat, when non-nil, is Flatten(t) already computed by the caller -- a
+// bind-time plan (LowerStep.flat), or the enclosing variant/result/option
+// level, which had to flatten this exact type anyway to build its join. Only
+// the variant/result/option cases consult it (they are the only lowers that
+// need their own flat type list, for the join/coercion bookkeeping); nil
+// means "unknown, compute it yourself", preserving the exact prior behavior.
+// Threading the known list down is what keeps the per-VALUE lower of a
+// deeply-cased variant (wasi:http's error-code is the motivating shape) from
+// re-running the full Flatten tree-walk -- and its per-case allocations --
+// on every call.
+func lowerFlatImpl(v Value, t binary.TypeDesc, flat []string, resolve Resolver, realloc Realloc, mem []byte) ([]CoreValue, error) {
 	switch desc := t.(type) {
 	case binary.PrimitiveDesc:
 		return lowerFlatPrimitive(v, desc.Prim, realloc, mem)
@@ -81,7 +93,7 @@ func lowerFlatImpl(v Value, t binary.TypeDesc, resolve Resolver, realloc Realloc
 		return lowerFlatRecord(v, desc, resolve, realloc, mem)
 
 	case binary.VariantDesc:
-		return lowerFlatVariant(v, desc, resolve, realloc, mem)
+		return lowerFlatVariant(v, desc, flat, resolve, realloc, mem)
 
 	case binary.TupleDesc:
 		return lowerFlatTuple(v, desc, resolve, realloc, mem)
@@ -97,10 +109,17 @@ func lowerFlatImpl(v Value, t binary.TypeDesc, resolve Resolver, realloc Realloc
 		if err != nil {
 			return nil, err
 		}
-		return lowerFlatOption(v, elemType, resolve, realloc, mem)
+		// An option's flat list is exactly [i32 discriminant] + Flatten(elem)
+		// (no join happens -- see flattenOption), so the element's own flat
+		// list is recoverable by slicing off the discriminant.
+		var elemFlat []string
+		if flat != nil {
+			elemFlat = flat[1:]
+		}
+		return lowerFlatOption(v, elemType, elemFlat, resolve, realloc, mem)
 
 	case binary.ResultDesc:
-		return lowerFlatResult(v, desc, resolve, realloc, mem)
+		return lowerFlatResult(v, desc, flat, resolve, realloc, mem)
 
 	case binary.OwnDesc, binary.BorrowDesc, binary.StreamDesc, binary.FutureDesc:
 		// stream/future values are opaque i32 handles, same lowering as
@@ -284,7 +303,7 @@ func lowerFlatRecord(v Value, desc binary.RecordDesc, resolve Resolver, realloc 
 		if err != nil {
 			return nil, err
 		}
-		fieldFlat, err := lowerFlatImpl(fields[i], fieldType, resolve, realloc, mem)
+		fieldFlat, err := lowerFlatImpl(fields[i], fieldType, nil, resolve, realloc, mem)
 		if err != nil {
 			return nil, fmt.Errorf("lowerFlat record field %s: %w", field.Name, err)
 		}
@@ -295,7 +314,9 @@ func lowerFlatRecord(v Value, desc binary.RecordDesc, resolve Resolver, realloc 
 
 // lowerFlatVariant lowers a variant value.
 // This is where the JOIN and COERCE operations happen.
-func lowerFlatVariant(v Value, desc binary.VariantDesc, resolve Resolver, realloc Realloc, mem []byte) ([]CoreValue, error) {
+// flat, when non-nil, is Flatten(desc) already known by the caller (see
+// lowerFlatImpl's doc); nil computes it here as before.
+func lowerFlatVariant(v Value, desc binary.VariantDesc, flat []string, resolve Resolver, realloc Realloc, mem []byte) ([]CoreValue, error) {
 	vv, ok := v.(VariantValue)
 	if !ok {
 		return nil, fmt.Errorf("lowerFlat variant: expected VariantValue, got %T", v)
@@ -306,9 +327,13 @@ func lowerFlatVariant(v Value, desc binary.VariantDesc, resolve Resolver, reallo
 	}
 
 	// Get the flattened variant type to know the joined flat types.
-	variantFlat, err := Flatten(desc, resolve)
-	if err != nil {
-		return nil, err
+	variantFlat := flat
+	if variantFlat == nil {
+		var err error
+		variantFlat, err = Flatten(desc, resolve)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// First element is the discriminant (i32).
@@ -328,15 +353,17 @@ func lowerFlatVariant(v Value, desc binary.VariantDesc, resolve Resolver, reallo
 			return nil, err
 		}
 
-		casePayload, err := lowerFlatImpl(vv.Payload, caseType, resolve, realloc, mem)
-		if err != nil {
-			return nil, fmt.Errorf("lowerFlat variant case %d: %w", vv.Disc, err)
-		}
-
-		// Get the native flat types for this case.
+		// Get the native flat types for this case -- before lowering the
+		// payload, so a case that is itself a variant/result/option receives
+		// its own flat list and doesn't re-Flatten it.
 		caseFlat, err := Flatten(caseType, resolve)
 		if err != nil {
 			return nil, err
+		}
+
+		casePayload, err := lowerFlatImpl(vv.Payload, caseType, caseFlat, resolve, realloc, mem)
+		if err != nil {
+			return nil, fmt.Errorf("lowerFlat variant case %d: %w", vv.Disc, err)
 		}
 
 		// Coerce the payload core values to the joined flat types.
@@ -437,7 +464,7 @@ func lowerFlatTuple(v Value, desc binary.TupleDesc, resolve Resolver, realloc Re
 		if err != nil {
 			return nil, err
 		}
-		elemFlat, err := lowerFlatImpl(elements[i], elemType, resolve, realloc, mem)
+		elemFlat, err := lowerFlatImpl(elements[i], elemType, nil, resolve, realloc, mem)
 		if err != nil {
 			return nil, fmt.Errorf("lowerFlat tuple element %d: %w", i, err)
 		}
@@ -474,14 +501,22 @@ func lowerFlatEnum(v Value, desc binary.EnumDesc) ([]CoreValue, error) {
 // carries no payload of its own but must still be zero-padded out to T's
 // flat width, since Flatten(OptionDesc) always reserves that many joined
 // positions regardless of which case is active.
-func lowerFlatOption(v Value, elemType binary.TypeDesc, resolve Resolver, realloc Realloc, mem []byte) ([]CoreValue, error) {
-	elemFlatTypes, err := Flatten(elemType, resolve)
-	if err != nil {
-		return nil, err
-	}
-
+// elemFlat, when non-nil, is Flatten(elemType) already known by the caller
+// (the enclosing option's flat list minus its discriminant -- see
+// lowerFlatImpl's OptionDesc case); nil computes it on the branch that needs
+// it.
+func lowerFlatOption(v Value, elemType binary.TypeDesc, elemFlat []string, resolve Resolver, realloc Realloc, mem []byte) ([]CoreValue, error) {
 	if v == nil {
-		// None: discriminant 0, then zero-padding for the element's width.
+		// None: discriminant 0, then zero-padding for the element's width --
+		// the one branch that needs the element's flat kinds itself.
+		elemFlatTypes := elemFlat
+		if elemFlatTypes == nil {
+			var err error
+			elemFlatTypes, err = Flatten(elemType, resolve)
+			if err != nil {
+				return nil, err
+			}
+		}
 		result := make([]CoreValue, 0, 1+len(elemFlatTypes))
 		result = append(result, NewCoreValueI32(0))
 		for _, ft := range elemFlatTypes {
@@ -497,7 +532,7 @@ func lowerFlatOption(v Value, elemType binary.TypeDesc, resolve Resolver, reallo
 	// Some: discriminant 1, then the element. No coercion is needed here:
 	// Option only ever joins one real case's flat types against zero
 	// padding, which is always a no-op join (join(x, x) == x).
-	elemVals, err := lowerFlatImpl(v, elemType, resolve, realloc, mem)
+	elemVals, err := lowerFlatImpl(v, elemType, elemFlat, resolve, realloc, mem)
 	if err != nil {
 		return nil, err
 	}
@@ -511,15 +546,21 @@ func lowerFlatOption(v Value, elemType binary.TypeDesc, resolve Resolver, reallo
 // variant, the two arms' flat types are joined position-by-position (see
 // join() in coerceValue), and whichever arm is inactive must still be
 // zero-padded/coerced out to the joined width.
-func lowerFlatResult(v Value, desc binary.ResultDesc, resolve Resolver, realloc Realloc, mem []byte) ([]CoreValue, error) {
+// flat, when non-nil, is Flatten(desc) already known by the caller (see
+// lowerFlatImpl's doc); nil computes it here as before.
+func lowerFlatResult(v Value, desc binary.ResultDesc, flat []string, resolve Resolver, realloc Realloc, mem []byte) ([]CoreValue, error) {
 	rv, ok := v.(ResultValue)
 	if !ok {
 		return nil, fmt.Errorf("lowerFlat result: expected ResultValue, got %T", v)
 	}
 
-	resultFlat, err := Flatten(desc, resolve)
-	if err != nil {
-		return nil, err
+	resultFlat := flat
+	if resultFlat == nil {
+		var err error
+		resultFlat, err = Flatten(desc, resolve)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if len(resultFlat) == 0 || resultFlat[0] != "i32" {
 		return nil, fmt.Errorf("lowerFlat result: expected first element to be i32 discriminant")
@@ -542,13 +583,15 @@ func lowerFlatResult(v Value, desc binary.ResultDesc, resolve Resolver, realloc 
 		if err != nil {
 			return nil, err
 		}
-		armVals, err := lowerFlatImpl(rv.Payload, armType, resolve, realloc, mem)
-		if err != nil {
-			return nil, fmt.Errorf("lowerFlat result payload: %w", err)
-		}
+		// Flatten the arm before lowering it, so an arm that is itself a
+		// variant/result/option receives its own flat list.
 		armFlatTypes, err := Flatten(armType, resolve)
 		if err != nil {
 			return nil, err
+		}
+		armVals, err := lowerFlatImpl(rv.Payload, armType, armFlatTypes, resolve, realloc, mem)
+		if err != nil {
+			return nil, fmt.Errorf("lowerFlat result payload: %w", err)
 		}
 		for i := 0; i < len(armVals) && i < len(joinedFlat); i++ {
 			payload = append(payload, coerceValue(armVals[i], armFlatTypes[i], joinedFlat[i]))
@@ -636,8 +679,36 @@ func LiftFlat(vals []CoreValue, t binary.TypeDesc, resolve Resolver, mem []byte)
 	// escapes into liftFlatImpl as a valueIter interface, so a fresh one would
 	// allocate every call); nothing retains it past liftFlatImpl's return.
 	vi := getCoreValueIter(vals)
-	val, err := liftFlatImpl(vi, t, resolve, mem)
+	val, err := liftFlatImpl(vi, t, nil, resolve, mem)
 	putCoreValueIter(vi)
+	return val, err
+}
+
+// LiftFlatKinds is LiftFlat for a caller that precomputed flat = Flatten(t)
+// at bind time (a hostParamPlan) and holds the core values as raw stack bits
+// rather than kind-tagged CoreValues. It exists for the guest->host hot path:
+// pairing each stack slot with its flat kind through a pooled iterator, and
+// handing the known flat list down the lift recursion, replaces both
+// per-call allocations the LiftFlat shape forced on liftHostArgsPlanned --
+// the []CoreValue built per parameter just to tag the bits, and the full
+// Flatten re-run a variant/result parameter's lift performed per VALUE.
+// bits must hold exactly the parameter's core values: len(bits) == len(flat)
+// when the type doesn't spill, or the single spill pointer when it does.
+func LiftFlatKinds(flat []string, bits []uint64, t binary.TypeDesc, resolve Resolver, mem []byte) (Value, error) {
+	if len(flat) > MaxFlatParams {
+		// Spilled: the one core value is a pointer to memory (same rule as
+		// LiftFlat's FlatWidth check, decided here from the precomputed list).
+		if len(bits) != 1 {
+			return nil, fmt.Errorf("LiftFlatKinds: expected 1 value for spilled type, got %d", len(bits))
+		}
+		return Load(mem, uint32(bits[0]), t, resolve)
+	}
+	if len(bits) != len(flat) {
+		return nil, fmt.Errorf("LiftFlatKinds: expected %d core value(s), got %d", len(flat), len(bits))
+	}
+	vi := getStackValueIter(flat, bits)
+	val, err := liftFlatImpl(vi, t, flat, resolve, mem)
+	putStackValueIter(vi)
 	return val, err
 }
 
@@ -651,7 +722,15 @@ type valueIter interface {
 // vi can be either a *CoreValueIter or any other type implementing valueIter.
 // mem is only threaded through for the string/list cases, which must load
 // their backing data from linear memory even in the flat ABI.
-func liftFlatImpl(vi valueIter, t binary.TypeDesc, resolve Resolver, mem []byte) (Value, error) {
+//
+// flat, when non-nil, is Flatten(t) already computed by the caller -- a
+// bind-time plan (hostParamPlan.flat, LiftStep.flat), or the enclosing
+// variant/result/option level, which had to flatten this exact type anyway.
+// Only the variant/result/option cases consult it (they need their own flat
+// list for the join/coercion bookkeeping); nil means "unknown, compute it
+// yourself", preserving the exact prior behavior. See lowerFlatImpl's twin
+// doc for why threading this down matters.
+func liftFlatImpl(vi valueIter, t binary.TypeDesc, flat []string, resolve Resolver, mem []byte) (Value, error) {
 	switch desc := t.(type) {
 	case binary.PrimitiveDesc:
 		return liftFlatPrimitive(vi, desc.Prim, mem)
@@ -667,7 +746,7 @@ func liftFlatImpl(vi valueIter, t binary.TypeDesc, resolve Resolver, mem []byte)
 		return liftFlatRecord(vi, desc, resolve, mem)
 
 	case binary.VariantDesc:
-		return liftFlatVariant(vi, desc, resolve, mem)
+		return liftFlatVariant(vi, desc, flat, resolve, mem)
 
 	case binary.TupleDesc:
 		return liftFlatTuple(vi, desc, resolve, mem)
@@ -683,10 +762,17 @@ func liftFlatImpl(vi valueIter, t binary.TypeDesc, resolve Resolver, mem []byte)
 		if err != nil {
 			return nil, err
 		}
-		return liftFlatOption(vi, elemType, resolve, mem)
+		// An option's flat list is exactly [i32 discriminant] + Flatten(elem)
+		// (no join happens -- see flattenOption), so the element's own flat
+		// list is recoverable by slicing off the discriminant.
+		var elemFlat []string
+		if flat != nil {
+			elemFlat = flat[1:]
+		}
+		return liftFlatOption(vi, elemType, elemFlat, resolve, mem)
 
 	case binary.ResultDesc:
-		return liftFlatResult(vi, desc, resolve, mem)
+		return liftFlatResult(vi, desc, flat, resolve, mem)
 
 	case binary.OwnDesc, binary.BorrowDesc, binary.StreamDesc, binary.FutureDesc:
 		// stream/future values are opaque i32 handles, same lifting as
@@ -812,7 +898,7 @@ func liftFlatList(vi valueIter, elemType binary.TypeDesc, resolve Resolver, mem 
 	if err != nil {
 		return nil, err
 	}
-	list, err := loadListFromRange(mem, ptrCV.AsI32(), lenCV.AsI32(), elemType, resolve)
+	list, err := loadAnyListFromRange(mem, ptrCV.AsI32(), lenCV.AsI32(), elemType, resolve)
 	if err != nil {
 		return nil, fmt.Errorf("liftFlatList: %w", err)
 	}
@@ -827,7 +913,7 @@ func liftFlatRecord(vi valueIter, desc binary.RecordDesc, resolve Resolver, mem 
 		if err != nil {
 			return nil, err
 		}
-		v, err := liftFlatImpl(vi, fieldType, resolve, mem)
+		v, err := liftFlatImpl(vi, fieldType, nil, resolve, mem)
 		if err != nil {
 			return nil, fmt.Errorf("liftFlat record field %s: %w", field.Name, err)
 		}
@@ -837,11 +923,17 @@ func liftFlatRecord(vi valueIter, desc binary.RecordDesc, resolve Resolver, mem 
 }
 
 // liftFlatVariant lifts a variant value.
-func liftFlatVariant(vi valueIter, desc binary.VariantDesc, resolve Resolver, mem []byte) (Value, error) {
+// flat, when non-nil, is Flatten(desc) already known by the caller (see
+// liftFlatImpl's doc); nil computes it here as before.
+func liftFlatVariant(vi valueIter, desc binary.VariantDesc, flat []string, resolve Resolver, mem []byte) (Value, error) {
 	// Get the flattened variant type.
-	variantFlat, err := Flatten(desc, resolve)
-	if err != nil {
-		return nil, err
+	variantFlat := flat
+	if variantFlat == nil {
+		var err error
+		variantFlat, err = Flatten(desc, resolve)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if len(variantFlat) == 0 || variantFlat[0] != "i32" {
@@ -878,29 +970,30 @@ func liftFlatVariant(vi valueIter, desc binary.VariantDesc, resolve Resolver, me
 
 	// Read the case payload THROUGH vi (which may itself be an enclosing
 	// coercingValueIter), so a nested variant/result advances every level's
-	// consumption count -- see coercingValueIter's doc.
-	coerceVI := &coercingValueIter{
-		underlying: vi,
-		joinedFlat: joinedFlat,
-		caseFlat:   caseFlat,
-		idx:        0,
-	}
+	// consumption count -- see coercingValueIter's doc. The iterator is
+	// pooled for the same reason the raw one is (it escapes into
+	// liftFlatImpl as a valueIter); nothing retains it past the payload
+	// lift, so it is released as soon as its consumption count is read.
+	coerceVI := getCoercingValueIter(vi, joinedFlat, caseFlat)
 
 	// Lift the case payload using the coercing iterator (implements valueIter).
 	var payload Value
 	if c.Type != nil {
 		caseType, err := resolveType(c.Type, resolve)
 		if err != nil {
+			putCoercingValueIter(coerceVI)
 			return nil, err
 		}
-		payload, err = liftFlatImpl(coerceVI, caseType, resolve, mem)
+		payload, err = liftFlatImpl(coerceVI, caseType, caseFlat, resolve, mem)
 		if err != nil {
+			putCoercingValueIter(coerceVI)
 			return nil, fmt.Errorf("liftFlat variant case %d: %w", caseIdx, err)
 		}
 	}
 
 	// Consume remaining joined flat values.
 	remainingJoined := len(joinedFlat) - coerceVI.idx
+	putCoercingValueIter(coerceVI)
 	for i := 0; i < remainingJoined; i++ {
 		_, err := vi.Next()
 		if err != nil {
@@ -933,6 +1026,26 @@ type coercingValueIter struct {
 	joinedFlat []string
 	caseFlat   []string
 	idx        int
+}
+
+var coercingValueIterPool = sync.Pool{New: func() any { return new(coercingValueIter) }}
+
+// getCoercingValueIter returns a pooled coercing iterator, for the same
+// escapes-as-valueIter reason getCoreValueIter exists: every variant/result
+// lift otherwise pays one allocation just to coerce its own payload. Return
+// it with putCoercingValueIter as soon as its final idx has been read.
+func getCoercingValueIter(underlying valueIter, joinedFlat, caseFlat []string) *coercingValueIter {
+	it := coercingValueIterPool.Get().(*coercingValueIter)
+	it.underlying, it.joinedFlat, it.caseFlat, it.idx = underlying, joinedFlat, caseFlat, 0
+	return it
+}
+
+// putCoercingValueIter returns an iterator to the pool, clearing every
+// reference so a pooled-but-idle iterator doesn't pin the underlying
+// iterator or a plan's flat lists.
+func putCoercingValueIter(it *coercingValueIter) {
+	it.underlying, it.joinedFlat, it.caseFlat = nil, nil, nil
+	coercingValueIterPool.Put(it)
 }
 
 // Next reads one value from the underlying iterator and coerces it from the
@@ -1008,7 +1121,7 @@ func liftFlatTuple(vi valueIter, desc binary.TupleDesc, resolve Resolver, mem []
 		if err != nil {
 			return nil, err
 		}
-		v, err := liftFlatImpl(vi, elemType, resolve, mem)
+		v, err := liftFlatImpl(vi, elemType, nil, resolve, mem)
 		if err != nil {
 			return nil, fmt.Errorf("liftFlat tuple element %d: %w", i, err)
 		}
@@ -1043,7 +1156,10 @@ func liftFlatEnum(vi valueIter, desc binary.EnumDesc) (Value, error) {
 // Mirrors lowerFlatOption: the "none" case must consume (and discard) the
 // same zero-padding lowerFlatOption emitted for T's flat width, so the
 // value-iterator stays aligned for whatever follows the option.
-func liftFlatOption(vi valueIter, elemType binary.TypeDesc, resolve Resolver, mem []byte) (Value, error) {
+// elemFlat, when non-nil, is Flatten(elemType) already known by the caller
+// (the enclosing option's flat list minus its discriminant -- see
+// liftFlatImpl's OptionDesc case); nil recomputes what each branch needs.
+func liftFlatOption(vi valueIter, elemType binary.TypeDesc, elemFlat []string, resolve Resolver, mem []byte) (Value, error) {
 	cv, err := vi.Next()
 	if err != nil {
 		return nil, err
@@ -1053,9 +1169,12 @@ func liftFlatOption(vi valueIter, elemType binary.TypeDesc, resolve Resolver, me
 	switch disc {
 	case 0:
 		// None: consume and discard the padding.
-		elemWidth, err := FlatWidth(elemType, resolve)
-		if err != nil {
-			return nil, err
+		elemWidth := len(elemFlat)
+		if elemFlat == nil {
+			elemWidth, err = FlatWidth(elemType, resolve)
+			if err != nil {
+				return nil, err
+			}
 		}
 		for range elemWidth {
 			if _, err := vi.Next(); err != nil {
@@ -1065,7 +1184,7 @@ func liftFlatOption(vi valueIter, elemType binary.TypeDesc, resolve Resolver, me
 		return nil, nil
 	case 1:
 		// Some
-		return liftFlatImpl(vi, elemType, resolve, mem)
+		return liftFlatImpl(vi, elemType, elemFlat, resolve, mem)
 	default:
 		return nil, fmt.Errorf("liftFlat option: invalid discriminant %d", disc)
 	}
@@ -1077,16 +1196,21 @@ func liftFlatOption(vi valueIter, elemType binary.TypeDesc, resolve Resolver, me
 // were coerced up to the joined type on the way out are decoded correctly,
 // and any joined positions the active arm didn't fill are consumed and
 // discarded so the outer iterator stays aligned.
-func liftFlatResult(vi valueIter, desc binary.ResultDesc, resolve Resolver, mem []byte) (Value, error) {
+// flat, when non-nil, is Flatten(desc) already known by the caller (see
+// liftFlatImpl's doc); nil computes it here as before.
+func liftFlatResult(vi valueIter, desc binary.ResultDesc, flat []string, resolve Resolver, mem []byte) (Value, error) {
 	cv, err := vi.Next()
 	if err != nil {
 		return nil, err
 	}
 	disc := cv.AsI32()
 
-	resultFlat, err := Flatten(desc, resolve)
-	if err != nil {
-		return nil, err
+	resultFlat := flat
+	if resultFlat == nil {
+		resultFlat, err = Flatten(desc, resolve)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if len(resultFlat) == 0 || resultFlat[0] != "i32" {
 		return nil, fmt.Errorf("liftFlat result: expected first element to be i32 discriminant")
@@ -1117,27 +1241,27 @@ func liftFlatResult(vi valueIter, desc binary.ResultDesc, resolve Resolver, mem 
 
 	// Read the arm payload THROUGH vi (which may be an enclosing
 	// coercingValueIter) so nested variant/result levels compose -- see
-	// coercingValueIter's doc.
-	coerceVI := &coercingValueIter{
-		underlying: vi,
-		joinedFlat: joinedFlat,
-		caseFlat:   armFlatTypes,
-	}
+	// coercingValueIter's doc. Pooled and released exactly as in
+	// liftFlatVariant.
+	coerceVI := getCoercingValueIter(vi, joinedFlat, armFlatTypes)
 
 	var payload Value
 	if armRef != nil {
 		armType, err := resolveType(armRef, resolve)
 		if err != nil {
+			putCoercingValueIter(coerceVI)
 			return nil, err
 		}
-		payload, err = liftFlatImpl(coerceVI, armType, resolve, mem)
+		payload, err = liftFlatImpl(coerceVI, armType, armFlatTypes, resolve, mem)
 		if err != nil {
+			putCoercingValueIter(coerceVI)
 			return nil, fmt.Errorf("liftFlat result payload: %w", err)
 		}
 	}
 
 	// Consume remaining joined flat values the active arm didn't fill.
 	remainingJoined := len(joinedFlat) - coerceVI.idx
+	putCoercingValueIter(coerceVI)
 	for i := 0; i < remainingJoined; i++ {
 		if _, err := vi.Next(); err != nil {
 			return nil, err
