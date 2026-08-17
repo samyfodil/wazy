@@ -383,15 +383,23 @@ func WithWASI(cfg WASIConfig) []component.Option {
 		stdinBytes, stdinReadErr = io.ReadAll(cfg.Stdin)
 	}
 
-	writerForRep := func(rep uint32) (io.Writer, error) {
+	// writerForRep reports the stdio io.Writer rep names, or false. Callers
+	// that need the "does not name a stdout/stderr stream" error for a rep
+	// nothing recognizes build it via unknownOutStreamErr -- only on that
+	// final miss, so probing a non-stdio rep (every fs/socket/http body
+	// stream write does) never allocates a discarded error.
+	writerForRep := func(rep uint32) (io.Writer, bool) {
 		switch rep {
 		case wasiStdoutRep:
-			return stdout, nil
+			return stdout, true
 		case wasiStderrRep:
-			return stderr, nil
+			return stderr, true
 		default:
-			return nil, fmt.Errorf("wasi:io/streams: output-stream rep %d does not name a stdout/stderr stream", rep)
+			return nil, false
 		}
+	}
+	unknownOutStreamErr := func(rep uint32) error {
+		return fmt.Errorf("wasi:io/streams: output-stream rep %d does not name a stdout/stderr stream", rep)
 	}
 
 	getStderr := func(context.Context, []component.Value) ([]component.Value, error) {
@@ -577,14 +585,13 @@ func WithWASI(cfg WASIConfig) []component.Option {
 	// section for why sockets' reps start at a disjoint 1<<20 base), so
 	// trying them in order is unambiguous. A rep none of the three
 	// recognizes is a genuinely unknown output-stream handle;
-	// writerForRep's own "does not name a stdout/stderr stream" error is
+	// unknownOutStreamErr's "does not name a stdout/stderr stream" error is
 	// returned for that case (matching checkWrite/blockingFlush's identical
 	// fallback below) rather than fs's/sockets' differently-worded "not
 	// found" errors, so all three output-stream methods report an unknown
 	// rep the same way.
 	writeSink := func(rep uint32, buf []byte) error {
-		w, werr := writerForRep(rep)
-		if werr == nil {
+		if w, ok := writerForRep(rep); ok {
 			_, err := w.Write(buf)
 			return err
 		}
@@ -597,7 +604,7 @@ func WithWASI(cfg WASIConfig) []component.Option {
 		if found, err := httphost.bodyStreamWrite(rep, buf); found {
 			return err
 		}
-		return werr
+		return unknownOutStreamErr(rep)
 	}
 
 	checkWrite := func(_ context.Context, args []component.Value) ([]component.Value, error) {
@@ -608,11 +615,11 @@ func WithWASI(cfg WASIConfig) []component.Option {
 		if !ok {
 			return nil, fmt.Errorf("[method]output-stream.check-write: self: expected uint32 rep, got %T", args[0])
 		}
-		if _, err := writerForRep(rep); err != nil {
+		if _, ok := writerForRep(rep); !ok {
 			if _, found := fs.writeStreamNode(rep); !found {
 				if _, found := sockets.outStreamNode(rep); !found {
 					if !httphost.isBodyStreamRep(rep) {
-						return nil, err
+						return nil, unknownOutStreamErr(rep)
 					}
 				}
 			}
@@ -620,7 +627,7 @@ func WithWASI(cfg WASIConfig) []component.Option {
 		// A large, fixed budget: there is no real backpressure to model
 		// against a Go io.Writer, an in-memory file, or a net.Conn, so this
 		// never has to make the guest wait.
-		return []component.Value{component.ResultValue{IsErr: false, Payload: uint64(1) << 40}}, nil
+		return wasiCheckWriteBudget, nil
 	}
 
 	write := func(_ context.Context, args []component.Value) ([]component.Value, error) {
@@ -638,7 +645,7 @@ func WithWASI(cfg WASIConfig) []component.Option {
 		if err := writeSink(rep, buf); err != nil {
 			return nil, fmt.Errorf("[method]output-stream.write: %w", err)
 		}
-		return []component.Value{component.ResultValue{IsErr: false, Payload: nil}}, nil
+		return wasiResultOk, nil
 	}
 
 	blockingFlush := func(_ context.Context, args []component.Value) ([]component.Value, error) {
@@ -649,7 +656,7 @@ func WithWASI(cfg WASIConfig) []component.Option {
 		if !ok {
 			return nil, fmt.Errorf("[method]output-stream.blocking-flush: self: expected uint32 rep, got %T", args[0])
 		}
-		if _, err := writerForRep(rep); err != nil {
+		if _, ok := writerForRep(rep); !ok {
 			// No internal buffering on any side (stdio writes straight
 			// through to the configured io.Writer; fs writes commit
 			// straight to the mount -- see writeStreamWrite's doc; socket
@@ -658,11 +665,11 @@ func WithWASI(cfg WASIConfig) []component.Option {
 			// beyond confirming rep actually names a live stream.
 			if _, found := fs.writeStreamNode(rep); !found {
 				if _, found := sockets.outStreamNode(rep); !found {
-					return nil, err
+					return nil, unknownOutStreamErr(rep)
 				}
 			}
 		}
-		return []component.Value{component.ResultValue{IsErr: false, Payload: nil}}, nil
+		return wasiResultOk, nil
 	}
 
 	checkWriteFD, checkWriteResolve := wasiCheckWriteSig()
