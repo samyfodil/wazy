@@ -11,6 +11,11 @@ languages or shared compiler toolchains.
 * [http-wasm](http_handler) e.g. an HTTP middleware guest built against any
   http-wasm SDK; [`http_handler/nethttp`](http_handler/nethttp) wraps one as a
   `net/http.Handler`
+* [WasmEdge sockets](wasmedge) e.g. a guest built against
+  `wasmedge_wasi_socket`, whose socket functions WASI preview 1 has no
+  equivalent for
+* [wasi:otel](wasi_otel) e.g. a component instrumented with OpenTelemetry,
+  which reports its spans, logs and metrics to the embedder
 
 Note: You may not see a language listed here because it either works without
 host imports, or it uses WASI.
