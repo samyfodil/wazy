@@ -302,7 +302,34 @@ func loadList(mem []byte, ptr uint32, elemType bintype.TypeDesc, resolve Resolve
 		return nil, err
 	}
 
-	return loadListFromRange(mem, listPtr.(uint32), listLen.(uint32), elemType, resolve)
+	return loadAnyListFromRange(mem, listPtr.(uint32), listLen.(uint32), elemType, resolve)
+}
+
+// loadAnyListFromRange is loadListFromRange behind the list<u8> fast path:
+// a byte list is read as ONE copied []byte -- the compact shape the store
+// side already accepts (byteListValue) and the public ListDesc doc already
+// names for list<u8> -- rather than a []Value costing a boxed interface per
+// BYTE plus a per-element load. Every non-u8 element type takes the general
+// []Value path unchanged. Both lift directions go through here (loadList for
+// the in-memory shape, liftFlatList for the flat ABI) so the two shapes a
+// consumer can observe for list<u8> stay the same everywhere.
+func loadAnyListFromRange(mem []byte, ptr, length uint32, elemType bintype.TypeDesc, resolve Resolver) (Value, error) {
+	if p, isPrim := elemType.(bintype.PrimitiveDesc); isPrim && p.Prim == "u8" {
+		// u8's size and alignment are both 1, so the only check the general
+		// path would apply is the bounds check. The bytes are copied out:
+		// mem is live guest memory, and a lifted value must not alias it.
+		if uint32(len(mem)) < ptr+length || ptr+length < ptr {
+			return nil, fmt.Errorf("loadListFromRange: list buffer overflow at ptr=%d len=%d mem_len=%d", ptr, length, len(mem))
+		}
+		b := make([]byte, length)
+		copy(b, mem[ptr:ptr+length])
+		return b, nil
+	}
+	list, err := loadListFromRange(mem, ptr, length, elemType, resolve)
+	if err != nil {
+		return nil, err
+	}
+	return list, nil
 }
 
 // loadListFromRange reads `length` elements of elemType starting at ptr.

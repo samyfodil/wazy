@@ -64,17 +64,23 @@ func stdoutStreamsImportOpts(out *bytes.Buffer, streamRep uint32) []Option {
 		if rep != streamRep {
 			return nil, fmt.Errorf("write: self names rep %d, not the stream get-stdout returned (%d)", rep, streamRep)
 		}
-		contents, ok := args[1].([]abi.Value)
-		if !ok {
-			return nil, fmt.Errorf("write: contents: expected []abi.Value (list<u8>), got %T", args[1])
-		}
-		buf := make([]byte, len(contents))
-		for i, v := range contents {
-			b, ok := v.(uint32)
-			if !ok {
-				return nil, fmt.Errorf("write: contents[%d]: expected uint32 byte, got %T", i, v)
+		// list<u8> arrives in either documented shape: the compact []byte
+		// (what the abi lift produces) or the general []abi.Value.
+		var buf []byte
+		switch contents := args[1].(type) {
+		case []byte:
+			buf = contents
+		case []abi.Value:
+			buf = make([]byte, len(contents))
+			for i, v := range contents {
+				b, ok := v.(uint32)
+				if !ok {
+					return nil, fmt.Errorf("write: contents[%d]: expected uint32 byte, got %T", i, v)
+				}
+				buf[i] = byte(b)
 			}
-			buf[i] = byte(b)
+		default:
+			return nil, fmt.Errorf("write: contents: expected []byte or []abi.Value (list<u8>), got %T", args[1])
 		}
 		out.Write(buf)
 		return nil, nil
