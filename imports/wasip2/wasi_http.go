@@ -147,6 +147,14 @@ type httpOutgoingBody struct {
 	// trailers holds the option<trailers> a guest passes to
 	// outgoing-body.finish (nil when it finishes with None, the common case).
 	trailers *httpFields
+
+	// rep and streamRep are the reps this body was minted under, recorded so
+	// serveHTTPCall can release them when the request that created it is
+	// done. Without them the only way back from the body to its map keys
+	// would be a scan. streamRep is 0 until the guest takes the body's
+	// output-stream, which a response with no body never does.
+	rep       uint32
+	streamRep uint32
 }
 
 // httpCapture is the slot a response-outparam names: what the guest set.
@@ -314,6 +322,7 @@ func (h *wasiHTTP) newBodyRep(b *httpOutgoingBody) uint32 {
 	rep := h.nextRep
 	h.nextRep++
 	h.bodies[rep] = b
+	b.rep = rep
 	return rep
 }
 
@@ -334,6 +343,7 @@ func (h *wasiHTTP) newBodyStreamRep(b *httpOutgoingBody) uint32 {
 	rep := h.nextBodyStream
 	h.nextBodyStream++
 	h.bodyStreams[rep] = b
+	b.streamRep = rep
 	return rep
 }
 
@@ -1257,6 +1267,9 @@ func serveHTTPCall(in *component.Instance, ctx context.Context, method string, u
 	capture := &httpCapture{}
 	outRep := h.newOutparamRep(capture)
 	outHandle := in.Resources().NewOwn(wasiHTTPResponseOutparamResType, outRep)
+	// Every exit from here on is done with the outparam and the body behind
+	// it, including the error ones.
+	defer func() { h.releaseServeState(reqRep, outRep, capture) }()
 
 	if _, err := in.CallExport(ctx, handlerInstance, "handle", reqHandle, outHandle); err != nil {
 		return 0, nil, nil, nil, fmt.Errorf("component/instance: ServeHTTP: guest handle: %w", err)
@@ -1285,6 +1298,38 @@ func serveHTTPCall(in *component.Instance, ctx context.Context, method string, u
 		}
 	}
 	return resp.status, hdr, respBody, trailer, nil
+}
+
+// releaseServeState drops the per-request host state serveHTTPCall minted or
+// caused to be minted, once the response has been read out of it.
+//
+// The incoming request, the response-outparam, and the outgoing-body the guest
+// takes from the response it sets are reachable only through the call that
+// created them: once the guest's handle export has returned and the capture has
+// been read, nothing can name them again. They were previously left in the maps, so a long-lived
+// instance accumulated one capture and one body per request it ever served,
+// and the rep counter climbed without bound -- which also made every handle
+// value expensive to box, small integers being free and large ones not.
+//
+// The response body slice handed back to the caller aliases the body's
+// buffer, which stays alive through that slice; dropping the map entry does
+// not disturb it.
+func (h *wasiHTTP) releaseServeState(reqRep, outRep uint32, capture *httpCapture) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	delete(h.incoming, reqRep)
+	delete(h.outparams, outRep)
+
+	if capture == nil || capture.resp == nil {
+		return
+	}
+	if b := capture.resp.body; b != nil {
+		delete(h.bodies, b.rep)
+		if b.streamRep != 0 {
+			delete(h.bodyStreams, b.streamRep)
+		}
+	}
 }
 
 // findExportInstance returns the full exported-instance name whose
