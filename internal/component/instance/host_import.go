@@ -732,6 +732,10 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 		var realloc abi.Realloc
 		if reallocOverride != nil {
 			realloc = reallocOfFunc(ctx, reallocOverride)
+		} else {
+			// Resolved through the instance's memo rather than left to
+			// lowerHostResultsPlanned's per-call reallocOf fallback.
+			realloc = in.reallocFor(ctx, memMod)
 		}
 		if err := lowerHostResultsPlanned(ctx, resultCount, resultPT, resultUsesMem, resolve, results, stack, memMod, resources, outPtrIdx, realloc); err != nil {
 			panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
