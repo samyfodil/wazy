@@ -194,25 +194,14 @@ func (m *machine) CompileGoFunctionTrampoline(exitCode nativeapi.ExitCode, sig *
 		if r.Kind == backend.ABIArgKindReg {
 			loadIntoReg := m.allocateInstr()
 			mode := m.amodePool.Allocate()
-			*mode = addressMode{kind: addressModeKindPostIndex, rn: arg0ret0AddrReg}
-			switch r.Type {
-			case ssa.TypeI32:
-				mode.imm = 8 // We use uint64 for all basic types, except SIMD v128.
-				loadIntoReg.asULoad(r.Reg, mode, 32)
-			case ssa.TypeI64:
-				mode.imm = 8 // We use uint64 for all basic types, except SIMD v128.
-				loadIntoReg.asULoad(r.Reg, mode, 64)
-			case ssa.TypeF32:
-				mode.imm = 8 // We use uint64 for all basic types, except SIMD v128.
-				loadIntoReg.asFpuLoad(r.Reg, mode, 32)
-			case ssa.TypeF64:
-				mode.imm = 8 // We use uint64 for all basic types, except SIMD v128.
-				loadIntoReg.asFpuLoad(r.Reg, mode, 64)
-			case ssa.TypeV128:
-				mode.imm = 16
-				loadIntoReg.asFpuLoad(r.Reg, mode, 128)
-			default:
-				panic("TODO")
+			*mode = addressMode{kind: addressModeKindPostIndex, rn: arg0ret0AddrReg, imm: goCallSlotSize(r.Type)}
+			// The register class is decided by the same predicate the ABI itself used when it
+			// assigned r.Reg (backend.setABIArgs switches on Type.IsInt), so an int result is
+			// always loaded with LDR Wt/Xt and a float or vector result with LDR St/Dt/Qt.
+			if r.Type.IsInt() {
+				loadIntoReg.asULoad(r.Reg, mode, r.Type.Bits())
+			} else {
+				loadIntoReg.asFpuLoad(r.Reg, mode, r.Type.Bits())
 			}
 			cur = linkInstr(cur, loadIntoReg)
 		} else {
@@ -220,31 +209,16 @@ func (m *machine) CompileGoFunctionTrampoline(exitCode nativeapi.ExitCode, sig *
 			intTmp, floatTmp := x11VReg, v11VReg
 			loadIntoTmpReg := m.allocateInstr()
 			mode := m.amodePool.Allocate()
-			*mode = addressMode{kind: addressModeKindPostIndex, rn: arg0ret0AddrReg}
+			*mode = addressMode{kind: addressModeKindPostIndex, rn: arg0ret0AddrReg, imm: goCallSlotSize(r.Type)}
 			var resultReg regalloc.VReg
-			switch r.Type {
-			case ssa.TypeI32:
-				mode.imm = 8 // We use uint64 for all basic types, except SIMD v128.
-				loadIntoTmpReg.asULoad(intTmp, mode, 32)
+			// Same class rule as the register case above, but into the caller-save temporaries,
+			// since this result still has to be copied on to its stack slot afterwards.
+			if r.Type.IsInt() {
+				loadIntoTmpReg.asULoad(intTmp, mode, r.Type.Bits())
 				resultReg = intTmp
-			case ssa.TypeI64:
-				mode.imm = 8 // We use uint64 for all basic types, except SIMD v128.
-				loadIntoTmpReg.asULoad(intTmp, mode, 64)
-				resultReg = intTmp
-			case ssa.TypeF32:
-				mode.imm = 8 // We use uint64 for all basic types, except SIMD v128.
-				loadIntoTmpReg.asFpuLoad(floatTmp, mode, 32)
+			} else {
+				loadIntoTmpReg.asFpuLoad(floatTmp, mode, r.Type.Bits())
 				resultReg = floatTmp
-			case ssa.TypeF64:
-				mode.imm = 8 // We use uint64 for all basic types, except SIMD v128.
-				loadIntoTmpReg.asFpuLoad(floatTmp, mode, 64)
-				resultReg = floatTmp
-			case ssa.TypeV128:
-				mode.imm = 16
-				loadIntoTmpReg.asFpuLoad(floatTmp, mode, 128)
-				resultReg = floatTmp
-			default:
-				panic("TODO")
 			}
 			cur = linkInstr(cur, loadIntoTmpReg)
 			cur = m.goFunctionCallStoreStackResult(cur, originalRet0Reg, r, resultReg)
@@ -462,34 +436,32 @@ func (m *machine) saveCurrentStackPointer(cur *instruction, execCtr regalloc.VRe
 	return cur
 }
 
+// goCallSlotSize returns how many bytes one value of the given type occupies in the
+// arg[0]/ret[0]... region of the Go call stack. That region is read and written by the Go side
+// as a plain []uint64, so every basic type takes one 8-byte slot regardless of its own width,
+// and a v128 takes two. Deriving this from Type.Bits rather than enumerating the types keeps the
+// stride and the load/store width answering to the same source.
+func goCallSlotSize(t ssa.Type) int64 {
+	if t.Bits() == 128 {
+		return 16
+	}
+	return 8
+}
+
 func (m *machine) goFunctionCallLoadStackArg(cur *instruction, originalArg0Reg regalloc.VReg, arg *backend.ABIArg, intVReg, floatVReg regalloc.VReg) (*instruction, regalloc.VReg) {
 	load := m.allocateInstr()
 	var result regalloc.VReg
 	mode := m.amodePool.Allocate()
-	*mode = addressMode{kind: addressModeKindPostIndex, rn: originalArg0Reg}
-	switch arg.Type {
-	case ssa.TypeI32:
-		mode.imm = 8 // We use uint64 for all basic types, except SIMD v128.
-		load.asULoad(intVReg, mode, 32)
+	*mode = addressMode{kind: addressModeKindPostIndex, rn: originalArg0Reg, imm: goCallSlotSize(arg.Type)}
+	// Int args go to the integer temporary via LDR Wt/Xt, float and vector args to the float
+	// temporary via LDR St/Dt/Qt. Type.IsInt is the same classifier backend.setABIArgs used to
+	// give this arg a stack slot in the first place, so the two can never disagree.
+	if arg.Type.IsInt() {
+		load.asULoad(intVReg, mode, arg.Type.Bits())
 		result = intVReg
-	case ssa.TypeI64:
-		mode.imm = 8 // We use uint64 for all basic types, except SIMD v128.
-		load.asULoad(intVReg, mode, 64)
-		result = intVReg
-	case ssa.TypeF32:
-		mode.imm = 8 // We use uint64 for all basic types, except SIMD v128.
-		load.asFpuLoad(floatVReg, mode, 32)
+	} else {
+		load.asFpuLoad(floatVReg, mode, arg.Type.Bits())
 		result = floatVReg
-	case ssa.TypeF64:
-		mode.imm = 8 // We use uint64 for all basic types, except SIMD v128.
-		load.asFpuLoad(floatVReg, mode, 64)
-		result = floatVReg
-	case ssa.TypeV128:
-		mode.imm = 16
-		load.asFpuLoad(floatVReg, mode, 128)
-		result = floatVReg
-	default:
-		panic("TODO")
 	}
 
 	cur = linkInstr(cur, load)
@@ -499,21 +471,9 @@ func (m *machine) goFunctionCallLoadStackArg(cur *instruction, originalArg0Reg r
 func (m *machine) goFunctionCallStoreStackResult(cur *instruction, originalRet0Reg regalloc.VReg, result *backend.ABIArg, resultVReg regalloc.VReg) *instruction {
 	store := m.allocateInstr()
 	mode := m.amodePool.Allocate()
-	*mode = addressMode{kind: addressModeKindPostIndex, rn: originalRet0Reg}
-	var sizeInBits byte
-	switch result.Type {
-	case ssa.TypeI32, ssa.TypeF32:
-		mode.imm = 8
-		sizeInBits = 32
-	case ssa.TypeI64, ssa.TypeF64:
-		mode.imm = 8
-		sizeInBits = 64
-	case ssa.TypeV128:
-		mode.imm = 16
-		sizeInBits = 128
-	default:
-		panic("TODO")
-	}
-	store.asStore(operandNR(resultVReg), mode, sizeInBits)
+	*mode = addressMode{kind: addressModeKindPostIndex, rn: originalRet0Reg, imm: goCallSlotSize(result.Type)}
+	// asStore already picks STR Wt/Xt vs STR St/Dt/Qt from the register class of resultVReg, so
+	// the width is all this needs to supply.
+	store.asStore(operandNR(resultVReg), mode, result.Type.Bits())
 	return linkInstr(cur, store)
 }

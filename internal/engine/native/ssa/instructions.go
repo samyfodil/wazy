@@ -1468,6 +1468,22 @@ func (i *Instruction) AsIcmp(x, y Value, c IntegerCmpCond) *Instruction {
 	return i
 }
 
+// AsIcmpImm initializes this instruction as an integer comparison against an
+// immediate with OpcodeIcmpImm.
+//
+// The field layout matches AsIcmp: the argument in v and the condition in u1,
+// with the immediate taking u2 in place of AsIcmp's second value. A backend
+// reads it back through IcmpImmData rather than the raw fields, so the two stay
+// in agreement by construction.
+func (i *Instruction) AsIcmpImm(x Value, imm uint64, c IntegerCmpCond) *Instruction {
+	i.opcode = OpcodeIcmpImm
+	i.v = x
+	i.u1 = uint64(c)
+	i.u2 = imm
+	i.typ = TypeI32
+	return i
+}
+
 // AsFcmp initializes this instruction as an integer comparison instruction with OpcodeFcmp.
 func (i *Instruction) AsFcmp(x, y Value, c FloatCmpCond) {
 	i.opcode = OpcodeFcmp
@@ -1762,6 +1778,12 @@ func (i *Instruction) AsRotr(x, amount Value) {
 // IcmpData returns the operands and comparison condition of this integer comparison instruction.
 func (i *Instruction) IcmpData() (x, y Value, c IntegerCmpCond) {
 	return i.v, i.v2, IntegerCmpCond(i.u1)
+}
+
+// IcmpImmData returns the operand, immediate and comparison condition of this
+// immediate integer comparison instruction.
+func (i *Instruction) IcmpImmData() (x Value, imm uint64, c IntegerCmpCond) {
+	return i.v, i.u2, IntegerCmpCond(i.u1)
 }
 
 // FcmpData returns the operands and comparison condition of this floating-point comparison instruction.

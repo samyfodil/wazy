@@ -75,7 +75,15 @@ func (o operand) nr() regalloc.VReg {
 // operandER encodes the given VReg as an operand of operandKindER.
 func operandER(r regalloc.VReg, eop extendOp, to byte) operand {
 	if to < 32 {
-		panic("TODO?BUG?: when we need to extend to less than 32 bits?")
+		// The extended register form has no result narrower than a W register: the only
+		// width control it has is the sf bit. See "ADD (extended register)" in the Arm ARM
+		// (C6.2.5): sf|op|S|01011|001|Rm|option|imm3|Rn|Rd, where sf=0 gives the 32-bit
+		// form and sf=1 the 64-bit one, and encodeAluRRRExtend sets sf only for to == 64.
+		//
+		// Extending to 8 or 16 bits produces the same bits [to-1:0] as extending to 32
+		// does, and the ALU that consumes this operand is congruent modulo 2^to, so the
+		// narrower result is exactly the low bits of the 32-bit one. Widen it to 32.
+		to = 32
 	}
 	return operand{kind: operandKindER, data: uint64(r), data2: uint64(eop)<<32 | uint64(to)}
 }

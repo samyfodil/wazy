@@ -251,7 +251,18 @@ func (m *machine) lowerLoad(ptr ssa.Value, offset uint32, typ ssa.Type, ret ssa.
 	case ssa.TypeV128:
 		load.asFpuLoad(dst, amode, 128)
 	default:
-		panic("TODO")
+		// The cases above name every ssa.Type that exists today (see ssa/type.go), and typ.Bits()
+		// above already rejects typeInvalid, so no type reaches this arm yet. A type added later
+		// (that file keeps 8/16 bit integers as a possible addition) still has one well defined
+		// lowering here, because arm64 picks a load by exactly two things: the width of the
+		// transfer, which is the type's width, and the class of the destination register, which is
+		// what regalloc.RegTypeOf assigned to the result value. asULoad covers the V=0 forms
+		// (LDRB/LDRH/LDR Wt/LDR Xt, size in bits 31:30), asFpuLoad the V=1 ones (LDR St/Dt/Qt).
+		if dst.RegType() == regalloc.RegTypeInt {
+			load.asULoad(dst, amode, typ.Bits())
+		} else {
+			load.asFpuLoad(dst, amode, typ.Bits())
+		}
 	}
 	m.insert(load)
 }

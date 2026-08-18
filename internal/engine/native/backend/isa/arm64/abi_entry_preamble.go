@@ -42,15 +42,14 @@ func (m *machine) goEntryPreamblePassArg(cur *instruction, paramSlicePtr regallo
 	var loadTargetReg operand
 	if !isStackArg {
 		loadTargetReg = operandNR(arg.Reg)
+	} else if typ.IsInt() {
+		// A stack arg has no ABI register, so it is staged through a caller-save scratch of the
+		// matching class: x15 for integers, v15 for floats and vectors. Type.IsInt is the same
+		// classifier backend.setABIArgs used to give this arg a stack slot, so the scratch class
+		// always agrees with the slot the value is being written into.
+		loadTargetReg = operandNR(x15VReg)
 	} else {
-		switch typ {
-		case ssa.TypeI32, ssa.TypeI64:
-			loadTargetReg = operandNR(x15VReg)
-		case ssa.TypeF32, ssa.TypeF64, ssa.TypeV128:
-			loadTargetReg = operandNR(v15VReg)
-		default:
-			panic("TODO?")
-		}
+		loadTargetReg = operandNR(v15VReg)
 	}
 
 	var postIndexImm int64
@@ -95,15 +94,12 @@ func (m *machine) goEntryPreamblePassResult(cur *instruction, resultSlicePtr reg
 	var storeTargetReg operand
 	if !isStackArg {
 		storeTargetReg = operandNR(result.Reg)
+	} else if typ.IsInt() {
+		// Mirror of goEntryPreamblePassArg: a stack result is staged through x15 or v15
+		// depending on the class backend.setABIArgs assigned it.
+		storeTargetReg = operandNR(x15VReg)
 	} else {
-		switch typ {
-		case ssa.TypeI32, ssa.TypeI64:
-			storeTargetReg = operandNR(x15VReg)
-		case ssa.TypeF32, ssa.TypeF64, ssa.TypeV128:
-			storeTargetReg = operandNR(v15VReg)
-		default:
-			panic("TODO?")
-		}
+		storeTargetReg = operandNR(v15VReg)
 	}
 
 	var postIndexImm int64
@@ -117,13 +113,12 @@ func (m *machine) goEntryPreamblePassResult(cur *instruction, resultSlicePtr reg
 		var loadMode *addressMode
 		cur, loadMode = m.resolveAddressModeForOffsetAndInsert(cur, resultStartOffsetFromSP+result.Offset, bits, spVReg, true)
 		toReg := m.allocateInstr()
-		switch typ {
-		case ssa.TypeI32, ssa.TypeI64:
+		// bits is typ.Bits(), so this is LDR Wt/Xt for an integer result and LDR St/Dt/Qt for a
+		// float or vector one, matching the scratch register class chosen above.
+		if typ.IsInt() {
 			toReg.asULoad(storeTargetReg.reg(), loadMode, bits)
-		case ssa.TypeF32, ssa.TypeF64, ssa.TypeV128:
+		} else {
 			toReg.asFpuLoad(storeTargetReg.reg(), loadMode, bits)
-		default:
-			panic("TODO?")
 		}
 		cur = linkInstr(cur, toReg)
 	}
