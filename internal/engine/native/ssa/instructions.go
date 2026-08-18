@@ -1986,6 +1986,18 @@ func (i *Instruction) AsReturn(vs nativeapi.VarLength[Value]) *Instruction {
 
 // AsIreduce initializes this instruction as a reduction instruction with OpcodeIreduce.
 func (i *Instruction) AsIreduce(v Value, dstType Type) *Instruction {
+	// Reject a malformed reduce where it is built rather than where it is
+	// lowered. Both backends have to handle whatever reaches them, so without
+	// this the first sign of a bad AsIreduce is a panic deep in instruction
+	// selection, naming a shape rather than the code that asked for it. There
+	// are only two integer types, so the sole meaningful narrowing is i64 to
+	// i32; a widening one is AsUExtend or AsSExtend, not this.
+	if !v.Type().IsInt() || !dstType.IsInt() {
+		panic("BUG: Ireduce is defined on integers, got " + v.Type().String() + " to " + dstType.String())
+	}
+	if dstType.Bits() > v.Type().Bits() {
+		panic("BUG: Ireduce widens " + v.Type().String() + " to " + dstType.String() + ", use AsUExtend or AsSExtend")
+	}
 	i.opcode = OpcodeIreduce
 	i.v = v
 	i.typ = dstType

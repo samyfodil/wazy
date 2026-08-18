@@ -282,45 +282,11 @@ func TestMachine_LowerInstr_Ireduce(t *testing.T) {
 	}
 }
 
-// TestMachine_LowerInstr_Ireduce_invalid pins the two guards on the Ireduce
-// lowering. Widening to i64 from a narrower type is not a reduction at all, and
-// would read past the end of a folded load; a non-integer destination has no
-// reduction to perform.
-func TestMachine_LowerInstr_Ireduce_invalid(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		srcType ssa.Type
-		dstType ssa.Type
-		expErr  string
-	}{
-		{
-			name:    "i32 to i64",
-			srcType: ssa.TypeI32,
-			dstType: ssa.TypeI64,
-			expErr:  "BUG: Ireduce to i64 from a narrower type",
-		},
-		{
-			name:    "i64 to f64",
-			srcType: ssa.TypeI64,
-			dstType: ssa.TypeF64,
-			expErr:  "BUG: Ireduce to a non-integer type",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx, b, m := newSetupWithMockContext()
-
-			x := b.CurrentBlock().AddParam(b, tc.srcType)
-			ctx.vRegMap[x] = raxVReg
-			ctx.definitions[x] = backend.SSAValueDefinition{V: x}
-
-			instr := b.AllocateInstruction().AsIreduce(x, tc.dstType).Insert(b)
-			ctx.vRegMap[instr.Return()] = rcxVReg
-
-			err := require.CapturePanic(func() { m.LowerInstr(instr) })
-			require.EqualError(t, err, tc.expErr)
-		})
-	}
-}
+// The Ireduce lowering's guards against a widening or non-integer reduce are no
+// longer reachable from this package: AsIreduce rejects both at construction, and
+// the fields it sets are unexported, so there is no way to hand LowerInstr a
+// malformed one. They stay as defence in depth; TestAsIreduce in the ssa package
+// covers the rejection that now happens first.
 
 // TestInstruction_encode_bnotAndIcmpImm pins the machine code behind the two
 // lowerings above, which the Format()-level tests cannot see.

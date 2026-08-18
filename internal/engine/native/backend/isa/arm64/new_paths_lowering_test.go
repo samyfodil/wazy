@@ -34,9 +34,11 @@ func TestMachine_LowerInstr_Ireduce(t *testing.T) {
 	}{
 		{name: "i64 to i32", src: ssa.TypeI64, dst: ssa.TypeI32, exp: "mov w2?, w1?"},
 		{name: "i32 to i32", src: ssa.TypeI32, dst: ssa.TypeI32, exp: "mov w2?, w1?"},
-		// The newly implemented case: no truncation, so the whole X register moves.
+		// No truncation, so the whole X register moves.
 		{name: "i64 to i64", src: ssa.TypeI64, dst: ssa.TypeI64, exp: "mov x2?, x1?"},
-		{name: "i32 to i64", src: ssa.TypeI32, dst: ssa.TypeI64, exp: "mov x2?, x1?"},
+		// i32 to i64 is absent on purpose: AsIreduce rejects a widening reduce at
+		// construction, so the lowering's guard for it can no longer be reached
+		// from outside the ssa package. TestAsIreduce covers the rejection.
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, b, m := newSetupWithMockContext()
@@ -54,20 +56,8 @@ func TestMachine_LowerInstr_Ireduce(t *testing.T) {
 		})
 	}
 
-	t.Run("non-integer destination panics", func(t *testing.T) {
-		ctx, b, m := newSetupWithMockContext()
-		v := b.CurrentBlock().AddParam(b, ssa.TypeI64)
-		ctx.vRegMap[v] = intToVReg(1)
-		ctx.definitions[v] = backend.SSAValueDefinition{V: v}
-
-		ireduce := b.AllocateInstruction()
-		ireduce.AsIreduce(v, ssa.TypeF32)
-		b.InsertInstruction(ireduce)
-		ctx.vRegMap[ireduce.Return()] = zzFloatVReg(2)
-
-		err := require.CapturePanic(func() { m.LowerInstr(ireduce) })
-		require.EqualError(t, err, "BUG: Ireduce to f32")
-	})
+	// A non-integer destination is rejected by AsIreduce now, so the lowering's
+	// own guard is unreachable from here; TestAsIreduce covers it instead.
 }
 
 // TestMachine_lowerBitcast_sameRegisterClass covers the two arms of
