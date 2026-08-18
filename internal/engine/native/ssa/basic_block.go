@@ -392,3 +392,22 @@ func (bb *basicBlock) LoopNestingForestChildren() []BasicBlock {
 func (bb *basicBlock) LoopHeader() bool {
 	return bb.loopHeader
 }
+
+// insertBeforeTerminator inserts instr immediately before the branch that ends
+// bb, which is where hoisted code has to land: every value defined in bb is
+// already available at that point, and the branch has to stay last.
+func (bb *basicBlock) insertBeforeTerminator(instr *Instruction) {
+	term := bb.currentInstr
+	if term == nil {
+		instr.prev, instr.next = nil, nil
+		bb.rootInstr, bb.currentInstr = instr, instr
+		return
+	}
+	instr.prev, instr.next = term.prev, term
+	if term.prev != nil {
+		term.prev.next = instr
+	} else {
+		bb.rootInstr = instr
+	}
+	term.prev = instr
+}

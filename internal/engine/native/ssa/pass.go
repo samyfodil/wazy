@@ -44,6 +44,10 @@ func (b *builder) runPreBlockLayoutPasses() {
 	// 	Copy-propagation.
 	// 	and more!
 
+	// Hoisting has to happen before the dead code pass, which stamps every
+	// instruction with the group id the backend reads.
+	passLoopInvariantCodeMotionOpt(b)
+
 	// passDeadCodeEliminationOpt could be more accurate if we do this after other optimizations.
 	passDeadCodeEliminationOpt(b)
 	b.donePreBlockLayoutPasses = true
