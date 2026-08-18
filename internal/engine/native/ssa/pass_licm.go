@@ -16,14 +16,23 @@ package ssa
 // memory are moved, so a hoist is never observable: the worst it can do is
 // compute a value for a loop that turns out to run zero times.
 //
+// What it must NOT move matters as much as what it moves, because in this
+// compiler hoisting is not free. Both backends fold a single-use producer into
+// its consumer only when the two share an InstructionGroupID, and groups never
+// span blocks, so moving a value to another block permanently costs it its
+// fold. An address computation that previously emitted no instruction at all
+// becomes a register live across the whole loop, and the allocator, which
+// picks its spill victim by furthest next use with no loop weighting, then
+// spills something hot. Hoisting everything measured 4.94% slower over the
+// TinyGo case.wasm benchmarks and 64.84% slower on matmul, whose compiled code
+// went from 209 stack references to 274. Refusing the fold-sensitive opcodes
+// below brings matmul back to byte-identical output while keeping the SIMD
+// case, whose loop body still drops from fourteen machine instructions to five.
+//
 // This must run before passDeadCodeEliminationOpt, which stamps every
 // instruction with the InstructionGroupID the backend reads. Moving an
 // instruction after that point would leave it carrying a group from the block
 // it came from.
-// licmPerLoopBudget caps how many values a single loop may have hoisted out of
-// it. See the comment at the accounting below for why a cap is needed at all.
-const licmPerLoopBudget = 4
-
 func passLoopInvariantCodeMotionOpt(b *builder) {
 	loopOf := b.licmLoopMembership()
 	if loopOf == nil {
@@ -31,24 +40,13 @@ func passLoopInvariantCodeMotionOpt(b *builder) {
 	}
 	defBlk := b.licmDefBlk()
 
-	// Every hoisted value stays live for the whole loop, so hoisting without a
-	// bound trades instructions inside the loop for spills around it. Budget the
-	// values a loop may gain: enough to lift a lowering's worth of expansion out
-	// of it, not enough to exhaust the register file.
-	hoisted := make(map[*basicBlock]int)
-
 	for _, blk := range b.reversePostOrderedBasicBlocks {
 		if blk.invalid || loopOf[blk.id] == nil {
 			continue
 		}
 		for cur := blk.rootInstr; cur != nil; {
 			next := cur.next
-			if hoisted[loopOf[blk.id]] >= licmPerLoopBudget {
-				cur = next
-				continue
-			}
 			if target := b.licmTarget(cur, loopOf[blk.id], loopOf, defBlk); target != nil {
-				hoisted[loopOf[blk.id]]++
 				blk.removeInstruction(cur)
 				target.insertBeforeTerminator(cur)
 				// Later instructions in this block may now be invariant too,
@@ -224,9 +222,27 @@ func hoistableFromLoop(instr *Instruction) bool {
 		return false
 	}
 	switch instr.opcode {
+	// A comparison has to stay in the same instruction group as whatever
+	// consumes it: the backends fold it into a branch, a select or a trap, and
+	// lowering an ExitIfTrueWithCode whose Icmp has been moved away panics
+	// outright. A comparison is cheap to leave where it is.
+	case OpcodeIcmp, OpcodeFcmp:
+		return false
 	// A constant costs a register for the whole loop once hoisted, where the
 	// backend would otherwise rematerialize it wherever it is needed.
 	case OpcodeIconst, OpcodeF32const, OpcodeF64const, OpcodeVconst:
+		return false
+	// Address arithmetic is not free where it stands: both backends fold these
+	// into a load or store's addressing mode, and folding only happens within
+	// one instruction group, which never spans blocks. Hoisting one therefore
+	// turns something that emitted no instruction at all into a register that
+	// lives across the whole loop.
+	//
+	// ponytail: rejecting these four opcodes outright is coarser than asking
+	// whether this particular value would have been folded. It costs the hoists
+	// that would have been profitable in a loop with no memory traffic; refine
+	// it by checking the consumers if a workload ever shows that mattering.
+	case OpcodeIadd, OpcodeIshl, OpcodeUExtend, OpcodeSExtend:
 		return false
 	case OpcodeLoad, OpcodeLoadSplat, OpcodeVZeroExtLoad,
 		OpcodeUload8, OpcodeUload16, OpcodeUload32,
