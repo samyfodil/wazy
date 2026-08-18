@@ -44,4 +44,24 @@
       (local.set $n (i32.sub (local.get $n) (i32.const 1)))
       (br $l)))
     (i32x4.extract_lane 0 (local.get $acc)))
+
+  ;; The same dot product, but reading both operands from linear memory at an
+  ;; address that moves with the loop counter. The constant-operand kernel above
+  ;; lets a runtime hoist the widening of both operands out of the loop, so it
+  ;; measures loop-invariant code motion as much as the dot lowering; here the
+  ;; operands genuinely change every iteration and only the lowering is left.
+  (memory 1)
+  (data (i32.const 0) "\00\07\0e\15\1c\23\2a\31\38\3f\46\4d\54\5b\62\69\00\05\0a\0f\14\19\1e\23\28\2d\32\37\3c\41\46\4b\0d\14\1b\22\29\30\37\3e\45\4c\53\5a\61\68\6f\76\03\08\0d\12\17\1c\21\26\2b\30\35\3a\3f\44\49\4e\1a\21\28\2f\36\3d\44\4b\52\59\60\67\6e\75\7c\83\06\0b\10\15\1a\1f\24\29\2e\33\38\3d\42\47\4c\51\27\2e\35\3c\43\4a\51\58\5f\66\6d\74\7b\82\89\90\09\0e\13\18\1d\22\27\2c\31\36\3b\40\45\4a\4f\54")
+  (func (export "dotmem") (param $n i32) (result i32)
+    (local $acc v128) (local $p i32)
+    (block $done (loop $l
+      (br_if $done (i32.eqz (local.get $n)))
+      (local.set $acc (i32x4.relaxed_dot_i8x16_i7x16_add_s
+        (v128.load (local.get $p))
+        (v128.load offset=16 (local.get $p))
+        (local.get $acc)))
+      (local.set $p (i32.and (i32.add (local.get $p) (i32.const 32)) (i32.const 96)))
+      (local.set $n (i32.sub (local.get $n) (i32.const 1)))
+      (br $l)))
+    (i32x4.extract_lane 0 (local.get $acc)))
 )

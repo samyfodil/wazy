@@ -25,7 +25,7 @@ var relaxedSimdWasm []byte
 // of ns/op: divide by relaxedIters to get the cost of one chained lowering.
 const relaxedIters = 10000
 
-var relaxedFuncs = []string{"madd", "minmax", "dot"}
+var relaxedFuncs = []string{"madd", "minmax", "dot", "dotmem"}
 
 func wazyRelaxedInstance(tb testing.TB) (context.Context, api.Module) {
 	ctx := context.Background()
