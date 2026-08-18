@@ -200,36 +200,33 @@ func (l *lifter) optStr(v component.Value, what string) *string {
 	return &s
 }
 
-// f64s lifts a list<f64>, which arrives as a []float64 -- the typed slice a
-// list of a fixed-width primitive lifts to -- or as the general []Value shape
-// from a caller that built one by hand.
+// f64s lifts a list<f64>, and u64s a list<u64>.
+//
+// Both go through component.ListOf, which takes either shape a list can
+// arrive in -- the typed slice a list of a fixed-width primitive lifts to, or
+// the general []Value -- and returns the typed one without copying when it is
+// already that. Spelling the conversion out here instead would be the same
+// code an embedder would have to write, which is what the helper exists to
+// spare them.
 func (l *lifter) f64s(v component.Value, what string) []float64 {
-	if l.err != nil || v == nil {
-		return nil
-	}
-	if typed, ok := v.([]float64); ok {
-		return typed
-	}
-	items := l.list(v, what)
-	out := make([]float64, len(items))
-	for i, item := range items {
-		out[i] = l.f64(item, what)
-	}
-	return out
+	return liftTypedList[float64](l, v, what)
 }
 
-// u64s lifts a list<u64>, in either shape, as f64s does.
 func (l *lifter) u64s(v component.Value, what string) []uint64 {
+	return liftTypedList[uint64](l, v, what)
+}
+
+// liftTypedList folds component.ListOf into the lifter's error accumulation,
+// so a malformed list reports like every other malformed field rather than
+// unwinding separately.
+func liftTypedList[T any](l *lifter, v component.Value, what string) []T {
 	if l.err != nil || v == nil {
 		return nil
 	}
-	if typed, ok := v.([]uint64); ok {
-		return typed
-	}
-	items := l.list(v, what)
-	out := make([]uint64, len(items))
-	for i, item := range items {
-		out[i] = l.u64(item, what)
+	out, err := component.ListOf[T](v)
+	if err != nil {
+		l.fail("%s: %v", what, err)
+		return nil
 	}
 	return out
 }
