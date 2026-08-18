@@ -402,7 +402,8 @@ func (c *compiler) handleInstruction() error {
 	if false {
 		var instName string
 		if op == wasm.OpcodeVecPrefix {
-			instName = wasm.VectorInstructionName(c.body[c.pc+1])
+			vecOp, _ := wasm.ReadVecOpcode(c.body, int(c.pc)+1)
+			instName = wasm.VectorInstructionName(vecOp)
 		} else if op == wasm.OpcodeAtomicPrefix {
 			instName = wasm.AtomicInstructionName(c.body[c.pc+1])
 		} else if op == wasm.OpcodeMiscPrefix {
@@ -1880,7 +1881,9 @@ operatorSwitch:
 		}
 	case wasm.OpcodeVecPrefix:
 		c.pc++
-		switch vecOp := c.body[c.pc]; vecOp {
+		vecOp, vecOpSize := wasm.ReadVecOpcode(c.body, int(c.pc))
+		c.pc += uint64(vecOpSize) - 1
+		switch vecOp {
 		case wasm.OpcodeVecV128Const:
 			c.pc++
 			lo := binary.LittleEndian.Uint64(c.body[c.pc : c.pc+8])

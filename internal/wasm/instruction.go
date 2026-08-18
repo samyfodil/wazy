@@ -359,307 +359,335 @@ const (
 	OpcodeMiscTableFill OpcodeMisc = 0x11
 )
 
-// OpcodeVec represents an opcode of a vector instructions which has
-// multi-byte encoding and is prefixed by OpcodeMiscPrefix.
+// OpcodeVec represents an opcode of a vector instruction. It is prefixed by
+// OpcodeVecPrefix and encoded as a LEB128 u32, so opcodes below 0x80 occupy a
+// single byte and the rest, including the relaxed-SIMD range at 0x100, occupy
+// two. Use ReadVecOpcode and AppendVecOpcode rather than indexing the body.
 //
-// These opcodes are toggled with CoreFeatureSIMD.
-type OpcodeVec = byte
+// These opcodes are toggled with CoreFeatureSIMD, except for the relaxed ones
+// which are toggled with CoreFeatureRelaxedSIMD.
+type OpcodeVec = uint32
 
 const (
 	// Loads and stores.
 
-	OpcodeVecV128Load        OpcodeVec = 0x00
-	OpcodeVecV128Load8x8s    OpcodeVec = 0x01
-	OpcodeVecV128Load8x8u    OpcodeVec = 0x02
-	OpcodeVecV128Load16x4s   OpcodeVec = 0x03
-	OpcodeVecV128Load16x4u   OpcodeVec = 0x04
-	OpcodeVecV128Load32x2s   OpcodeVec = 0x05
-	OpcodeVecV128Load32x2u   OpcodeVec = 0x06
-	OpcodeVecV128Load8Splat  OpcodeVec = 0x07
-	OpcodeVecV128Load16Splat OpcodeVec = 0x08
-	OpcodeVecV128Load32Splat OpcodeVec = 0x09
-	OpcodeVecV128Load64Splat OpcodeVec = 0x0a
+	OpcodeVecV128Load        = 0x00
+	OpcodeVecV128Load8x8s    = 0x01
+	OpcodeVecV128Load8x8u    = 0x02
+	OpcodeVecV128Load16x4s   = 0x03
+	OpcodeVecV128Load16x4u   = 0x04
+	OpcodeVecV128Load32x2s   = 0x05
+	OpcodeVecV128Load32x2u   = 0x06
+	OpcodeVecV128Load8Splat  = 0x07
+	OpcodeVecV128Load16Splat = 0x08
+	OpcodeVecV128Load32Splat = 0x09
+	OpcodeVecV128Load64Splat = 0x0a
 
-	OpcodeVecV128Load32zero OpcodeVec = 0x5c
-	OpcodeVecV128Load64zero OpcodeVec = 0x5d
+	OpcodeVecV128Load32zero = 0x5c
+	OpcodeVecV128Load64zero = 0x5d
 
-	OpcodeVecV128Store       OpcodeVec = 0x0b
-	OpcodeVecV128Load8Lane   OpcodeVec = 0x54
-	OpcodeVecV128Load16Lane  OpcodeVec = 0x55
-	OpcodeVecV128Load32Lane  OpcodeVec = 0x56
-	OpcodeVecV128Load64Lane  OpcodeVec = 0x57
-	OpcodeVecV128Store8Lane  OpcodeVec = 0x58
-	OpcodeVecV128Store16Lane OpcodeVec = 0x59
-	OpcodeVecV128Store32Lane OpcodeVec = 0x5a
-	OpcodeVecV128Store64Lane OpcodeVec = 0x5b
+	OpcodeVecV128Store       = 0x0b
+	OpcodeVecV128Load8Lane   = 0x54
+	OpcodeVecV128Load16Lane  = 0x55
+	OpcodeVecV128Load32Lane  = 0x56
+	OpcodeVecV128Load64Lane  = 0x57
+	OpcodeVecV128Store8Lane  = 0x58
+	OpcodeVecV128Store16Lane = 0x59
+	OpcodeVecV128Store32Lane = 0x5a
+	OpcodeVecV128Store64Lane = 0x5b
 
 	// OpcodeVecV128Const is the vector const instruction.
-	OpcodeVecV128Const OpcodeVec = 0x0c
+	OpcodeVecV128Const = 0x0c
 
 	// OpcodeVecV128i8x16Shuffle is the vector shuffle instruction.
-	OpcodeVecV128i8x16Shuffle OpcodeVec = 0x0d
+	OpcodeVecV128i8x16Shuffle = 0x0d
 
 	// Extrac and replaces.
 
-	OpcodeVecI8x16ExtractLaneS OpcodeVec = 0x15
-	OpcodeVecI8x16ExtractLaneU OpcodeVec = 0x16
-	OpcodeVecI8x16ReplaceLane  OpcodeVec = 0x17
-	OpcodeVecI16x8ExtractLaneS OpcodeVec = 0x18
-	OpcodeVecI16x8ExtractLaneU OpcodeVec = 0x19
-	OpcodeVecI16x8ReplaceLane  OpcodeVec = 0x1a
-	OpcodeVecI32x4ExtractLane  OpcodeVec = 0x1b
-	OpcodeVecI32x4ReplaceLane  OpcodeVec = 0x1c
-	OpcodeVecI64x2ExtractLane  OpcodeVec = 0x1d
-	OpcodeVecI64x2ReplaceLane  OpcodeVec = 0x1e
-	OpcodeVecF32x4ExtractLane  OpcodeVec = 0x1f
-	OpcodeVecF32x4ReplaceLane  OpcodeVec = 0x20
-	OpcodeVecF64x2ExtractLane  OpcodeVec = 0x21
-	OpcodeVecF64x2ReplaceLane  OpcodeVec = 0x22
+	OpcodeVecI8x16ExtractLaneS = 0x15
+	OpcodeVecI8x16ExtractLaneU = 0x16
+	OpcodeVecI8x16ReplaceLane  = 0x17
+	OpcodeVecI16x8ExtractLaneS = 0x18
+	OpcodeVecI16x8ExtractLaneU = 0x19
+	OpcodeVecI16x8ReplaceLane  = 0x1a
+	OpcodeVecI32x4ExtractLane  = 0x1b
+	OpcodeVecI32x4ReplaceLane  = 0x1c
+	OpcodeVecI64x2ExtractLane  = 0x1d
+	OpcodeVecI64x2ReplaceLane  = 0x1e
+	OpcodeVecF32x4ExtractLane  = 0x1f
+	OpcodeVecF32x4ReplaceLane  = 0x20
+	OpcodeVecF64x2ExtractLane  = 0x21
+	OpcodeVecF64x2ReplaceLane  = 0x22
 
 	// Splat and swizzle.
 
-	OpcodeVecI8x16Swizzle OpcodeVec = 0x0e
-	OpcodeVecI8x16Splat   OpcodeVec = 0x0f
-	OpcodeVecI16x8Splat   OpcodeVec = 0x10
-	OpcodeVecI32x4Splat   OpcodeVec = 0x11
-	OpcodeVecI64x2Splat   OpcodeVec = 0x12
-	OpcodeVecF32x4Splat   OpcodeVec = 0x13
-	OpcodeVecF64x2Splat   OpcodeVec = 0x14
+	OpcodeVecI8x16Swizzle = 0x0e
+	OpcodeVecI8x16Splat   = 0x0f
+	OpcodeVecI16x8Splat   = 0x10
+	OpcodeVecI32x4Splat   = 0x11
+	OpcodeVecI64x2Splat   = 0x12
+	OpcodeVecF32x4Splat   = 0x13
+	OpcodeVecF64x2Splat   = 0x14
 
 	// i8 comparisons.
 
-	OpcodeVecI8x16Eq  OpcodeVec = 0x23
-	OpcodeVecI8x16Ne  OpcodeVec = 0x24
-	OpcodeVecI8x16LtS OpcodeVec = 0x25
-	OpcodeVecI8x16LtU OpcodeVec = 0x26
-	OpcodeVecI8x16GtS OpcodeVec = 0x27
-	OpcodeVecI8x16GtU OpcodeVec = 0x28
-	OpcodeVecI8x16LeS OpcodeVec = 0x29
-	OpcodeVecI8x16LeU OpcodeVec = 0x2a
-	OpcodeVecI8x16GeS OpcodeVec = 0x2b
-	OpcodeVecI8x16GeU OpcodeVec = 0x2c
+	OpcodeVecI8x16Eq  = 0x23
+	OpcodeVecI8x16Ne  = 0x24
+	OpcodeVecI8x16LtS = 0x25
+	OpcodeVecI8x16LtU = 0x26
+	OpcodeVecI8x16GtS = 0x27
+	OpcodeVecI8x16GtU = 0x28
+	OpcodeVecI8x16LeS = 0x29
+	OpcodeVecI8x16LeU = 0x2a
+	OpcodeVecI8x16GeS = 0x2b
+	OpcodeVecI8x16GeU = 0x2c
 
 	// i16 comparisons.
 
-	OpcodeVecI16x8Eq  OpcodeVec = 0x2d
-	OpcodeVecI16x8Ne  OpcodeVec = 0x2e
-	OpcodeVecI16x8LtS OpcodeVec = 0x2f
-	OpcodeVecI16x8LtU OpcodeVec = 0x30
-	OpcodeVecI16x8GtS OpcodeVec = 0x31
-	OpcodeVecI16x8GtU OpcodeVec = 0x32
-	OpcodeVecI16x8LeS OpcodeVec = 0x33
-	OpcodeVecI16x8LeU OpcodeVec = 0x34
-	OpcodeVecI16x8GeS OpcodeVec = 0x35
-	OpcodeVecI16x8GeU OpcodeVec = 0x36
+	OpcodeVecI16x8Eq  = 0x2d
+	OpcodeVecI16x8Ne  = 0x2e
+	OpcodeVecI16x8LtS = 0x2f
+	OpcodeVecI16x8LtU = 0x30
+	OpcodeVecI16x8GtS = 0x31
+	OpcodeVecI16x8GtU = 0x32
+	OpcodeVecI16x8LeS = 0x33
+	OpcodeVecI16x8LeU = 0x34
+	OpcodeVecI16x8GeS = 0x35
+	OpcodeVecI16x8GeU = 0x36
 
 	// i32 comparisons.
 
-	OpcodeVecI32x4Eq  OpcodeVec = 0x37
-	OpcodeVecI32x4Ne  OpcodeVec = 0x38
-	OpcodeVecI32x4LtS OpcodeVec = 0x39
-	OpcodeVecI32x4LtU OpcodeVec = 0x3a
-	OpcodeVecI32x4GtS OpcodeVec = 0x3b
-	OpcodeVecI32x4GtU OpcodeVec = 0x3c
-	OpcodeVecI32x4LeS OpcodeVec = 0x3d
-	OpcodeVecI32x4LeU OpcodeVec = 0x3e
-	OpcodeVecI32x4GeS OpcodeVec = 0x3f
-	OpcodeVecI32x4GeU OpcodeVec = 0x40
+	OpcodeVecI32x4Eq  = 0x37
+	OpcodeVecI32x4Ne  = 0x38
+	OpcodeVecI32x4LtS = 0x39
+	OpcodeVecI32x4LtU = 0x3a
+	OpcodeVecI32x4GtS = 0x3b
+	OpcodeVecI32x4GtU = 0x3c
+	OpcodeVecI32x4LeS = 0x3d
+	OpcodeVecI32x4LeU = 0x3e
+	OpcodeVecI32x4GeS = 0x3f
+	OpcodeVecI32x4GeU = 0x40
 
 	// i64 comparisons.
 
-	OpcodeVecI64x2Eq  OpcodeVec = 0xd6
-	OpcodeVecI64x2Ne  OpcodeVec = 0xd7
-	OpcodeVecI64x2LtS OpcodeVec = 0xd8
-	OpcodeVecI64x2GtS OpcodeVec = 0xd9
-	OpcodeVecI64x2LeS OpcodeVec = 0xda
-	OpcodeVecI64x2GeS OpcodeVec = 0xdb
+	OpcodeVecI64x2Eq  = 0xd6
+	OpcodeVecI64x2Ne  = 0xd7
+	OpcodeVecI64x2LtS = 0xd8
+	OpcodeVecI64x2GtS = 0xd9
+	OpcodeVecI64x2LeS = 0xda
+	OpcodeVecI64x2GeS = 0xdb
 
 	// f32 comparisons.
 
-	OpcodeVecF32x4Eq OpcodeVec = 0x41
-	OpcodeVecF32x4Ne OpcodeVec = 0x42
-	OpcodeVecF32x4Lt OpcodeVec = 0x43
-	OpcodeVecF32x4Gt OpcodeVec = 0x44
-	OpcodeVecF32x4Le OpcodeVec = 0x45
-	OpcodeVecF32x4Ge OpcodeVec = 0x46
+	OpcodeVecF32x4Eq = 0x41
+	OpcodeVecF32x4Ne = 0x42
+	OpcodeVecF32x4Lt = 0x43
+	OpcodeVecF32x4Gt = 0x44
+	OpcodeVecF32x4Le = 0x45
+	OpcodeVecF32x4Ge = 0x46
 
 	// f64 comparisons.
 
-	OpcodeVecF64x2Eq OpcodeVec = 0x47
-	OpcodeVecF64x2Ne OpcodeVec = 0x48
-	OpcodeVecF64x2Lt OpcodeVec = 0x49
-	OpcodeVecF64x2Gt OpcodeVec = 0x4a
-	OpcodeVecF64x2Le OpcodeVec = 0x4b
-	OpcodeVecF64x2Ge OpcodeVec = 0x4c
+	OpcodeVecF64x2Eq = 0x47
+	OpcodeVecF64x2Ne = 0x48
+	OpcodeVecF64x2Lt = 0x49
+	OpcodeVecF64x2Gt = 0x4a
+	OpcodeVecF64x2Le = 0x4b
+	OpcodeVecF64x2Ge = 0x4c
 
 	// v128 logical instructions.
 
-	OpcodeVecV128Not       OpcodeVec = 0x4d
-	OpcodeVecV128And       OpcodeVec = 0x4e
-	OpcodeVecV128AndNot    OpcodeVec = 0x4f
-	OpcodeVecV128Or        OpcodeVec = 0x50
-	OpcodeVecV128Xor       OpcodeVec = 0x51
-	OpcodeVecV128Bitselect OpcodeVec = 0x52
-	OpcodeVecV128AnyTrue   OpcodeVec = 0x53
+	OpcodeVecV128Not       = 0x4d
+	OpcodeVecV128And       = 0x4e
+	OpcodeVecV128AndNot    = 0x4f
+	OpcodeVecV128Or        = 0x50
+	OpcodeVecV128Xor       = 0x51
+	OpcodeVecV128Bitselect = 0x52
+	OpcodeVecV128AnyTrue   = 0x53
 
 	// i8 misc.
 
-	OpcodeVecI8x16Abs          OpcodeVec = 0x60
-	OpcodeVecI8x16Neg          OpcodeVec = 0x61
-	OpcodeVecI8x16Popcnt       OpcodeVec = 0x62
-	OpcodeVecI8x16AllTrue      OpcodeVec = 0x63
-	OpcodeVecI8x16BitMask      OpcodeVec = 0x64
-	OpcodeVecI8x16NarrowI16x8S OpcodeVec = 0x65
-	OpcodeVecI8x16NarrowI16x8U OpcodeVec = 0x66
+	OpcodeVecI8x16Abs          = 0x60
+	OpcodeVecI8x16Neg          = 0x61
+	OpcodeVecI8x16Popcnt       = 0x62
+	OpcodeVecI8x16AllTrue      = 0x63
+	OpcodeVecI8x16BitMask      = 0x64
+	OpcodeVecI8x16NarrowI16x8S = 0x65
+	OpcodeVecI8x16NarrowI16x8U = 0x66
 
-	OpcodeVecI8x16Shl     OpcodeVec = 0x6b
-	OpcodeVecI8x16ShrS    OpcodeVec = 0x6c
-	OpcodeVecI8x16ShrU    OpcodeVec = 0x6d
-	OpcodeVecI8x16Add     OpcodeVec = 0x6e
-	OpcodeVecI8x16AddSatS OpcodeVec = 0x6f
+	OpcodeVecI8x16Shl     = 0x6b
+	OpcodeVecI8x16ShrS    = 0x6c
+	OpcodeVecI8x16ShrU    = 0x6d
+	OpcodeVecI8x16Add     = 0x6e
+	OpcodeVecI8x16AddSatS = 0x6f
 
-	OpcodeVecI8x16AddSatU OpcodeVec = 0x70
-	OpcodeVecI8x16Sub     OpcodeVec = 0x71
-	OpcodeVecI8x16SubSatS OpcodeVec = 0x72
-	OpcodeVecI8x16SubSatU OpcodeVec = 0x73
-	OpcodeVecI8x16MinS    OpcodeVec = 0x76
-	OpcodeVecI8x16MinU    OpcodeVec = 0x77
-	OpcodeVecI8x16MaxS    OpcodeVec = 0x78
-	OpcodeVecI8x16MaxU    OpcodeVec = 0x79
-	OpcodeVecI8x16AvgrU   OpcodeVec = 0x7b
+	OpcodeVecI8x16AddSatU = 0x70
+	OpcodeVecI8x16Sub     = 0x71
+	OpcodeVecI8x16SubSatS = 0x72
+	OpcodeVecI8x16SubSatU = 0x73
+	OpcodeVecI8x16MinS    = 0x76
+	OpcodeVecI8x16MinU    = 0x77
+	OpcodeVecI8x16MaxS    = 0x78
+	OpcodeVecI8x16MaxU    = 0x79
+	OpcodeVecI8x16AvgrU   = 0x7b
 
 	// i16 misc.
 
-	OpcodeVecI16x8ExtaddPairwiseI8x16S OpcodeVec = 0x7c
-	OpcodeVecI16x8ExtaddPairwiseI8x16U OpcodeVec = 0x7d
-	OpcodeVecI16x8Abs                  OpcodeVec = 0x80
-	OpcodeVecI16x8Neg                  OpcodeVec = 0x81
-	OpcodeVecI16x8Q15mulrSatS          OpcodeVec = 0x82
-	OpcodeVecI16x8AllTrue              OpcodeVec = 0x83
-	OpcodeVecI16x8BitMask              OpcodeVec = 0x84
-	OpcodeVecI16x8NarrowI32x4S         OpcodeVec = 0x85
-	OpcodeVecI16x8NarrowI32x4U         OpcodeVec = 0x86
-	OpcodeVecI16x8ExtendLowI8x16S      OpcodeVec = 0x87
-	OpcodeVecI16x8ExtendHighI8x16S     OpcodeVec = 0x88
-	OpcodeVecI16x8ExtendLowI8x16U      OpcodeVec = 0x89
-	OpcodeVecI16x8ExtendHighI8x16U     OpcodeVec = 0x8a
-	OpcodeVecI16x8Shl                  OpcodeVec = 0x8b
-	OpcodeVecI16x8ShrS                 OpcodeVec = 0x8c
-	OpcodeVecI16x8ShrU                 OpcodeVec = 0x8d
-	OpcodeVecI16x8Add                  OpcodeVec = 0x8e
-	OpcodeVecI16x8AddSatS              OpcodeVec = 0x8f
-	OpcodeVecI16x8AddSatU              OpcodeVec = 0x90
-	OpcodeVecI16x8Sub                  OpcodeVec = 0x91
-	OpcodeVecI16x8SubSatS              OpcodeVec = 0x92
-	OpcodeVecI16x8SubSatU              OpcodeVec = 0x93
-	OpcodeVecI16x8Mul                  OpcodeVec = 0x95
-	OpcodeVecI16x8MinS                 OpcodeVec = 0x96
-	OpcodeVecI16x8MinU                 OpcodeVec = 0x97
-	OpcodeVecI16x8MaxS                 OpcodeVec = 0x98
-	OpcodeVecI16x8MaxU                 OpcodeVec = 0x99
-	OpcodeVecI16x8AvgrU                OpcodeVec = 0x9b
-	OpcodeVecI16x8ExtMulLowI8x16S      OpcodeVec = 0x9c
-	OpcodeVecI16x8ExtMulHighI8x16S     OpcodeVec = 0x9d
-	OpcodeVecI16x8ExtMulLowI8x16U      OpcodeVec = 0x9e
-	OpcodeVecI16x8ExtMulHighI8x16U     OpcodeVec = 0x9f
+	OpcodeVecI16x8ExtaddPairwiseI8x16S = 0x7c
+	OpcodeVecI16x8ExtaddPairwiseI8x16U = 0x7d
+	OpcodeVecI16x8Abs                  = 0x80
+	OpcodeVecI16x8Neg                  = 0x81
+	OpcodeVecI16x8Q15mulrSatS          = 0x82
+	OpcodeVecI16x8AllTrue              = 0x83
+	OpcodeVecI16x8BitMask              = 0x84
+	OpcodeVecI16x8NarrowI32x4S         = 0x85
+	OpcodeVecI16x8NarrowI32x4U         = 0x86
+	OpcodeVecI16x8ExtendLowI8x16S      = 0x87
+	OpcodeVecI16x8ExtendHighI8x16S     = 0x88
+	OpcodeVecI16x8ExtendLowI8x16U      = 0x89
+	OpcodeVecI16x8ExtendHighI8x16U     = 0x8a
+	OpcodeVecI16x8Shl                  = 0x8b
+	OpcodeVecI16x8ShrS                 = 0x8c
+	OpcodeVecI16x8ShrU                 = 0x8d
+	OpcodeVecI16x8Add                  = 0x8e
+	OpcodeVecI16x8AddSatS              = 0x8f
+	OpcodeVecI16x8AddSatU              = 0x90
+	OpcodeVecI16x8Sub                  = 0x91
+	OpcodeVecI16x8SubSatS              = 0x92
+	OpcodeVecI16x8SubSatU              = 0x93
+	OpcodeVecI16x8Mul                  = 0x95
+	OpcodeVecI16x8MinS                 = 0x96
+	OpcodeVecI16x8MinU                 = 0x97
+	OpcodeVecI16x8MaxS                 = 0x98
+	OpcodeVecI16x8MaxU                 = 0x99
+	OpcodeVecI16x8AvgrU                = 0x9b
+	OpcodeVecI16x8ExtMulLowI8x16S      = 0x9c
+	OpcodeVecI16x8ExtMulHighI8x16S     = 0x9d
+	OpcodeVecI16x8ExtMulLowI8x16U      = 0x9e
+	OpcodeVecI16x8ExtMulHighI8x16U     = 0x9f
 
 	// i32 misc.
 
-	OpcodeVecI32x4ExtaddPairwiseI16x8S OpcodeVec = 0x7e
-	OpcodeVecI32x4ExtaddPairwiseI16x8U OpcodeVec = 0x7f
-	OpcodeVecI32x4Abs                  OpcodeVec = 0xa0
-	OpcodeVecI32x4Neg                  OpcodeVec = 0xa1
-	OpcodeVecI32x4AllTrue              OpcodeVec = 0xa3
-	OpcodeVecI32x4BitMask              OpcodeVec = 0xa4
-	OpcodeVecI32x4ExtendLowI16x8S      OpcodeVec = 0xa7
-	OpcodeVecI32x4ExtendHighI16x8S     OpcodeVec = 0xa8
-	OpcodeVecI32x4ExtendLowI16x8U      OpcodeVec = 0xa9
-	OpcodeVecI32x4ExtendHighI16x8U     OpcodeVec = 0xaa
-	OpcodeVecI32x4Shl                  OpcodeVec = 0xab
-	OpcodeVecI32x4ShrS                 OpcodeVec = 0xac
-	OpcodeVecI32x4ShrU                 OpcodeVec = 0xad
-	OpcodeVecI32x4Add                  OpcodeVec = 0xae
-	OpcodeVecI32x4Sub                  OpcodeVec = 0xb1
-	OpcodeVecI32x4Mul                  OpcodeVec = 0xb5
-	OpcodeVecI32x4MinS                 OpcodeVec = 0xb6
-	OpcodeVecI32x4MinU                 OpcodeVec = 0xb7
-	OpcodeVecI32x4MaxS                 OpcodeVec = 0xb8
-	OpcodeVecI32x4MaxU                 OpcodeVec = 0xb9
-	OpcodeVecI32x4DotI16x8S            OpcodeVec = 0xba
-	OpcodeVecI32x4ExtMulLowI16x8S      OpcodeVec = 0xbc
-	OpcodeVecI32x4ExtMulHighI16x8S     OpcodeVec = 0xbd
-	OpcodeVecI32x4ExtMulLowI16x8U      OpcodeVec = 0xbe
-	OpcodeVecI32x4ExtMulHighI16x8U     OpcodeVec = 0xbf
+	OpcodeVecI32x4ExtaddPairwiseI16x8S = 0x7e
+	OpcodeVecI32x4ExtaddPairwiseI16x8U = 0x7f
+	OpcodeVecI32x4Abs                  = 0xa0
+	OpcodeVecI32x4Neg                  = 0xa1
+	OpcodeVecI32x4AllTrue              = 0xa3
+	OpcodeVecI32x4BitMask              = 0xa4
+	OpcodeVecI32x4ExtendLowI16x8S      = 0xa7
+	OpcodeVecI32x4ExtendHighI16x8S     = 0xa8
+	OpcodeVecI32x4ExtendLowI16x8U      = 0xa9
+	OpcodeVecI32x4ExtendHighI16x8U     = 0xaa
+	OpcodeVecI32x4Shl                  = 0xab
+	OpcodeVecI32x4ShrS                 = 0xac
+	OpcodeVecI32x4ShrU                 = 0xad
+	OpcodeVecI32x4Add                  = 0xae
+	OpcodeVecI32x4Sub                  = 0xb1
+	OpcodeVecI32x4Mul                  = 0xb5
+	OpcodeVecI32x4MinS                 = 0xb6
+	OpcodeVecI32x4MinU                 = 0xb7
+	OpcodeVecI32x4MaxS                 = 0xb8
+	OpcodeVecI32x4MaxU                 = 0xb9
+	OpcodeVecI32x4DotI16x8S            = 0xba
+	OpcodeVecI32x4ExtMulLowI16x8S      = 0xbc
+	OpcodeVecI32x4ExtMulHighI16x8S     = 0xbd
+	OpcodeVecI32x4ExtMulLowI16x8U      = 0xbe
+	OpcodeVecI32x4ExtMulHighI16x8U     = 0xbf
 
 	// i64 misc.
 
-	OpcodeVecI64x2Abs              OpcodeVec = 0xc0
-	OpcodeVecI64x2Neg              OpcodeVec = 0xc1
-	OpcodeVecI64x2AllTrue          OpcodeVec = 0xc3
-	OpcodeVecI64x2BitMask          OpcodeVec = 0xc4
-	OpcodeVecI64x2ExtendLowI32x4S  OpcodeVec = 0xc7
-	OpcodeVecI64x2ExtendHighI32x4S OpcodeVec = 0xc8
-	OpcodeVecI64x2ExtendLowI32x4U  OpcodeVec = 0xc9
-	OpcodeVecI64x2ExtendHighI32x4U OpcodeVec = 0xca
-	OpcodeVecI64x2Shl              OpcodeVec = 0xcb
-	OpcodeVecI64x2ShrS             OpcodeVec = 0xcc
-	OpcodeVecI64x2ShrU             OpcodeVec = 0xcd
-	OpcodeVecI64x2Add              OpcodeVec = 0xce
-	OpcodeVecI64x2Sub              OpcodeVec = 0xd1
-	OpcodeVecI64x2Mul              OpcodeVec = 0xd5
-	OpcodeVecI64x2ExtMulLowI32x4S  OpcodeVec = 0xdc
-	OpcodeVecI64x2ExtMulHighI32x4S OpcodeVec = 0xdd
-	OpcodeVecI64x2ExtMulLowI32x4U  OpcodeVec = 0xde
-	OpcodeVecI64x2ExtMulHighI32x4U OpcodeVec = 0xdf
+	OpcodeVecI64x2Abs              = 0xc0
+	OpcodeVecI64x2Neg              = 0xc1
+	OpcodeVecI64x2AllTrue          = 0xc3
+	OpcodeVecI64x2BitMask          = 0xc4
+	OpcodeVecI64x2ExtendLowI32x4S  = 0xc7
+	OpcodeVecI64x2ExtendHighI32x4S = 0xc8
+	OpcodeVecI64x2ExtendLowI32x4U  = 0xc9
+	OpcodeVecI64x2ExtendHighI32x4U = 0xca
+	OpcodeVecI64x2Shl              = 0xcb
+	OpcodeVecI64x2ShrS             = 0xcc
+	OpcodeVecI64x2ShrU             = 0xcd
+	OpcodeVecI64x2Add              = 0xce
+	OpcodeVecI64x2Sub              = 0xd1
+	OpcodeVecI64x2Mul              = 0xd5
+	OpcodeVecI64x2ExtMulLowI32x4S  = 0xdc
+	OpcodeVecI64x2ExtMulHighI32x4S = 0xdd
+	OpcodeVecI64x2ExtMulLowI32x4U  = 0xde
+	OpcodeVecI64x2ExtMulHighI32x4U = 0xdf
 
 	// f32 misc.
 
-	OpcodeVecF32x4Ceil    OpcodeVec = 0x67
-	OpcodeVecF32x4Floor   OpcodeVec = 0x68
-	OpcodeVecF32x4Trunc   OpcodeVec = 0x69
-	OpcodeVecF32x4Nearest OpcodeVec = 0x6a
-	OpcodeVecF32x4Abs     OpcodeVec = 0xe0
-	OpcodeVecF32x4Neg     OpcodeVec = 0xe1
-	OpcodeVecF32x4Sqrt    OpcodeVec = 0xe3
-	OpcodeVecF32x4Add     OpcodeVec = 0xe4
-	OpcodeVecF32x4Sub     OpcodeVec = 0xe5
-	OpcodeVecF32x4Mul     OpcodeVec = 0xe6
-	OpcodeVecF32x4Div     OpcodeVec = 0xe7
-	OpcodeVecF32x4Min     OpcodeVec = 0xe8
-	OpcodeVecF32x4Max     OpcodeVec = 0xe9
-	OpcodeVecF32x4Pmin    OpcodeVec = 0xea
-	OpcodeVecF32x4Pmax    OpcodeVec = 0xeb
+	OpcodeVecF32x4Ceil    = 0x67
+	OpcodeVecF32x4Floor   = 0x68
+	OpcodeVecF32x4Trunc   = 0x69
+	OpcodeVecF32x4Nearest = 0x6a
+	OpcodeVecF32x4Abs     = 0xe0
+	OpcodeVecF32x4Neg     = 0xe1
+	OpcodeVecF32x4Sqrt    = 0xe3
+	OpcodeVecF32x4Add     = 0xe4
+	OpcodeVecF32x4Sub     = 0xe5
+	OpcodeVecF32x4Mul     = 0xe6
+	OpcodeVecF32x4Div     = 0xe7
+	OpcodeVecF32x4Min     = 0xe8
+	OpcodeVecF32x4Max     = 0xe9
+	OpcodeVecF32x4Pmin    = 0xea
+	OpcodeVecF32x4Pmax    = 0xeb
 
 	// f64 misc.
 
-	OpcodeVecF64x2Ceil    OpcodeVec = 0x74
-	OpcodeVecF64x2Floor   OpcodeVec = 0x75
-	OpcodeVecF64x2Trunc   OpcodeVec = 0x7a
-	OpcodeVecF64x2Nearest OpcodeVec = 0x94
-	OpcodeVecF64x2Abs     OpcodeVec = 0xec
-	OpcodeVecF64x2Neg     OpcodeVec = 0xed
-	OpcodeVecF64x2Sqrt    OpcodeVec = 0xef
-	OpcodeVecF64x2Add     OpcodeVec = 0xf0
-	OpcodeVecF64x2Sub     OpcodeVec = 0xf1
-	OpcodeVecF64x2Mul     OpcodeVec = 0xf2
-	OpcodeVecF64x2Div     OpcodeVec = 0xf3
-	OpcodeVecF64x2Min     OpcodeVec = 0xf4
-	OpcodeVecF64x2Max     OpcodeVec = 0xf5
-	OpcodeVecF64x2Pmin    OpcodeVec = 0xf6
-	OpcodeVecF64x2Pmax    OpcodeVec = 0xf7
+	OpcodeVecF64x2Ceil    = 0x74
+	OpcodeVecF64x2Floor   = 0x75
+	OpcodeVecF64x2Trunc   = 0x7a
+	OpcodeVecF64x2Nearest = 0x94
+	OpcodeVecF64x2Abs     = 0xec
+	OpcodeVecF64x2Neg     = 0xed
+	OpcodeVecF64x2Sqrt    = 0xef
+	OpcodeVecF64x2Add     = 0xf0
+	OpcodeVecF64x2Sub     = 0xf1
+	OpcodeVecF64x2Mul     = 0xf2
+	OpcodeVecF64x2Div     = 0xf3
+	OpcodeVecF64x2Min     = 0xf4
+	OpcodeVecF64x2Max     = 0xf5
+	OpcodeVecF64x2Pmin    = 0xf6
+	OpcodeVecF64x2Pmax    = 0xf7
 
 	// conversions.
 
-	OpcodeVecI32x4TruncSatF32x4S      OpcodeVec = 0xf8
-	OpcodeVecI32x4TruncSatF32x4U      OpcodeVec = 0xf9
-	OpcodeVecF32x4ConvertI32x4S       OpcodeVec = 0xfa
-	OpcodeVecF32x4ConvertI32x4U       OpcodeVec = 0xfb
-	OpcodeVecI32x4TruncSatF64x2SZero  OpcodeVec = 0xfc
-	OpcodeVecI32x4TruncSatF64x2UZero  OpcodeVec = 0xfd
-	OpcodeVecF64x2ConvertLowI32x4S    OpcodeVec = 0xfe
-	OpcodeVecF64x2ConvertLowI32x4U    OpcodeVec = 0xff
-	OpcodeVecF32x4DemoteF64x2Zero     OpcodeVec = 0x5e
-	OpcodeVecF64x2PromoteLowF32x4Zero OpcodeVec = 0x5f
+	OpcodeVecI32x4TruncSatF32x4S      = 0xf8
+	OpcodeVecI32x4TruncSatF32x4U      = 0xf9
+	OpcodeVecF32x4ConvertI32x4S       = 0xfa
+	OpcodeVecF32x4ConvertI32x4U       = 0xfb
+	OpcodeVecI32x4TruncSatF64x2SZero  = 0xfc
+	OpcodeVecI32x4TruncSatF64x2UZero  = 0xfd
+	OpcodeVecF64x2ConvertLowI32x4S    = 0xfe
+	OpcodeVecF64x2ConvertLowI32x4U    = 0xff
+	OpcodeVecF32x4DemoteF64x2Zero     = 0x5e
+	OpcodeVecF64x2PromoteLowF32x4Zero = 0x5f
+
+	// Relaxed SIMD. Unlike the constants above these do not fit in a byte, so a
+	// body always spends two bytes on them.
+	// https://github.com/WebAssembly/relaxed-simd
+
+	OpcodeVecI8x16RelaxedSwizzle           = 0x100
+	OpcodeVecI32x4RelaxedTruncF32x4S       = 0x101
+	OpcodeVecI32x4RelaxedTruncF32x4U       = 0x102
+	OpcodeVecI32x4RelaxedTruncF64x2SZero   = 0x103
+	OpcodeVecI32x4RelaxedTruncF64x2UZero   = 0x104
+	OpcodeVecF32x4RelaxedMadd              = 0x105
+	OpcodeVecF32x4RelaxedNmadd             = 0x106
+	OpcodeVecF64x2RelaxedMadd              = 0x107
+	OpcodeVecF64x2RelaxedNmadd             = 0x108
+	OpcodeVecI8x16RelaxedLaneselect        = 0x109
+	OpcodeVecI16x8RelaxedLaneselect        = 0x10a
+	OpcodeVecI32x4RelaxedLaneselect        = 0x10b
+	OpcodeVecI64x2RelaxedLaneselect        = 0x10c
+	OpcodeVecF32x4RelaxedMin               = 0x10d
+	OpcodeVecF32x4RelaxedMax               = 0x10e
+	OpcodeVecF64x2RelaxedMin               = 0x10f
+	OpcodeVecF64x2RelaxedMax               = 0x110
+	OpcodeVecI16x8RelaxedQ15mulrS          = 0x111
+	OpcodeVecI16x8RelaxedDotI8x16I7x16S    = 0x112
+	OpcodeVecI32x4RelaxedDotI8x16I7x16AddS = 0x113
 )
 
 // OpcodeAtomic represents an opcode of atomic instructions which has
@@ -1289,486 +1317,548 @@ func MiscInstructionName(oc OpcodeMisc) string {
 }
 
 const (
-	OpcodeVecV128LoadName                  = "v128.load"
-	OpcodeVecV128Load8x8SName              = "v128.load8x8_s"
-	OpcodeVecV128Load8x8UName              = "v128.load8x8_u"
-	OpcodeVecV128Load16x4SName             = "v128.load16x4_s"
-	OpcodeVecV128Load16x4UName             = "v128.load16x4_u"
-	OpcodeVecV128Load32x2SName             = "v128.load32x2_s"
-	OpcodeVecV128Load32x2UName             = "v128.load32x2_u"
-	OpcodeVecV128Load8SplatName            = "v128.load8_splat"
-	OpcodeVecV128Load16SplatName           = "v128.load16_splat"
-	OpcodeVecV128Load32SplatName           = "v128.load32_splat"
-	OpcodeVecV128Load64SplatName           = "v128.load64_splat"
-	OpcodeVecV128Load32zeroName            = "v128.load32_zero"
-	OpcodeVecV128Load64zeroName            = "v128.load64_zero"
-	OpcodeVecV128StoreName                 = "v128.store"
-	OpcodeVecV128Load8LaneName             = "v128.load8_lane"
-	OpcodeVecV128Load16LaneName            = "v128.load16_lane"
-	OpcodeVecV128Load32LaneName            = "v128.load32_lane"
-	OpcodeVecV128Load64LaneName            = "v128.load64_lane"
-	OpcodeVecV128Store8LaneName            = "v128.store8_lane"
-	OpcodeVecV128Store16LaneName           = "v128.store16_lane"
-	OpcodeVecV128Store32LaneName           = "v128.store32_lane"
-	OpcodeVecV128Store64LaneName           = "v128.store64_lane"
-	OpcodeVecV128ConstName                 = "v128.const"
-	OpcodeVecV128i8x16ShuffleName          = "v128.shuffle"
-	OpcodeVecI8x16ExtractLaneSName         = "i8x16.extract_lane_s"
-	OpcodeVecI8x16ExtractLaneUName         = "i8x16.extract_lane_u"
-	OpcodeVecI8x16ReplaceLaneName          = "i8x16.replace_lane"
-	OpcodeVecI16x8ExtractLaneSName         = "i16x8.extract_lane_s"
-	OpcodeVecI16x8ExtractLaneUName         = "i16x8.extract_lane_u"
-	OpcodeVecI16x8ReplaceLaneName          = "i16x8.replace_lane"
-	OpcodeVecI32x4ExtractLaneName          = "i32x4.extract_lane"
-	OpcodeVecI32x4ReplaceLaneName          = "i32x4.replace_lane"
-	OpcodeVecI64x2ExtractLaneName          = "i64x2.extract_lane"
-	OpcodeVecI64x2ReplaceLaneName          = "i64x2.replace_lane"
-	OpcodeVecF32x4ExtractLaneName          = "f32x4.extract_lane"
-	OpcodeVecF32x4ReplaceLaneName          = "f32x4.replace_lane"
-	OpcodeVecF64x2ExtractLaneName          = "f64x2.extract_lane"
-	OpcodeVecF64x2ReplaceLaneName          = "f64x2.replace_lane"
-	OpcodeVecI8x16SwizzleName              = "i8x16.swizzle"
-	OpcodeVecI8x16SplatName                = "i8x16.splat"
-	OpcodeVecI16x8SplatName                = "i16x8.splat"
-	OpcodeVecI32x4SplatName                = "i32x4.splat"
-	OpcodeVecI64x2SplatName                = "i64x2.splat"
-	OpcodeVecF32x4SplatName                = "f32x4.splat"
-	OpcodeVecF64x2SplatName                = "f64x2.splat"
-	OpcodeVecI8x16EqName                   = "i8x16.eq"
-	OpcodeVecI8x16NeName                   = "i8x16.ne"
-	OpcodeVecI8x16LtSName                  = "i8x16.lt_s"
-	OpcodeVecI8x16LtUName                  = "i8x16.lt_u"
-	OpcodeVecI8x16GtSName                  = "i8x16.gt_s"
-	OpcodeVecI8x16GtUName                  = "i8x16.gt_u"
-	OpcodeVecI8x16LeSName                  = "i8x16.le_s"
-	OpcodeVecI8x16LeUName                  = "i8x16.le_u"
-	OpcodeVecI8x16GeSName                  = "i8x16.ge_s"
-	OpcodeVecI8x16GeUName                  = "i8x16.ge_u"
-	OpcodeVecI16x8EqName                   = "i16x8.eq"
-	OpcodeVecI16x8NeName                   = "i16x8.ne"
-	OpcodeVecI16x8LtSName                  = "i16x8.lt_s"
-	OpcodeVecI16x8LtUName                  = "i16x8.lt_u"
-	OpcodeVecI16x8GtSName                  = "i16x8.gt_s"
-	OpcodeVecI16x8GtUName                  = "i16x8.gt_u"
-	OpcodeVecI16x8LeSName                  = "i16x8.le_s"
-	OpcodeVecI16x8LeUName                  = "i16x8.le_u"
-	OpcodeVecI16x8GeSName                  = "i16x8.ge_s"
-	OpcodeVecI16x8GeUName                  = "i16x8.ge_u"
-	OpcodeVecI32x4EqName                   = "i32x4.eq"
-	OpcodeVecI32x4NeName                   = "i32x4.ne"
-	OpcodeVecI32x4LtSName                  = "i32x4.lt_s"
-	OpcodeVecI32x4LtUName                  = "i32x4.lt_u"
-	OpcodeVecI32x4GtSName                  = "i32x4.gt_s"
-	OpcodeVecI32x4GtUName                  = "i32x4.gt_u"
-	OpcodeVecI32x4LeSName                  = "i32x4.le_s"
-	OpcodeVecI32x4LeUName                  = "i32x4.le_u"
-	OpcodeVecI32x4GeSName                  = "i32x4.ge_s"
-	OpcodeVecI32x4GeUName                  = "i32x4.ge_u"
-	OpcodeVecI64x2EqName                   = "i64x2.eq"
-	OpcodeVecI64x2NeName                   = "i64x2.ne"
-	OpcodeVecI64x2LtSName                  = "i64x2.lt"
-	OpcodeVecI64x2GtSName                  = "i64x2.gt"
-	OpcodeVecI64x2LeSName                  = "i64x2.le"
-	OpcodeVecI64x2GeSName                  = "i64x2.ge"
-	OpcodeVecF32x4EqName                   = "f32x4.eq"
-	OpcodeVecF32x4NeName                   = "f32x4.ne"
-	OpcodeVecF32x4LtName                   = "f32x4.lt"
-	OpcodeVecF32x4GtName                   = "f32x4.gt"
-	OpcodeVecF32x4LeName                   = "f32x4.le"
-	OpcodeVecF32x4GeName                   = "f32x4.ge"
-	OpcodeVecF64x2EqName                   = "f64x2.eq"
-	OpcodeVecF64x2NeName                   = "f64x2.ne"
-	OpcodeVecF64x2LtName                   = "f64x2.lt"
-	OpcodeVecF64x2GtName                   = "f64x2.gt"
-	OpcodeVecF64x2LeName                   = "f64x2.le"
-	OpcodeVecF64x2GeName                   = "f64x2.ge"
-	OpcodeVecV128NotName                   = "v128.not"
-	OpcodeVecV128AndName                   = "v128.and"
-	OpcodeVecV128AndNotName                = "v128.andnot"
-	OpcodeVecV128OrName                    = "v128.or"
-	OpcodeVecV128XorName                   = "v128.xor"
-	OpcodeVecV128BitselectName             = "v128.bitselect"
-	OpcodeVecV128AnyTrueName               = "v128.any_true"
-	OpcodeVecI8x16AbsName                  = "i8x16.abs"
-	OpcodeVecI8x16NegName                  = "i8x16.neg"
-	OpcodeVecI8x16PopcntName               = "i8x16.popcnt"
-	OpcodeVecI8x16AllTrueName              = "i8x16.all_true"
-	OpcodeVecI8x16BitMaskName              = "i8x16.bitmask"
-	OpcodeVecI8x16NarrowI16x8SName         = "i8x16.narrow_i16x8_s"
-	OpcodeVecI8x16NarrowI16x8UName         = "i8x16.narrow_i16x8_u"
-	OpcodeVecI8x16ShlName                  = "i8x16.shl"
-	OpcodeVecI8x16ShrSName                 = "i8x16.shr_s"
-	OpcodeVecI8x16ShrUName                 = "i8x16.shr_u"
-	OpcodeVecI8x16AddName                  = "i8x16.add"
-	OpcodeVecI8x16AddSatSName              = "i8x16.add_sat_s"
-	OpcodeVecI8x16AddSatUName              = "i8x16.add_sat_u"
-	OpcodeVecI8x16SubName                  = "i8x16.sub"
-	OpcodeVecI8x16SubSatSName              = "i8x16.sub_s"
-	OpcodeVecI8x16SubSatUName              = "i8x16.sub_u"
-	OpcodeVecI8x16MinSName                 = "i8x16.min_s"
-	OpcodeVecI8x16MinUName                 = "i8x16.min_u"
-	OpcodeVecI8x16MaxSName                 = "i8x16.max_s"
-	OpcodeVecI8x16MaxUName                 = "i8x16.max_u"
-	OpcodeVecI8x16AvgrUName                = "i8x16.avgr_u"
-	OpcodeVecI16x8ExtaddPairwiseI8x16SName = "i16x8.extadd_pairwise_i8x16_s"
-	OpcodeVecI16x8ExtaddPairwiseI8x16UName = "i16x8.extadd_pairwise_i8x16_u"
-	OpcodeVecI16x8AbsName                  = "i16x8.abs"
-	OpcodeVecI16x8NegName                  = "i16x8.neg"
-	OpcodeVecI16x8Q15mulrSatSName          = "i16x8.q15mulr_sat_s"
-	OpcodeVecI16x8AllTrueName              = "i16x8.all_true"
-	OpcodeVecI16x8BitMaskName              = "i16x8.bitmask"
-	OpcodeVecI16x8NarrowI32x4SName         = "i16x8.narrow_i32x4_s"
-	OpcodeVecI16x8NarrowI32x4UName         = "i16x8.narrow_i32x4_u"
-	OpcodeVecI16x8ExtendLowI8x16SName      = "i16x8.extend_low_i8x16_s"
-	OpcodeVecI16x8ExtendHighI8x16SName     = "i16x8.extend_high_i8x16_s"
-	OpcodeVecI16x8ExtendLowI8x16UName      = "i16x8.extend_low_i8x16_u"
-	OpcodeVecI16x8ExtendHighI8x16UName     = "i16x8.extend_high_i8x16_u"
-	OpcodeVecI16x8ShlName                  = "i16x8.shl"
-	OpcodeVecI16x8ShrSName                 = "i16x8.shr_s"
-	OpcodeVecI16x8ShrUName                 = "i16x8.shr_u"
-	OpcodeVecI16x8AddName                  = "i16x8.add"
-	OpcodeVecI16x8AddSatSName              = "i16x8.add_sat_s"
-	OpcodeVecI16x8AddSatUName              = "i16x8.add_sat_u"
-	OpcodeVecI16x8SubName                  = "i16x8.sub"
-	OpcodeVecI16x8SubSatSName              = "i16x8.sub_sat_s"
-	OpcodeVecI16x8SubSatUName              = "i16x8.sub_sat_u"
-	OpcodeVecI16x8MulName                  = "i16x8.mul"
-	OpcodeVecI16x8MinSName                 = "i16x8.min_s"
-	OpcodeVecI16x8MinUName                 = "i16x8.min_u"
-	OpcodeVecI16x8MaxSName                 = "i16x8.max_s"
-	OpcodeVecI16x8MaxUName                 = "i16x8.max_u"
-	OpcodeVecI16x8AvgrUName                = "i16x8.avgr_u"
-	OpcodeVecI16x8ExtMulLowI8x16SName      = "i16x8.extmul_low_i8x16_s"
-	OpcodeVecI16x8ExtMulHighI8x16SName     = "i16x8.extmul_high_i8x16_s"
-	OpcodeVecI16x8ExtMulLowI8x16UName      = "i16x8.extmul_low_i8x16_u"
-	OpcodeVecI16x8ExtMulHighI8x16UName     = "i16x8.extmul_high_i8x16_u"
-	OpcodeVecI32x4ExtaddPairwiseI16x8SName = "i32x4.extadd_pairwise_i16x8_s"
-	OpcodeVecI32x4ExtaddPairwiseI16x8UName = "i32x4.extadd_pairwise_i16x8_u"
-	OpcodeVecI32x4AbsName                  = "i32x4.abs"
-	OpcodeVecI32x4NegName                  = "i32x4.neg"
-	OpcodeVecI32x4AllTrueName              = "i32x4.all_true"
-	OpcodeVecI32x4BitMaskName              = "i32x4.bitmask"
-	OpcodeVecI32x4ExtendLowI16x8SName      = "i32x4.extend_low_i16x8_s"
-	OpcodeVecI32x4ExtendHighI16x8SName     = "i32x4.extend_high_i16x8_s"
-	OpcodeVecI32x4ExtendLowI16x8UName      = "i32x4.extend_low_i16x8_u"
-	OpcodeVecI32x4ExtendHighI16x8UName     = "i32x4.extend_high_i16x8_u"
-	OpcodeVecI32x4ShlName                  = "i32x4.shl"
-	OpcodeVecI32x4ShrSName                 = "i32x4.shr_s"
-	OpcodeVecI32x4ShrUName                 = "i32x4.shr_u"
-	OpcodeVecI32x4AddName                  = "i32x4.add"
-	OpcodeVecI32x4SubName                  = "i32x4.sub"
-	OpcodeVecI32x4MulName                  = "i32x4.mul"
-	OpcodeVecI32x4MinSName                 = "i32x4.min_s"
-	OpcodeVecI32x4MinUName                 = "i32x4.min_u"
-	OpcodeVecI32x4MaxSName                 = "i32x4.max_s"
-	OpcodeVecI32x4MaxUName                 = "i32x4.max_u"
-	OpcodeVecI32x4DotI16x8SName            = "i32x4.dot_i16x8_s"
-	OpcodeVecI32x4ExtMulLowI16x8SName      = "i32x4.extmul_low_i16x8_s"
-	OpcodeVecI32x4ExtMulHighI16x8SName     = "i32x4.extmul_high_i16x8_s"
-	OpcodeVecI32x4ExtMulLowI16x8UName      = "i32x4.extmul_low_i16x8_u"
-	OpcodeVecI32x4ExtMulHighI16x8UName     = "i32x4.extmul_high_i16x8_u"
-	OpcodeVecI64x2AbsName                  = "i64x2.abs"
-	OpcodeVecI64x2NegName                  = "i64x2.neg"
-	OpcodeVecI64x2AllTrueName              = "i64x2.all_true"
-	OpcodeVecI64x2BitMaskName              = "i64x2.bitmask"
-	OpcodeVecI64x2ExtendLowI32x4SName      = "i64x2.extend_low_i32x4_s"
-	OpcodeVecI64x2ExtendHighI32x4SName     = "i64x2.extend_high_i32x4_s"
-	OpcodeVecI64x2ExtendLowI32x4UName      = "i64x2.extend_low_i32x4_u"
-	OpcodeVecI64x2ExtendHighI32x4UName     = "i64x2.extend_high_i32x4_u"
-	OpcodeVecI64x2ShlName                  = "i64x2.shl"
-	OpcodeVecI64x2ShrSName                 = "i64x2.shr_s"
-	OpcodeVecI64x2ShrUName                 = "i64x2.shr_u"
-	OpcodeVecI64x2AddName                  = "i64x2.add"
-	OpcodeVecI64x2SubName                  = "i64x2.sub"
-	OpcodeVecI64x2MulName                  = "i64x2.mul"
-	OpcodeVecI64x2ExtMulLowI32x4SName      = "i64x2.extmul_low_i32x4_s"
-	OpcodeVecI64x2ExtMulHighI32x4SName     = "i64x2.extmul_high_i32x4_s"
-	OpcodeVecI64x2ExtMulLowI32x4UName      = "i64x2.extmul_low_i32x4_u"
-	OpcodeVecI64x2ExtMulHighI32x4UName     = "i64x2.extmul_high_i32x4_u"
-	OpcodeVecF32x4CeilName                 = "f32x4.ceil"
-	OpcodeVecF32x4FloorName                = "f32x4.floor"
-	OpcodeVecF32x4TruncName                = "f32x4.trunc"
-	OpcodeVecF32x4NearestName              = "f32x4.nearest"
-	OpcodeVecF32x4AbsName                  = "f32x4.abs"
-	OpcodeVecF32x4NegName                  = "f32x4.neg"
-	OpcodeVecF32x4SqrtName                 = "f32x4.sqrt"
-	OpcodeVecF32x4AddName                  = "f32x4.add"
-	OpcodeVecF32x4SubName                  = "f32x4.sub"
-	OpcodeVecF32x4MulName                  = "f32x4.mul"
-	OpcodeVecF32x4DivName                  = "f32x4.div"
-	OpcodeVecF32x4MinName                  = "f32x4.min"
-	OpcodeVecF32x4MaxName                  = "f32x4.max"
-	OpcodeVecF32x4PminName                 = "f32x4.pmin"
-	OpcodeVecF32x4PmaxName                 = "f32x4.pmax"
-	OpcodeVecF64x2CeilName                 = "f64x2.ceil"
-	OpcodeVecF64x2FloorName                = "f64x2.floor"
-	OpcodeVecF64x2TruncName                = "f64x2.trunc"
-	OpcodeVecF64x2NearestName              = "f64x2.nearest"
-	OpcodeVecF64x2AbsName                  = "f64x2.abs"
-	OpcodeVecF64x2NegName                  = "f64x2.neg"
-	OpcodeVecF64x2SqrtName                 = "f64x2.sqrt"
-	OpcodeVecF64x2AddName                  = "f64x2.add"
-	OpcodeVecF64x2SubName                  = "f64x2.sub"
-	OpcodeVecF64x2MulName                  = "f64x2.mul"
-	OpcodeVecF64x2DivName                  = "f64x2.div"
-	OpcodeVecF64x2MinName                  = "f64x2.min"
-	OpcodeVecF64x2MaxName                  = "f64x2.max"
-	OpcodeVecF64x2PminName                 = "f64x2.pmin"
-	OpcodeVecF64x2PmaxName                 = "f64x2.pmax"
-	OpcodeVecI32x4TruncSatF32x4SName       = "i32x4.trunc_sat_f32x4_s"
-	OpcodeVecI32x4TruncSatF32x4UName       = "i32x4.trunc_sat_f32x4_u"
-	OpcodeVecF32x4ConvertI32x4SName        = "f32x4.convert_i32x4_s"
-	OpcodeVecF32x4ConvertI32x4UName        = "f32x4.convert_i32x4_u"
-	OpcodeVecI32x4TruncSatF64x2SZeroName   = "i32x4.trunc_sat_f64x2_s_zero"
-	OpcodeVecI32x4TruncSatF64x2UZeroName   = "i32x4.trunc_sat_f64x2_u_zero"
-	OpcodeVecF64x2ConvertLowI32x4SName     = "f64x2.convert_low_i32x4_s"
-	OpcodeVecF64x2ConvertLowI32x4UName     = "f64x2.convert_low_i32x4_u"
-	OpcodeVecF32x4DemoteF64x2ZeroName      = "f32x4.demote_f64x2_zero"
-	OpcodeVecF64x2PromoteLowF32x4ZeroName  = "f64x2.promote_low_f32x4"
+	OpcodeVecV128LoadName                      = "v128.load"
+	OpcodeVecV128Load8x8SName                  = "v128.load8x8_s"
+	OpcodeVecV128Load8x8UName                  = "v128.load8x8_u"
+	OpcodeVecV128Load16x4SName                 = "v128.load16x4_s"
+	OpcodeVecV128Load16x4UName                 = "v128.load16x4_u"
+	OpcodeVecV128Load32x2SName                 = "v128.load32x2_s"
+	OpcodeVecV128Load32x2UName                 = "v128.load32x2_u"
+	OpcodeVecV128Load8SplatName                = "v128.load8_splat"
+	OpcodeVecV128Load16SplatName               = "v128.load16_splat"
+	OpcodeVecV128Load32SplatName               = "v128.load32_splat"
+	OpcodeVecV128Load64SplatName               = "v128.load64_splat"
+	OpcodeVecV128Load32zeroName                = "v128.load32_zero"
+	OpcodeVecV128Load64zeroName                = "v128.load64_zero"
+	OpcodeVecV128StoreName                     = "v128.store"
+	OpcodeVecV128Load8LaneName                 = "v128.load8_lane"
+	OpcodeVecV128Load16LaneName                = "v128.load16_lane"
+	OpcodeVecV128Load32LaneName                = "v128.load32_lane"
+	OpcodeVecV128Load64LaneName                = "v128.load64_lane"
+	OpcodeVecV128Store8LaneName                = "v128.store8_lane"
+	OpcodeVecV128Store16LaneName               = "v128.store16_lane"
+	OpcodeVecV128Store32LaneName               = "v128.store32_lane"
+	OpcodeVecV128Store64LaneName               = "v128.store64_lane"
+	OpcodeVecV128ConstName                     = "v128.const"
+	OpcodeVecV128i8x16ShuffleName              = "v128.shuffle"
+	OpcodeVecI8x16ExtractLaneSName             = "i8x16.extract_lane_s"
+	OpcodeVecI8x16ExtractLaneUName             = "i8x16.extract_lane_u"
+	OpcodeVecI8x16ReplaceLaneName              = "i8x16.replace_lane"
+	OpcodeVecI16x8ExtractLaneSName             = "i16x8.extract_lane_s"
+	OpcodeVecI16x8ExtractLaneUName             = "i16x8.extract_lane_u"
+	OpcodeVecI16x8ReplaceLaneName              = "i16x8.replace_lane"
+	OpcodeVecI32x4ExtractLaneName              = "i32x4.extract_lane"
+	OpcodeVecI32x4ReplaceLaneName              = "i32x4.replace_lane"
+	OpcodeVecI64x2ExtractLaneName              = "i64x2.extract_lane"
+	OpcodeVecI64x2ReplaceLaneName              = "i64x2.replace_lane"
+	OpcodeVecF32x4ExtractLaneName              = "f32x4.extract_lane"
+	OpcodeVecF32x4ReplaceLaneName              = "f32x4.replace_lane"
+	OpcodeVecF64x2ExtractLaneName              = "f64x2.extract_lane"
+	OpcodeVecF64x2ReplaceLaneName              = "f64x2.replace_lane"
+	OpcodeVecI8x16SwizzleName                  = "i8x16.swizzle"
+	OpcodeVecI8x16SplatName                    = "i8x16.splat"
+	OpcodeVecI16x8SplatName                    = "i16x8.splat"
+	OpcodeVecI32x4SplatName                    = "i32x4.splat"
+	OpcodeVecI64x2SplatName                    = "i64x2.splat"
+	OpcodeVecF32x4SplatName                    = "f32x4.splat"
+	OpcodeVecF64x2SplatName                    = "f64x2.splat"
+	OpcodeVecI8x16EqName                       = "i8x16.eq"
+	OpcodeVecI8x16NeName                       = "i8x16.ne"
+	OpcodeVecI8x16LtSName                      = "i8x16.lt_s"
+	OpcodeVecI8x16LtUName                      = "i8x16.lt_u"
+	OpcodeVecI8x16GtSName                      = "i8x16.gt_s"
+	OpcodeVecI8x16GtUName                      = "i8x16.gt_u"
+	OpcodeVecI8x16LeSName                      = "i8x16.le_s"
+	OpcodeVecI8x16LeUName                      = "i8x16.le_u"
+	OpcodeVecI8x16GeSName                      = "i8x16.ge_s"
+	OpcodeVecI8x16GeUName                      = "i8x16.ge_u"
+	OpcodeVecI16x8EqName                       = "i16x8.eq"
+	OpcodeVecI16x8NeName                       = "i16x8.ne"
+	OpcodeVecI16x8LtSName                      = "i16x8.lt_s"
+	OpcodeVecI16x8LtUName                      = "i16x8.lt_u"
+	OpcodeVecI16x8GtSName                      = "i16x8.gt_s"
+	OpcodeVecI16x8GtUName                      = "i16x8.gt_u"
+	OpcodeVecI16x8LeSName                      = "i16x8.le_s"
+	OpcodeVecI16x8LeUName                      = "i16x8.le_u"
+	OpcodeVecI16x8GeSName                      = "i16x8.ge_s"
+	OpcodeVecI16x8GeUName                      = "i16x8.ge_u"
+	OpcodeVecI32x4EqName                       = "i32x4.eq"
+	OpcodeVecI32x4NeName                       = "i32x4.ne"
+	OpcodeVecI32x4LtSName                      = "i32x4.lt_s"
+	OpcodeVecI32x4LtUName                      = "i32x4.lt_u"
+	OpcodeVecI32x4GtSName                      = "i32x4.gt_s"
+	OpcodeVecI32x4GtUName                      = "i32x4.gt_u"
+	OpcodeVecI32x4LeSName                      = "i32x4.le_s"
+	OpcodeVecI32x4LeUName                      = "i32x4.le_u"
+	OpcodeVecI32x4GeSName                      = "i32x4.ge_s"
+	OpcodeVecI32x4GeUName                      = "i32x4.ge_u"
+	OpcodeVecI64x2EqName                       = "i64x2.eq"
+	OpcodeVecI64x2NeName                       = "i64x2.ne"
+	OpcodeVecI64x2LtSName                      = "i64x2.lt"
+	OpcodeVecI64x2GtSName                      = "i64x2.gt"
+	OpcodeVecI64x2LeSName                      = "i64x2.le"
+	OpcodeVecI64x2GeSName                      = "i64x2.ge"
+	OpcodeVecF32x4EqName                       = "f32x4.eq"
+	OpcodeVecF32x4NeName                       = "f32x4.ne"
+	OpcodeVecF32x4LtName                       = "f32x4.lt"
+	OpcodeVecF32x4GtName                       = "f32x4.gt"
+	OpcodeVecF32x4LeName                       = "f32x4.le"
+	OpcodeVecF32x4GeName                       = "f32x4.ge"
+	OpcodeVecF64x2EqName                       = "f64x2.eq"
+	OpcodeVecF64x2NeName                       = "f64x2.ne"
+	OpcodeVecF64x2LtName                       = "f64x2.lt"
+	OpcodeVecF64x2GtName                       = "f64x2.gt"
+	OpcodeVecF64x2LeName                       = "f64x2.le"
+	OpcodeVecF64x2GeName                       = "f64x2.ge"
+	OpcodeVecV128NotName                       = "v128.not"
+	OpcodeVecV128AndName                       = "v128.and"
+	OpcodeVecV128AndNotName                    = "v128.andnot"
+	OpcodeVecV128OrName                        = "v128.or"
+	OpcodeVecV128XorName                       = "v128.xor"
+	OpcodeVecV128BitselectName                 = "v128.bitselect"
+	OpcodeVecV128AnyTrueName                   = "v128.any_true"
+	OpcodeVecI8x16AbsName                      = "i8x16.abs"
+	OpcodeVecI8x16NegName                      = "i8x16.neg"
+	OpcodeVecI8x16PopcntName                   = "i8x16.popcnt"
+	OpcodeVecI8x16AllTrueName                  = "i8x16.all_true"
+	OpcodeVecI8x16BitMaskName                  = "i8x16.bitmask"
+	OpcodeVecI8x16NarrowI16x8SName             = "i8x16.narrow_i16x8_s"
+	OpcodeVecI8x16NarrowI16x8UName             = "i8x16.narrow_i16x8_u"
+	OpcodeVecI8x16ShlName                      = "i8x16.shl"
+	OpcodeVecI8x16ShrSName                     = "i8x16.shr_s"
+	OpcodeVecI8x16ShrUName                     = "i8x16.shr_u"
+	OpcodeVecI8x16AddName                      = "i8x16.add"
+	OpcodeVecI8x16AddSatSName                  = "i8x16.add_sat_s"
+	OpcodeVecI8x16AddSatUName                  = "i8x16.add_sat_u"
+	OpcodeVecI8x16SubName                      = "i8x16.sub"
+	OpcodeVecI8x16SubSatSName                  = "i8x16.sub_s"
+	OpcodeVecI8x16SubSatUName                  = "i8x16.sub_u"
+	OpcodeVecI8x16MinSName                     = "i8x16.min_s"
+	OpcodeVecI8x16MinUName                     = "i8x16.min_u"
+	OpcodeVecI8x16MaxSName                     = "i8x16.max_s"
+	OpcodeVecI8x16MaxUName                     = "i8x16.max_u"
+	OpcodeVecI8x16AvgrUName                    = "i8x16.avgr_u"
+	OpcodeVecI16x8ExtaddPairwiseI8x16SName     = "i16x8.extadd_pairwise_i8x16_s"
+	OpcodeVecI16x8ExtaddPairwiseI8x16UName     = "i16x8.extadd_pairwise_i8x16_u"
+	OpcodeVecI16x8AbsName                      = "i16x8.abs"
+	OpcodeVecI16x8NegName                      = "i16x8.neg"
+	OpcodeVecI16x8Q15mulrSatSName              = "i16x8.q15mulr_sat_s"
+	OpcodeVecI16x8AllTrueName                  = "i16x8.all_true"
+	OpcodeVecI16x8BitMaskName                  = "i16x8.bitmask"
+	OpcodeVecI16x8NarrowI32x4SName             = "i16x8.narrow_i32x4_s"
+	OpcodeVecI16x8NarrowI32x4UName             = "i16x8.narrow_i32x4_u"
+	OpcodeVecI16x8ExtendLowI8x16SName          = "i16x8.extend_low_i8x16_s"
+	OpcodeVecI16x8ExtendHighI8x16SName         = "i16x8.extend_high_i8x16_s"
+	OpcodeVecI16x8ExtendLowI8x16UName          = "i16x8.extend_low_i8x16_u"
+	OpcodeVecI16x8ExtendHighI8x16UName         = "i16x8.extend_high_i8x16_u"
+	OpcodeVecI16x8ShlName                      = "i16x8.shl"
+	OpcodeVecI16x8ShrSName                     = "i16x8.shr_s"
+	OpcodeVecI16x8ShrUName                     = "i16x8.shr_u"
+	OpcodeVecI16x8AddName                      = "i16x8.add"
+	OpcodeVecI16x8AddSatSName                  = "i16x8.add_sat_s"
+	OpcodeVecI16x8AddSatUName                  = "i16x8.add_sat_u"
+	OpcodeVecI16x8SubName                      = "i16x8.sub"
+	OpcodeVecI16x8SubSatSName                  = "i16x8.sub_sat_s"
+	OpcodeVecI16x8SubSatUName                  = "i16x8.sub_sat_u"
+	OpcodeVecI16x8MulName                      = "i16x8.mul"
+	OpcodeVecI16x8MinSName                     = "i16x8.min_s"
+	OpcodeVecI16x8MinUName                     = "i16x8.min_u"
+	OpcodeVecI16x8MaxSName                     = "i16x8.max_s"
+	OpcodeVecI16x8MaxUName                     = "i16x8.max_u"
+	OpcodeVecI16x8AvgrUName                    = "i16x8.avgr_u"
+	OpcodeVecI16x8ExtMulLowI8x16SName          = "i16x8.extmul_low_i8x16_s"
+	OpcodeVecI16x8ExtMulHighI8x16SName         = "i16x8.extmul_high_i8x16_s"
+	OpcodeVecI16x8ExtMulLowI8x16UName          = "i16x8.extmul_low_i8x16_u"
+	OpcodeVecI16x8ExtMulHighI8x16UName         = "i16x8.extmul_high_i8x16_u"
+	OpcodeVecI32x4ExtaddPairwiseI16x8SName     = "i32x4.extadd_pairwise_i16x8_s"
+	OpcodeVecI32x4ExtaddPairwiseI16x8UName     = "i32x4.extadd_pairwise_i16x8_u"
+	OpcodeVecI32x4AbsName                      = "i32x4.abs"
+	OpcodeVecI32x4NegName                      = "i32x4.neg"
+	OpcodeVecI32x4AllTrueName                  = "i32x4.all_true"
+	OpcodeVecI32x4BitMaskName                  = "i32x4.bitmask"
+	OpcodeVecI32x4ExtendLowI16x8SName          = "i32x4.extend_low_i16x8_s"
+	OpcodeVecI32x4ExtendHighI16x8SName         = "i32x4.extend_high_i16x8_s"
+	OpcodeVecI32x4ExtendLowI16x8UName          = "i32x4.extend_low_i16x8_u"
+	OpcodeVecI32x4ExtendHighI16x8UName         = "i32x4.extend_high_i16x8_u"
+	OpcodeVecI32x4ShlName                      = "i32x4.shl"
+	OpcodeVecI32x4ShrSName                     = "i32x4.shr_s"
+	OpcodeVecI32x4ShrUName                     = "i32x4.shr_u"
+	OpcodeVecI32x4AddName                      = "i32x4.add"
+	OpcodeVecI32x4SubName                      = "i32x4.sub"
+	OpcodeVecI32x4MulName                      = "i32x4.mul"
+	OpcodeVecI32x4MinSName                     = "i32x4.min_s"
+	OpcodeVecI32x4MinUName                     = "i32x4.min_u"
+	OpcodeVecI32x4MaxSName                     = "i32x4.max_s"
+	OpcodeVecI32x4MaxUName                     = "i32x4.max_u"
+	OpcodeVecI32x4DotI16x8SName                = "i32x4.dot_i16x8_s"
+	OpcodeVecI32x4ExtMulLowI16x8SName          = "i32x4.extmul_low_i16x8_s"
+	OpcodeVecI32x4ExtMulHighI16x8SName         = "i32x4.extmul_high_i16x8_s"
+	OpcodeVecI32x4ExtMulLowI16x8UName          = "i32x4.extmul_low_i16x8_u"
+	OpcodeVecI32x4ExtMulHighI16x8UName         = "i32x4.extmul_high_i16x8_u"
+	OpcodeVecI64x2AbsName                      = "i64x2.abs"
+	OpcodeVecI64x2NegName                      = "i64x2.neg"
+	OpcodeVecI64x2AllTrueName                  = "i64x2.all_true"
+	OpcodeVecI64x2BitMaskName                  = "i64x2.bitmask"
+	OpcodeVecI64x2ExtendLowI32x4SName          = "i64x2.extend_low_i32x4_s"
+	OpcodeVecI64x2ExtendHighI32x4SName         = "i64x2.extend_high_i32x4_s"
+	OpcodeVecI64x2ExtendLowI32x4UName          = "i64x2.extend_low_i32x4_u"
+	OpcodeVecI64x2ExtendHighI32x4UName         = "i64x2.extend_high_i32x4_u"
+	OpcodeVecI64x2ShlName                      = "i64x2.shl"
+	OpcodeVecI64x2ShrSName                     = "i64x2.shr_s"
+	OpcodeVecI64x2ShrUName                     = "i64x2.shr_u"
+	OpcodeVecI64x2AddName                      = "i64x2.add"
+	OpcodeVecI64x2SubName                      = "i64x2.sub"
+	OpcodeVecI64x2MulName                      = "i64x2.mul"
+	OpcodeVecI64x2ExtMulLowI32x4SName          = "i64x2.extmul_low_i32x4_s"
+	OpcodeVecI64x2ExtMulHighI32x4SName         = "i64x2.extmul_high_i32x4_s"
+	OpcodeVecI64x2ExtMulLowI32x4UName          = "i64x2.extmul_low_i32x4_u"
+	OpcodeVecI64x2ExtMulHighI32x4UName         = "i64x2.extmul_high_i32x4_u"
+	OpcodeVecF32x4CeilName                     = "f32x4.ceil"
+	OpcodeVecF32x4FloorName                    = "f32x4.floor"
+	OpcodeVecF32x4TruncName                    = "f32x4.trunc"
+	OpcodeVecF32x4NearestName                  = "f32x4.nearest"
+	OpcodeVecF32x4AbsName                      = "f32x4.abs"
+	OpcodeVecF32x4NegName                      = "f32x4.neg"
+	OpcodeVecF32x4SqrtName                     = "f32x4.sqrt"
+	OpcodeVecF32x4AddName                      = "f32x4.add"
+	OpcodeVecF32x4SubName                      = "f32x4.sub"
+	OpcodeVecF32x4MulName                      = "f32x4.mul"
+	OpcodeVecF32x4DivName                      = "f32x4.div"
+	OpcodeVecF32x4MinName                      = "f32x4.min"
+	OpcodeVecF32x4MaxName                      = "f32x4.max"
+	OpcodeVecF32x4PminName                     = "f32x4.pmin"
+	OpcodeVecF32x4PmaxName                     = "f32x4.pmax"
+	OpcodeVecF64x2CeilName                     = "f64x2.ceil"
+	OpcodeVecF64x2FloorName                    = "f64x2.floor"
+	OpcodeVecF64x2TruncName                    = "f64x2.trunc"
+	OpcodeVecF64x2NearestName                  = "f64x2.nearest"
+	OpcodeVecF64x2AbsName                      = "f64x2.abs"
+	OpcodeVecF64x2NegName                      = "f64x2.neg"
+	OpcodeVecF64x2SqrtName                     = "f64x2.sqrt"
+	OpcodeVecF64x2AddName                      = "f64x2.add"
+	OpcodeVecF64x2SubName                      = "f64x2.sub"
+	OpcodeVecF64x2MulName                      = "f64x2.mul"
+	OpcodeVecF64x2DivName                      = "f64x2.div"
+	OpcodeVecF64x2MinName                      = "f64x2.min"
+	OpcodeVecF64x2MaxName                      = "f64x2.max"
+	OpcodeVecF64x2PminName                     = "f64x2.pmin"
+	OpcodeVecF64x2PmaxName                     = "f64x2.pmax"
+	OpcodeVecI32x4TruncSatF32x4SName           = "i32x4.trunc_sat_f32x4_s"
+	OpcodeVecI32x4TruncSatF32x4UName           = "i32x4.trunc_sat_f32x4_u"
+	OpcodeVecF32x4ConvertI32x4SName            = "f32x4.convert_i32x4_s"
+	OpcodeVecF32x4ConvertI32x4UName            = "f32x4.convert_i32x4_u"
+	OpcodeVecI32x4TruncSatF64x2SZeroName       = "i32x4.trunc_sat_f64x2_s_zero"
+	OpcodeVecI32x4TruncSatF64x2UZeroName       = "i32x4.trunc_sat_f64x2_u_zero"
+	OpcodeVecF64x2ConvertLowI32x4SName         = "f64x2.convert_low_i32x4_s"
+	OpcodeVecF64x2ConvertLowI32x4UName         = "f64x2.convert_low_i32x4_u"
+	OpcodeVecF32x4DemoteF64x2ZeroName          = "f32x4.demote_f64x2_zero"
+	OpcodeVecF64x2PromoteLowF32x4ZeroName      = "f64x2.promote_low_f32x4"
+	OpcodeVecI8x16RelaxedSwizzleName           = "i8x16.relaxed_swizzle"
+	OpcodeVecI32x4RelaxedTruncF32x4SName       = "i32x4.relaxed_trunc_f32x4_s"
+	OpcodeVecI32x4RelaxedTruncF32x4UName       = "i32x4.relaxed_trunc_f32x4_u"
+	OpcodeVecI32x4RelaxedTruncF64x2SZeroName   = "i32x4.relaxed_trunc_f64x2_s_zero"
+	OpcodeVecI32x4RelaxedTruncF64x2UZeroName   = "i32x4.relaxed_trunc_f64x2_u_zero"
+	OpcodeVecF32x4RelaxedMaddName              = "f32x4.relaxed_madd"
+	OpcodeVecF32x4RelaxedNmaddName             = "f32x4.relaxed_nmadd"
+	OpcodeVecF64x2RelaxedMaddName              = "f64x2.relaxed_madd"
+	OpcodeVecF64x2RelaxedNmaddName             = "f64x2.relaxed_nmadd"
+	OpcodeVecI8x16RelaxedLaneselectName        = "i8x16.relaxed_laneselect"
+	OpcodeVecI16x8RelaxedLaneselectName        = "i16x8.relaxed_laneselect"
+	OpcodeVecI32x4RelaxedLaneselectName        = "i32x4.relaxed_laneselect"
+	OpcodeVecI64x2RelaxedLaneselectName        = "i64x2.relaxed_laneselect"
+	OpcodeVecF32x4RelaxedMinName               = "f32x4.relaxed_min"
+	OpcodeVecF32x4RelaxedMaxName               = "f32x4.relaxed_max"
+	OpcodeVecF64x2RelaxedMinName               = "f64x2.relaxed_min"
+	OpcodeVecF64x2RelaxedMaxName               = "f64x2.relaxed_max"
+	OpcodeVecI16x8RelaxedQ15mulrSName          = "i16x8.relaxed_q15mulr_s"
+	OpcodeVecI16x8RelaxedDotI8x16I7x16SName    = "i16x8.relaxed_dot_i8x16_i7x16_s"
+	OpcodeVecI32x4RelaxedDotI8x16I7x16AddSName = "i32x4.relaxed_dot_i8x16_i7x16_add_s"
 )
 
 var vectorInstructionName = map[OpcodeVec]string{
-	OpcodeVecV128Load:                  OpcodeVecV128LoadName,
-	OpcodeVecV128Load8x8s:              OpcodeVecV128Load8x8SName,
-	OpcodeVecV128Load8x8u:              OpcodeVecV128Load8x8UName,
-	OpcodeVecV128Load16x4s:             OpcodeVecV128Load16x4SName,
-	OpcodeVecV128Load16x4u:             OpcodeVecV128Load16x4UName,
-	OpcodeVecV128Load32x2s:             OpcodeVecV128Load32x2SName,
-	OpcodeVecV128Load32x2u:             OpcodeVecV128Load32x2UName,
-	OpcodeVecV128Load8Splat:            OpcodeVecV128Load8SplatName,
-	OpcodeVecV128Load16Splat:           OpcodeVecV128Load16SplatName,
-	OpcodeVecV128Load32Splat:           OpcodeVecV128Load32SplatName,
-	OpcodeVecV128Load64Splat:           OpcodeVecV128Load64SplatName,
-	OpcodeVecV128Load32zero:            OpcodeVecV128Load32zeroName,
-	OpcodeVecV128Load64zero:            OpcodeVecV128Load64zeroName,
-	OpcodeVecV128Store:                 OpcodeVecV128StoreName,
-	OpcodeVecV128Load8Lane:             OpcodeVecV128Load8LaneName,
-	OpcodeVecV128Load16Lane:            OpcodeVecV128Load16LaneName,
-	OpcodeVecV128Load32Lane:            OpcodeVecV128Load32LaneName,
-	OpcodeVecV128Load64Lane:            OpcodeVecV128Load64LaneName,
-	OpcodeVecV128Store8Lane:            OpcodeVecV128Store8LaneName,
-	OpcodeVecV128Store16Lane:           OpcodeVecV128Store16LaneName,
-	OpcodeVecV128Store32Lane:           OpcodeVecV128Store32LaneName,
-	OpcodeVecV128Store64Lane:           OpcodeVecV128Store64LaneName,
-	OpcodeVecV128Const:                 OpcodeVecV128ConstName,
-	OpcodeVecV128i8x16Shuffle:          OpcodeVecV128i8x16ShuffleName,
-	OpcodeVecI8x16ExtractLaneS:         OpcodeVecI8x16ExtractLaneSName,
-	OpcodeVecI8x16ExtractLaneU:         OpcodeVecI8x16ExtractLaneUName,
-	OpcodeVecI8x16ReplaceLane:          OpcodeVecI8x16ReplaceLaneName,
-	OpcodeVecI16x8ExtractLaneS:         OpcodeVecI16x8ExtractLaneSName,
-	OpcodeVecI16x8ExtractLaneU:         OpcodeVecI16x8ExtractLaneUName,
-	OpcodeVecI16x8ReplaceLane:          OpcodeVecI16x8ReplaceLaneName,
-	OpcodeVecI32x4ExtractLane:          OpcodeVecI32x4ExtractLaneName,
-	OpcodeVecI32x4ReplaceLane:          OpcodeVecI32x4ReplaceLaneName,
-	OpcodeVecI64x2ExtractLane:          OpcodeVecI64x2ExtractLaneName,
-	OpcodeVecI64x2ReplaceLane:          OpcodeVecI64x2ReplaceLaneName,
-	OpcodeVecF32x4ExtractLane:          OpcodeVecF32x4ExtractLaneName,
-	OpcodeVecF32x4ReplaceLane:          OpcodeVecF32x4ReplaceLaneName,
-	OpcodeVecF64x2ExtractLane:          OpcodeVecF64x2ExtractLaneName,
-	OpcodeVecF64x2ReplaceLane:          OpcodeVecF64x2ReplaceLaneName,
-	OpcodeVecI8x16Swizzle:              OpcodeVecI8x16SwizzleName,
-	OpcodeVecI8x16Splat:                OpcodeVecI8x16SplatName,
-	OpcodeVecI16x8Splat:                OpcodeVecI16x8SplatName,
-	OpcodeVecI32x4Splat:                OpcodeVecI32x4SplatName,
-	OpcodeVecI64x2Splat:                OpcodeVecI64x2SplatName,
-	OpcodeVecF32x4Splat:                OpcodeVecF32x4SplatName,
-	OpcodeVecF64x2Splat:                OpcodeVecF64x2SplatName,
-	OpcodeVecI8x16Eq:                   OpcodeVecI8x16EqName,
-	OpcodeVecI8x16Ne:                   OpcodeVecI8x16NeName,
-	OpcodeVecI8x16LtS:                  OpcodeVecI8x16LtSName,
-	OpcodeVecI8x16LtU:                  OpcodeVecI8x16LtUName,
-	OpcodeVecI8x16GtS:                  OpcodeVecI8x16GtSName,
-	OpcodeVecI8x16GtU:                  OpcodeVecI8x16GtUName,
-	OpcodeVecI8x16LeS:                  OpcodeVecI8x16LeSName,
-	OpcodeVecI8x16LeU:                  OpcodeVecI8x16LeUName,
-	OpcodeVecI8x16GeS:                  OpcodeVecI8x16GeSName,
-	OpcodeVecI8x16GeU:                  OpcodeVecI8x16GeUName,
-	OpcodeVecI16x8Eq:                   OpcodeVecI16x8EqName,
-	OpcodeVecI16x8Ne:                   OpcodeVecI16x8NeName,
-	OpcodeVecI16x8LtS:                  OpcodeVecI16x8LtSName,
-	OpcodeVecI16x8LtU:                  OpcodeVecI16x8LtUName,
-	OpcodeVecI16x8GtS:                  OpcodeVecI16x8GtSName,
-	OpcodeVecI16x8GtU:                  OpcodeVecI16x8GtUName,
-	OpcodeVecI16x8LeS:                  OpcodeVecI16x8LeSName,
-	OpcodeVecI16x8LeU:                  OpcodeVecI16x8LeUName,
-	OpcodeVecI16x8GeS:                  OpcodeVecI16x8GeSName,
-	OpcodeVecI16x8GeU:                  OpcodeVecI16x8GeUName,
-	OpcodeVecI32x4Eq:                   OpcodeVecI32x4EqName,
-	OpcodeVecI32x4Ne:                   OpcodeVecI32x4NeName,
-	OpcodeVecI32x4LtS:                  OpcodeVecI32x4LtSName,
-	OpcodeVecI32x4LtU:                  OpcodeVecI32x4LtUName,
-	OpcodeVecI32x4GtS:                  OpcodeVecI32x4GtSName,
-	OpcodeVecI32x4GtU:                  OpcodeVecI32x4GtUName,
-	OpcodeVecI32x4LeS:                  OpcodeVecI32x4LeSName,
-	OpcodeVecI32x4LeU:                  OpcodeVecI32x4LeUName,
-	OpcodeVecI32x4GeS:                  OpcodeVecI32x4GeSName,
-	OpcodeVecI32x4GeU:                  OpcodeVecI32x4GeUName,
-	OpcodeVecI64x2Eq:                   OpcodeVecI64x2EqName,
-	OpcodeVecI64x2Ne:                   OpcodeVecI64x2NeName,
-	OpcodeVecI64x2LtS:                  OpcodeVecI64x2LtSName,
-	OpcodeVecI64x2GtS:                  OpcodeVecI64x2GtSName,
-	OpcodeVecI64x2LeS:                  OpcodeVecI64x2LeSName,
-	OpcodeVecI64x2GeS:                  OpcodeVecI64x2GeSName,
-	OpcodeVecF32x4Eq:                   OpcodeVecF32x4EqName,
-	OpcodeVecF32x4Ne:                   OpcodeVecF32x4NeName,
-	OpcodeVecF32x4Lt:                   OpcodeVecF32x4LtName,
-	OpcodeVecF32x4Gt:                   OpcodeVecF32x4GtName,
-	OpcodeVecF32x4Le:                   OpcodeVecF32x4LeName,
-	OpcodeVecF32x4Ge:                   OpcodeVecF32x4GeName,
-	OpcodeVecF64x2Eq:                   OpcodeVecF64x2EqName,
-	OpcodeVecF64x2Ne:                   OpcodeVecF64x2NeName,
-	OpcodeVecF64x2Lt:                   OpcodeVecF64x2LtName,
-	OpcodeVecF64x2Gt:                   OpcodeVecF64x2GtName,
-	OpcodeVecF64x2Le:                   OpcodeVecF64x2LeName,
-	OpcodeVecF64x2Ge:                   OpcodeVecF64x2GeName,
-	OpcodeVecV128Not:                   OpcodeVecV128NotName,
-	OpcodeVecV128And:                   OpcodeVecV128AndName,
-	OpcodeVecV128AndNot:                OpcodeVecV128AndNotName,
-	OpcodeVecV128Or:                    OpcodeVecV128OrName,
-	OpcodeVecV128Xor:                   OpcodeVecV128XorName,
-	OpcodeVecV128Bitselect:             OpcodeVecV128BitselectName,
-	OpcodeVecV128AnyTrue:               OpcodeVecV128AnyTrueName,
-	OpcodeVecI8x16Abs:                  OpcodeVecI8x16AbsName,
-	OpcodeVecI8x16Neg:                  OpcodeVecI8x16NegName,
-	OpcodeVecI8x16Popcnt:               OpcodeVecI8x16PopcntName,
-	OpcodeVecI8x16AllTrue:              OpcodeVecI8x16AllTrueName,
-	OpcodeVecI8x16BitMask:              OpcodeVecI8x16BitMaskName,
-	OpcodeVecI8x16NarrowI16x8S:         OpcodeVecI8x16NarrowI16x8SName,
-	OpcodeVecI8x16NarrowI16x8U:         OpcodeVecI8x16NarrowI16x8UName,
-	OpcodeVecI8x16Shl:                  OpcodeVecI8x16ShlName,
-	OpcodeVecI8x16ShrS:                 OpcodeVecI8x16ShrSName,
-	OpcodeVecI8x16ShrU:                 OpcodeVecI8x16ShrUName,
-	OpcodeVecI8x16Add:                  OpcodeVecI8x16AddName,
-	OpcodeVecI8x16AddSatS:              OpcodeVecI8x16AddSatSName,
-	OpcodeVecI8x16AddSatU:              OpcodeVecI8x16AddSatUName,
-	OpcodeVecI8x16Sub:                  OpcodeVecI8x16SubName,
-	OpcodeVecI8x16SubSatS:              OpcodeVecI8x16SubSatSName,
-	OpcodeVecI8x16SubSatU:              OpcodeVecI8x16SubSatUName,
-	OpcodeVecI8x16MinS:                 OpcodeVecI8x16MinSName,
-	OpcodeVecI8x16MinU:                 OpcodeVecI8x16MinUName,
-	OpcodeVecI8x16MaxS:                 OpcodeVecI8x16MaxSName,
-	OpcodeVecI8x16MaxU:                 OpcodeVecI8x16MaxUName,
-	OpcodeVecI8x16AvgrU:                OpcodeVecI8x16AvgrUName,
-	OpcodeVecI16x8ExtaddPairwiseI8x16S: OpcodeVecI16x8ExtaddPairwiseI8x16SName,
-	OpcodeVecI16x8ExtaddPairwiseI8x16U: OpcodeVecI16x8ExtaddPairwiseI8x16UName,
-	OpcodeVecI16x8Abs:                  OpcodeVecI16x8AbsName,
-	OpcodeVecI16x8Neg:                  OpcodeVecI16x8NegName,
-	OpcodeVecI16x8Q15mulrSatS:          OpcodeVecI16x8Q15mulrSatSName,
-	OpcodeVecI16x8AllTrue:              OpcodeVecI16x8AllTrueName,
-	OpcodeVecI16x8BitMask:              OpcodeVecI16x8BitMaskName,
-	OpcodeVecI16x8NarrowI32x4S:         OpcodeVecI16x8NarrowI32x4SName,
-	OpcodeVecI16x8NarrowI32x4U:         OpcodeVecI16x8NarrowI32x4UName,
-	OpcodeVecI16x8ExtendLowI8x16S:      OpcodeVecI16x8ExtendLowI8x16SName,
-	OpcodeVecI16x8ExtendHighI8x16S:     OpcodeVecI16x8ExtendHighI8x16SName,
-	OpcodeVecI16x8ExtendLowI8x16U:      OpcodeVecI16x8ExtendLowI8x16UName,
-	OpcodeVecI16x8ExtendHighI8x16U:     OpcodeVecI16x8ExtendHighI8x16UName,
-	OpcodeVecI16x8Shl:                  OpcodeVecI16x8ShlName,
-	OpcodeVecI16x8ShrS:                 OpcodeVecI16x8ShrSName,
-	OpcodeVecI16x8ShrU:                 OpcodeVecI16x8ShrUName,
-	OpcodeVecI16x8Add:                  OpcodeVecI16x8AddName,
-	OpcodeVecI16x8AddSatS:              OpcodeVecI16x8AddSatSName,
-	OpcodeVecI16x8AddSatU:              OpcodeVecI16x8AddSatUName,
-	OpcodeVecI16x8Sub:                  OpcodeVecI16x8SubName,
-	OpcodeVecI16x8SubSatS:              OpcodeVecI16x8SubSatSName,
-	OpcodeVecI16x8SubSatU:              OpcodeVecI16x8SubSatUName,
-	OpcodeVecI16x8Mul:                  OpcodeVecI16x8MulName,
-	OpcodeVecI16x8MinS:                 OpcodeVecI16x8MinSName,
-	OpcodeVecI16x8MinU:                 OpcodeVecI16x8MinUName,
-	OpcodeVecI16x8MaxS:                 OpcodeVecI16x8MaxSName,
-	OpcodeVecI16x8MaxU:                 OpcodeVecI16x8MaxUName,
-	OpcodeVecI16x8AvgrU:                OpcodeVecI16x8AvgrUName,
-	OpcodeVecI16x8ExtMulLowI8x16S:      OpcodeVecI16x8ExtMulLowI8x16SName,
-	OpcodeVecI16x8ExtMulHighI8x16S:     OpcodeVecI16x8ExtMulHighI8x16SName,
-	OpcodeVecI16x8ExtMulLowI8x16U:      OpcodeVecI16x8ExtMulLowI8x16UName,
-	OpcodeVecI16x8ExtMulHighI8x16U:     OpcodeVecI16x8ExtMulHighI8x16UName,
-	OpcodeVecI32x4ExtaddPairwiseI16x8S: OpcodeVecI32x4ExtaddPairwiseI16x8SName,
-	OpcodeVecI32x4ExtaddPairwiseI16x8U: OpcodeVecI32x4ExtaddPairwiseI16x8UName,
-	OpcodeVecI32x4Abs:                  OpcodeVecI32x4AbsName,
-	OpcodeVecI32x4Neg:                  OpcodeVecI32x4NegName,
-	OpcodeVecI32x4AllTrue:              OpcodeVecI32x4AllTrueName,
-	OpcodeVecI32x4BitMask:              OpcodeVecI32x4BitMaskName,
-	OpcodeVecI32x4ExtendLowI16x8S:      OpcodeVecI32x4ExtendLowI16x8SName,
-	OpcodeVecI32x4ExtendHighI16x8S:     OpcodeVecI32x4ExtendHighI16x8SName,
-	OpcodeVecI32x4ExtendLowI16x8U:      OpcodeVecI32x4ExtendLowI16x8UName,
-	OpcodeVecI32x4ExtendHighI16x8U:     OpcodeVecI32x4ExtendHighI16x8UName,
-	OpcodeVecI32x4Shl:                  OpcodeVecI32x4ShlName,
-	OpcodeVecI32x4ShrS:                 OpcodeVecI32x4ShrSName,
-	OpcodeVecI32x4ShrU:                 OpcodeVecI32x4ShrUName,
-	OpcodeVecI32x4Add:                  OpcodeVecI32x4AddName,
-	OpcodeVecI32x4Sub:                  OpcodeVecI32x4SubName,
-	OpcodeVecI32x4Mul:                  OpcodeVecI32x4MulName,
-	OpcodeVecI32x4MinS:                 OpcodeVecI32x4MinSName,
-	OpcodeVecI32x4MinU:                 OpcodeVecI32x4MinUName,
-	OpcodeVecI32x4MaxS:                 OpcodeVecI32x4MaxSName,
-	OpcodeVecI32x4MaxU:                 OpcodeVecI32x4MaxUName,
-	OpcodeVecI32x4DotI16x8S:            OpcodeVecI32x4DotI16x8SName,
-	OpcodeVecI32x4ExtMulLowI16x8S:      OpcodeVecI32x4ExtMulLowI16x8SName,
-	OpcodeVecI32x4ExtMulHighI16x8S:     OpcodeVecI32x4ExtMulHighI16x8SName,
-	OpcodeVecI32x4ExtMulLowI16x8U:      OpcodeVecI32x4ExtMulLowI16x8UName,
-	OpcodeVecI32x4ExtMulHighI16x8U:     OpcodeVecI32x4ExtMulHighI16x8UName,
-	OpcodeVecI64x2Abs:                  OpcodeVecI64x2AbsName,
-	OpcodeVecI64x2Neg:                  OpcodeVecI64x2NegName,
-	OpcodeVecI64x2AllTrue:              OpcodeVecI64x2AllTrueName,
-	OpcodeVecI64x2BitMask:              OpcodeVecI64x2BitMaskName,
-	OpcodeVecI64x2ExtendLowI32x4S:      OpcodeVecI64x2ExtendLowI32x4SName,
-	OpcodeVecI64x2ExtendHighI32x4S:     OpcodeVecI64x2ExtendHighI32x4SName,
-	OpcodeVecI64x2ExtendLowI32x4U:      OpcodeVecI64x2ExtendLowI32x4UName,
-	OpcodeVecI64x2ExtendHighI32x4U:     OpcodeVecI64x2ExtendHighI32x4UName,
-	OpcodeVecI64x2Shl:                  OpcodeVecI64x2ShlName,
-	OpcodeVecI64x2ShrS:                 OpcodeVecI64x2ShrSName,
-	OpcodeVecI64x2ShrU:                 OpcodeVecI64x2ShrUName,
-	OpcodeVecI64x2Add:                  OpcodeVecI64x2AddName,
-	OpcodeVecI64x2Sub:                  OpcodeVecI64x2SubName,
-	OpcodeVecI64x2Mul:                  OpcodeVecI64x2MulName,
-	OpcodeVecI64x2ExtMulLowI32x4S:      OpcodeVecI64x2ExtMulLowI32x4SName,
-	OpcodeVecI64x2ExtMulHighI32x4S:     OpcodeVecI64x2ExtMulHighI32x4SName,
-	OpcodeVecI64x2ExtMulLowI32x4U:      OpcodeVecI64x2ExtMulLowI32x4UName,
-	OpcodeVecI64x2ExtMulHighI32x4U:     OpcodeVecI64x2ExtMulHighI32x4UName,
-	OpcodeVecF32x4Ceil:                 OpcodeVecF32x4CeilName,
-	OpcodeVecF32x4Floor:                OpcodeVecF32x4FloorName,
-	OpcodeVecF32x4Trunc:                OpcodeVecF32x4TruncName,
-	OpcodeVecF32x4Nearest:              OpcodeVecF32x4NearestName,
-	OpcodeVecF32x4Abs:                  OpcodeVecF32x4AbsName,
-	OpcodeVecF32x4Neg:                  OpcodeVecF32x4NegName,
-	OpcodeVecF32x4Sqrt:                 OpcodeVecF32x4SqrtName,
-	OpcodeVecF32x4Add:                  OpcodeVecF32x4AddName,
-	OpcodeVecF32x4Sub:                  OpcodeVecF32x4SubName,
-	OpcodeVecF32x4Mul:                  OpcodeVecF32x4MulName,
-	OpcodeVecF32x4Div:                  OpcodeVecF32x4DivName,
-	OpcodeVecF32x4Min:                  OpcodeVecF32x4MinName,
-	OpcodeVecF32x4Max:                  OpcodeVecF32x4MaxName,
-	OpcodeVecF32x4Pmin:                 OpcodeVecF32x4PminName,
-	OpcodeVecF32x4Pmax:                 OpcodeVecF32x4PmaxName,
-	OpcodeVecF64x2Ceil:                 OpcodeVecF64x2CeilName,
-	OpcodeVecF64x2Floor:                OpcodeVecF64x2FloorName,
-	OpcodeVecF64x2Trunc:                OpcodeVecF64x2TruncName,
-	OpcodeVecF64x2Nearest:              OpcodeVecF64x2NearestName,
-	OpcodeVecF64x2Abs:                  OpcodeVecF64x2AbsName,
-	OpcodeVecF64x2Neg:                  OpcodeVecF64x2NegName,
-	OpcodeVecF64x2Sqrt:                 OpcodeVecF64x2SqrtName,
-	OpcodeVecF64x2Add:                  OpcodeVecF64x2AddName,
-	OpcodeVecF64x2Sub:                  OpcodeVecF64x2SubName,
-	OpcodeVecF64x2Mul:                  OpcodeVecF64x2MulName,
-	OpcodeVecF64x2Div:                  OpcodeVecF64x2DivName,
-	OpcodeVecF64x2Min:                  OpcodeVecF64x2MinName,
-	OpcodeVecF64x2Max:                  OpcodeVecF64x2MaxName,
-	OpcodeVecF64x2Pmin:                 OpcodeVecF64x2PminName,
-	OpcodeVecF64x2Pmax:                 OpcodeVecF64x2PmaxName,
-	OpcodeVecI32x4TruncSatF32x4S:       OpcodeVecI32x4TruncSatF32x4SName,
-	OpcodeVecI32x4TruncSatF32x4U:       OpcodeVecI32x4TruncSatF32x4UName,
-	OpcodeVecF32x4ConvertI32x4S:        OpcodeVecF32x4ConvertI32x4SName,
-	OpcodeVecF32x4ConvertI32x4U:        OpcodeVecF32x4ConvertI32x4UName,
-	OpcodeVecI32x4TruncSatF64x2SZero:   OpcodeVecI32x4TruncSatF64x2SZeroName,
-	OpcodeVecI32x4TruncSatF64x2UZero:   OpcodeVecI32x4TruncSatF64x2UZeroName,
-	OpcodeVecF64x2ConvertLowI32x4S:     OpcodeVecF64x2ConvertLowI32x4SName,
-	OpcodeVecF64x2ConvertLowI32x4U:     OpcodeVecF64x2ConvertLowI32x4UName,
-	OpcodeVecF32x4DemoteF64x2Zero:      OpcodeVecF32x4DemoteF64x2ZeroName,
-	OpcodeVecF64x2PromoteLowF32x4Zero:  OpcodeVecF64x2PromoteLowF32x4ZeroName,
+	OpcodeVecV128Load:                      OpcodeVecV128LoadName,
+	OpcodeVecV128Load8x8s:                  OpcodeVecV128Load8x8SName,
+	OpcodeVecV128Load8x8u:                  OpcodeVecV128Load8x8UName,
+	OpcodeVecV128Load16x4s:                 OpcodeVecV128Load16x4SName,
+	OpcodeVecV128Load16x4u:                 OpcodeVecV128Load16x4UName,
+	OpcodeVecV128Load32x2s:                 OpcodeVecV128Load32x2SName,
+	OpcodeVecV128Load32x2u:                 OpcodeVecV128Load32x2UName,
+	OpcodeVecV128Load8Splat:                OpcodeVecV128Load8SplatName,
+	OpcodeVecV128Load16Splat:               OpcodeVecV128Load16SplatName,
+	OpcodeVecV128Load32Splat:               OpcodeVecV128Load32SplatName,
+	OpcodeVecV128Load64Splat:               OpcodeVecV128Load64SplatName,
+	OpcodeVecV128Load32zero:                OpcodeVecV128Load32zeroName,
+	OpcodeVecV128Load64zero:                OpcodeVecV128Load64zeroName,
+	OpcodeVecV128Store:                     OpcodeVecV128StoreName,
+	OpcodeVecV128Load8Lane:                 OpcodeVecV128Load8LaneName,
+	OpcodeVecV128Load16Lane:                OpcodeVecV128Load16LaneName,
+	OpcodeVecV128Load32Lane:                OpcodeVecV128Load32LaneName,
+	OpcodeVecV128Load64Lane:                OpcodeVecV128Load64LaneName,
+	OpcodeVecV128Store8Lane:                OpcodeVecV128Store8LaneName,
+	OpcodeVecV128Store16Lane:               OpcodeVecV128Store16LaneName,
+	OpcodeVecV128Store32Lane:               OpcodeVecV128Store32LaneName,
+	OpcodeVecV128Store64Lane:               OpcodeVecV128Store64LaneName,
+	OpcodeVecV128Const:                     OpcodeVecV128ConstName,
+	OpcodeVecV128i8x16Shuffle:              OpcodeVecV128i8x16ShuffleName,
+	OpcodeVecI8x16ExtractLaneS:             OpcodeVecI8x16ExtractLaneSName,
+	OpcodeVecI8x16ExtractLaneU:             OpcodeVecI8x16ExtractLaneUName,
+	OpcodeVecI8x16ReplaceLane:              OpcodeVecI8x16ReplaceLaneName,
+	OpcodeVecI16x8ExtractLaneS:             OpcodeVecI16x8ExtractLaneSName,
+	OpcodeVecI16x8ExtractLaneU:             OpcodeVecI16x8ExtractLaneUName,
+	OpcodeVecI16x8ReplaceLane:              OpcodeVecI16x8ReplaceLaneName,
+	OpcodeVecI32x4ExtractLane:              OpcodeVecI32x4ExtractLaneName,
+	OpcodeVecI32x4ReplaceLane:              OpcodeVecI32x4ReplaceLaneName,
+	OpcodeVecI64x2ExtractLane:              OpcodeVecI64x2ExtractLaneName,
+	OpcodeVecI64x2ReplaceLane:              OpcodeVecI64x2ReplaceLaneName,
+	OpcodeVecF32x4ExtractLane:              OpcodeVecF32x4ExtractLaneName,
+	OpcodeVecF32x4ReplaceLane:              OpcodeVecF32x4ReplaceLaneName,
+	OpcodeVecF64x2ExtractLane:              OpcodeVecF64x2ExtractLaneName,
+	OpcodeVecF64x2ReplaceLane:              OpcodeVecF64x2ReplaceLaneName,
+	OpcodeVecI8x16Swizzle:                  OpcodeVecI8x16SwizzleName,
+	OpcodeVecI8x16Splat:                    OpcodeVecI8x16SplatName,
+	OpcodeVecI16x8Splat:                    OpcodeVecI16x8SplatName,
+	OpcodeVecI32x4Splat:                    OpcodeVecI32x4SplatName,
+	OpcodeVecI64x2Splat:                    OpcodeVecI64x2SplatName,
+	OpcodeVecF32x4Splat:                    OpcodeVecF32x4SplatName,
+	OpcodeVecF64x2Splat:                    OpcodeVecF64x2SplatName,
+	OpcodeVecI8x16Eq:                       OpcodeVecI8x16EqName,
+	OpcodeVecI8x16Ne:                       OpcodeVecI8x16NeName,
+	OpcodeVecI8x16LtS:                      OpcodeVecI8x16LtSName,
+	OpcodeVecI8x16LtU:                      OpcodeVecI8x16LtUName,
+	OpcodeVecI8x16GtS:                      OpcodeVecI8x16GtSName,
+	OpcodeVecI8x16GtU:                      OpcodeVecI8x16GtUName,
+	OpcodeVecI8x16LeS:                      OpcodeVecI8x16LeSName,
+	OpcodeVecI8x16LeU:                      OpcodeVecI8x16LeUName,
+	OpcodeVecI8x16GeS:                      OpcodeVecI8x16GeSName,
+	OpcodeVecI8x16GeU:                      OpcodeVecI8x16GeUName,
+	OpcodeVecI16x8Eq:                       OpcodeVecI16x8EqName,
+	OpcodeVecI16x8Ne:                       OpcodeVecI16x8NeName,
+	OpcodeVecI16x8LtS:                      OpcodeVecI16x8LtSName,
+	OpcodeVecI16x8LtU:                      OpcodeVecI16x8LtUName,
+	OpcodeVecI16x8GtS:                      OpcodeVecI16x8GtSName,
+	OpcodeVecI16x8GtU:                      OpcodeVecI16x8GtUName,
+	OpcodeVecI16x8LeS:                      OpcodeVecI16x8LeSName,
+	OpcodeVecI16x8LeU:                      OpcodeVecI16x8LeUName,
+	OpcodeVecI16x8GeS:                      OpcodeVecI16x8GeSName,
+	OpcodeVecI16x8GeU:                      OpcodeVecI16x8GeUName,
+	OpcodeVecI32x4Eq:                       OpcodeVecI32x4EqName,
+	OpcodeVecI32x4Ne:                       OpcodeVecI32x4NeName,
+	OpcodeVecI32x4LtS:                      OpcodeVecI32x4LtSName,
+	OpcodeVecI32x4LtU:                      OpcodeVecI32x4LtUName,
+	OpcodeVecI32x4GtS:                      OpcodeVecI32x4GtSName,
+	OpcodeVecI32x4GtU:                      OpcodeVecI32x4GtUName,
+	OpcodeVecI32x4LeS:                      OpcodeVecI32x4LeSName,
+	OpcodeVecI32x4LeU:                      OpcodeVecI32x4LeUName,
+	OpcodeVecI32x4GeS:                      OpcodeVecI32x4GeSName,
+	OpcodeVecI32x4GeU:                      OpcodeVecI32x4GeUName,
+	OpcodeVecI64x2Eq:                       OpcodeVecI64x2EqName,
+	OpcodeVecI64x2Ne:                       OpcodeVecI64x2NeName,
+	OpcodeVecI64x2LtS:                      OpcodeVecI64x2LtSName,
+	OpcodeVecI64x2GtS:                      OpcodeVecI64x2GtSName,
+	OpcodeVecI64x2LeS:                      OpcodeVecI64x2LeSName,
+	OpcodeVecI64x2GeS:                      OpcodeVecI64x2GeSName,
+	OpcodeVecF32x4Eq:                       OpcodeVecF32x4EqName,
+	OpcodeVecF32x4Ne:                       OpcodeVecF32x4NeName,
+	OpcodeVecF32x4Lt:                       OpcodeVecF32x4LtName,
+	OpcodeVecF32x4Gt:                       OpcodeVecF32x4GtName,
+	OpcodeVecF32x4Le:                       OpcodeVecF32x4LeName,
+	OpcodeVecF32x4Ge:                       OpcodeVecF32x4GeName,
+	OpcodeVecF64x2Eq:                       OpcodeVecF64x2EqName,
+	OpcodeVecF64x2Ne:                       OpcodeVecF64x2NeName,
+	OpcodeVecF64x2Lt:                       OpcodeVecF64x2LtName,
+	OpcodeVecF64x2Gt:                       OpcodeVecF64x2GtName,
+	OpcodeVecF64x2Le:                       OpcodeVecF64x2LeName,
+	OpcodeVecF64x2Ge:                       OpcodeVecF64x2GeName,
+	OpcodeVecV128Not:                       OpcodeVecV128NotName,
+	OpcodeVecV128And:                       OpcodeVecV128AndName,
+	OpcodeVecV128AndNot:                    OpcodeVecV128AndNotName,
+	OpcodeVecV128Or:                        OpcodeVecV128OrName,
+	OpcodeVecV128Xor:                       OpcodeVecV128XorName,
+	OpcodeVecV128Bitselect:                 OpcodeVecV128BitselectName,
+	OpcodeVecV128AnyTrue:                   OpcodeVecV128AnyTrueName,
+	OpcodeVecI8x16Abs:                      OpcodeVecI8x16AbsName,
+	OpcodeVecI8x16Neg:                      OpcodeVecI8x16NegName,
+	OpcodeVecI8x16Popcnt:                   OpcodeVecI8x16PopcntName,
+	OpcodeVecI8x16AllTrue:                  OpcodeVecI8x16AllTrueName,
+	OpcodeVecI8x16BitMask:                  OpcodeVecI8x16BitMaskName,
+	OpcodeVecI8x16NarrowI16x8S:             OpcodeVecI8x16NarrowI16x8SName,
+	OpcodeVecI8x16NarrowI16x8U:             OpcodeVecI8x16NarrowI16x8UName,
+	OpcodeVecI8x16Shl:                      OpcodeVecI8x16ShlName,
+	OpcodeVecI8x16ShrS:                     OpcodeVecI8x16ShrSName,
+	OpcodeVecI8x16ShrU:                     OpcodeVecI8x16ShrUName,
+	OpcodeVecI8x16Add:                      OpcodeVecI8x16AddName,
+	OpcodeVecI8x16AddSatS:                  OpcodeVecI8x16AddSatSName,
+	OpcodeVecI8x16AddSatU:                  OpcodeVecI8x16AddSatUName,
+	OpcodeVecI8x16Sub:                      OpcodeVecI8x16SubName,
+	OpcodeVecI8x16SubSatS:                  OpcodeVecI8x16SubSatSName,
+	OpcodeVecI8x16SubSatU:                  OpcodeVecI8x16SubSatUName,
+	OpcodeVecI8x16MinS:                     OpcodeVecI8x16MinSName,
+	OpcodeVecI8x16MinU:                     OpcodeVecI8x16MinUName,
+	OpcodeVecI8x16MaxS:                     OpcodeVecI8x16MaxSName,
+	OpcodeVecI8x16MaxU:                     OpcodeVecI8x16MaxUName,
+	OpcodeVecI8x16AvgrU:                    OpcodeVecI8x16AvgrUName,
+	OpcodeVecI16x8ExtaddPairwiseI8x16S:     OpcodeVecI16x8ExtaddPairwiseI8x16SName,
+	OpcodeVecI16x8ExtaddPairwiseI8x16U:     OpcodeVecI16x8ExtaddPairwiseI8x16UName,
+	OpcodeVecI16x8Abs:                      OpcodeVecI16x8AbsName,
+	OpcodeVecI16x8Neg:                      OpcodeVecI16x8NegName,
+	OpcodeVecI16x8Q15mulrSatS:              OpcodeVecI16x8Q15mulrSatSName,
+	OpcodeVecI16x8AllTrue:                  OpcodeVecI16x8AllTrueName,
+	OpcodeVecI16x8BitMask:                  OpcodeVecI16x8BitMaskName,
+	OpcodeVecI16x8NarrowI32x4S:             OpcodeVecI16x8NarrowI32x4SName,
+	OpcodeVecI16x8NarrowI32x4U:             OpcodeVecI16x8NarrowI32x4UName,
+	OpcodeVecI16x8ExtendLowI8x16S:          OpcodeVecI16x8ExtendLowI8x16SName,
+	OpcodeVecI16x8ExtendHighI8x16S:         OpcodeVecI16x8ExtendHighI8x16SName,
+	OpcodeVecI16x8ExtendLowI8x16U:          OpcodeVecI16x8ExtendLowI8x16UName,
+	OpcodeVecI16x8ExtendHighI8x16U:         OpcodeVecI16x8ExtendHighI8x16UName,
+	OpcodeVecI16x8Shl:                      OpcodeVecI16x8ShlName,
+	OpcodeVecI16x8ShrS:                     OpcodeVecI16x8ShrSName,
+	OpcodeVecI16x8ShrU:                     OpcodeVecI16x8ShrUName,
+	OpcodeVecI16x8Add:                      OpcodeVecI16x8AddName,
+	OpcodeVecI16x8AddSatS:                  OpcodeVecI16x8AddSatSName,
+	OpcodeVecI16x8AddSatU:                  OpcodeVecI16x8AddSatUName,
+	OpcodeVecI16x8Sub:                      OpcodeVecI16x8SubName,
+	OpcodeVecI16x8SubSatS:                  OpcodeVecI16x8SubSatSName,
+	OpcodeVecI16x8SubSatU:                  OpcodeVecI16x8SubSatUName,
+	OpcodeVecI16x8Mul:                      OpcodeVecI16x8MulName,
+	OpcodeVecI16x8MinS:                     OpcodeVecI16x8MinSName,
+	OpcodeVecI16x8MinU:                     OpcodeVecI16x8MinUName,
+	OpcodeVecI16x8MaxS:                     OpcodeVecI16x8MaxSName,
+	OpcodeVecI16x8MaxU:                     OpcodeVecI16x8MaxUName,
+	OpcodeVecI16x8AvgrU:                    OpcodeVecI16x8AvgrUName,
+	OpcodeVecI16x8ExtMulLowI8x16S:          OpcodeVecI16x8ExtMulLowI8x16SName,
+	OpcodeVecI16x8ExtMulHighI8x16S:         OpcodeVecI16x8ExtMulHighI8x16SName,
+	OpcodeVecI16x8ExtMulLowI8x16U:          OpcodeVecI16x8ExtMulLowI8x16UName,
+	OpcodeVecI16x8ExtMulHighI8x16U:         OpcodeVecI16x8ExtMulHighI8x16UName,
+	OpcodeVecI32x4ExtaddPairwiseI16x8S:     OpcodeVecI32x4ExtaddPairwiseI16x8SName,
+	OpcodeVecI32x4ExtaddPairwiseI16x8U:     OpcodeVecI32x4ExtaddPairwiseI16x8UName,
+	OpcodeVecI32x4Abs:                      OpcodeVecI32x4AbsName,
+	OpcodeVecI32x4Neg:                      OpcodeVecI32x4NegName,
+	OpcodeVecI32x4AllTrue:                  OpcodeVecI32x4AllTrueName,
+	OpcodeVecI32x4BitMask:                  OpcodeVecI32x4BitMaskName,
+	OpcodeVecI32x4ExtendLowI16x8S:          OpcodeVecI32x4ExtendLowI16x8SName,
+	OpcodeVecI32x4ExtendHighI16x8S:         OpcodeVecI32x4ExtendHighI16x8SName,
+	OpcodeVecI32x4ExtendLowI16x8U:          OpcodeVecI32x4ExtendLowI16x8UName,
+	OpcodeVecI32x4ExtendHighI16x8U:         OpcodeVecI32x4ExtendHighI16x8UName,
+	OpcodeVecI32x4Shl:                      OpcodeVecI32x4ShlName,
+	OpcodeVecI32x4ShrS:                     OpcodeVecI32x4ShrSName,
+	OpcodeVecI32x4ShrU:                     OpcodeVecI32x4ShrUName,
+	OpcodeVecI32x4Add:                      OpcodeVecI32x4AddName,
+	OpcodeVecI32x4Sub:                      OpcodeVecI32x4SubName,
+	OpcodeVecI32x4Mul:                      OpcodeVecI32x4MulName,
+	OpcodeVecI32x4MinS:                     OpcodeVecI32x4MinSName,
+	OpcodeVecI32x4MinU:                     OpcodeVecI32x4MinUName,
+	OpcodeVecI32x4MaxS:                     OpcodeVecI32x4MaxSName,
+	OpcodeVecI32x4MaxU:                     OpcodeVecI32x4MaxUName,
+	OpcodeVecI32x4DotI16x8S:                OpcodeVecI32x4DotI16x8SName,
+	OpcodeVecI32x4ExtMulLowI16x8S:          OpcodeVecI32x4ExtMulLowI16x8SName,
+	OpcodeVecI32x4ExtMulHighI16x8S:         OpcodeVecI32x4ExtMulHighI16x8SName,
+	OpcodeVecI32x4ExtMulLowI16x8U:          OpcodeVecI32x4ExtMulLowI16x8UName,
+	OpcodeVecI32x4ExtMulHighI16x8U:         OpcodeVecI32x4ExtMulHighI16x8UName,
+	OpcodeVecI64x2Abs:                      OpcodeVecI64x2AbsName,
+	OpcodeVecI64x2Neg:                      OpcodeVecI64x2NegName,
+	OpcodeVecI64x2AllTrue:                  OpcodeVecI64x2AllTrueName,
+	OpcodeVecI64x2BitMask:                  OpcodeVecI64x2BitMaskName,
+	OpcodeVecI64x2ExtendLowI32x4S:          OpcodeVecI64x2ExtendLowI32x4SName,
+	OpcodeVecI64x2ExtendHighI32x4S:         OpcodeVecI64x2ExtendHighI32x4SName,
+	OpcodeVecI64x2ExtendLowI32x4U:          OpcodeVecI64x2ExtendLowI32x4UName,
+	OpcodeVecI64x2ExtendHighI32x4U:         OpcodeVecI64x2ExtendHighI32x4UName,
+	OpcodeVecI64x2Shl:                      OpcodeVecI64x2ShlName,
+	OpcodeVecI64x2ShrS:                     OpcodeVecI64x2ShrSName,
+	OpcodeVecI64x2ShrU:                     OpcodeVecI64x2ShrUName,
+	OpcodeVecI64x2Add:                      OpcodeVecI64x2AddName,
+	OpcodeVecI64x2Sub:                      OpcodeVecI64x2SubName,
+	OpcodeVecI64x2Mul:                      OpcodeVecI64x2MulName,
+	OpcodeVecI64x2ExtMulLowI32x4S:          OpcodeVecI64x2ExtMulLowI32x4SName,
+	OpcodeVecI64x2ExtMulHighI32x4S:         OpcodeVecI64x2ExtMulHighI32x4SName,
+	OpcodeVecI64x2ExtMulLowI32x4U:          OpcodeVecI64x2ExtMulLowI32x4UName,
+	OpcodeVecI64x2ExtMulHighI32x4U:         OpcodeVecI64x2ExtMulHighI32x4UName,
+	OpcodeVecF32x4Ceil:                     OpcodeVecF32x4CeilName,
+	OpcodeVecF32x4Floor:                    OpcodeVecF32x4FloorName,
+	OpcodeVecF32x4Trunc:                    OpcodeVecF32x4TruncName,
+	OpcodeVecF32x4Nearest:                  OpcodeVecF32x4NearestName,
+	OpcodeVecF32x4Abs:                      OpcodeVecF32x4AbsName,
+	OpcodeVecF32x4Neg:                      OpcodeVecF32x4NegName,
+	OpcodeVecF32x4Sqrt:                     OpcodeVecF32x4SqrtName,
+	OpcodeVecF32x4Add:                      OpcodeVecF32x4AddName,
+	OpcodeVecF32x4Sub:                      OpcodeVecF32x4SubName,
+	OpcodeVecF32x4Mul:                      OpcodeVecF32x4MulName,
+	OpcodeVecF32x4Div:                      OpcodeVecF32x4DivName,
+	OpcodeVecF32x4Min:                      OpcodeVecF32x4MinName,
+	OpcodeVecF32x4Max:                      OpcodeVecF32x4MaxName,
+	OpcodeVecF32x4Pmin:                     OpcodeVecF32x4PminName,
+	OpcodeVecF32x4Pmax:                     OpcodeVecF32x4PmaxName,
+	OpcodeVecF64x2Ceil:                     OpcodeVecF64x2CeilName,
+	OpcodeVecF64x2Floor:                    OpcodeVecF64x2FloorName,
+	OpcodeVecF64x2Trunc:                    OpcodeVecF64x2TruncName,
+	OpcodeVecF64x2Nearest:                  OpcodeVecF64x2NearestName,
+	OpcodeVecF64x2Abs:                      OpcodeVecF64x2AbsName,
+	OpcodeVecF64x2Neg:                      OpcodeVecF64x2NegName,
+	OpcodeVecF64x2Sqrt:                     OpcodeVecF64x2SqrtName,
+	OpcodeVecF64x2Add:                      OpcodeVecF64x2AddName,
+	OpcodeVecF64x2Sub:                      OpcodeVecF64x2SubName,
+	OpcodeVecF64x2Mul:                      OpcodeVecF64x2MulName,
+	OpcodeVecF64x2Div:                      OpcodeVecF64x2DivName,
+	OpcodeVecF64x2Min:                      OpcodeVecF64x2MinName,
+	OpcodeVecF64x2Max:                      OpcodeVecF64x2MaxName,
+	OpcodeVecF64x2Pmin:                     OpcodeVecF64x2PminName,
+	OpcodeVecF64x2Pmax:                     OpcodeVecF64x2PmaxName,
+	OpcodeVecI32x4TruncSatF32x4S:           OpcodeVecI32x4TruncSatF32x4SName,
+	OpcodeVecI32x4TruncSatF32x4U:           OpcodeVecI32x4TruncSatF32x4UName,
+	OpcodeVecF32x4ConvertI32x4S:            OpcodeVecF32x4ConvertI32x4SName,
+	OpcodeVecF32x4ConvertI32x4U:            OpcodeVecF32x4ConvertI32x4UName,
+	OpcodeVecI32x4TruncSatF64x2SZero:       OpcodeVecI32x4TruncSatF64x2SZeroName,
+	OpcodeVecI32x4TruncSatF64x2UZero:       OpcodeVecI32x4TruncSatF64x2UZeroName,
+	OpcodeVecF64x2ConvertLowI32x4S:         OpcodeVecF64x2ConvertLowI32x4SName,
+	OpcodeVecF64x2ConvertLowI32x4U:         OpcodeVecF64x2ConvertLowI32x4UName,
+	OpcodeVecF32x4DemoteF64x2Zero:          OpcodeVecF32x4DemoteF64x2ZeroName,
+	OpcodeVecF64x2PromoteLowF32x4Zero:      OpcodeVecF64x2PromoteLowF32x4ZeroName,
+	OpcodeVecI8x16RelaxedSwizzle:           OpcodeVecI8x16RelaxedSwizzleName,
+	OpcodeVecI32x4RelaxedTruncF32x4S:       OpcodeVecI32x4RelaxedTruncF32x4SName,
+	OpcodeVecI32x4RelaxedTruncF32x4U:       OpcodeVecI32x4RelaxedTruncF32x4UName,
+	OpcodeVecI32x4RelaxedTruncF64x2SZero:   OpcodeVecI32x4RelaxedTruncF64x2SZeroName,
+	OpcodeVecI32x4RelaxedTruncF64x2UZero:   OpcodeVecI32x4RelaxedTruncF64x2UZeroName,
+	OpcodeVecF32x4RelaxedMadd:              OpcodeVecF32x4RelaxedMaddName,
+	OpcodeVecF32x4RelaxedNmadd:             OpcodeVecF32x4RelaxedNmaddName,
+	OpcodeVecF64x2RelaxedMadd:              OpcodeVecF64x2RelaxedMaddName,
+	OpcodeVecF64x2RelaxedNmadd:             OpcodeVecF64x2RelaxedNmaddName,
+	OpcodeVecI8x16RelaxedLaneselect:        OpcodeVecI8x16RelaxedLaneselectName,
+	OpcodeVecI16x8RelaxedLaneselect:        OpcodeVecI16x8RelaxedLaneselectName,
+	OpcodeVecI32x4RelaxedLaneselect:        OpcodeVecI32x4RelaxedLaneselectName,
+	OpcodeVecI64x2RelaxedLaneselect:        OpcodeVecI64x2RelaxedLaneselectName,
+	OpcodeVecF32x4RelaxedMin:               OpcodeVecF32x4RelaxedMinName,
+	OpcodeVecF32x4RelaxedMax:               OpcodeVecF32x4RelaxedMaxName,
+	OpcodeVecF64x2RelaxedMin:               OpcodeVecF64x2RelaxedMinName,
+	OpcodeVecF64x2RelaxedMax:               OpcodeVecF64x2RelaxedMaxName,
+	OpcodeVecI16x8RelaxedQ15mulrS:          OpcodeVecI16x8RelaxedQ15mulrSName,
+	OpcodeVecI16x8RelaxedDotI8x16I7x16S:    OpcodeVecI16x8RelaxedDotI8x16I7x16SName,
+	OpcodeVecI32x4RelaxedDotI8x16I7x16AddS: OpcodeVecI32x4RelaxedDotI8x16I7x16AddSName,
 }
 
 // VectorInstructionName returns the instruction name corresponding to the vector Opcode.
 func VectorInstructionName(oc OpcodeVec) (ret string) {
 	return vectorInstructionName[oc]
+}
+
+// ReadVecOpcode decodes the vector opcode at body[i], i.e. the LEB128 u32 that
+// follows OpcodeVecPrefix. size is how many bytes it occupied, or zero when the
+// encoding is truncated or wider than any vector opcode can be.
+func ReadVecOpcode(body []byte, i int) (op OpcodeVec, size int) {
+	b := body[i]
+	if b < 0x80 {
+		return OpcodeVec(b), 1
+	}
+	if i+1 >= len(body) || body[i+1] >= 0x80 {
+		return 0, 0
+	}
+	return OpcodeVec(b&0x7f) | OpcodeVec(body[i+1])<<7, 2
+}
+
+// AppendVecOpcode appends op to body in the LEB128 encoding ReadVecOpcode expects.
+func AppendVecOpcode(body []byte, op OpcodeVec) []byte {
+	if op < 0x80 {
+		return append(body, byte(op))
+	}
+	return append(body, byte(op)|0x80, byte(op>>7))
 }
 
 const (

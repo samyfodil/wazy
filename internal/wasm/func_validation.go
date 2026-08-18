@@ -94,7 +94,8 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			if op == OpcodeMiscPrefix {
 				instName = MiscInstructionName(body[pc+1])
 			} else if op == OpcodeVecPrefix {
-				instName = VectorInstructionName(body[pc+1])
+				vecOp, _ := ReadVecOpcode(body, int(pc)+1)
+				instName = VectorInstructionName(vecOp)
 			} else if op == OpcodeAtomicPrefix {
 				instName = AtomicInstructionName(body[pc+1])
 			} else {
@@ -1414,11 +1415,20 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			}
 		} else if op == OpcodeVecPrefix {
 			pc++
-			// Vector instructions come with two bytes where the first byte is always OpcodeVecPrefix,
-			// and the second byte determines the actual instruction.
-			vecOpcode := body[pc]
+			// The opcode after OpcodeVecPrefix is a LEB128 u32, so it spans one byte
+			// below 0x80 and two above it, relaxed-SIMD opcodes included.
+			vecOpcode, size := ReadVecOpcode(body, int(pc))
+			if size == 0 {
+				return fmt.Errorf("malformed vector opcode at pc=%#x", pc)
+			}
+			pc += uint64(size) - 1
 			if err := enabledFeatures.RequireEnabled(api.CoreFeatureSIMD); err != nil {
 				return fmt.Errorf("%s invalid as %v", vectorInstructionName[vecOpcode], err)
+			}
+			if vecOpcode >= OpcodeVecI8x16RelaxedSwizzle {
+				if err := enabledFeatures.RequireEnabled(api.CoreFeatureRelaxedSIMD); err != nil {
+					return fmt.Errorf("%s invalid as %v", vectorInstructionName[vecOpcode], err)
+				}
 			}
 
 			switch vecOpcode {

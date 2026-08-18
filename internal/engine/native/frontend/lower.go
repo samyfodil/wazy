@@ -1724,7 +1724,8 @@ func (c *Compiler) lowerCurrentOpcode() {
 
 	case wasm.OpcodeVecPrefix:
 		state.pc++
-		vecOp := c.wasmFunctionBody[state.pc]
+		vecOp, vecOpSize := wasm.ReadVecOpcode(c.wasmFunctionBody, state.pc)
+		state.pc += vecOpSize - 1
 		switch vecOp {
 		case wasm.OpcodeVecV128Const:
 			state.pc++

@@ -511,7 +511,8 @@ func (c *compiler) wasmOpcodeSignature(op wasm.Opcode, index uint32) (*signature
 			return nil, fmt.Errorf("unsupported misc instruction in interpreterir: 0x%x", op)
 		}
 	case wasm.OpcodeVecPrefix:
-		switch vecOp := c.body[c.pc+1]; vecOp {
+		vecOp, _ := wasm.ReadVecOpcode(c.body, int(c.pc)+1)
+		switch vecOp {
 		case wasm.OpcodeVecV128Const:
 			return signature_None_V128, nil
 		case wasm.OpcodeVecV128Load, wasm.OpcodeVecV128Load8x8s, wasm.OpcodeVecV128Load8x8u,
