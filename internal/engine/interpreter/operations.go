@@ -412,6 +412,12 @@ func (o operationKind) String() (ret string) {
 		ret = "V128Narrow"
 	case operationKindV128ITruncSatFromF:
 		ret = "V128ITruncSatFromF"
+	case operationKindV128RelaxedMadd:
+		ret = "V128RelaxedMadd"
+	case operationKindV128RelaxedDot:
+		ret = "V128RelaxedDot"
+	case operationKindV128RelaxedDotAdd:
+		ret = "V128RelaxedDotAdd"
 	case operationKindBuiltinFunctionCheckExitCode:
 		ret = "BuiltinFunctionCheckExitCode"
 	case operationKindAtomicMemoryWait:
@@ -892,6 +898,12 @@ const (
 	operationKindV128Narrow
 	// operationKindV128ITruncSatFromF is the Kind for NewOperationV128ITruncSatFromF.
 	operationKindV128ITruncSatFromF
+	// operationKindV128RelaxedMadd is the Kind for newOperationV128RelaxedMadd.
+	operationKindV128RelaxedMadd
+	// operationKindV128RelaxedDot is the Kind for newOperationV128RelaxedDot.
+	operationKindV128RelaxedDot
+	// operationKindV128RelaxedDotAdd is the Kind for newOperationV128RelaxedDotAdd.
+	operationKindV128RelaxedDotAdd
 
 	// operationKindBuiltinFunctionCheckExitCode is the Kind for NewOperationBuiltinFunctionCheckExitCode.
 	operationKindBuiltinFunctionCheckExitCode
@@ -1423,8 +1435,17 @@ func (o unionOperation) String() string {
 		operationKindV128FloatDemote,
 		operationKindV128FConvertFromI,
 		operationKindV128Dot,
+		operationKindV128RelaxedDot,
+		operationKindV128RelaxedDotAdd,
 		operationKindV128Narrow:
 		return o.Kind.String()
+
+	case operationKindV128RelaxedMadd:
+		// The negated form is a distinct instruction, so name it as one.
+		if o.B3 {
+			return fmt.Sprintf("V128RelaxedNmadd.%s", shapeName(o.B1))
+		}
+		return fmt.Sprintf("%s.%s", o.Kind, shapeName(o.B1))
 
 	case operationKindV128ITruncSatFromF:
 		if o.B3 {
@@ -3012,6 +3033,33 @@ func newOperationV128FloatDemote() unionOperation {
 // either shapeF32x4, or shapeF64x2.
 func newOperationV128FConvertFromI(destinationshape shape, signed bool) unionOperation {
 	return unionOperation{Kind: operationKindV128FConvertFromI, B1: destinationshape, B3: signed}
+}
+
+// newOperationV128RelaxedMadd is a constructor for unionOperation with operationKindV128RelaxedMadd.
+//
+// This corresponds to
+//
+//	wasm.OpcodeVecF32x4RelaxedMaddName wasm.OpcodeVecF32x4RelaxedNmaddName
+//	wasm.OpcodeVecF64x2RelaxedMaddName wasm.OpcodeVecF64x2RelaxedNmaddName
+//
+// B1 is the shape and B3 is set for the negated (nmadd) form. wazy computes the
+// product and the sum as two separate roundings; see RATIONALE.md.
+func newOperationV128RelaxedMadd(shape shape, negated bool) unionOperation {
+	return unionOperation{Kind: operationKindV128RelaxedMadd, B1: shape, B3: negated}
+}
+
+// newOperationV128RelaxedDot is a constructor for unionOperation with operationKindV128RelaxedDot.
+//
+// This corresponds to wasm.OpcodeVecI16x8RelaxedDotI8x16I7x16SName.
+func newOperationV128RelaxedDot() unionOperation {
+	return unionOperation{Kind: operationKindV128RelaxedDot}
+}
+
+// newOperationV128RelaxedDotAdd is a constructor for unionOperation with operationKindV128RelaxedDotAdd.
+//
+// This corresponds to wasm.OpcodeVecI32x4RelaxedDotI8x16I7x16AddSName.
+func newOperationV128RelaxedDotAdd() unionOperation {
+	return unionOperation{Kind: operationKindV128RelaxedDotAdd}
 }
 
 // NewOperationV128Dot is a constructor for unionOperation with operationKindV128Dot.

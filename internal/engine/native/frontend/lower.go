@@ -3173,6 +3173,117 @@ func (c *Compiler) lowerCurrentOpcode() {
 			ret := builder.AllocateInstruction().AsSplat(v1, lane).Insert(builder).Return()
 			state.push(ret)
 
+		// Relaxed SIMD. Each of these picks one of the results the proposal
+		// permits and sticks to it on every engine and architecture, so most
+		// reuse the non-relaxed instruction outright. See RATIONALE.md.
+		case wasm.OpcodeVecI8x16RelaxedSwizzle:
+			if state.unreachable {
+				break
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsSwizzle(v1, v2, ssa.VecLaneI8x16).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI32x4RelaxedTruncF32x4S, wasm.OpcodeVecI32x4RelaxedTruncF32x4U:
+			if state.unreachable {
+				break
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsVFcvtToIntSat(v1, ssa.VecLaneF32x4, vecOp == wasm.OpcodeVecI32x4RelaxedTruncF32x4S).
+				Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI32x4RelaxedTruncF64x2SZero, wasm.OpcodeVecI32x4RelaxedTruncF64x2UZero:
+			if state.unreachable {
+				break
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsVFcvtToIntSat(v1, ssa.VecLaneF64x2, vecOp == wasm.OpcodeVecI32x4RelaxedTruncF64x2SZero).
+				Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecF32x4RelaxedMadd, wasm.OpcodeVecF32x4RelaxedNmadd,
+			wasm.OpcodeVecF64x2RelaxedMadd, wasm.OpcodeVecF64x2RelaxedNmadd:
+			if state.unreachable {
+				break
+			}
+			lane := ssa.VecLaneF32x4
+			if vecOp == wasm.OpcodeVecF64x2RelaxedMadd || vecOp == wasm.OpcodeVecF64x2RelaxedNmadd {
+				lane = ssa.VecLaneF64x2
+			}
+			v3 := state.pop()
+			v2 := state.pop()
+			v1 := state.pop()
+			// The multiply and the add round separately: contracting them into a
+			// fused multiply-add would make the result depend on the host.
+			product := builder.AllocateInstruction().AsVFmul(v1, v2, lane).Insert(builder).Return()
+			sum := builder.AllocateInstruction()
+			if vecOp == wasm.OpcodeVecF32x4RelaxedNmadd || vecOp == wasm.OpcodeVecF64x2RelaxedNmadd {
+				// -(a*b) + c is exactly c - a*b in IEEE 754, which saves a negate.
+				sum.AsVFsub(v3, product, lane)
+			} else {
+				sum.AsVFadd(product, v3, lane)
+			}
+			state.push(sum.Insert(builder).Return())
+		case wasm.OpcodeVecI8x16RelaxedLaneselect, wasm.OpcodeVecI16x8RelaxedLaneselect,
+			wasm.OpcodeVecI32x4RelaxedLaneselect, wasm.OpcodeVecI64x2RelaxedLaneselect:
+			if state.unreachable {
+				break
+			}
+			c := state.pop()
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVbitselect(c, v1, v2).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecF32x4RelaxedMin, wasm.OpcodeVecF64x2RelaxedMin,
+			wasm.OpcodeVecF32x4RelaxedMax, wasm.OpcodeVecF64x2RelaxedMax:
+			if state.unreachable {
+				break
+			}
+			lane := ssa.VecLaneF32x4
+			if vecOp == wasm.OpcodeVecF64x2RelaxedMin || vecOp == wasm.OpcodeVecF64x2RelaxedMax {
+				lane = ssa.VecLaneF64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			// The pseudo-min/max form is one of the permitted results and lowers to
+			// a single instruction on amd64, unlike the NaN-propagating form.
+			instr := builder.AllocateInstruction()
+			if vecOp == wasm.OpcodeVecF32x4RelaxedMin || vecOp == wasm.OpcodeVecF64x2RelaxedMin {
+				instr.AsVMinPseudo(v1, v2, lane)
+			} else {
+				instr.AsVMaxPseudo(v1, v2, lane)
+			}
+			state.push(instr.Insert(builder).Return())
+		case wasm.OpcodeVecI16x8RelaxedQ15mulrS:
+			if state.unreachable {
+				break
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsSqmulRoundSat(v1, v2, ssa.VecLaneI16x8).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI16x8RelaxedDotI8x16I7x16S:
+			if state.unreachable {
+				break
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			state.push(relaxedDotI8x16(builder, v1, v2))
+		case wasm.OpcodeVecI32x4RelaxedDotI8x16I7x16AddS:
+			if state.unreachable {
+				break
+			}
+			v3 := state.pop()
+			v2 := state.pop()
+			v1 := state.pop()
+			dot := relaxedDotI8x16(builder, v1, v2)
+			widened := builder.AllocateInstruction().
+				AsExtIaddPairwise(dot, ssa.VecLaneI16x8, true).Insert(builder).Return()
+			ret := builder.AllocateInstruction().
+				AsVIadd(widened, v3, ssa.VecLaneI32x4).Insert(builder).Return()
+			state.push(ret)
+
 		default:
 			panic("TODO: unsupported vector instruction: " + wasm.VectorInstructionName(vecOp))
 		}
@@ -5440,4 +5551,18 @@ func (c *Compiler) boundsCheckInMemory(memLen, offset, size ssa.Value) {
 	builder.AllocateInstruction().
 		AsExitIfTrueWithCode(c.execCtxPtrValue, cmp, nativeapi.ExitCodeMemoryOutOfBounds).
 		Insert(builder)
+}
+
+// relaxedDotI8x16 emits i16x8.relaxed_dot_i8x16_i7x16_s: it reads both operands
+// as signed i8, multiplies them lane-wise and sums each adjacent pair into a
+// saturated i16 lane. Widening to i16 first lets the existing pairwise dot do
+// the multiply and the horizontal add, so no backend gains an instruction.
+func relaxedDotI8x16(builder ssa.Builder, v1, v2 ssa.Value) ssa.Value {
+	dot := func(low bool) ssa.Value {
+		x := builder.AllocateInstruction().AsWiden(v1, ssa.VecLaneI8x16, true, low).Insert(builder).Return()
+		y := builder.AllocateInstruction().AsWiden(v2, ssa.VecLaneI8x16, true, low).Insert(builder).Return()
+		return builder.AllocateInstruction().AsWideningPairwiseDotProductS(x, y).Insert(builder).Return()
+	}
+	return builder.AllocateInstruction().
+		AsNarrow(dot(true), dot(false), ssa.VecLaneI32x4, true).Insert(builder).Return()
 }

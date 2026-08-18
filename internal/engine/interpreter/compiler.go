@@ -2971,6 +2971,79 @@ operatorSwitch:
 			c.emit(
 				newOperationV128ITruncSatFromF(shapeF64x2, false),
 			)
+
+		// Relaxed SIMD. Each of these picks one of the results the proposal
+		// permits and sticks to it on every engine and architecture, so most
+		// reuse the non-relaxed operation outright. See RATIONALE.md.
+		case wasm.OpcodeVecI8x16RelaxedSwizzle:
+			c.emit(
+				newOperationV128Swizzle(),
+			)
+		case wasm.OpcodeVecI32x4RelaxedTruncF32x4S:
+			c.emit(
+				newOperationV128ITruncSatFromF(shapeF32x4, true),
+			)
+		case wasm.OpcodeVecI32x4RelaxedTruncF32x4U:
+			c.emit(
+				newOperationV128ITruncSatFromF(shapeF32x4, false),
+			)
+		case wasm.OpcodeVecI32x4RelaxedTruncF64x2SZero:
+			c.emit(
+				newOperationV128ITruncSatFromF(shapeF64x2, true),
+			)
+		case wasm.OpcodeVecI32x4RelaxedTruncF64x2UZero:
+			c.emit(
+				newOperationV128ITruncSatFromF(shapeF64x2, false),
+			)
+		case wasm.OpcodeVecF32x4RelaxedMadd:
+			c.emit(
+				newOperationV128RelaxedMadd(shapeF32x4, false),
+			)
+		case wasm.OpcodeVecF32x4RelaxedNmadd:
+			c.emit(
+				newOperationV128RelaxedMadd(shapeF32x4, true),
+			)
+		case wasm.OpcodeVecF64x2RelaxedMadd:
+			c.emit(
+				newOperationV128RelaxedMadd(shapeF64x2, false),
+			)
+		case wasm.OpcodeVecF64x2RelaxedNmadd:
+			c.emit(
+				newOperationV128RelaxedMadd(shapeF64x2, true),
+			)
+		case wasm.OpcodeVecI8x16RelaxedLaneselect, wasm.OpcodeVecI16x8RelaxedLaneselect,
+			wasm.OpcodeVecI32x4RelaxedLaneselect, wasm.OpcodeVecI64x2RelaxedLaneselect:
+			c.emit(
+				newOperationV128Bitselect(),
+			)
+		case wasm.OpcodeVecF32x4RelaxedMin:
+			c.emit(
+				newOperationV128Pmin(shapeF32x4),
+			)
+		case wasm.OpcodeVecF32x4RelaxedMax:
+			c.emit(
+				newOperationV128Pmax(shapeF32x4),
+			)
+		case wasm.OpcodeVecF64x2RelaxedMin:
+			c.emit(
+				newOperationV128Pmin(shapeF64x2),
+			)
+		case wasm.OpcodeVecF64x2RelaxedMax:
+			c.emit(
+				newOperationV128Pmax(shapeF64x2),
+			)
+		case wasm.OpcodeVecI16x8RelaxedQ15mulrS:
+			c.emit(
+				newOperationV128Q15mulrSatS(),
+			)
+		case wasm.OpcodeVecI16x8RelaxedDotI8x16I7x16S:
+			c.emit(
+				newOperationV128RelaxedDot(),
+			)
+		case wasm.OpcodeVecI32x4RelaxedDotI8x16I7x16AddS:
+			c.emit(
+				newOperationV128RelaxedDotAdd(),
+			)
 		default:
 			return fmt.Errorf("unsupported vector instruction in interpreterir: %s", wasm.VectorInstructionName(vecOp))
 		}

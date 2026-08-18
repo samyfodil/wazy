@@ -1498,6 +1498,65 @@ We _believe_ that all use cases are fine with the limitation, but also note that
 
 If a module reaches this limit, an error is returned at the compilation phase.
 
+## Relaxed SIMD
+
+The [relaxed-simd proposal](https://github.com/WebAssembly/relaxed-simd) defines
+instructions whose results are deliberately underspecified: each one lists
+several permitted answers so a host can emit whichever native sequence is
+cheapest for it. A runtime is free to pick a different answer per architecture,
+per CPU, even per call.
+
+wazy does not. Each relaxed instruction returns one documented result, the same
+one on the interpreter, on amd64 and on arm64. A program whose output changes
+when it moves between machines is miserable to debug, and the relaxed
+instructions turn up in exactly the code — codecs, kernels, neural network
+inference — where a one-bit difference is both easy to introduce and hard to
+trace back. The spec suite is written to accept any of the permitted answers, so
+pinning one costs no conformance.
+
+Where an ordinary SIMD instruction already computes a permitted answer, wazy
+reuses it, and every backend keeps the lowering it already had:
+
+| Instruction | wazy returns | Also permitted |
+| --- | --- | --- |
+| `i8x16.relaxed_swizzle` | `i8x16.swizzle`: an index of 16 or more gives zero | index taken modulo 16 below 128 |
+| `i32x4.relaxed_trunc_f32x4_s/u` | `i32x4.trunc_sat_f32x4_s/u` | out of range gives `INT32_MIN` |
+| `i32x4.relaxed_trunc_f64x2_s/u_zero` | `i32x4.trunc_sat_f64x2_s/u_zero` | out of range gives `INT32_MIN` |
+| `f32x4`/`f64x2` `.relaxed_madd` | `a * b + c`, rounding the product and the sum separately | a fused multiply-add, rounding once |
+| `f32x4`/`f64x2` `.relaxed_nmadd` | `-(a * b) + c`, likewise | a fused negated multiply-add |
+| `i8x16`/`i16x8`/`i32x4`/`i64x2` `.relaxed_laneselect` | `v128.bitselect` | consulting only the top bit of each lane, or of each byte |
+| `f32x4`/`f64x2` `.relaxed_min` | `f32x4.pmin`, i.e. `b < a ? b : a` | the NaN-propagating `f32x4.min` |
+| `f32x4`/`f64x2` `.relaxed_max` | `f32x4.pmax`, i.e. `a < b ? b : a` | the NaN-propagating `f32x4.max` |
+| `i16x8.relaxed_q15mulr_s` | `i16x8.q15mulr_sat_s`: the one overflowing product saturates to `INT16_MAX` | wrapping to `INT16_MIN` |
+| `i16x8.relaxed_dot_i8x16_i7x16_s` | both operands read as signed, each i16 lane saturated | either operand read as unsigned |
+| `i32x4.relaxed_dot_i8x16_i7x16_add_s` | the above, widened pairwise and added to the accumulator | as above |
+
+Two choices are worth spelling out.
+
+`relaxed_madd` and `relaxed_nmadd` are the instructions the proposal exists for:
+arm64 contracts them into a single `fmla`, and amd64 into a single `vfmadd` when
+the CPU has FMA3. wazy still rounds twice. A fused result differs from an
+unfused one in the last bit, so contracting would make wazy's output depend not
+just on the architecture but, on amd64, on whether the CPU is newer than
+Haswell — the one variation a program can neither detect nor plan for. The cost
+is one extra instruction per multiply-add.
+
+`relaxed_min` and `relaxed_max` go the other way, and take the pseudo-min/max
+form rather than the NaN-propagating one: it is a single `minps`/`maxps` on
+amd64 where the NaN-propagating form needs four instructions, and arm64 already
+lowers it in two. Both engines agree, so nothing is given up for the speed.
+
+The two dot products have no non-relaxed counterpart. Rather than teach both
+backends a new instruction, wazy widens each operand to i16 and reuses
+`i32x4.dot_i16x8_s`, which already does the multiply and the horizontal add, so
+neither backend grew an instruction for them.
+
+The official suite pins none of this: its `relaxed_min`/`relaxed_max` cases
+cover only NaN and signed zero, where min and max return the same thing. The
+table above is what `TestRelaxedSemantics` in
+`internal/integration_test/spectest/relaxed-simd` asserts, with operands chosen
+to tell the permitted answers apart.
+
 ## Compiler engine implementation
 
 ### Why it's safe to execute runtime-generated machine codes against async Goroutine preemption

@@ -584,9 +584,16 @@ func (c *compiler) wasmOpcodeSignature(op wasm.Opcode, index uint32) (*signature
 			wasm.OpcodeVecF32x4ConvertI32x4S, wasm.OpcodeVecF32x4ConvertI32x4U,
 			wasm.OpcodeVecF64x2ConvertLowI32x4S, wasm.OpcodeVecF64x2ConvertLowI32x4U,
 			wasm.OpcodeVecI32x4TruncSatF32x4S, wasm.OpcodeVecI32x4TruncSatF32x4U,
-			wasm.OpcodeVecI32x4TruncSatF64x2SZero, wasm.OpcodeVecI32x4TruncSatF64x2UZero:
+			wasm.OpcodeVecI32x4TruncSatF64x2SZero, wasm.OpcodeVecI32x4TruncSatF64x2UZero,
+			wasm.OpcodeVecI32x4RelaxedTruncF32x4S, wasm.OpcodeVecI32x4RelaxedTruncF32x4U,
+			wasm.OpcodeVecI32x4RelaxedTruncF64x2SZero, wasm.OpcodeVecI32x4RelaxedTruncF64x2UZero:
 			return signature_V128_V128, nil
-		case wasm.OpcodeVecV128Bitselect:
+		case wasm.OpcodeVecV128Bitselect,
+			wasm.OpcodeVecI8x16RelaxedLaneselect, wasm.OpcodeVecI16x8RelaxedLaneselect,
+			wasm.OpcodeVecI32x4RelaxedLaneselect, wasm.OpcodeVecI64x2RelaxedLaneselect,
+			wasm.OpcodeVecF32x4RelaxedMadd, wasm.OpcodeVecF32x4RelaxedNmadd,
+			wasm.OpcodeVecF64x2RelaxedMadd, wasm.OpcodeVecF64x2RelaxedNmadd,
+			wasm.OpcodeVecI32x4RelaxedDotI8x16I7x16AddS:
 			return signature_V128V128V128_V32, nil
 		case wasm.OpcodeVecI8x16Eq, wasm.OpcodeVecI8x16Ne, wasm.OpcodeVecI8x16LtS, wasm.OpcodeVecI8x16LtU, wasm.OpcodeVecI8x16GtS,
 			wasm.OpcodeVecI8x16GtU, wasm.OpcodeVecI8x16LeS, wasm.OpcodeVecI8x16LeU, wasm.OpcodeVecI8x16GeS, wasm.OpcodeVecI8x16GeU,
@@ -616,7 +623,11 @@ func (c *compiler) wasmOpcodeSignature(op wasm.Opcode, index uint32) (*signature
 			wasm.OpcodeVecI32x4ExtMulLowI16x8S, wasm.OpcodeVecI32x4ExtMulHighI16x8S, wasm.OpcodeVecI32x4ExtMulLowI16x8U, wasm.OpcodeVecI32x4ExtMulHighI16x8U,
 			wasm.OpcodeVecI64x2ExtMulLowI32x4S, wasm.OpcodeVecI64x2ExtMulHighI32x4S, wasm.OpcodeVecI64x2ExtMulLowI32x4U, wasm.OpcodeVecI64x2ExtMulHighI32x4U,
 			wasm.OpcodeVecI32x4DotI16x8S,
-			wasm.OpcodeVecI8x16NarrowI16x8S, wasm.OpcodeVecI8x16NarrowI16x8U, wasm.OpcodeVecI16x8NarrowI32x4S, wasm.OpcodeVecI16x8NarrowI32x4U:
+			wasm.OpcodeVecI8x16NarrowI16x8S, wasm.OpcodeVecI8x16NarrowI16x8U, wasm.OpcodeVecI16x8NarrowI32x4S, wasm.OpcodeVecI16x8NarrowI32x4U,
+			wasm.OpcodeVecI8x16RelaxedSwizzle,
+			wasm.OpcodeVecF32x4RelaxedMin, wasm.OpcodeVecF32x4RelaxedMax,
+			wasm.OpcodeVecF64x2RelaxedMin, wasm.OpcodeVecF64x2RelaxedMax,
+			wasm.OpcodeVecI16x8RelaxedQ15mulrS, wasm.OpcodeVecI16x8RelaxedDotI8x16I7x16S:
 			return signature_V128V128_V128, nil
 		default:
 			return nil, fmt.Errorf("unsupported vector instruction in interpreterir: %s", wasm.VectorInstructionName(vecOp))

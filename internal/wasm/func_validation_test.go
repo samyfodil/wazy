@@ -3197,6 +3197,25 @@ func TestModule_funcValidation_SIMD_error(t *testing.T) {
 			expectedErr: "f32x4.abs invalid as feature \"simd\" is disabled",
 		},
 		{
+			name:        "relaxed-simd disabled",
+			body:        vecInst(nil, OpcodeVecI8x16RelaxedSwizzle),
+			flag:        api.CoreFeatureSIMD,
+			expectedErr: "i8x16.relaxed_swizzle invalid as feature \"relaxed-simd\" is disabled",
+		},
+		{
+			name:        "truncated vector opcode",
+			body:        []byte{OpcodeVecPrefix, 0x80},
+			flag:        api.CoreFeatureSIMD,
+			expectedErr: "malformed vector opcode at pc=0x1",
+		},
+		{
+			name: "over-wide vector opcode",
+			// Three LEB128 bytes are wider than any vector opcode.
+			body:        []byte{OpcodeVecPrefix, 0x80, 0x80, 0x01},
+			flag:        api.CoreFeatureSIMD,
+			expectedErr: "malformed vector opcode at pc=0x1",
+		},
+		{
 			name: "v128.const immediate",
 			body: []byte{
 				OpcodeVecPrefix,
