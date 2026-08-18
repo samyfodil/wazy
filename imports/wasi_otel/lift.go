@@ -200,6 +200,40 @@ func (l *lifter) optStr(v component.Value, what string) *string {
 	return &s
 }
 
+// f64s lifts a list<f64>, which arrives as a []float64 -- the typed slice a
+// list of a fixed-width primitive lifts to -- or as the general []Value shape
+// from a caller that built one by hand.
+func (l *lifter) f64s(v component.Value, what string) []float64 {
+	if l.err != nil || v == nil {
+		return nil
+	}
+	if typed, ok := v.([]float64); ok {
+		return typed
+	}
+	items := l.list(v, what)
+	out := make([]float64, len(items))
+	for i, item := range items {
+		out[i] = l.f64(item, what)
+	}
+	return out
+}
+
+// u64s lifts a list<u64>, in either shape, as f64s does.
+func (l *lifter) u64s(v component.Value, what string) []uint64 {
+	if l.err != nil || v == nil {
+		return nil
+	}
+	if typed, ok := v.([]uint64); ok {
+		return typed
+	}
+	items := l.list(v, what)
+	out := make([]uint64, len(items))
+	for i, item := range items {
+		out[i] = l.u64(item, what)
+	}
+	return out
+}
+
 // keyValues lifts a list<key-value>.
 func (l *lifter) keyValues(v component.Value, what string) []KeyValue {
 	items := l.list(v, what)

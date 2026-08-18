@@ -492,6 +492,12 @@ func convertTestValue(rawValue any, t binary.TypeDesc, resolve Resolver) (Value,
 			}
 			result[i] = v
 		}
+		// A list of a fixed-width primitive lifts to the typed slice for that
+		// primitive, so that is the shape the oracle expects back. The values
+		// are the battery's either way; only the container differs.
+		if typed, ok := scalarSliceOf(result, elemType); ok {
+			return typed, nil
+		}
 		return result, nil
 
 	case binary.RecordDesc:
@@ -679,4 +685,93 @@ func convertTestPrimitive(rawValue any, prim string) (Value, error) {
 	}
 
 	return nil, fmt.Errorf("cannot convert value %v to primitive %s", rawValue, prim)
+}
+
+// scalarSliceOf packs a []Value of primitive elements into the typed slice
+// lifting produces for that primitive. ok is false for an element type that
+// has no typed slice, which stays []Value.
+//
+// It is written from the element Value types rather than from scalarlist.go's
+// decoders on purpose: if the two ever disagree about what a list<u32> holds,
+// the oracle should fail rather than agree with the code under test.
+func scalarSliceOf(vals []Value, elemType binary.TypeDesc) (Value, bool) {
+	p, ok := elemType.(binary.PrimitiveDesc)
+	if !ok {
+		return nil, false
+	}
+	switch p.Prim {
+	case "u8":
+		out := make([]byte, len(vals))
+		for i, v := range vals {
+			out[i] = byte(v.(uint32))
+		}
+		return out, true
+	case "s8":
+		out := make([]int8, len(vals))
+		for i, v := range vals {
+			out[i] = int8(v.(int32))
+		}
+		return out, true
+	case "bool":
+		out := make([]bool, len(vals))
+		for i, v := range vals {
+			out[i] = v.(bool)
+		}
+		return out, true
+	case "u16":
+		out := make([]uint16, len(vals))
+		for i, v := range vals {
+			out[i] = uint16(v.(uint32))
+		}
+		return out, true
+	case "s16":
+		out := make([]int16, len(vals))
+		for i, v := range vals {
+			out[i] = int16(v.(int32))
+		}
+		return out, true
+	case "u32":
+		out := make([]uint32, len(vals))
+		for i, v := range vals {
+			out[i] = v.(uint32)
+		}
+		return out, true
+	case "s32":
+		out := make([]int32, len(vals))
+		for i, v := range vals {
+			out[i] = v.(int32)
+		}
+		return out, true
+	case "u64":
+		out := make([]uint64, len(vals))
+		for i, v := range vals {
+			out[i] = v.(uint64)
+		}
+		return out, true
+	case "s64":
+		out := make([]int64, len(vals))
+		for i, v := range vals {
+			out[i] = v.(int64)
+		}
+		return out, true
+	case "f32":
+		out := make([]float32, len(vals))
+		for i, v := range vals {
+			out[i] = v.(float32)
+		}
+		return out, true
+	case "f64":
+		out := make([]float64, len(vals))
+		for i, v := range vals {
+			out[i] = v.(float64)
+		}
+		return out, true
+	case "char":
+		out := make([]rune, len(vals))
+		for i, v := range vals {
+			out[i] = v.(rune)
+		}
+		return out, true
+	}
+	return nil, false
 }

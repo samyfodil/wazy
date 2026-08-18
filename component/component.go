@@ -76,8 +76,12 @@ func NewCompileCache() *CompileCache { return instance.NewCompileCache() }
 
 // Value is a component-level call value: a Go value matching the Canonical
 // ABI's lifting of a WIT type (uint32, int64, float64, string, []any for
-// lists/records/tuples, uint32 for resource handles). It is the element type of
-// Call/CallExport arguments and results and of host-import args/results.
+// records/tuples and for lists of anything but a fixed-width primitive,
+// uint32 for resource handles). It is the element type of Call/CallExport
+// arguments and results and of host-import args/results.
+//
+// A list of a fixed-width primitive is the Go slice of that primitive rather
+// than a []Value -- see ListDesc in types.go.
 type Value = abi.Value
 
 // TypeDesc, PrimitiveDesc, and the rest of the WIT type vocabulary live in

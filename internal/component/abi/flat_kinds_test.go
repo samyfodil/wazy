@@ -155,15 +155,16 @@ func TestLiftListU8CompactShape(t *testing.T) {
 		t.Fatalf("loaded list<u8> = %#v, want []byte(\"abc\")", lv)
 	}
 
-	// A non-u8 element type stays the general []Value shape.
+	// Every fixed-width primitive element lifts to its own typed slice, not
+	// only u8.
 	u16List := binary.ListDesc{Element: binary.TypeRef{Primitive: "u16"}}
 	mem[8], mem[9] = 0x01, 0x00
 	v16, err := LiftFlat([]CoreValue{NewCoreValueI32(8), NewCoreValueI32(1)}, u16List, nil, mem)
 	if err != nil {
 		t.Fatalf("LiftFlat u16: %v", err)
 	}
-	if _, ok := v16.([]Value); !ok {
-		t.Fatalf("lifted list<u16> = %T, want []Value", v16)
+	if got, ok := v16.([]uint16); !ok || len(got) != 1 || got[0] != 1 {
+		t.Fatalf("lifted list<u16> = %#v, want []uint16{1}", v16)
 	}
 }
 

@@ -58,8 +58,14 @@ type (
 	RecordDesc = binary.RecordDesc
 	// VariantDesc is a discriminated union. Its Value is a VariantValue.
 	VariantDesc = binary.VariantDesc
-	// ListDesc is an unbounded sequence. Its Value is a []Value -- or, for
-	// list<u8> specifically, a []byte, which lowers with a single copy.
+	// ListDesc is an unbounded sequence. Its Value is the Go slice of the
+	// element type when that element is a fixed-width primitive -- []byte for
+	// list<u8>, []uint32 for list<u32>, []float64 for list<f64>, []bool,
+	// []rune for list<char>, and so on -- and a []Value otherwise, as for a
+	// list of strings or of records.
+	//
+	// Both shapes are accepted when lowering a scalar list, so a host func
+	// may hand over either; lifting produces the typed one.
 	ListDesc = binary.ListDesc
 	// TupleDesc is a positional product type. Its Value is a []Value.
 	TupleDesc = binary.TupleDesc
