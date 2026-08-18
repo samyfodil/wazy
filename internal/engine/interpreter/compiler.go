@@ -3018,19 +3018,19 @@ operatorSwitch:
 			)
 		case wasm.OpcodeVecF32x4RelaxedMin:
 			c.emit(
-				newOperationV128Pmin(shapeF32x4),
+				newOperationV128Min(shapeF32x4, false),
 			)
 		case wasm.OpcodeVecF32x4RelaxedMax:
 			c.emit(
-				newOperationV128Pmax(shapeF32x4),
+				newOperationV128Max(shapeF32x4, false),
 			)
 		case wasm.OpcodeVecF64x2RelaxedMin:
 			c.emit(
-				newOperationV128Pmin(shapeF64x2),
+				newOperationV128Min(shapeF64x2, false),
 			)
 		case wasm.OpcodeVecF64x2RelaxedMax:
 			c.emit(
-				newOperationV128Pmax(shapeF64x2),
+				newOperationV128Max(shapeF64x2, false),
 			)
 		case wasm.OpcodeVecI16x8RelaxedQ15mulrS:
 			c.emit(

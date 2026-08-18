@@ -1525,8 +1525,8 @@ reuses it, and every backend keeps the lowering it already had:
 | `f32x4`/`f64x2` `.relaxed_madd` | `a * b + c`, rounding the product and the sum separately | a fused multiply-add, rounding once |
 | `f32x4`/`f64x2` `.relaxed_nmadd` | `-(a * b) + c`, likewise | a fused negated multiply-add |
 | `i8x16`/`i16x8`/`i32x4`/`i64x2` `.relaxed_laneselect` | `v128.bitselect` | consulting only the top bit of each lane, or of each byte |
-| `f32x4`/`f64x2` `.relaxed_min` | `f32x4.pmin`, i.e. `b < a ? b : a` | the NaN-propagating `f32x4.min` |
-| `f32x4`/`f64x2` `.relaxed_max` | `f32x4.pmax`, i.e. `a < b ? b : a` | the NaN-propagating `f32x4.max` |
+| `f32x4`/`f64x2` `.relaxed_min` | `f32x4.min` | returning either operand for NaN or for zeroes of opposite sign |
+| `f32x4`/`f64x2` `.relaxed_max` | `f32x4.max` | returning either operand for NaN or for zeroes of opposite sign |
 | `i16x8.relaxed_q15mulr_s` | `i16x8.q15mulr_sat_s`: the one overflowing product saturates to `INT16_MAX` | wrapping to `INT16_MIN` |
 | `i16x8.relaxed_dot_i8x16_i7x16_s` | both operands read as signed, each i16 lane saturated | either operand read as unsigned |
 | `i32x4.relaxed_dot_i8x16_i7x16_add_s` | the above, widened pairwise and added to the accumulator | as above |
@@ -1541,19 +1541,51 @@ just on the architecture but, on amd64, on whether the CPU is newer than
 Haswell — the one variation a program can neither detect nor plan for. The cost
 is one extra instruction per multiply-add.
 
-`relaxed_min` and `relaxed_max` go the other way, and take the pseudo-min/max
-form rather than the NaN-propagating one: it is a single `minps`/`maxps` on
-amd64 where the NaN-propagating form needs four instructions, and arm64 already
-lowers it in two. Both engines agree, so nothing is given up for the speed.
+`relaxed_min` and `relaxed_max` are where wazy pays for the position. The
+pseudo-min/max form — `b < a ? b : a`, the one the hardware gives away — is a
+single `minps` on amd64 and three instructions on arm64, against nine and one
+for the NaN-propagating form wazy uses instead. The two forms differ only for
+NaN operands and for zeroes of opposite sign, but that is enough: the
+deterministic profile specifies plain `fmin`/`fmax`, and matching it on every
+instruction is worth more than eight amd64 instructions on an operation whose
+operands are rarely either.
+
+One caveat on "the same result everywhere": the sign and payload of a NaN
+result are not among the things wazy pins, because Wasm does not specify them
+and wazy's amd64 backend has never agreed with the other two implementations
+about them. Given a NaN operand with payload 1, the interpreter and the arm64
+backend return that payload quieted, while amd64 returns a freshly built
+canonical NaN, with the sign bit set for `min`:
+
+| | interpreter, arm64 | amd64 |
+| --- | --- | --- |
+| `f32x4.min` | `0x7fc00001` | `0xffc00000` |
+| `f32x4.max` | `0x7fc00001` | `0x7fc00000` |
+| `f64x2.min` | `0x7ff8000000000001` | `0xfff8000000000000` |
+| `f64x2.max` | `0x7ff8000000000001` | `0x7ff8000000000000` |
+
+That predates relaxed SIMD by a long way — it is how the non-relaxed
+`f32x4.min` has always behaved, and the differential fuzzer works around it by
+asking wasm-smith to canonicalize NaNs so that "the results can be matched among
+engines". Every value there is a NaN the spec permits, so nothing is
+non-conformant, but `relaxed_min` and `relaxed_max` inherit it. Everything else
+— which operand wins, which lane saturates, whether a product is fused — is
+fixed across all three.
 
 The two dot products have no non-relaxed counterpart. Rather than teach both
 backends a new instruction, wazy widens each operand to i16 and reuses
 `i32x4.dot_i16x8_s`, which already does the multiply and the horizontal add, so
 neither backend grew an instruction for them.
 
-The official suite pins none of this: its `relaxed_min`/`relaxed_max` cases
-cover only NaN and signed zero, where min and max return the same thing. The
-table above is what `TestRelaxedSemantics` in
+Every one of these choices corresponds to setting the spec's global parameter
+`R` to 0 for each instruction, which is exactly the
+[deterministic profile](https://webassembly.github.io/spec/core/appendix/profiles.html).
+wazy implements that profile, and the standard profile it is a restriction of.
+
+The official suite pins none of it: its `relaxed_min`/`relaxed_max` cases cover
+only NaN and signed zero, where min and max return the same thing as each other,
+and its `either` assertions accept every alternative by construction. The table
+above is what `TestRelaxedSemantics` in
 `internal/integration_test/spectest/relaxed-simd` asserts, with operands chosen
 to tell the permitted answers apart.
 

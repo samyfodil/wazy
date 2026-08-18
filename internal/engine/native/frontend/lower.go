@@ -3246,13 +3246,11 @@ func (c *Compiler) lowerCurrentOpcode() {
 			}
 			v2 := state.pop()
 			v1 := state.pop()
-			// The pseudo-min/max form is one of the permitted results and lowers to
-			// a single instruction on amd64, unlike the NaN-propagating form.
 			instr := builder.AllocateInstruction()
 			if vecOp == wasm.OpcodeVecF32x4RelaxedMin || vecOp == wasm.OpcodeVecF64x2RelaxedMin {
-				instr.AsVMinPseudo(v1, v2, lane)
+				instr.AsVFmin(v1, v2, lane)
 			} else {
-				instr.AsVMaxPseudo(v1, v2, lane)
+				instr.AsVFmax(v1, v2, lane)
 			}
 			state.push(instr.Insert(builder).Return())
 		case wasm.OpcodeVecI16x8RelaxedQ15mulrS:

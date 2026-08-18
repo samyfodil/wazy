@@ -23,6 +23,11 @@ var relaxedSemantics = []struct {
 	op   wasm.OpcodeVec
 	in   [][2]uint64
 	want [2]uint64
+	// nanLaneBits is the lane width of a result that has NaN lanes. Those lanes
+	// are checked for being a NaN rather than compared bit for bit: the sign and
+	// payload of a NaN result are unspecified, and wazy's engines have always
+	// differed on the sign bit here, well before relaxed SIMD.
+	nanLaneBits int
 }{
 	{
 		// An index of 16 or more gives zero, as in i8x16.swizzle. Reading only
@@ -127,10 +132,9 @@ var relaxedSemantics = []struct {
 		want: i64x2(0x2222222211111111, 0x2222222222222222),
 	},
 	{
-		// b < a ? b : a, so a NaN-free comparison picks the smaller lane. Note
-		// the official suite covers only NaN and signed zero, where relaxed_min
-		// and relaxed_max agree, so ordinary operands are the only thing that
-		// distinguishes them.
+		// The official suite covers only NaN and signed zero, where relaxed_min
+		// and relaxed_max agree with each other, so ordinary operands are the
+		// only thing that tells the two instructions apart.
 		name: "f32x4.relaxed_min",
 		op:   wasm.OpcodeVecF32x4RelaxedMin,
 		in:   [][2]uint64{f32x4(1, 5, -2, 0), f32x4(3, 2, -7, 1)},
@@ -153,6 +157,51 @@ var relaxedSemantics = []struct {
 		op:   wasm.OpcodeVecF64x2RelaxedMax,
 		in:   [][2]uint64{f64x2(1, 5), f64x2(3, 2)},
 		want: f64x2(3, 5),
+	},
+	{
+		// NaN and signed zero are where the permitted results diverge, and where
+		// the deterministic profile requires plain fmin: lane 1 would keep 1.0
+		// and lane 2 would keep +0.0 under the pseudo-min form.
+		name:        "f32x4.relaxed_min/nan and signed zero",
+		nanLaneBits: 32,
+		op:          wasm.OpcodeVecF32x4RelaxedMin,
+		in: [][2]uint64{
+			f32x4(f32NaN, 1, +0.0, negZero32),
+			f32x4(1, f32NaN, negZero32, +0.0),
+		},
+		want: f32x4(f32NaN, f32NaN, negZero32, negZero32),
+	},
+	{
+		// Likewise lane 1 would keep 1.0 and lane 3 would keep -0.0 under the
+		// pseudo-max form.
+		name:        "f32x4.relaxed_max/nan and signed zero",
+		nanLaneBits: 32,
+		op:          wasm.OpcodeVecF32x4RelaxedMax,
+		in: [][2]uint64{
+			f32x4(f32NaN, 1, +0.0, negZero32),
+			f32x4(1, f32NaN, negZero32, +0.0),
+		},
+		want: f32x4(f32NaN, f32NaN, +0.0, +0.0),
+	},
+	{
+		name:        "f64x2.relaxed_min/nan and signed zero",
+		nanLaneBits: 64,
+		op:          wasm.OpcodeVecF64x2RelaxedMin,
+		in: [][2]uint64{
+			f64x2(1, +0.0),
+			f64x2(f64NaN, negZero64),
+		},
+		want: f64x2(f64NaN, negZero64),
+	},
+	{
+		name:        "f64x2.relaxed_max/nan and signed zero",
+		nanLaneBits: 64,
+		op:          wasm.OpcodeVecF64x2RelaxedMax,
+		in: [][2]uint64{
+			f64x2(1, negZero64),
+			f64x2(f64NaN, +0.0),
+		},
+		want: f64x2(f64NaN, +0.0),
 	},
 	{
 		// Lane 0 is the only product that overflows: it saturates to INT16_MAX
@@ -238,14 +287,47 @@ func TestRelaxedSemantics(t *testing.T) {
 					results, err := mod.ExportedFunction("f").Call(ctx)
 					require.NoError(t, err)
 					require.Equal(t, 2, len(results))
-					require.Equal(t, tc.want, [2]uint64{results[0], results[1]},
+
+					want, got := tc.want, [2]uint64{results[0], results[1]}
+					if w := tc.nanLaneBits; w != 0 {
+						mask := ^uint64(0)
+						if w < 64 {
+							mask = uint64(1)<<w - 1
+						}
+						for lane := 0; lane < 128/w; lane++ {
+							i, shift := lane*w/64, uint(lane*w%64)
+							if !isNaNLane(want[i]>>shift&mask, w) {
+								continue
+							}
+							require.True(t, isNaNLane(got[i]>>shift&mask, w),
+								"lane %d: want a NaN, have %016x", lane, got[i]>>shift&mask)
+							want[i] &^= mask << shift
+							got[i] &^= mask << shift
+						}
+					}
+					require.Equal(t, want, got,
 						"want %016x%016x, have %016x%016x",
-						tc.want[1], tc.want[0], results[1], results[0])
+						want[1], want[0], got[1], got[0])
 				})
 			}
 		})
 	}
 }
+
+func isNaNLane(bits uint64, width int) bool {
+	if width == 32 {
+		return math.IsNaN(float64(math.Float32frombits(uint32(bits))))
+	}
+	return math.IsNaN(math.Float64frombits(bits))
+}
+
+// A NaN operand comes back quieted, so a canonical NaN in gives one back out.
+var (
+	f32NaN    = float32(math.NaN())
+	f64NaN    = math.NaN()
+	negZero32 = float32(math.Copysign(0, -1))
+	negZero64 = math.Copysign(0, -1)
+)
 
 func i8x16(v ...int8) (ret [2]uint64) {
 	for i, lane := range v {
