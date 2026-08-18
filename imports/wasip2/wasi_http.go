@@ -1168,6 +1168,26 @@ func wasiHTTPOptions(h *wasiHTTP) []component.Option {
 		component.WithResourceTag(wasiIfaceHTTPTypes, "response-outparam", wasiHTTPResponseOutparamResType),
 		component.WithResourceTag(wasiIfaceHTTPTypes, "future-trailers", wasiHTTPFutureTrailersResType),
 
+		// Releasing host state when the guest drops the handle naming it.
+		// Every resource here is a key into one of the maps above, and
+		// without a destructor the entry outlived the handle: an instance
+		// accumulated one per resource the guest ever made. serveHTTPCall
+		// releases what it owns itself, on the request path it controls;
+		// these cover everything the guest creates and drops on its own,
+		// which is the whole client side and any server-side resource a
+		// guest drops early.
+		component.WithHostResourceDtor(wasiHTTPIncomingRequestResType, h.dropIncomingRequest),
+		component.WithHostResourceDtor(wasiHTTPFieldsResType, h.dropFields),
+		component.WithHostResourceDtor(wasiHTTPOutgoingResponseResType, h.dropOutgoingResponse),
+		component.WithHostResourceDtor(wasiHTTPOutgoingBodyResType, h.dropOutgoingBody),
+		component.WithHostResourceDtor(wasiHTTPResponseOutparamResType, h.dropOutparam),
+		component.WithHostResourceDtor(wasiHTTPOutgoingRequestResType, h.dropOutRequest),
+		component.WithHostResourceDtor(wasiHTTPFutureResType, h.dropFuture),
+		component.WithHostResourceDtor(wasiHTTPIncomingResponseResType, h.dropIncomingResponse),
+		component.WithHostResourceDtor(wasiHTTPIncomingBodyResType, h.dropIncomingBody),
+		component.WithHostResourceDtor(wasiHTTPRequestOptionsResType, h.dropRequestOptions),
+		component.WithHostResourceDtor(wasiHTTPFutureTrailersResType, h.dropFutureTrailers),
+
 		component.WithImportCustom(wasiIfaceHTTPTypes, "[static]incoming-body.finish", h.incomingBodyFinish, inBodyFinishFD, inBodyFinishR),
 		component.WithImportCustom(wasiIfaceHTTPTypes, "[method]future-trailers.subscribe", h.futureTrailersSubscribe, ftSubFD, ftSubR),
 		component.WithImportCustom(wasiIfaceHTTPTypes, "[method]future-trailers.get", h.futureTrailersGet, ftGetFD, ftGetR),
@@ -1298,6 +1318,92 @@ func serveHTTPCall(in *component.Instance, ctx context.Context, method string, u
 		}
 	}
 	return resp.status, hdr, respBody, trailer, nil
+}
+
+// The destructors behind WithHostResourceDtor: each drops the entry its
+// resource named. Dropping a rep that is already gone is not an error --
+// serveHTTPCall releases the server-side request state itself, and a guest
+// dropping its handle afterwards must not fail because the host got there
+// first.
+
+func (h *wasiHTTP) dropIncomingRequest(_ context.Context, rep uint32) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.incoming, rep)
+	return nil
+}
+
+func (h *wasiHTTP) dropFields(_ context.Context, rep uint32) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.fields, rep)
+	return nil
+}
+
+func (h *wasiHTTP) dropOutgoingResponse(_ context.Context, rep uint32) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.responses, rep)
+	return nil
+}
+
+func (h *wasiHTTP) dropOutgoingBody(_ context.Context, rep uint32) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if b := h.bodies[rep]; b != nil && b.streamRep != 0 {
+		delete(h.bodyStreams, b.streamRep)
+	}
+	delete(h.bodies, rep)
+	return nil
+}
+
+func (h *wasiHTTP) dropOutparam(_ context.Context, rep uint32) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.outparams, rep)
+	return nil
+}
+
+func (h *wasiHTTP) dropOutRequest(_ context.Context, rep uint32) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.outRequests, rep)
+	return nil
+}
+
+func (h *wasiHTTP) dropFuture(_ context.Context, rep uint32) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.futures, rep)
+	return nil
+}
+
+func (h *wasiHTTP) dropIncomingResponse(_ context.Context, rep uint32) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.inResponses, rep)
+	return nil
+}
+
+func (h *wasiHTTP) dropIncomingBody(_ context.Context, rep uint32) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.inBodies, rep)
+	return nil
+}
+
+func (h *wasiHTTP) dropRequestOptions(_ context.Context, rep uint32) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.reqOptions, rep)
+	return nil
+}
+
+func (h *wasiHTTP) dropFutureTrailers(_ context.Context, rep uint32) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.futureTrailers, rep)
+	return nil
 }
 
 // releaseServeState drops the per-request host state serveHTTPCall minted or
