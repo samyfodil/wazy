@@ -367,17 +367,8 @@ func liftHistogram(l *lifter, v component.Value) Histogram {
 	for i, p := range points {
 		pf := l.fields(p, 8, what+".data-point")
 
-		bounds := l.list(pf[2], what+".bounds")
-		outBounds := make([]float64, len(bounds))
-		for j, b := range bounds {
-			outBounds[j] = l.f64(b, what+".bounds")
-		}
-
-		counts := l.list(pf[3], what+".bucket-counts")
-		outCounts := make([]uint64, len(counts))
-		for j, c := range counts {
-			outCounts[j] = l.u64(c, what+".bucket-counts")
-		}
+		outBounds := l.f64s(pf[2], what+".bounds")
+		outCounts := l.u64s(pf[3], what+".bucket-counts")
 
 		out[i] = HistogramDataPoint{
 			Attributes:   l.keyValues(pf[0], what+".data-point.attributes"),
@@ -432,13 +423,8 @@ func liftExponentialHistogram(l *lifter, v component.Value) ExponentialHistogram
 
 func liftExponentialBucket(l *lifter, v component.Value, what string) ExponentialBucket {
 	f := l.fields(v, 2, what)
-	counts := l.list(f[1], what+".counts")
-	out := make([]uint64, len(counts))
-	for i, c := range counts {
-		out[i] = l.u64(c, what+".counts")
-	}
 	return ExponentialBucket{
 		Offset: l.s32(f[0], what+".offset"),
-		Counts: out,
+		Counts: l.u64s(f[1], what+".counts"),
 	}
 }

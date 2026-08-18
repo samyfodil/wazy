@@ -194,13 +194,15 @@ func loadInt(mem []byte, ptr uint32, nbytes uint32, signed bool) (Value, error) 
 	bytes := mem[ptr : ptr+nbytes]
 	switch nbytes {
 	case 1:
-		v := uint32(bytes[0])
+		// A signed byte lifts as int32 whatever its sign. Returning early only
+		// for negatives, as this did, meant a non-negative s8 came back as a
+		// uint32 -- which storePrimitive then refused, so an s8 the host lifted
+		// could not be stored back unless it happened to be negative. The wider
+		// signed widths below never had the split.
 		if signed {
-			if bytes[0]&0x80 != 0 {
-				return int32(int8(bytes[0])), nil
-			}
+			return int32(int8(bytes[0])), nil
 		}
-		return v, nil
+		return uint32(bytes[0]), nil
 
 	case 2:
 		v := binary.LittleEndian.Uint16(bytes)
@@ -302,7 +304,25 @@ func loadList(mem []byte, ptr uint32, elemType bintype.TypeDesc, resolve Resolve
 		return nil, err
 	}
 
-	return loadListFromRange(mem, listPtr.(uint32), listLen.(uint32), elemType, resolve)
+	return loadAnyListFromRange(mem, listPtr.(uint32), listLen.(uint32), elemType, resolve)
+}
+
+// loadAnyListFromRange is loadListFromRange behind the typed-slice rule: a
+// list of a fixed-width primitive is read into the Go slice of that primitive
+// -- []byte for list<u8>, []uint32 for list<u32>, and so on -- rather than a
+// []Value costing a machine word per element. Every other element type takes
+// the general []Value path unchanged.
+//
+// Both lift directions go through here (loadList for the in-memory shape,
+// liftFlatList for the flat ABI) so the two shapes a consumer can observe for
+// one list type stay the same everywhere.
+func loadAnyListFromRange(mem []byte, ptr, length uint32, elemType bintype.TypeDesc, resolve Resolver) (Value, error) {
+	if prim, ok := scalarPrim(elemType); ok {
+		if v, handled, err := liftScalarList(mem, ptr, length, prim); handled {
+			return v, err
+		}
+	}
+	return loadListFromRange(mem, ptr, length, elemType, resolve)
 }
 
 // loadListFromRange reads `length` elements of elemType starting at ptr.
@@ -853,33 +873,22 @@ func storeList(mem []byte, ptr uint32, v Value, elemType bintype.TypeDesc, resol
 	return storeInt(mem, ptr+ptrSize, length, ptrSize)
 }
 
-// allocStoreAnyList stores a list value that is EITHER the general
-// []Value shape or, for list<u8> only, a raw []byte -- see byteListValue.
+// allocStoreAnyList stores a list value that is EITHER the general []Value
+// shape or the typed slice for a fixed-width primitive element -- []byte for
+// list<u8>, []uint32 for list<u32>, and so on. Both are accepted for every
+// such list; the typed one is what lifting now produces, and the one a host
+// func writing a numeric list already holds.
 func allocStoreAnyList(mem []byte, v Value, elemType bintype.TypeDesc, resolve Resolver, realloc Realloc) (uint32, uint32, error) {
-	if b, ok := byteListValue(v, elemType); ok {
-		return allocStoreBytes(mem, b, realloc)
+	if prim, ok := scalarPrim(elemType); ok {
+		if ptr, n, handled, err := storeScalarList(mem, v, prim, realloc); handled {
+			return ptr, n, err
+		}
 	}
 	list, ok := v.([]Value)
 	if !ok {
-		return 0, 0, fmt.Errorf("expected []Value (or []byte for list<u8>), got %T", v)
+		return 0, 0, fmt.Errorf("expected []Value (or the typed slice for a primitive element), got %T", v)
 	}
 	return allocStoreList(mem, list, elemType, resolve, realloc)
-}
-
-// byteListValue reports whether v is a raw []byte being stored as a
-// `list<u8>`. Value's general shape for a list is []Value (one interface per
-// element), which for a byte list costs a machine word per BYTE -- ~16x the
-// data on 64-bit. Since a host func producing bytes (a file read, an HTTP
-// body, a header value) already holds a []byte, letting it hand that over
-// directly turns the whole lowering into one copy. []Value stays valid
-// everywhere; this is a fast path, not a replacement.
-func byteListValue(v Value, elemType bintype.TypeDesc) ([]byte, bool) {
-	b, ok := v.([]byte)
-	if !ok {
-		return nil, false
-	}
-	p, isPrim := elemType.(bintype.PrimitiveDesc)
-	return b, isPrim && p.Prim == "u8"
 }
 
 // allocStoreBytes is allocStoreList's list<u8> fast path: one realloc and one

@@ -97,7 +97,11 @@ func main() {
 		if !ok {
 			return nil, fmt.Errorf("put: bucket rep %d does not exist", rep)
 		}
-		value, err := bytesOf(args[2])
+		// list<u8> arrives as a []byte -- a list of any fixed-width primitive
+		// lifts to the Go slice of that primitive. ListOf takes that shape as
+		// it is, and converts the general []Value shape a value built by hand
+		// still has.
+		value, err := component.ListOf[byte](args[2])
 		if err != nil {
 			return nil, fmt.Errorf("put %q: %w", key, err)
 		}
@@ -178,26 +182,4 @@ func main() {
 		log.Panicln(err)
 	}
 	fmt.Printf("guest: %s\n", results[0].(string))
-}
-
-// bytesOf reads a lifted list<u8>. The ABI hands one over as a []byte when it
-// can (a single copy, rather than one interface per byte), but a value built
-// elsewhere may still arrive in the general []Value shape, so accept both.
-func bytesOf(v component.Value) ([]byte, error) {
-	switch t := v.(type) {
-	case []byte:
-		return t, nil
-	case []component.Value:
-		out := make([]byte, len(t))
-		for i, e := range t {
-			b, ok := e.(uint32)
-			if !ok {
-				return nil, fmt.Errorf("list<u8>[%d]: expected u8, got %T", i, e)
-			}
-			out[i] = byte(b)
-		}
-		return out, nil
-	default:
-		return nil, fmt.Errorf("expected list<u8>, got %T", v)
-	}
 }

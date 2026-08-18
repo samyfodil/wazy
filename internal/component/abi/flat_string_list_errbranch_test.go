@@ -207,7 +207,7 @@ func TestDeCoerceValue(t *testing.T) {
 
 func TestLowerFlatOptionFlattenError(t *testing.T) {
 	mem := make([]byte, 100)
-	_, err := lowerFlatOption(nil, binary.FuncDesc{}, nil, okRealloc, mem)
+	_, err := lowerFlatOption(nil, binary.FuncDesc{}, nil, nil, okRealloc, mem)
 	if err == nil {
 		t.Error("expected error when elemType cannot be flattened")
 	}
@@ -215,7 +215,7 @@ func TestLowerFlatOptionFlattenError(t *testing.T) {
 
 func TestLowerFlatOptionSomePayloadError(t *testing.T) {
 	mem := make([]byte, 100)
-	_, err := lowerFlatOption("not-a-u32", binary.PrimitiveDesc{Prim: "u32"}, nil, okRealloc, mem)
+	_, err := lowerFlatOption("not-a-u32", binary.PrimitiveDesc{Prim: "u32"}, nil, nil, okRealloc, mem)
 	if err == nil {
 		t.Error("expected error propagated from Some payload lowering")
 	}
@@ -226,7 +226,7 @@ func TestLowerFlatOptionSomePayloadError(t *testing.T) {
 // wider than 1 core value.
 func TestLowerFlatOptionNonePaddingWidth(t *testing.T) {
 	mem := make([]byte, 100)
-	result, err := lowerFlatOption(nil, binary.PrimitiveDesc{Prim: "string"}, nil, okRealloc, mem)
+	result, err := lowerFlatOption(nil, binary.PrimitiveDesc{Prim: "string"}, nil, nil, okRealloc, mem)
 	if err != nil {
 		t.Fatalf("lowerFlatOption: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestLowerFlatOptionNonePaddingWidth(t *testing.T) {
 func TestLowerFlatResultFlattenError(t *testing.T) {
 	mem := make([]byte, 100)
 	badRef := binary.TypeRef{}
-	_, err := lowerFlatResult(ResultValue{IsErr: false, Payload: nil}, binary.ResultDesc{Ok: &badRef}, nil, okRealloc, mem)
+	_, err := lowerFlatResult(ResultValue{IsErr: false, Payload: nil}, binary.ResultDesc{Ok: &badRef}, nil, nil, okRealloc, mem)
 	if err == nil {
 		t.Error("expected error when result Ok type cannot be flattened/resolved")
 	}
@@ -251,7 +251,7 @@ func TestLowerFlatResultFlattenError(t *testing.T) {
 
 func TestLowerFlatResultNotAResultValue(t *testing.T) {
 	mem := make([]byte, 100)
-	_, err := lowerFlatResult("not a result", binary.ResultDesc{}, nil, okRealloc, mem)
+	_, err := lowerFlatResult("not a result", binary.ResultDesc{}, nil, nil, okRealloc, mem)
 	if err == nil || !strings.Contains(err.Error(), "expected ResultValue") {
 		t.Errorf("expected type error, got %v", err)
 	}
@@ -260,7 +260,7 @@ func TestLowerFlatResultNotAResultValue(t *testing.T) {
 func TestLowerFlatResultPayloadError(t *testing.T) {
 	mem := make([]byte, 100)
 	okRef := binary.TypeRef{Primitive: "u32"}
-	_, err := lowerFlatResult(ResultValue{IsErr: false, Payload: "bad"}, binary.ResultDesc{Ok: &okRef}, nil, okRealloc, mem)
+	_, err := lowerFlatResult(ResultValue{IsErr: false, Payload: "bad"}, binary.ResultDesc{Ok: &okRef}, nil, nil, okRealloc, mem)
 	if err == nil {
 		t.Error("expected error propagated from Ok payload lowering")
 	}
@@ -277,7 +277,7 @@ func TestLowerFlatResultPadsNarrowerArm(t *testing.T) {
 	errRef := binary.TypeRef{Primitive: "u32"}   // width 1
 	desc := binary.ResultDesc{Ok: &okRef, Err: &errRef}
 
-	result, err := lowerFlatResult(ResultValue{IsErr: true, Payload: uint32(42)}, desc, nil, okRealloc, mem)
+	result, err := lowerFlatResult(ResultValue{IsErr: true, Payload: uint32(42)}, desc, nil, nil, okRealloc, mem)
 	if err != nil {
 		t.Fatalf("lowerFlatResult: %v", err)
 	}
@@ -302,7 +302,7 @@ func TestLowerFlatResultPadsNarrowerArm(t *testing.T) {
 func TestLiftFlatOptionFlattenError(t *testing.T) {
 	mem := make([]byte, 100)
 	vi := NewCoreValueIter([]CoreValue{NewCoreValueI32(0)})
-	_, err := liftFlatOption(vi, binary.FuncDesc{}, nil, mem)
+	_, err := liftFlatOption(vi, binary.FuncDesc{}, nil, nil, mem)
 	if err == nil {
 		t.Error("expected error when elemType cannot be flattened")
 	}
@@ -312,7 +312,7 @@ func TestLiftFlatOptionNonePaddingExhausted(t *testing.T) {
 	mem := make([]byte, 100)
 	// disc=0 (none) but no padding value follows, even though string needs 2.
 	vi := NewCoreValueIter([]CoreValue{NewCoreValueI32(0)})
-	_, err := liftFlatOption(vi, binary.PrimitiveDesc{Prim: "string"}, nil, mem)
+	_, err := liftFlatOption(vi, binary.PrimitiveDesc{Prim: "string"}, nil, nil, mem)
 	if err == nil {
 		t.Error("expected error when none-padding is exhausted early")
 	}
@@ -321,7 +321,7 @@ func TestLiftFlatOptionNonePaddingExhausted(t *testing.T) {
 func TestLiftFlatOptionInvalidDiscriminant(t *testing.T) {
 	mem := make([]byte, 100)
 	vi := NewCoreValueIter([]CoreValue{NewCoreValueI32(7)})
-	_, err := liftFlatOption(vi, binary.PrimitiveDesc{Prim: "u32"}, nil, mem)
+	_, err := liftFlatOption(vi, binary.PrimitiveDesc{Prim: "u32"}, nil, nil, mem)
 	if err == nil {
 		t.Error("expected error for invalid option discriminant")
 	}
@@ -330,7 +330,7 @@ func TestLiftFlatOptionInvalidDiscriminant(t *testing.T) {
 func TestLiftFlatOptionSomePayloadError(t *testing.T) {
 	mem := make([]byte, 100)
 	vi := NewCoreValueIter([]CoreValue{NewCoreValueI32(1), NewCoreValueI32(0x110000)})
-	_, err := liftFlatOption(vi, binary.PrimitiveDesc{Prim: "char"}, nil, mem)
+	_, err := liftFlatOption(vi, binary.PrimitiveDesc{Prim: "char"}, nil, nil, mem)
 	if err == nil {
 		t.Error("expected error propagated from Some payload lifting")
 	}
@@ -342,7 +342,7 @@ func TestLiftFlatResultFlattenError(t *testing.T) {
 	mem := make([]byte, 100)
 	badRef := binary.TypeRef{}
 	vi := NewCoreValueIter([]CoreValue{NewCoreValueI32(0)})
-	_, err := liftFlatResult(vi, binary.ResultDesc{Ok: &badRef}, nil, mem)
+	_, err := liftFlatResult(vi, binary.ResultDesc{Ok: &badRef}, nil, nil, mem)
 	if err == nil {
 		t.Error("expected error when result Ok type cannot be flattened/resolved")
 	}
@@ -351,7 +351,7 @@ func TestLiftFlatResultFlattenError(t *testing.T) {
 func TestLiftFlatResultInvalidDiscriminant(t *testing.T) {
 	mem := make([]byte, 100)
 	vi := NewCoreValueIter([]CoreValue{NewCoreValueI32(9)})
-	_, err := liftFlatResult(vi, binary.ResultDesc{}, nil, mem)
+	_, err := liftFlatResult(vi, binary.ResultDesc{}, nil, nil, mem)
 	if err == nil {
 		t.Error("expected error for invalid result discriminant")
 	}
@@ -361,7 +361,7 @@ func TestLiftFlatResultPayloadError(t *testing.T) {
 	mem := make([]byte, 100)
 	okRef := binary.TypeRef{Primitive: "char"}
 	vi := NewCoreValueIter([]CoreValue{NewCoreValueI32(0), NewCoreValueI32(0x110000)})
-	_, err := liftFlatResult(vi, binary.ResultDesc{Ok: &okRef}, nil, mem)
+	_, err := liftFlatResult(vi, binary.ResultDesc{Ok: &okRef}, nil, nil, mem)
 	if err == nil {
 		t.Error("expected error propagated from Ok payload lifting")
 	}
@@ -384,7 +384,7 @@ func (mockValueIter) Done() bool               { return true }
 func TestLiftFlatResultComposesArbitraryIter(t *testing.T) {
 	mem := make([]byte, 100)
 	okRef := binary.TypeRef{Primitive: "u32"}
-	v, err := liftFlatResult(mockValueIter{}, binary.ResultDesc{Ok: &okRef}, nil, mem)
+	v, err := liftFlatResult(mockValueIter{}, binary.ResultDesc{Ok: &okRef}, nil, nil, mem)
 	if err != nil {
 		t.Fatalf("liftFlatResult with a generic valueIter should succeed, got %v", err)
 	}
@@ -405,7 +405,7 @@ func TestLiftFlatResultRoundTripsPaddedArm(t *testing.T) {
 	desc := binary.ResultDesc{Ok: &okRef, Err: &errRef}
 
 	vi := NewCoreValueIter([]CoreValue{NewCoreValueI32(1), NewCoreValueI32(42), NewCoreValueI32(0)})
-	got, err := liftFlatResult(vi, desc, nil, mem)
+	got, err := liftFlatResult(vi, desc, nil, nil, mem)
 	if err != nil {
 		t.Fatalf("liftFlatResult: %v", err)
 	}

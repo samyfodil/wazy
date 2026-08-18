@@ -139,6 +139,16 @@ func putCoreValueSlice(p *[]abi.CoreValue) {
 type Instance struct {
 	resolve abi.Resolver
 
+	// reallocCalls memoizes each core module's cabi_realloc, keyed by the
+	// module. Resolving an export mints a fresh api.Function -- and with it a
+	// call engine -- so doing it per host call made every host import that
+	// returns a string or list allocate one, which on the wasi:http path was
+	// the largest single object allocated per request. The bound-export path
+	// has always cached this (boundExport.reallocCall); this is the same fact
+	// for the guest->host direction, which cannot cache it at bind time
+	// because the calling module is only known per call.
+	reallocCalls sync.Map // api.Module -> reallocCall
+
 	// --- CallAsync (host-side non-blocking calls, callasync.go) ---
 	asyncActive atomic.Bool       // a CallAsync is outstanding; external AsyncCall.Resolve queues instead of erroring
 	amu         sync.Mutex        // guards mailbox, pending, PendingCall.closed, and acond
@@ -2117,6 +2127,29 @@ func coreReallocCall(fn api.Function) func(context.Context, uint32, uint32, uint
 		}
 		return uint32(buf[0]), nil
 	}
+}
+
+// reallocCall is the ctx-free realloc closure an abi.Realloc holds.
+type reallocCall = func(context.Context, uint32, uint32, uint32, uint32) (uint32, error)
+
+// reallocFor is reallocOf with the export resolution memoized per module.
+//
+// Caching the resolved function for the instance's lifetime is what
+// finalizeBoundExport already does for an export's own realloc, so the
+// lifetime is not a new assumption. A module exporting no cabi_realloc caches
+// a nil call, which Realloc.grow reports as "not present" exactly as the
+// uncached path does.
+func (in *Instance) reallocFor(ctx context.Context, mod api.Module) abi.Realloc {
+	if in == nil || mod == nil {
+		return reallocOf(ctx, mod)
+	}
+	if v, ok := in.reallocCalls.Load(mod); ok {
+		call, _ := v.(reallocCall)
+		return abi.Realloc{Ctx: ctx, Call: call}
+	}
+	call := coreReallocCall(mod.ExportedFunction("cabi_realloc"))
+	in.reallocCalls.Store(mod, call)
+	return abi.Realloc{Ctx: ctx, Call: call}
 }
 
 // reallocOfFunc builds an abi.Realloc for a caller that already resolved the

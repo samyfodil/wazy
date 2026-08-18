@@ -120,3 +120,50 @@ func (cvi *CoreValueIter) Next() (CoreValue, error) {
 func (cvi *CoreValueIter) Done() bool {
 	return cvi.i == len(cvi.values)
 }
+
+// stackValueIter is CoreValueIter over the two halves a planned caller
+// already holds separately: the flat kind list computed at bind time and the
+// raw bits sitting on the core stack. It exists so LiftFlatKinds can walk a
+// parameter's core values without first materializing a []CoreValue just to
+// pair each kind with its bits -- that pairing was one allocation per
+// parameter per guest->host call. kinds and bits are always the same length
+// (LiftFlatKinds checks before building one).
+type stackValueIter struct {
+	kinds []string
+	bits  []uint64
+	i     int
+}
+
+var stackValueIterPool = sync.Pool{New: func() any { return new(stackValueIter) }}
+
+// getStackValueIter returns a pooled iterator pairing kinds with bits, for
+// the same escapes-as-valueIter reason getCoreValueIter exists. Return it
+// with putStackValueIter once lifting is done.
+func getStackValueIter(kinds []string, bits []uint64) *stackValueIter {
+	it := stackValueIterPool.Get().(*stackValueIter)
+	it.kinds, it.bits, it.i = kinds, bits, 0
+	return it
+}
+
+// putStackValueIter returns an iterator to the pool, clearing both slice
+// references so a pooled-but-idle iterator doesn't pin the caller's stack
+// buffer or a plan's kind list.
+func putStackValueIter(it *stackValueIter) {
+	it.kinds, it.bits = nil, nil
+	stackValueIterPool.Put(it)
+}
+
+// Next returns the next CoreValue and advances the iterator.
+func (svi *stackValueIter) Next() (CoreValue, error) {
+	if svi.i >= len(svi.kinds) {
+		return CoreValue{}, fmt.Errorf("stackValueIter: index out of range")
+	}
+	cv := CoreValue{Kind: svi.kinds[svi.i], Bits: svi.bits[svi.i]}
+	svi.i++
+	return cv, nil
+}
+
+// Done reports whether all core values have been consumed.
+func (svi *stackValueIter) Done() bool {
+	return svi.i == len(svi.kinds)
+}

@@ -55,9 +55,25 @@ drop, which then fails with a cross-type error that doesn't mention tags.
 **Values have shapes.** A `record` and a `tuple` arrive as `[]Value` in
 declaration order; a `variant` is a `VariantValue{Disc, Payload}`; a `result`
 is a `ResultValue{IsErr, Payload}`; `option` is `nil` for none or the inner
-value for some; `list<u8>` arrives as `[]byte`. Note that returning a Go
-`error` from a host func *traps the guest* — a WIT-declared failure is a
-`ResultValue` with `IsErr` set, which is an ordinary value the guest handles.
+value for some.
+
+A `list` of a fixed-width primitive arrives as the Go slice of that primitive —
+`[]byte` for `list<u8>`, `[]uint32` for `list<u32>`, and so on — while a list of
+anything else, `list<string>` included, arrives as `[]Value`. `component.ListOf`
+reads either:
+
+```go
+value, err := component.ListOf[byte](args[2])    // list<u8>
+keys, err := component.ListOf[string](args[0])   // list<string>
+```
+
+It returns the typed shape as it arrived rather than copying, so reaching for it
+costs nothing when the list is already typed. Both shapes are accepted when you
+*return* a list, so a host func producing one can hand over whichever it has.
+
+Note that returning a Go `error` from a host func *traps the guest* — a
+WIT-declared failure is a `ResultValue` with `IsErr` set, which is an ordinary
+value the guest handles.
 
 ## Testing host funcs without a guest
 

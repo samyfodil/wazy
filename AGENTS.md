@@ -19,6 +19,9 @@ WebAssembly runtime for Go.
 - `api/` — stable API types shared across the tree.
 - `experimental/` — opt-in, unstable API.
 - `imports/wasi_snapshot_preview1/` — WASI preview1 host module.
+- `component/` — the public Component Model API (`Instantiate`, host imports, value shapes).
+- `internal/component/` — the component implementation: `binary/` decoding, `abi/` canonical lift/lower, `instance/` graph instantiation and resources.
+- `imports/wasip2/` — WASI 0.2 host implementation, written against the public `component` API.
 - `internal/engine/native/` — the optimizing compiler (amd64 + arm64 JIT).
 - `internal/engine/interpreter/` — the portable interpreter (fallback where the compiler is unsupported).
 - `internal/sysfs/` — host filesystem; `internal/wasip1/` — WASI wire layer.
@@ -49,8 +52,23 @@ Use the Makefile; it encodes the real invocations.
 - **Fresh-checkout CI:** some integration suites (libsodium, stdlibs) download or
   compile fixtures into git-ignored `testdata/` dirs. Code that `//go:embed`s such a
   dir must sit behind a build tag, or a clean checkout won't compile.
-- **Host functions:** use the generic, reflection-free `HostFunc0..8` / `HostProc0..8`
+- **Host functions:** use the generic, reflection-free `HostFunc0..16` / `HostProc0..16`
   in `host_typed.go`. Do not reintroduce `reflect`-based host dispatch.
+- **Component value shapes:** a `record`/`tuple` is a `[]Value` in declaration order,
+  a `variant` a `VariantValue`, a `result` a `ResultValue`, an `option` `nil` or the
+  inner value. A `list` of a fixed-width primitive is the Go slice of that primitive
+  (`[]byte`, `[]uint32`, `[]float64`, `[]bool`, `[]rune`); every other list is a
+  `[]Value`. Read one with `component.ListOf[T]`, which takes either shape and does
+  not copy the typed one. Lowering accepts both, so only *reading* a list cares.
+- **Component ABI hot paths:** the lift/lower tree runs per value per call, so an
+  allocation there is an allocation per request. Two habits it has been burned by:
+  boxing a value type into an interface inside a recursive walk, and building a
+  structure only to read its length (`FlatWidth` exists because `Flatten` was being
+  called for `len`). `BenchmarkServeHTTP` in `imports/wasip2` guards the total.
+- **Host resources:** a `WithResourceTag` without a matching `WithHostResourceDtor`
+  leaks — the handle goes away and the host state it named does not. Destructors for
+  one tag compose, since `wasi:filesystem`, `wasi:sockets` and `wasi:http` all mint
+  streams under the shared stream tags.
 - **arm64:** JIT changes must be verified on arm64. Under emulation:
   `GOARCH=arm64 CGO_ENABLED=0 go test ./internal/engine/native/...` (needs qemu-user).
 - **wasip1 FS semantics:** the stdlib suite

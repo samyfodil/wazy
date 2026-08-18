@@ -1251,6 +1251,18 @@ func wasiSocketOptions(sockets *wasiSockets) []component.Option {
 		component.WithResourceTag(wasiIfaceSocketsTCP, "tcp-socket", wasiTCPSocketResType),
 		component.WithResourceTag(wasiIfaceSocketsIPNameLookup, "resolve-address-stream", wasiResolveStreamResType),
 
+		// Releasing the node a dropped handle named; without these an
+		// instance kept every socket and stream a guest had ever opened.
+		// The stream tags are shared with wasi:filesystem and wasi:http, so
+		// each of these ignores a rep it does not own (socket reps start at a
+		// disjoint base -- see this file's "Rep numbering" doc) and
+		// registerDtor composes destructors for a tag rather than replacing
+		// them.
+		component.WithHostResourceDtor(wasiTCPSocketResType, sockets.dropTCPSock),
+		component.WithHostResourceDtor(wasiResolveStreamResType, sockets.dropResolveStream),
+		component.WithHostResourceDtor(wasiInputStreamResType, sockets.dropInputStream),
+		component.WithHostResourceDtor(wasiOutputStreamResType, sockets.dropOutputStream),
+
 		component.WithImportCustom(wasiIfaceSocketsInstanceNet, "instance-network", instanceNetwork, instNetFD, instNetResolve),
 		component.WithImportCustom(wasiIfaceSocketsIPNameLookup, "resolve-addresses", resolveAddresses, resolveFD, resolveResolve),
 		component.WithImportCustom(wasiIfaceSocketsIPNameLookup, "[method]resolve-address-stream.resolve-next-address", resolveNextAddress, resolveNextFD, resolveNextResolve),
@@ -1627,6 +1639,10 @@ func wasiUDPSocketOptions(sockets *wasiSockets) []component.Option {
 		component.WithResourceTag(wasiIfaceSocketsUDP, "udp-socket", wasiUDPSocketResType),
 		component.WithResourceTag(wasiIfaceSocketsUDP, "incoming-datagram-stream", wasiIncomingDatagramStreamResType),
 		component.WithResourceTag(wasiIfaceSocketsUDP, "outgoing-datagram-stream", wasiOutgoingDatagramStreamResType),
+
+		component.WithHostResourceDtor(wasiUDPSocketResType, sockets.dropUDPSock),
+		component.WithHostResourceDtor(wasiIncomingDatagramStreamResType, sockets.dropInDgram),
+		component.WithHostResourceDtor(wasiOutgoingDatagramStreamResType, sockets.dropOutDgram),
 
 		component.WithImportCustom(wasiIfaceSocketsInstanceNet, "instance-network", instanceNetwork, instNetFD, instNetResolve),
 		component.WithImportCustom(wasiIfaceSocketsUDPCreateSoc, "create-udp-socket", createUDPSocket, createUDPFD, createUDPResolve),
@@ -2148,4 +2164,62 @@ func wasiOutgoingSendSig() (component.FuncDesc, component.Resolver) {
 		Results: component.FuncResults{Unnamed: &resultRef},
 	}
 	return fd, tbl.resolver()
+}
+
+// The destructors behind WithHostResourceDtor. Each releases the node its rep
+// named. A rep this package did not mint is ignored: the stream tags are
+// shared with wasi:filesystem and wasi:http, whose reps come from disjoint
+// ranges, so deleting an absent key is the correct no-op rather than an error.
+//
+// Closing the underlying connection is deliberately left to the node's own
+// close paths, which the guest reaches explicitly; these release only the
+// bookkeeping that outlived the handle.
+
+func (s *wasiSockets) dropTCPSock(_ context.Context, rep uint32) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.tcpSocks, rep)
+	return nil
+}
+
+func (s *wasiSockets) dropUDPSock(_ context.Context, rep uint32) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.udpSocks, rep)
+	return nil
+}
+
+func (s *wasiSockets) dropResolveStream(_ context.Context, rep uint32) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.resolveStream, rep)
+	return nil
+}
+
+func (s *wasiSockets) dropInputStream(_ context.Context, rep uint32) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.inStreams, rep)
+	return nil
+}
+
+func (s *wasiSockets) dropOutputStream(_ context.Context, rep uint32) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.outStreams, rep)
+	return nil
+}
+
+func (s *wasiSockets) dropInDgram(_ context.Context, rep uint32) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.inDgrams, rep)
+	return nil
+}
+
+func (s *wasiSockets) dropOutDgram(_ context.Context, rep uint32) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.outDgrams, rep)
+	return nil
 }

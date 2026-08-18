@@ -83,6 +83,29 @@ var httpMethodCases = []string{
 	"GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH",
 }
 
+// httpMethodResults[i] is the shared result slice for httpMethodCases[i].
+// A method variant with no payload is call-invariant, and the instance layer
+// only reads a HostFunc's returned slice (lowerHostResultsPlanned), so every
+// incoming-request.method call can share one boxed value instead of
+// allocating a fresh slice + VariantValue box per request.
+var httpMethodResults = func() [][]component.Value {
+	out := make([][]component.Value, len(httpMethodCases))
+	for i := range httpMethodCases {
+		out[i] = []component.Value{component.VariantValue{Disc: uint32(i)}}
+	}
+	return out
+}()
+
+// wasiResultOk is the shared result slice for every host func whose success
+// is a payload-less `result<_, E>` Ok -- fields.set, outgoing-response.
+// set-status-code, outgoing-body.finish, output-stream.write/blocking-flush.
+// Shareable for the same only-read reason as httpMethodResults.
+var wasiResultOk = []component.Value{component.ResultValue{IsErr: false, Payload: nil}}
+
+// wasiCheckWriteBudget is output-stream.check-write's fixed Ok(1<<40) budget
+// (see checkWrite in wasi.go), shared across calls for the same reason.
+var wasiCheckWriteBudget = []component.Value{component.ResultValue{IsErr: false, Payload: uint64(1) << 40}}
+
 // httpIncomingRequest is the host state behind an incoming-request resource:
 // the inbound request serveHTTP synthesized for the guest to read.
 type httpIncomingRequest struct {
@@ -124,6 +147,14 @@ type httpOutgoingBody struct {
 	// trailers holds the option<trailers> a guest passes to
 	// outgoing-body.finish (nil when it finishes with None, the common case).
 	trailers *httpFields
+
+	// rep and streamRep are the reps this body was minted under, recorded so
+	// serveHTTPCall can release them when the request that created it is
+	// done. Without them the only way back from the body to its map keys
+	// would be a scan. streamRep is 0 until the guest takes the body's
+	// output-stream, which a response with no body never does.
+	rep       uint32
+	streamRep uint32
 }
 
 // httpCapture is the slot a response-outparam names: what the guest set.
@@ -155,6 +186,14 @@ type wasiHTTP struct {
 
 	nextBodyStream uint32
 	bodyStreams    map[uint32]*httpOutgoingBody
+
+	// handlerInstanceName caches the full exported-instance name
+	// findExportInstance resolves for wasi:http/incoming-handler. The export
+	// list is immutable once the Instance exists, so serveHTTPCall pays the
+	// scan (and the InstanceExports slice it allocates) once rather than per
+	// request. Guarded by mu; "" means not resolved yet (a component that
+	// lacks the export re-scans, but that is a once-per-request error path).
+	handlerInstanceName string
 
 	// --- outgoing (client) side ---
 
@@ -283,6 +322,7 @@ func (h *wasiHTTP) newBodyRep(b *httpOutgoingBody) uint32 {
 	rep := h.nextRep
 	h.nextRep++
 	h.bodies[rep] = b
+	b.rep = rep
 	return rep
 }
 
@@ -303,6 +343,7 @@ func (h *wasiHTTP) newBodyStreamRep(b *httpOutgoingBody) uint32 {
 	rep := h.nextBodyStream
 	h.nextBodyStream++
 	h.bodyStreams[rep] = b
+	b.streamRep = rep
 	return rep
 }
 
@@ -350,7 +391,7 @@ func (h *wasiHTTP) incomingRequestMethod(_ context.Context, args []component.Val
 	up := strings.ToUpper(req.method)
 	for i, name := range httpMethodCases {
 		if name == up {
-			return []component.Value{component.VariantValue{Disc: uint32(i)}}, nil
+			return httpMethodResults[i], nil
 		}
 	}
 	// other(string): discriminant 9, payload the raw method token.
@@ -572,7 +613,7 @@ func (h *wasiHTTP) fieldsSet(_ context.Context, args []component.Value) ([]compo
 		return []component.Value{component.ResultValue{IsErr: true, Payload: component.VariantValue{Disc: httpHeaderErrorImmutable}}}, nil
 	}
 	// result<_, header-error>: Ok.
-	return []component.Value{component.ResultValue{IsErr: false, Payload: nil}}, nil
+	return wasiResultOk, nil
 }
 
 // dropName removes every entry whose name matches, compared case-
@@ -637,7 +678,7 @@ func (h *wasiHTTP) outgoingResponseSetStatusCode(_ context.Context, args []compo
 	if !ok {
 		return nil, fmt.Errorf("[method]outgoing-response.set-status-code: rep %d does not name a live outgoing-response", rep)
 	}
-	return []component.Value{component.ResultValue{IsErr: false, Payload: nil}}, nil
+	return wasiResultOk, nil
 }
 
 func (h *wasiHTTP) outgoingResponseBody(_ context.Context, args []component.Value) ([]component.Value, error) {
@@ -740,7 +781,7 @@ func (h *wasiHTTP) outgoingBodyFinish(_ context.Context, args []component.Value)
 		return nil, fmt.Errorf("[static]outgoing-body.finish: rep %d does not name a live outgoing-body", rep)
 	}
 	// result<_, error-code>: Ok.
-	return []component.Value{component.ResultValue{IsErr: false, Payload: nil}}, nil
+	return wasiResultOk, nil
 }
 
 func (h *wasiHTTP) responseOutparamSet(_ context.Context, args []component.Value) ([]component.Value, error) {
@@ -1127,6 +1168,26 @@ func wasiHTTPOptions(h *wasiHTTP) []component.Option {
 		component.WithResourceTag(wasiIfaceHTTPTypes, "response-outparam", wasiHTTPResponseOutparamResType),
 		component.WithResourceTag(wasiIfaceHTTPTypes, "future-trailers", wasiHTTPFutureTrailersResType),
 
+		// Releasing host state when the guest drops the handle naming it.
+		// Every resource here is a key into one of the maps above, and
+		// without a destructor the entry outlived the handle: an instance
+		// accumulated one per resource the guest ever made. serveHTTPCall
+		// releases what it owns itself, on the request path it controls;
+		// these cover everything the guest creates and drops on its own,
+		// which is the whole client side and any server-side resource a
+		// guest drops early.
+		component.WithHostResourceDtor(wasiHTTPIncomingRequestResType, h.dropIncomingRequest),
+		component.WithHostResourceDtor(wasiHTTPFieldsResType, h.dropFields),
+		component.WithHostResourceDtor(wasiHTTPOutgoingResponseResType, h.dropOutgoingResponse),
+		component.WithHostResourceDtor(wasiHTTPOutgoingBodyResType, h.dropOutgoingBody),
+		component.WithHostResourceDtor(wasiHTTPResponseOutparamResType, h.dropOutparam),
+		component.WithHostResourceDtor(wasiHTTPOutgoingRequestResType, h.dropOutRequest),
+		component.WithHostResourceDtor(wasiHTTPFutureResType, h.dropFuture),
+		component.WithHostResourceDtor(wasiHTTPIncomingResponseResType, h.dropIncomingResponse),
+		component.WithHostResourceDtor(wasiHTTPIncomingBodyResType, h.dropIncomingBody),
+		component.WithHostResourceDtor(wasiHTTPRequestOptionsResType, h.dropRequestOptions),
+		component.WithHostResourceDtor(wasiHTTPFutureTrailersResType, h.dropFutureTrailers),
+
 		component.WithImportCustom(wasiIfaceHTTPTypes, "[static]incoming-body.finish", h.incomingBodyFinish, inBodyFinishFD, inBodyFinishR),
 		component.WithImportCustom(wasiIfaceHTTPTypes, "[method]future-trailers.subscribe", h.futureTrailersSubscribe, ftSubFD, ftSubR),
 		component.WithImportCustom(wasiIfaceHTTPTypes, "[method]future-trailers.get", h.futureTrailersGet, ftGetFD, ftGetR),
@@ -1194,12 +1255,22 @@ func serveHTTPRequest(in *component.Instance, w http.ResponseWriter, r *http.Req
 // back the response the guest set. Split out (taking already-decomposed request
 // parts) so tests can drive one request without a live net/http server.
 func serveHTTPCall(in *component.Instance, ctx context.Context, method string, u *url.URL, headers http.Header, reqBody []byte, reqTrailer http.Header) (status uint16, respHeader http.Header, respBody []byte, respTrailer http.Header, err error) {
-	if httpHostOf(in) == nil {
+	h := httpHostOf(in)
+	if h == nil {
 		return 0, nil, nil, nil, fmt.Errorf("component/instance: ServeHTTP: instance was not created with WithWASI(WASIConfig{EnableHTTP: true})")
 	}
-	handlerInstance, ok := findExportInstance(in, wasiIfaceHTTPIncomingHandler)
-	if !ok {
-		return 0, nil, nil, nil, fmt.Errorf("component/instance: ServeHTTP: component does not export %s", wasiIfaceHTTPIncomingHandler)
+	h.mu.Lock()
+	handlerInstance := h.handlerInstanceName
+	h.mu.Unlock()
+	if handlerInstance == "" {
+		var ok bool
+		handlerInstance, ok = findExportInstance(in, wasiIfaceHTTPIncomingHandler)
+		if !ok {
+			return 0, nil, nil, nil, fmt.Errorf("component/instance: ServeHTTP: component does not export %s", wasiIfaceHTTPIncomingHandler)
+		}
+		h.mu.Lock()
+		h.handlerInstanceName = handlerInstance
+		h.mu.Unlock()
 	}
 
 	pathQ := u.Path
@@ -1210,12 +1281,15 @@ func serveHTTPCall(in *component.Instance, ctx context.Context, method string, u
 		pathQ += "?" + u.RawQuery
 	}
 	req := &httpIncomingRequest{method: strings.ToUpper(method), pathQ: pathQ, headers: headers.Clone(), body: reqBody, trailers: reqTrailer.Clone()}
-	reqRep := httpHostOf(in).newIncomingRep(req)
+	reqRep := h.newIncomingRep(req)
 	reqHandle := in.Resources().NewOwn(wasiHTTPIncomingRequestResType, reqRep)
 
 	capture := &httpCapture{}
-	outRep := httpHostOf(in).newOutparamRep(capture)
+	outRep := h.newOutparamRep(capture)
 	outHandle := in.Resources().NewOwn(wasiHTTPResponseOutparamResType, outRep)
+	// Every exit from here on is done with the outparam and the body behind
+	// it, including the error ones.
+	defer func() { h.releaseServeState(reqRep, outRep, capture) }()
 
 	if _, err := in.CallExport(ctx, handlerInstance, "handle", reqHandle, outHandle); err != nil {
 		return 0, nil, nil, nil, fmt.Errorf("component/instance: ServeHTTP: guest handle: %w", err)
@@ -1244,6 +1318,124 @@ func serveHTTPCall(in *component.Instance, ctx context.Context, method string, u
 		}
 	}
 	return resp.status, hdr, respBody, trailer, nil
+}
+
+// The destructors behind WithHostResourceDtor: each drops the entry its
+// resource named. Dropping a rep that is already gone is not an error --
+// serveHTTPCall releases the server-side request state itself, and a guest
+// dropping its handle afterwards must not fail because the host got there
+// first.
+
+func (h *wasiHTTP) dropIncomingRequest(_ context.Context, rep uint32) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.incoming, rep)
+	return nil
+}
+
+func (h *wasiHTTP) dropFields(_ context.Context, rep uint32) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.fields, rep)
+	return nil
+}
+
+func (h *wasiHTTP) dropOutgoingResponse(_ context.Context, rep uint32) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.responses, rep)
+	return nil
+}
+
+func (h *wasiHTTP) dropOutgoingBody(_ context.Context, rep uint32) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if b := h.bodies[rep]; b != nil && b.streamRep != 0 {
+		delete(h.bodyStreams, b.streamRep)
+	}
+	delete(h.bodies, rep)
+	return nil
+}
+
+func (h *wasiHTTP) dropOutparam(_ context.Context, rep uint32) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.outparams, rep)
+	return nil
+}
+
+func (h *wasiHTTP) dropOutRequest(_ context.Context, rep uint32) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.outRequests, rep)
+	return nil
+}
+
+func (h *wasiHTTP) dropFuture(_ context.Context, rep uint32) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.futures, rep)
+	return nil
+}
+
+func (h *wasiHTTP) dropIncomingResponse(_ context.Context, rep uint32) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.inResponses, rep)
+	return nil
+}
+
+func (h *wasiHTTP) dropIncomingBody(_ context.Context, rep uint32) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.inBodies, rep)
+	return nil
+}
+
+func (h *wasiHTTP) dropRequestOptions(_ context.Context, rep uint32) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.reqOptions, rep)
+	return nil
+}
+
+func (h *wasiHTTP) dropFutureTrailers(_ context.Context, rep uint32) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.futureTrailers, rep)
+	return nil
+}
+
+// releaseServeState drops the per-request host state serveHTTPCall minted or
+// caused to be minted, once the response has been read out of it.
+//
+// The incoming request, the response-outparam, and the outgoing-body the guest
+// takes from the response it sets are reachable only through the call that
+// created them: once the guest's handle export has returned and the capture has
+// been read, nothing can name them again. They were previously left in the maps, so a long-lived
+// instance accumulated one capture and one body per request it ever served,
+// and the rep counter climbed without bound -- which also made every handle
+// value expensive to box, small integers being free and large ones not.
+//
+// The response body slice handed back to the caller aliases the body's
+// buffer, which stays alive through that slice; dropping the map entry does
+// not disturb it.
+func (h *wasiHTTP) releaseServeState(reqRep, outRep uint32, capture *httpCapture) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	delete(h.incoming, reqRep)
+	delete(h.outparams, outRep)
+
+	if capture == nil || capture.resp == nil {
+		return
+	}
+	if b := capture.resp.body; b != nil {
+		delete(h.bodies, b.rep)
+		if b.streamRep != 0 {
+			delete(h.bodyStreams, b.streamRep)
+		}
+	}
 }
 
 // findExportInstance returns the full exported-instance name whose

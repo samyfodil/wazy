@@ -474,6 +474,13 @@ func TestLowerHostResults(t *testing.T) {
 	if err := lowerHostResults(ctx, fdMulti, resMulti, []abi.Value{uint32(1), uint32(2)}, make([]uint64, 2), mod, newHandleTable(), -1, abi.Realloc{}); err == nil {
 		t.Fatal("expected multiple-results error")
 	}
+
+	// a result type that resolves but cannot be flattened fails at plan time
+	// (buildHostResultPlan's CompileLower arm)
+	fdBad, resBad := synthFuncDesc(nil, []binary.TypeDesc{binary.ResourceDesc{}})
+	if err := lowerHostResults(ctx, fdBad, resBad, []abi.Value{uint32(1)}, stack, mod, newHandleTable(), -1, abi.Realloc{}); err == nil {
+		t.Fatal("expected a compile error for an unflattenable result type")
+	}
 }
 
 // TestLowerHostResults_Spilled proves the out-pointer path itself (not just
