@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"sort"
 	"sync"
@@ -183,6 +184,19 @@ func (e *engine) HasCompiledModule(module *wasm.Module, listeners []api.Function
 
 // CompileModule implements wasm.Engine.
 func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listeners []api.FunctionListener, ensureTermination bool) (err error) {
+	// The compiler asserts with panics rather than threading errors through
+	// every tree-matching site, so a shape it cannot lower arrives here as a
+	// panic. The module reaching this point has already passed validation, so
+	// such a panic says wazy is incomplete, not that the wasm is bad -- and
+	// letting it escape would take down a host that is only guilty of
+	// compiling somebody else's module. Turn it into an error the caller can
+	// reject the module with, the way the call path already does for traps.
+	defer func() {
+		if r := recover(); r != nil {
+			err = compilePanicError(module, r)
+		}
+	}()
+
 	if nativeapi.PerfMapEnabled {
 		nativeapi.PerfMap.Lock()
 		defer nativeapi.PerfMap.Unlock()
@@ -1198,4 +1212,20 @@ func (cm *compiledModule) getSourceOffset(pc uintptr) uint64 {
 		return 0
 	}
 	return cm.sourceMap.wasmBinaryOffsets[index]
+}
+
+// compilePanicError turns a panic raised while compiling into an error naming
+// the module, keeping the stack so a wazy bug is still debuggable from a report.
+// A runtime error is re-raised: those signal a broken invariant in the compiler
+// itself rather than a shape it declined to lower, and hiding one behind a
+// returned error would turn a bug into a silently rejected module.
+func compilePanicError(module *wasm.Module, recovered interface{}) error {
+	if rte, ok := recovered.(runtime.Error); ok {
+		panic(rte)
+	}
+	var name string
+	if module.NameSection != nil {
+		name = module.NameSection.ModuleName
+	}
+	return fmt.Errorf("wazy failed to compile module %q: %v\n%s", name, recovered, debug.Stack())
 }
