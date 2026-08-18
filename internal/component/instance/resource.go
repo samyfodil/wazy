@@ -205,14 +205,39 @@ func (t *handleTable) liveCountLocked(typeIdx uint32) int {
 	return n
 }
 
-// registerDtor records the destructor callback for a resource type tag.
+// registerDtor records a destructor callback for a resource type tag.
+//
+// Registering a second destructor for a tag composes with the first rather
+// than replacing it, because one tag can name resources owned by several
+// independent host implementations: wasi:filesystem, wasi:sockets and
+// wasi:http all mint input-stream and output-stream handles under the shared
+// stream tags, each backed by its own state and its own disjoint range of
+// reps. Replacing would have let whichever registered last silently take over
+// releasing every stream, so the others would keep leaking with nothing to
+// report it.
+//
+// Every registered destructor runs, in registration order, and each is
+// expected to ignore a rep it does not own -- deleting an absent key. The
+// first error is returned, after the rest have run: a destructor that fails
+// must not stop the others from releasing what they own.
 func (t *handleTable) registerDtor(typeIdx uint32, dtor func(ctx context.Context, rep uint32) error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.dtors == nil {
 		t.dtors = make(map[uint32]func(ctx context.Context, rep uint32) error)
 	}
-	t.dtors[typeIdx] = dtor
+	prev := t.dtors[typeIdx]
+	if prev == nil {
+		t.dtors[typeIdx] = dtor
+		return
+	}
+	t.dtors[typeIdx] = func(ctx context.Context, rep uint32) error {
+		err := prev(ctx, rep)
+		if err2 := dtor(ctx, rep); err == nil {
+			err = err2
+		}
+		return err
+	}
 }
 
 // dtorFor returns the destructor callback registered for a resource type tag,

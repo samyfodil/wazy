@@ -1838,6 +1838,20 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []component.Option 
 		component.WithResourceTag(wasiIfaceStreams, "output-stream", wasiOutputStreamResType),
 		component.WithResourceTag(wasiIfaceError, "error", wasiErrorResType),
 
+		// Releasing the node a dropped handle named. Without these the maps
+		// only ever grew: an instance kept every descriptor, directory stream
+		// and file stream a guest had ever opened, for as long as the instance
+		// lived.
+		//
+		// The stream tags are shared with wasi:sockets and wasi:http, which
+		// mint their own streams under them from disjoint rep ranges, so each
+		// of these ignores a rep it does not own, and registerDtor composes
+		// destructors for a tag rather than replacing them.
+		component.WithHostResourceDtor(wasiDescriptorResType, fs.dropDescriptor),
+		component.WithHostResourceDtor(wasiDirEntryStreamResType, fs.dropDirStream),
+		component.WithHostResourceDtor(wasiInputStreamResType, fs.dropInputStream),
+		component.WithHostResourceDtor(wasiOutputStreamResType, fs.dropOutputStream),
+
 		component.WithImportCustom(wasiIfacePreopens, "get-directories", getDirectories, dirFD, dirResolve),
 
 		component.WithImportCustom(wasiIfaceFilesystemTypes, "filesystem-error-code", filesystemErrorCode, fsErrFD, fsErrResolve),
@@ -1895,6 +1909,38 @@ func wasiErrorCodeType(tbl *typeTable) component.TypeRef {
 		"not-permitted", "pipe", "read-only", "invalid-seek", "text-file-busy",
 		"cross-device",
 	}})
+}
+
+// The destructors behind WithHostResourceDtor. Each releases the node its rep
+// named, and ignores a rep it does not own -- the stream tags are shared with
+// the other host implementations that mint streams.
+
+func (f *wasiFS) dropDescriptor(_ context.Context, rep uint32) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.descs, rep)
+	return nil
+}
+
+func (f *wasiFS) dropDirStream(_ context.Context, rep uint32) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.dirStreams, rep)
+	return nil
+}
+
+func (f *wasiFS) dropInputStream(_ context.Context, rep uint32) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.streams, rep)
+	return nil
+}
+
+func (f *wasiFS) dropOutputStream(_ context.Context, rep uint32) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.writeStreams, rep)
+	return nil
 }
 
 // wasiDatetimeType interns wasi:clocks/wall-clock's `datetime` into tbl.
