@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/samyfodil/wazy/internal/engine/native/backend"
 	"github.com/samyfodil/wazy/internal/engine/native/backend/regalloc"
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
 	"github.com/samyfodil/wazy/internal/engine/native/ssa"
@@ -1969,20 +1970,42 @@ func (m *machine) lowerFcmpToFlag(x, y ssa.Value) {
 	m.insert(cmp)
 }
 
-func (m *machine) lowerExitIfTrueWithCode(execCtxVReg regalloc.VReg, cond ssa.Value, code nativeapi.ExitCode) {
-	condDef := m.compiler.ValueDefinition(cond)
+// lowerTrapCond returns the condition under which a conditional trap is taken,
+// setting the flags first when the condition is a comparison it can fold.
+//
+// The comparison feeding the trap is folded whenever it is still foldable,
+// which is the shape the frontend emits. It is not always: any pass that moves
+// the comparison into another block, or a second use of it, leaves a condition
+// already materialized as a 0-or-1 value, and cbnz tests that directly.
+func (m *machine) lowerTrapCond(condDef backend.SSAValueDefinition) cond {
 	if !m.compiler.MatchInstr(condDef, ssa.OpcodeIcmp) {
-		panic("TODO: OpcodeExitIfTrueWithCode must come after Icmp at the moment: " + condDef.Instr.Opcode().String())
+		rn := m.getOperand_NR(condDef, extModeNone)
+		return registerAsRegNotZeroCond(rn.nr())
 	}
 	condDef.Instr.MarkLowered()
-
-	cvalInstr := condDef.Instr
-	x, y, c := cvalInstr.IcmpData()
-	signed := c.Signed()
-
+	x, y, c := condDef.Instr.IcmpData()
 	if !m.tryLowerBandToFlag(x, y) {
-		m.lowerIcmpToFlag(x, y, signed)
+		m.lowerIcmpToFlag(x, y, c.Signed())
 	}
+	return condFlagFromSSAIntegerCmpCond(c).asCond()
+}
+
+// invertTrapCond returns the condition under which the trap is NOT taken, used
+// to branch over an inlined exit sequence.
+func invertTrapCond(c cond) cond {
+	switch c.kind() {
+	case condKindRegisterZero:
+		return registerAsRegNotZeroCond(c.register())
+	case condKindRegisterNotZero:
+		return registerAsRegZeroCond(c.register())
+	default:
+		return c.flag().invert().asCond()
+	}
+}
+
+func (m *machine) lowerExitIfTrueWithCode(execCtxVReg regalloc.VReg, cond ssa.Value, code nativeapi.ExitCode) {
+	condDef := m.compiler.ValueDefinition(cond)
+	trapCond := m.lowerTrapCond(condDef)
 
 	// We need to copy the execution context to a temp register, because if it's spilled,
 	// it might end up being reloaded inside the exiting branch.
@@ -1994,7 +2017,7 @@ func (m *machine) lowerExitIfTrueWithCode(execCtxVReg regalloc.VReg, cond ssa.Va
 	m.lowerExitWithCode(execCtxTmp, code)
 	// conditional branch target is after exit.
 	l := m.insertBrTargetLabel()
-	cbr.asCondBr(condFlagFromSSAIntegerCmpCond(c).invert().asCond(), l, false /* ignored */)
+	cbr.asCondBr(invertTrapCond(trapCond), l, false /* ignored */)
 }
 
 // lowerExitIfTrueWithCodeShared lowers a conditional trap by branching to a
@@ -2004,18 +2027,7 @@ func (m *machine) lowerExitIfTrueWithCode(execCtxVReg regalloc.VReg, cond ssa.Va
 // island is materialized once, after register allocation, by emitTrapIslands.
 func (m *machine) lowerExitIfTrueWithCodeShared(execCtxVReg regalloc.VReg, cond ssa.Value, code nativeapi.ExitCode) {
 	condDef := m.compiler.ValueDefinition(cond)
-	if !m.compiler.MatchInstr(condDef, ssa.OpcodeIcmp) {
-		panic("TODO: OpcodeExitIfTrueWithCode must come after Icmp at the moment: " + condDef.Instr.Opcode().String())
-	}
-	condDef.Instr.MarkLowered()
-
-	cvalInstr := condDef.Instr
-	x, y, c := cvalInstr.IcmpData()
-	signed := c.Signed()
-
-	if !m.tryLowerBandToFlag(x, y) {
-		m.lowerIcmpToFlag(x, y, signed)
-	}
+	trapCond := m.lowerTrapCond(condDef)
 
 	// The island runs after register allocation, so it needs the execution
 	// context in a fixed register: the reserved tmp register, which is never
@@ -2025,7 +2037,7 @@ func (m *machine) lowerExitIfTrueWithCodeShared(execCtxVReg regalloc.VReg, cond 
 	m.insert(mov)
 
 	cbr := m.allocateInstr()
-	cbr.asCondBr(condFlagFromSSAIntegerCmpCond(c).asCond(), m.getOrCreateTrapIsland(code), false /* ignored */)
+	cbr.asCondBr(trapCond, m.getOrCreateTrapIsland(code), false /* ignored */)
 	m.insert(cbr)
 }
 

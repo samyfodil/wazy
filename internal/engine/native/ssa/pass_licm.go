@@ -222,21 +222,21 @@ func hoistableFromLoop(instr *Instruction) bool {
 		return false
 	}
 	switch instr.opcode {
-	// A comparison has to stay in the same instruction group as whatever
-	// consumes it: the backends fold it into a branch, a select or a trap, and
-	// lowering an ExitIfTrueWithCode whose Icmp has been moved away panics
-	// outright. A comparison is cheap to leave where it is.
+	// The three groups below are all the same trade. Each of these folds into
+	// the instruction that consumes it, folding only happens inside one
+	// instruction group, and a group never spans blocks: hoisting one turns
+	// something that emitted no machine instruction at all into a register
+	// live across the whole loop. All three are cheap to leave where they are.
+	//
+	// A comparison folds into the branch, select or trap consuming it. The
+	// backends lower a moved comparison correctly, so this is a cost choice and
+	// not a correctness rule.
 	case OpcodeIcmp, OpcodeFcmp:
 		return false
-	// A constant costs a register for the whole loop once hoisted, where the
-	// backend would otherwise rematerialize it wherever it is needed.
+	// A constant is rematerialized at each use by the backend.
 	case OpcodeIconst, OpcodeF32const, OpcodeF64const, OpcodeVconst:
 		return false
-	// Address arithmetic is not free where it stands: both backends fold these
-	// into a load or store's addressing mode, and folding only happens within
-	// one instruction group, which never spans blocks. Hoisting one therefore
-	// turns something that emitted no instruction at all into a register that
-	// lives across the whole loop.
+	// Address arithmetic folds into a load or store's addressing mode.
 	//
 	// ponytail: rejecting these four opcodes outright is coarser than asking
 	// whether this particular value would have been folded. It costs the hoists
@@ -244,6 +244,8 @@ func hoistableFromLoop(instr *Instruction) bool {
 	// it by checking the consumers if a workload ever shows that mattering.
 	case OpcodeIadd, OpcodeIshl, OpcodeUExtend, OpcodeSExtend:
 		return false
+	// A load can trap and a store in the loop can invalidate it, even though
+	// loads are classified as having no side effect.
 	case OpcodeLoad, OpcodeLoadSplat, OpcodeVZeroExtLoad,
 		OpcodeUload8, OpcodeUload16, OpcodeUload32,
 		OpcodeSload8, OpcodeSload16, OpcodeSload32:

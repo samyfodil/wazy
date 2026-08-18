@@ -1659,28 +1659,43 @@ func (m *machine) lowerExtLoad(op ssa.Opcode, ptr ssa.Value, offset uint32, dst 
 	m.insert(load)
 }
 
-func (m *machine) lowerExitIfTrueWithCode(execCtx regalloc.VReg, cond ssa.Value, code nativeapi.ExitCode) {
-	condDef := m.c.ValueDefinition(cond)
+// lowerTrapCondToFlag sets the flags from a conditional trap's condition and
+// returns the condition under which the trap is taken.
+//
+// The comparison feeding the trap is folded into the flag-setting instruction
+// whenever it is still foldable, which is the shape the frontend emits. It is
+// not always: any pass that moves the comparison into another block, or a
+// second use of it, leaves a condition that has already been materialized as a
+// 0-or-1 value, and that just needs testing against itself.
+func (m *machine) lowerTrapCondToFlag(condDef backend.SSAValueDefinition) cond {
 	if !m.c.MatchInstr(condDef, ssa.OpcodeIcmp) {
-		panic("TODO: ExitIfTrue must come after Icmp at the moment: " + condDef.Instr.Opcode().String())
+		cv := m.getOperand_Reg(condDef)
+		m.insert(m.allocateInstr().asCmpRmiR(false, cv, cv.reg(), false))
+		return condNZ
 	}
 	cvalInstr := condDef.Instr
 	cvalInstr.MarkLowered()
-
-	// We need to copy the execution context to a temp register, because if it's spilled,
-	// it might end up being reloaded inside the exiting branch.
-	execCtxTmp := m.copyToTmp(execCtx)
-
 	x, y, c := cvalInstr.IcmpData()
 	xx, yy := m.c.ValueDefinition(x), m.c.ValueDefinition(y)
 	if !m.tryLowerBandToFlag(xx, yy) {
 		m.lowerIcmpToFlag(xx, yy, x.Type() == ssa.TypeI64)
 	}
+	return condFromSSAIntCmpCond(c)
+}
+
+func (m *machine) lowerExitIfTrueWithCode(execCtx regalloc.VReg, cond ssa.Value, code nativeapi.ExitCode) {
+	condDef := m.c.ValueDefinition(cond)
+
+	// We need to copy the execution context to a temp register, because if it's spilled,
+	// it might end up being reloaded inside the exiting branch.
+	execCtxTmp := m.copyToTmp(execCtx)
+
+	trapCond := m.lowerTrapCondToFlag(condDef)
 
 	jmpIf := m.allocateInstr()
 	m.insert(jmpIf)
 	l := m.lowerExitWithCode(execCtxTmp, code)
-	jmpIf.asJmpIf(condFromSSAIntCmpCond(c).invert(), newOperandLabel(l))
+	jmpIf.asJmpIf(trapCond.invert(), newOperandLabel(l))
 }
 
 // lowerExitIfTrueWithCodeShared lowers a conditional trap by branching to a
@@ -1690,11 +1705,6 @@ func (m *machine) lowerExitIfTrueWithCode(execCtx regalloc.VReg, cond ssa.Value,
 // island is materialized once, after register allocation, by emitTrapIslands.
 func (m *machine) lowerExitIfTrueWithCodeShared(cond ssa.Value, code nativeapi.ExitCode) {
 	condDef := m.c.ValueDefinition(cond)
-	if !m.c.MatchInstr(condDef, ssa.OpcodeIcmp) {
-		panic("TODO: ExitIfTrue must come after Icmp at the moment: " + condDef.Instr.Opcode().String())
-	}
-	cvalInstr := condDef.Instr
-	cvalInstr.MarkLowered()
 
 	// No per-site exec-context save: the island reloads execCtx from the
 	// reserved ctx slot ([rsp + ctxSlotOffsets execCtx]), written once in the
@@ -1702,14 +1712,10 @@ func (m *machine) lowerExitIfTrueWithCodeShared(cond ssa.Value, code nativeapi.E
 	// setupPrologue, emitTrapIslands). arm64 instead hands it over in the
 	// reserved x27 register.
 
-	x, y, c := cvalInstr.IcmpData()
-	xx, yy := m.c.ValueDefinition(x), m.c.ValueDefinition(y)
-	if !m.tryLowerBandToFlag(xx, yy) {
-		m.lowerIcmpToFlag(xx, yy, x.Type() == ssa.TypeI64)
-	}
+	trapCond := m.lowerTrapCondToFlag(condDef)
 
 	jmpIf := m.allocateInstr()
-	jmpIf.asJmpIf(condFromSSAIntCmpCond(c), newOperandLabel(m.getOrCreateTrapIsland(code)))
+	jmpIf.asJmpIf(trapCond, newOperandLabel(m.getOrCreateTrapIsland(code)))
 	m.insert(jmpIf)
 }
 
