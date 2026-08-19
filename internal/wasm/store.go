@@ -399,12 +399,17 @@ func (s *Store) instantiate(
 	// After engine creation, we can create the funcref element instances and initialize funcref type globals.
 	m.buildElementInstances(module.ElementSection)
 
+	// Per https://webassembly.github.io/spec/core/exec/modules.html#exec-instantiation, active element
+	// segments are applied before active data segments: an out-of-bounds trap partway through data
+	// segment application must not undo element segment writes that already landed (see linking.wast's
+	// "assert_trap ... out of bounds memory access" followed by an assert_return that observes the
+	// same module's earlier element segment write survived).
+	m.applyElements(module.ElementSection)
+
 	// Now all the validation passes, we are safe to mutate memory instances (possibly imported ones).
 	if err = m.applyData(module.DataSection); err != nil {
 		return nil, err
 	}
-
-	m.applyElements(module.ElementSection)
 
 	m.Engine.DoneInstantiation()
 
