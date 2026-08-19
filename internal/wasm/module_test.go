@@ -662,6 +662,19 @@ func TestModule_validateMemory(t *testing.T) {
 		err := m.validateMemory([]Memory{{}}, nil, api.CoreFeatureMultiMemory)
 		require.EqualError(t, err, "unknown memory 5 for data segment")
 	})
+	t.Run("multiple memories requires multi-memory even when split across imports and module-defined", func(t *testing.T) {
+		// decodeMemorySection only ever sees the module-defined count (1 here);
+		// the combined total (1 imported + 1 module-defined = 2) is only ever
+		// visible here, in validateMemory, which must independently gate it.
+		m := Module{}
+		err := m.validateMemory([]Memory{{}, {}}, nil, api.CoreFeaturesV1)
+		require.EqualError(t, err, `multiple memories are invalid as feature "multi-memory" is disabled`)
+	})
+	t.Run("multiple memories allowed when multi-memory is enabled", func(t *testing.T) {
+		m := Module{}
+		err := m.validateMemory([]Memory{{}, {}}, nil, api.CoreFeatureMultiMemory)
+		require.NoError(t, err)
+	})
 }
 
 func TestModule_validateImports(t *testing.T) {
