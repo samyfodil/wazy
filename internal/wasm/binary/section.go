@@ -196,7 +196,11 @@ func decodeMemorySection(
 	// half the remaining buffer can never be satisfied. Reject it before the
 	// allocation below, rather than after requesting up to vs*sizeof(Memory)
 	// bytes for a module that can't possibly contain that many entries.
-	if remaining := len(buf) - offset; vs > uint32(remaining)/2 {
+	// Compared as uint64 throughout: remaining, as an int, can exceed 4GiB on
+	// a 64-bit platform, and truncating it to uint32 first could wrap and
+	// falsely reject a legitimately large module.
+	remaining := uint64(len(buf) - offset)
+	if uint64(vs) > remaining/2 {
 		return nil, offset, fmt.Errorf("memory section size %d exceeds remaining module bytes (%d)", vs, remaining)
 	}
 	if vs > wasm.MaximumMemoryIndex {
@@ -208,12 +212,22 @@ func decodeMemorySection(
 	// embedder's own configured choice, e.g. via WithMemoryLimitPages -- but
 	// nothing otherwise stops a multi-memory module from eagerly demanding N
 	// times that much once buildMemory allocates every declared memory's
-	// capacity. Bound the SUM of capacities to that same embedder-configured
-	// ceiling, not the (potentially much larger) hard wasm.MemoryLimitPages:
-	// an embedder who deliberately configured a small per-memory limit is
-	// choosing a resource budget, and multi-memory must not let a module
-	// evade it by splitting the same total across many small memories.
-	var totalCapPages uint64
+	// minimum. Bound the SUM of each memory's Min (not Cap) to that same
+	// embedder-configured ceiling: Min bytes are unconditionally touched at
+	// instantiation regardless of allocator or config (NewMemoryInstance's
+	// minBytes slice/backing, or a custom allocator's Reallocate(minBytes)),
+	// so it's the metric that's actually always "eager". Cap, by contrast, is
+	// config-dependent -- WithMemoryCapacityFromMax inflates every max-less
+	// memory's Cap to the full memoryLimitPages, which made a Cap-based sum
+	// reject ordinary two-memory modules outright under that (documented,
+	// public) config, even though nothing was eagerly over-allocated by the
+	// module itself. Min is attacker-controlled (part of the untrusted wasm
+	// binary); Cap-beyond-Min is an embedder-controlled performance knob the
+	// embedder already opted into with informed consent (WithMemoryCapacityFromMax's
+	// own doc warns about its per-memory cost) -- this check exists to bound
+	// what the module can demand, not to second-guess the embedder's own
+	// tuning.
+	var totalMinPages uint64
 	for i := range ret {
 		var mem *wasm.Memory
 		mem, offset, err = decodeMemory(buf, offset, enabledFeatures, memorySizer, memoryLimitPages)
@@ -221,10 +235,10 @@ func decodeMemorySection(
 			return nil, offset, err
 		}
 		ret[i] = *mem
-		totalCapPages += uint64(mem.Cap)
-		if totalCapPages > uint64(memoryLimitPages) {
-			return nil, offset, fmt.Errorf("total memory capacity across %d memories (%d pages) exceeds %d pages",
-				i+1, totalCapPages, memoryLimitPages)
+		totalMinPages += uint64(mem.Min)
+		if totalMinPages > uint64(memoryLimitPages) {
+			return nil, offset, fmt.Errorf("total memory minimum across %d memories (%d pages) exceeds %d pages",
+				i+1, totalMinPages, memoryLimitPages)
 		}
 	}
 	return ret, offset, nil
