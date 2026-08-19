@@ -185,6 +185,19 @@ func TestMachine_lowerAddendFromInstr(t *testing.T) {
 			exp: addend{regalloc.VRegInvalid, 123, 0},
 		},
 		{
+			// 123 is indistinguishable from a sign-extension bug (zero- and
+			// sign-extending it produce the same 64-bit value); a constant
+			// with the top bit set is not, and pins down UExtend actually
+			// zero-extending rather than sign-extending.
+			name: "uextend const32 with high bit set",
+			in: func(ctx *mockCompiler, b ssa.Builder, m *machine) *ssa.Instruction {
+				iconst32 := b.AllocateInstruction().AsIconst32(0x80000000).Insert(b)
+				ctx.definitions[iconst32.Return()] = backend.SSAValueDefinition{Instr: iconst32}
+				return b.AllocateInstruction().AsUExtend(iconst32.Return(), 32, 64).Insert(b)
+			},
+			exp: addend{regalloc.VRegInvalid, 0x80000000, 0},
+		},
+		{
 			name: "uextend const64",
 			in: func(ctx *mockCompiler, b ssa.Builder, m *machine) *ssa.Instruction {
 				p := b.CurrentBlock().AddParam(b, ssa.TypeI32)
@@ -212,6 +225,18 @@ func TestMachine_lowerAddendFromInstr(t *testing.T) {
 				return b.AllocateInstruction().AsSExtend(iconst32.Return(), 32, 64).Insert(b)
 			},
 			exp: addend{regalloc.VRegInvalid, 123, 0},
+		},
+		{
+			// 123 is indistinguishable from a zero-extension bug; a constant
+			// with the top bit set is not, and pins down SExtend actually
+			// sign-extending rather than zero-extending.
+			name: "sextend const32 with high bit set",
+			in: func(ctx *mockCompiler, b ssa.Builder, m *machine) *ssa.Instruction {
+				iconst32 := b.AllocateInstruction().AsIconst32(0x80000000).Insert(b)
+				ctx.definitions[iconst32.Return()] = backend.SSAValueDefinition{Instr: iconst32}
+				return b.AllocateInstruction().AsSExtend(iconst32.Return(), 32, 64).Insert(b)
+			},
+			exp: addend{regalloc.VRegInvalid, -0x80000000, 0},
 		},
 		{
 			name: "sextend const64",

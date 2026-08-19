@@ -1313,19 +1313,19 @@ func TestE2E_memoryGrowWithinReservedCapacity(t *testing.T) {
 	require.Equal(t, uint32(3*wasm.MemoryPageSize), memory.Size())
 }
 
-// TestE2E_memoryAtMaxPages guards against a byte-length truncation bug: a
-// memory at the legal maximum of 65536 pages has a byte length of exactly
-// 2^32, which doesn't fit in 32 bits. Loading only the low 32 bits of that
-// length (as an optimization assuming "a page count fits in 32 bits" without
-// noticing the intermediate byte-length value doesn't) makes memory.size
-// wrongly report 0 pages, and makes every access on such a memory wrongly
-// trap as out-of-bounds.
+// TestE2E_memoryAtMaxPages guards against two bugs at the legal maximum of
+// 65536 pages, a memory whose byte length is exactly 2^32:
 //
-// This does NOT cover writes at the very top of such a memory (address
-// 0xffffffff): that exercises a separate, pre-existing (present on main
-// before multi-memory, unrelated to it) bug where the write silently lands
-// on the wrong address instead of trapping or landing correctly. Tracked
-// separately; out of scope here.
+//   - A byte-length truncation bug: loading only the low 32 bits of that
+//     length (an optimization assuming, incorrectly at this exact boundary,
+//     that a page-count-derived byte length always fits in 32 bits) made
+//     memory.size wrongly report 0 pages, and made every access on such a
+//     memory wrongly trap as out-of-bounds.
+//   - A sign/zero-extension mix-up in the amd64 backend's constant-address
+//     folding (lowerAddendFromInstr): UExtend of a compile-time-constant i32
+//     address was sign-extended instead of zero-extended, so an address like
+//     0xffffffff (a legal, in-bounds byte at this memory size) silently
+//     computed the wrong effective address instead of the intended one.
 func TestE2E_memoryAtMaxPages(t *testing.T) {
 	ctx := context.Background()
 	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler())
@@ -1334,16 +1334,24 @@ func TestE2E_memoryAtMaxPages(t *testing.T) {
 	m := &wasm.Module{
 		TypeSection: []wasm.FunctionType{
 			{Results: []wasm.ValueType{i32}},
+			{},
 		},
-		FunctionSection: []wasm.Index{0},
+		FunctionSection: []wasm.Index{0, 1},
 		MemorySection:   []wasm.Memory{{Min: 65536, Cap: 65536, Max: 65536, IsMaxEncoded: true}},
 		ExportSection: []wasm.Export{
 			{Name: "size", Type: wasm.ExternTypeFunc, Index: 0},
+			{Name: "store_last_byte", Type: wasm.ExternTypeFunc, Index: 1},
 			{Name: "memory", Type: wasm.ExternTypeMemory, Index: 0},
 		},
 		CodeSection: []wasm.Code{
 			{Body: []byte{
 				wasm.OpcodeMemorySize, 0x00,
+				wasm.OpcodeEnd,
+			}},
+			{Body: []byte{
+				wasm.OpcodeI32Const, 0x7f, // i32.const -1 (address 0xffffffff, the last valid byte)
+				wasm.OpcodeI32Const, 42, // value to store
+				wasm.OpcodeI32Store8, 0x00, 0x00, // align=0, offset=0
 				wasm.OpcodeEnd,
 			}},
 		},
@@ -1359,6 +1367,13 @@ func TestE2E_memoryAtMaxPages(t *testing.T) {
 	results, err := mod.ExportedFunction("size").Call(ctx)
 	require.NoError(t, err)
 	require.Equal(t, uint64(65536), results[0])
+
+	_, err = mod.ExportedFunction("store_last_byte").Call(ctx)
+	require.NoError(t, err)
+
+	value, ok := mod.Memory().ReadByte(0xffffffff)
+	require.True(t, ok)
+	require.Equal(t, byte(42), value)
 }
 
 type countingLinearMemory struct {
