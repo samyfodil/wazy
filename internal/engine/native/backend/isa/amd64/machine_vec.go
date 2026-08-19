@@ -491,8 +491,12 @@ func (m *machine) lowerWidenLow(x, ret ssa.Value, lane ssa.VecLane, signed bool)
 func (m *machine) lowerWidenHigh(x, ret ssa.Value, lane ssa.VecLane, signed bool) {
 	tmp := m.c.AllocateVReg(ssa.TypeV128)
 	xx := m.getOperand_Reg(m.c.ValueDefinition(x))
-	m.copyTo(xx.reg(), tmp)
-	m.insert(m.allocateInstr().asXmmRmRImm(sseOpcodePalignr, 8, newOperandReg(tmp), tmp))
+	// Bring the upper half down so the pmov*x below widens it. pshufd reads its
+	// source and writes elsewhere, so unlike an in-place palignr it needs no copy
+	// of x first, which is one instruction fewer everywhere a high half is
+	// widened -- extend_high, extmul_high and the relaxed dot products.
+	m.insert(m.allocateInstr().asDefineUninitializedReg(tmp))
+	m.insert(m.allocateInstr().asXmmRmRImm(sseOpcodePshufd, 0b00_00_11_10, xx, tmp))
 
 	var sseOp sseOpcode
 	switch lane {

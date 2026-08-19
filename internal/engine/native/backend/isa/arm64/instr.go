@@ -1162,8 +1162,16 @@ func (i *instruction) String() (str string) {
 		)
 	case bitRR:
 		size := is64SizeBitToSize(i.u2)
+		op := bitOp(i.u1).String()
+		// The 32-bit form of the byte-reversal is spelled REV, not REV32: opcode
+		// 0b000010 is REV when sf=0 and REV32 when sf=1, so the mnemonic depends on
+		// the operand width the enum alone cannot see. Printing rev32 with 32-bit
+		// registers gives an instruction no assembler accepts.
+		if bitOp(i.u1) == bitOpRev32 && size == 32 {
+			op = "rev"
+		}
 		str = fmt.Sprintf("%s %s, %s",
-			bitOp(i.u1),
+			op,
 			formatVRegSized(i.rd, size),
 			formatVRegSized(i.rn.nr(), size),
 		)
@@ -1264,7 +1272,12 @@ func (i *instruction) String() (str string) {
 			formatVRegVec(i.rd, vecArrangement16B, vecIndexNone),
 			formatVRegVec(i.rn.nr(), vecArrangement16B, vecIndexNone))
 	case fpuMovFromVec:
-		panic("TODO")
+		// MOV (element to scalar), an alias of DUP (element): the lane u2 of the
+		// vector rn, read with the size specifier u1, into the scalar rd.
+		arr := vecArrangement(i.u1)
+		str = fmt.Sprintf("mov %s, %s",
+			formatVRegWidthVec(i.rd, arr),
+			formatVRegVec(i.rn.nr(), arr, vecIndex(i.u2)))
 	case fpuRR:
 		dstSz := is64SizeBitToSize(i.u2)
 		srcSz := dstSz
@@ -1282,9 +1295,22 @@ func (i *instruction) String() (str string) {
 		str = fmt.Sprintf("%s %s, %s, %s", fpuBinOp(i.u1).String(),
 			formatVRegSized(i.rd, size), formatVRegSized(i.rn.nr(), size), formatVRegSized(i.rm.nr(), size))
 	case fpuRRI:
-		panic("TODO")
+		// Advanced SIMD scalar shift by immediate: the operation u1 on the scalar
+		// rn, of the size specifier u2, by the immediate held in rm. Laid out like
+		// vecShiftImm, of which this is the scalar counterpart.
+		sz := vecArrangement(i.u2)
+		str = fmt.Sprintf("%s %s, %s, #%d",
+			vecOp(i.u1),
+			formatVRegWidthVec(i.rd, sz),
+			formatVRegWidthVec(i.rn.nr(), sz),
+			i.rm.shiftImm())
 	case fpuRRRR:
-		panic("TODO")
+		// Floating-point data-processing (3 source), laid out like aluRRRR: the
+		// operation and the 64-bit size bit in u1, and the third source (ra) in u2.
+		size := is64SizeBitToSize(i.u1 >> 32)
+		str = fmt.Sprintf("%s %s, %s, %s, %s", fpuTriOp(i.u1).String(),
+			formatVRegSized(i.rd, size), formatVRegSized(i.rn.nr(), size),
+			formatVRegSized(i.rm.nr(), size), formatVRegSized(regalloc.VReg(i.u2), size))
 	case fpuCmp:
 		size := is64SizeBitToSize(i.u1)
 		str = fmt.Sprintf("fcmp %s, %s",
@@ -1406,7 +1432,12 @@ func (i *instruction) String() (str string) {
 			formatVRegVec(i.rn.nr(), arr, vecIndex(i.u2)),
 		)
 	case vecDupFromFpu:
-		panic("TODO")
+		// DUP (element) from a scalar, i.e. lane 0 of rn broadcast over rd with
+		// the destination arrangement u1: dup <Vd>.<T>, <Vn>.<Ts>[0].
+		arr := vecArrangement(i.u1)
+		str = fmt.Sprintf("dup %s, %s",
+			formatVRegVec(i.rd, arr, vecIndexNone),
+			formatVRegVec(i.rn.nr(), elementArrangement(arr), vecIndex(0)))
 	case vecExtract:
 		str = fmt.Sprintf("ext %s, %s, %s, #%d",
 			formatVRegVec(i.rd, vecArrangement(i.u1), vecIndexNone),
@@ -1415,14 +1446,41 @@ func (i *instruction) String() (str string) {
 			uint32(i.u2),
 		)
 	case vecExtend:
-		panic("TODO")
+		// SXTL/UXTL, the aliases of SSHLL/USHLL with a shift of zero: each lane of
+		// the source arrangement u2 is extended into a lane twice as wide, signed
+		// if u1 is non-zero. The 128-bit source arrangements are the "2" variants,
+		// which take the high half of the source register.
+		srcArr := vecArrangement(i.u2)
+		xtl := "uxtl"
+		if i.u1 != 0 {
+			xtl = "sxtl"
+		}
+		switch srcArr {
+		case vecArrangement16B, vecArrangement8H, vecArrangement4S:
+			xtl += "2"
+		}
+		str = fmt.Sprintf("%s %s, %s", xtl,
+			formatVRegVec(i.rd, widenArrangement(srcArr), vecIndexNone),
+			formatVRegVec(i.rn.nr(), srcArr, vecIndexNone))
 	case vecMovElement:
 		str = fmt.Sprintf("mov %s, %s",
 			formatVRegVec(i.rd, vecArrangement(i.u1), vecIndex(i.u2&0xffffffff)),
 			formatVRegVec(i.rn.nr(), vecArrangement(i.u1), vecIndex(i.u2>>32)),
 		)
 	case vecMiscNarrow:
-		panic("TODO")
+		// The narrowing two register misc operations (xtn, sqxtn, uqxtn, sqxtun,
+		// fcvtn): the operation is u1 and u2 is the destination arrangement, whose
+		// lanes are half as wide as the ones of the source. The 128-bit
+		// destination arrangements are the "2" variants, which write the high half.
+		dstArr := vecArrangement(i.u2)
+		narrow := vecOp(i.u1).String()
+		switch dstArr {
+		case vecArrangement16B, vecArrangement8H, vecArrangement4S:
+			narrow += "2"
+		}
+		str = fmt.Sprintf("%s %s, %s", narrow,
+			formatVRegVec(i.rd, dstArr, vecIndexNone),
+			formatVRegVec(i.rn.nr(), widenArrangement(dstArr), vecIndexNone))
 	case vecRRR, vecRRRRewrite:
 		str = fmt.Sprintf("%s %s, %s, %s",
 			vecOp(i.u1),
@@ -1732,14 +1790,18 @@ const (
 	// fpuMov128 represents a vector register move.
 	fpuMov128
 	// fpuMovFromVec represents a move to scalar from a vector element.
+	// u1 is the size specifier of the lane and u2 its index, as in movFromVec.
 	fpuMovFromVec
 	// fpuRR represents a 1-op FPU instruction.
 	fpuRR
 	// fpuRRR represents a 2-op FPU instruction.
 	fpuRRR
-	// fpuRRI represents a 2-op FPU instruction with immediate value.
+	// fpuRRI represents a 2-op FPU instruction with immediate value, i.e. the
+	// scalar counterpart of vecShiftImm: u1 is the vecOp, u2 the size specifier
+	// and rm holds the immediate.
 	fpuRRI
-	// fpuRRRR represents a 3-op FPU instruction.
+	// fpuRRRR represents a 3-op FPU instruction, laid out like aluRRRR: u1 is the
+	// fpuTriOp with the 64-bit size bit at bit 32, and u2 is the third source.
 	fpuRRRR
 	// fpuCmp represents a FPU comparison, either 32 or 64 bit.
 	fpuCmp
@@ -1791,14 +1853,17 @@ const (
 	// vecDupElement represents a duplication of a vector element to vector or scalar.
 	vecDupElement
 	// vecDupFromFpu represents a duplication of scalar to vector.
+	// u1 is the arrangement of the destination.
 	vecDupFromFpu
 	// vecExtract represents a vector extraction operation.
 	vecExtract
-	// vecExtend represents a vector extension operation.
+	// vecExtend represents a vector extension operation, i.e. sxtl/uxtl.
+	// u1 is non-zero for the signed form and u2 is the source arrangement.
 	vecExtend
 	// vecMovElement represents a move vector element to another vector element operation.
 	vecMovElement
 	// vecMiscNarrow represents a vector narrowing operation.
+	// u1 is the vecOp and u2 the arrangement of the (narrow) destination.
 	vecMiscNarrow
 	// vecRRR represents a vector ALU operation.
 	vecRRR
@@ -2158,6 +2223,16 @@ func (b vecOp) String() string {
 		return "sshr"
 	case vecOpZip1:
 		return "zip1"
+	case vecOpZip2:
+		return "zip2"
+	case vecOpUzp1:
+		return "uzp1"
+	case vecOpUzp2:
+		return "uzp2"
+	case vecOpTrn1:
+		return "trn1"
+	case vecOpTrn2:
+		return "trn2"
 	case vecOpFmin:
 		return "fmin"
 	case vecOpFmax:
@@ -2242,10 +2317,16 @@ const (
 	vecOpZip1
 	vecOpSmull
 	vecOpSmull2
+	// The rest of the "Advanced SIMD permute" family that zip1 belongs to.
+	vecOpZip2
+	vecOpUzp1
+	vecOpUzp2
+	vecOpTrn1
+	vecOpTrn2
 )
 
-// bitOp determines the type of bitwise operation. Instructions whose kind is one of
-// bitOpRbit and bitOpClz would use this type.
+// bitOp determines the type of bitwise operation, i.e. which member of the
+// "Data-processing (1 source)" group the bitRR instruction encodes.
 type bitOp int
 
 // String implements fmt.Stringer.
@@ -2255,6 +2336,14 @@ func (b bitOp) String() string {
 		return "rbit"
 	case bitOpClz:
 		return "clz"
+	case bitOpCls:
+		return "cls"
+	case bitOpRev16:
+		return "rev16"
+	case bitOpRev32:
+		return "rev32"
+	case bitOpRev64:
+		return "rev64"
 	}
 	panic(int(b))
 }
@@ -2264,6 +2353,16 @@ const (
 	bitOpRbit bitOp = iota
 	// 32/64-bit Clz.
 	bitOpClz
+	// 32/64-bit Cls.
+	bitOpCls
+	// 32/64-bit Rev16, reversing the bytes of each halfword.
+	bitOpRev16
+	// Rev32, reversing the bytes of each word. The 32-bit form of this one
+	// assembles as "rev" since there the whole register is a single word.
+	bitOpRev32
+	// 64-bit Rev, reversing all eight bytes. Unlike the others it has no 32-bit
+	// form: that opcode is unallocated when sf == 0.
+	bitOpRev64
 )
 
 // fpuUniOp represents a unary floating-point unit (FPU) operation.
@@ -2337,6 +2436,38 @@ func (f fpuBinOp) String() string {
 	panic(int(f))
 }
 
+// fpuTriOp represents a floating-point unit (FPU) operation with three source
+// operands, i.e. the "Floating-point data-processing (3 source)" group:
+// 0|0|0|11111|ptype|o1|Rm|o0|Ra|Rn|Rd where o1 (bit 21) and o0 (bit 15) select
+// the member. All of them compute a fused multiply-add of rn and rm into ra.
+type fpuTriOp byte
+
+const (
+	// fpuTriOpMAdd is FMADD: rd = ra + rn*rm. o1 = 0, o0 = 0.
+	fpuTriOpMAdd fpuTriOp = iota
+	// fpuTriOpMSub is FMSUB: rd = ra - rn*rm. o1 = 0, o0 = 1.
+	fpuTriOpMSub
+	// fpuTriOpNMAdd is FNMADD: rd = -ra - rn*rm. o1 = 1, o0 = 0.
+	fpuTriOpNMAdd
+	// fpuTriOpNMSub is FNMSUB: rd = -ra + rn*rm. o1 = 1, o0 = 1.
+	fpuTriOpNMSub
+)
+
+// String implements the fmt.Stringer.
+func (f fpuTriOp) String() string {
+	switch f {
+	case fpuTriOpMAdd:
+		return "fmadd"
+	case fpuTriOpMSub:
+		return "fmsub"
+	case fpuTriOpNMAdd:
+		return "fnmadd"
+	case fpuTriOpNMSub:
+		return "fnmsub"
+	}
+	panic(int(f))
+}
+
 // extMode represents the mode of a register operand extension.
 // For example, aluRRRExtend instructions need this info to determine the extensions.
 type extMode byte
@@ -2375,7 +2506,10 @@ func (e extMode) signed() bool {
 
 func extModeOf(t ssa.Type, signed bool) extMode {
 	switch t.Bits() {
-	case 32:
+	case 8, 16, 32:
+		// arm64 has no GPR operand narrower than a w register, so anything below
+		// 32 bits is held in, and extended to, 32 bits. The IR has no i8/i16 type
+		// today (see ssa.Type), but the mapping is the same if it ever gains one.
 		if signed {
 			return extModeSignExtend32
 		}
@@ -2386,7 +2520,10 @@ func extModeOf(t ssa.Type, signed bool) extMode {
 		}
 		return extModeZeroExtend64
 	default:
-		panic("TODO? do we need narrower than 32 bits?")
+		// The only other width the IR has is 128, i.e. TypeV128. Such a value
+		// fills a whole vector register and is never the operand of a GPR
+		// instruction, so there is no extension to apply to it.
+		return extModeNone
 	}
 }
 
@@ -2605,6 +2742,41 @@ func (v vecArrangement) String() (ret string) {
 		panic(v)
 	}
 	return
+}
+
+// elementArrangement returns the size specifier of a single lane of arr, e.g.
+// vecArrangementS for both vecArrangement2S and vecArrangement4S.
+func elementArrangement(arr vecArrangement) vecArrangement {
+	switch arr {
+	case vecArrangement8B, vecArrangement16B:
+		return vecArrangementB
+	case vecArrangement4H, vecArrangement8H:
+		return vecArrangementH
+	case vecArrangement2S, vecArrangement4S:
+		return vecArrangementS
+	case vecArrangement1D, vecArrangement2D:
+		return vecArrangementD
+	default:
+		panic("unsupported arrangement: " + arr.String())
+	}
+}
+
+// widenArrangement returns the arrangement whose lanes are twice as wide as the
+// lanes of arr and which fills a whole 128-bit register, i.e. the wide side of
+// the widening (sxtl/uxtl) and narrowing (xtn and friends) instructions. Both
+// the 64-bit and the 128-bit narrow arrangements map to the same wide one: the
+// latter are the "2" variants, which use the high half of the narrow register.
+func widenArrangement(arr vecArrangement) vecArrangement {
+	switch arr {
+	case vecArrangement8B, vecArrangement16B:
+		return vecArrangement8H
+	case vecArrangement4H, vecArrangement8H:
+		return vecArrangement4S
+	case vecArrangement2S, vecArrangement4S:
+		return vecArrangement2D
+	default:
+		panic("unsupported arrangement: " + arr.String())
+	}
 }
 
 // vecIndex is the index of an element of a vector register

@@ -61,6 +61,10 @@ type (
 		// LaneType is not empty if ValueType == "v128"
 		LaneType laneType    `json:"lane_type"`
 		Value    interface{} `json:"value"`
+		// Values is set when ValType == "either": the relaxed-simd proposal lets
+		// an instruction return any one of several results, and an engine passes
+		// the assertion by matching any of them.
+		Values []commandActionVal `json:"values"`
 	}
 )
 
@@ -177,10 +181,33 @@ func (c command) getAssertReturnArgsExps() (args []uint64, exps []uint64) {
 	for _, arg := range c.Action.Args {
 		args = append(args, arg.toUint64s()...)
 	}
-	for _, exp := range c.Exps {
+	// Take the first of the accepted result sets; callers that must honour the
+	// rest go through expAlternatives instead.
+	for _, exp := range c.expAlternatives()[0] {
 		exps = append(exps, exp.toUint64s()...)
 	}
 	return
+}
+
+// expAlternatives returns every set of results this command accepts. That is
+// just c.Exps unless some value is an "either", in which case each of its
+// alternatives yields a set of its own.
+func (c command) expAlternatives() [][]commandActionVal {
+	sets := [][]commandActionVal{nil}
+	for _, exp := range c.Exps {
+		alts := []commandActionVal{exp}
+		if exp.ValType == "either" {
+			alts = exp.Values
+		}
+		next := make([][]commandActionVal, 0, len(sets)*len(alts))
+		for _, set := range sets {
+			for _, alt := range alts {
+				next = append(next, append(append([]commandActionVal{}, set...), alt))
+			}
+		}
+		sets = next
+	}
+	return sets
 }
 
 func (c commandActionVal) toUint64s() (ret []uint64) {
@@ -221,6 +248,14 @@ func buildLaneUint64(raw []interface{}, width, valNum int) (lo, hi uint64) {
 		var err error
 		if strings.Contains(str, "nan") {
 			v = getNaNBits(str, width == 32)
+		} else if strings.HasPrefix(str, "-") {
+			// wasm-tools writes signed lanes where wast2json writes unsigned.
+			var signed int64
+			signed, err = strconv.ParseInt(str, 10, width)
+			if err != nil {
+				panic(err)
+			}
+			v = uint64(signed) & (1<<width - 1)
 		} else {
 			v, err = strconv.ParseUint(str, 10, width)
 			if err != nil {
@@ -429,7 +464,7 @@ func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, c
 					}
 					switch c.Action.ActionType {
 					case "invoke":
-						args, exps := c.getAssertReturnArgsExps()
+						args, _ := c.getAssertReturnArgsExps()
 						msg = fmt.Sprintf("%s invoke %s (%s)", msg, c.Action.Field, c.Action.Args)
 						if c.Action.Module != "" {
 							msg += " in module " + c.Action.Module
@@ -437,19 +472,28 @@ func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, c
 						fn := m.ExportedFunction(c.Action.Field)
 						results, err := fn.Call(ctx, args...)
 						require.NoError(t, err, msg)
-						require.Equal(t, len(exps), len(results), msg)
-						laneTypes := map[int]string{}
-						skipIndices := map[int]bool{}
-						for i, expV := range c.Exps {
-							if expV.ValType == "v128" {
-								laneTypes[i] = expV.LaneType
+						var matched bool
+						var valuesMsg string
+						for _, alt := range c.expAlternatives() {
+							var exps []uint64
+							laneTypes := map[int]string{}
+							skipIndices := map[int]bool{}
+							for i, expV := range alt {
+								exps = append(exps, expV.toUint64s()...)
+								if expV.ValType == "v128" {
+									laneTypes[i] = expV.LaneType
+								}
+								// When value is nil for ref types, it means "any ref" — skip comparison.
+								if expV.Value == nil && (expV.ValType == "funcref" || expV.ValType == "externref" || expV.ValType == "exnref") {
+									skipIndices[i] = true
+								}
 							}
-							// When value is nil for ref types, it means "any ref" — skip comparison.
-							if expV.Value == nil && (expV.ValType == "funcref" || expV.ValType == "externref" || expV.ValType == "exnref") {
-								skipIndices[i] = true
+							require.Equal(t, len(exps), len(results), msg)
+							matched, valuesMsg = valuesEq(results, exps, wasm.FromApiValueType(fn.Definition().ResultTypes()), laneTypes, skipIndices)
+							if matched {
+								break
 							}
 						}
-						matched, valuesMsg := valuesEq(results, exps, wasm.FromApiValueType(fn.Definition().ResultTypes()), laneTypes, skipIndices)
 						require.True(t, matched, msg+"\n"+valuesMsg)
 					case "get":
 						_, exps := c.getAssertReturnArgsExps()

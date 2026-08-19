@@ -42,6 +42,21 @@ skipped.
    export of `case.wasm` (deterministic, no host calls), at `fib=20` and
    `fib=30`.
 
+5. **`BenchmarkRelaxedSimd` — relaxed SIMD, against wasmtime.** Serial chains of
+   `f32x4.relaxed_madd`, `f32x4.relaxed_min`/`max` and
+   `i32x4.relaxed_dot_i8x16_i7x16_add_s`, ten thousand iterations per call, each
+   accumulator feeding the next iteration so the loop measures the latency of one
+   lowering. Upstream wazero does not implement the proposal, so the arms here
+   are **wazy**, **wasmtime** (its default, fastest-per-host lowerings) and
+   **wasmtime-det** (`SetWasmRelaxedSIMDDeterministic`, which pins results the
+   way wazy always does). The wasmtime-det arm is the like-for-like one:
+   `TestRelaxedSimdParity` asserts wazy and wasmtime-det agree bit for bit on
+   min/max and on the dot product. They cannot agree on `madd` — wasmtime returns
+   the fused result even in deterministic mode, where wazy rounds the multiply
+   and the add separately as the spec's deterministic profile requires — so that
+   arm is checked for closeness instead, and its timings compare two different
+   computations.
+
 The guest bytes are **identical for both runtimes** (see Test data below), so
 any difference is the runtime, not the module.
 

@@ -4686,6 +4686,45 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		lo, hi := v128Dot(x1Hi, x1Lo, x2Hi, x2Lo)
 		ce.pushValue(lo)
 		ce.pushValue(hi)
+	case operationKindV128RelaxedMadd:
+		x3Hi, x3Lo := ce.popValue(), ce.popValue()
+		x2Hi, x2Lo := ce.popValue(), ce.popValue()
+		x1Hi, x1Lo := ce.popValue(), ce.popValue()
+		var retLo, retHi uint64
+		if op.B1 == shapeF32x4 {
+			for i := 0; i < 2; i++ {
+				a, b, c := uint32(x1Lo>>(i*32)), uint32(x2Lo>>(i*32)), uint32(x3Lo>>(i*32))
+				retLo |= uint64(relaxedMadd32(a, b, c, op.B3)) << (i * 32)
+				a, b, c = uint32(x1Hi>>(i*32)), uint32(x2Hi>>(i*32)), uint32(x3Hi>>(i*32))
+				retHi |= uint64(relaxedMadd32(a, b, c, op.B3)) << (i * 32)
+			}
+		} else {
+			retLo = relaxedMadd64(x1Lo, x2Lo, x3Lo, op.B3)
+			retHi = relaxedMadd64(x1Hi, x2Hi, x3Hi, op.B3)
+		}
+		ce.pushValue(retLo)
+		ce.pushValue(retHi)
+	case operationKindV128RelaxedDot:
+		x2Hi, x2Lo := ce.popValue(), ce.popValue()
+		x1Hi, x1Lo := ce.popValue(), ce.popValue()
+		lo, hi := v128RelaxedDot(x1Hi, x1Lo, x2Hi, x2Lo)
+		ce.pushValue(lo)
+		ce.pushValue(hi)
+	case operationKindV128RelaxedDotAdd:
+		x3Hi, x3Lo := ce.popValue(), ce.popValue()
+		x2Hi, x2Lo := ce.popValue(), ce.popValue()
+		x1Hi, x1Lo := ce.popValue(), ce.popValue()
+		dotLo, dotHi := v128RelaxedDot(x1Hi, x1Lo, x2Hi, x2Lo)
+		// Widen each adjacent i16 pair to i32, then add the accumulator.
+		var retLo, retHi uint64
+		for i := 0; i < 2; i++ {
+			sum := int32(int16(uint16(dotLo>>(i*32)))) + int32(int16(uint16(dotLo>>(i*32+16))))
+			retLo |= uint64(uint32(sum+int32(uint32(x3Lo>>(i*32))))) << (i * 32)
+			sum = int32(int16(uint16(dotHi>>(i*32)))) + int32(int16(uint16(dotHi>>(i*32+16))))
+			retHi |= uint64(uint32(sum+int32(uint32(x3Hi>>(i*32))))) << (i * 32)
+		}
+		ce.pushValue(retLo)
+		ce.pushValue(retHi)
 	case operationKindV128ITruncSatFromF:
 		hi, lo := ce.popValue(), ce.popValue()
 		signed := op.B3
@@ -5388,6 +5427,49 @@ func (ce *callEngine) callGoFuncWithStack(ctx context.Context, m *wasm.ModuleIns
 // v128Dot performs a dot product of two 64-bit vectors.
 // Note: for some reason (which I suspect is due to a bug in Go compiler's regalloc),
 // inlining this function causes a bug which happens **only when** we run with -race AND arm64 AND Go 1.22.
+// v128RelaxedDot multiplies the i8 lanes of x1 and x2 pairwise and sums each
+// adjacent pair into an i16 lane, saturating. Both operands are read as signed,
+// which is one of the results the relaxed-simd proposal permits; see RATIONALE.md.
+func v128RelaxedDot(x1Hi, x1Lo, x2Hi, x2Lo uint64) (uint64, uint64) {
+	// A product of two int8 lanes lies in [-16256, 16384], so a pair of them
+	// sums to at most 32768 and at least -32512: only the top of the i16 range
+	// is ever crossed.
+	dot := func(x1, x2 uint64, i int) uint64 {
+		sum := int32(int8(x1>>(i*16)))*int32(int8(x2>>(i*16))) +
+			int32(int8(x1>>(i*16+8)))*int32(int8(x2>>(i*16+8)))
+		if sum > math.MaxInt16 {
+			sum = math.MaxInt16
+		}
+		return uint64(uint16(int16(sum))) << (i * 16)
+	}
+	var retLo, retHi uint64
+	for i := 0; i < 4; i++ {
+		retLo |= dot(x1Lo, x2Lo, i)
+		retHi |= dot(x1Hi, x2Hi, i)
+	}
+	return retLo, retHi
+}
+
+// relaxedMadd32 computes a*b+c, or -(a*b)+c when negated, over f32 bit patterns.
+// The product and the sum round separately: wazy never contracts them into a
+// fused multiply-add, so the result does not depend on the host. See RATIONALE.md.
+func relaxedMadd32(a, b, c uint32, negated bool) uint32 {
+	product := math.Float32frombits(a) * math.Float32frombits(b)
+	if negated {
+		product = -product
+	}
+	return math.Float32bits(product + math.Float32frombits(c))
+}
+
+// relaxedMadd64 is relaxedMadd32 for f64 bit patterns.
+func relaxedMadd64(a, b, c uint64, negated bool) uint64 {
+	product := math.Float64frombits(a) * math.Float64frombits(b)
+	if negated {
+		product = -product
+	}
+	return math.Float64bits(product + math.Float64frombits(c))
+}
+
 func v128Dot(x1Hi, x1Lo, x2Hi, x2Lo uint64) (uint64, uint64) {
 	r1 := int32(int16(x1Lo>>0)) * int32(int16(x2Lo>>0))
 	r2 := int32(int16(x1Lo>>16)) * int32(int16(x2Lo>>16))

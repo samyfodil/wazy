@@ -171,6 +171,11 @@ const CoreFeatureExceptionHandling CoreFeatures = CoreFeatureSIMD << 4
 // See https://github.com/WebAssembly/function-references for further details.
 const CoreFeatureTypedFunctionReferences CoreFeatures = CoreFeatureSIMD << 5
 
+// CoreFeatureRelaxedSIMD enables the relaxed vector instructions. It implies
+// CoreFeatureSIMD, which must be enabled alongside it.
+// See https://github.com/WebAssembly/relaxed-simd for further details.
+const CoreFeatureRelaxedSIMD CoreFeatures = CoreFeatureSIMD << 6
+
 // SetEnabled enables or disables the feature or group of features.
 func (f CoreFeatures) SetEnabled(feature CoreFeatures, val bool) CoreFeatures {
 	if val {
@@ -243,6 +248,8 @@ func featureName(f CoreFeatures) string {
 		return "exception-handling"
 	case CoreFeatureTypedFunctionReferences:
 		return "typed-function-references"
+	case CoreFeatureRelaxedSIMD:
+		return "relaxed-simd"
 	}
 	return ""
 }

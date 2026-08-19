@@ -54,8 +54,34 @@ func (m *machine) insertLoadConstant(v uint64, valType ssa.Type, vr regalloc.VRe
 		} else {
 			m.lowerConstantI64(vr, int64(v))
 		}
+	case ssa.TypeV128:
+		// v carries the entire constant, so the V128 value it names is v zero-extended: the low
+		// 64-bit lane is v and the high lane is zero. lowerFpuConst128 then picks the cheapest
+		// materialization for that pattern: a single `eor Vd.16b, Vd.16b, Vd.16b` when it is all
+		// zero, two `ins Vd.D[i], Xn` from GPRs before register allocation, and a pooled
+		// PC-relative `ldr Qt, <literal>` after it. Only the pooled form works on the
+		// post-register-allocation block argument path, which cannot allocate a scratch GPR, and
+		// lowerFpuConst128 already selects it there via m.regAllocStarted.
+		m.lowerFpuConst128(vr, v, 0)
 	default:
-		panic("TODO")
+		// The cases above name every ssa.Type that exists today (see ssa/type.go), and
+		// valType.Bits() above already rejects typeInvalid, so no type reaches this arm yet. A
+		// type added later still has a defined materialization: v has been masked to the type's
+		// width above, so build it at that width in the class of register the value was allocated
+		// into, which is what regalloc.RegTypeOf assigned. That is the same pairing the cases
+		// above use, just derived instead of enumerated.
+		switch {
+		case vr.RegType() == regalloc.RegTypeInt && valType.Bits() <= 32:
+			m.lowerConstantI32(vr, int32(v))
+		case vr.RegType() == regalloc.RegTypeInt:
+			m.lowerConstantI64(vr, int64(v))
+		case valType.Bits() <= 32:
+			m.lowerFpuConst32(vr, v)
+		case valType.Bits() <= 64:
+			m.lowerFpuConst64(vr, v)
+		default:
+			m.lowerFpuConst128(vr, v, 0)
+		}
 	}
 }
 

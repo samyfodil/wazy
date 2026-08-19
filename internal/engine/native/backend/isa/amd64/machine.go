@@ -572,6 +572,8 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		m.lowerAluRmiROp(instr, aluRmiROpcodeOr)
 	case ssa.OpcodeBxor:
 		m.lowerAluRmiROp(instr, aluRmiROpcodeXor)
+	case ssa.OpcodeBnot:
+		m.lowerBnot(instr)
 	case ssa.OpcodeIshl:
 		m.lowerShiftR(instr, shiftROpShiftLeft)
 	case ssa.OpcodeSshr:
@@ -1124,6 +1126,12 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		m.lowerExtend(instr.Arg(), instr.Return(), from, to, signed)
 	case ssa.OpcodeIcmp:
 		m.lowerIcmp(instr)
+	case ssa.OpcodeIcmpImm:
+		// `v = icmp_imm Cond, x, Y` compares the integer x against the immediate Y.
+		// AsIcmpImm and IcmpImmData in the SSA layer own the field layout between
+		// them, so this cannot disagree with whatever builds the instruction.
+		x, imm, c := instr.IcmpImmData()
+		m.lowerIcmpImm(x, c, imm, instr.Return())
 	case ssa.OpcodeFcmp:
 		m.lowerFcmp(instr)
 	case ssa.OpcodeSelect:
@@ -1134,10 +1142,38 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		retVal := instr.Return()
 		rd := m.c.VRegOf(retVal)
 
-		if retVal.Type() != ssa.TypeI32 {
-			panic("TODO?: Ireduce to non-i32")
+		switch retVal.Type() {
+		case ssa.TypeI32:
+			// Narrowing to i32 is a plain 32-bit move: writing a 32-bit register zeroes
+			// bits 63:32 of the destination, which discards the high half of the source
+			// exactly as Ireduce requires. extModeLQ with movzx encodes as 0x8b /r
+			// without REX.W, i.e. MOV r32, r/m32 (Intel SDM Vol.2B, MOV).
+			m.insert(m.allocateInstr().asMovzxRmR(extModeLQ, rn, rd))
+		case ssa.TypeI64:
+			// i64 is the widest integer type in this IR, so narrowing to it keeps every
+			// bit of the source and degenerates into a 64-bit move. The source has to be
+			// i64 as well: from anything narrower the memory operand form below would
+			// read past the end of the load it was folded from.
+			if instr.Arg().Type() != ssa.TypeI64 {
+				panic("BUG: Ireduce to i64 from a narrower type")
+			}
+			mov := m.allocateInstr()
+			switch rn.kind {
+			case operandKindReg:
+				// MOV r/m64, r64 = REX.W + 0x89 /r (Intel SDM Vol.2B, MOV).
+				mov.asMovRR(rn.reg(), rd, true)
+			case operandKindMem:
+				// MOV r64, r/m64 = REX.W + 0x8b /r (Intel SDM Vol.2B, MOV).
+				mov.asMov64MR(rn, rd)
+			default:
+				panic("BUG: invalid operand kind for Ireduce")
+			}
+			m.insert(mov)
+		default:
+			// Ireduce is defined on integers only, and TypeI32/TypeI64 are the only
+			// integer types, so there is nothing to narrow for the remaining types.
+			panic("BUG: Ireduce to a non-integer type")
 		}
-		m.insert(m.allocateInstr().asMovzxRmR(extModeLQ, rn, rd))
 
 	case ssa.OpcodeAtomicLoad:
 		ptr := instr.Arg()
@@ -1191,6 +1227,12 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		m.lowerTailCall(instr)
 
 	default:
+		// Every ssa.Opcode an instruction can carry is handled above: the branching
+		// opcodes and OpcodeReturn have their own cases at the top of this switch
+		// (they never reach LowerInstr), and the remaining ones all have a lowering.
+		// Reaching here means the instruction carries OpcodeInvalid, i.e. it was
+		// allocated but never initialized with a constructor, which the SSA passes
+		// reject long before lowering (instructionSideEffects has no entry for it).
 		panic("TODO: lowering " + op.String())
 	}
 }
@@ -1339,6 +1381,34 @@ func (m *machine) lowerIcmp(instr *ssa.Instruction) {
 	x, y, c := instr.IcmpData()
 	m.lowerIcmpToFlag(m.c.ValueDefinition(x), m.c.ValueDefinition(y), x.Type() == ssa.TypeI64)
 	rd := m.c.VRegOf(instr.Return())
+	tmp := m.c.AllocateVReg(ssa.TypeI32)
+	m.insert(m.allocateInstr().asSetcc(condFromSSAIntCmpCond(c), tmp))
+	// On amd64, setcc only sets the first byte of the register, so we need to zero extend it to match
+	// the semantics of Icmp that sets either 0 or 1.
+	m.insert(m.allocateInstr().asMovzxRmR(extModeBQ, newOperandReg(tmp), rd))
+}
+
+// lowerIcmpImm lowers `v = icmp_imm Cond, x, Y`: it compares x against the immediate
+// imm and materializes 0 or 1, exactly like lowerIcmp does for a register operand.
+func (m *machine) lowerIcmpImm(x ssa.Value, c ssa.IntegerCmpCond, imm uint64, ret ssa.Value) {
+	_64 := x.Type() == ssa.TypeI64
+	rn := m.getOperand_Reg(m.c.ValueDefinition(x))
+
+	// CMP takes at most a 32-bit immediate, which x64 sign-extends to the operand size
+	// (Intel SDM Vol.2A, CMP: "81 /7 id CMP r/m32, imm32" and "REX.W + 81 /7 id CMP
+	// r/m64, imm32", immediate sign-extended to 64 bits). So a 64-bit comparison can
+	// only use the immediate form when the value survives that sign extension; anything
+	// else has to be materialized in a register first. This is the same rule
+	// getOperand_Imm32_Reg applies to the y operand of Icmp.
+	rm, ok := asImm32Operand(imm, !_64)
+	if !ok {
+		tmp := m.c.AllocateVReg(x.Type())
+		m.insert(m.allocateInstr().asImm(tmp, imm, _64))
+		rm = newOperandReg(tmp)
+	}
+	m.insert(m.allocateInstr().asCmpRmiR(true, rm, rn.reg(), _64))
+
+	rd := m.c.VRegOf(ret)
 	tmp := m.c.AllocateVReg(ssa.TypeI32)
 	m.insert(m.allocateInstr().asSetcc(condFromSSAIntCmpCond(c), tmp))
 	// On amd64, setcc only sets the first byte of the register, so we need to zero extend it to match
@@ -1659,28 +1729,43 @@ func (m *machine) lowerExtLoad(op ssa.Opcode, ptr ssa.Value, offset uint32, dst 
 	m.insert(load)
 }
 
-func (m *machine) lowerExitIfTrueWithCode(execCtx regalloc.VReg, cond ssa.Value, code nativeapi.ExitCode) {
-	condDef := m.c.ValueDefinition(cond)
+// lowerTrapCondToFlag sets the flags from a conditional trap's condition and
+// returns the condition under which the trap is taken.
+//
+// The comparison feeding the trap is folded into the flag-setting instruction
+// whenever it is still foldable, which is the shape the frontend emits. It is
+// not always: any pass that moves the comparison into another block, or a
+// second use of it, leaves a condition that has already been materialized as a
+// 0-or-1 value, and that just needs testing against itself.
+func (m *machine) lowerTrapCondToFlag(condDef backend.SSAValueDefinition) cond {
 	if !m.c.MatchInstr(condDef, ssa.OpcodeIcmp) {
-		panic("TODO: ExitIfTrue must come after Icmp at the moment: " + condDef.Instr.Opcode().String())
+		cv := m.getOperand_Reg(condDef)
+		m.insert(m.allocateInstr().asCmpRmiR(false, cv, cv.reg(), false))
+		return condNZ
 	}
 	cvalInstr := condDef.Instr
 	cvalInstr.MarkLowered()
-
-	// We need to copy the execution context to a temp register, because if it's spilled,
-	// it might end up being reloaded inside the exiting branch.
-	execCtxTmp := m.copyToTmp(execCtx)
-
 	x, y, c := cvalInstr.IcmpData()
 	xx, yy := m.c.ValueDefinition(x), m.c.ValueDefinition(y)
 	if !m.tryLowerBandToFlag(xx, yy) {
 		m.lowerIcmpToFlag(xx, yy, x.Type() == ssa.TypeI64)
 	}
+	return condFromSSAIntCmpCond(c)
+}
+
+func (m *machine) lowerExitIfTrueWithCode(execCtx regalloc.VReg, cond ssa.Value, code nativeapi.ExitCode) {
+	condDef := m.c.ValueDefinition(cond)
+
+	// We need to copy the execution context to a temp register, because if it's spilled,
+	// it might end up being reloaded inside the exiting branch.
+	execCtxTmp := m.copyToTmp(execCtx)
+
+	trapCond := m.lowerTrapCondToFlag(condDef)
 
 	jmpIf := m.allocateInstr()
 	m.insert(jmpIf)
 	l := m.lowerExitWithCode(execCtxTmp, code)
-	jmpIf.asJmpIf(condFromSSAIntCmpCond(c).invert(), newOperandLabel(l))
+	jmpIf.asJmpIf(trapCond.invert(), newOperandLabel(l))
 }
 
 // lowerExitIfTrueWithCodeShared lowers a conditional trap by branching to a
@@ -1690,11 +1775,6 @@ func (m *machine) lowerExitIfTrueWithCode(execCtx regalloc.VReg, cond ssa.Value,
 // island is materialized once, after register allocation, by emitTrapIslands.
 func (m *machine) lowerExitIfTrueWithCodeShared(cond ssa.Value, code nativeapi.ExitCode) {
 	condDef := m.c.ValueDefinition(cond)
-	if !m.c.MatchInstr(condDef, ssa.OpcodeIcmp) {
-		panic("TODO: ExitIfTrue must come after Icmp at the moment: " + condDef.Instr.Opcode().String())
-	}
-	cvalInstr := condDef.Instr
-	cvalInstr.MarkLowered()
 
 	// No per-site exec-context save: the island reloads execCtx from the
 	// reserved ctx slot ([rsp + ctxSlotOffsets execCtx]), written once in the
@@ -1702,14 +1782,10 @@ func (m *machine) lowerExitIfTrueWithCodeShared(cond ssa.Value, code nativeapi.E
 	// setupPrologue, emitTrapIslands). arm64 instead hands it over in the
 	// reserved x27 register.
 
-	x, y, c := cvalInstr.IcmpData()
-	xx, yy := m.c.ValueDefinition(x), m.c.ValueDefinition(y)
-	if !m.tryLowerBandToFlag(xx, yy) {
-		m.lowerIcmpToFlag(xx, yy, x.Type() == ssa.TypeI64)
-	}
+	trapCond := m.lowerTrapCondToFlag(condDef)
 
 	jmpIf := m.allocateInstr()
-	jmpIf.asJmpIf(condFromSSAIntCmpCond(c), newOperandLabel(m.getOrCreateTrapIsland(code)))
+	jmpIf.asJmpIf(trapCond, newOperandLabel(m.getOrCreateTrapIsland(code)))
 	m.insert(jmpIf)
 }
 
@@ -1824,6 +1900,41 @@ func (m *machine) lowerAluRmiROp(si *ssa.Instruction, op aluRmiROpcode) {
 	alu := m.allocateInstr()
 	alu.asAluRmiR(op, rm, tmp, _64)
 	m.insert(alu)
+
+	// tmp now contains the result, we copy it to the dest register.
+	m.copyTo(tmp, rd)
+}
+
+// lowerBnot lowers `v = Bnot x`, the bitwise complement of an integer.
+//
+// x64 has a dedicated NOT (0xf7 /2), but the `not` instruction kind has no entry in
+// defKinds/useKinds, so the register allocator cannot handle one. XOR against an
+// all-ones immediate computes the same result with an instruction kind that is already
+// wired up: the encoder picks 0x83 /6 ib (XOR r/m, imm8) for it, and x64 sign-extends
+// that imm8 to the operand size, so 0xff becomes 0xffffffff for the 32-bit form and
+// 0xffffffff_ffffffff for the REX.W form (Intel SDM Vol.2B, XOR: "83 /6 ib XOR r/m32,
+// imm8" and "REX.W + 83 /6 ib XOR r/m64, imm8", immediate sign-extended). For the
+// 32-bit form the write to a 32-bit register also zeroes bits 63:32, which is what the
+// rest of the backend expects of an i32 value.
+//
+// Unlike NOT, XOR writes the flags. That is safe here because every flag producer in
+// this backend is consumed inside the same lowering that emits it (cmp/ucomis followed
+// immediately by setcc, cmov or a conditional jump).
+func (m *machine) lowerBnot(si *ssa.Instruction) {
+	x := si.Arg()
+	if !x.Type().IsInt() {
+		panic("BUG: Bnot on a non-integer type")
+	}
+	_64 := x.Type().Bits() == 64
+
+	rn := m.getOperand_Reg(m.c.ValueDefinition(x))
+	rd := m.c.VRegOf(si.Return())
+
+	// rn is being overwritten, so we first copy its value to a temp register,
+	// in case it is referenced again later.
+	tmp := m.copyToTmp(rn.reg())
+
+	m.insert(m.allocateInstr().asAluRmiR(aluRmiROpcodeXor, newOperandImm32(0xffffffff), tmp, _64))
 
 	// tmp now contains the result, we copy it to the dest register.
 	m.copyTo(tmp, rd)

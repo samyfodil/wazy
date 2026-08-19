@@ -94,7 +94,8 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			if op == OpcodeMiscPrefix {
 				instName = MiscInstructionName(body[pc+1])
 			} else if op == OpcodeVecPrefix {
-				instName = VectorInstructionName(body[pc+1])
+				vecOp, _ := ReadVecOpcode(body, int(pc)+1)
+				instName = VectorInstructionName(vecOp)
 			} else if op == OpcodeAtomicPrefix {
 				instName = AtomicInstructionName(body[pc+1])
 			} else {
@@ -1414,11 +1415,20 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			}
 		} else if op == OpcodeVecPrefix {
 			pc++
-			// Vector instructions come with two bytes where the first byte is always OpcodeVecPrefix,
-			// and the second byte determines the actual instruction.
-			vecOpcode := body[pc]
+			// The opcode after OpcodeVecPrefix is a LEB128 u32, so it spans one byte
+			// below 0x80 and two above it, relaxed-SIMD opcodes included.
+			vecOpcode, size := ReadVecOpcode(body, int(pc))
+			if size == 0 {
+				return fmt.Errorf("malformed vector opcode at pc=%#x", pc)
+			}
+			pc += uint64(size) - 1
 			if err := enabledFeatures.RequireEnabled(api.CoreFeatureSIMD); err != nil {
 				return fmt.Errorf("%s invalid as %v", vectorInstructionName[vecOpcode], err)
+			}
+			if vecOpcode >= OpcodeVecI8x16RelaxedSwizzle {
+				if err := enabledFeatures.RequireEnabled(api.CoreFeatureRelaxedSIMD); err != nil {
+					return fmt.Errorf("%s invalid as %v", vectorInstructionName[vecOpcode], err)
+				}
 			}
 
 			switch vecOpcode {
@@ -1604,7 +1614,12 @@ func (m *Module) validateFunctionWithMaxStackValues(
 					return fmt.Errorf("cannot pop the operand for %s: %v", vectorInstructionName[vecOpcode], err)
 				}
 				valueTypeStack.push(ValueTypeV128)
-			case OpcodeVecV128Bitselect:
+			case OpcodeVecV128Bitselect,
+				OpcodeVecI8x16RelaxedLaneselect, OpcodeVecI16x8RelaxedLaneselect,
+				OpcodeVecI32x4RelaxedLaneselect, OpcodeVecI64x2RelaxedLaneselect,
+				OpcodeVecF32x4RelaxedMadd, OpcodeVecF32x4RelaxedNmadd,
+				OpcodeVecF64x2RelaxedMadd, OpcodeVecF64x2RelaxedNmadd,
+				OpcodeVecI32x4RelaxedDotI8x16I7x16AddS:
 				if err := valueTypeStack.popAndVerifyType(ValueTypeV128); err != nil {
 					return fmt.Errorf("cannot pop the operand for %s: %v", vectorInstructionName[vecOpcode], err)
 				}
@@ -1683,7 +1698,9 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				OpcodeVecF64x2PromoteLowF32x4Zero, OpcodeVecF32x4DemoteF64x2Zero,
 				OpcodeVecF32x4ConvertI32x4S, OpcodeVecF32x4ConvertI32x4U,
 				OpcodeVecF64x2ConvertLowI32x4S, OpcodeVecF64x2ConvertLowI32x4U,
-				OpcodeVecI32x4TruncSatF32x4S, OpcodeVecI32x4TruncSatF32x4U, OpcodeVecI32x4TruncSatF64x2SZero, OpcodeVecI32x4TruncSatF64x2UZero:
+				OpcodeVecI32x4TruncSatF32x4S, OpcodeVecI32x4TruncSatF32x4U, OpcodeVecI32x4TruncSatF64x2SZero, OpcodeVecI32x4TruncSatF64x2UZero,
+				OpcodeVecI32x4RelaxedTruncF32x4S, OpcodeVecI32x4RelaxedTruncF32x4U,
+				OpcodeVecI32x4RelaxedTruncF64x2SZero, OpcodeVecI32x4RelaxedTruncF64x2UZero:
 				if err := valueTypeStack.popAndVerifyType(ValueTypeV128); err != nil {
 					return fmt.Errorf("cannot pop the operand for %s: %v", vectorInstructionName[vecOpcode], err)
 				}
@@ -1705,7 +1722,10 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				OpcodeVecI16x8Q15mulrSatS,
 				OpcodeVecI16x8ExtMulLowI8x16S, OpcodeVecI16x8ExtMulHighI8x16S, OpcodeVecI16x8ExtMulLowI8x16U, OpcodeVecI16x8ExtMulHighI8x16U,
 				OpcodeVecI32x4ExtMulLowI16x8S, OpcodeVecI32x4ExtMulHighI16x8S, OpcodeVecI32x4ExtMulLowI16x8U, OpcodeVecI32x4ExtMulHighI16x8U,
-				OpcodeVecI64x2ExtMulLowI32x4S, OpcodeVecI64x2ExtMulHighI32x4S, OpcodeVecI64x2ExtMulLowI32x4U, OpcodeVecI64x2ExtMulHighI32x4U:
+				OpcodeVecI64x2ExtMulLowI32x4S, OpcodeVecI64x2ExtMulHighI32x4S, OpcodeVecI64x2ExtMulLowI32x4U, OpcodeVecI64x2ExtMulHighI32x4U,
+				OpcodeVecI8x16RelaxedSwizzle,
+				OpcodeVecF32x4RelaxedMin, OpcodeVecF32x4RelaxedMax, OpcodeVecF64x2RelaxedMin, OpcodeVecF64x2RelaxedMax,
+				OpcodeVecI16x8RelaxedQ15mulrS, OpcodeVecI16x8RelaxedDotI8x16I7x16S:
 				if err := valueTypeStack.popAndVerifyType(ValueTypeV128); err != nil {
 					return fmt.Errorf("cannot pop the operand for %s: %v", vectorInstructionName[vecOpcode], err)
 				}

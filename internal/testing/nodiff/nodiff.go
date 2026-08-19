@@ -50,7 +50,7 @@ func RequireNoDiffT(t *testing.T, wasmBin []byte, checkMemory, loggingCheck bool
 
 // RequireNoDiff ensures that the behavior is the same between the compiler and the interpreter for any given binary.
 func RequireNoDiff(wasmBin []byte, checkMemory, loggingCheck bool, requireNoError func(err error)) {
-	const features = api.CoreFeaturesV2 | experimental.CoreFeaturesThreads | api.CoreFeatureTailCall | api.CoreFeatureExtendedConst | api.CoreFeatureExceptionHandling | api.CoreFeatureTypedFunctionReferences
+	const features = api.CoreFeaturesV2 | experimental.CoreFeaturesThreads | api.CoreFeatureTailCall | api.CoreFeatureExtendedConst | api.CoreFeatureExceptionHandling | api.CoreFeatureTypedFunctionReferences | api.CoreFeatureRelaxedSIMD
 	compiler := wazy.NewRuntimeWithConfig(context.Background(), wazy.NewRuntimeConfigCompiler().WithCoreFeatures(features))
 	interpreter := wazy.NewRuntimeWithConfig(context.Background(), wazy.NewRuntimeConfigInterpreter().WithCoreFeatures(features))
 	defer compiler.Close(context.Background())

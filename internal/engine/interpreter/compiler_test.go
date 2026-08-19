@@ -1140,6 +1140,11 @@ func TestCompile_Locals(t *testing.T) {
 	}
 }
 
+// vecInst appends a vector instruction's prefix and LEB128-encoded opcode.
+func vecInst(dst []byte, vec wasm.OpcodeVec) []byte {
+	return wasm.AppendVecOpcode(append(dst, wasm.OpcodeVecPrefix), vec)
+}
+
 func TestCompile_Vec(t *testing.T) {
 	addV128Const := func(in []byte) []byte {
 		return append(in, wasm.OpcodeVecPrefix,
@@ -1152,29 +1157,28 @@ func TestCompile_Vec(t *testing.T) {
 		ret = addV128Const(ret)
 		ret = addV128Const(ret)
 		ret = addV128Const(ret)
-		return append(ret, wasm.OpcodeVecPrefix, vec, wasm.OpcodeDrop, wasm.OpcodeEnd)
+		return append(vecInst(ret, vec), wasm.OpcodeDrop, wasm.OpcodeEnd)
 	}
 
 	vv2v := func(vec wasm.OpcodeVec) (ret []byte) {
 		ret = addV128Const(ret)
 		ret = addV128Const(ret)
-		return append(ret, wasm.OpcodeVecPrefix, vec, wasm.OpcodeDrop, wasm.OpcodeEnd)
+		return append(vecInst(ret, vec), wasm.OpcodeDrop, wasm.OpcodeEnd)
 	}
 
 	vi2v := func(vec wasm.OpcodeVec) (ret []byte) {
 		ret = addV128Const(ret)
-		return append(ret, wasm.OpcodeI32Const, 1,
-			wasm.OpcodeVecPrefix, vec,
+		return append(vecInst(append(ret, wasm.OpcodeI32Const, 1), vec),
 			wasm.OpcodeDrop, wasm.OpcodeEnd)
 	}
 
 	v2v := func(vec wasm.OpcodeVec) (ret []byte) {
 		ret = addV128Const(ret)
-		return append(ret, wasm.OpcodeVecPrefix, vec, wasm.OpcodeDrop, wasm.OpcodeEnd)
+		return append(vecInst(ret, vec), wasm.OpcodeDrop, wasm.OpcodeEnd)
 	}
 
 	load := func(vec wasm.OpcodeVec, offset, align uint32) (ret []byte) {
-		ret = []byte{wasm.OpcodeI32Const, 1, 1, 1, 1, wasm.OpcodeVecPrefix, vec}
+		ret = vecInst([]byte{wasm.OpcodeI32Const, 1, 1, 1, 1}, vec)
 		ret = append(ret, leb128.EncodeUint32(align)...)
 		ret = append(ret, leb128.EncodeUint32(offset)...)
 		ret = append(ret, wasm.OpcodeDrop, wasm.OpcodeEnd)
@@ -1183,7 +1187,7 @@ func TestCompile_Vec(t *testing.T) {
 
 	loadLane := func(vec wasm.OpcodeVec, offset, align uint32, lane byte) (ret []byte) {
 		ret = addV128Const([]byte{wasm.OpcodeI32Const, 1, 1, 1, 1})
-		ret = append(ret, wasm.OpcodeVecPrefix, vec)
+		ret = vecInst(ret, vec)
 		ret = append(ret, leb128.EncodeUint32(align)...)
 		ret = append(ret, leb128.EncodeUint32(offset)...)
 		ret = append(ret, lane, wasm.OpcodeDrop, wasm.OpcodeEnd)
@@ -1192,7 +1196,7 @@ func TestCompile_Vec(t *testing.T) {
 
 	storeLane := func(vec wasm.OpcodeVec, offset, align uint32, lane byte) (ret []byte) {
 		ret = addV128Const([]byte{wasm.OpcodeI32Const, 0})
-		ret = append(ret, wasm.OpcodeVecPrefix, vec)
+		ret = vecInst(ret, vec)
 		ret = append(ret, leb128.EncodeUint32(align)...)
 		ret = append(ret, leb128.EncodeUint32(offset)...)
 		ret = append(ret, lane, wasm.OpcodeEnd)
@@ -1201,7 +1205,7 @@ func TestCompile_Vec(t *testing.T) {
 
 	extractLane := func(vec wasm.OpcodeVec, lane byte) (ret []byte) {
 		ret = addV128Const(ret)
-		ret = append(ret, wasm.OpcodeVecPrefix, vec, lane, wasm.OpcodeDrop, wasm.OpcodeEnd)
+		ret = append(vecInst(ret, vec), lane, wasm.OpcodeDrop, wasm.OpcodeEnd)
 		return
 	}
 
@@ -1219,7 +1223,7 @@ func TestCompile_Vec(t *testing.T) {
 			ret = append(ret, wasm.OpcodeF64Const, 0, 0, 0, 0, 0, 0, 0, 0)
 		}
 
-		ret = append(ret, wasm.OpcodeVecPrefix, vec, lane, wasm.OpcodeDrop, wasm.OpcodeEnd)
+		ret = append(vecInst(ret, vec), lane, wasm.OpcodeDrop, wasm.OpcodeEnd)
 		return
 	}
 
@@ -1234,7 +1238,7 @@ func TestCompile_Vec(t *testing.T) {
 		case wasm.OpcodeVecF64x2Splat:
 			ret = append(ret, wasm.OpcodeF64Const, 0, 0, 0, 0, 0, 0, 0, 0)
 		}
-		ret = append(ret, wasm.OpcodeVecPrefix, vec, wasm.OpcodeDrop, wasm.OpcodeEnd)
+		ret = append(vecInst(ret, vec), wasm.OpcodeDrop, wasm.OpcodeEnd)
 		return
 	}
 

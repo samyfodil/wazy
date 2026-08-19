@@ -1073,6 +1073,18 @@ func (i *Instruction) AsExtLoad(op Opcode, ptr Value, offset uint32, dst64bit bo
 
 // AsVZeroExtLoad initializes this instruction as a store instruction with OpcodeVExtLoad.
 func (i *Instruction) AsVZeroExtLoad(ptr Value, offset uint32, scalarType Type) *Instruction {
+	if nativeapi.SSAValidationEnabled {
+		// The scalar type picks both the width of the load and the register
+		// class it lands in, and the destination is always a vector register:
+		// amd64 treats anything that is not f32 as an 8 byte movsd, and arm64
+		// emits an integer load into the float vreg the consumer reads. Either
+		// way a non-float scalar is silently the wrong load, with no panic on
+		// either backend, so name the caller instead. Only the frontend's
+		// load32_zero/load64_zero pair builds this, hence the validation tier.
+		if !scalarType.IsFloat() {
+			panic("BUG: VZeroExtLoad loads a scalar into a vector register, got " + scalarType.String() + ", use TypeF32 or TypeF64")
+		}
+	}
 	i.opcode = OpcodeVZeroExtLoad
 	i.v = ptr
 	i.u1 = uint64(offset)
@@ -1310,6 +1322,15 @@ func (i *Instruction) AsVImul(x, y Value, lane VecLane) *Instruction {
 // AsSqmulRoundSat initializes this instruction as a lane-wise saturating rounding multiplication
 // in Q15 format with OpcodeSqmulRoundSat on a vector.
 func (i *Instruction) AsSqmulRoundSat(x, y Value, lane VecLane) *Instruction {
+	// Q15 saturating rounding multiplication exists only on i16x8 lanes, and the
+	// two backends disagree about what any other lane means: amd64 ignores the
+	// lane entirely and always emits pmulhrsw, while arm64 emits sqrdmulh at the
+	// requested arrangement. A wrong lane is therefore a silent, backend
+	// dependent miscompile that nothing panics on, so reject it here as
+	// AsVIpopcnt does for its own single lane.
+	if lane != VecLaneI16x8 {
+		panic(fmt.Sprintf("BUG: SqmulRoundSat is defined on i16x8 lanes, got %s", lane))
+	}
 	i.opcode = OpcodeSqmulRoundSat
 	i.v = x
 	i.v2 = y
@@ -1460,10 +1481,38 @@ func (i *Instruction) AsIsub(x, y Value) *Instruction {
 
 // AsIcmp initializes this instruction as an integer comparison instruction with OpcodeIcmp.
 func (i *Instruction) AsIcmp(x, y Value, c IntegerCmpCond) *Instruction {
+	if nativeapi.SSAValidationEnabled {
+		// Mixing widths is a deliberate convention for Iadd and Ishl, where a
+		// 32 bit index is added to a 64 bit base, but a comparison of two
+		// different widths has no answer the backends agree on: amd64 takes the
+		// operand size from x alone, while arm64 derives an extend mode from x
+		// and applies it to y, so the same IR compares differently per backend
+		// and neither one panics. Bounds checks are built out of this shape, so
+		// getting it wrong is a memory safety bug surfacing far from its cause.
+		if x.Type() != y.Type() || !x.Type().IsInt() {
+			panic("BUG: Icmp compares two integers of the same type, got " + x.Type().String() + " and " + y.Type().String())
+		}
+	}
 	i.opcode = OpcodeIcmp
 	i.v = x
 	i.v2 = y
 	i.u1 = uint64(c)
+	i.typ = TypeI32
+	return i
+}
+
+// AsIcmpImm initializes this instruction as an integer comparison against an
+// immediate with OpcodeIcmpImm.
+//
+// The field layout matches AsIcmp: the argument in v and the condition in u1,
+// with the immediate taking u2 in place of AsIcmp's second value. A backend
+// reads it back through IcmpImmData rather than the raw fields, so the two stay
+// in agreement by construction.
+func (i *Instruction) AsIcmpImm(x Value, imm uint64, c IntegerCmpCond) *Instruction {
+	i.opcode = OpcodeIcmpImm
+	i.v = x
+	i.u1 = uint64(c)
+	i.u2 = imm
 	i.typ = TypeI32
 	return i
 }
@@ -1764,6 +1813,12 @@ func (i *Instruction) IcmpData() (x, y Value, c IntegerCmpCond) {
 	return i.v, i.v2, IntegerCmpCond(i.u1)
 }
 
+// IcmpImmData returns the operand, immediate and comparison condition of this
+// immediate integer comparison instruction.
+func (i *Instruction) IcmpImmData() (x Value, imm uint64, c IntegerCmpCond) {
+	return i.v, i.u2, IntegerCmpCond(i.u1)
+}
+
 // FcmpData returns the operands and comparison condition of this floating-point comparison instruction.
 func (i *Instruction) FcmpData() (x, y Value, c FloatCmpCond) {
 	return i.v, i.v2, FloatCmpCond(i.u1)
@@ -1964,6 +2019,18 @@ func (i *Instruction) AsReturn(vs nativeapi.VarLength[Value]) *Instruction {
 
 // AsIreduce initializes this instruction as a reduction instruction with OpcodeIreduce.
 func (i *Instruction) AsIreduce(v Value, dstType Type) *Instruction {
+	// Reject a malformed reduce where it is built rather than where it is
+	// lowered. Both backends have to handle whatever reaches them, so without
+	// this the first sign of a bad AsIreduce is a panic deep in instruction
+	// selection, naming a shape rather than the code that asked for it. There
+	// are only two integer types, so the sole meaningful narrowing is i64 to
+	// i32; a widening one is AsUExtend or AsSExtend, not this.
+	if !v.Type().IsInt() || !dstType.IsInt() {
+		panic("BUG: Ireduce is defined on integers, got " + v.Type().String() + " to " + dstType.String())
+	}
+	if dstType.Bits() > v.Type().Bits() {
+		panic("BUG: Ireduce widens " + v.Type().String() + " to " + dstType.String() + ", use AsUExtend or AsSExtend")
+	}
 	i.opcode = OpcodeIreduce
 	i.v = v
 	i.typ = dstType
@@ -2326,6 +2393,27 @@ func (i *Instruction) AsNearest(x Value) *Instruction {
 
 // AsBitcast initializes this instruction as an instruction with OpcodeBitcast.
 func (i *Instruction) AsBitcast(x Value, dstType Type) *Instruction {
+	// A bitcast whose ends sit in different register classes moves the bits
+	// between a general register and a vector one, so both ends must be the same
+	// width: the four wasm reinterpret pairs and nothing else. amd64 rejects the
+	// rest at instruction selection, but arm64 takes the arrangement from a
+	// single end and emits a mov of that width, so an f32 to i64 bitcast
+	// silently reads 32 bits of garbage. The two callers that pair a source with
+	// a destination by hand rather than from a wasm opcode (the throw parameter
+	// spill and its reload) are exactly where that pairing can drift, so name
+	// them here. A bitcast within one class is a plain register copy that both
+	// backends implement, so it is left alone.
+	if srcType := x.Type(); srcType.IsInt() != dstType.IsInt() {
+		switch {
+		case srcType == TypeI32 && dstType == TypeF32,
+			srcType == TypeF32 && dstType == TypeI32,
+			srcType == TypeI64 && dstType == TypeF64,
+			srcType == TypeF64 && dstType == TypeI64: // The four reinterpret pairs.
+		default:
+			panic("BUG: Bitcast cannot change width, got " + srcType.String() + " to " + dstType.String() +
+				", bitcast at the same width first, then AsUExtend, AsSExtend or AsIreduce")
+		}
+	}
 	i.opcode = OpcodeBitcast
 	i.v = x
 	i.typ = dstType

@@ -237,17 +237,15 @@ func (i *instruction) encode(m *machine) {
 		}
 		c.Emit4Bytes(q<<30 | 0b1110101<<21 | rn<<16 | 0b000111<<10 | rn<<5 | rd)
 	case cSet:
-		rd := regNumberInEncoding[i.rd.RealReg()]
-		cf := condFlag(i.u1)
-		if i.u2 == 1 {
-			// https://developer.arm.com/documentation/ddi0602/2022-03/Base-Instructions/CSETM--Conditional-Set-Mask--an-alias-of-CSINV-
-			// Note that we set 64bit version here.
-			c.Emit4Bytes(0b1101101010011111<<16 | uint32(cf.invert())<<12 | 0b011111<<5 | rd)
-		} else {
-			// https://developer.arm.com/documentation/ddi0602/2022-06/Base-Instructions/CSET--Conditional-Set--an-alias-of-CSINC-
-			// Note that we set 64bit version here.
-			c.Emit4Bytes(0b1001101010011111<<16 | uint32(cf.invert())<<12 | 0b111111<<5 | rd)
-		}
+		c.Emit4Bytes(encodeConditionalSelect(
+			kind,
+			regNumberInEncoding[i.rd.RealReg()],
+			regNumberInEncoding[xzr],
+			regNumberInEncoding[xzr],
+			condFlag(i.u1),
+			true,      // CSET/CSETM only have the 64-bit form here.
+			i.u2 == 1, // Mask, i.e. CSETM rather than CSET.
+		))
 	case extend:
 		c.Emit4Bytes(encodeExtend((i.u2>>32) == 1, byte(i.u1), byte(i.u2), regNumberInEncoding[i.rd.RealReg()], regNumberInEncoding[i.rn.realReg()]))
 	case fpuCmp:
@@ -275,6 +273,7 @@ func (i *instruction) encode(m *machine) {
 			regNumberInEncoding[i.rm.realReg()],
 			condFlag(i.u1),
 			i.u2 == 1,
+			false, // Unused by cSel.
 		))
 	case fpuCSel:
 		c.Emit4Bytes(encodeFpuCSel(
@@ -741,7 +740,15 @@ func encodeVecRRR(op vecOp, rd, rn, rm uint32, arr vecArrangement) uint32 {
 		size, _ := arrToSizeQEncoded(arr)
 		return encodeAdvancedSIMDThreeDifferent(rd, rn, rm, 0b1100, size, 0b0, 0b1)
 
+	case vecOpZip1, vecOpZip2, vecOpUzp1, vecOpUzp2, vecOpTrn1, vecOpTrn2:
+		// "Advanced SIMD permute" is a three-register group as well, so a vecRRR
+		// carrying one of these ops denotes exactly the permute instruction.
+		return encodeVecPermute(op, rd, rn, rm, arr)
+
 	default:
+		// Everything left is a two-register (vecMisc), across-lanes (vecLanes) or
+		// shift-by-immediate (vecShiftImm) operation. Those have no three-register
+		// form at all, so there is no encoding of "rd, rn, rm" for them.
 		panic("TODO: " + op.String())
 	}
 }
@@ -1115,33 +1122,73 @@ func encodeVecExtract(rd, rn, rm uint32, arr vecArrangement, index uint32) uint3
 
 // encodeVecPermute encodes as "Advanced SIMD permute."
 // https://developer.arm.com/documentation/ddi0602/2023-06/Index-by-Encoding/Data-Processing----Scalar-Floating-Point-and-Advanced-SIMD?lang=en#simd-dp
+//
+// The group is 0|Q|001110|size|0|Rm|0|opcode|10|Rn|Rd, where the three bit
+// opcode at bits 14..12 selects the member of the family:
+//
+//	UZP1 = 0b001, TRN1 = 0b010, ZIP1 = 0b011,
+//	UZP2 = 0b101, TRN2 = 0b110, ZIP2 = 0b111.
+//
+// e.g. with v0.4s, v1.4s, v2.4s: uzp1 = 0x4e821820, trn1 = 0x4e822820,
+// zip1 = 0x4e823820, uzp2 = 0x4e825820, trn2 = 0x4e826820, zip2 = 0x4e827820.
 func encodeVecPermute(op vecOp, rd, rn, rm uint32, arr vecArrangement) uint32 {
 	var q, size, opcode uint32
 	switch op {
+	case vecOpUzp1:
+		opcode = 0b001
+	case vecOpTrn1:
+		opcode = 0b010
 	case vecOpZip1:
 		opcode = 0b011
-		if arr == vecArrangement1D {
-			panic("unsupported arrangement: " + arr.String())
-		}
-		size, q = arrToSizeQEncoded(arr)
+	case vecOpUzp2:
+		opcode = 0b101
+	case vecOpTrn2:
+		opcode = 0b110
+	case vecOpZip2:
+		opcode = 0b111
 	default:
 		panic("TODO: " + op.String())
 	}
+	// size == 0b11 with Q == 0 (a single 64-bit element) is reserved for all of them.
+	if arr == vecArrangement1D {
+		panic("unsupported arrangement: " + arr.String())
+	}
+	size, q = arrToSizeQEncoded(arr)
 	return q<<30 | 0b001110<<24 | size<<22 | rm<<16 | opcode<<12 | 0b10<<10 | rn<<5 | rd
 }
 
 // encodeConditionalSelect encodes as "Conditional select" in
 // https://developer.arm.com/documentation/ddi0596/2020-12/Index-by-Encoding/Data-Processing----Register?lang=en#condsel
-func encodeConditionalSelect(kind instructionKind, rd, rn, rm uint32, c condFlag, _64bit bool) uint32 {
-	if kind != cSel {
-		panic("TODO: support other conditional select")
+//
+// The group is sf|op|S|11010100|Rm|cond|op2|Rn|Rd, and (op, op2) picks the
+// member: (0, 0b00) CSEL, (0, 0b01) CSINC, (1, 0b00) CSINV, (1, 0b01) CSNEG.
+// cSet is emitted through the CSET/CSETM aliases, which are CSINC/CSINV with
+// Rn == Rm == zr and the inverted condition; mask selects CSETM over CSET.
+func encodeConditionalSelect(kind instructionKind, rd, rn, rm uint32, c condFlag, _64bit, mask bool) uint32 {
+	var sf, op, op2 uint32
+	switch kind {
+	case cSel:
+		// CSEL: op = 0, op2 = 0b00.
+		if _64bit {
+			sf = 0b1
+		}
+	case cSet:
+		// https://developer.arm.com/documentation/ddi0602/2022-06/Base-Instructions/CSET--Conditional-Set--an-alias-of-CSINC-
+		// https://developer.arm.com/documentation/ddi0602/2022-03/Base-Instructions/CSETM--Conditional-Set-Mask--an-alias-of-CSINV-
+		// Note that we set 64bit version here.
+		// e.g. "cset x18, ne" = 0x9a9f07f2 and "csetm x0, ne" = 0xda9f03e0.
+		sf = 0b1
+		rn, rm = regNumberInEncoding[xzr], regNumberInEncoding[xzr]
+		c = c.invert()
+		if mask {
+			op = 0b1 // CSINV.
+		} else {
+			op2 = 0b01 // CSINC.
+		}
+	default:
+		panic(fmt.Sprintf("not a conditional select: instruction kind %d", kind))
 	}
-
-	ret := 0b110101<<23 | rm<<16 | uint32(c)<<12 | rn<<5 | rd
-	if _64bit {
-		ret |= 0b1 << 31
-	}
-	return ret
+	return sf<<31 | op<<30 | 0b11010100<<21 | rm<<16 | uint32(c)<<12 | op2<<10 | rn<<5 | rd
 }
 
 const dummyInstruction uint32 = 0x14000000 // "b 0"
@@ -1242,6 +1289,18 @@ func encodeAluRRRR(op aluOp, rd, rn, rm, ra, _64bit uint32) uint32 {
 		op31, oO = 0b000, 0b0
 	case aluOpMSub:
 		op31, oO = 0b000, 0b1
+	case aluOpSMulH, aluOpUMulH:
+		// SMULH/UMULH belong to the same "Data-processing (3 source)" group, but
+		// they have no Ra operand (the field is fixed to 0b11111) and no 32-bit
+		// form (sf is fixed to 1), so both `ra` and `_64bit` are irrelevant here:
+		//   SMULH <Xd>, <Xn>, <Xm> = 1|00|11011|010|Rm|0|(1)(1)(1)(1)(1)|Rn|Rd
+		//   UMULH <Xd>, <Xn>, <Xm> = 1|00|11011|110|Rm|0|(1)(1)(1)(1)(1)|Rn|Rd
+		// e.g. "smulh x0, x1, x2" = 0x9b427c20 and "umulh x0, x1, x2" = 0x9bc27c20.
+		op31 = 0b010
+		if op == aluOpUMulH {
+			op31 = 0b110
+		}
+		return 0b1<<31 | 0b11011<<24 | op31<<21 | rm<<16 | 0b11111<<10 | rn<<5 | rd
 	default:
 		panic("TODO/BUG")
 	}
@@ -1257,6 +1316,24 @@ func encodeBitRR(op bitOp, rd, rn, _64bit uint32) uint32 {
 		opcode2, opcode = 0b00000, 0b000000
 	case bitOpClz:
 		opcode2, opcode = 0b00000, 0b000100
+	case bitOpCls:
+		opcode2, opcode = 0b00000, 0b000101
+	case bitOpRev16:
+		// e.g. "rev16 w0, w2" = 0x5ac00440, "rev16 x0, x2" = 0xdac00440.
+		opcode2, opcode = 0b00000, 0b000001
+	case bitOpRev32:
+		// The 64-bit form is REV32, the 32-bit one is REV (it reverses the bytes
+		// of the single word it holds). e.g. "rev32 x0, x2" = 0xdac00840 and
+		// "rev w0, w2" = 0x5ac00840.
+		opcode2, opcode = 0b00000, 0b000010
+	case bitOpRev64:
+		// REV <Xd>, <Xn>. opcode 0b000011 is unallocated when sf == 0, so unlike
+		// the others this one exists only in the 64-bit form.
+		// e.g. "rev x0, x2" = 0xdac00c40.
+		if _64bit == 0 {
+			panic("rev64 has no 32-bit form")
+		}
+		opcode2, opcode = 0b00000, 0b000011
 	default:
 		panic("TODO/BUG")
 	}
@@ -1688,10 +1765,17 @@ func encodeAluRRR(op aluOp, rd, rn, rm uint32, _64bit, isRnSp bool) uint32 {
 		}
 	case aluOpAddS:
 		if isRnSp {
-			panic("TODO")
+			// SP cannot be named by the shifted-register form, where Rn == 31 means
+			// the zero register, so use "Extended register" with UXTX (== LSL #0).
+			// ADDS (extended register) is sf|0|1|01011|00|1|Rm|option|imm3|Rn|Rd,
+			// hence bits 31..21 = 0b00101011_001 and bits 15..10 = option(0b011)
+			// followed by imm3(0b000). e.g. "adds x0, sp, x1" = 0xab2163e0.
+			_31to21 = 0b00101011_001
+			_15to10 = 0b011000
+		} else {
+			// "Shifted register" with shift = 0
+			_31to21 = 0b00101011_000
 		}
-		// "Shifted register" with shift = 0
-		_31to21 = 0b00101011_000
 	case aluOpSub:
 		if isRnSp {
 			// "Extended register" with UXTW.
@@ -1703,10 +1787,15 @@ func encodeAluRRR(op aluOp, rd, rn, rm uint32, _64bit, isRnSp bool) uint32 {
 		}
 	case aluOpSubS:
 		if isRnSp {
-			panic("TODO")
+			// Same as aluOpAddS above, with op == 1: SUBS (extended register) is
+			// sf|1|1|01011|00|1|Rm|option|imm3|Rn|Rd, hence bits 31..21 =
+			// 0b01101011_001. e.g. "subs x0, sp, x1" = 0xeb2163e0.
+			_31to21 = 0b01101011_001
+			_15to10 = 0b011000
+		} else {
+			// "Shifted register" with shift = 0
+			_31to21 = 0b01101011_000
 		}
-		// "Shifted register" with shift = 0
-		_31to21 = 0b01101011_000
 	case aluOpAnd, aluOpOrr, aluOpOrn, aluOpEor, aluOpAnds:
 		// "Logical (shifted register)".
 		var opc, n uint32

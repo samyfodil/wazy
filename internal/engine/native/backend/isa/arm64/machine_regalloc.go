@@ -277,12 +277,29 @@ func (m *machine) insertMoveBefore(dst, src regalloc.VReg, instr *instruction) {
 	linkInstr(cur, prevNext)
 }
 
+// spillSlotBitsOf returns the width, in bits, of the spill slot backing v, whose recorded SSA type
+// is typ. For a VReg standing for an SSA value, that is simply the width of its type. A VReg that
+// names a real register directly (regalloc.FromRealReg) has no SSA type at all, though:
+// compiler.TypeOf indexes ssaTypeOfVRegID by VRegID and the reserved real-register IDs are never
+// written, so it returns typeInvalid. Nothing tells us which part of such a register is live, so
+// the whole architectural register is saved and restored: 64 bits for an X register and 128 bits
+// for a Q register. That is the rule setupPrologue and setupEpilogueAfter already apply to the
+// clobbered registers, which are untyped for exactly the same reason.
+func spillSlotBitsOf(v regalloc.VReg, typ ssa.Type) byte {
+	switch typ {
+	case ssa.TypeI32, ssa.TypeI64, ssa.TypeF32, ssa.TypeF64, ssa.TypeV128:
+		return typ.Bits()
+	default:
+		return regTypeToRegisterSizeInBits(v.RegType())
+	}
+}
+
 func (m *machine) insertStoreRegisterAt(v regalloc.VReg, instr *instruction, after bool) *instruction {
 	if !v.IsRealReg() {
 		panic("BUG: VReg must be backed by real reg to be stored")
 	}
 
-	typ := m.compiler.TypeOf(v)
+	bits := spillSlotBitsOf(v, m.compiler.TypeOf(v))
 
 	var prevNext, cur *instruction
 	if after {
@@ -291,11 +308,11 @@ func (m *machine) insertStoreRegisterAt(v regalloc.VReg, instr *instruction, aft
 		cur, prevNext = instr.prev, instr
 	}
 
-	offsetFromSP := m.getVRegSpillSlotOffsetFromSP(v.ID(), typ.Size())
+	offsetFromSP := m.getVRegSpillSlotOffsetFromSP(v.ID(), bits/8)
 	var amode *addressMode
-	cur, amode = m.resolveAddressModeForOffsetAndInsert(cur, offsetFromSP, typ.Bits(), spVReg, true)
+	cur, amode = m.resolveAddressModeForOffsetAndInsert(cur, offsetFromSP, bits, spVReg, true)
 	store := m.allocateInstr()
-	store.asStore(operandNR(v), amode, typ.Bits())
+	store.asStore(operandNR(v), amode, bits)
 
 	cur = linkInstr(cur, store)
 	return linkInstr(cur, prevNext)
@@ -307,6 +324,7 @@ func (m *machine) insertReloadRegisterAt(v regalloc.VReg, instr *instruction, af
 	}
 
 	typ := m.compiler.TypeOf(v)
+	bits := spillSlotBitsOf(v, typ)
 
 	var prevNext, cur *instruction
 	if after {
@@ -315,9 +333,9 @@ func (m *machine) insertReloadRegisterAt(v regalloc.VReg, instr *instruction, af
 		cur, prevNext = instr.prev, instr
 	}
 
-	offsetFromSP := m.getVRegSpillSlotOffsetFromSP(v.ID(), typ.Size())
+	offsetFromSP := m.getVRegSpillSlotOffsetFromSP(v.ID(), bits/8)
 	var amode *addressMode
-	cur, amode = m.resolveAddressModeForOffsetAndInsert(cur, offsetFromSP, typ.Bits(), spVReg, true)
+	cur, amode = m.resolveAddressModeForOffsetAndInsert(cur, offsetFromSP, bits, spVReg, true)
 	load := m.allocateInstr()
 	switch typ {
 	case ssa.TypeI32, ssa.TypeI64:
@@ -327,7 +345,18 @@ func (m *machine) insertReloadRegisterAt(v regalloc.VReg, instr *instruction, af
 	case ssa.TypeV128:
 		load.asFpuLoad(v, amode, 128)
 	default:
-		panic("TODO")
+		// No SSA type: v names a real register directly, so insertStoreRegisterAt saved the whole
+		// register and we reload the whole register. spillSlotBitsOf already picked the
+		// width from the register class, so all that is left is the instruction form:
+		// LDR (immediate, unsigned offset), 64-bit, bits 31:22 = 1111100001 (0xf9400000) for an
+		// X register, and LDR (immediate, SIMD&FP), 128-bit, bits 31:22 = 0011110011 (0x3dc00000)
+		// for a Q register. setupEpilogueAfter restores the clobbered registers with this same
+		// pair of forms.
+		if v.RegType() == regalloc.RegTypeInt {
+			load.asULoad(v, amode, bits)
+		} else {
+			load.asFpuLoad(v, amode, bits)
+		}
 	}
 
 	cur = linkInstr(cur, load)

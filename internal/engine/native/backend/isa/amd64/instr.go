@@ -182,17 +182,50 @@ func (i *instruction) String() string {
 	case xmmMovRM:
 		return fmt.Sprintf("%s %s, %s", sseOpcode(i.u1), i.op1.format(true), i.op2.format(true))
 	case xmmLoadConst:
-		panic("TODO")
+		return fmt.Sprintf("%s %s, %s", sseOpcode(i.u1), i.op1.format(false), i.op2.format(false))
 	case xmmToGpr:
 		return fmt.Sprintf("%s %s, %s", sseOpcode(i.u1), i.op1.format(i.b1), i.op2.format(i.b1))
 	case cvtUint64ToFloatSeq:
-		panic("TODO")
+		src, dst, tmpGp, tmpGp2, dst64 := i.cvtUint64ToFloatSeqData()
+		return fmt.Sprintf(
+			"cvtUint64ToFloatSeq src=%s, dst=%s, tmpGp=%s, tmpGp2=%s, dst64=%v",
+			formatVRegSized(src, true),
+			formatVRegSized(dst, true),
+			formatVRegSized(tmpGp, true),
+			formatVRegSized(tmpGp2, true), dst64)
 	case cvtFloatToSintSeq:
-		panic("TODO")
+		execCtx, src, tmpGp, tmpGp2, tmpXmm, src64, dst64, sat := i.fcvtToSintSequenceData()
+		return fmt.Sprintf(
+			"cvtFloatToSintSeq execCtx=%s, src=%s, tmpGp=%s, tmpGp2=%s, tmpXmm=%s, src64=%v, dst64=%v, sat=%v",
+			formatVRegSized(execCtx, true),
+			formatVRegSized(src, true),
+			formatVRegSized(tmpGp, true),
+			formatVRegSized(tmpGp2, true),
+			formatVRegSized(tmpXmm, true), src64, dst64, sat)
 	case cvtFloatToUintSeq:
-		panic("TODO")
+		execCtx, src, tmpGp, tmpGp2, tmpXmm, tmpXmm2, src64, dst64, sat := i.fcvtToUintSequenceData()
+		return fmt.Sprintf(
+			"cvtFloatToUintSeq execCtx=%s, src=%s, tmpGp=%s, tmpGp2=%s, tmpXmm=%s, tmpXmm2=%s, src64=%v, dst64=%v, sat=%v",
+			formatVRegSized(execCtx, true),
+			formatVRegSized(src, true),
+			formatVRegSized(tmpGp, true),
+			formatVRegSized(tmpGp2, true),
+			formatVRegSized(tmpXmm, true),
+			formatVRegSized(tmpXmm2, true), src64, dst64, sat)
 	case xmmMinMaxSeq:
-		panic("TODO")
+		var op string
+		if i.u1 != 0 {
+			op = "min"
+		} else {
+			op = "max"
+		}
+		var suffix string
+		if i.b1 {
+			suffix = "sd"
+		} else {
+			suffix = "ss"
+		}
+		return fmt.Sprintf("%s%sSeq %s, %s", op, suffix, i.op1.format(false), i.op2.format(false))
 	case xmmCmpRmR:
 		return fmt.Sprintf("%s %s, %s", sseOpcode(i.u1), i.op1.format(false), i.op2.format(false))
 	case xmmRmRImm:
@@ -389,6 +422,9 @@ func (i *instruction) Uses(regs *[]regalloc.VReg) []regalloc.VReg {
 	case useKindFcvtToUintSequence:
 		execCtx, src, tmpGp, tmpGp2, tmpXmm, tmpXmm2, _, _, _ := i.fcvtToUintSequenceData()
 		*regs = append(*regs, execCtx, src, tmpGp, tmpGp2, tmpXmm, tmpXmm2)
+	case useKindCvtUint64ToFloatSeq:
+		src, _, tmpGp, tmpGp2, _ := i.cvtUint64ToFloatSeqData()
+		*regs = append(*regs, src, tmpGp, tmpGp2)
 	case useKindDivRem:
 		execCtx, divisor, tmpGp, _, _, _ := i.idivRemSequenceData()
 		// idiv uses rax and rdx as implicit operands.
@@ -524,6 +560,17 @@ func (i *instruction) AssignUse(index int, v regalloc.VReg) {
 		case 4:
 			i.u1 = uint64(v)
 		case 5:
+			i.u2 = uint64(v)
+		default:
+			panic("BUG")
+		}
+	case useKindCvtUint64ToFloatSeq:
+		switch index {
+		case 0:
+			i.op1.setReg(v)
+		case 1:
+			i.u1 = uint64(v)
+		case 2:
 			i.u2 = uint64(v)
 		default:
 			panic("BUG")
@@ -943,7 +990,7 @@ func (m *machine) allocateFcvtToUintSequence(
 func (i *instruction) fcvtToUintSequenceData() (
 	execCtx, src, tmpGp, tmpGp2, tmpXmm, tmpXmm2 regalloc.VReg, src64, dst64, sat bool,
 ) {
-	if i.kind != fcvtToUintSequence {
+	if i.kind != fcvtToUintSequence && i.kind != cvtFloatToUintSeq {
 		panic("BUG")
 	}
 	op1a := i.op1.addressMode()
@@ -984,13 +1031,100 @@ func (m *machine) allocateFcvtToSintSequence(
 func (i *instruction) fcvtToSintSequenceData() (
 	execCtx, src, tmpGp, tmpGp2, tmpXmm regalloc.VReg, src64, dst64, sat bool,
 ) {
-	if i.kind != fcvtToSintSequence {
+	if i.kind != fcvtToSintSequence && i.kind != cvtFloatToSintSeq {
 		panic("BUG")
 	}
 	op1a := i.op1.addressMode()
 	op2a := i.op2.addressMode()
 	return op1a.base, op1a.index, op2a.base, op2a.index, regalloc.VReg(i.u1),
 		i.u2&1 != 0, i.u2&2 != 0, i.u2&4 != 0
+}
+
+// asXmmLoadConst initializes i as a load of a 128-bit constant into the XMM
+// register rd. mem addresses the constant, which is normally a RIP-relative
+// reference to a slot in the constant pool machine.Encode emits after the
+// function body (see machine.lowerVconst for how such a slot is allocated).
+//
+// op selects the load form: sseOpcodeMovups or sseOpcodeMovdqu for a constant
+// with no alignment guarantee, sseOpcodeMovaps or sseOpcodeMovdqa when it is
+// known to be 16-byte aligned.
+func (i *instruction) asXmmLoadConst(op sseOpcode, mem *amode, rd regalloc.VReg) *instruction { //nolint
+	i.kind = xmmLoadConst
+	i.op1 = newOperandMem(mem)
+	i.op2 = newOperandReg(rd)
+	i.u1 = uint64(op)
+	return i
+}
+
+// asCvtUint64ToFloatSeq initializes i as the sequence converting the unsigned
+// 64-bit integer in src into the float32 (dst64=false) or float64 (dst64=true)
+// in dst. tmpGp and tmpGp2 are clobbered by the sequence; src is preserved.
+func (i *instruction) asCvtUint64ToFloatSeq(src, dst, tmpGp, tmpGp2 regalloc.VReg, dst64 bool) *instruction { //nolint
+	i.kind = cvtUint64ToFloatSeq
+	i.op1 = newOperandReg(src)
+	i.op2 = newOperandReg(dst)
+	i.u1 = uint64(tmpGp)
+	i.u2 = uint64(tmpGp2)
+	i.b1 = dst64
+	return i
+}
+
+func (i *instruction) cvtUint64ToFloatSeqData() (src, dst, tmpGp, tmpGp2 regalloc.VReg, dst64 bool) {
+	if i.kind != cvtUint64ToFloatSeq {
+		panic("BUG")
+	}
+	return i.op1.reg(), i.op2.reg(), regalloc.VReg(i.u1), regalloc.VReg(i.u2), i.b1
+}
+
+// asXmmMinMaxSeq initializes i as the scalar minimum (isMin) or maximum
+// sequence over float32 (_64=false) or float64 (_64=true), with the NaN and
+// signed-zero semantics that minss/maxss alone do not provide: a NaN operand
+// propagates a quiet NaN, and min(+0,-0) is -0 while max(+0,-0) is +0.
+//
+// lhs must be a register. rhsDst holds the other input and receives the result.
+func (i *instruction) asXmmMinMaxSeq(isMin, _64 bool, lhs operand, rhsDst regalloc.VReg) *instruction { //nolint
+	if lhs.kind != operandKindReg {
+		panic("BUG")
+	}
+	i.kind = xmmMinMaxSeq
+	i.op1 = lhs
+	i.op2 = newOperandReg(rhsDst)
+	if isMin {
+		i.u1 = 1
+	} else {
+		i.u1 = 0
+	}
+	i.b1 = _64
+	return i
+}
+
+// allocateCvtFloatToSintSeq allocates a cvtFloatToSintSeq instruction. It takes
+// and lays out its operands exactly like allocateFcvtToSintSequence, and it
+// computes exactly the same thing. The two differ only in when they are
+// expanded: fcvtToSintSequence is turned into real instructions right after
+// register allocation (machine.ExecuteBeforeCodeGeneration), while
+// cvtFloatToSintSeq keeps its pseudo-instruction shape until encoding and emits
+// the whole sequence from instruction.encode.
+func (m *machine) allocateCvtFloatToSintSeq( //nolint
+	execCtx, src, tmpGp, tmpGp2, tmpXmm regalloc.VReg,
+	src64, dst64, sat bool,
+) *instruction {
+	i := m.allocateFcvtToSintSequence(execCtx, src, tmpGp, tmpGp2, tmpXmm, src64, dst64, sat)
+	i.kind = cvtFloatToSintSeq
+	return i
+}
+
+// allocateCvtFloatToUintSeq is the unsigned counterpart of
+// allocateCvtFloatToSintSeq: same operand layout and same result as
+// allocateFcvtToUintSequence, expanded at encoding time instead of right after
+// register allocation.
+func (m *machine) allocateCvtFloatToUintSeq( //nolint
+	execCtx, src, tmpGp, tmpGp2, tmpXmm, tmpXmm2 regalloc.VReg,
+	src64, dst64, sat bool,
+) *instruction {
+	i := m.allocateFcvtToUintSequence(execCtx, src, tmpGp, tmpGp2, tmpXmm, tmpXmm2, src64, dst64, sat)
+	i.kind = cvtFloatToUintSeq
+	return i
 }
 
 func (k instructionKind) String() string {
@@ -2385,6 +2519,11 @@ var defKinds = [instrMax]defKind{
 	nopUseReg:              defKindNone,
 	tailCall:               defKindCall,
 	tailCallIndirect:       defKindCall,
+	xmmLoadConst:           defKindOp2,
+	cvtUint64ToFloatSeq:    defKindOp2,
+	cvtFloatToSintSeq:      defKindNone,
+	cvtFloatToUintSeq:      defKindNone,
+	xmmMinMaxSeq:           defKindNone,
 }
 
 // String implements fmt.Stringer.
@@ -2421,6 +2560,7 @@ const (
 	useKindTailCallInd
 	useKindFcvtToSintSequence
 	useKindFcvtToUintSequence
+	useKindCvtUint64ToFloatSeq
 )
 
 var useKinds = [instrMax]useKind{
@@ -2471,6 +2611,11 @@ var useKinds = [instrMax]useKind{
 	nopUseReg:              useKindOp1,
 	tailCall:               useKindCall,
 	tailCallIndirect:       useKindTailCallInd,
+	xmmLoadConst:           useKindOp1,
+	cvtUint64ToFloatSeq:    useKindCvtUint64ToFloatSeq,
+	cvtFloatToSintSeq:      useKindFcvtToSintSequence,
+	cvtFloatToUintSeq:      useKindFcvtToUintSequence,
+	xmmMinMaxSeq:           useKindOp1Op2Reg,
 }
 
 func (u useKind) String() string {
@@ -2489,6 +2634,8 @@ func (u useKind) String() string {
 		return "callInd"
 	case useKindTailCallInd:
 		return "tailCallInd"
+	case useKindCvtUint64ToFloatSeq:
+		return "cvtUint64ToFloatSeq"
 	default:
 		return "invalid"
 	}

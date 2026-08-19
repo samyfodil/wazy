@@ -2715,6 +2715,11 @@ func TestModule_funcValidation_Select_error(t *testing.T) {
 	}
 }
 
+// vecInst appends a vector instruction's prefix and LEB128-encoded opcode.
+func vecInst(dst []byte, vec OpcodeVec) []byte {
+	return AppendVecOpcode(append(dst, OpcodeVecPrefix), vec)
+}
+
 func TestModule_funcValidation_SIMD(t *testing.T) {
 	addV128Const := func(in []byte) []byte {
 		return append(in, OpcodeVecPrefix,
@@ -2725,9 +2730,7 @@ func TestModule_funcValidation_SIMD(t *testing.T) {
 	vv2v := func(vec OpcodeVec) (ret []byte) {
 		ret = addV128Const(ret)
 		ret = addV128Const(ret)
-		return append(ret,
-			OpcodeVecPrefix,
-			vec,
+		return append(vecInst(ret, vec),
 			OpcodeDrop,
 			OpcodeEnd,
 		)
@@ -2736,9 +2739,7 @@ func TestModule_funcValidation_SIMD(t *testing.T) {
 		ret = addV128Const(ret)
 		ret = addV128Const(ret)
 		ret = addV128Const(ret)
-		return append(ret,
-			OpcodeVecPrefix,
-			vec,
+		return append(vecInst(ret, vec),
 			OpcodeDrop,
 			OpcodeEnd,
 		)
@@ -2746,9 +2747,7 @@ func TestModule_funcValidation_SIMD(t *testing.T) {
 
 	v2v := func(vec OpcodeVec) (ret []byte) {
 		ret = addV128Const(ret)
-		return append(ret,
-			OpcodeVecPrefix,
-			vec,
+		return append(vecInst(ret, vec),
 			OpcodeDrop,
 			OpcodeEnd,
 		)
@@ -2756,21 +2755,14 @@ func TestModule_funcValidation_SIMD(t *testing.T) {
 
 	vi2v := func(vec OpcodeVec) (ret []byte) {
 		ret = addV128Const(ret)
-		return append(ret,
-			OpcodeI32Const, 1,
-			OpcodeVecPrefix,
-			vec,
+		return append(vecInst(append(ret, OpcodeI32Const, 1), vec),
 			OpcodeDrop,
 			OpcodeEnd,
 		)
 	}
 
 	load := func(vec OpcodeVec, offset, align uint32) (ret []byte) {
-		ret = []byte{
-			OpcodeI32Const, 1,
-			OpcodeVecPrefix,
-			vec,
-		}
+		ret = vecInst([]byte{OpcodeI32Const, 1}, vec)
 
 		ret = append(ret, leb128.EncodeUint32(align)...)
 		ret = append(ret, leb128.EncodeUint32(offset)...)
@@ -2783,10 +2775,7 @@ func TestModule_funcValidation_SIMD(t *testing.T) {
 
 	loadLane := func(vec OpcodeVec, offset, align uint32, lane byte) (ret []byte) {
 		ret = addV128Const([]byte{OpcodeI32Const, 1})
-		ret = append(ret,
-			OpcodeVecPrefix,
-			vec,
-		)
+		ret = vecInst(ret, vec)
 
 		ret = append(ret, leb128.EncodeUint32(align)...)
 		ret = append(ret, leb128.EncodeUint32(offset)...)
@@ -2800,10 +2789,7 @@ func TestModule_funcValidation_SIMD(t *testing.T) {
 
 	storeLane := func(vec OpcodeVec, offset, align uint32, lane byte) (ret []byte) {
 		ret = addV128Const([]byte{OpcodeI32Const, 1})
-		ret = append(ret,
-			OpcodeVecPrefix,
-			vec,
-		)
+		ret = vecInst(ret, vec)
 		ret = append(ret, leb128.EncodeUint32(align)...)
 		ret = append(ret, leb128.EncodeUint32(offset)...)
 		ret = append(ret,
@@ -2815,9 +2801,7 @@ func TestModule_funcValidation_SIMD(t *testing.T) {
 
 	extractLane := func(vec OpcodeVec, lane byte) (ret []byte) {
 		ret = addV128Const(ret)
-		ret = append(ret,
-			OpcodeVecPrefix,
-			vec,
+		ret = append(vecInst(ret, vec),
 			lane,
 			OpcodeDrop,
 			OpcodeEnd,
@@ -2839,9 +2823,7 @@ func TestModule_funcValidation_SIMD(t *testing.T) {
 			ret = append(ret, OpcodeF64Const, 0, 0, 0, 0, 0, 0, 0, 0)
 		}
 
-		ret = append(ret,
-			OpcodeVecPrefix,
-			vec,
+		ret = append(vecInst(ret, vec),
 			lane,
 			OpcodeDrop,
 			OpcodeEnd,
@@ -2861,9 +2843,7 @@ func TestModule_funcValidation_SIMD(t *testing.T) {
 			ret = append(ret, OpcodeF64Const, 0, 0, 0, 0, 0, 0, 0, 0)
 		}
 
-		ret = append(ret,
-			OpcodeVecPrefix,
-			vec,
+		ret = append(vecInst(ret, vec),
 			OpcodeDrop,
 			OpcodeEnd,
 		)
@@ -3211,13 +3191,29 @@ func TestModule_funcValidation_SIMD_error(t *testing.T) {
 
 	tests := []testCase{
 		{
-			name: "simd disabled",
-			body: []byte{
-				OpcodeVecPrefix,
-				OpcodeVecF32x4Abs,
-			},
+			name:        "simd disabled",
+			body:        vecInst(nil, OpcodeVecF32x4Abs),
 			flag:        api.CoreFeaturesV1,
 			expectedErr: "f32x4.abs invalid as feature \"simd\" is disabled",
+		},
+		{
+			name:        "relaxed-simd disabled",
+			body:        vecInst(nil, OpcodeVecI8x16RelaxedSwizzle),
+			flag:        api.CoreFeatureSIMD,
+			expectedErr: "i8x16.relaxed_swizzle invalid as feature \"relaxed-simd\" is disabled",
+		},
+		{
+			name:        "truncated vector opcode",
+			body:        []byte{OpcodeVecPrefix, 0x80},
+			flag:        api.CoreFeatureSIMD,
+			expectedErr: "malformed vector opcode at pc=0x1",
+		},
+		{
+			name: "over-wide vector opcode",
+			// Three LEB128 bytes are wider than any vector opcode.
+			body:        []byte{OpcodeVecPrefix, 0x80, 0x80, 0x01},
+			flag:        api.CoreFeatureSIMD,
+			expectedErr: "malformed vector opcode at pc=0x1",
 		},
 		{
 			name: "v128.const immediate",
@@ -3232,31 +3228,23 @@ func TestModule_funcValidation_SIMD_error(t *testing.T) {
 		},
 		{
 			name: "i32x4.add operand",
-			body: []byte{
+			body: append(vecInst([]byte{
 				OpcodeVecPrefix,
 				OpcodeVecV128Const,
 				1, 1, 1, 1, 1, 1, 1, 1,
 				1, 1, 1, 1, 1, 1, 1, 1,
-				OpcodeVecPrefix,
-				OpcodeVecI32x4Add,
-				OpcodeDrop,
-				OpcodeEnd,
-			},
+			}, OpcodeVecI32x4Add), OpcodeDrop, OpcodeEnd),
 			flag:        api.CoreFeatureSIMD,
 			expectedErr: "cannot pop the operand for i32x4.add: v128 missing",
 		},
 		{
 			name: "i64x2.add operand",
-			body: []byte{
+			body: append(vecInst([]byte{
 				OpcodeVecPrefix,
 				OpcodeVecV128Const,
 				1, 1, 1, 1, 1, 1, 1, 1,
 				1, 1, 1, 1, 1, 1, 1, 1,
-				OpcodeVecPrefix,
-				OpcodeVecI64x2Add,
-				OpcodeDrop,
-				OpcodeEnd,
-			},
+			}, OpcodeVecI64x2Add), OpcodeDrop, OpcodeEnd),
 			flag:        api.CoreFeatureSIMD,
 			expectedErr: "cannot pop the operand for i64x2.add: v128 missing",
 		},
@@ -3285,11 +3273,9 @@ func TestModule_funcValidation_SIMD_error(t *testing.T) {
 	addExtractOrReplaceLaneOutOfIndexCase := func(op OpcodeVec, lane, laneCeil byte) {
 		n := VectorInstructionName(op)
 		tests = append(tests, testCase{
-			name: n + "/lane index out of range",
-			flag: api.CoreFeatureSIMD,
-			body: []byte{
-				OpcodeVecPrefix, op, lane,
-			},
+			name:        n + "/lane index out of range",
+			flag:        api.CoreFeatureSIMD,
+			body:        append(vecInst(nil, op), lane),
 			expectedErr: fmt.Sprintf("invalid lane index %d >= %d for %s", lane, laneCeil, n),
 		})
 	}
@@ -3314,11 +3300,10 @@ func TestModule_funcValidation_SIMD_error(t *testing.T) {
 		tests = append(tests, testCase{
 			name: n + "/lane index out of range",
 			flag: api.CoreFeatureSIMD,
-			body: []byte{
-				OpcodeVecPrefix, op,
+			body: append(vecInst(nil, op),
 				0, 0, // align and offset.
 				lane,
-			},
+			),
 			expectedErr: fmt.Sprintf("invalid lane index %d >= %d for %s", lane, laneCeil, n),
 		})
 	}

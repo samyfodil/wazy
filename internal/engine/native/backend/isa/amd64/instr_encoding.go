@@ -1,7 +1,9 @@
 package amd64
 
 import (
+	"encoding/binary"
 	"fmt"
+	"math"
 
 	"github.com/samyfodil/wazy/internal/engine/native/backend"
 	"github.com/samyfodil/wazy/internal/engine/native/backend/regalloc"
@@ -999,7 +1001,21 @@ func (i *instruction) encode(c backend.Compiler) (needsLabelResolution bool) {
 		dst := regEncodings[i.op1.reg().RealReg()]
 		encodeRegMem(c, legPrefix, opcode, opcodeNum, dst, i.op2.addressMode(), rexInfo(0).clearW())
 	case xmmLoadConst:
-		panic("TODO")
+		// A pooled 128-bit constant is reached through an ordinary memory
+		// operand (in practice a RIP-relative reference to the pool machine.Encode
+		// appends after the function body), so this is byte for byte the memory
+		// form of xmmUnaryRmR: MOVUPS xmm1, m128 is `0F 10 /r`, MOVAPS is
+		// `0F 28 /r` and MOVDQU is `F3 0F 6F /r` (Intel SDM Vol.2B).
+		//
+		// Rewriting the instruction in place, the way `zeros` does below, is not
+		// only shorter: it also makes the RIP-relative displacement resolvable,
+		// because machine.Encode dispatches the pending fixups on the kind of the
+		// instruction that requested them and it knows xmmUnaryRmR.
+		if i.op1.kind != operandKindMem {
+			panic("BUG: xmmLoadConst must address the constant through memory")
+		}
+		needsLabelResolution = i.asXmmUnaryRmR(sseOpcode(i.u1), i.op1, i.op2.reg()).encode(c)
+
 	case xmmToGpr:
 		var legPrefix legacyPrefixes
 		var opcode uint32
@@ -1036,13 +1052,300 @@ func (i *instruction) encode(c backend.Compiler) (needsLabelResolution bool) {
 		encodeRegReg(c, legPrefix, opcode, opcodeNum, src, dst, rex)
 
 	case cvtUint64ToFloatSeq:
-		panic("TODO")
+		src, dst, tmpGp, tmpGp2, dst64 := i.cvtUint64ToFloatSeqData()
+
+		var cvtOp, addOp sseOpcode
+		if dst64 {
+			cvtOp, addOp = sseOpcodeCvtsi2sd, sseOpcodeAddsd
+		} else {
+			cvtOp, addOp = sseOpcodeCvtsi2ss, sseOpcodeAddss
+		}
+
+		// cvtsi2s{s,d} reads its source as *signed*, so only the values whose
+		// sign bit is clear convert directly. For the others we convert half the
+		// value and double the result, keeping the discarded low bit sticky
+		// (`(v>>1)|(v&1)`) so that the single rounding step still rounds the way
+		// it would have on the full value. This is the sequence
+		// machine.lowerFcvtFromUint emits for a 64-bit source.
+		//
+		//	testq %src, %src
+		//	js    negative
+		//	cvtsi2s{s,d}q %src, %dst
+		//	jmp   done
+		// negative:
+		//	movq  %src, %tmpGp
+		//	shrq  $1, %tmpGp
+		//	movq  %src, %tmpGp2
+		//	andq  $1, %tmpGp2
+		//	orq   %tmpGp2, %tmpGp
+		//	cvtsi2s{s,d}q %tmpGp, %dst
+		//	add{ss,sd} %dst, %dst
+		// done:
+		newScratchInstr().asCmpRmiR(false, newOperandReg(src), src, true).encode(c)
+		toNegative := emitJccRel32(c, condS)
+		newScratchInstr().asGprToXmm(cvtOp, newOperandReg(src), dst, true).encode(c)
+		toDone := emitJmpRel32(c)
+
+		bindRel32(c, toNegative)
+		newScratchInstr().asMovRR(src, tmpGp, true).encode(c)
+		newScratchInstr().asShiftR(shiftROpShiftRightLogical, newOperandImm32(1), tmpGp, true).encode(c)
+		newScratchInstr().asMovRR(src, tmpGp2, true).encode(c)
+		newScratchInstr().asAluRmiR(aluRmiROpcodeAnd, newOperandImm32(1), tmpGp2, true).encode(c)
+		newScratchInstr().asAluRmiR(aluRmiROpcodeOr, newOperandReg(tmpGp2), tmpGp, true).encode(c)
+		newScratchInstr().asGprToXmm(cvtOp, newOperandReg(tmpGp), dst, true).encode(c)
+		newScratchInstr().asXmmRmR(addOp, newOperandReg(dst), dst).encode(c)
+
+		bindRel32(c, toDone)
+
 	case cvtFloatToSintSeq:
-		panic("TODO")
+		execCtx, src, tmpGp, tmpGp2, tmpXmm, src64, dst64, sat := i.fcvtToSintSequenceData()
+
+		var cmpOp, truncOp sseOpcode
+		if src64 {
+			cmpOp, truncOp = sseOpcodeUcomisd, sseOpcodeCvttsd2si
+		} else {
+			cmpOp, truncOp = sseOpcodeUcomiss, sseOpcodeCvttss2si
+		}
+
+		// cvtts{s,d}2si returns the "integer indefinite" value (INT_MIN) for
+		// every input it cannot represent: NaN, out of range in either
+		// direction. The sequence below re-examines the source to tell those
+		// apart, and either saturates or traps. It is the same sequence
+		// machine.lowerFcvtToSintSequenceAfterRegalloc emits.
+		var toDone []int
+
+		newScratchInstr().asXmmToGpr(truncOp, src, tmpGp, dst64).encode(c)
+
+		// INT_MIN is the only result for which `cmp $1, %dst` overflows, so OF
+		// clear means the conversion was exact.
+		newScratchInstr().asCmpRmiR(true, newOperandImm32(1), tmpGp, dst64).encode(c)
+		toDone = append(toDone, emitJccRel32(c, condNO))
+
+		// Comparing the source with itself sets PF exactly when it is NaN.
+		newScratchInstr().asXmmCmpRmR(cmpOp, newOperandReg(src), src).encode(c)
+		toNotNaN := emitJccRel32(c, condNP)
+
+		if sat {
+			// NaN saturates to zero.
+			newScratchInstr().asZeros(tmpGp).encode(c)
+			toDone = append(toDone, emitJmpRel32(c))
+
+			bindRel32(c, toNotNaN)
+
+			// Not NaN: a source below zero underflowed and INT_MIN is already
+			// the right answer, anything else overflowed and saturates to
+			// INT_MAX.
+			newScratchInstr().asZeros(tmpXmm).encode(c)
+			newScratchInstr().asXmmCmpRmR(cmpOp, newOperandReg(tmpXmm), src).encode(c)
+			toDone = append(toDone, emitJccRel32(c, condB))
+
+			if dst64 {
+				emitIconst(c, tmpGp, math.MaxInt64, dst64)
+			} else {
+				emitIconst(c, tmpGp, math.MaxInt32, dst64)
+			}
+		} else {
+			// NaN traps.
+			emitExitWithCode(c, execCtx, nativeapi.ExitCodeInvalidConversionToInteger)
+
+			bindRel32(c, toNotNaN)
+
+			// Not NaN, so this is an overflow unless the source is exactly the
+			// minimum representable integer. The magic constants below are that
+			// minimum for int[32|64] expressed as a float[32|64].
+			condAboveThreshold := condNB
+			var minInt uint64
+			switch {
+			case src64 && dst64:
+				minInt = 0xc3e0000000000000
+			case src64 && !dst64:
+				condAboveThreshold = condNBE
+				minInt = 0xC1E0_0000_0020_0000
+			case !src64 && dst64:
+				minInt = 0xDF00_0000
+			case !src64 && !dst64:
+				minInt = 0xCF00_0000
+			}
+
+			newScratchInstr().asImm(tmpGp2, minInt, src64).encode(c)
+			newScratchInstr().asGprToXmm(sseOpcodeMovq, newOperandReg(tmpGp2), tmpXmm, src64).encode(c)
+			newScratchInstr().asXmmCmpRmR(cmpOp, newOperandReg(tmpXmm), src).encode(c)
+			toCheckPositive := emitJccRel32(c, condAboveThreshold)
+
+			emitExitWithCode(c, execCtx, nativeapi.ExitCodeIntegerOverflow)
+
+			bindRel32(c, toCheckPositive)
+
+			// The source is at or above the threshold: it is only in range if
+			// it is negative, i.e. if it is the minimum integer itself.
+			newScratchInstr().asXmmRmR(sseOpcodeXorpd, newOperandReg(tmpXmm), tmpXmm).encode(c)
+			newScratchInstr().asXmmCmpRmR(cmpOp, newOperandReg(src), tmpXmm).encode(c)
+			toDone = append(toDone, emitJccRel32(c, condNB))
+
+			emitExitWithCode(c, execCtx, nativeapi.ExitCodeIntegerOverflow)
+		}
+
+		for _, at := range toDone {
+			bindRel32(c, at)
+		}
+
 	case cvtFloatToUintSeq:
-		panic("TODO")
+		execCtx, src, tmpGp, tmpGp2, tmpXmm, tmpXmm2, src64, dst64, sat := i.fcvtToUintSequenceData()
+
+		var subOp, cmpOp, truncOp sseOpcode
+		if src64 {
+			subOp, cmpOp, truncOp = sseOpcodeSubsd, sseOpcodeUcomisd, sseOpcodeCvttsd2si
+		} else {
+			subOp, cmpOp, truncOp = sseOpcodeSubss, sseOpcodeUcomiss, sseOpcodeCvttss2si
+		}
+
+		// There is no unsigned truncation instruction, so the source is split at
+		// 2**(dstBits-1): below the threshold a plain signed truncation is
+		// already correct, above it we subtract the threshold, truncate, and add
+		// it back on the integer side. Same sequence as
+		// machine.lowerFcvtToUintSequenceAfterRegalloc.
+		var toDone []int
+
+		// tmpXmm = 2**(dstBits-1), expressed in the source float format.
+		switch {
+		case src64 && dst64:
+			newScratchInstr().asImm(tmpGp, 0x43e0000000000000, true).encode(c)
+			newScratchInstr().asGprToXmm(sseOpcodeMovq, newOperandReg(tmpGp), tmpXmm, true).encode(c)
+		case src64 && !dst64:
+			newScratchInstr().asImm(tmpGp, 0x41e0000000000000, true).encode(c)
+			newScratchInstr().asGprToXmm(sseOpcodeMovq, newOperandReg(tmpGp), tmpXmm, true).encode(c)
+		case !src64 && dst64:
+			newScratchInstr().asImm(tmpGp, 0x5f000000, false).encode(c)
+			newScratchInstr().asGprToXmm(sseOpcodeMovq, newOperandReg(tmpGp), tmpXmm, false).encode(c)
+		case !src64 && !dst64:
+			newScratchInstr().asImm(tmpGp, 0x4f000000, false).encode(c)
+			newScratchInstr().asGprToXmm(sseOpcodeMovq, newOperandReg(tmpGp), tmpXmm, false).encode(c)
+		}
+
+		newScratchInstr().asXmmCmpRmR(cmpOp, newOperandReg(tmpXmm), src).encode(c)
+		toAboveThreshold := emitJccRel32(c, condNB)
+		toNotNaN := emitJccRel32(c, condNP)
+
+		// Below the threshold and unordered, so the source is NaN.
+		if sat {
+			newScratchInstr().asZeros(tmpGp).encode(c)
+			toDone = append(toDone, emitJmpRel32(c))
+		} else {
+			emitExitWithCode(c, execCtx, nativeapi.ExitCodeInvalidConversionToInteger)
+		}
+
+		bindRel32(c, toNotNaN)
+
+		// Below the threshold and ordered: a signed truncation is exact, and a
+		// negative result means the source was below zero.
+		newScratchInstr().asXmmToGpr(truncOp, src, tmpGp, dst64).encode(c)
+		newScratchInstr().asCmpRmiR(true, newOperandImm32(0), tmpGp, dst64).encode(c)
+		toDone = append(toDone, emitJccRel32(c, condNL))
+
+		if sat {
+			// Underflow saturates to the minimum unsigned value, zero.
+			newScratchInstr().asZeros(tmpGp).encode(c)
+			toDone = append(toDone, emitJmpRel32(c))
+		} else {
+			emitExitWithCode(c, execCtx, nativeapi.ExitCodeIntegerOverflow)
+		}
+
+		bindRel32(c, toAboveThreshold)
+
+		// At or above the threshold: truncate (source - threshold) instead.
+		newScratchInstr().asXmmUnaryRmR(sseOpcodeMovdqu, newOperandReg(src), tmpXmm2).encode(c)
+		newScratchInstr().asXmmRmR(subOp, newOperandReg(tmpXmm), tmpXmm2).encode(c)
+		newScratchInstr().asXmmToGpr(truncOp, tmpXmm2, tmpGp, dst64).encode(c)
+		newScratchInstr().asCmpRmiR(true, newOperandImm32(0), tmpGp, dst64).encode(c)
+		toNextLarge := emitJccRel32(c, condNL)
+
+		if sat {
+			// The shifted value still did not fit, so the source was above the
+			// maximum: saturate to it.
+			var maxInt uint64
+			if dst64 {
+				maxInt = math.MaxUint64
+			} else {
+				maxInt = math.MaxUint32
+			}
+			emitIconst(c, tmpGp, maxInt, dst64)
+			toDone = append(toDone, emitJmpRel32(c))
+		} else {
+			emitExitWithCode(c, execCtx, nativeapi.ExitCodeIntegerOverflow)
+		}
+
+		bindRel32(c, toNextLarge)
+
+		// Add the threshold back on, which wraps into the unsigned top half.
+		var addend operand
+		if dst64 {
+			emitIconst(c, tmpGp2, 0x8000000000000000, true)
+			addend = newOperandReg(tmpGp2)
+		} else {
+			addend = newOperandImm32(0x80000000)
+		}
+		newScratchInstr().asAluRmiR(aluRmiROpcodeAdd, addend, tmpGp, dst64).encode(c)
+
+		for _, at := range toDone {
+			bindRel32(c, at)
+		}
+
 	case xmmMinMaxSeq:
-		panic("TODO")
+		isMin, _64 := i.u1 != 0, i.b1
+		lhs, rhsDst := i.op1.reg(), i.op2.reg()
+
+		var cmpOp, minMaxOp, signOp, addOp sseOpcode
+		switch {
+		case _64 && isMin:
+			cmpOp, minMaxOp, signOp, addOp = sseOpcodeUcomisd, sseOpcodeMinsd, sseOpcodeOrpd, sseOpcodeAddsd
+		case _64 && !isMin:
+			cmpOp, minMaxOp, signOp, addOp = sseOpcodeUcomisd, sseOpcodeMaxsd, sseOpcodeAndpd, sseOpcodeAddsd
+		case !_64 && isMin:
+			cmpOp, minMaxOp, signOp, addOp = sseOpcodeUcomiss, sseOpcodeMinss, sseOpcodeOrps, sseOpcodeAddss
+		case !_64 && !isMin:
+			cmpOp, minMaxOp, signOp, addOp = sseOpcodeUcomiss, sseOpcodeMaxss, sseOpcodeAndps, sseOpcodeAddss
+		}
+
+		// mins{s,d}/maxs{s,d} return the second operand whenever the two are
+		// unordered or both zero, which is neither the IEEE nor the WebAssembly
+		// answer. ucomis{s,d} separates the three cases (see
+		// https://www.felixcloutier.com/x86/ucomiss#operation): ZF clear means
+		// ordered and different, ZF and PF set means unordered, ZF set with PF
+		// clear means equal. Same shape as machine.lowerFminFmax.
+		//
+		//	ucomis{s,d} %lhs, %rhsDst
+		//	jnz  doMinMax
+		//	jp   isNaN
+		//	{or,and}p{s,d} %lhs, %rhsDst
+		//	jmp  done
+		// isNaN:
+		//	add{ss,sd} %lhs, %rhsDst
+		//	jmp  done
+		// doMinMax:
+		//	{min,max}s{s,d} %lhs, %rhsDst
+		// done:
+		newScratchInstr().asXmmCmpRmR(cmpOp, newOperandReg(lhs), rhsDst).encode(c)
+		toDoMinMax := emitJccRel32(c, condNZ)
+		toIsNaN := emitJccRel32(c, condP)
+
+		// Equal: the operands can still be +0 and -0, and ORing the sign bits
+		// gives -0 for min while ANDing them gives +0 for max.
+		newScratchInstr().asXmmRmR(signOp, newOperandReg(lhs), rhsDst).encode(c)
+		toDoneFromEqual := emitJmpRel32(c)
+
+		// Unordered: adding the operands quiets whichever one is the NaN and
+		// propagates it.
+		bindRel32(c, toIsNaN)
+		newScratchInstr().asXmmRmR(addOp, newOperandReg(lhs), rhsDst).encode(c)
+		toDoneFromNaN := emitJmpRel32(c)
+
+		// Ordered and different: the hardware instruction is exact.
+		bindRel32(c, toDoMinMax)
+		newScratchInstr().asXmmRmR(minMaxOp, newOperandReg(lhs), rhsDst).encode(c)
+
+		bindRel32(c, toDoneFromEqual)
+		bindRel32(c, toDoneFromNaN)
+
 	case xmmCmpRmR:
 		var prefix legacyPrefixes
 		var opcode uint32
@@ -1312,12 +1615,20 @@ func (i *instruction) encode(c backend.Compiler) (needsLabelResolution bool) {
 			rex = rexInfo(0).clearW()
 		case 1:
 			opcode = 0x86
-			if i.op2.kind == operandKindReg {
-				panic("TODO?: xchg on two 1-byte registers")
-			}
-			// Some destinations must be encoded with REX.R = 1.
+			// XCHG r/m8, r8 is `86 /r` (Intel SDM Vol.2B, XCHG). A byte
+			// operand numbered 4 to 7 names AH/CH/DH/BH when no REX prefix is
+			// present and SPL/BPL/SIL/DIL when one is, so a REX prefix has to
+			// be forced for either operand that lands in that range: the
+			// ModRM.reg operand (src) and, for the register-register form, the
+			// ModRM.rm operand (dst) as well. `xchgb %sil, %dil` is 40 86 F7;
+			// the same bytes without the prefix, 86 F7, swap %dh and %bh.
 			if e := src.encoding(); e >= 4 && e <= 7 {
 				rex = rexInfo(0).always()
+			}
+			if dst.kind == operandKindReg {
+				if e := regEncodings[dst.reg().RealReg()].encoding(); e >= 4 && e <= 7 {
+					rex = rexInfo(0).always()
+				}
 			}
 		default:
 			panic(fmt.Sprintf("BUG: invalid size %d: %s", size, i.String()))
@@ -1728,4 +2039,102 @@ func lower32willSignExtendTo64(x uint64) bool {
 func lower8willSignExtendTo32(x uint32) bool {
 	xs := int32(x)
 	return xs == ((xs << 24) >> 24)
+}
+
+// newScratchInstr returns a zeroed instruction to build the pieces of a
+// pseudo-instruction expansion at encoding time. machine.allocateInstr always
+// hands out a reset instruction (see resetInstruction), so the asXxx
+// constructors are allowed to leave the fields they do not set alone, and a
+// fresh one per piece is what keeps that assumption true here too.
+func newScratchInstr() *instruction {
+	return &instruction{}
+}
+
+// emitJmpRel32 emits `jmp rel32`, which is `E9 cd` (Intel SDM Vol.2A, JMP),
+// with a placeholder displacement to be filled in by bindRel32. The returned
+// offset is the one just past the displacement, which is both where bindRel32
+// writes and what the displacement is relative to, since RIP points at the
+// following instruction.
+func emitJmpRel32(c backend.Compiler) int {
+	newScratchInstr().asJmp(newOperandImm32(0)).encode(c)
+	return len(c.Buf())
+}
+
+// emitJccRel32 emits `jcc rel32`, which is `0F 80+cc cd` (Intel SDM Vol.2A,
+// Jcc), with a placeholder displacement to be filled in by bindRel32. See
+// emitJmpRel32 for the returned offset.
+func emitJccRel32(c backend.Compiler, cc cond) int {
+	newScratchInstr().asJmpIf(cc, newOperandImm32(0)).encode(c)
+	return len(c.Buf())
+}
+
+// bindRel32 patches the placeholder displacement recorded by emitJmpRel32 or
+// emitJccRel32 so that the branch lands on the current end of the buffer.
+func bindRel32(c backend.Compiler, at int) {
+	buf := c.Buf()
+	binary.LittleEndian.PutUint32(buf[at-4:], uint32(int32(len(buf)-at)))
+}
+
+// emitIconst materializes v in the integer register dst, mirroring
+// machine.lowerIconst: zero is cheaper to produce with a xor than with a mov.
+func emitIconst(c backend.Compiler, dst regalloc.VReg, v uint64, _64 bool) {
+	if v == 0 {
+		newScratchInstr().asZeros(dst).encode(c)
+		return
+	}
+	newScratchInstr().asImm(dst, v, _64).encode(c)
+}
+
+// emitExitWithCode emits the machine code of machine.lowerExitWithCode: it
+// records the stack pointer, frame pointer and exit code in the execution
+// context, saves the address of the trapping site so the Go side can unwind,
+// and then leaves through the exit sequence. Control never comes back, so
+// whatever is emitted next is only reachable by a branch around this.
+//
+// The amode is a plain local because encodeRegMem takes it as a real pointer.
+// It must not be handed to newOperandMem, which launders the pointer through a
+// uintptr and so needs the pooled, heap-allocated amodes machine.amodePool
+// keeps alive.
+func emitExitWithCode(c backend.Compiler, execCtx regalloc.VReg, code nativeapi.ExitCode) {
+	am := amode{kindWithShift: uint32(amodeImmReg), base: execCtx}
+
+	// Save the stack and frame pointers the Go side has to return to. Both are
+	// `MOV r/m64, r64`, that is `REX.W + 89 /r` (Intel SDM Vol.2B, MOV), the
+	// same encoding movRM uses for its 8-byte case.
+	am.imm32 = nativeapi.ExecutionContextOffsetStackPointerBeforeGoCall.U32()
+	encodeRegMem(c, legacyPrefixesNone, 0x89, 1, regEncodings[rsp], &am, rexInfo(0).setW())
+	am.imm32 = nativeapi.ExecutionContextOffsetFramePointerBeforeGoCall.U32()
+	encodeRegMem(c, legacyPrefixesNone, 0x89, 1, regEncodings[rbp], &am, rexInfo(0).setW())
+
+	// RBP has been saved, so it is free to carry the exit code. The store is
+	// 4-byte, `MOV r/m32, r32` = `89 /r`.
+	newScratchInstr().asImm(rbpVReg, uint64(code), false).encode(c)
+	am.imm32 = nativeapi.ExecutionContextOffsetExitCodeOffset.U32()
+	encodeRegMem(c, legacyPrefixesNone, 0x89, 1, regEncodings[rbp], &am, rexInfo(0).clearW())
+
+	// Save the address of this site for stack unwinding. `lea disp32(%rip), %rbp`
+	// is `REX.W + 8D /r` (Intel SDM Vol.2A, LEA) with ModRM.mod=00 and
+	// ModRM.rm=101, the RIP+disp32 form in 64-bit mode. RBP needs no REX.R, so
+	// the instruction is exactly 7 bytes (REX + opcode + ModRM + disp32) and a
+	// displacement of -7 names its own first byte. That is the very address
+	// machine.lowerExitWithCode records, since it puts the label immediately
+	// before the LEA.
+	const leaSize = 7
+	rbpEnc := regEncodings[rbp]
+	rexInfo(0).setW().encode(c, regRexBit(byte(rbpEnc)), 0)
+	c.EmitByte(0x8d)
+	c.EmitByte(encodeModRM(0b00, rbpEnc.encoding(), 0b101))
+	selfDisp := int32(-leaSize)
+	c.Emit4Bytes(uint32(selfDisp))
+
+	am.imm32 = nativeapi.ExecutionContextOffsetGoCallReturnAddress.U32()
+	encodeRegMem(c, legacyPrefixesNone, 0x89, 1, regEncodings[rbp], &am, rexInfo(0).setW())
+
+	// Restore RBP and RSP from the execution context and return to the Go
+	// world, exactly as the exitSequence case above does.
+	am.imm32 = nativeapi.ExecutionContextOffsetOriginalFramePointer.U32()
+	encodeLoad64(c, &am, rbp)
+	am.imm32 = nativeapi.ExecutionContextOffsetOriginalStackPointer.U32()
+	encodeLoad64(c, &am, rsp)
+	encodeRet(c)
 }

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/samyfodil/wazy/internal/engine/native/backend"
 	"github.com/samyfodil/wazy/internal/engine/native/backend/regalloc"
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
 	"github.com/samyfodil/wazy/internal/engine/native/ssa"
@@ -218,6 +219,8 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		m.lowerBitwiseAluOp(instr, aluOpOrr, false)
 	case ssa.OpcodeBxor:
 		m.lowerBitwiseAluOp(instr, aluOpEor, false)
+	case ssa.OpcodeBnot:
+		m.lowerBitwiseNot(instr)
 	case ssa.OpcodeIshl:
 		m.lowerShifts(instr, extModeNone, aluOpLsl)
 	case ssa.OpcodeSshr:
@@ -320,11 +323,20 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		retVal := instr.Return()
 		rd := m.compiler.VRegOf(retVal)
 
-		if retVal.Type() != ssa.TypeI32 {
-			panic("TODO?: Ireduce to non-i32")
-		}
 		mov := m.allocateInstr()
-		mov.asMove32(rd, rn.reg())
+		switch retVal.Type() {
+		case ssa.TypeI32:
+			// The truncation is the write itself: mov32 is ORR Wd, WZR, Wn, and a write to
+			// a W register zeroes bits [63:32] of the X register.
+			mov.asMove32(rd, rn.reg())
+		case ssa.TypeI64:
+			// i64 is the widest integer in this IR, so a reduce to it keeps every bit:
+			// mov64 is ORR Xd, XZR, Xn.
+			mov.asMove64(rd, rn.reg())
+		default:
+			// Ireduce is defined on integers, and ssa.TypeI32/I64 are the only ones.
+			panic("BUG: Ireduce to " + retVal.Type().String())
+		}
 		m.insert(mov)
 	case ssa.OpcodeFneg:
 		m.lowerFpuUniOp(fpuUniOpNeg, instr.Arg(), instr.Return())
@@ -1373,8 +1385,28 @@ func (m *machine) lowerBitcast(instr *ssa.Instruction) {
 		}
 		mov.asMovFromVec(rd, rn, arr, vecIndex(0), false)
 		m.insert(mov)
-	default:
-		panic("TODO?BUG?")
+	case srcInt && dstInt: // Int to Int:
+		// Both ends live in a general register, so reinterpreting the bits is a copy of
+		// the destination width: mov32 is ORR Wd, WZR, Wn (which zeroes bits [63:32],
+		// exactly what a 32-bit value is) and mov64 is ORR Xd, XZR, Xn.
+		mov := m.allocateInstr()
+		if dstType.Bits() == 64 {
+			mov.asMove64(rd, rn.nr())
+		} else {
+			mov.asMove32(rd, rn.nr())
+		}
+		m.insert(mov)
+	default: // Float to Float, or vector to vector:
+		// Both ends live in a vector register, so this is a copy as well: MOV Vd.16B,
+		// Vn.16B (ORR (vector, register) with Q=1) for the full 128 bits, or MOV Vd.8B,
+		// Vn.8B (Q=0, which zeroes the upper half) for anything that fits in 64 bits.
+		mov := m.allocateInstr()
+		if dstType.Bits() == 128 {
+			mov.asFpuMov128(rd, rn.nr())
+		} else {
+			mov.asFpuMov64(rd, rn.nr())
+		}
+		m.insert(mov)
 	}
 }
 
@@ -1508,7 +1540,15 @@ func (m *machine) InsertMove(dst, src regalloc.VReg, typ ssa.Type) {
 	case ssa.TypeV128:
 		instr.asFpuMov128(dst, src)
 	default:
-		panic("TODO")
+		// typ only picks the register class and the width to copy, and every ssa.Type
+		// other than the ones above is handled by the register class alone. Copy the
+		// whole register: ORR Xd, XZR, Xn for a general register, MOV Vd.16B, Vn.16B
+		// for a vector one. Copying more bits than the value needs is harmless.
+		if src.RegType() == regalloc.RegTypeInt {
+			instr.asMove64(dst, src)
+		} else {
+			instr.asFpuMov128(dst, src)
+		}
 	}
 	m.insert(instr)
 }
@@ -1708,6 +1748,26 @@ func (m *machine) lowerBitwiseAluOp(si *ssa.Instruction, op aluOp, ignoreResult 
 
 	rm := m.getOperand_SR_NR(yDef, extModeNone)
 	alu.asALU(op, rd, rn, rm, _64)
+	m.insert(alu)
+}
+
+// lowerBitwiseNot lowers `rd = ^rn` for OpcodeBnot.
+func (m *machine) lowerBitwiseNot(si *ssa.Instruction) {
+	x := si.Arg()
+	if !x.Type().IsInt() {
+		// Bnot is the scalar not; the vector one is OpcodeVbnot, which is lowered to
+		// `not vd.16b, vn.16b` and never reaches here.
+		panic("BUG: Bnot on " + x.Type().String())
+	}
+	// Plain register form only: encodeAluRRRShift does not implement aluOpOrn, so the
+	// shifted register operand that getOperand_SR_NR could fold in has nowhere to go.
+	rn := m.getOperand_NR(m.compiler.ValueDefinition(x), extModeNone)
+	rd := m.compiler.VRegOf(si.Return())
+
+	// orn rd, xzr, rn, which is the MVN alias: "Logical (shifted register)" with
+	// opc=01 and N=1 computes Rn OR NOT(shifted Rm), and 0 OR NOT(rn) is ^rn.
+	alu := m.allocateInstr()
+	alu.asALU(aluOpOrn, rd, operandNR(xzrVReg), rn, x.Type().Bits() == 64)
 	m.insert(alu)
 }
 
@@ -1931,18 +1991,31 @@ func (m *machine) lowerExitWithCode(execCtxVReg regalloc.VReg, code nativeapi.Ex
 }
 
 func (m *machine) lowerIcmpToFlag(x, y ssa.Value, signed bool) {
-	if x.Type() != y.Type() {
-		panic(
-			fmt.Sprintf("TODO(maybe): support icmp with different types: v%d=%s != v%d=%s",
-				x.ID(), x.Type(), y.ID(), y.Type()))
+	// subs has a 32 and a 64 bit form only, so the comparison happens at the width of
+	// the wider operand, and the narrower one is extended into it by the operand helpers
+	// below, from extMod. The extension follows `signed`, which is what makes comparing
+	// the two registers mean comparing the two values: sxtw for a signed condition and
+	// uxtw for an unsigned one.
+	cmpType := x.Type()
+	if y.Type().Bits() > cmpType.Bits() {
+		cmpType = y.Type()
 	}
 
-	extMod := extModeOf(x.Type(), signed)
+	extMod := extModeOf(cmpType, signed)
 
 	// First operand must be in pure register form.
 	rn := m.getOperand_NR(m.compiler.ValueDefinition(x), extMod)
-	// Second operand can be in any of Imm12, ER, SR, or NR form supported by the SUBS instructions.
-	rm := m.getOperand_Imm12_ER_SR_NR(m.compiler.ValueDefinition(y), extMod)
+	yDef := m.compiler.ValueDefinition(y)
+	var rm operand
+	if y.Type().Bits() == cmpType.Bits() {
+		// Second operand can be in any of Imm12, ER, SR, or NR form supported by the SUBS instructions.
+		rm = m.getOperand_Imm12_ER_SR_NR(yDef, extMod)
+	} else {
+		// y is the narrower operand, so it has to be extended into the comparison width,
+		// and the shifted register form does not do that: getOperand_SR_NR folds a shift
+		// without looking at the mode. Pure register form does, via sxtw/uxtw.
+		rm = m.getOperand_NR(yDef, extMod)
+	}
 
 	alu := m.allocateInstr()
 	// subs zr, rn, rm
@@ -1952,37 +2025,83 @@ func (m *machine) lowerIcmpToFlag(x, y ssa.Value, signed bool) {
 		xzrVReg,
 		rn,
 		rm,
-		x.Type().Bits() == 64,
+		cmpType.Bits() == 64,
 	)
 	m.insert(alu)
 }
 
 func (m *machine) lowerFcmpToFlag(x, y ssa.Value) {
-	if x.Type() != y.Type() {
-		panic("TODO(maybe): support icmp with different types")
-	}
-
 	rn := m.getOperand_NR(m.compiler.ValueDefinition(x), extModeNone)
 	rm := m.getOperand_NR(m.compiler.ValueDefinition(y), extModeNone)
+
+	// fcmp only compares two registers of the same precision (C7.2.51 has an Sn, Sm and
+	// a Dn, Dm form and nothing mixed), so the single precision side of a mixed compare
+	// is promoted first with fcvt. f32 -> f64 is exact, so promoting does not change
+	// which of the two values is the greater one, nor whether they are equal.
+	switch {
+	case x.Type() == y.Type():
+	case x.Type() == ssa.TypeF32 && y.Type() == ssa.TypeF64:
+		rn = operandNR(m.promoteToF64(rn))
+	case x.Type() == ssa.TypeF64 && y.Type() == ssa.TypeF32:
+		rm = operandNR(m.promoteToF64(rm))
+	default:
+		// fcmp is defined on floats, and ssa.TypeF32/F64 are the only ones. Vectors are
+		// compared by OpcodeVFcmp, which does not come here.
+		panic(fmt.Sprintf("BUG: fcmp on non-float types: v%d=%s, v%d=%s",
+			x.ID(), x.Type(), y.ID(), y.Type()))
+	}
+
 	cmp := m.allocateInstr()
-	cmp.asFpuCmp(rn, rm, x.Type().Bits() == 64)
+	cmp.asFpuCmp(rn, rm, x.Type() == ssa.TypeF64 || y.Type() == ssa.TypeF64)
 	m.insert(cmp)
+}
+
+// promoteToF64 emits `fcvt d(ret), s(rn)` and returns the register holding the
+// promoted value. See OpcodeFpromote, which lowers to the same instruction.
+func (m *machine) promoteToF64(rn operand) regalloc.VReg {
+	ret := m.compiler.AllocateVReg(ssa.TypeF64)
+	cvt := m.allocateInstr()
+	cvt.asFpuRR(fpuUniOpCvt32To64, ret, rn, true)
+	m.insert(cvt)
+	return ret
+}
+
+// lowerTrapCond returns the condition under which a conditional trap is taken,
+// setting the flags first when the condition is a comparison it can fold.
+//
+// The comparison feeding the trap is folded whenever it is still foldable,
+// which is the shape the frontend emits. It is not always: any pass that moves
+// the comparison into another block, or a second use of it, leaves a condition
+// already materialized as a 0-or-1 value, and cbnz tests that directly.
+func (m *machine) lowerTrapCond(condDef backend.SSAValueDefinition) cond {
+	if !m.compiler.MatchInstr(condDef, ssa.OpcodeIcmp) {
+		rn := m.getOperand_NR(condDef, extModeNone)
+		return registerAsRegNotZeroCond(rn.nr())
+	}
+	condDef.Instr.MarkLowered()
+	x, y, c := condDef.Instr.IcmpData()
+	if !m.tryLowerBandToFlag(x, y) {
+		m.lowerIcmpToFlag(x, y, c.Signed())
+	}
+	return condFlagFromSSAIntegerCmpCond(c).asCond()
+}
+
+// invertTrapCond returns the condition under which the trap is NOT taken, used
+// to branch over an inlined exit sequence.
+func invertTrapCond(c cond) cond {
+	switch c.kind() {
+	case condKindRegisterZero:
+		return registerAsRegNotZeroCond(c.register())
+	case condKindRegisterNotZero:
+		return registerAsRegZeroCond(c.register())
+	default:
+		return c.flag().invert().asCond()
+	}
 }
 
 func (m *machine) lowerExitIfTrueWithCode(execCtxVReg regalloc.VReg, cond ssa.Value, code nativeapi.ExitCode) {
 	condDef := m.compiler.ValueDefinition(cond)
-	if !m.compiler.MatchInstr(condDef, ssa.OpcodeIcmp) {
-		panic("TODO: OpcodeExitIfTrueWithCode must come after Icmp at the moment: " + condDef.Instr.Opcode().String())
-	}
-	condDef.Instr.MarkLowered()
-
-	cvalInstr := condDef.Instr
-	x, y, c := cvalInstr.IcmpData()
-	signed := c.Signed()
-
-	if !m.tryLowerBandToFlag(x, y) {
-		m.lowerIcmpToFlag(x, y, signed)
-	}
+	trapCond := m.lowerTrapCond(condDef)
 
 	// We need to copy the execution context to a temp register, because if it's spilled,
 	// it might end up being reloaded inside the exiting branch.
@@ -1994,7 +2113,7 @@ func (m *machine) lowerExitIfTrueWithCode(execCtxVReg regalloc.VReg, cond ssa.Va
 	m.lowerExitWithCode(execCtxTmp, code)
 	// conditional branch target is after exit.
 	l := m.insertBrTargetLabel()
-	cbr.asCondBr(condFlagFromSSAIntegerCmpCond(c).invert().asCond(), l, false /* ignored */)
+	cbr.asCondBr(invertTrapCond(trapCond), l, false /* ignored */)
 }
 
 // lowerExitIfTrueWithCodeShared lowers a conditional trap by branching to a
@@ -2004,18 +2123,7 @@ func (m *machine) lowerExitIfTrueWithCode(execCtxVReg regalloc.VReg, cond ssa.Va
 // island is materialized once, after register allocation, by emitTrapIslands.
 func (m *machine) lowerExitIfTrueWithCodeShared(execCtxVReg regalloc.VReg, cond ssa.Value, code nativeapi.ExitCode) {
 	condDef := m.compiler.ValueDefinition(cond)
-	if !m.compiler.MatchInstr(condDef, ssa.OpcodeIcmp) {
-		panic("TODO: OpcodeExitIfTrueWithCode must come after Icmp at the moment: " + condDef.Instr.Opcode().String())
-	}
-	condDef.Instr.MarkLowered()
-
-	cvalInstr := condDef.Instr
-	x, y, c := cvalInstr.IcmpData()
-	signed := c.Signed()
-
-	if !m.tryLowerBandToFlag(x, y) {
-		m.lowerIcmpToFlag(x, y, signed)
-	}
+	trapCond := m.lowerTrapCond(condDef)
 
 	// The island runs after register allocation, so it needs the execution
 	// context in a fixed register: the reserved tmp register, which is never
@@ -2025,7 +2133,7 @@ func (m *machine) lowerExitIfTrueWithCodeShared(execCtxVReg regalloc.VReg, cond 
 	m.insert(mov)
 
 	cbr := m.allocateInstr()
-	cbr.asCondBr(condFlagFromSSAIntegerCmpCond(c).asCond(), m.getOrCreateTrapIsland(code), false /* ignored */)
+	cbr.asCondBr(trapCond, m.getOrCreateTrapIsland(code), false /* ignored */)
 	m.insert(cbr)
 }
 
@@ -2048,20 +2156,59 @@ func (m *machine) lowerSelect(c, x, y, result ssa.Value) {
 		cvalDef.Instr.MarkLowered()
 	default:
 		rn := m.getOperand_NR(cvalDef, extModeNone)
-		if c.Type() != ssa.TypeI32 && c.Type() != ssa.TypeI64 {
-			panic("TODO?BUG?: support select with non-integer condition")
+		switch ct := c.Type(); ct {
+		case ssa.TypeI32, ssa.TypeI64:
+			alu := m.allocateInstr()
+			// subs zr, rn, zr
+			alu.asALU(
+				aluOpSubS,
+				// We don't need the result, just need to set flags.
+				xzrVReg,
+				rn,
+				operandNR(xzrVReg),
+				ct.Bits() == 64,
+			)
+			m.insert(alu)
+		case ssa.TypeF32, ssa.TypeF64:
+			// The condition holds when it is not zero, the same test as above, but the
+			// value is a float in a vector register now. fcmp takes two registers, so the
+			// zero to compare against is materialized first with INS Vd.D[0], XZR, which
+			// zeroes the low 64 bits, covering both the S and the D view of the temporary.
+			//	ins tmp.d[0], xzr
+			//	fcmp s/d(rn), s/d(tmp)
+			// A NaN condition compares unordered, which leaves Z clear, so it counts as
+			// non-zero and selects x, and -0.0 compares equal to zero and selects y.
+			tmp := m.compiler.AllocateVReg(ssa.TypeF64)
+			zero := m.allocateInstr()
+			zero.asMovToVec(tmp, operandNR(xzrVReg), vecArrangementD, vecIndex(0))
+			m.insert(zero)
+
+			cmp := m.allocateInstr()
+			cmp.asFpuCmp(rn, operandNR(tmp), ct.Bits() == 64)
+			m.insert(cmp)
+		case ssa.TypeV128:
+			// The condition holds when any of its 128 bits is set. umaxp of the vector
+			// with itself folds the 16 bytes pairwise into the low 8, so d[0] is zero if
+			// and only if the whole vector is (this is how VanyTrue is lowered as well).
+			//	umaxp tmp.16b, rn.16b, rn.16b
+			//	mov tmpI, tmp.d[0]
+			//	subs xzr, tmpI, xzr
+			tmp := m.compiler.AllocateVReg(ssa.TypeV128)
+			umaxp := m.allocateInstr()
+			umaxp.asVecRRR(vecOpUmaxp, tmp, rn, rn, vecArrangement16B)
+			m.insert(umaxp)
+
+			tmpI := m.compiler.AllocateVReg(ssa.TypeI64)
+			mov := m.allocateInstr()
+			mov.asMovFromVec(tmpI, operandNR(tmp), vecArrangementD, vecIndex(0), false)
+			m.insert(mov)
+
+			alu := m.allocateInstr()
+			alu.asALU(aluOpSubS, xzrVReg, operandNR(tmpI), operandNR(xzrVReg), true)
+			m.insert(alu)
+		default:
+			panic("BUG: select with a condition of type " + ct.String())
 		}
-		alu := m.allocateInstr()
-		// subs zr, rn, zr
-		alu.asALU(
-			aluOpSubS,
-			// We don't need the result, just need to set flags.
-			xzrVReg,
-			rn,
-			operandNR(xzrVReg),
-			c.Type().Bits() == 64,
-		)
-		m.insert(alu)
 		cc = ne
 	}
 
