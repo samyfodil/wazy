@@ -324,15 +324,17 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			if err != nil {
 				return fmt.Errorf("read immediate: %v", err)
 			}
-			if memoryIndex != 0 {
-				if err := enabledFeatures.RequireEnabled(api.CoreFeatureMultiMemory); err != nil {
-					return fmt.Errorf("memory index must be zero but was %d: %w", memoryIndex, err)
+			if multiMemoryErr := enabledFeatures.RequireEnabled(api.CoreFeatureMultiMemory); multiMemoryErr != nil {
+				if memoryIndex != 0 {
+					return fmt.Errorf("memory index must be zero but was %d: %w", memoryIndex, multiMemoryErr)
+				}
+				if num != 1 {
+					return fmt.Errorf("%s reserved byte must be zero encoded with 1 byte", InstructionName(op))
 				}
 			}
 			if memoryIndex >= uint32(len(memories)) {
 				return fmt.Errorf("memory %d is out of range for %s", memoryIndex, InstructionName(op))
 			}
-			pc += uint64(num) - 1
 			switch Opcode(op) {
 			case OpcodeMemoryGrow:
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
@@ -1308,9 +1310,12 @@ func (m *Module) validateFunctionWithMaxStackValues(
 					if err != nil {
 						return fmt.Errorf("failed to read memory index for %s: %v", MiscInstructionName(miscOpcode), err)
 					}
-					if memoryIndex != 0 {
-						if err := enabledFeatures.RequireEnabled(api.CoreFeatureMultiMemory); err != nil {
-							return fmt.Errorf("memory index must be zero for %s as %v", MiscInstructionName(miscOpcode), err)
+					if multiMemoryErr := enabledFeatures.RequireEnabled(api.CoreFeatureMultiMemory); multiMemoryErr != nil {
+						if memoryIndex != 0 {
+							return fmt.Errorf("memory index must be zero for %s as %v", MiscInstructionName(miscOpcode), multiMemoryErr)
+						}
+						if num != 1 {
+							return fmt.Errorf("%s reserved byte must be zero encoded with 1 byte", MiscInstructionName(miscOpcode))
 						}
 					}
 					if memoryIndex >= uint32(len(memories)) {
@@ -1324,9 +1329,12 @@ func (m *Module) validateFunctionWithMaxStackValues(
 						if err != nil {
 							return fmt.Errorf("failed to read memory index for %s: %v", MiscInstructionName(miscOpcode), err)
 						}
-						if srcMemoryIndex != 0 {
-							if err := enabledFeatures.RequireEnabled(api.CoreFeatureMultiMemory); err != nil {
-								return fmt.Errorf("memory index must be zero for %s as %v", MiscInstructionName(miscOpcode), err)
+						if multiMemoryErr := enabledFeatures.RequireEnabled(api.CoreFeatureMultiMemory); multiMemoryErr != nil {
+							if srcMemoryIndex != 0 {
+								return fmt.Errorf("memory index must be zero for %s as %v", MiscInstructionName(miscOpcode), multiMemoryErr)
+							}
+							if num != 1 {
+								return fmt.Errorf("%s reserved byte must be zero encoded with 1 byte", MiscInstructionName(miscOpcode))
 							}
 						}
 						if srcMemoryIndex >= uint32(len(memories)) {
