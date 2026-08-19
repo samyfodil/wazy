@@ -1152,30 +1152,15 @@ func (c *Compiler) lowerCurrentOpcode() {
 			break
 		}
 
-		// Deliberately bypasses getMemoryLenValue's cached i64 variable: this
-		// is an uncached, uncoupled-from-the-load/store-bounds-check-caching
-		// read, one instruction cheaper for the (overwhelmingly common)
-		// sub-4GiB case. The byte length itself, not just the resulting page
-		// count, must be loaded as a full 64-bit value: a 65536-page (the
-		// legal maximum) memory has a byte length of exactly 2^32, which a
-		// 32-bit load truncates to zero.
-		opaqueOffset := c.offset.MemoryOffset(int(memIndex))
-		var memSizeInBytes ssa.Value
-		if memIndex < c.m.ImportMemoryCount {
-			memInstPtr := builder.AllocateInstruction().
-				AsLoad(c.moduleCtxPtrValue, opaqueOffset.U32(), ssa.TypeI64).
-				Insert(builder).
-				Return()
-			memSizeInBytes = builder.AllocateInstruction().
-				AsLoad(memInstPtr, memoryInstanceSizeOffset, ssa.TypeI64).
-				Insert(builder).
-				Return()
-		} else {
-			memSizeInBytes = builder.AllocateInstruction().
-				AsLoad(c.moduleCtxPtrValue, (opaqueOffset + 8).U32(), ssa.TypeI64).
-				Insert(builder).
-				Return()
-		}
+		// The byte length itself, not just the resulting page count, must be
+		// read as a full 64-bit value: a 65536-page (the legal maximum)
+		// memory has a byte length of exactly 2^32, which a 32-bit load
+		// truncates to zero. getMemoryLenValue already reads a full i64 (and,
+		// for a shared memory, an atomic one -- required since another
+		// thread can concurrently grow it); using it here (rather than a
+		// hand-rolled duplicate load) also lets it and any load/store bounds
+		// check on the same memory in this linear path share one read.
+		memSizeInBytes := c.getMemoryLenValue(memIndex, false)
 
 		amount := builder.AllocateInstruction().AsIconst64(uint64(wasm.MemoryPageSizeInBits)).Insert(builder).Return()
 		memSize64 := builder.AllocateInstruction().
@@ -1207,8 +1192,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 			// another imported index at runtime (this module is compiled once
 			// and reused across instantiations with different import
 			// bindings, so the compiler cannot know the import graph).
-			// Conservatively reload everything, as after any other host call.
-			c.reloadAfterCall()
+			// Conservatively reload every memory (globals can't be affected
+			// by a memory grow, so reloadAfterCall's extra global reload
+			// isn't needed here).
+			c.reloadAllMemories()
 		}
 
 	case wasm.OpcodeI32Store,
@@ -4729,20 +4716,26 @@ func (c *Compiler) reloadAfterCall() {
 	// Note that when these are not used in the following instructions, they will be optimized out.
 	// So in any ways, we define them!
 
-	// After calling any function, memory buffers might have changed. So we need to re-define the variables.
-	// However, if a memory is shared, we don't need to reload its base and length as the base will never change.
-	// (c.memoryShared is empty when the module has no memory, so this is a no-op in that case.)
+	// After calling any function, memory buffers might have changed.
+	c.reloadAllMemories()
+
+	// Also, any mutable Global can change.
+	for _, index := range c.mutableGlobalVariablesIndexes {
+		_ = c.getWasmGlobalValue(index, true)
+	}
+}
+
+// reloadAllMemories re-defines the cached base/length of every non-shared
+// memory. If a memory is shared, we don't need to reload its base and length
+// as the base will never change. (c.memoryShared is empty when the module has
+// no memory, so this is a no-op in that case.)
+func (c *Compiler) reloadAllMemories() {
 	if c.needMemory {
 		for i := range c.memoryShared {
 			if !c.memoryShared[i] {
 				c.reloadMemoryBaseLen(wasm.Index(i))
 			}
 		}
-	}
-
-	// Also, any mutable Global can change.
-	for _, index := range c.mutableGlobalVariablesIndexes {
-		_ = c.getWasmGlobalValue(index, true)
 	}
 }
 

@@ -1251,6 +1251,88 @@ func TestE2E_reexported_memory(t *testing.T) {
 	require.Equal(t, uint32(11), mem.Size()/65536)
 }
 
+// TestE2E_memoryGrowAliasedImportedIndices guards against a stale cached
+// base-pointer bug: a module compiles once and is reused across
+// instantiations with potentially different import bindings, so the native
+// frontend cannot know at compile time whether two of its own imported
+// memory indices will resolve to the same underlying *wasm.MemoryInstance.
+// Here m4 imports the same m1 "mem" export twice, under two different
+// memory indices. Everything happens in ONE function (a compiled function's
+// base-pointer cache is per-function, reset fresh at every call -- splitting
+// the touch/grow/access across separate exported functions would never
+// exercise the bug, since each call starts uncached regardless of the fix).
+// The function first touches index 1 (establishing/caching its base
+// pointer), then grows via index 0, which forces a real reallocation (m1's
+// memory has no reserved capacity beyond its 1-page minimum) of the SAME
+// underlying instance both indices alias. It then accesses index 1 again, at
+// an address only valid after the growth: if index 1's cached base wasn't
+// also invalidated by the grow, this reads/writes through a stale pointer
+// into the (potentially already-reclaimed) old backing array instead of the
+// new one.
+func TestE2E_memoryGrowAliasedImportedIndices(t *testing.T) {
+	m1 := &wasm.Module{
+		ExportSection: []wasm.Export{{Name: "mem", Type: wasm.ExternTypeMemory, Index: 0}},
+		MemorySection: []wasm.Memory{{Min: 1}},
+		NameSection:   &wasm.NameSection{ModuleName: "m1"},
+	}
+
+	const addr = 70000 // beyond m1's original 1-page (65536-byte) capacity
+	addrEnc := leb128.EncodeInt32(addr)
+
+	var body []byte
+	// Step 1: touch memory index 1 at a known-in-bounds address, to force its
+	// base pointer to be loaded and cached.
+	body = append(body, wasm.OpcodeI32Const, 0)
+	body = append(body, wasm.OpcodeI32Load8U, 0x40, 0x01, 0x00) // mem index 1, extended memarg form
+	body = append(body, wasm.OpcodeDrop)
+	// Step 2: grow memory index 0 by 10 pages -- reallocates the instance
+	// both indices alias.
+	body = append(body, wasm.OpcodeI32Const, 0x0a)
+	body = append(body, wasm.OpcodeMemoryGrow, 0x00)
+	body = append(body, wasm.OpcodeDrop)
+	// Step 3: write 42 via index 0 at an address only valid post-growth.
+	body = append(body, wasm.OpcodeI32Const)
+	body = append(body, addrEnc...)
+	body = append(body, wasm.OpcodeI32Const, 42)
+	body = append(body, wasm.OpcodeI32Store8, 0x00, 0x00) // mem index 0, plain form
+	// Step 4: read the same address back via index 1. Correct: sees 42
+	// (index 1's cache was invalidated by the grow too). Buggy: reads
+	// through the stale, cached-in-step-1 base -- wrong value, or a trap if
+	// its cached length is also stale and now (wrongly) rejects the access.
+	body = append(body, wasm.OpcodeI32Const)
+	body = append(body, addrEnc...)
+	body = append(body, wasm.OpcodeI32Load8U, 0x40, 0x01, 0x00)
+	body = append(body, wasm.OpcodeEnd)
+
+	m4 := &wasm.Module{
+		ImportMemoryCount: 2,
+		ImportSection: []wasm.Import{
+			{Module: "m1", Name: "mem", Type: wasm.ExternTypeMemory, DescMem: &wasm.Memory{Min: 1}},
+			{Module: "m1", Name: "mem", Type: wasm.ExternTypeMemory, DescMem: &wasm.Memory{Min: 1}},
+		},
+		TypeSection:     []wasm.FunctionType{{Results: []wasm.ValueType{i32}}},
+		FunctionSection: []wasm.Index{0},
+		ExportSection:   []wasm.Export{{Name: "run", Type: wasm.ExternTypeFunc, Index: 0}},
+		CodeSection:     []wasm.Code{{Body: body}},
+	}
+
+	ctx := context.Background()
+	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler().WithCoreFeatures(api.CoreFeaturesV2|api.CoreFeatureMultiMemory))
+	defer func() {
+		require.NoError(t, r.Close(ctx))
+	}()
+
+	_, err := r.Instantiate(ctx, binaryencoding.EncodeModule(m1))
+	require.NoError(t, err)
+
+	m4Inst, err := r.Instantiate(ctx, binaryencoding.EncodeModule(m4))
+	require.NoError(t, err)
+
+	results, err := m4Inst.ExportedFunction("run").Call(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(42), results[0])
+}
+
 func TestE2E_memoryGrowWithinReservedCapacity(t *testing.T) {
 	ctx := context.Background()
 	r := wazy.NewRuntimeWithConfig(ctx,
