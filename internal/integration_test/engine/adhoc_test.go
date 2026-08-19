@@ -943,7 +943,7 @@ func testMultipleInstantiation(t *testing.T, r wazy.Runtime) {
 	bin := binaryencoding.EncodeModule(&wasm.Module{
 		TypeSection:     []wasm.FunctionType{{}},
 		FunctionSection: []wasm.Index{0},
-		MemorySection:   &wasm.Memory{Min: 1, Cap: 1, Max: 1, IsMaxEncoded: true},
+		MemorySection:   []wasm.Memory{{Min: 1, Cap: 1, Max: 1, IsMaxEncoded: true}},
 		CodeSection: []wasm.Code{{
 			Body: []byte{
 				wasm.OpcodeI32Const, 1, // i32.const 1    ;; memory offset
@@ -1077,7 +1077,7 @@ func testMemoryGrowInRecursiveCall(t *testing.T, r wazy.Runtime) {
 				Body: []byte{wasm.OpcodeI32Const, 1, wasm.OpcodeMemoryGrow, 0, wasm.OpcodeDrop, wasm.OpcodeEnd},
 			},
 		},
-		MemorySection:   &wasm.Memory{Max: 1000},
+		MemorySection:   []wasm.Memory{{Max: 1000}},
 		ImportSection:   []wasm.Import{{Module: hostModuleName, Name: hostFnName, DescFunc: 0}},
 		ImportPerModule: map[string][]*wasm.Import{hostModuleName: {{Module: hostModuleName, Name: hostFnName, DescFunc: 0}}},
 		ExportSection: []wasm.Export{
@@ -1251,7 +1251,7 @@ func testModuleMemory(t *testing.T, r wazy.Runtime) {
 	bin := binaryencoding.EncodeModule(&wasm.Module{
 		TypeSection:     []wasm.FunctionType{{Params: []wasm.ValueType{wasm.ValueTypeI32}, ParamNumInUint64: 1}, {}},
 		FunctionSection: []wasm.Index{0, 1},
-		MemorySection:   &wasm.Memory{Min: 1, Cap: 1, Max: 20},
+		MemorySection:   []wasm.Memory{{Min: 1, Cap: 1, Max: 20}},
 		DataSection: []wasm.DataSegment{
 			{
 				Passive: true,

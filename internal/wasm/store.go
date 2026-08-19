@@ -75,12 +75,12 @@ type (
 	ModuleInstance struct {
 		internalapi.WazyOnlyType
 
-		ModuleName     string
-		Exports        map[string]*Export
-		Globals        []*GlobalInstance
-		MemoryInstance *MemoryInstance
-		Tables         []*TableInstance
-		Tags           []*TagInstance
+		ModuleName string
+		Exports    map[string]*Export
+		Globals    []*GlobalInstance
+		Memories   []*MemoryInstance
+		Tables     []*TableInstance
+		Tags       []*TagInstance
 
 		// Engine implements function calls for this module.
 		Engine ModuleEngine
@@ -135,6 +135,9 @@ type (
 	//
 	// https://www.w3.org/TR/2022/WD-wasm-core-2-20220419/exec/runtime.html#data-instances
 	DataInstance = []byte
+)
+
+type (
 
 	// GlobalInstance represents a global instance in a store.
 	// See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#global-instances%E2%91%A0
@@ -264,9 +267,12 @@ func (m *ModuleInstance) validateData(data []DataSegment) (err error) {
 			if typ != ValueTypeI32 {
 				return fmt.Errorf("%s[%d] offset expression must return i32 but was %s", SectionIDName(SectionIDData), i, ValueTypeName(typ))
 			}
+			if d.MemoryIndex >= uint32(len(m.Memories)) {
+				return fmt.Errorf("%s[%d]: unknown memory %d", SectionIDName(SectionIDData), i, d.MemoryIndex)
+			}
 			offset := int(results[0])
 			ceil := offset + len(d.Init)
-			if offset < 0 || ceil > len(m.MemoryInstance.Buffer) {
+			if offset < 0 || ceil > len(m.Memories[d.MemoryIndex].Buffer) {
 				return fmt.Errorf("%s[%d]: out of bounds memory access", SectionIDName(SectionIDData), i)
 			}
 		}
@@ -284,11 +290,15 @@ func (m *ModuleInstance) applyData(data []DataSegment) error {
 		m.DataInstances[i] = d.Init
 		if !d.IsPassive() {
 			offsetExprResults := evaluateConstExprInModuleInstance(&d.OffsetExpression, m)
+			if d.MemoryIndex >= uint32(len(m.Memories)) {
+				return fmt.Errorf("%s[%d]: unknown memory %d", SectionIDName(SectionIDData), i, d.MemoryIndex)
+			}
 			offset := int(offsetExprResults[0])
-			if offset < 0 || offset+len(d.Init) > len(m.MemoryInstance.Buffer) {
+			mem := m.Memories[d.MemoryIndex]
+			if offset < 0 || offset+len(d.Init) > len(mem.Buffer) {
 				return fmt.Errorf("%s[%d]: out of bounds memory access", SectionIDName(SectionIDData), i)
 			}
-			copy(m.MemoryInstance.Buffer[offset:], d.Init)
+			copy(mem.Buffer[offset:], d.Init)
 		}
 	}
 	return nil
@@ -356,6 +366,7 @@ func (s *Store) instantiate(
 	m = &ModuleInstance{ModuleName: name, TypeIDs: typeIDs, Sys: sysCtx, s: s, Source: module}
 
 	m.Tables = make([]*TableInstance, int(module.ImportTableCount)+len(module.TableSection))
+	m.Memories = make([]*MemoryInstance, int(module.ImportMemoryCount)+len(module.MemorySection))
 	m.Globals = make([]*GlobalInstance, int(module.ImportGlobalCount)+len(module.GlobalSection))
 	m.Tags = make([]*TagInstance, int(module.ImportTagCount)+len(module.TagSection))
 	m.Engine, err = s.Engine.NewModuleEngine(module, m)
@@ -516,7 +527,7 @@ func (m *ModuleInstance) resolveImports(ctx context.Context, module *Module) (er
 				importedTable.involvingModuleInstancesMutex.Unlock()
 			case ExternTypeMemory:
 				expected := i.DescMem
-				importedMemory := importedModule.MemoryInstance
+				importedMemory := importedModule.Memories[imported.Index]
 
 				if expected.Min > importedMemory.Pages() {
 					err = errorMinSizeMismatch(i, expected.Min, importedMemory.Min)
@@ -552,8 +563,8 @@ func (m *ModuleInstance) resolveImports(ctx context.Context, module *Module) (er
 					return
 				}
 
-				m.MemoryInstance = importedMemory
-				m.Engine.ResolveImportedMemory(importedModule.Engine)
+				m.Memories[i.IndexPerType] = importedMemory
+				m.Engine.ResolveImportedMemory(i.IndexPerType, imported.Index, importedModule.Engine)
 			case ExternTypeGlobal:
 				expected := i.DescGlobal
 				importedGlobal := importedModule.Globals[imported.Index]

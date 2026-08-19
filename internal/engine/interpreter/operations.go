@@ -1700,6 +1700,10 @@ type memoryArg struct {
 	// Offset is the address offset added to the instruction's dynamic address operand, yielding a 33-bit effective
 	// address that is the zero-based index at which the memory is accessed. Default to zero.
 	Offset uint32
+
+	// MemoryIndex is the index, into the module's memories, that this instruction accesses. Default to zero.
+	// Only nonzero when api.CoreFeatureMultiMemory is enabled.
+	MemoryIndex uint32
 }
 
 // NewOperationLoad is a constructor for unionOperation with operationKindLoad.
@@ -1709,7 +1713,7 @@ type memoryArg struct {
 // The engines are expected to check the boundary of memory length, and exit the execution if this exceeds the boundary,
 // otherwise load the corresponding value following the semantics of the corresponding WebAssembly instruction.
 func newOperationLoad(unsignedType unsignedType, arg memoryArg) unionOperation {
-	return unionOperation{Kind: operationKindLoad, B1: byte(unsignedType), U1: uint64(arg.Alignment), U2: uint64(arg.Offset)}
+	return unionOperation{Kind: operationKindLoad, B1: byte(unsignedType), U1: uint64(arg.Alignment), U2: uint64(arg.Offset), U3: uint64(arg.MemoryIndex)}
 }
 
 // NewOperationLoad8 is a constructor for unionOperation with operationKindLoad8.
@@ -1719,7 +1723,7 @@ func newOperationLoad(unsignedType unsignedType, arg memoryArg) unionOperation {
 // The engines are expected to check the boundary of memory length, and exit the execution if this exceeds the boundary,
 // otherwise load the corresponding value following the semantics of the corresponding WebAssembly instruction.
 func newOperationLoad8(signedInt signedInt, arg memoryArg) unionOperation {
-	return unionOperation{Kind: operationKindLoad8, B1: byte(signedInt), U1: uint64(arg.Alignment), U2: uint64(arg.Offset)}
+	return unionOperation{Kind: operationKindLoad8, B1: byte(signedInt), U1: uint64(arg.Alignment), U2: uint64(arg.Offset), U3: uint64(arg.MemoryIndex)}
 }
 
 // NewOperationLoad16 is a constructor for unionOperation with operationKindLoad16.
@@ -1729,7 +1733,7 @@ func newOperationLoad8(signedInt signedInt, arg memoryArg) unionOperation {
 // The engines are expected to check the boundary of memory length, and exit the execution if this exceeds the boundary,
 // otherwise load the corresponding value following the semantics of the corresponding WebAssembly instruction.
 func newOperationLoad16(signedInt signedInt, arg memoryArg) unionOperation {
-	return unionOperation{Kind: operationKindLoad16, B1: byte(signedInt), U1: uint64(arg.Alignment), U2: uint64(arg.Offset)}
+	return unionOperation{Kind: operationKindLoad16, B1: byte(signedInt), U1: uint64(arg.Alignment), U2: uint64(arg.Offset), U3: uint64(arg.MemoryIndex)}
 }
 
 // NewOperationLoad32 is a constructor for unionOperation with operationKindLoad32.
@@ -1743,7 +1747,7 @@ func newOperationLoad32(signed bool, arg memoryArg) unionOperation {
 	if signed {
 		sigB = 1
 	}
-	return unionOperation{Kind: operationKindLoad32, B1: sigB, U1: uint64(arg.Alignment), U2: uint64(arg.Offset)}
+	return unionOperation{Kind: operationKindLoad32, B1: sigB, U1: uint64(arg.Alignment), U2: uint64(arg.Offset), U3: uint64(arg.MemoryIndex)}
 }
 
 // NewOperationStore is a constructor for unionOperation with operationKindStore.
@@ -1753,7 +1757,7 @@ func newOperationLoad32(signed bool, arg memoryArg) unionOperation {
 // The engines are expected to check the boundary of memory length, and exit the execution if this exceeds the boundary,
 // otherwise store the corresponding value following the semantics of the corresponding WebAssembly instruction.
 func newOperationStore(unsignedType unsignedType, arg memoryArg) unionOperation {
-	return unionOperation{Kind: operationKindStore, B1: byte(unsignedType), U1: uint64(arg.Alignment), U2: uint64(arg.Offset)}
+	return unionOperation{Kind: operationKindStore, B1: byte(unsignedType), U1: uint64(arg.Alignment), U2: uint64(arg.Offset), U3: uint64(arg.MemoryIndex)}
 }
 
 // NewOperationStore8 is a constructor for unionOperation with operationKindStore8.
@@ -1763,7 +1767,7 @@ func newOperationStore(unsignedType unsignedType, arg memoryArg) unionOperation 
 // The engines are expected to check the boundary of memory length, and exit the execution if this exceeds the boundary,
 // otherwise store the corresponding value following the semantics of the corresponding WebAssembly instruction.
 func newOperationStore8(arg memoryArg) unionOperation {
-	return unionOperation{Kind: operationKindStore8, U1: uint64(arg.Alignment), U2: uint64(arg.Offset)}
+	return unionOperation{Kind: operationKindStore8, U1: uint64(arg.Alignment), U2: uint64(arg.Offset), U3: uint64(arg.MemoryIndex)}
 }
 
 // NewOperationStore16 is a constructor for unionOperation with operationKindStore16.
@@ -1773,7 +1777,7 @@ func newOperationStore8(arg memoryArg) unionOperation {
 // The engines are expected to check the boundary of memory length, and exit the execution if this exceeds the boundary,
 // otherwise store the corresponding value following the semantics of the corresponding WebAssembly instruction.
 func newOperationStore16(arg memoryArg) unionOperation {
-	return unionOperation{Kind: operationKindStore16, U1: uint64(arg.Alignment), U2: uint64(arg.Offset)}
+	return unionOperation{Kind: operationKindStore16, U1: uint64(arg.Alignment), U2: uint64(arg.Offset), U3: uint64(arg.MemoryIndex)}
 }
 
 // NewOperationStore32 is a constructor for unionOperation with operationKindStore32.
@@ -1783,7 +1787,7 @@ func newOperationStore16(arg memoryArg) unionOperation {
 // The engines are expected to check the boundary of memory length, and exit the execution if this exceeds the boundary,
 // otherwise store the corresponding value following the semantics of the corresponding WebAssembly instruction.
 func newOperationStore32(arg memoryArg) unionOperation {
-	return unionOperation{Kind: operationKindStore32, U1: uint64(arg.Alignment), U2: uint64(arg.Offset)}
+	return unionOperation{Kind: operationKindStore32, U1: uint64(arg.Alignment), U2: uint64(arg.Offset), U3: uint64(arg.MemoryIndex)}
 }
 
 // NewOperationMemorySize is a constructor for unionOperation with operationKindMemorySize.
@@ -1791,8 +1795,8 @@ func newOperationStore32(arg memoryArg) unionOperation {
 // This corresponds to wasm.OpcodeMemorySize.
 //
 // The engines are expected to push the current page size of the memory onto the stack.
-func newOperationMemorySize() unionOperation {
-	return unionOperation{Kind: operationKindMemorySize}
+func newOperationMemorySize(memoryIndex uint32) unionOperation {
+	return unionOperation{Kind: operationKindMemorySize, U1: uint64(memoryIndex)}
 }
 
 // NewOperationMemoryGrow is a constructor for unionOperation with operationKindMemoryGrow.
@@ -1802,8 +1806,8 @@ func newOperationMemorySize() unionOperation {
 // The engines are expected to pop one value from the top of the stack, then
 // execute wasm.MemoryInstance Grow with the value, and push the previous
 // page size of the memory onto the stack.
-func newOperationMemoryGrow() unionOperation {
-	return unionOperation{Kind: operationKindMemoryGrow}
+func newOperationMemoryGrow(memoryIndex uint32) unionOperation {
+	return unionOperation{Kind: operationKindMemoryGrow, U1: uint64(memoryIndex)}
 }
 
 // NewOperationConstI32 is a constructor for unionOperation with OperationConstI32.
@@ -2286,8 +2290,9 @@ func newOperationSignExtend64From32() unionOperation {
 //
 // dataIndex is the index of the data instance in ModuleInstance.DataInstances
 // by which this operation instantiates a part of the memory.
-func newOperationMemoryInit(dataIndex uint32) unionOperation {
-	return unionOperation{Kind: operationKindMemoryInit, U1: uint64(dataIndex)}
+// memoryIndex is the index of the memory this operation initializes.
+func newOperationMemoryInit(dataIndex, memoryIndex uint32) unionOperation {
+	return unionOperation{Kind: operationKindMemoryInit, U1: uint64(dataIndex), U2: uint64(memoryIndex)}
 }
 
 // NewOperationDataDrop implements Operation.
@@ -2303,13 +2308,13 @@ func newOperationDataDrop(dataIndex uint32) unionOperation {
 // NewOperationMemoryCopy is a consuctor for unionOperation with operationKindMemoryCopy.
 //
 // This corresponds to wasm.OpcodeMemoryCopyName.
-func newOperationMemoryCopy() unionOperation {
-	return unionOperation{Kind: operationKindMemoryCopy}
+func newOperationMemoryCopy(dstMemoryIndex, srcMemoryIndex uint32) unionOperation {
+	return unionOperation{Kind: operationKindMemoryCopy, U1: uint64(dstMemoryIndex), U2: uint64(srcMemoryIndex)}
 }
 
 // NewOperationMemoryFill is a consuctor for unionOperation with operationKindMemoryFill.
-func newOperationMemoryFill() unionOperation {
-	return unionOperation{Kind: operationKindMemoryFill}
+func newOperationMemoryFill(memoryIndex uint32) unionOperation {
+	return unionOperation{Kind: operationKindMemoryFill, U1: uint64(memoryIndex)}
 }
 
 // NewOperationTableInit is a constructor for unionOperation with operationKindTableInit.
@@ -2480,7 +2485,7 @@ const (
 //	wasm.OpcodeVecV128Load32SplatName wasm.OpcodeVecV128Load64SplatName wasm.OpcodeVecV128Load32zeroName
 //	wasm.OpcodeVecV128Load64zeroName
 func newOperationV128Load(loadType v128LoadType, arg memoryArg) unionOperation {
-	return unionOperation{Kind: operationKindV128Load, B1: loadType, U1: uint64(arg.Alignment), U2: uint64(arg.Offset)}
+	return unionOperation{Kind: operationKindV128Load, B1: loadType, U1: uint64(arg.Alignment), U2: uint64(arg.Offset), U3: uint64(arg.MemoryIndex)}
 }
 
 // NewOperationV128LoadLane is a constructor for unionOperation with operationKindV128LoadLane.
@@ -2492,7 +2497,7 @@ func newOperationV128Load(loadType v128LoadType, arg memoryArg) unionOperation {
 // laneIndex is >=0 && <(128/LaneSize).
 // laneSize is either 8, 16, 32, or 64.
 func newOperationV128LoadLane(laneIndex, laneSize byte, arg memoryArg) unionOperation {
-	return unionOperation{Kind: operationKindV128LoadLane, B1: laneSize, B2: laneIndex, U1: uint64(arg.Alignment), U2: uint64(arg.Offset)}
+	return unionOperation{Kind: operationKindV128LoadLane, B1: laneSize, B2: laneIndex, U1: uint64(arg.Alignment), U2: uint64(arg.Offset), U3: uint64(arg.MemoryIndex)}
 }
 
 // NewOperationV128Store is a constructor for unionOperation with operationKindV128Store.
@@ -2505,6 +2510,7 @@ func newOperationV128Store(arg memoryArg) unionOperation {
 		Kind: operationKindV128Store,
 		U1:   uint64(arg.Alignment),
 		U2:   uint64(arg.Offset),
+		U3:   uint64(arg.MemoryIndex),
 	}
 }
 
@@ -2523,6 +2529,7 @@ func newOperationV128StoreLane(laneIndex byte, laneSize byte, arg memoryArg) uni
 		B2:   laneIndex,
 		U1:   uint64(arg.Alignment),
 		U2:   uint64(arg.Offset),
+		U3:   uint64(arg.MemoryIndex),
 	}
 }
 
@@ -3119,7 +3126,7 @@ const (
 //
 //	wasm.OpcodeAtomicWait32Name wasm.OpcodeAtomicWait64Name
 func newOperationAtomicMemoryWait(unsignedType unsignedType, arg memoryArg) unionOperation {
-	return unionOperation{Kind: operationKindAtomicMemoryWait, B1: byte(unsignedType), U1: uint64(arg.Alignment), U2: uint64(arg.Offset)}
+	return unionOperation{Kind: operationKindAtomicMemoryWait, B1: byte(unsignedType), U1: uint64(arg.Alignment), U2: uint64(arg.Offset), U3: uint64(arg.MemoryIndex)}
 }
 
 // NewOperationAtomicMemoryNotify is a constructor for unionOperation with operationKindAtomicMemoryNotify.
@@ -3128,7 +3135,7 @@ func newOperationAtomicMemoryWait(unsignedType unsignedType, arg memoryArg) unio
 //
 //	wasm.OpcodeAtomicNotifyName
 func newOperationAtomicMemoryNotify(arg memoryArg) unionOperation {
-	return unionOperation{Kind: operationKindAtomicMemoryNotify, U1: uint64(arg.Alignment), U2: uint64(arg.Offset)}
+	return unionOperation{Kind: operationKindAtomicMemoryNotify, U1: uint64(arg.Alignment), U2: uint64(arg.Offset), U3: uint64(arg.MemoryIndex)}
 }
 
 // NewOperationAtomicFence is a constructor for unionOperation with operationKindAtomicFence.
@@ -3146,7 +3153,7 @@ func newOperationAtomicFence() unionOperation {
 //
 //	wasm.OpcodeAtomicI32LoadName wasm.OpcodeAtomicI64LoadName
 func newOperationAtomicLoad(unsignedType unsignedType, arg memoryArg) unionOperation {
-	return unionOperation{Kind: operationKindAtomicLoad, B1: byte(unsignedType), U1: uint64(arg.Alignment), U2: uint64(arg.Offset)}
+	return unionOperation{Kind: operationKindAtomicLoad, B1: byte(unsignedType), U1: uint64(arg.Alignment), U2: uint64(arg.Offset), U3: uint64(arg.MemoryIndex)}
 }
 
 // NewOperationAtomicLoad8 is a constructor for unionOperation with operationKindAtomicLoad8.
@@ -3155,7 +3162,7 @@ func newOperationAtomicLoad(unsignedType unsignedType, arg memoryArg) unionOpera
 //
 //	wasm.OpcodeAtomicI32Load8UName wasm.OpcodeAtomicI64Load8UName
 func newOperationAtomicLoad8(unsignedType unsignedType, arg memoryArg) unionOperation {
-	return unionOperation{Kind: operationKindAtomicLoad8, B1: byte(unsignedType), U1: uint64(arg.Alignment), U2: uint64(arg.Offset)}
+	return unionOperation{Kind: operationKindAtomicLoad8, B1: byte(unsignedType), U1: uint64(arg.Alignment), U2: uint64(arg.Offset), U3: uint64(arg.MemoryIndex)}
 }
 
 // NewOperationAtomicLoad16 is a constructor for unionOperation with operationKindAtomicLoad16.
@@ -3164,7 +3171,7 @@ func newOperationAtomicLoad8(unsignedType unsignedType, arg memoryArg) unionOper
 //
 //	wasm.OpcodeAtomicI32Load16UName wasm.OpcodeAtomicI64Load16UName
 func newOperationAtomicLoad16(unsignedType unsignedType, arg memoryArg) unionOperation {
-	return unionOperation{Kind: operationKindAtomicLoad16, B1: byte(unsignedType), U1: uint64(arg.Alignment), U2: uint64(arg.Offset)}
+	return unionOperation{Kind: operationKindAtomicLoad16, B1: byte(unsignedType), U1: uint64(arg.Alignment), U2: uint64(arg.Offset), U3: uint64(arg.MemoryIndex)}
 }
 
 // NewOperationAtomicStore is a constructor for unionOperation with operationKindAtomicStore.
@@ -3173,7 +3180,7 @@ func newOperationAtomicLoad16(unsignedType unsignedType, arg memoryArg) unionOpe
 //
 //	wasm.OpcodeAtomicI32StoreName wasm.OpcodeAtomicI64StoreName
 func newOperationAtomicStore(unsignedType unsignedType, arg memoryArg) unionOperation {
-	return unionOperation{Kind: operationKindAtomicStore, B1: byte(unsignedType), U1: uint64(arg.Alignment), U2: uint64(arg.Offset)}
+	return unionOperation{Kind: operationKindAtomicStore, B1: byte(unsignedType), U1: uint64(arg.Alignment), U2: uint64(arg.Offset), U3: uint64(arg.MemoryIndex)}
 }
 
 // NewOperationAtomicStore8 is a constructor for unionOperation with operationKindAtomicStore8.
@@ -3182,7 +3189,7 @@ func newOperationAtomicStore(unsignedType unsignedType, arg memoryArg) unionOper
 //
 //	wasm.OpcodeAtomicI32Store8UName wasm.OpcodeAtomicI64Store8UName
 func newOperationAtomicStore8(unsignedType unsignedType, arg memoryArg) unionOperation {
-	return unionOperation{Kind: operationKindAtomicStore8, B1: byte(unsignedType), U1: uint64(arg.Alignment), U2: uint64(arg.Offset)}
+	return unionOperation{Kind: operationKindAtomicStore8, B1: byte(unsignedType), U1: uint64(arg.Alignment), U2: uint64(arg.Offset), U3: uint64(arg.MemoryIndex)}
 }
 
 // NewOperationAtomicStore16 is a constructor for unionOperation with operationKindAtomicStore16.
@@ -3191,7 +3198,7 @@ func newOperationAtomicStore8(unsignedType unsignedType, arg memoryArg) unionOpe
 //
 //	wasm.OpcodeAtomicI32Store16UName wasm.OpcodeAtomicI64Store16UName
 func newOperationAtomicStore16(unsignedType unsignedType, arg memoryArg) unionOperation {
-	return unionOperation{Kind: operationKindAtomicStore16, B1: byte(unsignedType), U1: uint64(arg.Alignment), U2: uint64(arg.Offset)}
+	return unionOperation{Kind: operationKindAtomicStore16, B1: byte(unsignedType), U1: uint64(arg.Alignment), U2: uint64(arg.Offset), U3: uint64(arg.MemoryIndex)}
 }
 
 // NewOperationAtomicRMW is a constructor for unionOperation with operationKindAtomicRMW.
@@ -3204,7 +3211,7 @@ func newOperationAtomicStore16(unsignedType unsignedType, arg memoryArg) unionOp
 //	wasm.OpcodeAtomicI32RMWOrName wasm.OpcodeAtomicI64RmwOrName
 //	wasm.OpcodeAtomicI32RMWXorName wasm.OpcodeAtomicI64RmwXorName
 func newOperationAtomicRMW(unsignedType unsignedType, arg memoryArg, op atomicArithmeticOp) unionOperation {
-	return unionOperation{Kind: operationKindAtomicRMW, B1: byte(unsignedType), B2: byte(op), U1: uint64(arg.Alignment), U2: uint64(arg.Offset)}
+	return unionOperation{Kind: operationKindAtomicRMW, B1: byte(unsignedType), B2: byte(op), U1: uint64(arg.Alignment), U2: uint64(arg.Offset), U3: uint64(arg.MemoryIndex)}
 }
 
 // NewOperationAtomicRMW8 is a constructor for unionOperation with operationKindAtomicRMW8.
@@ -3217,7 +3224,7 @@ func newOperationAtomicRMW(unsignedType unsignedType, arg memoryArg, op atomicAr
 //	wasm.OpcodeAtomicI32RMW8OrUName wasm.OpcodeAtomicI64Rmw8OrUName
 //	wasm.OpcodeAtomicI32RMW8XorUName wasm.OpcodeAtomicI64Rmw8XorUName
 func newOperationAtomicRMW8(unsignedType unsignedType, arg memoryArg, op atomicArithmeticOp) unionOperation {
-	return unionOperation{Kind: operationKindAtomicRMW8, B1: byte(unsignedType), B2: byte(op), U1: uint64(arg.Alignment), U2: uint64(arg.Offset)}
+	return unionOperation{Kind: operationKindAtomicRMW8, B1: byte(unsignedType), B2: byte(op), U1: uint64(arg.Alignment), U2: uint64(arg.Offset), U3: uint64(arg.MemoryIndex)}
 }
 
 // NewOperationAtomicRMW16 is a constructor for unionOperation with operationKindAtomicRMW16.
@@ -3230,7 +3237,7 @@ func newOperationAtomicRMW8(unsignedType unsignedType, arg memoryArg, op atomicA
 //	wasm.OpcodeAtomicI32RMW16OrUName wasm.OpcodeAtomicI64Rmw16OrUName
 //	wasm.OpcodeAtomicI32RMW16XorUName wasm.OpcodeAtomicI64Rmw16XorUName
 func newOperationAtomicRMW16(unsignedType unsignedType, arg memoryArg, op atomicArithmeticOp) unionOperation {
-	return unionOperation{Kind: operationKindAtomicRMW16, B1: byte(unsignedType), B2: byte(op), U1: uint64(arg.Alignment), U2: uint64(arg.Offset)}
+	return unionOperation{Kind: operationKindAtomicRMW16, B1: byte(unsignedType), B2: byte(op), U1: uint64(arg.Alignment), U2: uint64(arg.Offset), U3: uint64(arg.MemoryIndex)}
 }
 
 // NewOperationAtomicRMWCmpxchg is a constructor for unionOperation with operationKindAtomicRMWCmpxchg.
@@ -3239,7 +3246,7 @@ func newOperationAtomicRMW16(unsignedType unsignedType, arg memoryArg, op atomic
 //
 //	wasm.OpcodeAtomicI32RMWCmpxchgName wasm.OpcodeAtomicI64RmwCmpxchgName
 func newOperationAtomicRMWCmpxchg(unsignedType unsignedType, arg memoryArg) unionOperation {
-	return unionOperation{Kind: operationKindAtomicRMWCmpxchg, B1: byte(unsignedType), U1: uint64(arg.Alignment), U2: uint64(arg.Offset)}
+	return unionOperation{Kind: operationKindAtomicRMWCmpxchg, B1: byte(unsignedType), U1: uint64(arg.Alignment), U2: uint64(arg.Offset), U3: uint64(arg.MemoryIndex)}
 }
 
 // NewOperationAtomicRMW8Cmpxchg is a constructor for unionOperation with operationKindAtomicRMW8Cmpxchg.
@@ -3248,7 +3255,7 @@ func newOperationAtomicRMWCmpxchg(unsignedType unsignedType, arg memoryArg) unio
 //
 //	wasm.OpcodeAtomicI32RMW8CmpxchgUName wasm.OpcodeAtomicI64Rmw8CmpxchgUName
 func newOperationAtomicRMW8Cmpxchg(unsignedType unsignedType, arg memoryArg) unionOperation {
-	return unionOperation{Kind: operationKindAtomicRMW8Cmpxchg, B1: byte(unsignedType), U1: uint64(arg.Alignment), U2: uint64(arg.Offset)}
+	return unionOperation{Kind: operationKindAtomicRMW8Cmpxchg, B1: byte(unsignedType), U1: uint64(arg.Alignment), U2: uint64(arg.Offset), U3: uint64(arg.MemoryIndex)}
 }
 
 // NewOperationAtomicRMW16Cmpxchg is a constructor for unionOperation with operationKindAtomicRMW16Cmpxchg.
@@ -3257,7 +3264,7 @@ func newOperationAtomicRMW8Cmpxchg(unsignedType unsignedType, arg memoryArg) uni
 //
 //	wasm.OpcodeAtomicI32RMW16CmpxchgUName wasm.OpcodeAtomicI64Rmw16CmpxchgUName
 func newOperationAtomicRMW16Cmpxchg(unsignedType unsignedType, arg memoryArg) unionOperation {
-	return unionOperation{Kind: operationKindAtomicRMW16Cmpxchg, B1: byte(unsignedType), U1: uint64(arg.Alignment), U2: uint64(arg.Offset)}
+	return unionOperation{Kind: operationKindAtomicRMW16Cmpxchg, B1: byte(unsignedType), U1: uint64(arg.Alignment), U2: uint64(arg.Offset), U3: uint64(arg.MemoryIndex)}
 }
 
 // newOperationTailCallReturnCall is a constructor for unionOperation with operationKindTailCallReturnCall.

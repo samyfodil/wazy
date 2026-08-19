@@ -11,6 +11,36 @@ import (
 	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
+func Test_readMemArg(t *testing.T) {
+	t.Run("plain form: memory index implicitly zero, feature irrelevant", func(t *testing.T) {
+		body := append(leb128.EncodeUint32(3), leb128.EncodeUint32(100)...) // align=3, offset=100
+		align, offset, memIdx, read, err := readMemArg(0, body, api.CoreFeaturesV1)
+		require.NoError(t, err)
+		require.Equal(t, uint32(3), align)
+		require.Equal(t, uint32(100), offset)
+		require.Equal(t, Index(0), memIdx)
+		require.Equal(t, uint64(len(body)), read)
+	})
+	t.Run("extended form: multi-memory enabled decodes the memory index", func(t *testing.T) {
+		rawAlign := uint32(2) | memArgMultiMemoryFlag
+		body := append(leb128.EncodeUint32(rawAlign), leb128.EncodeUint32(5)...) // memidx=5
+		body = append(body, leb128.EncodeUint32(64)...)                          // offset=64
+		align, offset, memIdx, read, err := readMemArg(0, body, api.CoreFeatureMultiMemory)
+		require.NoError(t, err)
+		require.Equal(t, uint32(2), align)
+		require.Equal(t, uint32(64), offset)
+		require.Equal(t, Index(5), memIdx)
+		require.Equal(t, uint64(len(body)), read)
+	})
+	t.Run("extended form: rejected when multi-memory is disabled, even for memory index zero", func(t *testing.T) {
+		rawAlign := uint32(2) | memArgMultiMemoryFlag
+		body := append(leb128.EncodeUint32(rawAlign), leb128.EncodeUint32(0)...) // memidx=0, explicit
+		body = append(body, leb128.EncodeUint32(0)...)
+		_, _, _, _, err := readMemArg(0, body, api.CoreFeaturesV1)
+		require.Error(t, err)
+	})
+}
+
 func TestModule_ValidateFunction_validateFunctionWithMaxStackValues(t *testing.T) {
 	const max = 100
 	const valuesNum = max + 1
@@ -302,7 +332,7 @@ func TestModule_ValidateFunction_BulkMemoryOperations(t *testing.T) {
 					DataCountSection: &c,
 				}
 				err := m.validateFunction(&stacks{}, api.CoreFeatureBulkMemoryOperations,
-					0, []Index{0}, nil, &Memory{}, []Table{{}, {}}, nil, nil, bytes.NewReader(nil))
+					0, []Index{0}, nil, []Memory{{}}, []Table{{}, {}}, nil, nil, bytes.NewReader(nil))
 				require.NoError(t, err)
 			})
 		}
@@ -313,7 +343,7 @@ func TestModule_ValidateFunction_BulkMemoryOperations(t *testing.T) {
 			dataSection         []DataSegment
 			elementSection      []ElementSegment
 			dataCountSectionNil bool
-			memory              *Memory
+			memory              []Memory
 			tables              []Table
 			flag                api.CoreFeatures
 			expectedErr         string
@@ -339,48 +369,48 @@ func TestModule_ValidateFunction_BulkMemoryOperations(t *testing.T) {
 			{
 				body:        []byte{OpcodeMiscPrefix, OpcodeMiscMemoryInit},
 				flag:        api.CoreFeatureBulkMemoryOperations,
-				memory:      &Memory{},
+				memory:      []Memory{{}},
 				expectedErr: "failed to read data segment index for memory.init: EOF",
 			},
 			{
 				body:        []byte{OpcodeMiscPrefix, OpcodeMiscMemoryInit, 100 /* data section out of range */},
 				flag:        api.CoreFeatureBulkMemoryOperations,
-				memory:      &Memory{},
+				memory:      []Memory{{}},
 				dataSection: []DataSegment{{}},
 				expectedErr: "index 100 out of range of data section(len=1)",
 			},
 			{
 				body:        []byte{OpcodeMiscPrefix, OpcodeMiscMemoryInit, 0},
 				flag:        api.CoreFeatureBulkMemoryOperations,
-				memory:      &Memory{},
+				memory:      []Memory{{}},
 				dataSection: []DataSegment{{}},
 				expectedErr: "failed to read memory index for memory.init: EOF",
 			},
 			{
 				body:        []byte{OpcodeMiscPrefix, OpcodeMiscMemoryInit, 0, 1},
 				flag:        api.CoreFeatureBulkMemoryOperations,
-				memory:      &Memory{},
+				memory:      []Memory{{}},
 				dataSection: []DataSegment{{}},
-				expectedErr: "memory.init reserved byte must be zero encoded with 1 byte",
+				expectedErr: `memory index must be zero for memory.init as feature "multi-memory" is disabled`,
 			},
 			{
 				body:        []byte{OpcodeMiscPrefix, OpcodeMiscMemoryInit, 0, 0},
 				flag:        api.CoreFeatureBulkMemoryOperations,
-				memory:      &Memory{},
+				memory:      []Memory{{}},
 				dataSection: []DataSegment{{}},
 				expectedErr: "cannot pop the operand for memory.init: i32 missing",
 			},
 			{
 				body:        []byte{OpcodeI32Const, 0, OpcodeMiscPrefix, OpcodeMiscMemoryInit, 0, 0},
 				flag:        api.CoreFeatureBulkMemoryOperations,
-				memory:      &Memory{},
+				memory:      []Memory{{}},
 				dataSection: []DataSegment{{}},
 				expectedErr: "cannot pop the operand for memory.init: i32 missing",
 			},
 			{
 				body:        []byte{OpcodeI32Const, 0, OpcodeI32Const, 0, OpcodeMiscPrefix, OpcodeMiscMemoryInit, 0, 0},
 				flag:        api.CoreFeatureBulkMemoryOperations,
-				memory:      &Memory{},
+				memory:      []Memory{{}},
 				dataSection: []DataSegment{{}},
 				expectedErr: "cannot pop the operand for memory.init: i32 missing",
 			},
@@ -393,20 +423,20 @@ func TestModule_ValidateFunction_BulkMemoryOperations(t *testing.T) {
 			{
 				body:                []byte{OpcodeMiscPrefix, OpcodeMiscDataDrop},
 				dataCountSectionNil: true,
-				memory:              &Memory{},
+				memory:              []Memory{{}},
 				flag:                api.CoreFeatureBulkMemoryOperations,
 				expectedErr:         `data.drop requires data count section`,
 			},
 			{
 				body:        []byte{OpcodeMiscPrefix, OpcodeMiscDataDrop},
 				flag:        api.CoreFeatureBulkMemoryOperations,
-				memory:      &Memory{},
+				memory:      []Memory{{}},
 				expectedErr: "failed to read data segment index for data.drop: EOF",
 			},
 			{
 				body:        []byte{OpcodeMiscPrefix, OpcodeMiscDataDrop, 100 /* data section out of range */},
 				flag:        api.CoreFeatureBulkMemoryOperations,
-				memory:      &Memory{},
+				memory:      []Memory{{}},
 				dataSection: []DataSegment{{}},
 				expectedErr: "index 100 out of range of data section(len=1)",
 			},
@@ -425,37 +455,37 @@ func TestModule_ValidateFunction_BulkMemoryOperations(t *testing.T) {
 			{
 				body:        []byte{OpcodeMiscPrefix, OpcodeMiscMemoryCopy},
 				flag:        api.CoreFeatureBulkMemoryOperations,
-				memory:      &Memory{},
+				memory:      []Memory{{}},
 				expectedErr: `failed to read memory index for memory.copy: EOF`,
 			},
 			{
 				body:        []byte{OpcodeMiscPrefix, OpcodeMiscMemoryCopy, 0},
 				flag:        api.CoreFeatureBulkMemoryOperations,
-				memory:      &Memory{},
+				memory:      []Memory{{}},
 				expectedErr: "failed to read memory index for memory.copy: EOF",
 			},
 			{
 				body:        []byte{OpcodeMiscPrefix, OpcodeMiscMemoryCopy, 0, 1},
 				flag:        api.CoreFeatureBulkMemoryOperations,
-				memory:      &Memory{},
-				expectedErr: "memory.copy reserved byte must be zero encoded with 1 byte",
+				memory:      []Memory{{}},
+				expectedErr: `memory index must be zero for memory.copy as feature "multi-memory" is disabled`,
 			},
 			{
 				body:        []byte{OpcodeMiscPrefix, OpcodeMiscMemoryCopy, 0, 0},
 				flag:        api.CoreFeatureBulkMemoryOperations,
-				memory:      &Memory{},
+				memory:      []Memory{{}},
 				expectedErr: "cannot pop the operand for memory.copy: i32 missing",
 			},
 			{
 				body:        []byte{OpcodeI32Const, 0, OpcodeMiscPrefix, OpcodeMiscMemoryCopy, 0, 0},
 				flag:        api.CoreFeatureBulkMemoryOperations,
-				memory:      &Memory{},
+				memory:      []Memory{{}},
 				expectedErr: "cannot pop the operand for memory.copy: i32 missing",
 			},
 			{
 				body:        []byte{OpcodeI32Const, 0, OpcodeI32Const, 0, OpcodeMiscPrefix, OpcodeMiscMemoryCopy, 0, 0},
 				flag:        api.CoreFeatureBulkMemoryOperations,
-				memory:      &Memory{},
+				memory:      []Memory{{}},
 				expectedErr: "cannot pop the operand for memory.copy: i32 missing",
 			},
 			// memory.fill
@@ -473,31 +503,31 @@ func TestModule_ValidateFunction_BulkMemoryOperations(t *testing.T) {
 			{
 				body:        []byte{OpcodeMiscPrefix, OpcodeMiscMemoryFill},
 				flag:        api.CoreFeatureBulkMemoryOperations,
-				memory:      &Memory{},
+				memory:      []Memory{{}},
 				expectedErr: `failed to read memory index for memory.fill: EOF`,
 			},
 			{
 				body:        []byte{OpcodeMiscPrefix, OpcodeMiscMemoryFill, 1},
 				flag:        api.CoreFeatureBulkMemoryOperations,
-				memory:      &Memory{},
-				expectedErr: `memory.fill reserved byte must be zero encoded with 1 byte`,
+				memory:      []Memory{{}},
+				expectedErr: `memory index must be zero for memory.fill as feature "multi-memory" is disabled`,
 			},
 			{
 				body:        []byte{OpcodeMiscPrefix, OpcodeMiscMemoryFill, 0},
 				flag:        api.CoreFeatureBulkMemoryOperations,
-				memory:      &Memory{},
+				memory:      []Memory{{}},
 				expectedErr: "cannot pop the operand for memory.fill: i32 missing",
 			},
 			{
 				body:        []byte{OpcodeI32Const, 0, OpcodeMiscPrefix, OpcodeMiscMemoryFill, 0},
 				flag:        api.CoreFeatureBulkMemoryOperations,
-				memory:      &Memory{},
+				memory:      []Memory{{}},
 				expectedErr: "cannot pop the operand for memory.fill: i32 missing",
 			},
 			{
 				body:        []byte{OpcodeI32Const, 0, OpcodeI32Const, 0, OpcodeMiscPrefix, OpcodeMiscMemoryFill, 0},
 				flag:        api.CoreFeatureBulkMemoryOperations,
-				memory:      &Memory{},
+				memory:      []Memory{{}},
 				expectedErr: "cannot pop the operand for memory.fill: i32 missing",
 			},
 			// table.init
@@ -2221,7 +2251,7 @@ func TestModule_funcValidation_CallIndirect(t *testing.T) {
 			}}},
 		}
 		err := m.validateFunction(&stacks{}, api.CoreFeatureReferenceTypes,
-			0, []Index{0}, nil, &Memory{}, []Table{{Type: RefTypeFuncref}}, nil, nil, bytes.NewReader(nil))
+			0, []Index{0}, nil, []Memory{{}}, []Table{{Type: RefTypeFuncref}}, nil, nil, bytes.NewReader(nil))
 		require.NoError(t, err)
 	})
 	t.Run("non zero table index", func(t *testing.T) {
@@ -2236,12 +2266,12 @@ func TestModule_funcValidation_CallIndirect(t *testing.T) {
 		}
 		t.Run("disabled", func(t *testing.T) {
 			err := m.validateFunction(&stacks{}, api.CoreFeaturesV1,
-				0, []Index{0}, nil, &Memory{}, []Table{{}, {}}, nil, nil, bytes.NewReader(nil))
+				0, []Index{0}, nil, []Memory{{}}, []Table{{}, {}}, nil, nil, bytes.NewReader(nil))
 			require.EqualError(t, err, "table index must be zero but was 100: feature \"reference-types\" is disabled")
 		})
 		t.Run("enabled but out of range", func(t *testing.T) {
 			err := m.validateFunction(&stacks{}, api.CoreFeatureReferenceTypes,
-				0, []Index{0}, nil, &Memory{}, []Table{{}, {}}, nil, nil, bytes.NewReader(nil))
+				0, []Index{0}, nil, []Memory{{}}, []Table{{}, {}}, nil, nil, bytes.NewReader(nil))
 			require.EqualError(t, err, "unknown table index: 100")
 		})
 	})
@@ -2256,7 +2286,7 @@ func TestModule_funcValidation_CallIndirect(t *testing.T) {
 			}}},
 		}
 		err := m.validateFunction(&stacks{}, api.CoreFeatureReferenceTypes,
-			0, []Index{0}, nil, &Memory{}, []Table{{Type: RefTypeExternref}}, nil, nil, bytes.NewReader(nil))
+			0, []Index{0}, nil, []Memory{{}}, []Table{{Type: RefTypeExternref}}, nil, nil, bytes.NewReader(nil))
 		require.EqualError(t, err, "table is not funcref type but was externref for call_indirect")
 	})
 }
@@ -3175,7 +3205,7 @@ func TestModule_funcValidation_SIMD(t *testing.T) {
 				CodeSection:     []Code{{Body: tc.body}},
 			}
 			err := m.validateFunction(&stacks{}, api.CoreFeatureSIMD,
-				0, []Index{0}, nil, &Memory{}, nil, nil, nil, bytes.NewReader(nil))
+				0, []Index{0}, nil, []Memory{{}}, nil, nil, nil, bytes.NewReader(nil))
 			require.NoError(t, err)
 		})
 	}
@@ -3326,7 +3356,7 @@ func TestModule_funcValidation_SIMD_error(t *testing.T) {
 				CodeSection:     []Code{{Body: tc.body}},
 			}
 			err := m.validateFunction(&stacks{}, tc.flag,
-				0, []Index{0}, nil, &Memory{}, nil, nil, nil, bytes.NewReader(nil))
+				0, []Index{0}, nil, []Memory{{}}, nil, nil, nil, bytes.NewReader(nil))
 			require.EqualError(t, err, tc.expectedErr)
 		})
 	}
@@ -4274,7 +4304,7 @@ func TestModule_funcValidation_Atomic(t *testing.T) {
 
 				t.Run("with memory", func(t *testing.T) {
 					err := m.validateFunction(&stacks{}, experimental.CoreFeaturesThreads,
-						0, []Index{0}, nil, &Memory{}, []Table{}, nil, nil, bytes.NewReader(nil))
+						0, []Index{0}, nil, []Memory{{}}, []Table{}, nil, nil, bytes.NewReader(nil))
 					require.NoError(t, err)
 				})
 
@@ -4303,7 +4333,7 @@ func TestModule_funcValidation_Atomic(t *testing.T) {
 			CodeSection:     []Code{{Body: body}},
 		}
 		err := m.validateFunction(&stacks{}, experimental.CoreFeaturesThreads,
-			0, []Index{0}, nil, &Memory{}, []Table{}, nil, nil, bytes.NewReader(nil))
+			0, []Index{0}, nil, []Memory{{}}, []Table{}, nil, nil, bytes.NewReader(nil))
 		require.Error(t, err, "invalid immediate value for atomic.fence")
 	})
 
@@ -4866,7 +4896,7 @@ func TestModule_funcValidation_Atomic(t *testing.T) {
 					CodeSection:     []Code{{Body: body}},
 				}
 				err := m.validateFunction(&stacks{}, experimental.CoreFeaturesThreads,
-					0, []Index{0}, nil, &Memory{}, []Table{}, nil, nil, bytes.NewReader(nil))
+					0, []Index{0}, nil, []Memory{{}}, []Table{}, nil, nil, bytes.NewReader(nil))
 				require.Error(t, err, "invalid memory alignment")
 			})
 		}

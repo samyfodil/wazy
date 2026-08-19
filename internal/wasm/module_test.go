@@ -146,7 +146,7 @@ func TestModule_allDeclarations(t *testing.T) {
 		module            *Module
 		expectedFunctions []Index
 		expectedGlobals   []GlobalType
-		expectedMemory    *Memory
+		expectedMemory    []Memory
 		expectedTables    []Table
 		expectedTags      []Index
 	}{
@@ -195,13 +195,13 @@ func TestModule_allDeclarations(t *testing.T) {
 			module: &Module{
 				ImportSection: []Import{{Type: ExternTypeMemory, DescMem: &Memory{Min: 1, Max: 10}}},
 			},
-			expectedMemory: &Memory{Min: 1, Max: 10},
+			expectedMemory: []Memory{{Min: 1, Max: 10}},
 		},
 		{
 			module: &Module{
-				MemorySection: &Memory{Min: 100},
+				MemorySection: []Memory{{Min: 100}},
 			},
-			expectedMemory: &Memory{Min: 100},
+			expectedMemory: []Memory{{Min: 100}},
 		},
 		// Tables.
 		{
@@ -639,7 +639,7 @@ func TestModule_validateMemory(t *testing.T) {
 		m := Module{DataSection: []DataSegment{{
 			OffsetExpression: NewConstantExpressionFromOpcode(OpcodeUnreachable, nil),
 		}}}
-		err := m.validateMemory(&Memory{}, nil, api.CoreFeaturesV1)
+		err := m.validateMemory([]Memory{{}}, nil, api.CoreFeaturesV1)
 		require.EqualError(t, err, "calculate offset: invalid opcode for const expression: 0x0")
 	})
 	t.Run("ok", func(t *testing.T) {
@@ -647,8 +647,20 @@ func TestModule_validateMemory(t *testing.T) {
 			Init:             []byte{0x1},
 			OffsetExpression: NewConstantExpressionFromI32(1),
 		}}}
-		err := m.validateMemory(&Memory{}, nil, api.CoreFeaturesV1)
+		err := m.validateMemory([]Memory{{}}, nil, api.CoreFeaturesV1)
 		require.NoError(t, err)
+	})
+	t.Run("active data segment targets an out of range memory index", func(t *testing.T) {
+		// A single declared memory (index 0), but the data segment targets memory
+		// index 5: must be a validation error, not an index-out-of-range panic at
+		// instantiation (see ModuleInstance.applyData/validateData in store.go).
+		m := Module{DataSection: []DataSegment{{
+			Init:             []byte{0x1},
+			OffsetExpression: NewConstantExpressionFromI32(0),
+			MemoryIndex:      5,
+		}}}
+		err := m.validateMemory([]Memory{{}}, nil, api.CoreFeatureMultiMemory)
+		require.EqualError(t, err, "unknown memory 5 for data segment")
 	})
 }
 
@@ -734,7 +746,7 @@ func TestModule_validateExports(t *testing.T) {
 		exportSection   []Export
 		functions       []Index
 		globals         []GlobalType
-		memory          *Memory
+		memory          []Memory
 		tables          []Table
 		expectedErr     string
 	}{
@@ -801,7 +813,7 @@ func TestModule_validateExports(t *testing.T) {
 			name:            "memory",
 			enabledFeatures: api.CoreFeaturesV1,
 			exportSection:   []Export{{Type: ExternTypeMemory, Index: 0}},
-			memory:          &Memory{},
+			memory:          []Memory{{}},
 		},
 		{
 			name:            "memory out of range",
@@ -911,18 +923,18 @@ func TestModule_buildMemoryInstance(t *testing.T) {
 	t.Run("nil", func(t *testing.T) {
 		m := ModuleInstance{}
 		m.buildMemory(&Module{}, nil)
-		require.Nil(t, m.MemoryInstance)
+		require.Equal(t, 0, len(m.Memories))
 	})
 	t.Run("non-nil", func(t *testing.T) {
 		min := uint32(1)
 		max := uint32(10)
 		mDef := MemoryDefinition{moduleName: "foo"}
-		m := ModuleInstance{}
+		m := ModuleInstance{Memories: make([]*MemoryInstance, 1)}
 		m.buildMemory(&Module{
-			MemorySection:           &Memory{Min: min, Cap: min, Max: max},
+			MemorySection:           []Memory{{Min: min, Cap: min, Max: max}},
 			MemoryDefinitionSection: []MemoryDefinition{mDef},
 		}, nil)
-		mem := m.MemoryInstance
+		mem := m.Memories[0]
 		require.Equal(t, min, mem.Min)
 		require.Equal(t, max, mem.Max)
 		require.Equal(t, &mDef, mem.definition)

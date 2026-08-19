@@ -97,7 +97,7 @@ func TestRuntime_CompileModule(t *testing.T) {
 		{
 			name: "MemorySection, but not exported",
 			wasm: &wasm.Module{
-				MemorySection: &wasm.Memory{Min: 2, Max: 3, IsMaxEncoded: true},
+				MemorySection: []wasm.Memory{{Min: 2, Max: 3, IsMaxEncoded: true}},
 			},
 			expected: func(compiled CompiledModule) {
 				require.Nil(t, compiled.ImportedMemories())
@@ -107,7 +107,7 @@ func TestRuntime_CompileModule(t *testing.T) {
 		{
 			name: "MemorySection exported",
 			wasm: &wasm.Module{
-				MemorySection: &wasm.Memory{Min: 2, Max: 3, IsMaxEncoded: true},
+				MemorySection: []wasm.Memory{{Min: 2, Max: 3, IsMaxEncoded: true}},
 				ExportSection: []wasm.Export{{
 					Type:  wasm.ExternTypeMemory,
 					Name:  "memory",
@@ -169,7 +169,7 @@ func TestRuntime_CompileModule_Errors(t *testing.T) {
 		},
 		{
 			name:        "memory has too many pages",
-			wasm:        binaryencoding.EncodeModule(&wasm.Module{MemorySection: &wasm.Memory{Min: 2, Cap: 2, Max: 70000, IsMaxEncoded: true}}),
+			wasm:        binaryencoding.EncodeModule(&wasm.Module{MemorySection: []wasm.Memory{{Min: 2, Cap: 2, Max: 70000, IsMaxEncoded: true}}}),
 			expectedErr: "section memory: max 70000 pages (4 Gi) over limit of 65536 pages (4 Gi)",
 		},
 	}
@@ -354,7 +354,7 @@ func TestModule_Memory(t *testing.T) {
 		{
 			name: "memory exported, one page",
 			wasm: binaryencoding.EncodeModule(&wasm.Module{
-				MemorySection: &wasm.Memory{Min: 1},
+				MemorySection: []wasm.Memory{{Min: 1}},
 				ExportSection: []wasm.Export{{Name: "memory", Type: api.ExternTypeMemory}},
 			}),
 			expected:    true,
@@ -526,7 +526,7 @@ func TestRuntime_Instantiate_DoesntEnforce_Start(t *testing.T) {
 	defer r.Close(testCtx)
 
 	binary := binaryencoding.EncodeModule(&wasm.Module{
-		MemorySection: &wasm.Memory{Min: 1},
+		MemorySection: []wasm.Memory{{Min: 1}},
 		ExportSection: []wasm.Export{{Name: "memory", Type: wasm.ExternTypeMemory, Index: 0}},
 	})
 

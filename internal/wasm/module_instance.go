@@ -166,7 +166,7 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 		m.Sys = nil
 	}
 
-	if mem := m.MemoryInstance; mem != nil {
+	for _, mem := range m.Memories {
 		if mem.ownerModuleEngine == m.Engine {
 			// Owner close. Mark ownerClosed, and recycle Buffer to the pool now
 			// only if no importer is still live -- otherwise the LAST importer's
@@ -231,34 +231,34 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 	return err
 }
 
-// Memory implements the same method as documented on api.Module.
+// Memory implements the same method as documented on api.Module. It returns
+// memory index 0, the module's first declared or imported memory.
 func (m *ModuleInstance) Memory() api.Memory {
-	return m.MemoryInstance
+	if len(m.Memories) == 0 {
+		return nil
+	}
+	return m.Memories[0]
 }
 
 // ExportedMemory implements the same method as documented on api.Module.
 func (m *ModuleInstance) ExportedMemory(name string) api.Memory {
-	_, err := m.getExport(name, ExternTypeMemory)
+	exp, err := m.getExport(name, ExternTypeMemory)
 	if err != nil {
 		return nil
 	}
-	// We Assume that we have at most one memory.
-	return m.MemoryInstance
+	return m.Memories[exp.Index]
 }
 
 // ExportedMemoryDefinitions implements the same method as documented on
 // api.Module.
 func (m *ModuleInstance) ExportedMemoryDefinitions() map[string]api.MemoryDefinition {
-	// Special case as we currently only support one memory.
-	if mem := m.MemoryInstance; mem != nil {
-		// Now, find out if it is exported
-		for name, exp := range m.Exports {
-			if exp.Type == ExternTypeMemory {
-				return map[string]api.MemoryDefinition{name: mem.definition}
-			}
+	ret := map[string]api.MemoryDefinition{}
+	for name, exp := range m.Exports {
+		if exp.Type == ExternTypeMemory {
+			ret[name] = m.Memories[exp.Index].definition
 		}
 	}
-	return map[string]api.MemoryDefinition{}
+	return ret
 }
 
 // ExportedFunction implements the same method as documented on api.Module.

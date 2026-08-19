@@ -87,7 +87,7 @@ func TestMemorySection(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    []byte
-		expected *wasm.Memory
+		expected []wasm.Memory
 	}{
 		{
 			name: "min and min with max",
@@ -95,7 +95,7 @@ func TestMemorySection(t *testing.T) {
 				0x01,             // 1 memory
 				0x01, 0x02, 0x03, // (memory 2 3)
 			},
-			expected: &wasm.Memory{Min: 2, Cap: 2, Max: three, IsMaxEncoded: true},
+			expected: []wasm.Memory{{Min: 2, Cap: 2, Max: three, IsMaxEncoded: true}},
 		},
 	}
 
@@ -125,7 +125,7 @@ func TestMemorySection_Errors(t *testing.T) {
 				0x01,       // (memory 1)
 				0x02, 0x03, // (memory 2 3)
 			},
-			expectedErr: "at most one memory allowed in module, but read 2",
+			expectedErr: `at most one memory allowed in module as feature "multi-memory" is disabled`,
 		},
 	}
 

@@ -76,7 +76,7 @@ func TestModule_SectionElementCount(t *testing.T) {
 		{
 			name: "MemorySection and DataSection",
 			input: &Module{
-				MemorySection: &Memory{Min: 1},
+				MemorySection: []Memory{{Min: 1}},
 				DataSection:   []DataSegment{{OffsetExpression: empty}},
 			},
 			expected: map[string]uint32{"data": 1, "memory": 1},

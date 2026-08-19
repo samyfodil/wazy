@@ -38,10 +38,7 @@ func (m *Module) BuildMemoryDefinitions() {
 		moduleName = m.NameSection.ModuleName
 	}
 
-	memoryCount := m.ImportMemoryCount
-	if m.MemorySection != nil {
-		memoryCount++
-	}
+	memoryCount := m.ImportMemoryCount + Index(len(m.MemorySection))
 
 	if memoryCount == 0 {
 		return
@@ -63,11 +60,12 @@ func (m *Module) BuildMemoryDefinitions() {
 		importMemIdx++
 	}
 
-	if m.MemorySection != nil {
+	for i := range m.MemorySection {
 		m.MemoryDefinitionSection = append(m.MemoryDefinitionSection, MemoryDefinition{
 			index:  importMemIdx,
-			memory: m.MemorySection,
+			memory: &m.MemorySection[i],
 		})
+		importMemIdx++
 	}
 
 	for i := range m.MemoryDefinitionSection {

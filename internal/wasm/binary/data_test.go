@@ -87,7 +87,7 @@ func Test_decodeDataSegment(t *testing.T) {
 				// Two initial data.
 				0x2, 0xf, 0xf,
 			},
-			expErr:   "memory index must be zero but was 1",
+			expErr:   `memory index must be zero for data segment as feature "multi-memory" is disabled`,
 			features: api.CoreFeatureBulkMemoryOperations,
 		},
 		{

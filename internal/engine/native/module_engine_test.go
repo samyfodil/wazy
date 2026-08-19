@@ -20,36 +20,35 @@ func TestModuleEngine_setupOpaque(t *testing.T) {
 	}{
 		{
 			offset: nativeapi.ModuleContextOffsetData{
-				LocalMemoryBegin:                    10,
-				ImportedMemoryBegin:                 -1,
+				MemoriesBegin:                       10,
 				ImportedFunctionsBegin:              -1,
 				TablesBegin:                         -1,
 				BeforeListenerTrampolines1stElement: -1,
 				AfterListenerTrampolines1stElement:  -1,
 				GlobalsBegin:                        -1,
 			},
-			m: &wasm.ModuleInstance{MemoryInstance: &wasm.MemoryInstance{
-				Buffer: make([]byte, 0xff),
-			}},
+			m: &wasm.ModuleInstance{
+				Memories: []*wasm.MemoryInstance{{Buffer: make([]byte, 0xff)}},
+				Source:   &wasm.Module{},
+			},
 		},
 		{
 			offset: nativeapi.ModuleContextOffsetData{
-				LocalMemoryBegin:                    -1,
-				ImportedMemoryBegin:                 30,
+				MemoriesBegin:                       30,
 				GlobalsBegin:                        -1,
 				TablesBegin:                         -1,
 				BeforeListenerTrampolines1stElement: -1,
 				AfterListenerTrampolines1stElement:  -1,
 				ImportedFunctionsBegin:              -1,
 			},
-			m: &wasm.ModuleInstance{MemoryInstance: &wasm.MemoryInstance{
-				Buffer: make([]byte, 0xff),
-			}},
+			m: &wasm.ModuleInstance{
+				Memories: []*wasm.MemoryInstance{{Buffer: make([]byte, 0xff)}},
+				Source:   &wasm.Module{ImportMemoryCount: 1},
+			},
 		},
 		{
 			offset: nativeapi.ModuleContextOffsetData{
-				LocalMemoryBegin:                    -1,
-				ImportedMemoryBegin:                 -1,
+				MemoriesBegin:                       -1,
 				ImportedFunctionsBegin:              -1,
 				GlobalsBegin:                        30,
 				TablesBegin:                         100,
@@ -87,27 +86,28 @@ func TestModuleEngine_setupOpaque(t *testing.T) {
 			}
 			m.setupOpaque()
 
-			if tc.offset.LocalMemoryBegin >= 0 {
-				actualPtr := uintptr(binary.LittleEndian.Uint64(m.opaque[tc.offset.LocalMemoryBegin:]))
-				expPtr := uintptr(unsafe.Pointer(&tc.m.MemoryInstance.Buffer[0]))
+			if tc.offset.MemoriesBegin >= 0 && tc.m.Source.ImportMemoryCount == 0 {
+				actualPtr := uintptr(binary.LittleEndian.Uint64(m.opaque[tc.offset.MemoriesBegin:]))
+				expPtr := uintptr(unsafe.Pointer(&tc.m.Memories[0].Buffer[0]))
 				require.Equal(t, expPtr, actualPtr)
-				actualLen := int(binary.LittleEndian.Uint64(m.opaque[tc.offset.LocalMemoryBegin+8:]))
-				expLen := len(tc.m.MemoryInstance.Buffer)
+				actualLen := int(binary.LittleEndian.Uint64(m.opaque[tc.offset.MemoriesBegin+8:]))
+				expLen := len(tc.m.Memories[0].Buffer)
 				require.Equal(t, expLen, actualLen)
 			}
-			if tc.offset.ImportedMemoryBegin >= 0 {
+			if tc.offset.MemoriesBegin >= 0 && tc.m.Source.ImportMemoryCount > 0 {
 				imported := &moduleEngine{
-					opaque: []byte{1, 2, 3}, module: &wasm.ModuleInstance{MemoryInstance: tc.m.MemoryInstance},
-					parent: &compiledModule{offsets: nativeapi.ModuleContextOffsetData{ImportedMemoryBegin: -1}},
+					opaque: []byte{1, 2, 3},
+					module: &wasm.ModuleInstance{Memories: []*wasm.MemoryInstance{tc.m.Memories[0]}, Source: &wasm.Module{}},
+					parent: &compiledModule{offsets: nativeapi.ModuleContextOffsetData{MemoriesBegin: -1}},
 				}
 				imported.opaquePtr = &imported.opaque[0]
-				m.ResolveImportedMemory(imported)
+				m.ResolveImportedMemory(0, 0, imported)
 
-				actualPtr := uintptr(binary.LittleEndian.Uint64(m.opaque[tc.offset.ImportedMemoryBegin:]))
-				expPtr := uintptr(unsafe.Pointer(tc.m.MemoryInstance))
+				actualPtr := uintptr(binary.LittleEndian.Uint64(m.opaque[tc.offset.MemoriesBegin:]))
+				expPtr := uintptr(unsafe.Pointer(tc.m.Memories[0]))
 				require.Equal(t, expPtr, actualPtr)
 
-				actualOpaquePtr := uintptr(binary.LittleEndian.Uint64(m.opaque[tc.offset.ImportedMemoryBegin+8:]))
+				actualOpaquePtr := uintptr(binary.LittleEndian.Uint64(m.opaque[tc.offset.MemoriesBegin+8:]))
 				require.Equal(t, uintptr(unsafe.Pointer(imported.opaquePtr)), actualOpaquePtr)
 				runtime.KeepAlive(imported)
 			}
@@ -363,21 +363,22 @@ func TestModuleEngine_ResolveImportedFunction_multilevel(t *testing.T) {
 func TestModuleEngine_ResolveImportedMemory_reexported(t *testing.T) {
 	m := &moduleEngine{
 		parent: &compiledModule{offsets: nativeapi.ModuleContextOffsetData{
-			ImportedMemoryBegin: 50,
+			MemoriesBegin: 50,
 		}},
 		opaque: make([]byte, 100),
 	}
 
 	importedME := &moduleEngine{
 		parent: &compiledModule{offsets: nativeapi.ModuleContextOffsetData{
-			ImportedMemoryBegin: 1000,
+			MemoriesBegin: 1000,
 		}},
+		module: &wasm.ModuleInstance{Source: &wasm.Module{ImportMemoryCount: 1}},
 		opaque: make([]byte, 2000),
 	}
 	binary.LittleEndian.PutUint64(importedME.opaque[1000:], 0x1234567890abcdef)
 	binary.LittleEndian.PutUint64(importedME.opaque[1000+8:], 0xabcdef1234567890)
 
-	m.ResolveImportedMemory(importedME)
+	m.ResolveImportedMemory(0, 0, importedME)
 	require.Equal(t, uint64(0x1234567890abcdef), binary.LittleEndian.Uint64(m.opaque[50:]))
 	require.Equal(t, uint64(0xabcdef1234567890), binary.LittleEndian.Uint64(m.opaque[50+8:]))
 }

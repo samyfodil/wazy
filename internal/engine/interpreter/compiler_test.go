@@ -152,7 +152,7 @@ func TestCompile(t *testing.T) {
 			expected: &compilationResult{
 				Operations: []unionOperation{ // begin with params: [$delta]
 					newOperationPick(0, false),                         // [$delta, $delta]
-					newOperationMemoryGrow(),                           // [$delta, $old_size]
+					newOperationMemoryGrow(0),                          // [$delta, $old_size]
 					newOperationDrop(inclusiveRange{Start: 1, End: 1}), // [$old_size]
 					newOperationBr(newLabel(labelKindReturn, 0)),       // return!
 				},
@@ -260,7 +260,7 @@ func TestCompile_BulkMemoryOperations(t *testing.T) {
 	module := &wasm.Module{
 		TypeSection:     []wasm.FunctionType{v_v},
 		FunctionSection: []wasm.Index{0},
-		MemorySection:   &wasm.Memory{Min: 1},
+		MemorySection:   []wasm.Memory{{Min: 1}},
 		DataSection: []wasm.DataSegment{
 			{
 				OffsetExpression: wasm.NewConstantExpressionFromI32(0),
@@ -287,7 +287,7 @@ func TestCompile_BulkMemoryOperations(t *testing.T) {
 			newOperationConstI32(16),                     // [16]
 			newOperationConstI32(0),                      // [16, 0]
 			newOperationConstI32(7),                      // [16, 0, 7]
-			newOperationMemoryInit(1),                    // []
+			newOperationMemoryInit(1, 0),                 // []
 			newOperationDataDrop(1),                      // []
 			newOperationBr(newLabel(labelKindReturn, 0)), // return!
 		},
@@ -2613,7 +2613,7 @@ func TestCompile_Vec(t *testing.T) {
 			module := &wasm.Module{
 				TypeSection:     []wasm.FunctionType{v_v},
 				FunctionSection: []wasm.Index{0},
-				MemorySection:   &wasm.Memory{},
+				MemorySection:   []wasm.Memory{{}},
 				CodeSection:     []wasm.Code{{Body: tc.body}},
 			}
 			c, err := newCompiler(api.CoreFeaturesV2, 0, module, false)
@@ -3675,7 +3675,7 @@ func TestCompiler_threads(t *testing.T) {
 			module := &wasm.Module{
 				TypeSection:     []wasm.FunctionType{v_v},
 				FunctionSection: []wasm.Index{0},
-				MemorySection:   &wasm.Memory{},
+				MemorySection:   []wasm.Memory{{}},
 				CodeSection:     []wasm.Code{{Body: body}},
 			}
 			c, err := newCompiler(api.CoreFeaturesV2, 0, module, false)

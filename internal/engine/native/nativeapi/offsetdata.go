@@ -95,8 +95,19 @@ const (
 type ModuleContextOffsetData struct {
 	TotalSize int
 	ModuleInstanceOffset,
-	LocalMemoryBegin,
-	ImportedMemoryBegin,
+	// MemoriesBegin is the base of an array of memoryRecordSize-byte records,
+	// one per memory in the module's memory index space (imports first, then
+	// module-defined). For an imported memory (index < the module's
+	// ImportMemoryCount), the record holds {*wasm.MemoryInstance, owner's
+	// opaque module context ptr}; the third field is unused padding. For a
+	// local memory, it holds {buffer base pointer, byte length,
+	// *wasm.MemoryInstance}: the third field lets lowerLocalMemoryGrow's fast
+	// path reach the live MemoryInstance (for its nativeGrowCap/sizeBytes
+	// fields) with a single constant-offset load off moduleCtxPtrValue,
+	// rather than chasing ModuleInstance -> Memories slice data pointer ->
+	// element, which costs an extra load now that Memories is a slice (was a
+	// single field pre-multi-memory). See MemoryOffset.
+	MemoriesBegin,
 	ImportedFunctionsBegin,
 	GlobalsBegin,
 	TypeIDs1stElement,
@@ -140,17 +151,21 @@ func (o Offset) U64() uint64 {
 	return uint64(o)
 }
 
-// LocalMemoryBase returns an offset of the first byte of the local memory.
-func (m *ModuleContextOffsetData) LocalMemoryBase() Offset {
-	return m.LocalMemoryBegin
+// memoryRecordSize is the byte size of each MemoriesBegin record: three
+// 8-byte fields, interpreted differently for a local vs. an imported memory.
+// See ModuleContextOffsetData.MemoriesBegin.
+const memoryRecordSize = 24
+
+// MemoryOffset returns the offset of the memoryIndex-th memory's record.
+func (m *ModuleContextOffsetData) MemoryOffset(memoryIndex int) Offset {
+	return m.MemoriesBegin + Offset(memoryIndex)*memoryRecordSize
 }
 
-// LocalMemoryLen returns an offset of the length of the local memory buffer.
-func (m *ModuleContextOffsetData) LocalMemoryLen() Offset {
-	if l := m.LocalMemoryBegin; l >= 0 {
-		return l + 8
-	}
-	return -1
+// LocalMemoryInstancePtrOffset returns the offset, within the memoryIndex-th
+// local memory's record, of the *wasm.MemoryInstance pointer field (only
+// meaningful for a local, i.e. non-imported, memory -- see MemoriesBegin).
+func (m *ModuleContextOffsetData) LocalMemoryInstancePtrOffset(memoryIndex int) Offset {
+	return m.MemoryOffset(memoryIndex) + 16
 }
 
 // TableOffset returns an offset of the i-th table instance.
@@ -172,25 +187,13 @@ func NewModuleContextOffsetData(m *wasm.Module, withListener bool) ModuleContext
 	ret.ModuleInstanceOffset = 0
 	offset += 8
 
-	if m.MemorySection != nil {
-		ret.LocalMemoryBegin = offset
-		// buffer base + memory size.
-		const localMemorySizeInOpaqueModuleContext = 16
-		offset += localMemorySizeInOpaqueModuleContext
-	} else {
-		// Indicates that there's no local memory
-		ret.LocalMemoryBegin = -1
-	}
-
-	if m.ImportMemoryCount > 0 {
+	if memories := int(m.ImportMemoryCount) + len(m.MemorySection); memories > 0 {
 		offset = align8(offset)
-		// *wasm.MemoryInstance + imported memory's owner (moduleContextOpaque)
-		const importedMemorySizeInOpaqueModuleContext = 16
-		ret.ImportedMemoryBegin = offset
-		offset += importedMemorySizeInOpaqueModuleContext
+		ret.MemoriesBegin = offset
+		offset += Offset(memories) * memoryRecordSize
 	} else {
-		// Indicates that there's no imported memory
-		ret.ImportedMemoryBegin = -1
+		// Indicates that there's no memory at all.
+		ret.MemoriesBegin = -1
 	}
 
 	if m.ImportFunctionCount > 0 {

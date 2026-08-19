@@ -1206,7 +1206,7 @@ func TestE2E_stores(t *testing.T) {
 func TestE2E_reexported_memory(t *testing.T) {
 	m1 := &wasm.Module{
 		ExportSection: []wasm.Export{{Name: "mem", Type: wasm.ExternTypeMemory, Index: 0}},
-		MemorySection: &wasm.Memory{Min: 1},
+		MemorySection: []wasm.Memory{{Min: 1}},
 		NameSection:   &wasm.NameSection{ModuleName: "m1"},
 	}
 	m2 := &wasm.Module{
@@ -1263,7 +1263,7 @@ func TestE2E_memoryGrowWithinReservedCapacity(t *testing.T) {
 			Results: []wasm.ValueType{i32},
 		}},
 		FunctionSection: []wasm.Index{0},
-		MemorySection:   &wasm.Memory{Min: 1, Cap: 3, Max: 3, IsMaxEncoded: true},
+		MemorySection:   []wasm.Memory{{Min: 1, Cap: 3, Max: 3, IsMaxEncoded: true}},
 		ExportSection: []wasm.Export{
 			{Name: "grow", Type: wasm.ExternTypeFunc, Index: 0},
 			{Name: "memory", Type: wasm.ExternTypeMemory, Index: 0},
@@ -1344,7 +1344,7 @@ func TestE2E_memoryGrowCustomAllocatorUsesGo(t *testing.T) {
 			Results: []wasm.ValueType{i32},
 		}},
 		FunctionSection: []wasm.Index{0},
-		MemorySection:   &wasm.Memory{Min: 1, Cap: 3, Max: 3, IsMaxEncoded: true},
+		MemorySection:   []wasm.Memory{{Min: 1, Cap: 3, Max: 3, IsMaxEncoded: true}},
 		ExportSection:   []wasm.Export{{Name: "grow", Type: wasm.ExternTypeFunc, Index: 0}},
 		CodeSection: []wasm.Code{{Body: []byte{
 			wasm.OpcodeLocalGet, 0,

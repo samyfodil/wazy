@@ -366,7 +366,7 @@ func Test888(t *testing.T) {
 	// FuncRef global works fine.
 	run(t, func(t *testing.T, r wazy.Runtime) {
 		imported := binaryencoding.EncodeModule(&wasm.Module{
-			MemorySection: &wasm.Memory{Min: 0, Max: 5, IsMaxEncoded: true},
+			MemorySection: []wasm.Memory{{Min: 0, Max: 5, IsMaxEncoded: true}},
 			GlobalSection: []wasm.Global{
 				{
 					Type: wasm.GlobalType{

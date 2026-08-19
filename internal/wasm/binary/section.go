@@ -180,20 +180,28 @@ func decodeMemorySection(
 	enabledFeatures api.CoreFeatures,
 	memorySizer memorySizer,
 	memoryLimitPages uint32,
-) (*wasm.Memory, int, error) {
+) ([]wasm.Memory, int, error) {
 	vs, n, err := leb128.LoadUint32(buf[offset:])
 	if err != nil {
 		return nil, offset, fmt.Errorf("error reading size")
 	}
 	offset += int(n)
 	if vs > 1 {
-		return nil, offset, fmt.Errorf("at most one memory allowed in module, but read %d", vs)
-	} else if vs == 0 {
-		// memory count can be zero.
-		return nil, offset, nil
+		if err := enabledFeatures.RequireEnabled(api.CoreFeatureMultiMemory); err != nil {
+			return nil, offset, fmt.Errorf("at most one memory allowed in module as %w", err)
+		}
 	}
 
-	return decodeMemory(buf, offset, enabledFeatures, memorySizer, memoryLimitPages)
+	ret := make([]wasm.Memory, vs)
+	for i := range ret {
+		var mem *wasm.Memory
+		mem, offset, err = decodeMemory(buf, offset, enabledFeatures, memorySizer, memoryLimitPages)
+		if err != nil {
+			return nil, offset, err
+		}
+		ret[i] = *mem
+	}
+	return ret, offset, nil
 }
 
 func decodeGlobalSection(buf []byte, offset int, enabledFeatures api.CoreFeatures) ([]wasm.Global, int, error) {

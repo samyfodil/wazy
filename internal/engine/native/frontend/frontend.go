@@ -36,21 +36,38 @@ type Compiler struct {
 
 	// wasmLocalToVariable maps the index (considered as wasm.Index of locals)
 	// to the corresponding ssa.Variable.
-	wasmLocalToVariable                   [] /* local index to */ ssa.Variable
-	wasmLocalFunctionIndex                wasm.Index
-	wasmFunctionTypeIndex                 wasm.Index
-	wasmFunctionTyp                       *wasm.FunctionType
-	wasmFunctionLocalTypes                []wasm.ValueType
-	wasmFunctionBody                      []byte
-	wasmFunctionBodyOffsetInCodeSection   uint64
-	memoryBaseVariable, memoryLenVariable ssa.Variable
-	needMemory                            bool
-	memoryShared                          bool
-	memoryMaxPages                        uint32
-	// memoryMinSizeInBytes is the static minimum size of the memory in bytes
-	// (zero if there is no memory). Since memories never shrink, any access
-	// whose end is a constant within this bound can never be out of bounds.
-	memoryMinSizeInBytes          uint64
+	wasmLocalToVariable                 [] /* local index to */ ssa.Variable
+	wasmLocalFunctionIndex              wasm.Index
+	wasmFunctionTypeIndex               wasm.Index
+	wasmFunctionTyp                     *wasm.FunctionType
+	wasmFunctionLocalTypes              []wasm.ValueType
+	wasmFunctionBody                    []byte
+	wasmFunctionBodyOffsetInCodeSection uint64
+	// memoryBaseVariables, memoryLenVariables, memoryShared, memoryMaxPages, and
+	// memoryMinSizeInBytes are index-correlated with the module's memory index
+	// space (imports first, then module-defined -- see wasm.Module.MemorySection).
+	memoryBaseVariables, memoryLenVariables []ssa.Variable
+	needMemory                              bool
+	// multiMemory is true when the module has more than one memory. It gates
+	// the linear-path known-safe-bounds cache in memOpSetup (getKnownSafeBound/
+	// recordKnownSafeBound): that cache's cross-block merge in
+	// initializeCurrentBlockKnownBounds intersects bounds purely by base-address
+	// ValueID, with no memory dimension, so under multi-memory a bound proven
+	// for one memory could be incorrectly reused for another that happens to
+	// share the same base address value. The simpler, single-block dominance
+	// pass (passDominatedMemoryBoundsEliminationOpt in ssa/pass.go) has been
+	// fixed to key on the memory-length SSA value too and stays enabled; this
+	// linear-path pre-cache is disabled outright for multi-memory rather than
+	// threading the same fix through the N-way predecessor intersection.
+	// ponytail: coarse ceiling -- ship correct now, add the memory-aware merge
+	// if multi-memory codegen benchmarks show it's worth it.
+	multiMemory    bool
+	memoryShared   []bool
+	memoryMaxPages []uint32
+	// memoryMinSizeInBytes is the static minimum size of each memory in bytes.
+	// Since memories never shrink, any access whose end is a constant within
+	// this bound can never be out of bounds.
+	memoryMinSizeInBytes          []uint64
 	globalVariables               []ssa.Variable
 	globalVariablesTypes          []ssa.Type
 	mutableGlobalVariablesIndexes []wasm.Index // index to ^.
@@ -275,8 +292,8 @@ func (c *Compiler) declareSignatures(listenerOn bool) {
 	}
 	c.memoryGrowSig = ssa.Signature{
 		ID: begin,
-		// Takes execution context and the page size to grow.
-		Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32},
+		// Takes execution context, the memory index, and the page size to grow.
+		Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI32},
 		// Returns the previous page size.
 		Results: []ssa.Type{ssa.TypeI32},
 	}
@@ -315,8 +332,8 @@ func (c *Compiler) declareSignatures(listenerOn bool) {
 
 	c.memoryWait32Sig = ssa.Signature{
 		ID: c.memmoveSig.ID + 1,
-		// exec context, timeout, expected, addr
-		Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeI32, ssa.TypeI64},
+		// exec context, memory index, timeout, expected, addr
+		Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI32, ssa.TypeI64},
 		// Returns the status.
 		Results: []ssa.Type{ssa.TypeI32},
 	}
@@ -324,8 +341,8 @@ func (c *Compiler) declareSignatures(listenerOn bool) {
 
 	c.memoryWait64Sig = ssa.Signature{
 		ID: c.memoryWait32Sig.ID + 1,
-		// exec context, timeout, expected, addr
-		Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64},
+		// exec context, memory index, timeout, expected, addr
+		Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64},
 		// Returns the status.
 		Results: []ssa.Type{ssa.TypeI32},
 	}
@@ -333,8 +350,8 @@ func (c *Compiler) declareSignatures(listenerOn bool) {
 
 	c.memoryNotifySig = ssa.Signature{
 		ID: c.memoryWait64Sig.ID + 1,
-		// exec context, count, addr
-		Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64},
+		// exec context, memory index, count, addr
+		Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI32, ssa.TypeI64},
 		// Returns the number notified.
 		Results: []ssa.Type{ssa.TypeI32},
 	}
@@ -484,26 +501,35 @@ func (c *Compiler) declareWasmLocals() {
 }
 
 func (c *Compiler) declareNecessaryVariables() {
-	if c.needMemory = c.m.MemorySection != nil; c.needMemory {
-		c.memoryShared = c.m.MemorySection.IsShared
-		c.memoryMaxPages = c.m.MemorySection.Max
-		c.memoryMinSizeInBytes = uint64(c.m.MemorySection.Min) * uint64(wasm.MemoryPageSize)
-	} else if c.needMemory = c.m.ImportMemoryCount > 0; c.needMemory {
-		for _, imp := range c.m.ImportSection {
-			if imp.Type == wasm.ExternTypeMemory {
-				c.memoryShared = imp.DescMem.IsShared
-				c.memoryMaxPages = imp.DescMem.Max
-				// The import's minimum is a type constraint on the provided
-				// memory, so it is a valid static lower bound as well.
-				c.memoryMinSizeInBytes = uint64(imp.DescMem.Min) * uint64(wasm.MemoryPageSize)
-				break
-			}
+	memoryCount := int(c.m.ImportMemoryCount) + len(c.m.MemorySection)
+	c.needMemory = memoryCount > 0
+	c.multiMemory = memoryCount > 1
+
+	c.memoryShared = c.memoryShared[:0]
+	c.memoryMaxPages = c.memoryMaxPages[:0]
+	c.memoryMinSizeInBytes = c.memoryMinSizeInBytes[:0]
+	c.memoryBaseVariables = c.memoryBaseVariables[:0]
+	c.memoryLenVariables = c.memoryLenVariables[:0]
+	for _, imp := range c.m.ImportSection {
+		if imp.Type != wasm.ExternTypeMemory {
+			continue
 		}
+		c.memoryShared = append(c.memoryShared, imp.DescMem.IsShared)
+		c.memoryMaxPages = append(c.memoryMaxPages, imp.DescMem.Max)
+		// The import's minimum is a type constraint on the provided
+		// memory, so it is a valid static lower bound as well.
+		c.memoryMinSizeInBytes = append(c.memoryMinSizeInBytes, uint64(imp.DescMem.Min)*uint64(wasm.MemoryPageSize))
+	}
+	for i := range c.m.MemorySection {
+		mem := &c.m.MemorySection[i]
+		c.memoryShared = append(c.memoryShared, mem.IsShared)
+		c.memoryMaxPages = append(c.memoryMaxPages, mem.Max)
+		c.memoryMinSizeInBytes = append(c.memoryMinSizeInBytes, uint64(mem.Min)*uint64(wasm.MemoryPageSize))
 	}
 
-	if c.needMemory {
-		c.memoryBaseVariable = c.ssaBuilder.DeclareVariable(ssa.TypeI64)
-		c.memoryLenVariable = c.ssaBuilder.DeclareVariable(ssa.TypeI64)
+	for range memoryCount {
+		c.memoryBaseVariables = append(c.memoryBaseVariables, c.ssaBuilder.DeclareVariable(ssa.TypeI64))
+		c.memoryLenVariables = append(c.memoryLenVariables, c.ssaBuilder.DeclareVariable(ssa.TypeI64))
 	}
 
 	c.globalVariables = c.globalVariables[:0]

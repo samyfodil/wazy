@@ -1498,6 +1498,14 @@ We _believe_ that all use cases are fine with the limitation, but also note that
 
 If a module reaches this limit, an error is returned at the compilation phase.
 
+### Number of memories in a module
+
+While the spec (as of the [multi-memory proposal](https://github.com/WebAssembly/multi-memory)) allows up to 2^32 memories, wazy limits this to 2^25 = 33,554,432, lower than
+the 2^27 used for functions, globals, and tables above. Each memory occupies a 24-byte record (base pointer, length, and a pointer back to the `*wasm.MemoryInstance`) in the
+native engine's opaque module context, and that context is addressed with a 32-bit signed offset. 2^27 * 24 bytes overflows that range, while 2^25 * 24 bytes = 768MiB does not.
+
+If a module reaches this limit, an error is returned at the validation phase.
+
 ## Relaxed SIMD
 
 The [relaxed-simd proposal](https://github.com/WebAssembly/relaxed-simd) defines

@@ -29,7 +29,7 @@ func TestMemoryPool_NoBleed(t *testing.T) {
 	for i := range first.Buffer {
 		first.Buffer[i] = 0xAA
 	}
-	m := &ModuleInstance{MemoryInstance: first, Engine: owner}
+	m := &ModuleInstance{Memories: []*MemoryInstance{first}, Engine: owner}
 	require.NoError(t, m.ensureResourcesClosed(context.Background()))
 	require.Nil(t, first.Buffer, "owner's Buffer field must be cleared once pooled")
 
@@ -108,22 +108,22 @@ func TestMemoryPool_ImportedMemoryNotRecycled(t *testing.T) {
 
 	s := newStore()
 	owner := &ModuleInstance{
-		MemoryInstance: mem,
-		Exports:        map[string]*Export{exportName: {Type: ExternTypeMemory}},
-		ModuleName:     moduleName,
-		Engine:         ownerEngine,
-		s:              s,
+		Memories:   []*MemoryInstance{mem},
+		Exports:    map[string]*Export{exportName: {Type: ExternTypeMemory}},
+		ModuleName: moduleName,
+		Engine:     ownerEngine,
+		s:          s,
 	}
 	s.nameToModule[moduleName] = owner
 
-	importer := &ModuleInstance{s: s, Engine: &mockModuleEngine{resolveImportsCalled: map[Index]Index{}}}
+	importer := &ModuleInstance{Memories: make([]*MemoryInstance, 1), s: s, Engine: &mockModuleEngine{resolveImportsCalled: map[Index]Index{}}}
 	err := importer.resolveImports(context.Background(), &Module{
 		ImportPerModule: map[string][]*Import{
 			moduleName: {{Module: moduleName, Name: exportName, Type: ExternTypeMemory, DescMem: &Memory{Max: 1}}},
 		},
 	})
 	require.NoError(t, err)
-	require.Equal(t, mem, importer.MemoryInstance)
+	require.Equal(t, mem, importer.Memories[0])
 	require.Equal(t, 1, mem.importers)
 
 	// Close the owner. Because an importer is still live (importers > 0), this must NOT return
@@ -137,8 +137,8 @@ func TestMemoryPool_ImportedMemoryNotRecycled(t *testing.T) {
 	}
 
 	// The importer's view is unaffected -- same object, same data.
-	require.Equal(t, mem, importer.MemoryInstance)
-	for i, b := range importer.MemoryInstance.Buffer {
+	require.Equal(t, mem, importer.Memories[0])
+	for i, b := range importer.Memories[0].Buffer {
 		if b != 0xBB {
 			t.Fatalf("importer observed corrupted byte %d = %#x", i, b)
 		}
@@ -159,11 +159,11 @@ func TestMemoryPool_ImportAfterOwnerClosed_Errors(t *testing.T) {
 
 	s := newStore()
 	owner := &ModuleInstance{
-		MemoryInstance: mem,
-		Exports:        map[string]*Export{exportName: {Type: ExternTypeMemory}},
-		ModuleName:     moduleName,
-		Engine:         ownerEngine,
-		s:              s,
+		Memories:   []*MemoryInstance{mem},
+		Exports:    map[string]*Export{exportName: {Type: ExternTypeMemory}},
+		ModuleName: moduleName,
+		Engine:     ownerEngine,
+		s:          s,
 	}
 	s.nameToModule[moduleName] = owner
 
@@ -175,14 +175,14 @@ func TestMemoryPool_ImportAfterOwnerClosed_Errors(t *testing.T) {
 	mem.ownerClosed = true
 	mem.Mux.Unlock()
 
-	importer := &ModuleInstance{s: s, Engine: &mockModuleEngine{resolveImportsCalled: map[Index]Index{}}}
+	importer := &ModuleInstance{Memories: make([]*MemoryInstance, 1), s: s, Engine: &mockModuleEngine{resolveImportsCalled: map[Index]Index{}}}
 	err := importer.resolveImports(context.Background(), &Module{
 		ImportPerModule: map[string][]*Import{
 			moduleName: {{Module: moduleName, Name: exportName, Type: ExternTypeMemory, DescMem: &Memory{Max: 1}}},
 		},
 	})
 	require.EqualError(t, err, "import memory[test.target]: memory owner module was closed concurrently")
-	require.Nil(t, importer.MemoryInstance)
+	require.Nil(t, importer.Memories[0])
 }
 
 // TestMemoryPool_SharedMemoryNotRecycled proves shared (wasm-threads)
@@ -196,7 +196,7 @@ func TestMemoryPool_SharedMemoryNotRecycled(t *testing.T) {
 	mem := NewMemoryInstance(memSec, nil, owner)
 	require.True(t, mem.Shared)
 
-	m := &ModuleInstance{MemoryInstance: mem, Engine: owner}
+	m := &ModuleInstance{Memories: []*MemoryInstance{mem}, Engine: owner}
 	require.NoError(t, m.ensureResourcesClosed(context.Background()))
 	require.NotNil(t, mem.Buffer, "shared memory's Buffer must not be cleared/pooled on Close")
 }
@@ -230,7 +230,7 @@ func TestMemoryPool_ConcurrentCreateCloseRace(t *testing.T) {
 				for i := range mem.Buffer {
 					mem.Buffer[i] = pattern
 				}
-				mi := &ModuleInstance{MemoryInstance: mem, Engine: owner}
+				mi := &ModuleInstance{Memories: []*MemoryInstance{mem}, Engine: owner}
 				if err := mi.ensureResourcesClosed(context.Background()); err != nil {
 					t.Errorf("goroutine %d iter %d: ensureResourcesClosed: %v", g, it, err)
 					return
@@ -253,17 +253,17 @@ func poolImportSetup(t *testing.T, n int) (*MemoryInstance, *ModuleInstance, []*
 
 	s := newStore()
 	owner := &ModuleInstance{
-		MemoryInstance: mem,
-		Exports:        map[string]*Export{exportName: {Type: ExternTypeMemory}},
-		ModuleName:     moduleName,
-		Engine:         ownerEngine,
-		s:              s,
+		Memories:   []*MemoryInstance{mem},
+		Exports:    map[string]*Export{exportName: {Type: ExternTypeMemory}},
+		ModuleName: moduleName,
+		Engine:     ownerEngine,
+		s:          s,
 	}
 	s.nameToModule[moduleName] = owner
 
 	importers := make([]*ModuleInstance, n)
 	for i := range n {
-		imp := &ModuleInstance{s: s, Engine: &mockModuleEngine{resolveImportsCalled: map[Index]Index{}}}
+		imp := &ModuleInstance{Memories: make([]*MemoryInstance, 1), s: s, Engine: &mockModuleEngine{resolveImportsCalled: map[Index]Index{}}}
 		err := imp.resolveImports(context.Background(), &Module{
 			ImportPerModule: map[string][]*Import{
 				moduleName: {{Module: moduleName, Name: exportName, Type: ExternTypeMemory, DescMem: &Memory{Max: 1}}},

@@ -23,39 +23,61 @@ const maximumValuesOnStack = 1 << 27
 // * idx is the index in the FunctionSection
 // * functions are the function index, which is prefixed by imports. The value is the TypeSection index.
 // * globals are the global index, which is prefixed by imports.
-// * memory is the potentially imported memory and can be nil.
+// * memories are the potentially imported memories, index-correlated with the memory index space.
 // * table is the potentially imported table and can be nil.
 // * declaredFunctionIndexes is the set of function indexes declared by declarative element segments which can be acceed by OpcodeRefFunc instruction.
 //
 // Returns an error if the instruction sequence is not valid,
 // or potentially it can exceed the maximum number of values on the stack.
 func (m *Module) validateFunction(sts *stacks, enabledFeatures api.CoreFeatures, idx Index, functions []Index,
-	globals []GlobalType, memory *Memory, tables []Table, tags []Index, declaredFunctionIndexes map[Index]struct{}, br *bytes.Reader,
+	globals []GlobalType, memories []Memory, tables []Table, tags []Index, declaredFunctionIndexes map[Index]struct{}, br *bytes.Reader,
 ) error {
-	return m.validateFunctionWithMaxStackValues(sts, enabledFeatures, idx, functions, globals, memory, tables, tags, maximumValuesOnStack, declaredFunctionIndexes, br)
+	return m.validateFunctionWithMaxStackValues(sts, enabledFeatures, idx, functions, globals, memories, tables, tags, maximumValuesOnStack, declaredFunctionIndexes, br)
 }
 
-func readMemArg(pc uint64, body []byte) (align, offset uint32, read uint64, err error) {
-	align, num, err := leb128.LoadUint32(body[pc:])
+// memArgMultiMemoryFlag is bit 6 of the memarg align LEB128, reserved by the
+// multi-memory proposal to signal that a memidx LEB128 immediately follows.
+// See https://webassembly.github.io/multi-memory/core/binary/instructions.html
+const memArgMultiMemoryFlag = 0x40
+
+func readMemArg(pc uint64, body []byte, enabledFeatures api.CoreFeatures) (align, offset uint32, memoryIndex Index, read uint64, err error) {
+	rawAlign, num, err := leb128.LoadUint32(body[pc:])
 	if err != nil {
 		err = fmt.Errorf("read memory align: %v", err)
 		return
 	}
+	read += num
+
+	if rawAlign&memArgMultiMemoryFlag != 0 {
+		if err = enabledFeatures.RequireEnabled(api.CoreFeatureMultiMemory); err != nil {
+			err = fmt.Errorf("memory index in memarg requires multi-memory: %w", err)
+			return
+		}
+		align = rawAlign &^ memArgMultiMemoryFlag
+		memoryIndex, num, err = leb128.LoadUint32(body[pc+read:])
+		if err != nil {
+			err = fmt.Errorf("read memory index: %v", err)
+			return
+		}
+		read += num
+	} else {
+		align = rawAlign
+	}
+
 	if align >= 32 {
 		// Prevent 1<<align uint32 overflow.
 		err = fmt.Errorf("invalid memory alignment")
 		return
 	}
-	read += num
 
-	offset, num, err = leb128.LoadUint32(body[pc+num:])
+	offset, num, err = leb128.LoadUint32(body[pc+read:])
 	if err != nil {
 		err = fmt.Errorf("read memory offset: %v", err)
 		return
 	}
 
 	read += num
-	return align, offset, read, nil
+	return align, offset, memoryIndex, read, nil
 }
 
 // validateFunctionWithMaxStackValues is like validateFunction, but allows overriding maxStackValues for testing.
@@ -68,7 +90,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 	idx Index,
 	functions []Index,
 	globals []GlobalType,
-	memory *Memory,
+	memories []Memory,
 	tables []Table,
 	tags []Index,
 	maxStackValues int,
@@ -109,13 +131,16 @@ func (m *Module) validateFunctionWithMaxStackValues(
 		}
 
 		if OpcodeI32Load <= op && op <= OpcodeI64Store32 {
-			if memory == nil {
+			if len(memories) == 0 {
 				return fmt.Errorf("memory must exist for %s", InstructionName(op))
 			}
 			pc++
-			align, _, read, err := readMemArg(pc, body)
+			align, _, memoryIndex, read, err := readMemArg(pc, body, enabledFeatures)
 			if err != nil {
 				return err
+			}
+			if memoryIndex >= uint32(len(memories)) {
+				return fmt.Errorf("memory %d is out of range for %s", memoryIndex, InstructionName(op))
 			}
 			pc += read - 1
 			switch op {
@@ -291,17 +316,23 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				}
 			}
 		} else if OpcodeMemorySize <= op && op <= OpcodeMemoryGrow {
-			if memory == nil {
+			if len(memories) == 0 {
 				return fmt.Errorf("memory must exist for %s", InstructionName(op))
 			}
 			pc++
-			val, num, err := leb128.LoadUint32(body[pc:])
+			memoryIndex, num, err := leb128.LoadUint32(body[pc:])
 			if err != nil {
 				return fmt.Errorf("read immediate: %v", err)
 			}
-			if val != 0 || num != 1 {
-				return fmt.Errorf("memory instruction reserved bytes not zero with 1 byte")
+			if memoryIndex != 0 {
+				if err := enabledFeatures.RequireEnabled(api.CoreFeatureMultiMemory); err != nil {
+					return fmt.Errorf("memory index must be zero but was %d: %w", memoryIndex, err)
+				}
 			}
+			if memoryIndex >= uint32(len(memories)) {
+				return fmt.Errorf("memory %d is out of range for %s", memoryIndex, InstructionName(op))
+			}
+			pc += uint64(num) - 1
 			switch Opcode(op) {
 			case OpcodeMemoryGrow:
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
@@ -1250,7 +1281,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 					}
 					pc += num - 1
 				case OpcodeMiscMemoryInit, OpcodeMiscMemoryCopy, OpcodeMiscMemoryFill:
-					if memory == nil {
+					if len(memories) == 0 {
 						return fmt.Errorf("memory must exist for %s", MiscInstructionName(miscOpcode))
 					}
 					params = []ValueType{ValueTypeI32, ValueTypeI32, ValueTypeI32}
@@ -1273,23 +1304,35 @@ func (m *Module) validateFunctionWithMaxStackValues(
 					}
 
 					pc++
-					val, num, err := leb128.LoadUint32(body[pc:])
+					memoryIndex, num, err := leb128.LoadUint32(body[pc:])
 					if err != nil {
 						return fmt.Errorf("failed to read memory index for %s: %v", MiscInstructionName(miscOpcode), err)
 					}
-					if val != 0 || num != 1 {
-						return fmt.Errorf("%s reserved byte must be zero encoded with 1 byte", MiscInstructionName(miscOpcode))
+					if memoryIndex != 0 {
+						if err := enabledFeatures.RequireEnabled(api.CoreFeatureMultiMemory); err != nil {
+							return fmt.Errorf("memory index must be zero for %s as %v", MiscInstructionName(miscOpcode), err)
+						}
 					}
+					if memoryIndex >= uint32(len(memories)) {
+						return fmt.Errorf("memory of index %d not found", memoryIndex)
+					}
+					pc += num - 1
 					if miscOpcode == OpcodeMiscMemoryCopy {
 						pc++
-						// memory.copy needs two memory index which are reserved as zero.
-						val, num, err := leb128.LoadUint32(body[pc:])
+						// memory.copy takes a second (source) memory index.
+						srcMemoryIndex, num, err := leb128.LoadUint32(body[pc:])
 						if err != nil {
 							return fmt.Errorf("failed to read memory index for %s: %v", MiscInstructionName(miscOpcode), err)
 						}
-						if val != 0 || num != 1 {
-							return fmt.Errorf("%s reserved byte must be zero encoded with 1 byte", MiscInstructionName(miscOpcode))
+						if srcMemoryIndex != 0 {
+							if err := enabledFeatures.RequireEnabled(api.CoreFeatureMultiMemory); err != nil {
+								return fmt.Errorf("memory index must be zero for %s as %v", MiscInstructionName(miscOpcode), err)
+							}
 						}
+						if srcMemoryIndex >= uint32(len(memories)) {
+							return fmt.Errorf("memory of index %d not found", srcMemoryIndex)
+						}
+						pc += num - 1
 					}
 
 				case OpcodeMiscTableInit:
@@ -1449,13 +1492,16 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				OpcodeVecV128Load32x2s, OpcodeVecV128Load32x2u, OpcodeVecV128Load8Splat, OpcodeVecV128Load16Splat,
 				OpcodeVecV128Load32Splat, OpcodeVecV128Load64Splat,
 				OpcodeVecV128Load32zero, OpcodeVecV128Load64zero:
-				if memory == nil {
+				if len(memories) == 0 {
 					return fmt.Errorf("memory must exist for %s", VectorInstructionName(vecOpcode))
 				}
 				pc++
-				align, _, read, err := readMemArg(pc, body)
+				align, _, memoryIndex, read, err := readMemArg(pc, body, enabledFeatures)
 				if err != nil {
 					return err
+				}
+				if memoryIndex >= uint32(len(memories)) {
+					return fmt.Errorf("memory %d is out of range for %s", memoryIndex, VectorInstructionName(vecOpcode))
 				}
 				pc += read - 1
 				var maxAlign uint32
@@ -1487,13 +1533,16 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				}
 				valueTypeStack.push(ValueTypeV128)
 			case OpcodeVecV128Store:
-				if memory == nil {
+				if len(memories) == 0 {
 					return fmt.Errorf("memory must exist for %s", VectorInstructionName(vecOpcode))
 				}
 				pc++
-				align, _, read, err := readMemArg(pc, body)
+				align, _, memoryIndex, read, err := readMemArg(pc, body, enabledFeatures)
 				if err != nil {
 					return err
+				}
+				if memoryIndex >= uint32(len(memories)) {
+					return fmt.Errorf("memory %d is out of range for %s", memoryIndex, VectorInstructionName(vecOpcode))
 				}
 				pc += read - 1
 				if 1<<align > 128/8 {
@@ -1506,14 +1555,17 @@ func (m *Module) validateFunctionWithMaxStackValues(
 					return fmt.Errorf("cannot pop the operand for %s: %v", OpcodeVecV128StoreName, err)
 				}
 			case OpcodeVecV128Load8Lane, OpcodeVecV128Load16Lane, OpcodeVecV128Load32Lane, OpcodeVecV128Load64Lane:
-				if memory == nil {
+				if len(memories) == 0 {
 					return fmt.Errorf("memory must exist for %s", VectorInstructionName(vecOpcode))
 				}
 				attr := vecLoadLanes[vecOpcode]
 				pc++
-				align, _, read, err := readMemArg(pc, body)
+				align, _, memoryIndex, read, err := readMemArg(pc, body, enabledFeatures)
 				if err != nil {
 					return err
+				}
+				if memoryIndex >= uint32(len(memories)) {
+					return fmt.Errorf("memory %d is out of range for %s", memoryIndex, vectorInstructionName[vecOpcode])
 				}
 				if 1<<align > attr.alignMax {
 					return fmt.Errorf("invalid memory alignment %d for %s", align, vectorInstructionName[vecOpcode])
@@ -1534,14 +1586,17 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				}
 				valueTypeStack.push(ValueTypeV128)
 			case OpcodeVecV128Store8Lane, OpcodeVecV128Store16Lane, OpcodeVecV128Store32Lane, OpcodeVecV128Store64Lane:
-				if memory == nil {
+				if len(memories) == 0 {
 					return fmt.Errorf("memory must exist for %s", VectorInstructionName(vecOpcode))
 				}
 				attr := vecStoreLanes[vecOpcode]
 				pc++
-				align, _, read, err := readMemArg(pc, body)
+				align, _, memoryIndex, read, err := readMemArg(pc, body, enabledFeatures)
 				if err != nil {
 					return err
+				}
+				if memoryIndex >= uint32(len(memories)) {
+					return fmt.Errorf("memory %d is out of range for %s", memoryIndex, vectorInstructionName[vecOpcode])
 				}
 				if 1<<align > attr.alignMax {
 					return fmt.Errorf("invalid memory alignment %d for %s", align, vectorInstructionName[vecOpcode])
@@ -1772,12 +1827,15 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			}
 
 			// All atomic operations except fence (checked above) require memory
-			if memory == nil {
+			if len(memories) == 0 {
 				return fmt.Errorf("memory must exist for %s", AtomicInstructionName(atomicOpcode))
 			}
-			align, _, read, err := readMemArg(pc, body)
+			align, _, memoryIndex, read, err := readMemArg(pc, body, enabledFeatures)
 			if err != nil {
 				return err
+			}
+			if memoryIndex >= uint32(len(memories)) {
+				return fmt.Errorf("memory %d is out of range for %s", memoryIndex, AtomicInstructionName(atomicOpcode))
 			}
 			pc += read - 1
 			switch atomicOpcode {

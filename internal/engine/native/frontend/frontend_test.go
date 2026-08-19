@@ -1265,12 +1265,12 @@ blk0: (v0:i64, v1:i64)
 			exp: `
 signatures:
 	sig0: i64i64_i32
-	sig2: i64i32_i32
+	sig2: i64i32i32_i32
 
 blk0: (v0:i64, v1:i64)
 	Store v1, v0, 0x8
-	v2:i64 = Load v1, 0x18
-	v3:i64 = Load v1, 0x20
+	v2:i64 = Load v1, 0x20
+	v3:i64 = Load v1, 0x28
 	v4:i32 = CallIndirect v2:sig0, v0, v3
 	v5:i64 = Load v1, 0x8
 	v6:i64 = Load v5, 0x0
@@ -1283,34 +1283,35 @@ blk0: (v0:i64, v1:i64)
 	v13:i32 = Iconst_32 0xa
 	Store v1, v0, 0x8
 	v14:i64 = Load v0, 0x48
-	v15:i32 = CallIndirect v14:sig2, v0, v13
-	v16:i64 = Load v1, 0x8
-	v17:i64 = Load v16, 0x0
-	v18:i64 = Load v1, 0x8
-	v19:i64 = Load v18, 0x30
+	v15:i32 = Iconst_32 0x0
+	v16:i32 = CallIndirect v14:sig2, v0, v15, v13
+	v17:i64 = Load v1, 0x8
+	v18:i64 = Load v17, 0x0
+	v19:i64 = Load v1, 0x8
+	v20:i64 = Load v19, 0x30
 	Store v1, v0, 0x8
-	v20:i64 = Load v1, 0x18
 	v21:i64 = Load v1, 0x20
-	v22:i32 = CallIndirect v20:sig0, v0, v21
-	v23:i64 = Load v1, 0x8
-	v24:i64 = Load v23, 0x0
-	v25:i64 = Load v1, 0x8
-	v26:i64 = Load v25, 0x30
-	v27:i64 = Load v1, 0x8
-	v28:i32 = Load v27, 0x30
-	v29:i32 = Iconst_32 0x10
-	v30:i32 = Ushr v28, v29
-	Jump blk_ret, v4, v12, v22, v30
+	v22:i64 = Load v1, 0x28
+	v23:i32 = CallIndirect v21:sig0, v0, v22
+	v24:i64 = Load v1, 0x8
+	v25:i64 = Load v24, 0x0
+	v26:i64 = Load v1, 0x8
+	v27:i64 = Load v26, 0x30
+	v28:i64 = Load v1, 0x8
+	v29:i32 = Load v28, 0x30
+	v30:i32 = Iconst_32 0x10
+	v31:i32 = Ushr v29, v30
+	Jump blk_ret, v4, v12, v23, v31
 `,
 			expAfterPasses: `
 signatures:
 	sig0: i64i64_i32
-	sig2: i64i32_i32
+	sig2: i64i32i32_i32
 
 blk0: (v0:i64, v1:i64)
 	Store v1, v0, 0x8
-	v2:i64 = Load v1, 0x18
-	v3:i64 = Load v1, 0x20
+	v2:i64 = Load v1, 0x20
+	v3:i64 = Load v1, 0x28
 	v4:i32 = CallIndirect v2:sig0, v0, v3
 	v9:i64 = Load v1, 0x8
 	v10:i32 = Load v9, 0x30
@@ -1319,16 +1320,17 @@ blk0: (v0:i64, v1:i64)
 	v13:i32 = Iconst_32 0xa
 	Store v1, v0, 0x8
 	v14:i64 = Load v0, 0x48
-	v15:i32 = CallIndirect v14:sig2, v0, v13
+	v15:i32 = Iconst_32 0x0
+	v16:i32 = CallIndirect v14:sig2, v0, v15, v13
 	Store v1, v0, 0x8
-	v20:i64 = Load v1, 0x18
 	v21:i64 = Load v1, 0x20
-	v22:i32 = CallIndirect v20:sig0, v0, v21
-	v27:i64 = Load v1, 0x8
-	v28:i32 = Load v27, 0x30
-	v29:i32 = Iconst_32 0x10
-	v30:i32 = Ushr v28, v29
-	Jump blk_ret, v4, v12, v22, v30
+	v22:i64 = Load v1, 0x28
+	v23:i32 = CallIndirect v21:sig0, v0, v22
+	v28:i64 = Load v1, 0x8
+	v29:i32 = Load v28, 0x30
+	v30:i32 = Iconst_32 0x10
+	v31:i32 = Ushr v29, v30
+	Jump blk_ret, v4, v12, v23, v31
 `,
 		},
 		{
@@ -1336,7 +1338,7 @@ blk0: (v0:i64, v1:i64)
 			m:    testcases.MemorySizeGrow.Module,
 			exp: `
 signatures:
-	sig1: i64i32_i32
+	sig1: i64i32i32_i32
 
 blk0: (v0:i64, v1:i64)
 	v2:i32 = Iconst_32 0x1
@@ -1352,23 +1354,23 @@ blk0: (v0:i64, v1:i64)
 	Jump blk1
 
 blk1: () <-- (blk0)
-	v12:i64 = Load v1, 0x0
-	v13:i64 = Load v12, 0x30
-	v14:i64 = Load v13, 0x28
-	v15:i64 = Ishl v9, v5
-	v16:i32 = Icmp ge_u, v14, v15
-	Brnz v16, blk2
+	v12:i64 = Load v1, 0x18
+	v13:i64 = Load v12, 0x28
+	v14:i64 = Ishl v9, v5
+	v15:i32 = Icmp ge_u, v13, v14
+	Brnz v15, blk2
 	Jump blk3
 
 blk2: () <-- (blk1)
-	Store v15, v1, 0x10
-	Store v15, v13, 0x30
+	Store v14, v1, 0x10
+	Store v14, v12, 0x30
 	Jump blk5, v7
 
 blk3: () <-- (blk1)
 	Store v1, v0, 0x8
-	v17:i64 = Load v0, 0x48
-	v18:i32 = CallIndirect v17:sig1, v0, v2
+	v16:i64 = Load v0, 0x48
+	v17:i32 = Iconst_32 0x0
+	v18:i32 = CallIndirect v16:sig1, v0, v17, v2
 	Jump blk5, v18
 
 blk4: () <-- (blk0)
@@ -1393,23 +1395,23 @@ blk5: (v3:i32) <-- (blk2,blk3,blk4)
 	Jump blk6
 
 blk6: () <-- (blk5)
-	v34:i64 = Load v1, 0x0
-	v35:i64 = Load v34, 0x30
-	v36:i64 = Load v35, 0x28
-	v37:i64 = Ishl v31, v27
-	v38:i32 = Icmp ge_u, v36, v37
-	Brnz v38, blk7
+	v34:i64 = Load v1, 0x18
+	v35:i64 = Load v34, 0x28
+	v36:i64 = Ishl v31, v27
+	v37:i32 = Icmp ge_u, v35, v36
+	Brnz v37, blk7
 	Jump blk8
 
 blk7: () <-- (blk6)
-	Store v37, v1, 0x10
-	Store v37, v35, 0x30
+	Store v36, v1, 0x10
+	Store v36, v34, 0x30
 	Jump blk10, v29
 
 blk8: () <-- (blk6)
 	Store v1, v0, 0x8
-	v39:i64 = Load v0, 0x48
-	v40:i32 = CallIndirect v39:sig1, v0, v25
+	v38:i64 = Load v0, 0x48
+	v39:i32 = Iconst_32 0x0
+	v40:i32 = CallIndirect v38:sig1, v0, v39, v25
 	Jump blk10, v40
 
 blk9: () <-- (blk5)
@@ -1423,7 +1425,7 @@ blk10: (v26:i32) <-- (blk7,blk8,blk9)
 `,
 			expAfterPasses: `
 signatures:
-	sig1: i64i32_i32
+	sig1: i64i32i32_i32
 
 blk0: (v0:i64, v1:i64)
 	v2:i32 = Iconst_32 0x1
@@ -1439,23 +1441,23 @@ blk0: (v0:i64, v1:i64)
 	Jump fallthrough
 
 blk1: () <-- (blk0)
-	v12:i64 = Load v1, 0x0
-	v13:i64 = Load v12, 0x30
-	v14:i64 = Load v13, 0x28
-	v15:i64 = Ishl v9, v5
-	v16:i32 = Icmp ge_u, v14, v15
-	Brz v16, blk3
+	v12:i64 = Load v1, 0x18
+	v13:i64 = Load v12, 0x28
+	v14:i64 = Ishl v9, v5
+	v15:i32 = Icmp ge_u, v13, v14
+	Brz v15, blk3
 	Jump fallthrough
 
 blk2: () <-- (blk1)
-	Store v15, v1, 0x10
-	Store v15, v13, 0x30
+	Store v14, v1, 0x10
+	Store v14, v12, 0x30
 	Jump blk5, v7
 
 blk3: () <-- (blk1)
 	Store v1, v0, 0x8
-	v17:i64 = Load v0, 0x48
-	v18:i32 = CallIndirect v17:sig1, v0, v2
+	v16:i64 = Load v0, 0x48
+	v17:i32 = Iconst_32 0x0
+	v18:i32 = CallIndirect v16:sig1, v0, v17, v2
 	Jump blk5, v18
 
 blk4: () <-- (blk0)
@@ -1479,23 +1481,23 @@ blk5: (v3:i32) <-- (blk2,blk3,blk4)
 	Jump fallthrough
 
 blk6: () <-- (blk5)
-	v34:i64 = Load v1, 0x0
-	v35:i64 = Load v34, 0x30
-	v36:i64 = Load v35, 0x28
-	v37:i64 = Ishl v31, v27
-	v38:i32 = Icmp ge_u, v36, v37
-	Brz v38, blk8
+	v34:i64 = Load v1, 0x18
+	v35:i64 = Load v34, 0x28
+	v36:i64 = Ishl v31, v27
+	v37:i32 = Icmp ge_u, v35, v36
+	Brz v37, blk8
 	Jump fallthrough
 
 blk7: () <-- (blk6)
-	Store v37, v1, 0x10
-	Store v37, v35, 0x30
+	Store v36, v1, 0x10
+	Store v36, v34, 0x30
 	Jump blk10, v29
 
 blk8: () <-- (blk6)
 	Store v1, v0, 0x8
-	v39:i64 = Load v0, 0x48
-	v40:i32 = CallIndirect v39:sig1, v0, v25
+	v38:i64 = Load v0, 0x48
+	v39:i32 = Iconst_32 0x0
+	v40:i32 = CallIndirect v38:sig1, v0, v39, v25
 	Jump blk10, v40
 
 blk9: () <-- (blk5)
@@ -1765,7 +1767,7 @@ blk0: (v0:i64, v1:i64, v2:v128, v3:v128)
 			features: api.CoreFeaturesV2 | experimental.CoreFeaturesThreads,
 			exp: `
 signatures:
-	sig6: i64i64i32i64_i32
+	sig6: i64i32i64i32i64_i32
 
 blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i64)
 	Store v1, v0, 0x8
@@ -1787,8 +1789,9 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i64)
 	v19:i32 = Icmp neq, v17, v18
 	ExitIfTrue v19, v0, unaligned_atomic
 	v20:i64 = Load v0, 0x488
-	v21:i32 = CallIndirect v20:sig6, v0, v4, v3, v15
-	Jump blk_ret, v21
+	v21:i32 = Iconst_32 0x0
+	v22:i32 = CallIndirect v20:sig6, v0, v21, v4, v3, v15
+	Jump blk_ret, v22
 `,
 		},
 		{
@@ -1797,7 +1800,7 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i64)
 			features: api.CoreFeaturesV2 | experimental.CoreFeaturesThreads,
 			exp: `
 signatures:
-	sig7: i64i64i64i64_i32
+	sig7: i64i32i64i64i64_i32
 
 blk0: (v0:i64, v1:i64, v2:i32, v3:i64, v4:i64)
 	Store v1, v0, 0x8
@@ -1819,8 +1822,9 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i64, v4:i64)
 	v19:i32 = Icmp neq, v17, v18
 	ExitIfTrue v19, v0, unaligned_atomic
 	v20:i64 = Load v0, 0x490
-	v21:i32 = CallIndirect v20:sig7, v0, v4, v3, v15
-	Jump blk_ret, v21
+	v21:i32 = Iconst_32 0x0
+	v22:i32 = CallIndirect v20:sig7, v0, v21, v4, v3, v15
+	Jump blk_ret, v22
 `,
 		},
 		{
@@ -1829,7 +1833,7 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i64, v4:i64)
 			features: api.CoreFeaturesV2 | experimental.CoreFeaturesThreads,
 			exp: `
 signatures:
-	sig8: i64i32i64_i32
+	sig8: i64i32i32i64_i32
 
 blk0: (v0:i64, v1:i64, v2:i32, v3:i32)
 	Store v1, v0, 0x8
@@ -1851,8 +1855,9 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32)
 	v18:i32 = Icmp neq, v16, v17
 	ExitIfTrue v18, v0, unaligned_atomic
 	v19:i64 = Load v0, 0x498
-	v20:i32 = CallIndirect v19:sig8, v0, v3, v14
-	Jump blk_ret, v20
+	v20:i32 = Iconst_32 0x0
+	v21:i32 = CallIndirect v19:sig8, v0, v20, v3, v14
+	Jump blk_ret, v21
 `,
 		},
 		{
@@ -2555,7 +2560,7 @@ blk0: (v0:i64, v1:i64)
 						wasm.OpcodeEnd,
 					},
 				}},
-				MemorySection: &wasm.Memory{Min: 1},
+				MemorySection: []wasm.Memory{{Min: 1}},
 			},
 			features: api.CoreFeaturesV2,
 			exp: `
@@ -2630,7 +2635,7 @@ blk3: () <-- (blk1,blk2)
 						wasm.OpcodeEnd,
 					},
 				}},
-				MemorySection: &wasm.Memory{Min: 1},
+				MemorySection: []wasm.Memory{{Min: 1}},
 			},
 			features: api.CoreFeaturesV2,
 			exp: `
@@ -2792,14 +2797,14 @@ func TestCompiler_declareSignatures(t *testing.T) {
 			{ID: 1, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI32}},
 			{ID: 2, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeF64, ssa.TypeI32}},
 			{ID: 3, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64, ssa.TypeI32}},
-			{ID: 4, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32}, Results: []ssa.Type{ssa.TypeI32}},
+			{ID: 4, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI32}, Results: []ssa.Type{ssa.TypeI32}},
 			{ID: 5, Params: []ssa.Type{ssa.TypeI64}},
 			{ID: 6, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
 			{ID: 7, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32}, Results: []ssa.Type{ssa.TypeI64}},
 			{ID: 8, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeI64}},
-			{ID: 9, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
-			{ID: 10, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
-			{ID: 11, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
+			{ID: 9, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
+			{ID: 10, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
+			{ID: 11, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
 			// EH signatures.
 			{ID: 12, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64}},
 			{ID: 13, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
@@ -2836,14 +2841,14 @@ func TestCompiler_declareSignatures(t *testing.T) {
 			{ID: 10, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32}},
 			{ID: 11, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI32}},
 			// Misc.
-			{ID: 12, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32}, Results: []ssa.Type{ssa.TypeI32}},
+			{ID: 12, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI32}, Results: []ssa.Type{ssa.TypeI32}},
 			{ID: 13, Params: []ssa.Type{ssa.TypeI64}},
 			{ID: 14, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
 			{ID: 15, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32}, Results: []ssa.Type{ssa.TypeI64}},
 			{ID: 16, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeI64}},
-			{ID: 17, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
-			{ID: 18, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
-			{ID: 19, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
+			{ID: 17, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
+			{ID: 18, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
+			{ID: 19, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
 			// EH signatures.
 			{ID: 20, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64}},
 			{ID: 21, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},

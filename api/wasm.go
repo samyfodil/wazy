@@ -149,7 +149,10 @@ type Module interface {
 	// Name is the name this module was instantiated with. Exported functions can be imported with this name.
 	Name() string
 
-	// Memory returns a memory defined in this module or nil if there are none wasn't.
+	// Memory returns memory index 0 (the module's first declared or imported
+	// memory) or nil if it has none. When CoreFeatureMultiMemory is enabled a
+	// module may have more than one memory; use ExportedMemory to reach any
+	// memory beyond index 0.
 	Memory() Memory
 
 	// ExportedFunction returns a function exported from this module or nil if it wasn't.
@@ -180,8 +183,8 @@ type Module interface {
 	// ExportedMemoryDefinitions returns all the exported memory definitions
 	// in this module, keyed on export name.
 	//
-	// Note: As of WebAssembly Core Specification 2.0, there can be at most one
-	// memory.
+	// Note: Without CoreFeatureMultiMemory there can be at most one memory;
+	// with it enabled, a module may export more than one.
 	ExportedMemoryDefinitions() map[string]MemoryDefinition
 
 	// ExportedGlobal a global exported from this module or nil if it wasn't.

@@ -55,14 +55,23 @@ func (b *builder) runPreBlockLayoutPasses() {
 
 type dominatedMemoryBound struct {
 	base ValueID
-	ceil uint64
-	next int
+	// memLen is the resolved-alias ValueID of the memory-length operand the
+	// bounds check compared against. Under the multi-memory proposal, distinct
+	// memories load their length from distinct opaque-context offsets and so
+	// necessarily produce distinct SSA values here (see getMemoryLenValue) --
+	// matching on it (in addition to base/ceil) is what keeps a bound proven
+	// for one memory from being incorrectly reused to eliminate a check
+	// against a different memory that happens to share the same base address
+	// value and a smaller-or-equal ceil.
+	memLen ValueID
+	ceil   uint64
+	next   int
 }
 
 // passDominatedMemoryBoundsEliminationOpt removes a linear-memory bounds check
-// when a stronger check of the same address dominates it. Redundant PHIs must
-// be eliminated first so addresses forwarded unchanged through block parameters
-// resolve to the same SSA value.
+// when a stronger check of the same address AND memory dominates it. Redundant
+// PHIs must be eliminated first so addresses forwarded unchanged through block
+// parameters resolve to the same SSA value.
 func passDominatedMemoryBoundsEliminationOpt(b *builder) {
 	blockCount := b.basicBlocksPool.Allocated()
 	if cap(b.dominatedMemoryBoundHeads) < blockCount {
@@ -78,18 +87,18 @@ func passDominatedMemoryBoundsEliminationOpt(b *builder) {
 	for _, blk := range b.reversePostOrderedBasicBlocks {
 		for cur := blk.rootInstr; cur != nil; {
 			next := cur.next
-			base, ceil, ok := memoryBoundsCheckData(b, cur)
-			if ok && b.hasDominatingMemoryBound(blk, base, ceil) {
+			base, memLen, ceil, ok := memoryBoundsCheckData(b, cur)
+			if ok && b.hasDominatingMemoryBound(blk, base, memLen, ceil) {
 				blk.removeInstruction(cur)
 			} else if ok {
-				b.recordDominatingMemoryBound(blk, base, ceil)
+				b.recordDominatingMemoryBound(blk, base, memLen, ceil)
 			}
 			cur = next
 		}
 	}
 }
 
-func memoryBoundsCheckData(b *builder, instr *Instruction) (base ValueID, ceil uint64, ok bool) {
+func memoryBoundsCheckData(b *builder, instr *Instruction) (base, memLen ValueID, ceil uint64, ok bool) {
 	if instr.opcode != OpcodeExitIfTrueWithCode {
 		return
 	}
@@ -101,7 +110,7 @@ func memoryBoundsCheckData(b *builder, instr *Instruction) (base ValueID, ceil u
 	if cmp == nil || cmp.opcode != OpcodeIcmp {
 		return
 	}
-	_, end, cond := cmp.IcmpData()
+	lenOperand, end, cond := cmp.IcmpData()
 	if cond != IntegerCmpCondUnsignedLessThan {
 		return
 	}
@@ -126,14 +135,14 @@ func memoryBoundsCheckData(b *builder, instr *Instruction) (base ValueID, ceil u
 	if from != 32 || to != 64 {
 		return
 	}
-	return b.resolveAlias(extend.Arg()).ID(), ceil, true
+	return b.resolveAlias(extend.Arg()).ID(), b.resolveAlias(lenOperand).ID(), ceil, true
 }
 
-func (b *builder) hasDominatingMemoryBound(blk *basicBlock, base ValueID, ceil uint64) bool {
+func (b *builder) hasDominatingMemoryBound(blk *basicBlock, base, memLen ValueID, ceil uint64) bool {
 	for {
 		for i := b.dominatedMemoryBoundHeads[blk.id]; i >= 0; i = b.dominatedMemoryBounds[i].next {
 			bound := &b.dominatedMemoryBounds[i]
-			if bound.base == base && bound.ceil >= ceil {
+			if bound.base == base && bound.memLen == memLen && bound.ceil >= ceil {
 				return true
 			}
 		}
@@ -145,16 +154,17 @@ func (b *builder) hasDominatingMemoryBound(blk *basicBlock, base ValueID, ceil u
 	}
 }
 
-func (b *builder) recordDominatingMemoryBound(blk *basicBlock, base ValueID, ceil uint64) {
+func (b *builder) recordDominatingMemoryBound(blk *basicBlock, base, memLen ValueID, ceil uint64) {
 	head := b.dominatedMemoryBoundHeads[blk.id]
 	for i := head; i >= 0; i = b.dominatedMemoryBounds[i].next {
 		bound := &b.dominatedMemoryBounds[i]
-		if bound.base == base {
+		if bound.base == base && bound.memLen == memLen {
 			bound.ceil = max(bound.ceil, ceil)
 			return
 		}
 	}
-	b.dominatedMemoryBounds = append(b.dominatedMemoryBounds, dominatedMemoryBound{base: base, ceil: ceil, next: head})
+	b.dominatedMemoryBounds = append(b.dominatedMemoryBounds,
+		dominatedMemoryBound{base: base, memLen: memLen, ceil: ceil, next: head})
 	b.dominatedMemoryBoundHeads[blk.id] = len(b.dominatedMemoryBounds) - 1
 }
 

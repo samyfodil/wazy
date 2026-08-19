@@ -47,10 +47,7 @@ type (
 	//
 	// 	type moduleContextOpaque struct {
 	// 	    moduleInstance                            *wasm.ModuleInstance
-	// 	    localMemoryBufferPtr                      *byte                (optional)
-	// 	    localMemoryLength                         uint64               (optional)
-	// 	    importedMemoryInstance                    *wasm.MemoryInstance (optional)
-	// 	    importedMemoryOwnerOpaqueCtx              *byte                (optional)
+	// 	    memories                                  [# of memories]memoryRecord (optional)
 	// 	    importedFunctions                         [# of importedFunctions]functionInstance
 	//      importedGlobals                           []ImportedGlobal       (optional)
 	//      localGlobals                              []Global               (optional)
@@ -61,6 +58,16 @@ type (
 	//      dataInstances1stElement                   []wasm.DataInstance    (optional)
 	//      elementInstances1stElement                []wasm.ElementInstance (optional)
 	// 	}
+	//
+	//  // memoryRecord is one per entry in the module's memory index space
+	//  // (imports first, then module-defined). For an imported memory it holds
+	//  // {*wasm.MemoryInstance, owner's opaque module context ptr, _ padding};
+	//  // for a local memory it holds {buffer base pointer, byte length,
+	//  // *wasm.MemoryInstance}. See nativeapi.MemoryOffset /
+	//  // LocalMemoryInstancePtrOffset.
+	//  type memoryRecord struct {
+	// 		a, b, c uint64
+	//  }
 	//
 	//  type ImportedGlobal struct {
 	// 		*Global
@@ -98,11 +105,14 @@ func (m *moduleEngine) setupOpaque() {
 		uint64(uintptr(unsafe.Pointer(m.module))),
 	)
 
-	if lm := offsets.LocalMemoryBegin; lm >= 0 {
-		m.putLocalMemory()
+	if offsets.MemoriesBegin >= 0 {
+		for i := range inst.Memories {
+			if wasm.Index(i) >= inst.Source.ImportMemoryCount {
+				m.putLocalMemory(wasm.Index(i))
+			}
+			// Note: imported memories are resolved in ResolveImportedMemory.
+		}
 	}
-
-	// Note: imported memory is resolved in ResolveImportedFunction.
 
 	// Note: imported functions are resolved in ResolveImportedFunction.
 
@@ -253,14 +263,14 @@ func (m *moduleEngine) SetGlobalValue(i wasm.Index, lo, hi uint64) {
 func (m *moduleEngine) OwnsGlobals() bool { return true }
 
 // MemoryGrown implements wasm.ModuleEngine.
-func (m *moduleEngine) MemoryGrown() {
-	m.putLocalMemory()
+func (m *moduleEngine) MemoryGrown(index wasm.Index) {
+	m.putLocalMemory(index)
 }
 
-// putLocalMemory writes the local memory buffer pointer and length to the opaque buffer.
-func (m *moduleEngine) putLocalMemory() {
-	mem := m.module.MemoryInstance
-	offset := m.parent.offsets.LocalMemoryBegin
+// putLocalMemory writes the index-th local memory's buffer pointer and length to the opaque buffer.
+func (m *moduleEngine) putLocalMemory(index wasm.Index) {
+	mem := m.module.Memories[index]
+	offset := m.parent.offsets.MemoryOffset(int(index))
 
 	s := mem.ByteSize()
 	var b uint64
@@ -269,6 +279,12 @@ func (m *moduleEngine) putLocalMemory() {
 	}
 	binary.LittleEndian.PutUint64(m.opaque[offset:], b)
 	binary.LittleEndian.PutUint64(m.opaque[offset+8:], s)
+	// The *wasm.MemoryInstance itself never changes across a Grow, but is
+	// cheap to rewrite here rather than special-cased to instantiation-time
+	// only; lowerLocalMemoryGrow's fast path reads it directly off this
+	// offset to reach nativeGrowCap/sizeBytes without chasing the
+	// ModuleInstance -> Memories slice.
+	binary.LittleEndian.PutUint64(m.opaque[offset+16:], uint64(uintptr(unsafe.Pointer(mem))))
 }
 
 // ResolveImportedFunction implements wasm.ModuleEngine.
@@ -295,21 +311,23 @@ func (m *moduleEngine) ResolveImportedFunction(index, descFunc, indexInImportedM
 }
 
 // ResolveImportedMemory implements wasm.ModuleEngine.
-func (m *moduleEngine) ResolveImportedMemory(importedModuleEngine wasm.ModuleEngine) {
+func (m *moduleEngine) ResolveImportedMemory(index, indexInImportedModule wasm.Index, importedModuleEngine wasm.ModuleEngine) {
 	importedME := importedModuleEngine.(*moduleEngine)
 	inst := importedME.module
 
 	var memInstPtr uint64
 	var memOwnerOpaquePtr uint64
-	if offs := importedME.parent.offsets; offs.ImportedMemoryBegin >= 0 {
-		offset := offs.ImportedMemoryBegin
+	if indexInImportedModule < inst.Source.ImportMemoryCount {
+		// The imported module itself imports this memory: read its already-resolved
+		// record so the chain of re-exports ultimately points at the true owner.
+		offset := importedME.parent.offsets.MemoryOffset(int(indexInImportedModule))
 		memInstPtr = binary.LittleEndian.Uint64(importedME.opaque[offset:])
 		memOwnerOpaquePtr = binary.LittleEndian.Uint64(importedME.opaque[offset+8:])
 	} else {
-		memInstPtr = uint64(uintptr(unsafe.Pointer(inst.MemoryInstance)))
+		memInstPtr = uint64(uintptr(unsafe.Pointer(inst.Memories[indexInImportedModule])))
 		memOwnerOpaquePtr = uint64(uintptr(unsafe.Pointer(importedME.opaquePtr)))
 	}
-	offset := m.parent.offsets.ImportedMemoryBegin
+	offset := m.parent.offsets.MemoryOffset(int(index))
 	binary.LittleEndian.PutUint64(m.opaque[offset:], memInstPtr)
 	binary.LittleEndian.PutUint64(m.opaque[offset+8:], memOwnerOpaquePtr)
 }

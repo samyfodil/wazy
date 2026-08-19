@@ -37,8 +37,9 @@ type waiters struct {
 
 // MemoryInstance represents a memory instance in a store, and implements api.Memory.
 //
-// Note: In WebAssembly 1.0 (20191205), there may be up to one Memory per store, which means the precise memory is always
-// wasm.Store Memories index zero: `store.Memories[0]`
+// Note: In WebAssembly 1.0 (20191205), there may be up to one Memory per module, which means the precise memory is
+// always ModuleInstance.Memories index zero: `mod.Memories[0]`. With api.CoreFeatureMultiMemory enabled, a module
+// may declare or import more than one memory, indexed by ModuleInstance.Memories.
 // See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#memory-instances%E2%91%A0.
 type MemoryInstance struct {
 	internalapi.WazyOnlyType
@@ -63,6 +64,9 @@ type MemoryInstance struct {
 	backing []byte
 	// definition is known at compile time.
 	definition api.MemoryDefinition
+
+	// index is this memory's Index within its owning ModuleInstance.Memories.
+	index Index
 
 	// Mux is used in interpreter mode to prevent overlapping calls to atomic instructions,
 	// introduced with WebAssembly threads proposal, and in compiler mode to make memory modifications
@@ -370,7 +374,7 @@ func (m *MemoryInstance) Grow(delta uint32) (result uint32, ok bool) {
 	} else {
 		m.sizeBytes = MemoryPagesToBytesNum(newPages)
 	}
-	m.ownerModuleEngine.MemoryGrown()
+	m.ownerModuleEngine.MemoryGrown(m.index)
 	return currentPages, true
 }
 
