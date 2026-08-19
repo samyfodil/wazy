@@ -539,6 +539,11 @@ func (m *ModuleInstance) resolveImports(ctx context.Context, module *Module) (er
 					return
 				}
 
+				if expected.IsShared != importedMemory.Shared {
+					err = errorSharedMismatch(i, expected.IsShared, importedMemory.Shared)
+					return
+				}
+
 				// Mark this memory as shared before handing it out, so its
 				// owner's Close (ensureResourcesClosed) can never decide to
 				// recycle Buffer into the linear-memory buffer pool while we
@@ -607,6 +612,10 @@ func errorNoMax(i *Import, expected uint32) error {
 
 func errorMaxSizeMismatch(i *Import, expected, actual uint32) error {
 	return errorInvalidImport(i, fmt.Errorf("maximum size mismatch: %d < %d", expected, actual))
+}
+
+func errorSharedMismatch(i *Import, expected, actual bool) error {
+	return errorInvalidImport(i, fmt.Errorf("shared mismatch: expected %t, but actual has %t", expected, actual))
 }
 
 func errorInvalidImport(i *Import, err error) error {
