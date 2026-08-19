@@ -1313,6 +1313,54 @@ func TestE2E_memoryGrowWithinReservedCapacity(t *testing.T) {
 	require.Equal(t, uint32(3*wasm.MemoryPageSize), memory.Size())
 }
 
+// TestE2E_memoryAtMaxPages guards against a byte-length truncation bug: a
+// memory at the legal maximum of 65536 pages has a byte length of exactly
+// 2^32, which doesn't fit in 32 bits. Loading only the low 32 bits of that
+// length (as an optimization assuming "a page count fits in 32 bits" without
+// noticing the intermediate byte-length value doesn't) makes memory.size
+// wrongly report 0 pages, and makes every access on such a memory wrongly
+// trap as out-of-bounds.
+//
+// This does NOT cover writes at the very top of such a memory (address
+// 0xffffffff): that exercises a separate, pre-existing (present on main
+// before multi-memory, unrelated to it) bug where the write silently lands
+// on the wrong address instead of trapping or landing correctly. Tracked
+// separately; out of scope here.
+func TestE2E_memoryAtMaxPages(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler())
+	t.Cleanup(func() { require.NoError(t, r.Close(ctx)) })
+
+	m := &wasm.Module{
+		TypeSection: []wasm.FunctionType{
+			{Results: []wasm.ValueType{i32}},
+		},
+		FunctionSection: []wasm.Index{0},
+		MemorySection:   []wasm.Memory{{Min: 65536, Cap: 65536, Max: 65536, IsMaxEncoded: true}},
+		ExportSection: []wasm.Export{
+			{Name: "size", Type: wasm.ExternTypeFunc, Index: 0},
+			{Name: "memory", Type: wasm.ExternTypeMemory, Index: 0},
+		},
+		CodeSection: []wasm.Code{
+			{Body: []byte{
+				wasm.OpcodeMemorySize, 0x00,
+				wasm.OpcodeEnd,
+			}},
+		},
+	}
+	mod, err := r.Instantiate(ctx, binaryencoding.EncodeModule(m))
+	require.NoError(t, err)
+
+	// mod.Memory().Size() (bytes, uint32) can't represent 2^32 bytes at all,
+	// a separate, pre-existing API limitation -- assert on the page count
+	// instead, which is what the fix under test actually corrects.
+	require.Equal(t, uint32(65536), mod.Memory().(*wasm.MemoryInstance).Pages())
+
+	results, err := mod.ExportedFunction("size").Call(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(65536), results[0])
+}
+
 type countingLinearMemory struct {
 	buf         []byte
 	reallocates int

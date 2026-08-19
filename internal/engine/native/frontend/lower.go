@@ -1152,11 +1152,13 @@ func (c *Compiler) lowerCurrentOpcode() {
 			break
 		}
 
-		// Deliberately bypasses getMemoryLenValue's cached 64-bit i64 variable:
-		// a page count never exceeds MemoryLimitPages (65536), so a direct
-		// (uncached, uncoupled from the load/store bounds-check caching)
-		// 32-bit load + shift is both correct and one instruction cheaper than
-		// loading the full 64-bit byte length and reducing it.
+		// Deliberately bypasses getMemoryLenValue's cached i64 variable: this
+		// is an uncached, uncoupled-from-the-load/store-bounds-check-caching
+		// read, one instruction cheaper for the (overwhelmingly common)
+		// sub-4GiB case. The byte length itself, not just the resulting page
+		// count, must be loaded as a full 64-bit value: a 65536-page (the
+		// legal maximum) memory has a byte length of exactly 2^32, which a
+		// 32-bit load truncates to zero.
 		opaqueOffset := c.offset.MemoryOffset(int(memIndex))
 		var memSizeInBytes ssa.Value
 		if memIndex < c.m.ImportMemoryCount {
@@ -1165,19 +1167,23 @@ func (c *Compiler) lowerCurrentOpcode() {
 				Insert(builder).
 				Return()
 			memSizeInBytes = builder.AllocateInstruction().
-				AsLoad(memInstPtr, memoryInstanceSizeOffset, ssa.TypeI32).
+				AsLoad(memInstPtr, memoryInstanceSizeOffset, ssa.TypeI64).
 				Insert(builder).
 				Return()
 		} else {
 			memSizeInBytes = builder.AllocateInstruction().
-				AsLoad(c.moduleCtxPtrValue, (opaqueOffset + 8).U32(), ssa.TypeI32).
+				AsLoad(c.moduleCtxPtrValue, (opaqueOffset + 8).U32(), ssa.TypeI64).
 				Insert(builder).
 				Return()
 		}
 
-		amount := builder.AllocateInstruction().AsIconst32(uint32(wasm.MemoryPageSizeInBits)).Insert(builder).Return()
-		memSize := builder.AllocateInstruction().
+		amount := builder.AllocateInstruction().AsIconst64(uint64(wasm.MemoryPageSizeInBits)).Insert(builder).Return()
+		memSize64 := builder.AllocateInstruction().
 			AsUshr(memSizeInBytes, amount).
+			Insert(builder).
+			Return()
+		memSize := builder.AllocateInstruction().
+			AsIreduce(memSize64, ssa.TypeI32).
 			Insert(builder).
 			Return()
 		state.push(memSize)
@@ -4964,7 +4970,11 @@ func (c *Compiler) getMemoryLenValue(memIndex wasm.Index, forceReload bool) ssa.
 			addr := builder.AllocateInstruction().AsIadd(c.moduleCtxPtrValue, lenOffset).Insert(builder).Return()
 			load.AsAtomicLoad(addr, 8, ssa.TypeI64)
 		} else {
-			load.AsExtLoad(ssa.OpcodeUload32, c.moduleCtxPtrValue, (opaqueOffset + 8).U32(), true)
+			// Must be a full 64-bit load, not AsExtLoad(Uload32, ...): a
+			// 65536-page (the legal maximum) memory has a byte length of
+			// exactly 2^32, which a 32-bit load truncates to zero, making
+			// every access on such a memory incorrectly trap as out-of-bounds.
+			load.AsLoad(c.moduleCtxPtrValue, (opaqueOffset + 8).U32(), ssa.TypeI64)
 		}
 		builder.InsertInstruction(load)
 		ret = load.Return()

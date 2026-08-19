@@ -1015,7 +1015,7 @@ blk3: () <-- (blk2)
 blk0: (v0:i64, v1:i64, v2:i32, v3:i32)
 	v4:i64 = Iconst_64 0x4
 	v5:i64 = UExtend v2, 32->64
-	v6:i64 = Uload32 v1, 0x10
+	v6:i64 = Load v1, 0x10
 	v7:i64 = Iadd v5, v4
 	v8:i32 = Icmp lt_u, v6, v7
 	ExitIfTrue v8, v0, memory_out_of_bounds
@@ -1032,7 +1032,7 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32)
 blk0: (v0:i64, v1:i64, v2:i32)
 	v3:i64 = Iconst_64 0x4
 	v4:i64 = UExtend v2, 32->64
-	v5:i64 = Uload32 v1, 0x10
+	v5:i64 = Load v1, 0x10
 	v6:i64 = Iadd v4, v3
 	v7:i32 = Icmp lt_u, v5, v6
 	ExitIfTrue v7, v0, memory_out_of_bounds
@@ -1072,7 +1072,7 @@ blk0: (v0:i64, v1:i64, v2:i32)
 blk1: () <-- (blk0)
 	Call f1:sig1, v0, v1
 	v5:i64 = Load v1, 0x8
-	v6:i64 = Uload32 v1, 0x10
+	v6:i64 = Load v1, 0x10
 	Jump blk3
 
 blk2: () <-- (blk0)
@@ -1081,7 +1081,7 @@ blk2: () <-- (blk0)
 blk3: () <-- (blk1,blk2)
 	v8:i64 = Iconst_64 0x4
 	v9:i64 = UExtend v2, 32->64
-	v10:i64 = Uload32 v1, 0x10
+	v10:i64 = Load v1, 0x10
 	v11:i64 = Iadd v9, v8
 	v12:i32 = Icmp lt_u, v10, v11
 	ExitIfTrue v12, v0, memory_out_of_bounds
@@ -1110,7 +1110,7 @@ blk2: () <-- (blk0)
 blk3: () <-- (blk1,blk2)
 	v8:i64 = Iconst_64 0x4
 	v9:i64 = UExtend v2, 32->64
-	v10:i64 = Uload32 v1, 0x10
+	v10:i64 = Load v1, 0x10
 	v11:i64 = Iadd v9, v8
 	v12:i32 = Icmp lt_u, v10, v11
 	ExitIfTrue v12, v0, memory_out_of_bounds
@@ -1140,7 +1140,7 @@ blk0: (v0:i64, v1:i64, v2:i32)
 blk0: (v0:i64, v1:i64, v2:i32)
 	v3:i64 = Iconst_64 0x4
 	v4:i64 = UExtend v2, 32->64
-	v5:i64 = Uload32 v1, 0x10
+	v5:i64 = Load v1, 0x10
 	v6:i64 = Iadd v4, v3
 	v7:i32 = Icmp lt_u, v5, v6
 	ExitIfTrue v7, v0, memory_out_of_bounds
@@ -1277,31 +1277,33 @@ blk0: (v0:i64, v1:i64)
 	v7:i64 = Load v1, 0x8
 	v8:i64 = Load v7, 0x30
 	v9:i64 = Load v1, 0x8
-	v10:i32 = Load v9, 0x30
-	v11:i32 = Iconst_32 0x10
-	v12:i32 = Ushr v10, v11
-	v13:i32 = Iconst_32 0xa
+	v10:i64 = Load v9, 0x30
+	v11:i64 = Iconst_64 0x10
+	v12:i64 = Ushr v10, v11
+	v13:i32 = Ireduce v12
+	v14:i32 = Iconst_32 0xa
 	Store v1, v0, 0x8
-	v14:i64 = Load v0, 0x48
-	v15:i32 = Iconst_32 0x0
-	v16:i32 = CallIndirect v14:sig2, v0, v15, v13
-	v17:i64 = Load v1, 0x8
-	v18:i64 = Load v17, 0x0
-	v19:i64 = Load v1, 0x8
-	v20:i64 = Load v19, 0x30
+	v15:i64 = Load v0, 0x48
+	v16:i32 = Iconst_32 0x0
+	v17:i32 = CallIndirect v15:sig2, v0, v16, v14
+	v18:i64 = Load v1, 0x8
+	v19:i64 = Load v18, 0x0
+	v20:i64 = Load v1, 0x8
+	v21:i64 = Load v20, 0x30
 	Store v1, v0, 0x8
-	v21:i64 = Load v1, 0x20
-	v22:i64 = Load v1, 0x28
-	v23:i32 = CallIndirect v21:sig0, v0, v22
-	v24:i64 = Load v1, 0x8
-	v25:i64 = Load v24, 0x0
-	v26:i64 = Load v1, 0x8
-	v27:i64 = Load v26, 0x30
-	v28:i64 = Load v1, 0x8
-	v29:i32 = Load v28, 0x30
-	v30:i32 = Iconst_32 0x10
-	v31:i32 = Ushr v29, v30
-	Jump blk_ret, v4, v12, v23, v31
+	v22:i64 = Load v1, 0x20
+	v23:i64 = Load v1, 0x28
+	v24:i32 = CallIndirect v22:sig0, v0, v23
+	v25:i64 = Load v1, 0x8
+	v26:i64 = Load v25, 0x0
+	v27:i64 = Load v1, 0x8
+	v28:i64 = Load v27, 0x30
+	v29:i64 = Load v1, 0x8
+	v30:i64 = Load v29, 0x30
+	v31:i64 = Iconst_64 0x10
+	v32:i64 = Ushr v30, v31
+	v33:i32 = Ireduce v32
+	Jump blk_ret, v4, v13, v24, v33
 `,
 			expAfterPasses: `
 signatures:
@@ -1314,23 +1316,25 @@ blk0: (v0:i64, v1:i64)
 	v3:i64 = Load v1, 0x28
 	v4:i32 = CallIndirect v2:sig0, v0, v3
 	v9:i64 = Load v1, 0x8
-	v10:i32 = Load v9, 0x30
-	v11:i32 = Iconst_32 0x10
-	v12:i32 = Ushr v10, v11
-	v13:i32 = Iconst_32 0xa
+	v10:i64 = Load v9, 0x30
+	v11:i64 = Iconst_64 0x10
+	v12:i64 = Ushr v10, v11
+	v13:i32 = Ireduce v12
+	v14:i32 = Iconst_32 0xa
 	Store v1, v0, 0x8
-	v14:i64 = Load v0, 0x48
-	v15:i32 = Iconst_32 0x0
-	v16:i32 = CallIndirect v14:sig2, v0, v15, v13
+	v15:i64 = Load v0, 0x48
+	v16:i32 = Iconst_32 0x0
+	v17:i32 = CallIndirect v15:sig2, v0, v16, v14
 	Store v1, v0, 0x8
-	v21:i64 = Load v1, 0x20
-	v22:i64 = Load v1, 0x28
-	v23:i32 = CallIndirect v21:sig0, v0, v22
-	v28:i64 = Load v1, 0x8
-	v29:i32 = Load v28, 0x30
-	v30:i32 = Iconst_32 0x10
-	v31:i32 = Ushr v29, v30
-	Jump blk_ret, v4, v12, v23, v31
+	v22:i64 = Load v1, 0x20
+	v23:i64 = Load v1, 0x28
+	v24:i32 = CallIndirect v22:sig0, v0, v23
+	v29:i64 = Load v1, 0x8
+	v30:i64 = Load v29, 0x30
+	v31:i64 = Iconst_64 0x10
+	v32:i64 = Ushr v30, v31
+	v33:i32 = Ireduce v32
+	Jump blk_ret, v4, v13, v24, v33
 `,
 		},
 		{
@@ -1342,7 +1346,7 @@ signatures:
 
 blk0: (v0:i64, v1:i64)
 	v2:i32 = Iconst_32 0x1
-	v4:i64 = Uload32 v1, 0x10
+	v4:i64 = Load v1, 0x10
 	v5:i64 = Iconst_64 0x10
 	v6:i64 = Ushr v4, v5
 	v7:i32 = Ireduce v6
@@ -1379,49 +1383,50 @@ blk4: () <-- (blk0)
 
 blk5: (v3:i32) <-- (blk2,blk3,blk4)
 	v20:i64 = Load v1, 0x8
-	v21:i64 = Uload32 v1, 0x10
-	v22:i32 = Load v1, 0x10
-	v23:i32 = Iconst_32 0x10
-	v24:i32 = Ushr v22, v23
-	v25:i32 = Iconst_32 0x1
-	v27:i64 = Iconst_64 0x10
-	v28:i64 = Ushr v21, v27
-	v29:i32 = Ireduce v28
-	v30:i64 = UExtend v25, 32->64
-	v31:i64 = Iadd v28, v30
-	v32:i64 = Iconst_64 0x2
-	v33:i32 = Icmp gt_u, v31, v32
-	Brnz v33, blk9
+	v21:i64 = Load v1, 0x10
+	v22:i64 = Load v1, 0x10
+	v23:i64 = Iconst_64 0x10
+	v24:i64 = Ushr v22, v23
+	v25:i32 = Ireduce v24
+	v26:i32 = Iconst_32 0x1
+	v28:i64 = Iconst_64 0x10
+	v29:i64 = Ushr v21, v28
+	v30:i32 = Ireduce v29
+	v31:i64 = UExtend v26, 32->64
+	v32:i64 = Iadd v29, v31
+	v33:i64 = Iconst_64 0x2
+	v34:i32 = Icmp gt_u, v32, v33
+	Brnz v34, blk9
 	Jump blk6
 
 blk6: () <-- (blk5)
-	v34:i64 = Load v1, 0x18
-	v35:i64 = Load v34, 0x28
-	v36:i64 = Ishl v31, v27
-	v37:i32 = Icmp ge_u, v35, v36
-	Brnz v37, blk7
+	v35:i64 = Load v1, 0x18
+	v36:i64 = Load v35, 0x28
+	v37:i64 = Ishl v32, v28
+	v38:i32 = Icmp ge_u, v36, v37
+	Brnz v38, blk7
 	Jump blk8
 
 blk7: () <-- (blk6)
-	Store v36, v1, 0x10
-	Store v36, v34, 0x30
-	Jump blk10, v29
+	Store v37, v1, 0x10
+	Store v37, v35, 0x30
+	Jump blk10, v30
 
 blk8: () <-- (blk6)
 	Store v1, v0, 0x8
-	v38:i64 = Load v0, 0x48
-	v39:i32 = Iconst_32 0x0
-	v40:i32 = CallIndirect v38:sig1, v0, v39, v25
-	Jump blk10, v40
-
-blk9: () <-- (blk5)
-	v41:i32 = Iconst_32 0xffffffff
+	v39:i64 = Load v0, 0x48
+	v40:i32 = Iconst_32 0x0
+	v41:i32 = CallIndirect v39:sig1, v0, v40, v26
 	Jump blk10, v41
 
-blk10: (v26:i32) <-- (blk7,blk8,blk9)
-	v42:i64 = Load v1, 0x8
-	v43:i64 = Uload32 v1, 0x10
-	Jump blk_ret, v3, v24, v26
+blk9: () <-- (blk5)
+	v42:i32 = Iconst_32 0xffffffff
+	Jump blk10, v42
+
+blk10: (v27:i32) <-- (blk7,blk8,blk9)
+	v43:i64 = Load v1, 0x8
+	v44:i64 = Load v1, 0x10
+	Jump blk_ret, v3, v25, v27
 `,
 			expAfterPasses: `
 signatures:
@@ -1429,7 +1434,7 @@ signatures:
 
 blk0: (v0:i64, v1:i64)
 	v2:i32 = Iconst_32 0x1
-	v4:i64 = Uload32 v1, 0x10
+	v4:i64 = Load v1, 0x10
 	v5:i64 = Iconst_64 0x10
 	v6:i64 = Ushr v4, v5
 	v7:i32 = Ireduce v6
@@ -1465,47 +1470,48 @@ blk4: () <-- (blk0)
 	Jump fallthrough, v19
 
 blk5: (v3:i32) <-- (blk2,blk3,blk4)
-	v21:i64 = Uload32 v1, 0x10
-	v22:i32 = Load v1, 0x10
-	v23:i32 = Iconst_32 0x10
-	v24:i32 = Ushr v22, v23
-	v25:i32 = Iconst_32 0x1
-	v27:i64 = Iconst_64 0x10
-	v28:i64 = Ushr v21, v27
-	v29:i32 = Ireduce v28
-	v30:i64 = UExtend v25, 32->64
-	v31:i64 = Iadd v28, v30
-	v32:i64 = Iconst_64 0x2
-	v33:i32 = Icmp gt_u, v31, v32
-	Brnz v33, blk9
+	v21:i64 = Load v1, 0x10
+	v22:i64 = Load v1, 0x10
+	v23:i64 = Iconst_64 0x10
+	v24:i64 = Ushr v22, v23
+	v25:i32 = Ireduce v24
+	v26:i32 = Iconst_32 0x1
+	v28:i64 = Iconst_64 0x10
+	v29:i64 = Ushr v21, v28
+	v30:i32 = Ireduce v29
+	v31:i64 = UExtend v26, 32->64
+	v32:i64 = Iadd v29, v31
+	v33:i64 = Iconst_64 0x2
+	v34:i32 = Icmp gt_u, v32, v33
+	Brnz v34, blk9
 	Jump fallthrough
 
 blk6: () <-- (blk5)
-	v34:i64 = Load v1, 0x18
-	v35:i64 = Load v34, 0x28
-	v36:i64 = Ishl v31, v27
-	v37:i32 = Icmp ge_u, v35, v36
-	Brz v37, blk8
+	v35:i64 = Load v1, 0x18
+	v36:i64 = Load v35, 0x28
+	v37:i64 = Ishl v32, v28
+	v38:i32 = Icmp ge_u, v36, v37
+	Brz v38, blk8
 	Jump fallthrough
 
 blk7: () <-- (blk6)
-	Store v36, v1, 0x10
-	Store v36, v34, 0x30
-	Jump blk10, v29
+	Store v37, v1, 0x10
+	Store v37, v35, 0x30
+	Jump blk10, v30
 
 blk8: () <-- (blk6)
 	Store v1, v0, 0x8
-	v38:i64 = Load v0, 0x48
-	v39:i32 = Iconst_32 0x0
-	v40:i32 = CallIndirect v38:sig1, v0, v39, v25
-	Jump blk10, v40
+	v39:i64 = Load v0, 0x48
+	v40:i32 = Iconst_32 0x0
+	v41:i32 = CallIndirect v39:sig1, v0, v40, v26
+	Jump blk10, v41
 
 blk9: () <-- (blk5)
-	v41:i32 = Iconst_32 0xffffffff
-	Jump fallthrough, v41
+	v42:i32 = Iconst_32 0xffffffff
+	Jump fallthrough, v42
 
-blk10: (v26:i32) <-- (blk7,blk8,blk9)
-	Jump blk_ret, v3, v24, v26
+blk10: (v27:i32) <-- (blk7,blk8,blk9)
+	Jump blk_ret, v3, v25, v27
 `,
 		},
 		{
@@ -1709,34 +1715,37 @@ blk6: () <-- (blk7,blk13)
 			name: "if_then_end_nesting_unreachable_if_then_else_end", m: testcases.IfThenEndNestingUnreachableIfThenElseEnd.Module,
 			exp: `
 blk0: (v0:i64, v1:i64, v2:f64, v3:f64, v4:f64)
-	v6:i32 = Load v1, 0x10
-	v7:i32 = Iconst_32 0x10
-	v8:i32 = Ushr v6, v7
-	Brz v8, blk3
+	v6:i64 = Load v1, 0x10
+	v7:i64 = Iconst_64 0x10
+	v8:i64 = Ushr v6, v7
+	v9:i32 = Ireduce v8
+	Brz v9, blk3
 	Jump blk2
 
 blk1: (v5:i64) <-- (blk4)
 	Jump blk_ret
 
 blk2: () <-- (blk0)
-	v9:i32 = Load v1, 0x10
-	v10:i32 = Iconst_32 0x10
-	v11:i32 = Ushr v9, v10
+	v10:i64 = Load v1, 0x10
+	v11:i64 = Iconst_64 0x10
+	v12:i64 = Ushr v10, v11
+	v13:i32 = Ireduce v12
 	Jump blk4
 
 blk3: () <-- (blk0)
 	Jump blk4
 
 blk4: () <-- (blk2,blk3)
-	v12:i64 = Iconst_64 0x0
-	Jump blk1, v12
+	v14:i64 = Iconst_64 0x0
+	Jump blk1, v14
 `,
 			expAfterPasses: `
 blk0: (v0:i64, v1:i64, v2:f64, v3:f64, v4:f64)
-	v6:i32 = Load v1, 0x10
-	v7:i32 = Iconst_32 0x10
-	v8:i32 = Ushr v6, v7
-	Brz v8, blk3
+	v6:i64 = Load v1, 0x10
+	v7:i64 = Iconst_64 0x10
+	v8:i64 = Ushr v6, v7
+	v9:i32 = Ireduce v8
+	Brz v9, blk3
 	Jump fallthrough
 
 blk2: () <-- (blk0)
@@ -2567,7 +2576,7 @@ blk0: (v0:i64, v1:i64)
 blk0: (v0:i64, v1:i64, v2:i32)
 	v3:i64 = Iconst_64 0x24
 	v4:i64 = UExtend v2, 32->64
-	v5:i64 = Uload32 v1, 0x10
+	v5:i64 = Load v1, 0x10
 	v6:i64 = Iadd v4, v3
 	v7:i32 = Icmp lt_u, v5, v6
 	ExitIfTrue v7, v0, memory_out_of_bounds
@@ -2642,7 +2651,7 @@ blk3: () <-- (blk1,blk2)
 blk0: (v0:i64, v1:i64, v2:i32)
 	v3:i64 = Iconst_64 0x14
 	v4:i64 = UExtend v2, 32->64
-	v5:i64 = Uload32 v1, 0x10
+	v5:i64 = Load v1, 0x10
 	v6:i64 = Iadd v4, v3
 	v7:i32 = Icmp lt_u, v5, v6
 	ExitIfTrue v7, v0, memory_out_of_bounds
@@ -2654,7 +2663,7 @@ blk0: (v0:i64, v1:i64, v2:i32)
 blk1: (v11:i32) <-- (blk0,blk6)
 	v12:i64 = Iconst_64 0x24
 	v13:i64 = UExtend v11, 32->64
-	v14:i64 = Uload32 v1, 0x10
+	v14:i64 = Load v1, 0x10
 	v15:i64 = Iadd v13, v12
 	v16:i32 = Icmp lt_u, v14, v15
 	ExitIfTrue v16, v0, memory_out_of_bounds
@@ -2679,7 +2688,7 @@ blk5: () <-- (blk7,blk9)
 blk6: (v20:i32) <-- (blk3)
 	v21:i64 = Iconst_64 0x54
 	v22:i64 = UExtend v20, 32->64
-	v23:i64 = Uload32 v1, 0x10
+	v23:i64 = Load v1, 0x10
 	v24:i64 = Iadd v22, v21
 	v25:i32 = Icmp lt_u, v23, v24
 	ExitIfTrue v25, v0, memory_out_of_bounds
