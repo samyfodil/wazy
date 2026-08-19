@@ -191,8 +191,24 @@ func decodeMemorySection(
 			return nil, offset, fmt.Errorf("at most one memory allowed in module as %w", err)
 		}
 	}
+	// Each memory entry is at least 2 bytes (a limits-flags byte plus a
+	// 1-byte-minimum LEB128 min), so an attacker-controlled vs bigger than
+	// the remaining buffer can never be satisfied. Reject it before the
+	// allocation below, rather than after requesting up to vs*sizeof(Memory)
+	// bytes for a module that can't possibly contain that many entries.
+	if remaining := len(buf) - offset; vs > uint32(remaining) {
+		return nil, offset, fmt.Errorf("memory section size %d exceeds remaining module bytes (%d)", vs, remaining)
+	}
 
 	ret := make([]wasm.Memory, vs)
+	// Each memory is individually bounded by memoryLimitPages (an embedder
+	// choice, up to wasm.MemoryLimitPages), but nothing otherwise stops a
+	// multi-memory module from eagerly demanding N times that much once
+	// buildMemory allocates every declared memory's capacity. Bound the SUM
+	// of capacities to wasm.MemoryLimitPages -- the same worst case a single
+	// pre-multi-memory module could already demand -- regardless of how many
+	// memories declare it.
+	var totalCapPages uint64
 	for i := range ret {
 		var mem *wasm.Memory
 		mem, offset, err = decodeMemory(buf, offset, enabledFeatures, memorySizer, memoryLimitPages)
@@ -200,6 +216,11 @@ func decodeMemorySection(
 			return nil, offset, err
 		}
 		ret[i] = *mem
+		totalCapPages += uint64(mem.Cap)
+		if totalCapPages > uint64(wasm.MemoryLimitPages) {
+			return nil, offset, fmt.Errorf("total memory capacity across %d memories (%d pages) exceeds %d pages",
+				i+1, totalCapPages, wasm.MemoryLimitPages)
+		}
 	}
 	return ret, offset, nil
 }

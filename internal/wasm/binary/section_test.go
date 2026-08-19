@@ -116,6 +116,7 @@ func TestMemorySection_Errors(t *testing.T) {
 	tests := []struct {
 		name        string
 		input       []byte
+		features    api.CoreFeatures
 		expectedErr string
 	}{
 		{
@@ -125,7 +126,27 @@ func TestMemorySection_Errors(t *testing.T) {
 				0x01,       // (memory 1)
 				0x02, 0x03, // (memory 2 3)
 			},
+			features:    api.CoreFeaturesV2,
 			expectedErr: `at most one memory allowed in module as feature "multi-memory" is disabled`,
+		},
+		{
+			name: "size exceeds remaining bytes",
+			input: []byte{
+				0xff, 0xff, 0xff, 0xff, 0x0f, // vs = 0xffffffff (max u32)
+				0x01, 0x02, 0x03, // a single, real memory entry's worth of bytes
+			},
+			features:    api.CoreFeaturesV2 | api.CoreFeatureMultiMemory,
+			expectedErr: "memory section size 4294967295 exceeds remaining module bytes (3)",
+		},
+		{
+			name: "aggregate capacity across memories exceeds MemoryLimitPages",
+			input: []byte{
+				0x02,                   // 2 memories
+				0x00, 0xc0, 0xb8, 0x02, // (memory min=40000)
+				0x00, 0xc0, 0xb8, 0x02, // (memory min=40000)
+			},
+			features:    api.CoreFeaturesV2 | api.CoreFeatureMultiMemory,
+			expectedErr: "total memory capacity across 2 memories (80000 pages) exceeds 65536 pages",
 		},
 	}
 
@@ -133,7 +154,7 @@ func TestMemorySection_Errors(t *testing.T) {
 		tc := tt
 
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, err := decodeMemorySection(tc.input, 0, api.CoreFeaturesV2, newMemorySizer(max, false, 0), max)
+			_, _, err := decodeMemorySection(tc.input, 0, tc.features, newMemorySizer(max, false, 0), max)
 			require.EqualError(t, err, tc.expectedErr)
 		})
 	}
