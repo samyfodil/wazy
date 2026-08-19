@@ -1191,12 +1191,19 @@ func (c *Compiler) lowerCurrentOpcode() {
 		pages := state.pop()
 		if memIndex >= c.m.ImportMemoryCount && !c.memoryShared[memIndex] {
 			state.push(c.lowerLocalMemoryGrow(memIndex, pages))
+			// A local memory has its own dedicated *wasm.MemoryInstance (see
+			// buildMemory), so growing it can never move another index's
+			// buffer; only this index's cache needs reloading.
+			c.reloadMemoryBaseLen(memIndex)
 		} else {
 			state.push(c.lowerMemoryGrowCall(memIndex, pages))
+			// An imported memory's *wasm.MemoryInstance can be aliased by
+			// another imported index at runtime (this module is compiled once
+			// and reused across instantiations with different import
+			// bindings, so the compiler cannot know the import graph).
+			// Conservatively reload everything, as after any other host call.
+			c.reloadAfterCall()
 		}
-
-		// After the memory grow, reload the cached memory base and len.
-		c.reloadMemoryBaseLen(memIndex)
 
 	case wasm.OpcodeI32Store,
 		wasm.OpcodeI64Store,
