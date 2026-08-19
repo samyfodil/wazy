@@ -114,10 +114,11 @@ func TestMemorySection_Errors(t *testing.T) {
 	max := wasm.MemoryLimitPages
 
 	tests := []struct {
-		name        string
-		input       []byte
-		features    api.CoreFeatures
-		expectedErr string
+		name             string
+		input            []byte
+		features         api.CoreFeatures
+		memoryLimitPages uint32
+		expectedErr      string
 	}{
 		{
 			name: "min and min with max",
@@ -126,8 +127,9 @@ func TestMemorySection_Errors(t *testing.T) {
 				0x01,       // (memory 1)
 				0x02, 0x03, // (memory 2 3)
 			},
-			features:    api.CoreFeaturesV2,
-			expectedErr: `at most one memory allowed in module as feature "multi-memory" is disabled`,
+			features:         api.CoreFeaturesV2,
+			memoryLimitPages: max,
+			expectedErr:      `at most one memory allowed in module as feature "multi-memory" is disabled`,
 		},
 		{
 			name: "size exceeds remaining bytes",
@@ -135,8 +137,19 @@ func TestMemorySection_Errors(t *testing.T) {
 				0xff, 0xff, 0xff, 0xff, 0x0f, // vs = 0xffffffff (max u32)
 				0x01, 0x02, 0x03, // a single, real memory entry's worth of bytes
 			},
-			features:    api.CoreFeaturesV2 | api.CoreFeatureMultiMemory,
-			expectedErr: "memory section size 4294967295 exceeds remaining module bytes (3)",
+			features:         api.CoreFeaturesV2 | api.CoreFeatureMultiMemory,
+			memoryLimitPages: max,
+			expectedErr:      "memory section size 4294967295 exceeds remaining module bytes (3)",
+		},
+		{
+			name: "size exceeds remaining bytes, accounting for the 2-byte minimum per entry",
+			input: []byte{
+				0x02,             // vs = 2, but...
+				0x01, 0x02, 0x03, // ...only 3 bytes remain, and each entry needs at least 2
+			},
+			features:         api.CoreFeaturesV2 | api.CoreFeatureMultiMemory,
+			memoryLimitPages: max,
+			expectedErr:      "memory section size 2 exceeds remaining module bytes (3)",
 		},
 		{
 			name: "aggregate capacity across memories exceeds MemoryLimitPages",
@@ -145,8 +158,20 @@ func TestMemorySection_Errors(t *testing.T) {
 				0x00, 0xc0, 0xb8, 0x02, // (memory min=40000)
 				0x00, 0xc0, 0xb8, 0x02, // (memory min=40000)
 			},
-			features:    api.CoreFeaturesV2 | api.CoreFeatureMultiMemory,
-			expectedErr: "total memory capacity across 2 memories (80000 pages) exceeds 65536 pages",
+			features:         api.CoreFeaturesV2 | api.CoreFeatureMultiMemory,
+			memoryLimitPages: max,
+			expectedErr:      "total memory capacity across 2 memories (80000 pages) exceeds 65536 pages",
+		},
+		{
+			name: "aggregate capacity respects an embedder-configured limit below MemoryLimitPages",
+			input: []byte{
+				0x02,       // 2 memories
+				0x00, 0x3c, // (memory min=60)
+				0x00, 0x3c, // (memory min=60)
+			},
+			features:         api.CoreFeaturesV2 | api.CoreFeatureMultiMemory,
+			memoryLimitPages: 100, // each memory (60 pages) is individually within the limit, but the sum (120) is not
+			expectedErr:      "total memory capacity across 2 memories (120 pages) exceeds 100 pages",
 		},
 	}
 
@@ -154,7 +179,7 @@ func TestMemorySection_Errors(t *testing.T) {
 		tc := tt
 
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, err := decodeMemorySection(tc.input, 0, tc.features, newMemorySizer(max, false, 0), max)
+			_, _, err := decodeMemorySection(tc.input, 0, tc.features, newMemorySizer(tc.memoryLimitPages, false, 0), tc.memoryLimitPages)
 			require.EqualError(t, err, tc.expectedErr)
 		})
 	}

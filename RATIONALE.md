@@ -1509,11 +1509,12 @@ If a module reaches this limit, an error is returned at the validation phase.
 ### Aggregate memory capacity across a module
 
 Each declared memory is individually bounded by the embedder-configured `WithMemoryLimitPages` (up to the 65536-page hard ceiling above), same as before multi-memory. But
-`buildMemory` eagerly allocates every declared memory's capacity at instantiation time, so without a further check, a multi-memory module could demand N times that ceiling
+`buildMemory` eagerly allocates every declared memory's capacity at instantiation time, so without a further check, a multi-memory module could demand N times that limit
 just by declaring N memories at the per-memory maximum -- a resource-exhaustion vector that couldn't exist when a module had at most one memory. wazy bounds the SUM of
-capacities across a module's declared memories to the same 65536-page ceiling, restoring the pre-multi-memory worst case (a module can never eagerly demand more than one
-memory's worth of capacity, combined across however many memories it declares) while leaving ordinary multi-memory usage -- several modest-sized memories well under that
-combined budget -- unaffected.
+capacities across a module's declared memories to that same embedder-configured limit (not the larger 65536-page hard ceiling): an embedder who deliberately configured a
+smaller per-memory limit is choosing a resource budget, and multi-memory must not let a module evade it by splitting the same total across many small memories. This
+restores the pre-multi-memory worst case -- a module can never eagerly demand more than one memory's worth of the embedder's configured capacity, combined across however
+many memories it declares -- while leaving ordinary multi-memory usage well under that combined budget unaffected.
 
 ## Relaxed SIMD
 

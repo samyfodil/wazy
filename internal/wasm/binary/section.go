@@ -193,21 +193,26 @@ func decodeMemorySection(
 	}
 	// Each memory entry is at least 2 bytes (a limits-flags byte plus a
 	// 1-byte-minimum LEB128 min), so an attacker-controlled vs bigger than
-	// the remaining buffer can never be satisfied. Reject it before the
+	// half the remaining buffer can never be satisfied. Reject it before the
 	// allocation below, rather than after requesting up to vs*sizeof(Memory)
 	// bytes for a module that can't possibly contain that many entries.
-	if remaining := len(buf) - offset; vs > uint32(remaining) {
+	if remaining := len(buf) - offset; vs > uint32(remaining)/2 {
 		return nil, offset, fmt.Errorf("memory section size %d exceeds remaining module bytes (%d)", vs, remaining)
+	}
+	if vs > wasm.MaximumMemoryIndex {
+		return nil, offset, fmt.Errorf("memory section size %d exceeds the limit of %d", vs, wasm.MaximumMemoryIndex)
 	}
 
 	ret := make([]wasm.Memory, vs)
-	// Each memory is individually bounded by memoryLimitPages (an embedder
-	// choice, up to wasm.MemoryLimitPages), but nothing otherwise stops a
-	// multi-memory module from eagerly demanding N times that much once
-	// buildMemory allocates every declared memory's capacity. Bound the SUM
-	// of capacities to wasm.MemoryLimitPages -- the same worst case a single
-	// pre-multi-memory module could already demand -- regardless of how many
-	// memories declare it.
+	// Each memory is individually bounded by memoryLimitPages -- the
+	// embedder's own configured choice, e.g. via WithMemoryLimitPages -- but
+	// nothing otherwise stops a multi-memory module from eagerly demanding N
+	// times that much once buildMemory allocates every declared memory's
+	// capacity. Bound the SUM of capacities to that same embedder-configured
+	// ceiling, not the (potentially much larger) hard wasm.MemoryLimitPages:
+	// an embedder who deliberately configured a small per-memory limit is
+	// choosing a resource budget, and multi-memory must not let a module
+	// evade it by splitting the same total across many small memories.
 	var totalCapPages uint64
 	for i := range ret {
 		var mem *wasm.Memory
@@ -217,9 +222,9 @@ func decodeMemorySection(
 		}
 		ret[i] = *mem
 		totalCapPages += uint64(mem.Cap)
-		if totalCapPages > uint64(wasm.MemoryLimitPages) {
+		if totalCapPages > uint64(memoryLimitPages) {
 			return nil, offset, fmt.Errorf("total memory capacity across %d memories (%d pages) exceeds %d pages",
-				i+1, totalCapPages, wasm.MemoryLimitPages)
+				i+1, totalCapPages, memoryLimitPages)
 		}
 	}
 	return ret, offset, nil
