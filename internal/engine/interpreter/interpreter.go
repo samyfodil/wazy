@@ -1136,10 +1136,26 @@ func (ce *callEngine) callGoFunc(ctx context.Context, m *wasm.ModuleInstance, f 
 	}
 }
 
+// memoryAt returns memories[idx]. idx 0 is special-cased to return the
+// already-resident mem0 pointer, avoiding a slice bounds check and load for
+// the overwhelmingly common case of a module with at most one memory.
+func memoryAt(memories []*wasm.MemoryInstance, mem0 *wasm.MemoryInstance, idx uint64) *wasm.MemoryInstance {
+	if idx == 0 {
+		return mem0
+	}
+	return memories[idx]
+}
+
 func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance, f *function) {
 	moduleInst := f.moduleInstance
 	functions := moduleInst.Engine.(*moduleEngine).functions
 	memories := moduleInst.Memories
+	// mem0 lets memoryAt skip the slice bounds check and load for memory index
+	// 0, the overwhelmingly common case (a module with at most one memory).
+	var mem0 *wasm.MemoryInstance
+	if len(memories) > 0 {
+		mem0 = memories[0]
+	}
 	globals := moduleInst.Globals
 	tables := moduleInst.Tables
 	typeIDs := moduleInst.TypeIDs
@@ -1287,7 +1303,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 		// base are both <= math.MaxUint32, so their sum is <= ~2^33.
 		case operationKindLoadI32, operationKindLoadF32:
 			frame.pc = pc // sync: OOB trap
-			mem := memories[op.U3]
+			mem := memoryAt(memories, mem0, op.U3)
 			ea := op.U2 + uint64(uint32(ce.popValue()))
 			if ea+4 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
@@ -1296,7 +1312,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindLoadI64, operationKindLoadF64:
 			frame.pc = pc // sync: OOB trap
-			mem := memories[op.U3]
+			mem := memoryAt(memories, mem0, op.U3)
 			ea := op.U2 + uint64(uint32(ce.popValue()))
 			if ea+8 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
@@ -1305,7 +1321,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindLoad8S32:
 			frame.pc = pc // sync: OOB trap
-			mem := memories[op.U3]
+			mem := memoryAt(memories, mem0, op.U3)
 			ea := op.U2 + uint64(uint32(ce.popValue()))
 			if ea+1 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
@@ -1314,7 +1330,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindLoad8S64:
 			frame.pc = pc // sync: OOB trap
-			mem := memories[op.U3]
+			mem := memoryAt(memories, mem0, op.U3)
 			ea := op.U2 + uint64(uint32(ce.popValue()))
 			if ea+1 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
@@ -1323,7 +1339,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindLoad8U32, operationKindLoad8U64:
 			frame.pc = pc // sync: OOB trap
-			mem := memories[op.U3]
+			mem := memoryAt(memories, mem0, op.U3)
 			ea := op.U2 + uint64(uint32(ce.popValue()))
 			if ea+1 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
@@ -1332,7 +1348,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindLoad16S32:
 			frame.pc = pc // sync: OOB trap
-			mem := memories[op.U3]
+			mem := memoryAt(memories, mem0, op.U3)
 			ea := op.U2 + uint64(uint32(ce.popValue()))
 			if ea+2 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
@@ -1341,7 +1357,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindLoad16S64:
 			frame.pc = pc // sync: OOB trap
-			mem := memories[op.U3]
+			mem := memoryAt(memories, mem0, op.U3)
 			ea := op.U2 + uint64(uint32(ce.popValue()))
 			if ea+2 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
@@ -1350,7 +1366,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindLoad16U32, operationKindLoad16U64:
 			frame.pc = pc // sync: OOB trap
-			mem := memories[op.U3]
+			mem := memoryAt(memories, mem0, op.U3)
 			ea := op.U2 + uint64(uint32(ce.popValue()))
 			if ea+2 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
@@ -1359,7 +1375,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindLoad32S:
 			frame.pc = pc // sync: OOB trap
-			mem := memories[op.U3]
+			mem := memoryAt(memories, mem0, op.U3)
 			ea := op.U2 + uint64(uint32(ce.popValue()))
 			if ea+4 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
@@ -1368,7 +1384,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindLoad32U:
 			frame.pc = pc // sync: OOB trap
-			mem := memories[op.U3]
+			mem := memoryAt(memories, mem0, op.U3)
 			ea := op.U2 + uint64(uint32(ce.popValue()))
 			if ea+4 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
@@ -1377,7 +1393,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindStoreI32, operationKindStoreF32:
 			frame.pc = pc // sync: OOB trap
-			mem := memories[op.U3]
+			mem := memoryAt(memories, mem0, op.U3)
 			val := ce.popValue()
 			ea := op.U2 + uint64(uint32(ce.popValue()))
 			if ea+4 > uint64(len(mem.Buffer)) {
@@ -1387,7 +1403,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindStoreI64, operationKindStoreF64:
 			frame.pc = pc // sync: OOB trap
-			mem := memories[op.U3]
+			mem := memoryAt(memories, mem0, op.U3)
 			val := ce.popValue()
 			ea := op.U2 + uint64(uint32(ce.popValue()))
 			if ea+8 > uint64(len(mem.Buffer)) {
@@ -1397,7 +1413,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindStore8:
 			frame.pc = pc // sync: OOB trap
-			mem := memories[op.U3]
+			mem := memoryAt(memories, mem0, op.U3)
 			val := byte(ce.popValue())
 			ea := op.U2 + uint64(uint32(ce.popValue()))
 			if ea+1 > uint64(len(mem.Buffer)) {
@@ -1407,7 +1423,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindStore16:
 			frame.pc = pc // sync: OOB trap
-			mem := memories[op.U3]
+			mem := memoryAt(memories, mem0, op.U3)
 			val := uint16(ce.popValue())
 			ea := op.U2 + uint64(uint32(ce.popValue()))
 			if ea+2 > uint64(len(mem.Buffer)) {
@@ -1417,7 +1433,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindStore32:
 			frame.pc = pc // sync: OOB trap
-			mem := memories[op.U3]
+			mem := memoryAt(memories, mem0, op.U3)
 			val := uint32(ce.popValue())
 			ea := op.U2 + uint64(uint32(ce.popValue()))
 			if ea+4 > uint64(len(mem.Buffer)) {
