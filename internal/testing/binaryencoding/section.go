@@ -84,8 +84,11 @@ func encodeTableSection(tables []wasm.Table) []byte {
 //
 // See EncodeMemory
 // See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#memory-section%E2%91%A0
-func encodeMemorySection(memory *wasm.Memory) []byte {
-	contents := append([]byte{1}, EncodeMemory(memory)...)
+func encodeMemorySection(memories []wasm.Memory) []byte {
+	contents := leb128.EncodeUint32(uint32(len(memories)))
+	for i := range memories {
+		contents = append(contents, EncodeMemory(&memories[i])...)
+	}
 	return encodeSection(wasm.SectionIDMemory, contents)
 }
 

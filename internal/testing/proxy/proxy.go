@@ -41,7 +41,7 @@ func NewModuleBinary(moduleName string, proxyTarget wazy.CompiledModule) []byte 
 	funcDefs := proxyTarget.ExportedFunctions()
 	funcNum := uint32(len(funcDefs))
 	proxyModule := &wasm.Module{
-		MemorySection: &wasm.Memory{Min: 1},
+		MemorySection: []wasm.Memory{{Min: 1}},
 		ExportSection: []wasm.Export{{Name: "memory", Type: api.ExternTypeMemory}},
 		NameSection:   &wasm.NameSection{ModuleName: proxyModuleName},
 	}

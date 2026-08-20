@@ -1373,7 +1373,7 @@ var (
 		Module: &wasm.Module{
 			TypeSection:     []wasm.FunctionType{{Params: []wasm.ValueType{i32, i32}, Results: []wasm.ValueType{i32}}},
 			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
-			MemorySection:   &wasm.Memory{Min: 1},
+			MemorySection:   []wasm.Memory{{Min: 1}},
 			FunctionSection: []wasm.Index{0},
 			CodeSection: []wasm.Code{{Body: []byte{
 				wasm.OpcodeLocalGet, 0, // offset
@@ -1392,7 +1392,7 @@ var (
 		Module: &wasm.Module{
 			TypeSection:     []wasm.FunctionType{{Params: []wasm.ValueType{i32, i64, f32, f64}}},
 			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
-			MemorySection:   &wasm.Memory{Min: 1},
+			MemorySection:   []wasm.Memory{{Min: 1}},
 			FunctionSection: []wasm.Index{0},
 			CodeSection: []wasm.Code{{Body: []byte{
 				wasm.OpcodeI32Const, 0, // offset
@@ -1444,7 +1444,7 @@ var (
 				Results: []wasm.ValueType{i32},
 			}},
 			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
-			MemorySection:   &wasm.Memory{Min: 1},
+			MemorySection:   []wasm.Memory{{Min: 1}},
 			FunctionSection: []wasm.Index{0},
 			CodeSection: []wasm.Code{{Body: []byte{
 				wasm.OpcodeLocalGet, 0,
@@ -1463,7 +1463,7 @@ var (
 				Results: []wasm.ValueType{i32},
 			}},
 			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
-			MemorySection:   &wasm.Memory{Min: 17},
+			MemorySection:   []wasm.Memory{{Min: 17}},
 			FunctionSection: []wasm.Index{0},
 			CodeSection: []wasm.Code{{Body: []byte{
 				wasm.OpcodeLocalGet, 0,
@@ -1482,7 +1482,7 @@ var (
 		Module: &wasm.Module{
 			TypeSection:     []wasm.FunctionType{{Results: []wasm.ValueType{i32, i32, i32}}},
 			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
-			MemorySection:   &wasm.Memory{Min: 1, Max: 2, IsMaxEncoded: true},
+			MemorySection:   []wasm.Memory{{Min: 1, Max: 2, IsMaxEncoded: true}},
 			FunctionSection: []wasm.Index{0},
 			CodeSection: []wasm.Code{{Body: []byte{
 				wasm.OpcodeI32Const, 1,
@@ -1500,7 +1500,7 @@ var (
 		Module: &wasm.Module{
 			TypeSection:     []wasm.FunctionType{i32_i32, {}},
 			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
-			MemorySection:   &wasm.Memory{Min: 1},
+			MemorySection:   []wasm.Memory{{Min: 1}},
 			FunctionSection: []wasm.Index{0, 1},
 			CodeSection: []wasm.Code{
 				{Body: []byte{
@@ -1531,7 +1531,7 @@ var (
 				{Name: "mem", Type: wasm.ExternTypeMemory, Index: 0},
 				{Name: "size", Type: wasm.ExternTypeFunc, Index: 0},
 			},
-			MemorySection:   &wasm.Memory{Min: 1},
+			MemorySection:   []wasm.Memory{{Min: 1}},
 			TypeSection:     []wasm.FunctionType{v_i32},
 			FunctionSection: []wasm.Index{0},
 			CodeSection:     []wasm.Code{{Body: []byte{wasm.OpcodeMemorySize, 0, wasm.OpcodeEnd}}},
@@ -1723,7 +1723,7 @@ var (
 				},
 			}},
 			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
-			MemorySection:   &wasm.Memory{Min: 1},
+			MemorySection:   []wasm.Memory{{Min: 1}},
 			FunctionSection: []wasm.Index{0},
 			CodeSection: []wasm.Code{{Body: []byte{
 				// Basic loads (without extensions).
@@ -1913,7 +1913,7 @@ var (
 			},
 
 			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
-			MemorySection:   &wasm.Memory{Min: 4554},
+			MemorySection:   []wasm.Memory{{Min: 4554}},
 			FunctionSection: []wasm.Index{0},
 			CodeSection: []wasm.Code{{Body: []byte{
 				wasm.OpcodeBlock, 1, // Signature v_i64,
@@ -1964,7 +1964,7 @@ var (
 		Module: &wasm.Module{
 			TypeSection:     []wasm.FunctionType{{Params: []wasm.ValueType{i32, i32, i64}, Results: []wasm.ValueType{i32}}},
 			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
-			MemorySection:   &wasm.Memory{Min: 1, Max: 1, IsMaxEncoded: true, IsShared: true},
+			MemorySection:   []wasm.Memory{{Min: 1, Max: 1, IsMaxEncoded: true, IsShared: true}},
 			FunctionSection: []wasm.Index{0},
 			CodeSection: []wasm.Code{{Body: []byte{
 				wasm.OpcodeLocalGet, 0,
@@ -1981,7 +1981,7 @@ var (
 		Module: &wasm.Module{
 			TypeSection:     []wasm.FunctionType{{Params: []wasm.ValueType{i32, i64, i64}, Results: []wasm.ValueType{i32}}},
 			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
-			MemorySection:   &wasm.Memory{Min: 1, Max: 1, IsMaxEncoded: true, IsShared: true},
+			MemorySection:   []wasm.Memory{{Min: 1, Max: 1, IsMaxEncoded: true, IsShared: true}},
 			FunctionSection: []wasm.Index{0},
 			CodeSection: []wasm.Code{{Body: []byte{
 				wasm.OpcodeLocalGet, 0,
@@ -1998,7 +1998,7 @@ var (
 		Module: &wasm.Module{
 			TypeSection:     []wasm.FunctionType{{Params: []wasm.ValueType{i32, i32}, Results: []wasm.ValueType{i32}}},
 			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
-			MemorySection:   &wasm.Memory{Min: 1, Max: 1, IsMaxEncoded: true, IsShared: true},
+			MemorySection:   []wasm.Memory{{Min: 1, Max: 1, IsMaxEncoded: true, IsShared: true}},
 			FunctionSection: []wasm.Index{0},
 			CodeSection: []wasm.Code{{Body: []byte{
 				wasm.OpcodeLocalGet, 0,
@@ -2017,7 +2017,7 @@ var (
 				Results: []wasm.ValueType{i32, i32, i32, i64, i64, i64, i64},
 			}},
 			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
-			MemorySection:   &wasm.Memory{Min: 1, Max: 1, IsMaxEncoded: true, IsShared: true},
+			MemorySection:   []wasm.Memory{{Min: 1, Max: 1, IsMaxEncoded: true, IsShared: true}},
 			FunctionSection: []wasm.Index{0},
 			CodeSection: []wasm.Code{{Body: []byte{
 				wasm.OpcodeI32Const, 0,
@@ -2054,7 +2054,7 @@ var (
 				Results: []wasm.ValueType{i32, i32, i32, i64, i64, i64, i64},
 			}},
 			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
-			MemorySection:   &wasm.Memory{Min: 1, Max: 1, IsMaxEncoded: true, IsShared: true},
+			MemorySection:   []wasm.Memory{{Min: 1, Max: 1, IsMaxEncoded: true, IsShared: true}},
 			FunctionSection: []wasm.Index{0},
 			CodeSection: []wasm.Code{{Body: []byte{
 				wasm.OpcodeI32Const, 0,
@@ -2091,7 +2091,7 @@ var (
 				Results: []wasm.ValueType{i32, i32, i32, i64, i64, i64, i64},
 			}},
 			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
-			MemorySection:   &wasm.Memory{Min: 1, Max: 1, IsMaxEncoded: true, IsShared: true},
+			MemorySection:   []wasm.Memory{{Min: 1, Max: 1, IsMaxEncoded: true, IsShared: true}},
 			FunctionSection: []wasm.Index{0},
 			CodeSection: []wasm.Code{{Body: []byte{
 				wasm.OpcodeI32Const, 0,
@@ -2128,7 +2128,7 @@ var (
 				Results: []wasm.ValueType{i32, i32, i32, i64, i64, i64, i64},
 			}},
 			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
-			MemorySection:   &wasm.Memory{Min: 1, Max: 1, IsMaxEncoded: true, IsShared: true},
+			MemorySection:   []wasm.Memory{{Min: 1, Max: 1, IsMaxEncoded: true, IsShared: true}},
 			FunctionSection: []wasm.Index{0},
 			CodeSection: []wasm.Code{{Body: []byte{
 				wasm.OpcodeI32Const, 0,
@@ -2165,7 +2165,7 @@ var (
 				Results: []wasm.ValueType{i32, i32, i32, i64, i64, i64, i64},
 			}},
 			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
-			MemorySection:   &wasm.Memory{Min: 1, Max: 1, IsMaxEncoded: true, IsShared: true},
+			MemorySection:   []wasm.Memory{{Min: 1, Max: 1, IsMaxEncoded: true, IsShared: true}},
 			FunctionSection: []wasm.Index{0},
 			CodeSection: []wasm.Code{{Body: []byte{
 				wasm.OpcodeI32Const, 0,
@@ -2202,7 +2202,7 @@ var (
 				Results: []wasm.ValueType{i32, i32, i32, i64, i64, i64, i64},
 			}},
 			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
-			MemorySection:   &wasm.Memory{Min: 1, Max: 1, IsMaxEncoded: true, IsShared: true},
+			MemorySection:   []wasm.Memory{{Min: 1, Max: 1, IsMaxEncoded: true, IsShared: true}},
 			FunctionSection: []wasm.Index{0},
 			CodeSection: []wasm.Code{{Body: []byte{
 				wasm.OpcodeI32Const, 0,
@@ -2239,7 +2239,7 @@ var (
 				Results: []wasm.ValueType{i32, i32, i32, i64, i64, i64, i64},
 			}},
 			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
-			MemorySection:   &wasm.Memory{Min: 1, Max: 1, IsMaxEncoded: true, IsShared: true},
+			MemorySection:   []wasm.Memory{{Min: 1, Max: 1, IsMaxEncoded: true, IsShared: true}},
 			FunctionSection: []wasm.Index{0},
 			CodeSection: []wasm.Code{{Body: []byte{
 				wasm.OpcodeI32Const, 0,
@@ -2290,7 +2290,7 @@ var (
 				Results: []wasm.ValueType{i32, i32, i32, i64, i64, i64, i64},
 			}},
 			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
-			MemorySection:   &wasm.Memory{Min: 1, Max: 1, IsMaxEncoded: true, IsShared: true},
+			MemorySection:   []wasm.Memory{{Min: 1, Max: 1, IsMaxEncoded: true, IsShared: true}},
 			FunctionSection: []wasm.Index{0},
 			CodeSection: []wasm.Code{{Body: []byte{
 				wasm.OpcodeI32Const, 0,
@@ -2334,7 +2334,7 @@ var (
 				Results: []wasm.ValueType{i32, i32, i32, i64, i64, i64, i64},
 			}},
 			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
-			MemorySection:   &wasm.Memory{Min: 1, Max: 1, IsMaxEncoded: true, IsShared: true},
+			MemorySection:   []wasm.Memory{{Min: 1, Max: 1, IsMaxEncoded: true, IsShared: true}},
 			FunctionSection: []wasm.Index{0},
 			CodeSection: []wasm.Code{{Body: []byte{
 				wasm.OpcodeI32Const, 0,
@@ -2378,7 +2378,7 @@ var (
 				Results: []wasm.ValueType{},
 			}},
 			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
-			MemorySection:   &wasm.Memory{Min: 1, Max: 1, IsMaxEncoded: true, IsShared: true},
+			MemorySection:   []wasm.Memory{{Min: 1, Max: 1, IsMaxEncoded: true, IsShared: true}},
 			FunctionSection: []wasm.Index{0},
 			CodeSection: []wasm.Code{{Body: []byte{
 				wasm.OpcodeAtomicPrefix, wasm.OpcodeAtomicFence, 0,
@@ -3114,7 +3114,7 @@ var LargeMethodBodyWithManyArgs = TestCase{
 	Module: &wasm.Module{
 		TypeSection:     []wasm.FunctionType{{Params: []wasm.ValueType{i32, i32, i32, i32, i32, i32, i32, i32, i32}, Results: []wasm.ValueType{i32}}},
 		ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
-		MemorySection:   &wasm.Memory{Min: 1},
+		MemorySection:   []wasm.Memory{{Min: 1}},
 		FunctionSection: []wasm.Index{0},
 		CodeSection: []wasm.Code{{
 			Body: func() []byte {

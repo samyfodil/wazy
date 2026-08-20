@@ -633,7 +633,8 @@ func (c *Compiler) lowerCurrentOpcode() {
 			c.callMemmove(dstAddr, srcAddr, copySizeInBytes)
 
 		case wasm.OpcodeMiscMemoryCopy:
-			state.pc += 2 // +2 to skip two memory indexes which are fixed to zero.
+			dstMemIndex := wasm.Index(c.readI32u())
+			srcMemIndex := wasm.Index(c.readI32u())
 			if state.unreachable {
 				break
 			}
@@ -646,13 +647,15 @@ func (c *Compiler) lowerCurrentOpcode() {
 				AllocateInstruction().AsUExtend(state.pop(), 32, 64).Insert(builder).Return()
 
 			// Out of bounds check.
-			memLen := c.getMemoryLenValue(false)
-			c.boundsCheckInMemory(memLen, dstOffset, copySize)
-			c.boundsCheckInMemory(memLen, srcOffset, copySize)
+			dstMemLen := c.getMemoryLenValue(dstMemIndex, false)
+			srcMemLen := c.getMemoryLenValue(srcMemIndex, false)
+			c.boundsCheckInMemory(dstMemLen, dstOffset, copySize)
+			c.boundsCheckInMemory(srcMemLen, srcOffset, copySize)
 
-			memBase := c.getMemoryBaseValue(false)
-			dstAddr := builder.AllocateInstruction().AsIadd(memBase, dstOffset).Insert(builder).Return()
-			srcAddr := builder.AllocateInstruction().AsIadd(memBase, srcOffset).Insert(builder).Return()
+			dstMemBase := c.getMemoryBaseValue(dstMemIndex, false)
+			srcMemBase := c.getMemoryBaseValue(srcMemIndex, false)
+			dstAddr := builder.AllocateInstruction().AsIadd(dstMemBase, dstOffset).Insert(builder).Return()
+			srcAddr := builder.AllocateInstruction().AsIadd(srcMemBase, srcOffset).Insert(builder).Return()
 
 			c.callMemmove(dstAddr, srcAddr, copySize)
 
@@ -733,7 +736,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 			builder.Seal(followingBlk)
 
 		case wasm.OpcodeMiscMemoryFill:
-			state.pc++ // Skip the memory index which is fixed to zero.
+			memIndex := wasm.Index(c.readI32u())
 			if state.unreachable {
 				break
 			}
@@ -745,10 +748,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 				AllocateInstruction().AsUExtend(state.pop(), 32, 64).Insert(builder).Return()
 
 			// Out of bounds check.
-			c.boundsCheckInMemory(c.getMemoryLenValue(false), offset, fillSize)
+			c.boundsCheckInMemory(c.getMemoryLenValue(memIndex, false), offset, fillSize)
 
 			// Calculate the base address:
-			addr := builder.AllocateInstruction().AsIadd(c.getMemoryBaseValue(false), offset).Insert(builder).Return()
+			addr := builder.AllocateInstruction().AsIadd(c.getMemoryBaseValue(memIndex, false), offset).Insert(builder).Return()
 
 			// Uses the copy trick for faster filling buffer, with a maximum chunk size of 8KB.
 			// https://github.com/golang/go/blob/go1.24.0/src/bytes/bytes.go#L664-L673
@@ -813,7 +816,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 
 		case wasm.OpcodeMiscMemoryInit:
 			index := c.readI32u()
-			state.pc++ // Skip the memory index which is fixed to zero.
+			memIndex := wasm.Index(c.readI32u())
 			if state.unreachable {
 				break
 			}
@@ -828,13 +831,13 @@ func (c *Compiler) lowerCurrentOpcode() {
 			dataInstPtr := c.dataOrElementInstanceAddr(index, c.offset.DataInstances1stElement)
 
 			// Bounds check.
-			c.boundsCheckInMemory(c.getMemoryLenValue(false), offsetInMemory, copySize)
+			c.boundsCheckInMemory(c.getMemoryLenValue(memIndex, false), offsetInMemory, copySize)
 			c.boundsCheckInDataOrElementInstance(dataInstPtr, offsetInDataInstance, copySize, nativeapi.ExitCodeMemoryOutOfBounds)
 
 			dataInstBaseAddr := builder.AllocateInstruction().AsLoad(dataInstPtr, 0, ssa.TypeI64).Insert(builder).Return()
 			srcAddr := builder.AllocateInstruction().AsIadd(dataInstBaseAddr, offsetInDataInstance).Insert(builder).Return()
 
-			memBase := c.getMemoryBaseValue(false)
+			memBase := c.getMemoryBaseValue(memIndex, false)
 			dstAddr := builder.AllocateInstruction().AsIadd(memBase, offsetInMemory).Insert(builder).Return()
 
 			c.callMemmove(dstAddr, srcAddr, copySize)
@@ -1144,53 +1147,56 @@ func (c *Compiler) lowerCurrentOpcode() {
 		state.push(sl)
 
 	case wasm.OpcodeMemorySize:
-		state.pc++ // skips the memory index.
+		memIndex := wasm.Index(c.readI32u())
 		if state.unreachable {
 			break
 		}
 
-		var memSizeInBytes ssa.Value
-		if c.offset.LocalMemoryBegin < 0 {
-			memInstPtr := builder.AllocateInstruction().
-				AsLoad(c.moduleCtxPtrValue, c.offset.ImportedMemoryBegin.U32(), ssa.TypeI64).
-				Insert(builder).
-				Return()
+		// The byte length itself, not just the resulting page count, must be
+		// read as a full 64-bit value: a 65536-page (the legal maximum)
+		// memory has a byte length of exactly 2^32, which a 32-bit load
+		// truncates to zero. getMemoryLenValue already reads a full i64 (and,
+		// for a shared memory, an atomic one -- required since another
+		// thread can concurrently grow it); using it here (rather than a
+		// hand-rolled duplicate load) also lets it and any load/store bounds
+		// check on the same memory in this linear path share one read.
+		memSizeInBytes := c.getMemoryLenValue(memIndex, false)
 
-			memSizeInBytes = builder.AllocateInstruction().
-				AsLoad(memInstPtr, memoryInstanceSizeOffset, ssa.TypeI32).
-				Insert(builder).
-				Return()
-		} else {
-			memSizeInBytes = builder.AllocateInstruction().
-				AsLoad(c.moduleCtxPtrValue, c.offset.LocalMemoryLen().U32(), ssa.TypeI32).
-				Insert(builder).
-				Return()
-		}
-
-		amount := builder.AllocateInstruction()
-		amount.AsIconst32(uint32(wasm.MemoryPageSizeInBits))
-		builder.InsertInstruction(amount)
+		amount := builder.AllocateInstruction().AsIconst64(uint64(wasm.MemoryPageSizeInBits)).Insert(builder).Return()
+		memSize64 := builder.AllocateInstruction().
+			AsUshr(memSizeInBytes, amount).
+			Insert(builder).
+			Return()
 		memSize := builder.AllocateInstruction().
-			AsUshr(memSizeInBytes, amount.Return()).
+			AsIreduce(memSize64, ssa.TypeI32).
 			Insert(builder).
 			Return()
 		state.push(memSize)
 
 	case wasm.OpcodeMemoryGrow:
-		state.pc++ // skips the memory index.
+		memIndex := wasm.Index(c.readI32u())
 		if state.unreachable {
 			break
 		}
 
 		pages := state.pop()
-		if c.offset.LocalMemoryBegin >= 0 && !c.memoryShared {
-			state.push(c.lowerLocalMemoryGrow(pages))
+		if memIndex >= c.m.ImportMemoryCount && !c.memoryShared[memIndex] {
+			state.push(c.lowerLocalMemoryGrow(memIndex, pages))
+			// A local memory has its own dedicated *wasm.MemoryInstance (see
+			// buildMemory), so growing it can never move another index's
+			// buffer; only this index's cache needs reloading.
+			c.reloadMemoryBaseLen(memIndex)
 		} else {
-			state.push(c.lowerMemoryGrowCall(pages))
+			state.push(c.lowerMemoryGrowCall(memIndex, pages))
+			// An imported memory's *wasm.MemoryInstance can be aliased by
+			// another imported index at runtime (this module is compiled once
+			// and reused across instantiations with different import
+			// bindings, so the compiler cannot know the import graph).
+			// Conservatively reload every memory (globals can't be affected
+			// by a memory grow, so reloadAfterCall's extra global reload
+			// isn't needed here).
+			c.reloadAllMemories()
 		}
-
-		// After the memory grow, reload the cached memory base and len.
-		c.reloadMemoryBaseLen()
 
 	case wasm.OpcodeI32Store,
 		wasm.OpcodeI64Store,
@@ -1202,7 +1208,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 		wasm.OpcodeI64Store16,
 		wasm.OpcodeI64Store32:
 
-		_, offset := c.readMemArg()
+		_, offset, memIndex := c.readMemArg()
 		if state.unreachable {
 			break
 		}
@@ -1230,7 +1236,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 
 		value := state.pop()
 		baseAddr := state.pop()
-		addr := c.memOpSetup(baseAddr, uint64(offset), opSize)
+		addr := c.memOpSetup(memIndex, baseAddr, uint64(offset), opSize)
 		builder.AllocateInstruction().
 			AsStore(opcode, value, addr, offset).
 			Insert(builder)
@@ -1249,7 +1255,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 		wasm.OpcodeI64Load16U,
 		wasm.OpcodeI64Load32S,
 		wasm.OpcodeI64Load32U:
-		_, offset := c.readMemArg()
+		_, offset, memIndex := c.readMemArg()
 		if state.unreachable {
 			break
 		}
@@ -1275,7 +1281,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 		}
 
 		baseAddr := state.pop()
-		addr := c.memOpSetup(baseAddr, uint64(offset), opSize)
+		addr := c.memOpSetup(memIndex, baseAddr, uint64(offset), opSize)
 		load := builder.AllocateInstruction()
 		switch op {
 		case wasm.OpcodeI32Load:
@@ -1739,18 +1745,18 @@ func (c *Compiler) lowerCurrentOpcode() {
 			ret := builder.AllocateInstruction().AsVconst(lo, hi).Insert(builder).Return()
 			state.push(ret)
 		case wasm.OpcodeVecV128Load:
-			_, offset := c.readMemArg()
+			_, offset, memIndex := c.readMemArg()
 			if state.unreachable {
 				break
 			}
 			baseAddr := state.pop()
-			addr := c.memOpSetup(baseAddr, uint64(offset), 16)
+			addr := c.memOpSetup(memIndex, baseAddr, uint64(offset), 16)
 			load := builder.AllocateInstruction()
 			load.AsLoad(addr, offset, ssa.TypeV128)
 			builder.InsertInstruction(load)
 			state.push(load.Return())
 		case wasm.OpcodeVecV128Load8Lane, wasm.OpcodeVecV128Load16Lane, wasm.OpcodeVecV128Load32Lane:
-			_, offset := c.readMemArg()
+			_, offset, memIndex := c.readMemArg()
 			state.pc++
 			if state.unreachable {
 				break
@@ -1769,7 +1775,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 			laneIndex := c.wasmFunctionBody[state.pc]
 			vector := state.pop()
 			baseAddr := state.pop()
-			addr := c.memOpSetup(baseAddr, uint64(offset), opSize)
+			addr := c.memOpSetup(memIndex, baseAddr, uint64(offset), opSize)
 			load := builder.AllocateInstruction().
 				AsExtLoad(loadOp, addr, offset, false).
 				Insert(builder).Return()
@@ -1778,7 +1784,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 				Insert(builder).Return()
 			state.push(ret)
 		case wasm.OpcodeVecV128Load64Lane:
-			_, offset := c.readMemArg()
+			_, offset, memIndex := c.readMemArg()
 			state.pc++
 			if state.unreachable {
 				break
@@ -1786,7 +1792,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 			laneIndex := c.wasmFunctionBody[state.pc]
 			vector := state.pop()
 			baseAddr := state.pop()
-			addr := c.memOpSetup(baseAddr, uint64(offset), 8)
+			addr := c.memOpSetup(memIndex, baseAddr, uint64(offset), 8)
 			load := builder.AllocateInstruction().
 				AsLoad(addr, offset, ssa.TypeI64).
 				Insert(builder).Return()
@@ -1796,7 +1802,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 			state.push(ret)
 
 		case wasm.OpcodeVecV128Load32zero, wasm.OpcodeVecV128Load64zero:
-			_, offset := c.readMemArg()
+			_, offset, memIndex := c.readMemArg()
 			if state.unreachable {
 				break
 			}
@@ -1810,7 +1816,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 			}
 
 			baseAddr := state.pop()
-			addr := c.memOpSetup(baseAddr, uint64(offset), uint64(scalarType.Size()))
+			addr := c.memOpSetup(memIndex, baseAddr, uint64(offset), uint64(scalarType.Size()))
 
 			ret := builder.AllocateInstruction().
 				AsVZeroExtLoad(addr, offset, scalarType).
@@ -1820,7 +1826,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 		case wasm.OpcodeVecV128Load8x8u, wasm.OpcodeVecV128Load8x8s,
 			wasm.OpcodeVecV128Load16x4u, wasm.OpcodeVecV128Load16x4s,
 			wasm.OpcodeVecV128Load32x2u, wasm.OpcodeVecV128Load32x2s:
-			_, offset := c.readMemArg()
+			_, offset, memIndex := c.readMemArg()
 			if state.unreachable {
 				break
 			}
@@ -1844,7 +1850,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 				lane = ssa.VecLaneI32x4
 			}
 			baseAddr := state.pop()
-			addr := c.memOpSetup(baseAddr, uint64(offset), 8)
+			addr := c.memOpSetup(memIndex, baseAddr, uint64(offset), 8)
 			load := builder.AllocateInstruction().
 				AsLoad(addr, offset, ssa.TypeF64).
 				Insert(builder).Return()
@@ -1854,7 +1860,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 			state.push(ret)
 		case wasm.OpcodeVecV128Load8Splat, wasm.OpcodeVecV128Load16Splat,
 			wasm.OpcodeVecV128Load32Splat, wasm.OpcodeVecV128Load64Splat:
-			_, offset := c.readMemArg()
+			_, offset, memIndex := c.readMemArg()
 			if state.unreachable {
 				break
 			}
@@ -1871,25 +1877,25 @@ func (c *Compiler) lowerCurrentOpcode() {
 				lane, opSize = ssa.VecLaneI64x2, 8
 			}
 			baseAddr := state.pop()
-			addr := c.memOpSetup(baseAddr, uint64(offset), opSize)
+			addr := c.memOpSetup(memIndex, baseAddr, uint64(offset), opSize)
 			ret := builder.AllocateInstruction().
 				AsLoadSplat(addr, offset, lane).
 				Insert(builder).Return()
 			state.push(ret)
 		case wasm.OpcodeVecV128Store:
-			_, offset := c.readMemArg()
+			_, offset, memIndex := c.readMemArg()
 			if state.unreachable {
 				break
 			}
 			value := state.pop()
 			baseAddr := state.pop()
-			addr := c.memOpSetup(baseAddr, uint64(offset), 16)
+			addr := c.memOpSetup(memIndex, baseAddr, uint64(offset), 16)
 			builder.AllocateInstruction().
 				AsStore(ssa.OpcodeStore, value, addr, offset).
 				Insert(builder)
 		case wasm.OpcodeVecV128Store8Lane, wasm.OpcodeVecV128Store16Lane,
 			wasm.OpcodeVecV128Store32Lane, wasm.OpcodeVecV128Store64Lane:
-			_, offset := c.readMemArg()
+			_, offset, memIndex := c.readMemArg()
 			state.pc++
 			if state.unreachable {
 				break
@@ -1910,7 +1916,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 			}
 			vector := state.pop()
 			baseAddr := state.pop()
-			addr := c.memOpSetup(baseAddr, uint64(offset), opSize)
+			addr := c.memOpSetup(memIndex, baseAddr, uint64(offset), opSize)
 			value := builder.AllocateInstruction().
 				AsExtractlane(vector, laneIndex, lane, false).
 				Insert(builder).Return()
@@ -3290,7 +3296,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 		atomicOp := c.wasmFunctionBody[state.pc]
 		switch atomicOp {
 		case wasm.OpcodeAtomicMemoryWait32, wasm.OpcodeAtomicMemoryWait64:
-			_, offset := c.readMemArg()
+			_, offset, memIndex := c.readMemArg()
 			if state.unreachable {
 				break
 			}
@@ -3314,7 +3320,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 			timeout := state.pop()
 			exp := state.pop()
 			baseAddr := state.pop()
-			addr := c.atomicMemOpSetup(baseAddr, uint64(offset), opSize)
+			addr := c.atomicMemOpSetup(memIndex, baseAddr, uint64(offset), opSize)
 
 			memoryWaitPtr := builder.AllocateInstruction().
 				AsLoad(c.execCtxPtrValue,
@@ -3322,13 +3328,14 @@ func (c *Compiler) lowerCurrentOpcode() {
 					ssa.TypeI64,
 				).Insert(builder).Return()
 
-			args := c.allocateVarLengthValues(4, c.execCtxPtrValue, timeout, exp, addr)
+			memIndexVal := builder.AllocateInstruction().AsIconst32(uint32(memIndex)).Insert(builder).Return()
+			args := c.allocateVarLengthValues(5, c.execCtxPtrValue, memIndexVal, timeout, exp, addr)
 			memoryWaitRet := builder.AllocateInstruction().
 				AsCallIndirect(memoryWaitPtr, sig, args).
 				Insert(builder).Return()
 			state.push(memoryWaitRet)
 		case wasm.OpcodeAtomicMemoryNotify:
-			_, offset := c.readMemArg()
+			_, offset, memIndex := c.readMemArg()
 			if state.unreachable {
 				break
 			}
@@ -3336,20 +3343,21 @@ func (c *Compiler) lowerCurrentOpcode() {
 			c.storeCallerModuleContext()
 			count := state.pop()
 			baseAddr := state.pop()
-			addr := c.atomicMemOpSetup(baseAddr, uint64(offset), 4)
+			addr := c.atomicMemOpSetup(memIndex, baseAddr, uint64(offset), 4)
 
 			memoryNotifyPtr := builder.AllocateInstruction().
 				AsLoad(c.execCtxPtrValue,
 					nativeapi.ExecutionContextOffsetMemoryNotifyTrampolineAddress.U32(),
 					ssa.TypeI64,
 				).Insert(builder).Return()
-			args := c.allocateVarLengthValues(3, c.execCtxPtrValue, count, addr)
+			memIndexVal := builder.AllocateInstruction().AsIconst32(uint32(memIndex)).Insert(builder).Return()
+			args := c.allocateVarLengthValues(4, c.execCtxPtrValue, memIndexVal, count, addr)
 			memoryNotifyRet := builder.AllocateInstruction().
 				AsCallIndirect(memoryNotifyPtr, &c.memoryNotifySig, args).
 				Insert(builder).Return()
 			state.push(memoryNotifyRet)
 		case wasm.OpcodeAtomicI32Load, wasm.OpcodeAtomicI64Load, wasm.OpcodeAtomicI32Load8U, wasm.OpcodeAtomicI32Load16U, wasm.OpcodeAtomicI64Load8U, wasm.OpcodeAtomicI64Load16U, wasm.OpcodeAtomicI64Load32U:
-			_, offset := c.readMemArg()
+			_, offset, memIndex := c.readMemArg()
 			if state.unreachable {
 				break
 			}
@@ -3376,11 +3384,11 @@ func (c *Compiler) lowerCurrentOpcode() {
 				typ = ssa.TypeI32
 			}
 
-			addr := c.atomicMemOpSetup(baseAddr, uint64(offset), size)
+			addr := c.atomicMemOpSetup(memIndex, baseAddr, uint64(offset), size)
 			res := builder.AllocateInstruction().AsAtomicLoad(addr, size, typ).Insert(builder).Return()
 			state.push(res)
 		case wasm.OpcodeAtomicI32Store, wasm.OpcodeAtomicI64Store, wasm.OpcodeAtomicI32Store8, wasm.OpcodeAtomicI32Store16, wasm.OpcodeAtomicI64Store8, wasm.OpcodeAtomicI64Store16, wasm.OpcodeAtomicI64Store32:
-			_, offset := c.readMemArg()
+			_, offset, memIndex := c.readMemArg()
 			if state.unreachable {
 				break
 			}
@@ -3400,7 +3408,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 				size = 1
 			}
 
-			addr := c.atomicMemOpSetup(baseAddr, uint64(offset), size)
+			addr := c.atomicMemOpSetup(memIndex, baseAddr, uint64(offset), size)
 			builder.AllocateInstruction().AsAtomicStore(addr, val, size).Insert(builder)
 		case wasm.OpcodeAtomicI32RmwAdd, wasm.OpcodeAtomicI64RmwAdd, wasm.OpcodeAtomicI32Rmw8AddU, wasm.OpcodeAtomicI32Rmw16AddU, wasm.OpcodeAtomicI64Rmw8AddU, wasm.OpcodeAtomicI64Rmw16AddU, wasm.OpcodeAtomicI64Rmw32AddU,
 			wasm.OpcodeAtomicI32RmwSub, wasm.OpcodeAtomicI64RmwSub, wasm.OpcodeAtomicI32Rmw8SubU, wasm.OpcodeAtomicI32Rmw16SubU, wasm.OpcodeAtomicI64Rmw8SubU, wasm.OpcodeAtomicI64Rmw16SubU, wasm.OpcodeAtomicI64Rmw32SubU,
@@ -3408,7 +3416,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 			wasm.OpcodeAtomicI32RmwOr, wasm.OpcodeAtomicI64RmwOr, wasm.OpcodeAtomicI32Rmw8OrU, wasm.OpcodeAtomicI32Rmw16OrU, wasm.OpcodeAtomicI64Rmw8OrU, wasm.OpcodeAtomicI64Rmw16OrU, wasm.OpcodeAtomicI64Rmw32OrU,
 			wasm.OpcodeAtomicI32RmwXor, wasm.OpcodeAtomicI64RmwXor, wasm.OpcodeAtomicI32Rmw8XorU, wasm.OpcodeAtomicI32Rmw16XorU, wasm.OpcodeAtomicI64Rmw8XorU, wasm.OpcodeAtomicI64Rmw16XorU, wasm.OpcodeAtomicI64Rmw32XorU,
 			wasm.OpcodeAtomicI32RmwXchg, wasm.OpcodeAtomicI64RmwXchg, wasm.OpcodeAtomicI32Rmw8XchgU, wasm.OpcodeAtomicI32Rmw16XchgU, wasm.OpcodeAtomicI64Rmw8XchgU, wasm.OpcodeAtomicI64Rmw16XchgU, wasm.OpcodeAtomicI64Rmw32XchgU:
-			_, offset := c.readMemArg()
+			_, offset, memIndex := c.readMemArg()
 			if state.unreachable {
 				break
 			}
@@ -3493,11 +3501,11 @@ func (c *Compiler) lowerCurrentOpcode() {
 				}
 			}
 
-			addr := c.atomicMemOpSetup(baseAddr, uint64(offset), size)
+			addr := c.atomicMemOpSetup(memIndex, baseAddr, uint64(offset), size)
 			res := builder.AllocateInstruction().AsAtomicRmw(rmwOp, addr, val, size).Insert(builder).Return()
 			state.push(res)
 		case wasm.OpcodeAtomicI32RmwCmpxchg, wasm.OpcodeAtomicI64RmwCmpxchg, wasm.OpcodeAtomicI32Rmw8CmpxchgU, wasm.OpcodeAtomicI32Rmw16CmpxchgU, wasm.OpcodeAtomicI64Rmw8CmpxchgU, wasm.OpcodeAtomicI64Rmw16CmpxchgU, wasm.OpcodeAtomicI64Rmw32CmpxchgU:
-			_, offset := c.readMemArg()
+			_, offset, memIndex := c.readMemArg()
 			if state.unreachable {
 				break
 			}
@@ -3517,7 +3525,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 			case wasm.OpcodeAtomicI32Rmw8CmpxchgU, wasm.OpcodeAtomicI64Rmw8CmpxchgU:
 				size = 1
 			}
-			addr := c.atomicMemOpSetup(baseAddr, uint64(offset), size)
+			addr := c.atomicMemOpSetup(memIndex, baseAddr, uint64(offset), size)
 			res := builder.AllocateInstruction().AsAtomicCas(addr, exp, repl, size).Insert(builder).Return()
 			state.push(res)
 		case wasm.OpcodeAtomicFence:
@@ -4529,10 +4537,10 @@ func (c *Compiler) staticUpperBoundU32Depth(v ssa.Value, depth int) (uint64, boo
 // recordRangeSafeBound materializes the absolute address for a bounds-check-
 // elided access (if not already computed) and records the known-safe bound so
 // subsequent accesses off the same base reuse it.
-func (c *Compiler) recordRangeSafeBound(baseAddr ssa.Value, baseAddrID ssa.ValueID, ceil uint64, address ssa.Value) ssa.Value {
+func (c *Compiler) recordRangeSafeBound(memIndex wasm.Index, baseAddr ssa.Value, baseAddrID ssa.ValueID, ceil uint64, address ssa.Value) ssa.Value {
 	builder := c.ssaBuilder
 	if !address.Valid() {
-		memBase := c.getMemoryBaseValue(false)
+		memBase := c.getMemoryBaseValue(memIndex, false)
 		extBaseAddr := builder.AllocateInstruction().AsUExtend(baseAddr, 32, 64).Insert(builder).Return()
 		address = builder.AllocateInstruction().AsIadd(memBase, extBaseAddr).Insert(builder).Return()
 	}
@@ -4540,59 +4548,71 @@ func (c *Compiler) recordRangeSafeBound(baseAddr ssa.Value, baseAddrID ssa.Value
 	return address
 }
 
-func (c *Compiler) memOpSetup(baseAddr ssa.Value, constOffset, operationSizeInBytes uint64) (address ssa.Value) {
+func (c *Compiler) memOpSetup(memIndex wasm.Index, baseAddr ssa.Value, constOffset, operationSizeInBytes uint64) (address ssa.Value) {
 	address = ssa.ValueInvalid
 	builder := c.ssaBuilder
 
 	baseAddrID := baseAddr.ID()
 	ceil := constOffset + operationSizeInBytes
-	if known := c.getKnownSafeBound(baseAddrID); known.valid() {
-		// We reuse the calculated absolute address even if the bound is not known to be safe.
-		address = known.absoluteAddr
-		if ceil <= known.bound {
-			if !address.Valid() {
-				// This means that, the bound is known to be safe, but the memory base might have changed.
-				// So, we re-calculate the address.
-				memBase := c.getMemoryBaseValue(false)
-				extBaseAddr := builder.AllocateInstruction().
-					AsUExtend(baseAddr, 32, 64).
-					Insert(builder).
-					Return()
-				address = builder.AllocateInstruction().
-					AsIadd(memBase, extBaseAddr).Insert(builder).Return()
-				known.absoluteAddr = address // Update the absolute address for the subsequent memory access.
+
+	// The linear-path known-safe-bounds cache (knownSafeBounds) is keyed only
+	// by baseAddrID, with no memory dimension in its cross-block merge -- see
+	// the multiMemory doc comment. Skip it outright for multi-memory modules;
+	// the dominance-based pass in ssa/pass.go (which IS memory-aware) still
+	// applies as a post-lowering optimization.
+	if !c.multiMemory {
+		if known := c.getKnownSafeBound(baseAddrID); known.valid() {
+			// We reuse the calculated absolute address even if the bound is not known to be safe.
+			address = known.absoluteAddr
+			if ceil <= known.bound {
+				if !address.Valid() {
+					// This means that, the bound is known to be safe, but the memory base might have changed.
+					// So, we re-calculate the address.
+					memBase := c.getMemoryBaseValue(memIndex, false)
+					extBaseAddr := builder.AllocateInstruction().
+						AsUExtend(baseAddr, 32, 64).
+						Insert(builder).
+						Return()
+					address = builder.AllocateInstruction().
+						AsIadd(memBase, extBaseAddr).Insert(builder).Return()
+					known.absoluteAddr = address // Update the absolute address for the subsequent memory access.
+				}
+				return
 			}
-			return
 		}
 	}
+
+	memoryMinSizeInBytes := c.memoryMinSizeInBytes[memIndex]
 
 	// A constant base address whose access end lies within the memory's
 	// minimum size can never be out of bounds: memories only ever grow, so
 	// the declared minimum is a static lower bound on the current length.
-	if def := builder.InstructionOfValue(baseAddr); def != nil && def.Constant() {
-		if uint64(uint32(def.ConstantVal()))+ceil <= c.memoryMinSizeInBytes {
-			if !address.Valid() {
-				memBase := c.getMemoryBaseValue(false)
-				extBaseAddr := builder.AllocateInstruction().
-					AsUExtend(baseAddr, 32, 64).
-					Insert(builder).
-					Return()
-				address = builder.AllocateInstruction().
-					AsIadd(memBase, extBaseAddr).Insert(builder).Return()
+	if !c.multiMemory {
+		if def := builder.InstructionOfValue(baseAddr); def != nil && def.Constant() {
+			if uint64(uint32(def.ConstantVal()))+ceil <= memoryMinSizeInBytes {
+				if !address.Valid() {
+					memBase := c.getMemoryBaseValue(memIndex, false)
+					extBaseAddr := builder.AllocateInstruction().
+						AsUExtend(baseAddr, 32, 64).
+						Insert(builder).
+						Return()
+					address = builder.AllocateInstruction().
+						AsIadd(memBase, extBaseAddr).Insert(builder).Return()
+				}
+				c.recordKnownSafeBound(baseAddrID, ceil, address)
+				return
 			}
-			c.recordKnownSafeBound(baseAddrID, ceil, address)
+		}
+
+		// A statically bounded base whose maximum access end lies within the
+		// memory's minimum can never be out of bounds. This includes x & C (at most
+		// C), x % C for a non-zero constant C (at most C-1), and non-wrapping add or
+		// constant-shift address composition. Mirrors the constant case's 32-bit-
+		// address assumption.
+		if upperBound, ok := c.staticUpperBoundU32(baseAddr); ok && upperBound+ceil <= memoryMinSizeInBytes {
+			address = c.recordRangeSafeBound(memIndex, baseAddr, baseAddrID, ceil, address)
 			return
 		}
-	}
-
-	// A statically bounded base whose maximum access end lies within the
-	// memory's minimum can never be out of bounds. This includes x & C (at most
-	// C), x % C for a non-zero constant C (at most C-1), and non-wrapping add or
-	// constant-shift address composition. Mirrors the constant case's 32-bit-
-	// address assumption.
-	if upperBound, ok := c.staticUpperBoundU32(baseAddr); ok && upperBound+ceil <= c.memoryMinSizeInBytes {
-		address = c.recordRangeSafeBound(baseAddr, baseAddrID, ceil, address)
-		return
 	}
 
 	ceilConst := builder.AllocateInstruction()
@@ -4606,7 +4626,7 @@ func (c *Compiler) memOpSetup(baseAddr ssa.Value, constOffset, operationSizeInBy
 		Return()
 
 	// Note: memLen is already zero extended to 64-bit space at the load time.
-	memLen := c.getMemoryLenValue(false)
+	memLen := c.getMemoryLenValue(memIndex, false)
 
 	// baseAddrPlusCeil = baseAddr + ceil
 	baseAddrPlusCeil := builder.AllocateInstruction()
@@ -4623,22 +4643,24 @@ func (c *Compiler) memOpSetup(baseAddr ssa.Value, constOffset, operationSizeInBy
 
 	// Load the value from memBase + extBaseAddr.
 	if address == ssa.ValueInvalid { // Reuse the value if the memBase is already calculated at this point.
-		memBase := c.getMemoryBaseValue(false)
+		memBase := c.getMemoryBaseValue(memIndex, false)
 		address = builder.AllocateInstruction().
 			AsIadd(memBase, extBaseAddr).Insert(builder).Return()
 	}
 
 	// Record the bound ceil for this baseAddr is known to be safe for the subsequent memory access in the same block.
-	c.recordKnownSafeBound(baseAddrID, ceil, address)
+	if !c.multiMemory {
+		c.recordKnownSafeBound(baseAddrID, ceil, address)
+	}
 	return
 }
 
 // atomicMemOpSetup inserts the bounds check and calculates the address of the memory operation (loads/stores), including
 // the constant offset and performs an alignment check on the final address.
-func (c *Compiler) atomicMemOpSetup(baseAddr ssa.Value, constOffset, operationSizeInBytes uint64) (address ssa.Value) {
+func (c *Compiler) atomicMemOpSetup(memIndex wasm.Index, baseAddr ssa.Value, constOffset, operationSizeInBytes uint64) (address ssa.Value) {
 	builder := c.ssaBuilder
 
-	addrWithoutOffset := c.memOpSetup(baseAddr, constOffset, operationSizeInBytes)
+	addrWithoutOffset := c.memOpSetup(memIndex, baseAddr, constOffset, operationSizeInBytes)
 	var addr ssa.Value
 	if constOffset == 0 {
 		addr = addrWithoutOffset
@@ -4694,11 +4716,8 @@ func (c *Compiler) reloadAfterCall() {
 	// Note that when these are not used in the following instructions, they will be optimized out.
 	// So in any ways, we define them!
 
-	// After calling any function, memory buffer might have changed. So we need to re-define the variable.
-	// However, if the memory is shared, we don't need to reload the memory base and length as the base will never change.
-	if c.needMemory && !c.memoryShared {
-		c.reloadMemoryBaseLen()
-	}
+	// After calling any function, memory buffers might have changed.
+	c.reloadAllMemories()
 
 	// Also, any mutable Global can change.
 	for _, index := range c.mutableGlobalVariablesIndexes {
@@ -4706,9 +4725,23 @@ func (c *Compiler) reloadAfterCall() {
 	}
 }
 
-func (c *Compiler) reloadMemoryBaseLen() {
-	_ = c.getMemoryBaseValue(true)
-	_ = c.getMemoryLenValue(true)
+// reloadAllMemories re-defines the cached base/length of every non-shared
+// memory. If a memory is shared, we don't need to reload its base and length
+// as the base will never change. (c.memoryShared is empty when the module has
+// no memory, so this is a no-op in that case.)
+func (c *Compiler) reloadAllMemories() {
+	if c.needMemory {
+		for i := range c.memoryShared {
+			if !c.memoryShared[i] {
+				c.reloadMemoryBaseLen(wasm.Index(i))
+			}
+		}
+	}
+}
+
+func (c *Compiler) reloadMemoryBaseLen(memIndex wasm.Index) {
+	_ = c.getMemoryBaseValue(memIndex, true)
+	_ = c.getMemoryLenValue(memIndex, true)
 
 	// This function being called means that the memory base might have changed.
 	// Therefore, we need to clear the absolute addresses recorded in the known safe bounds
@@ -4716,7 +4749,7 @@ func (c *Compiler) reloadMemoryBaseLen() {
 	c.resetAbsoluteAddressInSafeBounds()
 }
 
-func (c *Compiler) lowerMemoryGrowCall(pages ssa.Value) ssa.Value {
+func (c *Compiler) lowerMemoryGrowCall(memIndex wasm.Index, pages ssa.Value) ssa.Value {
 	builder := c.ssaBuilder
 	c.storeCallerModuleContext()
 	memoryGrowPtr := builder.AllocateInstruction().
@@ -4724,7 +4757,8 @@ func (c *Compiler) lowerMemoryGrowCall(pages ssa.Value) ssa.Value {
 			nativeapi.ExecutionContextOffsetMemoryGrowTrampolineAddress.U32(),
 			ssa.TypeI64,
 		).Insert(builder).Return()
-	args := c.allocateVarLengthValues(2, c.execCtxPtrValue, pages)
+	memIndexVal := builder.AllocateInstruction().AsIconst32(uint32(memIndex)).Insert(builder).Return()
+	args := c.allocateVarLengthValues(3, c.execCtxPtrValue, memIndexVal, pages)
 	return builder.AllocateInstruction().
 		AsCallIndirect(memoryGrowPtr, &c.memoryGrowSig, args).
 		Insert(builder).Return()
@@ -4733,7 +4767,7 @@ func (c *Compiler) lowerMemoryGrowCall(pages ssa.Value) ssa.Value {
 // lowerLocalMemoryGrow keeps growth within an ordinary memory's reserved
 // capacity in native code. Growth that needs allocation, and all custom
 // allocator growth (nativeGrowCap == 0), uses the existing Go trampoline.
-func (c *Compiler) lowerLocalMemoryGrow(pages ssa.Value) ssa.Value {
+func (c *Compiler) lowerLocalMemoryGrow(memIndex wasm.Index, pages ssa.Value) ssa.Value {
 	builder := c.ssaBuilder
 	checkCapacityBlk := builder.AllocateBasicBlock()
 	fastBlk := builder.AllocateBasicBlock()
@@ -4742,24 +4776,25 @@ func (c *Compiler) lowerLocalMemoryGrow(pages ssa.Value) ssa.Value {
 	followingBlk := builder.AllocateBasicBlock()
 	result := followingBlk.AddParam(builder, ssa.TypeI32)
 
-	currentLen := c.getMemoryLenValue(false)
+	currentLen := c.getMemoryLenValue(memIndex, false)
 	pageShift := builder.AllocateInstruction().AsIconst64(wasm.MemoryPageSizeInBits).Insert(builder).Return()
 	currentPages64 := builder.AllocateInstruction().AsUshr(currentLen, pageShift).Insert(builder).Return()
 	currentPages := builder.AllocateInstruction().AsIreduce(currentPages64, ssa.TypeI32).Insert(builder).Return()
 	pages64 := builder.AllocateInstruction().AsUExtend(pages, 32, 64).Insert(builder).Return()
 	newPages := builder.AllocateInstruction().AsIadd(currentPages64, pages64).Insert(builder).Return()
-	maxPages := builder.AllocateInstruction().AsIconst64(uint64(c.memoryMaxPages)).Insert(builder).Return()
+	maxPages := builder.AllocateInstruction().AsIconst64(uint64(c.memoryMaxPages[memIndex])).Insert(builder).Return()
 	overMax := builder.AllocateInstruction().
 		AsIcmp(newPages, maxPages, ssa.IntegerCmpCondUnsignedGreaterThan).Insert(builder).Return()
 	builder.AllocateInstruction().AsBrnz(overMax, ssa.ValuesNil, failBlk).Insert(builder)
 	builder.AllocateInstruction().AsJump(ssa.ValuesNil, checkCapacityBlk).Insert(builder)
 
 	builder.SetCurrentBlock(checkCapacityBlk)
-	moduleInstance := builder.AllocateInstruction().
-		AsLoad(c.moduleCtxPtrValue, c.offset.ModuleInstanceOffset.U32(), ssa.TypeI64).
-		Insert(builder).Return()
+	// This local memory's *wasm.MemoryInstance is mirrored into its own
+	// opaque-context record (see ModuleContextOffsetData.MemoriesBegin), so a
+	// single constant-offset load off moduleCtxPtrValue reaches it directly --
+	// no need to chase ModuleInstance -> Memories slice data pointer -> element.
 	memoryInstance := builder.AllocateInstruction().
-		AsLoad(moduleInstance, moduleInstanceMemoryOffset, ssa.TypeI64).
+		AsLoad(c.moduleCtxPtrValue, c.offset.LocalMemoryInstancePtrOffset(int(memIndex)).U32(), ssa.TypeI64).
 		Insert(builder).Return()
 	capacity := builder.AllocateInstruction().
 		AsLoad(memoryInstance, memoryInstanceNativeGrowCapOffset, ssa.TypeI64).
@@ -4775,7 +4810,7 @@ func (c *Compiler) lowerLocalMemoryGrow(pages ssa.Value) ssa.Value {
 	// Keep both logical-size views synchronized. The backing allocation and Go
 	// slice header are immutable on this path.
 	builder.AllocateInstruction().
-		AsStore(ssa.OpcodeStore, newLen, c.moduleCtxPtrValue, c.offset.LocalMemoryLen().U32()).
+		AsStore(ssa.OpcodeStore, newLen, c.moduleCtxPtrValue, (c.offset.MemoryOffset(int(memIndex)) + 8).U32()).
 		Insert(builder)
 	builder.AllocateInstruction().
 		AsStore(ssa.OpcodeStore, newLen, memoryInstance, memoryInstanceSizeOffset).
@@ -4785,7 +4820,7 @@ func (c *Compiler) lowerLocalMemoryGrow(pages ssa.Value) ssa.Value {
 	builder.Seal(fastBlk)
 
 	builder.SetCurrentBlock(slowBlk)
-	slowResult := c.lowerMemoryGrowCall(pages)
+	slowResult := c.lowerMemoryGrowCall(memIndex, pages)
 	builder.AllocateInstruction().
 		AsJump(c.allocateVarLengthValues(1, slowResult), followingBlk).Insert(builder)
 	builder.Seal(slowBlk)
@@ -4854,26 +4889,25 @@ func (c *Compiler) getWasmGlobalValue(index wasm.Index, forceLoad bool) ssa.Valu
 	return v
 }
 
-const (
-	memoryInstanceBufOffset    = 0
-	moduleInstanceMemoryOffset = 48
-)
+const memoryInstanceBufOffset = 0
 
 var memoryInstanceNativeGrowCapOffset, memoryInstanceSizeOffset = wasm.MemoryInstanceNativeGrowOffsets()
 
-func (c *Compiler) getMemoryBaseValue(forceReload bool) ssa.Value {
+func (c *Compiler) getMemoryBaseValue(memIndex wasm.Index, forceReload bool) ssa.Value {
 	builder := c.ssaBuilder
-	variable := c.memoryBaseVariable
+	variable := c.memoryBaseVariables[memIndex]
 	if !forceReload {
 		if v := builder.FindValueInLinearPath(variable); v.Valid() {
 			return v
 		}
 	}
 
+	opaqueOffset := c.offset.MemoryOffset(int(memIndex))
+
 	var ret ssa.Value
-	if c.offset.LocalMemoryBegin < 0 {
+	if memIndex < c.m.ImportMemoryCount {
 		loadMemInstPtr := builder.AllocateInstruction()
-		loadMemInstPtr.AsLoad(c.moduleCtxPtrValue, c.offset.ImportedMemoryBegin.U32(), ssa.TypeI64)
+		loadMemInstPtr.AsLoad(c.moduleCtxPtrValue, opaqueOffset.U32(), ssa.TypeI64)
 		builder.InsertInstruction(loadMemInstPtr)
 		memInstPtr := loadMemInstPtr.Return()
 
@@ -4883,7 +4917,7 @@ func (c *Compiler) getMemoryBaseValue(forceReload bool) ssa.Value {
 		ret = loadBufPtr.Return()
 	} else {
 		load := builder.AllocateInstruction()
-		load.AsLoad(c.moduleCtxPtrValue, c.offset.LocalMemoryBase().U32(), ssa.TypeI64)
+		load.AsLoad(c.moduleCtxPtrValue, opaqueOffset.U32(), ssa.TypeI64)
 		builder.InsertInstruction(load)
 		ret = load.Return()
 	}
@@ -4892,24 +4926,27 @@ func (c *Compiler) getMemoryBaseValue(forceReload bool) ssa.Value {
 	return ret
 }
 
-func (c *Compiler) getMemoryLenValue(forceReload bool) ssa.Value {
-	variable := c.memoryLenVariable
+func (c *Compiler) getMemoryLenValue(memIndex wasm.Index, forceReload bool) ssa.Value {
+	variable := c.memoryLenVariables[memIndex]
+	shared := c.memoryShared[memIndex]
 	builder := c.ssaBuilder
-	if !forceReload && !c.memoryShared {
+	if !forceReload && !shared {
 		if v := builder.FindValueInLinearPath(variable); v.Valid() {
 			return v
 		}
 	}
 
+	opaqueOffset := c.offset.MemoryOffset(int(memIndex))
+
 	var ret ssa.Value
-	if c.offset.LocalMemoryBegin < 0 {
+	if memIndex < c.m.ImportMemoryCount {
 		loadMemInstPtr := builder.AllocateInstruction()
-		loadMemInstPtr.AsLoad(c.moduleCtxPtrValue, c.offset.ImportedMemoryBegin.U32(), ssa.TypeI64)
+		loadMemInstPtr.AsLoad(c.moduleCtxPtrValue, opaqueOffset.U32(), ssa.TypeI64)
 		builder.InsertInstruction(loadMemInstPtr)
 		memInstPtr := loadMemInstPtr.Return()
 
 		loadBufSizePtr := builder.AllocateInstruction()
-		if c.memoryShared {
+		if shared {
 			sizeOffset := builder.AllocateInstruction().AsIconst64(uint64(memoryInstanceSizeOffset)).Insert(builder).Return()
 			addr := builder.AllocateInstruction().AsIadd(memInstPtr, sizeOffset).Insert(builder).Return()
 			loadBufSizePtr.AsAtomicLoad(addr, 8, ssa.TypeI64)
@@ -4921,12 +4958,16 @@ func (c *Compiler) getMemoryLenValue(forceReload bool) ssa.Value {
 		ret = loadBufSizePtr.Return()
 	} else {
 		load := builder.AllocateInstruction()
-		if c.memoryShared {
-			lenOffset := builder.AllocateInstruction().AsIconst64(c.offset.LocalMemoryLen().U64()).Insert(builder).Return()
+		if shared {
+			lenOffset := builder.AllocateInstruction().AsIconst64(uint64(opaqueOffset) + 8).Insert(builder).Return()
 			addr := builder.AllocateInstruction().AsIadd(c.moduleCtxPtrValue, lenOffset).Insert(builder).Return()
 			load.AsAtomicLoad(addr, 8, ssa.TypeI64)
 		} else {
-			load.AsExtLoad(ssa.OpcodeUload32, c.moduleCtxPtrValue, c.offset.LocalMemoryLen().U32(), true)
+			// Must be a full 64-bit load, not AsExtLoad(Uload32, ...): a
+			// 65536-page (the legal maximum) memory has a byte length of
+			// exactly 2^32, which a 32-bit load truncates to zero, making
+			// every access on such a memory incorrectly trap as out-of-bounds.
+			load.AsLoad(c.moduleCtxPtrValue, (opaqueOffset + 8).U32(), ssa.TypeI64)
 		}
 		builder.InsertInstruction(load)
 		ret = load.Return()
@@ -5276,22 +5317,40 @@ func (c *Compiler) readBlockType() *wasm.FunctionType {
 	return bt
 }
 
-func (c *Compiler) readMemArg() (align, offset uint32) {
+// memArgMultiMemoryFlag is bit 6 of the memarg align LEB128, reserved by the
+// multi-memory proposal to signal that a memidx LEB128 immediately follows.
+// See https://webassembly.github.io/multi-memory/core/binary/instructions.html
+const memArgMultiMemoryFlag = 0x40
+
+func (c *Compiler) readMemArg() (align, offset uint32, memIndex wasm.Index) {
 	state := c.state()
 
-	align, num, err := leb128.LoadUint32(c.wasmFunctionBody[state.pc+1:])
+	rawAlign, num, err := leb128.LoadUint32(c.wasmFunctionBody[state.pc+1:])
 	if err != nil {
 		panic(fmt.Errorf("read memory align: %v", err))
 	}
-
 	state.pc += int(num)
+
+	if rawAlign&memArgMultiMemoryFlag != 0 {
+		align = rawAlign &^ memArgMultiMemoryFlag
+		var idx uint32
+		idx, num, err = leb128.LoadUint32(c.wasmFunctionBody[state.pc+1:])
+		if err != nil {
+			panic(fmt.Errorf("read memory index: %v", err))
+		}
+		memIndex = wasm.Index(idx)
+		state.pc += int(num)
+	} else {
+		align = rawAlign
+	}
+
 	offset, num, err = leb128.LoadUint32(c.wasmFunctionBody[state.pc+1:])
 	if err != nil {
 		panic(fmt.Errorf("read memory offset: %v", err))
 	}
 
 	state.pc += int(num)
-	return align, offset
+	return align, offset, memIndex
 }
 
 // insertJumpToBlock inserts a jump instruction to the given block in the current block.

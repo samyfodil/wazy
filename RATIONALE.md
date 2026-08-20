@@ -1498,6 +1498,31 @@ We _believe_ that all use cases are fine with the limitation, but also note that
 
 If a module reaches this limit, an error is returned at the compilation phase.
 
+### Number of memories in a module
+
+While the spec (as of the [multi-memory proposal](https://github.com/WebAssembly/multi-memory)) allows up to 2^32 memories, wazy limits this to 2^25 = 33,554,432, lower than
+the 2^27 used for functions, globals, and tables above. Each memory occupies a 24-byte record (base pointer, length, and a pointer back to the `*wasm.MemoryInstance`) in the
+native engine's opaque module context, and that context is addressed with a 32-bit signed offset. 2^27 * 24 bytes overflows that range, while 2^25 * 24 bytes = 768MiB does not.
+
+If a module reaches this limit, an error is returned at the validation phase.
+
+### Aggregate memory minimum across a module
+
+Each declared memory is individually bounded by the embedder-configured `WithMemoryLimitPages` (up to the 65536-page hard ceiling above), same as before multi-memory. But
+`buildMemory` unconditionally, eagerly touches every declared memory's *minimum* at instantiation time regardless of allocator or config (`NewMemoryInstance`'s `minBytes`
+slice/backing, or a custom allocator's `Reallocate(minBytes)`), so without a further check, a multi-memory module could demand N times that limit just by declaring N
+memories at the per-memory minimum -- a resource-exhaustion vector that couldn't exist when a module had at most one memory. wazy bounds the SUM of each declared memory's
+`Min` (not `Cap`) to that same embedder-configured limit: an embedder who deliberately configured a smaller per-memory limit is choosing a resource budget, and
+multi-memory must not let a *module* evade it by splitting the same total across many small memories' minimums. This restores the pre-multi-memory worst case -- a module
+can never force more eager touching than one memory's worth of the embedder's configured minimum, combined across however many memories it declares -- while leaving
+ordinary multi-memory usage well under that combined budget unaffected.
+
+The check deliberately uses `Min`, not `Cap`. `Min` is part of the untrusted wasm binary (what the check exists to bound); `Cap` beyond `Min` is an embedder-controlled
+performance knob (`WithMemoryCapacityFromMax`, `WithMemoryCapacityReservePages`) the embedder already opts into with informed consent -- `WithMemoryCapacityFromMax`'s own
+doc warns that a max-less memory then reserves the full per-memory ceiling. A `Cap`-based sum would multiply that already-acknowledged cost by every max-less memory in a
+module and reject ordinary, spec-valid multi-memory modules outright under that config; this check exists to bound what the *module* can demand, not to second-guess the
+embedder's own tuning.
+
 ## Relaxed SIMD
 
 The [relaxed-simd proposal](https://github.com/WebAssembly/relaxed-simd) defines

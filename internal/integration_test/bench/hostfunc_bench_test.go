@@ -40,7 +40,7 @@ func BenchmarkHostFunctionCall(b *testing.B) {
 	const offset = uint64(100)
 	const val = float32(1.1234)
 
-	binary.LittleEndian.PutUint32(m.MemoryInstance.Buffer[offset:], math.Float32bits(val))
+	binary.LittleEndian.PutUint32(m.Memories[0].Buffer[offset:], math.Float32bits(val))
 
 	for _, fn := range []string{callGoHostName, callGoTypedHostName} {
 		b.Run(fn, func(b *testing.B) {
@@ -101,7 +101,7 @@ func TestBenchmarkFunctionCall(t *testing.T) {
 		{offset: wasm.MemoryPageSize - 4, val: 1.12314},
 	}
 
-	mem := m.MemoryInstance.Buffer
+	mem := m.Memories[0].Buffer
 
 	for _, f := range []struct {
 		name string
@@ -174,7 +174,7 @@ func setupHostCallBench(requireNoError func(error)) *wasm.ModuleInstance {
 			{Body: []byte{wasm.OpcodeLocalGet, 0, wasm.OpcodeCall, 0, wasm.OpcodeEnd}}, // Calling the index 0 = host.go.
 			{Body: []byte{wasm.OpcodeLocalGet, 0, wasm.OpcodeCall, 1, wasm.OpcodeEnd}}, // Calling the index 1 = host.go-typed.
 		},
-		MemorySection: &wasm.Memory{Min: 1},
+		MemorySection: []wasm.Memory{{Min: 1}},
 	})
 
 	importing, err := r.Instantiate(ctx, importingModuleBin)

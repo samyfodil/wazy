@@ -611,13 +611,13 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr, newsp, newfp)
 		case nativeapi.ExitCodeGrowMemory:
 			mod := c.callerModuleInstance()
-			mem := mod.MemoryInstance
 			s := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
-			argRes := &s[0]
-			if res, ok := mem.Grow(uint32(*argRes)); !ok {
-				*argRes = uint64(0xffffffff) // = -1 in signed 32-bit integer.
+			memIndex, pages := uint32(s[0]), uint32(s[1])
+			mem := mod.Memories[memIndex]
+			if res, ok := mem.Grow(pages); !ok {
+				s[0] = uint64(0xffffffff) // = -1 in signed 32-bit integer.
 			} else {
-				*argRes = uint64(res)
+				s[0] = uint64(res)
 			}
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr, uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
@@ -744,13 +744,13 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case nativeapi.ExitCodeMemoryWait32:
 			mod := c.callerModuleInstance()
-			mem := mod.MemoryInstance
+			s := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
+			memIndex, timeout, exp, addr := uint32(s[0]), int64(s[1]), uint32(s[2]), uintptr(s[3])
+			mem := mod.Memories[memIndex]
 			if !mem.Shared {
 				panic(wasmruntime.ErrRuntimeExpectedSharedMemory)
 			}
 
-			s := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
-			timeout, exp, addr := int64(s[0]), uint32(s[1]), uintptr(s[2])
 			base := uintptr(unsafe.Pointer(&mem.Buffer[0]))
 
 			offset := uint32(addr - base)
@@ -764,13 +764,13 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case nativeapi.ExitCodeMemoryWait64:
 			mod := c.callerModuleInstance()
-			mem := mod.MemoryInstance
+			s := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
+			memIndex, timeout, exp, addr := uint32(s[0]), int64(s[1]), uint64(s[2]), uintptr(s[3])
+			mem := mod.Memories[memIndex]
 			if !mem.Shared {
 				panic(wasmruntime.ErrRuntimeExpectedSharedMemory)
 			}
 
-			s := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
-			timeout, exp, addr := int64(s[0]), uint64(s[1]), uintptr(s[2])
 			base := uintptr(unsafe.Pointer(&mem.Buffer[0]))
 
 			offset := uint32(addr - base)
@@ -784,10 +784,9 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case nativeapi.ExitCodeMemoryNotify:
 			mod := c.callerModuleInstance()
-			mem := mod.MemoryInstance
-
 			s := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
-			count, addr := uint32(s[0]), s[1]
+			memIndex, count, addr := uint32(s[0]), uint32(s[1]), s[2]
+			mem := mod.Memories[memIndex]
 			offset := uint32(uintptr(addr) - uintptr(unsafe.Pointer(&mem.Buffer[0])))
 			res := mem.Notify(offset, count)
 			s[0] = uint64(res)

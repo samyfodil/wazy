@@ -19,7 +19,7 @@ func countMemoryBoundsChecks(b *builder) int {
 	count := 0
 	for blk := b.blockIteratorBegin(); blk != nil; blk = b.blockIteratorNext() {
 		for instr := blk.rootInstr; instr != nil; instr = instr.next {
-			if _, _, ok := memoryBoundsCheckData(b, instr); ok {
+			if _, _, _, ok := memoryBoundsCheckData(b, instr); ok {
 				count++
 			}
 		}
@@ -101,6 +101,28 @@ func TestPassDominatedMemoryBoundsElimination(t *testing.T) {
 		b.Seal(entry)
 		b.SetCurrentBlock(child)
 		insertMemoryBoundsCheck(b, ctx, memoryLen, base, 8)
+		b.AllocateInstruction().AsReturn(ValuesNil).Insert(b)
+		b.Seal(child)
+		passCalculateImmediateDominators(b)
+
+		passDominatedMemoryBoundsEliminationOpt(b)
+		require.Equal(t, 2, countMemoryBoundsChecks(b))
+	})
+
+	t.Run("different memory, same base and ceil (multi-memory)", func(t *testing.T) {
+		// A dominating check against one memory's length must never eliminate a
+		// check against a DIFFERENT memory's length, even with the same base
+		// address value and an equal-or-smaller ceil -- the two checks guard
+		// different buffers. See memoryBoundsCheckData's memLen doc comment.
+		b := NewBuilder().(*builder)
+		entry, child := b.AllocateBasicBlock(), b.AllocateBasicBlock()
+		ctx, memLen0, memLen1, base := entry.AddParam(b, TypeI64), entry.AddParam(b, TypeI64), entry.AddParam(b, TypeI64), entry.AddParam(b, TypeI32)
+		b.SetCurrentBlock(entry)
+		insertMemoryBoundsCheck(b, ctx, memLen0, base, 8)
+		b.AllocateInstruction().AsJump(ValuesNil, child).Insert(b)
+		b.Seal(entry)
+		b.SetCurrentBlock(child)
+		insertMemoryBoundsCheck(b, ctx, memLen1, base, 4) // Different memory's length, smaller ceil.
 		b.AllocateInstruction().AsReturn(ValuesNil).Insert(b)
 		b.Seal(child)
 		passCalculateImmediateDominators(b)

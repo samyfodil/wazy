@@ -26,10 +26,7 @@ func (m *Module) SectionElementCount(sectionID SectionID) uint32 { // element as
 	case SectionIDTable:
 		return uint32(len(m.TableSection))
 	case SectionIDMemory:
-		if m.MemorySection != nil {
-			return 1
-		}
-		return 0
+		return uint32(len(m.MemorySection))
 	case SectionIDGlobal:
 		return uint32(len(m.GlobalSection))
 	case SectionIDExport:

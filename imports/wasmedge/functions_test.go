@@ -74,7 +74,7 @@ func guestModule(fns []hostFn) []byte {
 // guestModuleFrom is guestModule with the imported module name spelled out,
 // for the tests that care where the functions come from.
 func guestModuleFrom(moduleName string, fns []hostFn) []byte {
-	m := &wasm.Module{MemorySection: &wasm.Memory{Min: 2, Cap: 2, Max: 2, IsMaxEncoded: true}}
+	m := &wasm.Module{MemorySection: []wasm.Memory{{Min: 2, Cap: 2, Max: 2, IsMaxEncoded: true}}}
 
 	i32s := func(n int) []wasm.ValueType {
 		types := make([]wasm.ValueType, n)

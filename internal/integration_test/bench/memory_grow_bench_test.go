@@ -48,7 +48,7 @@ func BenchmarkMemoryGrowNativeFastPath(b *testing.B) {
 	mod, err := r.Instantiate(ctx, binaryencoding.EncodeModule(&wasm.Module{
 		TypeSection:     []wasm.FunctionType{{}},
 		FunctionSection: []wasm.Index{0},
-		MemorySection:   &wasm.Memory{Min: 1, Cap: 2, Max: 2, IsMaxEncoded: true},
+		MemorySection:   []wasm.Memory{{Min: 1, Cap: 2, Max: 2, IsMaxEncoded: true}},
 		ExportSection:   []wasm.Export{{Name: "grow", Type: wasm.ExternTypeFunc, Index: 0}},
 		CodeSection:     []wasm.Code{{Body: body}},
 	}))

@@ -176,6 +176,17 @@ const CoreFeatureTypedFunctionReferences CoreFeatures = CoreFeatureSIMD << 5
 // See https://github.com/WebAssembly/relaxed-simd for further details.
 const CoreFeatureRelaxedSIMD CoreFeatures = CoreFeatureSIMD << 6
 
+// CoreFeatureMultiMemory enables declaring, importing and using more than one
+// memory per module ("multi-memory").
+//
+// Here are the notable effects:
+//   - The memory section and memory imports are no longer limited to one entry.
+//   - Every memory instruction (`*.load`, `*.store`, `memory.size`, `memory.grow`,
+//     `memory.fill`, `memory.init`, `memory.copy`) carries a memory index.
+//
+// See https://github.com/WebAssembly/multi-memory for further details.
+const CoreFeatureMultiMemory CoreFeatures = CoreFeatureSIMD << 7
+
 // SetEnabled enables or disables the feature or group of features.
 func (f CoreFeatures) SetEnabled(feature CoreFeatures, val bool) CoreFeatures {
 	if val {
@@ -250,6 +261,8 @@ func featureName(f CoreFeatures) string {
 		return "typed-function-references"
 	case CoreFeatureRelaxedSIMD:
 		return "relaxed-simd"
+	case CoreFeatureMultiMemory:
+		return "multi-memory"
 	}
 	return ""
 }

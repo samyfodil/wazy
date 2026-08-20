@@ -127,7 +127,7 @@ func (e *moduleEngine) SetGlobalValue(idx wasm.Index, lo, hi uint64) {
 func (e *moduleEngine) OwnsGlobals() bool { return false }
 
 // MemoryGrown implements wasm.ModuleEngine.
-func (e *moduleEngine) MemoryGrown() {}
+func (e *moduleEngine) MemoryGrown(wasm.Index) {}
 
 // restorable is implemented by panic values that can restore callEngine state.
 // Both *snapshot (snapshotter API) and *thrownException (exception handling)
@@ -929,7 +929,8 @@ func (e *moduleEngine) ResolveImportedFunction(index, descFunc, indexInImportedM
 }
 
 // ResolveImportedMemory implements wasm.ModuleEngine.
-func (e *moduleEngine) ResolveImportedMemory(wasm.ModuleEngine) {}
+func (e *moduleEngine) ResolveImportedMemory(index, indexInImportedModule wasm.Index, importedModuleEngine wasm.ModuleEngine) {
+}
 
 // DoneInstantiation implements wasm.ModuleEngine.
 func (e *moduleEngine) DoneInstantiation() {}
@@ -1135,10 +1136,26 @@ func (ce *callEngine) callGoFunc(ctx context.Context, m *wasm.ModuleInstance, f 
 	}
 }
 
+// memoryAt returns memories[idx]. idx 0 is special-cased to return the
+// already-resident mem0 pointer, avoiding a slice bounds check and load for
+// the overwhelmingly common case of a module with at most one memory.
+func memoryAt(memories []*wasm.MemoryInstance, mem0 *wasm.MemoryInstance, idx uint64) *wasm.MemoryInstance {
+	if idx == 0 {
+		return mem0
+	}
+	return memories[idx]
+}
+
 func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance, f *function) {
 	moduleInst := f.moduleInstance
 	functions := moduleInst.Engine.(*moduleEngine).functions
-	memoryInst := moduleInst.MemoryInstance
+	memories := moduleInst.Memories
+	// mem0 lets memoryAt skip the slice bounds check and load for memory index
+	// 0, the overwhelmingly common case (a module with at most one memory).
+	var mem0 *wasm.MemoryInstance
+	if len(memories) > 0 {
+		mem0 = memories[0]
+	}
 	globals := moduleInst.Globals
 	tables := moduleInst.Tables
 	typeIDs := moduleInst.TypeIDs
@@ -1279,142 +1296,157 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 		// I10: these Load*/Store* cases inline the bounds check instead of going through
 		// popMemoryOffset+MemoryInstance.ReadXxx/WriteXxx: popMemoryOffset's own
 		// "offset > math.MaxUint32" check is subsumed by the single "ea+N >
-		// len(Buffer)" check below, because len(memoryInst.Buffer) can never
+		// len(Buffer)" check below, because len(mem.Buffer) can never
 		// exceed 1<<32 (MemoryLimitPages * MemoryPageSize) and N >= 1, so any ea
 		// >= 1<<32 already fails ea+N > len(Buffer). ea itself cannot overflow
 		// uint64: op.U2 (the static offset immediate) and the truncated dynamic
 		// base are both <= math.MaxUint32, so their sum is <= ~2^33.
 		case operationKindLoadI32, operationKindLoadF32:
 			frame.pc = pc // sync: OOB trap
+			mem := memoryAt(memories, mem0, op.U3)
 			ea := op.U2 + uint64(uint32(ce.popValue()))
-			if ea+4 > uint64(len(memoryInst.Buffer)) {
+			if ea+4 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
-			ce.pushValue(uint64(binary.LittleEndian.Uint32(memoryInst.Buffer[ea:])))
+			ce.pushValue(uint64(binary.LittleEndian.Uint32(mem.Buffer[ea:])))
 			pc++
 		case operationKindLoadI64, operationKindLoadF64:
 			frame.pc = pc // sync: OOB trap
+			mem := memoryAt(memories, mem0, op.U3)
 			ea := op.U2 + uint64(uint32(ce.popValue()))
-			if ea+8 > uint64(len(memoryInst.Buffer)) {
+			if ea+8 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
-			ce.pushValue(binary.LittleEndian.Uint64(memoryInst.Buffer[ea:]))
+			ce.pushValue(binary.LittleEndian.Uint64(mem.Buffer[ea:]))
 			pc++
 		case operationKindLoad8S32:
 			frame.pc = pc // sync: OOB trap
+			mem := memoryAt(memories, mem0, op.U3)
 			ea := op.U2 + uint64(uint32(ce.popValue()))
-			if ea+1 > uint64(len(memoryInst.Buffer)) {
+			if ea+1 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
-			ce.pushValue(uint64(uint32(int8(memoryInst.Buffer[ea]))))
+			ce.pushValue(uint64(uint32(int8(mem.Buffer[ea]))))
 			pc++
 		case operationKindLoad8S64:
 			frame.pc = pc // sync: OOB trap
+			mem := memoryAt(memories, mem0, op.U3)
 			ea := op.U2 + uint64(uint32(ce.popValue()))
-			if ea+1 > uint64(len(memoryInst.Buffer)) {
+			if ea+1 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
-			ce.pushValue(uint64(int8(memoryInst.Buffer[ea])))
+			ce.pushValue(uint64(int8(mem.Buffer[ea])))
 			pc++
 		case operationKindLoad8U32, operationKindLoad8U64:
 			frame.pc = pc // sync: OOB trap
+			mem := memoryAt(memories, mem0, op.U3)
 			ea := op.U2 + uint64(uint32(ce.popValue()))
-			if ea+1 > uint64(len(memoryInst.Buffer)) {
+			if ea+1 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
-			ce.pushValue(uint64(memoryInst.Buffer[ea]))
+			ce.pushValue(uint64(mem.Buffer[ea]))
 			pc++
 		case operationKindLoad16S32:
 			frame.pc = pc // sync: OOB trap
+			mem := memoryAt(memories, mem0, op.U3)
 			ea := op.U2 + uint64(uint32(ce.popValue()))
-			if ea+2 > uint64(len(memoryInst.Buffer)) {
+			if ea+2 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
-			ce.pushValue(uint64(uint32(int16(binary.LittleEndian.Uint16(memoryInst.Buffer[ea:])))))
+			ce.pushValue(uint64(uint32(int16(binary.LittleEndian.Uint16(mem.Buffer[ea:])))))
 			pc++
 		case operationKindLoad16S64:
 			frame.pc = pc // sync: OOB trap
+			mem := memoryAt(memories, mem0, op.U3)
 			ea := op.U2 + uint64(uint32(ce.popValue()))
-			if ea+2 > uint64(len(memoryInst.Buffer)) {
+			if ea+2 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
-			ce.pushValue(uint64(int16(binary.LittleEndian.Uint16(memoryInst.Buffer[ea:]))))
+			ce.pushValue(uint64(int16(binary.LittleEndian.Uint16(mem.Buffer[ea:]))))
 			pc++
 		case operationKindLoad16U32, operationKindLoad16U64:
 			frame.pc = pc // sync: OOB trap
+			mem := memoryAt(memories, mem0, op.U3)
 			ea := op.U2 + uint64(uint32(ce.popValue()))
-			if ea+2 > uint64(len(memoryInst.Buffer)) {
+			if ea+2 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
-			ce.pushValue(uint64(binary.LittleEndian.Uint16(memoryInst.Buffer[ea:])))
+			ce.pushValue(uint64(binary.LittleEndian.Uint16(mem.Buffer[ea:])))
 			pc++
 		case operationKindLoad32S:
 			frame.pc = pc // sync: OOB trap
+			mem := memoryAt(memories, mem0, op.U3)
 			ea := op.U2 + uint64(uint32(ce.popValue()))
-			if ea+4 > uint64(len(memoryInst.Buffer)) {
+			if ea+4 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
-			ce.pushValue(uint64(int32(binary.LittleEndian.Uint32(memoryInst.Buffer[ea:]))))
+			ce.pushValue(uint64(int32(binary.LittleEndian.Uint32(mem.Buffer[ea:]))))
 			pc++
 		case operationKindLoad32U:
 			frame.pc = pc // sync: OOB trap
+			mem := memoryAt(memories, mem0, op.U3)
 			ea := op.U2 + uint64(uint32(ce.popValue()))
-			if ea+4 > uint64(len(memoryInst.Buffer)) {
+			if ea+4 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
-			ce.pushValue(uint64(binary.LittleEndian.Uint32(memoryInst.Buffer[ea:])))
+			ce.pushValue(uint64(binary.LittleEndian.Uint32(mem.Buffer[ea:])))
 			pc++
 		case operationKindStoreI32, operationKindStoreF32:
 			frame.pc = pc // sync: OOB trap
+			mem := memoryAt(memories, mem0, op.U3)
 			val := ce.popValue()
 			ea := op.U2 + uint64(uint32(ce.popValue()))
-			if ea+4 > uint64(len(memoryInst.Buffer)) {
+			if ea+4 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
-			binary.LittleEndian.PutUint32(memoryInst.Buffer[ea:], uint32(val))
+			binary.LittleEndian.PutUint32(mem.Buffer[ea:], uint32(val))
 			pc++
 		case operationKindStoreI64, operationKindStoreF64:
 			frame.pc = pc // sync: OOB trap
+			mem := memoryAt(memories, mem0, op.U3)
 			val := ce.popValue()
 			ea := op.U2 + uint64(uint32(ce.popValue()))
-			if ea+8 > uint64(len(memoryInst.Buffer)) {
+			if ea+8 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
-			binary.LittleEndian.PutUint64(memoryInst.Buffer[ea:], val)
+			binary.LittleEndian.PutUint64(mem.Buffer[ea:], val)
 			pc++
 		case operationKindStore8:
 			frame.pc = pc // sync: OOB trap
+			mem := memoryAt(memories, mem0, op.U3)
 			val := byte(ce.popValue())
 			ea := op.U2 + uint64(uint32(ce.popValue()))
-			if ea+1 > uint64(len(memoryInst.Buffer)) {
+			if ea+1 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
-			memoryInst.Buffer[ea] = val
+			mem.Buffer[ea] = val
 			pc++
 		case operationKindStore16:
 			frame.pc = pc // sync: OOB trap
+			mem := memoryAt(memories, mem0, op.U3)
 			val := uint16(ce.popValue())
 			ea := op.U2 + uint64(uint32(ce.popValue()))
-			if ea+2 > uint64(len(memoryInst.Buffer)) {
+			if ea+2 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
-			binary.LittleEndian.PutUint16(memoryInst.Buffer[ea:], val)
+			binary.LittleEndian.PutUint16(mem.Buffer[ea:], val)
 			pc++
 		case operationKindStore32:
 			frame.pc = pc // sync: OOB trap
+			mem := memoryAt(memories, mem0, op.U3)
 			val := uint32(ce.popValue())
 			ea := op.U2 + uint64(uint32(ce.popValue()))
-			if ea+4 > uint64(len(memoryInst.Buffer)) {
+			if ea+4 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
-			binary.LittleEndian.PutUint32(memoryInst.Buffer[ea:], val)
+			binary.LittleEndian.PutUint32(mem.Buffer[ea:], val)
 			pc++
 		case operationKindMemorySize:
-			ce.pushValue(uint64(memoryInst.Pages()))
+			ce.pushValue(uint64(memories[op.U1].Pages()))
 			pc++
 		case operationKindMemoryGrow:
 			n := ce.popValue()
-			if res, ok := memoryInst.Grow(uint32(n)); !ok {
+			if res, ok := memories[op.U1].Grow(uint32(n)); !ok {
 				ce.pushValue(uint64(0xffffffff)) // = -1 in signed 32-bit integer.
 			} else {
 				ce.pushValue(uint64(res))
@@ -2211,7 +2243,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 		default:
 			// SIMD/v128, atomics, and bulk memory/table ops: see callNativeFuncRare.
 			frame.pc = pc // sync: rare ops can trap (OOB mem/table, atomics); cold path
-			ce.callNativeFuncRare(op, frame, functions, memoryInst, tables, dataInstances, elementInstances)
+			ce.callNativeFuncRare(op, frame, functions, memories, tables, dataInstances, elementInstances)
 			pc++
 		}
 	}
@@ -2226,7 +2258,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 // practice, so moving them here keeps callNativeFunc small enough for the
 // compiler to inline its hot-path helpers (popValue, pushValue, drop, etc.)
 // into the dispatch loop. pc++ for these ops is done once by the caller.
-func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, functions []function, memoryInst *wasm.MemoryInstance, tables []*wasm.TableInstance, dataInstances []wasm.DataInstance, elementInstances []wasm.ElementInstance) {
+func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, functions []function, memories []*wasm.MemoryInstance, tables []*wasm.TableInstance, dataInstances []wasm.DataInstance, elementInstances []wasm.ElementInstance) {
 	switch op.Kind {
 	// Select, conversions, extends, and reinterprets: pure value ops with no
 	// data-dependent memory access. Moved out of callNativeFunc's hot dispatch
@@ -2532,38 +2564,41 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(uint64(v))
 	case operationKindMemoryInit:
 		dataInstance := dataInstances[op.U1]
+		mem := memories[op.U2]
 		copySize := ce.popValue()
 		inDataOffset := ce.popValue()
 		inMemoryOffset := ce.popValue()
 		if inDataOffset+copySize > uint64(len(dataInstance)) ||
-			inMemoryOffset+copySize > uint64(len(memoryInst.Buffer)) {
+			inMemoryOffset+copySize > uint64(len(mem.Buffer)) {
 			panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 		} else if copySize != 0 {
-			copy(memoryInst.Buffer[inMemoryOffset:inMemoryOffset+copySize], dataInstance[inDataOffset:])
+			copy(mem.Buffer[inMemoryOffset:inMemoryOffset+copySize], dataInstance[inDataOffset:])
 		}
 	case operationKindDataDrop:
 		dataInstances[op.U1] = nil
 	case operationKindMemoryCopy:
-		memLen := uint64(len(memoryInst.Buffer))
+		dstMem, srcMem := memories[op.U1], memories[op.U2]
+		dstLen, srcLen := uint64(len(dstMem.Buffer)), uint64(len(srcMem.Buffer))
 		copySize := ce.popValue()
 		sourceOffset := ce.popValue()
 		destinationOffset := ce.popValue()
-		if sourceOffset+copySize > memLen || destinationOffset+copySize > memLen {
+		if sourceOffset+copySize > srcLen || destinationOffset+copySize > dstLen {
 			panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 		} else if copySize != 0 {
-			copy(memoryInst.Buffer[destinationOffset:],
-				memoryInst.Buffer[sourceOffset:sourceOffset+copySize])
+			copy(dstMem.Buffer[destinationOffset:],
+				srcMem.Buffer[sourceOffset:sourceOffset+copySize])
 		}
 	case operationKindMemoryFill:
+		mem := memories[op.U1]
 		fillSize := ce.popValue()
 		value := byte(ce.popValue())
 		offset := ce.popValue()
-		if fillSize+offset > uint64(len(memoryInst.Buffer)) {
+		if fillSize+offset > uint64(len(mem.Buffer)) {
 			panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 		} else if fillSize != 0 {
 			// Uses the copy trick for faster filling the buffer with the value.
 			// https://github.com/golang/go/blob/go1.24.0/src/bytes/bytes.go#L664-L673
-			buf := memoryInst.Buffer[offset : offset+fillSize]
+			buf := mem.Buffer[offset : offset+fillSize]
 			if value == 0 {
 				clear(buf)
 			} else {
@@ -2734,21 +2769,22 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 			ce.pushValue(math.Float64bits(math.Float64frombits(xHigh) - math.Float64frombits(yHigh)))
 		}
 	case operationKindV128Load:
+		mem := memories[op.U3]
 		offset := ce.popMemoryOffset(op)
 		switch op.B1 {
 		case v128LoadType128:
-			lo, ok := memoryInst.ReadUint64Le(offset)
+			lo, ok := mem.ReadUint64Le(offset)
 			if !ok {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
 			ce.pushValue(lo)
-			hi, ok := memoryInst.ReadUint64Le(offset + 8)
+			hi, ok := mem.ReadUint64Le(offset + 8)
 			if !ok {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
 			ce.pushValue(hi)
 		case v128LoadType8x8s:
-			data, ok := memoryInst.Read(offset, 8)
+			data, ok := mem.Read(offset, 8)
 			if !ok {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -2759,7 +2795,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 				uint64(uint16(int8(data[7])))<<48 | uint64(uint16(int8(data[6])))<<32 | uint64(uint16(int8(data[5])))<<16 | uint64(uint16(int8(data[4]))),
 			)
 		case v128LoadType8x8u:
-			data, ok := memoryInst.Read(offset, 8)
+			data, ok := mem.Read(offset, 8)
 			if !ok {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -2770,7 +2806,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 				uint64(data[7])<<48 | uint64(data[6])<<32 | uint64(data[5])<<16 | uint64(data[4]),
 			)
 		case v128LoadType16x4s:
-			data, ok := memoryInst.Read(offset, 8)
+			data, ok := mem.Read(offset, 8)
 			if !ok {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -2783,7 +2819,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 					uint64(uint32(int16(binary.LittleEndian.Uint16(data[4:])))),
 			)
 		case v128LoadType16x4u:
-			data, ok := memoryInst.Read(offset, 8)
+			data, ok := mem.Read(offset, 8)
 			if !ok {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -2794,21 +2830,21 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 				uint64(binary.LittleEndian.Uint16(data[6:]))<<32 | uint64(binary.LittleEndian.Uint16(data[4:])),
 			)
 		case v128LoadType32x2s:
-			data, ok := memoryInst.Read(offset, 8)
+			data, ok := mem.Read(offset, 8)
 			if !ok {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
 			ce.pushValue(uint64(int32(binary.LittleEndian.Uint32(data))))
 			ce.pushValue(uint64(int32(binary.LittleEndian.Uint32(data[4:]))))
 		case v128LoadType32x2u:
-			data, ok := memoryInst.Read(offset, 8)
+			data, ok := mem.Read(offset, 8)
 			if !ok {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
 			ce.pushValue(uint64(binary.LittleEndian.Uint32(data)))
 			ce.pushValue(uint64(binary.LittleEndian.Uint32(data[4:])))
 		case v128LoadType8Splat:
-			v, ok := memoryInst.ReadByte(offset)
+			v, ok := mem.ReadByte(offset)
 			if !ok {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -2817,7 +2853,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 			ce.pushValue(v8)
 			ce.pushValue(v8)
 		case v128LoadType16Splat:
-			v, ok := memoryInst.ReadUint16Le(offset)
+			v, ok := mem.ReadUint16Le(offset)
 			if !ok {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -2825,7 +2861,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 			ce.pushValue(v4)
 			ce.pushValue(v4)
 		case v128LoadType32Splat:
-			v, ok := memoryInst.ReadUint32Le(offset)
+			v, ok := mem.ReadUint32Le(offset)
 			if !ok {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -2833,21 +2869,21 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 			ce.pushValue(vv)
 			ce.pushValue(vv)
 		case v128LoadType64Splat:
-			lo, ok := memoryInst.ReadUint64Le(offset)
+			lo, ok := mem.ReadUint64Le(offset)
 			if !ok {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
 			ce.pushValue(lo)
 			ce.pushValue(lo)
 		case v128LoadType32zero:
-			lo, ok := memoryInst.ReadUint32Le(offset)
+			lo, ok := mem.ReadUint32Le(offset)
 			if !ok {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
 			ce.pushValue(uint64(lo))
 			ce.pushValue(0)
 		case v128LoadType64zero:
-			lo, ok := memoryInst.ReadUint64Le(offset)
+			lo, ok := mem.ReadUint64Le(offset)
 			if !ok {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -2855,11 +2891,12 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 			ce.pushValue(0)
 		}
 	case operationKindV128LoadLane:
+		mem := memories[op.U3]
 		hi, lo := ce.popValue(), ce.popValue()
 		offset := ce.popMemoryOffset(op)
 		switch op.B1 {
 		case 8:
-			b, ok := memoryInst.ReadByte(offset)
+			b, ok := mem.ReadByte(offset)
 			if !ok {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -2871,7 +2908,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 				hi = (hi & ^(0xff << s)) | uint64(b)<<s
 			}
 		case 16:
-			b, ok := memoryInst.ReadUint16Le(offset)
+			b, ok := mem.ReadUint16Le(offset)
 			if !ok {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -2883,7 +2920,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 				hi = (hi & ^(0xff_ff << s)) | uint64(b)<<s
 			}
 		case 32:
-			b, ok := memoryInst.ReadUint32Le(offset)
+			b, ok := mem.ReadUint32Le(offset)
 			if !ok {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -2895,7 +2932,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 				hi = (hi & ^(0xff_ff_ff_ff << s)) | uint64(b)<<s
 			}
 		case 64:
-			b, ok := memoryInst.ReadUint64Le(offset)
+			b, ok := mem.ReadUint64Le(offset)
 			if !ok {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -2908,6 +2945,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(lo)
 		ce.pushValue(hi)
 	case operationKindV128Store:
+		mem := memories[op.U3]
 		hi, lo := ce.popValue(), ce.popValue()
 		offset := ce.popMemoryOffset(op)
 		// Write the upper bytes first to trigger an early error if the memory access is out of bounds.
@@ -2915,40 +2953,41 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		if uint64(offset)+8 > math.MaxUint32 {
 			panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 		}
-		if ok := memoryInst.WriteUint64Le(offset+8, hi); !ok {
+		if ok := mem.WriteUint64Le(offset+8, hi); !ok {
 			panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 		}
-		if ok := memoryInst.WriteUint64Le(offset, lo); !ok {
+		if ok := mem.WriteUint64Le(offset, lo); !ok {
 			panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 		}
 	case operationKindV128StoreLane:
+		mem := memories[op.U3]
 		hi, lo := ce.popValue(), ce.popValue()
 		offset := ce.popMemoryOffset(op)
 		var ok bool
 		switch op.B1 {
 		case 8:
 			if op.B2 < 8 {
-				ok = memoryInst.WriteByte(offset, byte(lo>>(op.B2*8)))
+				ok = mem.WriteByte(offset, byte(lo>>(op.B2*8)))
 			} else {
-				ok = memoryInst.WriteByte(offset, byte(hi>>((op.B2-8)*8)))
+				ok = mem.WriteByte(offset, byte(hi>>((op.B2-8)*8)))
 			}
 		case 16:
 			if op.B2 < 4 {
-				ok = memoryInst.WriteUint16Le(offset, uint16(lo>>(op.B2*16)))
+				ok = mem.WriteUint16Le(offset, uint16(lo>>(op.B2*16)))
 			} else {
-				ok = memoryInst.WriteUint16Le(offset, uint16(hi>>((op.B2-4)*16)))
+				ok = mem.WriteUint16Le(offset, uint16(hi>>((op.B2-4)*16)))
 			}
 		case 32:
 			if op.B2 < 2 {
-				ok = memoryInst.WriteUint32Le(offset, uint32(lo>>(op.B2*32)))
+				ok = mem.WriteUint32Le(offset, uint32(lo>>(op.B2*32)))
 			} else {
-				ok = memoryInst.WriteUint32Le(offset, uint32(hi>>((op.B2-2)*32)))
+				ok = mem.WriteUint32Le(offset, uint32(hi>>((op.B2-2)*32)))
 			}
 		case 64:
 			if op.B2 == 0 {
-				ok = memoryInst.WriteUint64Le(offset, lo)
+				ok = mem.WriteUint64Le(offset, lo)
 			} else {
-				ok = memoryInst.WriteUint64Le(offset, hi)
+				ok = mem.WriteUint64Le(offset, hi)
 			}
 		}
 		if !ok {
@@ -4796,12 +4835,13 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(retLo)
 		ce.pushValue(retHi)
 	case operationKindAtomicMemoryWait:
+		mem := memories[op.U3]
 		timeout := int64(ce.popValue())
 		exp := ce.popValue()
 		offset := ce.popMemoryOffset(op)
 		// Runtime instead of validation error because the spec intends to allow binaries to include
 		// such instructions as long as they are not executed.
-		if !memoryInst.Shared {
+		if !mem.Shared {
 			panic(wasmruntime.ErrRuntimeExpectedSharedMemory)
 		}
 
@@ -4810,10 +4850,10 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 			if offset%4 != 0 {
 				panic(wasmruntime.ErrRuntimeUnalignedAtomic)
 			}
-			if int(offset) > len(memoryInst.Buffer)-4 {
+			if int(offset) > len(mem.Buffer)-4 {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
-			ce.pushValue(memoryInst.Wait32(offset, uint32(exp), timeout, func(mem *wasm.MemoryInstance, offset uint32) uint32 {
+			ce.pushValue(mem.Wait32(offset, uint32(exp), timeout, func(mem *wasm.MemoryInstance, offset uint32) uint32 {
 				mem.Mux.Lock()
 				defer mem.Mux.Unlock()
 				value, _ := mem.ReadUint32Le(offset)
@@ -4823,10 +4863,10 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 			if offset%8 != 0 {
 				panic(wasmruntime.ErrRuntimeUnalignedAtomic)
 			}
-			if int(offset) > len(memoryInst.Buffer)-8 {
+			if int(offset) > len(mem.Buffer)-8 {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
-			ce.pushValue(memoryInst.Wait64(offset, exp, timeout, func(mem *wasm.MemoryInstance, offset uint32) uint64 {
+			ce.pushValue(mem.Wait64(offset, exp, timeout, func(mem *wasm.MemoryInstance, offset uint32) uint64 {
 				mem.Mux.Lock()
 				defer mem.Mux.Unlock()
 				value, _ := mem.ReadUint64Le(offset)
@@ -4834,35 +4874,38 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 			}))
 		}
 	case operationKindAtomicMemoryNotify:
+		mem := memories[op.U3]
 		count := ce.popValue()
 		offset := ce.popMemoryOffset(op)
 		if offset%4 != 0 {
 			panic(wasmruntime.ErrRuntimeUnalignedAtomic)
 		}
 		// Just a bounds check
-		if offset >= memoryInst.Size() {
+		if offset >= mem.Size() {
 			panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 		}
-		res := memoryInst.Notify(offset, uint32(count))
+		res := mem.Notify(offset, uint32(count))
 		ce.pushValue(uint64(res))
 	case operationKindAtomicFence:
-		// Memory not required for fence only
-		if memoryInst != nil {
+		// Fence has no memory operand and isn't tied to any particular memory; any mutex's
+		// Lock/Unlock provides the same CPU-level barrier, so any one memory's Mux suffices.
+		if len(memories) > 0 {
 			// An empty critical section can be used as a synchronization primitive, which is what
 			// fence is. Probably, there are no spectests or defined behavior to confirm this yet.
-			memoryInst.Mux.Lock()
-			memoryInst.Mux.Unlock() //nolint:staticcheck
+			memories[0].Mux.Lock()
+			memories[0].Mux.Unlock() //nolint:staticcheck
 		}
 	case operationKindAtomicLoad:
+		mem := memories[op.U3]
 		offset := ce.popMemoryOffset(op)
 		switch unsignedType(op.B1) {
 		case unsignedTypeI32:
 			if offset%4 != 0 {
 				panic(wasmruntime.ErrRuntimeUnalignedAtomic)
 			}
-			memoryInst.Mux.Lock()
-			val, ok := memoryInst.ReadUint32Le(offset)
-			memoryInst.Mux.Unlock()
+			mem.Mux.Lock()
+			val, ok := mem.ReadUint32Le(offset)
+			mem.Mux.Unlock()
 			if !ok {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -4871,36 +4914,39 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 			if offset%8 != 0 {
 				panic(wasmruntime.ErrRuntimeUnalignedAtomic)
 			}
-			memoryInst.Mux.Lock()
-			val, ok := memoryInst.ReadUint64Le(offset)
-			memoryInst.Mux.Unlock()
+			mem.Mux.Lock()
+			val, ok := mem.ReadUint64Le(offset)
+			mem.Mux.Unlock()
 			if !ok {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
 			ce.pushValue(val)
 		}
 	case operationKindAtomicLoad8:
+		mem := memories[op.U3]
 		offset := ce.popMemoryOffset(op)
-		memoryInst.Mux.Lock()
-		val, ok := memoryInst.ReadByte(offset)
-		memoryInst.Mux.Unlock()
+		mem.Mux.Lock()
+		val, ok := mem.ReadByte(offset)
+		mem.Mux.Unlock()
 		if !ok {
 			panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 		}
 		ce.pushValue(uint64(val))
 	case operationKindAtomicLoad16:
+		mem := memories[op.U3]
 		offset := ce.popMemoryOffset(op)
 		if offset%2 != 0 {
 			panic(wasmruntime.ErrRuntimeUnalignedAtomic)
 		}
-		memoryInst.Mux.Lock()
-		val, ok := memoryInst.ReadUint16Le(offset)
-		memoryInst.Mux.Unlock()
+		mem.Mux.Lock()
+		val, ok := mem.ReadUint16Le(offset)
+		mem.Mux.Unlock()
 		if !ok {
 			panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 		}
 		ce.pushValue(uint64(val))
 	case operationKindAtomicStore:
+		mem := memories[op.U3]
 		val := ce.popValue()
 		offset := ce.popMemoryOffset(op)
 		switch unsignedType(op.B1) {
@@ -4908,9 +4954,9 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 			if offset%4 != 0 {
 				panic(wasmruntime.ErrRuntimeUnalignedAtomic)
 			}
-			memoryInst.Mux.Lock()
-			ok := memoryInst.WriteUint32Le(offset, uint32(val))
-			memoryInst.Mux.Unlock()
+			mem.Mux.Lock()
+			ok := mem.WriteUint32Le(offset, uint32(val))
+			mem.Mux.Unlock()
 			if !ok {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -4918,35 +4964,38 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 			if offset%8 != 0 {
 				panic(wasmruntime.ErrRuntimeUnalignedAtomic)
 			}
-			memoryInst.Mux.Lock()
-			ok := memoryInst.WriteUint64Le(offset, val)
-			memoryInst.Mux.Unlock()
+			mem.Mux.Lock()
+			ok := mem.WriteUint64Le(offset, val)
+			mem.Mux.Unlock()
 			if !ok {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
 		}
 	case operationKindAtomicStore8:
+		mem := memories[op.U3]
 		val := byte(ce.popValue())
 		offset := ce.popMemoryOffset(op)
-		memoryInst.Mux.Lock()
-		ok := memoryInst.WriteByte(offset, val)
-		memoryInst.Mux.Unlock()
+		mem.Mux.Lock()
+		ok := mem.WriteByte(offset, val)
+		mem.Mux.Unlock()
 		if !ok {
 			panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 		}
 	case operationKindAtomicStore16:
+		mem := memories[op.U3]
 		val := uint16(ce.popValue())
 		offset := ce.popMemoryOffset(op)
 		if offset%2 != 0 {
 			panic(wasmruntime.ErrRuntimeUnalignedAtomic)
 		}
-		memoryInst.Mux.Lock()
-		ok := memoryInst.WriteUint16Le(offset, val)
-		memoryInst.Mux.Unlock()
+		mem.Mux.Lock()
+		ok := mem.WriteUint16Le(offset, val)
+		mem.Mux.Unlock()
 		if !ok {
 			panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 		}
 	case operationKindAtomicRMW:
+		mem := memories[op.U3]
 		val := ce.popValue()
 		offset := ce.popMemoryOffset(op)
 		switch unsignedType(op.B1) {
@@ -4954,10 +5003,10 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 			if offset%4 != 0 {
 				panic(wasmruntime.ErrRuntimeUnalignedAtomic)
 			}
-			memoryInst.Mux.Lock()
-			old, ok := memoryInst.ReadUint32Le(offset)
+			mem.Mux.Lock()
+			old, ok := mem.ReadUint32Le(offset)
 			if !ok {
-				memoryInst.Mux.Unlock()
+				mem.Mux.Unlock()
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
 			var newVal uint32
@@ -4975,17 +5024,17 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 			case atomicArithmeticOpNop:
 				newVal = uint32(val)
 			}
-			memoryInst.WriteUint32Le(offset, newVal)
-			memoryInst.Mux.Unlock()
+			mem.WriteUint32Le(offset, newVal)
+			mem.Mux.Unlock()
 			ce.pushValue(uint64(old))
 		case unsignedTypeI64:
 			if offset%8 != 0 {
 				panic(wasmruntime.ErrRuntimeUnalignedAtomic)
 			}
-			memoryInst.Mux.Lock()
-			old, ok := memoryInst.ReadUint64Le(offset)
+			mem.Mux.Lock()
+			old, ok := mem.ReadUint64Le(offset)
 			if !ok {
-				memoryInst.Mux.Unlock()
+				mem.Mux.Unlock()
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
 			var newVal uint64
@@ -5003,17 +5052,18 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 			case atomicArithmeticOpNop:
 				newVal = val
 			}
-			memoryInst.WriteUint64Le(offset, newVal)
-			memoryInst.Mux.Unlock()
+			mem.WriteUint64Le(offset, newVal)
+			mem.Mux.Unlock()
 			ce.pushValue(old)
 		}
 	case operationKindAtomicRMW8:
+		mem := memories[op.U3]
 		val := ce.popValue()
 		offset := ce.popMemoryOffset(op)
-		memoryInst.Mux.Lock()
-		old, ok := memoryInst.ReadByte(offset)
+		mem.Mux.Lock()
+		old, ok := mem.ReadByte(offset)
 		if !ok {
-			memoryInst.Mux.Unlock()
+			mem.Mux.Unlock()
 			panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 		}
 		arg := byte(val)
@@ -5032,19 +5082,20 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		case atomicArithmeticOpNop:
 			newVal = arg
 		}
-		memoryInst.WriteByte(offset, newVal)
-		memoryInst.Mux.Unlock()
+		mem.WriteByte(offset, newVal)
+		mem.Mux.Unlock()
 		ce.pushValue(uint64(old))
 	case operationKindAtomicRMW16:
+		mem := memories[op.U3]
 		val := ce.popValue()
 		offset := ce.popMemoryOffset(op)
 		if offset%2 != 0 {
 			panic(wasmruntime.ErrRuntimeUnalignedAtomic)
 		}
-		memoryInst.Mux.Lock()
-		old, ok := memoryInst.ReadUint16Le(offset)
+		mem.Mux.Lock()
+		old, ok := mem.ReadUint16Le(offset)
 		if !ok {
-			memoryInst.Mux.Unlock()
+			mem.Mux.Unlock()
 			panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 		}
 		arg := uint16(val)
@@ -5063,10 +5114,11 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		case atomicArithmeticOpNop:
 			newVal = arg
 		}
-		memoryInst.WriteUint16Le(offset, newVal)
-		memoryInst.Mux.Unlock()
+		mem.WriteUint16Le(offset, newVal)
+		mem.Mux.Unlock()
 		ce.pushValue(uint64(old))
 	case operationKindAtomicRMWCmpxchg:
+		mem := memories[op.U3]
 		rep := ce.popValue()
 		exp := ce.popValue()
 		offset := ce.popMemoryOffset(op)
@@ -5075,65 +5127,67 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 			if offset%4 != 0 {
 				panic(wasmruntime.ErrRuntimeUnalignedAtomic)
 			}
-			memoryInst.Mux.Lock()
-			old, ok := memoryInst.ReadUint32Le(offset)
+			mem.Mux.Lock()
+			old, ok := mem.ReadUint32Le(offset)
 			if !ok {
-				memoryInst.Mux.Unlock()
+				mem.Mux.Unlock()
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
 			if old == uint32(exp) {
-				memoryInst.WriteUint32Le(offset, uint32(rep))
+				mem.WriteUint32Le(offset, uint32(rep))
 			}
-			memoryInst.Mux.Unlock()
+			mem.Mux.Unlock()
 			ce.pushValue(uint64(old))
 		case unsignedTypeI64:
 			if offset%8 != 0 {
 				panic(wasmruntime.ErrRuntimeUnalignedAtomic)
 			}
-			memoryInst.Mux.Lock()
-			old, ok := memoryInst.ReadUint64Le(offset)
+			mem.Mux.Lock()
+			old, ok := mem.ReadUint64Le(offset)
 			if !ok {
-				memoryInst.Mux.Unlock()
+				mem.Mux.Unlock()
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
 			if old == exp {
-				memoryInst.WriteUint64Le(offset, rep)
+				mem.WriteUint64Le(offset, rep)
 			}
-			memoryInst.Mux.Unlock()
+			mem.Mux.Unlock()
 			ce.pushValue(old)
 		}
 	case operationKindAtomicRMW8Cmpxchg:
+		mem := memories[op.U3]
 		rep := byte(ce.popValue())
 		exp := byte(ce.popValue())
 		offset := ce.popMemoryOffset(op)
-		memoryInst.Mux.Lock()
-		old, ok := memoryInst.ReadByte(offset)
+		mem.Mux.Lock()
+		old, ok := mem.ReadByte(offset)
 		if !ok {
-			memoryInst.Mux.Unlock()
+			mem.Mux.Unlock()
 			panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 		}
 		if old == exp {
-			memoryInst.WriteByte(offset, rep)
+			mem.WriteByte(offset, rep)
 		}
-		memoryInst.Mux.Unlock()
+		mem.Mux.Unlock()
 		ce.pushValue(uint64(old))
 	case operationKindAtomicRMW16Cmpxchg:
+		mem := memories[op.U3]
 		rep := uint16(ce.popValue())
 		exp := uint16(ce.popValue())
 		offset := ce.popMemoryOffset(op)
 		if offset%2 != 0 {
 			panic(wasmruntime.ErrRuntimeUnalignedAtomic)
 		}
-		memoryInst.Mux.Lock()
-		old, ok := memoryInst.ReadUint16Le(offset)
+		mem.Mux.Lock()
+		old, ok := mem.ReadUint16Le(offset)
 		if !ok {
-			memoryInst.Mux.Unlock()
+			mem.Mux.Unlock()
 			panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 		}
 		if old == exp {
-			memoryInst.WriteUint16Le(offset, rep)
+			mem.WriteUint16Le(offset, rep)
 		}
-		memoryInst.Mux.Unlock()
+		mem.Mux.Unlock()
 		ce.pushValue(uint64(old))
 
 	case operationKindAdd, operationKindSub, operationKindMul,

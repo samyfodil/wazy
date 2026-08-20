@@ -164,10 +164,10 @@ func (m *machine) lowerAddendFromInstr(instr *ssa.Instruction) addend {
 		}
 		constInst := inputDef.IsFromInstr() && inputDef.Instr.Constant()
 		switch {
-		case constInst && op == ssa.OpcodeSExtend:
-			return addend{regalloc.VRegInvalid, int64(uint32(inputDef.Instr.ConstantVal())), 0}
 		case constInst && op == ssa.OpcodeUExtend:
-			return addend{regalloc.VRegInvalid, int64(int32(inputDef.Instr.ConstantVal())), 0} // sign-extend!
+			return addend{regalloc.VRegInvalid, int64(uint32(inputDef.Instr.ConstantVal())), 0} // zero-extend.
+		case constInst && op == ssa.OpcodeSExtend:
+			return addend{regalloc.VRegInvalid, int64(int32(inputDef.Instr.ConstantVal())), 0} // sign-extend.
 		default:
 			r := m.getOperand_Reg(inputDef)
 			return addend{r.reg(), 0, 0}

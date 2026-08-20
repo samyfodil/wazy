@@ -31,14 +31,14 @@ func TestModuleInstance_Memory(t *testing.T) {
 		{
 			name: "memory not exported, one page",
 			input: &Module{
-				MemorySection:           &Memory{Min: 1, Cap: 1},
+				MemorySection:           []Memory{{Min: 1, Cap: 1}},
 				MemoryDefinitionSection: []MemoryDefinition{{}},
 			},
 		},
 		{
 			name: "memory exported, different name",
 			input: &Module{
-				MemorySection:           &Memory{Min: 1, Cap: 1},
+				MemorySection:           []Memory{{Min: 1, Cap: 1}},
 				MemoryDefinitionSection: []MemoryDefinition{{}},
 				ExportSection:           []Export{{Type: ExternTypeMemory, Name: "momory", Index: 0}},
 			},
@@ -46,7 +46,7 @@ func TestModuleInstance_Memory(t *testing.T) {
 		{
 			name: "memory exported, but zero length",
 			input: &Module{
-				MemorySection:           &Memory{},
+				MemorySection:           []Memory{{}},
 				MemoryDefinitionSection: []MemoryDefinition{{}},
 				Exports:                 map[string]*Export{"memory": {Type: ExternTypeMemory, Name: "memory"}},
 			},
@@ -55,7 +55,7 @@ func TestModuleInstance_Memory(t *testing.T) {
 		{
 			name: "memory exported, one page",
 			input: &Module{
-				MemorySection:           &Memory{Min: 1, Cap: 1},
+				MemorySection:           []Memory{{Min: 1, Cap: 1}},
 				MemoryDefinitionSection: []MemoryDefinition{{}},
 				Exports:                 map[string]*Export{"memory": {Type: ExternTypeMemory, Name: "memory"}},
 			},
@@ -65,7 +65,7 @@ func TestModuleInstance_Memory(t *testing.T) {
 		{
 			name: "memory exported, two pages",
 			input: &Module{
-				MemorySection:           &Memory{Min: 2, Cap: 2},
+				MemorySection:           []Memory{{Min: 2, Cap: 2}},
 				MemoryDefinitionSection: []MemoryDefinition{{}},
 				Exports:                 map[string]*Export{"memory": {Type: ExternTypeMemory, Name: "memory"}},
 			},
@@ -110,7 +110,7 @@ func TestStore_Instantiate(t *testing.T) {
 
 	t.Run("ModuleInstance defaults", func(t *testing.T) {
 		require.Equal(t, s.nameToModule["bar"], mod)
-		require.Equal(t, s.nameToModule["bar"].MemoryInstance, mod.MemoryInstance)
+		require.Equal(t, s.nameToModule["bar"].Memories, mod.Memories)
 		require.Equal(t, s, mod.s)
 		require.Equal(t, sysCtx, mod.Sys)
 	})
@@ -152,7 +152,7 @@ func TestStore_CloseWithExitCode(t *testing.T) {
 				ImportFunctionCount:     1,
 				TypeSection:             []FunctionType{v_v},
 				ImportSection:           []Import{{Type: ExternTypeFunc, Module: importedModuleName, Name: "fn", DescFunc: 0}},
-				MemorySection:           &Memory{Min: 1, Cap: 1},
+				MemorySection:           []Memory{{Min: 1, Cap: 1}},
 				MemoryDefinitionSection: []MemoryDefinition{{}},
 				GlobalSection:           []Global{{Type: GlobalType{}, Init: NewConstantExpressionFromI32(1)}},
 				TableSection:            []Table{{Min: 10}},
@@ -199,7 +199,7 @@ func TestStore_hammer(t *testing.T) {
 		TypeSection:             []FunctionType{v_v},
 		FunctionSection:         []uint32{0},
 		CodeSection:             []Code{{Body: []byte{OpcodeEnd}}},
-		MemorySection:           &Memory{Min: 1, Cap: 1},
+		MemorySection:           []Memory{{Min: 1, Cap: 1}},
 		MemoryDefinitionSection: []MemoryDefinition{{}},
 		GlobalSection: []Global{{
 			Type: GlobalType{ValType: ValueTypeI32},
@@ -258,7 +258,7 @@ func TestStore_hammer_close(t *testing.T) {
 		TypeSection:             []FunctionType{v_v},
 		FunctionSection:         []uint32{0},
 		CodeSection:             []Code{{Body: []byte{OpcodeEnd}}},
-		MemorySection:           &Memory{Min: 1, Cap: 1},
+		MemorySection:           []Memory{{Min: 1, Cap: 1}},
 		MemoryDefinitionSection: []MemoryDefinition{{}},
 		GlobalSection: []Global{{
 			Type: GlobalType{ValType: ValueTypeI32},
@@ -478,7 +478,7 @@ func (e *mockModuleEngine) SetGlobalValue(idx Index, lo, hi uint64) { panic("BUG
 func (e *mockModuleEngine) OwnsGlobals() bool { return false }
 
 // MemoryGrown implements the same method as documented on wasm.ModuleEngine.
-func (e *mockModuleEngine) MemoryGrown() { e.memoryGrown++ }
+func (e *mockModuleEngine) MemoryGrown(Index) { e.memoryGrown++ }
 
 // DoneInstantiation implements the same method as documented on wasm.ModuleEngine.
 func (e *mockModuleEngine) DoneInstantiation() {}
@@ -494,7 +494,7 @@ func (e *mockModuleEngine) ResolveImportedFunction(index, _, importedIndex Index
 }
 
 // ResolveImportedMemory implements the same method as documented on wasm.ModuleEngine.
-func (e *mockModuleEngine) ResolveImportedMemory(imp ModuleEngine) {
+func (e *mockModuleEngine) ResolveImportedMemory(_, _ Index, imp ModuleEngine) {
 	e.importedMemModEngine = imp
 }
 
@@ -837,34 +837,34 @@ func Test_resolveImports(t *testing.T) {
 			s := newStore()
 			importedME := &mockModuleEngine{}
 			s.nameToModule[moduleName] = &ModuleInstance{
-				MemoryInstance: memoryInst,
+				Memories: []*MemoryInstance{memoryInst},
 				Exports: map[string]*Export{name: {
 					Type: ExternTypeMemory,
 				}},
 				ModuleName: moduleName,
 				Engine:     importedME,
 			}
-			m := &ModuleInstance{s: s, Engine: &mockModuleEngine{resolveImportsCalled: map[Index]Index{}}}
+			m := &ModuleInstance{Memories: make([]*MemoryInstance, 1), s: s, Engine: &mockModuleEngine{resolveImportsCalled: map[Index]Index{}}}
 			err := m.resolveImports(context.Background(), &Module{
 				ImportPerModule: map[string][]*Import{
 					moduleName: {{Module: moduleName, Name: name, Type: ExternTypeMemory, DescMem: &Memory{Max: max}}},
 				},
 			})
 			require.NoError(t, err)
-			require.Equal(t, m.MemoryInstance, memoryInst)
+			require.Equal(t, m.Memories[0], memoryInst)
 			require.Equal(t, importedME, m.Engine.(*mockModuleEngine).importedMemModEngine)
 		})
 		t.Run("minimum size mismatch", func(t *testing.T) {
 			importMemoryType := &Memory{Min: 2, Cap: 2}
 			s := newStore()
 			s.nameToModule[moduleName] = &ModuleInstance{
-				MemoryInstance: &MemoryInstance{Min: importMemoryType.Min - 1, Cap: 2},
+				Memories: []*MemoryInstance{{Min: importMemoryType.Min - 1, Cap: 2}},
 				Exports: map[string]*Export{name: {
 					Type: ExternTypeMemory,
 				}},
 				ModuleName: moduleName,
 			}
-			m := &ModuleInstance{s: s}
+			m := &ModuleInstance{Memories: make([]*MemoryInstance, 1), s: s}
 			err := m.resolveImports(context.Background(), &Module{
 				ImportPerModule: map[string][]*Import{
 					moduleName: {{Module: moduleName, Name: name, Type: ExternTypeMemory, DescMem: importMemoryType}},
@@ -875,7 +875,7 @@ func Test_resolveImports(t *testing.T) {
 		t.Run("maximum size mismatch", func(t *testing.T) {
 			s := newStore()
 			s.nameToModule[moduleName] = &ModuleInstance{
-				MemoryInstance: &MemoryInstance{Max: MemoryLimitPages},
+				Memories: []*MemoryInstance{{Max: MemoryLimitPages}},
 				Exports: map[string]*Export{name: {
 					Type: ExternTypeMemory,
 				}},
@@ -884,7 +884,7 @@ func Test_resolveImports(t *testing.T) {
 
 			max := uint32(10)
 			importMemoryType := &Memory{Max: max}
-			m := &ModuleInstance{s: s}
+			m := &ModuleInstance{Memories: make([]*MemoryInstance, 1), s: s}
 			err := m.resolveImports(context.Background(), &Module{
 				ImportPerModule: map[string][]*Import{moduleName: {{Module: moduleName, Name: name, Type: ExternTypeMemory, DescMem: importMemoryType}}},
 			})
@@ -894,7 +894,7 @@ func Test_resolveImports(t *testing.T) {
 }
 
 func TestModuleInstance_validateData(t *testing.T) {
-	m := &ModuleInstance{MemoryInstance: &MemoryInstance{Buffer: make([]byte, 5)}}
+	m := &ModuleInstance{Memories: []*MemoryInstance{{Buffer: make([]byte, 5)}}}
 	tests := []struct {
 		name   string
 		data   []DataSegment
@@ -939,17 +939,17 @@ func TestModuleInstance_validateData(t *testing.T) {
 
 func TestModuleInstance_applyData(t *testing.T) {
 	t.Run("ok", func(t *testing.T) {
-		m := &ModuleInstance{MemoryInstance: &MemoryInstance{Buffer: make([]byte, 10)}}
+		m := &ModuleInstance{Memories: []*MemoryInstance{{Buffer: make([]byte, 10)}}}
 		err := m.applyData([]DataSegment{
 			{OffsetExpression: NewConstantExpressionFromI32(0), Init: []byte{0xa, 0xf}},
 			{OffsetExpression: NewConstantExpressionFromI32(8), Init: []byte{0x1, 0x5}},
 		})
 		require.NoError(t, err)
-		require.Equal(t, []byte{0xa, 0xf, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1, 0x5}, m.MemoryInstance.Buffer)
+		require.Equal(t, []byte{0xa, 0xf, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1, 0x5}, m.Memories[0].Buffer)
 		require.Equal(t, [][]byte{{0xa, 0xf}, {0x1, 0x5}}, m.DataInstances)
 	})
 	t.Run("error", func(t *testing.T) {
-		m := &ModuleInstance{MemoryInstance: &MemoryInstance{Buffer: make([]byte, 5)}}
+		m := &ModuleInstance{Memories: []*MemoryInstance{{Buffer: make([]byte, 5)}}}
 		err := m.applyData([]DataSegment{
 			{OffsetExpression: NewConstantExpressionFromI32(8), Init: []byte{}},
 		})
