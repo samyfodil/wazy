@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -84,15 +83,16 @@ type Module struct {
 	//
 	// Note: The memory Index space begins with imported memories and ends with those defined in this module.
 	// For example, if there are two imported memories and one defined in this module, the memory Index 3 is defined in
-	// this module at TableSection[0].
+	// this module at MemorySection[0].
 	//
 	// Note: Version 1.0 (20191205) of the WebAssembly spec allows at most one memory definition per module, so the
-	// length of the MemorySection can be zero or one, and can only be one if there is no imported memory.
+	// length of the MemorySection can be zero or one, and can only be one if there is no imported memory, unless
+	// api.CoreFeatureMultiMemory is enabled, in which case any number of memories may be declared or imported.
 	//
 	// Note: In the Binary Format, this is SectionIDMemory.
 	//
 	// See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#memory-section%E2%91%A0
-	MemorySection *Memory
+	MemorySection []Memory
 
 	// TagSection contains each tag defined in this module for exception handling.
 	//
@@ -206,6 +206,12 @@ const (
 	MaximumGlobals       = uint32(1 << 27)
 	MaximumFunctionIndex = uint32(1 << 27)
 	MaximumTableIndex    = uint32(1 << 27)
+	// MaximumMemoryIndex is lower than its siblings above because each memory
+	// occupies a 24-byte (not 8-byte) record in the native engine's opaque
+	// module context, whose offsets are a signed 32-bit int: 1<<27 * 24
+	// overflows that range, whereas 1<<25 * 24 = 768MiB stays safely inside
+	// it. See "Number of memories in a module" in RATIONALE.md.
+	MaximumMemoryIndex = uint32(1 << 25)
 )
 
 // AssignModuleID calculates a sha256 checksum on `wasm` and other args, and set Module.ID to the result.
@@ -291,13 +297,13 @@ func (m *Module) typeIndexOfFunction(funcIdx Index) (Index, bool) {
 // module has multiple defects is unchanged from before this method was
 // split).
 func (m *Module) Validate(enabledFeatures api.CoreFeatures) error {
-	functions, globals, memory, tables, tags, err := m.validateBeforeFunctionBodies(enabledFeatures)
+	functions, globals, memories, tables, tags, err := m.validateBeforeFunctionBodies(enabledFeatures)
 	if err != nil {
 		return err
 	}
 
 	if m.CodeSection != nil {
-		if err = m.validateFunctions(enabledFeatures, functions, globals, memory, tables, tags, MaximumFunctionIndex); err != nil {
+		if err = m.validateFunctions(enabledFeatures, functions, globals, memories, tables, tags, MaximumFunctionIndex); err != nil {
 			return err
 		}
 	} // No need to validate host functions as NewHostModule validates
@@ -336,18 +342,18 @@ func (m *Module) ValidateFunctionBodies(enabledFeatures api.CoreFeatures) error 
 	if m.CodeSection == nil {
 		return nil
 	}
-	functions, globals, memory, tables, tags, err := m.AllDeclarations()
+	functions, globals, memories, tables, tags, err := m.AllDeclarations()
 	if err != nil {
 		return err
 	}
-	return m.validateFunctions(enabledFeatures, functions, globals, memory, tables, tags, MaximumFunctionIndex)
+	return m.validateFunctions(enabledFeatures, functions, globals, memories, tables, tags, MaximumFunctionIndex)
 }
 
 // validateBeforeFunctionBodies performs every Validate check that precedes
 // the per-function-body opcode walk. It returns the AllDeclarations() results
 // so Validate can feed them directly into validateFunctions without
 // recomputing them.
-func (m *Module) validateBeforeFunctionBodies(enabledFeatures api.CoreFeatures) (functions []Index, globals []GlobalType, memory *Memory, tables []Table, tags []Index, err error) {
+func (m *Module) validateBeforeFunctionBodies(enabledFeatures api.CoreFeatures) (functions []Index, globals []GlobalType, memories []Memory, tables []Table, tags []Index, err error) {
 	for i := range m.TypeSection {
 		tp := &m.TypeSection[i]
 		tp.CacheNumInUint64()
@@ -361,7 +367,7 @@ func (m *Module) validateBeforeFunctionBodies(enabledFeatures api.CoreFeatures) 
 		return
 	}
 
-	functions, globals, memory, tables, tags, err = m.AllDeclarations()
+	functions, globals, memories, tables, tags, err = m.AllDeclarations()
 	if err != nil {
 		return
 	}
@@ -378,11 +384,11 @@ func (m *Module) validateBeforeFunctionBodies(enabledFeatures api.CoreFeatures) 
 		return
 	}
 
-	if err = m.validateMemory(memory, globals, enabledFeatures); err != nil {
+	if err = m.validateMemory(memories, globals, enabledFeatures); err != nil {
 		return
 	}
 
-	err = m.validateExports(enabledFeatures, functions, globals, memory, tables, tags)
+	err = m.validateExports(enabledFeatures, functions, globals, memories, tables, tags)
 	return
 }
 
@@ -489,7 +495,7 @@ func (m *Module) validateGlobals(globals []GlobalType, numFuncts, maxGlobals uin
 	return nil
 }
 
-func (m *Module) validateFunctions(enabledFeatures api.CoreFeatures, functions []Index, globals []GlobalType, memory *Memory, tables []Table, tags []Index, maximumFunctionIndex uint32) error {
+func (m *Module) validateFunctions(enabledFeatures api.CoreFeatures, functions []Index, globals []GlobalType, memories []Memory, tables []Table, tags []Index, maximumFunctionIndex uint32) error {
 	if uint32(len(functions)) > maximumFunctionIndex {
 		return fmt.Errorf("too many functions (%d) in a module", len(functions))
 	}
@@ -523,7 +529,7 @@ func (m *Module) validateFunctions(enabledFeatures api.CoreFeatures, functions [
 		if c.GoFunc != nil {
 			continue
 		}
-		if err = m.validateFunction(vs, enabledFeatures, Index(idx), functions, globals, memory, tables, tags, declaredFuncIndexes, br); err != nil {
+		if err = m.validateFunction(vs, enabledFeatures, Index(idx), functions, globals, memories, tables, tags, declaredFuncIndexes, br); err != nil {
 			return fmt.Errorf("invalid %s: %w", m.funcDesc(SectionIDFunction, Index(idx)), err)
 		}
 	}
@@ -626,7 +632,19 @@ func (m *Module) funcDesc(sectionID SectionID, sectionIndex Index) string {
 	return fmt.Sprintf("%s[%d] export[%s]", sectionIDName, sectionIndex, strings.Join(exportNames, ","))
 }
 
-func (m *Module) validateMemory(memory *Memory, globals []GlobalType, _ api.CoreFeatures) error {
+func (m *Module) validateMemory(memories []Memory, globals []GlobalType, enabledFeatures api.CoreFeatures) error {
+	if len(memories) > int(MaximumMemoryIndex) {
+		return fmt.Errorf("too many memories in a module: %d given with limit %d", len(memories), MaximumMemoryIndex)
+	}
+	// decodeMemorySection only rejects >1 *module-defined* memory; an imported
+	// memory plus a module-defined one both land here, so the combined total
+	// (imports + defined) needs its own multi-memory gate.
+	if len(memories) > 1 {
+		if err := enabledFeatures.RequireEnabled(api.CoreFeatureMultiMemory); err != nil {
+			return fmt.Errorf("multiple memories are invalid as %w", err)
+		}
+	}
+
 	var activeElementCount int
 	for i := range m.DataSection {
 		d := &m.DataSection[i]
@@ -634,7 +652,7 @@ func (m *Module) validateMemory(memory *Memory, globals []GlobalType, _ api.Core
 			activeElementCount++
 		}
 	}
-	if activeElementCount > 0 && memory == nil {
+	if activeElementCount > 0 && len(memories) == 0 {
 		return fmt.Errorf("unknown memory")
 	}
 
@@ -644,6 +662,9 @@ func (m *Module) validateMemory(memory *Memory, globals []GlobalType, _ api.Core
 	for i := range m.DataSection {
 		d := &m.DataSection[i]
 		if !d.IsPassive() {
+			if d.MemoryIndex >= uint32(len(memories)) {
+				return fmt.Errorf("unknown memory %d for data segment", d.MemoryIndex)
+			}
 			if err := m.validateConstExpression(importedGlobals, 0, &d.OffsetExpression, ValueTypeI32); err != nil {
 				return fmt.Errorf("calculate offset: %w", err)
 			}
@@ -682,7 +703,7 @@ func (m *Module) validateImports(enabledFeatures api.CoreFeatures) error {
 	return nil
 }
 
-func (m *Module) validateExports(enabledFeatures api.CoreFeatures, functions []Index, globals []GlobalType, memory *Memory, tables []Table, tags []Index) error {
+func (m *Module) validateExports(enabledFeatures api.CoreFeatures, functions []Index, globals []GlobalType, memories []Memory, tables []Table, tags []Index) error {
 	for i := range m.ExportSection {
 		exp := &m.ExportSection[i]
 		index := exp.Index
@@ -702,7 +723,7 @@ func (m *Module) validateExports(enabledFeatures api.CoreFeatures, functions []I
 				return fmt.Errorf("invalid export[%q] global[%d]: %w", exp.Name, index, err)
 			}
 		case ExternTypeMemory:
-			if index > 0 || memory == nil {
+			if index >= uint32(len(memories)) {
 				return fmt.Errorf("memory for export[%q] out of range", exp.Name)
 			}
 		case ExternTypeTable:
@@ -849,11 +870,15 @@ func paramNames(localNames IndirectNameMap, funcIdx uint32, paramLen int) []stri
 }
 
 func (m *ModuleInstance) buildMemory(module *Module, allocator api.MemoryAllocator) {
-	memSec := module.MemorySection
-	if memSec != nil {
-		m.MemoryInstance = NewMemoryInstance(memSec, allocator, m.Engine)
-		poolAuditHold(m.MemoryInstance, m)
-		m.MemoryInstance.definition = &module.MemoryDefinitionSection[0]
+	idx := module.ImportMemoryCount
+	for i := range module.MemorySection {
+		memSec := &module.MemorySection[i]
+		mem := NewMemoryInstance(memSec, allocator, m.Engine)
+		poolAuditHold(mem, m)
+		mem.definition = &module.MemoryDefinitionSection[idx]
+		mem.index = idx
+		m.Memories[idx] = mem
+		idx++
 	}
 }
 
@@ -1105,6 +1130,9 @@ type DataSegment struct {
 	OffsetExpression ConstantExpression
 	Init             []byte
 	Passive          bool
+	// MemoryIndex is the index of the memory this (active) segment initializes.
+	// Only nonzero when api.CoreFeatureMultiMemory is enabled.
+	MemoryIndex Index
 }
 
 // IsPassive returns true if this data segment is "passive" in the sense that memory offset and
@@ -1188,7 +1216,7 @@ type NameMapAssoc struct {
 }
 
 // AllDeclarations returns all declarations for functions, globals, memories, tables and tags in a module including imported ones.
-func (m *Module) AllDeclarations() (functions []Index, globals []GlobalType, memory *Memory, tables []Table, tags []Index, err error) {
+func (m *Module) AllDeclarations() (functions []Index, globals []GlobalType, memories []Memory, tables []Table, tags []Index, err error) {
 	for i := range m.ImportSection {
 		imp := &m.ImportSection[i]
 		switch imp.Type {
@@ -1197,7 +1225,7 @@ func (m *Module) AllDeclarations() (functions []Index, globals []GlobalType, mem
 		case ExternTypeGlobal:
 			globals = append(globals, imp.DescGlobal)
 		case ExternTypeMemory:
-			memory = imp.DescMem
+			memories = append(memories, *imp.DescMem)
 		case ExternTypeTable:
 			tables = append(tables, imp.DescTable)
 		case ExternTypeTag:
@@ -1214,13 +1242,7 @@ func (m *Module) AllDeclarations() (functions []Index, globals []GlobalType, mem
 		t := &m.TagSection[i]
 		tags = append(tags, t.Type)
 	}
-	if m.MemorySection != nil {
-		if memory != nil { // shouldn't be possible due to Validate
-			err = errors.New("at most one table allowed in module")
-			return
-		}
-		memory = m.MemorySection
-	}
+	memories = append(memories, m.MemorySection...)
 	if m.TableSection != nil {
 		tables = append(tables, m.TableSection...)
 	}

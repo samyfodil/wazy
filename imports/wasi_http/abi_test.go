@@ -92,7 +92,7 @@ const (
 
 // guestModule builds the synthetic guest.
 func guestModule(realloc reallocKind) []byte {
-	m := &wasm.Module{MemorySection: &wasm.Memory{Min: 2, Cap: 2, Max: 2, IsMaxEncoded: true}}
+	m := &wasm.Module{MemorySection: []wasm.Memory{{Min: 2, Cap: 2, Max: 2, IsMaxEncoded: true}}}
 
 	for i, fn := range hostFns {
 		m.TypeSection = append(m.TypeSection, wasm.FunctionType{Params: fn.params, Results: fn.results})

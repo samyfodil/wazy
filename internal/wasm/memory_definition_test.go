@@ -30,7 +30,7 @@ func TestModule_BuildMemoryDefinitions(t *testing.T) {
 		},
 		{
 			name:            "defines memory{0,}",
-			m:               &Module{MemorySection: &Memory{Min: 0}},
+			m:               &Module{MemorySection: []Memory{{Min: 0}}},
 			expected:        []MemoryDefinition{{index: 0, memory: &Memory{Min: 0}}},
 			expectedExports: map[string]api.MemoryDefinition{},
 		},
@@ -42,7 +42,7 @@ func TestModule_BuildMemoryDefinitions(t *testing.T) {
 					{Name: "", Type: ExternTypeGlobal, Index: 0},
 				},
 				GlobalSection: []Global{{}},
-				MemorySection: &Memory{Min: 2, Max: 3, IsMaxEncoded: true},
+				MemorySection: []Memory{{Min: 2, Max: 3, IsMaxEncoded: true}},
 			},
 			expected: []MemoryDefinition{
 				{
@@ -70,7 +70,7 @@ func TestModule_BuildMemoryDefinitions(t *testing.T) {
 					{Name: "imported_memory", Type: ExternTypeMemory, Index: 0},
 					{Name: "memory_index=1", Type: ExternTypeMemory, Index: 1},
 				},
-				MemorySection: &Memory{Min: 2, Max: 3, IsMaxEncoded: true},
+				MemorySection: []Memory{{Min: 2, Max: 3, IsMaxEncoded: true}},
 			},
 			expected: []MemoryDefinition{
 				{

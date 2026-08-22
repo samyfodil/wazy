@@ -80,7 +80,10 @@ type ModuleEngine interface {
 	ResolveImportedFunction(index, descFunc, indexInImportedModule Index, importedModuleEngine ModuleEngine)
 
 	// ResolveImportedMemory is called when this module imports a memory from another module.
-	ResolveImportedMemory(importedModuleEngine ModuleEngine)
+	// 	- `index` is the memory Index of this imported memory.
+	//	- `indexInImportedModule` is the memory Index of the imported memory in the imported module.
+	//	- `importedModuleEngine` is the ModuleEngine for the imported ModuleInstance.
+	ResolveImportedMemory(index, indexInImportedModule Index, importedModuleEngine ModuleEngine)
 
 	// LookupFunction returns the FunctionModule and the Index of the function in the returned ModuleInstance at the given offset in the table.
 	LookupFunction(t *TableInstance, typeId FunctionTypeID, tableOffset Index) (*ModuleInstance, Index)
@@ -101,6 +104,6 @@ type ModuleEngine interface {
 	// the initialization via ElementSegment.
 	FunctionInstanceReference(funcIndex Index) Reference
 
-	// MemoryGrown notifies the engine that the memory has grown.
-	MemoryGrown()
+	// MemoryGrown notifies the engine that the memory at the given Index has grown.
+	MemoryGrown(index Index)
 }

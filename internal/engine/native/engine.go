@@ -967,7 +967,7 @@ func (e *engine) compileSharedFunctions() {
 	e.be.Init()
 	addTrampoline(0,
 		e.machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeGrowMemory, &ssa.Signature{
-			Params:  []ssa.Type{ssa.TypeI64 /* exec context */, ssa.TypeI32},
+			Params:  []ssa.Type{ssa.TypeI64 /* exec context */, ssa.TypeI32 /* memory index */, ssa.TypeI32 /* pages */},
 			Results: []ssa.Type{ssa.TypeI32},
 		}, false))
 
@@ -998,8 +998,8 @@ func (e *engine) compileSharedFunctions() {
 	e.be.Init()
 	addTrampoline(5,
 		e.machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeMemoryWait32, &ssa.Signature{
-			// exec context, timeout, expected, addr
-			Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeI32, ssa.TypeI64},
+			// exec context, memory index, timeout, expected, addr
+			Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI32, ssa.TypeI64},
 			// Returns the status.
 			Results: []ssa.Type{ssa.TypeI32},
 		}, false))
@@ -1007,8 +1007,8 @@ func (e *engine) compileSharedFunctions() {
 	e.be.Init()
 	addTrampoline(6,
 		e.machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeMemoryWait64, &ssa.Signature{
-			// exec context, timeout, expected, addr
-			Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64},
+			// exec context, memory index, timeout, expected, addr
+			Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64},
 			// Returns the status.
 			Results: []ssa.Type{ssa.TypeI32},
 		}, false))
@@ -1016,8 +1016,8 @@ func (e *engine) compileSharedFunctions() {
 	e.be.Init()
 	addTrampoline(7,
 		e.machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeMemoryNotify, &ssa.Signature{
-			// exec context, count, addr
-			Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64},
+			// exec context, memory index, count, addr
+			Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI32, ssa.TypeI64},
 			// Returns the number notified.
 			Results: []ssa.Type{ssa.TypeI32},
 		}, false))

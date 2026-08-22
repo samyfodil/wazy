@@ -99,7 +99,7 @@ func TestDecodeModule(t *testing.T) {
 			name: "table and memory section",
 			input: &wasm.Module{
 				TableSection:  []wasm.Table{{Min: 3, Type: wasm.RefTypeFuncref}},
-				MemorySection: &wasm.Memory{Min: 1, Cap: 1, Max: 1, IsMaxEncoded: true},
+				MemorySection: []wasm.Memory{{Min: 1, Cap: 1, Max: 1, IsMaxEncoded: true}},
 			},
 		},
 		{

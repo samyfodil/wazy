@@ -49,8 +49,11 @@ func decodeDataSegment(buf []byte, offset int, enabledFeatures api.CoreFeatures,
 			}
 			offset += int(n)
 			if d != 0 {
-				return offset, fmt.Errorf("memory index must be zero but was %d", d)
+				if err := enabledFeatures.RequireEnabled(api.CoreFeatureMultiMemory); err != nil {
+					return offset, fmt.Errorf("memory index must be zero for data segment as %w", err)
+				}
 			}
+			ret.MemoryIndex = d
 		}
 
 		offset, err = decodeConstantExpression(buf, offset, enabledFeatures, &ret.OffsetExpression)

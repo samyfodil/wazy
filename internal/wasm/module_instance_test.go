@@ -462,7 +462,7 @@ func TestModuleInstance_ensureResourcesClosed(t *testing.T) {
 		owner := &mockModuleEngine{}
 		buf := &freeRecordingMemory{}
 		mem := &MemoryInstance{expBuffer: buf, ownerModuleEngine: owner}
-		m := &ModuleInstance{MemoryInstance: mem, Engine: owner}
+		m := &ModuleInstance{Memories: []*MemoryInstance{mem}, Engine: owner}
 
 		require.NoError(t, m.ensureResourcesClosed(context.Background()))
 		require.True(t, buf.freed)
@@ -474,7 +474,7 @@ func TestModuleInstance_ensureResourcesClosed(t *testing.T) {
 		importer := &mockModuleEngine{}
 		buf := &freeRecordingMemory{}
 		mem := &MemoryInstance{expBuffer: buf, ownerModuleEngine: owner}
-		m := &ModuleInstance{MemoryInstance: mem, Engine: importer}
+		m := &ModuleInstance{Memories: []*MemoryInstance{mem}, Engine: importer}
 
 		require.NoError(t, m.ensureResourcesClosed(context.Background()))
 		require.False(t, buf.freed)
@@ -495,7 +495,7 @@ func TestModuleInstance_ensureResourcesClosed(t *testing.T) {
 // under a live module.
 func TestFailIfClosed_DeferredCleanupRunsOnce(t *testing.T) {
 	mem := &MemoryInstance{Buffer: make([]byte, 8), Min: 1, Cap: 1, Max: 1, importers: 2}
-	m := &ModuleInstance{MemoryInstance: mem, Engine: &mockModuleEngine{}}
+	m := &ModuleInstance{Memories: []*MemoryInstance{mem}, Engine: &mockModuleEngine{}}
 
 	// Mark it closed via the deferred path: resources are NOT released yet.
 	// (setExitCode directly, rather than closeWithExitCodeWithoutClosingResource,

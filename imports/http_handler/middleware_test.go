@@ -112,7 +112,7 @@ func newGuestModule(p guestParts) []byte {
 		})
 	}
 	if !p.omitMemory {
-		m.MemorySection = &wasm.Memory{Min: 1, Cap: 1, Max: 1, IsMaxEncoded: true}
+		m.MemorySection = []wasm.Memory{{Min: 1, Cap: 1, Max: 1, IsMaxEncoded: true}}
 		m.ExportSection = append(m.ExportSection, wasm.Export{Name: Memory, Type: wasm.ExternTypeMemory})
 	}
 
@@ -356,7 +356,7 @@ func newTestMemory(t *testing.T) api.Module {
 	t.Cleanup(func() { r.Close(testCtx) })
 
 	mod, err := r.Instantiate(testCtx, binaryencoding.EncodeModule(&wasm.Module{
-		MemorySection: &wasm.Memory{Min: 1, Cap: 1, Max: 1, IsMaxEncoded: true},
+		MemorySection: []wasm.Memory{{Min: 1, Cap: 1, Max: 1, IsMaxEncoded: true}},
 		ExportSection: []wasm.Export{{Name: Memory, Type: wasm.ExternTypeMemory}},
 	}))
 	require.NoError(t, err)

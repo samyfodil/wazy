@@ -325,7 +325,7 @@ func TestHostFunc_zeroAllocs(t *testing.T) {
 	// A minimal wasm-defined module supplies a real, memory-backed
 	// api.Module to pass to the GoModuleFunction, matching what an actual
 	// call originating from Wasm would provide.
-	memMod, err := r.Instantiate(ctx, binaryencoding.EncodeModule(&wasm.Module{MemorySection: &wasm.Memory{Min: 1}}))
+	memMod, err := r.Instantiate(ctx, binaryencoding.EncodeModule(&wasm.Module{MemorySection: []wasm.Memory{{Min: 1}}}))
 	require.NoError(t, err)
 	defer memMod.Close(ctx)
 

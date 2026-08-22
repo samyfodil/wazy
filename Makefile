@@ -134,6 +134,10 @@ spectest_relaxed_simd_dir := $(spectest_base_dir)/relaxed-simd
 spectest_relaxed_simd_testdata_dir := $(spectest_relaxed_simd_dir)/testdata
 spec_version_relaxed_simd := c3f9359af2cd607cc46b0a3274f90ea52543a2f2
 
+spectest_multi_memory_dir := $(spectest_base_dir)/multi-memory
+spectest_multi_memory_testdata_dir := $(spectest_multi_memory_dir)/testdata
+spec_version_multi_memory := cf8b5aa27257311b8eac80ae83f4ba22ee308064
+
 spectest_typed_function_references_dir := $(spectest_base_dir)/typed-function-references
 spectest_typed_function_references_testdata_dir := $(spectest_typed_function_references_dir)/testdata
 spec_version_typed_function_references := 74d2ec81d15efd3c0f2fba46a023f376101d8e46
@@ -154,6 +158,7 @@ build.spectest:
 	@$(MAKE) build.spectest.exception_handling
 	@$(MAKE) build.spectest.typed_function_references
 	@$(MAKE) build.spectest.relaxed_simd
+	@$(MAKE) build.spectest.multi_memory
 
 .PHONY: build.spectest.v1
 build.spectest.v1: # Note: wabt by default uses >1.0 features, so wast2json flags might drift as they include more. See WebAssembly/wabt#1878
@@ -253,6 +258,16 @@ build.spectest.relaxed_simd: # Needs wasm-tools: wast2json drops the proposal's 
 		&& curl -sSL 'https://api.github.com/repos/WebAssembly/relaxed-simd/contents/test/core/relaxed-simd?ref=$(spec_version_relaxed_simd)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
 	@cd $(spectest_relaxed_simd_testdata_dir) && for f in `find . -name '*.wast'`; do \
 		wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
+	done
+
+.PHONY: build.spectest.multi_memory
+build.spectest.multi_memory:
+	@rm -rf $(spectest_multi_memory_testdata_dir)
+	@mkdir -p $(spectest_multi_memory_testdata_dir)
+	@cd $(spectest_multi_memory_testdata_dir) \
+		&& curl -sSL 'https://api.github.com/repos/WebAssembly/multi-memory/contents/test/core/multi-memory?ref=$(spec_version_multi_memory)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
+	@cd $(spectest_multi_memory_testdata_dir) && for f in `find . -name '*.wast'`; do \
+		wast2json --enable-multi-memory --debug-names $$f; \
 	done
 
 .PHONY: test

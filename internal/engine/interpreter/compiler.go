@@ -277,7 +277,7 @@ type compilationResult struct {
 // newCompiler returns the new *compiler for the given parameters.
 // Use compiler.Next function to get compilation result per function.
 func newCompiler(enabledFeatures api.CoreFeatures, callFrameStackSizeInUint64 int, module *wasm.Module, ensureTermination bool) (*compiler, error) {
-	functions, globals, mem, tables, tags, err := module.AllDeclarations()
+	functions, globals, memories, tables, tags, err := module.AllDeclarations()
 	if err != nil {
 		return nil, err
 	}
@@ -285,14 +285,17 @@ func newCompiler(enabledFeatures api.CoreFeatures, callFrameStackSizeInUint64 in
 	hasTable, hasDataInstances, hasElementInstances := len(tables) > 0,
 		len(module.DataSection) > 0, len(module.ElementSection) > 0
 
-	var mt memoryType
-	switch {
-	case mem == nil:
-		mt = memoryTypeNone
-	case mem.IsShared:
-		mt = memoryTypeShared
-	default:
+	// mt is memoryTypeNone if the module has no memories, memoryTypeShared if
+	// any of them is shared, and memoryTypeStandard otherwise.
+	mt := memoryTypeNone
+	if len(memories) > 0 {
 		mt = memoryTypeStandard
+		for i := range memories {
+			if memories[i].IsShared {
+				mt = memoryTypeShared
+				break
+			}
+		}
 	}
 
 	types := module.TypeSection
@@ -1131,15 +1134,23 @@ operatorSwitch:
 		)
 	case wasm.OpcodeMemorySize:
 		c.result.UsesMemory = true
-		c.pc++ // Skip the reserved one byte.
+		memoryIndex, num, err := leb128.LoadUint32(c.body[c.pc+1:])
+		if err != nil {
+			return fmt.Errorf("reading memory index: %v", err)
+		}
+		c.pc += num
 		c.emit(
-			newOperationMemorySize(),
+			newOperationMemorySize(memoryIndex),
 		)
 	case wasm.OpcodeMemoryGrow:
 		c.result.UsesMemory = true
-		c.pc++ // Skip the reserved one byte.
+		memoryIndex, num, err := leb128.LoadUint32(c.body[c.pc+1:])
+		if err != nil {
+			return fmt.Errorf("reading memory index: %v", err)
+		}
+		c.pc += num
 		c.emit(
-			newOperationMemoryGrow(),
+			newOperationMemoryGrow(memoryIndex),
 		)
 	case wasm.OpcodeI32Const:
 		val, num, err := leb128.LoadInt32(c.body[c.pc+1:])
@@ -1781,9 +1792,14 @@ operatorSwitch:
 			if err != nil {
 				return fmt.Errorf("reading i32.const value: %v", err)
 			}
-			c.pc += num + 1 // +1 to skip the memory index which is fixed to zero.
+			c.pc += num
+			memoryIndex, num, err := leb128.LoadUint32(c.body[c.pc+1:])
+			if err != nil {
+				return fmt.Errorf("reading memory index: %v", err)
+			}
+			c.pc += num
 			c.emit(
-				newOperationMemoryInit(dataIndex),
+				newOperationMemoryInit(dataIndex, memoryIndex),
 			)
 		case wasm.OpcodeMiscDataDrop:
 			dataIndex, num, err := leb128.LoadUint32(c.body[c.pc+1:])
@@ -1796,15 +1812,28 @@ operatorSwitch:
 			)
 		case wasm.OpcodeMiscMemoryCopy:
 			c.result.UsesMemory = true
-			c.pc += 2 // +2 to skip two memory indexes which are fixed to zero.
+			dstMemoryIndex, num, err := leb128.LoadUint32(c.body[c.pc+1:])
+			if err != nil {
+				return fmt.Errorf("reading memory index: %v", err)
+			}
+			c.pc += num
+			srcMemoryIndex, num, err := leb128.LoadUint32(c.body[c.pc+1:])
+			if err != nil {
+				return fmt.Errorf("reading memory index: %v", err)
+			}
+			c.pc += num
 			c.emit(
-				newOperationMemoryCopy(),
+				newOperationMemoryCopy(dstMemoryIndex, srcMemoryIndex),
 			)
 		case wasm.OpcodeMiscMemoryFill:
 			c.result.UsesMemory = true
-			c.pc += 1 // +1 to skip the memory index which is fixed to zero.
+			memoryIndex, num, err := leb128.LoadUint32(c.body[c.pc+1:])
+			if err != nil {
+				return fmt.Errorf("reading memory index: %v", err)
+			}
+			c.pc += num
 			c.emit(
-				newOperationMemoryFill(),
+				newOperationMemoryFill(memoryIndex),
 			)
 		case wasm.OpcodeMiscTableInit:
 			elemIndex, num, err := leb128.LoadUint32(c.body[c.pc+1:])
@@ -3904,19 +3933,37 @@ func (c *compiler) getFrameDropRange(frame *controlFrame, isEnd bool) inclusiveR
 	}
 }
 
+// memArgMultiMemoryFlag is bit 6 of the memarg align LEB128, reserved by the
+// multi-memory proposal to signal that a memidx LEB128 immediately follows.
+// See https://webassembly.github.io/multi-memory/core/binary/instructions.html
+const memArgMultiMemoryFlag = 0x40
+
 func (c *compiler) readMemoryArg(tag string) (memoryArg, error) {
 	c.result.UsesMemory = true
-	alignment, num, err := leb128.LoadUint32(c.body[c.pc+1:])
+	rawAlign, num, err := leb128.LoadUint32(c.body[c.pc+1:])
 	if err != nil {
 		return memoryArg{}, fmt.Errorf("reading alignment for %s: %w", tag, err)
 	}
 	c.pc += num
+
+	var alignment, memoryIndex uint32
+	if rawAlign&memArgMultiMemoryFlag != 0 {
+		alignment = rawAlign &^ memArgMultiMemoryFlag
+		memoryIndex, num, err = leb128.LoadUint32(c.body[c.pc+1:])
+		if err != nil {
+			return memoryArg{}, fmt.Errorf("reading memory index for %s: %w", tag, err)
+		}
+		c.pc += num
+	} else {
+		alignment = rawAlign
+	}
+
 	offset, num, err := leb128.LoadUint32(c.body[c.pc+1:])
 	if err != nil {
 		return memoryArg{}, fmt.Errorf("reading offset for %s: %w", tag, err)
 	}
 	c.pc += num
-	return memoryArg{Offset: offset, Alignment: alignment}, nil
+	return memoryArg{Offset: offset, Alignment: alignment, MemoryIndex: memoryIndex}, nil
 }
 
 // parseCatchClause parses a single catch clause from the bytecode at c.pc,

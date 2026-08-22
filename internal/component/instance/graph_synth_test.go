@@ -226,7 +226,7 @@ func providerModule(ret int32, constVal, mutVal int32) []byte {
 	return binaryencoding.EncodeModule(&wasm.Module{
 		TypeSection:     []wasm.FunctionType{{Results: []wasm.ValueType{wasm.ValueTypeI32}, ResultNumInUint64: 1}},
 		FunctionSection: []wasm.Index{0},
-		MemorySection:   &wasm.Memory{Min: 1, Cap: 1, Max: 1, IsMaxEncoded: true},
+		MemorySection:   []wasm.Memory{{Min: 1, Cap: 1, Max: 1, IsMaxEncoded: true}},
 		GlobalSection: []wasm.Global{
 			{Type: wasm.GlobalType{ValType: wasm.ValueTypeI32}, Init: wasm.NewConstantExpressionFromOpcode(wasm.OpcodeI32Const, leb128.EncodeInt32(constVal))},
 			{Type: wasm.GlobalType{ValType: wasm.ValueTypeI32, Mutable: true}, Init: wasm.NewConstantExpressionFromOpcode(wasm.OpcodeI32Const, leb128.EncodeInt32(mutVal))},
