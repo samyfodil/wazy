@@ -4889,7 +4889,7 @@ func (c *Compiler) getWasmGlobalValue(index wasm.Index, forceLoad bool) ssa.Valu
 	return v
 }
 
-const memoryInstanceBufOffset = 0
+var memoryInstanceBufOffset = wasm.MemoryInstanceBufferOffset()
 
 var memoryInstanceNativeGrowCapOffset, memoryInstanceSizeOffset = wasm.MemoryInstanceNativeGrowOffsets()
 

@@ -44,6 +44,20 @@ type waiters struct {
 type MemoryInstance struct {
 	internalapi.WazyOnlyType
 
+	// sizeBytes is the logical byte length visible to Wasm and host APIs. The
+	// native engine may update this scalar after checked in-capacity growth;
+	// Buffer's slice header is only mutated by Go.
+	//
+	// A shared memory reads and writes it with sync/atomic, which on a platform
+	// whose int is 32 bits wide (GOARCH=386, arm, wasm) requires the field to
+	// be 64-bit aligned. The only alignment the compiler guarantees there is
+	// for the first word of an allocated struct, so this field is kept first
+	// and memoryInstanceSizeBytesIsAligned below fails the build if it moves.
+	// Placing it first rather than switching to atomic.Uint64 keeps the plain
+	// non-shared reads plain, and keeps the offset the native engine writes
+	// through (MemoryInstanceNativeGrowOffsets) a plain uint64.
+	sizeBytes uint64
+
 	Buffer        []byte
 	Min, Cap, Max uint32
 	Shared        bool
@@ -51,10 +65,6 @@ type MemoryInstance struct {
 	// without calling back into Go. It is zero for shared and custom-allocator
 	// memories, whose growth must always use Grow.
 	nativeGrowCap uint64
-	// sizeBytes is the logical byte length visible to Wasm and host APIs. The
-	// native engine may update this scalar after checked in-capacity growth;
-	// Buffer's slice header is only mutated by Go.
-	sizeBytes uint64
 	// growReservePages is the configured spare capacity to allocate after a Go
 	// fallback grows this memory's backing buffer.
 	growReservePages uint32
@@ -435,11 +445,28 @@ func memoryBytesNumToPages(bytesNum uint64) (pages uint32) {
 	return uint32(bytesNum >> MemoryPageSizeInBits)
 }
 
+// memoryInstanceSizeBytesIsAligned fails the build if sizeBytes stops being the
+// first field of MemoryInstance. sync/atomic only guarantees 64-bit alignment
+// for the first word of an allocated struct, and a misaligned 64-bit atomic
+// panics at runtime where an int is 32 bits wide -- silently, on platforms this
+// repository does not test.
+const memoryInstanceSizeBytesIsAligned = unsafe.Offsetof(MemoryInstance{}.sizeBytes)
+
+var _ [0]struct{} = [memoryInstanceSizeBytesIsAligned]struct{}{}
+
 // MemoryInstanceNativeGrowOffsets returns the byte offsets of the native grow
 // capacity and logical size for the native compiler's memory.grow fast path.
 func MemoryInstanceNativeGrowOffsets() (capacity, size uint32) {
 	return uint32(unsafe.Offsetof(MemoryInstance{}.nativeGrowCap)),
 		uint32(unsafe.Offsetof(MemoryInstance{}.sizeBytes))
+}
+
+// MemoryInstanceBufferOffset returns the byte offset of Buffer, which the
+// native compiler loads the memory base from. Ask for it rather than assuming
+// Buffer leads the struct: sizeBytes has to, so that a shared memory's atomic
+// access to it is 64-bit aligned on every platform.
+func MemoryInstanceBufferOffset() uint32 {
+	return uint32(unsafe.Offsetof(MemoryInstance{}.Buffer))
 }
 
 // hasSize returns true if Len is sufficient for byteCount at the given offset.

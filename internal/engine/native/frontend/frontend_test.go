@@ -1273,9 +1273,9 @@ blk0: (v0:i64, v1:i64)
 	v3:i64 = Load v1, 0x28
 	v4:i32 = CallIndirect v2:sig0, v0, v3
 	v5:i64 = Load v1, 0x8
-	v6:i64 = Load v5, 0x0
+	v6:i64 = Load v5, 0x8
 	v7:i64 = Load v1, 0x8
-	v8:i64 = Load v7, 0x30
+	v8:i64 = Load v7, 0x0
 	v9:i64 = Iconst_64 0x10
 	v10:i64 = Ushr v8, v9
 	v11:i32 = Ireduce v10
@@ -1285,17 +1285,17 @@ blk0: (v0:i64, v1:i64)
 	v14:i32 = Iconst_32 0x0
 	v15:i32 = CallIndirect v13:sig2, v0, v14, v12
 	v16:i64 = Load v1, 0x8
-	v17:i64 = Load v16, 0x0
+	v17:i64 = Load v16, 0x8
 	v18:i64 = Load v1, 0x8
-	v19:i64 = Load v18, 0x30
+	v19:i64 = Load v18, 0x0
 	Store v1, v0, 0x8
 	v20:i64 = Load v1, 0x20
 	v21:i64 = Load v1, 0x28
 	v22:i32 = CallIndirect v20:sig0, v0, v21
 	v23:i64 = Load v1, 0x8
-	v24:i64 = Load v23, 0x0
+	v24:i64 = Load v23, 0x8
 	v25:i64 = Load v1, 0x8
-	v26:i64 = Load v25, 0x30
+	v26:i64 = Load v25, 0x0
 	v27:i64 = Iconst_64 0x10
 	v28:i64 = Ushr v26, v27
 	v29:i32 = Ireduce v28
@@ -1312,7 +1312,7 @@ blk0: (v0:i64, v1:i64)
 	v3:i64 = Load v1, 0x28
 	v4:i32 = CallIndirect v2:sig0, v0, v3
 	v7:i64 = Load v1, 0x8
-	v8:i64 = Load v7, 0x30
+	v8:i64 = Load v7, 0x0
 	v9:i64 = Iconst_64 0x10
 	v10:i64 = Ushr v8, v9
 	v11:i32 = Ireduce v10
@@ -1326,7 +1326,7 @@ blk0: (v0:i64, v1:i64)
 	v21:i64 = Load v1, 0x28
 	v22:i32 = CallIndirect v20:sig0, v0, v21
 	v25:i64 = Load v1, 0x8
-	v26:i64 = Load v25, 0x30
+	v26:i64 = Load v25, 0x0
 	v27:i64 = Iconst_64 0x10
 	v28:i64 = Ushr v26, v27
 	v29:i32 = Ireduce v28
@@ -1355,7 +1355,7 @@ blk0: (v0:i64, v1:i64)
 
 blk1: () <-- (blk0)
 	v12:i64 = Load v1, 0x18
-	v13:i64 = Load v12, 0x28
+	v13:i64 = Load v12, 0x30
 	v14:i64 = Ishl v9, v5
 	v15:i32 = Icmp ge_u, v13, v14
 	Brnz v15, blk2
@@ -1363,7 +1363,7 @@ blk1: () <-- (blk0)
 
 blk2: () <-- (blk1)
 	Store v14, v1, 0x10
-	Store v14, v12, 0x30
+	Store v14, v12, 0x0
 	Jump blk5, v7
 
 blk3: () <-- (blk1)
@@ -1396,7 +1396,7 @@ blk5: (v3:i32) <-- (blk2,blk3,blk4)
 
 blk6: () <-- (blk5)
 	v34:i64 = Load v1, 0x18
-	v35:i64 = Load v34, 0x28
+	v35:i64 = Load v34, 0x30
 	v36:i64 = Ishl v31, v27
 	v37:i32 = Icmp ge_u, v35, v36
 	Brnz v37, blk7
@@ -1404,7 +1404,7 @@ blk6: () <-- (blk5)
 
 blk7: () <-- (blk6)
 	Store v36, v1, 0x10
-	Store v36, v34, 0x30
+	Store v36, v34, 0x0
 	Jump blk10, v29
 
 blk8: () <-- (blk6)
@@ -1442,7 +1442,7 @@ blk0: (v0:i64, v1:i64)
 
 blk1: () <-- (blk0)
 	v12:i64 = Load v1, 0x18
-	v13:i64 = Load v12, 0x28
+	v13:i64 = Load v12, 0x30
 	v14:i64 = Ishl v9, v5
 	v15:i32 = Icmp ge_u, v13, v14
 	Brz v15, blk3
@@ -1450,7 +1450,7 @@ blk1: () <-- (blk0)
 
 blk2: () <-- (blk1)
 	Store v14, v1, 0x10
-	Store v14, v12, 0x30
+	Store v14, v12, 0x0
 	Jump blk5, v7
 
 blk3: () <-- (blk1)
@@ -1482,7 +1482,7 @@ blk5: (v3:i32) <-- (blk2,blk3,blk4)
 
 blk6: () <-- (blk5)
 	v34:i64 = Load v1, 0x18
-	v35:i64 = Load v34, 0x28
+	v35:i64 = Load v34, 0x30
 	v36:i64 = Ishl v31, v27
 	v37:i32 = Icmp ge_u, v35, v36
 	Brz v37, blk8
@@ -1490,7 +1490,7 @@ blk6: () <-- (blk5)
 
 blk7: () <-- (blk6)
 	Store v36, v1, 0x10
-	Store v36, v34, 0x30
+	Store v36, v34, 0x0
 	Jump blk10, v29
 
 blk8: () <-- (blk6)

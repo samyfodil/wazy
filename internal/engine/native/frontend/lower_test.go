@@ -10,7 +10,7 @@ import (
 
 func Test_Offsets(t *testing.T) {
 	var memInstance wasm.MemoryInstance
-	require.Equal(t, int(unsafe.Offsetof(memInstance.Buffer)), memoryInstanceBufOffset)
+	require.Equal(t, uint32(unsafe.Offsetof(memInstance.Buffer)), memoryInstanceBufOffset)
 	capacityOffset, sizeOffset := wasm.MemoryInstanceNativeGrowOffsets()
 	require.Equal(t, capacityOffset, memoryInstanceNativeGrowCapOffset)
 	require.Equal(t, sizeOffset, memoryInstanceSizeOffset)
