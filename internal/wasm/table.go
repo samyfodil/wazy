@@ -280,7 +280,7 @@ func (m *Module) validateTable(enabledFeatures api.CoreFeatures, tables []Table,
 		}
 
 		if elem.IsActive() {
-			if len(tables) <= int(elem.TableIndex) {
+			if indexOutOfRange(elem.TableIndex, len(tables)) {
 				return fmt.Errorf("unknown table %d as active element target", elem.TableIndex)
 			}
 

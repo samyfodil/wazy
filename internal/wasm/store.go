@@ -219,7 +219,11 @@ func (m *ModuleInstance) applyElements(elems []ElementSegment) {
 
 		table := m.Tables[elem.TableIndex]
 		references := table.References
-		if int(offset)+len(elem.Init) > len(references) {
+		// Widened to uint64: offset comes from the module's own offset
+		// expression, so it spans the whole uint32 range, and int(offset) is
+		// negative where an int is 32 bits wide -- which would pass this check
+		// and then index out of range below.
+		if uint64(offset)+uint64(len(elem.Init)) > uint64(len(references)) {
 			// ErrElementOffsetOutOfBounds is the error raised when the active element offset exceeds the table length.
 			// Before CoreFeatureReferenceTypes, this was checked statically before instantiation, after the proposal,
 			// this must be raised as runtime error (as in assert_trap in spectest), not even an instantiation error.
@@ -695,7 +699,7 @@ func (s *Store) GetFunctionTypeIDs(ts []FunctionType) ([]FunctionTypeID, error) 
 func structuralValueTypeName(vt ValueType, typeIDs []FunctionTypeID) string {
 	if vt.IsConcreteRef() {
 		idx := vt.TypeIndex()
-		if int(idx) < len(typeIDs) {
+		if !indexOutOfRange(idx, len(typeIDs)) {
 			if vt.IsNullable() {
 				return fmt.Sprintf("(ref null tid=%d)", typeIDs[idx])
 			}

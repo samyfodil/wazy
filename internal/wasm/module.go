@@ -681,7 +681,7 @@ func (m *Module) validateImports(enabledFeatures api.CoreFeatures) error {
 		}
 		switch imp.Type {
 		case ExternTypeFunc:
-			if int(imp.DescFunc) >= len(m.TypeSection) {
+			if indexOutOfRange(imp.DescFunc, len(m.TypeSection)) {
 				return fmt.Errorf("invalid import[%q.%q] function: type index out of range", imp.Module, imp.Name)
 			}
 		case ExternTypeGlobal:
@@ -692,7 +692,7 @@ func (m *Module) validateImports(enabledFeatures api.CoreFeatures) error {
 				return fmt.Errorf("invalid import[%q.%q] global: %w", imp.Module, imp.Name, err)
 			}
 		case ExternTypeTag:
-			if int(imp.DescTag) >= len(m.TypeSection) {
+			if indexOutOfRange(imp.DescTag, len(m.TypeSection)) {
 				return fmt.Errorf("invalid import[%q.%q] tag: type index out of range", imp.Module, imp.Name)
 			}
 			if len(m.TypeSection[imp.DescTag].Results) > 0 {
@@ -890,6 +890,19 @@ func (m *ModuleInstance) buildMemory(module *Module, allocator api.MemoryAllocat
 //
 // See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#binary-index
 type Index = uint32
+
+// indexOutOfRange reports whether an index read out of a module falls outside a
+// slice of the given length.
+//
+// Use it in preference to "int(index) >= len(s)". An int is 32 bits wide on
+// GOARCH=386, arm and wasm, where int(index) of anything above math.MaxInt32 is
+// negative -- so the naive form accepts the index and the very next line panics.
+// Every index here is LEB128-decoded straight from the module body, so a
+// malformed module reaches it. Widening both sides to uint64 is exact on every
+// platform, and inlines away.
+func indexOutOfRange(index uint32, length int) bool {
+	return uint64(index) >= uint64(length)
+}
 
 // FunctionType is a possibly empty function signature.
 //

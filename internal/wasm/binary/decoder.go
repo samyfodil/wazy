@@ -107,7 +107,12 @@ func DecodeModule(
 				} else {
 					// Mirrors io.CopyN's behavior (used here prior to the slice-indexed rewrite): io.EOF
 					// whenever fewer than limit bytes remain, never io.ErrUnexpectedEOF for a partial remainder.
-					if int(limit) > len(binary)-offset {
+					// Compared as uint64: limit is a uint32 taken from the
+					// module's own section header, so a malformed module can
+					// put it above math.MaxInt32, and int(limit) is negative
+					// where an int is 32 bits wide -- which would pass this
+					// check and then wind offset backwards.
+					if remaining := len(binary) - offset; remaining < 0 || uint64(limit) > uint64(remaining) {
 						return nil, fmt.Errorf("failed to skip name[%s]: %w", name, io.EOF)
 					}
 					offset += int(limit)

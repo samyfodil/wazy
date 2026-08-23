@@ -5083,3 +5083,51 @@ func TestValidation_LegacyExceptionHandlingOpcodes(t *testing.T) {
 		})
 	}
 }
+
+func TestFuncValidation_alignmentCannotOverflowASignedInt(t *testing.T) {
+	// align is an exponent, so the natural-alignment checks compare 1<<align
+	// against the access size. An untyped 1 there takes type int, and 1<<31
+	// overflows to a negative number where an int is 32 bits wide (GOARCH=386,
+	// arm, wasm) -- so "1<<align > 4" reads false and the module validates.
+	// test/core/align.wast calls this case "Signed 32-bit overflow"; it is an
+	// assert_invalid the interpreter used to accept on those platforms.
+	for _, align := range []byte{31, 30, 3} {
+		t.Run(fmt.Sprintf("align=2**%d", align), func(t *testing.T) {
+			m := &Module{
+				TypeSection:     []FunctionType{v_v},
+				FunctionSection: []Index{0},
+				CodeSection: []Code{{Body: []byte{
+					OpcodeI32Const, 0,
+					OpcodeI32Load, align, 0, // i32.load align=2**align offset=0
+					OpcodeDrop,
+					OpcodeEnd,
+				}}},
+			}
+			err := m.validateFunction(&stacks{}, api.CoreFeaturesV2,
+				0, []Index{0}, nil, []Memory{{}}, []Table{}, nil, nil, bytes.NewReader(nil))
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "invalid memory alignment")
+		})
+	}
+}
+
+func TestFuncValidation_typeIndexAboveMaxInt32IsRejected(t *testing.T) {
+	// A call_indirect type index is a u32 read straight out of the body. Guarded
+	// as "int(typeIndex) >= len(m.TypeSection)" it is negative where an int is
+	// 32 bits wide, so the guard passes and the very next line indexes
+	// m.TypeSection out of range and panics. See indexOutOfRange.
+	m := &Module{
+		TypeSection:     []FunctionType{v_v},
+		FunctionSection: []Index{0},
+		CodeSection: []Code{{Body: []byte{
+			OpcodeI32Const, 0,
+			// call_indirect typeidx=0xffffffff tableidx=0
+			OpcodeCallIndirect, 0xff, 0xff, 0xff, 0xff, 0x0f, 0,
+			OpcodeEnd,
+		}}},
+	}
+	err := m.validateFunction(&stacks{}, api.CoreFeaturesV2,
+		0, []Index{0}, nil, nil, []Table{{Type: RefTypeFuncref}}, nil, nil, bytes.NewReader(nil))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid type index")
+}
