@@ -34,4 +34,22 @@
   (func (export "table_copy") (param i64 i64 i64) (table.copy $t $t (local.get 0) (local.get 1) (local.get 2)))
   (elem $e func $one)
   (func (export "table_init") (param i64 i32 i32) (table.init $t $e (local.get 0) (local.get 1) (local.get 2)))
+
+  ;; Vector loads and stores take their address in the memory's index type too.
+  (func (export "v128_store") (param i64) (v128.store (local.get 0) (v128.const i32x4 1 2 3 4)))
+  (func (export "v128_load_lane0") (param i64) (result i32)
+    (i32x4.extract_lane 0 (v128.load (local.get 0))))
+  (func (export "v128_load_lane3") (param i64) (result i32)
+    (i32x4.extract_lane 3 (v128.load (local.get 0))))
+  (func (export "v128_load8_splat") (param i64) (result i32)
+    (i8x16.extract_lane_u 7 (v128.load8_splat (local.get 0))))
+  (func (export "v128_load32_zero") (param i64) (result i32)
+    (i32x4.extract_lane 0 (v128.load32_zero (local.get 0))))
+  (func (export "v128_store8_lane") (param i64)
+    (v128.store8_lane 5 (local.get 0) (v128.const i32x4 0 0 0 0)))
+  (func (export "v128_load8_lane") (param i64) (result i32)
+    (i8x16.extract_lane_u 2 (v128.load8_lane 2 (local.get 0) (v128.const i32x4 0 0 0 0))))
+  ;; offset= past four gibibytes on a vector access, which must trap rather than wrap.
+  (func (export "v128_load_off") (param i64) (result i32)
+    (i32x4.extract_lane 0 (v128.load offset=0x1_0000_0000 (local.get 0))))
 )

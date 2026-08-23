@@ -15,6 +15,7 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
 	"github.com/samyfodil/wazy/internal/testing/require"
@@ -27,6 +28,9 @@ var memory64Wasm []byte
 
 //go:embed testdata/memory64_mixed.wasm
 var memory64MixedWasm []byte
+
+//go:embed testdata/memory64_shared.wasm
+var memory64SharedWasm []byte
 
 const memory64Features = api.CoreFeaturesV2 | api.CoreFeatureMemory64
 
@@ -45,6 +49,8 @@ func runMemory64Tests(t *testing.T, config wazy.RuntimeConfig) {
 	for name, f := range map[string]func(*testing.T, wazy.RuntimeConfig){
 		"instructions":                   testMemory64Instructions,
 		"mixed index types":              testMemory64MixedIndexTypes,
+		"vector access":                  testMemory64Vector,
+		"shared atomics":                 testMemory64SharedAtomics,
 		"wide offset on a 32-bit memory": testMemory64WideOffsetOn32BitMemory,
 		"api surface":                    testMemory64APISurface,
 		"allocation limits":              testMemory64AllocationLimits,
@@ -151,6 +157,98 @@ func testMemory64Instructions(t *testing.T, config wazy.RuntimeConfig) {
 		require.ErrorIs(t, callErr("table_copy", ^uint64(0), 0, 2), wasmruntime.ErrRuntimeInvalidTableAccess)
 		require.ErrorIs(t, callErr("table_init", ^uint64(0), 0, 1), wasmruntime.ErrRuntimeInvalidTableAccess)
 	})
+}
+
+// testMemory64Vector covers the vector loads and stores, whose address operand
+// follows the memory's index type like every other memory instruction's.
+func testMemory64Vector(t *testing.T, config wazy.RuntimeConfig) {
+	ctx := context.Background()
+	r := wazy.NewRuntimeWithConfig(ctx, config.WithCoreFeatures(memory64Features))
+	defer r.Close(ctx)
+	mod, err := r.Instantiate(ctx, memory64Wasm)
+	require.NoError(t, err)
+
+	call := func(name string, args ...uint64) []uint64 {
+		res, err := mod.ExportedFunction(name).Call(ctx, args...)
+		require.NoError(t, err, name)
+		return res
+	}
+	callErr := func(name string, args ...uint64) error {
+		_, err := mod.ExportedFunction(name).Call(ctx, args...)
+		return err
+	}
+
+	call("v128_store", 256)
+	require.Equal(t, uint64(1), call("v128_load_lane0", 256)[0])
+	require.Equal(t, uint64(4), call("v128_load_lane3", 256)[0])
+	require.Equal(t, uint64(2), call("v128_load32_zero", 260)[0])
+	require.Equal(t, uint64(1), call("v128_load8_lane", 256)[0])
+	require.Equal(t, uint64(2), call("v128_load8_splat", 260)[0])
+
+	// store8_lane writes lane 5 of an all-zero vector, so the byte it lands on
+	// reads back as zero.
+	call("v128_store8_lane", 256)
+	require.Equal(t, uint64(0), call("v128_load8_splat", 256)[0])
+
+	for _, addr := range []uint64{1 << 17, 1 << 40, ^uint64(0), ^uint64(0) - 15} {
+		require.ErrorIs(t, callErr("v128_load_lane0", addr), wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+		require.ErrorIs(t, callErr("v128_store", addr), wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+		require.ErrorIs(t, callErr("v128_load8_splat", addr), wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+		require.ErrorIs(t, callErr("v128_store8_lane", addr), wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+		require.ErrorIs(t, callErr("v128_load8_lane", addr), wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+		require.ErrorIs(t, callErr("v128_load32_zero", addr), wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+	}
+	// An offset immediate past four gibibytes, and an address that would make
+	// address+offset wrap back to zero.
+	require.ErrorIs(t, callErr("v128_load_off", 0), wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+	require.ErrorIs(t, callErr("v128_load_off", ^uint64(0)-(1<<32)+1), wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+}
+
+// testMemory64SharedAtomics covers the atomic instructions against a shared
+// memory with an i64 index type: their address operand follows the index type,
+// and the runtime resolves it back to an offset when it re-enters Go.
+func testMemory64SharedAtomics(t *testing.T, config wazy.RuntimeConfig) {
+	ctx := context.Background()
+	r := wazy.NewRuntimeWithConfig(ctx,
+		config.WithCoreFeatures(memory64Features|experimental.CoreFeaturesThreads))
+	defer r.Close(ctx)
+	mod, err := r.Instantiate(ctx, memory64SharedWasm)
+	require.NoError(t, err)
+
+	call := func(name string, args ...uint64) []uint64 {
+		res, err := mod.ExportedFunction(name).Call(ctx, args...)
+		require.NoError(t, err, name)
+		return res
+	}
+	callErr := func(name string, args ...uint64) error {
+		_, err := mod.ExportedFunction(name).Call(ctx, args...)
+		return err
+	}
+
+	call("store", 64, 7)
+	require.Equal(t, uint64(7), call("load", 64)[0])
+	require.Equal(t, uint64(7), call("rmw_add", 64, 5)[0])
+	require.Equal(t, uint64(12), call("load", 64)[0])
+	require.Equal(t, uint64(12), call("cmpxchg", 64, 12, 99)[0])
+	require.Equal(t, uint64(99), call("load", 64)[0])
+
+	call("store64", 128, ^uint64(0))
+	require.Equal(t, ^uint64(0), call("load64", 128)[0])
+
+	// Nothing is waiting, so notify wakes nobody, and a wait whose expectation
+	// does not match the memory returns 1 ("not equal") immediately.
+	require.Equal(t, uint64(0), call("notify", 64)[0])
+	require.Equal(t, uint64(1), call("wait32", 64, 0)[0])
+
+	for _, addr := range []uint64{1 << 17, 1 << 40, ^uint64(0) &^ 3} {
+		require.ErrorIs(t, callErr("load", addr), wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+		require.ErrorIs(t, callErr("store", addr, 0), wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+		require.ErrorIs(t, callErr("rmw_add", addr, 0), wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+		require.ErrorIs(t, callErr("notify", addr), wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+		require.ErrorIs(t, callErr("wait32", addr, 0), wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+	}
+	// An unaligned atomic address is a separate trap.
+	require.ErrorIs(t, callErr("load", 1), wasmruntime.ErrRuntimeUnalignedAtomic)
 }
 
 // testMemory64MixedIndexTypes covers memory.copy and table.copy between a
