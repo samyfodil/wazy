@@ -459,7 +459,10 @@ func testMemory64AllocationLimits(t *testing.T, config wazy.RuntimeConfig) {
 		require.NoError(t, err)
 		_, err = r.InstantiateModule(ctx, compiled, wazy.NewModuleConfig())
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "exceeds the limit of 65536 pages")
+		// The default limit is 65536 pages, itself clamped to what a slice on
+		// this platform can address -- 32767 pages where an int is 32 bits.
+		require.Contains(t, err.Error(), "exceeds the limit of")
+		require.Contains(t, err.Error(), "minimum of 281474976710656 pages")
 	})
 
 	t.Run("WithMemory64LimitPages raises and lowers the ceiling", func(t *testing.T) {
