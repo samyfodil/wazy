@@ -61,6 +61,12 @@ type RuntimeConfig interface {
 	// Note: Wasm has 32-bit memory and each page is 65536 (2^16) bytes. This
 	// implies a max of 65536 (2^16) addressable pages.
 	// See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#grow-mem
+	//
+	// Note: on a platform whose int is 32 bits wide (GOARCH=386, arm, wasm) a
+	// memory can never reach four gibibytes, because that is more than a Go
+	// slice can hold. The effective ceiling there is 32767 pages whatever is
+	// configured here, and a module asking for more fails to instantiate
+	// rather than panicking in the allocator.
 	WithMemoryLimitPages(memoryLimitPages uint32) RuntimeConfig
 
 	// WithMemoryCapacityFromMax eagerly allocates max memory, unless max is
@@ -93,6 +99,15 @@ type RuntimeConfig interface {
 	// limits exceed anything a host could allocate to still be valid, so such a
 	// module still compiles. It fails to instantiate if its minimum is over the
 	// limit, and memory.grow returns -1 rather than growing past it.
+	//
+	// The same platform ceiling WithMemoryLimitPages documents applies here,
+	// and is the binding one for any value over it: a Go slice cannot exceed
+	// math.MaxInt bytes, so a memory tops out at 2^47-1 pages on a 64-bit
+	// platform and 32767 pages on a 32-bit one.
+	//
+	// A module's memories are also summed: whatever index types it mixes,
+	// their declared minimums together may not exceed the larger of this
+	// limit and WithMemoryLimitPages'.
 	//
 	// See https://github.com/WebAssembly/memory64
 	WithMemory64LimitPages(memory64LimitPages uint64) RuntimeConfig

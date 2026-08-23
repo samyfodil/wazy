@@ -478,6 +478,19 @@ func testMemory64AllocationLimits(t *testing.T, config wazy.RuntimeConfig) {
 		require.Equal(t, ^uint64(0), res[0]) // the host limit, not the module's max, binds
 	})
 
+	t.Run("a limit of zero forbids a 64-bit memory outright", func(t *testing.T) {
+		// Zero is a real setting, not "unset": WithMemoryLimitPages(0) already
+		// rejects any 32-bit memory, and the 64-bit knob has to agree. Reading
+		// it as "use the default" would turn the strictest value the knob
+		// accepts into the most permissive one.
+		r := wazy.NewRuntimeWithConfig(ctx,
+			config.WithCoreFeatures(memory64Features).WithMemory64LimitPages(0))
+		defer r.Close(ctx)
+		_, err := r.Instantiate(ctx, memory64Wasm)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "exceeds the limit of 0 pages")
+	})
+
 	t.Run("the 32-bit limit does not bind a 64-bit memory", func(t *testing.T) {
 		// WithMemoryLimitPages tops out at 65536; a 64-bit memory needs its own
 		// knob to go past that, and must not be silently capped by this one.

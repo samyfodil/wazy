@@ -1,6 +1,8 @@
 package wasm
 
 import (
+	"math"
+
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/internalapi"
 )
@@ -115,14 +117,25 @@ func (f *MemoryDefinition) ExportNames() []string {
 
 // Min implements the same method as documented on api.MemoryDefinition.
 func (f *MemoryDefinition) Min() uint32 {
-	return uint32(f.memory.Min)
+	return saturateToUint32(f.memory.Min)
 }
 
 // Max implements the same method as documented on api.MemoryDefinition.
 func (f *MemoryDefinition) Max() (max uint32, encoded bool) {
-	max = uint32(f.memory.Max)
+	max = saturateToUint32(f.memory.Max)
 	encoded = f.memory.IsMaxEncoded
 	return
+}
+
+// saturateToUint32 caps rather than truncates a 64-bit memory's page count for
+// the uint32 halves of api.MemoryDefinition. Truncation would be worse than
+// imprecise: a memory declared with a maximum of exactly 2^32 pages would
+// report a maximum of zero, which reads as "cannot grow" -- the opposite of the
+// truth, and the very thing a caller consults Max to decide. Saturating keeps
+// the bound in the direction it is meant to be read, and keeps Min <= Max.
+// Use Min64 and Max64 for the exact values.
+func saturateToUint32(pages uint64) uint32 {
+	return uint32(min(pages, math.MaxUint32))
 }
 
 // Min64 implements the same method as documented on api.MemoryDefinition.

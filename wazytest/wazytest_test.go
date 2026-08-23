@@ -165,3 +165,18 @@ func TestNewFixedMemory(t *testing.T) {
 		t.Error("invalid max memory size:", memory.Max)
 	}
 }
+
+func TestMemoryGrow64RejectsADeltaWiderThanUint32(t *testing.T) {
+	// This double counts pages in a uint32, so no delta wider than that can
+	// succeed. Narrowing one would grow by the truncated remainder instead --
+	// and a multiple of 2^32 would report success having grown nothing, which
+	// the real MemoryInstance.Grow64 never does.
+	m := &Memory{Bytes: make([]byte, PageSize)}
+	if previous, ok := m.Grow64(1 << 32); ok {
+		t.Error("grew by a delta wider than the page counter")
+	} else if previous != 1 {
+		t.Error("invalid previous page count:", previous)
+	} else if m.Pages() != 1 {
+		t.Error("memory changed size:", m.Pages())
+	}
+}

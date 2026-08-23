@@ -1,6 +1,7 @@
 package wasm
 
 import (
+	"math"
 	"testing"
 
 	"github.com/samyfodil/wazy/api"
@@ -134,18 +135,33 @@ func TestMemoryDefinition_Memory64(t *testing.T) {
 		require.Equal(t, uint64(2), max64)
 	})
 	t.Run("64-bit past what a uint32 holds", func(t *testing.T) {
-		// Min and Max keep the documented truncation; the 64-bit accessors are
-		// the way to read a memory this large.
+		// Min and Max saturate rather than truncate; the 64-bit accessors are
+		// the way to read a memory this large exactly.
 		d := &MemoryDefinition{memory: &Memory{
 			Min: 1 << 32, Max: Memory64LimitPages, IsMemory64: true,
 		}}
 		require.True(t, d.IsMemory64())
-		require.Equal(t, uint32(0), d.Min())
+		require.Equal(t, uint32(math.MaxUint32), d.Min())
 		require.Equal(t, uint64(1)<<32, d.Min64())
 		max, encoded := d.Max()
 		require.False(t, encoded)
-		require.Equal(t, uint32(0), max)
+		require.Equal(t, uint32(math.MaxUint32), max)
 		max64, _ := d.Max64()
 		require.Equal(t, Memory64LimitPages, max64)
+	})
+	t.Run("a bounded 64-bit maximum never reads as zero", func(t *testing.T) {
+		// Truncating a maximum of exactly 2^32 pages would report zero with
+		// encoded=true, which reads as "declared, and cannot grow" -- the
+		// opposite of a memory that may reach 256Ti.
+		d := &MemoryDefinition{memory: &Memory{
+			Min: 1, Max: 1 << 32, IsMaxEncoded: true, IsMemory64: true,
+		}}
+		max, encoded := d.Max()
+		require.True(t, encoded)
+		require.Equal(t, uint32(math.MaxUint32), max)
+		require.True(t, max >= d.Min())
+		max64, encoded := d.Max64()
+		require.True(t, encoded)
+		require.Equal(t, uint64(1)<<32, max64)
 	})
 }

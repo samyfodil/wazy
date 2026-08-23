@@ -64,7 +64,9 @@ type (
 		// therefore applied at instantiation: a minimum over it fails to
 		// instantiate, and a maximum over it simply stops growth earlier.
 		//
-		// Zero means the corresponding default (MemoryLimitPages).
+		// Both are set by NewStore and are taken at face value: zero means no
+		// memory may hold a page, matching what WithMemoryLimitPages(0)
+		// already meant for a 32-bit memory by way of the decoder.
 		MemoryLimitPages, Memory64LimitPages uint64
 
 		// typeIDs maps each FunctionType.String() to a unique FunctionTypeID. This is used at runtime to
@@ -363,10 +365,14 @@ func (s *Store) memoryLimitPages(mem *Memory) uint64 {
 	if mem.IsMemory64 {
 		limit = s.Memory64LimitPages
 	}
-	if limit == 0 {
-		limit = uint64(MemoryLimitPages)
-	}
 	return min(limit, maxAllocatablePages)
+}
+
+// maxMemoryLimitPages is the more permissive of the two ceilings, and bounds
+// what one module may claim across all of its memories whatever index types it
+// mixes.
+func (s *Store) maxMemoryLimitPages() uint64 {
+	return max(s.memoryLimitPages(&Memory{}), s.memoryLimitPages(&Memory{IsMemory64: true}))
 }
 
 // Instantiate uses name instead of the Module.NameSection ModuleName as it allows instantiating the same module under

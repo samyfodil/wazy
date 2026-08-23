@@ -970,7 +970,7 @@ func TestModule_buildMemoryInstance(t *testing.T) {
 	})
 	t.Run("aggregate minimum over the configured limit", func(t *testing.T) {
 		limited := NewStore(api.CoreFeaturesV2|api.CoreFeatureMemory64|api.CoreFeatureMultiMemory, nil)
-		limited.Memory64LimitPages = 3
+		limited.MemoryLimitPages, limited.Memory64LimitPages = 3, 3
 		m := ModuleInstance{Memories: make([]*MemoryInstance, 2)}
 		err := m.buildMemory(&Module{
 			MemorySection: []Memory{
@@ -980,6 +980,36 @@ func TestModule_buildMemoryInstance(t *testing.T) {
 			MemoryDefinitionSection: []MemoryDefinition{{}, {}},
 		}, nil, limited)
 		require.EqualError(t, err, "total memory minimum across 2 memories (4 pages) exceeds 3 pages")
+	})
+	t.Run("mixing index types does not add the two ceilings together", func(t *testing.T) {
+		// One total covers both index types, so a module cannot claim
+		// MemoryLimitPages *and* Memory64LimitPages by declaring one of each.
+		limited := NewStore(api.CoreFeaturesV2|api.CoreFeatureMemory64|api.CoreFeatureMultiMemory, nil)
+		limited.MemoryLimitPages, limited.Memory64LimitPages = 2, 2
+		m := ModuleInstance{Memories: make([]*MemoryInstance, 2)}
+		err := m.buildMemory(&Module{
+			MemorySection: []Memory{
+				{Min: 2, Cap: 2, Max: 2},
+				{Min: 2, Cap: 2, Max: 2, IsMemory64: true},
+			},
+			MemoryDefinitionSection: []MemoryDefinition{{}, {}},
+		}, nil, limited)
+		require.EqualError(t, err, "total memory minimum across 2 memories (4 pages) exceeds 2 pages")
+	})
+	t.Run("the aggregate uses the more permissive of the two ceilings", func(t *testing.T) {
+		// Two 32-bit pages plus two 64-bit ones is over MemoryLimitPages but
+		// within Memory64LimitPages, so it is allowed: the bound is the most a
+		// single memory could have claimed, not the sum of both ceilings.
+		limited := NewStore(api.CoreFeaturesV2|api.CoreFeatureMemory64|api.CoreFeatureMultiMemory, nil)
+		limited.MemoryLimitPages, limited.Memory64LimitPages = 2, 4
+		m := ModuleInstance{Memories: make([]*MemoryInstance, 2)}
+		require.NoError(t, m.buildMemory(&Module{
+			MemorySection: []Memory{
+				{Min: 2, Cap: 2, Max: 2},
+				{Min: 2, Cap: 2, Max: 2, IsMemory64: true},
+			},
+			MemoryDefinitionSection: []MemoryDefinition{{}, {}},
+		}, nil, limited))
 	})
 }
 

@@ -262,17 +262,31 @@ func TestStore_memoryLimitPages_ClampedToWhatASliceCanAddress(t *testing.T) {
 }
 
 func TestStore_memoryLimitPages(t *testing.T) {
+	// The clamp below applies to the default too. It only bites where an int is
+	// 32 bits wide (GOARCH=386, arm, wasm), where a 65536-page memory is larger
+	// than any slice can be; see
+	// TestStore_memoryLimitPages_ClampedToWhatASliceCanAddress.
+	defaultLimit := min(uint64(MemoryLimitPages), maxAllocatablePages)
+
 	s := NewStore(api.CoreFeaturesV2, nil)
-	require.Equal(t, uint64(MemoryLimitPages), s.memoryLimitPages(&Memory{}))
-	require.Equal(t, uint64(MemoryLimitPages), s.memoryLimitPages(&Memory{IsMemory64: true}))
+	require.Equal(t, defaultLimit, s.memoryLimitPages(&Memory{}))
+	require.Equal(t, defaultLimit, s.memoryLimitPages(&Memory{IsMemory64: true}))
 
 	s.MemoryLimitPages, s.Memory64LimitPages = 2, 3
 	require.Equal(t, uint64(2), s.memoryLimitPages(&Memory{}))
 	require.Equal(t, uint64(3), s.memoryLimitPages(&Memory{IsMemory64: true}))
 
-	// A zero field means the default rather than "no pages allowed", so a Store
-	// built without going through NewStore still works.
+	// Zero is taken at face value: WithMemory64LimitPages(0) forbids a 64-bit
+	// memory from holding a page, the way WithMemoryLimitPages(0) already
+	// forbade a 32-bit one. Treating it as "unset" would turn the strictest
+	// setting either knob accepts into the most permissive.
 	s.MemoryLimitPages, s.Memory64LimitPages = 0, 0
-	require.Equal(t, uint64(MemoryLimitPages), s.memoryLimitPages(&Memory{}))
-	require.Equal(t, uint64(MemoryLimitPages), s.memoryLimitPages(&Memory{IsMemory64: true}))
+	require.Equal(t, uint64(0), s.memoryLimitPages(&Memory{}))
+	require.Equal(t, uint64(0), s.memoryLimitPages(&Memory{IsMemory64: true}))
+
+	// The aggregate bound is the more permissive of the two.
+	s.MemoryLimitPages, s.Memory64LimitPages = 5, 7
+	require.Equal(t, uint64(7), s.maxMemoryLimitPages())
+	s.MemoryLimitPages, s.Memory64LimitPages = 7, 5
+	require.Equal(t, uint64(7), s.maxMemoryLimitPages())
 }

@@ -880,9 +880,11 @@ func (m *ModuleInstance) buildMemory(module *Module, allocator api.MemoryAllocat
 	// modules. It is applied here instead, before anything is allocated, and
 	// the sum is bounded the same way decodeMemorySection bounds a 32-bit
 	// module's: one module must not be able to demand N times the configured
-	// ceiling just by declaring N memories. The two index types are summed
-	// separately, since each has its own configured ceiling.
-	totals := [2]uint64{}
+	// ceiling just by declaring N memories. Every memory counts against one
+	// total, whatever its index type, so mixing the two cannot add the two
+	// ceilings together; the total is bounded by the more permissive of them.
+	aggregate := s.maxMemoryLimitPages()
+	var total uint64
 	for i := range module.MemorySection {
 		memSec := &module.MemorySection[i]
 		limit := s.memoryLimitPages(memSec)
@@ -890,14 +892,12 @@ func (m *ModuleInstance) buildMemory(module *Module, allocator api.MemoryAllocat
 			return fmt.Errorf("memory[%d] minimum of %d pages (%s) exceeds the limit of %d pages (%s)",
 				i, memSec.Min, PagesToUnitOfBytes(memSec.Min), limit, PagesToUnitOfBytes(limit))
 		}
-		total := &totals[0]
-		if memSec.IsMemory64 {
-			total = &totals[1]
-		}
-		*total += memSec.Min
-		if *total > limit {
+		// No overflow: total is at most aggregate here or the loop has already
+		// returned, and Min is at most limit, which is at most aggregate.
+		total += memSec.Min
+		if total > aggregate {
 			return fmt.Errorf("total memory minimum across %d memories (%d pages) exceeds %d pages",
-				i+1, *total, limit)
+				i+1, total, aggregate)
 		}
 	}
 

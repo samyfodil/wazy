@@ -530,6 +530,12 @@ func (m *Memory) Grow(deltaPages uint32) (previousPages uint32, ok bool) {
 }
 
 func (m *Memory) Grow64(deltaPages uint64) (previousPages uint64, ok bool) {
+	// This double's page count is a uint32, so a delta wider than that cannot
+	// succeed. Narrowing it would silently grow by the truncated remainder --
+	// or, for a multiple of 2^32, report success having grown nothing.
+	if deltaPages > math.MaxUint32 {
+		return uint64(m.Pages()), false
+	}
 	prev, ok := m.Grow(uint32(deltaPages))
 	return uint64(prev), ok
 }
