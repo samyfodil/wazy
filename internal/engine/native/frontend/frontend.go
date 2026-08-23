@@ -531,8 +531,17 @@ func (c *Compiler) declareNecessaryVariables() {
 		c.memoryIndex64 = append(c.memoryIndex64, mem.IsMemory64)
 		c.anyMemory64 = c.anyMemory64 || mem.IsMemory64
 		// MemoryPagesToBytesNum rather than a plain shift: a 64-bit memory may
-		// declare up to 2^48 pages, which is exactly 2^64 bytes.
-		c.memoryMinSizeInBytes = append(c.memoryMinSizeInBytes, wasm.MemoryPagesToBytesNum(mem.Min))
+		// declare up to 2^48 pages, which is exactly 2^64 bytes. At that one
+		// point the conversion saturates, and a saturated value is not a lower
+		// bound on anything, so record no static minimum instead -- the
+		// elisions that consult it then simply do not fire. Such a module
+		// cannot be instantiated anyway (see Store.memoryLimitPages), so this
+		// only keeps the invariant those elisions rely on unconditionally true.
+		minSizeInBytes := wasm.MemoryPagesToBytesNum(mem.Min)
+		if minSizeInBytes == math.MaxUint64 {
+			minSizeInBytes = 0
+		}
+		c.memoryMinSizeInBytes = append(c.memoryMinSizeInBytes, minSizeInBytes)
 	}
 	for _, imp := range c.m.ImportSection {
 		if imp.Type != wasm.ExternTypeMemory {

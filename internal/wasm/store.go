@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 
@@ -350,6 +351,12 @@ func NewStore(enabledFeatures api.CoreFeatures, engine Engine) *Store {
 	}
 }
 
+// maxAllocatablePages is the most pages any memory can occupy on this platform,
+// whatever the embedder configures: a slice length is an int, and make rejects a
+// larger one by panicking rather than returning. Clamping here turns a module
+// that asks for more into a clean instantiation error.
+const maxAllocatablePages = uint64(math.MaxInt) >> MemoryPageSizeInBits
+
 // memoryLimitPages returns the page ceiling that applies to mem.
 func (s *Store) memoryLimitPages(mem *Memory) uint64 {
 	limit := s.MemoryLimitPages
@@ -357,9 +364,9 @@ func (s *Store) memoryLimitPages(mem *Memory) uint64 {
 		limit = s.Memory64LimitPages
 	}
 	if limit == 0 {
-		return uint64(MemoryLimitPages)
+		limit = uint64(MemoryLimitPages)
 	}
-	return limit
+	return min(limit, maxAllocatablePages)
 }
 
 // Instantiate uses name instead of the Module.NameSection ModuleName as it allows instantiating the same module under

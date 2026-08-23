@@ -217,6 +217,29 @@ func TestModule_buildTables_MinimumLimit(t *testing.T) {
 	require.EqualError(t, err, "table[0] minimum of 134217729 entries exceeds the limit of 134217728")
 }
 
+func TestStore_memoryLimitPages_ClampedToWhatASliceCanAddress(t *testing.T) {
+	// The specification lets a module declare up to 2^48 pages, and
+	// WithMemory64LimitPages lets an embedder allow that much. A slice length is
+	// an int, though, so make would panic rather than fail; the limit is clamped
+	// so the module fails to instantiate cleanly instead.
+	s := NewStore(api.CoreFeaturesV2|api.CoreFeatureMemory64, nil)
+	s.Memory64LimitPages = Memory64LimitPages
+	limit := s.memoryLimitPages(&Memory{IsMemory64: true})
+	require.Equal(t, maxAllocatablePages, limit)
+	require.True(t, MemoryPagesToBytesNum(limit) <= uint64(math.MaxInt))
+
+	m := ModuleInstance{Memories: make([]*MemoryInstance, 1)}
+	err := m.buildMemory(&Module{
+		MemorySection: []Memory{{
+			Min: Memory64LimitPages, Cap: Memory64LimitPages, Max: Memory64LimitPages,
+			IsMemory64: true,
+		}},
+		MemoryDefinitionSection: []MemoryDefinition{{}},
+	}, nil, s)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exceeds the limit of")
+}
+
 func TestStore_memoryLimitPages(t *testing.T) {
 	s := NewStore(api.CoreFeaturesV2, nil)
 	require.Equal(t, uint64(MemoryLimitPages), s.memoryLimitPages(&Memory{}))
