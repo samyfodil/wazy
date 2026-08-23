@@ -1301,6 +1301,13 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 		// >= 1<<32 already fails ea+N > len(Buffer). ea itself cannot overflow
 		// uint64: op.U2 (the static offset immediate) and the truncated dynamic
 		// base are both <= math.MaxUint32, so their sum is <= ~2^33.
+		//
+		// Both bounds hold because these Kinds only ever address a memory with
+		// an i32 index type: WithMemoryLimitPages caps such a memory at 65536
+		// pages, and the memarg offset of an instruction naming one is validated
+		// to fit in 32 bits. A memory with an i64 index type breaks both, which
+		// is why its loads and stores go to operationKindLoadMem64 and
+		// operationKindStoreMem64 instead, where the arithmetic is carry-checked.
 		case operationKindLoadI32, operationKindLoadF32:
 			frame.pc = pc // sync: OOB trap
 			mem := memoryAt(memories, mem0, op.U3)
