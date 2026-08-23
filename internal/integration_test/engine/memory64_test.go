@@ -32,6 +32,12 @@ var memory64MixedWasm []byte
 //go:embed testdata/memory64_shared.wasm
 var memory64SharedWasm []byte
 
+//go:embed testdata/memory64_elem_global.wasm
+var memory64ElemGlobalWasm []byte
+
+//go:embed testdata/memory64_elem_global_env.wasm
+var memory64ElemGlobalEnvWasm []byte
+
 const memory64Features = api.CoreFeaturesV2 | api.CoreFeatureMemory64
 
 func TestMemory64Compiler(t *testing.T) {
@@ -51,6 +57,7 @@ func runMemory64Tests(t *testing.T, config wazy.RuntimeConfig) {
 		"mixed index types":              testMemory64MixedIndexTypes,
 		"vector access":                  testMemory64Vector,
 		"shared atomics":                 testMemory64SharedAtomics,
+		"element segment offset":         testMemory64ElementSegmentOffset,
 		"wide offset on a 32-bit memory": testMemory64WideOffsetOn32BitMemory,
 		"api surface":                    testMemory64APISurface,
 		"allocation limits":              testMemory64AllocationLimits,
@@ -153,6 +160,12 @@ func testMemory64Instructions(t *testing.T, config wazy.RuntimeConfig) {
 			require.ErrorIs(t, callErr("call_indirect", idx), wasmruntime.ErrRuntimeInvalidTableAccess)
 			require.ErrorIs(t, callErr("table_is_null", idx), wasmruntime.ErrRuntimeInvalidTableAccess)
 		}
+		// A maximum in the upper half of the u64 range is still a maximum, not a
+		// negative number that blocks every growth.
+		require.Equal(t, uint64(1), call("big_table_size")[0])
+		require.Equal(t, uint64(1), call("big_table_grow", 2)[0])
+		require.Equal(t, uint64(3), call("big_table_size")[0])
+
 		require.ErrorIs(t, callErr("table_fill", ^uint64(0), 2), wasmruntime.ErrRuntimeInvalidTableAccess)
 		require.ErrorIs(t, callErr("table_copy", ^uint64(0), 0, 2), wasmruntime.ErrRuntimeInvalidTableAccess)
 		require.ErrorIs(t, callErr("table_init", ^uint64(0), 0, 1), wasmruntime.ErrRuntimeInvalidTableAccess)
@@ -202,6 +215,17 @@ func testMemory64Vector(t *testing.T, config wazy.RuntimeConfig) {
 	// address+offset wrap back to zero.
 	require.ErrorIs(t, callErr("v128_load_off", 0), wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 	require.ErrorIs(t, callErr("v128_load_off", ^uint64(0)-(1<<32)+1), wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+
+	// A v128 access spans sixteen bytes, so an address eight below the top of
+	// the range makes address+8 carry back to zero. The whole span has to be
+	// bounds-checked before either half is touched, or the store lands its upper
+	// half at address zero and only then traps -- a trapping store that mutated
+	// memory.
+	call("v128_store", 0)
+	require.Equal(t, uint64(1), call("v128_load_lane0", 0)[0])
+	require.ErrorIs(t, callErr("v128_store", ^uint64(0)-7), wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+	require.Equal(t, uint64(1), call("v128_load_lane0", 0)[0])
+	require.ErrorIs(t, callErr("v128_load_lane0", ^uint64(0)-7), wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 }
 
 // testMemory64SharedAtomics covers the atomic instructions against a shared
@@ -249,6 +273,26 @@ func testMemory64SharedAtomics(t *testing.T, config wazy.RuntimeConfig) {
 	}
 	// An unaligned atomic address is a separate trap.
 	require.ErrorIs(t, callErr("load", 1), wasmruntime.ErrRuntimeUnalignedAtomic)
+}
+
+// testMemory64ElementSegmentOffset covers the instantiation-time bounds check on
+// an active element segment of a 64-bit table. Reference types are disabled here
+// on purpose: that is what defers the check from validation to instantiation,
+// and an offset supplied by an imported global is what gets it there.
+func testMemory64ElementSegmentOffset(t *testing.T, config wazy.RuntimeConfig) {
+	ctx := context.Background()
+	r := wazy.NewRuntimeWithConfig(ctx,
+		config.WithCoreFeatures(api.CoreFeaturesV1|api.CoreFeatureMemory64))
+	defer r.Close(ctx)
+
+	_, err := r.Instantiate(ctx, memory64ElemGlobalEnvWasm)
+	require.NoError(t, err)
+
+	// The global holds 2^32, which does not fit a one-entry table. Narrowing it
+	// to a uint32 would make it zero, and the segment would be accepted.
+	_, err = r.Instantiate(ctx, memory64ElemGlobalWasm)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exceeds min table size")
 }
 
 // testMemory64MixedIndexTypes covers memory.copy and table.copy between a

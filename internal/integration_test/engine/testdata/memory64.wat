@@ -6,6 +6,9 @@
   (data (i64.const 0) "hello")
 
   (table $t i64 3 8 funcref)
+  ;; A maximum in the upper half of the u64 range, which must not read as a
+  ;; negative signed value and block growth.
+  (table $big i64 1 0xffff_ffff_ffff_ffff funcref)
   (elem (i64.const 0) func $one $two)
   (type $ret_i32 (func (result i32)))
   (func $one (result i32) (i32.const 100))
@@ -34,6 +37,10 @@
   (func (export "table_copy") (param i64 i64 i64) (table.copy $t $t (local.get 0) (local.get 1) (local.get 2)))
   (elem $e func $one)
   (func (export "table_init") (param i64 i32 i32) (table.init $t $e (local.get 0) (local.get 1) (local.get 2)))
+
+  (func (export "big_table_size") (result i64) (table.size $big))
+  (func (export "big_table_grow") (param i64) (result i64)
+    (table.grow $big (ref.null func) (local.get 0)))
 
   ;; Vector loads and stores take their address in the memory's index type too.
   (func (export "v128_store") (param i64) (v128.store (local.get 0) (v128.const i32x4 1 2 3 4)))

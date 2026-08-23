@@ -2839,16 +2839,14 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		offset := ce.popMemoryOffset(op)
 		switch op.B1 {
 		case v128LoadType128:
-			lo, ok := mem.ReadUint64LeAt(offset)
+			// One bounds check over the whole sixteen bytes, for the same
+			// reason operationKindV128Store does it that way.
+			buf, ok := mem.Read64(offset, 16)
 			if !ok {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
-			ce.pushValue(lo)
-			hi, ok := mem.ReadUint64LeAt(offset + 8)
-			if !ok {
-				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
-			}
-			ce.pushValue(hi)
+			ce.pushValue(binary.LittleEndian.Uint64(buf))
+			ce.pushValue(binary.LittleEndian.Uint64(buf[8:]))
 		case v128LoadType8x8s:
 			data, ok := mem.Read64(offset, 8)
 			if !ok {
@@ -3014,17 +3012,16 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		mem := memories[op.U3]
 		hi, lo := ce.popValue(), ce.popValue()
 		offset := ce.popMemoryOffset(op)
-		// Write the upper bytes first to trigger an early error if the memory access is out of bounds.
-		// Otherwise, the lower bytes might be written to memory, but the upper bytes might not.
-		if uint64(offset)+8 > math.MaxUint32 {
+		// One bounds check over the whole sixteen bytes, before either half is
+		// written: a store that traps must not have mutated memory, and against
+		// a 64-bit memory checking the halves separately would let offset+8
+		// carry out of a uint64 and land the upper half somewhere else.
+		buf, ok := mem.Read64(offset, 16)
+		if !ok {
 			panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 		}
-		if ok := mem.WriteUint64LeAt(offset+8, hi); !ok {
-			panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
-		}
-		if ok := mem.WriteUint64LeAt(offset, lo); !ok {
-			panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
-		}
+		binary.LittleEndian.PutUint64(buf, lo)
+		binary.LittleEndian.PutUint64(buf[8:], hi)
 	case operationKindV128StoreLane:
 		mem := memories[op.U3]
 		hi, lo := ce.popValue(), ce.popValue()

@@ -207,6 +207,27 @@ func TestTableInstance_Grow64(t *testing.T) {
 		require.Equal(t, ^uint64(0), tbl.Grow64(math.MaxUint32+1, 0))
 		require.Equal(t, ^uint64(0), tbl.Grow64(math.MaxUint64, 0))
 	})
+	t.Run("a maximum at or above 2^63 still permits growth", func(t *testing.T) {
+		// A 64-bit table's maximum spans the whole u64 range, so one at or above
+		// 2^63 reads as negative if compared as a signed integer -- which would
+		// make every growth fail.
+		for _, max := range []uint64{1 << 63, math.MaxUint64} {
+			tbl := &TableInstance{References: make([]Reference, 1), Max: &max, IsTable64: true}
+			require.Equal(t, uint64(1), tbl.Grow64(2, 0xf))
+			require.Equal(t, 3, len(tbl.References))
+		}
+	})
+}
+
+func Test_checkSegmentBounds(t *testing.T) {
+	require.NoError(t, checkSegmentBounds(4, 1, 3, 0))
+	require.EqualError(t, checkSegmentBounds(4, 2, 3, 7),
+		"element[7].init exceeds min table size")
+	// A 64-bit table's offset is not narrowed to a uint32, so one past 2^32-1
+	// stays out of bounds instead of aliasing a low index.
+	require.Error(t, checkSegmentBounds(4, 1<<32, 1, 0))
+	// Nor may offset+initCount carry back into range.
+	require.Error(t, checkSegmentBounds(4, math.MaxUint64, 1, 0))
 }
 
 func TestModule_buildTables_MinimumLimit(t *testing.T) {

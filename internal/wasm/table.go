@@ -343,8 +343,7 @@ func (m *Module) validateTable(enabledFeatures api.CoreFeatures, tables []Table,
 			}
 
 			if !enabledFeatures.IsEnabled(api.CoreFeatureReferenceTypes) && !hasGlobalRef && elem.TableIndex >= importedTableCount {
-				offset := offsetExprResults[0]
-				if err = checkSegmentBounds(t.Min, uint64(initCount)+offset, idx); err != nil {
+				if err = checkSegmentBounds(t.Min, offsetExprResults[0], uint64(initCount), idx); err != nil {
 					return err
 				}
 			}
@@ -395,10 +394,12 @@ func (m *ModuleInstance) buildTables(module *Module, skipBoundCheck bool) (err e
 		for elemI := range module.ElementSection { // Do not loop over the value since elementSegments is a slice of value.
 			elem := &module.ElementSection[elemI]
 			table := m.Tables[elem.TableIndex]
-			offset := uint32(evaluateConstExprInModuleInstance(&elem.OffsetExpr, m)[0])
+			// Not narrowed to a uint32: a 64-bit table's offset spans the whole
+			// u64 range, and truncating it would turn an out-of-bounds segment
+			// into an accepted one.
+			offset := evaluateConstExprInModuleInstance(&elem.OffsetExpr, m)[0]
 			// Check to see if we are out-of-bounds
-			initCount := uint64(len(elem.Init))
-			if err = checkSegmentBounds(table.Min, uint64(offset)+initCount, Index(elemI)); err != nil {
+			if err = checkSegmentBounds(table.Min, offset, uint64(len(elem.Init)), Index(elemI)); err != nil {
 				return
 			}
 		}
@@ -413,8 +414,13 @@ func (m *ModuleInstance) buildTables(module *Module, skipBoundCheck bool) (err e
 // means is we have to delay offset checks on imported tables until we link to them.
 // e.g. https://github.com/WebAssembly/spec/blob/wg-1.0/test/core/elem.wast#L117 wants pass on min=0 for import
 // e.g. https://github.com/WebAssembly/spec/blob/wg-1.0/test/core/elem.wast#L142 wants fail on min=0 module-defined
-func checkSegmentBounds(min uint64, requireMin uint64, idx Index) error { // uint64 in case offset was set to -1
-	if requireMin > min {
+// checkSegmentBounds fails when an element segment of initCount entries at
+// offset does not fit within a table of min entries. offset is taken as a whole
+// uint64 -- a 64-bit table's spans that entire range, and a 32-bit table's is a
+// zero-extended i32, so a negative one reads as a large positive -- and the sum
+// is carry-checked so it cannot wrap back into range.
+func checkSegmentBounds(min, offset, initCount uint64, idx Index) error {
+	if rangeOutOfBounds(offset, initCount, min) {
 		return fmt.Errorf("%s[%d].init exceeds min table size", SectionIDName(SectionIDElement), idx)
 	}
 	return nil
@@ -430,8 +436,13 @@ func (t *TableInstance) Grow(delta uint32, initialRef Reference) (currentLen uin
 		return
 	}
 
-	if newLen := int64(currentLen) + int64(delta); // adding as 64bit ints to avoid overflow.
-	newLen >= math.MaxUint32 || (t.Max != nil && newLen > int64(*t.Max)) {
+	// Compared as uint64 throughout: a table declared with an i64 index type may
+	// have a maximum anywhere in the u64 range, and reading one at or above 2^63
+	// as a signed integer would make it negative -- so every growth would fail.
+	// currentLen and delta are both bounded by 2^32-1, so their sum cannot
+	// overflow.
+	if newLen := uint64(currentLen) + uint64(delta); //
+	newLen >= math.MaxUint32 || (t.Max != nil && newLen > *t.Max) {
 		return 0xffffffff // = -1 in signed 32-bit integer.
 	}
 
