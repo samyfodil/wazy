@@ -24,7 +24,7 @@ func TestMemoryPool_NoBleed(t *testing.T) {
 	// Part 1 (recycle path): an owner's Close returns its Buffer to the pool and
 	// clears the field, so a stale post-Close read can't observe a future
 	// tenant's data.
-	first := NewMemoryInstance(memSec, nil, owner)
+	first := NewMemoryInstance(memSec, nil, owner, uint64(MemoryLimitPages))
 	require.Equal(t, int(capBytes), len(first.Buffer))
 	for i := range first.Buffer {
 		first.Buffer[i] = 0xAA
@@ -62,7 +62,7 @@ func TestMemoryPool_NoBleed(t *testing.T) {
 }
 
 func TestMemoryPool_NoBleedWithUnexposedReserve(t *testing.T) {
-	const logicalPages, capacityPages = uint32(1), uint32(37)
+	const logicalPages, capacityPages = uint64(1), uint64(37)
 	logicalBytes := MemoryPagesToBytesNum(logicalPages)
 	capacityBytes := MemoryPagesToBytesNum(capacityPages)
 
@@ -101,7 +101,7 @@ func TestMemoryPool_ImportedMemoryNotRecycled(t *testing.T) {
 	memSec := &Memory{Min: 1, Cap: 1, Max: 1}
 	ownerEngine := &mockModuleEngine{}
 
-	mem := NewMemoryInstance(memSec, nil, ownerEngine)
+	mem := NewMemoryInstance(memSec, nil, ownerEngine, uint64(MemoryLimitPages))
 	for i := range mem.Buffer {
 		mem.Buffer[i] = 0xBB
 	}
@@ -155,7 +155,7 @@ func TestMemoryPool_ImportAfterOwnerClosed_Errors(t *testing.T) {
 	memSec := &Memory{Min: 1, Cap: 1, Max: 1}
 	ownerEngine := &mockModuleEngine{}
 
-	mem := NewMemoryInstance(memSec, nil, ownerEngine)
+	mem := NewMemoryInstance(memSec, nil, ownerEngine, uint64(MemoryLimitPages))
 
 	s := newStore()
 	owner := &ModuleInstance{
@@ -193,7 +193,7 @@ func TestMemoryPool_SharedMemoryNotRecycled(t *testing.T) {
 	memSec := &Memory{Min: 1, Cap: 1, Max: 1, IsShared: true}
 	owner := &mockModuleEngine{}
 
-	mem := NewMemoryInstance(memSec, nil, owner)
+	mem := NewMemoryInstance(memSec, nil, owner, uint64(MemoryLimitPages))
 	require.True(t, mem.Shared)
 
 	m := &ModuleInstance{Memories: []*MemoryInstance{mem}, Engine: owner}
@@ -220,7 +220,7 @@ func TestMemoryPool_ConcurrentCreateCloseRace(t *testing.T) {
 			owner := &mockModuleEngine{}
 			pattern := byte(g%255 + 1) // never 0, so we can detect bleed
 			for it := 0; it < iterations; it++ {
-				mem := NewMemoryInstance(memSec, nil, owner)
+				mem := NewMemoryInstance(memSec, nil, owner, uint64(MemoryLimitPages))
 				for i, b := range mem.Buffer {
 					if b != 0 {
 						t.Errorf("goroutine %d iter %d: byte %d not zero on acquire: %#x", g, it, i, b)
@@ -249,7 +249,7 @@ func poolImportSetup(t *testing.T, n int) (*MemoryInstance, *ModuleInstance, []*
 	const moduleName, exportName = "test", "target"
 	memSec := &Memory{Min: 1, Cap: 1, Max: 1}
 	ownerEngine := &mockModuleEngine{}
-	mem := NewMemoryInstance(memSec, nil, ownerEngine)
+	mem := NewMemoryInstance(memSec, nil, ownerEngine, uint64(MemoryLimitPages))
 
 	s := newStore()
 	owner := &ModuleInstance{

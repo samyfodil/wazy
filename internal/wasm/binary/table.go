@@ -53,18 +53,28 @@ func decodeTable(buf []byte, offset int, enabledFeatures api.CoreFeatures, ret *
 		}
 	}
 
-	var shared bool
-	ret.Min, ret.Max, shared, offset, err = decodeLimitsType(buf, offset)
+	var shared, index64 bool
+	var min uint64
+	var maxP *uint64
+	min, maxP, shared, index64, offset, err = decodeLimitsType(buf, offset, enabledFeatures)
 	if err != nil {
 		return offset, fmt.Errorf("read limits: %v", err)
 	}
-	if ret.Min > wasm.MaximumFunctionIndex {
-		return offset, fmt.Errorf("table min must be at most %d", wasm.MaximumFunctionIndex)
-	}
-	if ret.Max != nil {
-		if *ret.Max < ret.Min {
+	ret.IsTable64 = index64
+	// The declared minimum is bounded only by the index type's own range: the
+	// specification requires a module declaring more entries than any host could
+	// allocate to still be *valid* (test/core/table.wast defines a table of
+	// 2^32-1 entries without instantiating it). wazy's own MaximumFunctionIndex
+	// ceiling is applied at instantiation instead, in buildTables, which is also
+	// where the allocation would happen.
+	ret.Min = min
+	if maxP != nil {
+		if *maxP < min {
 			return offset, fmt.Errorf("table size minimum must not be greater than maximum")
 		}
+		ret.Max = maxP
+	} else {
+		ret.Max = nil
 	}
 	if shared {
 		return offset, fmt.Errorf("tables cannot be marked as shared")

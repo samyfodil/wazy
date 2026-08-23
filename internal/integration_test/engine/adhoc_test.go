@@ -906,7 +906,7 @@ func testMemOps(t *testing.T, r wazy.Runtime) {
 	require.Zero(t, memory.Size())
 
 	// Any offset should be out of bounds error even when it is less than memory capacity(=memoryCapacityPages).
-	_, err = storeFn.Call(testCtx, wasm.MemoryPagesToBytesNum(memoryCapacityPages)-8)
+	_, err = storeFn.Call(testCtx, wasm.MemoryPagesToBytesNum(uint64(memoryCapacityPages))-8)
 	require.Error(t, err) // Out of bounds error.
 
 	// Try to grow the memory by one page
@@ -915,7 +915,7 @@ func testMemOps(t *testing.T, r wazy.Runtime) {
 	require.Zero(t, results[0]) // should succeed and return the old size in pages.
 
 	// Any offset larger than the current size should be out of bounds error even when it is less than memory capacity.
-	_, err = storeFn.Call(testCtx, wasm.MemoryPagesToBytesNum(memoryCapacityPages)-8)
+	_, err = storeFn.Call(testCtx, wasm.MemoryPagesToBytesNum(uint64(memoryCapacityPages))-8)
 	require.Error(t, err) // Out of bounds error.
 
 	// Check the size command works!
@@ -935,7 +935,7 @@ func testMemOps(t *testing.T, r wazy.Runtime) {
 	require.Equal(t, uint64(memoryCapacityPages), results[0])
 
 	// Now the store instruction at the memory capcity bound should succeed.
-	_, err = storeFn.Call(testCtx, wasm.MemoryPagesToBytesNum(memoryCapacityPages)-8) // i64.store needs 8 bytes from offset.
+	_, err = storeFn.Call(testCtx, wasm.MemoryPagesToBytesNum(uint64(memoryCapacityPages))-8) // i64.store needs 8 bytes from offset.
 	require.NoError(t, err)
 }
 

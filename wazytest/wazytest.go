@@ -513,6 +513,10 @@ func (m *Memory) Pages() uint32 {
 	return uint32(len(m.Bytes) / PageSize)
 }
 
+func (m *Memory) Size64() uint64 {
+	return uint64(len(m.Bytes))
+}
+
 func (m *Memory) Grow(deltaPages uint32) (previousPages uint32, ok bool) {
 	previousPages = m.Pages()
 	numPages := previousPages + deltaPages
@@ -523,6 +527,11 @@ func (m *Memory) Grow(deltaPages uint32) (previousPages uint32, ok bool) {
 	copy(bytes, m.Bytes)
 	m.Bytes = bytes
 	return previousPages, true
+}
+
+func (m *Memory) Grow64(deltaPages uint64) (previousPages uint64, ok bool) {
+	prev, ok := m.Grow(uint32(deltaPages))
+	return uint64(prev), ok
 }
 
 func (m *Memory) ReadByte(offset uint32) (byte, bool) {
@@ -568,6 +577,13 @@ func (m *Memory) Read(offset, length uint32) ([]byte, bool) {
 		return nil, false
 	}
 	return m.Bytes[offset : offset+length : offset+length], true
+}
+
+func (m *Memory) Read64(offset, length uint64) ([]byte, bool) {
+	if offset > math.MaxUint32 || length > math.MaxUint32 {
+		return nil, false
+	}
+	return m.Read(uint32(offset), uint32(length))
 }
 
 func (m *Memory) WriteByte(offset uint32, value byte) bool {
@@ -618,12 +634,26 @@ func (m *Memory) Write(offset uint32, value []byte) bool {
 	return true
 }
 
+func (m *Memory) Write64(offset uint64, value []byte) bool {
+	if offset > math.MaxUint32 {
+		return false
+	}
+	return m.Write(uint32(offset), value)
+}
+
 func (m *Memory) WriteString(offset uint32, value string) bool {
 	if m.isOutOfRange(offset, uint32(len(value))) {
 		return false
 	}
 	copy(m.Bytes[offset:], value)
 	return true
+}
+
+func (m *Memory) WriteString64(offset uint64, value string) bool {
+	if offset > math.MaxUint32 {
+		return false
+	}
+	return m.WriteString(uint32(offset), value)
 }
 
 func (m *Memory) isOutOfRange(offset, length uint32) bool {
@@ -664,6 +694,20 @@ func (def memoryDefinition) Min() uint32 {
 
 func (def memoryDefinition) Max() (uint32, bool) {
 	return def.memory.Max, def.memory.Max != 0
+}
+
+func (def memoryDefinition) Min64() uint64 {
+	return uint64(def.memory.Min)
+}
+
+func (def memoryDefinition) Max64() (uint64, bool) {
+	return uint64(def.memory.Max), def.memory.Max != 0
+}
+
+// IsMemory64 implements the same method as documented on api.MemoryDefinition.
+// A wazytest Memory is always 32-bit indexed.
+func (def memoryDefinition) IsMemory64() bool {
+	return false
 }
 
 var (

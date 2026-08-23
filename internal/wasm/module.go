@@ -666,7 +666,9 @@ func (m *Module) validateMemory(memories []Memory, globals []GlobalType, enabled
 			if d.MemoryIndex >= uint32(len(memories)) {
 				return fmt.Errorf("unknown memory %d for data segment", d.MemoryIndex)
 			}
-			if err := m.validateConstExpression(importedGlobals, 0, &d.OffsetExpression, ValueTypeI32); err != nil {
+			// An active data segment's offset is given in the index type of the
+			// memory it initializes: i64 for a 64-bit memory.
+			if err := m.validateConstExpression(importedGlobals, 0, &d.OffsetExpression, memories[d.MemoryIndex].IndexType()); err != nil {
 				return fmt.Errorf("calculate offset: %w", err)
 			}
 		}
@@ -870,17 +872,46 @@ func paramNames(localNames IndirectNameMap, funcIdx uint32, paramLen int) []stri
 	return nil
 }
 
-func (m *ModuleInstance) buildMemory(module *Module, allocator api.MemoryAllocator) {
+func (m *ModuleInstance) buildMemory(module *Module, allocator api.MemoryAllocator, s *Store) error {
+	// A 64-bit memory's declared minimum is bounded only by the specification's
+	// 2^48-page ceiling at validation time -- the specification requires a
+	// module declaring that much to be *valid*, so the embedder's far smaller
+	// allocation limit cannot be applied there without rejecting conformant
+	// modules. It is applied here instead, before anything is allocated, and
+	// the sum is bounded the same way decodeMemorySection bounds a 32-bit
+	// module's: one module must not be able to demand N times the configured
+	// ceiling just by declaring N memories. The two index types are summed
+	// separately, since each has its own configured ceiling.
+	totals := [2]uint64{}
+	for i := range module.MemorySection {
+		memSec := &module.MemorySection[i]
+		limit := s.memoryLimitPages(memSec)
+		if memSec.Min > limit {
+			return fmt.Errorf("memory[%d] minimum of %d pages (%s) exceeds the limit of %d pages (%s)",
+				i, memSec.Min, PagesToUnitOfBytes(memSec.Min), limit, PagesToUnitOfBytes(limit))
+		}
+		total := &totals[0]
+		if memSec.IsMemory64 {
+			total = &totals[1]
+		}
+		*total += memSec.Min
+		if *total > limit {
+			return fmt.Errorf("total memory minimum across %d memories (%d pages) exceeds %d pages",
+				i+1, *total, limit)
+		}
+	}
+
 	idx := module.ImportMemoryCount
 	for i := range module.MemorySection {
 		memSec := &module.MemorySection[i]
-		mem := NewMemoryInstance(memSec, allocator, m.Engine)
+		mem := NewMemoryInstance(memSec, allocator, m.Engine, s.memoryLimitPages(memSec))
 		poolAuditHold(mem, m)
 		mem.definition = &module.MemoryDefinitionSection[idx]
 		mem.index = idx
 		m.Memories[idx] = mem
 		idx++
 	}
+	return nil
 }
 
 // MaxAllocatablePages is the most pages a memory can occupy on this platform,
@@ -1068,18 +1099,29 @@ type Import struct {
 
 // Memory describes the limits of pages (64KB) in a memory.
 type Memory struct {
-	Min, Cap, Max uint32
+	Min, Cap, Max uint64
 	// IsMaxEncoded true if the Max is encoded in the original binary.
 	IsMaxEncoded bool
 	// IsShared true if the memory is shared for access from multiple agents.
 	IsShared bool
+	// IsMemory64 true if this memory is indexed by i64 instead of i32, per the
+	// memory64 proposal. Its page counts are then bounded by Memory64LimitPages
+	// rather than MemoryLimitPages.
+	IsMemory64 bool
+}
+
+// IndexType returns the value type of the addresses, sizes and lengths this
+// memory is indexed by: ValueTypeI64 for a 64-bit memory, ValueTypeI32
+// otherwise.
+func (m *Memory) IndexType() ValueType {
+	if m.IsMemory64 {
+		return ValueTypeI64
+	}
+	return ValueTypeI32
 }
 
 // Validate ensures values assigned to Min, Cap and Max are within valid thresholds.
-func (m *Memory) Validate(memoryLimitPages uint32) error {
-	if memoryLimitPages > MaxAllocatablePages {
-		memoryLimitPages = MaxAllocatablePages
-	}
+func (m *Memory) Validate(memoryLimitPages uint64) error {
 	min, capacity, max := m.Min, m.Cap, m.Max
 
 	if max > memoryLimitPages {

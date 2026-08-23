@@ -176,6 +176,12 @@ func NewRuntimeWithConfig(ctx context.Context, rConfig RuntimeConfig) Runtime {
 		engine = configEngine(ctx, config.enabledFeatures, nil)
 	}
 	store := wasm.NewStore(config.enabledFeatures, engine)
+	// The decoder applies memoryLimitPages to a 32-bit memory's declared
+	// limits; the store applies both ceilings at instantiation, which is the
+	// only place a 64-bit memory's can be applied without rejecting modules the
+	// specification requires to be valid. See wasm.Store.MemoryLimitPages.
+	store.MemoryLimitPages = uint64(config.memoryLimitPages)
+	store.Memory64LimitPages = config.memory64LimitPages
 	return &runtime{
 		cache:                      cacheImpl,
 		store:                      store,

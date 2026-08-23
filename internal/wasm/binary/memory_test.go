@@ -12,27 +12,31 @@ import (
 )
 
 func Test_newMemorySizer(t *testing.T) {
-	zero := uint32(0)
-	ten := uint32(10)
+	zero := uint64(0)
+	ten := uint64(10)
 	defaultLimit := wasm.MemoryLimitPages
+	defaultLimit64 := uint64(defaultLimit)
+	specCeiling64 := wasm.Memory64LimitPages
+	overSpecCeiling64 := wasm.Memory64LimitPages + 1
 
 	tests := []struct {
 		name                                       string
 		memoryCapacityFromMax                      bool
 		memoryCapacityReservePages                 uint32
+		index64                                    bool
 		limit                                      uint32
-		min                                        uint32
-		max                                        *uint32
-		expectedMin, expectedCapacity, expectedMax uint32
+		min                                        uint64
+		max                                        *uint64
+		expectedMin, expectedCapacity, expectedMax uint64
 	}{
 		{
 			name:             "min 0",
 			limit:            defaultLimit,
 			min:              zero,
-			max:              &defaultLimit,
+			max:              &defaultLimit64,
 			expectedMin:      zero,
 			expectedCapacity: zero,
-			expectedMax:      defaultLimit,
+			expectedMax:      defaultLimit64,
 		},
 		{
 			name:             "min 0 defaults max to defaultLimit",
@@ -40,7 +44,7 @@ func Test_newMemorySizer(t *testing.T) {
 			min:              zero,
 			expectedMin:      zero,
 			expectedCapacity: zero,
-			expectedMax:      defaultLimit,
+			expectedMax:      defaultLimit64,
 		},
 		{
 			name:             "min 0, max 0",
@@ -135,13 +139,64 @@ func Test_newMemorySizer(t *testing.T) {
 			expectedCapacity: 0,
 			expectedMax:      5,
 		},
+		{
+			// A 64-bit memory's declared limits are bounded by the
+			// specification's ceiling, not the embedder's, which is applied at
+			// instantiation instead. See newMemorySizer.
+			name:             "i64 min 0, no max defaults to the spec ceiling",
+			index64:          true,
+			limit:            5,
+			min:              zero,
+			expectedMin:      zero,
+			expectedCapacity: zero,
+			expectedMax:      wasm.Memory64LimitPages,
+		},
+		{
+			name:             "i64 max over the embedder limit is kept",
+			index64:          true,
+			limit:            5,
+			min:              zero,
+			max:              &specCeiling64,
+			expectedMin:      zero,
+			expectedCapacity: zero,
+			expectedMax:      wasm.Memory64LimitPages,
+		},
+		{
+			name:             "i64 min over the embedder limit is kept",
+			index64:          true,
+			limit:            5,
+			min:              wasm.Memory64LimitPages,
+			expectedMin:      wasm.Memory64LimitPages,
+			expectedCapacity: wasm.Memory64LimitPages,
+			expectedMax:      wasm.Memory64LimitPages,
+		},
+		{
+			name:             "i64 max over the spec ceiling propagates for Validate to reject",
+			index64:          true,
+			limit:            5,
+			min:              zero,
+			max:              &overSpecCeiling64,
+			expectedMin:      zero,
+			expectedCapacity: zero,
+			expectedMax:      wasm.Memory64LimitPages + 1,
+		},
+		{
+			name:                  "i64 memoryCapacityFromMax caps capacity at the spec ceiling",
+			index64:               true,
+			memoryCapacityFromMax: true,
+			limit:                 5,
+			min:                   zero,
+			expectedMin:           zero,
+			expectedCapacity:      wasm.Memory64LimitPages,
+			expectedMax:           wasm.Memory64LimitPages,
+		},
 	}
 
 	for _, tt := range tests {
 		tc := tt
 		t.Run(tc.name, func(t *testing.T) {
 			sizer := newMemorySizer(tc.limit, tc.memoryCapacityFromMax, tc.memoryCapacityReservePages)
-			min, capacity, max := sizer(tc.min, tc.max)
+			min, capacity, max := sizer(tc.min, tc.max, tc.index64)
 			require.Equal(t, tc.expectedMin, min)
 			// The sizer fills in a maximum no larger than a slice can address,
 			// so both expectations clamp with it where an int is 32 bits wide.
@@ -175,8 +230,8 @@ func clampToAllocatable(pages uint32) uint32 {
 }
 
 func TestMemoryType(t *testing.T) {
-	zero := uint32(0)
-	max := wasm.MemoryLimitPages
+	zero := uint64(0)
+	max := uint64(wasm.MemoryLimitPages)
 
 	tests := []struct {
 		name             string
@@ -240,7 +295,7 @@ func TestMemoryType(t *testing.T) {
 			expectedDecoded := tc.input
 			if tc.memoryLimitPages != 0 {
 				// If a memory limit exists, then the expected module Max reflects that limit.
-				tmax = tc.memoryLimitPages
+				tmax = uint64(tc.memoryLimitPages)
 				expectedDecoded.Max = tmax
 			}
 			// ...clamped to what a slice on this platform can address, which
@@ -256,11 +311,11 @@ func TestMemoryType(t *testing.T) {
 				t.Skip("declared minimum is past what a slice can address here")
 			}
 
-			features := api.CoreFeaturesV2
+			features := api.CoreFeaturesV2 | api.CoreFeatureMemory64
 			if tc.input.IsShared {
 				features = features.SetEnabled(experimental.CoreFeaturesThreads, true)
 			}
-			decoded, _, err := decodeMemory(b, 0, features, newMemorySizer(tmax, false, 0), tmax)
+			decoded, _, err := decodeMemory(b, 0, features, newMemorySizer(uint32(tmax), false, 0), uint32(tmax))
 			require.NoError(t, err)
 			require.Equal(t, decoded, expectedDecoded)
 		})
@@ -288,12 +343,12 @@ func TestDecodeMemoryType_Errors(t *testing.T) {
 		{
 			name:        "min > limit",
 			input:       []byte{0x0, 0xff, 0xff, 0xff, 0xff, 0xf},
-			expectedErr: "min 4294967295 pages (3 Ti) " + overAllocatableLimit(),
+			expectedErr: "min 4294967295 pages (255 Ti) over limit of 65536 pages (4 Gi)",
 		},
 		{
 			name:        "max > limit",
 			input:       []byte{0x1, 0, 0xff, 0xff, 0xff, 0xff, 0xf},
-			expectedErr: "max 4294967295 pages (3 Ti) " + overAllocatableLimit(),
+			expectedErr: "max 4294967295 pages (255 Ti) over limit of 65536 pages (4 Gi)",
 		},
 		{
 			name:        "shared but no threads",

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"math/bits"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,6 +24,12 @@ const (
 	// MemoryLimitPages is maximum number of pages defined (2^16).
 	// See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#grow-mem
 	MemoryLimitPages = uint32(65536)
+	// Memory64LimitPages is the maximum number of pages a memory declared with
+	// an i64 index type may have (2^48). Note this is the *specification*
+	// ceiling on what a module may declare, not on what wazy will allocate:
+	// see Store.Memory64LimitPages for the latter.
+	// See https://webassembly.github.io/memory64/core/valid/types.html
+	Memory64LimitPages = uint64(1) << 48
 	// MemoryPageSizeInBits satisfies the relation: "1 << MemoryPageSizeInBits == MemoryPageSize".
 	MemoryPageSizeInBits = 16
 )
@@ -59,15 +66,17 @@ type MemoryInstance struct {
 	sizeBytes uint64
 
 	Buffer        []byte
-	Min, Cap, Max uint32
+	Min, Cap, Max uint64
 	Shared        bool
+	// IsMemory64 is true when this memory is indexed by i64 rather than i32.
+	IsMemory64 bool
 	// nativeGrowCap is the byte length that the native engine may expose
 	// without calling back into Go. It is zero for shared and custom-allocator
 	// memories, whose growth must always use Grow.
 	nativeGrowCap uint64
 	// growReservePages is the configured spare capacity to allocate after a Go
 	// fallback grows this memory's backing buffer.
-	growReservePages uint32
+	growReservePages uint64
 	// backing is the explicitly allocated region. Buffer remains the Go-owned
 	// logical view, while native code may expose bytes up to len(backing) by
 	// updating sizeBytes without mutating either slice header.
@@ -119,10 +128,26 @@ type MemoryInstance struct {
 }
 
 // NewMemoryInstance creates a new instance based on the parameters in the SectionIDMemory.
-func NewMemoryInstance(memSec *Memory, allocator api.MemoryAllocator, moduleEngine ModuleEngine) *MemoryInstance {
+//
+// limitPages is the embedder's ceiling on how many pages this memory may
+// actually occupy (see Store.MemoryLimitPages / Store.Memory64LimitPages). The
+// instance's Max is the smaller of it and the module's declared maximum: a
+// 64-bit memory may legally declare a maximum of up to Memory64LimitPages,
+// which is far more than any host can allocate, so growth stops at whichever
+// comes first. This mirrors what the binary decoder's memorySizer already does
+// to a 32-bit memory's maximum. Pass MemoryLimitPages to apply only the
+// module's own maximum.
+//
+// The caller must already have rejected a memSec whose Min exceeds limitPages;
+// see ModuleInstance.buildMemory.
+func NewMemoryInstance(memSec *Memory, allocator api.MemoryAllocator, moduleEngine ModuleEngine, limitPages uint64) *MemoryInstance {
+	// Never below Min: a validated memSec always has Min <= Max, and buildMemory
+	// has already rejected a Min over limitPages, so this only guards a
+	// MemoryInstance built from a hand-written Memory that left Max unset.
+	maxPages := max(min(limitPages, memSec.Max), memSec.Min)
 	minBytes := MemoryPagesToBytesNum(memSec.Min)
-	capBytes := MemoryPagesToBytesNum(memSec.Cap)
-	maxBytes := MemoryPagesToBytesNum(memSec.Max)
+	capBytes := MemoryPagesToBytesNum(max(min(memSec.Cap, maxPages), memSec.Min))
+	maxBytes := MemoryPagesToBytesNum(maxPages)
 
 	var buffer, backing []byte
 	var expBuffer api.LinearMemory
@@ -149,7 +174,7 @@ func NewMemoryInstance(memSec *Memory, allocator api.MemoryAllocator, moduleEngi
 		buffer = backing[:minBytes]
 	}
 	poolable := allocator == nil && !memSec.IsShared
-	growReservePages := uint32(0)
+	growReservePages := uint64(0)
 	if memSec.Cap > memSec.Min {
 		growReservePages = memSec.Cap - memSec.Min
 	}
@@ -162,8 +187,9 @@ func NewMemoryInstance(memSec *Memory, allocator api.MemoryAllocator, moduleEngi
 		backing:           backing,
 		Min:               memSec.Min,
 		Cap:               memoryBytesNumToPages(uint64(cap(buffer))),
-		Max:               memSec.Max,
+		Max:               maxPages,
 		Shared:            memSec.IsShared,
+		IsMemory64:        memSec.IsMemory64,
 		nativeGrowCap:     nativeGrowCap,
 		sizeBytes:         minBytes,
 		growReservePages:  growReservePages,
@@ -186,6 +212,11 @@ func (m *MemoryInstance) Size() uint32 {
 	return uint32(m.byteSize())
 }
 
+// Size64 implements the same method as documented on api.Memory.
+func (m *MemoryInstance) Size64() uint64 {
+	return m.byteSize()
+}
+
 // ByteSize returns the logical memory size without the uint32 truncation
 // required by api.Memory.Size at the four-gibibyte WebAssembly limit.
 func (m *MemoryInstance) ByteSize() uint64 {
@@ -200,17 +231,41 @@ func (m *MemoryInstance) ReadByte(offset uint32) (byte, bool) {
 	return m.visibleBuffer()[offset], true
 }
 
+// ReadByteAt is ReadByte with a 64-bit offset.
+func (m *MemoryInstance) ReadByteAt(offset uint64) (byte, bool) {
+	if !m.hasSize64(offset, 1) {
+		return 0, false
+	}
+	return m.visibleBuffer()[offset], true
+}
+
 // ReadUint16Le implements the same method as documented on api.Memory.
 func (m *MemoryInstance) ReadUint16Le(offset uint32) (uint16, bool) {
 	if !m.hasSize(offset, 2) {
 		return 0, false
 	}
-	return binary.LittleEndian.Uint16(m.visibleBuffer()[offset : offset+2]), true
+	return binary.LittleEndian.Uint16(m.visibleBuffer()[offset:]), true
+}
+
+// ReadUint16LeAt is ReadUint16Le with a 64-bit offset.
+func (m *MemoryInstance) ReadUint16LeAt(offset uint64) (uint16, bool) {
+	if !m.hasSize64(offset, 2) {
+		return 0, false
+	}
+	return binary.LittleEndian.Uint16(m.visibleBuffer()[offset:]), true
 }
 
 // ReadUint32Le implements the same method as documented on api.Memory.
 func (m *MemoryInstance) ReadUint32Le(offset uint32) (uint32, bool) {
 	return m.readUint32Le(offset)
+}
+
+// ReadUint32LeAt is ReadUint32Le with a 64-bit offset.
+func (m *MemoryInstance) ReadUint32LeAt(offset uint64) (uint32, bool) {
+	if !m.hasSize64(offset, 4) {
+		return 0, false
+	}
+	return binary.LittleEndian.Uint32(m.visibleBuffer()[offset:]), true
 }
 
 // ReadFloat32Le implements the same method as documented on api.Memory.
@@ -225,6 +280,14 @@ func (m *MemoryInstance) ReadFloat32Le(offset uint32) (float32, bool) {
 // ReadUint64Le implements the same method as documented on api.Memory.
 func (m *MemoryInstance) ReadUint64Le(offset uint32) (uint64, bool) {
 	return m.readUint64Le(offset)
+}
+
+// ReadUint64LeAt is ReadUint64Le with a 64-bit offset.
+func (m *MemoryInstance) ReadUint64LeAt(offset uint64) (uint64, bool) {
+	if !m.hasSize64(offset, 8) {
+		return 0, false
+	}
+	return binary.LittleEndian.Uint64(m.visibleBuffer()[offset:]), true
 }
 
 // ReadFloat64Le implements the same method as documented on api.Memory.
@@ -244,9 +307,26 @@ func (m *MemoryInstance) Read(offset, byteCount uint32) ([]byte, bool) {
 	return m.visibleBuffer()[offset : offset+byteCount : offset+byteCount], true
 }
 
+// Read64 implements the same method as documented on api.Memory.
+func (m *MemoryInstance) Read64(offset, byteCount uint64) ([]byte, bool) {
+	if !m.hasSize64(offset, byteCount) {
+		return nil, false
+	}
+	return m.visibleBuffer()[offset : offset+byteCount : offset+byteCount], true
+}
+
 // WriteByte implements the same method as documented on api.Memory.
 func (m *MemoryInstance) WriteByte(offset uint32, v byte) bool {
 	if !m.hasSize(offset, 1) {
+		return false
+	}
+	m.visibleBuffer()[offset] = v
+	return true
+}
+
+// WriteByteAt is WriteByte with a 64-bit offset.
+func (m *MemoryInstance) WriteByteAt(offset uint64, v byte) bool {
+	if !m.hasSize64(offset, 1) {
 		return false
 	}
 	m.visibleBuffer()[offset] = v
@@ -262,9 +342,27 @@ func (m *MemoryInstance) WriteUint16Le(offset uint32, v uint16) bool {
 	return true
 }
 
+// WriteUint16LeAt is WriteUint16Le with a 64-bit offset.
+func (m *MemoryInstance) WriteUint16LeAt(offset uint64, v uint16) bool {
+	if !m.hasSize64(offset, 2) {
+		return false
+	}
+	binary.LittleEndian.PutUint16(m.visibleBuffer()[offset:], v)
+	return true
+}
+
 // WriteUint32Le implements the same method as documented on api.Memory.
 func (m *MemoryInstance) WriteUint32Le(offset, v uint32) bool {
 	return m.writeUint32Le(offset, v)
+}
+
+// WriteUint32LeAt is WriteUint32Le with a 64-bit offset.
+func (m *MemoryInstance) WriteUint32LeAt(offset uint64, v uint32) bool {
+	if !m.hasSize64(offset, 4) {
+		return false
+	}
+	binary.LittleEndian.PutUint32(m.visibleBuffer()[offset:], v)
+	return true
 }
 
 // WriteFloat32Le implements the same method as documented on api.Memory.
@@ -275,6 +373,15 @@ func (m *MemoryInstance) WriteFloat32Le(offset uint32, v float32) bool {
 // WriteUint64Le implements the same method as documented on api.Memory.
 func (m *MemoryInstance) WriteUint64Le(offset uint32, v uint64) bool {
 	return m.writeUint64Le(offset, v)
+}
+
+// WriteUint64LeAt is WriteUint64Le with a 64-bit offset.
+func (m *MemoryInstance) WriteUint64LeAt(offset, v uint64) bool {
+	if !m.hasSize64(offset, 8) {
+		return false
+	}
+	binary.LittleEndian.PutUint64(m.visibleBuffer()[offset:], v)
+	return true
 }
 
 // WriteFloat64Le implements the same method as documented on api.Memory.
@@ -291,6 +398,15 @@ func (m *MemoryInstance) Write(offset uint32, val []byte) bool {
 	return true
 }
 
+// Write64 implements the same method as documented on api.Memory.
+func (m *MemoryInstance) Write64(offset uint64, val []byte) bool {
+	if !m.hasSize64(offset, uint64(len(val))) {
+		return false
+	}
+	copy(m.visibleBuffer()[offset:], val)
+	return true
+}
+
 // WriteString implements the same method as documented on api.Memory.
 func (m *MemoryInstance) WriteString(offset uint32, val string) bool {
 	if !m.hasSize(offset, uint64(len(val))) {
@@ -300,27 +416,56 @@ func (m *MemoryInstance) WriteString(offset uint32, val string) bool {
 	return true
 }
 
+// WriteString64 implements the same method as documented on api.Memory.
+func (m *MemoryInstance) WriteString64(offset uint64, val string) bool {
+	if !m.hasSize64(offset, uint64(len(val))) {
+		return false
+	}
+	copy(m.visibleBuffer()[offset:], val)
+	return true
+}
+
 // MemoryPagesToBytesNum converts the given pages into the number of bytes contained in these pages.
-func MemoryPagesToBytesNum(pages uint32) (bytesNum uint64) {
-	return uint64(pages) << MemoryPageSizeInBits
+//
+// A 64-bit memory may declare up to Memory64LimitPages (2^48) pages, which is
+// exactly 2^64 bytes -- one past what a uint64 holds -- so the result saturates
+// at math.MaxUint64. Every caller treats a saturated value as "more than can
+// ever be allocated", which it is.
+func MemoryPagesToBytesNum(pages uint64) (bytesNum uint64) {
+	if pages > math.MaxUint64>>MemoryPageSizeInBits {
+		return math.MaxUint64
+	}
+	return pages << MemoryPageSizeInBits
 }
 
 // Grow implements the same method as documented on api.Memory.
 func (m *MemoryInstance) Grow(delta uint32) (result uint32, ok bool) {
+	previous, ok := m.Grow64(uint64(delta))
+	return uint32(previous), ok
+}
+
+// Grow64 implements the same method as documented on api.Memory.
+func (m *MemoryInstance) Grow64(delta uint64) (result uint64, ok bool) {
 	if m.Shared {
 		m.Mux.Lock()
 		defer m.Mux.Unlock()
 	}
 
-	currentPages := m.Pages()
+	currentPages := m.Pages64()
 	if delta == 0 {
 		return currentPages, true
 	}
 
-	newPages := currentPages + delta
-	if newPages > m.Max || int32(delta) < 0 {
+	// Compared as "delta > Max-currentPages" rather than by adding first: a
+	// 64-bit memory's delta spans the whole uint64 range, so currentPages+delta
+	// can wrap around to a value that looks in-bounds. The currentPages > Max
+	// guard keeps that subtraction from underflowing; a MemoryInstance built by
+	// NewMemoryInstance never trips it, but one assembled field by field can.
+	if currentPages > m.Max || delta > m.Max-currentPages {
 		return 0, false
-	} else if m.expBuffer != nil {
+	}
+	newPages := currentPages + delta
+	if m.expBuffer != nil {
 		buffer := m.expBuffer.Reallocate(MemoryPagesToBytesNum(newPages))
 		if buffer == nil {
 			// Allocator failed to grow.
@@ -390,13 +535,19 @@ func (m *MemoryInstance) Grow(delta uint32) (result uint32, ok bool) {
 
 // Pages implements the same method as documented on api.Memory.
 func (m *MemoryInstance) Pages() (result uint32) {
+	return uint32(memoryBytesNumToPages(m.byteSize()))
+}
+
+// Pages64 returns the page count without the uint32 truncation Pages inherits
+// from api.Memory. Use it for a memory that may exceed 65536 pages.
+func (m *MemoryInstance) Pages64() (result uint64) {
 	return memoryBytesNumToPages(m.byteSize())
 }
 
 // PagesToUnitOfBytes converts the pages to a human-readable form similar to what's specified. e.g. 1 -> "64Ki"
 //
 // See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#memory-instances%E2%91%A0
-func PagesToUnitOfBytes(pages uint32) string {
+func PagesToUnitOfBytes(pages uint64) string {
 	k := pages * 64
 	if k < 1024 {
 		return fmt.Sprintf("%d Ki", k)
@@ -441,8 +592,8 @@ func atomicStoreLength(slice *[]byte, length uintptr) {
 }
 
 // memoryBytesNumToPages converts the given number of bytes into the number of pages.
-func memoryBytesNumToPages(bytesNum uint64) (pages uint32) {
-	return uint32(bytesNum >> MemoryPageSizeInBits)
+func memoryBytesNumToPages(bytesNum uint64) (pages uint64) {
+	return bytesNum >> MemoryPageSizeInBits
 }
 
 // memoryInstanceSizeBytesIsAligned fails the build if sizeBytes stops being the
@@ -469,11 +620,39 @@ func MemoryInstanceBufferOffset() uint32 {
 	return uint32(unsafe.Offsetof(MemoryInstance{}.Buffer))
 }
 
+// rangeOutOfBounds reports whether the size units at offset fall outside a
+// region of limit units, without the intermediate addition overflowing -- which
+// an i64-indexed memory's or table's offset can make it do.
+func rangeOutOfBounds(offset, size, limit uint64) bool {
+	end, carry := bits.Add64(offset, size, 0)
+	return carry != 0 || end > limit
+}
+
+// indexType returns the value type this memory's addresses, sizes and lengths
+// are given in: ValueTypeI64 for a 64-bit memory, ValueTypeI32 otherwise.
+func (m *MemoryInstance) indexType() ValueType {
+	if m.IsMemory64 {
+		return ValueTypeI64
+	}
+	return ValueTypeI32
+}
+
 // hasSize returns true if Len is sufficient for byteCount at the given offset.
+//
+// The offset is a uint32 -- api.Memory's own width -- so the sum cannot
+// overflow and needs no carry test. hasSize64 is the equivalent for the 64-bit
+// offsets a memory declared with an i64 index type accepts, and pays for one.
 //
 // Note: This is always fine, because memory can grow, but never shrink.
 func (m *MemoryInstance) hasSize(offset uint32, byteCount uint64) bool {
 	return uint64(offset)+byteCount <= m.byteSize() // uint64 prevents overflow on add
+}
+
+// hasSize64 is hasSize for a 64-bit offset, where offset+byteCount can carry
+// out of a uint64 and wrap into a range that looks in bounds.
+func (m *MemoryInstance) hasSize64(offset, byteCount uint64) bool {
+	end, carry := bits.Add64(offset, byteCount, 0)
+	return carry == 0 && end <= m.byteSize()
 }
 
 func (m *MemoryInstance) byteSize() uint64 {
@@ -540,7 +719,7 @@ func (m *MemoryInstance) writeUint64Le(offset uint32, v uint64) bool {
 }
 
 // Wait32 suspends the caller until the offset is notified by a different agent.
-func (m *MemoryInstance) Wait32(offset uint32, exp uint32, timeout int64, reader func(mem *MemoryInstance, offset uint32) uint32) uint64 {
+func (m *MemoryInstance) Wait32(offset uint64, exp uint32, timeout int64, reader func(mem *MemoryInstance, offset uint64) uint32) uint64 {
 	w := m.getWaiters(offset)
 	w.mux.Lock()
 
@@ -554,7 +733,7 @@ func (m *MemoryInstance) Wait32(offset uint32, exp uint32, timeout int64, reader
 }
 
 // Wait64 suspends the caller until the offset is notified by a different agent.
-func (m *MemoryInstance) Wait64(offset uint32, exp uint64, timeout int64, reader func(mem *MemoryInstance, offset uint32) uint64) uint64 {
+func (m *MemoryInstance) Wait64(offset uint64, exp uint64, timeout int64, reader func(mem *MemoryInstance, offset uint64) uint64) uint64 {
 	w := m.getWaiters(offset)
 	w.mux.Lock()
 
@@ -603,7 +782,7 @@ func (m *MemoryInstance) wait(w *waiters, timeout int64) uint64 {
 	}
 }
 
-func (m *MemoryInstance) getWaiters(offset uint32) *waiters {
+func (m *MemoryInstance) getWaiters(offset uint64) *waiters {
 	wAny, ok := m.waiters.Load(offset)
 	if !ok {
 		// The first time an address is waited on, simultaneous waits will cause extra allocations.
@@ -616,7 +795,7 @@ func (m *MemoryInstance) getWaiters(offset uint32) *waiters {
 }
 
 // Notify wakes up at most count waiters at the given offset.
-func (m *MemoryInstance) Notify(offset uint32, count uint32) uint32 {
+func (m *MemoryInstance) Notify(offset uint64, count uint32) uint32 {
 	wAny, ok := m.waiters.Load(offset)
 	if !ok {
 		return 0

@@ -49,6 +49,23 @@ type (
 		// Engine is a global context for a Store which is in responsible for compilation and execution of Wasm modules.
 		Engine Engine
 
+		// MemoryLimitPages and Memory64LimitPages cap how many pages a memory
+		// may actually occupy, for a memory indexed by i32 and by i64
+		// respectively. They mirror the embedder's WithMemoryLimitPages and
+		// WithMemory64LimitPages.
+		//
+		// The binary decoder already applies MemoryLimitPages to a 32-bit
+		// memory's declared maximum, so that one only matters here as a
+		// belt-and-braces check. A 64-bit memory is different: the spec lets a
+		// module declare up to Memory64LimitPages (2^48) pages and requires
+		// such a module to *validate*, so its declared limits cannot be capped
+		// at decode time without rejecting conformant modules. The ceiling is
+		// therefore applied at instantiation: a minimum over it fails to
+		// instantiate, and a maximum over it simply stops growth earlier.
+		//
+		// Zero means the corresponding default (MemoryLimitPages).
+		MemoryLimitPages, Memory64LimitPages uint64
+
 		// typeIDs maps each FunctionType.String() to a unique FunctionTypeID. This is used at runtime to
 		// do type-checks on indirect function calls.
 		typeIDs map[string]FunctionTypeID
@@ -215,15 +232,15 @@ func (m *ModuleInstance) applyElements(elems []ElementSegment) {
 			continue
 		}
 		offsetExprResults := evaluateConstExprInModuleInstance(&elem.OffsetExpr, m)
-		offset := uint32(offsetExprResults[0])
+		offset := offsetExprResults[0]
 
 		table := m.Tables[elem.TableIndex]
 		references := table.References
-		// Widened to uint64: offset comes from the module's own offset
-		// expression, so it spans the whole uint32 range, and int(offset) is
-		// negative where an int is 32 bits wide -- which would pass this check
-		// and then index out of range below.
-		if uint64(offset)+uint64(len(elem.Init)) > uint64(len(references)) {
+		// rangeOutOfBounds rather than a plain addition: a 64-bit table's offset
+		// spans the whole uint64 range, so the sum can wrap into a value that
+		// looks in bounds. It also keeps the offset out of an int, which is
+		// negative for anything past MaxInt32 where an int is 32 bits wide.
+		if rangeOutOfBounds(offset, uint64(len(elem.Init)), uint64(len(references))) {
 			// ErrElementOffsetOutOfBounds is the error raised when the active element offset exceeds the table length.
 			// Before CoreFeatureReferenceTypes, this was checked statically before instantiation, after the proposal,
 			// this must be raised as runtime error (as in assert_trap in spectest), not even an instantiation error.
@@ -236,11 +253,11 @@ func (m *ModuleInstance) applyElements(elems []ElementSegment) {
 
 		if table.Type == RefTypeExternref {
 			for i := 0; i < len(elem.Init); i++ {
-				references[offset+uint32(i)] = Reference(0)
+				references[offset+uint64(i)] = Reference(0)
 			}
 		} else {
 			for i := range elem.Init {
-				references[offset+uint32(i)] = evaluateElementInitInModuleInstance(elem, i, m)
+				references[offset+uint64(i)] = evaluateElementInitInModuleInstance(elem, i, m)
 			}
 		}
 	}
@@ -268,17 +285,15 @@ func (m *ModuleInstance) validateData(data []DataSegment) (err error) {
 			if err != nil {
 				return fmt.Errorf("%s[%d] failed to evaluate offset expression: %w", SectionIDName(SectionIDData), i, err)
 			}
-			if typ != ValueTypeI32 {
-				return fmt.Errorf("%s[%d] offset expression must return i32 but was %s", SectionIDName(SectionIDData), i, ValueTypeName(typ))
-			}
 			if d.MemoryIndex >= uint32(len(m.Memories)) {
 				return fmt.Errorf("%s[%d]: unknown memory %d", SectionIDName(SectionIDData), i, d.MemoryIndex)
 			}
-			// Widened to uint64: int(results[0]) truncates the offset where an
-			// int is 32 bits wide, and adding len(Init) to an offset near
-			// MaxInt32 overflows to a negative ceil that passes the check.
-			offset := results[0]
-			if offset+uint64(len(d.Init)) > uint64(len(m.Memories[d.MemoryIndex].Buffer)) {
+			mem := m.Memories[d.MemoryIndex]
+			if expected := mem.indexType(); typ != expected {
+				return fmt.Errorf("%s[%d] offset expression must return %s but was %s",
+					SectionIDName(SectionIDData), i, ValueTypeName(expected), ValueTypeName(typ))
+			}
+			if rangeOutOfBounds(results[0], uint64(len(d.Init)), uint64(len(mem.Buffer))) {
 				return fmt.Errorf("%s[%d]: out of bounds memory access", SectionIDName(SectionIDData), i)
 			}
 		}
@@ -299,10 +314,9 @@ func (m *ModuleInstance) applyData(data []DataSegment) error {
 			if d.MemoryIndex >= uint32(len(m.Memories)) {
 				return fmt.Errorf("%s[%d]: unknown memory %d", SectionIDName(SectionIDData), i, d.MemoryIndex)
 			}
-			// Widened for the same reason as validateData's copy of this check.
 			offset := offsetExprResults[0]
 			mem := m.Memories[d.MemoryIndex]
-			if offset+uint64(len(d.Init)) > uint64(len(mem.Buffer)) {
+			if rangeOutOfBounds(offset, uint64(len(d.Init)), uint64(len(mem.Buffer))) {
 				return fmt.Errorf("%s[%d]: out of bounds memory access", SectionIDName(SectionIDData), i)
 			}
 			copy(mem.Buffer[offset:], d.Init)
@@ -325,13 +339,27 @@ func (m *ModuleInstance) getExport(name string, et ExternType) (*Export, error) 
 
 func NewStore(enabledFeatures api.CoreFeatures, engine Engine) *Store {
 	return &Store{
-		nameToModule:     map[string]*ModuleInstance{},
-		nameToModuleCap:  nameToModuleShrinkThreshold,
-		EnabledFeatures:  enabledFeatures,
-		Engine:           engine,
-		typeIDs:          map[string]FunctionTypeID{},
-		functionMaxTypes: maximumFunctionTypes,
+		nameToModule:       map[string]*ModuleInstance{},
+		nameToModuleCap:    nameToModuleShrinkThreshold,
+		EnabledFeatures:    enabledFeatures,
+		Engine:             engine,
+		typeIDs:            map[string]FunctionTypeID{},
+		functionMaxTypes:   maximumFunctionTypes,
+		MemoryLimitPages:   uint64(MemoryLimitPages),
+		Memory64LimitPages: uint64(MemoryLimitPages),
 	}
+}
+
+// memoryLimitPages returns the page ceiling that applies to mem.
+func (s *Store) memoryLimitPages(mem *Memory) uint64 {
+	limit := s.MemoryLimitPages
+	if mem.IsMemory64 {
+		limit = s.Memory64LimitPages
+	}
+	if limit == 0 {
+		return uint64(MemoryLimitPages)
+	}
+	return limit
 }
 
 // Instantiate uses name instead of the Module.NameSection ModuleName as it allows instantiating the same module under
@@ -396,7 +424,9 @@ func (s *Store) instantiate(
 
 	m.buildGlobals(module, m.Engine.FunctionInstanceReference)
 	m.buildTags(module)
-	m.buildMemory(module, allocator)
+	if err = m.buildMemory(module, allocator, s); err != nil {
+		return nil, err
+	}
 	m.Exports = module.Exports
 	for _, exp := range m.Exports {
 		if exp.Type == ExternTypeTable {
@@ -510,18 +540,23 @@ func (m *ModuleInstance) resolveImports(ctx context.Context, module *Module) (er
 					return
 				}
 
+				if expected.IsTable64 != importedTable.IsTable64 {
+					err = errorIndexTypeMismatch(i, expected.IsTable64, importedTable.IsTable64)
+					return
+				}
+
 				if uint64(expected.Min) > uint64(len(importedTable.References)) {
-					err = errorMinSizeMismatch(i, expected.Min, importedTable.Min)
+					err = errorMinSizeMismatch(i, uint64(expected.Min), uint64(importedTable.Min))
 					return
 				}
 
 				if expected.Max != nil {
 					expectedMax := *expected.Max
 					if importedTable.Max == nil {
-						err = errorNoMax(i, expectedMax)
+						err = errorNoMax(i, uint64(expectedMax))
 						return
 					} else if expectedMax < *importedTable.Max {
-						err = errorMaxSizeMismatch(i, expectedMax, *importedTable.Max)
+						err = errorMaxSizeMismatch(i, uint64(expectedMax), uint64(*importedTable.Max))
 						return
 					}
 				}
@@ -536,7 +571,12 @@ func (m *ModuleInstance) resolveImports(ctx context.Context, module *Module) (er
 				expected := i.DescMem
 				importedMemory := importedModule.Memories[imported.Index]
 
-				if expected.Min > importedMemory.Pages() {
+				if expected.IsMemory64 != importedMemory.IsMemory64 {
+					err = errorIndexTypeMismatch(i, expected.IsMemory64, importedMemory.IsMemory64)
+					return
+				}
+
+				if expected.Min > importedMemory.Pages64() {
 					err = errorMinSizeMismatch(i, expected.Min, importedMemory.Min)
 					return
 				}
@@ -609,16 +649,27 @@ func (m *ModuleInstance) resolveImports(ctx context.Context, module *Module) (er
 	return
 }
 
-func errorMinSizeMismatch(i *Import, expected, actual uint32) error {
+func errorMinSizeMismatch(i *Import, expected, actual uint64) error {
 	return errorInvalidImport(i, fmt.Errorf("minimum size mismatch: %d > %d", expected, actual))
 }
 
-func errorNoMax(i *Import, expected uint32) error {
+func errorNoMax(i *Import, expected uint64) error {
 	return errorInvalidImport(i, fmt.Errorf("maximum size mismatch: %d, but actual has no max", expected))
 }
 
-func errorMaxSizeMismatch(i *Import, expected, actual uint32) error {
+func errorMaxSizeMismatch(i *Import, expected, actual uint64) error {
 	return errorInvalidImport(i, fmt.Errorf("maximum size mismatch: %d < %d", expected, actual))
+}
+
+func errorIndexTypeMismatch(i *Import, expected, actual bool) error {
+	name := func(is64 bool) string {
+		if is64 {
+			return "i64"
+		}
+		return "i32"
+	}
+	return errorInvalidImport(i, fmt.Errorf("index type mismatch: expected %s, but actual has %s",
+		name(expected), name(actual)))
 }
 
 func errorSharedMismatch(i *Import, expected, actual bool) error {

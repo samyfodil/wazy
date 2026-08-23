@@ -41,6 +41,15 @@ func TestRuntimeConfig(t *testing.T) {
 			},
 		},
 		{
+			name: "memory64LimitPages",
+			with: func(c RuntimeConfig) RuntimeConfig {
+				return c.WithMemory64LimitPages(1 << 20)
+			},
+			expected: &runtimeConfig{
+				memory64LimitPages: 1 << 20,
+			},
+		},
+		{
 			name: "memoryCapacityFromMax",
 			with: func(c RuntimeConfig) RuntimeConfig {
 				return c.WithMemoryCapacityFromMax(true)
@@ -101,6 +110,18 @@ func TestRuntimeConfig(t *testing.T) {
 			input.WithMemoryLimitPages(wasm.MemoryLimitPages + 1)
 		})
 		require.EqualError(t, err, "memoryLimitPages invalid: 65537 > 65536")
+	})
+
+	t.Run("memory64LimitPages invalid panics", func(t *testing.T) {
+		err := require.CapturePanic(func() {
+			input := &runtimeConfig{}
+			input.WithMemory64LimitPages(wasm.Memory64LimitPages + 1)
+		})
+		require.EqualError(t, err, "memory64LimitPages invalid: 281474976710657 > 281474976710656")
+	})
+
+	t.Run("memory64LimitPages defaults to the 32-bit limit", func(t *testing.T) {
+		require.Equal(t, uint64(wasm.MemoryLimitPages), NewRuntimeConfig().(*runtimeConfig).memory64LimitPages)
 	})
 }
 

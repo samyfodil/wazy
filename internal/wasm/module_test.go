@@ -113,7 +113,7 @@ func TestMemory_Validate(t *testing.T) {
 		{
 			name:        "cap > maxLimit",
 			mem:         &Memory{Min: 2, Cap: math.MaxUint32, Max: 2},
-			expectedErr: "capacity 4294967295 pages (3 Ti) " + overLimit,
+			expectedErr: "capacity 4294967295 pages (255 Ti) over limit of 65536 pages (4 Gi)",
 		},
 		{
 			name:        "max < min",
@@ -123,12 +123,12 @@ func TestMemory_Validate(t *testing.T) {
 		{
 			name:        "min > limit",
 			mem:         &Memory{Min: math.MaxUint32},
-			expectedErr: "min 4294967295 pages (3 Ti) " + overLimit,
+			expectedErr: "min 4294967295 pages (255 Ti) over limit of 65536 pages (4 Gi)",
 		},
 		{
 			name:        "max > limit",
 			mem:         &Memory{Max: math.MaxUint32, IsMaxEncoded: true},
-			expectedErr: "max 4294967295 pages (3 Ti) " + overLimit,
+			expectedErr: "max 4294967295 pages (255 Ti) over limit of 65536 pages (4 Gi)",
 		},
 	}
 
@@ -136,7 +136,7 @@ func TestMemory_Validate(t *testing.T) {
 		tc := tt
 
 		t.Run(tc.name, func(t *testing.T) {
-			err := tc.mem.Validate(MemoryLimitPages)
+			err := tc.mem.Validate(uint64(MemoryLimitPages))
 			if tc.expectedErr == "" {
 				require.NoError(t, err)
 			} else {
@@ -938,24 +938,48 @@ func TestModule_buildGlobals(t *testing.T) {
 }
 
 func TestModule_buildMemoryInstance(t *testing.T) {
+	s := NewStore(api.CoreFeaturesV2, nil)
 	t.Run("nil", func(t *testing.T) {
 		m := ModuleInstance{}
-		m.buildMemory(&Module{}, nil)
+		require.NoError(t, m.buildMemory(&Module{}, nil, s))
 		require.Equal(t, 0, len(m.Memories))
 	})
 	t.Run("non-nil", func(t *testing.T) {
-		min := uint32(1)
-		max := uint32(10)
+		min := uint64(1)
+		max := uint64(10)
 		mDef := MemoryDefinition{moduleName: "foo"}
 		m := ModuleInstance{Memories: make([]*MemoryInstance, 1)}
-		m.buildMemory(&Module{
+		require.NoError(t, m.buildMemory(&Module{
 			MemorySection:           []Memory{{Min: min, Cap: min, Max: max}},
 			MemoryDefinitionSection: []MemoryDefinition{mDef},
-		}, nil)
+		}, nil, s))
 		mem := m.Memories[0]
 		require.Equal(t, min, mem.Min)
 		require.Equal(t, max, mem.Max)
 		require.Equal(t, &mDef, mem.definition)
+	})
+	t.Run("minimum over the configured limit", func(t *testing.T) {
+		limited := NewStore(api.CoreFeaturesV2|api.CoreFeatureMemory64, nil)
+		limited.Memory64LimitPages = 2
+		m := ModuleInstance{Memories: make([]*MemoryInstance, 1)}
+		err := m.buildMemory(&Module{
+			MemorySection:           []Memory{{Min: 3, Cap: 3, Max: 3, IsMemory64: true}},
+			MemoryDefinitionSection: []MemoryDefinition{{}},
+		}, nil, limited)
+		require.EqualError(t, err, "memory[0] minimum of 3 pages (192 Ki) exceeds the limit of 2 pages (128 Ki)")
+	})
+	t.Run("aggregate minimum over the configured limit", func(t *testing.T) {
+		limited := NewStore(api.CoreFeaturesV2|api.CoreFeatureMemory64|api.CoreFeatureMultiMemory, nil)
+		limited.Memory64LimitPages = 3
+		m := ModuleInstance{Memories: make([]*MemoryInstance, 2)}
+		err := m.buildMemory(&Module{
+			MemorySection: []Memory{
+				{Min: 2, Cap: 2, Max: 2, IsMemory64: true},
+				{Min: 2, Cap: 2, Max: 2, IsMemory64: true},
+			},
+			MemoryDefinitionSection: []MemoryDefinition{{}, {}},
+		}, nil, limited)
+		require.EqualError(t, err, "total memory minimum across 2 memories (4 pages) exceeds 3 pages")
 	})
 }
 

@@ -138,6 +138,22 @@ spectest_multi_memory_dir := $(spectest_base_dir)/multi-memory
 spectest_multi_memory_testdata_dir := $(spectest_multi_memory_dir)/testdata
 spec_version_multi_memory := cf8b5aa27257311b8eac80ae83f4ba22ee308064
 
+spectest_memory64_dir := $(spectest_base_dir)/memory64
+spectest_memory64_testdata_dir := $(spectest_memory64_dir)/testdata
+spec_version_memory64 := 9003cd5e24e53b84cd9027ea3dd7ae57159a6db1
+# The memory64 proposal has no test/core/memory64 subdirectory: its cases live
+# alongside the rest of the core suite, either in a *64.wast counterpart of an
+# existing file or mixed into one that covers both index types. This is the set
+# that exercises an i64 index type, on a memory or on a table.
+memory64_wast_files := \
+	address64.wast align64.wast binary-leb128.wast call_indirect.wast \
+	endianness64.wast float_memory64.wast imports.wast load64.wast \
+	memory64.wast memory_copy.wast memory_fill.wast memory_grow64.wast \
+	memory_init.wast memory_redundancy64.wast memory_trap64.wast \
+	table.wast table_copy.wast table_copy_mixed.wast table_fill.wast \
+	table_get.wast table_grow.wast table_init.wast table_set.wast \
+	table_size.wast
+
 spectest_typed_function_references_dir := $(spectest_base_dir)/typed-function-references
 spectest_typed_function_references_testdata_dir := $(spectest_typed_function_references_dir)/testdata
 spec_version_typed_function_references := 74d2ec81d15efd3c0f2fba46a023f376101d8e46
@@ -159,6 +175,7 @@ build.spectest:
 	@$(MAKE) build.spectest.typed_function_references
 	@$(MAKE) build.spectest.relaxed_simd
 	@$(MAKE) build.spectest.multi_memory
+	@$(MAKE) build.spectest.memory64
 
 .PHONY: build.spectest.v1
 build.spectest.v1: # Note: wabt by default uses >1.0 features, so wast2json flags might drift as they include more. See WebAssembly/wabt#1878
@@ -257,6 +274,18 @@ build.spectest.relaxed_simd: # Needs wasm-tools: wast2json drops the proposal's 
 	@cd $(spectest_relaxed_simd_testdata_dir) \
 		&& curl -sSL 'https://api.github.com/repos/WebAssembly/relaxed-simd/contents/test/core/relaxed-simd?ref=$(spec_version_relaxed_simd)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
 	@cd $(spectest_relaxed_simd_testdata_dir) && for f in `find . -name '*.wast'`; do \
+		wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
+	done
+
+.PHONY: build.spectest.memory64
+build.spectest.memory64: # Needs wasm-tools: wast2json cannot emit the "module definition" command memory64.wast uses.
+	@rm -rf $(spectest_memory64_testdata_dir)
+	@mkdir -p $(spectest_memory64_testdata_dir)
+	@cd $(spectest_memory64_testdata_dir) \
+		&& for f in $(memory64_wast_files); do \
+			curl -sJL "https://raw.githubusercontent.com/WebAssembly/memory64/$(spec_version_memory64)/test/core/$$f" -O; \
+		done
+	@cd $(spectest_memory64_testdata_dir) && for f in `find . -name '*.wast'`; do \
 		wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
 	done
 

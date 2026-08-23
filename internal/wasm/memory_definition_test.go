@@ -119,3 +119,33 @@ func TestModule_BuildMemoryDefinitions(t *testing.T) {
 		})
 	}
 }
+
+func TestMemoryDefinition_Memory64(t *testing.T) {
+	t.Run("32-bit", func(t *testing.T) {
+		d := &MemoryDefinition{memory: &Memory{Min: 1, Max: 2, IsMaxEncoded: true}}
+		require.False(t, d.IsMemory64())
+		require.Equal(t, uint32(1), d.Min())
+		require.Equal(t, uint64(1), d.Min64())
+		max, encoded := d.Max()
+		require.True(t, encoded)
+		require.Equal(t, uint32(2), max)
+		max64, encoded := d.Max64()
+		require.True(t, encoded)
+		require.Equal(t, uint64(2), max64)
+	})
+	t.Run("64-bit past what a uint32 holds", func(t *testing.T) {
+		// Min and Max keep the documented truncation; the 64-bit accessors are
+		// the way to read a memory this large.
+		d := &MemoryDefinition{memory: &Memory{
+			Min: 1 << 32, Max: Memory64LimitPages, IsMemory64: true,
+		}}
+		require.True(t, d.IsMemory64())
+		require.Equal(t, uint32(0), d.Min())
+		require.Equal(t, uint64(1)<<32, d.Min64())
+		max, encoded := d.Max()
+		require.False(t, encoded)
+		require.Equal(t, uint32(0), max)
+		max64, _ := d.Max64()
+		require.Equal(t, Memory64LimitPages, max64)
+	})
+}

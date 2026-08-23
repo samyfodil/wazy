@@ -115,12 +115,29 @@ func (f *MemoryDefinition) ExportNames() []string {
 
 // Min implements the same method as documented on api.MemoryDefinition.
 func (f *MemoryDefinition) Min() uint32 {
-	return f.memory.Min
+	return uint32(f.memory.Min)
 }
 
 // Max implements the same method as documented on api.MemoryDefinition.
 func (f *MemoryDefinition) Max() (max uint32, encoded bool) {
+	max = uint32(f.memory.Max)
+	encoded = f.memory.IsMaxEncoded
+	return
+}
+
+// Min64 implements the same method as documented on api.MemoryDefinition.
+func (f *MemoryDefinition) Min64() uint64 {
+	return f.memory.Min
+}
+
+// Max64 implements the same method as documented on api.MemoryDefinition.
+func (f *MemoryDefinition) Max64() (max uint64, encoded bool) {
 	max = f.memory.Max
 	encoded = f.memory.IsMaxEncoded
 	return
+}
+
+// IsMemory64 implements the same method as documented on api.MemoryDefinition.
+func (f *MemoryDefinition) IsMemory64() bool {
+	return f.memory.IsMemory64
 }

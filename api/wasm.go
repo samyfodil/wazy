@@ -286,11 +286,30 @@ type MemoryDefinition interface {
 	ExportDefinition
 
 	// Min returns the possibly zero initial count of 64KB pages.
+	//
+	// Note: This truncates when IsMemory64 is true and the minimum exceeds
+	// 2^32-1 pages; use Min64 for a 64-bit memory.
 	Min() uint32
 
 	// Max returns the possibly zero max count of 64KB pages, or false if
 	// unbounded.
+	//
+	// Note: This truncates when IsMemory64 is true and the maximum exceeds
+	// 2^32-1 pages; use Max64 for a 64-bit memory.
 	Max() (uint32, bool)
+
+	// Min64 is Min without the uint32 truncation.
+	Min64() uint64
+
+	// Max64 is Max without the uint32 truncation.
+	Max64() (uint64, bool)
+
+	// IsMemory64 returns true if this memory is indexed by i64 rather than
+	// i32, per the memory64 proposal. Its addresses, sizes and lengths are
+	// then 64-bit, and it may declare up to 2^48 pages.
+	//
+	// See CoreFeatureMemory64.
+	IsMemory64() bool
 
 	internalapi.WazyOnly
 }
@@ -581,6 +600,12 @@ type Memory interface {
 	// See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#-hrefsyntax-instr-memorymathsfmemorysize%E2%91%A0
 	Size() uint32
 
+	// Size64 returns the memory size in bytes available, without the uint32
+	// truncation Size documents. Prefer it whenever the memory may hold 65536
+	// pages or more, which a memory declared with an i64 index type usually
+	// can. See MemoryDefinition.IsMemory64 and CoreFeatureMemory64.
+	Size64() uint64
+
 	// Grow increases memory by the delta in pages (65536 bytes per page).
 	// The return val is the previous memory size in pages, or false if the
 	// delta was ignored as it exceeds MemoryDefinition.Max.
@@ -590,9 +615,15 @@ type Memory interface {
 	//   - This is the same as the "memory.grow" instruction defined in the
 	//	   WebAssembly Core Specification, except returns false instead of -1.
 	//   - When this returns true, any shared views via Read must be refreshed.
+	//   - The previous page count truncates the same way Size does; use Grow64
+	//     for a memory that can hold 2^32 pages or more.
 	//
 	// See MemorySizer Read and https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#grow-mem
 	Grow(deltaPages uint32) (previousPages uint32, ok bool)
+
+	// Grow64 is Grow with 64-bit page counts, for a memory declared with an
+	// i64 index type.
+	Grow64(deltaPages uint64) (previousPages uint64, ok bool)
 
 	// ReadByte reads a single byte from the underlying buffer at the offset or returns false if out of range.
 	ReadByte(offset uint32) (byte, bool)
@@ -653,6 +684,11 @@ type Memory interface {
 	// allocated.
 	Read(offset, byteCount uint32) ([]byte, bool)
 
+	// Read64 is Read with a 64-bit offset and byte count, for a memory that
+	// extends past four gibibytes. Scalar reads at such an offset compose from
+	// it, e.g. binary.LittleEndian.Uint32 over a four-byte Read64.
+	Read64(offset, byteCount uint64) ([]byte, bool)
+
 	// WriteByte writes a single byte to the underlying buffer at the offset in or returns false if out of range.
 	WriteByte(offset uint32, v byte) bool
 
@@ -683,8 +719,16 @@ type Memory interface {
 	// Write writes the slice to the underlying buffer at the offset or returns false if out of range.
 	Write(offset uint32, v []byte) bool
 
+	// Write64 is Write with a 64-bit offset, for a memory that extends past
+	// four gibibytes. Scalar writes at such an offset compose from Read64,
+	// which returns a write-through view.
+	Write64(offset uint64, v []byte) bool
+
 	// WriteString writes the string to the underlying buffer at the offset or returns false if out of range.
 	WriteString(offset uint32, v string) bool
+
+	// WriteString64 is WriteString with a 64-bit offset.
+	WriteString64(offset uint64, v string) bool
 
 	internalapi.WazyOnly
 }

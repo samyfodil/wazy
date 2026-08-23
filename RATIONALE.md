@@ -1523,6 +1523,101 @@ doc warns that a max-less memory then reserves the full per-memory ceiling. A `C
 module and reject ordinary, spec-valid multi-memory modules outright under that config; this check exists to bound what the *module* can demand, not to second-guess the
 embedder's own tuning.
 
+## The 64-bit address space (memory64)
+
+The [memory64 proposal](https://github.com/WebAssembly/memory64) lets a memory or a
+table declare an `i64` index type instead of `i32`. Every address, size and length
+operand of an instruction addressing it becomes `i64`, as does the result of
+`memory.size`, `memory.grow`, `table.size` and `table.grow`, and a `memarg`
+offset immediate widens from `u32` to `u64`.
+
+### Declared limits versus allocated limits
+
+The specification separates what a module may *declare* from what a host may
+*provide*, and memory64 makes that separation load-bearing: a 64-bit memory may
+declare up to 2^48 pages (2^64 bytes) and a 64-bit table up to 2^64-1 entries,
+and a module declaring that much must still be **valid**. The proposal's own
+tests rely on it -- `test/core/memory64.wast` and `test/core/table.wast` each
+contain a `(module definition ...)` that declares more than any host could ever
+allocate, precisely to check that validation does not reject it.
+
+wazy therefore applies two different ceilings at two different times:
+
+- **Decoding and validation** bound the declared limits by the specification's
+  own ceiling for the index type: 65536 pages for an `i32` memory, 2^48 for an
+  `i64` one. `WithMemoryLimitPages` continues to bound a 32-bit memory's
+  declared maximum here, as it always has -- for that index type the embedder's
+  default and the specification's ceiling coincide, so nothing changes.
+- **Instantiation** applies the embedder's allocation ceiling, which for a
+  64-bit memory is `WithMemory64LimitPages` (default 65536 pages, the same four
+  gibibytes a 32-bit memory gets, so enabling the feature does not by itself let
+  a module claim more host memory). A minimum over the limit fails to
+  instantiate; a maximum over it simply stops `memory.grow` earlier, which is
+  something a host may always do. Tables get the same treatment against
+  `MaximumFunctionIndex`, moved out of the decoder for the same reason.
+
+Applying the embedder's ceiling at decode time instead would reject conformant
+modules; applying only the specification's ceiling would let a twenty-byte
+module ask the host for 256 TiB. Splitting them is what satisfies both.
+
+### Bounds checks
+
+A 32-bit memory's address arithmetic cannot overflow: the dynamic address is
+zero-extended from `i32` and the `memarg` offset is at most 2^32-1, so their sum
+is bounded by 2^33 and a single unsigned compare against the memory length
+decides the access. A 64-bit memory's operands span the whole `uint64` range, so
+`address + offset + accessSize` can wrap around into a small, in-bounds-looking
+value. Every 64-bit bounds check therefore detects that carry, and treats it as
+out of bounds -- which it is, since no buffer is 2^64 bytes long.
+
+The native engine has two shapes for this, chosen per access site:
+
+- When `offset + accessSize` is within the memory's *declared minimum*, the
+  memory can never be shorter than that, so `memLen - ceil` cannot underflow and
+  one subtract plus one compare decides the access -- the same instruction count
+  as the 32-bit form.
+- Otherwise it computes `address + ceil` and tests both the carry and the length,
+  which costs two compares and an or.
+
+A 64-bit memory's `memarg` offset can also exceed any machine displacement, so it
+is folded into the computed address rather than left to the load/store
+instruction's addressing mode.
+
+The bounds-check-elimination caches (the frontend's linear-path
+`knownSafeBounds` and the dominance-based pass in `ssa/pass.go`) are all keyed on
+the 32-bit shape, so a 64-bit memory keeps every check. That is conservative but
+correct; there is room to extend them later.
+
+The 32-bit paths are untouched throughout: the interpreter routes a 64-bit
+memory's scalar loads and stores to their own operation kinds rather than adding
+a branch to the existing ones, and the native engine branches on the index type
+at lowering time, so a module with no 64-bit memory lowers to exactly the SSA it
+did before.
+
+### memory.grow and table.grow
+
+Both trampolines now take and return the page or entry count as `i64` whatever
+the index type, and a 32-bit memory's is widened and narrowed around the call.
+Those two instructions land in a block that is about to allocate a whole memory,
+so they cost nothing that matters, and the alternative -- a second trampoline
+per instruction, each with its own execution-context field -- is a lot of
+machinery to avoid them. A 64-bit memory skips `lowerLocalMemoryGrow`'s
+in-capacity fast path entirely: its page delta spans a range that path's
+arithmetic cannot bound without extra overflow checks, and `memory.grow` is rare
+enough that the Go trampoline is the better trade.
+
+### The memarg offset immediate
+
+The proposal widens the `memarg` offset from `u32` to `u64` for *every* memory
+instruction, not just those naming a 64-bit memory; validation then rejects an
+offset past 2^32-1 on a 32-bit memory. wazy gates the decoding width on
+`api.CoreFeatureMemory64` rather than on the addressed memory's index type,
+because the WebAssembly 1.0 conformance suite requires a six-byte LEB128 encoding
+of a small offset to be *malformed* (`binary-leb128.wast`, "offset 2 with one
+byte too many") while the memory64 suite requires the same encoding to be
+accepted. The feature flag selects which specification version applies, which is
+what it is for.
+
 ## Relaxed SIMD
 
 The [relaxed-simd proposal](https://github.com/WebAssembly/relaxed-simd) defines

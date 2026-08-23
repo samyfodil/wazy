@@ -108,8 +108,8 @@ func RequireNoDiff(wasmBin []byte, checkMemory, loggingCheck bool, requireNoErro
 		compilerMem, _ := compilerMod.Memory().(*wasm.MemoryInstance)
 		interpreterMem, _ := interpreterMod.Memory().(*wasm.MemoryInstance)
 		if checkMemory && compilerMem != nil && interpreterMem != nil {
-			compilerSize := wasm.MemoryPagesToBytesNum(compilerMem.Pages())
-			interpreterSize := wasm.MemoryPagesToBytesNum(interpreterMem.Pages())
+			compilerSize := wasm.MemoryPagesToBytesNum(compilerMem.Pages64())
+			interpreterSize := wasm.MemoryPagesToBytesNum(interpreterMem.Pages64())
 			if compilerSize != interpreterSize ||
 				!bytes.Equal(compilerMem.Buffer[:compilerSize], interpreterMem.Buffer[:interpreterSize]) {
 				requireNoError(errors.New("memory state mimsmatch"))

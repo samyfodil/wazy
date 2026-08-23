@@ -11,10 +11,22 @@ import (
 
 // Table describes the limits of elements and its type in a table.
 type Table struct {
-	Min      uint32
-	Max      *uint32
+	Min      uint64
+	Max      *uint64
 	Type     RefType
 	InitExpr *ConstantExpression
+	// IsTable64 is true when this table is indexed by i64 instead of i32, per
+	// the memory64 proposal.
+	IsTable64 bool
+}
+
+// IndexType returns the value type of the indexes, sizes and lengths this
+// table is indexed by: ValueTypeI64 for a 64-bit table, ValueTypeI32 otherwise.
+func (t *Table) IndexType() ValueType {
+	if t.IsTable64 {
+		return ValueTypeI64
+	}
+	return ValueTypeI32
 }
 
 // RefType is a reference type used for table elements.
@@ -193,10 +205,13 @@ type TableInstance struct {
 	References []Reference
 
 	// Min is the minimum (function) elements in this table and cannot grow to accommodate ElementSegment.
-	Min uint32
+	Min uint64
 
 	// Max if present is the maximum (function) elements in this table, or nil if unbounded.
-	Max *uint32
+	Max *uint64
+
+	// IsTable64 is true when this table is indexed by i64 instead of i32.
+	IsTable64 bool
 
 	// Type is either RefTypeFuncref or RefTypeExternRef.
 	Type RefType
@@ -307,10 +322,13 @@ func (m *Module) validateTable(enabledFeatures api.CoreFeatures, tables []Table,
 						return 0, 0, 0, err
 					}
 
-					if vt != ValueTypeI32 {
-						return 0, 0, 0, fmt.Errorf("%s[%d] (global.get %d): import[%d].global.ValType != i32", SectionIDName(SectionIDElement), idx, globalIndex, i)
+					// An active element segment's offset is given in the index
+					// type of the table it initializes: i64 for a 64-bit table.
+					if expected := t.IndexType(); vt != expected {
+						return 0, 0, 0, fmt.Errorf("%s[%d] (global.get %d): import[%d].global.ValType != %s",
+							SectionIDName(SectionIDElement), idx, globalIndex, i, ValueTypeName(expected))
 					}
-					return ValueTypeI32, 0, 0, nil
+					return vt, 0, 0, nil
 				},
 				func(funcIndex Index) (Reference, error) {
 					return 0, nil
@@ -319,13 +337,14 @@ func (m *Module) validateTable(enabledFeatures api.CoreFeatures, tables []Table,
 			if err != nil {
 				return fmt.Errorf("%s[%d] couldn't evaluate offset expression: %w", SectionIDName(SectionIDElement), idx, err)
 			}
-			if offsetExprType != ValueTypeI32 {
-				return fmt.Errorf("%s[%d] offset expression must return i32 but was %s", SectionIDName(SectionIDElement), idx, ValueTypeName(offsetExprType))
+			if expected := t.IndexType(); offsetExprType != expected {
+				return fmt.Errorf("%s[%d] offset expression must return %s but was %s",
+					SectionIDName(SectionIDElement), idx, ValueTypeName(expected), ValueTypeName(offsetExprType))
 			}
 
 			if !enabledFeatures.IsEnabled(api.CoreFeatureReferenceTypes) && !hasGlobalRef && elem.TableIndex >= importedTableCount {
-				offset := uint32(offsetExprResults[0])
-				if err = checkSegmentBounds(t.Min, uint64(initCount)+uint64(offset), idx); err != nil {
+				offset := offsetExprResults[0]
+				if err = checkSegmentBounds(t.Min, uint64(initCount)+offset, idx); err != nil {
 					return err
 				}
 			}
@@ -345,9 +364,19 @@ func (m *ModuleInstance) buildTables(module *Module, skipBoundCheck bool) (err e
 	idx := module.ImportTableCount
 	for i := range module.TableSection {
 		tsec := &module.TableSection[i]
+		// A 64-bit table's declared minimum is bounded only by u64 at
+		// validation time -- the specification requires a module declaring more
+		// entries than any host could allocate to still be *valid* -- so the
+		// bound that a 32-bit table gets at decode time (MaximumFunctionIndex,
+		// see binary.decodeTable) has to be applied here instead, before
+		// anything is allocated.
+		if tsec.Min > uint64(MaximumFunctionIndex) {
+			return fmt.Errorf("table[%d] minimum of %d entries exceeds the limit of %d",
+				i, tsec.Min, MaximumFunctionIndex)
+		}
 		t := &TableInstance{
 			References: make([]Reference, tsec.Min), Min: tsec.Min, Max: tsec.Max,
-			Type: tsec.Type,
+			Type: tsec.Type, IsTable64: tsec.IsTable64,
 		}
 		if tsec.InitExpr != nil {
 			initVals := evaluateConstExprInModuleInstance(tsec.InitExpr, m)
@@ -384,8 +413,8 @@ func (m *ModuleInstance) buildTables(module *Module, skipBoundCheck bool) (err e
 // means is we have to delay offset checks on imported tables until we link to them.
 // e.g. https://github.com/WebAssembly/spec/blob/wg-1.0/test/core/elem.wast#L117 wants pass on min=0 for import
 // e.g. https://github.com/WebAssembly/spec/blob/wg-1.0/test/core/elem.wast#L142 wants fail on min=0 module-defined
-func checkSegmentBounds(min uint32, requireMin uint64, idx Index) error { // uint64 in case offset was set to -1
-	if requireMin > uint64(min) {
+func checkSegmentBounds(min uint64, requireMin uint64, idx Index) error { // uint64 in case offset was set to -1
+	if requireMin > min {
 		return fmt.Errorf("%s[%d].init exceeds min table size", SectionIDName(SectionIDElement), idx)
 	}
 	return nil
@@ -419,4 +448,31 @@ func (t *TableInstance) Grow(delta uint32, initialRef Reference) (currentLen uin
 		copy(newRegion[i:], newRegion[:i])
 	}
 	return
+}
+
+// Grow64 is Grow for a table with an i64 index type, whose delta and result are
+// i64. A table never holds more than math.MaxUint32 entries whatever its index
+// type, so any delta past that simply fails.
+func (t *TableInstance) Grow64(delta uint64, initialRef Reference) (currentLen uint64) {
+	currentLen = uint64(len(t.References))
+	if delta == 0 {
+		return
+	}
+	if delta > math.MaxUint32 {
+		return ^uint64(0) // = -1 in signed 64-bit integer.
+	}
+	if res := t.Grow(uint32(delta), initialRef); res == 0xffffffff {
+		return ^uint64(0)
+	} else {
+		return uint64(res)
+	}
+}
+
+// indexType returns the value type this table's indexes, sizes and lengths are
+// given in: ValueTypeI64 for a 64-bit table, ValueTypeI32 otherwise.
+func (t *TableInstance) indexType() ValueType {
+	if t.IsTable64 {
+		return ValueTypeI64
+	}
+	return ValueTypeI32
 }

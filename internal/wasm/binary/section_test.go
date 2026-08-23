@@ -10,7 +10,7 @@ import (
 )
 
 func TestTableSection(t *testing.T) {
-	three := uint32(3)
+	three := uint64(3)
 	tests := []struct {
 		name     string
 		input    []byte
@@ -81,12 +81,10 @@ func TestTableSection_Errors(t *testing.T) {
 }
 
 func TestMemorySection(t *testing.T) {
-	// What newMemorySizer fills in for a memory with no declared maximum: the
-	// configured limit clamped to what a slice can address, which is lower
-	// where an int is 32 bits wide. See wasm.MaxAllocatablePages.
-	max := min(wasm.MemoryLimitPages, wasm.MaxAllocatablePages)
+	max := wasm.MemoryLimitPages
+	max64 := uint64(max)
 
-	three := uint32(3)
+	three := uint64(3)
 	tests := []struct {
 		name                  string
 		input                 []byte
@@ -119,8 +117,8 @@ func TestMemorySection(t *testing.T) {
 			features:              api.CoreFeaturesV2 | api.CoreFeatureMultiMemory,
 			memoryCapacityFromMax: true,
 			expected: []wasm.Memory{
-				{Min: 1, Cap: max, Max: max, IsMaxEncoded: false},
-				{Min: 1, Cap: max, Max: max, IsMaxEncoded: false},
+				{Min: 1, Cap: max64, Max: max64, IsMaxEncoded: false},
+				{Min: 1, Cap: max64, Max: max64, IsMaxEncoded: false},
 			},
 		},
 	}

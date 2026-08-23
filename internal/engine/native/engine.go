@@ -967,15 +967,17 @@ func (e *engine) compileSharedFunctions() {
 	e.be.Init()
 	addTrampoline(0,
 		e.machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeGrowMemory, &ssa.Signature{
-			Params:  []ssa.Type{ssa.TypeI64 /* exec context */, ssa.TypeI32 /* memory index */, ssa.TypeI32 /* pages */},
-			Results: []ssa.Type{ssa.TypeI32},
+			// The page delta and result are i64 whatever the memory's index type;
+			// see frontend's memoryGrowSig.
+			Params:  []ssa.Type{ssa.TypeI64 /* exec context */, ssa.TypeI32 /* memory index */, ssa.TypeI64 /* pages */},
+			Results: []ssa.Type{ssa.TypeI64},
 		}, false))
 
 	e.be.Init()
 	addTrampoline(1,
 		e.machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeTableGrow, &ssa.Signature{
-			Params:  []ssa.Type{ssa.TypeI64 /* exec context */, ssa.TypeI32 /* table index */, ssa.TypeI32 /* num */, ssa.TypeI64 /* ref */},
-			Results: []ssa.Type{ssa.TypeI32},
+			Params:  []ssa.Type{ssa.TypeI64 /* exec context */, ssa.TypeI32 /* table index */, ssa.TypeI64 /* num */, ssa.TypeI64 /* ref */},
+			Results: []ssa.Type{ssa.TypeI64},
 		}, false))
 
 	e.be.Init()

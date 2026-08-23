@@ -76,6 +76,27 @@ type RuntimeConfig interface {
 	// results in allocating 4GB. See the doc on WithMemoryLimitPages for detail.
 	WithMemoryCapacityFromMax(memoryCapacityFromMax bool) RuntimeConfig
 
+	// WithMemory64LimitPages overrides the maximum pages a memory declared with
+	// an i64 index type may actually occupy. The default is 65536 -- the same
+	// four gibibytes WithMemoryLimitPages defaults to, so enabling
+	// api.CoreFeatureMemory64 does not by itself let a module claim more host
+	// memory than a 32-bit one could. Setting a value larger than 2^48, the
+	// specification's own ceiling for a 64-bit memory, will panic.
+	//
+	// This example lets a 64-bit memory reach 16GB:
+	//	rConfig = wazy.NewRuntimeConfig().
+	//		WithCoreFeatures(api.CoreFeaturesV2 | api.CoreFeatureMemory64).
+	//		WithMemory64LimitPages(1 << 18)
+	//
+	// Unlike WithMemoryLimitPages, this bounds what is *allocated* rather than
+	// what may be declared: the specification requires a module whose declared
+	// limits exceed anything a host could allocate to still be valid, so such a
+	// module still compiles. It fails to instantiate if its minimum is over the
+	// limit, and memory.grow returns -1 rather than growing past it.
+	//
+	// See https://github.com/WebAssembly/memory64
+	WithMemory64LimitPages(memory64LimitPages uint64) RuntimeConfig
+
 	// WithMemoryCapacityReservePages allocates a backing reserve beyond a memory's
 	// initial size. This can make memory.grow cheaper without reserving the
 	// memory's entire maximum. Go fallback growth reapplies the reserve to the
@@ -196,6 +217,7 @@ type newEngine func(context.Context, api.CoreFeatures, filecache.Cache) wasm.Eng
 type runtimeConfig struct {
 	enabledFeatures            api.CoreFeatures
 	memoryLimitPages           uint32
+	memory64LimitPages         uint64
 	memoryCapacityFromMax      bool
 	memoryCapacityReservePages uint32
 	engineKind                 engineKind
@@ -210,6 +232,7 @@ type runtimeConfig struct {
 var engineLessConfig = &runtimeConfig{
 	enabledFeatures:       api.CoreFeaturesV2,
 	memoryLimitPages:      wasm.MemoryLimitPages,
+	memory64LimitPages:    uint64(wasm.MemoryLimitPages),
 	memoryCapacityFromMax: false,
 	dwarfDisabled:         false,
 }
@@ -294,6 +317,17 @@ func (c *runtimeConfig) WithMemoryLimitPages(memoryLimitPages uint32) RuntimeCon
 func (c *runtimeConfig) WithCompilationCache(ca CompilationCache) RuntimeConfig {
 	ret := c.clone()
 	ret.cache = ca
+	return ret
+}
+
+// WithMemory64LimitPages implements RuntimeConfig.WithMemory64LimitPages
+func (c *runtimeConfig) WithMemory64LimitPages(memory64LimitPages uint64) RuntimeConfig {
+	ret := c.clone()
+	// This panics instead of returning an error as it is unlikely.
+	if memory64LimitPages > wasm.Memory64LimitPages {
+		panic(fmt.Errorf("memory64LimitPages invalid: %d > %d", memory64LimitPages, wasm.Memory64LimitPages))
+	}
+	ret.memory64LimitPages = memory64LimitPages
 	return ret
 }
 

@@ -3,6 +3,7 @@ package wasm
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"testing"
 
 	"github.com/samyfodil/wazy/api"
@@ -14,10 +15,10 @@ import (
 func Test_readMemArg(t *testing.T) {
 	t.Run("plain form: memory index implicitly zero, feature irrelevant", func(t *testing.T) {
 		body := append(leb128.EncodeUint32(3), leb128.EncodeUint32(100)...) // align=3, offset=100
-		align, offset, memIdx, read, err := readMemArg(0, body, api.CoreFeaturesV1)
+		align, offset, memIdx, read, err := readMemArg(0, body, api.CoreFeaturesV1, api.CoreFeaturesV1.IsEnabled(api.CoreFeatureMemory64))
 		require.NoError(t, err)
 		require.Equal(t, uint32(3), align)
-		require.Equal(t, uint32(100), offset)
+		require.Equal(t, uint64(100), offset)
 		require.Equal(t, Index(0), memIdx)
 		require.Equal(t, uint64(len(body)), read)
 	})
@@ -25,10 +26,10 @@ func Test_readMemArg(t *testing.T) {
 		rawAlign := uint32(2) | memArgMultiMemoryFlag
 		body := append(leb128.EncodeUint32(rawAlign), leb128.EncodeUint32(5)...) // memidx=5
 		body = append(body, leb128.EncodeUint32(64)...)                          // offset=64
-		align, offset, memIdx, read, err := readMemArg(0, body, api.CoreFeatureMultiMemory)
+		align, offset, memIdx, read, err := readMemArg(0, body, api.CoreFeatureMultiMemory, api.CoreFeatureMultiMemory.IsEnabled(api.CoreFeatureMemory64))
 		require.NoError(t, err)
 		require.Equal(t, uint32(2), align)
-		require.Equal(t, uint32(64), offset)
+		require.Equal(t, uint64(64), offset)
 		require.Equal(t, Index(5), memIdx)
 		require.Equal(t, uint64(len(body)), read)
 	})
@@ -36,8 +37,63 @@ func Test_readMemArg(t *testing.T) {
 		rawAlign := uint32(2) | memArgMultiMemoryFlag
 		body := append(leb128.EncodeUint32(rawAlign), leb128.EncodeUint32(0)...) // memidx=0, explicit
 		body = append(body, leb128.EncodeUint32(0)...)
-		_, _, _, _, err := readMemArg(0, body, api.CoreFeaturesV1)
+		_, _, _, _, err := readMemArg(0, body, api.CoreFeaturesV1, api.CoreFeaturesV1.IsEnabled(api.CoreFeatureMemory64))
 		require.Error(t, err)
+	})
+	t.Run("memory64 widens the offset immediate to a u64", func(t *testing.T) {
+		body := append(leb128.EncodeUint32(0), leb128.EncodeUint64(1<<40)...)
+		align, offset, memIdx, read, err := readMemArg(0, body, api.CoreFeatureMemory64, api.CoreFeatureMemory64.IsEnabled(api.CoreFeatureMemory64))
+		require.NoError(t, err)
+		require.Equal(t, uint32(0), align)
+		require.Equal(t, uint64(1<<40), offset)
+		require.Equal(t, Index(0), memIdx)
+		require.Equal(t, uint64(len(body)), read)
+	})
+	t.Run("memory64 rejects an offset needing more than ten LEB128 bytes", func(t *testing.T) {
+		body := append(leb128.EncodeUint32(0),
+			0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00)
+		_, _, _, _, err := readMemArg(0, body, api.CoreFeatureMemory64, api.CoreFeatureMemory64.IsEnabled(api.CoreFeatureMemory64))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "read memory offset")
+	})
+	t.Run("without memory64 the offset immediate keeps its u32 bounds", func(t *testing.T) {
+		// A six-byte encoding of 2 is a valid u64 but an over-long u32, which
+		// the WebAssembly 1.0 conformance suite requires to be malformed.
+		body := append(leb128.EncodeUint32(0), 0x82, 0x80, 0x80, 0x80, 0x80, 0x00)
+		_, _, _, _, err := readMemArg(0, body, api.CoreFeaturesV1, api.CoreFeaturesV1.IsEnabled(api.CoreFeatureMemory64))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "read memory offset")
+
+		_, offset, _, _, err := readMemArg(0, body, api.CoreFeatureMemory64, api.CoreFeatureMemory64.IsEnabled(api.CoreFeatureMemory64))
+		require.NoError(t, err)
+		require.Equal(t, uint64(2), offset)
+	})
+}
+
+func Test_memArgIndexType(t *testing.T) {
+	memories := []Memory{{Min: 1}, {Min: 1, IsMemory64: true}}
+
+	t.Run("i32 memory", func(t *testing.T) {
+		typ, ok := memArgIndexType(memories, 0, math.MaxUint32, true)
+		require.True(t, ok)
+		require.Equal(t, ValueTypeI32, typ)
+	})
+	t.Run("i64 memory", func(t *testing.T) {
+		typ, ok := memArgIndexType(memories, 1, math.MaxUint64, true)
+		require.True(t, ok)
+		require.Equal(t, ValueTypeI64, typ)
+	})
+	t.Run("memory index out of range", func(t *testing.T) {
+		_, ok := memArgIndexType(memories, 2, 0, true)
+		require.False(t, ok)
+		require.EqualError(t, memArgError(memories, 2, 0, "i32.load"),
+			"memory 2 is out of range for i32.load")
+	})
+	t.Run("offset past 2^32-1 on a 32-bit memory", func(t *testing.T) {
+		_, ok := memArgIndexType(memories, 0, 1<<32, true)
+		require.False(t, ok)
+		require.EqualError(t, memArgError(memories, 0, 1<<32, "i32.load"),
+			"memory offset 4294967296 is out of range for i32.load on a 32-bit memory")
 	})
 }
 
@@ -5130,4 +5186,174 @@ func TestFuncValidation_typeIndexAboveMaxInt32IsRejected(t *testing.T) {
 		0, []Index{0}, nil, nil, []Table{{Type: RefTypeFuncref}}, nil, nil, bytes.NewReader(nil))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid type index")
+
+// TestModule_ValidateFunction_Memory64 covers the operand types the memory64
+// proposal makes depend on the index type of the memory an instruction names.
+func TestModule_ValidateFunction_Memory64(t *testing.T) {
+	const features = api.CoreFeaturesV2 | api.CoreFeatureMemory64 | api.CoreFeatureMultiMemory
+
+	// memories[0] is i32-indexed, memories[1] i64-indexed. A memarg naming a
+	// non-zero memory needs the multi-memory flag bit in its align byte.
+	memories := []Memory{{Min: 1}, {Min: 1, IsMemory64: true}}
+	mem64Arg := func(align uint32, offset uint64) []byte {
+		b := leb128.EncodeUint32(align | memArgMultiMemoryFlag)
+		b = append(b, leb128.EncodeUint32(1)...) // memory index 1
+		return append(b, leb128.EncodeUint64(offset)...)
+	}
+
+	validate := func(t *testing.T, body []byte, dataCount bool) error {
+		m := &Module{
+			TypeSection:     []FunctionType{v_v},
+			FunctionSection: []Index{0},
+			CodeSection:     []Code{{Body: append(body, OpcodeEnd)}},
+			DataSection:     []DataSegment{{Passive: true, Init: []byte{1}}},
+		}
+		if dataCount {
+			count := uint32(1)
+			m.DataCountSection = &count
+		}
+		return m.validateFunctionWithMaxStackValues(&stacks{}, features,
+			0, []Index{0}, nil, memories, nil, nil, 100, nil, bytes.NewReader(nil))
+	}
+
+	i32Const := func(v int32) []byte { return append([]byte{OpcodeI32Const}, leb128.EncodeInt32(v)...) }
+	i64Const := func(v int64) []byte { return append([]byte{OpcodeI64Const}, leb128.EncodeInt64(v)...) }
+
+	t.Run("a 64-bit memory's load takes an i64 address", func(t *testing.T) {
+		body := append(i64Const(0), OpcodeI32Load)
+		body = append(body, mem64Arg(2, 0)...)
+		require.NoError(t, validate(t, append(body, OpcodeDrop), false))
+	})
+	t.Run("an i32 address on a 64-bit memory is rejected", func(t *testing.T) {
+		body := append(i32Const(0), OpcodeI32Load)
+		body = append(body, mem64Arg(2, 0)...)
+		err := validate(t, append(body, OpcodeDrop), false)
+		require.Error(t, err)
+		require.EqualError(t, err, "type mismatch: expected i64, but was i32")
+	})
+	t.Run("an i64 address on a 32-bit memory is rejected", func(t *testing.T) {
+		body := append(i64Const(0), OpcodeI32Load, 0x02, 0x00)
+		err := validate(t, append(body, OpcodeDrop), false)
+		require.EqualError(t, err, "type mismatch: expected i32, but was i64")
+	})
+	t.Run("a 64-bit memory's store takes an i64 address", func(t *testing.T) {
+		body := append(i64Const(0), i32Const(1)...)
+		body = append(body, OpcodeI32Store)
+		body = append(body, mem64Arg(2, 0)...)
+		require.NoError(t, validate(t, body, false))
+	})
+	t.Run("an offset past 2^32-1 is rejected on a 32-bit memory", func(t *testing.T) {
+		body := append(i32Const(0), OpcodeI32Load, 0x02)
+		body = append(body, leb128.EncodeUint64(1<<32)...)
+		err := validate(t, append(body, OpcodeDrop), false)
+		require.EqualError(t, err,
+			"memory offset 4294967296 is out of range for i32.load on a 32-bit memory")
+	})
+	t.Run("an offset past 2^32-1 is accepted on a 64-bit memory", func(t *testing.T) {
+		body := append(i64Const(0), OpcodeI32Load)
+		body = append(body, mem64Arg(2, 1<<32)...)
+		require.NoError(t, validate(t, append(body, OpcodeDrop), false))
+	})
+	t.Run("memory.size and memory.grow follow the index type", func(t *testing.T) {
+		require.NoError(t, validate(t, []byte{OpcodeMemorySize, 0x01, OpcodeI64Const, 0x01, OpcodeI64Add, OpcodeMemoryGrow, 0x01, OpcodeDrop}, false))
+		err := validate(t, []byte{OpcodeMemorySize, 0x01, OpcodeI32Const, 0x01, OpcodeI32Add, OpcodeDrop}, false)
+		require.Error(t, err)
+	})
+	t.Run("memory.fill is [i64, i32, i64] on a 64-bit memory", func(t *testing.T) {
+		body := append(i64Const(0), i32Const(0)...)
+		body = append(body, i64Const(0)...)
+		require.NoError(t, validate(t, append(body, OpcodeMiscPrefix, OpcodeMiscMemoryFill, 0x01), false))
+
+		bad := append(i64Const(0), i32Const(0)...)
+		bad = append(bad, i32Const(0)...)
+		require.Error(t, validate(t, append(bad, OpcodeMiscPrefix, OpcodeMiscMemoryFill, 0x01), false))
+	})
+	t.Run("memory.init is [i64, i32, i32] on a 64-bit memory", func(t *testing.T) {
+		body := append(i64Const(0), i32Const(0)...)
+		body = append(body, i32Const(0)...)
+		require.NoError(t, validate(t, append(body, OpcodeMiscPrefix, OpcodeMiscMemoryInit, 0x00, 0x01), true))
+	})
+	t.Run("memory.copy takes the narrower of the two index types as its length", func(t *testing.T) {
+		// dst = memory 1 (i64), src = memory 0 (i32): [i64, i32, i32].
+		body := append(i64Const(0), i32Const(0)...)
+		body = append(body, i32Const(0)...)
+		require.NoError(t, validate(t, append(body, OpcodeMiscPrefix, OpcodeMiscMemoryCopy, 0x01, 0x00), false))
+
+		// Both 64-bit: [i64, i64, i64].
+		both := append(i64Const(0), i64Const(0)...)
+		both = append(both, i64Const(0)...)
+		require.NoError(t, validate(t, append(both, OpcodeMiscPrefix, OpcodeMiscMemoryCopy, 0x01, 0x01), false))
+
+		// An i64 length across a 32-bit source is rejected.
+		bad := append(i64Const(0), i32Const(0)...)
+		bad = append(bad, i64Const(0)...)
+		require.Error(t, validate(t, append(bad, OpcodeMiscPrefix, OpcodeMiscMemoryCopy, 0x01, 0x00), false))
+	})
+}
+
+// TestModule_ValidateFunction_Table64 is TestModule_ValidateFunction_Memory64
+// for the table side of the same proposal.
+func TestModule_ValidateFunction_Table64(t *testing.T) {
+	const features = api.CoreFeaturesV2 | api.CoreFeatureMemory64
+
+	// tables[0] is i32-indexed, tables[1] i64-indexed.
+	tables := []Table{{Min: 1, Type: RefTypeFuncref}, {Min: 1, Type: RefTypeFuncref, IsTable64: true}}
+
+	validate := func(t *testing.T, body []byte) error {
+		m := &Module{
+			TypeSection:     []FunctionType{v_v},
+			FunctionSection: []Index{0},
+			CodeSection:     []Code{{Body: append(body, OpcodeEnd)}},
+			ElementSection:  []ElementSegment{{Type: RefTypeFuncref, Mode: ElementModePassive}},
+		}
+		return m.validateFunctionWithMaxStackValues(&stacks{}, features,
+			0, []Index{0}, nil, nil, tables, nil, 100, nil, bytes.NewReader(nil))
+	}
+
+	i32Const := func(v int32) []byte { return append([]byte{OpcodeI32Const}, leb128.EncodeInt32(v)...) }
+	i64Const := func(v int64) []byte { return append([]byte{OpcodeI64Const}, leb128.EncodeInt64(v)...) }
+
+	t.Run("table.get and table.set take an i64 index", func(t *testing.T) {
+		require.NoError(t, validate(t, append(i64Const(0), OpcodeTableGet, 0x01, OpcodeDrop)))
+		require.Error(t, validate(t, append(i32Const(0), OpcodeTableGet, 0x01, OpcodeDrop)))
+
+		body := append(i64Const(0), OpcodeRefNull, RefTypeFuncref.Kind())
+		require.NoError(t, validate(t, append(body, OpcodeTableSet, 0x01)))
+	})
+	t.Run("table.size and table.grow follow the index type", func(t *testing.T) {
+		require.NoError(t, validate(t, []byte{
+			OpcodeMiscPrefix, OpcodeMiscTableSize, 0x01,
+			OpcodeDrop,
+			OpcodeRefNull, RefTypeFuncref.Kind(), OpcodeI64Const, 0x01,
+			OpcodeMiscPrefix, OpcodeMiscTableGrow, 0x01,
+			OpcodeDrop,
+		}))
+		require.Error(t, validate(t, []byte{
+			OpcodeRefNull, RefTypeFuncref.Kind(), OpcodeI32Const, 0x01,
+			OpcodeMiscPrefix, OpcodeMiscTableGrow, 0x01, OpcodeDrop,
+		}))
+	})
+	t.Run("table.fill is [i64, ref, i64] on a 64-bit table", func(t *testing.T) {
+		body := append(i64Const(0), OpcodeRefNull, RefTypeFuncref.Kind())
+		body = append(body, i64Const(0)...)
+		require.NoError(t, validate(t, append(body, OpcodeMiscPrefix, OpcodeMiscTableFill, 0x01)))
+	})
+	t.Run("table.init is [i64, i32, i32] on a 64-bit table", func(t *testing.T) {
+		body := append(i64Const(0), i32Const(0)...)
+		body = append(body, i32Const(0)...)
+		require.NoError(t, validate(t, append(body, OpcodeMiscPrefix, OpcodeMiscTableInit, 0x00, 0x01)))
+	})
+	t.Run("table.copy takes the narrower of the two index types as its length", func(t *testing.T) {
+		body := append(i64Const(0), i32Const(0)...)
+		body = append(body, i32Const(0)...)
+		require.NoError(t, validate(t, append(body, OpcodeMiscPrefix, OpcodeMiscTableCopy, 0x01, 0x00)))
+
+		bad := append(i64Const(0), i32Const(0)...)
+		bad = append(bad, i64Const(0)...)
+		require.Error(t, validate(t, append(bad, OpcodeMiscPrefix, OpcodeMiscTableCopy, 0x01, 0x00)))
+	})
+	t.Run("call_indirect takes an i64 index through a 64-bit table", func(t *testing.T) {
+		require.NoError(t, validate(t, append(i64Const(0), OpcodeCallIndirect, 0x00, 0x01)))
+		require.Error(t, validate(t, append(i32Const(0), OpcodeCallIndirect, 0x00, 0x01)))
+	})
 }
