@@ -291,7 +291,7 @@ func TestStreamCopy_BlockedSentinelAsync(t *testing.T) {
 	asyncRead := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, true, nil, nil)
 	out := callBuiltin(asyncRead, uint64(r), 0, 1)
 	if uint32(out[0]) != blockedSentinel {
-		t.Fatalf("got %#x, want BLOCKED (%#x)", out[0], blockedSentinel)
+		t.Fatalf("got %#x, want BLOCKED (%#x)", out[0], uint32(blockedSentinel))
 	}
 }
 

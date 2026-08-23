@@ -22,6 +22,15 @@ func DecodeModule(
 	memoryCapacityReservePages uint32,
 	dwarfEnabled, storeCustomSections bool,
 ) (*wasm.Module, error) {
+	// Whatever the embedder configured, a memory can never be longer than a Go
+	// slice. Clamping here rather than only in Memory.Validate keeps the
+	// implied maximum a sizer fills in for an unbounded memory consistent with
+	// the ceiling that is actually enforced, so the error names the field the
+	// module actually declared. See wasm.MaxAllocatablePages.
+	if memoryLimitPages > wasm.MaxAllocatablePages {
+		memoryLimitPages = wasm.MaxAllocatablePages
+	}
+
 	// Magic number.
 	if len(binary) < 4 || !bytes.Equal(binary[:4], Magic) {
 		return nil, ErrInvalidMagicNumber
@@ -222,6 +231,13 @@ type memorySizer func(minPages uint32, maxPages *uint32) (min uint32, capacity u
 // newMemorySizer sets capacity to the initial size plus the configured reserve,
 // capped at the effective maximum. memoryCapacityFromMax overrides the reserve.
 func newMemorySizer(memoryLimitPages uint32, memoryCapacityFromMax bool, memoryCapacityReservePages uint32) memorySizer {
+	// Clamped once here so the maximum this fills in for an unbounded memory
+	// is one that can actually be honoured. A memory can never be longer than
+	// a Go slice; see wasm.MaxAllocatablePages, which only differs from the
+	// configured limit where an int is 32 bits wide.
+	if memoryLimitPages > wasm.MaxAllocatablePages {
+		memoryLimitPages = wasm.MaxAllocatablePages
+	}
 	return func(minPages uint32, maxPages *uint32) (min, capacity, max uint32) {
 		if maxPages != nil {
 			if memoryCapacityFromMax {

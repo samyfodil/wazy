@@ -3,6 +3,7 @@ package frontend
 import (
 	"fmt"
 	"testing"
+	"unsafe"
 
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/experimental"
@@ -14,6 +15,13 @@ import (
 )
 
 func TestCompiler_LowerToSSA(t *testing.T) {
+	if unsafe.Sizeof(uintptr(0)) != 8 {
+		// The expected SSA embeds field offsets of the runtime structs the
+		// generated code loads from, and those move on a platform with
+		// twelve-byte slice headers. The native compiler only runs on amd64
+		// and arm64, so 64-bit is the only layout it ever emits code for.
+		t.Skip("the native compiler does not run on a 32-bit platform")
+	}
 	// Most of the logic should look similar to Cranelift's Wasm frontend, so when you want to see
 	// what output should look like, you can run:
 	// `~/wasmtime/target/debug/clif-util wasm --target aarch64-apple-darwin testcase.wat -p -t`

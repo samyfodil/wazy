@@ -416,7 +416,7 @@ func TestRun(t *testing.T) {
 			wazyOpts:         []string{"-timeout=1ms"},
 			wasm:             wasmInfiniteLoop,
 			expectedStderr:   "error: module closed with context deadline exceeded (timeout 1ms)\n",
-			expectedExitCode: int(sys.ExitCodeDeadlineExceeded),
+			expectedExitCode: int(deadlineExitCode),
 			test: func(t *testing.T) {
 				require.NoError(t, err)
 			},
@@ -691,6 +691,12 @@ Commands:
   version	Displays the version of wazy CLI
 `, stderr)
 }
+
+// deadlineExitCode is a variable, not sys.ExitCodeDeadlineExceeded used
+// directly: doMain returns int(exitCode) from a uint32 variable, which wraps
+// negative where an int is 32 bits wide (GOARCH=386, arm, wasm). Converting a
+// constant the same way would not compile there, so mirror what doMain does.
+var deadlineExitCode = sys.ExitCodeDeadlineExceeded
 
 func runMain(t *testing.T, workdir string, args []string) (int, string, string) {
 	t.Helper()

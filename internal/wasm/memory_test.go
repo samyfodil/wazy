@@ -3,6 +3,7 @@ package wasm
 import (
 	"math"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1134,4 +1135,27 @@ func (b *sliceBuffer) Reallocate(size uint64) []byte {
 		b.buf = b.buf[:size]
 	}
 	return b.buf
+}
+
+func TestMemory_MaxAllocatablePages(t *testing.T) {
+	// A memory can never be longer than a Go slice, so the platform binds what
+	// the embedder configures. On a 64-bit platform that is the specification's
+	// own ceiling and nothing changes; where an int is 32 bits wide it caps a
+	// memory just under two gibibytes, and a module asking for more has to be
+	// turned away rather than panicking in make.
+	require.True(t, MaxAllocatablePages <= MemoryLimitPages)
+	require.True(t, MemoryPagesToBytesNum(MaxAllocatablePages) <= uint64(math.MaxInt))
+	if strconv.IntSize == 64 {
+		require.Equal(t, uint32(MemoryLimitPages), MaxAllocatablePages)
+	}
+
+	// Validate applies it whatever the caller passes.
+	err := (&Memory{Min: MemoryLimitPages, Cap: MemoryLimitPages, Max: MemoryLimitPages}).
+		Validate(MemoryLimitPages)
+	if MaxAllocatablePages == MemoryLimitPages {
+		require.NoError(t, err)
+	} else {
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "over limit of")
+	}
 }

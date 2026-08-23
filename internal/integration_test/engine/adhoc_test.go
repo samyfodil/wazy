@@ -2567,6 +2567,11 @@ func testHugeBinary(t *testing.T, r wazy.Runtime) {
 	if testing.Short() {
 		t.Skip("skipping testHugeBinary in short mode since it takes a long time")
 	}
+	if strconv.IntSize < 64 {
+		// Compiling forty thousand functions of a thousand instructions each
+		// exhausts a 32-bit address space before the test proves anything.
+		t.Skip("not enough address space on a 32-bit platform")
+	}
 	var addFuncBody []byte
 	for i := 0; i < 1024; i++ {
 		addFuncBody = append(addFuncBody, wasm.OpcodeLocalGet, 0)

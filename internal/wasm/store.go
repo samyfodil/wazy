@@ -274,9 +274,11 @@ func (m *ModuleInstance) validateData(data []DataSegment) (err error) {
 			if d.MemoryIndex >= uint32(len(m.Memories)) {
 				return fmt.Errorf("%s[%d]: unknown memory %d", SectionIDName(SectionIDData), i, d.MemoryIndex)
 			}
-			offset := int(results[0])
-			ceil := offset + len(d.Init)
-			if offset < 0 || ceil > len(m.Memories[d.MemoryIndex].Buffer) {
+			// Widened to uint64: int(results[0]) truncates the offset where an
+			// int is 32 bits wide, and adding len(Init) to an offset near
+			// MaxInt32 overflows to a negative ceil that passes the check.
+			offset := results[0]
+			if offset+uint64(len(d.Init)) > uint64(len(m.Memories[d.MemoryIndex].Buffer)) {
 				return fmt.Errorf("%s[%d]: out of bounds memory access", SectionIDName(SectionIDData), i)
 			}
 		}
@@ -297,9 +299,10 @@ func (m *ModuleInstance) applyData(data []DataSegment) error {
 			if d.MemoryIndex >= uint32(len(m.Memories)) {
 				return fmt.Errorf("%s[%d]: unknown memory %d", SectionIDName(SectionIDData), i, d.MemoryIndex)
 			}
-			offset := int(offsetExprResults[0])
+			// Widened for the same reason as validateData's copy of this check.
+			offset := offsetExprResults[0]
 			mem := m.Memories[d.MemoryIndex]
-			if offset < 0 || offset+len(d.Init) > len(mem.Buffer) {
+			if offset+uint64(len(d.Init)) > uint64(len(mem.Buffer)) {
 				return fmt.Errorf("%s[%d]: out of bounds memory access", SectionIDName(SectionIDData), i)
 			}
 			copy(mem.Buffer[offset:], d.Init)

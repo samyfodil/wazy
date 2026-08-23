@@ -81,7 +81,10 @@ func TestTableSection_Errors(t *testing.T) {
 }
 
 func TestMemorySection(t *testing.T) {
-	max := wasm.MemoryLimitPages
+	// What newMemorySizer fills in for a memory with no declared maximum: the
+	// configured limit clamped to what a slice can address, which is lower
+	// where an int is 32 bits wide. See wasm.MaxAllocatablePages.
+	max := min(wasm.MemoryLimitPages, wasm.MaxAllocatablePages)
 
 	three := uint32(3)
 	tests := []struct {
@@ -183,7 +186,12 @@ func TestMemorySection_Errors(t *testing.T) {
 			},
 			features:         api.CoreFeaturesV2 | api.CoreFeatureMultiMemory,
 			memoryLimitPages: max,
-			expectedErr:      "total memory minimum across 2 memories (80000 pages) exceeds 65536 pages",
+			// Where an int is 32 bits wide a single 40000-page memory is
+			// already past what a slice can address, so that check fires
+			// first and the aggregate is never reached.
+			expectedErr: pick(
+				"total memory minimum across 2 memories (80000 pages) exceeds 65536 pages",
+				"min 40000 pages (2 Gi) "+overAllocatableLimit()),
 		},
 		{
 			name: "aggregate minimum respects an embedder-configured limit below MemoryLimitPages",

@@ -91,6 +91,11 @@ func TestSectionIDName(t *testing.T) {
 }
 
 func TestMemory_Validate(t *testing.T) {
+	// The limit Validate reports is MemoryLimitPages clamped to what a slice can
+	// hold, which differs where an int is 32 bits wide. See MaxAllocatablePages.
+	overLimit := fmt.Sprintf("over limit of %d pages (%s)",
+		MaxAllocatablePages, PagesToUnitOfBytes(MaxAllocatablePages))
+
 	tests := []struct {
 		name        string
 		mem         *Memory
@@ -108,7 +113,7 @@ func TestMemory_Validate(t *testing.T) {
 		{
 			name:        "cap > maxLimit",
 			mem:         &Memory{Min: 2, Cap: math.MaxUint32, Max: 2},
-			expectedErr: "capacity 4294967295 pages (3 Ti) over limit of 65536 pages (4 Gi)",
+			expectedErr: "capacity 4294967295 pages (3 Ti) " + overLimit,
 		},
 		{
 			name:        "max < min",
@@ -118,12 +123,12 @@ func TestMemory_Validate(t *testing.T) {
 		{
 			name:        "min > limit",
 			mem:         &Memory{Min: math.MaxUint32},
-			expectedErr: "min 4294967295 pages (3 Ti) over limit of 65536 pages (4 Gi)",
+			expectedErr: "min 4294967295 pages (3 Ti) " + overLimit,
 		},
 		{
 			name:        "max > limit",
 			mem:         &Memory{Max: math.MaxUint32, IsMaxEncoded: true},
-			expectedErr: "max 4294967295 pages (3 Ti) over limit of 65536 pages (4 Gi)",
+			expectedErr: "max 4294967295 pages (3 Ti) " + overLimit,
 		},
 	}
 
