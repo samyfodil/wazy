@@ -263,6 +263,13 @@ func testMemory64SharedAtomics(t *testing.T, config wazy.RuntimeConfig) {
 	// does not match the memory returns 1 ("not equal") immediately.
 	require.Equal(t, uint64(0), call("notify", 64)[0])
 	require.Equal(t, uint64(1), call("wait32", 64, 0)[0])
+	require.Equal(t, uint64(1), call("wait64", 128, 0)[0])
+
+	// The i64-result read-modify-writes take their address in the index type too.
+	require.Equal(t, ^uint64(0), call("rmw_add64", 128, 1)[0])
+	require.Equal(t, uint64(0), call("load64", 128)[0])
+	require.Equal(t, uint64(0), call("cmpxchg64", 128, 0, 5)[0])
+	require.Equal(t, uint64(5), call("load64", 128)[0])
 
 	for _, addr := range []uint64{1 << 17, 1 << 40, ^uint64(0) &^ 3} {
 		require.ErrorIs(t, callErr("load", addr), wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
@@ -270,6 +277,9 @@ func testMemory64SharedAtomics(t *testing.T, config wazy.RuntimeConfig) {
 		require.ErrorIs(t, callErr("rmw_add", addr, 0), wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 		require.ErrorIs(t, callErr("notify", addr), wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 		require.ErrorIs(t, callErr("wait32", addr, 0), wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+		require.ErrorIs(t, callErr("wait64", addr&^7, 0), wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+		require.ErrorIs(t, callErr("rmw_add64", addr&^7, 0), wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+		require.ErrorIs(t, callErr("cmpxchg64", addr&^7, 0, 0), wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 	}
 	// An unaligned atomic address is a separate trap.
 	require.ErrorIs(t, callErr("load", 1), wasmruntime.ErrRuntimeUnalignedAtomic)
