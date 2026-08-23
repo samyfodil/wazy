@@ -1560,6 +1560,19 @@ Applying the embedder's ceiling at decode time instead would reject conformant
 modules; applying only the specification's ceiling would let a twenty-byte
 module ask the host for 256 TiB. Splitting them is what satisfies both.
 
+Both ceilings are then clamped to what a Go slice can address -- `math.MaxInt`
+bytes, so 2^47-1 pages on a 64-bit platform and 32767 on a 32-bit one, where
+four gibibytes is more than any slice can hold. Without that, `make` would
+panic rather than the module failing to instantiate.
+
+A module's memories are also summed, the way `decodeMemorySection` already
+summed a 32-bit module's: one module must not be able to demand N times the
+ceiling just by declaring N memories under multi-memory. Every memory counts
+against a single total whatever its index type, so a module cannot claim
+`WithMemoryLimitPages` *and* `WithMemory64LimitPages` by declaring one of each;
+the total is bounded by the more permissive of the two, which is the most a
+single memory could have claimed.
+
 ### Bounds checks
 
 A 32-bit memory's address arithmetic cannot overflow: the dynamic address is
