@@ -1168,20 +1168,22 @@ func TestMemory_MaxAllocatablePages(t *testing.T) {
 		require.True(t, MaxAllocatablePages < uint64(MemoryLimitPages))
 	}
 
-	// A four-gibibyte memory instantiates only where a slice can hold one.
+	// A minimum past the ceiling is refused, and refused before anything is
+	// allocated -- which is the whole point, since make would panic rather than
+	// return. Stated as ceiling+1 so it holds at either width and, more
+	// importantly, so this test never asks the host for the memory it is
+	// describing: a literal four-gibibyte allocation succeeds on a kernel that
+	// overcommits and takes the process down on one that does not, which is how
+	// this test first failed on OpenBSD.
 	s := NewStore(api.CoreFeaturesV2, nil)
 	m := ModuleInstance{Memories: make([]*MemoryInstance, 1)}
+	overCeiling := MaxAllocatablePages + 1
 	err := m.buildMemory(&Module{
 		MemorySection: []Memory{{
-			Min: uint64(MemoryLimitPages), Cap: uint64(MemoryLimitPages),
-			Max: uint64(MemoryLimitPages), IsMaxEncoded: true,
+			Min: overCeiling, Cap: overCeiling, Max: overCeiling, IsMaxEncoded: true,
 		}},
 		MemoryDefinitionSection: []MemoryDefinition{{}},
 	}, nil, s)
-	if strconv.IntSize == 64 {
-		require.NoError(t, err)
-	} else {
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "exceeds the limit of")
-	}
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exceeds the limit of")
 }
