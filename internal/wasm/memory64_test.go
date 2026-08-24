@@ -246,7 +246,7 @@ func TestStore_memoryLimitPages_ClampedToWhatASliceCanAddress(t *testing.T) {
 	s := NewStore(api.CoreFeaturesV2|api.CoreFeatureMemory64, nil)
 	s.Memory64LimitPages = Memory64LimitPages
 	limit := s.memoryLimitPages(&Memory{IsMemory64: true})
-	require.Equal(t, maxAllocatablePages, limit)
+	require.Equal(t, MaxAllocatablePages, limit)
 	require.True(t, MemoryPagesToBytesNum(limit) <= uint64(math.MaxInt))
 
 	m := ModuleInstance{Memories: make([]*MemoryInstance, 1)}
@@ -266,7 +266,7 @@ func TestStore_memoryLimitPages(t *testing.T) {
 	// 32 bits wide (GOARCH=386, arm, wasm), where a 65536-page memory is larger
 	// than any slice can be; see
 	// TestStore_memoryLimitPages_ClampedToWhatASliceCanAddress.
-	defaultLimit := min(uint64(MemoryLimitPages), maxAllocatablePages)
+	defaultLimit := min(uint64(MemoryLimitPages), MaxAllocatablePages)
 
 	s := NewStore(api.CoreFeaturesV2, nil)
 	require.Equal(t, defaultLimit, s.memoryLimitPages(&Memory{}))

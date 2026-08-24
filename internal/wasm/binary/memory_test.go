@@ -198,35 +198,10 @@ func Test_newMemorySizer(t *testing.T) {
 			sizer := newMemorySizer(tc.limit, tc.memoryCapacityFromMax, tc.memoryCapacityReservePages)
 			min, capacity, max := sizer(tc.min, tc.max, tc.index64)
 			require.Equal(t, tc.expectedMin, min)
-			// The sizer fills in a maximum no larger than a slice can address,
-			// so both expectations clamp with it where an int is 32 bits wide.
-			require.Equal(t, clampToAllocatable(tc.expectedCapacity), capacity)
-			require.Equal(t, clampToAllocatable(tc.expectedMax), max)
+			require.Equal(t, tc.expectedCapacity, capacity)
+			require.Equal(t, tc.expectedMax, max)
 		})
 	}
-}
-
-// overAllocatableLimit is the tail of the error naming the effective page
-// ceiling, which is lower than MemoryLimitPages where an int is 32 bits wide.
-func overAllocatableLimit() string {
-	return fmt.Sprintf("over limit of %d pages (%s)",
-		wasm.MaxAllocatablePages, wasm.PagesToUnitOfBytes(wasm.MaxAllocatablePages))
-}
-
-// pick returns wide on a platform that can address a full 65536-page memory and
-// narrow otherwise, for the cases where the clamp changes which check fires.
-func pick(wide, narrow string) string {
-	if wasm.MaxAllocatablePages == wasm.MemoryLimitPages {
-		return wide
-	}
-	return narrow
-}
-
-// clampToAllocatable mirrors what newMemorySizer applies, so the expectations
-// stay honest on a platform whose int is 32 bits wide. See
-// wasm.MaxAllocatablePages.
-func clampToAllocatable(pages uint32) uint32 {
-	return min(pages, wasm.MaxAllocatablePages)
 }
 
 func TestMemoryType(t *testing.T) {
@@ -298,18 +273,6 @@ func TestMemoryType(t *testing.T) {
 				tmax = uint64(tc.memoryLimitPages)
 				expectedDecoded.Max = tmax
 			}
-			// ...clamped to what a slice on this platform can address, which
-			// only bites where an int is 32 bits wide.
-			if expectedDecoded.Max > wasm.MaxAllocatablePages {
-				expectedDecoded.Max = wasm.MaxAllocatablePages
-			}
-
-			if tc.input.Min > wasm.MaxAllocatablePages {
-				// A memory this large cannot exist where an int is 32 bits
-				// wide, and decodeMemory rightly says so. What that rejection
-				// looks like is covered by TestMemory_MaxAllocatablePages.
-				t.Skip("declared minimum is past what a slice can address here")
-			}
 
 			features := api.CoreFeaturesV2 | api.CoreFeatureMemory64
 			if tc.input.IsShared {
@@ -332,13 +295,9 @@ func TestDecodeMemoryType_Errors(t *testing.T) {
 		expectedErr    string
 	}{
 		{
-			name:  "max < min",
-			input: []byte{0x1, 0x80, 0x80, 0x4, 0},
-			// A 65536-page minimum is itself past what a slice can address
-			// where an int is 32 bits wide, and that check comes first.
-			expectedErr: pick(
-				"min 65536 pages (4 Gi) > max 0 pages (0 Ki)",
-				"min 65536 pages (4 Gi) "+overAllocatableLimit()),
+			name:        "max < min",
+			input:       []byte{0x1, 0x80, 0x80, 0x4, 0},
+			expectedErr: "min 65536 pages (4 Gi) > max 0 pages (0 Ki)",
 		},
 		{
 			name:        "min > limit",

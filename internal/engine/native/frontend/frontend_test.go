@@ -3,6 +3,7 @@ package frontend
 import (
 	"fmt"
 	"testing"
+	"unsafe"
 
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/experimental"
@@ -14,6 +15,13 @@ import (
 )
 
 func TestCompiler_LowerToSSA(t *testing.T) {
+	if unsafe.Sizeof(uintptr(0)) != 8 {
+		// The expected SSA embeds field offsets of the runtime structs the
+		// generated code loads from, and those move on a platform with
+		// twelve-byte slice headers. The native compiler only runs on amd64
+		// and arm64, so 64-bit is the only layout it ever emits code for.
+		t.Skip("the native compiler does not run on a 32-bit platform")
+	}
 	// Most of the logic should look similar to Cranelift's Wasm frontend, so when you want to see
 	// what output should look like, you can run:
 	// `~/wasmtime/target/debug/clif-util wasm --target aarch64-apple-darwin testcase.wat -p -t`
@@ -1273,9 +1281,9 @@ blk0: (v0:i64, v1:i64)
 	v3:i64 = Load v1, 0x28
 	v4:i32 = CallIndirect v2:sig0, v0, v3
 	v5:i64 = Load v1, 0x8
-	v6:i64 = Load v5, 0x0
+	v6:i64 = Load v5, 0x8
 	v7:i64 = Load v1, 0x8
-	v8:i64 = Load v7, 0x40
+	v8:i64 = Load v7, 0x0
 	v9:i64 = Iconst_64 0x10
 	v10:i64 = Ushr v8, v9
 	v11:i32 = Ireduce v10
@@ -1287,17 +1295,17 @@ blk0: (v0:i64, v1:i64)
 	v16:i64 = CallIndirect v14:sig2, v0, v15, v13
 	v17:i32 = Ireduce v16
 	v18:i64 = Load v1, 0x8
-	v19:i64 = Load v18, 0x0
+	v19:i64 = Load v18, 0x8
 	v20:i64 = Load v1, 0x8
-	v21:i64 = Load v20, 0x40
+	v21:i64 = Load v20, 0x0
 	Store v1, v0, 0x8
 	v22:i64 = Load v1, 0x20
 	v23:i64 = Load v1, 0x28
 	v24:i32 = CallIndirect v22:sig0, v0, v23
 	v25:i64 = Load v1, 0x8
-	v26:i64 = Load v25, 0x0
+	v26:i64 = Load v25, 0x8
 	v27:i64 = Load v1, 0x8
-	v28:i64 = Load v27, 0x40
+	v28:i64 = Load v27, 0x0
 	v29:i64 = Iconst_64 0x10
 	v30:i64 = Ushr v28, v29
 	v31:i32 = Ireduce v30
@@ -1314,7 +1322,7 @@ blk0: (v0:i64, v1:i64)
 	v3:i64 = Load v1, 0x28
 	v4:i32 = CallIndirect v2:sig0, v0, v3
 	v7:i64 = Load v1, 0x8
-	v8:i64 = Load v7, 0x40
+	v8:i64 = Load v7, 0x0
 	v9:i64 = Iconst_64 0x10
 	v10:i64 = Ushr v8, v9
 	v11:i32 = Ireduce v10
@@ -1329,7 +1337,7 @@ blk0: (v0:i64, v1:i64)
 	v23:i64 = Load v1, 0x28
 	v24:i32 = CallIndirect v22:sig0, v0, v23
 	v27:i64 = Load v1, 0x8
-	v28:i64 = Load v27, 0x40
+	v28:i64 = Load v27, 0x0
 	v29:i64 = Iconst_64 0x10
 	v30:i64 = Ushr v28, v29
 	v31:i32 = Ireduce v30
@@ -1358,7 +1366,7 @@ blk0: (v0:i64, v1:i64)
 
 blk1: () <-- (blk0)
 	v12:i64 = Load v1, 0x18
-	v13:i64 = Load v12, 0x38
+	v13:i64 = Load v12, 0x40
 	v14:i64 = Ishl v9, v5
 	v15:i32 = Icmp ge_u, v13, v14
 	Brnz v15, blk2
@@ -1366,7 +1374,7 @@ blk1: () <-- (blk0)
 
 blk2: () <-- (blk1)
 	Store v14, v1, 0x10
-	Store v14, v12, 0x40
+	Store v14, v12, 0x0
 	Jump blk5, v7
 
 blk3: () <-- (blk1)
@@ -1401,7 +1409,7 @@ blk5: (v3:i32) <-- (blk2,blk3,blk4)
 
 blk6: () <-- (blk5)
 	v36:i64 = Load v1, 0x18
-	v37:i64 = Load v36, 0x38
+	v37:i64 = Load v36, 0x40
 	v38:i64 = Ishl v33, v29
 	v39:i32 = Icmp ge_u, v37, v38
 	Brnz v39, blk7
@@ -1409,7 +1417,7 @@ blk6: () <-- (blk5)
 
 blk7: () <-- (blk6)
 	Store v38, v1, 0x10
-	Store v38, v36, 0x40
+	Store v38, v36, 0x0
 	Jump blk10, v31
 
 blk8: () <-- (blk6)
@@ -1449,7 +1457,7 @@ blk0: (v0:i64, v1:i64)
 
 blk1: () <-- (blk0)
 	v12:i64 = Load v1, 0x18
-	v13:i64 = Load v12, 0x38
+	v13:i64 = Load v12, 0x40
 	v14:i64 = Ishl v9, v5
 	v15:i32 = Icmp ge_u, v13, v14
 	Brz v15, blk3
@@ -1457,7 +1465,7 @@ blk1: () <-- (blk0)
 
 blk2: () <-- (blk1)
 	Store v14, v1, 0x10
-	Store v14, v12, 0x40
+	Store v14, v12, 0x0
 	Jump blk5, v7
 
 blk3: () <-- (blk1)
@@ -1491,7 +1499,7 @@ blk5: (v3:i32) <-- (blk2,blk3,blk4)
 
 blk6: () <-- (blk5)
 	v36:i64 = Load v1, 0x18
-	v37:i64 = Load v36, 0x38
+	v37:i64 = Load v36, 0x40
 	v38:i64 = Ishl v33, v29
 	v39:i32 = Icmp ge_u, v37, v38
 	Brz v39, blk8
@@ -1499,7 +1507,7 @@ blk6: () <-- (blk5)
 
 blk7: () <-- (blk6)
 	Store v38, v1, 0x10
-	Store v38, v36, 0x40
+	Store v38, v36, 0x0
 	Jump blk10, v31
 
 blk8: () <-- (blk6)

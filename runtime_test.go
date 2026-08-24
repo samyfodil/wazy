@@ -4,7 +4,6 @@ import (
 	"context"
 	_ "embed"
 	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -169,10 +168,9 @@ func TestRuntime_CompileModule_Errors(t *testing.T) {
 			expectedErr: "invalid version header",
 		},
 		{
-			name: "memory has too many pages",
-			wasm: binaryencoding.EncodeModule(&wasm.Module{MemorySection: []wasm.Memory{{Min: 2, Cap: 2, Max: 70000, IsMaxEncoded: true}}}),
-			expectedErr: fmt.Sprintf("section memory: max 70000 pages (4 Gi) over limit of %d pages (%s)",
-				wasm.MaxAllocatablePages, wasm.PagesToUnitOfBytes(wasm.MaxAllocatablePages)),
+			name:        "memory has too many pages",
+			wasm:        binaryencoding.EncodeModule(&wasm.Module{MemorySection: []wasm.Memory{{Min: 2, Cap: 2, Max: 70000, IsMaxEncoded: true}}}),
+			expectedErr: "section memory: max 70000 pages (4 Gi) over limit of 65536 pages (4 Gi)",
 		},
 	}
 

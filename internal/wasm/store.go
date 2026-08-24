@@ -353,11 +353,19 @@ func NewStore(enabledFeatures api.CoreFeatures, engine Engine) *Store {
 	}
 }
 
-// maxAllocatablePages is the most pages any memory can occupy on this platform,
-// whatever the embedder configures: a slice length is an int, and make rejects a
-// larger one by panicking rather than returning. Clamping here turns a module
-// that asks for more into a clean instantiation error.
-const maxAllocatablePages = uint64(math.MaxInt) >> MemoryPageSizeInBits
+// MaxAllocatablePages is the most pages any memory can occupy on this platform,
+// whatever the embedder configures with WithMemoryLimitPages or
+// WithMemory64LimitPages: a slice length is an int, and make rejects a larger
+// one by panicking rather than returning. Clamping here turns a module that asks
+// for more into a clean instantiation error.
+//
+// It is applied at instantiation rather than at decode because the
+// specification requires a module declaring limits no host could satisfy to
+// still be *valid* -- see the memory64 section of RATIONALE.md. That covers the
+// 32-bit case too: a four-gibibyte memory is longer than any slice where an int
+// is 32 bits wide (GOARCH=386, arm, wasm), and this is what turns it away
+// before make can panic.
+const MaxAllocatablePages = uint64(math.MaxInt) >> MemoryPageSizeInBits
 
 // memoryLimitPages returns the page ceiling that applies to mem.
 func (s *Store) memoryLimitPages(mem *Memory) uint64 {
@@ -365,7 +373,7 @@ func (s *Store) memoryLimitPages(mem *Memory) uint64 {
 	if mem.IsMemory64 {
 		limit = s.Memory64LimitPages
 	}
-	return min(limit, maxAllocatablePages)
+	return min(limit, MaxAllocatablePages)
 }
 
 // maxMemoryLimitPages is the more permissive of the two ceilings, and bounds

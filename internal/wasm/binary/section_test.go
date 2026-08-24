@@ -184,12 +184,7 @@ func TestMemorySection_Errors(t *testing.T) {
 			},
 			features:         api.CoreFeaturesV2 | api.CoreFeatureMultiMemory,
 			memoryLimitPages: max,
-			// Where an int is 32 bits wide a single 40000-page memory is
-			// already past what a slice can address, so that check fires
-			// first and the aggregate is never reached.
-			expectedErr: pick(
-				"total memory minimum across 2 memories (80000 pages) exceeds 65536 pages",
-				"min 40000 pages (2 Gi) "+overAllocatableLimit()),
+			expectedErr:      "total memory minimum across 2 memories (80000 pages) exceeds 65536 pages",
 		},
 		{
 			name: "aggregate minimum respects an embedder-configured limit below MemoryLimitPages",

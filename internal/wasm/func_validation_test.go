@@ -5186,6 +5186,7 @@ func TestFuncValidation_typeIndexAboveMaxInt32IsRejected(t *testing.T) {
 		0, []Index{0}, nil, nil, []Table{{Type: RefTypeFuncref}}, nil, nil, bytes.NewReader(nil))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid type index")
+}
 
 // TestModule_ValidateFunction_Memory64 covers the operand types the memory64
 // proposal makes depend on the index type of the memory an instruction names.

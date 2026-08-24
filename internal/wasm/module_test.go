@@ -91,11 +91,6 @@ func TestSectionIDName(t *testing.T) {
 }
 
 func TestMemory_Validate(t *testing.T) {
-	// The limit Validate reports is MemoryLimitPages clamped to what a slice can
-	// hold, which differs where an int is 32 bits wide. See MaxAllocatablePages.
-	overLimit := fmt.Sprintf("over limit of %d pages (%s)",
-		MaxAllocatablePages, PagesToUnitOfBytes(MaxAllocatablePages))
-
 	tests := []struct {
 		name        string
 		mem         *Memory

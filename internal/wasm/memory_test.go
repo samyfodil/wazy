@@ -1154,24 +1154,34 @@ func (b *sliceBuffer) Reallocate(size uint64) []byte {
 }
 
 func TestMemory_MaxAllocatablePages(t *testing.T) {
-	// A memory can never be longer than a Go slice, so the platform binds what
-	// the embedder configures. On a 64-bit platform that is the specification's
-	// own ceiling and nothing changes; where an int is 32 bits wide it caps a
-	// memory just under two gibibytes, and a module asking for more has to be
-	// turned away rather than panicking in make.
-	require.True(t, MaxAllocatablePages <= MemoryLimitPages)
+	// A memory can never be longer than a Go slice, so the platform binds
+	// whatever the embedder configures. It is enforced at instantiation, not at
+	// decode, because the specification requires a module declaring limits no
+	// host could satisfy to still be valid.
 	require.True(t, MemoryPagesToBytesNum(MaxAllocatablePages) <= uint64(math.MaxInt))
 	if strconv.IntSize == 64 {
-		require.Equal(t, uint32(MemoryLimitPages), MaxAllocatablePages)
+		// Far above anything a 32-bit memory could declare, so only a 64-bit
+		// one ever meets it here.
+		require.True(t, MaxAllocatablePages > uint64(MemoryLimitPages))
+	} else {
+		// Just under two gibibytes, so it binds even a 32-bit memory.
+		require.True(t, MaxAllocatablePages < uint64(MemoryLimitPages))
 	}
 
-	// Validate applies it whatever the caller passes.
-	err := (&Memory{Min: MemoryLimitPages, Cap: MemoryLimitPages, Max: MemoryLimitPages}).
-		Validate(MemoryLimitPages)
-	if MaxAllocatablePages == MemoryLimitPages {
+	// A four-gibibyte memory instantiates only where a slice can hold one.
+	s := NewStore(api.CoreFeaturesV2, nil)
+	m := ModuleInstance{Memories: make([]*MemoryInstance, 1)}
+	err := m.buildMemory(&Module{
+		MemorySection: []Memory{{
+			Min: uint64(MemoryLimitPages), Cap: uint64(MemoryLimitPages),
+			Max: uint64(MemoryLimitPages), IsMaxEncoded: true,
+		}},
+		MemoryDefinitionSection: []MemoryDefinition{{}},
+	}, nil, s)
+	if strconv.IntSize == 64 {
 		require.NoError(t, err)
 	} else {
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "over limit of")
+		require.Contains(t, err.Error(), "exceeds the limit of")
 	}
 }

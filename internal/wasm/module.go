@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
-	"math"
 	"slices"
 	"sort"
 	"strings"
@@ -913,18 +912,6 @@ func (m *ModuleInstance) buildMemory(module *Module, allocator api.MemoryAllocat
 	}
 	return nil
 }
-
-// MaxAllocatablePages is the most pages a memory can occupy on this platform,
-// whatever the embedder configured with WithMemoryLimitPages. A slice length is
-// an int, and make panics rather than returning an error past that, so a module
-// asking for more has to be turned away before anything is allocated.
-//
-// It only binds where an int is 32 bits wide (GOARCH=386, arm, wasm), and caps
-// a memory just under two gibibytes there. On a 64-bit platform it is the
-// specification's own 65536-page ceiling and changes nothing. The specification
-// lets a host provide less memory than a module asks for, so this is a limit
-// wazy is allowed to have.
-const MaxAllocatablePages = uint32(min(uint64(math.MaxInt)>>MemoryPageSizeInBits, uint64(MemoryLimitPages)))
 
 // Index is the offset in an index, not necessarily an absolute position in a Module section. This is because
 // indexs are often preceded by a corresponding type in the Module.ImportSection.
