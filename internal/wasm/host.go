@@ -66,6 +66,9 @@ func NewHostModule(
 	}
 
 	m.IsHostModule = true
+	// Host modules skip Module.Validate, which is where guest modules get canonicalized, so do it here: an
+	// unassigned CanonicalIndex would read as type 0 for every type. See CanonicalizeTypes.
+	CanonicalizeTypes(m.TypeSection)
 	// Uses the address of *wasm.Module as the module ID so that host functions can have each state per compilation.
 	// Downside of this is that compilation cache on host functions (trampoline codes for Go functions and
 	// Wasm codes for Wasm-implemented host functions) are not available and compiles each time. On the other hand,

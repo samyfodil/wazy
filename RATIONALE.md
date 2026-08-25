@@ -1722,6 +1722,61 @@ above is what `TestRelaxedSemantics` in
 `internal/integration_test/spectest/relaxed-simd` asserts, with operands chosen
 to tell the permitted answers apart.
 
+## Garbage collection (WasmGC): the type system
+
+The [GC proposal](https://github.com/WebAssembly/gc) adds struct and array types
+on a managed heap. What has landed so far is the type system: composite types,
+the `sub`/`sub final` subtype relation, the nine new abstract heap types and
+their lattice, and iso-recursive canonicalization. Instructions and the heap
+itself have not.
+
+**Composite types live on `FunctionType`.** A GC defined type is a function, a
+struct or an array, so the obvious move is a new sum type for the type section.
+`TypeSection []FunctionType` is reached from the decoder, both engines, the
+store's type-ID table, host module assembly and the public
+`api.FunctionDefinition`, and none of those care about struct types. So instead
+`FunctionType` grew `CompositeKind`, `Fields` and the subtype fields, all of
+whose zero values spell "a plain final function type". Every pre-GC construction
+site stays correct without being touched, and the parts that do care --
+`buildKey`, `EqualsType`, the subtype checks -- branch on `CompositeKind`. The
+name is now wrong for a third of its instances; renaming it is a mechanical
+change that can happen whenever, and it is not worth blocking the proposal on.
+
+**Type identity is a canonical index, not a rewritten one.** Two structurally
+identical rec groups are the same type, wherever they sit in a module's type
+section -- so `(ref $a)` and `(ref $b)` are interchangeable when `$a` and `$b`
+are separate but identical declarations. A `ValueType` carries a raw type index,
+which makes the two look different. One fix is to rewrite every index in the
+module to its representative after decoding; that breaks down because indices
+are also *created* during validation (a block type, `ref.func`'s result), long
+after such a pass would have run. So `CanonicalizeTypes` stamps a
+`CanonicalIndex` on each type instead, and concrete references resolve through
+it at comparison time. The comparison already receives the type section, so this
+cost no plumbing, and a reference minted mid-validation canonicalizes the same
+way as one that came out of the decoder.
+
+Before this, concrete references compared as *equal to anything*: a concrete
+ref's kind byte is `funcref`, and the pre-GC check read that as "the expected
+type is abstract funcref, so any concrete ref matches". That accident is what
+made `type-equivalence.wast` pass. It also hid two decoder bugs that the GC
+suite found immediately: a type's key was cached before its rec group fields
+were set, so every member of a rec group keyed identically to a standalone type
+with the same signature; and a standalone type could not reference itself, which
+GC allows because a bare type is its own rec group of one.
+
+**Where the roots are is still open.** Reclamation, not allocation, is the hard
+part, and the question a design has to answer is where a live reference can be
+found. Allocation can be a Go object per struct or array with the guest holding
+an index, the way `ExceptionTable` already works; the problem is that nothing
+tells wazy when the guest drops one. The likely answer is a handle table
+scanned conservatively: every wasm value stack word and local is treated as a
+possible handle, and a word that merely looks like one retains an object that is
+actually dead. That is sound for a non-moving collector, needs no stack maps and
+costs nothing on the hot path, which matters because the native engine's whole
+point is not paying for bookkeeping. The interpreter could be precise -- it
+knows which slots are reference-typed -- but there is no reason to write two
+collectors before one is proven.
+
 ## Compiler engine implementation
 
 ### Why it's safe to execute runtime-generated machine codes against async Goroutine preemption

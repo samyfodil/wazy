@@ -36,11 +36,17 @@ func decodeTypeSection(enabledFeatures api.CoreFeatures, buf []byte, offset int)
 			startIdx := uint32(len(result))
 			for j := uint32(0); j < recCount; j++ {
 				var ft wasm.FunctionType
-				if offset, err = decodeFunctionType(enabledFeatures, buf, offset, &vtArena, &ft); err != nil {
+				if offset, err = decodeDefinedType(enabledFeatures, buf, offset, &vtArena, &ft); err != nil {
 					return nil, offset, fmt.Errorf("read %d-th type in rec group: %v", j, err)
 				}
 				ft.RecGroupSize = int(recCount)
 				ft.RecGroupPosition = int(j)
+				// Cache the key only now that the rec group fields are set, since they are part of it. Decoding
+				// is single-threaded and this type is not yet shared, whereas the runtime call_indirect helpers
+				// reach key() through Store.GetFunctionTypeID on a *shared* FunctionType -- e.g.
+				// internal/emscripten (*InvokeFunc).Call and table.LookupFunction both call it while executing
+				// guest code, which is multi-goroutine -- so key() itself never writes.
+				ft.CacheKey()
 				result = append(result, ft)
 			}
 			for j := uint32(0); j < recCount; j++ {
@@ -52,12 +58,19 @@ func decodeTypeSection(enabledFeatures api.CoreFeatures, buf []byte, offset int)
 			// Decode as a regular function type starting from the same offset: since we never advanced past
 			// the peeked byte, there's nothing to "put back" the way the reader-based code needed to.
 			var ft wasm.FunctionType
-			if offset, err = decodeFunctionType(enabledFeatures, buf, offset, &vtArena, &ft); err != nil {
+			if offset, err = decodeDefinedType(enabledFeatures, buf, offset, &vtArena, &ft); err != nil {
 				return nil, offset, fmt.Errorf("read %d-th type: %v", i, err)
 			}
-			if err := validateTypeForwardRefs(&ft, uint32(len(result))); err != nil {
+			// Under GC a standalone type is its own rec group of one, so it may reference itself: hence
+			// +1. Typed function references alone does not have implicit rec groups, and rejects it.
+			selfRef := uint32(0)
+			if enabledFeatures.IsEnabled(api.CoreFeatureGC) {
+				selfRef = 1
+			}
+			if err := validateTypeForwardRefs(&ft, uint32(len(result))+selfRef); err != nil {
 				return nil, offset, err
 			}
+			ft.CacheKey()
 			result = append(result, ft)
 		}
 	}
@@ -78,6 +91,14 @@ func validateTypeForwardRefs(ft *wasm.FunctionType, maxTypeIndex uint32) error {
 		if vt.IsConcreteRef() && vt.TypeIndex() >= maxTypeIndex {
 			return fmt.Errorf("unknown type index %d in result[%d]", vt.TypeIndex(), i)
 		}
+	}
+	for i, f := range ft.Fields {
+		if f.Type.IsConcreteRef() && f.Type.TypeIndex() >= maxTypeIndex {
+			return fmt.Errorf("unknown type index %d in field[%d]", f.Type.TypeIndex(), i)
+		}
+	}
+	if ft.HasSupertype && ft.Supertype >= maxTypeIndex {
+		return fmt.Errorf("unknown supertype index %d", ft.Supertype)
 	}
 	return nil
 }
@@ -322,7 +343,7 @@ func decodeElementSection(buf []byte, offset int, enabledFeatures api.CoreFeatur
 	return result, offset, nil
 }
 
-func decodeCodeSection(buf []byte, offset int, sectionSize uint32) ([]wasm.Code, int, error) {
+func decodeCodeSection(buf []byte, offset int, sectionSize uint32, enabledFeatures api.CoreFeatures) ([]wasm.Code, int, error) {
 	codeSectionStart := offset
 	vs, n, err := leb128.LoadUint32(buf[offset:])
 	if err != nil {
@@ -343,7 +364,7 @@ func decodeCodeSection(buf []byte, offset int, sectionSize uint32) ([]wasm.Code,
 	// (see decodeCode) allocates at most once per section rather than re-deriving groups per function.
 	var locals []localsGroup
 	for i := uint32(0); i < vs; i++ {
-		offset, arenaOff, err = decodeCode(buf, offset, codeSectionStart, arena, arenaOff, &localTypes, &locals, &result[i])
+		offset, arenaOff, err = decodeCode(buf, offset, codeSectionStart, arena, arenaOff, &localTypes, &locals, enabledFeatures, &result[i])
 		if err != nil {
 			return nil, offset, fmt.Errorf("read %d-th code segment: %v", i, err)
 		}

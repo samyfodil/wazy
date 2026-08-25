@@ -206,6 +206,20 @@ const CoreFeatureMultiMemory CoreFeatures = CoreFeatureSIMD << 7
 // See https://github.com/WebAssembly/memory64 for further details.
 const CoreFeatureMemory64 CoreFeatures = CoreFeatureSIMD << 8
 
+// CoreFeatureGC enables the garbage collection proposal ("WasmGC"): struct and
+// array types allocated on a managed heap, with the reference types and cast
+// instructions that go with them. It implies CoreFeatureTypedFunctionReferences,
+// which must be enabled alongside it.
+//
+// Here are the notable effects:
+//   - The type section may define struct and array types, not just function
+//     types, and may declare a subtype relation with `sub` / `sub final`.
+//   - Nine abstract heap types are added -- nofunc, noextern, none, any, eq,
+//     i31, struct, array, noexn -- with a subtyping lattice over them.
+//
+// See https://github.com/WebAssembly/gc for further details.
+const CoreFeatureGC CoreFeatures = CoreFeatureSIMD << 9
+
 // SetEnabled enables or disables the feature or group of features.
 func (f CoreFeatures) SetEnabled(feature CoreFeatures, val bool) CoreFeatures {
 	if val {
@@ -284,6 +298,8 @@ func featureName(f CoreFeatures) string {
 		return "multi-memory"
 	case CoreFeatureMemory64:
 		return "memory64"
+	case CoreFeatureGC:
+		return "gc"
 	}
 	return ""
 }

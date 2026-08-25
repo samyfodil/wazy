@@ -4,11 +4,12 @@ import (
 	"fmt"
 	"unicode/utf8"
 
+	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/leb128"
 	"github.com/samyfodil/wazy/internal/wasm"
 )
 
-func decodeValueTypes(buf []byte, offset int, num uint32, arena *valueTypeArena) ([]wasm.ValueType, int, error) {
+func decodeValueTypes(enabledFeatures api.CoreFeatures, buf []byte, offset int, num uint32, arena *valueTypeArena) ([]wasm.ValueType, int, error) {
 	if num == 0 {
 		return nil, offset, nil
 	}
@@ -18,7 +19,7 @@ func decodeValueTypes(buf []byte, offset int, num uint32, arena *valueTypeArena)
 	// one backing array across function types is safe; the returned subslice is capacity-capped for defense.
 	ret := arena.alloc(int(num))
 	for i := uint32(0); i < num; i++ {
-		vt, o, err := decodeValueType(buf, offset)
+		vt, o, err := decodeValueType(enabledFeatures, buf, offset)
 		if err != nil {
 			return nil, offset, err
 		}
@@ -31,7 +32,7 @@ func decodeValueTypes(buf []byte, offset int, num uint32, arena *valueTypeArena)
 // decodeValueType decodes a single value type from buf[offset:], returning it and the offset after it. It is
 // split out of decodeValueTypes so that single-value-type callers (e.g. decodeGlobalType) don't need to allocate
 // a 1-element slice just to extract one wasm.ValueType.
-func decodeValueType(buf []byte, offset int) (wasm.ValueType, int, error) {
+func decodeValueType(enabledFeatures api.CoreFeatures, buf []byte, offset int) (wasm.ValueType, int, error) {
 	b, offset, err := readByte(buf, offset)
 	if err != nil {
 		return 0, offset, err
@@ -42,10 +43,31 @@ func decodeValueType(buf []byte, offset int) (wasm.ValueType, int, error) {
 		wasm.ValueTypeExnref.Kind():
 		return wasm.ValueType(b), offset, nil
 	case wasm.RefPrefixNullable, wasm.RefPrefixNonNullable:
-		return decodeRefType(buf, offset, b == wasm.RefPrefixNullable)
+		return decodeRefType(enabledFeatures, buf, offset, b == wasm.RefPrefixNullable)
 	default:
+		if vt := wasm.ValueType(b); vt.IsGCHeapType() {
+			// A GC abstract heap type in its short (nullable) spelling, e.g. 0x6e for anyref.
+			if err := enabledFeatures.RequireEnabled(api.CoreFeatureGC); err != nil {
+				return 0, offset, fmt.Errorf("value type %s is invalid as %w", wasm.ValueTypeName(vt), err)
+			}
+			return vt, offset, nil
+		}
 		return 0, offset, fmt.Errorf("invalid value type: %d", b)
 	}
+}
+
+// decodeStorageType decodes a struct field or array element type: a value type, or one of the packed types
+// i8 (0x78) and i16 (0x77), which are valid nowhere else.
+func decodeStorageType(enabledFeatures api.CoreFeatures, buf []byte, offset int) (wasm.ValueType, int, error) {
+	b, o, err := readByte(buf, offset)
+	if err != nil {
+		return 0, offset, err
+	}
+	switch wasm.ValueType(b) {
+	case wasm.ValueTypeI8, wasm.ValueTypeI16:
+		return wasm.ValueType(b), o, nil
+	}
+	return decodeValueType(enabledFeatures, buf, offset)
 }
 
 // decodeRefType decodes a heap type from buf[offset:] and returns the corresponding ValueType with the given
@@ -53,7 +75,7 @@ func decodeValueType(buf []byte, offset int) (wasm.ValueType, int, error) {
 //   - (ref null func)   -> funcref
 //   - (ref null extern) -> externref
 //   - (ref null exn)    -> exnref
-func decodeRefType(buf []byte, offset int, nullable bool) (wasm.ValueType, int, error) {
+func decodeRefType(enabledFeatures api.CoreFeatures, buf []byte, offset int, nullable bool) (wasm.ValueType, int, error) {
 	ht, n, err := leb128.LoadInt33AsInt64(buf[offset:])
 	if err != nil {
 		return 0, offset, fmt.Errorf("read ref heap type: %w", err)
@@ -69,7 +91,15 @@ func decodeRefType(buf []byte, offset int, nullable bool) (wasm.ValueType, int, 
 		vt = wasm.ValueTypeExnref
 	default:
 		if ht < 0 {
-			return 0, offset, fmt.Errorf("unknown abstract heap type: %d", ht)
+			abstract, ok := wasm.AbstractHeapTypeValueType(ht)
+			if !ok {
+				return 0, offset, fmt.Errorf("unknown abstract heap type: %d", ht)
+			}
+			if err := enabledFeatures.RequireEnabled(api.CoreFeatureGC); err != nil {
+				return 0, offset, fmt.Errorf("heap type %s is invalid as %w", wasm.ValueTypeName(abstract), err)
+			}
+			vt = abstract
+			break
 		}
 		vt = wasm.ValueTypeConcreteRef(uint32(ht), nullable)
 	}

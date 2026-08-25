@@ -649,7 +649,9 @@ func (m *ModuleInstance) resolveImports(ctx context.Context, module *Module) (er
 				}
 
 				if expected.Mutable && expected.ValType != importedGlobal.Type.ValType ||
-					!expected.Mutable && !isRefSubtypeOf(importedGlobal.Type.ValType, expected.ValType) {
+					// nil type section: the two value types come from different modules, so a concrete ref's
+					// index in one means nothing in the other. They can only match exactly, as before GC.
+					!expected.Mutable && !isRefSubtypeOf(importedGlobal.Type.ValType, expected.ValType, nil) {
 					err = errorInvalidImport(i, fmt.Errorf("value type mismatch: %s != %s",
 						ValueTypeName(expected.ValType), ValueTypeName(importedGlobal.Type.ValType)))
 					return

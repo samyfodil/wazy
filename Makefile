@@ -164,6 +164,14 @@ typed_function_references_wast_files := \
 	return_call_ref.wast return_call.wast select.wast table-sub.wast table.wast \
 	type-equivalence.wast unreached-invalid.wast unreached-valid.wast
 
+spectest_gc_dir := $(spectest_base_dir)/gc
+spectest_gc_testdata_dir := $(spectest_gc_dir)/testdata
+spec_version_gc := 756060f5816c7e2159f4817fbdee76cf52f9c923
+# Only the type-level files so far: the rest of test/core/gc needs the 0xfb
+# instructions, which are not implemented yet. type-subtyping.wast is held back
+# with them because it uses ref.test/ref.cast.
+gc_wast_files := type-canon.wast type-equivalence.wast type-rec.wast type-subtyping-invalid.wast
+
 .PHONY: build.spectest
 build.spectest:
 	@$(MAKE) build.spectest.v1
@@ -176,6 +184,7 @@ build.spectest:
 	@$(MAKE) build.spectest.relaxed_simd
 	@$(MAKE) build.spectest.multi_memory
 	@$(MAKE) build.spectest.memory64
+	@$(MAKE) build.spectest.gc
 
 .PHONY: build.spectest.v1
 build.spectest.v1: # Note: wabt by default uses >1.0 features, so wast2json flags might drift as they include more. See WebAssembly/wabt#1878
@@ -286,6 +295,19 @@ build.spectest.memory64: # Needs wasm-tools: wast2json cannot emit the "module d
 			curl -sJL "https://raw.githubusercontent.com/WebAssembly/memory64/$(spec_version_memory64)/test/core/$$f" -O; \
 		done
 	@cd $(spectest_memory64_testdata_dir) && for f in `find . -name '*.wast'`; do \
+		wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
+	done
+
+.PHONY: build.spectest.gc
+build.spectest.gc: # Needs wasm-tools: wast2json does not support the GC proposal's type section.
+	@rm -rf $(spectest_gc_testdata_dir)
+	@mkdir -p $(spectest_gc_testdata_dir)
+	@cd $(spectest_gc_testdata_dir) \
+		&& for f in $(gc_wast_files); do \
+			curl -sfJL "https://raw.githubusercontent.com/WebAssembly/gc/$(spec_version_gc)/test/core/$$f" -o $$f \
+			|| curl -sfJL "https://raw.githubusercontent.com/WebAssembly/gc/$(spec_version_gc)/test/core/gc/$$f" -o $$f; \
+		done
+	@cd $(spectest_gc_testdata_dir) && for f in `find . -name '*.wast'`; do \
 		wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
 	done
 

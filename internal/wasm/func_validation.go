@@ -158,6 +158,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 
 	sts.reset(functionType)
 	valueTypeStack := &sts.vs
+	valueTypeStack.types = m.TypeSection
 	// We start with the outermost control block which is for function return if the code branches into it.
 	controlBlockStack := &sts.cs
 
@@ -601,7 +602,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 					}
 					if actual == valueTypeUnknown {
 						defaultLabelType[index] = valueTypeUnknown
-					} else if !isRefSubtypeOf(actual, exp) {
+					} else if !isRefSubtypeOf(actual, exp, m.TypeSection) {
 						return typeMismatchError(true, OpcodeBrTableName, actual, exp, i)
 					}
 				}
@@ -626,7 +627,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 					return fmt.Errorf("inconsistent block type length for %s at %d; %v (ln=%d) != %v (l=%d)", OpcodeBrTableName, l, defaultLabelType, ln, tableLabelType, l)
 				}
 				for i := range defaultLabelType {
-					if defaultLabelType[i] != valueTypeUnknown && !areRefTypesCompatible(defaultLabelType[i], tableLabelType[i]) {
+					if defaultLabelType[i] != valueTypeUnknown && !areRefTypesCompatible(defaultLabelType[i], tableLabelType[i], m.TypeSection) {
 						return fmt.Errorf("inconsistent block type for %s at %d", OpcodeBrTableName, l)
 					}
 				}
@@ -724,7 +725,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 						return fmt.Errorf("catch clause type mismatch: catch delivers %d values but label expects %d", len(catchTypes), len(expectedTypes))
 					}
 					for j := range catchTypes {
-						if !isRefSubtypeOf(catchTypes[j], expectedTypes[j]) {
+						if !isRefSubtypeOf(catchTypes[j], expectedTypes[j], m.TypeSection) {
 							return fmt.Errorf("catch clause type mismatch at index %d: %v is not a subtype of %v", j, catchTypes[j], expectedTypes[j])
 						}
 					}
@@ -753,7 +754,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 						return fmt.Errorf("catch_all clause type mismatch: catch delivers %d values but label expects %d", len(catchTypes), len(expectedTypes))
 					}
 					for j := range catchTypes {
-						if !isRefSubtypeOf(catchTypes[j], expectedTypes[j]) {
+						if !isRefSubtypeOf(catchTypes[j], expectedTypes[j], m.TypeSection) {
 							return fmt.Errorf("catch_all clause type mismatch at index %d", j)
 						}
 					}
@@ -1240,7 +1241,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				nonNullTp = tp.AsNonNullable()
 			}
 			lastTarget := targetResultType[len(targetResultType)-1]
-			if nonNullTp != valueTypeUnknown && !isRefSubtypeOf(nonNullTp, lastTarget) {
+			if nonNullTp != valueTypeUnknown && !isRefSubtypeOf(nonNullTp, lastTarget, m.TypeSection) {
 				return fmt.Errorf("type mismatch on %s: ref type %s is not a subtype of label's last result %s",
 					OpcodeBrOnNonNullName, ValueTypeName(nonNullTp), ValueTypeName(lastTarget))
 			}
@@ -1444,7 +1445,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 						return fmt.Errorf("table of index %d not found", tableIndex)
 					}
 
-					if !isRefSubtypeOf(m.ElementSection[elementIndex].Type, tables[tableIndex].Type) {
+					if !isRefSubtypeOf(m.ElementSection[elementIndex].Type, tables[tableIndex].Type, m.TypeSection) {
 						return fmt.Errorf("type mismatch for table.init: element type %s does not match table type %s",
 							RefTypeName(m.ElementSection[elementIndex].Type),
 							RefTypeName(tables[tableIndex].Type),
@@ -1493,7 +1494,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 						return fmt.Errorf("table of index %d not found", srcTableIndex)
 					}
 
-					if !isRefSubtypeOf(tables[srcTableIndex].Type, tables[dstTableIndex].Type) {
+					if !isRefSubtypeOf(tables[srcTableIndex].Type, tables[dstTableIndex].Type, m.TypeSection) {
 						return fmt.Errorf("table type mismatch for table.copy: %s (src) != %s (dst)",
 							RefTypeName(tables[srcTableIndex].Type), RefTypeName(tables[dstTableIndex].Type))
 					}
@@ -2457,14 +2458,14 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				return fmt.Errorf("reference types cannot be used for non typed select instruction")
 			}
 
-			if v1 != valueTypeUnknown && v2 != valueTypeUnknown && !areRefTypesCompatible(v1, v2) {
+			if v1 != valueTypeUnknown && v2 != valueTypeUnknown && !areRefTypesCompatible(v1, v2, m.TypeSection) {
 				return fmt.Errorf("type mismatch on 1st and 2nd select operands")
 			}
 			if v1 == valueTypeUnknown {
 				valueTypeStack.push(v2)
 			} else if v2 == valueTypeUnknown {
 				valueTypeStack.push(v1)
-			} else if isRefSubtypeOf(v1, v2) {
+			} else if isRefSubtypeOf(v1, v2, m.TypeSection) {
 				valueTypeStack.push(v2)
 			} else {
 				valueTypeStack.push(v1)
@@ -2665,6 +2666,8 @@ type valueTypeStack struct {
 	maximumStackPointer int
 	// requireStackValuesTmp is used in requireStackValues function to reduce the allocation.
 	requireStackValuesTmp []ValueType
+	// types is the validated module's type section, needed to resolve concrete refs when subtype-checking.
+	types []FunctionType
 }
 
 // Only used in the analyzeFunction below.
@@ -2703,7 +2706,7 @@ func (s *valueTypeStack) popAndVerifyType(expected ValueType) error {
 	if !ok {
 		return fmt.Errorf("%s missing", ValueTypeName(expected))
 	}
-	if have != valueTypeUnknown && expected != valueTypeUnknown && !isRefSubtypeOf(have, expected) {
+	if have != valueTypeUnknown && expected != valueTypeUnknown && !isRefSubtypeOf(have, expected, s.types) {
 		return fmt.Errorf("type mismatch: expected %s, but was %s", ValueTypeName(expected), ValueTypeName(have))
 	}
 	return nil
@@ -2785,7 +2788,7 @@ func (s *valueTypeStack) requireStackValues(
 	// Finally, check the types of the values:
 	for i, v := range s.requireStackValuesTmp {
 		nextWant := want[countWanted-i-1] // have is in reverse order (stack)
-		if v != valueTypeUnknown && nextWant != valueTypeUnknown && !isRefSubtypeOf(v, nextWant) {
+		if v != valueTypeUnknown && nextWant != valueTypeUnknown && !isRefSubtypeOf(v, nextWant, s.types) {
 			return typeMismatchError(isParam, context, v, nextWant, i)
 		}
 	}
