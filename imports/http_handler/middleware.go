@@ -45,15 +45,20 @@ type Middleware interface {
 var _ Middleware = (*middleware)(nil)
 
 type middleware struct {
-	host            Host
-	runtime         wazy.Runtime
-	guestModule     wazy.CompiledModule
-	moduleConfig    wazy.ModuleConfig
-	guestConfig     []byte
-	logger          Logger
-	pool            sync.Pool
-	features        Features
-	instanceCounter uint64
+	host         Host
+	runtime      wazy.Runtime
+	guestModule  wazy.CompiledModule
+	moduleConfig wazy.ModuleConfig
+	guestConfig  []byte
+	logger       Logger
+	pool         sync.Pool
+	features     Features
+	// instanceCounter names each guest instance. atomic.Uint64 rather than a
+	// plain uint64 with atomic.AddUint64: sync/atomic needs a 64-bit-aligned
+	// address on a platform whose int is 32 bits wide (GOARCH=386, arm, wasm),
+	// and the compiler only guarantees that for a struct's first word. This
+	// type carries its own alignment, so the field can sit anywhere.
+	instanceCounter atomic.Uint64
 }
 
 func (m *middleware) Features() Features {
@@ -215,7 +220,7 @@ type guest struct {
 }
 
 func (m *middleware) newGuest(ctx context.Context) (*guest, error) {
-	moduleName := strconv.FormatUint(atomic.AddUint64(&m.instanceCounter, 1), 10)
+	moduleName := strconv.FormatUint(m.instanceCounter.Add(1), 10)
 
 	g, err := m.runtime.InstantiateModule(ctx, m.guestModule, m.moduleConfig.WithName(moduleName))
 	if err != nil {

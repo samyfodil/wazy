@@ -665,7 +665,9 @@ func (m *Module) validateMemory(memories []Memory, globals []GlobalType, enabled
 			if d.MemoryIndex >= uint32(len(memories)) {
 				return fmt.Errorf("unknown memory %d for data segment", d.MemoryIndex)
 			}
-			if err := m.validateConstExpression(importedGlobals, 0, &d.OffsetExpression, ValueTypeI32); err != nil {
+			// An active data segment's offset is given in the index type of the
+			// memory it initializes: i64 for a 64-bit memory.
+			if err := m.validateConstExpression(importedGlobals, 0, &d.OffsetExpression, memories[d.MemoryIndex].IndexType()); err != nil {
 				return fmt.Errorf("calculate offset: %w", err)
 			}
 		}
@@ -681,7 +683,7 @@ func (m *Module) validateImports(enabledFeatures api.CoreFeatures) error {
 		}
 		switch imp.Type {
 		case ExternTypeFunc:
-			if int(imp.DescFunc) >= len(m.TypeSection) {
+			if indexOutOfRange(imp.DescFunc, len(m.TypeSection)) {
 				return fmt.Errorf("invalid import[%q.%q] function: type index out of range", imp.Module, imp.Name)
 			}
 		case ExternTypeGlobal:
@@ -692,7 +694,7 @@ func (m *Module) validateImports(enabledFeatures api.CoreFeatures) error {
 				return fmt.Errorf("invalid import[%q.%q] global: %w", imp.Module, imp.Name, err)
 			}
 		case ExternTypeTag:
-			if int(imp.DescTag) >= len(m.TypeSection) {
+			if indexOutOfRange(imp.DescTag, len(m.TypeSection)) {
 				return fmt.Errorf("invalid import[%q.%q] tag: type index out of range", imp.Module, imp.Name)
 			}
 			if len(m.TypeSection[imp.DescTag].Results) > 0 {
@@ -869,17 +871,46 @@ func paramNames(localNames IndirectNameMap, funcIdx uint32, paramLen int) []stri
 	return nil
 }
 
-func (m *ModuleInstance) buildMemory(module *Module, allocator api.MemoryAllocator) {
+func (m *ModuleInstance) buildMemory(module *Module, allocator api.MemoryAllocator, s *Store) error {
+	// A 64-bit memory's declared minimum is bounded only by the specification's
+	// 2^48-page ceiling at validation time -- the specification requires a
+	// module declaring that much to be *valid*, so the embedder's far smaller
+	// allocation limit cannot be applied there without rejecting conformant
+	// modules. It is applied here instead, before anything is allocated, and
+	// the sum is bounded the same way decodeMemorySection bounds a 32-bit
+	// module's: one module must not be able to demand N times the configured
+	// ceiling just by declaring N memories. Every memory counts against one
+	// total, whatever its index type, so mixing the two cannot add the two
+	// ceilings together; the total is bounded by the more permissive of them.
+	aggregate := s.maxMemoryLimitPages()
+	var total uint64
+	for i := range module.MemorySection {
+		memSec := &module.MemorySection[i]
+		limit := s.memoryLimitPages(memSec)
+		if memSec.Min > limit {
+			return fmt.Errorf("memory[%d] minimum of %d pages (%s) exceeds the limit of %d pages (%s)",
+				i, memSec.Min, PagesToUnitOfBytes(memSec.Min), limit, PagesToUnitOfBytes(limit))
+		}
+		// No overflow: total is at most aggregate here or the loop has already
+		// returned, and Min is at most limit, which is at most aggregate.
+		total += memSec.Min
+		if total > aggregate {
+			return fmt.Errorf("total memory minimum across %d memories (%d pages) exceeds %d pages",
+				i+1, total, aggregate)
+		}
+	}
+
 	idx := module.ImportMemoryCount
 	for i := range module.MemorySection {
 		memSec := &module.MemorySection[i]
-		mem := NewMemoryInstance(memSec, allocator, m.Engine)
+		mem := NewMemoryInstance(memSec, allocator, m.Engine, s.memoryLimitPages(memSec))
 		poolAuditHold(mem, m)
 		mem.definition = &module.MemoryDefinitionSection[idx]
 		mem.index = idx
 		m.Memories[idx] = mem
 		idx++
 	}
+	return nil
 }
 
 // Index is the offset in an index, not necessarily an absolute position in a Module section. This is because
@@ -890,6 +921,19 @@ func (m *ModuleInstance) buildMemory(module *Module, allocator api.MemoryAllocat
 //
 // See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#binary-index
 type Index = uint32
+
+// indexOutOfRange reports whether an index read out of a module falls outside a
+// slice of the given length.
+//
+// Use it in preference to "int(index) >= len(s)". An int is 32 bits wide on
+// GOARCH=386, arm and wasm, where int(index) of anything above math.MaxInt32 is
+// negative -- so the naive form accepts the index and the very next line panics.
+// Every index here is LEB128-decoded straight from the module body, so a
+// malformed module reaches it. Widening both sides to uint64 is exact on every
+// platform, and inlines away.
+func indexOutOfRange(index uint32, length int) bool {
+	return uint64(index) >= uint64(length)
+}
 
 // FunctionType is a possibly empty function signature.
 //
@@ -1042,15 +1086,29 @@ type Import struct {
 
 // Memory describes the limits of pages (64KB) in a memory.
 type Memory struct {
-	Min, Cap, Max uint32
+	Min, Cap, Max uint64
 	// IsMaxEncoded true if the Max is encoded in the original binary.
 	IsMaxEncoded bool
 	// IsShared true if the memory is shared for access from multiple agents.
 	IsShared bool
+	// IsMemory64 true if this memory is indexed by i64 instead of i32, per the
+	// memory64 proposal. Its page counts are then bounded by Memory64LimitPages
+	// rather than MemoryLimitPages.
+	IsMemory64 bool
+}
+
+// IndexType returns the value type of the addresses, sizes and lengths this
+// memory is indexed by: ValueTypeI64 for a 64-bit memory, ValueTypeI32
+// otherwise.
+func (m *Memory) IndexType() ValueType {
+	if m.IsMemory64 {
+		return ValueTypeI64
+	}
+	return ValueTypeI32
 }
 
 // Validate ensures values assigned to Min, Cap and Max are within valid thresholds.
-func (m *Memory) Validate(memoryLimitPages uint32) error {
+func (m *Memory) Validate(memoryLimitPages uint64) error {
 	min, capacity, max := m.Min, m.Cap, m.Max
 
 	if max > memoryLimitPages {

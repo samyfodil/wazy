@@ -107,7 +107,12 @@ func DecodeModule(
 				} else {
 					// Mirrors io.CopyN's behavior (used here prior to the slice-indexed rewrite): io.EOF
 					// whenever fewer than limit bytes remain, never io.ErrUnexpectedEOF for a partial remainder.
-					if int(limit) > len(binary)-offset {
+					// Compared as uint64: limit is a uint32 taken from the
+					// module's own section header, so a malformed module can
+					// put it above math.MaxInt32, and int(limit) is negative
+					// where an int is 32 bits wide -- which would pass this
+					// check and then wind offset backwards.
+					if remaining := len(binary) - offset; remaining < 0 || uint64(limit) > uint64(remaining) {
 						return nil, fmt.Errorf("failed to skip name[%s]: %w", name, io.EOF)
 					}
 					offset += int(limit)
@@ -212,34 +217,46 @@ func checkSectionOrder(current, previous wasm.SectionID) (byte, bool) {
 }
 
 // memorySizer derives min, capacity and max pages from decoded wasm.
-type memorySizer func(minPages uint32, maxPages *uint32) (min uint32, capacity uint32, max uint32)
+type memorySizer func(minPages uint64, maxPages *uint64, index64 bool) (min uint64, capacity uint64, max uint64)
 
 // newMemorySizer sets capacity to the initial size plus the configured reserve,
 // capped at the effective maximum. memoryCapacityFromMax overrides the reserve.
 func newMemorySizer(memoryLimitPages uint32, memoryCapacityFromMax bool, memoryCapacityReservePages uint32) memorySizer {
-	return func(minPages uint32, maxPages *uint32) (min, capacity, max uint32) {
+	return func(minPages uint64, maxPages *uint64, index64 bool) (min, capacity, max uint64) {
+		// A memory declared with an i64 index type may legally declare up to
+		// wasm.Memory64LimitPages, far more than any host can allocate, and the
+		// specification requires such a module to still be *valid*. Its declared
+		// limits are therefore left alone here; the embedder's allocation
+		// ceiling is applied at instantiation instead, where a module that never
+		// gets instantiated cannot be wrongly rejected by it. See
+		// wasm.Store.Memory64LimitPages.
+		specLimitPages, limitPages := uint64(wasm.MemoryLimitPages), uint64(memoryLimitPages)
+		if index64 {
+			specLimitPages, limitPages = wasm.Memory64LimitPages, wasm.Memory64LimitPages
+		}
+		reservePages := uint64(memoryCapacityReservePages)
 		if maxPages != nil {
 			if memoryCapacityFromMax {
 				return minPages, *maxPages, *maxPages
 			}
 			// This is an invalid value: let it propagate, we will fail later.
-			if *maxPages > wasm.MemoryLimitPages {
+			if *maxPages > specLimitPages {
 				return minPages, minPages, *maxPages
 			}
 			// This is a valid value, but it goes over the run-time limit: return the limit.
-			if *maxPages > memoryLimitPages {
-				return minPages, memoryCapacity(minPages, memoryLimitPages, memoryCapacityReservePages), memoryLimitPages
+			if *maxPages > limitPages {
+				return minPages, memoryCapacity(minPages, limitPages, reservePages), limitPages
 			}
-			return minPages, memoryCapacity(minPages, *maxPages, memoryCapacityReservePages), *maxPages
+			return minPages, memoryCapacity(minPages, *maxPages, reservePages), *maxPages
 		}
 		if memoryCapacityFromMax {
-			return minPages, memoryLimitPages, memoryLimitPages
+			return minPages, limitPages, limitPages
 		}
-		return minPages, memoryCapacity(minPages, memoryLimitPages, memoryCapacityReservePages), memoryLimitPages
+		return minPages, memoryCapacity(minPages, limitPages, reservePages), limitPages
 	}
 }
 
-func memoryCapacity(minPages, maxPages, reservePages uint32) uint32 {
+func memoryCapacity(minPages, maxPages, reservePages uint64) uint64 {
 	if maxPages <= minPages {
 		return minPages
 	}

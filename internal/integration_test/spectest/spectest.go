@@ -379,9 +379,39 @@ func (c command) expectedError() (err error) {
 //go:embed testdata/spectest.wasm
 var spectestWasm []byte
 
+// spectest64Wasm is spectestWasm plus the "table64" and "memory64" exports the
+// memory64 proposal's cases import. It is a separate module because a module
+// declaring an i64-indexed memory only loads with api.CoreFeatureMemory64
+// enabled, which the other suites do not enable. Generated the same way:
+//
+//	cd testdata; wasm-tools parse -o spectest64.wasm spectest64.wat
+//
+//go:embed testdata/spectest64.wasm
+var spectest64Wasm []byte
+
+// Option customizes how a spectest suite runs.
+type Option func(*options)
+
+type options struct{ hostModule []byte }
+
+// WithMemory64HostModule uses the variant of the "spectest" host module that
+// also exports an i64-indexed memory and table. It requires the runtime config
+// to enable api.CoreFeatureMemory64.
+func WithMemory64HostModule() Option {
+	return func(o *options) { o.hostModule = spectest64Wasm }
+}
+
+func newOptions(opts []Option) options {
+	o := options{hostModule: spectestWasm}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return o
+}
+
 // Run runs all the test inside the testDataFS file system where all the cases are described
 // via JSON files created from wast2json.
-func Run(t *testing.T, testDataFS embed.FS, ctx context.Context, config wazy.RuntimeConfig) {
+func Run(t *testing.T, testDataFS embed.FS, ctx context.Context, config wazy.RuntimeConfig, opts ...Option) {
 	files, err := testDataFS.ReadDir("testdata")
 	require.NoError(t, err)
 
@@ -398,7 +428,7 @@ func Run(t *testing.T, testDataFS embed.FS, ctx context.Context, config wazy.Run
 	require.True(t, len(caseNames) > 0, "len(caseNames)=%d (not greater than zero)", len(caseNames))
 
 	for _, f := range caseNames {
-		RunCase(t, testDataFS, f, ctx, config, -1, 0, math.MaxInt)
+		RunCase(t, testDataFS, f, ctx, config, -1, 0, math.MaxInt, opts...)
 	}
 }
 
@@ -412,7 +442,7 @@ func Run(t *testing.T, testDataFS embed.FS, ctx context.Context, config wazy.Run
 // where mandatoryLine is the line number which can be run regardless of the lineBegin and lineEnd. It is useful when
 // we only want to run specific command while running "module" command to instantiate a module. If you don't need it,
 // just pass -1.
-func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, config wazy.RuntimeConfig, mandatoryLine, lineBegin, lineEnd int) {
+func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, config wazy.RuntimeConfig, mandatoryLine, lineBegin, lineEnd int, opts ...Option) {
 	raw, err := testDataFS.ReadFile(testdataPath(f + ".json"))
 	require.NoError(t, err)
 
@@ -427,7 +457,7 @@ func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, c
 			require.NoError(t, r.Close(ctx))
 		}()
 
-		_, err := r.InstantiateWithConfig(ctx, spectestWasm, wazy.NewModuleConfig())
+		_, err := r.InstantiateWithConfig(ctx, newOptions(opts).hostModule, wazy.NewModuleConfig())
 		require.NoError(t, err)
 
 		modules := make(map[string]api.Module)
@@ -457,6 +487,17 @@ func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, c
 						modules[c.Name] = mod
 					}
 					lastInstantiatedModule = mod
+				case "module_definition":
+					// A module *definition* is decoded and validated but not
+					// instantiated, which is how the specification's own tests
+					// exercise a module whose declared limits no host could ever
+					// allocate (test/core/memory64.wast defines a memory of 2^48
+					// pages). Compiling is exactly that much and no more.
+					buf, err := testDataFS.ReadFile(testdataPath(c.Filename))
+					require.NoError(t, err, msg)
+					compiled, err := r.CompileModule(ctx, buf)
+					require.NoError(t, err, msg)
+					require.NoError(t, compiled.Close(ctx), msg)
 				case "assert_return", "action":
 					m := lastInstantiatedModule
 					if c.Action.Module != "" {

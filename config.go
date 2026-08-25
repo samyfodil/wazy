@@ -61,6 +61,12 @@ type RuntimeConfig interface {
 	// Note: Wasm has 32-bit memory and each page is 65536 (2^16) bytes. This
 	// implies a max of 65536 (2^16) addressable pages.
 	// See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#grow-mem
+	//
+	// Note: on a platform whose int is 32 bits wide (GOARCH=386, arm, wasm) a
+	// memory can never reach four gibibytes, because that is more than a Go
+	// slice can hold. The effective ceiling there is 32767 pages whatever is
+	// configured here, and a module asking for more fails to instantiate
+	// rather than panicking in the allocator.
 	WithMemoryLimitPages(memoryLimitPages uint32) RuntimeConfig
 
 	// WithMemoryCapacityFromMax eagerly allocates max memory, unless max is
@@ -75,6 +81,36 @@ type RuntimeConfig interface {
 	// Note: if the memory maximum is not encoded in a Wasm binary, this
 	// results in allocating 4GB. See the doc on WithMemoryLimitPages for detail.
 	WithMemoryCapacityFromMax(memoryCapacityFromMax bool) RuntimeConfig
+
+	// WithMemory64LimitPages overrides the maximum pages a memory declared with
+	// an i64 index type may actually occupy. The default is 65536 -- the same
+	// four gibibytes WithMemoryLimitPages defaults to, so enabling
+	// api.CoreFeatureMemory64 does not by itself let a module claim more host
+	// memory than a 32-bit one could. Setting a value larger than 2^48, the
+	// specification's own ceiling for a 64-bit memory, will panic.
+	//
+	// This example lets a 64-bit memory reach 16GB:
+	//	rConfig = wazy.NewRuntimeConfig().
+	//		WithCoreFeatures(api.CoreFeaturesV2 | api.CoreFeatureMemory64).
+	//		WithMemory64LimitPages(1 << 18)
+	//
+	// Unlike WithMemoryLimitPages, this bounds what is *allocated* rather than
+	// what may be declared: the specification requires a module whose declared
+	// limits exceed anything a host could allocate to still be valid, so such a
+	// module still compiles. It fails to instantiate if its minimum is over the
+	// limit, and memory.grow returns -1 rather than growing past it.
+	//
+	// The same platform ceiling WithMemoryLimitPages documents applies here,
+	// and is the binding one for any value over it: a Go slice cannot exceed
+	// math.MaxInt bytes, so a memory tops out at 2^47-1 pages on a 64-bit
+	// platform and 32767 pages on a 32-bit one.
+	//
+	// A module's memories are also summed: whatever index types it mixes,
+	// their declared minimums together may not exceed the larger of this
+	// limit and WithMemoryLimitPages'.
+	//
+	// See https://github.com/WebAssembly/memory64
+	WithMemory64LimitPages(memory64LimitPages uint64) RuntimeConfig
 
 	// WithMemoryCapacityReservePages allocates a backing reserve beyond a memory's
 	// initial size. This can make memory.grow cheaper without reserving the
@@ -196,6 +232,7 @@ type newEngine func(context.Context, api.CoreFeatures, filecache.Cache) wasm.Eng
 type runtimeConfig struct {
 	enabledFeatures            api.CoreFeatures
 	memoryLimitPages           uint32
+	memory64LimitPages         uint64
 	memoryCapacityFromMax      bool
 	memoryCapacityReservePages uint32
 	engineKind                 engineKind
@@ -210,6 +247,7 @@ type runtimeConfig struct {
 var engineLessConfig = &runtimeConfig{
 	enabledFeatures:       api.CoreFeaturesV2,
 	memoryLimitPages:      wasm.MemoryLimitPages,
+	memory64LimitPages:    uint64(wasm.MemoryLimitPages),
 	memoryCapacityFromMax: false,
 	dwarfDisabled:         false,
 }
@@ -294,6 +332,17 @@ func (c *runtimeConfig) WithMemoryLimitPages(memoryLimitPages uint32) RuntimeCon
 func (c *runtimeConfig) WithCompilationCache(ca CompilationCache) RuntimeConfig {
 	ret := c.clone()
 	ret.cache = ca
+	return ret
+}
+
+// WithMemory64LimitPages implements RuntimeConfig.WithMemory64LimitPages
+func (c *runtimeConfig) WithMemory64LimitPages(memory64LimitPages uint64) RuntimeConfig {
+	ret := c.clone()
+	// This panics instead of returning an error as it is unlikely.
+	if memory64LimitPages > wasm.Memory64LimitPages {
+		panic(fmt.Errorf("memory64LimitPages invalid: %d > %d", memory64LimitPages, wasm.Memory64LimitPages))
+	}
+	ret.memory64LimitPages = memory64LimitPages
 	return ret
 }
 

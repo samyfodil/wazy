@@ -12,8 +12,8 @@ import (
 )
 
 func TestTableType(t *testing.T) {
-	zero := uint32(0)
-	max := wasm.MaximumFunctionIndex
+	zero := uint64(0)
+	max := uint64(wasm.MaximumFunctionIndex)
 
 	tests := []struct {
 		name     string
@@ -85,12 +85,6 @@ func TestDecodeTableType_Errors(t *testing.T) {
 			name:        "max < min",
 			input:       []byte{wasm.RefTypeFuncref.Kind(), 0x1, 0x80, 0x80, 0x4, 0},
 			expectedErr: "table size minimum must not be greater than maximum",
-			features:    api.CoreFeatureReferenceTypes,
-		},
-		{
-			name:        "min > limit",
-			input:       []byte{wasm.RefTypeFuncref.Kind(), 0x0, 0xff, 0xff, 0xff, 0xff, 0xf},
-			expectedErr: "table min must be at most 134217728",
 			features:    api.CoreFeatureReferenceTypes,
 		},
 		{

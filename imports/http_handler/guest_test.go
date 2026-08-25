@@ -69,7 +69,7 @@ func TestGuestPool(t *testing.T) {
 	defer mw.Close(testCtx)
 
 	m := mw.(*middleware)
-	require.Equal(t, uint64(1), m.instanceCounter) // the eager one
+	require.Equal(t, uint64(1), m.instanceCounter.Load()) // the eager one
 
 	const requests = 3
 	for range requests {
@@ -81,8 +81,9 @@ func TestGuestPool(t *testing.T) {
 	// Instances are pooled, so serial requests don't each need one. How many
 	// survive is up to sync.Pool - it may drop entries at any GC, and does
 	// under -race - so this asserts the bound, not an exact count.
-	require.True(t, m.instanceCounter <= requests+1,
-		"instantiated %d guests for %d serial requests", m.instanceCounter, requests)
+	instances := m.instanceCounter.Load()
+	require.True(t, instances <= requests+1,
+		"instantiated %d guests for %d serial requests", instances, requests)
 }
 
 // TestEmptyValuesWriteNothing covers the "nothing to write" arm shared by the

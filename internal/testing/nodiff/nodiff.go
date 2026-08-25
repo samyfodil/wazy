@@ -50,7 +50,7 @@ func RequireNoDiffT(t *testing.T, wasmBin []byte, checkMemory, loggingCheck bool
 
 // RequireNoDiff ensures that the behavior is the same between the compiler and the interpreter for any given binary.
 func RequireNoDiff(wasmBin []byte, checkMemory, loggingCheck bool, requireNoError func(err error)) {
-	const features = api.CoreFeaturesV2 | experimental.CoreFeaturesThreads | api.CoreFeatureTailCall | api.CoreFeatureExtendedConst | api.CoreFeatureExceptionHandling | api.CoreFeatureTypedFunctionReferences | api.CoreFeatureRelaxedSIMD | api.CoreFeatureMultiMemory
+	const features = api.CoreFeaturesV2 | experimental.CoreFeaturesThreads | api.CoreFeatureTailCall | api.CoreFeatureExtendedConst | api.CoreFeatureExceptionHandling | api.CoreFeatureTypedFunctionReferences | api.CoreFeatureRelaxedSIMD | api.CoreFeatureMultiMemory | api.CoreFeatureMemory64
 	compiler := wazy.NewRuntimeWithConfig(context.Background(), wazy.NewRuntimeConfigCompiler().WithCoreFeatures(features))
 	interpreter := wazy.NewRuntimeWithConfig(context.Background(), wazy.NewRuntimeConfigInterpreter().WithCoreFeatures(features))
 	defer compiler.Close(context.Background())
@@ -108,8 +108,8 @@ func RequireNoDiff(wasmBin []byte, checkMemory, loggingCheck bool, requireNoErro
 		compilerMem, _ := compilerMod.Memory().(*wasm.MemoryInstance)
 		interpreterMem, _ := interpreterMod.Memory().(*wasm.MemoryInstance)
 		if checkMemory && compilerMem != nil && interpreterMem != nil {
-			compilerSize := wasm.MemoryPagesToBytesNum(compilerMem.Pages())
-			interpreterSize := wasm.MemoryPagesToBytesNum(interpreterMem.Pages())
+			compilerSize := wasm.MemoryPagesToBytesNum(compilerMem.Pages64())
+			interpreterSize := wasm.MemoryPagesToBytesNum(interpreterMem.Pages64())
 			if compilerSize != interpreterSize ||
 				!bytes.Equal(compilerMem.Buffer[:compilerSize], interpreterMem.Buffer[:interpreterSize]) {
 				requireNoError(errors.New("memory state mimsmatch"))

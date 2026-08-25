@@ -95,13 +95,14 @@ pub fn run_nodiff(
     // Generate the configuration.
     let mut config = Config::arbitrary(&mut u)?;
 
-    // 64-bit memory won't be supported by wazy.
-    config.memory64_enabled = false;
+    // 64-bit memories are supported, so let the generator reach them.
+    config.memory64_enabled = true;
     // For exactly one memory exists.
     config.max_memories = 1;
     config.min_memories = 1;
     // If we don't set the limit, we will soon reach the OOM and the fuzzing will be killed by OS.
     config.max_memory32_pages = 10;
+    config.max_memory64_pages = 10;
     config.memory_max_size_required = true;
     // Don't test too large tables.
     config.max_tables = 2;

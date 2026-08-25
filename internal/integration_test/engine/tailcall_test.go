@@ -169,7 +169,7 @@ func TestE2E_tail_call_import_indirect(t *testing.T) {
 				FunctionSection: []wasm.Index{0, 0}, // entry (type 0), caller (type 0)
 				TableSection: []wasm.Table{{
 					Type: wasm.RefTypeFuncref,
-					Min:  1, Max: &[]uint32{1}[0], // Table with 1 element
+					Min:  1, Max: &[]uint64{1}[0], // Table with 1 element
 				}},
 				ElementSection: []wasm.ElementSegment{{
 					OffsetExpr: wasm.NewConstantExpressionFromI32(0),

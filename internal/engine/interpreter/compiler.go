@@ -171,7 +171,11 @@ type compiler struct {
 		depth int
 	}
 	pc, currentOpPC uint64
-	result          compilationResult
+	// anyIndex64 is anyMemory64 || anyTable64, kept as its own field because
+	// wasmOpcodeSignature tests it once per instruction -- not just per memory
+	// instruction -- to decide whether index64Signature can have anything to say.
+	anyIndex64 bool
+	result     compilationResult
 
 	// body holds the code for the function's body where Wasm instructions are stored.
 	body []byte
@@ -189,6 +193,14 @@ type compiler struct {
 	funcs []uint32
 	// globals holds the global types for all declared globals in the module where the target function exists.
 	globals []wasm.GlobalType
+	// memory64 records, per memory index, whether that memory has an i64 index type, and anyMemory64 is true if
+	// any of them does. anyMemory64 short-circuits the memarg peeking wasmOpcodeSignature would otherwise do for
+	// every memory instruction in a module that has no 64-bit memory at all.
+	memory64    []bool
+	anyMemory64 bool
+	// table64 and anyTable64 are table64's counterparts of memory64/anyMemory64.
+	table64    []bool
+	anyTable64 bool
 	// tags holds the type indexes for all declared tags in the module where the target function exists.
 	tags []uint32
 
@@ -298,6 +310,34 @@ func newCompiler(enabledFeatures api.CoreFeatures, callFrameStackSizeInUint64 in
 		}
 	}
 
+	var memory64 []bool
+	var anyMemory64 bool
+	for i := range memories {
+		if memories[i].IsMemory64 {
+			anyMemory64 = true
+		}
+	}
+	if anyMemory64 {
+		memory64 = make([]bool, len(memories))
+		for i := range memories {
+			memory64[i] = memories[i].IsMemory64
+		}
+	}
+
+	var table64 []bool
+	var anyTable64 bool
+	for i := range tables {
+		if tables[i].IsTable64 {
+			anyTable64 = true
+		}
+	}
+	if anyTable64 {
+		table64 = make([]bool, len(tables))
+		for i := range tables {
+			table64[i] = tables[i].IsTable64
+		}
+	}
+
 	types := module.TypeSection
 
 	c := &compiler{
@@ -315,16 +355,22 @@ func newCompiler(enabledFeatures api.CoreFeatures, callFrameStackSizeInUint64 in
 			HasElementInstances: hasElementInstances,
 		},
 		globals:           globals,
+		memory64:          memory64,
+		anyMemory64:       anyMemory64,
+		table64:           table64,
+		anyTable64:        anyTable64,
+		anyIndex64:        anyMemory64 || anyTable64,
 		funcs:             functions,
 		tags:              tags,
 		types:             types,
 		ensureTermination: ensureTermination,
 		br:                bytes.NewReader(nil),
 		funcTypeToSigs: funcTypeToIRSignatures{
-			indirectCalls: make([]*signature, len(types)),
-			directCalls:   make([]*signature, len(types)),
-			callRefCalls:  make([]*signature, len(types)),
-			wasmTypes:     types,
+			indirectCalls:   make([]*signature, len(types)),
+			indirectCalls64: make([]*signature, len(types)),
+			directCalls:     make([]*signature, len(types)),
+			callRefCalls:    make([]*signature, len(types)),
+			wasmTypes:       types,
 		},
 		needSourceOffset: module.DWARFLines != nil,
 	}
@@ -3958,12 +4004,118 @@ func (c *compiler) readMemoryArg(tag string) (memoryArg, error) {
 		alignment = rawAlign
 	}
 
-	offset, num, err := leb128.LoadUint32(c.body[c.pc+1:])
+	// Always a u64, even though wasm.readMemArg only widens the field to that
+	// when api.CoreFeatureMemory64 is enabled: this body has already been
+	// validated, so an encoding the narrower form would have rejected cannot
+	// reach here, and every encoding it accepts decodes identically -- same
+	// value, same byte count -- as a u64.
+	offset, num, err := leb128.LoadUint64(c.body[c.pc+1:])
 	if err != nil {
 		return memoryArg{}, fmt.Errorf("reading offset for %s: %w", tag, err)
 	}
 	c.pc += num
-	return memoryArg{Offset: offset, Alignment: alignment, MemoryIndex: memoryIndex}, nil
+	return memoryArg{
+		Offset:      offset,
+		Alignment:   alignment,
+		MemoryIndex: memoryIndex,
+		Index64:     c.memoryIsIndex64(memoryIndex),
+	}, nil
+}
+
+// memoryIsIndex64 reports whether the memory at idx has an i64 index type.
+// The function body has already been validated, so idx is always in range.
+func (c *compiler) memoryIsIndex64(idx uint32) bool {
+	return c.anyMemory64 && int(idx) < len(c.memory64) && c.memory64[idx]
+}
+
+// peekMemArgIndex64 reports whether the memarg that follows the opcode at c.pc
+// addresses a 64-bit memory, without advancing c.pc. wasmOpcodeSignature needs
+// this before readMemoryArg runs, because the index type of the addressed
+// memory is what decides a memory instruction's operand types.
+//
+// A malformed memarg is reported as 32-bit and left for readMemoryArg to
+// reject with the proper error.
+// skip is the width of any sub-opcode between the prefix byte at c.pc and the
+// memarg: zero for a plain opcode, one for the atomic prefix, and the vector
+// opcode's own width for the vector prefix.
+func (c *compiler) peekMemArgIndex64(skip uint64) bool {
+	if !c.anyMemory64 {
+		return false
+	}
+	rawAlign, num, err := leb128.LoadUint32(c.body[c.pc+1+skip:])
+	if err != nil {
+		return false
+	}
+	if rawAlign&memArgMultiMemoryFlag == 0 {
+		return c.memoryIsIndex64(0)
+	}
+	idx, _, err := leb128.LoadUint32(c.body[c.pc+1+skip+num:])
+	if err != nil {
+		return false
+	}
+	return c.memoryIsIndex64(idx)
+}
+
+// peekMemIndex64 is peekMemArgIndex64 for the instructions whose memory index
+// is a bare LEB128 immediate: it reads the one at c.pc+1+skip and also reports
+// how many bytes it took, so a caller can walk on to a second immediate.
+func (c *compiler) peekMemIndex64(skip uint64) (index64 bool, read uint64) {
+	idx, num, err := leb128.LoadUint32(c.body[c.pc+1+skip:])
+	if err != nil {
+		return false, 0
+	}
+	return c.memoryIsIndex64(idx), num
+}
+
+// tableIsIndex64 reports whether the table at idx has an i64 index type.
+func (c *compiler) tableIsIndex64(idx uint32) bool {
+	return c.anyTable64 && int(idx) < len(c.table64) && c.table64[idx]
+}
+
+// peekTableIndex64 is peekMemIndex64 for a table index immediate: it reads the
+// LEB128 one at c.pc+1+skip without advancing c.pc, and also reports how many
+// bytes it took so a caller can walk on to a second immediate.
+func (c *compiler) peekTableIndex64(skip uint64) (index64 bool, read uint64) {
+	idx, num, err := leb128.LoadUint32(c.body[c.pc+1+skip:])
+	if err != nil {
+		return false, 0
+	}
+	return c.tableIsIndex64(idx), num
+}
+
+// memSig picks between the i32-addressed and the i64-addressed form of a memory
+// instruction's signature, according to the index type of the memory its memarg
+// names. skip is as documented on peekMemArgIndex64.
+//
+// The anyMemory64 test is kept here as well as in index64Signature's caller so
+// that a mixed module -- one 64-bit memory alongside 32-bit ones -- still skips
+// the peek where it cannot matter.
+func (c *compiler) memSig(skip uint64, index32Form, index64Form *signature) *signature {
+	if c.anyMemory64 && c.peekMemArgIndex64(skip) {
+		return index64Form
+	}
+	return index32Form
+}
+
+// memIndexSig is memSig for the instructions whose memory index is a bare
+// LEB128 immediate: memory.size and memory.grow.
+func (c *compiler) memIndexSig(skip uint64, index32Form, index64Form *signature) *signature {
+	if c.anyMemory64 {
+		if index64, _ := c.peekMemIndex64(skip); index64 {
+			return index64Form
+		}
+	}
+	return index32Form
+}
+
+// tableIndexSig is memIndexSig for a table index immediate.
+func (c *compiler) tableIndexSig(skip uint64, index32Form, index64Form *signature) *signature {
+	if c.anyTable64 {
+		if index64, _ := c.peekTableIndex64(skip); index64 {
+			return index64Form
+		}
+	}
+	return index32Form
 }
 
 // parseCatchClause parses a single catch clause from the bytecode at c.pc,

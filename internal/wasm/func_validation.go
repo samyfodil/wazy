@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -40,7 +41,7 @@ func (m *Module) validateFunction(sts *stacks, enabledFeatures api.CoreFeatures,
 // See https://webassembly.github.io/multi-memory/core/binary/instructions.html
 const memArgMultiMemoryFlag = 0x40
 
-func readMemArg(pc uint64, body []byte, enabledFeatures api.CoreFeatures) (align, offset uint32, memoryIndex Index, read uint64, err error) {
+func readMemArg(pc uint64, body []byte, enabledFeatures api.CoreFeatures, memory64 bool) (align uint32, offset uint64, memoryIndex Index, read uint64, err error) {
 	rawAlign, num, err := leb128.LoadUint32(body[pc:])
 	if err != nil {
 		err = fmt.Errorf("read memory align: %v", err)
@@ -65,12 +66,25 @@ func readMemArg(pc uint64, body []byte, enabledFeatures api.CoreFeatures) (align
 	}
 
 	if align >= 32 {
-		// Prevent 1<<align uint32 overflow.
+		// Prevent uint64(1)<<align uint32 overflow.
 		err = fmt.Errorf("invalid memory alignment")
 		return
 	}
 
-	offset, num, err = leb128.LoadUint32(body[pc+read:])
+	// The memory64 proposal widens the offset immediate from u32 to u64 for
+	// every memarg, not just those naming a 64-bit memory: a 32-bit memory's
+	// offset is then merely *validated* to fit in 32 bits (see
+	// memArgIndexType). Without the feature the field keeps its u32 bounds, so
+	// an encoding longer than five bytes stays malformed -- which the
+	// WebAssembly 1.0 conformance suite requires (test/core/binary-leb128.wast
+	// "offset 2 with one byte too many").
+	if memory64 {
+		offset, num, err = leb128.LoadUint64(body[pc+read:])
+	} else {
+		var offset32 uint32
+		offset32, num, err = leb128.LoadUint32(body[pc+read:])
+		offset = uint64(offset32)
+	}
 	if err != nil {
 		err = fmt.Errorf("read memory offset: %v", err)
 		return
@@ -78,6 +92,42 @@ func readMemArg(pc uint64, body []byte, enabledFeatures api.CoreFeatures) (align
 
 	read += num
 	return align, offset, memoryIndex, read, nil
+}
+
+// memArgIndexType checks that a memarg's memory index is in range and that its
+// offset immediate fits the addressed memory, and returns the value type that
+// memory's addresses are given in: i64 for a 64-bit memory, i32 otherwise.
+//
+// It runs once per memory instruction in every function being validated, so the
+// message for a rejected memarg is built by memArgError instead: keeping the
+// formatting -- and the instruction name it needs -- out of this function is
+// what lets it inline.
+func memArgIndexType(memories []Memory, memoryIndex Index, offset uint64, memory64 bool) (ValueType, bool) {
+	if memoryIndex >= uint32(len(memories)) {
+		return 0, false
+	}
+	// Without the feature there is no i64-indexed memory to find, and readMemArg
+	// decoded the offset as a u32, so neither of the tests below can fire. This
+	// runs once per memory instruction in every function, so skipping them
+	// keeps validation where it was for a module that does not use memory64.
+	if !memory64 {
+		return ValueTypeI32, true
+	}
+	if memories[memoryIndex].IsMemory64 {
+		return ValueTypeI64, true
+	}
+	if offset > math.MaxUint32 {
+		return 0, false
+	}
+	return ValueTypeI32, true
+}
+
+// memArgError explains why memArgIndexType rejected a memarg.
+func memArgError(memories []Memory, memoryIndex Index, offset uint64, instName string) error {
+	if memoryIndex >= uint32(len(memories)) {
+		return fmt.Errorf("memory %d is out of range for %s", memoryIndex, instName)
+	}
+	return fmt.Errorf("memory offset %d is out of range for %s on a 32-bit memory", offset, instName)
 }
 
 // validateFunctionWithMaxStackValues is like validateFunction, but allows overriding maxStackValues for testing.
@@ -101,6 +151,10 @@ func (m *Module) validateFunctionWithMaxStackValues(
 	code := &m.CodeSection[idx]
 	body := code.Body
 	localTypes := code.LocalTypes
+
+	// Hoisted out of the per-instruction path: several checks below only apply
+	// once the memory64 proposal is in play.
+	memory64Enabled := enabledFeatures.IsEnabled(api.CoreFeatureMemory64)
 
 	sts.reset(functionType)
 	valueTypeStack := &sts.vs
@@ -135,183 +189,184 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				return fmt.Errorf("memory must exist for %s", InstructionName(op))
 			}
 			pc++
-			align, _, memoryIndex, read, err := readMemArg(pc, body, enabledFeatures)
+			align, offset, memoryIndex, read, err := readMemArg(pc, body, enabledFeatures, memory64Enabled)
 			if err != nil {
 				return err
 			}
-			if memoryIndex >= uint32(len(memories)) {
-				return fmt.Errorf("memory %d is out of range for %s", memoryIndex, InstructionName(op))
+			addrType, ok := memArgIndexType(memories, memoryIndex, offset, memory64Enabled)
+			if !ok {
+				return memArgError(memories, memoryIndex, offset, InstructionName(op))
 			}
 			pc += read - 1
 			switch op {
 			case OpcodeI32Load:
-				if 1<<align > 32/8 {
+				if uint64(1)<<align > 32/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI32)
 			case OpcodeF32Load:
-				if 1<<align > 32/8 {
+				if uint64(1)<<align > 32/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeF32)
 			case OpcodeI32Store:
-				if 1<<align > 32/8 {
+				if uint64(1)<<align > 32/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 			case OpcodeF32Store:
-				if 1<<align > 32/8 {
+				if uint64(1)<<align > 32/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeF32); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 			case OpcodeI64Load:
-				if 1<<align > 64/8 {
+				if uint64(1)<<align > 64/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI64)
 			case OpcodeF64Load:
-				if 1<<align > 64/8 {
+				if uint64(1)<<align > 64/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeF64)
 			case OpcodeI64Store:
-				if 1<<align > 64/8 {
+				if uint64(1)<<align > 64/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI64); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 			case OpcodeF64Store:
-				if 1<<align > 64/8 {
+				if uint64(1)<<align > 64/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeF64); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 			case OpcodeI32Load8S:
-				if 1<<align > 1 {
+				if uint64(1)<<align > 1 {
 					return fmt.Errorf("invalid memory alignment")
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI32)
 			case OpcodeI32Load8U:
-				if 1<<align > 1 {
+				if uint64(1)<<align > 1 {
 					return fmt.Errorf("invalid memory alignment")
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI32)
 			case OpcodeI64Load8S, OpcodeI64Load8U:
-				if 1<<align > 1 {
+				if uint64(1)<<align > 1 {
 					return fmt.Errorf("invalid memory alignment")
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI64)
 			case OpcodeI32Store8:
-				if 1<<align > 1 {
+				if uint64(1)<<align > 1 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 			case OpcodeI64Store8:
-				if 1<<align > 1 {
+				if uint64(1)<<align > 1 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI64); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 			case OpcodeI32Load16S, OpcodeI32Load16U:
-				if 1<<align > 16/8 {
+				if uint64(1)<<align > 16/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI32)
 			case OpcodeI64Load16S, OpcodeI64Load16U:
-				if 1<<align > 16/8 {
+				if uint64(1)<<align > 16/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI64)
 			case OpcodeI32Store16:
-				if 1<<align > 16/8 {
+				if uint64(1)<<align > 16/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 			case OpcodeI64Store16:
-				if 1<<align > 16/8 {
+				if uint64(1)<<align > 16/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI64); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 			case OpcodeI64Load32S, OpcodeI64Load32U:
-				if 1<<align > 32/8 {
+				if uint64(1)<<align > 32/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI64)
 			case OpcodeI64Store32:
-				if 1<<align > 32/8 {
+				if uint64(1)<<align > 32/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI64); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 			}
@@ -335,14 +390,15 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			if memoryIndex >= uint32(len(memories)) {
 				return fmt.Errorf("memory %d is out of range for %s", memoryIndex, InstructionName(op))
 			}
+			indexType := memories[memoryIndex].IndexType()
 			switch Opcode(op) {
 			case OpcodeMemoryGrow:
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(indexType); err != nil {
 					return err
 				}
-				valueTypeStack.push(ValueTypeI32)
+				valueTypeStack.push(indexType)
 			case OpcodeMemorySize:
-				valueTypeStack.push(ValueTypeI32)
+				valueTypeStack.push(indexType)
 			}
 			pc += num - 1
 		} else if OpcodeI32Const <= op && op <= OpcodeF64Const {
@@ -444,7 +500,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			index, num, err := leb128.LoadUint32(body[pc:])
 			if err != nil {
 				return fmt.Errorf("read immediate: %v", err)
-			} else if int(index) >= len(controlBlockStack.stack) {
+			} else if indexOutOfRange(index, len(controlBlockStack.stack)) {
 				return fmt.Errorf("invalid %s operation: index out of range", OpcodeBrName)
 			}
 			pc += num - 1
@@ -466,7 +522,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			index, num, err := leb128.LoadUint32(body[pc:])
 			if err != nil {
 				return fmt.Errorf("read immediate: %v", err)
-			} else if int(index) >= len(controlBlockStack.stack) {
+			} else if indexOutOfRange(index, len(controlBlockStack.stack)) {
 				return fmt.Errorf(
 					"invalid ln param given for %s: index=%d with %d for the current label stack length",
 					OpcodeBrIfName, index, len(controlBlockStack.stack))
@@ -510,7 +566,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			ln, n, err := leb128.DecodeUint32(br)
 			if err != nil {
 				return fmt.Errorf("read immediate: %w", err)
-			} else if int(ln) >= len(controlBlockStack.stack) {
+			} else if indexOutOfRange(ln, len(controlBlockStack.stack)) {
 				return fmt.Errorf(
 					"invalid ln param given for %s: ln=%d with %d for the current label stack length",
 					OpcodeBrTableName, ln, len(controlBlockStack.stack))
@@ -556,7 +612,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			}
 
 			for _, l := range sts.ls {
-				if int(l) >= len(controlBlockStack.stack) {
+				if indexOutOfRange(l, len(controlBlockStack.stack)) {
 					return fmt.Errorf("invalid l param given for %s", OpcodeBrTableName)
 				}
 				label := &controlBlockStack.stack[len(controlBlockStack.stack)-1-int(l)]
@@ -648,7 +704,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 						return fmt.Errorf("read catch label index: %v", err)
 					}
 					pc += labelNum - 1
-					if int(labelIdx) >= len(controlBlockStack.stack) {
+					if indexOutOfRange(labelIdx, len(controlBlockStack.stack)) {
 						return fmt.Errorf("invalid label index in catch clause: %d", labelIdx)
 					}
 					// Validate that the target label can accept the catch values.
@@ -679,7 +735,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 						return fmt.Errorf("read catch_all label index: %v", err)
 					}
 					pc += labelNum - 1
-					if int(labelIdx) >= len(controlBlockStack.stack) {
+					if indexOutOfRange(labelIdx, len(controlBlockStack.stack)) {
 						return fmt.Errorf("invalid label index in catch_all clause: %d", labelIdx)
 					}
 					target := &controlBlockStack.stack[len(controlBlockStack.stack)-int(labelIdx)-1]
@@ -721,7 +777,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				return fmt.Errorf("read immediate: %v", err)
 			}
 			pc += num - 1
-			if int(index) >= len(functions) {
+			if indexOutOfRange(index, len(functions)) {
 				return fmt.Errorf("invalid function index")
 			}
 
@@ -758,7 +814,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				opcodeName = OpcodeTailCallReturnCallIndirectName
 			}
 
-			if int(typeIndex) >= len(m.TypeSection) {
+			if indexOutOfRange(typeIndex, len(m.TypeSection)) {
 				return fmt.Errorf("invalid type index at %s: %d", opcodeName, typeIndex)
 			}
 
@@ -782,7 +838,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				return fmt.Errorf("table is not funcref type but was %s for %s", RefTypeName(table.Type), opcodeName)
 			}
 
-			if err = valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+			if err = valueTypeStack.popAndVerifyType(table.IndexType()); err != nil {
 				return fmt.Errorf("cannot pop the offset in table for %s", opcodeName)
 			}
 			funcType := &m.TypeSection[typeIndex]
@@ -806,7 +862,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				return fmt.Errorf("read immediate: %v", err)
 			}
 			pc += num - 1
-			if int(typeIndex) >= len(m.TypeSection) {
+			if indexOutOfRange(typeIndex, len(m.TypeSection)) {
 				return fmt.Errorf("invalid type index at %s: %d", instructionNames[op], typeIndex)
 			}
 			// Pop the funcref operand (nullable concrete ref to the type).
@@ -1061,7 +1117,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 					if err != nil {
 						return fmt.Errorf("unknown type for ref.null: 0x%x", reftype)
 					}
-					if int(typeIdx) >= len(m.TypeSection) {
+					if indexOutOfRange(typeIdx, len(m.TypeSection)) {
 						return fmt.Errorf("unknown type for ref.null: type index %d out of range", typeIdx)
 					}
 					pc += uint64(num) - 1
@@ -1114,7 +1170,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			index, num, err := leb128.LoadUint32(body[pc:])
 			if err != nil {
 				return fmt.Errorf("read immediate: %v", err)
-			} else if int(index) >= len(controlBlockStack.stack) {
+			} else if indexOutOfRange(index, len(controlBlockStack.stack)) {
 				return fmt.Errorf("invalid %s operation: index out of range", OpcodeBrOnNullName)
 			}
 			pc += num - 1
@@ -1154,7 +1210,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			index, num, err := leb128.LoadUint32(body[pc:])
 			if err != nil {
 				return fmt.Errorf("read immediate: %v", err)
-			} else if int(index) >= len(controlBlockStack.stack) {
+			} else if indexOutOfRange(index, len(controlBlockStack.stack)) {
 				return fmt.Errorf("invalid %s operation: index out of range", OpcodeBrOnNonNullName)
 			}
 			pc += num - 1
@@ -1212,8 +1268,9 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			}
 
 			refType := tables[tableIndex].Type
+			indexType := tables[tableIndex].IndexType()
 			if op == OpcodeTableGet {
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(indexType); err != nil {
 					return fmt.Errorf("cannot pop the operand for table.get: %v", err)
 				}
 				valueTypeStack.push(refType)
@@ -1221,7 +1278,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				if err := valueTypeStack.popAndVerifyType(refType); err != nil {
 					return fmt.Errorf("cannot pop the operand for table.set: %v", err)
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(indexType); err != nil {
 					return fmt.Errorf("cannot pop the operand for table.set: %v", err)
 				}
 			}
@@ -1278,7 +1335,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 					if err != nil {
 						return fmt.Errorf("failed to read data segment index for %s: %v", MiscInstructionName(miscOpcode), err)
 					}
-					if int(index) >= len(m.DataSection) {
+					if indexOutOfRange(index, len(m.DataSection)) {
 						return fmt.Errorf("index %d out of range of data section(len=%d)", index, len(m.DataSection))
 					}
 					pc += num - 1
@@ -1286,7 +1343,6 @@ func (m *Module) validateFunctionWithMaxStackValues(
 					if len(memories) == 0 {
 						return fmt.Errorf("memory must exist for %s", MiscInstructionName(miscOpcode))
 					}
-					params = []ValueType{ValueTypeI32, ValueTypeI32, ValueTypeI32}
 
 					if miscOpcode == OpcodeMiscMemoryInit {
 						if m.DataCountSection == nil {
@@ -1299,7 +1355,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 						if err != nil {
 							return fmt.Errorf("failed to read data segment index for %s: %v", MiscInstructionName(miscOpcode), err)
 						}
-						if int(index) >= len(m.DataSection) {
+						if indexOutOfRange(index, len(m.DataSection)) {
 							return fmt.Errorf("index %d out of range of data section(len=%d)", index, len(m.DataSection))
 						}
 						pc += num - 1
@@ -1322,6 +1378,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 						return fmt.Errorf("memory of index %d not found", memoryIndex)
 					}
 					pc += num - 1
+					srcIndexType := memories[memoryIndex].IndexType()
 					if miscOpcode == OpcodeMiscMemoryCopy {
 						pc++
 						// memory.copy takes a second (source) memory index.
@@ -1341,16 +1398,35 @@ func (m *Module) validateFunctionWithMaxStackValues(
 							return fmt.Errorf("memory of index %d not found", srcMemoryIndex)
 						}
 						pc += num - 1
+						srcIndexType = memories[srcMemoryIndex].IndexType()
+					}
+
+					// params are popped top of stack first, so they read
+					// (length, then the middle operand, then destination).
+					indexType := memories[memoryIndex].IndexType()
+					switch miscOpcode {
+					case OpcodeMiscMemoryFill:
+						// memory.fill x : [at, i32, at] -> []
+						params = []ValueType{indexType, ValueTypeI32, indexType}
+					case OpcodeMiscMemoryInit:
+						// memory.init x y : [at, i32, i32] -> []
+						params = []ValueType{ValueTypeI32, ValueTypeI32, indexType}
+					case OpcodeMiscMemoryCopy:
+						// memory.copy x y : [at_x, at_y, min(at_x, at_y)] -> []
+						lengthType := indexType
+						if srcIndexType == ValueTypeI32 {
+							lengthType = ValueTypeI32
+						}
+						params = []ValueType{lengthType, srcIndexType, indexType}
 					}
 
 				case OpcodeMiscTableInit:
-					params = []ValueType{ValueTypeI32, ValueTypeI32, ValueTypeI32}
 					pc++
 					elementIndex, num, err := leb128.LoadUint32(body[pc:])
 					if err != nil {
 						return fmt.Errorf("failed to read element segment index for %s: %v", MiscInstructionName(miscOpcode), err)
 					}
-					if int(elementIndex) >= len(m.ElementSection) {
+					if indexOutOfRange(elementIndex, len(m.ElementSection)) {
 						return fmt.Errorf("index %d out of range of element section(len=%d)", elementIndex, len(m.ElementSection))
 					}
 					pc += num
@@ -1374,18 +1450,20 @@ func (m *Module) validateFunctionWithMaxStackValues(
 							RefTypeName(tables[tableIndex].Type),
 						)
 					}
+					// table.init x y : [at, i32, i32] -> [], so only the
+					// destination follows the table's index type.
+					params = []ValueType{ValueTypeI32, ValueTypeI32, tables[tableIndex].IndexType()}
 					pc += num - 1
 				case OpcodeMiscElemDrop:
 					pc++
 					elementIndex, num, err := leb128.LoadUint32(body[pc:])
 					if err != nil {
 						return fmt.Errorf("failed to read element segment index for %s: %v", MiscInstructionName(miscOpcode), err)
-					} else if int(elementIndex) >= len(m.ElementSection) {
+					} else if indexOutOfRange(elementIndex, len(m.ElementSection)) {
 						return fmt.Errorf("index %d out of range of element section(len=%d)", elementIndex, len(m.ElementSection))
 					}
 					pc += num - 1
 				case OpcodeMiscTableCopy:
-					params = []ValueType{ValueTypeI32, ValueTypeI32, ValueTypeI32}
 					pc++
 
 					dstTableIndex, num, err := leb128.LoadUint32(body[pc:])
@@ -1420,6 +1498,15 @@ func (m *Module) validateFunctionWithMaxStackValues(
 							RefTypeName(tables[srcTableIndex].Type), RefTypeName(tables[dstTableIndex].Type))
 					}
 
+					// table.copy x y : [at_x, at_y, min(at_x, at_y)] -> []
+					dstIndexType := tables[dstTableIndex].IndexType()
+					srcIndexType := tables[srcTableIndex].IndexType()
+					lengthType := dstIndexType
+					if srcIndexType == ValueTypeI32 {
+						lengthType = ValueTypeI32
+					}
+					params = []ValueType{lengthType, srcIndexType, dstIndexType}
+
 					pc += num - 1
 				}
 				for _, p := range params {
@@ -1444,13 +1531,19 @@ func (m *Module) validateFunctionWithMaxStackValues(
 
 				var params, results []ValueType
 				reftype := tables[tableIndex].Type
+				// params are popped top of stack first, so they read in reverse
+				// of the instruction's operand order.
+				indexType := tables[tableIndex].IndexType()
 				if miscOpcode == OpcodeMiscTableGrow {
-					params = []ValueType{ValueTypeI32, reftype}
-					results = []ValueType{ValueTypeI32}
+					// table.grow x : [ref, at] -> [at]
+					params = []ValueType{indexType, reftype}
+					results = []ValueType{indexType}
 				} else if miscOpcode == OpcodeMiscTableSize {
-					results = []ValueType{ValueTypeI32}
+					// table.size x : [] -> [at]
+					results = []ValueType{indexType}
 				} else if miscOpcode == OpcodeMiscTableFill {
-					params = []ValueType{ValueTypeI32, reftype, ValueTypeI32}
+					// table.fill x : [at, ref, at] -> []
+					params = []ValueType{indexType, reftype, indexType}
 				}
 
 				for _, p := range params {
@@ -1504,12 +1597,13 @@ func (m *Module) validateFunctionWithMaxStackValues(
 					return fmt.Errorf("memory must exist for %s", VectorInstructionName(vecOpcode))
 				}
 				pc++
-				align, _, memoryIndex, read, err := readMemArg(pc, body, enabledFeatures)
+				align, offset, memoryIndex, read, err := readMemArg(pc, body, enabledFeatures, memory64Enabled)
 				if err != nil {
 					return err
 				}
-				if memoryIndex >= uint32(len(memories)) {
-					return fmt.Errorf("memory %d is out of range for %s", memoryIndex, VectorInstructionName(vecOpcode))
+				addrType, ok := memArgIndexType(memories, memoryIndex, offset, memory64Enabled)
+				if !ok {
+					return memArgError(memories, memoryIndex, offset, VectorInstructionName(vecOpcode))
 				}
 				pc += read - 1
 				var maxAlign uint32
@@ -1533,10 +1627,10 @@ func (m *Module) validateFunctionWithMaxStackValues(
 					maxAlign = 64 / 8
 				}
 
-				if 1<<align > maxAlign {
+				if uint64(1)<<align > uint64(maxAlign) {
 					return fmt.Errorf("invalid memory alignment %d for %s", align, VectorInstructionName(vecOpcode))
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return fmt.Errorf("cannot pop the operand for %s: %v", VectorInstructionName(vecOpcode), err)
 				}
 				valueTypeStack.push(ValueTypeV128)
@@ -1545,21 +1639,22 @@ func (m *Module) validateFunctionWithMaxStackValues(
 					return fmt.Errorf("memory must exist for %s", VectorInstructionName(vecOpcode))
 				}
 				pc++
-				align, _, memoryIndex, read, err := readMemArg(pc, body, enabledFeatures)
+				align, offset, memoryIndex, read, err := readMemArg(pc, body, enabledFeatures, memory64Enabled)
 				if err != nil {
 					return err
 				}
-				if memoryIndex >= uint32(len(memories)) {
-					return fmt.Errorf("memory %d is out of range for %s", memoryIndex, VectorInstructionName(vecOpcode))
+				addrType, ok := memArgIndexType(memories, memoryIndex, offset, memory64Enabled)
+				if !ok {
+					return memArgError(memories, memoryIndex, offset, VectorInstructionName(vecOpcode))
 				}
 				pc += read - 1
-				if 1<<align > 128/8 {
+				if uint64(1)<<align > 128/8 {
 					return fmt.Errorf("invalid memory alignment %d for %s", align, OpcodeVecV128StoreName)
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeV128); err != nil {
 					return fmt.Errorf("cannot pop the operand for %s: %v", OpcodeVecV128StoreName, err)
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return fmt.Errorf("cannot pop the operand for %s: %v", OpcodeVecV128StoreName, err)
 				}
 			case OpcodeVecV128Load8Lane, OpcodeVecV128Load16Lane, OpcodeVecV128Load32Lane, OpcodeVecV128Load64Lane:
@@ -1568,14 +1663,15 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				}
 				attr := vecLoadLanes[vecOpcode]
 				pc++
-				align, _, memoryIndex, read, err := readMemArg(pc, body, enabledFeatures)
+				align, offset, memoryIndex, read, err := readMemArg(pc, body, enabledFeatures, memory64Enabled)
 				if err != nil {
 					return err
 				}
-				if memoryIndex >= uint32(len(memories)) {
-					return fmt.Errorf("memory %d is out of range for %s", memoryIndex, vectorInstructionName[vecOpcode])
+				addrType, ok := memArgIndexType(memories, memoryIndex, offset, memory64Enabled)
+				if !ok {
+					return memArgError(memories, memoryIndex, offset, vectorInstructionName[vecOpcode])
 				}
-				if 1<<align > attr.alignMax {
+				if uint64(1)<<align > uint64(attr.alignMax) {
 					return fmt.Errorf("invalid memory alignment %d for %s", align, vectorInstructionName[vecOpcode])
 				}
 				pc += read
@@ -1589,7 +1685,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				if err := valueTypeStack.popAndVerifyType(ValueTypeV128); err != nil {
 					return fmt.Errorf("cannot pop the operand for %s: %v", vectorInstructionName[vecOpcode], err)
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return fmt.Errorf("cannot pop the operand for %s: %v", vectorInstructionName[vecOpcode], err)
 				}
 				valueTypeStack.push(ValueTypeV128)
@@ -1599,14 +1695,15 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				}
 				attr := vecStoreLanes[vecOpcode]
 				pc++
-				align, _, memoryIndex, read, err := readMemArg(pc, body, enabledFeatures)
+				align, offset, memoryIndex, read, err := readMemArg(pc, body, enabledFeatures, memory64Enabled)
 				if err != nil {
 					return err
 				}
-				if memoryIndex >= uint32(len(memories)) {
-					return fmt.Errorf("memory %d is out of range for %s", memoryIndex, vectorInstructionName[vecOpcode])
+				addrType, ok := memArgIndexType(memories, memoryIndex, offset, memory64Enabled)
+				if !ok {
+					return memArgError(memories, memoryIndex, offset, vectorInstructionName[vecOpcode])
 				}
-				if 1<<align > attr.alignMax {
+				if uint64(1)<<align > uint64(attr.alignMax) {
 					return fmt.Errorf("invalid memory alignment %d for %s", align, vectorInstructionName[vecOpcode])
 				}
 				pc += read
@@ -1620,7 +1717,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				if err := valueTypeStack.popAndVerifyType(ValueTypeV128); err != nil {
 					return fmt.Errorf("cannot pop the operand for %s: %v", vectorInstructionName[vecOpcode], err)
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return fmt.Errorf("cannot pop the operand for %s: %v", vectorInstructionName[vecOpcode], err)
 				}
 			case OpcodeVecI8x16ExtractLaneS,
@@ -1838,28 +1935,29 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			if len(memories) == 0 {
 				return fmt.Errorf("memory must exist for %s", AtomicInstructionName(atomicOpcode))
 			}
-			align, _, memoryIndex, read, err := readMemArg(pc, body, enabledFeatures)
+			align, offset, memoryIndex, read, err := readMemArg(pc, body, enabledFeatures, memory64Enabled)
 			if err != nil {
 				return err
 			}
-			if memoryIndex >= uint32(len(memories)) {
-				return fmt.Errorf("memory %d is out of range for %s", memoryIndex, AtomicInstructionName(atomicOpcode))
+			addrType, ok := memArgIndexType(memories, memoryIndex, offset, memory64Enabled)
+			if !ok {
+				return memArgError(memories, memoryIndex, offset, AtomicInstructionName(atomicOpcode))
 			}
 			pc += read - 1
 			switch atomicOpcode {
 			case OpcodeAtomicMemoryNotify:
-				if 1<<align > 32/8 {
+				if uint64(1)<<align > 32/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI32)
 			case OpcodeAtomicMemoryWait32:
-				if 1<<align > 32/8 {
+				if uint64(1)<<align > 32/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI64); err != nil {
@@ -1868,12 +1966,12 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI32)
 			case OpcodeAtomicMemoryWait64:
-				if 1<<align > 64/8 {
+				if uint64(1)<<align > 64/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI64); err != nil {
@@ -1882,215 +1980,215 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI64); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI32)
 			case OpcodeAtomicI32Load:
-				if 1<<align > 32/8 {
+				if uint64(1)<<align > 32/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI32)
 			case OpcodeAtomicI64Load:
-				if 1<<align > 64/8 {
+				if uint64(1)<<align > 64/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI64)
 			case OpcodeAtomicI32Load8U:
-				if 1<<align != 1 {
+				if uint64(1)<<align != 1 {
 					return fmt.Errorf("invalid memory alignment")
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI32)
 			case OpcodeAtomicI32Load16U:
-				if 1<<align != 16/8 {
+				if uint64(1)<<align != 16/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI32)
 			case OpcodeAtomicI64Load8U:
-				if 1<<align != 1 {
+				if uint64(1)<<align != 1 {
 					return fmt.Errorf("invalid memory alignment")
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI64)
 			case OpcodeAtomicI64Load16U:
-				if 1<<align > 16/8 {
+				if uint64(1)<<align > 16/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI64)
 			case OpcodeAtomicI64Load32U:
-				if 1<<align > 32/8 {
+				if uint64(1)<<align > 32/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI64)
 			case OpcodeAtomicI32Store:
-				if 1<<align > 32/8 {
+				if uint64(1)<<align > 32/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 			case OpcodeAtomicI64Store:
-				if 1<<align > 64/8 {
+				if uint64(1)<<align > 64/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI64); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 			case OpcodeAtomicI32Store8:
-				if 1<<align > 1 {
+				if uint64(1)<<align > 1 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 			case OpcodeAtomicI32Store16:
-				if 1<<align > 16/8 {
+				if uint64(1)<<align > 16/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 			case OpcodeAtomicI64Store8:
-				if 1<<align > 1 {
+				if uint64(1)<<align > 1 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI64); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 			case OpcodeAtomicI64Store16:
-				if 1<<align > 16/8 {
+				if uint64(1)<<align > 16/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI64); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 			case OpcodeAtomicI64Store32:
-				if 1<<align > 32/8 {
+				if uint64(1)<<align > 32/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI64); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 			case OpcodeAtomicI32RmwAdd, OpcodeAtomicI32RmwSub, OpcodeAtomicI32RmwAnd, OpcodeAtomicI32RmwOr, OpcodeAtomicI32RmwXor, OpcodeAtomicI32RmwXchg:
-				if 1<<align > 32/8 {
+				if uint64(1)<<align > 32/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI32)
 			case OpcodeAtomicI32Rmw8AddU, OpcodeAtomicI32Rmw8SubU, OpcodeAtomicI32Rmw8AndU, OpcodeAtomicI32Rmw8OrU, OpcodeAtomicI32Rmw8XorU, OpcodeAtomicI32Rmw8XchgU:
-				if 1<<align > 1 {
+				if uint64(1)<<align > 1 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI32)
 			case OpcodeAtomicI32Rmw16AddU, OpcodeAtomicI32Rmw16SubU, OpcodeAtomicI32Rmw16AndU, OpcodeAtomicI32Rmw16OrU, OpcodeAtomicI32Rmw16XorU, OpcodeAtomicI32Rmw16XchgU:
-				if 1<<align > 16/8 {
+				if uint64(1)<<align > 16/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI32)
 			case OpcodeAtomicI64RmwAdd, OpcodeAtomicI64RmwSub, OpcodeAtomicI64RmwAnd, OpcodeAtomicI64RmwOr, OpcodeAtomicI64RmwXor, OpcodeAtomicI64RmwXchg:
-				if 1<<align > 64/8 {
+				if uint64(1)<<align > 64/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI64); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI64)
 			case OpcodeAtomicI64Rmw8AddU, OpcodeAtomicI64Rmw8SubU, OpcodeAtomicI64Rmw8AndU, OpcodeAtomicI64Rmw8OrU, OpcodeAtomicI64Rmw8XorU, OpcodeAtomicI64Rmw8XchgU:
-				if 1<<align > 1 {
+				if uint64(1)<<align > 1 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI64); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI64)
 			case OpcodeAtomicI64Rmw16AddU, OpcodeAtomicI64Rmw16SubU, OpcodeAtomicI64Rmw16AndU, OpcodeAtomicI64Rmw16OrU, OpcodeAtomicI64Rmw16XorU, OpcodeAtomicI64Rmw16XchgU:
-				if 1<<align > 16/8 {
+				if uint64(1)<<align > 16/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI64); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI64)
 			case OpcodeAtomicI64Rmw32AddU, OpcodeAtomicI64Rmw32SubU, OpcodeAtomicI64Rmw32AndU, OpcodeAtomicI64Rmw32OrU, OpcodeAtomicI64Rmw32XorU, OpcodeAtomicI64Rmw32XchgU:
-				if 1<<align > 32/8 {
+				if uint64(1)<<align > 32/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI64); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI64)
 			case OpcodeAtomicI32RmwCmpxchg:
-				if 1<<align > 32/8 {
+				if uint64(1)<<align > 32/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
@@ -2099,12 +2197,12 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI32)
 			case OpcodeAtomicI32Rmw8CmpxchgU:
-				if 1<<align > 1 {
+				if uint64(1)<<align > 1 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
@@ -2113,12 +2211,12 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI32)
 			case OpcodeAtomicI32Rmw16CmpxchgU:
-				if 1<<align > 16/8 {
+				if uint64(1)<<align > 16/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
@@ -2127,12 +2225,12 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI32)
 			case OpcodeAtomicI64RmwCmpxchg:
-				if 1<<align > 64/8 {
+				if uint64(1)<<align > 64/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI64); err != nil {
@@ -2141,12 +2239,12 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI64); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI64)
 			case OpcodeAtomicI64Rmw8CmpxchgU:
-				if 1<<align > 1 {
+				if uint64(1)<<align > 1 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI64); err != nil {
@@ -2155,12 +2253,12 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI64); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI64)
 			case OpcodeAtomicI64Rmw16CmpxchgU:
-				if 1<<align > 16/8 {
+				if uint64(1)<<align > 16/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI64); err != nil {
@@ -2169,12 +2267,12 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI64); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI64)
 			case OpcodeAtomicI64Rmw32CmpxchgU:
-				if 1<<align > 32/8 {
+				if uint64(1)<<align > 32/8 {
 					return fmt.Errorf("invalid memory alignment")
 				}
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI64); err != nil {
@@ -2183,7 +2281,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				if err := valueTypeStack.popAndVerifyType(ValueTypeI64); err != nil {
 					return err
 				}
-				if err := valueTypeStack.popAndVerifyType(ValueTypeI32); err != nil {
+				if err := valueTypeStack.popAndVerifyType(addrType); err != nil {
 					return err
 				}
 				valueTypeStack.push(ValueTypeI64)
@@ -2341,7 +2439,10 @@ func (m *Module) validateFunctionWithMaxStackValues(
 						if ht < 0 {
 							return fmt.Errorf("invalid heap type for %s: %d", OpcodeTypedSelectName, ht)
 						}
-						if int(ht) >= len(m.TypeSection) {
+						// int64, so compared against an int64 length: ht
+						// spans a 33-bit signed range and int(ht) truncates
+						// where an int is 32 bits wide.
+						if ht >= int64(len(m.TypeSection)) {
 							return fmt.Errorf("unknown type for %s: type index %d out of range", OpcodeTypedSelectName, ht)
 						}
 					}

@@ -10,7 +10,7 @@ import (
 )
 
 func TestTableSection(t *testing.T) {
-	three := uint32(3)
+	three := uint64(3)
 	tests := []struct {
 		name     string
 		input    []byte
@@ -82,8 +82,9 @@ func TestTableSection_Errors(t *testing.T) {
 
 func TestMemorySection(t *testing.T) {
 	max := wasm.MemoryLimitPages
+	max64 := uint64(max)
 
-	three := uint32(3)
+	three := uint64(3)
 	tests := []struct {
 		name                  string
 		input                 []byte
@@ -116,8 +117,8 @@ func TestMemorySection(t *testing.T) {
 			features:              api.CoreFeaturesV2 | api.CoreFeatureMultiMemory,
 			memoryCapacityFromMax: true,
 			expected: []wasm.Memory{
-				{Min: 1, Cap: max, Max: max, IsMaxEncoded: false},
-				{Min: 1, Cap: max, Max: max, IsMaxEncoded: false},
+				{Min: 1, Cap: max64, Max: max64, IsMaxEncoded: false},
+				{Min: 1, Cap: max64, Max: max64, IsMaxEncoded: false},
 			},
 		},
 	}

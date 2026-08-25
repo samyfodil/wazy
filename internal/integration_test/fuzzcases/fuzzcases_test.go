@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
+	"strconv"
 	"testing"
 
 	"github.com/samyfodil/wazy"
@@ -331,6 +332,13 @@ func Test733(t *testing.T) {
 				// Note: this case uses large memory space, so can be slow like 1 to 2 seconds even without -race.
 				// The reason is that this test requires roughly 2GB of in-Wasm memory.
 				t.SkipNow()
+			}
+			if strconv.IntSize < 64 {
+				// The store is at 0x80000100, so the memory has to pass two
+				// gibibytes -- longer than a slice can be where an int is 32
+				// bits wide. Growing it there fails rather than trapping, which
+				// is the host limit doing its job, not a bug to assert on.
+				t.Skip("a memory this large cannot exist on a 32-bit platform")
 			}
 			f := mod.ExportedFunction("store higher offset")
 			require.NotNil(t, f)

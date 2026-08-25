@@ -187,6 +187,25 @@ const CoreFeatureRelaxedSIMD CoreFeatures = CoreFeatureSIMD << 6
 // See https://github.com/WebAssembly/multi-memory for further details.
 const CoreFeatureMultiMemory CoreFeatures = CoreFeatureSIMD << 7
 
+// CoreFeatureMemory64 enables the 64-bit address space ("memory64"): a memory
+// or table may be declared with an i64 index type instead of i32, lifting the
+// four-gibibyte ceiling.
+//
+// Here are the notable effects:
+//   - Memory and table limits accept the 0x04..0x07 flag bytes, whose min and
+//     max are encoded as u64 and whose index type is i64.
+//   - Every address, size and length operand of an instruction addressing an
+//     i64-indexed memory or table becomes i64 instead of i32, as does the
+//     result of `memory.size`, `memory.grow`, `table.size` and `table.grow`.
+//   - A `memarg` offset immediate may exceed 2^32 when the memory it addresses
+//     is 64-bit.
+//
+// Note: a 64-bit memory may still only occupy as many pages as the embedder
+// allows; see wazy.RuntimeConfig WithMemory64LimitPages.
+//
+// See https://github.com/WebAssembly/memory64 for further details.
+const CoreFeatureMemory64 CoreFeatures = CoreFeatureSIMD << 8
+
 // SetEnabled enables or disables the feature or group of features.
 func (f CoreFeatures) SetEnabled(feature CoreFeatures, val bool) CoreFeatures {
 	if val {
@@ -263,6 +282,8 @@ func featureName(f CoreFeatures) string {
 		return "relaxed-simd"
 	case CoreFeatureMultiMemory:
 		return "multi-memory"
+	case CoreFeatureMemory64:
+		return "memory64"
 	}
 	return ""
 }

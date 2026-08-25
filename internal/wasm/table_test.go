@@ -15,7 +15,7 @@ func Test_resolveImports_table(t *testing.T) {
 	const name = "target"
 
 	t.Run("ok", func(t *testing.T) {
-		max := uint32(10)
+		max := uint64(10)
 		tableInst := &TableInstance{Max: &max, involvingModuleInstances: []*ModuleInstance{{}}}
 		s := newStore()
 		s.nameToModule[moduleName] = &ModuleInstance{
@@ -50,7 +50,7 @@ func Test_resolveImports_table(t *testing.T) {
 		require.EqualError(t, err, "import table[test.target]: minimum size mismatch: 2 > 1")
 	})
 	t.Run("maximum size mismatch", func(t *testing.T) {
-		max := uint32(10)
+		max := uint64(10)
 		importTableType := Table{Max: &max}
 		s := newStore()
 		s.nameToModule[moduleName] = &ModuleInstance{
@@ -87,7 +87,7 @@ var codeEnd = Code{Body: []byte{OpcodeEnd}}
 
 func TestModule_validateTable(t *testing.T) {
 	const maxTableIndex = 5
-	three := uint32(3)
+	three := uint64(3)
 	tests := []struct {
 		name  string
 		input *Module
@@ -722,7 +722,7 @@ func TestModule_validateTable_Errors(t *testing.T) {
 }
 
 func TestModule_buildTables(t *testing.T) {
-	three := uint32(3)
+	three := uint64(3)
 	tests := []struct {
 		name            string
 		module          *Module
@@ -1053,11 +1053,11 @@ func TestModule_buildTable_Errors(t *testing.T) {
 
 func TestTableInstance_Grow(t *testing.T) {
 	expOnErr := uint32(0xffff_ffff) // -1 as signed i32.
-	max10 := uint32(10)
+	max10 := uint64(10)
 	tests := []struct {
 		name       string
 		currentLen int
-		max        *uint32
+		max        *uint64
 		delta, exp uint32
 	}{
 		{

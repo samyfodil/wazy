@@ -612,21 +612,34 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		case nativeapi.ExitCodeGrowMemory:
 			mod := c.callerModuleInstance()
 			s := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
-			memIndex, pages := uint32(s[0]), uint32(s[1])
+			memIndex := uint32(s[0])
 			mem := mod.Memories[memIndex]
-			if res, ok := mem.Grow(pages); !ok {
-				s[0] = uint64(0xffffffff) // = -1 in signed 32-bit integer.
+			// The trampoline passes the page delta as a full 64 bits whatever the
+			// memory's index type; a 32-bit memory's fits in the low half.
+			pages := s[1]
+			if res, ok := mem.Grow64(pages); !ok {
+				if mem.IsMemory64 {
+					s[0] = ^uint64(0) // = -1 in signed 64-bit integer.
+				} else {
+					s[0] = uint64(0xffffffff) // = -1 in signed 32-bit integer.
+				}
 			} else {
-				s[0] = uint64(res)
+				s[0] = res
 			}
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr, uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case nativeapi.ExitCodeTableGrow:
 			mod := c.callerModuleInstance()
 			s := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
-			tableIndex, num, ref := uint32(s[0]), uint32(s[1]), uintptr(s[2])
+			// As with memory.grow, the trampoline passes the entry count as a
+			// full 64 bits whatever the table's index type.
+			tableIndex, num, ref := uint32(s[0]), s[1], uintptr(s[2])
 			table := mod.Tables[tableIndex]
-			s[0] = uint64(uint32(int32(table.Grow(num, ref))))
+			if table.IsTable64 {
+				s[0] = table.Grow64(num, ref)
+			} else {
+				s[0] = uint64(table.Grow(uint32(num), ref))
+			}
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
@@ -753,8 +766,8 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 
 			base := uintptr(unsafe.Pointer(&mem.Buffer[0]))
 
-			offset := uint32(addr - base)
-			res := mem.Wait32(offset, exp, timeout, func(mem *wasm.MemoryInstance, offset uint32) uint32 {
+			offset := uint64(addr - base)
+			res := mem.Wait32(offset, exp, timeout, func(mem *wasm.MemoryInstance, offset uint64) uint32 {
 				addr := unsafe.Add(unsafe.Pointer(&mem.Buffer[0]), offset)
 				return atomic.LoadUint32((*uint32)(addr))
 			})
@@ -773,8 +786,8 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 
 			base := uintptr(unsafe.Pointer(&mem.Buffer[0]))
 
-			offset := uint32(addr - base)
-			res := mem.Wait64(offset, exp, timeout, func(mem *wasm.MemoryInstance, offset uint32) uint64 {
+			offset := uint64(addr - base)
+			res := mem.Wait64(offset, exp, timeout, func(mem *wasm.MemoryInstance, offset uint64) uint64 {
 				addr := unsafe.Add(unsafe.Pointer(&mem.Buffer[0]), offset)
 				return atomic.LoadUint64((*uint64)(addr))
 			})
@@ -787,7 +800,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			s := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
 			memIndex, count, addr := uint32(s[0]), uint32(s[1]), s[2]
 			mem := mod.Memories[memIndex]
-			offset := uint32(uintptr(addr) - uintptr(unsafe.Pointer(&mem.Buffer[0])))
+			offset := uint64(uintptr(addr) - uintptr(unsafe.Pointer(&mem.Buffer[0])))
 			res := mem.Notify(offset, count)
 			s[0] = uint64(res)
 			c.execCtx.exitCode = nativeapi.ExitCodeOK

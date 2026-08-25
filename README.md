@@ -143,6 +143,22 @@ r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigInterpreter())
 - **Compiler** translates each module to machine code during `CompileModule`, so your functions run natively, typically an order of magnitude faster than interpretation, with no host-specific dependencies.
 - **Interpreter** is pure Go with no architecture-specific code, so it runs anywhere Go runs, down to targets like `riscv64`.
 
+### Platform support
+
+| | |
+| --- | --- |
+| **Tested** | `linux/amd64`, `linux/arm64`, `darwin/arm64`, `windows/amd64`. Every commit runs the full suite and the specification conformance suites on these in CI. They are what wazy is developed and released against. |
+| **Builds, best-effort** | Every other Go target, including 32-bit ones (`386`, `arm`) and `js/wasm`, `wasip1`, `plan9`, `aix`, `s390x`, `ppc64le`, `riscv64`. CI cross-compiles them on every commit, and they run the interpreter. They are not exercised by CI, so a bug there is found by whoever hits it. |
+
+A 32-bit host is bound by what a Go slice can hold, so a linear memory tops out
+just under two gibibytes rather than the four a 32-bit Wasm memory may declare.
+A module asking for more is rejected rather than being allowed to exhaust the
+address space, and `memory.grow` stops there -- both of which the specification
+allows a host to do. Tests needing a larger address space skip themselves.
+
+If you depend on a platform in the second row, CI coverage for it is a
+reasonable thing to ask for in an issue.
+
 ## Example
 
 The fastest way in is an [example](examples/README.md). The [basic one](examples/basic) extends a Go program with an addition function written in WebAssembly.

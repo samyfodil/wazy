@@ -162,6 +162,53 @@ var (
 	signature_I32I64I32_None = &signature{
 		in: []unsignedType{unsignedTypeI32, unsignedTypeI64, unsignedTypeI32},
 	}
+	// The signatures below mirror their I32-addressed counterparts for a memory
+	// declared with an i64 index type (see api.CoreFeatureMemory64), whose
+	// address, size and length operands are i64 instead of i32.
+	signature_I64I32_None = &signature{
+		in: []unsignedType{unsignedTypeI64, unsignedTypeI32},
+	}
+	signature_I64I64_None = &signature{
+		in: []unsignedType{unsignedTypeI64, unsignedTypeI64},
+	}
+	signature_I64F32_None = &signature{
+		in: []unsignedType{unsignedTypeI64, unsignedTypeF32},
+	}
+	signature_I64F64_None = &signature{
+		in: []unsignedType{unsignedTypeI64, unsignedTypeF64},
+	}
+	signature_I64V128_None = &signature{
+		in: []unsignedType{unsignedTypeI64, unsignedTypeV128},
+	}
+	signature_I64V128_V128 = &signature{
+		in:  []unsignedType{unsignedTypeI64, unsignedTypeV128},
+		out: []unsignedType{unsignedTypeV128},
+	}
+	signature_I64I32I32_None = &signature{
+		in: []unsignedType{unsignedTypeI64, unsignedTypeI32, unsignedTypeI32},
+	}
+	signature_I64I32I64_None = &signature{
+		in: []unsignedType{unsignedTypeI64, unsignedTypeI32, unsignedTypeI64},
+	}
+	signature_I64I64I64_None = &signature{
+		in: []unsignedType{unsignedTypeI64, unsignedTypeI64, unsignedTypeI64},
+	}
+	signature_I64I32I64_I32 = &signature{
+		in:  []unsignedType{unsignedTypeI64, unsignedTypeI32, unsignedTypeI64},
+		out: []unsignedType{unsignedTypeI32},
+	}
+	signature_I64I64I64_I32 = &signature{
+		in:  []unsignedType{unsignedTypeI64, unsignedTypeI64, unsignedTypeI64},
+		out: []unsignedType{unsignedTypeI32},
+	}
+	signature_I64I32I32_I32 = &signature{
+		in:  []unsignedType{unsignedTypeI64, unsignedTypeI32, unsignedTypeI32},
+		out: []unsignedType{unsignedTypeI32},
+	}
+	signature_I64I64I64_I64 = &signature{
+		in:  []unsignedType{unsignedTypeI64, unsignedTypeI64, unsignedTypeI64},
+		out: []unsignedType{unsignedTypeI64},
+	}
 	signature_UnknownUnknownI32_Unknown = &signature{
 		in:  []unsignedType{unsignedTypeUnknown, unsignedTypeUnknown, unsignedTypeI32},
 		out: []unsignedType{unsignedTypeUnknown},
@@ -255,12 +302,127 @@ var (
 	}
 )
 
+// index64Signature returns the signature of an opcode whose operand types
+// follow the index type of the memory or table it names, for a module that has
+// at least one i64-indexed one. ok is false for every other opcode, leaving it
+// to wasmOpcodeSignature's own switch.
+//
+// It is a separate function, rather than the index-type test being folded into
+// each of those cases, so that a module without any 64-bit memory or table --
+// which is every module that does not use the memory64 proposal -- reaches
+// wasmOpcodeSignature's switch exactly as it did before this feature existed,
+// paying one predictable branch for the whole instruction stream.
+func (c *compiler) index64Signature(op wasm.Opcode, index uint32) (sig *signature, ok bool) {
+	switch op {
+	case wasm.OpcodeCallIndirect, wasm.OpcodeTailCallReturnCallIndirect:
+		// applyToStack has already consumed the type index, so the table index
+		// immediate starts at the next byte.
+		index64, _ := c.peekTableIndex64(0)
+		return c.funcTypeToSigs.get(index, true /* call_indirect */, index64), true
+	case wasm.OpcodeI32Load, wasm.OpcodeI32Load8S, wasm.OpcodeI32Load8U,
+		wasm.OpcodeI32Load16S, wasm.OpcodeI32Load16U:
+		return c.memSig(0, signature_I32_I32, signature_I64_I32), true
+	case wasm.OpcodeI64Load, wasm.OpcodeI64Load8S, wasm.OpcodeI64Load8U,
+		wasm.OpcodeI64Load16S, wasm.OpcodeI64Load16U, wasm.OpcodeI64Load32S, wasm.OpcodeI64Load32U:
+		return c.memSig(0, signature_I32_I64, signature_I64_I64), true
+	case wasm.OpcodeF32Load:
+		return c.memSig(0, signature_I32_F32, signature_I64_F32), true
+	case wasm.OpcodeF64Load:
+		return c.memSig(0, signature_I32_F64, signature_I64_F64), true
+	case wasm.OpcodeI32Store, wasm.OpcodeI32Store8, wasm.OpcodeI32Store16:
+		return c.memSig(0, signature_I32I32_None, signature_I64I32_None), true
+	case wasm.OpcodeI64Store, wasm.OpcodeI64Store8, wasm.OpcodeI64Store16, wasm.OpcodeI64Store32:
+		return c.memSig(0, signature_I32I64_None, signature_I64I64_None), true
+	case wasm.OpcodeF32Store:
+		return c.memSig(0, signature_I32F32_None, signature_I64F32_None), true
+	case wasm.OpcodeF64Store:
+		return c.memSig(0, signature_I32F64_None, signature_I64F64_None), true
+	case wasm.OpcodeMemorySize:
+		return c.memIndexSig(0, signature_None_I32, signature_None_I64), true
+	case wasm.OpcodeMemoryGrow:
+		return c.memIndexSig(0, signature_I32_I32, signature_I64_I64), true
+	case wasm.OpcodeTableGet:
+		return c.tableIndexSig(0, signature_I32_I64, signature_I64_I64), true
+	case wasm.OpcodeTableSet:
+		return c.tableIndexSig(0, signature_I32I64_None, signature_I64I64_None), true
+	case wasm.OpcodeMiscPrefix:
+		switch miscOp := c.body[c.pc+1]; miscOp {
+		case wasm.OpcodeMiscMemoryInit, wasm.OpcodeMiscMemoryCopy, wasm.OpcodeMiscMemoryFill:
+			return c.bulkMemorySignature(miscOp), true
+		case wasm.OpcodeMiscTableInit, wasm.OpcodeMiscTableCopy:
+			return c.bulkTableSignature(miscOp), true
+		case wasm.OpcodeMiscTableGrow:
+			// table.grow x : [ref, at] -> [at]
+			return c.tableIndexSig(1, signature_I64I32_I32, signature_I64I64_I64), true
+		case wasm.OpcodeMiscTableSize:
+			return c.tableIndexSig(1, signature_None_I32, signature_None_I64), true
+		case wasm.OpcodeMiscTableFill:
+			// table.fill x : [at, ref, at] -> []
+			return c.tableIndexSig(1, signature_I32I64I32_None, signature_I64I64I64_None), true
+		}
+	case wasm.OpcodeVecPrefix:
+		vecOp, vecOpSize := wasm.ReadVecOpcode(c.body, int(c.pc)+1)
+		switch vecOp {
+		case wasm.OpcodeVecV128Load, wasm.OpcodeVecV128Load8x8s, wasm.OpcodeVecV128Load8x8u,
+			wasm.OpcodeVecV128Load16x4s, wasm.OpcodeVecV128Load16x4u, wasm.OpcodeVecV128Load32x2s,
+			wasm.OpcodeVecV128Load32x2u, wasm.OpcodeVecV128Load8Splat, wasm.OpcodeVecV128Load16Splat,
+			wasm.OpcodeVecV128Load32Splat, wasm.OpcodeVecV128Load64Splat, wasm.OpcodeVecV128Load32zero,
+			wasm.OpcodeVecV128Load64zero:
+			return c.memSig(uint64(vecOpSize), signature_I32_V128, signature_I64_V128), true
+		case wasm.OpcodeVecV128Load8Lane, wasm.OpcodeVecV128Load16Lane,
+			wasm.OpcodeVecV128Load32Lane, wasm.OpcodeVecV128Load64Lane:
+			return c.memSig(uint64(vecOpSize), signature_I32V128_V128, signature_I64V128_V128), true
+		case wasm.OpcodeVecV128Store, wasm.OpcodeVecV128Store8Lane, wasm.OpcodeVecV128Store16Lane,
+			wasm.OpcodeVecV128Store32Lane, wasm.OpcodeVecV128Store64Lane:
+			return c.memSig(uint64(vecOpSize), signature_I32V128_None, signature_I64V128_None), true
+		}
+	case wasm.OpcodeAtomicPrefix:
+		switch atomicOp := c.body[c.pc+1]; atomicOp {
+		case wasm.OpcodeAtomicMemoryNotify:
+			return c.memSig(1, signature_I32I32_I32, signature_I64I32_I32), true
+		case wasm.OpcodeAtomicMemoryWait32:
+			return c.memSig(1, signature_I32I32I64_I32, signature_I64I32I64_I32), true
+		case wasm.OpcodeAtomicMemoryWait64:
+			return c.memSig(1, signature_I32I64I64_I32, signature_I64I64I64_I32), true
+		case wasm.OpcodeAtomicI32Load, wasm.OpcodeAtomicI32Load8U, wasm.OpcodeAtomicI32Load16U:
+			return c.memSig(1, signature_I32_I32, signature_I64_I32), true
+		case wasm.OpcodeAtomicI64Load, wasm.OpcodeAtomicI64Load8U, wasm.OpcodeAtomicI64Load16U,
+			wasm.OpcodeAtomicI64Load32U:
+			return c.memSig(1, signature_I32_I64, signature_I64_I64), true
+		case wasm.OpcodeAtomicI32Store, wasm.OpcodeAtomicI32Store8, wasm.OpcodeAtomicI32Store16:
+			return c.memSig(1, signature_I32I32_None, signature_I64I32_None), true
+		case wasm.OpcodeAtomicI64Store, wasm.OpcodeAtomicI64Store8, wasm.OpcodeAtomicI64Store16,
+			wasm.OpcodeAtomicI64Store32:
+			return c.memSig(1, signature_I32I64_None, signature_I64I64_None), true
+		case wasm.OpcodeAtomicI32RmwAdd, wasm.OpcodeAtomicI32RmwSub, wasm.OpcodeAtomicI32RmwAnd, wasm.OpcodeAtomicI32RmwOr, wasm.OpcodeAtomicI32RmwXor, wasm.OpcodeAtomicI32RmwXchg,
+			wasm.OpcodeAtomicI32Rmw8AddU, wasm.OpcodeAtomicI32Rmw8SubU, wasm.OpcodeAtomicI32Rmw8AndU, wasm.OpcodeAtomicI32Rmw8OrU, wasm.OpcodeAtomicI32Rmw8XorU, wasm.OpcodeAtomicI32Rmw8XchgU,
+			wasm.OpcodeAtomicI32Rmw16AddU, wasm.OpcodeAtomicI32Rmw16SubU, wasm.OpcodeAtomicI32Rmw16AndU, wasm.OpcodeAtomicI32Rmw16OrU, wasm.OpcodeAtomicI32Rmw16XorU, wasm.OpcodeAtomicI32Rmw16XchgU:
+			return c.memSig(1, signature_I32I32_I32, signature_I64I32_I32), true
+		case wasm.OpcodeAtomicI64RmwAdd, wasm.OpcodeAtomicI64RmwSub, wasm.OpcodeAtomicI64RmwAnd, wasm.OpcodeAtomicI64RmwOr, wasm.OpcodeAtomicI64RmwXor, wasm.OpcodeAtomicI64RmwXchg,
+			wasm.OpcodeAtomicI64Rmw8AddU, wasm.OpcodeAtomicI64Rmw8SubU, wasm.OpcodeAtomicI64Rmw8AndU, wasm.OpcodeAtomicI64Rmw8OrU, wasm.OpcodeAtomicI64Rmw8XorU, wasm.OpcodeAtomicI64Rmw8XchgU,
+			wasm.OpcodeAtomicI64Rmw16AddU, wasm.OpcodeAtomicI64Rmw16SubU, wasm.OpcodeAtomicI64Rmw16AndU, wasm.OpcodeAtomicI64Rmw16OrU, wasm.OpcodeAtomicI64Rmw16XorU, wasm.OpcodeAtomicI64Rmw16XchgU,
+			wasm.OpcodeAtomicI64Rmw32AddU, wasm.OpcodeAtomicI64Rmw32SubU, wasm.OpcodeAtomicI64Rmw32AndU, wasm.OpcodeAtomicI64Rmw32OrU, wasm.OpcodeAtomicI64Rmw32XorU, wasm.OpcodeAtomicI64Rmw32XchgU:
+			return c.memSig(1, signature_I32I64_I64, signature_I64I64_I64), true
+		case wasm.OpcodeAtomicI32RmwCmpxchg, wasm.OpcodeAtomicI32Rmw8CmpxchgU, wasm.OpcodeAtomicI32Rmw16CmpxchgU:
+			return c.memSig(1, signature_I32I32I32_I32, signature_I64I32I32_I32), true
+		case wasm.OpcodeAtomicI64RmwCmpxchg, wasm.OpcodeAtomicI64Rmw8CmpxchgU, wasm.OpcodeAtomicI64Rmw16CmpxchgU, wasm.OpcodeAtomicI64Rmw32CmpxchgU:
+			return c.memSig(1, signature_I32I64I64_I64, signature_I64I64I64_I64), true
+		}
+	}
+	return nil, false
+}
+
 // wasmOpcodeSignature returns the signature of given Wasm opcode.
 // Note that some of opcodes' signature vary depending on
 // the function instance (for example, local types).
 // "index" parameter is not used by most of opcodes.
 // The returned signature is used for stack validation when lowering Wasm's opcodes to interpreterir.
 func (c *compiler) wasmOpcodeSignature(op wasm.Opcode, index uint32) (*signature, error) {
+	if c.anyIndex64 {
+		if sig, ok := c.index64Signature(op, index); ok {
+			return sig, nil
+		}
+	}
 	switch op {
 	case wasm.OpcodeUnreachable, wasm.OpcodeNop, wasm.OpcodeBlock, wasm.OpcodeLoop:
 		return signature_None_None, nil
@@ -276,9 +438,9 @@ func (c *compiler) wasmOpcodeSignature(op wasm.Opcode, index uint32) (*signature
 	case wasm.OpcodeReturn:
 		return signature_None_None, nil
 	case wasm.OpcodeCall, wasm.OpcodeTailCallReturnCall:
-		return c.funcTypeToSigs.get(c.funcs[index], false /* direct */), nil
+		return c.funcTypeToSigs.get(c.funcs[index], false /* direct */, false), nil
 	case wasm.OpcodeCallIndirect, wasm.OpcodeTailCallReturnCallIndirect:
-		return c.funcTypeToSigs.get(index, true /* call_indirect */), nil
+		return c.funcTypeToSigs.get(index, true /* call_indirect */, false), nil
 	case wasm.OpcodeCallRef, wasm.OpcodeReturnCallRef:
 		return c.funcTypeToSigs.getCallRef(index), nil
 	case wasm.OpcodeRefAsNonNull:
@@ -671,21 +833,100 @@ func (c *compiler) wasmOpcodeSignature(op wasm.Opcode, index uint32) (*signature
 	}
 }
 
+// bulkMemorySignature returns the signature of a memory.init, memory.copy or
+// memory.fill at c.pc, whose operand types follow the index types of the
+// memories its immediates name.
+//
+// https://webassembly.github.io/memory64/core/valid/instructions.html
+func (c *compiler) bulkMemorySignature(miscOp byte) *signature {
+	if !c.anyMemory64 {
+		return signature_I32I32I32_None
+	}
+	switch miscOp {
+	case wasm.OpcodeMiscMemoryFill:
+		// memory.fill x : [at, i32, at] -> []
+		if index64, _ := c.peekMemIndex64(1); index64 {
+			return signature_I64I32I64_None
+		}
+	case wasm.OpcodeMiscMemoryInit:
+		// memory.init x y : [at, i32, i32] -> [], where the memory index
+		// follows the data segment index.
+		_, dataIdxLen := c.peekMemIndex64(1)
+		if index64, _ := c.peekMemIndex64(1 + dataIdxLen); index64 {
+			return signature_I64I32I32_None
+		}
+	case wasm.OpcodeMiscMemoryCopy:
+		// memory.copy x y : [at_x, at_y, min(at_x, at_y)] -> []
+		dst64, dstIdxLen := c.peekMemIndex64(1)
+		src64, _ := c.peekMemIndex64(1 + dstIdxLen)
+		switch {
+		case dst64 && src64:
+			return signature_I64I64I64_None
+		case dst64:
+			return signature_I64I32I32_None
+		case src64:
+			return signature_I32I64I32_None
+		}
+	}
+	return signature_I32I32I32_None
+}
+
+// bulkTableSignature returns the signature of a table.init or table.copy at
+// c.pc, whose operand types follow the index types of the tables its immediates
+// name.
+func (c *compiler) bulkTableSignature(miscOp byte) *signature {
+	if !c.anyTable64 {
+		return signature_I32I32I32_None
+	}
+	switch miscOp {
+	case wasm.OpcodeMiscTableInit:
+		// table.init x y : [at, i32, i32] -> [], where the table index follows
+		// the element segment index.
+		_, elemIdxLen := c.peekTableIndex64(1)
+		if index64, _ := c.peekTableIndex64(1 + elemIdxLen); index64 {
+			return signature_I64I32I32_None
+		}
+	case wasm.OpcodeMiscTableCopy:
+		// table.copy x y : [at_x, at_y, min(at_x, at_y)] -> []
+		dst64, dstIdxLen := c.peekTableIndex64(1)
+		src64, _ := c.peekTableIndex64(1 + dstIdxLen)
+		switch {
+		case dst64 && src64:
+			return signature_I64I64I64_None
+		case dst64:
+			return signature_I64I32I32_None
+		case src64:
+			return signature_I32I64I32_None
+		}
+	}
+	return signature_I32I32I32_None
+}
+
 // funcTypeToIRSignatures is the central cache for a module to get the *signature
 // for function calls.
 type funcTypeToIRSignatures struct {
 	directCalls   []*signature
 	indirectCalls []*signature
-	callRefCalls  []*signature
-	wasmTypes     []wasm.FunctionType
+	// indirectCalls64 caches the call_indirect signatures whose table index
+	// operand is i64 rather than i32, i.e. those against a 64-bit table.
+	indirectCalls64 []*signature
+	callRefCalls    []*signature
+	wasmTypes       []wasm.FunctionType
 }
 
 // get returns the *signature for the direct or indirect function call against functions whose type is at `typeIndex`.
-func (f *funcTypeToIRSignatures) get(typeIndex wasm.Index, indirect bool) *signature {
+//
+// index64 applies only to an indirect call, and selects the form whose table
+// index operand is i64: the operand follows the index type of the table the
+// call goes through.
+func (f *funcTypeToIRSignatures) get(typeIndex wasm.Index, indirect, index64 bool) *signature {
 	var sig *signature
-	if indirect {
+	switch {
+	case indirect && index64:
+		sig = f.indirectCalls64[typeIndex]
+	case indirect:
 		sig = f.indirectCalls[typeIndex]
-	} else {
+	default:
 		sig = f.directCalls[typeIndex]
 	}
 	if sig != nil {
@@ -712,10 +953,14 @@ func (f *funcTypeToIRSignatures) get(typeIndex wasm.Index, indirect bool) *signa
 		sig.out = append(sig.out, wasmValueTypeTounsignedType(vt))
 	}
 
-	if indirect {
+	switch {
+	case indirect && index64:
+		sig.in = append(sig.in, unsignedTypeI64)
+		f.indirectCalls64[typeIndex] = sig
+	case indirect:
 		sig.in = append(sig.in, unsignedTypeI32)
 		f.indirectCalls[typeIndex] = sig
-	} else {
+	default:
 		f.directCalls[typeIndex] = sig
 	}
 	return sig

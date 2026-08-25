@@ -63,7 +63,15 @@ type Compiler struct {
 	// if multi-memory codegen benchmarks show it's worth it.
 	multiMemory    bool
 	memoryShared   []bool
-	memoryMaxPages []uint32
+	memoryMaxPages []uint64
+	// memoryIndex64 records, per memory index, whether that memory has an i64
+	// index type, in which case its address and length operands are full 64-bit
+	// values whose arithmetic can overflow. anyMemory64 is true if any does.
+	memoryIndex64 []bool
+	anyMemory64   bool
+	// tableIndex64 is memoryIndex64's counterpart for the module's tables.
+	tableIndex64 []bool
+	anyTable64   bool
 	// memoryMinSizeInBytes is the static minimum size of each memory in bytes.
 	// Since memories never shrink, any access whose end is a constant within
 	// this bound can never be out of bounds.
@@ -292,10 +300,13 @@ func (c *Compiler) declareSignatures(listenerOn bool) {
 	}
 	c.memoryGrowSig = ssa.Signature{
 		ID: begin,
-		// Takes execution context, the memory index, and the page size to grow.
-		Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI32},
-		// Returns the previous page size.
-		Results: []ssa.Type{ssa.TypeI32},
+		// Takes execution context, the memory index, and the page count to grow by.
+		// The page count and result are i64 whatever the memory's index type: a
+		// 64-bit memory needs the full width, and narrowing back for a 32-bit one
+		// costs two instructions in a block that is about to allocate anyway.
+		Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64},
+		// Returns the previous page count.
+		Results: []ssa.Type{ssa.TypeI64},
 	}
 	c.ssaBuilder.DeclareSignature(&c.memoryGrowSig)
 
@@ -307,10 +318,12 @@ func (c *Compiler) declareSignatures(listenerOn bool) {
 	c.ssaBuilder.DeclareSignature(&c.checkModuleExitCodeSig)
 
 	c.tableGrowSig = ssa.Signature{
-		ID:     c.checkModuleExitCodeSig.ID + 1,
-		Params: []ssa.Type{ssa.TypeI64 /* exec context */, ssa.TypeI32 /* table index */, ssa.TypeI32 /* num */, ssa.TypeI64 /* ref */},
+		ID: c.checkModuleExitCodeSig.ID + 1,
+		// As with memoryGrowSig, the entry count and result are i64 whatever the
+		// table's index type.
+		Params: []ssa.Type{ssa.TypeI64 /* exec context */, ssa.TypeI32 /* table index */, ssa.TypeI64 /* num */, ssa.TypeI64 /* ref */},
 		// Returns the previous size.
-		Results: []ssa.Type{ssa.TypeI32},
+		Results: []ssa.Type{ssa.TypeI64},
 	}
 	c.ssaBuilder.DeclareSignature(&c.tableGrowSig)
 
@@ -507,29 +520,59 @@ func (c *Compiler) declareNecessaryVariables() {
 
 	c.memoryShared = c.memoryShared[:0]
 	c.memoryMaxPages = c.memoryMaxPages[:0]
+	c.memoryIndex64 = c.memoryIndex64[:0]
+	c.anyMemory64 = false
 	c.memoryMinSizeInBytes = c.memoryMinSizeInBytes[:0]
 	c.memoryBaseVariables = c.memoryBaseVariables[:0]
 	c.memoryLenVariables = c.memoryLenVariables[:0]
+	addMemory := func(mem *wasm.Memory) {
+		c.memoryShared = append(c.memoryShared, mem.IsShared)
+		c.memoryMaxPages = append(c.memoryMaxPages, mem.Max)
+		c.memoryIndex64 = append(c.memoryIndex64, mem.IsMemory64)
+		c.anyMemory64 = c.anyMemory64 || mem.IsMemory64
+		// MemoryPagesToBytesNum rather than a plain shift: a 64-bit memory may
+		// declare up to 2^48 pages, which is exactly 2^64 bytes. At that one
+		// point the conversion saturates, and a saturated value is not a lower
+		// bound on anything, so record no static minimum instead -- the
+		// elisions that consult it then simply do not fire. Such a module
+		// cannot be instantiated anyway (see Store.memoryLimitPages), so this
+		// only keeps the invariant those elisions rely on unconditionally true.
+		minSizeInBytes := wasm.MemoryPagesToBytesNum(mem.Min)
+		if minSizeInBytes == math.MaxUint64 {
+			minSizeInBytes = 0
+		}
+		c.memoryMinSizeInBytes = append(c.memoryMinSizeInBytes, minSizeInBytes)
+	}
 	for _, imp := range c.m.ImportSection {
 		if imp.Type != wasm.ExternTypeMemory {
 			continue
 		}
-		c.memoryShared = append(c.memoryShared, imp.DescMem.IsShared)
-		c.memoryMaxPages = append(c.memoryMaxPages, imp.DescMem.Max)
 		// The import's minimum is a type constraint on the provided
 		// memory, so it is a valid static lower bound as well.
-		c.memoryMinSizeInBytes = append(c.memoryMinSizeInBytes, uint64(imp.DescMem.Min)*uint64(wasm.MemoryPageSize))
+		addMemory(imp.DescMem)
 	}
 	for i := range c.m.MemorySection {
-		mem := &c.m.MemorySection[i]
-		c.memoryShared = append(c.memoryShared, mem.IsShared)
-		c.memoryMaxPages = append(c.memoryMaxPages, mem.Max)
-		c.memoryMinSizeInBytes = append(c.memoryMinSizeInBytes, uint64(mem.Min)*uint64(wasm.MemoryPageSize))
+		addMemory(&c.m.MemorySection[i])
 	}
 
 	for range memoryCount {
 		c.memoryBaseVariables = append(c.memoryBaseVariables, c.ssaBuilder.DeclareVariable(ssa.TypeI64))
 		c.memoryLenVariables = append(c.memoryLenVariables, c.ssaBuilder.DeclareVariable(ssa.TypeI64))
+	}
+
+	c.tableIndex64 = c.tableIndex64[:0]
+	c.anyTable64 = false
+	addTable := func(t *wasm.Table) {
+		c.tableIndex64 = append(c.tableIndex64, t.IsTable64)
+		c.anyTable64 = c.anyTable64 || t.IsTable64
+	}
+	for i := range c.m.ImportSection {
+		if imp := &c.m.ImportSection[i]; imp.Type == wasm.ExternTypeTable {
+			addTable(&imp.DescTable)
+		}
+	}
+	for i := range c.m.TableSection {
+		addTable(&c.m.TableSection[i])
 	}
 
 	c.globalVariables = c.globalVariables[:0]

@@ -1,3 +1,10 @@
+//go:build amd64 || arm64
+
+// This file's fixtures are sized to a 64-bit host: stack size classes in the
+// gibibytes, and uintptr return addresses above 2^32. The native compiler only
+// runs on amd64 and arm64, both 64-bit, so constrain the file to them rather
+// than shrinking what it covers.
+
 package amd64
 
 import (

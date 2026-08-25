@@ -438,21 +438,28 @@ func TestCompiler_wasmOpcodeSignature(t *testing.T) {
 
 func Test_funcTypeToIRSignatures(t *testing.T) {
 	f := &funcTypeToIRSignatures{
-		wasmTypes:     []wasm.FunctionType{v_v, i32_i32, v_f64f64},
-		directCalls:   make([]*signature, 3),
-		indirectCalls: make([]*signature, 3),
+		wasmTypes:       []wasm.FunctionType{v_v, i32_i32, v_f64f64},
+		directCalls:     make([]*signature, 3),
+		indirectCalls:   make([]*signature, 3),
+		indirectCalls64: make([]*signature, 3),
 	}
 
-	require.Equal(t, &signature{in: make([]unsignedType, 0), out: make([]unsignedType, 0)}, f.get(0, false))
-	require.Equal(t, &signature{in: []unsignedType{unsignedTypeI32}, out: make([]unsignedType, 0)}, f.get(0, true))
+	require.Equal(t, &signature{in: make([]unsignedType, 0), out: make([]unsignedType, 0)}, f.get(0, false, false))
+	require.Equal(t, &signature{in: []unsignedType{unsignedTypeI32}, out: make([]unsignedType, 0)}, f.get(0, true, false))
 	require.NotNil(t, f.directCalls[0])
 	require.NotNil(t, f.indirectCalls[0])
-	require.Equal(t, &signature{in: []unsignedType{unsignedTypeI32}, out: []unsignedType{unsignedTypeI32}}, f.get(1, false))
-	require.Equal(t, &signature{in: []unsignedType{unsignedTypeI32, unsignedTypeI32}, out: []unsignedType{unsignedTypeI32}}, f.get(1, true))
+	require.Equal(t, &signature{in: []unsignedType{unsignedTypeI32}, out: []unsignedType{unsignedTypeI32}}, f.get(1, false, false))
+	require.Equal(t, &signature{in: []unsignedType{unsignedTypeI32, unsignedTypeI32}, out: []unsignedType{unsignedTypeI32}}, f.get(1, true, false))
 	require.NotNil(t, f.directCalls[1])
 	require.NotNil(t, f.indirectCalls[1])
-	require.Equal(t, &signature{in: make([]unsignedType, 0), out: []unsignedType{unsignedTypeF64, unsignedTypeF64}}, f.get(2, false))
-	require.Equal(t, &signature{in: []unsignedType{unsignedTypeI32}, out: []unsignedType{unsignedTypeF64, unsignedTypeF64}}, f.get(2, true))
+	require.Equal(t, &signature{in: make([]unsignedType, 0), out: []unsignedType{unsignedTypeF64, unsignedTypeF64}}, f.get(2, false, false))
+	require.Equal(t, &signature{in: []unsignedType{unsignedTypeI32}, out: []unsignedType{unsignedTypeF64, unsignedTypeF64}}, f.get(2, true, false))
 	require.NotNil(t, f.directCalls[2])
 	require.NotNil(t, f.indirectCalls[2])
+
+	// A call_indirect through a table with an i64 index type takes the table
+	// index operand as an i64, and is cached separately from the i32 form.
+	require.Equal(t, &signature{in: []unsignedType{unsignedTypeI32, unsignedTypeI64}, out: []unsignedType{unsignedTypeI32}}, f.get(1, true, true))
+	require.NotNil(t, f.indirectCalls64[1])
+	require.Equal(t, &signature{in: []unsignedType{unsignedTypeI32, unsignedTypeI32}, out: []unsignedType{unsignedTypeI32}}, f.get(1, true, false))
 }

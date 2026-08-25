@@ -227,6 +227,15 @@ func decodeMemorySection(
 	// own doc warns about its per-memory cost) -- this check exists to bound
 	// what the module can demand, not to second-guess the embedder's own
 	// tuning.
+	//
+	// A 64-bit memory is deliberately left out of the sum: the specification
+	// caps its declared minimum at 2^48 pages, not at anything an embedder
+	// configured, and requires a module declaring that much to still be valid
+	// (test/core/memory64.wast defines exactly such a module without
+	// instantiating it). Rejecting it here would reject a conformant module,
+	// so the same eager-allocation bound is applied to 64-bit memories at
+	// instantiation instead -- see ModuleInstance.buildMemory, which is also
+	// where nothing has been allocated yet.
 	var totalMinPages uint64
 	for i := range ret {
 		var mem *wasm.Memory
@@ -235,7 +244,10 @@ func decodeMemorySection(
 			return nil, offset, err
 		}
 		ret[i] = *mem
-		totalMinPages += uint64(mem.Min)
+		if mem.IsMemory64 {
+			continue
+		}
+		totalMinPages += mem.Min
 		if totalMinPages > uint64(memoryLimitPages) {
 			return nil, offset, fmt.Errorf("total memory minimum across %d memories (%d pages) exceeds %d pages",
 				i+1, totalMinPages, memoryLimitPages)

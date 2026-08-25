@@ -832,7 +832,7 @@ func Test_resolveImports(t *testing.T) {
 	})
 	t.Run("memory", func(t *testing.T) {
 		t.Run("ok", func(t *testing.T) {
-			max := uint32(10)
+			max := uint64(10)
 			memoryInst := &MemoryInstance{Max: max}
 			s := newStore()
 			importedME := &mockModuleEngine{}
@@ -875,14 +875,14 @@ func Test_resolveImports(t *testing.T) {
 		t.Run("maximum size mismatch", func(t *testing.T) {
 			s := newStore()
 			s.nameToModule[moduleName] = &ModuleInstance{
-				Memories: []*MemoryInstance{{Max: MemoryLimitPages}},
+				Memories: []*MemoryInstance{{Max: uint64(MemoryLimitPages)}},
 				Exports: map[string]*Export{name: {
 					Type: ExternTypeMemory,
 				}},
 				ModuleName: moduleName,
 			}
 
-			max := uint32(10)
+			max := uint64(10)
 			importMemoryType := &Memory{Max: max}
 			m := &ModuleInstance{Memories: make([]*MemoryInstance, 1), s: s}
 			err := m.resolveImports(context.Background(), &Module{
@@ -890,6 +890,57 @@ func Test_resolveImports(t *testing.T) {
 			})
 			require.EqualError(t, err, "import memory[test.target]: maximum size mismatch: 10 < 65536")
 		})
+		t.Run("index type mismatch", func(t *testing.T) {
+			// A 64-bit memory cannot satisfy an import declared with an i32
+			// index type, nor the other way around.
+			for _, tc := range []struct {
+				name             string
+				expected, actual bool
+				expErr           string
+			}{
+				{
+					name: "i32 import, i64 memory", expected: false, actual: true,
+					expErr: "import memory[test.target]: index type mismatch: expected i32, but actual has i64",
+				},
+				{
+					name: "i64 import, i32 memory", expected: true, actual: false,
+					expErr: "import memory[test.target]: index type mismatch: expected i64, but actual has i32",
+				},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					s := newStore()
+					s.nameToModule[moduleName] = &ModuleInstance{
+						Memories:   []*MemoryInstance{{Max: 1, IsMemory64: tc.actual}},
+						Exports:    map[string]*Export{name: {Type: ExternTypeMemory}},
+						ModuleName: moduleName,
+					}
+					m := &ModuleInstance{Memories: make([]*MemoryInstance, 1), s: s}
+					err := m.resolveImports(context.Background(), &Module{
+						ImportPerModule: map[string][]*Import{moduleName: {{
+							Module: moduleName, Name: name, Type: ExternTypeMemory,
+							DescMem: &Memory{Max: 1, IsMemory64: tc.expected},
+						}}},
+					})
+					require.EqualError(t, err, tc.expErr)
+				})
+			}
+		})
+	})
+	t.Run("table index type mismatch", func(t *testing.T) {
+		s := newStore()
+		s.nameToModule[moduleName] = &ModuleInstance{
+			Tables:     []*TableInstance{{Type: RefTypeFuncref, involvingModuleInstances: []*ModuleInstance{{}}}},
+			Exports:    map[string]*Export{name: {Type: ExternTypeTable}},
+			ModuleName: moduleName,
+		}
+		m := &ModuleInstance{Tables: make([]*TableInstance, 1), s: s}
+		err := m.resolveImports(context.Background(), &Module{
+			ImportPerModule: map[string][]*Import{moduleName: {{
+				Module: moduleName, Name: name, Type: ExternTypeTable,
+				DescTable: Table{Type: RefTypeFuncref, IsTable64: true},
+			}}},
+		})
+		require.EqualError(t, err, "import table[test.target]: index type mismatch: expected i64, but actual has i32")
 	})
 }
 

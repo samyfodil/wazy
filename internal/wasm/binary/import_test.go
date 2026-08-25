@@ -9,7 +9,7 @@ import (
 )
 
 func TestEncodeImport(t *testing.T) {
-	ptrOfUint32 := func(v uint32) *uint32 {
+	ptrOfUint32 := func(v uint64) *uint64 {
 		return &v
 	}
 
@@ -140,7 +140,7 @@ func TestEncodeImport(t *testing.T) {
 				Type:    wasm.ExternTypeMemory,
 				Module:  "my",
 				Name:    "memory",
-				DescMem: &wasm.Memory{Min: 1, Max: wasm.MemoryLimitPages, IsMaxEncoded: false},
+				DescMem: &wasm.Memory{Min: 1, Max: uint64(wasm.MemoryLimitPages), IsMaxEncoded: false},
 			},
 			expected: []byte{
 				0x02, 'm', 'y',
