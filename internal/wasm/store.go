@@ -83,6 +83,10 @@ type (
 		// is per-Store because an exnref crosses module instances. See ExceptionTable.
 		Exceptions ExceptionTable
 
+		// GC hands out the references guest code holds for struct and array instances, and is per-Store for
+		// the same reason Exceptions is. See GCHeap.
+		GC GCHeap
+
 		// functionMaxTypes represents the limit on the number of function types in a store.
 		// Note: this is fixed to 2^27 but have this a field for testability.
 		functionMaxTypes uint32
@@ -229,7 +233,8 @@ func (m *ModuleInstance) buildElementInstances(elements []ElementSegment) {
 	m.ElementInstances = make([][]Reference, len(elements))
 	for i := range elements {
 		elm := &elements[i]
-		if elm.Type.Kind() == RefTypeFuncref.Kind() && elm.Mode == ElementModePassive {
+		// Any reference type can back a passive element segment under GC, not just funcref.
+		if elm.Mode == ElementModePassive {
 			// Only passive elements can be access as element instances.
 			// See https://www.w3.org/TR/2022/WD-wasm-core-2-20220419/syntax/modules.html#element-segments
 			inst := make([]Reference, len(elm.Init))
@@ -299,6 +304,7 @@ func (m *ModuleInstance) validateData(data []DataSegment) (err error) {
 				func(funcIndex Index) (Reference, error) {
 					return m.Engine.FunctionInstanceReference(funcIndex), nil
 				},
+				constExprEnv{},
 			)
 			if err != nil {
 				return fmt.Errorf("%s[%d] failed to evaluate offset expression: %w", SectionIDName(SectionIDData), i, err)
@@ -725,7 +731,7 @@ func errorInvalidImport(i *Import, err error) error {
 //
 // Global initialization constant expression can only reference the imported globals.
 // See the note on https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#constant-expressions%E2%91%A0
-func (g *GlobalInstance) initialize(importedGlobals []*GlobalInstance, expr *ConstantExpression, funcRefResolver func(funcIndex Index) Reference) {
+func (g *GlobalInstance) initialize(importedGlobals []*GlobalInstance, expr *ConstantExpression, funcRefResolver func(funcIndex Index) Reference, env constExprEnv) {
 	result, _, _ := evaluateConstExpr(
 		expr,
 		func(globalIndex Index) (ValueType, uint64, uint64, error) {
@@ -735,6 +741,7 @@ func (g *GlobalInstance) initialize(importedGlobals []*GlobalInstance, expr *Con
 		func(funcIndex Index) (Reference, error) {
 			return funcRefResolver(funcIndex), nil
 		},
+		env,
 	)
 	switch len(result) {
 	case 1:

@@ -167,10 +167,14 @@ typed_function_references_wast_files := \
 spectest_gc_dir := $(spectest_base_dir)/gc
 spectest_gc_testdata_dir := $(spectest_gc_dir)/testdata
 spec_version_gc := 756060f5816c7e2159f4817fbdee76cf52f9c923
-# The type-level files. The rest of test/core/gc needs the struct, array and
-# i31 instructions, which are not implemented yet.
+# type-canon, type-equivalence and type-rec live at test/core; the rest of the
+# suite is under test/core/gc, which is why the download tries both.
 gc_wast_files := type-canon.wast type-equivalence.wast type-rec.wast \
-	type-subtyping.wast type-subtyping-invalid.wast
+	type-subtyping.wast type-subtyping-invalid.wast \
+	struct.wast array.wast array_copy.wast array_fill.wast \
+	array_init_data.wast array_init_elem.wast array_new_data.wast \
+	array_new_elem.wast i31.wast ref_test.wast ref_cast.wast ref_eq.wast \
+	br_on_cast.wast br_on_cast_fail.wast extern.wast binary-gc.wast
 
 .PHONY: build.spectest
 build.spectest:

@@ -92,6 +92,35 @@ func decodeConstantExpression(buf []byte, offset int, enabledFeatures api.CoreFe
 			var n uint64
 			_, n, err = leb128.LoadUint32(buf[offset:])
 			offset += int(n)
+		case wasm.OpcodeGCPrefix:
+			if err := enabledFeatures.RequireEnabled(api.CoreFeatureGC); err != nil {
+				return offset, fmt.Errorf("GC instructions are not supported as %w", err)
+			}
+			gcOpcode, o, err := readByte(buf, offset)
+			if err != nil {
+				return offset, fmt.Errorf("read GC instruction opcode suffix: %w", err)
+			}
+			offset = o
+			// Only the allocating forms and the two extern conversions are constant.
+			var immediates int
+			switch gcOpcode {
+			case wasm.OpcodeGCStructNew, wasm.OpcodeGCStructNewDefault,
+				wasm.OpcodeGCArrayNew, wasm.OpcodeGCArrayNewDefault:
+				immediates = 1
+			case wasm.OpcodeGCArrayNewFixed:
+				immediates = 2
+			case wasm.OpcodeGCRefI31, wasm.OpcodeGCAnyConvertExtern, wasm.OpcodeGCExternConvertAny:
+			default:
+				return offset, fmt.Errorf("%s is not supported in a constant expression",
+					wasm.GCInstructionName(gcOpcode))
+			}
+			for i := 0; i < immediates; i++ {
+				var n uint64
+				if _, n, err = leb128.LoadUint32(buf[offset:]); err != nil {
+					return offset, fmt.Errorf("read immediate for %s: %w", wasm.GCInstructionName(gcOpcode), err)
+				}
+				offset += int(n)
+			}
 		case wasm.OpcodeVecPrefix:
 			if err := enabledFeatures.RequireEnabled(api.CoreFeatureSIMD); err != nil {
 				return offset, fmt.Errorf("vector instructions are not supported as %w", err)

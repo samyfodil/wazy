@@ -761,7 +761,9 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		case nativeapi.ExitCodeGCCheck:
 			mod := c.callerModuleInstance()
 			s := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
-			s[0] = wasm.RunGCCheck(mod, s[0], s[1], s[2])
+			// The native engine never uses the variadic forms directly: struct.new and array.new_fixed are
+			// lowered as an allocation followed by one set per operand, so there is no scratch area.
+			s[0] = wasm.RunGC(mod, s[0], s[1], s[2], s[3], s[4], s[5], nil)
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)

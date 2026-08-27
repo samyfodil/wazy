@@ -353,7 +353,8 @@ func hierarchyTop(vt ValueType, types []FunctionType) byte {
 	return kind
 }
 
-// The modes of RunGCCheck, which both engines route the GC proposal's runtime type checks through.
+// The modes of RunGC, which both engines route the GC proposal's runtime work through. Each names how the
+// five operands are read; see the switch in RunGC.
 const (
 	// GCCheckRefTest answers ref.test: a is the reference, b its target descriptor, and the result is 0 or 1.
 	GCCheckRefTest uint64 = iota
@@ -362,9 +363,47 @@ const (
 	// GCCheckIndirectCall answers the call_indirect type check for a module that declares a subtype
 	// relation: a is the callee's FunctionTypeID and b the declared one, and a mismatch traps.
 	GCCheckIndirectCall
+	// GCStructNew allocates a struct: a is the type index and the fields are read from the scratch area.
+	GCStructNew
+	// GCStructNewDefault allocates a struct with every field at its type's default: a is the type index.
+	GCStructNewDefault
+	// GCStructGet reads a field: a is the reference, b the field index, c 1 for a signed packed read.
+	GCStructGet
+	// GCStructSet writes a field: a is the reference, b the field index, c the value.
+	GCStructSet
+	// GCArrayNew allocates an array of b elements all equal to c: a is the type index.
+	GCArrayNew
+	// GCArrayNewDefault allocates an array of b elements at the element type's default: a is the type index.
+	GCArrayNewDefault
+	// GCArrayNewFixed allocates an array of b elements read from the scratch area: a is the type index.
+	GCArrayNewFixed
+	// GCArrayNewData allocates an array of d elements read from data segment b at byte offset c: a is the
+	// type index. GCArrayNewElem is the same over an element segment.
+	GCArrayNewData
+	GCArrayNewElem
+	// GCArrayInitData writes e elements of data segment c, from its offset d, into array a at index b.
+	// GCArrayInitElem is the same over an element segment.
+	GCArrayInitData
+	GCArrayInitElem
+	// GCArrayGet reads an element: a is the reference, b the index, c 1 for a signed packed read.
+	GCArrayGet
+	// GCArraySet writes an element: a is the reference, b the index, c the value.
+	GCArraySet
+	// GCArrayLen returns the length of the array a.
+	GCArrayLen
+	// GCArrayFill writes d copies of c into a starting at b.
+	GCArrayFill
+	// GCArrayCopy copies e elements from array c at index d into array a at index b.
+	GCArrayCopy
+	// GCRefEq compares references a and b for identity.
+	GCRefEq
+	// GCRefI31 makes an i31 from the i32 a; GCI31GetS and GCI31GetU read one back.
+	GCRefI31
+	GCI31GetS
+	GCI31GetU
 )
 
-// EncodeRefTarget packs the target of ref.test / ref.cast into the descriptor RunGCCheck expects: the type
+// EncodeRefTarget packs the target of ref.test / ref.cast into the descriptor RunGC expects: the type
 // index of a concrete target, or the kind byte of an abstract one, plus the two flags.
 func EncodeRefTarget(indexOrKind uint32, nullable, concrete bool) uint64 {
 	d := uint64(indexOrKind) << 2
@@ -377,19 +416,16 @@ func EncodeRefTarget(indexOrKind uint32, nullable, concrete bool) uint64 {
 	return d
 }
 
-// RunGCCheck performs one GC runtime type check on behalf of an engine. It panics with the matching trap when
-// a ref.cast or an indirect call fails, so a caller only has to look at the result for GCCheckRefTest.
+// RunGC performs one GC runtime operation on behalf of an engine, returning the value the instruction pushes
+// (zero for those that push nothing). It panics with the matching trap on failure.
 //
-// It lives here rather than in either engine because both need exactly this, and because the answer depends on
-// store-wide type identity (see Store.TypeIDIsSubtypeOf) that neither engine owns.
-func RunGCCheck(m *ModuleInstance, a, b, mode uint64) uint64 {
+// It lives here rather than in either engine because both need exactly this, and because most of it depends on
+// store-wide state -- the type identity behind Store.TypeIDIsSubtypeOf, and the heap behind Store.GC -- that
+// neither engine owns. scratch carries the operands of the variadic forms (struct.new, array.new_fixed) in
+// stack order; it is nil for every other mode.
+func RunGC(m *ModuleInstance, mode, a, b, c, d, e uint64, scratch []uint64) uint64 {
 	switch mode {
-	case GCCheckIndirectCall:
-		if !m.TypeIDIsSubtypeOf(FunctionTypeID(a), FunctionTypeID(b)) {
-			panic(wasmruntime.ErrRuntimeIndirectCallTypeMismatch)
-		}
-		return 0
-	default:
+	case GCCheckRefTest, GCCheckRefCast:
 		ok := m.refMatchesTarget(a, b)
 		if mode == GCCheckRefCast && !ok {
 			panic(wasmruntime.ErrRuntimeCastFailure)
@@ -398,6 +434,206 @@ func RunGCCheck(m *ModuleInstance, a, b, mode uint64) uint64 {
 			return 1
 		}
 		return 0
+
+	case GCCheckIndirectCall:
+		if !m.TypeIDIsSubtypeOf(FunctionTypeID(a), FunctionTypeID(b)) {
+			panic(wasmruntime.ErrRuntimeIndirectCallTypeMismatch)
+		}
+		return 0
+
+	case GCStructNew, GCStructNewDefault, GCArrayNew, GCArrayNewDefault, GCArrayNewFixed:
+		return m.allocGC(mode, a, b, c, scratch)
+
+	case GCArrayNewData, GCArrayNewElem:
+		o := m.newArray(a, d)
+		m.fillArrayFromSegment(o, 0, mode == GCArrayNewData, b, c, d)
+		return m.s.GC.Alloc(o)
+
+	case GCArrayInitData, GCArrayInitElem:
+		o := m.s.GC.Deref(a)
+		checkArrayRange(len(o.Fields), b, e)
+		m.fillArrayFromSegment(o, b, mode == GCArrayInitData, c, d, e)
+		return 0
+
+	case GCStructGet, GCArrayGet:
+		o := m.s.GC.Deref(a)
+		i := int(b)
+		if mode == GCArrayGet && i >= len(o.Fields) {
+			panic(wasmruntime.ErrRuntimeOutOfBoundsArrayAccess)
+		}
+		return o.Get(i, c == 1)
+
+	case GCStructSet, GCArraySet:
+		o := m.s.GC.Deref(a)
+		i := int(b)
+		if mode == GCArraySet && i >= len(o.Fields) {
+			panic(wasmruntime.ErrRuntimeOutOfBoundsArrayAccess)
+		}
+		o.Set(i, c)
+		return 0
+
+	case GCArrayLen:
+		return uint64(len(m.s.GC.Deref(a).Fields))
+
+	case GCArrayFill:
+		o := m.s.GC.Deref(a)
+		checkArrayRange(len(o.Fields), b, d)
+		for i := uint64(0); i < d; i++ {
+			o.Set(int(b+i), c)
+		}
+		return 0
+
+	case GCArrayCopy:
+		dst, src := m.s.GC.Deref(a), m.s.GC.Deref(c)
+		checkArrayRange(len(dst.Fields), b, e)
+		checkArrayRange(len(src.Fields), d, e)
+		// The two arrays may be the same object, so copy in the direction that cannot clobber a source
+		// element before it is read -- exactly what memory.copy does for overlapping ranges.
+		if b <= d {
+			for i := uint64(0); i < e; i++ {
+				dst.Set(int(b+i), src.Get(int(d+i), true))
+			}
+		} else {
+			for i := e; i > 0; i-- {
+				dst.Set(int(b+i-1), src.Get(int(d+i-1), true))
+			}
+		}
+		return 0
+
+	case GCRefEq:
+		if a == b {
+			return 1
+		}
+		return 0
+
+	case GCRefI31:
+		return EncodeI31(uint32(a))
+	case GCI31GetS, GCI31GetU:
+		if a == GCRefNull {
+			panic(wasmruntime.ErrRuntimeNullReference)
+		}
+		if mode == GCI31GetS {
+			return uint64(DecodeI31S(a))
+		}
+		return uint64(DecodeI31U(a))
+	}
+	panic("BUG: unknown GC runtime mode")
+}
+
+// allocGC handles the five allocating modes, which all end in one GCHeap.Alloc.
+func (m *ModuleInstance) allocGC(mode, typeIndex, count, init uint64, scratch []uint64) uint64 {
+	if indexOutOfRange(Index(typeIndex), len(m.TypeIDs)) {
+		panic("BUG: validation should have rejected type index")
+	}
+	def := &m.Source.TypeSection[typeIndex]
+	o := &GCObject{Type: def, TypeID: m.TypeIDs[typeIndex]}
+
+	switch mode {
+	case GCStructNewDefault:
+		o.Fields = make([]uint64, len(def.Fields))
+		for i := range o.Fields {
+			o.Fields[i] = defaultValue(def.Fields[i].Type)
+		}
+	case GCStructNew, GCArrayNewFixed:
+		// The operands were pushed in field order, so scratch is already in the right order. They go in
+		// through Set so a packed field is stored truncated, as Get's widening assumes.
+		o.Fields = make([]uint64, len(scratch))
+		for i, v := range scratch {
+			o.Set(i, v)
+		}
+	case GCArrayNew, GCArrayNewDefault:
+		n := checkArrayLen(count)
+		o.Fields = make([]uint64, n)
+		v := init
+		if mode == GCArrayNewDefault {
+			v = defaultValue(def.Fields[0].Type)
+		}
+		for i := range o.Fields {
+			o.Set(i, v)
+		}
+	}
+	return m.s.GC.Alloc(o)
+}
+
+// newArray allocates an uninitialised array of n elements of the given type index.
+func (m *ModuleInstance) newArray(typeIndex, n uint64) *GCObject {
+	def := &m.Source.TypeSection[typeIndex]
+	return &GCObject{Type: def, TypeID: m.TypeIDs[typeIndex], Fields: make([]uint64, checkArrayLen(n))}
+}
+
+// fillArrayFromSegment writes length elements into o starting at dst, reading them from a data or an element
+// segment starting at src. For a data segment src counts bytes and each element is read little-endian at its
+// storage width; for an element segment it counts references.
+func (m *ModuleInstance) fillArrayFromSegment(o *GCObject, dst uint64, fromData bool, segment, src, length uint64) {
+	if !fromData {
+		if indexOutOfRange(Index(segment), len(m.ElementInstances)) {
+			panic(wasmruntime.ErrRuntimeInvalidTableAccess)
+		}
+		elems := m.ElementInstances[segment]
+		if src+length > uint64(len(elems)) {
+			panic(wasmruntime.ErrRuntimeInvalidTableAccess)
+		}
+		for i := uint64(0); i < length; i++ {
+			o.Set(int(dst+i), uint64(elems[src+i]))
+		}
+		return
+	}
+
+	if indexOutOfRange(Index(segment), len(m.DataInstances)) {
+		panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+	}
+	data := m.DataInstances[segment]
+	width := storageWidth(o.storageType(0))
+	if src+length*width > uint64(len(data)) {
+		panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+	}
+	for i := uint64(0); i < length; i++ {
+		var v uint64
+		base := src + i*width
+		for b := uint64(0); b < width; b++ {
+			v |= uint64(data[base+b]) << (8 * b)
+		}
+		o.Set(int(dst+i), v)
+	}
+}
+
+// storageWidth is how many bytes of a data segment one element of the given storage type occupies.
+func storageWidth(st ValueType) uint64 {
+	switch st {
+	case ValueTypeI8:
+		return 1
+	case ValueTypeI16:
+		return 2
+	case ValueTypeI32, ValueTypeF32:
+		return 4
+	case ValueTypeV128:
+		return 16
+	default:
+		return 8
+	}
+}
+
+// defaultValue is the value a struct field or array element starts at when it is not given one. Every
+// numeric type defaults to zero and every reference type to null, which is the same bit pattern.
+func defaultValue(ValueType) uint64 { return 0 }
+
+// maxGCArrayLen bounds an array allocation. The spec's own limit is the implementation's, and a length that
+// cannot be backed has to trap rather than be attempted: an array.new with a length near 2^32 would otherwise
+// ask Go for 32GiB.
+const maxGCArrayLen = 1 << 28
+
+func checkArrayLen(n uint64) int {
+	if n > maxGCArrayLen {
+		panic(wasmruntime.ErrRuntimeOutOfBoundsArrayAccess)
+	}
+	return int(n)
+}
+
+// checkArrayRange traps unless [offset, offset+length) is inside an array of the given length. The addition
+// is done in uint64 so it cannot wrap.
+func checkArrayRange(arrayLen int, offset, length uint64) {
+	if offset+length > uint64(arrayLen) {
+		panic(wasmruntime.ErrRuntimeOutOfBoundsArrayAccess)
 	}
 }
 
@@ -417,15 +653,39 @@ func (m *ModuleInstance) refMatchesTarget(ref, desc uint64) bool {
 		if indexOutOfRange(idx, len(m.TypeIDs)) {
 			return false
 		}
-		return m.TypeIDIsSubtypeOf(m.Engine.TypeIDOfReference(Reference(ref)), m.TypeIDs[idx])
+		actual, ok := m.runtimeTypeIDOf(ref, m.Source.TypeSection[idx].CompositeKind)
+		return ok && m.TypeIDIsSubtypeOf(actual, m.TypeIDs[idx])
 	}
 	switch ValueType(desc >> 2) {
-	case ValueTypeFuncref, ValueTypeExternref, ValueTypeExnref:
-		// The tops match anything non-null in their own hierarchy, and validation kept the others out.
+	case ValueTypeFuncref, ValueTypeExternref, ValueTypeExnref, ValueTypeAnyref:
+		// A top matches anything non-null in its own hierarchy, and validation kept the others out.
 		return true
+	case ValueTypeEqref:
+		// i31, struct and array instances are the eq types. A value the embedder handed over through
+		// any.convert_extern is in the any hierarchy but has no identity wazy can compare.
+		return IsI31(ref) || IsGCHeapRef(ref)
+	case ValueTypeI31ref:
+		return IsI31(ref)
+	case ValueTypeStructref, ValueTypeArrayref:
+		if !IsGCHeapRef(ref) {
+			return false
+		}
+		o := m.s.GC.Deref(ref)
+		if ValueType(desc>>2) == ValueTypeStructref {
+			return !o.IsArray()
+		}
+		return o.IsArray()
 	default:
-		// The bottoms (nofunc, noextern, noexn, none) hold nothing but null, and no non-null value in the any
-		// hierarchy can exist until struct, array and i31 do.
+		// The bottoms (none, nofunc, noextern, noexn) hold nothing but null.
 		return false
 	}
+}
+
+// runtimeTypeIDOf returns the store-wide type of a non-null reference, asking whichever of the engine or the
+// heap owns values of the target's composite kind. An i31 has no defined type, so it is never one.
+func (m *ModuleInstance) runtimeTypeIDOf(ref uint64, kind CompositeKind) (FunctionTypeID, bool) {
+	if kind == CompositeKindFunc {
+		return m.Engine.TypeIDOfReference(Reference(ref)), true
+	}
+	return m.s.GC.TypeIDOf(ref)
 }

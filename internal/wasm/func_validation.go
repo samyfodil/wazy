@@ -1111,6 +1111,14 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				case ValueTypeExnref:
 					valueTypeStack.push(ValueTypeExnref)
 				default:
+					// One of the GC proposal's abstract heap types, in its short (nullable) spelling.
+					if vt := ValueType(reftype); vt.IsGCHeapType() {
+						if err := enabledFeatures.RequireEnabled(api.CoreFeatureGC); err != nil {
+							return fmt.Errorf("ref.null %s invalid as %w", ValueTypeName(vt), err)
+						}
+						valueTypeStack.push(vt)
+						break
+					}
 					// Concrete type index encoded as LEB128 u32.
 					if err := enabledFeatures.RequireEnabled(api.CoreFeatureTypedFunctionReferences); err != nil {
 						return fmt.Errorf("ref.null with concrete type invalid as %v", err)
@@ -1257,6 +1265,20 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				valueTypeStack.push(t)
 			}
 			// On the fall-through (null) path, nothing extra is pushed.
+		} else if op == OpcodeRefEq {
+			if err := enabledFeatures.RequireEnabled(api.CoreFeatureGC); err != nil {
+				return fmt.Errorf("%s invalid as %w", OpcodeRefEqName, err)
+			}
+			for i := 0; i < 2; i++ {
+				tp, err := valueTypeStack.pop()
+				if err != nil {
+					return fmt.Errorf("%s: %v", OpcodeRefEqName, err)
+				}
+				if tp != valueTypeUnknown && !isRefSubtypeOf(tp, ValueTypeEqref, m.TypeSection) {
+					return fmt.Errorf("%s: expected eqref but was %s", OpcodeRefEqName, ValueTypeName(tp))
+				}
+			}
+			valueTypeStack.push(ValueTypeI32)
 		} else if op == OpcodeTableGet || op == OpcodeTableSet {
 			if err := enabledFeatures.RequireEnabled(api.CoreFeatureReferenceTypes); err != nil {
 				return fmt.Errorf("%s is invalid as %v", InstructionName(op), err)
@@ -1952,8 +1974,18 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				} else {
 					valueTypeStack.push(target)
 				}
+			case OpcodeGCBrOnCast, OpcodeGCBrOnCastFail:
+				num, err := m.validateBrOnCast(gcOpcode, body[pc:], valueTypeStack, controlBlockStack)
+				if err != nil {
+					return err
+				}
+				pc += num - 1
 			default:
-				return fmt.Errorf("invalid GC instruction: %#x", gcOpcode)
+				num, err := m.validateGCInstruction(gcOpcode, body[pc:], valueTypeStack)
+				if err != nil {
+					return err
+				}
+				pc += num - 1
 			}
 		} else if op == OpcodeAtomicPrefix {
 			pc++
@@ -2981,6 +3013,11 @@ func decodeBlockTypeFast(types []FunctionType, body []byte, pos uint64, enabledF
 	return DecodeBlockType(types, br, enabledFeatures)
 }
 
+// singleResultBlockType is the block type of a block that takes nothing and leaves one value.
+func singleResultBlockType(vt ValueType) *FunctionType {
+	return &FunctionType{Results: []ValueType{vt}, ResultNumInUint64: 1}
+}
+
 func DecodeBlockType(types []FunctionType, r *bytes.Reader, enabledFeatures api.CoreFeatures) (*FunctionType, uint64, error) {
 	raw, num, err := leb128.DecodeInt33AsInt64(r)
 	if err != nil {
@@ -3007,6 +3044,11 @@ func DecodeBlockType(types []FunctionType, r *bytes.Reader, enabledFeatures api.
 		ret = blockType_v_externref
 	case -23: // 0x69 in original byte = exnref
 		ret = blockType_v_exnref
+	case HeapTypeNoExn, HeapTypeNoFunc, HeapTypeNoExtern, HeapTypeNone,
+		HeapTypeAny, HeapTypeEq, HeapTypeI31, HeapTypeStruct, HeapTypeArray:
+		// A GC abstract heap type in its short (nullable) spelling.
+		vt, _ := AbstractHeapTypeValueType(raw)
+		ret = singleResultBlockType(vt)
 	case -29: // 0x63 = ref null (nullable)
 		ht, htNum, err := leb128.DecodeInt33AsInt64(r)
 		if err != nil {
@@ -3022,7 +3064,12 @@ func DecodeBlockType(types []FunctionType, r *bytes.Reader, enabledFeatures api.
 			ret = blockType_v_externref
 		default:
 			if ht < 0 {
-				return nil, 0, fmt.Errorf("unknown abstract heap type in block: %d", ht)
+				vt, ok := AbstractHeapTypeValueType(ht)
+				if !ok {
+					return nil, 0, fmt.Errorf("unknown abstract heap type in block: %d", ht)
+				}
+				ret = singleResultBlockType(vt)
+				break
 			}
 			if int64(len(types)) <= ht {
 				return nil, 0, fmt.Errorf("unknown type")
@@ -3045,7 +3092,12 @@ func DecodeBlockType(types []FunctionType, r *bytes.Reader, enabledFeatures api.
 			ret = &FunctionType{Results: []ValueType{ValueTypeExternref.AsNonNullable()}, ResultNumInUint64: 1}
 		default:
 			if ht < 0 {
-				return nil, 0, fmt.Errorf("unknown abstract heap type in block: %d", ht)
+				vt, ok := AbstractHeapTypeValueType(ht)
+				if !ok {
+					return nil, 0, fmt.Errorf("unknown abstract heap type in block: %d", ht)
+				}
+				ret = singleResultBlockType(vt.AsNonNullable())
+				break
 			}
 			if int64(len(types)) <= ht {
 				return nil, 0, fmt.Errorf("unknown type")

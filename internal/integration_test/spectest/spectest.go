@@ -106,7 +106,7 @@ func (c commandActionVal) String() string {
 			ret, _ := strconv.ParseUint(str, 10, 64)
 			v = fmt.Sprintf("%f", math.Float64frombits(ret))
 		}
-	case "externref":
+	case "externref", "anyref":
 		if c.Value == "null" {
 			v = "null"
 		} else {
@@ -118,7 +118,8 @@ func (c commandActionVal) String() string {
 	case "funcref":
 		// All the in and out funcref params are null in spectest (cannot represent non-null as it depends on runtime impl).
 		v = "null"
-	case "exnref":
+	case "exnref", "eqref", "i31ref", "structref", "arrayref",
+		"nullref", "nullfuncref", "nullexternref", "nullexnref":
 		v = "null"
 	case "v128":
 		simdValues, ok := c.Value.([]interface{})
@@ -303,7 +304,7 @@ func (c commandActionVal) toUint64() (ret uint64) {
 	strValue := c.Value.(string)
 	if strings.Contains(strValue, "nan") {
 		ret = getNaNBits(strValue, c.ValType == "f32")
-	} else if c.ValType == "externref" {
+	} else if c.ValType == "externref" || c.ValType == "anyref" {
 		if c.Value == "null" {
 			ret = 0
 		} else {
@@ -360,7 +361,10 @@ func (c command) expectedError() (err error) {
 		err = wasmruntime.ErrRuntimeUncaughtException
 	case "cast failure", "cast":
 		err = wasmruntime.ErrRuntimeCastFailure
-	case "null", "null reference", "null function reference", "null function":
+	case "out of bounds array access":
+		err = wasmruntime.ErrRuntimeOutOfBoundsArrayAccess
+	case "null", "null reference", "null function reference", "null function",
+		"null array reference", "null structure reference", "null i31 reference":
 		err = wasmruntime.ErrRuntimeNullReference
 	default:
 		if strings.HasPrefix(c.Text, "uninitialized") {
@@ -527,7 +531,7 @@ func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, c
 									laneTypes[i] = expV.LaneType
 								}
 								// When value is nil for ref types, it means "any ref" — skip comparison.
-								if expV.Value == nil && (expV.ValType == "funcref" || expV.ValType == "externref" || expV.ValType == "exnref") {
+								if expV.Value == nil && isRefValType(expV.ValType) {
 									skipIndices[i] = true
 								}
 							}
@@ -668,6 +672,17 @@ func testdataPath(filename string) string {
 //   - laneTypes maps the index of valueTypes to laneType if valueTypes[i] == wasm.ValueTypeV128.
 //
 // Also, if matched == false this returns non-empty valuesMsg which can be used to augment the test failure message.
+// isRefValType reports whether a wast value type names a reference, in which case a nil expected value means
+// "any reference of this type" and the comparison is skipped.
+func isRefValType(s string) bool {
+	switch s {
+	case "funcref", "externref", "exnref", "anyref", "eqref", "i31ref", "structref", "arrayref",
+		"nullref", "nullfuncref", "nullexternref", "nullexnref":
+		return true
+	}
+	return false
+}
+
 func valuesEq(actual, exps []uint64, valTypes []wasm.ValueType, laneTypes map[int]laneType, skipIndices map[int]bool) (matched bool, valuesMsg string) {
 	matched = true
 
@@ -691,7 +706,7 @@ func valuesEq(actual, exps []uint64, valTypes []wasm.ValueType, laneTypes map[in
 			msgActualValuesStrs = append(msgActualValuesStrs, fmt.Sprintf("%d", uint32(actual[uint64RepPos])))
 			matched = matched && uint32(exps[uint64RepPos]) == uint32(actual[uint64RepPos])
 			uint64RepPos++
-		case wasm.ValueTypeI64, wasm.ValueTypeExternref, wasm.ValueTypeFuncref:
+		case wasm.ValueTypeI64:
 			msgExpValuesStrs = append(msgExpValuesStrs, fmt.Sprintf("%d", exps[uint64RepPos]))
 			msgActualValuesStrs = append(msgActualValuesStrs, fmt.Sprintf("%d", actual[uint64RepPos]))
 			matched = matched && exps[uint64RepPos] == actual[uint64RepPos]
@@ -795,7 +810,14 @@ func valuesEq(actual, exps []uint64, valTypes []wasm.ValueType, laneTypes map[in
 			}
 			uint64RepPos += 2
 		default:
-			panic("BUG")
+			if !tp.IsRef() {
+				panic("BUG")
+			}
+			// Every reference is one opaque word, whatever hierarchy it belongs to.
+			msgExpValuesStrs = append(msgExpValuesStrs, fmt.Sprintf("%d", exps[uint64RepPos]))
+			msgActualValuesStrs = append(msgActualValuesStrs, fmt.Sprintf("%d", actual[uint64RepPos]))
+			matched = matched && exps[uint64RepPos] == actual[uint64RepPos]
+			uint64RepPos++
 		}
 	}
 

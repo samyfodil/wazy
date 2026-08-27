@@ -1064,8 +1064,10 @@ func (e *engine) compileSharedFunctions() {
 	e.be.Init()
 	addTrampoline(13,
 		e.machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeGCCheck, &ssa.Signature{
-			// exec context, and the three operands of a GC runtime type check: see gcCheckSig.
-			Params:  []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64},
+			// exec context, then the mode and five operands of wasm.RunGC: see gcSig.
+			Params: []ssa.Type{
+				ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64,
+			},
 			Results: []ssa.Type{ssa.TypeI64},
 		}, false))
 

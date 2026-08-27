@@ -272,6 +272,7 @@ func (m *Module) validateTable(enabledFeatures api.CoreFeatures, tables []Table,
 					}
 					return 0, nil
 				},
+				constExprEnv{types: m.TypeSection},
 			)
 			if err != nil {
 				return err
@@ -333,6 +334,7 @@ func (m *Module) validateTable(enabledFeatures api.CoreFeatures, tables []Table,
 				func(funcIndex Index) (Reference, error) {
 					return 0, nil
 				},
+				constExprEnv{types: m.TypeSection},
 			)
 			if err != nil {
 				return fmt.Errorf("%s[%d] couldn't evaluate offset expression: %w", SectionIDName(SectionIDElement), idx, err)

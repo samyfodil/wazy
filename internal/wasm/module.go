@@ -584,6 +584,7 @@ func (m *Module) declaredFunctionIndexes(enabledFeatures api.CoreFeatures) (ret 
 				ret[funcIndex] = struct{}{}
 				return 0, nil
 			},
+			constExprEnv{types: m.TypeSection},
 		)
 
 		if initErr != nil {
@@ -611,6 +612,7 @@ func (m *Module) declaredFunctionIndexes(enabledFeatures api.CoreFeatures) (ret 
 						ret[funcIndex] = struct{}{}
 						return 0, nil
 					},
+					constExprEnv{types: m.TypeSection},
 				)
 			default:
 				ret[v] = struct{}{}
@@ -764,6 +766,7 @@ func (m *Module) validateConstExpression(globals []GlobalType, numFuncs uint32, 
 			lastRefFuncIdx = funcIndex
 			return 0, nil
 		},
+		constExprEnv{types: m.TypeSection},
 	)
 	if err != nil {
 		return err
@@ -811,7 +814,7 @@ func (m *ModuleInstance) buildGlobals(module *Module, funcRefResolver func(funcI
 		}
 		m.Globals[i+module.ImportGlobalCount] = g
 		g.Type = gs.Type
-		g.initialize(importedGlobals, &gs.Init, funcRefResolver)
+		g.initialize(importedGlobals, &gs.Init, funcRefResolver, constExprEnv{types: module.TypeSection, inst: m})
 	}
 }
 

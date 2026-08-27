@@ -27,6 +27,8 @@ var (
 	ErrRuntimeInvalidTableAccess = New("invalid table access")
 	// ErrRuntimeIndirectCallTypeMismatch indicates that the type check failed during call_indirect.
 	ErrRuntimeIndirectCallTypeMismatch = New("indirect call type mismatch")
+	// ErrRuntimeOutOfBoundsArrayAccess indicates an array index or range outside the array's bounds.
+	ErrRuntimeOutOfBoundsArrayAccess = New("out of bounds array access")
 	// ErrRuntimeCastFailure indicates that a ref.cast operand was not of the target type.
 	ErrRuntimeCastFailure = New("cast failure")
 	// ErrRuntimeUnalignedAtomic indicates that an atomic operation was made with incorrect memory alignment.

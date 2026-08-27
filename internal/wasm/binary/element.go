@@ -82,6 +82,12 @@ func decodeElementRefType(buf []byte, offset int, enabledFeatures api.CoreFeatur
 		return decodeRefType(enabledFeatures, buf, offset, b == wasm.RefPrefixNullable)
 	default:
 		ret := wasm.ValueType(b)
+		if ret.IsGCHeapType() {
+			if err := enabledFeatures.RequireEnabled(api.CoreFeatureGC); err != nil {
+				return 0, offset, fmt.Errorf("element type %s is invalid as %w", wasm.ValueTypeName(ret), err)
+			}
+			return ret, offset, nil
+		}
 		if ret != wasm.RefTypeFuncref && ret != wasm.RefTypeExternref {
 			return 0, offset, fmt.Errorf("invalid ref type for element: 0x%x", b)
 		}

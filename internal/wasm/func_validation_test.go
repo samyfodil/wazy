@@ -5472,3 +5472,404 @@ func cat(parts ...[]byte) []byte {
 	}
 	return ret
 }
+
+func TestModule_ValidateFunction_GCInstructions(t *testing.T) {
+	const gc = api.CoreFeaturesV2 | api.CoreFeatureTypedFunctionReferences | api.CoreFeatureGC
+	u32 := leb128.EncodeUint32
+
+	// type[0] struct{i8 mut, i64}, type[1] array of mutable i32, type[2] array of immutable anyref,
+	// type[3] a function type, type[4] struct with a non-nullable ref field.
+	types := func() []FunctionType {
+		return []FunctionType{
+			{CompositeKind: CompositeKindStruct, Fields: []FieldType{
+				{Type: ValueTypeI8, Mutable: true}, {Type: ValueTypeI64},
+			}},
+			{CompositeKind: CompositeKindArray, Fields: []FieldType{{Type: ValueTypeI32, Mutable: true}}},
+			{CompositeKind: CompositeKindArray, Fields: []FieldType{{Type: ValueTypeAnyref}}},
+			{},
+			{CompositeKind: CompositeKindStruct, Fields: []FieldType{
+				{Type: ValueTypeAnyref.AsNonNullable()},
+			}},
+		}
+	}
+	gcOp := func(op OpcodeGC, imms ...[]byte) []byte {
+		return cat(append([][]byte{{OpcodeGCPrefix, op}}, imms...)...)
+	}
+	nullRef := func(typeIdx uint32) []byte { return cat([]byte{OpcodeRefNull}, u32(typeIdx)) }
+
+	tests := []struct {
+		name        string
+		body        []byte
+		dataCount   *uint32
+		elements    []ElementSegment
+		expectedErr string
+	}{
+		{
+			name: "struct.new pops its fields in order",
+			body: cat([]byte{OpcodeI32Const, 1, OpcodeI64Const, 2},
+				gcOp(OpcodeGCStructNew, u32(0)), []byte{OpcodeDrop, OpcodeEnd}),
+		},
+		{
+			name:        "struct.new_default needs defaultable fields",
+			body:        cat(gcOp(OpcodeGCStructNewDefault, u32(4)), []byte{OpcodeDrop, OpcodeEnd}),
+			expectedErr: "struct.new_default: field 0 of type 4 has no default value",
+		},
+		{
+			name:        "struct.new_default rejects a non-struct type",
+			body:        cat(gcOp(OpcodeGCStructNewDefault, u32(3)), []byte{OpcodeDrop, OpcodeEnd}),
+			expectedErr: "struct.new_default: type 3 is a function type, not a struct type",
+		},
+		{
+			name:        "struct.new_default rejects an unknown type",
+			body:        cat(gcOp(OpcodeGCStructNewDefault, u32(9)), []byte{OpcodeDrop, OpcodeEnd}),
+			expectedErr: "struct.new_default: unknown type 9",
+		},
+		{
+			name:        "struct.get on a packed field needs a sign",
+			body:        cat(nullRef(0), gcOp(OpcodeGCStructGet, u32(0), u32(0)), []byte{OpcodeDrop, OpcodeEnd}),
+			expectedErr: "struct.get: the field is packed, so it needs the _s or _u form",
+		},
+		{
+			name:        "struct.get_s on an unpacked field is rejected",
+			body:        cat(nullRef(0), gcOp(OpcodeGCStructGetS, u32(0), u32(1)), []byte{OpcodeDrop, OpcodeEnd}),
+			expectedErr: "struct.get_s: the field is not packed",
+		},
+		{
+			name: "struct.get_u reads a packed field as i32",
+			body: cat(nullRef(0), gcOp(OpcodeGCStructGetU, u32(0), u32(0)),
+				[]byte{OpcodeI32Const, 0, OpcodeI32Add, OpcodeDrop, OpcodeEnd}),
+		},
+		{
+			name:        "struct.get rejects an unknown field",
+			body:        cat(nullRef(0), gcOp(OpcodeGCStructGet, u32(0), u32(5)), []byte{OpcodeDrop, OpcodeEnd}),
+			expectedErr: "struct.get: unknown field 5 in type 0",
+		},
+		{
+			name: "struct.set needs a mutable field",
+			body: cat(nullRef(0), []byte{OpcodeI64Const, 1},
+				gcOp(OpcodeGCStructSet, u32(0), u32(1)), []byte{OpcodeEnd}),
+			expectedErr: "struct.set: field 1 of type 0 is immutable",
+		},
+		{
+			name: "struct.set writes a packed field from an i32",
+			body: cat(nullRef(0), []byte{OpcodeI32Const, 1},
+				gcOp(OpcodeGCStructSet, u32(0), u32(0)), []byte{OpcodeEnd}),
+		},
+		{
+			name: "array.new pops the element then the length",
+			body: cat([]byte{OpcodeI32Const, 7, OpcodeI32Const, 3},
+				gcOp(OpcodeGCArrayNew, u32(1)), []byte{OpcodeDrop, OpcodeEnd}),
+		},
+		{
+			name: "array.new_default needs a defaultable element",
+			body: cat([]byte{OpcodeI32Const, 3}, gcOp(OpcodeGCArrayNewDefault, u32(1)),
+				[]byte{OpcodeDrop, OpcodeEnd}),
+		},
+		{
+			name: "array.new_fixed pops exactly its count",
+			body: cat([]byte{OpcodeI32Const, 1, OpcodeI32Const, 2},
+				gcOp(OpcodeGCArrayNewFixed, u32(1), u32(2)), []byte{OpcodeDrop, OpcodeEnd}),
+		},
+		{
+			name: "array.set needs a mutable element",
+			body: cat(nullRef(2), []byte{OpcodeI32Const, 0}, nullRef(2),
+				gcOp(OpcodeGCArraySet, u32(2)), []byte{OpcodeEnd}),
+			expectedErr: "array.set: the element of type 2 is immutable",
+		},
+		{
+			name: "array.len takes any array",
+			body: cat([]byte{OpcodeRefNull, ValueTypeArrayref.Kind()},
+				gcOp(OpcodeGCArrayLen), []byte{OpcodeDrop, OpcodeEnd}),
+		},
+		{
+			name:        "array.len rejects a struct",
+			body:        cat(nullRef(0), gcOp(OpcodeGCArrayLen), []byte{OpcodeDrop, OpcodeEnd}),
+			expectedErr: "array.len: expected arrayref but was (ref null 0)",
+		},
+		{
+			name: "array.fill needs a mutable element",
+			body: cat(nullRef(2), []byte{OpcodeI32Const, 0}, nullRef(2), []byte{OpcodeI32Const, 1},
+				gcOp(OpcodeGCArrayFill, u32(2)), []byte{OpcodeEnd}),
+			expectedErr: "array.fill: the element of type 2 is immutable",
+		},
+		{
+			name: "array.copy checks the element subtype relation",
+			body: cat(nullRef(1), []byte{OpcodeI32Const, 0}, nullRef(2), []byte{OpcodeI32Const, 0, OpcodeI32Const, 1},
+				gcOp(OpcodeGCArrayCopy, u32(1), u32(2)), []byte{OpcodeEnd}),
+			expectedErr: "array.copy: anyref is not a subtype of i32",
+		},
+		{
+			name: "array.new_data needs a data count section",
+			body: cat([]byte{OpcodeI32Const, 0, OpcodeI32Const, 1},
+				gcOp(OpcodeGCArrayNewData, u32(1), u32(0)), []byte{OpcodeDrop, OpcodeEnd}),
+			expectedErr: "array.new_data requires data count section",
+		},
+		{
+			name: "array.new_data rejects a reference element",
+			body: cat([]byte{OpcodeI32Const, 0, OpcodeI32Const, 1},
+				gcOp(OpcodeGCArrayNewData, u32(2), u32(0)), []byte{OpcodeDrop, OpcodeEnd}),
+			dataCount:   ptrTo(uint32(1)),
+			expectedErr: "array.new_data: the element of type 2 is a reference type",
+		},
+		{
+			name: "array.new_data rejects an unknown segment",
+			body: cat([]byte{OpcodeI32Const, 0, OpcodeI32Const, 1},
+				gcOp(OpcodeGCArrayNewData, u32(1), u32(3)), []byte{OpcodeDrop, OpcodeEnd}),
+			dataCount:   ptrTo(uint32(1)),
+			expectedErr: "array.new_data: unknown data segment 3",
+		},
+		{
+			name: "array.new_elem checks the segment's element type",
+			body: cat([]byte{OpcodeI32Const, 0, OpcodeI32Const, 1},
+				gcOp(OpcodeGCArrayNewElem, u32(2), u32(0)), []byte{OpcodeDrop, OpcodeEnd}),
+			elements:    []ElementSegment{{Type: ValueTypeFuncref}},
+			expectedErr: "array.new_elem: element segment 0 holds funcref, which is not a subtype of anyref",
+		},
+		{
+			name: "array.new_elem rejects an unknown segment",
+			body: cat([]byte{OpcodeI32Const, 0, OpcodeI32Const, 1},
+				gcOp(OpcodeGCArrayNewElem, u32(2), u32(0)), []byte{OpcodeDrop, OpcodeEnd}),
+			expectedErr: "array.new_elem: unknown element segment 0",
+		},
+		{
+			name: "array.init_elem needs a mutable element",
+			body: cat(nullRef(2), []byte{OpcodeI32Const, 0, OpcodeI32Const, 0, OpcodeI32Const, 1},
+				gcOp(OpcodeGCArrayInitElem, u32(2), u32(0)), []byte{OpcodeEnd}),
+			elements:    []ElementSegment{{Type: ValueTypeAnyref}},
+			expectedErr: "array.init_elem: the element of type 2 is immutable",
+		},
+		{
+			name: "ref.i31 takes an i32 and gives a non-nullable ref",
+			body: cat([]byte{OpcodeI32Const, 1}, gcOp(OpcodeGCRefI31),
+				gcOp(OpcodeGCI31GetS), []byte{OpcodeDrop, OpcodeEnd}),
+		},
+		{
+			name:        "i31.get_u rejects a struct",
+			body:        cat(nullRef(0), gcOp(OpcodeGCI31GetU), []byte{OpcodeDrop, OpcodeEnd}),
+			expectedErr: "i31.get_u: expected i31ref but was (ref null 0)",
+		},
+		{
+			name: "any.convert_extern moves between hierarchies",
+			body: cat([]byte{OpcodeRefNull, ValueTypeExternref.Kind()}, gcOp(OpcodeGCAnyConvertExtern),
+				gcOp(OpcodeGCExternConvertAny), []byte{OpcodeDrop, OpcodeEnd}),
+		},
+		{
+			name: "any.convert_extern rejects an anyref",
+			body: cat([]byte{OpcodeRefNull, ValueTypeAnyref.Kind()}, gcOp(OpcodeGCAnyConvertExtern),
+				[]byte{OpcodeDrop, OpcodeEnd}),
+			expectedErr: "any.convert_extern: expected externref but was anyref",
+		},
+		{
+			name:        "an unknown GC opcode is rejected",
+			body:        cat(gcOp(0x7f), []byte{OpcodeEnd}),
+			expectedErr: "invalid GC instruction: 0x7f",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &Module{
+				TypeSection:      types(),
+				FunctionSection:  []Index{3},
+				CodeSection:      []Code{{Body: tc.body}},
+				DataCountSection: tc.dataCount,
+				ElementSection:   tc.elements,
+			}
+			CanonicalizeTypes(m.TypeSection)
+			err := m.validateFunctionWithMaxStackValues(&stacks{}, gc,
+				0, []Index{3}, nil, nil, nil, nil, 100, nil, bytes.NewReader(nil))
+			if tc.expectedErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.EqualError(t, err, tc.expectedErr)
+			}
+		})
+	}
+}
+
+func ptrTo[T any](v T) *T { return &v }
+
+func TestModule_ValidateFunction_BrOnCast(t *testing.T) {
+	const gc = api.CoreFeaturesV2 | api.CoreFeatureTypedFunctionReferences | api.CoreFeatureGC
+	ht := leb128.EncodeInt64
+
+	// A block whose result is (ref i31), with br_on_cast branching into it.
+	brOnCast := func(op OpcodeGC, flags byte, label uint32, from, to int64) []byte {
+		return cat([]byte{OpcodeGCPrefix, op, flags}, leb128.EncodeUint32(label), ht(from), ht(to))
+	}
+	anyBlock := []byte{OpcodeBlock, byte(ValueTypeI31ref.Kind())}
+
+	tests := []struct {
+		name        string
+		body        []byte
+		expectedErr string
+	}{
+		{
+			name: "br_on_cast narrows into the label and leaves the difference behind",
+			body: cat(anyBlock,
+				[]byte{OpcodeRefNull, ValueTypeAnyref.Kind()},
+				brOnCast(OpcodeGCBrOnCast, 0b01, 0, HeapTypeAny, HeapTypeI31),
+				[]byte{OpcodeDrop, OpcodeRefNull, ValueTypeI31ref.Kind(), OpcodeEnd, OpcodeDrop, OpcodeEnd}),
+		},
+		{
+			name: "br_on_cast_fail branches with the difference",
+			body: cat([]byte{OpcodeBlock, byte(ValueTypeAnyref.Kind())},
+				[]byte{OpcodeRefNull, ValueTypeAnyref.Kind()},
+				brOnCast(OpcodeGCBrOnCastFail, 0b01, 0, HeapTypeAny, HeapTypeI31),
+				[]byte{OpcodeEnd, OpcodeDrop, OpcodeEnd}),
+		},
+		{
+			name: "the cast type must be a subtype of the source type",
+			body: cat(anyBlock,
+				[]byte{OpcodeRefNull, ValueTypeI31ref.Kind()},
+				brOnCast(OpcodeGCBrOnCast, 0b11, 0, HeapTypeI31, HeapTypeAny),
+				[]byte{OpcodeDrop, OpcodeRefNull, ValueTypeI31ref.Kind(), OpcodeEnd, OpcodeDrop, OpcodeEnd}),
+			expectedErr: "br_on_cast: anyref is not a subtype of i31ref",
+		},
+		{
+			name: "the operand must be a subtype of the source type",
+			body: cat(anyBlock,
+				[]byte{OpcodeRefNull, ValueTypeExternref.Kind()},
+				brOnCast(OpcodeGCBrOnCast, 0b01, 0, HeapTypeAny, HeapTypeI31),
+				[]byte{OpcodeDrop, OpcodeRefNull, ValueTypeI31ref.Kind(), OpcodeEnd, OpcodeDrop, OpcodeEnd}),
+			expectedErr: "br_on_cast: expected anyref but was externref",
+		},
+		{
+			name: "the label must expect a reference last",
+			body: cat([]byte{OpcodeBlock, 0x40 /* empty block type */},
+				[]byte{OpcodeRefNull, ValueTypeAnyref.Kind()},
+				brOnCast(OpcodeGCBrOnCast, 0b01, 0, HeapTypeAny, HeapTypeI31),
+				[]byte{OpcodeDrop, OpcodeEnd, OpcodeEnd}),
+			expectedErr: "br_on_cast: label 0 has no results but needs a reference type",
+		},
+		{
+			name: "the branched type must fit the label",
+			body: cat([]byte{OpcodeBlock, byte(ValueTypeStructref.Kind())},
+				[]byte{OpcodeRefNull, ValueTypeAnyref.Kind()},
+				brOnCast(OpcodeGCBrOnCast, 0b01, 0, HeapTypeAny, HeapTypeI31),
+				[]byte{OpcodeDrop, OpcodeRefNull, ValueTypeStructref.Kind(), OpcodeEnd, OpcodeDrop, OpcodeEnd}),
+			expectedErr: "br_on_cast: (ref i31) is not a subtype of label 0's last result structref",
+		},
+		{
+			name: "an out of range label is rejected",
+			body: cat(anyBlock,
+				[]byte{OpcodeRefNull, ValueTypeAnyref.Kind()},
+				brOnCast(OpcodeGCBrOnCast, 0b01, 9, HeapTypeAny, HeapTypeI31),
+				[]byte{OpcodeDrop, OpcodeRefNull, ValueTypeI31ref.Kind(), OpcodeEnd, OpcodeDrop, OpcodeEnd}),
+			expectedErr: "br_on_cast: invalid label index 9",
+		},
+		{
+			name: "invalid flags are rejected",
+			body: cat(anyBlock,
+				[]byte{OpcodeRefNull, ValueTypeAnyref.Kind()},
+				brOnCast(OpcodeGCBrOnCast, 0xff, 0, HeapTypeAny, HeapTypeI31),
+				[]byte{OpcodeDrop, OpcodeEnd, OpcodeDrop, OpcodeEnd}),
+			expectedErr: "br_on_cast: invalid flags 0xff",
+		},
+		{
+			name: "an unknown heap type is rejected",
+			body: cat(anyBlock,
+				[]byte{OpcodeRefNull, ValueTypeAnyref.Kind()},
+				brOnCast(OpcodeGCBrOnCast, 0b01, 0, -11, HeapTypeI31),
+				[]byte{OpcodeDrop, OpcodeEnd, OpcodeDrop, OpcodeEnd}),
+			expectedErr: "br_on_cast: unknown abstract heap type: -11",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &Module{
+				TypeSection:     []FunctionType{{}},
+				FunctionSection: []Index{0},
+				CodeSection:     []Code{{Body: tc.body}},
+			}
+			CanonicalizeTypes(m.TypeSection)
+			err := m.validateFunctionWithMaxStackValues(&stacks{}, gc,
+				0, []Index{0}, nil, nil, nil, nil, 100, nil, bytes.NewReader(nil))
+			if tc.expectedErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.EqualError(t, err, tc.expectedErr)
+			}
+		})
+	}
+}
+
+// TestModule_ValidateFunction_GCUnderflowAndTruncation runs every GC instruction against an empty stack and
+// against a truncated immediate. Neither can be reached from a well-formed module, so what is under test is
+// that each one fails loudly rather than reading past the end of the body or the operand stack.
+func TestModule_ValidateFunction_GCUnderflowAndTruncation(t *testing.T) {
+	const gc = api.CoreFeaturesV2 | api.CoreFeatureTypedFunctionReferences | api.CoreFeatureGC
+	u32 := leb128.EncodeUint32
+
+	// Every instruction with its immediates, all naming type 0 (a struct) or type 1 (an array) as needed.
+	immediates := map[OpcodeGC][]byte{
+		OpcodeGCStructNew:        u32(0),
+		OpcodeGCStructNewDefault: u32(0),
+		OpcodeGCStructGet:        cat(u32(0), u32(1)),
+		OpcodeGCStructGetS:       cat(u32(0), u32(0)),
+		OpcodeGCStructGetU:       cat(u32(0), u32(0)),
+		OpcodeGCStructSet:        cat(u32(0), u32(0)),
+		OpcodeGCArrayNew:         u32(1),
+		OpcodeGCArrayNewDefault:  u32(1),
+		OpcodeGCArrayNewFixed:    cat(u32(1), u32(1)),
+		OpcodeGCArrayGet:         u32(1),
+		OpcodeGCArrayGetS:        u32(2),
+		OpcodeGCArrayGetU:        u32(2),
+		OpcodeGCArraySet:         u32(1),
+		OpcodeGCArrayLen:         nil,
+		OpcodeGCArrayFill:        u32(1),
+		OpcodeGCArrayCopy:        cat(u32(1), u32(1)),
+		OpcodeGCArrayInitElem:    cat(u32(3), u32(0)),
+		OpcodeGCRefI31:           nil,
+		OpcodeGCI31GetS:          nil,
+		OpcodeGCI31GetU:          nil,
+		OpcodeGCAnyConvertExtern: nil,
+		OpcodeGCExternConvertAny: nil,
+	}
+
+	newModule := func(body []byte) *Module {
+		m := &Module{
+			TypeSection: []FunctionType{
+				{CompositeKind: CompositeKindStruct, Fields: []FieldType{
+					{Type: ValueTypeI8, Mutable: true}, {Type: ValueTypeI64},
+				}},
+				{CompositeKind: CompositeKindArray, Fields: []FieldType{{Type: ValueTypeI32, Mutable: true}}},
+				{CompositeKind: CompositeKindArray, Fields: []FieldType{{Type: ValueTypeI8, Mutable: true}}},
+				{CompositeKind: CompositeKindArray, Fields: []FieldType{{Type: ValueTypeFuncref, Mutable: true}}},
+				{},
+			},
+			FunctionSection: []Index{4},
+			CodeSection:     []Code{{Body: body}},
+			ElementSection:  []ElementSegment{{Type: ValueTypeFuncref}},
+		}
+		CanonicalizeTypes(m.TypeSection)
+		return m
+	}
+	validate := func(m *Module) error {
+		return m.validateFunctionWithMaxStackValues(&stacks{}, gc,
+			0, []Index{4}, nil, nil, nil, nil, 100, nil, bytes.NewReader(nil))
+	}
+
+	for op, imm := range immediates {
+		name := GCInstructionName(op)
+		t.Run(name+" on an empty stack", func(t *testing.T) {
+			// A drop keeps the function's own result arity satisfied for the instructions that push.
+			body := cat([]byte{OpcodeGCPrefix, op}, imm, []byte{OpcodeDrop, OpcodeEnd})
+			err := validate(newModule(body))
+			if op == OpcodeGCStructNewDefault {
+				require.NoError(t, err) // takes nothing off the stack
+				return
+			}
+			require.Error(t, err, "expected %s to reject an empty stack", name)
+		})
+		if len(imm) == 0 {
+			continue
+		}
+		t.Run(name+" with a truncated immediate", func(t *testing.T) {
+			// 0x80 is a LEB128 continuation byte with nothing after it.
+			body := []byte{OpcodeGCPrefix, op, 0x80}
+			require.Error(t, validate(newModule(body)), "expected %s to reject a truncated immediate", name)
+		})
+	}
+}

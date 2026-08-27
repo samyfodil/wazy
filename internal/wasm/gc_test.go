@@ -482,56 +482,60 @@ func (e *refEngine) TypeIDOfReference(Reference) FunctionTypeID { return e.typeI
 func TestRunGCCheck(t *testing.T) {
 	s := NewStore(api.CoreFeaturesV2, nil)
 	// $sup is extensible, $sub declares it as its supertype, $other is unrelated.
-	ids, err := s.GetFunctionTypeIDs([]FunctionType{
+	types := []FunctionType{
 		mkOpen(FunctionType{}),
 		mkSub(FunctionType{}, 0),
 		{Params: []ValueType{ValueTypeI32}},
-	})
+	}
+	ids, err := s.GetFunctionTypeIDs(types)
 	require.NoError(t, err)
 	sup, sub, other := ids[0], ids[1], ids[2]
 	require.NotEqual(t, sup, sub)
 
-	m := &ModuleInstance{s: s, TypeIDs: ids, Engine: &refEngine{typeID: sub}}
+	m := &ModuleInstance{
+		s: s, TypeIDs: ids, Engine: &refEngine{typeID: sub},
+		Source: &Module{TypeSection: types},
+	}
 	const someRef = uint64(0x1234)
 
 	t.Run("ref.test on a concrete target", func(t *testing.T) {
-		require.Equal(t, uint64(1), RunGCCheck(m, someRef, EncodeRefTarget(1, false, true), GCCheckRefTest))
-		require.Equal(t, uint64(1), RunGCCheck(m, someRef, EncodeRefTarget(0, false, true), GCCheckRefTest))
-		require.Equal(t, uint64(0), RunGCCheck(m, someRef, EncodeRefTarget(2, false, true), GCCheckRefTest))
+		require.Equal(t, uint64(1), RunGC(m, GCCheckRefTest, someRef, EncodeRefTarget(1, false, true), 0, 0, 0, nil))
+		require.Equal(t, uint64(1), RunGC(m, GCCheckRefTest, someRef, EncodeRefTarget(0, false, true), 0, 0, 0, nil))
+		require.Equal(t, uint64(0), RunGC(m, GCCheckRefTest, someRef, EncodeRefTarget(2, false, true), 0, 0, 0, nil))
 	})
 
 	t.Run("null is of exactly the nullable types", func(t *testing.T) {
-		require.Equal(t, uint64(1), RunGCCheck(m, 0, EncodeRefTarget(0, true, true), GCCheckRefTest))
-		require.Equal(t, uint64(0), RunGCCheck(m, 0, EncodeRefTarget(0, false, true), GCCheckRefTest))
+		require.Equal(t, uint64(1), RunGC(m, GCCheckRefTest, 0, EncodeRefTarget(0, true, true), 0, 0, 0, nil))
+		require.Equal(t, uint64(0), RunGC(m, GCCheckRefTest, 0, EncodeRefTarget(0, false, true), 0, 0, 0, nil))
 	})
 
 	t.Run("abstract targets", func(t *testing.T) {
 		top := EncodeRefTarget(uint32(ValueTypeFuncref.Kind()), false, false)
-		require.Equal(t, uint64(1), RunGCCheck(m, someRef, top, GCCheckRefTest))
+		require.Equal(t, uint64(1), RunGC(m, GCCheckRefTest, someRef, top, 0, 0, 0, nil))
 		bottom := EncodeRefTarget(uint32(ValueTypeNullFuncref.Kind()), false, false)
-		require.Equal(t, uint64(0), RunGCCheck(m, someRef, bottom, GCCheckRefTest))
+		require.Equal(t, uint64(0), RunGC(m, GCCheckRefTest, someRef, bottom, 0, 0, 0, nil))
 	})
 
 	t.Run("an out of range type index matches nothing", func(t *testing.T) {
-		require.Equal(t, uint64(0), RunGCCheck(m, someRef, EncodeRefTarget(99, false, true), GCCheckRefTest))
+		require.Equal(t, uint64(0), RunGC(m, GCCheckRefTest, someRef, EncodeRefTarget(99, false, true), 0, 0, 0, nil))
 	})
 
 	t.Run("ref.cast traps instead of returning zero", func(t *testing.T) {
-		require.Equal(t, uint64(1), RunGCCheck(m, someRef, EncodeRefTarget(0, false, true), GCCheckRefCast))
+		require.Equal(t, uint64(1), RunGC(m, GCCheckRefCast, someRef, EncodeRefTarget(0, false, true), 0, 0, 0, nil))
 		captured := requirePanic(t, func() {
-			RunGCCheck(m, someRef, EncodeRefTarget(2, false, true), GCCheckRefCast)
+			RunGC(m, GCCheckRefCast, someRef, EncodeRefTarget(2, false, true), 0, 0, 0, nil)
 		})
 		require.Equal(t, wasmruntime.ErrRuntimeCastFailure, captured)
 	})
 
 	t.Run("an indirect call accepts a subtype and traps otherwise", func(t *testing.T) {
-		require.Equal(t, uint64(0), RunGCCheck(m, uint64(sub), uint64(sup), GCCheckIndirectCall))
+		require.Equal(t, uint64(0), RunGC(m, GCCheckIndirectCall, uint64(sub), uint64(sup), 0, 0, 0, nil))
 		captured := requirePanic(t, func() {
-			RunGCCheck(m, uint64(sup), uint64(sub), GCCheckIndirectCall)
+			RunGC(m, GCCheckIndirectCall, uint64(sup), uint64(sub), 0, 0, 0, nil)
 		})
 		require.Equal(t, wasmruntime.ErrRuntimeIndirectCallTypeMismatch, captured)
 		captured = requirePanic(t, func() {
-			RunGCCheck(m, uint64(other), uint64(sup), GCCheckIndirectCall)
+			RunGC(m, GCCheckIndirectCall, uint64(other), uint64(sup), 0, 0, 0, nil)
 		})
 		require.Equal(t, wasmruntime.ErrRuntimeIndirectCallTypeMismatch, captured)
 	})

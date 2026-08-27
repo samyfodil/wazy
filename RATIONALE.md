@@ -1722,14 +1722,12 @@ above is what `TestRelaxedSemantics` in
 `internal/integration_test/spectest/relaxed-simd` asserts, with operands chosen
 to tell the permitted answers apart.
 
-## Garbage collection (WasmGC): the type system
+## Garbage collection (WasmGC)
 
 The [GC proposal](https://github.com/WebAssembly/gc) adds struct and array types
-on a managed heap. What has landed so far is the type system: composite types,
-the `sub`/`sub final` subtype relation, the nine new abstract heap types and
-their lattice, iso-recursive canonicalization, and the two instructions that ask
-about a type at runtime -- `ref.test` and `ref.cast`. The heap itself, and the
-instructions that allocate on it, have not.
+on a managed heap. The type system, every instruction and the heap itself are
+here, and the whole `test/core/gc` conformance suite passes on both engines.
+Reclamation is not: see the last section.
 
 **Composite types live on `FunctionType`.** A GC defined type is a function, a
 struct or an array, so the obvious move is a new sum type for the type section.
@@ -1791,18 +1789,57 @@ subtype-aware `call_indirect` check goes through the same one -- but only for a
 module that actually declares a subtype relation. Every other module keeps the
 inline compare it always had, so nothing that exists today pays for this.
 
-**Where the roots are is still open.** Reclamation, not allocation, is the hard
-part, and the question a design has to answer is where a live reference can be
-found. Allocation can be a Go object per struct or array with the guest holding
-an index, the way `ExceptionTable` already works; the problem is that nothing
-tells wazy when the guest drops one. The likely answer is a handle table
-scanned conservatively: every wasm value stack word and local is treated as a
+**A reference is a tagged word, and the tags are load-bearing.** Both engines
+carry every reference as an opaque `uint64`. Which hierarchy a given one belongs
+to is settled statically -- validation never lets a value cross between func,
+extern, exn and any -- so the same word can mean a function instance pointer in
+one place and something else in another. What breaks that clean split is
+`any.convert_extern`, which moves an embedder's `externref` into the any
+hierarchy without changing the word: a host pointer can then turn up exactly
+where `ref.test` is asking "is this a struct?". So the heap side is tagged (bit
+62 an index into `Store.GC`, bit 63 an i31) and the host side is left alone,
+which is the only choice available -- the embedder's pointer is not ours to
+encode. An untagged non-null value in the any hierarchy is a host value: it is
+`anyref` and nothing more specific, which is what `extern.wast` checks.
+
+Objects are indices into a table rather than Go pointers for the reason
+`ExceptionTable` already documents: a Go pointer parked in a `[]uint64` is
+invisible to the collector, so the guest would hold a dangling pointer as soon
+as the last Go reference went away.
+
+**Every GC instruction calls into Go, from both engines.** `wasm.RunGC` is the
+one implementation, and the native engine reaches it through a single
+trampoline. That is deliberate: what these instructions touch -- the managed
+heap, store-wide type identity, the module's data and element segments -- is
+outside both engines, so the alternative is two copies of the same logic against
+two different value representations. The two variadic forms (`struct.new`,
+`array.new_fixed`) are the one place the engines differ: the interpreter hands
+`RunGC` a slice of its own operand stack, while the native engine lowers them as
+an allocation followed by one store per operand, which is what lets the
+trampoline keep a fixed arity.
+
+The ceiling is a Go round trip per instruction. Nothing here is on a hot path
+yet, and inlining the common shapes -- a struct field load, an i31 test -- is a
+contained change once a profile asks for it.
+
+**Reclamation is still open, and until it lands this leaks.** Entries in
+`Store.GC` are held until the store closes, exactly as `ExceptionTable` does; a
+program that allocates in a loop grows that table without bound. The hard part
+is not allocation but where a live reference can be found. The design to build
+is a conservative scan: every wasm value stack word and local is treated as a
 possible handle, and a word that merely looks like one retains an object that is
 actually dead. That is sound for a non-moving collector, needs no stack maps and
 costs nothing on the hot path, which matters because the native engine's whole
-point is not paying for bookkeeping. The interpreter could be precise -- it
-knows which slots are reference-typed -- but there is no reason to write two
-collectors before one is proven.
+point is not paying for bookkeeping. The roots outside the stacks -- reference
+typed globals, tables, and the fields of reachable objects -- are already
+Go-visible. The interpreter could be precise, since it knows which slots are
+reference-typed, but there is no reason to write two collectors before one is
+proven.
+
+**Not yet supported: a `v128` struct field or array element.** `GCObject.Fields`
+is one `uint64` per field, which every other storage type fits in. No test in
+the GC suite uses one, and the native engine panics rather than silently
+truncating.
 
 ## Compiler engine implementation
 

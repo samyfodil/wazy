@@ -118,7 +118,16 @@ func evaluateConstExprFast(
 	}
 }
 
-func evaluateConstExpr(e *ConstantExpression, globalResolver func(globalIndex Index) (ValueType, uint64, uint64, error), funcRefResolver func(funcIndex Index) (Reference, error)) ([]uint64, ValueType, error) {
+// constExprEnv is what a constant expression needs beyond its own bytes and the two resolvers: the type
+// section, to know how many operands a struct.new takes, and the module instance to allocate against. Only
+// the GC proposal's constant instructions use either, and a caller that just wants the expression's type --
+// every validation-time one -- leaves both nil.
+type constExprEnv struct {
+	types []FunctionType
+	inst  *ModuleInstance
+}
+
+func evaluateConstExpr(e *ConstantExpression, globalResolver func(globalIndex Index) (ValueType, uint64, uint64, error), funcRefResolver func(funcIndex Index) (Reference, error), env constExprEnv) ([]uint64, ValueType, error) {
 	if lo, hi, typ, ok, err := evaluateConstExprFast(e.Data, globalResolver, funcRefResolver); ok {
 		if err != nil {
 			return nil, 0, err
@@ -188,6 +197,18 @@ func evaluateConstExpr(e *ConstantExpression, globalResolver func(globalIndex In
 			default:
 				stack = append(stack, lo)
 			}
+			typeStack = append(typeStack, typ)
+		case OpcodeGCPrefix:
+			if pc >= uint64(len(data)) {
+				return nil, 0, io.ErrUnexpectedEOF
+			}
+			gcOp := data[pc]
+			pc++
+			n, typ, err := evalGCConstExpr(gcOp, data[pc:], &stack, &typeStack, env)
+			if err != nil {
+				return nil, 0, err
+			}
+			pc += n
 			typeStack = append(typeStack, typ)
 		case OpcodeRefNull:
 			// Reference types are opaque 64bit pointer at runtime.
@@ -339,6 +360,10 @@ func evaluateConstExpr(e *ConstantExpression, globalResolver func(globalIndex In
 }
 
 func evaluateConstExprInModuleInstance(e *ConstantExpression, m *ModuleInstance) []uint64 {
+	env := constExprEnv{inst: m}
+	if m.Source != nil {
+		env.types = m.Source.TypeSection
+	}
 	v, _, _ := evaluateConstExpr(
 		e,
 		func(globalIndex Index) (ValueType, uint64, uint64, error) {
@@ -348,6 +373,7 @@ func evaluateConstExprInModuleInstance(e *ConstantExpression, m *ModuleInstance)
 		func(funcIndex Index) (Reference, error) {
 			return m.Engine.FunctionInstanceReference(funcIndex), nil
 		},
+		env,
 	)
 	return v
 }
@@ -360,6 +386,7 @@ func evaluateElementInit(
 	e *ElementSegment, i int,
 	globalResolver func(globalIndex Index) (ValueType, uint64, uint64, error),
 	funcRefResolver func(funcIndex Index) (Reference, error),
+	env constExprEnv,
 ) (Reference, ValueType, error) {
 	v := e.Init[i]
 	switch {
@@ -372,7 +399,7 @@ func evaluateElementInit(
 		}
 		return Reference(lo), typ, nil
 	case v&elementInitExprReference != 0:
-		vals, typ, err := evaluateConstExpr(&e.Exprs[v&^elementInitExprReference], globalResolver, funcRefResolver)
+		vals, typ, err := evaluateConstExpr(&e.Exprs[v&^elementInitExprReference], globalResolver, funcRefResolver, env)
 		if err != nil {
 			return 0, 0, err
 		}
@@ -391,6 +418,10 @@ func evaluateElementInit(
 // not expected here: Init entries are validated up front by validateTable before instantiation ever
 // reaches this point).
 func evaluateElementInitInModuleInstance(e *ElementSegment, i int, m *ModuleInstance) Reference {
+	env := constExprEnv{inst: m}
+	if m.Source != nil {
+		env.types = m.Source.TypeSection
+	}
 	ref, _, _ := evaluateElementInit(
 		e, i,
 		func(globalIndex Index) (ValueType, uint64, uint64, error) {
@@ -400,6 +431,7 @@ func evaluateElementInitInModuleInstance(e *ElementSegment, i int, m *ModuleInst
 		func(funcIndex Index) (Reference, error) {
 			return m.Engine.FunctionInstanceReference(funcIndex), nil
 		},
+		env,
 	)
 	return ref
 }
@@ -423,4 +455,100 @@ func NewConstantExpressionFromI32(val int32) ConstantExpression {
 
 func NewConstantExpressionFromI64(val int64) ConstantExpression {
 	return NewConstantExpressionFromOpcode(OpcodeI64Const, leb128.EncodeInt64(val))
+}
+
+// evalGCConstExpr evaluates one of the GC proposal's constant instructions, reading its immediates from data
+// and pushing its result onto stack. It returns how many immediate bytes it consumed and the type of the
+// value pushed; the caller appends that to the type stack.
+//
+// When env.inst is nil the caller only wants types, so nothing is allocated and the pushed value is a
+// placeholder -- which is exactly what validation needs, since a constant expression's type is fixed by its
+// immediates, not by what it would allocate.
+func evalGCConstExpr(op OpcodeGC, data []byte, stack *[]uint64, typeStack *[]ValueType, env constExprEnv) (uint64, ValueType, error) {
+	name := GCInstructionName(op)
+	pop := func(n int) []uint64 {
+		s := *stack
+		if n > len(s) {
+			n = len(s)
+		}
+		vals := s[len(s)-n:]
+		*stack = s[:len(s)-n]
+		if ts := *typeStack; n <= len(ts) {
+			*typeStack = ts[:len(ts)-n]
+		}
+		return vals
+	}
+
+	switch op {
+	case OpcodeGCRefI31:
+		v := pop(1)
+		var ref uint64
+		if len(v) == 1 {
+			ref = EncodeI31(uint32(v[0]))
+		}
+		*stack = append(*stack, ref)
+		return 0, ValueTypeI31ref.AsNonNullable(), nil
+
+	case OpcodeGCAnyConvertExtern, OpcodeGCExternConvertAny:
+		// Both are bijections on the same value, so only the static type changes.
+		to := ValueTypeAnyref
+		if op == OpcodeGCExternConvertAny {
+			to = ValueTypeExternref
+		}
+		pop(1)
+		*stack = append(*stack, 0)
+		return 0, to, nil
+	}
+
+	typeIndex, n, err := leb128.LoadUint32(data)
+	if err != nil {
+		return 0, 0, fmt.Errorf("read type index for %s: %w", name, err)
+	}
+	read := n
+
+	// operandCount is how many values come off the stack, and mode what RunGC is asked to do.
+	var operandCount int
+	var mode uint64
+	switch op {
+	case OpcodeGCStructNewDefault:
+		mode = GCStructNewDefault
+	case OpcodeGCStructNew:
+		mode = GCStructNew
+		if int(typeIndex) >= len(env.types) {
+			return read, 0, fmt.Errorf("%s: unknown type %d", name, typeIndex)
+		}
+		operandCount = len(env.types[typeIndex].Fields)
+	case OpcodeGCArrayNewDefault:
+		mode, operandCount = GCArrayNewDefault, 1
+	case OpcodeGCArrayNew:
+		mode, operandCount = GCArrayNew, 2
+	case OpcodeGCArrayNewFixed:
+		mode = GCArrayNewFixed
+		count, n2, err := leb128.LoadUint32(data[read:])
+		if err != nil {
+			return read, 0, fmt.Errorf("read element count for %s: %w", name, err)
+		}
+		read += n2
+		operandCount = int(count)
+	default:
+		return read, 0, fmt.Errorf("%s is not supported in a constant expression", name)
+	}
+
+	operands := pop(operandCount)
+	var ref uint64
+	if env.inst != nil {
+		switch mode {
+		case GCStructNew, GCArrayNewFixed:
+			ref = RunGC(env.inst, mode, uint64(typeIndex), 0, 0, 0, 0, operands)
+		case GCArrayNew:
+			// The operands were pushed as (init, length).
+			ref = RunGC(env.inst, mode, uint64(typeIndex), operands[1], operands[0], 0, 0, nil)
+		case GCArrayNewDefault:
+			ref = RunGC(env.inst, mode, uint64(typeIndex), operands[0], 0, 0, 0, nil)
+		default:
+			ref = RunGC(env.inst, mode, uint64(typeIndex), 0, 0, 0, 0, nil)
+		}
+	}
+	*stack = append(*stack, ref)
+	return read, ValueTypeConcreteRef(typeIndex, false), nil
 }

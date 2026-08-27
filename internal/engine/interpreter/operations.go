@@ -323,6 +323,8 @@ func (o operationKind) String() (ret string) {
 		ret = "RefTest"
 	case operationKindRefCast:
 		ret = "RefCast"
+	case operationKindGC:
+		ret = "GC"
 	case operationKindTableGet:
 		ret = "TableGet"
 	case operationKindTableSet:
@@ -1189,6 +1191,11 @@ const (
 	operationKindRefTest
 	operationKindRefCast
 
+	// operationKindGC is every other instruction of the GC proposal. One Kind covers them all because the
+	// engine does not implement any of them: it pops the operands the mode wants and hands them to
+	// wasm.RunGC, which is shared with the native engine. See newOperationGC.
+	operationKindGC
+
 	// operationKindEnd is always placed at the bottom of this iota definition to be used in the test.
 	operationKindEnd
 )
@@ -1313,6 +1320,7 @@ func (o unionOperation) String() string {
 		operationKindRefFunc,
 		operationKindRefTest,
 		operationKindRefCast,
+		operationKindGC,
 		operationKindTableGet,
 		operationKindTableSet,
 		operationKindTableSize,
@@ -2497,12 +2505,25 @@ func newOperationRefFunc(functionIndex uint32) unionOperation {
 // newOperationRefTest constructs the operation for wasm.OpcodeGCRefTestName, and newOperationRefCast the one
 // for wasm.OpcodeGCRefCastName. U1 is the target descriptor both engines share; see wasm.EncodeRefTarget.
 // ref.test pushes an i32; ref.cast either leaves the reference alone or traps.
-func newOperationRefTest(target uint64) unionOperation {
-	return unionOperation{Kind: operationKindRefTest, U1: target}
+//
+// keep makes the test leave its operand in place and push the result above it, which is how br_on_cast is
+// built: the test result feeds a conditional branch, and the reference stays for whichever path is taken.
+func newOperationRefTest(target uint64, keep bool) unionOperation {
+	op := unionOperation{Kind: operationKindRefTest, U1: target}
+	if keep {
+		op.B1 = 1
+	}
+	return op
 }
 
 func newOperationRefCast(target uint64) unionOperation {
 	return unionOperation{Kind: operationKindRefCast, U1: target}
+}
+
+// newOperationGC constructs the operation for one instruction of the GC proposal. U1 is the wasm.RunGC mode,
+// U2 and U3 its immediates (a type index, a field index, a segment index or an operand count, per mode).
+func newOperationGC(mode, imm1, imm2 uint64) unionOperation {
+	return unionOperation{Kind: operationKindGC, U1: mode, U2: imm1, U3: imm2}
 }
 
 // NewOperationTableGet constructor for unionOperation with operationKindTableGet.

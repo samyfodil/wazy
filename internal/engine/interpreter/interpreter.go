@@ -2719,12 +2719,17 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 	case operationKindRefFunc:
 		ce.pushValue(uint64(uintptr(unsafe.Pointer(&functions[op.U1]))))
 	case operationKindRefTest:
-		ref := ce.popValue()
-		ce.pushValue(wasm.RunGCCheck(ce.f.moduleInstance, ref, op.U1, wasm.GCCheckRefTest))
+		ref := ce.stack[len(ce.stack)-1]
+		if op.B1 == 0 {
+			ce.popValue() // the plain form consumes its operand; br_on_cast's leaves it in place
+		}
+		ce.pushValue(wasm.RunGC(ce.f.moduleInstance, wasm.GCCheckRefTest, ref, op.U1, 0, 0, 0, nil))
+	case operationKindGC:
+		ce.execGC(op)
 	case operationKindRefCast:
 		// The value stays on the stack: a successful cast only narrows its static type, and a failed one
 		// traps inside RunGCCheck.
-		wasm.RunGCCheck(ce.f.moduleInstance, ce.stack[len(ce.stack)-1], op.U1, wasm.GCCheckRefCast)
+		wasm.RunGC(ce.f.moduleInstance, wasm.GCCheckRefCast, ce.stack[len(ce.stack)-1], op.U1, 0, 0, 0, nil)
 	case operationKindTableGet:
 		table := tables[op.U1]
 
@@ -5663,4 +5668,89 @@ func v128Dot(x1Hi, x1Lo, x2Hi, x2Lo uint64) (uint64, uint64) {
 	r7 := int32(int16(x1Hi>>32)) * int32(int16(x2Hi>>32))
 	r8 := int32(int16(x1Hi>>48)) * int32(int16(x2Hi>>48))
 	return uint64(uint32(r1+r2)) | (uint64(uint32(r3+r4)) << 32), uint64(uint32(r5+r6)) | (uint64(uint32(r7+r8)) << 32)
+}
+
+// execGC executes one instruction of the GC proposal by popping the operands its mode wants and handing them
+// to wasm.RunGC, which the native engine reaches through a trampoline. The engine implements none of the
+// semantics itself: everything a GC instruction touches -- the managed heap, store-wide type identity, the
+// module's data and element segments -- lives outside it.
+//
+// The operand order below is the order the instruction pushes them, so the pops read bottom-up.
+func (ce *callEngine) execGC(op *unionOperation) {
+	m := ce.f.moduleInstance
+	mode, imm1, imm2 := op.U1, op.U2, op.U3
+
+	var a, b, c, d, e uint64
+	var scratch []uint64
+	push := true
+
+	switch mode {
+	case wasm.GCStructNewDefault:
+		a = imm1
+	case wasm.GCStructNew, wasm.GCArrayNewFixed:
+		a = imm1
+		n := int(imm2)
+		scratch = ce.stack[len(ce.stack)-n:]
+	case wasm.GCStructGet:
+		b, c = imm1, imm2
+		a = ce.popValue()
+	case wasm.GCStructSet:
+		b = imm1
+		c = ce.popValue()
+		a = ce.popValue()
+		push = false
+	case wasm.GCArrayNew:
+		a = imm1
+		b = ce.popValue()
+		c = ce.popValue()
+	case wasm.GCArrayNewDefault:
+		a = imm1
+		b = ce.popValue()
+	case wasm.GCArrayNewData, wasm.GCArrayNewElem:
+		a, b = imm1, imm2
+		d = ce.popValue()
+		c = ce.popValue()
+	case wasm.GCArrayInitData, wasm.GCArrayInitElem:
+		c = imm2
+		e = ce.popValue()
+		d = ce.popValue()
+		b = ce.popValue()
+		a = ce.popValue()
+		push = false
+	case wasm.GCArrayGet:
+		c = imm2
+		b = ce.popValue()
+		a = ce.popValue()
+	case wasm.GCArraySet:
+		c = ce.popValue()
+		b = ce.popValue()
+		a = ce.popValue()
+		push = false
+	case wasm.GCArrayLen, wasm.GCRefI31, wasm.GCI31GetS, wasm.GCI31GetU:
+		a = ce.popValue()
+	case wasm.GCArrayFill:
+		d = ce.popValue()
+		c = ce.popValue()
+		b = ce.popValue()
+		a = ce.popValue()
+		push = false
+	case wasm.GCArrayCopy:
+		e = ce.popValue()
+		d = ce.popValue()
+		c = ce.popValue()
+		b = ce.popValue()
+		a = ce.popValue()
+		push = false
+	case wasm.GCRefEq:
+		b = ce.popValue()
+		a = ce.popValue()
+	}
+
+	ret := wasm.RunGC(m, mode, a, b, c, d, e, scratch)
+	if scratch != nil {
+		ce.stack = ce.stack[:len(ce.stack)-len(scratch)]
+	}
+	if push {
+		ce.pushValue(ret)
+	}
 }

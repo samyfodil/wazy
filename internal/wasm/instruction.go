@@ -310,6 +310,10 @@ const (
 	// Note: This is dependent on the flag CoreFeatureSignExtensionOps
 	OpcodeI64Extend32S Opcode = 0xc4
 
+	// OpcodeRefEq compares two references in the eq hierarchy for identity.
+	// Note: This is dependent on the flag CoreFeatureGC.
+	OpcodeRefEq Opcode = 0xd3
+
 	// OpcodeMiscPrefix is the prefix of various multi-byte opcodes.
 	// Introduced in CoreFeatureNonTrappingFloatToIntConversion, but used in other
 	// features, such as CoreFeatureBulkMemoryOperations.
@@ -332,28 +336,78 @@ const (
 type OpcodeGC = byte
 
 const (
-	OpcodeGCRefTest     OpcodeGC = 20
-	OpcodeGCRefTestNull OpcodeGC = 21
-	OpcodeGCRefCast     OpcodeGC = 22
-	OpcodeGCRefCastNull OpcodeGC = 23
-
-	OpcodeGCRefTestName     = "ref.test"
-	OpcodeGCRefTestNullName = "ref.test null"
-	OpcodeGCRefCastName     = "ref.cast"
-	OpcodeGCRefCastNullName = "ref.cast null"
+	OpcodeGCStructNew        OpcodeGC = 0
+	OpcodeGCStructNewDefault OpcodeGC = 1
+	OpcodeGCStructGet        OpcodeGC = 2
+	OpcodeGCStructGetS       OpcodeGC = 3
+	OpcodeGCStructGetU       OpcodeGC = 4
+	OpcodeGCStructSet        OpcodeGC = 5
+	OpcodeGCArrayNew         OpcodeGC = 6
+	OpcodeGCArrayNewDefault  OpcodeGC = 7
+	OpcodeGCArrayNewFixed    OpcodeGC = 8
+	OpcodeGCArrayNewData     OpcodeGC = 9
+	OpcodeGCArrayNewElem     OpcodeGC = 10
+	OpcodeGCArrayGet         OpcodeGC = 11
+	OpcodeGCArrayGetS        OpcodeGC = 12
+	OpcodeGCArrayGetU        OpcodeGC = 13
+	OpcodeGCArraySet         OpcodeGC = 14
+	OpcodeGCArrayLen         OpcodeGC = 15
+	OpcodeGCArrayFill        OpcodeGC = 16
+	OpcodeGCArrayCopy        OpcodeGC = 17
+	OpcodeGCArrayInitData    OpcodeGC = 18
+	OpcodeGCArrayInitElem    OpcodeGC = 19
+	OpcodeGCRefTest          OpcodeGC = 20
+	OpcodeGCRefTestNull      OpcodeGC = 21
+	OpcodeGCRefCast          OpcodeGC = 22
+	OpcodeGCRefCastNull      OpcodeGC = 23
+	OpcodeGCBrOnCast         OpcodeGC = 24
+	OpcodeGCBrOnCastFail     OpcodeGC = 25
+	OpcodeGCAnyConvertExtern OpcodeGC = 26
+	OpcodeGCExternConvertAny OpcodeGC = 27
+	OpcodeGCRefI31           OpcodeGC = 28
+	OpcodeGCI31GetS          OpcodeGC = 29
+	OpcodeGCI31GetU          OpcodeGC = 30
 )
+
+// gcInstructionNames is indexed by OpcodeGC. See GCInstructionName.
+var gcInstructionNames = [...]string{
+	OpcodeGCStructNew:        "struct.new",
+	OpcodeGCStructNewDefault: "struct.new_default",
+	OpcodeGCStructGet:        "struct.get",
+	OpcodeGCStructGetS:       "struct.get_s",
+	OpcodeGCStructGetU:       "struct.get_u",
+	OpcodeGCStructSet:        "struct.set",
+	OpcodeGCArrayNew:         "array.new",
+	OpcodeGCArrayNewDefault:  "array.new_default",
+	OpcodeGCArrayNewFixed:    "array.new_fixed",
+	OpcodeGCArrayNewData:     "array.new_data",
+	OpcodeGCArrayNewElem:     "array.new_elem",
+	OpcodeGCArrayGet:         "array.get",
+	OpcodeGCArrayGetS:        "array.get_s",
+	OpcodeGCArrayGetU:        "array.get_u",
+	OpcodeGCArraySet:         "array.set",
+	OpcodeGCArrayLen:         "array.len",
+	OpcodeGCArrayFill:        "array.fill",
+	OpcodeGCArrayCopy:        "array.copy",
+	OpcodeGCArrayInitData:    "array.init_data",
+	OpcodeGCArrayInitElem:    "array.init_elem",
+	OpcodeGCRefTest:          "ref.test",
+	OpcodeGCRefTestNull:      "ref.test null",
+	OpcodeGCRefCast:          "ref.cast",
+	OpcodeGCRefCastNull:      "ref.cast null",
+	OpcodeGCBrOnCast:         "br_on_cast",
+	OpcodeGCBrOnCastFail:     "br_on_cast_fail",
+	OpcodeGCAnyConvertExtern: "any.convert_extern",
+	OpcodeGCExternConvertAny: "extern.convert_any",
+	OpcodeGCRefI31:           "ref.i31",
+	OpcodeGCI31GetS:          "i31.get_s",
+	OpcodeGCI31GetU:          "i31.get_u",
+}
 
 // GCInstructionName returns the name of the instruction prefixed by OpcodeGCPrefix.
 func GCInstructionName(oc OpcodeGC) string {
-	switch oc {
-	case OpcodeGCRefTest:
-		return OpcodeGCRefTestName
-	case OpcodeGCRefTestNull:
-		return OpcodeGCRefTestNullName
-	case OpcodeGCRefCast:
-		return OpcodeGCRefCastName
-	case OpcodeGCRefCastNull:
-		return OpcodeGCRefCastNullName
+	if int(oc) < len(gcInstructionNames) && gcInstructionNames[oc] != "" {
+		return gcInstructionNames[oc]
 	}
 	return fmt.Sprintf("gc(0x%x)", oc)
 }
@@ -1073,6 +1127,7 @@ const (
 	OpcodeRefNullName       = "ref.null"
 	OpcodeRefIsNullName     = "ref.is_null"
 	OpcodeRefFuncName       = "ref.func"
+	OpcodeRefEqName         = "ref.eq"
 	OpcodeRefAsNonNullName  = "ref.as_non_null"
 	OpcodeBrOnNullName      = "br_on_null"
 	OpcodeBrOnNonNullName   = "br_on_non_null"
