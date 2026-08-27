@@ -386,7 +386,7 @@ func (m *Module) validateBeforeFunctionBodies(enabledFeatures api.CoreFeatures) 
 		return
 	}
 
-	if err = m.validateGlobals(globals, uint32(len(functions)), MaximumGlobals); err != nil {
+	if err = m.validateGlobals(globals, uint32(len(functions)), MaximumGlobals, enabledFeatures); err != nil {
 		return
 	}
 
@@ -484,17 +484,22 @@ func (m *Module) validateStartSection() error {
 	return nil
 }
 
-func (m *Module) validateGlobals(globals []GlobalType, numFuncts, maxGlobals uint32) error {
+func (m *Module) validateGlobals(globals []GlobalType, numFuncts, maxGlobals uint32, enabledFeatures api.CoreFeatures) error {
 	if uint32(len(globals)) > maxGlobals {
 		return fmt.Errorf("too many globals in a module")
 	}
 
-	// Global initialization constant expression can only reference the imported globals.
-	// See the note on https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#constant-expressions%E2%91%A0
-	importedGlobals := globals[:m.ImportGlobalCount]
+	// Up to 2.0 a global's initializer could only name an imported global; from 3.0 it may name any global
+	// declared before it. wazy gates that on extended-const, which is where the rest of the same relaxation
+	// lives. See resolveConstExprGlobalType.
+	extended := enabledFeatures.IsEnabled(api.CoreFeatureExtendedConst)
 	for i := range m.GlobalSection {
+		visible := globals[:m.ImportGlobalCount]
+		if extended {
+			visible = globals[:m.ImportGlobalCount+Index(i)]
+		}
 		g := &m.GlobalSection[i]
-		if err := m.validateConstExpression(importedGlobals, numFuncts, &g.Init, g.Type.ValType); err != nil {
+		if err := m.validateConstExpression(visible, numFuncts, &g.Init, g.Type.ValType); err != nil {
 			return err
 		}
 	}
@@ -675,7 +680,12 @@ func (m *Module) validateMemory(memories []Memory, globals []GlobalType, enabled
 			}
 			// An active data segment's offset is given in the index type of the
 			// memory it initializes: i64 for a 64-bit memory.
-			if err := m.validateConstExpression(importedGlobals, 0, &d.OffsetExpression, memories[d.MemoryIndex].IndexType()); err != nil {
+			// An offset may name any global from 3.0 on, not just an imported one; see validateGlobals.
+			visible := importedGlobals
+			if enabledFeatures.IsEnabled(api.CoreFeatureExtendedConst) {
+				visible = globals
+			}
+			if err := m.validateConstExpression(visible, 0, &d.OffsetExpression, memories[d.MemoryIndex].IndexType()); err != nil {
 				return fmt.Errorf("calculate offset: %w", err)
 			}
 		}
@@ -801,8 +811,6 @@ func (m *ModuleInstance) buildTags(module *Module) {
 }
 
 func (m *ModuleInstance) buildGlobals(module *Module, funcRefResolver func(funcIndex Index) Reference) {
-	importedGlobals := m.Globals[:module.ImportGlobalCount]
-
 	me := m.Engine
 	engineOwnGlobal := me.OwnsGlobals()
 	for i := Index(0); i < Index(len(module.GlobalSection)); i++ {
@@ -814,7 +822,11 @@ func (m *ModuleInstance) buildGlobals(module *Module, funcRefResolver func(funcI
 		}
 		m.Globals[i+module.ImportGlobalCount] = g
 		g.Type = gs.Type
-		g.initialize(importedGlobals, &gs.Init, funcRefResolver, constExprEnv{types: module.TypeSection, inst: m})
+		// Globals are built in order, so everything an initializer is allowed to name -- the imports, plus
+		// every global declared before this one -- is already in place. Validation decides what is
+		// allowed; this only has to make it reachable.
+		g.initialize(m.Globals[:i+module.ImportGlobalCount], &gs.Init, funcRefResolver,
+			constExprEnv{types: module.TypeSection, inst: m})
 	}
 }
 

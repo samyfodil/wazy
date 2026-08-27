@@ -167,14 +167,16 @@ typed_function_references_wast_files := \
 spectest_gc_dir := $(spectest_base_dir)/gc
 spectest_gc_testdata_dir := $(spectest_gc_dir)/testdata
 spec_version_gc := 756060f5816c7e2159f4817fbdee76cf52f9c923
-# type-canon, type-equivalence and type-rec live at test/core; the rest of the
-# suite is under test/core/gc, which is why the download tries both.
-gc_wast_files := type-canon.wast type-equivalence.wast type-rec.wast \
-	type-subtyping.wast type-subtyping-invalid.wast \
-	struct.wast array.wast array_copy.wast array_fill.wast \
-	array_init_data.wast array_init_elem.wast array_new_data.wast \
-	array_new_elem.wast i31.wast ref_test.wast ref_cast.wast ref_eq.wast \
-	br_on_cast.wast br_on_cast_fail.wast extern.wast binary-gc.wast
+# The whole of the GC proposal's core suite: everything under test/core plus
+# everything under test/core/gc, which is why the download tries both paths.
+# comments.wast is the one exclusion, and not for a GC reason: it pulls in .wat
+# modules, which the harness (spectest.Run) only reads as .wasm.
+gc_wast_files := $(shell curl -sSL \
+	'https://api.github.com/repos/WebAssembly/gc/contents/test/core?ref=$(spec_version_gc)' \
+	| jq -r '.[] | select(.name|endswith(".wast")) | .name' | grep -v '^comments.wast$$')
+gc_wast_files += $(shell curl -sSL \
+	'https://api.github.com/repos/WebAssembly/gc/contents/test/core/gc?ref=$(spec_version_gc)' \
+	| jq -r '.[] | select(.name|endswith(".wast")) | .name')
 
 .PHONY: build.spectest
 build.spectest:

@@ -1725,9 +1725,25 @@ to tell the permitted answers apart.
 ## Garbage collection (WasmGC)
 
 The [GC proposal](https://github.com/WebAssembly/gc) adds struct and array types
-on a managed heap. The type system, every instruction and the heap itself are
-here, and the whole `test/core/gc` conformance suite passes on both engines.
-Reclamation is not: see the last section.
+on a managed heap. All of it is here -- the type system, every instruction, the
+heap and its collector -- and the proposal's whole core suite passes on both
+engines: 118 files, every one under `test/core` and `test/core/gc` except
+`comments.wast`, which pulls in `.wat` modules the harness only reads as `.wasm`.
+
+That suite is run at the feature set the GC branch itself assumes: 2.0 plus
+tail-call, extended-const and typed function references. Not the whole of 3.0,
+because that branch forked before multi-memory and memory64 landed, and its
+`binary.wast`, `memory.wast` and `imports.wast` still require the encodings those
+two relax -- a plain zero where multi-memory reads a memory index. Those files
+are covered with their later encodings by the multi-memory and memory64 suites.
+
+Running the wider suite turned up one thing that had nothing to do with GC: from
+3.0 a global's initializer, and a data or element segment's offset, may name any
+global declared before it rather than only an imported one. wazy validated that
+under `extended-const` but never made the earlier globals reachable to the
+evaluator, so `global.wast`, `data.wast` and `elem.wast` failed on it. Globals
+are built in order, so the fix is to hand each initializer the globals that
+already exist.
 
 **Composite types live on `FunctionType`.** A GC defined type is a function, a
 struct or an array, so the obvious move is a new sum type for the type section.
