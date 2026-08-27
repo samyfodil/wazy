@@ -30,8 +30,11 @@ type Compiler struct {
 	tableGrowSig           ssa.Signature
 	refFuncSig             ssa.Signature
 	gcSig                  ssa.Signature
+	gcSafepointSig         ssa.Signature
 	memmoveSig             ssa.Signature
 	ensureTermination      bool
+	// gcEnabled makes every loop header poll the collector's pause flag; see emitGCSafepoint.
+	gcEnabled bool
 
 	// Followings are reset by per function.
 
@@ -164,6 +167,9 @@ func NewFrontendCompiler(m *wasm.Module, ssaBuilder ssa.Builder, offset *nativea
 	c.declareSignatures(listenerOn)
 	return c
 }
+
+// SetGCEnabled makes loop headers emit the collector's safepoint poll. It must be called before lowering.
+func (c *Compiler) SetGCEnabled(on bool) { c.gcEnabled = on }
 
 // SetInterruptCheckInterval sets the loop interrupt-check interval used when
 // ensureTermination is active. interval must be 0 (check every iteration) or a
@@ -408,6 +414,12 @@ func (c *Compiler) declareSignatures(listenerOn bool) {
 		Results: []ssa.Type{ssa.TypeI64},
 	}
 	c.ssaBuilder.DeclareSignature(&c.gcSig)
+
+	c.gcSafepointSig = ssa.Signature{
+		ID:     c.gcSig.ID + 1,
+		Params: []ssa.Type{ssa.TypeI64 /* exec context */},
+	}
+	c.ssaBuilder.DeclareSignature(&c.gcSafepointSig)
 }
 
 // SignatureForWasmFunctionType returns the ssa.Signature for the given wasm.FunctionType.

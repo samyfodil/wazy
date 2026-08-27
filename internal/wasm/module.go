@@ -995,6 +995,34 @@ type FunctionType struct {
 	// the iso-recursive rule. Set by CanonicalizeTypes; see there for why concrete references compare through
 	// it rather than by their own index.
 	CanonicalIndex Index
+
+	// FieldSlots is where each field starts in a GCObject's flat word array, with one extra entry holding
+	// the total. Every storage type occupies one word except v128, which takes two, so this is the identity
+	// for all but a type with a vector field. Nil for a function type. See CacheFieldSlots.
+	FieldSlots []uint32
+}
+
+// CacheFieldSlots computes FieldSlots. Call it once, while this type is exclusively owned -- the decoder does
+// it as each type is read -- since the engines read it from guest execution on any number of goroutines.
+func (f *FunctionType) CacheFieldSlots() {
+	if f.CompositeKind == CompositeKindFunc || f.FieldSlots != nil {
+		return
+	}
+	f.FieldSlots = make([]uint32, len(f.Fields)+1)
+	var slot uint32
+	for i, fd := range f.Fields {
+		f.FieldSlots[i] = slot
+		slot += SlotsForStorageType(fd.Type)
+	}
+	f.FieldSlots[len(f.Fields)] = slot
+}
+
+// SlotsForStorageType is how many uint64 words one value of a storage type occupies in a GCObject.
+func SlotsForStorageType(st ValueType) uint32 {
+	if st == ValueTypeV128 {
+		return 2
+	}
+	return 1
 }
 
 // CompositeKind is the shape of a defined type: a function, a struct or an array.

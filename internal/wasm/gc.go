@@ -367,11 +367,13 @@ const (
 	GCStructNew
 	// GCStructNewDefault allocates a struct with every field at its type's default: a is the type index.
 	GCStructNewDefault
-	// GCStructGet reads a field: a is the reference, b the field index, c 1 for a signed packed read.
+	// GCStructGet reads one word of a field: a is the reference, b the word's slot (see
+	// FunctionType.FieldSlots), c 1 for a signed packed read. A vector field is two slots, read separately.
 	GCStructGet
-	// GCStructSet writes a field: a is the reference, b the field index, c the value.
+	// GCStructSet writes one word of a field: a is the reference, b the slot, c the value.
 	GCStructSet
-	// GCArrayNew allocates an array of b elements all equal to c: a is the type index.
+	// GCArrayNew allocates an array of b elements all equal to (c, d): a is the type index. d is the high
+	// word of a vector element and zero otherwise.
 	GCArrayNew
 	// GCArrayNewDefault allocates an array of b elements at the element type's default: a is the type index.
 	GCArrayNewDefault
@@ -385,13 +387,16 @@ const (
 	// GCArrayInitElem is the same over an element segment.
 	GCArrayInitData
 	GCArrayInitElem
-	// GCArrayGet reads an element: a is the reference, b the index, c 1 for a signed packed read.
+	// GCArrayGet reads one word of an element: a is the reference, b the element index, c the flags -- bit 0
+	// for a signed packed read, bit 1 for the high word of a vector element.
 	GCArrayGet
-	// GCArraySet writes an element: a is the reference, b the index, c the value.
+	// GCArraySet writes one word of an element: a is the reference, b the element index, c the value, d the
+	// flags, whose bit 1 selects the high word of a vector element.
 	GCArraySet
 	// GCArrayLen returns the length of the array a.
 	GCArrayLen
-	// GCArrayFill writes d copies of c into a starting at b.
+	// GCArrayFill writes d elements equal to (c, e) into a starting at element b. e is the high word of a
+	// vector element and zero otherwise.
 	GCArrayFill
 	// GCArrayCopy copies e elements from array c at index d into array a at index b.
 	GCArrayCopy
@@ -442,60 +447,65 @@ func RunGC(m *ModuleInstance, mode, a, b, c, d, e uint64, scratch []uint64) uint
 		return 0
 
 	case GCStructNew, GCStructNewDefault, GCArrayNew, GCArrayNewDefault, GCArrayNewFixed:
-		return m.allocGC(mode, a, b, c, scratch)
+		return m.allocGC(mode, a, b, c, d, scratch)
 
 	case GCArrayNewData, GCArrayNewElem:
 		o := m.newArray(a, d)
 		m.fillArrayFromSegment(o, 0, mode == GCArrayNewData, b, c, d)
-		return m.s.GC.Alloc(o)
+		return m.allocRef(o)
 
 	case GCArrayInitData, GCArrayInitElem:
 		o := m.s.GC.Deref(a)
-		checkArrayRange(len(o.Fields), b, e)
+		checkArrayRange(o.Len(), b, e)
 		m.fillArrayFromSegment(o, b, mode == GCArrayInitData, c, d, e)
 		return 0
 
-	case GCStructGet, GCArrayGet:
-		o := m.s.GC.Deref(a)
-		i := int(b)
-		if mode == GCArrayGet && i >= len(o.Fields) {
-			panic(wasmruntime.ErrRuntimeOutOfBoundsArrayAccess)
-		}
-		return o.Get(i, c == 1)
+	case GCStructGet:
+		return m.s.GC.Deref(a).Get(int(b), c&1 != 0)
 
-	case GCStructSet, GCArraySet:
+	case GCStructSet:
+		m.s.GC.Deref(a).Set(int(b), c)
+		return 0
+
+	case GCArrayGet:
 		o := m.s.GC.Deref(a)
-		i := int(b)
-		if mode == GCArraySet && i >= len(o.Fields) {
-			panic(wasmruntime.ErrRuntimeOutOfBoundsArrayAccess)
-		}
-		o.Set(i, c)
+		return o.Get(arraySlot(o, b, c), c&1 != 0)
+
+	case GCArraySet:
+		o := m.s.GC.Deref(a)
+		o.Set(arraySlot(o, b, d), c)
 		return 0
 
 	case GCArrayLen:
-		return uint64(len(m.s.GC.Deref(a).Fields))
+		return uint64(m.s.GC.Deref(a).Len())
 
 	case GCArrayFill:
 		o := m.s.GC.Deref(a)
-		checkArrayRange(len(o.Fields), b, d)
+		checkArrayRange(o.Len(), b, d)
+		stride := uint64(o.ElemSlots())
 		for i := uint64(0); i < d; i++ {
-			o.Set(int(b+i), c)
+			slot := (b + i) * stride
+			o.Set(int(slot), c)
+			if stride == 2 {
+				o.Set(int(slot+1), e)
+			}
 		}
 		return 0
 
 	case GCArrayCopy:
 		dst, src := m.s.GC.Deref(a), m.s.GC.Deref(c)
-		checkArrayRange(len(dst.Fields), b, e)
-		checkArrayRange(len(src.Fields), d, e)
+		checkArrayRange(dst.Len(), b, e)
+		checkArrayRange(src.Len(), d, e)
+		stride := uint64(dst.ElemSlots())
 		// The two arrays may be the same object, so copy in the direction that cannot clobber a source
 		// element before it is read -- exactly what memory.copy does for overlapping ranges.
 		if b <= d {
-			for i := uint64(0); i < e; i++ {
-				dst.Set(int(b+i), src.Get(int(d+i), true))
+			for i := uint64(0); i < e*stride; i++ {
+				dst.Set(int(b*stride+i), src.Get(int(d*stride+i), true))
 			}
 		} else {
-			for i := e; i > 0; i-- {
-				dst.Set(int(b+i-1), src.Get(int(d+i-1), true))
+			for i := e * stride; i > 0; i-- {
+				dst.Set(int(b*stride+i-1), src.Get(int(d*stride+i-1), true))
 			}
 		}
 		return 0
@@ -520,8 +530,29 @@ func RunGC(m *ModuleInstance, mode, a, b, c, d, e uint64, scratch []uint64) uint
 	panic("BUG: unknown GC runtime mode")
 }
 
+// structSlots is how many words a struct instance occupies.
+func structSlots(def *FunctionType) int {
+	if def.FieldSlots != nil {
+		return int(def.FieldSlots[len(def.Fields)])
+	}
+	return len(def.Fields)
+}
+
+// arraySlot maps an element index to the word it starts at, trapping when the index is past the end. flags
+// bit 1 selects the high word of a vector element.
+func arraySlot(o *GCObject, index, flags uint64) int {
+	if index >= uint64(o.Len()) {
+		panic(wasmruntime.ErrRuntimeOutOfBoundsArrayAccess)
+	}
+	slot := index * uint64(o.ElemSlots())
+	if flags&2 != 0 {
+		slot++
+	}
+	return int(slot)
+}
+
 // allocGC handles the five allocating modes, which all end in one GCHeap.Alloc.
-func (m *ModuleInstance) allocGC(mode, typeIndex, count, init uint64, scratch []uint64) uint64 {
+func (m *ModuleInstance) allocGC(mode, typeIndex, count, init, initHi uint64, scratch []uint64) uint64 {
 	if indexOutOfRange(Index(typeIndex), len(m.TypeIDs)) {
 		panic("BUG: validation should have rejected type index")
 	}
@@ -530,35 +561,51 @@ func (m *ModuleInstance) allocGC(mode, typeIndex, count, init uint64, scratch []
 
 	switch mode {
 	case GCStructNewDefault:
-		o.Fields = make([]uint64, len(def.Fields))
-		for i := range o.Fields {
-			o.Fields[i] = defaultValue(def.Fields[i].Type)
-		}
+		// Every default is the zero word, so a fresh slice already holds them.
+		o.Fields = make([]uint64, structSlots(def))
 	case GCStructNew, GCArrayNewFixed:
-		// The operands were pushed in field order, so scratch is already in the right order. They go in
-		// through Set so a packed field is stored truncated, as Get's widening assumes.
+		// The operands were pushed in field order, so scratch is already word-for-word the layout. They go
+		// in through Set so a packed field is stored truncated, as Get's widening assumes.
 		o.Fields = make([]uint64, len(scratch))
 		for i, v := range scratch {
 			o.Set(i, v)
 		}
 	case GCArrayNew, GCArrayNewDefault:
-		n := checkArrayLen(count)
+		// Bound the element count before multiplying it out, so a huge one traps rather than wrapping.
+		slots := int(SlotsForStorageType(def.Fields[0].Type))
+		n := checkArrayLen(count) * slots
 		o.Fields = make([]uint64, n)
-		v := init
-		if mode == GCArrayNewDefault {
-			v = defaultValue(def.Fields[0].Type)
-		}
-		for i := range o.Fields {
-			o.Set(i, v)
+		if mode == GCArrayNew {
+			for i := 0; i < n; i += slots {
+				o.Set(i, init)
+				if slots == 2 {
+					o.Set(i+1, initHi)
+				}
+			}
 		}
 	}
-	return m.s.GC.Alloc(o)
+	return m.allocRef(o)
+}
+
+// allocRef puts an object on the heap and, when that pushed the heap past its threshold, asks every execution
+// on the store to park so one of them can collect. Nothing collects here: a collection needs the wasm stacks
+// to be stable, which they are only at a safepoint.
+func (m *ModuleInstance) allocRef(o *GCObject) uint64 {
+	ref, wantGC := m.s.GC.Alloc(o)
+	if wantGC {
+		m.s.RequestGC()
+	}
+	return ref
 }
 
 // newArray allocates an uninitialised array of n elements of the given type index.
 func (m *ModuleInstance) newArray(typeIndex, n uint64) *GCObject {
 	def := &m.Source.TypeSection[typeIndex]
-	return &GCObject{Type: def, TypeID: m.TypeIDs[typeIndex], Fields: make([]uint64, checkArrayLen(n))}
+	slots := SlotsForStorageType(def.Fields[0].Type)
+	return &GCObject{
+		Type: def, TypeID: m.TypeIDs[typeIndex],
+		Fields: make([]uint64, checkArrayLen(n)*int(slots)),
+	}
 }
 
 // fillArrayFromSegment writes length elements into o starting at dst, reading them from a data or an element
@@ -574,7 +621,7 @@ func (m *ModuleInstance) fillArrayFromSegment(o *GCObject, dst uint64, fromData 
 			panic(wasmruntime.ErrRuntimeInvalidTableAccess)
 		}
 		for i := uint64(0); i < length; i++ {
-			o.Set(int(dst+i), uint64(elems[src+i]))
+			o.Set(int((dst+i)*uint64(o.ElemSlots())), uint64(elems[src+i]))
 		}
 		return
 	}
@@ -583,17 +630,22 @@ func (m *ModuleInstance) fillArrayFromSegment(o *GCObject, dst uint64, fromData 
 		panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 	}
 	data := m.DataInstances[segment]
-	width := storageWidth(o.storageType(0))
+	width := storageWidth(o.Type.Fields[0].Type)
 	if src+length*width > uint64(len(data)) {
 		panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 	}
+	stride := uint64(o.ElemSlots())
 	for i := uint64(0); i < length; i++ {
-		var v uint64
 		base := src + i*width
-		for b := uint64(0); b < width; b++ {
-			v |= uint64(data[base+b]) << (8 * b)
+		slot := (dst + i) * stride
+		// A vector element spans two words, low half first, so read the bytes eight at a time.
+		for w := uint64(0); w < stride; w++ {
+			var v uint64
+			for b := uint64(0); b < width && b < 8; b++ {
+				v |= uint64(data[base+w*8+b]) << (8 * b)
+			}
+			o.Set(int(slot+w), v)
 		}
-		o.Set(int(dst+i), v)
 	}
 }
 
@@ -612,10 +664,6 @@ func storageWidth(st ValueType) uint64 {
 		return 8
 	}
 }
-
-// defaultValue is the value a struct field or array element starts at when it is not given one. Every
-// numeric type defaults to zero and every reference type to null, which is the same bit pattern.
-func defaultValue(ValueType) uint64 { return 0 }
 
 // maxGCArrayLen bounds an array allocation. The spec's own limit is the implementation's, and a length that
 // cannot be backed has to trap rather than be attempted: an array.new with a length near 2^32 would otherwise

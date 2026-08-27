@@ -87,6 +87,10 @@ func evaluateConstExprFast(
 		case ValueTypeExnref.Kind():
 			valType = ValueTypeExnref
 		default:
+			if vt := ValueType(data[1]); vt.IsGCHeapType() {
+				valType = vt
+				break
+			}
 			// Concrete type index (typed refs): rare: let the general evaluator handle it.
 			return 0, 0, 0, false, nil
 		}
@@ -228,6 +232,11 @@ func evaluateConstExpr(e *ConstantExpression, globalResolver func(globalIndex In
 				valType = ValueTypeExnref
 				pc++
 			default:
+				if vt := ValueType(b); vt.IsGCHeapType() {
+					valType = vt
+					pc++
+					break
+				}
 				// Concrete type index encoded as LEB128.
 				typeIdx, n, err := leb128.LoadUint32(data[pc:])
 				if err != nil {

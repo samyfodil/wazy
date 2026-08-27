@@ -1412,6 +1412,13 @@ func (c *Compiler) lowerCurrentOpcode() {
 
 		c.switchTo(originalLen, loopHeader)
 
+		if c.gcEnabled {
+			// A loop header is where execution parks for a collection: a guest cannot run unboundedly
+			// without passing one, so this is what bounds how long a collection waits. The poll itself is
+			// a load and a rarely-taken branch; only the branch calls into Go.
+			c.emitGCSafepoint(builder)
+		}
+
 		if c.ensureTermination {
 			if c.interruptCheckInterval == 0 {
 				// Check every iteration: a Go round-trip (also the scheduler/GC
@@ -5937,10 +5944,10 @@ func (c *Compiler) lowerGCInstruction(gcOp wasm.OpcodeGC) {
 		if state.unreachable {
 			return
 		}
-		fields := c.m.TypeSection[typeIndex].Fields
+		t := &c.m.TypeSection[typeIndex]
 		var values []ssa.Value
 		if gcOp == wasm.OpcodeGCStructNew {
-			values = make([]ssa.Value, len(fields))
+			values = make([]ssa.Value, len(t.Fields))
 			for i := len(values) - 1; i >= 0; i-- {
 				values[i] = state.pop()
 			}
@@ -5950,7 +5957,7 @@ func (c *Compiler) lowerGCInstruction(gcOp wasm.OpcodeGC) {
 		// interpreter can hand it.
 		ref := c.callGC(wasm.GCStructNewDefault, c.gcConst(uint64(typeIndex)))
 		for i, v := range values {
-			c.callGC(wasm.GCStructSet, ref, c.gcConst(uint64(i)), c.gcToI64(v))
+			c.gcStoreWords(ref, wasm.GCStructSet, c.gcConst(uint64(t.FieldSlots[i])), v)
 		}
 		state.push(ref)
 
@@ -5963,17 +5970,26 @@ func (c *Compiler) lowerGCInstruction(gcOp wasm.OpcodeGC) {
 		if gcOp == wasm.OpcodeGCStructGetS {
 			signed = 1
 		}
+		t := &c.m.TypeSection[typeIndex]
+		slot := c.gcConst(uint64(t.FieldSlots[fieldIndex]))
 		ref := state.pop()
-		r := c.callGC(wasm.GCStructGet, ref, c.gcConst(uint64(fieldIndex)), c.gcConst(signed))
-		state.push(c.gcFromI64(r, unpackedFieldType(&c.m.TypeSection[typeIndex], fieldIndex)))
+		vt := unpackedFieldType(t, fieldIndex)
+		if vt == wasm.ValueTypeV128 {
+			lo := c.callGC(wasm.GCStructGet, ref, slot, c.gcConst(signed))
+			hi := c.callGC(wasm.GCStructGet, ref, c.gcConst(uint64(t.FieldSlots[fieldIndex]+1)), c.gcConst(signed))
+			state.push(c.gcV128From(lo, hi))
+			return
+		}
+		state.push(c.gcFromI64(c.callGC(wasm.GCStructGet, ref, slot, c.gcConst(signed)), vt))
 
 	case wasm.OpcodeGCStructSet:
-		_, fieldIndex := c.readI32u(), c.readI32u()
+		typeIndex, fieldIndex := c.readI32u(), c.readI32u()
 		if state.unreachable {
 			return
 		}
 		v, ref := state.pop(), state.pop()
-		c.callGC(wasm.GCStructSet, ref, c.gcConst(uint64(fieldIndex)), c.gcToI64(v))
+		slot := uint64(c.m.TypeSection[typeIndex].FieldSlots[fieldIndex])
+		c.gcStoreWords(ref, wasm.GCStructSet, c.gcConst(slot), v)
 
 	case wasm.OpcodeGCArrayNew, wasm.OpcodeGCArrayNewDefault:
 		typeIndex := c.readI32u()
@@ -5985,8 +6001,8 @@ func (c *Compiler) lowerGCInstruction(gcOp wasm.OpcodeGC) {
 			state.push(c.callGC(wasm.GCArrayNewDefault, c.gcConst(uint64(typeIndex)), c.gcToI64(length)))
 			return
 		}
-		init := state.pop()
-		state.push(c.callGC(wasm.GCArrayNew, c.gcConst(uint64(typeIndex)), c.gcToI64(length), c.gcToI64(init)))
+		lo, hi := c.gcSplitWords(state.pop())
+		state.push(c.callGC(wasm.GCArrayNew, c.gcConst(uint64(typeIndex)), c.gcToI64(length), lo, hi))
 
 	case wasm.OpcodeGCArrayNewFixed:
 		typeIndex, count := c.readI32u(), c.readI32u()
@@ -5999,7 +6015,7 @@ func (c *Compiler) lowerGCInstruction(gcOp wasm.OpcodeGC) {
 		}
 		ref := c.callGC(wasm.GCArrayNewDefault, c.gcConst(uint64(typeIndex)), c.gcConst(uint64(count)))
 		for i, v := range values {
-			c.callGC(wasm.GCArraySet, ref, c.gcConst(uint64(i)), c.gcToI64(v))
+			c.gcStoreElement(ref, c.gcConst(uint64(i)), v)
 		}
 		state.push(ref)
 
@@ -6026,8 +6042,15 @@ func (c *Compiler) lowerGCInstruction(gcOp wasm.OpcodeGC) {
 			signed = 1
 		}
 		index, ref := state.pop(), state.pop()
-		r := c.callGC(wasm.GCArrayGet, ref, c.gcToI64(index), c.gcConst(signed))
-		state.push(c.gcFromI64(r, unpackedFieldType(&c.m.TypeSection[typeIndex], 0)))
+		idx := c.gcToI64(index)
+		vt := unpackedFieldType(&c.m.TypeSection[typeIndex], 0)
+		if vt == wasm.ValueTypeV128 {
+			lo := c.callGC(wasm.GCArrayGet, ref, idx, c.gcConst(signed))
+			hi := c.callGC(wasm.GCArrayGet, ref, idx, c.gcConst(signed|2))
+			state.push(c.gcV128From(lo, hi))
+			return
+		}
+		state.push(c.gcFromI64(c.callGC(wasm.GCArrayGet, ref, idx, c.gcConst(signed)), vt))
 
 	case wasm.OpcodeGCArraySet:
 		c.readI32u()
@@ -6035,7 +6058,7 @@ func (c *Compiler) lowerGCInstruction(gcOp wasm.OpcodeGC) {
 			return
 		}
 		v, index, ref := state.pop(), state.pop(), state.pop()
-		c.callGC(wasm.GCArraySet, ref, c.gcToI64(index), c.gcToI64(v))
+		c.gcStoreElement(ref, c.gcToI64(index), v)
 
 	case wasm.OpcodeGCArrayLen:
 		if state.unreachable {
@@ -6049,7 +6072,8 @@ func (c *Compiler) lowerGCInstruction(gcOp wasm.OpcodeGC) {
 			return
 		}
 		length, v, index, ref := state.pop(), state.pop(), state.pop(), state.pop()
-		c.callGC(wasm.GCArrayFill, ref, c.gcToI64(index), c.gcToI64(v), c.gcToI64(length))
+		lo, hi := c.gcSplitWords(v)
+		c.callGC(wasm.GCArrayFill, ref, c.gcToI64(index), lo, c.gcToI64(length), hi)
 
 	case wasm.OpcodeGCArrayCopy:
 		c.readI32u()
@@ -6196,7 +6220,7 @@ func (c *Compiler) gcToI64(v ssa.Value) ssa.Value {
 	case ssa.TypeF64:
 		return builder.AllocateInstruction().AsBitcast(v, ssa.TypeI64).Insert(builder).Return()
 	}
-	panic("BUG: a v128 struct field or array element is not supported yet")
+	panic("BUG: a vector must go through gcSplitWords, not gcToI64")
 }
 
 // gcFromI64 narrows a trampoline result back to the wasm type the instruction pushes.
@@ -6210,13 +6234,89 @@ func (c *Compiler) gcFromI64(v ssa.Value, vt wasm.ValueType) ssa.Value {
 		return builder.AllocateInstruction().AsBitcast(bits, ssa.TypeF32).Insert(builder).Return()
 	case wasm.ValueTypeF64:
 		return builder.AllocateInstruction().AsBitcast(v, ssa.TypeF64).Insert(builder).Return()
-	case wasm.ValueTypeV128:
-		panic("BUG: a v128 struct field or array element is not supported yet")
 	}
-	// i64 and every reference type are already the right width.
+	// i64 and every reference type are already the right width; a vector is reassembled by gcV128From.
 	return v
 }
 
 func (c *Compiler) gcResultI32(v ssa.Value) ssa.Value {
 	return c.ssaBuilder.AllocateInstruction().AsIreduce(v, ssa.TypeI32).Insert(c.ssaBuilder).Return()
+}
+
+// gcSplitWords takes a value apart into the words RunGC moves it in: two for a vector, one for everything
+// else, whose high word is zero.
+func (c *Compiler) gcSplitWords(v ssa.Value) (lo, hi ssa.Value) {
+	if v.Type() != ssa.TypeV128 {
+		return c.gcToI64(v), c.gcConst(0)
+	}
+	builder := c.ssaBuilder
+	lo = builder.AllocateInstruction().
+		AsExtractlane(v, 0, ssa.VecLaneI64x2, false).Insert(builder).Return()
+	hi = builder.AllocateInstruction().
+		AsExtractlane(v, 1, ssa.VecLaneI64x2, false).Insert(builder).Return()
+	return lo, hi
+}
+
+// gcV128From reassembles a vector from the two words RunGC returned it in.
+func (c *Compiler) gcV128From(lo, hi ssa.Value) ssa.Value {
+	builder := c.ssaBuilder
+	zero := builder.AllocateInstruction().AsVconst(0, 0).Insert(builder).Return()
+	withLo := builder.AllocateInstruction().
+		AsInsertlane(zero, lo, 0, ssa.VecLaneI64x2).Insert(builder).Return()
+	return builder.AllocateInstruction().
+		AsInsertlane(withLo, hi, 1, ssa.VecLaneI64x2).Insert(builder).Return()
+}
+
+// gcStoreWords writes a value into a struct at the word slot names, taking two calls for a vector.
+func (c *Compiler) gcStoreWords(ref ssa.Value, mode uint64, slot ssa.Value, v ssa.Value) {
+	if v.Type() != ssa.TypeV128 {
+		c.callGC(mode, ref, slot, c.gcToI64(v))
+		return
+	}
+	lo, hi := c.gcSplitWords(v)
+	c.callGC(mode, ref, slot, lo)
+	next := c.ssaBuilder.AllocateInstruction().
+		AsIadd(slot, c.gcConst(1)).Insert(c.ssaBuilder).Return()
+	c.callGC(mode, ref, next, hi)
+}
+
+// gcStoreElement writes a value into an array element, taking two calls for a vector: the second selects the
+// element's high word through the flags operand.
+func (c *Compiler) gcStoreElement(ref, index, v ssa.Value) {
+	if v.Type() != ssa.TypeV128 {
+		c.callGC(wasm.GCArraySet, ref, index, c.gcToI64(v))
+		return
+	}
+	lo, hi := c.gcSplitWords(v)
+	c.callGC(wasm.GCArraySet, ref, index, lo)
+	c.callGC(wasm.GCArraySet, ref, index, hi, c.gcConst(2))
+}
+
+// emitGCSafepoint emits the loop-header poll of the collector's pause flag. The flag is a word in the
+// execution context that the collector writes, so the common path is one load and one not-taken branch.
+func (c *Compiler) emitGCSafepoint(builder ssa.Builder) {
+	pause := builder.AllocateInstruction().
+		AsLoad(c.execCtxPtrValue, nativeapi.ExecutionContextOffsetGCPause.U32(), ssa.TypeI32).
+		Insert(builder).Return()
+	zero := builder.AllocateInstruction().AsIconst32(0).Insert(builder).Return()
+	paused := builder.AllocateInstruction().
+		AsIcmp(pause, zero, ssa.IntegerCmpCondNotEqual).Insert(builder).Return()
+
+	parkBlk := builder.AllocateBasicBlock()
+	afterBlk := builder.AllocateBasicBlock()
+	builder.AllocateInstruction().AsBrnz(paused, ssa.ValuesNil, parkBlk).Insert(builder)
+	builder.AllocateInstruction().AsJump(ssa.ValuesNil, afterBlk).Insert(builder)
+
+	builder.SetCurrentBlock(parkBlk)
+	c.storeCallerModuleContext()
+	ptr := builder.AllocateInstruction().
+		AsLoad(c.execCtxPtrValue, nativeapi.ExecutionContextOffsetGCSafepointTrampolineAddress.U32(), ssa.TypeI64).
+		Insert(builder).Return()
+	args := c.allocateVarLengthValues(1, c.execCtxPtrValue)
+	builder.AllocateInstruction().AsCallIndirect(ptr, &c.gcSafepointSig, args).Insert(builder)
+	builder.AllocateInstruction().AsJump(ssa.ValuesNil, afterBlk).Insert(builder)
+	builder.Seal(parkBlk)
+
+	builder.SetCurrentBlock(afterBlk)
+	builder.Seal(afterBlk)
 }

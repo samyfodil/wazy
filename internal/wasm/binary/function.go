@@ -148,5 +148,6 @@ func decodeAggregateBody(enabledFeatures api.CoreFeatures, buf []byte, offset in
 		fields[i] = wasm.FieldType{Type: st, Mutable: mut == 1}
 	}
 	ret.Fields = fields
+	ret.CacheFieldSlots()
 	return offset, nil
 }

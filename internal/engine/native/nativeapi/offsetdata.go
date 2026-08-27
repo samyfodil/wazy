@@ -91,6 +91,11 @@ const (
 	// ExecutionContextOffsetGCCheckTrampolineAddress is the address of the trampoline behind ref.test,
 	// ref.cast and the subtype-aware call_indirect check. See nativeapi.ExitCodeGCCheck.
 	ExecutionContextOffsetGCCheckTrampolineAddress Offset = 1264
+	// ExecutionContextOffsetGCPause is the flag a loop header polls so a collection can stop the world: the
+	// collector writes 1 into it and compiled code calls the safepoint trampoline when it sees one.
+	ExecutionContextOffsetGCPause Offset = 1272
+	// ExecutionContextOffsetGCSafepointTrampolineAddress is the address of that trampoline.
+	ExecutionContextOffsetGCSafepointTrampolineAddress Offset = 1280
 )
 
 // ModuleContextOffsetData allows the compilers to get the information about offsets to the fields of native.moduleContextOpaque,

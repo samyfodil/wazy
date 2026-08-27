@@ -53,6 +53,10 @@ type (
 		// goroutine calling into it, not just one. sync.Pool is itself
 		// goroutine-safe, so no extra locking is needed here.
 		stackPools [stackPoolNumClasses]sync.Pool
+
+		// enabledFeatures is the runtime's feature set, kept so compilation knows whether to emit the
+		// collector's loop-header safepoint. See frontend.Compiler.SetGCEnabled.
+		enabledFeatures api.CoreFeatures
 	}
 
 	sharedFunctions struct {
@@ -91,7 +95,9 @@ type (
 		// control transfer; see (*callEngine).handleThrow.
 		throwTransferRegisterRestoreAddress *byte
 		// gcCheckAddress is the address of the GC runtime type check trampoline. See nativeapi.ExitCodeGCCheck.
-		gcCheckAddress      *byte
+		gcCheckAddress *byte
+		// gcSafepointAddress is the address of the GC safepoint trampoline.
+		gcSafepointAddress  *byte
 		listenerTrampolines listenerTrampolines
 	}
 
@@ -159,7 +165,7 @@ type sourceMap struct {
 var _ wasm.Engine = (*engine)(nil)
 
 // NewEngine returns the implementation of wasm.Engine.
-func NewEngine(ctx context.Context, _ api.CoreFeatures, fc filecache.Cache) wasm.Engine {
+func NewEngine(ctx context.Context, enabledFeatures api.CoreFeatures, fc filecache.Cache) wasm.Engine {
 	machine := newMachine()
 	be := backend.NewCompiler(ctx, machine, ssa.NewBuilder())
 	e := &engine{
@@ -169,6 +175,7 @@ func NewEngine(ctx context.Context, _ api.CoreFeatures, fc filecache.Cache) wasm
 		be:              be,
 		fileCache:       fc,
 		wazyVersion:     version.GetWazyVersion(),
+		enabledFeatures: enabledFeatures,
 	}
 	e.compileSharedFunctions()
 	return e
@@ -328,6 +335,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 	if workers := api.GetCompilationWorkers(ctx); workers <= 1 {
 		// Compile with a single goroutine.
 		fe := frontend.NewFrontendCompiler(module, ssaBuilder, &cm.offsets, ensureTermination, withListener, needSourceInfo)
+		fe.SetGCEnabled(e.enabledFeatures.IsEnabled(api.CoreFeatureGC))
 		fe.SetInterruptCheckInterval(interruptCheckInterval)
 
 		for i := range module.CodeSection {
@@ -387,6 +395,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 					module, ssaBuilder, &cm.offsets, ensureTermination, withListener, needSourceInfo).
 					WithTryTableMetadata(sharedTTM)
 				fe.SetInterruptCheckInterval(interruptCheckInterval)
+				fe.SetGCEnabled(e.enabledFeatures.IsEnabled(api.CoreFeatureGC))
 
 				for {
 					if err := ctx.Err(); err != nil {
@@ -956,7 +965,7 @@ func (e *engine) NewModuleEngine(m *wasm.Module, mi *wasm.ModuleInstance) (wasm.
 }
 
 func (e *engine) compileSharedFunctions() {
-	var sizes [14]int
+	var sizes [15]int
 	var trampolines []byte
 
 	addTrampoline := func(i int, buf []byte) {
@@ -1071,6 +1080,12 @@ func (e *engine) compileSharedFunctions() {
 			Results: []ssa.Type{ssa.TypeI64},
 		}, false))
 
+	e.be.Init()
+	addTrampoline(14,
+		e.machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeGCSafepoint, &ssa.Signature{
+			Params: []ssa.Type{ssa.TypeI64 /* exec context */},
+		}, false))
+
 	fns := &sharedFunctions{
 		executable:          mmapExecutable(trampolines),
 		listenerTrampolines: make(listenerTrampolines),
@@ -1105,6 +1120,8 @@ func (e *engine) compileSharedFunctions() {
 	fns.throwTransferRegisterRestoreAddress = &fns.executable[offset]
 	offset += sizes[12]
 	fns.gcCheckAddress = &fns.executable[offset]
+	offset += sizes[13]
+	fns.gcSafepointAddress = &fns.executable[offset]
 
 	if nativeapi.PerfMapEnabled {
 		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.memoryGrowAddress)), uint64(sizes[0]), "memory_grow_trampoline")
@@ -1121,6 +1138,7 @@ func (e *engine) compileSharedFunctions() {
 		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.tryTableLeaveAddress)), uint64(sizes[11]), "try_table_leave_trampoline")
 		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.throwTransferRegisterRestoreAddress)), uint64(sizes[12]), "throw_transfer_register_restore")
 		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.gcCheckAddress)), uint64(sizes[13]), "gc_check_trampoline")
+		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.gcSafepointAddress)), uint64(sizes[14]), "gc_safepoint_trampoline")
 	}
 
 	e.sharedFunctions = fns

@@ -325,6 +325,8 @@ func (o operationKind) String() (ret string) {
 		ret = "RefCast"
 	case operationKindGC:
 		ret = "GC"
+	case operationKindGCSafepoint:
+		ret = "GCSafepoint"
 	case operationKindTableGet:
 		ret = "TableGet"
 	case operationKindTableSet:
@@ -1191,6 +1193,10 @@ const (
 	operationKindRefTest
 	operationKindRefCast
 
+	// operationKindGCSafepoint is the poll a loop header does so a collection can stop the world. It is
+	// emitted only when the GC proposal is enabled, so nothing else ever pays for it.
+	operationKindGCSafepoint
+
 	// operationKindGC is every other instruction of the GC proposal. One Kind covers them all because the
 	// engine does not implement any of them: it pops the operands the mode wants and hands them to
 	// wasm.RunGC, which is shared with the native engine. See newOperationGC.
@@ -1321,6 +1327,7 @@ func (o unionOperation) String() string {
 		operationKindRefTest,
 		operationKindRefCast,
 		operationKindGC,
+		operationKindGCSafepoint,
 		operationKindTableGet,
 		operationKindTableSet,
 		operationKindTableSize,
@@ -2520,10 +2527,15 @@ func newOperationRefCast(target uint64) unionOperation {
 	return unionOperation{Kind: operationKindRefCast, U1: target}
 }
 
+func newOperationGCSafepoint() unionOperation {
+	return unionOperation{Kind: operationKindGCSafepoint}
+}
+
 // newOperationGC constructs the operation for one instruction of the GC proposal. U1 is the wasm.RunGC mode,
-// U2 and U3 its immediates (a type index, a field index, a segment index or an operand count, per mode).
-func newOperationGC(mode, imm1, imm2 uint64) unionOperation {
-	return unionOperation{Kind: operationKindGC, U1: mode, U2: imm1, U3: imm2}
+// U2 and U3 its immediates (a slot, a type index, a segment index or a word count, per mode), and B1 how many
+// words the value it moves occupies: two only for a vector field or element, one for everything else.
+func newOperationGC(mode, imm1, imm2 uint64, slots byte) unionOperation {
+	return unionOperation{Kind: operationKindGC, U1: mode, U2: imm1, U3: imm2, B1: slots}
 }
 
 // NewOperationTableGet constructor for unionOperation with operationKindTableGet.

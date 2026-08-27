@@ -553,6 +553,11 @@ operatorSwitch:
 		if c.ensureTermination {
 			c.emit(newOperationBuiltinFunctionCheckExitCode())
 		}
+		// A loop header is also where execution parks for a collection: a guest cannot run unboundedly
+		// without passing one, so this is what bounds how long a collection waits.
+		if c.enabledFeatures.IsEnabled(api.CoreFeatureGC) {
+			c.emit(newOperationGCSafepoint())
+		}
 	case wasm.OpcodeIf:
 		c.br.Reset(c.body[c.pc+1:])
 		bt, num, err := wasm.DecodeBlockType(c.types, c.br, c.enabledFeatures)
@@ -1792,7 +1797,7 @@ operatorSwitch:
 			newOperationTableSet(tableIndex),
 		)
 	case wasm.OpcodeRefEq:
-		c.emit(newOperationGC(wasm.GCRefEq, 0, 0))
+		c.emit(newOperationGC(wasm.GCRefEq, 0, 0, 1))
 	case wasm.OpcodeGCPrefix:
 		c.pc++
 		gcOp := c.body[c.pc]
@@ -4233,39 +4238,68 @@ func (c *compiler) compileGCInstruction(gcOp wasm.OpcodeGC) error {
 	}
 
 	// imm1 and imm2 are what the mode needs at runtime, which is not always what the instruction encodes:
-	// an array's type index, for instance, is only a validation-time fact.
+	// an array's type index, for instance, is only a validation-time fact. slots is how many words the
+	// value the instruction moves takes, which is two only for a vector field or element.
 	var imm1, imm2 uint64
+	slots := byte(1)
 	var err error
 	switch gcOp {
 	case wasm.OpcodeGCArrayLen, wasm.OpcodeGCRefI31, wasm.OpcodeGCI31GetS, wasm.OpcodeGCI31GetU:
 		// No immediates.
 
 	case wasm.OpcodeGCStructGet, wasm.OpcodeGCStructGetS, wasm.OpcodeGCStructGetU, wasm.OpcodeGCStructSet:
-		if _, err = c.readGCImmediate(); err != nil { // type index, a validation-time fact only
+		typeIndex, err := c.readGCImmediate()
+		if err != nil {
 			return err
 		}
-		if imm1, err = c.readGCImmediate(); err != nil { // field index
+		fieldIndex, err := c.readGCImmediate()
+		if err != nil {
 			return err
 		}
+		// A struct field is addressed by the word it starts at, which the type's layout fixes.
+		t := &c.types[typeIndex]
+		imm1 = uint64(t.FieldSlots[fieldIndex])
+		slots = byte(wasm.SlotsForStorageType(t.Fields[fieldIndex].Type))
 		if gcOp == wasm.OpcodeGCStructGetS {
 			imm2 = 1 // a signed read of a packed field
 		}
 
-	case wasm.OpcodeGCArrayGet, wasm.OpcodeGCArrayGetS, wasm.OpcodeGCArrayGetU, wasm.OpcodeGCArraySet:
-		if _, err = c.readGCImmediate(); err != nil { // type index, likewise
+	case wasm.OpcodeGCArrayGet, wasm.OpcodeGCArrayGetS, wasm.OpcodeGCArrayGetU, wasm.OpcodeGCArraySet,
+		wasm.OpcodeGCArrayNew, wasm.OpcodeGCArrayFill:
+		typeIndex, err := c.readGCImmediate()
+		if err != nil {
 			return err
 		}
-		if gcOp == wasm.OpcodeGCArrayGetS {
+		slots = byte(wasm.SlotsForStorageType(c.types[typeIndex].Fields[0].Type))
+		switch gcOp {
+		case wasm.OpcodeGCArrayGetS:
 			imm2 = 1
+		case wasm.OpcodeGCArrayNew:
+			imm1 = typeIndex // array.new needs the type at runtime; the accessors do not
 		}
 
 	case wasm.OpcodeGCStructNew:
-		if imm1, err = c.readGCImmediate(); err != nil {
+		typeIndex, err := c.readGCImmediate()
+		if err != nil {
 			return err
 		}
-		imm2 = uint64(len(c.types[imm1].Fields)) // how many operands to take off the stack
+		imm1 = typeIndex
+		// The operands on the stack are already the object's words, so take the whole layout.
+		imm2 = uint64(c.types[typeIndex].FieldSlots[len(c.types[typeIndex].Fields)])
 
-	case wasm.OpcodeGCArrayNewFixed, wasm.OpcodeGCArrayCopy, wasm.OpcodeGCArrayNewData,
+	case wasm.OpcodeGCArrayNewFixed:
+		typeIndex, err := c.readGCImmediate()
+		if err != nil {
+			return err
+		}
+		count, err := c.readGCImmediate()
+		if err != nil {
+			return err
+		}
+		imm1 = typeIndex
+		imm2 = count * uint64(wasm.SlotsForStorageType(c.types[typeIndex].Fields[0].Type))
+
+	case wasm.OpcodeGCArrayCopy, wasm.OpcodeGCArrayNewData,
 		wasm.OpcodeGCArrayNewElem, wasm.OpcodeGCArrayInitData, wasm.OpcodeGCArrayInitElem:
 		if imm1, err = c.readGCImmediate(); err != nil {
 			return err
@@ -4282,7 +4316,7 @@ func (c *compiler) compileGCInstruction(gcOp wasm.OpcodeGC) error {
 
 	// Every reader above leaves pc one past the last immediate; the caller's loop advances it again.
 	c.pc--
-	c.emit(newOperationGC(mode, imm1, imm2))
+	c.emit(newOperationGC(mode, imm1, imm2, slots))
 	return nil
 }
 

@@ -1822,24 +1822,41 @@ The ceiling is a Go round trip per instruction. Nothing here is on a hot path
 yet, and inlining the common shapes -- a struct field load, an i31 test -- is a
 contained change once a profile asks for it.
 
-**Reclamation is still open, and until it lands this leaks.** Entries in
-`Store.GC` are held until the store closes, exactly as `ExceptionTable` does; a
-program that allocates in a loop grows that table without bound. The hard part
-is not allocation but where a live reference can be found. The design to build
-is a conservative scan: every wasm value stack word and local is treated as a
-possible handle, and a word that merely looks like one retains an object that is
-actually dead. That is sound for a non-moving collector, needs no stack maps and
-costs nothing on the hot path, which matters because the native engine's whole
-point is not paying for bookkeeping. The roots outside the stacks -- reference
-typed globals, tables, and the fields of reachable objects -- are already
-Go-visible. The interpreter could be precise, since it knows which slots are
-reference-typed, but there is no reason to write two collectors before one is
-proven.
+**Reclamation scans stacks conservatively, and stops the world to do it.** The
+question a collector has to answer is where a live reference can be. Four of the
+five places are Go data structures the collector walks directly: reference-typed
+globals, reference-typed tables, the fields of reachable objects, and the
+parameter/result buffer of a call in flight. The fifth is a wasm value stack,
+which is a `[]uint64` (or, in the native engine, a `[]byte`) with no runtime type
+information -- so it is scanned conservatively. Every word that looks like a live
+handle keeps that object alive whether or not it really is one. That is sound for
+a non-moving collector, and it needs no stack maps, which is what keeps the cost
+off the hot path entirely: the native engine's whole point is not paying for
+bookkeeping.
 
-**Not yet supported: a `v128` struct field or array element.** `GCObject.Fields`
-is one `uint64` per field, which every other storage type fits in. No test in
-the GC suite uses one, and the native engine panics rather than silently
-truncating.
+Two things make that safe. Handles carry the generation of the slot they name, so
+a word left behind by an earlier call names a generation that no longer exists
+and matches nothing -- which is also what lets slots be reused rather than growing
+without bound. And a stack is only ever read while it is not being written to: a
+collection asks every call in flight to park, waits for all of them, marks,
+sweeps, and lets them go. The parking points are ones execution already passes
+through -- every loop header, and every host call, which is where an execution
+that is blocked outside wasm makes itself scannable. A guest cannot outrun a
+collection except by looping without a back edge, which no loop does.
+
+Nothing collects in the middle of an instruction: allocation only *asks* for a
+collection, and whichever execution reaches a parking point first runs it, where
+its own stack is stable too. The loop-header poll is one load and a not-taken
+branch, and it is emitted only when the GC proposal is enabled -- codegen for
+every other module is byte-identical to what it was before any of this landed.
+
+**A vector field takes two words.** Every other storage type fits in a
+`GCObject`'s single word; `v128` does not, so `FunctionType.FieldSlots` lays a
+struct out in words rather than fields and an array's elements are strided. The
+instructions that move one make two calls into the runtime, since a reference-
+sized result cannot carry a vector. Nothing in the WebAssembly/gc conformance
+suite declares such a field -- it is the corner where that suite and the SIMD
+proposal meet -- so `internal/integration_test/gc` covers it directly.
 
 ## Compiler engine implementation
 

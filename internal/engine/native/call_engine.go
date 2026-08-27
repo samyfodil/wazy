@@ -2,6 +2,7 @@ package native
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"runtime"
 	"sync/atomic"
@@ -47,6 +48,11 @@ type (
 		execCtxPtr        uintptr
 		numberOfResults   int
 		stackIteratorImpl stackIterator
+		// gcExec is this call's registration with the store's collector, nil unless the GC proposal is on.
+		gcExec *wasm.GCExecution
+		// gcParams is the caller's parameter/result slice, which holds live references for the duration of
+		// the call and so is a root alongside the wasm stack.
+		gcParams []uint64
 		// activeCatchScopes is the stack of currently-open try_table (with
 		// catch clauses) activations, pushed/popped 1:1 by
 		// ExitCodeTryTableEnter/Leave exactly as tryHandlers was before,
@@ -266,6 +272,12 @@ type (
 		// gcCheckTrampolineAddress holds the address of the GC runtime type check trampoline. It is last in
 		// this struct because the offsets in nativeapi are hand-maintained and additions go at the end.
 		gcCheckTrampolineAddress *byte
+		// gcPause is the flag loop headers poll: non-zero means a collection is waiting for this call to
+		// park. The collector writes it; see wasm.GCExecution.
+		gcPause uint32
+		_       uint32 // padding, so the next field keeps its eight-byte offset
+		// gcSafepointTrampolineAddress holds the address of the safepoint trampoline.
+		gcSafepointTrampolineAddress *byte
 	}
 )
 
@@ -442,6 +454,15 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 	snapshotEnabled := expctxkeys.SnapshotterEnabled.Load() && ctx.Value(expctxkeys.EnableSnapshotterKey{}) != nil
 	if snapshotEnabled {
 		ctx = context.WithValue(ctx, expctxkeys.SnapshotterKey{}, c)
+	}
+
+	if c.parent.parent.parent.enabledFeatures.IsEnabled(api.CoreFeatureGC) {
+		c.gcParams = paramResultStack
+		c.gcExec = c.parent.module.RegisterGCExecution(c, &c.execCtx.gcPause)
+		defer func() {
+			c.gcExec.Unregister()
+			c.gcExec, c.gcParams = nil, nil
+		}()
 	}
 
 	if nativeapi.StackGuardCheckEnabled {
@@ -650,11 +671,16 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			index := nativeapi.GoFunctionIndexFromExitCode(ec)
 			f := hostModuleGoFuncFromOpaque[api.GoFunction](index, c.execCtx.goFunctionCallCalleeModuleContextOpaque)
 			stack := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
+			// A host function can block for as long as it likes, and this call's wasm stack does not move
+			// while it does, so this is a parking point too: otherwise a collection would wait on an
+			// execution that is never going to reach a loop header.
+			resume := c.gcExec.EnterGo()
 			if snapshotEnabled {
 				callGoFunctionWithSnapshotRecover(c, ctx, f, stack)
 			} else {
 				f.Call(ctx, stack)
 			}
+			resume()
 			// Back to the native code.
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
@@ -670,12 +696,14 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			hostModule := hostModuleFromOpaque(c.execCtx.goFunctionCallCalleeModuleContextOpaque)
 			def := hostModule.FunctionDefinition(wasm.Index(index))
 			listener.Before(ctx, callerModule, def, s, c.stackIterator(true))
-			// Call into the Go function.
+			// Call into the Go function. As above, this is a parking point.
+			resume := c.gcExec.EnterGo()
 			if snapshotEnabled {
 				callGoFunctionWithSnapshotRecover(c, ctx, f, s)
 			} else {
 				f.Call(ctx, s)
 			}
+			resume()
 			// Call Listener.After.
 			listener.After(ctx, callerModule, def, s)
 			// Back to the native code.
@@ -687,11 +715,14 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			f := hostModuleGoFuncFromOpaque[api.GoModuleFunction](index, c.execCtx.goFunctionCallCalleeModuleContextOpaque)
 			mod := c.callerModuleInstance()
 			stack := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
+			// A host function can block for as long as it likes; see ExitCodeCallGoFunction above.
+			resume := c.gcExec.EnterGo()
 			if snapshotEnabled {
 				callGoModuleFunctionWithSnapshotRecover(c, ctx, f, mod, stack)
 			} else {
 				f.Call(ctx, mod, stack)
 			}
+			resume()
 			// Back to the native code.
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
@@ -707,12 +738,14 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			hostModule := hostModuleFromOpaque(c.execCtx.goFunctionCallCalleeModuleContextOpaque)
 			def := hostModule.FunctionDefinition(wasm.Index(index))
 			listener.Before(ctx, callerModule, def, s, c.stackIterator(true))
-			// Call into the Go function.
+			// Call into the Go function. As above, this is a parking point.
+			resume := c.gcExec.EnterGo()
 			if snapshotEnabled {
 				callGoModuleFunctionWithSnapshotRecover(c, ctx, f, callerModule, s)
 			} else {
 				f.Call(ctx, callerModule, s)
 			}
+			resume()
 			// Call Listener.After.
 			listener.After(ctx, callerModule, def, s)
 			// Back to the native code.
@@ -755,6 +788,11 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			funcIndex := wasm.Index(s[0])
 			ref := mod.Engine.FunctionInstanceReference(funcIndex)
 			s[0] = uint64(ref)
+			c.execCtx.exitCode = nativeapi.ExitCodeOK
+			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
+				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
+		case nativeapi.ExitCodeGCSafepoint:
+			c.gcExec.Safepoint()
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
@@ -1421,4 +1459,24 @@ func callGoFunctionWithSnapshotRecover(c *callEngine, ctx context.Context, f api
 func callGoModuleFunctionWithSnapshotRecover(c *callEngine, ctx context.Context, f api.GoModuleFunction, mod api.Module, stack []uint64) {
 	defer snapshotRecoverFn(c)
 	f.Call(ctx, mod, stack)
+}
+
+// ScanGCRoots implements wasm.GCRoots. The wasm stack is a flat byte buffer with no runtime type information,
+// so the whole of it is offered to the collector one word at a time, along with the callee-saved registers the
+// Go-call sequence spilled into the execution context and the caller's parameter/result slice. Together those
+// are every place a live reference can be while this call is parked: a value the register allocator kept in a
+// caller-saved register is spilled to the wasm stack before any call, and a callee-saved one is either in
+// savedRegisters or in the frame of whichever function preserved it.
+func (c *callEngine) ScanGCRoots(visit func(uint64)) {
+	stack := c.stack
+	for i := 0; i+8 <= len(stack); i += 8 {
+		visit(binary.LittleEndian.Uint64(stack[i:]))
+	}
+	for i := range c.execCtx.savedRegisters {
+		visit(c.execCtx.savedRegisters[i][0])
+		visit(c.execCtx.savedRegisters[i][1])
+	}
+	for _, v := range c.gcParams {
+		visit(v)
+	}
 }

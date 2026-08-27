@@ -32,7 +32,7 @@ func TestI31Encoding(t *testing.T) {
 
 func TestGCHeapRefTags(t *testing.T) {
 	var h GCHeap
-	ref := h.Alloc(&GCObject{Type: &FunctionType{CompositeKind: CompositeKindStruct}})
+	ref, _ := h.Alloc(&GCObject{Type: &FunctionType{CompositeKind: CompositeKindStruct}})
 	require.True(t, IsGCHeapRef(ref))
 	require.False(t, IsI31(ref))
 	require.NotEqual(t, GCRefNull, ref)
@@ -47,7 +47,7 @@ func TestGCHeapRefTags(t *testing.T) {
 func TestGCHeapDeref(t *testing.T) {
 	var h GCHeap
 	o := &GCObject{Type: &FunctionType{CompositeKind: CompositeKindStruct}, TypeID: 7}
-	ref := h.Alloc(o)
+	ref, _ := h.Alloc(o)
 	require.Equal(t, o, h.Deref(ref))
 
 	id, ok := h.TypeIDOf(ref)

@@ -87,6 +87,9 @@ type (
 		// the same reason Exceptions is. See GCHeap.
 		GC GCHeap
 
+		// gc is the stop-the-world handshake that reclaims what GC hands out. See gcController.
+		gc gcController
+
 		// functionMaxTypes represents the limit on the number of function types in a store.
 		// Note: this is fixed to 2^27 but have this a field for testability.
 		functionMaxTypes uint32

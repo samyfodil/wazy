@@ -99,6 +99,9 @@ func TestDecodeDefinedType_GC(t *testing.T) {
 			offset, err := decodeDefinedType(gcFeatures, tc.input, 0, &valueTypeArena{}, &actual)
 			require.NoError(t, err)
 			require.Equal(t, len(tc.input), offset)
+			// The decoder lays out the object's words as it reads the fields; do the same to the fixture
+			// so these can stay plain literals.
+			tc.expected.CacheFieldSlots()
 			require.Equal(t, tc.expected, actual)
 		})
 	}
