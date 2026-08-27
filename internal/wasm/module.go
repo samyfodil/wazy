@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -1105,13 +1106,17 @@ func (f *FunctionType) buildKey() string {
 	if f.RecGroupSize > 1 {
 		fmt.Fprintf(&sb, "|rec%d/%d", f.RecGroupPosition, f.RecGroupSize)
 	}
-	f.writeGCKeySuffix(&sb)
+	f.writeCompositeKey(&sb, strconv.FormatUint(uint64(f.Supertype), 10), ValueTypeName)
 	return sb.String()
 }
 
-// writeGCKeySuffix appends the parts of a key that only a GC type can have. It writes nothing at all for a
-// plain final function type, so pre-GC keys keep their exact historical spelling.
-func (f *FunctionType) writeGCKeySuffix(sb *strings.Builder) {
+// writeCompositeKey appends the parts of a key that only a GC type can have: the composite kind and its
+// fields, the supertype, and whether the type is extensible. It writes nothing at all for a plain final
+// function type, so pre-GC keys keep their exact historical spelling.
+//
+// super is how the supertype should be spelled -- a local index for a module-local key, a FunctionTypeID for
+// the store-wide one -- and fieldName likewise renders a field's type. See structuralTypeKey.
+func (f *FunctionType) writeCompositeKey(sb *strings.Builder, super string, fieldName func(ValueType) string) {
 	if f.CompositeKind != CompositeKindFunc {
 		sb.WriteByte('|')
 		if f.CompositeKind == CompositeKindStruct {
@@ -1124,11 +1129,12 @@ func (f *FunctionType) writeGCKeySuffix(sb *strings.Builder) {
 			if fd.Mutable {
 				sb.WriteString("mut ")
 			}
-			sb.WriteString(ValueTypeName(fd.Type))
+			sb.WriteString(fieldName(fd.Type))
 		}
 	}
 	if f.HasSupertype {
-		fmt.Fprintf(sb, "|sub%d", f.Supertype)
+		sb.WriteString("|sub")
+		sb.WriteString(super)
 	}
 	if f.Extensible {
 		sb.WriteString("|open")

@@ -167,10 +167,10 @@ typed_function_references_wast_files := \
 spectest_gc_dir := $(spectest_base_dir)/gc
 spectest_gc_testdata_dir := $(spectest_gc_dir)/testdata
 spec_version_gc := 756060f5816c7e2159f4817fbdee76cf52f9c923
-# Only the type-level files so far: the rest of test/core/gc needs the 0xfb
-# instructions, which are not implemented yet. type-subtyping.wast is held back
-# with them because it uses ref.test/ref.cast.
-gc_wast_files := type-canon.wast type-equivalence.wast type-rec.wast type-subtyping-invalid.wast
+# The type-level files. The rest of test/core/gc needs the struct, array and
+# i31 instructions, which are not implemented yet.
+gc_wast_files := type-canon.wast type-equivalence.wast type-rec.wast \
+	type-subtyping.wast type-subtyping-invalid.wast
 
 .PHONY: build.spectest
 build.spectest:

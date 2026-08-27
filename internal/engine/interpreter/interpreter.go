@@ -382,6 +382,14 @@ type function struct {
 	parent         *compiledFunction
 }
 
+// typeMatches reports whether f may be reached through a call_indirect declaring expected. Under the GC
+// proposal a function whose type is a *subtype* of the declared one matches, so equality is no longer the
+// whole rule -- but it is still the answer for every module that declares no subtype relation, so the walk
+// only runs once the cheap check has failed.
+func (f *function) typeMatches(expected wasm.FunctionTypeID) bool {
+	return f.typeID == expected || f.moduleInstance.TypeIDIsSubtypeOf(f.typeID, expected)
+}
+
 // functionFromUintptr resurrects the original *function from the given uintptr
 // which comes from either funcref table or OpcodeRefFunc instruction.
 func functionFromUintptr(ptr uintptr) *function {
@@ -935,6 +943,11 @@ func (e *moduleEngine) ResolveImportedMemory(index, indexInImportedModule wasm.I
 // DoneInstantiation implements wasm.ModuleEngine.
 func (e *moduleEngine) DoneInstantiation() {}
 
+// TypeIDOfReference implements the same method as documented on wasm.ModuleEngine.
+func (e *moduleEngine) TypeIDOfReference(ref wasm.Reference) wasm.FunctionTypeID {
+	return functionFromUintptr(uintptr(ref)).typeID
+}
+
 // FunctionInstanceReference implements the same method as documented on wasm.ModuleEngine.
 func (e *moduleEngine) FunctionInstanceReference(funcIndex wasm.Index) wasm.Reference {
 	return uintptr(unsafe.Pointer(&e.functions[funcIndex]))
@@ -959,7 +972,7 @@ func (e *moduleEngine) LookupFunction(t *wasm.TableInstance, typeId wasm.Functio
 	}
 
 	tf := functionFromUintptr(rawPtr)
-	if tf.typeID != typeId {
+	if !tf.typeMatches(typeId) {
 		panic(wasmruntime.ErrRuntimeIndirectCallTypeMismatch)
 	}
 	return tf.moduleInstance, tf.parent.index
@@ -2705,6 +2718,13 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		}
 	case operationKindRefFunc:
 		ce.pushValue(uint64(uintptr(unsafe.Pointer(&functions[op.U1]))))
+	case operationKindRefTest:
+		ref := ce.popValue()
+		ce.pushValue(wasm.RunGCCheck(ce.f.moduleInstance, ref, op.U1, wasm.GCCheckRefTest))
+	case operationKindRefCast:
+		// The value stays on the stack: a successful cast only narrows its static type, and a failed one
+		// traps inside RunGCCheck.
+		wasm.RunGCCheck(ce.f.moduleInstance, ce.stack[len(ce.stack)-1], op.U1, wasm.GCCheckRefCast)
 	case operationKindTableGet:
 		table := tables[op.U1]
 
@@ -5300,7 +5320,7 @@ func (ce *callEngine) functionForOffset(table *wasm.TableInstance, offset uint64
 	}
 
 	tf := functionFromUintptr(rawPtr)
-	if tf.typeID != expectedTypeID {
+	if !tf.typeMatches(expectedTypeID) {
 		panic(wasmruntime.ErrRuntimeIndirectCallTypeMismatch)
 	}
 	return tf

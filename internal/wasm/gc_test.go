@@ -5,6 +5,7 @@ import (
 
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/wasmruntime"
 )
 
 func structType(fields ...FieldType) FunctionType {
@@ -422,4 +423,220 @@ func TestFunctionTypeKeyDistinguishesGCTypes(t *testing.T) {
 	// A plain function type keeps its historical key spelling exactly.
 	ft := FunctionType{Params: []ValueType{ValueTypeI32}}
 	require.Equal(t, "i32_v", ft.String())
+}
+
+func TestHierarchyTop(t *testing.T) {
+	types := []FunctionType{structType(), arrayType(FieldType{Type: ValueTypeI32}), {}}
+	CanonicalizeTypes(types)
+	for _, tc := range []struct {
+		vt   ValueType
+		want ValueType
+	}{
+		{ValueTypeAnyref, ValueTypeAnyref},
+		{ValueTypeEqref, ValueTypeAnyref},
+		{ValueTypeI31ref, ValueTypeAnyref},
+		{ValueTypeStructref, ValueTypeAnyref},
+		{ValueTypeArrayref, ValueTypeAnyref},
+		{ValueTypeNullref, ValueTypeAnyref},
+		{ValueTypeFuncref, ValueTypeFuncref},
+		{ValueTypeNullFuncref, ValueTypeFuncref},
+		{ValueTypeExternref, ValueTypeExternref},
+		{ValueTypeNullExternref, ValueTypeExternref},
+		{ValueTypeExnref, ValueTypeExnref},
+		{ValueTypeNullExnref, ValueTypeExnref},
+		{ValueTypeConcreteRef(0, true), ValueTypeAnyref},  // struct
+		{ValueTypeConcreteRef(1, true), ValueTypeAnyref},  // array
+		{ValueTypeConcreteRef(2, true), ValueTypeFuncref}, // func
+	} {
+		require.Equal(t, tc.want.Kind(), hierarchyTop(tc.vt, types), ValueTypeName(tc.vt))
+	}
+	// Without a type section a concrete ref is assumed to be a function reference.
+	require.Equal(t, ValueTypeFuncref.Kind(), hierarchyTop(ValueTypeConcreteRef(0, true), nil))
+}
+
+func TestEncodeRefTarget(t *testing.T) {
+	for _, tc := range []struct {
+		indexOrKind        uint32
+		nullable, concrete bool
+	}{
+		{0, false, false},
+		{7, true, true},
+		{uint32(ValueTypeAnyref.Kind()), true, false},
+	} {
+		d := EncodeRefTarget(tc.indexOrKind, tc.nullable, tc.concrete)
+		require.Equal(t, tc.indexOrKind, uint32(d>>2))
+		require.Equal(t, tc.nullable, d&1 != 0)
+		require.Equal(t, tc.concrete, d&2 != 0)
+	}
+}
+
+// refEngine is a ModuleEngine that only answers TypeIDOfReference, which is all a GC runtime type check on a
+// function reference needs from one.
+type refEngine struct {
+	ModuleEngine
+	typeID FunctionTypeID
+}
+
+func (e *refEngine) TypeIDOfReference(Reference) FunctionTypeID { return e.typeID }
+
+func TestRunGCCheck(t *testing.T) {
+	s := NewStore(api.CoreFeaturesV2, nil)
+	// $sup is extensible, $sub declares it as its supertype, $other is unrelated.
+	ids, err := s.GetFunctionTypeIDs([]FunctionType{
+		mkOpen(FunctionType{}),
+		mkSub(FunctionType{}, 0),
+		{Params: []ValueType{ValueTypeI32}},
+	})
+	require.NoError(t, err)
+	sup, sub, other := ids[0], ids[1], ids[2]
+	require.NotEqual(t, sup, sub)
+
+	m := &ModuleInstance{s: s, TypeIDs: ids, Engine: &refEngine{typeID: sub}}
+	const someRef = uint64(0x1234)
+
+	t.Run("ref.test on a concrete target", func(t *testing.T) {
+		require.Equal(t, uint64(1), RunGCCheck(m, someRef, EncodeRefTarget(1, false, true), GCCheckRefTest))
+		require.Equal(t, uint64(1), RunGCCheck(m, someRef, EncodeRefTarget(0, false, true), GCCheckRefTest))
+		require.Equal(t, uint64(0), RunGCCheck(m, someRef, EncodeRefTarget(2, false, true), GCCheckRefTest))
+	})
+
+	t.Run("null is of exactly the nullable types", func(t *testing.T) {
+		require.Equal(t, uint64(1), RunGCCheck(m, 0, EncodeRefTarget(0, true, true), GCCheckRefTest))
+		require.Equal(t, uint64(0), RunGCCheck(m, 0, EncodeRefTarget(0, false, true), GCCheckRefTest))
+	})
+
+	t.Run("abstract targets", func(t *testing.T) {
+		top := EncodeRefTarget(uint32(ValueTypeFuncref.Kind()), false, false)
+		require.Equal(t, uint64(1), RunGCCheck(m, someRef, top, GCCheckRefTest))
+		bottom := EncodeRefTarget(uint32(ValueTypeNullFuncref.Kind()), false, false)
+		require.Equal(t, uint64(0), RunGCCheck(m, someRef, bottom, GCCheckRefTest))
+	})
+
+	t.Run("an out of range type index matches nothing", func(t *testing.T) {
+		require.Equal(t, uint64(0), RunGCCheck(m, someRef, EncodeRefTarget(99, false, true), GCCheckRefTest))
+	})
+
+	t.Run("ref.cast traps instead of returning zero", func(t *testing.T) {
+		require.Equal(t, uint64(1), RunGCCheck(m, someRef, EncodeRefTarget(0, false, true), GCCheckRefCast))
+		captured := requirePanic(t, func() {
+			RunGCCheck(m, someRef, EncodeRefTarget(2, false, true), GCCheckRefCast)
+		})
+		require.Equal(t, wasmruntime.ErrRuntimeCastFailure, captured)
+	})
+
+	t.Run("an indirect call accepts a subtype and traps otherwise", func(t *testing.T) {
+		require.Equal(t, uint64(0), RunGCCheck(m, uint64(sub), uint64(sup), GCCheckIndirectCall))
+		captured := requirePanic(t, func() {
+			RunGCCheck(m, uint64(sup), uint64(sub), GCCheckIndirectCall)
+		})
+		require.Equal(t, wasmruntime.ErrRuntimeIndirectCallTypeMismatch, captured)
+		captured = requirePanic(t, func() {
+			RunGCCheck(m, uint64(other), uint64(sup), GCCheckIndirectCall)
+		})
+		require.Equal(t, wasmruntime.ErrRuntimeIndirectCallTypeMismatch, captured)
+	})
+}
+
+func requirePanic(t *testing.T, f func()) (captured any) {
+	t.Helper()
+	defer func() { captured = recover() }()
+	f()
+	t.Fatal("expected a panic, but there was none")
+	return
+}
+
+func TestGetFunctionTypeIDs_RecGroupIdentity(t *testing.T) {
+	// (rec (func) (struct)) and (rec (struct) (func)) are different types even though each member looks
+	// identical in isolation, and a group whose sibling differs splits too.
+	group := func(members ...FunctionType) []FunctionType {
+		for i := range members {
+			members[i].RecGroupSize, members[i].RecGroupPosition = len(members), i
+		}
+		return members
+	}
+	s := NewStore(api.CoreFeaturesV2, nil)
+
+	a := group(FunctionType{}, structType())
+	b := group(structType(), FunctionType{})
+	c := group(FunctionType{}, structType(FieldType{Type: ValueTypeI32}))
+
+	idsA, err := s.GetFunctionTypeIDs(a)
+	require.NoError(t, err)
+	idsB, err := s.GetFunctionTypeIDs(b)
+	require.NoError(t, err)
+	idsC, err := s.GetFunctionTypeIDs(c)
+	require.NoError(t, err)
+
+	require.NotEqual(t, idsA[0], idsB[1]) // same shape, different position in the group
+	require.NotEqual(t, idsA[0], idsC[0]) // same shape, but a sibling differs
+
+	// Declaring the same group twice lands on the same IDs.
+	idsA2, err := s.GetFunctionTypeIDs(group(FunctionType{}, structType()))
+	require.NoError(t, err)
+	require.Equal(t, idsA, idsA2)
+
+	// A plain function type is still identified by its signature alone, whatever else the store has seen.
+	plain, err := s.GetFunctionTypeIDs([]FunctionType{{Params: []ValueType{ValueTypeI32}}})
+	require.NoError(t, err)
+	plain2, err := s.GetFunctionTypeIDs([]FunctionType{{Params: []ValueType{ValueTypeI32}}})
+	require.NoError(t, err)
+	require.Equal(t, plain, plain2)
+}
+
+func TestTypeIDIsSubtypeOf(t *testing.T) {
+	s := NewStore(api.CoreFeaturesV2, nil)
+	ids, err := s.GetFunctionTypeIDs([]FunctionType{
+		mkOpen(FunctionType{}),
+		mkOpen(mkSub(FunctionType{}, 0)),
+		mkSub(FunctionType{}, 1),
+		{Params: []ValueType{ValueTypeI32}},
+	})
+	require.NoError(t, err)
+
+	require.True(t, s.TypeIDIsSubtypeOf(ids[2], ids[2]))
+	require.True(t, s.TypeIDIsSubtypeOf(ids[2], ids[1]))
+	require.True(t, s.TypeIDIsSubtypeOf(ids[2], ids[0])) // two links up the chain
+	require.False(t, s.TypeIDIsSubtypeOf(ids[0], ids[2]))
+	require.False(t, s.TypeIDIsSubtypeOf(ids[2], ids[3]))
+	// An ID the store never handed out has no chain to walk.
+	require.False(t, s.TypeIDIsSubtypeOf(FunctionTypeID(1<<20), ids[0]))
+}
+
+func TestBottomKind(t *testing.T) {
+	for _, tc := range []struct {
+		kind ValueType
+		want ValueType
+		ok   bool
+	}{
+		{ValueTypeAnyref, ValueTypeNullref, true},
+		{ValueTypeStructref, ValueTypeNullref, true},
+		{ValueTypeFuncref, ValueTypeNullFuncref, true},
+		{ValueTypeExternref, ValueTypeNullExternref, true},
+		{ValueTypeExnref, ValueTypeNullExnref, true},
+		// The bottoms have none of their own, and neither do the numeric kinds.
+		{ValueTypeNullref, 0, false},
+		{ValueTypeNullFuncref, 0, false},
+		{ValueTypeI32, 0, false},
+	} {
+		got, ok := bottomKind(tc.kind.Kind())
+		require.Equal(t, tc.ok, ok, ValueTypeName(tc.kind))
+		require.Equal(t, tc.want.Kind(), got, ValueTypeName(tc.kind))
+	}
+}
+
+func TestHasConcreteRef(t *testing.T) {
+	ref := ValueTypeConcreteRef(0, true)
+	require.False(t, hasConcreteRef(&FunctionType{}))
+	require.False(t, hasConcreteRef(&FunctionType{Params: []ValueType{ValueTypeI32}, Results: []ValueType{ValueTypeFuncref}}))
+	require.True(t, hasConcreteRef(&FunctionType{Params: []ValueType{ValueTypeI32, ref}}))
+	require.True(t, hasConcreteRef(&FunctionType{Results: []ValueType{ValueTypeI32, ref}}))
+}
+
+func TestCheckFieldSubtype_PackedTypes(t *testing.T) {
+	// A packed field narrows to nothing but itself, mutable or not.
+	i8, i16 := FieldType{Type: ValueTypeI8}, FieldType{Type: ValueTypeI16}
+	require.NoError(t, checkFieldSubtype(i8, i8, nil))
+	require.EqualError(t, checkFieldSubtype(i8, i16, nil), "i8 is not a subtype of i16")
+	mutI8 := FieldType{Type: ValueTypeI8, Mutable: true}
+	require.NoError(t, checkFieldSubtype(mutI8, mutI8, nil))
 }

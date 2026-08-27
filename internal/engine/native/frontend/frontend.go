@@ -29,6 +29,7 @@ type Compiler struct {
 	checkModuleExitCodeSig ssa.Signature
 	tableGrowSig           ssa.Signature
 	refFuncSig             ssa.Signature
+	gcCheckSig             ssa.Signature
 	memmoveSig             ssa.Signature
 	ensureTermination      bool
 
@@ -397,6 +398,14 @@ func (c *Compiler) declareSignatures(listenerOn bool) {
 		Results: []ssa.Type{},
 	}
 	c.ssaBuilder.DeclareSignature(&c.tryTableLeaveSig)
+
+	c.gcCheckSig = ssa.Signature{
+		ID: c.tryTableLeaveSig.ID + 1,
+		// exec context, and the two operands plus the mode of wasm.RunGCCheck.
+		Params:  []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64},
+		Results: []ssa.Type{ssa.TypeI64},
+	}
+	c.ssaBuilder.DeclareSignature(&c.gcCheckSig)
 }
 
 // SignatureForWasmFunctionType returns the ssa.Signature for the given wasm.FunctionType.

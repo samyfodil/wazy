@@ -835,7 +835,9 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			}
 
 			table := tables[tableIndex]
-			if table.Type != RefTypeFuncref {
+			// The table only has to hold function references: with GC it may be typed at a concrete
+			// function type, or at nofunc, rather than plain funcref.
+			if hierarchyTop(table.Type, m.TypeSection) != ValueTypeFuncref.Kind() {
 				return fmt.Errorf("table is not funcref type but was %s for %s", RefTypeName(table.Type), opcodeName)
 			}
 
@@ -1913,6 +1915,46 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			}
 			valueTypeStack.pushStackLimit(len(bt.Params))
 			pc += num
+		} else if op == OpcodeGCPrefix {
+			pc++
+			gcOpcode := body[pc]
+			if err := enabledFeatures.RequireEnabled(api.CoreFeatureGC); err != nil {
+				return fmt.Errorf("%s invalid as %w", GCInstructionName(gcOpcode), err)
+			}
+			pc++
+			switch gcOpcode {
+			case OpcodeGCRefTest, OpcodeGCRefTestNull, OpcodeGCRefCast, OpcodeGCRefCastNull:
+				nullable := gcOpcode == OpcodeGCRefTestNull || gcOpcode == OpcodeGCRefCastNull
+				target, num, err := decodeHeapTypeImmediate(body[pc:], nullable, m.TypeSection)
+				if err != nil {
+					return fmt.Errorf("%s: %w", GCInstructionName(gcOpcode), err)
+				}
+				pc += num - 1
+
+				actual, err := valueTypeStack.pop()
+				if err != nil {
+					return fmt.Errorf("%s: %v", GCInstructionName(gcOpcode), err)
+				}
+				if actual != valueTypeUnknown {
+					if !isReferenceValueType(actual) {
+						return fmt.Errorf("%s: expected a reference type but was %s",
+							GCInstructionName(gcOpcode), ValueTypeName(actual))
+					}
+					// The operand and the target must share a hierarchy, else the test could never
+					// succeed and the cast could never do anything but trap.
+					if hierarchyTop(actual, m.TypeSection) != hierarchyTop(target, m.TypeSection) {
+						return fmt.Errorf("%s: %s and %s are in different type hierarchies",
+							GCInstructionName(gcOpcode), ValueTypeName(actual), ValueTypeName(target))
+					}
+				}
+				if gcOpcode == OpcodeGCRefTest || gcOpcode == OpcodeGCRefTestNull {
+					valueTypeStack.push(ValueTypeI32)
+				} else {
+					valueTypeStack.push(target)
+				}
+			default:
+				return fmt.Errorf("invalid GC instruction: %#x", gcOpcode)
+			}
 		} else if op == OpcodeAtomicPrefix {
 			pc++
 			// Atomic instructions come with two bytes where the first byte is always OpcodeAtomicPrefix,
@@ -3051,4 +3093,30 @@ func SplitCallStack(ft *FunctionType, stack []uint64) (params []uint64, results 
 		results = stack[:n]
 	}
 	return
+}
+
+// decodeHeapTypeImmediate reads the heap type immediate that ref.test and ref.cast carry, returning the
+// reference value type it denotes with the given nullability, and how many bytes it occupied.
+func decodeHeapTypeImmediate(body []byte, nullable bool, types []FunctionType) (ValueType, uint64, error) {
+	ht, num, err := leb128.LoadInt33AsInt64(body)
+	if err != nil {
+		return 0, 0, fmt.Errorf("read heap type: %w", err)
+	}
+	var vt ValueType
+	if ht < 0 {
+		abstract, ok := AbstractHeapTypeValueType(ht)
+		if !ok {
+			return 0, 0, fmt.Errorf("unknown abstract heap type: %d", ht)
+		}
+		vt = abstract
+	} else {
+		if ht >= int64(len(types)) {
+			return 0, 0, fmt.Errorf("unknown type index %d", ht)
+		}
+		vt = ValueTypeConcreteRef(uint32(ht), true)
+	}
+	if !nullable {
+		vt = vt.AsNonNullable()
+	}
+	return vt, uint64(num), nil
 }

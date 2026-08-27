@@ -49,6 +49,10 @@ const (
 	// ExitCodeTryTableLeave is an exit code for leaving a try_table block.
 	// The dispatch loop pops the most recent try handler.
 	ExitCodeTryTableLeave
+	// ExitCodeGCCheck is the shared exit code for the GC proposal's runtime type checks: ref.test,
+	// ref.cast, and the subtype-aware call_indirect check. Which one is meant is the trampoline's mode
+	// operand; see gcCheckMode.
+	ExitCodeGCCheck
 	exitCodeMax
 )
 
@@ -113,6 +117,8 @@ func (e ExitCode) String() string {
 		return "null_reference"
 	case ExitCodeTryTableEnter:
 		return "try_table_enter"
+	case ExitCodeGCCheck:
+		return "gc_check"
 	case ExitCodeTryTableLeave:
 		return "try_table_leave"
 	}

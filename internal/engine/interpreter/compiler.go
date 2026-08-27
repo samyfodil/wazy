@@ -1791,6 +1791,24 @@ operatorSwitch:
 		c.emit(
 			newOperationTableSet(tableIndex),
 		)
+	case wasm.OpcodeGCPrefix:
+		c.pc++
+		gcOp := c.body[c.pc]
+		c.pc++
+		target, num, err := decodeRefTarget(c.body[c.pc:],
+			gcOp == wasm.OpcodeGCRefTestNull || gcOp == wasm.OpcodeGCRefCastNull)
+		if err != nil {
+			return fmt.Errorf("failed to read heap type for %s: %v", wasm.GCInstructionName(gcOp), err)
+		}
+		c.pc += num - 1
+		switch gcOp {
+		case wasm.OpcodeGCRefTest, wasm.OpcodeGCRefTestNull:
+			c.emit(newOperationRefTest(target))
+		case wasm.OpcodeGCRefCast, wasm.OpcodeGCRefCastNull:
+			c.emit(newOperationRefCast(target))
+		default:
+			return fmt.Errorf("unsupported GC instruction: %#x", gcOp)
+		}
 	case wasm.OpcodeMiscPrefix:
 		c.pc++
 		// A misc opcode is encoded as an unsigned variable 32-bit integer.
@@ -4143,4 +4161,21 @@ func (c *compiler) parseCatchClause() (kind byte, tagIdx, labelIdx uint32, err e
 	}
 	c.pc += n - 1
 	return
+}
+
+// decodeRefTarget reads the heap type immediate of ref.test / ref.cast, which validation has already checked,
+// and packs it into the descriptor both engines share. See wasm.EncodeRefTarget.
+func decodeRefTarget(body []byte, nullable bool) (uint64, uint64, error) {
+	ht, num, err := leb128.LoadInt33AsInt64(body)
+	if err != nil {
+		return 0, 0, err
+	}
+	if ht < 0 {
+		abstract, ok := wasm.AbstractHeapTypeValueType(ht)
+		if !ok {
+			return 0, 0, fmt.Errorf("unknown abstract heap type: %d", ht)
+		}
+		return wasm.EncodeRefTarget(uint32(abstract.Kind()), nullable, false), uint64(num), nil
+	}
+	return wasm.EncodeRefTarget(uint32(ht), nullable, true), uint64(num), nil
 }

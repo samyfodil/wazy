@@ -2,9 +2,11 @@ package wasm
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/wasmruntime"
 )
 
 // This file holds the type system of the GC proposal: the abstract heap type lattice, subtyping over it, and
@@ -247,82 +249,183 @@ func valueTypeMatches(actual, expected ValueType, types []FunctionType) bool {
 func CanonicalizeTypes(types []FunctionType) {
 	// Keyed by rec group structure, holding the index its first member canonicalizes to.
 	interned := make(map[string]Index, len(types))
-	var sb strings.Builder
+	outside := func(idx Index) string {
+		if def := typeAt(types, idx); def != nil {
+			return "#" + strconv.FormatUint(uint64(def.CanonicalIndex), 10)
+		}
+		return "?" + strconv.FormatUint(uint64(idx), 10)
+	}
+	ForEachRecGroup(types, func(start, end int) {
+		key := RecGroupKey(types, start, end, outside)
+		canonStart, ok := interned[key]
+		if !ok {
+			canonStart = Index(start)
+			interned[key] = canonStart
+		}
+		for i := start; i < end; i++ {
+			types[i].CanonicalIndex = canonStart + Index(i-start)
+		}
+	})
+}
+
+// ForEachRecGroup calls f with the [start, end) bounds of each rec group in a type section. A type not
+// declared inside `rec` is its own group of one.
+func ForEachRecGroup(types []FunctionType, f func(start, end int)) {
 	for start := 0; start < len(types); {
 		n := types[start].RecGroupSize
 		if n < 1 {
 			n = 1
 		}
 		end := min(start+n, len(types))
-
-		sb.Reset()
-		for i := start; i < end; i++ {
-			writeCanonicalType(&sb, types, i, start, end)
-			sb.WriteByte(';')
-		}
-		canonStart, ok := interned[sb.String()]
-		if !ok {
-			canonStart = Index(start)
-			interned[sb.String()] = canonStart
-		}
-		for i := start; i < end; i++ {
-			types[i].CanonicalIndex = canonStart + Index(i-start)
-		}
+		f(start, end)
 		start = end
 	}
 }
 
-func writeCanonicalType(sb *strings.Builder, types []FunctionType, i, start, end int) {
-	t := &types[i]
-	fmt.Fprintf(sb, "k%d", t.CompositeKind)
-	if t.Extensible {
-		sb.WriteString("|open")
-	}
-	if t.HasSupertype {
-		sb.WriteString("|sub")
-		writeCanonicalTypeRef(sb, types, t.Supertype, start, end)
-	}
-	for _, p := range t.Params {
-		sb.WriteByte(' ')
-		writeCanonicalValueType(sb, types, p, start, end)
-	}
-	sb.WriteByte('_')
-	for _, r := range t.Results {
-		sb.WriteByte(' ')
-		writeCanonicalValueType(sb, types, r, start, end)
-	}
-	for _, f := range t.Fields {
-		sb.WriteByte(' ')
-		if f.Mutable {
-			sb.WriteString("mut")
+// RecGroupKey builds a structural key for the rec group types[start:end]. A reference to a type inside the
+// group is written by position, so the group is compared as a whole rather than by the indices it happens to
+// sit at; a reference to one outside it is written by refOutside, which decides what identity means to the
+// caller -- a canonical index within one module, or a FunctionTypeID across a store.
+//
+// Keying the group and not the member is the whole point: two function types can be identical in isolation and
+// still be different types because a sibling in their rec group differs.
+func RecGroupKey(types []FunctionType, start, end int, refOutside func(Index) string) string {
+	var sb strings.Builder
+	ref := func(idx Index) string {
+		if int(idx) >= start && int(idx) < end {
+			return "@" + strconv.Itoa(int(idx)-start)
 		}
-		writeCanonicalValueType(sb, types, f.Type, start, end)
+		return refOutside(idx)
+	}
+	valueType := func(vt ValueType) string {
+		if !vt.IsConcreteRef() {
+			return ValueTypeName(vt)
+		}
+		if vt.IsNullable() {
+			return "null" + ref(vt.TypeIndex())
+		}
+		return ref(vt.TypeIndex())
+	}
+	for i := start; i < end; i++ {
+		t := &types[i]
+		fmt.Fprintf(&sb, "k%d", t.CompositeKind)
+		for _, p := range t.Params {
+			sb.WriteByte(' ')
+			sb.WriteString(valueType(p))
+		}
+		sb.WriteByte('_')
+		for _, r := range t.Results {
+			sb.WriteByte(' ')
+			sb.WriteString(valueType(r))
+		}
+		super := "none"
+		if t.HasSupertype {
+			super = ref(t.Supertype)
+		}
+		t.writeCompositeKey(&sb, super, valueType)
+		sb.WriteByte(';')
+	}
+	return sb.String()
+}
+
+// hierarchyTop returns the top heap type of the hierarchy a value type belongs to: any, func, extern or exn.
+// Every reference type has exactly one, which is what makes "are these two in the same hierarchy" -- the
+// condition ref.test and ref.cast validate against -- a single comparison.
+func hierarchyTop(vt ValueType, types []FunctionType) byte {
+	kind := vt.Kind()
+	if vt.IsConcreteRef() {
+		kind = ValueTypeFuncref.Kind()
+		if def := typeAt(types, vt.TypeIndex()); def != nil {
+			kind = concreteTop(def.CompositeKind)
+		}
+	}
+	switch kind {
+	case ValueTypeNullref.Kind(), ValueTypeEqref.Kind(), ValueTypeI31ref.Kind(),
+		ValueTypeStructref.Kind(), ValueTypeArrayref.Kind():
+		return ValueTypeAnyref.Kind()
+	case ValueTypeNullFuncref.Kind():
+		return ValueTypeFuncref.Kind()
+	case ValueTypeNullExternref.Kind():
+		return ValueTypeExternref.Kind()
+	case ValueTypeNullExnref.Kind():
+		return ValueTypeExnref.Kind()
+	}
+	return kind
+}
+
+// The modes of RunGCCheck, which both engines route the GC proposal's runtime type checks through.
+const (
+	// GCCheckRefTest answers ref.test: a is the reference, b its target descriptor, and the result is 0 or 1.
+	GCCheckRefTest uint64 = iota
+	// GCCheckRefCast answers ref.cast: same operands, but a failure traps instead of returning 0.
+	GCCheckRefCast
+	// GCCheckIndirectCall answers the call_indirect type check for a module that declares a subtype
+	// relation: a is the callee's FunctionTypeID and b the declared one, and a mismatch traps.
+	GCCheckIndirectCall
+)
+
+// EncodeRefTarget packs the target of ref.test / ref.cast into the descriptor RunGCCheck expects: the type
+// index of a concrete target, or the kind byte of an abstract one, plus the two flags.
+func EncodeRefTarget(indexOrKind uint32, nullable, concrete bool) uint64 {
+	d := uint64(indexOrKind) << 2
+	if nullable {
+		d |= 1
+	}
+	if concrete {
+		d |= 2
+	}
+	return d
+}
+
+// RunGCCheck performs one GC runtime type check on behalf of an engine. It panics with the matching trap when
+// a ref.cast or an indirect call fails, so a caller only has to look at the result for GCCheckRefTest.
+//
+// It lives here rather than in either engine because both need exactly this, and because the answer depends on
+// store-wide type identity (see Store.TypeIDIsSubtypeOf) that neither engine owns.
+func RunGCCheck(m *ModuleInstance, a, b, mode uint64) uint64 {
+	switch mode {
+	case GCCheckIndirectCall:
+		if !m.TypeIDIsSubtypeOf(FunctionTypeID(a), FunctionTypeID(b)) {
+			panic(wasmruntime.ErrRuntimeIndirectCallTypeMismatch)
+		}
+		return 0
+	default:
+		ok := m.refMatchesTarget(a, b)
+		if mode == GCCheckRefCast && !ok {
+			panic(wasmruntime.ErrRuntimeCastFailure)
+		}
+		if ok {
+			return 1
+		}
+		return 0
 	}
 }
 
-func writeCanonicalValueType(sb *strings.Builder, types []FunctionType, vt ValueType, start, end int) {
-	if !vt.IsConcreteRef() {
-		sb.WriteString(ValueTypeName(vt))
-		return
+// refMatchesTarget reports whether the reference value ref -- zero for null, otherwise the engine's opaque
+// representation of a funcref or externref -- is of the type the descriptor names. See EncodeRefTarget.
+//
+// Validation has already established that the operand and the target share a hierarchy, which is what lets the
+// concrete case resolve ref as a function: a value reaching a concrete or func target is either null or a
+// function reference, never an externref's raw pointer.
+func (m *ModuleInstance) refMatchesTarget(ref, desc uint64) bool {
+	nullable, concrete := desc&1 != 0, desc&2 != 0
+	if ref == 0 {
+		return nullable // null is of every nullable reference type in its hierarchy, and of no other.
 	}
-	if vt.IsNullable() {
-		sb.WriteString("null")
+	if concrete {
+		idx := Index(desc >> 2)
+		if indexOutOfRange(idx, len(m.TypeIDs)) {
+			return false
+		}
+		return m.TypeIDIsSubtypeOf(m.Engine.TypeIDOfReference(Reference(ref)), m.TypeIDs[idx])
 	}
-	writeCanonicalTypeRef(sb, types, vt.TypeIndex(), start, end)
-}
-
-// writeCanonicalTypeRef writes a reference to type index idx: by position when it points inside the rec group
-// being keyed (so a group is compared as a whole, not by the indices it happens to sit at), and by the target's
-// already-assigned canonical index otherwise. Groups are keyed in order and references may only point backwards
-// or inside the group, so the canonical index of an outside target is always known by the time it is read.
-func writeCanonicalTypeRef(sb *strings.Builder, types []FunctionType, idx Index, start, end int) {
-	if int(idx) >= start && int(idx) < end {
-		fmt.Fprintf(sb, "@%d", int(idx)-start)
-		return
+	switch ValueType(desc >> 2) {
+	case ValueTypeFuncref, ValueTypeExternref, ValueTypeExnref:
+		// The tops match anything non-null in their own hierarchy, and validation kept the others out.
+		return true
+	default:
+		// The bottoms (nofunc, noextern, noexn, none) hold nothing but null, and no non-null value in the any
+		// hierarchy can exist until struct, array and i31 do.
+		return false
 	}
-	if def := typeAt(types, idx); def != nil {
-		fmt.Fprintf(sb, "#%d", def.CanonicalIndex)
-		return
-	}
-	fmt.Fprintf(sb, "?%d", idx)
 }

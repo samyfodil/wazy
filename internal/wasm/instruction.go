@@ -1,5 +1,7 @@
 package wasm
 
+import "fmt"
+
 // Opcode is the binary Opcode of an instruction. See also InstructionName
 type Opcode = byte
 
@@ -320,7 +322,41 @@ const (
 	// OpcodeAtomicPrefix is the prefix of all atomic instructions introduced in
 	// CoreFeatureThreads.
 	OpcodeAtomicPrefix Opcode = 0xfe
+
+	// OpcodeGCPrefix is the prefix of all instructions introduced in CoreFeatureGC.
+	OpcodeGCPrefix Opcode = 0xfb
 )
+
+// OpcodeGC represents opcodes of the garbage collection proposal. Such an operation has a multi-byte encoding
+// prefixed by OpcodeGCPrefix.
+type OpcodeGC = byte
+
+const (
+	OpcodeGCRefTest     OpcodeGC = 20
+	OpcodeGCRefTestNull OpcodeGC = 21
+	OpcodeGCRefCast     OpcodeGC = 22
+	OpcodeGCRefCastNull OpcodeGC = 23
+
+	OpcodeGCRefTestName     = "ref.test"
+	OpcodeGCRefTestNullName = "ref.test null"
+	OpcodeGCRefCastName     = "ref.cast"
+	OpcodeGCRefCastNullName = "ref.cast null"
+)
+
+// GCInstructionName returns the name of the instruction prefixed by OpcodeGCPrefix.
+func GCInstructionName(oc OpcodeGC) string {
+	switch oc {
+	case OpcodeGCRefTest:
+		return OpcodeGCRefTestName
+	case OpcodeGCRefTestNull:
+		return OpcodeGCRefTestNullName
+	case OpcodeGCRefCast:
+		return OpcodeGCRefCastName
+	case OpcodeGCRefCastNull:
+		return OpcodeGCRefCastNullName
+	}
+	return fmt.Sprintf("gc(0x%x)", oc)
+}
 
 // OpcodeMisc represents opcodes of the miscellaneous operations.
 // Such an operations has multi-byte encoding which is prefixed by OpcodeMiscPrefix.

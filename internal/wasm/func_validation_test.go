@@ -5358,3 +5358,117 @@ func TestModule_ValidateFunction_Table64(t *testing.T) {
 		require.Error(t, validate(t, append(i32Const(0), OpcodeCallIndirect, 0x00, 0x01)))
 	})
 }
+
+func TestModule_ValidateFunction_RefTestCast(t *testing.T) {
+	const gc = api.CoreFeaturesV2 | api.CoreFeatureTypedFunctionReferences | api.CoreFeatureGC
+
+	// type[0] is an extensible func type, type[1] its subtype, type[2] a struct.
+	types := []FunctionType{
+		mkOpen(FunctionType{}),
+		mkSub(FunctionType{}, 0),
+		structType(),
+	}
+
+	// A heap type immediate is a signed LEB128: negative for an abstract type, the index otherwise.
+	abstract := leb128.EncodeInt64
+	index := leb128.EncodeInt64
+
+	tests := []struct {
+		name        string
+		body        []byte
+		features    api.CoreFeatures
+		expectedErr string
+	}{
+		{
+			name: "ref.test on a funcref pushes an i32",
+			body: cat([]byte{OpcodeRefNull, ValueTypeFuncref.Kind(), OpcodeGCPrefix, OpcodeGCRefTest},
+				index(0), []byte{OpcodeDrop, OpcodeEnd}),
+		},
+		{
+			name: "ref.cast leaves a reference, which drop consumes",
+			body: cat([]byte{OpcodeRefNull, ValueTypeFuncref.Kind(), OpcodeGCPrefix, OpcodeGCRefCastNull},
+				index(1), []byte{OpcodeDrop, OpcodeEnd}),
+		},
+		{
+			name: "ref.test on an abstract target",
+			body: cat([]byte{OpcodeRefNull, ValueTypeFuncref.Kind(), OpcodeGCPrefix, OpcodeGCRefTestNull},
+				abstract(HeapTypeNoFunc), []byte{OpcodeDrop, OpcodeEnd}),
+		},
+		{
+			name: "gc must be enabled",
+			body: cat([]byte{OpcodeRefNull, ValueTypeFuncref.Kind(), OpcodeGCPrefix, OpcodeGCRefTest},
+				index(0), []byte{OpcodeDrop, OpcodeEnd}),
+			features:    api.CoreFeaturesV2 | api.CoreFeatureTypedFunctionReferences,
+			expectedErr: `ref.test invalid as feature "gc" is disabled`,
+		},
+		{
+			name:        "unknown GC instruction",
+			body:        []byte{OpcodeGCPrefix, 0xff, OpcodeEnd},
+			expectedErr: "invalid GC instruction: 0xff",
+		},
+		{
+			name: "unknown type index",
+			body: cat([]byte{OpcodeRefNull, ValueTypeFuncref.Kind(), OpcodeGCPrefix, OpcodeGCRefTest},
+				index(9), []byte{OpcodeDrop, OpcodeEnd}),
+			expectedErr: "ref.test: unknown type index 9",
+		},
+		{
+			name: "unknown abstract heap type",
+			body: cat([]byte{OpcodeRefNull, ValueTypeFuncref.Kind(), OpcodeGCPrefix, OpcodeGCRefTest},
+				abstract(-11), []byte{OpcodeDrop, OpcodeEnd}),
+			expectedErr: "ref.test: unknown abstract heap type: -11",
+		},
+		{
+			name:        "the operand must be a reference",
+			body:        cat([]byte{OpcodeI32Const, 0, OpcodeGCPrefix, OpcodeGCRefTest}, index(0), []byte{OpcodeDrop, OpcodeEnd}),
+			expectedErr: "ref.test: expected a reference type but was i32",
+		},
+		{
+			name:        "the operand must exist",
+			body:        cat([]byte{OpcodeGCPrefix, OpcodeGCRefTest}, index(0), []byte{OpcodeDrop, OpcodeEnd}),
+			expectedErr: "ref.test: invalid operation: trying to pop at 0 with limit 0",
+		},
+		{
+			name: "the operand and the target must share a hierarchy",
+			body: cat([]byte{OpcodeRefNull, ValueTypeExternref.Kind(), OpcodeGCPrefix, OpcodeGCRefTest},
+				index(0), []byte{OpcodeDrop, OpcodeEnd}),
+			expectedErr: "ref.test: externref and (ref 0) are in different type hierarchies",
+		},
+		{
+			name: "a struct target is in the any hierarchy, not func",
+			body: cat([]byte{OpcodeRefNull, ValueTypeFuncref.Kind(), OpcodeGCPrefix, OpcodeGCRefTest},
+				index(2), []byte{OpcodeDrop, OpcodeEnd}),
+			expectedErr: "ref.test: funcref and (ref 2) are in different type hierarchies",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			features := tc.features
+			if features == 0 {
+				features = gc
+			}
+			m := &Module{
+				TypeSection:     append([]FunctionType(nil), types...),
+				FunctionSection: []Index{0},
+				CodeSection:     []Code{{Body: tc.body}},
+			}
+			CanonicalizeTypes(m.TypeSection)
+			err := m.validateFunctionWithMaxStackValues(&stacks{}, features,
+				0, []Index{0}, nil, nil, nil, nil, 100, nil, bytes.NewReader(nil))
+			if tc.expectedErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.EqualError(t, err, tc.expectedErr)
+			}
+		})
+	}
+}
+
+func cat(parts ...[]byte) []byte {
+	var ret []byte
+	for _, p := range parts {
+		ret = append(ret, p...)
+	}
+	return ret
+}

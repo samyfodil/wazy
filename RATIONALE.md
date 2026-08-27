@@ -1727,8 +1727,9 @@ to tell the permitted answers apart.
 The [GC proposal](https://github.com/WebAssembly/gc) adds struct and array types
 on a managed heap. What has landed so far is the type system: composite types,
 the `sub`/`sub final` subtype relation, the nine new abstract heap types and
-their lattice, and iso-recursive canonicalization. Instructions and the heap
-itself have not.
+their lattice, iso-recursive canonicalization, and the two instructions that ask
+about a type at runtime -- `ref.test` and `ref.cast`. The heap itself, and the
+instructions that allocate on it, have not.
 
 **Composite types live on `FunctionType`.** A GC defined type is a function, a
 struct or an array, so the obvious move is a new sum type for the type section.
@@ -1763,6 +1764,32 @@ suite found immediately: a type's key was cached before its rec group fields
 were set, so every member of a rec group keyed identically to a standalone type
 with the same signature; and a standalone type could not reference itself, which
 GC allows because a bare type is its own rec group of one.
+
+**Subtyping reaches runtime, so a type ID is not just an equality.** `call_indirect`
+succeeds when the callee's type is a *subtype* of the declared one, and a function
+import links when the export's type is a subtype of the declared import type. Both
+compared `FunctionTypeID`s for equality before. The relation lives in the store,
+because the two IDs can come from different modules where a type index means
+nothing, and `Store.typeSupers` records each ID's declared supertype as it is
+interned. Every check keeps its equality fast path -- which is still the answer for
+every module that declares no subtype relation -- and only walks the chain when
+that fails.
+
+Making the store's IDs correct meant keying whole rec groups, not single types.
+Two function types can be identical in isolation and still be different types
+because a sibling in their rec group differs, which `type-subtyping.wast` checks
+directly. `RecGroupKey` builds that key once and both callers use it: module-local
+canonicalization spells an out-of-group reference as a canonical index, and the
+store spells it as a `FunctionTypeID`.
+
+**`ref.test` and `ref.cast` call into Go, from both engines.** The answer needs
+store-wide type identity, which compiled code cannot reach and which the
+interpreter would otherwise duplicate, so `wasm.RunGCCheck` is the one
+implementation and each engine supplies `TypeIDOfReference` to say what its own
+funcref representation is. In the native engine that is a trampoline call, and the
+subtype-aware `call_indirect` check goes through the same one -- but only for a
+module that actually declares a subtype relation. Every other module keeps the
+inline compare it always had, so nothing that exists today pays for this.
 
 **Where the roots are is still open.** Reclamation, not allocation, is the hard
 part, and the question a design has to answer is where a live reference can be

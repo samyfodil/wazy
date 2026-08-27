@@ -88,6 +88,9 @@ const (
 	// runtime (rather than baking it as a constant) so the amortized-check
 	// frequency can be retuned per run/per loop without recompiling.
 	ExecutionContextOffsetInterruptCheckMask Offset = 1256
+	// ExecutionContextOffsetGCCheckTrampolineAddress is the address of the trampoline behind ref.test,
+	// ref.cast and the subtype-aware call_indirect check. See nativeapi.ExitCodeGCCheck.
+	ExecutionContextOffsetGCCheckTrampolineAddress Offset = 1264
 )
 
 // ModuleContextOffsetData allows the compilers to get the information about offsets to the fields of native.moduleContextOpaque,

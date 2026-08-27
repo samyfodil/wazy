@@ -90,7 +90,9 @@ type (
 		// native.executionContext.savedRegisters as part of a throw-time
 		// control transfer; see (*callEngine).handleThrow.
 		throwTransferRegisterRestoreAddress *byte
-		listenerTrampolines                 listenerTrampolines
+		// gcCheckAddress is the address of the GC runtime type check trampoline. See nativeapi.ExitCodeGCCheck.
+		gcCheckAddress      *byte
+		listenerTrampolines listenerTrampolines
 	}
 
 	listenerTrampolines = map[*wasm.FunctionType]struct {
@@ -954,7 +956,7 @@ func (e *engine) NewModuleEngine(m *wasm.Module, mi *wasm.ModuleInstance) (wasm.
 }
 
 func (e *engine) compileSharedFunctions() {
-	var sizes [13]int
+	var sizes [14]int
 	var trampolines []byte
 
 	addTrampoline := func(i int, buf []byte) {
@@ -1059,6 +1061,14 @@ func (e *engine) compileSharedFunctions() {
 	e.be.Init()
 	addTrampoline(12, e.machine.CompileThrowTransferRegisterRestore())
 
+	e.be.Init()
+	addTrampoline(13,
+		e.machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeGCCheck, &ssa.Signature{
+			// exec context, and the three operands of a GC runtime type check: see gcCheckSig.
+			Params:  []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64},
+			Results: []ssa.Type{ssa.TypeI64},
+		}, false))
+
 	fns := &sharedFunctions{
 		executable:          mmapExecutable(trampolines),
 		listenerTrampolines: make(listenerTrampolines),
@@ -1091,6 +1101,8 @@ func (e *engine) compileSharedFunctions() {
 	fns.tryTableLeaveAddress = &fns.executable[offset]
 	offset += sizes[11]
 	fns.throwTransferRegisterRestoreAddress = &fns.executable[offset]
+	offset += sizes[12]
+	fns.gcCheckAddress = &fns.executable[offset]
 
 	if nativeapi.PerfMapEnabled {
 		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.memoryGrowAddress)), uint64(sizes[0]), "memory_grow_trampoline")
@@ -1106,6 +1118,7 @@ func (e *engine) compileSharedFunctions() {
 		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.tryTableEnterAddress)), uint64(sizes[10]), "try_table_enter_trampoline")
 		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.tryTableLeaveAddress)), uint64(sizes[11]), "try_table_leave_trampoline")
 		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.throwTransferRegisterRestoreAddress)), uint64(sizes[12]), "throw_transfer_register_restore")
+		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.gcCheckAddress)), uint64(sizes[13]), "gc_check_trampoline")
 	}
 
 	e.sharedFunctions = fns

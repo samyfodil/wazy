@@ -828,6 +828,17 @@ func (c *compiler) wasmOpcodeSignature(op wasm.Opcode, index uint32) (*signature
 		default:
 			return nil, fmt.Errorf("unsupported atomic instruction in interpreterir: %s", wasm.AtomicInstructionName(atomicOp))
 		}
+	case wasm.OpcodeGCPrefix:
+		gcOp := c.body[c.pc+1]
+		switch gcOp {
+		case wasm.OpcodeGCRefTest, wasm.OpcodeGCRefTestNull:
+			// A reference is an opaque i64 here, as everywhere else in this engine.
+			return signature_I64_I32, nil
+		case wasm.OpcodeGCRefCast, wasm.OpcodeGCRefCastNull:
+			return signature_I64_I64, nil
+		default:
+			return nil, fmt.Errorf("unsupported GC instruction in interpreterir: %s", wasm.GCInstructionName(gcOp))
+		}
 	default:
 		return nil, fmt.Errorf("unsupported instruction in interpreterir: 0x%x", op)
 	}

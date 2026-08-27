@@ -232,6 +232,7 @@ func (m *moduleEngine) NewFunction(index wasm.Index) api.Function {
 	ce.execCtx.throwAllocTrampolineAddress = sharedFunctions.throwAllocTrampolineAddress
 	ce.execCtx.throwTrampolineAddress = sharedFunctions.throwTrampolineAddress
 	ce.execCtx.tryTableEnterTrampolineAddress = sharedFunctions.tryTableEnterAddress
+	ce.execCtx.gcCheckTrampolineAddress = sharedFunctions.gcCheckAddress
 	ce.execCtx.tryTableLeaveTrampolineAddress = sharedFunctions.tryTableLeaveAddress
 	ce.execCtx.memmoveAddress = memmovPtr
 	ce.init()
@@ -337,6 +338,12 @@ func (m *moduleEngine) DoneInstantiation() {
 	if !m.module.Source.IsHostModule {
 		m.setupOpaque()
 	}
+}
+
+// TypeIDOfReference implements wasm.ModuleEngine. A funcref is the address of the callee's functionInstance
+// in some module's opaque context, so its type is a plain field read.
+func (m *moduleEngine) TypeIDOfReference(ref wasm.Reference) wasm.FunctionTypeID {
+	return nativeapi.PtrFromUintptr[functionInstance](uintptr(ref)).typeID
 }
 
 // FunctionInstanceReference implements wasm.ModuleEngine.

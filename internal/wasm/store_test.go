@@ -477,6 +477,9 @@ func (e *mockModuleEngine) SetGlobalValue(idx Index, lo, hi uint64) { panic("BUG
 // OwnsGlobals implements the same method as documented on wasm.ModuleEngine.
 func (e *mockModuleEngine) OwnsGlobals() bool { return false }
 
+// TypeIDOfReference implements the same method as documented on wasm.ModuleEngine.
+func (e *mockModuleEngine) TypeIDOfReference(Reference) FunctionTypeID { panic("BUG") }
+
 // MemoryGrown implements the same method as documented on wasm.ModuleEngine.
 func (e *mockModuleEngine) MemoryGrown(Index) { e.memoryGrown++ }
 

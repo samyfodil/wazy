@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/bits"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/samyfodil/wazy/api"
@@ -3573,6 +3574,33 @@ func (c *Compiler) lowerCurrentOpcode() {
 		default:
 			panic("TODO: unsupported atomic instruction: " + wasm.AtomicInstructionName(atomicOp))
 		}
+	case wasm.OpcodeGCPrefix:
+		gcOp := c.wasmFunctionBody[c.loweringState.pc+1]
+		c.loweringState.pc++
+		nullable := gcOp == wasm.OpcodeGCRefTestNull || gcOp == wasm.OpcodeGCRefCastNull
+		heapType := c.readI33s()
+		if state.unreachable {
+			break
+		}
+		target, ok := encodeRefTarget(heapType, nullable)
+		if !ok {
+			panic("BUG: validation should have rejected heap type " + strconv.FormatInt(heapType, 10))
+		}
+		isCast := gcOp == wasm.OpcodeGCRefCast || gcOp == wasm.OpcodeGCRefCastNull
+		mode := wasm.GCCheckRefTest
+		if isCast {
+			mode = wasm.GCCheckRefCast
+		}
+		// ref.cast keeps its operand: a successful cast only narrows the static type, and a failed one
+		// traps inside the trampoline.
+		ref := state.pop()
+		result := c.callGCCheck(ref, builder.AllocateInstruction().AsIconst64(target).Insert(builder).Return(), mode)
+		if isCast {
+			state.push(ref)
+		} else {
+			state.push(builder.AllocateInstruction().AsIreduce(result, ssa.TypeI32).Insert(builder).Return())
+		}
+
 	case wasm.OpcodeRefFunc:
 		funcIndex := c.readI32u()
 		if state.unreachable {
@@ -4302,13 +4330,24 @@ func (c *Compiler) prepareCallIndirect(typeIndex, tableIndex uint32) (ssa.Value,
 	builder.InsertInstruction(loadExpectedTypeID)
 	expectedTypeID := loadExpectedTypeID.Return()
 
-	// Check if the type ID matches.
-	checkTypeID := builder.AllocateInstruction()
-	checkTypeID.AsIcmp(actualTypeID, expectedTypeID, ssa.IntegerCmpCondNotEqual)
-	builder.InsertInstruction(checkTypeID)
-	exitIfNotMatch := builder.AllocateInstruction()
-	exitIfNotMatch.AsExitIfTrueWithCode(c.execCtxPtrValue, checkTypeID.Return(), nativeapi.ExitCodeIndirectCallTypeMismatch)
-	builder.InsertInstruction(exitIfNotMatch)
+	// Check if the type ID matches. Under the GC proposal a callee whose type is a *subtype* of the declared
+	// one also matches, and deciding that needs store-wide type identity which compiled code cannot reach --
+	// so a module that declares any subtype relation asks Go instead. Every module that declares none, which
+	// is every pre-GC module, keeps the inline compare it always had.
+	if c.moduleDeclaresSubtypes() {
+		c.callGCCheck(
+			builder.AllocateInstruction().AsUExtend(actualTypeID, 32, 64).Insert(builder).Return(),
+			builder.AllocateInstruction().AsUExtend(expectedTypeID, 32, 64).Insert(builder).Return(),
+			wasm.GCCheckIndirectCall,
+		)
+	} else {
+		checkTypeID := builder.AllocateInstruction()
+		checkTypeID.AsIcmp(actualTypeID, expectedTypeID, ssa.IntegerCmpCondNotEqual)
+		builder.InsertInstruction(checkTypeID)
+		exitIfNotMatch := builder.AllocateInstruction()
+		exitIfNotMatch.AsExitIfTrueWithCode(c.execCtxPtrValue, checkTypeID.Return(), nativeapi.ExitCodeIndirectCallTypeMismatch)
+		builder.InsertInstruction(exitIfNotMatch)
+	}
 
 	// Now ready to call the function. Load the executable and moduleContextOpaquePtr from the function instance.
 	loadExecutablePtr := builder.AllocateInstruction()
@@ -5406,6 +5445,56 @@ func (c *Compiler) readI32s() int32 {
 	}
 	c.loweringState.pc += int(n)
 	return v
+}
+
+// readI33s reads the signed 33-bit LEB128 a heap type immediate is encoded as.
+func (c *Compiler) readI33s() int64 {
+	v, n, err := leb128.LoadInt33AsInt64(c.wasmFunctionBody[c.loweringState.pc+1:])
+	if err != nil {
+		panic(err) // shouldn't be reached since compilation comes after validation.
+	}
+	c.loweringState.pc += int(n)
+	return v
+}
+
+// moduleDeclaresSubtypes reports whether any type in the module being compiled takes part in a declared
+// subtype relation, which is what makes call_indirect's type check more than an equality.
+func (c *Compiler) moduleDeclaresSubtypes() bool {
+	for i := range c.m.TypeSection {
+		if c.m.TypeSection[i].HasSupertype || c.m.TypeSection[i].Extensible {
+			return true
+		}
+	}
+	return false
+}
+
+// encodeRefTarget turns a decoded heap type immediate into the descriptor wasm.RunGCCheck expects.
+func encodeRefTarget(heapType int64, nullable bool) (uint64, bool) {
+	if heapType < 0 {
+		abstract, ok := wasm.AbstractHeapTypeValueType(heapType)
+		if !ok {
+			return 0, false
+		}
+		return wasm.EncodeRefTarget(uint32(abstract.Kind()), nullable, false), true
+	}
+	return wasm.EncodeRefTarget(uint32(heapType), nullable, true), true
+}
+
+// callGCCheck emits a call to the trampoline behind the GC proposal's runtime type checks, returning its
+// result. See wasm.RunGCCheck for what the operands mean per mode.
+//
+// ponytail: a Go round trip per check. ref.test and ref.cast are not on any hot path today, and the answer
+// needs store-wide type identity that compiled code cannot reach; inlining a supertype display into the
+// function instance is the upgrade if a profile ever asks for it.
+func (c *Compiler) callGCCheck(a, b ssa.Value, mode uint64) ssa.Value {
+	builder := c.ssaBuilder
+	c.storeCallerModuleContext()
+	ptr := builder.AllocateInstruction().
+		AsLoad(c.execCtxPtrValue, nativeapi.ExecutionContextOffsetGCCheckTrampolineAddress.U32(), ssa.TypeI64).
+		Insert(builder).Return()
+	modeVal := builder.AllocateInstruction().AsIconst64(mode).Insert(builder).Return()
+	args := c.allocateVarLengthValues(4, c.execCtxPtrValue, a, b, modeVal)
+	return builder.AllocateInstruction().AsCallIndirect(ptr, &c.gcCheckSig, args).Insert(builder).Return()
 }
 
 func (c *Compiler) readI64s() int64 {
