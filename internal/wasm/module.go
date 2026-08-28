@@ -358,8 +358,14 @@ func (m *Module) validateBeforeFunctionBodies(enabledFeatures api.CoreFeatures) 
 	for i := range m.TypeSection {
 		tp := &m.TypeSection[i]
 		tp.CacheNumInUint64()
+		tp.CanonicalIndex = Index(i)
 	}
-	CanonicalizeTypes(m.TypeSection)
+	// Canonicalization only decides anything for a concrete reference, which cannot exist without one of
+	// these two proposals -- and it costs a map and a key per rec group, which every module before them
+	// would otherwise pay on a path that used to be free.
+	if enabledFeatures.IsEnabled(api.CoreFeatureTypedFunctionReferences | api.CoreFeatureGC) {
+		CanonicalizeTypes(m.TypeSection)
+	}
 
 	if err = m.validateConcreteRefTypes(); err != nil {
 		return

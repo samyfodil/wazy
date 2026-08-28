@@ -49,10 +49,10 @@ type (
 		numberOfResults   int
 		stackIteratorImpl stackIterator
 		// gcExec is this call's registration with the store's collector, nil unless the GC proposal is on.
+		//
+		// Nothing else about the collector lives here: this struct is allocated per call and sits just under
+		// a Go size class boundary, so every field added to it costs a whole class.
 		gcExec *wasm.GCExecution
-		// gcParams is the caller's parameter/result slice, which holds live references for the duration of
-		// the call and so is a root alongside the wasm stack.
-		gcParams []uint64
 		// activeCatchScopes is the stack of currently-open try_table (with
 		// catch clauses) activations, pushed/popped 1:1 by
 		// ExitCodeTryTableEnter/Leave exactly as tryHandlers was before,
@@ -175,6 +175,9 @@ type (
 	executionContext struct {
 		// exitCode holds the nativeapi.ExitCode describing the state of the function execution.
 		exitCode nativeapi.ExitCode
+		// gcPause is the flag loop headers poll: non-zero means a collection is waiting for this call to
+		// park. It lives in the padding after exitCode, so it costs nothing. See ExecutionContextOffsetGCPause.
+		gcPause uint32
 		// callerModuleContextPtr holds the moduleContextOpaque for Go function calls.
 		callerModuleContextPtr *byte
 		// originalFramePointer holds the original frame pointer of the caller of the assembly function.
@@ -272,12 +275,6 @@ type (
 		// gcCheckTrampolineAddress holds the address of the GC runtime type check trampoline. It is last in
 		// this struct because the offsets in nativeapi are hand-maintained and additions go at the end.
 		gcCheckTrampolineAddress *byte
-		// gcPause is the flag loop headers poll: non-zero means a collection is waiting for this call to
-		// park. The collector writes it; see wasm.GCExecution.
-		gcPause uint32
-		_       uint32 // padding, so the next field keeps its eight-byte offset
-		// gcSafepointTrampolineAddress holds the address of the safepoint trampoline.
-		gcSafepointTrampolineAddress *byte
 	}
 )
 
@@ -456,12 +453,11 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		ctx = context.WithValue(ctx, expctxkeys.SnapshotterKey{}, c)
 	}
 
-	if c.parent.parent.parent.enabledFeatures.IsEnabled(api.CoreFeatureGC) {
-		c.gcParams = paramResultStack
+	if c.parent.gcEnabled {
 		c.gcExec = c.parent.module.RegisterGCExecution(c, &c.execCtx.gcPause)
 		defer func() {
 			c.gcExec.Unregister()
-			c.gcExec, c.gcParams = nil, nil
+			c.gcExec = nil
 		}()
 	}
 
@@ -674,13 +670,13 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			// A host function can block for as long as it likes, and this call's wasm stack does not move
 			// while it does, so this is a parking point too: otherwise a collection would wait on an
 			// execution that is never going to reach a loop header.
-			resume := c.gcExec.EnterGo()
+			c.gcExec.EnterGo()
 			if snapshotEnabled {
 				callGoFunctionWithSnapshotRecover(c, ctx, f, stack)
 			} else {
 				f.Call(ctx, stack)
 			}
-			resume()
+			c.gcExec.LeaveGo()
 			// Back to the native code.
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
@@ -697,13 +693,13 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			def := hostModule.FunctionDefinition(wasm.Index(index))
 			listener.Before(ctx, callerModule, def, s, c.stackIterator(true))
 			// Call into the Go function. As above, this is a parking point.
-			resume := c.gcExec.EnterGo()
+			c.gcExec.EnterGo()
 			if snapshotEnabled {
 				callGoFunctionWithSnapshotRecover(c, ctx, f, s)
 			} else {
 				f.Call(ctx, s)
 			}
-			resume()
+			c.gcExec.LeaveGo()
 			// Call Listener.After.
 			listener.After(ctx, callerModule, def, s)
 			// Back to the native code.
@@ -716,13 +712,13 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			mod := c.callerModuleInstance()
 			stack := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
 			// A host function can block for as long as it likes; see ExitCodeCallGoFunction above.
-			resume := c.gcExec.EnterGo()
+			c.gcExec.EnterGo()
 			if snapshotEnabled {
 				callGoModuleFunctionWithSnapshotRecover(c, ctx, f, mod, stack)
 			} else {
 				f.Call(ctx, mod, stack)
 			}
-			resume()
+			c.gcExec.LeaveGo()
 			// Back to the native code.
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
@@ -739,13 +735,13 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			def := hostModule.FunctionDefinition(wasm.Index(index))
 			listener.Before(ctx, callerModule, def, s, c.stackIterator(true))
 			// Call into the Go function. As above, this is a parking point.
-			resume := c.gcExec.EnterGo()
+			c.gcExec.EnterGo()
 			if snapshotEnabled {
 				callGoModuleFunctionWithSnapshotRecover(c, ctx, f, callerModule, s)
 			} else {
 				f.Call(ctx, callerModule, s)
 			}
-			resume()
+			c.gcExec.LeaveGo()
 			// Call Listener.After.
 			listener.After(ctx, callerModule, def, s)
 			// Back to the native code.
@@ -791,17 +787,20 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
-		case nativeapi.ExitCodeGCSafepoint:
-			c.gcExec.Safepoint()
-			c.execCtx.exitCode = nativeapi.ExitCodeOK
-			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
-				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case nativeapi.ExitCodeGCCheck:
 			mod := c.callerModuleInstance()
 			s := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
-			// The native engine never uses the variadic forms directly: struct.new and array.new_fixed are
-			// lowered as an allocation followed by one set per operand, so there is no scratch area.
-			s[0] = wasm.RunGC(mod, s[0], s[1], s[2], s[3], s[4], s[5], nil)
+			if s[0] == wasm.GCSafepoint {
+				// Not a type check: the collector has asked this call to park. It shares the trampoline
+				// rather than having one of its own, to keep a field out of the execution context.
+				c.gcExec.Safepoint()
+				s[0] = 0
+			} else {
+				// The native engine never uses the variadic forms directly: struct.new and
+				// array.new_fixed are lowered as an allocation followed by one set per operand, so
+				// there is no scratch area.
+				s[0] = wasm.RunGC(mod, s[0], s[1], s[2], s[3], s[4], s[5], nil)
+			}
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
@@ -1463,10 +1462,10 @@ func callGoModuleFunctionWithSnapshotRecover(c *callEngine, ctx context.Context,
 
 // ScanGCRoots implements wasm.GCRoots. The wasm stack is a flat byte buffer with no runtime type information,
 // so the whole of it is offered to the collector one word at a time, along with the callee-saved registers the
-// Go-call sequence spilled into the execution context and the caller's parameter/result slice. Together those
-// are every place a live reference can be while this call is parked: a value the register allocator kept in a
-// caller-saved register is spilled to the wasm stack before any call, and a callee-saved one is either in
-// savedRegisters or in the frame of whichever function preserved it.
+// Go-call sequence spilled into the execution context. Together those are every place a live reference can be
+// while this call is parked: a value the register allocator kept in a caller-saved register is spilled to the
+// wasm stack before any call, a callee-saved one is either in savedRegisters or in the frame of whichever
+// function preserved it, and an argument was copied into the callee's frame on entry.
 func (c *callEngine) ScanGCRoots(visit func(uint64)) {
 	stack := c.stack
 	for i := 0; i+8 <= len(stack); i += 8 {
@@ -1475,8 +1474,5 @@ func (c *callEngine) ScanGCRoots(visit func(uint64)) {
 	for i := range c.execCtx.savedRegisters {
 		visit(c.execCtx.savedRegisters[i][0])
 		visit(c.execCtx.savedRegisters[i][1])
-	}
-	for _, v := range c.gcParams {
-		visit(v)
 	}
 }

@@ -220,10 +220,10 @@ func TestCollectorEnterGo(t *testing.T) {
 	blockedRoots.set(kept)
 	f.alloc()
 
-	resume := blocked.EnterGo()
+	blocked.EnterGo()
 	f.collect() // would block forever if EnterGo did not count as parked
 	require.Equal(t, 1, f.s.GC.Live())
-	resume()
+	blocked.LeaveGo()
 	require.Equal(t, uint32(0), atomic.LoadUint32(&blockedPause))
 }
 
@@ -274,7 +274,8 @@ func TestGCExecutionNilIsInert(t *testing.T) {
 	var e *GCExecution
 	e.Safepoint()
 	e.Unregister()
-	e.EnterGo()()
+	e.EnterGo()
+	e.LeaveGo()
 }
 
 func TestStructSlotsWithoutLayout(t *testing.T) {

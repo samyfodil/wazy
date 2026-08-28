@@ -1163,14 +1163,14 @@ func (ce *callEngine) callGoFunc(ctx context.Context, m *wasm.ModuleInstance, f 
 	// A host function can block for as long as it likes, and its wasm stack does not move while it does, so
 	// this call is a parking point too. Without it a collection would wait on an execution that is never
 	// going to reach a loop header.
-	resume := ce.gcExec.EnterGo()
+	ce.gcExec.EnterGo()
 	switch fn := fn.(type) {
 	case api.GoModuleFunction:
 		fn.Call(ctx, m, stack)
 	case api.GoFunction:
 		fn.Call(ctx, stack)
 	}
-	resume()
+	ce.gcExec.LeaveGo()
 
 	ce.popFrame()
 	if lsn != nil {

@@ -6308,12 +6308,7 @@ func (c *Compiler) emitGCSafepoint(builder ssa.Builder) {
 	builder.AllocateInstruction().AsJump(ssa.ValuesNil, afterBlk).Insert(builder)
 
 	builder.SetCurrentBlock(parkBlk)
-	c.storeCallerModuleContext()
-	ptr := builder.AllocateInstruction().
-		AsLoad(c.execCtxPtrValue, nativeapi.ExecutionContextOffsetGCSafepointTrampolineAddress.U32(), ssa.TypeI64).
-		Insert(builder).Return()
-	args := c.allocateVarLengthValues(1, c.execCtxPtrValue)
-	builder.AllocateInstruction().AsCallIndirect(ptr, &c.gcSafepointSig, args).Insert(builder)
+	c.callGC(wasm.GCSafepoint)
 	builder.AllocateInstruction().AsJump(ssa.ValuesNil, afterBlk).Insert(builder)
 	builder.Seal(parkBlk)
 

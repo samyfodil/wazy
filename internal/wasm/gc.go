@@ -406,6 +406,10 @@ const (
 	GCRefI31
 	GCI31GetS
 	GCI31GetU
+	// GCSafepoint is not a type check at all: it is how the native engine's loop-header poll reaches Go,
+	// sharing the GC trampoline so the safepoint costs no field in the execution context. It never reaches
+	// RunGC -- the engine handles it before dispatching -- and exists here so both sides name one constant.
+	GCSafepoint
 )
 
 // EncodeRefTarget packs the target of ref.test / ref.cast into the descriptor RunGC expects: the type

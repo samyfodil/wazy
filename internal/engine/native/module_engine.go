@@ -25,6 +25,9 @@ type (
 		localFunctionInstances []*functionInstance
 		importedFunctions      []importedFunction
 		listeners              []api.FunctionListener
+		// gcEnabled caches whether this runtime enables the GC proposal, so the per-call check in
+		// callWithStack is one load off an already-hot pointer rather than three dependent ones.
+		gcEnabled bool
 	}
 
 	functionInstance struct {
@@ -233,7 +236,6 @@ func (m *moduleEngine) NewFunction(index wasm.Index) api.Function {
 	ce.execCtx.throwTrampolineAddress = sharedFunctions.throwTrampolineAddress
 	ce.execCtx.tryTableEnterTrampolineAddress = sharedFunctions.tryTableEnterAddress
 	ce.execCtx.gcCheckTrampolineAddress = sharedFunctions.gcCheckAddress
-	ce.execCtx.gcSafepointTrampolineAddress = sharedFunctions.gcSafepointAddress
 	ce.execCtx.tryTableLeaveTrampolineAddress = sharedFunctions.tryTableLeaveAddress
 	ce.execCtx.memmoveAddress = memmovPtr
 	ce.init()

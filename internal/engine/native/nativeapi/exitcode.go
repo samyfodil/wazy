@@ -53,8 +53,6 @@ const (
 	// ref.cast, and the subtype-aware call_indirect check. Which one is meant is the trampoline's mode
 	// operand; see gcCheckMode.
 	ExitCodeGCCheck
-	// ExitCodeGCSafepoint is the exit a loop header takes when the collector has asked this call to park.
-	ExitCodeGCSafepoint
 	exitCodeMax
 )
 
@@ -121,8 +119,6 @@ func (e ExitCode) String() string {
 		return "try_table_enter"
 	case ExitCodeGCCheck:
 		return "gc_check"
-	case ExitCodeGCSafepoint:
-		return "gc_safepoint"
 	case ExitCodeTryTableLeave:
 		return "try_table_leave"
 	}

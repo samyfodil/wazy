@@ -95,9 +95,7 @@ type (
 		// control transfer; see (*callEngine).handleThrow.
 		throwTransferRegisterRestoreAddress *byte
 		// gcCheckAddress is the address of the GC runtime type check trampoline. See nativeapi.ExitCodeGCCheck.
-		gcCheckAddress *byte
-		// gcSafepointAddress is the address of the GC safepoint trampoline.
-		gcSafepointAddress  *byte
+		gcCheckAddress      *byte
 		listenerTrampolines listenerTrampolines
 	}
 
@@ -938,7 +936,7 @@ func checkAddrInBytes(addr uintptr, b []byte) bool {
 
 // NewModuleEngine implements wasm.Engine.
 func (e *engine) NewModuleEngine(m *wasm.Module, mi *wasm.ModuleInstance) (wasm.ModuleEngine, error) {
-	me := &moduleEngine{}
+	me := &moduleEngine{gcEnabled: e.enabledFeatures.IsEnabled(api.CoreFeatureGC)}
 
 	// Note: imported functions are resolved in moduleEngine.ResolveImportedFunction.
 	me.importedFunctions = make([]importedFunction, m.ImportFunctionCount)
@@ -965,7 +963,7 @@ func (e *engine) NewModuleEngine(m *wasm.Module, mi *wasm.ModuleInstance) (wasm.
 }
 
 func (e *engine) compileSharedFunctions() {
-	var sizes [15]int
+	var sizes [14]int
 	var trampolines []byte
 
 	addTrampoline := func(i int, buf []byte) {
@@ -1080,12 +1078,6 @@ func (e *engine) compileSharedFunctions() {
 			Results: []ssa.Type{ssa.TypeI64},
 		}, false))
 
-	e.be.Init()
-	addTrampoline(14,
-		e.machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeGCSafepoint, &ssa.Signature{
-			Params: []ssa.Type{ssa.TypeI64 /* exec context */},
-		}, false))
-
 	fns := &sharedFunctions{
 		executable:          mmapExecutable(trampolines),
 		listenerTrampolines: make(listenerTrampolines),
@@ -1120,8 +1112,6 @@ func (e *engine) compileSharedFunctions() {
 	fns.throwTransferRegisterRestoreAddress = &fns.executable[offset]
 	offset += sizes[12]
 	fns.gcCheckAddress = &fns.executable[offset]
-	offset += sizes[13]
-	fns.gcSafepointAddress = &fns.executable[offset]
 
 	if nativeapi.PerfMapEnabled {
 		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.memoryGrowAddress)), uint64(sizes[0]), "memory_grow_trampoline")
@@ -1138,7 +1128,6 @@ func (e *engine) compileSharedFunctions() {
 		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.tryTableLeaveAddress)), uint64(sizes[11]), "try_table_leave_trampoline")
 		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.throwTransferRegisterRestoreAddress)), uint64(sizes[12]), "throw_transfer_register_restore")
 		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.gcCheckAddress)), uint64(sizes[13]), "gc_check_trampoline")
-		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.gcSafepointAddress)), uint64(sizes[14]), "gc_safepoint_trampoline")
 	}
 
 	e.sharedFunctions = fns

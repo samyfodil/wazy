@@ -165,26 +165,43 @@ func (g *gcController) othersParkedLocked(self *GCExecution) bool {
 
 // EnterGo marks this execution stable for the duration of a Go call made from wasm -- a host function, or
 // anything else that can block -- so a collection is never left waiting on a stack that has stopped moving
-// anyway. It returns the function that resumes.
-func (e *GCExecution) EnterGo() func() {
+// anyway. LeaveGo resumes.
+//
+// These are a pair of nil-checked methods rather than one call returning a closure because a host call is a
+// hot path: with the GC proposal off the whole thing has to fold down to a branch.
+func (e *GCExecution) EnterGo() {
 	if e == nil {
-		return func() {}
+		return
 	}
+	e.enterGoSlow()
+}
+
+func (e *GCExecution) enterGoSlow() {
 	g := &e.s.gc
 	g.mu.Lock()
+	defer g.mu.Unlock()
 	e.parked = true
 	g.cond.Broadcast()
-	g.mu.Unlock()
-	return func() {
-		g.mu.Lock()
-		defer g.mu.Unlock()
-		// Do not resume into a collection in progress: that would be a stack moving under the scan.
-		for g.collecting {
-			g.cond.Wait()
-		}
-		e.parked = false
-		atomic.StoreUint32(e.pause, 0)
+}
+
+// LeaveGo resumes an execution that EnterGo parked.
+func (e *GCExecution) LeaveGo() {
+	if e == nil {
+		return
 	}
+	e.leaveGoSlow()
+}
+
+func (e *GCExecution) leaveGoSlow() {
+	g := &e.s.gc
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	// Do not resume into a collection in progress: that would be a stack moving under the scan.
+	for g.collecting {
+		g.cond.Wait()
+	}
+	e.parked = false
+	atomic.StoreUint32(e.pause, 0)
 }
 
 // RegisterGCExecution is Store.RegisterGCExecution, reachable from the engines through a module instance.
