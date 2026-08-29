@@ -553,6 +553,11 @@ operatorSwitch:
 		if c.ensureTermination {
 			c.emit(newOperationBuiltinFunctionCheckExitCode())
 		}
+		// A loop header is also where execution parks for a collection: a guest cannot run unboundedly
+		// without passing one, so this is what bounds how long a collection waits.
+		if c.enabledFeatures.IsEnabled(api.CoreFeatureGC) {
+			c.emit(newOperationGCSafepoint())
+		}
 	case wasm.OpcodeIf:
 		c.br.Reset(c.body[c.pc+1:])
 		bt, num, err := wasm.DecodeBlockType(c.types, c.br, c.enabledFeatures)
@@ -1791,6 +1796,15 @@ operatorSwitch:
 		c.emit(
 			newOperationTableSet(tableIndex),
 		)
+	case wasm.OpcodeRefEq:
+		c.emit(newOperationGC(wasm.GCRefEq, 0, 0, 1))
+	case wasm.OpcodeGCPrefix:
+		c.pc++
+		gcOp := c.body[c.pc]
+		c.pc++
+		if err := c.compileGCInstruction(gcOp); err != nil {
+			return err
+		}
 	case wasm.OpcodeMiscPrefix:
 		c.pc++
 		// A misc opcode is encoded as an unsigned variable 32-bit integer.
@@ -4143,4 +4157,221 @@ func (c *compiler) parseCatchClause() (kind byte, tagIdx, labelIdx uint32, err e
 	}
 	c.pc += n - 1
 	return
+}
+
+// decodeRefTarget reads the heap type immediate of ref.test / ref.cast, which validation has already checked,
+// and packs it into the descriptor both engines share. See wasm.EncodeRefTarget.
+func decodeRefTarget(body []byte, nullable bool) (uint64, uint64, error) {
+	ht, num, err := leb128.LoadInt33AsInt64(body)
+	if err != nil {
+		return 0, 0, err
+	}
+	if ht < 0 {
+		abstract, ok := wasm.AbstractHeapTypeValueType(ht)
+		if !ok {
+			return 0, 0, fmt.Errorf("unknown abstract heap type: %d", ht)
+		}
+		return wasm.EncodeRefTarget(uint32(abstract.Kind()), nullable, false), uint64(num), nil
+	}
+	return wasm.EncodeRefTarget(uint32(ht), nullable, true), uint64(num), nil
+}
+
+// gcModes maps a GC opcode to the wasm.RunGC mode it becomes. The four with two forms each -- the signed and
+// unsigned reads, and the two cast tests -- share a mode and carry the difference in an immediate.
+var gcModes = map[wasm.OpcodeGC]uint64{
+	wasm.OpcodeGCStructNew:        wasm.GCStructNew,
+	wasm.OpcodeGCStructNewDefault: wasm.GCStructNewDefault,
+	wasm.OpcodeGCStructGet:        wasm.GCStructGet,
+	wasm.OpcodeGCStructGetS:       wasm.GCStructGet,
+	wasm.OpcodeGCStructGetU:       wasm.GCStructGet,
+	wasm.OpcodeGCStructSet:        wasm.GCStructSet,
+	wasm.OpcodeGCArrayNew:         wasm.GCArrayNew,
+	wasm.OpcodeGCArrayNewDefault:  wasm.GCArrayNewDefault,
+	wasm.OpcodeGCArrayNewFixed:    wasm.GCArrayNewFixed,
+	wasm.OpcodeGCArrayNewData:     wasm.GCArrayNewData,
+	wasm.OpcodeGCArrayNewElem:     wasm.GCArrayNewElem,
+	wasm.OpcodeGCArrayGet:         wasm.GCArrayGet,
+	wasm.OpcodeGCArrayGetS:        wasm.GCArrayGet,
+	wasm.OpcodeGCArrayGetU:        wasm.GCArrayGet,
+	wasm.OpcodeGCArraySet:         wasm.GCArraySet,
+	wasm.OpcodeGCArrayLen:         wasm.GCArrayLen,
+	wasm.OpcodeGCArrayFill:        wasm.GCArrayFill,
+	wasm.OpcodeGCArrayCopy:        wasm.GCArrayCopy,
+	wasm.OpcodeGCArrayInitData:    wasm.GCArrayInitData,
+	wasm.OpcodeGCArrayInitElem:    wasm.GCArrayInitElem,
+	wasm.OpcodeGCRefI31:           wasm.GCRefI31,
+	wasm.OpcodeGCI31GetS:          wasm.GCI31GetS,
+	wasm.OpcodeGCI31GetU:          wasm.GCI31GetU,
+}
+
+// compileGCInstruction emits one instruction of the GC proposal, having already read its 0xfb prefix and
+// opcode. Everything but the two casts and the two conversions becomes a single operationKindGC.
+func (c *compiler) compileGCInstruction(gcOp wasm.OpcodeGC) error {
+	switch gcOp {
+	case wasm.OpcodeGCRefTest, wasm.OpcodeGCRefTestNull, wasm.OpcodeGCRefCast, wasm.OpcodeGCRefCastNull:
+		target, num, err := decodeRefTarget(c.body[c.pc:],
+			gcOp == wasm.OpcodeGCRefTestNull || gcOp == wasm.OpcodeGCRefCastNull)
+		if err != nil {
+			return fmt.Errorf("failed to read heap type for %s: %v", wasm.GCInstructionName(gcOp), err)
+		}
+		c.pc += num - 1
+		if gcOp == wasm.OpcodeGCRefTest || gcOp == wasm.OpcodeGCRefTestNull {
+			c.emit(newOperationRefTest(target, false))
+		} else {
+			c.emit(newOperationRefCast(target))
+		}
+		return nil
+
+	case wasm.OpcodeGCBrOnCast, wasm.OpcodeGCBrOnCastFail:
+		return c.compileBrOnCast(gcOp)
+
+	case wasm.OpcodeGCAnyConvertExtern, wasm.OpcodeGCExternConvertAny:
+		// Both are bijections on the same underlying value, so there is nothing to emit: only the static
+		// type changes, and the engine carries every reference as the same opaque word.
+		c.pc--
+		return nil
+	}
+
+	mode, ok := gcModes[gcOp]
+	if !ok {
+		return fmt.Errorf("unsupported GC instruction: %s", wasm.GCInstructionName(gcOp))
+	}
+
+	// imm1 and imm2 are what the mode needs at runtime, which is not always what the instruction encodes:
+	// an array's type index, for instance, is only a validation-time fact. slots is how many words the
+	// value the instruction moves takes, which is two only for a vector field or element.
+	var imm1, imm2 uint64
+	slots := byte(1)
+	var err error
+	switch gcOp {
+	case wasm.OpcodeGCArrayLen, wasm.OpcodeGCRefI31, wasm.OpcodeGCI31GetS, wasm.OpcodeGCI31GetU:
+		// No immediates.
+
+	case wasm.OpcodeGCStructGet, wasm.OpcodeGCStructGetS, wasm.OpcodeGCStructGetU, wasm.OpcodeGCStructSet:
+		typeIndex, err := c.readGCImmediate()
+		if err != nil {
+			return err
+		}
+		fieldIndex, err := c.readGCImmediate()
+		if err != nil {
+			return err
+		}
+		// A struct field is addressed by the word it starts at, which the type's layout fixes.
+		t := &c.types[typeIndex]
+		imm1 = uint64(t.FieldSlots[fieldIndex])
+		slots = byte(wasm.SlotsForStorageType(t.Fields[fieldIndex].Type))
+		if gcOp == wasm.OpcodeGCStructGetS {
+			imm2 = 1 // a signed read of a packed field
+		}
+
+	case wasm.OpcodeGCArrayGet, wasm.OpcodeGCArrayGetS, wasm.OpcodeGCArrayGetU, wasm.OpcodeGCArraySet,
+		wasm.OpcodeGCArrayNew, wasm.OpcodeGCArrayFill:
+		typeIndex, err := c.readGCImmediate()
+		if err != nil {
+			return err
+		}
+		slots = byte(wasm.SlotsForStorageType(c.types[typeIndex].Fields[0].Type))
+		switch gcOp {
+		case wasm.OpcodeGCArrayGetS:
+			imm2 = 1
+		case wasm.OpcodeGCArrayNew:
+			imm1 = typeIndex // array.new needs the type at runtime; the accessors do not
+		}
+
+	case wasm.OpcodeGCStructNew:
+		typeIndex, err := c.readGCImmediate()
+		if err != nil {
+			return err
+		}
+		imm1 = typeIndex
+		// The operands on the stack are already the object's words, so take the whole layout.
+		imm2 = uint64(c.types[typeIndex].FieldSlots[len(c.types[typeIndex].Fields)])
+
+	case wasm.OpcodeGCArrayNewFixed:
+		typeIndex, err := c.readGCImmediate()
+		if err != nil {
+			return err
+		}
+		count, err := c.readGCImmediate()
+		if err != nil {
+			return err
+		}
+		imm1 = typeIndex
+		imm2 = count * uint64(wasm.SlotsForStorageType(c.types[typeIndex].Fields[0].Type))
+
+	case wasm.OpcodeGCArrayCopy, wasm.OpcodeGCArrayNewData,
+		wasm.OpcodeGCArrayNewElem, wasm.OpcodeGCArrayInitData, wasm.OpcodeGCArrayInitElem:
+		if imm1, err = c.readGCImmediate(); err != nil {
+			return err
+		}
+		if imm2, err = c.readGCImmediate(); err != nil {
+			return err
+		}
+
+	default:
+		if imm1, err = c.readGCImmediate(); err != nil {
+			return err
+		}
+	}
+
+	// Every reader above leaves pc one past the last immediate; the caller's loop advances it again.
+	c.pc--
+	c.emit(newOperationGC(mode, imm1, imm2, slots))
+	return nil
+}
+
+func (c *compiler) readGCImmediate() (uint64, error) {
+	v, num, err := leb128.LoadUint32(c.body[c.pc:])
+	if err != nil {
+		return 0, fmt.Errorf("failed to read GC immediate: %v", err)
+	}
+	c.pc += num
+	return uint64(v), nil
+}
+
+// compileBrOnCast emits br_on_cast and br_on_cast_fail as a peeking ref.test followed by a conditional
+// branch, which is exactly what they mean: the reference stays on the stack for whichever path is taken, and
+// only the branch condition differs between the two forms.
+func (c *compiler) compileBrOnCast(gcOp wasm.OpcodeGC) error {
+	if int(c.pc) >= len(c.body) {
+		return fmt.Errorf("%s: missing flags", wasm.GCInstructionName(gcOp))
+	}
+	flags := c.body[c.pc]
+	c.pc++
+	targetIndex, n, err := leb128.LoadUint32(c.body[c.pc:])
+	if err != nil {
+		return fmt.Errorf("read the target for %s: %w", wasm.GCInstructionName(gcOp), err)
+	}
+	c.pc += n
+	// The first heap type is what the operand already is, which only validation cares about; the second is
+	// what the test casts to.
+	_, n1, err := decodeRefTarget(c.body[c.pc:], flags&1 != 0)
+	if err != nil {
+		return fmt.Errorf("read the source type for %s: %w", wasm.GCInstructionName(gcOp), err)
+	}
+	c.pc += n1
+	castTarget, n2, err := decodeRefTarget(c.body[c.pc:], flags&2 != 0)
+	if err != nil {
+		return fmt.Errorf("read the cast type for %s: %w", wasm.GCInstructionName(gcOp), err)
+	}
+	c.pc += n2 - 1
+
+	if c.unreachableState.on {
+		return nil
+	}
+
+	targetFrame := c.controlFrames.get(int(targetIndex))
+	targetFrame.ensureContinuation()
+	drop := c.getFrameDropRange(targetFrame, false)
+	target := targetFrame.asLabel()
+
+	c.emit(newOperationRefTest(castTarget, true))
+	if gcOp == wasm.OpcodeGCBrOnCastFail {
+		// br_on_cast_fail branches on the same test failing.
+		c.emit(newOperationEqz(unsignedInt32))
+	}
+	continuationLabel := newLabel(labelKindHeader, c.nextFrameID())
+	c.emit(newOperationBrIf(target, continuationLabel, drop))
+	c.emit(newOperationLabel(continuationLabel))
+	return nil
 }

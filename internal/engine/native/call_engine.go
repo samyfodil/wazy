@@ -2,6 +2,7 @@ package native
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"runtime"
 	"sync/atomic"
@@ -47,6 +48,11 @@ type (
 		execCtxPtr        uintptr
 		numberOfResults   int
 		stackIteratorImpl stackIterator
+		// gcExec is this call's registration with the store's collector, nil unless the GC proposal is on.
+		//
+		// Nothing else about the collector lives here: this struct is allocated per call and sits just under
+		// a Go size class boundary, so every field added to it costs a whole class.
+		gcExec *wasm.GCExecution
 		// activeCatchScopes is the stack of currently-open try_table (with
 		// catch clauses) activations, pushed/popped 1:1 by
 		// ExitCodeTryTableEnter/Leave exactly as tryHandlers was before,
@@ -169,6 +175,9 @@ type (
 	executionContext struct {
 		// exitCode holds the nativeapi.ExitCode describing the state of the function execution.
 		exitCode nativeapi.ExitCode
+		// gcPause is the flag loop headers poll: non-zero means a collection is waiting for this call to
+		// park. It lives in the padding after exitCode, so it costs nothing. See ExecutionContextOffsetGCPause.
+		gcPause uint32
 		// callerModuleContextPtr holds the moduleContextOpaque for Go function calls.
 		callerModuleContextPtr *byte
 		// originalFramePointer holds the original frame pointer of the caller of the assembly function.
@@ -263,6 +272,9 @@ type (
 		// frequency can be retuned (e.g. for an observed-hot loop) without a
 		// recompile. mask==0 => check every iteration.
 		interruptCheckMask uint64
+		// gcCheckTrampolineAddress holds the address of the GC runtime type check trampoline. It is last in
+		// this struct because the offsets in nativeapi are hand-maintained and additions go at the end.
+		gcCheckTrampolineAddress *byte
 	}
 )
 
@@ -273,6 +285,7 @@ func (c *callEngine) requiredInitialStackSize() int {
 	stackSize := stackPoolBaseSize
 	paramResultInBytes := c.sizeOfParamResultSlice * 8 * 2 // * 8 because uint64 is 8 bytes, and *2 because we need both separated param/result slots.
 	required := paramResultInBytes + 32 + 16               // 32 is enough to accommodate the call frame info, and 16 exists just in case when []byte is not aligned to 16 bytes.
+	required += c.gcRootsReserve()                         // this much of the buffer is below the stack limit, so the guest never gets it.
 	if required > stackSize {
 		stackSize = required
 	}
@@ -309,7 +322,7 @@ func (c *callEngine) init() {
 		stackSize := c.requiredInitialStackSize() + nativeapi.StackGuardCheckGuardPageSize
 		c.stack = make([]byte, stackSize)
 		c.stackTop = alignedStackTop(c.stack)
-		c.execCtx.stackBottomPtr = stackCheckLimitPtr(c.stack, nativeapi.StackGuardCheckGuardPageSize)
+		c.execCtx.stackBottomPtr = c.stackCheckLimitPtr(nativeapi.StackGuardCheckGuardPageSize)
 	}
 	c.execCtxPtr = uintptr(unsafe.Pointer(&c.execCtx))
 }
@@ -332,8 +345,47 @@ func alignedStackTop(s []byte) uintptr {
 // indexing is always in range: the real buffer is >= stackPoolBaseSize
 // (10240) and only ever grows, so base+MARGIN < len(stack) always holds. See
 // the invariant proof on backend.StackBoundsCheckMarginBytes.
-func stackCheckLimitPtr(stack []byte, base int) *byte {
-	return &stack[base+backend.StackBoundsCheckMarginBytes]
+func (c *callEngine) stackCheckLimitPtr(base int) *byte {
+	reserve := c.gcRootsReserve()
+	if reserve > 0 {
+		// A stack fresh from the pool holds another call's words; clear the count so they do not read as
+		// this call's roots.
+		binary.LittleEndian.PutUint64(c.stack[base+reserve-8:], 0)
+	}
+	return &c.stack[base+reserve+backend.StackBoundsCheckMarginBytes]
+}
+
+// registerGC makes this call visible to the collector, which may then stop it and scan its stack. Only ever
+// called once this callEngine's stack is one it owns.
+func (c *callEngine) registerGC() {
+	if c.parent.gcEnabled {
+		c.gcExec = c.parent.module.RegisterGCExecution(c, &c.execCtx.gcPause)
+	}
+}
+
+func (c *callEngine) unregisterGC() {
+	if c.gcExec != nil {
+		c.gcExec.Unregister()
+		c.gcExec = nil
+	}
+}
+
+// gcRootsReserve is how many bytes at the bottom of the wasm stack are set aside for the values a safepoint
+// spills before it parks. The stack limit is biased up by this much on top of the usual margin, so the region
+// sits below everything generated code and the go-call trampoline can reach, and nothing overwrites a spill
+// while the collector is looking at it.
+//
+// Putting them here rather than in a buffer of their own costs nothing on the per-call path: no second pool to
+// draw from, and no pointer to keep in the execution context, because compiled code already holds the stack
+// limit at a fixed offset there and the region is a constant distance below it.
+//
+// The layout, from the bottom of the buffer up, is: the spilled words, then the count of them, then the go-call
+// margin, then the stack the guest actually gets.
+func (c *callEngine) gcRootsReserve() int {
+	if c.parent == nil {
+		return 0 // a callEngine built by hand in a test has no module behind it.
+	}
+	return int(c.parent.gcRootsReserve)
 }
 
 // Definition implements api.Function.
@@ -442,7 +494,10 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 	}
 
 	if nativeapi.StackGuardCheckEnabled {
+		// This build's stack is the one init() allocated and never recycles, so it is already stable to scan.
+		c.registerGC()
 		defer func() {
+			c.unregisterGC()
 			nativeapi.CheckStackGuardPage(c.stack)
 		}()
 	} else {
@@ -464,8 +519,16 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		var stackBoxed *[]byte
 		c.stack, stackBoxed = eng.acquireStack(c.requiredInitialStackSize())
 		c.stackTop = alignedStackTop(c.stack)
-		c.execCtx.stackBottomPtr = stackCheckLimitPtr(c.stack, 0)
+		c.execCtx.stackBottomPtr = c.stackCheckLimitPtr(0)
+		// Registered only now: a collection reads c.stack, so this call must own one first.
+		c.registerGC()
 		defer func() {
+			// Unregister first: a collection may call ScanGCRoots right up until it returns, and that
+			// reads c.stack -- which the release below hands to whichever call takes it out of the pool
+			// next. Doing it here rather than in a defer of its own also makes the ordering a property
+			// of the code instead of one of Go's defer order, and leaves the number of defers in this
+			// function where it was, which is what keeps them open-coded.
+			c.unregisterGC()
 			// Release whichever buffer c.stack currently is -- not
 			// necessarily the one just acquired above: stack growth
 			// (growStack/cloneStack) or an experimental Snapshot restore
@@ -647,11 +710,16 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			index := nativeapi.GoFunctionIndexFromExitCode(ec)
 			f := hostModuleGoFuncFromOpaque[api.GoFunction](index, c.execCtx.goFunctionCallCalleeModuleContextOpaque)
 			stack := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
+			// A host function can block for as long as it likes, and this call's wasm stack does not move
+			// while it does, so this is a parking point too: otherwise a collection would wait on an
+			// execution that is never going to reach a loop header.
+			c.gcExec.EnterGo()
 			if snapshotEnabled {
 				callGoFunctionWithSnapshotRecover(c, ctx, f, stack)
 			} else {
 				f.Call(ctx, stack)
 			}
+			c.gcExec.LeaveGo()
 			// Back to the native code.
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
@@ -667,12 +735,14 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			hostModule := hostModuleFromOpaque(c.execCtx.goFunctionCallCalleeModuleContextOpaque)
 			def := hostModule.FunctionDefinition(wasm.Index(index))
 			listener.Before(ctx, callerModule, def, s, c.stackIterator(true))
-			// Call into the Go function.
+			// Call into the Go function. As above, this is a parking point.
+			c.gcExec.EnterGo()
 			if snapshotEnabled {
 				callGoFunctionWithSnapshotRecover(c, ctx, f, s)
 			} else {
 				f.Call(ctx, s)
 			}
+			c.gcExec.LeaveGo()
 			// Call Listener.After.
 			listener.After(ctx, callerModule, def, s)
 			// Back to the native code.
@@ -684,11 +754,14 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			f := hostModuleGoFuncFromOpaque[api.GoModuleFunction](index, c.execCtx.goFunctionCallCalleeModuleContextOpaque)
 			mod := c.callerModuleInstance()
 			stack := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
+			// A host function can block for as long as it likes; see ExitCodeCallGoFunction above.
+			c.gcExec.EnterGo()
 			if snapshotEnabled {
 				callGoModuleFunctionWithSnapshotRecover(c, ctx, f, mod, stack)
 			} else {
 				f.Call(ctx, mod, stack)
 			}
+			c.gcExec.LeaveGo()
 			// Back to the native code.
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
@@ -704,12 +777,14 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			hostModule := hostModuleFromOpaque(c.execCtx.goFunctionCallCalleeModuleContextOpaque)
 			def := hostModule.FunctionDefinition(wasm.Index(index))
 			listener.Before(ctx, callerModule, def, s, c.stackIterator(true))
-			// Call into the Go function.
+			// Call into the Go function. As above, this is a parking point.
+			c.gcExec.EnterGo()
 			if snapshotEnabled {
 				callGoModuleFunctionWithSnapshotRecover(c, ctx, f, callerModule, s)
 			} else {
 				f.Call(ctx, callerModule, s)
 			}
+			c.gcExec.LeaveGo()
 			// Call Listener.After.
 			listener.After(ctx, callerModule, def, s)
 			// Back to the native code.
@@ -752,6 +827,23 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			funcIndex := wasm.Index(s[0])
 			ref := mod.Engine.FunctionInstanceReference(funcIndex)
 			s[0] = uint64(ref)
+			c.execCtx.exitCode = nativeapi.ExitCodeOK
+			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
+				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
+		case nativeapi.ExitCodeGCCheck:
+			mod := c.callerModuleInstance()
+			s := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
+			if s[0] == wasm.GCSafepoint {
+				// Not a type check: the collector has asked this call to park. It shares the trampoline
+				// rather than having one of its own, to keep a field out of the execution context.
+				c.gcExec.Safepoint()
+				s[0] = 0
+			} else {
+				// The native engine never uses the variadic forms directly: struct.new and
+				// array.new_fixed are lowered as an allocation followed by one set per operand, so
+				// there is no scratch area.
+				s[0] = wasm.RunGC(mod, s[0], s[1], s[2], s[3], s[4], s[5], nil)
+			}
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
@@ -1183,7 +1275,7 @@ func (c *callEngine) growStackWithGuarded() (newSP uintptr, newFP uintptr, err e
 		return
 	}
 	if nativeapi.StackGuardCheckEnabled {
-		c.execCtx.stackBottomPtr = stackCheckLimitPtr(c.stack, nativeapi.StackGuardCheckGuardPageSize)
+		c.execCtx.stackBottomPtr = c.stackCheckLimitPtr(nativeapi.StackGuardCheckGuardPageSize)
 	}
 	return
 }
@@ -1215,7 +1307,7 @@ func (c *callEngine) growStack() (newSP, newFP uintptr, err error) {
 	}
 	newSP, newFP, c.stackTop = c.cloneStackInto(newStack)
 	c.stack = newStack
-	c.execCtx.stackBottomPtr = stackCheckLimitPtr(c.stack, 0)
+	c.execCtx.stackBottomPtr = c.stackCheckLimitPtr(0)
 	return
 }
 
@@ -1370,7 +1462,7 @@ func (s *snapshot) doRestore() {
 	c.stack = s.stack
 	c.stackTop = s.top
 	ec := &c.execCtx
-	ec.stackBottomPtr = stackCheckLimitPtr(c.stack, 0)
+	ec.stackBottomPtr = c.stackCheckLimitPtr(0)
 	ec.stackPointerBeforeGoCall = spp
 	ec.framePointerBeforeGoCall = s.fp
 	ec.goCallReturnAddress = s.returnAddress
@@ -1409,4 +1501,58 @@ func callGoFunctionWithSnapshotRecover(c *callEngine, ctx context.Context, f api
 func callGoModuleFunctionWithSnapshotRecover(c *callEngine, ctx context.Context, f api.GoModuleFunction, mod api.Module, stack []uint64) {
 	defer snapshotRecoverFn(c)
 	f.Call(ctx, mod, stack)
+}
+
+// ScanGCRoots implements wasm.GCRoots.
+//
+// One conservative walk of the wasm stack covers everything, because a safepoint spills every live wasm value
+// into the reserved region at the bottom of that same stack before it parks (see gcRootsReserve). Spilling is
+// what makes the scan exact enough: working out where the backend chose to keep a value does not survive a
+// change of register allocator -- with more registers to play with, arm64 keeps a loop's live reference in one
+// across the safepoint call, where it appears in neither the stack nor the saved registers, which is how a
+// reachable object came to be swept there while amd64, forced to spill, was fine.
+//
+// Words that are not references, and stale ones left by an earlier safepoint, are visited too. That costs a
+// failed lookup: a handle carries the generation of the slot it names, so a word that no longer names a live
+// object matches nothing.
+func (c *callEngine) ScanGCRoots(visit func(uint64)) {
+	if len(c.stack) == 0 {
+		return
+	}
+	bottom := uintptr(unsafe.Pointer(&c.stack[0]))
+	// Walk down from stackTop rather than up from the slice, because that is the grid the values are on:
+	// the stack grows down from an address aligned to 16 bytes *inside* the buffer (see alignedStackTop),
+	// so a word starts at stackTop-8k, not at an offset of &stack[0].
+	top := int(c.stackTop - bottom)
+	if top > len(c.stack) {
+		top = len(c.stack)
+	}
+
+	// The spilled roots are read exactly, by count, and the walk below stops above them. Reading them
+	// conservatively along with everything else would retain what an *earlier* safepoint spilled: the region
+	// is written from the bottom up and reused, so a safepoint holding fewer values than one before it leaves
+	// the difference behind.
+	floor := 0
+	if reserve := c.gcRootsReserve(); reserve > 0 && c.execCtx.stackBottomPtr != nil {
+		floor = int(uintptr(unsafe.Pointer(c.execCtx.stackBottomPtr))-bottom) - backend.StackBoundsCheckMarginBytes
+		if floor >= 8 && floor <= len(c.stack) {
+			n := int(binary.LittleEndian.Uint64(c.stack[floor-8:]))
+			if max := (reserve - 8) / 8; n > max {
+				n = max // never trust a count read out of a buffer the guest could have influenced.
+			}
+			for i := 0; i < n; i++ {
+				visit(binary.LittleEndian.Uint64(c.stack[floor-16-8*i:]))
+			}
+		} else {
+			floor = 0
+		}
+	}
+
+	for off := top - 8; off >= floor; off -= 8 {
+		visit(binary.LittleEndian.Uint64(c.stack[off:]))
+	}
+	for i := range c.execCtx.savedRegisters {
+		visit(c.execCtx.savedRegisters[i][0])
+		visit(c.execCtx.savedRegisters[i][1])
+	}
 }

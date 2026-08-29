@@ -158,6 +158,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 
 	sts.reset(functionType)
 	valueTypeStack := &sts.vs
+	valueTypeStack.types = m.TypeSection
 	// We start with the outermost control block which is for function return if the code branches into it.
 	controlBlockStack := &sts.cs
 
@@ -601,7 +602,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 					}
 					if actual == valueTypeUnknown {
 						defaultLabelType[index] = valueTypeUnknown
-					} else if !isRefSubtypeOf(actual, exp) {
+					} else if !isRefSubtypeOf(actual, exp, m.TypeSection) {
 						return typeMismatchError(true, OpcodeBrTableName, actual, exp, i)
 					}
 				}
@@ -626,7 +627,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 					return fmt.Errorf("inconsistent block type length for %s at %d; %v (ln=%d) != %v (l=%d)", OpcodeBrTableName, l, defaultLabelType, ln, tableLabelType, l)
 				}
 				for i := range defaultLabelType {
-					if defaultLabelType[i] != valueTypeUnknown && !areRefTypesCompatible(defaultLabelType[i], tableLabelType[i]) {
+					if defaultLabelType[i] != valueTypeUnknown && !areRefTypesCompatible(defaultLabelType[i], tableLabelType[i], m.TypeSection) {
 						return fmt.Errorf("inconsistent block type for %s at %d", OpcodeBrTableName, l)
 					}
 				}
@@ -724,7 +725,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 						return fmt.Errorf("catch clause type mismatch: catch delivers %d values but label expects %d", len(catchTypes), len(expectedTypes))
 					}
 					for j := range catchTypes {
-						if !isRefSubtypeOf(catchTypes[j], expectedTypes[j]) {
+						if !isRefSubtypeOf(catchTypes[j], expectedTypes[j], m.TypeSection) {
 							return fmt.Errorf("catch clause type mismatch at index %d: %v is not a subtype of %v", j, catchTypes[j], expectedTypes[j])
 						}
 					}
@@ -753,7 +754,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 						return fmt.Errorf("catch_all clause type mismatch: catch delivers %d values but label expects %d", len(catchTypes), len(expectedTypes))
 					}
 					for j := range catchTypes {
-						if !isRefSubtypeOf(catchTypes[j], expectedTypes[j]) {
+						if !isRefSubtypeOf(catchTypes[j], expectedTypes[j], m.TypeSection) {
 							return fmt.Errorf("catch_all clause type mismatch at index %d", j)
 						}
 					}
@@ -834,7 +835,9 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			}
 
 			table := tables[tableIndex]
-			if table.Type != RefTypeFuncref {
+			// The table only has to hold function references: with GC it may be typed at a concrete
+			// function type, or at nofunc, rather than plain funcref.
+			if hierarchyTop(table.Type, m.TypeSection) != ValueTypeFuncref.Kind() {
 				return fmt.Errorf("table is not funcref type but was %s for %s", RefTypeName(table.Type), opcodeName)
 			}
 
@@ -1108,6 +1111,14 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				case ValueTypeExnref:
 					valueTypeStack.push(ValueTypeExnref)
 				default:
+					// One of the GC proposal's abstract heap types, in its short (nullable) spelling.
+					if vt := ValueType(reftype); vt.IsGCHeapType() {
+						if err := enabledFeatures.RequireEnabled(api.CoreFeatureGC); err != nil {
+							return fmt.Errorf("ref.null %s invalid as %w", ValueTypeName(vt), err)
+						}
+						valueTypeStack.push(vt)
+						break
+					}
 					// Concrete type index encoded as LEB128 u32.
 					if err := enabledFeatures.RequireEnabled(api.CoreFeatureTypedFunctionReferences); err != nil {
 						return fmt.Errorf("ref.null with concrete type invalid as %v", err)
@@ -1240,7 +1251,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				nonNullTp = tp.AsNonNullable()
 			}
 			lastTarget := targetResultType[len(targetResultType)-1]
-			if nonNullTp != valueTypeUnknown && !isRefSubtypeOf(nonNullTp, lastTarget) {
+			if nonNullTp != valueTypeUnknown && !isRefSubtypeOf(nonNullTp, lastTarget, m.TypeSection) {
 				return fmt.Errorf("type mismatch on %s: ref type %s is not a subtype of label's last result %s",
 					OpcodeBrOnNonNullName, ValueTypeName(nonNullTp), ValueTypeName(lastTarget))
 			}
@@ -1254,6 +1265,20 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				valueTypeStack.push(t)
 			}
 			// On the fall-through (null) path, nothing extra is pushed.
+		} else if op == OpcodeRefEq {
+			if err := enabledFeatures.RequireEnabled(api.CoreFeatureGC); err != nil {
+				return fmt.Errorf("%s invalid as %w", OpcodeRefEqName, err)
+			}
+			for i := 0; i < 2; i++ {
+				tp, err := valueTypeStack.pop()
+				if err != nil {
+					return fmt.Errorf("%s: %v", OpcodeRefEqName, err)
+				}
+				if tp != valueTypeUnknown && !isRefSubtypeOf(tp, ValueTypeEqref, m.TypeSection) {
+					return fmt.Errorf("%s: expected eqref but was %s", OpcodeRefEqName, ValueTypeName(tp))
+				}
+			}
+			valueTypeStack.push(ValueTypeI32)
 		} else if op == OpcodeTableGet || op == OpcodeTableSet {
 			if err := enabledFeatures.RequireEnabled(api.CoreFeatureReferenceTypes); err != nil {
 				return fmt.Errorf("%s is invalid as %v", InstructionName(op), err)
@@ -1444,7 +1469,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 						return fmt.Errorf("table of index %d not found", tableIndex)
 					}
 
-					if !isRefSubtypeOf(m.ElementSection[elementIndex].Type, tables[tableIndex].Type) {
+					if !isRefSubtypeOf(m.ElementSection[elementIndex].Type, tables[tableIndex].Type, m.TypeSection) {
 						return fmt.Errorf("type mismatch for table.init: element type %s does not match table type %s",
 							RefTypeName(m.ElementSection[elementIndex].Type),
 							RefTypeName(tables[tableIndex].Type),
@@ -1493,7 +1518,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 						return fmt.Errorf("table of index %d not found", srcTableIndex)
 					}
 
-					if !isRefSubtypeOf(tables[srcTableIndex].Type, tables[dstTableIndex].Type) {
+					if !isRefSubtypeOf(tables[srcTableIndex].Type, tables[dstTableIndex].Type, m.TypeSection) {
 						return fmt.Errorf("table type mismatch for table.copy: %s (src) != %s (dst)",
 							RefTypeName(tables[srcTableIndex].Type), RefTypeName(tables[dstTableIndex].Type))
 					}
@@ -1912,6 +1937,56 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			}
 			valueTypeStack.pushStackLimit(len(bt.Params))
 			pc += num
+		} else if op == OpcodeGCPrefix {
+			pc++
+			gcOpcode := body[pc]
+			if err := enabledFeatures.RequireEnabled(api.CoreFeatureGC); err != nil {
+				return fmt.Errorf("%s invalid as %w", GCInstructionName(gcOpcode), err)
+			}
+			pc++
+			switch gcOpcode {
+			case OpcodeGCRefTest, OpcodeGCRefTestNull, OpcodeGCRefCast, OpcodeGCRefCastNull:
+				nullable := gcOpcode == OpcodeGCRefTestNull || gcOpcode == OpcodeGCRefCastNull
+				target, num, err := decodeHeapTypeImmediate(body[pc:], nullable, m.TypeSection)
+				if err != nil {
+					return fmt.Errorf("%s: %w", GCInstructionName(gcOpcode), err)
+				}
+				pc += num - 1
+
+				actual, err := valueTypeStack.pop()
+				if err != nil {
+					return fmt.Errorf("%s: %v", GCInstructionName(gcOpcode), err)
+				}
+				if actual != valueTypeUnknown {
+					if !isReferenceValueType(actual) {
+						return fmt.Errorf("%s: expected a reference type but was %s",
+							GCInstructionName(gcOpcode), ValueTypeName(actual))
+					}
+					// The operand and the target must share a hierarchy, else the test could never
+					// succeed and the cast could never do anything but trap.
+					if hierarchyTop(actual, m.TypeSection) != hierarchyTop(target, m.TypeSection) {
+						return fmt.Errorf("%s: %s and %s are in different type hierarchies",
+							GCInstructionName(gcOpcode), ValueTypeName(actual), ValueTypeName(target))
+					}
+				}
+				if gcOpcode == OpcodeGCRefTest || gcOpcode == OpcodeGCRefTestNull {
+					valueTypeStack.push(ValueTypeI32)
+				} else {
+					valueTypeStack.push(target)
+				}
+			case OpcodeGCBrOnCast, OpcodeGCBrOnCastFail:
+				num, err := m.validateBrOnCast(gcOpcode, body[pc:], valueTypeStack, controlBlockStack)
+				if err != nil {
+					return err
+				}
+				pc += num - 1
+			default:
+				num, err := m.validateGCInstruction(gcOpcode, body[pc:], valueTypeStack)
+				if err != nil {
+					return err
+				}
+				pc += num - 1
+			}
 		} else if op == OpcodeAtomicPrefix {
 			pc++
 			// Atomic instructions come with two bytes where the first byte is always OpcodeAtomicPrefix,
@@ -2457,14 +2532,14 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				return fmt.Errorf("reference types cannot be used for non typed select instruction")
 			}
 
-			if v1 != valueTypeUnknown && v2 != valueTypeUnknown && !areRefTypesCompatible(v1, v2) {
+			if v1 != valueTypeUnknown && v2 != valueTypeUnknown && !areRefTypesCompatible(v1, v2, m.TypeSection) {
 				return fmt.Errorf("type mismatch on 1st and 2nd select operands")
 			}
 			if v1 == valueTypeUnknown {
 				valueTypeStack.push(v2)
 			} else if v2 == valueTypeUnknown {
 				valueTypeStack.push(v1)
-			} else if isRefSubtypeOf(v1, v2) {
+			} else if isRefSubtypeOf(v1, v2, m.TypeSection) {
 				valueTypeStack.push(v2)
 			} else {
 				valueTypeStack.push(v1)
@@ -2665,6 +2740,8 @@ type valueTypeStack struct {
 	maximumStackPointer int
 	// requireStackValuesTmp is used in requireStackValues function to reduce the allocation.
 	requireStackValuesTmp []ValueType
+	// types is the validated module's type section, needed to resolve concrete refs when subtype-checking.
+	types []FunctionType
 }
 
 // Only used in the analyzeFunction below.
@@ -2703,7 +2780,7 @@ func (s *valueTypeStack) popAndVerifyType(expected ValueType) error {
 	if !ok {
 		return fmt.Errorf("%s missing", ValueTypeName(expected))
 	}
-	if have != valueTypeUnknown && expected != valueTypeUnknown && !isRefSubtypeOf(have, expected) {
+	if have != valueTypeUnknown && expected != valueTypeUnknown && !isRefSubtypeOf(have, expected, s.types) {
 		return fmt.Errorf("type mismatch: expected %s, but was %s", ValueTypeName(expected), ValueTypeName(have))
 	}
 	return nil
@@ -2785,7 +2862,7 @@ func (s *valueTypeStack) requireStackValues(
 	// Finally, check the types of the values:
 	for i, v := range s.requireStackValuesTmp {
 		nextWant := want[countWanted-i-1] // have is in reverse order (stack)
-		if v != valueTypeUnknown && nextWant != valueTypeUnknown && !isRefSubtypeOf(v, nextWant) {
+		if v != valueTypeUnknown && nextWant != valueTypeUnknown && !isRefSubtypeOf(v, nextWant, s.types) {
 			return typeMismatchError(isParam, context, v, nextWant, i)
 		}
 	}
@@ -2936,6 +3013,11 @@ func decodeBlockTypeFast(types []FunctionType, body []byte, pos uint64, enabledF
 	return DecodeBlockType(types, br, enabledFeatures)
 }
 
+// singleResultBlockType is the block type of a block that takes nothing and leaves one value.
+func singleResultBlockType(vt ValueType) *FunctionType {
+	return &FunctionType{Results: []ValueType{vt}, ResultNumInUint64: 1}
+}
+
 func DecodeBlockType(types []FunctionType, r *bytes.Reader, enabledFeatures api.CoreFeatures) (*FunctionType, uint64, error) {
 	raw, num, err := leb128.DecodeInt33AsInt64(r)
 	if err != nil {
@@ -2962,6 +3044,11 @@ func DecodeBlockType(types []FunctionType, r *bytes.Reader, enabledFeatures api.
 		ret = blockType_v_externref
 	case -23: // 0x69 in original byte = exnref
 		ret = blockType_v_exnref
+	case HeapTypeNoExn, HeapTypeNoFunc, HeapTypeNoExtern, HeapTypeNone,
+		HeapTypeAny, HeapTypeEq, HeapTypeI31, HeapTypeStruct, HeapTypeArray:
+		// A GC abstract heap type in its short (nullable) spelling.
+		vt, _ := AbstractHeapTypeValueType(raw)
+		ret = singleResultBlockType(vt)
 	case -29: // 0x63 = ref null (nullable)
 		ht, htNum, err := leb128.DecodeInt33AsInt64(r)
 		if err != nil {
@@ -2977,7 +3064,12 @@ func DecodeBlockType(types []FunctionType, r *bytes.Reader, enabledFeatures api.
 			ret = blockType_v_externref
 		default:
 			if ht < 0 {
-				return nil, 0, fmt.Errorf("unknown abstract heap type in block: %d", ht)
+				vt, ok := AbstractHeapTypeValueType(ht)
+				if !ok {
+					return nil, 0, fmt.Errorf("unknown abstract heap type in block: %d", ht)
+				}
+				ret = singleResultBlockType(vt)
+				break
 			}
 			if int64(len(types)) <= ht {
 				return nil, 0, fmt.Errorf("unknown type")
@@ -3000,7 +3092,12 @@ func DecodeBlockType(types []FunctionType, r *bytes.Reader, enabledFeatures api.
 			ret = &FunctionType{Results: []ValueType{ValueTypeExternref.AsNonNullable()}, ResultNumInUint64: 1}
 		default:
 			if ht < 0 {
-				return nil, 0, fmt.Errorf("unknown abstract heap type in block: %d", ht)
+				vt, ok := AbstractHeapTypeValueType(ht)
+				if !ok {
+					return nil, 0, fmt.Errorf("unknown abstract heap type in block: %d", ht)
+				}
+				ret = singleResultBlockType(vt.AsNonNullable())
+				break
 			}
 			if int64(len(types)) <= ht {
 				return nil, 0, fmt.Errorf("unknown type")
@@ -3048,4 +3145,30 @@ func SplitCallStack(ft *FunctionType, stack []uint64) (params []uint64, results 
 		results = stack[:n]
 	}
 	return
+}
+
+// decodeHeapTypeImmediate reads the heap type immediate that ref.test and ref.cast carry, returning the
+// reference value type it denotes with the given nullability, and how many bytes it occupied.
+func decodeHeapTypeImmediate(body []byte, nullable bool, types []FunctionType) (ValueType, uint64, error) {
+	ht, num, err := leb128.LoadInt33AsInt64(body)
+	if err != nil {
+		return 0, 0, fmt.Errorf("read heap type: %w", err)
+	}
+	var vt ValueType
+	if ht < 0 {
+		abstract, ok := AbstractHeapTypeValueType(ht)
+		if !ok {
+			return 0, 0, fmt.Errorf("unknown abstract heap type: %d", ht)
+		}
+		vt = abstract
+	} else {
+		if ht >= int64(len(types)) {
+			return 0, 0, fmt.Errorf("unknown type index %d", ht)
+		}
+		vt = ValueTypeConcreteRef(uint32(ht), true)
+	}
+	if !nullable {
+		vt = vt.AsNonNullable()
+	}
+	return vt, uint64(num), nil
 }

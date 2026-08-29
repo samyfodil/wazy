@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/engine/native/backend"
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
 	"github.com/samyfodil/wazy/internal/engine/native/ssa"
 	"github.com/samyfodil/wazy/internal/leb128"
@@ -1411,6 +1412,13 @@ func (c *Compiler) lowerCurrentOpcode() {
 		builder.InsertInstruction(br)
 
 		c.switchTo(originalLen, loopHeader)
+
+		if c.gcEnabled {
+			// A loop header is where execution parks for a collection: a guest cannot run unboundedly
+			// without passing one, so this is what bounds how long a collection waits. The poll itself is
+			// a load and a rarely-taken branch; only the branch calls into Go.
+			c.emitGCSafepoint(builder)
+		}
 
 		if c.ensureTermination {
 			if c.interruptCheckInterval == 0 {
@@ -3573,6 +3581,18 @@ func (c *Compiler) lowerCurrentOpcode() {
 		default:
 			panic("TODO: unsupported atomic instruction: " + wasm.AtomicInstructionName(atomicOp))
 		}
+	case wasm.OpcodeRefEq:
+		if state.unreachable {
+			break
+		}
+		b, a := state.pop(), state.pop()
+		state.push(c.gcResultI32(c.callGC(wasm.GCRefEq, a, b)))
+
+	case wasm.OpcodeGCPrefix:
+		gcOp := c.wasmFunctionBody[c.loweringState.pc+1]
+		c.loweringState.pc++
+		c.lowerGCInstruction(gcOp)
+
 	case wasm.OpcodeRefFunc:
 		funcIndex := c.readI32u()
 		if state.unreachable {
@@ -4302,13 +4322,23 @@ func (c *Compiler) prepareCallIndirect(typeIndex, tableIndex uint32) (ssa.Value,
 	builder.InsertInstruction(loadExpectedTypeID)
 	expectedTypeID := loadExpectedTypeID.Return()
 
-	// Check if the type ID matches.
-	checkTypeID := builder.AllocateInstruction()
-	checkTypeID.AsIcmp(actualTypeID, expectedTypeID, ssa.IntegerCmpCondNotEqual)
-	builder.InsertInstruction(checkTypeID)
-	exitIfNotMatch := builder.AllocateInstruction()
-	exitIfNotMatch.AsExitIfTrueWithCode(c.execCtxPtrValue, checkTypeID.Return(), nativeapi.ExitCodeIndirectCallTypeMismatch)
-	builder.InsertInstruction(exitIfNotMatch)
+	// Check if the type ID matches. Under the GC proposal a callee whose type is a *subtype* of the declared
+	// one also matches, and deciding that needs store-wide type identity which compiled code cannot reach --
+	// so a module that declares any subtype relation asks Go instead. Every module that declares none, which
+	// is every pre-GC module, keeps the inline compare it always had.
+	if c.moduleDeclaresSubtypes() {
+		c.callGC(wasm.GCCheckIndirectCall,
+			builder.AllocateInstruction().AsUExtend(actualTypeID, 32, 64).Insert(builder).Return(),
+			builder.AllocateInstruction().AsUExtend(expectedTypeID, 32, 64).Insert(builder).Return(),
+		)
+	} else {
+		checkTypeID := builder.AllocateInstruction()
+		checkTypeID.AsIcmp(actualTypeID, expectedTypeID, ssa.IntegerCmpCondNotEqual)
+		builder.InsertInstruction(checkTypeID)
+		exitIfNotMatch := builder.AllocateInstruction()
+		exitIfNotMatch.AsExitIfTrueWithCode(c.execCtxPtrValue, checkTypeID.Return(), nativeapi.ExitCodeIndirectCallTypeMismatch)
+		builder.InsertInstruction(exitIfNotMatch)
+	}
 
 	// Now ready to call the function. Load the executable and moduleContextOpaquePtr from the function instance.
 	loadExecutablePtr := builder.AllocateInstruction()
@@ -5408,6 +5438,63 @@ func (c *Compiler) readI32s() int32 {
 	return v
 }
 
+// readI33s reads the signed 33-bit LEB128 a heap type immediate is encoded as.
+func (c *Compiler) readI33s() int64 {
+	v, n, err := leb128.LoadInt33AsInt64(c.wasmFunctionBody[c.loweringState.pc+1:])
+	if err != nil {
+		panic(err) // shouldn't be reached since compilation comes after validation.
+	}
+	c.loweringState.pc += int(n)
+	return v
+}
+
+// moduleDeclaresSubtypes reports whether any type in the module being compiled takes part in a declared
+// subtype relation, which is what makes call_indirect's type check more than an equality.
+func (c *Compiler) moduleDeclaresSubtypes() bool {
+	for i := range c.m.TypeSection {
+		if c.m.TypeSection[i].HasSupertype || c.m.TypeSection[i].Extensible {
+			return true
+		}
+	}
+	return false
+}
+
+// encodeRefTarget turns a decoded heap type immediate into the descriptor wasm.RunGCCheck expects.
+func encodeRefTarget(heapType int64, nullable bool) (uint64, bool) {
+	if heapType < 0 {
+		abstract, ok := wasm.AbstractHeapTypeValueType(heapType)
+		if !ok {
+			return 0, false
+		}
+		return wasm.EncodeRefTarget(uint32(abstract.Kind()), nullable, false), true
+	}
+	return wasm.EncodeRefTarget(uint32(heapType), nullable, true), true
+}
+
+// callGC emits a call to the trampoline behind every GC runtime operation, returning its result. See
+// wasm.RunGC for what the operands mean per mode; unused ones are passed as zero.
+//
+// ponytail: a Go round trip per GC instruction. The answer needs store-wide type identity and the managed
+// heap, neither of which compiled code can reach today, and no GC instruction is on a hot path yet -- so this
+// buys the whole proposal for one trampoline. Inlining the common shapes (a struct field load, an i31 test) is
+// the upgrade if a profile ever asks for it.
+func (c *Compiler) callGC(mode uint64, operands ...ssa.Value) ssa.Value {
+	builder := c.ssaBuilder
+	c.storeCallerModuleContext()
+	ptr := builder.AllocateInstruction().
+		AsLoad(c.execCtxPtrValue, nativeapi.ExecutionContextOffsetGCCheckTrampolineAddress.U32(), ssa.TypeI64).
+		Insert(builder).Return()
+	// RunGC takes a fixed five operands whatever the mode, so pad the unused tail with zeroes.
+	vs := make([]ssa.Value, 0, 7)
+	vs = append(vs, c.execCtxPtrValue, builder.AllocateInstruction().AsIconst64(mode).Insert(builder).Return())
+	vs = append(vs, operands...)
+	for len(vs) < 7 {
+		vs = append(vs, builder.AllocateInstruction().AsIconst64(0).Insert(builder).Return())
+	}
+	args := c.allocateVarLengthValues(7, vs...)
+	return builder.AllocateInstruction().AsCallIndirect(ptr, &c.gcSig, args).Insert(builder).Return()
+}
+
 func (c *Compiler) readI64s() int64 {
 	v, n, err := leb128.LoadInt64(c.wasmFunctionBody[c.loweringState.pc+1:])
 	if err != nil {
@@ -5812,4 +5899,477 @@ func relaxedDotI8x16(builder ssa.Builder, v1, v2 ssa.Value) ssa.Value {
 	}
 	return builder.AllocateInstruction().
 		AsNarrow(dot(true), dot(false), ssa.VecLaneI32x4, true).Insert(builder).Return()
+}
+
+// lowerGCInstruction lowers one instruction of the GC proposal. Every one of them becomes a call to the shared
+// trampoline (see callGC), so the work here is reading the immediates and getting the operands into and out of
+// the i64s that trampoline speaks. c.loweringState.pc is at the GC opcode on entry.
+func (c *Compiler) lowerGCInstruction(gcOp wasm.OpcodeGC) {
+	state := c.state()
+
+	switch gcOp {
+	case wasm.OpcodeGCRefTest, wasm.OpcodeGCRefTestNull, wasm.OpcodeGCRefCast, wasm.OpcodeGCRefCastNull:
+		nullable := gcOp == wasm.OpcodeGCRefTestNull || gcOp == wasm.OpcodeGCRefCastNull
+		heapType := c.readI33s()
+		if state.unreachable {
+			return
+		}
+		target, ok := encodeRefTarget(heapType, nullable)
+		if !ok {
+			panic("BUG: validation should have rejected the heap type")
+		}
+		isCast := gcOp == wasm.OpcodeGCRefCast || gcOp == wasm.OpcodeGCRefCastNull
+		mode := wasm.GCCheckRefTest
+		if isCast {
+			mode = wasm.GCCheckRefCast
+		}
+		// ref.cast keeps its operand: a successful cast only narrows the static type, and a failed one
+		// traps inside the trampoline.
+		ref := state.pop()
+		result := c.callGC(mode, ref, c.gcConst(target))
+		if isCast {
+			state.push(ref)
+		} else {
+			state.push(c.gcResultI32(result))
+		}
+
+	case wasm.OpcodeGCBrOnCast, wasm.OpcodeGCBrOnCastFail:
+		c.lowerBrOnCast(gcOp)
+
+	case wasm.OpcodeGCAnyConvertExtern, wasm.OpcodeGCExternConvertAny:
+		// Both are bijections on the same underlying value, and every reference is the same opaque word
+		// here, so there is nothing to emit.
+
+	case wasm.OpcodeGCStructNew, wasm.OpcodeGCStructNewDefault:
+		typeIndex := c.readI32u()
+		if state.unreachable {
+			return
+		}
+		t := &c.m.TypeSection[typeIndex]
+		var values []ssa.Value
+		if gcOp == wasm.OpcodeGCStructNew {
+			values = make([]ssa.Value, len(t.Fields))
+			for i := len(values) - 1; i >= 0; i-- {
+				values[i] = state.pop()
+			}
+		}
+		// Allocating defaulted and then storing is how the variadic forms avoid needing a scratch area
+		// across the trampoline. RunGC's own struct.new takes its fields from one, which only the
+		// interpreter can hand it.
+		ref := c.callGC(wasm.GCStructNewDefault, c.gcConst(uint64(typeIndex)))
+		for i, v := range values {
+			c.gcStoreWords(ref, wasm.GCStructSet, c.gcConst(uint64(t.FieldSlots[i])), v)
+		}
+		state.push(ref)
+
+	case wasm.OpcodeGCStructGet, wasm.OpcodeGCStructGetS, wasm.OpcodeGCStructGetU:
+		typeIndex, fieldIndex := c.readI32u(), c.readI32u()
+		if state.unreachable {
+			return
+		}
+		signed := uint64(0)
+		if gcOp == wasm.OpcodeGCStructGetS {
+			signed = 1
+		}
+		t := &c.m.TypeSection[typeIndex]
+		slot := c.gcConst(uint64(t.FieldSlots[fieldIndex]))
+		ref := state.pop()
+		vt := unpackedFieldType(t, fieldIndex)
+		if vt == wasm.ValueTypeV128 {
+			lo := c.callGC(wasm.GCStructGet, ref, slot, c.gcConst(signed))
+			hi := c.callGC(wasm.GCStructGet, ref, c.gcConst(uint64(t.FieldSlots[fieldIndex]+1)), c.gcConst(signed))
+			state.push(c.gcV128From(lo, hi))
+			return
+		}
+		state.push(c.gcFromI64(c.callGC(wasm.GCStructGet, ref, slot, c.gcConst(signed)), vt))
+
+	case wasm.OpcodeGCStructSet:
+		typeIndex, fieldIndex := c.readI32u(), c.readI32u()
+		if state.unreachable {
+			return
+		}
+		v, ref := state.pop(), state.pop()
+		slot := uint64(c.m.TypeSection[typeIndex].FieldSlots[fieldIndex])
+		c.gcStoreWords(ref, wasm.GCStructSet, c.gcConst(slot), v)
+
+	case wasm.OpcodeGCArrayNew, wasm.OpcodeGCArrayNewDefault:
+		typeIndex := c.readI32u()
+		if state.unreachable {
+			return
+		}
+		length := state.pop()
+		if gcOp == wasm.OpcodeGCArrayNewDefault {
+			state.push(c.callGC(wasm.GCArrayNewDefault, c.gcConst(uint64(typeIndex)), c.gcToI64(length)))
+			return
+		}
+		lo, hi := c.gcSplitWords(state.pop())
+		state.push(c.callGC(wasm.GCArrayNew, c.gcConst(uint64(typeIndex)), c.gcToI64(length), lo, hi))
+
+	case wasm.OpcodeGCArrayNewFixed:
+		typeIndex, count := c.readI32u(), c.readI32u()
+		if state.unreachable {
+			return
+		}
+		values := make([]ssa.Value, count)
+		for i := int(count) - 1; i >= 0; i-- {
+			values[i] = state.pop()
+		}
+		ref := c.callGC(wasm.GCArrayNewDefault, c.gcConst(uint64(typeIndex)), c.gcConst(uint64(count)))
+		for i, v := range values {
+			c.gcStoreElement(ref, c.gcConst(uint64(i)), v)
+		}
+		state.push(ref)
+
+	case wasm.OpcodeGCArrayNewData, wasm.OpcodeGCArrayNewElem:
+		typeIndex, segment := c.readI32u(), c.readI32u()
+		if state.unreachable {
+			return
+		}
+		mode := uint64(wasm.GCArrayNewData)
+		if gcOp == wasm.OpcodeGCArrayNewElem {
+			mode = wasm.GCArrayNewElem
+		}
+		length, offset := state.pop(), state.pop()
+		state.push(c.callGC(mode, c.gcConst(uint64(typeIndex)), c.gcConst(uint64(segment)),
+			c.gcToI64(offset), c.gcToI64(length)))
+
+	case wasm.OpcodeGCArrayGet, wasm.OpcodeGCArrayGetS, wasm.OpcodeGCArrayGetU:
+		typeIndex := c.readI32u()
+		if state.unreachable {
+			return
+		}
+		signed := uint64(0)
+		if gcOp == wasm.OpcodeGCArrayGetS {
+			signed = 1
+		}
+		index, ref := state.pop(), state.pop()
+		idx := c.gcToI64(index)
+		vt := unpackedFieldType(&c.m.TypeSection[typeIndex], 0)
+		if vt == wasm.ValueTypeV128 {
+			lo := c.callGC(wasm.GCArrayGet, ref, idx, c.gcConst(signed))
+			hi := c.callGC(wasm.GCArrayGet, ref, idx, c.gcConst(signed|2))
+			state.push(c.gcV128From(lo, hi))
+			return
+		}
+		state.push(c.gcFromI64(c.callGC(wasm.GCArrayGet, ref, idx, c.gcConst(signed)), vt))
+
+	case wasm.OpcodeGCArraySet:
+		c.readI32u()
+		if state.unreachable {
+			return
+		}
+		v, index, ref := state.pop(), state.pop(), state.pop()
+		c.gcStoreElement(ref, c.gcToI64(index), v)
+
+	case wasm.OpcodeGCArrayLen:
+		if state.unreachable {
+			return
+		}
+		state.push(c.gcResultI32(c.callGC(wasm.GCArrayLen, state.pop())))
+
+	case wasm.OpcodeGCArrayFill:
+		c.readI32u()
+		if state.unreachable {
+			return
+		}
+		length, v, index, ref := state.pop(), state.pop(), state.pop(), state.pop()
+		lo, hi := c.gcSplitWords(v)
+		c.callGC(wasm.GCArrayFill, ref, c.gcToI64(index), lo, c.gcToI64(length), hi)
+
+	case wasm.OpcodeGCArrayCopy:
+		c.readI32u()
+		c.readI32u()
+		if state.unreachable {
+			return
+		}
+		length, srcIndex, src, dstIndex, dst := state.pop(), state.pop(), state.pop(), state.pop(), state.pop()
+		c.callGC(wasm.GCArrayCopy, dst, c.gcToI64(dstIndex), src, c.gcToI64(srcIndex), c.gcToI64(length))
+
+	case wasm.OpcodeGCArrayInitData, wasm.OpcodeGCArrayInitElem:
+		c.readI32u()
+		segment := c.readI32u()
+		if state.unreachable {
+			return
+		}
+		mode := uint64(wasm.GCArrayInitData)
+		if gcOp == wasm.OpcodeGCArrayInitElem {
+			mode = wasm.GCArrayInitElem
+		}
+		length, offset, dstIndex, ref := state.pop(), state.pop(), state.pop(), state.pop()
+		c.callGC(mode, ref, c.gcToI64(dstIndex), c.gcConst(uint64(segment)), c.gcToI64(offset), c.gcToI64(length))
+
+	case wasm.OpcodeGCRefI31:
+		if state.unreachable {
+			return
+		}
+		state.push(c.callGC(wasm.GCRefI31, c.gcToI64(state.pop())))
+
+	case wasm.OpcodeGCI31GetS, wasm.OpcodeGCI31GetU:
+		if state.unreachable {
+			return
+		}
+		mode := uint64(wasm.GCI31GetS)
+		if gcOp == wasm.OpcodeGCI31GetU {
+			mode = wasm.GCI31GetU
+		}
+		state.push(c.gcResultI32(c.callGC(mode, state.pop())))
+
+	default:
+		panic("TODO: unsupported GC instruction: " + wasm.GCInstructionName(gcOp))
+	}
+}
+
+// lowerBrOnCast lowers br_on_cast and br_on_cast_fail as a peeking test plus a conditional branch, exactly as
+// the interpreter does: the reference stays on the stack for whichever path is taken.
+func (c *Compiler) lowerBrOnCast(gcOp wasm.OpcodeGC) {
+	builder := c.ssaBuilder
+	state := c.state()
+
+	flags := c.wasmFunctionBody[c.loweringState.pc+1]
+	c.loweringState.pc++
+	labelIndex := c.readI32u()
+	// The first heap type is what the operand already is, which only validation cares about.
+	c.readI33s()
+	castHeapType := c.readI33s()
+	if state.unreachable {
+		return
+	}
+	target, ok := encodeRefTarget(castHeapType, flags&2 != 0)
+	if !ok {
+		panic("BUG: validation should have rejected the heap type")
+	}
+
+	ref := state.pop()
+	matched := c.callGC(wasm.GCCheckRefTest, ref, c.gcConst(target))
+	state.push(ref)
+
+	// br_on_cast branches when the test succeeds, br_on_cast_fail when it fails.
+	cond := ssa.IntegerCmpCondNotEqual
+	if gcOp == wasm.OpcodeGCBrOnCastFail {
+		cond = ssa.IntegerCmpCondEqual
+	}
+	zero := builder.AllocateInstruction().AsIconst64(0).Insert(builder).Return()
+	takeBranch := builder.AllocateInstruction().AsIcmp(matched, zero, cond).Insert(builder).Return()
+
+	targetBlk, argNum := state.brTargetArgNumFor(labelIndex)
+	args := c.nPeekDup(argNum)
+	var sealTargetBlk bool
+
+	if c.branchExitsTryTable(int(labelIndex)) {
+		current := builder.CurrentBlock()
+		trampolineBlk := builder.AllocateBasicBlock()
+		builder.SetCurrentBlock(trampolineBlk)
+		c.emitTryTableLeaves(int(labelIndex))
+		c.insertJumpToBlock(args, targetBlk)
+		builder.SetCurrentBlock(current)
+		targetBlk = trampolineBlk
+		sealTargetBlk = true
+		args = ssa.ValuesNil
+	}
+
+	if c.needListener && targetBlk.ReturnBlock() {
+		current := builder.CurrentBlock()
+		targetBlk = builder.AllocateBasicBlock()
+		builder.SetCurrentBlock(targetBlk)
+		sealTargetBlk = true
+		c.callListenerAfter()
+		instr := builder.AllocateInstruction()
+		instr.AsReturn(args)
+		builder.InsertInstruction(instr)
+		args = ssa.ValuesNil
+		builder.SetCurrentBlock(current)
+	}
+
+	brnz := builder.AllocateInstruction()
+	brnz.AsBrnz(takeBranch, args, targetBlk)
+	builder.InsertInstruction(brnz)
+	if sealTargetBlk {
+		builder.Seal(targetBlk)
+	}
+
+	elseBlk := builder.AllocateBasicBlock()
+	c.insertJumpToBlock(ssa.ValuesNil, elseBlk)
+	builder.Seal(elseBlk)
+	builder.SetCurrentBlock(elseBlk)
+}
+
+// unpackedFieldType is the value type a struct field or array element appears as on the operand stack.
+func unpackedFieldType(t *wasm.FunctionType, fieldIndex uint32) wasm.ValueType {
+	st := t.Fields[fieldIndex].Type
+	switch st {
+	case wasm.ValueTypeI8, wasm.ValueTypeI16:
+		return wasm.ValueTypeI32
+	}
+	return st
+}
+
+func (c *Compiler) gcConst(v uint64) ssa.Value {
+	return c.ssaBuilder.AllocateInstruction().AsIconst64(v).Insert(c.ssaBuilder).Return()
+}
+
+// gcToI64 widens an operand to the i64 the GC trampoline speaks, bit-for-bit.
+func (c *Compiler) gcToI64(v ssa.Value) ssa.Value {
+	builder := c.ssaBuilder
+	switch v.Type() {
+	case ssa.TypeI64:
+		return v
+	case ssa.TypeI32:
+		return builder.AllocateInstruction().AsUExtend(v, 32, 64).Insert(builder).Return()
+	case ssa.TypeF32:
+		bits := builder.AllocateInstruction().AsBitcast(v, ssa.TypeI32).Insert(builder).Return()
+		return builder.AllocateInstruction().AsUExtend(bits, 32, 64).Insert(builder).Return()
+	case ssa.TypeF64:
+		return builder.AllocateInstruction().AsBitcast(v, ssa.TypeI64).Insert(builder).Return()
+	}
+	panic("BUG: a vector must go through gcSplitWords, not gcToI64")
+}
+
+// gcFromI64 narrows a trampoline result back to the wasm type the instruction pushes.
+func (c *Compiler) gcFromI64(v ssa.Value, vt wasm.ValueType) ssa.Value {
+	builder := c.ssaBuilder
+	switch vt {
+	case wasm.ValueTypeI32:
+		return c.gcResultI32(v)
+	case wasm.ValueTypeF32:
+		bits := c.gcResultI32(v)
+		return builder.AllocateInstruction().AsBitcast(bits, ssa.TypeF32).Insert(builder).Return()
+	case wasm.ValueTypeF64:
+		return builder.AllocateInstruction().AsBitcast(v, ssa.TypeF64).Insert(builder).Return()
+	}
+	// i64 and every reference type are already the right width; a vector is reassembled by gcV128From.
+	return v
+}
+
+func (c *Compiler) gcResultI32(v ssa.Value) ssa.Value {
+	return c.ssaBuilder.AllocateInstruction().AsIreduce(v, ssa.TypeI32).Insert(c.ssaBuilder).Return()
+}
+
+// gcSplitWords takes a value apart into the words RunGC moves it in: two for a vector, one for everything
+// else, whose high word is zero.
+func (c *Compiler) gcSplitWords(v ssa.Value) (lo, hi ssa.Value) {
+	if v.Type() != ssa.TypeV128 {
+		return c.gcToI64(v), c.gcConst(0)
+	}
+	builder := c.ssaBuilder
+	lo = builder.AllocateInstruction().
+		AsExtractlane(v, 0, ssa.VecLaneI64x2, false).Insert(builder).Return()
+	hi = builder.AllocateInstruction().
+		AsExtractlane(v, 1, ssa.VecLaneI64x2, false).Insert(builder).Return()
+	return lo, hi
+}
+
+// gcV128From reassembles a vector from the two words RunGC returned it in.
+func (c *Compiler) gcV128From(lo, hi ssa.Value) ssa.Value {
+	builder := c.ssaBuilder
+	zero := builder.AllocateInstruction().AsVconst(0, 0).Insert(builder).Return()
+	withLo := builder.AllocateInstruction().
+		AsInsertlane(zero, lo, 0, ssa.VecLaneI64x2).Insert(builder).Return()
+	return builder.AllocateInstruction().
+		AsInsertlane(withLo, hi, 1, ssa.VecLaneI64x2).Insert(builder).Return()
+}
+
+// gcStoreWords writes a value into a struct at the word slot names, taking two calls for a vector.
+func (c *Compiler) gcStoreWords(ref ssa.Value, mode uint64, slot ssa.Value, v ssa.Value) {
+	if v.Type() != ssa.TypeV128 {
+		c.callGC(mode, ref, slot, c.gcToI64(v))
+		return
+	}
+	lo, hi := c.gcSplitWords(v)
+	c.callGC(mode, ref, slot, lo)
+	next := c.ssaBuilder.AllocateInstruction().
+		AsIadd(slot, c.gcConst(1)).Insert(c.ssaBuilder).Return()
+	c.callGC(mode, ref, next, hi)
+}
+
+// gcStoreElement writes a value into an array element, taking two calls for a vector: the second selects the
+// element's high word through the flags operand.
+func (c *Compiler) gcStoreElement(ref, index, v ssa.Value) {
+	if v.Type() != ssa.TypeV128 {
+		c.callGC(wasm.GCArraySet, ref, index, c.gcToI64(v))
+		return
+	}
+	lo, hi := c.gcSplitWords(v)
+	c.callGC(wasm.GCArraySet, ref, index, lo)
+	c.callGC(wasm.GCArraySet, ref, index, hi, c.gcConst(2))
+}
+
+// materializeGCRoots spills every live wasm value -- the locals and the operand stack -- into the region the
+// call engine reserves at the bottom of the wasm stack, so a collection finds an exact root set in its ordinary
+// conservative scan rather than trying to work out where the backend put them.
+//
+// Only i64-shaped values are spilled, which is every reference plus some integers that are not; the collector
+// is conservative about what a word means, so including them costs nothing but a failed lookup. What it cannot
+// do is *miss* one, and inferring liveness from the machine state is exactly what does not survive a change of
+// register allocator: arm64 has enough registers to keep a loop's reference in one across the safepoint call,
+// where it appears in neither the wasm stack nor the saved registers.
+//
+// The region is addressed off the stack limit, which compiled code already holds at a fixed offset in the
+// execution context. Everything below that limit by more than the go-call margin is unreachable to generated
+// code and to the trampoline, so a spill stays put until the collector has read it. Both are compile-time
+// constants, so this is one subtract and n stores -- inside the park block, which is entered only when a
+// collection is actually waiting.
+func (c *Compiler) materializeGCRoots(builder ssa.Builder) {
+	var vals []ssa.Value
+	push := func(v ssa.Value) {
+		if v.Valid() && v.Type() == ssa.TypeI64 {
+			vals = append(vals, v)
+		}
+	}
+	// Only this function's locals: wasmLocalToVariable is reused across functions and keeps whatever the
+	// longest one before it needed, so its length is not the local count.
+	locals := len(c.wasmFunctionTyp.Params) + len(c.wasmFunctionLocalTypes)
+	for i := 0; i < locals && i < len(c.wasmLocalToVariable); i++ {
+		push(builder.MustFindValue(c.wasmLocalToVariable[i]))
+	}
+	for _, v := range c.state().values {
+		push(v)
+	}
+	if len(vals) == 0 {
+		return
+	}
+	if len(vals) > c.maxGCRoots {
+		c.maxGCRoots = len(vals)
+	}
+
+	limit := builder.AllocateInstruction().
+		AsLoad(c.execCtxPtrValue, nativeapi.ExecutionContextOffsetStackBottomPtr.U32(), ssa.TypeI64).
+		Insert(builder).Return()
+	// The count sits one margin below the limit and the spilled words below that, so this safepoint's n
+	// words start n+1 words down. The scan reads the count first, which is what keeps a shorter safepoint
+	// from retaining what a longer one before it left behind.
+	back := builder.AllocateInstruction().
+		AsIconst64(uint64(backend.StackBoundsCheckMarginBytes + 8*(len(vals)+1))).Insert(builder).Return()
+	base := builder.AllocateInstruction().AsIsub(limit, back).Insert(builder).Return()
+	for i, v := range vals {
+		builder.AllocateInstruction().
+			AsStore(ssa.OpcodeStore, v, base, uint32(i*8)).Insert(builder)
+	}
+	count := builder.AllocateInstruction().AsIconst64(uint64(len(vals))).Insert(builder).Return()
+	builder.AllocateInstruction().
+		AsStore(ssa.OpcodeStore, count, base, uint32(8*len(vals))).Insert(builder)
+}
+
+// emitGCSafepoint emits the loop-header poll of the collector's pause flag. The flag is a word in the
+// execution context that the collector writes, so the common path is one load and one not-taken branch.
+func (c *Compiler) emitGCSafepoint(builder ssa.Builder) {
+	pause := builder.AllocateInstruction().
+		AsLoad(c.execCtxPtrValue, nativeapi.ExecutionContextOffsetGCPause.U32(), ssa.TypeI32).
+		Insert(builder).Return()
+	zero := builder.AllocateInstruction().AsIconst32(0).Insert(builder).Return()
+	paused := builder.AllocateInstruction().
+		AsIcmp(pause, zero, ssa.IntegerCmpCondNotEqual).Insert(builder).Return()
+
+	parkBlk := builder.AllocateBasicBlock()
+	afterBlk := builder.AllocateBasicBlock()
+	builder.AllocateInstruction().AsBrnz(paused, ssa.ValuesNil, parkBlk).Insert(builder)
+	builder.AllocateInstruction().AsJump(ssa.ValuesNil, afterBlk).Insert(builder)
+
+	builder.SetCurrentBlock(parkBlk)
+	c.materializeGCRoots(builder)
+	c.callGC(wasm.GCSafepoint)
+	builder.AllocateInstruction().AsJump(ssa.ValuesNil, afterBlk).Insert(builder)
+	builder.Seal(parkBlk)
+
+	builder.SetCurrentBlock(afterBlk)
+	builder.Seal(afterBlk)
 }

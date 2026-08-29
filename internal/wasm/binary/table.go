@@ -38,7 +38,7 @@ func decodeTable(buf []byte, offset int, enabledFeatures api.CoreFeatures, ret *
 	switch b {
 	case wasm.RefPrefixNullable, wasm.RefPrefixNonNullable:
 		var vt wasm.ValueType
-		vt, offset, err = decodeRefType(buf, offset, b == wasm.RefPrefixNullable)
+		vt, offset, err = decodeRefType(enabledFeatures, buf, offset, b == wasm.RefPrefixNullable)
 		if err != nil {
 			return offset, err
 		}

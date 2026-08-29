@@ -477,6 +477,9 @@ func (e *mockModuleEngine) SetGlobalValue(idx Index, lo, hi uint64) { panic("BUG
 // OwnsGlobals implements the same method as documented on wasm.ModuleEngine.
 func (e *mockModuleEngine) OwnsGlobals() bool { return false }
 
+// TypeIDOfReference implements the same method as documented on wasm.ModuleEngine.
+func (e *mockModuleEngine) TypeIDOfReference(Reference) FunctionTypeID { panic("BUG") }
+
 // MemoryGrown implements the same method as documented on wasm.ModuleEngine.
 func (e *mockModuleEngine) MemoryGrown(Index) { e.memoryGrown++ }
 
@@ -583,7 +586,7 @@ func TestGlobalInstance_initialize(t *testing.T) {
 					expr = NewConstantExpressionFromOpcode(OpcodeF64Const, u64.LeBytes(api.EncodeF64(math.MaxFloat64)))
 				}
 
-				g.initialize(nil, &expr, nil)
+				g.initialize(nil, &expr, nil, constExprEnv{})
 
 				switch vt {
 				case ValueTypeI32:
@@ -618,7 +621,7 @@ func TestGlobalInstance_initialize(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				g := GlobalInstance{}
 				g.Type.ValType = ValueType(tc.expr.Data[0])
-				g.initialize(nil, &tc.expr, nil)
+				g.initialize(nil, &tc.expr, nil, constExprEnv{})
 				require.Equal(t, uint64(0), g.Val)
 			})
 		}
@@ -632,6 +635,7 @@ func TestGlobalInstance_initialize(t *testing.T) {
 				require.Equal(t, Index(1), funcIndex)
 				return 0xdeadbeaf
 			},
+			constExprEnv{},
 		)
 		require.Equal(t, uint64(0xdeadbeaf), g.Val)
 	})
@@ -657,7 +661,7 @@ func TestGlobalInstance_initialize(t *testing.T) {
 				globals := []*GlobalInstance{{Val: tc.val, ValHi: tc.valHi, Type: GlobalType{ValType: tc.valueType}}}
 
 				g := &GlobalInstance{Type: GlobalType{ValType: tc.valueType}}
-				g.initialize(globals, &expr, nil)
+				g.initialize(globals, &expr, nil, constExprEnv{})
 				switch tc.valueType {
 				case ValueTypeI32:
 					require.Equal(t, int32(tc.val), int32(g.Val))
@@ -683,7 +687,7 @@ func TestGlobalInstance_initialize(t *testing.T) {
 			2, 0, 0, 0, 0, 0, 0, 0,
 		})
 		g := GlobalInstance{Type: GlobalType{ValType: ValueTypeV128}}
-		g.initialize(nil, &expr, nil)
+		g.initialize(nil, &expr, nil, constExprEnv{})
 		require.Equal(t, uint64(0x1), g.Val)
 		require.Equal(t, uint64(0x2), g.ValHi)
 	})

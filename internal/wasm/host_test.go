@@ -148,6 +148,7 @@ func requireHostModuleEquals(t *testing.T, expected, actual *Module) {
 	for i := range expected.TypeSection {
 		expected.TypeSection[i].CacheKey()
 	}
+	CanonicalizeTypes(expected.TypeSection)
 
 	// `require.Equal(t, expected, actual)` fails reflect pointers don't match, so brute compare:
 	require.Equal(t, expected.TypeSection, actual.TypeSection)

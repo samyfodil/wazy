@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -357,9 +358,20 @@ func (m *Module) validateBeforeFunctionBodies(enabledFeatures api.CoreFeatures) 
 	for i := range m.TypeSection {
 		tp := &m.TypeSection[i]
 		tp.CacheNumInUint64()
+		tp.CanonicalIndex = Index(i)
+	}
+	// Canonicalization only decides anything for a concrete reference, which cannot exist without one of
+	// these two proposals -- and it costs a map and a key per rec group, which every module before them
+	// would otherwise pay on a path that used to be free.
+	if enabledFeatures.IsEnabled(api.CoreFeatureTypedFunctionReferences | api.CoreFeatureGC) {
+		CanonicalizeTypes(m.TypeSection)
 	}
 
 	if err = m.validateConcreteRefTypes(); err != nil {
+		return
+	}
+
+	if err = m.validateTypeSection(enabledFeatures); err != nil {
 		return
 	}
 
@@ -380,7 +392,7 @@ func (m *Module) validateBeforeFunctionBodies(enabledFeatures api.CoreFeatures) 
 		return
 	}
 
-	if err = m.validateGlobals(globals, uint32(len(functions)), MaximumGlobals); err != nil {
+	if err = m.validateGlobals(globals, uint32(len(functions)), MaximumGlobals, enabledFeatures); err != nil {
 		return
 	}
 
@@ -478,17 +490,22 @@ func (m *Module) validateStartSection() error {
 	return nil
 }
 
-func (m *Module) validateGlobals(globals []GlobalType, numFuncts, maxGlobals uint32) error {
+func (m *Module) validateGlobals(globals []GlobalType, numFuncts, maxGlobals uint32, enabledFeatures api.CoreFeatures) error {
 	if uint32(len(globals)) > maxGlobals {
 		return fmt.Errorf("too many globals in a module")
 	}
 
-	// Global initialization constant expression can only reference the imported globals.
-	// See the note on https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#constant-expressions%E2%91%A0
-	importedGlobals := globals[:m.ImportGlobalCount]
+	// Up to 2.0 a global's initializer could only name an imported global; from 3.0 it may name any global
+	// declared before it. wazy gates that on extended-const, which is where the rest of the same relaxation
+	// lives. See resolveConstExprGlobalType.
+	extended := enabledFeatures.IsEnabled(api.CoreFeatureExtendedConst)
 	for i := range m.GlobalSection {
+		visible := globals[:m.ImportGlobalCount]
+		if extended {
+			visible = globals[:m.ImportGlobalCount+Index(i)]
+		}
 		g := &m.GlobalSection[i]
-		if err := m.validateConstExpression(importedGlobals, numFuncts, &g.Init, g.Type.ValType); err != nil {
+		if err := m.validateConstExpression(visible, numFuncts, &g.Init, g.Type.ValType); err != nil {
 			return err
 		}
 	}
@@ -578,6 +595,7 @@ func (m *Module) declaredFunctionIndexes(enabledFeatures api.CoreFeatures) (ret 
 				ret[funcIndex] = struct{}{}
 				return 0, nil
 			},
+			constExprEnv{types: m.TypeSection},
 		)
 
 		if initErr != nil {
@@ -605,6 +623,7 @@ func (m *Module) declaredFunctionIndexes(enabledFeatures api.CoreFeatures) (ret 
 						ret[funcIndex] = struct{}{}
 						return 0, nil
 					},
+					constExprEnv{types: m.TypeSection},
 				)
 			default:
 				ret[v] = struct{}{}
@@ -667,7 +686,12 @@ func (m *Module) validateMemory(memories []Memory, globals []GlobalType, enabled
 			}
 			// An active data segment's offset is given in the index type of the
 			// memory it initializes: i64 for a 64-bit memory.
-			if err := m.validateConstExpression(importedGlobals, 0, &d.OffsetExpression, memories[d.MemoryIndex].IndexType()); err != nil {
+			// An offset may name any global from 3.0 on, not just an imported one; see validateGlobals.
+			visible := importedGlobals
+			if enabledFeatures.IsEnabled(api.CoreFeatureExtendedConst) {
+				visible = globals
+			}
+			if err := m.validateConstExpression(visible, 0, &d.OffsetExpression, memories[d.MemoryIndex].IndexType()); err != nil {
 				return fmt.Errorf("calculate offset: %w", err)
 			}
 		}
@@ -758,6 +782,7 @@ func (m *Module) validateConstExpression(globals []GlobalType, numFuncs uint32, 
 			lastRefFuncIdx = funcIndex
 			return 0, nil
 		},
+		constExprEnv{types: m.TypeSection},
 	)
 	if err != nil {
 		return err
@@ -767,7 +792,7 @@ func (m *Module) validateConstExpression(globals []GlobalType, numFuncs uint32, 
 			typ = ValueTypeConcreteRef(typeIndex, false)
 		}
 	}
-	if !isRefSubtypeOf(typ, expectedType) {
+	if !isRefSubtypeOf(typ, expectedType, m.TypeSection) {
 		return fmt.Errorf("const expression type mismatch expected %s but got %s", ValueTypeName(expectedType), ValueTypeName(typ))
 	}
 	return nil
@@ -792,8 +817,6 @@ func (m *ModuleInstance) buildTags(module *Module) {
 }
 
 func (m *ModuleInstance) buildGlobals(module *Module, funcRefResolver func(funcIndex Index) Reference) {
-	importedGlobals := m.Globals[:module.ImportGlobalCount]
-
 	me := m.Engine
 	engineOwnGlobal := me.OwnsGlobals()
 	for i := Index(0); i < Index(len(module.GlobalSection)); i++ {
@@ -805,7 +828,11 @@ func (m *ModuleInstance) buildGlobals(module *Module, funcRefResolver func(funcI
 		}
 		m.Globals[i+module.ImportGlobalCount] = g
 		g.Type = gs.Type
-		g.initialize(importedGlobals, &gs.Init, funcRefResolver)
+		// Globals are built in order, so everything an initializer is allowed to name -- the imports, plus
+		// every global declared before this one -- is already in place. Validation decides what is
+		// allowed; this only has to make it reachable.
+		g.initialize(m.Globals[:i+module.ImportGlobalCount], &gs.Init, funcRefResolver,
+			constExprEnv{types: module.TypeSection, inst: m})
 	}
 }
 
@@ -963,6 +990,73 @@ type FunctionType struct {
 
 	// RecGroupPosition is the 0-based position of this type within its rec group.
 	RecGroupPosition int
+
+	// CompositeKind says whether this is a function, struct or array type. Its zero value is
+	// CompositeKindFunc, so every FunctionType built before the GC proposal stays a function type.
+	CompositeKind CompositeKind
+
+	// Fields are the struct fields when CompositeKind is CompositeKindStruct, or the single element type
+	// when it is CompositeKindArray. Nil for function types.
+	Fields []FieldType
+
+	// Supertype is the index of the declared supertype, valid only when HasSupertype is set.
+	Supertype Index
+
+	// HasSupertype is set when the type was declared `sub $x` with a supertype.
+	HasSupertype bool
+
+	// Extensible is set when the type was declared `sub` without `final`, i.e. other types may name it as a
+	// supertype. A plain comptype in the type section is implicitly final, which is this field's zero value.
+	Extensible bool
+
+	// CanonicalIndex is the index of the first type in this module structurally identical to this one, under
+	// the iso-recursive rule. Set by CanonicalizeTypes; see there for why concrete references compare through
+	// it rather than by their own index.
+	CanonicalIndex Index
+
+	// FieldSlots is where each field starts in a GCObject's flat word array, with one extra entry holding
+	// the total. Every storage type occupies one word except v128, which takes two, so this is the identity
+	// for all but a type with a vector field. Nil for a function type. See CacheFieldSlots.
+	FieldSlots []uint32
+}
+
+// CacheFieldSlots computes FieldSlots. Call it once, while this type is exclusively owned -- the decoder does
+// it as each type is read -- since the engines read it from guest execution on any number of goroutines.
+func (f *FunctionType) CacheFieldSlots() {
+	if f.CompositeKind == CompositeKindFunc || f.FieldSlots != nil {
+		return
+	}
+	f.FieldSlots = make([]uint32, len(f.Fields)+1)
+	var slot uint32
+	for i, fd := range f.Fields {
+		f.FieldSlots[i] = slot
+		slot += SlotsForStorageType(fd.Type)
+	}
+	f.FieldSlots[len(f.Fields)] = slot
+}
+
+// SlotsForStorageType is how many uint64 words one value of a storage type occupies in a GCObject.
+func SlotsForStorageType(st ValueType) uint32 {
+	if st == ValueTypeV128 {
+		return 2
+	}
+	return 1
+}
+
+// CompositeKind is the shape of a defined type: a function, a struct or an array.
+type CompositeKind byte
+
+const (
+	CompositeKindFunc CompositeKind = iota
+	CompositeKindStruct
+	CompositeKindArray
+)
+
+// FieldType is a struct field or array element: a storage type plus mutability.
+type FieldType struct {
+	// Type is a ValueType, or one of the packed types ValueTypeI8 / ValueTypeI16.
+	Type    ValueType
+	Mutable bool
 }
 
 func (f *FunctionType) CacheNumInUint64() {
@@ -994,6 +1088,13 @@ func (f *FunctionType) EqualsSignature(params []ValueType, results []ValueType) 
 // belong to the same rec group position/size (GC proposal type identity).
 func (f *FunctionType) EqualsType(other *FunctionType) bool {
 	if !f.EqualsSignature(other.Params, other.Results) {
+		return false
+	}
+	if f.CompositeKind != other.CompositeKind || !slices.Equal(f.Fields, other.Fields) {
+		return false
+	}
+	if f.HasSupertype != other.HasSupertype || (f.HasSupertype && f.Supertype != other.Supertype) ||
+		f.Extensible != other.Extensible {
 		return false
 	}
 	return f.RecGroupSize == other.RecGroupSize && f.RecGroupPosition == other.RecGroupPosition
@@ -1054,7 +1155,39 @@ func (f *FunctionType) buildKey() string {
 	if f.RecGroupSize > 1 {
 		fmt.Fprintf(&sb, "|rec%d/%d", f.RecGroupPosition, f.RecGroupSize)
 	}
+	f.writeCompositeKey(&sb, strconv.FormatUint(uint64(f.Supertype), 10), ValueTypeName)
 	return sb.String()
+}
+
+// writeCompositeKey appends the parts of a key that only a GC type can have: the composite kind and its
+// fields, the supertype, and whether the type is extensible. It writes nothing at all for a plain final
+// function type, so pre-GC keys keep their exact historical spelling.
+//
+// super is how the supertype should be spelled -- a local index for a module-local key, a FunctionTypeID for
+// the store-wide one -- and fieldName likewise renders a field's type. See structuralTypeKey.
+func (f *FunctionType) writeCompositeKey(sb *strings.Builder, super string, fieldName func(ValueType) string) {
+	if f.CompositeKind != CompositeKindFunc {
+		sb.WriteByte('|')
+		if f.CompositeKind == CompositeKindStruct {
+			sb.WriteString("struct")
+		} else {
+			sb.WriteString("array")
+		}
+		for _, fd := range f.Fields {
+			sb.WriteByte(' ')
+			if fd.Mutable {
+				sb.WriteString("mut ")
+			}
+			sb.WriteString(fieldName(fd.Type))
+		}
+	}
+	if f.HasSupertype {
+		sb.WriteString("|sub")
+		sb.WriteString(super)
+	}
+	if f.Extensible {
+		sb.WriteString("|open")
+	}
 }
 
 // String implements fmt.Stringer.
@@ -1403,14 +1536,38 @@ const (
 	ValueTypeExnref    ValueType = 0x69
 )
 
+// The abstract heap types added by the GC proposal, in their `ref null` (short) spelling. Like the pre-GC
+// reference kinds above, each kind byte is the heap type's binary encoding, i.e. byte(0x80 + heapType).
+const (
+	ValueTypeNullExnref    ValueType = 0x74 // (ref null noexn)
+	ValueTypeNullFuncref   ValueType = 0x73 // (ref null nofunc)
+	ValueTypeNullExternref ValueType = 0x72 // (ref null noextern)
+	ValueTypeNullref       ValueType = 0x71 // (ref null none)
+	ValueTypeAnyref        ValueType = 0x6e
+	ValueTypeEqref         ValueType = 0x6d
+	ValueTypeI31ref        ValueType = 0x6c
+	ValueTypeStructref     ValueType = 0x6b
+	ValueTypeArrayref      ValueType = 0x6a
+)
+
+// The packed storage types of the GC proposal. These are valid only as a struct field or array element type,
+// never as a value type, so they are rejected everywhere decodeValueType is used.
+const (
+	ValueTypeI8  ValueType = 0x78
+	ValueTypeI16 ValueType = 0x77
+)
+
 // Kind returns the base type byte (bits 0-7).
 func (v ValueType) Kind() byte { return byte(v) }
 
 // IsRef returns true if this is a reference type (including non-nullable variants).
+//
+// 0x69..0x74 is exactly the set of abstract heap type encodings: exn, array, i31, struct, eq, any, extern, func,
+// none, noextern, nofunc, noexn. Nothing else lives in that range -- the numeric kinds start at v128 (0x7b) --
+// so one range test replaces a per-kind list that would now be twelve comparisons long.
 func (v ValueType) IsRef() bool {
 	k := v.Kind()
-	return k == ValueTypeFuncref.Kind() || k == ValueTypeExternref.Kind() || k == ValueTypeExnref.Kind() ||
-		v&flagConcreteRef != 0
+	return (k >= ValueTypeExnref.Kind() && k <= ValueTypeNullExnref.Kind()) || v&flagConcreteRef != 0
 }
 
 // IsNullable returns true if this reference type is nullable. Must only be called on ref types.
@@ -1451,7 +1608,43 @@ const (
 	HeapTypeExtern int64 = -17
 	// HeapTypeExn is the abstract heap type for exception references.
 	HeapTypeExn int64 = -23
+
+	// The nine abstract heap types added by the GC proposal.
+	HeapTypeNoExn    int64 = -12
+	HeapTypeNoFunc   int64 = -13
+	HeapTypeNoExtern int64 = -14
+	HeapTypeNone     int64 = -15
+	HeapTypeAny      int64 = -18
+	HeapTypeEq       int64 = -19
+	HeapTypeI31      int64 = -20
+	HeapTypeStruct   int64 = -21
+	HeapTypeArray    int64 = -22
 )
+
+// AbstractHeapTypeValueType maps an abstract heap type to the ValueType of its nullable reference, or returns
+// false if ht is not a known abstract heap type. Every kind byte is byte(0x80+ht) by construction, so the map
+// is a membership test plus that arithmetic.
+func AbstractHeapTypeValueType(ht int64) (ValueType, bool) {
+	switch ht {
+	case HeapTypeFunc, HeapTypeExtern, HeapTypeExn,
+		HeapTypeNoExn, HeapTypeNoFunc, HeapTypeNoExtern, HeapTypeNone,
+		HeapTypeAny, HeapTypeEq, HeapTypeI31, HeapTypeStruct, HeapTypeArray:
+		return ValueType(uint8(ht + 0x80)), true
+	}
+	return 0, false
+}
+
+// IsGCHeapType returns true if vt's kind is one of the abstract heap types the GC proposal adds. Used to gate
+// them on api.CoreFeatureGC.
+func (v ValueType) IsGCHeapType() bool {
+	switch v.Kind() {
+	case ValueTypeNullExnref.Kind(), ValueTypeNullFuncref.Kind(), ValueTypeNullExternref.Kind(),
+		ValueTypeNullref.Kind(), ValueTypeAnyref.Kind(), ValueTypeEqref.Kind(), ValueTypeI31ref.Kind(),
+		ValueTypeStructref.Kind(), ValueTypeArrayref.Kind():
+		return true
+	}
+	return false
+}
 
 // ValueTypeName returns the name of a ValueType.
 func ValueTypeName(t ValueType) string {
@@ -1487,36 +1680,49 @@ func ValueTypeName(t ValueType) string {
 			return "(ref exn)"
 		}
 		return "exnref"
+	case ValueTypeI8:
+		return "i8"
+	case ValueTypeI16:
+		return "i16"
+	}
+	if name, ok := gcRefNames[t.AsNullable()]; ok {
+		if !t.IsNullable() {
+			return "(ref " + name.heap + ")"
+		}
+		return name.short
 	}
 	return "unknown"
+}
+
+var gcRefNames = map[ValueType]struct{ heap, short string }{
+	ValueTypeNullExnref:    {"noexn", "nullexnref"},
+	ValueTypeNullFuncref:   {"nofunc", "nullfuncref"},
+	ValueTypeNullExternref: {"noextern", "nullexternref"},
+	ValueTypeNullref:       {"none", "nullref"},
+	ValueTypeAnyref:        {"any", "anyref"},
+	ValueTypeEqref:         {"eq", "eqref"},
+	ValueTypeI31ref:        {"i31", "i31ref"},
+	ValueTypeStructref:     {"struct", "structref"},
+	ValueTypeArrayref:      {"array", "arrayref"},
 }
 
 func isReferenceValueType(vt ValueType) bool {
 	return vt.IsRef()
 }
 
-// isRefSubtypeOf returns true if actual is a subtype of (or equal to) expected.
-// Non-nullable is a subtype of nullable. Concrete function refs are subtypes of funcref.
-func isRefSubtypeOf(actual, expected ValueType) bool {
-	if actual == expected {
-		return true
-	}
-	// Non-nullable is subtype of nullable (same kind/index).
-	if actual.AsNullable() == expected.AsNullable() && expected.IsNullable() {
-		return true
-	}
-	// Concrete function ref is subtype of (abstract) funcref (nullable or non-nullable).
-	if actual.IsConcreteRef() && expected.Kind() == ValueTypeFuncref.Kind() {
-		if !actual.IsNullable() || expected.IsNullable() {
-			return true
-		}
-	}
-	return false
+// isRefSubtypeOf returns true if actual is a subtype of (or equal to) expected, over the reference type
+// lattice: non-nullable is a subtype of nullable, concrete refs sit under the abstract top of their composite
+// kind, and the GC abstract heap types form the hierarchy in gc.go.
+//
+// types is the type section the concrete indices in actual/expected refer to. See isHeapSubtype for when it
+// may be nil.
+func isRefSubtypeOf(actual, expected ValueType, types []FunctionType) bool {
+	return valueTypeMatches(actual, expected, types)
 }
 
 // areRefTypesCompatible returns true if either type is a subtype of the other.
-func areRefTypesCompatible(a, b ValueType) bool {
-	return isRefSubtypeOf(a, b) || isRefSubtypeOf(b, a)
+func areRefTypesCompatible(a, b ValueType, types []FunctionType) bool {
+	return isRefSubtypeOf(a, b, types) || isRefSubtypeOf(b, a, types)
 }
 
 // ExternType is an alias of api.ExternType defined to simplify imports.

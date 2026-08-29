@@ -3,6 +3,7 @@ package interpreter
 import (
 	"fmt"
 
+	"github.com/samyfodil/wazy/internal/leb128"
 	"github.com/samyfodil/wazy/internal/wasm"
 )
 
@@ -828,6 +829,10 @@ func (c *compiler) wasmOpcodeSignature(op wasm.Opcode, index uint32) (*signature
 		default:
 			return nil, fmt.Errorf("unsupported atomic instruction in interpreterir: %s", wasm.AtomicInstructionName(atomicOp))
 		}
+	case wasm.OpcodeRefEq:
+		return signature_I64I64_I32, nil
+	case wasm.OpcodeGCPrefix:
+		return c.gcSignature(c.body[c.pc+1])
 	default:
 		return nil, fmt.Errorf("unsupported instruction in interpreterir: 0x%x", op)
 	}
@@ -1079,4 +1084,158 @@ func wasmValueTypeToUnsignedInOutSignature(vt wasm.ValueType) *signature {
 		}
 	}
 	panic("unreachable")
+}
+
+// gcSignature returns the stack effect of one instruction of the GC proposal. References are opaque i64s here
+// as everywhere else in this engine, and a packed field is read and written as an i32.
+//
+// The immediates are re-read rather than threaded from the compile step, because applyToStack runs first and a
+// struct's field type -- hence the instruction's own stack effect -- is only knowable from them.
+func (c *compiler) gcSignature(gcOp wasm.OpcodeGC) (*signature, error) {
+	imm := func(i int) (uint32, int, error) {
+		// c.pc is at the 0xfb prefix, +1 the opcode, +2 the first immediate.
+		off := c.pc + 2
+		var v uint32
+		var read uint64
+		for j := 0; j <= i; j++ {
+			var n uint64
+			var err error
+			v, n, err = leb128.LoadUint32(c.body[off+read:])
+			if err != nil {
+				return 0, 0, fmt.Errorf("read immediate for %s: %w", wasm.GCInstructionName(gcOp), err)
+			}
+			read += n
+		}
+		return v, int(read), nil
+	}
+	// storage returns the unsignedType of a struct field or array element, which is what a packed one widens
+	// to on the stack.
+	storage := func(typeIndex, fieldIndex uint32) (unsignedType, error) {
+		if int(typeIndex) >= len(c.types) {
+			return 0, fmt.Errorf("%s: unknown type %d", wasm.GCInstructionName(gcOp), typeIndex)
+		}
+		fields := c.types[typeIndex].Fields
+		if int(fieldIndex) >= len(fields) {
+			return 0, fmt.Errorf("%s: unknown field %d", wasm.GCInstructionName(gcOp), fieldIndex)
+		}
+		return unsignedTypeOf(unpackedValueType(fields[fieldIndex].Type)), nil
+	}
+
+	switch gcOp {
+	case wasm.OpcodeGCStructNew:
+		typeIndex, _, err := imm(0)
+		if err != nil {
+			return nil, err
+		}
+		if int(typeIndex) >= len(c.types) {
+			return nil, fmt.Errorf("struct.new: unknown type %d", typeIndex)
+		}
+		in := make([]unsignedType, len(c.types[typeIndex].Fields))
+		for i := range in {
+			if in[i], err = storage(typeIndex, uint32(i)); err != nil {
+				return nil, err
+			}
+		}
+		return &signature{in: in, out: []unsignedType{unsignedTypeI64}}, nil
+
+	case wasm.OpcodeGCStructNewDefault:
+		return signature_None_I64, nil
+	case wasm.OpcodeGCArrayNewDefault:
+		return signature_I32_I64, nil
+
+	case wasm.OpcodeGCStructGet, wasm.OpcodeGCStructGetS, wasm.OpcodeGCStructGetU, wasm.OpcodeGCStructSet:
+		typeIndex, _, err := imm(0)
+		if err != nil {
+			return nil, err
+		}
+		fieldIndex, _, err := imm(1)
+		if err != nil {
+			return nil, err
+		}
+		t, err := storage(typeIndex, fieldIndex)
+		if err != nil {
+			return nil, err
+		}
+		if gcOp == wasm.OpcodeGCStructSet {
+			return &signature{in: []unsignedType{unsignedTypeI64, t}}, nil
+		}
+		return &signature{in: []unsignedType{unsignedTypeI64}, out: []unsignedType{t}}, nil
+
+	case wasm.OpcodeGCArrayNew, wasm.OpcodeGCArrayNewFixed, wasm.OpcodeGCArrayGet, wasm.OpcodeGCArrayGetS,
+		wasm.OpcodeGCArrayGetU, wasm.OpcodeGCArraySet, wasm.OpcodeGCArrayFill:
+		typeIndex, _, err := imm(0)
+		if err != nil {
+			return nil, err
+		}
+		t, err := storage(typeIndex, 0)
+		if err != nil {
+			return nil, err
+		}
+		switch gcOp {
+		case wasm.OpcodeGCArrayNew:
+			return &signature{in: []unsignedType{t, unsignedTypeI32}, out: []unsignedType{unsignedTypeI64}}, nil
+		case wasm.OpcodeGCArrayNewFixed:
+			count, _, err := imm(1)
+			if err != nil {
+				return nil, err
+			}
+			in := make([]unsignedType, count)
+			for i := range in {
+				in[i] = t
+			}
+			return &signature{in: in, out: []unsignedType{unsignedTypeI64}}, nil
+		case wasm.OpcodeGCArraySet:
+			return &signature{in: []unsignedType{unsignedTypeI64, unsignedTypeI32, t}}, nil
+		case wasm.OpcodeGCArrayFill:
+			return &signature{in: []unsignedType{unsignedTypeI64, unsignedTypeI32, t, unsignedTypeI32}}, nil
+		default: // the three array.get forms
+			return &signature{in: []unsignedType{unsignedTypeI64, unsignedTypeI32}, out: []unsignedType{t}}, nil
+		}
+
+	case wasm.OpcodeGCArrayNewData, wasm.OpcodeGCArrayNewElem:
+		return &signature{in: []unsignedType{unsignedTypeI32, unsignedTypeI32}, out: []unsignedType{unsignedTypeI64}}, nil
+	case wasm.OpcodeGCArrayInitData, wasm.OpcodeGCArrayInitElem:
+		return &signature{in: []unsignedType{unsignedTypeI64, unsignedTypeI32, unsignedTypeI32, unsignedTypeI32}}, nil
+	case wasm.OpcodeGCArrayCopy:
+		return &signature{in: []unsignedType{
+			unsignedTypeI64, unsignedTypeI32, unsignedTypeI64, unsignedTypeI32, unsignedTypeI32,
+		}}, nil
+	case wasm.OpcodeGCArrayLen, wasm.OpcodeGCI31GetS, wasm.OpcodeGCI31GetU,
+		wasm.OpcodeGCRefTest, wasm.OpcodeGCRefTestNull:
+		return signature_I64_I32, nil
+	case wasm.OpcodeGCRefI31:
+		return signature_I32_I64, nil
+	case wasm.OpcodeGCRefCast, wasm.OpcodeGCRefCastNull,
+		wasm.OpcodeGCAnyConvertExtern, wasm.OpcodeGCExternConvertAny:
+		return signature_I64_I64, nil
+	case wasm.OpcodeGCBrOnCast, wasm.OpcodeGCBrOnCastFail:
+		// The reference stays on the stack on both paths, so this is a no-op on the stack shape; the
+		// branch itself is emitted as a test plus a conditional branch.
+		return signature_I64_I64, nil
+	}
+	return nil, fmt.Errorf("unsupported GC instruction in interpreterir: %s", wasm.GCInstructionName(gcOp))
+}
+
+// unsignedTypeOf is the engine's stack type for a wasm value type. Every reference is an opaque i64.
+func unsignedTypeOf(vt wasm.ValueType) unsignedType {
+	switch vt {
+	case wasm.ValueTypeI32:
+		return unsignedTypeI32
+	case wasm.ValueTypeF32:
+		return unsignedTypeF32
+	case wasm.ValueTypeF64:
+		return unsignedTypeF64
+	case wasm.ValueTypeV128:
+		return unsignedTypeV128
+	}
+	return unsignedTypeI64
+}
+
+// unpackedValueType is wasm's unpackedType, repeated here because it is unexported there.
+func unpackedValueType(st wasm.ValueType) wasm.ValueType {
+	switch st {
+	case wasm.ValueTypeI8, wasm.ValueTypeI16:
+		return wasm.ValueTypeI32
+	}
+	return st
 }

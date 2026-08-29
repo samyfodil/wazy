@@ -25,6 +25,13 @@ type (
 		localFunctionInstances []*functionInstance
 		importedFunctions      []importedFunction
 		listeners              []api.FunctionListener
+		// gcEnabled caches whether this runtime enables the GC proposal, so the per-call check in
+		// callWithStack is one load off an already-hot pointer rather than three dependent ones.
+		gcEnabled bool
+		// gcRootsReserve is callEngine.gcRootsReserve's answer, precomputed. It is read twice on every
+		// call -- to size the stack and to place its limit -- and deriving it there meant reaching
+		// through to the compiled module for maxGCRoots on a path that otherwise never touches it.
+		gcRootsReserve int32
 	}
 
 	functionInstance struct {
@@ -232,6 +239,7 @@ func (m *moduleEngine) NewFunction(index wasm.Index) api.Function {
 	ce.execCtx.throwAllocTrampolineAddress = sharedFunctions.throwAllocTrampolineAddress
 	ce.execCtx.throwTrampolineAddress = sharedFunctions.throwTrampolineAddress
 	ce.execCtx.tryTableEnterTrampolineAddress = sharedFunctions.tryTableEnterAddress
+	ce.execCtx.gcCheckTrampolineAddress = sharedFunctions.gcCheckAddress
 	ce.execCtx.tryTableLeaveTrampolineAddress = sharedFunctions.tryTableLeaveAddress
 	ce.execCtx.memmoveAddress = memmovPtr
 	ce.init()
@@ -337,6 +345,12 @@ func (m *moduleEngine) DoneInstantiation() {
 	if !m.module.Source.IsHostModule {
 		m.setupOpaque()
 	}
+}
+
+// TypeIDOfReference implements wasm.ModuleEngine. A funcref is the address of the callee's functionInstance
+// in some module's opaque context, so its type is a plain field read.
+func (m *moduleEngine) TypeIDOfReference(ref wasm.Reference) wasm.FunctionTypeID {
+	return nativeapi.PtrFromUintptr[functionInstance](uintptr(ref)).typeID
 }
 
 // FunctionInstanceReference implements wasm.ModuleEngine.

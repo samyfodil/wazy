@@ -104,6 +104,11 @@ type ModuleEngine interface {
 	// the initialization via ElementSegment.
 	FunctionInstanceReference(funcIndex Index) Reference
 
+	// TypeIDOfReference returns the FunctionTypeID of a non-null function reference, whose representation
+	// is the engine's own. It is what lets the GC proposal's runtime type checks (see RunGCCheck) ask what
+	// a funcref actually is without knowing how the engine spells one.
+	TypeIDOfReference(ref Reference) FunctionTypeID
+
 	// MemoryGrown notifies the engine that the memory at the given Index has grown.
 	MemoryGrown(index Index)
 }

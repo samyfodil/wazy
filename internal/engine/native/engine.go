@@ -53,6 +53,10 @@ type (
 		// goroutine calling into it, not just one. sync.Pool is itself
 		// goroutine-safe, so no extra locking is needed here.
 		stackPools [stackPoolNumClasses]sync.Pool
+
+		// enabledFeatures is the runtime's feature set, kept so compilation knows whether to emit the
+		// collector's loop-header safepoint. See frontend.Compiler.SetGCEnabled.
+		enabledFeatures api.CoreFeatures
 	}
 
 	sharedFunctions struct {
@@ -90,7 +94,9 @@ type (
 		// native.executionContext.savedRegisters as part of a throw-time
 		// control transfer; see (*callEngine).handleThrow.
 		throwTransferRegisterRestoreAddress *byte
-		listenerTrampolines                 listenerTrampolines
+		// gcCheckAddress is the address of the GC runtime type check trampoline. See nativeapi.ExitCodeGCCheck.
+		gcCheckAddress      *byte
+		listenerTrampolines listenerTrampolines
 	}
 
 	listenerTrampolines = map[*wasm.FunctionType]struct {
@@ -107,6 +113,9 @@ type (
 		parent            *engine
 		module            *wasm.Module
 		ensureTermination bool
+		// maxGCRoots is the most values any safepoint in this module writes; see
+		// frontend.Compiler.MaxGCRoots.
+		maxGCRoots int
 		// interruptCheckInterval is the (power-of-two) loop-header interrupt-check
 		// interval this module was compiled under. Seeds execCtx.interruptCheckMask
 		// (= interval-1) per callEngine so the amortized check's mask is a runtime
@@ -157,7 +166,7 @@ type sourceMap struct {
 var _ wasm.Engine = (*engine)(nil)
 
 // NewEngine returns the implementation of wasm.Engine.
-func NewEngine(ctx context.Context, _ api.CoreFeatures, fc filecache.Cache) wasm.Engine {
+func NewEngine(ctx context.Context, enabledFeatures api.CoreFeatures, fc filecache.Cache) wasm.Engine {
 	machine := newMachine()
 	be := backend.NewCompiler(ctx, machine, ssa.NewBuilder())
 	e := &engine{
@@ -167,6 +176,7 @@ func NewEngine(ctx context.Context, _ api.CoreFeatures, fc filecache.Cache) wasm
 		be:              be,
 		fileCache:       fc,
 		wazyVersion:     version.GetWazyVersion(),
+		enabledFeatures: enabledFeatures,
 	}
 	e.compileSharedFunctions()
 	return e
@@ -326,6 +336,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 	if workers := api.GetCompilationWorkers(ctx); workers <= 1 {
 		// Compile with a single goroutine.
 		fe := frontend.NewFrontendCompiler(module, ssaBuilder, &cm.offsets, ensureTermination, withListener, needSourceInfo)
+		fe.SetGCEnabled(e.enabledFeatures.IsEnabled(api.CoreFeatureGC))
 		fe.SetInterruptCheckInterval(interruptCheckInterval)
 
 		for i := range module.CodeSection {
@@ -345,6 +356,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 			relocator.appendFunction(fctx, module, cm, i, fidx, body, relsPerFunc, be.SourceOffsetInfo(), ehEntries, frameSize)
 		}
 		cm.tryTableInfo = fe.TryTableMetadata()
+		cm.maxGCRoots = fe.MaxGCRoots()
 	} else {
 		// Compile with N worker goroutines.
 		// Collect compiled functions across workers in a slice,
@@ -370,6 +382,9 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 		sharedTTM := frontend.NewSharedTryTableMetadata()
 
 		var count atomic.Uint32
+		// maxGCRoots is the largest root-buffer size any worker's frontend needed; see
+		// frontend.Compiler.MaxGCRoots.
+		var maxGCRoots atomic.Int64
 		var wg sync.WaitGroup
 		wg.Add(workers)
 
@@ -385,6 +400,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 					module, ssaBuilder, &cm.offsets, ensureTermination, withListener, needSourceInfo).
 					WithTryTableMetadata(sharedTTM)
 				fe.SetInterruptCheckInterval(interruptCheckInterval)
+				fe.SetGCEnabled(e.enabledFeatures.IsEnabled(api.CoreFeatureGC))
 
 				for {
 					if err := ctx.Err(); err != nil {
@@ -411,6 +427,9 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 						return
 					}
 
+					if n := fe.MaxGCRoots(); n > int(maxGCRoots.Load()) {
+						maxGCRoots.Store(int64(n))
+					}
 					compiledFuncs[i] = compiledFunc{
 						fctx, i, fidx, body,
 						// These slices are internal to the backend compiler and since we are going to buffer them instead
@@ -425,6 +444,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 		}
 
 		wg.Wait()
+		cm.maxGCRoots = int(maxGCRoots.Load())
 		if err := context.Cause(ctx); err != nil {
 			return nil, err
 		}
@@ -927,7 +947,7 @@ func checkAddrInBytes(addr uintptr, b []byte) bool {
 
 // NewModuleEngine implements wasm.Engine.
 func (e *engine) NewModuleEngine(m *wasm.Module, mi *wasm.ModuleInstance) (wasm.ModuleEngine, error) {
-	me := &moduleEngine{}
+	me := &moduleEngine{gcEnabled: e.enabledFeatures.IsEnabled(api.CoreFeatureGC)}
 
 	// Note: imported functions are resolved in moduleEngine.ResolveImportedFunction.
 	me.importedFunctions = make([]importedFunction, m.ImportFunctionCount)
@@ -938,6 +958,11 @@ func (e *engine) NewModuleEngine(m *wasm.Module, mi *wasm.ModuleInstance) (wasm.
 	}
 	me.parent = compiled
 	me.module = mi
+	if me.gcEnabled && compiled.maxGCRoots > 0 {
+		// The spilled words plus their count, 16-byte aligned so the go-call margin above the region keeps
+		// the alignment the trampoline wants. See callEngine.gcRootsReserve.
+		me.gcRootsReserve = int32((8*compiled.maxGCRoots + 8 + 15) &^ 15)
+	}
 	me.listeners = compiled.listeners
 
 	if m.IsHostModule {
@@ -954,7 +979,7 @@ func (e *engine) NewModuleEngine(m *wasm.Module, mi *wasm.ModuleInstance) (wasm.
 }
 
 func (e *engine) compileSharedFunctions() {
-	var sizes [13]int
+	var sizes [14]int
 	var trampolines []byte
 
 	addTrampoline := func(i int, buf []byte) {
@@ -1059,6 +1084,16 @@ func (e *engine) compileSharedFunctions() {
 	e.be.Init()
 	addTrampoline(12, e.machine.CompileThrowTransferRegisterRestore())
 
+	e.be.Init()
+	addTrampoline(13,
+		e.machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeGCCheck, &ssa.Signature{
+			// exec context, then the mode and five operands of wasm.RunGC: see gcSig.
+			Params: []ssa.Type{
+				ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64,
+			},
+			Results: []ssa.Type{ssa.TypeI64},
+		}, false))
+
 	fns := &sharedFunctions{
 		executable:          mmapExecutable(trampolines),
 		listenerTrampolines: make(listenerTrampolines),
@@ -1091,6 +1126,8 @@ func (e *engine) compileSharedFunctions() {
 	fns.tryTableLeaveAddress = &fns.executable[offset]
 	offset += sizes[11]
 	fns.throwTransferRegisterRestoreAddress = &fns.executable[offset]
+	offset += sizes[12]
+	fns.gcCheckAddress = &fns.executable[offset]
 
 	if nativeapi.PerfMapEnabled {
 		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.memoryGrowAddress)), uint64(sizes[0]), "memory_grow_trampoline")
@@ -1106,6 +1143,7 @@ func (e *engine) compileSharedFunctions() {
 		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.tryTableEnterAddress)), uint64(sizes[10]), "try_table_enter_trampoline")
 		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.tryTableLeaveAddress)), uint64(sizes[11]), "try_table_leave_trampoline")
 		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.throwTransferRegisterRestoreAddress)), uint64(sizes[12]), "throw_transfer_register_restore")
+		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.gcCheckAddress)), uint64(sizes[13]), "gc_check_trampoline")
 	}
 
 	e.sharedFunctions = fns

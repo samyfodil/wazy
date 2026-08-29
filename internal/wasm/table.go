@@ -272,6 +272,7 @@ func (m *Module) validateTable(enabledFeatures api.CoreFeatures, tables []Table,
 					}
 					return 0, nil
 				},
+				constExprEnv{types: m.TypeSection},
 			)
 			if err != nil {
 				return err
@@ -287,7 +288,7 @@ func (m *Module) validateTable(enabledFeatures api.CoreFeatures, tables []Table,
 					return fmt.Errorf("%s[%d].init[%d] must be externref but was %s", SectionIDName(SectionIDElement), idx, ei, ValueTypeName(initType))
 				}
 			default:
-				if !isRefSubtypeOf(initType, elem.Type) && initType != ValueTypeFuncref {
+				if !isRefSubtypeOf(initType, elem.Type, m.TypeSection) && initType != ValueTypeFuncref {
 					return fmt.Errorf("%s[%d].init[%d] must be %s but was %s",
 						SectionIDName(SectionIDElement), idx, ei, ValueTypeName(elem.Type), ValueTypeName(initType))
 				}
@@ -300,7 +301,7 @@ func (m *Module) validateTable(enabledFeatures api.CoreFeatures, tables []Table,
 			}
 
 			t := tables[elem.TableIndex]
-			if !isRefSubtypeOf(elem.Type, t.Type) {
+			if !isRefSubtypeOf(elem.Type, t.Type, m.TypeSection) {
 				return fmt.Errorf("element type mismatch: table has %s but element has %s",
 					RefTypeName(t.Type), RefTypeName(elem.Type),
 				)
@@ -333,6 +334,7 @@ func (m *Module) validateTable(enabledFeatures api.CoreFeatures, tables []Table,
 				func(funcIndex Index) (Reference, error) {
 					return 0, nil
 				},
+				constExprEnv{types: m.TypeSection},
 			)
 			if err != nil {
 				return fmt.Errorf("%s[%d] couldn't evaluate offset expression: %w", SectionIDName(SectionIDElement), idx, err)

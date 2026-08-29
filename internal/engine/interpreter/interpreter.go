@@ -9,6 +9,7 @@ import (
 	"math/bits"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/samyfodil/wazy/api"
@@ -187,6 +188,19 @@ type callEngine struct {
 
 	// stackiterator for Listeners to walk frames and stack.
 	stackIterator stackIterator
+
+	// gcPause is what a loop header polls: non-zero means a collection is waiting for this call to park.
+	// gcExec is this call's registration with the store, and is nil unless the GC proposal is enabled.
+	gcPause uint32
+	gcExec  *wasm.GCExecution
+}
+
+// ScanGCRoots implements wasm.GCRoots. Every operand and local this call holds lives in one flat []uint64, so
+// the whole of it is offered to the collector, which decides what looks like a reference.
+func (ce *callEngine) ScanGCRoots(visit func(uint64)) {
+	for _, v := range ce.stack {
+		visit(v)
+	}
 }
 
 // matchCatchClause checks whether a single catch clause matches the given exception.
@@ -372,7 +386,10 @@ type compiledFunction struct {
 	offsetsInWasmBinary []uint64
 	hostFn              interface{}
 	ensureTermination   bool
-	index               wasm.Index
+	// gcEnabled mirrors the engine's feature set, so a call knows whether to register itself with the
+	// store's collector without reaching back through the module.
+	gcEnabled bool
+	index     wasm.Index
 }
 
 type function struct {
@@ -380,6 +397,14 @@ type function struct {
 	moduleInstance *wasm.ModuleInstance
 	typeID         wasm.FunctionTypeID
 	parent         *compiledFunction
+}
+
+// typeMatches reports whether f may be reached through a call_indirect declaring expected. Under the GC
+// proposal a function whose type is a *subtype* of the declared one matches, so equality is no longer the
+// whole rule -- but it is still the answer for every module that declares no subtype relation, so the walk
+// only runs once the cheap check has failed.
+func (f *function) typeMatches(expected wasm.FunctionTypeID) bool {
+	return f.typeID == expected || f.moduleInstance.TypeIDIsSubtypeOf(f.typeID, expected)
 }
 
 // functionFromUintptr resurrects the original *function from the given uintptr
@@ -565,6 +590,7 @@ func (e *engine) CompileModule(_ context.Context, module *wasm.Module, listeners
 		}
 		compiled.source = module
 		compiled.ensureTermination = ensureTermination
+		compiled.gcEnabled = e.enabledFeatures.IsEnabled(api.CoreFeatureGC)
 		compiled.listener = lsn
 		compiled.index = imported + uint32(i)
 	}
@@ -935,6 +961,11 @@ func (e *moduleEngine) ResolveImportedMemory(index, indexInImportedModule wasm.I
 // DoneInstantiation implements wasm.ModuleEngine.
 func (e *moduleEngine) DoneInstantiation() {}
 
+// TypeIDOfReference implements the same method as documented on wasm.ModuleEngine.
+func (e *moduleEngine) TypeIDOfReference(ref wasm.Reference) wasm.FunctionTypeID {
+	return functionFromUintptr(uintptr(ref)).typeID
+}
+
 // FunctionInstanceReference implements the same method as documented on wasm.ModuleEngine.
 func (e *moduleEngine) FunctionInstanceReference(funcIndex wasm.Index) wasm.Reference {
 	return uintptr(unsafe.Pointer(&e.functions[funcIndex]))
@@ -959,7 +990,7 @@ func (e *moduleEngine) LookupFunction(t *wasm.TableInstance, typeId wasm.Functio
 	}
 
 	tf := functionFromUintptr(rawPtr)
-	if tf.typeID != typeId {
+	if !tf.typeMatches(typeId) {
 		panic(wasmruntime.ErrRuntimeIndirectCallTypeMismatch)
 	}
 	return tf.moduleInstance, tf.parent.index
@@ -1009,6 +1040,14 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 
 	if expctxkeys.SnapshotterEnabled.Load() && ctx.Value(expctxkeys.EnableSnapshotterKey{}) != nil {
 		ctx = context.WithValue(ctx, expctxkeys.SnapshotterKey{}, ce)
+	}
+
+	if ce.f.parent.gcEnabled {
+		ce.gcExec = m.RegisterGCExecution(ce, &ce.gcPause)
+		defer func() {
+			ce.gcExec.Unregister()
+			ce.gcExec = nil
+		}()
 	}
 
 	defer func() {
@@ -1121,12 +1160,17 @@ func (ce *callEngine) callGoFunc(ctx context.Context, m *wasm.ModuleInstance, f 
 	ce.pushFrame(callFrame{f: f, base: len(ce.stack)})
 
 	fn := f.parent.hostFn
+	// A host function can block for as long as it likes, and its wasm stack does not move while it does, so
+	// this call is a parking point too. Without it a collection would wait on an execution that is never
+	// going to reach a loop header.
+	ce.gcExec.EnterGo()
 	switch fn := fn.(type) {
 	case api.GoModuleFunction:
 		fn.Call(ctx, m, stack)
 	case api.GoFunction:
 		fn.Call(ctx, stack)
 	}
+	ce.gcExec.LeaveGo()
 
 	ce.popFrame()
 	if lsn != nil {
@@ -2705,6 +2749,22 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		}
 	case operationKindRefFunc:
 		ce.pushValue(uint64(uintptr(unsafe.Pointer(&functions[op.U1]))))
+	case operationKindRefTest:
+		ref := ce.stack[len(ce.stack)-1]
+		if op.B1 == 0 {
+			ce.popValue() // the plain form consumes its operand; br_on_cast's leaves it in place
+		}
+		ce.pushValue(wasm.RunGC(ce.f.moduleInstance, wasm.GCCheckRefTest, ref, op.U1, 0, 0, 0, nil))
+	case operationKindGCSafepoint:
+		if atomic.LoadUint32(&ce.gcPause) != 0 {
+			ce.gcExec.Safepoint()
+		}
+	case operationKindGC:
+		ce.execGC(op)
+	case operationKindRefCast:
+		// The value stays on the stack: a successful cast only narrows its static type, and a failed one
+		// traps inside RunGCCheck.
+		wasm.RunGC(ce.f.moduleInstance, wasm.GCCheckRefCast, ce.stack[len(ce.stack)-1], op.U1, 0, 0, 0, nil)
 	case operationKindTableGet:
 		table := tables[op.U1]
 
@@ -5300,7 +5360,7 @@ func (ce *callEngine) functionForOffset(table *wasm.TableInstance, offset uint64
 	}
 
 	tf := functionFromUintptr(rawPtr)
-	if tf.typeID != expectedTypeID {
+	if !tf.typeMatches(expectedTypeID) {
 		panic(wasmruntime.ErrRuntimeIndirectCallTypeMismatch)
 	}
 	return tf
@@ -5643,4 +5703,112 @@ func v128Dot(x1Hi, x1Lo, x2Hi, x2Lo uint64) (uint64, uint64) {
 	r7 := int32(int16(x1Hi>>32)) * int32(int16(x2Hi>>32))
 	r8 := int32(int16(x1Hi>>48)) * int32(int16(x2Hi>>48))
 	return uint64(uint32(r1+r2)) | (uint64(uint32(r3+r4)) << 32), uint64(uint32(r5+r6)) | (uint64(uint32(r7+r8)) << 32)
+}
+
+// execGC executes one instruction of the GC proposal by popping the operands its mode wants and handing them
+// to wasm.RunGC, which the native engine reaches through a trampoline. The engine implements none of the
+// semantics itself: everything a GC instruction touches -- the managed heap, store-wide type identity, the
+// module's data and element segments -- lives outside it.
+//
+// The operand order below is the order the instruction pushes them, so the pops read bottom-up. op.B1 is how
+// many words the moved value takes: two for a vector field or element, which becomes two calls into RunGC
+// because a reference-sized result cannot carry one.
+func (ce *callEngine) execGC(op *unionOperation) {
+	m := ce.f.moduleInstance
+	mode, imm1, imm2 := op.U1, op.U2, op.U3
+	wide := op.B1 == 2
+
+	// popValue pairs pop a vector's two words in the order they were pushed.
+	popWide := func() (lo, hi uint64) {
+		if wide {
+			hi = ce.popValue()
+		}
+		return ce.popValue(), hi
+	}
+
+	switch mode {
+	case wasm.GCStructNewDefault:
+		ce.pushValue(wasm.RunGC(m, mode, imm1, 0, 0, 0, 0, nil))
+
+	case wasm.GCStructNew, wasm.GCArrayNewFixed:
+		n := int(imm2)
+		scratch := ce.stack[len(ce.stack)-n:]
+		ref := wasm.RunGC(m, mode, imm1, 0, 0, 0, 0, scratch)
+		ce.stack = ce.stack[:len(ce.stack)-n]
+		ce.pushValue(ref)
+
+	case wasm.GCStructGet:
+		ref := ce.popValue()
+		ce.pushValue(wasm.RunGC(m, mode, ref, imm1, imm2, 0, 0, nil))
+		if wide {
+			ce.pushValue(wasm.RunGC(m, mode, ref, imm1+1, imm2, 0, 0, nil))
+		}
+
+	case wasm.GCStructSet:
+		lo, hi := popWide()
+		ref := ce.popValue()
+		wasm.RunGC(m, mode, ref, imm1, lo, 0, 0, nil)
+		if wide {
+			wasm.RunGC(m, mode, ref, imm1+1, hi, 0, 0, nil)
+		}
+
+	case wasm.GCArrayNew:
+		length := ce.popValue()
+		lo, hi := popWide()
+		ce.pushValue(wasm.RunGC(m, mode, imm1, length, lo, hi, 0, nil))
+
+	case wasm.GCArrayNewDefault:
+		ce.pushValue(wasm.RunGC(m, mode, imm1, ce.popValue(), 0, 0, 0, nil))
+
+	case wasm.GCArrayNewData, wasm.GCArrayNewElem:
+		length := ce.popValue()
+		offset := ce.popValue()
+		ce.pushValue(wasm.RunGC(m, mode, imm1, imm2, offset, length, 0, nil))
+
+	case wasm.GCArrayInitData, wasm.GCArrayInitElem:
+		length := ce.popValue()
+		offset := ce.popValue()
+		index := ce.popValue()
+		ref := ce.popValue()
+		wasm.RunGC(m, mode, ref, index, imm2, offset, length, nil)
+
+	case wasm.GCArrayGet:
+		index := ce.popValue()
+		ref := ce.popValue()
+		ce.pushValue(wasm.RunGC(m, mode, ref, index, imm2, 0, 0, nil))
+		if wide {
+			ce.pushValue(wasm.RunGC(m, mode, ref, index, imm2|2, 0, 0, nil))
+		}
+
+	case wasm.GCArraySet:
+		lo, hi := popWide()
+		index := ce.popValue()
+		ref := ce.popValue()
+		wasm.RunGC(m, mode, ref, index, lo, 0, 0, nil)
+		if wide {
+			wasm.RunGC(m, mode, ref, index, hi, 2, 0, nil)
+		}
+
+	case wasm.GCArrayFill:
+		length := ce.popValue()
+		lo, hi := popWide()
+		index := ce.popValue()
+		ref := ce.popValue()
+		wasm.RunGC(m, mode, ref, index, lo, length, hi, nil)
+
+	case wasm.GCArrayCopy:
+		length := ce.popValue()
+		srcIndex := ce.popValue()
+		src := ce.popValue()
+		dstIndex := ce.popValue()
+		dst := ce.popValue()
+		wasm.RunGC(m, mode, dst, dstIndex, src, srcIndex, length, nil)
+
+	case wasm.GCArrayLen, wasm.GCRefI31, wasm.GCI31GetS, wasm.GCI31GetU:
+		ce.pushValue(wasm.RunGC(m, mode, ce.popValue(), 0, 0, 0, 0, nil))
+
+	case wasm.GCRefEq:
+		b := ce.popValue()
+		ce.pushValue(wasm.RunGC(m, mode, ce.popValue(), b, 0, 0, 0, nil))
+	}
 }

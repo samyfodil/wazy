@@ -18,6 +18,13 @@ const (
 const (
 	// ExecutionContextOffsetExitCodeOffset is an offset of `exitCode` field in native.executionContext
 	ExecutionContextOffsetExitCodeOffset Offset = 0
+	// ExecutionContextOffsetGCPause is the flag a loop header polls so a collection can stop the world: the
+	// collector writes 1 into it and compiled code calls the GC trampoline when it sees one. It sits in the
+	// padding after the exit code, and the safepoint reuses the GC trampoline rather than adding a second
+	// address field, so the collector costs this struct nothing at all -- which matters because it is
+	// embedded in the per-call callEngine, close enough to a Go size class boundary that eight bytes would
+	// cost 256 per call. See wasm.GCSafepoint.
+	ExecutionContextOffsetGCPause Offset = 4
 	// ExecutionContextOffsetCallerModuleContextPtr is an offset of `callerModuleContextPtr` field in native.executionContext
 	ExecutionContextOffsetCallerModuleContextPtr Offset = 8
 	// ExecutionContextOffsetOriginalFramePointer is an offset of `originalFramePointer` field in native.executionContext
@@ -88,6 +95,9 @@ const (
 	// runtime (rather than baking it as a constant) so the amortized-check
 	// frequency can be retuned per run/per loop without recompiling.
 	ExecutionContextOffsetInterruptCheckMask Offset = 1256
+	// ExecutionContextOffsetGCCheckTrampolineAddress is the address of the trampoline behind ref.test,
+	// ref.cast and the subtype-aware call_indirect check. See nativeapi.ExitCodeGCCheck.
+	ExecutionContextOffsetGCCheckTrampolineAddress Offset = 1264
 )
 
 // ModuleContextOffsetData allows the compilers to get the information about offsets to the fields of native.moduleContextOpaque,

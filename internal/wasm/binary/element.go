@@ -72,16 +72,22 @@ func decodeElementConstExprVector(buf []byte, offset int, elemType wasm.RefType,
 	return init, exprs, offset, nil
 }
 
-func decodeElementRefType(buf []byte, offset int) (wasm.RefType, int, error) {
+func decodeElementRefType(buf []byte, offset int, enabledFeatures api.CoreFeatures) (wasm.RefType, int, error) {
 	b, offset, err := readByte(buf, offset)
 	if err != nil {
 		return 0, offset, fmt.Errorf("read element ref type: %w", err)
 	}
 	switch b {
 	case wasm.RefPrefixNullable, wasm.RefPrefixNonNullable:
-		return decodeRefType(buf, offset, b == wasm.RefPrefixNullable)
+		return decodeRefType(enabledFeatures, buf, offset, b == wasm.RefPrefixNullable)
 	default:
 		ret := wasm.ValueType(b)
+		if ret.IsGCHeapType() {
+			if err := enabledFeatures.RequireEnabled(api.CoreFeatureGC); err != nil {
+				return 0, offset, fmt.Errorf("element type %s is invalid as %w", wasm.ValueTypeName(ret), err)
+			}
+			return ret, offset, nil
+		}
 		if ret != wasm.RefTypeFuncref && ret != wasm.RefTypeExternref {
 			return 0, offset, fmt.Errorf("invalid ref type for element: 0x%x", b)
 		}
@@ -211,7 +217,7 @@ func decodeElementSegment(buf []byte, offset int, enabledFeatures api.CoreFeatur
 		ret.Type = wasm.RefTypeFuncref
 		return offset, nil
 	case elementSegmentPrefixPassiveConstExprVector:
-		ret.Type, offset, err = decodeElementRefType(buf, offset)
+		ret.Type, offset, err = decodeElementRefType(buf, offset, enabledFeatures)
 		if err != nil {
 			return offset, err
 		}
@@ -239,7 +245,7 @@ func decodeElementSegment(buf []byte, offset int, enabledFeatures api.CoreFeatur
 			return offset, fmt.Errorf("read expr for offset: %w", err)
 		}
 
-		ret.Type, offset, err = decodeElementRefType(buf, offset)
+		ret.Type, offset, err = decodeElementRefType(buf, offset, enabledFeatures)
 		if err != nil {
 			return offset, err
 		}
@@ -252,7 +258,7 @@ func decodeElementSegment(buf []byte, offset int, enabledFeatures api.CoreFeatur
 		ret.Mode = wasm.ElementModeActive
 		return offset, nil
 	case elementSegmentPrefixDeclarativeConstExprVector:
-		ret.Type, offset, err = decodeElementRefType(buf, offset)
+		ret.Type, offset, err = decodeElementRefType(buf, offset, enabledFeatures)
 		if err != nil {
 			return offset, err
 		}

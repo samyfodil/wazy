@@ -1722,6 +1722,158 @@ above is what `TestRelaxedSemantics` in
 `internal/integration_test/spectest/relaxed-simd` asserts, with operands chosen
 to tell the permitted answers apart.
 
+## Garbage collection (WasmGC)
+
+The [GC proposal](https://github.com/WebAssembly/gc) adds struct and array types
+on a managed heap. All of it is here -- the type system, every instruction, the
+heap and its collector -- and the proposal's whole core suite passes on both
+engines: 118 files, every one under `test/core` and `test/core/gc` except
+`comments.wast`, which pulls in `.wat` modules the harness only reads as `.wasm`.
+
+That suite is run at the feature set the GC branch itself assumes: 2.0 plus
+tail-call, extended-const and typed function references. Not the whole of 3.0,
+because that branch forked before multi-memory and memory64 landed, and its
+`binary.wast`, `memory.wast` and `imports.wast` still require the encodings those
+two relax -- a plain zero where multi-memory reads a memory index. Those files
+are covered with their later encodings by the multi-memory and memory64 suites.
+
+Running the wider suite turned up one thing that had nothing to do with GC: from
+3.0 a global's initializer, and a data or element segment's offset, may name any
+global declared before it rather than only an imported one. wazy validated that
+under `extended-const` but never made the earlier globals reachable to the
+evaluator, so `global.wast`, `data.wast` and `elem.wast` failed on it. Globals
+are built in order, so the fix is to hand each initializer the globals that
+already exist.
+
+**Composite types live on `FunctionType`.** A GC defined type is a function, a
+struct or an array, so the obvious move is a new sum type for the type section.
+`TypeSection []FunctionType` is reached from the decoder, both engines, the
+store's type-ID table, host module assembly and the public
+`api.FunctionDefinition`, and none of those care about struct types. So instead
+`FunctionType` grew `CompositeKind`, `Fields` and the subtype fields, all of
+whose zero values spell "a plain final function type". Every pre-GC construction
+site stays correct without being touched, and the parts that do care --
+`buildKey`, `EqualsType`, the subtype checks -- branch on `CompositeKind`. The
+name is now wrong for a third of its instances; renaming it is a mechanical
+change that can happen whenever, and it is not worth blocking the proposal on.
+
+**Type identity is a canonical index, not a rewritten one.** Two structurally
+identical rec groups are the same type, wherever they sit in a module's type
+section -- so `(ref $a)` and `(ref $b)` are interchangeable when `$a` and `$b`
+are separate but identical declarations. A `ValueType` carries a raw type index,
+which makes the two look different. One fix is to rewrite every index in the
+module to its representative after decoding; that breaks down because indices
+are also *created* during validation (a block type, `ref.func`'s result), long
+after such a pass would have run. So `CanonicalizeTypes` stamps a
+`CanonicalIndex` on each type instead, and concrete references resolve through
+it at comparison time. The comparison already receives the type section, so this
+cost no plumbing, and a reference minted mid-validation canonicalizes the same
+way as one that came out of the decoder.
+
+Before this, concrete references compared as *equal to anything*: a concrete
+ref's kind byte is `funcref`, and the pre-GC check read that as "the expected
+type is abstract funcref, so any concrete ref matches". That accident is what
+made `type-equivalence.wast` pass. It also hid two decoder bugs that the GC
+suite found immediately: a type's key was cached before its rec group fields
+were set, so every member of a rec group keyed identically to a standalone type
+with the same signature; and a standalone type could not reference itself, which
+GC allows because a bare type is its own rec group of one.
+
+**Subtyping reaches runtime, so a type ID is not just an equality.** `call_indirect`
+succeeds when the callee's type is a *subtype* of the declared one, and a function
+import links when the export's type is a subtype of the declared import type. Both
+compared `FunctionTypeID`s for equality before. The relation lives in the store,
+because the two IDs can come from different modules where a type index means
+nothing, and `Store.typeSupers` records each ID's declared supertype as it is
+interned. Every check keeps its equality fast path -- which is still the answer for
+every module that declares no subtype relation -- and only walks the chain when
+that fails.
+
+Making the store's IDs correct meant keying whole rec groups, not single types.
+Two function types can be identical in isolation and still be different types
+because a sibling in their rec group differs, which `type-subtyping.wast` checks
+directly. `RecGroupKey` builds that key once and both callers use it: module-local
+canonicalization spells an out-of-group reference as a canonical index, and the
+store spells it as a `FunctionTypeID`.
+
+**`ref.test` and `ref.cast` call into Go, from both engines.** The answer needs
+store-wide type identity, which compiled code cannot reach and which the
+interpreter would otherwise duplicate, so `wasm.RunGCCheck` is the one
+implementation and each engine supplies `TypeIDOfReference` to say what its own
+funcref representation is. In the native engine that is a trampoline call, and the
+subtype-aware `call_indirect` check goes through the same one -- but only for a
+module that actually declares a subtype relation. Every other module keeps the
+inline compare it always had, so nothing that exists today pays for this.
+
+**A reference is a tagged word, and the tags are load-bearing.** Both engines
+carry every reference as an opaque `uint64`. Which hierarchy a given one belongs
+to is settled statically -- validation never lets a value cross between func,
+extern, exn and any -- so the same word can mean a function instance pointer in
+one place and something else in another. What breaks that clean split is
+`any.convert_extern`, which moves an embedder's `externref` into the any
+hierarchy without changing the word: a host pointer can then turn up exactly
+where `ref.test` is asking "is this a struct?". So the heap side is tagged (bit
+62 an index into `Store.GC`, bit 63 an i31) and the host side is left alone,
+which is the only choice available -- the embedder's pointer is not ours to
+encode. An untagged non-null value in the any hierarchy is a host value: it is
+`anyref` and nothing more specific, which is what `extern.wast` checks.
+
+Objects are indices into a table rather than Go pointers for the reason
+`ExceptionTable` already documents: a Go pointer parked in a `[]uint64` is
+invisible to the collector, so the guest would hold a dangling pointer as soon
+as the last Go reference went away.
+
+**Every GC instruction calls into Go, from both engines.** `wasm.RunGC` is the
+one implementation, and the native engine reaches it through a single
+trampoline. That is deliberate: what these instructions touch -- the managed
+heap, store-wide type identity, the module's data and element segments -- is
+outside both engines, so the alternative is two copies of the same logic against
+two different value representations. The two variadic forms (`struct.new`,
+`array.new_fixed`) are the one place the engines differ: the interpreter hands
+`RunGC` a slice of its own operand stack, while the native engine lowers them as
+an allocation followed by one store per operand, which is what lets the
+trampoline keep a fixed arity.
+
+The ceiling is a Go round trip per instruction. Nothing here is on a hot path
+yet, and inlining the common shapes -- a struct field load, an i31 test -- is a
+contained change once a profile asks for it.
+
+**Reclamation scans stacks conservatively, and stops the world to do it.** The
+question a collector has to answer is where a live reference can be. Four of the
+five places are Go data structures the collector walks directly: reference-typed
+globals, reference-typed tables, the fields of reachable objects, and the
+parameter/result buffer of a call in flight. The fifth is a wasm value stack,
+which is a `[]uint64` (or, in the native engine, a `[]byte`) with no runtime type
+information -- so it is scanned conservatively. Every word that looks like a live
+handle keeps that object alive whether or not it really is one. That is sound for
+a non-moving collector, and it needs no stack maps, which is what keeps the cost
+off the hot path entirely: the native engine's whole point is not paying for
+bookkeeping.
+
+Two things make that safe. Handles carry the generation of the slot they name, so
+a word left behind by an earlier call names a generation that no longer exists
+and matches nothing -- which is also what lets slots be reused rather than growing
+without bound. And a stack is only ever read while it is not being written to: a
+collection asks every call in flight to park, waits for all of them, marks,
+sweeps, and lets them go. The parking points are ones execution already passes
+through -- every loop header, and every host call, which is where an execution
+that is blocked outside wasm makes itself scannable. A guest cannot outrun a
+collection except by looping without a back edge, which no loop does.
+
+Nothing collects in the middle of an instruction: allocation only *asks* for a
+collection, and whichever execution reaches a parking point first runs it, where
+its own stack is stable too. The loop-header poll is one load and a not-taken
+branch, and it is emitted only when the GC proposal is enabled -- codegen for
+every other module is byte-identical to what it was before any of this landed.
+
+**A vector field takes two words.** Every other storage type fits in a
+`GCObject`'s single word; `v128` does not, so `FunctionType.FieldSlots` lays a
+struct out in words rather than fields and an array's elements are strided. The
+instructions that move one make two calls into the runtime, since a reference-
+sized result cannot carry a vector. Nothing in the WebAssembly/gc conformance
+suite declares such a field -- it is the corner where that suite and the SIMD
+proposal meet -- so `internal/integration_test/gc` covers it directly.
+
 ## Compiler engine implementation
 
 ### Why it's safe to execute runtime-generated machine codes against async Goroutine preemption

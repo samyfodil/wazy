@@ -149,7 +149,7 @@ func DecodeModule(
 		case wasm.SectionIDElement:
 			m.ElementSection, offset, err = decodeElementSection(binary, offset, enabledFeatures)
 		case wasm.SectionIDCode:
-			m.CodeSection, offset, err = decodeCodeSection(binary, offset, sectionSize)
+			m.CodeSection, offset, err = decodeCodeSection(binary, offset, sectionSize, enabledFeatures)
 		case wasm.SectionIDData:
 			m.DataSection, offset, err = decodeDataSection(binary, offset, enabledFeatures)
 		case wasm.SectionIDDataCount:

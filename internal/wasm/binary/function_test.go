@@ -84,9 +84,10 @@ func TestFunctionType(t *testing.T) {
 
 		t.Run(fmt.Sprintf("decode - %s", tc.name), func(t *testing.T) {
 			var actual wasm.FunctionType
-			_, err := decodeFunctionType(api.CoreFeaturesV2, b, 0, &valueTypeArena{}, &actual)
+			_, err := decodeDefinedType(api.CoreFeaturesV2, b, 0, &valueTypeArena{}, &actual)
 			require.NoError(t, err)
-			// Set the FunctionType key on the input, as decoding does.
+			// decodeTypeSection caches the key once the rec group fields are set, which is after this call.
+			actual.CacheKey()
 			tc.input.CacheKey()
 			require.Equal(t, actual, tc.input)
 		})
@@ -103,18 +104,33 @@ func TestDecodeFunctionType_Errors(t *testing.T) {
 	}{
 		{
 			name:        "undefined param no result",
-			input:       []byte{0x60, 1, 0x6e, 0},
-			expectedErr: "could not read parameter types: invalid value type: 110",
+			input:       []byte{0x60, 1, 0x00, 0},
+			expectedErr: "could not read parameter types: invalid value type: 0",
 		},
 		{
 			name:        "no param undefined result",
-			input:       []byte{0x60, 0, 1, 0x6e},
-			expectedErr: "could not read result types: invalid value type: 110",
+			input:       []byte{0x60, 0, 1, 0x00},
+			expectedErr: "could not read result types: invalid value type: 0",
 		},
 		{
 			name:        "undefined param undefined result",
-			input:       []byte{0x60, 1, 0x6e, 1, 0x6e},
-			expectedErr: "could not read parameter types: invalid value type: 110",
+			input:       []byte{0x60, 1, 0x00, 1, 0x00},
+			expectedErr: "could not read parameter types: invalid value type: 0",
+		},
+		{
+			name:        "anyref param - gc not enabled",
+			input:       []byte{0x60, 1, 0x6e, 0},
+			expectedErr: "could not read parameter types: value type anyref is invalid as feature \"gc\" is disabled",
+		},
+		{
+			name:        "struct type - gc not enabled",
+			input:       []byte{0x5f, 1, i32, 0},
+			expectedErr: "struct type is invalid as feature \"gc\" is disabled",
+		},
+		{
+			name:        "sub final - gc not enabled",
+			input:       []byte{0x4f, 0, 0x60, 0, 0},
+			expectedErr: "subtype declaration is invalid as feature \"gc\" is disabled",
 		},
 		{
 			name:        "no param two results - multi-value not enabled",
@@ -138,7 +154,7 @@ func TestDecodeFunctionType_Errors(t *testing.T) {
 
 		t.Run(tc.name, func(t *testing.T) {
 			var actual wasm.FunctionType
-			_, err := decodeFunctionType(api.CoreFeaturesV1, tc.input, 0, &valueTypeArena{}, &actual)
+			_, err := decodeDefinedType(api.CoreFeaturesV1, tc.input, 0, &valueTypeArena{}, &actual)
 			require.EqualError(t, err, tc.expectedErr)
 		})
 	}

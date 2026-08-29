@@ -5,6 +5,7 @@ import (
 	"io"
 	"math"
 
+	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/leb128"
 	"github.com/samyfodil/wazy/internal/wasm"
 )
@@ -19,7 +20,7 @@ type localsGroup struct {
 // decodeCode decodes one function body into arena[arenaOff:] and returns the new input offset and the new arena
 // offset. groups is a caller-owned scratch, reused across the section, into which the single locals pass records
 // its (type, count) runs before LocalTypes is materialized once.
-func decodeCode(buf []byte, offset, codeSectionStart int, arena []byte, arenaOff int, localTypesArena *valueTypeArena, groups *[]localsGroup, ret *wasm.Code) (newOffset, newArenaOff int, err error) {
+func decodeCode(buf []byte, offset, codeSectionStart int, arena []byte, arenaOff int, localTypesArena *valueTypeArena, groups *[]localsGroup, enabledFeatures api.CoreFeatures, ret *wasm.Code) (newOffset, newArenaOff int, err error) {
 	ss, n, err := leb128.LoadUint32(buf[offset:])
 	if err != nil {
 		return offset, arenaOff, fmt.Errorf("get the size of code: %w", err)
@@ -71,7 +72,7 @@ func decodeCode(buf []byte, offset, codeSectionStart int, arena []byte, arenaOff
 			switch b {
 			case wasm.RefPrefixNullable, wasm.RefPrefixNonNullable:
 				before := offset
-				vt, offset, err = decodeRefType(buf, offset, b == wasm.RefPrefixNullable)
+				vt, offset, err = decodeRefType(enabledFeatures, buf, offset, b == wasm.RefPrefixNullable)
 				if err != nil {
 					return offset, arenaOff, err
 				}

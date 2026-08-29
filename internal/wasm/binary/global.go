@@ -13,7 +13,7 @@ import (
 // See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#binary-global
 func decodeGlobal(buf []byte, offset int, enabledFeatures api.CoreFeatures, ret *wasm.Global) (int, error) {
 	var err error
-	ret.Type, offset, err = decodeGlobalType(buf, offset)
+	ret.Type, offset, err = decodeGlobalType(buf, offset, enabledFeatures)
 	if err != nil {
 		return offset, err
 	}
@@ -25,8 +25,8 @@ func decodeGlobal(buf []byte, offset int, enabledFeatures api.CoreFeatures, ret 
 // Binary Format, and the offset after it.
 //
 // See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#binary-globaltype
-func decodeGlobalType(buf []byte, offset int) (wasm.GlobalType, int, error) {
-	vt, offset, err := decodeValueType(buf, offset)
+func decodeGlobalType(buf []byte, offset int, enabledFeatures api.CoreFeatures) (wasm.GlobalType, int, error) {
+	vt, offset, err := decodeValueType(enabledFeatures, buf, offset)
 	if err != nil {
 		return wasm.GlobalType{}, offset, fmt.Errorf("read value type: %w", err)
 	}

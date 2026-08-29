@@ -73,9 +73,22 @@ type (
 		// do type-checks on indirect function calls.
 		typeIDs map[string]FunctionTypeID
 
+		// typeSupers[id] is the FunctionTypeID of id's declared supertype, or NoFunctionTypeID when it has
+		// none. IDs are handed out densely (see getFunctionTypeIDByKey), so this is indexed by ID directly.
+		// It is what makes a runtime subtype check possible across module boundaries, where a module-local
+		// type index means nothing: see TypeIDIsSubtypeOf.
+		typeSupers []FunctionTypeID
+
 		// Exceptions hands out the exnref values guest code holds, and keeps the exceptions they name alive. It
 		// is per-Store because an exnref crosses module instances. See ExceptionTable.
 		Exceptions ExceptionTable
+
+		// GC hands out the references guest code holds for struct and array instances, and is per-Store for
+		// the same reason Exceptions is. See GCHeap.
+		GC GCHeap
+
+		// gc is the stop-the-world handshake that reclaims what GC hands out. See gcController.
+		gc gcController
 
 		// functionMaxTypes represents the limit on the number of function types in a store.
 		// Note: this is fixed to 2^27 but have this a field for testability.
@@ -199,6 +212,15 @@ func (m *ModuleInstance) ExceptionTable() *ExceptionTable {
 	return &m.s.Exceptions
 }
 
+// NoFunctionTypeID marks the absence of a supertype in Store.typeSupers. Real IDs are dense from zero and
+// capped at functionMaxTypes (2^27), so the top of the range can never be one.
+const NoFunctionTypeID = FunctionTypeID(math.MaxUint32)
+
+// TypeIDIsSubtypeOf is Store.TypeIDIsSubtypeOf, reachable from the engines through a module instance.
+func (m *ModuleInstance) TypeIDIsSubtypeOf(actual, target FunctionTypeID) bool {
+	return m.s.TypeIDIsSubtypeOf(actual, target)
+}
+
 // GetFunctionTypeID is used by emscripten.
 func (m *ModuleInstance) GetFunctionTypeID(t *FunctionType) FunctionTypeID {
 	id, err := m.s.GetFunctionTypeID(t)
@@ -214,7 +236,8 @@ func (m *ModuleInstance) buildElementInstances(elements []ElementSegment) {
 	m.ElementInstances = make([][]Reference, len(elements))
 	for i := range elements {
 		elm := &elements[i]
-		if elm.Type.Kind() == RefTypeFuncref.Kind() && elm.Mode == ElementModePassive {
+		// Any reference type can back a passive element segment under GC, not just funcref.
+		if elm.Mode == ElementModePassive {
 			// Only passive elements can be access as element instances.
 			// See https://www.w3.org/TR/2022/WD-wasm-core-2-20220419/syntax/modules.html#element-segments
 			inst := make([]Reference, len(elm.Init))
@@ -284,6 +307,7 @@ func (m *ModuleInstance) validateData(data []DataSegment) (err error) {
 				func(funcIndex Index) (Reference, error) {
 					return m.Engine.FunctionInstanceReference(funcIndex), nil
 				},
+				constExprEnv{},
 			)
 			if err != nil {
 				return fmt.Errorf("%s[%d] failed to evaluate offset expression: %w", SectionIDName(SectionIDData), i, err)
@@ -541,8 +565,10 @@ func (m *ModuleInstance) resolveImports(ctx context.Context, module *Module) (er
 				matched := false
 				if m.TypeIDs != nil && importedModule.TypeIDs != nil {
 					// Use structural type IDs for comparison (handles concrete ref types across modules).
+					// An exported function may also be of a *subtype* of the declared import type, which is
+					// what makes a GC module importing at a supertype link.
 					actualTypeIdx, ok := src.typeIndexOfFunction(imported.Index)
-					matched = ok && importedModule.TypeIDs[actualTypeIdx] == m.TypeIDs[i.DescFunc]
+					matched = ok && m.TypeIDIsSubtypeOf(importedModule.TypeIDs[actualTypeIdx], m.TypeIDs[i.DescFunc])
 				} else {
 					matched = actual.EqualsSignature(expectedType.Params, expectedType.Results)
 				}
@@ -649,7 +675,9 @@ func (m *ModuleInstance) resolveImports(ctx context.Context, module *Module) (er
 				}
 
 				if expected.Mutable && expected.ValType != importedGlobal.Type.ValType ||
-					!expected.Mutable && !isRefSubtypeOf(importedGlobal.Type.ValType, expected.ValType) {
+					// nil type section: the two value types come from different modules, so a concrete ref's
+					// index in one means nothing in the other. They can only match exactly, as before GC.
+					!expected.Mutable && !isRefSubtypeOf(importedGlobal.Type.ValType, expected.ValType, nil) {
 					err = errorInvalidImport(i, fmt.Errorf("value type mismatch: %s != %s",
 						ValueTypeName(expected.ValType), ValueTypeName(importedGlobal.Type.ValType)))
 					return
@@ -706,7 +734,7 @@ func errorInvalidImport(i *Import, err error) error {
 //
 // Global initialization constant expression can only reference the imported globals.
 // See the note on https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#constant-expressions%E2%91%A0
-func (g *GlobalInstance) initialize(importedGlobals []*GlobalInstance, expr *ConstantExpression, funcRefResolver func(funcIndex Index) Reference) {
+func (g *GlobalInstance) initialize(importedGlobals []*GlobalInstance, expr *ConstantExpression, funcRefResolver func(funcIndex Index) Reference, env constExprEnv) {
 	result, _, _ := evaluateConstExpr(
 		expr,
 		func(globalIndex Index) (ValueType, uint64, uint64, error) {
@@ -716,6 +744,7 @@ func (g *GlobalInstance) initialize(importedGlobals []*GlobalInstance, expr *Con
 		func(funcIndex Index) (Reference, error) {
 			return funcRefResolver(funcIndex), nil
 		},
+		env,
 	)
 	switch len(result) {
 	case 1:
@@ -756,85 +785,107 @@ func (g *GlobalInstance) SetValue(lo, hi uint64) {
 
 func (s *Store) GetFunctionTypeIDs(ts []FunctionType) ([]FunctionTypeID, error) {
 	ret := make([]FunctionTypeID, len(ts))
-	for i := range ts {
-		t := &ts[i]
-		key := structuralTypeKey(t, ret)
-		id, err := s.getFunctionTypeIDByKey(key)
+	var err error
+	ForEachRecGroup(ts, func(start, end int) {
 		if err != nil {
-			return nil, err
+			return
 		}
-		ret[i] = id
+		// A group whose single member is a plain function type is identified by its signature alone, which
+		// keeps the key of every pre-GC type exactly what it always was.
+		groupKey := ""
+		if !isPlainFuncType(ts, start, end) {
+			groupKey = RecGroupKey(ts, start, end, func(idx Index) string {
+				if indexOutOfRange(idx, len(ret)) {
+					return fmt.Sprintf("?%d", idx)
+				}
+				return fmt.Sprintf("#tid=%d", ret[idx])
+			})
+		}
+		for i := start; i < end; i++ {
+			t := &ts[i]
+			key := t.key()
+			if groupKey != "" {
+				key = fmt.Sprintf("%s@%d", groupKey, i-start)
+			}
+			// A supertype index is always below its subtype's (validateTypeSection enforces it), so the
+			// supertype's ID is already in ret -- including when both sit in this same group.
+			super := NoFunctionTypeID
+			if t.HasSupertype && int(t.Supertype) < i {
+				super = ret[t.Supertype]
+			}
+			var id FunctionTypeID
+			if id, err = s.getFunctionTypeIDByKey(key, super); err != nil {
+				return
+			}
+			ret[i] = id
+		}
+	})
+	if err != nil {
+		return nil, err
 	}
 	return ret, nil
 }
 
-// structuralValueTypeName returns a string representation of a ValueType where
-// concrete ref type indices are replaced with their FunctionTypeID. This makes
-// the name independent of module-local type index numbering.
-func structuralValueTypeName(vt ValueType, typeIDs []FunctionTypeID) string {
-	if vt.IsConcreteRef() {
-		idx := vt.TypeIndex()
-		if !indexOutOfRange(idx, len(typeIDs)) {
-			if vt.IsNullable() {
-				return fmt.Sprintf("(ref null tid=%d)", typeIDs[idx])
-			}
-			return fmt.Sprintf("(ref tid=%d)", typeIDs[idx])
-		}
+// isPlainFuncType reports whether types[start:end] is a lone function type with nothing that makes its
+// identity depend on anything but its own signature.
+func isPlainFuncType(types []FunctionType, start, end int) bool {
+	if end-start != 1 {
+		return false
 	}
-	return ValueTypeName(vt)
+	t := &types[start]
+	return t.CompositeKind == CompositeKindFunc && !t.HasSupertype && !t.Extensible && !hasConcreteRef(t)
 }
 
-// structuralTypeKey returns a string key for a FunctionType that is stable
-// across modules. For signatures without concrete ref types it falls back to
-// FunctionType.key(). When concrete refs are present, local type indices are
-// replaced with their already-assigned FunctionTypeID so that two modules
-// defining structurally identical types at different indices produce the same
-// key and share a single FunctionTypeID.
-func structuralTypeKey(ft *FunctionType, typeIDs []FunctionTypeID) string {
-	hasConcreteRef := false
+// TypeIDIsSubtypeOf reports whether a value whose runtime type is actual may be used where target is expected,
+// by walking actual's declared supertype chain. Both engines reach this from ref.test / ref.cast, where the two
+// IDs can come from different modules and so cannot be compared as type indices.
+//
+// ponytail: one RLock per check. Threading the supertype chain onto each runtime function instance would make
+// this a load and compare, which is worth doing only if a profile ever shows these instructions mattering.
+func (s *Store) TypeIDIsSubtypeOf(actual, target FunctionTypeID) bool {
+	if actual == target {
+		return true
+	}
+	s.mux.RLock()
+	defer s.mux.RUnlock()
+	// Bounded by the number of types: the chain is acyclic by construction (a supertype index is always below
+	// its subtype's), but this is reached from guest execution, so do not depend on that for termination.
+	for i := 0; i <= len(s.typeSupers); i++ {
+		if int(actual) >= len(s.typeSupers) {
+			return false
+		}
+		actual = s.typeSupers[actual]
+		if actual == NoFunctionTypeID {
+			return false
+		}
+		if actual == target {
+			return true
+		}
+	}
+	return false
+}
+
+func hasConcreteRef(ft *FunctionType) bool {
 	for _, p := range ft.Params {
 		if p.IsConcreteRef() {
-			hasConcreteRef = true
-			break
+			return true
 		}
 	}
-	if !hasConcreteRef {
-		for _, r := range ft.Results {
-			if r.IsConcreteRef() {
-				hasConcreteRef = true
-				break
-			}
+	for _, r := range ft.Results {
+		if r.IsConcreteRef() {
+			return true
 		}
 	}
-	if !hasConcreteRef {
-		return ft.key()
-	}
-	var ret string
-	for _, b := range ft.Params {
-		ret += structuralValueTypeName(b, typeIDs)
-	}
-	if len(ft.Params) == 0 {
-		ret += "v_"
-	} else {
-		ret += "_"
-	}
-	for _, b := range ft.Results {
-		ret += structuralValueTypeName(b, typeIDs)
-	}
-	if len(ft.Results) == 0 {
-		ret += "v"
-	}
-	if ft.RecGroupSize > 1 {
-		ret += fmt.Sprintf("|rec%d/%d", ft.RecGroupPosition, ft.RecGroupSize)
-	}
-	return ret
+	return false
 }
 
 func (s *Store) GetFunctionTypeID(t *FunctionType) (FunctionTypeID, error) {
-	return s.getFunctionTypeIDByKey(t.key())
+	return s.getFunctionTypeIDByKey(t.key(), NoFunctionTypeID)
 }
 
-func (s *Store) getFunctionTypeIDByKey(key string) (FunctionTypeID, error) {
+// getFunctionTypeIDByKey interns key, recording super as the resulting ID's supertype. Callers that cannot have
+// a supertype -- host modules, and the emscripten helper -- pass NoFunctionTypeID.
+func (s *Store) getFunctionTypeIDByKey(key string, super FunctionTypeID) (FunctionTypeID, error) {
 	s.mux.RLock()
 	id, ok := s.typeIDs[key]
 	s.mux.RUnlock()
@@ -851,6 +902,9 @@ func (s *Store) getFunctionTypeIDByKey(key string) (FunctionTypeID, error) {
 		}
 		id = FunctionTypeID(l)
 		s.typeIDs[key] = id
+		// The key encodes the supertype (see structuralTypeKey), so every module reaching this ID agrees on
+		// what super is, and appending in ID order keeps the slice dense.
+		s.typeSupers = append(s.typeSupers, super)
 	}
 	return id, nil
 }

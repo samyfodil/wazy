@@ -261,6 +261,7 @@ func requireHostModuleEquals(t *testing.T, expected, actual *wasm.Module) {
 		// shared FunctionType. See wasm.FunctionType.CacheKey.
 		tp.CacheKey()
 	}
+	wasm.CanonicalizeTypes(expected.TypeSection)
 	require.Equal(t, expected.TypeSection, actual.TypeSection)
 	require.Equal(t, expected.ImportSection, actual.ImportSection)
 	require.Equal(t, expected.FunctionSection, actual.FunctionSection)
