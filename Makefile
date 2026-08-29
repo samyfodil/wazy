@@ -287,12 +287,27 @@ build.spectest.v3_interaction: # Refreshes the vendored wasmtime cases, then reb
 
 # Note: We currently cannot build the "threads" subdirectory that spawns threads due to missing support in wast2json.
 # https://github.com/WebAssembly/wabt/issues/2348#issuecomment-1878003959
+#
+# The cases come from two places, because neither has all of them:
+#
+#   - atomic.wast from the proposal repository. The testsuite mirror's copy is a strict subset of it,
+#     71 lines short: no sub-word cmpxchg, and none of the wait/notify out-of-bounds or unaligned traps.
+#   - exports.wast and memory.wast from the testsuite submodule. The proposal repository has files by
+#     those names at the root of test/core, but they are the plain spec versions and mention `shared`
+#     nowhere; the shared-memory cases exist only in the mirror's curated proposals/threads.
+#
+# imports.wast is deliberately not taken from either. The mirror's copy has the shared-memory import
+# cases but the threads branch forked before reference-types, so it still asserts that a module with
+# two tables is invalid -- which wazy correctly accepts. It also imports a "shared_memory" the spectest
+# host module does not export.
 .PHONY: build.spectest.threads
-build.spectest.threads:
+build.spectest.threads: $(spectest_testsuite_dir)/binary.wast
 	@rm -rf $(spectest_threads_testdata_dir)
 	@mkdir -p $(spectest_threads_testdata_dir)
 	@cd $(spectest_threads_testdata_dir) \
 		&& curl -sSL 'https://api.github.com/repos/WebAssembly/threads/contents/test/core/threads?ref=$(spec_version_threads)' | jq -r '.[]| .download_url' | grep -E "/atomic.wast" | xargs -Iurl curl -sJL url -O
+	@cp $(spectest_testsuite_dir)/proposals/threads/exports.wast $(spectest_testsuite_dir)/proposals/threads/memory.wast \
+		$(spectest_threads_testdata_dir)/
 	@cd $(spectest_threads_testdata_dir) && for f in `find . -name '*.wast'`; do \
 		wast2json --enable-threads --debug-names $$f; \
 	done
