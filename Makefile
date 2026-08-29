@@ -107,6 +107,15 @@ internal/testing/dwarftestdata/testdata/rust/main.wasm.xz:
 
 spectest_base_dir := internal/integration_test/spectest
 
+# GitHub's API allows 60 unauthenticated requests an hour per IP, which the shared CI runners burn
+# through long before these targets have made their eleven. When the limit is hit the response is an
+# error object rather than a list, jq fails mid-pipeline, and the download loop quietly produces
+# nothing -- into a directory the target has already emptied, so the damage only surfaces much later
+# as "pattern testdata/*.json: no matching files found". Send a token where one exists: the limit
+# becomes 5000 and the flake goes away.
+gh_api_curl := curl -fsSL --retry 5 --retry-all-errors $(if $(GITHUB_TOKEN),-H "Authorization: Bearer $(GITHUB_TOKEN)")
+
+
 # WebAssembly/testsuite as a submodule: the amalgamated core suite, pinned by gitlink rather than
 # copied in. Suites generated from it keep no cases in the tree -- refreshing upstream is a submodule
 # bump, not several thousand files of derived output in a diff.
@@ -201,10 +210,13 @@ spec_version_gc := 756060f5816c7e2159f4817fbdee76cf52f9c923
 # everything under test/core/gc, which is why the download tries both paths.
 # comments.wast is the one exclusion, and not for a GC reason: it pulls in .wat
 # modules, which the harness (spectest.Run) only reads as .wasm.
-gc_wast_files := $(shell curl -sSL \
+# Recursive rather than immediate: an immediate assignment runs these two API calls on every make
+# invocation, `make test` and `make lint` included, which is both slow and a third of the hourly
+# unauthenticated budget spent before any target runs.
+gc_wast_files = $(shell $(gh_api_curl) \
 	'https://api.github.com/repos/WebAssembly/gc/contents/test/core?ref=$(spec_version_gc)' \
-	| jq -r '.[] | select(.name|endswith(".wast")) | .name' | grep -v '^comments.wast$$')
-gc_wast_files += $(shell curl -sSL \
+	| jq -r '.[] | select(.name|endswith(".wast")) | .name' | grep -v '^comments.wast$$') \
+	$(shell $(gh_api_curl) \
 	'https://api.github.com/repos/WebAssembly/gc/contents/test/core/gc?ref=$(spec_version_gc)' \
 	| jq -r '.[] | select(.name|endswith(".wast")) | .name')
 
@@ -229,7 +241,7 @@ build.spectest.v1: # Note: wabt by default uses >1.0 features, so wast2json flag
 	@rm -rf $(spectest_v1_testdata_dir)
 	@mkdir -p $(spectest_v1_testdata_dir)
 	@cd $(spectest_v1_testdata_dir) \
-		&& curl -sSL 'https://api.github.com/repos/WebAssembly/spec/contents/test/core?ref=$(spec_version_v1)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
+		&& $(gh_api_curl) 'https://api.github.com/repos/WebAssembly/spec/contents/test/core?ref=$(spec_version_v1)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
 	@cd $(spectest_v1_testdata_dir) && for f in `find . -name '*.wast'`; do \
 		perl -pi -e 's/\(assert_return_canonical_nan\s(\(invoke\s"f32.demote_f64"\s\((f[0-9]{2})\.const\s[a-z0-9.+:-]+\)\))\)/\(assert_return $$1 \(f32.const nan:canonical\)\)/g' $$f; \
 		perl -pi -e 's/\(assert_return_arithmetic_nan\s(\(invoke\s"f32.demote_f64"\s\((f[0-9]{2})\.const\s[a-z0-9.+:-]+\)\))\)/\(assert_return $$1 \(f32.const nan:arithmetic\)\)/g' $$f; \
@@ -256,9 +268,9 @@ build.spectest.v2: # Note: SIMD cases are placed in the "simd" subdirectory.
 	@rm -rf $(spectest_v2_testdata_dir)
 	@mkdir -p $(spectest_v2_testdata_dir)
 	@cd $(spectest_v2_testdata_dir) \
-		&& curl -sSL 'https://api.github.com/repos/WebAssembly/spec/contents/test/core?ref=$(spec_version_v2)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
+		&& $(gh_api_curl) 'https://api.github.com/repos/WebAssembly/spec/contents/test/core?ref=$(spec_version_v2)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
 	@cd $(spectest_v2_testdata_dir) \
-		&& curl -sSL 'https://api.github.com/repos/WebAssembly/spec/contents/test/core/simd?ref=$(spec_version_v2)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
+		&& $(gh_api_curl) 'https://api.github.com/repos/WebAssembly/spec/contents/test/core/simd?ref=$(spec_version_v2)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
 	@cd $(spectest_v2_testdata_dir) && for f in `find . -name '*.wast'`; do \
 		wast2json --debug-names --no-check $$f || true; \
 	done # Ignore the error here as some tests (e.g. comments.wast right now) are not supported by wast2json yet.
@@ -305,7 +317,7 @@ build.spectest.threads: $(spectest_testsuite_dir)/binary.wast
 	@rm -rf $(spectest_threads_testdata_dir)
 	@mkdir -p $(spectest_threads_testdata_dir)
 	@cd $(spectest_threads_testdata_dir) \
-		&& curl -sSL 'https://api.github.com/repos/WebAssembly/threads/contents/test/core/threads?ref=$(spec_version_threads)' | jq -r '.[]| .download_url' | grep -E "/atomic.wast" | xargs -Iurl curl -sJL url -O
+		&& $(gh_api_curl) 'https://api.github.com/repos/WebAssembly/threads/contents/test/core/threads?ref=$(spec_version_threads)' | jq -r '.[]| .download_url' | grep -E "/atomic.wast" | xargs -Iurl curl -sJL url -O
 	@cp $(spectest_testsuite_dir)/proposals/threads/exports.wast $(spectest_testsuite_dir)/proposals/threads/memory.wast \
 		$(spectest_threads_testdata_dir)/
 	@cd $(spectest_threads_testdata_dir) && for f in `find . -name '*.wast'`; do \
@@ -323,7 +335,7 @@ build.spectest.tail_call:
 	@rm -rf $(spectest_tail_call_testdata_dir)
 	@mkdir -p $(spectest_tail_call_testdata_dir)
 	@cd $(spectest_tail_call_testdata_dir) \
-		&& curl -sSL 'https://api.github.com/repos/WebAssembly/testsuite/contents/proposals/tail-call?ref=$(spec_version_tail_call)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
+		&& $(gh_api_curl) 'https://api.github.com/repos/WebAssembly/testsuite/contents/proposals/tail-call?ref=$(spec_version_tail_call)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
 	@cd $(spectest_tail_call_testdata_dir) && for f in `find . -name '*.wast'`; do \
 		wast2json --enable-tail-call --debug-names $$f; \
 	done
@@ -333,7 +345,7 @@ build.spectest.exception_handling:
 	@rm -rf $(spectest_exception_handling_testdata_dir)
 	@mkdir -p $(spectest_exception_handling_testdata_dir)
 	@cd $(spectest_exception_handling_testdata_dir) \
-		&& curl -sSL 'https://api.github.com/repos/WebAssembly/spec/contents/test/core/exceptions?ref=$(spec_version_exception_handling)' \
+		&& $(gh_api_curl) 'https://api.github.com/repos/WebAssembly/spec/contents/test/core/exceptions?ref=$(spec_version_exception_handling)' \
 		| jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
 	@cd $(spectest_exception_handling_testdata_dir) && for f in `find . -name '*.wast'`; do \
 		wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f || true; \
@@ -356,7 +368,7 @@ build.spectest.relaxed_simd: # Needs wasm-tools: wast2json drops the proposal's 
 	@rm -rf $(spectest_relaxed_simd_testdata_dir)
 	@mkdir -p $(spectest_relaxed_simd_testdata_dir)
 	@cd $(spectest_relaxed_simd_testdata_dir) \
-		&& curl -sSL 'https://api.github.com/repos/WebAssembly/relaxed-simd/contents/test/core/relaxed-simd?ref=$(spec_version_relaxed_simd)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
+		&& $(gh_api_curl) 'https://api.github.com/repos/WebAssembly/relaxed-simd/contents/test/core/relaxed-simd?ref=$(spec_version_relaxed_simd)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
 	@cd $(spectest_relaxed_simd_testdata_dir) && for f in `find . -name '*.wast'`; do \
 		wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
 	done
@@ -391,7 +403,7 @@ build.spectest.multi_memory:
 	@rm -rf $(spectest_multi_memory_testdata_dir)
 	@mkdir -p $(spectest_multi_memory_testdata_dir)
 	@cd $(spectest_multi_memory_testdata_dir) \
-		&& curl -sSL 'https://api.github.com/repos/WebAssembly/multi-memory/contents/test/core/multi-memory?ref=$(spec_version_multi_memory)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
+		&& $(gh_api_curl) 'https://api.github.com/repos/WebAssembly/multi-memory/contents/test/core/multi-memory?ref=$(spec_version_multi_memory)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
 	@cd $(spectest_multi_memory_testdata_dir) && for f in `find . -name '*.wast'`; do \
 		wast2json --enable-multi-memory --debug-names $$f; \
 	done

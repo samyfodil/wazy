@@ -58,8 +58,12 @@ jobs:
           key: check-${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ hashFiles('**/go.sum', 'Makefile') }}
 
       - run: make build.spectest
+        env:  # these targets make eleven GitHub API calls; unauthenticated they hit the hourly cap
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - run: make check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   test:
     name: ${{ matrix.platform.arch }}, ${{ matrix.platform.os }}, Go-${{ matrix.go-version }}
