@@ -34,6 +34,9 @@ type Compiler struct {
 	ensureTermination      bool
 	// gcEnabled makes every loop header poll the collector's pause flag; see emitGCSafepoint.
 	gcEnabled bool
+	// maxGCRoots is the most values any one safepoint in this function writes, which is how big the root
+	// buffer has to be. See materializeGCRoots.
+	maxGCRoots int
 
 	// Followings are reset by per function.
 
@@ -169,6 +172,10 @@ func NewFrontendCompiler(m *wasm.Module, ssaBuilder ssa.Builder, offset *nativea
 
 // SetGCEnabled makes loop headers emit the collector's safepoint poll. It must be called before lowering.
 func (c *Compiler) SetGCEnabled(on bool) { c.gcEnabled = on }
+
+// MaxGCRoots is the most values any safepoint lowered so far writes into the root buffer. It accumulates
+// across every function the compiler lowers, so the engine can size one buffer per call for the whole module.
+func (c *Compiler) MaxGCRoots() int { return c.maxGCRoots }
 
 // SetInterruptCheckInterval sets the loop interrupt-check interval used when
 // ensureTermination is active. interval must be 0 (check every iteration) or a

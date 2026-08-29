@@ -275,6 +275,9 @@ type (
 		// gcCheckTrampolineAddress holds the address of the GC runtime type check trampoline. It is last in
 		// this struct because the offsets in nativeapi are hand-maintained and additions go at the end.
 		gcCheckTrampolineAddress *byte
+		// gcRootsPtr points at this call's root buffer; see ExecutionContextOffsetGCRootsPtr. The buffer
+		// itself is owned by callWithStack, which keeps it alive for the duration of the call.
+		gcRootsPtr *uint64
 	}
 )
 
@@ -454,10 +457,16 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 	}
 
 	if c.parent.gcEnabled {
+		// The buffer a safepoint writes its live values into. It is owned here rather than by the
+		// callEngine because that struct sits right under a Go size class boundary.
+		gcRoots := make([]uint64, gcRootsBufferLen(c))
+		c.execCtx.gcRootsPtr = &gcRoots[0]
 		c.gcExec = c.parent.module.RegisterGCExecution(c, &c.execCtx.gcPause)
 		defer func() {
 			c.gcExec.Unregister()
 			c.gcExec = nil
+			c.execCtx.gcRootsPtr = nil
+			runtime.KeepAlive(gcRoots)
 		}()
 	}
 
@@ -1460,19 +1469,43 @@ func callGoModuleFunctionWithSnapshotRecover(c *callEngine, ctx context.Context,
 	f.Call(ctx, mod, stack)
 }
 
-// ScanGCRoots implements wasm.GCRoots. The wasm stack is a flat byte buffer with no runtime type information,
-// so the whole of it is offered to the collector one word at a time, along with the callee-saved registers the
-// Go-call sequence spilled into the execution context. Together those are every place a live reference can be
-// while this call is parked: a value the register allocator kept in a caller-saved register is spilled to the
-// wasm stack before any call, a callee-saved one is either in savedRegisters or in the frame of whichever
-// function preserved it, and an argument was copied into the callee's frame on entry.
+// ScanGCRoots implements wasm.GCRoots.
+//
+// The exact part is the root buffer: a safepoint writes every live wasm value into it before parking, so the
+// collector does not have to work out where the backend chose to keep them. Scanning the stack and the saved
+// registers for them does not work -- with more registers to play with, arm64 keeps a loop's live reference in
+// one across the safepoint call and it appears in neither place, which is how a reachable object came to be
+// swept there while amd64, forced to spill, was fine.
+//
+// The wasm stack and the saved registers are still scanned conservatively on top of that. They cost nothing to
+// look at, and they cover the one case the buffer does not: an execution parked inside a host call, which
+// stopped at a Go boundary rather than at a safepoint.
 func (c *callEngine) ScanGCRoots(visit func(uint64)) {
-	stack := c.stack
-	for i := 0; i+8 <= len(stack); i += 8 {
-		visit(binary.LittleEndian.Uint64(stack[i:]))
+	if p := c.execCtx.gcRootsPtr; p != nil {
+		roots := unsafe.Slice(p, gcRootsBufferLen(c))
+		for _, v := range roots[1 : 1+roots[0]] {
+			visit(v)
+		}
+	}
+
+	// Walk down from stackTop rather than up from the slice, because that is the grid the values are on:
+	// the stack grows down from an address aligned to 16 bytes *inside* the buffer (see alignedStackTop),
+	// so a word starts at stackTop-8k, not at an offset of &stack[0].
+	if len(c.stack) > 0 {
+		top := int(c.stackTop - uintptr(unsafe.Pointer(&c.stack[0])))
+		if top > len(c.stack) {
+			top = len(c.stack)
+		}
+		for off := top - 8; off >= 0; off -= 8 {
+			visit(binary.LittleEndian.Uint64(c.stack[off:]))
+		}
 	}
 	for i := range c.execCtx.savedRegisters {
 		visit(c.execCtx.savedRegisters[i][0])
 		visit(c.execCtx.savedRegisters[i][1])
 	}
 }
+
+// gcRootsBufferLen is how many words this call's root buffer holds: the count plus the most any one safepoint
+// in the module can write.
+func gcRootsBufferLen(c *callEngine) int { return c.parent.parent.maxGCRoots + 1 }

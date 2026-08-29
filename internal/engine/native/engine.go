@@ -113,6 +113,9 @@ type (
 		parent            *engine
 		module            *wasm.Module
 		ensureTermination bool
+		// maxGCRoots is the most values any safepoint in this module writes; see
+		// frontend.Compiler.MaxGCRoots.
+		maxGCRoots int
 		// interruptCheckInterval is the (power-of-two) loop-header interrupt-check
 		// interval this module was compiled under. Seeds execCtx.interruptCheckMask
 		// (= interval-1) per callEngine so the amortized check's mask is a runtime
@@ -353,6 +356,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 			relocator.appendFunction(fctx, module, cm, i, fidx, body, relsPerFunc, be.SourceOffsetInfo(), ehEntries, frameSize)
 		}
 		cm.tryTableInfo = fe.TryTableMetadata()
+		cm.maxGCRoots = fe.MaxGCRoots()
 	} else {
 		// Compile with N worker goroutines.
 		// Collect compiled functions across workers in a slice,
@@ -378,6 +382,9 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 		sharedTTM := frontend.NewSharedTryTableMetadata()
 
 		var count atomic.Uint32
+		// maxGCRoots is the largest root-buffer size any worker's frontend needed; see
+		// frontend.Compiler.MaxGCRoots.
+		var maxGCRoots atomic.Int64
 		var wg sync.WaitGroup
 		wg.Add(workers)
 
@@ -420,6 +427,9 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 						return
 					}
 
+					if n := fe.MaxGCRoots(); n > int(maxGCRoots.Load()) {
+						maxGCRoots.Store(int64(n))
+					}
 					compiledFuncs[i] = compiledFunc{
 						fctx, i, fidx, body,
 						// These slices are internal to the backend compiler and since we are going to buffer them instead
@@ -434,6 +444,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 		}
 
 		wg.Wait()
+		cm.maxGCRoots = int(maxGCRoots.Load())
 		if err := context.Cause(ctx); err != nil {
 			return nil, err
 		}

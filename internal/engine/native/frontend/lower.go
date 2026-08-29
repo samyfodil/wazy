@@ -6292,6 +6292,48 @@ func (c *Compiler) gcStoreElement(ref, index, v ssa.Value) {
 	c.callGC(wasm.GCArraySet, ref, index, hi, c.gcConst(2))
 }
 
+// materializeGCRoots writes every live wasm value -- the locals and the operand stack -- into this call's root
+// buffer, so a collection reads an exact root set rather than trying to find where the backend put them.
+//
+// Only i64-shaped values are written, which is every reference plus some integers that are not; the collector
+// is conservative about what a word means, so including them costs nothing but a wasted lookup. What it cannot
+// do is *miss* one, and inferring liveness from the machine state is exactly what does not survive a change of
+// register allocator: arm64 has enough registers to keep a loop's reference in one across the safepoint call,
+// where it appears in neither the wasm stack nor the saved registers.
+//
+// This runs inside the park block, which is entered only when a collection is actually waiting, so the stores
+// cost nothing on the path that does not park.
+func (c *Compiler) materializeGCRoots(builder ssa.Builder) {
+	ptr := builder.AllocateInstruction().
+		AsLoad(c.execCtxPtrValue, nativeapi.ExecutionContextOffsetGCRootsPtr.U32(), ssa.TypeI64).
+		Insert(builder).Return()
+
+	n := 0
+	write := func(v ssa.Value) {
+		if !v.Valid() || v.Type() != ssa.TypeI64 {
+			return
+		}
+		n++
+		builder.AllocateInstruction().
+			AsStore(ssa.OpcodeStore, v, ptr, uint32(n*8)).Insert(builder)
+	}
+	// Only this function's locals: wasmLocalToVariable is reused across functions and keeps whatever the
+	// longest one before it needed, so its length is not the local count.
+	locals := len(c.wasmFunctionTyp.Params) + len(c.wasmFunctionLocalTypes)
+	for i := 0; i < locals && i < len(c.wasmLocalToVariable); i++ {
+		write(builder.MustFindValue(c.wasmLocalToVariable[i]))
+	}
+	for _, v := range c.state().values {
+		write(v)
+	}
+
+	count := builder.AllocateInstruction().AsIconst64(uint64(n)).Insert(builder).Return()
+	builder.AllocateInstruction().AsStore(ssa.OpcodeStore, count, ptr, 0).Insert(builder)
+	if n > c.maxGCRoots {
+		c.maxGCRoots = n
+	}
+}
+
 // emitGCSafepoint emits the loop-header poll of the collector's pause flag. The flag is a word in the
 // execution context that the collector writes, so the common path is one load and one not-taken branch.
 func (c *Compiler) emitGCSafepoint(builder ssa.Builder) {
@@ -6308,6 +6350,7 @@ func (c *Compiler) emitGCSafepoint(builder ssa.Builder) {
 	builder.AllocateInstruction().AsJump(ssa.ValuesNil, afterBlk).Insert(builder)
 
 	builder.SetCurrentBlock(parkBlk)
+	c.materializeGCRoots(builder)
 	c.callGC(wasm.GCSafepoint)
 	builder.AllocateInstruction().AsJump(ssa.ValuesNil, afterBlk).Insert(builder)
 	builder.Seal(parkBlk)
