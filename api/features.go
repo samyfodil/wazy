@@ -10,7 +10,7 @@ import (
 //
 // Constants define individual features, such as CoreFeatureMultiValue, or
 // groups of "finished" features, assigned to a WebAssembly Core Specification
-// version, e.g. CoreFeaturesV1 or CoreFeaturesV2.
+// version, e.g. CoreFeaturesV1, CoreFeaturesV2 or CoreFeaturesV3.
 //
 // Note: Numeric values are not intended to be interpreted except as bit flags.
 type CoreFeatures uint64
@@ -34,6 +34,36 @@ const CoreFeaturesV2 = CoreFeaturesV1 |
 	CoreFeatureReferenceTypes |
 	CoreFeatureSignExtensionOps |
 	CoreFeatureSIMD
+
+// CoreFeaturesV3 are features included in the WebAssembly Core Specification
+// 3.0, released as the live standard on 17 September 2025. It is
+// CoreFeaturesV2 plus the eight feature proposals that version folded in:
+//
+//   - extended constant expressions (CoreFeatureExtendedConst)
+//   - tail calls (CoreFeatureTailCall)
+//   - exception handling (CoreFeatureExceptionHandling)
+//   - multiple memories (CoreFeatureMultiMemory)
+//   - 64-bit address space (CoreFeatureMemory64)
+//   - typeful (typed function) references (CoreFeatureTypedFunctionReferences)
+//   - garbage collection (CoreFeatureGC)
+//   - relaxed vector instructions (CoreFeatureRelaxedSIMD)
+//
+// The 3.0 changelog lists two further entries that are not feature flags here:
+// "Profiles", a way for the specification to describe reduced variants of
+// itself, and "Custom Annotations", a text-format-only extension. wazy reads
+// binary modules, so neither has a runtime effect.
+//
+// See https://webassembly.github.io/spec/core/appendix/changes.html#release-3-0
+// and https://webassembly.org/news/2025-09-17-wasm-3.0/
+const CoreFeaturesV3 = CoreFeaturesV2 |
+	CoreFeatureTailCall |
+	CoreFeatureExtendedConst |
+	CoreFeatureExceptionHandling |
+	CoreFeatureTypedFunctionReferences |
+	CoreFeatureRelaxedSIMD |
+	CoreFeatureMultiMemory |
+	CoreFeatureMemory64 |
+	CoreFeatureGC
 
 const (
 	// CoreFeatureBulkMemoryOperations adds instructions modify ranges of
