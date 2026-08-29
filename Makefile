@@ -107,6 +107,14 @@ internal/testing/dwarftestdata/testdata/rust/main.wasm.xz:
 
 spectest_base_dir := internal/integration_test/spectest
 
+# WebAssembly/testsuite as a submodule: the amalgamated core suite, pinned by gitlink rather than
+# copied in. Suites generated from it keep no cases in the tree -- refreshing upstream is a submodule
+# bump, not several thousand files of derived output in a diff.
+spectest_testsuite_dir := $(spectest_base_dir)/testsuite
+
+$(spectest_testsuite_dir):
+	@git submodule update --init --depth 1 $(spectest_testsuite_dir)
+
 spectest_v1_dir := $(spectest_base_dir)/v1
 spectest_v1_testdata_dir := $(spectest_v1_dir)/testdata
 spec_version_v1 := wg-1.0
@@ -114,6 +122,26 @@ spec_version_v1 := wg-1.0
 spectest_v2_dir := $(spectest_base_dir)/v2
 spectest_v2_testdata_dir := $(spectest_v2_dir)/testdata
 spec_version_v2 := wg-2.0
+
+spectest_v3_interaction_dir := $(spectest_base_dir)/v3-interaction
+spectest_v3_interaction_testdata_dir := $(spectest_v3_interaction_dir)/testdata
+# The cases crossing two of 3.0's proposals. The wasmtime-*.wast are vendored from the Bytecode
+# Alliance's own hand-written extras (Apache-2.0), the wazy-*.wast are this repository's, for the
+# crossings those do not reach. Both are committed as source; only the .json and .wasm regenerate.
+wasmtime_version := d8a0da6d661605713798c1c9c76be5c28e3159ff
+wasmtime_interaction_wast_files := \
+	gc/alloc-v128-struct.wast gc/array-init-data.wast gc/array-new-data.wast \
+	gc/array-new-elem.wast gc/const-expr-gc-simd.wast memory64/bounds.wast \
+	memory64/multi-memory.wast memory64/offsets.wast memory64/simd.wast
+
+spectest_v3_dir := $(spectest_base_dir)/v3
+spectest_v3_testdata_dir := $(spectest_v3_dir)/testdata
+# WebAssembly 3.0 has no test suite of its own in the spec repository: there,
+# the eight proposals it folded in still sit in per-proposal subdirectories of
+# test/core. WebAssembly/testsuite is the amalgamation -- its root is the core
+# suite with every finished proposal merged in, and since 3.0 was released the
+# only things left under proposals/ are the ones that came after it. So its
+# root is the 3.0 corpus. The commit is pinned by the submodule, not here.
 
 spectest_threads_dir := $(spectest_base_dir)/threads
 spectest_threads_testdata_dir := $(spectest_threads_dir)/testdata
@@ -182,6 +210,8 @@ gc_wast_files += $(shell curl -sSL \
 build.spectest:
 	@$(MAKE) build.spectest.v1
 	@$(MAKE) build.spectest.v2
+	@$(MAKE) build.spectest.v3
+	@$(MAKE) build.spectest.v3_interaction
 	@$(MAKE) build.spectest.threads
 	@$(MAKE) build.spectest.tail_call
 	@$(MAKE) build.spectest.extended_const
@@ -230,6 +260,28 @@ build.spectest.v2: # Note: SIMD cases are placed in the "simd" subdirectory.
 	@cd $(spectest_v2_testdata_dir) && for f in `find . -name '*.wast'`; do \
 		wast2json --debug-names --no-check $$f || true; \
 	done # Ignore the error here as some tests (e.g. comments.wast right now) are not supported by wast2json yet.
+
+.PHONY: build.spectest.v3
+build.spectest.v3: $(spectest_testsuite_dir) # Needs wasm-tools: the corpus spans every 3.0 proposal, including the GC type section and memory64's "module definition".
+	@rm -rf $(spectest_v3_testdata_dir)
+	@mkdir -p $(spectest_v3_testdata_dir)
+	@cp $(spectest_testsuite_dir)/*.wast $(spectest_v3_testdata_dir)/
+	@cd $(spectest_v3_testdata_dir) && for f in `find . -name '*.wast'`; do \
+		wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
+	done
+	@sh $(spectest_v3_dir)/assemble-text-modules.sh $(spectest_v3_testdata_dir)
+	@rm -f $(spectest_v3_testdata_dir)/*.wast # The submodule is the source; these were a working copy.
+
+.PHONY: build.spectest.v3_interaction
+build.spectest.v3_interaction: # Refreshes the vendored wasmtime cases, then rebuilds every case from its .wast.
+	@cd $(spectest_v3_interaction_testdata_dir) \
+		&& for f in $(wasmtime_interaction_wast_files); do \
+			curl -sfJL "https://raw.githubusercontent.com/bytecodealliance/wasmtime/$(wasmtime_version)/tests/misc_testsuite/$$f" \
+				-o "wasmtime-$$(echo $$f | tr '/' '-')"; \
+		done
+	@cd $(spectest_v3_interaction_testdata_dir) && rm -f *.json *.wasm && for f in `find . -name '*.wast'`; do \
+		wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
+	done
 
 # Note: We currently cannot build the "threads" subdirectory that spawns threads due to missing support in wast2json.
 # https://github.com/WebAssembly/wabt/issues/2348#issuecomment-1878003959
