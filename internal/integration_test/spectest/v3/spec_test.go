@@ -34,6 +34,11 @@ func testcases(t *testing.T) *os.Root {
 	}
 	t.Cleanup(func() { root.Close() })
 	if _, err := root.Stat("testdata"); err != nil {
+		// The cases are generated, not committed. Skipping is right for a working tree that has not
+		// built them; in CI it would mean the suite silently never ran, so the job sets this.
+		if os.Getenv("WAZY_SPECTEST_REQUIRE_CASES") != "" {
+			t.Fatalf("no cases and WAZY_SPECTEST_REQUIRE_CASES is set: `make build.spectest.v3` must run first (%v)", err)
+		}
 		t.Skipf("no cases: run `make build.spectest.v3` to generate them from the testsuite submodule (%v)", err)
 	}
 	return root

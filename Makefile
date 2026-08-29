@@ -112,7 +112,9 @@ spectest_base_dir := internal/integration_test/spectest
 # bump, not several thousand files of derived output in a diff.
 spectest_testsuite_dir := $(spectest_base_dir)/testsuite
 
-$(spectest_testsuite_dir):
+# Depend on a file inside the submodule, not the directory: a checkout that did not fetch submodules
+# leaves the directory there but empty, and make would take that for a satisfied target.
+$(spectest_testsuite_dir)/binary.wast:
 	@git submodule update --init --depth 1 $(spectest_testsuite_dir)
 
 spectest_v1_dir := $(spectest_base_dir)/v1
@@ -262,7 +264,7 @@ build.spectest.v2: # Note: SIMD cases are placed in the "simd" subdirectory.
 	done # Ignore the error here as some tests (e.g. comments.wast right now) are not supported by wast2json yet.
 
 .PHONY: build.spectest.v3
-build.spectest.v3: $(spectest_testsuite_dir) # Needs wasm-tools: the corpus spans every 3.0 proposal, including the GC type section and memory64's "module definition".
+build.spectest.v3: $(spectest_testsuite_dir)/binary.wast # Needs wasm-tools: the corpus spans every 3.0 proposal, including the GC type section and memory64's "module definition".
 	@rm -rf $(spectest_v3_testdata_dir)
 	@mkdir -p $(spectest_v3_testdata_dir)
 	@cp $(spectest_testsuite_dir)/*.wast $(spectest_v3_testdata_dir)/
