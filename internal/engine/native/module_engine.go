@@ -28,6 +28,10 @@ type (
 		// gcEnabled caches whether this runtime enables the GC proposal, so the per-call check in
 		// callWithStack is one load off an already-hot pointer rather than three dependent ones.
 		gcEnabled bool
+		// gcRootsReserve is callEngine.gcRootsReserve's answer, precomputed. It is read twice on every
+		// call -- to size the stack and to place its limit -- and deriving it there meant reaching
+		// through to the compiled module for maxGCRoots on a path that otherwise never touches it.
+		gcRootsReserve int32
 	}
 
 	functionInstance struct {

@@ -98,10 +98,6 @@ const (
 	// ExecutionContextOffsetGCCheckTrampolineAddress is the address of the trampoline behind ref.test,
 	// ref.cast and the subtype-aware call_indirect check. See nativeapi.ExitCodeGCCheck.
 	ExecutionContextOffsetGCCheckTrampolineAddress Offset = 1264
-	// ExecutionContextOffsetGCRootsPtr points at the buffer a safepoint writes its live values into, so the
-	// collector reads an exact root set instead of guessing at one. The first word is the count and the
-	// rest are the values. See frontend.Compiler.materializeGCRoots.
-	ExecutionContextOffsetGCRootsPtr Offset = 1272
 )
 
 // ModuleContextOffsetData allows the compilers to get the information about offsets to the fields of native.moduleContextOpaque,

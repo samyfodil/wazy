@@ -54,11 +54,6 @@ type (
 		// goroutine-safe, so no extra locking is needed here.
 		stackPools [stackPoolNumClasses]sync.Pool
 
-		// gcRootsPool recycles the buffers a safepoint writes its live values into. They are per call, and
-		// a fresh one per call was measurably worse than the collector itself -- see
-		// (*callEngine).ScanGCRoots.
-		gcRootsPool sync.Pool
-
 		// enabledFeatures is the runtime's feature set, kept so compilation knows whether to emit the
 		// collector's loop-header safepoint. See frontend.Compiler.SetGCEnabled.
 		enabledFeatures api.CoreFeatures
@@ -950,22 +945,6 @@ func checkAddrInBytes(addr uintptr, b []byte) bool {
 	return uintptr(unsafe.Pointer(&b[0])) <= addr && addr <= uintptr(unsafe.Pointer(&b[len(b)-1]))
 }
 
-// acquireGCRoots returns a root buffer of at least n words, recycled where possible.
-func (e *engine) acquireGCRoots(n int) *[]uint64 {
-	if v := e.gcRootsPool.Get(); v != nil {
-		b := v.(*[]uint64)
-		if cap(*b) >= n {
-			*b = (*b)[:n]
-			(*b)[0] = 0
-			return b
-		}
-	}
-	b := make([]uint64, n)
-	return &b
-}
-
-func (e *engine) releaseGCRoots(b *[]uint64) { e.gcRootsPool.Put(b) }
-
 // NewModuleEngine implements wasm.Engine.
 func (e *engine) NewModuleEngine(m *wasm.Module, mi *wasm.ModuleInstance) (wasm.ModuleEngine, error) {
 	me := &moduleEngine{gcEnabled: e.enabledFeatures.IsEnabled(api.CoreFeatureGC)}
@@ -979,6 +958,11 @@ func (e *engine) NewModuleEngine(m *wasm.Module, mi *wasm.ModuleInstance) (wasm.
 	}
 	me.parent = compiled
 	me.module = mi
+	if me.gcEnabled && compiled.maxGCRoots > 0 {
+		// The spilled words plus their count, 16-byte aligned so the go-call margin above the region keeps
+		// the alignment the trampoline wants. See callEngine.gcRootsReserve.
+		me.gcRootsReserve = int32((8*compiled.maxGCRoots + 8 + 15) &^ 15)
+	}
 	me.listeners = compiled.listeners
 
 	if m.IsHostModule {
