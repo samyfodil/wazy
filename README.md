@@ -30,7 +30,7 @@ wazy implements the WebAssembly Core Specification [1.0][1], [2.0][2] and [3.0][
 
 ## Fast
 
-wazy is faster than [wazero][wazero], the runtime it descends from, on the paths that set real throughput and latency — and it is on par with [wasmtime][wasmtime] across the whole of the WebAssembly 3.0 standard, on conformance and on speed, in pure Go with no CGO. Past 3.0 wasmtime is still ahead: it ships `wide-arithmetic`, `custom-page-sizes` and `branch-hinting`, which wazy does not implement.
+wazy is faster than [wazero][wazero], the runtime it descends from, on the paths that set real throughput and latency — and it is on par with [wasmtime][wasmtime] across the whole of the WebAssembly 3.0 standard, on conformance and on speed, in pure Go with no CGO. Past 3.0 wasmtime is still ahead: it ships `wide-arithmetic` and `custom-page-sizes`, which wazy does not implement. Within 3.0 the one thing wazy does not act on is `branch-hinting`, whose payload is a custom section: wazy decodes and ignores it, which is conformant, where wasmtime uses it for code layout.
 
 ### vs wazero
 
