@@ -458,15 +458,24 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 
 	if c.parent.gcEnabled {
 		// The buffer a safepoint writes its live values into. It is owned here rather than by the
-		// callEngine because that struct sits right under a Go size class boundary.
-		gcRoots := make([]uint64, gcRootsBufferLen(c))
-		c.execCtx.gcRootsPtr = &gcRoots[0]
+		// callEngine because that struct sits right under a Go size class boundary, and it comes from a
+		// pool because a fresh one per call cost more than the collector it serves.
+		eng := c.parent.parent.parent
+		var gcRoots *[]uint64
+		// A module with no safepoint that writes anything -- no loops, or none holding a value -- needs no
+		// buffer at all, and then this costs nothing beyond the registration.
+		if n := gcRootsBufferLen(c); n > 1 {
+			gcRoots = eng.acquireGCRoots(n)
+			c.execCtx.gcRootsPtr = &(*gcRoots)[0]
+		}
 		c.gcExec = c.parent.module.RegisterGCExecution(c, &c.execCtx.gcPause)
 		defer func() {
 			c.gcExec.Unregister()
 			c.gcExec = nil
-			c.execCtx.gcRootsPtr = nil
-			runtime.KeepAlive(gcRoots)
+			if gcRoots != nil {
+				c.execCtx.gcRootsPtr = nil
+				eng.releaseGCRoots(gcRoots)
+			}
 		}()
 	}
 

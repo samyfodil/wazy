@@ -121,7 +121,7 @@ func TestCollector(t *testing.T) {
 		f.s.mux.Lock()
 		f.s.moduleList = f.m
 		f.s.mux.Unlock()
-		t.Cleanup(func() { f.s.deleteModule(f.m) })
+		t.Cleanup(func() { require.NoError(t, f.s.deleteModule(f.m)) })
 
 		f.collect()
 		require.Equal(t, 2, f.s.GC.Live())
