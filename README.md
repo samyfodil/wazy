@@ -26,11 +26,11 @@ wazy embeds WebAssembly in your Go application. Run code compiled from Rust, C, 
 go get github.com/samyfodil/wazy@latest
 ```
 
-wazy is compliant with the WebAssembly Core Specification [1.0][1] and [2.0][2]. It runs on any Go target, with an optimizing native compiler on amd64 and arm64, and a pure-Go interpreter everywhere else.
+wazy implements the WebAssembly Core Specification [1.0][1], [2.0][2] and [3.0][3] — 3.0 in full, including all eight proposals it folded in: tail calls, extended const, exception handling, typed function references, relaxed SIMD, multiple memories, memory64 and garbage collection. Enable them together with `api.CoreFeaturesV3`; the default stays `api.CoreFeaturesV2`. It runs on any Go target, with an optimizing native compiler on amd64 and arm64, and a pure-Go interpreter everywhere else.
 
 ## Fast
 
-wazy is faster than [wazero][wazero], the runtime it descends from, on the paths that set real throughput and latency — and it is on par with [wasmtime][wasmtime] on conformance, standards support, and speed, in pure Go with no CGO.
+wazy is faster than [wazero][wazero], the runtime it descends from, on the paths that set real throughput and latency — and it is on par with [wasmtime][wasmtime] across the whole of the WebAssembly 3.0 standard, on conformance and on speed, in pure Go with no CGO. Past 3.0 wasmtime is still ahead: it ships `wide-arithmetic` and `custom-page-sizes`, which wazy does not implement. Within 3.0 the one thing wazy does not act on is `branch-hinting`, whose payload is a custom section: wazy decodes and ignores it, which is conformant, where wasmtime uses it for code layout.
 
 ### vs wazero
 
@@ -173,6 +173,8 @@ Using wazy in production? [Open a PR](https://github.com/samyfodil/wazy/pulls) t
 
 wazy started from [wazero][wazero]'s code (Copyright 2020-2023 wazero authors) and still draws on its WebAssembly semantics, WASI implementation, and compliance and fuzzing test suites. We do not intend to keep wazero's API compatibility or its architecture. The goals are pure Go, performance, and conformance to the standard. See [RATIONALE.md](RATIONALE.md) for wazero's original design rationale and [LICENSE](LICENSE) for the Apache 2.0 license.
 
+The specification conformance suites are built from [WebAssembly/testsuite](https://github.com/WebAssembly/testsuite) and the individual proposal repositories (Apache 2.0). The cross-proposal cases in [`internal/integration_test/spectest/v3-interaction`](internal/integration_test/spectest/v3-interaction) named `wasmtime-*.wast` are vendored from [wasmtime](https://github.com/bytecodealliance/wasmtime)'s `tests/misc_testsuite` (Apache 2.0 WITH LLVM-exception); the `wazy-*.wast` beside them are this repository's.
+
 [`imports/http_handler`](imports/http_handler) and its `nethttp` subpackage are a port of [http-wasm-host-go](https://github.com/http-wasm/http-wasm-host-go) (Apache 2.0), which is hard-typed to wazero: the ABI, the `Host` interface and the net/http adapter come from there, and its Technology Compatibility Kit is vendored to test them. [`imports/wasi_http`](imports/wasi_http) reimplements the pre-standard WASI-HTTP ABI from [wasi-go](https://github.com/stealthrocket/wasi-go) (Apache 2.0).
 
 ## License
@@ -181,6 +183,7 @@ Apache 2.0. See [LICENSE](LICENSE).
 
 [1]: https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/
 [2]: https://www.w3.org/TR/2022/WD-wasm-core-2-20220419/
+[3]: https://webassembly.github.io/spec/core/
 [wazero]: https://github.com/tetratelabs/wazero
 [wasmtime]: https://github.com/bytecodealliance/wasmtime
 [cm]: https://component-model.bytecodealliance.org/

@@ -1,0 +1,4 @@
+[submodule "internal/integration_test/spectest/testsuite"]
+	path = internal/integration_test/spectest/testsuite
+	url = https://github.com/WebAssembly/testsuite.git
+	branch = main

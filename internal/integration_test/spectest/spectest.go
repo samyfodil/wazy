@@ -2,9 +2,10 @@ package spectest
 
 import (
 	"context"
-	"embed"
+	_ "embed"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"math"
 	"strconv"
 	"strings"
@@ -35,6 +36,11 @@ type (
 
 		// Set when type == "register"
 		As string `json:"as,omitempty"`
+
+		// Set when type == "module_instance": the name bound to the new instance, and the name of the
+		// "module definition" it instantiates.
+		Instance string `json:"instance,omitempty"`
+		Module   string `json:"module,omitempty"`
 
 		// Set when type == "assert_return" || "action"
 		Action commandAction      `json:"action,omitempty"`
@@ -417,8 +423,8 @@ func newOptions(opts []Option) options {
 
 // Run runs all the test inside the testDataFS file system where all the cases are described
 // via JSON files created from wast2json.
-func Run(t *testing.T, testDataFS embed.FS, ctx context.Context, config wazy.RuntimeConfig, opts ...Option) {
-	files, err := testDataFS.ReadDir("testdata")
+func Run(t *testing.T, testDataFS fs.FS, ctx context.Context, config wazy.RuntimeConfig, opts ...Option) {
+	files, err := fs.ReadDir(testDataFS, "testdata")
 	require.NoError(t, err)
 
 	caseNames := make([]string, 0, len(files))
@@ -448,8 +454,8 @@ func Run(t *testing.T, testDataFS embed.FS, ctx context.Context, config wazy.Run
 // where mandatoryLine is the line number which can be run regardless of the lineBegin and lineEnd. It is useful when
 // we only want to run specific command while running "module" command to instantiate a module. If you don't need it,
 // just pass -1.
-func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, config wazy.RuntimeConfig, mandatoryLine, lineBegin, lineEnd int, opts ...Option) {
-	raw, err := testDataFS.ReadFile(testdataPath(f + ".json"))
+func RunCase(t *testing.T, testDataFS fs.FS, f string, ctx context.Context, config wazy.RuntimeConfig, mandatoryLine, lineBegin, lineEnd int, opts ...Option) {
+	raw, err := fs.ReadFile(testDataFS, testdataPath(f+".json"))
 	require.NoError(t, err)
 
 	var base testbase
@@ -467,6 +473,18 @@ func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, c
 		require.NoError(t, err)
 
 		modules := make(map[string]api.Module)
+		// definitions holds the binary of each "module definition" so a later "module instance" can
+		// instantiate it again: instantiation is generative, so every instance gets its own state.
+		definitions := make(map[string][]byte)
+		// A "register" command may appear after the module or instance it names -- instance.wast
+		// registers both of its instances only once both exist. wazy binds a module's import name when
+		// it is instantiated and cannot rename one afterwards, so collect them up front.
+		registerAs := make(map[string]string)
+		for i := range base.Commands {
+			if c := &base.Commands[i]; c.CommandType == "register" && c.Name != "" {
+				registerAs[c.Name] = c.As
+			}
+		}
 		var lastInstantiatedModule api.Module
 		for i := 0; i < len(base.Commands); i++ {
 			c := &base.Commands[i]
@@ -479,13 +497,21 @@ func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, c
 				msg := fmt.Sprintf("%s:%d %s", wastName, c.Line, c.CommandType)
 				switch c.CommandType {
 				case "module":
-					buf, err := testDataFS.ReadFile(testdataPath(c.Filename))
+					if c.ModuleType == "text" {
+						// We don't support direct loading of wast yet. Forget the previous module so the
+						// commands that would have run against this one skip rather than test the wrong one.
+						lastInstantiatedModule = nil
+						t.Skip()
+					}
+					buf, err := fs.ReadFile(testDataFS, testdataPath(c.Filename))
 					require.NoError(t, err, msg)
 
 					var registeredName string
 					if next := i + 1; next < len(base.Commands) && base.Commands[next].CommandType == "register" {
 						registeredName = base.Commands[next].As
 						i++ // Skip the entire "register" command.
+					} else {
+						registeredName = registerAs[c.Name] // Empty unless a later command registers it.
 					}
 					mod, err := r.InstantiateWithConfig(ctx, buf, wazy.NewModuleConfig().WithName(registeredName))
 					require.NoError(t, err, msg)
@@ -499,15 +525,37 @@ func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, c
 					// exercise a module whose declared limits no host could ever
 					// allocate (test/core/memory64.wast defines a memory of 2^48
 					// pages). Compiling is exactly that much and no more.
-					buf, err := testDataFS.ReadFile(testdataPath(c.Filename))
+					buf, err := fs.ReadFile(testDataFS, testdataPath(c.Filename))
 					require.NoError(t, err, msg)
 					compiled, err := r.CompileModule(ctx, buf)
 					require.NoError(t, err, msg)
 					require.NoError(t, compiled.Close(ctx), msg)
+					if c.Name != "" {
+						definitions[c.Name] = buf
+					}
+				case "module_instance":
+					// Instantiation is generative: each instance of the same definition gets its own
+					// globals, memories and tables, which is exactly what instance.wast asserts.
+					buf, ok := definitions[c.Module]
+					require.True(t, ok, "%s: no module definition named %q", msg, c.Module)
+					mod, err := r.InstantiateWithConfig(ctx, buf,
+						wazy.NewModuleConfig().WithName(registerAs[c.Instance]))
+					require.NoError(t, err, msg)
+					if c.Instance != "" {
+						modules[c.Instance] = mod
+					}
+					lastInstantiatedModule = mod
+				case "register":
+					// The name was bound when the module or instance was instantiated, from registerAs
+					// above. Reaching here only confirms that it took.
+					require.NotNil(t, r.Module(c.As), msg)
 				case "assert_return", "action":
 					m := lastInstantiatedModule
 					if c.Action.Module != "" {
 						m = modules[c.Action.Module]
+					}
+					if m == nil {
+						t.Skip() // The module this acts on was a text one, skipped above.
 					}
 					switch c.Action.ActionType {
 					case "invoke":
@@ -517,6 +565,10 @@ func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, c
 							msg += " in module " + c.Action.Module
 						}
 						fn := m.ExportedFunction(c.Action.Field)
+						// A module command that failed leaves the one before it current, and that one
+						// does not export this. Say so, rather than dereferencing nil and taking the
+						// whole run down with a SIGSEGV that hides the failure that caused it.
+						require.NotNil(t, fn, "%s: no exported function %q", msg, c.Action.Field)
 						results, err := fn.Call(ctx, args...)
 						require.NoError(t, err, msg)
 						var matched bool
@@ -558,7 +610,7 @@ func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, c
 				case "assert_malformed":
 					if c.ModuleType != "text" {
 						// We don't support direct loading of wast yet.
-						buf, err := testDataFS.ReadFile(testdataPath(c.Filename))
+						buf, err := fs.ReadFile(testDataFS, testdataPath(c.Filename))
 						require.NoError(t, err, msg)
 						_, err = r.InstantiateWithConfig(ctx, buf, wazy.NewModuleConfig())
 						require.Error(t, err, msg)
@@ -567,6 +619,9 @@ func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, c
 					m := lastInstantiatedModule
 					if c.Action.Module != "" {
 						m = modules[c.Action.Module]
+					}
+					if m == nil {
+						t.Skip() // The module this acts on was a text one, skipped above.
 					}
 					switch c.Action.ActionType {
 					case "invoke":
@@ -585,11 +640,14 @@ func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, c
 						// We don't support direct loading of wast yet.
 						t.Skip()
 					}
-					buf, err := testDataFS.ReadFile(testdataPath(c.Filename))
+					buf, err := fs.ReadFile(testDataFS, testdataPath(c.Filename))
 					require.NoError(t, err, msg)
 					_, err = r.InstantiateWithConfig(ctx, buf, wazy.NewModuleConfig())
 					require.Error(t, err, msg)
 				case "assert_exhaustion":
+					if lastInstantiatedModule == nil {
+						t.Skip() // The module this acts on was a text one, skipped above.
+					}
 					switch c.Action.ActionType {
 					case "invoke":
 						args := c.getAssertReturnArgs()
@@ -607,7 +665,7 @@ func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, c
 						// We don't support direct loading of wast yet.
 						t.Skip()
 					}
-					buf, err := testDataFS.ReadFile(testdataPath(c.Filename))
+					buf, err := fs.ReadFile(testDataFS, testdataPath(c.Filename))
 					require.NoError(t, err, msg)
 					_, err = r.InstantiateWithConfig(ctx, buf, wazy.NewModuleConfig())
 					require.Error(t, err, msg)
@@ -615,6 +673,9 @@ func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, c
 					m := lastInstantiatedModule
 					if c.Action.Module != "" {
 						m = modules[c.Action.Module]
+					}
+					if m == nil {
+						t.Skip() // The module this acts on was a text one, skipped above.
 					}
 					switch c.Action.ActionType {
 					case "invoke":
@@ -629,7 +690,7 @@ func RunCase(t *testing.T, testDataFS embed.FS, f string, ctx context.Context, c
 						t.Fatalf("unsupported action type type: %v", c)
 					}
 				case "assert_uninstantiable":
-					buf, err := testDataFS.ReadFile(testdataPath(c.Filename))
+					buf, err := fs.ReadFile(testDataFS, testdataPath(c.Filename))
 					require.NoError(t, err, msg)
 					_, err = r.InstantiateWithConfig(ctx, buf, wazy.NewModuleConfig())
 					if c.Text == "out of bounds table access" {

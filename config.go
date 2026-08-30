@@ -42,6 +42,10 @@ type RuntimeConfig interface {
 	//	features := api.CoreFeaturesV2.SetEnabled(api.CoreFeatureMutableGlobal, false)
 	//	rConfig = wazy.NewRuntimeConfig().WithCoreFeatures(features)
 	//
+	// Example of the whole of WebAssembly 3.0, which wazy implements but does
+	// not enable by default:
+	//	rConfig = wazy.NewRuntimeConfig().WithCoreFeatures(api.CoreFeaturesV3)
+	//
 	// # Why default to version 2.0?
 	//
 	// Many compilers that target WebAssembly require features after

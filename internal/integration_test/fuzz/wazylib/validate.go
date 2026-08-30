@@ -12,7 +12,7 @@ import (
 func tryCompile(wasmBin []byte) {
 	ctx := context.Background()
 	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler().
-		WithCoreFeatures(api.CoreFeaturesV2|experimental.CoreFeaturesThreads|api.CoreFeatureMemory64))
+		WithCoreFeatures(api.CoreFeaturesV3|experimental.CoreFeaturesThreads))
 	defer func() {
 		if err := r.Close(context.Background()); err != nil {
 			panic(err)

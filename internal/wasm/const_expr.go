@@ -475,22 +475,25 @@ func NewConstantExpressionFromI64(val int64) ConstantExpression {
 // immediates, not by what it would allocate.
 func evalGCConstExpr(op OpcodeGC, data []byte, stack *[]uint64, typeStack *[]ValueType, env constExprEnv) (uint64, ValueType, error) {
 	name := GCInstructionName(op)
-	pop := func(n int) []uint64 {
+	// pop removes words words from the value stack and values entries from the type stack. The two counts
+	// differ as soon as a vector is involved: a v128 is one value on the type stack and two words on the
+	// value stack, so popping both by the same number leaves one of them wrong.
+	pop := func(words, values int) []uint64 {
 		s := *stack
-		if n > len(s) {
-			n = len(s)
+		if words > len(s) {
+			words = len(s)
 		}
-		vals := s[len(s)-n:]
-		*stack = s[:len(s)-n]
-		if ts := *typeStack; n <= len(ts) {
-			*typeStack = ts[:len(ts)-n]
+		got := s[len(s)-words:]
+		*stack = s[:len(s)-words]
+		if ts := *typeStack; values <= len(ts) {
+			*typeStack = ts[:len(ts)-values]
 		}
-		return vals
+		return got
 	}
 
 	switch op {
 	case OpcodeGCRefI31:
-		v := pop(1)
+		v := pop(1, 1)
 		var ref uint64
 		if len(v) == 1 {
 			ref = EncodeI31(uint32(v[0]))
@@ -504,7 +507,7 @@ func evalGCConstExpr(op OpcodeGC, data []byte, stack *[]uint64, typeStack *[]Val
 		if op == OpcodeGCExternConvertAny {
 			to = ValueTypeExternref
 		}
-		pop(1)
+		pop(1, 1)
 		*stack = append(*stack, 0)
 		return 0, to, nil
 	}
@@ -515,9 +518,24 @@ func evalGCConstExpr(op OpcodeGC, data []byte, stack *[]uint64, typeStack *[]Val
 	}
 	read := n
 
-	// operandCount is how many values come off the stack, and mode what RunGC is asked to do.
+	// operandCount is how many stack *words* come off the stack, and mode what RunGC is asked to do. A
+	// word is not a value: a v128 field or element occupies two of them, so counting fields or elements
+	// would leave half of every vector behind and hand RunGC a scratch area of the wrong length.
 	var operandCount int
+	// valueCount is the same operands counted as *values*, which is what the parallel type stack holds.
+	var valueCount int
 	var mode uint64
+	// elemSlots is how many words one array element takes, needed by the two array forms that take an
+	// element value rather than a count of them.
+	var elemSlots int
+	if op != OpcodeGCStructNewDefault && op != OpcodeGCStructNew {
+		if int(typeIndex) >= len(env.types) {
+			return read, 0, fmt.Errorf("%s: unknown type %d", name, typeIndex)
+		}
+		if fields := env.types[typeIndex].Fields; len(fields) > 0 {
+			elemSlots = int(SlotsForStorageType(fields[0].Type))
+		}
+	}
 	switch op {
 	case OpcodeGCStructNewDefault:
 		mode = GCStructNewDefault
@@ -526,11 +544,12 @@ func evalGCConstExpr(op OpcodeGC, data []byte, stack *[]uint64, typeStack *[]Val
 		if int(typeIndex) >= len(env.types) {
 			return read, 0, fmt.Errorf("%s: unknown type %d", name, typeIndex)
 		}
-		operandCount = len(env.types[typeIndex].Fields)
+		operandCount, valueCount = structSlots(&env.types[typeIndex]), len(env.types[typeIndex].Fields)
 	case OpcodeGCArrayNewDefault:
-		mode, operandCount = GCArrayNewDefault, 1
+		mode, operandCount, valueCount = GCArrayNewDefault, 1, 1
 	case OpcodeGCArrayNew:
-		mode, operandCount = GCArrayNew, 2
+		// The initial element, then the i32 length.
+		mode, operandCount, valueCount = GCArrayNew, elemSlots+1, 2
 	case OpcodeGCArrayNewFixed:
 		mode = GCArrayNewFixed
 		count, n2, err := leb128.LoadUint32(data[read:])
@@ -538,20 +557,25 @@ func evalGCConstExpr(op OpcodeGC, data []byte, stack *[]uint64, typeStack *[]Val
 			return read, 0, fmt.Errorf("read element count for %s: %w", name, err)
 		}
 		read += n2
-		operandCount = int(count)
+		operandCount, valueCount = int(count)*elemSlots, int(count)
 	default:
 		return read, 0, fmt.Errorf("%s is not supported in a constant expression", name)
 	}
 
-	operands := pop(operandCount)
+	operands := pop(operandCount, valueCount)
 	var ref uint64
 	if env.inst != nil {
 		switch mode {
 		case GCStructNew, GCArrayNewFixed:
 			ref = RunGC(env.inst, mode, uint64(typeIndex), 0, 0, 0, 0, operands)
 		case GCArrayNew:
-			// The operands were pushed as (init, length).
-			ref = RunGC(env.inst, mode, uint64(typeIndex), operands[1], operands[0], 0, 0, nil)
+			// The operands were pushed as (init..., length), the init being one word or, for a
+			// vector element, its low half then its high half.
+			var initHi uint64
+			if elemSlots == 2 {
+				initHi = operands[1]
+			}
+			ref = RunGC(env.inst, mode, uint64(typeIndex), operands[elemSlots], operands[0], initHi, 0, nil)
 		case GCArrayNewDefault:
 			ref = RunGC(env.inst, mode, uint64(typeIndex), operands[0], 0, 0, 0, nil)
 		default:

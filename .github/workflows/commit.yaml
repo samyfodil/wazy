@@ -40,6 +40,8 @@ jobs:
           curl -sSL ${wasm_tools_url} | tar --strip-components 1 -C /usr/local/bin -xzf - wasm-tools-${wasm_tools_version}-x86_64-linux/wasm-tools
 
       - uses: actions/checkout@v6
+        with:
+          submodules: true
 
       - uses: actions/setup-go@v6
         with:  # not cache: true as we also need to cache golint
@@ -56,12 +58,17 @@ jobs:
           key: check-${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ hashFiles('**/go.sum', 'Makefile') }}
 
       - run: make build.spectest
+        env:  # these targets make eleven GitHub API calls; unauthenticated they hit the hourly cap
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - run: make check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   test:
     name: ${{ matrix.platform.arch }}, ${{ matrix.platform.os }}, Go-${{ matrix.go-version }}
     runs-on: ${{ matrix.platform.os }}
+    needs: spectest_corpus  # for the generated 3.0 cases, which are not committed
     strategy:
       fail-fast: false  # don't fail fast as sometimes failures are arch/OS specific
       matrix:  # Use versions consistent with wazy's Go support policy.
@@ -79,10 +86,17 @@ jobs:
     steps:
 
       - uses: actions/checkout@v6
+        with:
+          submodules: true
 
       - uses: actions/setup-go@v6
         with:
           go-version: ${{ matrix.go-version }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: spectest-v3-corpus
+          path: internal/integration_test/spectest/v3/testdata
 
       # Ensure the pagefile is large enough to execute tests like TestStore_hammer_close on Windows.
       - name: configure Pagefile
@@ -96,6 +110,8 @@ jobs:
       # Run -race could be really slow without -short, so run them together on this workflow.
       # Since -short is not added in the scratch tests, all the tests are run in CI in practice.
       - run: make test go_test_options='-timeout 20m -race -short'
+        env:
+          WAZY_SPECTEST_REQUIRE_CASES: "1"  # the corpus came from the artifact; skipping means it did not
 
       - name: "Generate coverage report"  # only once (not per OS)
         if: runner.os == 'Linux'
@@ -106,6 +122,32 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         run: bash <(curl -s https://codecov.io/bash)
+
+  spectest_corpus:
+    # The 3.0 corpus is generated from the WebAssembly/testsuite submodule rather than committed, so
+    # something has to generate it before the test matrix can run those suites. Doing it once here and
+    # publishing it means the matrix does not need wasm-tools on three operating systems.
+    name: Build the 3.0 spectest corpus
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - name: Install wasm-tools
+        run: |
+          version=1.245.1
+          target=x86_64-linux
+          url=https://github.com/bytecodealliance/wasm-tools/releases/download/v${version}/wasm-tools-${version}-${target}.tar.gz
+          curl -sSL ${url} | tar --strip-components 1 -C /usr/local/bin -xzf - wasm-tools-${version}-${target}/wasm-tools
+
+      - run: make build.spectest.v3
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spectest-v3-corpus
+          path: internal/integration_test/spectest/v3/testdata
+          retention-days: 1
 
   test_scratch:
     name: ${{ matrix.platform.arch }}, Linux (scratch), Go-${{ matrix.go-version }}${{ matrix.platform.no_prot_exec && ', no-prot-exec' }}
@@ -197,7 +239,9 @@ jobs:
       - name: Build test binaries
         run: |
           parent="$(dirname $PWD)/"
-          go list -f '{{.Dir}}' ./... | egrep -v 'imports|sysfs' | while IFS= read -r pkg; do
+          # spectest/v3 is excluded because its cases are generated rather than embedded, and these
+          # binaries run from a directory where the package's testdata is not beside them.
+          go list -f '{{.Dir}}' ./... | egrep -v 'imports|sysfs|spectest/v3$' | while IFS= read -r pkg; do
           basepath="${pkg#${parent}}"
           echo go test "${pkg}" -c -o "_tests/${basepath}.test"
           go test "${pkg}" -c -o "_tests/${basepath}.test"
@@ -239,7 +283,9 @@ jobs:
       - name: Build test binaries
         run: |
           parent="$(dirname $PWD)/"
-          go list -f '{{.Dir}}' ./... | egrep -v 'imports|sysfs' | while IFS= read -r pkg; do
+          # spectest/v3 is excluded because its cases are generated rather than embedded, and these
+          # binaries run from a directory where the package's testdata is not beside them.
+          go list -f '{{.Dir}}' ./... | egrep -v 'imports|sysfs|spectest/v3$' | while IFS= read -r pkg; do
           basepath="${pkg#${parent}}"
           echo go test "${pkg}" -c -o "_tests/${basepath}.test"
           go test "${pkg}" -c -o "_tests/${basepath}.test"
