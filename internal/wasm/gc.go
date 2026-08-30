@@ -455,17 +455,21 @@ func RunGC(m *ModuleInstance, mode, a, b, c, d, e uint64, scratch []uint64) uint
 
 	case GCArrayNewData, GCArrayNewElem:
 		fromData := mode == GCArrayNewData
+		width := storageWidth(m.Source.TypeSection[a].Fields[0].Type)
 		// The segment is read before the array is allocated, so a range overrunning the segment reports the
 		// segment's trap even when the same length would also overrun the array-length cap.
-		m.checkSegmentRange(fromData, b, c, d, storageWidth(m.Source.TypeSection[a].Fields[0].Type))
+		m.checkSegmentRange(fromData, b, c, d, width)
 		o := m.newArray(a, d)
-		m.fillArrayFromSegment(o, 0, fromData, b, c, d)
+		m.fillArrayFromSegment(o, 0, fromData, b, c, d, width)
 		return m.allocRef(o)
 
 	case GCArrayInitData, GCArrayInitElem:
 		o := m.s.GC.Deref(a)
 		checkArrayRange(o.Len(), b, e)
-		m.fillArrayFromSegment(o, b, mode == GCArrayInitData, c, d, e)
+		fromData := mode == GCArrayInitData
+		width := storageWidth(o.Type.Fields[0].Type)
+		m.checkSegmentRange(fromData, c, d, e, width)
+		m.fillArrayFromSegment(o, b, fromData, c, d, e, width)
 		return 0
 
 	case GCStructGet:
@@ -638,10 +642,11 @@ func (m *ModuleInstance) checkSegmentRange(fromData bool, segment, src, length, 
 // fillArrayFromSegment writes length elements into o starting at dst, reading them from a data or an element
 // segment starting at src. For a data segment src counts bytes and each element is read little-endian at its
 // storage width; for an element segment it counts references.
-func (m *ModuleInstance) fillArrayFromSegment(o *GCObject, dst uint64, fromData bool, segment, src, length uint64) {
-	width := storageWidth(o.Type.Fields[0].Type)
-	m.checkSegmentRange(fromData, segment, src, length, width)
-
+//
+// The caller passes width and has already called checkSegmentRange with it, because the two instructions that
+// allocate have to make that check before they allocate. Doing it here as well would only be a second bounds
+// check and a second storageWidth on every one of these.
+func (m *ModuleInstance) fillArrayFromSegment(o *GCObject, dst uint64, fromData bool, segment, src, length, width uint64) {
 	if !fromData {
 		elems := m.ElementInstances[segment]
 		for i := uint64(0); i < length; i++ {
