@@ -878,6 +878,13 @@ const (
 	fcvtToUintSequence
 
 	// xmmCMov is a conditional move instruction for XMM registers. Lowered after register allocation.
+	//
+	// It only conditionally overwrites its destination, so the destination's prior
+	// contents survive the instruction and it is declared to the register allocator
+	// as a use as well as a def -- otherwise nothing stops the allocator from
+	// evicting it and handing the def a fresh register holding garbage. The integer
+	// counterpart cmove is modelled the same way.
+	// See https://github.com/wazero/wazero/issues/2534.
 	xmmCMov
 
 	// idivRemSequence is a sequence of instructions to compute both the quotient and remainder of a division.
@@ -2600,7 +2607,7 @@ var useKinds = [instrMax]useKind{
 	fcvtToSintSequence:     useKindFcvtToSintSequence,
 	defineUninitializedReg: useKindNone,
 	fcvtToUintSequence:     useKindFcvtToUintSequence,
-	xmmCMov:                useKindOp1,
+	xmmCMov:                useKindOp1Op2Reg,
 	idivRemSequence:        useKindDivRem,
 	blendvpd:               useKindBlendvpd,
 	mfence:                 useKindNone,

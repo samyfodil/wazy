@@ -12,6 +12,7 @@
 | Standard | wazy | wazero |
 | --- | :---: | :---: |
 | Core Wasm 1.0 / 2.0 | ✅ | ✅ |
+| Core Wasm 3.0 | ✅ | ❌ |
 | WASI 0.1 &nbsp;(`wasip1`) | ✅ | ✅ |
 | WASI 0.2 · Component Model &nbsp;(`wasip2`) | ✅ | ❌ |
 | WASI 0.3 async ABI &nbsp;(`wasip3`) | ✅ | ❌ |

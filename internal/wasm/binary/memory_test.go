@@ -140,6 +140,19 @@ func Test_newMemorySizer(t *testing.T) {
 			expectedMax:      5,
 		},
 		{
+			// The limit is the effective maximum, so the capacity comes from it
+			// rather than from the module's larger declared maximum, which would
+			// make Validate reject a module the limit was meant to accommodate.
+			name:                  "max > memoryLimitPages memoryCapacityFromMax",
+			memoryCapacityFromMax: true,
+			limit:                 5,
+			min:                   0,
+			max:                   &ten,
+			expectedMin:           0,
+			expectedCapacity:      5,
+			expectedMax:           5,
+		},
+		{
 			// A 64-bit memory's declared limits are bounded by the
 			// specification's ceiling, not the embedder's, which is applied at
 			// instantiation instead. See newMemorySizer.
@@ -189,6 +202,19 @@ func Test_newMemorySizer(t *testing.T) {
 			expectedMin:           zero,
 			expectedCapacity:      wasm.Memory64LimitPages,
 			expectedMax:           wasm.Memory64LimitPages,
+		},
+		{
+			// A 64-bit memory is bounded by the spec ceiling, not the embedder's
+			// limit, so a declared maximum under it is kept as-is.
+			name:                  "i64 memoryCapacityFromMax keeps a max under the spec ceiling",
+			index64:               true,
+			memoryCapacityFromMax: true,
+			limit:                 5,
+			min:                   zero,
+			max:                   &ten,
+			expectedMin:           zero,
+			expectedCapacity:      ten,
+			expectedMax:           ten,
 		},
 	}
 

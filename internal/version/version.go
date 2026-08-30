@@ -3,12 +3,14 @@ package version
 import (
 	"runtime/debug"
 	"strings"
+	"sync"
 )
 
 // Default is the default version value used when none was found.
 const Default = "dev"
 
 // version holds the current version from the go.mod of downstream users or set by ldflag for wazy CLI.
+// It is only ever written at link time, so reading it needs no synchronization.
 var version string
 
 // GetWazyVersion returns the current version of wazy either in the go.mod or set by ldflag for wazy CLI.
@@ -19,13 +21,19 @@ var version string
 // then this returns "0.1.2-12314124-abcd".
 //
 // Note: this is tested in ./testdata/main_test.go with a separate go.mod to pretend as the wazy user.
-func GetWazyVersion() (ret string) {
+func GetWazyVersion() string {
 	if len(version) != 0 {
 		return version
 	}
+	return fromBuildInfo()
+}
 
-	info, ok := debug.ReadBuildInfo()
-	if ok {
+// fromBuildInfo reads the version out of the build info once. Callers race --
+// NewCompilationCacheWithDir and the native engine both call GetWazyVersion, and
+// runtimes are built concurrently -- so the memoization has to be synchronized.
+var fromBuildInfo = sync.OnceValue(func() string {
+	var ret string
+	if info, ok := debug.ReadBuildInfo(); ok {
 		for _, dep := range info.Deps {
 			// Note: here's the assumption that wazy is imported as github.com/samyfodil/wazy.
 			if strings.Contains(dep.Path, "github.com/samyfodil/wazy") {
@@ -41,11 +49,8 @@ func GetWazyVersion() (ret string) {
 	if versionMissing(ret) {
 		return Default // don't return parens
 	}
-
-	// Cache for the subsequent calls.
-	version = ret
 	return ret
-}
+})
 
 func versionMissing(ret string) bool {
 	return ret == "" || ret == "(devel)" // pkg.go defaults to (devel)

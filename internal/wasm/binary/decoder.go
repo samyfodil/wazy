@@ -236,16 +236,22 @@ func newMemorySizer(memoryLimitPages uint32, memoryCapacityFromMax bool, memoryC
 		}
 		reservePages := uint64(memoryCapacityReservePages)
 		if maxPages != nil {
-			if memoryCapacityFromMax {
-				return minPages, *maxPages, *maxPages
-			}
 			// This is an invalid value: let it propagate, we will fail later.
 			if *maxPages > specLimitPages {
 				return minPages, minPages, *maxPages
 			}
 			// This is a valid value, but it goes over the run-time limit: return the limit.
+			// memoryCapacityFromMax takes the *effective* maximum, so that a module
+			// declaring more than the configured limit uses the limit instead of being
+			// rejected outright.
 			if *maxPages > limitPages {
+				if memoryCapacityFromMax {
+					return minPages, limitPages, limitPages
+				}
 				return minPages, memoryCapacity(minPages, limitPages, reservePages), limitPages
+			}
+			if memoryCapacityFromMax {
+				return minPages, *maxPages, *maxPages
 			}
 			return minPages, memoryCapacity(minPages, *maxPages, reservePages), *maxPages
 		}

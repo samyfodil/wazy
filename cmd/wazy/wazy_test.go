@@ -521,12 +521,24 @@ func TestRun_Errors(t *testing.T) {
 			args:    []string{"--mount=te", "testdata/wasi_env.wasm"},
 		},
 		{
+			message: "is not a directory",
+			args:    []string{"--mount=" + notWasmPath + ":/", "testdata/wasi_env.wasm"},
+		},
+		{
 			message: "invalid cachedir",
 			args:    []string{"--cachedir", notWasmPath, wasmPath},
 		},
 		{
 			message: "timeout duration may not be negative",
 			args:    []string{"-timeout=-10s", wasmPath},
+		},
+		{
+			message: "invalid listen",
+			args:    []string{"--listen=8080", wasmPath},
+		},
+		{
+			message: "invalid listen port",
+			args:    []string{"--listen=localhost:abc", wasmPath},
 		},
 	}
 
