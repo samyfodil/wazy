@@ -227,6 +227,13 @@ func (e *GCExecution) EnterGo() {
 	if e == nil {
 		return
 	}
+	e.enterGo()
+}
+
+// enterGo is EnterGo's body, split out so EnterGo itself stays under the inliner's budget. Every host call
+// runs EnterGo, and for a guest without the GC proposal e is nil -- that case has to stay a compare and a
+// branch at the call site, not a call.
+func (e *GCExecution) enterGo() {
 	e.parked.Store(true)
 	if e.s.gc.collecting.Load() {
 		e.wake()
@@ -247,6 +254,11 @@ func (e *GCExecution) LeaveGo() {
 	if e == nil {
 		return
 	}
+	e.leaveGo()
+}
+
+// leaveGo is LeaveGo's body; see enterGo for why it is split.
+func (e *GCExecution) leaveGo() {
 	e.parked.Store(false)
 	// Do not resume into a collection in progress: that would be a stack moving under the scan. The pause
 	// flag is left alone -- if a collection was asked for while this call was in Go, its next parking point
