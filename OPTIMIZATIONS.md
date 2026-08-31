@@ -368,3 +368,67 @@ arm64 verification, not only package-local goldens.
 
 Lock in wins with alloc-count benchmarks (the repo already has `leb128_alloc_test.go` asserting
 zero-alloc patterns — extend that to DecodeModule/Instantiate/Call paths).
+
+## Sweep round 2 (2026-08-31) — shipped
+
+A fresh six-way subsystem sweep (pprof on five workloads, twenty static scans, adversarial triage)
+found 136 candidates; the nine below landed. **All timings are an Apple M4, `benchstat` over
+interleaved A/B runs (`-count` 5–10), with upstream wazero measured in the same runs as a control —
+its arms are flat throughout, which is what makes the wazy deltas trustworthy.**
+
+| Benchmark | before | after | |
+|---|---|---|---|
+| `wasip2.ServeHTTP` | 6.589µ | 3.569µ | **−45.8%**, 76→65 allocs/op |
+| `EHFastPath/n=1000` | 59.66µ | 35.55µ | **−40.4%** |
+| `EHThrowPath/n=1000` | 196.6µ | 152.4µ | −22.5% |
+| `ExportedFunctionCall_FreshHandle` | 181.2n | 129.3n | −28.7% |
+| `Invocation/compiler/fib_for_5` | 42.88n | 35.05n | −18.2% |
+| `HostCall/typed/CallWithStack` | 57.63n | 48.31n | −16.2% |
+| `HostCall/gomodule/CallWithStack` | 56.13n | 47.61n | −15.2% |
+| `Invocation/compiler/base64_*` | | | −7.7% to −8.6% |
+| `Execute/fib=20` | 19.32µ | 18.26µ | −5.5% |
+| geomean, `integration_test/bench` | | | **−12.5%** |
+
+**`HostCall/gomodule` used to lose to upstream wazero and no longer does** — 56.13n vs wazero's
+48.68n before, 47.61n vs 48.87n after. That arm is the shared baseline both runtimes implement the
+same way, so it was the one place the fork was behind. The cause was `acquireStack`: a `sync.Pool`
+round trip per call on an already-obtained `api.Function`, where wazero's callEngine owns its stack
+for its lifetime. A callEngine now keeps its stack from the second call on; the first call still
+round-trips, which is what keeps A1 (`ExportedFunction()` not allocating ~10 KiB per lookup) intact.
+
+What shipped, by area: the component ABI's per-call type-layout re-derivation compiled to a plan once
+at bind time (the ServeHTTP win, plus a real data race in `buildHostWrapper`'s per-call closure);
+`try_table` enter no longer copying a 1064-byte register block twice; `executionContext.savedRegisters`
+sized to what the ISAs actually write (1024→512 B, callEngine 1520→1008 B) with a fail-loud fit
+assertion in both backends; `WithCloseOnContextDone` not arming a watcher goroutine for a context that
+cannot be canceled; `ref.func` memoized instead of allocating per execution into a never-trimmed slice
+(also an unbounded-growth bug and a race); amd64 three-operand LEA for 64-bit `Iadd`, XMM prologue
+run-batching, aligned spill slots, and the `splitCriticalEdge` gid fix that had been silently
+disabling icmp→br_if fusion at 52% of split sites; arm64 aligned spill slots, MADD/MSUB fusion,
+LSR/ASR operand folding and STP/LDP spill pairing; interpreter `popValue` inlined into both dispatch
+loops, `local.get`/`local.set` split by V128-ness at compile time, module state reached through one
+pointer; WasmGC read path off the store-wide RWMutex; `descriptor.Table.Insert` no longer quadratic.
+
+### Rejected with measurements — do not redo
+
+- **C27 on arm64 (reserved prologue ctx slot) — REJECTED, measured LOSS.** Porting amd64's C27 to
+  arm64 removes one `mov x27, execCtx` from the fall-through path of each trap site but adds a
+  sub/orr/str to the prologue and an add to the epilogue of every function with any trap island. Small
+  hot functions call far more often than they trap, so the fixed per-call cost wins: `string_manipulation_size_1000`
+  +7.99%, `reverse_array_size_500` +7.70%, geomean over the affected set +0.24% — versus −3.90% with it
+  reverted. Isolated by bisection: the other four arm64 changes were each disabled in turn and none
+  moved it. amd64's C27 is unaffected and stays. If revisited, gate the reserved slot on the trap-SITE
+  count so it only applies where it pays for itself.
+- **A dense `[]functionInstance` for the `ref.func` memo — REJECTED.** Sizing it by local function
+  count costs 24 B per function on every instance that takes any funcref; `case.wasm` has ~92
+  functions and takes 8, which measured Instantiate +63% B/op and +7.07%. The memo is a prepend-only
+  linked list instead: one allocation per distinct funcref and none to publish, and a node's address
+  is stable — a funcref is a bare `uintptr` the GC does not trace, so an entry handed to the guest
+  must never move. Instantiate ended at 3287 B/op 58 allocs against 3309/62 before the sweep.
+
+### Still open from this sweep
+
+58 compile-time and instantiate-time candidates were triaged but not implemented, including two that
+look like bugs rather than tuning: zeroing the pooled linear-memory buffer measured **64% of
+instantiate CPU** (MADV_DONTNEED would make it lazy), and a closed module that imported a table is
+never dropped from the owner's keep-alive set.
