@@ -27,6 +27,11 @@ import (
 type Table[Key ~int32, Item any] struct {
 	masks []uint64
 	items []Item
+	// nextFree is a lower bound on the index in masks of the first word with a
+	// free slot: every word before it is full. Insert scans from here instead
+	// of rescanning the whole bitmap, which made allocation quadratic in the
+	// number of live items; Delete lowers it to keep POSIX lowest-free order.
+	nextFree int
 }
 
 // Len returns the number of items stored in the table.
@@ -55,7 +60,7 @@ func (t *Table[Key, Item]) grow(n int) {
 // The method does not perform deduplication, it is possible for the same item
 // to be inserted multiple times, each insertion will return a different key.
 func (t *Table[Key, Item]) Insert(item Item) (key Key, ok bool) {
-	offset := 0
+	offset := t.nextFree
 insert:
 	// Note: this loop could be made a lot more efficient using vectorized
 	// operations: 256 bits vector registers would yield a theoretical 4x
@@ -67,6 +72,7 @@ insert:
 			key = Key(index)*64 + Key(shift)
 			t.items[key] = item
 			t.masks[index] = mask | uint64(1<<shift)
+			t.nextFree = index
 			return key, key >= 0
 		}
 	}
@@ -120,6 +126,9 @@ func (t *Table[Key, Item]) Delete(key Key) {
 			var zero Item
 			t.items[key] = zero
 			t.masks[index] = mask & ^uint64(1<<shift)
+			if int(index) < t.nextFree {
+				t.nextFree = int(index)
+			}
 		}
 	}
 }
@@ -146,4 +155,5 @@ func (t *Table[Key, Item]) Range(f func(Key, Item) bool) {
 func (t *Table[Key, Item]) Reset() {
 	clear(t.masks)
 	clear(t.items)
+	t.nextFree = 0
 }

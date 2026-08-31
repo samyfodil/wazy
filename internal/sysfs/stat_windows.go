@@ -73,6 +73,12 @@ func statFile(f fs.File) (sys.Stat_t, sys.Errno) {
 	return defaultStatFile(f)
 }
 
+// statOSFile stats an open file. os.File implements fdFile, so this is the
+// handle path in statFile above.
+func statOSFile(f *osFile) (sys.Stat_t, sys.Errno) {
+	return statFile(f.file)
+}
+
 func statHandle(h syscall.Handle) (sys.Stat_t, sys.Errno) {
 	winFt, err := syscall.GetFileType(h)
 	if err != nil {

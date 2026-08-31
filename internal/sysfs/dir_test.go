@@ -4,8 +4,11 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"runtime"
 	"sort"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/samyfodil/wazy/internal/fstest"
@@ -169,4 +172,59 @@ func requireIno(t *testing.T, dirents []sys.Dirent, expectDirIno bool) {
 			require.Zero(t, e.Ino, "%+v", e)
 		}
 	}
+}
+
+// TestOSFileReaddirLargeDir reads a directory whose entries don't fit in one
+// getdents64 buffer, so entries and their names have to survive across batches.
+func TestOSFileReaddirLargeDir(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	const count = 500
+	want := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		name := strings.Repeat("a", 40) + strconv.Itoa(i)
+		require.NoError(t, os.WriteFile(path.Join(tmpDir, name), nil, 0o600))
+		want = append(want, name)
+	}
+	sort.Strings(want)
+
+	// Read every entry in one call.
+	f, errno := sysfs.OpenOSFile(tmpDir, sys.O_RDONLY, 0)
+	require.EqualErrno(t, 0, errno)
+	defer f.Close()
+
+	dirents, errno := f.Readdir(-1)
+	require.EqualErrno(t, 0, errno)
+	require.Equal(t, want, direntNames(dirents))
+
+	// Read in chunks that don't align with the batches: names read earlier
+	// must still be intact once later batches have been parsed.
+	f2, errno := sysfs.OpenOSFile(tmpDir, sys.O_RDONLY, 0)
+	require.EqualErrno(t, 0, errno)
+	defer f2.Close()
+
+	var chunked []sys.Dirent
+	for {
+		dirents, errno = f2.Readdir(7)
+		require.EqualErrno(t, 0, errno)
+		if len(dirents) == 0 {
+			break
+		}
+		require.True(t, len(dirents) <= 7)
+		chunked = append(chunked, dirents...)
+	}
+	require.Equal(t, want, direntNames(chunked))
+	for _, e := range chunked {
+		require.Zero(t, e.Type, "%+v", e) // all are regular files
+	}
+}
+
+func direntNames(dirents []sys.Dirent) []string {
+	names := make([]string, 0, len(dirents))
+	for _, e := range dirents {
+		names = append(names, e.Name)
+	}
+	sort.Strings(names)
+	return names
 }

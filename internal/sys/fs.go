@@ -102,14 +102,19 @@ func (f *FileEntry) DirentCache() (*DirentCache, sys.Errno) {
 		return nil, sys.ENOTDIR
 	}
 
-	// Generate the dotEntries only once.
-	if dotEntries, errno := synthesizeDotEntries(f); errno != 0 {
+	// Generate the dot entries only once.
+	dotIno, errno := f.File.Ino()
+	if errno != 0 {
 		return nil, errno
-	} else {
-		f.direntCache = &DirentCache{f: f.File, dotEntries: dotEntries}
 	}
+	dir := &DirentCache{f: f.File}
+	dir.dotEntries[0] = sys.Dirent{Name: ".", Ino: dotIno, Type: fs.ModeDir}
+	// See /RATIONALE.md for why we don't attempt to get an inode for ".." and
+	// why in wasi-libc this won't fan-out either.
+	dir.dotEntries[1] = sys.Dirent{Name: "..", Ino: 0, Type: fs.ModeDir}
+	f.direntCache = dir
 
-	return f.direntCache, 0
+	return dir, 0
 }
 
 // DirentCache is a caching abstraction of sys.File Readdir.
@@ -134,8 +139,9 @@ type DirentCache struct {
 	f sys.File
 
 	// dotEntries are the "." and ".." entries added when the directory is
-	// initialized.
-	dotEntries []sys.Dirent
+	// initialized. They are stored inline: a slice of them was one more
+	// allocation per directory listing.
+	dotEntries [2]sys.Dirent
 
 	// dirents are the potentially unread directory entries.
 	//
@@ -150,20 +156,6 @@ type DirentCache struct {
 	// the directory when it is exhausted. Entires in an exhausted directory
 	// are not visible until it is rewound via calling Read with `pos==0`.
 	eof bool
-}
-
-// synthesizeDotEntries generates a slice of the two elements "." and "..".
-func synthesizeDotEntries(f *FileEntry) ([]sys.Dirent, sys.Errno) {
-	dotIno, errno := f.File.Ino()
-	if errno != 0 {
-		return nil, errno
-	}
-	result := [2]sys.Dirent{}
-	result[0] = sys.Dirent{Name: ".", Ino: dotIno, Type: fs.ModeDir}
-	// See /RATIONALE.md for why we don't attempt to get an inode for ".." and
-	// why in wasi-libc this won't fan-out either.
-	result[1] = sys.Dirent{Name: "..", Ino: 0, Type: fs.ModeDir}
-	return result[:], 0
 }
 
 // exhaustedDirents avoids allocating empty slices.
@@ -205,7 +197,7 @@ func (d *DirentCache) Read(pos uint64, n uint32) (dirents []sys.Dirent, errno sy
 
 	if d.dirents == nil {
 		// Always populate dot entries, which makes min len(dirents) == 2.
-		d.dirents = d.dotEntries
+		d.dirents = d.dotEntries[:]
 		d.countRead = 2
 		d.eof = false
 
@@ -215,7 +207,7 @@ func (d *DirentCache) Read(pos uint64, n uint32) (dirents []sys.Dirent, errno sy
 			return
 		} else if countRead := len(dirents); countRead > 0 {
 			d.eof = countRead < countToRead
-			d.dirents = append(d.dotEntries, dirents...)
+			d.dirents = append(d.dotEntries[:], dirents...)
 			d.countRead += uint64(countRead)
 		}
 

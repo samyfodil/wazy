@@ -88,6 +88,35 @@ func TestFileTable(t *testing.T) {
 	}
 }
 
+func TestFileTableInsertLowestFree(t *testing.T) {
+	table := new(sys.FileTable)
+	entry := &sys.FileEntry{Name: "x"}
+
+	// Fill past a 64 bit mask word boundary, so that freed slots end up behind
+	// the insertion hint.
+	for i := int32(0); i < 130; i++ {
+		k, ok := table.Insert(entry)
+		require.True(t, ok)
+		require.Equal(t, i, k)
+	}
+
+	// Freed slots must be reused lowest-first, as POSIX fd allocation requires.
+	table.Delete(3)
+	table.Delete(70)
+	for _, want := range []int32{3, 70, 130} {
+		k, ok := table.Insert(entry)
+		require.True(t, ok)
+		require.Equal(t, want, k)
+	}
+	require.Equal(t, 131, table.Len())
+
+	// A reset table allocates from zero again.
+	table.Reset()
+	k, ok := table.Insert(entry)
+	require.True(t, ok)
+	require.Equal(t, int32(0), k)
+}
+
 func BenchmarkFileTableInsert(b *testing.B) {
 	table := new(sys.FileTable)
 	entry := new(sys.FileEntry)

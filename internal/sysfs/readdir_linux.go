@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"io/fs"
 	"path"
+	"slices"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -56,7 +57,7 @@ var direntBufPool = sync.Pool{
 // doesn't already have one.
 func (f *osFile) acquireDirentBuf() {
 	if f.direntBuf == nil {
-		f.direntBuf = *(direntBufPool.Get().(*[]byte))
+		f.direntBuf = direntBufPool.Get().(*[]byte)
 	}
 }
 
@@ -65,7 +66,7 @@ func (f *osFile) acquireDirentBuf() {
 func (f *osFile) releaseDirentBuf() {
 	if buf := f.direntBuf; buf != nil {
 		f.direntBuf = nil
-		direntBufPool.Put(&buf)
+		direntBufPool.Put(buf)
 	}
 }
 
@@ -138,8 +139,15 @@ func (f *osFile) readdirGetdents(n int) (dirents []sys.Dirent, errno sys.Errno) 
 		}
 
 		if readAll || n-len(dirents) >= len(f.bufferedDirents) {
-			dirents = append(dirents, f.bufferedDirents...)
-			f.bufferedDirents = nil
+			if dirents == nil {
+				// Hand over the whole batch: a listing that fits in one
+				// getdents64 call is the common case, and appending only
+				// copied it.
+				dirents, f.bufferedDirents = f.bufferedDirents, nil
+			} else {
+				dirents = append(dirents, f.bufferedDirents...)
+				f.bufferedDirents = nil
+			}
 		} else {
 			need := n - len(dirents)
 			dirents = append(dirents, f.bufferedDirents[:need:need]...)
@@ -160,7 +168,8 @@ func (f *osFile) fillBufferedDirents() sys.Errno {
 	// on osFile (see newOsFile) and used elsewhere in this package (e.g.
 	// poll, setNonblock) instead of calling f.file.Fd(), which would
 	// (redundantly) force the descriptor back into blocking mode.
-	n, err := syscall.ReadDirent(int(f.fd), f.direntBuf)
+	buf := *f.direntBuf
+	n, err := syscall.ReadDirent(int(f.fd), buf)
 	if err != nil {
 		return sys.UnwrapOSError(err)
 	}
@@ -169,7 +178,7 @@ func (f *osFile) fillBufferedDirents() sys.Errno {
 		return 0
 	}
 
-	dirents, errno := parseDirents(f.direntBuf[:n], f.path, f.bufferedDirents[:0])
+	dirents, errno := parseDirents(buf[:n], f.path, f.bufferedDirents[:0])
 	if errno != 0 {
 		return errno
 	}
@@ -183,6 +192,18 @@ func (f *osFile) fillBufferedDirents() sys.Errno {
 // internal/sys.DirentCache). dirPath is the directory's real path, used
 // only to lstat entries whose d_type is DT_UNKNOWN.
 func parseDirents(buf []byte, dirPath string, dst []sys.Dirent) ([]sys.Dirent, sys.Errno) {
+	// Size dst from the batch: growing it from nil cost five allocations for a
+	// thirteen entry directory.
+	dst = slices.Grow(dst, countDirents(buf))
+
+	// names is the arena the entry names are cut from, so a batch costs one
+	// allocation for all of them instead of a string each. The names are a
+	// subset of these bytes, so reserving batchLen means append never
+	// reallocates: every name points into the one array, which lives exactly as
+	// long as the dirents referencing it.
+	var names []byte
+	batchLen := len(buf)
+
 	for len(buf) > 0 {
 		if uintptr(len(buf)) < direntNameOff {
 			break // truncated record: shouldn't happen, but don't panic.
@@ -211,7 +232,16 @@ func parseDirents(buf []byte, dirPath string, dst []sys.Dirent) ([]sys.Dirent, s
 		if isDotOrDotDot(nameBytes) {
 			continue
 		}
-		name := string(nameBytes)
+
+		var name string
+		if len(nameBytes) > 0 {
+			if names == nil {
+				names = make([]byte, 0, batchLen)
+			}
+			off := len(names)
+			names = append(names, nameBytes...)
+			name = unsafe.String(&names[off], len(nameBytes))
+		}
 
 		typ, ok := direntTypeToFileMode(dtype)
 		if !ok {
@@ -235,6 +265,21 @@ func parseDirents(buf []byte, dirPath string, dst []sys.Dirent) ([]sys.Dirent, s
 		dst = append(dst, sys.Dirent{Name: name, Ino: sys.Inode(ino), Type: typ})
 	}
 	return dst, 0
+}
+
+// countDirents returns the number of raw records in buf, an upper bound on the
+// entries parseDirents yields from it (it drops "." and ".."). It only walks
+// the record lengths, so it is much cheaper than the parse itself.
+func countDirents(buf []byte) (n int) {
+	for uintptr(len(buf)) >= direntNameOff {
+		reclen := binary.NativeEndian.Uint16(buf[direntReclenOff:])
+		if reclen == 0 || uintptr(reclen) > uintptr(len(buf)) || uintptr(reclen) < direntNameOff {
+			break
+		}
+		buf = buf[reclen:]
+		n++
+	}
+	return
 }
 
 // isDotOrDotDot returns true if name is "." or "..".

@@ -36,10 +36,51 @@ func (f *baseSockFile) Stat() (fs sys.Stat_t, errno sys.Errno) {
 	return
 }
 
+// sockOp caches a socket's syscall.RawConn together with a closure bound to it
+// once. RawConn.Control takes its callback through an interface call, so a
+// closure built per read or write escapes, dragging the n and errno it captures
+// to the heap with it; binding one closure per socket and passing arguments and
+// results through these fields keeps the hot path allocation-free. Calls on one
+// socket are serialized, like the rest of these files' mutable state.
+type sockOp struct {
+	conn  syscall.Conn
+	rc    syscall.RawConn
+	fn    func(fd uintptr, buf []byte) (int, sys.Errno)
+	buf   []byte
+	n     int
+	errno sys.Errno
+	op    func(fd uintptr)
+}
+
+func (s *sockOp) init(conn syscall.Conn) {
+	s.conn = conn
+	s.op = func(fd uintptr) { s.n, s.errno = s.fn(fd, s.buf) }
+}
+
+// call runs fn against the socket's file descriptor, which RawConn.Control
+// keeps valid for the duration of the call. The errno from fn wins; otherwise
+// Control's own error is surfaced.
+func (s *sockOp) call(fn func(fd uintptr, buf []byte) (int, sys.Errno), buf []byte) (int, sys.Errno) {
+	if s.rc == nil {
+		rc, err := s.conn.SyscallConn()
+		if err != nil {
+			return 0, sys.UnwrapOSError(err)
+		}
+		s.rc = rc
+	}
+	s.fn, s.buf, s.n, s.errno = fn, buf, 0, 0
+	controlErr := s.rc.Control(s.op)
+	if s.errno != 0 {
+		return s.n, s.errno
+	}
+	return s.n, sys.UnwrapOSError(controlErr)
+}
+
 var _ socketapi.TCPSock = (*tcpListenerFile)(nil)
 
 type tcpListenerFile struct {
 	baseSockFile
+	sockOp
 
 	tl       *net.TCPListener
 	closed   bool
@@ -54,7 +95,9 @@ type tcpListenerFile struct {
 // that the underlying file descriptor is valid throughout
 // the duration of the syscall.
 func newDefaultTCPListenerFile(tl *net.TCPListener) socketapi.TCPSock {
-	return &tcpListenerFile{tl: tl}
+	f := &tcpListenerFile{tl: tl}
+	f.init(tl)
+	return f
 }
 
 // Close implements the same method as documented on sys.File
@@ -84,13 +127,9 @@ var _ socketapi.TCPConn = (*tcpConnFile)(nil)
 
 type tcpConnFile struct {
 	baseSockFile
+	sockOp
 
 	tc *net.TCPConn
-
-	// rc caches the connection's syscall.RawConn so per-read/write syscalls skip
-	// a SyscallConn() allocation (W4). nil if SyscallConn failed at construction,
-	// in which case control() falls back to syscallConnControl.
-	rc syscall.RawConn
 
 	// nonblock is true when the underlying connection is flagged as non-blocking.
 	// This ensures that reads and writes return sys.EAGAIN without blocking the caller.
@@ -101,28 +140,8 @@ type tcpConnFile struct {
 
 func newTcpConn(tc *net.TCPConn) socketapi.TCPConn {
 	f := &tcpConnFile{tc: tc}
-	// Cache RawConn once; RawConn.Control still guards fd validity per call.
-	if rc, err := tc.SyscallConn(); err == nil {
-		f.rc = rc
-	}
+	f.init(tc)
 	return f
-}
-
-// control runs op against the connection's fd, reusing the cached RawConn when
-// available. op matches RawConn.Control's signature exactly (writing results via
-// captured vars) so no adapter closure is allocated on top of it — one escaping
-// closure per call instead of two (W4). RawConn.Control keeps the fd valid for
-// the duration of the call. The returned Errno is Control's own error, which the
-// caller should use only when op reported success (inner errno wins).
-func (f *tcpConnFile) control(op func(fd uintptr)) sys.Errno {
-	if f.rc != nil {
-		return sys.UnwrapOSError(f.rc.Control(op))
-	}
-	rc, err := f.tc.SyscallConn()
-	if err != nil {
-		return sys.UnwrapOSError(err)
-	}
-	return sys.UnwrapOSError(rc.Control(op))
 }
 
 // Read implements the same method as documented on sys.File
@@ -131,14 +150,9 @@ func (f *tcpConnFile) Read(buf []byte) (n int, errno sys.Errno) {
 		return 0, 0 // Short-circuit 0-len reads.
 	}
 	if nonBlockingFileReadSupported && f.IsNonblock() {
-		controlErr := f.control(func(fd uintptr) {
-			var e sys.Errno
-			n, e = readSocket(fd, buf)
-			errno = fileError(f, f.closed, e)
-		})
-		if errno == 0 { // inner errno wins; else surface Control's own error
-			errno = controlErr
-		}
+		n, errno = f.call(readSocket, buf)
+		// Validate even on success: the guest may have closed this file.
+		return n, fileError(f, f.closed, errno)
 	} else {
 		n, errno = read(f.tc, buf)
 	}
@@ -152,15 +166,9 @@ func (f *tcpConnFile) Read(buf []byte) (n int, errno sys.Errno) {
 // Write implements the same method as documented on sys.File
 func (f *tcpConnFile) Write(buf []byte) (n int, errno sys.Errno) {
 	if nonBlockingFileWriteSupported && f.IsNonblock() {
-		controlErr := f.control(func(fd uintptr) {
-			var e sys.Errno
-			n, e = writeSocket(fd, buf)
-			errno = fileError(f, f.closed, e)
-		})
-		if errno == 0 { // inner errno wins; else surface Control's own error
-			errno = controlErr
-		}
-		return
+		n, errno = f.call(writeSocket, buf)
+		// Validate even on success: the guest may have closed this file.
+		return n, fileError(f, f.closed, errno)
 	} else {
 		n, errno = write(f.tc, buf)
 	}
@@ -177,15 +185,14 @@ func (f *tcpConnFile) Recvfrom(p []byte, flags int) (n int, errno sys.Errno) {
 		errno = sys.EINVAL
 		return
 	}
-	controlErr := f.control(func(fd uintptr) {
-		var e sys.Errno
-		n, e = recvfrom(fd, p, MSG_PEEK)
-		errno = fileError(f, f.closed, e)
-	})
-	if errno == 0 { // inner errno wins; else surface Control's own error
-		errno = controlErr
-	}
-	return
+	n, errno = f.call(peekSocket, p)
+	return n, fileError(f, f.closed, errno)
+}
+
+// peekSocket is recvfrom with MSG_PEEK, as a top-level function so that
+// Recvfrom passes it to call without allocating a closure.
+func peekSocket(fd uintptr, buf []byte) (int, sys.Errno) {
+	return recvfrom(fd, buf, MSG_PEEK)
 }
 
 // Close implements the same method as documented on sys.File
