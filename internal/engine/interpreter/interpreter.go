@@ -204,17 +204,21 @@ func (ce *callEngine) ScanGCRoots(visit func(uint64)) {
 }
 
 // matchCatchClause checks whether a single catch clause matches the given exception.
-// Returns whether it matched and the values to push onto the stack.
+// Returns whether it matched and the values to push onto the stack. The caller
+// only copies them onto the operand stack (see applyExceptionHandler) and never
+// retains or writes them, so a plain catch hands over exn.Params itself.
 func matchCatchClause(exnRefOf func(*wasm.Exception) uint64, kind byte, clauseTag *wasm.TagInstance, exn *wasm.Exception) (matched bool, values []uint64) {
 	switch kind {
 	case wasm.CatchKindCatch:
 		if exn.Tag == clauseTag {
-			return true, slices.Clone(exn.Params)
+			return true, exn.Params
 		}
 	case wasm.CatchKindCatchRef:
 		if exn.Tag == clauseTag {
-			values = slices.Clone(exn.Params)
-			values = append(values, exnRefOf(exn))
+			// Sized exactly: clone-then-append would grow and copy a second time.
+			values = make([]uint64, len(exn.Params)+1)
+			copy(values, exn.Params)
+			values[len(exn.Params)] = exnRefOf(exn)
 			return true, values
 		}
 	case wasm.CatchKindCatchAll:
@@ -949,7 +953,107 @@ func (e *engine) lowerIR(ir *compilationResult, ret *compiledFunction) error {
 		}
 	}
 
+	compactBody(ret)
+
 	return nil
+}
+
+// compactBody deletes the operations that dispatch to nothing and rewrites every
+// body index into the compacted space (F8). Two kinds go:
+//
+//   - labels, the branch anchors the compiler leaves behind. Execution treats one
+//     as a bare pc++, but reaching it still costs a whole dispatch iteration, and
+//     they are 5-15% of the operations a loop or a recursive call executes.
+//   - a br whose target is the next surviving operation, i.e. one that jumps
+//     where control was already going. These appear once the labels between the
+//     br and its target are gone (4% of fib_rec's dispatches).
+//
+// A deleted operation's address maps to the next surviving one -- exactly where
+// control reached from it anyway -- so the mapping is order preserving and every
+// [startPC, endPC) range keeps the operations it contained. A br to a return
+// target keeps math.MaxUint64 and is never deleted: it ends the function rather
+// than falling through.
+//
+// This must run last: it consumes the body indices the passes above resolved.
+func compactBody(ret *compiledFunction) {
+	// remap serves both passes. Backwards it holds, for each index, the OLD index
+	// of the first operation at or after it that survives -- so i survives exactly
+	// when remap[i] == i -- and going backwards means everything after i is
+	// already settled when i is judged, collapsing a br->br->label chain in one
+	// pass with no fixpoint. The forward pass then overwrites each slot in place
+	// with i's NEW index, which for a deleted i is the next survivor's. The extra
+	// slot maps a target of len(body) to the new end; both are past the loop
+	// guard, which ends the function either way.
+	remap := make([]uint64, len(ret.body)+1)
+	remap[len(ret.body)] = uint64(len(ret.body))
+	for i := len(ret.body) - 1; i >= 0; i-- {
+		op := &ret.body[i]
+		if op.Kind == operationKindLabel ||
+			(op.Kind == operationKindBr && op.U1 > uint64(i) && op.U1 != math.MaxUint64 &&
+				remap[op.U1] == remap[i+1]) {
+			remap[i] = remap[i+1]
+		} else {
+			remap[i] = uint64(i)
+		}
+	}
+
+	body := ret.body[:0]
+	offsets := ret.offsetsInWasmBinary[:0]
+	haveOffsets := len(ret.offsetsInWasmBinary) != 0
+	for i := range ret.body {
+		survives := remap[i] == uint64(i)
+		remap[i] = uint64(len(body))
+		if !survives {
+			continue
+		}
+		// Compacting in place is safe: len(body) <= i always, so this only ever
+		// overwrites a slot already read.
+		body = append(body, ret.body[i])
+		if haveOffsets {
+			offsets = append(offsets, ret.offsetsInWasmBinary[i])
+		}
+	}
+	remap[len(ret.body)] = uint64(len(body))
+	if len(body) == len(ret.body) {
+		return // nothing died; nothing to rewrite
+	}
+	ret.body = body
+	if haveOffsets {
+		ret.offsetsInWasmBinary = offsets
+	}
+
+	// setLabelAddress leaves math.MaxUint64 for a return target, which is not a
+	// body index and must survive untouched.
+	retarget := func(p *uint64) {
+		if *p != math.MaxUint64 {
+			*p = remap[*p]
+		}
+	}
+	for i := range ret.body {
+		op := &ret.body[i]
+		switch op.Kind {
+		case operationKindBr:
+			retarget(&op.U1)
+		case operationKindBrIf, operationKindBrOnNull, operationKindBrOnNonNull:
+			retarget(&op.U1)
+			retarget(&op.U2)
+		case operationKindBrTable:
+			us := ret.sideTable[op.U3]
+			for j := 0; j < len(us); j += 2 { // odd entries are drop ranges
+				retarget(&us[j])
+			}
+		case operationKindTailCallReturnCallIndirect, operationKindReturnCallRef:
+			retarget(&ret.sideTable[op.U3][1])
+		}
+	}
+	for i := range ret.exceptionTable {
+		entry := &ret.exceptionTable[i]
+		retarget(&entry.startPC)
+		retarget(&entry.endPC)
+		for j := range entry.clauses {
+			retarget(&entry.clauses[j].targetPC)
+		}
+	}
 }
 
 func (e *engine) setLabelAddress(op *uint64, label label, labelAddressResolutions [labelKindNum][]uint64) {
@@ -1136,7 +1240,7 @@ func (ce *callEngine) recoverOnCall(ctx context.Context, m *wasm.ModuleInstance,
 		if f.parent.listener != nil {
 			functionListeners = append(functionListeners, functionListenerInvocation{
 				FunctionListener: f.parent.listener,
-				def:              f.definition(),
+				def:              def,
 			})
 		}
 	}

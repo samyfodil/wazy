@@ -493,3 +493,110 @@ func TestEngine_WasmModulesShareCompiledFunctions(t *testing.T) {
 	_, ok = e.compiledFunctions[m.ID]
 	require.False(t, ok)
 }
+
+func TestCompactBody(t *testing.T) {
+	// A body exercising every reference compactBody has to rewrite: a label at
+	// the head, a br that only becomes a fallthrough once the label after it is
+	// gone, a backward BrIf target, a br_table side payload whose odd entries are
+	// drop ranges and must not move, a br to the return target, the parallel
+	// source-offset array, and an exception table range plus catch target.
+	const ret = math.MaxUint64
+	f := &compiledFunction{
+		body: []unionOperation{
+			{Kind: operationKindLabel},                      // 0: dead
+			{Kind: operationKindConstI32},                   // 1
+			{Kind: operationKindBr, U1: 4},                  // 2: dead once 3 goes
+			{Kind: operationKindLabel},                      // 3: dead
+			{Kind: operationKindConstI32},                   // 4
+			{Kind: operationKindBrIf, U1: 8, U2: 0, U3: 77}, // 5
+			{Kind: operationKindLabel},                      // 6: dead
+			{Kind: operationKindBrTable, U3: 0},             // 7
+			{Kind: operationKindBr, U1: ret},                // 8: return target, never dead
+		},
+		sideTable:           [][]uint64{{8, 55, 0, 66}},
+		offsetsInWasmBinary: []uint64{10, 11, 12, 13, 14, 15, 16, 17, 18},
+		exceptionTable: []exceptionTableEntry{{
+			startPC: 0,
+			endPC:   6,
+			clauses: []exceptionTableCatchClause{{targetPC: 3}},
+		}},
+	}
+
+	compactBody(f)
+
+	require.Equal(t, []unionOperation{
+		{Kind: operationKindConstI32},                   // was 1
+		{Kind: operationKindConstI32},                   // was 4
+		{Kind: operationKindBrIf, U1: 4, U2: 0, U3: 77}, // was 5; U3 is a drop range, not an index
+		{Kind: operationKindBrTable, U3: 0},             // was 7
+		{Kind: operationKindBr, U1: ret},                // was 8
+	}, f.body)
+	// Odd side-table entries are drop ranges and must survive untouched.
+	require.Equal(t, [][]uint64{{4, 55, 0, 66}}, f.sideTable)
+	require.Equal(t, []uint64{11, 14, 15, 17, 18}, f.offsetsInWasmBinary)
+	require.Equal(t, []exceptionTableEntry{{
+		startPC: 0,
+		endPC:   3,
+		clauses: []exceptionTableCatchClause{{targetPC: 1}},
+	}}, f.exceptionTable)
+}
+
+func TestCompactBody_NoLabelsSurviveCompilation(t *testing.T) {
+	e := NewEngine(testCtx, api.CoreFeaturesV1, nil).(*engine)
+	m := &wasm.Module{
+		TypeSection:     []wasm.FunctionType{{}},
+		FunctionSection: []wasm.Index{0},
+		// (block (loop (br 1))) -- the shape that emits the most labels.
+		CodeSection: []wasm.Code{{Body: []byte{
+			wasm.OpcodeBlock, 0x40,
+			wasm.OpcodeLoop, 0x40,
+			wasm.OpcodeBr, 1,
+			wasm.OpcodeEnd,
+			wasm.OpcodeEnd,
+			wasm.OpcodeEnd,
+		}}},
+		ID: wasm.ModuleID{1},
+	}
+	require.NoError(t, e.CompileModule(testCtx, m, nil, false))
+	body := e.compiledFunctions[m.ID].funcs[0].body
+	require.NotEqual(t, 0, len(body))
+	for i := range body {
+		require.NotEqual(t, operationKindLabel, body[i].Kind, "label survived at %d", i)
+		// Every branch target must land inside the compacted body (or just past
+		// its end, which returns), never on a stale pre-compaction index.
+		if body[i].Kind == operationKindBr && body[i].U1 != math.MaxUint64 {
+			require.True(t, body[i].U1 <= uint64(len(body)))
+		}
+	}
+}
+
+func TestMatchCatchClause_DoesNotWriteThroughExceptionParams(t *testing.T) {
+	tag := &wasm.TagInstance{}
+	exnRef := func(*wasm.Exception) uint64 { return 99 }
+	// Params deliberately has spare capacity and a sentinel behind it: appending
+	// the exnref straight onto exn.Params would clobber the sentinel, and the
+	// exception stays live for a rethrow and for any outer handler.
+	backing := []uint64{1, 2, 3, 7}
+	exn := &wasm.Exception{Tag: tag, Params: backing[:3]}
+
+	matched, values := matchCatchClause(exnRef, wasm.CatchKindCatch, tag, exn)
+	require.True(t, matched)
+	require.Equal(t, []uint64{1, 2, 3}, values)
+
+	matched, values = matchCatchClause(exnRef, wasm.CatchKindCatchRef, tag, exn)
+	require.True(t, matched)
+	require.Equal(t, []uint64{1, 2, 3, 99}, values)
+	require.Equal(t, uint64(7), backing[3], "catch_ref wrote through exn.Params' backing array")
+
+	// A second handler must still see the original params.
+	matched, values = matchCatchClause(exnRef, wasm.CatchKindCatch, tag, exn)
+	require.True(t, matched)
+	require.Equal(t, []uint64{1, 2, 3}, values)
+
+	matched, values = matchCatchClause(exnRef, wasm.CatchKindCatchAllRef, nil, exn)
+	require.True(t, matched)
+	require.Equal(t, []uint64{99}, values)
+
+	matched, _ = matchCatchClause(exnRef, wasm.CatchKindCatch, &wasm.TagInstance{}, exn)
+	require.False(t, matched)
+}
