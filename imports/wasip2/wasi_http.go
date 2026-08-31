@@ -38,6 +38,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"sort"
@@ -102,9 +103,32 @@ var httpMethodResults = func() [][]component.Value {
 // Shareable for the same only-read reason as httpMethodResults.
 var wasiResultOk = []component.Value{component.ResultValue{IsErr: false, Payload: nil}}
 
-// wasiCheckWriteBudget is output-stream.check-write's fixed Ok(1<<40) budget
-// (see checkWrite in wasi.go), shared across calls for the same reason.
-var wasiCheckWriteBudget = []component.Value{component.ResultValue{IsErr: false, Payload: uint64(1) << 40}}
+// wasiMaxWriteBudget is the largest byte count check-write may report.
+//
+// check-write's WIT result is a u64, but its meaning is "the number of bytes
+// permitted for the next call to `write`" -- a bound on the length of a list<u8>
+// the guest builds in its own memory and hands back. Every list crosses this
+// boundary as a uint32 length (abi.allocStoreList / abi.loadListFromRange), so
+// 2^32-1 is the longest list any guest can express here. A budget above that
+// describes a write we could not lift even if the guest made it.
+//
+// And over-reporting is not a harmless over-estimate. A wasm32 guest narrows the
+// u64 to its own usize, so a budget that is a multiple of 2^32 arrives as ZERO.
+// The wasi_snapshot_preview1 component adapter -- which every standard-Go guest
+// reaches WASI through -- computes its write length as
+// `bytes.len().min(permit as usize)`, an i32.wrap_i64. Its "no budget" guard
+// tests the full u64 for zero, so a nonzero budget that wraps to zero slips past
+// it: the adapter calls write with an empty list and reports success with
+// nwritten = 0. Silent data loss, one truncated file per write.
+//
+// Being the maximum u32 it is also nonzero under narrowing to any width.
+const wasiMaxWriteBudget = uint64(math.MaxUint32)
+
+// wasiCheckWriteBudget is output-stream.check-write's fixed Ok budget (see
+// checkWrite in wasi.go), shared across calls for the same reason.
+var wasiCheckWriteBudget = []component.Value{
+	component.ResultValue{IsErr: false, Payload: wasiMaxWriteBudget},
+}
 
 // httpIncomingRequest is the host state behind an incoming-request resource:
 // the inbound request serveHTTP synthesized for the guest to read.

@@ -3,6 +3,7 @@ package wasip2
 import (
 	"bytes"
 	"context"
+	"math"
 	"testing"
 
 	"github.com/samyfodil/wazy/component"
@@ -206,8 +207,21 @@ func TestWASI_CheckWrite(t *testing.T) {
 		if !ok || rv.IsErr {
 			t.Fatalf("check-write: %#v", results[0])
 		}
-		if rv.Payload.(uint64) == 0 {
+		// Assert what the GUEST sees, not what the host sends. A wasm32
+		// guest narrows this u64 to its own usize, so a budget that is a
+		// multiple of 2^32 (1<<40 was) arrives as zero and the preview1
+		// adapter silently writes nothing. Checking the full u64 for zero
+		// is the same guard the adapter makes -- and the one that misses
+		// this. See wasiMaxWriteBudget.
+		budget := rv.Payload.(uint64)
+		if budget == 0 {
 			t.Fatal("check-write: expected a nonzero write budget")
+		}
+		if uint32(budget) == 0 {
+			t.Fatalf("check-write: budget %d narrows to zero in a wasm32 guest", budget)
+		}
+		if budget > math.MaxUint32 {
+			t.Fatalf("check-write: budget %d exceeds the longest list<u8> the ABI can carry", budget)
 		}
 	})
 	t.Run("unknown rep", func(t *testing.T) {
