@@ -573,7 +573,13 @@ func (m *Module) validateFunctions(enabledFeatures api.CoreFeatures, functions [
 // See https://github.com/WebAssembly/reference-types/issues/31
 // See https://github.com/WebAssembly/reference-types/issues/76
 func (m *Module) declaredFunctionIndexes(enabledFeatures api.CoreFeatures) (ret map[Index]struct{}, err error) {
-	ret = map[uint32]struct{}{}
+	// Element segment entries dominate this set in any module with a function table, so size for them
+	// up front rather than rehashing the map on the way up.
+	n := len(m.ExportSection)
+	for i := range m.ElementSection {
+		n += len(m.ElementSection[i].Init)
+	}
+	ret = make(map[Index]struct{}, n)
 
 	for i := range m.ExportSection {
 		exp := &m.ExportSection[i]
@@ -1124,39 +1130,35 @@ func (f *FunctionType) CacheKey() {
 	}
 }
 
-// buildKey generates the key. It is built with a single pre-sized strings.Builder rather than repeated string +=
-// concatenation (which reallocated on every operand). Grow is pre-computed from the operand name lengths so the
-// no-rec-group case allocates exactly once; a rec-group suffix (rare) may cost one extra grow.
+// buildKey generates the key. It appends into a stack buffer and converts once, so the only allocation is the
+// returned string: a strings.Builder here cost two, since fmt.Fprintf's io.Writer forced the builder to the
+// heap on top of its own buffer. 96 bytes covers any function type whose operands are numeric or plain
+// reference types; a longer one just grows the append.
 func (f *FunctionType) buildKey() string {
-	// 3 covers the worst-case separators ("v_" + "v" when both operand lists are empty).
-	n := 3
+	var stack [96]byte
+	buf := stack[:0]
 	for _, b := range f.Params {
-		n += len(ValueTypeName(b))
-	}
-	for _, b := range f.Results {
-		n += len(ValueTypeName(b))
-	}
-	var sb strings.Builder
-	sb.Grow(n)
-	for _, b := range f.Params {
-		sb.WriteString(ValueTypeName(b))
+		buf = append(buf, ValueTypeName(b)...)
 	}
 	if len(f.Params) == 0 {
-		sb.WriteString("v_")
+		buf = append(buf, "v_"...)
 	} else {
-		sb.WriteByte('_')
+		buf = append(buf, '_')
 	}
 	for _, b := range f.Results {
-		sb.WriteString(ValueTypeName(b))
+		buf = append(buf, ValueTypeName(b)...)
 	}
 	if len(f.Results) == 0 {
-		sb.WriteByte('v')
+		buf = append(buf, 'v')
 	}
 	if f.RecGroupSize > 1 {
-		fmt.Fprintf(&sb, "|rec%d/%d", f.RecGroupPosition, f.RecGroupSize)
+		buf = append(buf, "|rec"...)
+		buf = strconv.AppendUint(buf, uint64(f.RecGroupPosition), 10)
+		buf = append(buf, '/')
+		buf = strconv.AppendUint(buf, uint64(f.RecGroupSize), 10)
 	}
-	f.writeCompositeKey(&sb, strconv.FormatUint(uint64(f.Supertype), 10), ValueTypeName)
-	return sb.String()
+	buf = f.writeCompositeKey(buf, strconv.FormatUint(uint64(f.Supertype), 10), ValueTypeName)
+	return string(buf)
 }
 
 // writeCompositeKey appends the parts of a key that only a GC type can have: the composite kind and its
@@ -1165,29 +1167,30 @@ func (f *FunctionType) buildKey() string {
 //
 // super is how the supertype should be spelled -- a local index for a module-local key, a FunctionTypeID for
 // the store-wide one -- and fieldName likewise renders a field's type. See structuralTypeKey.
-func (f *FunctionType) writeCompositeKey(sb *strings.Builder, super string, fieldName func(ValueType) string) {
+func (f *FunctionType) writeCompositeKey(b []byte, super string, fieldName func(ValueType) string) []byte {
 	if f.CompositeKind != CompositeKindFunc {
-		sb.WriteByte('|')
+		b = append(b, '|')
 		if f.CompositeKind == CompositeKindStruct {
-			sb.WriteString("struct")
+			b = append(b, "struct"...)
 		} else {
-			sb.WriteString("array")
+			b = append(b, "array"...)
 		}
 		for _, fd := range f.Fields {
-			sb.WriteByte(' ')
+			b = append(b, ' ')
 			if fd.Mutable {
-				sb.WriteString("mut ")
+				b = append(b, "mut "...)
 			}
-			sb.WriteString(fieldName(fd.Type))
+			b = append(b, fieldName(fd.Type)...)
 		}
 	}
 	if f.HasSupertype {
-		sb.WriteString("|sub")
-		sb.WriteString(super)
+		b = append(b, "|sub"...)
+		b = append(b, super...)
 	}
 	if f.Extensible {
-		sb.WriteString("|open")
+		b = append(b, "|open"...)
 	}
+	return b
 }
 
 // String implements fmt.Stringer.
@@ -1408,6 +1411,23 @@ type NameMapAssoc struct {
 
 // AllDeclarations returns all declarations for functions, globals, memories, tables and tags in a module including imported ones.
 func (m *Module) AllDeclarations() (functions []Index, globals []GlobalType, memories []Memory, tables []Table, tags []Index, err error) {
+	// Size from the import counts the decoder already cached plus the local section lengths, so none of the
+	// five appends below regrows. A count left zero by a hand-built Module only costs the old growth.
+	if n := m.ImportFunctionCount + Index(len(m.FunctionSection)); n > 0 {
+		functions = make([]Index, 0, n)
+	}
+	if n := m.ImportGlobalCount + Index(len(m.GlobalSection)); n > 0 {
+		globals = make([]GlobalType, 0, n)
+	}
+	if n := m.ImportMemoryCount + Index(len(m.MemorySection)); n > 0 {
+		memories = make([]Memory, 0, n)
+	}
+	if n := m.ImportTableCount + Index(len(m.TableSection)); n > 0 {
+		tables = make([]Table, 0, n)
+	}
+	if n := m.ImportTagCount + Index(len(m.TagSection)); n > 0 {
+		tags = make([]Index, 0, n)
+	}
 	for i := range m.ImportSection {
 		imp := &m.ImportSection[i]
 		switch imp.Type {

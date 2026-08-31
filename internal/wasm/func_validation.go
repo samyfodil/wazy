@@ -380,9 +380,10 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			if err != nil {
 				return fmt.Errorf("read immediate: %v", err)
 			}
-			if multiMemoryErr := enabledFeatures.RequireEnabled(api.CoreFeatureMultiMemory); multiMemoryErr != nil {
+			if !enabledFeatures.IsEnabled(api.CoreFeatureMultiMemory) {
 				if memoryIndex != 0 {
-					return fmt.Errorf("memory index must be zero but was %d: %w", memoryIndex, multiMemoryErr)
+					return fmt.Errorf("memory index must be zero but was %d: %w", memoryIndex,
+						enabledFeatures.RequireEnabled(api.CoreFeatureMultiMemory))
 				}
 				if num != 1 {
 					return fmt.Errorf("%s reserved byte must be zero encoded with 1 byte", InstructionName(op))
@@ -1391,9 +1392,10 @@ func (m *Module) validateFunctionWithMaxStackValues(
 					if err != nil {
 						return fmt.Errorf("failed to read memory index for %s: %v", MiscInstructionName(miscOpcode), err)
 					}
-					if multiMemoryErr := enabledFeatures.RequireEnabled(api.CoreFeatureMultiMemory); multiMemoryErr != nil {
+					if !enabledFeatures.IsEnabled(api.CoreFeatureMultiMemory) {
 						if memoryIndex != 0 {
-							return fmt.Errorf("memory index must be zero for %s as %v", MiscInstructionName(miscOpcode), multiMemoryErr)
+							return fmt.Errorf("memory index must be zero for %s as %v", MiscInstructionName(miscOpcode),
+								enabledFeatures.RequireEnabled(api.CoreFeatureMultiMemory))
 						}
 						if num != 1 {
 							return fmt.Errorf("%s reserved byte must be zero encoded with 1 byte", MiscInstructionName(miscOpcode))
@@ -1411,9 +1413,10 @@ func (m *Module) validateFunctionWithMaxStackValues(
 						if err != nil {
 							return fmt.Errorf("failed to read memory index for %s: %v", MiscInstructionName(miscOpcode), err)
 						}
-						if multiMemoryErr := enabledFeatures.RequireEnabled(api.CoreFeatureMultiMemory); multiMemoryErr != nil {
+						if !enabledFeatures.IsEnabled(api.CoreFeatureMultiMemory) {
 							if srcMemoryIndex != 0 {
-								return fmt.Errorf("memory index must be zero for %s as %v", MiscInstructionName(miscOpcode), multiMemoryErr)
+								return fmt.Errorf("memory index must be zero for %s as %v", MiscInstructionName(miscOpcode),
+									enabledFeatures.RequireEnabled(api.CoreFeatureMultiMemory))
 							}
 							if num != 1 {
 								return fmt.Errorf("%s reserved byte must be zero encoded with 1 byte", MiscInstructionName(miscOpcode))
@@ -2638,10 +2641,9 @@ func (sts *stacks) reset(functionType *FunctionType) {
 	sts.cs.stack = sts.cs.stack[:0]
 	sts.cs.stack = append(sts.cs.stack, controlBlock{blockType: functionType})
 	sts.ls = sts.ls[:0]
-	clear(sts.initLocals)
-	if sts.initLocals == nil {
-		sts.initLocals = make(map[uint32]struct{})
-	}
+	// nil, not cleared: markLocalInit allocates on first write, so a function with no
+	// non-defaultable locals -- i.e. almost every function -- never touches a map at all.
+	sts.initLocals = nil
 }
 
 func (sts *stacks) validateCallSignature(opName string, funcType *FunctionType) error {
@@ -2786,11 +2788,11 @@ func (s *valueTypeStack) popAndVerifyType(expected ValueType) error {
 	return nil
 }
 
+// max, not an if: it keeps the body under the cost cap the inliner applies to callees of a function as big
+// as validateFunctionWithMaxStackValues, which calls this on nearly every instruction.
 func (s *valueTypeStack) push(v ValueType) {
 	s.stack = append(s.stack, v)
-	if sp := len(s.stack); sp > s.maximumStackPointer {
-		s.maximumStackPointer = sp
-	}
+	s.maximumStackPointer = max(s.maximumStackPointer, len(s.stack))
 }
 
 func (s *valueTypeStack) unreachable() {

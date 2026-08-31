@@ -3,7 +3,6 @@ package wasm
 import (
 	"fmt"
 	"strconv"
-	"strings"
 
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/wasmruntime"
@@ -225,11 +224,13 @@ func checkFieldSubtype(sub, super FieldType, types []FunctionType) error {
 }
 
 // valueTypeMatches reports whether actual is a subtype of expected, over both numeric/packed types (where it
-// is equality) and reference types (where it is the lattice above plus nullability).
+// is equality) and reference types (where it is the lattice above plus nullability). The identical-types
+// case, which nearly every operand check is, stays here so it inlines; the lattice walk is refTypeMatches.
 func valueTypeMatches(actual, expected ValueType, types []FunctionType) bool {
-	if actual == expected {
-		return true
-	}
+	return actual == expected || refTypeMatches(actual, expected, types)
+}
+
+func refTypeMatches(actual, expected ValueType, types []FunctionType) bool {
 	if !actual.IsRef() || !expected.IsRef() {
 		return false
 	}
@@ -290,7 +291,7 @@ func ForEachRecGroup(types []FunctionType, f func(start, end int)) {
 // Keying the group and not the member is the whole point: two function types can be identical in isolation and
 // still be different types because a sibling in their rec group differs.
 func RecGroupKey(types []FunctionType, start, end int, refOutside func(Index) string) string {
-	var sb strings.Builder
+	var buf []byte
 	ref := func(idx Index) string {
 		if int(idx) >= start && int(idx) < end {
 			return "@" + strconv.Itoa(int(idx)-start)
@@ -308,24 +309,25 @@ func RecGroupKey(types []FunctionType, start, end int, refOutside func(Index) st
 	}
 	for i := start; i < end; i++ {
 		t := &types[i]
-		fmt.Fprintf(&sb, "k%d", t.CompositeKind)
+		buf = append(buf, 'k')
+		buf = strconv.AppendUint(buf, uint64(t.CompositeKind), 10)
 		for _, p := range t.Params {
-			sb.WriteByte(' ')
-			sb.WriteString(valueType(p))
+			buf = append(buf, ' ')
+			buf = append(buf, valueType(p)...)
 		}
-		sb.WriteByte('_')
+		buf = append(buf, '_')
 		for _, r := range t.Results {
-			sb.WriteByte(' ')
-			sb.WriteString(valueType(r))
+			buf = append(buf, ' ')
+			buf = append(buf, valueType(r)...)
 		}
 		super := "none"
 		if t.HasSupertype {
 			super = ref(t.Supertype)
 		}
-		t.writeCompositeKey(&sb, super, valueType)
-		sb.WriteByte(';')
+		buf = t.writeCompositeKey(buf, super, valueType)
+		buf = append(buf, ';')
 	}
-	return sb.String()
+	return string(buf)
 }
 
 // hierarchyTop returns the top heap type of the hierarchy a value type belongs to: any, func, extern or exn.
