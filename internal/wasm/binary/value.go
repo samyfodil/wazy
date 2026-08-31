@@ -114,10 +114,10 @@ func decodeRefType(enabledFeatures api.CoreFeatures, buf []byte, offset int, nul
 // copy it (via a stringArena, or bytes.Equal-comparison against an already-owned string) before storing it.
 // Error/offset semantics match the previous decodeUTF8 exactly: the size-read error returns the pre-size offset;
 // the read/validation errors return the post-size offset; a zero-size string returns (nil, post-size offset, nil).
-func decodeUTF8Raw(buf []byte, offset int, contextFormat string, contextArgs ...interface{}) ([]byte, int, error) {
+func decodeUTF8Raw(buf []byte, offset int, contextFormat string, contextArgs ...uint32) ([]byte, int, error) {
 	size, n, err := leb128.LoadUint32(buf[offset:])
 	if err != nil {
-		return nil, offset, fmt.Errorf("failed to read %s size: %w", fmt.Sprintf(contextFormat, contextArgs...), err)
+		return nil, offset, fmt.Errorf("failed to read %s size: %w", errContext(contextFormat, contextArgs), err)
 	}
 	offset += int(n)
 
@@ -127,19 +127,33 @@ func decodeUTF8Raw(buf []byte, offset int, contextFormat string, contextArgs ...
 
 	strBytes, newOffset, err := readBytes(buf, offset, int(size))
 	if err != nil {
-		return nil, offset, fmt.Errorf("failed to read %s: %w", fmt.Sprintf(contextFormat, contextArgs...), err)
+		return nil, offset, fmt.Errorf("failed to read %s: %w", errContext(contextFormat, contextArgs), err)
 	}
 
 	if !utf8.Valid(strBytes) {
-		return nil, offset, fmt.Errorf("%s is not valid UTF-8", fmt.Sprintf(contextFormat, contextArgs...))
+		return nil, offset, fmt.Errorf("%s is not valid UTF-8", errContext(contextFormat, contextArgs))
 	}
 
 	return strBytes, newOffset, nil
 }
 
+// errContext fills contextFormat's verbs, of which the callers have at most two (the name section's function and
+// local indices). It exists so the arguments can be typed uint32 up to here rather than interface{}: an index
+// above 255 heap-boxes on conversion, and on the success path -- once per named function and local -- that box is
+// never read. Formatting stays where it belongs, on the error path.
+func errContext(contextFormat string, contextArgs []uint32) string {
+	switch len(contextArgs) {
+	case 1:
+		return fmt.Sprintf(contextFormat, contextArgs[0])
+	case 2:
+		return fmt.Sprintf(contextFormat, contextArgs[0], contextArgs[1])
+	}
+	return contextFormat
+}
+
 // decodeUTF8 decodes a size prefixed string from buf[offset:], returning it (arena-owned so it doesn't alias the
 // caller's input slice) and the offset after it. contextFormat and contextArgs apply an error format when present.
-func decodeUTF8(buf []byte, offset int, arena *stringArena, contextFormat string, contextArgs ...interface{}) (string, int, error) {
+func decodeUTF8(buf []byte, offset int, arena *stringArena, contextFormat string, contextArgs ...uint32) (string, int, error) {
 	raw, newOffset, err := decodeUTF8Raw(buf, offset, contextFormat, contextArgs...)
 	if err != nil {
 		return "", newOffset, err

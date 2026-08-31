@@ -1,9 +1,11 @@
 package binary
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/leb128"
 	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/internal/wasm"
@@ -309,4 +311,98 @@ func TestDecodeDataCountSection(t *testing.T) {
 		_, _, err := decodeDataCountSection([]byte{}, 0)
 		require.NoError(t, err)
 	})
+}
+
+func TestImportSection_PerModuleRuns(t *testing.T) {
+	imp := func(module, name string) []byte {
+		b := []byte{byte(len(module))}
+		b = append(b, module...)
+		b = append(b, byte(len(name)))
+		b = append(b, name...)
+		return append(b, wasm.ExternTypeFunc, 0x00)
+	}
+	// "env" is interrupted by "other" and then resumed: the case the contiguous-run carving falls back to
+	// appending for.
+	in := []byte{0x04}
+	in = append(in, imp("env", "one")...)
+	in = append(in, imp("env", "two")...)
+	in = append(in, imp("other", "three")...)
+	in = append(in, imp("env", "four")...)
+
+	names := func(imports []*wasm.Import) []string {
+		var ret []string
+		for _, i := range imports {
+			ret = append(ret, i.Name)
+		}
+		return ret
+	}
+
+	_, perModule, funcCount, _, _, _, _, _, err := decodeImportSection(in, 0, &stringArena{},
+		newMemorySizer(wasm.MemoryLimitPages, false, 0), wasm.MemoryLimitPages, api.CoreFeaturesV2)
+	require.NoError(t, err)
+	require.Equal(t, wasm.Index(4), funcCount)
+	require.Equal(t, 2, len(perModule))
+	require.Equal(t, []string{"one", "two", "four"}, names(perModule["env"]))
+	require.Equal(t, []string{"three"}, names(perModule["other"]))
+	// Each run is capacity-capped, so resuming "env" reallocated instead of overwriting "other"'s entry.
+	require.Equal(t, len(perModule["other"]), cap(perModule["other"]))
+}
+
+func TestCodeSection_ArenaIsBoundedByTheInput(t *testing.T) {
+	// A section header's declared size is only checked against the bytes actually decoded *after* the
+	// section is read, so it is attacker controlled here: sizing the body arena from it alone would let
+	// this 5-byte section ask for 256 MiB.
+	const declared = uint32(256 << 20)
+	in := []byte{
+		0x01,       // 1 function body
+		0x03,       // its size is 3 bytes
+		0x00,       // no locals
+		0x01, 0x0b, // nop, end
+	}
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	code, _, err := decodeCodeSection(in, 0, declared, api.CoreFeaturesV2)
+	runtime.ReadMemStats(&after)
+
+	require.NoError(t, err)
+	require.Equal(t, []byte{0x01, 0x0b}, code[0].Body)
+	require.True(t, after.TotalAlloc-before.TotalAlloc < 1<<20,
+		"decoding a %d byte section allocated %d bytes", len(in), after.TotalAlloc-before.TotalAlloc)
+}
+
+func TestTypeSection_ResultIsBoundedByTheInput(t *testing.T) {
+	// The vector count is untrusted too: sizing the result from it alone would turn this 6-byte section
+	// into a 1,000,000 * sizeof(FunctionType) allocation.
+	in := append(leb128.EncodeUint32(1_000_000), 0x60, 0x00, 0x00) // one (func), then nothing
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, _, err := decodeTypeSection(api.CoreFeaturesV2, in, 0, uint32(len(in)))
+	runtime.ReadMemStats(&after)
+
+	require.Error(t, err) // the count outruns the section
+	require.True(t, after.TotalAlloc-before.TotalAlloc < 1<<20,
+		"decoding a %d byte section allocated %d bytes", len(in), after.TotalAlloc-before.TotalAlloc)
+}
+
+func TestDataSection_SegmentsShareOneArena(t *testing.T) {
+	in := []byte{
+		0x02, // 2 segments
+		0x00, wasm.OpcodeI32Const, 0x01, wasm.OpcodeEnd, 0x02, 0xaa, 0xbb,
+		0x00, wasm.OpcodeI32Const, 0x08, wasm.OpcodeEnd, 0x03, 0x0c, 0x0d, 0x0e,
+	}
+	segments, _, err := decodeDataSection(in, 0, uint32(len(in)), api.CoreFeaturesV2)
+	require.NoError(t, err)
+	require.Equal(t, 2, len(segments))
+	require.Equal(t, []byte{0xaa, 0xbb}, segments[0].Init)
+	require.Equal(t, []byte{0x0c, 0x0d, 0x0e}, segments[1].Init)
+	require.Equal(t, []byte{wasm.OpcodeI32Const, 0x01, wasm.OpcodeEnd}, segments[0].OffsetExpression.Data)
+	require.Equal(t, []byte{wasm.OpcodeI32Const, 0x08, wasm.OpcodeEnd}, segments[1].OffsetExpression.Data)
+	// Capacity-capped: appending to one segment's Init cannot overwrite the next segment's bytes.
+	require.Equal(t, len(segments[0].Init), cap(segments[0].Init))
+	segments[0].Init = append(segments[0].Init, 0xff)
+	require.Equal(t, []byte{0x0c, 0x0d, 0x0e}, segments[1].Init)
 }

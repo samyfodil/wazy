@@ -62,7 +62,10 @@ func decodeElementConstExprVector(buf []byte, offset int, elemType wasm.RefType,
 	var exprs []wasm.ConstantExpression
 	for i := range init {
 		var expr wasm.ConstantExpression
-		offset, err = decodeConstantExpression(buf, offset, enabledFeatures, &expr)
+		// No arena: wasm.CompactElementInit drops expr.Data for every entry it compacts (ref.func,
+		// global.get, ref.null -- what real producers emit), so these copies are short-lived garbage
+		// rather than module-lifetime data, and arena chunks would retain them all.
+		offset, err = decodeConstantExpression(buf, offset, enabledFeatures, nil, &expr)
 		if err != nil {
 			return nil, nil, offset, err
 		}
@@ -116,7 +119,7 @@ const (
 	elementSegmentPrefixDeclarativeConstExprVector
 )
 
-func decodeElementSegment(buf []byte, offset int, enabledFeatures api.CoreFeatures, ret *wasm.ElementSegment) (int, error) {
+func decodeElementSegment(buf []byte, offset int, enabledFeatures api.CoreFeatures, ba *byteArena, ret *wasm.ElementSegment) (int, error) {
 	prefix, n, err := leb128.LoadUint32(buf[offset:])
 	if err != nil {
 		return offset, fmt.Errorf("read element prefix: %w", err)
@@ -133,7 +136,7 @@ func decodeElementSegment(buf []byte, offset int, enabledFeatures api.CoreFeatur
 	switch prefix {
 	case elementSegmentPrefixLegacy:
 		// Legacy prefix which is WebAssembly 1.0 compatible.
-		offset, err = decodeConstantExpression(buf, offset, enabledFeatures, &ret.OffsetExpr)
+		offset, err = decodeConstantExpression(buf, offset, enabledFeatures, ba, &ret.OffsetExpr)
 		if err != nil {
 			return offset, fmt.Errorf("read expr for offset: %w", err)
 		}
@@ -173,7 +176,7 @@ func decodeElementSegment(buf []byte, offset int, enabledFeatures api.CoreFeatur
 			}
 		}
 
-		offset, err = decodeConstantExpression(buf, offset, enabledFeatures, &ret.OffsetExpr)
+		offset, err = decodeConstantExpression(buf, offset, enabledFeatures, ba, &ret.OffsetExpr)
 		if err != nil {
 			return offset, fmt.Errorf("read expr for offset: %w", err)
 		}
@@ -204,7 +207,7 @@ func decodeElementSegment(buf []byte, offset int, enabledFeatures api.CoreFeatur
 		ret.Mode = wasm.ElementModeDeclarative
 		return offset, nil
 	case elementSegmentPrefixActiveFuncrefConstExprVector:
-		offset, err = decodeConstantExpression(buf, offset, enabledFeatures, &ret.OffsetExpr)
+		offset, err = decodeConstantExpression(buf, offset, enabledFeatures, ba, &ret.OffsetExpr)
 		if err != nil {
 			return offset, fmt.Errorf("read expr for offset: %w", err)
 		}
@@ -240,7 +243,7 @@ func decodeElementSegment(buf []byte, offset int, enabledFeatures api.CoreFeatur
 				return offset, fmt.Errorf("table index must be zero but was %d: %w", ret.TableIndex, err)
 			}
 		}
-		offset, err = decodeConstantExpression(buf, offset, enabledFeatures, &ret.OffsetExpr)
+		offset, err = decodeConstantExpression(buf, offset, enabledFeatures, ba, &ret.OffsetExpr)
 		if err != nil {
 			return offset, fmt.Errorf("read expr for offset: %w", err)
 		}

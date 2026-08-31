@@ -9,7 +9,7 @@ import (
 	"github.com/samyfodil/wazy/internal/wasm"
 )
 
-func decodeTypeSection(enabledFeatures api.CoreFeatures, buf []byte, offset int) ([]wasm.FunctionType, int, error) {
+func decodeTypeSection(enabledFeatures api.CoreFeatures, buf []byte, offset int, sectionSize uint32) ([]wasm.FunctionType, int, error) {
 	vs, n, err := leb128.LoadUint32(buf[offset:])
 	if err != nil {
 		return nil, offset, fmt.Errorf("get size of vector: %w", err)
@@ -18,7 +18,10 @@ func decodeTypeSection(enabledFeatures api.CoreFeatures, buf []byte, offset int)
 
 	// vtArena batches the Params/Results slices of every function type in this section into a few chunks.
 	var vtArena valueTypeArena
-	var result []wasm.FunctionType
+	// Size from the section's own count, clamped to what this section's bytes could possibly encode (the
+	// shortest type entry is 2 bytes), so an inflated count can't drive a huge allocation. Both the count and
+	// the size come from the untrusted module, hence the clamp against the bytes actually present too.
+	result := make([]wasm.FunctionType, 0, min(uint64(vs), uint64(arenaSize(sectionSize, len(buf)-offset))/2))
 	for i := uint32(0); i < vs; i++ {
 		// Peek at the leading byte to check for rec group (0x4e, GC proposal).
 		b, o, err := readByte(buf, offset)
@@ -149,7 +152,28 @@ func decodeImportSection(
 			imp.IndexPerType = tagCount
 			tagCount++
 		}
-		perModule[imp.Module] = append(perModule[imp.Module], imp)
+	}
+
+	// ImportPerModule's slices are runs of one backing array rather than N slices each grown from nil:
+	// imports are grouped by module in practice, so a namespace is almost always one contiguous run. A
+	// namespace interrupted by another and then resumed appends onto its earlier run, which reallocates
+	// (the runs are capacity-capped) and so cannot clobber the following one.
+	backing := make([]*wasm.Import, vs)
+	for i := range result {
+		backing[i] = &result[i]
+	}
+	for start := 0; start < len(backing); {
+		module := backing[start].Module
+		end := start + 1
+		for end < len(backing) && backing[end].Module == module {
+			end++
+		}
+		if existing, ok := perModule[module]; ok {
+			perModule[module] = append(existing, backing[start:end:end]...)
+		} else {
+			perModule[module] = backing[start:end:end]
+		}
+		start = end
 	}
 	return result, perModule, funcCount, globalCount, memoryCount, tableCount, tagCount, offset, nil
 }
@@ -285,8 +309,10 @@ func decodeGlobalSection(buf []byte, offset int, enabledFeatures api.CoreFeature
 	offset += int(n)
 
 	result := make([]wasm.Global, vs)
+	// One arena for every global's init expression, as the code section does for bodies.
+	var ba byteArena
 	for i := uint32(0); i < vs; i++ {
-		if offset, err = decodeGlobal(buf, offset, enabledFeatures, &result[i]); err != nil {
+		if offset, err = decodeGlobal(buf, offset, enabledFeatures, &ba, &result[i]); err != nil {
 			return nil, offset, fmt.Errorf("global[%d]: %w", i, err)
 		}
 	}
@@ -335,8 +361,10 @@ func decodeElementSection(buf []byte, offset int, enabledFeatures api.CoreFeatur
 	offset += int(n)
 
 	result := make([]wasm.ElementSegment, vs)
+	// One arena for every segment's offset expression.
+	var ba byteArena
 	for i := uint32(0); i < vs; i++ {
-		if offset, err = decodeElementSegment(buf, offset, enabledFeatures, &result[i]); err != nil {
+		if offset, err = decodeElementSegment(buf, offset, enabledFeatures, &ba, &result[i]); err != nil {
 			return nil, offset, fmt.Errorf("read element: %w", err)
 		}
 	}
@@ -356,7 +384,7 @@ func decodeCodeSection(buf []byte, offset int, sectionSize uint32, enabledFeatur
 	// retained on wasm.Code.Body for the module's lifetime, which is identical retention to the previous N
 	// separate make([]byte)+copy per body — just one allocation instead of N. The section size is a safe upper
 	// bound (bodies are a strict subset of the section's bytes; size headers and locals live in the same span).
-	arena := make([]byte, sectionSize)
+	arena := make([]byte, arenaSize(sectionSize, len(buf)-offset))
 	arenaOff := 0
 	// localTypes batches every function's Code.LocalTypes into a few chunks instead of one slice per function.
 	var localTypes valueTypeArena
@@ -372,7 +400,7 @@ func decodeCodeSection(buf []byte, offset int, sectionSize uint32, enabledFeatur
 	return result, offset, nil
 }
 
-func decodeDataSection(buf []byte, offset int, enabledFeatures api.CoreFeatures) ([]wasm.DataSegment, int, error) {
+func decodeDataSection(buf []byte, offset int, sectionSize uint32, enabledFeatures api.CoreFeatures) ([]wasm.DataSegment, int, error) {
 	vs, n, err := leb128.LoadUint32(buf[offset:])
 	if err != nil {
 		return nil, offset, fmt.Errorf("get size of vector: %w", err)
@@ -380,8 +408,13 @@ func decodeDataSection(buf []byte, offset int, enabledFeatures api.CoreFeatures)
 	offset += int(n)
 
 	result := make([]wasm.DataSegment, vs)
+	// One backing array holds every segment's Init plus its offset expression, exactly as the code section
+	// does for bodies: both are copies of disjoint spans of this section, so the section size is a safe upper
+	// bound for their sum and the whole section needs a single allocation. It is clamped to the bytes actually
+	// remaining, since sectionSize comes from the module's own (untrusted) header.
+	ba := byteArena{buf: make([]byte, 0, arenaSize(sectionSize, len(buf)-offset))}
 	for i := uint32(0); i < vs; i++ {
-		if offset, err = decodeDataSegment(buf, offset, enabledFeatures, &result[i]); err != nil {
+		if offset, err = decodeDataSegment(buf, offset, enabledFeatures, &ba, &result[i]); err != nil {
 			return nil, offset, fmt.Errorf("read data segment: %w", err)
 		}
 	}

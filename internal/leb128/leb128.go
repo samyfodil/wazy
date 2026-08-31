@@ -119,9 +119,16 @@ func DecodeUint32(r io.ByteReader) (ret uint32, bytesRead uint64, err error) {
 }
 
 // LoadUint32 is the same as DecodeUint32 but reads directly out of buf via index, rather than through the
-// io.ByteReader interface.
+// io.ByteReader interface. The one-byte encoding -- every index, count and size below 128, i.e. most of what a
+// module contains -- returns before the loop, which for it would only add the terminal-byte overflow test and
+// the accumulate of a zero shift. Longer encodings pay one compare for that.
 func LoadUint32(buf []byte) (ret uint32, bytesRead uint64, err error) {
 	bufLen := len(buf)
+	if bufLen != 0 {
+		if b := buf[0]; b < 0x80 {
+			return uint32(b), 1, nil
+		}
+	}
 	var s uint32
 	for i := 0; i < maxVarintLen32; i++ {
 		if i >= bufLen {
@@ -146,6 +153,9 @@ func LoadUint64(buf []byte) (ret uint64, bytesRead uint64, err error) {
 	bufLen := len(buf)
 	if bufLen == 0 {
 		return 0, 0, io.EOF
+	}
+	if b := buf[0]; b < 0x80 {
+		return uint64(b), 1, nil
 	}
 
 	// Derived from https://github.com/golang/go/blob/go1.24.0/src/encoding/binary/varint.go
@@ -192,10 +202,16 @@ func DecodeInt32(r io.ByteReader) (ret int32, bytesRead uint64, err error) {
 }
 
 // LoadInt32 is the same as DecodeInt32 but reads directly out of buf via index, rather than through the
-// io.ByteReader interface.
+// io.ByteReader interface. As in LoadUint32 the one-byte encoding returns before the loop: its low 7 bits
+// sign-extend straight to the result, and neither the shifted sign extension nor the overflow check can fire.
 func LoadInt32(buf []byte) (ret int32, bytesRead uint64, err error) {
 	var shift int
 	bufLen := len(buf)
+	if bufLen != 0 {
+		if b := buf[0]; b < 0x80 {
+			return int32(int8(b<<1) >> 1), 1, nil
+		}
+	}
 	for i := 0; ; i++ {
 		if i >= bufLen {
 			return 0, 0, io.EOF
@@ -265,6 +281,12 @@ func LoadInt33AsInt64(buf []byte) (ret int64, bytesRead uint64, err error) {
 	var shift int
 	var b int64
 	bufLen := len(buf)
+	if bufLen != 0 {
+		// One byte: int33Finish's sign extension reduces to the same 7-bit one, and its overflow test cannot fire.
+		if fb := buf[0]; fb < 0x80 {
+			return int64(int8(fb<<1) >> 1), 1, nil
+		}
+	}
 	i := 0
 	for shift < 35 {
 		if i >= bufLen {
@@ -284,16 +306,12 @@ func LoadInt33AsInt64(buf []byte) (ret int64, bytesRead uint64, err error) {
 // int33Finish applies the sign extension and overflow checks shared by DecodeInt33AsInt64 and LoadInt33AsInt64
 // once the raw 35-bit accumulation loop above has produced ret, shift and bytesRead from the final byte b.
 func int33Finish(b int64, shift int, bytesRead uint64, ret int64) (int64, uint64, error) {
-	// fixme: can be optimized
 	if shift < 33 && (b&int33Mask3) == int33Mask3 {
 		ret |= int33Mask4 << shift
 	}
-	ret = ret & int33Mask4
-
-	// if 33rd bit == 1, we translate it as a corresponding signed-33bit minus value
-	if ret&int33Mask5 > 0 {
-		ret = ret - int33Mask6
-	}
+	// Sign-extend bit 32: this both discards the bits above the 33rd (what the old & (2^33-1) did) and turns a
+	// set 33rd bit into the corresponding negative value (what the old compare-and-subtract did).
+	ret = ret << 31 >> 31
 
 	// Over flow checks: the loop above can run at most maxVarintLen33 times (bounded by shift<35), so bytesRead
 	// can never exceed maxVarintLen33; the > case is kept for defensive symmetry with the 32/64-bit variants.
@@ -339,10 +357,15 @@ func DecodeInt64(r io.ByteReader) (ret int64, bytesRead uint64, err error) {
 }
 
 // LoadInt64 is the same as DecodeInt64 but reads directly out of buf via index, rather than through the
-// io.ByteReader interface.
+// io.ByteReader interface. One-byte fast path as in LoadInt32.
 func LoadInt64(buf []byte) (ret int64, bytesRead uint64, err error) {
 	var shift int
 	bufLen := len(buf)
+	if bufLen != 0 {
+		if b := buf[0]; b < 0x80 {
+			return int64(int8(b<<1) >> 1), 1, nil
+		}
+	}
 	for i := 0; ; i++ {
 		if i >= bufLen {
 			return 0, 0, io.EOF

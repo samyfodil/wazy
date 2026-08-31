@@ -11,14 +11,14 @@ import (
 // returning the offset after it.
 //
 // See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#binary-global
-func decodeGlobal(buf []byte, offset int, enabledFeatures api.CoreFeatures, ret *wasm.Global) (int, error) {
+func decodeGlobal(buf []byte, offset int, enabledFeatures api.CoreFeatures, ba *byteArena, ret *wasm.Global) (int, error) {
 	var err error
 	ret.Type, offset, err = decodeGlobalType(buf, offset, enabledFeatures)
 	if err != nil {
 		return offset, err
 	}
 
-	return decodeConstantExpression(buf, offset, enabledFeatures, &ret.Init)
+	return decodeConstantExpression(buf, offset, enabledFeatures, ba, &ret.Init)
 }
 
 // decodeGlobalType returns the wasm.GlobalType decoded from buf[offset:] with the WebAssembly 1.0 (20191205)

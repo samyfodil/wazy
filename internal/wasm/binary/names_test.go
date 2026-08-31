@@ -3,6 +3,7 @@ package binary
 import (
 	"testing"
 
+	"github.com/samyfodil/wazy/internal/leb128"
 	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/internal/wasm"
@@ -170,4 +171,26 @@ func TestDecodeNameSection_Errors(t *testing.T) {
 			require.EqualError(t, err, tc.expectedErr)
 		})
 	}
+}
+
+// TestDecodeFunctionNames_NoPerNameAllocation pins the success path of the name section to a handful of
+// allocations. Its error context carries the function index, and passing that as interface{} heap-boxed
+// every index at or above 256 (runtime.convT32's static boxes stop there) whether or not an error was ever
+// formatted -- one allocation per named function, on the path that never reads the box.
+func TestDecodeFunctionNames_NoPerNameAllocation(t *testing.T) {
+	const count = 600
+	in := leb128.EncodeUint32(count)
+	for i := uint32(0); i < count; i++ {
+		in = append(in, leb128.EncodeUint32(i)...)
+		in = append(in, 0x03, 'f', 'n', byte('0'+i%10))
+	}
+
+	allocs := testing.AllocsPerRun(3, func() {
+		names, _, err := decodeFunctionNames(in, 0, &stringArena{})
+		if err != nil || len(names) != count {
+			t.Fatal(err)
+		}
+	})
+	// The name map plus the string arena's geometrically grown chunks; nothing per name.
+	require.True(t, allocs < 30, "decodeFunctionNames allocated %v times for %d names", allocs, count)
 }
