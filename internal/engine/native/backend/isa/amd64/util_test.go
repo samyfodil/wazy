@@ -119,6 +119,11 @@ func (m *mockCompiler) VRegOf(value ssa.Value) regalloc.VReg {
 	return vReg
 }
 
+// AliasVReg implements backend.Compiler.
+func (m *mockCompiler) AliasVReg(value, src ssa.Value) {
+	m.vRegMap[value] = m.VRegOf(src)
+}
+
 // MatchInstr implements backend.Compiler.
 func (m *mockCompiler) MatchInstr(def backend.SSAValueDefinition, opcode ssa.Opcode) bool {
 	instr := def.Instr

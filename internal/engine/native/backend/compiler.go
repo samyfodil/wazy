@@ -80,6 +80,11 @@ type Compiler interface {
 	// VRegOf returns the virtual register of the given ssa.Value.
 	VRegOf(value ssa.Value) regalloc.VReg
 
+	// AliasVReg makes VRegOf(value) return the register already assigned to src, so a lowering
+	// whose result is bit-identical to its operand can emit no instruction at all instead of a
+	// register-to-register copy. It must be called before any user of value is lowered.
+	AliasVReg(value, src ssa.Value)
+
 	// TypeOf returns the ssa.Type of the given virtual register.
 	TypeOf(regalloc.VReg) ssa.Type
 
@@ -309,6 +314,11 @@ func (c *compiler) ValueDefinition(value ssa.Value) SSAValueDefinition {
 // VRegOf implements Compiler.VRegOf.
 func (c *compiler) VRegOf(value ssa.Value) regalloc.VReg {
 	return c.ssaValueToVRegs[value.ID()]
+}
+
+// AliasVReg implements Compiler.AliasVReg.
+func (c *compiler) AliasVReg(value, src ssa.Value) {
+	c.ssaValueToVRegs[value.ID()] = c.ssaValueToVRegs[src.ID()]
 }
 
 // Format implements Compiler.Format.

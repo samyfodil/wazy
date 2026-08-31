@@ -1850,33 +1850,59 @@ func (m *machine) lowerRotr(si *ssa.Instruction) {
 	m.insert(alu)
 }
 
-func (m *machine) lowerExtend(arg, ret ssa.Value, from, to byte, signed bool) {
-	rd := m.compiler.VRegOf(ret)
-	def := m.compiler.ValueDefinition(arg)
+// zeroExtends32 reports whether instr, producing a 32-bit result, leaves bits [63:32] of the X
+// register holding it set to zero, which every write to a W register does:
+// https://developer.arm.com/documentation/den0024/a/An-Introduction-to-the-ARMv8-Instruction-Sets/The-ARMv8-instruction-sets/Distinguishing-between-32-bit-and-64-bit-A64-instructions
+// An unsigned 32->64 extend of such a result is the identity, so aliasZeroExtended32 hands the
+// extend its operand's register and lowerExtend emits nothing at all for it.
+func zeroExtends32(instr *ssa.Instruction) bool {
+	if instr == nil {
+		return false
+	}
+	switch instr.Opcode() {
+	case
+		ssa.OpcodeIadd, ssa.OpcodeIsub, ssa.OpcodeLoad,
+		ssa.OpcodeBand, ssa.OpcodeBor, ssa.OpcodeBnot,
+		ssa.OpcodeIshl, ssa.OpcodeUshr, ssa.OpcodeSshr,
+		ssa.OpcodeRotl, ssa.OpcodeRotr,
+		ssa.OpcodeUload8, ssa.OpcodeUload16, ssa.OpcodeUload32:
+		return true
+	default:
+		return false
+	}
+}
 
-	if instr := def.Instr; !signed && from == 32 && instr != nil {
-		// We can optimize out the unsigned extend because:
-		// 	Writes to the W register set bits [63:32] of the X register to zero
-		//  https://developer.arm.com/documentation/den0024/a/An-Introduction-to-the-ARMv8-Instruction-Sets/The-ARMv8-instruction-sets/Distinguishing-between-32-bit-and-64-bit-A64-instructions
-		switch instr.Opcode() {
-		case
-			ssa.OpcodeIadd, ssa.OpcodeIsub, ssa.OpcodeLoad,
-			ssa.OpcodeBand, ssa.OpcodeBor, ssa.OpcodeBnot,
-			ssa.OpcodeIshl, ssa.OpcodeUshr, ssa.OpcodeSshr,
-			ssa.OpcodeRotl, ssa.OpcodeRotr,
-			ssa.OpcodeUload8, ssa.OpcodeUload16, ssa.OpcodeUload32:
-			// So, if the argument is the result of a 32-bit operation, we can just copy the register.
-			// It is highly likely that this copy will be optimized out after register allocation.
-			rn := m.compiler.VRegOf(arg)
-			mov := m.allocateInstr()
-			// Note: do not use move32 as it will be lowered to a 32-bit move, which is not copy (that is actually the impl of UExtend).
-			mov.asMove64(rd, rn)
-			m.insert(mov)
-			return
-		default:
+// aliasZeroExtended32 points the result of every unsigned 32->64 extend in blk at the virtual
+// register of its operand, whenever that operand's producer already zeroes bits [63:32] (see
+// zeroExtends32). The extend then needs no instruction, and -- unlike the register-to-register
+// copy this replaces -- the two values no longer interfere, so the register allocator cannot be
+// forced to keep them apart.
+//
+// This runs before any instruction of blk is lowered. Blocks are lowered in reverse post-order and
+// a definition dominates its uses, so every consumer of the extend is lowered after this point.
+func (m *machine) aliasZeroExtended32(blk ssa.BasicBlock) {
+	builder := m.compiler.SSABuilder()
+	for cur := blk.Root(); cur != nil; cur = cur.Next() {
+		if cur.Opcode() != ssa.OpcodeUExtend {
+			continue
+		}
+		if from, _ := cur.ExtendFromToBits(); from != 32 {
+			continue
+		}
+		if arg := cur.Arg(); zeroExtends32(builder.InstructionOfValue(arg)) {
+			m.compiler.AliasVReg(cur.Return(), arg)
 		}
 	}
-	rn := m.getOperand_NR(def, extModeNone)
+}
+
+func (m *machine) lowerExtend(arg, ret ssa.Value, from, to byte, signed bool) {
+	rd := m.compiler.VRegOf(ret)
+	if !signed && from == 32 && rd == m.compiler.VRegOf(arg) {
+		// aliasZeroExtended32 already gave ret the operand's register, whose upper half is known
+		// zero, so the extend is a no-op.
+		return
+	}
+	rn := m.getOperand_NR(m.compiler.ValueDefinition(arg), extModeNone)
 
 	ext := m.allocateInstr()
 	ext.asExtend(rd, rn.nr(), from, to, signed)

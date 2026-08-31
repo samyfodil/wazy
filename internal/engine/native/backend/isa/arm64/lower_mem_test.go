@@ -741,6 +741,35 @@ func TestMachine_lowerToAddressModeFromAddends(t *testing.T) {
 			exp:           addressMode{kind: addressModeKindRegUnsignedImm12, rn: nextVReg, imm: 0},
 		},
 		{
+			// The offset splits: 0x12000 into the add's shifted imm12, 0x904 into the load's own
+			// imm12 (0x904/4 == 0x241, well under 4096). Two instructions, not movz+movk+add.
+			name:          "one a64 with a split offset",
+			a64s:          []regalloc.VReg{x1},
+			offset:        0x12904,
+			dstSizeInBits: 32,
+			insts:         []string{"add x100?, x1, #0x12000"},
+			exp:           addressMode{kind: addressModeKindRegUnsignedImm12, rn: nextVReg, imm: 0x904},
+		},
+		{
+			// Same offset for a 64-bit transfer cannot split: the imm12 is scaled by 8 and
+			// 0x904 is not a multiple of 8, so the whole constant is materialized as before.
+			name:          "one a64 with a low half the imm12 cannot scale",
+			a64s:          []regalloc.VReg{x1},
+			offset:        0x12904,
+			dstSizeInBits: 64,
+			insts:         []string{"movz x101?, #0x2904, lsl 0", "movk x101?, #0x1, lsl 16", "add x100?, x1, x101?"},
+			exp:           addressMode{kind: addressModeKindRegUnsignedImm12, rn: nextVReg, imm: 0},
+		},
+		{
+			// And a high half past the add's own imm12 range (0xfff000) cannot split either.
+			name:          "one a64 with a high half past imm12",
+			a64s:          []regalloc.VReg{x1},
+			offset:        0x1000904,
+			dstSizeInBits: 32,
+			insts:         []string{"movz x101?, #0x904, lsl 0", "movk x101?, #0x100, lsl 16", "add x100?, x1, x101?"},
+			exp:           addressMode{kind: addressModeKindRegUnsignedImm12, rn: nextVReg, imm: 0},
+		},
+		{
 			name:          "two a64 with imm12",
 			a64s:          []regalloc.VReg{x1, x2},
 			offset:        4095,
