@@ -364,9 +364,8 @@ func (m *machine) RegAlloc() {
 	if m.needsCtxSlot() {
 		m.spillSlotSize = ehCtxReservedSlotSize
 	}
-	rf := m.regAllocFn
 	m.regAllocStarted = true
-	m.regAlloc.DoAllocation(&rf)
+	m.regAlloc.DoAllocation(&m.regAllocFn)
 	// Now that we know the final spill slot size, we must align spillSlotSize to 16 bytes.
 	m.spillSlotSize = (m.spillSlotSize + 15) &^ 15
 }
@@ -451,7 +450,7 @@ func (m *machine) lowerBrTable(index ssa.Value, targets ssa.Values) {
 
 	jmpTableBegin, jmpTableBeginLabel := m.allocateBrTarget()
 	m.insert(jmpTableBegin)
-	leaJmpTableAddr.asLEA(newOperandLabel(jmpTableBeginLabel), addr)
+	leaJmpTableAddr.asLEA(newOperandLabel(jmpTableBeginLabel), addr, true)
 
 	jmpTable := m.allocateInstr()
 	targetSliceIndex := m.addJmpTableTarget(targets)
@@ -1856,7 +1855,7 @@ func (m *machine) lowerExitWithCode(execCtx regalloc.VReg, code nativeapi.ExitCo
 	// Next is to save the current address for stack unwinding.
 	nop, currentAddrLabel := m.allocateBrTarget()
 	m.insert(nop)
-	readRip := m.allocateInstr().asLEA(newOperandLabel(currentAddrLabel), ripReg)
+	readRip := m.allocateInstr().asLEA(newOperandLabel(currentAddrLabel), ripReg, true)
 	m.insert(readRip)
 	saveRip := m.allocateInstr().asMovRM(
 		ripReg,
@@ -1893,20 +1892,23 @@ func (m *machine) lowerAluRmiROp(si *ssa.Instruction, op aluRmiROpcode) {
 	rm := m.getOperand_Mem_Imm32_Reg(yDef)
 	rd := m.c.VRegOf(si.Return())
 
-	// A 64-bit add is what LEA computes, and LEA is three-operand: it reads rn and rm and
+	// An add is what LEA computes, and LEA is three-operand: it reads rn and rm and
 	// writes rd, so neither the copy in nor the copy out below is needed. LEA leaves the
 	// flags alone, which costs nothing here because no flag in this backend outlives the
-	// lowering that produced it (see lowerBnot). i64 immediates reaching this point have
-	// their sign bit clear (asImm32 with allowSignExt=false), so the sign-extended disp32
-	// is the same value.
-	if op == aluRmiROpcodeAdd && _64 && rm.kind != operandKindMem {
+	// lowering that produced it (see lowerBnot). The 32-bit form (REX.W clear) is equally
+	// exact: x64 still computes the address at 64-bit width but truncates the result to 32
+	// bits and zero-extends it into rd, and a sum modulo 2^32 depends only on the low 32
+	// bits of its addends -- the same value `addl` would leave, upper half included. That
+	// also makes the immediate's sign irrelevant here, i32 (asImm32 with allowSignExt=true)
+	// as well as i64.
+	if op == aluRmiROpcodeAdd && rm.kind != operandKindMem {
 		var am *amode
 		if rm.kind == operandKindImm32 {
 			am = m.newAmodeImmReg(rm.imm32(), rn.reg())
 		} else {
 			am = m.newAmodeRegRegShift(0, rn.reg(), rm.reg(), 0)
 		}
-		m.insert(m.allocateInstr().asLEA(newOperandMem(am), rd))
+		m.insert(m.allocateInstr().asLEA(newOperandMem(am), rd, _64))
 		return
 	}
 

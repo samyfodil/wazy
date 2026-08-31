@@ -2019,7 +2019,7 @@ L2 (SSA Block: blk2):
 L0 (SSA Block: blk0):
 	pushq %rbp
 	movq %rsp, %rbp
-	sub $16, %rsp
+	pushq %rdx
 	cmpl $0, %ecx
 	jnz L2
 L1 (SSA Block: blk1):
@@ -2032,17 +2032,16 @@ L6 (SSA Block: blk6):
 	movl %esi, %edi
 L3 (SSA Block: blk3):
 	movl %edi, %eax
-	add $16, %rsp
+	popq %rdx
 	movq %rbp, %rsp
 	popq %rbp
 	ret
 L5 (SSA Block: blk5):
 	sub $1, %ecx
-	add %esi, %edi
-	mov.l %rdi, (%rsp)
+	lea (%rdi,%rsi,1), %edx
 	movl %esi, %edi
-	movzx.lq (%rsp), %rsi
-	add $16, %rsp
+	movl %edx, %esi
+	popq %rdx
 	movq %rbp, %rsp
 	popq %rbp
 	tailCall f0

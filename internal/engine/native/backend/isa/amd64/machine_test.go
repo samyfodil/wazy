@@ -305,11 +305,12 @@ L2:
 
 func Test_machine_lowerAluRmiROp(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		typ   ssa.Type
-		op    aluRmiROpcode
-		konst bool // y is a constant rather than a second block param.
-		exp   string
+		name     string
+		typ      ssa.Type
+		op       aluRmiROpcode
+		konst    bool // y is a constant rather than a second block param.
+		konstVal uint64
+		exp      string
 	}{
 		{
 			name: "i64 add reg+reg is one LEA",
@@ -320,18 +321,25 @@ func Test_machine_lowerAluRmiROp(t *testing.T) {
 		},
 		{
 			name: "i64 add reg+imm is one LEA",
-			typ:  ssa.TypeI64, op: aluRmiROpcodeAdd, konst: true,
+			typ:  ssa.TypeI64, op: aluRmiROpcodeAdd, konst: true, konstVal: 5,
 			exp: `
 	lea 5(%rax), %rdx
 `,
 		},
 		{
-			name: "i32 add keeps the copy-in/copy-out form",
+			name: "i32 add reg+reg is one LEA",
 			typ:  ssa.TypeI32, op: aluRmiROpcodeAdd,
 			exp: `
-	movq %rax, %r1?
-	add %ecx, %r1d?
-	movq %r1?, %rdx
+	lea (%rax,%rcx,1), %edx
+`,
+		},
+		{
+			// The sign bit of an i32 immediate is allowed here (unlike the i64 case): the
+			// disp32 sign-extends to 64 bits, but truncating the result back to 32 undoes it.
+			name: "i32 add reg+negative imm is one LEA",
+			typ:  ssa.TypeI32, op: aluRmiROpcodeAdd, konst: true, konstVal: 0xffffffff,
+			exp: `
+	lea -1(%rax), %edx
 `,
 		},
 		{
@@ -353,7 +361,11 @@ func Test_machine_lowerAluRmiROp(t *testing.T) {
 			var y ssa.Value
 			if tc.konst {
 				c := b.AllocateInstruction()
-				c.AsIconst64(5)
+				if tc.typ == ssa.TypeI32 {
+					c.AsIconst32(uint32(tc.konstVal))
+				} else {
+					c.AsIconst64(tc.konstVal)
+				}
 				b.InsertInstruction(c)
 				y = c.Return()
 				ctx.definitions[y] = backend.SSAValueDefinition{Instr: c}

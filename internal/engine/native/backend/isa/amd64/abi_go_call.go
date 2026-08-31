@@ -344,7 +344,7 @@ func (m *machine) storeReturnAddressAndExit(cur *instruction, execCtx regalloc.V
 
 	nop, l := m.allocateBrTarget()
 	cur = linkInstr(cur, nop)
-	readRip.asLEA(newOperandLabel(l), ripReg)
+	readRip.asLEA(newOperandLabel(l), ripReg, true)
 	return cur
 }
 

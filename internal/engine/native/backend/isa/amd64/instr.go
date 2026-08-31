@@ -122,7 +122,7 @@ func (i *instruction) String() string {
 	case mov64MR:
 		return fmt.Sprintf("movq %s, %s", i.op1.format(true), i.op2.format(true))
 	case lea:
-		return fmt.Sprintf("lea %s, %s", i.op1.format(true), i.op2.format(true))
+		return fmt.Sprintf("lea %s, %s", i.op1.format(true), i.op2.format(i.b1))
 	case movsxRmR:
 		return fmt.Sprintf("movsx.%s %s, %s", extMode(i.u1), i.op1.format(true), i.op2.format(true))
 	case movRM:
@@ -1306,10 +1306,11 @@ func (i *instruction) jmpLabel() label {
 	}
 }
 
-func (i *instruction) asLEA(target operand, rd regalloc.VReg) *instruction {
+func (i *instruction) asLEA(target operand, rd regalloc.VReg, _64 bool) *instruction {
 	i.kind = lea
 	i.op1 = target
 	i.op2 = newOperandReg(rd)
+	i.b1 = _64
 	return i
 }
 

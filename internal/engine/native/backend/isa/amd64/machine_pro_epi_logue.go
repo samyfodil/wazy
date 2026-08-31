@@ -59,7 +59,7 @@ func (m *machine) emitTrapIslands() {
 		// Record the address of this exit.
 		addrNop, addrLabel := m.allocateBrTarget()
 		cur = linkInstr(cur, addrNop)
-		cur = linkInstr(cur, m.allocateInstr().asLEA(newOperandLabel(addrLabel), rbpVReg))
+		cur = linkInstr(cur, m.allocateInstr().asLEA(newOperandLabel(addrLabel), rbpVReg, true))
 		saveRip := m.allocateInstr().asMovRM(
 			rbpVReg,
 			newOperandMem(m.newAmodeImmReg(nativeapi.ExecutionContextOffsetGoCallReturnAddress.U32(), raxVReg)),
