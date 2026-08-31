@@ -63,7 +63,21 @@ func newRegInUseSet[I Instr, B Block[I], F Function[I, B]]() regInUseSet[I, B, F
 }
 
 func (rs *regInUseSet[I, B, F]) reset() {
-	clear(rs.arr[:])
+	// Only the slots mask says are live can be non-nil, so clearing them one by one beats
+	// memclr-ing 512 bytes of pointers (and its bulk write barrier) on every block.
+	for m := rs.mask; m != 0; m &= m - 1 {
+		rs.arr[bits.TrailingZeros64(m)] = nil
+	}
+	rs.mask = 0
+}
+
+// clearVRegs empties the set, unassigning the RealReg of every vrState it held.
+func (rs *regInUseSet[I, B, F]) clearVRegs() {
+	for m := rs.mask; m != 0; m &= m - 1 {
+		r := bits.TrailingZeros64(m)
+		rs.arr[r].r = RealRegInvalid
+		rs.arr[r] = nil
+	}
 	rs.mask = 0
 }
 

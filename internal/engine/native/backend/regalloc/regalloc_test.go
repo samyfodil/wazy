@@ -352,11 +352,13 @@ func TestAllocator_livenessAnalysis(t *testing.T) {
 				}
 				t.Run(fmt.Sprintf("block_id=%d", blockID), func(t *testing.T) {
 					exp := tc.exps[blockID]
+					// The live-ins propagated down the loop nesting forest live in their own range.
+					all := append(append([]*_vrState{}, a.liveIns(actual)...), a.loopLiveIns(actual)...)
 					if len(exp.liveIns) == 0 {
-						require.Nil(t, actual.liveIns, "live ins")
+						require.Zero(t, len(all), "live ins")
 					} else {
 						var actuals []VRegID
-						for _, s := range actual.liveIns {
+						for _, s := range all {
 							actuals = append(actuals, s.v.ID())
 						}
 						sort.Slice(actuals, func(i, j int) bool {
@@ -405,4 +407,78 @@ func Test_findOrSpillAllocatable_prefersSpill(t *testing.T) {
 		got := a.findOrSpillAllocatable(s, []RealReg{3, 4}, RegSet(0).add(3), 3)
 		require.Equal(t, RealReg(4), got)
 	})
+}
+
+func TestAllocator_loopTreeDFS_siblingsShareLiveIns(t *testing.T) {
+	// A loop header with three forest children: every child gets the identical propagated set,
+	// so they must all point at one range of liveInsBuf instead of each holding a copy.
+	loop, c0, c1, c2 := newMockBlock(0), newMockBlock(1), newMockBlock(2), newMockBlock(3)
+	loop.loop(c0, c1, c2)
+	f := newMockFunction(loop, c0, c1, c2)
+
+	a := _newAllocator(&RegisterInfo{})
+	v := &_vrState{v: VReg(4444).SetRegType(RegTypeInt)}
+	loopState := a.getOrAllocateBlockState(0)
+	a.liveInsBuf = append(a.liveInsBuf, v)
+	loopState.liveInsBegin, loopState.liveInsEnd = 0, 1
+	for _, id := range []int32{1, 2, 3} {
+		a.getOrAllocateBlockState(id)
+	}
+	a.loopTreeDFS(f, loop)
+
+	first := a.blockStates.Get(1)
+	require.Equal(t, []*_vrState{v}, a.loopLiveIns(first), "propagated live ins")
+	for _, id := range []int{2, 3} {
+		sibling := a.blockStates.Get(id)
+		require.Equal(t, first.loopLiveInsBegin, sibling.loopLiveInsBegin)
+		require.Equal(t, first.loopLiveInsEnd, sibling.loopLiveInsEnd)
+	}
+	// Only the one shared range was appended: v itself plus the loop's own live-in.
+	require.Equal(t, 2, len(a.liveInsBuf))
+	// loopTreeDFS borrows vrState.spilled as its work flag and must hand it back cleared.
+	require.False(t, v.spilled)
+}
+
+func Test_regInUseSet_reset(t *testing.T) {
+	var rs regInUseSet[*mockInstr, *mockBlock, *mockFunction]
+	for _, r := range []RealReg{0, 1, 31, 32, 63} {
+		rs.add(r, &_vrState{v: VReg(1000 + VReg(r))})
+	}
+	rs.remove(31)
+	rs.reset()
+	require.Zero(t, rs.mask)
+	for r := RealReg(0); r < 64; r++ {
+		require.Nil(t, rs.get(r), "r%d", r)
+	}
+}
+
+func Test_regInUseSet_clearVRegs(t *testing.T) {
+	var rs regInUseSet[*mockInstr, *mockBlock, *mockFunction]
+	held := make([]*_vrState, 0, 3)
+	for _, r := range []RealReg{2, 30, 63} {
+		vs := &_vrState{v: VReg(1000 + VReg(r)), r: r}
+		held = append(held, vs)
+		rs.add(r, vs)
+	}
+	rs.clearVRegs()
+	require.Zero(t, rs.mask)
+	for r := RealReg(0); r < 64; r++ {
+		require.Nil(t, rs.get(r), "r%d", r)
+	}
+	for _, vs := range held {
+		require.Equal(t, RealRegInvalid, vs.r)
+	}
+}
+
+func Test_recordReload_listsEachSpillOnce(t *testing.T) {
+	a := &_allocator{}
+	f, blk := newMockFunction(), newMockBlock(0)
+	first, second := &_vrState{v: VReg(3333)}, &_vrState{v: VReg(4444)}
+	a.recordReload(f, first, blk)
+	a.recordReload(f, first, blk)
+	a.recordReload(f, second, blk)
+	// scheduleSpills walks this list instead of every VRegID, so a value reloaded twice must appear once.
+	require.Equal(t, []*_vrState{first, second}, a.spills)
+	require.True(t, first.spilled)
+	require.True(t, second.spilled)
 }
