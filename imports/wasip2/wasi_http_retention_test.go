@@ -72,6 +72,20 @@ func TestServeHTTPReleasesPerRequestState(t *testing.T) {
 	// difference between "released" and "released late".
 	serve(200)
 	assertEmpty(220)
+
+	// The rep counter must not climb either. Emptying the maps bounds memory,
+	// but a rep that is retired rather than reused still walks the counter up
+	// one request at a time, and past 255 the runtime stops handing out its
+	// shared word for a boxed integer -- so every handle the canonical ABI
+	// lifts or lowers turns back into an allocation. Serving more requests
+	// than that is the whole point of the check: at 220 served, a counter that
+	// climbed at all is already in the allocating range.
+	host.mu.Lock()
+	next := host.nextRep
+	host.mu.Unlock()
+	if next > 255 {
+		t.Errorf("after 220 requests: nextRep = %d, want it bounded well under 256 (reps are being retired, not reused)", next)
+	}
 }
 
 // TestOutgoingHandlerReleasesPerRequestState is the client-side counterpart.

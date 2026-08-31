@@ -198,6 +198,53 @@ func TestPoll_GetResourcesUninitialized(t *testing.T) {
 	}
 }
 
+// TestPoll_DropPollableReleasesDeadline pins that dropping a timer pollable
+// releases its deadline.
+//
+// Every subscribe-duration/subscribe-instant records one, and nothing removed
+// it: a guest that waits on a timer -- the ordinary way to wait -- grew
+// deadlines by one entry per wait for the life of the instance, without bound
+// and at the guest's choosing. Subscribing repeatedly and dropping each handle
+// is what separates "released" from "accumulates".
+func TestPoll_DropPollableReleasesDeadline(t *testing.T) {
+	p := newTestPoll(time.Now())
+	ctx := context.Background()
+
+	for i := 0; i < 50; i++ {
+		res, err := p.subscribeDuration(ctx, []abi.Value{uint64(time.Hour)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rep := res[0].(uint32)
+		if _, ok := p.deadlineOf(rep); !ok {
+			t.Fatalf("subscribe %d: deadline not recorded", i)
+		}
+		if err := p.dropPollable(ctx, rep); err != nil {
+			t.Fatalf("dropPollable: %v", err)
+		}
+		if _, ok := p.deadlineOf(rep); ok {
+			t.Fatalf("subscribe %d: deadline still present after drop", i)
+		}
+	}
+
+	p.mu.Lock()
+	n := len(p.deadlines)
+	p.mu.Unlock()
+	if n != 0 {
+		t.Errorf("deadlines holds %d entries after 50 subscribe/drop rounds, want 0", n)
+	}
+}
+
+// TestPoll_DropAlwaysReadyPollable pins that the same destructor is harmless
+// for the always-ready singleton, which every non-timer pollable shares and
+// which is not in the deadlines map at all.
+func TestPoll_DropAlwaysReadyPollable(t *testing.T) {
+	p := newTestPoll(time.Now())
+	if err := p.dropPollable(context.Background(), wasiPollableRep); err != nil {
+		t.Fatalf("dropPollable(always-ready): %v", err)
+	}
+}
+
 func TestSleepUntilPast(t *testing.T) {
 	start := time.Now()
 	wasiSleepUntil(context.Background(), time.Now().Add(-time.Hour))

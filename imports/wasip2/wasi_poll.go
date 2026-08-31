@@ -98,6 +98,23 @@ func (p *wasiPoll) newTimer(deadline time.Time) uint32 {
 	return rep
 }
 
+// dropPollable releases a timer pollable's deadline when the guest drops its
+// handle. Without it every subscribe-duration/subscribe-instant left an entry
+// behind, so a guest that polls on a timer -- which is the ordinary way to
+// wait -- grew this map for the life of the instance.
+//
+// Every pollable shares wasiPollableResType, so this also runs for the
+// always-ready socket/stream/http pollables; those are all rep 1 and are not
+// in the map, and deleting an absent key is a no-op. Per the handle table's
+// registerDtor, a second dtor registered for this tag composes with this one
+// rather than replacing it.
+func (p *wasiPoll) dropPollable(_ context.Context, rep uint32) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.deadlines, rep)
+	return nil
+}
+
 // deadlineOf returns rep's timer deadline, or ok=false if rep is not a timer
 // pollable (i.e. an always-ready socket/stream/http pollable).
 func (p *wasiPoll) deadlineOf(rep uint32) (time.Time, bool) {
@@ -302,6 +319,7 @@ func wasiClockPollOptions(p *wasiPoll) []component.Option {
 	return []component.Option{
 		component.WithResourcesHook(p.setResources),
 		component.WithResourceTag(wasiIfacePoll, "pollable", wasiPollableResType),
+		component.WithHostResourceDtor(wasiPollableResType, p.dropPollable),
 
 		component.WithImportCustom(wasiIfacePoll, "[method]pollable.block", p.block, blockFD, blockR),
 		component.WithImportCustom(wasiIfacePoll, "poll", p.poll, pollFD, pollR),

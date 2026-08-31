@@ -220,20 +220,27 @@ func (p *PendingCall) Await(ctx context.Context) ([]abi.Value, error) {
 	default:
 	}
 
-	// A watcher wakes the cond so a cancelled Await can return promptly.
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		select {
-		case <-ctx.Done():
-			in.amu.Lock()
-			if in.acond != nil {
-				in.acond.Broadcast()
+	// A watcher wakes the cond so a cancelled Await can return promptly. A
+	// context that can never be done -- Background/TODO, whose Done channel is
+	// nil -- has nothing to wake for: the watcher would park on <-stop until
+	// this returns and broadcast never. Skipping it there costs the caller
+	// nothing (ctx.Err() below stays nil for exactly those contexts) and saves
+	// a channel and a goroutine on every such call.
+	if ctx.Done() != nil {
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() {
+			select {
+			case <-ctx.Done():
+				in.amu.Lock()
+				if in.acond != nil {
+					in.acond.Broadcast()
+				}
+				in.amu.Unlock()
+			case <-stop:
 			}
-			in.amu.Unlock()
-		case <-stop:
-		}
-	}()
+		}()
+	}
 
 	for {
 		in.amu.Lock()

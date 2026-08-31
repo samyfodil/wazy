@@ -668,6 +668,12 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 		// own args slice as its results, which lowering still has to read.
 		argsp := getValueSlice(len(paramPlans))
 		var args []abi.Value
+		// The borrow list is built into a frame-local array rather than a nil
+		// slice grown by append: it is returned and read by the deferred
+		// release below, both inside this frame, so it never has to reach the
+		// heap. Four covers a WASI method's `self` and then some; a longer
+		// borrow list simply appends past it and allocates as before.
+		var lentArr [4]lentHandle
 		var lent []lentHandle
 		// Declared per invocation. The enclosing bind-time `err` is one heap
 		// cell shared by every call through this import: a captured-variable
@@ -676,9 +682,9 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 		// through one Instance can overlap.
 		var err error
 		if paramsSpill {
-			args, lent, err = liftHostArgsSpilled(in, paramPlans, paramTupleDesc, resolve, api.DecodeU32(stack[0]), memMod, resources, *argsp)
+			args, lent, err = liftHostArgsSpilled(in, paramPlans, paramTupleDesc, resolve, api.DecodeU32(stack[0]), memMod, resources, *argsp, lentArr[:])
 		} else {
-			args, lent, err = liftHostArgsPlanned(in, paramPlans, resolve, stack, memMod, resources, *argsp)
+			args, lent, err = liftHostArgsPlanned(in, paramPlans, resolve, stack, memMod, resources, *argsp, lentArr[:])
 		}
 		if err != nil {
 			panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
@@ -884,7 +890,7 @@ func liftHostArgs(in *Instance, fd binary.FuncDesc, resolve abi.Resolver, stack 
 	if err != nil {
 		return nil, nil, err
 	}
-	return liftHostArgsPlanned(in, plans, resolve, stack, mod, resources, nil)
+	return liftHostArgsPlanned(in, plans, resolve, stack, mod, resources, nil, nil)
 }
 
 // liftHostArgsPlanned is liftHostArgs with the per-param resolve/flatten/
@@ -895,13 +901,13 @@ func liftHostArgs(in *Instance, fd binary.FuncDesc, resolve abi.Resolver, stack 
 // resolve is still needed for LiftFlat's composite tree-walk. dst, when it is
 // already the right length, receives the lifted values (the hot wrapper hands
 // in a pooled buffer); anything else allocates.
-func liftHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.Resolver, stack []uint64, mod api.Module, resources *handleTable, dst []abi.Value) ([]abi.Value, []lentHandle, error) {
+func liftHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.Resolver, stack []uint64, mod api.Module, resources *handleTable, dst []abi.Value, lentBuf []lentHandle) ([]abi.Value, []lentHandle, error) {
 	mem, memAvailable := memoryBytesOf(mod)
 	args := dst
 	if len(args) != len(plans) {
 		args = make([]abi.Value, len(plans))
 	}
-	var lent []lentHandle
+	lent := lentBuf[:0]
 	pos := 0
 	for i := range plans {
 		pp := &plans[i]
@@ -953,7 +959,7 @@ func liftHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.Resolv
 // liftHostArgsPlanned's, just sourced from the loaded tuple's elements
 // instead of per-plan LiftFlat calls -- see async_host_import.go's
 // liftAsyncHostArgsSpilled for the async-lower twin of this function.
-func liftHostArgsSpilled(in *Instance, plans []hostParamPlan, tupleDesc binary.TupleDesc, resolve abi.Resolver, ptr uint32, mod api.Module, resources *handleTable, dst []abi.Value) ([]abi.Value, []lentHandle, error) {
+func liftHostArgsSpilled(in *Instance, plans []hostParamPlan, tupleDesc binary.TupleDesc, resolve abi.Resolver, ptr uint32, mod api.Module, resources *handleTable, dst []abi.Value, lentBuf []lentHandle) ([]abi.Value, []lentHandle, error) {
 	mem, memAvailable := memoryBytesOf(mod)
 	if !memAvailable {
 		return nil, nil, fmt.Errorf("parameter list spills to memory (flattens beyond the flat limit), but the calling module has no memory")
@@ -970,7 +976,7 @@ func liftHostArgsSpilled(in *Instance, plans []hostParamPlan, tupleDesc binary.T
 	if len(args) != len(plans) {
 		args = make([]abi.Value, len(plans))
 	}
-	var lent []lentHandle
+	lent := lentBuf[:0]
 	for i := range plans {
 		pp := &plans[i]
 		v := raw[i]

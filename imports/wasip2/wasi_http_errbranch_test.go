@@ -200,6 +200,24 @@ func TestHTTP_OutgoingBody(t *testing.T) {
 		t.Fatal("unknown stream rep should not be found")
 	}
 
+	// The stream may be taken at most once (wasi:http types.wit). A second
+	// write used to mint a fresh output-stream rep and overwrite the body's
+	// only pointer back to the first, orphaning that bodyStreams entry for the
+	// life of the instance -- unbounded growth on a call the guest can repeat.
+	res2, err := h.outgoingBodyWrite(context.Background(), []abi.Value{bodyRep})
+	if err != nil {
+		t.Fatalf("second write() error = %v", err)
+	}
+	if !res2[0].(abi.ResultValue).IsErr {
+		t.Fatal("second write() returned Ok, want the err arm: the stream is take-once")
+	}
+	h.mu.Lock()
+	nStreams := len(h.bodyStreams)
+	h.mu.Unlock()
+	if nStreams != 1 {
+		t.Errorf("bodyStreams holds %d entries after two write() calls, want 1", nStreams)
+	}
+
 	_, err = h.outgoingBodyWrite(context.Background(), nil)
 	reqErr(t, err, "expected 1 arg")
 	_, err = h.outgoingBodyWrite(context.Background(), []abi.Value{"x"})

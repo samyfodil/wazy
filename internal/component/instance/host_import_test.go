@@ -283,7 +283,7 @@ func TestLiftHostArgsSpilled_RoundTrip(t *testing.T) {
 		t.Fatalf("Store: %v", err)
 	}
 
-	args, lent, err := liftHostArgsSpilled(nil, plans, tupleDesc, resolve, ptr, mod, newHandleTable(), nil)
+	args, lent, err := liftHostArgsSpilled(nil, plans, tupleDesc, resolve, ptr, mod, newHandleTable(), nil, nil)
 	if err != nil {
 		t.Fatalf("liftHostArgsSpilled: %v", err)
 	}
@@ -402,14 +402,14 @@ func TestLiftHostArgsPlanned_ReusedBuffer(t *testing.T) {
 		}
 	}
 
-	fresh, _, err := liftHostArgsPlanned(nil, plans, resolve, stack, mod, tbl, nil)
+	fresh, _, err := liftHostArgsPlanned(nil, plans, resolve, stack, mod, tbl, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	same("allocating path", fresh)
 
 	dst := []abi.Value{"stale", uint32(999)}
-	reused, _, err := liftHostArgsPlanned(nil, plans, resolve, stack, mod, tbl, dst)
+	reused, _, err := liftHostArgsPlanned(nil, plans, resolve, stack, mod, tbl, dst, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -418,7 +418,7 @@ func TestLiftHostArgsPlanned_ReusedBuffer(t *testing.T) {
 		t.Fatal("expected the supplied buffer to be filled in place")
 	}
 
-	short, _, err := liftHostArgsPlanned(nil, plans, resolve, stack, mod, tbl, []abi.Value{nil})
+	short, _, err := liftHostArgsPlanned(nil, plans, resolve, stack, mod, tbl, []abi.Value{nil}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -464,7 +464,7 @@ func BenchmarkLiftHostArgs(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if _, _, err := liftHostArgsPlanned(nil, plans, resolve, stack, mod, tbl, nil); err != nil {
+			if _, _, err := liftHostArgsPlanned(nil, plans, resolve, stack, mod, tbl, nil, nil); err != nil {
 				b.Fatal(err)
 			}
 		}
