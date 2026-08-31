@@ -236,7 +236,6 @@ L0 (SSA Block: blk0):
 L0 (SSA Block: blk0):
 	mov x130?, x2
 	mov x131?, x3
-L1 (SSA Block: blk1):
 	mov x1, x130?
 	mov x0, x131?
 	ret
@@ -245,7 +244,6 @@ L1 (SSA Block: blk1):
 L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
 	str xzr, [sp, #-0x10]!
-L1 (SSA Block: blk1):
 	mov x1, x2
 	mov x0, x3
 	add sp, sp, #0x10
@@ -334,7 +332,6 @@ L1 (SSA Block: blk1):
 L4 (SSA Block: blk4):
 	b L1
 L3 (SSA Block: blk3):
-L2 (SSA Block: blk2):
 	mov x0, x130?
 	ret
 `,
@@ -348,7 +345,6 @@ L1 (SSA Block: blk1):
 L4 (SSA Block: blk4):
 	b #-0x8 (L1)
 L3 (SSA Block: blk3):
-L2 (SSA Block: blk2):
 	mov x0, x2
 	add sp, sp, #0x10
 	ldr x30, [sp], #0x10
@@ -555,8 +551,6 @@ L1 (SSA Block: blk1):
 L5 (SSA Block: blk5):
 	b L1
 L4 (SSA Block: blk4):
-L3 (SSA Block: blk3):
-L2 (SSA Block: blk2):
 	mov x131?, xzr
 	mov x0, x131?
 	ret
@@ -570,8 +564,6 @@ L1 (SSA Block: blk1):
 L5 (SSA Block: blk5):
 	b #-0x4 (L1)
 L4 (SSA Block: blk4):
-L3 (SSA Block: blk3):
-L2 (SSA Block: blk2):
 	mov x0, xzr
 	add sp, sp, #0x10
 	ldr x30, [sp], #0x10
@@ -591,7 +583,6 @@ L1 (SSA Block: blk1):
 L5 (SSA Block: blk5):
 	ret
 L4 (SSA Block: blk4):
-L3 (SSA Block: blk3):
 	load_const_block_arg x131?, 0x1
 	b L1
 `,
@@ -607,7 +598,6 @@ L5 (SSA Block: blk5):
 	ldr x30, [sp], #0x10
 	ret
 L4 (SSA Block: blk4):
-L3 (SSA Block: blk3):
 	load_const_block_arg x2, 0x1
 	orr w2, wzr, #0x1
 	b #-0x18 (L1)
