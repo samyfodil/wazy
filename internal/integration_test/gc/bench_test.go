@@ -43,6 +43,21 @@ func BenchmarkGCCall(b *testing.B) {
 			}
 		})
 	}
+
+	// Walking a chain: a ref.cast and a struct.get per link and no allocation at all, which is the heap's
+	// read path on its own.
+	b.Run("walk", func(b *testing.B) {
+		if _, err := mod.ExportedFunction("chain").Call(ctx, 1000); err != nil {
+			b.Fatal(err)
+		}
+		f := mod.ExportedFunction("chain_len")
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if _, err := f.Call(ctx); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }
 
 var _ = api.CoreFeaturesV2

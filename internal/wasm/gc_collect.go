@@ -51,14 +51,17 @@ type GCExecution struct {
 	pause *uint32
 	// parked is true while this execution's stack is stable. Guarded by Store.gc.mu.
 	parked bool
+	// prev and next thread this execution into gcController.execs. Guarded by Store.gc.mu.
+	prev, next *GCExecution
 }
 
 // gcController is the Store-wide half of the stop-the-world handshake.
 type gcController struct {
 	mu   sync.Mutex
 	cond *sync.Cond
-	// execs is every wasm call in flight on this store.
-	execs map[*GCExecution]struct{}
+	// execs is every wasm call in flight on this store, threaded through GCExecution rather than held in a
+	// map: registering and unregistering happen once per call, which is far too hot for a hash.
+	execs *GCExecution
 	// collecting is true from the moment one execution decides to collect until it has swept.
 	collecting bool
 	// wanted is set by an allocation that crossed the threshold and cleared when a collection starts.
@@ -68,21 +71,24 @@ type gcController struct {
 func (g *gcController) init() {
 	if g.cond == nil {
 		g.cond = sync.NewCond(&g.mu)
-		g.execs = map[*GCExecution]struct{}{}
 	}
 }
 
 // RegisterGCExecution registers one wasm call in flight. pause is the flag the engine polls at its parking
 // points, which the collector writes into; it must stay valid until Unregister.
 func (s *Store) RegisterGCExecution(roots GCRoots, pause *uint32) *GCExecution {
-	e := &GCExecution{s: s, roots: roots, pause: pause}
-	s.gc.mu.Lock()
-	defer s.gc.mu.Unlock()
-	s.gc.init()
-	s.gc.execs[e] = struct{}{}
+	g := &s.gc
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.init()
+	e := &GCExecution{s: s, roots: roots, pause: pause, next: g.execs}
+	if e.next != nil {
+		e.next.prev = e
+	}
+	g.execs = e
 	// A collection may already be waiting for everyone to stop, in which case this new execution must not
 	// start running until it is over.
-	if s.gc.collecting {
+	if g.collecting {
 		atomic.StoreUint32(pause, 1)
 	}
 	return e
@@ -93,10 +99,23 @@ func (e *GCExecution) Unregister() {
 	if e == nil {
 		return
 	}
-	e.s.gc.mu.Lock()
-	defer e.s.gc.mu.Unlock()
-	delete(e.s.gc.execs, e)
-	e.s.gc.cond.Broadcast()
+	g := &e.s.gc
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if e.prev != nil {
+		e.prev.next = e.next
+	} else if g.execs == e {
+		g.execs = e.next
+	} else {
+		return // already unregistered, and the list no longer names it
+	}
+	if e.next != nil {
+		e.next.prev = e.prev
+	}
+	// Nothing else is cleared: an unregistered execution is only invisible to the collector, and a stray
+	// Safepoint or LeaveGo after this has to stay as harmless as it was when this was a map delete.
+	e.prev, e.next = nil, nil
+	g.cond.Broadcast()
 }
 
 // Safepoint is called by an engine when it sees its pause flag set, at a point where its wasm stack is stable.
@@ -135,7 +154,7 @@ func (e *GCExecution) parkLocked() {
 		g.wanted = false
 		g.collecting = true
 		e.parked = true
-		for other := range g.execs {
+		for other := g.execs; other != nil; other = other.next {
 			if other != e {
 				atomic.StoreUint32(other.pause, 1)
 			}
@@ -146,7 +165,7 @@ func (e *GCExecution) parkLocked() {
 		e.s.collectGarbageLocked()
 		g.collecting = false
 		e.parked = false
-		for other := range g.execs {
+		for other := g.execs; other != nil; other = other.next {
 			atomic.StoreUint32(other.pause, 0)
 		}
 		g.cond.Broadcast()
@@ -155,7 +174,7 @@ func (e *GCExecution) parkLocked() {
 }
 
 func (g *gcController) othersParkedLocked(self *GCExecution) bool {
-	for e := range g.execs {
+	for e := g.execs; e != nil; e = e.next {
 		if e != self && !e.parked {
 			return false
 		}
@@ -223,7 +242,7 @@ func (s *Store) RequestGC() {
 		return
 	}
 	s.gc.wanted = true
-	for e := range s.gc.execs {
+	for e := s.gc.execs; e != nil; e = e.next {
 		atomic.StoreUint32(e.pause, 1)
 	}
 }
@@ -235,8 +254,11 @@ func (s *Store) collectGarbageLocked() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	for i := range h.slots {
-		h.slots[i].marked = false
+	// Every execution that could be reading a slot is parked, and each of them takes gc.mu again before it
+	// runs another instruction, so the plain writes below are ordered before anything sees them.
+	slots := h.table()[:h.used]
+	for i := range slots {
+		slots[i].marked = false
 	}
 
 	// pending is the mark stack: an object is pushed when first marked and popped to scan its fields, so a
@@ -251,7 +273,7 @@ func (s *Store) collectGarbageLocked() {
 		pending = append(pending, slot.obj)
 	}
 
-	for e := range s.gc.execs {
+	for e := s.gc.execs; e != nil; e = e.next {
 		e.roots.ScanGCRoots(mark)
 	}
 	s.scanModuleRootsLocked(mark)
@@ -266,8 +288,8 @@ func (s *Store) collectGarbageLocked() {
 		}
 	}
 
-	for i := range h.slots {
-		slot := &h.slots[i]
+	for i := range slots {
+		slot := &slots[i]
 		if slot.obj == nil || slot.marked {
 			continue
 		}
@@ -279,7 +301,7 @@ func (s *Store) collectGarbageLocked() {
 	h.allocs = 0
 	// Collect again once the heap has roughly doubled, so a program with a large live set does not spend
 	// all its time marking.
-	live := len(h.slots) - len(h.free)
+	live := h.used - len(h.free)
 	h.nextAt = live + gcInitialThreshold
 }
 

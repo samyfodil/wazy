@@ -494,32 +494,21 @@ func RunGC(m *ModuleInstance, mode, a, b, c, d, e uint64, scratch []uint64) uint
 	case GCArrayFill:
 		o := m.s.GC.Deref(a)
 		checkArrayRange(o.Len(), b, d)
+		// Every element of an array shares one storage type, so the value is packed once rather than on
+		// each of the writes.
 		stride := uint64(o.ElemSlots())
-		for i := uint64(0); i < d; i++ {
-			slot := (b + i) * stride
-			o.Set(int(slot), c)
-			if stride == 2 {
-				o.Set(int(slot+1), e)
-			}
-		}
+		fillWords(o.Fields[b*stride:(b+d)*stride], int(stride), packStorage(o.Type.Fields[0].Type, c), e)
 		return 0
 
 	case GCArrayCopy:
 		dst, src := m.s.GC.Deref(a), m.s.GC.Deref(c)
 		checkArrayRange(dst.Len(), b, e)
 		checkArrayRange(src.Len(), d, e)
+		// Validation makes the source element a subtype of the destination's, and a packed or vector
+		// storage type is a subtype of nothing but itself, so the words move as they are. The two arrays
+		// may be the same object, and copy's memmove is exactly the direction rule array.copy asks for.
 		stride := uint64(dst.ElemSlots())
-		// The two arrays may be the same object, so copy in the direction that cannot clobber a source
-		// element before it is read -- exactly what memory.copy does for overlapping ranges.
-		if b <= d {
-			for i := uint64(0); i < e*stride; i++ {
-				dst.Set(int(b*stride+i), src.Get(int(d*stride+i), true))
-			}
-		} else {
-			for i := e * stride; i > 0; i-- {
-				dst.Set(int(b*stride+i-1), src.Get(int(d*stride+i-1), true))
-			}
-		}
+		copy(dst.Fields[b*stride:(b+e)*stride], src.Fields[d*stride:(d+e)*stride])
 		return 0
 
 	case GCRefEq:
@@ -569,16 +558,17 @@ func (m *ModuleInstance) allocGC(mode, typeIndex, count, init, initHi uint64, sc
 		panic("BUG: validation should have rejected type index")
 	}
 	def := &m.Source.TypeSection[typeIndex]
-	o := &GCObject{Type: def, TypeID: m.TypeIDs[typeIndex]}
+	id := m.TypeIDs[typeIndex]
 
+	var o *GCObject
 	switch mode {
 	case GCStructNewDefault:
-		// Every default is the zero word, so a fresh slice already holds them.
-		o.Fields = make([]uint64, structSlots(def))
+		// Every default is the zero word, so a fresh object already holds them.
+		o = newGCObject(def, id, structSlots(def))
 	case GCStructNew, GCArrayNewFixed:
 		// The operands were pushed in field order, so scratch is already word-for-word the layout. They go
 		// in through Set so a packed field is stored truncated, as Get's widening assumes.
-		o.Fields = make([]uint64, len(scratch))
+		o = newGCObject(def, id, len(scratch))
 		for i, v := range scratch {
 			o.Set(i, v)
 		}
@@ -586,17 +576,26 @@ func (m *ModuleInstance) allocGC(mode, typeIndex, count, init, initHi uint64, sc
 		// Bound the element count before multiplying it out, so a huge one traps rather than wrapping.
 		slots := int(SlotsForStorageType(def.Fields[0].Type))
 		n := checkArrayLen(count) * slots
-		o.Fields = make([]uint64, n)
+		o = newGCObject(def, id, n)
 		if mode == GCArrayNew {
-			for i := 0; i < n; i += slots {
-				o.Set(i, init)
-				if slots == 2 {
-					o.Set(i+1, initHi)
-				}
-			}
+			fillWords(o.Fields, slots, packStorage(def.Fields[0].Type, init), initHi)
 		}
 	}
 	return m.allocRef(o)
+}
+
+// fillWords writes the element (lo, hi) into every stride words of dst, which is what array.new and array.fill
+// both do once the value has been packed to its storage type. hi is read only for a vector element.
+func fillWords(dst []uint64, stride int, lo, hi uint64) {
+	if stride == 1 {
+		for i := range dst {
+			dst[i] = lo
+		}
+		return
+	}
+	for i := 0; i < len(dst); i += stride {
+		dst[i], dst[i+1] = lo, hi
+	}
 }
 
 // allocRef puts an object on the heap and, when that pushed the heap past its threshold, asks every execution
@@ -614,10 +613,7 @@ func (m *ModuleInstance) allocRef(o *GCObject) uint64 {
 func (m *ModuleInstance) newArray(typeIndex, n uint64) *GCObject {
 	def := &m.Source.TypeSection[typeIndex]
 	slots := SlotsForStorageType(def.Fields[0].Type)
-	return &GCObject{
-		Type: def, TypeID: m.TypeIDs[typeIndex],
-		Fields: make([]uint64, checkArrayLen(n)*int(slots)),
-	}
+	return newGCObject(def, m.TypeIDs[typeIndex], checkArrayLen(n)*int(slots))
 }
 
 // checkSegmentRange traps unless the segment named by segment holds length elements starting at src: src

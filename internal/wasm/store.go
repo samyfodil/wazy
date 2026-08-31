@@ -77,7 +77,10 @@ type (
 		// none. IDs are handed out densely (see getFunctionTypeIDByKey), so this is indexed by ID directly.
 		// It is what makes a runtime subtype check possible across module boundaries, where a module-local
 		// type index means nothing: see TypeIDIsSubtypeOf.
-		typeSupers []FunctionTypeID
+		//
+		// It is behind an atomic pointer because guest execution reads it without mux: an entry is written
+		// before the slice header naming it is stored, and never changes afterwards.
+		typeSupers atomic.Pointer[[]FunctionTypeID]
 
 		// Exceptions hands out the exnref values guest code holds, and keeps the exceptions they name alive. It
 		// is per-Store because an exnref crosses module instances. See ExceptionTable.
@@ -840,21 +843,21 @@ func isPlainFuncType(types []FunctionType, start, end int) bool {
 // by walking actual's declared supertype chain. Both engines reach this from ref.test / ref.cast, where the two
 // IDs can come from different modules and so cannot be compared as type indices.
 //
-// ponytail: one RLock per check. Threading the supertype chain onto each runtime function instance would make
-// this a load and compare, which is worth doing only if a profile ever shows these instructions mattering.
+// It takes no lock. The chain is fixed once the types are registered, and a module cannot execute an
+// instruction naming an ID its own instantiation did not register first, so the load below sees at least the
+// entries that instantiation appended.
 func (s *Store) TypeIDIsSubtypeOf(actual, target FunctionTypeID) bool {
 	if actual == target {
 		return true
 	}
-	s.mux.RLock()
-	defer s.mux.RUnlock()
+	supers := s.loadTypeSupers()
 	// Bounded by the number of types: the chain is acyclic by construction (a supertype index is always below
 	// its subtype's), but this is reached from guest execution, so do not depend on that for termination.
-	for i := 0; i <= len(s.typeSupers); i++ {
-		if int(actual) >= len(s.typeSupers) {
+	for i := 0; i <= len(supers); i++ {
+		if int(actual) >= len(supers) {
 			return false
 		}
-		actual = s.typeSupers[actual]
+		actual = supers[actual]
 		if actual == NoFunctionTypeID {
 			return false
 		}
@@ -863,6 +866,14 @@ func (s *Store) TypeIDIsSubtypeOf(actual, target FunctionTypeID) bool {
 		}
 	}
 	return false
+}
+
+// loadTypeSupers returns the supertype table, which is nil until the first type is registered.
+func (s *Store) loadTypeSupers() []FunctionTypeID {
+	if p := s.typeSupers.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 func hasConcreteRef(ft *FunctionType) bool {
@@ -903,8 +914,10 @@ func (s *Store) getFunctionTypeIDByKey(key string, super FunctionTypeID) (Functi
 		id = FunctionTypeID(l)
 		s.typeIDs[key] = id
 		// The key encodes the supertype (see structuralTypeKey), so every module reaching this ID agrees on
-		// what super is, and appending in ID order keeps the slice dense.
-		s.typeSupers = append(s.typeSupers, super)
+		// what super is, and appending in ID order keeps the slice dense. Storing the header last is what
+		// publishes the entry to the readers that take no lock; see TypeIDIsSubtypeOf.
+		supers := append(s.loadTypeSupers(), super)
+		s.typeSupers.Store(&supers)
 	}
 	return id, nil
 }

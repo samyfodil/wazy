@@ -1,6 +1,7 @@
 package wasm
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -267,6 +268,90 @@ func TestCollectorRegisterDuringCollection(t *testing.T) {
 	f.s.gc.cond.Broadcast()
 	f.s.gc.mu.Unlock()
 	e.Unregister()
+}
+
+// TestCollectorUnregisterUnlinksOnlyItself covers the list the executions are threaded into: dropping one from
+// the middle, and then from the head, must leave every other execution's roots reachable.
+func TestCollectorUnregisterUnlinksOnlyItself(t *testing.T) {
+	f := newGCCollectFixture(t)
+	var pause [3]uint32
+	var roots [3]*stackRoots
+	var execs [3]*GCExecution
+	for i := range execs {
+		roots[i] = &stackRoots{}
+		execs[i] = f.m.RegisterGCExecution(roots[i], &pause[i])
+		// Stand still, as a host call would, so a collection has something to wait on.
+		execs[i].EnterGo()
+	}
+	// Registering prepends, so execs[2] is the head, execs[1] the middle and execs[0] the tail.
+	for i := range roots {
+		roots[i].set(f.alloc())
+	}
+	f.alloc() // and one nothing names
+
+	execs[1].Unregister()
+	f.collect()
+	require.Equal(t, 2, f.s.GC.Live(), "the executions on either side of the dropped one are still roots")
+
+	execs[2].Unregister() // the head this time
+	f.collect()
+	require.Equal(t, 1, f.s.GC.Live())
+
+	execs[1].Unregister() // dropping one twice must not walk into the list at all
+	execs[0].Unregister()
+	f.collect()
+	require.Equal(t, 0, f.s.GC.Live())
+}
+
+// TestCollectorConcurrentReaders drives the heap's lock-free read path from several executions at once, with
+// collections happening in between, which is where a missing publication edge shows up under -race.
+func TestCollectorConcurrentReaders(t *testing.T) {
+	types := []FunctionType{{
+		CompositeKind: CompositeKindStruct,
+		Fields:        []FieldType{{Type: ValueTypeAnyref, Mutable: true}, {Type: ValueTypeAnyref, Mutable: true}},
+	}}
+	types[0].CacheFieldSlots()
+	m := gcTestModule(t, types, nil, nil)
+
+	// Enough allocations across the readers to cross the collection threshold several times over.
+	const readers, iterations = 4, gcInitialThreshold
+
+	var wg sync.WaitGroup
+	fail := make(chan string, readers)
+	for r := 0; r < readers; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			roots := &stackRoots{}
+			var pause uint32
+			e := m.RegisterGCExecution(roots, &pause)
+			defer e.Unregister()
+			for i := 0; i < iterations; i++ {
+				ref := RunGC(m, GCStructNewDefault, 0, 0, 0, 0, 0, nil)
+				// Nothing collects until every execution parks, and this one only parks below, so
+				// rooting the object here is soon enough.
+				roots.set(ref)
+				want := EncodeI31(uint32(i))
+				RunGC(m, GCStructSet, ref, 0, want, 0, 0, nil)
+				if got := RunGC(m, GCStructGet, ref, 0, 0, 0, 0, nil); got != want {
+					fail <- fmt.Sprintf("struct.get read %#x, want %#x", got, want)
+					return
+				}
+				if id, ok := m.s.GC.TypeIDOf(ref); !ok || id != m.TypeIDs[0] {
+					fail <- fmt.Sprintf("TypeIDOf gave (%d, %v), want (%d, true)", id, ok, m.TypeIDs[0])
+					return
+				}
+				if atomic.LoadUint32(&pause) != 0 {
+					e.Safepoint()
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(fail)
+	for msg := range fail {
+		t.Fatal(msg)
+	}
 }
 
 func TestGCExecutionNilIsInert(t *testing.T) {

@@ -151,6 +151,38 @@ func TestRunGC_Structs(t *testing.T) {
 			RunGC(m, GCStructGet, GCRefNull, 0, 0, 0, 0, nil)
 		}))
 	})
+
+	t.Run("a struct too wide to ride in the header keeps its own words", func(t *testing.T) {
+		big := gcTestModule(t, []FunctionType{{CompositeKind: CompositeKindStruct, Fields: []FieldType{
+			{Type: ValueTypeI32, Mutable: true},
+			{Type: ValueTypeI64, Mutable: true},
+			{Type: ValueTypeI32, Mutable: true},
+			{Type: ValueTypeI64, Mutable: true},
+			{Type: ValueTypeI8, Mutable: true},
+		}}}, nil, nil)
+		ref := RunGC(big, GCStructNew, 0, 0, 0, 0, 0, []uint64{1, 2, 3, 4, 0x1ff})
+		for i, want := range []uint64{1, 2, 3, 4, 0xff} {
+			require.Equal(t, want, RunGC(big, GCStructGet, ref, uint64(i), 0, 0, 0, nil), "field %d", i)
+		}
+	})
+}
+
+func TestNewGCObject(t *testing.T) {
+	def := &FunctionType{CompositeKind: CompositeKindStruct}
+	// The header carries a few words itself and falls back to its own backing beyond that, so both paths
+	// have to hand back the same thing.
+	for _, n := range []int{0, 1, gcInlineSlots, gcInlineSlots + 1, 9} {
+		o := newGCObject(def, 3, n)
+		require.Equal(t, def, o.Type, "n=%d", n)
+		require.Equal(t, FunctionTypeID(3), o.TypeID, "n=%d", n)
+		require.Equal(t, n, len(o.Fields), "n=%d", n)
+		// Capped, so appending to Fields can never scribble over whatever follows in the allocation.
+		require.Equal(t, n, cap(o.Fields), "n=%d", n)
+		for i := 0; i < n; i++ {
+			require.Equal(t, uint64(0), o.Fields[i], "n=%d word %d", n, i)
+			o.Fields[i] = uint64(i + 1)
+		}
+	}
 }
 
 func TestRunGC_Arrays(t *testing.T) {
@@ -196,6 +228,27 @@ func TestRunGC_Arrays(t *testing.T) {
 		backward := RunGC(m, GCArrayNewFixed, 0, 0, 0, 0, 0, []uint64{1, 2, 3, 4, 5})
 		RunGC(m, GCArrayCopy, backward, 2, backward, 0, 3, nil) // dst > src
 		require.Equal(t, []uint64{1, 2, 1, 2, 3}, gcArrayContents(m, backward, 5))
+	})
+
+	t.Run("fill and copy over a packed array move the stored bytes", func(t *testing.T) {
+		p := gcTestModule(t, []FunctionType{
+			{CompositeKind: CompositeKindArray, Fields: []FieldType{{Type: ValueTypeI8, Mutable: true}}},
+		}, nil, nil)
+		ref := RunGC(p, GCArrayNewFixed, 0, 0, 0, 0, 0, []uint64{1, 2, 3, 4, 5})
+		// The fill value is truncated to the storage width, as a write per element would have done.
+		RunGC(p, GCArrayFill, ref, 1, 0x1ff, 2, 0, nil)
+		require.Equal(t, []uint64{1, 0xff, 0xff, 4, 5}, gcArrayContents(p, ref, 5))
+		RunGC(p, GCArrayCopy, ref, 3, ref, 1, 2, nil)
+		require.Equal(t, []uint64{1, 0xff, 0xff, 0xff, 0xff}, gcArrayContents(p, ref, 5))
+		// A signed read still widens from bit 7, which only holds if the bytes moved unchanged.
+		require.Equal(t, uint64(0xffffffff), RunGC(p, GCArrayGet, ref, 3, 1, 0, 0, nil))
+	})
+
+	t.Run("an empty range at the end of an array is not out of bounds", func(t *testing.T) {
+		ref := newArray(2, 0)
+		RunGC(m, GCArrayFill, ref, 2, 9, 0, 0, nil)
+		RunGC(m, GCArrayCopy, ref, 2, ref, 2, 0, nil)
+		require.Equal(t, []uint64{0, 0}, gcArrayContents(m, ref, 2))
 	})
 
 	t.Run("out of bounds traps", func(t *testing.T) {
