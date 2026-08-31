@@ -276,6 +276,10 @@ func (b *builder) splitCriticalEdge(pred, succ *basicBlock, predInfo *basicBlock
 	// Replace originalBranch with the newBranch.
 	newBranch := b.AllocateInstruction()
 	newBranch.opcode = originalBranch.opcode
+	// newBranch takes originalBranch's place in pred, so it belongs to the same instruction
+	// group: without this it would keep the zero gid and the backend would refuse to fuse
+	// the preceding icmp into the conditional branch.
+	newBranch.gid = originalBranch.gid
 	newBranch.rValue = Value(trampoline.ID())
 	switch originalBranch.opcode {
 	case OpcodeJump:

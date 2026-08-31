@@ -2660,6 +2660,14 @@ func TestInstruction_format_encode(t *testing.T) {
 			wantFormat: "lea 65535(%rsp,%r13,8), %rdx",
 		},
 		{
+			// x+x lowers to a three-operand LEA whose base and index are the same register.
+			setup: func(i *instruction) {
+				i.asLEA(newOperandMem(newAmodeRegRegShift(0, raxVReg, raxVReg, 0)), rdxVReg)
+			},
+			want:       "488d1400",
+			wantFormat: "lea (%rax,%rax,1), %rdx",
+		},
+		{
 			setup: func(i *instruction) {
 				i.asLEA(newOperandLabel(label(1234)), r11VReg)
 			},

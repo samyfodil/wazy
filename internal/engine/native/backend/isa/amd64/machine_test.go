@@ -303,6 +303,80 @@ L2:
 `, m.Format())
 }
 
+func Test_machine_lowerAluRmiROp(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		typ   ssa.Type
+		op    aluRmiROpcode
+		konst bool // y is a constant rather than a second block param.
+		exp   string
+	}{
+		{
+			name: "i64 add reg+reg is one LEA",
+			typ:  ssa.TypeI64, op: aluRmiROpcodeAdd,
+			exp: `
+	lea (%rax,%rcx,1), %rdx
+`,
+		},
+		{
+			name: "i64 add reg+imm is one LEA",
+			typ:  ssa.TypeI64, op: aluRmiROpcodeAdd, konst: true,
+			exp: `
+	lea 5(%rax), %rdx
+`,
+		},
+		{
+			name: "i32 add keeps the copy-in/copy-out form",
+			typ:  ssa.TypeI32, op: aluRmiROpcodeAdd,
+			exp: `
+	movq %rax, %r1?
+	add %ecx, %r1d?
+	movq %r1?, %rdx
+`,
+		},
+		{
+			name: "i64 sub keeps the copy-in/copy-out form",
+			typ:  ssa.TypeI64, op: aluRmiROpcodeSub,
+			exp: `
+	movq %rax, %r1?
+	sub %rcx, %r1?
+	movq %r1?, %rdx
+`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, b, m := newSetupWithMockContext()
+			x := b.CurrentBlock().AddParam(b, tc.typ)
+			ctx.vRegMap[x] = raxVReg
+			ctx.typeOf[raxVReg.ID()] = tc.typ
+
+			var y ssa.Value
+			if tc.konst {
+				c := b.AllocateInstruction()
+				c.AsIconst64(5)
+				b.InsertInstruction(c)
+				y = c.Return()
+				ctx.definitions[y] = backend.SSAValueDefinition{Instr: c}
+			} else {
+				y = b.CurrentBlock().AddParam(b, tc.typ)
+			}
+			ctx.vRegMap[y] = rcxVReg
+			ctx.vRegMap[0] = rdxVReg // The result.
+
+			instr := &ssa.Instruction{}
+			if tc.op == aluRmiROpcodeAdd {
+				instr.AsIadd(x, y)
+			} else {
+				instr.AsIsub(x, y)
+			}
+			m.lowerAluRmiROp(instr, tc.op)
+			m.FlushPendingInstructions()
+			m.rootInstr = m.perBlockHead
+			require.Equal(t, tc.exp, m.Format())
+		})
+	}
+}
+
 func Test_machine_lowerClz(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
