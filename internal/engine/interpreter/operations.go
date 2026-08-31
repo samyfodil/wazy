@@ -181,8 +181,12 @@ func (o operationKind) String() (ret string) {
 		ret = "Select"
 	case operationKindPick:
 		ret = "Pick"
+	case operationKindPickV128:
+		ret = "PickV128"
 	case operationKindSet:
 		ret = "Swap"
+	case operationKindSetV128:
+		ret = "SwapV128"
 	case operationKindGlobalGet:
 		ret = "GlobalGet"
 	case operationKindGlobalSet:
@@ -1193,6 +1197,14 @@ const (
 	operationKindRefTest
 	operationKindRefCast
 
+	// operationKindPickV128 and operationKindSetV128 are the vector-typed halves of
+	// operationKindPick and operationKindSet. Which one a local.get/local.set is is known when the
+	// operation is built, so splitting the Kind keeps the per-instruction B3 test out of the two
+	// hottest arms of the engine's dispatch switch. They sit at the bottom of the iota so that
+	// adding them does not renumber the Kinds those dense switches dispatch on.
+	operationKindPickV128
+	operationKindSetV128
+
 	// operationKindGCSafepoint is the poll a loop header does so a collection can stop the world. It is
 	// emitted only when the GC proposal is enabled, so nothing else ever pays for it.
 	operationKindGCSafepoint
@@ -1361,12 +1373,11 @@ func (o unionOperation) String() string {
 		return fmt.Sprintf("%s: type=%d, table=%d", o.Kind, o.U1, o.U2)
 
 	case operationKindDrop:
-		start := int64(o.U1)
-		end := int64(o.U2)
-		return fmt.Sprintf("%s %d..%d", o.Kind, start, end)
+		r := inclusiveRangeFromU64(o.U1)
+		return fmt.Sprintf("%s %d..%d", o.Kind, r.Start, r.End)
 
-	case operationKindPick, operationKindSet:
-		return fmt.Sprintf("%s %d (is_vector=%v)", o.Kind, o.U1, o.B3)
+	case operationKindPick, operationKindPickV128, operationKindSet, operationKindSetV128:
+		return fmt.Sprintf("%s %d", o.Kind, o.U1)
 
 	case operationKindLoad, operationKindStore:
 		return fmt.Sprintf("%s.%s (align=%d, offset=%d)", unsignedType(o.B1), o.Kind, o.U1, o.U2)
@@ -1684,16 +1695,28 @@ type inclusiveRange struct {
 }
 
 // AsU64 is be used to convert inclusiveRange to uint64 so that it can be stored in unionOperation.
+//
+// The packing is chosen so that callEngine.drop can tell its two hot shapes apart with a single
+// shift: 0 is "drop nothing", and any other value below 1<<32 is "drop that many values off the
+// top", which is every range starting at 0. Only a range that keeps values above the dropped ones
+// needs the general Start<<32|End form, and that form always has a non-zero upper half.
 func (i inclusiveRange) AsU64() uint64 {
+	if i.Start < 0 {
+		return 0
+	} else if i.Start == 0 {
+		return uint64(i.End) + 1
+	}
 	return uint64(uint32(i.Start))<<32 | uint64(uint32(i.End))
 }
 
-// inclusiveRangeFromU64 retrieves inclusiveRange from the given uint64 which is stored in unionOperation.
+// inclusiveRangeFromU64 is the inverse of AsU64.
 func inclusiveRangeFromU64(v uint64) inclusiveRange {
-	return inclusiveRange{
-		Start: int32(uint32(v >> 32)),
-		End:   int32(uint32(v)),
+	if v == 0 {
+		return nopinclusiveRange
+	} else if v>>32 == 0 {
+		return inclusiveRange{Start: 0, End: int32(v) - 1}
 	}
+	return inclusiveRange{Start: int32(uint32(v >> 32)), End: int32(uint32(v))}
 }
 
 // nopinclusiveRange is inclusiveRange which corresponds to no-operation.
@@ -1729,7 +1752,11 @@ func newOperationSelect(isTargetVector bool) unionOperation {
 // depth is the location of the pick target in the uint64 value stack at runtime.
 // If isTargetVector=true, this points to the location of the lower 64-bits of the vector.
 func newOperationPick(depth int, isTargetVector bool) unionOperation {
-	return unionOperation{Kind: operationKindPick, U1: uint64(depth), B3: isTargetVector}
+	kind := operationKindPick
+	if isTargetVector {
+		kind = operationKindPickV128
+	}
+	return unionOperation{Kind: kind, U1: uint64(depth)}
 }
 
 // NewOperationSet is a constructor for unionOperation with operationKindSet.
@@ -1740,7 +1767,11 @@ func newOperationPick(depth int, isTargetVector bool) unionOperation {
 // depth is the location of the set target in the uint64 value stack at runtime.
 // If isTargetVector=true, this points the location of the lower 64-bits of the vector.
 func newOperationSet(depth int, isTargetVector bool) unionOperation {
-	return unionOperation{Kind: operationKindSet, U1: uint64(depth), B3: isTargetVector}
+	kind := operationKindSet
+	if isTargetVector {
+		kind = operationKindSetV128
+	}
+	return unionOperation{Kind: kind, U1: uint64(depth)}
 }
 
 // NewOperationGlobalGet is a constructor for unionOperation with operationKindGlobalGet.

@@ -64,10 +64,13 @@ var ehBrOwnLabelWasm []byte
 //go:embed testdata/eh_catch_outside.wasm
 var ehCatchOutsideWasm []byte
 
+//go:embed testdata/eh_tail_call_unwind.wasm
+var ehTailCallUnwindWasm []byte
+
 // TestExceptionHandlingInterpreter runs EH tests only for the interpreter.
 func TestExceptionHandlingInterpreter(t *testing.T) {
 	cfg := wazy.NewRuntimeConfigInterpreter().
-		WithCoreFeatures(api.CoreFeaturesV2 | api.CoreFeatureExceptionHandling)
+		WithCoreFeatures(api.CoreFeaturesV3 | api.CoreFeatureExceptionHandling)
 	runEHTests(t, cfg)
 }
 
@@ -77,7 +80,7 @@ func TestExceptionHandlingCompiler(t *testing.T) {
 		t.Skip()
 	}
 	cfg := wazy.NewRuntimeConfigCompiler().
-		WithCoreFeatures(api.CoreFeaturesV2 | api.CoreFeatureExceptionHandling)
+		WithCoreFeatures(api.CoreFeaturesV3 | api.CoreFeatureExceptionHandling)
 	runEHTests(t, cfg)
 }
 
@@ -115,6 +118,30 @@ func runEHTests(t *testing.T, cfg wazy.RuntimeConfig) {
 	t.Run("catch_outside", func(t *testing.T) {
 		testEHCatchOutside(t, cfg)
 	})
+	t.Run("tail_call_unwind", func(t *testing.T) {
+		testEHTailCallUnwind(t, cfg)
+	})
+}
+
+// testEHTailCallUnwind covers return_call swapping the function a frame runs, and with it
+// whether that frame can catch: a caller with no try_table tail-calling into one that has
+// a handler must start catching, and a caller inside a try_table tail-calling into a
+// function without one must stop.
+func testEHTailCallUnwind(t *testing.T, cfg wazy.RuntimeConfig) {
+	ctx := context.Background()
+	r := wazy.NewRuntimeWithConfig(ctx, cfg)
+	defer r.Close(ctx)
+
+	mod, err := r.InstantiateWithConfig(ctx, ehTailCallUnwindWasm,
+		wazy.NewModuleConfig().WithStartFunctions())
+	require.NoError(t, err)
+
+	res, err := mod.ExportedFunction("tail_into_catcher").Call(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), api.DecodeI32(res[0]))
+
+	_, err = mod.ExportedFunction("catcher_tail_into_nocatch").Call(ctx)
+	require.Error(t, err)
 }
 
 // testEHCrossFrameCatch is the core reproducer for the interpreter bug:

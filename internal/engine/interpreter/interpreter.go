@@ -264,14 +264,16 @@ func (ce *callEngine) applyExceptionHandler(frame *callFrame, clause *exceptionT
 // (exception handling and snapshot restores). Returns true if the frame was
 // unwound (caller should refresh frame/body and continue the loop).
 // Returns false on normal return (caller should do pc++).
-func (ce *callEngine) callWithUnwind(ctx context.Context, m *wasm.ModuleInstance, tf *function) bool {
+//
+// unwindable is whether an unwind can land in the calling frame, i.e. whether that frame's
+// function has an exception table or the snapshotter is active. It is passed in rather than
+// re-derived here because it is a property of the frame, not of this call, so the caller can
+// hold it in a register instead of walking ce.frames -> f -> parent -> exceptionTable and
+// loading the snapshotter latch on every call (I9).
+func (ce *callEngine) callWithUnwind(ctx context.Context, m *wasm.ModuleInstance, tf *function, unwindable bool) bool {
 	// Short-circuit: skip defer/recover overhead when neither exception
-	// handlers nor the snapshotter are active for the calling frame. The
-	// SnapshotterEnabled latch avoids walking the ctx.Value chain at all
-	// unless some context in this process has ever enabled the snapshotter.
-	frame := ce.frames[len(ce.frames)-1]
-	if len(frame.f.parent.exceptionTable) == 0 &&
-		!(expctxkeys.SnapshotterEnabled.Load() && ctx.Value(expctxkeys.EnableSnapshotterKey{}) != nil) {
+	// handlers nor the snapshotter are active for the calling frame.
+	if !unwindable {
 		ce.callFunction(ctx, m, tf)
 		return false
 	}
@@ -334,17 +336,17 @@ func (ce *callEngine) peekValues(count int) []uint64 {
 	return ce.stack[stackLen-count : stackLen]
 }
 
+// drop discards the values selected by an inclusiveRange packed with AsU64. raw below 1<<32 is the
+// hot shape -- nothing to drop, or a plain truncation of the top raw values -- and needs no decode.
 func (ce *callEngine) drop(raw uint64) {
-	r := inclusiveRangeFromU64(raw)
-	if r.Start == -1 {
+	if raw>>32 == 0 {
+		ce.stack = ce.stack[:uint64(len(ce.stack))-raw]
 		return
-	} else if r.Start == 0 {
-		ce.stack = ce.stack[:int32(len(ce.stack))-1-r.End]
-	} else {
-		newStack := ce.stack[:int32(len(ce.stack))-1-r.End]
-		newStack = append(newStack, ce.stack[int32(len(ce.stack))-r.Start:]...)
-		ce.stack = newStack
 	}
+	start, end := int32(raw>>32), int32(uint32(raw))
+	newStack := ce.stack[:int32(len(ce.stack))-1-end]
+	newStack = append(newStack, ce.stack[int32(len(ce.stack))-start:]...)
+	ce.stack = newStack
 }
 
 func (ce *callEngine) pushFrame(frame callFrame) {
@@ -385,7 +387,12 @@ type compiledFunction struct {
 	listener            api.FunctionListener
 	offsetsInWasmBinary []uint64
 	hostFn              interface{}
-	ensureTermination   bool
+	// goModuleFn and goFn are hostFn settled into its one concrete shape at instantiation (H8),
+	// so a host call dispatches on a nil check instead of a runtime.interfaceSwitch. Exactly one
+	// is ever non-nil, and only for a host function.
+	goModuleFn        api.GoModuleFunction
+	goFn              api.GoFunction
+	ensureTermination bool
 	// gcEnabled mirrors the engine's feature set, so a call knows whether to register itself with the
 	// store's collector without reaching back through the module.
 	gcEnabled bool
@@ -577,6 +584,12 @@ func (e *engine) CompileModule(_ context.Context, module *wasm.Module, listeners
 		// which need to be compiled down to
 		if codeSeg := &module.CodeSection[i]; codeSeg.GoFunc != nil {
 			compiled.hostFn = codeSeg.GoFunc
+			switch fn := codeSeg.GoFunc.(type) {
+			case api.GoModuleFunction:
+				compiled.goModuleFn = fn
+			case api.GoFunction:
+				compiled.goFn = fn
+			}
 		} else {
 			ir, err := irCompiler.Next()
 			if err != nil {
@@ -1159,15 +1172,13 @@ func (ce *callEngine) callGoFunc(ctx context.Context, m *wasm.ModuleInstance, f 
 	}
 	ce.pushFrame(callFrame{f: f, base: len(ce.stack)})
 
-	fn := f.parent.hostFn
 	// A host function can block for as long as it likes, and its wasm stack does not move while it does, so
 	// this call is a parking point too. Without it a collection would wait on an execution that is never
 	// going to reach a loop header.
 	ce.gcExec.EnterGo()
-	switch fn := fn.(type) {
-	case api.GoModuleFunction:
+	if fn := f.parent.goModuleFn; fn != nil {
 		fn.Call(ctx, m, stack)
-	case api.GoFunction:
+	} else if fn := f.parent.goFn; fn != nil {
 		fn.Call(ctx, stack)
 	}
 	ce.gcExec.LeaveGo()
@@ -1180,31 +1191,32 @@ func (ce *callEngine) callGoFunc(ctx context.Context, m *wasm.ModuleInstance, f 
 	}
 }
 
-// memoryAt returns memories[idx]. idx 0 is special-cased to return the
+// memoryAt returns moduleInst.Memories[idx]. idx 0 is special-cased to return the
 // already-resident mem0 pointer, avoiding a slice bounds check and load for
-// the overwhelmingly common case of a module with at most one memory.
-func memoryAt(memories []*wasm.MemoryInstance, mem0 *wasm.MemoryInstance, idx uint64) *wasm.MemoryInstance {
+// the overwhelmingly common case of a module with at most one memory. The
+// Memories slice header is reached through moduleInst rather than passed in so
+// that loading it stays inside the multi-memory branch (I14).
+func memoryAt(moduleInst *wasm.ModuleInstance, mem0 *wasm.MemoryInstance, idx uint64) *wasm.MemoryInstance {
 	if idx == 0 {
 		return mem0
 	}
-	return memories[idx]
+	return moduleInst.Memories[idx]
 }
 
 func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance, f *function) {
 	moduleInst := f.moduleInstance
-	functions := moduleInst.Engine.(*moduleEngine).functions
-	memories := moduleInst.Memories
+	me := moduleInst.Engine.(*moduleEngine)
 	// mem0 lets memoryAt skip the slice bounds check and load for memory index
 	// 0, the overwhelmingly common case (a module with at most one memory).
 	var mem0 *wasm.MemoryInstance
-	if len(memories) > 0 {
+	if memories := moduleInst.Memories; len(memories) > 0 {
 		mem0 = memories[0]
 	}
-	globals := moduleInst.Globals
-	tables := moduleInst.Tables
-	typeIDs := moduleInst.TypeIDs
-	dataInstances := moduleInst.DataInstances
-	elementInstances := moduleInst.ElementInstances
+	// I14: everything else the module owns -- Memories, Globals, Tables, TypeIDs, DataInstances,
+	// ElementInstances -- is reached through moduleInst rather than hoisted into a local. As
+	// locals their slice headers stayed live across the whole 240-arm switch, so the loop head
+	// re-materialised six of them per instruction executed; behind one pointer the ptr/len loads
+	// happen only in the arms that actually index them.
 	ce.pushFrame(callFrame{f: f, base: len(ce.stack)})
 	// Take frame's address only after the push: ce.frames is a value slice, so
 	// pushing can grow and relocate its backing array. Any nested call below
@@ -1233,6 +1245,24 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 	// common ALU / comparison / const / local / global-get / branch path never
 	// touches frame.pc.
 	pc := frame.pc
+	// I9: whether an unwind can land in this frame is a property of the function the frame is
+	// running, so it is computed here instead of on every call. snapshotEnabled cannot go from
+	// false to true while this frame runs: a ctx already carrying EnableSnapshotterKey means the
+	// latch was set before the call began, and ctx does not change under us. unwindable is
+	// refreshed wherever a tail call swaps frame.f.
+	snapshotEnabled := expctxkeys.SnapshotterEnabled.Load() && ctx.Value(expctxkeys.EnableSnapshotterKey{}) != nil
+	unwindable := snapshotEnabled || len(f.parent.exceptionTable) != 0
+	// I12: a func literal, not ce.popValue, deliberately. The inliner caps a callee
+	// inlined into a "big" function at cost 20 and the method costs 23, so every one
+	// of the ~190 pops below was a real CALL. inlineCostOK doubles that cap for a
+	// callee with a ClosureParent, which admits this copy; it is only ever called
+	// directly, so it neither escapes nor allocates. Keep it in step with popValue.
+	popValue := func() (v uint64) {
+		i := len(ce.stack) - 1
+		v = ce.stack[i]
+		ce.stack = ce.stack[:i]
+		return
+	}
 	for pc < uint64(len(body)) {
 		op := &body[pc]
 		// TODO: add description of each operation/case
@@ -1259,25 +1289,33 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 		case operationKindBr:
 			pc = op.U1
 		case operationKindBrIf:
-			if ce.popValue() > 0 {
-				ce.drop(op.U3)
+			if popValue() > 0 {
+				// A branch whose target needs no stack adjustment packs to 0 (see
+				// inclusiveRange.AsU64), which is the common case for a loop back-edge.
+				// drop costs 65 against the inliner's cap for this function, so testing
+				// here is what keeps that case from paying for a CALL. Same below.
+				if op.U3 != 0 {
+					ce.drop(op.U3)
+				}
 				pc = op.U1
 			} else {
 				pc = op.U2
 			}
 		case operationKindBrTable:
 			us := frame.f.parent.sideTable[op.U3]
-			v := ce.popValue()
+			v := popValue()
 			defaultAt := uint64(len(us))/2 - 1
 			if v > defaultAt {
 				v = defaultAt
 			}
 			v *= 2
-			ce.drop(us[v+1])
+			if d := us[v+1]; d != 0 {
+				ce.drop(d)
+			}
 			pc = us[v]
 		case operationKindCall:
 			frame.pc = pc // sync: callee may snapshot/throw/trap; traces read this frame's pc
-			frameUnwound := ce.callWithUnwind(ctx, f.moduleInstance, &functions[op.U1])
+			frameUnwound := ce.callWithUnwind(ctx, f.moduleInstance, &me.functions[op.U1], unwindable)
 			// Re-take frame regardless of frameUnwound: the callee (or
 			// anything it called) may have grown ce.frames and relocated its
 			// backing array, staling any pointer taken before the call.
@@ -1290,11 +1328,11 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindCallIndirect:
 			frame.pc = pc // sync: functionForOffset/callee may trap/throw/snapshot
-			offset := ce.popValue()
-			table := tables[op.U2]
-			tf := ce.functionForOffset(table, offset, typeIDs[op.U1])
+			offset := popValue()
+			table := moduleInst.Tables[op.U2]
+			tf := ce.functionForOffset(table, offset, moduleInst.TypeIDs[op.U1])
 
-			frameUnwound := ce.callWithUnwind(ctx, f.moduleInstance, tf)
+			frameUnwound := ce.callWithUnwind(ctx, f.moduleInstance, tf, unwindable)
 			frame = &ce.frames[len(ce.frames)-1]
 			if frameUnwound {
 				pc = frame.pc // reload: handler set frame.pc to the catch target
@@ -1305,37 +1343,39 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 		case operationKindDrop:
 			ce.drop(op.U1)
 			pc++
+		// local.get and local.set. The V128 halves are separate Kinds (I13) because whether the
+		// target is a vector is settled when the operation is built, and these two arms are the
+		// hottest in the switch: a per-instruction test of op.B3 was pure loss for scalar locals.
 		case operationKindPick:
+			ce.pushValue(ce.stack[len(ce.stack)-1-int(op.U1)])
+			pc++
+		case operationKindPickV128:
 			index := len(ce.stack) - 1 - int(op.U1)
 			ce.pushValue(ce.stack[index])
-			if op.B3 { // V128 value target.
-				ce.pushValue(ce.stack[index+1])
-			}
+			ce.pushValue(ce.stack[index+1])
 			pc++
 		case operationKindSet:
-			if op.B3 { // V128 value target.
-				lowIndex := len(ce.stack) - 1 - int(op.U1)
-				highIndex := lowIndex + 1
-				hi, lo := ce.popValue(), ce.popValue()
-				ce.stack[lowIndex], ce.stack[highIndex] = lo, hi
-			} else {
-				index := len(ce.stack) - 1 - int(op.U1)
-				ce.stack[index] = ce.popValue()
-			}
+			index := len(ce.stack) - 1 - int(op.U1)
+			ce.stack[index] = popValue()
+			pc++
+		case operationKindSetV128:
+			lowIndex := len(ce.stack) - 1 - int(op.U1)
+			hi, lo := popValue(), popValue()
+			ce.stack[lowIndex], ce.stack[lowIndex+1] = lo, hi
 			pc++
 		case operationKindGlobalGet:
-			g := globals[op.U1]
+			g := moduleInst.Globals[op.U1]
 			ce.pushValue(g.Val)
 			if op.B3 { // V128; precomputed at lowering time (I11) to avoid deref'ing g.Type here.
 				ce.pushValue(g.ValHi)
 			}
 			pc++
 		case operationKindGlobalSet:
-			g := globals[op.U1]
+			g := moduleInst.Globals[op.U1]
 			if op.B3 { // V128; precomputed at lowering time (I11) to avoid deref'ing g.Type here.
-				g.ValHi = ce.popValue()
+				g.ValHi = popValue()
 			}
-			g.Val = ce.popValue()
+			g.Val = popValue()
 			pc++
 		// I10: these Load*/Store* cases inline the bounds check instead of going through
 		// popMemoryOffset+MemoryInstance.ReadXxx/WriteXxx: popMemoryOffset's own
@@ -1354,8 +1394,8 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 		// operationKindStoreMem64 instead, where the arithmetic is carry-checked.
 		case operationKindLoadI32, operationKindLoadF32:
 			frame.pc = pc // sync: OOB trap
-			mem := memoryAt(memories, mem0, op.U3)
-			ea := op.U2 + uint64(uint32(ce.popValue()))
+			mem := memoryAt(moduleInst, mem0, op.U3)
+			ea := op.U2 + uint64(uint32(popValue()))
 			if ea+4 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -1363,8 +1403,8 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindLoadI64, operationKindLoadF64:
 			frame.pc = pc // sync: OOB trap
-			mem := memoryAt(memories, mem0, op.U3)
-			ea := op.U2 + uint64(uint32(ce.popValue()))
+			mem := memoryAt(moduleInst, mem0, op.U3)
+			ea := op.U2 + uint64(uint32(popValue()))
 			if ea+8 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -1372,8 +1412,8 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindLoad8S32:
 			frame.pc = pc // sync: OOB trap
-			mem := memoryAt(memories, mem0, op.U3)
-			ea := op.U2 + uint64(uint32(ce.popValue()))
+			mem := memoryAt(moduleInst, mem0, op.U3)
+			ea := op.U2 + uint64(uint32(popValue()))
 			if ea+1 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -1381,8 +1421,8 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindLoad8S64:
 			frame.pc = pc // sync: OOB trap
-			mem := memoryAt(memories, mem0, op.U3)
-			ea := op.U2 + uint64(uint32(ce.popValue()))
+			mem := memoryAt(moduleInst, mem0, op.U3)
+			ea := op.U2 + uint64(uint32(popValue()))
 			if ea+1 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -1390,8 +1430,8 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindLoad8U32, operationKindLoad8U64:
 			frame.pc = pc // sync: OOB trap
-			mem := memoryAt(memories, mem0, op.U3)
-			ea := op.U2 + uint64(uint32(ce.popValue()))
+			mem := memoryAt(moduleInst, mem0, op.U3)
+			ea := op.U2 + uint64(uint32(popValue()))
 			if ea+1 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -1399,8 +1439,8 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindLoad16S32:
 			frame.pc = pc // sync: OOB trap
-			mem := memoryAt(memories, mem0, op.U3)
-			ea := op.U2 + uint64(uint32(ce.popValue()))
+			mem := memoryAt(moduleInst, mem0, op.U3)
+			ea := op.U2 + uint64(uint32(popValue()))
 			if ea+2 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -1408,8 +1448,8 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindLoad16S64:
 			frame.pc = pc // sync: OOB trap
-			mem := memoryAt(memories, mem0, op.U3)
-			ea := op.U2 + uint64(uint32(ce.popValue()))
+			mem := memoryAt(moduleInst, mem0, op.U3)
+			ea := op.U2 + uint64(uint32(popValue()))
 			if ea+2 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -1417,8 +1457,8 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindLoad16U32, operationKindLoad16U64:
 			frame.pc = pc // sync: OOB trap
-			mem := memoryAt(memories, mem0, op.U3)
-			ea := op.U2 + uint64(uint32(ce.popValue()))
+			mem := memoryAt(moduleInst, mem0, op.U3)
+			ea := op.U2 + uint64(uint32(popValue()))
 			if ea+2 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -1426,8 +1466,8 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindLoad32S:
 			frame.pc = pc // sync: OOB trap
-			mem := memoryAt(memories, mem0, op.U3)
-			ea := op.U2 + uint64(uint32(ce.popValue()))
+			mem := memoryAt(moduleInst, mem0, op.U3)
+			ea := op.U2 + uint64(uint32(popValue()))
 			if ea+4 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -1435,8 +1475,8 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindLoad32U:
 			frame.pc = pc // sync: OOB trap
-			mem := memoryAt(memories, mem0, op.U3)
-			ea := op.U2 + uint64(uint32(ce.popValue()))
+			mem := memoryAt(moduleInst, mem0, op.U3)
+			ea := op.U2 + uint64(uint32(popValue()))
 			if ea+4 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -1444,9 +1484,9 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindStoreI32, operationKindStoreF32:
 			frame.pc = pc // sync: OOB trap
-			mem := memoryAt(memories, mem0, op.U3)
-			val := ce.popValue()
-			ea := op.U2 + uint64(uint32(ce.popValue()))
+			mem := memoryAt(moduleInst, mem0, op.U3)
+			val := popValue()
+			ea := op.U2 + uint64(uint32(popValue()))
 			if ea+4 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -1454,9 +1494,9 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindStoreI64, operationKindStoreF64:
 			frame.pc = pc // sync: OOB trap
-			mem := memoryAt(memories, mem0, op.U3)
-			val := ce.popValue()
-			ea := op.U2 + uint64(uint32(ce.popValue()))
+			mem := memoryAt(moduleInst, mem0, op.U3)
+			val := popValue()
+			ea := op.U2 + uint64(uint32(popValue()))
 			if ea+8 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -1464,9 +1504,9 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindStore8:
 			frame.pc = pc // sync: OOB trap
-			mem := memoryAt(memories, mem0, op.U3)
-			val := byte(ce.popValue())
-			ea := op.U2 + uint64(uint32(ce.popValue()))
+			mem := memoryAt(moduleInst, mem0, op.U3)
+			val := byte(popValue())
+			ea := op.U2 + uint64(uint32(popValue()))
 			if ea+1 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -1474,9 +1514,9 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindStore16:
 			frame.pc = pc // sync: OOB trap
-			mem := memoryAt(memories, mem0, op.U3)
-			val := uint16(ce.popValue())
-			ea := op.U2 + uint64(uint32(ce.popValue()))
+			mem := memoryAt(moduleInst, mem0, op.U3)
+			val := uint16(popValue())
+			ea := op.U2 + uint64(uint32(popValue()))
 			if ea+2 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -1484,9 +1524,9 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindStore32:
 			frame.pc = pc // sync: OOB trap
-			mem := memoryAt(memories, mem0, op.U3)
-			val := uint32(ce.popValue())
-			ea := op.U2 + uint64(uint32(ce.popValue()))
+			mem := memoryAt(moduleInst, mem0, op.U3)
+			val := uint32(popValue())
+			ea := op.U2 + uint64(uint32(popValue()))
 			if ea+4 > uint64(len(mem.Buffer)) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
@@ -1494,8 +1534,8 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindLoadMem64:
 			frame.pc = pc // sync: OOB trap
-			mem := memoryAt(memories, mem0, op.U3)
-			ea := mem64EffectiveAddr(mem, op.U2, ce.popValue(), uint64(op.B2))
+			mem := memoryAt(moduleInst, mem0, op.U3)
+			ea := mem64EffectiveAddr(mem, op.U2, popValue(), uint64(op.B2))
 			b := mem.Buffer[ea:]
 			switch memLoadShape(op.B1) {
 			case memLoadShape32:
@@ -1522,9 +1562,9 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindStoreMem64:
 			frame.pc = pc // sync: OOB trap
-			mem := memoryAt(memories, mem0, op.U3)
-			val := ce.popValue()
-			ea := mem64EffectiveAddr(mem, op.U2, ce.popValue(), uint64(op.B2))
+			mem := memoryAt(moduleInst, mem0, op.U3)
+			val := popValue()
+			ea := mem64EffectiveAddr(mem, op.U2, popValue(), uint64(op.B2))
 			switch op.B2 {
 			case 1:
 				mem.Buffer[ea] = byte(val)
@@ -1540,11 +1580,11 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			// Pages64 rather than Pages: a 64-bit memory can hold more than the
 			// 65536 pages a uint32 page count tops out at, and for an i32 memory
 			// the two agree.
-			ce.pushValue(memories[op.U1].Pages64())
+			ce.pushValue(moduleInst.Memories[op.U1].Pages64())
 			pc++
 		case operationKindMemoryGrow:
-			mem := memories[op.U1]
-			n := ce.popValue()
+			mem := moduleInst.Memories[op.U1]
+			n := popValue()
 			if !mem.IsMemory64 {
 				n = uint64(uint32(n))
 			}
@@ -1563,7 +1603,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			ce.pushValue(op.U1)
 			pc++
 		case operationKindEqI32:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if uint32(v1) == uint32(v2) {
 				ce.pushValue(1)
 			} else {
@@ -1571,7 +1611,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindEqI64:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if v1 == v2 {
 				ce.pushValue(1)
 			} else {
@@ -1579,7 +1619,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindEqF32:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if math.Float32frombits(uint32(v2)) == math.Float32frombits(uint32(v1)) {
 				ce.pushValue(1)
 			} else {
@@ -1587,7 +1627,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindEqF64:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if math.Float64frombits(v2) == math.Float64frombits(v1) {
 				ce.pushValue(1)
 			} else {
@@ -1595,7 +1635,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindNeI32:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if uint32(v1) != uint32(v2) {
 				ce.pushValue(1)
 			} else {
@@ -1603,7 +1643,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindNeI64:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if v1 != v2 {
 				ce.pushValue(1)
 			} else {
@@ -1611,7 +1651,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindNeF32:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if math.Float32frombits(uint32(v2)) != math.Float32frombits(uint32(v1)) {
 				ce.pushValue(1)
 			} else {
@@ -1619,7 +1659,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindNeF64:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if math.Float64frombits(v2) != math.Float64frombits(v1) {
 				ce.pushValue(1)
 			} else {
@@ -1627,7 +1667,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindEqz:
-			v := ce.popValue()
+			v := popValue()
 			if unsignedInt(op.B1) == unsignedInt32 {
 				v = uint64(uint32(v))
 			}
@@ -1638,7 +1678,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindLtS32:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if int32(v1) < int32(v2) {
 				ce.pushValue(1)
 			} else {
@@ -1646,7 +1686,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindLtU32:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if uint32(v1) < uint32(v2) {
 				ce.pushValue(1)
 			} else {
@@ -1654,7 +1694,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindLtS64:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if int64(v1) < int64(v2) {
 				ce.pushValue(1)
 			} else {
@@ -1662,7 +1702,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindLtU64:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if v1 < v2 {
 				ce.pushValue(1)
 			} else {
@@ -1670,7 +1710,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindLtF32:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if math.Float32frombits(uint32(v1)) < math.Float32frombits(uint32(v2)) {
 				ce.pushValue(1)
 			} else {
@@ -1678,7 +1718,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindLtF64:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if math.Float64frombits(v1) < math.Float64frombits(v2) {
 				ce.pushValue(1)
 			} else {
@@ -1686,7 +1726,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindGtS32:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if int32(v1) > int32(v2) {
 				ce.pushValue(1)
 			} else {
@@ -1694,7 +1734,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindGtU32:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if uint32(v1) > uint32(v2) {
 				ce.pushValue(1)
 			} else {
@@ -1702,7 +1742,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindGtS64:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if int64(v1) > int64(v2) {
 				ce.pushValue(1)
 			} else {
@@ -1710,7 +1750,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindGtU64:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if v1 > v2 {
 				ce.pushValue(1)
 			} else {
@@ -1718,7 +1758,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindGtF32:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if math.Float32frombits(uint32(v1)) > math.Float32frombits(uint32(v2)) {
 				ce.pushValue(1)
 			} else {
@@ -1726,7 +1766,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindGtF64:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if math.Float64frombits(v1) > math.Float64frombits(v2) {
 				ce.pushValue(1)
 			} else {
@@ -1734,7 +1774,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindLeS32:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if int32(v1) <= int32(v2) {
 				ce.pushValue(1)
 			} else {
@@ -1742,7 +1782,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindLeU32:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if uint32(v1) <= uint32(v2) {
 				ce.pushValue(1)
 			} else {
@@ -1750,7 +1790,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindLeS64:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if int64(v1) <= int64(v2) {
 				ce.pushValue(1)
 			} else {
@@ -1758,7 +1798,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindLeU64:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if v1 <= v2 {
 				ce.pushValue(1)
 			} else {
@@ -1766,7 +1806,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindLeF32:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if math.Float32frombits(uint32(v1)) <= math.Float32frombits(uint32(v2)) {
 				ce.pushValue(1)
 			} else {
@@ -1774,7 +1814,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindLeF64:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if math.Float64frombits(v1) <= math.Float64frombits(v2) {
 				ce.pushValue(1)
 			} else {
@@ -1782,7 +1822,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindGeS32:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if int32(v1) >= int32(v2) {
 				ce.pushValue(1)
 			} else {
@@ -1790,7 +1830,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindGeU32:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if uint32(v1) >= uint32(v2) {
 				ce.pushValue(1)
 			} else {
@@ -1798,7 +1838,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindGeS64:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if int64(v1) >= int64(v2) {
 				ce.pushValue(1)
 			} else {
@@ -1806,7 +1846,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindGeU64:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if v1 >= v2 {
 				ce.pushValue(1)
 			} else {
@@ -1814,7 +1854,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindGeF32:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if math.Float32frombits(uint32(v1)) >= math.Float32frombits(uint32(v2)) {
 				ce.pushValue(1)
 			} else {
@@ -1822,7 +1862,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindGeF64:
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			if math.Float64frombits(v1) >= math.Float64frombits(v2) {
 				ce.pushValue(1)
 			} else {
@@ -1830,70 +1870,70 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindAddI32:
-			v2 := ce.popValue()
-			v1 := ce.popValue()
+			v2 := popValue()
+			v1 := popValue()
 			ce.pushValue(uint64(uint32(v1) + uint32(v2)))
 			pc++
 		case operationKindAddI64:
-			v2 := ce.popValue()
-			v1 := ce.popValue()
+			v2 := popValue()
+			v1 := popValue()
 			ce.pushValue(v1 + v2)
 			pc++
 		case operationKindAddF32:
-			v2 := ce.popValue()
-			v1 := ce.popValue()
+			v2 := popValue()
+			v1 := popValue()
 			ce.pushValue(addFloat32bits(uint32(v1), uint32(v2)))
 			pc++
 		case operationKindAddF64:
-			v2 := ce.popValue()
-			v1 := ce.popValue()
+			v2 := popValue()
+			v1 := popValue()
 			v := math.Float64frombits(v1) + math.Float64frombits(v2)
 			ce.pushValue(math.Float64bits(v))
 			pc++
 		case operationKindSubI32:
-			v2 := ce.popValue()
-			v1 := ce.popValue()
+			v2 := popValue()
+			v1 := popValue()
 			ce.pushValue(uint64(uint32(v1) - uint32(v2)))
 			pc++
 		case operationKindSubI64:
-			v2 := ce.popValue()
-			v1 := ce.popValue()
+			v2 := popValue()
+			v1 := popValue()
 			ce.pushValue(v1 - v2)
 			pc++
 		case operationKindSubF32:
-			v2 := ce.popValue()
-			v1 := ce.popValue()
+			v2 := popValue()
+			v1 := popValue()
 			ce.pushValue(subFloat32bits(uint32(v1), uint32(v2)))
 			pc++
 		case operationKindSubF64:
-			v2 := ce.popValue()
-			v1 := ce.popValue()
+			v2 := popValue()
+			v1 := popValue()
 			v := math.Float64frombits(v1) - math.Float64frombits(v2)
 			ce.pushValue(math.Float64bits(v))
 			pc++
 		case operationKindMulI32:
-			v2 := ce.popValue()
-			v1 := ce.popValue()
+			v2 := popValue()
+			v1 := popValue()
 			ce.pushValue(uint64(uint32(v1) * uint32(v2)))
 			pc++
 		case operationKindMulI64:
-			v2 := ce.popValue()
-			v1 := ce.popValue()
+			v2 := popValue()
+			v1 := popValue()
 			ce.pushValue(v1 * v2)
 			pc++
 		case operationKindMulF32:
-			v2 := ce.popValue()
-			v1 := ce.popValue()
+			v2 := popValue()
+			v1 := popValue()
 			ce.pushValue(mulFloat32bits(uint32(v1), uint32(v2)))
 			pc++
 		case operationKindMulF64:
-			v2 := ce.popValue()
-			v1 := ce.popValue()
+			v2 := popValue()
+			v1 := popValue()
 			v := math.Float64frombits(v2) * math.Float64frombits(v1)
 			ce.pushValue(math.Float64bits(v))
 			pc++
 		case operationKindClz:
-			v := ce.popValue()
+			v := popValue()
 			if op.B1 == 0 {
 				// unsignedInt32
 				ce.pushValue(uint64(bits.LeadingZeros32(uint32(v))))
@@ -1903,7 +1943,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindCtz:
-			v := ce.popValue()
+			v := popValue()
 			if op.B1 == 0 {
 				// unsignedInt32
 				ce.pushValue(uint64(bits.TrailingZeros32(uint32(v))))
@@ -1913,7 +1953,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindPopcnt:
-			v := ce.popValue()
+			v := popValue()
 			if op.B1 == 0 {
 				// unsignedInt32
 				ce.pushValue(uint64(bits.OnesCount32(uint32(v))))
@@ -1924,7 +1964,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindDivS32:
 			frame.pc = pc // sync: divide-by-zero / overflow trap
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			d := int32(v2)
 			n := int32(v1)
 			if d == 0 {
@@ -1937,7 +1977,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindDivU32:
 			frame.pc = pc // sync: divide-by-zero trap
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			d := uint32(v2)
 			n := uint32(v1)
 			if d == 0 {
@@ -1947,7 +1987,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindDivS64:
 			frame.pc = pc // sync: divide-by-zero / overflow trap
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			d := int64(v2)
 			n := int64(v1)
 			if d == 0 {
@@ -1960,7 +2000,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindDivU64:
 			frame.pc = pc // sync: divide-by-zero trap
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			d := v2
 			n := v1
 			if d == 0 {
@@ -1971,17 +2011,17 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 		case operationKindDivF32:
 			// Float division never traps (IEEE 754: div-by-zero yields Inf/NaN), so
 			// unlike the integer variants above this doesn't need a frame.pc sync.
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			ce.pushValue(divFloat32bits(uint32(v1), uint32(v2)))
 			pc++
 		case operationKindDivF64:
 			// Float division never traps; see operationKindDivF32.
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			ce.pushValue(math.Float64bits(math.Float64frombits(v1) / math.Float64frombits(v2)))
 			pc++
 		case operationKindRemS32:
 			frame.pc = pc // sync: divide-by-zero trap
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			d := int32(v2)
 			n := int32(v1)
 			if d == 0 {
@@ -1991,7 +2031,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindRemU32:
 			frame.pc = pc // sync: divide-by-zero trap
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			d := uint32(v2)
 			n := uint32(v1)
 			if d == 0 {
@@ -2001,7 +2041,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindRemS64:
 			frame.pc = pc // sync: divide-by-zero trap
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			d := int64(v2)
 			n := int64(v1)
 			if d == 0 {
@@ -2011,7 +2051,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			pc++
 		case operationKindRemU64:
 			frame.pc = pc // sync: divide-by-zero trap
-			v2, v1 := ce.popValue(), ce.popValue()
+			v2, v1 := popValue(), popValue()
 			d := v2
 			n := v1
 			if d == 0 {
@@ -2020,8 +2060,8 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			ce.pushValue(n % d)
 			pc++
 		case operationKindAnd:
-			v2 := ce.popValue()
-			v1 := ce.popValue()
+			v2 := popValue()
+			v1 := popValue()
 			if op.B1 == 0 {
 				// unsignedInt32
 				ce.pushValue(uint64(uint32(v2) & uint32(v1)))
@@ -2031,8 +2071,8 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindOr:
-			v2 := ce.popValue()
-			v1 := ce.popValue()
+			v2 := popValue()
+			v1 := popValue()
 			if op.B1 == 0 {
 				// unsignedInt32
 				ce.pushValue(uint64(uint32(v2) | uint32(v1)))
@@ -2042,8 +2082,8 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindXor:
-			v2 := ce.popValue()
-			v1 := ce.popValue()
+			v2 := popValue()
+			v1 := popValue()
 			if op.B1 == 0 {
 				// unsignedInt32
 				ce.pushValue(uint64(uint32(v2) ^ uint32(v1)))
@@ -2053,8 +2093,8 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindShl:
-			v2 := ce.popValue()
-			v1 := ce.popValue()
+			v2 := popValue()
+			v1 := popValue()
 			if op.B1 == 0 {
 				// unsignedInt32
 				ce.pushValue(uint64(uint32(v1) << (uint32(v2) % 32)))
@@ -2064,8 +2104,8 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindShr:
-			v2 := ce.popValue()
-			v1 := ce.popValue()
+			v2 := popValue()
+			v1 := popValue()
 			switch signedInt(op.B1) {
 			case signedInt32:
 				ce.pushValue(uint64(uint32(int32(v1) >> (uint32(v2) % 32))))
@@ -2078,8 +2118,8 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindRotl:
-			v2 := ce.popValue()
-			v1 := ce.popValue()
+			v2 := popValue()
+			v1 := popValue()
 			if op.B1 == 0 {
 				// unsignedInt32
 				ce.pushValue(uint64(bits.RotateLeft32(uint32(v1), int(v2))))
@@ -2089,8 +2129,8 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			pc++
 		case operationKindRotr:
-			v2 := ce.popValue()
-			v1 := ce.popValue()
+			v2 := popValue()
+			v1 := popValue()
 			if op.B1 == 0 {
 				// unsignedInt32
 				ce.pushValue(uint64(bits.RotateLeft32(uint32(v1), -int(v2))))
@@ -2103,110 +2143,110 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			if op.B1 == 0 {
 				// float32
 				const mask uint32 = 1 << 31
-				ce.pushValue(uint64(uint32(ce.popValue()) &^ mask))
+				ce.pushValue(uint64(uint32(popValue()) &^ mask))
 			} else {
 				// float64
 				const mask uint64 = 1 << 63
-				ce.pushValue(ce.popValue() &^ mask)
+				ce.pushValue(popValue() &^ mask)
 			}
 			pc++
 		case operationKindNeg:
 			if op.B1 == 0 {
 				// float32
-				v := -math.Float32frombits(uint32(ce.popValue()))
+				v := -math.Float32frombits(uint32(popValue()))
 				ce.pushValue(uint64(math.Float32bits(v)))
 			} else {
 				// float64
-				v := -math.Float64frombits(ce.popValue())
+				v := -math.Float64frombits(popValue())
 				ce.pushValue(math.Float64bits(v))
 			}
 			pc++
 		case operationKindCeil:
 			if op.B1 == 0 {
 				// float32
-				v := moremath.WasmCompatCeilF32(math.Float32frombits(uint32(ce.popValue())))
+				v := moremath.WasmCompatCeilF32(math.Float32frombits(uint32(popValue())))
 				ce.pushValue(uint64(math.Float32bits(v)))
 			} else {
 				// float64
-				v := moremath.WasmCompatCeilF64(math.Float64frombits(ce.popValue()))
+				v := moremath.WasmCompatCeilF64(math.Float64frombits(popValue()))
 				ce.pushValue(math.Float64bits(v))
 			}
 			pc++
 		case operationKindFloor:
 			if op.B1 == 0 {
 				// float32
-				v := moremath.WasmCompatFloorF32(math.Float32frombits(uint32(ce.popValue())))
+				v := moremath.WasmCompatFloorF32(math.Float32frombits(uint32(popValue())))
 				ce.pushValue(uint64(math.Float32bits(v)))
 			} else {
 				// float64
-				v := moremath.WasmCompatFloorF64(math.Float64frombits(ce.popValue()))
+				v := moremath.WasmCompatFloorF64(math.Float64frombits(popValue()))
 				ce.pushValue(math.Float64bits(v))
 			}
 			pc++
 		case operationKindTrunc:
 			if op.B1 == 0 {
 				// float32
-				v := moremath.WasmCompatTruncF32(math.Float32frombits(uint32(ce.popValue())))
+				v := moremath.WasmCompatTruncF32(math.Float32frombits(uint32(popValue())))
 				ce.pushValue(uint64(math.Float32bits(v)))
 			} else {
 				// float64
-				v := moremath.WasmCompatTruncF64(math.Float64frombits(ce.popValue()))
+				v := moremath.WasmCompatTruncF64(math.Float64frombits(popValue()))
 				ce.pushValue(math.Float64bits(v))
 			}
 			pc++
 		case operationKindNearest:
 			if op.B1 == 0 {
 				// float32
-				f := math.Float32frombits(uint32(ce.popValue()))
+				f := math.Float32frombits(uint32(popValue()))
 				ce.pushValue(uint64(math.Float32bits(moremath.WasmCompatNearestF32(f))))
 			} else {
 				// float64
-				f := math.Float64frombits(ce.popValue())
+				f := math.Float64frombits(popValue())
 				ce.pushValue(math.Float64bits(moremath.WasmCompatNearestF64(f)))
 			}
 			pc++
 		case operationKindSqrt:
 			if op.B1 == 0 {
 				// float32
-				v := math.Sqrt(float64(math.Float32frombits(uint32(ce.popValue()))))
+				v := math.Sqrt(float64(math.Float32frombits(uint32(popValue()))))
 				ce.pushValue(uint64(math.Float32bits(float32(v))))
 			} else {
 				// float64
-				v := math.Sqrt(math.Float64frombits(ce.popValue()))
+				v := math.Sqrt(math.Float64frombits(popValue()))
 				ce.pushValue(math.Float64bits(v))
 			}
 			pc++
 		case operationKindMin:
 			if op.B1 == 0 {
 				// float32
-				ce.pushValue(wasmCompatMin32bits(uint32(ce.popValue()), uint32(ce.popValue())))
+				ce.pushValue(wasmCompatMin32bits(uint32(popValue()), uint32(popValue())))
 			} else {
-				v2 := math.Float64frombits(ce.popValue())
-				v1 := math.Float64frombits(ce.popValue())
+				v2 := math.Float64frombits(popValue())
+				v1 := math.Float64frombits(popValue())
 				ce.pushValue(math.Float64bits(moremath.WasmCompatMin64(v1, v2)))
 			}
 			pc++
 		case operationKindMax:
 			if op.B1 == 0 {
-				ce.pushValue(wasmCompatMax32bits(uint32(ce.popValue()), uint32(ce.popValue())))
+				ce.pushValue(wasmCompatMax32bits(uint32(popValue()), uint32(popValue())))
 			} else {
 				// float64
-				v2 := math.Float64frombits(ce.popValue())
-				v1 := math.Float64frombits(ce.popValue())
+				v2 := math.Float64frombits(popValue())
+				v1 := math.Float64frombits(popValue())
 				ce.pushValue(math.Float64bits(moremath.WasmCompatMax64(v1, v2)))
 			}
 			pc++
 		case operationKindCopysign:
 			if op.B1 == 0 {
 				// float32
-				v2 := uint32(ce.popValue())
-				v1 := uint32(ce.popValue())
+				v2 := uint32(popValue())
+				v1 := uint32(popValue())
 				const signbit = 1 << 31
 				ce.pushValue(uint64(v1&^signbit | v2&signbit))
 			} else {
 				// float64
-				v2 := ce.popValue()
-				v1 := ce.popValue()
+				v2 := popValue()
+				v1 := popValue()
 				const signbit = 1 << 63
 				ce.pushValue(v1&^signbit | v2&signbit)
 			}
@@ -2218,7 +2258,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			paramCount := len(tag.Type.Params)
 			params := make([]uint64, paramCount)
 			for i := paramCount - 1; i >= 0; i-- {
-				params[i] = ce.popValue()
+				params[i] = popValue()
 			}
 			exn := &wasm.Exception{Tag: tag, Params: params}
 			if clause, values := searchExceptionTable(exn, frame); clause != nil {
@@ -2230,7 +2270,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 
 		case operationKindThrowRef:
 			frame.pc = pc // sync: null-ref trap / searchExceptionTable / unwinding trace
-			v := ce.popValue()
+			v := popValue()
 			if v == 0 {
 				panic(wasmruntime.ErrRuntimeNullReference) // throw_ref on null exnref traps
 			}
@@ -2248,23 +2288,24 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			panic(&thrownException{exception: exn})
 
 		case operationKindTailCallReturnCall:
-			f := &functions[op.U1]
+			f := &me.functions[op.U1]
 			ce.dropForTailCall(frame, f)
 			body = ce.resetPc(frame, f)
 			pc = frame.pc // reload: resetPc reset pc to 0 for the reused frame
+			unwindable = snapshotEnabled || len(frame.f.parent.exceptionTable) != 0
 
 		case operationKindTailCallReturnCallIndirect:
 			frame.pc = pc // sync: functionForOffset/callee may trap/throw/snapshot
-			offset := ce.popValue()
-			table := tables[op.U2]
-			tf := ce.functionForOffset(table, offset, typeIDs[op.U1])
+			offset := popValue()
+			table := moduleInst.Tables[op.U2]
+			tf := ce.functionForOffset(table, offset, moduleInst.TypeIDs[op.U1])
 
 			// We are allowing proper tail calls only across functions that belong to the same
 			// module; for indirect calls, we have to enforce it at run-time.
 			// For details, see internal/engine/RATIONALE.md
 			if tf.moduleInstance != f.moduleInstance {
 				// Revert to a normal call.
-				frameUnwound := ce.callWithUnwind(ctx, f.moduleInstance, tf)
+				frameUnwound := ce.callWithUnwind(ctx, f.moduleInstance, tf, unwindable)
 				frame = &ce.frames[len(ce.frames)-1]
 				if frameUnwound {
 					pc = frame.pc // reload: handler set frame.pc to the catch target
@@ -2282,16 +2323,17 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			ce.dropForTailCall(frame, tf)
 			body = ce.resetPc(frame, tf)
 			pc = frame.pc // reload: resetPc reset pc to 0 for the reused frame
+			unwindable = snapshotEnabled || len(frame.f.parent.exceptionTable) != 0
 
 		case operationKindCallRef:
 			frame.pc = pc // sync: null-ref trap / callee may throw/trap/snapshot
-			ref := ce.popValue()
+			ref := popValue()
 			if ref == 0 {
 				panic(wasmruntime.ErrRuntimeNullReference)
 			}
 			tf := functionFromUintptr(uintptr(ref))
 
-			frameUnwound := ce.callWithUnwind(ctx, f.moduleInstance, tf)
+			frameUnwound := ce.callWithUnwind(ctx, f.moduleInstance, tf, unwindable)
 			frame = &ce.frames[len(ce.frames)-1]
 			if frameUnwound {
 				pc = frame.pc // reload: handler set frame.pc to the catch target
@@ -2302,14 +2344,14 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 
 		case operationKindReturnCallRef:
 			frame.pc = pc // sync: null-ref trap / callee may throw/trap/snapshot
-			ref := ce.popValue()
+			ref := popValue()
 			if ref == 0 {
 				panic(wasmruntime.ErrRuntimeNullReference)
 			}
 			tf := functionFromUintptr(uintptr(ref))
 
 			if tf.moduleInstance != f.moduleInstance {
-				frameUnwound := ce.callWithUnwind(ctx, f.moduleInstance, tf)
+				frameUnwound := ce.callWithUnwind(ctx, f.moduleInstance, tf, unwindable)
 				frame = &ce.frames[len(ce.frames)-1]
 				if frameUnwound {
 					pc = frame.pc // reload: handler set frame.pc to the catch target
@@ -2325,11 +2367,14 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			ce.dropForTailCall(frame, tf)
 			body = ce.resetPc(frame, tf)
 			pc = frame.pc // reload: resetPc reset pc to 0 for the reused frame
+			unwindable = snapshotEnabled || len(frame.f.parent.exceptionTable) != 0
 
 		case operationKindBrOnNull:
-			ref := ce.popValue()
+			ref := popValue()
 			if ref == 0 {
-				ce.drop(op.U3)
+				if op.U3 != 0 {
+					ce.drop(op.U3)
+				}
 				pc = op.U1
 			} else {
 				ce.pushValue(ref)
@@ -2337,9 +2382,11 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 
 		case operationKindBrOnNonNull:
-			ref := ce.popValue()
+			ref := popValue()
 			if ref != 0 {
-				ce.drop(op.U3)
+				if op.U3 != 0 {
+					ce.drop(op.U3)
+				}
 				ce.pushValue(ref)
 				pc = op.U1
 			} else {
@@ -2349,7 +2396,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 		default:
 			// SIMD/v128, atomics, and bulk memory/table ops: see callNativeFuncRare.
 			frame.pc = pc // sync: rare ops can trap (OOB mem/table, atomics); cold path
-			ce.callNativeFuncRare(op, frame, functions, memories, tables, dataInstances, elementInstances)
+			ce.callNativeFuncRare(op, frame, moduleInst, me)
 			pc++
 		}
 	}
@@ -2364,7 +2411,20 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 // practice, so moving them here keeps callNativeFunc small enough for the
 // compiler to inline its hot-path helpers (popValue, pushValue, drop, etc.)
 // into the dispatch loop. pc++ for these ops is done once by the caller.
-func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, functions []function, memories []*wasm.MemoryInstance, tables []*wasm.TableInstance, dataInstances []wasm.DataInstance, elementInstances []wasm.ElementInstance) {
+func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, moduleInst *wasm.ModuleInstance, me *moduleEngine) {
+	functions := me.functions
+	// popValue: a func literal for the same reason as in callNativeFunc (I12) -- this function is
+	// "big" too, and the ~240 pops below were all real CALLs.
+	popValue := func() (v uint64) {
+		i := len(ce.stack) - 1
+		v = ce.stack[i]
+		ce.stack = ce.stack[:i]
+		return
+	}
+	memories := moduleInst.Memories
+	tables := moduleInst.Tables
+	dataInstances := moduleInst.DataInstances
+	elementInstances := moduleInst.ElementInstances
 	switch op.Kind {
 	// Select, conversions, extends, and reinterprets: pure value ops with no
 	// data-dependent memory access. Moved out of callNativeFunc's hot dispatch
@@ -2374,35 +2434,35 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 	// file's I6/I10/I11 changes. These are not hot for typical numeric/loop
 	// code, unlike the specialized ALU/compare/load/store cases kept above.
 	case operationKindSelect:
-		c := ce.popValue()
+		c := popValue()
 		if op.B3 { // Target is vector.
-			x2Hi, x2Lo := ce.popValue(), ce.popValue()
+			x2Hi, x2Lo := popValue(), popValue()
 			if c == 0 {
-				_, _ = ce.popValue(), ce.popValue() // discard the x1's lo and hi bits.
+				_, _ = popValue(), popValue() // discard the x1's lo and hi bits.
 				ce.pushValue(x2Lo)
 				ce.pushValue(x2Hi)
 			}
 		} else {
-			v2 := ce.popValue()
+			v2 := popValue()
 			if c == 0 {
-				_ = ce.popValue()
+				_ = popValue()
 				ce.pushValue(v2)
 			}
 		}
 	case operationKindRefAsNonNull:
-		ref := ce.popValue()
+		ref := popValue()
 		if ref == 0 {
 			panic(wasmruntime.ErrRuntimeNullReference)
 		}
 		ce.pushValue(ref)
 	case operationKindI32WrapFromI64:
-		ce.pushValue(uint64(uint32(ce.popValue())))
+		ce.pushValue(uint64(uint32(popValue())))
 	case operationKindITruncFromF:
 		if op.B1 == 0 {
 			// float32
 			switch signedInt(op.B2) {
 			case signedInt32:
-				v := math.Trunc(float64(math.Float32frombits(uint32(ce.popValue()))))
+				v := math.Trunc(float64(math.Float32frombits(uint32(popValue()))))
 				if math.IsNaN(v) { // NaN cannot be compared with themselves, so we have to use IsNaN
 					if op.B3 {
 						// non-trapping conversion must cast nan to zero.
@@ -2424,7 +2484,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 				}
 				ce.pushValue(uint64(uint32(int32(v))))
 			case signedInt64:
-				v := math.Trunc(float64(math.Float32frombits(uint32(ce.popValue()))))
+				v := math.Trunc(float64(math.Float32frombits(uint32(popValue()))))
 				res := int64(v)
 				if math.IsNaN(v) { // NaN cannot be compared with themselves, so we have to use IsNaN
 					if op.B3 {
@@ -2449,7 +2509,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 				}
 				ce.pushValue(uint64(res))
 			case signedUint32:
-				v := math.Trunc(float64(math.Float32frombits(uint32(ce.popValue()))))
+				v := math.Trunc(float64(math.Float32frombits(uint32(popValue()))))
 				if math.IsNaN(v) { // NaN cannot be compared with themselves, so we have to use IsNaN
 					if op.B3 {
 						// non-trapping conversion must cast nan to zero.
@@ -2471,7 +2531,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 				}
 				ce.pushValue(uint64(uint32(v)))
 			case signedUint64:
-				v := math.Trunc(float64(math.Float32frombits(uint32(ce.popValue()))))
+				v := math.Trunc(float64(math.Float32frombits(uint32(popValue()))))
 				res := uint64(v)
 				if math.IsNaN(v) { // NaN cannot be compared with themselves, so we have to use IsNaN
 					if op.B3 {
@@ -2500,7 +2560,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 			// float64
 			switch signedInt(op.B2) {
 			case signedInt32:
-				v := math.Trunc(math.Float64frombits(ce.popValue()))
+				v := math.Trunc(math.Float64frombits(popValue()))
 				if math.IsNaN(v) { // NaN cannot be compared with themselves, so we have to use IsNaN
 					if op.B3 {
 						// non-trapping conversion must cast nan to zero.
@@ -2522,7 +2582,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 				}
 				ce.pushValue(uint64(uint32(int32(v))))
 			case signedInt64:
-				v := math.Trunc(math.Float64frombits(ce.popValue()))
+				v := math.Trunc(math.Float64frombits(popValue()))
 				res := int64(v)
 				if math.IsNaN(v) { // NaN cannot be compared with themselves, so we have to use IsNaN
 					if op.B3 {
@@ -2547,7 +2607,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 				}
 				ce.pushValue(uint64(res))
 			case signedUint32:
-				v := math.Trunc(math.Float64frombits(ce.popValue()))
+				v := math.Trunc(math.Float64frombits(popValue()))
 				if math.IsNaN(v) { // NaN cannot be compared with themselves, so we have to use IsNaN
 					if op.B3 {
 						// non-trapping conversion must cast nan to zero.
@@ -2569,7 +2629,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 				}
 				ce.pushValue(uint64(uint32(v)))
 			case signedUint64:
-				v := math.Trunc(math.Float64frombits(ce.popValue()))
+				v := math.Trunc(math.Float64frombits(popValue()))
 				res := uint64(v)
 				if math.IsNaN(v) { // NaN cannot be compared with themselves, so we have to use IsNaN
 					if op.B3 {
@@ -2600,80 +2660,80 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		case signedInt32:
 			if op.B2 == 0 {
 				// float32
-				v := float32(int32(ce.popValue()))
+				v := float32(int32(popValue()))
 				ce.pushValue(uint64(math.Float32bits(v)))
 			} else {
 				// float64
-				v := float64(int32(ce.popValue()))
+				v := float64(int32(popValue()))
 				ce.pushValue(math.Float64bits(v))
 			}
 		case signedInt64:
 			if op.B2 == 0 {
 				// float32
-				v := float32(int64(ce.popValue()))
+				v := float32(int64(popValue()))
 				ce.pushValue(uint64(math.Float32bits(v)))
 			} else {
 				// float64
-				v := float64(int64(ce.popValue()))
+				v := float64(int64(popValue()))
 				ce.pushValue(math.Float64bits(v))
 			}
 		case signedUint32:
 			if op.B2 == 0 {
 				// float32
-				v := float32(uint32(ce.popValue()))
+				v := float32(uint32(popValue()))
 				ce.pushValue(uint64(math.Float32bits(v)))
 			} else {
 				// float64
-				v := float64(uint32(ce.popValue()))
+				v := float64(uint32(popValue()))
 				ce.pushValue(math.Float64bits(v))
 			}
 		case signedUint64:
 			if op.B2 == 0 {
 				// float32
-				v := float32(ce.popValue())
+				v := float32(popValue())
 				ce.pushValue(uint64(math.Float32bits(v)))
 			} else {
 				// float64
-				v := float64(ce.popValue())
+				v := float64(popValue())
 				ce.pushValue(math.Float64bits(v))
 			}
 		}
 	case operationKindF32DemoteFromF64:
-		v := float32(math.Float64frombits(ce.popValue()))
+		v := float32(math.Float64frombits(popValue()))
 		ce.pushValue(uint64(math.Float32bits(v)))
 	case operationKindF64PromoteFromF32:
-		v := float64(math.Float32frombits(uint32(ce.popValue())))
+		v := float64(math.Float32frombits(uint32(popValue())))
 		ce.pushValue(math.Float64bits(v))
 	case operationKindExtend:
 		if op.B1 == 1 {
 			// Signed.
-			v := int64(int32(ce.popValue()))
+			v := int64(int32(popValue()))
 			ce.pushValue(uint64(v))
 		} else {
-			v := uint64(uint32(ce.popValue()))
+			v := uint64(uint32(popValue()))
 			ce.pushValue(v)
 		}
 	case operationKindSignExtend32From8:
-		v := uint32(int8(ce.popValue()))
+		v := uint32(int8(popValue()))
 		ce.pushValue(uint64(v))
 	case operationKindSignExtend32From16:
-		v := uint32(int16(ce.popValue()))
+		v := uint32(int16(popValue()))
 		ce.pushValue(uint64(v))
 	case operationKindSignExtend64From8:
-		v := int64(int8(ce.popValue()))
+		v := int64(int8(popValue()))
 		ce.pushValue(uint64(v))
 	case operationKindSignExtend64From16:
-		v := int64(int16(ce.popValue()))
+		v := int64(int16(popValue()))
 		ce.pushValue(uint64(v))
 	case operationKindSignExtend64From32:
-		v := int64(int32(ce.popValue()))
+		v := int64(int32(popValue()))
 		ce.pushValue(uint64(v))
 	case operationKindMemoryInit:
 		dataInstance := dataInstances[op.U1]
 		mem := memories[op.U2]
-		copySize := ce.popValue()
-		inDataOffset := ce.popValue()
-		inMemoryOffset := ce.popValue()
+		copySize := popValue()
+		inDataOffset := popValue()
+		inMemoryOffset := popValue()
 		// rangeOutOfBounds rather than a plain addition: a 64-bit memory's
 		// destination offset spans the whole uint64 range, so the sum can wrap
 		// around to a value that looks in bounds.
@@ -2688,9 +2748,9 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 	case operationKindMemoryCopy:
 		dstMem, srcMem := memories[op.U1], memories[op.U2]
 		dstLen, srcLen := uint64(len(dstMem.Buffer)), uint64(len(srcMem.Buffer))
-		copySize := ce.popValue()
-		sourceOffset := ce.popValue()
-		destinationOffset := ce.popValue()
+		copySize := popValue()
+		sourceOffset := popValue()
+		destinationOffset := popValue()
 		if rangeOutOfBounds(sourceOffset, copySize, srcLen) ||
 			rangeOutOfBounds(destinationOffset, copySize, dstLen) {
 			panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
@@ -2700,9 +2760,9 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		}
 	case operationKindMemoryFill:
 		mem := memories[op.U1]
-		fillSize := ce.popValue()
-		value := byte(ce.popValue())
-		offset := ce.popValue()
+		fillSize := popValue()
+		value := byte(popValue())
+		offset := popValue()
 		if rangeOutOfBounds(offset, fillSize, uint64(len(mem.Buffer))) {
 			panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 		} else if fillSize != 0 {
@@ -2721,9 +2781,9 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		}
 	case operationKindTableInit:
 		elementInstance := elementInstances[op.U1]
-		copySize := ce.popValue()
-		inElementOffset := ce.popValue()
-		inTableOffset := ce.popValue()
+		copySize := popValue()
+		inElementOffset := popValue()
+		inTableOffset := popValue()
 		table := tables[op.U2]
 		// rangeOutOfBounds rather than a plain addition: a 64-bit table's offset
 		// spans the whole uint64 range, so the sum can wrap into a value that
@@ -2738,9 +2798,9 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		elementInstances[op.U1] = nil
 	case operationKindTableCopy:
 		srcTable, dstTable := tables[op.U1].References, tables[op.U2].References
-		copySize := ce.popValue()
-		sourceOffset := ce.popValue()
-		destinationOffset := ce.popValue()
+		copySize := popValue()
+		sourceOffset := popValue()
+		destinationOffset := popValue()
 		if rangeOutOfBounds(sourceOffset, copySize, uint64(len(srcTable))) ||
 			rangeOutOfBounds(destinationOffset, copySize, uint64(len(dstTable))) {
 			panic(wasmruntime.ErrRuntimeInvalidTableAccess)
@@ -2752,7 +2812,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 	case operationKindRefTest:
 		ref := ce.stack[len(ce.stack)-1]
 		if op.B1 == 0 {
-			ce.popValue() // the plain form consumes its operand; br_on_cast's leaves it in place
+			popValue() // the plain form consumes its operand; br_on_cast's leaves it in place
 		}
 		ce.pushValue(wasm.RunGC(ce.f.moduleInstance, wasm.GCCheckRefTest, ref, op.U1, 0, 0, 0, nil))
 	case operationKindGCSafepoint:
@@ -2768,7 +2828,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 	case operationKindTableGet:
 		table := tables[op.U1]
 
-		offset := ce.popValue()
+		offset := popValue()
 		if offset >= uint64(len(table.References)) {
 			panic(wasmruntime.ErrRuntimeInvalidTableAccess)
 		}
@@ -2776,9 +2836,9 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(uint64(table.References[offset]))
 	case operationKindTableSet:
 		table := tables[op.U1]
-		ref := ce.popValue()
+		ref := popValue()
 
-		offset := ce.popValue()
+		offset := popValue()
 		if offset >= uint64(len(table.References)) {
 			panic(wasmruntime.ErrRuntimeInvalidTableAccess)
 		}
@@ -2789,7 +2849,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(uint64(len(table.References)))
 	case operationKindTableGrow:
 		table := tables[op.U1]
-		num, ref := ce.popValue(), ce.popValue()
+		num, ref := popValue(), popValue()
 		if table.IsTable64 {
 			ce.pushValue(table.Grow64(num, uintptr(ref)))
 		} else {
@@ -2797,9 +2857,9 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		}
 	case operationKindTableFill:
 		table := tables[op.U1]
-		num := ce.popValue()
-		ref := uintptr(ce.popValue())
-		offset := ce.popValue()
+		num := popValue()
+		ref := uintptr(popValue())
+		offset := popValue()
 		if rangeOutOfBounds(offset, num, uint64(len(table.References))) {
 			panic(wasmruntime.ErrRuntimeInvalidTableAccess)
 		} else if num > 0 {
@@ -2816,8 +2876,8 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(lo)
 		ce.pushValue(hi)
 	case operationKindV128Add:
-		yHigh, yLow := ce.popValue(), ce.popValue()
-		xHigh, xLow := ce.popValue(), ce.popValue()
+		yHigh, yLow := popValue(), popValue()
+		xHigh, xLow := popValue(), popValue()
 		switch op.B1 {
 		case shapeI8x16:
 			ce.pushValue(
@@ -2859,8 +2919,8 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 			ce.pushValue(math.Float64bits(math.Float64frombits(xHigh) + math.Float64frombits(yHigh)))
 		}
 	case operationKindV128Sub:
-		yHigh, yLow := ce.popValue(), ce.popValue()
-		xHigh, xLow := ce.popValue(), ce.popValue()
+		yHigh, yLow := popValue(), popValue()
+		xHigh, xLow := popValue(), popValue()
 		switch op.B1 {
 		case shapeI8x16:
 			ce.pushValue(
@@ -3023,7 +3083,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		}
 	case operationKindV128LoadLane:
 		mem := memories[op.U3]
-		hi, lo := ce.popValue(), ce.popValue()
+		hi, lo := popValue(), popValue()
 		offset := ce.popMemoryOffset(op)
 		switch op.B1 {
 		case 8:
@@ -3077,7 +3137,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(hi)
 	case operationKindV128Store:
 		mem := memories[op.U3]
-		hi, lo := ce.popValue(), ce.popValue()
+		hi, lo := popValue(), popValue()
 		offset := ce.popMemoryOffset(op)
 		// One bounds check over the whole sixteen bytes, before either half is
 		// written: a store that traps must not have mutated memory, and against
@@ -3091,7 +3151,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		binary.LittleEndian.PutUint64(buf[8:], hi)
 	case operationKindV128StoreLane:
 		mem := memories[op.U3]
-		hi, lo := ce.popValue(), ce.popValue()
+		hi, lo := popValue(), popValue()
 		offset := ce.popMemoryOffset(op)
 		var ok bool
 		switch op.B1 {
@@ -3124,8 +3184,8 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 			panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 		}
 	case operationKindV128ReplaceLane:
-		v := ce.popValue()
-		hi, lo := ce.popValue(), ce.popValue()
+		v := popValue()
+		hi, lo := popValue(), popValue()
 		switch op.B1 {
 		case shapeI8x16:
 			if op.B2 < 8 {
@@ -3161,7 +3221,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(lo)
 		ce.pushValue(hi)
 	case operationKindV128ExtractLane:
-		hi, lo := ce.popValue(), ce.popValue()
+		hi, lo := popValue(), popValue()
 		var v uint64
 		switch op.B1 {
 		case shapeI8x16:
@@ -3205,7 +3265,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		}
 		ce.pushValue(v)
 	case operationKindV128Splat:
-		v := ce.popValue()
+		v := popValue()
 		var hi, lo uint64
 		switch op.B1 {
 		case shapeI8x16:
@@ -3224,8 +3284,8 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(lo)
 		ce.pushValue(hi)
 	case operationKindV128Swizzle:
-		idxHi, idxLo := ce.popValue(), ce.popValue()
-		baseHi, baseLo := ce.popValue(), ce.popValue()
+		idxHi, idxLo := popValue(), popValue()
+		baseHi, baseLo := popValue(), popValue()
 		var newVal [16]byte
 		for i := 0; i < 16; i++ {
 			var id byte
@@ -3243,7 +3303,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(binary.LittleEndian.Uint64(newVal[:8]))
 		ce.pushValue(binary.LittleEndian.Uint64(newVal[8:]))
 	case operationKindV128Shuffle:
-		xHi, xLo, yHi, yLo := ce.popValue(), ce.popValue(), ce.popValue(), ce.popValue()
+		xHi, xLo, yHi, yLo := popValue(), popValue(), popValue(), popValue()
 		var newVal [16]byte
 		for i, l := range frame.f.parent.sideTable[op.U3] {
 			if l < 8 {
@@ -3259,14 +3319,14 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(binary.LittleEndian.Uint64(newVal[:8]))
 		ce.pushValue(binary.LittleEndian.Uint64(newVal[8:]))
 	case operationKindV128AnyTrue:
-		hi, lo := ce.popValue(), ce.popValue()
+		hi, lo := popValue(), popValue()
 		if hi != 0 || lo != 0 {
 			ce.pushValue(1)
 		} else {
 			ce.pushValue(0)
 		}
 	case operationKindV128AllTrue:
-		hi, lo := ce.popValue(), ce.popValue()
+		hi, lo := popValue(), popValue()
 		var ret bool
 		switch op.B1 {
 		case shapeI8x16:
@@ -3291,7 +3351,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		}
 	case operationKindV128BitMask:
 		// https://github.com/WebAssembly/spec/blob/wg-2.0.draft1/proposals/simd/SIMD.md#bitmask-extraction
-		hi, lo := ce.popValue(), ce.popValue()
+		hi, lo := popValue(), popValue()
 		var res uint64
 		switch op.B1 {
 		case shapeI8x16:
@@ -3337,40 +3397,40 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		}
 		ce.pushValue(res)
 	case operationKindV128And:
-		x2Hi, x2Lo := ce.popValue(), ce.popValue()
-		x1Hi, x1Lo := ce.popValue(), ce.popValue()
+		x2Hi, x2Lo := popValue(), popValue()
+		x1Hi, x1Lo := popValue(), popValue()
 		ce.pushValue(x1Lo & x2Lo)
 		ce.pushValue(x1Hi & x2Hi)
 	case operationKindV128Not:
-		hi, lo := ce.popValue(), ce.popValue()
+		hi, lo := popValue(), popValue()
 		ce.pushValue(^lo)
 		ce.pushValue(^hi)
 	case operationKindV128Or:
-		x2Hi, x2Lo := ce.popValue(), ce.popValue()
-		x1Hi, x1Lo := ce.popValue(), ce.popValue()
+		x2Hi, x2Lo := popValue(), popValue()
+		x1Hi, x1Lo := popValue(), popValue()
 		ce.pushValue(x1Lo | x2Lo)
 		ce.pushValue(x1Hi | x2Hi)
 	case operationKindV128Xor:
-		x2Hi, x2Lo := ce.popValue(), ce.popValue()
-		x1Hi, x1Lo := ce.popValue(), ce.popValue()
+		x2Hi, x2Lo := popValue(), popValue()
+		x1Hi, x1Lo := popValue(), popValue()
 		ce.pushValue(x1Lo ^ x2Lo)
 		ce.pushValue(x1Hi ^ x2Hi)
 	case operationKindV128Bitselect:
 		// https://github.com/WebAssembly/spec/blob/wg-2.0.draft1/proposals/simd/SIMD.md#bitwise-select
-		cHi, cLo := ce.popValue(), ce.popValue()
-		x2Hi, x2Lo := ce.popValue(), ce.popValue()
-		x1Hi, x1Lo := ce.popValue(), ce.popValue()
+		cHi, cLo := popValue(), popValue()
+		x2Hi, x2Lo := popValue(), popValue()
+		x1Hi, x1Lo := popValue(), popValue()
 		// v128.or(v128.and(v1, c), v128.and(v2, v128.not(c)))
 		ce.pushValue((x1Lo & cLo) | (x2Lo & (^cLo)))
 		ce.pushValue((x1Hi & cHi) | (x2Hi & (^cHi)))
 	case operationKindV128AndNot:
-		x2Hi, x2Lo := ce.popValue(), ce.popValue()
-		x1Hi, x1Lo := ce.popValue(), ce.popValue()
+		x2Hi, x2Lo := popValue(), popValue()
+		x1Hi, x1Lo := popValue(), popValue()
 		ce.pushValue(x1Lo & (^x2Lo))
 		ce.pushValue(x1Hi & (^x2Hi))
 	case operationKindV128Shl:
-		s := ce.popValue()
-		hi, lo := ce.popValue(), ce.popValue()
+		s := popValue()
+		hi, lo := popValue(), popValue()
 		switch op.B1 {
 		case shapeI8x16:
 			s = s % 8
@@ -3412,8 +3472,8 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(lo)
 		ce.pushValue(hi)
 	case operationKindV128Shr:
-		s := ce.popValue()
-		hi, lo := ce.popValue(), ce.popValue()
+		s := popValue()
+		hi, lo := popValue(), popValue()
 		switch op.B1 {
 		case shapeI8x16:
 			s = s % 8
@@ -3496,8 +3556,8 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(lo)
 		ce.pushValue(hi)
 	case operationKindV128Cmp:
-		x2Hi, x2Lo := ce.popValue(), ce.popValue()
-		x1Hi, x1Lo := ce.popValue(), ce.popValue()
+		x2Hi, x2Lo := popValue(), popValue()
+		x1Hi, x1Lo := popValue(), popValue()
 		var result []bool
 		switch op.B1 {
 		case v128CmpTypeI8x16Eq:
@@ -3861,8 +3921,8 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(retLo)
 		ce.pushValue(retHi)
 	case operationKindV128AddSat:
-		x2hi, x2Lo := ce.popValue(), ce.popValue()
-		x1hi, x1Lo := ce.popValue(), ce.popValue()
+		x2hi, x2Lo := popValue(), popValue()
+		x1hi, x1Lo := popValue(), popValue()
 
 		var retLo, retHi uint64
 
@@ -3942,8 +4002,8 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(retLo)
 		ce.pushValue(retHi)
 	case operationKindV128SubSat:
-		x2hi, x2Lo := ce.popValue(), ce.popValue()
-		x1hi, x1Lo := ce.popValue(), ce.popValue()
+		x2hi, x2Lo := popValue(), popValue()
+		x1hi, x1Lo := popValue(), popValue()
 
 		var retLo, retHi uint64
 
@@ -4023,8 +4083,8 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(retLo)
 		ce.pushValue(retHi)
 	case operationKindV128Mul:
-		x2hi, x2lo := ce.popValue(), ce.popValue()
-		x1hi, x1lo := ce.popValue(), ce.popValue()
+		x2hi, x2lo := popValue(), popValue()
+		x1hi, x1lo := popValue(), popValue()
 		var retLo, retHi uint64
 		switch op.B1 {
 		case shapeI16x8:
@@ -4048,8 +4108,8 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(retLo)
 		ce.pushValue(retHi)
 	case operationKindV128Div:
-		x2hi, x2lo := ce.popValue(), ce.popValue()
-		x1hi, x1lo := ce.popValue(), ce.popValue()
+		x2hi, x2lo := popValue(), popValue()
+		x1hi, x1lo := popValue(), popValue()
 		var retLo, retHi uint64
 		if op.B1 == shapeF64x2 {
 			retHi = math.Float64bits(math.Float64frombits(x1hi) / math.Float64frombits(x2hi))
@@ -4061,7 +4121,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(retLo)
 		ce.pushValue(retHi)
 	case operationKindV128Neg:
-		hi, lo := ce.popValue(), ce.popValue()
+		hi, lo := popValue(), popValue()
 		switch op.B1 {
 		case shapeI8x16:
 			lo = uint64(-byte(lo)) | (uint64(-byte(lo>>8)) << 8) |
@@ -4095,7 +4155,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(lo)
 		ce.pushValue(hi)
 	case operationKindV128Sqrt:
-		hi, lo := ce.popValue(), ce.popValue()
+		hi, lo := popValue(), popValue()
 		if op.B1 == shapeF64x2 {
 			hi = math.Float64bits(math.Sqrt(math.Float64frombits(hi)))
 			lo = math.Float64bits(math.Sqrt(math.Float64frombits(lo)))
@@ -4108,7 +4168,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(lo)
 		ce.pushValue(hi)
 	case operationKindV128Abs:
-		hi, lo := ce.popValue(), ce.popValue()
+		hi, lo := popValue(), popValue()
 		switch op.B1 {
 		case shapeI8x16:
 			lo = uint64(i8Abs(byte(lo))) | (uint64(i8Abs(byte(lo>>8))) << 8) |
@@ -4144,7 +4204,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(lo)
 		ce.pushValue(hi)
 	case operationKindV128Popcnt:
-		hi, lo := ce.popValue(), ce.popValue()
+		hi, lo := popValue(), popValue()
 		var retLo, retHi uint64
 		for i := 0; i < 16; i++ {
 			var v byte
@@ -4170,8 +4230,8 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(retLo)
 		ce.pushValue(retHi)
 	case operationKindV128Min:
-		x2hi, x2lo := ce.popValue(), ce.popValue()
-		x1hi, x1lo := ce.popValue(), ce.popValue()
+		x2hi, x2lo := popValue(), popValue()
+		x1hi, x1lo := popValue(), popValue()
 		var retLo, retHi uint64
 		switch op.B1 {
 		case shapeI8x16:
@@ -4244,8 +4304,8 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(retLo)
 		ce.pushValue(retHi)
 	case operationKindV128Max:
-		x2hi, x2lo := ce.popValue(), ce.popValue()
-		x1hi, x1lo := ce.popValue(), ce.popValue()
+		x2hi, x2lo := popValue(), popValue()
+		x1hi, x1lo := popValue(), popValue()
 		var retLo, retHi uint64
 		switch op.B1 {
 		case shapeI8x16:
@@ -4318,8 +4378,8 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(retLo)
 		ce.pushValue(retHi)
 	case operationKindV128AvgrU:
-		x2hi, x2lo := ce.popValue(), ce.popValue()
-		x1hi, x1lo := ce.popValue(), ce.popValue()
+		x2hi, x2lo := popValue(), popValue()
+		x1hi, x1lo := popValue(), popValue()
 		var retLo, retHi uint64
 		switch op.B1 {
 		case shapeI8x16:
@@ -4344,8 +4404,8 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(retLo)
 		ce.pushValue(retHi)
 	case operationKindV128Pmin:
-		x2hi, x2lo := ce.popValue(), ce.popValue()
-		x1hi, x1lo := ce.popValue(), ce.popValue()
+		x2hi, x2lo := popValue(), popValue()
+		x1hi, x1lo := popValue(), popValue()
 		var retLo, retHi uint64
 		if op.B1 == shapeF32x4 {
 			if flt32(math.Float32frombits(uint32(x2lo)), math.Float32frombits(uint32(x1lo))) {
@@ -4383,8 +4443,8 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(retLo)
 		ce.pushValue(retHi)
 	case operationKindV128Pmax:
-		x2hi, x2lo := ce.popValue(), ce.popValue()
-		x1hi, x1lo := ce.popValue(), ce.popValue()
+		x2hi, x2lo := popValue(), popValue()
+		x1hi, x1lo := popValue(), popValue()
 		var retLo, retHi uint64
 		if op.B1 == shapeF32x4 {
 			if flt32(math.Float32frombits(uint32(x1lo)), math.Float32frombits(uint32(x2lo))) {
@@ -4422,7 +4482,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(retLo)
 		ce.pushValue(retHi)
 	case operationKindV128Ceil:
-		hi, lo := ce.popValue(), ce.popValue()
+		hi, lo := popValue(), popValue()
 		if op.B1 == shapeF32x4 {
 			lo = uint64(math.Float32bits(moremath.WasmCompatCeilF32(math.Float32frombits(uint32(lo))))) |
 				(uint64(math.Float32bits(moremath.WasmCompatCeilF32(math.Float32frombits(uint32(lo>>32))))) << 32)
@@ -4435,7 +4495,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(lo)
 		ce.pushValue(hi)
 	case operationKindV128Floor:
-		hi, lo := ce.popValue(), ce.popValue()
+		hi, lo := popValue(), popValue()
 		if op.B1 == shapeF32x4 {
 			lo = uint64(math.Float32bits(moremath.WasmCompatFloorF32(math.Float32frombits(uint32(lo))))) |
 				(uint64(math.Float32bits(moremath.WasmCompatFloorF32(math.Float32frombits(uint32(lo>>32))))) << 32)
@@ -4448,7 +4508,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(lo)
 		ce.pushValue(hi)
 	case operationKindV128Trunc:
-		hi, lo := ce.popValue(), ce.popValue()
+		hi, lo := popValue(), popValue()
 		if op.B1 == shapeF32x4 {
 			lo = uint64(math.Float32bits(moremath.WasmCompatTruncF32(math.Float32frombits(uint32(lo))))) |
 				(uint64(math.Float32bits(moremath.WasmCompatTruncF32(math.Float32frombits(uint32(lo>>32))))) << 32)
@@ -4461,7 +4521,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(lo)
 		ce.pushValue(hi)
 	case operationKindV128Nearest:
-		hi, lo := ce.popValue(), ce.popValue()
+		hi, lo := popValue(), popValue()
 		if op.B1 == shapeF32x4 {
 			lo = uint64(math.Float32bits(moremath.WasmCompatNearestF32(math.Float32frombits(uint32(lo))))) |
 				(uint64(math.Float32bits(moremath.WasmCompatNearestF32(math.Float32frombits(uint32(lo>>32))))) << 32)
@@ -4474,7 +4534,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(lo)
 		ce.pushValue(hi)
 	case operationKindV128Extend:
-		hi, lo := ce.popValue(), ce.popValue()
+		hi, lo := popValue(), popValue()
 		var origin uint64
 		if op.B3 { // use lower 64 bits
 			origin = lo
@@ -4534,8 +4594,8 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(retLo)
 		ce.pushValue(retHi)
 	case operationKindV128ExtMul:
-		x2Hi, x2Lo := ce.popValue(), ce.popValue()
-		x1Hi, x1Lo := ce.popValue(), ce.popValue()
+		x2Hi, x2Lo := popValue(), popValue()
+		x1Hi, x1Lo := popValue(), popValue()
 		var x1, x2 uint64
 		if op.B3 { // use lower 64 bits
 			x1, x2 = x1Lo, x2Lo
@@ -4596,8 +4656,8 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(retLo)
 		ce.pushValue(retHi)
 	case operationKindV128Q15mulrSatS:
-		x2hi, x2Lo := ce.popValue(), ce.popValue()
-		x1hi, x1Lo := ce.popValue(), ce.popValue()
+		x2hi, x2Lo := popValue(), popValue()
+		x1hi, x1Lo := popValue(), popValue()
 		var retLo, retHi uint64
 		for i := 0; i < 8; i++ {
 			var v, w int16
@@ -4627,7 +4687,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(retLo)
 		ce.pushValue(retHi)
 	case operationKindV128ExtAddPairwise:
-		hi, lo := ce.popValue(), ce.popValue()
+		hi, lo := popValue(), popValue()
 
 		signed := op.B3
 
@@ -4681,18 +4741,18 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(retLo)
 		ce.pushValue(retHi)
 	case operationKindV128FloatPromote:
-		_, toPromote := ce.popValue(), ce.popValue()
+		_, toPromote := popValue(), popValue()
 		ce.pushValue(math.Float64bits(float64(math.Float32frombits(uint32(toPromote)))))
 		ce.pushValue(math.Float64bits(float64(math.Float32frombits(uint32(toPromote >> 32)))))
 	case operationKindV128FloatDemote:
-		hi, lo := ce.popValue(), ce.popValue()
+		hi, lo := popValue(), popValue()
 		ce.pushValue(
 			uint64(math.Float32bits(float32(math.Float64frombits(lo)))) |
 				(uint64(math.Float32bits(float32(math.Float64frombits(hi)))) << 32),
 		)
 		ce.pushValue(0)
 	case operationKindV128FConvertFromI:
-		hi, lo := ce.popValue(), ce.popValue()
+		hi, lo := popValue(), popValue()
 		v1, v2, v3, v4 := uint32(lo), uint32(lo>>32), uint32(hi), uint32(hi>>32)
 		signed := op.B3
 
@@ -4721,8 +4781,8 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(retLo)
 		ce.pushValue(retHi)
 	case operationKindV128Narrow:
-		x2Hi, x2Lo := ce.popValue(), ce.popValue()
-		x1Hi, x1Lo := ce.popValue(), ce.popValue()
+		x2Hi, x2Lo := popValue(), popValue()
+		x1Hi, x1Lo := popValue(), popValue()
 		signed := op.B3
 
 		var retLo, retHi uint64
@@ -4850,15 +4910,15 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(retLo)
 		ce.pushValue(retHi)
 	case operationKindV128Dot:
-		x2Hi, x2Lo := ce.popValue(), ce.popValue()
-		x1Hi, x1Lo := ce.popValue(), ce.popValue()
+		x2Hi, x2Lo := popValue(), popValue()
+		x1Hi, x1Lo := popValue(), popValue()
 		lo, hi := v128Dot(x1Hi, x1Lo, x2Hi, x2Lo)
 		ce.pushValue(lo)
 		ce.pushValue(hi)
 	case operationKindV128RelaxedMadd:
-		x3Hi, x3Lo := ce.popValue(), ce.popValue()
-		x2Hi, x2Lo := ce.popValue(), ce.popValue()
-		x1Hi, x1Lo := ce.popValue(), ce.popValue()
+		x3Hi, x3Lo := popValue(), popValue()
+		x2Hi, x2Lo := popValue(), popValue()
+		x1Hi, x1Lo := popValue(), popValue()
 		var retLo, retHi uint64
 		if op.B1 == shapeF32x4 {
 			for i := 0; i < 2; i++ {
@@ -4874,15 +4934,15 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(retLo)
 		ce.pushValue(retHi)
 	case operationKindV128RelaxedDot:
-		x2Hi, x2Lo := ce.popValue(), ce.popValue()
-		x1Hi, x1Lo := ce.popValue(), ce.popValue()
+		x2Hi, x2Lo := popValue(), popValue()
+		x1Hi, x1Lo := popValue(), popValue()
 		lo, hi := v128RelaxedDot(x1Hi, x1Lo, x2Hi, x2Lo)
 		ce.pushValue(lo)
 		ce.pushValue(hi)
 	case operationKindV128RelaxedDotAdd:
-		x3Hi, x3Lo := ce.popValue(), ce.popValue()
-		x2Hi, x2Lo := ce.popValue(), ce.popValue()
-		x1Hi, x1Lo := ce.popValue(), ce.popValue()
+		x3Hi, x3Lo := popValue(), popValue()
+		x2Hi, x2Lo := popValue(), popValue()
+		x1Hi, x1Lo := popValue(), popValue()
 		dotLo, dotHi := v128RelaxedDot(x1Hi, x1Lo, x2Hi, x2Lo)
 		// Widen each adjacent i16 pair to i32, then add the accumulator.
 		var retLo, retHi uint64
@@ -4895,7 +4955,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(retLo)
 		ce.pushValue(retHi)
 	case operationKindV128ITruncSatFromF:
-		hi, lo := ce.popValue(), ce.popValue()
+		hi, lo := popValue(), popValue()
 		signed := op.B3
 		var retLo, retHi uint64
 
@@ -4966,8 +5026,8 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(retHi)
 	case operationKindAtomicMemoryWait:
 		mem := memories[op.U3]
-		timeout := int64(ce.popValue())
-		exp := ce.popValue()
+		timeout := int64(popValue())
+		exp := popValue()
 		offset := ce.popMemoryOffset(op)
 		// Runtime instead of validation error because the spec intends to allow binaries to include
 		// such instructions as long as they are not executed.
@@ -5005,7 +5065,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		}
 	case operationKindAtomicMemoryNotify:
 		mem := memories[op.U3]
-		count := ce.popValue()
+		count := popValue()
 		offset := ce.popMemoryOffset(op)
 		if offset%4 != 0 {
 			panic(wasmruntime.ErrRuntimeUnalignedAtomic)
@@ -5077,7 +5137,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(uint64(val))
 	case operationKindAtomicStore:
 		mem := memories[op.U3]
-		val := ce.popValue()
+		val := popValue()
 		offset := ce.popMemoryOffset(op)
 		switch unsignedType(op.B1) {
 		case unsignedTypeI32:
@@ -5103,7 +5163,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		}
 	case operationKindAtomicStore8:
 		mem := memories[op.U3]
-		val := byte(ce.popValue())
+		val := byte(popValue())
 		offset := ce.popMemoryOffset(op)
 		mem.Mux.Lock()
 		ok := mem.WriteByteAt(offset, val)
@@ -5113,7 +5173,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		}
 	case operationKindAtomicStore16:
 		mem := memories[op.U3]
-		val := uint16(ce.popValue())
+		val := uint16(popValue())
 		offset := ce.popMemoryOffset(op)
 		if offset%2 != 0 {
 			panic(wasmruntime.ErrRuntimeUnalignedAtomic)
@@ -5126,7 +5186,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		}
 	case operationKindAtomicRMW:
 		mem := memories[op.U3]
-		val := ce.popValue()
+		val := popValue()
 		offset := ce.popMemoryOffset(op)
 		switch unsignedType(op.B1) {
 		case unsignedTypeI32:
@@ -5188,7 +5248,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		}
 	case operationKindAtomicRMW8:
 		mem := memories[op.U3]
-		val := ce.popValue()
+		val := popValue()
 		offset := ce.popMemoryOffset(op)
 		mem.Mux.Lock()
 		old, ok := mem.ReadByteAt(offset)
@@ -5217,7 +5277,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(uint64(old))
 	case operationKindAtomicRMW16:
 		mem := memories[op.U3]
-		val := ce.popValue()
+		val := popValue()
 		offset := ce.popMemoryOffset(op)
 		if offset%2 != 0 {
 			panic(wasmruntime.ErrRuntimeUnalignedAtomic)
@@ -5249,8 +5309,8 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(uint64(old))
 	case operationKindAtomicRMWCmpxchg:
 		mem := memories[op.U3]
-		rep := ce.popValue()
-		exp := ce.popValue()
+		rep := popValue()
+		exp := popValue()
 		offset := ce.popMemoryOffset(op)
 		switch unsignedType(op.B1) {
 		case unsignedTypeI32:
@@ -5286,8 +5346,8 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		}
 	case operationKindAtomicRMW8Cmpxchg:
 		mem := memories[op.U3]
-		rep := byte(ce.popValue())
-		exp := byte(ce.popValue())
+		rep := byte(popValue())
+		exp := byte(popValue())
 		offset := ce.popMemoryOffset(op)
 		mem.Mux.Lock()
 		old, ok := mem.ReadByteAt(offset)
@@ -5302,8 +5362,8 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, f
 		ce.pushValue(uint64(old))
 	case operationKindAtomicRMW16Cmpxchg:
 		mem := memories[op.U3]
-		rep := uint16(ce.popValue())
-		exp := uint16(ce.popValue())
+		rep := uint16(popValue())
+		exp := uint16(popValue())
 		offset := ce.popMemoryOffset(op)
 		if offset%2 != 0 {
 			panic(wasmruntime.ErrRuntimeUnalignedAtomic)
