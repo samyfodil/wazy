@@ -83,8 +83,15 @@ func (b *builder) licmLoopMembership() []*basicBlock {
 		return nil
 	}
 
-	loopOf := make([]*basicBlock, b.BlockIDMax())
-	var stack []*basicBlock
+	loopOf := b.licmLoops
+	if n := int(b.BlockIDMax()); cap(loopOf) < n {
+		loopOf = make([]*basicBlock, n)
+	} else {
+		loopOf = loopOf[:n]
+		clear(loopOf)
+	}
+	b.licmLoops = loopOf
+	stack := b.blkStack[:0]
 	// Reverse post order reaches an outer header before the headers nested in
 	// it, so an inner loop overwrites the outer one and each block ends up
 	// mapped to its innermost loop.
@@ -120,6 +127,7 @@ func (b *builder) licmLoopMembership() []*basicBlock {
 			}
 		}
 	}
+	b.blkStack = stack
 	return loopOf
 }
 
@@ -127,7 +135,14 @@ func (b *builder) licmLoopMembership() []*basicBlock {
 // passRedundantPhiEliminationOpt are resolved on the way, because this runs
 // before the dead code pass that would otherwise have done it.
 func (b *builder) licmDefBlk() []*basicBlock {
-	defBlk := make([]*basicBlock, b.nextValueID)
+	defBlk := b.licmDefs
+	if n := int(b.nextValueID); cap(defBlk) < n {
+		defBlk = make([]*basicBlock, n)
+	} else {
+		defBlk = defBlk[:n]
+		clear(defBlk)
+	}
+	b.licmDefs = defBlk
 	entry := b.entryBlk()
 	for _, blk := range b.reversePostOrderedBasicBlocks {
 		if blk.invalid {

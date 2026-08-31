@@ -254,6 +254,16 @@ func passRedundantPhiEliminationOpt(b *builder) {
 		for blk := b.blockIteratorReversePostOrderNext(); blk != nil; blk = b.blockIteratorReversePostOrderNext() {
 			params := blk.params.View()
 			paramNum := len(params)
+			if paramNum == 0 {
+				continue
+			}
+
+			// Resolve the alias in the arguments so that we could use the previous iteration's
+			// result. Once per predecessor: this resolves the branch's whole argument vector,
+			// which is the same vector every parameter below reads.
+			for predIndex := range blk.preds {
+				b.resolveArgumentAlias(blk.preds[predIndex].branch)
+			}
 
 			for paramIndex := 0; paramIndex < paramNum; paramIndex++ {
 				phiValue := params[paramIndex]
@@ -261,10 +271,7 @@ func passRedundantPhiEliminationOpt(b *builder) {
 
 				nonSelfReferencingValue := ValueInvalid
 				for predIndex := range blk.preds {
-					br := blk.preds[predIndex].branch
-					// Resolve the alias in the arguments so that we could use the previous iteration's result.
-					b.resolveArgumentAlias(br)
-					pred := br.vs.View()[paramIndex]
+					pred := blk.preds[predIndex].branch.vs.View()[paramIndex]
 					if pred == phiValue {
 						// This is self-referencing: PHI from the same PHI.
 						continue
@@ -482,6 +489,8 @@ func (b *builder) incRefCount(id ValueID, from *Instruction) {
 func passSortSuccessors(b *builder) {
 	for i := 0; i < b.basicBlocksPool.Allocated(); i++ {
 		blk := b.basicBlocksPool.View(i)
-		sortBlocks(blk.success)
+		if len(blk.success) > 1 { // Two thirds of the blocks have zero or one successor.
+			sortBlocks(blk.success)
+		}
 	}
 }

@@ -174,6 +174,10 @@ type builder struct {
 	// valuesInfo contains the data per Value used to lower the SSA in backend. This is indexed by ValueID.
 	valuesInfo []ValueInfo
 
+	// varDefs backs basicBlock.varDefsOff/varDefsLen: one window per block that defines
+	// anything, indexed by Variable, holding the last definition of that Variable there.
+	varDefs []Value
+
 	// dominators stores the immediate dominator of each BasicBlock.
 	// The index is blockID of the BasicBlock.
 	dominators []*basicBlock
@@ -185,6 +189,8 @@ type builder struct {
 	loopNestingForestRoots []BasicBlock
 
 	// The followings are used for optimization passes/deterministic compilation.
+	licmLoops                 []*basicBlock
+	licmDefs                  []*basicBlock
 	instStack                 []*Instruction
 	blkStack                  []*basicBlock
 	blkStack2                 []*basicBlock
@@ -289,6 +295,7 @@ func (b *builder) Init(s *Signature) {
 		}
 	}
 
+	b.varDefs = b.varDefs[:0]
 	b.redundantParams = b.redundantParams[:0]
 	b.dominatedMemoryBounds = b.dominatedMemoryBounds[:0]
 	b.dominatedMemoryBoundHeads = b.dominatedMemoryBoundHeads[:0]
@@ -427,7 +434,34 @@ func (b *builder) InsertInstruction(instr *Instruction) {
 // DefineVariable implements Builder.DefineVariable.
 func (b *builder) DefineVariable(variable Variable, value Value, block BasicBlock) {
 	bb := block.(*basicBlock)
-	bb.lastDefinitions[variable] = value
+	i := uint32(variable) & variableIndexMask
+	if i >= bb.varDefsLen {
+		b.growVarDefs(bb)
+	}
+	b.varDefs[bb.varDefsOff+i] = value
+}
+
+// lastDefinition returns the definition of the variable in this block, if any.
+func (b *builder) lastDefinition(bb *basicBlock, variable Variable) (Value, bool) {
+	i := uint32(variable) & variableIndexMask
+	if i >= bb.varDefsLen {
+		return ValueInvalid, false
+	}
+	v := b.varDefs[bb.varDefsOff+i]
+	return v, v.Valid()
+}
+
+// growVarDefs gives bb a window with room for every Variable declared so far. The frontend
+// declares them all before lowering a body, so this runs at most once per block.
+func (b *builder) growVarDefs(bb *basicBlock) {
+	off, n := uint32(len(b.varDefs)), uint32(b.nextVariable)&variableIndexMask
+	b.varDefs = append(b.varDefs, make([]Value, n)...)
+	row := b.varDefs[off:]
+	for i := range row {
+		row[i] = ValueInvalid
+	}
+	copy(row, b.varDefs[bb.varDefsOff:bb.varDefsOff+bb.varDefsLen])
+	bb.varDefsOff, bb.varDefsLen = off, n
 }
 
 // DefineVariableInCurrentBB implements Builder.DefineVariableInCurrentBB.
@@ -471,21 +505,24 @@ func (b *builder) FindValueInLinearPath(variable Variable) Value {
 }
 
 func (b *builder) findValueInLinearPath(variable Variable, blk *basicBlock) Value {
-	if val, ok := blk.lastDefinitions[variable]; ok {
-		return val
-	} else if !blk.sealed {
-		return ValueInvalid
-	}
+	for {
+		if val, ok := b.lastDefinition(blk, variable); ok {
+			return val
+		} else if !blk.sealed {
+			return ValueInvalid
+		}
 
-	if pred := blk.singlePred; pred != nil {
 		// If this block is sealed and have only one predecessor,
 		// we can use the value in that block without ambiguity on definition.
-		return b.findValueInLinearPath(variable, pred)
+		pred := blk.singlePred
+		if pred == nil {
+			if len(blk.preds) == 1 {
+				panic("BUG")
+			}
+			return ValueInvalid
+		}
+		blk = pred
 	}
-	if len(blk.preds) == 1 {
-		panic("BUG")
-	}
-	return ValueInvalid
 }
 
 // MustFindValue implements Builder.MustFindValue.
@@ -493,39 +530,45 @@ func (b *builder) MustFindValue(variable Variable) Value {
 	return b.findValue(variable.getType(), variable, b.currentBB)
 }
 
-// findValue recursively tries to find the latest definition of a `variable`. The algorithm is described in
+// findValue tries to find the latest definition of a `variable`. The algorithm is described in
 // the section 2 of the paper https://link.springer.com/content/pdf/10.1007/978-3-642-37051-9_6.pdf.
 //
-// TODO: reimplement this in iterative, not recursive, to avoid stack overflow.
+// The walk up a chain of single-predecessor blocks is iterative; only the fork at a block with
+// several predecessors recurses.
 func (b *builder) findValue(typ Type, variable Variable, blk *basicBlock) Value {
-	if val, ok := blk.lastDefinitions[variable]; ok {
-		// The value is already defined in this block!
-		return val
-	} else if !blk.sealed { // Incomplete CFG as in the paper.
-		// If this is not sealed, that means it might have additional unknown predecessor later on.
-		// So we temporarily define the placeholder value here (not add as a parameter yet!),
-		// and record it as unknown.
-		// The unknown values are resolved when we call seal this block via BasicBlock.Seal().
-		value := b.allocateValue(typ)
-		if nativeapi.SSALoggingEnabled {
-			fmt.Printf("adding unknown value placeholder for %s at %d\n", variable, blk.id)
+	for {
+		if val, ok := b.lastDefinition(blk, variable); ok {
+			// The value is already defined in this block!
+			return val
+		} else if !blk.sealed { // Incomplete CFG as in the paper.
+			// If this is not sealed, that means it might have additional unknown predecessor later on.
+			// So we temporarily define the placeholder value here (not add as a parameter yet!),
+			// and record it as unknown.
+			// The unknown values are resolved when we call seal this block via BasicBlock.Seal().
+			value := b.allocateValue(typ)
+			if nativeapi.SSALoggingEnabled {
+				fmt.Printf("adding unknown value placeholder for %s at %d\n", variable, blk.id)
+			}
+			b.DefineVariable(variable, value, blk)
+			blk.unknownValues = append(blk.unknownValues, unknownValue{
+				variable: variable,
+				value:    value,
+			})
+			return value
+		} else if blk.EntryBlock() {
+			// If this is the entry block, we reach the uninitialized variable which has zero value.
+			return b.zeros[variable.getType()]
 		}
-		blk.lastDefinitions[variable] = value
-		blk.unknownValues = append(blk.unknownValues, unknownValue{
-			variable: variable,
-			value:    value,
-		})
-		return value
-	} else if blk.EntryBlock() {
-		// If this is the entry block, we reach the uninitialized variable which has zero value.
-		return b.zeros[variable.getType()]
-	}
 
-	if pred := blk.singlePred; pred != nil {
 		// If this block is sealed and have only one predecessor,
 		// we can use the value in that block without ambiguity on definition.
-		return b.findValue(typ, variable, pred)
-	} else if len(blk.preds) == 0 {
+		pred := blk.singlePred
+		if pred == nil {
+			break
+		}
+		blk = pred
+	}
+	if len(blk.preds) == 0 {
 		panic("BUG: value is not defined for " + variable.String())
 	}
 

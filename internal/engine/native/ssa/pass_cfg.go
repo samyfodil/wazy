@@ -206,7 +206,11 @@ type dominatorSparseTree struct {
 	time         int32
 	euler        []*basicBlock
 	first, depth []int32
+	// table is the RMQ sparse table. Its rows are windows into tableBacking, one
+	// allocation for the whole table rather than one per Euler tour slot.
 	table        [][]int32
+	tableBacking []int32
+	tableStride  int
 }
 
 // passBuildDominatorTree builds the dominator tree for the function, and constructs builder.sparseTree.
@@ -268,15 +272,20 @@ func (dt *dominatorSparseTree) eulerTour(node *basicBlock, height int32) {
 func (dt *dominatorSparseTree) buildSparseTable() {
 	n := len(dt.depth)
 	k := int(math.Log2(float64(n))) + 1
+	if n >= len(dt.table) || k > dt.tableStride {
+		// Reshape for the largest function seen so far, so this stops firing.
+		rows, stride := max(n+1, len(dt.table)), max(k, dt.tableStride)
+		dt.tableBacking = make([]int32, rows*stride)
+		dt.table = make([][]int32, rows)
+		for i := range dt.table {
+			dt.table[i] = dt.tableBacking[i*stride : (i+1)*stride]
+		}
+		dt.tableStride = stride
+	}
 	table := dt.table
 
-	if n >= len(table) {
-		table = append(table, make([][]int32, n-len(table)+1)...)
-	}
-	for i := range table {
-		if len(table[i]) < k {
-			table[i] = append(table[i], make([]int32, k-len(table[i]))...)
-		}
+	// Rows past n hold the previous function's entries; nothing below reads them.
+	for i := range table[:n] {
 		table[i][0] = int32(i)
 	}
 
@@ -289,7 +298,6 @@ func (dt *dominatorSparseTree) buildSparseTable() {
 			}
 		}
 	}
-	dt.table = table
 }
 
 // rmq performs a range minimum query on the sparse table.

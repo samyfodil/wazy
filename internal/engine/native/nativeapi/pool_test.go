@@ -54,6 +54,16 @@ func TestAppendAndView(t *testing.T) {
 		v.Append(&pool, 1)
 		require.Equal(t, []uint64{1}, v.View())
 	})
+	t.Run("spill from array", func(t *testing.T) {
+		// Crossing arraySize within one Append moves the contents into a pooled slice,
+		// which is reserved for both halves at once and must keep them in order.
+		v := pool.Allocate(0)
+		for i := uint64(0); i < 6; i++ {
+			v = v.Append(&pool, i)
+		}
+		v = v.Append(&pool, 6, 7, 8, 9)
+		require.Equal(t, []uint64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, v.View())
+	})
 	t.Run("non zero start", func(t *testing.T) {
 		v := pool.Allocate(10)
 		for i := uint64(0); i < 10; i++ {
