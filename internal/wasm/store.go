@@ -260,8 +260,7 @@ func (m *ModuleInstance) applyElements(elems []ElementSegment) {
 			len(elem.Init) == 0 {
 			continue
 		}
-		offsetExprResults := evaluateConstExprInModuleInstance(&elem.OffsetExpr, m)
-		offset := offsetExprResults[0]
+		offset := evaluateConstExprScalarInModuleInstance(&elem.OffsetExpr, m)
 
 		table := m.Tables[elem.TableIndex]
 		references := table.References
@@ -340,11 +339,10 @@ func (m *ModuleInstance) applyData(data []DataSegment) error {
 		d := &data[i]
 		m.DataInstances[i] = d.Init
 		if !d.IsPassive() {
-			offsetExprResults := evaluateConstExprInModuleInstance(&d.OffsetExpression, m)
+			offset := evaluateConstExprScalarInModuleInstance(&d.OffsetExpression, m)
 			if d.MemoryIndex >= uint32(len(m.Memories)) {
 				return fmt.Errorf("%s[%d]: unknown memory %d", SectionIDName(SectionIDData), i, d.MemoryIndex)
 			}
-			offset := offsetExprResults[0]
 			mem := m.Memories[d.MemoryIndex]
 			if rangeOutOfBounds(offset, uint64(len(d.Init)), uint64(len(mem.Buffer))) {
 				return fmt.Errorf("%s[%d]: out of bounds memory access", SectionIDName(SectionIDData), i)
@@ -476,8 +474,10 @@ func (s *Store) instantiate(
 		return nil, err
 	}
 	m.Exports = module.Exports
-	for _, exp := range m.Exports {
-		if exp.Type == ExternTypeTable {
+	// ExportSection, not the Exports map: same entries, but a linear scan of a slice
+	// rather than a hashed bucket walk per instantiate.
+	for i := range module.ExportSection {
+		if exp := &module.ExportSection[i]; exp.Type == ExternTypeTable {
 			t := m.Tables[exp.Index]
 			t.involvingModuleInstances = append(t.involvingModuleInstances, m)
 		}
@@ -564,18 +564,25 @@ func (m *ModuleInstance) resolveImports(ctx context.Context, module *Module) (er
 			case ExternTypeFunc:
 				expectedType := &module.TypeSection[i.DescFunc]
 				src := importedModule.Source
-				actual := src.typeOfFunction(imported.Index)
+				// typeIndexOfFunction walks the whole import section for an imported
+				// callee, so resolve the type once rather than once here and once in
+				// typeOfFunction, which is only needed to spell the error.
+				actualTypeIdx, resolved := src.typeIndexOfFunction(imported.Index)
 				matched := false
 				if m.TypeIDs != nil && importedModule.TypeIDs != nil {
 					// Use structural type IDs for comparison (handles concrete ref types across modules).
 					// An exported function may also be of a *subtype* of the declared import type, which is
 					// what makes a GC module importing at a supertype link.
-					actualTypeIdx, ok := src.typeIndexOfFunction(imported.Index)
-					matched = ok && m.TypeIDIsSubtypeOf(importedModule.TypeIDs[actualTypeIdx], m.TypeIDs[i.DescFunc])
-				} else {
+					matched = resolved && m.TypeIDIsSubtypeOf(importedModule.TypeIDs[actualTypeIdx], m.TypeIDs[i.DescFunc])
+				} else if resolved {
+					actual := &src.TypeSection[actualTypeIdx]
 					matched = actual.EqualsSignature(expectedType.Params, expectedType.Results)
 				}
 				if !matched {
+					var actual *FunctionType
+					if resolved {
+						actual = &src.TypeSection[actualTypeIdx]
+					}
 					err = errorInvalidImport(i, fmt.Errorf("signature mismatch: %s != %s", expectedType, actual))
 					return
 				}

@@ -95,7 +95,13 @@ func putPooledMemoryBuffer(buf []byte) {
 	if capBytes == 0 || reproNoMemPool {
 		return
 	}
-	v, _ := memoryBufferPools.LoadOrStore(capBytes, &sync.Pool{})
+	// Load first: LoadOrStore's argument is evaluated on every call, so passing
+	// &sync.Pool{} directly heap-allocates a pool per close and throws it away
+	// the moment the bucket already exists, which after the first close it always does.
+	v, ok := memoryBufferPools.Load(capBytes)
+	if !ok {
+		v, _ = memoryBufferPools.LoadOrStore(capBytes, &sync.Pool{})
+	}
 	// Store *[]byte, not []byte: sync.Pool.Put([]byte) boxes the slice header
 	// into interface{}, which heap-allocates it (staticcheck SA6002) -- the
 	// opposite of what a pool that exists to avoid allocations wants.

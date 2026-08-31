@@ -3,7 +3,9 @@ package wazy
 import (
 	"context"
 	_ "embed"
+	"encoding/hex"
 	"errors"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -1012,4 +1014,48 @@ func TestNewRuntime_concurrent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// TestTableImporter_PinnedAfterClose locks in why a module that imported a
+// table is kept in the table owner's TableInstance.involvingModuleInstances
+// forever, even after it closes: the table can still hold a funcref into the
+// closed module, and that reference is a raw address the GC cannot see. Drop
+// the entry and the closed module's ModuleInstance -- and with it its
+// moduleEngine, its opaque and its executable pages -- becomes collectable
+// while the table still points into them, so the call_indirect below jumps
+// into unmapped memory. That is a hard crash, not a test failure, so anyone
+// "fixing" the retention as a leak has to make the drop conditional on the
+// table provably holding no reference into the module.
+func TestTableImporter_PinnedAfterClose(t *testing.T) {
+	// owner exports table "t" and calls through it; importer writes its own
+	// $f (returning 42) into slot 0 with an active element segment.
+	const (
+		ownerHex    = "0061736d01000000010a026000017f60017f017f03020101040401700001070c02017401000463616c6c00000a0901070020001100000b"
+		importerHex = "0061736d010000000105016000017f0209010141017401700001030201000907010041000b01000a06010400412a0b"
+	)
+	decode := func(s string) []byte {
+		bin, err := hex.DecodeString(s)
+		require.NoError(t, err)
+		return bin
+	}
+
+	ctx := context.Background()
+	r := NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	owner, err := r.InstantiateWithConfig(ctx, decode(ownerHex), NewModuleConfig().WithName("A"))
+	require.NoError(t, err)
+	// Instantiate, not InstantiateModule: this owns its CompiledModule, so Close
+	// also releases the compiled artifact's reference. Only the table's hold on
+	// the ModuleInstance keeps the code mapped afterwards.
+	importer, err := r.Instantiate(ctx, decode(importerHex))
+	require.NoError(t, err)
+	require.NoError(t, importer.Close(ctx))
+	for i := 0; i < 5; i++ {
+		goruntime.GC()
+	}
+
+	res, err := owner.ExportedFunction("call").Call(ctx, 0)
+	require.NoError(t, err)
+	require.Equal(t, uint64(42), res[0])
 }

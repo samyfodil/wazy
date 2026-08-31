@@ -368,6 +368,32 @@ func evaluateConstExpr(e *ConstantExpression, globalResolver func(globalIndex In
 	}
 }
 
+// evaluateConstExprScalarInModuleInstance is evaluateConstExprInModuleInstance for the callers that
+// only ever read the first result -- every active segment offset. The fast path already has it as a
+// scalar, so this skips the one-element []uint64 that would otherwise be heap-allocated per segment,
+// per instantiate. Errors are ignored exactly as evaluateConstExprInModuleInstance ignores them;
+// neither resolver below can return one.
+func evaluateConstExprScalarInModuleInstance(e *ConstantExpression, m *ModuleInstance) uint64 {
+	if lo, _, _, ok, err := evaluateConstExprFast(e.Data,
+		func(globalIndex Index) (ValueType, uint64, uint64, error) {
+			g := m.Globals[globalIndex]
+			return g.Type.ValType, g.Val, g.ValHi, nil
+		},
+		func(funcIndex Index) (Reference, error) {
+			return m.Engine.FunctionInstanceReference(funcIndex), nil
+		},
+	); ok {
+		if err != nil {
+			return 0
+		}
+		return lo
+	}
+	if v := evaluateConstExprInModuleInstance(e, m); len(v) > 0 {
+		return v[0]
+	}
+	return 0
+}
+
 func evaluateConstExprInModuleInstance(e *ConstantExpression, m *ModuleInstance) []uint64 {
 	env := constExprEnv{inst: m}
 	if m.Source != nil {

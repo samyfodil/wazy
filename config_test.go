@@ -585,16 +585,38 @@ func TestModuleConfig_clone(t *testing.T) {
 
 	// Make post-clone changes
 	mc.fsConfig = NewFSConfig().WithFSMount(fstest.FS, "/")
-	mc.environKeys["2"] = 2
-
-	cloned.environKeys["1"] = 1
-
-	// Ensure the maps are not shared
-	require.Equal(t, map[string]int{"2": 2}, mc.environKeys)
-	require.Equal(t, map[string]int{"1": 1}, cloned.environKeys)
 
 	// Ensure the fs is not shared
 	require.Nil(t, cloned.fsConfig)
+}
+
+// TestModuleConfig_WithEnv_immutable ensures a WithEnv call is invisible to the
+// config it derives from and to a sibling derived from the same one. clone
+// shares environ and environKeys, so WithEnv has to copy both: overwriting
+// through the shared backing array, or appending into its spare capacity (the
+// three entries below leave some), would rewrite the other config's environment.
+func TestModuleConfig_WithEnv_immutable(t *testing.T) {
+	base := NewModuleConfig().WithEnv("a", "1").WithEnv("b", "2").WithEnv("c", "3")
+
+	overwritten := base.WithEnv("a", "9")
+	appended := base.WithEnv("d", "4")
+	sibling := base.WithEnv("d", "5")
+
+	requireEnviron(t, base, "a=1", "b=2", "c=3")
+	requireEnviron(t, overwritten, "a=9", "b=2", "c=3")
+	requireEnviron(t, appended, "a=1", "b=2", "c=3", "d=4")
+	requireEnviron(t, sibling, "a=1", "b=2", "c=3", "d=5")
+}
+
+func requireEnviron(t *testing.T, c ModuleConfig, expected ...string) {
+	t.Helper()
+	sysCtx, err := c.(*moduleConfig).toSysContext()
+	require.NoError(t, err)
+	got := make([]string, 0, len(expected))
+	for _, e := range sysCtx.Environ() {
+		got = append(got, string(e))
+	}
+	require.Equal(t, expected, got)
 }
 
 func Test_compiledModule_Name(t *testing.T) {
