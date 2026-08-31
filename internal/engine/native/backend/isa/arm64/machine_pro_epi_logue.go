@@ -11,6 +11,7 @@ import (
 func (m *machine) PostRegAlloc() {
 	m.setupPrologue()
 	m.postRegAlloc()
+	m.pairSpillAccesses()
 	m.emitTrapIslands()
 	m.emitFpConstPool()
 }
@@ -56,8 +57,11 @@ func (m *machine) emitFpConstPool() {
 // lowerExitIfTrueWithCodeShared at the end of the function body. Islands are
 // only ever branched to (never fallen into) and never return, so they can be
 // emitted after register allocation using real registers only: the execution
-// context arrives in the reserved tmp register and x17 serves as scratch,
-// which is fine to clobber on a path that exits the function.
+// context is reloaded from the reserved ctx slot (written once in the prologue,
+// see needsCtxSlot) into the reserved tmp register, and x17 serves as scratch,
+// which is fine to clobber on a path that exits the function. SP is unchanged
+// between the prologue and every trap site that branches here, so the slot is
+// reachable at the same offset.
 func (m *machine) emitTrapIslands() {
 	if len(m.trapIslands) == 0 {
 		return
@@ -77,6 +81,14 @@ func (m *machine) emitTrapIslands() {
 		pos := m.labelPositionPool.GetOrAllocate(int(ti.l))
 		pos.begin, pos.end = nop, nop
 		cur = linkInstr(cur, nop)
+
+		// Reload the execution context from the reserved ctx slot.
+		execOff, _ := m.EhCtxSlotOffsets()
+		reload := m.allocateInstr()
+		reloadMode := m.amodePool.Allocate()
+		*reloadMode = addressMode{kind: addressModeKindRegUnsignedImm12, rn: spVReg, imm: execOff}
+		reload.asULoad(tmpRegVReg, reloadMode, 64)
+		cur = linkInstr(cur, reload)
 
 		// Set the exit code in the execution context.
 		movz := m.allocateInstr()
@@ -273,20 +285,23 @@ func (m *machine) setupPrologue() {
 	//
 	cur = m.createFrameSizeSlot(cur, m.frameSize())
 
-	// P3.0: for functions with an EH context, store the entry-ABI context
-	// registers (execCtx in x0, moduleCtx in x1) into the reserved fixed
-	// slots at the bottom of the spill region ([SP+16]/[SP+24]). RegAlloc
-	// reserved ehCtxReservedSlotSize bytes there, and SP is now at its final
-	// value (below the frame-size slot). x0/x1 still hold execCtx/moduleCtx
-	// here: x0 always points at the execution context whenever native code is
-	// entered from Go (including after the stack-grow re-entry, see
-	// saveRequiredRegs), and x1 is saved/restored across that re-entry -- the
-	// same invariant that lets the function body read them after the prologue.
-	// Nothing reads these slots yet (P3.0), so runtime behavior is unchanged.
-	if m.hasEHContext {
+	// Store the entry-ABI context registers (execCtx in x0, moduleCtx in x1)
+	// into the reserved fixed slots at the bottom of the spill region
+	// ([SP+16]/[SP+24]). RegAlloc reserved ehCtxReservedSlotSize bytes there,
+	// and SP is now at its final value (below the frame-size slot). x0/x1 still
+	// hold execCtx/moduleCtx here: x0 always points at the execution context
+	// whenever native code is entered from Go (including after the stack-grow
+	// re-entry, see saveRequiredRegs), and x1 is saved/restored across that
+	// re-entry -- the same invariant that lets the function body read them after
+	// the prologue. execCtx is reloaded by the shared trap islands (so it is
+	// stored for any function with trap sites); moduleCtx is only needed by the
+	// P3.0 EH path.
+	if m.needsCtxSlot() {
 		execOff, modOff := m.EhCtxSlotOffsets()
 		cur = m.storeEhCtxSlot(cur, x0VReg, execOff)
-		cur = m.storeEhCtxSlot(cur, x1VReg, modOff)
+		if m.hasEHContext {
+			cur = m.storeEhCtxSlot(cur, x1VReg, modOff)
+		}
 	}
 
 	linkInstr(cur, prevInitInst)

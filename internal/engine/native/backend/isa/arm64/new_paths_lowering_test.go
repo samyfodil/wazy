@@ -334,9 +334,8 @@ func TestMachine_lowerExitIfTrueWithCode_nonIcmpCondition(t *testing.T) {
 	t.Run("shared island", func(t *testing.T) {
 		ctx, b, m := newSetupWithMockContext()
 		c := setup(ctx, b, m)
-		m.lowerExitIfTrueWithCodeShared(intToVReg(1), c, nativeapi.ExitCodeUnreachable)
+		m.lowerExitIfTrueWithCodeShared(c, nativeapi.ExitCodeUnreachable)
 		require.Equal(t, `
-mov x27, x1?
 cbnz w2?, L1
 `, "\n"+formatEmittedInstructionsInCurrentBlock(m)+"\n")
 	})
@@ -388,11 +387,10 @@ func TestMachine_lowerExitIfTrueWithCode_icmpCondition(t *testing.T) {
 	t.Run("shared island", func(t *testing.T) {
 		ctx, b, m := newSetupWithMockContext()
 		c, icmp := setup(ctx, b, m)
-		m.lowerExitIfTrueWithCodeShared(intToVReg(3), c, nativeapi.ExitCodeUnreachable)
+		m.lowerExitIfTrueWithCodeShared(c, nativeapi.ExitCodeUnreachable)
 		require.True(t, icmp.Lowered())
 		require.Equal(t, `
 subs wzr, w1?, w2?
-mov x27, x3?
 b.eq L1
 `, "\n"+formatEmittedInstructionsInCurrentBlock(m)+"\n")
 	})
@@ -616,5 +614,143 @@ func Test_operandER_subWordTarget(t *testing.T) {
 		m.FlushPendingInstructions()
 		m.encode(m.perBlockHead)
 		require.Equal(t, "2380220b", hex.EncodeToString(m.compiler.Buf()))
+	})
+}
+
+// TestMachine_lowerSubOrAdd_mulAccumulate covers the MADD/MSUB fold: a multiply
+// feeding an add or a subtract becomes one instruction instead of two.
+//
+// Expected encodings are the "Data-processing (3 source)" forms of the Arm ARM:
+// MADD <Xd>, <Xn>, <Xm>, <Xa> computes Xa + Xn*Xm and MSUB computes Xa - Xn*Xm,
+// which is why only the right-hand operand of a subtract can be the multiply.
+func TestMachine_lowerSubOrAdd_mulAccumulate(t *testing.T) {
+	// setup builds the multiply feeding an add/sub and lowers the add/sub.
+	setup := func(typ ssa.Type, add, mulLeft bool, mulRefCount uint32, accIsConst bool) *machine {
+		ctx, b, m := newSetupWithMockContext()
+		blk := b.CurrentBlock()
+
+		mkParam := func(r regalloc.VReg) ssa.Value {
+			v := blk.AddParam(b, typ)
+			ctx.vRegMap[v] = r
+			ctx.definitions[v] = backend.SSAValueDefinition{V: v}
+			return v
+		}
+		a, c := mkParam(x2VReg), mkParam(x3VReg)
+
+		var acc ssa.Value
+		if accIsConst {
+			k := b.AllocateInstruction()
+			k.AsIconst64(0x20)
+			b.InsertInstruction(k)
+			acc = k.Return()
+			ctx.vRegMap[acc] = x1VReg
+			ctx.definitions[acc] = backend.SSAValueDefinition{Instr: k, V: acc}
+		} else {
+			acc = mkParam(x1VReg)
+		}
+
+		mul := b.AllocateInstruction()
+		mul.AsImul(a, c)
+		b.InsertInstruction(mul)
+		mulVal := mul.Return()
+		ctx.vRegMap[mulVal] = x4VReg
+		ctx.definitions[mulVal] = backend.SSAValueDefinition{Instr: mul, V: mulVal, RefCount: mulRefCount}
+
+		alu := b.AllocateInstruction()
+		switch {
+		case mulLeft:
+			alu.AsIadd(mulVal, acc)
+		case add:
+			alu.AsIadd(acc, mulVal)
+		default:
+			alu.AsIsub(acc, mulVal)
+		}
+		b.InsertInstruction(alu)
+		ctx.vRegMap[alu.Return()] = x5VReg
+
+		m.lowerSubOrAdd(alu, add)
+		return m
+	}
+
+	for _, tc := range []struct {
+		name          string
+		typ           ssa.Type
+		add, mulLeft  bool
+		expectedAsm   string
+		expectedBytes string
+	}{
+		{
+			name: "add i64", typ: ssa.TypeI64, add: true,
+			expectedAsm: "madd x5, x2, x3, x1", expectedBytes: "4504039b",
+		},
+		{
+			name: "add i32", typ: ssa.TypeI32, add: true,
+			expectedAsm: "madd w5, w2, w3, w1", expectedBytes: "4504031b",
+		},
+		{
+			// x - a*c is MSUB; the accumulator stays the left operand.
+			name: "sub i64", typ: ssa.TypeI64,
+			expectedAsm: "msub x5, x2, x3, x1", expectedBytes: "4584039b",
+		},
+		{
+			name: "sub i32", typ: ssa.TypeI32,
+			expectedAsm: "msub w5, w2, w3, w1", expectedBytes: "4584031b",
+		},
+		{
+			// Addition commutes, so the multiply may be the left operand too.
+			name: "add i64 with the multiply on the left", typ: ssa.TypeI64, add: true, mulLeft: true,
+			expectedAsm: "madd x5, x2, x3, x1", expectedBytes: "4504039b",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := setup(tc.typ, tc.add, tc.mulLeft, 0, false)
+			require.Equal(t, tc.expectedAsm, formatEmittedInstructionsInCurrentBlock(m))
+
+			m.FlushPendingInstructions()
+			m.encode(m.perBlockHead)
+			require.Equal(t, tc.expectedBytes, hex.EncodeToString(m.compiler.Buf()))
+		})
+	}
+
+	// The cases that must NOT fold. Each keeps the plain two-instruction shape,
+	// so the multiply is lowered on its own and only the ALU op appears here.
+	t.Run("multiply on the left of a subtract", func(t *testing.T) {
+		// (a*c) - x has no MSUB form: MSUB subtracts the product, not from it.
+		ctx, b, m := newSetupWithMockContext()
+		blk := b.CurrentBlock()
+		mkParam := func(r regalloc.VReg) ssa.Value {
+			v := blk.AddParam(b, ssa.TypeI64)
+			ctx.vRegMap[v] = r
+			ctx.definitions[v] = backend.SSAValueDefinition{V: v}
+			return v
+		}
+		a, c, x := mkParam(x2VReg), mkParam(x3VReg), mkParam(x1VReg)
+
+		mul := b.AllocateInstruction()
+		mul.AsImul(a, c)
+		b.InsertInstruction(mul)
+		ctx.vRegMap[mul.Return()] = x4VReg
+		ctx.definitions[mul.Return()] = backend.SSAValueDefinition{Instr: mul, V: mul.Return()}
+
+		sub := b.AllocateInstruction()
+		sub.AsIsub(mul.Return(), x)
+		b.InsertInstruction(sub)
+		ctx.vRegMap[sub.Return()] = x5VReg
+
+		m.lowerSubOrAdd(sub, false)
+		require.Equal(t, "sub x5, x4, x1", formatEmittedInstructionsInCurrentBlock(m))
+		require.False(t, mul.Lowered())
+	})
+
+	t.Run("multiply used more than once", func(t *testing.T) {
+		m := setup(ssa.TypeI64, true, false, 2, false)
+		require.Equal(t, "add x5, x1, x4", formatEmittedInstructionsInCurrentBlock(m))
+	})
+
+	t.Run("constant accumulator keeps the immediate form", func(t *testing.T) {
+		// (a*c) + 0x20: folding would have to materialize 0x20 into a register,
+		// while the plain form keeps it as the imm12 of the ADD.
+		m := setup(ssa.TypeI64, true, true, 0, true)
+		require.Equal(t, "add x5, x4, #0x20", formatEmittedInstructionsInCurrentBlock(m))
 	})
 }

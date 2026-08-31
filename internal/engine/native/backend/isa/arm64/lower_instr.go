@@ -177,7 +177,7 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 			// specific site.
 			m.lowerExitIfTrueWithCode(m.compiler.VRegOf(execCtx), c, code)
 		} else {
-			m.lowerExitIfTrueWithCodeShared(m.compiler.VRegOf(execCtx), c, code)
+			m.lowerExitIfTrueWithCodeShared(c, code)
 		}
 	case ssa.OpcodeStore, ssa.OpcodeIstore8, ssa.OpcodeIstore16, ssa.OpcodeIstore32:
 		m.lowerStore(instr)
@@ -1509,6 +1509,19 @@ func (m *machine) lowerSubOrAdd(si *ssa.Instruction, add bool) {
 	}
 
 	xDef, yDef := m.compiler.ValueDefinition(x), m.compiler.ValueDefinition(y)
+
+	// Fold a feeding multiply into MADD/MSUB. `(a*b)-y` has no such form -- MSUB
+	// subtracts the product -- so on a subtract only y may be the multiply. On an
+	// add either may be, except when y is a constant: the plain form keeps that as
+	// an imm12 while MADD would need it materialized into a register.
+	if m.tryLowerMulAccumulate(si, yDef, xDef, add) {
+		return
+	}
+	if add && !(yDef.IsFromInstr() && yDef.Instr.Constant()) &&
+		m.tryLowerMulAccumulate(si, xDef, yDef, true) {
+		return
+	}
+
 	rn := m.getOperand_NR(xDef, extModeNone)
 	rm, yNegated := m.getOperand_MaybeNegatedImm12_ER_SR_NR(yDef, extModeNone)
 
@@ -1527,6 +1540,30 @@ func (m *machine) lowerSubOrAdd(si *ssa.Instruction, add bool) {
 	alu := m.allocateInstr()
 	alu.asALU(aop, rd, rn, rm, x.Type().Bits() == 64)
 	m.insert(alu)
+}
+
+// tryLowerMulAccumulate lowers `acc + a*b` (add) or `acc - a*b` (!add) as a single
+// MADD/MSUB when mulDef is a multiply this instruction may consume, and reports
+// whether it did. On Apple and Neoverse cores the fused form has the same latency
+// as the MUL alone, so the accumulate comes for free.
+func (m *machine) tryLowerMulAccumulate(si *ssa.Instruction, mulDef, accDef backend.SSAValueDefinition, add bool) bool {
+	if !m.compiler.MatchInstr(mulDef, ssa.OpcodeImul) {
+		return false
+	}
+	a, b := mulDef.Instr.Arg2()
+	rn := m.getOperand_NR(m.compiler.ValueDefinition(a), extModeNone)
+	rm := m.getOperand_NR(m.compiler.ValueDefinition(b), extModeNone)
+	ra := m.getOperand_NR(accDef, extModeNone)
+	mulDef.Instr.MarkLowered()
+
+	op := aluOpMSub
+	if add {
+		op = aluOpMAdd
+	}
+	mla := m.allocateInstr()
+	mla.asALURRRR(op, m.compiler.VRegOf(si.Return()), rn, rm, ra.nr(), si.Return().Type().Bits() == 64)
+	m.insert(mla)
+	return true
 }
 
 // InsertMove implements backend.Machine.
@@ -2121,16 +2158,14 @@ func (m *machine) lowerExitIfTrueWithCode(execCtxVReg regalloc.VReg, cond ssa.Va
 // code, instead of inlining the whole exit sequence at each site. The hot
 // path falls through (the branch is taken only when trapping), and the
 // island is materialized once, after register allocation, by emitTrapIslands.
-func (m *machine) lowerExitIfTrueWithCodeShared(execCtxVReg regalloc.VReg, cond ssa.Value, code nativeapi.ExitCode) {
+func (m *machine) lowerExitIfTrueWithCodeShared(cond ssa.Value, code nativeapi.ExitCode) {
 	condDef := m.compiler.ValueDefinition(cond)
 	trapCond := m.lowerTrapCond(condDef)
 
-	// The island runs after register allocation, so it needs the execution
-	// context in a fixed register: the reserved tmp register, which is never
-	// allocated and holds no live value between lowered sequences.
-	mov := m.allocateInstr()
-	mov.asMove64(tmpRegVReg, execCtxVReg)
-	m.insert(mov)
+	// No per-site exec-context copy: the island reloads execCtx from the
+	// reserved ctx slot ([sp + EhCtxSlotOffsets execCtx]), written once in the
+	// prologue for any function with trap islands (see needsCtxSlot,
+	// setupPrologue, emitTrapIslands).
 
 	cbr := m.allocateInstr()
 	cbr.asCondBr(trapCond, m.getOrCreateTrapIsland(code), false /* ignored */)

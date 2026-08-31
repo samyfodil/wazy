@@ -303,13 +303,23 @@ func (m *machine) EhCtxSlotOffsets() (execCtxOffset, moduleCtxOffset int64) {
 	return 16, 24
 }
 
+// needsCtxSlot reports whether this function reserves the fixed exec-context
+// slot at the bottom of the spill region. Two readers need it: the P3.0 EH path
+// (both execCtx and moduleCtx) and the shared conditional-trap islands (execCtx
+// only -- reloaded there instead of being copied into x27 at every trap site;
+// see lowerExitIfTrueWithCodeShared / emitTrapIslands). Trap islands are created
+// during lowering, so len(trapIslands) is final by RegAlloc time.
+func (m *machine) needsCtxSlot() bool {
+	return m.hasEHContext || len(m.trapIslands) > 0
+}
+
 // RegAlloc implements backend.Machine Function.
 func (m *machine) RegAlloc() {
 	// Reserve the fixed execCtx/moduleCtx slots at the bottom of the
 	// spill-slot region before the allocator hands out any of its own slots,
 	// so the reserved offsets ([SP+16]/[SP+24]) are stable regardless of how
 	// many spill slots this function ends up needing.
-	if m.hasEHContext {
+	if m.needsCtxSlot() {
 		m.spillSlotSize = ehCtxReservedSlotSize
 	}
 	m.regAllocStarted = true
@@ -714,10 +724,14 @@ func (m *machine) InsertReturn() {
 func (m *machine) getVRegSpillSlotOffsetFromSP(id regalloc.VRegID, size byte) int64 {
 	offset, ok := m.spillSlots[id]
 	if !ok {
-		offset = m.spillSlotSize
-		// TODO: this should be aligned depending on the `size` to use Imm12 offset load/store as much as possible.
+		// Align the slot to its own size (always 4, 8 or 16). The returned offset adds 16,
+		// so an aligned slot keeps the scaled unsigned-imm12 addressing form, which reaches
+		// 4096*size; an unaligned one falls back to the unscaled imm9 form (±256) and, past
+		// that, to materializing the offset in a register.
+		align := int64(size)
+		offset = (m.spillSlotSize + align - 1) &^ (align - 1)
 		m.spillSlots[id] = offset
-		m.spillSlotSize += int64(size)
+		m.spillSlotSize = offset + align
 	}
 	return offset + 16 // spill slot starts above the clobbered registers and the frame size.
 }

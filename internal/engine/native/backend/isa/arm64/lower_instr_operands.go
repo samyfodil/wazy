@@ -264,18 +264,32 @@ func (m *machine) getOperand_SR_NR(def backend.SSAValueDefinition, mode extMode)
 		return operandNR(m.compiler.VRegOf(def.V))
 	}
 
-	if m.compiler.MatchInstr(def, ssa.OpcodeIshl) {
-		// Check if the shift amount is constant instruction.
-		targetVal, amountVal := def.Instr.Arg2()
+	// A shift by a constant folds into the shifted-register operand, which drops the
+	// shift instruction entirely. "Add/subtract (shifted register)" and "Logical
+	// (shifted register)" both encode all three of LSL, LSR and ASR (see
+	// encodeAluRRRShift); a rotate has no such form.
+	var sop shiftOp
+	switch {
+	case m.compiler.MatchInstr(def, ssa.OpcodeIshl):
+		sop = shiftOpLSL
+	case m.compiler.MatchInstr(def, ssa.OpcodeUshr):
+		sop = shiftOpLSR
+	case m.compiler.MatchInstr(def, ssa.OpcodeSshr):
+		sop = shiftOpASR
+	default:
+		return m.getOperand_NR(def, mode)
+	}
+
+	// Check if the shift amount is constant instruction.
+	targetVal, amountVal := def.Instr.Arg2()
+	amountDef := m.compiler.ValueDefinition(amountVal)
+	if amountDef.IsFromInstr() && amountDef.Instr.Constant() {
+		// If that is the case, we can use the shifted register operand (SR).
 		targetVReg := m.getOperand_NR(m.compiler.ValueDefinition(targetVal), extModeNone).nr()
-		amountDef := m.compiler.ValueDefinition(amountVal)
-		if amountDef.IsFromInstr() && amountDef.Instr.Constant() {
-			// If that is the case, we can use the shifted register operand (SR).
-			c := byte(amountDef.Instr.ConstantVal()) & (targetVal.Type().Bits() - 1) // Clears the unnecessary bits.
-			def.Instr.MarkLowered()
-			amountDef.Instr.MarkLowered()
-			return operandSR(targetVReg, c, shiftOpLSL)
-		}
+		c := byte(amountDef.Instr.ConstantVal()) & (targetVal.Type().Bits() - 1) // Clears the unnecessary bits.
+		def.Instr.MarkLowered()
+		amountDef.Instr.MarkLowered()
+		return operandSR(targetVReg, c, sop)
 	}
 	return m.getOperand_NR(def, mode)
 }
