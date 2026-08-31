@@ -369,10 +369,10 @@ arm64 verification, not only package-local goldens.
 Lock in wins with alloc-count benchmarks (the repo already has `leb128_alloc_test.go` asserting
 zero-alloc patterns — extend that to DecodeModule/Instantiate/Call paths).
 
-## Sweep round 2 (2026-08-31) — shipped
+## Sweep round 1 (2026-08-31) — shipped
 
 A fresh six-way subsystem sweep (pprof on five workloads, twenty static scans, adversarial triage)
-found 136 candidates; the nine below landed. **All timings are an Apple M4, `benchstat` over
+found 136 candidates; the nine areas below landed in round 1, and round 2 (further down) took the rest. **All timings are an Apple M4, `benchstat` over
 interleaved A/B runs (`-count` 5–10), with upstream wazero measured in the same runs as a control —
 its arms are flat throughout, which is what makes the wazy deltas trustworthy.**
 
@@ -432,3 +432,77 @@ pointer; WasmGC read path off the store-wide RWMutex; `descriptor.Table.Insert` 
 look like bugs rather than tuning: zeroing the pooled linear-memory buffer measured **64% of
 instantiate CPU** (MADV_DONTNEED would make it lazy), and a closed module that imported a table is
 never dropped from the owner's keep-alive set.
+
+
+## Sweep round 3 — the compile-time and instantiate backlog
+
+Round 2's 58 deferred candidates, plus every round-1 deferral and the remaining OPTIMIZATIONS.md
+opens. Thirteen subsystem areas. **Same method: Apple M4, `benchstat` over interleaved A/B runs,
+upstream wazero measured in the same runs as a control — its arms are flat in every table below.**
+
+Cumulative against the fork point, `internal/integration_test/bench`:
+
+| Benchmark | main | branch | |
+|---|---|---|---|
+| `EHFastPath/n=100000` | 5.836m | 3.459m | **−40.7%** |
+| `EHFastPath/n=1000` | 59.61µ | 35.59µ | **−40.3%** |
+| `ExportedFunctionCall_FreshHandle` | 189.5n | 138.3n | **−27.0%** (1.513Ki → 1.011Ki B/op) |
+| `EHThrowPath/n=10` | 2.101µ | 1.712µ | −18.5% |
+| `Invocation/compiler/fib_for_5` | 42.95n | 35.05n | −18.4% |
+| `Compilation/without_extern_cache` | 5.002m | 4.109m | **−17.9%** |
+| `Initialization/compiler` | 2.029µ | 1.676µ | −17.4% |
+| `Codec/binary.DecodeModule` | 10.399µ | 8.943µ | −14.0% |
+| `Invocation/compiler/base64_100` | 35.51µ | 31.36µ | −11.7% |
+| geomean | 31.90µ | 26.22µ | **−17.8%** (B/op −22.9%) |
+
+`benchmarks/vs-wazero`, and on real modules:
+
+| Benchmark | main | branch | |
+|---|---|---|---|
+| `CompileModulesExtensive/greet_zig_5k` | 753.3µ | 556.4µ | **−26.1%** |
+| `CompileModulesExtensive/greet_rust_10k` | 1132.7µ | 871.3µ | **−23.1%** |
+| `Compile` | 4.975m | 4.125m | −17.1% |
+| `Instantiate` | 2.071µ | 1.727µ | **−16.6%** (now 9.1x wazero's 15.72µ) |
+| `HostCall/typed/CallWithStack` | 57.80n | 48.58n | −16.0% |
+| `HostCall/gomodule/CallWithStack` | 55.92n | 48.28n | −13.7% |
+| `Execute/fib=20` | 19.29µ | 17.96µ | −6.9% |
+| `wasip2.ServeHTTP` | 6.560µ | 3.370µ | **−48.6%** (76 → 45 allocs/op) |
+
+The one deliberate regression: `Compilation/interpreter` +1.7%. The interpreter's lowering does more
+work up front (labels resolved at compile time, local.get/set split by V128-ness) to buy
+`Invocation/interpreter/fib_for_20` −5.3% and `fib_for_10` −3.1%. A module is lowered once and run
+many times, so the trade is taken deliberately rather than chased.
+
+Shipped, by area: the decoder gained per-section byte arenas and leb128 single-byte fast paths, and
+its section sizes are now clamped to the bytes actually present (a malformed 5-byte code section
+declaring 256 MiB allocated 256 MiB); validation stopped formatting an error it throws away on every
+memory instruction; instantiation stopped re-encoding environ, scanning the whole export map for
+tables, and computing each imported function's type twice; the SSA builder replaced its per-block map
+with a dense arena and `ssa.Instruction` went 144 → 128 bytes; regalloc stopped re-allocating its
+128 real-register vrStates per function; the whole compilation unit (machine + builder + compiler) is
+now recycled through a pool instead of rebuilt per module; the frontend stopped emitting a
+speculative memory-base reload after every call and routing OpcodeEnd through an empty continuation
+block; amd64 got LEA for 32-bit `Iadd`; arm64 got the UExtend elision as a vreg alias rather than a
+mov; and the component runtime keeps its handle reps dense.
+
+### Rejected with measurements — do not redo
+
+- **A lock-free collector handshake that costs the non-GC path — FIXED, not reverted, but the trap is
+  worth recording.** Taking `gc.mu` out of `EnterGo`/`LeaveGo` inlined their bodies and pushed them
+  from cost 64 to 94, past the inliner's budget of 80. Every host call runs `gcExec.EnterGo()`, and
+  for a guest without the GC proposal the receiver is nil — a case that had been a compare and a
+  branch became two real calls. Measured +9.2% / +6.9% on `BenchmarkHostCallLoopCloseOnContextDone`
+  before the body was split back out. **The lesson generalises: a nil-receiver fast path on a hot
+  path is only free while the method still inlines, and nothing warns you when it stops.**
+- The area's own `BenchmarkGCHandshake` (register + EnterGo + LeaveGo + Unregister in a loop) showed
+  the mutex at 46% of CPU and the lock-free version winning. That microbenchmark was written
+  alongside the change and did not reach the real host-call path. Prefer an existing end-to-end
+  benchmark when one exists.
+
+### Remaining known gaps
+
+- `internal/wasm/binary` reads a component's embedded core modules with a full `DecodeModule` when it
+  only needs a few sections.
+- `Store.mux` still serializes instantiate and close against each other.
+- The 2431-line validator body (3632-byte frame, 35-deep else-if chain) was left alone deliberately:
+  correctness of validation outranks its speed, and no mechanical rewrite stayed reviewable.
