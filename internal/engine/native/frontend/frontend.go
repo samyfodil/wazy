@@ -38,7 +38,8 @@ type Compiler struct {
 	// buffer has to be. See materializeGCRoots.
 	maxGCRoots int
 
-	// Followings are reset by per function.
+	// Followings are reset by per function, except the module-invariant memory,
+	// table and global tables that declareModuleInvariants fills in once.
 
 	// wasmLocalToVariable maps the index (considered as wasm.Index of locals)
 	// to the corresponding ssa.Variable.
@@ -85,8 +86,11 @@ type Compiler struct {
 	globalVariables               []ssa.Variable
 	globalVariablesTypes          []ssa.Type
 	mutableGlobalVariablesIndexes []wasm.Index // index to ^.
-	needListener                  bool
-	needSourceOffsetInfo          bool
+	// declaresSubtypes is set when the module's type section declares any
+	// subtype relation. See declareModuleInvariants.
+	declaresSubtypes     bool
+	needListener         bool
+	needSourceOffsetInfo bool
 	// interruptCheckInterval controls loop interrupt-check lowering when
 	// ensureTermination is set: 0 means check every iteration (a Go round-trip
 	// per loop header), a power of two N means check only every Nth iteration
@@ -167,6 +171,7 @@ func NewFrontendCompiler(m *wasm.Module, ssaBuilder ssa.Builder, offset *nativea
 		varLengthKnownSafeBoundWithIDPool: nativeapi.NewVarLengthPool[knownSafeBoundWithID](),
 	}
 	c.declareSignatures(listenerOn)
+	c.declareModuleInvariants()
 	return c
 }
 
@@ -536,18 +541,15 @@ func (c *Compiler) declareWasmLocals() {
 	}
 }
 
-func (c *Compiler) declareNecessaryVariables() {
+// declareModuleInvariants derives everything about the module's memory, table
+// and global index spaces that does not depend on which function is being
+// lowered. It runs once per module; declareNecessaryVariables then only has to
+// hand out one fresh ssa.Variable per entry per function.
+func (c *Compiler) declareModuleInvariants() {
 	memoryCount := int(c.m.ImportMemoryCount) + len(c.m.MemorySection)
 	c.needMemory = memoryCount > 0
 	c.multiMemory = memoryCount > 1
 
-	c.memoryShared = c.memoryShared[:0]
-	c.memoryMaxPages = c.memoryMaxPages[:0]
-	c.memoryIndex64 = c.memoryIndex64[:0]
-	c.anyMemory64 = false
-	c.memoryMinSizeInBytes = c.memoryMinSizeInBytes[:0]
-	c.memoryBaseVariables = c.memoryBaseVariables[:0]
-	c.memoryLenVariables = c.memoryLenVariables[:0]
 	addMemory := func(mem *wasm.Memory) {
 		c.memoryShared = append(c.memoryShared, mem.IsShared)
 		c.memoryMaxPages = append(c.memoryMaxPages, mem.Max)
@@ -578,13 +580,6 @@ func (c *Compiler) declareNecessaryVariables() {
 		addMemory(&c.m.MemorySection[i])
 	}
 
-	for range memoryCount {
-		c.memoryBaseVariables = append(c.memoryBaseVariables, c.ssaBuilder.DeclareVariable(ssa.TypeI64))
-		c.memoryLenVariables = append(c.memoryLenVariables, c.ssaBuilder.DeclareVariable(ssa.TypeI64))
-	}
-
-	c.tableIndex64 = c.tableIndex64[:0]
-	c.anyTable64 = false
 	addTable := func(t *wasm.Table) {
 		c.tableIndex64 = append(c.tableIndex64, t.IsTable64)
 		c.anyTable64 = c.anyTable64 || t.IsTable64
@@ -598,9 +593,6 @@ func (c *Compiler) declareNecessaryVariables() {
 		addTable(&c.m.TableSection[i])
 	}
 
-	c.globalVariables = c.globalVariables[:0]
-	c.mutableGlobalVariablesIndexes = c.mutableGlobalVariablesIndexes[:0]
-	c.globalVariablesTypes = c.globalVariablesTypes[:0]
 	for _, imp := range c.m.ImportSection {
 		if imp.Type == wasm.ExternTypeGlobal {
 			desc := imp.DescGlobal
@@ -612,17 +604,43 @@ func (c *Compiler) declareNecessaryVariables() {
 		c.declareWasmGlobal(desc.ValType, desc.Mutable)
 	}
 
+	// declaresSubtypes reports whether any type in the module takes part in a
+	// declared subtype relation, which is what makes call_indirect's type check
+	// more than an equality.
+	for i := range c.m.TypeSection {
+		if c.m.TypeSection[i].HasSupertype || c.m.TypeSection[i].Extensible {
+			c.declaresSubtypes = true
+			break
+		}
+	}
+
 	// TODO: add tables.
 }
 
 func (c *Compiler) declareWasmGlobal(typ wasm.ValueType, mutable bool) {
-	st := WasmTypeToSSAType(typ)
-	v := c.ssaBuilder.DeclareVariable(st)
-	index := wasm.Index(len(c.globalVariables))
-	c.globalVariables = append(c.globalVariables, v)
-	c.globalVariablesTypes = append(c.globalVariablesTypes, st)
+	index := wasm.Index(len(c.globalVariablesTypes))
+	c.globalVariablesTypes = append(c.globalVariablesTypes, WasmTypeToSSAType(typ))
 	if mutable {
 		c.mutableGlobalVariablesIndexes = append(c.mutableGlobalVariablesIndexes, index)
+	}
+}
+
+// declareNecessaryVariables hands out this function's ssa.Variable for each
+// memory base/length and each global. Those are per function -- the builder's
+// variable numbering restarts with every one -- but everything they are indexed
+// by is not; see declareModuleInvariants.
+func (c *Compiler) declareNecessaryVariables() {
+	builder := c.ssaBuilder
+	c.memoryBaseVariables = c.memoryBaseVariables[:0]
+	c.memoryLenVariables = c.memoryLenVariables[:0]
+	for range c.memoryShared {
+		c.memoryBaseVariables = append(c.memoryBaseVariables, builder.DeclareVariable(ssa.TypeI64))
+		c.memoryLenVariables = append(c.memoryLenVariables, builder.DeclareVariable(ssa.TypeI64))
+	}
+
+	c.globalVariables = c.globalVariables[:0]
+	for _, typ := range c.globalVariablesTypes {
+		c.globalVariables = append(c.globalVariables, builder.DeclareVariable(typ))
 	}
 }
 

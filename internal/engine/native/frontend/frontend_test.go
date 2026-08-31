@@ -203,10 +203,9 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32)
 			name: "swap params and return", m: testcases.SwapParamsAndReturn.Module,
 			exp: `
 blk0: (v0:i64, v1:i64, v2:i32, v3:i32)
-	Jump blk1
-
-blk1: () <-- (blk0)
 	Jump blk_ret, v3, v2
+
+blk1: ()
 `,
 		},
 		{
@@ -476,15 +475,13 @@ blk1: (v3:i32) <-- (blk0,blk1)
 	Brnz v3, blk1, v3
 	Jump blk4
 
-blk2: () <-- (blk3)
-	v4:i32 = Iconst_32 0x0
-	Jump blk_ret, v4
+blk2: ()
 
-blk3: () <-- (blk4)
-	Jump blk2
+blk3: ()
 
 blk4: () <-- (blk1)
-	Jump blk3
+	v4:i32 = Iconst_32 0x0
+	Jump blk_ret, v4
 `,
 			expAfterPasses: `
 blk0: (v0:i64, v1:i64, v2:i32)
@@ -498,12 +495,6 @@ blk5: () <-- (blk1)
 	Jump blk1
 
 blk4: () <-- (blk1)
-	Jump fallthrough
-
-blk3: () <-- (blk4)
-	Jump fallthrough
-
-blk2: () <-- (blk3)
 	v4:i32 = Iconst_32 0x0
 	Jump blk_ret, v4
 `,
@@ -515,24 +506,23 @@ blk2: () <-- (blk3)
 blk0: (v0:i64, v1:i64, v2:i32)
 	Jump blk1, v2
 
-blk1: (v3:i32) <-- (blk0,blk3)
+blk1: (v3:i32) <-- (blk0,blk4)
 	Brnz v3, blk_ret
 	Jump blk4
 
 blk2: ()
 
-blk3: () <-- (blk4)
-	v4:i32 = Iconst_32 0x1
-	Jump blk1, v4
+blk3: ()
 
 blk4: () <-- (blk1)
-	Jump blk3
+	v4:i32 = Iconst_32 0x1
+	Jump blk1, v4
 `,
 			expAfterPasses: `
 blk0: (v0:i64, v1:i64, v2:i32)
 	Jump fallthrough, v2
 
-blk1: (v3:i32) <-- (blk0,blk3)
+blk1: (v3:i32) <-- (blk0,blk4)
 	Brnz v3, blk5
 	Jump blk4
 
@@ -540,9 +530,6 @@ blk5: () <-- (blk1)
 	Jump blk_ret
 
 blk4: () <-- (blk1)
-	Jump fallthrough
-
-blk3: () <-- (blk4)
 	v4:i32 = Iconst_32 0x1
 	Jump blk1, v4
 `,
@@ -772,11 +759,10 @@ blk1: (v4:i32,v5:i32) <-- (blk0,blk1)
 	Brnz v7, blk1, v4, v5
 	Jump blk3
 
-blk2: (v6:i32) <-- (blk3)
-	Jump blk_ret, v6
+blk2: (v6:i32)
 
 blk3: () <-- (blk1)
-	Jump blk2, v4
+	Jump blk_ret, v4
 `,
 			expAfterPasses: `
 blk0: (v0:i64, v1:i64, v2:i32, v3:i32)
@@ -791,9 +777,6 @@ blk4: () <-- (blk1)
 	Jump blk1
 
 blk3: () <-- (blk1)
-	Jump fallthrough
-
-blk2: () <-- (blk3)
 	Jump blk_ret, v2
 `,
 		},
@@ -1735,8 +1718,7 @@ blk0: (v0:i64, v1:i64, v2:f64, v3:f64, v4:f64)
 	Brz v9, blk3
 	Jump blk2
 
-blk1: (v5:i64) <-- (blk4)
-	Jump blk_ret
+blk1: (v5:i64)
 
 blk2: () <-- (blk0)
 	v10:i64 = Iconst_64 0x10
@@ -1749,7 +1731,7 @@ blk3: () <-- (blk0)
 
 blk4: () <-- (blk2,blk3)
 	v13:i64 = Iconst_64 0x0
-	Jump blk1, v13
+	Jump blk_ret
 `,
 			expAfterPasses: `
 blk0: (v0:i64, v1:i64, v2:f64, v3:f64, v4:f64)
@@ -1767,9 +1749,6 @@ blk3: () <-- (blk0)
 	Jump fallthrough
 
 blk4: () <-- (blk2,blk3)
-	Jump fallthrough
-
-blk1: () <-- (blk4)
 	Jump blk_ret
 `,
 		},
@@ -2694,7 +2673,7 @@ blk4: () <-- (blk1)
 	Brnz v11, blk_ret
 	Jump blk9
 
-blk5: () <-- (blk7,blk9)
+blk5: () <-- (blk8,blk9)
 	Jump blk_ret
 
 blk6: (v20:i32) <-- (blk3)
@@ -2710,11 +2689,10 @@ blk6: (v20:i32) <-- (blk3)
 	Brnz v28, blk1, v20
 	Jump blk8
 
-blk7: () <-- (blk8)
-	Jump blk5
+blk7: ()
 
 blk8: () <-- (blk6)
-	Jump blk7
+	Jump blk5
 
 blk9: () <-- (blk4)
 	Jump blk5
