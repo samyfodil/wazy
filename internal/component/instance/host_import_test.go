@@ -283,7 +283,7 @@ func TestLiftHostArgsSpilled_RoundTrip(t *testing.T) {
 		t.Fatalf("Store: %v", err)
 	}
 
-	args, lent, err := liftHostArgsSpilled(nil, plans, tupleDesc, resolve, ptr, mod, newHandleTable())
+	args, lent, err := liftHostArgsSpilled(nil, plans, tupleDesc, resolve, ptr, mod, newHandleTable(), nil)
 	if err != nil {
 		t.Fatalf("liftHostArgsSpilled: %v", err)
 	}
@@ -376,6 +376,55 @@ func TestLiftHostArgs_String(t *testing.T) {
 	}
 }
 
+// TestLiftHostArgsPlanned_ReusedBuffer proves the wrapper's fast path -- it
+// hands the lift a pooled buffer instead of letting it allocate one per call
+// (buildHostWrapper) -- lifts exactly what the allocating path lifts, that a
+// buffer still holding the previous call's values is fully overwritten, and
+// that a buffer of the wrong length is ignored rather than written past.
+func TestLiftHostArgsPlanned_ReusedBuffer(t *testing.T) {
+	_, mod := memModule(t)
+	mod.Memory().WriteString(0, "hi")
+	fd, resolve := synthFuncDesc([]binary.TypeDesc{
+		binary.PrimitiveDesc{Prim: "string"},
+		binary.PrimitiveDesc{Prim: "u32"},
+	}, nil)
+	plans, err := buildHostParamPlans(fd, resolve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stack := []uint64{0, 2, 7}
+	tbl := newHandleTable()
+
+	same := func(name string, got []abi.Value) {
+		t.Helper()
+		if len(got) != 2 || got[0] != abi.Value("hi") || got[1] != abi.Value(uint32(7)) {
+			t.Fatalf("%s: args = %#v, want [\"hi\" 7]", name, got)
+		}
+	}
+
+	fresh, _, err := liftHostArgsPlanned(nil, plans, resolve, stack, mod, tbl, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	same("allocating path", fresh)
+
+	dst := []abi.Value{"stale", uint32(999)}
+	reused, _, err := liftHostArgsPlanned(nil, plans, resolve, stack, mod, tbl, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	same("reused buffer", reused)
+	if &reused[0] != &dst[0] {
+		t.Fatal("expected the supplied buffer to be filled in place")
+	}
+
+	short, _, err := liftHostArgsPlanned(nil, plans, resolve, stack, mod, tbl, []abi.Value{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	same("wrong-length buffer", short)
+}
+
 // BenchmarkLiftHostArgs measures the guest->host arg-lift on a representative
 // WASI-shaped signature (string + u32), comparing the per-call-plan path
 // (liftHostArgs, which re-resolves + re-flattens every param every call) with
@@ -415,7 +464,7 @@ func BenchmarkLiftHostArgs(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if _, _, err := liftHostArgsPlanned(nil, plans, resolve, stack, mod, tbl); err != nil {
+			if _, _, err := liftHostArgsPlanned(nil, plans, resolve, stack, mod, tbl, nil); err != nil {
 				b.Fatal(err)
 			}
 		}

@@ -112,15 +112,15 @@ func Size(t binary.TypeDesc, resolve Resolver) (uint32, error) {
 // DiscriminantType returns the core type used to encode a variant discriminant.
 // This mirrors the canonical ABI discriminant_type() function.
 func DiscriminantType(numCases int) string {
-	if numCases <= 0 || uint64(numCases) > math.MaxUint32 {
+	// ceil(log2(numCases)/8) picks the narrowest of u8/u16/u32 that can hold
+	// numCases-1, which is three integer comparisons -- the float form this
+	// replaces ran math.Log2 per variant/enum store, load and size query.
+	switch {
+	case numCases <= 0 || uint64(numCases) > math.MaxUint32:
 		return "" // invalid
-	}
-	// Compute ceil(log2(numCases) / 8)
-	logCases := math.Ceil(math.Log2(float64(numCases)) / 8)
-	switch int(logCases) {
-	case 0, 1:
+	case numCases <= 1<<8:
 		return "u8"
-	case 2:
+	case numCases <= 1<<16:
 		return "u16"
 	default:
 		return "u32"
@@ -400,10 +400,13 @@ func sizeVariant(desc binary.VariantDesc, resolve Resolver) (uint32, error) {
 	}
 	offset += maxCaseSize
 
-	// Align final size to variant alignment
-	variantAlign, err := alignmentVariant(desc, resolve)
-	if err != nil {
-		return 0, err
+	// Align final size to variant alignment. alignmentVariant is
+	// max(discriminant alignment, MaxCaseAlignment), and a discriminant's
+	// alignment equals its size, so both halves are already in hand -- calling
+	// it here would walk every case's payload a second time.
+	variantAlign := maxCaseAlign
+	if discSize > variantAlign {
+		variantAlign = discSize
 	}
 	return Align(offset, variantAlign), nil
 }
@@ -563,24 +566,67 @@ func sizeResult(desc binary.ResultDesc, resolve Resolver) (uint32, error) {
 
 // primDescs holds each primitive pre-boxed into the TypeDesc interface.
 // Returning binary.PrimitiveDesc{...} directly boxes a fresh value on every
-// call, and resolveType runs once per node of every type walk.
-var primDescs = func() map[string]binary.TypeDesc {
-	m := map[string]binary.TypeDesc{}
-	for _, p := range []string{
-		"bool", "s8", "u8", "s16", "u16", "s32", "u32", "s64", "u64",
-		"f32", "f64", "char", "string", "error-context",
-	} {
-		m[p] = binary.PrimitiveDesc{Prim: p}
+// call, and resolveType runs once per node of every type walk. Selected by
+// primDesc's switch rather than by hashing the name in a map: the set is
+// closed and tiny, and TestPrimDescIndices pins the switch to this order.
+var primDescs = [...]binary.TypeDesc{
+	binary.PrimitiveDesc{Prim: "bool"},
+	binary.PrimitiveDesc{Prim: "s8"},
+	binary.PrimitiveDesc{Prim: "u8"},
+	binary.PrimitiveDesc{Prim: "s16"},
+	binary.PrimitiveDesc{Prim: "u16"},
+	binary.PrimitiveDesc{Prim: "s32"},
+	binary.PrimitiveDesc{Prim: "u32"},
+	binary.PrimitiveDesc{Prim: "s64"},
+	binary.PrimitiveDesc{Prim: "u64"},
+	binary.PrimitiveDesc{Prim: "f32"},
+	binary.PrimitiveDesc{Prim: "f64"},
+	binary.PrimitiveDesc{Prim: "char"},
+	binary.PrimitiveDesc{Prim: "string"},
+	binary.PrimitiveDesc{Prim: "error-context"},
+}
+
+// primDesc returns name's pre-boxed descriptor, if name is a primitive.
+func primDesc(name string) (binary.TypeDesc, bool) {
+	switch name {
+	case "bool":
+		return primDescs[0], true
+	case "s8":
+		return primDescs[1], true
+	case "u8":
+		return primDescs[2], true
+	case "s16":
+		return primDescs[3], true
+	case "u16":
+		return primDescs[4], true
+	case "s32":
+		return primDescs[5], true
+	case "u32":
+		return primDescs[6], true
+	case "s64":
+		return primDescs[7], true
+	case "u64":
+		return primDescs[8], true
+	case "f32":
+		return primDescs[9], true
+	case "f64":
+		return primDescs[10], true
+	case "char":
+		return primDescs[11], true
+	case "string":
+		return primDescs[12], true
+	case "error-context":
+		return primDescs[13], true
 	}
-	return m
-}()
+	return nil, false
+}
 
 func resolveType(ref *binary.TypeRef, resolve Resolver) (binary.TypeDesc, error) {
 	if ref == nil {
 		return nil, fmt.Errorf("nil type reference")
 	}
 	if ref.Primitive != "" {
-		if d, ok := primDescs[ref.Primitive]; ok {
+		if d, ok := primDesc(ref.Primitive); ok {
 			return d, nil
 		}
 		return binary.PrimitiveDesc{Prim: ref.Primitive}, nil

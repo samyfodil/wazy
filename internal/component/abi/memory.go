@@ -609,29 +609,24 @@ func loadResult(mem []byte, ptr uint32, desc bintype.ResultDesc, resolve Resolve
 }
 
 // Store writes a value of the given type to memory at the given pointer.
-// This mirrors the canonical ABI store() function.
+// This mirrors the canonical ABI store() function. A caller that stores the
+// same type repeatedly (a bound import's result) should compile the layout
+// once with CompileStore rather than pay the two type-graph walks per call.
 func Store(mem []byte, ptr uint32, t bintype.TypeDesc, v Value, resolve Resolver, realloc Realloc) error {
-	// Check alignment and bounds
-	align, err := Alignment(t, resolve)
+	s, err := CompileStore(t, resolve)
 	if err != nil {
 		return err
 	}
-	if ptr != Align(ptr, align) {
-		return fmt.Errorf("store: pointer %d not aligned to %d", ptr, align)
-	}
-
-	size, err := Size(t, resolve)
-	if err != nil {
-		return err
-	}
-	if uint32(len(mem)) < ptr+size {
-		return fmt.Errorf("store: buffer overflow: ptr=%d size=%d mem_len=%d", ptr, size, len(mem))
-	}
-
-	return storeValue(mem, ptr, t, v, resolve, realloc)
+	return s.Store(mem, ptr, v, realloc)
 }
 
-func storeValue(mem []byte, ptr uint32, t bintype.TypeDesc, v Value, resolve Resolver, realloc Realloc) error {
+// storeValue writes v of type t at ptr. align is t's own alignment when the
+// caller already had to compute it to place ptr (so ptr is a multiple of it),
+// or 0 when it doesn't know: only the option/variant/result cases consume it,
+// to find their payload offset, and deriving it there walks every field/case
+// of the type again on every call -- wasi:http's 30-case error-code arm was
+// re-walked on every guest->host result store.
+func storeValue(mem []byte, ptr uint32, t bintype.TypeDesc, v Value, align uint32, resolve Resolver, realloc Realloc) error {
 	switch desc := t.(type) {
 	case bintype.PrimitiveDesc:
 		return storePrimitive(mem, ptr, desc.Prim, v, realloc)
@@ -647,7 +642,7 @@ func storeValue(mem []byte, ptr uint32, t bintype.TypeDesc, v Value, resolve Res
 		return storeRecord(mem, ptr, v, desc, resolve, realloc)
 
 	case bintype.VariantDesc:
-		return storeVariant(mem, ptr, v, desc, resolve, realloc)
+		return storeVariant(mem, ptr, v, desc, align, resolve, realloc)
 
 	case bintype.TupleDesc:
 		return storeTuple(mem, ptr, v, desc, resolve, realloc)
@@ -663,10 +658,10 @@ func storeValue(mem []byte, ptr uint32, t bintype.TypeDesc, v Value, resolve Res
 		if err != nil {
 			return err
 		}
-		return storeOption(mem, ptr, v, elemType, resolve, realloc)
+		return storeOption(mem, ptr, v, elemType, align, resolve, realloc)
 
 	case bintype.ResultDesc:
-		return storeResult(mem, ptr, v, desc, resolve, realloc)
+		return storeResult(mem, ptr, v, desc, align, resolve, realloc)
 
 	case bintype.OwnDesc, bintype.BorrowDesc, bintype.StreamDesc, bintype.FutureDesc:
 		// stream/future values are opaque i32 handles, same store as
@@ -940,7 +935,7 @@ func allocStoreList(mem []byte, list []Value, elemType bintype.TypeDesc, resolve
 	// Store each element
 	for i, elem := range list {
 		elemPtr := newPtr + uint32(i)*elemSize
-		if err := storeValue(mem, elemPtr, elemType, elem, resolve, realloc); err != nil {
+		if err := storeValue(mem, elemPtr, elemType, elem, elemAlign, resolve, realloc); err != nil {
 			return 0, 0, fmt.Errorf("[%d]: %w", i, err)
 		}
 	}
@@ -971,7 +966,7 @@ func storeRecord(mem []byte, ptr uint32, v Value, desc bintype.RecordDesc, resol
 		}
 		offset = Align(offset, fieldAlign)
 
-		if err := storeValue(mem, offset, fieldType, fields[i], resolve, realloc); err != nil {
+		if err := storeValue(mem, offset, fieldType, fields[i], fieldAlign, resolve, realloc); err != nil {
 			return fmt.Errorf("storeRecord: field %s: %w", field.Name, err)
 		}
 
@@ -985,7 +980,7 @@ func storeRecord(mem []byte, ptr uint32, v Value, desc bintype.RecordDesc, resol
 	return nil
 }
 
-func storeVariant(mem []byte, ptr uint32, v Value, desc bintype.VariantDesc, resolve Resolver, realloc Realloc) error {
+func storeVariant(mem []byte, ptr uint32, v Value, desc bintype.VariantDesc, align uint32, resolve Resolver, realloc Realloc) error {
 	vv, ok := v.(VariantValue)
 	if !ok {
 		return fmt.Errorf("storeVariant: expected VariantValue, got %T", v)
@@ -1006,13 +1001,18 @@ func storeVariant(mem []byte, ptr uint32, v Value, desc bintype.VariantDesc, res
 		return err
 	}
 
-	// Compute offset to payload
-	offset := ptr + discSize
-	maxCaseAlign, err := MaxCaseAlignment(desc.Cases, resolve)
-	if err != nil {
-		return err
+	// Compute offset to payload. Aligning to the variant's own alignment --
+	// max(discriminant alignment, MaxCaseAlignment) -- lands on the same
+	// offset as aligning to MaxCaseAlignment alone, since ptr is a multiple
+	// of it and a discriminant's size equals its alignment; so the caller's
+	// value is used when it has one, and only otherwise are the cases walked.
+	payloadAlign := align
+	if payloadAlign == 0 {
+		if payloadAlign, err = MaxCaseAlignment(desc.Cases, resolve); err != nil {
+			return err
+		}
 	}
-	offset = Align(offset, maxCaseAlign)
+	offset := Align(ptr+discSize, payloadAlign)
 
 	// Store payload if present
 	c := desc.Cases[vv.Disc]
@@ -1024,7 +1024,7 @@ func storeVariant(mem []byte, ptr uint32, v Value, desc bintype.VariantDesc, res
 		if vv.Payload == nil {
 			return fmt.Errorf("storeVariant: case %d requires payload", vv.Disc)
 		}
-		if err := storeValue(mem, offset, caseType, vv.Payload, resolve, realloc); err != nil {
+		if err := storeValue(mem, offset, caseType, vv.Payload, 0, resolve, realloc); err != nil {
 			return fmt.Errorf("storeVariant case %d: %w", vv.Disc, err)
 		}
 	}
@@ -1055,7 +1055,7 @@ func storeTuple(mem []byte, ptr uint32, v Value, desc bintype.TupleDesc, resolve
 		}
 		offset = Align(offset, elemAlign)
 
-		if err := storeValue(mem, offset, elemType, elements[i], resolve, realloc); err != nil {
+		if err := storeValue(mem, offset, elemType, elements[i], elemAlign, resolve, realloc); err != nil {
 			return fmt.Errorf("storeTuple: element %d: %w", i, err)
 		}
 
@@ -1101,7 +1101,7 @@ func storeEnum(mem []byte, ptr uint32, v Value, desc bintype.EnumDesc) error {
 	return storeInt(mem, ptr, caseIdx, enumSize)
 }
 
-func storeOption(mem []byte, ptr uint32, v Value, elemType bintype.TypeDesc, resolve Resolver, realloc Realloc) error {
+func storeOption(mem []byte, ptr uint32, v Value, elemType bintype.TypeDesc, align uint32, resolve Resolver, realloc Realloc) error {
 	// Option is a variant with discriminant (0=none, 1=some)
 	var discIdx uint32
 	var payload Value
@@ -1120,17 +1120,21 @@ func storeOption(mem []byte, ptr uint32, v Value, elemType bintype.TypeDesc, res
 		return err
 	}
 
-	// Compute offset to payload
-	offset := ptr + 1
-	elemAlign, err := Alignment(elemType, resolve)
-	if err != nil {
-		return err
+	// Compute offset to payload. An option's own alignment IS its element's
+	// (the u8 discriminant never widens it), so the caller's value serves for
+	// both the offset and the element's own store.
+	elemAlign := align
+	if elemAlign == 0 {
+		var err error
+		if elemAlign, err = Alignment(elemType, resolve); err != nil {
+			return err
+		}
 	}
-	offset = Align(offset, elemAlign)
+	offset := Align(ptr+1, elemAlign)
 
 	// Store payload if some
 	if discIdx == 1 {
-		if err := storeValue(mem, offset, elemType, payload, resolve, realloc); err != nil {
+		if err := storeValue(mem, offset, elemType, payload, elemAlign, resolve, realloc); err != nil {
 			return fmt.Errorf("storeOption some: %w", err)
 		}
 	}
@@ -1138,7 +1142,7 @@ func storeOption(mem []byte, ptr uint32, v Value, elemType bintype.TypeDesc, res
 	return nil
 }
 
-func storeResult(mem []byte, ptr uint32, v Value, desc bintype.ResultDesc, resolve Resolver, realloc Realloc) error {
+func storeResult(mem []byte, ptr uint32, v Value, desc bintype.ResultDesc, align uint32, resolve Resolver, realloc Realloc) error {
 	rv, ok := v.(ResultValue)
 	if !ok {
 		return fmt.Errorf("storeResult: expected ResultValue, got %T", v)
@@ -1156,36 +1160,17 @@ func storeResult(mem []byte, ptr uint32, v Value, desc bintype.ResultDesc, resol
 		return err
 	}
 
-	// Compute offset to payload
-	offset := ptr + 1
-	maxAlign := uint32(1)
-	if desc.Ok != nil {
-		okType, err := resolveType(desc.Ok, resolve)
-		if err != nil {
+	// Compute offset to payload. A result's own alignment IS the max of its
+	// arms' (the u8 discriminant never widens it), so the caller's value
+	// replaces walking BOTH arm types on every call.
+	maxAlign := align
+	if maxAlign == 0 {
+		var err error
+		if maxAlign, err = alignmentResult(desc, resolve); err != nil {
 			return err
-		}
-		okAlign, err := Alignment(okType, resolve)
-		if err != nil {
-			return err
-		}
-		if okAlign > maxAlign {
-			maxAlign = okAlign
 		}
 	}
-	if desc.Err != nil {
-		errType, err := resolveType(desc.Err, resolve)
-		if err != nil {
-			return err
-		}
-		errAlign, err := Alignment(errType, resolve)
-		if err != nil {
-			return err
-		}
-		if errAlign > maxAlign {
-			maxAlign = errAlign
-		}
-	}
-	offset = Align(offset, maxAlign)
+	offset := Align(ptr+1, maxAlign)
 
 	// Store payload
 	if rv.IsErr {
@@ -1194,7 +1179,7 @@ func storeResult(mem []byte, ptr uint32, v Value, desc bintype.ResultDesc, resol
 			if err != nil {
 				return err
 			}
-			if err := storeValue(mem, offset, errType, rv.Payload, resolve, realloc); err != nil {
+			if err := storeValue(mem, offset, errType, rv.Payload, 0, resolve, realloc); err != nil {
 				return fmt.Errorf("storeResult err: %w", err)
 			}
 		}
@@ -1204,7 +1189,7 @@ func storeResult(mem []byte, ptr uint32, v Value, desc bintype.ResultDesc, resol
 			if err != nil {
 				return err
 			}
-			if err := storeValue(mem, offset, okType, rv.Payload, resolve, realloc); err != nil {
+			if err := storeValue(mem, offset, okType, rv.Payload, 0, resolve, realloc); err != nil {
 				return fmt.Errorf("storeResult ok: %w", err)
 			}
 		}

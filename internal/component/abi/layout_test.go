@@ -1,6 +1,7 @@
 package abi
 
 import (
+	"math"
 	"testing"
 
 	"github.com/samyfodil/wazy/internal/component/binary"
@@ -754,5 +755,51 @@ func TestUnsupportedType(t *testing.T) {
 	_, err := Alignment(desc, noResolver)
 	if err == nil {
 		t.Error("expected error for unsupported type (func)")
+	}
+}
+
+// TestDiscriminantTypeMatchesCeilLog2 pins the integer form of
+// DiscriminantType to the ceil(log2(n)/8) float rule it replaced, at and
+// around every u8/u16/u32 boundary.
+func TestDiscriminantTypeMatchesCeilLog2(t *testing.T) {
+	ref := func(numCases int) string {
+		if numCases <= 0 || uint64(numCases) > math.MaxUint32 {
+			return ""
+		}
+		switch int(math.Ceil(math.Log2(float64(numCases)) / 8)) {
+		case 0, 1:
+			return "u8"
+		case 2:
+			return "u16"
+		default:
+			return "u32"
+		}
+	}
+	cases := []int{-1, 0, 1, 2, 3, 127, 128, 255, 256, 257, 65535, 65536, 65537, 1 << 20, 1<<31 - 1}
+	// Non-constant shift so this still compiles where int is 32 bits (there it
+	// yields 0, which the -1/0 cases already cover).
+	shift := 40
+	if n := 1 << shift; n > 0 {
+		cases = append(cases, n)
+	}
+	for _, n := range cases {
+		if got, want := DiscriminantType(n), ref(n); got != want {
+			t.Errorf("DiscriminantType(%d) = %q, want %q", n, got, want)
+		}
+	}
+}
+
+// TestPrimDescIndices pins primDesc's switch to primDescs' order: a wrong
+// index there would silently hand back the wrong primitive descriptor.
+func TestPrimDescIndices(t *testing.T) {
+	for i, d := range primDescs {
+		name := d.(binary.PrimitiveDesc).Prim
+		got, ok := primDesc(name)
+		if !ok || got != primDescs[i] {
+			t.Errorf("primDesc(%q) = (%v, %v), want (%v, true)", name, got, ok, primDescs[i])
+		}
+	}
+	if got, ok := primDesc("not-a-primitive"); ok || got != nil {
+		t.Errorf("primDesc(%q) = (%v, %v), want (nil, false)", "not-a-primitive", got, ok)
 	}
 }

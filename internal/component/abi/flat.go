@@ -625,28 +625,11 @@ func SpillValue(v Value, t binary.TypeDesc, mem []byte, resolve Resolver, reallo
 
 // spillValue stores a value to memory and returns the pointer.
 func spillValue(v Value, t binary.TypeDesc, mem []byte, resolve Resolver, realloc Realloc) (uint32, error) {
-	align, err := Alignment(t, resolve)
+	s, err := CompileStore(t, resolve)
 	if err != nil {
 		return 0, err
 	}
-
-	size, err := Size(t, resolve)
-	if err != nil {
-		return 0, err
-	}
-
-	// Allocate memory.
-	ptr, err := realloc.Grow(0, 0, align, size)
-	if err != nil {
-		return 0, fmt.Errorf("spillValue: realloc failed: %w", err)
-	}
-
-	// Store the value.
-	if err := Store(mem, ptr, t, v, resolve, realloc); err != nil {
-		return 0, fmt.Errorf("spillValue: store failed: %w", err)
-	}
-
-	return ptr, nil
+	return s.Spill(v, mem, realloc)
 }
 
 // ============================================================================

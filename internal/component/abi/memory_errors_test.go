@@ -281,7 +281,7 @@ func TestResultWrongType(t *testing.T) {
 	}
 
 	// Pass a non-ResultValue
-	err := storeResult(mem, 0, "not a result", desc, nil, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
+	err := storeResult(mem, 0, "not a result", desc, 0, nil, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
 	if err == nil {
 		t.Error("expected error for storing non-result value")
 	}
@@ -295,7 +295,7 @@ func TestResultIsErrWrongType(t *testing.T) {
 	}
 
 	// Pass a result-like map with wrong isErr type
-	err := storeResult(mem, 0, map[string]any{"isErr": "not bool"}, desc, nil, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
+	err := storeResult(mem, 0, map[string]any{"isErr": "not bool"}, desc, 0, nil, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
 	if err == nil {
 		t.Error("expected error for result with non-bool isErr")
 	}
@@ -531,7 +531,7 @@ func TestStoreOptWithMissingPayloadType(t *testing.T) {
 	}
 
 	// Store some value (not nil) which triggers storing discriminant 1
-	err := storeOption(mem, 0, uint32(42), desc, nil, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
+	err := storeOption(mem, 0, uint32(42), desc, 0, nil, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
 	if err != nil {
 		// This might succeed depending on alignment, so check if it actually stored
 		t.Logf("storeOption succeeded or failed: %v", err)
