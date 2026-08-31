@@ -461,11 +461,11 @@ Cumulative against the fork point, `internal/integration_test/bench`:
 |---|---|---|---|
 | `CompileModulesExtensive/greet_zig_5k` | 753.3µ | 556.4µ | **−26.1%** |
 | `CompileModulesExtensive/greet_rust_10k` | 1132.7µ | 871.3µ | **−23.1%** |
-| `Compile` | 4.975m | 4.125m | −17.1% |
-| `Instantiate` | 2.071µ | 1.727µ | **−16.6%** (now 9.1x wazero's 15.72µ) |
-| `HostCall/typed/CallWithStack` | 57.80n | 48.58n | −16.0% |
-| `HostCall/gomodule/CallWithStack` | 55.92n | 48.28n | −13.7% |
-| `Execute/fib=20` | 19.29µ | 17.96µ | −6.9% |
+| `Compile` | 4.972m | 4.132m | −16.9% |
+| `Instantiate` | 2.054µ | 1.724µ | **−16.1%** (now 9.1x wazero's 15.74µ) |
+| `HostCall/typed/CallWithStack` | 57.44n | 48.52n | −15.5% |
+| `HostCall/gomodule/CallWithStack` | 55.80n | 47.82n | −14.3% (wazero: 48.26n) |
+| `Execute/fib=20` | 19.40µ | 17.81µ | −8.2% |
 | `wasip2.ServeHTTP` | 6.560µ | 3.370µ | **−48.6%** (76 → 45 allocs/op) |
 
 The one deliberate regression: `Compilation/interpreter` +1.7%. The interpreter's lowering does more
