@@ -1772,3 +1772,105 @@ func TestDWARF(t *testing.T) {
 	err = r.Close(ctx)
 	require.NoError(t, err)
 }
+
+// refFuncLoopModule exports run(n), which writes ref.func 0 into table[n-1]...table[0], and holds an
+// element segment that puts the same ref.func 0 at table[1000].
+func refFuncLoopModule() *wasm.Module {
+	return &wasm.Module{
+		TypeSection:     []wasm.FunctionType{{}, {Params: []wasm.ValueType{i32}}},
+		FunctionSection: []wasm.Index{0, 1},
+		TableSection:    []wasm.Table{{Type: wasm.RefTypeFuncref, Min: 1001}},
+		ElementSection: []wasm.ElementSegment{{
+			OffsetExpr: wasm.NewConstantExpressionFromOpcode(wasm.OpcodeI32Const, leb128.EncodeInt32(1000)),
+			TableIndex: 0, Type: wasm.RefTypeFuncref, Mode: wasm.ElementModeActive,
+			Init: []wasm.Index{0},
+		}},
+		ExportSection: []wasm.Export{{Name: "run", Type: wasm.ExternTypeFunc, Index: 1}},
+		CodeSection: []wasm.Code{
+			{Body: []byte{wasm.OpcodeEnd}},
+			{Body: []byte{
+				wasm.OpcodeLoop, 0x40,
+				wasm.OpcodeLocalGet, 0,
+				wasm.OpcodeI32Const, 1,
+				wasm.OpcodeI32Sub,
+				wasm.OpcodeLocalTee, 0, // table index
+				wasm.OpcodeRefFunc, 0, // value
+				wasm.OpcodeTableSet, 0,
+				wasm.OpcodeLocalGet, 0,
+				wasm.OpcodeBrIf, 0,
+				wasm.OpcodeEnd,
+				wasm.OpcodeEnd,
+			}},
+		},
+	}
+}
+
+// TestRefFuncMemoized checks that ref.func yields one reference per function index -- the same one the
+// element segment wrote at instantiation -- and that re-executing it allocates nothing.
+func TestRefFuncMemoized(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler())
+	defer func() {
+		require.NoError(t, r.Close(ctx))
+	}()
+	compiled, err := r.CompileModule(ctx, binaryencoding.EncodeModule(refFuncLoopModule()))
+	require.NoError(t, err)
+
+	inst, err := r.InstantiateModule(ctx, compiled, wazy.NewModuleConfig())
+	require.NoError(t, err)
+	f := inst.ExportedFunction("run")
+	require.NotNil(t, f)
+	stack := []uint64{2}
+	require.NoError(t, f.CallWithStack(ctx, stack))
+
+	refs := inst.(*wasm.ModuleInstance).Tables[0].References
+	require.NotEqual(t, uintptr(0), refs[0])
+	require.Equal(t, refs[0], refs[1])    // Two executions of ref.func 0.
+	require.Equal(t, refs[0], refs[1000]) // ...and the element segment's own ref.func 0.
+
+	require.Zero(t, testing.AllocsPerRun(5, func() {
+		stack[0] = 2
+		if err := f.CallWithStack(ctx, stack); err != nil {
+			panic(err)
+		}
+	}))
+
+	// Callers racing for the first ref.func of an instance must still end up with the one reference.
+	inst2, err := r.InstantiateModule(ctx, compiled, wazy.NewModuleConfig())
+	require.NoError(t, err)
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() { errs <- inst2.ExportedFunction("run").CallWithStack(ctx, []uint64{2}) }()
+	}
+	for i := 0; i < 2; i++ {
+		require.NoError(t, <-errs)
+	}
+	refs2 := inst2.(*wasm.ModuleInstance).Tables[0].References
+	require.Equal(t, refs2[0], refs2[1])
+	require.Equal(t, refs2[0], refs2[1000])
+}
+
+// BenchmarkRefFuncLoop executes ref.func 1000 times per operation.
+func BenchmarkRefFuncLoop(b *testing.B) {
+	ctx := context.Background()
+	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler())
+	defer func() {
+		require.NoError(b, r.Close(ctx))
+	}()
+	inst, err := r.Instantiate(ctx, binaryencoding.EncodeModule(refFuncLoopModule()))
+	require.NoError(b, err)
+	f := inst.ExportedFunction("run")
+	require.NotNil(b, f)
+
+	stack := []uint64{1000}
+	require.NoError(b, f.CallWithStack(ctx, stack))
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		stack[0] = 1000
+		if err = f.CallWithStack(ctx, stack); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

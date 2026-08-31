@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/samyfodil/wazy/api"
@@ -18,11 +19,16 @@ type (
 	// moduleEngine implements wasm.ModuleEngine.
 	moduleEngine struct {
 		// opaquePtr equals &opaque[0].
-		opaquePtr              *byte
-		parent                 *compiledModule
-		module                 *wasm.ModuleInstance
-		opaque                 moduleContextOpaque
-		localFunctionInstances []*functionInstance
+		opaquePtr *byte
+		parent    *compiledModule
+		module    *wasm.ModuleInstance
+		opaque    moduleContextOpaque
+		// localFunctionInstances memoizes one functionInstance per local function: ref.func must yield
+		// the same reference every time it runs, and materializing one per execution both allocated and
+		// grew the module engine without bound. It is built in full on the first funcref taken -- a
+		// module that takes none never pays for it -- and published atomically so concurrent calls into
+		// one instance agree on the table.
+		localFunctionInstances atomic.Pointer[[]functionInstance]
 		importedFunctions      []importedFunction
 		listeners              []api.FunctionListener
 		// gcEnabled caches whether this runtime enables the GC proposal, so the per-call check in
@@ -359,19 +365,31 @@ func (m *moduleEngine) FunctionInstanceReference(funcIndex wasm.Index) wasm.Refe
 		begin, _, _ := m.parent.offsets.ImportedFunctionOffset(funcIndex)
 		return uintptr(unsafe.Pointer(&m.opaque[begin]))
 	}
-	localIndex := funcIndex - m.module.Source.ImportFunctionCount
-	p := m.parent
-	executable := &p.executable[p.functionOffsets[localIndex]]
-	typeID := m.module.TypeIDs[m.module.Source.FunctionSection[localIndex]]
-
-	lf := &functionInstance{
-		executable:             executable,
-		moduleContextOpaquePtr: m.opaquePtr,
-		typeID:                 typeID,
-		indexInModule:          funcIndex,
+	fis := m.localFunctionInstances.Load()
+	if fis == nil {
+		fis = m.buildLocalFunctionInstances()
 	}
-	m.localFunctionInstances = append(m.localFunctionInstances, lf)
-	return uintptr(unsafe.Pointer(lf))
+	return uintptr(unsafe.Pointer(&(*fis)[funcIndex-m.module.Source.ImportFunctionCount]))
+}
+
+// buildLocalFunctionInstances materializes the funcref of every local function at once and publishes
+// it. The loser of a race adopts the winner's table, so one function index keeps yielding one
+// reference no matter who built it.
+func (m *moduleEngine) buildLocalFunctionInstances() *[]functionInstance {
+	p, src := m.parent, m.module.Source
+	fis := make([]functionInstance, len(p.functionOffsets))
+	for i := range fis {
+		fis[i] = functionInstance{
+			executable:             &p.executable[p.functionOffsets[i]],
+			moduleContextOpaquePtr: m.opaquePtr,
+			typeID:                 m.module.TypeIDs[src.FunctionSection[i]],
+			indexInModule:          src.ImportFunctionCount + wasm.Index(i),
+		}
+	}
+	if !m.localFunctionInstances.CompareAndSwap(nil, &fis) {
+		return m.localFunctionInstances.Load()
+	}
+	return &fis
 }
 
 // LookupFunction implements wasm.ModuleEngine.
