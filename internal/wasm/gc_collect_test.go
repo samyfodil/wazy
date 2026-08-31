@@ -5,6 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/testing/require"
@@ -67,6 +68,14 @@ func (f *gcCollectFixture) alloc() uint64 {
 func (f *gcCollectFixture) collect() {
 	f.s.RequestGC()
 	f.exec.Safepoint()
+}
+
+// endCollection clears the flag a test set by hand, waking whatever stood still for it.
+func (f *gcCollectFixture) endCollection() {
+	f.s.gc.mu.Lock()
+	defer f.s.gc.mu.Unlock()
+	f.s.gc.collecting.Store(false)
+	f.s.gc.cond.Broadcast()
 }
 
 func TestCollector(t *testing.T) {
@@ -159,10 +168,7 @@ func TestCollectorThreshold(t *testing.T) {
 	}
 	require.Equal(t, gcInitialThreshold+10, f.s.GC.Live())
 
-	f.s.gc.mu.Lock()
-	wanted := f.s.gc.wanted
-	f.s.gc.mu.Unlock()
-	require.True(t, wanted, "crossing the threshold should have asked for a collection")
+	require.True(t, f.s.gc.wanted.Load(), "crossing the threshold should have asked for a collection")
 	require.NotEqual(t, uint32(0), atomic.LoadUint32(&f.pause), "and should have asked this execution to park")
 
 	f.exec.Safepoint()
@@ -253,26 +259,156 @@ func TestCollectorUnregisterWakesTheCollector(t *testing.T) {
 }
 
 func TestCollectorRegisterDuringCollection(t *testing.T) {
-	// A call that starts while a collection is in progress must not run until it is over.
+	// A call that starts while a collection is in progress must not run until it is over: its cell is
+	// visible to the scan from the moment it takes one, and the scan reads whatever stack the cell names.
 	f := newGCCollectFixture(t)
-	f.s.gc.mu.Lock()
-	f.s.gc.collecting = true
-	f.s.gc.mu.Unlock()
+	f.s.gc.collecting.Store(true)
+	defer f.endCollection()
 
 	var pause uint32
-	e := f.m.RegisterGCExecution(&stackRoots{}, &pause)
-	require.Equal(t, uint32(1), atomic.LoadUint32(&pause))
+	registered := make(chan *GCExecution, 1)
+	go func() { registered <- f.m.RegisterGCExecution(&stackRoots{}, &pause) }()
+	select {
+	case <-registered:
+		t.Fatal("a call registered during a collection was let through")
+	case <-time.After(20 * time.Millisecond):
+	}
 
-	f.s.gc.mu.Lock()
-	f.s.gc.collecting = false
-	f.s.gc.cond.Broadcast()
-	f.s.gc.mu.Unlock()
-	e.Unregister()
+	f.endCollection()
+	(<-registered).Unregister()
 }
 
-// TestCollectorUnregisterUnlinksOnlyItself covers the list the executions are threaded into: dropping one from
-// the middle, and then from the head, must leave every other execution's roots reachable.
-func TestCollectorUnregisterUnlinksOnlyItself(t *testing.T) {
+// TestCollectorLeaveGoWaitsOutACollection covers the half of the handshake that has no lock to fall back on: a
+// host call that returns while a collection is scanning must not resume until the scan is over.
+func TestCollectorLeaveGoWaitsOutACollection(t *testing.T) {
+	f := newGCCollectFixture(t)
+	var pause uint32
+	e := f.m.RegisterGCExecution(&stackRoots{}, &pause)
+	e.EnterGo()
+
+	f.s.gc.collecting.Store(true)
+	// However this ends, nothing may be left waiting on a collection that never finishes.
+	defer e.Unregister()
+	defer f.endCollection()
+
+	resumed := make(chan struct{})
+	go func() {
+		e.LeaveGo()
+		close(resumed)
+	}()
+	// The collection is still running, so LeaveGo owes the collector a wait rather than a return.
+	select {
+	case <-resumed:
+		t.Fatal("LeaveGo resumed into a collection in progress")
+	case <-time.After(20 * time.Millisecond):
+	}
+	f.endCollection()
+	<-resumed
+}
+
+// TestCollectorLeaveGoKeepsAPendingRequest covers the pause flag across a host call. RequestGC will not ask a
+// second time while a request is outstanding, so a LeaveGo that cleared the flag would drop the collection
+// altogether and let the heap grow without bound.
+func TestCollectorLeaveGoKeepsAPendingRequest(t *testing.T) {
+	f := newGCCollectFixture(t)
+	f.alloc()
+	f.exec.EnterGo()
+	f.s.RequestGC()
+	f.exec.LeaveGo()
+	require.NotEqual(t, uint32(0), atomic.LoadUint32(&f.pause),
+		"the request has to still be waiting at the next parking point")
+	f.exec.Safepoint()
+	require.Equal(t, 0, f.s.GC.Live())
+}
+
+// TestCollectorCellsAreReused covers the one thing that keeps the grow-only list of calls in flight bounded: a
+// cell an unregistered call left behind is taken by the next one rather than adding to the list.
+func TestCollectorCellsAreReused(t *testing.T) {
+	f := newGCCollectFixture(t)
+	cells := func() int {
+		n := 0
+		for c := f.s.gc.execs.Load(); c != nil; c = c.next {
+			n++
+		}
+		return n
+	}
+	before := cells()
+	for round := 0; round < 3; round++ {
+		var pause [4]uint32
+		var execs [4]*GCExecution
+		for i := range execs {
+			execs[i] = f.m.RegisterGCExecution(&stackRoots{}, &pause[i])
+		}
+		for _, e := range execs {
+			e.Unregister()
+		}
+	}
+	require.Equal(t, before+4, cells(), "the list must grow to the peak in flight and stop there")
+}
+
+// TestCollectorHandshakeChurn runs the whole handshake -- registering, host calls, safepoints and dropping the
+// call -- from several goroutines at once while collections happen underneath, which is what the -race
+// detector needs to see to catch a missing edge between an execution and a collection.
+func TestCollectorHandshakeChurn(t *testing.T) {
+	types := []FunctionType{{
+		CompositeKind: CompositeKindStruct,
+		Fields:        []FieldType{{Type: ValueTypeAnyref, Mutable: true}, {Type: ValueTypeAnyref, Mutable: true}},
+	}}
+	types[0].CacheFieldSlots()
+	m := gcTestModule(t, types, nil, nil)
+
+	const callers, calls = 6, 400
+	var wg sync.WaitGroup
+	fail := make(chan string, callers)
+	for c := 0; c < callers; c++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < calls; i++ {
+				roots := &stackRoots{}
+				var pause uint32
+				e := m.RegisterGCExecution(roots, &pause)
+				ref := RunGC(m, GCStructNewDefault, 0, 0, 0, 0, 0, nil)
+				// Nothing collects until every execution parks, and this one parks only below, so
+				// rooting the object here is soon enough.
+				roots.set(ref)
+				if atomic.LoadUint32(&pause) != 0 {
+					e.Safepoint()
+				}
+				// A host call: the stack stands still, so a collection may run right through it.
+				e.EnterGo()
+				m.s.RequestGC()
+				e.LeaveGo()
+				if atomic.LoadUint32(&pause) != 0 {
+					e.Safepoint()
+				}
+				// A collection that had not seen this call would have reclaimed what its stack names.
+				if _, ok := m.s.GC.TypeIDOf(ref); !ok {
+					fail <- "a collection reclaimed an object this call's stack still named"
+					return
+				}
+				e.Unregister()
+			}
+		}()
+	}
+	wg.Wait()
+	close(fail)
+	for msg := range fail {
+		t.Fatal(msg)
+	}
+	// Every call has returned, so nothing roots anything: one last collection must reclaim the lot.
+	roots := &stackRoots{}
+	var pause uint32
+	e := m.RegisterGCExecution(roots, &pause)
+	m.s.RequestGC()
+	e.Safepoint()
+	e.Unregister()
+	require.Equal(t, 0, m.s.GC.Live())
+}
+
+// TestCollectorUnregisterEmptiesOnlyItsOwnCell covers the list the executions are threaded into: dropping one
+// from the middle, and then from the head, must leave every other execution's roots reachable.
+func TestCollectorUnregisterEmptiesOnlyItsOwnCell(t *testing.T) {
 	f := newGCCollectFixture(t)
 	var pause [3]uint32
 	var roots [3]*stackRoots
@@ -283,7 +419,7 @@ func TestCollectorUnregisterUnlinksOnlyItself(t *testing.T) {
 		// Stand still, as a host call would, so a collection has something to wait on.
 		execs[i].EnterGo()
 	}
-	// Registering prepends, so execs[2] is the head, execs[1] the middle and execs[0] the tail.
+	// Every cell is taken as this goes, so execs[2] is the head, execs[1] the middle and execs[0] the tail.
 	for i := range roots {
 		roots[i].set(f.alloc())
 	}
@@ -297,7 +433,7 @@ func TestCollectorUnregisterUnlinksOnlyItself(t *testing.T) {
 	f.collect()
 	require.Equal(t, 1, f.s.GC.Live())
 
-	execs[1].Unregister() // dropping one twice must not walk into the list at all
+	execs[1].Unregister() // dropping one twice must not empty the cell out from under anyone
 	execs[0].Unregister()
 	f.collect()
 	require.Equal(t, 0, f.s.GC.Live())
@@ -399,3 +535,22 @@ func TestArraySlotBounds(t *testing.T) {
 }
 
 var _ = api.CoreFeaturesV2
+
+// BenchmarkGCHandshake is what one call into a GC-enabled guest that makes one host call pays the collector
+// even when no collection ever happens: registering the call, parking for the host call, resuming, and
+// dropping it. Run it with -cpu 1,8 -- the point of the handshake is that it does not serialise.
+func BenchmarkGCHandshake(b *testing.B) {
+	s := NewStore(api.CoreFeaturesV2, nil)
+	m := &ModuleInstance{s: s}
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		roots := &stackRoots{}
+		var pause uint32
+		for pb.Next() {
+			e := m.RegisterGCExecution(roots, &pause)
+			e.EnterGo()
+			e.LeaveGo()
+			e.Unregister()
+		}
+	})
+}
