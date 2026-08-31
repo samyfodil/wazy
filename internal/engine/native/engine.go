@@ -42,10 +42,6 @@ type (
 		// setFinalizer defaults to runtime.SetFinalizer, but overridable for tests.
 		setFinalizer func(obj interface{}, finalizer interface{})
 
-		// The followings are reused for compiling shared functions.
-		machine backend.Machine
-		be      backend.Compiler
-
 		// stackPools holds pooled wasm-execution stack buffers (see
 		// (*callEngine).callWithStack and stack_pool.go), shared by every
 		// moduleEngine/callEngine created from this engine (i.e. per
@@ -167,13 +163,9 @@ var _ wasm.Engine = (*engine)(nil)
 
 // NewEngine returns the implementation of wasm.Engine.
 func NewEngine(ctx context.Context, enabledFeatures api.CoreFeatures, fc filecache.Cache) wasm.Engine {
-	machine := newMachine()
-	be := backend.NewCompiler(ctx, machine, ssa.NewBuilder())
 	e := &engine{
 		compiledModules: make(map[wasm.ModuleID]*compiledModuleWithCount),
 		setFinalizer:    runtime.SetFinalizer,
-		machine:         machine,
-		be:              be,
 		fileCache:       fc,
 		wazyVersion:     version.GetWazyVersion(),
 		enabledFeatures: enabledFeatures,
@@ -288,6 +280,35 @@ func (exec *executables) compileEntryPreambles(m *wasm.Module, machine backend.M
 	}
 }
 
+// compileUnit is the state one goroutine needs to compile functions: a Machine, its ssa.Builder,
+// and the backend.Compiler binding the two.
+type compileUnit struct {
+	machine backend.Machine
+	builder ssa.Builder
+	be      backend.Compiler
+}
+
+// compileUnits recycles compileUnits across modules. All three components hold nativeapi.Pool
+// pages (instructions, labels, blocks) that their Reset keeps for the next function, so a unit
+// that has already compiled a module starts the next one with those pages warm instead of
+// growing them again. Nothing in a unit is engine-specific -- newMachine takes no arguments --
+// so one process-wide pool serves every Runtime, including the common case of a Runtime that
+// compiles a single module and is thrown away.
+var compileUnits sync.Pool
+
+// acquireCompileUnit returns a unit ready to compile a module. Per-function state is reset by
+// backend.Compiler.Init before each function; InitModule drops what only holds within one module.
+func acquireCompileUnit() *compileUnit {
+	if u, ok := compileUnits.Get().(*compileUnit); ok {
+		u.be.InitModule()
+		return u
+	}
+	machine := newMachine()
+	builder := ssa.NewBuilder()
+	// NewCompiler discards the context, and a unit outlives any single compilation anyway.
+	return &compileUnit{machine: machine, builder: builder, be: backend.NewCompiler(context.Background(), machine, builder)}
+}
+
 func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listeners []api.FunctionListener, ensureTermination bool) (*compiledModule, error) {
 	if module.IsHostModule {
 		return e.compileHostModule(ctx, module, listeners)
@@ -312,7 +333,10 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 		return cm, nil
 	}
 
-	machine := newMachine()
+	unit := acquireCompileUnit()
+	defer compileUnits.Put(unit)
+	machine, ssaBuilder, be := unit.machine, unit.builder, unit.be
+
 	relocator, err := newEngineRelocator(machine, importedFns, localFns)
 	if err != nil {
 		return nil, err
@@ -320,8 +344,6 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 
 	needSourceInfo := module.DWARFLines != nil
 
-	ssaBuilder := ssa.NewBuilder()
-	be := backend.NewCompiler(ctx, machine, ssaBuilder)
 	cm.executables.compileEntryPreambles(module, machine, be)
 	cm.functionOffsets = make([]int, localFns)
 	cm.ehTables = make([][]nativeapi.EhEntry, localFns)
@@ -392,10 +414,10 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 			go func() {
 				defer wg.Done()
 
-				// Creates new compiler instances which are reused for each function.
-				machine := newMachine()
-				ssaBuilder := ssa.NewBuilder()
-				be := backend.NewCompiler(ctx, machine, ssaBuilder)
+				// Takes compiler instances which are reused for each function.
+				unit := acquireCompileUnit()
+				defer compileUnits.Put(unit)
+				ssaBuilder, be := unit.builder, unit.be
 				fe := frontend.NewFrontendCompiler(
 					module, ssaBuilder, &cm.offsets, ensureTermination, withListener, needSourceInfo).
 					WithTryTableMetadata(sharedTTM)
@@ -764,8 +786,9 @@ func buildEhEntries(pending []frontend.EhPendingEntry, blockOffsets []backend.Co
 }
 
 func (e *engine) compileHostModule(ctx context.Context, module *wasm.Module, listeners []api.FunctionListener) (*compiledModule, error) {
-	machine := newMachine()
-	be := backend.NewCompiler(ctx, machine, ssa.NewBuilder())
+	unit := acquireCompileUnit()
+	defer compileUnits.Put(unit)
+	machine, be := unit.machine, unit.be
 
 	num := len(module.CodeSection)
 	cm := &compiledModule{module: module, listeners: listeners, executables: &executables{}}
@@ -979,6 +1002,10 @@ func (e *engine) NewModuleEngine(m *wasm.Module, mi *wasm.ModuleInstance) (wasm.
 }
 
 func (e *engine) compileSharedFunctions() {
+	unit := acquireCompileUnit()
+	defer compileUnits.Put(unit)
+	machine, be := unit.machine, unit.be
+
 	var sizes [14]int
 	var trampolines []byte
 
@@ -989,104 +1016,104 @@ func (e *engine) compileSharedFunctions() {
 		sizes[i] = len(buf) + align
 	}
 
-	e.be.Init()
+	be.Init()
 	addTrampoline(0,
-		e.machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeGrowMemory, &ssa.Signature{
+		machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeGrowMemory, &ssa.Signature{
 			// The page delta and result are i64 whatever the memory's index type;
 			// see frontend's memoryGrowSig.
 			Params:  []ssa.Type{ssa.TypeI64 /* exec context */, ssa.TypeI32 /* memory index */, ssa.TypeI64 /* pages */},
 			Results: []ssa.Type{ssa.TypeI64},
 		}, false))
 
-	e.be.Init()
+	be.Init()
 	addTrampoline(1,
-		e.machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeTableGrow, &ssa.Signature{
+		machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeTableGrow, &ssa.Signature{
 			Params:  []ssa.Type{ssa.TypeI64 /* exec context */, ssa.TypeI32 /* table index */, ssa.TypeI64 /* num */, ssa.TypeI64 /* ref */},
 			Results: []ssa.Type{ssa.TypeI64},
 		}, false))
 
-	e.be.Init()
+	be.Init()
 	addTrampoline(2,
-		e.machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeCheckModuleExitCode, &ssa.Signature{
+		machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeCheckModuleExitCode, &ssa.Signature{
 			Params:  []ssa.Type{ssa.TypeI32 /* exec context */},
 			Results: []ssa.Type{ssa.TypeI32},
 		}, false))
 
-	e.be.Init()
+	be.Init()
 	addTrampoline(3,
-		e.machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeRefFunc, &ssa.Signature{
+		machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeRefFunc, &ssa.Signature{
 			Params:  []ssa.Type{ssa.TypeI64 /* exec context */, ssa.TypeI32 /* function index */},
 			Results: []ssa.Type{ssa.TypeI64}, // returns the function reference.
 		}, false))
 
-	e.be.Init()
-	addTrampoline(4, e.machine.CompileStackGrowCallSequence())
+	be.Init()
+	addTrampoline(4, machine.CompileStackGrowCallSequence())
 
-	e.be.Init()
+	be.Init()
 	addTrampoline(5,
-		e.machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeMemoryWait32, &ssa.Signature{
+		machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeMemoryWait32, &ssa.Signature{
 			// exec context, memory index, timeout, expected, addr
 			Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI32, ssa.TypeI64},
 			// Returns the status.
 			Results: []ssa.Type{ssa.TypeI32},
 		}, false))
 
-	e.be.Init()
+	be.Init()
 	addTrampoline(6,
-		e.machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeMemoryWait64, &ssa.Signature{
+		machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeMemoryWait64, &ssa.Signature{
 			// exec context, memory index, timeout, expected, addr
 			Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64},
 			// Returns the status.
 			Results: []ssa.Type{ssa.TypeI32},
 		}, false))
 
-	e.be.Init()
+	be.Init()
 	addTrampoline(7,
-		e.machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeMemoryNotify, &ssa.Signature{
+		machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeMemoryNotify, &ssa.Signature{
 			// exec context, memory index, count, addr
 			Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI32, ssa.TypeI64},
 			// Returns the number notified.
 			Results: []ssa.Type{ssa.TypeI32},
 		}, false))
 
-	e.be.Init()
+	be.Init()
 	addTrampoline(8,
-		e.machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeThrowAlloc, &ssa.Signature{
+		machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeThrowAlloc, &ssa.Signature{
 			// exec context, tag index → exnref
 			Params:  []ssa.Type{ssa.TypeI64, ssa.TypeI64},
 			Results: []ssa.Type{ssa.TypeI64},
 		}, false))
 
-	e.be.Init()
+	be.Init()
 	addTrampoline(9,
-		e.machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeThrow, &ssa.Signature{
+		machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeThrow, &ssa.Signature{
 			// exec context, exnref
 			Params:  []ssa.Type{ssa.TypeI64, ssa.TypeI64},
 			Results: []ssa.Type{},
 		}, false))
 
-	e.be.Init()
+	be.Init()
 	addTrampoline(10,
-		e.machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeTryTableEnter, &ssa.Signature{
+		machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeTryTableEnter, &ssa.Signature{
 			// exec context, catch clause info (encoded)
 			Params:  []ssa.Type{ssa.TypeI64, ssa.TypeI64},
 			Results: []ssa.Type{},
 		}, false))
 
-	e.be.Init()
+	be.Init()
 	addTrampoline(11,
-		e.machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeTryTableLeave, &ssa.Signature{
+		machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeTryTableLeave, &ssa.Signature{
 			// exec context
 			Params:  []ssa.Type{ssa.TypeI64},
 			Results: []ssa.Type{},
 		}, false))
 
-	e.be.Init()
-	addTrampoline(12, e.machine.CompileThrowTransferRegisterRestore())
+	be.Init()
+	addTrampoline(12, machine.CompileThrowTransferRegisterRestore())
 
-	e.be.Init()
+	be.Init()
 	addTrampoline(13,
-		e.machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeGCCheck, &ssa.Signature{
+		machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeGCCheck, &ssa.Signature{
 			// exec context, then the mode and five operands of wasm.RunGC: see gcSig.
 			Params: []ssa.Type{
 				ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64,
@@ -1213,19 +1240,23 @@ func (e *engine) getListenerTrampolineForType(functionType *wasm.FunctionType) (
 
 	trampoline, ok := e.sharedFunctions.listenerTrampolines[functionType]
 	if !ok {
+		unit := acquireCompileUnit()
+		defer compileUnits.Put(unit)
+		machine, be := unit.machine, unit.be
+
 		var executable []byte
 		beforeSig, afterSig := frontend.SignatureForListener(functionType)
 
-		e.be.Init()
-		buf := e.machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeCallListenerBefore, beforeSig, false)
+		be.Init()
+		buf := machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeCallListenerBefore, beforeSig, false)
 		executable = append(executable, buf...)
 
 		align := 15 & -len(executable) // Align 16-bytes boundary.
 		executable = append(executable, make([]byte, align)...)
 		offset := len(executable)
 
-		e.be.Init()
-		buf = e.machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeCallListenerAfter, afterSig, false)
+		be.Init()
+		buf = machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeCallListenerAfter, afterSig, false)
 		executable = append(executable, buf...)
 
 		trampoline.executable = mmapExecutable(executable)

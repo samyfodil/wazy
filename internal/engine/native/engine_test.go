@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"sync"
 	"testing"
 	"unsafe"
 
@@ -281,4 +282,76 @@ func TestEngine_WasmModulesShareCompiledModule(t *testing.T) {
 	e.DeleteCompiledModule(m)
 	_, ok = e.compiledModules[m.ID]
 	require.False(t, ok)
+}
+
+// TestEngine_CompileModule_concurrent compiles modules of differing shapes from several
+// goroutines at once and requires the machine code to be identical to compiling them one at a
+// time. Compilation state (machine, ssa.Builder, backend.Compiler) is recycled through
+// compileUnits, so this is what catches a unit reaching two goroutines at once, or carrying the
+// previous module's ssa.SignatureID-keyed ABI cache into the next one. Run it under -race.
+func TestEngine_CompileModule_concurrent(t *testing.T) {
+	ctx := context.Background()
+
+	// Shapes differ in arity and register class so that a stale ABI would misplace arguments,
+	// and the widest one spills arguments to the stack.
+	mods := []*wasm.Module{
+		{
+			TypeSection:     []wasm.FunctionType{{Params: []wasm.ValueType{wasm.ValueTypeI32, wasm.ValueTypeI32}, Results: []wasm.ValueType{wasm.ValueTypeI32}}},
+			FunctionSection: []wasm.Index{0},
+			CodeSection:     []wasm.Code{{Body: []byte{wasm.OpcodeLocalGet, 0, wasm.OpcodeLocalGet, 1, wasm.OpcodeI32Add, wasm.OpcodeEnd}}},
+		},
+		{
+			TypeSection:     []wasm.FunctionType{{Params: []wasm.ValueType{wasm.ValueTypeF64, wasm.ValueTypeF64}, Results: []wasm.ValueType{wasm.ValueTypeF64}}},
+			FunctionSection: []wasm.Index{0},
+			CodeSection:     []wasm.Code{{Body: []byte{wasm.OpcodeLocalGet, 0, wasm.OpcodeLocalGet, 1, wasm.OpcodeF64Add, wasm.OpcodeEnd}}},
+		},
+		{
+			TypeSection: []wasm.FunctionType{{
+				Params: []wasm.ValueType{
+					wasm.ValueTypeI64, wasm.ValueTypeI64, wasm.ValueTypeI64, wasm.ValueTypeI64,
+					wasm.ValueTypeI64, wasm.ValueTypeI64, wasm.ValueTypeI64, wasm.ValueTypeI64,
+					wasm.ValueTypeI64, wasm.ValueTypeI64, wasm.ValueTypeI64, wasm.ValueTypeI64,
+				},
+				Results: []wasm.ValueType{wasm.ValueTypeI64},
+			}},
+			FunctionSection: []wasm.Index{0},
+			CodeSection:     []wasm.Code{{Body: []byte{wasm.OpcodeLocalGet, 11, wasm.OpcodeEnd}}},
+		},
+		{
+			TypeSection:     []wasm.FunctionType{{}},
+			FunctionSection: []wasm.Index{0},
+			CodeSection:     []wasm.Code{{Body: []byte{wasm.OpcodeEnd}}},
+		},
+	}
+	// Same engine throughout: the shared-function trampolines the code refers to are per engine.
+	e := NewEngine(ctx, api.CoreFeaturesV2, nil).(*engine)
+
+	want := make([][]byte, len(mods))
+	for i, m := range mods {
+		cm, err := e.compileModule(ctx, m, nil, false)
+		require.NoError(t, err)
+		want[i] = append([]byte(nil), cm.executable...)
+	}
+
+	got := make([][]byte, len(mods))
+	errs := make([]error, len(mods))
+	var wg sync.WaitGroup
+	for i, m := range mods {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cm, err := e.compileModule(ctx, m, nil, false)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			got[i] = append([]byte(nil), cm.executable...)
+		}()
+	}
+	wg.Wait()
+
+	for i := range mods {
+		require.NoError(t, errs[i])
+		require.Equal(t, want[i], got[i])
+	}
 }

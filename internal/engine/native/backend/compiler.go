@@ -71,6 +71,11 @@ type Compiler interface {
 	// Init initializes the internal state of the compiler for the next compilation.
 	Init()
 
+	// InitModule drops the state that is only valid within a single module: the ABI cache is
+	// keyed by ssa.SignatureID, and those IDs are reassigned by every module. Must be called
+	// before compiling a module with a Compiler carried over from a previous one.
+	InitModule()
+
 	// AllocateVReg allocates a new virtual register of the given type.
 	AllocateVReg(typ ssa.Type) regalloc.VReg
 
@@ -300,6 +305,13 @@ func (c *compiler) Init() {
 	c.buf = c.buf[:0]
 	c.sourceOffsets = c.sourceOffsets[:0]
 	c.relocations = c.relocations[:0]
+}
+
+// InitModule implements Compiler.InitModule.
+func (c *compiler) InitModule() {
+	// GetFunctionABI re-initializes an entry whenever it is not Initialized, and append writes
+	// zeroes over the retained backing array, so truncating is a complete reset.
+	c.abis = c.abis[:0]
 }
 
 // ValueDefinition implements Compiler.ValueDefinition.

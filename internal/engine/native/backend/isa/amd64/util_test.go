@@ -78,6 +78,7 @@ func (m *mockCompiler) RegAlloc()                            {}
 func (m *mockCompiler) Lower()                               {}
 func (m *mockCompiler) Format() string                       { return "" }
 func (m *mockCompiler) Init()                                {}
+func (m *mockCompiler) InitModule()                          {}
 
 func newMockCompilationContext() *mockCompiler { //nolint
 	return &mockCompiler{
