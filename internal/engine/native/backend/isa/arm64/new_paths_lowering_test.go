@@ -756,3 +756,108 @@ func TestMachine_lowerSubOrAdd_mulAccumulate(t *testing.T) {
 		require.Equal(t, "add x5, x4, #0x20", formatEmittedInstructionsInCurrentBlock(m))
 	})
 }
+
+// Test_aliasZeroExtended32 covers the pass that lets an unsigned 32->64 extend
+// emit nothing: when the operand's producer already zeroed bits [63:32], the
+// extend's result is given the operand's own virtual register.
+//
+// The two halves have to stay in step. If zeroExtends32 ever claimed an opcode
+// that leaves garbage in the upper half, or if aliasZeroExtended32 stopped
+// running before lowering, the "no alias" cases below would silently lose their
+// uxtw and the extend would read whatever the producer left there.
+func Test_aliasZeroExtended32(t *testing.T) {
+	// setup builds `v = <producer>` followed by an extend of v, runs the alias
+	// pass over the block, then lowers just the extend.
+	setup := func(t *testing.T, producer func(b ssa.Builder, arg ssa.Value) *ssa.Instruction, signed bool, from, to byte) (*mockCompiler, *machine, *ssa.Instruction) {
+		ctx, b, m := newSetupWithMockContext()
+		param := b.CurrentBlock().AddParam(b, ssa.TypeI32)
+		ctx.vRegMap[param] = intToVReg(1)
+		ctx.definitions[param] = backend.SSAValueDefinition{V: param}
+
+		p := producer(b, param)
+		b.InsertInstruction(p)
+		v := p.Return()
+		ctx.vRegMap[v] = intToVReg(2)
+		ctx.definitions[v] = backend.SSAValueDefinition{V: v, Instr: p}
+
+		ext := b.AllocateInstruction()
+		if signed {
+			ext.AsSExtend(v, from, to)
+		} else {
+			ext.AsUExtend(v, from, to)
+		}
+		b.InsertInstruction(ext)
+		ctx.vRegMap[ext.Return()] = intToVReg(3)
+
+		m.StartBlock(b.CurrentBlock()) // also pins that StartBlock is where the alias pass runs.
+		m.lowerExtend(v, ext.Return(), from, to, signed)
+		return ctx, m, ext
+	}
+
+	iadd32 := func(b ssa.Builder, arg ssa.Value) *ssa.Instruction {
+		return b.AllocateInstruction().AsIadd(arg, arg)
+	}
+	imul32 := func(b ssa.Builder, arg ssa.Value) *ssa.Instruction {
+		return b.AllocateInstruction().AsImul(arg, arg)
+	}
+
+	t.Run("zero-extending producer: aliased, nothing emitted", func(t *testing.T) {
+		ctx, m, ext := setup(t, iadd32, false, 32, 64)
+		require.Equal(t, intToVReg(2), ctx.VRegOf(ext.Return()))
+		require.Equal(t, "nop0", formatEmittedInstructionsInCurrentBlock(m))
+	})
+	t.Run("other producer: not aliased, uxtw emitted", func(t *testing.T) {
+		ctx, m, ext := setup(t, imul32, false, 32, 64)
+		require.Equal(t, intToVReg(3), ctx.VRegOf(ext.Return()))
+		require.Equal(t, "uxtw x3?, w2?\nnop0", formatEmittedInstructionsInCurrentBlock(m))
+	})
+	t.Run("signed extend is never aliased", func(t *testing.T) {
+		ctx, m, ext := setup(t, iadd32, true, 32, 64)
+		require.Equal(t, intToVReg(3), ctx.VRegOf(ext.Return()))
+		require.Equal(t, "sxtw x3?, w2?\nnop0", formatEmittedInstructionsInCurrentBlock(m))
+	})
+	t.Run("narrower source is never aliased", func(t *testing.T) {
+		ctx, m, ext := setup(t, iadd32, false, 8, 64)
+		require.Equal(t, intToVReg(3), ctx.VRegOf(ext.Return()))
+		require.Equal(t, "uxtb x3?, w2?\nnop0", formatEmittedInstructionsInCurrentBlock(m))
+	})
+	t.Run("operand with no producer is never aliased", func(t *testing.T) {
+		ctx, b, m := newSetupWithMockContext()
+		// A function/block parameter has no defining instruction, so nothing vouches for its
+		// upper half -- the entry ABI is free to hand over a full 64-bit register.
+		param := b.CurrentBlock().AddParam(b, ssa.TypeI32)
+		ctx.vRegMap[param] = intToVReg(1)
+		ctx.definitions[param] = backend.SSAValueDefinition{V: param}
+		ext := b.AllocateInstruction()
+		ext.AsUExtend(param, 32, 64)
+		b.InsertInstruction(ext)
+		ctx.vRegMap[ext.Return()] = intToVReg(3)
+
+		m.StartBlock(b.CurrentBlock())
+		m.lowerExtend(param, ext.Return(), 32, 64, false)
+		require.Equal(t, intToVReg(3), ctx.VRegOf(ext.Return()))
+		require.Equal(t, "uxtw x3?, w1?\nnop0", formatEmittedInstructionsInCurrentBlock(m))
+	})
+	t.Run("every trusted producer is aliased", func(t *testing.T) {
+		for name, producer := range map[string]func(b ssa.Builder, arg ssa.Value) *ssa.Instruction{
+			"band": func(b ssa.Builder, arg ssa.Value) *ssa.Instruction {
+				return b.AllocateInstruction().AsBand(arg, arg)
+			},
+			"ishl": func(b ssa.Builder, arg ssa.Value) *ssa.Instruction {
+				return b.AllocateInstruction().AsIshl(arg, arg)
+			},
+			"ushr": func(b ssa.Builder, arg ssa.Value) *ssa.Instruction {
+				return b.AllocateInstruction().AsUshr(arg, arg)
+			},
+			"load": func(b ssa.Builder, arg ssa.Value) *ssa.Instruction {
+				return b.AllocateInstruction().AsLoad(arg, 0, ssa.TypeI32)
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				ctx, m, ext := setup(t, producer, false, 32, 64)
+				require.Equal(t, intToVReg(2), ctx.VRegOf(ext.Return()))
+				require.Equal(t, "nop0", formatEmittedInstructionsInCurrentBlock(m))
+			})
+		}
+	})
+}

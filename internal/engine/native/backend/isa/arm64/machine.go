@@ -239,6 +239,7 @@ func (m *machine) LinkAdjacentBlocks(prev, next ssa.BasicBlock) {
 
 // StartBlock implements backend.Machine.
 func (m *machine) StartBlock(blk ssa.BasicBlock) {
+	m.aliasZeroExtended32(blk)
 	m.currentLabelPos = m.getOrAllocateSSABlockLabelPosition(blk)
 	labelPos := m.currentLabelPos
 	end := m.allocateNop()
