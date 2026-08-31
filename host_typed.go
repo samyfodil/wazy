@@ -3,6 +3,7 @@ package wazy
 import (
 	"context"
 	"math"
+	"unsafe"
 
 	"github.com/samyfodil/wazy/api"
 )
@@ -22,8 +23,7 @@ import (
 // argument. Convert explicitly at the call boundary instead (for example,
 // take a uint32 parameter and cast it to Pages inside the function body).
 // Keeping the constraint to exact types lets decodeHostValue/encodeHostValue
-// resolve entirely through a literal type switch, with no reflection and no
-// per-call allocation.
+// resolve at compile time, with no reflection and no per-call allocation.
 type HostValue interface {
 	uint32 | int32 | uint64 | int64 | float32 | float64 | uintptr
 }
@@ -51,53 +51,35 @@ func hostValueType[T HostValue]() api.ValueType {
 // decodeHostValue decodes a stack slot into a HostValue of type T, following
 // the encoding conventions documented on api.ValueType.
 //
-// Because HostValue is constrained to the exact predeclared numeric types,
-// the type switch below always matches one of its cases; it costs no more
-// than a hand-written WithGoModuleFunction adapter (no reflection, no
-// per-call allocation; see TestHostFunc_zeroAllocs).
+// Both tests are on constants of T, so the compiler folds them and the decode
+// is the single move it would be in a hand-written WithGoModuleFunction
+// adapter. A type switch on any(zero) does not fold: the dynamic type comes
+// from the generic dictionary, so it stays a real switch on every host call.
 func decodeHostValue[T HostValue](raw uint64) T {
 	var zero T
-	switch any(zero).(type) {
-	case uint32:
-		return T(uint32(raw))
-	case int32:
-		return T(int32(raw))
-	case uint64:
-		return T(raw)
-	case int64:
-		return T(int64(raw))
-	case float32:
-		return T(math.Float32frombits(uint32(raw)))
-	case float64:
+	if T(1)/T(2) != 0 { // integer division truncates to 0, so T is a float
+		if unsafe.Sizeof(zero) == 4 {
+			return T(math.Float32frombits(uint32(raw)))
+		}
 		return T(math.Float64frombits(raw))
-	case uintptr:
-		return T(uintptr(raw))
-	default:
-		panic("wazy: BUG: unreachable, T is constrained to HostValue")
 	}
+	// Every integer HostValue, signed or not, is the slot truncated to its own
+	// width, which is exactly what converting from uint64 does.
+	return T(raw)
 }
 
 // encodeHostValue encodes v as a stack slot, following the encoding
 // conventions documented on api.ValueType. See decodeHostValue.
 func encodeHostValue[T HostValue](v T) uint64 {
-	switch x := any(v).(type) {
-	case uint32:
-		return uint64(x)
-	case int32:
-		return uint64(int64(x))
-	case uint64:
-		return x
-	case int64:
-		return uint64(x)
-	case float32:
-		return uint64(math.Float32bits(x))
-	case float64:
-		return math.Float64bits(x)
-	case uintptr:
-		return uint64(x)
-	default:
-		panic("wazy: BUG: unreachable, T is constrained to HostValue")
+	if T(1)/T(2) != 0 { // T is a float, see decodeHostValue
+		if unsafe.Sizeof(v) == 4 {
+			return uint64(math.Float32bits(float32(v)))
+		}
+		return math.Float64bits(float64(v))
 	}
+	// Converting to uint64 sign-extends a signed HostValue and zero-extends an
+	// unsigned one, which is what api.ValueType asks for.
+	return uint64(v)
 }
 
 // HostFunc0 defines a host function taking no parameters besides the

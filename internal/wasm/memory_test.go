@@ -330,6 +330,35 @@ func TestMemoryInstance_HasSize(t *testing.T) {
 	})
 }
 
+// TestMemoryInstance_logicalSizeBounds pins the four extracted numeric
+// accessors to the logical size rather than to the allocation: each folds
+// hasSize and visibleBuffer into one bounds test, so spare capacity past
+// sizeBytes has to stay invisible.
+func TestMemoryInstance_logicalSizeBounds(t *testing.T) {
+	// Eight logical bytes inside a thirty-two byte allocation.
+	m := &MemoryInstance{Buffer: make([]byte, 32), sizeBytes: 8}
+
+	require.True(t, m.writeUint64Le(0, math.MaxUint64))
+	require.True(t, m.writeUint32Le(4, math.MaxUint32))
+	require.False(t, m.writeUint64Le(1, math.MaxUint64))
+	require.False(t, m.writeUint32Le(5, math.MaxUint32))
+
+	v64, ok := m.readUint64Le(0)
+	require.True(t, ok)
+	require.Equal(t, uint64(math.MaxUint64), v64)
+	v32, ok := m.readUint32Le(4)
+	require.True(t, ok)
+	require.Equal(t, uint32(math.MaxUint32), v32)
+
+	_, ok = m.readUint64Le(1)
+	require.False(t, ok)
+	_, ok = m.readUint32Le(5)
+	require.False(t, ok)
+
+	// The rejected writes must not have reached the spare capacity.
+	require.Equal(t, make([]byte, 24), m.Buffer[8:])
+}
+
 func TestMemoryInstance_ReadUint16Le(t *testing.T) {
 	tests := []struct {
 		name       string

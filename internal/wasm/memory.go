@@ -656,14 +656,14 @@ func (m *MemoryInstance) hasSize64(offset, byteCount uint64) bool {
 }
 
 func (m *MemoryInstance) byteSize() uint64 {
+	var size uint64
 	if m.Shared {
-		if size := atomic.LoadUint64(&m.sizeBytes); size != 0 || len(m.Buffer) == 0 {
-			return size
-		}
-		return uint64(len(m.Buffer))
+		size = atomic.LoadUint64(&m.sizeBytes)
+	} else {
+		size = m.sizeBytes
 	}
-	if m.sizeBytes != 0 || len(m.Buffer) == 0 {
-		return m.sizeBytes
+	if size != 0 || len(m.Buffer) == 0 {
+		return size
 	}
 	// Preserve support for internal/tests constructing MemoryInstance literals.
 	return uint64(len(m.Buffer))
@@ -682,39 +682,52 @@ func (m *MemoryInstance) allocatedBuffer() []byte {
 
 // readUint32Le implements ReadUint32Le without using a context. This is extracted as both ints and floats are stored in
 // memory as uint32le.
+//
+// It bounds-checks against the visible buffer's own length instead of calling
+// hasSize, here and in the three below: hasSize and visibleBuffer each evaluate
+// byteSize, and a shared memory's atomic load stops the compiler from merging
+// the two.
 func (m *MemoryInstance) readUint32Le(offset uint32) (uint32, bool) {
-	if !m.hasSize(offset, 4) {
+	buf := m.visibleBuffer()
+	off := uint64(offset)
+	if off+4 > uint64(len(buf)) {
 		return 0, false
 	}
-	return binary.LittleEndian.Uint32(m.visibleBuffer()[offset:]), true
+	return binary.LittleEndian.Uint32(buf[off : off+4]), true
 }
 
 // readUint64Le implements ReadUint64Le without using a context. This is extracted as both ints and floats are stored in
 // memory as uint64le.
 func (m *MemoryInstance) readUint64Le(offset uint32) (uint64, bool) {
-	if !m.hasSize(offset, 8) {
+	buf := m.visibleBuffer()
+	off := uint64(offset)
+	if off+8 > uint64(len(buf)) {
 		return 0, false
 	}
-	return binary.LittleEndian.Uint64(m.visibleBuffer()[offset:]), true
+	return binary.LittleEndian.Uint64(buf[off : off+8]), true
 }
 
 // writeUint32Le implements WriteUint32Le without using a context. This is extracted as both ints and floats are stored
 // in memory as uint32le.
 func (m *MemoryInstance) writeUint32Le(offset uint32, v uint32) bool {
-	if !m.hasSize(offset, 4) {
+	buf := m.visibleBuffer()
+	off := uint64(offset)
+	if off+4 > uint64(len(buf)) {
 		return false
 	}
-	binary.LittleEndian.PutUint32(m.visibleBuffer()[offset:], v)
+	binary.LittleEndian.PutUint32(buf[off:off+4], v)
 	return true
 }
 
 // writeUint64Le implements WriteUint64Le without using a context. This is extracted as both ints and floats are stored
 // in memory as uint64le.
 func (m *MemoryInstance) writeUint64Le(offset uint32, v uint64) bool {
-	if !m.hasSize(offset, 8) {
+	buf := m.visibleBuffer()
+	off := uint64(offset)
+	if off+8 > uint64(len(buf)) {
 		return false
 	}
-	binary.LittleEndian.PutUint64(m.visibleBuffer()[offset:], v)
+	binary.LittleEndian.PutUint64(buf[off:off+8], v)
 	return true
 }
 

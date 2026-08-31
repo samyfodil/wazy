@@ -310,8 +310,8 @@ func i32s(n int) []api.ValueType {
 
 // TestHostFunc_zeroAllocs guards the headline win of the typed API: calling
 // the GoModuleFunction produced by HostFunc1 must not allocate. This proves
-// decodeHostValue/encodeHostValue resolve entirely through their literal
-// type switches, never touching the allocating reflection machinery.
+// decodeHostValue/encodeHostValue resolve entirely at compile time, never
+// touching the allocating reflection machinery.
 //
 // This calls the registered api.GoModuleFunction directly with a reused
 // stack: it is simpler than round-tripping through a wasm-defined importing
@@ -365,4 +365,93 @@ func goModuleFuncFor(t *testing.T, b HostFunctionBuilder) api.GoModuleFunction {
 	fn, ok := hostFn.Code.GoFunc.(api.GoModuleFunction)
 	require.True(t, ok)
 	return fn
+}
+
+// decodeHostValueRef and encodeHostValueRef are the literal type switches that
+// decodeHostValue and encodeHostValue replaced with tests the compiler folds
+// per instantiation. They stay here as the reference: a fold that resolves to
+// the wrong conversion silently corrupts guest values rather than failing
+// loudly, and TestHostValue_matchesReference is what catches it.
+func decodeHostValueRef[T HostValue](raw uint64) T {
+	var zero T
+	switch any(zero).(type) {
+	case uint32:
+		return T(uint32(raw))
+	case int32:
+		return T(int32(raw))
+	case uint64:
+		return T(raw)
+	case int64:
+		return T(int64(raw))
+	case float32:
+		return T(math.Float32frombits(uint32(raw)))
+	case float64:
+		return T(math.Float64frombits(raw))
+	case uintptr:
+		return T(uintptr(raw))
+	default:
+		panic("unreachable")
+	}
+}
+
+func encodeHostValueRef[T HostValue](v T) uint64 {
+	switch x := any(v).(type) {
+	case uint32:
+		return uint64(x)
+	case int32:
+		return uint64(int64(x))
+	case uint64:
+		return x
+	case int64:
+		return uint64(x)
+	case float32:
+		return uint64(math.Float32bits(x))
+	case float64:
+		return math.Float64bits(x)
+	case uintptr:
+		return uint64(x)
+	default:
+		panic("unreachable")
+	}
+}
+
+// TestHostValue_matchesReference checks decodeHostValue and encodeHostValue
+// against those references for every HostValue type, over the bit patterns
+// where a wrong conversion shows up: a sign extension that should have been a
+// truncation, a float slot reinterpreted as an integer, an f32 payload read at
+// 64 bits.
+func TestHostValue_matchesReference(t *testing.T) {
+	raws := []uint64{
+		0, 1, 0x7fffffff, 0x80000000, 0xffffffff, 1 << 32,
+		math.MaxInt64, 1 << 63, math.MaxUint64, 0x0123456789abcdef,
+		uint64(math.Float32bits(float32(math.Pi))),
+		uint64(math.Float32bits(float32(math.NaN()))),
+		math.Float64bits(-math.E),
+		math.Float64bits(math.Inf(-1)),
+		math.Float64bits(math.Copysign(0, -1)),
+	}
+	requireHostValueMatches[uint32](t, "uint32", raws)
+	requireHostValueMatches[int32](t, "int32", raws)
+	requireHostValueMatches[uint64](t, "uint64", raws)
+	requireHostValueMatches[int64](t, "int64", raws)
+	requireHostValueMatches[float32](t, "float32", raws)
+	requireHostValueMatches[float64](t, "float64", raws)
+	requireHostValueMatches[uintptr](t, "uintptr", raws)
+}
+
+func requireHostValueMatches[T HostValue](t *testing.T, name string, raws []uint64) {
+	t.Helper()
+	for _, raw := range raws {
+		// Values are compared through the reference encoder rather than
+		// directly, so a NaN payload or a negative zero compares by its bits.
+		got, want := decodeHostValue[T](raw), decodeHostValueRef[T](raw)
+		if encodeHostValueRef(got) != encodeHostValueRef(want) {
+			t.Fatalf("decodeHostValue[%s](%#x) = %#x, want %#x",
+				name, raw, encodeHostValueRef(got), encodeHostValueRef(want))
+		}
+		if encodeHostValue(want) != encodeHostValueRef(want) {
+			t.Fatalf("encodeHostValue[%s](decode(%#x)) = %#x, want %#x",
+				name, raw, encodeHostValue(want), encodeHostValueRef(want))
+		}
+	}
 }
