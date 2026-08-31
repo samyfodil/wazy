@@ -303,23 +303,13 @@ func (m *machine) EhCtxSlotOffsets() (execCtxOffset, moduleCtxOffset int64) {
 	return 16, 24
 }
 
-// needsCtxSlot reports whether this function reserves the fixed exec-context
-// slot at the bottom of the spill region. Two readers need it: the P3.0 EH path
-// (both execCtx and moduleCtx) and the shared conditional-trap islands (execCtx
-// only -- reloaded there instead of being copied into x27 at every trap site;
-// see lowerExitIfTrueWithCodeShared / emitTrapIslands). Trap islands are created
-// during lowering, so len(trapIslands) is final by RegAlloc time.
-func (m *machine) needsCtxSlot() bool {
-	return m.hasEHContext || len(m.trapIslands) > 0
-}
-
 // RegAlloc implements backend.Machine Function.
 func (m *machine) RegAlloc() {
 	// Reserve the fixed execCtx/moduleCtx slots at the bottom of the
 	// spill-slot region before the allocator hands out any of its own slots,
 	// so the reserved offsets ([SP+16]/[SP+24]) are stable regardless of how
 	// many spill slots this function ends up needing.
-	if m.needsCtxSlot() {
+	if m.hasEHContext {
 		m.spillSlotSize = ehCtxReservedSlotSize
 	}
 	m.regAllocStarted = true

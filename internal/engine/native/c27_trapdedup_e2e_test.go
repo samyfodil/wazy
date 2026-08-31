@@ -10,10 +10,11 @@ import (
 
 // c27TrapWasm exercises shared trap-island exec-context recovery end-to-end.
 // sum4 does four dynamic loads in one straight-line block, so four bounds-check
-// sites share a machine block. On both backends the exec-context the island
-// needs is written ONCE to the reserved ctx slot in the prologue (see
-// needsCtxSlot / setupPrologue), not re-saved at each site -- amd64 reloads it
-// into RAX, arm64 into x27. The correctness risk is that a trap
+// sites share a machine block. On amd64 the exec-context the island needs is
+// written ONCE to the reserved ctx slot in the prologue (see setupPrologue),
+// not re-saved at each site; arm64 copies it per site into x27 instead, because
+// the reserved-slot form measured slower there (see the arm64 note in
+// OPTIMIZATIONS.md). The correctness risk is that a trap
 // at any of these sites — here the second load — must recover the exec-context
 // from the reserved slot and report memory_out_of_bounds, not a stale/garbage
 // trap or a crash.

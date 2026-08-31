@@ -1645,6 +1645,7 @@ L0 (SSA Block: blk0):
 	ldr x133?, [x129?, #0x10]
 	add x134?, x132?, #0x4
 	subs xzr, x133?, x134?
+	mov x27, x128?
 	b.lo L2
 	ldr x136?, [x129?, #0x8]
 	add x139?, x136?, x132?
@@ -1655,25 +1656,20 @@ L0 (SSA Block: blk0):
 			afterFinalizeARM64: `
 L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
-	sub sp, sp, #0x10
-	orr x27, xzr, #0x10
-	str x27, [sp, #-0x10]!
-	str x0, [sp, #0x10]
+	str xzr, [sp, #-0x10]!
 	uxtw x8, w2
 	ldr x9, [x1, #0x10]
 	add x10, x8, #0x4
 	subs xzr, x9, x10
-	b.lo #0x24, (L2)
+	mov x27, x0
+	b.lo #0x1c, (L2)
 	ldr x9, [x1, #0x8]
 	add x8, x9, x8
-	ldr w8, [x8]
-	mov x0, x8
-	add sp, sp, #0x10
+	ldr w0, [x8]
 	add sp, sp, #0x10
 	ldr x30, [sp], #0x10
 	ret
 L2:
-	ldr x27, [sp, #0x10]
 	movz x17, #0x4, lsl 0
 	str w17, [x27]
 	mov x17, sp
@@ -1924,11 +1920,8 @@ L0 (SSA Block: blk0):
 	orr x27, xzr, #0x10
 	sub sp, sp, x27
 	stp x30, x27, [sp, #-0x10]!
-	sub sp, sp, #0x10
-	orr x27, xzr, #0x10
-	str x27, [sp, #-0x10]!
-	str x0, [sp, #0x10]
-	ldr x8, [sp, #0x30]
+	str xzr, [sp, #-0x10]!
+	ldr x8, [sp, #0x20]
 	ldr x9, [x1, #0x8]
 	mov x10, xzr
 	add x10, x9, w10 UXTW
@@ -1936,12 +1929,14 @@ L0 (SSA Block: blk0):
 	orr w11, wzr, #0x8
 	add x11, x9, w11 UXTW
 	ands xzr, x11, #0x1
-	b.ne #0x7c, (L2)
+	mov x27, x0
+	b.ne #0x88, (L2)
 	ldaddalh w3, w1, x11
 	orr w11, wzr, #0x10
 	add x11, x9, w11 UXTW
 	ands xzr, x11, #0x3
-	b.ne #0x68, (L2)
+	mov x27, x0
+	b.ne #0x70, (L2)
 	ldaddal w4, w2, x11
 	orr w11, wzr, #0x18
 	add x11, x9, w11 UXTW
@@ -1949,26 +1944,27 @@ L0 (SSA Block: blk0):
 	orr w11, wzr, #0x20
 	add x11, x9, w11 UXTW
 	ands xzr, x11, #0x1
-	b.ne #0x48, (L2)
+	mov x27, x0
+	b.ne #0x4c, (L2)
 	ldaddalh w6, w4, x11
 	movz w11, #0x28, lsl 0
 	add x11, x9, w11 UXTW
 	ands xzr, x11, #0x3
+	mov x27, x0
 	b.ne #0x34, (L2)
 	ldaddal w7, w5, x11
 	orr w11, wzr, #0x30
 	add x9, x9, w11 UXTW
 	ands xzr, x9, #0x7
-	b.ne #0x20, (L2)
+	mov x27, x0
+	b.ne #0x1c, (L2)
 	ldaddal x8, x6, x9
 	mov x0, x10
-	add sp, sp, #0x10
 	add sp, sp, #0x10
 	ldr x30, [sp], #0x10
 	add sp, sp, #0x10
 	ret
 L2:
-	ldr x27, [sp, #0x10]
 	movz x17, #0x17, lsl 0
 	str w17, [x27]
 	mov x17, sp

@@ -177,7 +177,7 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 			// specific site.
 			m.lowerExitIfTrueWithCode(m.compiler.VRegOf(execCtx), c, code)
 		} else {
-			m.lowerExitIfTrueWithCodeShared(c, code)
+			m.lowerExitIfTrueWithCodeShared(m.compiler.VRegOf(execCtx), c, code)
 		}
 	case ssa.OpcodeStore, ssa.OpcodeIstore8, ssa.OpcodeIstore16, ssa.OpcodeIstore32:
 		m.lowerStore(instr)
@@ -2158,14 +2158,16 @@ func (m *machine) lowerExitIfTrueWithCode(execCtxVReg regalloc.VReg, cond ssa.Va
 // code, instead of inlining the whole exit sequence at each site. The hot
 // path falls through (the branch is taken only when trapping), and the
 // island is materialized once, after register allocation, by emitTrapIslands.
-func (m *machine) lowerExitIfTrueWithCodeShared(cond ssa.Value, code nativeapi.ExitCode) {
+func (m *machine) lowerExitIfTrueWithCodeShared(execCtxVReg regalloc.VReg, cond ssa.Value, code nativeapi.ExitCode) {
 	condDef := m.compiler.ValueDefinition(cond)
 	trapCond := m.lowerTrapCond(condDef)
 
-	// No per-site exec-context copy: the island reloads execCtx from the
-	// reserved ctx slot ([sp + EhCtxSlotOffsets execCtx]), written once in the
-	// prologue for any function with trap islands (see needsCtxSlot,
-	// setupPrologue, emitTrapIslands).
+	// The island runs after register allocation, so it needs the execution
+	// context in a fixed register: the reserved tmp register, which is never
+	// allocated and holds no live value between lowered sequences.
+	mov := m.allocateInstr()
+	mov.asMove64(tmpRegVReg, execCtxVReg)
+	m.insert(mov)
 
 	cbr := m.allocateInstr()
 	cbr.asCondBr(trapCond, m.getOrCreateTrapIsland(code), false /* ignored */)
