@@ -23,12 +23,9 @@ type (
 		parent    *compiledModule
 		module    *wasm.ModuleInstance
 		opaque    moduleContextOpaque
-		// localFunctionInstances memoizes one functionInstance per local function: ref.func must yield
-		// the same reference every time it runs, and materializing one per execution both allocated and
-		// grew the module engine without bound. It is built in full on the first funcref taken -- a
-		// module that takes none never pays for it -- and published atomically so concurrent calls into
-		// one instance agree on the table.
-		localFunctionInstances atomic.Pointer[[]functionInstance]
+		// localFunctionInstances memoizes the funcref of each local function one is taken of. See
+		// localFuncref; a module that never executes ref.func never allocates it.
+		localFunctionInstances atomic.Pointer[[]*functionInstance]
 		importedFunctions      []importedFunction
 		listeners              []api.FunctionListener
 		// gcEnabled caches whether this runtime enables the GC proposal, so the per-call check in
@@ -365,31 +362,57 @@ func (m *moduleEngine) FunctionInstanceReference(funcIndex wasm.Index) wasm.Refe
 		begin, _, _ := m.parent.offsets.ImportedFunctionOffset(funcIndex)
 		return uintptr(unsafe.Pointer(&m.opaque[begin]))
 	}
-	fis := m.localFunctionInstances.Load()
-	if fis == nil {
-		fis = m.buildLocalFunctionInstances()
-	}
-	return uintptr(unsafe.Pointer(&(*fis)[funcIndex-m.module.Source.ImportFunctionCount]))
+	return m.localFuncref(funcIndex)
 }
 
-// buildLocalFunctionInstances materializes the funcref of every local function at once and publishes
-// it. The loser of a race adopts the winner's table, so one function index keeps yielding one
-// reference no matter who built it.
-func (m *moduleEngine) buildLocalFunctionInstances() *[]functionInstance {
-	p, src := m.parent, m.module.Source
-	fis := make([]functionInstance, len(p.functionOffsets))
-	for i := range fis {
-		fis[i] = functionInstance{
-			executable:             &p.executable[p.functionOffsets[i]],
+// localFuncref memoizes one functionInstance per local function index a funcref is actually taken
+// of. Materializing one per execution allocated per instruction and appended to a module-lifetime
+// slice that was never trimmed, so a guest looping on ref.func grew the engine without bound; the
+// append also raced when two goroutines called into one instance.
+//
+// The instances are allocated one at a time and the table holds POINTERS to them, because a funcref
+// is a bare uintptr that the GC does not trace: an entry's address is handed to the guest, so it must
+// never move afterwards. The pointer slice itself is replaced copy-on-write, which moves only the
+// pointers.
+//
+// Keying is sparse rather than by function index: the two are far apart in practice (a TinyGo module
+// exporting ~90 functions takes funcrefs of a handful), and a dense table would cost every instance
+// that takes any funcref at all.
+//
+// ponytail: linear in the number of DISTINCT funcrefs one instance has taken, which is a handful for
+// every module shape here. A module taking hundreds would want a dense table keyed by the
+// declared-function set (internal/wasm computes declaredFunctionIndexes during validation but does
+// not retain it); switch to that if one ever shows up.
+func (m *moduleEngine) localFuncref(funcIndex wasm.Index) wasm.Reference {
+	for {
+		refs := m.localFunctionInstances.Load()
+		if refs != nil {
+			for _, fi := range *refs {
+				if fi.indexInModule == funcIndex {
+					return uintptr(unsafe.Pointer(fi))
+				}
+			}
+		}
+		p, src := m.parent, m.module.Source
+		localIndex := funcIndex - src.ImportFunctionCount
+		fi := &functionInstance{
+			executable:             &p.executable[p.functionOffsets[localIndex]],
 			moduleContextOpaquePtr: m.opaquePtr,
-			typeID:                 m.module.TypeIDs[src.FunctionSection[i]],
-			indexInModule:          src.ImportFunctionCount + wasm.Index(i),
+			typeID:                 m.module.TypeIDs[src.FunctionSection[localIndex]],
+			indexInModule:          funcIndex,
+		}
+		var grown []*functionInstance
+		if refs != nil {
+			grown = make([]*functionInstance, len(*refs), len(*refs)+1)
+			copy(grown, *refs)
+		}
+		grown = append(grown, fi)
+		// A racing writer that got there first is handled by looping: the rescan may find that it
+		// added this very index, in which case that entry wins and this fi is dropped.
+		if m.localFunctionInstances.CompareAndSwap(refs, &grown) {
+			return uintptr(unsafe.Pointer(fi))
 		}
 	}
-	if !m.localFunctionInstances.CompareAndSwap(nil, &fis) {
-		return m.localFunctionInstances.Load()
-	}
-	return &fis
 }
 
 // LookupFunction implements wasm.ModuleEngine.
