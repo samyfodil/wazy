@@ -1809,7 +1809,7 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i64)
 	v18:i64 = Iconst_64 0x0
 	v19:i32 = Icmp neq, v17, v18
 	ExitIfTrue v19, v0, unaligned_atomic
-	v20:i64 = Load v0, 0x488
+	v20:i64 = Load v0, 0x288
 	v21:i32 = Iconst_32 0x0
 	v22:i32 = CallIndirect v20:sig6, v0, v21, v4, v3, v15
 	Jump blk_ret, v22
@@ -1842,7 +1842,7 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i64, v4:i64)
 	v18:i64 = Iconst_64 0x0
 	v19:i32 = Icmp neq, v17, v18
 	ExitIfTrue v19, v0, unaligned_atomic
-	v20:i64 = Load v0, 0x490
+	v20:i64 = Load v0, 0x290
 	v21:i32 = Iconst_32 0x0
 	v22:i32 = CallIndirect v20:sig7, v0, v21, v4, v3, v15
 	Jump blk_ret, v22
@@ -1875,7 +1875,7 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32)
 	v17:i64 = Iconst_64 0x0
 	v18:i32 = Icmp neq, v16, v17
 	ExitIfTrue v18, v0, unaligned_atomic
-	v19:i64 = Load v0, 0x498
+	v19:i64 = Load v0, 0x298
 	v20:i32 = Iconst_32 0x0
 	v21:i32 = CallIndirect v19:sig8, v0, v20, v3, v14
 	Jump blk_ret, v21

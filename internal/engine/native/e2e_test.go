@@ -6,12 +6,14 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"sync"
 	"testing"
 	"unsafe"
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/internal/engine/native"
 	"github.com/samyfodil/wazy/internal/engine/native/testcases"
 	"github.com/samyfodil/wazy/internal/leb128"
 	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
@@ -1873,4 +1875,111 @@ func BenchmarkRefFuncLoop(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+// TestCallEngine_stackRetainedAcrossCalls covers the two paths callWithStack takes to get a wasm
+// stack: the pool round trip a once-called handle does (which is what keeps
+// mod.ExportedFunction(name).Call(ctx) from allocating ~10KB per lookup) and the retained buffer a
+// reused handle keeps instead. They have to produce identical results, and a call that grows the
+// stack has to give the grown buffer back rather than hold it forever. See callEngine.stackRetained.
+func TestCallEngine_stackRetainedAcrossCalls(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler())
+	defer func() { require.NoError(t, r.Close(ctx)) }()
+
+	// (func $id (param i32) (result i32) (local.get 0))
+	// (func $rec (param i32) (result i32)   ;; sum(1..n), deep enough to grow the stack
+	//   (if (result i32) (i32.eqz (local.get 0))
+	//     (then (i32.const 0))
+	//     (else (i32.add (local.get 0) (call $rec (i32.sub (local.get 0) (i32.const 1)))))))
+	m := &wasm.Module{
+		TypeSection:     []wasm.FunctionType{{Params: []wasm.ValueType{i32}, Results: []wasm.ValueType{i32}}},
+		FunctionSection: []wasm.Index{0, 0},
+		CodeSection: []wasm.Code{
+			{Body: []byte{wasm.OpcodeLocalGet, 0, wasm.OpcodeEnd}},
+			{Body: []byte{
+				wasm.OpcodeLocalGet, 0,
+				wasm.OpcodeI32Eqz,
+				wasm.OpcodeIf, 0x7f, // if (result i32)
+				wasm.OpcodeI32Const, 0,
+				wasm.OpcodeElse,
+				wasm.OpcodeLocalGet, 0,
+				wasm.OpcodeLocalGet, 0,
+				wasm.OpcodeI32Const, 1,
+				wasm.OpcodeI32Sub,
+				wasm.OpcodeCall, 1,
+				wasm.OpcodeI32Add,
+				wasm.OpcodeEnd,
+				wasm.OpcodeEnd,
+			}},
+		},
+		ExportSection: []wasm.Export{
+			{Name: "id", Type: wasm.ExternTypeFunc, Index: 0},
+			{Name: "rec", Type: wasm.ExternTypeFunc, Index: 1},
+		},
+	}
+	inst, err := r.Instantiate(ctx, binaryencoding.EncodeModule(m))
+	require.NoError(t, err)
+
+	t.Run("reused handle keeps its buffer", func(t *testing.T) {
+		id := inst.ExportedFunction("id")
+
+		// The first call releases: a handle called once and dropped -- what ExportedFunction().Call()
+		// produces every time -- must leave its buffer in the pool for the next lookup.
+		res, err := id.Call(ctx, 42)
+		require.NoError(t, err)
+		require.Equal(t, uint64(42), res[0])
+		require.Equal(t, 0, native.RetainedStackLenForTest(id))
+
+		// From the second call on it holds the buffer, and still computes the same thing.
+		for i := 0; i < 3; i++ {
+			res, err = id.Call(ctx, 42)
+			require.NoError(t, err)
+			require.Equal(t, uint64(42), res[0])
+			require.True(t, native.RetainedStackLenForTest(id) > 0, "call %d released a buffer it should have kept", i)
+		}
+	})
+
+	t.Run("a grown stack is not retained", func(t *testing.T) {
+		rec := inst.ExportedFunction("rec")
+		const deep, shallow = 20000, 10
+		const deepSum, shallowSum = deep * (deep + 1) / 2, shallow * (shallow + 1) / 2
+
+		// Call once so the handle is past its first (always-releasing) call.
+		res, err := rec.Call(ctx, shallow)
+		require.NoError(t, err)
+		require.Equal(t, uint64(shallowSum), res[0])
+
+		// This one recurses far enough to replace the buffer via growStack. The replacement is
+		// bigger than a fresh call needs, so it goes back to the pool instead of being held.
+		res, err = rec.Call(ctx, deep)
+		require.NoError(t, err)
+		require.Equal(t, uint64(deepSum), res[0])
+		require.Equal(t, 0, native.RetainedStackLenForTest(rec))
+
+		// And the handle still works afterwards, on a freshly acquired buffer.
+		res, err = rec.Call(ctx, shallow)
+		require.NoError(t, err)
+		require.Equal(t, uint64(shallowSum), res[0])
+		require.True(t, native.RetainedStackLenForTest(rec) > 0)
+	})
+
+	t.Run("concurrent handles", func(t *testing.T) {
+		var wg sync.WaitGroup
+		for g := 0; g < 4; g++ {
+			wg.Add(1)
+			go func(g int) {
+				defer wg.Done()
+				id := inst.ExportedFunction("id")
+				for i := 0; i < 50; i++ {
+					res, err := id.Call(ctx, uint64(g))
+					if err != nil || res[0] != uint64(g) {
+						t.Errorf("goroutine %d iteration %d: %v %v", g, i, res, err)
+						return
+					}
+				}
+			}(g)
+		}
+		wg.Wait()
+	})
 }

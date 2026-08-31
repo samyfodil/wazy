@@ -41,6 +41,15 @@ func (m *ModuleInstance) FailIfClosed() (err error) {
 //
 // Callers of this function must invoke the returned context.CancelFunc to release the spawned Goroutine.
 func (m *ModuleInstance) CloseModuleOnCanceledOrTimeout(ctx context.Context) context.CancelFunc {
+	if ctx.Done() == nil {
+		// A context that can never be canceled (context.Background/TODO, or any
+		// value/without-cancel wrapper of one) would leave the watcher below
+		// blocked on cancelChan alone, so it can only ever observe the caller
+		// closing it. Skipping it entirely is observationally identical, and
+		// saves a goroutine, a channel and a closure on every top-level call
+		// made under WithCloseOnContextDone.
+		return func() {}
+	}
 	// Creating an empty channel in this case is a bit more efficient than
 	// creating a context.Context and canceling it with the same effect. We
 	// really just need to be notified when to stop listening to the users

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"runtime"
+	"slices"
 	"sync/atomic"
 	"unsafe"
 
@@ -17,6 +18,13 @@ import (
 	"github.com/samyfodil/wazy/internal/wasmdebug"
 	"github.com/samyfodil/wazy/internal/wasmruntime"
 )
+
+// savedRegistersLen is the number of 16-byte slots in executionContext.savedRegisters (and in the
+// two snapshots of it below). Derived from the offsets the backends store through, so the Go struct
+// and the generated code can never disagree about where the field ends -- see
+// nativeapi.ExecutionContextOffsetSavedRegistersEnd for why it is sized this tightly.
+const savedRegistersLen = (nativeapi.ExecutionContextOffsetSavedRegistersEnd -
+	nativeapi.ExecutionContextOffsetSavedRegistersBegin) / 16
 
 type (
 	// callEngine implements api.Function.
@@ -39,6 +47,17 @@ type (
 		eng *engine
 		// indexInModule is the index of the function in the module.
 		indexInModule wasm.Index
+		// stackRetained means this callEngine has already returned one stack to the pool, so the
+		// next call keeps its buffer in c.stack instead of doing a pool Get+Put per call. It lives
+		// in the padding after indexInModule, so it costs this struct nothing.
+		//
+		// The first call always releases: mod.ExportedFunction(name).Call(ctx) builds a fresh
+		// callEngine every time (see stack_pool.go), and a callEngine that is called once and
+		// dropped must give its buffer back or the pool drains and every lookup allocates ~10KB
+		// again. A callEngine called twice is a cached handle in a loop, where the pool round trip
+		// is pure overhead. The tradeoff is a handle called exactly twice and then dropped, whose
+		// buffer goes to the GC rather than back to the pool.
+		stackRetained bool
 		// sizeOfParamResultSlice is the size of the parameter/result slice.
 		sizeOfParamResultSlice int
 		requiredParams         int
@@ -161,7 +180,7 @@ type (
 		// saveRegistersInExecutionContext -- before any Go code runs).
 		// Captured unconditionally for every scope; see this struct's own
 		// doc comment above for why it cannot yet be made conditional.
-		savedRegisters [64][2]uint64
+		savedRegisters [savedRegistersLen][2]uint64
 		// localsSaveArea is this scope's locals-mirror buffer -- acquired
 		// from callEngine.ehLocalsPool (acquireLocalsSaveArea), NOT a fresh
 		// heap allocation. Handlers read from it to get throw-time values.
@@ -211,8 +230,8 @@ type (
 		// checkModuleExitCodeTrampolineAddress holds the address of check-module-exit-code function.
 		checkModuleExitCodeTrampolineAddress *byte
 		// savedRegisters is the opaque spaces for save/restore registers.
-		// We want to align 16 bytes for each register, so we use [64][2]uint64.
-		savedRegisters [64][2]uint64
+		// We want to align 16 bytes for each register, so each slot is a [2]uint64.
+		savedRegisters [savedRegistersLen][2]uint64
 		// goFunctionCallCalleeModuleContextOpaque is the pointer to the target Go function's moduleContextOpaque.
 		goFunctionCallCalleeModuleContextOpaque uintptr
 		// tableGrowTrampolineAddress holds the address of table grow trampoline function.
@@ -302,17 +321,13 @@ func (c *callEngine) requiredInitialStackSize() int {
 // callEngine per call -- ExportedFunction is never cached). That
 // allocation is now done by (*callEngine).callWithStack, pulling from
 // engine.stackPools (stack_pool.go) instead, and released back when that
-// call returns.
+// call returns -- except once this callEngine has proven to be a reused
+// handle, after which it holds onto the buffer instead (see stackRetained).
 //
-// It can't just be done once here instead of in callWithStack: a single
-// callEngine can have Call/CallWithStack invoked more than once across its
-// lifetime -- e.g. a cached api.Function handle reused in a hot loop, as
-// BenchmarkInvocation's fib benchmarks and BenchmarkRedundancyHeavyExec
-// both do -- and the pool's contract is "acquire at the start of a
-// top-level call, release when it returns". Acquiring only once here and
-// releasing after the first call returns would hand this callEngine's
-// buffer to a different pool consumer while a second call on the very same
-// callEngine still thinks it owns it.
+// It can't just be done once here instead of in callWithStack: a
+// callEngine created and called once, which is what
+// mod.ExportedFunction(name).Call(ctx) produces every time, must hand its
+// buffer back or the pool has nothing to hand out.
 func (c *callEngine) init() {
 	if nativeapi.StackGuardCheckEnabled {
 		// Debug-only path: never pooled -- see acquireStack's doc comment
@@ -517,8 +532,14 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		eng := c.parent.parent.parent
 		c.eng = eng // so growStack / the grow loop can reach the pool
 		var stackBoxed *[]byte
-		c.stack, stackBoxed = eng.acquireStack(c.requiredInitialStackSize())
-		c.stackTop = alignedStackTop(c.stack)
+		if c.stack == nil {
+			c.stack, stackBoxed = eng.acquireStack(c.requiredInitialStackSize())
+			c.stackTop = alignedStackTop(c.stack)
+		}
+		acquiredLen := len(c.stack)
+		// Recomputed even on a retained buffer: it is what clears the
+		// previous call's spilled-root count, which must not read as this
+		// call's (see stackCheckLimitPtr).
 		c.execCtx.stackBottomPtr = c.stackCheckLimitPtr(0)
 		// Registered only now: a collection reads c.stack, so this call must own one first.
 		c.registerGC()
@@ -529,6 +550,10 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			// of the code instead of one of Go's defer order, and leaves the number of defers in this
 			// function where it was, which is what keeps them open-coded.
 			c.unregisterGC()
+			if c.stackRetained && len(c.stack) == acquiredLen {
+				return // kept for this callEngine's next call; see stackRetained.
+			}
+			c.stackRetained = true
 			// Release whichever buffer c.stack currently is -- not
 			// necessarily the one just acquired above: stack growth
 			// (growStack/cloneStack) or an experimental Snapshot restore
@@ -538,6 +563,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			// pre-growth/pre-restore buffer is simply not returned to the
 			// pool and left for the GC, same as before pooling existed.
 			eng.releaseStack(c.stack, stackBoxed)
+			c.stack = nil
 		}()
 	}
 
@@ -1036,12 +1062,19 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			// handler blocks, symmetric to how locals are reloaded, so the
 			// register snapshot can be skipped safely and generally rather
 			// than always paid for.
-			c.activeCatchScopes = append(c.activeCatchScopes, activeCatchScope{
-				moduleInstance: mod,
-				resumePC:       resumePC,
-				savedRegisters: c.execCtx.savedRegisters,
-				localsSaveArea: saveArea,
-			})
+			//
+			// Grown-then-filled rather than appended as a composite literal:
+			// an activeCatchScope is dominated by the register snapshot, so
+			// appending a value would build the whole thing on the Go stack
+			// and then copy it into the slice, paying for the snapshot twice
+			// on every single try_table entry.
+			scopes := slices.Grow(c.activeCatchScopes, 1)
+			c.activeCatchScopes = scopes[:len(scopes)+1]
+			scope := &c.activeCatchScopes[len(scopes)]
+			scope.moduleInstance = mod
+			scope.resumePC = resumePC
+			scope.savedRegisters = c.execCtx.savedRegisters
+			scope.localsSaveArea = saveArea
 			// Set clauseIdx = -1 (no exception) in execCtx for the compiled code
 			// to read after the trampoline returns.
 			c.execCtx.caughtExceptionClauseIdx = -1
@@ -1425,7 +1458,7 @@ type snapshot struct {
 	sp, fp, top    uintptr
 	returnAddress  *byte
 	stack          []byte
-	savedRegisters [64][2]uint64
+	savedRegisters [savedRegistersLen][2]uint64
 	ret            []uint64
 	c              *callEngine
 }

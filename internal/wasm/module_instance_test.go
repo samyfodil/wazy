@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -382,6 +383,30 @@ func TestModuleInstance_CloseModuleOnCanceledOrTimeout(t *testing.T) {
 
 		err := cc.FailIfClosed()
 		require.Nil(t, err)
+	})
+
+	t.Run("uncancelable context arms nothing", func(t *testing.T) {
+		cc := &ModuleInstance{ModuleName: "test", s: s, Sys: internalsys.DefaultContext(nil)}
+		// A context whose Done() is nil can only ever be observed through cancelChan, so the
+		// watcher goroutine is dead weight -- WithCloseOnContextDone would otherwise pay for one
+		// on every top-level call. Counting goroutines is what makes this test fail if the
+		// shortcut is dropped: the dones are deliberately not called until after the count.
+		type arbitrary struct{}
+		ctx := context.WithValue(context.Background(), arbitrary{}, "arbitrary")
+		before := runtime.NumGoroutine()
+		dones := make([]context.CancelFunc, 100)
+		for i := range dones {
+			dones[i] = cc.CloseModuleOnCanceledOrTimeout(ctx)
+		}
+		require.True(t, runtime.NumGoroutine()-before < len(dones)/2,
+			"spawned %d goroutines for %d uncancelable calls", runtime.NumGoroutine()-before, len(dones))
+		for _, done := range dones {
+			done() // must stay safe to call, exactly as the watching path's is.
+		}
+
+		// And the module is untouched: nothing closed it.
+		require.Equal(t, uint64(0), cc.Closed.Load())
+		require.NoError(t, cc.FailIfClosed())
 	})
 }
 

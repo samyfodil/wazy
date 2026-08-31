@@ -291,7 +291,7 @@ func TestMachine_lowerExitWithCode(t *testing.T) {
 	m.rootInstr = m.perBlockHead
 	require.Equal(t, `
 	mov.q %rsp, 56(%r15)
-	mov.q %rbp, 1152(%r15)
+	mov.q %rbp, 640(%r15)
 	movl $3, %ebp
 	mov.l %rbp, (%r15)
 L1:

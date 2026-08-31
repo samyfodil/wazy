@@ -2090,7 +2090,7 @@ L0 (SSA Block: blk0):
 	str x27, [sp, #-0x10]!
 	stp x0, x1, [sp, #0x10]
 	str x1, [x0, #0x8]
-	ldr x8, [x0, #0x4b0]
+	ldr x8, [x0, #0x2b0]
 	movz x9, #0x1b, lsl 0
 	mov x1, x9
 	bl x8
@@ -2159,7 +2159,7 @@ L0 (SSA Block: blk0):
 	str x27, [sp, #-0x10]!
 	stp x0, x1, [sp, #0x10]
 	str x1, [x0, #0x8]
-	ldr x8, [x0, #0x4b0]
+	ldr x8, [x0, #0x2b0]
 	movz x9, #0x1b, lsl 0
 	mov x1, x9
 	bl x8
@@ -2218,7 +2218,7 @@ L0 (SSA Block: blk0):
 	str w5, [sp, #0x24]
 	str w6, [sp, #0x28]
 	str x1, [x0, #0x8]
-	ldr x8, [x0, #0x4b0]
+	ldr x8, [x0, #0x2b0]
 	movz x9, #0x1b, lsl 0
 	mov x1, x9
 	bl x8
@@ -2299,7 +2299,7 @@ L0 (SSA Block: blk0):
 	str x27, [sp, #-0x10]!
 	stp x0, x1, [sp, #0x10]
 	str x1, [x0, #0x8]
-	ldr x8, [x0, #0x4b0]
+	ldr x8, [x0, #0x2b0]
 	movz x9, #0x1b, lsl 0
 	mov x1, x9
 	bl x8
