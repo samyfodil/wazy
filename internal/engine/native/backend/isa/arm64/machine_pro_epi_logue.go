@@ -11,6 +11,7 @@ import (
 func (m *machine) PostRegAlloc() {
 	m.setupPrologue()
 	m.postRegAlloc()
+	m.pairSpillAccesses()
 	m.emitTrapIslands()
 	m.emitFpConstPool()
 }

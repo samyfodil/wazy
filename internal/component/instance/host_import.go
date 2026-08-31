@@ -14,6 +14,11 @@ import (
 // lifted component-level argument values and returns the component-level
 // result values. Returning an error aborts the guest call that invoked it
 // (the error surfaces from the originating Instance.Call).
+//
+// args is valid only for the duration of the call: the wrapper hands over a
+// pooled buffer and reuses it for the next call through this import, exactly
+// as wazy hands a core host function the engine's own stack slice. Copy any
+// element a HostFunc needs to outlive its return.
 type HostFunc func(ctx context.Context, args []abi.Value) ([]abi.Value, error)
 
 // Option configures Instantiate.
@@ -656,12 +661,30 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 		if memOverride != nil {
 			memMod = memOverride
 		}
+		// The lifted argument list goes into a pooled buffer rather than a
+		// fresh slice per call -- one allocation on every guest->host call,
+		// and a WASI request makes ten. Released in the deferred block below
+		// (not right after hi.fn) because a HostFunc is allowed to return its
+		// own args slice as its results, which lowering still has to read.
+		argsp := getValueSlice(len(paramPlans))
 		var args []abi.Value
+		// The borrow list is built into a frame-local array rather than a nil
+		// slice grown by append: it is returned and read by the deferred
+		// release below, both inside this frame, so it never has to reach the
+		// heap. Four covers a WASI method's `self` and then some; a longer
+		// borrow list simply appends past it and allocates as before.
+		var lentArr [4]lentHandle
 		var lent []lentHandle
+		// Declared per invocation. The enclosing bind-time `err` is one heap
+		// cell shared by every call through this import: a captured-variable
+		// heap write on the hot path, and a write-write race whose loser gets
+		// its trap reported against the wrong call the moment two calls
+		// through one Instance can overlap.
+		var err error
 		if paramsSpill {
-			args, lent, err = liftHostArgsSpilled(in, paramPlans, paramTupleDesc, resolve, api.DecodeU32(stack[0]), memMod, resources)
+			args, lent, err = liftHostArgsSpilled(in, paramPlans, paramTupleDesc, resolve, api.DecodeU32(stack[0]), memMod, resources, *argsp, lentArr[:])
 		} else {
-			args, lent, err = liftHostArgsPlanned(in, paramPlans, resolve, stack, memMod, resources)
+			args, lent, err = liftHostArgsPlanned(in, paramPlans, resolve, stack, memMod, resources, *argsp, lentArr[:])
 		}
 		if err != nil {
 			panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
@@ -672,6 +695,7 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 			for _, l := range lent {
 				_ = resources.Unlend(l.tag, l.handle) //nolint:errcheck // best-effort release
 			}
+			putValueSlice(argsp)
 		}()
 		// A sync canon lower whose callee is an async lift (callback or
 		// stackful) is a potential block (docs/component-model-async-
@@ -745,7 +769,7 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 			// lowerHostResultsPlanned's per-call reallocOf fallback.
 			realloc = in.reallocFor(ctx, memMod)
 		}
-		if err := lowerHostResultsPlanned(ctx, resultPlan, resolve, results, stack, memMod, resources, outPtrIdx, realloc); err != nil {
+		if err := lowerHostResultsPlanned(ctx, resultPlan, results, stack, memMod, resources, outPtrIdx, realloc); err != nil {
 			panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
 		}
 	})
@@ -866,7 +890,7 @@ func liftHostArgs(in *Instance, fd binary.FuncDesc, resolve abi.Resolver, stack 
 	if err != nil {
 		return nil, nil, err
 	}
-	return liftHostArgsPlanned(in, plans, resolve, stack, mod, resources)
+	return liftHostArgsPlanned(in, plans, resolve, stack, mod, resources, nil, nil)
 }
 
 // liftHostArgsPlanned is liftHostArgs with the per-param resolve/flatten/
@@ -874,11 +898,16 @@ func liftHostArgs(in *Instance, fd binary.FuncDesc, resolve abi.Resolver, stack 
 // by abi as a bare handle (uint32, per abi.Value's documented mapping); this
 // then resolves that handle to the host rep it names via resources, so the
 // HostFunc receives the rep, not the raw handle -- see resolveHandleArg.
-// resolve is still needed for LiftFlat's composite tree-walk.
-func liftHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.Resolver, stack []uint64, mod api.Module, resources *handleTable) ([]abi.Value, []lentHandle, error) {
+// resolve is still needed for LiftFlat's composite tree-walk. dst, when it is
+// already the right length, receives the lifted values (the hot wrapper hands
+// in a pooled buffer); anything else allocates.
+func liftHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.Resolver, stack []uint64, mod api.Module, resources *handleTable, dst []abi.Value, lentBuf []lentHandle) ([]abi.Value, []lentHandle, error) {
 	mem, memAvailable := memoryBytesOf(mod)
-	args := make([]abi.Value, len(plans))
-	var lent []lentHandle
+	args := dst
+	if len(args) != len(plans) {
+		args = make([]abi.Value, len(plans))
+	}
+	lent := lentBuf[:0]
 	pos := 0
 	for i := range plans {
 		pp := &plans[i]
@@ -930,7 +959,7 @@ func liftHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.Resolv
 // liftHostArgsPlanned's, just sourced from the loaded tuple's elements
 // instead of per-plan LiftFlat calls -- see async_host_import.go's
 // liftAsyncHostArgsSpilled for the async-lower twin of this function.
-func liftHostArgsSpilled(in *Instance, plans []hostParamPlan, tupleDesc binary.TupleDesc, resolve abi.Resolver, ptr uint32, mod api.Module, resources *handleTable) ([]abi.Value, []lentHandle, error) {
+func liftHostArgsSpilled(in *Instance, plans []hostParamPlan, tupleDesc binary.TupleDesc, resolve abi.Resolver, ptr uint32, mod api.Module, resources *handleTable, dst []abi.Value, lentBuf []lentHandle) ([]abi.Value, []lentHandle, error) {
 	mem, memAvailable := memoryBytesOf(mod)
 	if !memAvailable {
 		return nil, nil, fmt.Errorf("parameter list spills to memory (flattens beyond the flat limit), but the calling module has no memory")
@@ -943,8 +972,11 @@ func liftHostArgsSpilled(in *Instance, plans []hostParamPlan, tupleDesc binary.T
 	if !ok || len(raw) != len(plans) {
 		return nil, nil, fmt.Errorf("spilled parameter list: expected %d value(s), got %T", len(plans), tupleVal)
 	}
-	args := make([]abi.Value, len(plans))
-	var lent []lentHandle
+	args := dst
+	if len(args) != len(plans) {
+		args = make([]abi.Value, len(plans))
+	}
+	lent := lentBuf[:0]
 	for i := range plans {
 		pp := &plans[i]
 		v := raw[i]
@@ -1169,7 +1201,7 @@ func lowerHostResults(ctx context.Context, fd binary.FuncDesc, resolve abi.Resol
 	if err != nil {
 		return err
 	}
-	return lowerHostResultsPlanned(ctx, plan, resolve, results, stack, mod, resources, outPtrIdx, realloc)
+	return lowerHostResultsPlanned(ctx, plan, results, stack, mod, resources, outPtrIdx, realloc)
 }
 
 // hostResultPlan is the bind-time-precomputed lower plan for a host import's
@@ -1181,6 +1213,11 @@ type hostResultPlan struct {
 	rt      binary.TypeDesc // valid when count == 1
 	usesMem bool            // valid when count == 1
 	step    abi.LowerStep   // valid when count == 1
+	// store lowers the result the other way -- into guest memory at an
+	// out-pointer (a result too wide to return flat, and every async result),
+	// with the type's alignment and size resolved here instead of on every
+	// call. Valid when count == 1.
+	store abi.StoreStep
 }
 
 // buildHostResultPlan precomputes the result-lower facts for fd. A count of
@@ -1203,15 +1240,18 @@ func buildHostResultPlan(fd binary.FuncDesc, resolve abi.Resolver) (hostResultPl
 	if err != nil {
 		return plan, fmt.Errorf("result: %w", err)
 	}
-	plan.rt, plan.usesMem, plan.step = rt, usesMemory(rt, resolve), step
+	storeStep, err := abi.CompileStore(rt, resolve)
+	if err != nil {
+		return plan, fmt.Errorf("result: %w", err)
+	}
+	plan.rt, plan.usesMem, plan.step, plan.store = rt, usesMemory(rt, resolve), step, storeStep
 	return plan, nil
 }
 
 // lowerHostResultsPlanned is lowerHostResults with the result count / resolved
-// type / memory-need / lower step precomputed (see buildHostResultPlan).
-// resolve is still needed for Store's composite tree-walk on the out-pointer
-// path.
-func lowerHostResultsPlanned(ctx context.Context, plan hostResultPlan, resolve abi.Resolver, results []abi.Value, stack []uint64, mod api.Module, resources *handleTable, outPtrIdx int, realloc abi.Realloc) error {
+// type / memory-need / lower step / store layout precomputed (see
+// buildHostResultPlan).
+func lowerHostResultsPlanned(ctx context.Context, plan hostResultPlan, results []abi.Value, stack []uint64, mod api.Module, resources *handleTable, outPtrIdx int, realloc abi.Realloc) error {
 	if len(results) != plan.count {
 		return fmt.Errorf("returned %d result(s), but the import declares %d", len(results), plan.count)
 	}
@@ -1242,7 +1282,7 @@ func lowerHostResultsPlanned(ctx context.Context, plan hostResultPlan, resolve a
 			return fmt.Errorf("result: out-pointer stack slot %d out of range (stack has %d value(s))", outPtrIdx, len(stack))
 		}
 		ptr := api.DecodeU32(stack[outPtrIdx])
-		if err := abi.Store(mem, ptr, plan.rt, resultVal, resolve, realloc); err != nil {
+		if err := plan.store.Store(mem, ptr, resultVal, realloc); err != nil {
 			return fmt.Errorf("result: store spilled result: %w", err)
 		}
 		return nil

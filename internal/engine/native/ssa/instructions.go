@@ -15,26 +15,29 @@ type Opcode uint32
 // Opcode. Since Go doesn't have union type, we use this flattened type
 // for all instructions, and therefore each field has different meaning
 // depending on Opcode.
+//
+// The fields are ordered widest-first, which makes this 128 bytes. Grouping them by
+// declaration order instead leaves 21 bytes of padding and costs 144, and instructions are
+// allocated a page of 128 at a time.
 type Instruction struct {
 	// id is the unique ID of this instruction which ascends from 0 following the order of program.
-	id         int
-	opcode     Opcode
-	u1, u2     uint64
-	v          Value
-	v2         Value
-	v3         Value
-	vs         Values
-	typ        Type
-	prev, next *Instruction
-
+	id     int
+	u1, u2 uint64
+	v      Value
+	v2     Value
+	v3     Value
 	// rValue is the (first) return value of this instruction.
 	// For branching instructions except for OpcodeBrTable, they hold BlockID to jump cast to Value.
-	rValue Value
+	rValue       Value
+	sourceOffset SourceOffset
+	vs           Values
 	// rValues are the rest of the return values of this instruction.
 	// For OpcodeBrTable, it holds the list of BlockID to jump cast to Value.
 	rValues        Values
+	prev, next     *Instruction
+	opcode         Opcode
 	gid            InstructionGroupID
-	sourceOffset   SourceOffset
+	typ            Type
 	live           bool
 	alreadyLowered bool
 }

@@ -289,6 +289,7 @@ func (m *machine) CompileGoFunctionTrampoline(exitCode nativeapi.ExitCode, sig *
 
 func (m *machine) saveRegistersInExecutionContext(cur *instruction, execCtx regalloc.VReg, regs []regalloc.VReg) *instruction {
 	offset := nativeapi.ExecutionContextOffsetSavedRegistersBegin.I64()
+	nativeapi.AssertSavedRegistersFit(offset + int64(len(regs))*16)
 	for _, v := range regs {
 		store := m.allocateInstr()
 		mem := newOperandMem(m.newAmodeImmReg(uint32(offset), execCtx))
@@ -308,6 +309,7 @@ func (m *machine) saveRegistersInExecutionContext(cur *instruction, execCtx rega
 
 func (m *machine) restoreRegistersInExecutionContext(cur *instruction, execCtx regalloc.VReg, regs []regalloc.VReg) *instruction {
 	offset := nativeapi.ExecutionContextOffsetSavedRegistersBegin.I64()
+	nativeapi.AssertSavedRegistersFit(offset + int64(len(regs))*16)
 	for _, v := range regs {
 		load := m.allocateInstr()
 		mem := newOperandMem(m.newAmodeImmReg(uint32(offset), execCtx))
@@ -342,7 +344,7 @@ func (m *machine) storeReturnAddressAndExit(cur *instruction, execCtx regalloc.V
 
 	nop, l := m.allocateBrTarget()
 	cur = linkInstr(cur, nop)
-	readRip.asLEA(newOperandLabel(l), ripReg)
+	readRip.asLEA(newOperandLabel(l), ripReg, true)
 	return cur
 }
 

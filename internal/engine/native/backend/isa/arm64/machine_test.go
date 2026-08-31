@@ -102,12 +102,25 @@ func TestMachine_getVRegSpillSlotOffsetFromSP(t *testing.T) {
 	_, ok := m.spillSlots[id]
 	require.True(t, ok)
 
+	// A slot is aligned to its own size, so the 16-byte one skips the 8 left over
+	// by the first: an unaligned offset would lose the scaled unsigned-imm12 form.
 	id = 100
 	offset = m.getVRegSpillSlotOffsetFromSP(id, 16)
-	require.Equal(t, int64(16+8), offset)
-	require.Equal(t, int64(24), m.spillSlotSize)
+	require.Equal(t, int64(16+16), offset)
+	require.Equal(t, int64(32), m.spillSlotSize)
 	_, ok = m.spillSlots[id]
 	require.True(t, ok)
+
+	// A 4-byte slot fits at the next 4-byte boundary, and the 8-byte slot after it
+	// is padded back up to 8. Every returned offset stays a multiple of its size.
+	require.Equal(t, int64(16+32), m.getVRegSpillSlotOffsetFromSP(101, 4))
+	require.Equal(t, int64(36), m.spillSlotSize)
+	require.Equal(t, int64(16+40), m.getVRegSpillSlotOffsetFromSP(102, 8))
+	require.Equal(t, int64(48), m.spillSlotSize)
+
+	// Repeating a lookup must return the same slot, not allocate another.
+	require.Equal(t, int64(16+40), m.getVRegSpillSlotOffsetFromSP(102, 8))
+	require.Equal(t, int64(48), m.spillSlotSize)
 }
 
 func TestMachine_insertConditionalJumpTrampoline(t *testing.T) {

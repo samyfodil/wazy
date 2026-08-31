@@ -71,6 +71,53 @@ func (a *valueTypeArena) alloc(n int) []wasm.ValueType {
 	return a.buf[start : start+n : start+n]
 }
 
+// byteArena is the []byte equivalent of valueTypeArena: it batches the small immutable byte slices one section
+// retains (data segment Init, constant expression Data) into a few chunks instead of one allocation each. The
+// bytes it hands back are only ever read after decode, so capacity-capped subslices of a shared chunk are
+// indistinguishable from N separate slices.
+type byteArena struct {
+	buf []byte
+}
+
+// alloc returns a length-n subslice of the arena for the caller to fill. A nil arena allocates standalone, which
+// is what the one-off callers (a table's init expression) want: a whole chunk for a single 3-byte slice is worse
+// than the plain make it replaces. n == 0 keeps the allocation-free non-nil empty slice make returns, since an
+// empty data segment's Init is compared against []byte{} rather than nil.
+func (a *byteArena) alloc(n int) []byte {
+	if a == nil || n == 0 {
+		return make([]byte, n)
+	}
+	if cap(a.buf)-len(a.buf) < n {
+		// Current chunk can't fit n: start a fresh one. The old chunk stays alive via slices already carved from
+		// it. Grow geometrically but never below n so any single slice fits in one chunk.
+		newCap := cap(a.buf) * 2
+		if newCap < 256 {
+			newCap = 256
+		}
+		if newCap < n {
+			newCap = n
+		}
+		a.buf = make([]byte, 0, newCap)
+	}
+	start := len(a.buf)
+	a.buf = a.buf[:start+n]
+	return a.buf[start : start+n : start+n]
+}
+
+// arenaSize clamps a section's own declared size to the bytes actually remaining in the module, for use as an
+// arena capacity. sectionSize comes from the module's (untrusted) section header and is only checked against the
+// bytes actually decoded *after* the section is read, so using it raw would let a 20-byte module ask for a 4 GiB
+// arena up front.
+func arenaSize(sectionSize uint32, remaining int) int {
+	if remaining < 0 {
+		return 0
+	}
+	if uint64(sectionSize) > uint64(remaining) {
+		return remaining
+	}
+	return int(sectionSize)
+}
+
 // readByte returns buf[offset] and offset+1, or io.EOF if offset is out of range. It is the slice-indexed
 // equivalent of (*bytes.Reader).ReadByte.
 func readByte(buf []byte, offset int) (b byte, newOffset int, err error) {

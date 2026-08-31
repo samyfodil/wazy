@@ -17,14 +17,16 @@ func newTCPListenerFile(tl *net.TCPListener) socketapi.TCPSock {
 	return newDefaultTCPListenerFile(tl)
 }
 
-func _pollSock(conn syscall.Conn, flag sys.Pflag, timeoutMillis int32) (bool, sys.Errno) {
-	n, errno := syscallConnControl(conn, func(fd uintptr) (int, sys.Errno) {
+func _pollSock(f *tcpListenerFile, flag sys.Pflag, timeoutMillis int32) (bool, sys.Errno) {
+	// The function literal captures nothing, so it is a static value: no
+	// closure is allocated per poll.
+	n, errno := f.call(func(fd uintptr, _ []byte) (int, sys.Errno) {
 		if ready, errno := poll(fd, sys.POLLIN, 0); !ready || errno != 0 {
 			return -1, errno
 		} else {
 			return 0, errno
 		}
-	})
+	}, nil)
 	return n >= 0, errno
 }
 

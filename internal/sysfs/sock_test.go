@@ -1,6 +1,7 @@
 package sysfs
 
 import (
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -129,6 +130,66 @@ func TestTcpConnFile_Read(t *testing.T) {
 	require.Zero(t, errno2)
 	require.NoError(t, err)
 	require.Equal(t, "waze", string(bytes2))
+}
+
+// TestTcpConnFile_ReadPeekWrite covers the syscall state a connection shares
+// between Read, Recvfrom and Write: each call must see its own buffer and
+// result, and a closed connection must fail even when data is available.
+func TestTcpConnFile_ReadPeekWrite(t *testing.T) {
+	listen, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listen.Close()
+
+	tcpAddr, err := net.ResolveTCPAddr("tcp", listen.Addr().String())
+	require.NoError(t, err)
+	tcp, err := net.DialTCP("tcp", nil, tcpAddr)
+	require.NoError(t, err)
+	defer tcp.Close() //nolint
+
+	conn, err := listen.Accept()
+	require.NoError(t, err)
+	defer conn.Close()
+
+	file := newTcpConn(tcp)
+	require.Zero(t, file.(*tcpConnFile).SetNonblock(true))
+
+	buf := make([]byte, 8)
+	_, errno := file.Read(buf)
+	require.Equal(t, sys.EAGAIN, errno)
+
+	_, err = conn.Write([]byte("wazy"))
+	require.NoError(t, err)
+
+	// Peeking doesn't consume, so the following Read sees the same bytes.
+	var n int
+	for {
+		n, errno = file.Recvfrom(buf, MSG_PEEK)
+		if errno != sys.EAGAIN {
+			break
+		}
+	}
+	require.Zero(t, errno)
+	require.Equal(t, "wazy", string(buf[:n]))
+
+	n, errno = file.Read(buf)
+	require.Zero(t, errno)
+	require.Equal(t, "wazy", string(buf[:n]))
+
+	n, errno = file.Write([]byte("wazy!"))
+	require.Zero(t, errno)
+	require.Equal(t, 5, n)
+
+	peeked := make([]byte, 5)
+	_, err = io.ReadFull(conn, peeked)
+	require.NoError(t, err)
+	require.Equal(t, "wazy!", string(peeked))
+
+	// A closed file fails even when the read would otherwise have succeeded.
+	_, err = conn.Write([]byte("wazy"))
+	require.NoError(t, err)
+	require.Zero(t, file.Close())
+	_, errno = file.Read(buf)
+	require.Equal(t, sys.EBADF, errno)
 }
 
 func TestTcpConnFile_Stat(t *testing.T) {

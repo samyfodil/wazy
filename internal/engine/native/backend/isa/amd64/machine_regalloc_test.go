@@ -76,7 +76,7 @@ func TestMachine_insertReloadRegisterAt(t *testing.T) {
 			expected: `
 	ud2
 	movq 16(%rsp), %rax
-	movdqu 24(%rsp), %xmm1
+	movdqu 32(%rsp), %xmm1
 	ret
 `,
 		},
@@ -85,7 +85,7 @@ func TestMachine_insertReloadRegisterAt(t *testing.T) {
 			expected: `
 	ud2
 	movq 160(%rsp), %rax
-	movdqu 168(%rsp), %xmm1
+	movdqu 176(%rsp), %xmm1
 	ret
 `,
 		},
@@ -121,6 +121,29 @@ func TestMachine_insertReloadRegisterAt(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+func TestMachine_getVRegSpillSlotOffsetFromSP(t *testing.T) {
+	_, _, m := newSetupWithMockContext()
+
+	// Each slot gets its natural alignment, so a wider one after a narrower one is padded
+	// instead of straddling. Sizes are the ssa.Type sizes: 4 (i32/f32), 8 (i64/f64), 16 (v128).
+	for _, tc := range []struct {
+		id     regalloc.VRegID
+		size   byte
+		expOff int64
+		expEnd int64
+	}{
+		{id: 1, size: 4, expOff: 0, expEnd: 4},
+		{id: 2, size: 8, expOff: 8, expEnd: 16}, // padded past 4.
+		{id: 3, size: 4, expOff: 16, expEnd: 20},
+		{id: 4, size: 16, expOff: 32, expEnd: 48}, // padded past 20.
+		{id: 5, size: 16, expOff: 48, expEnd: 64}, // already aligned: no padding.
+		{id: 2, size: 8, expOff: 8, expEnd: 64},   // cached, and does not grow the region.
+	} {
+		require.Equal(t, tc.expOff, m.getVRegSpillSlotOffsetFromSP(tc.id, tc.size))
+		require.Equal(t, tc.expEnd, m.spillSlotSize)
 	}
 }
 

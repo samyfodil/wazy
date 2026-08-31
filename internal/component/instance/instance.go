@@ -97,6 +97,12 @@ var (
 			return &s
 		},
 	}
+	valueSlicePool = sync.Pool{
+		New: func() any {
+			s := make([]abi.Value, 0, 8)
+			return &s
+		},
+	}
 )
 
 // getUint64Slice returns a pooled []uint64 of exactly length n, ready to
@@ -114,6 +120,27 @@ func getUint64Slice(n int) *[]uint64 {
 func putUint64Slice(p *[]uint64) {
 	*p = (*p)[:0]
 	uint64SlicePool.Put(p)
+}
+
+// getValueSlice/putValueSlice are getUint64Slice/putUint64Slice's []abi.Value
+// counterpart, holding one host import call's lifted argument list (see
+// buildHostWrapper). putValueSlice clears the slice before returning it: a
+// pooled buffer still holding lifted values would keep every string, list and
+// resource rep of the last call reachable until the buffer is next filled.
+func getValueSlice(n int) *[]abi.Value {
+	p := valueSlicePool.Get().(*[]abi.Value)
+	if cap(*p) < n {
+		*p = make([]abi.Value, n)
+	} else {
+		*p = (*p)[:n]
+	}
+	return p
+}
+
+func putValueSlice(p *[]abi.Value) {
+	clear(*p)
+	*p = (*p)[:0]
+	valueSlicePool.Put(p)
 }
 
 // getCoreValueSlice/putCoreValueSlice are getUint64Slice/putUint64Slice's
@@ -2117,12 +2144,17 @@ func coreReallocCall(fn api.Function) func(context.Context, uint32, uint32, uint
 		return nil
 	}
 	return func(ctx context.Context, origPtr, origSize, align, newSize uint32) (uint32, error) {
-		// CallWithStack into a fixed 4-slot buffer (4 params, 1 result) avoids
-		// the result-slice allocation Call makes on each realloc -- one per
-		// string/list lowered into guest memory.
-		var buf [4]uint64
+		// CallWithStack into a 4-slot buffer (4 params, 1 result) avoids the
+		// result-slice allocation Call makes on each realloc -- one per
+		// string/list lowered into guest memory. The buffer is pooled rather
+		// than a local array: CallWithStack takes it through an interface, so
+		// a local escapes and heap-allocates on every realloc anyway (see
+		// uint64SlicePool's doc for why pooling is safe here).
+		bufp := getUint64Slice(4)
+		defer putUint64Slice(bufp)
+		buf := *bufp
 		buf[0], buf[1], buf[2], buf[3] = uint64(origPtr), uint64(origSize), uint64(align), uint64(newSize)
-		if err := fn.CallWithStack(ctx, buf[:]); err != nil {
+		if err := fn.CallWithStack(ctx, buf); err != nil {
 			return 0, fmt.Errorf("cabi_realloc: %w", err)
 		}
 		return uint32(buf[0]), nil

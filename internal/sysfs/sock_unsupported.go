@@ -26,7 +26,7 @@ func (f *unsupportedSockFile) Accept() (socketapi.TCPConn, sys.Errno) {
 	return nil, sys.ENOSYS
 }
 
-func _pollSock(conn syscall.Conn, flag sys.Pflag, timeoutMillis int32) (bool, sys.Errno) {
+func _pollSock(f *tcpListenerFile, flag sys.Pflag, timeoutMillis int32) (bool, sys.Errno) {
 	return false, sys.ENOTSUP
 }
 

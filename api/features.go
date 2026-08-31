@@ -265,11 +265,18 @@ func (f CoreFeatures) IsEnabled(feature CoreFeatures) bool {
 
 // RequireEnabled returns an error if the feature (or group of features) is not
 // enabled.
+//
+// The message is built by featureDisabledError so that the bit test alone is
+// small enough to inline into the validator's per-instruction path.
 func (f CoreFeatures) RequireEnabled(feature CoreFeatures) error {
 	if f&feature == 0 {
-		return fmt.Errorf("feature %q is disabled", feature)
+		return featureDisabledError(feature)
 	}
 	return nil
+}
+
+func featureDisabledError(feature CoreFeatures) error {
+	return fmt.Errorf("feature %q is disabled", feature)
 }
 
 // String implements fmt.Stringer by returning each enabled feature.

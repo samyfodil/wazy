@@ -35,6 +35,7 @@ type LowerStep struct {
 	resolve Resolver        // kind==composite: for the tree-walk body
 	spills  bool            // kind==composite: precomputed len(Flatten(t)) > MaxFlatParams
 	flat    []string        // kind==composite, non-spilling: Flatten(t), handed down the tree-walk
+	store   StoreStep       // kind==composite, spilling: the spill's precomputed layout
 }
 
 // CompileLower builds the LowerStep for an already-resolved top-level parameter
@@ -60,7 +61,13 @@ func CompileLower(t binary.TypeDesc, resolve Resolver) (LowerStep, error) {
 		// The flat list computed for the spill decision is kept: Lower hands
 		// it down the tree-walk so a variant/result at the top of the tree
 		// doesn't re-Flatten itself on every call (see lowerFlatImpl's doc).
-		return LowerStep{kind: lowerKindComposite, t: t, resolve: resolve, spills: len(flat) > MaxFlatParams, flat: flat}, nil
+		step := LowerStep{kind: lowerKindComposite, t: t, resolve: resolve, spills: len(flat) > MaxFlatParams, flat: flat}
+		if step.spills {
+			if step.store, err = CompileStore(t, resolve); err != nil {
+				return LowerStep{}, err
+			}
+		}
+		return step, nil
 	}
 }
 
@@ -101,7 +108,7 @@ func (s *LowerStep) Lower(dst []CoreValue, v Value, realloc Realloc, mem []byte)
 
 	default: // lowerKindComposite
 		if s.spills {
-			ptr, err := spillValue(v, s.t, mem, s.resolve, realloc)
+			ptr, err := s.store.Spill(v, mem, realloc)
 			if err != nil {
 				return nil, err
 			}
@@ -113,6 +120,60 @@ func (s *LowerStep) Lower(dst []CoreValue, v Value, realloc Realloc, mem []byte)
 		}
 		return append(dst, flat...), nil
 	}
+}
+
+// StoreStep is the memory-direction counterpart of LowerStep: a plan compiled
+// once at bind time to store one value of a fixed type at a guest pointer.
+// Store re-derives the type's alignment and size from the type graph on every
+// call, and each of those two walks is itself super-linear in the type (a
+// record's size asks every field for both its alignment and its size, then
+// asks the record for its alignment again) -- on the wasi:http guest->host
+// path that pair of walks was the largest single cost of a request. A type's
+// layout is immutable, so a caller with a fixed type computes it once here.
+type StoreStep struct {
+	t       binary.TypeDesc
+	resolve Resolver
+	align   uint32
+	size    uint32
+}
+
+// CompileStore resolves t's layout for repeated Store/Spill calls. Its errors
+// are exactly the ones the package-level Store raises per call.
+func CompileStore(t binary.TypeDesc, resolve Resolver) (StoreStep, error) {
+	align, err := Alignment(t, resolve)
+	if err != nil {
+		return StoreStep{}, err
+	}
+	size, err := Size(t, resolve)
+	if err != nil {
+		return StoreStep{}, err
+	}
+	return StoreStep{t: t, resolve: resolve, align: align, size: size}, nil
+}
+
+// Store writes v at ptr, exactly as the package-level Store would for the type
+// CompileStore was built from.
+func (s *StoreStep) Store(mem []byte, ptr uint32, v Value, realloc Realloc) error {
+	if ptr != Align(ptr, s.align) {
+		return fmt.Errorf("store: pointer %d not aligned to %d", ptr, s.align)
+	}
+	if uint32(len(mem)) < ptr+s.size {
+		return fmt.Errorf("store: buffer overflow: ptr=%d size=%d mem_len=%d", ptr, s.size, len(mem))
+	}
+	return storeValue(mem, ptr, s.t, v, s.align, s.resolve, realloc)
+}
+
+// Spill allocates a region for v and stores it there, exactly as spillValue
+// would for the type CompileStore was built from.
+func (s *StoreStep) Spill(v Value, mem []byte, realloc Realloc) (uint32, error) {
+	ptr, err := realloc.Grow(0, 0, s.align, s.size)
+	if err != nil {
+		return 0, fmt.Errorf("spillValue: realloc failed: %w", err)
+	}
+	if err := s.Store(mem, ptr, v, realloc); err != nil {
+		return 0, fmt.Errorf("spillValue: store failed: %w", err)
+	}
+	return ptr, nil
 }
 
 // LiftStep is the result-side counterpart of LowerStep: a plan compiled once at

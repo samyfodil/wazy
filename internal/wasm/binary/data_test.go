@@ -120,7 +120,7 @@ func Test_decodeDataSegment(t *testing.T) {
 		tc := tt
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
 			var actual wasm.DataSegment
-			_, err := decodeDataSegment(tc.in, 0, tc.features, &actual)
+			_, err := decodeDataSegment(tc.in, 0, tc.features, &byteArena{}, &actual)
 			if tc.expErr == "" {
 				require.NoError(t, err)
 				require.Equal(t, tc.exp, actual)

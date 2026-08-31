@@ -28,12 +28,10 @@ func TestMachine_setupPrologue(t *testing.T) {
 			exp: `
 	pushq %rbp
 	movq %rsp, %rbp
-	sub $16, %rsp
-	movdqu %xmm15, (%rsp)
-	sub $16, %rsp
-	movdqu %xmm1, (%rsp)
-	sub $16, %rsp
+	sub $48, %rsp
 	movdqu %xmm0, (%rsp)
+	movdqu %xmm1, 16(%rsp)
+	movdqu %xmm15, 32(%rsp)
 	pushq %rcx
 	pushq %rax
 	ud2
@@ -45,12 +43,10 @@ func TestMachine_setupPrologue(t *testing.T) {
 			exp: `
 	pushq %rbp
 	movq %rsp, %rbp
-	sub $16, %rsp
-	movdqu %xmm15, (%rsp)
-	sub $16, %rsp
-	movdqu %xmm1, (%rsp)
-	sub $16, %rsp
+	sub $48, %rsp
 	movdqu %xmm0, (%rsp)
+	movdqu %xmm1, 16(%rsp)
+	movdqu %xmm15, 32(%rsp)
 	pushq %rcx
 	pushq %rax
 	sub $48, %rsp
@@ -138,11 +134,9 @@ func TestMachine_postRegAlloc(t *testing.T) {
 	popq %rax
 	popq %rcx
 	movdqu (%rsp), %xmm0
-	add $16, %rsp
-	movdqu (%rsp), %xmm1
-	add $16, %rsp
-	movdqu (%rsp), %xmm15
-	add $16, %rsp
+	movdqu 16(%rsp), %xmm1
+	movdqu 32(%rsp), %xmm15
+	add $48, %rsp
 	movq %rbp, %rsp
 	popq %rbp
 	ret
@@ -156,11 +150,9 @@ func TestMachine_postRegAlloc(t *testing.T) {
 	popq %rax
 	popq %rcx
 	movdqu (%rsp), %xmm0
-	add $16, %rsp
-	movdqu (%rsp), %xmm1
-	add $16, %rsp
-	movdqu (%rsp), %xmm15
-	add $16, %rsp
+	movdqu 16(%rsp), %xmm1
+	movdqu 32(%rsp), %xmm15
+	add $48, %rsp
 	movq %rbp, %rsp
 	popq %rbp
 	ret

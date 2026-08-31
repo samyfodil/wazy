@@ -1,6 +1,8 @@
 package nativeapi
 
 import (
+	"fmt"
+
 	"github.com/samyfodil/wazy/internal/wasm"
 )
 
@@ -53,52 +55,78 @@ const (
 	ExecutionContextOffsetCheckModuleExitCodeTrampolineAddress Offset = 88
 	// ExecutionContextOffsetSavedRegistersBegin is an offset of the first element of `savedRegisters` field in native.executionContext
 	ExecutionContextOffsetSavedRegistersBegin Offset = 96
+	// ExecutionContextOffsetSavedRegistersEnd is one past the last byte of `savedRegisters`.
+	//
+	// The field is sized to the largest layout either ISA actually writes there, not to a round
+	// number: amd64's stackGrowSaveVRegs needs 464 bytes (29 registers x a 16-byte slot each) and
+	// arm64's saveRequiredRegs needs 496 (stp/ldp-paired, see registerSaveRestoreSlots). The
+	// remaining slack is deliberately small -- savedRegisters sits inside the per-call callEngine,
+	// so every unused byte here is paid on every invocation, and the 1024 bytes this used to be
+	// pushed that allocation a whole Go size class up.
+	//
+	// AssertSavedRegistersFit is what keeps it honest: both backends run it over every register
+	// list they lay out, so a list that outgrows this bound fails loudly at code-generation time
+	// (i.e. on the first module ever compiled) rather than silently writing over the fields below.
+	ExecutionContextOffsetSavedRegistersEnd Offset = 608
 	// ExecutionContextOffsetGoFunctionCallCalleeModuleContextOpaque is an offset of `goFunctionCallCalleeModuleContextOpaque` field in native.executionContext
-	ExecutionContextOffsetGoFunctionCallCalleeModuleContextOpaque Offset = 1120
+	ExecutionContextOffsetGoFunctionCallCalleeModuleContextOpaque Offset = 608
 	// ExecutionContextOffsetTableGrowTrampolineAddress is an offset of `tableGrowTrampolineAddress` field in native.executionContext
-	ExecutionContextOffsetTableGrowTrampolineAddress Offset = 1128
+	ExecutionContextOffsetTableGrowTrampolineAddress Offset = 616
 	// ExecutionContextOffsetRefFuncTrampolineAddress is an offset of `refFuncTrampolineAddress` field in native.executionContext
-	ExecutionContextOffsetRefFuncTrampolineAddress      Offset = 1136
-	ExecutionContextOffsetMemmoveAddress                Offset = 1144
-	ExecutionContextOffsetFramePointerBeforeGoCall      Offset = 1152
-	ExecutionContextOffsetMemoryWait32TrampolineAddress Offset = 1160
-	ExecutionContextOffsetMemoryWait64TrampolineAddress Offset = 1168
-	ExecutionContextOffsetMemoryNotifyTrampolineAddress Offset = 1176
+	ExecutionContextOffsetRefFuncTrampolineAddress      Offset = 624
+	ExecutionContextOffsetMemmoveAddress                Offset = 632
+	ExecutionContextOffsetFramePointerBeforeGoCall      Offset = 640
+	ExecutionContextOffsetMemoryWait32TrampolineAddress Offset = 648
+	ExecutionContextOffsetMemoryWait64TrampolineAddress Offset = 656
+	ExecutionContextOffsetMemoryNotifyTrampolineAddress Offset = 664
 	// ExecutionContextOffsetThrowAllocTrampolineAddress is the address of the
 	// throw-alloc trampoline, which allocates the Exception heap object,
 	// sets exceptionParamsPtr, and returns the exnref.
-	ExecutionContextOffsetThrowAllocTrampolineAddress    Offset = 1184
-	ExecutionContextOffsetThrowTrampolineAddress         Offset = 1192
-	ExecutionContextOffsetTryTableEnterTrampolineAddress Offset = 1200
-	ExecutionContextOffsetTryTableLeaveTrampolineAddress Offset = 1208
+	ExecutionContextOffsetThrowAllocTrampolineAddress    Offset = 672
+	ExecutionContextOffsetThrowTrampolineAddress         Offset = 680
+	ExecutionContextOffsetTryTableEnterTrampolineAddress Offset = 688
+	ExecutionContextOffsetTryTableLeaveTrampolineAddress Offset = 696
 	// ExecutionContextOffsetExceptionRef holds the exnref of the caught exception,
 	// used on the throw side and by catch_ref/catch_all_ref handlers.
-	ExecutionContextOffsetExceptionRef Offset = 1216
+	ExecutionContextOffsetExceptionRef Offset = 704
 	// ExecutionContextOffsetExceptionParamsPtr points into the Exception's
 	// Params slice backing array. Used by both throw (store params) and
 	// catch (load params) sides.
-	ExecutionContextOffsetExceptionParamsPtr Offset = 1224
+	ExecutionContextOffsetExceptionParamsPtr Offset = 712
 	// ExecutionContextOffsetCaughtExceptionClauseIdx is the matched catch clause index
 	// written by handleException and read by compiled handler dispatch code.
-	ExecutionContextOffsetCaughtExceptionClauseIdx Offset = 1232
+	ExecutionContextOffsetCaughtExceptionClauseIdx Offset = 720
 	// ExecutionContextOffsetLocalsSaveAreaPtr points to a heap-allocated buffer
 	// where locals are mirrored inside try_table bodies, so that handler blocks
 	// can read throw-time local values after stack-clone restore.
-	ExecutionContextOffsetLocalsSaveAreaPtr Offset = 1240
+	ExecutionContextOffsetLocalsSaveAreaPtr Offset = 728
 	// ExecutionContextOffsetInterruptCounter is an offset of the `interruptCounter`
 	// field. Loop headers increment it and, under WithCloseOnContextDone with a
 	// non-zero interrupt-check interval, only perform the module-exit-code check
 	// when (counter & (interval-1)) == 0 (see frontend loop lowering).
-	ExecutionContextOffsetInterruptCounter Offset = 1248
+	ExecutionContextOffsetInterruptCounter Offset = 736
 	// ExecutionContextOffsetInterruptCheckMask is an offset of the
 	// `interruptCheckMask` field. It holds (interval-1); loop headers load it at
 	// runtime (rather than baking it as a constant) so the amortized-check
 	// frequency can be retuned per run/per loop without recompiling.
-	ExecutionContextOffsetInterruptCheckMask Offset = 1256
+	ExecutionContextOffsetInterruptCheckMask Offset = 744
 	// ExecutionContextOffsetGCCheckTrampolineAddress is the address of the trampoline behind ref.test,
 	// ref.cast and the subtype-aware call_indirect check. See nativeapi.ExitCodeGCCheck.
-	ExecutionContextOffsetGCCheckTrampolineAddress Offset = 1264
+	ExecutionContextOffsetGCCheckTrampolineAddress Offset = 752
 )
+
+// AssertSavedRegistersFit panics if a save/restore layout that ends at absolute offset end
+// (exclusive) within native.executionContext would run past savedRegisters and into the fields
+// after it -- which, since the store is a raw offset off the execution context pointer, would
+// silently corrupt trampoline addresses and guest state rather than fault. Every backend layout of
+// that region goes through here; see ExecutionContextOffsetSavedRegistersEnd.
+func AssertSavedRegistersFit(end int64) {
+	if end > ExecutionContextOffsetSavedRegistersEnd.I64() {
+		panic(fmt.Sprintf("BUG: register save area needs %d bytes, but executionContext.savedRegisters holds %d",
+			end-ExecutionContextOffsetSavedRegistersBegin.I64(),
+			ExecutionContextOffsetSavedRegistersEnd.I64()-ExecutionContextOffsetSavedRegistersBegin.I64()))
+	}
+}
 
 // ModuleContextOffsetData allows the compilers to get the information about offsets to the fields of native.moduleContextOpaque,
 // This is unique per module.

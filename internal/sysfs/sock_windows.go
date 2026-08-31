@@ -69,12 +69,12 @@ func setNonblockSocket(fd uintptr, enabled bool) sys.Errno {
 	return sys.UnwrapOSError(errno)
 }
 
-func _pollSock(conn syscall.Conn, flag sys.Pflag, timeoutMillis int32) (bool, sys.Errno) {
+func _pollSock(f *tcpListenerFile, flag sys.Pflag, timeoutMillis int32) (bool, sys.Errno) {
 	if flag != sys.POLLIN {
 		return false, sys.ENOTSUP
 	}
-	n, errno := syscallConnControl(conn, func(fd uintptr) (int, sys.Errno) {
+	n, errno := f.call(func(fd uintptr, _ []byte) (int, sys.Errno) {
 		return _poll([]pollFd{newPollFd(fd, _POLLIN, 0)}, timeoutMillis)
-	})
+	}, nil)
 	return n > 0, errno
 }

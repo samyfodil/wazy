@@ -68,7 +68,7 @@ func TestMachine_CompileGoFunctionTrampoline(t *testing.T) {
 	stp q26, q27, [x0, #0x130]
 	stp q28, q29, [x0, #0x150]
 	stp q30, q31, [x0, #0x170]
-	str x1, [x0, #0x460]
+	str x1, [x0, #0x260]
 	sub sp, sp, #0x120
 	mov x15, sp
 	str q0, [x15], #0x10
@@ -179,7 +179,7 @@ func TestMachine_CompileGoFunctionTrampoline(t *testing.T) {
 	stp q26, q27, [x0, #0x130]
 	stp q28, q29, [x0, #0x150]
 	stp q30, q31, [x0, #0x170]
-	str x1, [x0, #0x460]
+	str x1, [x0, #0x260]
 	sub sp, sp, #0x20
 	mov x15, sp
 	str d0, [x15], #0x8
@@ -237,7 +237,7 @@ func TestMachine_CompileGoFunctionTrampoline(t *testing.T) {
 	stp q26, q27, [x0, #0x130]
 	stp q28, q29, [x0, #0x150]
 	stp q30, q31, [x0, #0x170]
-	str x1, [x0, #0x460]
+	str x1, [x0, #0x260]
 	sub sp, sp, #0x20
 	mov x15, sp
 	str d0, [x15], #0x8
@@ -521,6 +521,35 @@ func Test_goFunctionCallStoreStackResult(t *testing.T) {
 				err := m.Encode(context.Background())
 				require.NoError(t, err)
 			})
+		})
+	}
+}
+
+// Test_savedRegistersFit pins the two register lists against the size of
+// native.executionContext.savedRegisters. The field is sized to exactly what these need (see
+// nativeapi.ExecutionContextOffsetSavedRegistersEnd), so a list that grows past it would store over
+// the execution-context fields that follow -- silently, since these are raw offsets off a pointer.
+// registerSaveRestoreSlots itself panics on overflow; this catches it without compiling a module.
+func Test_savedRegistersFit(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		regs []regalloc.VReg
+		exp  int64 // bytes of savedRegisters this list's stp/ldp-paired layout occupies.
+	}{
+		{name: "calleeSavedRegistersSorted", regs: calleeSavedRegistersSorted, exp: 304},
+		{name: "saveRequiredRegs", regs: saveRequiredRegs, exp: 496},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			slots := registerSaveRestoreSlots(tc.regs)
+			last := slots[len(slots)-1]
+			size := int64(16)
+			if last.r2 != regalloc.VRegInvalid && last.r1.RegType() == regalloc.RegTypeFloat {
+				size = 32 // a paired v-register slot is two 16-byte registers.
+			}
+			end := last.offset + size
+			require.Equal(t, tc.exp, end-nativeapi.ExecutionContextOffsetSavedRegistersBegin.I64())
+			require.True(t, end <= nativeapi.ExecutionContextOffsetSavedRegistersEnd.I64(),
+				"%s ends at %d, past savedRegisters", tc.name, end)
 		})
 	}
 }

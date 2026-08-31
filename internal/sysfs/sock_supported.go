@@ -14,7 +14,7 @@ import (
 func (f *tcpListenerFile) Accept() (socketapi.TCPConn, sys.Errno) {
 	// Ensure we have an incoming connection, otherwise return immediately.
 	if f.nonblock {
-		if ready, errno := _pollSock(f.tl, sys.POLLIN, 0); !ready || errno != 0 {
+		if ready, errno := _pollSock(f, sys.POLLIN, 0); !ready || errno != 0 {
 			return nil, sys.EAGAIN
 		}
 	}

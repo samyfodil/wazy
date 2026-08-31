@@ -3913,7 +3913,7 @@ func (c *compiler) emit(op unionOperation) {
 			// we could remove such operations.
 			// That happens when drop operation is unnecessary.
 			// i.e. when there's no need to adjust stack before jmp.
-			if int64(op.U1) == -1 {
+			if op.U1 == 0 {
 				return
 			}
 		}

@@ -6,12 +6,14 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"sync"
 	"testing"
 	"unsafe"
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/experimental"
+	"github.com/samyfodil/wazy/internal/engine/native"
 	"github.com/samyfodil/wazy/internal/engine/native/testcases"
 	"github.com/samyfodil/wazy/internal/leb128"
 	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
@@ -1738,6 +1740,158 @@ func TestListener_long_many_consts(t *testing.T) {
 `, "\n"+buf.String())
 }
 
+// memoryFillSizes covers both sides of the frontend's constant memory.fill
+// threshold (memoryFillInlineMaxBytes), plus every shape the inline lowering
+// picks between: single byte, the 2/4-byte overlapping pairs, exact multiples
+// of 8, and multiples of 8 plus a tail that the last store has to overlap.
+var memoryFillSizes = []uint32{0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 63, 64, 65, 127, 128, 129, 200}
+
+// TestMemoryFillConstantSize checks that a memory.fill with a compile-time
+// constant size -- which the frontend lowers to straight-line stores rather
+// than the copy-doubling memmove loop -- writes exactly what the loop writes,
+// and traps out of bounds without writing anything.
+func TestMemoryFillConstantSize(t *testing.T) {
+	fillBody := func(size []byte) []byte {
+		body := []byte{wasm.OpcodeLocalGet, 0, wasm.OpcodeLocalGet, 1}
+		body = append(body, size...)
+		return append(body, wasm.OpcodeMiscPrefix, byte(wasm.OpcodeMiscMemoryFill), 0, wasm.OpcodeEnd)
+	}
+
+	m := &wasm.Module{
+		TypeSection: []wasm.FunctionType{
+			{Params: []wasm.ValueType{i32, i32}},      // constant size: (dst, value)
+			{Params: []wasm.ValueType{i32, i32, i32}}, // dynamic size: (dst, value, size)
+		},
+		MemorySection: []wasm.Memory{{Min: 1, Cap: 1, Max: 1, IsMaxEncoded: true}},
+	}
+	for _, size := range memoryFillSizes {
+		m.FunctionSection = append(m.FunctionSection, 0)
+		m.CodeSection = append(m.CodeSection, wasm.Code{
+			Body: fillBody(append([]byte{wasm.OpcodeI32Const}, leb128.EncodeInt32(int32(size))...)),
+		})
+		m.ExportSection = append(m.ExportSection, wasm.Export{
+			Name: fmt.Sprintf("const%d", size), Type: wasm.ExternTypeFunc, Index: uint32(len(m.CodeSection) - 1),
+		})
+	}
+	m.FunctionSection = append(m.FunctionSection, 1)
+	m.CodeSection = append(m.CodeSection, wasm.Code{Body: fillBody([]byte{wasm.OpcodeLocalGet, 2})})
+	m.ExportSection = append(m.ExportSection, wasm.Export{
+		Name: "dyn", Type: wasm.ExternTypeFunc, Index: uint32(len(m.CodeSection) - 1),
+	})
+	// A constant fill value takes the other splat path: the byte pattern is
+	// folded at compile time instead of built with a multiply.
+	m.FunctionSection = append(m.FunctionSection, 0)
+	m.CodeSection = append(m.CodeSection, wasm.Code{Body: []byte{
+		wasm.OpcodeLocalGet, 0,
+		wasm.OpcodeI32Const, 0xef, 0xfd, 0x02, // 0xbeef
+		wasm.OpcodeI32Const, 20,
+		wasm.OpcodeMiscPrefix, byte(wasm.OpcodeMiscMemoryFill), 0, wasm.OpcodeEnd,
+	}})
+	m.ExportSection = append(m.ExportSection, wasm.Export{
+		Name: "constvalue", Type: wasm.ExternTypeFunc, Index: uint32(len(m.CodeSection) - 1),
+	})
+
+	ctx := context.Background()
+	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler())
+	defer func() { require.NoError(t, r.Close(ctx)) }()
+	inst, err := r.Instantiate(ctx, binaryencoding.EncodeModule(m))
+	require.NoError(t, err)
+	mem := inst.Memory()
+
+	// Every fill this test makes lands inside one window; comparing just the
+	// window, plus a count of bytes disturbed outside it, keeps a failure
+	// readable instead of dumping 64KiB.
+	const memSize, window = wasm.MemoryPageSize, 256
+	scratch := make([]byte, memSize)
+	reset := func() {
+		for i := range scratch {
+			scratch[i] = 0xa5
+		}
+		require.True(t, mem.Write(0, scratch))
+	}
+	snapshot := func(at uint32) []byte {
+		got, ok := mem.Read(at, window)
+		require.True(t, ok)
+		got = append([]byte(nil), got...)
+		all, ok := mem.Read(0, memSize)
+		require.True(t, ok)
+		var outside int
+		for i, b := range all {
+			if (i < int(at) || i >= int(at)+window) && b != 0xa5 {
+				outside++
+			}
+		}
+		require.Equal(t, 0, outside, "bytes written outside the window")
+		return got
+	}
+
+	// The two lowerings must agree byte for byte, at an offset that is neither
+	// 8-byte aligned nor a multiple of the size, so a wrong store offset or
+	// width in the inline path shows up as a differing byte.
+	const dst, value = 3, 0xbeef // only the low byte may be written
+	expected := func(at, size uint32) []byte {
+		want := make([]byte, window)
+		for i := range want {
+			want[i] = 0xa5
+		}
+		for i := uint32(0); i < size; i++ {
+			want[at+i] = byte(value & 0xff)
+		}
+		return want
+	}
+	dyn := inst.ExportedFunction("dyn")
+	for _, size := range memoryFillSizes {
+		reset()
+		_, err = inst.ExportedFunction(fmt.Sprintf("const%d", size)).Call(ctx, dst, value)
+		require.NoError(t, err, size)
+		constant := snapshot(0)
+
+		reset()
+		_, err = dyn.Call(ctx, dst, value, uint64(size))
+		require.NoError(t, err, size)
+		require.Equal(t, snapshot(0), constant, size)
+
+		// ...and both must match what memory.fill is defined to do.
+		require.Equal(t, expected(dst, size), constant, size)
+	}
+
+	// A constant fill value must be masked to its low byte just the same.
+	reset()
+	_, err = inst.ExportedFunction("constvalue").Call(ctx, dst, 0)
+	require.NoError(t, err)
+	require.Equal(t, expected(dst, 20), snapshot(0))
+
+	// Out of bounds traps, and nothing is written -- including by the inline
+	// path, whose stores all sit after the bounds check.
+	reset()
+	untouched := expected(0, 0)
+	for _, tc := range []struct {
+		name string
+		call func() error
+	}{
+		{"const128 past the end", func() error {
+			_, err := inst.ExportedFunction("const128").Call(ctx, uint64(memSize)-127, value)
+			return err
+		}},
+		{"const0 past the end", func() error {
+			_, err := inst.ExportedFunction("const0").Call(ctx, uint64(memSize)+1, value)
+			return err
+		}},
+		{"const1 at the end", func() error {
+			_, err := inst.ExportedFunction("const1").Call(ctx, uint64(memSize), value)
+			return err
+		}},
+	} {
+		require.Error(t, tc.call(), tc.name)
+		require.Equal(t, untouched, snapshot(memSize-window), tc.name)
+	}
+
+	// A zero-size fill at exactly the end of the memory is in bounds.
+	_, err = inst.ExportedFunction("const0").Call(ctx, uint64(memSize), value)
+	require.NoError(t, err)
+	require.Equal(t, untouched, snapshot(memSize-window))
+}
+
 // TestDWARF verifies that the DWARF based stack traces work as expected before/after compilation cache.
 func TestDWARF(t *testing.T) {
 	config := wazy.NewRuntimeConfigCompiler()
@@ -1771,4 +1925,213 @@ func TestDWARF(t *testing.T) {
 
 	err = r.Close(ctx)
 	require.NoError(t, err)
+}
+
+// refFuncLoopModule exports run(n), which writes ref.func 0 into table[n-1]...table[0], and holds an
+// element segment that puts the same ref.func 0 at table[1000].
+func refFuncLoopModule() *wasm.Module {
+	return &wasm.Module{
+		TypeSection:     []wasm.FunctionType{{}, {Params: []wasm.ValueType{i32}}},
+		FunctionSection: []wasm.Index{0, 1},
+		TableSection:    []wasm.Table{{Type: wasm.RefTypeFuncref, Min: 1001}},
+		ElementSection: []wasm.ElementSegment{{
+			OffsetExpr: wasm.NewConstantExpressionFromOpcode(wasm.OpcodeI32Const, leb128.EncodeInt32(1000)),
+			TableIndex: 0, Type: wasm.RefTypeFuncref, Mode: wasm.ElementModeActive,
+			Init: []wasm.Index{0},
+		}},
+		ExportSection: []wasm.Export{{Name: "run", Type: wasm.ExternTypeFunc, Index: 1}},
+		CodeSection: []wasm.Code{
+			{Body: []byte{wasm.OpcodeEnd}},
+			{Body: []byte{
+				wasm.OpcodeLoop, 0x40,
+				wasm.OpcodeLocalGet, 0,
+				wasm.OpcodeI32Const, 1,
+				wasm.OpcodeI32Sub,
+				wasm.OpcodeLocalTee, 0, // table index
+				wasm.OpcodeRefFunc, 0, // value
+				wasm.OpcodeTableSet, 0,
+				wasm.OpcodeLocalGet, 0,
+				wasm.OpcodeBrIf, 0,
+				wasm.OpcodeEnd,
+				wasm.OpcodeEnd,
+			}},
+		},
+	}
+}
+
+// TestRefFuncMemoized checks that ref.func yields one reference per function index -- the same one the
+// element segment wrote at instantiation -- and that re-executing it allocates nothing.
+func TestRefFuncMemoized(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler())
+	defer func() {
+		require.NoError(t, r.Close(ctx))
+	}()
+	compiled, err := r.CompileModule(ctx, binaryencoding.EncodeModule(refFuncLoopModule()))
+	require.NoError(t, err)
+
+	inst, err := r.InstantiateModule(ctx, compiled, wazy.NewModuleConfig())
+	require.NoError(t, err)
+	f := inst.ExportedFunction("run")
+	require.NotNil(t, f)
+	stack := []uint64{2}
+	require.NoError(t, f.CallWithStack(ctx, stack))
+
+	refs := inst.(*wasm.ModuleInstance).Tables[0].References
+	require.NotEqual(t, uintptr(0), refs[0])
+	require.Equal(t, refs[0], refs[1])    // Two executions of ref.func 0.
+	require.Equal(t, refs[0], refs[1000]) // ...and the element segment's own ref.func 0.
+
+	require.Zero(t, testing.AllocsPerRun(5, func() {
+		stack[0] = 2
+		if err := f.CallWithStack(ctx, stack); err != nil {
+			panic(err)
+		}
+	}))
+
+	// Callers racing for the first ref.func of an instance must still end up with the one reference.
+	inst2, err := r.InstantiateModule(ctx, compiled, wazy.NewModuleConfig())
+	require.NoError(t, err)
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() { errs <- inst2.ExportedFunction("run").CallWithStack(ctx, []uint64{2}) }()
+	}
+	for i := 0; i < 2; i++ {
+		require.NoError(t, <-errs)
+	}
+	refs2 := inst2.(*wasm.ModuleInstance).Tables[0].References
+	require.Equal(t, refs2[0], refs2[1])
+	require.Equal(t, refs2[0], refs2[1000])
+}
+
+// BenchmarkRefFuncLoop executes ref.func 1000 times per operation.
+func BenchmarkRefFuncLoop(b *testing.B) {
+	ctx := context.Background()
+	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler())
+	defer func() {
+		require.NoError(b, r.Close(ctx))
+	}()
+	inst, err := r.Instantiate(ctx, binaryencoding.EncodeModule(refFuncLoopModule()))
+	require.NoError(b, err)
+	f := inst.ExportedFunction("run")
+	require.NotNil(b, f)
+
+	stack := []uint64{1000}
+	require.NoError(b, f.CallWithStack(ctx, stack))
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		stack[0] = 1000
+		if err = f.CallWithStack(ctx, stack); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// TestCallEngine_stackRetainedAcrossCalls covers the two paths callWithStack takes to get a wasm
+// stack: the pool round trip a once-called handle does (which is what keeps
+// mod.ExportedFunction(name).Call(ctx) from allocating ~10KB per lookup) and the retained buffer a
+// reused handle keeps instead. They have to produce identical results, and a call that grows the
+// stack has to give the grown buffer back rather than hold it forever. See callEngine.stackRetained.
+func TestCallEngine_stackRetainedAcrossCalls(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler())
+	defer func() { require.NoError(t, r.Close(ctx)) }()
+
+	// (func $id (param i32) (result i32) (local.get 0))
+	// (func $rec (param i32) (result i32)   ;; sum(1..n), deep enough to grow the stack
+	//   (if (result i32) (i32.eqz (local.get 0))
+	//     (then (i32.const 0))
+	//     (else (i32.add (local.get 0) (call $rec (i32.sub (local.get 0) (i32.const 1)))))))
+	m := &wasm.Module{
+		TypeSection:     []wasm.FunctionType{{Params: []wasm.ValueType{i32}, Results: []wasm.ValueType{i32}}},
+		FunctionSection: []wasm.Index{0, 0},
+		CodeSection: []wasm.Code{
+			{Body: []byte{wasm.OpcodeLocalGet, 0, wasm.OpcodeEnd}},
+			{Body: []byte{
+				wasm.OpcodeLocalGet, 0,
+				wasm.OpcodeI32Eqz,
+				wasm.OpcodeIf, 0x7f, // if (result i32)
+				wasm.OpcodeI32Const, 0,
+				wasm.OpcodeElse,
+				wasm.OpcodeLocalGet, 0,
+				wasm.OpcodeLocalGet, 0,
+				wasm.OpcodeI32Const, 1,
+				wasm.OpcodeI32Sub,
+				wasm.OpcodeCall, 1,
+				wasm.OpcodeI32Add,
+				wasm.OpcodeEnd,
+				wasm.OpcodeEnd,
+			}},
+		},
+		ExportSection: []wasm.Export{
+			{Name: "id", Type: wasm.ExternTypeFunc, Index: 0},
+			{Name: "rec", Type: wasm.ExternTypeFunc, Index: 1},
+		},
+	}
+	inst, err := r.Instantiate(ctx, binaryencoding.EncodeModule(m))
+	require.NoError(t, err)
+
+	t.Run("reused handle keeps its buffer", func(t *testing.T) {
+		id := inst.ExportedFunction("id")
+
+		// The first call releases: a handle called once and dropped -- what ExportedFunction().Call()
+		// produces every time -- must leave its buffer in the pool for the next lookup.
+		res, err := id.Call(ctx, 42)
+		require.NoError(t, err)
+		require.Equal(t, uint64(42), res[0])
+		require.Equal(t, 0, native.RetainedStackLenForTest(id))
+
+		// From the second call on it holds the buffer, and still computes the same thing.
+		for i := 0; i < 3; i++ {
+			res, err = id.Call(ctx, 42)
+			require.NoError(t, err)
+			require.Equal(t, uint64(42), res[0])
+			require.True(t, native.RetainedStackLenForTest(id) > 0, "call %d released a buffer it should have kept", i)
+		}
+	})
+
+	t.Run("a grown stack is not retained", func(t *testing.T) {
+		rec := inst.ExportedFunction("rec")
+		const deep, shallow = 20000, 10
+		const deepSum, shallowSum = deep * (deep + 1) / 2, shallow * (shallow + 1) / 2
+
+		// Call once so the handle is past its first (always-releasing) call.
+		res, err := rec.Call(ctx, shallow)
+		require.NoError(t, err)
+		require.Equal(t, uint64(shallowSum), res[0])
+
+		// This one recurses far enough to replace the buffer via growStack. The replacement is
+		// bigger than a fresh call needs, so it goes back to the pool instead of being held.
+		res, err = rec.Call(ctx, deep)
+		require.NoError(t, err)
+		require.Equal(t, uint64(deepSum), res[0])
+		require.Equal(t, 0, native.RetainedStackLenForTest(rec))
+
+		// And the handle still works afterwards, on a freshly acquired buffer.
+		res, err = rec.Call(ctx, shallow)
+		require.NoError(t, err)
+		require.Equal(t, uint64(shallowSum), res[0])
+		require.True(t, native.RetainedStackLenForTest(rec) > 0)
+	})
+
+	t.Run("concurrent handles", func(t *testing.T) {
+		var wg sync.WaitGroup
+		for g := 0; g < 4; g++ {
+			wg.Add(1)
+			go func(g int) {
+				defer wg.Done()
+				id := inst.ExportedFunction("id")
+				for i := 0; i < 50; i++ {
+					res, err := id.Call(ctx, uint64(g))
+					if err != nil || res[0] != uint64(g) {
+						t.Errorf("goroutine %d iteration %d: %v %v", g, i, res, err)
+						return
+					}
+				}
+			}(g)
+		}
+		wg.Wait()
+	})
 }

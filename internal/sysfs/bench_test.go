@@ -3,6 +3,7 @@ package sysfs
 import (
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"path"
 	"testing"
@@ -53,7 +54,7 @@ func BenchmarkFsFileRead(b *testing.B) {
 		bc := bc
 
 		b.Run(bc.name, func(b *testing.B) {
-			name := "wazy.txt"
+			name := wazyFile
 			f, errno := OpenFSFile(bc.fs, name, sys.O_RDONLY, 0)
 			if errno != 0 {
 				b.Fatal(errno)
@@ -87,5 +88,81 @@ func BenchmarkFsFileRead(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+// benchSock returns a non-blocking connection with nothing to read, and the
+// listener it was accepted from, also non-blocking.
+func benchSock(b *testing.B) (*tcpConnFile, *tcpListenerFile) {
+	b.Helper()
+
+	listen, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { listen.Close() })
+
+	tcpAddr, err := net.ResolveTCPAddr("tcp", listen.Addr().String())
+	if err != nil {
+		b.Fatal(err)
+	}
+	tcp, err := net.DialTCP("tcp", nil, tcpAddr)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { tcp.Close() })
+
+	peer, err := listen.Accept()
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { peer.Close() })
+
+	conn := newTcpConn(tcp).(*tcpConnFile)
+	if errno := conn.SetNonblock(true); errno != 0 {
+		b.Fatal(errno)
+	}
+	lf := newTCPListenerFile(listen.(*net.TCPListener)).(*tcpListenerFile)
+	if errno := lf.SetNonblock(true); errno != 0 {
+		b.Fatal(errno)
+	}
+	return conn, lf
+}
+
+func BenchmarkTcpConnRead(b *testing.B) {
+	conn, _ := benchSock(b)
+	buf := make([]byte, 8)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, errno := conn.Read(buf); errno != sys.EAGAIN {
+			b.Fatal(errno)
+		}
+	}
+}
+
+func BenchmarkTcpConnWrite(b *testing.B) {
+	conn, _ := benchSock(b)
+	buf := []byte("wazy")
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, errno := conn.Write(buf); errno != 0 && errno != sys.EAGAIN {
+			b.Fatal(errno)
+		}
+	}
+}
+
+func BenchmarkTcpListenerAccept(b *testing.B) {
+	_, lf := benchSock(b)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, errno := lf.Accept(); errno != sys.EAGAIN {
+			b.Fatal(errno)
+		}
 	}
 }

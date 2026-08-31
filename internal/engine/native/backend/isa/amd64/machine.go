@@ -364,9 +364,8 @@ func (m *machine) RegAlloc() {
 	if m.needsCtxSlot() {
 		m.spillSlotSize = ehCtxReservedSlotSize
 	}
-	rf := m.regAllocFn
 	m.regAllocStarted = true
-	m.regAlloc.DoAllocation(&rf)
+	m.regAlloc.DoAllocation(&m.regAllocFn)
 	// Now that we know the final spill slot size, we must align spillSlotSize to 16 bytes.
 	m.spillSlotSize = (m.spillSlotSize + 15) &^ 15
 }
@@ -451,7 +450,7 @@ func (m *machine) lowerBrTable(index ssa.Value, targets ssa.Values) {
 
 	jmpTableBegin, jmpTableBeginLabel := m.allocateBrTarget()
 	m.insert(jmpTableBegin)
-	leaJmpTableAddr.asLEA(newOperandLabel(jmpTableBeginLabel), addr)
+	leaJmpTableAddr.asLEA(newOperandLabel(jmpTableBeginLabel), addr, true)
 
 	jmpTable := m.allocateInstr()
 	targetSliceIndex := m.addJmpTableTarget(targets)
@@ -1856,7 +1855,7 @@ func (m *machine) lowerExitWithCode(execCtx regalloc.VReg, code nativeapi.ExitCo
 	// Next is to save the current address for stack unwinding.
 	nop, currentAddrLabel := m.allocateBrTarget()
 	m.insert(nop)
-	readRip := m.allocateInstr().asLEA(newOperandLabel(currentAddrLabel), ripReg)
+	readRip := m.allocateInstr().asLEA(newOperandLabel(currentAddrLabel), ripReg, true)
 	m.insert(readRip)
 	saveRip := m.allocateInstr().asMovRM(
 		ripReg,
@@ -1892,6 +1891,26 @@ func (m *machine) lowerAluRmiROp(si *ssa.Instruction, op aluRmiROpcode) {
 	rn := m.getOperand_Reg(xDef)
 	rm := m.getOperand_Mem_Imm32_Reg(yDef)
 	rd := m.c.VRegOf(si.Return())
+
+	// An add is what LEA computes, and LEA is three-operand: it reads rn and rm and
+	// writes rd, so neither the copy in nor the copy out below is needed. LEA leaves the
+	// flags alone, which costs nothing here because no flag in this backend outlives the
+	// lowering that produced it (see lowerBnot). The 32-bit form (REX.W clear) is equally
+	// exact: x64 still computes the address at 64-bit width but truncates the result to 32
+	// bits and zero-extends it into rd, and a sum modulo 2^32 depends only on the low 32
+	// bits of its addends -- the same value `addl` would leave, upper half included. That
+	// also makes the immediate's sign irrelevant here, i32 (asImm32 with allowSignExt=true)
+	// as well as i64.
+	if op == aluRmiROpcodeAdd && rm.kind != operandKindMem {
+		var am *amode
+		if rm.kind == operandKindImm32 {
+			am = m.newAmodeImmReg(rm.imm32(), rn.reg())
+		} else {
+			am = m.newAmodeRegRegShift(0, rn.reg(), rm.reg(), 0)
+		}
+		m.insert(m.allocateInstr().asLEA(newOperandMem(am), rd, _64))
+		return
+	}
 
 	// rn is being overwritten, so we first copy its value to a temp register,
 	// in case it is referenced again later.
@@ -2567,9 +2586,14 @@ func (m *machine) allocateLabel() (label, *labelPosition) {
 func (m *machine) getVRegSpillSlotOffsetFromSP(id regalloc.VRegID, size byte) int64 {
 	offset, ok := m.spillSlots[id]
 	if !ok {
-		offset = m.spillSlotSize
+		// Natural alignment: bump-allocating packs an 8-byte slot right after a 4-byte one and
+		// every access to it then splits. The region base is only 8-byte aligned (an odd number
+		// of integer clobber pushes shifts it), so a V128 slot can still end up 8-byte aligned,
+		// which movdqu tolerates.
+		align := int64(size)
+		offset = (m.spillSlotSize + align - 1) &^ (align - 1)
 		m.spillSlots[id] = offset
-		m.spillSlotSize += int64(size)
+		m.spillSlotSize = offset + align
 	}
 	return offset
 }

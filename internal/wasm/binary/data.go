@@ -22,7 +22,7 @@ const (
 	dataSegmentPrefixActiveWithMemoryIndex dataSegmentPrefix = 0x2
 )
 
-func decodeDataSegment(buf []byte, offset int, enabledFeatures api.CoreFeatures, ret *wasm.DataSegment) (newOffset int, err error) {
+func decodeDataSegment(buf []byte, offset int, enabledFeatures api.CoreFeatures, ba *byteArena, ret *wasm.DataSegment) (newOffset int, err error) {
 	dataSegmentPrefx, n, err := leb128.LoadUint32(buf[offset:])
 	if err != nil {
 		err = fmt.Errorf("read data segment prefix: %w", err)
@@ -56,7 +56,7 @@ func decodeDataSegment(buf []byte, offset int, enabledFeatures api.CoreFeatures,
 			ret.MemoryIndex = d
 		}
 
-		offset, err = decodeConstantExpression(buf, offset, enabledFeatures, &ret.OffsetExpression)
+		offset, err = decodeConstantExpression(buf, offset, enabledFeatures, ba, &ret.OffsetExpression)
 		if err != nil {
 			return offset, fmt.Errorf("read offset expression: %v", err)
 		}
@@ -80,7 +80,7 @@ func decodeDataSegment(buf []byte, offset int, enabledFeatures api.CoreFeatures,
 	if err != nil {
 		return offset, fmt.Errorf("read bytes for init: %v", err)
 	}
-	ret.Init = make([]byte, vs)
+	ret.Init = ba.alloc(int(vs))
 	copy(ret.Init, data)
 	return newOffset, nil
 }

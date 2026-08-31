@@ -82,7 +82,7 @@ func decodeTable(buf []byte, offset int, enabledFeatures api.CoreFeatures, ret *
 
 	if hasInitExpr {
 		var initExpr wasm.ConstantExpression
-		offset, err = decodeConstantExpression(buf, offset, enabledFeatures, &initExpr)
+		offset, err = decodeConstantExpression(buf, offset, enabledFeatures, nil, &initExpr)
 		if err != nil {
 			return offset, fmt.Errorf("read table init expr: %v", err)
 		}

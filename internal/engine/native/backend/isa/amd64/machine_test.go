@@ -291,7 +291,7 @@ func TestMachine_lowerExitWithCode(t *testing.T) {
 	m.rootInstr = m.perBlockHead
 	require.Equal(t, `
 	mov.q %rsp, 56(%r15)
-	mov.q %rbp, 1152(%r15)
+	mov.q %rbp, 640(%r15)
 	movl $3, %ebp
 	mov.l %rbp, (%r15)
 L1:
@@ -301,6 +301,92 @@ L1:
 L2:
 	ud2
 `, m.Format())
+}
+
+func Test_machine_lowerAluRmiROp(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		typ      ssa.Type
+		op       aluRmiROpcode
+		konst    bool // y is a constant rather than a second block param.
+		konstVal uint64
+		exp      string
+	}{
+		{
+			name: "i64 add reg+reg is one LEA",
+			typ:  ssa.TypeI64, op: aluRmiROpcodeAdd,
+			exp: `
+	lea (%rax,%rcx,1), %rdx
+`,
+		},
+		{
+			name: "i64 add reg+imm is one LEA",
+			typ:  ssa.TypeI64, op: aluRmiROpcodeAdd, konst: true, konstVal: 5,
+			exp: `
+	lea 5(%rax), %rdx
+`,
+		},
+		{
+			name: "i32 add reg+reg is one LEA",
+			typ:  ssa.TypeI32, op: aluRmiROpcodeAdd,
+			exp: `
+	lea (%rax,%rcx,1), %edx
+`,
+		},
+		{
+			// The sign bit of an i32 immediate is allowed here (unlike the i64 case): the
+			// disp32 sign-extends to 64 bits, but truncating the result back to 32 undoes it.
+			name: "i32 add reg+negative imm is one LEA",
+			typ:  ssa.TypeI32, op: aluRmiROpcodeAdd, konst: true, konstVal: 0xffffffff,
+			exp: `
+	lea -1(%rax), %edx
+`,
+		},
+		{
+			name: "i64 sub keeps the copy-in/copy-out form",
+			typ:  ssa.TypeI64, op: aluRmiROpcodeSub,
+			exp: `
+	movq %rax, %r1?
+	sub %rcx, %r1?
+	movq %r1?, %rdx
+`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, b, m := newSetupWithMockContext()
+			x := b.CurrentBlock().AddParam(b, tc.typ)
+			ctx.vRegMap[x] = raxVReg
+			ctx.typeOf[raxVReg.ID()] = tc.typ
+
+			var y ssa.Value
+			if tc.konst {
+				c := b.AllocateInstruction()
+				if tc.typ == ssa.TypeI32 {
+					c.AsIconst32(uint32(tc.konstVal))
+				} else {
+					c.AsIconst64(tc.konstVal)
+				}
+				b.InsertInstruction(c)
+				y = c.Return()
+				ctx.definitions[y] = backend.SSAValueDefinition{Instr: c}
+			} else {
+				y = b.CurrentBlock().AddParam(b, tc.typ)
+			}
+			ctx.vRegMap[y] = rcxVReg
+			ctx.vRegMap[0] = rdxVReg // The result.
+
+			instr := &ssa.Instruction{}
+			if tc.op == aluRmiROpcodeAdd {
+				instr.AsIadd(x, y)
+			} else {
+				instr.AsIsub(x, y)
+			}
+			m.lowerAluRmiROp(instr, tc.op)
+			m.FlushPendingInstructions()
+			m.rootInstr = m.perBlockHead
+			require.Equal(t, tc.exp, m.Format())
+		})
+	}
 }
 
 func Test_machine_lowerClz(t *testing.T) {

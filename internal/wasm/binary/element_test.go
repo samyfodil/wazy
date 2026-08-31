@@ -437,7 +437,7 @@ func TestDecodeElementSegment(t *testing.T) {
 		tc := tt
 		t.Run(tc.name, func(t *testing.T) {
 			var actual wasm.ElementSegment
-			_, err := decodeElementSegment(tc.in, 0, tc.features, &actual)
+			_, err := decodeElementSegment(tc.in, 0, tc.features, &byteArena{}, &actual)
 			if tc.expErr != "" {
 				require.EqualError(t, err, tc.expErr)
 			} else {
@@ -450,6 +450,6 @@ func TestDecodeElementSegment(t *testing.T) {
 
 func TestDecodeElementSegment_errors(t *testing.T) {
 	var actual wasm.ElementSegment
-	_, err := decodeElementSegment([]byte{1}, 0, api.CoreFeatureMultiValue, &actual)
+	_, err := decodeElementSegment([]byte{1}, 0, api.CoreFeatureMultiValue, nil, &actual)
 	require.EqualError(t, err, `non-zero prefix for element segment is invalid as feature "bulk-memory-operations" is disabled`)
 }

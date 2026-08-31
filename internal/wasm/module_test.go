@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/samyfodil/wazy/api"
@@ -28,6 +29,25 @@ func TestFunctionType_String(t *testing.T) {
 		{functype: &FunctionType{Params: []ValueType{ValueTypeI32}, Results: []ValueType{ValueTypeI64}}, exp: "i32_i64"},
 		{functype: &FunctionType{Params: []ValueType{ValueTypeI64, ValueTypeF32}, Results: []ValueType{ValueTypeI64, ValueTypeF32}}, exp: "i64f32_i64f32"},
 		{functype: &FunctionType{Params: []ValueType{ValueTypeI64, ValueTypeF32, ValueTypeF64}, Results: []ValueType{ValueTypeF32, ValueTypeI32, ValueTypeF64}}, exp: "i64f32f64_f32i32f64"},
+		// Longer than buildKey's stack buffer, so the key is built by growing onto the heap instead.
+		{
+			functype: &FunctionType{Params: repeatValueType(ValueTypeI32, 40), Results: repeatValueType(ValueTypeF64, 40)},
+			exp:      strings.Repeat("i32", 40) + "_" + strings.Repeat("f64", 40),
+		},
+		// The rec-group and composite suffixes, which only a GC type carries.
+		{functype: &FunctionType{RecGroupPosition: 1, RecGroupSize: 2}, exp: "v_v|rec1/2"},
+		{
+			functype: &FunctionType{
+				CompositeKind: CompositeKindStruct,
+				Fields:        []FieldType{{Type: ValueTypeI8}, {Type: ValueTypeI64, Mutable: true}},
+				HasSupertype:  true, Supertype: 3, Extensible: true,
+			},
+			exp: "v_v|struct i8 mut i64|sub3|open",
+		},
+		{
+			functype: &FunctionType{CompositeKind: CompositeKindArray, Fields: []FieldType{{Type: ValueTypeI32}}},
+			exp:      "v_v|array i32",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1253,4 +1273,12 @@ func TestIndexOutOfRange(t *testing.T) {
 	require.True(t, indexOutOfRange(math.MaxInt32, 10))
 	require.True(t, indexOutOfRange(math.MaxInt32+1, 10))
 	require.True(t, indexOutOfRange(0, 0))
+}
+
+func repeatValueType(vt ValueType, n int) []ValueType {
+	ret := make([]ValueType, n)
+	for i := range ret {
+		ret[i] = vt
+	}
+	return ret
 }

@@ -355,6 +355,13 @@ func (m *machine) lowerToAddressModeFromAddends(a32s *nativeapi.Queue[addend32],
 		return
 	}
 
+	// A static offset too large for the transfer's own imm12 still splits in two: the high part
+	// is one `add ..., #hi, lsl #12`, the low part stays in the imm12. That is two instructions
+	// against the three (movz + movk + add) it takes to materialize the whole constant.
+	hi, lo := offset&^0xfff, offset&0xfff
+	_, splitFits := asImm12Operand(uint64(hi))
+	splitFits = splitFits && hi != 0 && offsetFitsInAddressModeKindRegUnsignedImm12(size, lo)
+
 	switch a64sExist, a32sExist := !a64s.Empty(), !a32s.Empty(); {
 	case a64sExist && a32sExist:
 		var base regalloc.VReg
@@ -371,6 +378,10 @@ func (m *machine) lowerToAddressModeFromAddends(a32s *nativeapi.Queue[addend32],
 		var base regalloc.VReg
 		base = a64s.Dequeue()
 		*amode = addressMode{kind: addressModeKindRegSignedImm9, rn: base, imm: offset}
+		offset = 0
+	case a64sExist && splitFits:
+		base := m.addConstToReg64(a64s.Dequeue(), hi)
+		*amode = addressMode{kind: addressModeKindRegUnsignedImm12, rn: base, imm: lo}
 		offset = 0
 	case a64sExist:
 		var base regalloc.VReg

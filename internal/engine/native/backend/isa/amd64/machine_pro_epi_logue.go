@@ -59,7 +59,7 @@ func (m *machine) emitTrapIslands() {
 		// Record the address of this exit.
 		addrNop, addrLabel := m.allocateBrTarget()
 		cur = linkInstr(cur, addrNop)
-		cur = linkInstr(cur, m.allocateInstr().asLEA(newOperandLabel(addrLabel), rbpVReg))
+		cur = linkInstr(cur, m.allocateInstr().asLEA(newOperandLabel(addrLabel), rbpVReg, true))
 		saveRip := m.allocateInstr().asMovRM(
 			rbpVReg,
 			newOperandMem(m.newAmodeImmReg(nativeapi.ExecutionContextOffsetGoCallReturnAddress.U32(), raxVReg)),
@@ -139,18 +139,25 @@ func (m *machine) setupPrologue() {
 	//                                               +-----------------+ <----- RSP
 	//
 	if regs := m.clobberedRegs; len(regs) > 0 {
-		for i := range regs {
-			r := regs[len(regs)-1-i] // Reverse order.
-			if r.RegType() == regalloc.RegTypeInt {
-				cur = linkInstr(cur, m.allocateInstr().asPush64(newOperandReg(r)))
-			} else {
-				// Push the XMM register is not supported by the PUSH instruction.
-				cur = m.addRSP(-16, cur)
-				push := m.allocateInstr().asXmmMovRM(
-					sseOpcodeMovdqu, r, newOperandMem(m.newAmodeImmReg(0, rspVReg)),
-				)
-				cur = linkInstr(cur, push)
+		for i := len(regs) - 1; i >= 0; i-- { // Reverse order.
+			if regs[i].RegType() == regalloc.RegTypeInt {
+				cur = linkInstr(cur, m.allocateInstr().asPush64(newOperandReg(regs[i])))
+				continue
 			}
+			// PUSH cannot take an XMM register, so they get slots reserved by hand. Reserve a
+			// whole run of them with one SUB and store at displacements, rather than one SUB
+			// each: the slot addresses are the same either way.
+			run := i
+			for run > 0 && regs[run-1].RegType() != regalloc.RegTypeInt {
+				run--
+			}
+			cur = m.addRSP(int32(-16*(i-run+1)), cur)
+			for j := run; j <= i; j++ {
+				cur = linkInstr(cur, m.allocateInstr().asXmmMovRM(
+					sseOpcodeMovdqu, regs[j], newOperandMem(m.newAmodeImmReg(uint32(16*(j-run)), rspVReg)),
+				))
+			}
+			i = run
 		}
 	}
 
@@ -357,17 +364,24 @@ func (m *machine) setupEpilogueAfter(cur *instruction) {
 	//               (low address)
 	//
 	if regs := m.clobberedRegs; len(regs) > 0 {
-		for _, r := range regs {
-			if r.RegType() == regalloc.RegTypeInt {
-				cur = linkInstr(cur, m.allocateInstr().asPop64(r))
-			} else {
-				// Pop the XMM register is not supported by the POP instruction.
-				pop := m.allocateInstr().asXmmUnaryRmR(
-					sseOpcodeMovdqu, newOperandMem(m.newAmodeImmReg(0, rspVReg)), r,
-				)
-				cur = linkInstr(cur, pop)
-				cur = m.addRSP(16, cur)
+		for i := 0; i < len(regs); i++ {
+			if regs[i].RegType() == regalloc.RegTypeInt {
+				cur = linkInstr(cur, m.allocateInstr().asPop64(regs[i]))
+				continue
 			}
+			// POP cannot take an XMM register; mirror the prologue's single reservation
+			// per run with a single release.
+			run := i
+			for run+1 < len(regs) && regs[run+1].RegType() != regalloc.RegTypeInt {
+				run++
+			}
+			for j := i; j <= run; j++ {
+				cur = linkInstr(cur, m.allocateInstr().asXmmUnaryRmR(
+					sseOpcodeMovdqu, newOperandMem(m.newAmodeImmReg(uint32(16*(j-i)), rspVReg)), regs[j],
+				))
+			}
+			cur = m.addRSP(int32(16*(run-i+1)), cur)
+			i = run
 		}
 	}
 

@@ -130,6 +130,18 @@ func TestModule_ValidateFunction_MemorySizeGrowMemidxPCAdvance(t *testing.T) {
 		require.NoError(t, err)
 	})
 
+	t.Run("memory.size: a padded memidx is rejected without multi-memory", func(t *testing.T) {
+		// The memidx decodes to zero, so only the encoded length rejects it. This is the branch the
+		// multi-memory gate reaches once the feature bit alone, rather than a built error value, decides
+		// whether to enter it.
+		body := append([]byte{OpcodeMemorySize}, paddedZero...)
+		body = append(body, OpcodeDrop, OpcodeEnd)
+		m.CodeSection[0] = Code{Body: body}
+		err := m.validateFunctionWithMaxStackValues(&stacks{}, api.CoreFeaturesV2,
+			0, []Index{0}, nil, memories, nil, nil, 100, nil, bytes.NewReader(nil))
+		require.EqualError(t, err, "memory.size reserved byte must be zero encoded with 1 byte")
+	})
+
 	t.Run("memory.size: three drops past the memidx correctly fail, not silently pass", func(t *testing.T) {
 		// If pc double-advances, it skips 2*(num-1)=4 bytes instead of 2 for
 		// this 3-byte memidx, landing exactly on the THIRD Drop and skipping

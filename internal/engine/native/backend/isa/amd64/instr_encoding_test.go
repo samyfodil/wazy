@@ -2643,28 +2643,59 @@ func TestInstruction_format_encode(t *testing.T) {
 			wantFormat: "xor %r11d, %r15d",
 		},
 		{
-			setup:      func(i *instruction) { i.asLEA(newOperandMem(newAmodeImmReg(0, rdiVReg)), rdxVReg) },
+			setup:      func(i *instruction) { i.asLEA(newOperandMem(newAmodeImmReg(0, rdiVReg)), rdxVReg, true) },
 			want:       "488d17",
 			wantFormat: "lea (%rdi), %rdx",
 		},
 		{
-			setup:      func(i *instruction) { i.asLEA(newOperandMem(newAmodeImmReg(0xffff, rdiVReg)), rdxVReg) },
+			setup:      func(i *instruction) { i.asLEA(newOperandMem(newAmodeImmReg(0xffff, rdiVReg)), rdxVReg, true) },
 			want:       "488d97ffff0000",
 			wantFormat: "lea 65535(%rdi), %rdx",
 		},
 		{
 			setup: func(i *instruction) {
-				i.asLEA(newOperandMem(newAmodeRegRegShift(0xffff, rspVReg, r13VReg, 3)), rdxVReg)
+				i.asLEA(newOperandMem(newAmodeRegRegShift(0xffff, rspVReg, r13VReg, 3)), rdxVReg, true)
 			},
 			want:       "4a8d94ecffff0000",
 			wantFormat: "lea 65535(%rsp,%r13,8), %rdx",
 		},
 		{
+			// x+x lowers to a three-operand LEA whose base and index are the same register.
 			setup: func(i *instruction) {
-				i.asLEA(newOperandLabel(label(1234)), r11VReg)
+				i.asLEA(newOperandMem(newAmodeRegRegShift(0, raxVReg, raxVReg, 0)), rdxVReg, true)
+			},
+			want:       "488d1400",
+			wantFormat: "lea (%rax,%rax,1), %rdx",
+		},
+		{
+			setup: func(i *instruction) {
+				i.asLEA(newOperandLabel(label(1234)), r11VReg, true)
 			},
 			want:       "4c8d1dffffffff",
 			wantFormat: "lea L1234, %r11",
+		},
+		{
+			// 32-bit Iadd: REX.W is clear, so no REX prefix at all when no operand needs one.
+			setup: func(i *instruction) {
+				i.asLEA(newOperandMem(newAmodeRegRegShift(0, raxVReg, rcxVReg, 0)), rdxVReg, false)
+			},
+			want:       "8d1408",
+			wantFormat: "lea (%rax,%rcx,1), %edx",
+		},
+		{
+			setup: func(i *instruction) {
+				i.asLEA(newOperandMem(newAmodeImmReg(0xffff, rdiVReg)), rdxVReg, false)
+			},
+			want:       "8d97ffff0000",
+			wantFormat: "lea 65535(%rdi), %edx",
+		},
+		{
+			// A REX prefix is still needed for the extended registers, but without W.
+			setup: func(i *instruction) {
+				i.asLEA(newOperandMem(newAmodeRegRegShift(0, r13VReg, rcxVReg, 0)), r11VReg, false)
+			},
+			want:       "458d5c0d00",
+			wantFormat: "lea (%r13,%rcx,1), %r11d",
 		},
 		{
 			setup:      func(i *instruction) { i.kind = ud2 },

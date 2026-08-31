@@ -277,6 +277,7 @@ func registerSaveRestoreSlots(regs []regalloc.VReg) []registerSaveRestoreSlot {
 			i++
 		}
 	}
+	nativeapi.AssertSavedRegistersFit(offset)
 	return slots
 }
 

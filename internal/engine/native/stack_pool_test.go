@@ -12,6 +12,7 @@ import (
 	"testing"
 	"unsafe"
 
+	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
@@ -182,4 +183,12 @@ func TestEngine_acquireStack_tooLargeIsNotPooled(t *testing.T) {
 	// Releasing an oversized buffer beyond the largest class floors into
 	// the top class rather than panicking or growing the array.
 	e.releaseStack(buf, nil)
+}
+
+// RetainedStackLenForTest reports the length of the wasm stack f is holding on to between calls, or
+// 0 when it holds none because its last call handed the buffer back to the pool. Exported for the
+// end-to-end tests in native_test, which is where a real, callable api.Function can be built; see
+// callEngine.stackRetained for what the two cases mean.
+func RetainedStackLenForTest(f api.Function) int {
+	return len(f.(*callEngine).stack)
 }

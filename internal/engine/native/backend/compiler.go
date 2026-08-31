@@ -71,6 +71,11 @@ type Compiler interface {
 	// Init initializes the internal state of the compiler for the next compilation.
 	Init()
 
+	// InitModule drops the state that is only valid within a single module: the ABI cache is
+	// keyed by ssa.SignatureID, and those IDs are reassigned by every module. Must be called
+	// before compiling a module with a Compiler carried over from a previous one.
+	InitModule()
+
 	// AllocateVReg allocates a new virtual register of the given type.
 	AllocateVReg(typ ssa.Type) regalloc.VReg
 
@@ -79,6 +84,11 @@ type Compiler interface {
 
 	// VRegOf returns the virtual register of the given ssa.Value.
 	VRegOf(value ssa.Value) regalloc.VReg
+
+	// AliasVReg makes VRegOf(value) return the register already assigned to src, so a lowering
+	// whose result is bit-identical to its operand can emit no instruction at all instead of a
+	// register-to-register copy. It must be called before any user of value is lowered.
+	AliasVReg(value, src ssa.Value)
 
 	// TypeOf returns the ssa.Type of the given virtual register.
 	TypeOf(regalloc.VReg) ssa.Type
@@ -297,6 +307,13 @@ func (c *compiler) Init() {
 	c.relocations = c.relocations[:0]
 }
 
+// InitModule implements Compiler.InitModule.
+func (c *compiler) InitModule() {
+	// GetFunctionABI re-initializes an entry whenever it is not Initialized, and append writes
+	// zeroes over the retained backing array, so truncating is a complete reset.
+	c.abis = c.abis[:0]
+}
+
 // ValueDefinition implements Compiler.ValueDefinition.
 func (c *compiler) ValueDefinition(value ssa.Value) SSAValueDefinition {
 	return SSAValueDefinition{
@@ -309,6 +326,11 @@ func (c *compiler) ValueDefinition(value ssa.Value) SSAValueDefinition {
 // VRegOf implements Compiler.VRegOf.
 func (c *compiler) VRegOf(value ssa.Value) regalloc.VReg {
 	return c.ssaValueToVRegs[value.ID()]
+}
+
+// AliasVReg implements Compiler.AliasVReg.
+func (c *compiler) AliasVReg(value, src ssa.Value) {
+	c.ssaValueToVRegs[value.ID()] = c.ssaValueToVRegs[src.ID()]
 }
 
 // Format implements Compiler.Format.

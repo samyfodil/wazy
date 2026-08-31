@@ -77,7 +77,10 @@ type (
 		// none. IDs are handed out densely (see getFunctionTypeIDByKey), so this is indexed by ID directly.
 		// It is what makes a runtime subtype check possible across module boundaries, where a module-local
 		// type index means nothing: see TypeIDIsSubtypeOf.
-		typeSupers []FunctionTypeID
+		//
+		// It is behind an atomic pointer because guest execution reads it without mux: an entry is written
+		// before the slice header naming it is stored, and never changes afterwards.
+		typeSupers atomic.Pointer[[]FunctionTypeID]
 
 		// Exceptions hands out the exnref values guest code holds, and keeps the exceptions they name alive. It
 		// is per-Store because an exnref crosses module instances. See ExceptionTable.
@@ -257,8 +260,7 @@ func (m *ModuleInstance) applyElements(elems []ElementSegment) {
 			len(elem.Init) == 0 {
 			continue
 		}
-		offsetExprResults := evaluateConstExprInModuleInstance(&elem.OffsetExpr, m)
-		offset := offsetExprResults[0]
+		offset := evaluateConstExprScalarInModuleInstance(&elem.OffsetExpr, m)
 
 		table := m.Tables[elem.TableIndex]
 		references := table.References
@@ -337,11 +339,10 @@ func (m *ModuleInstance) applyData(data []DataSegment) error {
 		d := &data[i]
 		m.DataInstances[i] = d.Init
 		if !d.IsPassive() {
-			offsetExprResults := evaluateConstExprInModuleInstance(&d.OffsetExpression, m)
+			offset := evaluateConstExprScalarInModuleInstance(&d.OffsetExpression, m)
 			if d.MemoryIndex >= uint32(len(m.Memories)) {
 				return fmt.Errorf("%s[%d]: unknown memory %d", SectionIDName(SectionIDData), i, d.MemoryIndex)
 			}
-			offset := offsetExprResults[0]
 			mem := m.Memories[d.MemoryIndex]
 			if rangeOutOfBounds(offset, uint64(len(d.Init)), uint64(len(mem.Buffer))) {
 				return fmt.Errorf("%s[%d]: out of bounds memory access", SectionIDName(SectionIDData), i)
@@ -473,8 +474,10 @@ func (s *Store) instantiate(
 		return nil, err
 	}
 	m.Exports = module.Exports
-	for _, exp := range m.Exports {
-		if exp.Type == ExternTypeTable {
+	// ExportSection, not the Exports map: same entries, but a linear scan of a slice
+	// rather than a hashed bucket walk per instantiate.
+	for i := range module.ExportSection {
+		if exp := &module.ExportSection[i]; exp.Type == ExternTypeTable {
 			t := m.Tables[exp.Index]
 			t.involvingModuleInstances = append(t.involvingModuleInstances, m)
 		}
@@ -561,18 +564,25 @@ func (m *ModuleInstance) resolveImports(ctx context.Context, module *Module) (er
 			case ExternTypeFunc:
 				expectedType := &module.TypeSection[i.DescFunc]
 				src := importedModule.Source
-				actual := src.typeOfFunction(imported.Index)
+				// typeIndexOfFunction walks the whole import section for an imported
+				// callee, so resolve the type once rather than once here and once in
+				// typeOfFunction, which is only needed to spell the error.
+				actualTypeIdx, resolved := src.typeIndexOfFunction(imported.Index)
 				matched := false
 				if m.TypeIDs != nil && importedModule.TypeIDs != nil {
 					// Use structural type IDs for comparison (handles concrete ref types across modules).
 					// An exported function may also be of a *subtype* of the declared import type, which is
 					// what makes a GC module importing at a supertype link.
-					actualTypeIdx, ok := src.typeIndexOfFunction(imported.Index)
-					matched = ok && m.TypeIDIsSubtypeOf(importedModule.TypeIDs[actualTypeIdx], m.TypeIDs[i.DescFunc])
-				} else {
+					matched = resolved && m.TypeIDIsSubtypeOf(importedModule.TypeIDs[actualTypeIdx], m.TypeIDs[i.DescFunc])
+				} else if resolved {
+					actual := &src.TypeSection[actualTypeIdx]
 					matched = actual.EqualsSignature(expectedType.Params, expectedType.Results)
 				}
 				if !matched {
+					var actual *FunctionType
+					if resolved {
+						actual = &src.TypeSection[actualTypeIdx]
+					}
 					err = errorInvalidImport(i, fmt.Errorf("signature mismatch: %s != %s", expectedType, actual))
 					return
 				}
@@ -840,21 +850,21 @@ func isPlainFuncType(types []FunctionType, start, end int) bool {
 // by walking actual's declared supertype chain. Both engines reach this from ref.test / ref.cast, where the two
 // IDs can come from different modules and so cannot be compared as type indices.
 //
-// ponytail: one RLock per check. Threading the supertype chain onto each runtime function instance would make
-// this a load and compare, which is worth doing only if a profile ever shows these instructions mattering.
+// It takes no lock. The chain is fixed once the types are registered, and a module cannot execute an
+// instruction naming an ID its own instantiation did not register first, so the load below sees at least the
+// entries that instantiation appended.
 func (s *Store) TypeIDIsSubtypeOf(actual, target FunctionTypeID) bool {
 	if actual == target {
 		return true
 	}
-	s.mux.RLock()
-	defer s.mux.RUnlock()
+	supers := s.loadTypeSupers()
 	// Bounded by the number of types: the chain is acyclic by construction (a supertype index is always below
 	// its subtype's), but this is reached from guest execution, so do not depend on that for termination.
-	for i := 0; i <= len(s.typeSupers); i++ {
-		if int(actual) >= len(s.typeSupers) {
+	for i := 0; i <= len(supers); i++ {
+		if int(actual) >= len(supers) {
 			return false
 		}
-		actual = s.typeSupers[actual]
+		actual = supers[actual]
 		if actual == NoFunctionTypeID {
 			return false
 		}
@@ -863,6 +873,14 @@ func (s *Store) TypeIDIsSubtypeOf(actual, target FunctionTypeID) bool {
 		}
 	}
 	return false
+}
+
+// loadTypeSupers returns the supertype table, which is nil until the first type is registered.
+func (s *Store) loadTypeSupers() []FunctionTypeID {
+	if p := s.typeSupers.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 func hasConcreteRef(ft *FunctionType) bool {
@@ -903,8 +921,10 @@ func (s *Store) getFunctionTypeIDByKey(key string, super FunctionTypeID) (Functi
 		id = FunctionTypeID(l)
 		s.typeIDs[key] = id
 		// The key encodes the supertype (see structuralTypeKey), so every module reaching this ID agrees on
-		// what super is, and appending in ID order keeps the slice dense.
-		s.typeSupers = append(s.typeSupers, super)
+		// what super is, and appending in ID order keeps the slice dense. Storing the header last is what
+		// publishes the entry to the readers that take no lock; see TypeIDIsSubtypeOf.
+		supers := append(s.loadTypeSupers(), super)
+		s.typeSupers.Store(&supers)
 	}
 	return id, nil
 }

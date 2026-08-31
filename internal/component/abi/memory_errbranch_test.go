@@ -214,7 +214,7 @@ func TestLoadListElementError(t *testing.T) {
 
 func TestStoreValueUnsupportedType(t *testing.T) {
 	mem := make([]byte, 8)
-	if err := storeValue(mem, 0, bintype.FuncDesc{}, uint32(1), nil, okRealloc); err == nil {
+	if err := storeValue(mem, 0, bintype.FuncDesc{}, uint32(1), 0, nil, okRealloc); err == nil {
 		t.Error("expected error for storeValue unsupported type")
 	}
 }
@@ -230,7 +230,7 @@ func TestStoreValueListBadElementRef(t *testing.T) {
 	mem := make([]byte, 8)
 	// ListDesc with an empty TypeRef (neither prim nor index) -> resolveType error
 	desc := bintype.ListDesc{Element: bintype.TypeRef{}}
-	if err := storeValue(mem, 0, desc, []Value{}, nil, okRealloc); err == nil {
+	if err := storeValue(mem, 0, desc, []Value{}, 0, nil, okRealloc); err == nil {
 		t.Error("expected error for storeValue list bad element ref")
 	}
 }
@@ -246,7 +246,7 @@ func TestLoadValueListBadElementRef(t *testing.T) {
 func TestStoreValueOptionBadElementRef(t *testing.T) {
 	mem := make([]byte, 8)
 	desc := bintype.OptionDesc{Element: bintype.TypeRef{}}
-	if err := storeValue(mem, 0, desc, nil, nil, okRealloc); err == nil {
+	if err := storeValue(mem, 0, desc, nil, 0, nil, okRealloc); err == nil {
 		t.Error("expected error for storeValue option bad element ref")
 	}
 }
@@ -263,17 +263,17 @@ func TestLoadValueOptionBadElementRef(t *testing.T) {
 
 func TestStoreHandleWrongType(t *testing.T) {
 	mem := make([]byte, 8)
-	if err := storeValue(mem, 0, bintype.OwnDesc{}, "not-a-handle", nil, okRealloc); err == nil {
+	if err := storeValue(mem, 0, bintype.OwnDesc{}, "not-a-handle", 0, nil, okRealloc); err == nil {
 		t.Error("expected error for storeValue own handle wrong type")
 	}
-	if err := storeValue(mem, 0, bintype.BorrowDesc{}, "not-a-handle", nil, okRealloc); err == nil {
+	if err := storeValue(mem, 0, bintype.BorrowDesc{}, "not-a-handle", 0, nil, okRealloc); err == nil {
 		t.Error("expected error for storeValue borrow handle wrong type")
 	}
 }
 
 func TestStoreLoadHandleRoundTrip(t *testing.T) {
 	mem := make([]byte, 8)
-	if err := storeValue(mem, 0, bintype.OwnDesc{}, uint32(7), nil, okRealloc); err != nil {
+	if err := storeValue(mem, 0, bintype.OwnDesc{}, uint32(7), 0, nil, okRealloc); err != nil {
 		t.Fatalf("storeValue own handle: %v", err)
 	}
 	v, err := loadValue(mem, 0, bintype.OwnDesc{}, nil)
@@ -363,7 +363,7 @@ func TestStoreVariantMaxCaseAlignError(t *testing.T) {
 	desc := bintype.VariantDesc{Cases: []bintype.VariantCase{
 		{Name: "a", Type: &bintype.TypeRef{TypeIndex: u32ptr(0)}},
 	}}
-	err := storeVariant(mem, 0, VariantValue{Disc: 0, Payload: uint32(1)}, desc, funcResolve, okRealloc)
+	err := storeVariant(mem, 0, VariantValue{Disc: 0, Payload: uint32(1)}, desc, 0, funcResolve, okRealloc)
 	if err == nil {
 		t.Error("expected error for storeVariant max-case-alignment failure")
 	}
@@ -375,7 +375,7 @@ func TestStoreVariantPayloadStoreError(t *testing.T) {
 		{Name: "a", Type: &bintype.TypeRef{Primitive: "u32"}},
 	}}
 	// payload wrong Go type
-	err := storeVariant(mem, 0, VariantValue{Disc: 0, Payload: "bad"}, desc, nil, okRealloc)
+	err := storeVariant(mem, 0, VariantValue{Disc: 0, Payload: "bad"}, desc, 0, nil, okRealloc)
 	if err == nil {
 		t.Error("expected error for storeVariant payload store failure")
 	}
@@ -420,7 +420,7 @@ func TestStoreEnumInvalidLabels(t *testing.T) {
 func TestStoreOptionAlignmentError(t *testing.T) {
 	mem := make([]byte, 100)
 	// some payload; element type unsupported -> Alignment error
-	if err := storeOption(mem, 0, uint32(1), bintype.FuncDesc{}, funcResolve, okRealloc); err == nil {
+	if err := storeOption(mem, 0, uint32(1), bintype.FuncDesc{}, 0, funcResolve, okRealloc); err == nil {
 		t.Error("expected error for storeOption alignment failure")
 	}
 }
@@ -428,7 +428,7 @@ func TestStoreOptionAlignmentError(t *testing.T) {
 func TestStoreOptionPayloadError(t *testing.T) {
 	mem := make([]byte, 100)
 	// element u32, but payload wrong type
-	if err := storeOption(mem, 0, "bad", bintype.PrimitiveDesc{Prim: "u32"}, nil, okRealloc); err == nil {
+	if err := storeOption(mem, 0, "bad", bintype.PrimitiveDesc{Prim: "u32"}, 0, nil, okRealloc); err == nil {
 		t.Error("expected error for storeOption payload store failure")
 	}
 }
@@ -454,7 +454,7 @@ func TestLoadOptionPayloadError(t *testing.T) {
 func TestStoreResultOkAlignmentError(t *testing.T) {
 	mem := make([]byte, 100)
 	desc := bintype.ResultDesc{Ok: &bintype.TypeRef{TypeIndex: u32ptr(0)}}
-	err := storeResult(mem, 0, ResultValue{IsErr: false, Payload: uint32(1)}, desc, funcResolve, okRealloc)
+	err := storeResult(mem, 0, ResultValue{IsErr: false, Payload: uint32(1)}, desc, 0, funcResolve, okRealloc)
 	if err == nil {
 		t.Error("expected error for storeResult ok alignment failure")
 	}
@@ -463,7 +463,7 @@ func TestStoreResultOkAlignmentError(t *testing.T) {
 func TestStoreResultErrAlignmentError(t *testing.T) {
 	mem := make([]byte, 100)
 	desc := bintype.ResultDesc{Err: &bintype.TypeRef{TypeIndex: u32ptr(0)}}
-	err := storeResult(mem, 0, ResultValue{IsErr: true, Payload: uint32(1)}, desc, funcResolve, okRealloc)
+	err := storeResult(mem, 0, ResultValue{IsErr: true, Payload: uint32(1)}, desc, 0, funcResolve, okRealloc)
 	if err == nil {
 		t.Error("expected error for storeResult err alignment failure")
 	}
@@ -475,7 +475,7 @@ func TestStoreResultOkPayloadError(t *testing.T) {
 		Ok:  &bintype.TypeRef{Primitive: "u32"},
 		Err: &bintype.TypeRef{Primitive: "u32"},
 	}
-	err := storeResult(mem, 0, ResultValue{IsErr: false, Payload: "bad"}, desc, nil, okRealloc)
+	err := storeResult(mem, 0, ResultValue{IsErr: false, Payload: "bad"}, desc, 0, nil, okRealloc)
 	if err == nil {
 		t.Error("expected error for storeResult ok payload store failure")
 	}
@@ -487,7 +487,7 @@ func TestStoreResultErrPayloadError(t *testing.T) {
 		Ok:  &bintype.TypeRef{Primitive: "u32"},
 		Err: &bintype.TypeRef{Primitive: "u32"},
 	}
-	err := storeResult(mem, 0, ResultValue{IsErr: true, Payload: "bad"}, desc, nil, okRealloc)
+	err := storeResult(mem, 0, ResultValue{IsErr: true, Payload: "bad"}, desc, 0, nil, okRealloc)
 	if err == nil {
 		t.Error("expected error for storeResult err payload store failure")
 	}

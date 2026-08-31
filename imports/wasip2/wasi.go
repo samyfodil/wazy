@@ -47,8 +47,10 @@ import (
 //     the configured Writer. write and blocking-write-and-flush share one
 //     implementation (this host has no internal buffering to distinguish
 //     "written" from "written and flushed"); blocking-flush is a no-op
-//     success; check-write always reports a large budget (2^40 bytes),
-//     since there is no real backpressure to model against a Go io.Writer.
+//     success; check-write always reports a budget of 2^32-1 bytes (the
+//     longest list<u8> the canonical ABI can express, and deliberately not
+//     a multiple of 2^32 -- see wasiMaxWriteBudget), since there is no real
+//     backpressure to model against a Go io.Writer.
 //   - wasi:cli/exit.exit, wasi:cli/environment.{get-environment,
 //     get-arguments}, wasi:filesystem/preopens.get-directories: real,
 //     WIT-correct implementations, but exit always fails the call (see
@@ -624,9 +626,11 @@ func WithWASI(cfg WASIConfig) []component.Option {
 				}
 			}
 		}
-		// A large, fixed budget: there is no real backpressure to model
+		// A fixed budget of 2^32-1: there is no real backpressure to model
 		// against a Go io.Writer, an in-memory file, or a net.Conn, so this
-		// never has to make the guest wait.
+		// never has to make the guest wait. It is capped at the largest
+		// list<u8> the ABI can carry, and kept off a 2^32 boundary so it
+		// cannot narrow to zero in a wasm32 guest -- see wasiMaxWriteBudget.
 		return wasiCheckWriteBudget, nil
 	}
 

@@ -174,7 +174,7 @@ func (m *machine) lowerVUshri8x16(x, y, ret ssa.Value) {
 
 	maskTableLabel := m.getOrAllocateConstLabel(&m.constI8x16LogicalSHRMaskTableIndex, i8x16LogicalSHRMaskTable[:])
 	base := m.c.AllocateVReg(ssa.TypeI64)
-	lea := m.allocateInstr().asLEA(newOperandLabel(maskTableLabel), base)
+	lea := m.allocateInstr().asLEA(newOperandLabel(maskTableLabel), base, true)
 	m.insert(lea)
 
 	// Shift tmpGpReg by 4 to multiply the shift amount by 16.
@@ -352,7 +352,7 @@ func (m *machine) lowerVIshl(x, y, ret ssa.Value, lane ssa.VecLane) {
 	if isI8x16 {
 		maskTableLabel := m.getOrAllocateConstLabel(&m.constI8x16SHLMaskTableIndex, i8x16SHLMaskTable[:])
 		base := m.c.AllocateVReg(ssa.TypeI64)
-		lea := m.allocateInstr().asLEA(newOperandLabel(maskTableLabel), base)
+		lea := m.allocateInstr().asLEA(newOperandLabel(maskTableLabel), base, true)
 		m.insert(lea)
 
 		// Shift tmpGpReg by 4 to multiply the shift amount by 16.

@@ -10,7 +10,7 @@ import (
 	"github.com/samyfodil/wazy/internal/wasm"
 )
 
-func decodeConstantExpression(buf []byte, offset int, enabledFeatures api.CoreFeatures, ret *wasm.ConstantExpression) (int, error) {
+func decodeConstantExpression(buf []byte, offset int, enabledFeatures api.CoreFeatures, ba *byteArena, ret *wasm.ConstantExpression) (int, error) {
 	startOffset := offset
 	for {
 		opcode, o, err := readByte(buf, offset)
@@ -151,7 +151,7 @@ func decodeConstantExpression(buf []byte, offset int, enabledFeatures api.CoreFe
 				return offset, fmt.Errorf("read vector const instruction immediates: needs 16 bytes but was %d bytes", n)
 			}
 		case wasm.OpcodeEnd:
-			data := make([]byte, offset-startOffset)
+			data := ba.alloc(offset - startOffset)
 			copy(data, buf[startOffset:offset])
 			ret.Data = data
 			return offset, nil

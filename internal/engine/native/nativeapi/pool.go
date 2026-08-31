@@ -185,7 +185,11 @@ func (i VarLength[T]) Append(p *VarLengthPool[T], items ...T) VarLength[T] {
 		arr.next += copy(arr.arr[arr.next:], items)
 	} else {
 		slc = p.slicePool.Allocate()
-		// Copy the array to the slice.
+		// Copy the array to the slice. Reserve the whole result up front: growing for the
+		// array's contents and then again for the items would allocate twice.
+		if n := arr.next + len(items); cap(*slc) < n {
+			*slc = make([]T, 0, n)
+		}
 		*slc = append(*slc, arr.arr[:arr.next]...)
 		*slc = append(*slc, items...)
 		i.slc = slc

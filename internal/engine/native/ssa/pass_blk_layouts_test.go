@@ -184,6 +184,7 @@ func TestBuilder_splitCriticalEdge(t *testing.T) {
 	v := inst.Return()
 	originalBrz := b.AllocateInstruction() // This is the split edge.
 	originalBrz.AsBrz(v, ValuesNil, dummyBlk)
+	originalBrz.gid = 3
 	b.InsertInstruction(originalBrz)
 	dummyJump := b.AllocateInstruction()
 	dummyJump.AsJump(ValuesNil, dummyBlk2)
@@ -203,6 +204,9 @@ func TestBuilder_splitCriticalEdge(t *testing.T) {
 	replacedBrz := predBlk.rootInstr.next
 	require.Equal(t, OpcodeBrz, replacedBrz.opcode)
 	require.Equal(t, trampoline, b.basicBlock(BasicBlockID(replacedBrz.rValue)))
+	// It stands where the original branch stood, so it must keep its group: the backend
+	// only fuses a comparison into a branch of the same group.
+	require.Equal(t, InstructionGroupID(3), replacedBrz.gid)
 }
 
 func Test_swapInstruction(t *testing.T) {

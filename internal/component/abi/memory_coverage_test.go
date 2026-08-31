@@ -1,6 +1,8 @@
 package abi
 
 import (
+	"bytes"
+	"fmt"
 	"testing"
 
 	bintype "github.com/samyfodil/wazy/internal/component/binary"
@@ -267,7 +269,7 @@ func TestVariantWithPayload(t *testing.T) {
 
 	// Test case 0 with payload
 	value := VariantValue{Disc: 0, Payload: uint32(42)}
-	err := storeVariant(mem, 0, value, desc, resolve, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
+	err := storeVariant(mem, 0, value, desc, 0, resolve, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
 	if err != nil {
 		t.Errorf("storeVariant case 0 failed: %v", err)
 	}
@@ -346,5 +348,82 @@ func TestLoadIntVariousSizes(t *testing.T) {
 		if v == nil {
 			t.Errorf("loadInt nbytes=%d returned nil", tt.nbytes)
 		}
+	}
+}
+
+// TestStoreValueAlignArgMatchesDerived proves storeValue's two paths agree:
+// the fast one, where the caller hands in the type's own alignment (every
+// caller already computed it to place ptr), and the slow one, where the
+// option/variant/result case derives it by walking the type. They must write
+// byte-identical memory, including for a variant whose discriminant is WIDER
+// than any case payload -- the one shape where "the variant's alignment" and
+// "MaxCaseAlignment" are different numbers that must still land on the same
+// payload offset.
+func TestStoreValueAlignArgMatchesDerived(t *testing.T) {
+	u8 := bintype.TypeRef{Primitive: "u8"}
+	u32 := bintype.TypeRef{Primitive: "u32"}
+	u64 := bintype.TypeRef{Primitive: "u64"}
+	str := bintype.TypeRef{Primitive: "string"}
+
+	// A variant with 300 cases: its discriminant is u16 (alignment 2) while no
+	// case payload needs more than 1.
+	wideDisc := bintype.VariantDesc{}
+	for i := 0; i < 300; i++ {
+		c := bintype.VariantCase{Name: fmt.Sprintf("c%d", i)}
+		if i == 299 {
+			c.Type = &u8
+		}
+		wideDisc.Cases = append(wideDisc.Cases, c)
+	}
+
+	optU64 := bintype.OptionDesc{Element: u64}
+	idx := func(i uint32) *uint32 { return &i }
+	resolve := mapResolver(map[uint32]bintype.TypeDesc{
+		0: optU64,
+		1: bintype.ResultDesc{Ok: &u32, Err: &u8},
+	})
+	optU64Ref := bintype.TypeRef{TypeIndex: idx(0)}
+	resU32U8Ref := bintype.TypeRef{TypeIndex: idx(1)}
+
+	tests := []struct {
+		name string
+		desc bintype.TypeDesc
+		val  Value
+	}{
+		{"option<u64> some", optU64, uint64(0x0102030405060708)},
+		{"option<u64> none", optU64, nil},
+		{"option<u8>", bintype.OptionDesc{Element: u8}, uint32(3)},
+		{"option<string>", bintype.OptionDesc{Element: str}, "hi"},
+		{"result<u64,u8> ok", bintype.ResultDesc{Ok: &u64, Err: &u8}, ResultValue{Payload: uint64(9)}},
+		{"result<u8,u64> err", bintype.ResultDesc{Ok: &u8, Err: &u64}, ResultValue{IsErr: true, Payload: uint64(9)}},
+		{"result<_,u8> err", bintype.ResultDesc{Err: &u8}, ResultValue{IsErr: true, Payload: uint32(5)}},
+		{"result<u32,u8> ok", bintype.ResultDesc{Ok: &u32, Err: &u8}, ResultValue{Payload: uint32(0x11223344)}},
+		{"result<option<u64>,u8> ok", bintype.ResultDesc{Ok: &optU64Ref, Err: &u8}, ResultValue{Payload: uint64(9)}},
+		{"variant u8 disc", bintype.VariantDesc{Cases: []bintype.VariantCase{{Name: "a", Type: &u8}, {Name: "b", Type: &u64}}}, VariantValue{Disc: 1, Payload: uint64(9)}},
+		{"variant u16 disc wider than cases", wideDisc, VariantValue{Disc: 299, Payload: uint32(7)}},
+		{"record{u8, option<u64>}", bintype.RecordDesc{Fields: []bintype.RecordField{{Name: "a", Type: u8}, {Name: "b", Type: optU64Ref}}}, []Value{uint32(1), uint64(2)}},
+		{"tuple<u8, result<u32,u8>>", bintype.TupleDesc{Elements: []bintype.TypeRef{u8, resU32U8Ref}}, []Value{uint32(1), ResultValue{Payload: uint32(2)}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			align, err := Alignment(tt.desc, resolve)
+			if err != nil {
+				t.Fatalf("Alignment: %v", err)
+			}
+			for _, ptr := range []uint32{0, align * 3} {
+				fast := make([]byte, 8192)
+				slow := make([]byte, 8192)
+				if err := storeValue(fast, ptr, tt.desc, tt.val, align, resolve, okRealloc); err != nil {
+					t.Fatalf("storeValue(align=%d) at ptr %d: %v", align, ptr, err)
+				}
+				if err := storeValue(slow, ptr, tt.desc, tt.val, 0, resolve, okRealloc); err != nil {
+					t.Fatalf("storeValue(align=0) at ptr %d: %v", ptr, err)
+				}
+				if !bytes.Equal(fast, slow) {
+					t.Fatalf("ptr %d: align=%d and align=0 wrote different memory", ptr, align)
+				}
+			}
+		})
 	}
 }

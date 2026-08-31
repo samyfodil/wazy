@@ -194,8 +194,8 @@ type asyncResolveCfg struct {
 	iface, funcName string
 	resultCount     int
 	resultType      binary.TypeDesc
+	resultStore     abi.StoreStep
 	resultUsesMem   bool
-	resolve         abi.Resolver
 	resources       *handleTable
 	reallocOverride api.Function
 }
@@ -243,7 +243,7 @@ func (st *subtask) applyResolve(vals []abi.Value) error {
 			realloc = reallocOfFunc(st.resolveCtx, cfg.reallocOverride)
 		}
 	}
-	if serr := abi.Store(mem, st.retPtr, cfg.resultType, resultVal, cfg.resolve, realloc); serr != nil {
+	if serr := cfg.resultStore.Store(mem, st.retPtr, resultVal, realloc); serr != nil {
 		return fmt.Errorf("async import %q %q: result: store: %w", cfg.iface, cfg.funcName, serr)
 	}
 	st.resolve(subtaskReturned, nil)
@@ -350,8 +350,8 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 	// see asyncResolveCfg's doc and subtask.applyResolve (this file).
 	cfg := &asyncResolveCfg{
 		iface: iface, funcName: funcName,
-		resultCount: resultCount, resultType: resultType, resultUsesMem: resultUsesMem,
-		resolve: resolve, resources: resources, reallocOverride: reallocOverride,
+		resultCount: resultCount, resultType: resultType, resultStore: resultPlan.store, resultUsesMem: resultUsesMem,
+		resources: resources, reallocOverride: reallocOverride,
 	}
 
 	fn := api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {

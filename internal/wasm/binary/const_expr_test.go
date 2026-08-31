@@ -82,7 +82,8 @@ func TestDecodeConstantExpression(t *testing.T) {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
 			var actual wasm.ConstantExpression
 			_, err := decodeConstantExpression(tc.in, 0,
-				api.CoreFeatureBulkMemoryOperations|api.CoreFeatureSIMD|api.CoreFeatureExtendedConst, &actual)
+				api.CoreFeatureBulkMemoryOperations|api.CoreFeatureSIMD|api.CoreFeatureExtendedConst,
+				&byteArena{}, &actual)
 			require.NoError(t, err)
 			require.Equal(t, tc.exp, actual)
 		})
@@ -198,7 +199,7 @@ func TestDecodeConstantExpression_errors(t *testing.T) {
 		tc := tt
 		t.Run(tc.expectedErr, func(t *testing.T) {
 			var actual wasm.ConstantExpression
-			_, err := decodeConstantExpression(tc.in, 0, tc.features, &actual)
+			_, err := decodeConstantExpression(tc.in, 0, tc.features, nil, &actual)
 			require.EqualError(t, err, tc.expectedErr)
 		})
 	}

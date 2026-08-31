@@ -761,7 +761,8 @@ func (c *Compiler) lowerCurrentOpcode() {
 
 			// memory.fill x : [at, i32, at] -> []
 			index64 := c.memoryIsIndex64(memIndex)
-			fillSize := c.zeroExtendIndex(state.pop(), index64)
+			fillSizeOperand := state.pop()
+			fillSize := c.zeroExtendIndex(fillSizeOperand, index64)
 			value := state.pop()
 			offset := c.zeroExtendIndex(state.pop(), index64)
 
@@ -770,6 +771,14 @@ func (c *Compiler) lowerCurrentOpcode() {
 
 			// Calculate the base address:
 			addr := builder.AllocateInstruction().AsIadd(c.getMemoryBaseValue(memIndex, false), offset).Insert(builder).Return()
+
+			if def := builder.InstructionOfValue(fillSizeOperand); def != nil && def.Constant() &&
+				def.ConstantVal() <= memoryFillInlineMaxBytes {
+				// A short constant fill is a handful of stores; producers emit
+				// it for every small struct or array zeroing.
+				c.inlineMemoryFill(addr, value, uint32(def.ConstantVal()))
+				break
+			}
 
 			// Uses the copy trick for faster filling buffer, with a maximum chunk size of 8KB.
 			// https://github.com/golang/go/blob/go1.24.0/src/bytes/bytes.go#L664-L673
@@ -1546,6 +1555,16 @@ func (c *Compiler) lowerCurrentOpcode() {
 		followingBlk := ctrl.followingBlock
 
 		unreachable := state.unreachable
+		// Nothing branched out of this frame, so its continuation block would
+		// only forward what is already here: stay in the current block instead,
+		// and let dead-block elimination drop the one we never used. Restricted
+		// to block and loop because an if's else arm still has to jump into
+		// theirs, a try_table's continuation must stay outside the block-ID
+		// range its handlers protect, and the function frame's is the return
+		// block.
+		fallThrough := !unreachable && followingBlk.Preds() == 0 &&
+			(ctrl.kind == controlFrameKindBlock || ctrl.kind == controlFrameKindLoop)
+
 		if !unreachable {
 			// For try_table with catch clauses, emit the leave trampoline
 			// before the jump to the following block. If there are no catch clauses,
@@ -1554,11 +1573,13 @@ func (c *Compiler) lowerCurrentOpcode() {
 				c.emitTryTableLeave()
 			}
 
-			// Top n-th args will be used as a result of the current control frame.
-			args := c.nPeekDup(len(ctrl.blockType.Results))
+			if !fallThrough {
+				// Top n-th args will be used as a result of the current control frame.
+				args := c.nPeekDup(len(ctrl.blockType.Results))
 
-			// Insert the unconditional branch to the target.
-			c.insertJumpToBlock(args, followingBlk)
+				// Insert the unconditional branch to the target.
+				c.insertJumpToBlock(args, followingBlk)
+			}
 		} else { // recover from the unreachable state.
 			state.unreachable = false
 		}
@@ -1588,6 +1609,16 @@ func (c *Compiler) lowerCurrentOpcode() {
 		}
 
 		builder.Seal(followingBlk)
+
+		if fallThrough {
+			// Leave the frame's results on the stack exactly where the
+			// continuation block's parameters would have put them.
+			base := ctrl.originalStackLenWithoutParam
+			results := len(ctrl.blockType.Results)
+			copy(state.values[base:], state.values[len(state.values)-results:])
+			state.values = state.values[:base+results]
+			break
+		}
 
 		// Ready to start translating the following block.
 		c.switchTo(ctrl.originalStackLenWithoutParam, followingBlk)
@@ -4326,7 +4357,7 @@ func (c *Compiler) prepareCallIndirect(typeIndex, tableIndex uint32) (ssa.Value,
 	// one also matches, and deciding that needs store-wide type identity which compiled code cannot reach --
 	// so a module that declares any subtype relation asks Go instead. Every module that declares none, which
 	// is every pre-GC module, keeps the inline compare it always had.
-	if c.moduleDeclaresSubtypes() {
+	if c.declaresSubtypes {
 		c.callGC(wasm.GCCheckIndirectCall,
 			builder.AllocateInstruction().AsUExtend(actualTypeID, 32, 64).Insert(builder).Return(),
 			builder.AllocateInstruction().AsUExtend(expectedTypeID, 32, 64).Insert(builder).Return(),
@@ -4838,6 +4869,66 @@ func (c *Compiler) memAlignmentCheck(addr ssa.Value, operationSizeInBytes uint64
 	zero := builder.AllocateInstruction().AsIconst64(0).Insert(builder).Return()
 	cmp := builder.AllocateInstruction().AsIcmp(masked, zero, ssa.IntegerCmpCondNotEqual).Insert(builder).Return()
 	builder.AllocateInstruction().AsExitIfTrueWithCode(c.execCtxPtrValue, cmp, nativeapi.ExitCodeUnalignedAtomic).Insert(builder)
+}
+
+// memoryFillInlineMaxBytes is the largest compile-time-constant memory.fill
+// size lowered as straight-line stores instead of the copy-doubling memmove
+// loop. The ceiling is code size: at 128 bytes this is 16 eight-byte stores,
+// and past that the loop -- one Go-runtime memmove call, whatever the size --
+// is the better trade.
+const memoryFillInlineMaxBytes = 128
+
+// inlineMemoryFill writes size bytes of value's low byte at addr with plain
+// stores. Its caller has already emitted the bounds check, so the
+// trap-before-any-write ordering of the memmove loop it replaces is kept, as is
+// the zero-size case: bounds are still checked, and nothing is written.
+func (c *Compiler) inlineMemoryFill(addr, value ssa.Value, size uint32) {
+	if size == 0 {
+		return
+	}
+	builder := c.ssaBuilder
+
+	// One 8-byte store covers 8 bytes only if the byte is splatted across the
+	// whole word first; multiplying by 0x01..01 is the cheapest way there.
+	var splat ssa.Value
+	if def := builder.InstructionOfValue(value); def != nil && def.Constant() {
+		splat = builder.AllocateInstruction().
+			AsIconst64((def.ConstantVal() & 0xff) * 0x0101010101010101).Insert(builder).Return()
+	} else {
+		mask := builder.AllocateInstruction().AsIconst32(0xff).Insert(builder).Return()
+		lowByte := builder.AllocateInstruction().AsBand(value, mask).Insert(builder).Return()
+		wide := builder.AllocateInstruction().AsUExtend(lowByte, 32, 64).Insert(builder).Return()
+		factor := builder.AllocateInstruction().AsIconst64(0x0101010101010101).Insert(builder).Return()
+		splat = builder.AllocateInstruction().AsImul(wide, factor).Insert(builder).Return()
+	}
+
+	store := func(op ssa.Opcode, offset uint32) {
+		builder.AllocateInstruction().AsStore(op, splat, addr, offset).Insert(builder)
+	}
+	switch {
+	case size >= 8:
+		// The last store overlaps the previous one when size is not a multiple
+		// of 8, which is cheaper than stepping down through narrower stores.
+		var off uint32
+		for ; off+8 <= size; off += 8 {
+			store(ssa.OpcodeStore, off)
+		}
+		if off < size {
+			store(ssa.OpcodeStore, size-8)
+		}
+	case size >= 4:
+		store(ssa.OpcodeIstore32, 0)
+		if size > 4 {
+			store(ssa.OpcodeIstore32, size-4)
+		}
+	case size >= 2:
+		store(ssa.OpcodeIstore16, 0)
+		if size > 2 {
+			store(ssa.OpcodeIstore16, size-2)
+		}
+	default:
+		store(ssa.OpcodeIstore8, 0)
+	}
 }
 
 func (c *Compiler) callMemmove(dst, src, size ssa.Value) {
@@ -5446,17 +5537,6 @@ func (c *Compiler) readI33s() int64 {
 	}
 	c.loweringState.pc += int(n)
 	return v
-}
-
-// moduleDeclaresSubtypes reports whether any type in the module being compiled takes part in a declared
-// subtype relation, which is what makes call_indirect's type check more than an equality.
-func (c *Compiler) moduleDeclaresSubtypes() bool {
-	for i := range c.m.TypeSection {
-		if c.m.TypeSection[i].HasSupertype || c.m.TypeSection[i].Extensible {
-			return true
-		}
-	}
-	return false
 }
 
 // encodeRefTarget turns a decoded heap type immediate into the descriptor wasm.RunGCCheck expects.

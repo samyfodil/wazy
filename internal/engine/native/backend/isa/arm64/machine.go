@@ -239,6 +239,7 @@ func (m *machine) LinkAdjacentBlocks(prev, next ssa.BasicBlock) {
 
 // StartBlock implements backend.Machine.
 func (m *machine) StartBlock(blk ssa.BasicBlock) {
+	m.aliasZeroExtended32(blk)
 	m.currentLabelPos = m.getOrAllocateSSABlockLabelPosition(blk)
 	labelPos := m.currentLabelPos
 	end := m.allocateNop()
@@ -714,10 +715,14 @@ func (m *machine) InsertReturn() {
 func (m *machine) getVRegSpillSlotOffsetFromSP(id regalloc.VRegID, size byte) int64 {
 	offset, ok := m.spillSlots[id]
 	if !ok {
-		offset = m.spillSlotSize
-		// TODO: this should be aligned depending on the `size` to use Imm12 offset load/store as much as possible.
+		// Align the slot to its own size (always 4, 8 or 16). The returned offset adds 16,
+		// so an aligned slot keeps the scaled unsigned-imm12 addressing form, which reaches
+		// 4096*size; an unaligned one falls back to the unscaled imm9 form (±256) and, past
+		// that, to materializing the offset in a register.
+		align := int64(size)
+		offset = (m.spillSlotSize + align - 1) &^ (align - 1)
 		m.spillSlots[id] = offset
-		m.spillSlotSize += int64(size)
+		m.spillSlotSize = offset + align
 	}
 	return offset + 16 // spill slot starts above the clobbered registers and the frame size.
 }

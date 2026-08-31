@@ -618,3 +618,246 @@ func Test_operandER_subWordTarget(t *testing.T) {
 		require.Equal(t, "2380220b", hex.EncodeToString(m.compiler.Buf()))
 	})
 }
+
+// TestMachine_lowerSubOrAdd_mulAccumulate covers the MADD/MSUB fold: a multiply
+// feeding an add or a subtract becomes one instruction instead of two.
+//
+// Expected encodings are the "Data-processing (3 source)" forms of the Arm ARM:
+// MADD <Xd>, <Xn>, <Xm>, <Xa> computes Xa + Xn*Xm and MSUB computes Xa - Xn*Xm,
+// which is why only the right-hand operand of a subtract can be the multiply.
+func TestMachine_lowerSubOrAdd_mulAccumulate(t *testing.T) {
+	// setup builds the multiply feeding an add/sub and lowers the add/sub.
+	setup := func(typ ssa.Type, add, mulLeft bool, mulRefCount uint32, accIsConst bool) *machine {
+		ctx, b, m := newSetupWithMockContext()
+		blk := b.CurrentBlock()
+
+		mkParam := func(r regalloc.VReg) ssa.Value {
+			v := blk.AddParam(b, typ)
+			ctx.vRegMap[v] = r
+			ctx.definitions[v] = backend.SSAValueDefinition{V: v}
+			return v
+		}
+		a, c := mkParam(x2VReg), mkParam(x3VReg)
+
+		var acc ssa.Value
+		if accIsConst {
+			k := b.AllocateInstruction()
+			k.AsIconst64(0x20)
+			b.InsertInstruction(k)
+			acc = k.Return()
+			ctx.vRegMap[acc] = x1VReg
+			ctx.definitions[acc] = backend.SSAValueDefinition{Instr: k, V: acc}
+		} else {
+			acc = mkParam(x1VReg)
+		}
+
+		mul := b.AllocateInstruction()
+		mul.AsImul(a, c)
+		b.InsertInstruction(mul)
+		mulVal := mul.Return()
+		ctx.vRegMap[mulVal] = x4VReg
+		ctx.definitions[mulVal] = backend.SSAValueDefinition{Instr: mul, V: mulVal, RefCount: mulRefCount}
+
+		alu := b.AllocateInstruction()
+		switch {
+		case mulLeft:
+			alu.AsIadd(mulVal, acc)
+		case add:
+			alu.AsIadd(acc, mulVal)
+		default:
+			alu.AsIsub(acc, mulVal)
+		}
+		b.InsertInstruction(alu)
+		ctx.vRegMap[alu.Return()] = x5VReg
+
+		m.lowerSubOrAdd(alu, add)
+		return m
+	}
+
+	for _, tc := range []struct {
+		name          string
+		typ           ssa.Type
+		add, mulLeft  bool
+		expectedAsm   string
+		expectedBytes string
+	}{
+		{
+			name: "add i64", typ: ssa.TypeI64, add: true,
+			expectedAsm: "madd x5, x2, x3, x1", expectedBytes: "4504039b",
+		},
+		{
+			name: "add i32", typ: ssa.TypeI32, add: true,
+			expectedAsm: "madd w5, w2, w3, w1", expectedBytes: "4504031b",
+		},
+		{
+			// x - a*c is MSUB; the accumulator stays the left operand.
+			name: "sub i64", typ: ssa.TypeI64,
+			expectedAsm: "msub x5, x2, x3, x1", expectedBytes: "4584039b",
+		},
+		{
+			name: "sub i32", typ: ssa.TypeI32,
+			expectedAsm: "msub w5, w2, w3, w1", expectedBytes: "4584031b",
+		},
+		{
+			// Addition commutes, so the multiply may be the left operand too.
+			name: "add i64 with the multiply on the left", typ: ssa.TypeI64, add: true, mulLeft: true,
+			expectedAsm: "madd x5, x2, x3, x1", expectedBytes: "4504039b",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := setup(tc.typ, tc.add, tc.mulLeft, 0, false)
+			require.Equal(t, tc.expectedAsm, formatEmittedInstructionsInCurrentBlock(m))
+
+			m.FlushPendingInstructions()
+			m.encode(m.perBlockHead)
+			require.Equal(t, tc.expectedBytes, hex.EncodeToString(m.compiler.Buf()))
+		})
+	}
+
+	// The cases that must NOT fold. Each keeps the plain two-instruction shape,
+	// so the multiply is lowered on its own and only the ALU op appears here.
+	t.Run("multiply on the left of a subtract", func(t *testing.T) {
+		// (a*c) - x has no MSUB form: MSUB subtracts the product, not from it.
+		ctx, b, m := newSetupWithMockContext()
+		blk := b.CurrentBlock()
+		mkParam := func(r regalloc.VReg) ssa.Value {
+			v := blk.AddParam(b, ssa.TypeI64)
+			ctx.vRegMap[v] = r
+			ctx.definitions[v] = backend.SSAValueDefinition{V: v}
+			return v
+		}
+		a, c, x := mkParam(x2VReg), mkParam(x3VReg), mkParam(x1VReg)
+
+		mul := b.AllocateInstruction()
+		mul.AsImul(a, c)
+		b.InsertInstruction(mul)
+		ctx.vRegMap[mul.Return()] = x4VReg
+		ctx.definitions[mul.Return()] = backend.SSAValueDefinition{Instr: mul, V: mul.Return()}
+
+		sub := b.AllocateInstruction()
+		sub.AsIsub(mul.Return(), x)
+		b.InsertInstruction(sub)
+		ctx.vRegMap[sub.Return()] = x5VReg
+
+		m.lowerSubOrAdd(sub, false)
+		require.Equal(t, "sub x5, x4, x1", formatEmittedInstructionsInCurrentBlock(m))
+		require.False(t, mul.Lowered())
+	})
+
+	t.Run("multiply used more than once", func(t *testing.T) {
+		m := setup(ssa.TypeI64, true, false, 2, false)
+		require.Equal(t, "add x5, x1, x4", formatEmittedInstructionsInCurrentBlock(m))
+	})
+
+	t.Run("constant accumulator keeps the immediate form", func(t *testing.T) {
+		// (a*c) + 0x20: folding would have to materialize 0x20 into a register,
+		// while the plain form keeps it as the imm12 of the ADD.
+		m := setup(ssa.TypeI64, true, true, 0, true)
+		require.Equal(t, "add x5, x4, #0x20", formatEmittedInstructionsInCurrentBlock(m))
+	})
+}
+
+// Test_aliasZeroExtended32 covers the pass that lets an unsigned 32->64 extend
+// emit nothing: when the operand's producer already zeroed bits [63:32], the
+// extend's result is given the operand's own virtual register.
+//
+// The two halves have to stay in step. If zeroExtends32 ever claimed an opcode
+// that leaves garbage in the upper half, or if aliasZeroExtended32 stopped
+// running before lowering, the "no alias" cases below would silently lose their
+// uxtw and the extend would read whatever the producer left there.
+func Test_aliasZeroExtended32(t *testing.T) {
+	// setup builds `v = <producer>` followed by an extend of v, runs the alias
+	// pass over the block, then lowers just the extend.
+	setup := func(t *testing.T, producer func(b ssa.Builder, arg ssa.Value) *ssa.Instruction, signed bool, from, to byte) (*mockCompiler, *machine, *ssa.Instruction) {
+		ctx, b, m := newSetupWithMockContext()
+		param := b.CurrentBlock().AddParam(b, ssa.TypeI32)
+		ctx.vRegMap[param] = intToVReg(1)
+		ctx.definitions[param] = backend.SSAValueDefinition{V: param}
+
+		p := producer(b, param)
+		b.InsertInstruction(p)
+		v := p.Return()
+		ctx.vRegMap[v] = intToVReg(2)
+		ctx.definitions[v] = backend.SSAValueDefinition{V: v, Instr: p}
+
+		ext := b.AllocateInstruction()
+		if signed {
+			ext.AsSExtend(v, from, to)
+		} else {
+			ext.AsUExtend(v, from, to)
+		}
+		b.InsertInstruction(ext)
+		ctx.vRegMap[ext.Return()] = intToVReg(3)
+
+		m.StartBlock(b.CurrentBlock()) // also pins that StartBlock is where the alias pass runs.
+		m.lowerExtend(v, ext.Return(), from, to, signed)
+		return ctx, m, ext
+	}
+
+	iadd32 := func(b ssa.Builder, arg ssa.Value) *ssa.Instruction {
+		return b.AllocateInstruction().AsIadd(arg, arg)
+	}
+	imul32 := func(b ssa.Builder, arg ssa.Value) *ssa.Instruction {
+		return b.AllocateInstruction().AsImul(arg, arg)
+	}
+
+	t.Run("zero-extending producer: aliased, nothing emitted", func(t *testing.T) {
+		ctx, m, ext := setup(t, iadd32, false, 32, 64)
+		require.Equal(t, intToVReg(2), ctx.VRegOf(ext.Return()))
+		require.Equal(t, "nop0", formatEmittedInstructionsInCurrentBlock(m))
+	})
+	t.Run("other producer: not aliased, uxtw emitted", func(t *testing.T) {
+		ctx, m, ext := setup(t, imul32, false, 32, 64)
+		require.Equal(t, intToVReg(3), ctx.VRegOf(ext.Return()))
+		require.Equal(t, "uxtw x3?, w2?\nnop0", formatEmittedInstructionsInCurrentBlock(m))
+	})
+	t.Run("signed extend is never aliased", func(t *testing.T) {
+		ctx, m, ext := setup(t, iadd32, true, 32, 64)
+		require.Equal(t, intToVReg(3), ctx.VRegOf(ext.Return()))
+		require.Equal(t, "sxtw x3?, w2?\nnop0", formatEmittedInstructionsInCurrentBlock(m))
+	})
+	t.Run("narrower source is never aliased", func(t *testing.T) {
+		ctx, m, ext := setup(t, iadd32, false, 8, 64)
+		require.Equal(t, intToVReg(3), ctx.VRegOf(ext.Return()))
+		require.Equal(t, "uxtb x3?, w2?\nnop0", formatEmittedInstructionsInCurrentBlock(m))
+	})
+	t.Run("operand with no producer is never aliased", func(t *testing.T) {
+		ctx, b, m := newSetupWithMockContext()
+		// A function/block parameter has no defining instruction, so nothing vouches for its
+		// upper half -- the entry ABI is free to hand over a full 64-bit register.
+		param := b.CurrentBlock().AddParam(b, ssa.TypeI32)
+		ctx.vRegMap[param] = intToVReg(1)
+		ctx.definitions[param] = backend.SSAValueDefinition{V: param}
+		ext := b.AllocateInstruction()
+		ext.AsUExtend(param, 32, 64)
+		b.InsertInstruction(ext)
+		ctx.vRegMap[ext.Return()] = intToVReg(3)
+
+		m.StartBlock(b.CurrentBlock())
+		m.lowerExtend(param, ext.Return(), 32, 64, false)
+		require.Equal(t, intToVReg(3), ctx.VRegOf(ext.Return()))
+		require.Equal(t, "uxtw x3?, w1?\nnop0", formatEmittedInstructionsInCurrentBlock(m))
+	})
+	t.Run("every trusted producer is aliased", func(t *testing.T) {
+		for name, producer := range map[string]func(b ssa.Builder, arg ssa.Value) *ssa.Instruction{
+			"band": func(b ssa.Builder, arg ssa.Value) *ssa.Instruction {
+				return b.AllocateInstruction().AsBand(arg, arg)
+			},
+			"ishl": func(b ssa.Builder, arg ssa.Value) *ssa.Instruction {
+				return b.AllocateInstruction().AsIshl(arg, arg)
+			},
+			"ushr": func(b ssa.Builder, arg ssa.Value) *ssa.Instruction {
+				return b.AllocateInstruction().AsUshr(arg, arg)
+			},
+			"load": func(b ssa.Builder, arg ssa.Value) *ssa.Instruction {
+				return b.AllocateInstruction().AsLoad(arg, 0, ssa.TypeI32)
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				ctx, m, ext := setup(t, producer, false, 32, 64)
+				require.Equal(t, intToVReg(2), ctx.VRegOf(ext.Return()))
+				require.Equal(t, "nop0", formatEmittedInstructionsInCurrentBlock(m))
+			})
+		}
+	})
+}

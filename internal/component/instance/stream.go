@@ -175,6 +175,12 @@ func (b *guestBuffer) write(vs []abi.Value) error {
 	if !ok {
 		return fmt.Errorf("stream/future buffer write: calling module has no memory")
 	}
+	// The element type's layout is the same for every element, so it is walked
+	// once per copy here rather than twice per element inside abi.Store.
+	st, err := abi.CompileStore(b.elem, b.resolve)
+	if err != nil {
+		return fmt.Errorf("stream/future buffer write: %w", err)
+	}
 	for i, v := range vs {
 		// Feature 3: the mirror of read's transfer arm above -- v is the
 		// host-level rep intermediate (either just TakeOwn-reduced by the
@@ -188,7 +194,7 @@ func (b *guestBuffer) write(vs []abi.Value) error {
 			}
 			v = b.inst.resources.NewOwn(b.inst.canonTag(b.ownElem.ResourceType), rep)
 		}
-		if err := abi.Store(mem, b.ptr, b.elem, v, b.resolve, b.realloc); err != nil {
+		if err := st.Store(mem, b.ptr, v, b.realloc); err != nil {
 			return fmt.Errorf("stream/future buffer write: element %d: %w", i, err)
 		}
 		b.ptr += b.elemSz

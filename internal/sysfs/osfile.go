@@ -45,8 +45,9 @@ type osFile struct {
 
 	// direntBuf is a reusable buffer for raw getdents64 reads, used only by
 	// the Linux fast path in readdir_linux.go. Always nil on other
-	// platforms.
-	direntBuf []byte
+	// platforms. It is held by pointer because that is what its pool stores:
+	// returning the slice header itself would box it on every close.
+	direntBuf *[]byte
 
 	// bufferedDirents holds entries parsed from a prior getdents64 batch
 	// that haven't yet been returned by Readdir, since a single batch can
@@ -195,7 +196,7 @@ func (f *osFile) Stat() (sys.Stat_t, sys.Errno) {
 		return sys.Stat_t{}, sys.EBADF
 	}
 
-	st, errno := statFile(f.file)
+	st, errno := statOSFile(f)
 	switch errno {
 	case 0:
 		f.cachedSt = cachedStat{dev: st.Dev, ino: st.Ino, isDir: st.Mode&fs.ModeDir == fs.ModeDir, valid: true}

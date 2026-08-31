@@ -841,4 +841,23 @@ func TestDominatorTree(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("table reused by a smaller function", func(t *testing.T) {
+		// The sparse table is kept across functions, so the rows a larger function left
+		// behind must not answer a smaller one.
+		big := constructGraphFromEdges(edgesCase{
+			0: {1, 2}, 1: {3, 4}, 2: {5, 6}, 3: {7}, 4: {8}, 5: {9}, 6: {10},
+		})
+		passCalculateImmediateDominators(big)
+		passBuildDominatorTree(big)
+
+		small := constructGraphFromEdges(edgesCase{0: {1, 2}, 1: {3}, 2: {3}})
+		small.sparseTree = big.sparseTree // As a pooled builder would carry it over.
+		passCalculateImmediateDominators(small)
+		passBuildDominatorTree(small)
+
+		require.Equal(t, BasicBlockID(0), small.sparseTree.findLCA(1, 2).id)
+		require.Equal(t, BasicBlockID(0), small.sparseTree.findLCA(1, 3).id)
+		require.Equal(t, BasicBlockID(3), small.sparseTree.findLCA(3, 3).id)
+	})
 }

@@ -1,6 +1,7 @@
 package arm64
 
 import (
+	"encoding/hex"
 	"testing"
 
 	"github.com/samyfodil/wazy/internal/engine/native/backend/regalloc"
@@ -84,10 +85,10 @@ func TestMachine_insertStoreRegisterAt(t *testing.T) {
 			spillSlotSize: 0xffff,
 			expected: `
 	udf
-	movz x27, #0xf, lsl 0
+	movz x27, #0x10, lsl 0
 	movk x27, #0x1, lsl 16
 	str x1, [sp, x27]
-	movz x27, #0x17, lsl 0
+	movz x27, #0x18, lsl 0
 	movk x27, #0x1, lsl 16
 	str d1, [sp, x27]
 	exit_sequence x30
@@ -157,10 +158,10 @@ func TestMachine_insertReloadRegisterAt(t *testing.T) {
 			spillSlotSize: 0xffff,
 			expected: `
 	udf
-	movz x27, #0xf, lsl 0
+	movz x27, #0x10, lsl 0
 	movk x27, #0x1, lsl 16
 	ldr x1, [sp, x27]
-	movz x27, #0x17, lsl 0
+	movz x27, #0x18, lsl 0
 	movk x27, #0x1, lsl 16
 	ldr d1, [sp, x27]
 	exit_sequence x30
@@ -290,4 +291,173 @@ func TestMachineMachineswap(t *testing.T) {
 			require.Equal(t, tc.expected, m.Format())
 		})
 	}
+}
+
+// TestMachine_pairSpillAccesses covers the STP/LDP folding of neighbouring spill
+// accesses. The expected encoding is "Load/store register pair (signed offset)"
+// from the Arm ARM: the immediate is the low slot's offset in units of 8 bytes,
+// Rt takes the low slot and Rt2 the high one -- so a descending pair has to swap
+// the two registers, not the offset.
+func TestMachine_pairSpillAccesses(t *testing.T) {
+	// spillAccess builds `str/ldr <r>, [<base>, #off]` as the spill helpers emit it.
+	spillAccess := func(m *machine, load bool, r, base regalloc.VReg, off int64) *instruction {
+		amode := m.amodePool.Allocate()
+		*amode = addressMode{kind: addressModeKindRegUnsignedImm12, rn: base, imm: off}
+		i := m.allocateInstr()
+		if load {
+			i.asULoad(r, amode, 64)
+		} else {
+			i.asStore(operandNR(r), amode, 64)
+		}
+		return i
+	}
+	chain := func(m *machine, instrs ...*instruction) {
+		for i := 0; i < len(instrs)-1; i++ {
+			instrs[i].next = instrs[i+1]
+			instrs[i+1].prev = instrs[i]
+		}
+		m.rootInstr = instrs[0]
+	}
+
+	for _, tc := range []struct {
+		name  string
+		build func(m *machine) []*instruction
+		exp   string
+	}{
+		{
+			name: "ascending stores",
+			build: func(m *machine) []*instruction {
+				return []*instruction{
+					spillAccess(m, false, x1VReg, spVReg, 16),
+					spillAccess(m, false, x2VReg, spVReg, 24),
+				}
+			},
+			exp: "\n\tstp x1, x2, [sp, #0x10]\n",
+		},
+		{
+			name: "descending stores swap the registers",
+			build: func(m *machine) []*instruction {
+				return []*instruction{
+					spillAccess(m, false, x1VReg, spVReg, 24),
+					spillAccess(m, false, x2VReg, spVReg, 16),
+				}
+			},
+			exp: "\n\tstp x2, x1, [sp, #0x10]\n",
+		},
+		{
+			name: "ascending reloads",
+			build: func(m *machine) []*instruction {
+				return []*instruction{
+					spillAccess(m, true, x1VReg, spVReg, 16),
+					spillAccess(m, true, x2VReg, spVReg, 24),
+				}
+			},
+			exp: "\n\tldp x1, x2, [sp, #0x10]\n",
+		},
+		{
+			name: "three in a row pair greedily",
+			build: func(m *machine) []*instruction {
+				return []*instruction{
+					spillAccess(m, false, x1VReg, spVReg, 16),
+					spillAccess(m, false, x2VReg, spVReg, 24),
+					spillAccess(m, false, x3VReg, spVReg, 32),
+				}
+			},
+			exp: "\n\tstp x1, x2, [sp, #0x10]\n\tstr x3, [sp, #0x20]\n",
+		},
+		{
+			name: "non-neighbouring slots",
+			build: func(m *machine) []*instruction {
+				return []*instruction{
+					spillAccess(m, false, x1VReg, spVReg, 16),
+					spillAccess(m, false, x2VReg, spVReg, 32),
+				}
+			},
+			exp: "\n\tstr x1, [sp, #0x10]\n\tstr x2, [sp, #0x20]\n",
+		},
+		{
+			name: "a store and a reload",
+			build: func(m *machine) []*instruction {
+				return []*instruction{
+					spillAccess(m, false, x1VReg, spVReg, 16),
+					spillAccess(m, true, x2VReg, spVReg, 24),
+				}
+			},
+			exp: "\n\tstr x1, [sp, #0x10]\n\tldr x2, [sp, #0x18]\n",
+		},
+		{
+			// LDP with two identical destinations is CONSTRAINED UNPREDICTABLE.
+			name: "the same register twice",
+			build: func(m *machine) []*instruction {
+				return []*instruction{
+					spillAccess(m, true, x1VReg, spVReg, 16),
+					spillAccess(m, true, x1VReg, spVReg, 24),
+				}
+			},
+			exp: "\n\tldr x1, [sp, #0x10]\n\tldr x1, [sp, #0x18]\n",
+		},
+		{
+			// imm7 is signed and scaled by 8, so 64*8 is one slot past the top.
+			name: "offset out of the imm7 range",
+			build: func(m *machine) []*instruction {
+				return []*instruction{
+					spillAccess(m, false, x1VReg, spVReg, 64*8),
+					spillAccess(m, false, x2VReg, spVReg, 64*8+8),
+				}
+			},
+			exp: "\n\tstr x1, [sp, #0x200]\n\tstr x2, [sp, #0x208]\n",
+		},
+		{
+			name: "a base other than SP",
+			build: func(m *machine) []*instruction {
+				return []*instruction{
+					spillAccess(m, false, x1VReg, x9VReg, 16),
+					spillAccess(m, false, x2VReg, x9VReg, 24),
+				}
+			},
+			exp: "\n\tstr x1, [x9, #0x10]\n\tstr x2, [x9, #0x18]\n",
+		},
+		{
+			// A block boundary is a nop0 (see StartBlock/EndBlock), so it breaks the
+			// run and keeps a spill from moving across a control-flow edge.
+			name: "separated by a block bracket",
+			build: func(m *machine) []*instruction {
+				return []*instruction{
+					spillAccess(m, false, x1VReg, spVReg, 16),
+					m.allocateNop(),
+					spillAccess(m, false, x2VReg, spVReg, 24),
+				}
+			},
+			exp: "\n\tstr x1, [sp, #0x10]\n\tstr x2, [sp, #0x18]\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, m := newSetupWithMockContext()
+			chain(m, tc.build(m)...)
+			m.pairSpillAccesses()
+			require.Equal(t, tc.exp, m.Format())
+		})
+	}
+
+	t.Run("encoding", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			load bool
+			exp  string
+		}{
+			{name: "stp", exp: "e10b01a9"},
+			{name: "ldp", load: true, exp: "e10b41a9"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				_, _, m := newSetupWithMockContext()
+				chain(m,
+					spillAccess(m, tc.load, x1VReg, spVReg, 16),
+					spillAccess(m, tc.load, x2VReg, spVReg, 24),
+				)
+				m.pairSpillAccesses()
+				m.encode(m.rootInstr)
+				require.Equal(t, tc.exp, hex.EncodeToString(m.compiler.Buf()))
+			})
+		}
+	})
 }

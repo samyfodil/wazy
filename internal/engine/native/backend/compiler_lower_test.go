@@ -138,3 +138,31 @@ func TestCompiler_lowerBlockArguments(t *testing.T) {
 		})
 	}
 }
+
+// TestCompiler_InitModule checks that InitModule drops the ABI cache. The cache is keyed by
+// ssa.SignatureID, and every module reassigns those IDs from zero, so a Compiler carried over
+// to a second module would otherwise lower its calls with the previous module's ABI.
+func TestCompiler_InitModule(t *testing.T) {
+	m := &mockMachine{
+		argResultInts:   []regalloc.RealReg{regalloc.RealReg(0), regalloc.RealReg(1)},
+		argResultFloats: []regalloc.RealReg{regalloc.RealReg(2), regalloc.RealReg(3)},
+	}
+	c := newCompiler(context.Background(), m, ssa.NewBuilder())
+
+	first := &ssa.Signature{Params: []ssa.Type{ssa.TypeI32}}
+	second := &ssa.Signature{Params: []ssa.Type{ssa.TypeF64, ssa.TypeF64}, Results: []ssa.Type{ssa.TypeI64}}
+
+	abi := c.GetFunctionABI(first)
+	require.Equal(t, 1, len(abi.Args))
+	require.Equal(t, 0, len(abi.Rets))
+
+	// Within a module the same ID always means the same signature, so the cached entry wins.
+	abi = c.GetFunctionABI(second)
+	require.Equal(t, 1, len(abi.Args))
+
+	c.InitModule()
+	abi = c.GetFunctionABI(second)
+	require.Equal(t, 2, len(abi.Args))
+	require.Equal(t, 1, len(abi.Rets))
+	require.Equal(t, ssa.TypeF64, abi.Args[0].Type)
+}

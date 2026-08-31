@@ -83,8 +83,10 @@ type (
 		success []*basicBlock
 		// singlePred is the alias to preds[0] for fast lookup, and only set after Seal is called.
 		singlePred *basicBlock
-		// lastDefinitions maps Variable to its last definition in this block.
-		lastDefinitions map[Variable]Value
+		// varDefsOff, varDefsLen locate this block's window in builder.varDefs, which holds
+		// the last definition of each Variable in this block. varDefsLen is zero until the
+		// block defines something, which over 40% of blocks never do.
+		varDefsOff, varDefsLen uint32
 		// unknownsValues are used in builder.findValue. The usage is well-described in the paper.
 		unknownValues []unknownValue
 		// invalid is true if this block is made invalid during optimizations.
@@ -285,7 +287,7 @@ func resetBasicBlock(bb *basicBlock) {
 	bb.invalid, bb.sealed = false, false
 	bb.singlePred = nil
 	bb.unknownValues = bb.unknownValues[:0]
-	bb.lastDefinitions = nativeapi.ResetMap(bb.lastDefinitions)
+	bb.varDefsOff, bb.varDefsLen = 0, 0
 	bb.reversePostOrder = -1
 	bb.visited = 0
 	bb.loopNestingForestChildren = basicBlockVarLengthNil
@@ -301,20 +303,31 @@ func (bb *basicBlock) addPred(blk BasicBlock, branch *Instruction) {
 	}
 
 	pred := blk.(*basicBlock)
-	for i := range bb.preds {
-		existingPred := &bb.preds[i]
-		if existingPred.blk == pred && existingPred.branch != branch {
-			// If the target is already added, then this must come from the same BrTable or TryTableDispatch,
-			// otherwise such redundant branch should be eliminated by the frontend. (which should be simpler).
-			panic(fmt.Sprintf("BUG: redundant non BrTable/TryTableDispatch jumps in %s whose targets are the same", bb.Name()))
+	if nativeapi.SSAValidationEnabled {
+		// Quadratic in the number of predecessors, which a br_table makes arbitrarily large.
+		for i := range bb.preds {
+			existingPred := &bb.preds[i]
+			if existingPred.blk == pred && existingPred.branch != branch {
+				// If the target is already added, then this must come from the same BrTable or TryTableDispatch,
+				// otherwise such redundant branch should be eliminated by the frontend. (which should be simpler).
+				panic(fmt.Sprintf("BUG: redundant non BrTable/TryTableDispatch jumps in %s whose targets are the same", bb.Name()))
+			}
 		}
 	}
 
+	// Most blocks end up with one or two of each, and the growth from nil would allocate for
+	// both; a freshly pooled block starts with no backing array at all.
+	if cap(bb.preds) == 0 {
+		bb.preds = make([]basicBlockPredecessorInfo, 0, 2)
+	}
 	bb.preds = append(bb.preds, basicBlockPredecessorInfo{
 		blk:    pred,
 		branch: branch,
 	})
 
+	if cap(pred.success) == 0 {
+		pred.success = make([]*basicBlock, 0, 2)
+	}
 	pred.success = append(pred.success, bb)
 }
 

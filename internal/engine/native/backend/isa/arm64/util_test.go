@@ -110,6 +110,7 @@ func (m *mockCompiler) RegAlloc()                            {}
 func (m *mockCompiler) Lower()                               {}
 func (m *mockCompiler) Format() string                       { return "" }
 func (m *mockCompiler) Init()                                {}
+func (m *mockCompiler) InitModule()                          {}
 
 func newMockCompilationContext() *mockCompiler {
 	return &mockCompiler{
@@ -149,6 +150,11 @@ func (m *mockCompiler) VRegOf(value ssa.Value) regalloc.VReg {
 		panic("Value does not exist")
 	}
 	return vReg
+}
+
+// AliasVReg implements backend.Compiler.
+func (m *mockCompiler) AliasVReg(value, src ssa.Value) {
+	m.vRegMap[value] = m.VRegOf(src)
 }
 
 // MatchInstr implements backend.Compiler.

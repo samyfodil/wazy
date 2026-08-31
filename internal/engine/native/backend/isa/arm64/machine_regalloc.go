@@ -363,6 +363,87 @@ func (m *machine) insertReloadRegisterAt(v regalloc.VReg, instr *instruction, af
 	return linkInstr(cur, prevNext)
 }
 
+// pairSpillAccesses merges neighbouring 64-bit spill stores/reloads into a single
+// STP/LDP, extending to the spill region what C9 already does for the clobbered
+// registers. Two such accesses adjacent in the list have nothing between them and
+// address disjoint slots, so one pair instruction does the same work with half the
+// memory operations. Run after postRegAlloc, when every address mode is final.
+//
+// Nothing but a store64/uLoad64 is ever unlinked, and every labelPosition begins and
+// ends on a nop0 (see StartBlock/EndBlock), so no block bound is disturbed -- and a
+// block bound between two accesses is exactly what stops them from being paired,
+// which is what keeps a spill from moving across a control-flow edge.
+func (m *machine) pairSpillAccesses() {
+	var prev *instruction
+	for cur := m.rootInstr; cur != nil; cur = cur.next {
+		if prev != nil && m.tryPairSpillAccess(prev, cur) {
+			prev = nil
+			continue
+		}
+		if cur.kind == store64 || cur.kind == uLoad64 {
+			prev = cur
+		} else {
+			prev = nil
+		}
+	}
+}
+
+// tryPairSpillAccess rewrites `a` into the STP/LDP covering both `a` and `b` and
+// unlinks `b`, reporting whether it did.
+func (m *machine) tryPairSpillAccess(a, b *instruction) bool {
+	if a.kind != b.kind {
+		return false
+	}
+	load := a.kind == uLoad64
+	am, bm := a.getAmode(), b.getAmode()
+	if am.rn != spVReg || bm.rn != spVReg || !immOffsetAmode(am) || !immOffsetAmode(bm) {
+		return false
+	}
+	var r1, r2 regalloc.VReg
+	if load {
+		r1, r2 = a.rd, b.rd
+	} else {
+		if a.rn.kind != operandKindNR || b.rn.kind != operandKindNR {
+			return false
+		}
+		r1, r2 = a.rn.nr(), b.rn.nr()
+	}
+	// LDP with two identical destinations is CONSTRAINED UNPREDICTABLE, and a
+	// duplicate store is not worth pairing either.
+	if r1 == r2 {
+		return false
+	}
+	lo, hi := am.imm, bm.imm
+	if lo > hi {
+		lo, hi = hi, lo
+		r1, r2 = r2, r1
+	}
+	// "Load/store register pair (signed offset)": the offset is the low slot's, in
+	// units of 8 bytes, and imm7 is signed.
+	if hi-lo != 8 || lo%8 != 0 || lo < -64*8 || lo > 63*8 {
+		return false
+	}
+
+	amode := m.amodePool.Allocate()
+	*amode = addressMode{kind: addressModeKindRegSignedImm7, rn: spVReg, imm: lo}
+	if load {
+		a.asLoadPair64(r1, r2, amode)
+	} else {
+		a.asStorePair64(r1, r2, amode)
+	}
+	a.next = b.next
+	if b.next != nil {
+		b.next.prev = a
+	}
+	return true
+}
+
+// immOffsetAmode reports whether the address mode is a plain base+immediate one,
+// i.e. its offset is already known and does not need an index register.
+func immOffsetAmode(a *addressMode) bool {
+	return a.kind == addressModeKindRegUnsignedImm12 || a.kind == addressModeKindRegSignedImm9
+}
+
 func lastInstrForInsertion(begin, end *instruction) *instruction {
 	cur := end
 	for cur.kind == nop0 {

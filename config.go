@@ -8,6 +8,8 @@ import (
 	"io/fs"
 	"math"
 	"net"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/samyfodil/wazy/api"
@@ -752,10 +754,14 @@ type moduleConfig struct {
 	nanosleep          sys.Nanosleep
 	osyield            sys.Osyield
 	args               [][]byte
-	// environ is pair-indexed to retain order similar to os.Environ.
+	// environ holds the already-encoded "key=value" entries, in insertion order
+	// like os.Environ, exactly as internalsys.Context wants them. Encoding at
+	// WithEnv time rather than in toSysContext keeps instantiation free of a
+	// per-variable allocation.
 	environ [][]byte
-	// environKeys allow overwriting of existing values.
-	environKeys map[string]int
+	// environErr is the first WithEnv validation failure, reported by
+	// toSysContext so an invalid key still surfaces at instantiation.
+	environErr error
 	// fsConfig is the file system configuration for ABI like WASI.
 	fsConfig FSConfig
 	// sockConfig is the network listener configuration for ABI like WASI.
@@ -764,19 +770,13 @@ type moduleConfig struct {
 
 // NewModuleConfig returns a ModuleConfig that can be used for configuring module instantiation.
 func NewModuleConfig() ModuleConfig {
-	return &moduleConfig{
-		startFunctions: []string{"_start"},
-		environKeys:    map[string]int{},
-	}
+	return &moduleConfig{startFunctions: []string{"_start"}}
 }
 
-// clone makes a deep copy of this module config.
+// clone makes a copy of this module config. environ is shared with it; WithEnv,
+// the only method that changes it, copies it rather than writing through.
 func (c *moduleConfig) clone() *moduleConfig {
-	ret := *c // copy except maps which share a ref
-	ret.environKeys = make(map[string]int, len(c.environKeys))
-	for key, value := range c.environKeys {
-		ret.environKeys[key] = value
-	}
+	ret := *c
 	return &ret
 }
 
@@ -801,13 +801,30 @@ func toByteSlices(strings []string) (result [][]byte) {
 // WithEnv implements ModuleConfig.WithEnv
 func (c *moduleConfig) WithEnv(key, value string) ModuleConfig {
 	ret := c.clone()
-	// Check to see if this key already exists and update it.
-	if i, ok := ret.environKeys[key]; ok {
-		ret.environ[i+1] = []byte(value) // environ is pair-indexed, so the value is 1 after the key.
-	} else {
-		ret.environKeys[key] = len(ret.environ)
-		ret.environ = append(ret.environ, []byte(key), []byte(value))
+	// Same validation as syscall.Setenv for Linux. NUL is enforced by
+	// internalsys.NewContext, on the encoded entry.
+	if ret.environErr == nil {
+		if len(key) == 0 {
+			ret.environErr = errors.New("environ invalid: empty key")
+		} else if strings.IndexByte(key, '=') >= 0 {
+			ret.environErr = errors.New("environ invalid: key contains '=' character")
+		}
 	}
+	entry := make([]byte, 0, len(key)+len(value)+1)
+	entry = append(append(append(entry, key...), '='), value...)
+	// environ is shared with the config this was cloned from, so it is never
+	// written in place -- not even into its spare capacity, which a sibling
+	// clone's append would also claim. The scan replaces the key->index map
+	// this used to carry: an environment is a handful of entries, and cloning
+	// that map on every WithEnv cost more than the scan it saved.
+	for i, e := range ret.environ {
+		if len(e) > len(key) && e[len(key)] == '=' && string(e[:len(key)]) == key {
+			ret.environ = slices.Clone(ret.environ)
+			ret.environ[i] = entry
+			return ret
+		}
+	}
+	ret.environ = append(ret.environ[:len(ret.environ):len(ret.environ)], entry)
 	return ret
 }
 
@@ -921,30 +938,13 @@ func (c *moduleConfig) WithRandSource(source io.Reader) ModuleConfig {
 
 // toSysContext creates a baseline wasm.Context configured by ModuleConfig.
 func (c *moduleConfig) toSysContext() (sysCtx *internalsys.Context, err error) {
-	var environ [][]byte // Intentionally doesn't pre-allocate to reduce logic to default to nil.
-	// Same validation as syscall.Setenv for Linux
-	for i := 0; i < len(c.environ); i += 2 {
-		key, value := c.environ[i], c.environ[i+1]
-		keyLen := len(key)
-		if keyLen == 0 {
-			err = errors.New("environ invalid: empty key")
-			return
-		}
-		valueLen := len(value)
-		result := make([]byte, keyLen+valueLen+1)
-		j := 0
-		for ; j < keyLen; j++ {
-			if k := key[j]; k == '=' { // NUL enforced in NewContext
-				err = errors.New("environ invalid: key contains '=' character")
-				return
-			} else {
-				result[j] = k
-			}
-		}
-		result[j] = '='
-		copy(result[j+1:], value)
-		environ = append(environ, result)
+	if c.environErr != nil {
+		return nil, c.environErr
 	}
+	// c.environ is already encoded and never mutated after WithEnv built it, so
+	// every instance of this config shares it. internalsys.Context only reads it
+	// (Environ is copied into guest memory by environ_get).
+	environ := c.environ
 
 	var fs []sys.FS
 	var guestPaths []string

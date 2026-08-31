@@ -19,6 +19,10 @@ import (
 // Higher 4-bit is used to store Type for this variable.
 type Variable uint32
 
+// variableIndexMask masks off the Type stored in the higher 4-bit of a Variable,
+// leaving the dense index assigned by Builder.DeclareVariable.
+const variableIndexMask = 0x0fffffff
+
 // String implements fmt.Stringer.
 func (v Variable) String() string {
 	return fmt.Sprintf("var%d", v&0x0fffffff)

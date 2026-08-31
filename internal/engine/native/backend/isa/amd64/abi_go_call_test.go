@@ -51,14 +51,14 @@ func TestMachine_CompileGoFunctionTrampoline(t *testing.T) {
 	movdqu %xmm13, 256(%rax)
 	movdqu %xmm14, 272(%rax)
 	movdqu %xmm15, 288(%rax)
-	mov.q %rbx, 1120(%rax)
+	mov.q %rbx, 608(%rax)
 	sub $32, %rsp
 	movsd %xmm0, (%rsp)
 	pushq $32
 	movl $25606, %r12d
 	mov.l %r12, (%rax)
 	mov.q %rsp, 56(%rax)
-	mov.q %rbp, 1152(%rax)
+	mov.q %rbp, 640(%rax)
 	lea L1, %r12
 	mov.q %r12, 48(%rax)
 	exit_sequence %rax
@@ -110,7 +110,7 @@ L1:
 	movdqu %xmm13, 256(%rax)
 	movdqu %xmm14, 272(%rax)
 	movdqu %xmm15, 288(%rax)
-	mov.q %rbx, 1120(%rax)
+	mov.q %rbx, 608(%rax)
 	sub $32, %rsp
 	movsd %xmm0, (%rsp)
 	movsd %xmm1, 8(%rsp)
@@ -120,7 +120,7 @@ L1:
 	movl $25606, %r12d
 	mov.l %r12, (%rax)
 	mov.q %rsp, 56(%rax)
-	mov.q %rbp, 1152(%rax)
+	mov.q %rbp, 640(%rax)
 	lea L1, %r12
 	mov.q %r12, 48(%rax)
 	exit_sequence %rax
@@ -173,7 +173,7 @@ L1:
 	movl $2, %r12d
 	mov.l %r12, (%rax)
 	mov.q %rsp, 56(%rax)
-	mov.q %rbp, 1152(%rax)
+	mov.q %rbp, 640(%rax)
 	lea L1, %r12
 	mov.q %r12, 48(%rax)
 	exit_sequence %rax
@@ -232,7 +232,7 @@ L1:
 	movdqu %xmm13, 256(%rax)
 	movdqu %xmm14, 272(%rax)
 	movdqu %xmm15, 288(%rax)
-	mov.q %rbx, 1120(%rax)
+	mov.q %rbx, 608(%rax)
 	sub $240, %rsp
 	movsd %xmm0, (%rsp)
 	movsd %xmm1, 8(%rsp)
@@ -256,7 +256,7 @@ L1:
 	movl $25606, %r12d
 	mov.l %r12, (%rax)
 	mov.q %rsp, 56(%rax)
-	mov.q %rbp, 1152(%rax)
+	mov.q %rbp, 640(%rax)
 	lea L1, %r12
 	mov.q %r12, 48(%rax)
 	exit_sequence %rax
@@ -384,7 +384,7 @@ func TestMachine_CompileStackGrowCallSequence(t *testing.T) {
 	movl $1, %r12d
 	mov.l %r12, (%rax)
 	mov.q %rsp, 56(%rax)
-	mov.q %rbp, 1152(%rax)
+	mov.q %rbp, 640(%rax)
 	lea L1, %r12
 	mov.q %r12, 48(%rax)
 	exit_sequence %rax
@@ -475,6 +475,27 @@ L2:
 			err := m.Encode(context.Background())
 			require.NoError(t, err)
 			require.Equal(t, tc.exp, m.Format())
+		})
+	}
+}
+
+// Test_savedRegistersFit pins the two register lists against the size of
+// native.executionContext.savedRegisters. The field is sized to exactly what these need (see
+// nativeapi.ExecutionContextOffsetSavedRegistersEnd), so a list that grows past it would store over
+// the execution-context fields that follow -- silently, since these are raw offsets off a pointer.
+func Test_savedRegistersFit(t *testing.T) {
+	room := nativeapi.ExecutionContextOffsetSavedRegistersEnd - nativeapi.ExecutionContextOffsetSavedRegistersBegin
+	for _, tc := range []struct {
+		name string
+		regs []regalloc.VReg
+	}{
+		{name: "calleeSavedVRegs", regs: calleeSavedVRegs},
+		{name: "stackGrowSaveVRegs", regs: stackGrowSaveVRegs},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Each register gets its own 16-byte slot; see saveRegistersInExecutionContext.
+			require.True(t, len(tc.regs)*16 <= int(room),
+				"%s needs %d bytes of savedRegisters, which holds %d", tc.name, len(tc.regs)*16, room)
 		})
 	}
 }

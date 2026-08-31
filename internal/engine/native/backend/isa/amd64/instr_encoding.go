@@ -721,15 +721,19 @@ func (i *instruction) encode(c backend.Compiler) (needsLabelResolution bool) {
 		encodeLoad64(c, m, i.op2.reg().RealReg())
 
 	case lea:
-		needsLabelResolution = true
 		dst := regEncodings[i.op2.reg().RealReg()]
-		rex := rexInfo(0).setW()
+		rex := rexInfo(0)
+		if i.b1 { // 64-bit; the 32-bit form drops REX.W and zero-extends into the full register.
+			rex = rex.setW()
+		}
 		const opcode, opcodeNum = 0x8d, 1
 		switch i.op1.kind {
 		case operandKindMem:
 			a := i.op1.addressMode()
 			encodeRegMem(c, legacyPrefixesNone, opcode, opcodeNum, dst, a, rex)
 		case operandKindLabel:
+			// Only the RIP-relative form carries a displacement to patch later.
+			needsLabelResolution = true
 			rex.encode(c, regRexBit(byte(dst)), 0)
 			c.EmitByte(byte((opcode) & 0xff))
 

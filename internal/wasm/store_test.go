@@ -1012,6 +1012,32 @@ func TestModuleInstance_applyData(t *testing.T) {
 	})
 }
 
+// Test_evaluateConstExprScalarInModuleInstance proves the scalar offset helper
+// agrees with the []uint64-returning form it replaced in applyData and
+// applyElements, on both the fast path (a plain constant, global.get) and the
+// slow one (extended-const arithmetic, which evaluateConstExprFast declines).
+func Test_evaluateConstExprScalarInModuleInstance(t *testing.T) {
+	m := &ModuleInstance{
+		Globals: []*GlobalInstance{{Type: GlobalType{ValType: ValueTypeI32}, Val: 7}},
+		Source:  &Module{},
+	}
+	for _, tc := range []struct {
+		name string
+		expr ConstantExpression
+	}{
+		{"i32.const", NewConstantExpressionFromI32(5)},
+		{"i64.const", NewConstantExpressionFromI64(1 << 40)},
+		{"global.get", ConstantExpression{Data: []byte{OpcodeGlobalGet, 0, OpcodeEnd}}},
+		{"extended-const", ConstantExpression{Data: []byte{OpcodeI32Const, 1, OpcodeI32Const, 2, OpcodeI32Add, OpcodeEnd}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			slow := evaluateConstExprInModuleInstance(&tc.expr, m)
+			require.Equal(t, 1, len(slow))
+			require.Equal(t, slow[0], evaluateConstExprScalarInModuleInstance(&tc.expr, m))
+		})
+	}
+}
+
 func globalsContain(globals []*GlobalInstance, want *GlobalInstance) bool {
 	for _, f := range globals {
 		if f == want {

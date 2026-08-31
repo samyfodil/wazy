@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/samyfodil/wazy/api"
@@ -18,11 +19,13 @@ type (
 	// moduleEngine implements wasm.ModuleEngine.
 	moduleEngine struct {
 		// opaquePtr equals &opaque[0].
-		opaquePtr              *byte
-		parent                 *compiledModule
-		module                 *wasm.ModuleInstance
-		opaque                 moduleContextOpaque
-		localFunctionInstances []*functionInstance
+		opaquePtr *byte
+		parent    *compiledModule
+		module    *wasm.ModuleInstance
+		opaque    moduleContextOpaque
+		// localFunctionInstances is the head of the ref.func memo list. See localFuncref; a module
+		// that never executes ref.func never allocates a node.
+		localFunctionInstances atomic.Pointer[funcrefNode]
 		importedFunctions      []importedFunction
 		listeners              []api.FunctionListener
 		// gcEnabled caches whether this runtime enables the GC proposal, so the per-call check in
@@ -39,6 +42,13 @@ type (
 		moduleContextOpaquePtr *byte
 		typeID                 wasm.FunctionTypeID
 		indexInModule          wasm.Index
+	}
+
+	// funcrefNode is one memoized ref.func result. Its fi is addressed by the guest as a funcref, so
+	// a node is never moved or freed while its module engine lives.
+	funcrefNode struct {
+		fi   functionInstance
+		next *funcrefNode
 	}
 
 	importedFunction struct {
@@ -359,19 +369,49 @@ func (m *moduleEngine) FunctionInstanceReference(funcIndex wasm.Index) wasm.Refe
 		begin, _, _ := m.parent.offsets.ImportedFunctionOffset(funcIndex)
 		return uintptr(unsafe.Pointer(&m.opaque[begin]))
 	}
-	localIndex := funcIndex - m.module.Source.ImportFunctionCount
-	p := m.parent
-	executable := &p.executable[p.functionOffsets[localIndex]]
-	typeID := m.module.TypeIDs[m.module.Source.FunctionSection[localIndex]]
+	return m.localFuncref(funcIndex)
+}
 
-	lf := &functionInstance{
-		executable:             executable,
-		moduleContextOpaquePtr: m.opaquePtr,
-		typeID:                 typeID,
-		indexInModule:          funcIndex,
+// localFuncref memoizes one functionInstance per local function index a funcref is actually taken
+// of. Materializing one per execution allocated per instruction and appended to a module-lifetime
+// slice that was never trimmed, so a guest looping on ref.func grew the engine without bound; that
+// append also raced when two goroutines called into one instance.
+//
+// The memo is a prepend-only linked list rather than a table for two reasons. A funcref is a bare
+// uintptr the GC does not trace, so an address handed to the guest must never move afterwards, and a
+// node never does. And a list costs exactly one allocation per DISTINCT funcref -- the same as the
+// per-execution code it replaces paid for its first one -- where a slice would also pay to publish
+// each append, and a dense table indexed by function index would cost every instance 24 bytes per
+// function to hold the handful of entries a module actually takes (a TinyGo module exporting ~90
+// functions takes 8).
+//
+// ponytail: lookup is linear in the number of distinct funcrefs this instance has taken, which is a
+// handful for every module shape seen here. A module taking hundreds would want a dense table keyed
+// by the declared-function set (internal/wasm computes declaredFunctionIndexes during validation but
+// does not retain it); switch to that if one ever shows up.
+func (m *moduleEngine) localFuncref(funcIndex wasm.Index) wasm.Reference {
+	for {
+		head := m.localFunctionInstances.Load()
+		for n := head; n != nil; n = n.next {
+			if n.fi.indexInModule == funcIndex {
+				return uintptr(unsafe.Pointer(&n.fi))
+			}
+		}
+		p, src := m.parent, m.module.Source
+		localIndex := funcIndex - src.ImportFunctionCount
+		n := &funcrefNode{next: head, fi: functionInstance{
+			executable:             &p.executable[p.functionOffsets[localIndex]],
+			moduleContextOpaquePtr: m.opaquePtr,
+			typeID:                 m.module.TypeIDs[src.FunctionSection[localIndex]],
+			indexInModule:          funcIndex,
+		}}
+		// A racing writer that prepended first is handled by looping: the rescan may find it added
+		// this very index, in which case that node wins and this one is dropped, so one index keeps
+		// yielding one reference.
+		if m.localFunctionInstances.CompareAndSwap(head, n) {
+			return uintptr(unsafe.Pointer(&n.fi))
+		}
 	}
-	m.localFunctionInstances = append(m.localFunctionInstances, lf)
-	return uintptr(unsafe.Pointer(lf))
 }
 
 // LookupFunction implements wasm.ModuleEngine.

@@ -38,6 +38,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"sort"
@@ -102,9 +103,32 @@ var httpMethodResults = func() [][]component.Value {
 // Shareable for the same only-read reason as httpMethodResults.
 var wasiResultOk = []component.Value{component.ResultValue{IsErr: false, Payload: nil}}
 
-// wasiCheckWriteBudget is output-stream.check-write's fixed Ok(1<<40) budget
-// (see checkWrite in wasi.go), shared across calls for the same reason.
-var wasiCheckWriteBudget = []component.Value{component.ResultValue{IsErr: false, Payload: uint64(1) << 40}}
+// wasiMaxWriteBudget is the largest byte count check-write may report.
+//
+// check-write's WIT result is a u64, but its meaning is "the number of bytes
+// permitted for the next call to `write`" -- a bound on the length of a list<u8>
+// the guest builds in its own memory and hands back. Every list crosses this
+// boundary as a uint32 length (abi.allocStoreList / abi.loadListFromRange), so
+// 2^32-1 is the longest list any guest can express here. A budget above that
+// describes a write we could not lift even if the guest made it.
+//
+// And over-reporting is not a harmless over-estimate. A wasm32 guest narrows the
+// u64 to its own usize, so a budget that is a multiple of 2^32 arrives as ZERO.
+// The wasi_snapshot_preview1 component adapter -- which every standard-Go guest
+// reaches WASI through -- computes its write length as
+// `bytes.len().min(permit as usize)`, an i32.wrap_i64. Its "no budget" guard
+// tests the full u64 for zero, so a nonzero budget that wraps to zero slips past
+// it: the adapter calls write with an empty list and reports success with
+// nwritten = 0. Silent data loss, one truncated file per write.
+//
+// Being the maximum u32 it is also nonzero under narrowing to any width.
+const wasiMaxWriteBudget = uint64(math.MaxUint32)
+
+// wasiCheckWriteBudget is output-stream.check-write's fixed Ok budget (see
+// checkWrite in wasi.go), shared across calls for the same reason.
+var wasiCheckWriteBudget = []component.Value{
+	component.ResultValue{IsErr: false, Payload: wasiMaxWriteBudget},
+}
 
 // httpIncomingRequest is the host state behind an incoming-request resource:
 // the inbound request serveHTTP synthesized for the guest to read.
@@ -177,7 +201,15 @@ type wasiHTTP struct {
 	// own<T> handle need it directly, exactly like wasi_fs.go.
 	getResources func() (*component.HandleTable, error)
 
-	nextRep   uint32
+	nextRep uint32
+	// freeReps holds reps whose map entry is gone, for the next mint to reuse.
+	// Recycling is what keeps the live rep space dense, and density is worth
+	// having: the Go runtime hands out a shared preallocated word when an
+	// integer below 256 is boxed into an interface and heap-allocates above
+	// it, so a counter that only climbs turns every handle the canonical ABI
+	// lifts or lowers into an allocation. Reps are only ever recycled through
+	// dropRep, which will not release one twice.
+	freeReps  []uint32
 	incoming  map[uint32]*httpIncomingRequest
 	fields    map[uint32]*httpFields
 	responses map[uint32]*httpOutgoingResponse
@@ -289,11 +321,37 @@ func newWasiHTTP() *wasiHTTP {
 	}
 }
 
+// mintRepLocked returns a rep for a new resource, preferring one a finished
+// resource released over a fresh one. Callers hold h.mu.
+func (h *wasiHTTP) mintRepLocked() uint32 {
+	if n := len(h.freeReps); n > 0 {
+		rep := h.freeReps[n-1]
+		h.freeReps = h.freeReps[:n-1]
+		return rep
+	}
+	rep := h.nextRep
+	h.nextRep++
+	return rep
+}
+
+// dropRep removes rep from m and recycles it -- but only if it was still
+// there. The guard is load-bearing rather than defensive: the server path
+// releases its own request state and the guest then drops the handle naming
+// it, so the same rep reaches here twice by design (see the destructors'
+// doc), and recycling it twice would hand one rep to two live resources.
+// m must be keyed in the mintRepLocked space; bodyStreams is not (see
+// httpBodyStreamRepBase). Callers hold h.mu.
+func dropRep[T any](h *wasiHTTP, m map[uint32]T, rep uint32) {
+	if _, ok := m[rep]; ok {
+		delete(m, rep)
+		h.freeReps = append(h.freeReps, rep)
+	}
+}
+
 func (h *wasiHTTP) newIncomingRep(r *httpIncomingRequest) uint32 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	rep := h.nextRep
-	h.nextRep++
+	rep := h.mintRepLocked()
 	h.incoming[rep] = r
 	return rep
 }
@@ -301,8 +359,7 @@ func (h *wasiHTTP) newIncomingRep(r *httpIncomingRequest) uint32 {
 func (h *wasiHTTP) newFieldsRep(f *httpFields) uint32 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	rep := h.nextRep
-	h.nextRep++
+	rep := h.mintRepLocked()
 	h.fields[rep] = f
 	return rep
 }
@@ -310,8 +367,7 @@ func (h *wasiHTTP) newFieldsRep(f *httpFields) uint32 {
 func (h *wasiHTTP) newResponseRep(r *httpOutgoingResponse) uint32 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	rep := h.nextRep
-	h.nextRep++
+	rep := h.mintRepLocked()
 	h.responses[rep] = r
 	return rep
 }
@@ -319,8 +375,7 @@ func (h *wasiHTTP) newResponseRep(r *httpOutgoingResponse) uint32 {
 func (h *wasiHTTP) newBodyRep(b *httpOutgoingBody) uint32 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	rep := h.nextRep
-	h.nextRep++
+	rep := h.mintRepLocked()
 	h.bodies[rep] = b
 	b.rep = rep
 	return rep
@@ -329,17 +384,24 @@ func (h *wasiHTTP) newBodyRep(b *httpOutgoingBody) uint32 {
 func (h *wasiHTTP) newOutparamRep(c *httpCapture) uint32 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	rep := h.nextRep
-	h.nextRep++
+	rep := h.mintRepLocked()
 	h.outparams[rep] = c
 	return rep
 }
 
 // newBodyStreamRep mints a globally-disjoint output-stream rep naming b's
-// buffer, so writeSink can route the guest's writes into it.
+// buffer, so writeSink can route the guest's writes into it. It returns 0 if b
+// already has one: outgoing-body.write yields the stream "at most once"
+// (wasi:http types.wit), and minting a second one overwrote b.streamRep, which
+// was the only route back to the first -- leaving that bodyStreams entry
+// unreachable and unfreeable for the life of the instance, one per extra call
+// the guest chose to make.
 func (h *wasiHTTP) newBodyStreamRep(b *httpOutgoingBody) uint32 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if b.streamRep != 0 {
+		return 0
+	}
 	rep := h.nextBodyStream
 	h.nextBodyStream++
 	h.bodyStreams[rep] = b
@@ -651,7 +713,7 @@ func (h *wasiHTTP) outgoingResponseConstructor(_ context.Context, args []compone
 	if f == nil {
 		f = &httpFields{}
 	}
-	delete(h.fields, rep)
+	dropRep(h, h.fields, rep)
 	h.mu.Unlock()
 	respRep := h.newResponseRep(&httpOutgoingResponse{status: 200, headers: f})
 	return []component.Value{respRep}, nil
@@ -732,6 +794,10 @@ func (h *wasiHTTP) outgoingBodyWrite(_ context.Context, args []component.Value) 
 		return nil, fmt.Errorf("[method]outgoing-body.write: rep %d does not name a live outgoing-body", rep)
 	}
 	streamRep := h.newBodyStreamRep(body)
+	if streamRep == 0 {
+		// result<own<output-stream>, _>: the stream was already taken.
+		return []component.Value{component.ResultValue{IsErr: true, Payload: nil}}, nil
+	}
 	handle := res.NewOwn(wasiOutputStreamResType, streamRep)
 	// result<own<output-stream>, _>: Ok.
 	return []component.Value{component.ResultValue{IsErr: false, Payload: handle}}, nil
@@ -767,7 +833,7 @@ func (h *wasiHTTP) outgoingBodyFinish(_ context.Context, args []component.Value)
 		}
 		h.mu.Lock()
 		trailers = h.fields[trailerRep]
-		delete(h.fields, trailerRep)
+		dropRep(h, h.fields, trailerRep)
 		h.mu.Unlock()
 	}
 	h.mu.Lock()
@@ -775,6 +841,9 @@ func (h *wasiHTTP) outgoingBodyFinish(_ context.Context, args []component.Value)
 	if ok {
 		body.finished = true
 		body.trailers = trailers
+		// finish consumed the handle and the response still points at the
+		// body itself, so the entry -- and its rep -- are done here too.
+		dropRep(h, h.bodies, rep)
 	}
 	h.mu.Unlock()
 	if !ok {
@@ -800,6 +869,11 @@ func (h *wasiHTTP) responseOutparamSet(_ context.Context, args []component.Value
 
 	h.mu.Lock()
 	cap, ok := h.outparams[rep]
+	// Lifting this arg already consumed the handle, and serveHTTPCall holds
+	// the capture directly, so the entry is finished with here -- releasing it
+	// now is what lets the rep be reused rather than retired unrecycled by
+	// releaseServeState, which cannot know whether a handle still names it.
+	dropRep(h, h.outparams, rep)
 	h.mu.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("[static]response-outparam.set: rep %d does not name a live response-outparam", rep)
@@ -831,7 +905,7 @@ func (h *wasiHTTP) responseOutparamSet(_ context.Context, args []component.Value
 	}
 	h.mu.Lock()
 	resp := h.responses[respRep]
-	delete(h.responses, respRep)
+	dropRep(h, h.responses, respRep)
 	h.mu.Unlock()
 	if resp == nil {
 		return nil, fmt.Errorf("[static]response-outparam.set: Ok rep %d does not name a live outgoing-response", respRep)
@@ -1217,7 +1291,10 @@ func wasiHTTPOptions(h *wasiHTTP) []component.Option {
 // is reported as 500.
 func serveHTTPRequest(in *component.Instance, w http.ResponseWriter, r *http.Request) {
 	var body []byte
-	if r.Body != nil { // a bodyless request (e.g. a bridged GET) leaves Body nil
+	// A bodyless request leaves Body nil (a bridged GET) or http.NoBody, and a
+	// server request declares ContentLength 0 for one -- reading any of those
+	// still cost io.ReadAll's 512-byte starting buffer to return nothing.
+	if r.Body != nil && r.Body != http.NoBody && r.ContentLength != 0 {
 		b, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "read request body: "+err.Error(), http.StatusBadRequest)
@@ -1280,7 +1357,12 @@ func serveHTTPCall(in *component.Instance, ctx context.Context, method string, u
 	if u.RawQuery != "" {
 		pathQ += "?" + u.RawQuery
 	}
-	req := &httpIncomingRequest{method: strings.ToUpper(method), pathQ: pathQ, headers: headers.Clone(), body: reqBody, trailers: reqTrailer.Clone()}
+	// headers/trailers are held by reference, not cloned. Nothing here writes
+	// them: incoming-request.headers reads them once to build the guest's
+	// fields resource (a separate copy the guest may then mutate freely), and
+	// incoming-body.finish only hands the trailers back. The clone was a
+	// second deep copy of every header on every request, discarded unread.
+	req := &httpIncomingRequest{method: strings.ToUpper(method), pathQ: pathQ, headers: headers, body: reqBody, trailers: reqTrailer}
 	reqRep := h.newIncomingRep(req)
 	reqHandle := in.Resources().NewOwn(wasiHTTPIncomingRequestResType, reqRep)
 
@@ -1329,21 +1411,21 @@ func serveHTTPCall(in *component.Instance, ctx context.Context, method string, u
 func (h *wasiHTTP) dropIncomingRequest(_ context.Context, rep uint32) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.incoming, rep)
+	dropRep(h, h.incoming, rep)
 	return nil
 }
 
 func (h *wasiHTTP) dropFields(_ context.Context, rep uint32) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.fields, rep)
+	dropRep(h, h.fields, rep)
 	return nil
 }
 
 func (h *wasiHTTP) dropOutgoingResponse(_ context.Context, rep uint32) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.responses, rep)
+	dropRep(h, h.responses, rep)
 	return nil
 }
 
@@ -1353,56 +1435,56 @@ func (h *wasiHTTP) dropOutgoingBody(_ context.Context, rep uint32) error {
 	if b := h.bodies[rep]; b != nil && b.streamRep != 0 {
 		delete(h.bodyStreams, b.streamRep)
 	}
-	delete(h.bodies, rep)
+	dropRep(h, h.bodies, rep)
 	return nil
 }
 
 func (h *wasiHTTP) dropOutparam(_ context.Context, rep uint32) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.outparams, rep)
+	dropRep(h, h.outparams, rep)
 	return nil
 }
 
 func (h *wasiHTTP) dropOutRequest(_ context.Context, rep uint32) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.outRequests, rep)
+	dropRep(h, h.outRequests, rep)
 	return nil
 }
 
 func (h *wasiHTTP) dropFuture(_ context.Context, rep uint32) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.futures, rep)
+	dropRep(h, h.futures, rep)
 	return nil
 }
 
 func (h *wasiHTTP) dropIncomingResponse(_ context.Context, rep uint32) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.inResponses, rep)
+	dropRep(h, h.inResponses, rep)
 	return nil
 }
 
 func (h *wasiHTTP) dropIncomingBody(_ context.Context, rep uint32) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.inBodies, rep)
+	dropRep(h, h.inBodies, rep)
 	return nil
 }
 
 func (h *wasiHTTP) dropRequestOptions(_ context.Context, rep uint32) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.reqOptions, rep)
+	dropRep(h, h.reqOptions, rep)
 	return nil
 }
 
 func (h *wasiHTTP) dropFutureTrailers(_ context.Context, rep uint32) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.futureTrailers, rep)
+	dropRep(h, h.futureTrailers, rep)
 	return nil
 }
 
@@ -1420,6 +1502,14 @@ func (h *wasiHTTP) dropFutureTrailers(_ context.Context, rep uint32) error {
 // The response body slice handed back to the caller aliases the body's
 // buffer, which stays alive through that slice; dropping the map entry does
 // not disturb it.
+//
+// These are plain deletes, not dropRep: this is the net that catches a guest
+// which returned WITHOUT dropping its handles, so a handle naming one of
+// these reps may still be live in the table. Retiring such a rep is safe;
+// recycling it would let the next request mint the same rep and give that
+// stale handle a different live resource instead of the "does not name a
+// live ..." it gets today. A guest that does drop its handles has already
+// recycled these through the destructors below, during the call.
 func (h *wasiHTTP) releaseServeState(reqRep, outRep uint32, capture *httpCapture) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -1460,8 +1550,7 @@ func findExportInstance(in *component.Instance, prefix string) (string, bool) {
 func (h *wasiHTTP) newOutRequestRep(r *httpOutgoingRequest) uint32 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	rep := h.nextRep
-	h.nextRep++
+	rep := h.mintRepLocked()
 	h.outRequests[rep] = r
 	return rep
 }
@@ -1469,8 +1558,7 @@ func (h *wasiHTTP) newOutRequestRep(r *httpOutgoingRequest) uint32 {
 func (h *wasiHTTP) newFutureRep(f *httpFuture) uint32 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	rep := h.nextRep
-	h.nextRep++
+	rep := h.mintRepLocked()
 	h.futures[rep] = f
 	return rep
 }
@@ -1478,8 +1566,7 @@ func (h *wasiHTTP) newFutureRep(f *httpFuture) uint32 {
 func (h *wasiHTTP) newInResponseRep(r *httpIncomingResponse) uint32 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	rep := h.nextRep
-	h.nextRep++
+	rep := h.mintRepLocked()
 	h.inResponses[rep] = r
 	return rep
 }
@@ -1487,8 +1574,7 @@ func (h *wasiHTTP) newInResponseRep(r *httpIncomingResponse) uint32 {
 func (h *wasiHTTP) newInBodyRep(b *httpIncomingBody) uint32 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	rep := h.nextRep
-	h.nextRep++
+	rep := h.mintRepLocked()
 	h.inBodies[rep] = b
 	return rep
 }
@@ -1506,7 +1592,7 @@ func (h *wasiHTTP) outgoingRequestConstructor(_ context.Context, args []componen
 	if f == nil {
 		f = &httpFields{}
 	}
-	delete(h.fields, rep)
+	dropRep(h, h.fields, rep)
 	h.mu.Unlock()
 	reqRep := h.newOutRequestRep(&httpOutgoingRequest{method: "GET", scheme: "http", pathQ: "/", headers: f})
 	return []component.Value{reqRep}, nil
@@ -1648,8 +1734,7 @@ func (h *wasiHTTP) outgoingRequestBody(_ context.Context, args []component.Value
 func (h *wasiHTTP) newReqOptionsRep(o *httpRequestOptions) uint32 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	rep := h.nextRep
-	h.nextRep++
+	rep := h.mintRepLocked()
 	h.reqOptions[rep] = o
 	return rep
 }
@@ -1743,13 +1828,13 @@ func (h *wasiHTTP) outgoingHandlerHandle(ctx context.Context, args []component.V
 				timeout = o.firstByteTimeout
 			}
 		}
-		delete(h.reqOptions, optRep)
+		dropRep(h, h.reqOptions, optRep)
 		h.mu.Unlock()
 	}
 
 	h.mu.Lock()
 	r, ok := h.outRequests[reqRep]
-	delete(h.outRequests, reqRep)
+	dropRep(h, h.outRequests, reqRep)
 	client := h.client
 	h.mu.Unlock()
 	if !ok {
@@ -2007,8 +2092,7 @@ func (h *wasiHTTP) incomingBodyStream(_ context.Context, args []component.Value)
 func (h *wasiHTTP) newFutureTrailersRep(f *httpFutureTrailers) uint32 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	rep := h.nextRep
-	h.nextRep++
+	rep := h.mintRepLocked()
 	h.futureTrailers[rep] = f
 	return rep
 }
@@ -2031,7 +2115,7 @@ func (h *wasiHTTP) incomingBodyFinish(_ context.Context, args []component.Value)
 	var trailers http.Header
 	if ok {
 		trailers = b.trailers
-		delete(h.inBodies, rep)
+		dropRep(h, h.inBodies, rep)
 	}
 	h.mu.Unlock()
 	if !ok {

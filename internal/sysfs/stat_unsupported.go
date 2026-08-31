@@ -37,3 +37,7 @@ func stat(path string) (sys.Stat_t, sys.Errno) {
 func statFile(f fs.File) (sys.Stat_t, sys.Errno) {
 	return defaultStatFile(f)
 }
+
+func statOSFile(f *osFile) (sys.Stat_t, sys.Errno) {
+	return defaultStatFile(f.file)
+}

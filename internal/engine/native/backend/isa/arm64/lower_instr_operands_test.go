@@ -153,6 +153,41 @@ func TestMachine_getOperand_SR_NR(t *testing.T) {
 		return
 	}
 
+	// shiftWithConstAmount builds `(p1+p2) <shift> amount` with a constant amount, the
+	// shape getOperand_SR_NR folds into a shifted-register operand.
+	shiftWithConstAmount := func(as func(*ssa.Instruction, ssa.Value, ssa.Value) *ssa.Instruction, typ ssa.Type, amt uint32) func(
+		ctx *mockCompiler, builder ssa.Builder, m *machine,
+	) (backend.SSAValueDefinition, extMode, func(t *testing.T)) {
+		return func(ctx *mockCompiler, builder ssa.Builder, m *machine) (backend.SSAValueDefinition, extMode, func(t *testing.T)) {
+			blk := builder.CurrentBlock()
+			p1 := blk.AddParam(builder, typ)
+			p2 := blk.AddParam(builder, typ)
+			add := builder.AllocateInstruction()
+			add.AsIadd(p1, p2)
+			builder.InsertInstruction(add)
+			addResult := add.Return()
+
+			amount := builder.AllocateInstruction()
+			amount.AsIconst32(amt)
+			builder.InsertInstruction(amount)
+			amountVal := amount.Return()
+
+			shift := builder.AllocateInstruction()
+			as(shift, addResult, amountVal)
+			builder.InsertInstruction(shift)
+
+			ctx.vRegMap[p1] = regalloc.VReg(1)
+			ctx.definitions[p1] = backend.SSAValueDefinition{V: p1}
+			ctx.vRegMap[p2] = regalloc.VReg(2)
+			ctx.definitions[p2] = backend.SSAValueDefinition{V: p2}
+			ctx.definitions[addResult] = backend.SSAValueDefinition{Instr: add, V: addResult}
+			ctx.definitions[amountVal] = backend.SSAValueDefinition{Instr: amount, V: amountVal}
+			ctx.vRegMap[addResult] = regalloc.VReg(1234)
+			ctx.vRegMap[shift.Return()] = regalloc.VReg(10)
+			return backend.SSAValueDefinition{Instr: shift, V: shift.Return()}, extModeNone, func(t *testing.T) {}
+		}
+	}
+
 	for _, tc := range []struct {
 		name         string
 		setup        func(*mockCompiler, ssa.Builder, *machine) (def backend.SSAValueDefinition, mode extMode, verify func(t *testing.T))
@@ -248,6 +283,25 @@ func TestMachine_getOperand_SR_NR(t *testing.T) {
 				return
 			},
 			exp: operandSR(regalloc.VReg(1234), 13, shiftOpLSL),
+		},
+		{
+			name:  "ushr with const amount",
+			setup: shiftWithConstAmount((*ssa.Instruction).AsUshr, ssa.TypeI64, 14),
+			exp:   operandSR(regalloc.VReg(1234), 14, shiftOpLSR),
+		},
+		{
+			name:  "sshr with const amount with i32",
+			setup: shiftWithConstAmount((*ssa.Instruction).AsSshr, ssa.TypeI32, 45), // taken modulo 31.
+			exp:   operandSR(regalloc.VReg(1234), 13, shiftOpASR),
+		},
+		{
+			// ROR has no "shifted register" ALU form, so it must stay a real instruction.
+			name: "rotr with const amount is not folded",
+			setup: shiftWithConstAmount(func(i *ssa.Instruction, x, amount ssa.Value) *ssa.Instruction {
+				i.AsRotr(x, amount)
+				return i
+			}, ssa.TypeI64, 14),
+			exp: operandNR(regalloc.VReg(10)),
 		},
 		{
 			name: "ishl with const amount with const shift target",
