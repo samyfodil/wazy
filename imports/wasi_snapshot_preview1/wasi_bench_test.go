@@ -356,11 +356,12 @@ func Benchmark_pathFilestat(b *testing.B) {
 				preopenFile, ok := fsc.LookupFile(sys.FdPreopen)
 				require.True(b, ok)
 				preopen := preopenFile.FS
-				fd, errno := fsc.OpenFile(preopen, "zig", sysapi.O_RDONLY, 0)
+				dirFD, errno := fsc.OpenFile(preopen, "zig", sysapi.O_RDONLY, 0)
 				if errno != 0 {
 					b.Fatal(errno)
 				}
-				defer fsc.CloseFile(fd) //nolint
+				fd = dirFD
+				defer fsc.CloseFile(dirFD) //nolint
 			}
 
 			fn := mod.ExportedFunction(wasip1.PathFilestatGetName)

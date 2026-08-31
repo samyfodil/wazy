@@ -8,13 +8,16 @@ import (
 	"github.com/samyfodil/wazy/sys"
 )
 
-func timesToTimespecs(atim int64, mtim int64) (times *[2]syscall.Timespec) {
+// timesToTimespecs fills times from atim and mtim, reporting false when both
+// are omitted and there is nothing to change. times is the caller's array
+// rather than a returned pointer, which the compiler had to heap-allocate on
+// every call.
+func timesToTimespecs(atim int64, mtim int64, times *[2]syscall.Timespec) bool {
 	// When both inputs are omitted, there is nothing to change.
 	if atim == sys.UTIME_OMIT && mtim == sys.UTIME_OMIT {
-		return
+		return false
 	}
 
-	times = &[2]syscall.Timespec{}
 	if atim == sys.UTIME_OMIT {
 		times[0] = syscall.Timespec{Nsec: _UTIME_OMIT}
 		times[1] = syscall.NsecToTimespec(mtim)
@@ -25,5 +28,5 @@ func timesToTimespecs(atim int64, mtim int64) (times *[2]syscall.Timespec) {
 		times[0] = syscall.NsecToTimespec(atim)
 		times[1] = syscall.NsecToTimespec(mtim)
 	}
-	return
+	return true
 }

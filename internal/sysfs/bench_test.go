@@ -54,7 +54,7 @@ func BenchmarkFsFileRead(b *testing.B) {
 		bc := bc
 
 		b.Run(bc.name, func(b *testing.B) {
-			name := "wazy.txt"
+			name := wazyFile
 			f, errno := OpenFSFile(bc.fs, name, sys.O_RDONLY, 0)
 			if errno != 0 {
 				b.Fatal(errno)

@@ -890,15 +890,14 @@ func fdReaddirFn(_ context.Context, mod api.Module, params []uint64) sysapi.Errn
 	// First, determine the maximum directory entries that can be encoded as
 	// dirents. The total size is DirentSize(24) + nameSize, for each file.
 	// Since a zero-length file name is invalid, the minimum size entry is
-	// 25 (DirentSize + 1 character).
-	maxDirEntries := bufLen/wasip1.DirentSize + 1
-
-	// While unlikely maxDirEntries will fit into bufLen, add one more just in
-	// case, as we need to know if we hit the end of the directory or not to
-	// write the correct bufused (e.g. == bufLen unless EOF).
+	// 25 (DirentSize + 1 character), so no more than bufLen/25 can be written
+	// whole. One more is read to tell whether the directory ended, as it is a
+	// truncated last entry that makes bufused == bufLen:
 	//	>> If less than the size of the read buffer, the end of the
 	//	>> directory has been reached.
-	maxDirEntries += 1
+	// The floor of two is the "." and ".." DirentCache prepends, which it
+	// subtracts from the count before reading the underlying directory.
+	maxDirEntries := max(bufLen/(wasip1.DirentSize+1)+1, 2)
 
 	// Read up to max entries. The underlying implementation will cache these,
 	// starting at the current location, so that they can be re-read. This is

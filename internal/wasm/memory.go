@@ -224,35 +224,45 @@ func (m *MemoryInstance) ByteSize() uint64 {
 }
 
 // ReadByte implements the same method as documented on api.Memory.
+//
+// It bounds-checks against the visible buffer's own length instead of calling
+// hasSize, as do all the accessors below: hasSize and visibleBuffer each
+// evaluate byteSize, and a shared memory's atomic load stops the compiler from
+// merging the two.
 func (m *MemoryInstance) ReadByte(offset uint32) (byte, bool) {
-	if !m.hasSize(offset, 1) {
+	buf := m.visibleBuffer()
+	if uint64(offset) >= uint64(len(buf)) {
 		return 0, false
 	}
-	return m.visibleBuffer()[offset], true
+	return buf[offset], true
 }
 
 // ReadByteAt is ReadByte with a 64-bit offset.
 func (m *MemoryInstance) ReadByteAt(offset uint64) (byte, bool) {
-	if !m.hasSize64(offset, 1) {
+	buf := m.visibleBuffer()
+	if offset >= uint64(len(buf)) {
 		return 0, false
 	}
-	return m.visibleBuffer()[offset], true
+	return buf[offset], true
 }
 
 // ReadUint16Le implements the same method as documented on api.Memory.
 func (m *MemoryInstance) ReadUint16Le(offset uint32) (uint16, bool) {
-	if !m.hasSize(offset, 2) {
+	buf := m.visibleBuffer()
+	off := uint64(offset)
+	if off+2 > uint64(len(buf)) {
 		return 0, false
 	}
-	return binary.LittleEndian.Uint16(m.visibleBuffer()[offset:]), true
+	return binary.LittleEndian.Uint16(buf[off : off+2]), true
 }
 
 // ReadUint16LeAt is ReadUint16Le with a 64-bit offset.
 func (m *MemoryInstance) ReadUint16LeAt(offset uint64) (uint16, bool) {
-	if !m.hasSize64(offset, 2) {
+	buf := m.visibleBuffer()
+	if rangeOutOfBounds(offset, 2, uint64(len(buf))) {
 		return 0, false
 	}
-	return binary.LittleEndian.Uint16(m.visibleBuffer()[offset:]), true
+	return binary.LittleEndian.Uint16(buf[offset : offset+2]), true
 }
 
 // ReadUint32Le implements the same method as documented on api.Memory.
@@ -262,10 +272,11 @@ func (m *MemoryInstance) ReadUint32Le(offset uint32) (uint32, bool) {
 
 // ReadUint32LeAt is ReadUint32Le with a 64-bit offset.
 func (m *MemoryInstance) ReadUint32LeAt(offset uint64) (uint32, bool) {
-	if !m.hasSize64(offset, 4) {
+	buf := m.visibleBuffer()
+	if rangeOutOfBounds(offset, 4, uint64(len(buf))) {
 		return 0, false
 	}
-	return binary.LittleEndian.Uint32(m.visibleBuffer()[offset:]), true
+	return binary.LittleEndian.Uint32(buf[offset : offset+4]), true
 }
 
 // ReadFloat32Le implements the same method as documented on api.Memory.
@@ -284,10 +295,11 @@ func (m *MemoryInstance) ReadUint64Le(offset uint32) (uint64, bool) {
 
 // ReadUint64LeAt is ReadUint64Le with a 64-bit offset.
 func (m *MemoryInstance) ReadUint64LeAt(offset uint64) (uint64, bool) {
-	if !m.hasSize64(offset, 8) {
+	buf := m.visibleBuffer()
+	if rangeOutOfBounds(offset, 8, uint64(len(buf))) {
 		return 0, false
 	}
-	return binary.LittleEndian.Uint64(m.visibleBuffer()[offset:]), true
+	return binary.LittleEndian.Uint64(buf[offset : offset+8]), true
 }
 
 // ReadFloat64Le implements the same method as documented on api.Memory.
@@ -301,53 +313,62 @@ func (m *MemoryInstance) ReadFloat64Le(offset uint32) (float64, bool) {
 
 // Read implements the same method as documented on api.Memory.
 func (m *MemoryInstance) Read(offset, byteCount uint32) ([]byte, bool) {
-	if !m.hasSize(offset, uint64(byteCount)) {
+	buf := m.visibleBuffer()
+	off, end := uint64(offset), uint64(offset)+uint64(byteCount)
+	if end > uint64(len(buf)) {
 		return nil, false
 	}
-	return m.visibleBuffer()[offset : offset+byteCount : offset+byteCount], true
+	return buf[off:end:end], true
 }
 
 // Read64 implements the same method as documented on api.Memory.
 func (m *MemoryInstance) Read64(offset, byteCount uint64) ([]byte, bool) {
-	if !m.hasSize64(offset, byteCount) {
+	buf := m.visibleBuffer()
+	if rangeOutOfBounds(offset, byteCount, uint64(len(buf))) {
 		return nil, false
 	}
-	return m.visibleBuffer()[offset : offset+byteCount : offset+byteCount], true
+	end := offset + byteCount
+	return buf[offset:end:end], true
 }
 
 // WriteByte implements the same method as documented on api.Memory.
 func (m *MemoryInstance) WriteByte(offset uint32, v byte) bool {
-	if !m.hasSize(offset, 1) {
+	buf := m.visibleBuffer()
+	if uint64(offset) >= uint64(len(buf)) {
 		return false
 	}
-	m.visibleBuffer()[offset] = v
+	buf[offset] = v
 	return true
 }
 
 // WriteByteAt is WriteByte with a 64-bit offset.
 func (m *MemoryInstance) WriteByteAt(offset uint64, v byte) bool {
-	if !m.hasSize64(offset, 1) {
+	buf := m.visibleBuffer()
+	if offset >= uint64(len(buf)) {
 		return false
 	}
-	m.visibleBuffer()[offset] = v
+	buf[offset] = v
 	return true
 }
 
 // WriteUint16Le implements the same method as documented on api.Memory.
 func (m *MemoryInstance) WriteUint16Le(offset uint32, v uint16) bool {
-	if !m.hasSize(offset, 2) {
+	buf := m.visibleBuffer()
+	off := uint64(offset)
+	if off+2 > uint64(len(buf)) {
 		return false
 	}
-	binary.LittleEndian.PutUint16(m.visibleBuffer()[offset:], v)
+	binary.LittleEndian.PutUint16(buf[off:off+2], v)
 	return true
 }
 
 // WriteUint16LeAt is WriteUint16Le with a 64-bit offset.
 func (m *MemoryInstance) WriteUint16LeAt(offset uint64, v uint16) bool {
-	if !m.hasSize64(offset, 2) {
+	buf := m.visibleBuffer()
+	if rangeOutOfBounds(offset, 2, uint64(len(buf))) {
 		return false
 	}
-	binary.LittleEndian.PutUint16(m.visibleBuffer()[offset:], v)
+	binary.LittleEndian.PutUint16(buf[offset:offset+2], v)
 	return true
 }
 
@@ -358,10 +379,11 @@ func (m *MemoryInstance) WriteUint32Le(offset, v uint32) bool {
 
 // WriteUint32LeAt is WriteUint32Le with a 64-bit offset.
 func (m *MemoryInstance) WriteUint32LeAt(offset uint64, v uint32) bool {
-	if !m.hasSize64(offset, 4) {
+	buf := m.visibleBuffer()
+	if rangeOutOfBounds(offset, 4, uint64(len(buf))) {
 		return false
 	}
-	binary.LittleEndian.PutUint32(m.visibleBuffer()[offset:], v)
+	binary.LittleEndian.PutUint32(buf[offset:offset+4], v)
 	return true
 }
 
@@ -377,10 +399,11 @@ func (m *MemoryInstance) WriteUint64Le(offset uint32, v uint64) bool {
 
 // WriteUint64LeAt is WriteUint64Le with a 64-bit offset.
 func (m *MemoryInstance) WriteUint64LeAt(offset, v uint64) bool {
-	if !m.hasSize64(offset, 8) {
+	buf := m.visibleBuffer()
+	if rangeOutOfBounds(offset, 8, uint64(len(buf))) {
 		return false
 	}
-	binary.LittleEndian.PutUint64(m.visibleBuffer()[offset:], v)
+	binary.LittleEndian.PutUint64(buf[offset:offset+8], v)
 	return true
 }
 
@@ -391,37 +414,43 @@ func (m *MemoryInstance) WriteFloat64Le(offset uint32, v float64) bool {
 
 // Write implements the same method as documented on api.Memory.
 func (m *MemoryInstance) Write(offset uint32, val []byte) bool {
-	if !m.hasSize(offset, uint64(len(val))) {
+	buf := m.visibleBuffer()
+	off := uint64(offset)
+	if off+uint64(len(val)) > uint64(len(buf)) {
 		return false
 	}
-	copy(m.visibleBuffer()[offset:], val)
+	copy(buf[off:], val)
 	return true
 }
 
 // Write64 implements the same method as documented on api.Memory.
 func (m *MemoryInstance) Write64(offset uint64, val []byte) bool {
-	if !m.hasSize64(offset, uint64(len(val))) {
+	buf := m.visibleBuffer()
+	if rangeOutOfBounds(offset, uint64(len(val)), uint64(len(buf))) {
 		return false
 	}
-	copy(m.visibleBuffer()[offset:], val)
+	copy(buf[offset:], val)
 	return true
 }
 
 // WriteString implements the same method as documented on api.Memory.
 func (m *MemoryInstance) WriteString(offset uint32, val string) bool {
-	if !m.hasSize(offset, uint64(len(val))) {
+	buf := m.visibleBuffer()
+	off := uint64(offset)
+	if off+uint64(len(val)) > uint64(len(buf)) {
 		return false
 	}
-	copy(m.visibleBuffer()[offset:], val)
+	copy(buf[off:], val)
 	return true
 }
 
 // WriteString64 implements the same method as documented on api.Memory.
 func (m *MemoryInstance) WriteString64(offset uint64, val string) bool {
-	if !m.hasSize64(offset, uint64(len(val))) {
+	buf := m.visibleBuffer()
+	if rangeOutOfBounds(offset, uint64(len(val)), uint64(len(buf))) {
 		return false
 	}
-	copy(m.visibleBuffer()[offset:], val)
+	copy(buf[offset:], val)
 	return true
 }
 
@@ -682,11 +711,6 @@ func (m *MemoryInstance) allocatedBuffer() []byte {
 
 // readUint32Le implements ReadUint32Le without using a context. This is extracted as both ints and floats are stored in
 // memory as uint32le.
-//
-// It bounds-checks against the visible buffer's own length instead of calling
-// hasSize, here and in the three below: hasSize and visibleBuffer each evaluate
-// byteSize, and a shared memory's atomic load stops the compiler from merging
-// the two.
 func (m *MemoryInstance) readUint32Le(offset uint32) (uint32, bool) {
 	buf := m.visibleBuffer()
 	off := uint64(offset)

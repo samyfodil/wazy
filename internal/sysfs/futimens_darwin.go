@@ -10,16 +10,16 @@ import (
 const _UTIME_OMIT = -2
 
 func utimens(path string, atim, mtim int64) sys.Errno {
-	times := timesToTimespecs(atim, mtim)
-	if times == nil {
+	var times [2]syscall.Timespec
+	if !timesToTimespecs(atim, mtim, &times) {
 		return 0
 	}
 	return sys.UnwrapOSError(syscall.UtimesNano(path, times[:]))
 }
 
 func futimens(fd uintptr, atim, mtim int64) sys.Errno {
-	times := timesToTimespecs(atim, mtim)
-	if times == nil {
+	var times [2]syscall.Timespec
+	if !timesToTimespecs(atim, mtim, &times) {
 		return 0
 	}
 	_p0 := unsafe.Pointer(&times[0])

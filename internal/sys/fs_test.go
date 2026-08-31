@@ -320,6 +320,38 @@ func TestFSContext_Renumber(t *testing.T) {
 	})
 }
 
+// TestDirentCache_ReadAtMostDots covers a count that doesn't reach past the
+// two dot entries, which fd_readdir asks for when the guest's buffer only has
+// room for them. Without the int(n)-2 form, n==1 wraps the Readdir count to a
+// huge positive number, and n<=2 returns no entries at all.
+func TestDirentCache_ReadAtMostDots(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(path.Join(tmpDir, "file"), nil, 0o0666))
+
+	c := Context{}
+	root := sysfs.DirFS(tmpDir)
+	require.NoError(t, c.InitFSContext(nil, nil, nil, []sys.FS{root}, []string{"/"}, nil))
+	fsc := c.fsc
+	defer fsc.Close()
+
+	for _, n := range []uint32{1, 2} {
+		fd, errno := fsc.OpenFile(root, ".", sys.O_RDONLY, 0)
+		require.EqualErrno(t, 0, errno)
+		f, _ := fsc.LookupFile(fd)
+		dir, errno := f.DirentCache()
+		require.EqualErrno(t, 0, errno)
+
+		dirents, errno := dir.Read(0, n)
+		require.EqualErrno(t, 0, errno)
+		require.Equal(t, int(n), len(dirents))
+		require.Equal(t, ".", dirents[0].Name)
+		if n == 2 {
+			require.Equal(t, "..", dirents[1].Name)
+		}
+		require.EqualErrno(t, 0, fsc.CloseFile(fd))
+	}
+}
+
 // This is similar to https://github.com/WebAssembly/wasi-testsuite/blob/ac32f57400cdcdd0425d3085c24fc7fc40011d1c/tests/rust/src/bin/fd_readdir.rs#L120
 func TestDirentCache_ReadNewFile(t *testing.T) {
 	tmpDir := t.TempDir()

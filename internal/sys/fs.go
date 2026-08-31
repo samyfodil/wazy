@@ -201,8 +201,11 @@ func (d *DirentCache) Read(pos uint64, n uint32) (dirents []sys.Dirent, errno sy
 		d.countRead = 2
 		d.eof = false
 
-		if countToRead := int(n - 2); countToRead <= 0 {
-			return
+		// int(n) - 2, not int(n-2): n is a uint32, so a caller asking for
+		// fewer than the two dot entries would otherwise wrap to a huge
+		// Readdir count. Those callers want the dot entries alone.
+		if countToRead := int(n) - 2; countToRead <= 0 {
+			return d.cachedDirents(n), 0
 		} else if dirents, errno = d.f.Readdir(countToRead); errno != 0 {
 			return
 		} else if countRead := len(dirents); countRead > 0 {
