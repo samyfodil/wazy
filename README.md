@@ -245,17 +245,6 @@ Long compute is where the compiler wins; a document small enough that instantiat
 
 <sub>Third-party measurement, not ours, and not reproducible from this repo. Apple M5 Pro (18-core), 48 GB, macOS 26.5, Go 1.26.1, `CGO_ENABLED=0`, wazy `v0.0.0-20260807033006-cd2607360a17`, `anydoc.wasm` 6,542,355 bytes, best of 3 (best of 20 for the small input). Reported in [#29][i29].</sub>
 
-### Migrating from wazero
-
-The API mirrors wazero's, so migration is the import line:
-
-```diff
--import "github.com/tetratelabs/wazero"
-+import "github.com/samyfodil/wazy"
-```
-
-The one exception is host-function registration: typed generics replace wazero's reflection-based `WithFunc` ([above](#host-functions-typed-and-allocation-free)). [go-anydoc][anydoc] reports porting a production embedding as one import change, keeping cross-compilation to `riscv64`, `ppc64le`, `386` and `s390x` ([#29][i29]).
-
 ## Moving fast
 
 The API is stable. wazy broke compatibility with wazero once, over host-function registration, and that break is behind it — typed generics replaced the reflection path and the surface has settled. What keeps moving is everything under it: performance work lands continuously, guarded by the conformance, differential and fuzzing suites above rather than by a release cadence. Those same suites judge a contribution, not its author, machine-generated or human.
