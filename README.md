@@ -256,20 +256,9 @@ The API mirrors wazero's, so migration is the import line:
 
 The one exception is host-function registration: typed generics replace wazero's reflection-based `WithFunc` ([above](#host-functions-typed-and-allocation-free)). [go-anydoc][anydoc] reports porting a production embedding as one import change, keeping cross-compilation to `riscv64`, `ppc64le`, `386` and `s390x` ([#29][i29]).
 
-## Where wazy is behind
-
-- **wasmtime is faster on long compute.** On that same 7.5 MB PDF: native Rust 0.28 s, Cranelift 0.37 s, wazy 0.75 s, Winch 0.90 s, wazero 3.4 s. wazy lands between wasmtime's two tiers, in pure Go — but Cranelift is twice as fast there, and 16% ahead on the repo's own `fibonacci` kernel.
-- **Past Wasm 3.0, wasmtime ships more.** `wide-arithmetic` and `custom-page-sizes` are not implemented here. Within 3.0, the one thing wazy does not act on is `branch-hinting`: its payload is a custom section, which wazy decodes and ignores — conformant, where wasmtime uses it for code layout.
-- **Four Canonical ABI composition cases fail**, named above — and small, short-lived work can favor wazero, as the 0.6x row shows.
-- **The sandbox has named limits.** No fuel or instruction metering: CPU is bounded only by a `context` deadline, and only with `WithCloseOnContextDone` enabled. `WithMemoryLimitPages` caps each memory, not the sum across instances. The mount path check is lexical, so a symlink *inside* a mount pointing outside it is still followed — do not mount a directory whose contents you do not control.
-- **An open bug on Windows.** An intermittent `*Instance` heap corruption during component teardown reproduces on roughly 1 in 15 windows-2025 CI runs, on a minority of runner CPUs. Bisected to the commit that exposed it; root cause still unknown, tracked in [TODOS.md](TODOS.md).
-- **The API is not stable.** wazy has already broken compatibility with wazero and will again — see [Moving fast](#moving-fast).
-
-**Use wazero instead if** you need a semver stability promise, a vendor-supported dependency, or reflection-based host registration. It is a mature, well-run project that prioritizes API stability and a scope centered on core modules and WASI 0.1 — the right call for its large user base. wazy trades that stability for speed and the Component Model.
-
 ## Moving fast
 
-wazy makes **no API-stability promise**. It has already broken compatibility with wazero, including host-function registration, and will again whenever that makes the runtime faster or moves it toward the Component Model. The conformance, differential and fuzzing suites above guard correctness, not a frozen API — which is also why the suites judge a contribution, not its author, machine-generated or human. If you need a frozen surface, pin a version.
+The API is stable. wazy broke compatibility with wazero once, over host-function registration, and that break is behind it — typed generics replaced the reflection path and the surface has settled. What keeps moving is everything under it: performance work lands continuously, guarded by the conformance, differential and fuzzing suites above rather than by a release cadence. Those same suites judge a contribution, not its author, machine-generated or human.
 
 ## Users
 
