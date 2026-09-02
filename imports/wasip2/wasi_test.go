@@ -163,6 +163,34 @@ func TestWASI_GetArguments_Empty(t *testing.T) {
 	}
 }
 
+// TestWASI_InitialCWD covers both arms of initial-cwd's option<string>.
+// wasi:cli/environment has three funcs and this is the third; leaving it to
+// the graph engine's trap stub made every TinyGo wasip2 guest fail during
+// _initialize, since TinyGo's syscall init calls it.
+func TestWASI_InitialCWD(t *testing.T) {
+	t.Run("none", func(t *testing.T) {
+		fn := wasiHostFunc(t, WASIConfig{}, wasiIfaceEnvironment, "initial-cwd")
+		results, err := fn(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(results) != 1 || results[0] != nil {
+			t.Fatalf("initial-cwd: got %#v, want [nil] (none)", results)
+		}
+	})
+
+	t.Run("some", func(t *testing.T) {
+		fn := wasiHostFunc(t, WASIConfig{InitialCWD: "/work"}, wasiIfaceEnvironment, "initial-cwd")
+		results, err := fn(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(results) != 1 || results[0] != "/work" {
+			t.Fatalf("initial-cwd: got %#v, want [\"/work\"] (some)", results)
+		}
+	})
+}
+
 // TestWASI_GetDirectories proves get-directories returns one preopened
 // descriptor per configured mount, each backed by a real, resolvable own<
 // descriptor> handle -- see wasi_fs.go's package doc for why an empty

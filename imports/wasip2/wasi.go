@@ -188,6 +188,13 @@ type WASIConfig struct {
 	// into the WIT list<string> shape.
 	Args []string
 
+	// InitialCWD is the working directory wasi:cli/environment's initial-cwd
+	// reports. Empty means none, which is what a guest gets when the host has
+	// no meaningful directory to name -- a legal answer, and the one a guest
+	// with no preopens should see. It is a label, not an authority: it grants
+	// no access on its own, and a path is only reachable if FS also mounts it.
+	InitialCWD string
+
 	// FS supplies the preopened directories wasi:filesystem/
 	// preopens.get-directories returns -- see wasi_fs.go. It is the same
 	// wazy.FSConfig the core (wasi_snapshot_preview1) runtime takes, so one
@@ -457,6 +464,18 @@ func WithWASI(cfg WASIConfig) []component.Option {
 		return []component.Value{pairs}, nil
 	}
 
+	// wasi:cli/environment.initial-cwd returns option<string>: the inner
+	// value for some, nil for none (component.OptionDesc's convention).
+	// TinyGo's syscall init calls this during _initialize, so leaving it to
+	// the graph engine's trap stub makes every TinyGo wasip2 guest fail to
+	// instantiate rather than fail on use.
+	initialCWD := func(context.Context, []component.Value) ([]component.Value, error) {
+		if cfg.InitialCWD == "" {
+			return []component.Value{nil}, nil
+		}
+		return []component.Value{cfg.InitialCWD}, nil
+	}
+
 	getArguments := func(context.Context, []component.Value) ([]component.Value, error) {
 		// wasi:cli/environment.get-arguments returns the full argv, per the
 		// wasi_snapshot_preview1 args_get convention argv[0] carries over
@@ -695,6 +714,9 @@ func WithWASI(cfg WASIConfig) []component.Option {
 			nil, []component.TypeDesc{component.ListDesc{Element: component.TypeRef{Primitive: "string"}}}),
 
 		component.WithImportCustom(wasiIfaceEnvironment, "get-environment", getEnvironment, envFD, envResolve),
+
+		component.WithImport(wasiIfaceEnvironment, "initial-cwd", initialCWD,
+			nil, []component.TypeDesc{component.OptionDesc{Element: component.TypeRef{Primitive: "string"}}}),
 
 		component.WithImport(wasiIfaceRandom, "get-random-bytes", getRandomBytes,
 			[]component.TypeDesc{component.PrimitiveDesc{Prim: "u64"}},
