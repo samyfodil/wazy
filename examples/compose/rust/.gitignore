@@ -1,0 +1,4 @@
+target/
+provider/src/bindings.rs
+consumer/src/bindings.rs
+self.wasm

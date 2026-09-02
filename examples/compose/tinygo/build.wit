@@ -1,0 +1,17 @@
+// Build-only worlds. NOT part of the contract: greeter.wit is.
+//
+// TinyGo's runtime links a fixed slice of WASI 0.2 into every wasip2 binary
+// (package syscall's init reads the environment, the initial working directory
+// and the preopened directories), so the world handed to
+// `wasm-tools component embed` has to declare those imports or `component new`
+// rejects the module. `provider` and `consumer` here are the worlds from
+// greeter.wit -- same package, so they are included by name.
+world provider-tinygo {
+  include provider;
+  include wasi:cli/imports@0.2.0;
+}
+
+world consumer-tinygo {
+  include consumer;
+  include wasi:cli/imports@0.2.0;
+}

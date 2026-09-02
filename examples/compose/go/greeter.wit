@@ -1,0 +1,20 @@
+package wazy:compose@0.1.0;
+
+interface greeter {
+  record visitor {
+    name: string,
+    id: u32,
+  }
+
+  greet: func(who: visitor) -> string;
+  greet-all: func(names: list<string>) -> list<string>;
+}
+
+world provider {
+  export greeter;
+}
+
+world consumer {
+  import greeter;
+  export run: func() -> list<string>;
+}

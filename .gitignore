@@ -49,3 +49,10 @@ zig-out/
 .netlify/
 .gstack/
 .claude/worktrees/
+
+# Component example build artifacts (the .wasm beside the source is committed;
+# the toolchain scratch that produced it is not).
+examples/*/*/target/
+examples/*/*/node_modules/
+examples/*/*/.venv/
+examples/*/*/__pycache__/

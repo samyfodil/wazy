@@ -1,0 +1,18 @@
+[package]
+name = "consumer"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+wit-bindgen-rt.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "wazy:compose"
+
+[package.metadata.component.target]
+path = "../greeter.wit"
+world = "consumer"

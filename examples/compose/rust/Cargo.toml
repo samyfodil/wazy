@@ -1,0 +1,16 @@
+[workspace]
+resolver = "3"
+members = ["provider", "consumer"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+
+[profile.release]
+opt-level = "s"
+strip = true
+lto = true
