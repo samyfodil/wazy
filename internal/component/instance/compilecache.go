@@ -95,7 +95,14 @@ type CompileCache struct {
 // re-slicing and re-rewriting). Immutable after graphPlanFor stores it.
 type graphPlan struct {
 	neededTypes map[string]map[string]coreFuncSig
-	rewritten   [][]byte // indexed by core module index; ready to compile/instantiate
+	// rewritten is indexed by the CORE MODULE INDEX SPACE (which interleaves
+	// section-1 modules with core-module outer aliases -- see
+	// binary/coremodulespace.go), the space a core:instance's ModuleIdx names.
+	// Note an aliased entry's bytes are sliced out of an ENCLOSING component's
+	// buffer, so this plan is only pure over comp as long as comp's Outer chain
+	// is fixed -- which it is: the decoder sets it once and nothing re-parents
+	// a Component.
+	rewritten [][]byte
 }
 
 // NewCompileCache returns an empty CompileCache ready to pass to

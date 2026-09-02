@@ -240,10 +240,15 @@ func (st *subtask) applyResolve(vals []abi.Value) error {
 	if cfg.resultUsesMem {
 		realloc = reallocOf(st.resolveCtx, st.memMod)
 		if cfg.reallocOverride != nil {
-			realloc = reallocOfFunc(st.resolveCtx, cfg.reallocOverride)
+			realloc = reallocOfFunc(st.resolveCtx, cfg.reallocOverride, st.memMod)
 		}
 	}
-	if serr := cfg.resultStore.Store(mem, st.retPtr, resultVal, realloc); serr != nil {
+	// The refreshed view Store returns is dropped: this is the only store on
+	// this path and nothing writes through mem afterwards. (mem itself is
+	// fetched fresh at :224 above, after the async call completed, so it is
+	// current as of THIS store's own bounds check; the staleness that used to
+	// bite here happened INSIDE the store tree, and is fixed there.)
+	if _, serr := cfg.resultStore.Store(mem, st.retPtr, resultVal, realloc); serr != nil {
 		return fmt.Errorf("async import %q %q: result: store: %w", cfg.iface, cfg.funcName, serr)
 	}
 	st.resolve(subtaskReturned, nil)

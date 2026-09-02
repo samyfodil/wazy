@@ -132,6 +132,18 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 				continue
 			}
 		}
+		// A component import (0x04) -- a nested component parameterized by a
+		// COMPONENT, satisfied by a `(with "x" (component N))` instantiate-arg
+		// the parent recorded in cfg.componentArgs. It carries no runtime
+		// obligation of its own: the definition is code this component
+		// instantiates itself, wherever its instance section says. Only
+		// allowed when actually supplied, so a ROOT component importing a
+		// component is still rejected.
+		if im.ExternType == 0x04 {
+			if _, ok := cfg.componentArgs[im.Name]; ok {
+				continue
+			}
+		}
 		if im.ExternType != 0x05 { // instance
 			return nil, fmt.Errorf("component/instance: import %q has extern kind %s (%#x); only instance imports are supported", im.Name, api.ExternTypeName(im.ExternType), im.ExternType)
 		}
@@ -509,8 +521,12 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 
 		switch ci.Kind {
 		case 0x00: // instantiate a real embedded core module
-			if int(ci.ModuleIdx) >= len(comp.CoreModules) {
-				return fail(fmt.Errorf("component/instance: core instance %d references core module %d, out of range of %d modules", k, ci.ModuleIdx, len(comp.CoreModules)))
+			// rewrittenCore is indexed by the core module index space (see
+			// discoverNeededFuncTypes), which is what ModuleIdx names --
+			// NOT by comp.CoreModules position, which misses every
+			// core-module outer alias.
+			if int(ci.ModuleIdx) >= len(rewrittenCore) {
+				return fail(fmt.Errorf("component/instance: core instance %d references core module %d, out of range of the %d-entry core module index space", k, ci.ModuleIdx, len(rewrittenCore)))
 			}
 			// rewrittenCore[ci.ModuleIdx] already holds this module's bytes after
 			// coreModuleBytes + the (stable) empty-import-name rewrite, computed
@@ -810,13 +826,27 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 	}
 	// Pull in transitive dependencies: a needed instance's instance-args name
 	// earlier (forward-declared) siblings it links, which must exist first.
+	//
+	// The arg's own index is NOT what to mark: an instance alias or an
+	// instance export introduces an index of its own that merely DENOTES an
+	// instance defined elsewhere (see resolveInstanceArgTarget), and `needed`
+	// is keyed by the space slot of the DEFINITION -- the key
+	// componentInstanceSpaceIndices assigns. Marking the alias slot instead
+	// would be a silent no-op, leaving a provider that the exportedAsInstance
+	// claim above excluded from `needed` uninstantiated, which is exactly the
+	// shape a composition whose provider is also re-exported produces.
 	for i := len(comp.Instances) - 1; i >= 0; i-- {
 		if !needed[spaceIdx[i]] {
 			continue
 		}
 		for _, arg := range comp.Instances[i].Args {
-			if arg.Sort == 0x05 {
-				needed[int(arg.SortIdx)] = true
+			if arg.Sort != 0x05 {
+				continue
+			}
+			// A resolution failure is left to the instantiation loop below,
+			// which reports it against the arg it actually belongs to.
+			if tgt, err := resolveInstanceArgTarget(comp, arg.SortIdx); err == nil && !tgt.imported {
+				needed[int(tgt.spaceIdx)] = true
 			}
 		}
 	}
@@ -833,11 +863,11 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 		if !needed[compInstIdx] || inst.Kind != 0x00 {
 			continue
 		}
-		if int(inst.ComponentIdx) >= len(comp.NestedComponents) {
+		nested, err := resolveComponentDef(comp, cfg, inst.ComponentIdx)
+		if err != nil {
 			failClose()
-			return nil, nil, fmt.Errorf("component/instance: component instance %d references nested component %d, out of range of %d", compInstIdx, inst.ComponentIdx, len(comp.NestedComponents))
+			return nil, nil, fmt.Errorf("component/instance: component instance %d: %w", compInstIdx, err)
 		}
-		nested := comp.NestedComponents[inst.ComponentIdx]
 
 		// A pure re-export shim (no core module/canon of its own) is seen
 		// through by bindInstanceExportGraph -- it just re-exports funcs passed
@@ -875,11 +905,49 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 		typeArgTags := map[uint32]uint32{}
 		for _, arg := range inst.Args {
 			switch arg.Sort {
-			case 0x05: // instance: a sibling sub-Instance
-				sib, ok := byIdx[int(arg.SortIdx)]
+			case 0x05: // instance: a sibling sub-Instance (possibly projected
+				// through one of its instance-typed exports), or an instance
+				// THIS component imports and passes straight through.
+				tgt, terr := resolveInstanceArgTarget(comp, arg.SortIdx)
+				if terr != nil {
+					failClose()
+					return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q references instance %d, which is neither a prior nested instantiation nor an imported instance: %w", compInstIdx, arg.Name, arg.SortIdx, terr)
+				}
+				if len(tgt.projection) > 1 {
+					// A sub-Instance is FLAT: an exported interface lives in
+					// its exports under "X#member" keys (buildInstanceExportIndex),
+					// which materializes exactly ONE level of instance
+					// nesting. There is nothing to look a second level up in,
+					// and no WIT-based tool can emit one (WIT interfaces do
+					// not nest), so refuse rather than quietly binding the
+					// outermost name and dropping the rest.
+					failClose()
+					return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q: instance %d projects a nested instance export (%q); only one level of instance-export projection is supported", compInstIdx, arg.Name, arg.SortIdx, strings.Join(tgt.projection, " -> "))
+				}
+				if tgt.imported {
+					if len(tgt.projection) > 0 {
+						// An imported instance has no *Instance and no
+						// nesting -- only the flat, name-keyed cfg entries the
+						// embedder registered (forwardImportedInstance's doc) --
+						// so there is no instance-typed export to project out
+						// of it. Every instance-export alias carries a name,
+						// so this can only be reached by projecting, and the
+						// projection-free forwarding path below is untouched.
+						failClose()
+						return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q: instance %d aliases the export %q of the IMPORTED instance %q; an imported instance has no instance-typed exports in this runtime", compInstIdx, arg.Name, arg.SortIdx, tgt.projection[0], tgt.importName)
+					}
+					// No *Instance exists for an imported instance -- it is
+					// only the embedder's name-keyed cfg entries -- so none of
+					// the sibling resource plumbing below applies; re-key those
+					// entries under the arg name instead. See
+					// forwardImportedInstance.
+					forwardImportedInstance(cfg, subCfg, nested, tgt.importName, arg.Name, typeArgTags)
+					continue
+				}
+				sib, ok := byIdx[int(tgt.spaceIdx)]
 				if !ok {
 					failClose()
-					return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q references instance %d, which is not a prior nested instantiation", compInstIdx, arg.Name, arg.SortIdx)
+					return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q references instance %d, which is neither a prior nested instantiation nor an imported instance: instance definition %d was not instantiated", compInstIdx, arg.Name, arg.SortIdx, tgt.spaceIdx)
 				}
 				// Line up the sibling's exported resources with the nested
 				// component's imports of the same name, plus the definer's dtor
@@ -892,7 +960,19 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 				importerResIdx := importedResourceIndices(nested, arg.Name)
 				provDefToName := map[uint32]string{}
 				if sib.comp != nil {
-					for rname, sibDef := range exportedResourceDefs(sib.comp) {
+					// Projecting: the resources to line up are the ones
+					// reachable through the ALIASED export, not sib's top
+					// level -- a wit-component provider has no top-level type
+					// export at all. Note the deliberate asymmetry with
+					// importerResIdx just above: the provider side is keyed by
+					// the alias's export name, the importer side by the arg
+					// name, and the two are independent (see
+					// instanceArgTarget.projection).
+					provRes := exportedResourceDefs(sib.comp)
+					if len(tgt.projection) == 1 {
+						provRes = exportedInstanceResourceDefs(sib.comp, tgt.projection[0])
+					}
+					for rname, sibDef := range provRes {
 						provDefToName[sibDef] = rname
 						if dIdx, ok := importerResIdx[rname]; ok {
 							tag := nested.ResourceDefIndex(dIdx)
@@ -926,6 +1006,30 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 					}
 					dIdx, ok := importerResIdx[name]
 					return dIdx, ok
+				}
+				if len(tgt.projection) == 1 {
+					// Bind the members of the PROJECTED interface. sib's
+					// exports hold them flat under "X#member" keys, indexed by
+					// instanceExports; the importee's canon lower, meanwhile,
+					// looks each one up under its OWN import name plus the
+					// member name (importInterfaceName + the alias name, see
+					// computeCanonHostFunc). So the lookup is by the alias's
+					// export name X and the registration is by the arg name Y
+					// -- the one place the X != Y distinction is load-bearing.
+					members, mok := sib.instanceExports[tgt.projection[0]]
+					if !mok {
+						failClose()
+						return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q: instance %d projects the export %q of nested instance %d, which exports no such instance", compInstIdx, arg.Name, arg.SortIdx, tgt.projection[0], tgt.spaceIdx)
+					}
+					for member, entry := range members {
+						// entry.name is the flat "X#member" key sib.invoke and
+						// the async diagnostics want; member is the bare name
+						// the importee imports.
+						hi := delegatingHostImport(sib, entry.name, entry.be, provToImp)
+						hi.asyncTarget = &guestAsyncTarget{sub: sib, be: entry.be, exportName: entry.name, provToImp: provToImp}
+						subCfg.imports[mkImportKey(arg.Name, member)] = hi
+					}
+					continue
 				}
 				for name, be := range sib.exports {
 					if strings.ContainsRune(name, '#') { // interface-member export, not a plain func
@@ -966,6 +1070,29 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 				if dtor := cfg.hostResDtors[tag]; dtor != nil {
 					subCfg.hostResDtors[tag] = dtor
 				}
+
+			case 0x04: // component: pass a component DEFINITION in, satisfying
+				// the nested component's own component-sort import of this
+				// name. Nothing is instantiated here -- the definition is
+				// code, occupying a slot in the CHILD's component index space,
+				// which the child instantiates itself at its own instance
+				// section (types.11.wast). That is also why, unlike a 0x05
+				// arg, there is no sibling to pull into `needed` above.
+				//
+				// It resolves against the OUTER comp/cfg, so a component arg
+				// the outer itself received as an import forwards down an
+				// arbitrary chain for free.
+				def, derr := resolveComponentDef(comp, cfg, arg.SortIdx)
+				if derr != nil {
+					failClose()
+					return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q: %w", compInstIdx, arg.Name, derr)
+				}
+				if subCfg.componentArgs == nil {
+					// Lazily: virtually no composition has a component arg,
+					// and subCfg is built for every nested instantiation.
+					subCfg.componentArgs = map[string]*binary.Component{}
+				}
+				subCfg.componentArgs[arg.Name] = def
 
 			default:
 				failClose()
@@ -1305,9 +1432,27 @@ func discoverNeededFuncTypes(r wazy.Runtime, comp *binary.Component, componentBy
 	// import-name rewrite -- the exact bytes the main instantiation loop needs,
 	// captured here (the rewrite already happens for discovery) so the loop
 	// reuses them instead of re-slicing and re-rewriting every instantiation.
-	rewritten := make([][]byte, len(comp.CoreModules))
-	for i, cm := range comp.CoreModules {
-		coreBytes, err := coreModuleBytes(cm, componentBytes)
+	// Indexed by the CORE MODULE INDEX SPACE, not by section-1 position: a
+	// core:instance's ModuleIdx names that space, which interleaves embedded
+	// modules with core-module `alias outer` entries naming an ENCLOSING
+	// component's module (fused.23.wast). ResolveCoreModule hands back the
+	// component that actually embeds the module, whose own Bytes the module's
+	// Offset/Size index into -- so an aliased module is sliced out of the
+	// PARENT's buffer, not this component's.
+	rewritten := make([][]byte, comp.CoreModuleSpaceLen())
+	for i := range rewritten {
+		owner, modIdx, err := comp.ResolveCoreModule(uint32(i))
+		if err != nil {
+			return nil, nil, fmt.Errorf("component/instance: %w", err)
+		}
+		// A self-owned entry keeps using the CALLER's componentBytes: a
+		// hand-built (non-decoded) Component has nil Bytes, and its caller
+		// passes the buffer explicitly.
+		ownerBytes := componentBytes
+		if owner != comp {
+			ownerBytes = owner.Bytes
+		}
+		coreBytes, err := coreModuleBytes(owner.CoreModules[modIdx], ownerBytes)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1551,10 +1696,16 @@ func computeCanonHostFunc(
 				// live sibling is filled in once it exists, always before
 				// any guest call could reach this func.
 				instRef := comp.Instances[localIdx]
-				if instRef.Kind != 0x00 || int(instRef.ComponentIdx) >= len(comp.NestedComponents) {
+				if instRef.Kind != 0x00 {
 					return hostFuncDef{}, "", fmt.Errorf("lower func index %d: component instance %d is not a real nested component instantiation", fi, al.InstanceIdx)
 				}
-				nested := comp.NestedComponents[instRef.ComponentIdx]
+				// Through the component index space, not NestedComponents
+				// directly: a component that both imports and defines
+				// components indexes the two interleaved (componentspace.go).
+				nested, nerr := resolveComponentDef(comp, cfg, instRef.ComponentIdx)
+				if nerr != nil {
+					return hostFuncDef{}, "", fmt.Errorf("lower func index %d: component instance %d: %w", fi, al.InstanceIdx, nerr)
+				}
 				sfd, sresolve, serr := resolveStaticExportFuncDesc(nested, al.Name)
 				if serr != nil {
 					return hostFuncDef{}, "", fmt.Errorf("lower func index %d: sibling component instance %d export %q: %w", fi, al.InstanceIdx, al.Name, serr)
@@ -1970,7 +2121,7 @@ func bindImportExportsGraph(comp *binary.Component, componentFunc func(uint32) (
 			exports[exp.Name] = be
 
 		case 0x05: // instance
-			if err := bindInstanceExportGraph(comp, exp, componentFunc, coreFuncTarget, resolve, exports, abiCache); err != nil {
+			if err := bindInstanceExportGraph(comp, exp, componentFunc, coreFuncTarget, resolve, exports, abiCache, compInstances); err != nil {
 				return nil, err
 			}
 
@@ -1984,6 +2135,43 @@ func bindImportExportsGraph(comp *binary.Component, componentFunc func(uint32) (
 		}
 	}
 	return exports, nil
+}
+
+// reexposedSubExport prepares a nested sub-Instance's already-bound export to
+// be re-exposed as one of the OUTER component's own exports -- either through a
+// func alias naming it (bindFuncExportGraph) or as one member of an instance
+// alias projecting sub's whole interface (bindInstanceExportGraph).
+//
+// An async export's runtime state (activeTask, exclusiveHeld, ...) lives on
+// sub, not on whatever Instance eventually calls invoke() on the re-exported
+// boundExport -- see boundExport.home's doc. Copy (never mutate the shared be)
+// so sub's own exports map -- and any OTHER alias chain reusing the same be --
+// is unaffected. Only set home when it isn't already set: a MULTI-level
+// re-export (sub's own export was itself bound by re-exporting one of ITS
+// children) must keep pointing at the deepest true owner.
+//
+// sub.syncTaskNeeded (added alongside thread.go's Stage C): a plain SYNC lift
+// also needs home whenever sub itself binds a canon that resolves the current
+// task at call time (task.return/context.get/set/backpressure.inc/dec/
+// waitable-set.wait/poll, or a thread.* canon) -- invokeEntered installs the
+// syncImplicit task on whichever Instance eventually calls it (target,
+// sched.go's dispatch), but the host func closures backing those canons were
+// bound to sub directly (graph.go's computeCanonHostFunc closes over sub, not
+// whatever outer component re-exports it by alias) and read sub.activeTask --
+// so without this, the syncImplicit task lands on the WRONG Instance (the outer
+// re-exporter, whose own syncTaskNeeded is unrelated) and sub.activeTask stays
+// nil. trap-if-block-and-sync's poll-is-fine (wast:300, reached through exactly
+// this $Tester -> alias -> $D shape) is the first suite to exercise a
+// re-exported sync lift whose OWN instance has syncTaskNeeded=true. Gated on
+// sub.syncTaskNeeded (not unconditional) to keep the "overwhelmingly common
+// case" (a plain sync lift with no such canon) allocation-free.
+func reexposedSubExport(sub *Instance, be *boundExport) *boundExport {
+	if (be.asyncCallback || be.stackful || sub.syncTaskNeeded) && be.home == nil {
+		homeBE := *be
+		homeBE.home = sub
+		return &homeBE
+	}
+	return be
 }
 
 // bindFuncExportGraph is bindFuncExport's graph-engine counterpart -- see
@@ -2000,43 +2188,7 @@ func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc f
 		// is held in subInstances and closed with this one.
 		if sub, ok := compInstances[int(at.instIdx)]; ok {
 			if be, ok := sub.exports[at.name]; ok {
-				// An async export's runtime state (activeTask, exclusiveHeld,
-				// ...) lives on sub, not on whatever Instance eventually
-				// calls invoke() on this re-exported boundExport -- see
-				// boundExport.home's doc. Copy (never mutate the shared be)
-				// so sub's own exports map -- and any OTHER alias chain
-				// reusing the same be -- is unaffected. Only set home when
-				// it isn't already set: a MULTI-level re-export (sub's own
-				// export was itself bound by re-exporting one of ITS
-				// children) must keep pointing at the deepest true owner.
-				//
-				// sub.syncTaskNeeded (added alongside thread.go's Stage C):
-				// a plain SYNC lift also needs home whenever sub itself binds
-				// a canon that resolves the current task at call time
-				// (task.return/context.get/set/backpressure.inc/dec/
-				// waitable-set.wait/poll, or a thread.* canon) -- invokeEntered
-				// installs the syncImplicit task on whichever Instance
-				// eventually calls it (target, sched.go's dispatch), but the
-				// host func closures backing those canons were bound to sub
-				// directly (graph.go's computeCanonHostFunc closes over sub,
-				// not whatever outer component re-exports it by alias) and
-				// read sub.activeTask -- so without this, the syncImplicit
-				// task lands on the WRONG Instance (the outer re-exporter,
-				// whose own syncTaskNeeded is unrelated) and sub.activeTask
-				// stays nil. trap-if-block-and-sync's poll-is-fine (wast:300,
-				// reached through exactly this $Tester -> alias -> $D shape)
-				// is the first suite to exercise a re-exported sync lift whose
-				// OWN instance has syncTaskNeeded=true. Gated on
-				// sub.syncTaskNeeded (not unconditional) to keep the
-				// "overwhelmingly common case" (a plain sync lift with no
-				// such canon) allocation-free, matching this doc's original
-				// intent.
-				if (be.asyncCallback || be.stackful || sub.syncTaskNeeded) && be.home == nil {
-					homeBE := *be
-					homeBE.home = sub
-					return &homeBE, nil
-				}
-				return be, nil
+				return reexposedSubExport(sub, be), nil
 			}
 			return nil, fmt.Errorf("component/instance: export %q: nested component instance %d has no export %q", diagName, at.instIdx, at.name)
 		}
@@ -2250,10 +2402,74 @@ func componentInstanceSpaceIndices(comp *binary.Component) []int {
 	return out
 }
 
+// resolveComponentDef resolves an index in comp's COMPONENT index space to
+// the component definition it names: one of comp's own section-4 nested
+// components (possibly reached through an `alias outer` into an enclosing
+// component), or -- for a component-sort IMPORT -- the definition the parent
+// supplied for that import name via a `(with "x" (component N))`
+// instantiate-arg, which instantiateNestedInstances recorded in
+// cfg.componentArgs.
+//
+// cfg may be nil at a bind-time site that only needs a nested component's
+// static shape; a component import is then simply unsatisfiable, which is the
+// correct (and previously the only) answer there.
+func resolveComponentDef(comp *binary.Component, cfg *config, idx uint32) (*binary.Component, error) {
+	def, importName, err := comp.ResolveComponent(idx)
+	if err != nil {
+		return nil, err
+	}
+	if def != nil {
+		return def, nil
+	}
+	if cfg != nil {
+		if d, ok := cfg.componentArgs[importName]; ok {
+			return d, nil
+		}
+	}
+	return nil, fmt.Errorf("component %d names the component import %q, which nothing supplied (a component import is satisfied only by a `(with %q (component ...))` instantiate-arg of an enclosing component)", idx, importName, importName)
+}
+
 // bindInstanceExportGraph is bindInstanceExport's graph-engine counterpart --
 // identical resolution of the re-export-shim shape (see host_import.go's
 // doc), but calling bindFuncExportGraph for each member.
-func bindInstanceExportGraph(comp *binary.Component, exp binary.Export, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver, exports map[string]*boundExport, abiCache *CompileCache) error {
+func bindInstanceExportGraph(comp *binary.Component, exp binary.Export, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver, exports map[string]*boundExport, abiCache *CompileCache, compInstances map[int]*Instance) error {
+	// An instance export naming an instance ALIAS re-exposes an INTERFACE of a
+	// nested instance this component instantiated: `(alias export $sub "X"
+	// (instance $g))` + `(export "E" (instance $g))`, which is how a composed
+	// component republishes its consumer half's world exports (componentize-py
+	// output composed by wasm-tools/wac has exactly this shape). Nothing is
+	// instantiated by the alias itself -- $sub already is -- so this is a
+	// re-keying of $sub's "X#member" family onto this component's "E#member",
+	// the instance-export counterpart of bindFuncExportGraph's func-alias arm.
+	//
+	// A projection-free index (a plain definition, or the alias an
+	// `(export "E" (instance N))` introduces) is the pre-existing shim shape
+	// and falls through to the resolution below; a resolution failure does
+	// too, so the diagnostics there stay the ones callers already know.
+	if tgt, terr := resolveInstanceArgTarget(comp, exp.ExternIndex); terr == nil && len(tgt.projection) > 0 {
+		switch {
+		case tgt.imported:
+			return fmt.Errorf("component/instance: export %q references instance %d, which aliases the export %q of the IMPORTED instance %q; an imported instance has no instance-typed exports in this runtime", exp.Name, exp.ExternIndex, tgt.projection[0], tgt.importName)
+		case len(tgt.projection) > 1:
+			// Same one-level limit as the instantiate-arg side: a
+			// sub-Instance's exports are flat "X#member" keys, so there is no
+			// second level to project through.
+			return fmt.Errorf("component/instance: export %q references instance %d, which projects a nested instance export (%q); only one level of instance-export projection is supported", exp.Name, exp.ExternIndex, strings.Join(tgt.projection, " -> "))
+		}
+		sub, ok := compInstances[int(tgt.spaceIdx)]
+		if !ok {
+			return fmt.Errorf("component/instance: export %q references instance %d, which projects the export %q of instance definition %d; that definition was never instantiated", exp.Name, exp.ExternIndex, tgt.projection[0], tgt.spaceIdx)
+		}
+		members, ok := sub.instanceExports[tgt.projection[0]]
+		if !ok {
+			return fmt.Errorf("component/instance: export %q references instance %d, which projects the export %q of nested instance %d; that instance exports no such instance", exp.Name, exp.ExternIndex, tgt.projection[0], tgt.spaceIdx)
+		}
+		for member, entry := range members {
+			exports[instanceExportKey(exp.Name, member)] = reexposedSubExport(sub, entry.be)
+		}
+		return nil
+	}
+
 	// The component-level "instance" sort index space is NOT simply
 	// [imported instances] ++ [comp.Instances]: per Binary.md, "all exports
 	// (of all sorts) introduce a new index that aliases the exported
@@ -2309,10 +2525,13 @@ func bindInstanceExportGraph(comp *binary.Component, exp binary.Export, componen
 	if inst.Kind != 0x00 {
 		return fmt.Errorf("component/instance: export %q instance %d is not a component instantiation (kind %#x); inline-export instances are not supported", exp.Name, exp.ExternIndex, inst.Kind)
 	}
-	if int(inst.ComponentIdx) >= len(comp.NestedComponents) {
-		return fmt.Errorf("component/instance: export %q instance %d references nested component %d, out of range of %d decoded nested component(s)", exp.Name, exp.ExternIndex, inst.ComponentIdx, len(comp.NestedComponents))
+	// Through the component index space (componentspace.go); cfg is not
+	// threaded into this bind-time path, so a component IMPORT here is simply
+	// unsatisfiable -- which is what it has always been.
+	nested, err := resolveComponentDef(comp, nil, inst.ComponentIdx)
+	if err != nil {
+		return fmt.Errorf("component/instance: export %q instance %d: %w", exp.Name, exp.ExternIndex, err)
 	}
-	nested := comp.NestedComponents[inst.ComponentIdx]
 	if err := validateShimComponent(nested); err != nil {
 		return fmt.Errorf("component/instance: export %q: nested component %d: %w; a more complex nested component is out of scope for this milestone", exp.Name, inst.ComponentIdx, err)
 	}

@@ -71,11 +71,32 @@
   inline-export group `(export "" (func $_initialize))`) is in EVERY
   componentize-go component, so no such component could be instantiated at all.
   fused.0 + fused.3 now run.
-- **REMAINING skips** (4, each pinned by name + reason in
-  `wastKnownSkips`): types.11 (instantiate-arg of sort 0x4), fused.22 (a nested
-  component's imported-instance func type absent from the importer's type
-  space), fused.23 (a nested component defining no core module of its own),
-  resources.14 (an instantiate-arg naming an IMPORTED instance).
+- **DONE (nested composition, the last four skips):** `wastKnownSkips` is now
+  EMPTY -- every vendored module of every suite instantiates. All four were one
+  theme (a nested component naming a definition an ENCLOSING component owns)
+  but three mechanisms, so three changes:
+  - **`alias outer` was a dead end.** A decoded nested component had no link to
+    the component it was decoded from, so a de Bruijn `alias outer <count>`
+    with count > 0 could not resolve. `binary.Component.Outer` (set by the
+    section-4 recursion) closes that for types (fused.22's `$c1` aliases all
+    six of the root's flags types) and for core modules.
+  - **Two index spaces were still equated with one binary section.** A
+    core:instance's `ModuleIdx` names the CORE MODULE index space, which
+    interleaves section-1 embedded modules with core-module outer aliases
+    (`coremodulespace.go`; fused.23's `$c` has the aliased module at index 1,
+    behind its own `$shim2`). An instance definition's `ComponentIdx` names
+    the COMPONENT index space, which includes component IMPORTS
+    (`componentspace.go`; types.11's `$c` defines no nested component and
+    instantiates the one it imports, supplied by the parent as a
+    `(with "x" (component N))` arg -- see `config.componentArgs`).
+  - **An instance-sort instantiate-arg may name an imported instance**, not
+    only a prior nested instantiation (resources.14). An imported instance has
+    no runtime object -- only the embedder's name-keyed `*config` entries -- so
+    forwarding it is a re-keying from the outer import name to the arg name
+    (`forwardImportedInstance`).
+  - Plus one plain Canonical-ABI gap fused.22 also depended on: `lift_flat_flags`
+    / `load_flags` must DISCARD bits above the label count
+    (`unpack_flags_from_int`), which wazy did not.
 - **Historic fused sub-features** (all now run; the reworks fixed them):
   \>16 flat params on an imported func (whole-param spilling for a lowered
   import), func/type instantiate-args, self-referential nesting.

@@ -84,7 +84,7 @@ func errorContextDebugMessageHostFunc(in *Instance, memMod api.Module, reallocFn
 		}
 		realloc := reallocOf(ctx, m)
 		if reallocFn != nil {
-			realloc = reallocOfFunc(ctx, reallocFn)
+			realloc = reallocOfFunc(ctx, reallocFn, m)
 		}
 		if err := abi.Store(mem, ptr, binary.PrimitiveDesc{Prim: "string"}, ec.debugMessage, nil, realloc); err != nil {
 			panic(fmt.Errorf("component/instance: error-context.debug-message: store: %w", err))

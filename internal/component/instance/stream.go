@@ -194,7 +194,15 @@ func (b *guestBuffer) write(vs []abi.Value) error {
 			}
 			v = b.inst.resources.NewOwn(b.inst.canonTag(b.ownElem.ResourceType), rep)
 		}
-		if err := st.Store(mem, b.ptr, v, b.realloc); err != nil {
+		// Rebind mem from the store: an element with an indirect payload
+		// (string, list, a record containing one) allocates, and an allocation
+		// can replace the whole backing array (see abi.Realloc.Mem). Element
+		// 0's grow would otherwise leave elements 1..n-1 bounds-checked against
+		// the pre-grow length -- rejecting valid writes -- and, where the check
+		// happened to pass, written into an array the guest no longer reads.
+		// Numeric elements never allocate, so this costs nothing on the
+		// memmove-class path: StoreStep.Store hands back the same slice.
+		if mem, err = st.Store(mem, b.ptr, v, b.realloc); err != nil {
 			return fmt.Errorf("stream/future buffer write: element %d: %w", i, err)
 		}
 		b.ptr += b.elemSz

@@ -174,7 +174,11 @@ type Instance struct {
 	// has always cached this (boundExport.reallocCall); this is the same fact
 	// for the guest->host direction, which cannot cache it at bind time
 	// because the calling module is only known per call.
-	reallocCalls sync.Map // api.Module -> reallocCall
+	// The value is a moduleRealloc, not a bare reallocCall: the abi.Realloc
+	// also needs a live-memory accessor (abi.Realloc.Mem), and minting that
+	// closure per host call would put back exactly the allocation this memo
+	// exists to remove.
+	reallocCalls sync.Map // api.Module -> moduleRealloc
 
 	// --- CallAsync (host-side non-blocking calls, callasync.go) ---
 	asyncActive atomic.Bool       // a CallAsync is outstanding; external AsyncCall.Resolve queues instead of erroring
@@ -559,6 +563,19 @@ type boundExport struct {
 	// literal rather than a fresh closure. nil when the module exports no
 	// cabi_realloc (then abi.Realloc.grow fails loud).
 	reallocCall func(context.Context, uint32, uint32, uint32, uint32) (uint32, error)
+
+	// memFn is the live-memory accessor the per-invoke abi.Realloc carries
+	// (abi.Realloc.Mem), built once here for the same reason reallocCall is:
+	// cachedReallocOf must stay a plain struct literal with no closure
+	// allocation on the hot lowering path.
+	//
+	// It is built from be.mod, NEVER from be.reallocMod. When a canon lift's
+	// realloc option targets a different core instance (see reallocMod's doc,
+	// cross-abi-calls.wast's $Memory/$Core split) the realloc lives on one
+	// module and the MEMORY being written on another; taking the accessor from
+	// the realloc's module would compile, pass every same-instance test, and
+	// silently refresh from the wrong linear memory.
+	memFn func() []byte
 
 	// The fields below cache fd's ABI flattening / type resolution, computed
 	// once at bind time (finalizeBoundExport) instead of on every invoke()
@@ -1099,6 +1116,7 @@ func finalizeBoundExport(be *boundExport, resolve abi.Resolver, abiCache *Compil
 	}
 	be.reallocFn = rmod.ExportedFunction(reallocName)
 	be.reallocCall = coreReallocCall(be.reallocFn)
+	be.memFn = memAccessorOf(be.mod) // be.mod, not rmod -- see memFn's doc
 	if be.coreFn != nil {
 		be.coreResultCount = len(be.coreFn.Definition().ResultTypes())
 	}
@@ -2120,10 +2138,53 @@ func memoryBytesOf(mod api.Module) (buf []byte, ok bool) {
 	return buf, true
 }
 
+// memAccessorOf builds the abi.Realloc.Mem accessor for mod: a closure that
+// returns a LIVE view of mod's linear memory every time it is called. nil when
+// mod has no memory, which abi treats as "cannot refresh" (it then keeps the
+// caller's own slice, i.e. the pre-refresh behavior).
+//
+// The typed-nil probe happens ONCE, here, rather than on every allocation:
+// memoryBytesOf carries a defer+recover to absorb the panic wazy's
+// Module.Memory() raises for a module with no memory, and paying a deferred
+// recover plus an interface call per string/list lowered is not acceptable on
+// this path. Once the probe has established that mod really does have a memory,
+// api.Memory is stable for the module's lifetime and the accessor is a bare
+// Read -- no defer, no re-lookup.
+//
+// Read(0, Size()) is deliberately re-evaluated per call: on an in-capacity grow
+// the backing array is the same one but LONGER, and on a relocating grow it is
+// a different array entirely; only re-reading catches both.
+//
+// It shares memoryBytesOf's pre-existing memory64 limitation -- Size() is a
+// uint32, so a memory at or past 4 GiB reports 0 and yields an empty view. That
+// is the behavior every other caller here already gets; widening it to
+// Size64/Read64 changes what memory64 components see and belongs in its own
+// change, not folded into a staleness fix.
+func memAccessorOf(mod api.Module) func() []byte {
+	if mod == nil {
+		return nil
+	}
+	if _, ok := memoryBytesOf(mod); !ok {
+		return nil
+	}
+	m := mod.Memory()
+	return func() []byte {
+		buf, ok := m.Read(0, m.Size())
+		if !ok {
+			return nil
+		}
+		return buf
+	}
+}
+
 // reallocOf returns the abi.Realloc backed by mod's "cabi_realloc" export, or
-// one that fails loudly (Call == nil) if mod doesn't export it.
+// one that fails loudly (Call == nil) if mod doesn't export it. Mem is wired to
+// mod's own memory so the abi layer can refresh its view across a grow; this
+// path mints both closures per call, which is fine off the guest-call hot path
+// (error-context, the stream/future builtins' bind-time setup, and
+// lowerHostResultsPlanned's fallback all reach it at most once per operation).
 func reallocOf(ctx context.Context, mod api.Module) abi.Realloc {
-	return abi.Realloc{Ctx: ctx, Call: coreReallocCall(mod.ExportedFunction("cabi_realloc"))}
+	return abi.Realloc{Ctx: ctx, Call: coreReallocCall(mod.ExportedFunction("cabi_realloc")), Mem: memAccessorOf(mod)}
 }
 
 // cachedReallocOf is reallocOf's boundExport-caching counterpart: the ctx-free
@@ -2132,7 +2193,7 @@ func reallocOf(ctx context.Context, mod api.Module) abi.Realloc {
 // allocation on the hot lowering path. A nil be.reallocCall (module exports no
 // cabi_realloc) makes Realloc.grow fail loud, matching reallocOf.
 func cachedReallocOf(ctx context.Context, be *boundExport) abi.Realloc {
-	return abi.Realloc{Ctx: ctx, Call: be.reallocCall}
+	return abi.Realloc{Ctx: ctx, Call: be.reallocCall, Mem: be.memFn}
 }
 
 // coreReallocCall wraps an already-resolved cabi_realloc api.Function as the
@@ -2164,6 +2225,15 @@ func coreReallocCall(fn api.Function) func(context.Context, uint32, uint32, uint
 // reallocCall is the ctx-free realloc closure an abi.Realloc holds.
 type reallocCall = func(context.Context, uint32, uint32, uint32, uint32) (uint32, error)
 
+// moduleRealloc is everything an abi.Realloc needs about one core module,
+// resolved once and memoized in Instance.reallocCalls: the cabi_realloc
+// callback and the live-memory accessor. Both are nil-tolerant (no realloc
+// export / no memory).
+type moduleRealloc struct {
+	call reallocCall
+	mem  func() []byte
+}
+
 // reallocFor is reallocOf with the export resolution memoized per module.
 //
 // Caching the resolved function for the instance's lifetime is what
@@ -2176,20 +2246,31 @@ func (in *Instance) reallocFor(ctx context.Context, mod api.Module) abi.Realloc 
 		return reallocOf(ctx, mod)
 	}
 	if v, ok := in.reallocCalls.Load(mod); ok {
-		call, _ := v.(reallocCall)
-		return abi.Realloc{Ctx: ctx, Call: call}
+		mr, _ := v.(moduleRealloc)
+		return abi.Realloc{Ctx: ctx, Call: mr.call, Mem: mr.mem}
 	}
-	call := coreReallocCall(mod.ExportedFunction("cabi_realloc"))
-	in.reallocCalls.Store(mod, call)
-	return abi.Realloc{Ctx: ctx, Call: call}
+	mr := moduleRealloc{call: coreReallocCall(mod.ExportedFunction("cabi_realloc")), mem: memAccessorOf(mod)}
+	in.reallocCalls.Store(mod, mr)
+	return abi.Realloc{Ctx: ctx, Call: mr.call, Mem: mr.mem}
 }
 
 // reallocOfFunc builds an abi.Realloc for a caller that already resolved the
 // exact realloc func to call (e.g. buildHostWrapper, via a canon lower's own
 // "realloc" CanonOpt). Unlike the guest-export path it builds the Call closure
 // per use, which is fine off the guest-call hot path.
-func reallocOfFunc(ctx context.Context, fn api.Function) abi.Realloc {
-	return abi.Realloc{Ctx: ctx, Call: coreReallocCall(fn)}
+//
+// memMod is the module whose linear memory is being written -- which is NOT
+// necessarily the module fn was resolved from. A canon's memory and realloc
+// options are independent core func/memory indices and may name different core
+// instances (graph.go's resolveReallocFuncGraph); taking the memory accessor
+// from fn's module would refresh from the wrong memory. Every caller already
+// has the memory module in hand (it is the same one it passes to
+// memoryBytesOf), so it is passed explicitly rather than derived. A nil memMod
+// (a bare elementless stream/future, whose canon carries no memory opt) yields
+// a nil Mem, i.e. "cannot refresh" -- correct, because such a copy never
+// touches memory at all.
+func reallocOfFunc(ctx context.Context, fn api.Function, memMod api.Module) abi.Realloc {
+	return abi.Realloc{Ctx: ctx, Call: coreReallocCall(fn), Mem: memAccessorOf(memMod)}
 }
 
 // funcResultTypeRefs normalizes FuncResults (unnamed-or-named) into a slice of

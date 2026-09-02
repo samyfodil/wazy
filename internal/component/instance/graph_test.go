@@ -78,7 +78,7 @@ func TestGraph_CoreModuleIdxOutOfRange(t *testing.T) {
 	comp := decodeRealHello(t)
 	comp.CoreInstances[0].ModuleIdx = 99
 	_, err := runGraph(t, comp)
-	requireErrContains(t, err, "out of range of 4 modules")
+	requireErrContains(t, err, "out of range of the 4-entry core module index space")
 }
 
 func TestGraph_CoreModuleBytesOOB(t *testing.T) {
@@ -291,7 +291,7 @@ func TestGraph_BindInstanceExport_NestedComponentOutOfRange(t *testing.T) {
 	comp := decodeRealHello(t)
 	comp.Instances[0].ComponentIdx = 99
 	_, err := runGraph(t, comp)
-	requireErrContains(t, err, "decoded nested component")
+	requireErrContains(t, err, "out of range of the 1-entry component index space")
 }
 
 func TestGraph_BindInstanceExport_NotPureShim(t *testing.T) {

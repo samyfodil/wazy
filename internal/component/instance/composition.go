@@ -86,6 +86,108 @@ func exportedResourceDefs(comp *binary.Component) map[string]uint32 {
 	return out
 }
 
+// exportedInstanceResourceDefs is exportedResourceDefs one level in: it returns
+// the resources a component exports as MEMBERS of the instance it exports under
+// instanceExportName, each mapped to its canonical definition index. It is what
+// an instance-alias instantiate-arg needs, because that arg names an interface
+// INSIDE the provider, not the provider's top level.
+//
+// The distinction is not academic. A wit-component-produced provider has no
+// top-level type export at all -- its resource is a top-level type DEFINITION
+// re-exported as a member of the exported instance -- so exportedResourceDefs
+// returns nil for it, which would silently leave every own<R> crossing the
+// composition boundary with no destructor and no resourceOrigin, i.e. tagged
+// inconsistently with the provider's own table.
+//
+// Both instance-definition shapes are read:
+//
+//   - Kind 0x01, the inline-export form, states the member's type index
+//     directly.
+//   - Kind 0x00, the instantiate-a-shim form every real wit-component provider
+//     emits, states it only indirectly: the shim RE-EXPORTS a type it itself
+//     IMPORTS, and the outer component supplies the real definition as a
+//     `(with "<the shim's import name>" (type N))` instantiate-arg. So the walk
+//     is shim export -> shim TypeSpace entry -> shim import name -> the outer's
+//     arg of that name -> the outer's own type index.
+//
+// A non-resource member (a plain `record`, say) fails the ResourceDesc guard
+// and is correctly ignored, as is anything whose type will not resolve.
+// Best-effort throughout, exactly like exportedResourceDefs: an unreadable
+// member contributes nothing rather than failing instantiation.
+//
+// One shape it deliberately does not chase: a provider that is ITSELF a
+// composition, i.e. whose instance export names an alias of one of its own
+// sub-instances' exports rather than an instance definition. componentInstanceDef
+// returns ok == false there and this returns nil, so a resource crossing two
+// composition levels is left unlined-up. That is not silent -- the first handle
+// to cross traps with a resource-type mismatch -- but it is not supported.
+func exportedInstanceResourceDefs(comp *binary.Component, instanceExportName string) map[string]uint32 {
+	var localIdx int
+	found := false
+	for _, exp := range comp.Exports {
+		if exp.ExternType != 0x05 || exp.Name != instanceExportName { // instance export
+			continue
+		}
+		if localIdx, found = componentInstanceDef(comp, exp.ExternIndex); found {
+			break
+		}
+	}
+	if !found || localIdx >= len(comp.Instances) {
+		return nil
+	}
+	var out map[string]uint32
+	add := func(name string, typeIdx uint32) {
+		td, err := comp.ResolveType(typeIdx)
+		if err != nil {
+			return
+		}
+		if _, isRes := td.(binary.ResourceDesc); !isRes {
+			return
+		}
+		if out == nil {
+			out = make(map[string]uint32)
+		}
+		out[name] = comp.ResourceDefIndex(typeIdx)
+	}
+	inst := comp.Instances[localIdx]
+	switch inst.Kind {
+	case 0x01:
+		for _, member := range inst.Exports {
+			if member.Sort == 0x03 { // type
+				add(member.Name, member.SortIdx)
+			}
+		}
+	case 0x00:
+		// cfg nil: this is a static shape question, and a shim reached
+		// through a component-sort IMPORT is not one this can answer (nor one
+		// wit-component emits) -- resolveComponentDef's own documented
+		// bind-time behavior.
+		shim, err := resolveComponentDef(comp, nil, inst.ComponentIdx)
+		if err != nil {
+			return nil
+		}
+		argByName := make(map[string]binary.InstantiateArg, len(inst.Args))
+		for _, arg := range inst.Args {
+			argByName[arg.Name] = arg
+		}
+		for _, member := range shim.Exports {
+			if member.ExternType != 0x03 || int(member.ExternIndex) >= len(shim.TypeSpace) { // type
+				continue
+			}
+			e := shim.TypeSpace[member.ExternIndex]
+			if e.Kind != binary.TypeSpaceImport || int(e.Import) >= len(shim.Imports) {
+				continue
+			}
+			arg, ok := argByName[shim.Imports[e.Import].Name]
+			if !ok || arg.Sort != 0x03 { // type
+				continue
+			}
+			add(member.Name, arg.SortIdx)
+		}
+	}
+	return out
+}
+
 // importedResourceIndices returns, for a component, each resource it IMPORTS
 // through the instance named importName mapped to the local TypeSpace index that
 // names it (a type-sort export alias into that imported instance). That index is
@@ -105,6 +207,177 @@ func importedResourceIndices(comp *binary.Component, importName string) map[stri
 		}
 	}
 	return out
+}
+
+// instanceArgMaxDepth bounds resolveInstanceArgTarget's export/alias chain
+// walk, exactly as resolveInstanceMaxDepth does in the binary package. A
+// well-formed binary can only chain forward-declared definitions, so this is a
+// defensive guard against a hand-built or corrupt structure, not a real limit.
+const instanceArgMaxDepth = 64
+
+// instanceArgTarget is what an instance-sort instantiate-arg index ultimately
+// denotes, as resolved by resolveInstanceArgTarget.
+type instanceArgTarget struct {
+	// imported picks which of the two producers backs this arg, because they
+	// are satisfied in completely different ways. An instance the component
+	// IMPORTS (imported, importName set) has no runtime object at all -- only
+	// the flat name-keyed entries the embedder registered on *config, which
+	// forwardImportedInstance re-keys. One the component INSTANTIATES itself
+	// (!imported, spaceIdx set) is a sibling *Instance whose exports are
+	// wired in as delegating host imports.
+	imported   bool
+	spaceIdx   uint32 // component-instance index space slot of the DEFINITION (!imported)
+	importName string // the outer component's own import name (imported)
+
+	// projection is the chain of instance-typed EXPORT names to project
+	// through to reach the denoted instance, base-first: empty for the base
+	// instance itself, ["X"] for an `(alias export $base "X" (instance))`,
+	// ["X", "Y"] for an alias of that alias.
+	//
+	// An instance alias INSTANTIATES NOTHING -- per Explainer.md it only
+	// introduces an index denoting an instance-typed export of an instance
+	// that already exists. So spaceIdx/importName always name the base that
+	// does get instantiated, and projection is what has to be looked up
+	// INSIDE it. That split is what keeps the two independent names of a
+	// composition straight: `(alias export $p "X" (instance $g))` passed as
+	// `(with "Y" (instance $g))` means "satisfy the importee's import Y with
+	// the provider's export X", and the binary format nowhere requires
+	// X == Y (subtyping is checked on the instance TYPE, never on the export
+	// name) even though every composer in practice makes them equal.
+	projection []string
+}
+
+// resolveInstanceArgTarget resolves an index in comp's component-instance index
+// space to the instance it denotes, following every producer that space has
+// (see componentinstancespace.go):
+//
+//   - an instance import   -- the answer: {imported, importName}.
+//   - an instance definition -- the answer: {!imported, spaceIdx}, spaceIdx
+//     being this slot, which is the key componentInstanceSpaceIndices assigns
+//     the definition and therefore the key instantiateNestedInstances files
+//     the resulting sub-Instance under.
+//   - an instance export   -- `(export "E" (instance N))` re-denotes N under a
+//     new index without projecting anything, so this just continues at N.
+//   - an instance alias    -- `(alias export $p "X" (instance))` denotes $p's
+//     instance-typed export "X": record "X" and continue at $p.
+//
+// Alias names accumulate innermost-first as the walk moves outward toward the
+// base, so they are reversed once at the end to yield the base-first order
+// projection documents.
+//
+// It fails loud rather than returning a bogus target: an out-of-range index, a
+// malformed entry, an `alias outer` (which names an instance in an ENCLOSING
+// component's index space, something this engine does not model), or a chain
+// that exceeds instanceArgMaxDepth all return an error naming what was found.
+func resolveInstanceArgTarget(comp *binary.Component, idx uint32) (instanceArgTarget, error) {
+	if len(comp.ComponentInstanceSpace) == 0 {
+		// Hand-built (non-decoded) Component: its instance index space is the
+		// flat [imports] ++ [definitions] arithmetic componentInstanceDef
+		// falls back to, so an index below the import count is an import and
+		// everything else is a local definition at that same slot. No alias
+		// is representable in that model, so no projection can arise.
+		if int(idx) < numImportedInstances(comp) {
+			name, err := importInterfaceName(comp, idx)
+			if err != nil {
+				return instanceArgTarget{}, err
+			}
+			return instanceArgTarget{imported: true, importName: name}, nil
+		}
+		return instanceArgTarget{spaceIdx: idx}, nil
+	}
+	var projection []string
+	reversed := func() []string {
+		for i, j := 0, len(projection)-1; i < j; i, j = i+1, j-1 {
+			projection[i], projection[j] = projection[j], projection[i]
+		}
+		return projection
+	}
+	cur := idx
+	for depth := 0; depth < instanceArgMaxDepth; depth++ {
+		if int(cur) >= len(comp.ComponentInstanceSpace) {
+			return instanceArgTarget{}, fmt.Errorf("instance %d is past the end of the %d-entry component instance index space", cur, len(comp.ComponentInstanceSpace))
+		}
+		switch e := comp.ComponentInstanceSpace[cur]; e.Kind {
+		case binary.ComponentInstanceFromDefinition:
+			return instanceArgTarget{spaceIdx: cur, projection: reversed()}, nil
+		case binary.ComponentInstanceFromImport:
+			if int(e.Import) >= len(comp.Imports) {
+				return instanceArgTarget{}, fmt.Errorf("instance %d names import %d, past the end of the %d import(s)", cur, e.Import, len(comp.Imports))
+			}
+			return instanceArgTarget{imported: true, importName: comp.Imports[e.Import].Name, projection: reversed()}, nil
+		case binary.ComponentInstanceFromExport:
+			if int(e.Export) >= len(comp.Exports) {
+				return instanceArgTarget{}, fmt.Errorf("instance %d names export %d, past the end of the %d export(s)", cur, e.Export, len(comp.Exports))
+			}
+			cur = comp.Exports[e.Export].ExternIndex
+		case binary.ComponentInstanceFromAlias:
+			if int(e.Alias) >= len(comp.Aliases) {
+				return instanceArgTarget{}, fmt.Errorf("instance %d names alias %d, past the end of the %d alias(es)", cur, e.Alias, len(comp.Aliases))
+			}
+			al := comp.Aliases[e.Alias]
+			if al.Sort != 0x05 { // can't happen from decodeAliasSection, which files the space entry by sort
+				return instanceArgTarget{}, fmt.Errorf("instance %d names alias %d, whose sort is %#x rather than instance (0x05)", cur, e.Alias, al.Sort)
+			}
+			if al.TargetKind != 0x00 {
+				return instanceArgTarget{}, fmt.Errorf("instance %d is an alias with target kind %#x; only an instance-export alias (0x00) names an instance this component can resolve", cur, al.TargetKind)
+			}
+			projection = append(projection, al.Name)
+			cur = al.InstanceIdx
+		default:
+			return instanceArgTarget{}, fmt.Errorf("instance %d has unrecognized index-space kind %d", cur, e.Kind)
+		}
+	}
+	return instanceArgTarget{}, fmt.Errorf("instance %d: the export/alias chain exceeds %d links (cycle?)", idx, instanceArgMaxDepth)
+}
+
+// forwardImportedInstance satisfies a nested component's instance import named
+// argName with the instance THIS component imports under outerName -- the
+// pass-through an `(instantiate $inner (with "host" (instance $host)))` asks
+// for, where $host is the outer component's own instance import.
+//
+// An imported instance is not an object in this runtime: it exists only as the
+// flat, name-keyed entries the embedder registered on *config -- host funcs in
+// cfg.imports, resource tags in cfg.resourceTags, and the destructors those
+// tags key in cfg.hostResDtors. Forwarding it is therefore a re-keying: every
+// entry filed under the OUTER component's import name is re-filed under the
+// arg name, which by definition is the NESTED component's own import name and
+// so is exactly what its lowered aliases will look up (graph.go's canon lower
+// resolves through importInterfaceName on the nested component).
+//
+// Both resource lines are load-bearing. typeArgTags is what makes the nested
+// component's own<r>/borrow<r>/resource.drop of the forwarded resource tag the
+// shared handle table the way the host does -- it must go through typeArgTags
+// rather than subCfg.resourceTags because subCfg.resCanon (always set for a
+// nested instantiation) overrides effectiveResourceTypeIdx. subCfg.resourceTags
+// is what a THIRD level needs: a grandchild receiving the resource as a
+// `(with "r" (type ...))` arg resolves it through effectiveResourceTypeIdx,
+// which reads resourceTags.
+func forwardImportedInstance(cfg, subCfg *config, nested *binary.Component, outerName, argName string, typeArgTags map[uint32]uint32) {
+	// Match on the version-suffix-stripped iface both sides, since that is the
+	// normalization every importKey construction goes through (mkImportKey).
+	outerIface := mkImportKey(outerName, "").iface
+	for k, hi := range cfg.imports {
+		if k.iface != outerIface {
+			continue
+		}
+		subCfg.imports[mkImportKey(argName, k.name)] = hi
+	}
+	importerResIdx := importedResourceIndices(nested, argName)
+	for k, tag := range cfg.resourceTags {
+		if k.iface != outerIface {
+			continue
+		}
+		if subCfg.resourceTags == nil {
+			subCfg.resourceTags = map[importKey]uint32{}
+		}
+		subCfg.resourceTags[mkImportKey(argName, k.name)] = tag
+		if idx, ok := importerResIdx[k.name]; ok {
+			typeArgTags[idx] = tag
+		}
+		if dtor := cfg.hostResDtors[tag]; dtor != nil {
+			subCfg.hostResDtors[tag] = dtor
+		}
+	}
 }
 
 // translateResourceIdxBase is where synthetic type indices for translated
