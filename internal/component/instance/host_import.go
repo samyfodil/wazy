@@ -97,6 +97,20 @@ type config struct {
 	// its own tree root (instantiateGraph allocates a fresh *sched).
 	sharedSched *sched
 
+	// componentArgs maps a COMPONENT-sort import name of the component being
+	// instantiated to the component DEFINITION the parent supplied for it via
+	// a `(with "x" (component N))` instantiate-arg (types.11.wast). Unlike
+	// every other arg sort, nothing is instantiated on the child's behalf: a
+	// component-sort import is code, occupying a slot in the child's own
+	// component index space, which the child instantiates itself with its own
+	// args at its own instance section (Explainer.md, "Instance Definitions").
+	//
+	// nil for a root instantiation -- there is deliberately no Option to fill
+	// it, so a ROOT component with a component import still fails loud, which
+	// is what simple.4.wast's "root-level component imports are not supported"
+	// expects.
+	componentArgs map[string]*binary.Component
+
 	// pendingDelegates accumulates a canon lower's forward reference to a
 	// nested sibling component instance that had not yet been instantiated
 	// at the point THIS instance's own core-instance loop needed to bind it
@@ -763,7 +777,23 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 		}
 		var realloc abi.Realloc
 		if overrideReallocCall != nil {
+			// Mem comes from memMod, not from the module the override realloc
+			// was resolved on: a canon lower's memory and realloc options are
+			// independent and may name different core instances, so taking the
+			// accessor from the realloc's module would refresh the wrong memory.
+			//
+			// It is taken from the instance's per-module memo rather than minted
+			// here: memMod is only known per call (it is derived from the call's
+			// own api.Module), but the accessor it maps to is not, and minting a
+			// closure per call showed up as +3 allocs/op on wasip2.ServeHTTP --
+			// this path runs ~3.6x per request. reallocFor memoizes call and mem
+			// together; only mem is wanted here, since the override supplies its
+			// own Call. Guarded by resultPlan.usesMem (precomputed at bind time)
+			// so an import whose results never touch memory does not even look.
 			realloc = abi.Realloc{Ctx: ctx, Call: overrideReallocCall}
+			if resultPlan.usesMem {
+				realloc.Mem = in.reallocFor(ctx, memMod).Mem
+			}
 		} else {
 			// Resolved through the instance's memo rather than left to
 			// lowerHostResultsPlanned's per-call reallocOf fallback.
@@ -1282,7 +1312,11 @@ func lowerHostResultsPlanned(ctx context.Context, plan hostResultPlan, results [
 			return fmt.Errorf("result: out-pointer stack slot %d out of range (stack has %d value(s))", outPtrIdx, len(stack))
 		}
 		ptr := api.DecodeU32(stack[outPtrIdx])
-		if err := plan.store.Store(mem, ptr, resultVal, realloc); err != nil {
+		// The refreshed view is dropped: nothing below writes through mem.
+		// Correctness for the nested string/list payloads inside resultVal is
+		// StoreStep.Store's own business -- it threads the live view through
+		// the whole store tree (see abi/memory.go's storeValue).
+		if _, err := plan.store.Store(mem, ptr, resultVal, realloc); err != nil {
 			return fmt.Errorf("result: store spilled result: %w", err)
 		}
 		return nil

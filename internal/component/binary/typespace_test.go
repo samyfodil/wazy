@@ -327,3 +327,69 @@ func TestDecode_TypeSpace_ImportedType(t *testing.T) {
 		t.Fatalf("got %#v, want PrimitiveDesc{u32}", td)
 	}
 }
+
+// synthOuterTypeAlias encodes section 6 carrying one
+// `(alias outer <count> <idx> (type))`.
+func synthOuterTypeAlias(count, idx byte) []byte {
+	return synthSection(6, []byte{0x01, 0x03, 0x02, count, idx})
+}
+
+// A nested component re-exporting a type its PARENT defines -- fused.22.wast's
+// `$c1` does this for all six of the root's flags types. Before Component.Outer
+// existed, resolveAlias bailed on any OuterCount > 0, so the lifted func
+// signature that named the aliased type could not be flattened at all.
+func TestResolveType_OuterAliasIntoEnclosingComponent(t *testing.T) {
+	// Root defines one flags type; the child aliases it and re-exports it.
+	rootTypes := synthSection(7, []byte{0x01, 0x6e, 0x01, 0x02, 'f', '1'}) // one flags with one label "f1"
+	child := synthComponent(synthOuterTypeAlias(1, 0))
+	raw := synthComponent(rootTypes, synthNestedComponentSection(child))
+
+	root, err := Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	c := root.NestedComponents[0]
+	td, err := c.ResolveType(0)
+	if err != nil {
+		t.Fatalf("child.ResolveType(0): %v", err)
+	}
+	fd, ok := td.(FlagsDesc)
+	if !ok {
+		t.Fatalf("child.ResolveType(0) = %T, want FlagsDesc", td)
+	}
+	if len(fd.Names) != 1 || fd.Names[0] != "f1" {
+		t.Errorf("flags labels = %v, want [f1]", fd.Names)
+	}
+}
+
+// A count of 2 skips two enclosing components -- the shape an `alias outer 2`
+// inside a nested component's own nested component needs.
+func TestResolveType_OuterAliasCountTwo(t *testing.T) {
+	rootTypes := synthSection(7, []byte{0x01, 0x6e, 0x01, 0x02, 'f', '1'})
+	grandchild := synthComponent(synthOuterTypeAlias(2, 0))
+	child := synthComponent(synthNestedComponentSection(grandchild))
+	raw := synthComponent(rootTypes, synthNestedComponentSection(child))
+
+	root, err := Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	gc := root.NestedComponents[0].NestedComponents[0]
+	if _, err := gc.ResolveType(0); err != nil {
+		t.Fatalf("grandchild.ResolveType(0): %v", err)
+	}
+}
+
+// The fail-loud branch: an outer alias whose de Bruijn count runs past the
+// known enclosing chain (a nested component binary decoded standalone, or a
+// hand-built Component).
+func TestResolveType_OuterAliasBeyondKnownEnclosingComponents(t *testing.T) {
+	standalone, err := Decode(bytes.NewReader(synthComponent(synthOuterTypeAlias(1, 0))))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	_, err = standalone.ResolveType(0)
+	if err == nil || !strings.Contains(err.Error(), "but only 0 are known") {
+		t.Fatalf("ResolveType(0) error = %v, want it to report the missing enclosing component", err)
+	}
+}

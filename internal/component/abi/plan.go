@@ -93,7 +93,12 @@ func (s *LowerStep) Lower(dst []CoreValue, v Value, realloc Realloc, mem []byte)
 		// A string flattens to exactly (ptr, len) = 2 core values, always <=
 		// MaxFlatParams (16), so it can never spill -- append both directly, no
 		// Flatten re-check and no intermediate []CoreValue.
-		ptr, byteLen, err := allocStoreString(mem, str, realloc)
+		// allocStoreString refreshes `mem` internally around its own grow, so
+		// its bounds check and copy target the live array; the refreshed view
+		// is dropped here because nothing in this frame -- or in Lower's
+		// caller, instance.lowerParams -- writes through `mem` afterwards.
+		// See lowerFlatImpl's doc for the invariant that makes that safe.
+		ptr, byteLen, _, err := allocStoreString(mem, str, realloc)
 		if err != nil {
 			return nil, fmt.Errorf("lowerFlatString: %w", err)
 		}
@@ -153,24 +158,46 @@ func CompileStore(t binary.TypeDesc, resolve Resolver) (StoreStep, error) {
 
 // Store writes v at ptr, exactly as the package-level Store would for the type
 // CompileStore was built from.
-func (s *StoreStep) Store(mem []byte, ptr uint32, v Value, realloc Realloc) error {
+//
+// mem must be a view that is current as of THIS call: the bounds check below
+// runs against it, so a snapshot taken before some earlier allocation would
+// reject a pointer into a region that genuinely exists. The []byte returned is
+// the view valid after the store -- storing a string or list grows guest
+// memory, which can replace the backing array (see Realloc.Mem) -- and a caller
+// that stores repeatedly through one view MUST rebind from it. That is exactly
+// what instance/stream.go's guestBuffer.write does per element: without it,
+// element 0's grow leaves elements 1..n-1 bounds-checked against a stale length
+// and written into an abandoned array.
+func (s *StoreStep) Store(mem []byte, ptr uint32, v Value, realloc Realloc) ([]byte, error) {
 	if ptr != Align(ptr, s.align) {
-		return fmt.Errorf("store: pointer %d not aligned to %d", ptr, s.align)
+		return mem, fmt.Errorf("store: pointer %d not aligned to %d", ptr, s.align)
 	}
-	if uint32(len(mem)) < ptr+s.size {
-		return fmt.Errorf("store: buffer overflow: ptr=%d size=%d mem_len=%d", ptr, s.size, len(mem))
+	// ptr+s.size is wrap-guarded because ptr can come straight from the
+	// guest's cabi_realloc (Spill, just below): a hostile or buggy allocator
+	// returning a pointer near 2^32 would otherwise wrap past the check.
+	if ptr+s.size < ptr || uint32(len(mem)) < ptr+s.size {
+		return mem, fmt.Errorf("store: buffer overflow: ptr=%d size=%d mem_len=%d", ptr, s.size, len(mem))
 	}
 	return storeValue(mem, ptr, s.t, v, s.align, s.resolve, realloc)
 }
 
 // Spill allocates a region for v and stores it there, exactly as spillValue
 // would for the type CompileStore was built from.
+//
+// This is the whole-parameter-list spill (instance.lowerParams' paramsSpill
+// arm), i.e. the single largest allocation on the export path and the one most
+// likely to force a page grow -- so the region it just allocated is, by
+// construction, at or past the end of the caller's view. GrowMem hands back the
+// post-growth view, which is what Store then bounds-checks and writes through;
+// with the pre-grow one, Store's own check rejects the fresh pointer outright.
 func (s *StoreStep) Spill(v Value, mem []byte, realloc Realloc) (uint32, error) {
-	ptr, err := realloc.Grow(0, 0, s.align, s.size)
+	ptr, mem, err := realloc.GrowMem(mem, 0, 0, s.align, s.size)
 	if err != nil {
 		return 0, fmt.Errorf("spillValue: realloc failed: %w", err)
 	}
-	if err := s.Store(mem, ptr, v, realloc); err != nil {
+	// The refreshed view Store returns is dropped: no caller of Spill writes
+	// through mem afterwards (they only forward the pointer as a core value).
+	if _, err := s.Store(mem, ptr, v, realloc); err != nil {
 		return 0, fmt.Errorf("spillValue: store failed: %w", err)
 	}
 	return ptr, nil

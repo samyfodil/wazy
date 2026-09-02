@@ -109,6 +109,10 @@ func decodeComponent(buf []byte) (*Component, error) {
 				Offset: sectionStart,
 				Size:   int(sectionSize),
 			})
+			// Every embedded core module occupies the next index in the
+			// component's core module index space, interleaved with
+			// core-module outer aliases -- see coremodulespace.go.
+			c.CoreModuleSpace = append(c.CoreModuleSpace, CoreModuleSpaceEntry{Kind: CoreModuleFromDefinition, Module: uint32(len(c.CoreModules) - 1)})
 
 		case 2: // Core Instance section
 			coreInstances, newOffset, err := decodeCoreInstanceSection(buf, offset, sectionSize)
@@ -137,7 +141,14 @@ func decodeComponent(buf []byte) (*Component, error) {
 			if err != nil {
 				return nil, fmt.Errorf("nested component[%d]: %w", len(c.NestedComponents), err)
 			}
+			// The enclosing link is what makes the nested component's
+			// `alias outer` definitions resolvable -- see Component.Outer.
+			nested.Outer = c
 			c.NestedComponents = append(c.NestedComponents, nested)
+			// Every nested component occupies the next index in the
+			// component index space, interleaved with component imports,
+			// component aliases and component exports -- see componentspace.go.
+			c.ComponentSpace = append(c.ComponentSpace, ComponentSpaceEntry{Kind: ComponentFromDefinition, Component: uint32(len(c.NestedComponents) - 1)})
 			offset += int(sectionSize)
 
 		case 5: // Instance section
@@ -189,6 +200,18 @@ func decodeComponent(buf []byte) (*Component, error) {
 				// componentinstancespace.go.
 				if al.Sort == 0x05 {
 					c.ComponentInstanceSpace = append(c.ComponentInstanceSpace, ComponentInstanceSpaceEntry{Kind: ComponentInstanceFromAlias, Alias: aliasBase + uint32(j)})
+				}
+				// A core-module alias (sort 0x00 core, core:sort 0x11 module)
+				// occupies the next index in the component's core module index
+				// space, interleaved with section-1 embedded modules -- see
+				// coremodulespace.go.
+				if al.Sort == 0x00 && al.CoreSort == 0x11 {
+					c.CoreModuleSpace = append(c.CoreModuleSpace, CoreModuleSpaceEntry{Kind: CoreModuleFromAlias, Alias: aliasBase + uint32(j)})
+				}
+				// A component alias (sort 0x04) occupies the next index in the
+				// component index space -- see componentspace.go.
+				if al.Sort == 0x04 {
+					c.ComponentSpace = append(c.ComponentSpace, ComponentSpaceEntry{Kind: ComponentFromAlias, Alias: aliasBase + uint32(j)})
 				}
 			}
 
@@ -266,6 +289,13 @@ func decodeComponent(buf []byte) (*Component, error) {
 				if im.ExternType == 0x05 {
 					c.ComponentInstanceSpace = append(c.ComponentInstanceSpace, ComponentInstanceSpaceEntry{Kind: ComponentInstanceFromImport, Import: importBase + uint32(j)})
 				}
+				// A component import (sort component 0x04) occupies the next
+				// index in the component index space -- see componentspace.go.
+				// It is a component DEFINITION the embedder supplies, which
+				// this component then instantiates itself.
+				if im.ExternType == 0x04 {
+					c.ComponentSpace = append(c.ComponentSpace, ComponentSpaceEntry{Kind: ComponentFromImport, Import: importBase + uint32(j)})
+				}
 			}
 
 		case 11: // Export section
@@ -285,6 +315,9 @@ func decodeComponent(buf []byte) (*Component, error) {
 				case 0x03: // type export: introduces a type index aliasing the
 					// exported type ("export introduces an alias").
 					c.TypeSpace = append(c.TypeSpace, TypeSpaceEntry{Kind: TypeSpaceExport, Export: exportBase + uint32(j)})
+				case 0x04: // component export: introduces a component index
+					// aliasing the exported component -- see componentspace.go.
+					c.ComponentSpace = append(c.ComponentSpace, ComponentSpaceEntry{Kind: ComponentFromExport, Export: exportBase + uint32(j)})
 				case 0x05: // instance export: introduces an instance index
 					// aliasing the exported instance, shifting every LATER
 					// instance definition -- see componentinstancespace.go.

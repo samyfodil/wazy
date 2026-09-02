@@ -96,7 +96,7 @@ func TestLoadIntSignedWidths(t *testing.T) {
 
 func TestStoreStringReallocFails(t *testing.T) {
 	mem := make([]byte, 100)
-	if err := storeString(mem, 0, "hi", failRealloc); err == nil {
+	if _, err := storeString(mem, 0, "hi", failRealloc); err == nil {
 		t.Error("expected error for storeString realloc failure")
 	}
 }
@@ -105,7 +105,7 @@ func TestStoreStringAllocOutOfBounds(t *testing.T) {
 	mem := make([]byte, 10)
 	// realloc returns a pointer past the end of mem
 	badRealloc := ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 1000, nil })
-	if err := storeString(mem, 0, "hello", badRealloc); err == nil {
+	if _, err := storeString(mem, 0, "hello", badRealloc); err == nil {
 		t.Error("expected error for storeString alloc out of bounds")
 	}
 }
@@ -114,7 +114,7 @@ func TestStoreStringPtrStoreOverflow(t *testing.T) {
 	// mem large enough for string data (at 4096) but the ptr/len header at ptr=... won't fit.
 	mem := make([]byte, 5000)
 	// ptr near the end: writing 8-byte header overflows.
-	if err := storeString(mem, 4998, "x", okRealloc); err == nil {
+	if _, err := storeString(mem, 4998, "x", okRealloc); err == nil {
 		t.Error("expected error for storeString header store overflow")
 	}
 }
@@ -143,7 +143,7 @@ func TestLoadStringDataOutOfBounds(t *testing.T) {
 func TestStoreListSizeError(t *testing.T) {
 	mem := make([]byte, 100)
 	// non-empty list with an unsupported element type -> Size() errors
-	err := storeList(mem, 0, []Value{uint32(1)}, bintype.FuncDesc{}, nil, okRealloc)
+	_, err := storeList(mem, 0, []Value{uint32(1)}, bintype.FuncDesc{}, nil, okRealloc)
 	if err == nil {
 		t.Error("expected error for storeList element Size failure")
 	}
@@ -151,7 +151,7 @@ func TestStoreListSizeError(t *testing.T) {
 
 func TestStoreListReallocFails(t *testing.T) {
 	mem := make([]byte, 100)
-	err := storeList(mem, 0, []Value{uint32(1)}, bintype.PrimitiveDesc{Prim: "u32"}, nil, failRealloc)
+	_, err := storeList(mem, 0, []Value{uint32(1)}, bintype.PrimitiveDesc{Prim: "u32"}, nil, failRealloc)
 	if err == nil {
 		t.Error("expected error for storeList realloc failure")
 	}
@@ -160,7 +160,7 @@ func TestStoreListReallocFails(t *testing.T) {
 func TestStoreListAllocOutOfBounds(t *testing.T) {
 	mem := make([]byte, 20)
 	badRealloc := ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 1000, nil })
-	err := storeList(mem, 0, []Value{uint32(1)}, bintype.PrimitiveDesc{Prim: "u32"}, nil, badRealloc)
+	_, err := storeList(mem, 0, []Value{uint32(1)}, bintype.PrimitiveDesc{Prim: "u32"}, nil, badRealloc)
 	if err == nil {
 		t.Error("expected error for storeList alloc out of bounds")
 	}
@@ -169,7 +169,7 @@ func TestStoreListAllocOutOfBounds(t *testing.T) {
 func TestStoreListElementError(t *testing.T) {
 	mem := make([]byte, 5000)
 	// element type u32 but a value is the wrong Go type -> storeValue fails
-	err := storeList(mem, 0, []Value{"not-a-u32"}, bintype.PrimitiveDesc{Prim: "u32"}, nil, okRealloc)
+	_, err := storeList(mem, 0, []Value{"not-a-u32"}, bintype.PrimitiveDesc{Prim: "u32"}, nil, okRealloc)
 	if err == nil {
 		t.Error("expected error for storeList element store failure")
 	}
@@ -178,7 +178,7 @@ func TestStoreListElementError(t *testing.T) {
 func TestStoreListHeaderOverflow(t *testing.T) {
 	// list data allocated at 4096; header write at ptr near end overflows.
 	mem := make([]byte, 5000)
-	err := storeList(mem, 4998, []Value{uint32(1)}, bintype.PrimitiveDesc{Prim: "u32"}, nil, okRealloc)
+	_, err := storeList(mem, 4998, []Value{uint32(1)}, bintype.PrimitiveDesc{Prim: "u32"}, nil, okRealloc)
 	if err == nil {
 		t.Error("expected error for storeList header overflow")
 	}
@@ -214,7 +214,7 @@ func TestLoadListElementError(t *testing.T) {
 
 func TestStoreValueUnsupportedType(t *testing.T) {
 	mem := make([]byte, 8)
-	if err := storeValue(mem, 0, bintype.FuncDesc{}, uint32(1), 0, nil, okRealloc); err == nil {
+	if _, err := storeValue(mem, 0, bintype.FuncDesc{}, uint32(1), 0, nil, okRealloc); err == nil {
 		t.Error("expected error for storeValue unsupported type")
 	}
 }
@@ -230,7 +230,7 @@ func TestStoreValueListBadElementRef(t *testing.T) {
 	mem := make([]byte, 8)
 	// ListDesc with an empty TypeRef (neither prim nor index) -> resolveType error
 	desc := bintype.ListDesc{Element: bintype.TypeRef{}}
-	if err := storeValue(mem, 0, desc, []Value{}, 0, nil, okRealloc); err == nil {
+	if _, err := storeValue(mem, 0, desc, []Value{}, 0, nil, okRealloc); err == nil {
 		t.Error("expected error for storeValue list bad element ref")
 	}
 }
@@ -246,7 +246,7 @@ func TestLoadValueListBadElementRef(t *testing.T) {
 func TestStoreValueOptionBadElementRef(t *testing.T) {
 	mem := make([]byte, 8)
 	desc := bintype.OptionDesc{Element: bintype.TypeRef{}}
-	if err := storeValue(mem, 0, desc, nil, 0, nil, okRealloc); err == nil {
+	if _, err := storeValue(mem, 0, desc, nil, 0, nil, okRealloc); err == nil {
 		t.Error("expected error for storeValue option bad element ref")
 	}
 }
@@ -263,17 +263,17 @@ func TestLoadValueOptionBadElementRef(t *testing.T) {
 
 func TestStoreHandleWrongType(t *testing.T) {
 	mem := make([]byte, 8)
-	if err := storeValue(mem, 0, bintype.OwnDesc{}, "not-a-handle", 0, nil, okRealloc); err == nil {
+	if _, err := storeValue(mem, 0, bintype.OwnDesc{}, "not-a-handle", 0, nil, okRealloc); err == nil {
 		t.Error("expected error for storeValue own handle wrong type")
 	}
-	if err := storeValue(mem, 0, bintype.BorrowDesc{}, "not-a-handle", 0, nil, okRealloc); err == nil {
+	if _, err := storeValue(mem, 0, bintype.BorrowDesc{}, "not-a-handle", 0, nil, okRealloc); err == nil {
 		t.Error("expected error for storeValue borrow handle wrong type")
 	}
 }
 
 func TestStoreLoadHandleRoundTrip(t *testing.T) {
 	mem := make([]byte, 8)
-	if err := storeValue(mem, 0, bintype.OwnDesc{}, uint32(7), 0, nil, okRealloc); err != nil {
+	if _, err := storeValue(mem, 0, bintype.OwnDesc{}, uint32(7), 0, nil, okRealloc); err != nil {
 		t.Fatalf("storeValue own handle: %v", err)
 	}
 	v, err := loadValue(mem, 0, bintype.OwnDesc{}, nil)
@@ -292,7 +292,7 @@ func TestStoreRecordFieldAlignmentError(t *testing.T) {
 	desc := bintype.RecordDesc{Fields: []bintype.RecordField{
 		{Name: "a", Type: bintype.TypeRef{TypeIndex: u32ptr(0)}},
 	}}
-	err := storeRecord(mem, 0, []Value{uint32(1)}, desc, funcResolve, okRealloc)
+	_, err := storeRecord(mem, 0, []Value{uint32(1)}, desc, funcResolve, okRealloc)
 	if err == nil {
 		t.Error("expected error for storeRecord field alignment failure")
 	}
@@ -305,7 +305,7 @@ func TestStoreRecordFieldStoreError(t *testing.T) {
 		{Name: "b", Type: bintype.TypeRef{Primitive: "u32"}},
 	}}
 	// mem only 8 bytes; second field write is within bounds, but value type wrong
-	err := storeRecord(mem, 0, []Value{uint32(1), "bad"}, desc, nil, okRealloc)
+	_, err := storeRecord(mem, 0, []Value{uint32(1), "bad"}, desc, nil, okRealloc)
 	if err == nil {
 		t.Error("expected error for storeRecord field store failure")
 	}
@@ -327,7 +327,7 @@ func TestLoadRecordFieldLoadError(t *testing.T) {
 func TestStoreTupleElementAlignmentError(t *testing.T) {
 	mem := make([]byte, 100)
 	desc := bintype.TupleDesc{Elements: []bintype.TypeRef{{TypeIndex: u32ptr(0)}}}
-	err := storeTuple(mem, 0, []Value{uint32(1)}, desc, funcResolve, okRealloc)
+	_, err := storeTuple(mem, 0, []Value{uint32(1)}, desc, funcResolve, okRealloc)
 	if err == nil {
 		t.Error("expected error for storeTuple element alignment failure")
 	}
@@ -339,7 +339,7 @@ func TestStoreTupleElementStoreError(t *testing.T) {
 		{Primitive: "u32"},
 		{Primitive: "u32"},
 	}}
-	err := storeTuple(mem, 0, []Value{uint32(1), "bad"}, desc, nil, okRealloc)
+	_, err := storeTuple(mem, 0, []Value{uint32(1), "bad"}, desc, nil, okRealloc)
 	if err == nil {
 		t.Error("expected error for storeTuple element store failure")
 	}
@@ -363,7 +363,7 @@ func TestStoreVariantMaxCaseAlignError(t *testing.T) {
 	desc := bintype.VariantDesc{Cases: []bintype.VariantCase{
 		{Name: "a", Type: &bintype.TypeRef{TypeIndex: u32ptr(0)}},
 	}}
-	err := storeVariant(mem, 0, VariantValue{Disc: 0, Payload: uint32(1)}, desc, 0, funcResolve, okRealloc)
+	_, err := storeVariant(mem, 0, VariantValue{Disc: 0, Payload: uint32(1)}, desc, 0, funcResolve, okRealloc)
 	if err == nil {
 		t.Error("expected error for storeVariant max-case-alignment failure")
 	}
@@ -375,7 +375,7 @@ func TestStoreVariantPayloadStoreError(t *testing.T) {
 		{Name: "a", Type: &bintype.TypeRef{Primitive: "u32"}},
 	}}
 	// payload wrong Go type
-	err := storeVariant(mem, 0, VariantValue{Disc: 0, Payload: "bad"}, desc, 0, nil, okRealloc)
+	_, err := storeVariant(mem, 0, VariantValue{Disc: 0, Payload: "bad"}, desc, 0, nil, okRealloc)
 	if err == nil {
 		t.Error("expected error for storeVariant payload store failure")
 	}
@@ -420,7 +420,7 @@ func TestStoreEnumInvalidLabels(t *testing.T) {
 func TestStoreOptionAlignmentError(t *testing.T) {
 	mem := make([]byte, 100)
 	// some payload; element type unsupported -> Alignment error
-	if err := storeOption(mem, 0, uint32(1), bintype.FuncDesc{}, 0, funcResolve, okRealloc); err == nil {
+	if _, err := storeOption(mem, 0, uint32(1), bintype.FuncDesc{}, 0, funcResolve, okRealloc); err == nil {
 		t.Error("expected error for storeOption alignment failure")
 	}
 }
@@ -428,7 +428,7 @@ func TestStoreOptionAlignmentError(t *testing.T) {
 func TestStoreOptionPayloadError(t *testing.T) {
 	mem := make([]byte, 100)
 	// element u32, but payload wrong type
-	if err := storeOption(mem, 0, "bad", bintype.PrimitiveDesc{Prim: "u32"}, 0, nil, okRealloc); err == nil {
+	if _, err := storeOption(mem, 0, "bad", bintype.PrimitiveDesc{Prim: "u32"}, 0, nil, okRealloc); err == nil {
 		t.Error("expected error for storeOption payload store failure")
 	}
 }
@@ -454,7 +454,7 @@ func TestLoadOptionPayloadError(t *testing.T) {
 func TestStoreResultOkAlignmentError(t *testing.T) {
 	mem := make([]byte, 100)
 	desc := bintype.ResultDesc{Ok: &bintype.TypeRef{TypeIndex: u32ptr(0)}}
-	err := storeResult(mem, 0, ResultValue{IsErr: false, Payload: uint32(1)}, desc, 0, funcResolve, okRealloc)
+	_, err := storeResult(mem, 0, ResultValue{IsErr: false, Payload: uint32(1)}, desc, 0, funcResolve, okRealloc)
 	if err == nil {
 		t.Error("expected error for storeResult ok alignment failure")
 	}
@@ -463,7 +463,7 @@ func TestStoreResultOkAlignmentError(t *testing.T) {
 func TestStoreResultErrAlignmentError(t *testing.T) {
 	mem := make([]byte, 100)
 	desc := bintype.ResultDesc{Err: &bintype.TypeRef{TypeIndex: u32ptr(0)}}
-	err := storeResult(mem, 0, ResultValue{IsErr: true, Payload: uint32(1)}, desc, 0, funcResolve, okRealloc)
+	_, err := storeResult(mem, 0, ResultValue{IsErr: true, Payload: uint32(1)}, desc, 0, funcResolve, okRealloc)
 	if err == nil {
 		t.Error("expected error for storeResult err alignment failure")
 	}
@@ -475,7 +475,7 @@ func TestStoreResultOkPayloadError(t *testing.T) {
 		Ok:  &bintype.TypeRef{Primitive: "u32"},
 		Err: &bintype.TypeRef{Primitive: "u32"},
 	}
-	err := storeResult(mem, 0, ResultValue{IsErr: false, Payload: "bad"}, desc, 0, nil, okRealloc)
+	_, err := storeResult(mem, 0, ResultValue{IsErr: false, Payload: "bad"}, desc, 0, nil, okRealloc)
 	if err == nil {
 		t.Error("expected error for storeResult ok payload store failure")
 	}
@@ -487,7 +487,7 @@ func TestStoreResultErrPayloadError(t *testing.T) {
 		Ok:  &bintype.TypeRef{Primitive: "u32"},
 		Err: &bintype.TypeRef{Primitive: "u32"},
 	}
-	err := storeResult(mem, 0, ResultValue{IsErr: true, Payload: "bad"}, desc, 0, nil, okRealloc)
+	_, err := storeResult(mem, 0, ResultValue{IsErr: true, Payload: "bad"}, desc, 0, nil, okRealloc)
 	if err == nil {
 		t.Error("expected error for storeResult err payload store failure")
 	}
@@ -579,7 +579,7 @@ func mustStoreInt(t *testing.T, mem []byte, ptr uint32, v any, nbytes uint32) {
 // sanity: error messages are wrapped (spot-check a couple)
 func TestErrorMessagesWrapped(t *testing.T) {
 	mem := make([]byte, 100)
-	err := storeList(mem, 0, []Value{"bad"}, bintype.PrimitiveDesc{Prim: "u32"}, nil, okRealloc)
+	_, err := storeList(mem, 0, []Value{"bad"}, bintype.PrimitiveDesc{Prim: "u32"}, nil, okRealloc)
 	if err == nil || !strings.Contains(err.Error(), "storeList") {
 		t.Errorf("expected wrapped storeList error, got %v", err)
 	}

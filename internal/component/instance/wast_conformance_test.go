@@ -24,18 +24,17 @@ import (
 // bug invisible: issue #25 (buildPassthroughShim rejecting an empty export
 // name) silently skipped fused.0 and fused.3 -- the official suite reproduced
 // the reporter's failure all along, and the suite still reported PASS.
-var wastKnownSkips = map[string]map[string]string{
-	"types": {
-		"types.11.wasm": "component instantiate-arg of sort 0x4 (component type) is not resolved yet",
-	},
-	"fused": {
-		"fused.22.wasm": "a nested component's imported-instance func type is not in the importing component's type space",
-		"fused.23.wasm": "a nested component that defines no core module of its own (core instance references the parent's)",
-	},
-	"resources": {
-		"resources.14.wasm": "a component instantiate-arg naming an IMPORTED (not nested-instantiated) instance",
-	},
-}
+//
+// It is now EMPTY: every vendored module of every suite instantiates. The last
+// four (types.11, fused.22, fused.23, resources.14) were all a nested component
+// naming a definition an ENCLOSING component owns, and closing them meant
+// modelling the two index spaces this package still equated with a single
+// binary section -- the core module space (coremodulespace.go) and the
+// component space (componentspace.go) -- plus a decode-time Component.Outer
+// link so an `alias outer` resolves, an instance-sort instantiate-arg that
+// names an imported instance, and (fused.22's second, unrelated half) masking
+// flags to their label count on lift.
+var wastKnownSkips = map[string]map[string]string{}
 
 // TestWastConformance runs the official WebAssembly/component-model canonical-ABI
 // conformance suites (test/values/*.wast) through wazy. Each .wast was split by

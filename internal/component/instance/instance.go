@@ -174,7 +174,11 @@ type Instance struct {
 	// has always cached this (boundExport.reallocCall); this is the same fact
 	// for the guest->host direction, which cannot cache it at bind time
 	// because the calling module is only known per call.
-	reallocCalls sync.Map // api.Module -> reallocCall
+	// The value is a moduleRealloc, not a bare reallocCall: the abi.Realloc
+	// also needs a live-memory accessor (abi.Realloc.Mem), and minting that
+	// closure per host call would put back exactly the allocation this memo
+	// exists to remove.
+	reallocCalls sync.Map // api.Module -> moduleRealloc
 
 	// --- CallAsync (host-side non-blocking calls, callasync.go) ---
 	asyncActive atomic.Bool       // a CallAsync is outstanding; external AsyncCall.Resolve queues instead of erroring
@@ -192,6 +196,28 @@ type Instance struct {
 	// exports' keys follow the "instance#member" convention); never mutated
 	// afterward, so concurrent CallExport calls read it safely with no lock.
 	instanceExports map[string]map[string]instanceExportEntry
+
+	// reexposedInstances maps an instance-export name THIS component
+	// publishes to the instance that actually DEFINES that interface, plus
+	// the name that instance publishes it under. Filled in only for an
+	// export that is an instance ALIAS projecting a nested sub-Instance's
+	// interface (bindInstanceExportGraph's projection arm) -- i.e. only for a
+	// component that merely republishes an interface it composed in. nil for
+	// a component that defines every interface it exports, which is every
+	// component that is not itself the output of a composer.
+	//
+	// It is boundExport.home's counterpart for the one fact home cannot
+	// carry: a types-only interface (a record or a resource and no funcs)
+	// produces no boundExport at all, yet a FURTHER composition taking that
+	// interface as an instantiate-arg still has to line its resources up
+	// against the definer's tables, tags and destructors rather than against
+	// this component's, which has no entry for them at all. Transitive like
+	// home is: a chain of wrappers records the deepest owner, so resolving
+	// ownership costs one lookup at any depth.
+	//
+	// Written once during instantiation and never mutated afterward, so
+	// concurrent CallExport calls read it safely with no lock.
+	reexposedInstances map[string]reexposedIface
 
 	// closers are every module instantiated for this component (core guest
 	// modules and synthetic host modules), closed in reverse order by Close.
@@ -490,24 +516,67 @@ type boundExport struct {
 	// today -- see resolveReallocFuncGraph's doc.
 	reallocMod api.Module
 
-	// home is the *Instance this export's async runtime state (activeTask,
-	// exclusiveHeld, mayEnter, numWaitingToEnter, ...) actually lives on --
-	// set only when this boundExport was reached by re-exporting a NESTED
-	// component instance's export directly through a func alias
-	// (bindFuncExportGraph's isLift==false branch), rather than bound by a
-	// real `canon lift` against the Instance that will eventually dispatch
-	// it. nil in the overwhelmingly common case (an export's home IS
-	// whatever Instance calls invoke() on it), where invoke() uses itself.
-	// Needed because sched is the only per-composition-tree-shared async
-	// field; activeTask/exclusiveHeld/mayEnter/numWaitingToEnter are
-	// per-Instance, so a root component that only wraps and re-exports a
-	// nested component's async export (the async .wast suites' standard
-	// shape: an outer anonymous component instantiating $C/$D and
-	// `(alias export $d "run")`-ing $D's export back out) must dispatch
-	// invokeAsyncCallback/invokeStackful against $D's OWN Instance, not the
-	// root's -- every blocking builtin's closure was bound against $D's
-	// Instance at $D's own instantiation time.
+	// home is the *Instance that DEFINES this export -- the one whose own
+	// `canon lift` produced this boundExport -- recorded whenever that is NOT
+	// the Instance holding it in its exports map. It is set every time a
+	// boundExport is re-exposed out of a nested sub-Instance, either through
+	// a func alias naming it (bindFuncExportGraph's isLift==false branch) or
+	// as one member of an instance alias projecting a whole interface
+	// (bindInstanceExportGraph's projection arm) -- between them, the shape
+	// every composed component republishes its inner halves' exports with.
+	// nil in the overwhelmingly common case, where an export's owner IS
+	// whatever Instance calls invoke() on it.
+	//
+	// The owner is what the whole call has to run against, because the whole
+	// call was bound against it:
+	//
+	//   - Its async runtime state (activeTask, exclusiveHeld, mayEnter,
+	//     numWaitingToEnter, ...) is per-Instance -- sched is the only
+	//     per-composition-tree-shared async field -- and every blocking
+	//     builtin's closure was bound against the definer at ITS own
+	//     instantiation time, so invoke() must dispatch
+	//     invokeAsyncCallback/invokeStackful there (the async .wast suites'
+	//     standard shape: an outer anonymous component instantiating $C/$D
+	//     and `(alias export $d "run")`-ing $D's export back out).
+	//   - The same holds for a plain SYNC lift whose definer binds a canon
+	//     that resolves the current task at call time (task.return,
+	//     context.get/set, backpressure.inc/dec, waitable-set.wait/poll, or a
+	//     thread.* canon): invokeEntered installs its syncImplicit task on
+	//     whichever Instance runs the call, while those closures read the
+	//     DEFINER's activeTask.
+	//   - lowerParams/liftResult mint and reduce this export's own<R>/
+	//     borrow<R> handles in in.resources, tagged through in.resCanon and
+	//     in.isGuestResource, and the fd states the DEFINER's resource type
+	//     indices. A component that merely republishes an interface has no
+	//     entry for those resources at all: it never composed them into
+	//     itself.
+	//   - Resolving fd's nested TypeRefs needs the definer's TypeSpace; see
+	//     the resolve field just above, which carries exactly that. Routing
+	//     invoke() to the owner is what makes `in.resolve == be.resolve` hold
+	//     inside invokeEntered, so every in.resolve site there is right for
+	//     free.
+	//
+	// Set unconditionally, where an earlier version set it only for the async
+	// shapes that first needed it. A wrapper re-exposing a plain SYNC lift is
+	// precisely what `wac compose` and `wasm-tools compose` emit, and a
+	// SECOND composition over such a wrapper must reach past it to the real
+	// definer for all four reasons above -- see reexposedSubExport, which
+	// records this, for what went wrong without it. Only set when it is not
+	// already set, so a MULTI-level re-export keeps pointing at the deepest
+	// true owner rather than at the intermediate wrapper.
 	home *Instance
+
+	// homeName is the export key `home` files this boundExport under in its
+	// OWN exports map -- an "iface#member" key or a bare func name. Set
+	// together with home, and needed alongside it because the two names need
+	// not agree: nothing in the binary format ties a re-exposing wrapper's
+	// export name to the name the definer publishes the same export under, so
+	// a composer may rename an interface (or a bare func) at every level. See
+	// instanceArgTarget.projection for the identical independence one level
+	// down. Consulted through ownerOf by everything that has to invoke the
+	// export on its owner -- delegatingHostImport and guestAsyncTarget --
+	// both to look it up there and to name it in a diagnostic.
+	homeName string
 
 	// asyncCallback is true when this export is an async lift with a
 	// callback option (CanonOpt kind 0x06 async + 0x07 callback) -- see
@@ -559,6 +628,19 @@ type boundExport struct {
 	// literal rather than a fresh closure. nil when the module exports no
 	// cabi_realloc (then abi.Realloc.grow fails loud).
 	reallocCall func(context.Context, uint32, uint32, uint32, uint32) (uint32, error)
+
+	// memFn is the live-memory accessor the per-invoke abi.Realloc carries
+	// (abi.Realloc.Mem), built once here for the same reason reallocCall is:
+	// cachedReallocOf must stay a plain struct literal with no closure
+	// allocation on the hot lowering path.
+	//
+	// It is built from be.mod, NEVER from be.reallocMod. When a canon lift's
+	// realloc option targets a different core instance (see reallocMod's doc,
+	// cross-abi-calls.wast's $Memory/$Core split) the realloc lives on one
+	// module and the MEMORY being written on another; taking the accessor from
+	// the realloc's module would compile, pass every same-instance test, and
+	// silently refresh from the wrong linear memory.
+	memFn func() []byte
 
 	// The fields below cache fd's ABI flattening / type resolution, computed
 	// once at bind time (finalizeBoundExport) instead of on every invoke()
@@ -1099,6 +1181,7 @@ func finalizeBoundExport(be *boundExport, resolve abi.Resolver, abiCache *Compil
 	}
 	be.reallocFn = rmod.ExportedFunction(reallocName)
 	be.reallocCall = coreReallocCall(be.reallocFn)
+	be.memFn = memAccessorOf(be.mod) // be.mod, not rmod -- see memFn's doc
 	if be.coreFn != nil {
 		be.coreResultCount = len(be.coreFn.Definition().ResultTypes())
 	}
@@ -1574,6 +1657,16 @@ func instanceExportKey(instanceName, memberName string) string {
 	return instanceName + "#" + memberName
 }
 
+// reexposedIface names the true owner of an interface a component only
+// re-exposes: the *Instance that defines it, plus that instance's OWN export
+// name for it. Both halves are load-bearing -- the two names need not agree,
+// since a composer may rename an interface between composition levels. See
+// Instance.reexposedInstances.
+type reexposedIface struct {
+	owner *Instance
+	name  string
+}
+
 // instanceExportEntry pairs a boundExport with the exact "instance#member"
 // string it was bound under in the flat exports map (reused verbatim, not
 // rebuilt) -- see buildInstanceExportIndex.
@@ -1611,11 +1704,13 @@ func buildInstanceExportIndex(exports map[string]*boundExport) map[string]map[st
 }
 
 func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName string, args []abi.Value) ([]abi.Value, error) {
-	// A boundExport reached by re-exporting a nested instance's export
-	// through a func alias carries its own async home (be.home's doc) --
-	// dispatch the async paths against THAT Instance, not the caller's; the
-	// plain sync path below never touches per-Instance async state, so it's
-	// unaffected either way.
+	// A boundExport re-exposed out of a nested instance names its true owner
+	// (be.home's doc) -- run the call against THAT Instance, not against
+	// whichever component republished the export. Everything below this point
+	// reads per-Instance state the definer owns and the republisher does not:
+	// the async dispatch paths' runtime state, poisoning, and (through
+	// invokeEntered) the syncImplicit task plus the handle table, resource
+	// tags and resolver lowerParams/liftResult work in.
 	target := in
 	if be.home != nil {
 		target = be.home
@@ -2120,10 +2215,53 @@ func memoryBytesOf(mod api.Module) (buf []byte, ok bool) {
 	return buf, true
 }
 
+// memAccessorOf builds the abi.Realloc.Mem accessor for mod: a closure that
+// returns a LIVE view of mod's linear memory every time it is called. nil when
+// mod has no memory, which abi treats as "cannot refresh" (it then keeps the
+// caller's own slice, i.e. the pre-refresh behavior).
+//
+// The typed-nil probe happens ONCE, here, rather than on every allocation:
+// memoryBytesOf carries a defer+recover to absorb the panic wazy's
+// Module.Memory() raises for a module with no memory, and paying a deferred
+// recover plus an interface call per string/list lowered is not acceptable on
+// this path. Once the probe has established that mod really does have a memory,
+// api.Memory is stable for the module's lifetime and the accessor is a bare
+// Read -- no defer, no re-lookup.
+//
+// Read(0, Size()) is deliberately re-evaluated per call: on an in-capacity grow
+// the backing array is the same one but LONGER, and on a relocating grow it is
+// a different array entirely; only re-reading catches both.
+//
+// It shares memoryBytesOf's pre-existing memory64 limitation -- Size() is a
+// uint32, so a memory at or past 4 GiB reports 0 and yields an empty view. That
+// is the behavior every other caller here already gets; widening it to
+// Size64/Read64 changes what memory64 components see and belongs in its own
+// change, not folded into a staleness fix.
+func memAccessorOf(mod api.Module) func() []byte {
+	if mod == nil {
+		return nil
+	}
+	if _, ok := memoryBytesOf(mod); !ok {
+		return nil
+	}
+	m := mod.Memory()
+	return func() []byte {
+		buf, ok := m.Read(0, m.Size())
+		if !ok {
+			return nil
+		}
+		return buf
+	}
+}
+
 // reallocOf returns the abi.Realloc backed by mod's "cabi_realloc" export, or
-// one that fails loudly (Call == nil) if mod doesn't export it.
+// one that fails loudly (Call == nil) if mod doesn't export it. Mem is wired to
+// mod's own memory so the abi layer can refresh its view across a grow; this
+// path mints both closures per call, which is fine off the guest-call hot path
+// (error-context, the stream/future builtins' bind-time setup, and
+// lowerHostResultsPlanned's fallback all reach it at most once per operation).
 func reallocOf(ctx context.Context, mod api.Module) abi.Realloc {
-	return abi.Realloc{Ctx: ctx, Call: coreReallocCall(mod.ExportedFunction("cabi_realloc"))}
+	return abi.Realloc{Ctx: ctx, Call: coreReallocCall(mod.ExportedFunction("cabi_realloc")), Mem: memAccessorOf(mod)}
 }
 
 // cachedReallocOf is reallocOf's boundExport-caching counterpart: the ctx-free
@@ -2132,7 +2270,7 @@ func reallocOf(ctx context.Context, mod api.Module) abi.Realloc {
 // allocation on the hot lowering path. A nil be.reallocCall (module exports no
 // cabi_realloc) makes Realloc.grow fail loud, matching reallocOf.
 func cachedReallocOf(ctx context.Context, be *boundExport) abi.Realloc {
-	return abi.Realloc{Ctx: ctx, Call: be.reallocCall}
+	return abi.Realloc{Ctx: ctx, Call: be.reallocCall, Mem: be.memFn}
 }
 
 // coreReallocCall wraps an already-resolved cabi_realloc api.Function as the
@@ -2164,6 +2302,15 @@ func coreReallocCall(fn api.Function) func(context.Context, uint32, uint32, uint
 // reallocCall is the ctx-free realloc closure an abi.Realloc holds.
 type reallocCall = func(context.Context, uint32, uint32, uint32, uint32) (uint32, error)
 
+// moduleRealloc is everything an abi.Realloc needs about one core module,
+// resolved once and memoized in Instance.reallocCalls: the cabi_realloc
+// callback and the live-memory accessor. Both are nil-tolerant (no realloc
+// export / no memory).
+type moduleRealloc struct {
+	call reallocCall
+	mem  func() []byte
+}
+
 // reallocFor is reallocOf with the export resolution memoized per module.
 //
 // Caching the resolved function for the instance's lifetime is what
@@ -2176,20 +2323,31 @@ func (in *Instance) reallocFor(ctx context.Context, mod api.Module) abi.Realloc 
 		return reallocOf(ctx, mod)
 	}
 	if v, ok := in.reallocCalls.Load(mod); ok {
-		call, _ := v.(reallocCall)
-		return abi.Realloc{Ctx: ctx, Call: call}
+		mr, _ := v.(moduleRealloc)
+		return abi.Realloc{Ctx: ctx, Call: mr.call, Mem: mr.mem}
 	}
-	call := coreReallocCall(mod.ExportedFunction("cabi_realloc"))
-	in.reallocCalls.Store(mod, call)
-	return abi.Realloc{Ctx: ctx, Call: call}
+	mr := moduleRealloc{call: coreReallocCall(mod.ExportedFunction("cabi_realloc")), mem: memAccessorOf(mod)}
+	in.reallocCalls.Store(mod, mr)
+	return abi.Realloc{Ctx: ctx, Call: mr.call, Mem: mr.mem}
 }
 
 // reallocOfFunc builds an abi.Realloc for a caller that already resolved the
 // exact realloc func to call (e.g. buildHostWrapper, via a canon lower's own
 // "realloc" CanonOpt). Unlike the guest-export path it builds the Call closure
 // per use, which is fine off the guest-call hot path.
-func reallocOfFunc(ctx context.Context, fn api.Function) abi.Realloc {
-	return abi.Realloc{Ctx: ctx, Call: coreReallocCall(fn)}
+//
+// memMod is the module whose linear memory is being written -- which is NOT
+// necessarily the module fn was resolved from. A canon's memory and realloc
+// options are independent core func/memory indices and may name different core
+// instances (graph.go's resolveReallocFuncGraph); taking the memory accessor
+// from fn's module would refresh from the wrong memory. Every caller already
+// has the memory module in hand (it is the same one it passes to
+// memoryBytesOf), so it is passed explicitly rather than derived. A nil memMod
+// (a bare elementless stream/future, whose canon carries no memory opt) yields
+// a nil Mem, i.e. "cannot refresh" -- correct, because such a copy never
+// touches memory at all.
+func reallocOfFunc(ctx context.Context, fn api.Function, memMod api.Module) abi.Realloc {
+	return abi.Realloc{Ctx: ctx, Call: coreReallocCall(fn), Mem: memAccessorOf(memMod)}
 }
 
 // funcResultTypeRefs normalizes FuncResults (unnamed-or-named) into a slice of

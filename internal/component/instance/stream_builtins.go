@@ -440,7 +440,7 @@ func streamCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 		// memory opt and the runtime caller supplied none).
 		var realloc abi.Realloc
 		if reallocFn != nil {
-			realloc = reallocOfFunc(ctx, reallocFn)
+			realloc = reallocOfFunc(ctx, reallocFn, m)
 		} else if m != nil {
 			realloc = reallocOf(ctx, m)
 		}
@@ -563,7 +563,7 @@ func futureCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 		// memory opt and the runtime caller supplied none).
 		var realloc abi.Realloc
 		if reallocFn != nil {
-			realloc = reallocOfFunc(ctx, reallocFn)
+			realloc = reallocOfFunc(ctx, reallocFn, m)
 		} else if m != nil {
 			realloc = reallocOf(ctx, m)
 		}

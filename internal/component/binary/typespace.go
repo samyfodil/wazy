@@ -73,13 +73,14 @@ const maxTypeAliasDepth = 32
 // It follows alias chains where this decoder has enough structure to do so:
 // an "export" alias (TargetKind 0x00) naming a type-sort entry inline-exported
 // by one of this component's own instances (Instances, section 5, Kind
-// 0x01), and a self-referential "outer" alias (TargetKind 0x02, OuterCount
-// 0) into this same component's TypeSpace. Anything else this decoder
+// 0x01), and an "outer" alias (TargetKind 0x02) -- both the self-referential
+// form (OuterCount 0, another index in this same TypeSpace) and a genuine
+// de Bruijn reference into an ENCLOSING component's type index space, which
+// walks Component.Outer OuterCount times. Anything else this decoder
 // cannot follow structurally -- most notably a type exported from an
 // *imported* instance (the common real-guest shape, e.g. `alias export
 // $streams "output-stream" (type $ot)`; this package does not decode nested
-// type declarations inside an imported instance type) or an alias into a
-// genuinely enclosing (nested-component) scope -- fails loud with an error
+// type declarations inside an imported instance type) -- fails loud with an error
 // naming the index and the reason, rather than returning a zero value or
 // panicking. That is the correct outcome for such an index: as documented
 // on OwnDesc/BorrowDesc, own/borrow handle types only ever use their
@@ -228,12 +229,24 @@ func (c *Component) resolveAlias(al AliasDef, idx uint32, depth int) (TypeDesc, 
 		return nil, fmt.Errorf("type index %d: alias exports %q from instance %d, which this decoder cannot resolve structurally (an imported instance, or a locally-instantiated instance whose nested type declarations are not decoded)", idx, al.Name, al.InstanceIdx)
 
 	case 0x02: // outer
-		if al.OuterCount == 0 {
-			// A self-referential "outer" (count 0) is just another index
-			// into this same component's TypeSpace.
-			return c.resolveTypeDepth(al.OuterIndex, depth+1)
+		// The de Bruijn count is the number of enclosing components to skip:
+		// 0 is this same component (Explainer.md permits it), 1 the component
+		// this one is nested in, and so on. Walk Component.Outer that many
+		// times and resolve OuterIndex in the component we land on -- which
+		// is a plain index in ITS type index space, not this one's.
+		//
+		// A nested component built by wit-component routinely does this to
+		// re-export a type its parent defines (fused.22.wast's `$c1` aliases
+		// all six of the root's flags types), so failing here made those
+		// components uninstantiable.
+		outer := c
+		for i := uint32(0); i < al.OuterCount; i++ {
+			if outer.Outer == nil {
+				return nil, fmt.Errorf("type index %d: outer alias (count=%d) targets %d enclosing component(s), but only %d are known (this component was decoded standalone, or is hand-built)", idx, al.OuterCount, al.OuterCount, i)
+			}
+			outer = outer.Outer
 		}
-		return nil, fmt.Errorf("type index %d: outer alias (count=%d) targets an enclosing component's type index space, which this decoder does not decode (nested/enclosing components are not decoded by this milestone)", idx, al.OuterCount)
+		return outer.resolveTypeDepth(al.OuterIndex, depth+1)
 
 	default:
 		// TargetKind 0x01 (core export) cannot legally carry a type-sort

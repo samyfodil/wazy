@@ -8,7 +8,7 @@ asmfmt        := github.com/klauspost/asmfmt/cmd/asmfmt@v1.3.2
 all_sources   := $(wildcard *.go */*.go */*/*.go */*/*/*.go */*/*/*.go */*/*/*/*.go)
 all_testdata  := $(wildcard testdata/* */testdata/* */*/testdata/* */*/testdata/*/* */*/*/testdata/*)
 all_testing   := $(wildcard internal/testing/* internal/testing/*/* internal/testing/*/*/*)
-all_examples  := $(wildcard examples/* examples/*/* examples/*/*/* */*/example/* */*/example/*/* */*/example/*/*/*)
+all_examples  := $(wildcard examples/* examples/*/* examples/*/*/* examples/*/*/*/* examples/*/*/*/*/* */*/example/* */*/example/*/* */*/example/*/*/*)
 all_it        := $(wildcard internal/integration_test/* internal/integration_test/*/* internal/integration_test/*/*/*)
 # main_sources exclude any test or example related code
 main_sources  := $(wildcard $(filter-out %_test.go benchmarks/% $(all_testdata) $(all_testing) $(all_examples) $(all_it), $(all_sources)))

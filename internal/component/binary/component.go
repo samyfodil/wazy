@@ -40,8 +40,27 @@ type Component struct {
 	// order across sections. See componentinstancespace.go.
 	ComponentInstanceSpace []ComponentInstanceSpaceEntry
 
-	// CoreModules are embedded core wasm modules (section 1).
+	// ComponentSpace is the component's COMPONENT index space, one entry per
+	// component-producing definition (component import / nested component
+	// definition / component alias / component export) in overall declaration
+	// order across sections. An instance definition's ComponentIdx indexes
+	// this, not NestedComponents. See componentspace.go.
+	ComponentSpace []ComponentSpaceEntry
+
+	// CoreModules are embedded core wasm modules (section 1) only, in that
+	// section's declaration order. This is NOT the core module index space a
+	// core:instance's ModuleIdx indexes -- that space also includes core-
+	// module outer aliases (section 6, sort core 0x00 / core:sort module
+	// 0x11), interleaved with CoreModules in overall declaration order. See
+	// CoreModuleSpace and ResolveCoreModule.
 	CoreModules []CoreModule
+
+	// CoreModuleSpace is the component's core module index space: one entry
+	// per core-module-index-producing definition (section-1 embedded module or
+	// section-6 core-module outer alias), in overall declaration order. Use
+	// ResolveCoreModule rather than indexing CoreModules directly. See
+	// coremodulespace.go.
+	CoreModuleSpace []CoreModuleSpaceEntry
 
 	// CoreInstances instantiate core modules with arguments (section 2).
 	CoreInstances []CoreInstance
@@ -67,6 +86,19 @@ type Component struct {
 	// internal/component/instance fails loud rather than trying to
 	// instantiate them.
 	NestedComponents []*Component
+
+	// Outer is the component this one was decoded from as a section-4 nested
+	// component (nil for a top-level component). It is what makes an
+	// `alias outer <count> <idx>` with count > 0 resolvable: the de Bruijn
+	// count is a number of enclosing components to skip, so resolution walks
+	// this link that many times and then indexes the resulting component's
+	// index space of the aliased sort. See ResolveType (typespace.go) and
+	// ResolveCoreModule (coremodulespace.go).
+	//
+	// This makes the Component graph CYCLIC (parent -> NestedComponents ->
+	// Outer -> parent). reflect.DeepEqual copes; fmt's %#v does not, so never
+	// dump a whole Component with it.
+	Outer *Component
 
 	// Aliases bring names into scope (section 6).
 	Aliases []AliasDef

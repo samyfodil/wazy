@@ -182,7 +182,7 @@ func TestStoreAllPrimitives(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mem := make([]byte, 100)
-			err := storePrimitive(mem, 0, tt.prim, tt.value, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
+			_, err := storePrimitive(mem, 0, tt.prim, tt.value, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
 			if err != nil {
 				t.Errorf("Store failed: %v", err)
 				return
@@ -208,7 +208,7 @@ func TestRecordWithMultipleFields(t *testing.T) {
 	resolve := func(idx uint32) bintype.TypeDesc { return nil }
 	value := []Value{uint32(1), uint32(0x12345678), uint32(0x1234)}
 
-	err := storeRecord(mem, 0, value, desc, resolve, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
+	_, err := storeRecord(mem, 0, value, desc, resolve, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
 	if err != nil {
 		t.Errorf("storeRecord failed: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestTupleWithMultipleElements(t *testing.T) {
 	resolve := func(idx uint32) bintype.TypeDesc { return nil }
 	value := []Value{uint32(1), uint32(0x12345678), uint32(0x1234)}
 
-	err := storeTuple(mem, 0, value, desc, resolve, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
+	_, err := storeTuple(mem, 0, value, desc, resolve, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
 	if err != nil {
 		t.Errorf("storeTuple failed: %v", err)
 	}
@@ -269,7 +269,7 @@ func TestVariantWithPayload(t *testing.T) {
 
 	// Test case 0 with payload
 	value := VariantValue{Disc: 0, Payload: uint32(42)}
-	err := storeVariant(mem, 0, value, desc, 0, resolve, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
+	_, err := storeVariant(mem, 0, value, desc, 0, resolve, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 0, nil }))
 	if err != nil {
 		t.Errorf("storeVariant case 0 failed: %v", err)
 	}
@@ -289,7 +289,7 @@ func TestVariantWithPayload(t *testing.T) {
 func TestEmptyString(t *testing.T) {
 	mem := make([]byte, 100)
 
-	err := storeString(mem, 0, "", ReallocFunc(func(_, _, _, _ uint32) (uint32, error) {
+	_, err := storeString(mem, 0, "", ReallocFunc(func(_, _, _, _ uint32) (uint32, error) {
 		return 100, nil
 	}))
 	if err != nil {
@@ -414,10 +414,10 @@ func TestStoreValueAlignArgMatchesDerived(t *testing.T) {
 			for _, ptr := range []uint32{0, align * 3} {
 				fast := make([]byte, 8192)
 				slow := make([]byte, 8192)
-				if err := storeValue(fast, ptr, tt.desc, tt.val, align, resolve, okRealloc); err != nil {
+				if _, err := storeValue(fast, ptr, tt.desc, tt.val, align, resolve, okRealloc); err != nil {
 					t.Fatalf("storeValue(align=%d) at ptr %d: %v", align, ptr, err)
 				}
-				if err := storeValue(slow, ptr, tt.desc, tt.val, 0, resolve, okRealloc); err != nil {
+				if _, err := storeValue(slow, ptr, tt.desc, tt.val, 0, resolve, okRealloc); err != nil {
 					t.Fatalf("storeValue(align=0) at ptr %d: %v", ptr, err)
 				}
 				if !bytes.Equal(fast, slow) {
