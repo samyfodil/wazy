@@ -917,3 +917,26 @@ func resultDescs(be *boundExport) []binary.TypeDesc {
 	}
 	return nil
 }
+
+// componentExportsInstance reports whether comp declares an instance-typed
+// export named name.
+//
+// It exists to tell two cases apart at a projection site: a provider that has
+// no such export at all (a real error) and one whose exported interface simply
+// carries no functions -- an `interface` declaring only a record or a resource,
+// which is ordinary WIT. Only func exports become "iface#member" keys in
+// buildInstanceExportIndex, so a types-only interface is absent from
+// instanceExports even though the component genuinely exports it, and treating
+// that absence as "no such export" made every composition over such an
+// interface fail to instantiate.
+func componentExportsInstance(comp *binary.Component, name string) bool {
+	if comp == nil {
+		return false
+	}
+	for i := range comp.Exports {
+		if comp.Exports[i].Name == name && comp.Exports[i].ExternType == 0x05 {
+			return true
+		}
+	}
+	return false
+}

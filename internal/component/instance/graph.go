@@ -1018,6 +1018,15 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 					// -- the one place the X != Y distinction is load-bearing.
 					members, mok := sib.instanceExports[tgt.projection[0]]
 					if !mok {
+						// Only func exports become "X#member" keys, so an
+						// interface carrying just a record or a resource is
+						// absent here even though it is genuinely exported.
+						// Bind nothing and continue: there are no functions to
+						// wire, and the types themselves travel through the
+						// resource plumbing above, not through imports.
+						if componentExportsInstance(sib.comp, tgt.projection[0]) {
+							continue
+						}
 						failClose()
 						return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q: instance %d projects the export %q of nested instance %d, which exports no such instance", compInstIdx, arg.Name, arg.SortIdx, tgt.projection[0], tgt.spaceIdx)
 					}
@@ -2462,6 +2471,11 @@ func bindInstanceExportGraph(comp *binary.Component, exp binary.Export, componen
 		}
 		members, ok := sub.instanceExports[tgt.projection[0]]
 		if !ok {
+			// A types-only interface has no func members to re-expose; see the
+			// matching arm in instantiateNestedInstances.
+			if componentExportsInstance(sub.comp, tgt.projection[0]) {
+				return nil
+			}
 			return fmt.Errorf("component/instance: export %q references instance %d, which projects the export %q of nested instance %d; that instance exports no such instance", exp.Name, exp.ExternIndex, tgt.projection[0], tgt.spaceIdx)
 		}
 		for member, entry := range members {
