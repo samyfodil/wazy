@@ -47,7 +47,7 @@ var scalarListCases = []struct {
 func storeElems(t *testing.T, mem []byte, ptr uint32, prim string, size uint32, elems []Value) {
 	t.Helper()
 	for i, e := range elems {
-		if err := storePrimitive(mem, ptr+uint32(i)*size, prim, e, Realloc{}); err != nil {
+		if _, err := storePrimitive(mem, ptr+uint32(i)*size, prim, e, Realloc{}); err != nil {
 			t.Fatalf("storePrimitive %s[%d]: %v", prim, i, err)
 		}
 	}
@@ -113,7 +113,7 @@ func TestScalarListRoundTrip(t *testing.T) {
 
 			// Store it back into a fresh arena through the typed path.
 			out := make([]byte, 256)
-			gotPtr, gotN, handled, err := storeScalarList(out, typed, tc.prim, bumpRealloc(64))
+			gotPtr, gotN, _, handled, err := storeScalarList(out, typed, tc.prim, bumpRealloc(64))
 			if err != nil {
 				t.Fatalf("store: %v", err)
 			}
@@ -143,7 +143,7 @@ func TestScalarListStoreAcceptsValueShape(t *testing.T) {
 			mem := make([]byte, 256)
 			elemType := binary.PrimitiveDesc{Prim: tc.prim}
 
-			ptr, n, err := allocStoreAnyList(mem, tc.elems, elemType, nil, bumpRealloc(64))
+			ptr, n, _, err := allocStoreAnyList(mem, tc.elems, elemType, nil, bumpRealloc(64))
 			if err != nil {
 				t.Fatalf("store []Value: %v", err)
 			}
@@ -171,7 +171,7 @@ func TestScalarListLeavesAggregatesAlone(t *testing.T) {
 			if _, handled, _ := liftScalarList(nil, 0, 0, prim); handled {
 				t.Errorf("%s should not have a typed slice", prim)
 			}
-			if _, _, handled, _ := storeScalarList(nil, []Value{}, prim, Realloc{}); handled {
+			if _, _, _, handled, _ := storeScalarList(nil, []Value{}, prim, Realloc{}); handled {
 				t.Errorf("%s should not be stored by the typed path", prim)
 			}
 		})
@@ -210,7 +210,7 @@ func TestScalarListCharValidation(t *testing.T) {
 		t.Error("a code point above the Unicode range should not lift")
 	}
 
-	if _, _, _, err := storeScalarList(make([]byte, 32), []rune{0xD800}, "char", bumpRealloc(0)); err == nil {
+	if _, _, _, _, err := storeScalarList(make([]byte, 32), []rune{0xD800}, "char", bumpRealloc(0)); err == nil {
 		t.Error("a surrogate half should not store as a char")
 	}
 }
@@ -293,7 +293,7 @@ func TestSignedByteLiftsSigned(t *testing.T) {
 		if got != int32(v) {
 			t.Errorf("s8 %d lifted as %d", v, got)
 		}
-		if err := storePrimitive(mem, 8, "s8", lifted, Realloc{}); err != nil {
+		if _, err := storePrimitive(mem, 8, "s8", lifted, Realloc{}); err != nil {
 			t.Errorf("storing back the lifted s8 %d: %v", v, err)
 		}
 	}

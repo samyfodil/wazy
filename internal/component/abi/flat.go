@@ -77,6 +77,24 @@ func LowerFlatInto(dst []CoreValue, v Value, t binary.TypeDesc, resolve Resolver
 // deeply-cased variant (wasi:http's error-code is the motivating shape) from
 // re-running the full Flatten tree-walk -- and its per-case allocations --
 // on every call.
+//
+// LOAD-BEARING INVARIANT -- no lowerFlat* frame may write through `mem`.
+//
+// mem here is a SNAPSHOT that is valid only until the next allocation. Every
+// lowerFlat* function below hands the same snapshot to each of its children
+// (lowerFlatRecord's field loop, lowerFlatTuple's element loop,
+// lowerFlatVariant/Option/Result's payload), so once field 0 is a string or a
+// list, its realloc may have replaced the backing array and every later sibling
+// holds a dead slice. That is harmless ONLY because no frame in this tree
+// touches memory itself: the sole writers are allocStoreString,
+// allocStoreAnyList (and, beneath it, allocStoreList / storeScalarList /
+// encodeScalarList) and StoreStep.Spill/Store, each of which refreshes its own
+// view around its own grow via Realloc.GrowMem and bounds-checks against the
+// refreshed one. Unlike the store tree in memory.go, which threads the live
+// view back up through every return, this tree cannot be checked by the
+// compiler -- so any new lowerFlat* code that reads or writes `mem` directly
+// must obtain a fresh view first (realloc.Mem), or thread one the way
+// storeValue does.
 func lowerFlatImpl(v Value, t binary.TypeDesc, flat []string, resolve Resolver, realloc Realloc, mem []byte) ([]CoreValue, error) {
 	switch desc := t.(type) {
 	case binary.PrimitiveDesc:
@@ -257,7 +275,10 @@ func lowerPrimitiveCore(v Value, prim string) (CoreValue, error) {
 // store_string_into_range() -- the same allocate+copy helper storeString
 // uses for the Store/Load path (see allocStoreString in memory.go).
 func lowerFlatString(s string, realloc Realloc, mem []byte) ([]CoreValue, error) {
-	ptr, byteLen, err := allocStoreString(mem, s, realloc)
+	// The refreshed view allocStoreString returns is dropped: this frame does
+	// not write through mem, and neither does any lowerFlat* frame above it --
+	// see lowerFlatImpl's invariant.
+	ptr, byteLen, _, err := allocStoreString(mem, s, realloc)
 	if err != nil {
 		return nil, fmt.Errorf("lowerFlatString: %w", err)
 	}
@@ -275,7 +296,10 @@ func lowerFlatString(s string, realloc Realloc, mem []byte) ([]CoreValue, error)
 // store_list_into_range() -- the same allocate+store helper storeList uses
 // for the Store/Load path (see allocStoreList in memory.go).
 func lowerFlatList(v Value, elemType binary.TypeDesc, resolve Resolver, realloc Realloc, mem []byte) ([]CoreValue, error) {
-	ptr, length, err := allocStoreAnyList(mem, v, elemType, resolve, realloc)
+	// As in lowerFlatString: allocStoreAnyList (and, below it, allocStoreList's
+	// per-element loop) keeps its own view live; nothing here writes through
+	// mem, so the refreshed one is dropped.
+	ptr, length, _, err := allocStoreAnyList(mem, v, elemType, resolve, realloc)
 	if err != nil {
 		return nil, fmt.Errorf("lowerFlatList: %w", err)
 	}
@@ -623,7 +647,10 @@ func SpillValue(v Value, t binary.TypeDesc, mem []byte, resolve Resolver, reallo
 	return spillValue(v, t, mem, resolve, realloc)
 }
 
-// spillValue stores a value to memory and returns the pointer.
+// spillValue stores a value to memory and returns the pointer. The caller's
+// `mem` may be dead once this returns: the spill allocates (and each nested
+// string/list allocates again), which can replace the backing array. The write
+// itself is correct regardless -- StoreStep.Spill refreshes internally.
 func spillValue(v Value, t binary.TypeDesc, mem []byte, resolve Resolver, realloc Realloc) (uint32, error) {
 	s, err := CompileStore(t, resolve)
 	if err != nil {
@@ -1114,12 +1141,34 @@ func liftFlatTuple(vi valueIter, desc binary.TupleDesc, resolve Resolver, mem []
 }
 
 // liftFlatFlags lifts a flags value.
+//
+// The core i32 carries one bit per label in declaration order; bits ABOVE the
+// label count carry no meaning and are DISCARDED, never trapped on. That is
+// exactly the reference implementation's lift_flat_flags ->
+// unpack_flags_from_int (definitions.py), which shifts out one bit per label
+// and simply drops whatever is left. Returning the raw i32 instead handed the
+// consumer garbage high bits: fused.22.wast calls a 1-label flags import with
+// 0xFFFFFF01 and the callee asserts it observes exactly 1.
 func liftFlatFlags(vi valueIter, desc binary.FlagsDesc) (Value, error) {
+	// flattenFlagsNumLabels is the 1..32 label bound flagsBitMask relies on --
+	// checked here so a malformed descriptor fails loud instead of producing a
+	// nonsense shift.
+	if _, err := flattenFlagsNumLabels(len(desc.Names)); err != nil {
+		return nil, err
+	}
 	cv, err := vi.Next()
 	if err != nil {
 		return nil, err
 	}
-	return cv.AsI32(), nil
+	return cv.AsI32() & flagsBitMask(len(desc.Names)), nil
+}
+
+// flagsBitMask is the set of meaningful bits for a flags type with numLabels
+// labels -- the mask unpack_flags_from_int's per-label shift loop implies.
+// numLabels must already be in 1..32 (flattenFlagsNumLabels /
+// sizeFlagsNumLabels enforce that at every call site).
+func flagsBitMask(numLabels int) uint32 {
+	return ^uint32(0) >> (32 - uint(numLabels))
 }
 
 // liftFlatEnum lifts an enum value.

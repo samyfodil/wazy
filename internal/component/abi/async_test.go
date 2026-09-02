@@ -69,7 +69,7 @@ func TestStoreLoadStreamFutureErrorContextRoundTrip(t *testing.T) {
 		binary.PrimitiveDesc{Prim: "error-context"},
 	} {
 		mem := make([]byte, 8)
-		if err := storeValue(mem, 0, d, uint32(42), 0, nil, okRealloc); err != nil {
+		if _, err := storeValue(mem, 0, d, uint32(42), 0, nil, okRealloc); err != nil {
 			t.Fatalf("storeValue(%T): %v", d, err)
 		}
 		v, err := loadValue(mem, 0, d, nil)
@@ -89,7 +89,7 @@ func TestStoreStreamFutureErrorContextWrongType(t *testing.T) {
 		binary.PrimitiveDesc{Prim: "error-context"},
 	} {
 		mem := make([]byte, 8)
-		if err := storeValue(mem, 0, d, "not-a-handle", 0, nil, okRealloc); err == nil {
+		if _, err := storeValue(mem, 0, d, "not-a-handle", 0, nil, okRealloc); err == nil {
 			t.Errorf("storeValue(%T): expected error for non-uint32 value", d)
 		}
 	}

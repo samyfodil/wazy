@@ -152,162 +152,173 @@ func liftScalarList(mem []byte, ptr, length uint32, prim string) (v Value, handl
 }
 
 // encodeScalarList writes each element of in through enc into a freshly
-// allocated guest buffer, and returns its pointer and element count.
-func encodeScalarList[T any](mem []byte, in []T, elemSize, align uint32, realloc Realloc, enc func([]byte, T) error) (uint32, uint32, error) {
+// allocated guest buffer, and returns its pointer, its element count, and the
+// memory view valid AFTER the allocation.
+//
+// The allocation can move the backing array (see Realloc.Mem), so BOTH the
+// bounds check and `span` are derived from the refreshed slice -- slicing
+// `span` off the caller's pre-grow view, as this used to, hands the whole
+// element loop a window onto a detached array. The enc callbacks are pure byte
+// writers and cannot grow, so one refresh per call is enough here.
+func encodeScalarList[T any](mem []byte, in []T, elemSize, align uint32, realloc Realloc, enc func([]byte, T) error) (uint32, uint32, []byte, error) {
 	length := uint32(len(in))
 	if elemSize != 0 && length > (1<<32-1)/elemSize {
-		return 0, 0, fmt.Errorf("list length %d overflows at %d bytes per element", length, elemSize)
+		return 0, 0, mem, fmt.Errorf("list length %d overflows at %d bytes per element", length, elemSize)
 	}
 	byteLen := length * elemSize
 
-	ptr, err := realloc.Grow(0, 0, align, byteLen)
+	ptr, mem, err := realloc.GrowMem(mem, 0, 0, align, byteLen)
 	if err != nil {
-		return 0, 0, fmt.Errorf("realloc failed: %w", err)
+		return 0, 0, mem, fmt.Errorf("realloc failed: %w", err)
 	}
-	if ptr+byteLen < ptr || uint32(len(mem)) < ptr+byteLen {
-		return 0, 0, fmt.Errorf("allocated memory out of bounds: ptr=%d size=%d", ptr, byteLen)
+	if err := checkAllocated(mem, ptr, byteLen); err != nil {
+		return 0, 0, mem, err
 	}
 	span := mem[ptr : ptr+byteLen]
 	for i, v := range in {
 		if err := enc(span[uint32(i)*elemSize:], v); err != nil {
-			return 0, 0, err
+			return 0, 0, mem, err
 		}
 	}
-	return ptr, length, nil
+	return ptr, length, mem, nil
 }
 
 // storeScalarList stores a typed slice as a list of the matching primitive.
 // handled is false when v is not the typed slice for prim, which the caller
 // then stores from its []Value shape instead -- both shapes stay accepted.
-func storeScalarList(mem []byte, v Value, prim string, realloc Realloc) (ptr, n uint32, handled bool, err error) {
+// fresh is the memory view valid after the store (every arm allocates), so
+// allocStoreAnyList's caller doesn't carry on through a pre-grow snapshot. On
+// the handled == false fallthrough nothing was allocated and the caller's own
+// slice comes straight back.
+func storeScalarList(mem []byte, v Value, prim string, realloc Realloc) (ptr, n uint32, fresh []byte, handled bool, err error) {
 	switch prim {
 	case "u8":
 		b, ok := v.([]byte)
 		if !ok {
-			return 0, 0, false, nil
+			return 0, 0, mem, false, nil
 		}
-		ptr, n, err = allocStoreBytes(mem, b, realloc)
-		return ptr, n, true, err
+		ptr, n, mem, err = allocStoreBytes(mem, b, realloc)
+		return ptr, n, mem, true, err
 
 	case "s8":
 		in, ok := v.([]int8)
 		if !ok {
-			return 0, 0, false, nil
+			return 0, 0, mem, false, nil
 		}
-		ptr, n, err = encodeScalarList(mem, in, 1, 1, realloc, func(b []byte, e int8) error {
+		ptr, n, mem, err = encodeScalarList(mem, in, 1, 1, realloc, func(b []byte, e int8) error {
 			b[0] = byte(e)
 			return nil
 		})
-		return ptr, n, true, err
+		return ptr, n, mem, true, err
 
 	case "bool":
 		in, ok := v.([]bool)
 		if !ok {
-			return 0, 0, false, nil
+			return 0, 0, mem, false, nil
 		}
-		ptr, n, err = encodeScalarList(mem, in, 1, 1, realloc, func(b []byte, e bool) error {
+		ptr, n, mem, err = encodeScalarList(mem, in, 1, 1, realloc, func(b []byte, e bool) error {
 			b[0] = 0
 			if e {
 				b[0] = 1
 			}
 			return nil
 		})
-		return ptr, n, true, err
+		return ptr, n, mem, true, err
 
 	case "u16":
 		in, ok := v.([]uint16)
 		if !ok {
-			return 0, 0, false, nil
+			return 0, 0, mem, false, nil
 		}
-		ptr, n, err = encodeScalarList(mem, in, 2, 2, realloc, func(b []byte, e uint16) error {
+		ptr, n, mem, err = encodeScalarList(mem, in, 2, 2, realloc, func(b []byte, e uint16) error {
 			binary.LittleEndian.PutUint16(b, e)
 			return nil
 		})
-		return ptr, n, true, err
+		return ptr, n, mem, true, err
 
 	case "s16":
 		in, ok := v.([]int16)
 		if !ok {
-			return 0, 0, false, nil
+			return 0, 0, mem, false, nil
 		}
-		ptr, n, err = encodeScalarList(mem, in, 2, 2, realloc, func(b []byte, e int16) error {
+		ptr, n, mem, err = encodeScalarList(mem, in, 2, 2, realloc, func(b []byte, e int16) error {
 			binary.LittleEndian.PutUint16(b, uint16(e))
 			return nil
 		})
-		return ptr, n, true, err
+		return ptr, n, mem, true, err
 
 	case "u32":
 		in, ok := v.([]uint32)
 		if !ok {
-			return 0, 0, false, nil
+			return 0, 0, mem, false, nil
 		}
-		ptr, n, err = encodeScalarList(mem, in, 4, 4, realloc, func(b []byte, e uint32) error {
+		ptr, n, mem, err = encodeScalarList(mem, in, 4, 4, realloc, func(b []byte, e uint32) error {
 			binary.LittleEndian.PutUint32(b, e)
 			return nil
 		})
-		return ptr, n, true, err
+		return ptr, n, mem, true, err
 
 	case "s32":
 		in, ok := v.([]int32)
 		if !ok {
-			return 0, 0, false, nil
+			return 0, 0, mem, false, nil
 		}
-		ptr, n, err = encodeScalarList(mem, in, 4, 4, realloc, func(b []byte, e int32) error {
+		ptr, n, mem, err = encodeScalarList(mem, in, 4, 4, realloc, func(b []byte, e int32) error {
 			binary.LittleEndian.PutUint32(b, uint32(e))
 			return nil
 		})
-		return ptr, n, true, err
+		return ptr, n, mem, true, err
 
 	case "u64":
 		in, ok := v.([]uint64)
 		if !ok {
-			return 0, 0, false, nil
+			return 0, 0, mem, false, nil
 		}
-		ptr, n, err = encodeScalarList(mem, in, 8, 8, realloc, func(b []byte, e uint64) error {
+		ptr, n, mem, err = encodeScalarList(mem, in, 8, 8, realloc, func(b []byte, e uint64) error {
 			binary.LittleEndian.PutUint64(b, e)
 			return nil
 		})
-		return ptr, n, true, err
+		return ptr, n, mem, true, err
 
 	case "s64":
 		in, ok := v.([]int64)
 		if !ok {
-			return 0, 0, false, nil
+			return 0, 0, mem, false, nil
 		}
-		ptr, n, err = encodeScalarList(mem, in, 8, 8, realloc, func(b []byte, e int64) error {
+		ptr, n, mem, err = encodeScalarList(mem, in, 8, 8, realloc, func(b []byte, e int64) error {
 			binary.LittleEndian.PutUint64(b, uint64(e))
 			return nil
 		})
-		return ptr, n, true, err
+		return ptr, n, mem, true, err
 
 	case "f32":
 		in, ok := v.([]float32)
 		if !ok {
-			return 0, 0, false, nil
+			return 0, 0, mem, false, nil
 		}
-		ptr, n, err = encodeScalarList(mem, in, 4, 4, realloc, func(b []byte, e float32) error {
+		ptr, n, mem, err = encodeScalarList(mem, in, 4, 4, realloc, func(b []byte, e float32) error {
 			binary.LittleEndian.PutUint32(b, math.Float32bits(e))
 			return nil
 		})
-		return ptr, n, true, err
+		return ptr, n, mem, true, err
 
 	case "f64":
 		in, ok := v.([]float64)
 		if !ok {
-			return 0, 0, false, nil
+			return 0, 0, mem, false, nil
 		}
-		ptr, n, err = encodeScalarList(mem, in, 8, 8, realloc, func(b []byte, e float64) error {
+		ptr, n, mem, err = encodeScalarList(mem, in, 8, 8, realloc, func(b []byte, e float64) error {
 			binary.LittleEndian.PutUint64(b, math.Float64bits(e))
 			return nil
 		})
-		return ptr, n, true, err
+		return ptr, n, mem, true, err
 
 	case "char":
 		in, ok := v.([]rune)
 		if !ok {
-			return 0, 0, false, nil
+			return 0, 0, mem, false, nil
 		}
-		ptr, n, err = encodeScalarList(mem, in, 4, 4, realloc, func(b []byte, e rune) error {
+		ptr, n, mem, err = encodeScalarList(mem, in, 4, 4, realloc, func(b []byte, e rune) error {
 			if e < 0 || e >= 0x110000 {
 				return fmt.Errorf("store char: value %d out of range", e)
 			}
@@ -317,9 +328,9 @@ func storeScalarList(mem []byte, v Value, prim string, realloc Realloc) (ptr, n 
 			binary.LittleEndian.PutUint32(b, uint32(e))
 			return nil
 		})
-		return ptr, n, true, err
+		return ptr, n, mem, true, err
 	}
-	return 0, 0, false, nil
+	return 0, 0, mem, false, nil
 }
 
 // scalarPrim returns the primitive name of a list's element type, if the
