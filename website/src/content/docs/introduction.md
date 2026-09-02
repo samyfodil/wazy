@@ -48,9 +48,9 @@ the [WASI 0.3 async ABI](../guides/async/). None of those are targets of upstrea
 
 Being honest about the edges is cheaper than a support thread later.
 
-- **cgo**, when the library must spawn OS threads of its own. wazy exposes shared memory and
-  atomics (`experimental.CoreFeaturesThreads`) but not `wasi-threads` spawn — or when the code
-  needs the host machine itself.
+- **cgo**, when the library must spawn OS threads of its own, or needs the host machine itself.
+  wazy exposes shared memory and atomics (`experimental.CoreFeaturesThreads`) but not
+  `wasi-threads` spawn.
 - **A container or microVM**, when you need kernel-enforced CPU quotas per tenant. wazy caps
   memory and enforces a deadline, but there is no fuel metering.
 - **Starlark or a scripting interpreter**, when the code is config-shaped and your authors will

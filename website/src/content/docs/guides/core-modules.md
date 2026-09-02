@@ -147,4 +147,12 @@ if _, err := mod.ExportedFunction("run").Call(ctx); err != nil {
 }
 ```
 
-Exit code 0 is still returned as an `*sys.ExitError` — a normal `_start` completion, not a failure.
+Exit code 0 behaves differently in the two places it can reach you:
+
+- **During instantiation.** `Instantiate`, `InstantiateWithConfig` and `InstantiateModule` run the
+  start functions themselves, and a start function that exits **0** is a normal `_start`
+  completion, so the error is converted to `nil` before it returns. Only a non-zero exit comes back
+  as an `*sys.ExitError`.
+- **On a later call.** Once a module has exited, every subsequent call into it fails with an
+  `*sys.ExitError` carrying the recorded code — **including 0**. That is why the check above tests
+  `ExitCode() != 0` rather than treating any `*sys.ExitError` as a failure.

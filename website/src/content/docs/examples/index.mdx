@@ -1,0 +1,111 @@
+---
+title: Examples
+description: Runnable programs in the wazy repository, walked through one at a time — from calling a single exported function to composing components written in two languages.
+sidebar:
+  order: 0
+  label: Overview
+---
+
+Every page in this section walks through a program that exists in the repository and runs in CI.
+Nothing here is a sketch: the guests are real `.wasm` files built by real toolchains, and the host
+code is the file you can open beside it.
+
+```bash
+git clone https://github.com/samyfodil/wazy && cd wazy
+make test.examples
+```
+
+That builds nothing and downloads nothing — the guest binaries are committed. Each tutorial also
+gives the command for its own example alone, and the toolchain command that produced its guest if
+you want to rebuild it.
+
+## Core WebAssembly
+
+Start here if you have a `.wasm` and a Go program and want them talking. These examples use plain
+core modules: the interface is integers and a linear memory, and both sides agree on the layout by
+hand.
+
+<div class="track">
+	<a href="hello-world/">
+		<span class="n">01</span>
+		<span class="t">Adding two numbers</span>
+		<span class="d">Compile a Go function to Wasm with TinyGo, embed the binary, instantiate it, and call it. The shortest complete program.</span>
+	</a>
+	<a href="strings/">
+		<span class="n">02</span>
+		<span class="t">Strings across the boundary</span>
+		<span class="d">Pass a string in and read one back, in TinyGo, Rust and Zig — each through its own allocator. Who allocates, and who frees.</span>
+	</a>
+	<a href="calling-go/">
+		<span class="n">03</span>
+		<span class="t">Calling Go from Wasm</span>
+		<span class="d">The other direction: register Go functions in a host module and have the guest import and call them.</span>
+	</a>
+	<a href="multiple-results/">
+		<span class="n">04</span>
+		<span class="t">Multiple results</span>
+		<span class="d">Return two values from a Wasm function and from a Go host function, by result offset and by multi-value.</span>
+	</a>
+	<a href="wasi/">
+		<span class="n">05</span>
+		<span class="t">Reading a file with WASI 0.1</span>
+		<span class="d">Give a guest stdout and a filesystem you chose, and run the same <code>cat</code> compiled by four toolchains.</span>
+	</a>
+	<a href="assemblyscript/">
+		<span class="n">06</span>
+		<span class="t">AssemblyScript special imports</span>
+		<span class="d">An AssemblyScript module not built against WASI still needs <code>abort</code>, <code>trace</code> and <code>seed</code>.</span>
+	</a>
+	<a href="concurrency/">
+		<span class="n">07</span>
+		<span class="t">One instance per goroutine</span>
+		<span class="d">Compile once, then give each goroutine its own instance, its own memory, and no name.</span>
+	</a>
+	<a href="compilation-cache/">
+		<span class="n">08</span>
+		<span class="t">Sharing a compilation cache</span>
+		<span class="d">Run two runtimes off one compiled artifact, and keep it on disk so the next process starts warm.</span>
+	</a>
+	<a href="cli/">
+		<span class="n">09</span>
+		<span class="t">Running a binary from the CLI</span>
+		<span class="d">Run a TinyGo command module under the <code>wazy</code> CLI and pass it arguments the guest reads with <code>flag</code>.</span>
+	</a>
+</div>
+
+## The Component Model
+
+A component carries its own typed interface, so values cross as Go values and the hand-agreed
+layout above disappears. These four are the reason wazy exists as something other than a wazero
+fork.
+
+<div class="track">
+	<a href="components/">
+		<span class="n">10</span>
+		<span class="t">Components, threads and async</span>
+		<span class="d">Six workloads from one program: an interface export, a rustc WASI command, an async export, a spawned thread, a five-thread map-reduce, and <code>CallAsync</code>.</span>
+	</a>
+	<a href="custom-wit/">
+		<span class="n">11</span>
+		<span class="t">Bring your own WIT</span>
+		<span class="d">Declare a key-value interface and implement all four functions in Go — a resource, an <code>option</code> and a <code>result</code> included.</span>
+	</a>
+	<a href="building-components/">
+		<span class="n">12</span>
+		<span class="t">Building a component</span>
+		<span class="d">Produce a WASI 0.2 component from Rust, TinyGo, Go, C, JavaScript or Python, with the real commands for each.</span>
+	</a>
+	<a href="composing-components/">
+		<span class="n">13</span>
+		<span class="t">Composing components</span>
+		<span class="d">Link a provider and a consumer written in different languages into one <code>.wasm</code>, and run the pair with no host glue.</span>
+	</a>
+</div>
+
+## If you would rather read than run
+
+The [guides](../guides/core-modules/) cover the same ground as reference rather than walkthrough,
+and [pkg.go.dev](https://pkg.go.dev/github.com/samyfodil/wazy) has the generated API
+documentation. [Getting started](../getting-started/) is the five-minute version of tutorial 01.
+
+Missing an example you wanted? [Open an issue](https://github.com/samyfodil/wazy/issues/new).

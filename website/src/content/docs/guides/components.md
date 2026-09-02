@@ -52,21 +52,47 @@ _, err := inst.Call(ctx, "wasi:cli/run@0.2.3#run")
 
 | WIT | Go |
 | --- | --- |
-| `bool`, `u8`…`u64`, `s8`…`s64`, `f32`, `f64` | `bool`, `uint8`…`uint64`, `int8`…`int64`, `float32`, `float64` |
+| `bool` | `bool` |
+| `u8`, `u16`, `u32` | `uint32` — the narrow widths widen |
+| `s8`, `s16`, `s32` | `int32` — the narrow widths widen |
+| `u64`, `s64` | `uint64`, `int64` |
+| `f32`, `f64` | `float32`, `float64` |
 | `char` | `rune` |
 | `string` | `string` |
-| `list<T>` | `[]T` for a typed `T`; `component.ListOf[T]` to assert it |
-| `record` | `map[string]any`, keyed by field name |
-| `tuple<A, B>` | `[]any` |
-| `option<T>` | `nil`, or the value |
-| `result<T, E>` | the `T`, or a Go `error` carrying the `E` |
-| `variant`, `enum` | a tagged value; `enum` cases by name |
-| `flags` | a set of enabled names |
-| `own<R>`, `borrow<R>` | a handle the runtime tracks |
+| `list<T>` | `[]T` for a fixed-width primitive `T`, `[]component.Value` otherwise |
+| `record` | `[]component.Value` in declared field order — **not** a map |
+| `tuple<A, B>` | `[]component.Value` |
+| `option<T>` | `nil` for `none`, or the inner value for `some` |
+| `result<T, E>` | `component.ResultValue{IsErr, Payload}` — **not** a Go `error` |
+| `variant` | `component.VariantValue{Disc, Payload}`, `Disc` the 0-based case index |
+| `enum` | `uint32`, the case index |
+| `flags` | `uint32` bitset, LSB = the first declared label |
+| `own<R>`, `borrow<R>` | `uint32`, the handle's host representation |
+
+Three of those rows are where hand-written host code usually goes wrong.
+
+**Narrow integers arrive widened.** A `u8` is a `uint32` and an `s16` is an `int32`; there is no
+`uint8` anywhere in the value vocabulary. Handing back a `uint8(5)` for a `u8` fails at store time
+with `unsupported type uint8`, not at compile time.
+
+**A record is a slice, not a map.** Its Go shape is `[]component.Value` in declared field order,
+with one entry per field — the ABI transmits order and types, never names, so there is nothing for
+a key to match on. A `map[string]any` is rejected outright: `storeRecord: expected []Value`.
+
+**A `result` is a value, not a Go `error`.** `component.ResultValue{IsErr: true, Payload: …}` is an
+ordinary value the guest receives and handles. Returning a Go `error` from a host function is a
+different thing entirely — it *traps* the guest call. Use the error return for "this call cannot
+proceed", and a `ResultValue` for a failure the WIT declared.
 
 A typed `list<T>` lifts to `[]T` directly, so `list<u32>` is a `[]uint32` and not a `[]any` of
-boxed `uint32`s. `component.ListOf[T](v)` gets you the typed slice from a `component.Value` when
-you need the assertion in one step.
+boxed `uint32`s. Lists of anything wider — strings, records, nested lists — lift as
+`[]component.Value`. `component.ListOf[T](v)` returns `([]T, error)` from either shape, so a host
+function can ask for the slice it wants in one step:
+
+```go
+names, err := component.ListOf[string](args[0])   // list<string>
+sizes, err := component.ListOf[uint32](args[1])   // list<u32>
+```
 
 :::caution
 A `list<u32>` that lifts correctly proves less than it looks like: it is the type most likely to

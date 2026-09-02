@@ -1,0 +1,382 @@
+---
+title: Bring your own WIT
+description: Declare a key-value interface in WIT and implement all four of its functions in Go, including a resource, an option and a result whose error arm is a variant.
+sidebar:
+  order: 11
+---
+
+import { FileTree } from '@astrojs/starlight/components';
+
+A `.wit` file is a contract, and nothing says it has to be WASI's.
+[`examples/custom-wit`](https://github.com/samyfodil/wazy/tree/main/examples/custom-wit) writes one
+of its own — a bucket resource with a constructor and methods, an `option` return, and a `result`
+whose error arm is a variant — then implements every function of it in Go, with a Rust guest
+compiled from the same file on the other side. The idea underneath is that a WIT type is a graph
+rather than a tree, which is why declaring a signature means building a small type table first.
+
+None of this API is privileged. wazy's own WASI 0.2 surface in `imports/wasip2` is written against
+it, and no non-test file there reaches into an internal package, so whatever WASI can express an
+embedder can express too.
+
+## Run it
+
+From `examples/custom-wit`:
+
+```bash
+go run .
+```
+
+```
+host: created bucket "cache" (rep 1)
+guest: hello wazy|missing=true|keys=greeting,target
+```
+
+One line from the host, one from the guest. Between them the guest constructed a bucket, put a value
+in it, read that value back, asked for a key that is not there, and listed what remains.
+
+## The contract
+
+```rust title="examples/custom-wit/testdata/store.wit"
+package example:store@1.0.0;
+
+interface kv {
+  /// A named bucket of key/value pairs, owned by the host.
+  resource bucket {
+    constructor(name: string);
+    put: func(key: string, value: list<u8>);
+    get: func(key: string) -> option<list<u8>>;
+  }
+
+  variant error {
+    no-such-bucket,
+    denied(string),
+  }
+
+  /// Returns every key in the bucket, or why it could not.
+  list-keys: func(b: borrow<bucket>) -> result<list<string>, error>;
+}
+
+world app {
+  import kv;
+  export run: func() -> string;
+}
+```
+
+The world is the direction of the whole thing: the guest *imports* `kv`, so the host implements it,
+and the guest exports one function, `run`, which the host calls. Four host functions come out of
+that interface, and their names are not the ones in the WIT source. A resource's constructor and
+methods are mangled: `[constructor]bucket`, `[method]bucket.put`, `[method]bucket.get`. Only the
+free function keeps its plain name, `list-keys`.
+
+## The Rust half, prebuilt
+
+<FileTree>
+
+- examples/custom-wit
+  - custom_wit.go the host half
+  - custom_wit_test.go
+  - testdata
+    - store.wit the contract above
+    - store.wasm **prebuilt** Rust component
+
+</FileTree>
+
+`testdata/store.wasm` is committed. It is a Rust component built against the same `.wit` with
+`wit-bindgen` generating its bindings, and the README records the build as
+`cargo build --release --target wasm32-wasip2`; the Rust crate itself is not in this repository, so
+treat the `.wasm` as what it is — a binary a stranger produced, running unmodified. The host embeds
+it and never looks inside.
+
+## Host state, and the tag that names the resource
+
+```go title="examples/custom-wit/custom_wit.go" {7,13}
+//go:embed testdata/store.wasm
+var storeWasm []byte
+
+// bucketResType is the tag this host mints bucket handles under. Any value
+// works; what matters is that WithResourceTag maps it to the WIT resource, so
+// the guest's own resource.drop can find it.
+const bucketResType uint32 = 1
+
+// store is the host state behind the `bucket` resource. Handles the guest
+// holds are indices into this; reps are what the host sees.
+type store struct {
+	next    uint32
+	buckets map[uint32]map[string][]byte
+}
+
+func newStore() *store { return &store{next: 1, buckets: map[uint32]map[string][]byte{}} }
+
+func (s *store) create() uint32 {
+	rep := s.next
+	s.next++
+	s.buckets[rep] = map[string][]byte{}
+	return rep
+}
+```
+
+Two numberings meet here and it pays to keep them apart. A **rep** is the host's own name for a live
+object — here a key into `s.buckets`, and it is what every host function in this file receives. A
+**handle** is the guest's opaque integer for the same object, minted and revoked by the runtime. The
+guest never sees a rep; the host never sees a handle. `bucketResType` is a third number again: a tag
+the host picks to say *which resource* a rep belongs to, since one host can own several.
+
+## The constructor
+
+```go title="examples/custom-wit/custom_wit.go" collapse={1-7} {17,22}
+func main() {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	s := newStore()
+
+	// The interface name as the guest imports it. Matching ignores the
+	// "@x.y.z" suffix, so one registration serves every patch version.
+	const iface = "example:store/kv@1.0.0"
+
+	// --- [constructor]bucket(name: string) -> bucket ----------------------
+	//
+	// A top-level own<bucket> result: return the rep and the engine mints the
+	// guest's handle under bucketResType.
+	ctorTbl := component.NewTypeTable()
+	ctorFD := ctorTbl.Func([]component.TypeRef{component.Prim("string")}, ctorTbl.Own(bucketResType))
+	ctor := func(_ context.Context, args []component.Value) ([]component.Value, error) {
+		name := args[0].(string)
+		rep := s.create()
+		fmt.Printf("host: created bucket %q (rep %d)\n", name, rep)
+		return []component.Value{rep}, nil
+	}
+```
+
+A `TypeTable` per signature, and `Func` assembles the params and the single result into a
+`FuncDesc`. `Own(bucketResType)` is the piece worth pausing on: the function's declared result is
+`own<bucket>`, so the value the Go closure returns is a plain rep — `uint32` — and the runtime turns
+it into a fresh handle for the guest on the way out. That translation happens only at the top level
+of a result. A handle sitting inside a record or a list is not reached by it; those you mint
+yourself from the `HandleTable` that `WithResourcesHook` hands you.
+
+The interface constant carries its version, and matching strips the `@x.y.z` suffix, so this one
+registration answers `example:store/kv@1.0.1` as well.
+
+## A borrow, a byte list, an absent value
+
+```go title="examples/custom-wit/custom_wit.go" {21,41,43}
+	// --- [method]bucket.put(self: borrow<bucket>, key: string, value: list<u8>)
+	//
+	// A borrow argument arrives already resolved to the host rep. list<u8>
+	// arrives as a []byte.
+	putTbl := component.NewTypeTable()
+	putFD := putTbl.Func([]component.TypeRef{
+		putTbl.Borrow(bucketResType),
+		component.Prim("string"),
+		putTbl.List(component.Prim("u8")),
+	}, component.TypeRef{}) // no result
+	put := func(_ context.Context, args []component.Value) ([]component.Value, error) {
+		rep, key := args[0].(uint32), args[1].(string)
+		b, ok := s.buckets[rep]
+		if !ok {
+			return nil, fmt.Errorf("put: bucket rep %d does not exist", rep)
+		}
+		// list<u8> arrives as a []byte -- a list of any fixed-width primitive
+		// lifts to the Go slice of that primitive. ListOf takes that shape as
+		// it is, and converts the general []Value shape a value built by hand
+		// still has.
+		value, err := component.ListOf[byte](args[2])
+		if err != nil {
+			return nil, fmt.Errorf("put %q: %w", key, err)
+		}
+		b[key] = value
+		return nil, nil
+	}
+
+	// --- [method]bucket.get(self: borrow<bucket>, key: string) -> option<list<u8>>
+	//
+	// option is nil for none, or the inner value for some.
+	getTbl := component.NewTypeTable()
+	getFD := getTbl.Func([]component.TypeRef{
+		getTbl.Borrow(bucketResType),
+		component.Prim("string"),
+	}, getTbl.Option(getTbl.List(component.Prim("u8"))))
+	get := func(_ context.Context, args []component.Value) ([]component.Value, error) {
+		rep, key := args[0].(uint32), args[1].(string)
+		v, ok := s.buckets[rep][key]
+		if !ok {
+			return []component.Value{nil}, nil // option::none
+		}
+		return []component.Value{v}, nil // option::some
+	}
+```
+
+A method's receiver is an ordinary first parameter — `borrow<bucket>` — and it arrives already
+resolved, so `args[0].(uint32)` is a rep and not something to look up. `component.TypeRef{}`, the
+zero value, is how `Func` spells "returns nothing".
+
+The `option` is the shape that surprises people. There is no wrapper type: a `nil` in the results
+slice is `none`, and anything else is `some` of that value. The check is on the interface itself, so
+a `[]byte(nil)` handed back for an empty list is `some` of an empty list, not `none` — the two are
+different answers and only an untyped `nil` gives the second. Reading the byte list goes through
+`component.ListOf[byte]` rather than a type assertion, because a `list<u8>` lifted from guest memory
+arrives as `[]byte` while a value built by hand in a test is still `[]Value`; `ListOf` accepts both
+and returns the typed slice as it arrived, copying nothing in the fast case.
+
+## The signature `WithImport` cannot express
+
+```go title="examples/custom-wit/custom_wit.go" {6-9,12,18-21}
+	// --- list-keys(b: borrow<bucket>) -> result<list<string>, error> -------
+	//
+	// The signature WithImport cannot express: both arms of the result are
+	// composites, so each needs a slot in the type table.
+	keysTbl := component.NewTypeTable()
+	errRef := keysTbl.Variant(
+		component.VariantCaseSpec{Name: "no-such-bucket"},
+		component.VariantCaseSpec{Name: "denied", Type: component.Prim("string")},
+	)
+	keysFD := keysTbl.Func(
+		[]component.TypeRef{keysTbl.Borrow(bucketResType)},
+		keysTbl.Result(keysTbl.List(component.Prim("string")), errRef),
+	)
+	listKeys := func(_ context.Context, args []component.Value) ([]component.Value, error) {
+		b, ok := s.buckets[args[0].(uint32)]
+		if !ok {
+			// The err arm, carrying the payload-less first variant case.
+			return []component.Value{component.ResultValue{
+				IsErr:   true,
+				Payload: component.VariantValue{Disc: 0},
+			}}, nil
+		}
+		keys := make([]string, 0, len(b))
+		for k := range b {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys) // map order is not a contract; the guest prints these
+		out := make([]component.Value, len(keys))
+		for i, k := range keys {
+			out[i] = k
+		}
+		return []component.Value{component.ResultValue{Payload: out}}, nil
+	}
+```
+
+This is the reason `WithImportCustom` exists. `WithImport` takes flat `[]TypeDesc` params and
+results, which is enough for `list<string>` but not for `result<list<string>, error>`, where both
+arms are themselves composites and the result has to *name* them. Interning each child in the table
+and referring to it by `TypeRef` is exactly what naming means here, and the sugar methods — `List`,
+`Option`, `Result`, `Variant`, `Own`, `Borrow` — build the entries, so the only `TypeRef` literal
+you write is the zero value that spells "no result".
+
+`Disc: 0` selects `no-such-bucket` because it is declared first. Case order in the WIT file *is* the
+discriminant, and `denied` would be `Disc: 1` with its string in `Payload`. `list<string>` is not a
+fixed-width primitive, so the ok arm is a `[]component.Value` of strings rather than a `[]string` —
+and the sort is not decoration: Go map iteration order is random, and the guest prints these keys
+into the output the test asserts on.
+
+## Wiring it up
+
+```go title="examples/custom-wit/custom_wit.go" {11}
+	inst, err := component.Instantiate(ctx, r, storeWasm,
+		component.WithImportCustom(iface, "[constructor]bucket", ctor, ctorFD, ctorTbl.Resolver()),
+		component.WithImportCustom(iface, "[method]bucket.put", put, putFD, putTbl.Resolver()),
+		component.WithImportCustom(iface, "[method]bucket.get", get, getFD, getTbl.Resolver()),
+		component.WithImportCustom(iface, "list-keys", listKeys, keysFD, keysTbl.Resolver()),
+
+		// Required for any interface with a resource. The guest drops its
+		// owned bucket through a canon carrying the component binary's own
+		// type index; this maps that to bucketResType. Without it the first
+		// drop trips the handle table's cross-type check.
+		component.WithResourceTag(iface, "bucket", bucketResType),
+	)
+	if err != nil {
+		log.Panicln(err)
+	}
+	defer inst.Close(ctx)
+
+	results, err := inst.Call(ctx, "run")
+	if err != nil {
+		log.Panicln(err)
+	}
+	fmt.Printf("guest: %s\n", results[0].(string))
+```
+
+Each registration passes the closure, its `FuncDesc`, and the resolver from the table that
+`FuncDesc` was built with — the two travel together, since a `TypeRef` is an index that is
+meaningless without its table. Call `Resolver()` after the signature is complete.
+
+No WASI option appears anywhere. This guest imports one interface, and it is yours.
+
+## Resource lifetimes
+
+`WithResourceTag` is not an optimization or a nicety, and it is easy to leave out because three of
+the four functions work without it. The component binary has its own internal index for the `bucket`
+type, and your host has `bucketResType`. Calls succeed because a rep flows through them, but the
+first time the guest runs `resource.drop` on its owned handle, the handle table checks the type it
+was minted under against the type being dropped, they disagree, and you get a cross-type error that
+says nothing about tags.
+
+The rules underneath, worth knowing before you own something more expensive than a map entry:
+
+- **Only the own arm runs a destructor.** Dropping a `borrow` releases the loan on the lender's
+  handle and returns; a destructor is looked up only after the runtime has confirmed the handle is
+  an owning one. A resource with outstanding borrows cannot be dropped at all.
+- **A tag with no destructor leaks.** This example registers `WithResourceTag` and no
+  `WithHostResourceDtor`, so when the guest drops its bucket the handle goes away and
+  `s.buckets[rep]` stays behind forever. In a program that prints two lines and exits this is
+  invisible. In a long-lived host it is a slow leak, and nothing sweeps it later: closing the
+  instance tears down core modules, not live handles. Pair every tag you own with a destructor.
+- **Destructors for one tag compose, they do not replace.** A second registration for the same tag
+  runs after the first, not instead of it — this is what lets `wasi:filesystem`, `wasi:sockets` and
+  `wasi:http` all mint stream handles under one shared tag while each releases only its own reps.
+  Every registered destructor runs in registration order and the first error is returned after the
+  rest have finished, so write yours to ignore a rep it does not recognize (deleting an absent map
+  key already does).
+
+wazy's own WASI implementation is the shape to copy. The registration is one line beside the imports
+it belongs to:
+
+```go title="imports/wasip2/wasi_sockets.go"
+		component.WithHostResourceDtor(wasiTCPSocketResType, sockets.dropTCPSock),
+```
+
+and the destructor releases the bookkeeping the handle outlived, nothing more:
+
+```go title="imports/wasip2/wasi_sockets.go"
+func (s *wasiSockets) dropTCPSock(_ context.Context, rep uint32) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.tcpSocks, rep)
+	return nil
+}
+```
+
+Closing the connection is deliberately not in there: that belongs to the close paths the guest
+reaches explicitly, and a destructor releases only the bookkeeping that outlived the handle.
+
+:::caution
+Returning a Go `error` from a host function **traps the guest** — the call does not come back. A
+failure the WIT declares is not an error at all but an ordinary value: a `ResultValue` with `IsErr`
+set, which the guest receives and handles. Keep the Go error return for "this call cannot proceed",
+as `put` does when handed a rep that names nothing.
+:::
+
+## Testing the branches underneath
+
+Getting a guest to exercise the `no-such-bucket` arm would mean compiling a Rust component per error
+branch. [`component/componenttest`](https://github.com/samyfodil/wazy/tree/main/component/componenttest)
+applies the same Options an `Instantiate` would, runs the resource
+hooks, and hands back the registered functions so a test can call them directly with lifted values.
+What it does not do is exercise the Canonical ABI — nothing is lifted from or lowered into guest
+memory — so a signature that is wrong about layout still passes there. Keep one real-guest test per
+interface, as this example is, and use the harness for everything below it.
+
+## Getting the other half
+
+This page took the guest binary as given. [Building a component](../building-components/) is where
+one comes from: a single exported function written six times, in Rust, TinyGo, standard Go, C,
+JavaScript and Python, with the real toolchain commands for each. After it,
+[Composing components](../composing-components/) satisfies an import the other way round — with a
+second component rather than with Go, and no host implementation in the middle.
+
+For an import the host cannot answer on the spot there is `WithAsyncImport`, which the
+[custom WIT guide](../../guides/custom-wit/) covers; and
+[host functions](../../guides/host-functions/) is the untyped core-module equivalent of everything
+on this page.

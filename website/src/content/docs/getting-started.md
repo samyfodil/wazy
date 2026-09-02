@@ -9,7 +9,7 @@ sidebar:
 go get github.com/samyfodil/wazy@latest
 ```
 
-wazy needs Go 1.24 or newer and nothing else. `CGO_ENABLED=0` is fine — encouraged, even.
+wazy needs Go 1.25 or newer and nothing else. `CGO_ENABLED=0` is fine — encouraged, even.
 
 ## Run a component
 

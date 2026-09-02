@@ -20,25 +20,56 @@ decided to await something.
 
 ## When the host is the slow half
 
-`CallAsync` returns a `*component.PendingCall` — a live invocation suspended on an import your Go
-code has not answered yet. Another goroutine resolves it:
+Sometimes the guest awaits something *your Go code* has not finished: a database round trip, an
+HTTP response. Register that import with `component.WithAsyncImport` rather than `WithImport`, so
+the canonical lowering knows the call may not return immediately. The `AsyncHostFunc` it takes is
+handed an `*component.AsyncCall` and may return without resolving it — the result is delivered
+later, from any goroutine, with `call.Resolve`:
 
 ```go
-pending, err := inst.CallAsync(ctx, "run-async")
+release := make(chan struct{})
+
+getImport := component.WithAsyncImport("get", "", // a bare top-level func import "get"
+	func(_ context.Context, _ []component.Value, call *component.AsyncCall) error {
+		go func() {
+			<-release // stand-in for I/O finishing on some other goroutine
+			call.Resolve([]component.Value{uint32(42)})
+		}()
+		return nil // the import call returns unresolved
+	},
+	nil, // no params
+	[]component.TypeDesc{component.PrimitiveDesc{Prim: "u32"}}, // -> u32
+)
+
+inst, err := component.Instantiate(ctx, r, componentBytes, getImport)
+```
+
+Start the export with `CallAsync` instead of `Call`. It returns a `*component.PendingCall` the
+moment the guest parks on that import, so the host goroutine is free while the guest is suspended.
+`Await` then drives the scheduler until the task completes:
+
+```go
+p, err := inst.CallAsync(ctx, "run-async")
 if err != nil {
 	return err
 }
 
-go func() {
-	value := fetchFromSomewhereSlow()
-	pending.Complete(ctx, "example:store/kv", "fetch", []component.Value{value})
-}()
+close(release) // let the other goroutine complete the import
 
-out, err := pending.Wait(ctx)
+out, err := p.Await(ctx)
 ```
 
-Register the import itself with `component.WithAsyncImport` rather than `WithImport`, so the
-canonical lowering knows the call may not return immediately.
+`PendingCall` has exactly three methods. `Done()` returns a channel closed when the call resolves,
+fails, is cancelled, or the instance closes — select on it to see whether the guest actually
+parked. `Await(ctx)` blocks until then and returns the lifted results. `Cancel(ctx)` abandons the
+call and reaps the parked guest state.
+
+:::note
+Two limits on this path today: one `CallAsync` may be outstanding per instance, and the export must
+be an async (callback) lift — `CallAsync` on a synchronous export returns an error rather than a
+handle. `Await` is the sole driver once `CallAsync` returns, so call it from a single goroutine;
+`Resolve` may be called from any.
+:::
 
 ## What the ABI covers
 
@@ -61,7 +92,8 @@ handed the baton over an unbuffered channel. The async ABI buys you suspension a
 parallelism inside one component.
 
 [`examples/component`](https://github.com/samyfodil/wazy/tree/main/examples/component) runs an
-async export, a thread-spawning component, and a five-thread map-reduce over one shared array.
+async export, a thread-spawning component, a five-thread map-reduce over one shared array, and the
+`CallAsync` flow above end to end.
 
 ## Scope
 

@@ -108,8 +108,10 @@ the call.
 
 ## Logging what the guest does
 
-`experimental/logging` wraps a runtime and prints every host call — useful when a guest fails on an
-import you did not expect:
+The `logging` package prints every host call the guest makes — useful when a guest fails on an
+import you did not expect. It does not wrap the runtime: you decorate a `context.Context` with a
+listener factory, and every module compiled or instantiated under that context carries the
+listeners.
 
 ```go
 import (
@@ -120,5 +122,8 @@ import (
 ctx = api.WithFunctionListenerFactory(ctx,
 	logging.NewHostLoggingListenerFactory(os.Stderr, logging.LogScopeFilesystem))
 ```
+
+Build that `ctx` before `wazy.NewRuntime` and pass it on: the listeners are bound to a module when
+it is compiled, so a context decorated after the fact reaches nothing.
 
 The [CLI](../../reference/cli/) exposes the same thing as `-hostlogging=filesystem,clock,…`.

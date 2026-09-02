@@ -22,7 +22,7 @@ own [custom imports](../custom-wit/).
 | --- | --- |
 | `wasi:cli` | stdin/stdout/stderr, `get-arguments`, `get-environment`, `initial-cwd`, `exit`, terminal handles |
 | `wasi:clocks` | monotonic and wall clocks, `subscribe-duration`, `subscribe-instant` |
-| `wasi:filesystem` | preopened directories, open/read/write/seek, metadata, directory iteration, `stat`, `statfs` |
+| `wasi:filesystem` | preopened directories, open/read/write/seek, directory iteration, `stat`, `stat-at`, `metadata-hash`, `metadata-hash-at` |
 | `wasi:io` | `input-stream` / `output-stream`, `pollable`, batched `poll` |
 | `wasi:random` | `get-random-bytes`, insecure variants, seeds |
 | `wasi:sockets` | TCP and UDP sockets, `instance-network`, IP name lookup |
@@ -30,8 +30,11 @@ own [custom imports](../custom-wit/).
 
 ## Everything is opt-in
 
-`wasip2.Config` is deny-by-default. An empty config gives the guest a component that can compute
-and nothing else: no stdio, no files, no clock of consequence, no network.
+`wasip2.Config` is deny-by-default for everything it gates. An empty config gives the guest a
+component that can compute and little else: no stdio, no files, no network. The clocks and
+`wasi:random` are the exception — `wasip2.With` registers them unconditionally, so the guest gets a
+real monotonic clock, a real `time.Now`, and real `crypto/rand`. `WallClock` is the only one of
+them you can replace.
 
 ```go
 cfg := wasip2.Config{

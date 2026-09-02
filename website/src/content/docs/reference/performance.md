@@ -6,13 +6,21 @@ description: The benchmarks behind every figure on this site, how to run them, a
 Every first-party figure on this site is a benchmark in the repository. Run them yourself:
 
 ```bash
-cd benchmarks/vs-wazero && go test -bench .    # Instantiate, HostCall, Compile, Execute
-go test -bench . ./imports/wasip2/... ./internal/integration_test/bench/...
+(cd benchmarks/vs-wazero && go test -bench .)  # Instantiate, HostCall, Compile, Execute
+go test -bench . ./imports/wasip2/... ./internal/integration_test/bench/... ./internal/component/...
 ```
 
-Figures were measured on a core-pinned i9-12900HK (amd64) unless noted; arm64 work is measured on
-an Apple M4. Method, per-optimization numbers and the optimizations **measured and rejected**
-(including one that made arm64 8% slower) are in
+`./internal/component/...` is where the component figures live — `BenchmarkInstantiateHelloCached`
+in `internal/component/instance` is the 350.5 µs cached component instantiate. `benchmarks/vs-wazero`
+is its own Go module, hence the subshell.
+
+The head-to-head sweeps below — instantiate **9.1x**, the cumulative geomean and **B/op −22.9%**,
+the host-call pair and the compile **−23% to −26%** — were measured on an **Apple M4** (arm64),
+`benchstat` over interleaved A/B runs with upstream wazero as a control in the same runs. The
+per-optimization figures that predate them — the interruptible-loop numbers, `memory.grow`, and the
+host-call reflection baseline — are a core-pinned **i9-12900HK** (amd64). Method, the machine behind
+each result, and the optimizations **measured and rejected** (including one that made arm64 8%
+slower) are in
 [OPTIMIZATIONS.md](https://github.com/samyfodil/wazy/blob/main/OPTIMIZATIONS.md).
 
 ## Head to head with wazero
@@ -22,9 +30,9 @@ Measured against wazero in the same runs, on the same workloads.
 | Path | wazy vs wazero | What & why |
 | --- | :--: | --- |
 | **Instantiate** | **9.1x** | 1.724 µs vs 15.74 µs, on a 37 KB TinyGo module. |
-| **Interruptible loops** (`WithCloseOnContextDone`) | **12–13x**; +5% vs +75% overhead | The per-loop check is amortized, not a Go round-trip per iteration; tune with `WithInterruptCheckInterval`. Against `wazero@main`. |
+| **Interruptible loops** (`WithCloseOnContextDone`) | **12–13x**; +5% vs +75% overhead | On a loop calling a host function each iteration. The check is amortized, not a Go round-trip per iteration; a near-empty compute kernel is the worst case at 1.7–2.4x, tunable with `WithInterruptCheckInterval`. Against `wazero@main`. |
 | **Compiled execution** | memory-heavy code leads | `string_manipulation` −18%, `reverse_array` −14%, `base64` −12%, `fibonacci` a wash — the advantage tracks memory-access intensity, not arithmetic. |
-| **Host calls** (Go ↔ Wasm) | a tie | 48.5 ns here, 48.3 ns there, on the raw stack API both runtimes expose. The win is structural, not per-call. |
+| **Host calls** (Go ↔ Wasm) | a tie | 47.8 ns here, 48.3 ns there, on `HostCall/gomodule/CallWithStack` — the shared baseline both runtimes implement the same way. The win is structural, not per-call. |
 | **Cumulative** | geomean **−17.8%**, B/op **−22.9%** | Across `internal/integration_test/bench`, versus the wazero fork point, with upstream wazero as a control in the same runs — its arms stayed flat. |
 
 ## What the rewrite bought
@@ -83,6 +91,8 @@ The head-to-head module also carries a three-way comparison against wasmtime —
 - **Use `CallWithStack`** in hot loops; `Call` allocates the result slice.
 - **Reserve memory capacity** with `WithMemoryCapacityReservePages` if the guest grows its memory
   repeatedly.
-- **Tune `WithInterruptCheckInterval`** if you use `WithCloseOnContextDone` and the +5% matters.
+- **Tune `WithInterruptCheckInterval`** if you use `WithCloseOnContextDone`. The +5% is a loop that
+  calls a host function each iteration; a near-empty compute kernel pays 1.7–2.4x, and the interval
+  sweep moves that from 26.9x of floor at 0 to 1.74x at 4096.
 - **Do not pool instances.** Instantiation is 1.7 µs and 3.3 KB; a fresh instance per request is
   both faster to reason about and safer than scrubbing a reused one.

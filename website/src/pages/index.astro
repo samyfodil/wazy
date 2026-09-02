@@ -11,9 +11,8 @@ const manifest = [
 	{ what: 'filesystem', state: 'nothing mounted' },
 	{ what: 'sockets — tcp, udp', state: 'unregistered' },
 	{ what: 'outgoing http', state: 'unregistered' },
-	{ what: 'environment, args', state: 'empty' },
-	{ what: 'wall clock', state: 'frozen' },
-	{ what: 'randomness', state: 'deterministic' },
+	{ what: 'environment', state: 'empty' },
+	{ what: 'arguments', state: 'argv[0] only' },
 	{ what: 'stdout', state: 'os.Stdout', on: true },
 ];
 
@@ -21,16 +20,39 @@ const manifest = [
    log scale over five decades, 10 ns to 1 ms. */
 const LO = 10;
 const HI = 1_000_000;
-const at = (ns: number) =>
-	((Math.log10(ns) - Math.log10(LO)) / (Math.log10(HI) - Math.log10(LO))) * 100;
+const at = (ns: number) => {
+	const pct =
+		((Math.log10(ns) - Math.log10(LO)) / (Math.log10(HI) - Math.log10(LO))) * 100;
+	/* A future benchmark outside the declared decades must not place a marker
+	   off the track. */
+	return Math.min(100, Math.max(0, pct));
+};
 
+/* host is the machine the number was actually taken on — they are not all the
+   same one, and OPTIMIZATIONS.md records no machine for the last row. */
 const ruler = [
-	{ name: 'Host call, Go ↔ Wasm', ns: 48.5, label: '48.5 ns' },
-	{ name: 'memory.grow, in capacity', ns: 109, label: '109 ns' },
-	{ name: 'Instantiate a 37 KB module', ns: 1724, label: '1.72 µs' },
-	{ name: 'Serve a warm wasi:http component', ns: 3370, label: '3.37 µs' },
-	{ name: 'The same instantiate, on wazero', ns: 15740, label: '15.7 µs', other: true },
-	{ name: 'Re-instantiate a cached component graph', ns: 350500, label: '350 µs' },
+	{ name: 'Host call, Go ↔ Wasm', ns: 48.5, label: '48.5 ns', host: 'Apple M4' },
+	{ name: 'memory.grow, in capacity', ns: 109, label: '109 ns', host: 'i9-12900HK' },
+	{ name: 'Instantiate a 37 KB module', ns: 1724, label: '1.72 µs', host: 'Apple M4' },
+	{
+		name: 'Serve a warm wasi:http component',
+		ns: 3370,
+		label: '3.37 µs',
+		host: 'Apple M4',
+	},
+	{
+		name: 'The same instantiate, on wazero',
+		ns: 15740,
+		label: '15.7 µs',
+		host: 'Apple M4',
+		other: true,
+	},
+	{
+		name: 'Re-instantiate a cached component graph',
+		ns: 350500,
+		label: '350 µs',
+		host: 'host not recorded',
+	},
 ];
 
 const wit = `interface kv {
@@ -48,19 +70,37 @@ const wit = `interface kv {
     -> result<list<string>, error>;
 }`;
 
-const go = `// The host half, in ordinary Go. wazy lifts and
-// lowers every value across the boundary.
-component.WithImport("example:store/kv", "list-keys",
-	func(ctx context.Context, args []component.Value) (
-		[]component.Value, error) {
+const go = `// The host half, in ordinary Go. Both arms of the
+// result are composites, so each gets a type-table slot.
+tbl := component.NewTypeTable()
+errRef := tbl.Variant(
+	component.VariantCaseSpec{Name: "no-such-bucket"},
+	component.VariantCaseSpec{Name: "denied",
+		Type: component.Prim("string")},
+)
+fd := tbl.Func(
+	[]component.TypeRef{tbl.Borrow(bucketResType)},
+	tbl.Result(tbl.List(component.Prim("string")), errRef),
+)
 
-		keys, err := listKeys(args[0])
-		if err != nil {
-			return nil, err // becomes the error variant
-		}
-		return []component.Value{keys}, nil
-	},
-	params, results)`;
+listKeys := func(_ context.Context, args []component.Value) (
+	[]component.Value, error) {
+
+	b, ok := s.buckets[args[0].(uint32)]
+	if !ok {
+		// The err arm, carrying the payload-less first case.
+		return []component.Value{component.ResultValue{
+			IsErr:   true,
+			Payload: component.VariantValue{Disc: 0},
+		}}, nil
+	}
+	return []component.Value{component.ResultValue{
+		Payload: keysOf(b),
+	}}, nil
+}
+
+component.WithImportCustom("example:store/kv", "list-keys",
+	listKeys, fd, tbl.Resolver())`;
 
 const versus = [
 	{
@@ -73,20 +113,20 @@ const versus = [
 		path: 'Interruptible loops',
 		note: 'WithCloseOnContextDone',
 		ratio: '12–13×',
-		why: '+5% overhead against +75%. The deadline check is amortized across the loop rather than a Go round trip per iteration. Measured against wazero@main.',
+		why: '+5% overhead against +75% on a loop that calls a host function each iteration. A near-empty compute kernel is the worst case at 1.7-2.4x, tunable with WithInterruptCheckInterval. Measured against wazero@main.',
 	},
 	{
 		path: 'Compiled execution',
 		note: 'memory-heavy code',
-		ratio: '−18%',
+		ratio: 'up to −18%',
 		why: 'string_manipulation −18%, reverse_array −14%, base64 −12%, fibonacci a wash. The advantage tracks memory-access intensity, not arithmetic.',
 	},
 	{
 		path: 'Host calls',
-		note: 'raw stack API',
+		note: 'CallWithStack, gomodule arm',
 		ratio: 'a tie',
 		tie: true,
-		why: '48.5 ns here, 48.3 ns there. Both runtimes expose the same path and neither wins it. What differs is that wazero still ships a reflection-based registration API beside it; wazy deleted that path rather than optimizing it.',
+		why: '47.8 ns here, 48.3 ns there, on the gomodule arm both runtimes implement the same way. Neither wins it. What differs is that wazero still ships a reflection-based registration API beside it; wazy deleted that path rather than optimizing it.',
 	},
 	{
 		path: 'Cumulative',
@@ -102,10 +142,13 @@ const versus = [
 		title: 'A WebAssembly runtime in pure Go',
 		template: 'splash',
 		tableOfContents: false,
+		head: [{ tag: 'meta', attrs: { property: 'og:type', content: 'website' } }],
 	}}
 	hasSidebar={false}
 >
-	<div class="landing">
+	{/* not-content keeps Starlight's prose flow-margin off the dense rows; the
+	    landing declares its own spacing in brand.css. */}
+	<div class="landing not-content">
 		<section class="hero">
 			<div>
 				<h1>Run code you didn&rsquo;t write.</h1>
@@ -146,7 +189,9 @@ const versus = [
 			<h2>Small enough to do per request</h2>
 			<p>
 				A sandbox per request is only practical if none of it costs anything. Every marker below is a
-				benchmark in this repository, measured on a core-pinned i9-12900HK. The scale is logarithmic.
+				benchmark in this repository, taken core-pinned on a quiet machine with the comparison
+				interleaved. They were not all taken on the same machine, so each names its own host. The
+				scale is logarithmic.
 			</p>
 
 			<div class="ruler">
@@ -164,7 +209,10 @@ const versus = [
 				{
 					ruler.map((r) => (
 						<div class={r.other ? 'ruler-row other' : 'ruler-row'}>
-							<span class="name">{r.name}</span>
+							<span class="name">
+								{r.name}
+								<span class="host" style="color:var(--sl-color-gray-3)"> · {r.host}</span>
+							</span>
 							<div class="ruler-track">
 								<span
 									class={at(r.ns) > 74 ? 'ruler-mark flip' : 'ruler-mark'}
@@ -178,9 +226,9 @@ const versus = [
 				}
 			</div>
 			<p class="sub">
-				Run them yourself with <code>cd benchmarks/vs-wazero &amp;&amp; go test -bench .</code>. The
-				method, the per-optimization numbers and the optimizations measured and <em>rejected</em>{' '}
-				are on the <a href={`${base}/reference/performance/`}>performance page</a>.
+				These six live in four different packages; the{' '}
+				<a href={`${base}/reference/performance/`}>performance page</a> has the commands that run
+				all of them, the method, and the optimizations measured and <em>rejected</em>.
 			</p>
 		</section>
 
@@ -306,7 +354,14 @@ const versus = [
 				</div>
 				<div class="count">
 					<b>31 / 31</b>
-					<span>official Component Model async suites, 0 skipped, 0 failed</span>
+					<span>
+						official Component Model async suites, 0 skipped, 0 failed — one fixture a locally
+						corrected copy of a file broken upstream
+					</span>
+				</div>
+				<div class="count">
+					<b>7 / 7</b>
+					<span>official Canonical ABI value suites, every vendored module instantiating</span>
 				</div>
 				<div class="count">
 					<b>3 OS</b>
@@ -318,9 +373,12 @@ const versus = [
 				</div>
 			</div>
 			<p class="sub">
-				Four Canonical ABI cases do fail, and they are named in the code rather than hidden:{' '}
-				<code>types.11</code>, <code>fused.22</code>, <code>fused.23</code> and{' '}
-				<code>resources.14</code>, each pinned to the composition gap it represents. Detail on the{' '}
+				That list is empty: every vendored module of all seven Canonical ABI value suites
+				instantiates. The last four entries &mdash; <code>types.11</code>, <code>fused.22</code>,{' '}
+				<code>fused.23</code> and <code>resources.14</code> &mdash; were each a nested component
+				naming a definition an enclosing one owns, and closing them meant modelling the core-module
+				and component index spaces separately. Empty is enforced like any other state: were one of
+				them to come back, the harness would fail. Detail on the{' '}
 				<a href={`${base}/reference/conformance/`}>conformance page</a>.
 			</p>
 		</section>
