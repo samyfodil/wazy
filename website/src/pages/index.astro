@@ -1,0 +1,326 @@
+---
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+import { Code, LinkButton } from '@astrojs/starlight/components';
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const repo = 'https://github.com/samyfodil/wazy';
+
+const quickstart = `r := wazy.NewRuntime(ctx)
+defer r.Close(ctx) // Closes everything this runtime created.
+
+// Stdout, and nothing else: nothing mounted, no sockets.
+inst, err := component.Instantiate(ctx, r, helloWasm,
+	wasip2.With(wasip2.Config{Stdout: os.Stdout})...)
+if err != nil {
+	return err
+}
+defer inst.Close(ctx)
+
+// A wasi:cli/command component: run its entry point.
+_, err = inst.Call(ctx, "wasi:cli/run@0.2.3#run")`;
+
+const typed = `b := r.NewHostModuleBuilder("env")
+
+wazy.HostFunc2(b.NewFunctionBuilder(), func(ctx context.Context, mod api.Module, x, y uint32) uint32 {
+	return x + y
+}).Export("add")
+
+env, err := b.Instantiate(ctx)`;
+---
+
+<StarlightPage
+	frontmatter={{
+		title: 'wazy',
+		template: 'splash',
+		tableOfContents: false,
+	}}
+	hasSidebar={false}
+>
+	<div class="landing">
+		<section class="hero-band">
+			<span class="eyebrow">pure Go &middot; no cgo &middot; one dependency</span>
+			<h1>Run code you <span class="grad">didn&rsquo;t&nbsp;write</span>.</h1>
+			<p class="lede">
+				wazy is a WebAssembly runtime written in pure Go. Ship a plugin system, execute a
+				customer&rsquo;s untrusted script, or use a Rust or C library you would otherwise reach
+				through cgo &mdash; compiled to Wasm it becomes a byte slice you <code>go:embed</code> and
+				a function you call.
+			</p>
+			<div class="actions">
+				<LinkButton href={`${base}/getting-started/`}>Get started</LinkButton>
+				<LinkButton href={`${repo}/tree/main/examples`} variant="minimal" icon="external">Examples</LinkButton>
+				<span class="install">go get github.com/samyfodil/wazy@latest</span>
+			</div>
+
+			<div class="stats">
+				<div class="stat"><div class="v">1.7&nbsp;&micro;s</div><div class="k">to instantiate a 37&nbsp;KB module</div></div>
+				<div class="stat"><div class="v">48&nbsp;ns</div><div class="k">per host call, zero allocations</div></div>
+				<div class="stat"><div class="v">114</div><div class="k">WASI 0.2 host functions</div></div>
+				<div class="stat"><div class="v">31/31</div><div class="k">async conformance suites</div></div>
+			</div>
+		</section>
+
+		<section class="band">
+			<div class="split">
+				<div>
+					<h2>Twelve lines to a sandbox</h2>
+					<p>
+						A genuine <code>wasm32-wasip2</code> component from rustc, given stdout and nothing
+						else. The guest starts with no files beyond what you mount and no sockets unless you
+						allow them.
+					</p>
+					<p>
+						Values cross typed: a component exporting <code>run: func() -&gt; string</code> hands
+						back a Go <code>string</code>, not a pointer and a length.
+					</p>
+					<p><a href={`${base}/guides/components/`}>Components and the Component Model &rarr;</a></p>
+				</div>
+				<Code code={quickstart} lang="go" title="main.go" />
+			</div>
+		</section>
+
+		<section class="band">
+			<h2>What you get</h2>
+			<div class="feature-grid">
+				<div class="feature">
+					<h3>Deny by default</h3>
+					<p>
+						No files beyond what you mount, no sockets unless you allow them, a fake clock on the
+						WASI&nbsp;0.1 path. Cap memory with <code>WithMemoryLimitPages</code>; a
+						<code>context</code> deadline kills even a tight compiled loop.
+					</p>
+				</div>
+				<div class="feature">
+					<h3>Plugin contracts with types in them</h3>
+					<p>
+						wazy runs WebAssembly <em>components</em> &mdash; a <code>.wasm</code> that carries its
+						own typed interface. Records, lists, <code>option</code> and <code>result</code> cross
+						as Go values, and a handle to a host object is a lifetime the runtime drops for you.
+					</p>
+				</div>
+				<div class="feature">
+					<h3>Guests that suspend and resume</h3>
+					<p>
+						The WASI&nbsp;0.3 async ABI: <code>stream&lt;T&gt;</code>, <code>future&lt;T&gt;</code>,
+						subtasks, cancellation, backpressure and cooperative threads, with goroutines and
+						channels as the substrate. A parked guest costs one goroutine.
+					</p>
+				</div>
+				<div class="feature">
+					<h3>Cheap enough to be per-request</h3>
+					<p>
+						Every request gets its own fresh linear memory instead of a pooled one you scrub
+						between calls. A warm <code>wasi:http</code> component answers through
+						<code>net/http</code> in 3.37&nbsp;&micro;s and 45 allocations.
+					</p>
+				</div>
+				<div class="feature">
+					<h3>Nothing to install</h3>
+					<p>
+						One Go dependency, <code>golang.org/x/sys</code>. CI builds and runs guests from Rust,
+						C, C++, Zig, TinyGo, AssemblyScript and Go with <code>CGO_ENABLED=0</code>, and
+						cross-compiles to <code>s390x</code>, <code>ppc64le</code>, <code>plan9</code> and more.
+					</p>
+				</div>
+				<div class="feature">
+					<h3>Conformance you can count</h3>
+					<p>
+						711 generated core-spec case files with no skip list, 31 official async suites, the
+						wasi-testsuite on Linux, macOS <em>and</em> Windows, and four fuzz targets &mdash; three
+						differential against the interpreter.
+					</p>
+				</div>
+			</div>
+		</section>
+
+		<section class="band">
+			<div class="split">
+				<div>
+					<h2>Host functions, typed and allocation-free</h2>
+					<p>
+						Instead of a <code>reflect</code>-per-call path, typed generic helpers derive the Wasm
+						signature from Go&rsquo;s types at compile time. <code>HostFunc0</code>&ndash;<code
+							>HostFunc16</code
+						> and <code>HostProc0</code>&ndash;<code>HostProc16</code> cover 16 parameters; dispatch
+						allocates nothing.
+					</p>
+					<p><a href={`${base}/guides/host-functions/`}>Host functions &rarr;</a></p>
+				</div>
+				<Code code={typed} lang="go" title="host.go" />
+			</div>
+		</section>
+
+		<section class="band">
+			<h2>Standards</h2>
+			<table>
+				<thead><tr><th>Standard</th><th class="num">Supported</th></tr></thead>
+				<tbody>
+					<tr><td>Core Wasm 1.0 / 2.0</td><td class="num yes">&#10003;</td></tr>
+					<tr>
+						<td>
+							Core Wasm 3.0<br />
+							<small
+								>tail calls, extended const, exception handling, typed function references, relaxed
+								SIMD, multiple memories, memory64, GC</small
+							>
+						</td>
+						<td class="num yes">&#10003;</td>
+					</tr>
+					<tr><td>WASI 0.1 &mdash; <code>wasip1</code></td><td class="num yes">&#10003;</td></tr>
+					<tr>
+						<td>WASI 0.2 &middot; Component Model &mdash; <code>wasip2</code></td>
+						<td class="num yes">&#10003;</td>
+					</tr>
+					<tr>
+						<td>WASI 0.3 async ABI &mdash; <code>stream</code>, <code>future</code>, tasks, threads</td>
+						<td class="num yes">&#10003;</td>
+					</tr>
+				</tbody>
+			</table>
+			<p class="fineprint">
+				Turn the 3.0 proposals on together with <code>api.CoreFeaturesV3</code>; the default stays
+				<code>api.CoreFeaturesV2</code>.
+			</p>
+		</section>
+
+		<section class="band">
+			<h2>Why run Wasm inside your Go process?</h2>
+			<p>
+				The library you need exists only in Rust or C, or the code you must run is your
+				customers&rsquo;. Today that means cgo, a subprocess, a container, an embedded interpreter,
+				or trust.
+			</p>
+			<table>
+				<thead><tr><th>Instead of</th><th>It costs</th><th>wazy</th></tr></thead>
+				<tbody>
+					<tr>
+						<td><strong>cgo</strong>, to reach a Rust or C library</td>
+						<td>
+							<code>CGO_ENABLED=0</code> and cross-compilation; the race detector and pprof stop at the
+							library boundary; a bad pointer is your process&rsquo;s
+						</td>
+						<td>
+							The same library as one <code>.wasm</code>.
+							<a href="https://github.com/xusenlin/go-anydoc">go-anydoc</a> converts a 7.5&nbsp;MB PDF
+							through a Rust crate and still cross-compiles to <code>s390x</code>
+						</td>
+					</tr>
+					<tr>
+						<td><strong>A subprocess, an RPC plugin, or a container per request</strong></td>
+						<td>
+							a second artifact per OS/arch, a process or image to supervise, a serialized round trip
+							per call
+						</td>
+						<td>One file to version and sign; a fresh sandbox per request, 48&nbsp;ns per host call, no daemon</td>
+					</tr>
+					<tr>
+						<td><strong>An embedded interpreter</strong> (goja, yaegi, Starlark)</td>
+						<td>one language, forever</td>
+						<td>Any language that targets Wasm &mdash; one example runs the same guest built by four toolchains</td>
+					</tr>
+					<tr>
+						<td><strong>Trusting the code</strong></td>
+						<td>a dependency&rsquo;s <code>init()</code> runs with your files, your credentials, your network</td>
+						<td>
+							Deny by default: nothing mounted, no sockets registered, and a fake WASI&nbsp;0.1 clock
+							until you hand over a real one
+						</td>
+					</tr>
+				</tbody>
+			</table>
+			<p class="fineprint">
+				<strong>Where the alternative still wins.</strong> cgo, when the library must spawn OS threads
+				of its own, or the host machine itself. A container or microVM, when you need kernel-enforced
+				CPU quotas per tenant: wazy caps memory and enforces a deadline, but there is no fuel
+				metering. Starlark, when the code is config-shaped and your authors will not install a Wasm
+				toolchain. Trust, when the code is first-party and what you wanted was extensibility, not
+				safety.
+			</p>
+		</section>
+
+		<section class="band">
+			<h2>Head to head with wazero</h2>
+			<p>
+				Measured against wazero in the same runs, on the same workloads. Every first-party figure on
+				this site is a benchmark in the repository &mdash; run them yourself.
+			</p>
+			<table>
+				<thead><tr><th>Path</th><th class="num">wazy vs wazero</th><th>What &amp; why</th></tr></thead>
+				<tbody>
+					<tr>
+						<td><strong>Instantiate</strong></td>
+						<td class="num"><strong>9.1x</strong></td>
+						<td>1.724&nbsp;&micro;s vs 15.74&nbsp;&micro;s, on a 37&nbsp;KB TinyGo module.</td>
+					</tr>
+					<tr>
+						<td><strong>Interruptible loops</strong><br /><code>WithCloseOnContextDone</code></td>
+						<td class="num"><strong>12&ndash;13x</strong></td>
+						<td>
+							+5% overhead vs +75%. The per-loop check is amortized, not a Go round-trip per
+							iteration. Against <code>wazero@main</code>.
+						</td>
+					</tr>
+					<tr>
+						<td><strong>Compiled execution</strong></td>
+						<td class="num">memory-heavy leads</td>
+						<td>
+							<code>string_manipulation</code> &minus;18%, <code>reverse_array</code> &minus;14%,
+							<code>base64</code> &minus;12%, <code>fibonacci</code> a wash &mdash; the advantage tracks
+							memory-access intensity, not arithmetic.
+						</td>
+					</tr>
+					<tr>
+						<td><strong>Host calls</strong> (Go &harr; Wasm)</td>
+						<td class="num">a tie</td>
+						<td>
+							48.5&nbsp;ns here, 48.3&nbsp;ns there, on the raw stack API both runtimes expose. The
+							win is structural, not per-call.
+						</td>
+					</tr>
+					<tr>
+						<td><strong>Cumulative</strong></td>
+						<td class="num">geomean <strong>&minus;17.8%</strong></td>
+						<td>
+							B/op &minus;22.9%, across <code>internal/integration_test/bench</code>, versus the wazero
+							fork point, with upstream wazero as a control in the same runs.
+						</td>
+					</tr>
+				</tbody>
+			</table>
+			<p>
+				<a href={`${base}/reference/performance/`}
+					>Full numbers, method, and the optimizations measured and rejected &rarr;</a
+				>
+			</p>
+		</section>
+
+		<section class="band">
+			<h2>Used by</h2>
+			<ul>
+				<li>
+					<a href="https://github.com/taubyte/tau">taubyte/tau</a> &mdash; the open-source platform
+					behind Taubyte clouds runs WebAssembly workloads on wazy.
+				</li>
+				<li>
+					<a href="https://github.com/xusenlin/go-anydoc">go-anydoc</a> &mdash; Go bindings for a Rust
+					document converter; its 6.5&nbsp;MB module is the largest published wazy measurement.
+				</li>
+			</ul>
+			<p class="fineprint">
+				Using wazy in production? <a href={`${repo}/pulls`}>Open a PR</a> to add yourself.
+			</p>
+		</section>
+	</div>
+</StarlightPage>
+
+<style is:global>
+	/* The splash template prints the page title above the content; the hero
+	   already says "wazy" in the header logo, so drop that panel here. */
+	.content-panel:has(> .sl-container > h1#_top) {
+		display: none;
+	}
+	/* Give the landing the full content column rather than the prose measure. */
+	.sl-markdown-content:has(> .landing) {
+		max-width: none;
+	}
+</style>

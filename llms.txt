@@ -6,6 +6,7 @@ wazy is a Go library: `go get github.com/samyfodil/wazy`. The public API lives i
 
 ## Documentation
 
+- [Website](https://samyfodil.github.io/wazy/): guides and reference — getting started, components, WASI 0.2, async, sandboxing, CLI, performance, conformance.
 - [README](README.md): overview, install, usage, and benchmarks vs. wazero.
 - [RATIONALE](RATIONALE.md): design decisions, engine internals, and trade-offs.
 - [CONTRIBUTING](CONTRIBUTING.md): how to build, test, and contribute.

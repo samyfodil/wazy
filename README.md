@@ -9,7 +9,7 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/samyfodil/wazy.svg)](https://pkg.go.dev/github.com/samyfodil/wazy) [![Test](https://github.com/samyfodil/wazy/actions/workflows/commit.yaml/badge.svg)](https://github.com/samyfodil/wazy/actions/workflows/commit.yaml) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-[**Docs**](https://pkg.go.dev/github.com/samyfodil/wazy) · [**Examples**](examples) · [**Components**](examples/component) · [**Benchmarks**](#benchmarks) · [**Optimizations**](OPTIMIZATIONS.md)
+[**Docs**](https://samyfodil.github.io/wazy/) · [**API**](https://pkg.go.dev/github.com/samyfodil/wazy) · [**Examples**](examples) · [**Components**](examples/component) · [**Benchmarks**](#benchmarks) · [**Optimizations**](OPTIMIZATIONS.md)
 
 </div>
 
