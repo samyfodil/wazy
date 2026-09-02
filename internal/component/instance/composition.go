@@ -115,12 +115,29 @@ func exportedResourceDefs(comp *binary.Component) map[string]uint32 {
 // Best-effort throughout, exactly like exportedResourceDefs: an unreadable
 // member contributes nothing rather than failing instantiation.
 //
-// One shape it deliberately does not chase: a provider that is ITSELF a
-// composition, i.e. whose instance export names an alias of one of its own
-// sub-instances' exports rather than an instance definition. componentInstanceDef
-// returns ok == false there and this returns nil, so a resource crossing two
-// composition levels is left unlined-up. That is not silent -- the first handle
-// to cross traps with a resource-type mismatch -- but it is not supported.
+// One shape it does not read, by construction: a component that does not DEFINE
+// the interface at all and only re-exposes a nested sub-instance's --
+// `(alias export $p "X" (instance $g))` + `(export "X" (instance $g))`, the
+// shape `wac compose` and `wasm-tools compose` emit for a composed component.
+// componentInstanceDef returns ok == false for an alias-produced index-space
+// slot, so this returns nil, which is the right answer: such a component has no
+// instance DEFINITION of its own to read, and its TypeSpace does not contain
+// the resource at all.
+//
+// It is therefore the CALLER's job to resolve the true owner first
+// (Instance.reexposedInstances, recorded by bindInstanceExportGraph's
+// projection arm) and to call this against the OWNER's comp under the OWNER's
+// own export name for the interface -- the two names need not agree, since a
+// composer may rename across levels. instantiateNestedInstances' arg.Sort ==
+// 0x05 arm does exactly that.
+//
+// Calling it against the re-exposing component instead is not a
+// resource-specific gap, and it does not trap on the first handle to cross:
+// the same mistake also hands the re-exposed exports' whole signatures to the
+// wrapper's resolver, and instantiation then fails before any guest code runs
+// with "type index N not found" -- a message naming neither resources nor
+// composition. See boundExport.home and Instance.reexposedInstances for the
+// two records that make the owner reachable.
 func exportedInstanceResourceDefs(comp *binary.Component, instanceExportName string) map[string]uint32 {
 	var localIdx int
 	found := false
@@ -511,19 +528,34 @@ func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, byIdx
 	if al.Sort != 0x01 || al.TargetKind != 0x00 {
 		return nil, fmt.Errorf("func arg index %d is a %#x/%#x alias, not a func export alias", funcIdx, al.Sort, al.TargetKind)
 	}
-	// A LOCAL instance definition names a sibling nested instantiation;
-	// anything else is an imported instance, resolved through
-	// importInterfaceName below. Resolved through the true component instance
-	// index space (see componentInstanceDef), not numImported arithmetic,
-	// since an interleaved instance export shifts every later definition.
-	if _, isLocal := componentInstanceDef(comp, al.InstanceIdx); isLocal {
-		sib, ok := byIdx[int(al.InstanceIdx)]
-		if !ok {
+	// A local instance DEFINITION that has not been instantiated yet is a
+	// forward reference. Say exactly that, rather than falling through to the
+	// imported-instance path below, which would blame the import list for a
+	// problem in the instantiation order.
+	if _, isDef := componentInstanceDef(comp, al.InstanceIdx); isDef {
+		if _, instantiated := byIdx[int(al.InstanceIdx)]; !instantiated {
 			return nil, fmt.Errorf("func arg index %d aliases component instance %d, which is not a prior nested instantiation", funcIdx, al.InstanceIdx)
 		}
-		be, ok := sib.exports[al.Name]
+	}
+	// A prior nested instantiation names a sibling; anything else is an
+	// imported instance, resolved through importInterfaceName below.
+	// resolveFuncAliasInstance is the resolution the func-EXPORT side uses
+	// (bindFuncExportGraph), shared because the operand is the same thing on
+	// both sides: a raw component-instance index-space slot, which besides a
+	// definition can be an alias of its own -- `(alias export $p "iface"
+	// (instance $g))` then `(alias export $g "f" (func))` -- or an
+	// export-produced slot, neither of which byIdx (keyed by definition slots)
+	// has an entry for. It also resolves that space through
+	// componentInstanceDef rather than numImported arithmetic, since an
+	// interleaved instance export shifts every later definition.
+	sib, key, rerr := resolveFuncAliasInstance(comp, aliasTarget{instIdx: al.InstanceIdx, name: al.Name}, byIdx)
+	if rerr != nil {
+		return nil, fmt.Errorf("func arg index %d %w", funcIdx, rerr)
+	}
+	if sib != nil {
+		be, ok := sib.exports[key]
 		if !ok {
-			return nil, fmt.Errorf("func arg index %d: sibling component instance %d has no export %q", funcIdx, al.InstanceIdx, al.Name)
+			return nil, fmt.Errorf("func arg index %d: sibling component instance %d has no export %q", funcIdx, al.InstanceIdx, key)
 		}
 		// No resource-type wiring for a bare (non-instance) func arg -- a
 		// resource crossing this boundary would need its own `(with "r"
@@ -531,8 +563,12 @@ func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, byIdx
 		// this one; provToImp is only consulted when the func signature
 		// itself has an own<R>/borrow<R> param or result.
 		provToImp := func(uint32) (uint32, bool) { return 0, false }
-		hi := delegatingHostImport(sib, al.Name, be, provToImp)
-		hi.asyncTarget = &guestAsyncTarget{sub: sib, be: be, exportName: al.Name, provToImp: provToImp}
+		// The sibling may itself only RE-EXPOSE the aliased export, in which
+		// case the call belongs to whatever instance defines it -- see
+		// boundExport.home and ownerOf.
+		owner, ownerKey := ownerOf(be, sib, key)
+		hi := delegatingHostImport(owner, ownerKey, be, provToImp)
+		hi.asyncTarget = &guestAsyncTarget{sub: owner, be: be, exportName: ownerKey, provToImp: provToImp}
 		return hi, nil
 	}
 	iface, err := importInterfaceName(comp, al.InstanceIdx)

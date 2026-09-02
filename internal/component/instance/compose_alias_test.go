@@ -3,12 +3,11 @@ package instance
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"testing"
 
-	_ "embed"
-
 	"github.com/samyfodil/wazy"
-
+	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
 )
 
@@ -27,8 +26,10 @@ var composeAliasRenamedWasm []byte
 
 // composedRun instantiates a composed fixture and calls one export, with no
 // host imports at all -- the whole point of a composition is that the consumer's
-// only import is satisfied by the provider.
-func composedRun(t *testing.T, raw []byte, exportName string) uint32 {
+// only import is satisfied by the provider. Every composed fixture answers in a
+// single u32 (see composedRunExpected's doc for why), so the result shape is
+// fixed here rather than left to each caller.
+func composedRun(t *testing.T, raw []byte, exportName string, args ...abi.Value) uint32 {
 	t.Helper()
 	comp, err := binary.Decode(bytes.NewReader(raw))
 	if err != nil {
@@ -42,7 +43,7 @@ func composedRun(t *testing.T, raw []byte, exportName string) uint32 {
 		t.Fatalf("instantiate: %v", err)
 	}
 	t.Cleanup(func() { in.Close(ctx) }) //nolint:errcheck // test cleanup
-	out, err := in.Call(ctx, exportName)
+	out, err := in.Call(ctx, exportName, args...)
 	if err != nil {
 		t.Fatalf("call %q: %v", exportName, err)
 	}

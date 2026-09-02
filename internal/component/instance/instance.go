@@ -197,6 +197,28 @@ type Instance struct {
 	// afterward, so concurrent CallExport calls read it safely with no lock.
 	instanceExports map[string]map[string]instanceExportEntry
 
+	// reexposedInstances maps an instance-export name THIS component
+	// publishes to the instance that actually DEFINES that interface, plus
+	// the name that instance publishes it under. Filled in only for an
+	// export that is an instance ALIAS projecting a nested sub-Instance's
+	// interface (bindInstanceExportGraph's projection arm) -- i.e. only for a
+	// component that merely republishes an interface it composed in. nil for
+	// a component that defines every interface it exports, which is every
+	// component that is not itself the output of a composer.
+	//
+	// It is boundExport.home's counterpart for the one fact home cannot
+	// carry: a types-only interface (a record or a resource and no funcs)
+	// produces no boundExport at all, yet a FURTHER composition taking that
+	// interface as an instantiate-arg still has to line its resources up
+	// against the definer's tables, tags and destructors rather than against
+	// this component's, which has no entry for them at all. Transitive like
+	// home is: a chain of wrappers records the deepest owner, so resolving
+	// ownership costs one lookup at any depth.
+	//
+	// Written once during instantiation and never mutated afterward, so
+	// concurrent CallExport calls read it safely with no lock.
+	reexposedInstances map[string]reexposedIface
+
 	// closers are every module instantiated for this component (core guest
 	// modules and synthetic host modules), closed in reverse order by Close.
 	closers []api.Module
@@ -494,24 +516,67 @@ type boundExport struct {
 	// today -- see resolveReallocFuncGraph's doc.
 	reallocMod api.Module
 
-	// home is the *Instance this export's async runtime state (activeTask,
-	// exclusiveHeld, mayEnter, numWaitingToEnter, ...) actually lives on --
-	// set only when this boundExport was reached by re-exporting a NESTED
-	// component instance's export directly through a func alias
-	// (bindFuncExportGraph's isLift==false branch), rather than bound by a
-	// real `canon lift` against the Instance that will eventually dispatch
-	// it. nil in the overwhelmingly common case (an export's home IS
-	// whatever Instance calls invoke() on it), where invoke() uses itself.
-	// Needed because sched is the only per-composition-tree-shared async
-	// field; activeTask/exclusiveHeld/mayEnter/numWaitingToEnter are
-	// per-Instance, so a root component that only wraps and re-exports a
-	// nested component's async export (the async .wast suites' standard
-	// shape: an outer anonymous component instantiating $C/$D and
-	// `(alias export $d "run")`-ing $D's export back out) must dispatch
-	// invokeAsyncCallback/invokeStackful against $D's OWN Instance, not the
-	// root's -- every blocking builtin's closure was bound against $D's
-	// Instance at $D's own instantiation time.
+	// home is the *Instance that DEFINES this export -- the one whose own
+	// `canon lift` produced this boundExport -- recorded whenever that is NOT
+	// the Instance holding it in its exports map. It is set every time a
+	// boundExport is re-exposed out of a nested sub-Instance, either through
+	// a func alias naming it (bindFuncExportGraph's isLift==false branch) or
+	// as one member of an instance alias projecting a whole interface
+	// (bindInstanceExportGraph's projection arm) -- between them, the shape
+	// every composed component republishes its inner halves' exports with.
+	// nil in the overwhelmingly common case, where an export's owner IS
+	// whatever Instance calls invoke() on it.
+	//
+	// The owner is what the whole call has to run against, because the whole
+	// call was bound against it:
+	//
+	//   - Its async runtime state (activeTask, exclusiveHeld, mayEnter,
+	//     numWaitingToEnter, ...) is per-Instance -- sched is the only
+	//     per-composition-tree-shared async field -- and every blocking
+	//     builtin's closure was bound against the definer at ITS own
+	//     instantiation time, so invoke() must dispatch
+	//     invokeAsyncCallback/invokeStackful there (the async .wast suites'
+	//     standard shape: an outer anonymous component instantiating $C/$D
+	//     and `(alias export $d "run")`-ing $D's export back out).
+	//   - The same holds for a plain SYNC lift whose definer binds a canon
+	//     that resolves the current task at call time (task.return,
+	//     context.get/set, backpressure.inc/dec, waitable-set.wait/poll, or a
+	//     thread.* canon): invokeEntered installs its syncImplicit task on
+	//     whichever Instance runs the call, while those closures read the
+	//     DEFINER's activeTask.
+	//   - lowerParams/liftResult mint and reduce this export's own<R>/
+	//     borrow<R> handles in in.resources, tagged through in.resCanon and
+	//     in.isGuestResource, and the fd states the DEFINER's resource type
+	//     indices. A component that merely republishes an interface has no
+	//     entry for those resources at all: it never composed them into
+	//     itself.
+	//   - Resolving fd's nested TypeRefs needs the definer's TypeSpace; see
+	//     the resolve field just above, which carries exactly that. Routing
+	//     invoke() to the owner is what makes `in.resolve == be.resolve` hold
+	//     inside invokeEntered, so every in.resolve site there is right for
+	//     free.
+	//
+	// Set unconditionally, where an earlier version set it only for the async
+	// shapes that first needed it. A wrapper re-exposing a plain SYNC lift is
+	// precisely what `wac compose` and `wasm-tools compose` emit, and a
+	// SECOND composition over such a wrapper must reach past it to the real
+	// definer for all four reasons above -- see reexposedSubExport, which
+	// records this, for what went wrong without it. Only set when it is not
+	// already set, so a MULTI-level re-export keeps pointing at the deepest
+	// true owner rather than at the intermediate wrapper.
 	home *Instance
+
+	// homeName is the export key `home` files this boundExport under in its
+	// OWN exports map -- an "iface#member" key or a bare func name. Set
+	// together with home, and needed alongside it because the two names need
+	// not agree: nothing in the binary format ties a re-exposing wrapper's
+	// export name to the name the definer publishes the same export under, so
+	// a composer may rename an interface (or a bare func) at every level. See
+	// instanceArgTarget.projection for the identical independence one level
+	// down. Consulted through ownerOf by everything that has to invoke the
+	// export on its owner -- delegatingHostImport and guestAsyncTarget --
+	// both to look it up there and to name it in a diagnostic.
+	homeName string
 
 	// asyncCallback is true when this export is an async lift with a
 	// callback option (CanonOpt kind 0x06 async + 0x07 callback) -- see
@@ -1592,6 +1657,16 @@ func instanceExportKey(instanceName, memberName string) string {
 	return instanceName + "#" + memberName
 }
 
+// reexposedIface names the true owner of an interface a component only
+// re-exposes: the *Instance that defines it, plus that instance's OWN export
+// name for it. Both halves are load-bearing -- the two names need not agree,
+// since a composer may rename an interface between composition levels. See
+// Instance.reexposedInstances.
+type reexposedIface struct {
+	owner *Instance
+	name  string
+}
+
 // instanceExportEntry pairs a boundExport with the exact "instance#member"
 // string it was bound under in the flat exports map (reused verbatim, not
 // rebuilt) -- see buildInstanceExportIndex.
@@ -1629,11 +1704,13 @@ func buildInstanceExportIndex(exports map[string]*boundExport) map[string]map[st
 }
 
 func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName string, args []abi.Value) ([]abi.Value, error) {
-	// A boundExport reached by re-exporting a nested instance's export
-	// through a func alias carries its own async home (be.home's doc) --
-	// dispatch the async paths against THAT Instance, not the caller's; the
-	// plain sync path below never touches per-Instance async state, so it's
-	// unaffected either way.
+	// A boundExport re-exposed out of a nested instance names its true owner
+	// (be.home's doc) -- run the call against THAT Instance, not against
+	// whichever component republished the export. Everything below this point
+	// reads per-Instance state the definer owns and the republisher does not:
+	// the async dispatch paths' runtime state, poisoning, and (through
+	// invokeEntered) the syncImplicit task plus the handle table, resource
+	// tags and resolver lowerParams/liftResult work in.
 	target := in
 	if be.home != nil {
 		target = be.home
