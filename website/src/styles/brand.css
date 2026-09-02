@@ -1,182 +1,558 @@
-/* wazy brand: the logo's blue -> cyan gradient, as Starlight theme tokens. */
+/*
+ * wazy — palette, type and page furniture.
+ *
+ * Two rules drive the colour system:
+ *   1. Everything is derived from the mark's indigo→cyan ramp, so the ground is
+ *      indigo-black rather than neutral black.
+ *   2. Cyan is a *state*, never decoration. It marks a capability that has been
+ *      granted, or a number that was measured. Denied and unmeasured stay grey.
+ */
+
+/* ---------------------------------------------------------------- palette */
 
 :root {
-  --sl-color-accent-low: #1b2350;
-  --sl-color-accent: #4457e8;
-  --sl-color-accent-high: #b9c4ff;
-  --wazy-grad: linear-gradient(100deg, #5184ff, #2aa8f6 55%, #20f1ef);
-  --wazy-grad-soft: linear-gradient(100deg, #5264f3, #14c1cb);
+	--sl-color-white: #f4f6ff;
+	--sl-color-gray-1: #dde1f2;
+	--sl-color-gray-2: #b4bad8;
+	--sl-color-gray-3: #868dae;
+	--sl-color-gray-4: #545b7c;
+	--sl-color-gray-5: #333955;
+	--sl-color-gray-6: #1a1f35;
+	--sl-color-gray-7: #12162a;
+	--sl-color-black: #0a0c18;
+
+	--sl-color-accent-low: #1b2050;
+	--sl-color-accent: #6e7bff;
+	--sl-color-accent-high: #c2c8ff;
+
+	--wz-cyan: #35d6d0;
+	--wz-cyan-dim: #1d7f80;
+	--wz-indigo: #7c86ff;
+	--wz-rule: #232842;
+	--wz-panel: #0e1224;
+	--wz-panel-edge: #232842;
+	--wz-glow: rgba(53, 214, 208, 0.14);
 }
 
 :root[data-theme='light'] {
-  --sl-color-accent-low: #d8ddfd;
-  --sl-color-accent: #3543cf;
-  --sl-color-accent-high: #1c2470;
-  --wazy-grad: linear-gradient(100deg, #2519a8, #2aa8f6 55%, #087b91);
+	--sl-color-white: #0a0c18;
+	--sl-color-gray-1: #14182c;
+	--sl-color-gray-2: #3a4160;
+	--sl-color-gray-3: #5c6484;
+	--sl-color-gray-4: #8a91ac;
+	--sl-color-gray-5: #c7cbdd;
+	--sl-color-gray-6: #e7eaf4;
+	--sl-color-gray-7: #f2f4fa;
+	--sl-color-black: #f6f7fc;
+
+	--sl-color-accent-low: #dcdffd;
+	--sl-color-accent: #3a41d6;
+	--sl-color-accent-high: #1a1e6b;
+
+	--wz-cyan: #0b8e9b;
+	--wz-cyan-dim: #8fc9cf;
+	--wz-indigo: #3a41d6;
+	--wz-rule: #dfe3f0;
+	--wz-panel: #ffffff;
+	--wz-panel-edge: #dfe3f0;
+	--wz-glow: rgba(11, 142, 155, 0.08);
 }
 
-/* ---------- landing page ---------- */
+/* ------------------------------------------------------------------- type */
+
+:root {
+	--sl-font: 'Familjen Grotesk Variable', ui-sans-serif, system-ui, sans-serif;
+	--sl-font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+body {
+	font-synthesis-weight: none;
+	letter-spacing: -0.005em;
+}
+
+.sl-markdown-content h1,
+.sl-markdown-content h2,
+.sl-markdown-content h3,
+.sl-markdown-content h4 {
+	letter-spacing: -0.025em;
+	font-weight: 700;
+}
+
+/* Starlight's sidebar and nav pick up the grotesque; the mono is for machine
+   text only (code, capability names, measured values). */
+.sidebar-content a { letter-spacing: -0.01em; }
+
+/* ---------------------------------------------------------- docs furniture */
+
+/* A 45° notch echoing the mark, on the one element that frames machine output. */
+.sl-markdown-content .expressive-code .frame {
+	--ec-frm-edBg: var(--wz-panel);
+	--ec-frm-edTabBarBg: var(--sl-color-gray-7);
+}
+
+.sl-markdown-content :not(pre) > code {
+	background: var(--sl-color-gray-7);
+	border: 1px solid var(--wz-rule);
+	border-radius: 3px;
+	padding: 0.1em 0.35em;
+	font-size: 0.85em;
+}
+
+.sl-markdown-content table {
+	font-size: 0.94rem;
+}
+.sl-markdown-content th {
+	font-weight: 600;
+	color: var(--sl-color-gray-2);
+}
+
+/* Section starts read as structure, not decoration. Starlight wraps headings in
+   a flex wrapper and leaves the h2 itself `display: inline`, so the rule has to
+   go on the wrapper or it only spans the width of the words. The landing draws
+   its own section rules and has no wrapper, so it is unaffected. */
+.sl-markdown-content .sl-heading-wrapper.level-h2 {
+	margin-top: 2.6rem;
+	padding-top: 1.5rem;
+	border-top: 1px solid var(--wz-rule);
+}
+
+/* ------------------------------------------------------------------ shared */
+
+.grant { color: var(--wz-cyan); }
+.deny { color: var(--sl-color-gray-4); }
+
+/* =========================================================== landing page = */
 
 .landing {
-  --pad: clamp(1rem, 4vw, 2rem);
+	--gutter: clamp(1rem, 3vw, 2rem);
+	font-size: 1rem;
 }
 
-.hero-band {
-  padding: clamp(2rem, 6vw, 4.5rem) 0 clamp(1.5rem, 4vw, 3rem);
+.landing section {
+	padding-block: clamp(2.5rem, 5vw, 4rem);
+	border-top: 1px solid var(--wz-rule);
+}
+.landing section:first-child {
+	border-top: 0;
+	padding-top: clamp(2rem, 5vw, 3.5rem);
 }
 
-.eyebrow {
-  display: inline-block;
-  margin: 0 0 1.25rem;
-  font-family: var(--__sl-font-mono, ui-monospace, monospace);
-  font-size: 0.78rem;
-  letter-spacing: 0.02em;
-  color: var(--sl-color-accent-high);
-  background: var(--sl-color-accent-low);
-  border: 1px solid var(--sl-color-accent);
-  border-radius: 999px;
-  padding: 0.25rem 0.85rem;
+.landing h2 {
+	font-size: clamp(1.5rem, 3.4vw, 2.1rem);
+	line-height: 1.1;
+	letter-spacing: -0.03em;
+	font-weight: 700;
+	margin: 0 0 0.7rem;
+	max-width: 26ch;
+	text-wrap: balance;
 }
 
-.landing h1 {
-  font-size: clamp(2.4rem, 6vw, 3.6rem);
-  line-height: 1.05;
-  letter-spacing: -0.035em;
-  margin: 0 0 1rem;
-  max-width: 20ch;
+.landing p {
+	max-width: 64ch;
+	margin: 0 0 1rem;
+	color: var(--sl-color-gray-2);
+	line-height: 1.6;
 }
 
-.landing h1 .grad {
-  background: var(--wazy-grad);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+.landing a:not(.btn) {
+	color: var(--sl-color-white);
+	text-decoration-color: var(--wz-cyan);
+	text-underline-offset: 0.2em;
+	text-decoration-thickness: 1px;
 }
 
-.lede {
-  font-size: clamp(1.05rem, 2.2vw, 1.25rem);
-  line-height: 1.6;
-  color: var(--sl-color-gray-2);
-  max-width: 62ch;
-  margin: 0 0 2rem;
+.sub {
+	margin-top: 1.4rem;
+	font-size: 0.86rem;
+	line-height: 1.55;
+	color: var(--sl-color-gray-3);
+	max-width: 72ch;
+}
+.sub code { font-size: 0.92em; }
+
+/* ------------------------------------------------------------------- hero */
+
+.hero {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: clamp(2rem, 5vw, 3.5rem);
+	align-items: stretch;
+}
+/* The panel is the taller column; drop the install line to the foot of the text
+   column so the two bottom edges line up instead of leaving a hole. */
+.hero > div:first-child {
+	display: flex;
+	flex-direction: column;
+}
+@media (min-width: 56rem) {
+	.hero { grid-template-columns: minmax(0, 1.05fr) minmax(24rem, 0.95fr); }
 }
 
-.actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem;
-  align-items: center;
+.hero h1 {
+	font-size: clamp(2.6rem, 6.6vw, 4.1rem);
+	line-height: 0.98;
+	letter-spacing: -0.045em;
+	font-weight: 700;
+	margin: 0 0 1.25rem;
+	text-wrap: balance;
 }
 
-.install {
-  font-family: var(--__sl-font-mono, ui-monospace, monospace);
-  font-size: 0.85rem;
-  background: var(--sl-color-gray-6);
-  border: 1px solid var(--sl-color-gray-5);
-  border-radius: 8px;
-  padding: 0.55rem 0.9rem;
-  color: var(--sl-color-gray-2);
-  white-space: nowrap;
-  overflow-x: auto;
-}
-.install::before { content: '$ '; opacity: 0.5; }
-
-.stats {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 1rem;
-  margin: clamp(2rem, 5vw, 3.5rem) 0 0;
-  border-top: 1px solid var(--sl-color-hairline);
-  padding-top: 1.75rem;
-}
-.stat .v {
-  font-size: 1.75rem;
-  font-weight: 700;
-  letter-spacing: -0.03em;
-  background: var(--wazy-grad);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-.stat .k {
-  font-size: 0.85rem;
-  line-height: 1.4;
-  color: var(--sl-color-gray-3);
+.hero .lede {
+	font-size: clamp(1.02rem, 1.6vw, 1.15rem);
+	line-height: 1.55;
+	color: var(--sl-color-gray-2);
+	max-width: 46ch;
+	margin-bottom: 1.75rem;
 }
 
-.band {
-  border-top: 1px solid var(--sl-color-hairline);
-  padding: clamp(2.25rem, 5vw, 3.5rem) 0 0;
-}
-.band > h2 {
-  font-size: 1.6rem;
-  letter-spacing: -0.02em;
-  margin: 0 0 0.5rem;
-}
-.band > p {
-  color: var(--sl-color-gray-2);
-  max-width: 68ch;
-  margin: 0 0 1.5rem;
+.hero .lede strong {
+	color: var(--sl-color-white);
+	font-weight: 600;
 }
 
-.split {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 1.5rem;
-  align-items: start;
-}
-@media (min-width: 60rem) {
-  .split { grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); gap: 2.5rem; }
+.cta {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.6rem;
+	margin-bottom: 1.5rem;
 }
 
-.feature-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 1rem;
+.btn {
+	display: inline-flex;
+	align-items: center;
+	font: inherit;
+	font-weight: 600;
+	font-size: 0.95rem;
+	padding: 0.6rem 1.2rem;
+	border-radius: 4px;
+	border: 1px solid transparent;
+	text-decoration: none;
 }
-.feature {
-  border: 1px solid var(--sl-color-gray-5);
-  border-radius: 10px;
-  padding: 1.25rem 1.35rem;
-  background: var(--sl-color-black);
+.btn-solid {
+	background: var(--sl-color-accent);
+	color: #fff;
 }
-.feature h3 {
-  font-size: 1rem;
-  margin: 0 0 0.5rem;
-  letter-spacing: -0.01em;
+.btn-solid:hover { background: var(--sl-color-accent-high); color: var(--sl-color-black); }
+:root[data-theme='light'] .btn-solid:hover { color: #fff; background: var(--sl-color-accent-high); }
+.btn-line {
+	border-color: var(--sl-color-gray-5);
+	color: var(--sl-color-white);
 }
-.feature p {
-  font-size: 0.92rem;
-  line-height: 1.6;
-  color: var(--sl-color-gray-3);
-  margin: 0;
+.btn-line:hover { border-color: var(--sl-color-gray-4); }
+
+.get {
+	font-family: var(--sl-font-mono);
+	font-size: 0.82rem;
+	color: var(--sl-color-gray-3);
+	border-top: 1px solid var(--wz-rule);
+	margin-top: auto;
+	padding-top: 0.9rem;
+	overflow-x: auto;
+	white-space: nowrap;
+}
+.get b { color: var(--sl-color-gray-2); font-weight: 400; }
+
+/* ------------------------------------------------- the sandbox manifest */
+
+.manifest {
+	background: var(--wz-panel);
+	border: 1px solid var(--wz-panel-edge);
+	/* 45° corner cut, from the mark's geometry. */
+	clip-path: polygon(0 0, calc(100% - 18px) 0, 100% 18px, 100% 100%, 0 100%);
+	font-family: var(--sl-font-mono);
+	font-size: 0.84rem;
+	line-height: 1.5;
 }
 
-.landing table { font-size: 0.9rem; }
-.landing table td, .landing table th { vertical-align: top; }
-.landing .num { text-align: center; white-space: nowrap; }
-.yes { color: #3fb950; font-weight: 700; }
-:root[data-theme='light'] .yes { color: #0f7a34; }
-
-.fineprint {
-  font-size: 0.82rem;
-  line-height: 1.55;
-  color: var(--sl-color-gray-3);
-  max-width: 74ch;
+.manifest-head {
+	display: flex;
+	justify-content: space-between;
+	gap: 1rem;
+	padding: 0.7rem 1.1rem;
+	border-bottom: 1px solid var(--wz-panel-edge);
+	color: var(--sl-color-gray-3);
+	font-size: 0.78rem;
+}
+.manifest-head b {
+	color: var(--sl-color-gray-1);
+	font-weight: 500;
 }
 
-/* The splash template centres its content column; give the landing full width. */
-.landing :global(.sl-markdown-content) { margin-top: 0; }
+.manifest-rows { padding-top: 0.4rem; }
 
-@media (max-width: 50rem) {
-  /* Wide comparison tables scroll inside themselves rather than clipping. */
-  .landing table {
-    display: block;
-    overflow-x: auto;
-    white-space: normal;
-  }
-  .landing table td,
-  .landing table th { min-width: 8rem; }
-  .actions { gap: 0.6rem; }
-  .install { width: 100%; }
+.manifest-row {
+	display: grid;
+	grid-template-columns: 1fr auto;
+	gap: 1rem;
+	align-items: baseline;
+	padding: 0.34rem 1.1rem;
+}
+.manifest-row .what { color: var(--sl-color-gray-2); }
+.manifest-row .state { color: var(--sl-color-gray-4); white-space: nowrap; }
+.manifest-row.on { background: var(--wz-glow); }
+.manifest-row.on .what { color: var(--sl-color-white); }
+.manifest-row.on .state { color: var(--wz-cyan); }
+
+.manifest-foot {
+	border-top: 1px solid var(--wz-panel-edge);
+	padding: 0.7rem 1.1rem;
+	color: var(--sl-color-gray-3);
+	font-size: 0.78rem;
+}
+
+/* --------------------------------------------------------- latency ruler */
+
+.ruler {
+	margin-top: 2rem;
+	font-family: var(--sl-font-mono);
+	font-size: 0.8rem;
+}
+
+.ruler-axis {
+	display: grid;
+	grid-template-columns: var(--label-w) minmax(0, 1fr);
+	gap: 1rem;
+	color: var(--sl-color-gray-4);
+	padding-bottom: 0.4rem;
+}
+.ruler { --label-w: 13.5rem; }
+
+.ruler-ticks {
+	position: relative;
+	height: 1.2em;
+}
+.ruler-ticks span {
+	position: absolute;
+	transform: translateX(-50%);
+	white-space: nowrap;
+}
+.ruler-ticks span:first-child { transform: none; }
+.ruler-ticks span:last-child { transform: translateX(-100%); }
+
+.ruler-row {
+	display: grid;
+	grid-template-columns: var(--label-w) minmax(0, 1fr);
+	gap: 1rem;
+	align-items: center;
+	padding: 0.42rem 0;
+	border-top: 1px solid var(--wz-rule);
+}
+.ruler-row .name {
+	color: var(--sl-color-gray-2);
+	font-size: 0.82rem;
+	line-height: 1.3;
+}
+.ruler-row.other .name { color: var(--sl-color-gray-4); }
+
+.ruler-track {
+	position: relative;
+	height: 1.6rem;
+	/* Decade gridlines, so the log scale is legible rather than implied. */
+	background-image: repeating-linear-gradient(
+		to right,
+		var(--wz-rule) 0 1px,
+		transparent 1px 20%
+	);
+}
+.ruler-mark {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	display: flex;
+	align-items: center;
+	gap: 0.45rem;
+	transform: translateX(-3px);
+}
+.ruler-mark::before {
+	content: '';
+	width: 6px;
+	height: 6px;
+	background: var(--wz-cyan);
+	rotate: 45deg;
+	flex: none;
+}
+.ruler-mark b {
+	color: var(--wz-cyan);
+	font-weight: 500;
+	font-size: 0.82rem;
+	white-space: nowrap;
+}
+.ruler-row.other .ruler-mark::before { background: var(--sl-color-gray-4); }
+.ruler-row.other .ruler-mark b { color: var(--sl-color-gray-4); }
+/* Past three-quarters of the axis the label would overflow; flip it inward. */
+.ruler-mark.flip { flex-direction: row-reverse; transform: translateX(3px); }
+
+/* ------------------------------------------------------------ two columns */
+
+.pair {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 1.25rem;
+	margin-top: 1.75rem;
+	align-items: start;
+}
+@media (min-width: 56rem) {
+	.pair { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1.5rem; }
+}
+.pair .expressive-code { margin: 0; }
+
+.pair-note {
+	font-family: var(--sl-font-mono);
+	font-size: 0.78rem;
+	color: var(--sl-color-gray-3);
+	margin: 0.5rem 0 0;
+}
+
+/* ------------------------------------------------------------- spec strip */
+
+.spec {
+	margin-top: 1.75rem;
+	border-top: 1px solid var(--wz-rule);
+}
+.spec-row {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 0.15rem 1.5rem;
+	padding: 0.85rem 0;
+	border-bottom: 1px solid var(--wz-rule);
+}
+@media (min-width: 44rem) {
+	.spec-row { grid-template-columns: 15rem minmax(0, 1fr); align-items: baseline; }
+}
+.spec-row dt {
+	font-family: var(--sl-font-mono);
+	font-size: 0.86rem;
+	color: var(--wz-cyan);
+}
+.spec-row dd {
+	margin: 0;
+	color: var(--sl-color-gray-2);
+	font-size: 0.94rem;
+	line-height: 1.5;
+}
+.spec-row.off dt { color: var(--sl-color-gray-4); }
+
+/* ------------------------------------------------------------- comparison */
+
+.versus { margin-top: 1.75rem; border-top: 1px solid var(--wz-rule); }
+
+.versus-row {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 0.35rem 1.5rem;
+	padding: 1rem 0;
+	border-bottom: 1px solid var(--wz-rule);
+}
+@media (min-width: 50rem) {
+	.versus-row {
+		grid-template-columns: 13rem 7.5rem minmax(0, 1fr);
+		align-items: baseline;
+	}
+}
+.versus-row .path {
+	font-weight: 600;
+	color: var(--sl-color-white);
+	font-size: 0.96rem;
+}
+.versus-row .path span {
+	display: block;
+	font-family: var(--sl-font-mono);
+	font-size: 0.76rem;
+	font-weight: 400;
+	color: var(--sl-color-gray-4);
+	margin-top: 0.15rem;
+}
+.versus-row .ratio {
+	font-family: var(--sl-font-mono);
+	font-size: 1.05rem;
+	color: var(--wz-cyan);
+}
+.versus-row.tie .ratio { color: var(--sl-color-gray-3); }
+.versus-row .why {
+	color: var(--sl-color-gray-2);
+	font-size: 0.92rem;
+	line-height: 1.5;
+}
+
+/* --------------------------------------------------------------- counters */
+
+.counts {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+	gap: 1px;
+	margin-top: 1.75rem;
+	background: var(--wz-rule);
+	border: 1px solid var(--wz-rule);
+}
+.count {
+	background: var(--wz-panel);
+	padding: 1.15rem 1.25rem;
+}
+.count b {
+	display: block;
+	font-family: var(--sl-font-mono);
+	font-size: 1.55rem;
+	font-weight: 500;
+	letter-spacing: -0.02em;
+	color: var(--wz-cyan);
+	line-height: 1.1;
+}
+.count span {
+	display: block;
+	margin-top: 0.35rem;
+	font-size: 0.84rem;
+	line-height: 1.4;
+	color: var(--sl-color-gray-3);
+}
+
+/* --------------------------------------------------------------- honesty */
+
+.limits {
+	margin-top: 1.5rem;
+	padding-left: 0;
+	list-style: none;
+}
+.limits li {
+	border-top: 1px solid var(--wz-rule);
+	padding: 0.85rem 0;
+	color: var(--sl-color-gray-2);
+	font-size: 0.94rem;
+	line-height: 1.55;
+	max-width: 68ch;
+}
+.limits li b {
+	color: var(--sl-color-white);
+	font-weight: 600;
+}
+
+/* ------------------------------------------------------------------ users */
+
+.users { margin: 1.5rem 0 0; padding: 0; list-style: none; }
+.users li {
+	border-top: 1px solid var(--wz-rule);
+	padding: 0.85rem 0;
+	color: var(--sl-color-gray-2);
+	font-size: 0.94rem;
+	max-width: 68ch;
+}
+
+/* --------------------------------------------------------- splash cleanup */
+
+/* The splash template prints the page title above the content; the hero says
+   it better, so drop that panel on this page only. */
+.content-panel:has(> .sl-container > h1#_top) { display: none; }
+.sl-markdown-content:has(> .landing) { max-width: none; }
+
+@media (prefers-reduced-motion: reduce) {
+	* { animation: none !important; transition: none !important; }
+}
+
+@media (max-width: 44rem) {
+	.ruler { --label-w: 100%; font-size: 0.75rem; }
+	/* Six decade labels collide at phone width; every other one still reads. */
+	.ruler-ticks span:nth-child(2),
+	.ruler-ticks span:nth-child(5) { display: none; }
+	.ruler-axis,
+	.ruler-row { grid-template-columns: minmax(0, 1fr); gap: 0.25rem; }
+	.ruler-row { padding: 0.7rem 0; }
 }

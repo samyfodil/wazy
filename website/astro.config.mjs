@@ -5,6 +5,8 @@ import starlight from '@astrojs/starlight';
 const repo = 'https://github.com/samyfodil/wazy';
 
 export default defineConfig({
+  // Keeps the dev overlay out of screenshots and off the page while designing.
+  devToolbar: { enabled: false },
   // GitHub Pages project site. Swap both for a custom domain (and add a CNAME).
   site: 'https://samyfodil.github.io',
   base: '/wazy',
@@ -20,7 +22,12 @@ export default defineConfig({
       },
       social: [{ icon: 'github', label: 'GitHub', href: repo }],
       editLink: { baseUrl: `${repo}/edit/main/website/` },
-      customCss: ['./src/styles/brand.css'],
+      customCss: [
+        '@fontsource-variable/familjen-grotesk',
+        '@fontsource/ibm-plex-mono/400.css',
+        '@fontsource/ibm-plex-mono/500.css',
+        './src/styles/brand.css',
+      ],
       lastUpdated: true,
       expressiveCode: {
         themes: ['github-dark-dimmed', 'github-light'],
