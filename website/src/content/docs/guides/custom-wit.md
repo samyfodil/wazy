@@ -34,9 +34,8 @@ world app {
 }
 ```
 
-That is [`examples/custom-wit`](https://github.com/samyfodil/wazy/tree/main/examples/custom-wit),
-which is worth reading end to end: it covers resources, a `borrow`, a `variant` and a
-`result<list<string>, variant>`.
+That is [`examples/custom-wit`](../../examples/custom-wit/), walked through end to end: it covers
+resources, a `borrow`, a `variant` and a `result<list<string>, variant>`.
 
 ## Implementing the host half
 
@@ -188,5 +187,5 @@ cargo component build --release        # or: cargo build --target wasm32-wasip2
 
 From Go, TinyGo, C or Zig, `wit-bindgen` generates the guest bindings and `wasm-tools component new`
 wraps the core module. The
-[examples directory](https://github.com/samyfodil/wazy/tree/main/examples) has the exact commands
-per toolchain, and commits the resulting `.wasm` beside the source.
+[Building a component](../../examples/building-components/) has the exact commands per toolchain,
+for six languages, and the repository commits the resulting `.wasm` beside each source.

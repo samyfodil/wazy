@@ -91,7 +91,7 @@ and nothing else. But *cooperative* is literal: exactly one task in a compositio
 handed the baton over an unbuffered channel. The async ABI buys you suspension and composition, not
 parallelism inside one component.
 
-[`examples/component`](https://github.com/samyfodil/wazy/tree/main/examples/component) runs an
+[Components, threads and async](../../examples/components/) runs an
 async export, a thread-spawning component, a five-thread map-reduce over one shared array, and the
 `CallAsync` flow above end to end.
 

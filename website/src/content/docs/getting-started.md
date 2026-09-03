@@ -54,8 +54,8 @@ func main() {
 }
 ```
 
-That is [`examples/component`](https://github.com/samyfodil/wazy/tree/main/examples/component),
-minus the error handling.
+That is [`examples/component`](../examples/components/), walked through line by line — minus the
+error handling here.
 
 Values cross typed. A component exporting `run: func() -> string` hands back a Go `string` rather
 than a pointer and a length:
@@ -91,7 +91,7 @@ if err != nil {
 results, err := mod.ExportedFunction("add").Call(ctx, 1, 2)
 ```
 
-That is [`examples/basic`](https://github.com/samyfodil/wazy/tree/main/examples/basic). More in
+That is [`examples/basic`](../examples/hello-world/), walked through line by line. More in
 [Core modules and WASI 0.1](../guides/core-modules/).
 
 ## The three objects
@@ -112,5 +112,4 @@ request can get its own fresh linear memory instead of a pooled one you scrub be
 - [Host functions](../guides/host-functions/) — the typed, allocation-free registration API.
 - [Components](../guides/components/) — the Component Model, typed values, resources.
 - [Sandboxing and limits](../guides/sandboxing/) — what the guest can reach, and how to cap it.
-- [Examples](https://github.com/samyfodil/wazy/tree/main/examples) — runnable programs for each of
-  the above.
+- [Examples](../examples/) — thirteen runnable programs, each with a walkthrough.
