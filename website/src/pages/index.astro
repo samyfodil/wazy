@@ -1,0 +1,426 @@
+---
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+import { Code } from '@astrojs/starlight/components';
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const repo = 'https://github.com/samyfodil/wazy';
+
+/* The hero panel is the real default: component.Instantiate with only a Stdout.
+   Everything not handed over stays unreachable. */
+const manifest = [
+	{ what: 'filesystem', state: 'nothing mounted' },
+	{ what: 'sockets — tcp, udp', state: 'unregistered' },
+	{ what: 'outgoing http', state: 'unregistered' },
+	{ what: 'environment', state: 'empty' },
+	{ what: 'arguments', state: 'argv[0] only' },
+	{ what: 'stdout', state: 'os.Stdout', on: true },
+];
+
+/* Every point on the ruler is a benchmark in the repository. Positions are a
+   log scale over five decades, 10 ns to 1 ms. */
+const LO = 10;
+const HI = 1_000_000;
+const at = (ns: number) => {
+	const pct =
+		((Math.log10(ns) - Math.log10(LO)) / (Math.log10(HI) - Math.log10(LO))) * 100;
+	/* A future benchmark outside the declared decades must not place a marker
+	   off the track. */
+	return Math.min(100, Math.max(0, pct));
+};
+
+/* host is the machine the number was actually taken on — they are not all the
+   same one, and OPTIMIZATIONS.md records no machine for the last row. */
+const ruler = [
+	{ name: 'Host call, Go ↔ Wasm', ns: 48.5, label: '48.5 ns', host: 'Apple M4' },
+	{ name: 'memory.grow, in capacity', ns: 109, label: '109 ns', host: 'i9-12900HK' },
+	{ name: 'Instantiate a 37 KB module', ns: 1724, label: '1.72 µs', host: 'Apple M4' },
+	{
+		name: 'Serve a warm wasi:http component',
+		ns: 3370,
+		label: '3.37 µs',
+		host: 'Apple M4',
+	},
+	{
+		name: 'The same instantiate, on wazero',
+		ns: 15740,
+		label: '15.7 µs',
+		host: 'Apple M4',
+		other: true,
+	},
+	{
+		name: 'Re-instantiate a cached component graph',
+		ns: 350500,
+		label: '350 µs',
+		host: 'host not recorded',
+	},
+];
+
+const wit = `interface kv {
+  resource bucket {
+    constructor(name: string);
+    get: func(key: string) -> option<list<u8>>;
+  }
+
+  variant error {
+    no-such-bucket,
+    denied(string),
+  }
+
+  list-keys: func(b: borrow<bucket>)
+    -> result<list<string>, error>;
+}`;
+
+const go = `// The host half, in ordinary Go. Both arms of the
+// result are composites, so each gets a type-table slot.
+tbl := component.NewTypeTable()
+errRef := tbl.Variant(
+	component.VariantCaseSpec{Name: "no-such-bucket"},
+	component.VariantCaseSpec{Name: "denied",
+		Type: component.Prim("string")},
+)
+fd := tbl.Func(
+	[]component.TypeRef{tbl.Borrow(bucketResType)},
+	tbl.Result(tbl.List(component.Prim("string")), errRef),
+)
+
+listKeys := func(_ context.Context, args []component.Value) (
+	[]component.Value, error) {
+
+	b, ok := s.buckets[args[0].(uint32)]
+	if !ok {
+		// The err arm, carrying the payload-less first case.
+		return []component.Value{component.ResultValue{
+			IsErr:   true,
+			Payload: component.VariantValue{Disc: 0},
+		}}, nil
+	}
+	return []component.Value{component.ResultValue{
+		Payload: keysOf(b),
+	}}, nil
+}
+
+component.WithImportCustom("example:store/kv", "list-keys",
+	listKeys, fd, tbl.Resolver())`;
+
+const versus = [
+	{
+		path: 'Instantiate',
+		note: 'per request',
+		ratio: '9.1×',
+		why: '1.724 µs against 15.74 µs, on a 37 KB TinyGo module. Cheap enough that every request gets a fresh linear memory instead of a pooled one you scrub between calls.',
+	},
+	{
+		path: 'Interruptible loops',
+		note: 'WithCloseOnContextDone',
+		ratio: '12–13×',
+		why: '+5% overhead against +75% on a loop that calls a host function each iteration. A near-empty compute kernel is the worst case at 1.7-2.4x, tunable with WithInterruptCheckInterval. Measured against wazero@main.',
+	},
+	{
+		path: 'Compiled execution',
+		note: 'memory-heavy code',
+		ratio: 'up to −18%',
+		why: 'string_manipulation −18%, reverse_array −14%, base64 −12%, fibonacci a wash. The advantage tracks memory-access intensity, not arithmetic.',
+	},
+	{
+		path: 'Host calls',
+		note: 'CallWithStack, gomodule arm',
+		ratio: 'a tie',
+		tie: true,
+		why: '47.8 ns here, 48.3 ns there, on the gomodule arm both runtimes implement the same way. Neither wins it. What differs is that wazero still ships a reflection-based registration API beside it; wazy deleted that path rather than optimizing it.',
+	},
+	{
+		path: 'Cumulative',
+		note: 'geomean, B/op −22.9%',
+		ratio: '−17.8%',
+		why: 'Across internal/integration_test/bench, against the wazero fork point, with upstream wazero as a control in the same runs — its arms stayed flat.',
+	},
+];
+---
+
+<StarlightPage
+	frontmatter={{
+		title: 'A WebAssembly runtime in pure Go',
+		template: 'splash',
+		tableOfContents: false,
+		head: [{ tag: 'meta', attrs: { property: 'og:type', content: 'website' } }],
+	}}
+	hasSidebar={false}
+>
+	{/* not-content keeps Starlight's prose flow-margin off the dense rows; the
+	    landing declares its own spacing in brand.css. */}
+	<div class="landing not-content">
+		<section class="hero">
+			<div>
+				<h1>Run code you didn&rsquo;t write.</h1>
+				<p class="lede">
+					wazy runs WebAssembly inside your Go process. Somebody else&rsquo;s Rust, C or Zig becomes
+					a byte slice you <strong>go:embed</strong> and a function you call &mdash; sandboxed, with
+					nothing to install at runtime and no cgo.
+				</p>
+				<div class="cta">
+					<a class="btn btn-solid" href={`${base}/getting-started/`}>Get started</a>
+					<a class="btn btn-line" href={`${base}/examples/`}>Read the examples</a>
+				</div>
+				<p class="get"><b>go get</b> github.com/samyfodil/wazy@latest</p>
+			</div>
+
+			<div class="manifest">
+				<div class="manifest-head">
+					<b>guest capabilities</b>
+					<span>component.Instantiate</span>
+				</div>
+				<div class="manifest-rows">
+					{
+						manifest.map((row) => (
+							<div class={row.on ? 'manifest-row on' : 'manifest-row'}>
+								<span class="what">{row.what}</span>
+								<span class="state">{row.state}</span>
+							</div>
+						))
+					}
+				</div>
+				<div class="manifest-foot">
+					One line granted stdout. Nothing else was asked for, so nothing else exists.
+				</div>
+			</div>
+		</section>
+
+		<section>
+			<h2>Small enough to do per request</h2>
+			<p>
+				A sandbox per request is only practical if none of it costs anything. Every marker below is a
+				benchmark in this repository, taken core-pinned on a quiet machine with the comparison
+				interleaved. They were not all taken on the same machine, so each names its own host. The
+				scale is logarithmic.
+			</p>
+
+			<div class="ruler">
+				<div class="ruler-axis">
+					<span></span>
+					<div class="ruler-ticks">
+						<span style="left:0%">10 ns</span>
+						<span style="left:20%">100 ns</span>
+						<span style="left:40%">1 µs</span>
+						<span style="left:60%">10 µs</span>
+						<span style="left:80%">100 µs</span>
+						<span style="left:100%">1 ms</span>
+					</div>
+				</div>
+				{
+					ruler.map((r) => (
+						<div class={r.other ? 'ruler-row other' : 'ruler-row'}>
+							<span class="name">
+								{r.name}
+								<span class="host" style="color:var(--sl-color-gray-3)"> · {r.host}</span>
+							</span>
+							<div class="ruler-track">
+								<span
+									class={at(r.ns) > 74 ? 'ruler-mark flip' : 'ruler-mark'}
+									style={`left:${at(r.ns).toFixed(1)}%`}
+								>
+									<b>{r.label}</b>
+								</span>
+							</div>
+						</div>
+					))
+				}
+			</div>
+			<p class="sub">
+				These six live in four different packages; the{' '}
+				<a href={`${base}/reference/performance/`}>performance page</a> has the commands that run
+				all of them, the method, and the optimizations measured and <em>rejected</em>.
+			</p>
+		</section>
+
+		<section>
+			<h2>A plugin contract with types in it</h2>
+			<p>
+				Embedding Wasm normally means <code>fn.Call(ctx, ptr, len)</code>, decoding a pair of i32s out
+				of the guest&rsquo;s memory, and both halves hand-agreeing on layout and on who frees what.
+				wazy runs WebAssembly <em>components</em>: a <code>.wasm</code> that carries its own typed
+				interface, so records, lists, <code>option</code> and <code>result</code> cross as Go values,
+				and a handle to a host object is a lifetime the runtime drops for you.
+			</p>
+
+			<div class="pair">
+				<div>
+					<Code code={wit} lang="rust" title="store.wit" />
+					<p class="pair-note">Declare the contract once.</p>
+				</div>
+				<div>
+					<Code code={go} lang="go" title="host.go" />
+					<p class="pair-note">The other half is anything that compiles to Wasm.</p>
+				</div>
+			</div>
+
+			<p class="sub">
+				That is <a href={`${base}/examples/custom-wit/`}>walked through here</a>. A binary a
+				stranger produced with <code>cargo build --target wasm32-wasip2</code> also runs unmodified,
+				on the 114 <a href={`${base}/guides/wasi/`}>WASI 0.2 host functions</a> wazy implements.
+			</p>
+		</section>
+
+		<section>
+			<h2>What it runs</h2>
+			<p>
+				Components stay components: genuine <code>wasm32-wasip2</code> binaries from rustc and
+				wasm-tools, not flattened to core modules or hand-written <code>.wat</code>.
+			</p>
+			<dl class="spec">
+				<div class="spec-row">
+					<dt>core wasm 1.0, 2.0</dt>
+					<dd>The baseline, on the optimizing compiler and the interpreter alike.</dd>
+				</div>
+				<div class="spec-row">
+					<dt>core wasm 3.0</dt>
+					<dd>
+						All eight folded-in proposals: tail calls, extended const, exception handling, typed
+						function references, relaxed SIMD, multiple memories, memory64 and garbage collection.
+						Enabled together with <code>api.CoreFeaturesV3</code>; the default stays V2.
+					</dd>
+				</div>
+				<div class="spec-row">
+					<dt>wasi 0.1</dt>
+					<dd>
+						The preview-1 ABI for core modules, through <code>imports/wasi_snapshot_preview1</code>.
+					</dd>
+				</div>
+				<div class="spec-row">
+					<dt>wasi 0.2</dt>
+					<dd>
+						The Component Model and 114 host functions across cli, clocks, filesystem, io, random,
+						sockets and http — the last in both directions. Every capability opts in per
+						instantiation.
+					</dd>
+				</div>
+				<div class="spec-row">
+					<dt>wasi 0.3 async abi</dt>
+					<dd>
+						<code>stream&lt;T&gt;</code>, <code>future&lt;T&gt;</code>, subtasks, cancellation,
+						backpressure and cooperative threads, on goroutines and channels. A parked guest costs
+						one goroutine, and you call an async export exactly like a synchronous one.
+					</dd>
+				</div>
+				<div class="spec-row off">
+					<dt>wasi-threads spawn</dt>
+					<dd>
+						Not implemented. Shared memory and atomics are available through{' '}
+						<code>experimental.CoreFeaturesThreads</code>, but a guest cannot spawn OS threads.
+					</dd>
+				</div>
+			</dl>
+		</section>
+
+		<section>
+			<h2>Against wazero, in the same runs</h2>
+			<p>
+				wazy started from wazero&rsquo;s code and still draws on its WebAssembly semantics and its
+				test suites. It kept neither the API nor the architecture, and these are the paths where that
+				shows.
+			</p>
+			<div class="versus">
+				{
+					versus.map((v) => (
+						<div class={v.tie ? 'versus-row tie' : 'versus-row'}>
+							<div class="path">
+								{v.path}
+								<span>{v.note}</span>
+							</div>
+							<div class="ratio">{v.ratio}</div>
+							<div class="why">{v.why}</div>
+						</div>
+					))
+				}
+			</div>
+			<p class="sub">
+				Two orders of magnitude up, a third party measured a 6.5 MB Rust document converter at 4.5×
+				on a 7.5 MB PDF — and wazero <em>winning</em> on a 1 KB input, where instantiation still
+				dominates. Both rows are on the{' '}
+				<a href={`${base}/reference/performance/`}>performance page</a>.
+			</p>
+		</section>
+
+		<section>
+			<h2>Correctness is a pass count, not a claim</h2>
+			<p>
+				Every number here comes from somebody else&rsquo;s suite. The component harness fails if its
+				known-skip list changes in <em>either</em> direction: a new entry is a regression, a stale one
+				means a gap closed and the list must shrink.
+			</p>
+			<div class="counts">
+				<div class="count">
+					<b>711</b>
+					<span>generated core spec case files, across 13 corpora, with no skip list</span>
+				</div>
+				<div class="count">
+					<b>31 / 31</b>
+					<span>
+						official Component Model async suites, 0 skipped, 0 failed — one fixture a locally
+						corrected copy of a file broken upstream
+					</span>
+				</div>
+				<div class="count">
+					<b>7 / 7</b>
+					<span>official Canonical ABI value suites, every vendored module instantiating</span>
+				</div>
+				<div class="count">
+					<b>3 OS</b>
+					<span>wasi-testsuite on Linux, macOS and Windows, no skipped tests</span>
+				</div>
+				<div class="count">
+					<b>4</b>
+					<span>fuzz targets, three of them differential against the interpreter</span>
+				</div>
+			</div>
+			<p class="sub">
+				That list is empty: every vendored module of all seven Canonical ABI value suites
+				instantiates. The last four entries &mdash; <code>types.11</code>, <code>fused.22</code>,{' '}
+				<code>fused.23</code> and <code>resources.14</code> &mdash; were each a nested component
+				naming a definition an enclosing one owns, and closing them meant modelling the core-module
+				and component index spaces separately. Empty is enforced like any other state: were one of
+				them to come back, the harness would fail. Detail on the{' '}
+				<a href={`${base}/reference/conformance/`}>conformance page</a>.
+			</p>
+		</section>
+
+		<section>
+			<h2>Where something else is the right answer</h2>
+			<ul class="limits">
+				<li>
+					<b>cgo</b>, when the library must spawn OS threads of its own, or needs the host machine
+					itself.
+				</li>
+				<li>
+					<b>A container or a microVM</b>, when you need kernel-enforced CPU quotas per tenant. wazy
+					caps memory and enforces a deadline; there is no fuel metering.
+				</li>
+				<li>
+					<b>Starlark or a scripting interpreter</b>, when the code is config-shaped and your authors
+					will not install a Wasm toolchain.
+				</li>
+				<li>
+					<b>Trust</b>, when the code is first-party and what you wanted was extensibility, not
+					safety.
+				</li>
+			</ul>
+		</section>
+
+		<section>
+			<h2>In production</h2>
+			<ul class="users">
+				<li>
+					<a href="https://github.com/taubyte/tau">taubyte/tau</a> — the open-source platform behind
+					Taubyte clouds runs its WebAssembly workloads on wazy.
+				</li>
+				<li>
+					<a href="https://github.com/xusenlin/go-anydoc">go-anydoc</a> — Go bindings for a Rust
+					document converter, and the largest published wazy measurement.
+				</li>
+			</ul>
+			<div class="cta" style="margin-top:2rem">
+				<a class="btn btn-solid" href={`${base}/getting-started/`}>Get started</a>
+				<a class="btn btn-line" href={repo}>Source on GitHub</a>
+			</div>
+		</section>
+	</div>
+</StarlightPage>

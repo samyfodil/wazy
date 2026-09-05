@@ -1,0 +1,62 @@
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths: ['website/**', '.github/workflows/pages.yaml']
+  pull_request:
+    branches: [main]
+    paths: ['website/**', '.github/workflows/pages.yaml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-24.04
+    # Superseded builds are worth cancelling; the deploy below is not (see there).
+    concurrency:
+      group: pages-build-${{ github.ref }}
+      cancel-in-progress: true
+    defaults:
+      run:
+        working-directory: website
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - name: Check internal links
+        run: npm run check:links
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: website/dist
+
+  deploy:
+    name: Deploy
+    # Only main publishes: pull requests stop after the build above, and a
+    # workflow_dispatch run from another branch does too -- the ref is the gate,
+    # not the event, so an intentional manual redeploy of main still works.
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    # GitHub's published Pages pattern: one deploy group for the whole repository,
+    # never cancelled, so a half-finished upload is not left as the live site.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

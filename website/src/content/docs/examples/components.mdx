@@ -1,0 +1,521 @@
+---
+title: Components, threads and async
+description: Run six Component Model workloads from one Go program — an interface export, a rustc WASI command, an async export, guest threads, and a call parked on host I/O.
+sidebar:
+  order: 10
+---
+
+import { FileTree } from '@astrojs/starlight/components';
+
+`examples/component` is one Go program that runs six components back to back: a typed interface
+export, a rustc `wasi:cli/command`, an async export, a component that spawns a Component Model
+thread, a five-thread map-reduce, and a call that parks while a goroutine does the host's half of
+the work. Six shapes, one `component.Instance` API — and one property that holds across all six: the
+call site never changes. Whether the guest returns immediately, suspends on the scheduler, or forks
+five threads over its own memory, the Go side is `inst.Call` and a `[]component.Value` back.
+
+## Run it
+
+```bash
+cd examples/component
+go run .
+```
+
+```
+component:adder/calc add(2, 3) = 5
+wasi:cli hello: hello world
+async run-async() = 42
+thread (spawn + resume) = 99
+multithread map-reduce (4 mappers + reducer) = 72
+callasync run-async() = 42 (was parked until the external goroutine resolved)
+```
+
+Those six lines are not illustrative. `component_test.go` asserts the program's stdout against
+them verbatim, so CI fails the day any of the six stops working.
+
+## The binaries and where they came from
+
+<FileTree>
+- examples/component/
+  - README.md
+  - component.go
+  - component_test.go
+  - testdata/
+    - adder.wasm
+    - async_first_light.wasm
+    - await_import.wasm
+    - hello.wasm
+    - multithread.wasm
+    - multithread.wat
+    - thread.wasm
+    - thread.wat
+</FileTree>
+
+Every `.wasm` is committed. Four of them are byte-identical to fixtures wazy's own package tests
+already run — `adder.wasm` is the binary behind `TestRealAdder_Add`, `async_first_light.wasm` the
+one behind `TestFirstLightAsync`. `adder.wasm` and `hello.wasm` came out of the real Rust toolchain
+and their sources are not in this repo. `thread.wasm` and `multithread.wasm` exist only here; both
+ship their `.wat` beside them, with the build line in the first comment:
+
+```bash
+wasm-tools parse thread.wat -o thread.wasm
+```
+
+The whole program shares one runtime, and every instance is closed as its function returns:
+
+```go title="examples/component/component.go" {7-12}
+func main() {
+	ctx := context.Background()
+
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx) // Closes everything this runtime created.
+
+	fmt.Println(callInterfaceExport(ctx, r))
+	fmt.Println(runWASICommand(ctx, r))
+	fmt.Println(runAsyncExport(ctx, r))
+	fmt.Println(runThreadExport(ctx, r))
+	fmt.Println(runMultiThread(ctx, r))
+	fmt.Println(runCallAsync(ctx, r))
+}
+```
+
+## An interface export, called by name
+
+`adder.wasm` is a `wasm32-wasip2` reactor built by wit-bindgen whose world exports an *interface*,
+`component:adder/calc`, holding `add: func(a: u32, b: u32) -> u32`.
+
+```go title="examples/component/component.go" {8}
+func callInterfaceExport(ctx context.Context, r wazy.Runtime) string {
+	inst, err := component.Instantiate(ctx, r, adderWasm)
+	if err != nil {
+		log.Panicf("instantiate adder: %v", err)
+	}
+	defer inst.Close(ctx)
+
+	got, err := inst.CallExport(ctx, "component:adder/calc", "add", uint32(2), uint32(3))
+	if err != nil {
+		log.Panicf("call add: %v", err)
+	}
+	return fmt.Sprintf("component:adder/calc add(2, 3) = %d", got[0].(uint32))
+}
+```
+
+`CallExport` exists because of what the tooling does to a world that exports an interface rather
+than bare functions: wit-component packages the interface's lifted functions into a nested
+re-export shim and an instance that instantiates it, and the top-level export names *that
+instance*, not the functions. `CallExport` takes the two halves separately and reaches inside.
+It is sugar — `Call(ctx, "component:adder/calc#add", ...)` resolves to the same export — but the
+two-argument form takes a fast path that skips joining the strings on every call.
+
+No WASI here. This component imports nothing, so it gets no host surface at all.
+
+## A rustc command with stdout and nothing else
+
+`hello.wasm` is a genuine `cargo build --target wasm32-wasip2` binary — a `wasi:cli/command`, the
+kind of artifact a stranger hands you. It runs unmodified.
+
+```go title="examples/component/component.go" {3-4,10}
+func runWASICommand(ctx context.Context, r wazy.Runtime) string {
+	var stdout bytes.Buffer
+	inst, err := component.Instantiate(ctx, r, helloWasm,
+		wasip2.With(wasip2.Config{Stdout: &stdout})...)
+	if err != nil {
+		log.Panicf("instantiate hello: %v", err)
+	}
+	defer inst.Close(ctx)
+
+	if _, err := inst.Call(ctx, "wasi:cli/run@0.2.3#run"); err != nil {
+		log.Panicf("run hello: %v", err)
+	}
+	return "wasi:cli hello: " + strings.TrimSpace(stdout.String())
+}
+```
+
+`wasip2.With` returns a slice of options, hence the `...`. Stdout is an `io.Writer`, so a
+`bytes.Buffer` captures what the guest prints without a pipe or a temp file — the same seam a test
+uses to assert on a command's output.
+
+What is *not* in that config matters as much as what is. No filesystem is mounted, `AllowTCP` and
+`AllowUDP` are false, `EnableHTTP` is false. Those interfaces are then not registered at all, and
+if this guest reached for a socket it would trap loudly, naming the interface and function it
+wanted, rather than silently succeeding against a stub.
+
+:::caution[The export name is literal]
+`wasi:cli/run@0.2.3#run` is an exact map lookup against the names the component declares — version
+included. A guest built against a different WASI point release exports a different string, and the
+call fails with `export ... not found`. Read the name off the component rather than assuming it.
+:::
+
+## An async export, called like any other
+
+`async_first_light.wasm` is a callback-ABI async export. Here is its whole source:
+
+```wat title="internal/component/instance/testdata/async/first_light.wat" collapse={14-17} {6,18}
+(component
+  (core module $m
+    (import "canon" "task.return" (func $tr (param i32)))
+    (memory (export "mem") 1)
+    (func (export "run") (result i32)
+      (call $tr (i32.const 42))
+      (i32.const 0)) ;; EXIT
+    (func (export "cb") (param i32 i32 i32) (result i32)
+      (i32.const 0)) ;; EXIT
+    (func (export "ra") (param i32 i32 i32 i32) (result i32) unreachable))
+  (type $ft (func async (result u32)))
+  (canon task.return (result u32) (core func $tr))
+  (core instance $i (instantiate $m (with "canon" (instance (export "task.return" (func $tr))))))
+  (alias core export $i "run" (core func $run))
+  (alias core export $i "cb" (core func $cb))
+  (alias core export $i "mem" (core memory $mem))
+  (alias core export $i "ra" (core func $ra))
+  (canon lift (core func $run) (memory $mem) (realloc $ra) async (callback $cb) (func $lifted (type $ft)))
+  (export "run-async" (func $lifted))
+)
+```
+
+The guest does not return a value. It calls `task.return(42)` to resolve its task and hands back
+`EXIT` as a status code; the lift is marked `async` with a `callback`, so the runtime may re-enter
+`cb` as many times as the task needs before the task is done. That is a different execution model
+from a synchronous export.
+
+None of which shows up on the Go side:
+
+```go title="examples/component/component.go" {8}
+func runAsyncExport(ctx context.Context, r wazy.Runtime) string {
+	inst, err := component.Instantiate(ctx, r, asyncWasm)
+	if err != nil {
+		log.Panicf("instantiate async: %v", err)
+	}
+	defer inst.Close(ctx)
+
+	got, err := inst.Call(ctx, "run-async")
+	if err != nil {
+		log.Panicf("call run-async: %v", err)
+	}
+	return fmt.Sprintf("async run-async() = %d", got[0].(uint32))
+}
+```
+
+Same `inst.Call`, same `[]component.Value`, same `got[0].(uint32)` as the adder. The scheduler runs
+underneath: it drives the task, delivers events to the callback, and returns once the task
+resolves. Nothing about your call site changes because the guest decided to suspend. That property
+is what makes the next two sections possible at all.
+
+## One guest thread
+
+`thread.wasm` goes further: its export spawns a Component Model *thread* and lets the worker
+resolve the task.
+
+```wat title="examples/component/testdata/thread.wat" collapse={1-16, 45-54} {23-33}
+;; A minimal Component Model component that spawns a thread.
+;;
+;; Build: wasm-tools parse thread.wat -o thread.wasm
+;;
+;; The lifted `run-async` export is a stackful async function. Its core `run`
+;; spawns a worker thread with `thread.new-indirect` (created SUSPENDED) and
+;; hands control to it with `thread.yield-then-resume`. The worker runs on that
+;; thread and calls `task.return(99)`, resolving the task.
+(component
+  ;; Standalone table+memory instance so the canon builtins can reference the
+  ;; func table (the trick the conformance fixtures use).
+  (core module $MemTable
+    (table (export "ftbl") 1 funcref)
+    (memory (export "mem") 1))
+  (core instance $memTable (instantiate $MemTable))
+
+  (core module $m
+    (import "" "task.return" (func $task.return (param i32)))
+    (import "" "thread.new-indirect" (func $thread.new-indirect (param i32 i32) (result i32)))
+    (import "" "thread.yield-then-resume" (func $thread.yield-then-resume (param i32) (result i32)))
+    (import "" "ftbl" (table $ftbl 1 funcref))
+
+    ;; Worker: runs on a spawned thread, returns its argument to the task.
+    (func $worker (param $arg i32)
+      (call $task.return (local.get $arg)))
+    (elem (table $ftbl) (i32.const 0) func $worker)
+
+    ;; run (stackful async, no callback): spawn worker(99) as a SUSPENDED
+    ;; thread, then yield-then-resume into it. The worker calls task.return(99);
+    ;; control comes back here and run returns, resolving the task.
+    (func (export "run")
+      (drop (call $thread.yield-then-resume
+              (call $thread.new-indirect (i32.const 0) (i32.const 99)))))
+
+    (func (export "ra") (param i32 i32 i32 i32) (result i32) unreachable))
+
+  (core type $start-func-ty (func (param i32)))
+  (alias core export $memTable "ftbl" (core table $ftbl))
+  (alias core export $memTable "mem" (core memory $mem))
+
+  (canon task.return (result u32) (core func $task.return))
+  (core func $thread.new-indirect (canon thread.new-indirect $start-func-ty (table $ftbl)))
+  (core func $thread.yield-then-resume (canon thread.yield-then-resume))
+
+  (core instance $i (instantiate $m
+    (with "" (instance
+      (export "task.return" (func $task.return))
+      (export "thread.new-indirect" (func $thread.new-indirect))
+      (export "thread.yield-then-resume" (func $thread.yield-then-resume))
+      (export "ftbl" (table $ftbl))))))
+
+  (alias core export $i "run" (core func $run))
+  (alias core export $i "ra" (core func $ra))
+
+  (type $ft (func async (result u32)))
+  (canon lift (core func $run) (memory $mem) (realloc $ra) async (func $lifted (type $ft)))
+  (export "run-async" (func $lifted))
+)
+```
+
+`thread.new-indirect` takes a table index and an argument and creates the thread *suspended*, so
+nothing runs until `thread.yield-then-resume` hands it control. The worker calls `task.return(99)`
+from inside the spawned thread — control returns to `run`, which then returns. Note the lift here
+carries no callback: this is the stackful shape, suspended on a goroutine with a channel baton, so
+exactly one thread runs at a time.
+
+The Go side, again, is one blocking call:
+
+```go title="examples/component/component.go" {8}
+func runThreadExport(ctx context.Context, r wazy.Runtime) string {
+	inst, err := component.Instantiate(ctx, r, threadWasm)
+	if err != nil {
+		log.Panicf("instantiate thread: %v", err)
+	}
+	defer inst.Close(ctx)
+
+	got, err := inst.Call(ctx, "run-async")
+	if err != nil {
+		log.Panicf("call thread run-async: %v", err)
+	}
+	return fmt.Sprintf("thread (spawn + resume) = %d", got[0].(uint32))
+}
+```
+
+## Five threads over one array
+
+`multithread.wasm` is the same machinery at scale: one linear memory, five threads over it. Four
+mappers each double a two-element chunk, then a reducer sums the doubled array. `2*(1+..+8) = 72`.
+
+```wat title="examples/component/testdata/multithread.wat" collapse={1-23, 75-99}
+;; Multi-threaded map-reduce over a shared array, with Component Model threads.
+;;
+;; run-async fills an 8-element u32 array with [1..8], then spawns FIVE worker
+;; threads over one shared linear memory (thread.new-indirect): four "mapper"
+;; threads each doubling their own 2-element chunk, and one "reducer" thread
+;; that sums the whole (now-doubled) array and returns the total. main parks all
+;; five, then drives them with thread.yield-then-resume -- mappers first, reducer
+;; last. Result: 2*(1+..+8) = 72.
+;;
+;; Build: wasm-tools parse multithread.wat -o multithread.wasm
+(component
+  (core module $MemTable
+    (table (export "ftbl") 2 funcref) ;; [0]=mapper [1]=reducer
+    (memory (export "mem") 1))
+  (core instance $memTable (instantiate $MemTable))
+
+  (core module $m
+    (import "" "task.return" (func $task.return (param i32)))
+    (import "" "thread.new-indirect" (func $thread.new-indirect (param i32 i32) (result i32)))
+    (import "" "thread.yield-then-resume" (func $thread.yield-then-resume (param i32) (result i32)))
+    (import "" "ftbl" (table $ftbl 2 funcref))
+    (import "" "mem" (memory 1))
+
+    ;; mapper(chunk): double the two u32s in [chunk*2, chunk*2+2), in shared mem.
+    (func $mapper (param $chunk i32)
+      (local $b i32)
+      (local.set $b (i32.mul (local.get $chunk) (i32.const 8)))
+      (i32.store (local.get $b)
+        (i32.mul (i32.load (local.get $b)) (i32.const 2)))
+      (i32.store (i32.add (local.get $b) (i32.const 4))
+        (i32.mul (i32.load (i32.add (local.get $b) (i32.const 4))) (i32.const 2))))
+    (elem (table $ftbl) (i32.const 0) func $mapper)
+
+    ;; reducer(_): sum the eight (doubled) elements and resolve the task. Runs
+    ;; last, so the task is resolved when this final thread exits.
+    (func $reducer (param $ignored i32)
+      (local $i i32) (local $sum i32)
+      (block $ue (loop $ul
+        (br_if $ue (i32.ge_u (local.get $i) (i32.const 8)))
+        (local.set $sum (i32.add (local.get $sum) (i32.load (i32.mul (local.get $i) (i32.const 4)))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $ul)))
+      (call $task.return (local.get $sum)))
+    (elem (table $ftbl) (i32.const 1) func $reducer)
+
+    (func (export "run")
+      (local $i i32)
+      ;; array[i] = i+1  for i in 0..8  (bytes 0..32)
+      (block $ie (loop $il
+        (br_if $ie (i32.ge_u (local.get $i) (i32.const 8)))
+        (i32.store (i32.mul (local.get $i) (i32.const 4)) (i32.add (local.get $i) (i32.const 1)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $il)))
+      ;; spawn 4 mappers (chunks 0..4) + 1 reducer; stash handles at 64+i*4
+      (local.set $i (i32.const 0))
+      (block $se (loop $sl
+        (br_if $se (i32.ge_u (local.get $i) (i32.const 4)))
+        (i32.store (i32.add (i32.const 64) (i32.mul (local.get $i) (i32.const 4)))
+          (call $thread.new-indirect (i32.const 0) (local.get $i)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $sl)))
+      (i32.store (i32.const 80) ;; reducer handle at 64+4*4=80
+        (call $thread.new-indirect (i32.const 1) (i32.const 0)))
+      ;; drive the 4 mappers
+      (local.set $i (i32.const 0))
+      (block $re (loop $rl
+        (br_if $re (i32.ge_u (local.get $i) (i32.const 4)))
+        (drop (call $thread.yield-then-resume
+          (i32.load (i32.add (i32.const 64) (i32.mul (local.get $i) (i32.const 4))))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $rl)))
+      ;; drive the reducer last (it resolves the task)
+      (drop (call $thread.yield-then-resume (i32.load (i32.const 80)))))
+
+    (func (export "ra") (param i32 i32 i32 i32) (result i32) unreachable))
+
+  (core type $start-func-ty (func (param i32)))
+  (alias core export $memTable "ftbl" (core table $ftbl))
+  (alias core export $memTable "mem" (core memory $mem))
+
+  (canon task.return (result u32) (core func $task.return))
+  (core func $thread.new-indirect (canon thread.new-indirect $start-func-ty (table $ftbl)))
+  (core func $thread.yield-then-resume (canon thread.yield-then-resume))
+
+  (core instance $i (instantiate $m
+    (with "" (instance
+      (export "task.return" (func $task.return))
+      (export "thread.new-indirect" (func $thread.new-indirect))
+      (export "thread.yield-then-resume" (func $thread.yield-then-resume))
+      (export "ftbl" (table $ftbl))
+      (export "mem" (memory $mem))))))
+
+  (alias core export $i "run" (core func $run))
+  (alias core export $i "ra" (core func $ra))
+
+  (type $ft (func async (result u32)))
+  (canon lift (core func $run) (memory $mem) (realloc $ra) async (func $lifted (type $ft)))
+  (export "run-async" (func $lifted))
+)
+```
+
+Two details do the real work. All five threads are spawned before any of them runs, and their
+handles are stashed in linear memory at offsets 64 through 80 — the guest is managing its own
+thread table in its own heap. And the order of the drive loop is the only synchronization there
+is: the four mappers are resumed first, the reducer last, so the reducer reads an array every
+mapper has already finished doubling. Cooperative, not preemptive; there is no lock anywhere in that file because
+there does not need to be.
+
+```go title="examples/component/component.go" {8}
+func runMultiThread(ctx context.Context, r wazy.Runtime) string {
+	inst, err := component.Instantiate(ctx, r, multiThreadWasm)
+	if err != nil {
+		log.Panicf("instantiate multithread: %v", err)
+	}
+	defer inst.Close(ctx)
+
+	got, err := inst.Call(ctx, "run-async")
+	if err != nil {
+		log.Panicf("call multithread run-async: %v", err)
+	}
+	return fmt.Sprintf("multithread map-reduce (4 mappers + reducer) = %d", got[0].(uint32))
+}
+```
+
+Five guest threads, and the embedder still writes one line.
+
+## A call parked on host I/O
+
+The first five all fit inside a blocking `Call` because the host was never the slow half. Flip
+that: `await_import.wasm` awaits an import `get() -> u32` that the host cannot answer yet.
+
+```go title="examples/component/component.go" {6-9}
+	release := make(chan struct{})
+	// The "get() -> u32" import defers its result to a goroutine.
+	getImport := component.WithAsyncImport("get", "",
+		func(_ context.Context, _ []component.Value, call *component.AsyncCall) error {
+			go func() {
+				<-release // stand-in for I/O finishing on some other goroutine
+				call.Resolve([]component.Value{uint32(42)})
+			}()
+			return nil
+		},
+		nil, // no params
+		[]component.TypeDesc{component.PrimitiveDesc{Prim: "u32"}}, // -> u32
+	)
+```
+
+`WithAsyncImport`, not `WithImport`: the difference is that the host function may return *without*
+having produced a result. It hands the work to a goroutine and returns nil, and `AsyncCall.Resolve`
+delivers the value later, from wherever that goroutine happens to be. A synchronous `HostFunc`
+has no way to express that — it returns results or it returns an error. The last two arguments are
+the import's WIT signature, params then results, which is how the canonical lowering knows to
+flatten a `u32` on the way back.
+
+```go title="examples/component/component.go" {7,19-20}
+	inst, err := component.Instantiate(ctx, r, awaitImportWasm, getImport)
+	if err != nil {
+		log.Panicf("instantiate await_import: %v", err)
+	}
+	defer inst.Close(ctx)
+
+	p, err := inst.CallAsync(ctx, "run-async")
+	if err != nil {
+		log.Panicf("CallAsync: %v", err)
+	}
+	// The call is parked here, awaiting the external import — the host is free.
+	pending := ""
+	select {
+	case <-p.Done():
+	default:
+		pending = " (was parked until the external goroutine resolved)"
+	}
+
+	close(release) // let the other goroutine complete the import
+	got, err := p.Await(ctx)
+	if err != nil {
+		log.Panicf("Await: %v", err)
+	}
+	return fmt.Sprintf("callasync run-async() = %d%s", got[0].(uint32), pending)
+```
+
+`CallAsync` returns the moment the guest parks — the `PendingCall` is a live invocation with its
+guest stack intact, waiting on a value your Go code has not produced. The non-blocking `select` on
+`p.Done()` is how the example *proves* it parked rather than resolving inline: `Done()` is still
+open at that point, which is why the printed line carries its parenthetical. Then `close(release)`
+lets the goroutine call `Resolve`, and `p.Await(ctx)` drives the guest the rest of the way and
+returns its result. Between `CallAsync` and `Await` the calling goroutine owns itself.
+
+## Where this bites
+
+**Values are type-exact, not Go-convenient.** `component.Value` is `any`, and lowering checks the
+concrete type. `uint32(2)` lowers; a bare `2` is an `int` and fails with
+`lowerFlat u32: expected uint32, got int`. Same going the other way — `got[0].(uint32)` is an
+assertion against what the WIT declared, not a conversion.
+
+**`CallAsync` has two hard limits today.** One outstanding call per `Instance`, and the export must
+be an async *callback* lift. `thread.wasm` and `multithread.wasm` use the stackful shape, so
+`CallAsync` rejects them: `only async (callback) lifts are supported by this milestone`. They run
+under a plain `Call` instead, which is why the example splits them that way.
+
+**Component Model threads are `.wat`-only in practice.** No production toolchain emits
+`thread.new-indirect` yet, and wazy does not implement `wasi-threads` spawn. If you want guest
+threads today you hand-write them, which is exactly why these two fixtures exist rather than a
+Rust crate.
+
+**Closing an instance is not bookkeeping.** `Instance.Close` cancels an outstanding `CallAsync`
+and reaps every parked guest goroutine — a stackful task or a promoted callback task can be sitting
+on a channel with guest frames still inside the engine, and they have to be unwound before the core
+modules go away. That is why each function here closes its own instance rather than leaning on
+`r.Close(ctx)` at the end of `main`.
+
+## Next
+
+Every interface on this page belonged to WASI or to the guest. [Bring your own WIT](../custom-wit/)
+writes the contract instead — a resource with a constructor and methods, an `option`, a `result`
+whose error arm is a variant — and implements the host half of it in ordinary Go. Two pages later,
+[Composing components](../composing-components/) removes the host half altogether and plugs one
+component's export straight into another's import.
+
+For the ABI underneath everything here — lifting, lowering, resources, handle lifetimes — read the
+[components guide](../../guides/components/); for the scheduler, streams, futures and the rest of
+the async surface, the [async guide](../../guides/async/).

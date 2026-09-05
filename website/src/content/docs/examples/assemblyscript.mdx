@@ -1,0 +1,173 @@
+---
+title: AssemblyScript special imports
+description: Run an AssemblyScript module that was not built against WASI by supplying the abort, trace and seed functions it expects in the "env" module.
+sidebar:
+  order: 6
+---
+
+import { LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+An AssemblyScript module that was not compiled against WASI still imports three functions from a module named `env`: `abort`, `trace` and `seed`. Nothing in the Wasm spec provides them, so the host has to. `imports/assemblyscript` is that host half, and this is the smallest example in the set — the code is four calls long, and the only thing worth reading is why those three imports exist at all.
+
+## Run it
+
+From `imports/assemblyscript/example`:
+
+```bash
+$ go run assemblyscript.go 7
+hello_world returned: 10
+sad sad world at index.ts:7:3
+```
+
+Two lines, two streams. `hello_world returned: 10` is the host printing a return value on stdout. `sad sad world at index.ts:7:3` never passed through Go at all — the guest threw, and wazy's `abort` implementation read the message and source position out of guest memory and wrote them to the module's stderr.
+
+## The guest and how it was built
+
+Eight lines of AssemblyScript, one function that computes and one that throws.
+
+```typescript title="imports/assemblyscript/example/testdata/index.ts"
+export function hello_world(arg: u32): u32 {
+  trace("hello world", 2, arg + 0.1, arg + 0.2);
+  return arg + 3;
+}
+
+export function goodbye_world(): void {
+  throw new Error("sad sad world");
+}
+```
+
+Neither function calls anything that looks like I/O, and that is deliberate. `trace` is a compiler built-in, not `console.log`; `throw` lowers to a call to the `abort` built-in. Both become imports in the emitted binary.
+
+The `.wasm` is committed, so you do not need a Node toolchain to run the example:
+
+```go title="imports/assemblyscript/example/assemblyscript.go"
+// asWasm compiled using `npm install && npm run build`
+//
+//go:embed testdata/index.wasm
+var asWasm []byte
+```
+
+To rebuild it, `make build.examples.as` runs `npm install && npm run build` in `testdata`, where the script is:
+
+```json title="imports/assemblyscript/example/testdata/package.json" {5}
+{
+  "name": "hello-assemblyscript",
+  "version": "0.0.1",
+  "scripts": {
+    "build": "asc index.ts --debug -b none -o index.wasm"
+  },
+  "devDependencies": {
+    "assemblyscript": "^0.27.0"
+  }
+}
+```
+
+## Registering `env` before the guest
+
+```go title="imports/assemblyscript/example/assemblyscript.go" collapse={2-7} {9-14}
+func main() {
+	// Choose the context to use for function calls.
+	ctx := context.Background()
+
+	// Create a new WebAssembly Runtime.
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx) // This closes everything this Runtime created.
+
+	// Instantiate a module implementing functions used by AssemblyScript.
+	// Thrown errors will be logged to os.Stderr
+	_, err := assemblyscript.Instantiate(ctx, r)
+	if err != nil {
+		log.Panicln(err)
+	}
+
+	// Instantiate a WebAssembly module that imports the "abort" and "trace"
+	// functions defined by assemblyscript.Instantiate and exports functions
+	// we'll use in this example.
+	mod, err := r.InstantiateWithConfig(ctx, asWasm,
+		// Override the default module config that discards stdout and stderr.
+		wazy.NewModuleConfig().WithStdout(os.Stdout).WithStderr(os.Stderr))
+	if err != nil {
+		log.Panicln(err)
+	}
+```
+
+The ordering rule is the one from [Calling Go from Wasm](../calling-go/): imports resolve by module name at instantiation, so `env` must already be registered, and a guest instantiated ahead of it fails with `module[env] not instantiated`. What is particular to this package is that it writes that module for you rather than making you build it.
+
+The `ModuleConfig` matters just as much, for a reason specific to `abort`: it writes to the *module's* stderr, not to anything belonging to the host module. So the discarded-by-default streams swallow the one diagnostic this example exists to show, and the guest exits with the same error saying nothing.
+
+## What the two calls do differently
+
+```go title="imports/assemblyscript/example/assemblyscript.go" collapse={4-11} {20-24}
+	// Get references to WebAssembly functions we'll use in this example.
+	helloWorld := mod.ExportedFunction("hello_world")
+	goodbyeWorld := mod.ExportedFunction("goodbye_world")
+
+	// Let's use the argument to this main function in Wasm.
+	numStr := os.Args[1]
+	num, err := strconv.Atoi(numStr)
+	if err != nil {
+		log.Panicln(err)
+	}
+
+	// Call hello_world, which returns the input value incremented by 3.
+	// While this calls trace(), our configuration didn't enable it.
+	results, err := helloWorld.Call(ctx, uint64(num))
+	if err != nil {
+		log.Panicln(err)
+	}
+	fmt.Printf("hello_world returned: %v", results[0])
+
+	// Call goodbye_world, which aborts with an error.
+	// assemblyscript.Instantiate was configured above to abort to stderr.
+	if _, err = goodbyeWorld.Call(ctx); err == nil {
+		log.Panicln("goodbye_world did not fail")
+	}
+```
+
+`hello_world` is an ordinary call that happens to hit `trace` on the way through. The trace produces no output here, because `assemblyscript.Instantiate` uses the default exporter and the default exporter discards traces.
+
+`goodbye_world` is the interesting one: a thrown error in the guest is a call to `abort`, and wazy's `abort` closes the module with exit code 255 and unwinds. `Call` returns `module closed with exit_code(255)` rather than anything derived from the JavaScript-looking `Error` the guest constructed — the text only reaches you through stderr. The instance is closed once that happens, so this is the last useful call on `mod`.
+
+## The three imports, one at a time
+
+The signatures below are the ones the compiler emits into the import section, quoted from the doc comments in `imports/assemblyscript/assemblyscript.go`.
+
+- **`abort`** — `(param i32 i32 i32 i32)`, being pointers to the message and file name plus a line and column. wazy reads both strings as UTF-16 out of guest memory, writes `message at file:line:column` to stderr, then closes the module with 255. `NewFunctionExporter().WithAbortMessageDisabled()` keeps the exit and drops the message, which also stops the host from reading guest memory on every abort.
+- **`trace`** — `(param i32 i32 f64 f64 f64 f64 f64)`: a message pointer, a count, and five float slots of which only the first `count` are meaningful. Off by default. `WithTraceToStdout()` and `WithTraceToStderr()` turn it on, and each traced call becomes one `trace: message a,b` line. The package recommends stdout, on the grounds that trace volume is easy to underestimate and stderr is where you want the aborts to stand out.
+- **`seed`** — `(result f64)`, called when AssemblyScript's random number generator needs seeding. It reads eight bytes from the module's `WithRandSource`, so a run configured with a deterministic source gets a deterministic `Math.random`. There is no option to disable it; `ExportFunctions` always exports all three, and imports the guest never declares cost nothing.
+
+Two failure modes are worth recognising. If `env` was never instantiated you get `module[env] not instantiated`. If you built your own `env` module and forgot one of the three, you get `"abort" is not exported in module "env"` instead — and because a runtime holds one module per name, adding your own functions means building a single `env` rather than instantiating a second one, which fails with `module[env] has already been instantiated`:
+
+```go title="imports/assemblyscript/assemblyscript_example_test.go" collapse={4-6} {10-12}
+	// First construct your own module builder for "env"
+	envBuilder := r.NewHostModuleBuilder("env").
+		NewFunctionBuilder().
+		WithGoFunction(api.GoFunc(func(_ context.Context, stack []uint64) {
+			stack[0] = api.EncodeU32(1)
+		}), nil, []api.ValueType{api.ValueTypeI32}).
+		Export("get_int")
+
+	// Now, add AssemblyScript special function imports into it.
+	assemblyscript.NewFunctionExporter().
+		WithAbortMessageDisabled().
+		ExportFunctions(envBuilder)
+```
+
+:::caution[This only covers AssemblyScript without WASI]
+`index.ts` avoids anything that does real I/O, `console.log` included. AssemblyScript can compile such code, but it needs the [wasi-shim](https://github.com/AssemblyScript/wasi-shim#usage) — and a guest built that way imports `wasi_snapshot_preview1`, not `env`. Instantiate `wasi_snapshot_preview1` for it instead; this package will not help.
+:::
+
+## After this package
+
+[One instance per goroutine](../concurrency/) drops host imports entirely and asks a different
+question: how much of the work can be done once, and what has to be rebuilt per call. If your
+AssemblyScript grows past `trace` into real I/O, though, the answer is not this package at all but
+the wasi-shim and the much larger host module of
+[Reading a file with WASI 0.1](../wasi/).
+
+<CardGrid>
+  <LinkCard title="Reading a file with WASI 0.1" href="../wasi/" description="The host module an AssemblyScript program built with the wasi-shim would need instead." />
+  <LinkCard title="WASI" href="../../guides/wasi/" description="Both WASI versions wazy implements, and what a guest gets under each." />
+  <LinkCard title="Host functions" href="../../guides/host-functions/" description="Building your own module the way env is built here." />
+  <LinkCard title="Source" href="https://github.com/samyfodil/wazy/tree/main/imports/assemblyscript/example" description="imports/assemblyscript/example" />
+</CardGrid>
