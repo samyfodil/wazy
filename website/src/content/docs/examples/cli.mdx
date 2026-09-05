@@ -1,0 +1,216 @@
+---
+title: Running a binary from the CLI
+description: Run a TinyGo command module under the wazy CLI and pass it arguments the guest reads with Go's standard flag package.
+sidebar:
+  order: 9
+---
+
+import { FileTree, LinkCard } from '@astrojs/starlight/components';
+
+`examples/cli` contains no host program. It is a forty-line Go calculator compiled to WebAssembly, plus a test that feeds it to `wazy run` — and that absence is the lesson. A WASI command binary does not need Go code wrapped around it; it needs a runner that hands it argv, stdio and a clock. This page is about that runner and the guest it runs. The complete flag surface lives in the [CLI reference](../../reference/cli/).
+
+## Run it
+
+From `examples/cli`:
+
+```bash
+go run github.com/samyfodil/wazy/cmd/wazy run testdata/cli.wasm 3 4
+```
+
+That prints `result: 7`. The guest also takes a flag of its own, and it goes after the path, not before it:
+
+```bash
+go run github.com/samyfodil/wazy/cmd/wazy run testdata/cli.wasm -sub=true 3 1
+```
+
+which prints `result: 2`. That is one of the two cases `cli_test.go` asserts — the other is the plain `3 1` addition — and `make test.examples` runs them along with every other example. If you would rather have the runner on your `PATH`:
+
+```bash
+go install github.com/samyfodil/wazy/cmd/wazy@latest
+```
+
+## The guest is an ordinary Go command
+
+<FileTree>
+
+- examples/cli
+  - README.md
+  - cli_test.go
+  - testdata
+    - cli.go
+    - **cli.wasm** committed, no toolchain needed to run the example
+
+</FileTree>
+
+Nothing in the guest knows it is running under a runtime. It declares a flag, parses, reads two positional arguments and writes a line to stdout.
+
+```go title="examples/cli/testdata/cli.go" collapse={1-8} {10-13,20,26}
+package main
+
+import (
+	"flag"
+	"os"
+	"strconv"
+)
+
+func main() {
+	var sub bool
+	flag.BoolVar(&sub, "sub", false, "whether to subtract arguments instead of add")
+
+	flag.Parse()
+
+	if flag.NArg() < 2 {
+		os.Stdout.WriteString("bad arguments\n")
+		os.Exit(1)
+	}
+
+	a, err := strconv.Atoi(flag.Arg(0))
+	if err != nil {
+		os.Stdout.WriteString("bad arguments\n")
+		os.Exit(1)
+	}
+
+	b, err := strconv.Atoi(flag.Arg(1))
+	if err != nil {
+		os.Stdout.WriteString("bad arguments\n")
+		os.Exit(1)
+	}
+
+	var res int
+	if sub {
+		res = a - b
+	} else {
+		res = a + b
+	}
+
+	os.Stdout.WriteString("result: " + strconv.Itoa(res) + "\n")
+}
+```
+
+`flag.Parse` works because `os.Args` is populated from the WASI `args_get` call, which the runtime answers from whatever the CLI was told. `os.Exit` works because WASI has `proc_exit`. The guest is portable Go that happens to be reached through a different syscall layer.
+
+TinyGo builds it, and the Makefile target it belongs to is the one that produces *commands* rather than libraries — note the absence of `-buildmode=c-shared`, which is what the reactor-style examples use:
+
+```bash title="Makefile" {5}
+tinygo_sources_clis := examples/cli/testdata/cli.go imports/wasi_snapshot_preview1/example/testdata/tinygo/cat.go imports/wasi_snapshot_preview1/testdata/tinygo/wasi.go cmd/wazy/testdata/cat/cat.go
+.PHONY: build.examples.tinygo_clis
+build.examples.tinygo_clis: $(tinygo_sources_clis)
+	@for f in $^; do \
+	    tinygo build -o $$(echo $$f | sed -e 's/\.go/\.wasm/') -scheduler=none --no-debug --target=wasip1 $$f; \
+	done
+	@mv cmd/wazy/testdata/cat/cat.wasm cmd/wazy/testdata/cat/cat-tinygo.wasm
+```
+
+`make build.examples.tinygo_clis` regenerates `cli.wasm`, and needs TinyGo installed. The built artifact is committed, so running the example does not.
+
+## What `wazy run` decides on your behalf
+
+The runner is itself a wazy embedding, a single 600-line file, `cmd/wazy/wazy.go`. Three parts of it explain the behaviour you see from the shell.
+
+The first is how the command line is split. Everything up to the `.wasm` path belongs to wazy; everything after it belongs to the guest.
+
+```go title="cmd/wazy/wazy.go" collapse={9-34} {1-2,35}
+	wasmPath := flags.Arg(0)
+	wasmArgs := flags.Args()[1:]
+	if len(wasmArgs) > 1 {
+		// Skip "--" if provided
+		if wasmArgs[0] == "--" {
+			wasmArgs = wasmArgs[1:]
+		}
+	}
+
+	// Don't use map to preserve order
+	var env []string
+	if envInherit {
+		envs = append(os.Environ(), envs...)
+	}
+	for _, e := range envs {
+		fields := strings.SplitN(e, "=", 2)
+		if len(fields) != 2 {
+			fmt.Fprintf(stdErr, "invalid environment variable: %s\n", e)
+			return 1
+		}
+		env = append(env, fields[0], fields[1])
+	}
+
+	rc, _, fsConfig := validateMounts(mounts, stdErr)
+	if rc != 0 {
+		return rc
+	}
+
+	wasm, err := os.ReadFile(wasmPath)
+	if err != nil {
+		fmt.Fprintf(stdErr, "error reading wasm binary: %v\n", err)
+		return 1
+	}
+
+	wasmExe := filepath.Base(wasmPath)
+```
+
+There is no re-parsing of the tail. Go's `flag` package stops at the first non-flag argument, so the `.wasm` path terminates wazy's own flags and `-sub=true` is carried through as an opaque string. The `--` separator is accepted and dropped if you prefer to be explicit. The last highlighted line is why the guest sees a sensible argv: the program name slot is filled with the base name of the path, so `flag.Arg(0)` inside the guest is your first real argument rather than a directory.
+
+The second is the set of capabilities the guest starts with. A library embedding of wazy starts closed and you open what you need. The CLI does the opposite, and says so in a comment:
+
+```go title="cmd/wazy/wazy.go" {1-2,12}
+	// Because we are running a binary directly rather than embedding in an application,
+	// we default to wiring up commonly used OS functionality.
+	conf := wazy.NewModuleConfig().
+		WithStdout(stdOut).
+		WithStderr(stdErr).
+		WithStdin(os.Stdin).
+		WithRandSource(rand.Reader).
+		WithFSConfig(fsConfig).
+		WithSysNanosleep().
+		WithSysNanotime().
+		WithSysWalltime().
+		WithArgs(append([]string{wasmExe}, wasmArgs...)...)
+	for i := 0; i < len(env); i += 2 {
+		conf = conf.WithEnv(env[i], env[i+1])
+	}
+```
+
+Stdio, the real wall clock, real monotonic time, real sleep and the host's CSPRNG are on. Every one of those lines is an override of a library default that starts closed — including the fake clock [Reading a file with WASI 0.1](../wasi/) describes. Two capabilities stay shut even here: `fsConfig` is empty until you pass `-mount`, and no socket is opened until you pass `-listen`. Environment variables are not inherited either, unless you ask with `-env-inherit`.
+
+The third is what "the program finished" means for a command module.
+
+```go title="cmd/wazy/wazy.go" {2,7,13}
+	if err != nil {
+		if exitErr, ok := err.(*sys.ExitError); ok {
+			exitCode := exitErr.ExitCode()
+			if exitCode == sys.ExitCodeDeadlineExceeded {
+				fmt.Fprintf(stdErr, "error: %v (timeout %v)\n", exitErr, timeout)
+			}
+			return int(exitCode)
+		}
+		fmt.Fprintf(stdErr, "error instantiating wasm binary: %v\n", err)
+		return 1
+	}
+
+	// We're done, _start was called as part of instantiating the module.
+	return 0
+```
+
+The whole run happens inside `InstantiateModule`. A command module's `_start` is its WebAssembly start behaviour, so by the time instantiation returns, `main` has already run. A guest that exits non-zero surfaces as a `*sys.ExitError` on that call, and the CLI passes the code straight through as its own process exit status — `os.Exit(1)` in `cli.go` makes `wazy run` exit 1.
+
+## What surprises people about command modules
+
+1. **There is nothing to call.** No exported function, no `mod.ExportedFunction("main")`. Instantiation *is* the invocation, and it is a one-shot: to run the calculator twice you instantiate twice. The reactor half of that distinction — a module that exports functions and stays alive — is [Adding two numbers](../hello-world/).
+
+2. **A guest flag is not a wazy flag, and position is what distinguishes them.** `wazy run -interpreter cli.wasm -sub=true 3 1` gives the interpreter flag to wazy and the sub flag to the guest, purely because one is left of the path and one is right of it. The `--` separator is stripped only when arguments follow it, so a lone trailing `--` reaches the guest as an argument.
+
+3. **argv[0] is the file's base name, not the path you typed.** A guest that prints its own usage string will say `cli.wasm`, whatever directory you ran it from.
+
+4. **`-hostlogging` is the debugger.** When a guest silently does nothing, ask the runtime what it was asking for. The scopes are `all`, `clock`, `filesystem`, `memory`, `proc`, `poll`, `random` and `sock`, comma-separated, logged to stderr.
+
+:::caution
+`-mount` is a real mount, not a sandbox boundary. The flag's own help says it: the guest can escape the mounted volume through relative lookups like `../../`. If that matters, embed wazy as a library and hand it an `fs.FS` you control, as described in [Sandboxing](../../guides/sandboxing/).
+:::
+
+## Next
+
+That is the last of the core-module walkthroughs. Everything from here swaps hand-agreed integers and offsets for a typed interface the binary carries itself: [Components, threads and async](../components/) runs six such guests from one Go program, and the string that cost an allocator export and a packed `u64` in [Strings across the boundary](../strings/) becomes an ordinary argument.
+
+<LinkCard title="Components, threads and async" description="Six components in one program, and the same inst.Call behind every one of them." href="../components/" />
+<LinkCard title="Adding two numbers" description="The embedding counterpart to this page: a reactor module compiled with TinyGo, instantiated and called from a Go host." href="../hello-world/" />
+<LinkCard title="CLI reference" description="Every wazy run and wazy compile flag, with the cache directory and compilation worker settings." href="../../reference/cli/" />
+<LinkCard title="WASI guide" description="What a wasip1 guest can reach, and how the runtime answers args_get, proc_exit and the rest." href="../../guides/wasi/" />

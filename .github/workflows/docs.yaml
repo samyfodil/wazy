@@ -23,7 +23,10 @@ jobs:
         with:
           # accept rate-limit codes so a busy shields.io/pkg.go.dev doesn't red the
           # build; give transient 5xx failures more time to clear with backoff
-          # instead of accepting 500 outright (which would mask a truly broken link)
-          args: --no-progress --max-retries 5 --retry-wait-time 3 --accept 200,204,206,429 README.md
+          # instead of accepting 500 outright (which would mask a truly broken link).
+          # --accept REPLACES lychee's default set, so 404 is not accepted -- and the
+          # README's Docs link 404s until the first Pages deploy lands on main, hence
+          # the exclude. REMOVE IT once https://samyfodil.github.io/wazy/ serves 200.
+          args: --no-progress --max-retries 5 --retry-wait-time 3 --accept 200,204,206,429 --exclude 'samyfodil\.github\.io/wazy' README.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

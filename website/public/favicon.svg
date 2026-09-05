@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="130 80 420 240" role="img" aria-label="wazy">
+  <defs>
+    <linearGradient id="l" x1="0%" y1="0%" x2="90%" y2="100%">
+      <stop offset="0%" stop-color="#86A9FF"/><stop offset="50%" stop-color="#5264F3"/><stop offset="100%" stop-color="#2519A8"/>
+    </linearGradient>
+    <linearGradient id="c" x1="0%" y1="10%" x2="100%" y2="95%">
+      <stop offset="0%" stop-color="#5184FF"/><stop offset="52%" stop-color="#2AA8F6"/><stop offset="100%" stop-color="#61E5ED"/>
+    </linearGradient>
+    <linearGradient id="r" x1="18%" y1="0%" x2="82%" y2="100%">
+      <stop offset="0%" stop-color="#20F1EF"/><stop offset="52%" stop-color="#14C1CB"/><stop offset="100%" stop-color="#087B91"/>
+    </linearGradient>
+  </defs>
+  <polygon points="140,200 220,90 300,200 220,310" fill="url(#l)"/>
+  <polygon points="380,200 460,90 540,200 460,310" fill="url(#r)"/>
+  <polygon points="220,310 300,200 380,200 460,310 380,310 340,252 300,310" fill="url(#c)"/>
+</svg>

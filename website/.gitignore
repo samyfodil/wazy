@@ -1,0 +1,7 @@
+dist/
+.astro/
+node_modules/
+
+# The repo root ignores package-lock.json (an AssemblyScript-testdata rule);
+# this one is a real lockfile and `npm ci` in .github/workflows/pages.yaml needs it.
+!package-lock.json

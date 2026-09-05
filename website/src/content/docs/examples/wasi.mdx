@@ -1,0 +1,466 @@
+---
+title: Reading a file with WASI 0.1
+description: Give a guest stdout and a filesystem through WASI 0.1, and run the same cat program compiled by four different toolchains.
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem, Steps, LinkCard, CardGrid, FileTree } from '@astrojs/starlight/components';
+
+`cat` is the smallest program that needs the outside world: it takes a path, opens it, and copies
+the bytes to stdout. A WebAssembly module can do neither on its own. This example hands a guest both
+capabilities through WASI 0.1 — one Go call registers the host functions, and a `ModuleConfig`
+decides what those functions are allowed to reach. The same host runs four unmodified binaries,
+compiled from Go, Rust, C and Zig, because none of them was built against wazy.
+
+## Run it
+
+<Steps>
+
+1. From the example directory:
+
+   ```bash
+   cd imports/wasi_snapshot_preview1/example
+   go run cat.go /test.txt
+   ```
+
+   ```
+   greet filesystem
+   ```
+
+2. Swap the guest without touching the host. `TOOLCHAIN` picks which embedded binary to run;
+   unset, it defaults to TinyGo.
+
+   ```bash
+   TOOLCHAIN=zig-cc go run cat.go /test.txt
+   ```
+
+   ```
+   greet filesystem
+   ```
+
+</Steps>
+
+The whole example lives in one directory, with each guest's source next to the binary built from it:
+
+<FileTree>
+
+- imports/wasi_snapshot_preview1/example/
+  - cat.go the host
+  - cat_test.go
+  - README.md
+  - testdata/
+    - test.txt the one file the guest may open
+    - sub/
+      - test.txt
+    - tinygo/
+      - cat.go
+      - cat.wasm 49 KB
+    - cargo-wasi/
+      - cat.rs
+      - Cargo.toml
+      - cat.wasm 90 KB
+    - zig/
+      - cat.zig
+      - build.zig
+      - cat.wasm 8 KB
+    - zig-cc/
+      - cat.c
+      - cat.wasm 34 KB
+
+</FileTree>
+
+## Four guests, one program
+
+Every binary is checked in, so running the example needs no toolchain at all. The `README.md` is
+blunt about why: checking in the artifact "removes a potentially expensive toolchain setup", at the
+cost of having to watch how each one is built so the repository does not bloat.
+
+<Tabs>
+<TabItem label="TinyGo">
+
+```go title="imports/wasi_snapshot_preview1/example/testdata/tinygo/cat.go"
+package main
+
+import (
+	"os"
+)
+
+// main runs cat: concatenate and print files.
+//
+// Note: main becomes WASI's "_start" function.
+func main() {
+	// Start at arg[1] because args[0] is the program name.
+	for i := 1; i < len(os.Args); i++ {
+		bytes, err := os.ReadFile(os.Args[i])
+		if err != nil {
+			os.Exit(1)
+		}
+
+		// Use write to avoid needing to worry about Windows newlines.
+		os.Stdout.Write(bytes)
+	}
+}
+```
+
+Built by `make build.examples.tinygo`, which for this file runs:
+
+```bash
+tinygo build -o cat.wasm -scheduler=none --no-debug --target=wasip1 cat.go
+```
+
+The Makefile keeps two TinyGo rules, and the only difference between them is `-buildmode=c-shared`.
+Without it, as here, the output is a command rather than the reactor
+[Adding two numbers](../hello-world/) instantiates: its entry point is `_start` and it runs to
+completion.
+`-scheduler=none` then drops the goroutine scheduler this program never uses, and `--no-debug` the
+debug sections. The result is 49 KB.
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust title="imports/wasi_snapshot_preview1/example/testdata/cargo-wasi/cat.rs"
+use std::env;
+use std::fs::File;
+use std::io;
+use std::io::Write;
+use std::process::exit;
+
+fn main() {
+    // Start at arg[1] because args[0] is the program name.
+    for path in env::args().skip(1) {
+        if let Ok(mut file) = File::open(&path) {
+            io::copy(&mut file, &mut io::stdout()).unwrap();
+        } else {
+            writeln!(io::stderr(), "error opening: {}: No such file or directory", path).unwrap();
+            exit(1);
+        }
+    }
+}
+```
+
+Built by `make build.examples.rust`, which for this file runs:
+
+```bash
+cargo build --target wasm32-wasip1 --release
+```
+
+This guest, the C one and the Zig one all print a diagnostic to stderr when a file will not open;
+only TinyGo exits silently. That is why the host wires up stderr as well as stdout.
+
+The directory is named after cargo-wasi, the crate the `README.md` documents; the Makefile builds it
+with plain cargo now. Size is why the README discusses the toolchain at all — against the older
+`wasm32-wasi` release target the same source came out over 1.9 MB, which was too large to check in.
+The explanation the README offers is that the target is not pure Rust. The committed binary is
+90 KB, still the largest of the four.
+
+</TabItem>
+<TabItem label="C">
+
+```c title="imports/wasi_snapshot_preview1/example/testdata/zig-cc/cat.c"
+#include <fcntl.h> // constants
+#include <unistd.h> // posix
+#include <stdio.h> // fprintf
+
+const int BUF_LEN = 512;
+
+// main is the same as wasi _start: "concatenate and print files."
+int main(int argc, char** argv)
+{
+  unsigned char buf[BUF_LEN];
+  int fd = 0;
+  int len = 0;
+
+  // Start at arg[1] because args[0] is the program name.
+  for (int i = 1; i < argc; i++) {
+    int fd = open(argv[i], O_RDONLY);
+    if (fd < 0) {
+      fprintf(stderr, "error opening %s: %d\n", argv[i], fd);
+      return 1;
+    }
+
+    for (;;) {
+      len = read(fd, &buf[0], BUF_LEN);
+      if (len > 0) {
+        write(STDOUT_FILENO, buf, len);
+      } else if (len == 0) {
+        break;
+      } else {
+        fprintf(stderr, "error reading %s\n", argv[i]);
+        return 1;
+      }
+    }
+    close(fd);
+  }
+
+  return 0;
+}
+```
+
+Built by `make build.examples.zig-cc`, which for this file runs:
+
+```bash
+zig cc --target=wasm32-wasi -o cat.wasm cat.c
+```
+
+The Makefile explains the choice of compiler: "We use zig to build C as it is easy to install and
+embeds a copy of zig-cc." Emscripten is deliberately absent — the example `README.md` notes that
+Emscripten supports WASI I/O only for stdin, stdout and stderr, so a `cat` would need custom
+filesystem code. Emscripten's own maintainers suggest wasi-libc instead, which is what this tab is.
+34 KB.
+
+</TabItem>
+<TabItem label="Zig">
+
+```zig title="imports/wasi_snapshot_preview1/example/testdata/zig/cat.zig"
+const std = @import("std");
+const io = std.io;
+const os = std.os;
+const allocator = std.heap.page_allocator;
+const stdout = std.io.getStdOut();
+const warn = std.log.warn;
+
+pub fn main() !void {
+    // Allocate arguments from the the operating system.
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+
+    // loop on the args, skipping the filename (args[0])
+    for (args[1..args.len]) |arg| {
+
+        // open the file from a relative path, as "/" is pre-opened and the CWD.
+        const file = std.fs.cwd().openFile(arg, .{ .mode = .read_only }) catch |err| {
+            warn("Unable to open file {s}: {s}\n", .{ arg, @errorName(err) });
+            return err;
+        };
+        defer file.close();
+
+        // Write the contents to stdout
+        stdout.writeFileAll(file, .{}) catch |err| {
+            warn("Unable to write contents to stdout: {s}\n", .{@errorName(err)});
+            return err;
+        };
+    }
+}
+```
+
+Built by `make build.examples.zig`, which runs `zig build -Doptimize=ReleaseSmall` in the directory
+and moves the artifact out of `zig-out`. The `build.zig` beside it pins the target to
+`.cpu_arch = .wasm32` and `.os_tag = .wasi`.
+
+At 8 KB it is under a quarter the size of the next smallest, the C build. Note the comment on
+the open call — Zig resolves the path against the current working directory, which for a WASI
+program is its first preopened directory. That assumption has consequences, covered below.
+
+</TabItem>
+</Tabs>
+
+## Handing over stdout and a filesystem
+
+The guest binaries and the one file they are allowed to read are all compiled into the host program.
+Nothing here touches the real filesystem: `catFS` is an `embed.FS`, and `fs.Sub` trims the
+`testdata/` prefix so the guest sees `test.txt` at the root rather than `testdata/test.txt`.
+
+```go title="imports/wasi_snapshot_preview1/example/cat.go" collapse={1-14, 21-39} {16-19}
+package main
+
+import (
+	"context"
+	"embed"
+	"fmt"
+	"io/fs"
+	"log"
+	"os"
+
+	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/imports/wasi_snapshot_preview1"
+	"github.com/samyfodil/wazy/sys"
+)
+
+// catFS is an embedded filesystem limited to test.txt
+//
+//go:embed testdata/test.txt
+var catFS embed.FS
+
+// catWasmCargoWasi was compiled from testdata/cargo-wasi/cat.rs
+//
+//go:embed testdata/cargo-wasi/cat.wasm
+var catWasmCargoWasi []byte
+
+// catWasmTinyGo was compiled from testdata/tinygo/cat.go
+//
+//go:embed testdata/tinygo/cat.wasm
+var catWasmTinyGo []byte
+
+// catWasmZig was compiled from testdata/zig/cat.zig
+//
+//go:embed testdata/zig/cat.wasm
+var catWasmZig []byte
+
+// catWasmZigCc was compiled from testdata/zig-cc/cat.c
+//
+//go:embed testdata/zig-cc/cat.wasm
+var catWasmZigCc []byte
+```
+
+The `ModuleConfig` is where the guest's world is drawn. Three calls, three capabilities, and
+everything not named stays off:
+
+```go title="imports/wasi_snapshot_preview1/example/cat.go" {15-17}
+	// Choose the context to use for function calls.
+	ctx := context.Background()
+
+	// Create a new WebAssembly Runtime.
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx) // This closes everything this Runtime created.
+
+	// Since wazy uses fs.FS, we can use standard libraries to do things like trim the leading path.
+	rooted, err := fs.Sub(catFS, "testdata")
+	if err != nil {
+		log.Panicln(err)
+	}
+
+	// Combine the above into our baseline config, overriding defaults.
+	config := wazy.NewModuleConfig().
+		// By default, I/O streams are discarded and there's no file system.
+		WithStdout(os.Stdout).WithStderr(os.Stderr).WithFS(rooted)
+```
+
+`WithFS` is shorthand: it builds an `FSConfig` with the given `fs.FS` mounted at the guest root.
+Because it takes an `fs.FS`, an `embed.FS` works, an `os.DirFS` works, and so does anything else
+you implement. For finer control — a read-only mount, several mounts at different guest paths —
+reach for `WithFSConfig` and `NewFSConfig` instead.
+
+Registering WASI is one call, and it is separate from the module. The host functions live in their
+own module named `wasi_snapshot_preview1`, which every guest here imports by that name:
+
+```go title="imports/wasi_snapshot_preview1/example/cat.go" collapse={8-21}
+	// Instantiate WASI, which implements system I/O such as console output.
+	wasi_snapshot_preview1.MustInstantiate(ctx, r)
+
+	// Choose the binary we want to test. Most compilers that implement WASI
+	// are portable enough to use binaries interchangeably.
+	var catWasm []byte
+	toolchain := os.Getenv("TOOLCHAIN")
+	switch toolchain {
+	case "":
+		fallthrough // default to TinyGo
+	case "cargo-wasi":
+		catWasm = catWasmCargoWasi
+	case "tinygo":
+		catWasm = catWasmTinyGo
+	case "zig":
+		catWasm = catWasmZig
+	case "zig-cc":
+		catWasm = catWasmZigCc
+	default:
+		log.Panicln("unknown toolchain", toolchain)
+	}
+```
+
+Registration happens against the runtime, not against a module, so it costs once no matter how many
+guests you go on to instantiate. Each instance still gets its own file descriptor table and its own
+copy of the config.
+
+Instantiation is the call, because a WASI command has no exports worth calling — its entry point is
+`_start`, and wazy runs it as part of bringing the module up:
+
+```go title="imports/wasi_snapshot_preview1/example/cat.go" {3,6-10}
+	// InstantiateModule runs the "_start" function, WASI's "main".
+	// * Set the program name (arg[0]) to "wasi"; arg[1] should be "/test.txt".
+	if _, err = r.InstantiateWithConfig(ctx, catWasm, config.WithArgs("wasi", os.Args[1])); err != nil {
+		// Note: Most compilers do not exit the module after running "_start",
+		// unless there was an error. This allows you to call exported functions.
+		if exitErr, ok := err.(*sys.ExitError); ok && exitErr.ExitCode() != 0 {
+			fmt.Fprintf(os.Stderr, "exit_code: %d\n", exitErr.ExitCode())
+		} else if !ok {
+			log.Panicln(err)
+		}
+	}
+```
+
+`config` is immutable and every `WithXXX` returns a new value, so `config.WithArgs(...)` layers the
+per-run arguments onto the shared baseline without disturbing it. Reuse the same baseline across
+concurrent instantiations freely.
+
+## What the guest can see, and what it cannot
+
+Everything the guest can reach is in the two lines above. What is not configured is not merely
+empty — the host function fails.
+
+| Capability | Here | Unconfigured default |
+| --- | --- | --- |
+| Filesystem | `test.txt` at `/`, out of an `embed.FS` | no file access at all; `path_open` returns `ENOSYS` |
+| stdout, stderr | `os.Stdout`, `os.Stderr` | discarded |
+| stdin | not set | reads return `io.EOF` |
+| Arguments | `"wasi"` and the path | empty; `os.Args` is never passed through |
+| Environment | not set | empty; the host's environment is never passed through |
+| Clocks | not set | a **fake** clock (see below) |
+| Randomness | not set | a deterministic source |
+
+Two of those defaults are worth restating as choices rather than omissions. `WithArgs` does not
+default to `os.Args`, and `WithEnv` does not default to the process environment, because either
+would leak the host's command line into a sandbox. If a guest needs them, you pass them, one at a
+time, having looked at them.
+
+:::caution[The default clock is fake, not slow]
+Leave the clock alone and the guest does not read the real time. `clock_time_get` with the realtime
+clock ID returns a counter that starts at midnight UTC on 1 January 2022 and advances exactly 1 ms
+per reading; the monotonic clock starts at zero and does the same. `nanosleep` returns immediately.
+A guest that logs timestamps will produce a plausible-looking, entirely fictional sequence.
+
+Hand over the real clock explicitly with `WithSysWalltime` and `WithSysNanotime`, and pair them with
+`WithSysNanosleep` — some compilers, Go among them, implement sleeping by spinning on the monotonic
+clock, so a real clock with a no-op sleep burns CPU.
+:::
+
+## Exit codes, arg zero, mount order, symlinks
+
+**A guest that exits is an error, and that is fine.** `_start` returning nonzero surfaces as
+`*sys.ExitError` out of `InstantiateWithConfig`, not as a panic and not as a zero value. The
+example's Rust guest takes that path whenever the file is missing. Note the inverse too, from the
+comment in the source: most compilers do *not* exit the module after `_start`, so the returned
+`api.Module` usually stays alive and its exports remain callable.
+
+**`arg[0]` is the program name, and wazy will not invent one.** All four guests start their loop at
+index 1 — `os.Args[1:]` in Go, `.skip(1)` in Rust, `argc` from 1 in C, `args[1..]` in Zig. The host
+passes `"wasi"` as `arg[0]` for exactly this reason. Pass only the path and every guest silently
+reads nothing.
+
+**Mount order decides the working directory.** WASI has no `chdir`; a guest resolves relative paths
+against a preopened directory, and most take the first one. The Zig guest opens through
+`std.fs.cwd()`, so it only finds files under the first preopen. `cat_test.go` skips one case for
+this reason — with two mounts configured, Zig will not resolve a path under the second. When you
+mount more than one directory, the order you add them is part of the contract.
+
+**Escape is checked, but symlinks are not.** A guest path that climbs out of its mount — `../..`,
+or a rooted path — is rejected before it reaches the filesystem, and there is no option to turn that
+off. What the check does not cover is a symlink *inside* a mounted directory pointing outside it,
+because the host OS resolves that far below this layer. Mounting an `embed.FS`, as this example
+does, sidesteps the question entirely; mounting a directory whose contents you do not control does
+not.
+
+## Same thing, no host program
+
+wazy's CLI does what `cat.go` does, with the mounts on the command line. From `cat_test.go`:
+
+```bash
+go run github.com/samyfodil/wazy/cmd/wazy run -mount=testdata:/ cat.wasm /test.txt
+```
+
+The test also passes `-hostlogging=filesystem`, which traces every filesystem call the guest makes —
+the fastest way to find out why a guest is not seeing the file you thought you gave it.
+[Running a binary from the CLI](../cli/) picks that thread up, with a guest that parses its own
+flags.
+
+Next in order, though, is the case this page assumes away.
+[AssemblyScript special imports](../assemblyscript/) runs a guest that was never built against WASI
+at all and wants three functions from `env` instead — a host module you write, not one you
+register.
+
+<CardGrid>
+  <LinkCard title="Sandboxing and limits" href="../../guides/sandboxing/" description="Every capability, its default, and how to cap memory and wall time." />
+  <LinkCard title="Core modules and WASI 0.1" href="../../guides/core-modules/" description="Compiling once and instantiating many, with or without WASI." />
+  <LinkCard title="Running a binary from the CLI" href="../cli/" description="The same job with no host program, and a guest that reads its own flags." />
+  <LinkCard title="CLI reference" href="../../reference/cli/" description="Flags for mounts, host logging and the rest." />
+</CardGrid>

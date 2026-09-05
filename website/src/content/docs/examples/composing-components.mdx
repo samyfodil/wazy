@@ -1,0 +1,550 @@
+---
+title: Composing components
+description: Link a provider and a consumer written in different languages into a single .wasm, and run the pair on wazy with nothing between them.
+sidebar:
+  order: 13
+---
+
+import { Tabs, TabItem, Steps, FileTree } from '@astrojs/starlight/components';
+
+Twelve components sit in `examples/compose/`: for each of six languages, one that **exports** the
+`wazy:compose/greeter` interface and one that **imports** it and exports `run`. A composer welds
+any consumer to any provider — a C consumer to a Rust provider, a Python consumer to a TinyGo one —
+and hands back a single `.wasm`.
+
+Weigh that against implementing `greeter` in Go, which is what [Bring your own WIT](../custom-wit/)
+did. There the two halves are joined in your process, by your code, at your version. Composed, the
+join is a name inside the binary: the halves are written in different languages, built by different
+toolchains, shipped by different people, and the artifact that reaches you is already whole.
+
+## Run it
+
+<Steps>
+
+1. Compose the two halves. Every language directory holds both, so start with a pair that needs no
+   host configuration at all:
+
+   ```bash
+   cd examples/compose/c
+   wasm-tools compose consumer.wasm -d provider.wasm -o self.wasm
+   ```
+
+2. Look at what came out. The greeter import is gone — it was satisfied by the provider — and one
+   export is left:
+
+   ```bash
+   wasm-tools component wit self.wasm
+   ```
+
+   ```rust
+   world root {
+     export run: func() -> list<string>;
+   }
+   ```
+
+3. Instantiate it and call that export. Built `-mexec-model=reactor`, the provider imports nothing
+   and the consumer imports nothing but the greeter, so composing them leaves no import at all and
+   the pair needs no options:
+
+   ```go
+   r := wazy.NewRuntime(ctx)
+   inst, err := component.Instantiate(ctx, r, componentWasm)
+   out, err := inst.Call(ctx, "run")
+   ```
+
+   `run` returns three strings: `Hello, wazy #42! (from C)`, `a (via C)`, and `empty-len=0`.
+
+</Steps>
+
+Now change one word. The consumer stays C; the provider comes from another directory:
+
+```bash
+wasm-tools compose consumer.wasm -d ../rust/provider.wasm -o pair.wasm
+```
+
+The same `run` now answers `(from Rust)` and `(via Rust)`, because the text was never in the
+consumer — every byte of it crossed the interface. That is the whole point of the example, and it
+holds for all 36 consumer/provider pairs the six languages make.
+
+## The interface both halves compile against
+
+One file, byte-identical in all six directories:
+
+```rust title="examples/compose/rust/greeter.wit"
+package wazy:compose@0.1.0;
+
+interface greeter {
+  record visitor {
+    name: string,
+    id: u32,
+  }
+
+  greet: func(who: visitor) -> string;
+  greet-all: func(names: list<string>) -> list<string>;
+}
+
+world provider {
+  export greeter;
+}
+
+world consumer {
+  import greeter;
+  export run: func() -> list<string>;
+}
+```
+
+The types are chosen to stress the place where two guest allocators meet: a record carrying a
+`string`, and `list<string>` travelling in both directions — including the empty list, which every
+implementation here deliberately leaves un-special-cased so a zero-length round trip is really
+tested.
+
+## The two halves
+
+<FileTree>
+
+- examples/compose/
+  - c/
+    - greeter.wit the contract — the same bytes in every directory
+    - provider.c
+    - consumer.c
+    - provider.wasm
+    - consumer.wasm
+    - README.md build recipe and exact toolchain versions
+  - go/ standard Go, hand-written Canonical ABI in `abi/`
+  - javascript/ jco + componentize-js
+  - python/ componentize-py
+  - rust/ cargo component
+  - tinygo/ TinyGo with generated bindings in `gen/`
+
+</FileTree>
+
+All twelve `.wasm` are committed, from 14 KB of C to 18 MB of CPython. The directory is a nested Go
+module on purpose — a nested module is excluded from the parent's zip, so `go get
+github.com/samyfodil/wazy` does not download any of them.
+
+Each provider answers `Hello, <name> #<id>! (from <language>)` and `<name> (via <language>)`. The
+language is named in the answer so a composed pair says out loud which side executed.
+
+<Tabs>
+<TabItem label="Rust">
+
+```rust title="examples/compose/rust/provider/src/lib.rs" collapse={1-9}
+//! `wazy:compose/provider` — the provider half of the cross-language
+//! composition matrix, in Rust.
+//!
+//! Exports `wazy:compose/greeter`. Every string it produces names Rust, so a
+//! composed consumer written in another language proves which side ran.
+
+#[allow(warnings)]
+mod bindings;
+
+use bindings::exports::wazy::compose::greeter::{Guest, Visitor};
+
+struct Component;
+
+impl Guest for Component {
+    /// `Hello, <name> #<id>! (from Rust)`
+    fn greet(who: Visitor) -> String {
+        format!("Hello, {} #{}! (from Rust)", who.name, who.id)
+    }
+
+    /// One `<name> (via Rust)` per input, in order.
+    ///
+    /// An empty input yields an empty output — the empty-list path is part of
+    /// the contract under test, so it is deliberately *not* special-cased.
+    fn greet_all(names: Vec<String>) -> Vec<String> {
+        names
+            .into_iter()
+            .map(|name| format!("{name} (via Rust)"))
+            .collect()
+    }
+}
+
+bindings::export!(Component with_types_in bindings);
+```
+
+```bash
+cargo component build --release --target wasm32-wasip2
+cp target/wasm32-wasip2/release/provider.wasm provider.wasm
+cp target/wasm32-wasip2/release/consumer.wasm consumer.wasm
+```
+
+The same `cargo component` build as [Building a component](../building-components/), pointed at two
+crates instead of one; `*/src/bindings.rs` is regenerated from `greeter.wit` each time and is not
+committed. 49 837 bytes for the provider — the smallest of the five toolchains that link a language
+runtime.
+
+</TabItem>
+<TabItem label="TinyGo">
+
+```go title="examples/compose/tinygo/provider/main.go" collapse={1-16}
+// Command provider implements the `provider` world of wazy:compose/greeter
+// (see ../greeter.wit): it exports the interface that a consumer component
+// written in any other language can import.
+//
+// The bindings under ../gen/provider are generated from greeter.wit by
+// wit-bindgen-go; all this file does is fill in the two exported functions.
+// See ../README.md to rebuild.
+package main
+
+import (
+	"strconv"
+
+	"go.bytecodealliance.org/cm"
+
+	greeter "github.com/samyfodil/wazy/examples/compose/tinygo/gen/provider/wazy/compose/greeter"
+)
+
+// lang is the one place the language name appears; both exports quote it so a
+// composed pair makes it obvious which half produced which string.
+const lang = "TinyGo"
+
+func init() {
+	greeter.Exports.Greet = func(who greeter.Visitor) string {
+		return "Hello, " + who.Name + " #" + strconv.FormatUint(uint64(who.ID), 10) + "! (from " + lang + ")"
+	}
+
+	greeter.Exports.GreetAll = func(names cm.List[string]) cm.List[string] {
+		// One element out per element in -- including none at all for an empty
+		// input. The empty list is deliberately not special-cased: a zero-length
+		// list<string> round trip is part of what this example tests.
+		in := names.Slice()
+		out := make([]string, len(in))
+		for i, name := range in {
+			out[i] = name + " (via " + lang + ")"
+		}
+		return cm.ToList(out)
+	}
+}
+
+// main is required by the Go toolchain but never runs: a component has no
+// `_start`, only the exports it declares in its world.
+func main() {}
+```
+
+```bash collapse={1-5}
+WIT="$(mktemp -d)"
+cp greeter.wit build.wit "$WIT/"
+mkdir -p "$WIT/deps/cli"
+cp "$(tinygo env TINYGOROOT)"/lib/wasi-cli/wit/*.wit "$WIT/deps/cli/"
+cp -r "$(tinygo env TINYGOROOT)"/lib/wasi-cli/wit/deps/* "$WIT/deps/"
+
+tinygo build -target=wasip2 --wit-package "$WIT" --wit-world provider-tinygo -o provider.wasm ./provider
+tinygo build -target=wasip2 --wit-package "$WIT" --wit-world consumer-tinygo -o consumer.wasm ./consumer
+
+rm -rf "$WIT"
+```
+
+The world handed to the compiler is `provider-tinygo`, not `provider` — the build-world trick
+[Building a component](../building-components/) explains, applied here to each half separately.
+`greeter.wit` itself stays the untouched contract, which is what lets a TinyGo half link against a
+C one.
+
+</TabItem>
+<TabItem label="Go">
+
+Standard Go has no component target and no WIT bindings generator, so the interface is written out
+by hand: a wasip1 reactor core module first, then `wasm-tools` wraps it.
+
+```go title="examples/compose/go/provider/main.go" collapse={1-5}
+// greet is `greet: func(who: visitor) -> string`.
+//
+// `visitor` flattens to three i32s -- the two of its string field, then its u32
+// -- so the record arrives unpacked and is never laid out in memory.
+//
+//go:wasmexport wazy:compose/greeter@0.1.0#greet
+func greet(namePtr, nameLen, id uint32) uint32 {
+	name := abi.LoadString(namePtr, nameLen)
+	answer := "Hello, " + name + " #" + strconv.FormatUint(uint64(id), 10) + "! (from Go)"
+	return abi.Pair(abi.StoreString(answer))
+}
+
+//go:wasmexport cabi_post_wazy:compose/greeter@0.1.0#greet
+func greetPost(uint32) { abi.Reset() }
+```
+
+```bash
+GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o provider-core.wasm ./provider
+wasm-tools component embed greeter.wit --world provider provider-core.wasm -o provider-embedded.wasm
+wasm-tools component new provider-embedded.wasm \
+    --adapt wasi_snapshot_preview1=wasi_snapshot_preview1.reactor.wasm \
+    -o provider.wasm
+```
+
+`//go:wasmexport` takes the Canonical ABI's name verbatim — colon, slash, `@` and `#` included —
+which is why no generator is strictly needed here, down to the `cabi_post_` half that runs once the
+host has copied the answer out. The reactor build and the preview1 adapter behind it are the same
+two steps as the standard-Go tab of [Building a component](../building-components/).
+
+</TabItem>
+<TabItem label="C">
+
+```c title="examples/compose/c/provider.c"
+// greet returns exactly: Hello, <who.name> #<who.id>! (from C)
+void exports_wazy_compose_greeter_greet(exports_wazy_compose_greeter_visitor_t *who,
+                                        provider_string_t *ret) {
+  static const char prefix[] = "Hello, ";
+  static const char infix[] = " #";
+  static const char suffix[] = "! (from " LANG ")";
+  const size_t plen = sizeof(prefix) - 1;
+  const size_t ilen = sizeof(infix) - 1;
+  const size_t slen = sizeof(suffix) - 1;
+
+  char digits[10];
+  const size_t dlen = u32_to_dec(who->id, digits);
+
+  const size_t len = plen + who->name.len + ilen + dlen + slen;
+  uint8_t *buf = xmalloc(len);
+
+  size_t off = 0;
+  memcpy(buf + off, prefix, plen);
+  off += plen;
+  memcpy(buf + off, who->name.ptr, who->name.len);
+  off += who->name.len;
+  memcpy(buf + off, infix, ilen);
+  off += ilen;
+  memcpy(buf + off, digits, dlen);
+  off += dlen;
+  memcpy(buf + off, suffix, slen);
+
+  ret->ptr = buf;
+  ret->len = len;
+}
+```
+
+```bash
+wit-bindgen c --world provider --out-dir build/provider greeter.wit
+
+$WASI_SDK/bin/clang --target=wasm32-wasip2 -O2 -mexec-model=reactor -Wl,--strip-all \
+  -Ibuild/provider provider.c build/provider/provider.c \
+  build/provider/provider_component_type.o -o provider.wasm
+```
+
+Every result is assembled with `memcpy` and explicit lengths, and the decimal conversion is
+hand-written rather than `snprintf`, for a reason that shows up in the import section: pulling in
+`stdio` would drag WASI along with it. As built, the provider imports nothing at all and the
+consumer imports nothing but the greeter interface, which is what makes the C pair the only one
+here that composes to an import-free artifact.
+
+</TabItem>
+<TabItem label="JavaScript">
+
+```javascript title="examples/compose/javascript/provider.js"
+// world `provider` exports the whole `greeter` interface, so the module
+// exports one object named after the interface. jco maps WIT kebab-case to
+// lowerCamelCase: `greet-all` -> `greetAll`, and the `visitor` record arrives
+// as a plain object with `name` and `id` properties.
+export const greeter = {
+  greet(who) {
+    return `Hello, ${who.name} #${who.id}! (from JavaScript)`;
+  },
+
+  greetAll(names) {
+    // map() over an empty array yields an empty array -- the empty-list path
+    // is deliberately not special-cased.
+    return names.map((name) => `${name} (via JavaScript)`);
+  },
+};
+```
+
+```bash
+jco componentize provider.js --wit greeter.wit --world-name provider -o provider.wasm
+```
+
+`greeter.wit` holds two worlds, so `--world-name` is required. On the consumer side the WIT import
+becomes an ordinary JavaScript module import whose specifier is the fully qualified interface name,
+version included — `import { greet, greetAll } from 'wazy:compose/greeter@0.1.0';`. Drop the
+`@0.1.0` and it does not resolve. Nothing is installed for it: the specifier is satisfied by the
+component's import section, not by npm.
+
+</TabItem>
+<TabItem label="Python">
+
+```python title="examples/compose/python/provider_app.py"
+"""The `provider` world of `wazy:compose@0.1.0`, in Python.
+
+componentize-py turns the WIT `greeter` interface into `wit_world.exports.Greeter`
+(the protocol to implement) plus `wit_world.exports.greeter` (the type module
+holding the `visitor` record). The class name must match the interface name.
+"""
+
+from typing import List
+
+import wit_world
+from wit_world.exports import greeter
+
+LANG = "Python"
+
+
+class Greeter(wit_world.exports.Greeter):
+    def greet(self, who: greeter.Visitor) -> str:
+        return f"Hello, {who.name} #{who.id}! (from {LANG})"
+
+    def greet_all(self, names: List[str]) -> List[str]:
+        # No special case for the empty list: the comprehension already
+        # returns [], which is exactly what the contract asks for.
+        return [f"{name} (via {LANG})" for name in names]
+```
+
+```bash
+~/cpy-venv/.venv/bin/componentize-py -d greeter.wit -w provider componentize provider_app -o provider.wasm
+```
+
+Hence `provider_app.py` rather than `provider.py`: the module name has to differ from the world
+name, for the reason [Building a component](../building-components/) gives. Each artifact carries a
+whole CPython, so each lands around 18 MB — twice over, in a composed pair.
+
+</TabItem>
+</Tabs>
+
+### The consumer
+
+All six consumers do the same three things, and none of them contains a provider's text:
+
+```rust title="examples/compose/rust/consumer/src/lib.rs" collapse={1-14}
+//! `wazy:compose/consumer` — the consumer half, in Rust.
+//!
+//! Imports `wazy:compose/greeter` and exports `run`. Nothing the provider says
+//! is hardcoded here: every element of the returned list is text that crossed
+//! the Canonical ABI, so a bad lift or lower shows up in the output instead of
+//! being masked by a local constant.
+
+#[allow(warnings)]
+mod bindings;
+
+use bindings::wazy::compose::greeter::{self, Visitor};
+use bindings::Guest;
+
+struct Component;
+
+impl Guest for Component {
+    fn run() -> Vec<String> {
+        // 1. record-with-string argument, string result.
+        let first = greeter::greet(&Visitor {
+            name: "wazy".to_string(),
+            id: 42,
+        });
+
+        // 2. list<string> in, list<string> out — take element 0.
+        let all = greeter::greet_all(&["a".to_string(), "b".to_string()]);
+        let second = match all.into_iter().next() {
+            Some(s) => s,
+            // Report the wrong answer rather than hiding it.
+            None => "greet-all([a, b]) returned 0 elements".to_string(),
+        };
+
+        // 3. the empty-list path: report the real length, whatever it is.
+        let empty = greeter::greet_all(&[]);
+        let third = format!("empty-len={}", empty.len());
+
+        vec![first, second, third]
+    }
+}
+
+bindings::export!(Component with_types_in bindings);
+```
+
+The third element is the one to watch. It reports the length `greet-all([])` actually returned
+rather than the length it was supposed to return, so a provider that mishandles the empty list is
+caught in the output instead of passing silently.
+
+## The host side
+
+A composed artifact is instantiated like any other component. Nothing about the composition reaches
+the Go API — you do not register the greeter, and there is no option that names it:
+
+```go
+inst, err := component.Instantiate(ctx, r, componentWasm)
+if err != nil {
+	return err
+}
+defer inst.Close(ctx)
+```
+
+WASI is the exception, and it is not the composition's doing. `wasm-tools compose` satisfies what
+one half imports from what the other exports; whatever is left over — the WASI both halves' language
+runtimes reach for while starting up — stays an import of the composed component for the host to
+fill in:
+
+```go title="examples/compose/javascript/README.md"
+r := wazy.NewRuntime(ctx)
+inst, err := component.Instantiate(ctx, r, wasm, wasip2.With(wasip2.Config{})...)
+```
+
+Only the C pair escapes it, for the reasons the previous page sets out language by language. A
+zero-value `wasip2.Config{}` covers every other pair: no stdio, no filesystem, no sockets — see
+[the WASI guide](../../guides/wasi/) for what each field opens up.
+
+The Python pair needs the same runtime feature its single-component sibling did — componentize-py's
+CPython initializes a global with `i32.add`, which the default core feature set rejects:
+
+```go title="examples/compose/python/README.md"
+r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfig().
+    WithCoreFeatures(api.CoreFeaturesV2|api.CoreFeatureExtendedConst))
+```
+
+## What wazy does at instantiation time
+
+wazy does not flatten a composition. It reads the graph the composer wrote and instantiates the
+nested components in order, linking them as it goes. Every composer emits the same three lines:
+
+```wat title="internal/component/instance/compose_alias_test.go"
+(instance $p (instantiate $Provider))
+(alias export $p "X" (instance $g))
+(instance $c (instantiate $Consumer (with "Y" (instance $g))))
+```
+
+The provider is instantiated first. The middle line is where composition lives: the consumer does
+not need the provider instance, it needs the sub-instance the provider exports, reached by
+`alias export`. That alias takes a slot of its own in the component-instance index space, and the
+consumer's instantiate-arg names that slot.
+
+To wire it, wazy resolves the arg through the instance index space — definition, import, alias or
+export — projects the named export off the already-live provider, and binds its member functions
+under the **arg's** name. Names on the two sides are independent, which is the subtlety: `X` is the
+provider's name for the interface it exports and `Y` is the consumer's name for the interface it
+imports. Composers happen to make them equal; nothing in the binary format requires it, since
+subtyping is checked on the instance type, never on the export name.
+
+After that the consumer's lowered import calls straight into the provider instance. No host function
+sits in between, and resources cross with their identity intact: a handle the provider mints is
+transferred by representation into the consumer's own table, and the consumer's `resource.drop` — on
+its own local type index — runs the provider's destructor. That holds when a composed component is
+itself used as the provider of a further composition, because ownership is chased to the component
+that actually defined the interface, at any depth.
+
+Shapes wazy cannot wire fail during instantiation, with the arg and the index named, rather than
+mis-binding and surfacing later as a corrupt-looking error. `TestGraph_ComposedInstanceAlias`,
+`TestComposeTwoLevelCarriesResourceIdentity` and
+`TestGraph_InstanceAliasFailsLoudOnShapesItCannotWire` in `internal/component/instance/` are the
+committed proofs of each half of that.
+
+## What decides whether a pair links
+
+- **The composer does not matter.** `wasm-tools compose` (now deprecated) and `wac plug`
+  emit the same alias-and-arg shape, and wazy takes either. Pick whichever is installed.
+- **WASI does not compose away.** A composed pair is import-free only if neither half wants
+  anything the other does not export, which in practice means both were built the way the C halves
+  were — `-mexec-model=reactor`, no `stdio`. Every other toolchain here brings its runtime's WASI
+  along, and the composed artifact inherits it.
+- **The composed artifact is not committed.** `c/` and `rust/` list `self.wasm` in their
+  `.gitignore`; the twelve halves are what the repository carries. Compose the pair you want, when
+  you want it.
+- **The per-language READMEs predate the runtime work.** Their "known gap" sections describe a
+  composed component failing to instantiate. That gap was closed by the same change that added these
+  examples — composing them is what surfaced it — and all 36 pairs now instantiate and return the
+  provider's own text across the boundary. The JavaScript and Python files carry a second stale
+  claim, that their `.wasm` was too large to commit; both are in the tree. The build recipes and the
+  toolchain versions are current.
+
+## Where to go next
+
+This is the last of the example walkthroughs. [Components and the Component
+Model](../../guides/components/) is the same ground as reference rather than tutorial, and
+[Bring your own WIT](../custom-wit/) is the other way to satisfy an import — in Go, in your
+process, instead of with a second component. If you want to see how much of the specification this
+rests on, [conformance](../../reference/conformance/) has the numbers.
+
+The sources for all six languages, with their exact toolchain versions and verification transcripts,
+are in
+[`examples/compose/`](https://github.com/samyfodil/wazy/tree/main/examples/compose).

@@ -9,7 +9,7 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/samyfodil/wazy.svg)](https://pkg.go.dev/github.com/samyfodil/wazy) [![Test](https://github.com/samyfodil/wazy/actions/workflows/commit.yaml/badge.svg)](https://github.com/samyfodil/wazy/actions/workflows/commit.yaml) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-[**Docs**](https://pkg.go.dev/github.com/samyfodil/wazy) · [**Examples**](examples) · [**Components**](examples/component) · [**Benchmarks**](#benchmarks) · [**Optimizations**](OPTIMIZATIONS.md)
+[**Docs**](https://samyfodil.github.io/wazy/) · [**API**](https://pkg.go.dev/github.com/samyfodil/wazy) · [**Examples**](examples) · [**Components**](examples/component) · [**Benchmarks**](#benchmarks) · [**Optimizations**](OPTIMIZATIONS.md)
 
 </div>
 
@@ -178,7 +178,7 @@ Correctness here is a pass count against somebody else's suite, not a claim.
 | --- | --- | --- |
 | Core spec tests | [WebAssembly/testsuite][testsuite] + the proposal repos | 13 corpora, **711 generated case files, no skip list**; the 3.0 corpus runs on **both** engines. |
 | Component Model async | the official async `.wast` suites | **31 suites, 0 skipped, 0 failed.** |
-| Canonical ABI values | the official `test/values` suites | 7 suites, through `wasm-tools json-from-wast`. Four modules across three of them fail to instantiate — see below. |
+| Canonical ABI values | the official `test/values` suites | **7 suites, 0 skipped, 0 failed**, through `wasm-tools json-from-wast` — every vendored module instantiates. |
 | wasi-testsuite | [WebAssembly/wasi-testsuite][wasitest] | AssemblyScript, C and Rust, **no skipped tests**, on Linux, macOS **and** Windows, through the `wazy` CLI. |
 | Cross-proposal interaction | wasmtime's `tests/misc_testsuite` | 9 `.wast` vendored from wasmtime, beside 5 written here. |
 
@@ -187,7 +187,7 @@ go test ./internal/integration_test/spectest/...  # core spec corpora
 go test ./internal/component/...                  # component ABI + async .wast
 ```
 
-**The four Canonical ABI failures are named in the code, not hidden.** `wastKnownSkips` in `internal/component/instance/wast_conformance_test.go` pins `types.11`, `fused.22`, `fused.23` and `resources.14` with the composition gap each represents, and the harness fails if that set changes in *either* direction — a new entry is a regression, a stale one means a gap closed and the list must shrink. It exists because a silent skip once hid a bug ([#25](https://github.com/samyfodil/wazy/issues/25)). A separate workflow runs the Zig standard-library test binary, the Go `wasip1` standard-library tests on two Go versions and libsodium's suite on every push; a differential trace-oracle byte-compares the async runtime against the spec's reference implementation (`definitions.py`). One official async fixture is broken; the 31/31 above runs against a corrected copy, and the fix is filed upstream as [component-model#679][pr679].
+**The Canonical ABI skip list is empty, and that is enforced.** `wastKnownSkips` in `internal/component/instance/wast_conformance_test.go` is `map[string]map[string]string{}` — every vendored module of every suite instantiates — and the harness fails if that set changes in *either* direction: a new entry is a regression, a stale one means a gap closed and the list must shrink. The last four (`types.11`, `fused.22`, `fused.23`, `resources.14`) were all a nested component naming a definition an enclosing component owns; closing them meant modelling the core-module and component index spaces separately, linking each component to its outer one at decode time so an `alias outer` resolves, and masking flags to their label count on lift. The mechanism exists because a silent skip once hid a bug ([#25](https://github.com/samyfodil/wazy/issues/25)). A separate workflow runs the Zig standard-library test binary, the Go `wasip1` standard-library tests on two Go versions and libsodium's suite on every push; a differential trace-oracle byte-compares the async runtime against the spec's reference implementation (`definitions.py`). One official async fixture is broken; the 31/31 above runs against a corrected copy, and the fix is filed upstream as [component-model#679][pr679].
 
 ## Benchmarks
 
@@ -198,7 +198,7 @@ cd benchmarks/vs-wazero && go test -bench .    # Instantiate, HostCall, Compile,
 go test -bench . ./imports/wasip2/... ./internal/integration_test/bench/...
 ```
 
-Figures on this page were measured on a core-pinned i9-12900HK (amd64) unless noted; arm64 work is measured on an Apple M4. Method, per-optimization numbers and the optimizations **measured and rejected** (including one that made arm64 8% slower) are in [OPTIMIZATIONS.md](OPTIMIZATIONS.md).
+Figures on this page come from two machines, each stated where it matters: the head-to-head and cumulative numbers on an Apple M4, `memory.grow` and the interruptible-loop numbers on a core-pinned i9-12900HK. Both used `benchstat` over interleaved A/B runs with upstream wazero as a control in the same runs. Method, per-optimization numbers and the optimizations **measured and rejected** (including one that made arm64 8% slower) are in [OPTIMIZATIONS.md](OPTIMIZATIONS.md).
 
 ### Head to head with wazero
 
@@ -207,9 +207,9 @@ Measured against wazero in the same runs, on the same workloads:
 | Path | wazy vs wazero | What & why |
 | --- | :--: | --- |
 | **Instantiate** | **9.1x** | 1.724 µs vs 15.74 µs, on a 37 KB TinyGo module. |
-| **Interruptible loops** (`WithCloseOnContextDone`) | **12–13x**; +5% vs +75% overhead | The per-loop check is amortized, not a Go round-trip per iteration; tune with `WithInterruptCheckInterval`. Against `wazero@main`. |
+| **Interruptible loops** (`WithCloseOnContextDone`) | **12–13x**; +5% vs +75% overhead | On a loop calling a host function each iteration. The check is amortized, not a Go round-trip per iteration; a near-empty compute kernel is the worst case at 1.7–2.4x, tunable with `WithInterruptCheckInterval`. Against `wazero@main`. |
 | **Compiled execution** | memory-heavy code leads | `string_manipulation` −18%, `reverse_array` −14%, `base64` −12%, `fibonacci` a wash — the advantage tracks memory-access intensity, not arithmetic. |
-| **Host calls** (Go ↔ Wasm) | a tie | 48.5 ns here, 48.3 ns there, on the raw stack API both runtimes expose. The win is structural, not per-call: see below. |
+| **Host calls** (Go ↔ Wasm) | a tie | 47.8 ns here, 48.3 ns there, on the `WithGoModuleFunction` arm both runtimes implement the same way. The win is structural, not per-call: see below. |
 | **Cumulative** | geomean **−17.8%**, B/op **−22.9%** | Across `internal/integration_test/bench`, versus the wazero fork point, with upstream wazero as a control in the same runs — its arms stayed flat. |
 
 ### What the rewrite bought

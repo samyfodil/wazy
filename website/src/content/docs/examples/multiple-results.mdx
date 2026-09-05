@@ -1,0 +1,258 @@
+---
+title: Multiple results
+description: Return two values from a WebAssembly function and from a Go host function, using result offsets and multi-value side by side.
+sidebar:
+  order: 4
+---
+
+import { Steps, FileTree } from '@astrojs/starlight/components';
+
+A function that reports an age and an error code has two things to say and one place to put them. This example says both three times over: once by writing the second value into linear memory at an address the caller chose, once with a WebAssembly function that genuinely returns two values, and once with a Go host function that does the same across an import. All three modules export the same `call_get_age`, and all three print 37.
+
+## Run it
+
+```bash
+$ cd examples/multiple-results
+$ go run multiple-results.go
+result-offset/wasm: age=37
+multi-value/wasm: age=37
+multi-value/imported_host: age=37
+```
+
+The number is the same every time. What changes down the three lines is only the module name, and behind it the technique that produced the 37.
+
+<FileTree>
+- examples/multiple-results
+  - README.md
+  - multiple-results.go
+  - multiple-results_test.go
+  - testdata
+    - result_offset.wat
+    - result_offset.wasm
+    - multi_value.wat
+    - multi_value.wasm
+    - multi_value_imported.wat
+    - multi_value_imported.wasm
+</FileTree>
+
+## Writing the second result into memory
+
+The portable technique gives up on returning the second value at all. `get_age` takes an `i32` parameter that is not an input: it is an address, and the function stores the age there. What comes back through the result slot is only the errno.
+
+```wat title="examples/multiple-results/testdata/result_offset.wat" collapse={1-6} {13-18,24-31}
+;; result-offset/wasm defines Wasm functions that illustrate multiple results
+;; using a technique compatible with any WebAssembly 1.0 runtime.
+;;
+;; To return a value in WASM written to a result parameter, you have to define
+;; memory and pass a location to write the result. At the end of your function,
+;; you load that location.
+(module $result-offset/wasm
+  ;; To use result parameters, we need scratch memory. Allocate the least
+  ;; possible: 1 page (64KB).
+  (memory 1 1)
+
+  ;; get_age returns a result, while a second result is written to memory.
+  (func $get_age (param $result_offset.age i32) (result (;errno;) i32)
+    local.get 0   ;; stack = [$result_offset.age]
+    i64.const 37  ;; stack = [$result_offset.age, 37]
+    i64.store     ;; stack = []
+    i32.const 0   ;; stack = [0]
+  )
+
+  ;; Now, define a function that shows the Wasm mechanics returning something
+  ;; written to a result parameter.
+  ;; The caller provides a memory offset to the callee, so that it knows where
+  ;; to write the second result.
+  (func (export "call_get_age") (result i64)
+    i32.const 8   ;; stack = [8] arbitrary $result_offset.age param to get_age
+    call $get_age ;; stack = [errno] result of get_age
+    drop          ;; stack = []
+
+    i32.const 8   ;; stack = [8] same value as the $result_offset.age parameter
+    i64.load      ;; stack = [age]
+  )
+)
+```
+
+Read what the second result costs. The module has to declare a memory it otherwise has no use for — `(memory 1 1)` is one page, 64 KB, the least it can allocate and still have somewhere to write. The caller has to pick an address, pass it down, and load it back afterwards, and both halves have to write the same 8. Nothing enforces that agreement; the store and the load are separate instructions in separate functions.
+
+The payoff is that this needs no feature beyond WebAssembly 1.0, and it is not a curiosity. It is the shape of the entire WASI 0.1 ABI: every `*_get` in `wasi_snapshot_preview1` returns an errno and writes its payload to an offset the guest handed over. Implement those host functions and you write this pattern whether you like it or not — see [Reading a file with WASI 0.1](../wasi/).
+
+## Returning two values outright
+
+With the multi-value feature, the function type has two results and the value stack carries both.
+
+```wat title="examples/multiple-results/testdata/multi_value.wat" collapse={1-2} {6-9}
+;; multiValueWasmFunctions defines Wasm functions that illustrate multiple
+;; results using the "multiple-results" feature.
+(module $multi-value/wasm
+
+  ;; Define a function that returns two results
+  (func $get_age (result (;age;) i64 (;errno;) i32)
+    i64.const 37  ;; stack = [37]
+    i32.const 0   ;; stack = [37, 0]
+  )
+
+  ;; Now, define a function that returns only the first result.
+  (func (export "call_get_age") (result i64)
+    call $get_age ;; stack = [37, errno] result of get_age
+    drop          ;; stack = [37]
+  )
+)
+```
+
+The module declares no memory, because it needs none. `call_get_age` drops the errno with a single `drop`, where the offset version had to remember an address and issue a load.
+
+This depends on `api.CoreFeatureMultiValue`, which is part of `api.CoreFeaturesV2` and therefore on by default in wazy — `NewRuntime` uses `NewRuntimeConfig`, whose `enabledFeatures` is `api.CoreFeaturesV2`. Multi-value also changes block types: `block`, `loop` and `if` can take an arbitrary function type once it is enabled.
+
+## The same signature, imported from Go
+
+The third module declares `get_age` as an import rather than defining it, and is otherwise identical to the second.
+
+```wat title="examples/multiple-results/testdata/multi_value_imported.wat" collapse={1-2} {5}
+;; multiValueWasmFunctions defines Wasm functions that illustrate multiple
+;; results using the "multiple-results" feature.
+(module $multi-value/imported_host
+  ;; Imports the `get_age` function from `multi-value/host` defined in the host.
+  (func $get_age (import "multi-value/host" "get_age") (result (;age;) i64 (;errno;) i32))
+
+  ;; Now, define a function that returns only the first result.
+  (func (export "call_get_age") (result i64)
+    call $get_age ;; stack = [37, errno] result of get_age
+    drop          ;; stack = [37]
+  )
+)
+```
+
+All three `.wasm` files are committed, and the Go file records how each was produced:
+
+```go title="examples/multiple-results/multiple-results.go"
+// resultOffsetWasm was generated by the following:
+//
+//	cd testdata; wat2wasm --debug-names result_offset.wat
+//
+//go:embed testdata/result_offset.wasm
+var resultOffsetWasm []byte
+```
+
+To change one of them:
+
+<Steps>
+
+1. Edit the `.wat` in `testdata`.
+
+2. Rebuild the binary next to it:
+
+   ```bash
+   cd testdata; wat2wasm --debug-names multi_value.wat
+   ```
+
+3. Run the example again:
+
+   ```bash
+   go run multiple-results.go
+   ```
+
+</Steps>
+
+## The Go half
+
+Instantiation is unremarkable except for the second runtime, which exists for a reason that has expired.
+
+```go title="examples/multiple-results/multiple-results.go" {11-12}
+	// Create a new WebAssembly Runtime.
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx) // This closes everything this Runtime created.
+
+	// Add a module that uses offset parameters for multiple results defined in WebAssembly.
+	wasm, err := resultOffsetWasmFunctions(ctx, r)
+	if err != nil {
+		log.Panicln(err)
+	}
+
+	// wazy enables WebAssembly Core Specification 2.0 features by default.
+	runtimeWithMultiValue := wazy.NewRuntime(ctx)
+
+	// Add a module that uses multiple results values
+
+	// ... defined in WebAssembly.
+	wasmWithMultiValue, err := multiValueWasmFunctions(ctx, runtimeWithMultiValue)
+	if err != nil {
+		log.Panicln(err)
+	}
+
+	// ... defined in Go.
+	multiValueFromImportedHost, err := multiValueFromImportedHostWasmFunctions(ctx, runtimeWithMultiValue)
+	if err != nil {
+		log.Panicln(err)
+	}
+```
+
+Both `NewRuntime` calls produce the same configuration. The split dates from when multi-value had to be switched on explicitly; today the only thing separating `r` from `runtimeWithMultiValue` is the name.
+
+The host function is where the technique stops being about WebAssembly and starts being about the Go API:
+
+```go title="examples/multiple-results/multiple-results.go" {6-9}
+func multiValueFromImportedHostWasmFunctions(ctx context.Context, r wazy.Runtime) (api.Module, error) {
+	// Instantiate the host module with the exported `get_age` function which returns multiple results.
+	if _, err := r.NewHostModuleBuilder("multi-value/host").
+		// Define a function that returns two results
+		NewFunctionBuilder().
+		WithGoFunction(api.GoFunc(func(_ context.Context, stack []uint64) {
+			stack[0] = 37 // age
+			stack[1] = 0  // errno
+		}), nil, []api.ValueType{api.ValueTypeI64, api.ValueTypeI32}).
+		Export("get_age").
+		Instantiate(ctx); err != nil {
+		return nil, err
+	}
+	// Then, creates the module which imports the `get_age` function from the `multi-value/host` module above.
+	return r.Instantiate(ctx, multiValueFromImportedHostWasm)
+}
+```
+
+The raw stack behaves as [Calling Go from Wasm](../calling-go/) described it, with one wrinkle this signature brings out: the function declares no parameters, so the slice it receives exists only to carry results back. Write both, starting at index zero. The slice is not yours after the function returns.
+
+The two `api.ValueType` values are the signature, and they have to line up with the `(result i64 i32)` in the guest's import. The builder registers the host module under the name `multi-value/host`, which is the module string in that same import.
+
+Calling is where the shapes converge again:
+
+```go title="examples/multiple-results/multiple-results.go" {2,9}
+	// Call the function from each module and print the results to the console.
+	for _, mod := range []api.Module{wasm, wasmWithMultiValue, multiValueFromImportedHost} {
+		getAge := mod.ExportedFunction("call_get_age")
+		results, err := getAge.Call(ctx)
+		if err != nil {
+			log.Panicln(err)
+		}
+
+		fmt.Printf("%s: age=%d\n", mod.Name(), results[0])
+	}
+```
+
+The loop treats the three modules as interchangeable, because they are: each exports `call_get_age` with one `i64` result, and the technique used behind it does not reach the caller. `Call` always returns a slice, one element per declared result, which is one here. `get_age` would hand back two, but none of the three modules export it: each keeps the pair private and gives the caller a single `i64`.
+
+## Which one to write today
+
+Reach for multi-value. wazy enables it by default, it costs no memory, no agreed-on address and no load, and it is the only one of the two that survives a refactor without both halves being edited in step. It is not yet a W3C recommendation, but it is in the 2.0 draft and runtimes support it broadly.
+
+Write result offsets when the choice is not yours:
+
+- You are targeting a runtime pinned to WebAssembly 1.0, or a wazy runtime deliberately configured with `api.CoreFeaturesV1`.
+- You are implementing an ABI that already has this shape. WASI 0.1 is the big one, and none of it is negotiable.
+
+If what you actually want to return is not a pair of numbers — a string, a list, a record, a fallible result — neither technique is the answer. That is what the Component Model types are for; see the [components guide](../../guides/components/), where `result` and `option` cross the boundary as Go values.
+
+## Signatures, offsets, and the raw-stack builder
+
+**Two results means the raw-stack builder.** The typed helpers `HostFunc0` through `HostFunc16` map one Go return value to one WebAssembly result, so the moment you need a second one you drop to `WithGoFunction` and write the `api.ValueType` slices by hand. That is the trade the example is making, not a stylistic choice.
+
+**The signature is checked, the offsets are not.** A mismatch between the declared host types and the guest's import fails at instantiation with `signature mismatch`. A wrong module name fails there too, earlier and with a different message: `module[multi-value/host] not instantiated`. The result-offset technique has no such check: the caller's `i32.const 8` and the callee's `i64.store` agree only because someone kept them in sync.
+
+**Multi-value is guarded on both sides.** On a runtime configured with `api.CoreFeaturesV1`, decoding `multi_value.wasm` fails, and so does building the host function — `Instantiate` on the host module builder returns `multiple result types invalid as feature "multi-value" is disabled` before any guest is involved.
+
+**Offset 8 is a hardcoded address with nothing behind it.** The module owns its whole page and no allocator runs, so the demo can put a value anywhere. A real ABI cannot: the host has to ask the guest's allocator for the space it writes into, which is the subject of [Strings across the boundary](../strings/).
+
+## Where the pattern reappears
+
+[Reading a file with WASI 0.1](../wasi/) puts the result-offset technique to work at scale, since that is what the whole WASI 0.1 ABI is built from. For the other shapes a host function can take — the typed helpers, module access, memory — read the [host functions guide](../../guides/host-functions/).

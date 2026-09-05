@@ -1,0 +1,664 @@
+---
+title: Building a component
+description: Produce a WASI 0.2 component from Rust, TinyGo, Go, C, JavaScript or Python, with the real toolchain commands for each.
+sidebar:
+  order: 12
+---
+
+import { Tabs, TabItem, Steps, FileTree, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+One exported function — `greet(name: string) -> string` — written six times, in Rust, TinyGo,
+standard Go, C, JavaScript and Python, against a single `.wit` file and built six different ways.
+That is `examples/componentize`. The Go code that calls the result is identical for all six and
+cannot tell which toolchain produced the binary, so this page is the part that happens before wazy
+is involved at all: turning a library you already have into a `.wasm` a host can load.
+
+```rust title="examples/componentize/rust/greet.wit"
+package wazy:examples@0.1.0;
+
+world greeter {
+  export greet: func(name: string) -> string;
+}
+```
+
+That file is byte-identical in all six directories. It is the whole contract.
+
+## Run it
+
+All six components are committed, so you can see the contract come back out of a binary before
+installing anything. The C one is 13 KB. From `examples/componentize/c`:
+
+```bash
+wasm-tools component wit greet.wasm
+```
+
+```rust
+world root {
+  export greet: func(name: string) -> string;
+}
+```
+
+Handing that to wazy is two lines, whichever language built it:
+
+```go
+inst, err := component.Instantiate(ctx, r, greetWasm, wasip2.With(wasip2.Config{})...)
+out, err := inst.Call(ctx, "greet", "wazy")   // "Hello, wazy! (from TinyGo)"
+```
+
+`greet` is exported by the world rather than by an interface, so there is no interface prefix and no
+`CallExport` — the two-argument form [Components, threads and async](../components/) needed for
+`component:adder/calc`. That page is the host program in full; this one is the other half of it.
+
+## Pick a language
+
+| Language | Toolchain | `greet.wasm` | Needs WASI 0.2 |
+| --- | --- | --- | --- |
+| Rust | `cargo-component` 0.21.1 | 46 KB | yes |
+| TinyGo | TinyGo 0.42.0 + `wasm-tools` | 470 KB | yes |
+| Go | go1.26 + `wasm-tools` + preview1 adapter | 1.8 MB | yes |
+| C | wasi-sdk 34.0 + `wit-bindgen` 0.47.0 | 13 KB | no |
+| JavaScript | `jco` 1.32.1 | 12 MB | yes |
+| Python | `componentize-py` 0.25.0 | 18 MB | yes, plus `extended-const` |
+
+The built `.wasm` is in the repo for every one of them, so the commands in each tab are for changing
+a guest, not for getting one.
+
+<FileTree>
+- examples/componentize
+  - c
+    - greet.wit
+    - greet.c
+  - go
+    - greet.wit
+    - main.go the Canonical ABI, written out by hand
+  - javascript
+    - greet.wit
+    - greet.js
+  - python
+    - greet.wit
+    - app.py
+  - rust
+    - Cargo.toml
+    - greet.wit
+    - src
+      - lib.rs
+  - tinygo
+    - build.wit a build-only world, not the contract
+    - gen/ generated bindings, committed
+    - greet.wit
+    - main.go
+</FileTree>
+
+## Six toolchains
+
+<Tabs>
+<TabItem label="Rust">
+
+The shortest path of the six, and the one with the least between your code and the component.
+
+```bash
+rustup target add wasm32-wasip2
+cargo install cargo-component --locked
+```
+
+```bash
+cargo component build --release --target wasm32-wasip2
+cp target/wasm32-wasip2/release/greet.wasm greet.wasm
+```
+
+```rust title="examples/componentize/rust/src/lib.rs"
+#[allow(warnings)]
+mod bindings;
+
+use bindings::Guest;
+
+struct Component;
+
+impl Guest for Component {
+    fn greet(name: String) -> String {
+        format!("Hello, {name}! (from Rust)")
+    }
+}
+
+bindings::export!(Component with_types_in bindings);
+```
+
+`cargo component` regenerates `src/bindings.rs` from `greet.wit` on every build, so the generated
+bindings are not committed. It finds the WIT through the manifest, not a command-line flag:
+
+```toml title="examples/componentize/rust/Cargo.toml" {10-11,18-23}
+[package]
+name = "greet"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = "s"
+strip = true
+lto = true
+
+[package.metadata.component]
+package = "wazy:examples"
+
+[package.metadata.component.target]
+path = "greet.wit"
+world = "greeter"
+```
+
+:::caution[Two components come out, one is a decoy]
+cargo-component 0.21.1 also builds its default `wasm32-wasip1` target on the side, and its closing
+line reads `Creating component target/wasm32-wasip1/release/greet.wasm`. Ignore it — the component
+you want is the `wasm32-wasip2` one named in the `cp` above.
+:::
+
+`greet` itself touches no WASI, but Rust's `std` links its panic and stdio machinery unconditionally,
+so the component still declares `wasi:cli`, `wasi:io`, `wasi:clocks` and `wasi:filesystem` imports.
+Instantiate it with `wasip2.With(wasip2.Config{})`.
+
+</TabItem>
+<TabItem label="TinyGo">
+
+TinyGo has had a component target since 0.33 and shells out to `wasm-tools`, which must be on `PATH`.
+
+| tool | version used | notes |
+| --- | --- | --- |
+| [Go](https://go.dev/dl/) | 1.26.0 | TinyGo compiles with the host Go toolchain |
+| [TinyGo](https://github.com/tinygo-org/tinygo/releases) | 0.42.0 | `-target=wasip2` needs 0.33+ |
+| [`wasm-tools`](https://github.com/bytecodealliance/wasm-tools) | 1.253.0 | must be on `PATH`; TinyGo shells out to it for `component embed` / `component new` |
+| `wit-bindgen-go` | v0.7.0 | only to regenerate `gen/` |
+
+```bash
+# TinyGo (single binary tarball, no build step)
+curl -LO https://github.com/tinygo-org/tinygo/releases/download/v0.42.0/tinygo0.42.0.linux-amd64.tar.gz
+tar xzf tinygo0.42.0.linux-amd64.tar.gz && export PATH="$PWD/tinygo/bin:$PATH"
+
+# wasm-tools
+cargo install --locked wasm-tools@1.253.0
+```
+
+The build assembles a WIT package first: the contract, the build world, and the WASI 0.2 dependency
+tree that ships inside TinyGo.
+
+```bash
+# The WIT package TinyGo compiles against: the contract, the build world, and
+# the WASI 0.2 dependency tree that ships inside TinyGo.
+WIT="$(mktemp -d)"
+cp greet.wit build.wit "$WIT/"
+mkdir -p "$WIT/deps/cli"
+cp "$(tinygo env TINYGOROOT)"/lib/wasi-cli/wit/*.wit "$WIT/deps/cli/"
+cp -r "$(tinygo env TINYGOROOT)"/lib/wasi-cli/wit/deps/* "$WIT/deps/"
+
+tinygo build -target=wasip2 --wit-package "$WIT" --wit-world greeter-tinygo -o greet.wasm .
+rm -rf "$WIT"
+```
+
+The guest is one closure. Everything under `gen/` comes from `wit-bindgen-go` and is committed, so
+the component builds without that step:
+
+```go title="examples/componentize/tinygo/main.go" {10-14}
+// Command greet is the TinyGo implementation of the `wazy:examples/greeter`
+// world: it exports one function, `greet(name: string) -> string`.
+//
+// The bindings under gen/ are generated from greet.wit by wit-bindgen-go; all
+// this file does is fill in the exported function. See README.md to rebuild.
+package main
+
+import greeter "github.com/samyfodil/wazy/examples/componentize/tinygo/gen/wazy/examples/greeter"
+
+func init() {
+	greeter.Exports.Greet = func(name string) string {
+		return "Hello, " + name + "! (from TinyGo)"
+	}
+}
+
+// main is required by the Go toolchain but never runs: a component has no
+// `_start`, only the exports it declares in its world.
+func main() {}
+```
+
+Regenerating `gen/` is only needed if `greet.wit` changes:
+
+```bash
+go install go.bytecodealliance.org/cmd/wit-bindgen-go@v0.7.0
+wit-bindgen-go generate --world greeter --out gen \
+  --package-root github.com/samyfodil/wazy/examples/componentize/tinygo/gen ./greet.wit
+```
+
+Pin `go.bytecodealliance.org/cm` to v0.3.0, which is what wit-bindgen-go v0.7.0 generates against.
+Do not `go get ...@latest`: v0.7.0 of that module no longer contains the root `cm` package.
+
+The `--wit-world greeter-tinygo` is not a typo — see [the build-world section](#a-build-world-is-not-the-contract)
+below.
+
+</TabItem>
+<TabItem label="Go">
+
+Standard Go has no component target and no WIT bindings generator, so this is the longest path of the
+six and the most instructive to read. A wasip1 *reactor* core module comes out of `go build`, and
+`wasm-tools` wraps it in a component against `greet.wit`.
+
+Install Go 1.24+ (`//go:wasmexport` and `-buildmode=c-shared` for `wasip1` landed there; built here
+with go1.26.0), `wasm-tools` (`cargo install wasm-tools`, 1.253.0 here), and the preview1 reactor
+adapter, which maps the `wasi_snapshot_preview1` imports the Go runtime emits onto WASI 0.2:
+
+```bash
+curl -LO https://github.com/bytecodealliance/wasmtime/releases/download/v48.0.1/wasi_snapshot_preview1.reactor.wasm
+```
+
+<Steps>
+
+1. Compile the core module. `-buildmode=c-shared` is what makes it a reactor: the module exports
+   `_initialize` instead of `_start`, so it can sit still and be called. A plain `go build` produces
+   a command, which has nothing to call.
+
+   ```bash
+   GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o core.wasm .
+   ```
+
+2. Staple the contract onto it.
+
+   ```bash
+   wasm-tools component embed greet.wit core.wasm -o embedded.wasm
+   ```
+
+3. Wrap it, translating the preview1 imports on the way.
+
+   ```bash
+   wasm-tools component new embedded.wasm \
+       --adapt wasi_snapshot_preview1=wasi_snapshot_preview1.reactor.wasm \
+       -o greet.wasm
+   ```
+
+</Steps>
+
+Without a bindings generator, the Canonical ABI is written out by hand — three core exports, and two
+details that are load-bearing:
+
+```go title="examples/componentize/go/main.go" collapse={1-22,35-62} {24-33,64-92}
+// The `greeter` world of greet.wit, in standard Go.
+//
+// Standard Go has no WIT bindings generator, so the Canonical ABI that
+// `greet: func(name: string) -> string` lowers to is written out here by hand.
+// It comes to three core exports:
+//
+//	greet(ptr, len i32) -> i32   the name arrives as (pointer, length) into our
+//	                             memory; the answer goes back as the address of
+//	                             a [pointer, length] pair
+//	cabi_realloc(...)   -> i32   how the host allocates inside our memory
+//	cabi_post_greet(i32)         runs once the host has copied the answer out
+//
+// `wasm-tools component embed` staples greet.wit onto the core module, and
+// `wasm-tools component new` uses it to wrap those three functions into the
+// typed component export a host calls as plain greet("wazy"). See README.md.
+package main
+
+import "unsafe"
+
+// main never runs. -buildmode=c-shared makes this a reactor: the module exports
+// `_initialize` instead of `_start`. Go still needs a main to link.
+func main() {}
+
+// arena is the only memory the host is given pointers into, and it deliberately
+// is not the Go heap. The preview1 adapter calls cabi_realloc from inside a WASI
+// call the Go runtime is already making, and allocating there re-enters the
+// runtime on its own system stack -- "fatal: systemstack called from unexpected
+// goroutine", which surfaces as an unreadable trap during _initialize. Bumping a
+// pointer through a plain array touches no runtime machinery at all.
+//
+// The adapter's own state is the first 128 KiB of it; the rest is one call's
+// worth of strings, handed back by cabi_post_greet each time.
+var arena [192 << 10]byte
+
+// base is the linear-memory address of arena[0]. Every pointer the host holds
+// came out of alloc, so a host pointer is always base plus an index into arena
+// -- which is why nothing below has to do pointer arithmetic.
+func base() uint32 { return uint32(uintptr(unsafe.Pointer(&arena[0]))) }
+
+var (
+	next  uint32 // bytes of arena handed out
+	floor uint32 // where next settles once the runtime and adapter have started
+)
+
+// init runs at the tail of _initialize, by which point the adapter has taken its
+// one permanent allocation. Everything above this mark belongs to a single call,
+// and cabi_post_greet gives it back.
+func init() { floor = next }
+
+func alloc(size, align uint32) uint32 {
+	addr := (base() + next + align - 1) &^ (align - 1)
+	if next = addr - base() + size; next > uint32(len(arena)) {
+		panic("greeter: arena exhausted")
+	}
+	return addr
+}
+
+// at views size bytes of linear memory at a host pointer.
+func at(ptr, size uint32) []byte {
+	off := ptr - base()
+	return arena[off : off+size]
+}
+
+//go:wasmexport cabi_realloc
+func cabiRealloc(oldPtr, oldSize, align, newSize uint32) uint32 {
+	if align == 0 {
+		align = 1
+	}
+	ptr := alloc(newSize, align)
+	if oldSize > 0 {
+		copy(at(ptr, newSize), at(oldPtr, oldSize))
+	}
+	return ptr
+}
+
+// ret is greet's return area: a string comes back as the pair
+// [pointer, length], and greet's i32 result is the address of that pair.
+var ret [2]uint32
+
+//go:wasmexport greet
+func greet(ptr, size uint32) uint32 {
+	answer := "Hello, " + string(at(ptr, size)) + "! (from Go)"
+
+	out := alloc(uint32(len(answer)), 1)
+	copy(at(out, uint32(len(answer))), answer)
+
+	ret[0], ret[1] = out, uint32(len(answer))
+	return uint32(uintptr(unsafe.Pointer(&ret)))
+}
+
+//go:wasmexport cabi_post_greet
+func cabiPostGreet(uint32) { next = floor }
+```
+
+`cabi_realloc` allocates from a plain array, never the Go heap. The adapter calls it from inside a
+WASI call the Go runtime is already making, and allocating there re-enters the runtime on its own
+system stack. The failure is a bare `out of bounds memory access` during `_initialize`, with a stack
+full of `runtime.badsystemstack`. That array must also clear 128 KiB, which is what the adapter's own
+state takes.
+
+The component imports WASI 0.2 not because the greeting needs it but because a standard-Go binary
+carries the Go runtime, which reads the clock and the environment on the way up. That runtime is also
+why `greet.wasm` is ~1.8 MB.
+
+</TabItem>
+<TabItem label="C">
+
+The only one of the six that produces a component with no imports at all, and the smallest at 13 KB.
+The stock distro clang cannot build it — it has no wasm sysroot.
+
+```bash
+curl -L https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-x86_64-linux.tar.gz | tar xz
+export WASI_SDK=$PWD/wasi-sdk-34.0-x86_64-linux
+```
+
+```bash
+cargo install wit-bindgen-cli --version 0.47.0
+```
+
+```bash
+wit-bindgen c --out-dir build greet.wit
+$WASI_SDK/bin/clang --target=wasm32-wasip2 -O2 -mexec-model=reactor -Wl,--strip-all \
+  -Ibuild greet.c build/greeter.c build/greeter_component_type.o -o greet.wasm
+```
+
+That is the whole build — there is no separate `wasm-tools component new` step. wasi-sdk 34 links
+through `wasm-component-ld`, so `--target=wasm32-wasip2` emits a component directly. Two flags carry
+weight:
+
+- `-mexec-model=reactor` builds a *library* component. Without it clang links a command: the
+  component grows to 135K and picks up a `wasi:cli/run` export plus `wasi:cli/environment` and
+  `wasi:cli/exit` imports it never uses.
+- `-Wl,--strip-all` drops debug info and names, 51K to 13K.
+
+`greet.c` defines exactly one function; `wit-bindgen` generates the canonical ABI glue around it,
+into a disposable `build/` directory.
+
+```c title="examples/componentize/c/greet.c" collapse={1-12} {31-36}
+// greet.c — the C guest for the `wazy:examples/greeter` world.
+//
+// Bindings are generated from greet.wit by `wit-bindgen c` (see README.md),
+// which produces greeter.h/greeter.c and declares the one function this file
+// has to define. Everything else — the canonical ABI lifting of the incoming
+// string, the return area, cabi_realloc, and the cabi_post_greet that frees
+// what we return — lives in that generated code.
+
+#include <stdlib.h>
+#include <string.h>
+
+#include "greeter.h"
+
+// A component-model `string` is a (ptr, len) pair in linear memory, NOT a
+// nul-terminated C string, so build the greeting with memcpy and lengths.
+//
+// The buffer handed back in `ret` is owned by the host after this returns:
+// the generated `cabi_post_greet` free()s it once the host has copied it out.
+void exports_greeter_greet(greeter_string_t *name, greeter_string_t *ret) {
+  static const char prefix[] = "Hello, ";
+  static const char suffix[] = "! (from C)";
+  const size_t plen = sizeof(prefix) - 1;
+  const size_t slen = sizeof(suffix) - 1;
+
+  const size_t len = plen + name->len + slen;
+  uint8_t *buf = malloc(len);
+  if (!buf) {
+    abort();
+  }
+
+  memcpy(buf, prefix, plen);
+  memcpy(buf + plen, name->ptr, name->len);
+  memcpy(buf + plen + name->len, suffix, slen);
+
+  ret->ptr = buf;
+  ret->len = len;
+}
+```
+
+A component-model `string` is a pointer and a length, not a nul-terminated C string. The returned
+buffer is `malloc`'d and handed to the host; the generated `cabi_post_greet` frees it after the host
+has copied it out.
+
+</TabItem>
+<TabItem label="JavaScript">
+
+The lightest toolchain to install and by far the heaviest output: `jco componentize` bundles
+StarlingMonkey/SpiderMonkey into the component.
+
+```bash
+npm i -g @bytecodealliance/jco @bytecodealliance/componentize-js @bytecodealliance/preview2-shim
+```
+
+`preview2-shim` is not optional with a **global** install: `componentize-js` resolves it as a
+sibling, and `npm i -g` of the first two alone leaves it missing, so `jco componentize` fails with:
+
+```
+Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@bytecodealliance/preview2-shim'
+```
+
+A local `npm i` in a project directory gets it as a transitive dependency and needs no extra package
+— but then `node_modules` lands next to your source.
+
+```bash
+jco componentize greet.js --wit greet.wit -o greet.wasm
+```
+
+```javascript title="examples/componentize/javascript/greet.js"
+// The `greeter` world exports one function, so this module exports one
+// function. jco maps the WIT kebab-case name to lowerCamelCase; `greet` is
+// already both.
+export function greet(name) {
+  return `Hello, ${name}! (from JavaScript)`;
+}
+```
+
+Built with node v23.11.1, npm 10.9.2, jco 1.32.1, componentize-js 0.22.0 and preview2-shim 0.23.0.
+
+The 12 MB is the JavaScript engine, not the program, and the size is flat: a real plugin costs the
+same 12 MB plus its own source. Two ways to trim it, both with trade-offs:
+
+- `jco componentize greet.js --wit greet.wit -d all -o greet.wasm` disables every WASI feature. The
+  result imports nothing and runs on wazy with no `wasip2` options at all, saving about 40 KB. Cheap,
+  but `console.log` is gone.
+- `--backend quickjs` swaps SpiderMonkey for QuickJS and drops the component to 1.5 MB. The example
+  README records that output failing to instantiate on wazy — see
+  [the last section](#where-a-toolchain-choice-reaches-the-host).
+
+</TabItem>
+<TabItem label="Python">
+
+`componentize-py` embeds a whole CPython interpreter, which makes this the largest artifact of the
+six at about 18 MB. The install is a pip package and nothing else.
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install componentize-py==0.25.0
+```
+
+```bash
+.venv/bin/componentize-py -d greet.wit -w greeter componentize app -o greet.wasm
+```
+
+`-w greeter` is the world in `greet.wit`; `app` is the Python module (`app.py`) implementing it. The
+module name must differ from the world name — componentize-py generates a module for the world, and
+Python cannot load two top-level modules with the same name.
+
+```python title="examples/componentize/python/app.py"
+"""The `wazy:examples/greeter` world, in Python.
+
+componentize-py generates the `wit_world` module from greet.wit; implementing
+its `WitWorld` protocol is the whole guest.
+"""
+
+import wit_world
+
+
+class WitWorld(wit_world.WitWorld):
+    def greet(self, name: str) -> str:
+        return f"Hello, {name}! (from Python)"
+```
+
+Built with Python 3.12.3 and componentize-py 0.25.0. This is the one guest that needs a non-default
+runtime configuration on the host side; the next section has it.
+
+</TabItem>
+</Tabs>
+
+## What the host has to supply
+
+For five of the six, nothing beyond WASI 0.2 with a zero-value config:
+
+```go
+inst, err := component.Instantiate(ctx, r, greetWasm, wasip2.With(wasip2.Config{})...)
+```
+
+`wasip2.Config{}` grants no stdio, no filesystem and no sockets. That is enough for a language
+runtime to finish starting up, and nothing more — the guest cannot read a file you did not mount.
+The C component needs even that not at all, because it imports nothing.
+
+The CPython guest additionally needs a Core WebAssembly feature the default set leaves off:
+
+```go
+r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfig().
+    WithCoreFeatures(api.CoreFeaturesV2|api.CoreFeatureExtendedConst))
+
+inst, err := component.Instantiate(ctx, r, greetWasm, wasip2.With(wasip2.Config{})...)
+```
+
+componentize-py's CPython build initializes a global with `i32.add`, which the default
+`api.CoreFeaturesV2` rejects. `api.CoreFeaturesV3` works too.
+
+## What separates the six
+
+### Nearly every component imports WASI, whatever the code does
+
+C is the exception. Rust's `std` links panic and stdio machinery unconditionally. TinyGo's `syscall`
+package initialises itself on every wasip2 binary, reading the environment, the initial working
+directory and the preopened directories — about 33 WASI 0.2 functions no matter what the guest does.
+A standard-Go binary carries the Go runtime, which reads the clock and the environment on the way up.
+The JavaScript engine reaches for `wasi:clocks`, `wasi:random` and stdio while initialising, and traps
+on the first unresolved import without them: `wasi:clocks/monotonic-clock.now not implemented (trap
+stub)`. CPython calls `wasi:cli/environment` during interpreter start-up, before it ever reaches
+`greet`.
+
+Assume you need `wasip2.With(wasip2.Config{})` and check with `wasm-tools component wit greet.wasm`
+if you want to know exactly what a binary asks for.
+
+### Size is the language runtime, not your program
+
+Thirteen kilobytes to eighteen megabytes, for one function returning a string. Nothing in the guest source
+explains the range: C and Rust ship your code, TinyGo and Go ship a small runtime with it, and jco and
+componentize-py ship an entire language implementation. That cost is paid once — a real JavaScript
+plugin is the same 12 MB plus its own source — and it does not reach the host, which calls all six the
+same way.
+
+### A build world is not the contract
+
+TinyGo's directory has a second `.wit` file, and it is not a duplicate:
+
+```rust title="examples/componentize/tinygo/build.wit" {11-14}
+// Build-only world. NOT part of the contract: greet.wit is.
+//
+// TinyGo's runtime links a fixed slice of WASI 0.2 into every wasip2 binary
+// (package syscall's init reads the environment and the preopened
+// directories), so the world handed to `wasm-tools component embed` has to
+// declare those imports or `component new` rejects the module. `greeter` here
+// is the world from greet.wit -- same package, so it is included by name.
+//
+// The component this produces still exports exactly `greet: func(name:
+// string) -> string`; run `wasm-tools component wit greet.wasm` to see it.
+world greeter-tinygo {
+  include greeter;
+  include wasi:cli/imports@0.2.0;
+}
+```
+
+`wasm-tools component new` refuses a core module whose imports the world does not declare, and no
+build flag (`-gc=leaking -scheduler=none -panic=trap -no-debug`) removes TinyGo's. So the world you
+*build* against gains `wasi:cli/imports`, while `greet.wit` — the file a consumer reads — stays
+byte-identical to the other five. The component still exports exactly `greet`.
+
+### Where a toolchain choice reaches the host
+
+componentize-py needs `extended-const`, above — the only host-side setting any of the six asks for
+beyond WASI 0.2. The other place the choice of toolchain shows up is `jco --backend quickjs`, the
+1.5 MB option, which is not what the committed `greet.wasm` was built with.
+`examples/componentize/javascript/README.md` records that output failing to instantiate on an
+instance-sort instantiate-arg: the QuickJS backend emits a `wac`-composed component whose
+component-instance index space is mostly imported and aliased instances rather than nested
+instantiations. wazy resolves both of those now — it is the same shape as every pair in
+[Composing components](../composing-components/) — so that note predates the current composition
+path and has not been re-checked against it. The default StarlingMonkey backend, which the build
+command above uses, is unaffected either way.
+
+## One component, then two
+
+Once you can build one component, the interesting move is building two and wiring them together
+without a host in between.
+
+<CardGrid>
+  <LinkCard
+    title="Composing components"
+    description="Wire a provider and a consumer written in different languages into one artifact."
+    href="../composing-components/"
+  />
+  <LinkCard
+    title="Components guide"
+    description="The reference version: worlds, imports, exports, and what wazy does with them."
+    href="../../guides/components/"
+  />
+  <LinkCard
+    title="Your own WIT interface"
+    description="Design a contract with a resource, an option and a result, then implement the host half in Go."
+    href="../custom-wit/"
+  />
+  <LinkCard
+    title="examples/componentize"
+    description="The six directories, each with its own README and toolchain versions."
+    href="https://github.com/samyfodil/wazy/tree/main/examples/componentize"
+  />
+</CardGrid>

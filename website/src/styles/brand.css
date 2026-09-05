@@ -1,0 +1,725 @@
+/*
+ * wazy — palette, type and page furniture.
+ *
+ * Three rules drive the colour system:
+ *   1. Everything is derived from the mark's indigo→cyan ramp, so the ground is
+ *      indigo-black rather than neutral black.
+ *   2. Cyan is a *state*, never decoration. It marks a capability that has been
+ *      granted, or a number that was measured. Denied and unmeasured stay grey.
+ *   3. Every colour that carries text clears WCAG AA (4.5:1) against every
+ *      surface it is used on — ground, panel and the cyan glow alike. The
+ *      boundary of an interactive control clears 3:1. Ratios are in the
+ *      comments beside the tokens that were chosen for them.
+ */
+
+/* ---------------------------------------------------------------- palette */
+
+:root {
+	--sl-color-white: #f4f6ff;
+	--sl-color-gray-1: #dde1f2;
+	--sl-color-gray-2: #b4bad8;
+	--sl-color-gray-3: #868dae;
+	--sl-color-gray-4: #545b7c;
+	--sl-color-gray-5: #333955;
+	--sl-color-gray-6: #1a1f35;
+	--sl-color-gray-7: #12162a;
+	--sl-color-black: #0a0c18;
+
+	--sl-color-accent-low: #1b2050;
+	--sl-color-accent: #6e7bff;
+	--sl-color-accent-high: #c2c8ff;
+
+	--wz-cyan: #35d6d0;
+	--wz-indigo: #7c86ff;
+	/* The grey that denied and unmeasured states are written in. Its own token
+	   rather than --sl-color-gray-4 (2.80:1 on the panel, and Starlight maps
+	   that value into its own chrome): 4.90:1 on the ground, 4.67:1 on the
+	   panel, 4.50:1 on gray-7. */
+	--wz-denied: #767ea3;
+	/* The boundary of an outlined control, 3.29:1 on the ground. Not
+	   --sl-color-gray-5, which Starlight maps to --sl-color-hairline-light. */
+	--wz-control-edge: #5a628a;
+	--wz-rule: #232842;
+	--wz-panel: #0e1224;
+	--wz-panel-edge: #232842;
+	--wz-glow: rgba(53, 214, 208, 0.14);
+}
+
+:root[data-theme='light'] {
+	--sl-color-white: #0a0c18;
+	--sl-color-gray-1: #14182c;
+	--sl-color-gray-2: #3a4160;
+	--sl-color-gray-3: #5c6484;
+	--sl-color-gray-4: #8a91ac;
+	--sl-color-gray-5: #c7cbdd;
+	--sl-color-gray-6: #e7eaf4;
+	--sl-color-gray-7: #f2f4fa;
+	--sl-color-black: #f6f7fc;
+
+	--sl-color-accent-low: #dcdffd;
+	--sl-color-accent: #3a41d6;
+	--sl-color-accent-high: #1a1e6b;
+
+	/* Darker than the dark theme's cyan by design: on white the lighter tone was
+	   3.66:1. This is 5.44:1 on the ground, 5.82:1 on the panel, 5.21:1 on the
+	   glow, and the hue moves too little to break the indigo→cyan ramp. */
+	--wz-cyan: #07707a;
+	--wz-indigo: #3a41d6;
+	--wz-denied: #656d8c; /* 4.76:1 ground, 5.10:1 panel, 4.64:1 gray-7 */
+	--wz-control-edge: #848ba4; /* 3.16:1 on the ground */
+	--wz-rule: #dfe3f0;
+	--wz-panel: #ffffff;
+	--wz-panel-edge: #dfe3f0;
+	--wz-glow: rgba(7, 112, 122, 0.08);
+}
+
+/* ------------------------------------------------------------------- type */
+
+:root {
+	--sl-font: 'Familjen Grotesk Variable', ui-sans-serif, system-ui, sans-serif;
+	--sl-font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+body {
+	font-synthesis-weight: none;
+	letter-spacing: -0.005em;
+}
+
+.sl-markdown-content h1,
+.sl-markdown-content h2,
+.sl-markdown-content h3,
+.sl-markdown-content h4 {
+	letter-spacing: -0.025em;
+	font-weight: 700;
+}
+
+/* Starlight's sidebar and nav pick up the grotesque; the mono is for machine
+   text only (code, capability names, measured values). */
+.sidebar-content a { letter-spacing: -0.01em; }
+
+/* ---------------------------------------------------------- docs furniture */
+
+/* The page title. Starlight prints it in its own panel, outside
+   .sl-markdown-content, so none of the rules above reach it. It carries the
+   landing's display treatment — the one piece of the hero's voice a docs page
+   gets — at a size that still fits a 34-character title in the 45rem column. */
+.content-panel h1#_top {
+	font-size: clamp(2.35rem, 5vw, 3.3rem);
+	line-height: 1.03;
+	letter-spacing: -0.035em;
+	font-weight: 700;
+	text-wrap: balance;
+}
+
+/* One machine-text surface. Expressive Code ships two grounds — a slate for
+   editor frames and a different slate for terminal frames — plus its own
+   border colour at :root, so the declarations have to sit on .expressive-code
+   to shadow them for the frame inside. */
+.sl-markdown-content .expressive-code {
+	--ec-frm-edBg: var(--wz-panel);
+	--ec-frm-trmBg: var(--wz-panel);
+	--ec-frm-edActTabBg: var(--wz-panel);
+	--ec-frm-edTabBarBg: var(--sl-color-gray-7);
+	--ec-frm-trmTtbBg: var(--sl-color-gray-7);
+	--ec-brdCol: var(--wz-rule);
+	--ec-frm-frameBoxShdCssVal: none;
+}
+
+.sl-markdown-content :not(pre) > code {
+	background: var(--sl-color-gray-7);
+	border: 1px solid var(--wz-rule);
+	border-radius: 3px;
+	padding: 0.1em 0.35em;
+	font-size: 0.85em;
+}
+
+/* A heading that is code is still a heading: the chip and the 85% step belong
+   to code sitting inside a sentence. Weight is inherited, but only the 400 and
+   500 mono faces are loaded and font-synthesis is off, so it lands at 500. */
+.sl-markdown-content :is(h1, h2, h3, h4, h5, h6) > code {
+	font-size: inherit;
+	background: none;
+	border: 0;
+	padding: 0;
+	font-weight: inherit;
+}
+
+/* Tables get the landing's row grammar: no cell borders, one hairline between
+   rows, a flush left edge, and a header that reads as a label rather than as a
+   heavier row — the same relation .manifest-head has to the rows below it.
+   Cyan in the first column comes from .grant in the markdown, never from here:
+   not every first column names a granted capability. */
+.sl-markdown-content table {
+	font-size: 0.94rem;
+	border-top: 1px solid var(--wz-rule);
+}
+.sl-markdown-content :is(th, td) {
+	border-bottom: 1px solid var(--wz-rule);
+	padding: 0.7rem 1.5rem 0.7rem 0;
+	vertical-align: baseline;
+}
+.sl-markdown-content :is(th, td):last-child { padding-right: 0; }
+.sl-markdown-content th {
+	font-weight: 600;
+	font-size: 0.84rem;
+	color: var(--sl-color-gray-3);
+}
+.sl-markdown-content tbody td:first-child { color: var(--sl-color-white); }
+/* A cell that is nothing but code is machine text, not prose with code in it. */
+.sl-markdown-content :is(th, td) > code:only-child {
+	background: none;
+	border: 0;
+	padding: 0;
+}
+
+/* Section starts read as structure, not decoration. Starlight wraps headings in
+   a flex wrapper and leaves the h2 itself `display: inline`, so the rule has to
+   go on the wrapper or it only spans the width of the words. The landing draws
+   its own section rules and has no wrapper, so it is unaffected. */
+.sl-markdown-content .sl-heading-wrapper.level-h2 {
+	margin-top: 2.6rem;
+	padding-top: 1.5rem;
+	border-top: 1px solid var(--wz-rule);
+}
+
+/* ------------------------------------------------------------------ shared */
+
+.grant { color: var(--wz-cyan); }
+.deny { color: var(--wz-denied); }
+
+/* =========================================================== landing page = */
+
+.landing {
+	font-size: 1rem;
+}
+
+.landing section {
+	padding-block: clamp(2.5rem, 5vw, 4rem);
+	border-top: 1px solid var(--wz-rule);
+}
+.landing section:first-child {
+	border-top: 0;
+	padding-top: clamp(2rem, 5vw, 3.5rem);
+}
+
+/* Starlight colours headings and links inside .sl-markdown-content, and
+   `not-content` switches both off for the landing. What the landing still needs
+   it declares itself; the flow-margin it was switched off for, it does not. */
+.landing :is(h1, h2, h3) {
+	color: var(--sl-color-white);
+}
+
+.landing h2 {
+	font-size: clamp(1.5rem, 3.4vw, 2.1rem);
+	line-height: 1.1;
+	letter-spacing: -0.03em;
+	font-weight: 700;
+	margin: 0 0 0.7rem;
+	max-width: 26ch;
+	text-wrap: balance;
+}
+
+.landing p {
+	max-width: 64ch;
+	margin: 0 0 1rem;
+	color: var(--sl-color-gray-2);
+	line-height: 1.6;
+}
+
+/* Indigo, not cyan: an underline is decoration, and cyan is reserved for a
+   granted capability or a measured number. */
+.landing a:not(.btn) {
+	color: var(--sl-color-white);
+	text-decoration-color: var(--wz-indigo);
+	text-underline-offset: 0.2em;
+	text-decoration-thickness: 1px;
+}
+.landing a:not(.btn):hover { text-decoration-thickness: 2px; }
+
+.sub {
+	margin-top: 1.4rem;
+	font-size: 0.86rem;
+	line-height: 1.55;
+	color: var(--sl-color-gray-3);
+	max-width: 72ch;
+}
+.sub code { font-size: 0.92em; }
+
+/* ------------------------------------------------------------------- hero */
+
+.hero {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: clamp(2rem, 5vw, 3.5rem);
+	align-items: stretch;
+}
+/* The panel is the taller column; drop the install line to the foot of the text
+   column so the two bottom edges line up instead of leaving a hole. */
+.hero > div:first-child {
+	display: flex;
+	flex-direction: column;
+}
+@media (min-width: 56rem) {
+	.hero { grid-template-columns: minmax(0, 1.05fr) minmax(24rem, 0.95fr); }
+}
+
+.hero h1 {
+	font-size: clamp(2.6rem, 6.6vw, 4.1rem);
+	line-height: 0.98;
+	letter-spacing: -0.045em;
+	font-weight: 700;
+	margin: 0 0 1.25rem;
+	text-wrap: balance;
+}
+
+.hero .lede {
+	font-size: clamp(1.02rem, 1.6vw, 1.15rem);
+	line-height: 1.55;
+	color: var(--sl-color-gray-2);
+	max-width: 46ch;
+	margin-bottom: 1.75rem;
+}
+
+.hero .lede strong {
+	color: var(--sl-color-white);
+	font-weight: 600;
+}
+
+/* The landing carries `not-content`, so Starlight's prose flow-margin no longer
+   supplies the gap above the buttons; it is declared here instead. Every other
+   row device on this page wants to be flush and is left alone. */
+.cta {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.6rem;
+	margin-top: 1rem;
+	margin-bottom: 1.5rem;
+}
+
+.btn {
+	display: inline-flex;
+	align-items: center;
+	font: inherit;
+	font-weight: 600;
+	font-size: 0.95rem;
+	padding: 0.6rem 1.2rem;
+	border-radius: 4px;
+	border: 1px solid transparent;
+	text-decoration: none;
+}
+/* Ink on the indigo, not white: white on the dark theme's accent is 3.54:1,
+   this is 5.51:1. The light theme's accent is dark enough to take white. */
+.btn-solid {
+	background: var(--sl-color-accent);
+	color: var(--sl-color-black);
+}
+:root[data-theme='light'] .btn-solid { color: #fff; }
+.btn-solid:hover { background: var(--sl-color-accent-high); }
+.btn-line {
+	border-color: var(--wz-control-edge);
+	color: var(--sl-color-white);
+}
+.btn-line:hover { border-color: var(--sl-color-gray-3); }
+
+.get {
+	font-family: var(--sl-font-mono);
+	font-size: 0.82rem;
+	color: var(--sl-color-gray-3);
+	border-top: 1px solid var(--wz-rule);
+	margin-top: auto;
+	padding-top: 0.9rem;
+	overflow-x: auto;
+	white-space: nowrap;
+}
+.get b { color: var(--sl-color-gray-2); font-weight: 400; }
+
+/* ------------------------------------------------- the sandbox manifest */
+
+.manifest {
+	/* The panel holds six rows and the text column is taller, so it must hug its
+	   content rather than stretch and trail dead space below the last row. */
+	align-self: start;
+	/* 45° corner cut, from the mark's geometry. clip-path cuts the border away
+	   with it, so the cut edge is drawn as a background layer: a 1px stroke
+	   lying just inside the clip line, in the 18px square the notch occupies. */
+	background:
+		linear-gradient(
+				45deg,
+				transparent 0 calc(50% - 1px),
+				var(--wz-panel-edge) calc(50% - 1px) 50%,
+				transparent 50%
+			)
+			top right / 18px 18px no-repeat border-box,
+		var(--wz-panel);
+	border: 1px solid var(--wz-panel-edge);
+	clip-path: polygon(0 0, calc(100% - 18px) 0, 100% 18px, 100% 100%, 0 100%);
+	font-family: var(--sl-font-mono);
+	font-size: 0.84rem;
+	line-height: 1.5;
+}
+
+.manifest-head {
+	display: flex;
+	justify-content: space-between;
+	gap: 1rem;
+	padding: 0.7rem 1.1rem;
+	border-bottom: 1px solid var(--wz-panel-edge);
+	color: var(--sl-color-gray-3);
+	font-size: 0.78rem;
+}
+.manifest-head b {
+	color: var(--sl-color-gray-1);
+	font-weight: 500;
+}
+
+.manifest-rows { padding-top: 0.4rem; }
+
+.manifest-row {
+	display: grid;
+	grid-template-columns: 1fr auto;
+	gap: 1rem;
+	align-items: baseline;
+	padding: 0.34rem 1.1rem;
+}
+.manifest-row .what { color: var(--sl-color-gray-2); }
+.manifest-row .state { color: var(--wz-denied); white-space: nowrap; }
+.manifest-row.on { background: var(--wz-glow); }
+.manifest-row.on .what { color: var(--sl-color-white); }
+.manifest-row.on .state { color: var(--wz-cyan); }
+
+.manifest-foot {
+	border-top: 1px solid var(--wz-panel-edge);
+	padding: 0.7rem 1.1rem;
+	color: var(--sl-color-gray-3);
+	font-size: 0.78rem;
+}
+
+/* --------------------------------------------------------- latency ruler */
+
+.ruler {
+	margin-top: 2rem;
+	font-family: var(--sl-font-mono);
+	font-size: 0.8rem;
+}
+
+.ruler-axis {
+	display: grid;
+	grid-template-columns: var(--label-w) minmax(0, 1fr);
+	gap: 1rem;
+	color: var(--sl-color-gray-3);
+	padding-bottom: 0.4rem;
+}
+.ruler { --label-w: 13.5rem; }
+
+.ruler-ticks {
+	position: relative;
+	height: 1.2em;
+}
+.ruler-ticks span {
+	position: absolute;
+	transform: translateX(-50%);
+	white-space: nowrap;
+}
+.ruler-ticks span:first-child { transform: none; }
+.ruler-ticks span:last-child { transform: translateX(-100%); }
+
+.ruler-row {
+	display: grid;
+	grid-template-columns: var(--label-w) minmax(0, 1fr);
+	gap: 1rem;
+	align-items: center;
+	padding: 0.42rem 0;
+	border-top: 1px solid var(--wz-rule);
+}
+.ruler-row .name {
+	color: var(--sl-color-gray-2);
+	font-size: 0.82rem;
+	line-height: 1.3;
+}
+.ruler-row.other .name { color: var(--wz-denied); }
+
+.ruler-track {
+	position: relative;
+	height: 1.6rem;
+	/* Decade gridlines, so the log scale is legible rather than implied. The
+	   repeat period puts the sixth stripe outside the box, which would leave the
+	   1 ms decade with a label and no rule, so that one is drawn from the right
+	   edge instead. Both are backgrounds: a border would shorten the padding box
+	   the markers are positioned against. */
+	background-image:
+		repeating-linear-gradient(to right, var(--wz-rule) 0 1px, transparent 1px 20%),
+		linear-gradient(to left, var(--wz-rule) 0 1px, transparent 1px);
+}
+.ruler-mark {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	display: flex;
+	align-items: center;
+	gap: 0.45rem;
+	transform: translateX(-3px);
+}
+.ruler-mark::before {
+	content: '';
+	width: 6px;
+	height: 6px;
+	background: var(--wz-cyan);
+	rotate: 45deg;
+	flex: none;
+}
+.ruler-mark b {
+	color: var(--wz-cyan);
+	font-weight: 500;
+	font-size: 0.82rem;
+	white-space: nowrap;
+}
+.ruler-row.other .ruler-mark::before { background: var(--wz-denied); }
+.ruler-row.other .ruler-mark b { color: var(--wz-denied); }
+/* Past three-quarters of the axis the label would overflow; flip it inward.
+   Reversing the children alone would leave the box anchored by its left edge
+   and push the diamond further out, so the box is translated by its own width:
+   that puts the diamond's right edge on the anchor, and the +3px mirrors the
+   -3px half-diamond offset of the unflipped case. */
+.ruler-mark.flip { flex-direction: row-reverse; transform: translateX(calc(-100% + 3px)); }
+
+/* ------------------------------------------------------------ two columns */
+
+.pair {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 1.25rem;
+	margin-top: 1.75rem;
+	align-items: start;
+}
+@media (min-width: 56rem) {
+	.pair { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1.5rem; }
+}
+.pair .expressive-code { margin: 0; }
+
+/* Two English sentences: they are captions, so they read as prose. Mono here
+   would be decorative labelling, and the mono is for machine text. */
+.pair-note {
+	font-size: 0.82rem;
+	color: var(--sl-color-gray-3);
+	margin: 0.5rem 0 0;
+}
+
+/* ------------------------------------------------------------- spec strip */
+
+.spec {
+	margin-top: 1.75rem;
+	border-top: 1px solid var(--wz-rule);
+}
+.spec-row {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 0.15rem 1.5rem;
+	padding: 0.85rem 0;
+	border-bottom: 1px solid var(--wz-rule);
+}
+@media (min-width: 44rem) {
+	.spec-row { grid-template-columns: 15rem minmax(0, 1fr); align-items: baseline; }
+}
+.spec-row dt {
+	font-family: var(--sl-font-mono);
+	font-size: 0.86rem;
+	color: var(--wz-cyan);
+}
+.spec-row dd {
+	margin: 0;
+	/* Starlight indents dd by 1rem. The landing switches that off with
+	   not-content, but the reset is explicit so the grid does not depend on it. */
+	padding-inline-start: 0;
+	color: var(--sl-color-gray-2);
+	font-size: 0.94rem;
+	line-height: 1.5;
+}
+.spec-row.off dt { color: var(--wz-denied); }
+
+/* ------------------------------------------------------------- comparison */
+
+.versus { margin-top: 1.75rem; border-top: 1px solid var(--wz-rule); }
+
+.versus-row {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 0.35rem 1.5rem;
+	padding: 1rem 0;
+	border-bottom: 1px solid var(--wz-rule);
+}
+@media (min-width: 50rem) {
+	.versus-row {
+		grid-template-columns: 13rem 7.5rem minmax(0, 1fr);
+		align-items: baseline;
+	}
+}
+.versus-row .path {
+	font-weight: 600;
+	color: var(--sl-color-white);
+	font-size: 0.96rem;
+}
+.versus-row .path span {
+	display: block;
+	font-family: var(--sl-font-mono);
+	font-size: 0.76rem;
+	font-weight: 400;
+	color: var(--wz-denied);
+	margin-top: 0.15rem;
+}
+.versus-row .ratio {
+	font-family: var(--sl-font-mono);
+	font-size: 1.05rem;
+	color: var(--wz-cyan);
+}
+.versus-row.tie .ratio { color: var(--sl-color-gray-3); }
+.versus-row .why {
+	color: var(--sl-color-gray-2);
+	font-size: 0.92rem;
+	line-height: 1.5;
+}
+
+/* --------------------------------------------------------------- counters */
+
+/* The hairlines are drawn by the counters themselves rather than by a 1px gap
+   over a ruled background: a row that does not fill its columns then leaves
+   empty space rather than a block of rule colour. Adjacent counters overlap
+   their outlines exactly, so every seam stays 1px. */
+.counts {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	margin-top: 1.75rem;
+}
+@media (min-width: 50rem) {
+	.counts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+.count {
+	background: var(--wz-panel);
+	box-shadow: 0 0 0 1px var(--wz-rule);
+	padding: 1.15rem 1.25rem;
+}
+.count b {
+	display: block;
+	font-family: var(--sl-font-mono);
+	font-size: 1.55rem;
+	font-weight: 500;
+	letter-spacing: -0.02em;
+	color: var(--wz-cyan);
+	line-height: 1.1;
+}
+.count span {
+	display: block;
+	margin-top: 0.35rem;
+	font-size: 0.84rem;
+	line-height: 1.4;
+	color: var(--sl-color-gray-3);
+}
+
+/* --------------------------------------------------------------- honesty */
+
+.limits {
+	margin-top: 1.5rem;
+	padding-left: 0;
+	list-style: none;
+}
+.limits li {
+	border-top: 1px solid var(--wz-rule);
+	padding: 0.85rem 0;
+	color: var(--sl-color-gray-2);
+	font-size: 0.94rem;
+	line-height: 1.55;
+	max-width: 68ch;
+}
+.limits li b {
+	color: var(--sl-color-white);
+	font-weight: 600;
+}
+
+/* ------------------------------------------------------------------ users */
+
+.users { margin: 1.5rem 0 0; padding: 0; list-style: none; }
+.users li {
+	border-top: 1px solid var(--wz-rule);
+	padding: 0.85rem 0;
+	color: var(--sl-color-gray-2);
+	font-size: 0.94rem;
+	max-width: 68ch;
+}
+
+/* --------------------------------------------------------- splash cleanup */
+
+/* The splash template prints the page title above the content; the hero says it
+   better. Scoped to the landing — every docs page emits the same panel, and
+   this is the only page that has a second title for it to duplicate. Hidden by
+   the screen-reader pattern rather than `display: none`, because #_top is where
+   the skip link on every page lands, and a link cannot land on a node that is
+   not rendered. */
+main:has(.landing) > .content-panel:has(> .sl-container > h1#_top) {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	border: 0;
+	overflow: hidden;
+	clip-path: inset(50%);
+	white-space: nowrap;
+}
+/* With that panel out of the flow, Starlight's panel-to-panel hairline would
+   paint across the top of the hero. */
+main:has(.landing) > .content-panel + .content-panel { border-top: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+	* { animation: none !important; transition: none !important; }
+}
+
+@media (max-width: 44rem) {
+	.ruler { font-size: 0.75rem; }
+	/* Six decade labels collide at phone width. Dropping the second and the
+	   fifth leaves 10 ns, 1 µs, 10 µs and 1 ms: both ends of the declared scale
+	   survive, which matters more than an even spacing. */
+	.ruler-ticks span:nth-child(2),
+	.ruler-ticks span:nth-child(5) { display: none; }
+	.ruler-axis,
+	.ruler-row { grid-template-columns: minmax(0, 1fr); gap: 0.25rem; }
+	.ruler-row { padding: 0.7rem 0; }
+}
+
+/* ------------------------------------------------- examples index (tracks) */
+
+/* Thirteen tutorials as thirteen identical cards would be a wall. A two-track
+   list stays scannable and shows the intended order. */
+.track {
+	margin: 1.25rem 0 2.5rem;
+	border-top: 1px solid var(--wz-rule);
+}
+.track > a {
+	display: grid;
+	grid-template-columns: 1.9rem minmax(0, 1fr);
+	gap: 0.1rem 0.9rem;
+	padding: 0.85rem 0.2rem;
+	border-bottom: 1px solid var(--wz-rule);
+	text-decoration: none;
+	color: inherit;
+}
+@media (min-width: 44rem) {
+	.track > a { grid-template-columns: 1.9rem 14rem minmax(0, 1fr); align-items: baseline; }
+}
+.track > a:hover { background: var(--wz-panel); }
+.track > a:focus-visible { outline: 2px solid var(--sl-color-accent); outline-offset: -2px; }
+.track .n {
+	font-family: var(--sl-font-mono);
+	font-size: 0.8rem;
+	color: var(--sl-color-gray-3);
+	grid-row: span 2;
+}
+@media (min-width: 44rem) { .track .n { grid-row: auto; } }
+.track .t {
+	font-weight: 600;
+	color: var(--sl-color-white);
+	font-size: 0.98rem;
+}
+.track > a:hover .t { color: var(--sl-color-accent); }
+.track .d {
+	color: var(--sl-color-gray-3);
+	font-size: 0.9rem;
+	line-height: 1.5;
+}
