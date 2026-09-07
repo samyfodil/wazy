@@ -713,21 +713,21 @@ wazero** and **2.77× ahead of v0.1.3** — the release it had regressed against
   it costs one reallocation. Stored as a 32-bit page count rather than 64-bit bytes so the atomics
   need no alignment argument on GOARCH=386/arm/wasm.
 
-  **Measured, Apple M4, native arm64, min of 10 x 300 ops, arms interleaved:**
+  **Measured, Apple M4, native arm64, min of 10 × 300 ops, arms interleaved:**
 
   | | ns/op | B/op | vs wazero |
   |---|---|---|---|
-  | wazero v1.12.0 | 459.2 µs | | 1.00x |
-  | wazy v0.1.3 | 304.8 µs | 9.69 MB | 1.51x |
-  | wazy at `0980600d` (F1 fixed) | 331.4 µs | 9.67 MB | 1.39x |
-  | **wazy + this** | **110.1 µs** | **37.6 KB** | **4.17x** |
+  | wazero v1.12.0 | 459.2 µs | | 1.00× |
+  | wazy v0.1.3 | 304.8 µs | 9.69 MB | 1.51× |
+  | wazy at `0980600d` (F1 fixed) | 331.4 µs | 9.67 MB | 1.39× |
+  | **wazy + this** | **110.1 µs** | **37.6 KB** | **4.17×** |
 
-  **-66.8% against `0980600d` and -63.9% against v0.1.3** — so the regression is not merely closed,
-  the row is 2.77x ahead of where it was before it appeared. On amd64 (i9-12900HK, core-pinned,
-  benchstat n=12, p=0.000 on every row) the same change is **-83.9%**, 1593.5 µs to 255.9 µs, with
-  **B/op -99.6%**: 9.4 MB to 37 KB. Neutral everywhere else it could matter — the component
-  instantiate benchmarks are geomean -0.17% (every row `~`, n=10) and the memory-grow suite geomean
-  -1.6% (every row `~`, n=8).
+  **−66.8% against `0980600d` and −63.9% against v0.1.3** — so the regression is not merely closed,
+  the row is 2.77× ahead of where it was before it appeared. On amd64 (i9-12900HK, core-pinned,
+  benchstat n=12, p=0.000 on every row) the same change is **−83.9%**, 1593.5 µs to 255.9 µs, with
+  **B/op −99.6%**: 9.4 MB to 37 KB. Neutral everywhere else it could matter — the component
+  instantiate benchmarks are geomean −0.17% (every row `~`, n=10) and the memory-grow suite geomean
+  −1.6% (every row `~`, n=8).
 
 ### Rejected with measurements — do not redo
 
