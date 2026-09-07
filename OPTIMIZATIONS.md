@@ -668,6 +668,9 @@ the whole curve rather than bisect — put the entire step at one commit: `2b940
 itself a performance sweep. Everything before it sits at 300–360 µs; `2b940c77` jumps to 488 µs and
 it stays there.
 
+Two independent causes, both in that one sweep, both now fixed. The row ends up **4.17× ahead of
+wazero** and **2.77× ahead of v0.1.3** — the release it had regressed against.
+
 - **F1. `ref.func` memo scanned a list — quadratic in element-segment entries.** **RESOLVED.**
   A differential CPU profile (`pprof -diff_base`, focused on the `Convert` path) named
   `localFuncref` at **+0.50 s flat**, about half the regression, under
@@ -685,10 +688,46 @@ it stays there.
   map does not claim still resolves through the old list, so correctness never depends on the set
   being complete. **Measured: 448 µs → 339 µs, −24.3%, 1.03× → 1.37× vs wazero**; `applyElements`
   drops from 0.64 s to 0.04 s of the profile.
-- **F2. `MemoryInstance.Grow` — the other half, still open.** With the scan gone, `Grow64` dominates
-  what remains of the `Convert` profile (0.63 s), and **12.6%** still separates this row from
-  v0.1.3. Same window, different cause; it is the growth path R11 already describes as
-  "append-driven full copies". Not attempted here.
+- **F2. A linear memory was allocated at exactly its initial size — so growing it once cost a full
+  copy, every instantiation.** **RESOLVED.** With the scan gone, `Grow64` dominated what remained of
+  the `Convert` profile (0.63 s) and **12.6%** still separated this row from v0.1.3. The cause was
+  not the growth policy itself but the size growth started from. `NewMemoryInstance` sized the
+  backing to `Cap`, which for a module that declares no reserve is exactly `Min`. The guest's
+  allocator then asked for **one** more page, which is over `Cap`, so every instantiation ran the
+  Go fallback: a fresh `make` of the geometrically doubled capacity plus a copy of the whole
+  memory. On the go-anydoc module that is a 6.4 MB allocation and a 3.2 MB copy per conversion:
+
+      GROW cur=49 delta=1 new=50 cap=49 max=1024 realloc=true
+
+  The buffer pool could not absorb any of it, because it buckets by *exact* capacity. The grown
+  buffer was filed under 98 pages; every later instantiation asked for 49 and missed. Tracing the
+  pool over 50 conversions showed **51 puts and 51 misses — a 0% hit rate**, so the pool was pure
+  overhead on this workload, which is also why disabling it measured a small *gain* (see the
+  rejected-hypotheses entry below; that measurement was right, and this is why).
+
+  The fix is one number: `Memory.capHighWaterPages` records the largest backing any instance of
+  that memory has needed, and `NewMemoryInstance` starts the next one there. The grow is then
+  satisfied in place — no reallocation, no copy — and because every instantiation now asks for the
+  same capacity, the pool bucket matches and the allocation goes too. A same-process hint only: it
+  never changes what the module observes, is not serialized with the compilation cache, and losing
+  it costs one reallocation. Stored as a 32-bit page count rather than 64-bit bytes so the atomics
+  need no alignment argument on GOARCH=386/arm/wasm.
+
+  **Measured, Apple M4, native arm64, min of 10 × 300 ops, arms interleaved:**
+
+  | | ns/op | B/op | vs wazero |
+  |---|---|---|---|
+  | wazero v1.12.0 | 459.2 µs | | 1.00× |
+  | wazy v0.1.3 | 304.8 µs | 9.69 MB | 1.51× |
+  | wazy at `0980600d` (F1 fixed) | 331.4 µs | 9.67 MB | 1.39× |
+  | **wazy + this** | **110.1 µs** | **37.6 KB** | **4.17×** |
+
+  **−66.8% against `0980600d` and −63.9% against v0.1.3** — so the regression is not merely closed,
+  the row is 2.77× ahead of where it was before it appeared. On amd64 (i9-12900HK, core-pinned,
+  benchstat n=12, p=0.000 on every row) the same change is **−83.9%**, 1593.5 µs to 255.9 µs, with
+  **B/op −99.6%**: 9.4 MB to 37 KB. Neutral everywhere else it could matter — the component
+  instantiate benchmarks are geomean −0.17% (every row `~`, n=10) and the memory-grow suite geomean
+  −1.6% (every row `~`, n=8).
 
 ### Rejected with measurements — do not redo
 
@@ -698,5 +737,10 @@ it stays there.
   `WAZY_REPRO_NO_MEMPOOL=1` against the default is 438 µs vs 451 µs, min of 6 each: the pool costs
   **~3%** on this workload, real but an order of magnitude short of the regression. Worth knowing as
   a small net negative for instantiate-dominated guests; not worth re-investigating as the cause.
+
+  *Postscript.* That ~3% had a cause worth naming: on this workload the pool's hit rate was **zero**
+  (51 puts, 51 misses over 50 conversions), so it was all bookkeeping and no reuse. F2 fixed the
+  size mismatch that caused it. The conclusion above still stands — the pool was never the
+  regression — but it is no longer a net negative here.
 
 [anydoc-opt]: https://github.com/xusenlin/go-anydoc
