@@ -40,20 +40,49 @@ func deadlockGoroutineFixture(t *testing.T) (*Instance, *boundExport) {
 	return inst, be
 }
 
-// numGoroutineStable waits (bounded) for runtime.NumGoroutine() to settle,
-// then returns it -- goroutine teardown after a channel close/send is not
+// numGoroutineStable waits (bounded) for runtime.NumGoroutine() to settle, then
+// returns it -- goroutine teardown after a channel close/send is not
 // synchronous with the send itself (the Go scheduler may take a moment to
 // actually unschedule the exiting goroutine), so a single immediate read is
 // flaky. Polls instead of sleeping a fixed amount.
+//
+// Two consecutive equal samples are deliberately not enough. A goroutine that
+// has not started yet reads as "settled" at the pre-spawn count, which on a
+// loaded machine is exactly what happens; that is a real CI flake, not a
+// theoretical one. Use this only for a baseline, where there is nothing
+// specific to wait for -- when the test knows what it expects the count to do,
+// waitGoroutines says so directly and cannot return early.
 func numGoroutineStable(t *testing.T) int {
 	t.Helper()
-	var n, prev int
-	for i := 0; i < 200; i++ {
+	// Consecutive equal samples required before calling it settled.
+	const settled = 5
+	var n, prev, same int
+	for i := 0; i < 400; i++ {
 		n = runtime.NumGoroutine()
 		if i > 0 && n == prev {
-			return n
+			if same++; same >= settled {
+				return n
+			}
+		} else {
+			same = 0
 		}
 		prev = n
+		time.Sleep(2 * time.Millisecond)
+	}
+	return n
+}
+
+// waitGoroutines polls runtime.NumGoroutine() until want holds, or the budget
+// runs out, and returns the last count either way. The caller keeps its own
+// assertion, so a timeout still fails with its own message -- this only removes
+// the race between the scheduler and the read, it never hides a real leak.
+func waitGoroutines(t *testing.T, want func(int) bool) int {
+	t.Helper()
+	var n int
+	for i := 0; i < 1000; i++ { // 2s ceiling; returns as soon as want holds
+		if n = runtime.NumGoroutine(); want(n) {
+			return n
+		}
 		time.Sleep(2 * time.Millisecond)
 	}
 	return n
@@ -85,7 +114,7 @@ func TestStackfulReap_CloseReapsParkedGoroutine(t *testing.T) {
 		t.Fatal("startStackfulExportTask: calleeTask is nil")
 	}
 
-	during := numGoroutineStable(t)
+	during := waitGoroutines(t, func(n int) bool { return n > before })
 	if during <= before {
 		t.Fatalf("goroutine count = %d after starting a task that should have parked mid-wait, want > baseline %d", during, before)
 	}
@@ -94,7 +123,7 @@ func TestStackfulReap_CloseReapsParkedGoroutine(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	after := numGoroutineStable(t)
+	after := waitGoroutines(t, func(n int) bool { return n <= before })
 	if after > before {
 		t.Fatalf("goroutine count after Close = %d, want <= pre-call baseline %d (parked stackful goroutine leaked)", after, before)
 	}
@@ -125,7 +154,7 @@ func TestStackfulReap_InvokeStackfulReapsOnDeadlockTrap(t *testing.T) {
 	_, callErr := inst.Call(ctx, "f")
 	requireErrContains(t, callErr, "wasm trap: deadlock detected: event loop cannot make further progress")
 
-	after := numGoroutineStable(t)
+	after := waitGoroutines(t, func(n int) bool { return n <= before })
 	if after > before {
 		t.Fatalf("goroutine count after a deadlock-trapping call = %d, want <= pre-call baseline %d (invokeStackful's own reap did not clean up)", after, before)
 	}

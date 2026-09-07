@@ -58,7 +58,7 @@ func TestPromotedGuestTask_BlockParkResumeAbort(t *testing.T) {
 		t.Fatal("ready() true before the predicate is satisfied")
 	}
 
-	during := numGoroutineStable(t)
+	during := waitGoroutines(t, func(n int) bool { return n > before })
 	if during <= before {
 		t.Fatalf("goroutine count = %d during park, want > baseline %d (segment goroutine should be live)", during, before)
 	}
@@ -86,7 +86,7 @@ func TestPromotedGuestTask_BlockParkResumeAbort(t *testing.T) {
 		t.Fatal("gt should be unparked after resumeReady")
 	}
 
-	after := numGoroutineStable(t)
+	after := waitGoroutines(t, func(n int) bool { return n <= before })
 	if after > before {
 		t.Fatalf("goroutine count after resume = %d, want <= baseline %d (segment goroutine leaked)", after, before)
 	}
@@ -111,7 +111,7 @@ func TestPromotedGuestTask_ReapAbortsParkedSegment(t *testing.T) {
 		t.Fatalf("runSegment: %v", err)
 	}
 
-	during := numGoroutineStable(t)
+	during := waitGoroutines(t, func(n int) bool { return n > before })
 	if during <= before {
 		t.Fatalf("goroutine count = %d during park, want > baseline %d", during, before)
 	}
@@ -135,7 +135,7 @@ func TestPromotedGuestTask_ReapAbortsParkedSegment(t *testing.T) {
 	default:
 	}
 
-	after := numGoroutineStable(t)
+	after := waitGoroutines(t, func(n int) bool { return n <= before })
 	if after > before {
 		t.Fatalf("goroutine count after reap = %d, want <= baseline %d (parked segment goroutine leaked)", after, before)
 	}
