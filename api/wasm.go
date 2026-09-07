@@ -287,21 +287,22 @@ type MemoryDefinition interface {
 
 	// Min returns the possibly zero initial count of 64KB pages.
 	//
-	// Note: This truncates when IsMemory64 is true and the minimum exceeds
-	// 2^32-1 pages; use Min64 for a 64-bit memory.
+	// Note: This saturates at 2^32-1 when IsMemory64 is true and the minimum
+	// exceeds it; use Min64 for a 64-bit memory.
 	Min() uint32
 
 	// Max returns the possibly zero max count of 64KB pages, or false if
 	// unbounded.
 	//
-	// Note: This truncates when IsMemory64 is true and the maximum exceeds
-	// 2^32-1 pages; use Max64 for a 64-bit memory.
+	// Note: This saturates at 2^32-1 when IsMemory64 is true and the maximum
+	// exceeds it -- rather than truncating to zero, which would read as
+	// "cannot grow"; use Max64 for a 64-bit memory.
 	Max() (uint32, bool)
 
-	// Min64 is Min without the uint32 truncation.
+	// Min64 is Min without the uint32 saturation.
 	Min64() uint64
 
-	// Max64 is Max without the uint32 truncation.
+	// Max64 is Max without the uint32 saturation.
 	Max64() (uint64, bool)
 
 	// IsMemory64 returns true if this memory is indexed by i64 rather than

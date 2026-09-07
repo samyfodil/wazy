@@ -506,3 +506,145 @@ mov; and the component runtime keeps its handle reps dense.
 - `Store.mux` still serializes instantiate and close against each other.
 - The 2431-line validator body (3632-byte frame, 35-deep else-if chain) was left alone deliberately:
   correctness of validation outranks its speed, and no mechanical rewrite stayed reviewable.
+
+## Sweep round 4 (2026-09-06) — upstream catch-up, `memory.fill`
+
+Audit of every wazero commit after the fork baseline `c0f3a4e` through upstream HEAD `6edbb8c0`
+(11 commits; see the ledger in the PR description). Nine of the eleven were already covered, most
+of them because wazy had fixed the same issue independently and earlier -- though six of those nine
+had no test that would have failed if the behaviour were reverted, which is its own finding. One was
+a real, large gap: C28 below.
+
+Separately, checking wazy against those commits surfaced four defects that are *not* any of them,
+all shared with upstream. They ship alongside because they were found here: fd_prestat_get
+answering success for a non-directory pre-open (which made the filesystem unreachable to a
+wasi-libc guest whenever a socket listener was configured), WithMemoryLimitPages not bounding an
+i64-index memory (an embedder-visible semantic change, deliberate -- see RATIONALE.md and the
+sandboxing guide), fd_renumber(fd, fd) closing the descriptor it is defined to leave alone, and the
+CLI exiting zero when a profile could not be written.
+
+- **C28. `memory.fill` lowered through a copy-doubling `memmove` loop** — **RESOLVED**, adapting
+  upstream wazero [#2538](https://github.com/wazero/wazero/pull/2538) and then going past it.
+  wazy already inlined *compile-time-constant* fills up to 128 bytes as scalar 8-byte stores
+  (that part predates and beats upstream), but every **run-time-length** fill, and every constant
+  fill over 128 bytes, still took the copy-doubling trick: write one byte, then `memory.copy`
+  doubling chunks through `runtime.memmove`. That is 2× the memory traffic (every chunk is re-read
+  as the next copy's source) plus a call per chunk, and it is the path a `memset(p, 0, n)` in guest
+  code actually takes. Measured against upstream wazero *at HEAD, i.e. with #2538 already in it*,
+  `main` was **7.8× slower at 64 B** on arm64 (21.66µs vs 2.76µs, both min-of-N on the same
+  machine).
+
+  Four changes, in order of size of win:
+
+  1. **Run-time lengths take inline 128-bit stores** (upstream's shape): an `i8x16.splat` of the
+     byte, a 64-bytes-per-iteration main loop of four v128 stores, then a 16-byte loop.
+  2. **The byte-at-a-time tail is gone.** Upstream finishes a non-multiple-of-16 region with up to
+     fifteen single-byte stores. Since the whole region is already bounds-checked, the last vector
+     can simply be stored **overlapping** the previous one at `addr+size-16` — at most one extra
+     store instead of up to fifteen, and the 16-byte loop's condition becomes strict so an exact
+     multiple is not written twice. A run-time region shorter than one vector (the only case that
+     cannot use it) takes a descending ladder of overlapping 8/4/2/1-byte stores instead of a loop:
+     at most four compares and two stores where a byte loop took up to fifteen of each.
+  3. **Large zero fills call `runtime.memclrNoHeapPointers`** through the same execution-context
+     hook the `memory.copy` lowering already uses for `runtime.memmove` (`memclr.go`, a new
+     `memclrAddress` field, `ExecutionContextOffsetMemclrAddress`, `memclrSig`, `callMemclr`).
+     Zero is the dominant fill value in practice and memclr is the best fill code on every platform.
+  4. **Every dispatch test folds when its operand is constant.** A constant size skips the size
+     gates; a constant *nonzero* byte removes the memclr arm outright; a constant zero byte at or
+     above the memclr floor calls memclr with no run-time test at all; and a constant size up to
+     `memoryFillInlineMaxBytes` (raised 128 → 256, now v128 stores) stays fully unrolled and
+     branch-free. wazy's SSA deliberately runs no constant-folding pass, so without this the
+     folding would never happen later.
+
+  **Measured.** Two different baselines matter here and they must not be conflated: what this
+  replaces on `main`, and what wazy gains over taking upstream #2538 verbatim. Both are below,
+  each with its own harness.
+
+  **(a) Versus `main`** — the whole of C28. Apple M4, native arm64, interleaved A/B swapping only
+  `lower.go`, fixed op counts, min-of-N over n=18 (the M4's P-core/E-core scheduler makes medians
+  unusable; min is the right estimator). `BenchmarkMemoryFill*`, both fill-value arms:
+
+  | fill size | main | this | | | main | this | |
+  |---|---|---|---|---|---|---|---|
+  | 15 | 16.99µs | 2.70µs | **−84%** | 1024 | 44.19µs | 26.19µs | −41% |
+  | 31 | 18.27µs | 2.28µs | **−88%** | 4096 | 2.95µs | 1.15µs | −61% |
+  | 64 | 21.66µs | 1.94µs | **−91%** | const 64 B | 2.03µs | 1.14µs | −44% |
+  | 79 | 24.94µs | 2.49µs | **−90%** | const 256 B | 26.41µs | 3.82µs | **−86%** |
+  | 127 | 24.55µs | 3.62µs | **−85%** | const 1 KiB | 42.06µs | 26.33µs | −37% |
+  | 256 | 28.57µs | 4.54µs | **−84%** | **geomean** | | | **−79.0%** |
+
+  **(b) Versus a verbatim port of #2538** — i.e. what the overlapping tail, the scalar ladder and
+  the constant folding buy *beyond* upstream's shape, which is the part that is wazy's own.
+  i9-12900HK, verified-quiet, core-pinned `taskset -c 2,3` + `GOMAXPROCS=1`, interleaved,
+  `benchstat` n=15–18, every row p=0.000: 15 B **−70%**, 31 B **−77%**, 64 B −19%, 79 B **−60%**,
+  127 B **−50%**, 256 B −9%, **geomean −53.5%**. The same comparison on the M4 gives **−59.2%**.
+  (The 64 B and 256 B rows are small here precisely because upstream's shape already handles exact
+  multiples of 64 well; the win is concentrated where its byte tail was longest.)
+
+  Against **upstream wazero at HEAD** (which already has #2538), `benchmarks/vs-wazero`
+  `BenchmarkMemoryFill*` with the wazero pin bumped to `6edbb8c0`: on native arm64, min-of-8,
+  **geomean 1.68×**, from 7.1× at 15 B and 4.6× at 31 B down to parity once the fill is
+  memory-bandwidth-bound at 64 KiB and above. An amd64 run of the same comparison gave higher
+  ratios (2.25× geomean, median of n=4) but that box could not be certified quiet and an
+  independent check under load measured roughly half; treat the arm64 figure as the supported one
+  and the amd64 ratios as not yet re-measured.
+
+  Thresholds are measured, not assumed. `memoryFillInlineMaxBytes` 128 → **256**: a constant 256-byte
+  clear goes 3981 → 3452 ns, and 512 buys only a further 1% for twice the code, so 256 is the knee.
+  `memoryFillMemclrMinBytes` = **1024** (upstream's value), confirmed by forcing inline-always vs
+  memclr at *identical* sizes rather than comparing across sizes: memclr wins **−41% at 1 KiB** and
+  **−44% at 4 KiB**, and *loses* badly below — dropping the floor to 256 makes a 256-byte fill 59%
+  slower. The 512–768 window is genuinely open: an unrelated process took the machine during that
+  sweep and the numbers are not trustworthy, so the floor was left at upstream's rather than tuned on
+  contaminated data. Compile time costs **+1.2%** (`BenchmarkCompile`, p=0.000, n=16 on the
+  M4 -- an earlier amd64 read said "unchanged" only because that box was too noisy to
+  resolve it), which is the extra basic blocks and the one additional declared
+  signature. Weighed against the same-baseline execute win -- -79.0% geomean on the fill
+  itself and -23.7% on a real TinyGo workload, both wazy-vs-wazy -- that is the right
+  side of the trade.
+
+  Whole-suite regression check, wazy-at-HEAD vs this work, native arm64, min-of-N:
+  `random_mat_mul` **-23.7%** and `string_manipulation` **-12.5%** -- TinyGo's allocator
+  zeroes new blocks through `memory.fill`, which is exactly the workload upstream #2538
+  was aimed at -- and every other kernel within +-1%. Four `BenchmarkHostCall` rows read
+  +1 to +2.4%, which is **code layout, not a regression, and was proved so rather than
+  assumed**: a third tree carrying these fixes with HEAD's engine sources byte-for-byte
+  still shows it (+3.65% on typed/Call, i.e. *larger* than the full change), while
+  `Compile` goes flat in that tree. Non-codegen edits cannot alter host-call machine
+  code, so the delta is the Go binary relocating -- the same effect C22 documents on
+  `fib`, whose codegen was byte-identical. Two earlier readings of these rows were
+  discarded first: one confounded by the two trees pinning different wazero versions,
+  one by the M4's P/E-core scheduler.
+
+- **An amd64 ABI defect the memclr call would otherwise have shipped.** Go's amd64 ABI reserves
+  `X15` as a zero register, and `runtime.memclrNoHeapPointers`' SSE path is a run of
+  `MOVOU X15, n(DI)` that takes that at its word. wazy allocates `xmm15` like any other vector
+  register, so a large zero `memory.fill` would write **whatever vector value happened to live
+  there** instead of zeros. `runtime.memmove` — the only Go runtime routine wazy called this way
+  before — merely uses `X15` as scratch and re-zeroes it before returning, which is why nothing
+  caught this. AVX2 hides it completely (that path zeroes its own vector), so the entire spec suite
+  and every benchmark passed on this machine. `lowerCall` now zeroes `xmm15` at the call site, next
+  to the existing all-vector clobber declaration. Pinned by an amd64 finalize golden and by an e2e
+  test that re-executes itself under `GODEBUG=cpu.avx2=off` with sixteen v128 values live across the
+  fill: without the fix the "cleared" buffer comes back holding `0x16`. Upstream wazero has the same
+  defect in #2538 as merged.
+
+  The zeroing is emitted **only for memclr**, not for every Go-runtime call through
+  that path. Zeroing unconditionally is simpler and was the first cut, but on a quiet
+  box it cost **+4.95% on a hot 64-byte `memory.copy` loop** (p=0.000, n=24) and +1.16%
+  geomean across the `memory.copy` sizes -- memmove is only a few cycles at that size,
+  so one extra uop shows. memmove never *reads* X15 (it uses it as scratch and re-zeroes
+  it before returning), so the two are flagged apart in the SSA (`AsCallGoRuntimeMemclr`
+  alongside `AsCallGoRuntimeMemmove`, both still taking the shared vector-clobber
+  handling). After that, every `memory.copy` row is back to indistinguishable from
+  unpatched (all p >= 0.32, n=24), which is what the emitted code now says by
+  construction. `BenchmarkMemoryCopy`/`BenchmarkMemoryCopyConst` were added for this --
+  the suite had no `memory.copy` coverage at all.
+
+- **Not adopted, with reasons.** Two further leads from the review were left as measured follow-ups
+  rather than shipped blind: arm64 `movi vN.16b, #imm8` for repeated-byte v128 constants (a real win
+  for constant *nonzero* fills, but it needs a new arm64 instruction kind and this host cannot
+  measure arm64 wall-clock, so it would be an unmeasured claim), and amd64 `movd` in place of
+  `pinsrb` in `lowerSplat` to break the merge dependency on the destination. Sinking the v128 splat
+  and the tail offset past the short-region branch *was* shipped: **−10 to −11.5% at size 15**
+  (p=0.000), +1.7–2.7% at 31/64 which is within this repo's known ±6% code-layout noise.

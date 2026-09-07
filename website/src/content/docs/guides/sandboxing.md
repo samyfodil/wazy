@@ -77,9 +77,17 @@ r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfig().
 	WithMemoryLimitPages(256))          // 256 * 64 KiB = 16 MiB, hard cap
 ```
 
-A module whose declared maximum exceeds the limit is rejected at compile time; a `memory.grow` past
-it fails at run time, which is a value the guest must handle. `WithMemory64LimitPages` is the
-memory64 equivalent.
+A module whose declared *minimum* exceeds the limit is rejected at compile time. A declared
+*maximum* over it is clamped to the limit instead, so the module still loads and simply cannot grow
+as far as it asked; a `memory.grow` past the limit fails at run time, returning -1, which is a value
+the guest must handle.
+
+This bounds a memory declared with an i64 index type as well — otherwise a module could reach past
+your only general memory ceiling by doing nothing more than declaring `i64`, which is what
+`clang --target=wasm64` and Rust's memory64 target emit. `WithMemory64LimitPages` sets that ceiling
+independently, above or below this one, and wins whichever order the two are configured in; it is
+the only way to allow a 64-bit memory past four gibibytes, since `WithMemoryLimitPages` itself tops
+out at 65536 pages.
 
 `WithMemoryCapacityReservePages` trades address space for speed: reserving capacity up front makes
 in-capacity `memory.grow` a 109 ns operation instead of a reallocation. Out-of-capacity, shared and
