@@ -1698,110 +1698,134 @@ func testListenerStackIteratorOffset(t *testing.T, r wazy.Runtime) {
 		0x0, 0x0, 0x0, 0x0, // abbrev offset
 		0x0, // asize
 	}
+	// The same section, but a version debug/dwarf rejects. Source offsets must
+	// not depend on the DWARF parsing: they are a code-section offset, and
+	// api.InternalFunction.SourceOffsetForPC promises them whether or not the
+	// line info behind them resolves. Go 1.27 tightened what dwarf.New accepts
+	// (wazero#2526), which turned exactly this into a silent loss of offsets
+	// upstream; wazy keys the source map on the section being present instead.
+	unparseableDWARFInfo := []byte{
+		0x7, 0x0, 0x0, 0x0, // length
+		0xff, 0xff, // version: not a DWARF version at all
+		0x0, 0x0, 0x0, 0x0, // abbrev offset
+		0x0, // asize
+	}
 
-	encoded := binaryencoding.EncodeModule(&wasm.Module{
-		TypeSection: []wasm.FunctionType{
-			// f1 type
-			{Params: []wasm.ValueType{wasm.ValueTypeI32, wasm.ValueTypeI32, wasm.ValueTypeI32}},
-			// f2 type
-			{Results: []wasm.ValueType{wasm.ValueTypeI32}},
-			// f3 type
-			{Params: []wasm.ValueType{wasm.ValueTypeI32}, Results: []wasm.ValueType{wasm.ValueTypeI32}},
-		},
-		FunctionSection: []wasm.Index{0, 1, 2},
-		NameSection: &wasm.NameSection{
-			ModuleName: "whatever",
-			FunctionNames: wasm.NameMap{
-				{Index: wasm.Index(0), Name: "f1"},
-				{Index: wasm.Index(1), Name: "f2"},
-				{Index: wasm.Index(2), Name: "f3"},
+	run := func(t *testing.T, debugInfo []byte) {
+		tape = nil
+		encoded := binaryencoding.EncodeModule(&wasm.Module{
+			TypeSection: []wasm.FunctionType{
+				// f1 type
+				{Params: []wasm.ValueType{wasm.ValueTypeI32, wasm.ValueTypeI32, wasm.ValueTypeI32}},
+				// f2 type
+				{Results: []wasm.ValueType{wasm.ValueTypeI32}},
+				// f3 type
+				{Params: []wasm.ValueType{wasm.ValueTypeI32}, Results: []wasm.ValueType{wasm.ValueTypeI32}},
 			},
-		},
-		CodeSection: []wasm.Code{
-			{ // f1
-				Body: []byte{
-					wasm.OpcodeI32Const, 42,
-					wasm.OpcodeLocalSet, 0,
-					wasm.OpcodeI32Const, 11,
-					wasm.OpcodeLocalSet, 1,
-					wasm.OpcodeCall, 1, // call f2
-					wasm.OpcodeDrop,
-					wasm.OpcodeEnd,
+			FunctionSection: []wasm.Index{0, 1, 2},
+			NameSection: &wasm.NameSection{
+				ModuleName: "whatever",
+				FunctionNames: wasm.NameMap{
+					{Index: wasm.Index(0), Name: "f1"},
+					{Index: wasm.Index(1), Name: "f2"},
+					{Index: wasm.Index(2), Name: "f3"},
 				},
+			},
+			CodeSection: []wasm.Code{
+				{ // f1
+					Body: []byte{
+						wasm.OpcodeI32Const, 42,
+						wasm.OpcodeLocalSet, 0,
+						wasm.OpcodeI32Const, 11,
+						wasm.OpcodeLocalSet, 1,
+						wasm.OpcodeCall, 1, // call f2
+						wasm.OpcodeDrop,
+						wasm.OpcodeEnd,
+					},
+				},
+				{
+					Body: []byte{
+						wasm.OpcodeI32Const, 6,
+						wasm.OpcodeCall, 2, // call f3
+						wasm.OpcodeEnd,
+					},
+				},
+				{Body: []byte{wasm.OpcodeI32Const, 15, wasm.OpcodeEnd}},
+			},
+			ExportSection: []wasm.Export{
+				{Name: "f1", Type: wasm.ExternTypeFunc, Index: 0},
+				{Name: "f2", Type: wasm.ExternTypeFunc, Index: 1},
+				{Name: "f3", Type: wasm.ExternTypeFunc, Index: 2},
+			},
+			CustomSections: []*wasm.CustomSection{{Name: ".debug_info", Data: debugInfo}},
+		})
+		decoded, err := binary.DecodeModule(encoded, api.CoreFeaturesV2, 0, false, 0, true, true)
+		require.NoError(t, err)
+
+		f1offset := decoded.CodeSection[0].BodyOffsetInCodeSection
+		f2offset := decoded.CodeSection[1].BodyOffsetInCodeSection
+		f3offset := decoded.CodeSection[2].BodyOffsetInCodeSection
+
+		inst, err := r.Instantiate(ctx, encoded)
+		require.NoError(t, err)
+
+		f1Fn := inst.ExportedFunction("f1")
+		require.NotNil(t, f1Fn)
+
+		_, err = f1Fn.Call(ctx, 2, 3, 4)
+		require.NoError(t, err)
+
+		module, ok := inst.(*wasm.ModuleInstance)
+		require.True(t, ok)
+
+		defs := module.ExportedFunctionDefinitions()
+		f1 := defs["f1"]
+		f2 := defs["f2"]
+		f3 := defs["f3"]
+		t.Logf("f1 offset: %#x", f1offset)
+		t.Logf("f2 offset: %#x", f2offset)
+		t.Logf("f3 offset: %#x", f3offset)
+
+		expectedStacks := [][]frame{
+			{
+				{f1, f1offset + 0},
 			},
 			{
-				Body: []byte{
-					wasm.OpcodeI32Const, 6,
-					wasm.OpcodeCall, 2, // call f3
-					wasm.OpcodeEnd,
-				},
+				{f2, f2offset + 0},
+				{f1, f1offset + 8}, // index of call opcode in f1's code
 			},
-			{Body: []byte{wasm.OpcodeI32Const, 15, wasm.OpcodeEnd}},
-		},
-		ExportSection: []wasm.Export{
-			{Name: "f1", Type: wasm.ExternTypeFunc, Index: 0},
-			{Name: "f2", Type: wasm.ExternTypeFunc, Index: 1},
-			{Name: "f3", Type: wasm.ExternTypeFunc, Index: 2},
-		},
-		CustomSections: []*wasm.CustomSection{{Name: ".debug_info", Data: minimalDWARFInfo}},
-	})
-	decoded, err := binary.DecodeModule(encoded, api.CoreFeaturesV2, 0, false, 0, true, true)
-	require.NoError(t, err)
-
-	f1offset := decoded.CodeSection[0].BodyOffsetInCodeSection
-	f2offset := decoded.CodeSection[1].BodyOffsetInCodeSection
-	f3offset := decoded.CodeSection[2].BodyOffsetInCodeSection
-
-	inst, err := r.Instantiate(ctx, encoded)
-	require.NoError(t, err)
-
-	f1Fn := inst.ExportedFunction("f1")
-	require.NotNil(t, f1Fn)
-
-	_, err = f1Fn.Call(ctx, 2, 3, 4)
-	require.NoError(t, err)
-
-	module, ok := inst.(*wasm.ModuleInstance)
-	require.True(t, ok)
-
-	defs := module.ExportedFunctionDefinitions()
-	f1 := defs["f1"]
-	f2 := defs["f2"]
-	f3 := defs["f3"]
-	t.Logf("f1 offset: %#x", f1offset)
-	t.Logf("f2 offset: %#x", f2offset)
-	t.Logf("f3 offset: %#x", f3offset)
-
-	expectedStacks := [][]frame{
-		{
-			{f1, f1offset + 0},
-		},
-		{
-			{f2, f2offset + 0},
-			{f1, f1offset + 8}, // index of call opcode in f1's code
-		},
-		{
-			{f3, f3offset},     // host functions don't have a wasm code offset
-			{f2, f2offset + 2}, // index of call opcode in f2's code
-			{f1, f1offset + 8}, // index of call opcode in f1's code
-		},
-	}
-
-	for si, stack := range tape {
-		t.Log("Recorded stack", si, ":")
-		require.True(t, len(expectedStacks) > 0, "more recorded stacks than expected stacks")
-		expectedStack := expectedStacks[0]
-		expectedStacks = expectedStacks[1:]
-		for fi, frame := range stack {
-			t.Logf("\t%d -> %s :: %#x", fi, frame.function.Name(), frame.offset)
-			require.True(t, len(expectedStack) > 0, "more frames in stack than expected")
-			expectedFrame := expectedStack[0]
-			expectedStack = expectedStack[1:]
-			require.Equal(t, expectedFrame, frame)
+			{
+				{f3, f3offset},     // host functions don't have a wasm code offset
+				{f2, f2offset + 2}, // index of call opcode in f2's code
+				{f1, f1offset + 8}, // index of call opcode in f1's code
+			},
 		}
-		require.Zero(t, len(expectedStack), "expected more frames in stack")
+
+		for si, stack := range tape {
+			t.Log("Recorded stack", si, ":")
+			require.True(t, len(expectedStacks) > 0, "more recorded stacks than expected stacks")
+			expectedStack := expectedStacks[0]
+			expectedStacks = expectedStacks[1:]
+			for fi, frame := range stack {
+				t.Logf("\t%d -> %s :: %#x", fi, frame.function.Name(), frame.offset)
+				require.True(t, len(expectedStack) > 0, "more frames in stack than expected")
+				expectedFrame := expectedStack[0]
+				expectedStack = expectedStack[1:]
+				require.Equal(t, expectedFrame, frame)
+			}
+			require.Zero(t, len(expectedStack), "expected more frames in stack")
+		}
+		require.Zero(t, len(expectedStacks), "expected more stacks")
+		// Both runs instantiate the same named module into the same runtime.
+		require.NoError(t, inst.Close(ctx))
 	}
-	require.Zero(t, len(expectedStacks), "expected more stacks")
+
+	for _, dw := range []struct {
+		name string
+		info []byte
+	}{{"parseable", minimalDWARFInfo}, {"unparseable", unparseableDWARFInfo}} {
+		t.Run(dw.name, func(t *testing.T) { run(t, dw.info) })
+	}
 }
 
 // fnListener implements both api.FunctionListenerFactory and api.FunctionListener for testing.
