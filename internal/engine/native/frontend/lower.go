@@ -772,74 +772,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 			// Calculate the base address:
 			addr := builder.AllocateInstruction().AsIadd(c.getMemoryBaseValue(memIndex, false), offset).Insert(builder).Return()
 
-			if def := builder.InstructionOfValue(fillSizeOperand); def != nil && def.Constant() &&
-				def.ConstantVal() <= memoryFillInlineMaxBytes {
-				// A short constant fill is a handful of stores; producers emit
-				// it for every small struct or array zeroing.
-				c.inlineMemoryFill(addr, value, uint32(def.ConstantVal()))
-				break
-			}
-
-			// Uses the copy trick for faster filling buffer, with a maximum chunk size of 8KB.
-			// https://github.com/golang/go/blob/go1.24.0/src/bytes/bytes.go#L664-L673
-			//
-			// 	buf := memoryInst.Buffer[offset : offset+fillSize]
-			// 	buf[0] = value
-			// 	for i := 1; i < fillSize; {
-			// 		chunk := ((i - 1) & 8191) + 1
-			// 		copy(buf[i:], buf[:chunk])
-			// 		i += chunk
-			// 	}
-
-			// Prepare the loop and following block.
-			beforeLoop := builder.AllocateBasicBlock()
-			loopBlk := builder.AllocateBasicBlock()
-			loopVar := loopBlk.AddParam(builder, ssa.TypeI64)
-			followingBlk := builder.AllocateBasicBlock()
-
-			// Insert the jump to the beforeLoop block; If the fillSize is zero, then jump to the following block to skip entire logics.
-			zero := builder.AllocateInstruction().AsIconst64(0).Insert(builder).Return()
-			ifFillSizeZero := builder.AllocateInstruction().AsIcmp(fillSize, zero, ssa.IntegerCmpCondEqual).
-				Insert(builder).Return()
-			builder.AllocateInstruction().AsBrnz(ifFillSizeZero, ssa.ValuesNil, followingBlk).Insert(builder)
-			c.insertJumpToBlock(ssa.ValuesNil, beforeLoop)
-
-			// buf[0] = value
-			builder.SetCurrentBlock(beforeLoop)
-			builder.AllocateInstruction().AsStore(ssa.OpcodeIstore8, value, addr, 0).Insert(builder)
-			one := builder.AllocateInstruction().AsIconst64(1).Insert(builder).Return()
-			c.insertJumpToBlock(c.allocateVarLengthValues(1, one), loopBlk)
-
-			builder.SetCurrentBlock(loopBlk)
-			dstAddr := builder.AllocateInstruction().AsIadd(addr, loopVar).Insert(builder).Return()
-
-			// chunk := ((i - 1) & 8191) + 1
-			mask := builder.AllocateInstruction().AsIconst64(8191).Insert(builder).Return()
-			tmp1 := builder.AllocateInstruction().AsIsub(loopVar, one).Insert(builder).Return()
-			tmp2 := builder.AllocateInstruction().AsBand(tmp1, mask).Insert(builder).Return()
-			chunk := builder.AllocateInstruction().AsIadd(tmp2, one).Insert(builder).Return()
-
-			// i += chunk
-			newLoopVar := builder.AllocateInstruction().AsIadd(loopVar, chunk).Insert(builder).Return()
-			newLoopVarLessThanFillSize := builder.AllocateInstruction().
-				AsIcmp(newLoopVar, fillSize, ssa.IntegerCmpCondUnsignedLessThan).Insert(builder).Return()
-
-			// count = min(chunk, fillSize-loopVar)
-			diff := builder.AllocateInstruction().AsIsub(fillSize, loopVar).Insert(builder).Return()
-			count := builder.AllocateInstruction().AsSelect(newLoopVarLessThanFillSize, chunk, diff).Insert(builder).Return()
-
-			c.callMemmove(dstAddr, addr, count)
-
-			builder.AllocateInstruction().
-				AsBrnz(newLoopVarLessThanFillSize, c.allocateVarLengthValues(1, newLoopVar), loopBlk).
-				Insert(builder)
-
-			c.insertJumpToBlock(ssa.ValuesNil, followingBlk)
-			builder.SetCurrentBlock(followingBlk)
-
-			builder.Seal(beforeLoop)
-			builder.Seal(loopBlk)
-			builder.Seal(followingBlk)
+			c.lowerMemoryFill(addr, value, fillSize, builder.InstructionOfValue(fillSizeOperand))
 
 		case wasm.OpcodeMiscMemoryInit:
 			index := c.readI32u()
@@ -4872,15 +4805,348 @@ func (c *Compiler) memAlignmentCheck(addr ssa.Value, operationSizeInBytes uint64
 }
 
 // memoryFillInlineMaxBytes is the largest compile-time-constant memory.fill
-// size lowered as straight-line stores instead of the copy-doubling memmove
-// loop. The ceiling is code size: at 128 bytes this is 16 eight-byte stores,
-// and past that the loop -- one Go-runtime memmove call, whatever the size --
-// is the better trade.
-const memoryFillInlineMaxBytes = 128
+// size lowered as straight-line stores instead of the general loop. The ceiling
+// is code size: at 256 bytes this is 16 sixteen-byte stores, and past that the
+// loop's four stores per iteration are the better trade.
+const memoryFillInlineMaxBytes = 256
+
+// memoryFillMemclrMinBytes is the smallest zero fill dispatched to the Go
+// runtime's memclrNoHeapPointers instead of the inline store loop. Below it the
+// inline loop's few nanoseconds beat the call; above it memclr's wider (and,
+// for very large sizes, non-temporal) stores win and the call is noise.
+const memoryFillMemclrMinBytes = 1024
+
+// memoryFillMainLoopBytes is how much the main loop writes per iteration: four
+// 128-bit stores. Fills shorter than this skip it entirely.
+const memoryFillMainLoopBytes = 64
+
+// lowerMemoryFill emits the body of memory.fill for a region whose bounds the
+// caller has already checked. sizeDef is the defining instruction of the
+// *unextended* size operand, or nil; when it is a constant every dispatch the
+// general lowering would make at run time is known now, so only the one arm
+// that applies is emitted.
+func (c *Compiler) lowerMemoryFill(addr, value, fillSize ssa.Value, sizeDef *ssa.Instruction) {
+	knownSize := int64(-1)
+	if sizeDef != nil && sizeDef.Constant() {
+		knownSize = int64(sizeDef.ConstantVal())
+	}
+
+	if knownSize >= 0 {
+		switch {
+		case knownSize == 0:
+			// Bounds were still checked above; nothing is written.
+			return
+		case knownSize <= memoryFillInlineMaxBytes:
+			// A short constant fill is a handful of stores; producers emit it
+			// for every small struct or array zeroing.
+			c.inlineMemoryFill(addr, value, uint32(knownSize))
+			return
+		case knownSize >= memoryFillMemclrMinBytes && c.constantFillByte(value) == 0:
+			// A large constant zero fill -- a buffer clear -- goes straight to
+			// memclr with no run-time dispatch at all.
+			c.callMemclr(addr, fillSize)
+			return
+		}
+	}
+
+	c.memoryFillLoops(addr, value, fillSize, knownSize)
+}
+
+// constantFillByte returns the low byte memory.fill would write when value is a
+// compile-time constant, or -1 when it is not.
+func (c *Compiler) constantFillByte(value ssa.Value) int64 {
+	def := c.ssaBuilder.InstructionOfValue(value)
+	if def == nil || !def.Constant() {
+		return -1
+	}
+	return int64(def.ConstantVal() & 0xff)
+}
+
+// memoryFillLoops emits the general memory.fill: inline 128-bit stores in a
+// 64-bytes-per-iteration main loop and a 16-byte loop for the remainder, with
+// large zero fills dispatched to the Go runtime's memclrNoHeapPointers.
+// knownSize is the compile-time-constant byte count, or -1; it only suppresses
+// dispatch tests whose outcome is already known.
+//
+// Adapted from wazero (wazero/wazero#2538, Apache-2.0), which introduced this
+// shape in place of the copy-doubling memmove loop. Where upstream finishes a
+// non-multiple-of-16 fill with a byte-at-a-time loop, this ends it with one
+// 128-bit store overlapping the previous one, which is always in bounds because
+// the whole region was checked: at most one extra store instead of up to fifteen.
+// A region shorter than a vector cannot use that, and takes the scalar ladder
+// instead -- still not a loop.
+//
+//	if fillSize < 16 { scalar ladder; done }
+//	if fillSize >= 64 && fillSize >= 1024 && (value&0xff) == 0 {
+//		memclr(addr, fillSize); done
+//	}
+//	pattern := i8x16.splat(value)
+//	last, i := fillSize-16, 0
+//	for ; i+64 <= fillSize; i += 64 { store128x4(addr+i, pattern) }
+//	for ; i < last; i += 16 { store128(addr+i, pattern) }
+//	store128(addr+last, pattern)
+func (c *Compiler) memoryFillLoops(addr, value, fillSize ssa.Value, knownSize int64) {
+	builder := c.ssaBuilder
+
+	// A constant size settles every dispatch test at compile time; a constant
+	// value settles half of the memclr one. lowerMemoryFill has already taken
+	// every constant size up to memoryFillInlineMaxBytes, so a known size here
+	// always reaches the main loop and never the byte tail.
+	sizeUnknown := knownSize < 0
+	// The byte is either not known (so it may be zero at run time) or known to
+	// be zero -- a known nonzero byte can never go to memclr.
+	byteMayBeZero := c.constantFillByte(value) <= 0
+	mayMemclr := byteMayBeZero && (sizeUnknown || knownSize >= memoryFillMemclrMinBytes)
+
+	mainLoopBlk := builder.AllocateBasicBlock()
+	mainLoopVar := mainLoopBlk.AddParam(builder, ssa.TypeI64)
+	midLoopBlk := builder.AllocateBasicBlock()
+	midLoopVar := midLoopBlk.AddParam(builder, ssa.TypeI64)
+	midBodyBlk := builder.AllocateBasicBlock()
+	lastStoreBlk := builder.AllocateBasicBlock()
+	followingBlk := builder.AllocateBasicBlock()
+
+	zero := builder.AllocateInstruction().AsIconst64(0).Insert(builder).Return()
+	sixteen := builder.AllocateInstruction().AsIconst64(16).Insert(builder).Return()
+	mainStep := builder.AllocateInstruction().AsIconst64(memoryFillMainLoopBytes).Insert(builder).Return()
+
+	// The offset of the final, overlapping vector store -- it underflows for a
+	// region shorter than a vector, which is why that case never reaches it --
+	// and the 128-bit splat pattern shared by both store loops. Both are built
+	// as late as still dominates every use: a run-time size builds them past the
+	// short-region branch, so the scalar ladder -- which uses neither -- does not
+	// pay for them. A constant size builds them here. (They are dead on the one
+	// constant-size arm that reaches memclr, which is a constant size over the
+	// memclr floor with a run-time fill byte; sinking them past that branch too
+	// would need a block of their own, which is not worth it for one Isub and
+	// one splat in front of a memclr call.)
+	var lastOff, pattern ssa.Value
+	buildVectorOperands := func() {
+		lastOff = builder.AllocateInstruction().AsIsub(fillSize, sixteen).Insert(builder).Return()
+		pattern = c.splatFillByte(value)
+	}
+	if !sizeUnknown {
+		buildVectorOperands()
+	}
+
+	if sizeUnknown {
+		// Anything shorter than one vector -- zero-length included -- takes the
+		// scalar ladder, and nothing else does.
+		smallBlk := builder.AllocateBasicBlock()
+		belowVector := builder.AllocateInstruction().
+			AsIcmp(fillSize, sixteen, ssa.IntegerCmpCondUnsignedLessThan).Insert(builder).Return()
+		builder.AllocateInstruction().AsBrnz(belowVector, ssa.ValuesNil, smallBlk).Insert(builder)
+
+		gateBlk := builder.AllocateBasicBlock()
+		c.insertJumpToBlock(ssa.ValuesNil, gateBlk)
+
+		builder.SetCurrentBlock(smallBlk)
+		c.smallFillLadder(addr, value, fillSize, followingBlk)
+		builder.Seal(smallBlk)
+
+		builder.SetCurrentBlock(gateBlk)
+		builder.Seal(gateBlk)
+
+		// Between one and four vectors: skip the main loop.
+		// gateBlk dominates every vector user, so the splat and the tail offset
+		// are built here rather than in the entry block, where the ladder above
+		// -- which uses neither -- would pay for them.
+		buildVectorOperands()
+
+		belowMain := builder.AllocateInstruction().
+			AsIcmp(fillSize, mainStep, ssa.IntegerCmpCondUnsignedLessThan).Insert(builder).Return()
+		builder.AllocateInstruction().
+			AsBrnz(belowMain, c.allocateVarLengthValues(1, zero), midLoopBlk).
+			Insert(builder)
+
+		mainGateBlk := builder.AllocateBasicBlock()
+		c.insertJumpToBlock(ssa.ValuesNil, mainGateBlk)
+		builder.SetCurrentBlock(mainGateBlk)
+		builder.Seal(mainGateBlk)
+	}
+
+	if mayMemclr {
+		memclrBlk := builder.AllocateBasicBlock()
+		cond := c.memclrDispatchCond(value, fillSize, zero, sizeUnknown)
+		builder.AllocateInstruction().AsBrnz(cond, ssa.ValuesNil, memclrBlk).Insert(builder)
+		c.insertJumpToBlock(c.allocateVarLengthValues(1, zero), mainLoopBlk)
+
+		builder.SetCurrentBlock(memclrBlk)
+		c.callMemclr(addr, fillSize)
+		c.insertJumpToBlock(ssa.ValuesNil, followingBlk)
+		builder.Seal(memclrBlk)
+	} else {
+		c.insertJumpToBlock(c.allocateVarLengthValues(1, zero), mainLoopBlk)
+	}
+
+	// Main loop: four 16-byte stores per iteration. Only entered while
+	// mainLoopVar+64 <= fillSize, so the stores stay inside the checked region.
+	builder.SetCurrentBlock(mainLoopBlk)
+	mainDst := builder.AllocateInstruction().AsIadd(addr, mainLoopVar).Insert(builder).Return()
+	for off := uint32(0); off < memoryFillMainLoopBytes; off += 16 {
+		builder.AllocateInstruction().AsStore(ssa.OpcodeStore, pattern, mainDst, off).Insert(builder)
+	}
+	newMainLoopVar := builder.AllocateInstruction().AsIadd(mainLoopVar, mainStep).Insert(builder).Return()
+	nextMainCeil := builder.AllocateInstruction().AsIadd(newMainLoopVar, mainStep).Insert(builder).Return()
+	canContinueMain := builder.AllocateInstruction().
+		AsIcmp(nextMainCeil, fillSize, ssa.IntegerCmpCondUnsignedLessThanOrEqual).Insert(builder).Return()
+	builder.AllocateInstruction().
+		AsBrnz(canContinueMain, c.allocateVarLengthValues(1, newMainLoopVar), mainLoopBlk).
+		Insert(builder)
+	// When the main loop consumed the region exactly there is nothing left, and
+	// the overlapping store below would rewrite a vector for no reason. Every
+	// other exit leaves between 1 and 63 bytes, which the 16-byte loop and that
+	// store cover between them.
+	mainDoneBlk := builder.AllocateBasicBlock()
+	c.insertJumpToBlock(ssa.ValuesNil, mainDoneBlk)
+	builder.SetCurrentBlock(mainDoneBlk)
+	mainConsumedAll := builder.AllocateInstruction().
+		AsIcmp(newMainLoopVar, fillSize, ssa.IntegerCmpCondUnsignedGreaterThanOrEqual).Insert(builder).Return()
+	builder.AllocateInstruction().AsBrnz(mainConsumedAll, ssa.ValuesNil, followingBlk).Insert(builder)
+	c.insertJumpToBlock(c.allocateVarLengthValues(1, newMainLoopVar), midLoopBlk)
+	builder.Seal(mainDoneBlk)
+
+	// 16-byte loop header: strict, so the last vector is left to the
+	// overlapping store below rather than written twice on an exact multiple.
+	builder.SetCurrentBlock(midLoopBlk)
+	midDone := builder.AllocateInstruction().
+		AsIcmp(midLoopVar, lastOff, ssa.IntegerCmpCondUnsignedGreaterThanOrEqual).Insert(builder).Return()
+	builder.AllocateInstruction().AsBrnz(midDone, ssa.ValuesNil, lastStoreBlk).Insert(builder)
+	c.insertJumpToBlock(ssa.ValuesNil, midBodyBlk)
+
+	builder.SetCurrentBlock(midBodyBlk)
+	midDst := builder.AllocateInstruction().AsIadd(addr, midLoopVar).Insert(builder).Return()
+	builder.AllocateInstruction().AsStore(ssa.OpcodeStore, pattern, midDst, 0).Insert(builder)
+	midCeil := builder.AllocateInstruction().AsIadd(midLoopVar, sixteen).Insert(builder).Return()
+	c.insertJumpToBlock(c.allocateVarLengthValues(1, midCeil), midLoopBlk)
+
+	// The last vector, overlapping whatever the loops already wrote.
+	builder.SetCurrentBlock(lastStoreBlk)
+	lastDst := builder.AllocateInstruction().AsIadd(addr, lastOff).Insert(builder).Return()
+	builder.AllocateInstruction().AsStore(ssa.OpcodeStore, pattern, lastDst, 0).Insert(builder)
+	c.insertJumpToBlock(ssa.ValuesNil, followingBlk)
+
+	builder.SetCurrentBlock(followingBlk)
+
+	builder.Seal(mainLoopBlk)
+	builder.Seal(midLoopBlk)
+	builder.Seal(midBodyBlk)
+	builder.Seal(lastStoreBlk)
+	builder.Seal(followingBlk)
+}
+
+// memclrDispatchCond builds the run-time test that sends a fill to memclr:
+// the byte is zero and the region is at least memoryFillMemclrMinBytes. Either
+// half is dropped when it is already known.
+func (c *Compiler) memclrDispatchCond(value, fillSize, zero ssa.Value, sizeUnknown bool) ssa.Value {
+	builder := c.ssaBuilder
+	// Not the zero Value: that is a legitimate value ID, so an unset cond has
+	// to be the invalid one for the Valid() test below to mean anything.
+	cond := ssa.ValueInvalid
+	if b := c.constantFillByte(value); b < 0 {
+		valueU64 := builder.AllocateInstruction().AsUExtend(value, 32, 64).Insert(builder).Return()
+		ff := builder.AllocateInstruction().AsIconst64(0xff).Insert(builder).Return()
+		valueByte := builder.AllocateInstruction().AsBand(valueU64, ff).Insert(builder).Return()
+		cond = builder.AllocateInstruction().
+			AsIcmp(valueByte, zero, ssa.IntegerCmpCondEqual).Insert(builder).Return()
+	}
+	if sizeUnknown {
+		kilo := builder.AllocateInstruction().AsIconst64(memoryFillMemclrMinBytes).Insert(builder).Return()
+		big := builder.AllocateInstruction().
+			AsIcmp(fillSize, kilo, ssa.IntegerCmpCondUnsignedGreaterThanOrEqual).Insert(builder).Return()
+		if cond.Valid() {
+			cond = builder.AllocateInstruction().AsBand(cond, big).Insert(builder).Return()
+		} else {
+			cond = big
+		}
+	}
+	return cond
+}
+
+// scalarFillWord broadcasts value's low byte across a 64-bit word, so one
+// 8-byte store covers eight bytes. A constant byte folds; otherwise multiplying
+// by 0x01..01 is the cheapest way there.
+func (c *Compiler) scalarFillWord(value ssa.Value) ssa.Value {
+	builder := c.ssaBuilder
+	if b := c.constantFillByte(value); b >= 0 {
+		return builder.AllocateInstruction().
+			AsIconst64(uint64(b) * 0x0101010101010101).Insert(builder).Return()
+	}
+	mask := builder.AllocateInstruction().AsIconst32(0xff).Insert(builder).Return()
+	lowByte := builder.AllocateInstruction().AsBand(value, mask).Insert(builder).Return()
+	wide := builder.AllocateInstruction().AsUExtend(lowByte, 32, 64).Insert(builder).Return()
+	factor := builder.AllocateInstruction().AsIconst64(0x0101010101010101).Insert(builder).Return()
+	return builder.AllocateInstruction().AsImul(wide, factor).Insert(builder).Return()
+}
+
+// smallFillLadder fills a run-time region shorter than one vector: a descending
+// ladder of overlapping power-of-two stores, at most four compares and two
+// stores, where a byte-at-a-time loop would take up to fifteen of each. The
+// caller has already established fillSize < 16 and jumps here; every block ends
+// at followingBlk.
+func (c *Compiler) smallFillLadder(addr, value, fillSize ssa.Value, followingBlk ssa.BasicBlock) {
+	builder := c.ssaBuilder
+	splat := c.scalarFillWord(value)
+
+	// The pair of overlapping stores for one width, then out.
+	pair := func(op ssa.Opcode, width uint64) {
+		builder.AllocateInstruction().AsStore(op, splat, addr, 0).Insert(builder)
+		w := builder.AllocateInstruction().AsIconst64(width).Insert(builder).Return()
+		off := builder.AllocateInstruction().AsIsub(fillSize, w).Insert(builder).Return()
+		dst := builder.AllocateInstruction().AsIadd(addr, off).Insert(builder).Return()
+		builder.AllocateInstruction().AsStore(op, splat, dst, 0).Insert(builder)
+		c.insertJumpToBlock(ssa.ValuesNil, followingBlk)
+	}
+
+	for _, rung := range []struct {
+		width uint64
+		op    ssa.Opcode
+	}{{8, ssa.OpcodeStore}, {4, ssa.OpcodeIstore32}, {2, ssa.OpcodeIstore16}} {
+		takeBlk := builder.AllocateBasicBlock()
+		nextBlk := builder.AllocateBasicBlock()
+		w := builder.AllocateInstruction().AsIconst64(rung.width).Insert(builder).Return()
+		fits := builder.AllocateInstruction().
+			AsIcmp(fillSize, w, ssa.IntegerCmpCondUnsignedGreaterThanOrEqual).Insert(builder).Return()
+		builder.AllocateInstruction().AsBrnz(fits, ssa.ValuesNil, takeBlk).Insert(builder)
+		c.insertJumpToBlock(ssa.ValuesNil, nextBlk)
+
+		builder.SetCurrentBlock(takeBlk)
+		pair(rung.op, rung.width)
+		builder.Seal(takeBlk)
+
+		builder.SetCurrentBlock(nextBlk)
+		builder.Seal(nextBlk)
+	}
+
+	// One byte left, or none at all -- the zero-length case, whose bounds the
+	// caller has already checked.
+	oneBlk := builder.AllocateBasicBlock()
+	zero := builder.AllocateInstruction().AsIconst64(0).Insert(builder).Return()
+	nonEmpty := builder.AllocateInstruction().
+		AsIcmp(fillSize, zero, ssa.IntegerCmpCondNotEqual).Insert(builder).Return()
+	builder.AllocateInstruction().AsBrnz(nonEmpty, ssa.ValuesNil, oneBlk).Insert(builder)
+	c.insertJumpToBlock(ssa.ValuesNil, followingBlk)
+
+	builder.SetCurrentBlock(oneBlk)
+	builder.AllocateInstruction().AsStore(ssa.OpcodeIstore8, value, addr, 0).Insert(builder)
+	c.insertJumpToBlock(ssa.ValuesNil, followingBlk)
+	builder.Seal(oneBlk)
+}
+
+// splatFillByte broadcasts value's low byte across a 128-bit vector. A constant
+// byte becomes a vector constant; otherwise it is one i8x16.splat.
+func (c *Compiler) splatFillByte(value ssa.Value) ssa.Value {
+	builder := c.ssaBuilder
+	if b := c.constantFillByte(value); b >= 0 {
+		word := uint64(b) * 0x0101010101010101
+		return builder.AllocateInstruction().AsVconst(word, word).Insert(builder).Return()
+	}
+	return builder.AllocateInstruction().AsSplat(value, ssa.VecLaneI8x16).Insert(builder).Return()
+}
 
 // inlineMemoryFill writes size bytes of value's low byte at addr with plain
 // stores. Its caller has already emitted the bounds check, so the
-// trap-before-any-write ordering of the memmove loop it replaces is kept, as is
+// trap-before-any-write ordering of the loop it replaces is kept, as is
 // the zero-size case: bounds are still checked, and nothing is written.
 func (c *Compiler) inlineMemoryFill(addr, value ssa.Value, size uint32) {
 	if size == 0 {
@@ -4888,32 +5154,32 @@ func (c *Compiler) inlineMemoryFill(addr, value ssa.Value, size uint32) {
 	}
 	builder := c.ssaBuilder
 
-	// One 8-byte store covers 8 bytes only if the byte is splatted across the
-	// whole word first; multiplying by 0x01..01 is the cheapest way there.
-	var splat ssa.Value
-	if def := builder.InstructionOfValue(value); def != nil && def.Constant() {
-		splat = builder.AllocateInstruction().
-			AsIconst64((def.ConstantVal() & 0xff) * 0x0101010101010101).Insert(builder).Return()
-	} else {
-		mask := builder.AllocateInstruction().AsIconst32(0xff).Insert(builder).Return()
-		lowByte := builder.AllocateInstruction().AsBand(value, mask).Insert(builder).Return()
-		wide := builder.AllocateInstruction().AsUExtend(lowByte, 32, 64).Insert(builder).Return()
-		factor := builder.AllocateInstruction().AsIconst64(0x0101010101010101).Insert(builder).Return()
-		splat = builder.AllocateInstruction().AsImul(wide, factor).Insert(builder).Return()
+	if size >= 16 {
+		// 128-bit stores: two per cycle on every core that sustains two stores
+		// per cycle regardless of width, so half the instructions of the 8-byte
+		// sequence for the same bytes. The last store overlaps the previous one
+		// when size is not a multiple of 16, which is cheaper than stepping
+		// down through narrower stores.
+		pattern := c.splatFillByte(value)
+		var off uint32
+		for ; off+16 <= size; off += 16 {
+			builder.AllocateInstruction().AsStore(ssa.OpcodeStore, pattern, addr, off).Insert(builder)
+		}
+		if off < size {
+			builder.AllocateInstruction().AsStore(ssa.OpcodeStore, pattern, addr, size-16).Insert(builder)
+		}
+		return
 	}
+
+	splat := c.scalarFillWord(value)
 
 	store := func(op ssa.Opcode, offset uint32) {
 		builder.AllocateInstruction().AsStore(op, splat, addr, offset).Insert(builder)
 	}
 	switch {
 	case size >= 8:
-		// The last store overlaps the previous one when size is not a multiple
-		// of 8, which is cheaper than stepping down through narrower stores.
-		var off uint32
-		for ; off+8 <= size; off += 8 {
-			store(ssa.OpcodeStore, off)
-		}
-		if off < size {
+		store(ssa.OpcodeStore, 0)
+		if size > 8 {
 			store(ssa.OpcodeStore, size-8)
 		}
 	case size >= 4:
@@ -4929,6 +5195,23 @@ func (c *Compiler) inlineMemoryFill(addr, value ssa.Value, size uint32) {
 	default:
 		store(ssa.OpcodeIstore8, 0)
 	}
+}
+
+// callMemclr emits a call to the Go runtime's memclrNoHeapPointers through the
+// same mechanism as callMemmove: the isMemmove call handling covers memclr too,
+// since both may clobber every vector register.
+//
+// This, memclr.go and the execution-context slot behind it are adapted from
+// wazero (wazero/wazero#2538, Apache-2.0) along with memoryFillLoops.
+func (c *Compiler) callMemclr(ptr, size ssa.Value) {
+	args := c.allocateVarLengthValues(2, ptr, size)
+	builder := c.ssaBuilder
+	memclrPtr := builder.AllocateInstruction().
+		AsLoad(c.execCtxPtrValue,
+			nativeapi.ExecutionContextOffsetMemclrAddress.U32(),
+			ssa.TypeI64,
+		).Insert(builder).Return()
+	builder.AllocateInstruction().AsCallGoRuntimeMemclr(memclrPtr, &c.memclrSig, args).Insert(builder)
 }
 
 func (c *Compiler) callMemmove(dst, src, size ssa.Value) {

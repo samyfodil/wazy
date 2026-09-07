@@ -1625,7 +1625,161 @@ L0 (SSA Block: blk0):
 `,
 		},
 		{
+			name: "memory_fill_memclr", m: testcases.MemoryFillMemclr.Module,
+			afterFinalizeAMD64: `
+L0 (SSA Block: blk0):
+	pushq %rbp
+	movq %rsp, %rbp
+	sub $128, %rsp
+	movdqu %xmm8, (%rsp)
+	movdqu %xmm9, 16(%rsp)
+	movdqu %xmm10, 32(%rsp)
+	movdqu %xmm11, 48(%rsp)
+	movdqu %xmm12, 64(%rsp)
+	movdqu %xmm13, 80(%rsp)
+	movdqu %xmm14, 96(%rsp)
+	movdqu %xmm15, 112(%rsp)
+	pushq %rdx
+	sub $32, %rsp
+	mov.q %rax, (%rsp)
+	mov.q %rax, 16(%rsp)
+	movl $1024, %edx
+	movzx.lq %rdx, %rdx
+	movzx.lq %rcx, %rcx
+	movq 16(%rbx), %rsi
+	lea (%rcx,%rdx,1), %rdi
+	cmpq %rdi, %rsi
+	jb L2
+	movq 8(%rbx), %rbx
+	lea (%rbx,%rcx,1), %rcx
+	movq %rcx, %rax
+	movq %rdx, %rbx
+	defineUninitializedReg %xmm0
+	defineUninitializedReg %xmm1
+	defineUninitializedReg %xmm2
+	defineUninitializedReg %xmm3
+	defineUninitializedReg %xmm4
+	defineUninitializedReg %xmm5
+	defineUninitializedReg %xmm6
+	defineUninitializedReg %xmm7
+	defineUninitializedReg %xmm8
+	defineUninitializedReg %xmm9
+	defineUninitializedReg %xmm10
+	defineUninitializedReg %xmm11
+	defineUninitializedReg %xmm12
+	defineUninitializedReg %xmm13
+	defineUninitializedReg %xmm14
+	defineUninitializedReg %xmm15
+	defineUninitializedReg %rdx
+	pxor %xmm15, %xmm15
+	movq 16(%rsp), %rcx
+	callq *760(%rcx)
+	nop_use_reg %xmm0
+	nop_use_reg %xmm1
+	nop_use_reg %xmm2
+	nop_use_reg %xmm3
+	nop_use_reg %xmm4
+	nop_use_reg %xmm5
+	nop_use_reg %xmm6
+	nop_use_reg %xmm7
+	nop_use_reg %xmm8
+	nop_use_reg %xmm9
+	nop_use_reg %xmm10
+	nop_use_reg %xmm11
+	nop_use_reg %xmm12
+	nop_use_reg %xmm13
+	nop_use_reg %xmm14
+	nop_use_reg %xmm15
+	nop_use_reg %rdx
+	add $32, %rsp
+	popq %rdx
+	movdqu (%rsp), %xmm8
+	movdqu 16(%rsp), %xmm9
+	movdqu 32(%rsp), %xmm10
+	movdqu 48(%rsp), %xmm11
+	movdqu 64(%rsp), %xmm12
+	movdqu 80(%rsp), %xmm13
+	movdqu 96(%rsp), %xmm14
+	movdqu 112(%rsp), %xmm15
+	add $128, %rsp
+	movq %rbp, %rsp
+	popq %rbp
+	ret
+L2:
+	movq (%rsp), %rax
+	mov.q %rsp, 56(%rax)
+	mov.q %rbp, 640(%rax)
+	movl $4, %ebp
+	mov.l %rbp, (%rax)
+L3:
+	lea L3, %rbp
+	mov.q %rbp, 48(%rax)
+	exit_sequence %rax
+`,
+			afterFinalizeARM64: `
+L0 (SSA Block: blk0):
+	stp x30, xzr, [sp, #-0x10]!
+	str xzr, [sp, #-0x10]!
+	orr w8, wzr, #0x400
+	uxtw x8, w8
+	uxtw x9, w2
+	ldr x10, [x1, #0x10]
+	add x11, x9, x8
+	subs xzr, x10, x11
+	mov x27, x0
+	b.lo #0x28, (L2)
+	ldr x10, [x1, #0x8]
+	add x9, x10, x9
+	ldr x10, [x0, #0x2f8]
+	mov x0, x9
+	mov x1, x8
+	bl x10
+	add sp, sp, #0x10
+	ldr x30, [sp], #0x10
+	ret
+L2:
+	movz x17, #0x4, lsl 0
+	str w17, [x27]
+	mov x17, sp
+	str x17, [x27, #0x38]
+	adr x17, #0x0
+	str x17, [x27, #0x30]
+	exit_sequence x27
+`,
+		},
+		{
 			name: "memory_load_basic", m: testcases.MemoryLoadBasic.Module,
+			afterFinalizeAMD64: `
+L0 (SSA Block: blk0):
+	pushq %rbp
+	movq %rsp, %rbp
+	pushq %rdx
+	sub $16, %rsp
+	mov.q %rax, (%rsp)
+	movzx.lq %rcx, %rcx
+	movq 16(%rbx), %rdx
+	lea 4(%rcx), %rsi
+	cmpq %rsi, %rdx
+	jb L2
+	movq 8(%rbx), %rdx
+	movzx.lq (%rdx,%rcx,1), %rcx
+	movl %ecx, %eax
+	add $16, %rsp
+	popq %rdx
+	movq %rbp, %rsp
+	popq %rbp
+	ret
+L2:
+	movq (%rsp), %rax
+	mov.q %rsp, 56(%rax)
+	mov.q %rbp, 640(%rax)
+	movl $4, %ebp
+	mov.l %rbp, (%rax)
+L3:
+	lea L3, %rbp
+	mov.q %rbp, 48(%rax)
+	exit_sequence %rax
+`,
 			afterLoweringARM64: `
 L0 (SSA Block: blk0):
 	mov x128?, x0
@@ -1904,7 +2058,75 @@ L2:
 		},
 		{
 			name: "AtomicRmwAdd",
-			m:    testcases.AtomicRmwAdd.Module,
+			afterFinalizeAMD64: `
+L0 (SSA Block: blk0):
+	pushq %rbp
+	movq %rsp, %rbp
+	pushq %rdx
+	sub $16, %rsp
+	mov.q %rax, (%rsp)
+	movq 8(%rbx), %rdx
+	lock xadd.b %rcx, (%rdx)
+	movzx.bl %rcx, %rcx
+	movl $8, %ebx
+	movzx.lq %rbx, %rbx
+	lea (%rdx,%rbx,1), %rbx
+	testq $1, %rbx
+	jnz L2
+	lock xadd.w %rdi, (%rbx)
+	movzx.wl %rdi, %rdi
+	movq %rdi, %rbx
+	movl $16, %edi
+	movzx.lq %rdi, %rdi
+	lea (%rdx,%rdi,1), %rdi
+	testq $3, %rdi
+	jnz L2
+	lock xadd.l %rsi, (%rdi)
+	lock xadd.b %r8, 24(%rdx)
+	movzx.bq %r8, %r8
+	movq %r8, %rdi
+	movl $32, %r8d
+	movzx.lq %r8, %r8
+	lea (%rdx,%r8,1), %r8
+	testq $1, %r8
+	jnz L2
+	lock xadd.w %r9, (%r8)
+	movzx.wq %r9, %r9
+	movl $40, %r8d
+	movzx.lq %r8, %r8
+	lea (%rdx,%r8,1), %r8
+	testq $3, %r8
+	jnz L2
+	lock xadd.l %r10, (%r8)
+	movzx.lq %r10, %r10
+	movq %r10, %r8
+	movl $48, %r10d
+	movzx.lq %r10, %r10
+	lea (%rdx,%r10,1), %rdx
+	testq $7, %rdx
+	jnz L2
+	lock xadd.q %r11, (%rdx)
+	movl %ecx, %eax
+	movl %esi, %ecx
+	movq %r9, %rsi
+	movq %r11, %r9
+	add $16, %rsp
+	popq %rdx
+	movq %rbp, %rsp
+	popq %rbp
+	ret
+L2:
+	movq (%rsp), %rax
+	mov.q %rsp, 56(%rax)
+	mov.q %rbp, 640(%rax)
+	movl $23, %ebp
+	mov.l %rbp, (%rax)
+L3:
+	lea L3, %rbp
+	mov.q %rbp, 48(%rax)
+	exit_sequence %rax
+`,
+			m: testcases.AtomicRmwAdd.Module,
 			afterFinalizeARM64: `
 L0 (SSA Block: blk0):
 	orr x27, xzr, #0x10

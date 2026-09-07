@@ -291,9 +291,12 @@ type (
 		// frequency can be retuned (e.g. for an observed-hot loop) without a
 		// recompile. mask==0 => check every iteration.
 		interruptCheckMask uint64
-		// gcCheckTrampolineAddress holds the address of the GC runtime type check trampoline. It is last in
-		// this struct because the offsets in nativeapi are hand-maintained and additions go at the end.
+		// gcCheckTrampolineAddress holds the address of the GC runtime type check trampoline.
 		gcCheckTrampolineAddress *byte
+		// memclrAddress holds the address of memclrNoHeapPointers implemented by the Go
+		// runtime. See memclr.go. It is last in this struct because the offsets in
+		// nativeapi are hand-maintained and additions go at the end.
+		memclrAddress uintptr
 	}
 )
 
