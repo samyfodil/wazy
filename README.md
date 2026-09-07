@@ -209,6 +209,7 @@ Measured against wazero in the same runs, on the same workloads:
 | **Instantiate** | **9.1x** | 1.724 µs vs 15.74 µs, on a 37 KB TinyGo module. |
 | **Interruptible loops** (`WithCloseOnContextDone`) | **12–13x**; +5% vs +75% overhead | On a loop calling a host function each iteration. The check is amortized, not a Go round-trip per iteration; a near-empty compute kernel is the worst case at 1.7–2.4x, tunable with `WithInterruptCheckInterval`. Against `wazero@main`. |
 | **Compiled execution** | memory-heavy code leads | `string_manipulation` −18%, `reverse_array` −14%, `base64` −12%, `fibonacci` a wash — the advantage tracks memory-access intensity, not arithmetic. |
+| **`memory.fill`** | **1.68x** | Geomean over a size sweep, against wazero *at HEAD* — i.e. with its own inline-store rewrite already in it. 7.1x at 15 bytes and 4.6x at 31, down to parity once the fill is memory-bandwidth-bound at 64 KiB. Constant-size clears 1.8–2.5x. |
 | **Host calls** (Go ↔ Wasm) | a tie | 47.8 ns here, 48.3 ns there, on the `WithGoModuleFunction` arm both runtimes implement the same way. The win is structural, not per-call: see below. |
 | **Cumulative** | geomean **−17.8%**, B/op **−22.9%** | Across `internal/integration_test/bench`, versus the wazero fork point, with upstream wazero as a control in the same runs — its arms stayed flat. |
 
@@ -223,27 +224,40 @@ These are wazy before and after its own optimization work — not a wazero compa
 | **Interpreter** | a benchmark that allocated 1.35M times now allocates twice | **~30%** |
 | **Memory per call** | 11784 B / 3 allocs → 1551 B / 2 allocs | **−87%** |
 | **Compile**, real modules | 5 KB Zig 753.3 µs → 556.4 µs; 10 KB Rust 1132.7 µs → 871.3 µs | **−23% to −26%** |
+| **`memory.fill`** | a size sweep, geomean; −91% at 64 bytes | **−79%** |
 
 The host-call row is the one worth reading twice. wazy deleted reflection-based registration rather than optimizing it, so the 14.5x is against the path that no longer exists — wazero still ships one. `memory.grow` is opt-in via `WithMemoryCapacityReservePages`; out-of-capacity, shared and imported memories keep the safe Go path.
 
 The head-to-head module also carries a three-way comparison against wasmtime (`BenchmarkExecute3`, `BenchmarkCompile3`, `BenchmarkExecute3Heavy`, `BenchmarkRelaxedSimd`); those arms link `wasmtime-go`, so they need cgo — an irony worth stating on a page selling `CGO_ENABLED=0`.
 
-### At scale: a 6.5 MB Rust module, measured by someone else
+### At scale: a 6.5 MB Rust module
 
-The suites above are kernels. [go-anydoc][anydoc] measured two orders of magnitude up: a 6.5 MB `wasm32-wasip1` command module (Rust 1.88, `opt-level = 3`, `wasm-opt -O3`) run as a single instantiate — stdin in, stdout out, a long stretch of compute between. Same `.wasm`, same input, same machine, identical output, `CompileModule` excluded from every timing.
+The suites above are kernels. [go-anydoc][anydoc] is two orders of magnitude up: a 6.5 MB
+`wasm32-wasip1` command module (Rust 1.88, `opt-level = 3`, `wasm-opt -O3`) run as a single
+instantiate — stdin in, stdout out, a long stretch of compute between. Same `.wasm`, same input,
+same machine, identical output, `CompileModule` excluded from every timing.
 
 | Converting | wazero v1.12.0 | wazy | |
 | --- | :---: | :---: | :---: |
-| 1 KB docx, compiled | 0.4 ms | 0.62 ms | **0.6x — wazero wins** |
-| 5 MB docx body, compiled | 0.86 s | 0.19 s | 4.5x |
-| 7.5 MB PDF, compiled | 3.4 s | 0.75 s | 4.5x |
-| 1 KB docx, interpreted | 3.5 ms | 2.7 ms | 1.3x |
-| 5 MB docx body, interpreted | 11.1 s | 8.6 s | 1.3x |
-| 7.5 MB PDF, interpreted | 41.4 s | 32.6 s | 1.3x |
+| 1 KB docx, compiled | 0.46 ms | 0.35 ms | 1.3x |
+| 5 MB docx body, compiled | 1.06 s | 0.22 s | 4.8x |
+| 1 KB docx, interpreted | 2.65 ms | 1.70 ms | 1.6x |
+| 5 MB docx body, interpreted | 13.1 s | 7.4 s | 1.8x |
 
-Long compute is where the compiler wins; a document small enough that instantiation dominates goes the other way, and that first row is the crossover. One scale down, the same report has `fibonacci` a wash, `reverse_array` +4%, `random_mat_mul` +15%, `base64` +24%, `string_manipulation` +27%, and this module +350%.
+Long compute is where the compiler wins — a 5 MB body converts 4.8x faster. The small-document
+row is the one to watch: there, instantiation dominates and conversion is noise, so it measures
+setup rather than throughput. It is also the row that regressed. go-anydoc's own report had wazy
+*losing* it, 0.6x, and reproducing that here traced it to a funcref memo that scanned a list —
+taking a reference for each of the module's 593 element-segment entries in turn made instantiation
+quadratic. wazy memoizes them in a dense table instead; see [OPTIMIZATIONS.md](OPTIMIZATIONS.md)
+for the diagnosis, and for the `memory.grow` half of the same regression that is still open.
 
-<sub>Third-party measurement, not ours, and not reproducible from this repo. Apple M5 Pro (18-core), 48 GB, macOS 26.5, Go 1.26.1, `CGO_ENABLED=0`, wazy `v0.0.0-20260807033006-cd2607360a17`, `anydoc.wasm` 6,542,355 bytes, best of 3 (best of 20 for the small input). Reported in [#29][i29].</sub>
+<sub>Apple M4, native arm64, Go 1.26, `CGO_ENABLED=0`, `anydoc.wasm` 6,542,355 bytes. Run
+`go test -run '^$' -bench ConvertDOCX` in a checkout of [go-anydoc][anydoc]; inputs are generated by
+the harness, so a checkout is enough to reproduce it. Arms interleaved, min of 6 (small) and 4
+(large) — the M4 has performance and efficiency cores and no `taskset`, which makes medians on this
+machine untrustworthy. The original third-party report, including PDF figures this table omits
+because no PDF worth measuring is small enough to commit, is [#29][i29].</sub>
 
 ## Moving fast
 

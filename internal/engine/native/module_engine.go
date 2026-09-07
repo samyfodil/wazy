@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"unsafe"
 
@@ -23,8 +24,13 @@ type (
 		parent    *compiledModule
 		module    *wasm.ModuleInstance
 		opaque    moduleContextOpaque
-		// localFunctionInstances is the head of the ref.func memo list. See localFuncref; a module
-		// that never executes ref.func never allocates a node.
+		// funcrefs is the dense funcref memo, one slot per wasm.Module.FuncrefSlots entry, built
+		// once by funcrefsOnce. See localFuncref.
+		funcrefs     []functionInstance
+		funcrefsOnce sync.Once
+		// localFunctionInstances is the head of the fallback ref.func memo list, used only for an
+		// index the module never declared a slot for. See localFuncref; a module that never
+		// executes ref.func never allocates a node.
 		localFunctionInstances atomic.Pointer[funcrefNode]
 		importedFunctions      []importedFunction
 		listeners              []api.FunctionListener
@@ -373,24 +379,55 @@ func (m *moduleEngine) FunctionInstanceReference(funcIndex wasm.Index) wasm.Refe
 	return m.localFuncref(funcIndex)
 }
 
-// localFuncref memoizes one functionInstance per local function index a funcref is actually taken
-// of. Materializing one per execution allocated per instruction and appended to a module-lifetime
-// slice that was never trimmed, so a guest looping on ref.func grew the engine without bound; that
-// append also raced when two goroutines called into one instance.
+// localFuncref memoizes one functionInstance per local function index a funcref is taken of.
+// Materializing one per execution allocated per instruction and appended to a module-lifetime slice
+// that was never trimmed, so a guest looping on ref.func grew the engine without bound; that append
+// also raced when two goroutines called into one instance.
 //
-// The memo is a prepend-only linked list rather than a table for two reasons. A funcref is a bare
-// uintptr the GC does not trace, so an address handed to the guest must never move afterwards, and a
-// node never does. And a list costs exactly one allocation per DISTINCT funcref -- the same as the
-// per-execution code it replaces paid for its first one -- where a slice would also pay to publish
-// each append, and a dense table indexed by function index would cost every instance 24 bytes per
-// function to hold the handful of entries a module actually takes (a TinyGo module exporting ~90
-// functions takes 8).
+// The memo is a dense table indexed by wasm.Module.FuncrefSlots, filled in full on first use. It
+// used to be a prepend-only list scanned linearly, on the reasoning that a module takes a handful of
+// distinct funcrefs (a TinyGo module exporting ~90 functions takes 8) -- true of every module in
+// wazy's own suite, and false of any module with a real indirect-call table. Instantiation takes a
+// reference for every element-segment entry in turn, so a scan makes that quadratic: a 6.5 MB Rust
+// module with a 593-entry table spent ~176k node visits, ~175us, per instantiate. The table is keyed
+// by the declared-function set rather than by function index so the cost is one slot per function a
+// funcref can name, not per function in the module.
 //
-// ponytail: lookup is linear in the number of distinct funcrefs this instance has taken, which is a
-// handful for every module shape seen here. A module taking hundreds would want a dense table keyed
-// by the declared-function set (internal/wasm computes declaredFunctionIndexes during validation but
-// does not retain it); switch to that if one ever shows up.
+// A funcref is a bare uintptr the GC does not trace, so an address handed to the guest must never
+// move afterwards: funcrefs is allocated once at its final size and never grown or reallocated, and
+// the slice keeps its elements' pointer fields reachable.
+//
+// An index with no slot -- a module validated by a path that left FuncrefSlots nil -- still works,
+// via the fallback list below. That list is never the quadratic case: it only ever sees indexes the
+// dense table did not claim.
 func (m *moduleEngine) localFuncref(funcIndex wasm.Index) wasm.Reference {
+	if slot, ok := m.parent.funcrefSlotsOf()[funcIndex]; ok {
+		m.funcrefsOnce.Do(m.buildFuncrefs)
+		return uintptr(unsafe.Pointer(&m.funcrefs[slot]))
+	}
+	return m.localFuncrefSlow(funcIndex)
+}
+
+// buildFuncrefs fills every declared slot at once. Instantiation asks for all of them in a row, so
+// filling on demand would only add a per-slot published-yet check to the same total work.
+func (m *moduleEngine) buildFuncrefs() {
+	p, src := m.parent, m.module.Source
+	slots := p.funcrefSlotsOf()
+	fis := make([]functionInstance, len(slots))
+	for funcIndex, slot := range slots {
+		localIndex := funcIndex - src.ImportFunctionCount
+		fis[slot] = functionInstance{
+			executable:             &p.executable[p.functionOffsets[localIndex]],
+			moduleContextOpaquePtr: m.opaquePtr,
+			typeID:                 m.module.TypeIDs[src.FunctionSection[localIndex]],
+			indexInModule:          funcIndex,
+		}
+	}
+	m.funcrefs = fis
+}
+
+// localFuncrefSlow is the pre-table memo, kept for indexes the module declared no slot for.
+func (m *moduleEngine) localFuncrefSlow(funcIndex wasm.Index) wasm.Reference {
 	for {
 		head := m.localFunctionInstances.Load()
 		for n := head; n != nil; n = n.next {

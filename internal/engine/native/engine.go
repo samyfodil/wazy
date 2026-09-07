@@ -109,6 +109,11 @@ type (
 		parent            *engine
 		module            *wasm.Module
 		ensureTermination bool
+		// funcrefSlots assigns a dense slot to each local function a funcref can name, so a
+		// moduleEngine memoizes one functionInstance per slot and finds it by index rather than
+		// by scanning. Built once per compiled module, lazily; see funcrefSlotsOf.
+		funcrefSlots     map[wasm.Index]uint32
+		funcrefSlotsOnce sync.Once
 		// maxGCRoots is the most values any safepoint in this module writes; see
 		// frontend.Compiler.MaxGCRoots.
 		maxGCRoots int
@@ -1219,6 +1224,50 @@ func mmapExecutable(src []byte) []byte {
 		panic(err)
 	}
 	return executable
+}
+
+// funcrefSlotsOf returns the dense funcref slot map for this module, building it on first use.
+//
+// The set is every local function an element segment initializes a table with, plus every exported
+// one: between them they cover the indexes a funcref is taken of in bulk. Anything else -- a
+// ref.func naming a function reachable only through a global -- falls back to the scan, which is
+// correct and, being a handful, fast. Deliberately not the spec's full declared-function set:
+// that is computed during validation, which a compilation-cache hit skips.
+func (cm *compiledModule) funcrefSlotsOf() map[wasm.Index]uint32 {
+	cm.funcrefSlotsOnce.Do(func() {
+		src := cm.module
+		imported := src.ImportFunctionCount
+		slots := make(map[wasm.Index]uint32)
+		add := func(idx wasm.Index) {
+			if idx < imported {
+				return // an imported function's reference is its opaque-context entry, not a slot
+			}
+			if _, dup := slots[idx]; !dup {
+				slots[idx] = uint32(len(slots))
+			}
+		}
+		for i := range src.ElementSection {
+			// Init is not a list of plain indexes: it encodes ref.null and the global.get
+			// and const-expr forms in the high bits, which FuncIndex filters out. Only a
+			// plain index names a local function up front; the rest resolve at
+			// instantiation and reach the fallback.
+			seg := &src.ElementSection[i]
+			for j := range seg.Init {
+				if idx, ok := seg.FuncIndex(j); ok {
+					add(idx)
+				}
+			}
+		}
+		for i := range src.ExportSection {
+			if exp := &src.ExportSection[i]; exp.Type == wasm.ExternTypeFunc {
+				add(exp.Index)
+			}
+		}
+		if len(slots) > 0 {
+			cm.funcrefSlots = slots
+		}
+	})
+	return cm.funcrefSlots
 }
 
 func (cm *compiledModule) functionIndexOf(addr uintptr) wasm.Index {
