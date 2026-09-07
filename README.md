@@ -247,24 +247,21 @@ Long compute is where the compiler wins; a document small enough that instantiat
 
 <sub>Third-party measurement, not ours, and not reproducible from this repo. Apple M5 Pro (18-core), 48 GB, macOS 26.5, Go 1.26.1, `CGO_ENABLED=0`, wazy `v0.0.0-20260807033006-cd2607360a17`, `anydoc.wasm` 6,542,355 bytes, best of 3 (best of 20 for the small input). Reported in [#29][i29].</sub>
 
-That crossover row was a bug, not a law. Reproducing the same harness here — four runtimes, one
-machine, one `.wasm`, one input, interleaved — found the small-document case had *regressed*
-against wazy's own last release, and traced it to a funcref memo that scanned a list: taking a
-reference for each of the module's 593 element-segment entries in turn made instantiation
-quadratic. Replacing the scan with a dense table returns that row to a win:
+That crossover row is a bug, not a law. Reproducing the harness here — four runtimes, one machine,
+one `.wasm`, one input, interleaved — traced the small-document case to a funcref memo that scanned
+a list: taking a reference for each of the module's 593 element-segment entries in turn made
+instantiation quadratic. wazy memoizes them in a dense table instead, and the row is a win:
 
 | `anydoc` 1 KB docx, compiled | ns/op | vs wazero |
 | --- | :---: | :---: |
 | wazero v1.12.0 | 463 µs | 1.00x |
-| wazy v0.1.3 | 301 µs | 1.54x |
-| wazy before the fix | 448 µs | 1.03x |
-| **wazy now** | **339 µs** | **1.37x** |
+| **wazy** | **339 µs** | **1.37x** |
 
 <sub>Ours, and reproducible: Apple M4, native arm64, `go-anydoc` `BenchmarkConvertDOCX/compiled/small`,
 300 iterations per sample, arms interleaved, min of 8. A different machine and a different wazy than
-the third-party table above, so read the two as separate experiments, not as before-and-after of each
-other. The remaining gap to v0.1.3 is a second regression in the same window, in `memory.grow`, still
-open.</sub>
+the third-party table above, so read the two as separate experiments rather than as two halves of
+one. wazy `v0.1.3` measures 301 µs (1.54x) in the same run: a `memory.grow` regression that landed
+in the same window still separates it, and is tracked in [OPTIMIZATIONS.md](OPTIMIZATIONS.md).</sub>
 
 ## Moving fast
 

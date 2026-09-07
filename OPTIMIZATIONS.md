@@ -648,3 +648,55 @@ CLI exiting zero when a profile could not be written.
   `pinsrb` in `lowerSplat` to break the merge dependency on the destination. Sinking the v128 splat
   and the tail offset past the short-region branch *was* shipped: **−10 to −11.5% at size 15**
   (p=0.000), +1.7–2.7% at 31/64 which is within this repo's known ±6% code-layout noise.
+
+## Instantiate regression found by a real consumer (2026-09-07)
+
+[go-anydoc][anydoc-opt] reported wazy *losing* to wazero on one row of its table: a 1 KB document
+through a 6.5 MB Rust `wasm32-wasip1` module, where instantiation dominates and conversion does not.
+Reproducing that harness here — four runtimes, one machine, one `.wasm`, one input, interleaved,
+min-of-N because the M4's P/E-core scheduler makes medians unusable — showed the row had regressed
+against wazy's own last release, not merely trailed wazero:
+
+| arm | ns/op | vs wazero |
+|---|---|---|
+| wazero v1.12.0 | 463 µs | 1.00× |
+| wazy v0.1.3 (released 2026-08-15) | 301 µs | 1.54× |
+| wazy at `62f3ccba` | 448 µs | 1.03× |
+
+Measuring **every** commit from the `v0.1.3` tag forward — 12 squash-merged PRs, small enough to take
+the whole curve rather than bisect — put the entire step at one commit: `2b940c77` (#57), which is
+itself a performance sweep. Everything before it sits at 300–360 µs; `2b940c77` jumps to 488 µs and
+it stays there.
+
+- **F1. `ref.func` memo scanned a list — quadratic in element-segment entries.** **RESOLVED.**
+  A differential CPU profile (`pprof -diff_base`, focused on the `Convert` path) named
+  `localFuncref` at **+0.50 s flat**, about half the regression, under
+  `applyElements → evaluateElementInit → FunctionInstanceReference`. #57 had replaced
+  per-execution `functionInstance` materialization — which allocated per instruction and grew an
+  untrimmed module-lifetime slice, and raced — with a prepend-only memo list scanned linearly. That
+  is right for the shape it was measured on and its comment said so, naming the exact condition that
+  would break it: *"a module taking hundreds would want a dense table … switch to that if one ever
+  shows up."* A 593-entry `call_indirect` table is that module. Instantiation takes a reference for
+  every element-segment entry in turn, so the scan is O(n²): 593²/2 ≈ 176 000 node visits, predicting
+  ~176 µs against ~175 µs measured. Now a dense table indexed by a per-compiled-module slot map,
+  filled in one pass. The map is derived from the **decoded module** rather than validation's
+  declared-function set, because a compilation-cache hit never re-validates — keying on the declared
+  set left the fast path dead on exactly the path production uses, which a test caught. Anything the
+  map does not claim still resolves through the old list, so correctness never depends on the set
+  being complete. **Measured: 448 µs → 339 µs, −24.3%, 1.03× → 1.37× vs wazero**; `applyElements`
+  drops from 0.64 s to 0.04 s of the profile.
+- **F2. `MemoryInstance.Grow` — the other half, still open.** With the scan gone, `Grow64` dominates
+  what remains of the `Convert` profile (0.63 s), and **12.6%** still separates this row from
+  v0.1.3. Same window, different cause; it is the growth path R11 already describes as
+  "append-driven full copies". Not attempted here.
+
+### Rejected with measurements — do not redo
+
+- **The linear-memory buffer pool is not this regression.** It landed in the same PR and looked
+  obvious: same bytes per op, *half* the allocations (582 vs 1051), yet 48% slower — which reads as
+  explicit zeroing replacing lazily-faulted fresh pages. It is not. On an idle machine,
+  `WAZY_REPRO_NO_MEMPOOL=1` against the default is 438 µs vs 451 µs, min of 6 each: the pool costs
+  **~3%** on this workload, real but an order of magnitude short of the regression. Worth knowing as
+  a small net negative for instantiate-dominated guests; not worth re-investigating as the cause.
+
+[anydoc-opt]: https://github.com/xusenlin/go-anydoc
