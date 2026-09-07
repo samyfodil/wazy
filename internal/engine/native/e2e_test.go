@@ -2263,6 +2263,15 @@ func TestMemoryFillMemclrNoAVX2(t *testing.T) {
 	if runtime.GOARCH != "amd64" {
 		t.Skip("the X15 zero-register convention is amd64-only")
 	}
+	// The BSD and illumos jobs ship prebuilt test binaries into a VM and run
+	// them with -test.short; child processes cannot be reaped there ("wait: no
+	// child processes"), and this test is built on re-executing itself. The
+	// emitted instruction is pinned everywhere by the memory_fill_memclr
+	// backend golden -- this is the behavioural half, and one platform running
+	// it is enough.
+	if testing.Short() {
+		t.Skip("re-executes the test binary; not viable under -short (BSD/illumos VM runners)")
+	}
 	if os.Getenv(noAVX2Child) == "" {
 		cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$", "-test.v")
 		cmd.Env = append(os.Environ(), noAVX2Child+"=1", "GODEBUG=cpu.avx2=off")
