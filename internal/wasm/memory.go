@@ -77,6 +77,12 @@ type MemoryInstance struct {
 	// growReservePages is the configured spare capacity to allocate after a Go
 	// fallback grows this memory's backing buffer.
 	growReservePages uint64
+	// capHighWater points at the owning module's Memory.capHighWaterPages, so a
+	// reallocating grow can tell the next instantiation of the same module how
+	// much backing to start with. It points into the decoded module, which
+	// outlives every instance built from it. Nil for a MemoryInstance built
+	// without a module -- tests, and the component-model host memories.
+	capHighWater *uint32
 	// backing is the explicitly allocated region. Buffer remains the Go-owned
 	// logical view, while native code may expose bytes up to len(backing) by
 	// updating sizeBytes without mutating either slice header.
@@ -149,6 +155,25 @@ func NewMemoryInstance(memSec *Memory, allocator api.MemoryAllocator, moduleEngi
 	capBytes := MemoryPagesToBytesNum(max(min(memSec.Cap, maxPages), memSec.Min))
 	maxBytes := MemoryPagesToBytesNum(maxPages)
 
+	// Start where the last instance of this memory ended up, when that was
+	// larger. Sizing only to Cap means a guest whose allocator grows the heap
+	// even once pays a full reallocate-and-copy on every instantiation, and --
+	// because the buffer pool buckets by exact capacity -- files the grown
+	// buffer under a size no later instantiation ever asks for, so the pool
+	// never hits either. Both go away once the initial allocation is already
+	// the size the module settles at.
+	//
+	// The trade is that one instance which grew unusually large makes later
+	// ones start large too, even if they would not have grown at all. That is
+	// bounded by maxBytes -- the embedder's ceiling -- it is memory this module
+	// has already been allowed to hold once, and untouched pages stay lazily
+	// backed. The mark is never lowered: an instance needing less simply
+	// exposes less, and shrinking it would hand the copy straight back to
+	// whichever instance needs the larger size next.
+	if hw := MemoryPagesToBytesNum(uint64(atomic.LoadUint32(&memSec.capHighWaterPages))); hw > capBytes {
+		capBytes = min(hw, maxBytes)
+	}
+
 	var buffer, backing []byte
 	var expBuffer api.LinearMemory
 	if allocator != nil {
@@ -185,6 +210,7 @@ func NewMemoryInstance(memSec *Memory, allocator api.MemoryAllocator, moduleEngi
 	mi := &MemoryInstance{
 		Buffer:            buffer,
 		backing:           backing,
+		capHighWater:      &memSec.capHighWaterPages,
 		Min:               memSec.Min,
 		Cap:               memoryBytesNumToPages(uint64(cap(buffer))),
 		Max:               maxPages,
@@ -543,6 +569,7 @@ func (m *MemoryInstance) Grow64(delta uint64) (result uint64, ok bool) {
 		m.Buffer = newBacking[:newLenBytes]
 		m.Cap = newCapPages
 		m.nativeGrowCap = MemoryPagesToBytesNum(m.Cap)
+		m.raiseCapHighWater(newCapPages)
 	} else { // We already have the capacity we need.
 		if m.Shared {
 			// We assume grow is called under a guest lock.
@@ -560,6 +587,27 @@ func (m *MemoryInstance) Grow64(delta uint64) (result uint64, ok bool) {
 	}
 	m.ownerModuleEngine.MemoryGrown(m.index)
 	return currentPages, true
+}
+
+// raiseCapHighWater records that an instance of this memory needed capPages of
+// backing, so the next instantiation of the same module starts there instead of
+// reallocating to reach it. Monotonic: one compiled module may be instantiated
+// concurrently and the useful value is the largest any instance has needed, so
+// a losing compare-and-swap retries rather than clobbering a higher mark.
+//
+// A page count past uint32 is 256 TiB of backing and cannot be reached; it is
+// dropped rather than truncated, which would record a mark far too small.
+func (m *MemoryInstance) raiseCapHighWater(capPages uint64) {
+	if m.capHighWater == nil || capPages > math.MaxUint32 {
+		return
+	}
+	want := uint32(capPages)
+	for {
+		cur := atomic.LoadUint32(m.capHighWater)
+		if cur >= want || atomic.CompareAndSwapUint32(m.capHighWater, cur, want) {
+			return
+		}
+	}
 }
 
 // Pages implements the same method as documented on api.Memory.

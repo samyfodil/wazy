@@ -1231,6 +1231,29 @@ type Memory struct {
 	// memory64 proposal. Its page counts are then bounded by Memory64LimitPages
 	// rather than MemoryLimitPages.
 	IsMemory64 bool
+
+	// capHighWaterPages is the largest backing allocation any instance of this
+	// memory has been observed to need. It starts at zero and is raised by
+	// MemoryInstance.Grow whenever a Go fallback grow has to reallocate;
+	// NewMemoryInstance then sizes the next instance's backing to it, so a
+	// module that always grows to the same working set stops paying for that
+	// reallocation and its copy after the first instantiation.
+	//
+	// This is a same-process hint, not module state: it never changes what the
+	// module observes -- the logical size still starts at Min and growth is
+	// still bounded by Max -- it is not serialized with the compilation cache,
+	// and losing it only costs one reallocation.
+	//
+	// Read and written atomically, through the pointer MemoryInstance holds,
+	// because one compiled module may be instantiated concurrently. Pages
+	// rather than bytes, and 32 rather than 64 bits, so the atomics need no
+	// alignment argument: a 64-bit field is only 4-byte aligned on GOARCH=386,
+	// arm and wasm, where a misaligned 64-bit atomic panics (see
+	// MemoryInstance.sizeBytes for the field that does have to fight this). A
+	// page count that overflows uint32 is 256 TiB of backing, which no host
+	// allocates. A plain field rather than atomic.Uint32 so that Memory stays
+	// copyable, which the decoder relies on.
+	capHighWaterPages uint32
 }
 
 // IndexType returns the value type of the addresses, sizes and lengths this
