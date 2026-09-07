@@ -1697,10 +1697,23 @@ func preopenPath(fsc *sys.FSContext, fd int32) (string, sysapi.Errno) {
 		return "", sysapi.EBADF // closed
 	} else if !f.IsPreopen {
 		return "", sysapi.EBADF
-	} else if isDir, errno := f.File.IsDir(); errno != 0 || !isDir {
-		// In wasip1, only directories can be returned by fd_prestat_get as
-		// there are no prestat types defined for files or sockets.
+	} else if isDir, errno := f.File.IsDir(); errno != 0 {
 		return "", errno
+	} else if !isDir {
+		// In wasip1, only directories can be returned by fd_prestat_get as
+		// there are no prestat types defined for files or sockets. Returning
+		// the zero errno here instead -- success with a zero-length name --
+		// registers the stream or socket in the guest's preopen table under an
+		// empty prefix, and an empty prefix matches every relative path:
+		// wasi-libc scans its table in reverse and takes the longest match, so
+		// a TCP listener (which InitFSContext marks IsPreopen, at a higher fd
+		// than every directory) shadows the root mount and the whole
+		// filesystem becomes unreachable.
+		//
+		// EBADF specifically, not ENOTDIR: both preopen scanners stop cleanly
+		// on EBADF (wasi-libc breaks, Go's syscall/fs_wasip1 breaks), while
+		// wasi-libc treats any other error as fatal and _Exit(EX_OSERR)s.
+		return "", sysapi.EBADF
 	} else {
 		return f.Name, 0
 	}

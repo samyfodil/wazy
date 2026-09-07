@@ -73,6 +73,12 @@ type RuntimeConfig interface {
 	// slice can hold. The effective ceiling there is 32767 pages whatever is
 	// configured here, and a module asking for more fails to instantiate
 	// rather than panicking in the allocator.
+	//
+	// Note: this bounds a memory declared with an i64 index type as well, so
+	// that enabling api.CoreFeatureMemory64 cannot quietly undo it. Set that
+	// ceiling independently -- above or below this one -- with
+	// WithMemory64LimitPages, which then wins whichever order the two are
+	// configured in.
 	WithMemoryLimitPages(memoryLimitPages uint32) RuntimeConfig
 
 	// WithMemoryCapacityFromMax eagerly allocates max memory, unless max is
@@ -89,11 +95,13 @@ type RuntimeConfig interface {
 	WithMemoryCapacityFromMax(memoryCapacityFromMax bool) RuntimeConfig
 
 	// WithMemory64LimitPages overrides the maximum pages a memory declared with
-	// an i64 index type may actually occupy. The default is 65536 -- the same
-	// four gibibytes WithMemoryLimitPages defaults to, so enabling
+	// an i64 index type may actually occupy. Unset, it follows
+	// WithMemoryLimitPages -- 65536 by default -- so enabling
 	// api.CoreFeatureMemory64 does not by itself let a module claim more host
-	// memory than a 32-bit one could. Setting a value larger than 2^48, the
-	// specification's own ceiling for a 64-bit memory, will panic.
+	// memory than a 32-bit one could, and tightening the general limit tightens
+	// this one too. Setting it here pins it whichever order the two are
+	// configured in. Setting a value larger than 2^48, the specification's own
+	// ceiling for a 64-bit memory, will panic.
 	//
 	// This example lets a 64-bit memory reach 16GB:
 	//	rConfig = wazy.NewRuntimeConfig().
@@ -236,9 +244,12 @@ func NewRuntimeConfig() RuntimeConfig {
 type newEngine func(context.Context, api.CoreFeatures, filecache.Cache) wasm.Engine
 
 type runtimeConfig struct {
-	enabledFeatures            api.CoreFeatures
-	memoryLimitPages           uint32
-	memory64LimitPages         uint64
+	enabledFeatures    api.CoreFeatures
+	memoryLimitPages   uint32
+	memory64LimitPages uint64
+	// memory64LimitSet records an explicit WithMemory64LimitPages, so that a
+	// later WithMemoryLimitPages does not overwrite a deliberate choice.
+	memory64LimitSet           bool
 	memoryCapacityFromMax      bool
 	memoryCapacityReservePages uint32
 	engineKind                 engineKind
@@ -331,6 +342,13 @@ func (c *runtimeConfig) WithMemoryLimitPages(memoryLimitPages uint32) RuntimeCon
 		panic(fmt.Errorf("memoryLimitPages invalid: %d > %d", memoryLimitPages, wasm.MemoryLimitPages))
 	}
 	ret.memoryLimitPages = memoryLimitPages
+	// Absent an explicit WithMemory64LimitPages, the 64-bit ceiling follows this
+	// one: an embedder tightening the only general memory knob must not be left
+	// with a 64-bit memory still on the untightened default, which a module can
+	// reach by doing nothing more than declaring an i64 index type.
+	if !ret.memory64LimitSet {
+		ret.memory64LimitPages = uint64(memoryLimitPages)
+	}
 	return ret
 }
 
@@ -349,6 +367,7 @@ func (c *runtimeConfig) WithMemory64LimitPages(memory64LimitPages uint64) Runtim
 		panic(fmt.Errorf("memory64LimitPages invalid: %d > %d", memory64LimitPages, wasm.Memory64LimitPages))
 	}
 	ret.memory64LimitPages = memory64LimitPages
+	ret.memory64LimitSet = true
 	return ret
 }
 

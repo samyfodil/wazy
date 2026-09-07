@@ -2514,6 +2514,38 @@ func Test_fdRenumber(t *testing.T) {
 `,
 		},
 		{
+			name:          "to=stderr",
+			from:          fileFD,
+			to:            sys.FdStderr,
+			expectedErrno: wasip1.ErrnoSuccess,
+			expectedLog: `
+==> wasi_snapshot_preview1.fd_renumber(fd=4,to=2)
+<== errno=ESUCCESS
+`,
+		},
+		{
+			// dup3(fd, fd) is a no-op returning fd, which is what a guest
+			// closing over its own descriptor relies on.
+			name:          "onto itself",
+			from:          fileFD,
+			to:            fileFD,
+			expectedErrno: wasip1.ErrnoSuccess,
+			expectedLog: `
+==> wasi_snapshot_preview1.fd_renumber(fd=4,to=4)
+<== errno=ESUCCESS
+`,
+		},
+		{
+			name:          "stdin onto itself",
+			from:          sys.FdStdin,
+			to:            sys.FdStdin,
+			expectedErrno: wasip1.ErrnoSuccess,
+			expectedLog: `
+==> wasi_snapshot_preview1.fd_renumber(fd=0,to=0)
+<== errno=ESUCCESS
+`,
+		},
+		{
 			name:          "file to dir",
 			from:          fileFD,
 			to:            dirFD,

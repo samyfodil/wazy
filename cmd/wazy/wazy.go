@@ -106,11 +106,20 @@ func doCompile(args []string, stdErr io.Writer) int {
 	}
 
 	if memProfile != "" {
-		defer writeHeapProfile(stdErr, memProfile)
+		writeHeapProfile, err := createHeapProfile(stdErr, memProfile)
+		if err != nil {
+			fmt.Fprintln(stdErr, err)
+			return 1
+		}
+		defer writeHeapProfile()
 	}
 
 	if cpuProfile != "" {
-		stopCPUProfile := startCPUProfile(stdErr, cpuProfile)
+		stopCPUProfile, err := startCPUProfile(cpuProfile)
+		if err != nil {
+			fmt.Fprintln(stdErr, err)
+			return 1
+		}
 		defer stopCPUProfile()
 	}
 
@@ -231,11 +240,20 @@ func doRun(args []string, stdOut io.Writer, stdErr logging.Writer) int {
 	}
 
 	if memProfile != "" {
-		defer writeHeapProfile(stdErr, memProfile)
+		writeHeapProfile, err := createHeapProfile(stdErr, memProfile)
+		if err != nil {
+			fmt.Fprintln(stdErr, err)
+			return 1
+		}
+		defer writeHeapProfile()
 	}
 
 	if cpuProfile != "" {
-		stopCPUProfile := startCPUProfile(stdErr, cpuProfile)
+		stopCPUProfile, err := startCPUProfile(cpuProfile)
+		if err != nil {
+			fmt.Fprintln(stdErr, err)
+			return 1
+		}
 		defer stopCPUProfile()
 	}
 
@@ -531,36 +549,38 @@ func printRunUsage(stdErr io.Writer, flags *flag.FlagSet) {
 	flags.PrintDefaults()
 }
 
-func startCPUProfile(stdErr io.Writer, path string) (stopCPUProfile func()) {
+func startCPUProfile(path string) (stopCPUProfile func(), err error) {
 	f, err := os.Create(path)
 	if err != nil {
-		fmt.Fprintf(stdErr, "error creating cpu profile output: %v\n", err)
-		return func() {}
+		return nil, fmt.Errorf("error creating cpu profile output: %w", err)
 	}
 
 	if err := pprof.StartCPUProfile(f); err != nil {
 		f.Close()
-		fmt.Fprintf(stdErr, "error starting cpu profile: %v\n", err)
-		return func() {}
+		return nil, fmt.Errorf("error starting cpu profile: %w", err)
 	}
 
 	return func() {
 		defer f.Close()
 		pprof.StopCPUProfile()
-	}
+	}, nil
 }
 
-func writeHeapProfile(stdErr io.Writer, path string) {
+// createHeapProfile opens the output up-front, so an unwritable path fails
+// before the work it was supposed to profile, and returns the function that
+// writes the profile on the way out.
+func createHeapProfile(stdErr io.Writer, path string) (writeHeapProfile func(), err error) {
 	f, err := os.Create(path)
 	if err != nil {
-		fmt.Fprintf(stdErr, "error creating memory profile output: %v\n", err)
-		return
+		return nil, fmt.Errorf("error creating memory profile output: %w", err)
 	}
-	defer f.Close()
-	runtime.GC()
-	if err := pprof.WriteHeapProfile(f); err != nil {
-		fmt.Fprintf(stdErr, "error writing memory profile: %v\n", err)
-	}
+	return func() {
+		defer f.Close()
+		runtime.GC()
+		if err := pprof.WriteHeapProfile(f); err != nil {
+			fmt.Fprintf(stdErr, "error writing memory profile: %v\n", err)
+		}
+	}, nil
 }
 
 type sliceFlag []string

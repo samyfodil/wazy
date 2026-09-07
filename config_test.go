@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
+	"fmt"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/samyfodil/wazy/internal/fstest"
 	"github.com/samyfodil/wazy/internal/platform"
 	internalsys "github.com/samyfodil/wazy/internal/sys"
+	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/internal/wasm"
 	"github.com/samyfodil/wazy/sys"
@@ -38,6 +40,8 @@ func TestRuntimeConfig(t *testing.T) {
 			},
 			expected: &runtimeConfig{
 				memoryLimitPages: 10,
+				// The 64-bit ceiling follows it, absent an explicit one.
+				memory64LimitPages: 10,
 			},
 		},
 		{
@@ -47,6 +51,7 @@ func TestRuntimeConfig(t *testing.T) {
 			},
 			expected: &runtimeConfig{
 				memory64LimitPages: 1 << 20,
+				memory64LimitSet:   true,
 			},
 		},
 		{
@@ -723,4 +728,33 @@ func TestNewRuntimeConfig(t *testing.T) {
 	require.NotEqual(t, engineLessConfig, c)
 	// Ensures if the correct engine is selected.
 	require.Equal(t, engineKindAuto, c.engineKind)
+}
+
+// TestMemoryCapacityFromMax_OverLimit covers wazero#2517 at the level an
+// embedder sees it: a module whose declared maximum exceeds
+// WithMemoryLimitPages must instantiate, with the limit as its effective
+// maximum, rather than being rejected. Applying the capacity mode before the
+// limit -- the shape of the upstream bug -- fails the Instantiate here.
+func TestMemoryCapacityFromMax_OverLimit(t *testing.T) {
+	ctx := context.Background()
+	// (module (memory (export "m") 0 10))
+	bin := binaryencoding.EncodeModule(&wasm.Module{
+		MemorySection: []wasm.Memory{{Min: 0, Cap: 0, Max: 10, IsMaxEncoded: true}},
+		ExportSection: []wasm.Export{{Name: "m", Type: wasm.ExternTypeMemory}},
+	})
+
+	for _, fromMax := range []bool{false, true} {
+		t.Run(fmt.Sprintf("memoryCapacityFromMax=%v", fromMax), func(t *testing.T) {
+			r := NewRuntimeWithConfig(ctx, NewRuntimeConfig().
+				WithMemoryLimitPages(5).WithMemoryCapacityFromMax(fromMax))
+			defer func() { require.NoError(t, r.Close(ctx)) }()
+
+			mod, err := r.Instantiate(ctx, bin)
+			require.NoError(t, err)
+
+			max, ok := mod.ExportedMemory("m").Definition().Max()
+			require.True(t, ok)
+			require.Equal(t, uint32(5), max)
+		})
+	}
 }

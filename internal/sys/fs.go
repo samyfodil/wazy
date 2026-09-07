@@ -326,6 +326,13 @@ func (c *FSContext) Renumber(from, to int32) sys.Errno {
 		return sys.ENOTSUP
 	}
 
+	// dup2(fd, fd) is a no-op returning fd. Without this the destination close
+	// below would close the source, since they are the same entry, and the
+	// caller would be handed success over a descriptor that no longer works.
+	if from == to {
+		return 0
+	}
+
 	// If toFile is already open, we close it to prevent windows lock issues.
 	//
 	// The doc is unclear and other implementations do nothing for already-opened To FDs.

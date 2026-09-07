@@ -494,9 +494,11 @@ func testMemory64AllocationLimits(t *testing.T, config wazy.RuntimeConfig) {
 		require.Contains(t, err.Error(), "exceeds the limit of 0 pages")
 	})
 
-	t.Run("the 32-bit limit does not bind a 64-bit memory", func(t *testing.T) {
-		// WithMemoryLimitPages tops out at 65536; a 64-bit memory needs its own
-		// knob to go past that, and must not be silently capped by this one.
+	t.Run("the general limit binds a 64-bit memory too", func(t *testing.T) {
+		// Otherwise an untrusted module reaches past the embedder's only
+		// general memory ceiling by doing nothing but declaring an i64 index
+		// type -- which is what clang --target=wasm64 and rustc's memory64
+		// target emit by default.
 		r := wazy.NewRuntimeWithConfig(ctx,
 			config.WithCoreFeatures(memory64Features).WithMemoryLimitPages(1))
 		defer r.Close(ctx)
@@ -504,6 +506,29 @@ func testMemory64AllocationLimits(t *testing.T, config wazy.RuntimeConfig) {
 		require.NoError(t, err)
 		res, err := mod.ExportedFunction("mem_grow").Call(ctx, 3)
 		require.NoError(t, err)
-		require.Equal(t, uint64(1), res[0])
+		require.Equal(t, uint64(0xffffffffffffffff), res[0]) // -1: refused
+	})
+
+	t.Run("WithMemory64LimitPages still takes a 64-bit memory past it", func(t *testing.T) {
+		// WithMemoryLimitPages tops out at 65536 pages, so the 64-bit knob is
+		// the only way past four gibibytes; setting it wins whichever order the
+		// two are configured in.
+		for _, name := range []string{"64-bit knob last", "64-bit knob first"} {
+			t.Run(name, func(t *testing.T) {
+				c := config.WithCoreFeatures(memory64Features)
+				if name == "64-bit knob last" {
+					c = c.WithMemoryLimitPages(1).WithMemory64LimitPages(4)
+				} else {
+					c = c.WithMemory64LimitPages(4).WithMemoryLimitPages(1)
+				}
+				r := wazy.NewRuntimeWithConfig(ctx, c)
+				defer r.Close(ctx)
+				mod, err := r.Instantiate(ctx, memory64Wasm)
+				require.NoError(t, err)
+				res, err := mod.ExportedFunction("mem_grow").Call(ctx, 3)
+				require.NoError(t, err)
+				require.Equal(t, uint64(1), res[0])
+			})
+		}
 	})
 }

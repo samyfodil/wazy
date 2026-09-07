@@ -318,6 +318,64 @@ func TestFSContext_Renumber(t *testing.T) {
 			require.False(t, ok)
 		}
 	})
+
+	// dup2(fd, fd) is defined to be a no-op returning fd, not a close. The
+	// destination is closed to release it, so without an identity guard the
+	// source and destination being the same entry closes the very file the
+	// call is supposed to leave alone -- and reports success.
+	t.Run("onto itself", func(t *testing.T) {
+		// Its own context: the subtests above vacate the stdio slots, so a
+		// shared one would hand OpenFile fd 0 and test nothing about stdio.
+		var c Context
+		require.NoError(t, c.InitFSContext(nil, nil, nil, []sys.FS{dirFS}, []string{"/"}, nil))
+		fsc := c.fsc
+		defer func() { require.NoError(t, fsc.Close()) }()
+
+		fd, errno := fsc.OpenFile(dirFS, dirName, sys.O_RDONLY, 0)
+		require.EqualErrno(t, 0, errno)
+		before, ok := fsc.LookupFile(fd)
+		require.True(t, ok)
+
+		require.EqualErrno(t, 0, fsc.Renumber(fd, fd))
+
+		after, ok := fsc.LookupFile(fd)
+		require.True(t, ok)
+		require.Equal(t, before, after)
+		_, errno = after.File.Stat()
+		require.EqualErrno(t, 0, errno)
+
+		// The stdio slots are the case wazy's relaxation newly made reachable:
+		// before it, Renumber(0, 0) was refused outright.
+		for _, stdioFd := range []int32{FdStdin, FdStdout, FdStderr} {
+			require.EqualErrno(t, 0, fsc.Renumber(stdioFd, stdioFd))
+			stdio, ok := fsc.LookupFile(stdioFd)
+			require.True(t, ok)
+			require.True(t, stdio.IsPreopen)
+			_, errno := stdio.File.Stat()
+			require.EqualErrno(t, 0, errno)
+		}
+	})
+
+	// The entry displaced from the destination is closed, deliberately: leaving
+	// it open holds a Windows file lock the guest can no longer release.
+	t.Run("displaced file is closed", func(t *testing.T) {
+		var c Context
+		require.NoError(t, c.InitFSContext(nil, nil, nil, []sys.FS{dirFS}, []string{"/"}, nil))
+		fsc := c.fsc
+		defer func() { require.NoError(t, fsc.Close()) }()
+
+		fromFd, errno := fsc.OpenFile(dirFS, dirName, sys.O_RDONLY, 0)
+		require.EqualErrno(t, 0, errno)
+		toFd, errno := fsc.OpenFile(dirFS, dirName, sys.O_RDONLY, 0)
+		require.EqualErrno(t, 0, errno)
+		displaced, ok := fsc.LookupFile(toFd)
+		require.True(t, ok)
+
+		require.EqualErrno(t, 0, fsc.Renumber(fromFd, toFd))
+
+		_, errno = displaced.File.Stat()
+		require.EqualErrno(t, sys.EBADF, errno)
+	})
 }
 
 // TestDirentCache_ReadAtMostDots covers a count that doesn't reach past the
