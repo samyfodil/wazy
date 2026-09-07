@@ -113,6 +113,9 @@ const (
 	// ExecutionContextOffsetGCCheckTrampolineAddress is the address of the trampoline behind ref.test,
 	// ref.cast and the subtype-aware call_indirect check. See nativeapi.ExitCodeGCCheck.
 	ExecutionContextOffsetGCCheckTrampolineAddress Offset = 752
+	// ExecutionContextOffsetMemclrAddress is the offset of `memclrAddress`, the entry PC of
+	// the Go runtime's memclrNoHeapPointers, called by the memory.fill lowering.
+	ExecutionContextOffsetMemclrAddress Offset = 760
 )
 
 // AssertSavedRegistersFit panics if a save/restore layout that ends at absolute offset end

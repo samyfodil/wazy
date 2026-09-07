@@ -2142,6 +2142,22 @@ func (m *machine) lowerCall(si *ssa.Instruction) {
 		// Since Go 1.24 it may also use DX, which is not reserved for the function call's 3 args.
 		// https://github.com/golang/go/blob/go1.24.0/src/runtime/memmove_amd64.s#L123
 		m.insert(m.allocateInstr().asDefineUninitializedReg(regInfo.RealRegToVReg[rdx]))
+
+		// Go's amd64 ABI reserves X15 as a zero register, and memclr reads it
+		// as one: memclrNoHeapPointers' SSE path is a run of `MOVOU X15, n(DI)`,
+		// so a nonzero X15 makes a "clear" write garbage. wazy allocates xmm15
+		// like any other vector register, so the invariant has to be restored
+		// here. The pseudo-definition above already told the allocator xmm15 is
+		// clobbered, so nothing live is in it at this point.
+		//
+		// memmove is exempt: it only uses X15 as scratch and re-zeroes it before
+		// returning, never reading it. That is worth distinguishing rather than
+		// zeroing unconditionally -- one extra uop measured +4.95% on a hot
+		// 64-byte memory.copy loop, where memmove itself is only a few cycles.
+		// https://github.com/golang/go/blob/go1.24.0/src/cmd/compile/abi-internal.md#amd64-architecture
+		if si.IsCallGoRuntimeMemclr() {
+			m.insert(m.allocateInstr().asZeros(regInfo.RealRegToVReg[xmm15]))
+		}
 	}
 
 	if isDirectCall {

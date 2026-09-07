@@ -577,3 +577,38 @@ func Test_LargeStdout(t *testing.T) {
 		require.NoError(t, err, string(output))
 	}
 }
+
+// Test_listenerDoesNotShadowPreopens is the end-to-end form of the
+// fd_prestat_get fix: a TCP listener is registered as a pre-open but is not a
+// directory, and answering fd_prestat_get for it with success and a zero-length
+// name puts an empty prefix in the guest's preopen table. wasi-libc scans that
+// table in reverse and takes the longest match, and an empty prefix matches
+// every relative path, so the listener -- always at a higher fd than the
+// directory mounts -- shadowed the root and made the filesystem unreachable.
+//
+// `wazy run --listen ... --mount ...` reaches exactly this configuration.
+func Test_listenerDoesNotShadowPreopens(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(path.Join(tmpDir, "hello.txt"), []byte("hi"), 0o0666))
+
+	for _, withListener := range []bool{false, true} {
+		name := "no listener"
+		if withListener {
+			name = "with listener"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := testCtx
+			if withListener {
+				ctx = experimentalsock.WithConfig(testCtx,
+					experimentalsock.NewConfig().WithTCPListener("127.0.0.1", 0))
+			}
+			cfg := wazy.NewModuleConfig().
+				WithArgs("wasi", "ls", "/").
+				WithFSConfig(wazy.NewFSConfig().WithReadOnlyDirMount(tmpDir, "/"))
+
+			// The listener must not change what the guest can see.
+			console := compileAndRun(t, ctx, cfg, wasmZigCc)
+			require.Equal(t, "./.\n./..\n./hello.txt\n", console)
+		})
+	}
+}

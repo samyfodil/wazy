@@ -1455,6 +1455,25 @@ var (
 		},
 	}
 
+	// MemoryFillMemclr is a constant zero fill large enough to be dispatched
+	// straight to the Go runtime's memclrNoHeapPointers, with no run-time test.
+	MemoryFillMemclr = TestCase{
+		Name: "memory_fill_memclr",
+		Module: &wasm.Module{
+			TypeSection:     []wasm.FunctionType{{Params: []wasm.ValueType{i32}}},
+			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
+			MemorySection:   []wasm.Memory{{Min: 1}},
+			FunctionSection: []wasm.Index{0},
+			CodeSection: []wasm.Code{{Body: []byte{
+				wasm.OpcodeLocalGet, 0,
+				wasm.OpcodeI32Const, 0,
+				wasm.OpcodeI32Const, 0x80, 0x08, // 1024
+				wasm.OpcodeMiscPrefix, wasm.OpcodeMiscMemoryFill, 0,
+				wasm.OpcodeEnd,
+			}}},
+		},
+	}
+
 	MemoryLoadURem = TestCase{
 		Name: "memory_load_urem",
 		Module: &wasm.Module{

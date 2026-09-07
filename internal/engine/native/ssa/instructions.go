@@ -2296,6 +2296,26 @@ func (i *Instruction) AsCallGoRuntimeMemmove(funcPtr Value, sig *Signature, args
 	return i
 }
 
+// AsCallGoRuntimeMemclr is AsCallGoRuntimeMemmove for runtime.memclrNoHeapPointers.
+// It shares memmove's call handling -- both may clobber every vector register --
+// but is flagged apart because memclr additionally *reads* amd64's X15 as a zero
+// register, which the backend has to establish. See IsCallGoRuntimeMemclr.
+func (i *Instruction) AsCallGoRuntimeMemclr(funcPtr Value, sig *Signature, args Values) *Instruction {
+	i.AsCallIndirect(funcPtr, sig, args)
+	i.u2 = 2
+	return i
+}
+
+// IsCallGoRuntimeMemclr reports whether this is the memclr call of
+// AsCallGoRuntimeMemclr rather than the memmove of AsCallGoRuntimeMemmove.
+//
+// The opcode test is not redundant: u2 is a multiplexed field, holding the
+// signature ID for a direct call and a lane index for several vector opcodes,
+// so without it this answers true for anything that happens to store 2 there.
+func (i *Instruction) IsCallGoRuntimeMemclr() bool {
+	return (i.opcode == OpcodeCallIndirect || i.opcode == OpcodeTailCallReturnCallIndirect) && i.u2 == 2
+}
+
 // CallIndirectData returns the call indirect data for this instruction necessary for backends.
 func (i *Instruction) CallIndirectData() (funcPtr Value, sigID SignatureID, args []Value, isGoMemmove bool) {
 	if i.opcode != OpcodeCallIndirect && i.opcode != OpcodeTailCallReturnCallIndirect {
@@ -2304,7 +2324,7 @@ func (i *Instruction) CallIndirectData() (funcPtr Value, sigID SignatureID, args
 	funcPtr = i.v
 	sigID = SignatureID(i.u1)
 	args = i.vs.View()
-	isGoMemmove = i.u2 == 1
+	isGoMemmove = i.u2 != 0 // memmove or memclr: both need the call's vector handling
 	return
 }
 

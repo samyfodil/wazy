@@ -31,6 +31,7 @@ type Compiler struct {
 	refFuncSig             ssa.Signature
 	gcSig                  ssa.Signature
 	memmoveSig             ssa.Signature
+	memclrSig              ssa.Signature
 	ensureTermination      bool
 	// gcEnabled makes every loop header poll the collector's pause flag; see emitGCSafepoint.
 	gcEnabled bool
@@ -425,6 +426,13 @@ func (c *Compiler) declareSignatures(listenerOn bool) {
 		Results: []ssa.Type{ssa.TypeI64},
 	}
 	c.ssaBuilder.DeclareSignature(&c.gcSig)
+
+	c.memclrSig = ssa.Signature{
+		ID: c.gcSig.ID + 1,
+		// ptr and the byte count.
+		Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64},
+	}
+	c.ssaBuilder.DeclareSignature(&c.memclrSig)
 }
 
 // SignatureForWasmFunctionType returns the ssa.Signature for the given wasm.FunctionType.

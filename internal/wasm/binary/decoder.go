@@ -174,7 +174,7 @@ func DecodeModule(
 	if dwarfEnabled {
 		// Defer dwarf.New (abbrev/unit-header parsing) to the first Line() call --
 		// DWARF is only read when formatting an error stack trace.
-		m.DWARFLines = wasmdebug.NewDWARFLinesLazy(abbrev, info, line, ranges, str)
+		m.DWARFLines = wasmdebug.NewDWARFLines(abbrev, info, line, ranges, str)
 	}
 
 	functionCount, codeCount := m.SectionElementCount(wasm.SectionIDFunction), m.SectionElementCount(wasm.SectionIDCode)

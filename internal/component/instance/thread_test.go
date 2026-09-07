@@ -739,7 +739,7 @@ func TestGuestThread_BlockResumeRoundtrip(t *testing.T) {
 	default:
 	}
 
-	during := numGoroutineStable(t)
+	during := waitGoroutines(t, func(n int) bool { return n > before })
 	if during <= before {
 		t.Fatalf("goroutine count = %d while th is parked mid-call, want > baseline %d", during, before)
 	}
@@ -772,7 +772,7 @@ func TestGuestThread_BlockResumeRoundtrip(t *testing.T) {
 		t.Fatalf("in.activeThread = %v after th finished, want nil", in.activeThread)
 	}
 
-	after := numGoroutineStable(t)
+	after := waitGoroutines(t, func(n int) bool { return n <= before })
 	if after > before {
 		t.Fatalf("goroutine count after th finishes = %d, want <= baseline %d (goroutine leaked)", after, before)
 	}
@@ -796,7 +796,7 @@ func TestGuestThread_ReapAbortsParkedSpawnedThread(t *testing.T) {
 	if err := th.resumeReady(); err != nil {
 		t.Fatalf("resumeReady: %v", err)
 	}
-	during := numGoroutineStable(t)
+	during := waitGoroutines(t, func(n int) bool { return n > before })
 	if during <= before {
 		t.Fatalf("goroutine count = %d while th is parked, want > baseline %d", during, before)
 	}
@@ -821,7 +821,7 @@ func TestGuestThread_ReapAbortsParkedSpawnedThread(t *testing.T) {
 	default:
 	}
 
-	after := numGoroutineStable(t)
+	after := waitGoroutines(t, func(n int) bool { return n <= before })
 	if after > before {
 		t.Fatalf("goroutine count after reap = %d, want <= baseline %d (parked spawned thread's goroutine leaked)", after, before)
 	}
@@ -865,7 +865,7 @@ func TestGuestThread_ReapNeverSpawnedThread(t *testing.T) {
 	if tsk.liveThreads != 0 {
 		t.Fatalf("tsk.liveThreads = %d after reap, want 0", tsk.liveThreads)
 	}
-	after := numGoroutineStable(t)
+	after := waitGoroutines(t, func(n int) bool { return n <= before })
 	if after > before {
 		t.Fatalf("goroutine count after reaping a never-spawned thread = %d, want <= baseline %d", after, before)
 	}
@@ -1244,7 +1244,7 @@ func TestThreadYieldThenResumeHostFunc_SwitchAndSelfPark(t *testing.T) {
 		t.Fatal("st did not resume to completion synchronously")
 	}
 
-	after := numGoroutineStable(t)
+	after := waitGoroutines(t, func(n int) bool { return n <= before })
 	if after > before {
 		t.Fatalf("goroutine count after everything completes = %d, want <= baseline %d (leak)", after, before)
 	}

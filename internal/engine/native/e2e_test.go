@@ -3,9 +3,13 @@ package native_test
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/binary"
 	"fmt"
 	"math"
+	"os"
+	"os/exec"
+	"runtime"
 	"sync"
 	"testing"
 	"unsafe"
@@ -1740,11 +1744,16 @@ func TestListener_long_many_consts(t *testing.T) {
 `, "\n"+buf.String())
 }
 
-// memoryFillSizes covers both sides of the frontend's constant memory.fill
-// threshold (memoryFillInlineMaxBytes), plus every shape the inline lowering
-// picks between: single byte, the 2/4-byte overlapping pairs, exact multiples
-// of 8, and multiples of 8 plus a tail that the last store has to overlap.
-var memoryFillSizes = []uint32{0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 63, 64, 65, 127, 128, 129, 200}
+// memoryFillSizes straddles every threshold the memory.fill lowering has: the
+// shapes the inline path picks between (single byte, the 2/4/8-byte overlapping
+// pairs, exact multiples of 16 and multiples plus an overlapping tail), the
+// constant-size ceiling memoryFillInlineMaxBytes, the 64-byte main loop, the
+// 16-byte loop and its byte tail, and the memclr cutover at
+// memoryFillMemclrMinBytes.
+var memoryFillSizes = []uint32{
+	0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 79, 127, 128, 129, 200,
+	255, 256, 257, 319, 511, 512, 1023, 1024, 1025, 1039, 2048, 4000,
+}
 
 // TestMemoryFillConstantSize checks that a memory.fill with a compile-time
 // constant size -- which the frontend lowers to straight-line stores rather
@@ -1761,6 +1770,8 @@ func TestMemoryFillConstantSize(t *testing.T) {
 		TypeSection: []wasm.FunctionType{
 			{Params: []wasm.ValueType{i32, i32}},      // constant size: (dst, value)
 			{Params: []wasm.ValueType{i32, i32, i32}}, // dynamic size: (dst, value, size)
+			{Params: []wasm.ValueType{i32}},           // constant size and value: (dst)
+			{Params: []wasm.ValueType{i32, i32}},      // dynamic size, constant value: (dst, size)
 		},
 		MemorySection: []wasm.Memory{{Min: 1, Cap: 1, Max: 1, IsMaxEncoded: true}},
 	}
@@ -1778,6 +1789,20 @@ func TestMemoryFillConstantSize(t *testing.T) {
 	m.ExportSection = append(m.ExportSection, wasm.Export{
 		Name: "dyn", Type: wasm.ExternTypeFunc, Index: uint32(len(m.CodeSection) - 1),
 	})
+	// A dynamic size with a *constant* value -- the shape a producer emits for
+	// memset(p, 0, n) -- folds only half of the memclr dispatch, so it is its
+	// own arm.
+	for _, v := range []uint32{0, 0xff} {
+		m.FunctionSection = append(m.FunctionSection, 3)
+		body := []byte{wasm.OpcodeLocalGet, 0, wasm.OpcodeI32Const}
+		body = append(body, leb128.EncodeInt32(int32(v))...)
+		body = append(body, wasm.OpcodeLocalGet, 1,
+			wasm.OpcodeMiscPrefix, byte(wasm.OpcodeMiscMemoryFill), 0, wasm.OpcodeEnd)
+		m.CodeSection = append(m.CodeSection, wasm.Code{Body: body})
+		m.ExportSection = append(m.ExportSection, wasm.Export{
+			Name: fmt.Sprintf("dynvalue%d", v), Type: wasm.ExternTypeFunc, Index: uint32(len(m.CodeSection) - 1),
+		})
+	}
 	// A constant fill value takes the other splat path: the byte pattern is
 	// folded at compile time instead of built with a multiply.
 	m.FunctionSection = append(m.FunctionSection, 0)
@@ -1791,6 +1816,36 @@ func TestMemoryFillConstantSize(t *testing.T) {
 		Name: "constvalue", Type: wasm.ExternTypeFunc, Index: uint32(len(m.CodeSection) - 1),
 	})
 
+	// Constant size *and* constant value: the four arms a fully-folded fill can
+	// take -- direct memclr (zero at or above the memclr threshold), the inline
+	// stores (below the constant ceiling), and the store loops (a nonzero byte
+	// too large to inline, which must never reach memclr).
+	type folded struct {
+		name        string
+		value, size uint32
+	}
+	foldedFills := []folded{
+		{"fold_zero_1024", 0, 1024},
+		{"fold_zero_4000", 0, 4000},
+		{"fold_zero_1023", 0, 1023},
+		{"fold_ff_1024", 0xff, 1024},
+		{"fold_ff_4000", 0xff, 4000},
+		{"fold_zero_64", 0, 64},
+		{"fold_ff_300", 0xff, 300},
+	}
+	for _, f := range foldedFills {
+		body := []byte{wasm.OpcodeLocalGet, 0, wasm.OpcodeI32Const}
+		body = append(body, leb128.EncodeInt32(int32(f.value))...)
+		body = append(body, wasm.OpcodeI32Const)
+		body = append(body, leb128.EncodeInt32(int32(f.size))...)
+		body = append(body, wasm.OpcodeMiscPrefix, byte(wasm.OpcodeMiscMemoryFill), 0, wasm.OpcodeEnd)
+		m.FunctionSection = append(m.FunctionSection, 2)
+		m.CodeSection = append(m.CodeSection, wasm.Code{Body: body})
+		m.ExportSection = append(m.ExportSection, wasm.Export{
+			Name: f.name, Type: wasm.ExternTypeFunc, Index: uint32(len(m.CodeSection) - 1),
+		})
+	}
+
 	ctx := context.Background()
 	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler())
 	defer func() { require.NoError(t, r.Close(ctx)) }()
@@ -1801,7 +1856,7 @@ func TestMemoryFillConstantSize(t *testing.T) {
 	// Every fill this test makes lands inside one window; comparing just the
 	// window, plus a count of bytes disturbed outside it, keeps a failure
 	// readable instead of dumping 64KiB.
-	const memSize, window = wasm.MemoryPageSize, 256
+	const memSize, window = wasm.MemoryPageSize, 4096
 	scratch := make([]byte, memSize)
 	reset := func() {
 		for i := range scratch {
@@ -1840,6 +1895,9 @@ func TestMemoryFillConstantSize(t *testing.T) {
 		return want
 	}
 	dyn := inst.ExportedFunction("dyn")
+	dynValue := map[uint32]api.Function{
+		0: inst.ExportedFunction("dynvalue0"), 0xff: inst.ExportedFunction("dynvalue255"),
+	}
 	for _, size := range memoryFillSizes {
 		reset()
 		_, err = inst.ExportedFunction(fmt.Sprintf("const%d", size)).Call(ctx, dst, value)
@@ -1853,6 +1911,21 @@ func TestMemoryFillConstantSize(t *testing.T) {
 
 		// ...and both must match what memory.fill is defined to do.
 		require.Equal(t, expected(dst, size), constant, size)
+
+		// A constant value with a dynamic size must agree too.
+		for v, fn := range dynValue {
+			reset()
+			_, err = fn.Call(ctx, dst, uint64(size))
+			require.NoError(t, err, size)
+			want := make([]byte, window)
+			for i := range want {
+				want[i] = 0xa5
+			}
+			for i := uint32(0); i < size; i++ {
+				want[dst+i] = byte(v)
+			}
+			require.Equal(t, want, snapshot(0), size, v)
+		}
 	}
 
 	// A constant fill value must be masked to its low byte just the same.
@@ -1860,6 +1933,29 @@ func TestMemoryFillConstantSize(t *testing.T) {
 	_, err = inst.ExportedFunction("constvalue").Call(ctx, dst, 0)
 	require.NoError(t, err)
 	require.Equal(t, expected(dst, 20), snapshot(0))
+
+	// Folding both operands must not change a single written byte, on any arm.
+	for _, f := range foldedFills {
+		reset()
+		_, err = inst.ExportedFunction(f.name).Call(ctx, dst)
+		require.NoError(t, err, f.name)
+		got := snapshot(0)
+
+		want := make([]byte, window)
+		for i := range want {
+			want[i] = 0xa5
+		}
+		for i := uint32(0); i < f.size; i++ {
+			want[dst+i] = byte(f.value)
+		}
+		require.Equal(t, want, got, f.name)
+
+		// ...and must agree with the fully dynamic lowering.
+		reset()
+		_, err = dyn.Call(ctx, dst, uint64(f.value), uint64(f.size))
+		require.NoError(t, err, f.name)
+		require.Equal(t, got, snapshot(0), f.name)
+	}
 
 	// Out of bounds traps, and nothing is written -- including by the inline
 	// path, whose stores all sit after the bounds check.
@@ -1879,6 +1975,15 @@ func TestMemoryFillConstantSize(t *testing.T) {
 		}},
 		{"const1 at the end", func() error {
 			_, err := inst.ExportedFunction("const1").Call(ctx, uint64(memSize), value)
+			return err
+		}},
+		{"fold_zero_1024 past the end", func() error {
+			// The memclr arm must trap before the call, like every other arm.
+			_, err := inst.ExportedFunction("fold_zero_1024").Call(ctx, uint64(memSize)-1023)
+			return err
+		}},
+		{"dyn memclr-sized past the end", func() error {
+			_, err := dyn.Call(ctx, uint64(memSize)-1023, 0, 1024)
 			return err
 		}},
 	} {
@@ -2134,4 +2239,76 @@ func TestCallEngine_stackRetainedAcrossCalls(t *testing.T) {
 		}
 		wg.Wait()
 	})
+}
+
+// memclrXmm15Wasm clears 1 KiB with sixteen v128 values live across the fill;
+// see testdata/memclr_xmm15.wat.
+//
+//go:embed testdata/memclr_xmm15.wasm
+var memclrXmm15Wasm []byte
+
+// noAVX2Child marks the re-executed child process of TestMemoryFillMemclrNoAVX2.
+const noAVX2Child = "WAZY_TEST_MEMCLR_NO_AVX2"
+
+// TestMemoryFillMemclrNoAVX2 covers the amd64 ABI hazard in dispatching a large
+// zero memory.fill to runtime.memclrNoHeapPointers: its SSE path is a run of
+// `MOVOU X15, n(DI)`, taking Go's reserved zero register at its word. wazy
+// allocates xmm15 like any other vector register, so without an explicit zeroing
+// at the call site a "clear" writes whatever vector value happened to live there.
+//
+// AVX2 hides it -- that path zeroes its own vector -- so the child process runs
+// with the feature turned off, which is the only way this reproduces on a modern
+// machine.
+func TestMemoryFillMemclrNoAVX2(t *testing.T) {
+	if runtime.GOARCH != "amd64" {
+		t.Skip("the X15 zero-register convention is amd64-only")
+	}
+	// The BSD and illumos jobs ship prebuilt test binaries into a VM and run
+	// them with -test.short; child processes cannot be reaped there ("wait: no
+	// child processes"), and this test is built on re-executing itself. The
+	// emitted instruction is pinned everywhere by the memory_fill_memclr
+	// backend golden -- this is the behavioural half, and one platform running
+	// it is enough.
+	if testing.Short() {
+		t.Skip("re-executes the test binary; not viable under -short (BSD/illumos VM runners)")
+	}
+	if os.Getenv(noAVX2Child) == "" {
+		cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$", "-test.v")
+		cmd.Env = append(os.Environ(), noAVX2Child+"=1", "GODEBUG=cpu.avx2=off")
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+		return
+	}
+
+	ctx := context.Background()
+	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler())
+	defer func() { require.NoError(t, r.Close(ctx)) }()
+
+	inst, err := r.Instantiate(ctx, memclrXmm15Wasm)
+	require.NoError(t, err)
+
+	mem := inst.Memory()
+	dirty := make([]byte, 1024)
+	for i := range dirty {
+		dirty[i] = 0x5a
+	}
+	require.True(t, mem.Write(0, dirty))
+
+	res, err := inst.ExportedFunction("run").Call(ctx)
+	require.NoError(t, err)
+
+	// The clear itself: every byte must be zero, not whatever xmm15 held.
+	got, ok := mem.Read(0, 1024)
+	require.True(t, ok)
+	for i, b := range got {
+		require.Equal(t, byte(0), b, i)
+	}
+
+	// And the other half of the ABI contract: the sixteen vectors live across
+	// the call, so their i8x16 sum must be exactly what the constants in
+	// testdata/memclr_xmm15.wat add up to. Comparing two runs of the same
+	// binary would agree whether or not the values survived, so the expected
+	// value is spelled out.
+	require.Equal(t, uint64(0x1a1a1a1009090908), res[0])
+	require.Equal(t, uint64(0x3c3c3c202a2a2a18), res[1])
 }

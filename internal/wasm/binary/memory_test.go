@@ -18,6 +18,7 @@ func Test_newMemorySizer(t *testing.T) {
 	defaultLimit64 := uint64(defaultLimit)
 	specCeiling64 := wasm.Memory64LimitPages
 	overSpecCeiling64 := wasm.Memory64LimitPages + 1
+	overSpecCeiling32 := uint64(wasm.MemoryLimitPages) + 1
 
 	tests := []struct {
 		name                                       string
@@ -215,6 +216,86 @@ func Test_newMemorySizer(t *testing.T) {
 			expectedMin:           zero,
 			expectedCapacity:      ten,
 			expectedMax:           ten,
+		},
+		{
+			// The reserve applies to a 64-bit memory too, and its ceiling is
+			// the spec ceiling rather than the embedder's page limit.
+			name:                       "i64 min 10, reserve 20, no max",
+			index64:                    true,
+			memoryCapacityReservePages: 20,
+			limit:                      5,
+			min:                        ten,
+			expectedMin:                ten,
+			expectedCapacity:           30,
+			expectedMax:                specCeiling64,
+		},
+		{
+			name:                       "i64 reserve capped at the encoded max",
+			index64:                    true,
+			memoryCapacityReservePages: 20,
+			limit:                      5,
+			min:                        zero,
+			max:                        &ten,
+			expectedMin:                zero,
+			expectedCapacity:           ten,
+			expectedMax:                ten,
+		},
+		{
+			name:                       "i64 memoryCapacityFromMax beats the reserve",
+			index64:                    true,
+			memoryCapacityFromMax:      true,
+			memoryCapacityReservePages: 20,
+			limit:                      5,
+			min:                        zero,
+			max:                        &ten,
+			expectedMin:                zero,
+			expectedCapacity:           ten,
+			expectedMax:                ten,
+		},
+		{
+			// wazero#2517: memoryCapacityFromMax must take the *effective*
+			// maximum, so a module declaring more than the limit is clamped
+			// rather than rejected -- and the reserve does not change that.
+			name:                       "max > limit, memoryCapacityFromMax with a reserve",
+			memoryCapacityFromMax:      true,
+			memoryCapacityReservePages: 20,
+			limit:                      5,
+			min:                        zero,
+			max:                        &ten,
+			expectedMin:                zero,
+			expectedCapacity:           5,
+			expectedMax:                5,
+		},
+		{
+			name:                       "no max, memoryCapacityFromMax with a reserve",
+			memoryCapacityFromMax:      true,
+			memoryCapacityReservePages: 20,
+			limit:                      defaultLimit,
+			min:                        ten,
+			expectedMin:                ten,
+			expectedCapacity:           defaultLimit64,
+			expectedMax:                defaultLimit64,
+		},
+		{
+			// An i32 max over the spec ceiling is invalid: it propagates
+			// untouched for Validate to reject, whatever the capacity mode.
+			name:             "max over the spec ceiling propagates",
+			limit:            defaultLimit,
+			min:              zero,
+			max:              &overSpecCeiling32,
+			expectedMin:      zero,
+			expectedCapacity: zero,
+			expectedMax:      overSpecCeiling32,
+		},
+		{
+			name:                  "max over the spec ceiling propagates, memoryCapacityFromMax",
+			memoryCapacityFromMax: true,
+			limit:                 defaultLimit,
+			min:                   zero,
+			max:                   &overSpecCeiling32,
+			expectedMin:           zero,
+			expectedCapacity:      zero,
+			expectedMax:           overSpecCeiling32,
 		},
 	}
 

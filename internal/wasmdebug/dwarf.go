@@ -13,11 +13,15 @@ import (
 // DWARFLines is used to retrieve source code line information from the DWARF data.
 type DWARFLines struct {
 	// d is created by DWARF custom sections. When constructed lazily (see
-	// NewDWARFLinesLazy) it is nil until the first Line() call parses raw*.
+	// NewDWARFLines) it is nil until the first Line() call parses raw*.
 	d *dwarf.Data
 	// raw* hold the undecoded .debug_* sections for lazy construction; nil once
-	// parsed (or when built eagerly via NewDWARFLines).
+	// parsed.
 	rawAbbrev, rawInfo, rawLine, rawRanges, rawStr []byte
+	// parsed records that the lazy dwarf.New has run. It is not "d != nil":
+	// dwarf.New rejects malformed input by returning a nil *dwarf.Data on
+	// Go 1.27 and an empty one before it, and neither should be retried.
+	parsed bool
 	// linesPerEntry maps dwarf.Offset for dwarf.Entry to the list of lines contained by the entry.
 	// The value is sorted in the increasing order by the address.
 	linesPerEntry map[dwarf.Offset][]line
@@ -29,19 +33,11 @@ type line struct {
 	pos  dwarf.LineReaderPos
 }
 
-// NewDWARFLines returns DWARFLines for the given *dwarf.Data.
-func NewDWARFLines(d *dwarf.Data) *DWARFLines {
-	if d == nil {
-		return nil
-	}
-	return &DWARFLines{d: d, linesPerEntry: map[dwarf.Offset][]line{}}
-}
-
-// NewDWARFLinesLazy returns DWARFLines that defers dwarf.New (which parses the
+// NewDWARFLines returns DWARFLines that defers dwarf.New (which parses the
 // abbrev tables and unit headers) to the first Line() call. DWARF is consumed only
 // when formatting an error stack trace, so the common no-error compile should never
 // pay for it. Returns nil when there is no debug info (no .debug_info section).
-func NewDWARFLinesLazy(abbrev, info, lineSec, ranges, str []byte) *DWARFLines {
+func NewDWARFLines(abbrev, info, lineSec, ranges, str []byte) *DWARFLines {
 	if len(info) == 0 {
 		return nil
 	}
@@ -81,12 +77,13 @@ func (d *DWARFLines) Line(instructionOffset uint64) (ret []string) {
 	d.mux.Lock()
 	defer d.mux.Unlock()
 
-	if d.d == nil { // lazily parse the DWARF sections on first use (see NewDWARFLinesLazy).
+	if !d.parsed { // lazily parse the DWARF sections on first use (see NewDWARFLines).
+		d.parsed = true
 		d.d, _ = dwarf.New(d.rawAbbrev, nil, nil, d.rawInfo, d.rawLine, nil, d.rawRanges, d.rawStr)
 		d.rawAbbrev, d.rawInfo, d.rawLine, d.rawRanges, d.rawStr = nil, nil, nil, nil, nil
-		if d.d == nil {
-			return
-		}
+	}
+	if d.d == nil { // the sections were there but did not parse.
+		return
 	}
 
 	r := d.d.Reader()

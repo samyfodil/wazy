@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/samyfodil/wazy/internal/engine/native/backend"
+	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
 	"github.com/samyfodil/wazy/internal/engine/native/ssa"
 	"github.com/samyfodil/wazy/internal/testing/require"
 )
@@ -367,4 +368,47 @@ func TestInstruction_encode_bnotAndIcmpImm(t *testing.T) {
 			require.Equal(t, tc.want, hex.EncodeToString(mc.buf))
 		})
 	}
+}
+
+// TestMachine_LowerInstr_exitIfTrueWithCode_sourceOffset is the amd64 half of
+// the arm64 test of the same name: sharing one exit sequence per trap kind
+// costs the per-site trap address a DWARF stack trace maps back to source, so a
+// site carrying a source offset keeps its sequence inline. The finalize goldens
+// cannot cover this, being built without source offsets.
+func TestMachine_LowerInstr_exitIfTrueWithCode_sourceOffset(t *testing.T) {
+	lower := func(t *testing.T, offset ssa.SourceOffset) *machine {
+		t.Helper()
+		ctx, b, m := newSetupWithMockContext()
+		m.maxSSABlockID, m.nextLabel = 1, 1
+		ctx.vRegCounter = 10
+		ctx.typeOf[raxVReg.ID()] = ssa.TypeI64
+
+		blk := b.CurrentBlock()
+		execCtx := blk.AddParam(b, ssa.TypeI64)
+		c := blk.AddParam(b, ssa.TypeI32)
+		ctx.vRegMap[execCtx], ctx.vRegMap[c] = raxVReg, rcxVReg
+		ctx.definitions[execCtx] = backend.SSAValueDefinition{V: execCtx}
+		ctx.definitions[c] = backend.SSAValueDefinition{V: c}
+
+		b.SetCurrentSourceOffset(offset)
+		instr := b.AllocateInstruction()
+		instr.AsExitIfTrueWithCode(execCtx, c, nativeapi.ExitCodeUnreachable)
+		b.InsertInstruction(instr)
+		require.Equal(t, offset, instr.SourceOffset())
+
+		m.LowerInstr(instr)
+		return m
+	}
+
+	t.Run("no source offset shares an island", func(t *testing.T) {
+		m := lower(t, ssa.SourceOffset(-1))
+		require.Equal(t, 1, len(m.trapIslands))
+		require.False(t, strings.Contains(formatEmittedInstructionsInCurrentBlock(m), "exit_sequence"))
+	})
+
+	t.Run("source offset keeps the sequence inline", func(t *testing.T) {
+		m := lower(t, ssa.SourceOffset(0x1234))
+		require.Zero(t, len(m.trapIslands))
+		require.True(t, strings.Contains(formatEmittedInstructionsInCurrentBlock(m), "exit_sequence"))
+	})
 }

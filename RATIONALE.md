@@ -1549,9 +1549,15 @@ wazy therefore applies two different ceilings at two different times:
   declared maximum here, as it always has -- for that index type the embedder's
   default and the specification's ceiling coincide, so nothing changes.
 - **Instantiation** applies the embedder's allocation ceiling, which for a
-  64-bit memory is `WithMemory64LimitPages` (default 65536 pages, the same four
-  gibibytes a 32-bit memory gets, so enabling the feature does not by itself let
-  a module claim more host memory). A minimum over the limit fails to
+  64-bit memory is `WithMemory64LimitPages`. Unset, that follows
+  `WithMemoryLimitPages` (65536 pages by default, the same four gibibytes a
+  32-bit memory gets), so enabling the feature does not by itself let a module
+  claim more host memory -- and, just as importantly, *tightening* the general
+  limit tightens the 64-bit one, or an untrusted module would reach past the
+  embedder's only general memory knob by doing nothing but declaring an `i64`
+  index type. Setting `WithMemory64LimitPages` explicitly pins it, whichever
+  order the two are configured in, since it is the only way past four
+  gibibytes. A minimum over the limit fails to
   instantiate; a maximum over it simply stops `memory.grow` earlier, which is
   something a host may always do. Tables get the same treatment against
   `MaximumFunctionIndex`, moved out of the decoder for the same reason.

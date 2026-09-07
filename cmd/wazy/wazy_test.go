@@ -164,6 +164,8 @@ func TestCompile_Errors(t *testing.T) {
 	require.NoError(t, os.WriteFile(wasmPath, wasmWasiArg, 0o600))
 
 	notWasmPath := filepath.Join(tmpDir, "bears.wasm")
+	// A path whose parent does not exist, so creating a profile there fails.
+	unwritablePath := filepath.Join(tmpDir, "not-a-dir", "profile.out")
 	require.NoError(t, os.WriteFile(notWasmPath, []byte("pooh"), 0o600))
 
 	tests := []struct {
@@ -185,6 +187,16 @@ func TestCompile_Errors(t *testing.T) {
 		{
 			message: "invalid cachedir",
 			args:    []string{"--cachedir", notWasmPath, wasmPath},
+		},
+		{
+			// Asking for a profile and silently not getting one leaves a
+			// benchmark harness reading a file that was never written.
+			message: "error creating cpu profile output",
+			args:    []string{"-cpuprofile", unwritablePath, wasmPath},
+		},
+		{
+			message: "error creating memory profile output",
+			args:    []string{"-memprofile", unwritablePath, wasmPath},
 		},
 	}
 
@@ -494,6 +506,7 @@ func TestRun_Errors(t *testing.T) {
 	require.NoError(t, os.WriteFile(wasmPath, wasmWasiArg, 0o700))
 
 	notWasmPath := filepath.Join(t.TempDir(), "bears.wasm")
+	unwritablePath := filepath.Join(t.TempDir(), "not-a-dir", "profile.out")
 	require.NoError(t, os.WriteFile(notWasmPath, []byte("pooh"), 0o700))
 
 	tests := []struct {
@@ -539,6 +552,16 @@ func TestRun_Errors(t *testing.T) {
 		{
 			message: "invalid listen port",
 			args:    []string{"--listen=localhost:abc", wasmPath},
+		},
+		{
+			// Asking for a profile and silently not getting one leaves a
+			// benchmark harness reading a file that was never written.
+			message: "error creating cpu profile output",
+			args:    []string{"-cpuprofile", unwritablePath, wasmPath},
+		},
+		{
+			message: "error creating memory profile output",
+			args:    []string{"-memprofile", unwritablePath, wasmPath},
 		},
 	}
 

@@ -317,6 +317,7 @@ func (b *hostModuleBuilder) Compile(ctx context.Context) (CompiledModule, error)
 		return nil, err
 	}
 	c.typeIDs = typeIDs
+	c.typeIDStore = b.r.store
 
 	return c, nil
 }
