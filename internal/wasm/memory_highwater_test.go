@@ -132,8 +132,10 @@ func TestMemoryHighWater_Monotonic(t *testing.T) {
 // behind it -- what tests and the component-model host memories do -- which has
 // nowhere to record a mark and must simply grow.
 func TestMemoryHighWater_NilIsSafe(t *testing.T) {
-	mi := &MemoryInstance{Min: 1, Cap: 1, Max: 4, Buffer: make([]byte, MemoryPagesToBytesNum(1)),
-		sizeBytes: MemoryPagesToBytesNum(1), ownerModuleEngine: &mockModuleEngine{}}
+	mi := &MemoryInstance{
+		Min: 1, Cap: 1, Max: 4, Buffer: make([]byte, MemoryPagesToBytesNum(1)),
+		sizeBytes: MemoryPagesToBytesNum(1), ownerModuleEngine: &mockModuleEngine{},
+	}
 	require.Nil(t, mi.capHighWater)
 	_, ok := mi.Grow(1)
 	require.True(t, ok)
