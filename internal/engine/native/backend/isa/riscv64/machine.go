@@ -427,9 +427,23 @@ func (m *machine) resolveAddressingMode(arg0offset, ret0offset int64, i *instruc
 		panic("BUG: unexpected address mode kind in resolveAddressingMode")
 	}
 	amode.kind = addressModeKindRegSignedImm12
+
+	// A 12-bit displacement covers +/-2KiB from SP, which a function with
+	// enough stack-passed arguments -- or simply a large spill frame beneath
+	// them -- runs past. arm64 never hits this (its scaled imm12 reaches 32KiB
+	// and it has a register+register fallback); RISC-V has neither, so the
+	// load/store grows into a three-instruction form that materializes the
+	// address in the reserved scratch first. This runs before the layout pass
+	// in resolveRelativeAddresses, so the larger size() is accounted for.
+	//
+	// The scratch cannot collide with anything live: these address modes are
+	// always SP-based, and for a store the value being stored lives in rd,
+	// not in the scratch.
 	if !fitsInSignedImm12(amode.imm) {
-		panic(fmt.Sprintf("BUG: resolved arg/result stack offset %d does not fit in imm12; "+
-			"the caller must reserve a smaller argument area", amode.imm))
+		if !fitsInAuipcPair(amode.imm) {
+			panic(fmt.Sprintf("BUG: arg/result stack offset %d is beyond a 32-bit displacement", amode.imm))
+		}
+		i.setBigOffset(true)
 	}
 }
 
@@ -472,8 +486,13 @@ func (m *machine) frameSize() int64 {
 	return s
 }
 
+// clobberedRegSlotSize is the size of the callee-saved save area. Every
+// register RV64G can clobber -- integer or FP -- is 64 bits, so slots are 8
+// bytes, unlike arm64 where a v-register forces 16. The *region* is still
+// rounded to 16 so the frame keeps its 16-byte alignment with an odd number of
+// saved registers.
 func (m *machine) clobberedRegSlotSize() int64 {
-	return int64(len(m.clobberedRegs) * 16)
+	return (int64(len(m.clobberedRegs))*8 + 15) &^ 15
 }
 
 // Encode implements backend.Machine.

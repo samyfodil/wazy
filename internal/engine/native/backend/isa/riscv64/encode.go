@@ -494,6 +494,23 @@ func fmtBit(_64bit bool) uint32 {
 	return 0
 }
 
+// A hardware FP instruction is not the same thing as the wasm operator that
+// shares its name. Three divergences the lowering above this layer must close,
+// none of which the encoders here can:
+//
+//   - FMIN/FMAX return the non-NaN operand when one input is NaN; wasm requires
+//     NaN out. Guard with fclass/feq.
+//   - FCVT.W/L on a NaN or an out-of-range input returns a saturated integer
+//     and raises a flag. wasm's non-saturating truncations must *trap* on both,
+//     and the saturating ones must return 0 for NaN, so both need an explicit
+//     fclass + range check first.
+//   - f32 values in an f register must be NaN-boxed (upper 32 bits all ones).
+//     FLW and FMV.W.X produce a box; FLD and FMV.D.X do not. So an f32 arriving
+//     from memory or from a GPR must come in through the single-precision form,
+//     or subsequent f32 arithmetic sees a NaN instead of the value. Register
+//     copies and spills, by contrast, must move all 64 bits (fsgnj.d, fsd/fld)
+//     to *preserve* an existing box.
+
 // encodeFpuRRR encodes a two-operand FP instruction.
 func encodeFpuRRR(o fpuBinOp, rd, rs1, rs2 uint32, _64bit bool) uint32 {
 	f := fmtBit(_64bit)
@@ -513,6 +530,10 @@ func encodeFpuRRR(o fpuBinOp, rd, rs1, rs2 uint32, _64bit bool) uint32 {
 	case fpuBinOpSgnjx:
 		return encodeR(0b0010000|f, rs2, rs1, 0b010, rd, opOpFP)
 	case fpuBinOpMin:
+		// NOTE: FMIN/FMAX are *not* wasm's f32.min/f32.max. RISC-V returns the
+		// non-NaN operand when exactly one input is NaN; wasm requires a NaN
+		// result. The lowering must add the fclass/feq guard -- see the
+		// warning above encodeFpuRRR.
 		return encodeR(0b0010100|f, rs2, rs1, 0b000, rd, opOpFP)
 	case fpuBinOpMax:
 		return encodeR(0b0010100|f, rs2, rs1, 0b001, rd, opOpFP)

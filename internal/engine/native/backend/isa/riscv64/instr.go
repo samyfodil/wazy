@@ -26,9 +26,39 @@ import (
 // sign-extended operands implement i32 unsigned comparison directly, with no
 // masking.
 //
-// The one place the invariant must be re-established explicitly is
-// i64.extend_i32_u (and any other value crossing from 32 to 64 bits as
-// unsigned), which needs the slli/srli 32 pair.
+// The invariant is a *precondition* of that argument, so every producer of an
+// i32 has to maintain it. These are the ones that do not maintain it for free,
+// and what each needs -- this list is the lowering's checklist, not background:
+//
+//	i32.const               materialize int32(v), not uint32(v). A LUI-based
+//	                        constant needs ADDIW, not ADDI, or 0x7fffffff comes
+//	                        out as 0xffffffff7fffffff.
+//	i32.wrap_i64            addiw dst, src, 0. A plain copy leaves
+//	                        0x0000000080000000 looking positive.
+//	i32 add/sub/mul/shl     the .w forms. Wide 0x7fffffff+1 yields a
+//	                        non-canonical 0x0000000080000000.
+//	i32 shr_u/shr_s/rotl/r  the .w shifts: wide shifts take six count bits, so
+//	                        i32.shr_s(1, 32) would return 0 instead of 1.
+//	                        Rotations need the count reduced modulo 32 and both
+//	                        halves canonical.
+//	i32.extend8_s/16_s      word shifts (or XLEN-correct distances); the naive
+//	                        (x<<24)>>s24 on 64 bits leaves 0x80 positive.
+//	i32.load, globals,      lw, not lwu/ld. A stored 0x80000000 reloaded with
+//	  spills, host results   lwu is non-canonical, and -1 from a helper that
+//	                        zero-extends compares unequal to canonical -1.
+//	i32.clz/ctz/popcnt      the software sequences must be width-aware:
+//	                        popcnt of sign-extended -1 is 64, not 32, and
+//	                        ctz(0) must be 32.
+//
+// And the mirror-image hazard: every *unsigned consumer* of an i32 must
+// zero-extend first. Adding a sign-extended 0x80000000 to a memory base
+// subtracts 2GiB rather than adding 2GiB, so effective-address arithmetic,
+// memory/table indices and lengths, and host marshaling all need the
+// slli/srli 32 pair. i64.extend_i32_u is only the most visible case.
+//
+// What is already canonical and needs nothing: the bitwise ops (canonical in,
+// canonical out), FCVT.W/WU and FMV.X.W, the word AMO and LR/SC results, and
+// i32.load8_u/load16_u.
 
 type (
 	// instruction is one machine instruction or a meta-instruction convenient
@@ -37,7 +67,7 @@ type (
 	instruction struct {
 		prev, next          *instruction
 		rd                  regalloc.VReg
-		rs1, rs2            operand
+		rs1, rs2, rs3       operand
 		amode               *addressMode
 		u1, u2              uint64
 		kind                instructionKind
@@ -116,6 +146,11 @@ const (
 	// atomicRmw / atomicCas / atomicLoad / atomicStore / fence implement the
 	// threads proposal on top of the A extension.
 	atomicRmw
+	// atomicCas is compare-exchange. Unlike every other instruction here it
+	// has *three* sources -- address, expected, replacement -- so it carries
+	// the third in rs3 and is the sole user of useKindRS1RS2RS3. Modelling
+	// only two would let the allocator overwrite the expected value, which
+	// the LR/SC retry loop must keep live across iterations.
 	atomicCas
 	atomicLoad
 	atomicStore
@@ -379,7 +414,7 @@ var useKinds = [numInstructionKinds]useKind{
 	fclass:            useKindRS1,
 	fpuConstPoolData:  useKindNone,
 	atomicRmw:         useKindRS1RS2,
-	atomicCas:         useKindRS1RS2,
+	atomicCas:         useKindRS1RS2RS3,
 	atomicLoad:        useKindRS1,
 	atomicStore:       useKindRS1RS2,
 	fence:             useKindNone,
@@ -402,6 +437,8 @@ func (i *instruction) Uses(regs *[]regalloc.VReg) []regalloc.VReg {
 		if i.rs2.isReg() {
 			*regs = append(*regs, i.rs2.nr())
 		}
+	case useKindRS1RS2RS3:
+		*regs = append(*regs, i.rs1.nr(), i.rs2.nr(), i.rs3.nr())
 	case useKindRS1Amode:
 		*regs = append(*regs, i.getAmode().rn)
 	case useKindRDRS1Amode:
@@ -448,6 +485,15 @@ func (i *instruction) AssignUse(index int, reg regalloc.VReg) {
 		} else {
 			i.rs2 = operandNR(reg)
 		}
+	case useKindRS1RS2RS3:
+		switch index {
+		case 0:
+			i.rs1 = operandNR(reg)
+		case 1:
+			i.rs2 = operandNR(reg)
+		default:
+			i.rs3 = operandNR(reg)
+		}
 	case useKindRS1Amode:
 		i.getAmode().rn = reg
 	case useKindRDRS1Amode:
@@ -470,8 +516,13 @@ func (i *instruction) AssignUse(index int, reg regalloc.VReg) {
 // constructors
 // ---------------------------------------------------------------------------
 
+// asNop0 builds an *unlabeled* nop0. u1 must be the invalid sentinel rather
+// than the zero value: label 0 is a perfectly good label (SSA block 0, the
+// entry block), so a zero u1 would make every block-boundary nop claim to
+// anchor L0 and clobber the entry block's resolved offset during layout.
 func (i *instruction) asNop0() *instruction {
 	i.kind = nop0
+	i.u1 = uint64(labelInvalid)
 	return i
 }
 
@@ -481,12 +532,15 @@ func (i *instruction) asNop0WithLabel(l label) *instruction {
 	return i
 }
 
-// nop0Label returns the label anchored by this nop0, if any.
+// nop0Label returns the label anchored by this nop0, if any. labelReturn is
+// rejected alongside labelInvalid: the return block's labelPosition lives in
+// machine.returnLabelPos, not in the pool, so it must never be looked up there.
 func (i *instruction) nop0Label() (label, bool) {
-	if l := label(i.u1); l != labelInvalid {
-		return l, true
+	l := label(i.u1)
+	if l == labelInvalid || l == labelReturn {
+		return labelInvalid, false
 	}
-	return labelInvalid, false
+	return l, true
 }
 
 func (i *instruction) asALU(op aluOp, rd regalloc.VReg, rs1, rs2 operand, _64bit bool) *instruction {
@@ -545,6 +599,16 @@ func (i *instruction) asLoad(rd regalloc.VReg, amode *addressMode, bits byte, si
 	i.u2 = b2u64(signed)
 	return i
 }
+
+// A load or store whose displacement does not fit in the 12-bit field grows
+// into `lui tmp, hi; add tmp, tmp, base; l/s rd, lo(tmp)`. The flag lives in
+// bit 1 of u2 (bit 0 is the load's signedness) so size() and encode() agree
+// without a separate field on every instruction.
+func (i *instruction) setBigOffset(v bool) { i.u2 = i.u2&^2 | b2u64(v)<<1 }
+
+func (i *instruction) bigOffset() bool { return i.u2&2 != 0 }
+
+func (i *instruction) loadIsSigned() bool { return i.u2&1 != 0 }
 
 func (i *instruction) asFpuLoad(rd regalloc.VReg, amode *addressMode, bits byte) *instruction {
 	i.kind = fpuLoad

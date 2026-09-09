@@ -47,9 +47,30 @@ func (i *instruction) size() int64 {
 		return 8
 	case brTableSequence:
 		return brTableSequenceOffsetTableBegin + int64(i.u2)*4
+	case load, store, fpuLoad, fpuStore:
+		if i.bigOffset() {
+			return 12 // lui + add + the access itself.
+		}
+		return 4
 	default:
 		return 4
 	}
+}
+
+// emitAccessBase materializes the address base a load/store should use,
+// handling the grown out-of-range-displacement form. It returns the base
+// register number and the displacement to put in the access itself.
+func emitAccessBase(c compilerBuf, i *instruction) (base uint32, disp int32) {
+	a := i.getAmode()
+	rn := regNumberInEncoding[a.rn.RealReg()]
+	if !i.bigOffset() {
+		return rn, int32(a.imm)
+	}
+	tmp := regNumberInEncoding[tmpReg]
+	hi, lo := splitImm32(int32(a.imm))
+	c.Emit4Bytes(encodeLui(tmp, hi))
+	c.Emit4Bytes(encodeAluRRR(aluOpAdd, tmp, tmp, rn, true))
+	return tmp, lo
 }
 
 // encode appends this instruction's machine code to the compiler's buffer.
@@ -87,21 +108,17 @@ func (i *instruction) encode(m *machine) {
 		r := regNumberInEncoding[i.rs1.realReg()]
 		c.Emit4Bytes(encodeFpuRRR(fpuBinOpSgnj, regNumberInEncoding[i.rd.RealReg()], r, r, true))
 	case load:
-		a := i.getAmode()
-		c.Emit4Bytes(encodeLoad(regNumberInEncoding[i.rd.RealReg()], regNumberInEncoding[a.rn.RealReg()],
-			int32(a.imm), byte(i.u1), i.u2 == 1))
+		base, disp := emitAccessBase(c, i)
+		c.Emit4Bytes(encodeLoad(regNumberInEncoding[i.rd.RealReg()], base, disp, byte(i.u1), i.loadIsSigned()))
 	case store:
-		a := i.getAmode()
-		c.Emit4Bytes(encodeStore(regNumberInEncoding[i.rd.RealReg()], regNumberInEncoding[a.rn.RealReg()],
-			int32(a.imm), byte(i.u1)))
+		base, disp := emitAccessBase(c, i)
+		c.Emit4Bytes(encodeStore(regNumberInEncoding[i.rd.RealReg()], base, disp, byte(i.u1)))
 	case fpuLoad:
-		a := i.getAmode()
-		c.Emit4Bytes(encodeFpuLoad(regNumberInEncoding[i.rd.RealReg()], regNumberInEncoding[a.rn.RealReg()],
-			int32(a.imm), byte(i.u1)))
+		base, disp := emitAccessBase(c, i)
+		c.Emit4Bytes(encodeFpuLoad(regNumberInEncoding[i.rd.RealReg()], base, disp, byte(i.u1)))
 	case fpuStore:
-		a := i.getAmode()
-		c.Emit4Bytes(encodeFpuStore(regNumberInEncoding[i.rd.RealReg()], regNumberInEncoding[a.rn.RealReg()],
-			int32(a.imm), byte(i.u1)))
+		base, disp := emitAccessBase(c, i)
+		c.Emit4Bytes(encodeFpuStore(regNumberInEncoding[i.rd.RealReg()], base, disp, byte(i.u1)))
 	case condBr:
 		encodeCondBr(c, i)
 	case br:

@@ -210,9 +210,16 @@ func (m *machine) resolveAddressModeForOffset(offset int64, rn regalloc.VReg, al
 		*amode = addressMode{kind: addressModeKindRegSignedImm12, rn: rn, imm: offset}
 		return amode
 	}
+	// The scratch we build the address in must not be the base register
+	// itself: materializing the offset into it would destroy the base before
+	// the add reads it (`add tmp, tmp, tmp` computes 2*offset). tmpReg2 exists
+	// precisely so the post-regalloc paths have a second choice here.
 	var base regalloc.VReg
 	if allowTmpRegUse {
 		base = tmpRegVReg
+		if rn == tmpRegVReg {
+			base = tmpReg2VReg
+		}
 	} else {
 		base = m.compiler.AllocateVReg(ssa.TypeI64)
 	}

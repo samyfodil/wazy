@@ -2,7 +2,7 @@ package riscv64
 
 import (
 	"encoding/binary"
-	"math"
+	"fmt"
 
 	"github.com/samyfodil/wazy/internal/engine/native/backend"
 )
@@ -50,10 +50,14 @@ func (m *machine) ResolveRelocations(
 		instrOffset := r.Offset
 		calleeFnOffset := refToBinaryOffset[r.FuncRef]
 		diff := int64(calleeFnOffset) - instrOffset
-		if diff < math.MinInt32 || diff > math.MaxInt32 {
-			// auipc+jalr reaches +/-2GiB. An executable larger than that is
-			// beyond what any backend here handles.
-			panic("BUG: call displacement exceeds 2GiB")
+		if !fitsInAuipcPair(diff) {
+			// The pair's reach is very slightly under +/-2GiB and asymmetric
+			// (see fitsInAuipcPair): rounding the high half up for a negative
+			// low half overflows past +0x7ffff7ff, and auipc sign-extends its
+			// upper immediate, so an out-of-range split silently lands 4GiB
+			// low rather than failing. An executable this large is beyond what
+			// this backend handles, so refuse it loudly.
+			panic(fmt.Sprintf("BUG: call displacement %#x is out of auipc+jalr range", diff))
 		}
 
 		hi, lo := splitImm32(int32(diff))
