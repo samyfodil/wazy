@@ -40,7 +40,7 @@ func TestAbiImpl_callerGenVRegToFunctionArg_constant_inlining(t *testing.T) {
 	i64 := builder.AllocateInstruction().AsIconst64(10).Insert(builder)
 	f64 := builder.AllocateInstruction().AsF64const(3.14).Insert(builder)
 	abi := &backend.FunctionABI{}
-	abi.Init(&ssa.Signature{Params: []ssa.Type{ssa.TypeI64, ssa.TypeF64}}, intParamResultRegs, floatParamResultRegs)
+	abi.Init(&ssa.Signature{Params: []ssa.Type{ssa.TypeI64, ssa.TypeF64}}, intParamResultRegs, floatParamResultRegs, regalloc.RegTypeFloat)
 	m.callerGenVRegToFunctionArg(abi, 0, regalloc.VReg(100).SetRegType(regalloc.RegTypeInt), backend.SSAValueDefinition{Instr: i64, RefCount: 1}, 0)
 	m.callerGenVRegToFunctionArg(abi, 1, regalloc.VReg(50).SetRegType(regalloc.RegTypeFloat), backend.SSAValueDefinition{Instr: f64, RefCount: 1}, 0)
 	// 3.14 is a high-entropy F64 loaded on the post-regalloc arg path (no scratch

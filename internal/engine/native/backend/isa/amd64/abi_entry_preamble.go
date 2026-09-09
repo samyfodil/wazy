@@ -35,7 +35,7 @@ func (m *machine) CompileEntryPreamble(sig *ssa.Signature) []byte {
 
 func (m *machine) compileEntryPreamble(sig *ssa.Signature) *instruction {
 	abi := backend.FunctionABI{}
-	abi.Init(sig, intArgResultRegs, floatArgResultRegs)
+	abi.Init(sig, intArgResultRegs, floatArgResultRegs, regalloc.RegTypeFloat)
 
 	root := m.allocateNop()
 

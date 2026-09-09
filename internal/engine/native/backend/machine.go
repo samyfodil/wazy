@@ -123,6 +123,15 @@ type (
 		// ArgsResultsRegs returns the registers used for arguments and return values.
 		ArgsResultsRegs() (argResultInts, argResultFloats []regalloc.RealReg)
 
+		// V128RegType returns the register class this ISA keeps v128 values
+		// in. It is regalloc.RegTypeFloat wherever the float and vector
+		// registers are the same file (arm64, amd64), and regalloc.RegTypeVec
+		// where they are separate (riscv64, whose f-registers are 64-bit and
+		// whose RVV v-registers are a distinct file). When it is RegTypeVec,
+		// FunctionABI passes v128 arguments and results on the stack rather
+		// than in registers.
+		V128RegType() regalloc.RegType
+
 		// CallTrampolineIslandInfo returns the interval of the offset where the trampoline island is placed, and
 		// the size of the trampoline island. If islandSize is zero, the trampoline island is not used on this machine.
 		CallTrampolineIslandInfo(numFunctions int) (interval, islandSize int, err error)

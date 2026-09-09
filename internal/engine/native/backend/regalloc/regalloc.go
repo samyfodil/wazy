@@ -1054,17 +1054,20 @@ func (a *Allocator[I, B, F]) fixMergeState(f F, blk B) {
 
 		s.resetAt(predSt)
 
-		// Finds the free registers if any.
-		intTmp, floatTmp := VRegInvalid, VRegInvalid
-		if intFree := s.findAllocatable(
-			a.regInfo.AllocatableRegisters[RegTypeInt], desiredOccupantsSet,
-		); intFree != RealRegInvalid {
-			intTmp = FromRealReg(intFree, RegTypeInt)
-		}
-		if floatFree := s.findAllocatable(
-			a.regInfo.AllocatableRegisters[RegTypeFloat], desiredOccupantsSet,
-		); floatFree != RealRegInvalid {
-			floatTmp = FromRealReg(floatFree, RegTypeFloat)
+		// Find a free temporary per register class, if any. This is per class
+		// rather than an int/float pair because a temporary must come from the
+		// same physical file as the value it shuffles: on an ISA where vectors
+		// live outside the float file (RegTypeVec), handing a v128 an
+		// f-register temporary would silently truncate it. Classes the ISA
+		// does not have contribute an empty list and stay VRegInvalid.
+		var tmps [NumRegType]VReg
+		for t := RegTypeInt; t < NumRegType; t++ {
+			tmps[t] = VRegInvalid
+			if free := s.findAllocatable(
+				a.regInfo.AllocatableRegisters[t], desiredOccupantsSet,
+			); free != RealRegInvalid {
+				tmps[t] = FromRealReg(free, t)
+			}
 		}
 
 		for m := desiredOccupants.mask; m != 0; m &= m - 1 {
@@ -1077,13 +1080,7 @@ func (a *Allocator[I, B, F]) fixMergeState(f F, blk B) {
 			}
 
 			typ := desiredVReg.v.RegType()
-			var tmpRealReg VReg
-			if typ == RegTypeInt {
-				tmpRealReg = intTmp
-			} else {
-				tmpRealReg = floatTmp
-			}
-			a.reconcileEdge(f, r, pred, currentVReg, desiredVReg, tmpRealReg, typ)
+			a.reconcileEdge(f, r, pred, currentVReg, desiredVReg, tmps[typ], typ)
 		}
 	}
 }

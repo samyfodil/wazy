@@ -372,6 +372,7 @@ const (
 	useKindNone       useKind = iota + 1
 	useKindRS1                // rs1 only
 	useKindRS1RS2             // rs1 and rs2 (rs2 may be an immediate, which is skipped)
+	useKindRS1RS2RS3          // rs1, rs2 and rs3, all registers (compare-exchange)
 	useKindRS1Amode           // rs1 is the address base
 	useKindRDRS1Amode         // rd is a stored *source*, rs1 the address base
 	useKindCall

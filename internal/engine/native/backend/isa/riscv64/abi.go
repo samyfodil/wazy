@@ -45,6 +45,15 @@ var regInfo = &regalloc.RegisterInfo{
 			// These are the argument/return registers. Less preferred in the allocation.
 			f17, f16, f15, f14, f13, f12, f11, f10, // fa7..fa0
 		},
+		// RVV. v0 is the architecturally fixed mask register and v31 is the
+		// reserved scratch; the rest are free. v128 never travels in a
+		// register across a call (FunctionABI puts it on the stack when the
+		// ISA has a vector file), so there is no argument-register ordering
+		// to respect here.
+		regalloc.RegTypeVec: {
+			v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15,
+			v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30,
+		},
 	},
 	CalleeSavedRegisters: regalloc.NewRegSet(
 		x8, x9, x18, x19, x20, x21, x22, x23, x24, x25, x26, x27,
@@ -54,6 +63,9 @@ var regInfo = &regalloc.RegisterInfo{
 		x1, x5, x6, x7, x10, x11, x12, x13, x14, x15, x16, x17, x28, x29, x30, x31,
 		f0, f1, f2, f3, f4, f5, f6, f7, f10, f11, f12, f13, f14, f15, f16, f17,
 		f28, f29, f30, f31,
+		// The RVV psABI makes the whole vector file caller-saved.
+		v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15,
+		v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31,
 	),
 	RealRegToVReg: []regalloc.VReg{
 		x0: x0VReg, x1: x1VReg, x2: x2VReg, x3: x3VReg, x4: x4VReg, x5: x5VReg, x6: x6VReg, x7: x7VReg,
@@ -66,15 +78,29 @@ var regInfo = &regalloc.RegisterInfo{
 		f15: f15VReg, f16: f16VReg, f17: f17VReg, f18: f18VReg, f19: f19VReg, f20: f20VReg, f21: f21VReg,
 		f22: f22VReg, f23: f23VReg, f24: f24VReg, f25: f25VReg, f26: f26VReg, f27: f27VReg, f28: f28VReg,
 		f29: f29VReg, f30: f30VReg, f31: f31VReg,
+		v0: v0VReg, v1: v1VReg, v2: v2VReg, v3: v3VReg, v4: v4VReg, v5: v5VReg, v6: v6VReg, v7: v7VReg,
+		v8: v8VReg, v9: v9VReg, v10: v10VReg, v11: v11VReg, v12: v12VReg, v13: v13VReg, v14: v14VReg, v15: v15VReg,
+		v16: v16VReg, v17: v17VReg, v18: v18VReg, v19: v19VReg, v20: v20VReg, v21: v21VReg, v22: v22VReg, v23: v23VReg,
+		v24: v24VReg, v25: v25VReg, v26: v26VReg, v27: v27VReg, v28: v28VReg, v29: v29VReg, v30: v30VReg, v31: v31VReg,
 	},
 	RealRegName: func(r regalloc.RealReg) string { return regNames[r] },
 	RealRegType: func(r regalloc.RealReg) regalloc.RegType {
-		if r < f0 {
+		switch {
+		case r < f0:
 			return regalloc.RegTypeInt
+		case r < v0:
+			return regalloc.RegTypeFloat
+		default:
+			return regalloc.RegTypeVec
 		}
-		return regalloc.RegTypeFloat
 	},
 }
+
+// RV64's f-registers are 64 bits wide and cannot hold a v128, and RVV's
+// v-registers are a separate file. So vectors get their own allocation class
+// here, unlike every other backend, and v128 call arguments travel on the
+// stack (see backend.FunctionABI.setABIArgs).
+func (m *machine) V128RegType() regalloc.RegType { return regalloc.RegTypeVec }
 
 // ArgsResultsRegs implements backend.Machine.
 func (m *machine) ArgsResultsRegs() (argResultInts, argResultFloats []regalloc.RealReg) {

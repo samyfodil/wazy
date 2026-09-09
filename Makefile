@@ -21,7 +21,15 @@ go_test_options ?= -timeout 300s
 # Every test/benchmark run goes through scripts/cap: a rootless memory-capped
 # cgroup scope, so a runaway suite is killed inside its own cgroup instead of
 # taking the desktop down. Override the ceiling with `make test cap_mem=4G`.
-cap_mem ?= 1G
+#
+# 2G, not 1G, and the difference is measured rather than guessed: the SIMD
+# spectests peak at 1084 MiB and the rest of the spectest corpus at 1059 MiB
+# (cgroup memory.peak, run sequentially). At a 1G ceiling MemoryHigh sits at
+# 921 MiB, so those suites never exceed the cap -- they live permanently in the
+# reclaim band instead, which is slower and generates exactly the system-wide
+# pressure the cap exists to avoid. A ceiling below a job's real working set
+# does not contain it, it strangles it.
+cap_mem ?= 2G
 cap     := ./scripts/cap $(cap_mem) --
 
 .PHONY: test.examples
