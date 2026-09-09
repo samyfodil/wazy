@@ -183,6 +183,13 @@ func TestEngine_acquireStack_tooLargeIsNotPooled(t *testing.T) {
 	// Releasing an oversized buffer beyond the largest class floors into
 	// the top class rather than panicking or growing the array.
 	e.releaseStack(buf, nil)
+
+	// Take it back out, which checks the claim above: the release on its own
+	// only asserts that nothing panicked, not that the buffer landed in the
+	// *top* class.
+	got := e.stackPools[stackPoolNumClasses-1].Get()
+	require.NotNil(t, got, "an oversized release must land in the top class")
+	require.Equal(t, n, len(*got.(*[]byte)))
 }
 
 // RetainedStackLenForTest reports the length of the wasm stack f is holding on to between calls, or
