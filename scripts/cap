@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# Run a command inside a rootless, memory-capped cgroup-v2 scope so a runaway
+# test/build (OOM, fork bomb) is killed inside its own cgroup — never the host.
+#
+# Used two ways:
+#   - manually:        scripts/cap [MEM] -- <command...>
+#   - wrapping a test: scripts/cap 1G -- go test ./...
+#
+# MEM defaults to $WAZY_CAP_MEM or 1G. Ported from Documents/jpt/scripts/cap,
+# which is itself from warpjs-itr2; the rationale below is that history, kept
+# verbatim because every paragraph of it was paid for with a dead desktop.
+#
+# ★★★ TWO CONTROLS, AND THE SECOND ONE IS WHY THE DESKTOP KEPT DYING.
+#
+# MemoryMax is the HARD ceiling: cross it and the kernel kills inside this cgroup. It works — every
+# kernel OOM on this box since the cap was adopted is "Memory cgroup out of memory", contained,
+# host survived.
+#
+# But a job is free to thrash right up against MemoryMax, and the sustained reclaim that causes is
+# SYSTEM-WIDE memory PRESSURE (PSI). systemd-oomd watches pressure, not limits, and kills the
+# cgroup under the most pressure — which on a desktop is GNOME Shell, not the test:
+#
+#	org.gnome.Shell@x11.service: systemd-oomd killed some process(es) in this unit.
+#
+# i.e. the caps held and the session died anyway. MemoryHigh is the missing half: it THROTTLES the
+# cgroup and reclaims inside it before the pressure escapes, so the job slows down instead of the
+# desktop dying. Set to 90% of MemoryMax.
+#
+# ★ 90, NOT 75. At 75% a job whose working set legitimately IS its budget lives permanently in
+# reclaim. MemoryHigh is meant to catch a RUNAWAY before its pressure escapes the cgroup, not to
+# strangle a job that is using what it was given. 90% leaves a real throttle band under the hard
+# wall and still fires long before MemoryMax.
+#
+# WAZY_NO_CAP=1 bypasses entirely (CI without a user systemd session). An unavailable systemd-run
+# is a HARD ERROR rather than a silent uncapped exec: that silent fallback is how the sibling
+# repo's runner reached 25-28 GB anon-RSS and took the whole machine down twice. "Always safe to
+# invoke" is not the same as "always capping".
+#
+# ★★★ AND A THIRD CONTROL: HEAVY JOBS ARE MUTUALLY EXCLUSIVE WITH MEASUREMENTS.
+#
+# A benchmark taken beside another job is not a benchmark. The PSI/quiet-box check cannot catch an
+# interloper: a script checks once at the top and then measures for half an hour, and the stray
+# starts at minute twelve. So the lock lives here, because every heavy job already goes through
+# this script and nothing new has to be remembered.
+#
+#   MEASUREMENT payloads (a compiled .test, go test -bench, benchmarks/, scripts/mac-arm.sh)
+#   take the lock EXCLUSIVE. Everything else — builds, plain `go test` — takes it SHARED.
+#
+# So two measurements exclude each other, a build excludes a measurement, and two builds run
+# concurrently as before. A waiter says who it is waiting for, because the point is to make the
+# stray VISIBLE rather than to serialise silently. WAZY_NO_LOCK=1 opts out; WAZY_LOCK_WAIT sets
+# the timeout.
+capIsMeasurement() {
+  # Skip the wrappers a caller puts in front of the real payload.
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      taskset)                             # `taskset -c LIST cmd` or `taskset MASK cmd`
+        shift
+        if [ "${1:-}" = "-c" ]; then shift 2; else shift; fi ;;
+      env|nice|ionice) shift ;;
+      qemu-*-static|qemu-*) shift ;;       # cross-arch runs still measure
+      *=*) shift ;;                        # leading VAR=value
+      -*) shift ;;                         # flags belonging to a skipped wrapper
+      *) break ;;
+    esac
+  done
+  [ $# -eq 0 ] && return 1
+  case "$(basename "$1")" in
+    *.test|*bench|benchstat|mac-arm.sh) return 0 ;;
+    go)
+      case " $* " in *" -bench"*|*" -bench="*) return 0 ;; esac
+      return 1 ;;
+  esac
+  return 1
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+  fail=0
+  t() { # t <want 0|1> <argv...>
+    want="$1"; shift
+    if capIsMeasurement "$@"; then got=0; else got=1; fi
+    [ "$got" = "$want" ] || { echo "cap --selftest: want $want got $got for: $*" >&2; fail=1; }
+  }
+  t 0 /tmp/go-build/native.test -test.bench=.
+  t 0 ./bench.test
+  t 0 go test ./internal/engine/native -bench=. -run=XXX
+  t 0 taskset -c 0,2,4 go test -bench=Fib ./benchmarks/vs-wazero
+  t 0 ./scripts/mac-arm.sh
+  t 0 qemu-riscv64-static -one-insn-per-tb ./native.test -test.bench=.
+  t 1 go test ./... -count=1
+  t 1 go build ./...
+  t 1 taskset -c 0,2,4,6 go test ./internal/... -count=1
+  t 1 make -j4
+  t 1 gofumpt -l .
+  [ "$fail" = 0 ] && echo "cap --selftest: ok"
+  exit "$fail"
+fi
+
+mem="${WAZY_CAP_MEM:-1G}"
+case "${1:-}" in
+  [0-9]*[GMK]) mem="$1"; shift ;;
+esac
+[ "${1:-}" = "--" ] && shift
+
+# MemoryHigh = 90% of MemoryMax, in the same unit. Integer arithmetic on the numeric part.
+high="$mem"
+case "$mem" in
+  *G) high="$(( ${mem%G} * 921 ))M" ;;
+  *M) high="$(( ${mem%M} * 9 / 10 ))M" ;;
+  *K) high="$(( ${mem%K} * 9 / 10 ))K" ;;
+esac
+
+if [ "${WAZY_NO_CAP:-0}" = "1" ]; then
+  exec "$@"
+fi
+
+runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+if ! command -v systemd-run >/dev/null 2>&1 || [ ! -S "$runtime/systemd/private" ]; then
+  echo "scripts/cap: REFUSING to run uncapped — systemd-run --user is unavailable." >&2
+  echo "  An uncapped suite has twice taken this host down; a silent fallback is not a cap." >&2
+  echo "  Set WAZY_NO_CAP=1 to override deliberately (CI has no user systemd session)." >&2
+  exit 70
+fi
+
+# ★ BOUND THE COMPILER'S PARALLELISM, NOT JUST ITS MEMORY.
+#
+# The caps above stop a job exceeding its budget. They do NOT stop it entering the MemoryHigh
+# throttle band, and entering that band is itself fatal when user@.service carries
+# ManagedOOMMemoryPressure=kill: the reclaim pressure throttling generates is exactly the signal
+# systemd-oomd acts on, and the unit it kills is GNOME Shell. `go build` defaults to one compile
+# process per CPU; holding it to 4 keeps peak RSS far below the cap, so the band is never entered.
+# Attacking the cause is cheaper than surviving the symptom. Both are overridable if a caller means it.
+case " $GOFLAGS " in
+  *" -p="*) ;;
+  *) GOFLAGS="${GOFLAGS:+$GOFLAGS }-p=4" ;;
+esac
+export GOFLAGS
+export GOMAXPROCS="${GOMAXPROCS:-6}"
+
+if [ "${WAZY_NO_LOCK:-0}" != "1" ]; then
+  lockfile="${TMPDIR:-/tmp}/wazy-cap.lock"
+  : >>"$lockfile" 2>/dev/null || lockfile=""
+  if [ -n "$lockfile" ] && command -v flock >/dev/null 2>&1; then
+    if capIsMeasurement "$@"; then mode="-x"; kind="measurement"; else mode="-s"; kind="build"; fi
+    # ★ The fd is deliberately NOT close-on-exec: the exec below replaces this shell with
+    # systemd-run, and the lock has to outlive the shell and cover the whole job.
+    exec 9>>"$lockfile"
+    if ! flock -n "$mode" 9; then
+      # fuser reports THIS shell too — fd 9 is already open — so drop it, or the message
+      # accuses the waiter of being the holder.
+      holders="$(command -v fuser >/dev/null 2>&1 && fuser "$lockfile" 2>/dev/null | tr -s ' ' '\n' \
+        | grep -E '^[0-9]+$' | grep -v "^$$\$" | tr '\n' ' ')"
+      echo "scripts/cap: waiting -- this is a $kind and the box is already busy${holders:+ (pids:$holders)}" >&2
+      [ -n "$holders" ] && ps -o pid=,etime=,args= -p $holders 2>/dev/null | cut -c1-160 >&2
+      t0=$SECONDS
+      if ! flock -w "${WAZY_LOCK_WAIT:-1800}" "$mode" 9; then
+        echo "scripts/cap: REFUSING -- still busy after ${WAZY_LOCK_WAIT:-1800}s." >&2
+        echo "  A measurement taken beside another job is not a measurement." >&2
+        echo "  Kill the holder above, or set WAZY_NO_LOCK=1 if you mean it." >&2
+        exit 75
+      fi
+      echo "scripts/cap: acquired after $((SECONDS-t0))s" >&2
+    fi
+  fi
+fi
+
+exec systemd-run --user --scope -q --collect \
+  -p MemoryMax="$mem" -p MemoryHigh="$high" -p MemorySwapMax=0 -p TasksMax=4096 -- "$@"

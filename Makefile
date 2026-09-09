@@ -18,9 +18,15 @@ main_packages := $(sort $(foreach f,$(dir $(main_sources)),$(if $(findstring ./,
 
 go_test_options ?= -timeout 300s
 
+# Every test/benchmark run goes through scripts/cap: a rootless memory-capped
+# cgroup scope, so a runaway suite is killed inside its own cgroup instead of
+# taking the desktop down. Override the ceiling with `make test cap_mem=4G`.
+cap_mem ?= 1G
+cap     := ./scripts/cap $(cap_mem) --
+
 .PHONY: test.examples
 test.examples:
-	@go test $(go_test_options) ./examples/... ./imports/assemblyscript/example/... ./imports/emscripten/... ./imports/wasi_snapshot_preview1/example/...
+	@$(cap) go test $(go_test_options) ./examples/... ./imports/assemblyscript/example/... ./imports/emscripten/... ./imports/wasi_snapshot_preview1/example/...
 
 .PHONY: build.examples.as
 build.examples.as:
@@ -410,29 +416,29 @@ build.spectest.multi_memory:
 
 .PHONY: test
 test:
-	@go test $(go_test_options) ./...
-	@cd internal/version/testdata && go test $(go_test_options) ./...
-	@cd internal/integration_test/fuzz/wazylib && CGO_ENABLED=0 WASM_BINARY_PATH=testdata/test.wasm go test ./...
+	@$(cap) go test $(go_test_options) ./...
+	@cd internal/version/testdata && ../../../scripts/cap $(cap_mem) -- go test $(go_test_options) ./...
+	@cd internal/integration_test/fuzz/wazylib && CGO_ENABLED=0 WASM_BINARY_PATH=testdata/test.wasm ../../../../scripts/cap $(cap_mem) -- go test ./...
 
 .PHONY: test.arm64
 test.arm64: ## Run the suite for the arm64 compiler backend under qemu-user
 	# -one-insn-per-tb works around a qemu-user (<=8.2.2) multi-insn-TB self-modifying-code
 	# bug that flaky-SIGSEGVs (~30%) on wazy's JIT'd code. Needs qemu-aarch64-static. See
 	# CONTRIBUTING.md. Slower emulation, so a longer timeout than the host `test` target.
-	@GOARCH=arm64 CGO_ENABLED=0 go test -timeout 90m -exec 'qemu-aarch64-static -one-insn-per-tb' ./...
+	@GOARCH=arm64 CGO_ENABLED=0 $(cap) go test -timeout 90m -exec 'qemu-aarch64-static -one-insn-per-tb' ./...
 
 .PHONY: test.interp
 test.interp: ## Run the suite against the interpreter engine (riscv64 cross-run, no compiler)
 	# A non-amd64/arm64 GOARCH auto-selects the interpreter; qemu-riscv64 runs it (no JIT, no
 	# flag needed). Compiler-codegen tests self-skip via platform.CompilerSupported(). Needs
 	# qemu-riscv64-static.
-	@GOARCH=riscv64 CGO_ENABLED=0 go test -timeout 60m -exec qemu-riscv64-static ./...
+	@GOARCH=riscv64 CGO_ENABLED=0 $(cap) go test -timeout 60m -exec qemu-riscv64-static ./...
 
 .PHONY: coverage
 # replace spaces with commas
 coverpkg = $(shell echo $(main_packages) | tr ' ' ',')
 coverage: ## Generate test coverage
-	@go test -coverprofile=coverage.txt -covermode=atomic --coverpkg=$(coverpkg) $(main_packages)
+	@$(cap) go test -coverprofile=coverage.txt -covermode=atomic --coverpkg=$(coverpkg) $(main_packages)
 	@go tool cover -func coverage.txt
 
 golangci_lint_path := $(shell go env GOPATH)/bin/golangci-lint
@@ -499,7 +505,7 @@ fuzz_default_flags := --no-trace-compares --sanitizer=none -- -rss_limit_mb=8192
 fuzz_timeout_seconds ?= 10
 .PHONY: fuzz
 fuzz:
-	@cd internal/integration_test/fuzz && cargo test
+	@cd internal/integration_test/fuzz && ../../../scripts/cap $(cap_mem) -- cargo test
 	@cd internal/integration_test/fuzz && cargo fuzz run logging_no_diff $(fuzz_default_flags) -max_total_time=$(fuzz_timeout_seconds)
 	@cd internal/integration_test/fuzz && cargo fuzz run no_diff $(fuzz_default_flags) -max_total_time=$(fuzz_timeout_seconds)
 	@cd internal/integration_test/fuzz && cargo fuzz run memory_no_diff $(fuzz_default_flags) -max_total_time=$(fuzz_timeout_seconds)
