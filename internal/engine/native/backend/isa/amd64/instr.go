@@ -701,8 +701,15 @@ func (i *instruction) asNop0WithLabel(label label) *instruction { //nolint
 	return i
 }
 
-func (i *instruction) nop0Label() label {
-	return label(i.u1)
+// nop0Label returns the label this nop anchors, if it anchors one. The second
+// result is false for a plain block-boundary nop and for labelReturn, which
+// has no labelPosition in the pool.
+func (i *instruction) nop0Label() (label, bool) {
+	l := label(i.u1)
+	if l == labelInvalid || l == labelReturn {
+		return labelInvalid, false
+	}
+	return l, true
 }
 
 type instructionKind byte

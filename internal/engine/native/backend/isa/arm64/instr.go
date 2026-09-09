@@ -524,8 +524,13 @@ func (i *instruction) asMOVN(dst regalloc.VReg, imm uint64, shift uint32, dst64b
 	}
 }
 
+// asNop0 builds a nop that anchors *no* label. The label field must carry the
+// invalid sentinel rather than the zero value: label 0 is a real label -- SSA
+// block 0, the entry block -- so a zero here is indistinguishable from "this
+// nop anchors L0", and every block-boundary nop would claim it.
 func (i *instruction) asNop0() *instruction {
 	i.kind = nop0
+	i.u1 = uint64(labelInvalid)
 	return i
 }
 
@@ -534,8 +539,15 @@ func (i *instruction) asNop0WithLabel(l label) {
 	i.u1 = uint64(l)
 }
 
-func (i *instruction) nop0Label() label {
-	return label(i.u1)
+// nop0Label returns the label this nop anchors, if it anchors one. The second
+// result is false for a plain block-boundary nop and for labelReturn, whose
+// labelPosition lives in machine.returnLabelPos rather than in the pool.
+func (i *instruction) nop0Label() (label, bool) {
+	l := label(i.u1)
+	if l == labelInvalid || l == labelReturn {
+		return labelInvalid, false
+	}
+	return l, true
 }
 
 func (i *instruction) asRet() {
@@ -1109,8 +1121,10 @@ func (i *instruction) String() (str string) {
 
 	switch i.kind {
 	case nop0:
-		if i.u1 != 0 {
-			l := label(i.u1)
+		// Ask nop0Label rather than testing the raw field: a zero there means
+		// "anchors L0", not "anchors nothing", which is the confusion the
+		// labelInvalid sentinel exists to remove.
+		if l, ok := i.nop0Label(); ok {
 			str = fmt.Sprintf("%s:", l)
 		} else {
 			str = "nop0"
