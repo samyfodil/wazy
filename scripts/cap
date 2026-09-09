@@ -51,6 +51,11 @@
 # stray VISIBLE rather than to serialise silently. WAZY_NO_LOCK=1 opts out; WAZY_LOCK_WAIT sets
 # the timeout.
 capIsMeasurement() {
+  # ★ AN ARBITRARY SCRIPT CAN SAY SO, BECAUSE THE CLASSIFIER CANNOT KNOW. A
+  # one-off A/B in a scratchpad is a measurement and its basename says nothing;
+  # such a script takes the SHARED lock and is duly interrupted mid-run.
+  # WAZY_MEASURE=1 is how a wrapper declares what it is.
+  [ "${WAZY_MEASURE:-0}" = "1" ] && return 0
   # Skip the wrappers a caller puts in front of the real payload.
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -92,6 +97,7 @@ if [ "${1:-}" = "--selftest" ]; then
   t 1 taskset -c 0,2,4,6 go test ./internal/... -count=1
   t 1 make -j4
   t 1 gofumpt -l .
+  ( export WAZY_MEASURE=1; t 0 ./scratchpad/my-ab.sh )
   [ "$fail" = 0 ] && echo "cap --selftest: ok"
   exit "$fail"
 fi
