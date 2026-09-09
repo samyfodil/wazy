@@ -143,6 +143,30 @@ esac
 export GOFLAGS
 export GOMAXPROCS="${GOMAXPROCS:-6}"
 
+# ★ AND TELL THE GO RUNTIME ABOUT THE CEILING, OR IT WILL WALK INTO IT.
+#
+# Go's GC does not read cgroup limits. It paces off GOGC: at the default 100 it
+# lets the heap reach twice the live set before collecting, so a job holding one
+# large live object never collects inside our budget and RSS climbs to the wall.
+# The signature is unmistakable -- peak memory tracks whatever cap you give it.
+# Measured on `go test ./internal/engine/native`, which parks a 5.4GiB buffer in
+# a sync.Pool (the oversized-acquire case in stack_pool_test.go) and thereby
+# sets a ~10.8GiB heap goal:
+#
+#	cap 2G -> peak 1889 MiB, hangs		cap 4G -> peak 3772 MiB, hangs
+#
+# GOMEMLIMIT is the runtime's own answer: a soft ceiling that makes the GC work
+# harder as the heap approaches it rather than pacing off the live set alone.
+# Set below MemoryHigh so Go collects before the kernel starts throttling -- the
+# two mechanisms then agree instead of fighting. Being soft, it still lets a job
+# that genuinely needs more run on, with MemoryMax as the hard backstop.
+if [ -z "${GOMEMLIMIT:-}" ]; then
+  case "$mem" in
+    *G) export GOMEMLIMIT="$(( ${mem%G} * 850 ))MiB" ;;
+    *M) export GOMEMLIMIT="$(( ${mem%M} * 85 / 100 ))MiB" ;;
+  esac
+fi
+
 if [ "${WAZY_NO_LOCK:-0}" != "1" ]; then
   lockfile="${TMPDIR:-/tmp}/wazy-cap.lock"
   : >>"$lockfile" 2>/dev/null || lockfile=""
