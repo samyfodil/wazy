@@ -511,7 +511,16 @@ func (m *machine) Encode(ctx context.Context) error {
 
 func (m *machine) encode(root *instruction) {
 	for cur := root; cur != nil; cur = cur.next {
+		before := int64(len(m.compiler.Buf()))
 		cur.encode(m)
+		// size() is not a hint: resolveRelativeAddresses lays out every label
+		// from it, so an encoder that emits a different number of bytes sends
+		// every branch past it to the wrong address. The failure is silent and
+		// arbitrarily distant from its cause, and the check costs one integer
+		// compare per instruction on a path that runs once per function.
+		if got, want := int64(len(m.compiler.Buf()))-before, cur.size(); got != want {
+			panic(fmt.Sprintf("BUG: %s encoded %d bytes, size() says %d", cur, got, want))
+		}
 	}
 }
 

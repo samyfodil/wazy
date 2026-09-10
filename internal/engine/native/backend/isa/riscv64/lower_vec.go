@@ -712,8 +712,16 @@ func (m *machine) vecSplatConst(v int64, sew uint32) regalloc.VReg {
 // ceil(-0.3) is -0.0, and leave anything already integral -- or NaN, or
 // infinite -- untouched.
 func (m *machine) lowerVecRound(instr *ssa.Instruction, mode roundMode) {
-	vs2, rd, sew := m.vecUn(instr)
+	x, lane := instr.ArgWithLane()
+	vs2 := m.getOperand_NR(m.compiler.ValueDefinition(x))
+	rd := m.compiler.VRegOf(instr.Return())
+	sew := sewForLane(lane)
 	m.insert(m.allocateInstr().asVecRound(rd, vs2, sew, mode))
+	// Rounding leaves a NaN lane alone, which keeps the payload and the sign
+	// the input had -- but wasm wants a quiet NaN out, and the spec's
+	// nan:canonical means the positive one specifically.
+	nan := m.vecCanonicalNaN(lane)
+	m.insert(m.allocateInstr().asVecNaNZero(rd, vs2, operandNR(nan), sew, sew))
 }
 
 // lowerVZeroExtLoad loads a narrow value into lane 0 and zeroes the rest.

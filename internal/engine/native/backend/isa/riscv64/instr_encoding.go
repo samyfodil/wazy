@@ -104,7 +104,7 @@ func (i *instruction) size() int64 {
 	case vecSelectLt:
 		return 12 // vsetivli + compare + merge
 	case vecHighBits:
-		return 20 // vsetivli + compare + vsetivli + readout + two shifts
+		return 24 // vsetivli + compare + vsetivli + readout + two shifts
 	case vecExtract:
 		if signed := i.u1&1 != 0; !signed && uint32(i.u2) < vsew32 {
 			return 16 // vsetivli + the lane read + the two zero-extending shifts
@@ -115,7 +115,7 @@ func (i *instruction) size() int64 {
 	case vecNarrow:
 		return 12 // vsetivli + vnclip + a copy out of the temp
 	case vecConst:
-		return 20 // vsetivli + two lane writes + a slide + a copy
+		return 16 // vsetivli + a lane write + a slide + a second lane write
 	case vecSlide:
 		if i.u1>>8&1 == 1 {
 			return 16 // vsetivli + copy in + slideup + copy out
@@ -380,10 +380,9 @@ func (i *instruction) encode(m *machine) {
 		// tail-agnostic -- so anything from lane 16 up is either garbage or a
 		// sign. Keep exactly the lanes that exist.
 		rd := intRd(i.rd)
-		if shift := int32(64 - 16>>sew); shift != 0 {
-			c.Emit4Bytes(encodeAluRRImm(aluOpSll, rd, rd, shift, true))
-			c.Emit4Bytes(encodeAluRRImm(aluOpSrl, rd, rd, shift, true))
-		}
+		shift := int32(64 - 16>>sew) // 48, 56, 60 or 62: never zero.
+		c.Emit4Bytes(encodeAluRRImm(aluOpSll, rd, rd, shift, true))
+		c.Emit4Bytes(encodeAluRRImm(aluOpSrl, rd, rd, shift, true))
 	case vecExtract:
 		sew := uint32(i.u2)
 		lane := ssa.VecLane(i.u1 >> 8)
@@ -430,8 +429,6 @@ func (i *instruction) encode(m *machine) {
 		c.Emit4Bytes(encodeVmvSX(tmp, regNumberInEncoding[i.rs2.realReg()]))
 		c.Emit4Bytes(encodeVecVIu(vfunctSlideup, vecReg(i.rd), tmp, 1))
 		c.Emit4Bytes(encodeVmvSX(vecReg(i.rd), regNumberInEncoding[i.rs1.realReg()]))
-		c.Emit4Bytes(encodeVmvVV(tmp, vecReg(i.rd)))
-		c.Emit4Bytes(encodeVmvVV(vecReg(i.rd), tmp))
 	case vecCmp:
 		encodeVecCmp(c, i)
 	case vecMaskPop:
@@ -810,10 +807,10 @@ func encodeVecRound(c compilerBuf, i *instruction) {
 	// shifted into the high half.
 	fpTmp := regNumberInEncoding[fpTmpReg]
 	if sew == vsew64 {
-		c.Emit4Bytes(encodeLui(scratch, 0x43300))
+		c.Emit4Bytes(encodeLui(scratch, 0x43300000))
 		c.Emit4Bytes(encodeAluRRImm(aluOpSll, scratch, scratch, 32, true))
 	} else {
-		c.Emit4Bytes(encodeLui(scratch, 0x4b000))
+		c.Emit4Bytes(encodeLui(scratch, 0x4b000000))
 	}
 	c.Emit4Bytes(encodeFmvFromInt(fpTmp, scratch, sew == vsew64))
 

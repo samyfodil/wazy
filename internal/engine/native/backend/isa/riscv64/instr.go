@@ -1413,6 +1413,41 @@ func (i *instruction) String() string {
 		return fmt.Sprintf("bitcount %s, %s", formatVReg(i.rd), i.rs1.format())
 	case vecMov:
 		return fmt.Sprintf("vmv1r.v %s, %s", formatVReg(i.rd), i.rs1.format())
+	case vecConst:
+		return fmt.Sprintf("vconst %s, %s, %s", formatVReg(i.rd), i.rs1.format(), i.rs2.format())
+	case vecNarrow:
+		return fmt.Sprintf("vnclip %s, %s", formatVReg(i.rd), i.rs1.format())
+	case vecMaskPop:
+		return fmt.Sprintf("vcpop %s, %s", formatVReg(i.rd), i.rs1.format())
+	case vecHighBits:
+		return fmt.Sprintf("vhighbits %s, %s", formatVReg(i.rd), i.rs1.format())
+	case vecExtract:
+		return fmt.Sprintf("vextract %s, %s", formatVReg(i.rd), i.rs1.format())
+	case vecInsert:
+		return fmt.Sprintf("vinsert %s, %s, %s", formatVReg(i.rd), i.rs1.format(), i.rs2.format())
+	case vecInsertLane0:
+		return fmt.Sprintf("vmv.s.x %s, %s", formatVReg(i.rd), i.rs1.format())
+	case vecSelectLt:
+		return fmt.Sprintf("vselectlt %s, %s, %s, %s, %s", formatVReg(i.rd),
+			i.rs1.format(), i.rs2.format(), i.rs3.format(), i.rs4.format())
+	case vecNaNZero:
+		return fmt.Sprintf("vnanzero %s, %s, %s", formatVReg(i.rd), i.rs1.format(), i.rs2.format())
+	case vecRound:
+		return fmt.Sprintf("vround %s, %s", formatVReg(i.rd), i.rs1.format())
+	case vecSlide:
+		return fmt.Sprintf("vslide %s, %s, %d", formatVReg(i.rd), i.rs1.format(), i.u1&0xff)
+	case vecShiftImm:
+		return fmt.Sprintf("vshifti %s, %s, %d", formatVReg(i.rd), i.rs1.format(), i.u1>>8)
+	case vecSplat:
+		return fmt.Sprintf("vmv.v.x %s, %s", formatVReg(i.rd), i.rs1.format())
+	case vecCmp:
+		return fmt.Sprintf("vcmp %s, %s, %s", formatVReg(i.rd), i.rs1.format(), i.rs2.format())
+	case vecRRR:
+		return fmt.Sprintf("vop %s, %s, %s", formatVReg(i.rd), i.rs1.format(), i.rs2.format())
+	case vecRR:
+		return fmt.Sprintf("vop %s, %s", formatVReg(i.rd), i.rs1.format())
+	case vecRX:
+		return fmt.Sprintf("vop.vx %s, %s, %s", formatVReg(i.rd), i.rs1.format(), i.rs2.format())
 	case vecLoad:
 		return fmt.Sprintf("vle8.v %s, %s", formatVReg(i.rd), i.getAmode().format())
 	case vecStore:

@@ -176,8 +176,15 @@ const (
 	desiredLocStack       = desiredLoc(desiredLocKindStack)
 )
 
+// newDesiredLocReg packs a register into the two bits above the kind.
+//
+// The widening is not cosmetic: RealReg is a byte, so shifting one that names a
+// register above 63 -- which riscv64's third register file does -- wraps inside
+// the byte before it ever reaches the uint16. RealReg 65 (v1) came back out as
+// RealReg 1 (ra), and a v128 phi was reconciled by moving a vector register
+// into an integer one.
 func newDesiredLocReg(r RealReg) desiredLoc {
-	return desiredLoc(desiredLocKindReg) | desiredLoc(r<<2)
+	return desiredLoc(desiredLocKindReg) | desiredLoc(uint16(r)<<2)
 }
 
 func (d desiredLoc) realReg() RealReg {
