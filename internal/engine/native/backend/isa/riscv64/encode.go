@@ -779,3 +779,41 @@ func encodeVectorStore(vs3, rs1, sew uint32) uint32 {
 func encodeVmv1r(vd, vs2 uint32) uint32 {
 	return 0b100111<<26 | 1<<25 | vs2<<20 | 0<<15 | 0b011<<12 | vd<<7 | opVec
 }
+
+// ---------------------------------------------------------------------------
+// A extension (atomics)
+// ---------------------------------------------------------------------------
+
+// funct5 values for the AMO opcode space.
+const (
+	amoFunctAdd  = 0b00000
+	amoFunctSwap = 0b00001
+	amoFunctLR   = 0b00010
+	amoFunctSC   = 0b00011
+	amoFunctXor  = 0b00100
+	amoFunctOr   = 0b01000
+	amoFunctAnd  = 0b01100
+)
+
+// encodeAMO encodes an atomic memory operation. aq and rl are both set: wasm's
+// atomics are sequentially consistent, and the acquire-release pair is what
+// gives that on RISC-V without separate fences.
+func encodeAMO(funct5, rd, rs1, rs2 uint32, _64bit bool) uint32 {
+	funct3 := uint32(0b010) // .w
+	if _64bit {
+		funct3 = 0b011 // .d
+	}
+	const aqrl = 1<<26 | 1<<25
+	return funct5<<27 | aqrl | rs2<<20 | rs1<<15 | funct3<<12 | rd<<7 | opAmo
+}
+
+// encodeLR encodes `lr.{w,d}.aqrl rd, (rs1)`.
+func encodeLR(rd, rs1 uint32, _64bit bool) uint32 {
+	return encodeAMO(amoFunctLR, rd, rs1, 0, _64bit)
+}
+
+// encodeSC encodes `sc.{w,d}.aqrl rd, rs2, (rs1)`, where rd receives zero on
+// success and non-zero when the reservation was lost.
+func encodeSC(rd, rs1, rs2 uint32, _64bit bool) uint32 {
+	return encodeAMO(amoFunctSC, rd, rs1, rs2, _64bit)
+}

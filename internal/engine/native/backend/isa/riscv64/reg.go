@@ -147,11 +147,17 @@ const (
 // lui+addi into a register). A single scratch would be live across both halves
 // of those sequences.
 const (
-	zeroReg    = x0
-	raReg      = x1
-	spReg      = x2
-	tmpReg     = x31
-	tmpReg2    = x30
+	zeroReg = x0
+	raReg   = x1
+	spReg   = x2
+	tmpReg  = x31
+	tmpReg2 = x30
+	// tmpReg3 exists for one job: the byte and halfword atomics. RISC-V has no
+	// sub-word AMO, so those become an LR/SC loop that must hold the aligned
+	// address, the bit shift, the positioned mask and the value being
+	// assembled all at once -- more than two scratch registers can carry, and
+	// the loop is expanded at encode time, where nothing can be allocated.
+	tmpReg3    = x29
 	fpTmpReg   = f31
 	vecMaskReg = v0
 	vecTmpReg  = v31
@@ -262,6 +268,7 @@ var (
 	spVReg         = x2VReg
 	tmpRegVReg     = x31VReg
 	tmpReg2VReg    = x30VReg
+	tmpReg3VReg    = x29VReg
 	fpTmpRegVReg   = f31VReg
 	vecMaskRegVReg = v0VReg
 	vecTmpRegVReg  = v31VReg

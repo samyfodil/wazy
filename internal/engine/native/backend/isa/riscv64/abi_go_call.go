@@ -277,7 +277,7 @@ func (m *machine) restoreRegistersInExecutionContext(cur *instruction, regs []re
 var saveRequiredRegs = append([]regalloc.VReg{
 	x1VReg, x5VReg, x6VReg, x7VReg,
 	x11VReg, x12VReg, x13VReg, x14VReg, x15VReg, x16VReg, x17VReg,
-	x28VReg, x29VReg,
+	x28VReg,
 	f0VReg, f1VReg, f2VReg, f3VReg, f4VReg, f5VReg, f6VReg, f7VReg,
 	f10VReg, f11VReg, f12VReg, f13VReg, f14VReg, f15VReg, f16VReg, f17VReg,
 	f28VReg, f29VReg, f30VReg,

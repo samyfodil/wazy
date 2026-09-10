@@ -30,7 +30,7 @@ var regInfo = &regalloc.RegisterInfo{
 			x5, x6, x7, // t0-t2
 			x8, x9, // s0-s1
 			x18, x19, x20, x21, x22, x23, x24, x25, x26, // s2-s10
-			x28, x29, // t3-t4
+			x28, // t3 (t4 is tmpReg3, see reg.go)
 			// Clobbered by every call (jal writes it), so least preferred of
 			// the non-argument registers.
 			x1, // ra

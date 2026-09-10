@@ -156,6 +156,17 @@ func TestEncodings_againstClang(t *testing.T) {
 		{"vle32.v v3, (a2)", encodeVectorLoad(3, 12, vsew32)},
 		{"vse8.v v31, (sp)", encodeVectorStore(31, 2, vsew8)},
 		{"vmv1r.v v2, v1", encodeVmv1r(2, 1)},
+		// --- A extension: sequentially consistent, hence aqrl throughout ---
+		{"amoadd.w.aqrl a0, a1, (a2)", encodeAMO(amoFunctAdd, 10, 12, 11, false)},
+		{"amoadd.d.aqrl a0, a1, (a2)", encodeAMO(amoFunctAdd, 10, 12, 11, true)},
+		{"amoswap.w.aqrl a0, a1, (a2)", encodeAMO(amoFunctSwap, 10, 12, 11, false)},
+		{"amoand.d.aqrl a0, a1, (a2)", encodeAMO(amoFunctAnd, 10, 12, 11, true)},
+		{"amoor.w.aqrl a0, a1, (a2)", encodeAMO(amoFunctOr, 10, 12, 11, false)},
+		{"amoxor.d.aqrl a0, a1, (a2)", encodeAMO(amoFunctXor, 10, 12, 11, true)},
+		{"lr.w.aqrl a0, (a2)", encodeLR(10, 12, false)},
+		{"lr.d.aqrl a0, (a2)", encodeLR(10, 12, true)},
+		{"sc.w.aqrl a0, a1, (a2)", encodeSC(10, 12, 11, false)},
+		{"sc.d.aqrl a0, a1, (a2)", encodeSC(10, 12, 11, true)},
 	}
 
 	var srcs []string
