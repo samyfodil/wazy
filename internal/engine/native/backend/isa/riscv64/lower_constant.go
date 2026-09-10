@@ -47,7 +47,7 @@ func (m *machine) lowerConstantF32(rd regalloc.VReg, v uint32) {
 		m.insert(mv)
 		return
 	}
-	tmp := m.compiler.AllocateVReg(ssa.TypeI64)
+	tmp := m.scratchInt()
 	m.lowerConstantI64(tmp, int64(int32(v)))
 	mv := m.allocateInstr()
 	mv.asFmvFromInt(rd, operandNR(tmp), false)
@@ -62,7 +62,7 @@ func (m *machine) lowerConstantF64(rd regalloc.VReg, v uint64) {
 		m.insert(mv)
 		return
 	}
-	tmp := m.compiler.AllocateVReg(ssa.TypeI64)
+	tmp := m.scratchInt()
 	m.lowerConstantI64(tmp, int64(v))
 	mv := m.allocateInstr()
 	mv.asFmvFromInt(rd, operandNR(tmp), true)
@@ -157,4 +157,25 @@ func (m *machine) lowerLoadConstantBlockArgAfterRegAlloc(i *instruction) {
 	v, typ, dst := i.loadConstBlockArgData()
 	m.pendingInstructions = m.pendingInstructions[:0]
 	m.insertLoadConstant(v, typ, dst)
+}
+
+// scratchInt returns an integer register to build a value in.
+//
+// Which one depends on when we are called. An FP constant needs a scratch to
+// assemble its bit pattern in before crossing to the float file, and
+// lowerLoadConstantBlockArgAfterRegAlloc reaches this path *after* register
+// allocation has finished -- where a freshly allocated virtual register is
+// never assigned a real one, so the instruction encodes garbage. That is not a
+// crash: every float constant used as a block argument silently becomes zero,
+// which is what a br_if carrying an f32, and every call_indirect dispatching
+// through one, actually returned.
+//
+// The reserved scratch is safe here for the same reason it is safe in the
+// prologue: it is never allocatable, and this expansion is a self-contained
+// two-instruction sequence with nothing live across it.
+func (m *machine) scratchInt() regalloc.VReg {
+	if m.regAllocStarted {
+		return tmpRegVReg
+	}
+	return m.compiler.AllocateVReg(ssa.TypeI64)
 }

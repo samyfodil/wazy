@@ -278,8 +278,39 @@ var saveRequiredRegs = append([]regalloc.VReg{
 	x1VReg, x5VReg, x6VReg, x7VReg,
 	x11VReg, x12VReg, x13VReg, x14VReg, x15VReg, x16VReg, x17VReg,
 	x28VReg, x29VReg,
+	f0VReg, f1VReg, f2VReg, f3VReg, f4VReg, f5VReg, f6VReg, f7VReg,
 	f10VReg, f11VReg, f12VReg, f13VReg, f14VReg, f15VReg, f16VReg, f17VReg,
+	f28VReg, f29VReg, f30VReg,
 }, calleeSavedRegistersSorted...)
+
+func init() {
+	// Everything the allocator can hand out must be preserved across a grow,
+	// bar the execution context itself. A register missing here is not a crash
+	// but a silently wrong value after the stack moves.
+	saved := make(map[regalloc.VReg]bool, len(saveRequiredRegs))
+	for _, r := range saveRequiredRegs {
+		saved[r] = true
+	}
+	for class, regs := range regInfo.AllocatableRegisters {
+		if regalloc.RegType(class) == regalloc.RegTypeVec {
+			// Not yet, and not by oversight. A v128 cannot reach the backend
+			// while the platform gate withholds SIMD, so no vector register is
+			// ever allocated today. It also could not be saved here if it
+			// were: executionContext.savedRegisters has 512 bytes, of which
+			// the integer and float sets already use most, and 30 vector
+			// registers need 480 more. Enabling RVV means enlarging that area
+			// or spilling vectors elsewhere -- a decision for that work, which
+			// this check exists to force rather than let slip.
+			continue
+		}
+		for _, r := range regs {
+			v := regInfo.RealRegToVReg[r]
+			if v != x10VReg && !saved[v] {
+				panic("BUG: allocatable register " + regNames[r] + " is not preserved across a stack grow")
+			}
+		}
+	}
+}
 
 // CompileStackGrowCallSequence implements backend.Machine.
 func (m *machine) CompileStackGrowCallSequence() []byte {

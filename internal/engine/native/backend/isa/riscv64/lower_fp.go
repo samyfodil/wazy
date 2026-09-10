@@ -3,6 +3,8 @@ package riscv64
 import (
 	"math"
 
+	"github.com/samyfodil/wazy/internal/moremath"
+
 	"github.com/samyfodil/wazy/internal/engine/native/backend/regalloc"
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
 	"github.com/samyfodil/wazy/internal/engine/native/ssa"
@@ -40,9 +42,15 @@ func (m *machine) lowerDivRem(instr *ssa.Instruction, op ssa.Opcode) {
 	m.trapIfCondBr(execCtx, condEQ, rm, operandNR(zeroVReg), nativeapi.ExitCodeIntegerDivisionByZero)
 
 	if signed && isDiv {
-		// The overflow case: dividend == INT_MIN && divisor == -1. Detect it
-		// by testing both halves and branching to the trap only when both
-		// hold, which needs a skip label because there is no compound branch.
+		// Overflow is dividend == INT_MIN && divisor == -1, and RISC-V has no
+		// compound branch. Rather than branch over a trap -- which would put a
+		// forward jump inside this basic block, where the register allocator
+		// assumes straight-line code and may place a spill the jump skips --
+		// fold both halves into one value that is zero exactly when both hold:
+		//
+		//	(x ^ INT_MIN) | (y ^ -1) == 0  iff  x == INT_MIN && y == -1
+		//
+		// and branch once, to the trap island, which never returns.
 		minVal := int64(math.MinInt64)
 		if !_64bit {
 			minVal = math.MinInt32
@@ -50,18 +58,13 @@ func (m *machine) lowerDivRem(instr *ssa.Instruction, op ssa.Opcode) {
 		minReg := m.compiler.AllocateVReg(ssa.TypeI64)
 		m.lowerConstantI64(minReg, minVal)
 
-		skip := m.insertBrTargetLabelAfterCurrent()
-		// If divisor != -1, skip the overflow trap.
-		notMinusOne := m.allocateInstr()
-		notMinusOne.asCondBr(condNE, rm, operandNR(m.materialize(-1)), skip)
-		m.insert(notMinusOne)
-		// If dividend != INT_MIN, skip too.
-		notMin := m.allocateInstr()
-		notMin.asCondBr(condNE, rn, operandNR(minReg), skip)
-		m.insert(notMin)
-
-		m.trapUnconditional(execCtx, nativeapi.ExitCodeIntegerOverflow)
-		m.insert(m.labelNop(skip))
+		acc := m.compiler.AllocateVReg(ssa.TypeI64)
+		t := m.compiler.AllocateVReg(ssa.TypeI64)
+		m.emit(m.allocateInstr().asALU(aluOpXor, acc, rn, operandNR(minReg), true))
+		m.emit(m.allocateInstr().asALU(aluOpXor, t, rm, operandImm(-1), true))
+		m.emit(m.allocateInstr().asALU(aluOpOr, acc, operandNR(acc), operandNR(t), true))
+		m.trapIfCondBr(execCtx, condEQ, operandNR(acc), operandNR(zeroVReg),
+			nativeapi.ExitCodeIntegerOverflow)
 	}
 
 	var aop aluOp
@@ -100,31 +103,59 @@ func (m *machine) lowerFminFmax(instr *ssa.Instruction, isMax bool) {
 	if isMax {
 		op = fpuBinOpMax
 	}
-	i := m.allocateInstr()
-	i.asFpuRRR(op, rd, rn, rm, _64bit)
-	m.insert(i)
+	hw := m.compiler.AllocateVReg(x.Type())
+	m.emit(m.allocateInstr().asFpuRRR(op, hw, rn, rm, _64bit))
 
-	// If either operand is unordered, overwrite the result with a NaN. feq
-	// answers false for NaN, so `x == x` is the standard ordered test.
+	// Blend in a NaN when either operand is unordered. feq answers false for
+	// NaN, so `v == v` is the ordered test, and the two results are selected
+	// with a mask rather than a branch: a forward jump here would sit inside
+	// the basic block, where the register allocator assumes straight-line code
+	// and may place a spill or reload that the jump skips.
 	ordered := m.compiler.AllocateVReg(ssa.TypeI64)
-	tmp := m.compiler.AllocateVReg(ssa.TypeI64)
+	t := m.compiler.AllocateVReg(ssa.TypeI64)
 	m.emit(m.allocateInstr().asFpuCmp(fpuCmpOpEq, ordered, rn, rn, _64bit))
-	m.emit(m.allocateInstr().asFpuCmp(fpuCmpOpEq, tmp, rm, rm, _64bit))
-	m.emit(m.allocateInstr().asALU(aluOpAnd, ordered, operandNR(ordered), operandNR(tmp), true))
+	m.emit(m.allocateInstr().asFpuCmp(fpuCmpOpEq, t, rm, rm, _64bit))
+	m.emit(m.allocateInstr().asALU(aluOpAnd, ordered, operandNR(ordered), operandNR(t), true))
 
-	skip := m.insertBrTargetLabelAfterCurrent()
-	br := m.allocateInstr()
-	br.asCondBr(condNE, operandNR(ordered), operandNR(zeroVReg), skip)
-	m.insert(br)
-
+	// The *canonical* NaN, not Go's. math.NaN() is 0x7ff8000000000001 -- its
+	// payload is 1, not zero -- and wasm requires min/max to produce a
+	// canonical NaN, which the spec suite checks bit for bit. Using Go's
+	// constant here fails 136 assertions on a single mantissa bit while
+	// reporting, unhelpfully, "have NaN want NaN".
 	nan := m.compiler.AllocateVReg(x.Type())
 	if _64bit {
-		m.lowerConstantF64(nan, math.Float64bits(math.NaN()))
+		m.lowerConstantF64(nan, moremath.F64CanonicalNaNBits)
 	} else {
-		m.lowerConstantF32(nan, math.Float32bits(float32(math.NaN())))
+		m.lowerConstantF32(nan, moremath.F32CanonicalNaNBits)
 	}
-	m.emit(m.allocateInstr().asFpuMov(rd, nan))
-	m.insert(m.labelNop(skip))
+	m.blendFP(rd, hw, nan, m.maskFromBool(operandNR(ordered)), _64bit)
+}
+
+// maskFromBool turns a 0/1 value into 0 or all-ones, the form blendFP wants.
+func (m *machine) maskFromBool(cond operand) regalloc.VReg {
+	mask := m.compiler.AllocateVReg(ssa.TypeI64)
+	m.emit(m.allocateInstr().asALU(aluOpSub, mask, operandNR(zeroVReg), cond, true))
+	return mask
+}
+
+// blendFP computes `rd = mask ? whenTrue : whenFalse` for floating-point
+// values, without branching.
+//
+// The masking operations only exist in the integer file, so both values cross
+// over, get blended as bit patterns, and cross back. For f32 the moves are the
+// single-precision ones: fmv.x.w and fmv.w.x, so that the NaN boxing RV64D
+// requires is re-established on the way back rather than left to chance.
+func (m *machine) blendFP(rd, whenTrue, whenFalse, mask regalloc.VReg, _64bit bool) {
+	bt := m.compiler.AllocateVReg(ssa.TypeI64)
+	bf := m.compiler.AllocateVReg(ssa.TypeI64)
+	m.emit(m.allocateInstr().asFmvToInt(bt, operandNR(whenTrue), _64bit))
+	m.emit(m.allocateInstr().asFmvToInt(bf, operandNR(whenFalse), _64bit))
+
+	diff := m.compiler.AllocateVReg(ssa.TypeI64)
+	m.emit(m.allocateInstr().asALU(aluOpXor, diff, operandNR(bt), operandNR(bf), true))
+	m.emit(m.allocateInstr().asALU(aluOpAnd, diff, operandNR(diff), operandNR(mask), true))
+	m.emit(m.allocateInstr().asALU(aluOpXor, diff, operandNR(bf), operandNR(diff), true))
+	m.emit(m.allocateInstr().asFmvFromInt(rd, operandNR(diff), _64bit))
 }
 
 type roundMode byte
@@ -151,10 +182,20 @@ func (m *machine) lowerFpuRound(instr *ssa.Instruction, mode roundMode) {
 	_64bit := x.Type() == ssa.TypeF64
 	rn := m.getOperand_NR(m.compiler.ValueDefinition(x))
 
-	// Start with the identity, so the "already integral" path needs no move.
-	m.emit(m.allocateInstr().asFpuMov(rd, rn.nr()))
+	// Round through the integer file under the requested mode, then put the
+	// sign back: wasm requires ceil(-0.3) to be -0.0, where converting back
+	// from the integer 0 gives +0.0.
+	iv := m.compiler.AllocateVReg(ssa.TypeI64)
+	m.emit(m.allocateInstr().asFcvtToIntRounded(iv, rn, true /* to i64 */, _64bit, true, mode))
+	rounded := m.compiler.AllocateVReg(x.Type())
+	m.emit(m.allocateInstr().asFcvtFromInt(rounded, operandNR(iv), _64bit, true, true))
+	m.emit(m.allocateInstr().asFpuRRR(fpuBinOpSgnj, rounded, operandNR(rounded), rn, _64bit))
 
-	// |x| < 2^52 (or 2^23) is the region where the round trip is exact.
+	// That round trip is only exact while every integer in range is
+	// representable, i.e. |x| < 2^52 (2^23 for f32). At or above it the value
+	// is already integral and must be returned untouched -- as must NaN and
+	// the infinities, which the comparison below reports as out of range
+	// because flt is false for unordered operands.
 	limit := m.compiler.AllocateVReg(x.Type())
 	if _64bit {
 		m.lowerConstantF64(limit, math.Float64bits(math.Ldexp(1, 52)))
@@ -163,30 +204,22 @@ func (m *machine) lowerFpuRound(instr *ssa.Instruction, mode roundMode) {
 	}
 	absx := m.compiler.AllocateVReg(x.Type())
 	m.emit(m.allocateInstr().asFpuRR(fpuUniOpAbs, absx, rn, _64bit))
-
 	inRange := m.compiler.AllocateVReg(ssa.TypeI64)
 	m.emit(m.allocateInstr().asFpuCmp(fpuCmpOpLt, inRange, operandNR(absx), operandNR(limit), _64bit))
 
-	skip := m.insertBrTargetLabelAfterCurrent()
-	br := m.allocateInstr()
-	// A NaN compares false here too, so it skips and is returned unchanged.
-	br.asCondBr(condEQ, operandNR(inRange), operandNR(zeroVReg), skip)
-	m.insert(br)
+	// The out-of-range operand is the input itself, but passed through an
+	// addition of zero rather than used raw. Two reasons, and only the second
+	// is obvious: adding zero is exact for every value that reaches this path
+	// (they are all integral, or infinite), and it *quiets* a signaling NaN,
+	// which wasm requires of every arithmetic operator. Returning the input
+	// untouched leaves a signaling NaN signaling, which the spec suite catches
+	// with the singularly unhelpful "have NaN want NaN".
+	zero := m.compiler.AllocateVReg(x.Type())
+	m.emit(m.allocateInstr().asFmvFromInt(zero, operandNR(zeroVReg), _64bit))
+	passthrough := m.compiler.AllocateVReg(x.Type())
+	m.emit(m.allocateInstr().asFpuRRR(fpuBinOpAdd, passthrough, rn, operandNR(zero), _64bit))
 
-	// Round through the integer file, then restore the sign so that a result
-	// of zero keeps the sign of the input -- wasm requires ceil(-0.3) to be
-	// -0.0, which a bare convert-back would give as +0.0.
-	iv := m.compiler.AllocateVReg(ssa.TypeI64)
-	cvt := m.allocateInstr()
-	cvt.asFcvtToIntRounded(iv, rn, true /* to i64 */, _64bit, true /* signed */, mode)
-	m.insert(cvt)
-
-	back := m.allocateInstr()
-	back.asFcvtFromInt(rd, operandNR(iv), _64bit, true, true)
-	m.insert(back)
-
-	m.emit(m.allocateInstr().asFpuRRR(fpuBinOpSgnj, rd, operandNR(rd), rn, _64bit))
-	m.insert(m.labelNop(skip))
+	m.blendFP(rd, rounded, passthrough, m.maskFromBool(operandNR(inRange)), _64bit)
 }
 
 // lowerFcvtFromInt lowers i32/i64 -> f32/f64.
@@ -293,24 +326,6 @@ func (m *machine) trapUnconditional(execCtx regalloc.VReg, code nativeapi.ExitCo
 	b := m.allocateInstr()
 	b.asBr(island)
 	m.insert(b)
-}
-
-// insertBrTargetLabelAfterCurrent allocates a label to be placed later by
-// labelNop, for the local skip-branches the sequences above need.
-func (m *machine) insertBrTargetLabelAfterCurrent() label {
-	l := m.nextLabel
-	m.nextLabel++
-	pos := m.labelPositionPool.GetOrAllocate(int(l))
-	nop := m.allocateInstr()
-	nop.asNop0WithLabel(l)
-	pos.begin, pos.end = nop, nop
-	return l
-}
-
-// labelNop returns the nop that anchors a label allocated above.
-func (m *machine) labelNop(l label) *instruction {
-	pos := m.labelPositionPool.GetOrAllocate(int(l))
-	return pos.begin
 }
 
 // materialize builds a small constant into a fresh register.
