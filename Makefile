@@ -442,6 +442,14 @@ test.interp: ## Run the suite against the interpreter engine (riscv64 cross-run,
 	# qemu-riscv64-static.
 	@GOARCH=riscv64 CGO_ENABLED=0 $(cap) go test -timeout 60m -exec qemu-riscv64-static ./...
 
+.PHONY: test.riscv64
+test.riscv64: ## Run the suite for the riscv64 compiler backend under qemu-user
+	# -one-insn-per-tb works around the same qemu-user multi-insn-TB
+	# self-modifying-code bug that test.arm64 documents: JIT'd code is written
+	# and then executed, and qemu can hold a stale translation. Needs
+	# qemu-riscv64-static. Slower emulation, so a longer timeout.
+	@GOARCH=riscv64 CGO_ENABLED=0 $(cap) go test -timeout 90m -exec 'qemu-riscv64-static -one-insn-per-tb' ./...
+
 .PHONY: coverage
 # replace spaces with commas
 coverpkg = $(shell echo $(main_packages) | tr ' ' ',')

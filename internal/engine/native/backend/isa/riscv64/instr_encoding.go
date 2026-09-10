@@ -397,18 +397,19 @@ func (m *machine) resolveRelativeAddresses(ctx context.Context) {
 	for cur := m.rootInstr; cur != nil; cur = cur.next {
 		switch cur.kind {
 		case br:
-			target := m.labelPositionPool.Get(int(cur.brLabel())).binaryOffset
-			cur.brOffsetResolve(target - currentOffset)
+			cur.brOffsetResolve(m.labelOffset(cur.brLabel(), "br") - currentOffset)
 		case condBr:
-			target := m.labelPositionPool.Get(int(cur.condBrLabel())).binaryOffset
-			cur.condBrOffsetResolve(target - currentOffset)
+			cur.condBrOffsetResolve(m.labelOffset(cur.condBrLabel(), "condBr") - currentOffset)
 		case adr:
-			target := m.labelPositionPool.Get(int(cur.u1)).binaryOffset
-			cur.u2 = uint64(uint32(int32(target - currentOffset)))
+			// asAdrPCRel carries its displacement directly and marks u1 with
+			// the invalid sentinel, precisely so it is not looked up here.
+			if l := label(cur.u1); l != labelInvalid && l != labelReturn {
+				cur.u2 = uint64(uint32(int32(m.labelOffset(l, "adr") - currentOffset)))
+			}
 		case brTableSequence:
 			targets := m.jmpTableTargets[cur.u1]
 			for i := range targets {
-				t := m.labelPositionPool.Get(int(label(targets[i]))).binaryOffset
+				t := m.labelOffset(label(targets[i]), "br_table entry")
 				targets[i] = uint32(int32(t - (currentOffset + brTableSequenceOffsetTableBegin)))
 			}
 		case sourceOffsetInfo:
@@ -434,4 +435,16 @@ func condBrExpansionFor(diff int64, current byte) byte {
 		return current
 	}
 	return want
+}
+
+// labelOffset returns a label's resolved offset, failing loudly rather than
+// dereferencing nil when a branch names a label that was never placed -- which
+// is a lowering bug, and one that is otherwise reported as an opaque nil
+// dereference deep inside encoding.
+func (m *machine) labelOffset(l label, what string) int64 {
+	pos := m.labelPositionPool.Get(int(l))
+	if pos == nil {
+		panic(fmt.Sprintf("BUG: %s targets %s, which has no position", what, l))
+	}
+	return pos.binaryOffset
 }
