@@ -226,6 +226,31 @@ func TestEncodings_againstClang(t *testing.T) {
 		{"vfcvt.f.xu.v v1, v2", encodeVecUnary(vfunctFunary0, 1, 2, vsubCvtFXu, opfvv)},
 		{"vzext.vf2 v1, v2", encodeVecUnary(vfunctXunary, 1, 2, vsubZext2, opmvv)},
 		{"vsext.vf2 v1, v2", encodeVecUnary(vfunctXunary, 1, 2, vsubSext2, opmvv)},
+		// --- RVV: lane movement, narrowing, widening ---
+		{"vslidedown.vi v1, v2, 3", encodeVecVIu(vfunctSlidedown, 1, 2, 3)},
+		{"vslideup.vi v1, v2, 3", encodeVecVIu(vfunctSlideup, 1, 2, 3)},
+		{"vslidedown.vx v1, v2, a0", encodeVecVX(vfunctSlidedown, 1, 2, 10)},
+		{"vslideup.vx v1, v2, a0", encodeVecVX(vfunctSlideup, 1, 2, 10)},
+		{"vrgather.vi v1, v2, 3", encodeVecVIu(vfunctRgather, 1, 2, 3)},
+		{"vrgather.vx v1, v2, a0", encodeVecVX(vfunctRgather, 1, 2, 10)},
+		{"vnclip.wi v1, v2, 0", encodeVecVIu(vfunctNclip, 1, 2, 0)},
+		{"vnclipu.wi v1, v2, 0", encodeVecVIu(vfunctNclipu, 1, 2, 0)},
+		{"vsext.vf4 v1, v2", encodeVecUnary(vfunctXunary, 1, 2, vsubSext4, opmvv)},
+		{"vzext.vf4 v1, v2", encodeVecUnary(vfunctXunary, 1, 2, vsubZext4, opmvv)},
+		{"vfwcvt.f.f.v v1, v2", encodeVecUnary(vfunctFunary0, 1, 2, vsubFwcvtFF, opfvv)},
+		{"vfncvt.f.f.w v1, v2", encodeVecUnary(vfunctFunary0, 1, 2, vsubFncvtFF, opfvv)},
+		{"vsmul.vv v1, v2, v3", encodeVecVV(vfunctSmul, 1, 2, 3, opivv)},
+		{"vwmul.vv v1, v2, v3", encodeVecVV(vfunctWmul, 1, 2, 3, opmvv)},
+		{"vredsum.vs v1, v2, v3", encodeVecVV(vfunctRedsum, 1, 2, 3, opmvv)},
+		{"vcompress.vm v1, v2, v3", encodeVecVV(vfunctCompress, 1, 2, 3, opmvv)},
+		{"vmv.s.x v1, a0", encodeVmvSX(1, 10)},
+		{"vadd.vi v1, v2, 1", encodeVecVI(vfunctAdd, 1, 2, 1)},
+		{"vand.vi v1, v2, 1", encodeVecVI(vfunctAnd, 1, 2, 1)},
+		{"vmseq.vi v1, v2, 0", encodeVecVI(vfunctMseq, 1, 2, 0)},
+		{"vmerge.vim v1, v2, 1, v0", encodeVmergeVI(1, 2, 1)},
+		// --- RVV rounding needs the fcsr, since vfcvt has no static mode ---
+		{"fsrmi a0, 3", encodeFsrmi(10, 3)},
+		{"fsrm a0, a1", encodeFsrm(10, 11)},
 	}
 
 	var srcs []string

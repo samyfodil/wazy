@@ -155,3 +155,68 @@ func encodeVmvXS(rd, vs2 uint32) uint32 {
 func encodeVcpopM(rd, vs2 uint32) uint32 {
 	return encodeVec(vfunctWrxunary, 1, vs2, vsubCpop, opmvv, rd)
 }
+
+// funct6 values for the remaining families.
+const (
+	vfunctSlideup   = 0b001110
+	vfunctSlidedown = 0b001111
+	vfunctSmul      = 0b100111
+	vfunctNclipu    = 0b101110
+	vfunctNclip     = 0b101111
+	vfunctWmul      = 0b111011
+	vfunctRedsum    = 0b000000
+	vfunctCompress  = 0b010111
+)
+
+// vs1 sub-opcodes for the wider extension and conversion variants.
+const (
+	vsubZext4   = 0b00100
+	vsubSext4   = 0b00101
+	vsubFwcvtFF = 0b01100
+	vsubFncvtFF = 0b10100
+	vsubMvSX    = 0b01010
+)
+
+// encodeVecVIu encodes a vector-immediate operation whose immediate is
+// *unsigned* 5-bit: the slide and gather offsets, and the narrowing shift
+// amounts, which index lanes rather than carry a value.
+func encodeVecVIu(funct6, vd, vs2, uimm uint32) uint32 {
+	if uimm > 31 {
+		panic(fmt.Sprintf("BUG: %d does not fit RVV's 5-bit unsigned immediate", uimm))
+	}
+	return encodeVec(funct6, 1, vs2, uimm, opivi, vd)
+}
+
+// encodeVmergeVI encodes `vmerge.vim vd, vs2, imm, v0`.
+func encodeVmergeVI(vd, vs2 uint32, imm int32) uint32 {
+	return encodeVec(vfunctMerge, 0, vs2, uint32(imm)&0x1f, opivi, vd)
+}
+
+// encodeVmvSX encodes `vmv.s.x vd, rs1`: write an integer register into lane 0
+// only, leaving the other lanes alone.
+func encodeVmvSX(vd, rs1 uint32) uint32 {
+	return encodeVec(vfunctWrxunary, 1, 0, rs1, opmvx, vd)
+}
+
+// ---------------------------------------------------------------------------
+// Rounding mode
+// ---------------------------------------------------------------------------
+//
+// RVV's vfcvt has no static rounding-mode field, unlike its scalar
+// counterpart: it always rounds per the fcsr's frm, except for the explicit
+// .rtz forms. So the vector ceil, floor and nearest have to set frm around the
+// conversion and put it back, which is what these are for.
+
+const csrFRM = 0x002
+
+// encodeFsrmi encodes `fsrmi rd, imm`: set frm to imm, returning the old value
+// in rd.
+func encodeFsrmi(rd, imm uint32) uint32 {
+	return csrFRM<<20 | imm<<15 | 0b101<<12 | rd<<7 | opSystem
+}
+
+// encodeFsrm encodes `fsrm rd, rs1`: set frm from a register, returning the
+// old value.
+func encodeFsrm(rd, rs1 uint32) uint32 {
+	return csrFRM<<20 | rs1<<15 | 0b001<<12 | rd<<7 | opSystem
+}
