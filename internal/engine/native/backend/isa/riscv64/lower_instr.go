@@ -190,10 +190,66 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 	case ssa.OpcodeFence:
 		m.insert(m.allocateInstr().asFence())
 
+	// ---- SIMD ----
+	case ssa.OpcodeVIadd:
+		m.lowerVecRRR(vfunctAdd, opivv, instr)
+	case ssa.OpcodeVIsub:
+		m.lowerVecRRR(vfunctSub, opivv, instr)
+	case ssa.OpcodeVImul:
+		m.lowerVecRRR(vfunctMul, opmvv, instr)
+	case ssa.OpcodeVband:
+		m.lowerVecRRR(vfunctAnd, opivv, instr)
+	case ssa.OpcodeVbor:
+		m.lowerVecRRR(vfunctOr, opivv, instr)
+	case ssa.OpcodeVbxor:
+		m.lowerVecRRR(vfunctXor, opivv, instr)
+	case ssa.OpcodeVbnot:
+		m.lowerVbnot(instr)
+	case ssa.OpcodeVIneg:
+		m.lowerVIneg(instr)
+	case ssa.OpcodeVImin:
+		m.lowerVecRRR(vfunctMin, opivv, instr)
+	case ssa.OpcodeVImax:
+		m.lowerVecRRR(vfunctMax, opivv, instr)
+	case ssa.OpcodeVUmin:
+		m.lowerVecRRR(vfunctMinu, opivv, instr)
+	case ssa.OpcodeVUmax:
+		m.lowerVecRRR(vfunctMaxu, opivv, instr)
+	case ssa.OpcodeVSaddSat:
+		m.lowerVecRRR(vfunctSadd, opivv, instr)
+	case ssa.OpcodeVUaddSat:
+		m.lowerVecRRR(vfunctSaddu, opivv, instr)
+	case ssa.OpcodeVSsubSat:
+		m.lowerVecRRR(vfunctSsub, opivv, instr)
+	case ssa.OpcodeVUsubSat:
+		m.lowerVecRRR(vfunctSsubu, opivv, instr)
+	case ssa.OpcodeVAvgRound:
+		m.lowerVecRRR(vfunctAaddu, opmvv, instr)
+	case ssa.OpcodeVIshl:
+		m.lowerVecShift(vfunctSll, instr)
+	case ssa.OpcodeVUshr:
+		m.lowerVecShift(vfunctSrl, instr)
+	case ssa.OpcodeVSshr:
+		m.lowerVecShift(vfunctSra, instr)
+	case ssa.OpcodeVIcmp:
+		m.lowerVIcmp(instr)
+	case ssa.OpcodeVFcmp:
+		m.lowerVFcmp(instr)
+	case ssa.OpcodeVFadd:
+		m.lowerVecRRR(vfunctFadd, opfvv, instr)
+	case ssa.OpcodeVFsub:
+		m.lowerVecRRR(vfunctFsub, opfvv, instr)
+	case ssa.OpcodeVFmul:
+		m.lowerVecRRR(vfunctFmul, opfvv, instr)
+	case ssa.OpcodeVFdiv:
+		m.lowerVecRRR(vfunctFdiv, opfvv, instr)
+	case ssa.OpcodeVSqrt:
+		m.lowerVecRR(vfunctFunary1, vsubFsqrt, opfvv, instr)
+
 	default:
 		panic("BUG: unimplemented lowering for opcode " + op.String() +
-			" on riscv64. Vector opcodes cannot reach here: the platform gate " +
-			"withholds the compiler until the RVV lowering exists.")
+			" on riscv64. The remaining vector opcodes are gated off by " +
+			"riscv64CompilerSupports until their lowering lands.")
 	}
 }
 

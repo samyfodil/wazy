@@ -161,6 +161,21 @@ const (
 	// preceding vsetivli because it is defined on the register rather than on
 	// the current vtype.
 	vecMov
+	// vecRRR is a vector-vector operation: vd = vs2 <op> vs1. u1 packs the
+	// funct6 and form, u2 the element width.
+	vecRRR
+	// vecRR is a unary vector operation, its variant in the vs1 field.
+	vecRR
+	// vecRX is a vector-scalar operation taking an integer register.
+	vecRX
+	// vecSplat broadcasts an integer register or a small immediate.
+	vecSplat
+	// vecCmp is a lane-wise comparison materialized as all-ones/all-zeros
+	// lanes rather than left as a mask, which is what wasm's i8x16.eq and
+	// friends produce.
+	vecCmp
+	// vecMaskPop reduces a mask to a scalar bit count, for any_true/all_true.
+	vecMaskPop
 	// vecLoad / vecStore move exactly 16 bytes to or from the address in rs1.
 	// RVV load/store have no displacement field at all -- the address must
 	// already be in a register -- so a spill computes it first.
@@ -341,6 +356,12 @@ var defKinds = [numInstructionKinds]defKind{
 	atomicStore:       defKindNone,
 	fence:             defKindNone,
 	clzCtzPopcnt:      defKindRD,
+	vecRRR:            defKindRD,
+	vecRR:             defKindRD,
+	vecRX:             defKindRD,
+	vecSplat:          defKindRD,
+	vecCmp:            defKindRD,
+	vecMaskPop:        defKindRD,
 	vecMov:            defKindRD,
 	vecLoad:           defKindRD,
 	vecStore:          defKindNone,
@@ -433,6 +454,12 @@ var useKinds = [numInstructionKinds]useKind{
 	atomicStore:       useKindRS1RS2,
 	fence:             useKindNone,
 	clzCtzPopcnt:      useKindRS1,
+	vecRRR:            useKindRS1RS2,
+	vecRR:             useKindRS1,
+	vecRX:             useKindRS1RS2,
+	vecSplat:          useKindRS1,
+	vecCmp:            useKindRS1RS2,
+	vecMaskPop:        useKindRS1,
 	vecMov:            useKindRS1,
 	vecLoad:           useKindRS1,
 	// A vector store reads the value in rd and the address in rs1, the same
@@ -888,6 +915,71 @@ func (i *instruction) asFclass(rd regalloc.VReg, rs1 operand, _64bit bool) *inst
 	i.rd = rd
 	i.rs1 = rs1
 	i.u1 = b2u64(_64bit)
+	return i
+}
+
+// asVecRRR builds `vd = vs2 <op> vs1`. form is the OP-V funct3 selecting the
+// operand shape, sew the element width.
+func (i *instruction) asVecRRR(funct6, form uint32, rd regalloc.VReg, vs2, vs1 operand, sew uint32) *instruction {
+	i.kind = vecRRR
+	i.rd = rd
+	i.rs1 = vs2
+	i.rs2 = vs1
+	i.u1 = uint64(funct6) | uint64(form)<<8
+	i.u2 = uint64(sew)
+	return i
+}
+
+// asVecRR builds a unary vector operation, whose variant occupies the vs1 field.
+func (i *instruction) asVecRR(funct6, variant, form uint32, rd regalloc.VReg, vs2 operand, sew uint32) *instruction {
+	i.kind = vecRR
+	i.rd = rd
+	i.rs1 = vs2
+	i.u1 = uint64(funct6) | uint64(form)<<8 | uint64(variant)<<16
+	i.u2 = uint64(sew)
+	return i
+}
+
+// asVecRX builds a vector-scalar operation taking an integer register.
+func (i *instruction) asVecRX(funct6 uint32, rd regalloc.VReg, vs2, rs1 operand, sew uint32) *instruction {
+	i.kind = vecRX
+	i.rd = rd
+	i.rs1 = vs2
+	i.rs2 = rs1
+	i.u1 = uint64(funct6)
+	i.u2 = uint64(sew)
+	return i
+}
+
+// asVecSplat broadcasts an integer register across every lane.
+func (i *instruction) asVecSplat(rd regalloc.VReg, rs1 operand, sew uint32) *instruction {
+	i.kind = vecSplat
+	i.rd = rd
+	i.rs1 = rs1
+	i.u2 = uint64(sew)
+	return i
+}
+
+// asVecCmp builds a lane-wise comparison whose result is all-ones or all-zeros
+// per lane, rather than the mask RVV produces natively.
+func (i *instruction) asVecCmp(funct6, form uint32, rd regalloc.VReg, vs2, vs1 operand, sew uint32) *instruction {
+	i.kind = vecCmp
+	i.rd = rd
+	i.rs1 = vs2
+	i.rs2 = vs1
+	i.u1 = uint64(funct6) | uint64(form)<<8
+	i.u2 = uint64(sew)
+	return i
+}
+
+// asVecMaskPop counts the lanes for which the comparison against zero holds,
+// which is how any_true and all_true are answered. u1 selects the comparison.
+func (i *instruction) asVecMaskPop(rd regalloc.VReg, vs2 operand, sew uint32, eqZero bool) *instruction {
+	i.kind = vecMaskPop
+	i.rd = rd
+	i.rs1 = vs2
+	i.u1 = b2u64(eqZero)
+	i.u2 = uint64(sew)
 	return i
 }
 

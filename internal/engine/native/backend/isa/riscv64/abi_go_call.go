@@ -293,14 +293,15 @@ func init() {
 	}
 	for class, regs := range regInfo.AllocatableRegisters {
 		if regalloc.RegType(class) == regalloc.RegTypeVec {
-			// Not yet, and not by oversight. A v128 cannot reach the backend
-			// while the platform gate withholds SIMD, so no vector register is
-			// ever allocated today. It also could not be saved here if it
-			// were: executionContext.savedRegisters has 512 bytes, of which
-			// the integer and float sets already use most, and 30 vector
-			// registers need 480 more. Enabling RVV means enlarging that area
-			// or spilling vectors elsewhere -- a decision for that work, which
-			// this check exists to force rather than let slip.
+			// Vector registers are deliberately absent, and it is not a gap.
+			// A stack grow is only ever reached from a function prologue or
+			// the Go-call trampoline's own check, i.e. at entry, where the
+			// only live values are the incoming arguments -- and a v128
+			// argument travels on the stack here, never in a v-register (see
+			// FunctionABI.setABIArgs). Mid-function, every v-register is
+			// caller-saved, so the allocator has already spilled anything
+			// live across a call. So no vector register is ever live at a
+			// point that reaches this sequence.
 			continue
 		}
 		for _, r := range regs {

@@ -69,6 +69,16 @@ func (i *instruction) size() int64 {
 		return 8
 	case brTableSequence:
 		return brTableSequenceOffsetTableBegin + int64(i.u2)*4
+	case vecRRR, vecRR, vecRX, vecSplat:
+		return 8 // vsetivli + the operation
+	case vecCmp:
+		return 20 // vsetivli + all-ones + zeros + compare + merge
+	case vecMaskPop:
+		return 12 // vsetivli + compare + vcpop
+	case vecMov:
+		return 4 // vmv1r.v needs no vtype
+	case vecLoad, vecStore:
+		return 8 // vsetivli + the access
 	case load, store, fpuLoad, fpuStore:
 		if i.bigOffset() {
 			return 12 // lui + add + the access itself.
@@ -203,6 +213,33 @@ func (i *instruction) encode(m *machine) {
 		} else {
 			c.Emit8Bytes(i.u1)
 		}
+	case vecRRR:
+		funct6, form := uint32(i.u1&0xff), uint32(i.u1>>8&0xff)
+		emitVsetivli(c, uint32(i.u2))
+		c.Emit4Bytes(encodeVecVV(funct6, vecReg(i.rd), vecReg(i.rs1.nr()), vecReg(i.rs2.nr()), form))
+	case vecRR:
+		funct6, form, variant := uint32(i.u1&0xff), uint32(i.u1>>8&0xff), uint32(i.u1>>16&0xff)
+		emitVsetivli(c, uint32(i.u2))
+		c.Emit4Bytes(encodeVecUnary(funct6, vecReg(i.rd), vecReg(i.rs1.nr()), variant, form))
+	case vecRX:
+		emitVsetivli(c, uint32(i.u2))
+		c.Emit4Bytes(encodeVecVX(uint32(i.u1), vecReg(i.rd), vecReg(i.rs1.nr()),
+			regNumberInEncoding[i.rs2.realReg()]))
+	case vecSplat:
+		emitVsetivli(c, uint32(i.u2))
+		c.Emit4Bytes(encodeVmvVX(vecReg(i.rd), regNumberInEncoding[i.rs1.realReg()]))
+	case vecCmp:
+		encodeVecCmp(c, i)
+	case vecMaskPop:
+		encodeVecMaskPop(c, i)
+	case vecMov:
+		c.Emit4Bytes(encodeVmv1r(vecReg(i.rd), vecReg(i.rs1.nr())))
+	case vecLoad:
+		emitVsetivli(c, vsew64)
+		c.Emit4Bytes(encodeVectorLoad(vecReg(i.rd), regNumberInEncoding[i.rs1.realReg()], vsew64))
+	case vecStore:
+		emitVsetivli(c, vsew64)
+		c.Emit4Bytes(encodeVectorStore(vecReg(i.rd), regNumberInEncoding[i.rs1.realReg()], vsew64))
 	case brTableSequence:
 		encodeBrTableSequence(c, m, i)
 	default:
@@ -484,4 +521,59 @@ func (m *machine) labelOffset(l label, what string) int64 {
 		panic(fmt.Sprintf("BUG: %s targets %s, which has no position", what, l))
 	}
 	return pos.binaryOffset
+}
+
+// vecReg is the encoding number of a vector register.
+func vecReg(v regalloc.VReg) uint32 { return regNumberInEncoding[v.RealReg()] }
+
+// emitVsetivli configures the vector unit for exactly 16 bytes at the given
+// element width.
+//
+// It is emitted before every vector operation rather than tracked across them.
+// A vtype is a piece of machine state, and getting it wrong is silent -- the
+// operation simply reads the wrong number of lanes at the wrong width -- so
+// the correct-by-construction version comes first. Collapsing runs of
+// identical vsetivli is a straightforward peephole over the final instruction
+// list, and worth doing, but it is an optimization and belongs after the
+// semantics are pinned by the spec suite.
+func emitVsetivli(c compilerBuf, sew uint32) {
+	c.Emit4Bytes(encodeVsetivli(vecAVLFor(sew), sew))
+}
+
+// encodeVecCmp emits a lane-wise comparison as all-ones/all-zeros lanes.
+//
+// RVV comparisons produce a *mask* -- one bit per lane -- where wasm wants a
+// full-width vector of all-ones or all-zeros. The mask therefore has to be
+// materialized: build the two candidate vectors, run the comparison into v0
+// (the architecturally fixed mask register, which is why it is held out of
+// allocation), and merge.
+func encodeVecCmp(c compilerBuf, i *instruction) {
+	funct6, form := uint32(i.u1&0xff), uint32(i.u1>>8&0xff)
+	sew := uint32(i.u2)
+	vd, vs2, vs1 := vecReg(i.rd), vecReg(i.rs1.nr()), vecReg(i.rs2.nr())
+	tmp := regNumberInEncoding[vecTmpReg]
+
+	emitVsetivli(c, sew)
+	c.Emit4Bytes(encodeVmvVI(tmp, -1)) // all-ones lanes
+	c.Emit4Bytes(encodeVmvVI(vd, 0))   // all-zeros lanes
+	c.Emit4Bytes(encodeVec(funct6, 1, vs2, vs1, form, regNumberInEncoding[vecMaskReg]))
+	c.Emit4Bytes(encodeVmerge(vd, vd, tmp))
+}
+
+// encodeVecMaskPop answers any_true and all_true.
+//
+// Both reduce to counting lanes: any_true is "not every lane is zero" and
+// all_true is "no lane is zero", so one comparison against zero and a
+// population count of the resulting mask serves both, with the caller
+// comparing the count afterwards.
+func encodeVecMaskPop(c compilerBuf, i *instruction) {
+	sew := uint32(i.u2)
+	rd := intRd(i.rd)
+	vs2 := vecReg(i.rs1.nr())
+	mask := regNumberInEncoding[vecMaskReg]
+
+	emitVsetivli(c, sew)
+	// vmseq.vi v0, vs2, 0 -- lanes that are zero.
+	c.Emit4Bytes(encodeVec(vfunctMseq, 1, vs2, 0, opivi, mask))
+	c.Emit4Bytes(encodeVcpopM(rd, mask))
 }
