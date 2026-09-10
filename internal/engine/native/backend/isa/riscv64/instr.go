@@ -521,7 +521,9 @@ var useKinds = [numInstructionKinds]useKind{
 	vecConst:       useKindRS1RS2,
 	vecMaskPop:     useKindRS1,
 	vecMov:         useKindRS1,
-	vecLoad:        useKindRS1,
+	// A vector load reads only the address base, which lives in the mode --
+	// not in rs1, which asVecLoad never sets.
+	vecLoad: useKindRS1Amode,
 	// A vector store reads the value in rd and the address base in the mode,
 	// the same shape as the scalar store.
 	vecStore: useKindRDRS1Amode,
@@ -1411,9 +1413,9 @@ func (i *instruction) String() string {
 	case vecMov:
 		return fmt.Sprintf("vmv1r.v %s, %s", formatVReg(i.rd), i.rs1.format())
 	case vecLoad:
-		return fmt.Sprintf("vle64.v %s, %s", formatVReg(i.rd), i.getAmode().format())
+		return fmt.Sprintf("vle8.v %s, %s", formatVReg(i.rd), i.getAmode().format())
 	case vecStore:
-		return fmt.Sprintf("vse64.v %s, %s", formatVReg(i.rd), i.getAmode().format())
+		return fmt.Sprintf("vse8.v %s, %s", formatVReg(i.rd), i.getAmode().format())
 	}
 	panic(fmt.Sprintf("BUG: unknown instruction kind %d", i.kind))
 }

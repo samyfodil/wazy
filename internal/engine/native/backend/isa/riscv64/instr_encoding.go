@@ -92,9 +92,9 @@ func (i *instruction) size() int64 {
 		// truncation the pair of frm writes around it.
 		return 48
 	case vecSelectLt:
-		return 16 // vsetivli + compare + copy + merge
+		return 12 // vsetivli + compare + merge
 	case vecHighBits:
-		return 12 // vsetivli + compare + a second vsetivli-free readout
+		return 20 // vsetivli + compare + vsetivli + readout + two shifts
 	case vecExtract:
 		return 8 // vsetivli + the lane read
 	case vecInsert:
@@ -111,7 +111,7 @@ func (i *instruction) size() int64 {
 	case vecNaNZero:
 		return 12 // vsetivli + vmfeq + vmerge
 	case vecCmp:
-		return 20 // vsetivli + all-ones + zeros + compare + merge
+		return 16 // vsetivli + compare + zeros + merge
 	case vecMaskPop:
 		return 12 // vsetivli + compare + vcpop
 	case vecMov:
@@ -330,9 +330,13 @@ func (i *instruction) encode(m *machine) {
 		if fp {
 			funct6, form = vfunctMflt, opfvv
 		}
-		c.Emit4Bytes(encodeVec(funct6, 1, vecReg(i.rs2.nr()), vecReg(i.rs1.nr()), form, mask))
-		c.Emit4Bytes(encodeVmvVV(vecReg(i.rd), vecReg(i.rs4.nr())))
-		c.Emit4Bytes(encodeVmerge(vecReg(i.rd), vecReg(i.rd), vecReg(i.rs3.nr())))
+		// vs2 is the *left* operand of an RVV compare, so rs1 goes there:
+		// the mask wanted is `a < b`, in the lowering's own order.
+		c.Emit4Bytes(encodeVec(funct6, 1, vecReg(i.rs1.nr()), vecReg(i.rs2.nr()), form, mask))
+		// vmerge picks between the two sources directly. Copying one into rd
+		// first would destroy the other whenever regalloc gave them the same
+		// register.
+		c.Emit4Bytes(encodeVmerge(vecReg(i.rd), vecReg(i.rs4.nr()), vecReg(i.rs3.nr())))
 	case vecHighBits:
 		sew := uint32(i.u2)
 		mask := regNumberInEncoding[vecMaskReg]
@@ -343,6 +347,14 @@ func (i *instruction) encode(m *machine) {
 		// element wide enough to hold the lane count suffices.
 		emitVsetivli(c, vsew16)
 		c.Emit4Bytes(encodeVmvXS(intRd(i.rd), mask))
+		// vmv.x.s sign-extends, and the mask bits above the lane count are
+		// tail-agnostic -- so anything from lane 16 up is either garbage or a
+		// sign. Keep exactly the lanes that exist.
+		rd := intRd(i.rd)
+		if shift := int32(64 - 16>>sew); shift != 0 {
+			c.Emit4Bytes(encodeAluRRImm(aluOpSll, rd, rd, shift, true))
+			c.Emit4Bytes(encodeAluRRImm(aluOpSrl, rd, rd, shift, true))
+		}
 	case vecExtract:
 		sew := uint32(i.u2)
 		lane := ssa.VecLane(i.u1 >> 8)
@@ -391,12 +403,12 @@ func (i *instruction) encode(m *machine) {
 		c.Emit4Bytes(encodeVmv1r(vecReg(i.rd), vecReg(i.rs1.nr())))
 	case vecLoad:
 		base := emitVecAddress(c, i)
-		emitVsetivli(c, vsew64)
-		c.Emit4Bytes(encodeVectorLoad(vecReg(i.rd), base, vsew64))
+		emitVsetivli(c, vsew8)
+		c.Emit4Bytes(encodeVectorLoad(vecReg(i.rd), base, vsew8))
 	case vecStore:
 		base := emitVecAddress(c, i)
-		emitVsetivli(c, vsew64)
-		c.Emit4Bytes(encodeVectorStore(vecReg(i.rd), base, vsew64))
+		emitVsetivli(c, vsew8)
+		c.Emit4Bytes(encodeVectorStore(vecReg(i.rd), base, vsew8))
 	case brTableSequence:
 		encodeBrTableSequence(c, m, i)
 	default:
@@ -708,13 +720,13 @@ func encodeVecCmp(c compilerBuf, i *instruction) {
 	funct6, form := uint32(i.u1&0xff), uint32(i.u1>>8&0xff)
 	sew := uint32(i.u2)
 	vd, vs2, vs1 := vecReg(i.rd), vecReg(i.rs1.nr()), vecReg(i.rs2.nr())
-	tmp := regNumberInEncoding[vecTmpReg]
 
 	emitVsetivli(c, sew)
-	c.Emit4Bytes(encodeVmvVI(tmp, -1)) // all-ones lanes
-	c.Emit4Bytes(encodeVmvVI(vd, 0))   // all-zeros lanes
+	// The compare comes first: vd may well be one of its sources, and the
+	// zeroing below would otherwise read as a comparison against zero.
 	c.Emit4Bytes(encodeVec(funct6, 1, vs2, vs1, form, regNumberInEncoding[vecMaskReg]))
-	c.Emit4Bytes(encodeVmerge(vd, vd, tmp))
+	c.Emit4Bytes(encodeVmvVI(vd, 0))
+	c.Emit4Bytes(encodeVmergeVI(vd, vd, -1))
 }
 
 // encodeVecMaskPop answers any_true and all_true.
@@ -798,6 +810,13 @@ func frmFor(mode roundMode) uint32 {
 
 // emitVecAddress materializes a vector access's address into the reserved
 // scratch, since RVV load and store take a bare base register.
+//
+// The access itself uses byte elements rather than the 64-bit ones the
+// register's contents suggest. Sixteen e8 elements move the same sixteen
+// bytes, but a unit-stride access requires only its *element* width of
+// alignment -- so e8 needs none, where e64 would require the address to be
+// eight-byte aligned. wasm permits an unaligned v128.load, and simd_address
+// exercises exactly that with align=1 and odd offsets.
 func emitVecAddress(c compilerBuf, i *instruction) uint32 {
 	a := i.getAmode()
 	tmp := regNumberInEncoding[tmpReg]

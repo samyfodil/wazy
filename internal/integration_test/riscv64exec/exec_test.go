@@ -116,6 +116,20 @@ func TestRiscv64_compiledExecution(t *testing.T) {
 		require.Equal(t, 12.0, f64of("f64_mul", math.Float64bits(3.0), math.Float64bits(4.0)))
 	})
 
+	t.Run("negative memory index traps", func(t *testing.T) {
+		// An i32 index lives sign-extended, so -1 is 0xffffffffffffffff. A
+		// bounds check that compares it as a signed 64-bit value lets it
+		// through, and the address computation then reads *below* the memory
+		// base. wasm requires a trap.
+		for _, idx := range []uint64{uint64(uint32(0xffffffff)), uint64(uint32(0x80000000))} {
+			_, err := mod.ExportedFunction("load_at").Call(ctx, idx)
+			require.Error(t, err, "load at index %#x must trap", idx)
+		}
+		// ...while an in-range index still works. Address 1000 is untouched
+		// by the earlier subtests, which write at 0.
+		require.Equal(t, uint32(0), i32("load_at", 1000))
+	})
+
 	t.Run("traps", func(t *testing.T) {
 		_, err := mod.ExportedFunction("div_s").Call(ctx, 1, 0)
 		require.Error(t, err, "division by zero must trap")
@@ -184,6 +198,9 @@ func riscvExecModule() []byte {
 		{"roundtrip32", 1, []byte{
 			wasm.OpcodeI32Const, 0, wasm.OpcodeLocalGet, 0, wasm.OpcodeI32Store, 0x02, 0x00,
 			wasm.OpcodeI32Const, 0, wasm.OpcodeI32Load, 0x02, 0x00, wasm.OpcodeEnd,
+		}},
+		{"load_at", 1, []byte{
+			wasm.OpcodeLocalGet, 0, wasm.OpcodeI32Load, 0x02, 0x00, wasm.OpcodeEnd,
 		}},
 		{"roundtrip64", 3, []byte{
 			wasm.OpcodeI32Const, 0, wasm.OpcodeLocalGet, 0, wasm.OpcodeI64Store, 0x03, 0x00,
