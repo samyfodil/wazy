@@ -314,7 +314,30 @@ func (m *machine) insertStackBoundsCheck(requiredStackSize int64, cur *instructi
 	setSize.asStore(tmpRegVReg, amode2, 64, true)
 	cur = linkInstr(cur, setSize)
 
-	cur = m.insertExitSequence(cur, x10VReg, nativeapi.ExitCodeGrowStack)
+	// Hand over to the shared stack-grow sequence rather than exiting to Go
+	// from here.
+	//
+	// The difference is not stylistic. CompileStackGrowCallSequence saves and
+	// restores every register the allocator can hand out; exiting inline saves
+	// nothing, so the grow returns with the incoming arguments destroyed --
+	// including a1, the module context. Nothing fails at that point either:
+	// execution continues with a garbage module context, and the next thing to
+	// read through it reports something unrelated. Here that was a
+	// call_indirect whose table length came back wrong, failing an infinite
+	// recursion with "invalid table access" where "stack overflow" belonged.
+	ldrTrampoline := m.allocateInstr()
+	amode3 := m.amodePool.Allocate()
+	*amode3 = addressMode{
+		kind: addressModeKindRegSignedImm12,
+		rn:   x10VReg, // the execution context is always the first argument.
+		imm:  nativeapi.ExecutionContextOffsetStackGrowCallTrampolineAddress.I64(),
+	}
+	ldrTrampoline.asLoad(tmpRegVReg, amode3, 64, false)
+	cur = linkInstr(cur, ldrTrampoline)
+
+	call := m.allocateInstr()
+	call.asCallIndirect(tmpRegVReg, nil)
+	cur = linkInstr(cur, call)
 
 	return linkInstr(cur, afterGrow)
 }
