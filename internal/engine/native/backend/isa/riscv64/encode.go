@@ -97,15 +97,21 @@ func fitsInSignedImm21(v int64) bool { return v >= -1048576 && v <= 1048575 && v
 // bits, and because addi and jalr sign-extend that immediate, a set bit 11 is
 // compensated by rounding the high half up.
 //
-// That rounding is why the pair cannot reach the whole int32 range. Above
-// maxAuipcPairOffset the `v - lo` carry pushes hi past INT32_MAX; auipc
-// sign-extends its 20-bit upper immediate on RV64, so an out-of-range split
-// does not fail, it silently lands 4GiB below the intended address. Callers
-// gate on fitsInAuipcPair; this panics rather than wrap.
+// Above maxAuipcPairOffset the `v - lo` carry pushes hi past INT32_MAX and it
+// wraps. Whether that matters depends entirely on what closes the pair:
+//
+//   - `lui hi; addiw lo` is correct for the *whole* int32 range. addiw
+//     truncates the sum to 32 bits and re-extends, which undoes the wrap
+//     exactly. Constant materialization uses this form and needs no gate.
+//   - `auipc hi; jalr lo`, `auipc hi; addi lo` and `lui hi; add rN` have no
+//     truncating tail, so a wrapped hi is fatal -- and silently so, because
+//     auipc sign-extends its 20-bit upper immediate on RV64, landing 4GiB
+//     below the intended address rather than failing. Those callers must gate
+//     on fitsInAuipcPair first.
+//
+// splitImm32 itself is pure arithmetic and deliberately does not panic: it
+// cannot tell which of the two shapes its caller is building.
 func splitImm32(v int32) (hi, lo int32) {
-	if !fitsInAuipcPair(int64(v)) {
-		panic(fmt.Sprintf("BUG: %#x is out of auipc/lui+addi pair range", v))
-	}
 	lo = int32(v) << 20 >> 20 // sign-extend the low 12 bits
 	hi = v - lo
 	return
@@ -121,6 +127,18 @@ const (
 
 func fitsInAuipcPair(v int64) bool {
 	return v >= minAuipcPairOffset && v <= maxAuipcPairOffset
+}
+
+// splitImm32PCRel is splitImm32 for the pair shapes that have no truncating
+// tail -- auipc+jalr, auipc+addi, lui+add -- where a wrapped high half is
+// silently wrong rather than merely surprising. Every such displacement here
+// is an intra-function or intra-executable offset that cannot legitimately
+// approach 2GiB, so this is an assertion rather than a condition to handle.
+func splitImm32PCRel(v int64, what string) (hi, lo int32) {
+	if !fitsInAuipcPair(v) {
+		panic(fmt.Sprintf("BUG: %s displacement %#x is out of auipc-pair range", what, v))
+	}
+	return splitImm32(int32(v))
 }
 
 // ---------------------------------------------------------------------------

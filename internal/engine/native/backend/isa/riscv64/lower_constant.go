@@ -80,14 +80,11 @@ func (m *machine) lowerConstantF64(rd regalloc.VReg, v uint64) {
 // and int32/imm12 edge: worst case 8 instructions, common cases 1 or 2, and
 // every immediate produced fits the field it goes in.
 func (m *machine) lowerConstantI64(rd regalloc.VReg, v int64) {
-	m.emitConstantSeq(rd, v, true)
+	m.emitConstantSeq(rd, v)
 }
 
-// emitConstantSeq builds v into rd. `top` distinguishes the outermost call,
-// which may use the 32-bit-result addiw form, from the recursive ones, which
-// must not: an inner value is about to be shifted left, so truncating it to 32
-// bits would discard the very bits the shift is going to move up.
-func (m *machine) emitConstantSeq(rd regalloc.VReg, v int64, top bool) {
+// emitConstantSeq builds v into rd.
+func (m *machine) emitConstantSeq(rd regalloc.VReg, v int64) {
 	if fitsInSignedImm12(v) {
 		// addi rd, zero, v
 		alu := m.allocateInstr()
@@ -99,19 +96,24 @@ func (m *machine) emitConstantSeq(rd regalloc.VReg, v int64, top bool) {
 	if v >= math.MinInt32 && v <= math.MaxInt32 {
 		// lui rd, hi20 ; addiw rd, rd, lo12
 		//
-		// addiw, not addi: lui sign-extends its result, so for a value like
-		// 0x7fffffff the hi20 half rounds up to 0x80000000 and sign-extends to
-		// 0xffffffff80000000. Truncating the sum to 32 bits and re-extending is
-		// what recovers the intended 0x000000007fffffff. The distinction only
-		// matters at the top of the int32 range, which is exactly where a
-		// wrong choice hides.
+		// addiw, not addi, and unconditionally -- including on the recursive
+		// path. lui sign-extends its result, so for a value at the top of the
+		// range like 0x7fffffff the hi half rounds up to 0x80000000 and
+		// sign-extends to 0xffffffff80000000; addiw truncates the sum back to
+		// 32 bits and re-extends, recovering 0x000000007fffffff, where a plain
+		// addi would leave 0xffffffff7fffffff. addiw is safe for the recursive
+		// case too: v fits in int32 by the branch condition, so truncating to
+		// 32 bits and re-extending is the identity on it.
+		//
+		// The window where this matters is only 2048 values wide out of 2^31,
+		// which is exactly why a random-sample test walked straight past it.
 		hi, lo := splitImm32(int32(v))
 		l := m.allocateInstr()
 		l.asLui(rd, hi)
 		m.insert(l)
 		if lo != 0 {
 			alu := m.allocateInstr()
-			alu.asALU(aluOpAdd, rd, operandNR(rd), operandImm(int64(lo)), !top)
+			alu.asALU(aluOpAdd, rd, operandNR(rd), operandImm(int64(lo)), false /* addiw */)
 			m.insert(alu)
 		}
 		return
@@ -128,7 +130,7 @@ func (m *machine) emitConstantSeq(rd regalloc.VReg, v int64, top bool) {
 	shift := bits.TrailingZeros64(uint64(rest))
 	rest >>= uint(shift)
 
-	m.emitConstantSeq(rd, rest, false)
+	m.emitConstantSeq(rd, rest)
 
 	sll := m.allocateInstr()
 	sll.asShiftImm(aluOpSll, rd, operandNR(rd), int64(shift), true)

@@ -68,7 +68,9 @@ func emitAccessBase(c compilerBuf, i *instruction) (base uint32, disp int32) {
 		return rn, int32(a.imm)
 	}
 	tmp := regNumberInEncoding[tmpReg]
-	hi, lo := splitImm32(int32(a.imm))
+	// lui+add has no truncating tail either: the displacement reaches the load
+	// through a register, not through a 32-bit-result instruction.
+	hi, lo := splitImm32PCRel(a.imm, "oversized stack displacement")
 	c.Emit4Bytes(encodeLui(tmp, hi))
 	c.Emit4Bytes(encodeAluRRR(aluOpAdd, tmp, tmp, rn, true))
 	return tmp, lo
@@ -97,7 +99,7 @@ func (i *instruction) encode(m *machine) {
 	case adr:
 		// resolveRelativeAddresses put the PC-relative displacement in u2.
 		rd := regNumberInEncoding[i.rd.RealReg()]
-		hi, lo := splitImm32(int32(uint32(i.u2)))
+		hi, lo := splitImm32PCRel(int64(int32(uint32(i.u2))), "adr")
 		c.Emit4Bytes(encodeAuipc(rd, hi))
 		c.Emit4Bytes(encodeAluRRImm(aluOpAdd, rd, rd, lo, true))
 	case mov:
@@ -204,7 +206,7 @@ func encodeCondBr(c compilerBuf, i *instruction) {
 		c.Emit4Bytes(encodeJal(regNumberInEncoding[zeroReg], int32(offset-4)))
 	default:
 		c.Emit4Bytes(encodeBranch(cond.invert(), rs1, rs2, 12))
-		hi, lo := splitImm32(int32(offset - 4))
+		hi, lo := splitImm32PCRel(offset-4, "long conditional branch")
 		c.Emit4Bytes(encodeAuipc(regNumberInEncoding[tmpReg], hi))
 		c.Emit4Bytes(encodeJalr(regNumberInEncoding[zeroReg], regNumberInEncoding[tmpReg], lo))
 	}
@@ -216,7 +218,7 @@ func encodeBr(c compilerBuf, i *instruction) {
 		c.Emit4Bytes(encodeJal(regNumberInEncoding[zeroReg], int32(offset)))
 		return
 	}
-	hi, lo := splitImm32(int32(offset))
+	hi, lo := splitImm32PCRel(offset, "long unconditional branch")
 	c.Emit4Bytes(encodeAuipc(regNumberInEncoding[tmpReg], hi))
 	c.Emit4Bytes(encodeJalr(regNumberInEncoding[zeroReg], regNumberInEncoding[tmpReg], lo))
 }
