@@ -530,7 +530,7 @@ func (m *machine) lowerExitWithCode(execCtx regalloc.VReg, code nativeapi.ExitCo
 	m.storeExecCtxField(execCtx, sp, nativeapi.ExecutionContextOffsetStackPointerBeforeGoCall.I64(), 64)
 
 	ra := m.compiler.AllocateVReg(ssa.TypeI64)
-	m.emit(m.allocateInstr().asAdrPCRel(ra, 8+exitSequenceSize))
+	m.emit(m.allocateInstr().asAdrPCRel(ra, goExitResumeOffsetFromAdr))
 	m.storeExecCtxField(execCtx, ra, nativeapi.ExecutionContextOffsetGoCallReturnAddress.I64(), 64)
 
 	m.insert(m.allocateInstr().asExitSequence(execCtx))

@@ -16,6 +16,27 @@ type compilerBuf interface {
 	Emit8Bytes(uint64)
 }
 
+// intRd returns the encoding number of an integer destination register,
+// refusing the ones compiled code must never write.
+//
+// x27 is Go's g. Clobbering it does not fail where it happens: the program
+// runs on until the next signal arrives, and the runtime then reports "fatal:
+// bad g in signal handler" from somewhere entirely unrelated, with no
+// traceback, because it has no goroutine to attribute the fault to. x3 (gp)
+// and x4 (tp) are reserved by the psABI and fail just as remotely. Catching
+// the write at encode time turns all three into a normal Go panic naming the
+// instruction that did it.
+func intRd(v regalloc.VReg) uint32 {
+	switch r := v.RealReg(); r {
+	case x27:
+		panic("BUG: compiled code must not write x27, which is Go's g")
+	case x3, x4:
+		panic("BUG: compiled code must not write " + regNames[r] + ", reserved by the psABI")
+	default:
+		return regNumberInEncoding[r]
+	}
+}
+
 // size returns the number of bytes this instruction occupies once encoded.
 // Every real RISC-V instruction here is 4 bytes -- the backend never emits the
 // compressed RVC forms -- so only meta instructions and the multi-instruction
@@ -84,7 +105,7 @@ func (i *instruction) encode(m *machine) {
 	case aluRRR:
 		op := aluOp(i.u1)
 		_64bit := i.u2 == 1
-		rd := regNumberInEncoding[i.rd.RealReg()]
+		rd := intRd(i.rd)
 		rs1 := regNumberInEncoding[i.rs1.realReg()]
 		if i.rs2.kind == operandKindImm {
 			c.Emit4Bytes(encodeAluRRImm(op, rd, rs1, int32(i.rs2.imm), _64bit))
@@ -92,19 +113,19 @@ func (i *instruction) encode(m *machine) {
 			c.Emit4Bytes(encodeAluRRR(op, rd, rs1, regNumberInEncoding[i.rs2.realReg()], _64bit))
 		}
 	case shiftImm:
-		c.Emit4Bytes(encodeAluRRImm(aluOp(i.u1), regNumberInEncoding[i.rd.RealReg()],
+		c.Emit4Bytes(encodeAluRRImm(aluOp(i.u1), intRd(i.rd),
 			regNumberInEncoding[i.rs1.realReg()], int32(i.rs2.imm), i.u2 == 1))
 	case lui:
-		c.Emit4Bytes(encodeLui(regNumberInEncoding[i.rd.RealReg()], int32(uint32(i.u1))))
+		c.Emit4Bytes(encodeLui(intRd(i.rd), int32(uint32(i.u1))))
 	case adr:
 		// resolveRelativeAddresses put the PC-relative displacement in u2.
-		rd := regNumberInEncoding[i.rd.RealReg()]
+		rd := intRd(i.rd)
 		hi, lo := splitImm32PCRel(int64(int32(uint32(i.u2))), "adr")
 		c.Emit4Bytes(encodeAuipc(rd, hi))
 		c.Emit4Bytes(encodeAluRRImm(aluOpAdd, rd, rd, lo, true))
 	case mov:
 		// `mv rd, rs` is `addi rd, rs, 0`.
-		c.Emit4Bytes(encodeAluRRImm(aluOpAdd, regNumberInEncoding[i.rd.RealReg()],
+		c.Emit4Bytes(encodeAluRRImm(aluOpAdd, intRd(i.rd),
 			regNumberInEncoding[i.rs1.realReg()], 0, true))
 	case fpuMov:
 		// `fmv.d rd, rs` is `fsgnj.d rd, rs, rs`.
@@ -112,7 +133,7 @@ func (i *instruction) encode(m *machine) {
 		c.Emit4Bytes(encodeFpuRRR(fpuBinOpSgnj, regNumberInEncoding[i.rd.RealReg()], r, r, true))
 	case load:
 		base, disp := emitAccessBase(c, i)
-		c.Emit4Bytes(encodeLoad(regNumberInEncoding[i.rd.RealReg()], base, disp, byte(i.u1), i.loadIsSigned()))
+		c.Emit4Bytes(encodeLoad(intRd(i.rd), base, disp, byte(i.u1), i.loadIsSigned()))
 	case store:
 		base, disp := emitAccessBase(c, i)
 		c.Emit4Bytes(encodeStore(regNumberInEncoding[i.rd.RealReg()], base, disp, byte(i.u1)))
@@ -152,11 +173,11 @@ func (i *instruction) encode(m *machine) {
 	case fpuRR:
 		encodeFpuRR(c, i)
 	case fpuCmp:
-		c.Emit4Bytes(encodeFpuCmp(fpuCmpOp(i.u1), regNumberInEncoding[i.rd.RealReg()],
+		c.Emit4Bytes(encodeFpuCmp(fpuCmpOp(i.u1), intRd(i.rd),
 			regNumberInEncoding[i.rs1.realReg()], regNumberInEncoding[i.rs2.realReg()], i.u2 == 1))
 	case fcvtToInt:
 		dst64, src64, signed := i.u1&1 == 1, i.u1>>1&1 == 1, i.u1>>2&1 == 1
-		c.Emit4Bytes(encodeFcvtToIntRM(regNumberInEncoding[i.rd.RealReg()],
+		c.Emit4Bytes(encodeFcvtToIntRM(intRd(i.rd),
 			regNumberInEncoding[i.rs1.realReg()], dst64, src64, signed, uint32(i.u2)))
 	case fcvtFromInt:
 		dst64, src64, signed := i.u1&1 == 1, i.u1>>1&1 == 1, i.u1>>2&1 == 1
@@ -166,13 +187,13 @@ func (i *instruction) encode(m *machine) {
 		c.Emit4Bytes(encodeFcvtSD(regNumberInEncoding[i.rd.RealReg()],
 			regNumberInEncoding[i.rs1.realReg()], i.u1 == 1))
 	case fmvToInt:
-		c.Emit4Bytes(encodeFmvToInt(regNumberInEncoding[i.rd.RealReg()],
+		c.Emit4Bytes(encodeFmvToInt(intRd(i.rd),
 			regNumberInEncoding[i.rs1.realReg()], i.u1 == 1))
 	case fmvFromInt:
 		c.Emit4Bytes(encodeFmvFromInt(regNumberInEncoding[i.rd.RealReg()],
 			regNumberInEncoding[i.rs1.realReg()], i.u1 == 1))
 	case fclass:
-		c.Emit4Bytes(encodeFclass(regNumberInEncoding[i.rd.RealReg()],
+		c.Emit4Bytes(encodeFclass(intRd(i.rd),
 			regNumberInEncoding[i.rs1.realReg()], i.u1 == 1))
 	case fence:
 		c.Emit4Bytes(encodeFence(0b0011, 0b0011))
@@ -247,6 +268,22 @@ func encodeFpuRR(c compilerBuf, i *instruction) {
 // recording a resume address (insertExitSequence, emitTrapIslands) can add a
 // constant rather than depend on which register the context landed in.
 const exitSequenceSize = 5 * 4
+
+// adrSequenceSize is the size of the auipc+addi pair an `adr` expands to.
+const adrSequenceSize = 8
+
+// goExitResumeOffsetFromAdr is how far past its own `adr` the resume address
+// of a Go exit lies: the adr itself, the store that puts its result into the
+// execution context, and then the exit sequence.
+//
+// It is spelled out rather than written as a number because the obvious number
+// is arm64's. There the adr is a single instruction, so the same distance is
+// 8+exitSequenceSize; here the adr is a pair, and copying that constant across
+// leaves the resume address four bytes short -- pointing into the middle of
+// the exit sequence rather than past it. Nothing fails at that point: the
+// program runs on until a signal arrives and the runtime reports "fatal: bad g
+// in signal handler" from somewhere unrelated.
+const goExitResumeOffsetFromAdr = adrSequenceSize + 4 + exitSequenceSize
 
 // encodeExitSequence restores Go's ra, frame pointer and sp from the execution
 // context and returns, handing control back to the Go side of the call.

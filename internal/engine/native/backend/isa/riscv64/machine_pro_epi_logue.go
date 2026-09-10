@@ -334,7 +334,7 @@ func (m *machine) insertExitSequence(cur *instruction, execCtx regalloc.VReg, co
 	// The address to resume at, which is the instruction just past the exit
 	// sequence: adr covers the auipc+addi pair and the exit sequence itself.
 	adr := m.allocateInstr()
-	adr.asAdrPCRel(tmpRegVReg, 8+exitSequenceSize)
+	adr.asAdrPCRel(tmpRegVReg, goExitResumeOffsetFromAdr)
 	cur = linkInstr(cur, adr)
 	cur = m.storeToExecCtx(cur, execCtx, tmpRegVReg, nativeapi.ExecutionContextOffsetGoCallReturnAddress.I64(), 64)
 
@@ -384,7 +384,7 @@ func (m *machine) emitTrapIslands() {
 		cur = m.storeToExecCtx(cur, tmpRegVReg, tmpReg2VReg, nativeapi.ExecutionContextOffsetStackPointerBeforeGoCall.I64(), 64)
 
 		adr := m.allocateInstr()
-		adr.asAdrPCRel(tmpReg2VReg, 8+exitSequenceSize)
+		adr.asAdrPCRel(tmpReg2VReg, goExitResumeOffsetFromAdr)
 		cur = linkInstr(cur, adr)
 		cur = m.storeToExecCtx(cur, tmpRegVReg, tmpReg2VReg, nativeapi.ExecutionContextOffsetGoCallReturnAddress.I64(), 64)
 

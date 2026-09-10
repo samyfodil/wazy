@@ -4,6 +4,7 @@ package riscv64exec
 
 import (
 	"context"
+	"math"
 	"testing"
 
 	"github.com/samyfodil/wazy"
@@ -103,6 +104,18 @@ func TestRiscv64_compiledExecution(t *testing.T) {
 		require.Equal(t, uint32(3628800), i32("fact", 10))
 	})
 
+	t.Run("floats", func(t *testing.T) {
+		f64of := func(name string, args ...uint64) float64 {
+			t.Helper()
+			res, err := mod.ExportedFunction(name).Call(ctx, args...)
+			require.NoError(t, err)
+			return math.Float64frombits(res[0])
+		}
+		require.Equal(t, 3.5, f64of("f64_const"))
+		require.Equal(t, 7.0, f64of("f64_add", math.Float64bits(3.0), math.Float64bits(4.0)))
+		require.Equal(t, 12.0, f64of("f64_mul", math.Float64bits(3.0), math.Float64bits(4.0)))
+	})
+
 	t.Run("traps", func(t *testing.T) {
 		_, err := mod.ExportedFunction("div_s").Call(ctx, 1, 0)
 		require.Error(t, err, "division by zero must trap")
@@ -123,6 +136,11 @@ func riscvExecModule() []byte {
 	un1i32 := wasm.FunctionType{Params: []wasm.ValueType{i32t}, Results: []wasm.ValueType{i32t}}
 	noneI64 := wasm.FunctionType{Results: []wasm.ValueType{i64t}}
 	un1i64 := wasm.FunctionType{Params: []wasm.ValueType{i64t}, Results: []wasm.ValueType{i64t}}
+	noneF64 := wasm.FunctionType{Results: []wasm.ValueType{wasm.ValueTypeF64}}
+	bin2f64 := wasm.FunctionType{
+		Params:  []wasm.ValueType{wasm.ValueTypeF64, wasm.ValueTypeF64},
+		Results: []wasm.ValueType{wasm.ValueTypeF64},
+	}
 
 	type fn struct {
 		name string
@@ -173,7 +191,23 @@ func riscvExecModule() []byte {
 		}},
 	}
 
-	types := []wasm.FunctionType{bin2i32, un1i32, noneI64, un1i64}
+	f64const := func(v float64) []byte {
+		b := []byte{wasm.OpcodeF64Const}
+		var raw [8]byte
+		bits := math.Float64bits(v)
+		for i := 0; i < 8; i++ {
+			raw[i] = byte(bits >> (8 * uint(i)))
+		}
+		b = append(b, raw[:]...)
+		return append(b, wasm.OpcodeEnd)
+	}
+	fns = append(fns,
+		fn{"f64_const", 4, f64const(3.5)},
+		fn{"f64_add", 5, bin(wasm.OpcodeF64Add)},
+		fn{"f64_mul", 5, bin(wasm.OpcodeF64Mul)},
+	)
+
+	types := []wasm.FunctionType{bin2i32, un1i32, noneI64, un1i64, noneF64, bin2f64}
 	m := &wasm.Module{
 		TypeSection:     types,
 		MemorySection:   []wasm.Memory{{Min: 1, Cap: 1, Max: 1, IsMaxEncoded: true}},
