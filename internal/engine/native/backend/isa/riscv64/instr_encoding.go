@@ -6,6 +6,7 @@ import (
 
 	"github.com/samyfodil/wazy/internal/engine/native/backend/regalloc"
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
+	"github.com/samyfodil/wazy/internal/engine/native/ssa"
 )
 
 // compilerBuf is the slice of backend.Compiler the encoders here need. Keeping
@@ -71,6 +72,31 @@ func (i *instruction) size() int64 {
 		return brTableSequenceOffsetTableBegin + int64(i.u2)*4
 	case vecRRR, vecRR, vecRX, vecSplat:
 		return 8 // vsetivli + the operation
+	case vecShiftImm:
+		return 8 // vsetivli + the shift
+	case vecInsertLane0:
+		return 8 // vsetivli + vmv.s.x
+	case vecRound:
+		// vsetivli, |x| and the limit splat, the in-range mask, the two
+		// conversions, the sign restore, the merge, and for every mode but
+		// truncation the pair of frm writes around it.
+		return 48
+	case vecSelectLt:
+		return 16 // vsetivli + compare + copy + merge
+	case vecHighBits:
+		return 12 // vsetivli + compare + a second vsetivli-free readout
+	case vecExtract:
+		return 8 // vsetivli + the lane read
+	case vecInsert:
+		return 20 // vsetivli + index splat + compare + scalar splat + merge
+	case vecNarrow:
+		return 8 // vsetivli + vnclip
+	case vecConst:
+		return 20 // vsetivli + two lane writes + a slide + a copy
+	case vecSlide:
+		return 8 // vsetivli + the slide
+	case vecNaNZero:
+		return 12 // vsetivli + vmfeq + vmerge
 	case vecCmp:
 		return 20 // vsetivli + all-ones + zeros + compare + merge
 	case vecMaskPop:
@@ -228,6 +254,86 @@ func (i *instruction) encode(m *machine) {
 	case vecSplat:
 		emitVsetivli(c, uint32(i.u2))
 		c.Emit4Bytes(encodeVmvVX(vecReg(i.rd), regNumberInEncoding[i.rs1.realReg()]))
+	case vecSlide:
+		offset, up := uint32(i.u1&0xff), i.u1>>8&1 == 1
+		funct6 := uint32(vfunctSlidedown)
+		if up {
+			funct6 = vfunctSlideup
+		}
+		emitVsetivli(c, uint32(i.u2))
+		c.Emit4Bytes(encodeVecVIu(funct6, vecReg(i.rd), vecReg(i.rs1.nr()), offset))
+	case vecNaNZero:
+		sew := uint32(i.u2)
+		emitVsetivli(c, sew)
+		// vmfeq of a value with itself is false exactly on the NaN lanes.
+		c.Emit4Bytes(encodeVecVV(vfunctMfeq, regNumberInEncoding[vecMaskReg],
+			vecReg(i.rs1.nr()), vecReg(i.rs1.nr()), opfvv))
+		// Keep rd where ordered, take the zero vector where not.
+		c.Emit4Bytes(encodeVmerge(vecReg(i.rd), vecReg(i.rs2.nr()), vecReg(i.rd)))
+	case vecShiftImm:
+		funct6, amount := uint32(i.u1&0xff), uint32(i.u1>>8)
+		emitVsetivli(c, uint32(i.u2))
+		c.Emit4Bytes(encodeVecVIu(funct6, vecReg(i.rd), vecReg(i.rs1.nr()), amount))
+	case vecInsertLane0:
+		emitVsetivli(c, uint32(i.u2))
+		c.Emit4Bytes(encodeVmvSX(vecReg(i.rd), regNumberInEncoding[i.rs1.realReg()]))
+	case vecRound:
+		encodeVecRound(c, i)
+	case vecSelectLt:
+		sew := uint32(i.u2)
+		mask := regNumberInEncoding[vecMaskReg]
+		emitVsetivli(c, sew)
+		fp := sew >= vsew32 // pmin/pmax only exist for float lanes.
+		funct6, form := uint32(vfunctMslt), uint32(opivv)
+		if fp {
+			funct6, form = vfunctMflt, opfvv
+		}
+		c.Emit4Bytes(encodeVec(funct6, 1, vecReg(i.rs2.nr()), vecReg(i.rs1.nr()), form, mask))
+		c.Emit4Bytes(encodeVmvVV(vecReg(i.rd), vecReg(i.rs4.nr())))
+		c.Emit4Bytes(encodeVmerge(vecReg(i.rd), vecReg(i.rd), vecReg(i.rs3.nr())))
+	case vecHighBits:
+		sew := uint32(i.u2)
+		mask := regNumberInEncoding[vecMaskReg]
+		emitVsetivli(c, sew)
+		// Lanes whose sign bit is set are exactly those below zero.
+		c.Emit4Bytes(encodeVec(vfunctMslt, 1, vecReg(i.rs1.nr()), 0, opivx, mask))
+		// Read the mask bits out as an integer. One bit per lane, so an
+		// element wide enough to hold the lane count suffices.
+		emitVsetivli(c, vsew16)
+		c.Emit4Bytes(encodeVmvXS(intRd(i.rd), mask))
+	case vecExtract:
+		sew := uint32(i.u2)
+		lane := ssa.VecLane(i.u1 >> 8)
+		emitVsetivli(c, sew)
+		if lane == ssa.VecLaneF32x4 || lane == ssa.VecLaneF64x2 {
+			c.Emit4Bytes(encodeVfmvFS(regNumberInEncoding[i.rd.RealReg()], vecReg(i.rs1.nr())))
+			return
+		}
+		c.Emit4Bytes(encodeVmvXS(intRd(i.rd), vecReg(i.rs1.nr())))
+	case vecInsert:
+		sew, index := uint32(i.u2), uint32(i.u1)
+		mask := regNumberInEncoding[vecMaskReg]
+		tmp := regNumberInEncoding[vecTmpReg]
+		emitVsetivli(c, sew)
+		// Build the one-lane mask by splatting the target index and comparing
+		// it against each lane's own index, which vid.v supplies.
+		c.Emit4Bytes(encodeVid(tmp))
+		c.Emit4Bytes(encodeVecVI(vfunctMseq, mask, tmp, int32(index)))
+		c.Emit4Bytes(encodeVmvVX(tmp, regNumberInEncoding[i.rs2.realReg()]))
+		c.Emit4Bytes(encodeVmerge(vecReg(i.rd), vecReg(i.rs1.nr()), tmp))
+	case vecNarrow:
+		emitVsetivli(c, uint32(i.u2))
+		c.Emit4Bytes(encodeVecVIu(uint32(i.u1), vecReg(i.rd), vecReg(i.rs1.nr()), 0))
+	case vecConst:
+		tmp := regNumberInEncoding[vecTmpReg]
+		emitVsetivli(c, vsew64)
+		// vmv.s.x writes lane 0 only, so the high half goes in first and is
+		// slid up into lane 1, freeing lane 0 for the low half.
+		c.Emit4Bytes(encodeVmvSX(tmp, regNumberInEncoding[i.rs2.realReg()]))
+		c.Emit4Bytes(encodeVecVIu(vfunctSlideup, vecReg(i.rd), tmp, 1))
+		c.Emit4Bytes(encodeVmvSX(vecReg(i.rd), regNumberInEncoding[i.rs1.realReg()]))
+		c.Emit4Bytes(encodeVmvVV(tmp, vecReg(i.rd)))
+		c.Emit4Bytes(encodeVmvVV(vecReg(i.rd), tmp))
 	case vecCmp:
 		encodeVecCmp(c, i)
 	case vecMaskPop:
@@ -576,4 +682,65 @@ func encodeVecMaskPop(c compilerBuf, i *instruction) {
 	// vmseq.vi v0, vs2, 0 -- lanes that are zero.
 	c.Emit4Bytes(encodeVec(vfunctMseq, 1, vs2, 0, opivi, mask))
 	c.Emit4Bytes(encodeVcpopM(rd, mask))
+}
+
+// encodeVecRound emits the lane-wise ceil, floor, trunc and nearest.
+//
+// The conversion out and back is only exact while every integer in range is
+// representable, so lanes at or above 2^23 (2^52 for f64) are left as they
+// are -- which is right, because such a value is already integral, and it also
+// covers NaN and the infinities, since the magnitude comparison reports them
+// as out of range.
+//
+// Unlike the scalar form, the rounding mode cannot be named in the
+// instruction: RVV's vfcvt always follows frm. So every mode but truncation
+// writes frm, converts, and writes it back.
+func encodeVecRound(c compilerBuf, i *instruction) {
+	sew := uint32(i.u2)
+	mode := roundMode(i.u1)
+	vd, vs2 := vecReg(i.rd), vecReg(i.rs1.nr())
+	tmp := regNumberInEncoding[vecTmpReg]
+	mask := regNumberInEncoding[vecMaskReg]
+	scratch := regNumberInEncoding[tmpReg]
+
+	emitVsetivli(c, sew)
+
+	dynamic := mode != roundModeTrunc
+	if dynamic {
+		c.Emit4Bytes(encodeFsrmi(scratch, frmFor(mode)))
+	}
+
+	// Convert out and back under the selected mode.
+	variant := uint32(vsubCvtXF)
+	if !dynamic {
+		variant = vsubCvtRtzXF
+	}
+	c.Emit4Bytes(encodeVecUnary(vfunctFunary0, tmp, vs2, variant, opfvv))
+	c.Emit4Bytes(encodeVecUnary(vfunctFunary0, tmp, tmp, vsubCvtFX, opfvv))
+	// Restore the sign, so that ceil(-0.3) is -0.0 rather than +0.0.
+	c.Emit4Bytes(encodeVecVV(vfunctFsgnjn, tmp, tmp, vs2, opfvv))
+	c.Emit4Bytes(encodeVecVV(vfunctFsgnjn, tmp, tmp, tmp, opfvv))
+
+	if dynamic {
+		c.Emit4Bytes(encodeFsrm(regNumberInEncoding[zeroReg], scratch))
+	}
+
+	// Keep the rounded lanes only where the input was small enough for the
+	// round trip to be exact; elsewhere keep the input.
+	c.Emit4Bytes(encodeVecVV(vfunctMflt, mask, vs2, vs2, opfvv))
+	c.Emit4Bytes(encodeVmerge(vd, vs2, tmp))
+}
+
+// frmFor maps a wasm rounding operator to the fcsr rounding mode.
+func frmFor(mode roundMode) uint32 {
+	switch mode {
+	case roundModeNearest:
+		return rmRNE
+	case roundModeFloor:
+		return rmRDN
+	case roundModeCeil:
+		return rmRUP
+	default:
+		return rmRTZ
+	}
 }

@@ -67,7 +67,7 @@ type (
 	instruction struct {
 		prev, next          *instruction
 		rd                  regalloc.VReg
-		rs1, rs2, rs3       operand
+		rs1, rs2, rs3, rs4  operand
 		amode               *addressMode
 		u1, u2              uint64
 		kind                instructionKind
@@ -174,6 +174,30 @@ const (
 	// lanes rather than left as a mask, which is what wasm's i8x16.eq and
 	// friends produce.
 	vecCmp
+	// vecSlide moves lanes up or down by an immediate offset.
+	vecSlide
+	// vecNaNZero zeroes the lanes whose float value is NaN, which is the one
+	// place RVV's saturating conversion disagrees with wasm.
+	vecNaNZero
+	// vecShiftImm is a lane-wise shift by a compile-time amount.
+	vecShiftImm
+	// vecRound is the lane-wise ceil/floor/trunc/nearest.
+	vecRound
+	// vecInsertLane0 writes a scalar into lane 0 only.
+	vecInsertLane0
+	// vecSelectLt is a lane-wise `a < b ? y : x`, which is what wasm's pmin
+	// and pmax are defined as -- deliberately not min and max.
+	vecSelectLt
+	// vecHighBits gathers each lane's sign bit into an integer register.
+	vecHighBits
+	// vecExtract reads lane 0 into an integer or float register.
+	vecExtract
+	// vecInsert writes a scalar into one lane, leaving the rest.
+	vecInsert
+	// vecNarrow halves the element width with saturation.
+	vecNarrow
+	// vecConst materializes a 128-bit constant from two integer registers.
+	vecConst
 	// vecMaskPop reduces a mask to a scalar bit count, for any_true/all_true.
 	vecMaskPop
 	// vecLoad / vecStore move exactly 16 bytes to or from the address in rs1.
@@ -361,6 +385,17 @@ var defKinds = [numInstructionKinds]defKind{
 	vecRX:             defKindRD,
 	vecSplat:          defKindRD,
 	vecCmp:            defKindRD,
+	vecSlide:          defKindRD,
+	vecNaNZero:        defKindRD,
+	vecShiftImm:       defKindRD,
+	vecRound:          defKindRD,
+	vecInsertLane0:    defKindRD,
+	vecSelectLt:       defKindRD,
+	vecHighBits:       defKindRD,
+	vecExtract:        defKindRD,
+	vecInsert:         defKindRD,
+	vecNarrow:         defKindRD,
+	vecConst:          defKindRD,
 	vecMaskPop:        defKindRD,
 	vecMov:            defKindRD,
 	vecLoad:           defKindRD,
@@ -407,6 +442,8 @@ const (
 	useKindRS1RS2             // rs1 and rs2 (rs2 may be an immediate, which is skipped)
 	useKindRS1RS2RS3          // rs1, rs2 and rs3, all registers (compare-exchange)
 	useKindRDRS1              // rd is a stored *source*, rs1 the address register
+	useKindRDRS1RS2           // rd is both read and written, plus rs1 and rs2
+	useKindVecSelect          // four vector sources: the compared pair and the selected pair
 	useKindRS1Amode           // rs1 is the address base
 	useKindRDRS1Amode         // rd is a stored *source*, rs1 the address base
 	useKindCall
@@ -459,9 +496,22 @@ var useKinds = [numInstructionKinds]useKind{
 	vecRX:             useKindRS1RS2,
 	vecSplat:          useKindRS1,
 	vecCmp:            useKindRS1RS2,
-	vecMaskPop:        useKindRS1,
-	vecMov:            useKindRS1,
-	vecLoad:           useKindRS1,
+	vecSlide:          useKindRS1,
+	// vecNaNZero reads the value being corrected (rd), the float source it
+	// tests, and the zero vector it merges in.
+	vecNaNZero:     useKindRDRS1RS2,
+	vecShiftImm:    useKindRS1,
+	vecRound:       useKindRS1,
+	vecInsertLane0: useKindRS1,
+	vecSelectLt:    useKindVecSelect,
+	vecHighBits:    useKindRS1,
+	vecExtract:     useKindRS1,
+	vecInsert:      useKindRS1RS2,
+	vecNarrow:      useKindRS1,
+	vecConst:       useKindRS1RS2,
+	vecMaskPop:     useKindRS1,
+	vecMov:         useKindRS1,
+	vecLoad:        useKindRS1,
 	// A vector store reads the value in rd and the address in rs1, the same
 	// shape as the scalar store.
 	vecStore: useKindRDRS1,
@@ -487,6 +537,10 @@ func (i *instruction) Uses(regs *[]regalloc.VReg) []regalloc.VReg {
 		*regs = append(*regs, i.rs1.nr(), i.rs2.nr(), i.rs3.nr())
 	case useKindRDRS1:
 		*regs = append(*regs, i.rd, i.rs1.nr())
+	case useKindRDRS1RS2:
+		*regs = append(*regs, i.rd, i.rs1.nr(), i.rs2.nr())
+	case useKindVecSelect:
+		*regs = append(*regs, i.rs1.nr(), i.rs2.nr(), i.rs3.nr(), i.rs4.nr())
 	case useKindRS1Amode:
 		*regs = append(*regs, i.getAmode().rn)
 	case useKindRDRS1Amode:
@@ -547,6 +601,26 @@ func (i *instruction) AssignUse(index int, reg regalloc.VReg) {
 			i.rd = reg
 		} else {
 			i.rs1 = operandNR(reg)
+		}
+	case useKindRDRS1RS2:
+		switch index {
+		case 0:
+			i.rd = reg
+		case 1:
+			i.rs1 = operandNR(reg)
+		default:
+			i.rs2 = operandNR(reg)
+		}
+	case useKindVecSelect:
+		switch index {
+		case 0:
+			i.rs1 = operandNR(reg)
+		case 1:
+			i.rs2 = operandNR(reg)
+		case 2:
+			i.rs3 = operandNR(reg)
+		default:
+			i.rs4 = operandNR(reg)
 		}
 	case useKindRS1Amode:
 		i.getAmode().rn = reg
@@ -980,6 +1054,111 @@ func (i *instruction) asVecMaskPop(rd regalloc.VReg, vs2 operand, sew uint32, eq
 	i.rs1 = vs2
 	i.u1 = b2u64(eqZero)
 	i.u2 = uint64(sew)
+	return i
+}
+
+// asVecSlide moves lanes by an immediate offset; up when up is true.
+func (i *instruction) asVecSlide(rd regalloc.VReg, vs2 operand, offset, sew uint32, up bool) *instruction {
+	i.kind = vecSlide
+	i.rd = rd
+	i.rs1 = vs2
+	i.u1 = uint64(offset) | b2u64(up)<<8
+	i.u2 = uint64(sew)
+	return i
+}
+
+// asVecNaNZero replaces rd's lanes with zeros wherever the corresponding lane
+// of the float source is NaN.
+func (i *instruction) asVecNaNZero(rd regalloc.VReg, src, zeros operand, sew uint32) *instruction {
+	i.kind = vecNaNZero
+	i.rd = rd
+	i.rs1 = src
+	i.rs2 = zeros
+	i.u2 = uint64(sew)
+	return i
+}
+
+// asVecShiftImm shifts each lane by a compile-time amount.
+func (i *instruction) asVecShiftImm(funct6 uint32, rd regalloc.VReg, vs2 operand, amount, sew uint32) *instruction {
+	i.kind = vecShiftImm
+	i.rd = rd
+	i.rs1 = vs2
+	i.u1 = uint64(funct6) | uint64(amount)<<8
+	i.u2 = uint64(sew)
+	return i
+}
+
+// asVecRound is the lane-wise ceil/floor/trunc/nearest.
+func (i *instruction) asVecRound(rd regalloc.VReg, vs2 operand, sew uint32, mode roundMode) *instruction {
+	i.kind = vecRound
+	i.rd = rd
+	i.rs1 = vs2
+	i.u1 = uint64(mode)
+	i.u2 = uint64(sew)
+	return i
+}
+
+// asVecInsertLane0 writes a scalar into lane 0, leaving the others as they are.
+func (i *instruction) asVecInsertLane0(rd regalloc.VReg, scalar operand, sew uint32) *instruction {
+	i.kind = vecInsertLane0
+	i.rd = rd
+	i.rs1 = scalar
+	i.u2 = uint64(sew)
+	return i
+}
+
+// asVecSelectLt builds `a < b ? whenTrue : whenFalse`, lane-wise.
+func (i *instruction) asVecSelectLt(rd regalloc.VReg, a, b, whenTrue, whenFalse operand, sew uint32) *instruction {
+	i.kind = vecSelectLt
+	i.rd = rd
+	i.rs1, i.rs2, i.rs3, i.rs4 = a, b, whenTrue, whenFalse
+	i.u2 = uint64(sew)
+	return i
+}
+
+func (i *instruction) asVecHighBits(rd regalloc.VReg, vs2 operand, sew uint32) *instruction {
+	i.kind = vecHighBits
+	i.rd = rd
+	i.rs1 = vs2
+	i.u2 = uint64(sew)
+	return i
+}
+
+// asVecExtract reads lane 0. signed says whether a narrow integer lane is
+// sign- or zero-extended into the destination; lane says which file it lands in.
+func (i *instruction) asVecExtract(rd regalloc.VReg, vs2 operand, sew uint32, signed bool, lane ssa.VecLane) *instruction {
+	i.kind = vecExtract
+	i.rd = rd
+	i.rs1 = vs2
+	i.u1 = b2u64(signed) | uint64(lane)<<8
+	i.u2 = uint64(sew)
+	return i
+}
+
+func (i *instruction) asVecInsert(rd regalloc.VReg, vs2, scalar operand, index, sew uint32) *instruction {
+	i.kind = vecInsert
+	i.rd = rd
+	i.rs1 = vs2
+	i.rs2 = scalar
+	i.u1 = uint64(index)
+	i.u2 = uint64(sew)
+	return i
+}
+
+func (i *instruction) asVecNarrow(funct6 uint32, rd regalloc.VReg, vs2 operand, dstSew uint32) *instruction {
+	i.kind = vecNarrow
+	i.rd = rd
+	i.rs1 = vs2
+	i.u1 = uint64(funct6)
+	i.u2 = uint64(dstSew)
+	return i
+}
+
+func (i *instruction) asVecConst(rd regalloc.VReg, lo, hi operand) *instruction {
+	i.kind = vecConst
+	i.rd = rd
+	i.rs1 = lo
+	i.rs2 = hi
 	return i
 }
 

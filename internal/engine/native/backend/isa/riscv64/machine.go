@@ -352,6 +352,8 @@ func (m *machine) InsertMove(dst, src regalloc.VReg, typ ssa.Type) {
 		instr.asMove64(dst, src)
 	case ssa.TypeF32, ssa.TypeF64:
 		instr.asFpuMov(dst, src)
+	case ssa.TypeV128:
+		instr.asVecMov(dst, src)
 	default:
 		panic("BUG: unsupported move type on riscv64: " + typ.String())
 	}

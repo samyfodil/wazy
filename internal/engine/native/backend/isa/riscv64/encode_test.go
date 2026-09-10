@@ -251,6 +251,12 @@ func TestEncodings_againstClang(t *testing.T) {
 		// --- RVV rounding needs the fcsr, since vfcvt has no static mode ---
 		{"fsrmi a0, 3", encodeFsrmi(10, 3)},
 		{"fsrm a0, a1", encodeFsrm(10, 11)},
+		{"vid.v v1", encodeVid(1)},
+		{"vfmv.f.s fa0, v1", encodeVfmvFS(10, 1)},
+		{"vfcvt.x.f.v v1, v2", encodeVecUnary(vfunctFunary0, 1, 2, vsubCvtXF, opfvv)},
+		{"vsrl.vi v1, v2, 8", encodeVecVIu(vfunctSrl, 1, 2, 8)},
+		{"vsra.vi v1, v2, 8", encodeVecVIu(vfunctSra, 1, 2, 8)},
+		{"vsll.vi v1, v2, 8", encodeVecVIu(vfunctSll, 1, 2, 8)},
 	}
 
 	var srcs []string

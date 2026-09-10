@@ -15,34 +15,44 @@ func NewRegSet(regs ...RealReg) RegSet {
 	return ret
 }
 
+// maxRealRegs is the number of physical registers a backend may declare.
+//
+// It was 64, which suited amd64 (32) and arm64 (63) but not riscv64: 32
+// integer, 32 float and 32 vector registers come to 96. The old limit did not
+// merely truncate, it discarded silently -- add() returned the set unchanged
+// for anything at or above 64 while the parallel lookup array indexed straight
+// into a panic -- so a backend that crossed it got a register that was never
+// recorded as in use and an out-of-range read some time later.
+const maxRealRegs = 128
+
 // RegSet represents a set of registers.
-type RegSet uint64
+type RegSet [maxRealRegs / 64]uint64
 
 func (rs RegSet) format(info *RegisterInfo) string { //nolint:unused
 	var ret []string
-	for i := 0; i < 64; i++ {
-		if rs&(1<<uint(i)) != 0 {
-			ret = append(ret, info.RealRegName(RealReg(i)))
-		}
-	}
+	rs.Range(func(r RealReg) { ret = append(ret, info.RealRegName(r)) })
 	return strings.Join(ret, ", ")
 }
 
 func (rs RegSet) has(r RealReg) bool {
-	return rs&(1<<uint(r)) != 0
+	if r >= maxRealRegs {
+		return false
+	}
+	return rs[r/64]&(1<<uint(r%64)) != 0
 }
 
 func (rs RegSet) add(r RealReg) RegSet {
-	if r >= 64 {
-		return rs
+	if r >= maxRealRegs {
+		panic("BUG: RealReg out of range; raise maxRealRegs")
 	}
-	return rs | 1<<uint(r)
+	rs[r/64] |= 1 << uint(r%64)
+	return rs
 }
 
 func (rs RegSet) Range(f func(allocatedRealReg RealReg)) {
-	for i := 0; i < 64; i++ {
-		if rs&(1<<uint(i)) != 0 {
-			f(RealReg(i))
+	for w, m := range rs {
+		for ; m != 0; m &= m - 1 {
+			f(RealReg(w*64 + bits.TrailingZeros64(m)))
 		}
 	}
 }
@@ -52,8 +62,8 @@ func (rs RegSet) Range(f func(allocatedRealReg RealReg)) {
 // bits.TrailingZeros64 instead of scanning all 64 slots — range_ runs on the
 // hot per-call-instruction and per-edge paths (C12).
 type regInUseSet[I Instr, B Block[I], F Function[I, B]] struct {
-	arr  [64]*vrState[I, B, F]
-	mask uint64
+	arr  [maxRealRegs]*vrState[I, B, F]
+	mask RegSet
 }
 
 func newRegInUseSet[I Instr, B Block[I], F Function[I, B]]() regInUseSet[I, B, F] {
@@ -65,20 +75,17 @@ func newRegInUseSet[I Instr, B Block[I], F Function[I, B]]() regInUseSet[I, B, F
 func (rs *regInUseSet[I, B, F]) reset() {
 	// Only the slots mask says are live can be non-nil, so clearing them one by one beats
 	// memclr-ing 512 bytes of pointers (and its bulk write barrier) on every block.
-	for m := rs.mask; m != 0; m &= m - 1 {
-		rs.arr[bits.TrailingZeros64(m)] = nil
-	}
-	rs.mask = 0
+	rs.mask.Range(func(r RealReg) { rs.arr[r] = nil })
+	rs.mask = RegSet{}
 }
 
 // clearVRegs empties the set, unassigning the RealReg of every vrState it held.
 func (rs *regInUseSet[I, B, F]) clearVRegs() {
-	for m := rs.mask; m != 0; m &= m - 1 {
-		r := bits.TrailingZeros64(m)
+	rs.mask.Range(func(r RealReg) {
 		rs.arr[r].r = RealRegInvalid
 		rs.arr[r] = nil
-	}
-	rs.mask = 0
+	})
+	rs.mask = RegSet{}
 }
 
 func (rs *regInUseSet[I, B, F]) format(info *RegisterInfo) string { //nolint:unused
@@ -92,7 +99,7 @@ func (rs *regInUseSet[I, B, F]) format(info *RegisterInfo) string { //nolint:unu
 }
 
 func (rs *regInUseSet[I, B, F]) has(r RealReg) bool {
-	return r < 64 && rs.arr[r] != nil
+	return r < maxRealRegs && rs.arr[r] != nil
 }
 
 func (rs *regInUseSet[I, B, F]) get(r RealReg) *vrState[I, B, F] {
@@ -101,20 +108,20 @@ func (rs *regInUseSet[I, B, F]) get(r RealReg) *vrState[I, B, F] {
 
 func (rs *regInUseSet[I, B, F]) remove(r RealReg) {
 	rs.arr[r] = nil
-	rs.mask &^= 1 << r
+	rs.mask[r/64] &^= 1 << uint(r%64)
 }
 
 func (rs *regInUseSet[I, B, F]) add(r RealReg, vr *vrState[I, B, F]) {
-	if r >= 64 {
-		return
+	if r >= maxRealRegs {
+		panic("BUG: RealReg out of range; raise maxRealRegs")
 	}
 	rs.arr[r] = vr
-	rs.mask |= 1 << r
+	rs.mask[r/64] |= 1 << uint(r%64)
 }
 
 func (rs *regInUseSet[I, B, F]) range_(f func(allocatedRealReg RealReg, vr *vrState[I, B, F])) {
-	for m := rs.mask; m != 0; m &= m - 1 {
-		r := bits.TrailingZeros64(m)
-		f(RealReg(r), rs.arr[r])
-	}
+	rs.mask.Range(func(r RealReg) { f(r, rs.arr[r]) })
 }
+
+// set returns the occupancy as a RegSet.
+func (rs *regInUseSet[I, B, F]) set() RegSet { return rs.mask }

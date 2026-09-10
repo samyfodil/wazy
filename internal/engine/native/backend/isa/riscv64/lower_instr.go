@@ -245,6 +245,86 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		m.lowerVecRRR(vfunctFdiv, opfvv, instr)
 	case ssa.OpcodeVSqrt:
 		m.lowerVecRR(vfunctFunary1, vsubFsqrt, opfvv, instr)
+	case ssa.OpcodeVFneg:
+		m.lowerVFneg(instr)
+	case ssa.OpcodeVFabs:
+		m.lowerVFabs(instr)
+	case ssa.OpcodeVIabs:
+		m.lowerVIabs(instr)
+	case ssa.OpcodeVbandnot:
+		m.lowerVbandnot(instr)
+	case ssa.OpcodeVbitselect:
+		m.lowerVbitselect(instr)
+	case ssa.OpcodeVanyTrue:
+		m.lowerVanyTrue(instr)
+	case ssa.OpcodeVallTrue:
+		m.lowerVallTrue(instr)
+	case ssa.OpcodeVhighBits:
+		m.lowerVhighBits(instr)
+	case ssa.OpcodeSplat:
+		m.lowerSplat(instr)
+	case ssa.OpcodeVFmin:
+		m.lowerVFminFmax(instr, false)
+	case ssa.OpcodeVFmax:
+		m.lowerVFminFmax(instr, true)
+	case ssa.OpcodeVMinPseudo:
+		m.lowerVMinMaxPseudo(instr, false)
+	case ssa.OpcodeVMaxPseudo:
+		m.lowerVMinMaxPseudo(instr, true)
+	case ssa.OpcodeVFcvtFromSint:
+		m.lowerVFcvtFromInt(instr, true)
+	case ssa.OpcodeVFcvtFromUint:
+		m.lowerVFcvtFromInt(instr, false)
+	case ssa.OpcodeVFcvtToSintSat:
+		m.lowerVFcvtToIntSat(instr, true)
+	case ssa.OpcodeVFcvtToUintSat:
+		m.lowerVFcvtToIntSat(instr, false)
+	case ssa.OpcodeFvdemote:
+		m.lowerFvdemote(instr)
+	case ssa.OpcodeFvpromoteLow:
+		m.lowerFvpromoteLow(instr)
+	case ssa.OpcodeSwidenLow:
+		m.lowerVwiden(instr, true, false)
+	case ssa.OpcodeSwidenHigh:
+		m.lowerVwiden(instr, true, true)
+	case ssa.OpcodeUwidenLow:
+		m.lowerVwiden(instr, false, false)
+	case ssa.OpcodeUwidenHigh:
+		m.lowerVwiden(instr, false, true)
+	case ssa.OpcodeSwizzle:
+		m.lowerSwizzle(instr)
+	case ssa.OpcodeSqmulRoundSat:
+		m.lowerSqmulRoundSat(instr)
+	case ssa.OpcodeExtractlane:
+		m.lowerExtractlane(instr)
+	case ssa.OpcodeInsertlane:
+		m.lowerInsertlane(instr)
+	case ssa.OpcodeSnarrow:
+		m.lowerNarrow(instr, true)
+	case ssa.OpcodeUnarrow:
+		m.lowerNarrow(instr, false)
+	case ssa.OpcodeVconst:
+		m.lowerVconst(instr)
+	case ssa.OpcodeVCeil:
+		m.lowerVecRound(instr, roundModeCeil)
+	case ssa.OpcodeVFloor:
+		m.lowerVecRound(instr, roundModeFloor)
+	case ssa.OpcodeVTrunc:
+		m.lowerVecRound(instr, roundModeTrunc)
+	case ssa.OpcodeVNearest:
+		m.lowerVecRound(instr, roundModeNearest)
+	case ssa.OpcodeVIpopcnt:
+		m.lowerVIpopcnt(instr)
+	case ssa.OpcodeExtIaddPairwise:
+		m.lowerExtIaddPairwise(instr)
+	case ssa.OpcodeWideningPairwiseDotProductS:
+		m.lowerWideningPairwiseDotProduct(instr)
+	case ssa.OpcodeVZeroExtLoad:
+		m.lowerVZeroExtLoad(instr)
+	case ssa.OpcodeLoadSplat:
+		m.lowerLoadSplat(instr)
+	case ssa.OpcodeShuffle:
+		m.lowerShuffle(instr)
 
 	default:
 		panic("BUG: unimplemented lowering for opcode " + op.String() +

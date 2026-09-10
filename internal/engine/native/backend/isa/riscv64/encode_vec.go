@@ -166,7 +166,28 @@ const (
 	vfunctWmul      = 0b111011
 	vfunctRedsum    = 0b000000
 	vfunctCompress  = 0b010111
+	// VMUNARY0, which is where vid.v lives -- a different funct6 from
+	// VXUNARY0 (the extensions), despite both being "unary with the variant
+	// in vs1".
+	vfunctMunary0 = 0b010100
 )
+
+// vs1 sub-opcodes for VMUNARY0 and the dynamic-rounding conversion.
+const (
+	vsubVid   = 0b10001
+	vsubCvtXF = 0b00001 // vfcvt.x.f.v: rounds per frm
+	vsubFmvFS = 0b00000
+)
+
+// encodeVid encodes `vid.v vd`: write each lane its own index.
+func encodeVid(vd uint32) uint32 {
+	return encodeVec(vfunctMunary0, 1, 0, vsubVid, opmvv, vd)
+}
+
+// encodeVfmvFS encodes `vfmv.f.s rd, vs2`: lane 0 into a float register.
+func encodeVfmvFS(rd, vs2 uint32) uint32 {
+	return encodeVec(vfunctWrxunary, 1, vs2, vsubFmvFS, opfvv, rd)
+}
 
 // vs1 sub-opcodes for the wider extension and conversion variants.
 const (

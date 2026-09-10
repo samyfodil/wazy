@@ -134,6 +134,15 @@ func (m *machine) LowerParams(args []ssa.Value) {
 			load.asLoad(reg, amode, 64, false)
 		case ssa.TypeF32, ssa.TypeF64:
 			load.asFpuLoad(reg, amode, arg.Type.Bits())
+		case ssa.TypeV128:
+			// A v128 always arrives on the stack (setABIArgs puts it there
+			// for a vector-file ISA), and RVV's load takes a bare base
+			// register, so the address is materialized first.
+			m.insert(m.allocateInstr().asALU(aluOpAdd, tmpRegVReg, operandNR(spVReg), operandImm(0), true))
+			load.asVecLoad(reg, tmpRegVReg)
+			m.insert(load)
+			m.unresolvedAddressModes = append(m.unresolvedAddressModes, load)
+			continue
 		default:
 			panic("BUG: unsupported param type on riscv64: " + arg.Type.String())
 		}
