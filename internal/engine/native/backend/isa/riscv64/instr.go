@@ -820,12 +820,34 @@ func (i *instruction) asFpuCmp(op fpuCmpOp, rd regalloc.VReg, rs1, rs2 operand, 
 	return i
 }
 
-// asFcvtToInt is the fcvt.{w,wu,l,lu}.{s,d} family. u1 packs the three flags.
+// asFcvtToInt is the fcvt.{w,wu,l,lu}.{s,d} family. u1 packs the three flags
+// and u2 the rounding mode, which defaults to round-toward-zero because that
+// is what wasm's truncating conversions want.
 func (i *instruction) asFcvtToInt(rd regalloc.VReg, rs1 operand, dst64, src64, signed bool) *instruction {
 	i.kind = fcvtToInt
 	i.rd = rd
 	i.rs1 = rs1
 	i.u1 = b2u64(dst64) | b2u64(src64)<<1 | b2u64(signed)<<2
+	i.u2 = rmRTZ
+	return i
+}
+
+// asFcvtToIntRounded is asFcvtToInt under an explicit rounding mode, used by
+// the ceil/floor/trunc/nearest lowering.
+func (i *instruction) asFcvtToIntRounded(rd regalloc.VReg, rs1 operand, dst64, src64, signed bool, mode roundMode) *instruction {
+	i.asFcvtToInt(rd, rs1, dst64, src64, signed)
+	switch mode {
+	case roundModeNearest:
+		i.u2 = rmRNE
+	case roundModeTrunc:
+		i.u2 = rmRTZ
+	case roundModeFloor:
+		i.u2 = rmRDN
+	case roundModeCeil:
+		i.u2 = rmRUP
+	default:
+		panic(fmt.Sprintf("BUG: unknown round mode %d", mode))
+	}
 	return i
 }
 

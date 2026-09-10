@@ -624,6 +624,27 @@ func encodeFpuCmp(o fpuCmpOp, rd, rs1, rs2 uint32, _64bit bool) uint32 {
 	return encodeR(0b1010000|fmtBit(_64bit), rs2, rs1, funct3, rd, opOpFP)
 }
 
+// Rounding-mode field values for the FP instructions that take one.
+const (
+	rmRDN = 0b010 // toward -inf, i.e. floor
+	rmRUP = 0b011 // toward +inf, i.e. ceil
+)
+
+// encodeFcvtToIntRM is encodeFcvtToInt with an explicit rounding mode, which
+// is what implements ceil/floor/trunc/nearest: RV64D has no rounding
+// instruction of its own (that is Zfa's fround), so each is a convert to
+// integer under the matching mode and a convert back.
+func encodeFcvtToIntRM(rd, rs1 uint32, dst64, src64, signed bool, rm uint32) uint32 {
+	rs2 := uint32(0)
+	if dst64 {
+		rs2 = 2
+	}
+	if !signed {
+		rs2 |= 1
+	}
+	return encodeR(0b1100000|fmtBit(src64), rs2, rs1, rm, rd, opOpFP)
+}
+
 // encodeFcvtToInt encodes `fcvt.{w,wu,l,lu}.{s,d} rd, rs1, rtz`. Always
 // round-towards-zero: wasm's i32.trunc_f32_s and friends truncate.
 func encodeFcvtToInt(rd, rs1 uint32, dst64, src64, signed bool) uint32 {

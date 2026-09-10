@@ -156,8 +156,8 @@ func (i *instruction) encode(m *machine) {
 			regNumberInEncoding[i.rs1.realReg()], regNumberInEncoding[i.rs2.realReg()], i.u2 == 1))
 	case fcvtToInt:
 		dst64, src64, signed := i.u1&1 == 1, i.u1>>1&1 == 1, i.u1>>2&1 == 1
-		c.Emit4Bytes(encodeFcvtToInt(regNumberInEncoding[i.rd.RealReg()],
-			regNumberInEncoding[i.rs1.realReg()], dst64, src64, signed))
+		c.Emit4Bytes(encodeFcvtToIntRM(regNumberInEncoding[i.rd.RealReg()],
+			regNumberInEncoding[i.rs1.realReg()], dst64, src64, signed, uint32(i.u2)))
 	case fcvtFromInt:
 		dst64, src64, signed := i.u1&1 == 1, i.u1>>1&1 == 1, i.u1>>2&1 == 1
 		c.Emit4Bytes(encodeFcvtFromInt(regNumberInEncoding[i.rd.RealReg()],
