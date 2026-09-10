@@ -42,6 +42,7 @@ var (
 	// Caller-saved staging registers for stack-passed arguments and results.
 	entryIntScratch   = x6VReg // t1
 	entryFloatScratch = f0VReg // ft0
+	entryVecScratch   = v1VReg // the first allocatable vector register
 )
 
 func (m *machine) constructEntryPreamble(sig *ssa.Signature) (root *instruction) {
@@ -113,11 +114,14 @@ func (m *machine) goEntryPreamblePassArg(cur *instruction, paramSlicePtr regallo
 	isStackArg := arg.Kind == backend.ABIArgKindStack
 
 	var dst regalloc.VReg
-	if !isStackArg {
+	switch {
+	case !isStackArg:
 		dst = arg.Reg
-	} else if typ.IsInt() {
+	case typ == ssa.TypeV128:
+		dst = entryVecScratch
+	case typ.IsInt():
 		dst = entryIntScratch
-	} else {
+	default:
 		dst = entryFloatScratch
 	}
 
@@ -138,6 +142,9 @@ func (m *machine) goEntryPreamblePassArg(cur *instruction, paramSlicePtr regallo
 		load.asFpuLoad(dst, amode, 32)
 	case ssa.TypeF64:
 		load.asFpuLoad(dst, amode, 64)
+	case ssa.TypeV128:
+		// Two []uint64 slots, read as one 16-byte vector load.
+		load.asVecLoad(dst, amode)
 	default:
 		panic("BUG: unsupported argument type in the entry preamble: " + typ.String())
 	}
@@ -159,7 +166,11 @@ func (m *machine) goEntryPreamblePassArg(cur *instruction, paramSlicePtr regallo
 	var st *addressMode
 	cur, st = m.resolveAddressModeForOffsetAndInsert(cur, argStartOffsetFromSP+arg.Offset, spVReg, true)
 	store := m.allocateInstr()
-	store.asStore(dst, st, typ.Bits(), typ.IsInt())
+	if typ == ssa.TypeV128 {
+		store.asVecStore(dst, st)
+	} else {
+		store.asStore(dst, st, typ.Bits(), typ.IsInt())
+	}
 	return linkInstr(cur, store)
 }
 
@@ -173,17 +184,23 @@ func (m *machine) goEntryPreamblePassResult(cur *instruction, resultSlicePtr reg
 	if !isStackArg {
 		src = result.Reg
 	} else {
-		if typ.IsInt() {
+		switch {
+		case typ == ssa.TypeV128:
+			src = entryVecScratch
+		case typ.IsInt():
 			src = entryIntScratch
-		} else {
+		default:
 			src = entryFloatScratch
 		}
 		var ld *addressMode
 		cur, ld = m.resolveAddressModeForOffsetAndInsert(cur, resultStartOffsetFromSP+result.Offset, spVReg, true)
 		load := m.allocateInstr()
-		if typ.IsInt() {
+		switch {
+		case typ == ssa.TypeV128:
+			load.asVecLoad(src, ld)
+		case typ.IsInt():
 			load.asLoad(src, ld, typ.Bits(), typ == ssa.TypeI32)
-		} else {
+		default:
 			load.asFpuLoad(src, ld, typ.Bits())
 		}
 		cur = linkInstr(cur, load)
@@ -192,7 +209,12 @@ func (m *machine) goEntryPreamblePassResult(cur *instruction, resultSlicePtr reg
 	amode := m.amodePool.Allocate()
 	*amode = addressMode{kind: addressModeKindRegSignedImm12, rn: resultSlicePtr, imm: 0}
 	store := m.allocateInstr()
-	store.asStore(src, amode, 64, typ.IsInt())
+	if typ == ssa.TypeV128 {
+		// Two []uint64 slots, written as one 16-byte vector store.
+		store.asVecStore(src, amode)
+	} else {
+		store.asStore(src, amode, 64, typ.IsInt())
+	}
 	cur = linkInstr(cur, store)
 
 	step := int64(8)

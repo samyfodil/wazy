@@ -310,12 +310,12 @@ func (m *machine) lowerFvdemote(instr *ssa.Instruction) {
 	vs2, rd, _ := m.vecUn(instr)
 	// The source is f64x2 and the result f32x4, so the conversion runs at the
 	// *narrow* width, which is what the .w suffix denotes.
-	m.insert(m.allocateInstr().asVecRR(vfunctFunary0, vsubFncvtFF, opfvv, rd, vs2, vsew32))
+	m.insert(m.allocateInstr().asVecWiden(vfunctFunary0, vsubFncvtFF, opfvv, rd, vs2, vsew32))
 }
 
 func (m *machine) lowerFvpromoteLow(instr *ssa.Instruction) {
 	vs2, rd, _ := m.vecUn(instr)
-	m.insert(m.allocateInstr().asVecRR(vfunctFunary0, vsubFwcvtFF, opfvv, rd, vs2, vsew32))
+	m.insert(m.allocateInstr().asVecWiden(vfunctFunary0, vsubFwcvtFF, opfvv, rd, vs2, vsew32))
 }
 
 // lowerVwiden widens the low or high half of a vector, signed or not.
@@ -340,7 +340,7 @@ func (m *machine) lowerVwiden(instr *ssa.Instruction, signed, high bool) {
 	}
 	// The extension is expressed at the *destination* width, which is one
 	// step wider: the sew constants are an index, so that is simply +1.
-	m.insert(m.allocateInstr().asVecRR(vfunctXunary, variant, opmvv, rd, vs2, srcSew+1))
+	m.insert(m.allocateInstr().asVecExtend(vfunctXunary, variant, opmvv, rd, vs2, srcSew+1))
 }
 
 // lowerSwizzle permutes bytes by a runtime index vector.
@@ -353,7 +353,7 @@ func (m *machine) lowerSwizzle(instr *ssa.Instruction) {
 	rd := m.compiler.VRegOf(instr.Return())
 	vx := m.getOperand_NR(m.compiler.ValueDefinition(x))
 	vy := m.getOperand_NR(m.compiler.ValueDefinition(y))
-	m.insert(m.allocateInstr().asVecRRR(vfunctRgather, opivv, rd, vx, vy, vsew8))
+	m.insert(m.allocateInstr().asVecRRR(vfunctRgather, opivv, rd, vx, vy, vsew8).asVecNoOverlap())
 }
 
 // lowerSqmulRoundSat is the saturating rounding doubling multiply, which RVV
@@ -693,8 +693,8 @@ func (m *machine) lowerShuffle(instr *ssa.Instruction) {
 
 	a := m.compiler.AllocateVReg(ssa.TypeV128)
 	b := m.compiler.AllocateVReg(ssa.TypeV128)
-	m.insert(m.allocateInstr().asVecRRR(vfunctRgather, opivv, a, vx, operandNR(idxLo), vsew8))
-	m.insert(m.allocateInstr().asVecRRR(vfunctRgather, opivv, b, vy, operandNR(idxHi), vsew8))
+	m.insert(m.allocateInstr().asVecRRR(vfunctRgather, opivv, a, vx, operandNR(idxLo), vsew8).asVecNoOverlap())
+	m.insert(m.allocateInstr().asVecRRR(vfunctRgather, opivv, b, vy, operandNR(idxHi), vsew8).asVecNoOverlap())
 	m.insert(m.allocateInstr().asVecRRR(vfunctOr, opivv, rd, operandNR(a), operandNR(b), vsew8))
 }
 

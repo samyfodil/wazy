@@ -51,6 +51,8 @@ func (m *machine) lowerLoad(ptr ssa.Value, offset uint32, typ ssa.Type, ret ssa.
 		// flw, not fld, for an f32: the single-precision form is what produces
 		// the NaN boxing RV64D requires of a value in an f-register.
 		load.asFpuLoad(dst, amode, typ.Bits())
+	case ssa.TypeV128:
+		load.asVecLoad(dst, amode)
 	default:
 		panic("BUG: unsupported load type on riscv64: " + typ.String())
 	}
@@ -72,6 +74,10 @@ func (m *machine) lowerStore(si *ssa.Instruction) {
 	amode := m.lowerToAddressMode(ptr, offset)
 	src := m.getOperand_NR(m.compiler.ValueDefinition(value))
 	store := m.allocateInstr()
-	store.asStore(src.nr(), amode, storeSizeInBits, value.Type().IsInt())
+	if value.Type() == ssa.TypeV128 {
+		store.asVecStore(src.nr(), amode)
+	} else {
+		store.asStore(src.nr(), amode, storeSizeInBits, value.Type().IsInt())
+	}
 	m.insert(store)
 }

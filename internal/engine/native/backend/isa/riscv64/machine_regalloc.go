@@ -300,8 +300,9 @@ func (m *machine) insertStoreRegisterAt(v regalloc.VReg, instr *instruction, aft
 	offsetFromSP := m.getVRegSpillSlotOffsetFromSP(v.ID(), size)
 
 	if v.RegType() == regalloc.RegTypeVec {
-		cur = m.emitVecSpillAddress(cur, offsetFromSP)
-		cur = linkInstr(cur, m.allocateInstr().asVecStore(v, tmpRegVReg))
+		var amode *addressMode
+		cur, amode = m.resolveAddressModeForOffsetAndInsert(cur, offsetFromSP, spVReg, true)
+		cur = linkInstr(cur, m.allocateInstr().asVecStore(v, amode))
 		return linkInstr(cur, prevNext)
 	}
 
@@ -333,8 +334,9 @@ func (m *machine) insertReloadRegisterAt(v regalloc.VReg, instr *instruction, af
 	offsetFromSP := m.getVRegSpillSlotOffsetFromSP(v.ID(), size)
 
 	if v.RegType() == regalloc.RegTypeVec {
-		cur = m.emitVecSpillAddress(cur, offsetFromSP)
-		cur = linkInstr(cur, m.allocateInstr().asVecLoad(v, tmpRegVReg))
+		var amode *addressMode
+		cur, amode = m.resolveAddressModeForOffsetAndInsert(cur, offsetFromSP, spVReg, true)
+		cur = linkInstr(cur, m.allocateInstr().asVecLoad(v, amode))
 		return linkInstr(cur, prevNext)
 	}
 
@@ -348,25 +350,6 @@ func (m *machine) insertReloadRegisterAt(v regalloc.VReg, instr *instruction, af
 	}
 	cur = linkInstr(cur, load)
 	return linkInstr(cur, prevNext)
-}
-
-// emitVecSpillAddress materializes sp+offset into tmpReg, because RVV's
-// load/store instructions take a bare base register with no displacement.
-func (m *machine) emitVecSpillAddress(cur *instruction, offset int64) *instruction {
-	if fitsInSignedImm12(offset) {
-		add := m.allocateInstr()
-		add.asALU(aluOpAdd, tmpRegVReg, operandNR(spVReg), operandImm(offset), true)
-		return linkInstr(cur, add)
-	}
-	m.pendingInstructions = m.pendingInstructions[:0]
-	m.lowerConstantI64(tmpRegVReg, offset)
-	for _, i := range m.pendingInstructions {
-		cur = linkInstr(cur, i)
-	}
-	m.pendingInstructions = m.pendingInstructions[:0]
-	add := m.allocateInstr()
-	add.asALU(aluOpAdd, tmpRegVReg, operandNR(tmpRegVReg), operandNR(spVReg), true)
-	return linkInstr(cur, add)
 }
 
 // getVRegSpillSlotOffsetFromSP returns the SP-relative offset of v's spill

@@ -88,8 +88,9 @@ func (m *machine) setupPrologue() {
 // storeRegToSPOffset emits `sd r, off(sp)` (or the FP/vector equivalent).
 func (m *machine) storeRegToSPOffset(cur *instruction, r regalloc.VReg, off int64) *instruction {
 	if r.RegType() == regalloc.RegTypeVec {
-		cur = m.emitVecSpillAddress(cur, off)
-		return linkInstr(cur, m.allocateInstr().asVecStore(r, tmpRegVReg))
+		var vm *addressMode
+		cur, vm = m.resolveAddressModeForOffsetAndInsert(cur, off, spVReg, true)
+		return linkInstr(cur, m.allocateInstr().asVecStore(r, vm))
 	}
 	var amode *addressMode
 	cur, amode = m.resolveAddressModeForOffsetAndInsert(cur, off, spVReg, true)
@@ -101,8 +102,9 @@ func (m *machine) storeRegToSPOffset(cur *instruction, r regalloc.VReg, off int6
 // loadRegFromSPOffset is storeRegToSPOffset's mirror.
 func (m *machine) loadRegFromSPOffset(cur *instruction, r regalloc.VReg, off int64) *instruction {
 	if r.RegType() == regalloc.RegTypeVec {
-		cur = m.emitVecSpillAddress(cur, off)
-		return linkInstr(cur, m.allocateInstr().asVecLoad(r, tmpRegVReg))
+		var vm *addressMode
+		cur, vm = m.resolveAddressModeForOffsetAndInsert(cur, off, spVReg, true)
+		return linkInstr(cur, m.allocateInstr().asVecLoad(r, vm))
 	}
 	var amode *addressMode
 	cur, amode = m.resolveAddressModeForOffsetAndInsert(cur, off, spVReg, true)

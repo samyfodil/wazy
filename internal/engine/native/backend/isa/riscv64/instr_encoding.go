@@ -44,7 +44,7 @@ func intRd(v regalloc.VReg) uint32 {
 // expansions differ.
 func (i *instruction) size() int64 {
 	switch i.kind {
-	case nop0, sourceOffsetInfo, loadConstBlockArg:
+	case nop0, sourceOffsetInfo, loadConstBlockArg, nopDefReg, nopUseReg:
 		return 0
 	case fpuConstPoolData:
 		return int64(i.u2) / 8 // 4 or 8 bytes of raw data.
@@ -70,7 +70,17 @@ func (i *instruction) size() int64 {
 		return 8
 	case brTableSequence:
 		return brTableSequenceOffsetTableBegin + int64(i.u2)*4
-	case vecRRR, vecRR, vecRX, vecSplat:
+	case vecRR:
+		if i.u1&(1<<24|1<<25) != 0 {
+			return 12 // vsetivli + the operation + a copy out of the temp
+		}
+		return 8 // vsetivli + the operation
+	case vecRRR:
+		if i.vecNeedsNoOverlap() {
+			return 12 // vsetivli + the operation + a copy out of the temp
+		}
+		return 8 // vsetivli + the operation
+	case vecRX, vecSplat:
 		return 8 // vsetivli + the operation
 	case vecShiftImm:
 		return 8 // vsetivli + the shift
@@ -90,10 +100,13 @@ func (i *instruction) size() int64 {
 	case vecInsert:
 		return 20 // vsetivli + index splat + compare + scalar splat + merge
 	case vecNarrow:
-		return 8 // vsetivli + vnclip
+		return 12 // vsetivli + vnclip + a copy out of the temp
 	case vecConst:
 		return 20 // vsetivli + two lane writes + a slide + a copy
 	case vecSlide:
+		if i.u1>>8&1 == 1 {
+			return 16 // vsetivli + copy in + slideup + copy out
+		}
 		return 8 // vsetivli + the slide
 	case vecNaNZero:
 		return 12 // vsetivli + vmfeq + vmerge
@@ -104,7 +117,7 @@ func (i *instruction) size() int64 {
 	case vecMov:
 		return 4 // vmv1r.v needs no vtype
 	case vecLoad, vecStore:
-		return 8 // vsetivli + the access
+		return 12 // address materialization + vsetivli + the access
 	case load, store, fpuLoad, fpuStore:
 		if i.bigOffset() {
 			return 12 // lui + add + the access itself.
@@ -137,7 +150,7 @@ func emitAccessBase(c compilerBuf, i *instruction) (base uint32, disp int32) {
 func (i *instruction) encode(m *machine) {
 	c := m.compiler
 	switch i.kind {
-	case nop0, loadConstBlockArg, sourceOffsetInfo:
+	case nop0, loadConstBlockArg, sourceOffsetInfo, nopDefReg, nopUseReg:
 	case aluRRR:
 		op := aluOp(i.u1)
 		_64bit := i.u2 == 1
@@ -242,9 +255,32 @@ func (i *instruction) encode(m *machine) {
 	case vecRRR:
 		funct6, form := uint32(i.u1&0xff), uint32(i.u1>>8&0xff)
 		emitVsetivli(c, uint32(i.u2))
+		if i.vecNeedsNoOverlap() {
+			tmp := regNumberInEncoding[vecTmpReg]
+			c.Emit4Bytes(encodeVecVV(funct6, tmp, vecReg(i.rs1.nr()), vecReg(i.rs2.nr()), form))
+			c.Emit4Bytes(encodeVmv1r(vecReg(i.rd), tmp))
+			return
+		}
 		c.Emit4Bytes(encodeVecVV(funct6, vecReg(i.rd), vecReg(i.rs1.nr()), vecReg(i.rs2.nr()), form))
 	case vecRR:
 		funct6, form, variant := uint32(i.u1&0xff), uint32(i.u1>>8&0xff), uint32(i.u1>>16&0xff)
+		widening, extending := i.u1&(1<<24) != 0, i.u1&(1<<25) != 0
+		if widening || extending {
+			// The result goes to the reserved vector temp and is copied out,
+			// because a widening or narrowing instruction may not write its
+			// own source register -- and vd and vs2 are routinely the same
+			// after allocation.
+			sew := uint32(i.u2)
+			if widening {
+				c.Emit4Bytes(encodeVsetivliLMul(vecAVLFor(sew), sew, vlmulMF2))
+			} else {
+				emitVsetivli(c, sew)
+			}
+			tmp := regNumberInEncoding[vecTmpReg]
+			c.Emit4Bytes(encodeVecUnary(funct6, tmp, vecReg(i.rs1.nr()), variant, form))
+			c.Emit4Bytes(encodeVmv1r(vecReg(i.rd), tmp))
+			return
+		}
 		emitVsetivli(c, uint32(i.u2))
 		c.Emit4Bytes(encodeVecUnary(funct6, vecReg(i.rd), vecReg(i.rs1.nr()), variant, form))
 	case vecRX:
@@ -256,12 +292,18 @@ func (i *instruction) encode(m *machine) {
 		c.Emit4Bytes(encodeVmvVX(vecReg(i.rd), regNumberInEncoding[i.rs1.realReg()]))
 	case vecSlide:
 		offset, up := uint32(i.u1&0xff), i.u1>>8&1 == 1
-		funct6 := uint32(vfunctSlidedown)
-		if up {
-			funct6 = vfunctSlideup
-		}
 		emitVsetivli(c, uint32(i.u2))
-		c.Emit4Bytes(encodeVecVIu(funct6, vecReg(i.rd), vecReg(i.rs1.nr()), offset))
+		if !up {
+			c.Emit4Bytes(encodeVecVIu(vfunctSlidedown, vecReg(i.rd), vecReg(i.rs1.nr()), offset))
+			return
+		}
+		// vslideup reads elements below the ones it writes, so it may not
+		// write its own source; and it leaves the lanes below the offset
+		// alone, so the destination has to start from them.
+		tmp := regNumberInEncoding[vecTmpReg]
+		c.Emit4Bytes(encodeVmv1r(tmp, vecReg(i.rd)))
+		c.Emit4Bytes(encodeVecVIu(vfunctSlideup, tmp, vecReg(i.rs1.nr()), offset))
+		c.Emit4Bytes(encodeVmv1r(vecReg(i.rd), tmp))
 	case vecNaNZero:
 		sew := uint32(i.u2)
 		emitVsetivli(c, sew)
@@ -322,8 +364,15 @@ func (i *instruction) encode(m *machine) {
 		c.Emit4Bytes(encodeVmvVX(tmp, regNumberInEncoding[i.rs2.realReg()]))
 		c.Emit4Bytes(encodeVmerge(vecReg(i.rd), vecReg(i.rs1.nr()), tmp))
 	case vecNarrow:
-		emitVsetivli(c, uint32(i.u2))
-		c.Emit4Bytes(encodeVecVIu(uint32(i.u1), vecReg(i.rd), vecReg(i.rs1.nr()), 0))
+		// Narrowing: the vtype carries the destination width, and the source
+		// is twice that -- so the fractional grouping keeps the source at one
+		// register. The destination goes through the temp for the same
+		// no-overlap rule as the widening operations.
+		sew := uint32(i.u2)
+		tmp := regNumberInEncoding[vecTmpReg]
+		c.Emit4Bytes(encodeVsetivliLMul(vecAVLFor(sew), sew, vlmulMF2))
+		c.Emit4Bytes(encodeVecVIu(uint32(i.u1), tmp, vecReg(i.rs1.nr()), 0))
+		c.Emit4Bytes(encodeVmv1r(vecReg(i.rd), tmp))
 	case vecConst:
 		tmp := regNumberInEncoding[vecTmpReg]
 		emitVsetivli(c, vsew64)
@@ -341,11 +390,13 @@ func (i *instruction) encode(m *machine) {
 	case vecMov:
 		c.Emit4Bytes(encodeVmv1r(vecReg(i.rd), vecReg(i.rs1.nr())))
 	case vecLoad:
+		base := emitVecAddress(c, i)
 		emitVsetivli(c, vsew64)
-		c.Emit4Bytes(encodeVectorLoad(vecReg(i.rd), regNumberInEncoding[i.rs1.realReg()], vsew64))
+		c.Emit4Bytes(encodeVectorLoad(vecReg(i.rd), base, vsew64))
 	case vecStore:
+		base := emitVecAddress(c, i)
 		emitVsetivli(c, vsew64)
-		c.Emit4Bytes(encodeVectorStore(vecReg(i.rd), regNumberInEncoding[i.rs1.realReg()], vsew64))
+		c.Emit4Bytes(encodeVectorStore(vecReg(i.rd), base, vsew64))
 	case brTableSequence:
 		encodeBrTableSequence(c, m, i)
 	default:
@@ -743,4 +794,16 @@ func frmFor(mode roundMode) uint32 {
 	default:
 		return rmRTZ
 	}
+}
+
+// emitVecAddress materializes a vector access's address into the reserved
+// scratch, since RVV load and store take a bare base register.
+func emitVecAddress(c compilerBuf, i *instruction) uint32 {
+	a := i.getAmode()
+	tmp := regNumberInEncoding[tmpReg]
+	if !fitsInSignedImm12(a.imm) {
+		panic(fmt.Sprintf("BUG: vector access displacement %d does not fit imm12", a.imm))
+	}
+	c.Emit4Bytes(encodeAluRRImm(aluOpAdd, tmp, regNumberInEncoding[a.rn.RealReg()], int32(a.imm), true))
+	return tmp
 }

@@ -742,8 +742,27 @@ func vecAVLFor(sew uint32) uint32 {
 // LMUL=1, and tail/mask-agnostic set so the tail beyond 16 bytes is explicitly
 // don't-care rather than something we would have to preserve.
 func encodeVsetivli(avl, sew uint32) uint32 {
+	return encodeVsetivliLMul(avl, sew, vlmulM1)
+}
+
+// vlmul field values. Only these two are needed: whole registers for the
+// ordinary operations, and half a register for the widening and narrowing
+// ones.
+const (
+	vlmulM1  = 0b000
+	vlmulMF2 = 0b111
+)
+
+// encodeVsetivliLMul is encodeVsetivli with an explicit register grouping.
+//
+// The fractional grouping is what makes RVV's widening and narrowing
+// instructions usable one register at a time. Both address a register *group*
+// twice as wide on one side, so a widening convert at LMUL=1 writes two
+// registers -- which does not fit a model where a v128 is exactly one. Setting
+// LMUL=1/2 on the narrow side puts the wide side at one register.
+func encodeVsetivliLMul(avl, sew, vlmul uint32) uint32 {
 	const vtypeTaMa = 1<<7 | 1<<6 // vma, vta
-	zimm := vtypeTaMa | sew<<3    // vlmul = 0 (m1)
+	zimm := vtypeTaMa | sew<<3 | vlmul
 	return 0b11<<30 | zimm<<20 | avl<<15 | 0b111<<12 | 0<<7 | opVec
 }
 

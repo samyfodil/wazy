@@ -135,14 +135,9 @@ func (m *machine) LowerParams(args []ssa.Value) {
 		case ssa.TypeF32, ssa.TypeF64:
 			load.asFpuLoad(reg, amode, arg.Type.Bits())
 		case ssa.TypeV128:
-			// A v128 always arrives on the stack (setABIArgs puts it there
-			// for a vector-file ISA), and RVV's load takes a bare base
-			// register, so the address is materialized first.
-			m.insert(m.allocateInstr().asALU(aluOpAdd, tmpRegVReg, operandNR(spVReg), operandImm(0), true))
-			load.asVecLoad(reg, tmpRegVReg)
-			m.insert(load)
-			m.unresolvedAddressModes = append(m.unresolvedAddressModes, load)
-			continue
+			// A v128 always arrives on the stack: setABIArgs puts it there
+			// for an ISA with a separate vector file.
+			load.asVecLoad(reg, amode)
 		default:
 			panic("BUG: unsupported param type on riscv64: " + arg.Type.String())
 		}
@@ -175,7 +170,11 @@ func (m *machine) LowerReturns(rets []ssa.Value) {
 		amode := m.amodePool.Allocate()
 		*amode = addressMode{kind: addressModeKindResultStackSpace, rn: spVReg, imm: r.Offset}
 		store := m.allocateInstr()
-		store.asStore(reg, amode, r.Type.Bits(), r.Type.IsInt())
+		if r.Type == ssa.TypeV128 {
+			store.asVecStore(reg, amode)
+		} else {
+			store.asStore(reg, amode, r.Type.Bits(), r.Type.IsInt())
+		}
 		m.insert(store)
 		m.unresolvedAddressModes = append(m.unresolvedAddressModes, store)
 	}
@@ -196,7 +195,11 @@ func (m *machine) callerGenVRegToFunctionArg(a *backend.FunctionABI, argIndex in
 	// SP is already adjusted at this point.
 	amode := m.resolveAddressModeForOffset(arg.Offset-slotBegin, spVReg, false)
 	store := m.allocateInstr()
-	store.asStore(reg, amode, arg.Type.Bits(), arg.Type.IsInt())
+	if arg.Type == ssa.TypeV128 {
+		store.asVecStore(reg, amode)
+	} else {
+		store.asStore(reg, amode, arg.Type.Bits(), arg.Type.IsInt())
+	}
 	m.insert(store)
 }
 
@@ -215,6 +218,8 @@ func (m *machine) callerGenFunctionReturnVReg(a *backend.FunctionABI, retIndex i
 		ldr.asLoad(reg, amode, 64, false)
 	case ssa.TypeF32, ssa.TypeF64:
 		ldr.asFpuLoad(reg, amode, r.Type.Bits())
+	case ssa.TypeV128:
+		ldr.asVecLoad(reg, amode)
 	default:
 		panic("BUG: unsupported return type on riscv64: " + r.Type.String())
 	}
@@ -266,9 +271,42 @@ func (m *machine) resolveAddressModeForOffset(offset int64, rn regalloc.VReg, al
 	return amode
 }
 
+// goRuntimeClobbered is every register this backend treats as callee-saved
+// that Go's riscv64 ABI treats as scratch.
+//
+// Go's internal ABI names only X0, X2, X3, X4 and X27 as having a fixed
+// meaning across a call; X8, X9 and X18-X23 are argument and result registers
+// there, and everything else is scratch. This backend, following the platform
+// ABI instead, keeps s0-s11 and fs0-fs11 across calls -- so a call into the Go
+// runtime can destroy any of them.
+//
+// This is not theoretical. Go's memmove for riscv64 clobbers X9 and X18-X21
+// today, and memclr clobbers X9. The list below is deliberately the whole set
+// the ABI permits rather than the ones the current implementation happens to
+// use, because the contract is what a future Go release will keep to.
+var goRuntimeClobbered = []regalloc.VReg{
+	x8VReg, x9VReg, x18VReg, x19VReg, x20VReg, x21VReg, x22VReg, x23VReg,
+	x24VReg, x25VReg, x26VReg,
+	f8VReg, f9VReg, f18VReg, f19VReg, f20VReg, f21VReg, f22VReg, f23VReg,
+	f24VReg, f25VReg, f26VReg, f27VReg,
+}
+
 func (m *machine) lowerCall(si *ssa.Instruction) {
 	isDirectCall := si.Opcode() == ssa.OpcodeCall
 	indirectCalleePtr, directCallee, calleeABI, stackSlotSize := m.prepareCall(si, isDirectCall)
+
+	// A call into the Go runtime is bracketed so the allocator knows nothing
+	// survives it in those registers: a definition before, so it holds nothing
+	// live across the call, and a use after, so it is not treated as dead.
+	isGoRuntime := false
+	if !isDirectCall {
+		_, _, _, isGoRuntime = si.CallIndirectData()
+	}
+	if isGoRuntime {
+		for _, r := range goRuntimeClobbered {
+			m.insert(m.allocateInstr().asNopDefReg(r))
+		}
+	}
 
 	if isDirectCall {
 		call := m.allocateInstr()
@@ -279,6 +317,12 @@ func (m *machine) lowerCall(si *ssa.Instruction) {
 		callInd := m.allocateInstr()
 		callInd.asCallIndirect(ptr, calleeABI)
 		m.insert(callInd)
+	}
+
+	if isGoRuntime {
+		for _, r := range goRuntimeClobbered {
+			m.insert(m.allocateInstr().asNopUseReg(r))
+		}
 	}
 
 	m.insertReturns(si, calleeABI, stackSlotSize)

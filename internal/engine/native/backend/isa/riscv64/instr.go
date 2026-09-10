@@ -81,6 +81,12 @@ const (
 	instrInvalid instructionKind = iota
 	// nop0 is a zero-width meta instruction used to anchor a label.
 	nop0
+	// nopDefReg and nopUseReg are zero-width meta instructions that define or
+	// use one register and emit nothing. They bracket a call into the Go
+	// runtime, telling the allocator that the callee may destroy registers
+	// this backend otherwise treats as callee-saved.
+	nopDefReg
+	nopUseReg
 	// sourceOffsetInfo is a zero-width marker recording a wasm source offset.
 	sourceOffsetInfo
 	// loadConstBlockArg is a placeholder for a block-argument constant, expanded
@@ -341,6 +347,8 @@ const (
 
 var defKinds = [numInstructionKinds]defKind{
 	nop0:              defKindNone,
+	nopDefReg:         defKindRD,
+	nopUseReg:         defKindNone,
 	sourceOffsetInfo:  defKindNone,
 	loadConstBlockArg: defKindRD,
 	aluRRR:            defKindRD,
@@ -452,6 +460,8 @@ const (
 
 var useKinds = [numInstructionKinds]useKind{
 	nop0:              useKindNone,
+	nopDefReg:         useKindNone,
+	nopUseReg:         useKindRS1,
 	sourceOffsetInfo:  useKindNone,
 	loadConstBlockArg: useKindNone,
 	aluRRR:            useKindRS1RS2,
@@ -512,9 +522,9 @@ var useKinds = [numInstructionKinds]useKind{
 	vecMaskPop:     useKindRS1,
 	vecMov:         useKindRS1,
 	vecLoad:        useKindRS1,
-	// A vector store reads the value in rd and the address in rs1, the same
-	// shape as the scalar store.
-	vecStore: useKindRDRS1,
+	// A vector store reads the value in rd and the address base in the mode,
+	// the same shape as the scalar store.
+	vecStore: useKindRDRS1Amode,
 }
 
 // Uses implements regalloc.Instr.
@@ -648,6 +658,18 @@ func (i *instruction) AssignUse(index int, reg regalloc.VReg) {
 // than the zero value: label 0 is a perfectly good label (SSA block 0, the
 // entry block), so a zero u1 would make every block-boundary nop claim to
 // anchor L0 and clobber the entry block's resolved offset during layout.
+func (i *instruction) asNopDefReg(r regalloc.VReg) *instruction {
+	i.kind = nopDefReg
+	i.rd = r
+	return i
+}
+
+func (i *instruction) asNopUseReg(r regalloc.VReg) *instruction {
+	i.kind = nopUseReg
+	i.rs1 = operandNR(r)
+	return i
+}
+
 func (i *instruction) asNop0() *instruction {
 	i.kind = nop0
 	i.u1 = uint64(labelInvalid)
@@ -1014,6 +1036,42 @@ func (i *instruction) asVecRR(funct6, variant, form uint32, rd regalloc.VReg, vs
 	return i
 }
 
+// asVecNoOverlap marks a vector-vector operation whose destination may not be
+// one of its sources.
+//
+// RVV imposes this on a specific family -- gathers, slide-ups, compresses, and
+// anything widening or narrowing -- because those read source elements at
+// indices other than the one they are writing, so an in-place destination
+// would feed already-overwritten data back in. The assembler enforces it; a
+// register allocator that happens to pick vd == vs2 does not, and the result
+// is an illegal instruction at run time rather than anything diagnosable.
+func (i *instruction) asVecNoOverlap() *instruction {
+	i.u1 |= 1 << 26
+	return i
+}
+
+func (i *instruction) vecNeedsNoOverlap() bool { return i.u1&(1<<26) != 0 }
+
+// asVecWiden marks a unary vector operation as one whose two sides differ in
+// width. Two things follow, and neither is optional: the vtype needs the
+// fractional grouping so the wide side is one register rather than two, and
+// the destination must not be the source, because a widening or narrowing
+// instruction may not overlap its operand. Both are handled at encode time.
+func (i *instruction) asVecWiden(funct6, variant, form uint32, rd regalloc.VReg, vs2 operand, sew uint32) *instruction {
+	i.asVecRR(funct6, variant, form, rd, vs2, sew)
+	i.u1 |= 1 << 24
+	return i
+}
+
+// asVecExtend is asVecWiden for the integer extensions, which take the
+// *destination* width in the vtype and so need no fractional grouping -- but
+// still may not write their own source.
+func (i *instruction) asVecExtend(funct6, variant, form uint32, rd regalloc.VReg, vs2 operand, sew uint32) *instruction {
+	i.asVecRR(funct6, variant, form, rd, vs2, sew)
+	i.u1 |= 1 << 25
+	return i
+}
+
 // asVecRX builds a vector-scalar operation taking an integer register.
 func (i *instruction) asVecRX(funct6 uint32, rd regalloc.VReg, vs2, rs1 operand, sew uint32) *instruction {
 	i.kind = vecRX
@@ -1169,19 +1227,23 @@ func (i *instruction) asVecMov(rd, rs regalloc.VReg) *instruction {
 	return i
 }
 
-// asVecLoad / asVecStore move the 16 bytes of a v128 to or from the address
-// already materialized in addr.
-func (i *instruction) asVecLoad(rd, addr regalloc.VReg) *instruction {
+// asVecLoad / asVecStore move the 16 bytes of a v128 to or from [rn + imm].
+//
+// RVV's load and store take a bare base register with no displacement, so the
+// encoding materializes the address into the reserved scratch first. Carrying
+// an addressMode rather than a ready register is what lets the ABI paths use
+// these with offsets that are not known until the frame is laid out.
+func (i *instruction) asVecLoad(rd regalloc.VReg, amode *addressMode) *instruction {
 	i.kind = vecLoad
 	i.rd = rd
-	i.rs1 = operandNR(addr)
+	i.setAmode(amode)
 	return i
 }
 
-func (i *instruction) asVecStore(src, addr regalloc.VReg) *instruction {
+func (i *instruction) asVecStore(src regalloc.VReg, amode *addressMode) *instruction {
 	i.kind = vecStore
 	i.rd = src
-	i.rs1 = operandNR(addr)
+	i.setAmode(amode)
 	return i
 }
 
@@ -1248,6 +1310,10 @@ func (i *instruction) String() string {
 	switch i.kind {
 	case nop0:
 		return "nop"
+	case nopDefReg:
+		return fmt.Sprintf("nop_def %s", formatVReg(i.rd))
+	case nopUseReg:
+		return fmt.Sprintf("nop_use %s", i.rs1.format())
 	case sourceOffsetInfo:
 		return fmt.Sprintf("source_offset_info %d", i.sourceOffset())
 	case loadConstBlockArg:
@@ -1345,9 +1411,9 @@ func (i *instruction) String() string {
 	case vecMov:
 		return fmt.Sprintf("vmv1r.v %s, %s", formatVReg(i.rd), i.rs1.format())
 	case vecLoad:
-		return fmt.Sprintf("vle64.v %s, (%s)", formatVReg(i.rd), i.rs1.format())
+		return fmt.Sprintf("vle64.v %s, %s", formatVReg(i.rd), i.getAmode().format())
 	case vecStore:
-		return fmt.Sprintf("vse64.v %s, (%s)", formatVReg(i.rd), i.rs1.format())
+		return fmt.Sprintf("vse64.v %s, %s", formatVReg(i.rd), i.getAmode().format())
 	}
 	panic(fmt.Sprintf("BUG: unknown instruction kind %d", i.kind))
 }
