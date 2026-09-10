@@ -1129,12 +1129,13 @@ func (i *instruction) asVecSlide(rd regalloc.VReg, vs2 operand, offset, sew uint
 
 // asVecNaNZero replaces rd's lanes with zeros wherever the corresponding lane
 // of the float source is NaN.
-func (i *instruction) asVecNaNZero(rd regalloc.VReg, src, zeros operand, sew uint32) *instruction {
+func (i *instruction) asVecNaNZero(rd regalloc.VReg, src, zeros operand, cmpSew, mergeSew uint32) *instruction {
 	i.kind = vecNaNZero
 	i.rd = rd
 	i.rs1 = src
 	i.rs2 = zeros
-	i.u2 = uint64(sew)
+	i.u1 = uint64(mergeSew)
+	i.u2 = uint64(cmpSew)
 	return i
 }
 

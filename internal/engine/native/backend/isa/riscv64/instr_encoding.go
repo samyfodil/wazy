@@ -71,7 +71,10 @@ func (i *instruction) size() int64 {
 	case brTableSequence:
 		return brTableSequenceOffsetTableBegin + int64(i.u2)*4
 	case vecRR:
-		if i.u1&(1<<24|1<<25) != 0 {
+		if i.u1&(1<<24) != 0 {
+			return 20 // vsetivli + zeroing + vsetivli + the operation + a copy out
+		}
+		if i.u1&(1<<25) != 0 {
 			return 12 // vsetivli + the operation + a copy out of the temp
 		}
 		return 8 // vsetivli + the operation
@@ -87,15 +90,25 @@ func (i *instruction) size() int64 {
 	case vecInsertLane0:
 		return 8 // vsetivli + vmv.s.x
 	case vecRound:
-		// vsetivli, |x| and the limit splat, the in-range mask, the two
-		// conversions, the sign restore, the merge, and for every mode but
-		// truncation the pair of frm writes around it.
-		return 48
+		// vsetivli, the limit, |x|, the in-range mask, the two conversions,
+		// the sign restore, the merge, and for every mode but truncation the
+		// pair of frm writes around it. The f64 limit needs one shift more.
+		n := int64(40)
+		if uint32(i.u2) == vsew64 {
+			n += 4
+		}
+		if roundMode(i.u1) != roundModeTrunc {
+			n += 8
+		}
+		return n
 	case vecSelectLt:
 		return 12 // vsetivli + compare + merge
 	case vecHighBits:
 		return 20 // vsetivli + compare + vsetivli + readout + two shifts
 	case vecExtract:
+		if signed := i.u1&1 != 0; !signed && uint32(i.u2) < vsew32 {
+			return 16 // vsetivli + the lane read + the two zero-extending shifts
+		}
 		return 8 // vsetivli + the lane read
 	case vecInsert:
 		return 20 // vsetivli + index splat + compare + scalar splat + merge
@@ -109,6 +122,9 @@ func (i *instruction) size() int64 {
 		}
 		return 8 // vsetivli + the slide
 	case vecNaNZero:
+		if uint32(i.u1) != uint32(i.u2) {
+			return 16 // vsetivli + vmfeq + a second vsetivli + vmerge
+		}
 		return 12 // vsetivli + vmfeq + vmerge
 	case vecCmp:
 		return 16 // vsetivli + compare + zeros + merge
@@ -271,12 +287,22 @@ func (i *instruction) encode(m *machine) {
 			// own source register -- and vd and vs2 are routinely the same
 			// after allocation.
 			sew := uint32(i.u2)
+			tmp := regNumberInEncoding[vecTmpReg]
 			if widening {
-				c.Emit4Bytes(encodeVsetivliLMul(vecAVLFor(sew), sew, vlmulMF2))
+				// Half the elements, not vecAVLFor's whole sixteen bytes: one
+				// side of the operation is twice as wide, so sixteen bytes of
+				// it is half the count. Relying on vsetivli to clamp would
+				// pin the backend to VLEN=128.
+				//
+				// The zeroing covers the narrowing direction, whose result
+				// fills only half the register; for the widening direction it
+				// is overwritten in full.
+				emitVsetivli(c, vsew8)
+				c.Emit4Bytes(encodeVmvVI(tmp, 0))
+				c.Emit4Bytes(encodeVsetivliLMulTU(vecAVLFor(sew)/2, sew, vlmulMF2))
 			} else {
 				emitVsetivli(c, sew)
 			}
-			tmp := regNumberInEncoding[vecTmpReg]
 			c.Emit4Bytes(encodeVecUnary(funct6, tmp, vecReg(i.rs1.nr()), variant, form))
 			c.Emit4Bytes(encodeVmv1r(vecReg(i.rd), tmp))
 			return
@@ -305,11 +331,14 @@ func (i *instruction) encode(m *machine) {
 		c.Emit4Bytes(encodeVecVIu(vfunctSlideup, tmp, vecReg(i.rs1.nr()), offset))
 		c.Emit4Bytes(encodeVmv1r(vecReg(i.rd), tmp))
 	case vecNaNZero:
-		sew := uint32(i.u2)
-		emitVsetivli(c, sew)
+		cmpSew, mergeSew := uint32(i.u2), uint32(i.u1)
+		emitVsetivli(c, cmpSew)
 		// vmfeq of a value with itself is false exactly on the NaN lanes.
 		c.Emit4Bytes(encodeVecVV(vfunctMfeq, regNumberInEncoding[vecMaskReg],
 			vecReg(i.rs1.nr()), vecReg(i.rs1.nr()), opfvv))
+		if mergeSew != cmpSew {
+			emitVsetivli(c, mergeSew)
+		}
 		// Keep rd where ordered, take the zero vector where not.
 		c.Emit4Bytes(encodeVmerge(vecReg(i.rd), vecReg(i.rs2.nr()), vecReg(i.rd)))
 	case vecShiftImm:
@@ -363,7 +392,15 @@ func (i *instruction) encode(m *machine) {
 			c.Emit4Bytes(encodeVfmvFS(regNumberInEncoding[i.rd.RealReg()], vecReg(i.rs1.nr())))
 			return
 		}
-		c.Emit4Bytes(encodeVmvXS(intRd(i.rd), vecReg(i.rs1.nr())))
+		rd := intRd(i.rd)
+		c.Emit4Bytes(encodeVmvXS(rd, vecReg(i.rs1.nr())))
+		// vmv.x.s sign-extends from SEW, which is what the signed forms want.
+		// The unsigned ones have to undo it.
+		if signed := i.u1&1 != 0; !signed && sew < vsew32 {
+			shift := int32(64 - 8<<sew)
+			c.Emit4Bytes(encodeAluRRImm(aluOpSll, rd, rd, shift, true))
+			c.Emit4Bytes(encodeAluRRImm(aluOpSrl, rd, rd, shift, true))
+		}
 	case vecInsert:
 		sew, index := uint32(i.u2), uint32(i.u1)
 		mask := regNumberInEncoding[vecMaskReg]
@@ -382,7 +419,7 @@ func (i *instruction) encode(m *machine) {
 		// no-overlap rule as the widening operations.
 		sew := uint32(i.u2)
 		tmp := regNumberInEncoding[vecTmpReg]
-		c.Emit4Bytes(encodeVsetivliLMul(vecAVLFor(sew), sew, vlmulMF2))
+		c.Emit4Bytes(encodeVsetivliLMul(vecAVLFor(sew)/2, sew, vlmulMF2))
 		c.Emit4Bytes(encodeVecVIu(uint32(i.u1), tmp, vecReg(i.rs1.nr()), 0))
 		c.Emit4Bytes(encodeVmv1r(vecReg(i.rd), tmp))
 	case vecConst:
@@ -768,6 +805,24 @@ func encodeVecRound(c compilerBuf, i *instruction) {
 
 	emitVsetivli(c, sew)
 
+	// The largest magnitude whose round trip through an integer is exact:
+	// 2^23 for f32, 2^52 for f64. Both are a single lui away, the second
+	// shifted into the high half.
+	fpTmp := regNumberInEncoding[fpTmpReg]
+	if sew == vsew64 {
+		c.Emit4Bytes(encodeLui(scratch, 0x43300))
+		c.Emit4Bytes(encodeAluRRImm(aluOpSll, scratch, scratch, 32, true))
+	} else {
+		c.Emit4Bytes(encodeLui(scratch, 0x4b000))
+	}
+	c.Emit4Bytes(encodeFmvFromInt(fpTmp, scratch, sew == vsew64))
+
+	// The in-range mask, built before tmp is needed for the conversion.
+	// NaN compares false, which keeps the input -- and a NaN is its own
+	// rounding.
+	c.Emit4Bytes(encodeVecVV(vfunctFsgnjx, tmp, vs2, vs2, opfvv)) // |x|
+	c.Emit4Bytes(encodeVecVV(vfunctMflt, mask, tmp, fpTmp, opfvf))
+
 	dynamic := mode != roundModeTrunc
 	if dynamic {
 		c.Emit4Bytes(encodeFsrmi(scratch, frmFor(mode)))
@@ -780,7 +835,9 @@ func encodeVecRound(c compilerBuf, i *instruction) {
 	}
 	c.Emit4Bytes(encodeVecUnary(vfunctFunary0, tmp, vs2, variant, opfvv))
 	c.Emit4Bytes(encodeVecUnary(vfunctFunary0, tmp, tmp, vsubCvtFX, opfvv))
-	// Restore the sign, so that ceil(-0.3) is -0.0 rather than +0.0.
+	// Restore the sign, so that ceil(-0.3) is -0.0 rather than +0.0. Two
+	// negating copies: the first takes the negated sign of the input, the
+	// second negates that back.
 	c.Emit4Bytes(encodeVecVV(vfunctFsgnjn, tmp, tmp, vs2, opfvv))
 	c.Emit4Bytes(encodeVecVV(vfunctFsgnjn, tmp, tmp, tmp, opfvv))
 
@@ -789,8 +846,8 @@ func encodeVecRound(c compilerBuf, i *instruction) {
 	}
 
 	// Keep the rounded lanes only where the input was small enough for the
-	// round trip to be exact; elsewhere keep the input.
-	c.Emit4Bytes(encodeVecVV(vfunctMflt, mask, vs2, vs2, opfvv))
+	// round trip to be exact; elsewhere keep the input, which is already
+	// integral.
 	c.Emit4Bytes(encodeVmerge(vd, vs2, tmp))
 }
 

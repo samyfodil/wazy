@@ -195,6 +195,13 @@ const (
 	vsubSext4   = 0b00101
 	vsubFwcvtFF = 0b01100
 	vsubFncvtFF = 0b10100
+	// Widening integer-to-float and narrowing float-to-integer, which is what
+	// wasm's f64x2.convert_low_i32x4 and i32x4.trunc_sat_f64x2_zero are: the
+	// two sides differ in width, so neither has a same-width form.
+	vsubFwcvtFXu   = 0b01010
+	vsubFwcvtFX    = 0b01011
+	vsubFncvtRtzXu = 0b10110
+	vsubFncvtRtzX  = 0b10111
 	vsubMvSX    = 0b01010
 )
 

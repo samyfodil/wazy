@@ -766,6 +766,17 @@ func encodeVsetivliLMul(avl, sew, vlmul uint32) uint32 {
 	return 0b11<<30 | zimm<<20 | avl<<15 | 0b111<<12 | 0<<7 | opVec
 }
 
+// encodeVsetivliLMulTU is encodeVsetivliLMul with a tail-*undisturbed* policy.
+//
+// A narrowing instruction fills only half a register, and the agnostic tail
+// the other forms ask for may legally be written as all-ones -- so the half
+// the caller has already zeroed would not stay zero. Undisturbed keeps it.
+func encodeVsetivliLMulTU(avl, sew, vlmul uint32) uint32 {
+	const vtypeMaTu = 1 << 7 // vma, vta=0
+	zimm := vtypeMaTu | sew<<3 | vlmul
+	return 0b11<<30 | zimm<<20 | avl<<15 | 0b111<<12 | 0<<7 | opVec
+}
+
 // vecWidthField is the `width` field of a vector load/store, which is not the
 // same encoding as vsew.
 func vecWidthField(sew uint32) uint32 {

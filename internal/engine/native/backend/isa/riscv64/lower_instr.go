@@ -198,11 +198,11 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 	case ssa.OpcodeVImul:
 		m.lowerVecRRR(vfunctMul, opmvv, instr)
 	case ssa.OpcodeVband:
-		m.lowerVecRRR(vfunctAnd, opivv, instr)
+		m.lowerVecRRRBits(vfunctAnd, instr)
 	case ssa.OpcodeVbor:
-		m.lowerVecRRR(vfunctOr, opivv, instr)
+		m.lowerVecRRRBits(vfunctOr, instr)
 	case ssa.OpcodeVbxor:
-		m.lowerVecRRR(vfunctXor, opivv, instr)
+		m.lowerVecRRRBits(vfunctXor, instr)
 	case ssa.OpcodeVbnot:
 		m.lowerVbnot(instr)
 	case ssa.OpcodeVIneg:
@@ -635,9 +635,21 @@ func (m *machine) lowerSelect(c, x, y, ret ssa.Value) {
 		return
 	}
 
+	if x.Type() == ssa.TypeV128 {
+		// The same blend, one register wider. vmerge would want the condition
+		// in v0 as a lane mask; the scalar mask is already all-ones or zero,
+		// so vand.vx applies it to every lane at once.
+		rx := m.getOperand_NR(m.compiler.ValueDefinition(x))
+		ry := m.getOperand_NR(m.compiler.ValueDefinition(y))
+		diff := m.compiler.AllocateVReg(ssa.TypeV128)
+		m.emit(m.allocateInstr().asVecRRR(vfunctXor, opivv, diff, rx, ry, vsew64))
+		m.emit(m.allocateInstr().asVecRX(vfunctAnd, diff, operandNR(diff), operandNR(mask), vsew64))
+		m.emit(m.allocateInstr().asVecRRR(vfunctXor, opivv, rd, operandNR(diff), ry, vsew64))
+		return
+	}
+
 	// The FP case blends in the integer file and moves the result back, since
 	// the masking operations only exist there.
-	_64bit := x.Type() == ssa.TypeF64
 	rx := m.getOperand_NR(m.compiler.ValueDefinition(x))
 	ry := m.getOperand_NR(m.compiler.ValueDefinition(y))
 	bx := m.compiler.AllocateVReg(ssa.TypeI64)
@@ -651,7 +663,6 @@ func (m *machine) lowerSelect(c, x, y, ret ssa.Value) {
 	// Move back as a full 64-bit pattern: for an f32 both inputs were already
 	// NaN-boxed, and blending two boxed values bit-for-bit keeps the box.
 	m.emit(m.allocateInstr().asFmvFromInt(rd, operandNR(diff), true))
-	_ = _64bit
 }
 
 // lowerExitWithCode emits an unconditional exit back to Go.

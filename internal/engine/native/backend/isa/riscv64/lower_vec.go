@@ -35,6 +35,17 @@ func (m *machine) lowerVecRRR(funct6, form uint32, instr *ssa.Instruction) {
 	m.insert(i)
 }
 
+// lowerVecRRRBits lowers a bitwise operation, which has no lane shape at all:
+// the SSA instruction carries none, and every element width moves the same
+// 128 bits.
+func (m *machine) lowerVecRRRBits(funct6 uint32, instr *ssa.Instruction) {
+	x, y := instr.Arg2()
+	rd := m.compiler.VRegOf(instr.Return())
+	vs2 := m.getOperand_NR(m.compiler.ValueDefinition(x))
+	vs1 := m.getOperand_NR(m.compiler.ValueDefinition(y))
+	m.insert(m.allocateInstr().asVecRRR(funct6, opivv, rd, vs2, vs1, vsew64))
+}
+
 // lowerVecRR lowers a lane-wise unary operation.
 func (m *machine) lowerVecRR(funct6, variant, form uint32, instr *ssa.Instruction) {
 	x, lane := instr.ArgWithLane()
@@ -274,13 +285,30 @@ func (m *machine) lowerSplat(instr *ssa.Instruction) {
 }
 
 // lowerVFcvtFromInt converts integer lanes to float lanes.
+//
+// The f64x2 shape is wasm's f64x2.convert_low_i32x4, whose operand is an
+// i32x4: the frontend only widens it for arm64, and the other backends have an
+// instruction that reads the low half directly. So does RVV -- vfwcvt reads
+// half a register's worth of narrow lanes and writes a full register of wide
+// ones, which is the whole operation.
 func (m *machine) lowerVFcvtFromInt(instr *ssa.Instruction, signed bool) {
-	vs2, rd, sew := m.vecUn(instr)
+	x, lane := instr.ArgWithLane()
+	vs2 := m.getOperand_NR(m.compiler.ValueDefinition(x))
+	rd := m.compiler.VRegOf(instr.Return())
+
+	if lane == ssa.VecLaneF64x2 {
+		variant := uint32(vsubFwcvtFXu)
+		if signed {
+			variant = vsubFwcvtFX
+		}
+		m.insert(m.allocateInstr().asVecWiden(vfunctFunary0, variant, opfvv, rd, vs2, vsew32))
+		return
+	}
 	variant := uint32(vsubCvtFXu)
 	if signed {
 		variant = vsubCvtFX
 	}
-	m.insert(m.allocateInstr().asVecRR(vfunctFunary0, variant, opfvv, rd, vs2, sew))
+	m.insert(m.allocateInstr().asVecRR(vfunctFunary0, variant, opfvv, rd, vs2, sewForLane(lane)))
 }
 
 // lowerVFcvtToIntSat converts float lanes to saturating integer lanes.
@@ -290,19 +318,38 @@ func (m *machine) lowerVFcvtFromInt(instr *ssa.Instruction, signed bool) {
 // as the scalar case, and corrected the same way, by masking the lanes that
 // compare unordered against themselves.
 func (m *machine) lowerVFcvtToIntSat(instr *ssa.Instruction, signed bool) {
-	vs2, rd, sew := m.vecUn(instr)
-	variant := uint32(vsubCvtRtzXuF)
-	if signed {
-		variant = vsubCvtRtzXF
+	x, lane := instr.ArgWithLane()
+	vs2 := m.getOperand_NR(m.compiler.ValueDefinition(x))
+	rd := m.compiler.VRegOf(instr.Return())
+	sew := sewForLane(lane)
+
+	// The f64x2 shape is i32x4.trunc_sat_f64x2_zero: two f64 lanes in, two i32
+	// lanes out and the upper two zero. vfncvt does the conversion, and the
+	// half-register it leaves untouched is already the zero the name promises.
+	dstSew := sew
+	if lane == ssa.VecLaneF64x2 {
+		dstSew = vsew32
+		variant := uint32(vsubFncvtRtzXu)
+		if signed {
+			variant = vsubFncvtRtzX
+		}
+		m.insert(m.allocateInstr().asVecWiden(vfunctFunary0, variant, opfvv, rd, vs2, dstSew))
+	} else {
+		variant := uint32(vsubCvtRtzXuF)
+		if signed {
+			variant = vsubCvtRtzXF
+		}
+		m.insert(m.allocateInstr().asVecRR(vfunctFunary0, variant, opfvv, rd, vs2, sew))
 	}
-	m.insert(m.allocateInstr().asVecRR(vfunctFunary0, variant, opfvv, rd, vs2, sew))
 
 	// Zero the lanes whose input was NaN: vmfeq of a value with itself is
 	// false exactly there, so merging against a zero vector under that mask
-	// leaves everything else alone.
+	// leaves everything else alone. The comparison runs at the *source* width
+	// and the merge at the destination's, which line up because a mask bit is
+	// addressed by lane index either way.
 	zeros := m.compiler.AllocateVReg(ssa.TypeV128)
-	m.insert(m.allocateInstr().asVecSplat(zeros, operandNR(zeroVReg), sew))
-	m.insert(m.allocateInstr().asVecNaNZero(rd, vs2, operandNR(zeros), sew))
+	m.insert(m.allocateInstr().asVecSplat(zeros, operandNR(zeroVReg), dstSew))
+	m.insert(m.allocateInstr().asVecNaNZero(rd, vs2, operandNR(zeros), sew, dstSew))
 }
 
 // lowerFvdemote and lowerFvpromoteLow narrow and widen float lanes.
@@ -318,6 +365,24 @@ func (m *machine) lowerFvpromoteLow(instr *ssa.Instruction) {
 	m.insert(m.allocateInstr().asVecWiden(vfunctFunary0, vsubFwcvtFF, opfvv, rd, vs2, vsew32))
 }
 
+// vecFromFloat moves a value into a vector register when the frontend left it
+// in a scalar float one.
+//
+// The v128.loadNxM opcodes are expressed as an f64 load feeding a widen, which
+// costs nothing on the backends where the float and vector registers are the
+// same file. RISC-V's are separate files, so the value has to cross -- through
+// an integer register, since that is the only path either end offers.
+func (m *machine) vecFromFloat(v operand) operand {
+	if v.nr().RegType() != regalloc.RegTypeFloat {
+		return v
+	}
+	bits := m.compiler.AllocateVReg(ssa.TypeI64)
+	m.insert(m.allocateInstr().asFmvToInt(bits, v, true))
+	vec := m.compiler.AllocateVReg(ssa.TypeV128)
+	m.insert(m.allocateInstr().asVecInsertLane0(vec, operandNR(bits), vsew64))
+	return operandNR(vec)
+}
+
 // lowerVwiden widens the low or high half of a vector, signed or not.
 //
 // RVV's extensions always read the *low* half, so the high-half forms slide
@@ -325,7 +390,7 @@ func (m *machine) lowerFvpromoteLow(instr *ssa.Instruction) {
 func (m *machine) lowerVwiden(instr *ssa.Instruction, signed, high bool) {
 	x, lane := instr.ArgWithLane()
 	rd := m.compiler.VRegOf(instr.Return())
-	vs2 := m.getOperand_NR(m.compiler.ValueDefinition(x))
+	vs2 := m.vecFromFloat(m.getOperand_NR(m.compiler.ValueDefinition(x)))
 	srcSew := sewForLane(lane)
 
 	if high {
@@ -390,8 +455,8 @@ func (m *machine) lowerVFminFmax(instr *ssa.Instruction, isMax bool) {
 	// checked; the first correction makes the result NaN, which the second
 	// then leaves alone.
 	nanVec := m.vecCanonicalNaN(lane)
-	m.insert(m.allocateInstr().asVecNaNZero(rd, vx, operandNR(nanVec), sew))
-	m.insert(m.allocateInstr().asVecNaNZero(rd, vy, operandNR(nanVec), sew))
+	m.insert(m.allocateInstr().asVecNaNZero(rd, vx, operandNR(nanVec), sew, sew))
+	m.insert(m.allocateInstr().asVecNaNZero(rd, vy, operandNR(nanVec), sew, sew))
 }
 
 // vecCanonicalNaN builds a vector whose every lane is the canonical NaN of the
@@ -498,6 +563,18 @@ func (m *machine) lowerNarrow(instr *ssa.Instruction, signed bool) {
 	funct6 := uint32(vfunctNclipu)
 	if signed {
 		funct6 = vfunctNclip
+	}
+	if !signed {
+		// wasm's unsigned narrowing reads *signed* lanes and saturates them
+		// into the unsigned destination range, so a negative lane becomes 0.
+		// vnclipu reads its source as unsigned and would turn the same lane
+		// into the maximum instead, so the negatives are clamped away first.
+		clamp := func(v operand) operand {
+			c := m.compiler.AllocateVReg(ssa.TypeV128)
+			m.insert(m.allocateInstr().asVecRX(vfunctMax, c, v, operandNR(zeroVReg), sewForLane(lane)))
+			return operandNR(c)
+		}
+		vx, vy = clamp(vx), clamp(vy)
 	}
 	lo := m.compiler.AllocateVReg(ssa.TypeV128)
 	hi := m.compiler.AllocateVReg(ssa.TypeV128)
