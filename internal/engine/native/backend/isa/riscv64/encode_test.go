@@ -146,6 +146,16 @@ func TestEncodings_againstClang(t *testing.T) {
 		{"fmv.d.x fa0, a1", encodeFmvFromInt(10, 11, true)},
 		{"fclass.s a0, fa1", encodeFclass(10, 11, false)},
 		{"fclass.d a0, fa1", encodeFclass(10, 11, true)},
+		// --- RVV: the fixed-16-byte configurations v128 needs ---
+		{"vsetivli zero, 16, e8, m1, ta, ma", encodeVsetivli(vecAVLFor(vsew8), vsew8)},
+		{"vsetivli zero, 8, e16, m1, ta, ma", encodeVsetivli(vecAVLFor(vsew16), vsew16)},
+		{"vsetivli zero, 4, e32, m1, ta, ma", encodeVsetivli(vecAVLFor(vsew32), vsew32)},
+		{"vsetivli zero, 2, e64, m1, ta, ma", encodeVsetivli(vecAVLFor(vsew64), vsew64)},
+		{"vle64.v v1, (a0)", encodeVectorLoad(1, 10, vsew64)},
+		{"vse64.v v1, (a0)", encodeVectorStore(1, 10, vsew64)},
+		{"vle32.v v3, (a2)", encodeVectorLoad(3, 12, vsew32)},
+		{"vse8.v v31, (sp)", encodeVectorStore(31, 2, vsew8)},
+		{"vmv1r.v v2, v1", encodeVmv1r(2, 1)},
 	}
 
 	var srcs []string
@@ -164,7 +174,8 @@ func TestEncodings_againstClang(t *testing.T) {
 }
 
 // assembleRV64 assembles RV64G source with clang and returns the .text words.
-// -march=rv64g (not rv64gc) keeps the compressed extension off so every
+// -march=rv64gv enables the vector extension while (unlike rv64gcv) keeping
+// the compressed extension off, so every
 // instruction is the 4 bytes this backend emits, and -mno-relax stops the
 // assembler rewriting sequences behind our back.
 func assembleRV64(t *testing.T, src string) []uint32 {
@@ -174,7 +185,7 @@ func assembleRV64(t *testing.T, src string) []uint32 {
 	if err := os.WriteFile(asmPath, []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("clang", "--target=riscv64-unknown-elf", "-march=rv64g", "-mno-relax",
+	cmd := exec.Command("clang", "--target=riscv64-unknown-elf", "-march=rv64gv", "-mno-relax",
 		"-c", "-x", "assembler", asmPath, "-o", objPath)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("clang failed: %v\n%s", err, out)

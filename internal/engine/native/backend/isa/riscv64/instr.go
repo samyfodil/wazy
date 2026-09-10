@@ -157,6 +157,15 @@ const (
 	fence
 	// clzCtzPopcnt expands to the software bit-counting sequence.
 	clzCtzPopcnt
+	// vecMov is a whole-register vector copy (vmv1r.v), which needs no
+	// preceding vsetivli because it is defined on the register rather than on
+	// the current vtype.
+	vecMov
+	// vecLoad / vecStore move exactly 16 bytes to or from the address in rs1.
+	// RVV load/store have no displacement field at all -- the address must
+	// already be in a register -- so a spill computes it first.
+	vecLoad
+	vecStore
 
 	numInstructionKinds
 )
@@ -332,6 +341,9 @@ var defKinds = [numInstructionKinds]defKind{
 	atomicStore:       defKindNone,
 	fence:             defKindNone,
 	clzCtzPopcnt:      defKindRD,
+	vecMov:            defKindRD,
+	vecLoad:           defKindRD,
+	vecStore:          defKindNone,
 }
 
 // Defs implements regalloc.Instr.
@@ -373,6 +385,7 @@ const (
 	useKindRS1                // rs1 only
 	useKindRS1RS2             // rs1 and rs2 (rs2 may be an immediate, which is skipped)
 	useKindRS1RS2RS3          // rs1, rs2 and rs3, all registers (compare-exchange)
+	useKindRDRS1              // rd is a stored *source*, rs1 the address register
 	useKindRS1Amode           // rs1 is the address base
 	useKindRDRS1Amode         // rd is a stored *source*, rs1 the address base
 	useKindCall
@@ -420,6 +433,11 @@ var useKinds = [numInstructionKinds]useKind{
 	atomicStore:       useKindRS1RS2,
 	fence:             useKindNone,
 	clzCtzPopcnt:      useKindRS1,
+	vecMov:            useKindRS1,
+	vecLoad:           useKindRS1,
+	// A vector store reads the value in rd and the address in rs1, the same
+	// shape as the scalar store.
+	vecStore: useKindRDRS1,
 }
 
 // Uses implements regalloc.Instr.
@@ -440,6 +458,8 @@ func (i *instruction) Uses(regs *[]regalloc.VReg) []regalloc.VReg {
 		}
 	case useKindRS1RS2RS3:
 		*regs = append(*regs, i.rs1.nr(), i.rs2.nr(), i.rs3.nr())
+	case useKindRDRS1:
+		*regs = append(*regs, i.rd, i.rs1.nr())
 	case useKindRS1Amode:
 		*regs = append(*regs, i.getAmode().rn)
 	case useKindRDRS1Amode:
@@ -494,6 +514,12 @@ func (i *instruction) AssignUse(index int, reg regalloc.VReg) {
 			i.rs2 = operandNR(reg)
 		default:
 			i.rs3 = operandNR(reg)
+		}
+	case useKindRDRS1:
+		if index == 0 {
+			i.rd = reg
+		} else {
+			i.rs1 = operandNR(reg)
 		}
 	case useKindRS1Amode:
 		i.getAmode().rn = reg
@@ -575,6 +601,17 @@ func (i *instruction) asAdr(rd regalloc.VReg, l label) *instruction {
 	i.kind = adr
 	i.rd = rd
 	i.u1 = uint64(l)
+	return i
+}
+
+// asAdrPCRel is asAdr for a displacement already known in bytes, rather than
+// one resolved from a label. u1 is set to labelInvalid so
+// resolveRelativeAddresses leaves the offset alone.
+func (i *instruction) asAdrPCRel(rd regalloc.VReg, offset int64) *instruction {
+	i.kind = adr
+	i.rd = rd
+	i.u1 = uint64(labelInvalid)
+	i.u2 = uint64(uint32(int32(offset)))
 	return i
 }
 
@@ -822,6 +859,29 @@ func (i *instruction) asFclass(rd regalloc.VReg, rs1 operand, _64bit bool) *inst
 	return i
 }
 
+func (i *instruction) asVecMov(rd, rs regalloc.VReg) *instruction {
+	i.kind = vecMov
+	i.rd = rd
+	i.rs1 = operandNR(rs)
+	return i
+}
+
+// asVecLoad / asVecStore move the 16 bytes of a v128 to or from the address
+// already materialized in addr.
+func (i *instruction) asVecLoad(rd, addr regalloc.VReg) *instruction {
+	i.kind = vecLoad
+	i.rd = rd
+	i.rs1 = operandNR(addr)
+	return i
+}
+
+func (i *instruction) asVecStore(src, addr regalloc.VReg) *instruction {
+	i.kind = vecStore
+	i.rd = src
+	i.rs1 = operandNR(addr)
+	return i
+}
+
 func (i *instruction) asFence() *instruction {
 	i.kind = fence
 	return i
@@ -979,6 +1039,12 @@ func (i *instruction) String() string {
 		return "fence rw, rw"
 	case clzCtzPopcnt:
 		return fmt.Sprintf("bitcount %s, %s", formatVReg(i.rd), i.rs1.format())
+	case vecMov:
+		return fmt.Sprintf("vmv1r.v %s, %s", formatVReg(i.rd), i.rs1.format())
+	case vecLoad:
+		return fmt.Sprintf("vle64.v %s, (%s)", formatVReg(i.rd), i.rs1.format())
+	case vecStore:
+		return fmt.Sprintf("vse64.v %s, (%s)", formatVReg(i.rd), i.rs1.format())
 	}
 	panic(fmt.Sprintf("BUG: unknown instruction kind %d", i.kind))
 }

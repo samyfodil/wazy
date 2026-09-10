@@ -93,12 +93,34 @@ func fitsInSignedImm13(v int64) bool { return v >= -4096 && v <= 4095 && v%2 == 
 func fitsInSignedImm21(v int64) bool { return v >= -1048576 && v <= 1048575 && v%2 == 0 }
 
 // splitImm32 splits v into the (hi, lo) pair that `lui hi; addi lo` (or
-// `auipc hi; addi lo`) materializes. addi sign-extends its 12-bit immediate,
-// so a set bit 11 in the low half is compensated by rounding the high half up.
+// `auipc hi; jalr lo`) materializes. The low half is the sign-extended low 12
+// bits, and because addi and jalr sign-extend that immediate, a set bit 11 is
+// compensated by rounding the high half up.
+//
+// That rounding is why the pair cannot reach the whole int32 range. Above
+// maxAuipcPairOffset the `v - lo` carry pushes hi past INT32_MAX; auipc
+// sign-extends its 20-bit upper immediate on RV64, so an out-of-range split
+// does not fail, it silently lands 4GiB below the intended address. Callers
+// gate on fitsInAuipcPair; this panics rather than wrap.
 func splitImm32(v int32) (hi, lo int32) {
-	lo = int32(int16(int32(v) << 20 >> 20)) // sign-extend the low 12 bits
+	if !fitsInAuipcPair(int64(v)) {
+		panic(fmt.Sprintf("BUG: %#x is out of auipc/lui+addi pair range", v))
+	}
+	lo = int32(v) << 20 >> 20 // sign-extend the low 12 bits
 	hi = v - lo
 	return
+}
+
+// The reachable range of an auipc/lui + addi(/jalr) pair. It is asymmetric:
+// the low half contributes [-2048, 2047] on top of a high half that is a
+// multiple of 4096 capped at INT32_MAX-4095.
+const (
+	maxAuipcPairOffset = 0x7ffff7ff
+	minAuipcPairOffset = -0x80000800
+)
+
+func fitsInAuipcPair(v int64) bool {
+	return v >= minAuipcPairOffset && v <= maxAuipcPairOffset
 }
 
 // ---------------------------------------------------------------------------
@@ -634,4 +656,87 @@ func encodeFmvFromInt(rd, rs1 uint32, _64bit bool) uint32 {
 // comparison.
 func encodeFclass(rd, rs1 uint32, _64bit bool) uint32 {
 	return encodeR(0b1110000|fmtBit(_64bit), 0, rs1, 0b001, rd, opOpFP)
+}
+
+// ---------------------------------------------------------------------------
+// RVV (vector extension)
+// ---------------------------------------------------------------------------
+//
+// wasm's v128 is exactly 128 bits, while RVV's VLEN is an implementation
+// choice the compiler does not know. The two are reconciled by never relying
+// on VLEN: every vector operation is preceded by a vsetivli that pins the
+// element width and count so that exactly 16 bytes are in play -- 16 e8, 8
+// e16, 4 e32 or 2 e64 elements at LMUL=1 -- which holds for any VLEN >= 128.
+// That minimum is what the platform gate checks before selecting this backend.
+
+const opVec = 0b1010111 // OP-V
+
+// vsew encodes the element width field of a vtype immediate.
+const (
+	vsew8 uint32 = iota
+	vsew16
+	vsew32
+	vsew64
+)
+
+// vecAVLFor returns the element count that covers exactly 16 bytes at the
+// given element width.
+func vecAVLFor(sew uint32) uint32 {
+	switch sew {
+	case vsew8:
+		return 16
+	case vsew16:
+		return 8
+	case vsew32:
+		return 4
+	case vsew64:
+		return 2
+	}
+	panic(fmt.Sprintf("BUG: unknown vsew %d", sew))
+}
+
+// encodeVsetivli encodes `vsetivli zero, avl, e<sew>, m1, ta, ma`: set the
+// vector type and length from immediates, discarding the resulting vl (rd =
+// zero) because the caller has already chosen an avl that fits.
+//
+// The vtype immediate is vma<<7 | vta<<6 | vsew<<3 | vlmul, with vlmul=0 for
+// LMUL=1, and tail/mask-agnostic set so the tail beyond 16 bytes is explicitly
+// don't-care rather than something we would have to preserve.
+func encodeVsetivli(avl, sew uint32) uint32 {
+	const vtypeTaMa = 1<<7 | 1<<6 // vma, vta
+	zimm := vtypeTaMa | sew<<3    // vlmul = 0 (m1)
+	return 0b11<<30 | zimm<<20 | avl<<15 | 0b111<<12 | 0<<7 | opVec
+}
+
+// vecWidthField is the `width` field of a vector load/store, which is not the
+// same encoding as vsew.
+func vecWidthField(sew uint32) uint32 {
+	switch sew {
+	case vsew8:
+		return 0b000
+	case vsew16:
+		return 0b101
+	case vsew32:
+		return 0b110
+	case vsew64:
+		return 0b111
+	}
+	panic(fmt.Sprintf("BUG: unknown vsew %d", sew))
+}
+
+// encodeVectorLoad encodes `vle<sew>.v vd, (rs1)`, unmasked, unit stride.
+func encodeVectorLoad(vd, rs1, sew uint32) uint32 {
+	return 1<<25 | rs1<<15 | vecWidthField(sew)<<12 | vd<<7 | opLoadFP
+}
+
+// encodeVectorStore encodes `vse<sew>.v vs3, (rs1)`, unmasked, unit stride.
+func encodeVectorStore(vs3, rs1, sew uint32) uint32 {
+	return 1<<25 | rs1<<15 | vecWidthField(sew)<<12 | vs3<<7 | opStoreFP
+}
+
+// encodeVmv1r encodes `vmv1r.v vd, vs2`: a whole-register move that needs no
+// preceding vsetivli, since it is defined in terms of the register itself
+// rather than the current vtype.
+func encodeVmv1r(vd, vs2 uint32) uint32 {
+	return 0b100111<<26 | 1<<25 | vs2<<20 | 0<<15 | 0b011<<12 | vd<<7 | opVec
 }

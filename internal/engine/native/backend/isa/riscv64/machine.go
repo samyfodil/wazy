@@ -368,8 +368,10 @@ func (m *machine) InsertReturn() {
 // Format implements backend.Machine.
 func (m *machine) Format() string {
 	begins := map[*instruction]label{}
-	for _, pos := range m.labelPositionPool.View() {
-		begins[pos.begin] = label(pos.sb.ID())
+	for i := 0; i <= m.labelPositionPool.MaxIDEncountered(); i++ {
+		if pos := m.labelPositionPool.Get(i); pos != nil {
+			begins[pos.begin] = label(i)
+		}
 	}
 
 	var lines []string

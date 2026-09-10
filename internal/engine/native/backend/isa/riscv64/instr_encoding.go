@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/samyfodil/wazy/internal/engine/native/backend/regalloc"
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
 )
 
@@ -236,6 +237,77 @@ func encodeFpuRR(c compilerBuf, i *instruction) {
 		c.Emit4Bytes(encodeFpuRRR(fpuBinOpSgnjx, rd, rs, rs, _64bit))
 	default:
 		panic(fmt.Sprintf("BUG: unknown fpuUniOp %d", i.u1))
+	}
+}
+
+// exitSequenceSize is the byte length of encodeExitSequence's output. It is
+// fixed: the context-eviction move is emitted unconditionally so that callers
+// recording a resume address (insertExitSequence, emitTrapIslands) can add a
+// constant rather than depend on which register the context landed in.
+const exitSequenceSize = 5 * 4
+
+// encodeExitSequence restores Go's ra, frame pointer and sp from the execution
+// context and returns, handing control back to the Go side of the call.
+//
+// SP is an ordinary register on RISC-V, so it is reloaded directly -- arm64
+// needs a scratch because it cannot load into SP. s0 is Go's frame pointer on
+// riscv64 and this backend allocates it, so it has to be restored here for
+// Go's traceback to work on the other side.
+func encodeExitSequence(c compilerBuf, ctxReg regalloc.VReg) {
+	// Move the context into the reserved scratch first. This is unconditional
+	// so the sequence is a constant size, and it is necessary whenever the
+	// context happens to live in ra or s0, which the loads below overwrite.
+	ctx := regNumberInEncoding[ctxReg.RealReg()]
+	tmp := regNumberInEncoding[tmpReg]
+	c.Emit4Bytes(encodeAluRRImm(aluOpAdd, tmp, ctx, 0, true)) // mv tmp, ctx
+
+	c.Emit4Bytes(encodeLoad(regNumberInEncoding[raReg], tmp,
+		int32(nativeapi.ExecutionContextOffsetGoReturnAddress.I64()), 64, false))
+	c.Emit4Bytes(encodeLoad(regNumberInEncoding[x8], tmp,
+		int32(nativeapi.ExecutionContextOffsetOriginalFramePointer.I64()), 64, false))
+	c.Emit4Bytes(encodeLoad(regNumberInEncoding[spReg], tmp,
+		int32(nativeapi.ExecutionContextOffsetOriginalStackPointer.I64()), 64, false))
+	c.Emit4Bytes(encodeRet())
+}
+
+// brTableSequenceOffsetTableBegin is the byte offset, from the start of the
+// br_table sequence, at which the jump table itself begins -- i.e. the size of
+// the seven instructions encodeBrTableSequence emits ahead of the data.
+const brTableSequenceOffsetTableBegin = 7 * 4
+
+// encodeBrTableSequence emits the br_table dispatch and the table it reads.
+//
+// Each table entry is a 32-bit displacement from the table's own address (see
+// resolveRelativeAddresses), which keeps the table position-independent -- the
+// executable is mmap'd at an address unknown at compile time, so an absolute
+// target could not be baked in.
+//
+//	auipc tmp,  0            ; tmp  = address of this instruction
+//	addi  tmp,  tmp, 28      ; tmp  = address of the table
+//	slli  tmp2, idx, 2       ; tmp2 = idx * 4
+//	add   tmp2, tmp, tmp2    ; tmp2 = &table[idx]
+//	lw    tmp2, 0(tmp2)      ; tmp2 = table[idx], sign-extended
+//	add   tmp,  tmp, tmp2    ; tmp  = table address + displacement
+//	jalr  zero, 0(tmp)
+//	<table>
+//
+// The index has already been bounds-checked by the lowering, so no negative or
+// out-of-range entry can be reached here.
+func encodeBrTableSequence(c compilerBuf, m *machine, i *instruction) {
+	tmp := regNumberInEncoding[tmpReg]
+	tmp2 := regNumberInEncoding[tmpReg2]
+	idx := regNumberInEncoding[i.rs1.realReg()]
+
+	c.Emit4Bytes(encodeAuipc(tmp, 0))
+	c.Emit4Bytes(encodeAluRRImm(aluOpAdd, tmp, tmp, brTableSequenceOffsetTableBegin, true))
+	c.Emit4Bytes(encodeAluRRImm(aluOpSll, tmp2, idx, 2, true))
+	c.Emit4Bytes(encodeAluRRR(aluOpAdd, tmp2, tmp, tmp2, true))
+	c.Emit4Bytes(encodeLoad(tmp2, tmp2, 0, 32, true))
+	c.Emit4Bytes(encodeAluRRR(aluOpAdd, tmp, tmp, tmp2, true))
+	c.Emit4Bytes(encodeJalr(regNumberInEncoding[zeroReg], tmp, 0))
+
+	for _, off := range m.jmpTableTargets[i.u1] {
+		c.Emit4Bytes(off)
 	}
 }
 
