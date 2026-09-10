@@ -733,6 +733,16 @@ func (i *instruction) brOffsetResolve(offset int64) {
 	i.u2 = i.u2&0xffffffff | uint64(uint32(int32(offset)))<<32
 }
 
+// asBrTableSequence records a br_table dispatch: rs1 is the already-clamped
+// index, u1 the entry in machine.jmpTableTargets and u2 the table length.
+func (i *instruction) asBrTableSequence(index regalloc.VReg, tableIndex uint32, targetCount int) *instruction {
+	i.kind = brTableSequence
+	i.rs1 = operandNR(index)
+	i.u1 = uint64(tableIndex)
+	i.u2 = uint64(targetCount)
+	return i
+}
+
 func (i *instruction) asRet() *instruction {
 	i.kind = ret
 	return i
