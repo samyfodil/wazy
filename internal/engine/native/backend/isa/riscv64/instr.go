@@ -78,7 +78,9 @@ type (
 )
 
 const (
-	instrInvalid instructionKind = iota
+	// instrInvalid is the zero value, so that an instruction taken from the
+	// pool and not yet given a kind is not silently a valid one.
+	instrInvalid instructionKind = iota //nolint:unused
 	// nop0 is a zero-width meta instruction used to anchor a label.
 	nop0
 	// nopDefReg and nopUseReg are zero-width meta instructions that define or
@@ -232,7 +234,7 @@ type operandKind byte
 
 const (
 	// operandKindInvalid marks an unused operand slot.
-	operandKindInvalid operandKind = iota
+	operandKindInvalid operandKind = iota //nolint:unused
 	// operandKindNR is a plain register.
 	operandKindNR
 	// operandKindImm is a signed 12-bit immediate.
@@ -283,7 +285,8 @@ func (o operand) format() string {
 type addressModeKind byte
 
 const (
-	addressModeKindInvalid addressModeKind = iota
+	// addressModeKindInvalid is the zero value.
+	addressModeKindInvalid addressModeKind = iota //nolint:unused
 	// addressModeKindRegSignedImm12 is the only addressing mode RISC-V has:
 	// [rn + imm12]. Everything else must be materialized into a register.
 	addressModeKindRegSignedImm12
@@ -737,16 +740,9 @@ func (i *instruction) asLui(rd regalloc.VReg, v int32) *instruction {
 	return i
 }
 
-func (i *instruction) asAdr(rd regalloc.VReg, l label) *instruction {
-	i.kind = adr
-	i.rd = rd
-	i.u1 = uint64(l)
-	return i
-}
-
-// asAdrPCRel is asAdr for a displacement already known in bytes, rather than
-// one resolved from a label. u1 is set to labelInvalid so
-// resolveRelativeAddresses leaves the offset alone.
+// asAdrPCRel materializes a PC-relative address whose displacement is already
+// known in bytes. u1 is set to labelInvalid so resolveRelativeAddresses leaves
+// the offset alone.
 func (i *instruction) asAdrPCRel(rd regalloc.VReg, offset int64) *instruction {
 	i.kind = adr
 	i.rd = rd
@@ -1017,14 +1013,6 @@ func (i *instruction) asFmvToInt(rd regalloc.VReg, rs1 operand, _64bit bool) *in
 
 func (i *instruction) asFmvFromInt(rd regalloc.VReg, rs1 operand, _64bit bool) *instruction {
 	i.kind = fmvFromInt
-	i.rd = rd
-	i.rs1 = rs1
-	i.u1 = b2u64(_64bit)
-	return i
-}
-
-func (i *instruction) asFclass(rd regalloc.VReg, rs1 operand, _64bit bool) *instruction {
-	i.kind = fclass
 	i.rd = rd
 	i.rs1 = rs1
 	i.u1 = b2u64(_64bit)

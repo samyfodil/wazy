@@ -46,9 +46,6 @@ type (
 
 		unresolvedAddressModes []*instruction
 
-		// condBrRelocs holds conditional branches needing offset relocation.
-		condBrRelocs []condBrReloc
-
 		// jmpTableTargets holds the labels of the jump table targets.
 		jmpTableTargets     [][]uint32
 		jmpTableTargetsNext int
@@ -56,12 +53,6 @@ type (
 		// trapIslands are this function's shared conditional-trap exit
 		// sequences, one per exit code (see emitTrapIslands).
 		trapIslands []trapIsland
-
-		// fpConstPool is the deduplicated pool of FP literals. RISC-V has no
-		// FP immediate form at all -- even 1.0 must come from memory or be
-		// built in a GPR and moved across -- so every non-trivial FP constant
-		// goes through here.
-		fpConstPool []fpConst
 
 		// spillSlotSize is the size in bytes of the spill-slot region. See the
 		// frame diagram in machine_pro_epi_logue.go. Multiple of 16.
@@ -78,27 +69,11 @@ type (
 		regAllocStarted bool
 	}
 
-	condBrReloc struct {
-		cbr *instruction
-		// currentLabelPos is the labelPosition within which condBr is defined.
-		currentLabelPos *labelPosition
-		// nextLabel is the next block's label.
-		nextLabel label
-		offset    int64
-	}
-
 	// trapIsland is a shared per-function exit sequence for conditional traps
 	// with the given exit code, reachable via the label.
 	trapIsland struct {
 		code nativeapi.ExitCode
 		l    label
-	}
-
-	// fpConst is one entry in the per-function FP literal pool.
-	fpConst struct {
-		bits  uint64
-		width byte // 32 or 64
-		l     label
 	}
 )
 
@@ -257,22 +232,6 @@ func (m *machine) Reset() {
 	m.perBlockHead, m.perBlockEnd, m.rootInstr = nil, nil, nil
 	m.orderedSSABlockLabelPos = m.orderedSSABlockLabelPos[:0]
 	m.trapIslands = m.trapIslands[:0]
-	m.fpConstPool = m.fpConstPool[:0]
-	m.condBrRelocs = m.condBrRelocs[:0]
-}
-
-// getOrAddFpConst returns the label of the pool slot holding the given
-// constant, allocating and deduplicating on first use.
-func (m *machine) getOrAddFpConst(bits uint64, width byte) label {
-	for i := range m.fpConstPool {
-		if c := &m.fpConstPool[i]; c.bits == bits && c.width == width {
-			return c.l
-		}
-	}
-	l := m.nextLabel
-	m.nextLabel++
-	m.fpConstPool = append(m.fpConstPool, fpConst{bits: bits, width: width, l: l})
-	return l
 }
 
 // getOrCreateTrapIsland returns the label of this function's shared trap island
@@ -309,12 +268,6 @@ func (m *machine) SetCompiler(ctx backend.Compiler) {
 
 func (m *machine) insert(i *instruction) {
 	m.pendingInstructions = append(m.pendingInstructions, i)
-}
-
-func (m *machine) insertBrTargetLabel() label {
-	nop, l := m.allocateBrTarget()
-	m.insert(nop)
-	return l
 }
 
 func (m *machine) allocateBrTarget() (nop *instruction, l label) {

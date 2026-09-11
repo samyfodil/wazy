@@ -124,9 +124,7 @@ func (m *machine) lowerAtomicCas(instr *ssa.Instruction) {
 		// sign-extended too -- which for an i32 it already is, and for an i64
 		// (i64.atomic.rmw32.cmpxchg_u) it is not.
 		if wide {
-			sext := m.compiler.AllocateVReg(ssa.TypeI64)
-			m.insert(m.allocateInstr().asALU(aluOpAdd, sext, exp, operandImm(0), false))
-			exp = operandNR(sext)
+			exp = m.signExtend32(exp)
 		}
 	}
 	m.insert(m.allocateInstr().asAtomicCas(rd, addr, exp, repl, size, wide))

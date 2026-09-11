@@ -317,24 +317,6 @@ func (m *machine) trapIfCondBr(execCtx regalloc.VReg, flag condFlag, rn, rm oper
 	m.insert(br)
 }
 
-// trapUnconditional jumps to the shared trap island for `code`.
-func (m *machine) trapUnconditional(execCtx regalloc.VReg, code nativeapi.ExitCode) {
-	island := m.getOrCreateTrapIsland(code)
-	mv := m.allocateInstr()
-	mv.asMove64(tmpRegVReg, execCtx)
-	m.insert(mv)
-	b := m.allocateInstr()
-	b.asBr(island)
-	m.insert(b)
-}
-
-// materialize builds a small constant into a fresh register.
-func (m *machine) materialize(v int64) regalloc.VReg {
-	r := m.compiler.AllocateVReg(ssa.TypeI64)
-	m.lowerConstantI64(r, v)
-	return r
-}
-
 // fcvtTrapBounds gives the open/half-open interval a float must lie in for its
 // truncation to fit the destination integer type. Trap unless
 // (loInclusive ? lo <= x : lo < x) && x < hi.

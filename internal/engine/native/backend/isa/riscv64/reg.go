@@ -263,15 +263,11 @@ var (
 	v30VReg = regalloc.FromRealReg(v30, regalloc.RegTypeVec)
 	v31VReg = regalloc.FromRealReg(v31, regalloc.RegTypeVec)
 
-	zeroVReg       = x0VReg
-	raVReg         = x1VReg
-	spVReg         = x2VReg
-	tmpRegVReg     = x31VReg
-	tmpReg2VReg    = x30VReg
-	tmpReg3VReg    = x29VReg
-	fpTmpRegVReg   = f31VReg
-	vecMaskRegVReg = v0VReg
-	vecTmpRegVReg  = v31VReg
+	zeroVReg    = x0VReg
+	raVReg      = x1VReg
+	spVReg      = x2VReg
+	tmpRegVReg  = x31VReg
+	tmpReg2VReg = x30VReg
 )
 
 var regNames = [...]string{
@@ -324,16 +320,3 @@ var regNumberInEncoding = func() (ret [v31 + 1]uint32) {
 	}
 	return
 }()
-
-func regTypeToRegisterSizeInBits(r regalloc.RegType) byte {
-	switch r {
-	case regalloc.RegTypeInt:
-		return 64
-	case regalloc.RegTypeFloat:
-		return 64 // RV64D f-registers are 64-bit; v128 is RegTypeVec, not this.
-	case regalloc.RegTypeVec:
-		return 128 // The wasm-visible width, not VLEN.
-	default:
-		panic("BUG: invalid register type")
-	}
-}

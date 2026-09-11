@@ -390,20 +390,3 @@ func (m *machine) lowerTailCall(si *ssa.Instruction) {
 	// If this is a proper tail call, returns are cleared in the postRegAlloc phase.
 	m.insertReturns(si, calleeABI, stackSlotSize)
 }
-
-// insertAddOrSubStackPointer emits `rd = sp +/- diff`.
-func (m *machine) insertAddOrSubStackPointer(rd regalloc.VReg, diff int64, add bool) {
-	if !add {
-		diff = -diff
-	}
-	if fitsInSignedImm12(diff) {
-		alu := m.allocateInstr()
-		alu.asALU(aluOpAdd, rd, operandNR(spVReg), operandImm(diff), true)
-		m.insert(alu)
-		return
-	}
-	m.lowerConstantI64(tmpRegVReg, diff)
-	alu := m.allocateInstr()
-	alu.asALU(aluOpAdd, rd, operandNR(spVReg), operandNR(tmpRegVReg), true)
-	m.insert(alu)
-}
