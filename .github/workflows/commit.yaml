@@ -167,9 +167,9 @@ jobs:
             no_prot_exec: true
           - os: ubuntu-24.04-arm
             arch: arm64
-          # riscv64 disabled: the hosted ubuntu-24.04-riscv runner never completes
-          # (hangs to the 24h ceiling); the interpreter suite itself passes fine
-          # under qemu-riscv64. Re-add when the runner is reliable.
+          # riscv64 is not here: the hosted ubuntu-24.04-riscv runner never
+          # completes (it hangs to the 24h ceiling). The test_riscv64 job runs
+          # that backend under qemu instead.
 
     steps:
 
@@ -262,6 +262,47 @@ jobs:
           environment_variables: WAZYCLI
           # This runs all tests compiled above in sequence.
           run: find _tests -name "*.test" | xargs -t -Itestbin nice testbin -test.short -test.v
+
+  # The riscv64 backend is the only one no hosted runner executes natively, so
+  # the emulator stands in for the silicon. -one-insn-per-tb is the same
+  # workaround the test.arm64 make target carries: qemu-user can hold a stale
+  # translation of a page the JIT has just rewritten.
+  test_riscv64:
+    name: riscv64, Linux (qemu)
+    runs-on: ubuntu-24.04
+    needs: spectest_corpus  # for the generated 3.0 cases, which are not committed
+    timeout-minutes: 45
+
+    steps:
+
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: spectest-v3-corpus
+          path: internal/integration_test/spectest/v3/testdata
+
+      - run: sudo apt-get update && sudo apt-get install -y qemu-user-static
+
+      - name: Spec suites for the riscv64 backend
+        run: |
+          go test -p 1 -timeout 40m \
+            -exec 'qemu-riscv64-static -one-insn-per-tb' \
+            ./internal/integration_test/riscv64exec/... \
+            ./internal/integration_test/spectest/...
+        env:
+          GOARCH: riscv64
+          CGO_ENABLED: 0
+          # SIMD and threads are gated on RVV, and without it every suite from
+          # v2 up skips itself and still reports ok. This makes that loud.
+          WAZY_RISCV64_REQUIRE_V: "1"
+          WAZY_SPECTEST_REQUIRE_CASES: "1"  # the corpus came from the artifact; skipping means it did not
 
   test_vm:
     name: amd64, ${{ matrix.os.name }}

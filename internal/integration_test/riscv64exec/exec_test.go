@@ -5,6 +5,7 @@ package riscv64exec
 import (
 	"context"
 	"math"
+	"os"
 	"testing"
 
 	"github.com/samyfodil/wazy"
@@ -27,6 +28,26 @@ import (
 // and asserts the compiler really was selected before running anything.
 // Without that assertion it could quietly pass on the interpreter and still
 // tell us nothing.
+
+// TestRiscv64_vectorExtensionPresent fails where RVV is missing, but only when
+// asked to.
+//
+// SIMD and threads are gated on the vector extension, and where it is absent
+// the whole of spectest v2 and above skips itself and reports ok. That is the
+// right behaviour on hardware that genuinely has no RVV; it is not what we want
+// from CI, where a silently skipped suite is indistinguishable from a passing
+// one. CI sets the variable, so a runner whose emulator lost RVV fails loudly
+// rather than going green on nothing.
+func TestRiscv64_vectorExtensionPresent(t *testing.T) {
+	if os.Getenv("WAZY_RISCV64_REQUIRE_V") == "" {
+		t.Skip("set WAZY_RISCV64_REQUIRE_V to assert the vector extension is present")
+	}
+	require.True(t, platform.CpuFeatures.Has(platform.CpuFeatureRiscv64V),
+		"RVV is absent, so every SIMD and threads suite would skip itself and still report ok")
+	require.True(t, platform.CompilerSupports(api.CoreFeaturesV2),
+		"the riscv64 compiler must be selected for CoreFeaturesV2")
+}
+
 func TestRiscv64_compiledExecution(t *testing.T) {
 	require.True(t, platform.CompilerSupports(api.CoreFeaturesV1),
 		"the riscv64 compiler must be selected for CoreFeaturesV1, or this test proves nothing")

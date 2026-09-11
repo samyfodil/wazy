@@ -202,7 +202,7 @@ const (
 	vsubFwcvtFX    = 0b01011
 	vsubFncvtRtzXu = 0b10110
 	vsubFncvtRtzX  = 0b10111
-	vsubMvSX    = 0b01010
+	vsubMvSX       = 0b01010
 )
 
 // encodeVecVIu encodes a vector-immediate operation whose immediate is

@@ -88,6 +88,12 @@ func executableMmapSupported() bool {
 // backend targets assumes. What the baseline does not include is Zabha or
 // Zacas, so the sub-word and compare-exchange forms are LR/SC loops rather than
 // single instructions -- a code-size question, not a correctness one.
+//
+// What the spec suites under qemu-user do not establish is the *ordering*: it
+// runs guest threads as host threads, so an x86 host's stronger model hides the
+// reorderings a weakly ordered machine would expose. The sequences carry the
+// fences and the aq/rl bits the memory model asks for; confirming that on
+// silicon is still worth doing.
 func riscv64CompilerSupports(features api.CoreFeatures) bool {
 	if features.IsEnabled(api.CoreFeatureSIMD) {
 		return CpuFeatures.Has(CpuFeatureRiscv64V)
