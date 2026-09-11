@@ -84,15 +84,11 @@ func executableMmapSupported() bool {
 // none. Where it is absent the interpreter takes SIMD modules, exactly as it
 // does on an amd64 without SSE4.1.
 //
-// Threads is still withheld, and for a reason that is not about hardware: the
-// atomic lowering does not exist yet. It also wants verifying on real silicon
-// rather than under emulation, because RISC-V is weakly ordered and qemu-user
-// runs guest threads as host threads -- so an x86 host's stronger model hides
-// exactly the reorderings that would matter.
+// Threads needs the A extension, which RV64GC includes and the baseline the
+// backend targets assumes. What the baseline does not include is Zabha or
+// Zacas, so the sub-word and compare-exchange forms are LR/SC loops rather than
+// single instructions -- a code-size question, not a correctness one.
 func riscv64CompilerSupports(features api.CoreFeatures) bool {
-	if features.IsEnabled(experimental.CoreFeaturesThreads) {
-		return false
-	}
 	if features.IsEnabled(api.CoreFeatureSIMD) {
 		return CpuFeatures.Has(CpuFeatureRiscv64V)
 	}

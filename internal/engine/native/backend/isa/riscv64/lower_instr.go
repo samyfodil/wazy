@@ -189,6 +189,14 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 
 	case ssa.OpcodeFence:
 		m.insert(m.allocateInstr().asFence())
+	case ssa.OpcodeAtomicRmw:
+		m.lowerAtomicRmw(instr)
+	case ssa.OpcodeAtomicCas:
+		m.lowerAtomicCas(instr)
+	case ssa.OpcodeAtomicLoad:
+		m.lowerAtomicLoad(instr)
+	case ssa.OpcodeAtomicStore:
+		m.lowerAtomicStore(instr)
 
 	// ---- SIMD ----
 	case ssa.OpcodeVIadd:

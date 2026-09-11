@@ -50,6 +50,22 @@ func (i *instruction) size() int64 {
 		return int64(i.u2) / 8 // 4 or 8 bytes of raw data.
 	case adr:
 		return 8 // auipc + addi
+	case atomicRmw:
+		if i.u1>>8&1 != 0 && i.u2 == 4 {
+			return 12 // the AMO + the two zero-extending shifts
+		}
+		return 4
+	case atomicCas:
+		if i.u1&1 != 0 && i.u2 != 8 {
+			return 24 // the retry loop + the two zero-extending shifts
+		}
+		return 16 // lr + the mismatch branch + sc + the retry branch
+	case atomicRmwSeq, atomicCasSeq:
+		return 52 // the mask, then a ten-instruction retry loop
+	case atomicLoad:
+		return 12 // fence + the load + fence
+	case atomicStore:
+		return 8 // fence + the store
 	case call, tailCall:
 		return callSequenceSize // auipc + jalr
 	case exitSequence:
@@ -262,6 +278,23 @@ func (i *instruction) encode(m *machine) {
 			regNumberInEncoding[i.rs1.realReg()], i.u1 == 1))
 	case fence:
 		c.Emit4Bytes(encodeFence(0b0011, 0b0011))
+	case atomicRmw:
+		encodeAtomicRmw(c, i)
+	case atomicRmwSeq:
+		encodeAtomicRmwSeq(c, i)
+	case atomicCas:
+		encodeAtomicCas(c, i)
+	case atomicCasSeq:
+		encodeAtomicCasSeq(c, i)
+	case atomicLoad:
+		encodeAtomicLoad(c, i)
+	case atomicStore:
+		// Release: everything before is visible before the store. Paired with
+		// the load's leading full fence this is the sequentially consistent
+		// mapping of the RISC-V memory model appendix.
+		c.Emit4Bytes(encodeFence(0b0011, 0b0001))
+		c.Emit4Bytes(encodeStore(regNumberInEncoding[i.rs2.realReg()],
+			regNumberInEncoding[i.rs1.realReg()], 0, byte(i.u2)*8))
 	case fpuConstPoolData:
 		if i.u2 == 32 {
 			c.Emit4Bytes(uint32(i.u1))
@@ -879,4 +912,130 @@ func emitVecAddress(c compilerBuf, i *instruction) uint32 {
 	}
 	c.Emit4Bytes(encodeAluRRImm(aluOpAdd, tmp, regNumberInEncoding[a.rn.RealReg()], int32(a.imm), true))
 	return tmp
+}
+
+// ---------------------------------------------------------------------------
+// Atomics
+// ---------------------------------------------------------------------------
+
+// zeroExtendTo32 emits the two shifts that clear the upper half of a register.
+//
+// A 32-bit atomic leaves its result sign-extended, which is what an i32 wants;
+// the i64 forms (i64.atomic.*32_u) want the same bits zero-extended instead.
+func zeroExtendTo32(c compilerBuf, rd uint32) {
+	c.Emit4Bytes(encodeAluRRImm(aluOpSll, rd, rd, 32, true))
+	c.Emit4Bytes(encodeAluRRImm(aluOpSrl, rd, rd, 32, true))
+}
+
+func encodeAtomicRmw(c compilerBuf, i *instruction) {
+	funct5, wide := uint32(i.u1&0xff), i.u1>>8&1 != 0
+	rd := intRd(i.rd)
+	c.Emit4Bytes(encodeAMO(funct5, rd,
+		regNumberInEncoding[i.rs1.realReg()], regNumberInEncoding[i.rs2.realReg()], i.u2 == 8))
+	if wide && i.u2 == 4 {
+		zeroExtendTo32(c, rd)
+	}
+}
+
+func encodeAtomicLoad(c compilerBuf, i *instruction) {
+	rd := intRd(i.rd)
+	bits := int(i.u2) * 8
+	// A 32-bit load is the one width where signedness is a choice: lw for an
+	// i32 result, which lives sign-extended, lwu for an i64 one.
+	signed := bits == 32 && i.u1&1 == 0
+	c.Emit4Bytes(encodeFence(0b0011, 0b0011))
+	c.Emit4Bytes(encodeLoad(rd, regNumberInEncoding[i.rs1.realReg()], 0, byte(bits), signed))
+	c.Emit4Bytes(encodeFence(0b0010, 0b0011))
+}
+
+// emitFieldMask builds the in-place mask for a sub-word atomic: the low `bits`
+// set, shifted up to where the field sits in its word.
+func emitFieldMask(c compilerBuf, mask, shift uint32, bits int) {
+	c.Emit4Bytes(encodeAluRRImm(aluOpAdd, mask, regNumberInEncoding[zeroReg], -1, true))
+	c.Emit4Bytes(encodeAluRRImm(aluOpSrl, mask, mask, int32(64-bits), true))
+	c.Emit4Bytes(encodeAluRRR(aluOpSll, mask, mask, shift, true))
+}
+
+// encodeAtomicRmwSeq expands a byte or halfword read-modify-write.
+//
+// The field is read out of its containing word, the operation runs on it
+// widened to 64 bits -- which is safe because only the low `bits` of the result
+// are kept -- and the word is written back with just that field replaced.
+func encodeAtomicRmwSeq(c compilerBuf, i *instruction) {
+	op := ssa.AtomicRmwOp(i.u1)
+	bits := int(i.u2) * 8
+	rd := intRd(i.rd)
+	addr, val, shift := regNumberInEncoding[i.rs1.realReg()],
+		regNumberInEncoding[i.rs2.realReg()], regNumberInEncoding[i.rs3.realReg()]
+	mask, old, tmp := regNumberInEncoding[tmpReg3], regNumberInEncoding[tmpReg2], regNumberInEncoding[tmpReg]
+
+	emitFieldMask(c, mask, shift, bits)
+	// retry:
+	c.Emit4Bytes(encodeLR(old, addr, false))
+	c.Emit4Bytes(encodeAluRRR(aluOpAnd, rd, old, mask, true))
+	c.Emit4Bytes(encodeAluRRR(aluOpSrl, rd, rd, shift, true)) // the result
+	switch op {
+	case ssa.AtomicRmwOpAdd:
+		c.Emit4Bytes(encodeAluRRR(aluOpAdd, tmp, rd, val, true))
+	case ssa.AtomicRmwOpSub:
+		c.Emit4Bytes(encodeAluRRR(aluOpSub, tmp, rd, val, true))
+	case ssa.AtomicRmwOpAnd:
+		c.Emit4Bytes(encodeAluRRR(aluOpAnd, tmp, rd, val, true))
+	case ssa.AtomicRmwOpOr:
+		c.Emit4Bytes(encodeAluRRR(aluOpOr, tmp, rd, val, true))
+	case ssa.AtomicRmwOpXor:
+		c.Emit4Bytes(encodeAluRRR(aluOpXor, tmp, rd, val, true))
+	case ssa.AtomicRmwOpXchg:
+		c.Emit4Bytes(encodeAluRRR(aluOpAdd, tmp, regNumberInEncoding[zeroReg], val, true))
+	default:
+		panic(fmt.Sprintf("BUG: unknown atomic rmw op %s", op))
+	}
+	// Splice the new field into the word: old ^ ((old ^ new<<shift) & mask).
+	c.Emit4Bytes(encodeAluRRR(aluOpSll, tmp, tmp, shift, true))
+	c.Emit4Bytes(encodeAluRRR(aluOpXor, tmp, tmp, old, true))
+	c.Emit4Bytes(encodeAluRRR(aluOpAnd, tmp, tmp, mask, true))
+	c.Emit4Bytes(encodeAluRRR(aluOpXor, tmp, tmp, old, true))
+	c.Emit4Bytes(encodeSC(old, addr, tmp, false))
+	c.Emit4Bytes(encodeBranch(condNE, old, regNumberInEncoding[zeroReg], -9*4))
+}
+
+func encodeAtomicCas(c compilerBuf, i *instruction) {
+	wide, _64bit := i.u1&1 != 0, i.u2 == 8
+	rd := intRd(i.rd)
+	addr, exp, repl := regNumberInEncoding[i.rs1.realReg()],
+		regNumberInEncoding[i.rs2.realReg()], regNumberInEncoding[i.rs3.realReg()]
+	status := regNumberInEncoding[tmpReg]
+
+	// retry:
+	c.Emit4Bytes(encodeLR(rd, addr, _64bit))
+	c.Emit4Bytes(encodeBranch(condNE, rd, exp, 3*4)) // mismatch: leave it alone
+	c.Emit4Bytes(encodeSC(status, addr, repl, _64bit))
+	c.Emit4Bytes(encodeBranch(condNE, status, regNumberInEncoding[zeroReg], -3*4))
+	// done:
+	if wide && !_64bit {
+		zeroExtendTo32(c, rd)
+	}
+}
+
+func encodeAtomicCasSeq(c compilerBuf, i *instruction) {
+	bits := int(i.u2) * 8
+	rd := intRd(i.rd)
+	addr, exp, repl, shift := regNumberInEncoding[i.rs1.realReg()],
+		regNumberInEncoding[i.rs2.realReg()], regNumberInEncoding[i.rs3.realReg()],
+		regNumberInEncoding[i.rs4.realReg()]
+	mask, old, tmp := regNumberInEncoding[tmpReg3], regNumberInEncoding[tmpReg2], regNumberInEncoding[tmpReg]
+
+	emitFieldMask(c, mask, shift, bits)
+	// retry:
+	c.Emit4Bytes(encodeLR(old, addr, false))
+	c.Emit4Bytes(encodeAluRRR(aluOpAnd, rd, old, mask, true))
+	c.Emit4Bytes(encodeAluRRR(aluOpSrl, rd, rd, shift, true)) // the result
+	c.Emit4Bytes(encodeBranch(condNE, rd, exp, 7*4))          // mismatch: leave it alone
+	c.Emit4Bytes(encodeAluRRR(aluOpSll, tmp, repl, shift, true))
+	c.Emit4Bytes(encodeAluRRR(aluOpXor, tmp, tmp, old, true))
+	c.Emit4Bytes(encodeAluRRR(aluOpAnd, tmp, tmp, mask, true))
+	c.Emit4Bytes(encodeAluRRR(aluOpXor, tmp, tmp, old, true))
+	c.Emit4Bytes(encodeSC(old, addr, tmp, false))
+	c.Emit4Bytes(encodeBranch(condNE, old, regNumberInEncoding[zeroReg], -9*4))
+	// done:
 }

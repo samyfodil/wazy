@@ -158,6 +158,15 @@ const (
 	// only two would let the allocator overwrite the expected value, which
 	// the LR/SC retry loop must keep live across iterations.
 	atomicCas
+	// atomicRmwSeq and atomicCasSeq are the byte and halfword forms. RV64A has
+	// no sub-word AMO and no compare-exchange at any width (both want the Zabha
+	// and Zacas extensions, which are not in the baseline), so these expand to
+	// an LR/SC retry loop over the containing word. The loop branches to
+	// itself, which is why it is one instruction here rather than several
+	// blocks: a basic block is the unit the register allocator reasons about,
+	// and a branch inside one would be invisible to it.
+	atomicRmwSeq
+	atomicCasSeq
 	atomicLoad
 	atomicStore
 	fence
@@ -384,6 +393,8 @@ var defKinds = [numInstructionKinds]defKind{
 	fpuConstPoolData:  defKindNone,
 	atomicRmw:         defKindRD,
 	atomicCas:         defKindRD,
+	atomicRmwSeq:      defKindRD,
+	atomicCasSeq:      defKindRD,
 	atomicLoad:        defKindRD,
 	atomicStore:       defKindNone,
 	fence:             defKindNone,
@@ -445,15 +456,15 @@ func (i *instruction) AssignDef(reg regalloc.VReg) {
 type useKind byte
 
 const (
-	useKindNone       useKind = iota + 1
-	useKindRS1                // rs1 only
-	useKindRS1RS2             // rs1 and rs2 (rs2 may be an immediate, which is skipped)
-	useKindRS1RS2RS3          // rs1, rs2 and rs3, all registers (compare-exchange)
-	useKindRDRS1              // rd is a stored *source*, rs1 the address register
-	useKindRDRS1RS2           // rd is both read and written, plus rs1 and rs2
-	useKindVecSelect          // four vector sources: the compared pair and the selected pair
-	useKindRS1Amode           // rs1 is the address base
-	useKindRDRS1Amode         // rd is a stored *source*, rs1 the address base
+	useKindNone         useKind = iota + 1
+	useKindRS1                  // rs1 only
+	useKindRS1RS2               // rs1 and rs2 (rs2 may be an immediate, which is skipped)
+	useKindRS1RS2RS3            // rs1, rs2 and rs3, all registers (compare-exchange)
+	useKindRDRS1                // rd is a stored *source*, rs1 the address register
+	useKindRDRS1RS2             // rd is both read and written, plus rs1 and rs2
+	useKindRS1RS2RS3RS4         // four sources, all read
+	useKindRS1Amode             // rs1 is the address base
+	useKindRDRS1Amode           // rd is a stored *source*, rs1 the address base
 	useKindCall
 	useKindCallInd
 )
@@ -497,23 +508,27 @@ var useKinds = [numInstructionKinds]useKind{
 	fpuConstPoolData:  useKindNone,
 	atomicRmw:         useKindRS1RS2,
 	atomicCas:         useKindRS1RS2RS3,
-	atomicLoad:        useKindRS1,
-	atomicStore:       useKindRS1RS2,
-	fence:             useKindNone,
-	clzCtzPopcnt:      useKindRS1,
-	vecRRR:            useKindRS1RS2,
-	vecRR:             useKindRS1,
-	vecRX:             useKindRS1RS2,
-	vecSplat:          useKindRS1,
-	vecCmp:            useKindRS1RS2,
-	vecSlide:          useKindRS1,
+	// The sub-word forms take the word-aligned address and the shift that
+	// places the field inside it, both computed before the loop.
+	atomicRmwSeq: useKindRS1RS2RS3,
+	atomicCasSeq: useKindRS1RS2RS3RS4, // address, expected, replacement, shift
+	atomicLoad:   useKindRS1,
+	atomicStore:  useKindRS1RS2,
+	fence:        useKindNone,
+	clzCtzPopcnt: useKindRS1,
+	vecRRR:       useKindRS1RS2,
+	vecRR:        useKindRS1,
+	vecRX:        useKindRS1RS2,
+	vecSplat:     useKindRS1,
+	vecCmp:       useKindRS1RS2,
+	vecSlide:     useKindRS1,
 	// vecNaNZero reads the value being corrected (rd), the float source it
 	// tests, and the zero vector it merges in.
 	vecNaNZero:     useKindRDRS1RS2,
 	vecShiftImm:    useKindRS1,
 	vecRound:       useKindRS1,
 	vecInsertLane0: useKindRS1,
-	vecSelectLt:    useKindVecSelect,
+	vecSelectLt:    useKindRS1RS2RS3RS4,
 	vecHighBits:    useKindRS1,
 	vecExtract:     useKindRS1,
 	vecInsert:      useKindRS1RS2,
@@ -551,7 +566,7 @@ func (i *instruction) Uses(regs *[]regalloc.VReg) []regalloc.VReg {
 		*regs = append(*regs, i.rd, i.rs1.nr())
 	case useKindRDRS1RS2:
 		*regs = append(*regs, i.rd, i.rs1.nr(), i.rs2.nr())
-	case useKindVecSelect:
+	case useKindRS1RS2RS3RS4:
 		*regs = append(*regs, i.rs1.nr(), i.rs2.nr(), i.rs3.nr(), i.rs4.nr())
 	case useKindRS1Amode:
 		*regs = append(*regs, i.getAmode().rn)
@@ -623,7 +638,7 @@ func (i *instruction) AssignUse(index int, reg regalloc.VReg) {
 		default:
 			i.rs2 = operandNR(reg)
 		}
-	case useKindVecSelect:
+	case useKindRS1RS2RS3RS4:
 		switch index {
 		case 0:
 			i.rs1 = operandNR(reg)
@@ -1255,6 +1270,67 @@ func (i *instruction) asFence() *instruction {
 	return i
 }
 
+// asAtomicRmw is the word and doubleword read-modify-write, one AMO
+// instruction. size is 4 or 8; wide is whether the result is an i64, which a
+// 32-bit access has to be zero-extended into.
+func (i *instruction) asAtomicRmw(funct5 uint32, rd regalloc.VReg, addr, val operand, size uint64, wide bool) *instruction {
+	i.kind = atomicRmw
+	i.rd = rd
+	i.rs1, i.rs2 = addr, val
+	i.u1 = uint64(funct5) | b2u64(wide)<<8
+	i.u2 = size
+	return i
+}
+
+// asAtomicRmwSeq is the byte and halfword read-modify-write. addr is already
+// word-aligned and shift places the field within that word; both come from the
+// lowering, so the loop itself needs only the reserved scratches.
+func (i *instruction) asAtomicRmwSeq(op ssa.AtomicRmwOp, rd regalloc.VReg, addr, val, shift operand, size uint64) *instruction {
+	i.kind = atomicRmwSeq
+	i.rd = rd
+	i.rs1, i.rs2, i.rs3 = addr, val, shift
+	i.u1 = uint64(op)
+	i.u2 = size
+	return i
+}
+
+// asAtomicCas is the word and doubleword compare-exchange.
+func (i *instruction) asAtomicCas(rd regalloc.VReg, addr, exp, repl operand, size uint64, wide bool) *instruction {
+	i.kind = atomicCas
+	i.rd = rd
+	i.rs1, i.rs2, i.rs3 = addr, exp, repl
+	i.u1 = b2u64(wide)
+	i.u2 = size
+	return i
+}
+
+// asAtomicCasSeq is the byte and halfword compare-exchange.
+func (i *instruction) asAtomicCasSeq(rd regalloc.VReg, addr, exp, repl, shift operand, size uint64) *instruction {
+	i.kind = atomicCasSeq
+	i.rd = rd
+	i.rs1, i.rs2, i.rs3, i.rs4 = addr, exp, repl, shift
+	i.u2 = size
+	return i
+}
+
+// asAtomicLoad and asAtomicStore are the sequentially consistent accesses,
+// which RISC-V spells as a plain load or store between fences.
+func (i *instruction) asAtomicLoad(rd regalloc.VReg, addr operand, size uint64, wide bool) *instruction {
+	i.kind = atomicLoad
+	i.rd = rd
+	i.rs1 = addr
+	i.u1 = b2u64(wide)
+	i.u2 = size
+	return i
+}
+
+func (i *instruction) asAtomicStore(addr, val operand, size uint64) *instruction {
+	i.kind = atomicStore
+	i.rs1, i.rs2 = addr, val
+	i.u2 = size
+	return i
+}
+
 func (i *instruction) asSourceOffsetInfo(l ssa.SourceOffset) *instruction {
 	i.kind = sourceOffsetInfo
 	i.u1 = uint64(l)
@@ -1407,6 +1483,12 @@ func (i *instruction) String() string {
 		return fmt.Sprintf("atomic_load %s, %s", formatVReg(i.rd), i.rs1.format())
 	case atomicStore:
 		return fmt.Sprintf("atomic_store %s, %s", i.rs1.format(), i.rs2.format())
+	case atomicRmwSeq:
+		return fmt.Sprintf("atomic_rmw_seq %s, %s, %s, %s", formatVReg(i.rd),
+			i.rs1.format(), i.rs2.format(), i.rs3.format())
+	case atomicCasSeq:
+		return fmt.Sprintf("atomic_cas_seq %s, %s, %s, %s, %s", formatVReg(i.rd),
+			i.rs1.format(), i.rs2.format(), i.rs3.format(), i.rs4.format())
 	case fence:
 		return "fence rw, rw"
 	case clzCtzPopcnt:
