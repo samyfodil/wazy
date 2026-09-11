@@ -436,19 +436,25 @@ test.arm64: ## Run the suite for the arm64 compiler backend under qemu-user
 	@GOARCH=arm64 CGO_ENABLED=0 $(cap) go test -timeout 90m -exec 'qemu-aarch64-static -one-insn-per-tb' ./...
 
 .PHONY: test.interp
-test.interp: ## Run the suite against the interpreter engine (riscv64 cross-run, no compiler)
-	# A non-amd64/arm64 GOARCH auto-selects the interpreter; qemu-riscv64 runs it (no JIT, no
-	# flag needed). Compiler-codegen tests self-skip via platform.CompilerSupported(). Needs
-	# qemu-riscv64-static.
-	@GOARCH=riscv64 CGO_ENABLED=0 $(cap) go test -timeout 60m -exec qemu-riscv64-static ./...
+test.interp: ## Run the suite against the interpreter engine (s390x cross-run, no compiler)
+	# An arch with no backend auto-selects the interpreter, and compiler-codegen
+	# tests self-skip via platform.CompilerSupported(). That used to be riscv64;
+	# now that riscv64 has a backend, an arch is needed that still does not --
+	# s390x is the one `make check` already cross-builds. No JIT, so no
+	# -one-insn-per-tb. Needs qemu-s390x-static.
+	@GOARCH=s390x CGO_ENABLED=0 $(cap) go test -p 1 -timeout 60m -exec qemu-s390x-static ./...
 
 .PHONY: test.riscv64
 test.riscv64: ## Run the suite for the riscv64 compiler backend under qemu-user
 	# -one-insn-per-tb works around the same qemu-user multi-insn-TB
 	# self-modifying-code bug that test.arm64 documents: JIT'd code is written
-	# and then executed, and qemu can hold a stale translation. Needs
-	# qemu-riscv64-static. Slower emulation, so a longer timeout.
-	@GOARCH=riscv64 CGO_ENABLED=0 $(cap) go test -timeout 90m -exec 'qemu-riscv64-static -one-insn-per-tb' ./...
+	# and then executed, and qemu can hold a stale translation. It also costs
+	# about 25x, hence the timeout. Needs qemu-riscv64-static.
+	#
+	# -p 1 because each emulated test binary holds around a gigabyte, and four
+	# of them at once do not fit under the memory cap -- the run does not fail,
+	# it goes to disk and takes an hour to do a minute of work.
+	@GOARCH=riscv64 CGO_ENABLED=0 $(cap) go test -p 1 -timeout 90m -exec 'qemu-riscv64-static -one-insn-per-tb' ./...
 
 .PHONY: coverage
 # replace spaces with commas
