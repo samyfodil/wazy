@@ -682,15 +682,12 @@ func (m *machine) lowerSelect(c, x, y, ret ssa.Value) {
 }
 
 // lowerExitWithCode emits an unconditional exit back to Go.
+//
+// It used to clear pendingInstructions first, which no other backend does and
+// which dropped the source-offset marker LowerInstr had just put there: the
+// trap's recorded address then resolved against the *previous* marker, and a
+// DWARF backtrace named an earlier line than the one that trapped.
 func (m *machine) lowerExitWithCode(execCtx regalloc.VReg, code nativeapi.ExitCode) {
-	m.pendingInstructions = m.pendingInstructions[:0]
-	m.emitExitWithCode(execCtx, code)
-}
-
-// emitExitWithCode is lowerExitWithCode without the reset, for callers that
-// have already emitted something this instruction depends on -- the inline
-// conditional trap emits the branch that skips this sequence first.
-func (m *machine) emitExitWithCode(execCtx regalloc.VReg, code nativeapi.ExitCode) {
 	tmp := m.compiler.AllocateVReg(ssa.TypeI64)
 	m.lowerConstantI64(tmp, int64(code))
 	m.storeExecCtxField(execCtx, tmp, nativeapi.ExecutionContextOffsetExitCodeOffset.I64(), 32)
