@@ -263,52 +263,24 @@ jobs:
           # This runs all tests compiled above in sequence.
           run: find _tests -name "*.test" | xargs -t -Itestbin nice testbin -test.short -test.v
 
-  # Native riscv64, on the hosted preview runner.
+  # There is no native riscv64 job, and it is not for want of trying.
   #
-  # This was tried once before and disabled: "the hosted ubuntu-24.04-riscv
-  # runner has never once completed -- it hangs to the 24h ceiling every run",
-  # concluded to be a runner problem. Two things have changed. Upstream wazero
-  # still runs on that label, so it is not the runner; and the job that hung was
-  # test_scratch, which cross-builds every test binary and runs them inside a
-  # `docker buildx --platform linux/riscv64` scratch container -- a good deal
-  # more machinery than a test needs. This runs `go test` directly instead, and
-  # carries a timeout so it cannot burn the ceiling whatever happens.
+  # The label upstream wazero uses, ubuntu-24.04-riscv, resolves for them to
+  # runners named rise-riscv-runner-* -- real RISC-V hardware donated through
+  # RISE (the RISC-V Software Ecosystem) and attached to their org. GitHub does
+  # not offer a hosted riscv64 runner; its own machines report as
+  # "GitHub Actions <n>", which is what every other job in this file lands on.
   #
-  # Note what is deliberately NOT set here: WAZY_RISCV64_REQUIRE_V. Real silicon
-  # may not have the vector extension, and where it is absent skipping the SIMD
-  # and threads suites is the correct behaviour, not a failure. The emulated job
-  # below is where RVV is guaranteed and therefore where those suites are
-  # actually exercised -- which is why both jobs exist rather than one.
-  test_riscv64_native:
-    name: riscv64, Linux (native)
-    runs-on: ubuntu-24.04-riscv
-    needs: spectest_corpus  # for the generated 3.0 cases, which are not committed
-    timeout-minutes: 45  # a backstop: this label has hung indefinitely before
-
-    steps:
-
-      - uses: actions/checkout@v6
-        with:
-          submodules: true
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version: "1.26"
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: spectest-v3-corpus
-          path: internal/integration_test/spectest/v3/testdata
-
-      # Which extensions this silicon actually has decides whether the SIMD and
-      # threads suites run or skip, so record it in the log rather than leaving
-      # a green run ambiguous.
-      - name: Report the ISA string
-        run: grep -m1 -E '^isa' /proc/cpuinfo || true
-
-      - run: go test -timeout 40m ./...
-        env:
-          WAZY_SPECTEST_REQUIRE_CASES: "1"  # the corpus came from the artifact; skipping means it did not
+  # A label resolves to runners attached to *your* org, so with none attached
+  # here the job never gets a machine at all: measured, it sat queued 40
+  # minutes with runner="" and was cancelled, while the emulated job beside it
+  # was allocated in four. That is what the earlier note meant by "never once
+  # completed"; it was right, and the cause is not the job's contents.
+  #
+  # To get native coverage, wazy needs riscv64 runners attached -- apply to
+  # RISE's runner programme for open-source projects, or register a self-hosted
+  # riscv64 machine -- and then this job is worth adding back. Until then the
+  # emulator is the only option, with the caveats recorded on it.
 
   # And under the emulator, which is the only place the vector extension is
   # guaranteed present -- so it is where the SIMD and threads suites actually

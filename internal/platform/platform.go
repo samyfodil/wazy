@@ -25,6 +25,15 @@ func CompilerSupports(features api.CoreFeatures) bool {
 }
 
 func compilerPlatformSupports(features api.CoreFeatures) bool {
+	// riscv64 is Linux and nothing else. golang.org/x/sys/cpu reads the vector
+	// extension out of AT_HWCAP, which is a Linux interface and reports nothing
+	// elsewhere -- so on another OS every module would silently fall back to the
+	// interpreter with no way to tell that from a CPU without RVV. Nor has this
+	// backend been run anywhere else. The interpreter still serves those.
+	if runtime.GOARCH == "riscv64" {
+		return runtime.GOOS == "linux" && riscv64CompilerSupports(features)
+	}
+
 	switch runtime.GOOS {
 	case "linux", "darwin", "freebsd", "netbsd", "windows":
 		if runtime.GOARCH == "arm64" {
@@ -32,9 +41,6 @@ func compilerPlatformSupports(features api.CoreFeatures) bool {
 				return CpuFeatures.Has(CpuFeatureArm64Atomic)
 			}
 			return true
-		}
-		if runtime.GOARCH == "riscv64" {
-			return riscv64CompilerSupports(features)
 		}
 		fallthrough
 	case "dragonfly", "solaris", "illumos":
