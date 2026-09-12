@@ -130,12 +130,6 @@ func encodeVmerge(vd, vs2, vs1 uint32) uint32 {
 	return encodeVec(vfunctMerge, 0, vs2, vs1, opivv, vd)
 }
 
-// encodeVmvVV encodes `vmv.v.v vd, vs1`, a whole-vector copy under the current
-// vtype.
-func encodeVmvVV(vd, vs1 uint32) uint32 {
-	return encodeVec(vfunctMerge, 1, 0, vs1, opivv, vd)
-}
-
 // encodeVmvVX encodes `vmv.v.x vd, rs1`: splat an integer register.
 func encodeVmvVX(vd, rs1 uint32) uint32 {
 	return encodeVec(vfunctMerge, 1, 0, rs1, opivx, vd)

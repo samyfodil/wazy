@@ -355,13 +355,31 @@ jobs:
       # through 8.2.2+ds-0ubuntu1.18), so take a fixed build instead. Measured
       # locally on the same test binaries: 8.2.2 fails 1 run in 10, 9.2.1 zero
       # in 30. The binary is static-pie linked, so it needs nothing else.
+      # Two things are needed, and the second is easy to miss. The distro
+      # package registers the binfmt_misc handlers, which is what lets a test
+      # exec a riscv64 binary -- examples/cli and the wasi cat example both run
+      # the CLI as a subprocess, and without a handler that is "exit status 1".
+      # Then the 9.2.1 binary replaces the one the handler points at, so the
+      # explicit -exec and the binfmt path both get the fixed emulator.
       - name: Install a qemu carrying the /proc/self/maps fix
         run: |
+          sudo apt-get update && sudo apt-get install -y qemu-user-static
           deb=qemu-user_9.2.1+ds-1ubuntu5_amd64.deb
           curl -fsSL -o "$deb" "http://archive.ubuntu.com/ubuntu/pool/universe/q/qemu/$deb"
           dpkg -x "$deb" "$PWD/.qemu"
-          echo "QEMU_RISCV64=$PWD/.qemu/usr/bin/qemu-riscv64" >> "$GITHUB_ENV"
-          "$PWD/.qemu/usr/bin/qemu-riscv64" --version
+          sudo cp "$PWD/.qemu/usr/bin/qemu-riscv64" /usr/bin/qemu-riscv64-static
+          qemu-riscv64-static --version
+          # Fail here, not thirty minutes later, if the handler is missing.
+          test -e /proc/sys/fs/binfmt_misc/qemu-riscv64
+
+      # The CLI, cross-built, so the two examples that shell out to it run that
+      # instead of `go run` -- which every other cross-architecture job in this
+      # file already does for the same reason.
+      - name: Cross-build the CLI for the examples that exec it
+        run: go build -o "$PWD/wazycli" ./cmd/wazy
+        env:
+          GOARCH: riscv64
+          CGO_ENABLED: 0
 
       # The whole tree, not a chosen subset. Every defect this backend has had
       # since the spec suites went green was outside them: the API's []uint64
@@ -369,10 +387,11 @@ jobs:
       # on a large signature, and a segfault that only a TinyGo binary's
       # register pressure produced. A subset would have caught none of them.
       - name: The tree, on the riscv64 backend
-        run: go test -p 1 -timeout 40m -exec "$QEMU_RISCV64" ./...
+        run: go test -p 1 -timeout 40m -exec qemu-riscv64-static ./...
         env:
           GOARCH: riscv64
           CGO_ENABLED: 0
+          WAZYCLI: ${{ github.workspace }}/wazycli
           # SIMD and threads are gated on RVV, and without it every suite from
           # v2 up skips itself and still reports ok. This makes that loud.
           WAZY_RISCV64_REQUIRE_V: "1"

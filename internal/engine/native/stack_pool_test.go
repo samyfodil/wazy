@@ -174,11 +174,12 @@ func TestEngine_releaseStack_grownBufferGoesToItsOwnClass(t *testing.T) {
 }
 
 func TestEngine_acquireStack_tooLargeIsNotPooled(t *testing.T) {
-	// The Get below is a sync.Pool Get, and a GC between it and the Put drops
-	// what the Put offered -- one cycle moves it to the victim cache, a second
-	// discards it. In isolation there is no GC in that window; inside the full
-	// package under a memory cap there is, which is why this failed only there.
-	// The two tests above hold GC off for the same reason.
+	// Holding GC off makes the common case deterministic: a cycle between the
+	// Put and the Get below moves what was offered to the victim cache, and a
+	// second cycle discards it. It is not sufficient on its own -- sync.Pool
+	// promises nothing about a Get returning what a Put offered, GC or no GC,
+	// and this test failed on a macos runner under -race with GC already off --
+	// so the assertion is retried, as the two tests above retry theirs.
 	disableGC(t)
 
 	e := &engine{}
@@ -187,15 +188,19 @@ func TestEngine_acquireStack_tooLargeIsNotPooled(t *testing.T) {
 	require.Equal(t, n, len(buf))
 	require.Nil(t, boxed)
 
-	// Releasing an oversized buffer beyond the largest class floors into
-	// the top class rather than panicking or growing the array.
-	e.releaseStack(buf, nil)
-
-	// Take it back out, which checks the claim above: the release on its own
-	// only asserts that nothing panicked, not that the buffer landed in the
-	// *top* class.
-	got := e.stackPools[stackPoolNumClasses-1].Get()
-	require.NotNil(t, got, "an oversized release must land in the top class")
+	// Releasing an oversized buffer beyond the largest class floors into the top
+	// class rather than panicking or growing the array. Taking it back out is
+	// what checks that: the release on its own only asserts nothing panicked,
+	// not that the buffer landed in the *top* class.
+	//
+	// The same buffer is offered each time, so the retries cost no further
+	// allocation -- which matters when it is over half a gigabyte.
+	var got any
+	for i := 0; i < maxPoolRetries && got == nil; i++ {
+		e.releaseStack(buf, nil)
+		got = e.stackPools[stackPoolNumClasses-1].Get()
+	}
+	require.NotNil(t, got, "an oversized release never reached the top class in %d attempts", maxPoolRetries)
 	require.Equal(t, n, len(*got.(*[]byte)))
 }
 

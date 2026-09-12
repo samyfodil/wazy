@@ -472,9 +472,6 @@ func encodeJalr(rd, rs1 uint32, imm int32) uint32 { return encodeI(imm, rs1, 0b0
 // encodeRet encodes `ret`, the canonical alias for `jalr zero, 0(ra)`.
 func encodeRet() uint32 { return encodeJalr(0, 1, 0) }
 
-// encodeNop encodes `nop`, the canonical alias for `addi zero, zero, 0`.
-func encodeNop() uint32 { return encodeI(0, 0, 0b000, 0, opOpImm) }
-
 // encodeEbreak encodes `ebreak`, used to fill unreachable padding.
 func encodeEbreak() uint32 { return encodeI(1, 0, 0b000, 0, opSystem) }
 
@@ -643,19 +640,6 @@ func encodeFcvtToIntRM(rd, rs1 uint32, dst64, src64, signed bool, rm uint32) uin
 		rs2 |= 1
 	}
 	return encodeR(0b1100000|fmtBit(src64), rs2, rs1, rm, rd, opOpFP)
-}
-
-// encodeFcvtToInt encodes `fcvt.{w,wu,l,lu}.{s,d} rd, rs1, rtz`. Always
-// round-towards-zero: wasm's i32.trunc_f32_s and friends truncate.
-func encodeFcvtToInt(rd, rs1 uint32, dst64, src64, signed bool) uint32 {
-	rs2 := uint32(0) // .w
-	if dst64 {
-		rs2 = 2 // .l
-	}
-	if !signed {
-		rs2 |= 1 // .wu / .lu
-	}
-	return encodeR(0b1100000|fmtBit(src64), rs2, rs1, rmRTZ, rd, opOpFP)
 }
 
 // encodeFcvtFromInt encodes `fcvt.{s,d}.{w,wu,l,lu} rd, rs1`.
