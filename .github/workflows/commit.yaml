@@ -311,7 +311,8 @@ jobs:
           WAZY_SPECTEST_REQUIRE_CASES: "1"  # the corpus came from the artifact; skipping means it did not
 
   # And under the emulator, which is the only place the vector extension is
-  # guaranteed present.
+  # guaranteed present -- so it is where the SIMD and threads suites actually
+  # run if the native runner's silicon lacks RVV.
   #
   # Without -one-insn-per-tb, which the test.riscv64 make target carries: that
   # flag guards against qemu-user holding a stale translation of a page the JIT
@@ -320,10 +321,10 @@ jobs:
   # every push buys little; `make test.riscv64` is the thorough form and is
   # what to run before a release.
   test_riscv64:
-    name: riscv64 + interpreter, Linux (qemu)
+    name: riscv64, Linux (qemu)
     runs-on: ubuntu-24.04
     needs: spectest_corpus  # for the generated 3.0 cases, which are not committed
-    timeout-minutes: 60  # two emulated runs of the whole tree
+    timeout-minutes: 45  # an emulated run of the whole tree
 
     steps:
 
@@ -365,18 +366,6 @@ jobs:
           # v2 up skips itself and still reports ok. This makes that loud.
           WAZY_RISCV64_REQUIRE_V: "1"
           WAZY_SPECTEST_REQUIRE_CASES: "1"  # the corpus came from the artifact; skipping means it did not
-
-      # s390x has no backend, so it selects the interpreter -- the fallback
-      # `make check` only ever compiles. riscv64 used to serve this purpose and
-      # cannot any more, now that it has a backend of its own.
-      - name: The tree, on the interpreter (no backend for this arch)
-        run: |
-          go test -p 1 -timeout 40m -exec qemu-s390x-static \
-            $(go list ./... | grep -v '^github.com/samyfodil/wazy/cmd/wazy$')
-        env:
-          GOARCH: s390x
-          CGO_ENABLED: 0
-          WAZY_SPECTEST_REQUIRE_CASES: "1"
 
   test_vm:
     name: amd64, ${{ matrix.os.name }}

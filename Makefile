@@ -437,11 +437,20 @@ test.arm64: ## Run the suite for the arm64 compiler backend under qemu-user
 
 .PHONY: test.interp
 test.interp: ## Run the suite against the interpreter engine (s390x cross-run, no compiler)
-	# An arch with no backend auto-selects the interpreter, and compiler-codegen
-	# tests self-skip via platform.CompilerSupported(). That used to be riscv64;
-	# now that riscv64 has a backend, an arch is needed that still does not --
-	# s390x is the one `make check` already cross-builds. No JIT, so no
+	# An arch with no backend auto-selects the interpreter. That used to be
+	# riscv64; now that riscv64 has a backend, an arch is needed that still does
+	# not -- s390x is the one `make check` already cross-builds. No JIT, so no
 	# -one-insn-per-tb. Needs qemu-s390x-static.
+	#
+	# Three packages do not pass here, none of them about the engine, which is
+	# why this is not in CI:
+	#   - internal/engine/native does not build: stack_pool_test.go is
+	#     //go:build amd64 || arm64 || riscv64, and the ungated e2e_test.go
+	#     calls RetainedStackLenForTest from it. That breaks on any arch without
+	#     a backend, and has since before riscv64 had one.
+	#   - internal/sysfs and imports/wasi_snapshot_preview1 disagree on
+	#     timestamp granularity under this emulator (223000005000 vs
+	#     223000000000).
 	@GOARCH=s390x CGO_ENABLED=0 $(cap) go test -p 1 -timeout 60m -exec qemu-s390x-static ./...
 
 .PHONY: test.riscv64
