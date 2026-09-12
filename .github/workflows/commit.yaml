@@ -341,24 +341,35 @@ jobs:
           name: spectest-v3-corpus
           path: internal/integration_test/spectest/v3/testdata
 
-      - run: sudo apt-get update && sudo apt-get install -y qemu-user-static
+      # Not the distro's qemu. ubuntu-24.04 ships 8.2.2, which emulates
+      # /proc/self/maps without holding mmap_lock: a concurrent mapping change
+      # can leave its maps printer looking at a guest mapping absent from its
+      # own host snapshot, interval_tree_iter_first() returns null, and the next
+      # field access dereferences it. Anything that writes a CPU or heap profile
+      # reaches it, because runtime/pprof's profile builder reads that file --
+      # which made cmd/wazy die with "QEMU internal SIGSEGV {code=MAPERR,
+      # addr=0x20}" about one run in six.
+      #
+      # Upstream fix bbd5630a75e7, backported as dad762774e, released in 8.2.8.
+      # Ubuntu has not backported it to noble at any patch level (checked
+      # through 8.2.2+ds-0ubuntu1.18), so take a fixed build instead. Measured
+      # locally on the same test binaries: 8.2.2 fails 1 run in 10, 9.2.1 zero
+      # in 30. The binary is static-pie linked, so it needs nothing else.
+      - name: Install a qemu carrying the /proc/self/maps fix
+        run: |
+          deb=qemu-user_9.2.1+ds-1ubuntu5_amd64.deb
+          curl -fsSL -o "$deb" "http://archive.ubuntu.com/ubuntu/pool/universe/q/qemu/$deb"
+          dpkg -x "$deb" "$PWD/.qemu"
+          echo "QEMU_RISCV64=$PWD/.qemu/usr/bin/qemu-riscv64" >> "$GITHUB_ENV"
+          "$PWD/.qemu/usr/bin/qemu-riscv64" --version
 
       # The whole tree, not a chosen subset. Every defect this backend has had
       # since the spec suites went green was outside them: the API's []uint64
       # encoding, a v128 crossing into a host function, a trampoline that spun
       # on a large signature, and a segfault that only a TinyGo binary's
       # register pressure produced. A subset would have caught none of them.
-      # cmd/wazy is left out because qemu-user cannot run it: it dies with
-      # "QEMU internal SIGSEGV {code=MAPERR, addr=0x20}" -- a crash inside the
-      # emulator, not the guest -- roughly one run in six. Not ours, and not
-      # this backend's: it does the same under qemu-aarch64, and under
-      # qemu-s390x, which has no backend and so runs the pure-Go interpreter
-      # with no generated code at all. The package runs natively on every
-      # arch the other jobs cover.
       - name: The tree, on the riscv64 backend
-        run: |
-          go test -p 1 -timeout 40m -exec qemu-riscv64-static \
-            $(go list ./... | grep -v '^github.com/samyfodil/wazy/cmd/wazy$')
+        run: go test -p 1 -timeout 40m -exec "$QEMU_RISCV64" ./...
         env:
           GOARCH: riscv64
           CGO_ENABLED: 0
