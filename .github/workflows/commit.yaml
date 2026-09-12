@@ -264,14 +264,19 @@ jobs:
           run: find _tests -name "*.test" | xargs -t -Itestbin nice testbin -test.short -test.v
 
   # The riscv64 backend is the only one no hosted runner executes natively, so
-  # the emulator stands in for the silicon. -one-insn-per-tb is the same
-  # workaround the test.arm64 make target carries: qemu-user can hold a stale
-  # translation of a page the JIT has just rewritten.
+  # the emulator stands in for the silicon.
+  #
+  # Without -one-insn-per-tb, which the test.riscv64 make target carries: that
+  # flag guards against qemu-user holding a stale translation of a page the JIT
+  # has rewritten, and it costs about 25x -- half an hour here against a couple
+  # of minutes. The risk it covers does not vary by suite, so paying it on
+  # every push buys little; `make test.riscv64` is the thorough form and is
+  # what to run before a release.
   test_riscv64:
     name: riscv64, Linux (qemu)
     runs-on: ubuntu-24.04
     needs: spectest_corpus  # for the generated 3.0 cases, which are not committed
-    timeout-minutes: 45
+    timeout-minutes: 35
 
     steps:
 
@@ -292,10 +297,11 @@ jobs:
 
       - name: Spec suites for the riscv64 backend
         run: |
-          go test -p 1 -timeout 40m \
-            -exec 'qemu-riscv64-static -one-insn-per-tb' \
+          go test -p 1 -timeout 30m \
+            -exec qemu-riscv64-static \
             ./internal/integration_test/riscv64exec/... \
-            ./internal/integration_test/spectest/...
+            ./internal/integration_test/spectest/... \
+            ./internal/integration_test/engine/...
         env:
           GOARCH: riscv64
           CGO_ENABLED: 0

@@ -727,17 +727,48 @@ func (m *machine) storeExecCtxField(execCtx, src regalloc.VReg, off int64, bits 
 // sequence in place, reached by falling through a branch on the inverted
 // condition. Costlier in code size than the shared island, and the only form
 // whose recorded address identifies the trap site rather than the island.
+//
+// The sequence it emits touches only the reserved registers, which is not a
+// style choice. The branch over it sits inside a basic block, and the register
+// allocator treats a basic block as straight-line code: it will place a reload
+// in the region the branch skips, leaving the value garbage on the path that
+// skipped it. That is not theoretical -- it cost a SIGSEGV in TinyGo's GC,
+// where the reload of a spilled execution context landed inside the skipped
+// trap and the in-bounds path then stored through a bounds-check temporary.
+// With no allocated register in the region there is nothing to place.
 func (m *machine) lowerExitIfTrueWithCodeInline(execCtx regalloc.VReg, cond ssa.Value, code nativeapi.ExitCode) {
 	flag, rx, ry := m.lowerTrapBranchOperands(cond)
+
+	// Last thing before the branch, to keep the window in which a spill could
+	// land on tmpReg as short as it can be.
+	m.insert(m.allocateInstr().asMove64(tmpRegVReg, execCtx))
 
 	// The branch is patched once the target label exists, which is only after
 	// the sequence it skips has been emitted.
 	cbr := m.allocateInstr()
 	m.insert(cbr)
-	m.emitExitWithCode(execCtx, code)
+	m.emitTrapExitInline(code)
 	nop, l := m.allocateBrTarget()
 	m.insert(nop)
 	cbr.asCondBr(flag.invert(), rx, ry, l)
+}
+
+// emitTrapExitInline emits the body of a trap island in place, reading the
+// execution context out of tmpReg. It is the same sequence emitTrapIslands
+// writes after register allocation, and for the same reason: reserved registers
+// only.
+func (m *machine) emitTrapExitInline(code nativeapi.ExitCode) {
+	m.lowerConstantI64(tmpReg2VReg, int64(code))
+	m.storeExecCtxField(tmpRegVReg, tmpReg2VReg, nativeapi.ExecutionContextOffsetExitCodeOffset.I64(), 32)
+
+	m.emit(m.allocateInstr().asMove64(tmpReg2VReg, spVReg))
+	m.storeExecCtxField(tmpRegVReg, tmpReg2VReg, nativeapi.ExecutionContextOffsetStackPointerBeforeGoCall.I64(), 64)
+
+	// The address of this exit, undisplaced: see lowerExitWithCode.
+	m.emit(m.allocateInstr().asAdrPCRel(tmpReg2VReg, 0))
+	m.storeExecCtxField(tmpRegVReg, tmpReg2VReg, nativeapi.ExecutionContextOffsetGoCallReturnAddress.I64(), 64)
+
+	m.insert(m.allocateInstr().asExitSequence(tmpRegVReg))
 }
 
 // lowerTrapBranchOperands reduces a trap's condition to the three operands a

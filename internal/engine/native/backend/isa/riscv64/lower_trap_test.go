@@ -53,4 +53,32 @@ func TestMachine_LowerInstr_exitIfTrueWithCode_sourceOffset(t *testing.T) {
 		require.Zero(t, len(m.trapIslands))
 		require.True(t, strings.Contains(formatEmittedInstructionsInCurrentBlock(m), "exit_sequence"))
 	})
+
+	// The branch over an inline exit sits inside a basic block, and the
+	// register allocator treats a basic block as straight-line code: given a
+	// virtual register in there it may place a reload the branch skips, leaving
+	// the value garbage on the path that skipped it. That cost a SIGSEGV in
+	// TinyGo's GC, where the reload of a spilled execution context landed
+	// inside the skipped trap and the in-bounds path stored through a
+	// bounds-check temporary. Everything past the branch must already be a real
+	// register, which pre-allocation means a reserved one.
+	t.Run("the skipped region names no virtual register", func(t *testing.T) {
+		m := lower(t, ssa.SourceOffset(0x1234))
+		body := formatEmittedInstructionsInCurrentBlock(m)
+
+		var skipped []string
+		for _, line := range strings.Split(body, "\n")[1:] {
+			if strings.HasPrefix(line, "b") { // the conditional branch over the exit
+				skipped = nil
+				continue
+			}
+			skipped = append(skipped, line)
+		}
+		require.True(t, len(skipped) > 0)
+		region := strings.Join(skipped, "\n")
+		require.True(t, strings.Contains(region, "exit_sequence"))
+		// formatVReg spells a virtual register with a trailing '?'.
+		require.False(t, strings.Contains(region, "?"),
+			"inline trap exit names a virtual register:\n%s", region)
+	})
 }
