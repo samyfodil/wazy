@@ -327,20 +327,34 @@ jobs:
       # through 8.2.2+ds-0ubuntu1.18), so take a fixed build instead. Measured
       # locally on the same test binaries: 8.2.2 fails 1 run in 10, 9.2.1 zero
       # in 30. The binary is static-pie linked, so it needs nothing else.
-      # Two things are needed, and the second is easy to miss. The distro
-      # package registers the binfmt_misc handlers, which is what lets a test
-      # exec a riscv64 binary -- examples/cli and the wasi cat example both run
-      # the CLI as a subprocess, and without a handler that is "exit status 1".
-      # Then the 9.2.1 binary replaces the one the handler points at, so the
-      # explicit -exec and the binfmt path both get the fixed emulator.
-      - name: Install a qemu carrying the /proc/self/maps fix
+      # Two emulators, deliberately, each where it is needed.
+      #
+      # The distro package is installed for its binfmt_misc handler alone: that
+      # is what lets a test exec a riscv64 binary, and examples/cli and the wasi
+      # cat example both run the CLI as a subprocess. Without a handler that is
+      # "exit status 1". Those subprocesses write no profiles, so the handler's
+      # 8.2.2 is fine for them.
+      #
+      # The test binaries themselves go through -exec, and those are what write
+      # CPU and heap profiles -- reaching runtime/pprof's profile builder, which
+      # reads /proc/self/maps. 8.2.2 emulates that without holding mmap_lock and
+      # dies inside itself, "QEMU internal SIGSEGV {code=MAPERR, addr=0x20}",
+      # about one run in six. Upstream fix bbd5630a75e7, backported dad762774e,
+      # released in 8.2.8; Ubuntu has not backported it to noble at any patch
+      # level. Measured on the same binaries: 8.2.2 fails 1 run in 10, 9.2.1
+      # zero in 30.
+      #
+      # The 9.2.1 build is used from where it unpacks rather than replacing the
+      # handler's binary, because the handler is registered with the F flag,
+      # which pins the interpreter file open -- overwriting it is ETXTBSY.
+      - name: Install the emulators
         run: |
           sudo apt-get update && sudo apt-get install -y qemu-user-static
           deb=qemu-user_9.2.1+ds-1ubuntu5_amd64.deb
           curl -fsSL -o "$deb" "http://archive.ubuntu.com/ubuntu/pool/universe/q/qemu/$deb"
           dpkg -x "$deb" "$PWD/.qemu"
-          sudo cp "$PWD/.qemu/usr/bin/qemu-riscv64" /usr/bin/qemu-riscv64-static
-          qemu-riscv64-static --version
+          echo "QEMU_RISCV64=$PWD/.qemu/usr/bin/qemu-riscv64" >> "$GITHUB_ENV"
+          "$PWD/.qemu/usr/bin/qemu-riscv64" --version
           # Fail here, not thirty minutes later, if the handler is missing.
           test -e /proc/sys/fs/binfmt_misc/qemu-riscv64
 
@@ -359,7 +373,7 @@ jobs:
       # on a large signature, and a segfault that only a TinyGo binary's
       # register pressure produced. A subset would have caught none of them.
       - name: The tree, on the riscv64 backend
-        run: go test -p 1 -timeout 40m -exec qemu-riscv64-static ./...
+        run: go test -p 1 -timeout 40m -exec "$QEMU_RISCV64" ./...
         env:
           GOARCH: riscv64
           CGO_ENABLED: 0
