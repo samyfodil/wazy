@@ -341,7 +341,40 @@ func (m *machine) insertStackBoundsCheck(requiredStackSize int64, cur *instructi
 	call.asCallIndirect(tmpRegVReg, nil)
 	cur = linkInstr(cur, call)
 
-	return linkInstr(cur, afterGrow)
+	cur = linkInstr(cur, afterGrow)
+	// Measure the skip here rather than leaving it to resolveRelativeAddresses.
+	// A function prologue does go through that pass, but
+	// CompileGoFunctionTrampoline does not -- and an unresolved conditional
+	// branch encodes a displacement of zero, which on RISC-V is a branch to
+	// itself. The trampoline for a signature large enough to need this check
+	// spun forever, and only a signature that large reaches it. Where the pass
+	// does run it recomputes the same distance from the label.
+	resolveCondBrToAfter(brOK, cur)
+	return cur
+}
+
+// resolveCondBrToAfter writes into br the displacement that lands just past
+// last.
+//
+// It iterates because growing a branch to reach a distant target also moves the
+// target: each pass can only raise the expansion level, which is capped, so it
+// settles.
+func resolveCondBrToAfter(br, last *instruction) {
+	for {
+		var off int64
+		for cur := br; ; cur = cur.next {
+			off += cur.size()
+			if cur == last {
+				break
+			}
+		}
+		if want := condBrExpansionFor(off, br.condBrExpansion()); want != br.condBrExpansion() {
+			br.setCondBrExpansion(want)
+			continue
+		}
+		br.condBrOffsetResolve(off)
+		return
+	}
 }
 
 // insertExitSequence emits the "set the exit code, record SP and the resume
@@ -408,8 +441,10 @@ func (m *machine) emitTrapIslands() {
 		cur = linkInstr(cur, mv)
 		cur = m.storeToExecCtx(cur, tmpRegVReg, tmpReg2VReg, nativeapi.ExecutionContextOffsetStackPointerBeforeGoCall.I64(), 64)
 
+		// The island's own address: inside the function that trapped, which is
+		// all the backtracer needs. See lowerExitWithCode.
 		adr := m.allocateInstr()
-		adr.asAdrPCRel(tmpReg2VReg, goExitResumeOffsetFromAdr)
+		adr.asAdrPCRel(tmpReg2VReg, 0)
 		cur = linkInstr(cur, adr)
 		cur = m.storeToExecCtx(cur, tmpRegVReg, tmpReg2VReg, nativeapi.ExecutionContextOffsetGoCallReturnAddress.I64(), 64)
 

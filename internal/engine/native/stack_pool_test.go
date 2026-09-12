@@ -174,6 +174,13 @@ func TestEngine_releaseStack_grownBufferGoesToItsOwnClass(t *testing.T) {
 }
 
 func TestEngine_acquireStack_tooLargeIsNotPooled(t *testing.T) {
+	// The Get below is a sync.Pool Get, and a GC between it and the Put drops
+	// what the Put offered -- one cycle moves it to the victim cache, a second
+	// discards it. In isolation there is no GC in that window; inside the full
+	// package under a memory cap there is, which is why this failed only there.
+	// The two tests above hold GC off for the same reason.
+	disableGC(t)
+
 	e := &engine{}
 	n := (stackPoolBaseSize << (stackPoolNumClasses - 1)) + 1
 	buf, boxed := e.acquireStack(n)

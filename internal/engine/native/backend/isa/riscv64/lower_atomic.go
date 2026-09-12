@@ -20,7 +20,7 @@ import (
 // the word-aligned address and the shift that places the field inside it -- is
 // computed here, ahead of register allocation, as ordinary instructions.
 
-// atomicOperands pulls apart an atomic instruction's address argument into the
+// atomicWordAndShift pulls apart an atomic instruction's address argument into the
 // pair the sub-word sequences want: the containing word's address, and the bit
 // position of the field within it.
 //

@@ -206,16 +206,7 @@ func (m *machine) goEntryPreamblePassResult(cur *instruction, resultSlicePtr reg
 		cur = linkInstr(cur, load)
 	}
 
-	amode := m.amodePool.Allocate()
-	*amode = addressMode{kind: addressModeKindRegSignedImm12, rn: resultSlicePtr, imm: 0}
-	store := m.allocateInstr()
-	if typ == ssa.TypeV128 {
-		// Two []uint64 slots, written as one 16-byte vector store.
-		store.asVecStore(src, amode)
-	} else {
-		store.asStore(src, amode, 64, typ.IsInt())
-	}
-	cur = linkInstr(cur, store)
+	cur = m.storeWasmValueToSlot(cur, src, resultSlicePtr, 0, typ)
 
 	step := int64(8)
 	if typ == ssa.TypeV128 {

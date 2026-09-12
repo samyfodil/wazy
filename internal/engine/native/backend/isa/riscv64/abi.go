@@ -353,6 +353,39 @@ func (m *machine) prepareCall(si *ssa.Instruction, isDirectCall bool) (ssa.Value
 	return indirectCalleePtr, directCallee, calleeABI, stackSlotSize
 }
 
+// storeWasmValueToSlot writes one wasm value into a []uint64 slot in the
+// encoding the api package defines: an i32 zero-extended, an f32 in the low
+// four bytes, and in both cases an upper half of zero.
+//
+// Neither is what the register holds. This backend keeps an i32
+// sign-extended -- that is what lets one unsigned 64-bit comparison serve i32
+// as well as i64, with no masking -- and RV64D requires a single-precision
+// value in an f-register to be NaN-boxed, upper half all ones. Storing the
+// register whole hands Go 0xffffffffffffffff for an i32 -1 where api.EncodeI32
+// and every other backend give 0x00000000ffffffff, and 0xffffffff40400000 for
+// the f32 3.0.
+//
+// Two paths cross into Go this way: a call's results, and a host function's
+// arguments. The wasm stack itself is not one of them -- it stays in the
+// backend's own representation.
+func (m *machine) storeWasmValueToSlot(cur *instruction, src, base regalloc.VReg, offset int64, typ ssa.Type) *instruction {
+	amode := m.amodePool.Allocate()
+	*amode = addressMode{kind: addressModeKindRegSignedImm12, rn: base, imm: offset}
+	if typ == ssa.TypeV128 {
+		// Two slots, written as one sixteen-byte vector store.
+		return linkInstr(cur, m.allocateInstr().asVecStore(src, amode))
+	}
+	bits := byte(typ.Bits())
+	cur = linkInstr(cur, m.allocateInstr().asStore(src, amode, bits, typ.IsInt()))
+	if bits == 64 {
+		return cur
+	}
+	// A 32-bit store leaves the slot's upper half alone; zero it.
+	hi := m.amodePool.Allocate()
+	*hi = addressMode{kind: addressModeKindRegSignedImm12, rn: base, imm: offset + 4}
+	return linkInstr(cur, m.allocateInstr().asStore(zeroVReg, hi, 32, true))
+}
+
 func (m *machine) insertReturns(si *ssa.Instruction, calleeABI *backend.FunctionABI, stackSlotSize int64) {
 	var index int
 	r1, rs := si.Returns()

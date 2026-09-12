@@ -40,7 +40,20 @@ func TestE2E(t *testing.T) {
 	type callCase struct {
 		funcName           string // defaults to testcases.ExportedFunctionName
 		params, expResults []uint64
-		expErr             string
+		// expResultsRiscv64 replaces expResults on riscv64, for the handful of
+		// results whose exact bits the wasm spec leaves open and the hardware
+		// therefore decides.
+		//
+		// The only case so far is a NaN payload. RISC-V's F and D extensions
+		// specify that every NaN *result* is the canonical NaN -- payloads are
+		// architecturally not propagated, by any instruction -- where x86 and
+		// arm64 carry an input payload through. The spec calls that result
+		// nan:arithmetic, meaning any quiet NaN, so all three are conformant
+		// and the spec suites pass on all three. Nothing in the backend could
+		// close the gap either: it is not min/max-specific, it is what fadd
+		// does.
+		expResultsRiscv64 []uint64
+		expErr            string
 	}
 	for _, tc := range []struct {
 		name        string
@@ -344,6 +357,13 @@ func TestE2E(t *testing.T) {
 						uint64(0x7ff80001),
 						uint64(0x7ff80001),
 					},
+					expResultsRiscv64: []uint64{
+						0x7ff8000000000000,
+						0x7ff8000000000000,
+
+						uint64(0x7fc00000),
+						uint64(0x7fc00000),
+					},
 				},
 				{
 					// Both NaN.
@@ -357,6 +377,13 @@ func TestE2E(t *testing.T) {
 
 						uint64(0x7ff80001),
 						uint64(0x7ff80001),
+					},
+					expResultsRiscv64: []uint64{
+						0x7ff8000000000000,
+						0x7ff8000000000000,
+
+						uint64(0x7fc00000),
+						uint64(0x7fc00000),
 					},
 				},
 				{
@@ -1021,10 +1048,14 @@ func TestE2E(t *testing.T) {
 								require.Contains(t, err.Error(), cc.expErr)
 							} else {
 								require.NoError(t, err)
-								require.Equal(t, len(cc.expResults), len(result))
-								for i := range cc.expResults {
-									if cc.expResults[i] != result[i] {
-										t.Errorf("result[%d]: exp %x, got %x", i, cc.expResults[i], result[i])
+								exp := cc.expResults
+								if runtime.GOARCH == "riscv64" && cc.expResultsRiscv64 != nil {
+									exp = cc.expResultsRiscv64
+								}
+								require.Equal(t, len(exp), len(result))
+								for i := range exp {
+									if exp[i] != result[i] {
+										t.Errorf("result[%d]: exp %x, got %x", i, exp[i], result[i])
 									}
 								}
 							}

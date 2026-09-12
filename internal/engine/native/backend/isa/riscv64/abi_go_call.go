@@ -122,11 +122,7 @@ func (m *machine) CompileGoFunctionTrampoline(exitCode nativeapi.ExitCode, sig *
 		} else {
 			cur, v = m.goFunctionCallLoadStackArg(cur, originalArg0Reg, arg, intTmp, floatTmp)
 		}
-		store := m.allocateInstr()
-		amode := m.amodePool.Allocate()
-		*amode = addressMode{kind: addressModeKindRegSignedImm12, rn: arg0ret0AddrReg, imm: 0}
-		store.asStore(v, amode, 64, arg.Type.IsInt())
-		cur = linkInstr(cur, store)
+		cur = m.storeWasmValueToSlot(cur, v, arg0ret0AddrReg, 0, arg.Type)
 		// No post-index addressing on RISC-V; advance explicitly.
 		cur = m.addRegImm(cur, arg0ret0AddrReg, arg0ret0AddrReg, goCallSlotSize(arg.Type))
 	}
@@ -176,16 +172,22 @@ func (m *machine) CompileGoFunctionTrampoline(exitCode nativeapi.ExitCode, sig *
 		load := m.allocateInstr()
 		dst := r.Reg
 		if r.Kind != backend.ABIArgKindReg {
-			if r.Type.IsInt() {
+			switch {
+			case r.Type == ssa.TypeV128:
+				dst = vecTmpRegVReg
+			case r.Type.IsInt():
 				dst = intTmp
-			} else {
+			default:
 				dst = floatTmp
 			}
 		}
-		if r.Type.IsInt() {
+		switch {
+		case r.Type == ssa.TypeV128:
+			load.asVecLoad(dst, amode)
+		case r.Type.IsInt():
 			// An i32 result must arrive sign-extended like every other i32.
 			load.asLoad(dst, amode, r.Type.Bits(), r.Type == ssa.TypeI32)
-		} else {
+		default:
 			load.asFpuLoad(dst, amode, r.Type.Bits())
 		}
 		cur = linkInstr(cur, load)
@@ -229,9 +231,17 @@ func (m *machine) goFunctionCallLoadStackArg(cur *instruction, originalArg0Reg r
 	load := m.allocateInstr()
 	amode := m.amodePool.Allocate()
 	*amode = addressMode{kind: addressModeKindRegSignedImm12, rn: originalArg0Reg, imm: 0}
-	if arg.Type.IsInt() {
+	switch {
+	case arg.Type == ssa.TypeV128:
+		// A v128 never travels in a register across a call on this ISA, so a
+		// stack-passed one has to land in the reserved vector scratch. It
+		// cannot land in floatTmp at all: RV64D's f-registers are 64 bits wide
+		// and belong to a different file from RVV's.
+		dst = vecTmpRegVReg
+		load.asVecLoad(dst, amode)
+	case arg.Type.IsInt():
 		load.asLoad(dst, amode, arg.Type.Bits(), arg.Type == ssa.TypeI32)
-	} else {
+	default:
 		dst = floatTmp
 		load.asFpuLoad(dst, amode, arg.Type.Bits())
 	}
@@ -244,7 +254,11 @@ func (m *machine) goFunctionCallStoreStackResult(cur *instruction, originalRet0R
 	store := m.allocateInstr()
 	amode := m.amodePool.Allocate()
 	*amode = addressMode{kind: addressModeKindRegSignedImm12, rn: originalRet0Reg, imm: 0}
-	store.asStore(resultVReg, amode, result.Type.Bits(), result.Type.IsInt())
+	if result.Type == ssa.TypeV128 {
+		store.asVecStore(resultVReg, amode)
+	} else {
+		store.asStore(resultVReg, amode, result.Type.Bits(), result.Type.IsInt())
+	}
 	cur = linkInstr(cur, store)
 	return m.addRegImm(cur, originalRet0Reg, originalRet0Reg, goCallSlotSize(result.Type))
 }

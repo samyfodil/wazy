@@ -268,6 +268,10 @@ var (
 	spVReg      = x2VReg
 	tmpRegVReg  = x31VReg
 	tmpReg2VReg = x30VReg
+	// The reserved vector scratch, for the paths that move a v128 after
+	// register allocation: a stack-passed v128 crossing a Go call has nowhere
+	// allocator-assigned to land.
+	vecTmpRegVReg = v31VReg
 )
 
 var regNames = [...]string{
