@@ -263,24 +263,54 @@ jobs:
           # This runs all tests compiled above in sequence.
           run: find _tests -name "*.test" | xargs -t -Itestbin nice testbin -test.short -test.v
 
-  # There is no native riscv64 job, and it is not for want of trying.
+  # Native riscv64, on real hardware.
   #
-  # The label upstream wazero uses, ubuntu-24.04-riscv, resolves for them to
-  # runners named rise-riscv-runner-* -- real RISC-V hardware donated through
-  # RISE (the RISC-V Software Ecosystem) and attached to their org. GitHub does
-  # not offer a hosted riscv64 runner; its own machines report as
-  # "GitHub Actions <n>", which is what every other job in this file lands on.
+  # ubuntu-24.04-riscv resolves through RISE RISC-V Runners
+  # (https://riscv-runners.riseproject.dev), a managed service that RISE offers
+  # free to open-source projects: a GitHub App provisions ephemeral runners on
+  # real RISC-V nodes. It needs the App installed on the account --
+  # github.com/apps/rise-risc-v-runners-personal for a personal account,
+  # github.com/apps/rise-risc-v-runners for an org -- and until it is, jobs with
+  # this label sit queued with no runner assigned rather than failing. That is
+  # what the earlier "never once completed" note was seeing.
   #
-  # A label resolves to runners attached to *your* org, so with none attached
-  # here the job never gets a machine at all: measured, it sat queued 40
-  # minutes with runner="" and was cancelled, while the emulated job beside it
-  # was allocated in four. That is what the earlier note meant by "never once
-  # completed"; it was right, and the cause is not the job's contents.
-  #
-  # To get native coverage, wazy needs riscv64 runners attached -- apply to
-  # RISE's runner programme for open-source projects, or register a self-hosted
-  # riscv64 machine -- and then this job is worth adding back. Until then the
-  # emulator is the only option, with the caveats recorded on it.
+  # Only one label is user-facing and it does not choose a board; today it lands
+  # on Scaleway EM-RV1. Which extensions that silicon carries decides whether the
+  # SIMD and threads suites run here or skip themselves, so the job records the
+  # ISA string and does NOT set WAZY_RISCV64_REQUIRE_V: on hardware without the
+  # vector extension, skipping those suites is correct behaviour, not a failure.
+  test_riscv64_native:
+    name: riscv64, Linux (native)
+    runs-on: ubuntu-24.04-riscv
+    needs: spectest_corpus  # for the generated 3.0 cases, which are not committed
+    timeout-minutes: 60
+
+    steps:
+
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: spectest-v3-corpus
+          path: internal/integration_test/spectest/v3/testdata
+
+      # Which extensions this silicon has decides which suites run, so a green
+      # run should not be ambiguous about it.
+      - name: Report the machine
+        run: |
+          uname -m
+          grep -m1 -E '^isa' /proc/cpuinfo || true
+          grep -m1 -E '^uarch|^mvendorid' /proc/cpuinfo || true
+
+      - run: go test -timeout 45m ./...
+        env:
+          WAZY_SPECTEST_REQUIRE_CASES: "1"  # the corpus came from the artifact; skipping means it did not
 
   # And under the emulator, which is the only place the vector extension is
   # guaranteed present -- so it is where the SIMD and threads suites actually
