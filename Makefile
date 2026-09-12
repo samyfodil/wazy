@@ -18,9 +18,15 @@ main_packages := $(sort $(foreach f,$(dir $(main_sources)),$(if $(findstring ./,
 
 go_test_options ?= -timeout 300s
 
-# Every test/benchmark run goes through scripts/cap: a rootless memory-capped
-# cgroup scope, so a runaway suite is killed inside its own cgroup instead of
-# taking the desktop down. Override the ceiling with `make test cap_mem=4G`.
+# Local development only. Every test/benchmark run goes through scripts/cap: a
+# rootless memory-capped cgroup scope, so a runaway suite is killed inside its
+# own cgroup instead of taking the desktop down. Override the ceiling with
+# `make test cap_mem=4G`.
+#
+# It drops out entirely under CI. A hosted runner is disposable and already
+# bounded, has no user systemd session for the scope, and is not the machine
+# this protects; scripts/cap refuses to run uncapped rather than falling back
+# silently, so leaving it in CI's path turns every `make test` into exit 70.
 #
 # 2G, not 1G, and the difference is measured rather than guessed: the SIMD
 # spectests peak at 1084 MiB and the rest of the spectest corpus at 1059 MiB
@@ -30,7 +36,10 @@ go_test_options ?= -timeout 300s
 # pressure the cap exists to avoid. A ceiling below a job's real working set
 # does not contain it, it strangles it.
 cap_mem ?= 2G
-cap     := ./scripts/cap $(cap_mem) --
+# CI is set by GitHub Actions and every other CI worth naming.
+cap     := $(if $(CI),,./scripts/cap $(cap_mem) --)
+cap3    := $(if $(CI),,../../../scripts/cap $(cap_mem) --)
+cap4    := $(if $(CI),,../../../../scripts/cap $(cap_mem) --)
 
 .PHONY: test.examples
 test.examples:
@@ -425,8 +434,8 @@ build.spectest.multi_memory:
 .PHONY: test
 test:
 	@$(cap) go test $(go_test_options) ./...
-	@cd internal/version/testdata && ../../../scripts/cap $(cap_mem) -- go test $(go_test_options) ./...
-	@cd internal/integration_test/fuzz/wazylib && CGO_ENABLED=0 WASM_BINARY_PATH=testdata/test.wasm ../../../../scripts/cap $(cap_mem) -- go test ./...
+	@cd internal/version/testdata && $(cap3) go test $(go_test_options) ./...
+	@cd internal/integration_test/fuzz/wazylib && CGO_ENABLED=0 WASM_BINARY_PATH=testdata/test.wasm $(cap4) go test ./...
 
 .PHONY: test.arm64
 test.arm64: ## Run the suite for the arm64 compiler backend under qemu-user
@@ -536,7 +545,7 @@ fuzz_default_flags := --no-trace-compares --sanitizer=none -- -rss_limit_mb=8192
 fuzz_timeout_seconds ?= 10
 .PHONY: fuzz
 fuzz:
-	@cd internal/integration_test/fuzz && ../../../scripts/cap $(cap_mem) -- cargo test
+	@cd internal/integration_test/fuzz && $(cap3) cargo test
 	@cd internal/integration_test/fuzz && cargo fuzz run logging_no_diff $(fuzz_default_flags) -max_total_time=$(fuzz_timeout_seconds)
 	@cd internal/integration_test/fuzz && cargo fuzz run no_diff $(fuzz_default_flags) -max_total_time=$(fuzz_timeout_seconds)
 	@cd internal/integration_test/fuzz && cargo fuzz run memory_no_diff $(fuzz_default_flags) -max_total_time=$(fuzz_timeout_seconds)

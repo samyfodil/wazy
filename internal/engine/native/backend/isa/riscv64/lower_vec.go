@@ -3,10 +3,9 @@ package riscv64
 import (
 	"fmt"
 
-	"github.com/samyfodil/wazy/internal/moremath"
-
 	"github.com/samyfodil/wazy/internal/engine/native/backend/regalloc"
 	"github.com/samyfodil/wazy/internal/engine/native/ssa"
+	"github.com/samyfodil/wazy/internal/moremath"
 )
 
 // sewForLane maps a wasm lane shape to the RVV element width that covers it.

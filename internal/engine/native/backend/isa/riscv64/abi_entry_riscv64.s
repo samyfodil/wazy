@@ -9,11 +9,11 @@
 // than X31, because the Go assembler reserves X31 as its own temporary; and
 // X27 is never touched, because that is g.
 TEXT ·entrypoint(SB), NOSPLIT|NOFRAME, $0-48
-	MOV preambleExecutable+0(FP), X5       // t0: jump target
-	MOV functionExecutable+8(FP), X22      // s6
-	MOV executionContextPtr+16(FP), X10    // a0
-	MOV moduleContextPtr+24(FP), X11       // a1
-	MOV paramResultSlicePtr+32(FP), X18    // s2
+	MOV preambleExecutable+0(FP), X5         // t0: jump target
+	MOV functionExecutable+8(FP), X22        // s6
+	MOV executionContextPtr+16(FP), X10      // a0
+	MOV moduleContextPtr+24(FP), X11         // a1
+	MOV paramResultSlicePtr+32(FP), X18      // s2
 	MOV goAllocatedStackSlicePtr+40(FP), X20 // s4
 	JMP (X5)
 
@@ -23,15 +23,15 @@ TEXT ·entrypoint(SB), NOSPLIT|NOFRAME, $0-48
 // Unlike arm64, SP is an ordinary register on RISC-V, so Go's stack pointer is
 // stored straight into the execution context with no scratch in between.
 TEXT ·afterGoFunctionCallEntrypoint(SB), NOSPLIT|NOFRAME, $0-32
-	MOV goCallReturnAddress+0(FP), X19     // s3: jump target
-	MOV executionContextPtr+8(FP), X10     // a0
-	MOV stackPointer+16(FP), X18           // s2
+	MOV goCallReturnAddress+0(FP), X19 // s3: jump target
+	MOV executionContextPtr+8(FP), X10 // a0
+	MOV stackPointer+16(FP), X18       // s2
 
 	// Save Go's frame pointer (X8), stack pointer (X2) and return address
 	// (X1) into native.executionContext, so a later exit can restore them.
-	MOV X8, 16(X10)   // ExecutionContextOffsetOriginalFramePointer
-	MOV X2, 24(X10)   // ExecutionContextOffsetOriginalStackPointer
-	MOV X1, 32(X10)   // ExecutionContextOffsetGoReturnAddress
+	MOV X8, 16(X10) // ExecutionContextOffsetOriginalFramePointer
+	MOV X2, 24(X10) // ExecutionContextOffsetOriginalStackPointer
+	MOV X1, 32(X10) // ExecutionContextOffsetGoReturnAddress
 
 	// Switch to the wasm stack and resume.
 	MOV X18, X2
@@ -59,9 +59,9 @@ TEXT ·afterGoFunctionCallEntrypoint(SB), NOSPLIT|NOFRAME, $0-32
 // because every RV64G register is 64 bits -- there is no 128-bit vector file
 // to widen them the way arm64's v-registers do.
 TEXT ·afterThrowTransferEntrypoint(SB), NOSPLIT|NOFRAME, $0-32
-	MOV executionContextPtr+8(FP), X10     // a0
-	MOV stackPointer+16(FP), X6            // t1
-	MOV targetPC+24(FP), X7                // t2
+	MOV executionContextPtr+8(FP), X10 // a0
+	MOV stackPointer+16(FP), X6        // t1
+	MOV targetPC+24(FP), X7            // t2
 
 	MOV X8, 16(X10)
 	MOV X2, 24(X10)
@@ -70,17 +70,17 @@ TEXT ·afterThrowTransferEntrypoint(SB), NOSPLIT|NOFRAME, $0-32
 	// Restore the wasm callee-saved integer registers. None of these is
 	// X10/X6/X7, so the arguments above survive, and X27 (g) is deliberately
 	// absent: it belongs to the Go runtime and compiled code never clobbers it.
-	MOV 96(X10), X8    // s0
-	MOV 104(X10), X9   // s1
-	MOV 112(X10), X18  // s2
-	MOV 120(X10), X19  // s3
-	MOV 128(X10), X20  // s4
-	MOV 136(X10), X21  // s5
-	MOV 144(X10), X22  // s6
-	MOV 152(X10), X23  // s7
-	MOV 160(X10), X24  // s8
-	MOV 168(X10), X25  // s9
-	MOV 176(X10), X26  // s10
+	MOV 96(X10), X8   // s0
+	MOV 104(X10), X9  // s1
+	MOV 112(X10), X18 // s2
+	MOV 120(X10), X19 // s3
+	MOV 128(X10), X20 // s4
+	MOV 136(X10), X21 // s5
+	MOV 144(X10), X22 // s6
+	MOV 152(X10), X23 // s7
+	MOV 160(X10), X24 // s8
+	MOV 168(X10), X25 // s9
+	MOV 176(X10), X26 // s10
 
 	// ...and the callee-saved float registers, fs0-fs11.
 	MOVD 184(X10), F8

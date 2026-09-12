@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/samyfodil/wazy/internal/engine/native/backend"
-
 	"github.com/samyfodil/wazy/internal/engine/native/backend/regalloc"
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
 	"github.com/samyfodil/wazy/internal/engine/native/ssa"

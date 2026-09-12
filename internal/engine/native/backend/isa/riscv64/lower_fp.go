@@ -3,11 +3,10 @@ package riscv64
 import (
 	"math"
 
-	"github.com/samyfodil/wazy/internal/moremath"
-
 	"github.com/samyfodil/wazy/internal/engine/native/backend/regalloc"
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
 	"github.com/samyfodil/wazy/internal/engine/native/ssa"
+	"github.com/samyfodil/wazy/internal/moremath"
 )
 
 // The RISC-V M and F/D extensions define every exceptional case as a value
