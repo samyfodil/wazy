@@ -401,11 +401,21 @@ func (m *machine) insertExitSequence(cur *instruction, execCtx regalloc.VReg, co
 	return linkInstr(cur, exit)
 }
 
+// storeToExecCtx writes one register into the execution context.
+//
+// The store follows src's register class. Hardcoding the integer form here --
+// which it did -- makes a float register's *number* name an integer register
+// instead, so `sd f8` stored x8. That is how saveRegistersInExecutionContext
+// came to save none of the twelve callee-saved float registers while
+// restoreRegistersInExecutionContext dutifully reloaded all twelve, handing
+// the compiled code an integer bit pattern where an f64 had been. It took a
+// function with enough live floats across a Go call to notice: twenty f64 and
+// twenty f32 results live across a listener.
 func (m *machine) storeToExecCtx(cur *instruction, execCtx, src regalloc.VReg, off int64, bits byte) *instruction {
 	amode := m.amodePool.Allocate()
 	*amode = addressMode{kind: addressModeKindRegSignedImm12, rn: execCtx, imm: off}
 	store := m.allocateInstr()
-	store.asStore(src, amode, bits, true)
+	store.asStore(src, amode, bits, src.RegType() == regalloc.RegTypeInt)
 	return linkInstr(cur, store)
 }
 
