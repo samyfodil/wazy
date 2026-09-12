@@ -167,9 +167,9 @@ jobs:
             no_prot_exec: true
           - os: ubuntu-24.04-arm
             arch: arm64
-          # riscv64 is not here: the hosted ubuntu-24.04-riscv runner never
-          # completes (it hangs to the 24h ceiling). The test_riscv64 job runs
-          # that backend under qemu instead.
+          # riscv64 is not here: this job's scratch-container machinery is what
+          # hung on that runner. test_riscv64_native runs it with a plain
+          # `go test`, and test_riscv64 runs it emulated.
 
     steps:
 
@@ -263,8 +263,55 @@ jobs:
           # This runs all tests compiled above in sequence.
           run: find _tests -name "*.test" | xargs -t -Itestbin nice testbin -test.short -test.v
 
-  # The riscv64 backend is the only one no hosted runner executes natively, so
-  # the emulator stands in for the silicon.
+  # Native riscv64, on the hosted preview runner.
+  #
+  # This was tried once before and disabled: "the hosted ubuntu-24.04-riscv
+  # runner has never once completed -- it hangs to the 24h ceiling every run",
+  # concluded to be a runner problem. Two things have changed. Upstream wazero
+  # still runs on that label, so it is not the runner; and the job that hung was
+  # test_scratch, which cross-builds every test binary and runs them inside a
+  # `docker buildx --platform linux/riscv64` scratch container -- a good deal
+  # more machinery than a test needs. This runs `go test` directly instead, and
+  # carries a timeout so it cannot burn the ceiling whatever happens.
+  #
+  # Note what is deliberately NOT set here: WAZY_RISCV64_REQUIRE_V. Real silicon
+  # may not have the vector extension, and where it is absent skipping the SIMD
+  # and threads suites is the correct behaviour, not a failure. The emulated job
+  # below is where RVV is guaranteed and therefore where those suites are
+  # actually exercised -- which is why both jobs exist rather than one.
+  test_riscv64_native:
+    name: riscv64, Linux (native)
+    runs-on: ubuntu-24.04-riscv
+    needs: spectest_corpus  # for the generated 3.0 cases, which are not committed
+    timeout-minutes: 45  # a backstop: this label has hung indefinitely before
+
+    steps:
+
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: spectest-v3-corpus
+          path: internal/integration_test/spectest/v3/testdata
+
+      # Which extensions this silicon actually has decides whether the SIMD and
+      # threads suites run or skip, so record it in the log rather than leaving
+      # a green run ambiguous.
+      - name: Report the ISA string
+        run: grep -m1 -E '^isa' /proc/cpuinfo || true
+
+      - run: go test -timeout 40m ./...
+        env:
+          WAZY_SPECTEST_REQUIRE_CASES: "1"  # the corpus came from the artifact; skipping means it did not
+
+  # And under the emulator, which is the only place the vector extension is
+  # guaranteed present.
   #
   # Without -one-insn-per-tb, which the test.riscv64 make target carries: that
   # flag guards against qemu-user holding a stale translation of a page the JIT
@@ -300,9 +347,17 @@ jobs:
       # encoding, a v128 crossing into a host function, a trampoline that spun
       # on a large signature, and a segfault that only a TinyGo binary's
       # register pressure produced. A subset would have caught none of them.
+      # cmd/wazy is left out because qemu-user cannot run it: it dies with
+      # "QEMU internal SIGSEGV {code=MAPERR, addr=0x20}" -- a crash inside the
+      # emulator, not the guest -- roughly one run in six. Not ours, and not
+      # this backend's: it does the same under qemu-aarch64, and under
+      # qemu-s390x, which has no backend and so runs the pure-Go interpreter
+      # with no generated code at all. The package runs natively on every
+      # arch the other jobs cover.
       - name: The tree, on the riscv64 backend
         run: |
-          go test -p 1 -timeout 40m -exec qemu-riscv64-static ./...
+          go test -p 1 -timeout 40m -exec qemu-riscv64-static \
+            $(go list ./... | grep -v '^github.com/samyfodil/wazy/cmd/wazy$')
         env:
           GOARCH: riscv64
           CGO_ENABLED: 0
@@ -316,7 +371,8 @@ jobs:
       # cannot any more, now that it has a backend of its own.
       - name: The tree, on the interpreter (no backend for this arch)
         run: |
-          go test -p 1 -timeout 40m -exec qemu-s390x-static ./...
+          go test -p 1 -timeout 40m -exec qemu-s390x-static \
+            $(go list ./... | grep -v '^github.com/samyfodil/wazy/cmd/wazy$')
         env:
           GOARCH: s390x
           CGO_ENABLED: 0
