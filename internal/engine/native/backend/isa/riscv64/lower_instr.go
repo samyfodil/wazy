@@ -183,7 +183,15 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		m.lowerExitWithCode(m.compiler.VRegOf(execCtx), code)
 	case ssa.OpcodeExitIfTrueWithCode:
 		execCtx, c, code := instr.ExitIfTrueWithCodeData()
-		m.lowerExitIfTrueWithCode(m.compiler.VRegOf(execCtx), c, code)
+		if instr.SourceOffset().Valid() {
+			// Sharing one exit sequence per trap kind costs the per-site trap
+			// address, which is what a DWARF backtrace maps back to source. A
+			// site that carries a source offset keeps its sequence inline so
+			// the address it records is its own.
+			m.lowerExitIfTrueWithCodeInline(m.compiler.VRegOf(execCtx), c, code)
+		} else {
+			m.lowerExitIfTrueWithCode(m.compiler.VRegOf(execCtx), c, code)
+		}
 	case ssa.OpcodeUndefined:
 		m.insert(m.allocateInstr().asUDF())
 
@@ -676,6 +684,13 @@ func (m *machine) lowerSelect(c, x, y, ret ssa.Value) {
 // lowerExitWithCode emits an unconditional exit back to Go.
 func (m *machine) lowerExitWithCode(execCtx regalloc.VReg, code nativeapi.ExitCode) {
 	m.pendingInstructions = m.pendingInstructions[:0]
+	m.emitExitWithCode(execCtx, code)
+}
+
+// emitExitWithCode is lowerExitWithCode without the reset, for callers that
+// have already emitted something this instruction depends on -- the inline
+// conditional trap emits the branch that skips this sequence first.
+func (m *machine) emitExitWithCode(execCtx regalloc.VReg, code nativeapi.ExitCode) {
 	tmp := m.compiler.AllocateVReg(ssa.TypeI64)
 	m.lowerConstantI64(tmp, int64(code))
 	m.storeExecCtxField(execCtx, tmp, nativeapi.ExecutionContextOffsetExitCodeOffset.I64(), 32)
@@ -684,8 +699,14 @@ func (m *machine) lowerExitWithCode(execCtx regalloc.VReg, code nativeapi.ExitCo
 	m.emit(m.allocateInstr().asMove64(sp, spVReg))
 	m.storeExecCtxField(execCtx, sp, nativeapi.ExecutionContextOffsetStackPointerBeforeGoCall.I64(), 64)
 
+	// The address of *this* exit, with no displacement: a trap never resumes,
+	// and what reads this field back is the backtracer, which needs an address
+	// inside the function that trapped. Displacing it past the exit sequence
+	// lands one byte past the end of a function whose body ends in the trap --
+	// outside the executable entirely, where the frame is dropped rather than
+	// misattributed. See abi_go_call.go for the exit that really does resume.
 	ra := m.compiler.AllocateVReg(ssa.TypeI64)
-	m.emit(m.allocateInstr().asAdrPCRel(ra, goExitResumeOffsetFromAdr))
+	m.emit(m.allocateInstr().asAdrPCRel(ra, 0))
 	m.storeExecCtxField(execCtx, ra, nativeapi.ExecutionContextOffsetGoCallReturnAddress.I64(), 64)
 
 	m.insert(m.allocateInstr().asExitSequence(execCtx))
@@ -702,9 +723,43 @@ func (m *machine) storeExecCtxField(execCtx, src regalloc.VReg, off int64, bits 
 // lowerExitIfTrueWithCode branches to the shared trap island for `code` when
 // the condition holds. One island per exit code per function keeps the check
 // site to a single branch on the hot path.
-func (m *machine) lowerExitIfTrueWithCode(execCtx regalloc.VReg, cond ssa.Value, code nativeapi.ExitCode) {
-	condDef := m.compiler.ValueDefinition(cond)
+// lowerExitIfTrueWithCodeInline lowers a conditional trap with its exit
+// sequence in place, reached by falling through a branch on the inverted
+// condition. Costlier in code size than the shared island, and the only form
+// whose recorded address identifies the trap site rather than the island.
+func (m *machine) lowerExitIfTrueWithCodeInline(execCtx regalloc.VReg, cond ssa.Value, code nativeapi.ExitCode) {
+	flag, rx, ry := m.lowerTrapBranchOperands(cond)
 
+	// The branch is patched once the target label exists, which is only after
+	// the sequence it skips has been emitted.
+	cbr := m.allocateInstr()
+	m.insert(cbr)
+	m.emitExitWithCode(execCtx, code)
+	nop, l := m.allocateBrTarget()
+	m.insert(nop)
+	cbr.asCondBr(flag.invert(), rx, ry, l)
+}
+
+// lowerTrapBranchOperands reduces a trap's condition to the three operands a
+// RISC-V conditional branch takes. A comparison feeding the trap folds into the
+// branch; anything else is tested against zero.
+func (m *machine) lowerTrapBranchOperands(cond ssa.Value) (cond_ condFlag, rx, ry operand) {
+	condDef := m.compiler.ValueDefinition(cond)
+	if m.compiler.MatchInstr(condDef, ssa.OpcodeIcmp) {
+		x, y, c := condDef.Instr.IcmpData()
+		flag, swap := condFlagFromSSAIntegerCmpCond(c)
+		rx = m.getOperand_NR(m.compiler.ValueDefinition(x))
+		ry = m.getOperand_NR(m.compiler.ValueDefinition(y))
+		if swap {
+			rx, ry = ry, rx
+		}
+		condDef.Instr.MarkLowered()
+		return flag, rx, ry
+	}
+	return condNE, m.getOperand_NR(condDef), operandNR(zeroVReg)
+}
+
+func (m *machine) lowerExitIfTrueWithCode(execCtx regalloc.VReg, cond ssa.Value, code nativeapi.ExitCode) {
 	island := m.getOrCreateTrapIsland(code)
 
 	// The island reads the execution context out of the reserved tmpReg.
@@ -712,23 +767,8 @@ func (m *machine) lowerExitIfTrueWithCode(execCtx regalloc.VReg, cond ssa.Value,
 	mv.asMove64(tmpRegVReg, execCtx)
 	m.insert(mv)
 
-	if m.compiler.MatchInstr(condDef, ssa.OpcodeIcmp) {
-		x, y, c := condDef.Instr.IcmpData()
-		flag, swap := condFlagFromSSAIntegerCmpCond(c)
-		rx := m.getOperand_NR(m.compiler.ValueDefinition(x))
-		ry := m.getOperand_NR(m.compiler.ValueDefinition(y))
-		if swap {
-			rx, ry = ry, rx
-		}
-		br := m.allocateInstr()
-		br.asCondBr(flag, rx, ry, island)
-		m.insert(br)
-		condDef.Instr.MarkLowered()
-		return
-	}
-
-	rn := m.getOperand_NR(condDef)
+	flag, rx, ry := m.lowerTrapBranchOperands(cond)
 	br := m.allocateInstr()
-	br.asCondBr(condNE, rn, operandNR(zeroVReg), island)
+	br.asCondBr(flag, rx, ry, island)
 	m.insert(br)
 }
