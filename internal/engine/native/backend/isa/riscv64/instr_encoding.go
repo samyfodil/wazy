@@ -149,6 +149,9 @@ func (i *instruction) size() int64 {
 	case vecMov:
 		return 4 // vmv1r.v needs no vtype
 	case vecLoad, vecStore:
+		if i.bigOffset() {
+			return 20 // lui + add + addi + vsetivli + the access
+		}
 		return 12 // address materialization + vsetivli + the access
 	case load, store, fpuLoad, fpuStore:
 		if i.bigOffset() {
@@ -907,10 +910,23 @@ func frmFor(mode roundMode) uint32 {
 func emitVecAddress(c compilerBuf, i *instruction) uint32 {
 	a := i.getAmode()
 	tmp := regNumberInEncoding[tmpReg]
+	rn := regNumberInEncoding[a.rn.RealReg()]
+	if i.bigOffset() {
+		// Past +/-2KiB from SP, which a function with enough stack-passed v128
+		// arguments reaches -- and every v128 argument is stack-passed on this
+		// ISA. The whole displacement has to end up in the register, low half
+		// included, because an RVV access has no displacement field to put it
+		// in.
+		hi, lo := splitImm32PCRel(a.imm, "oversized vector stack displacement")
+		c.Emit4Bytes(encodeLui(tmp, hi))
+		c.Emit4Bytes(encodeAluRRR(aluOpAdd, tmp, tmp, rn, true))
+		c.Emit4Bytes(encodeAluRRImm(aluOpAdd, tmp, tmp, lo, true))
+		return tmp
+	}
 	if !fitsInSignedImm12(a.imm) {
 		panic(fmt.Sprintf("BUG: vector access displacement %d does not fit imm12", a.imm))
 	}
-	c.Emit4Bytes(encodeAluRRImm(aluOpAdd, tmp, regNumberInEncoding[a.rn.RealReg()], int32(a.imm), true))
+	c.Emit4Bytes(encodeAluRRImm(aluOpAdd, tmp, rn, int32(a.imm), true))
 	return tmp
 }
 
