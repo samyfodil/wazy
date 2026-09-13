@@ -560,15 +560,23 @@ libsodium:
 #### CLI release related ####
 
 VERSION ?= dev
-non_windows_platforms := darwin_amd64 darwin_arm64 linux_amd64 linux_arm64
+# linux_riscv64 is Linux-only on purpose: the compiler backend for it is gated to
+# Linux (golang.org/x/sys/cpu reads the vector extension out of AT_HWCAP, which no
+# other OS provides), and nothing else has been run there.
+non_windows_platforms := darwin_amd64 darwin_arm64 linux_amd64 linux_arm64 linux_riscv64
 non_windows_archives  := $(non_windows_platforms:%=dist/wazy_$(VERSION)_%.tar.gz)
 windows_platforms     := windows_amd64 # TODO: add arm64 windows once we start testing on it.
 windows_archives      := $(windows_platforms:%=dist/wazy_$(VERSION)_%.zip)
 checksum_txt          := dist/wazy_$(VERSION)_checksums.txt
 
-# define macros for multi-platform builds. these parse the filename being built
-go-arch = $(if $(findstring amd64,$1),amd64,arm64)
-go-os   = $(if $(findstring .exe,$1),windows,$(if $(findstring linux,$1),linux,darwin))
+# Macros for multi-platform builds, taking the target from the path being built:
+# build/wazy_<goos>_<goarch>/wazy[.exe]. Read out rather than guessed at -- the
+# previous form was `$(if $(findstring amd64,$1),amd64,arm64)`, which answers
+# arm64 for anything that is not amd64, so adding a third architecture would have
+# built an arm64 binary and named it riscv64.
+go-platform = $(patsubst wazy_%,%,$(notdir $(patsubst %/,%,$(dir $1))))
+go-os   = $(firstword $(subst _, ,$(call go-platform,$1)))
+go-arch = $(lastword $(subst _, ,$(call go-platform,$1)))
 
 build/wazy_%/wazy:
 	$(call go-build,$@,$<)
