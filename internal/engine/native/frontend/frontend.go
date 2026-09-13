@@ -667,6 +667,20 @@ func WasmTypeToSSAType(vt wasm.ValueType) ssa.Type {
 	case wasm.ValueTypeF64:
 		return ssa.TypeF64
 	case wasm.ValueTypeV128:
+		// A v128 reaches here from a signature, a local, a global or a block type
+		// rather than from a vector opcode, so requireEmulatedVecOp never sees it.
+		// Without this a module carrying v128 and using no vector instruction at
+		// all -- one parameter returned unchanged is enough -- would compile to
+		// vector instructions the CPU cannot execute. Refusing is the same bargain
+		// made for the opcodes: the engine's compile path turns this into an error
+		// naming the module, so it is rejected rather than trapping later.
+		//
+		// This is what the scalar lowering has yet to do: expand a v128 into its
+		// two words everywhere it can appear, not only where it is computed.
+		if emulateSIMD {
+			panic("TODO: no scalar lowering yet for the v128 value type " +
+				"on a CPU without a vector unit")
+		}
 		return ssa.TypeV128
 	default:
 		// Concrete ref types (ref $t) have variable bit patterns.

@@ -8,7 +8,6 @@ import (
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/integration_test/spectest"
-	"github.com/samyfodil/wazy/internal/platform"
 )
 
 //go:embed testdata/*.wasm
@@ -18,10 +17,15 @@ var testcases embed.FS
 const enabledFeatures = api.CoreFeaturesV2 | api.CoreFeatureMultiMemory
 
 func TestCompiler(t *testing.T) {
-	if !platform.CompilerSupported() {
+	// Not CompilerSupported(), which asks about CoreFeaturesV2 and so about SIMD:
+	// this corpus does not use v128, and on hardware with no vector unit the
+	// suite would skip itself over a feature it never touches. See
+	// spectest.CompilerFeatures.
+	features, ok := spectest.CompilerFeatures(t, testcases, enabledFeatures)
+	if !ok {
 		t.Skip()
 	}
-	spectest.Run(t, testcases, context.Background(), wazy.NewRuntimeConfigCompiler().WithCoreFeatures(enabledFeatures))
+	spectest.Run(t, testcases, context.Background(), wazy.NewRuntimeConfigCompiler().WithCoreFeatures(features))
 }
 
 func TestInterpreter(t *testing.T) {

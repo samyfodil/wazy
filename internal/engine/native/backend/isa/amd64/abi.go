@@ -47,6 +47,10 @@ var regInfo = &regalloc.RegisterInfo{
 	},
 }
 
+// amd64's XMM registers hold both floats and vectors, so a v128 belongs to
+// the ordinary float class.
+func (m *machine) V128RegType() regalloc.RegType { return regalloc.RegTypeFloat }
+
 // ArgsResultsRegs implements backend.Machine.
 func (m *machine) ArgsResultsRegs() (argResultInts, argResultFloats []regalloc.RealReg) {
 	return intArgResultRegs, floatArgResultRegs

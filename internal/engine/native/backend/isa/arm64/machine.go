@@ -512,9 +512,10 @@ func (m *machine) resolveRelativeAddresses(ctx context.Context) {
 			for cur := pos.begin; ; cur = cur.next {
 				switch cur.kind {
 				case nop0:
-					l := cur.nop0Label()
-					if pos := m.labelPositionPool.Get(int(l)); pos != nil {
-						pos.binaryOffset = offset + size
+					if l, ok := cur.nop0Label(); ok {
+						if pos := m.labelPositionPool.Get(int(l)); pos != nil {
+							pos.binaryOffset = offset + size
+						}
 					}
 				case condBr:
 					if !cur.condBrOffsetResolved() {

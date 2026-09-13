@@ -22,6 +22,11 @@ func TestCompiler_LowerToSSA(t *testing.T) {
 		// and arm64, so 64-bit is the only layout it ever emits code for.
 		t.Skip("the native compiler does not run on a 32-bit platform")
 	}
+	// The expected SSA below is the vector lowering, so pin the mode rather than
+	// take the host's: on a CPU with no vector unit the frontend lowers v128 to
+	// scalar pairs instead, and these goldens would describe the wrong thing.
+	defer pinVectorLowering()()
+
 	// Most of the logic should look similar to Cranelift's Wasm frontend, so when you want to see
 	// what output should look like, you can run:
 	// `~/wasmtime/target/debug/clif-util wasm --target aarch64-apple-darwin testcase.wat -p -t`
@@ -2733,6 +2738,11 @@ blk9: () <-- (blk4)
 }
 
 func TestSignatureForListener(t *testing.T) {
+	// The expected signatures carry ssa.TypeV128, which is the vector lowering's
+	// shape: where there is no vector unit a v128 becomes two words instead. Pin
+	// the mode so this describes one thing on every host.
+	defer pinVectorLowering()()
+
 	for _, tc := range []struct {
 		name          string
 		sig           *wasm.FunctionType
