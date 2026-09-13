@@ -275,10 +275,17 @@ jobs:
   # what the earlier "never once completed" note was seeing.
   #
   # Only one label is user-facing and it does not choose a board; today it lands
-  # on Scaleway EM-RV1. Which extensions that silicon carries decides whether the
-  # SIMD and threads suites run here or skip themselves, so the job records the
-  # ISA string and does NOT set WAZY_RISCV64_REQUIRE_V: on hardware without the
-  # vector extension, skipping those suites is correct behaviour, not a failure.
+  # on Scaleway EM-RV1, which reports `rv64imafdcsu` -- RV64GC exactly, the
+  # baseline this backend targets, with no vector extension. So this job does NOT
+  # set WAZY_RISCV64_REQUIRE_V: on hardware that genuinely has no RVV, a SIMD
+  # module falling to the interpreter is correct behaviour and not a failure, and
+  # the emulated job below is where the vector lowering executes. It still records
+  # the ISA string, because a different board behind the same label would change
+  # which half of that is true.
+  #
+  # Worth having even so, and not only for weak memory ordering: real silicon with
+  # no vector unit is what caught memory.fill being lowered to 16-byte stores,
+  # which no emulator configuration here had ever executed.
   test_riscv64_native:
     name: riscv64, Linux (native)
     runs-on: ubuntu-24.04-riscv
@@ -312,9 +319,22 @@ jobs:
         env:
           WAZY_SPECTEST_REQUIRE_CASES: "1"  # the corpus came from the artifact; skipping means it did not
 
-  # And under the emulator, which is the only place the vector extension is
-  # guaranteed present -- so it is where the SIMD and threads suites actually
-  # run if the native runner's silicon lacks RVV.
+  # And under the emulator, for the vector extension and nothing else.
+  #
+  # The native runner above reports `rv64imafdcsu`: plain RV64GC, no V. RVV is an
+  # optional extension and that silicon does not carry it, so every module the
+  # backend would lower to vector instructions falls to the interpreter there --
+  # correctly, but leaving the SIMD lowering unexecuted. qemu-user is the only
+  # RVV machine available to this workflow, which is the whole reason this job
+  # exists; WAZY_RISCV64_REQUIRE_V below makes an emulator that quietly loses the
+  # extension fail instead of going green on skipped suites.
+  #
+  # It runs the whole tree rather than a SIMD subset because most suites gate
+  # their compiler half on CoreFeaturesV2 -- which includes SIMD -- so on a
+  # machine without RVV they skip it. Until those gates ask for the feature set
+  # they actually need, "the packages that exercise RVV" is very nearly all of
+  # them, and a subset would be a coverage cliff rather than a saving. 16 minutes
+  # against the native job's 10.
   #
   # Without -one-insn-per-tb, which the test.riscv64 make target carries: that
   # flag guards against qemu-user holding a stale translation of a page the JIT
@@ -323,7 +343,7 @@ jobs:
   # every push buys little; `make test.riscv64` is the thorough form and is
   # what to run before a release.
   test_riscv64:
-    name: riscv64, Linux (qemu)
+    name: riscv64, Linux (qemu, RVV)
     runs-on: ubuntu-24.04
     needs: spectest_corpus  # for the generated 3.0 cases, which are not committed
     timeout-minutes: 45  # an emulated run of the whole tree
@@ -365,18 +385,12 @@ jobs:
       # "exit status 1". Those subprocesses write no profiles, so the handler's
       # 8.2.2 is fine for them.
       #
-      # The test binaries themselves go through -exec, and those are what write
-      # CPU and heap profiles -- reaching runtime/pprof's profile builder, which
-      # reads /proc/self/maps. 8.2.2 emulates that without holding mmap_lock and
-      # dies inside itself, "QEMU internal SIGSEGV {code=MAPERR, addr=0x20}",
-      # about one run in six. Upstream fix bbd5630a75e7, backported dad762774e,
-      # released in 8.2.8; Ubuntu has not backported it to noble at any patch
-      # level. Measured on the same binaries: 8.2.2 fails 1 run in 10, 9.2.1
-      # zero in 30.
+      # The test binaries themselves go through -exec, and those are the ones
+      # that write profiles, so they get 9.2.1.
       #
-      # The 9.2.1 build is used from where it unpacks rather than replacing the
-      # handler's binary, because the handler is registered with the F flag,
-      # which pins the interpreter file open -- overwriting it is ETXTBSY.
+      # It is used from where it unpacks rather than replacing the handler's
+      # binary, because the handler is registered with the F flag, which pins the
+      # interpreter file open -- overwriting it is ETXTBSY.
       - name: Install the emulators
         run: |
           sudo apt-get update && sudo apt-get install -y qemu-user-static
