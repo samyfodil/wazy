@@ -14,10 +14,94 @@ import (
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/moremath"
+	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/internal/wasm"
+	"github.com/samyfodil/wazy/internal/wasm/binary"
 	"github.com/samyfodil/wazy/internal/wasmruntime"
 )
+
+// CompilerFeatures reports the feature set a suite should hand the compiler on
+// this platform, and whether the compiler can take the suite at all.
+//
+// A suite asks for CoreFeaturesV2 as a baseline and then adds the proposal it is
+// about. V2 includes SIMD, and on riscv64 SIMD needs the vector extension --
+// optional there, and absent from most shipping silicon including the CI runners,
+// which report plain RV64GC. Gating on CoreFeaturesV2 therefore withheld the
+// compiler from suites that never touch v128: tail calls, exception handling, GC,
+// threads and the rest ran interpreter-only on that hardware while reporting ok,
+// which is no coverage of the backend they exist to exercise.
+//
+// So where the compiler cannot take the whole set but can take it without SIMD,
+// drop SIMD and run. A suite whose corpus genuinely executes v128 must not use
+// this -- relaxed-simd is the clear case -- because its modules would then fail
+// to validate rather than skip. Which suites those are was established by
+// validating every module in every corpus against its own feature set with SIMD
+// cleared: only relaxed-simd and the simd_* files of v2 and v3 need it.
+func CompilerFeatures(t *testing.T, testDataFS fs.FS, features api.CoreFeatures) (api.CoreFeatures, bool) {
+	t.Helper()
+	if platform.CompilerSupports(features) {
+		return features, true
+	}
+	withoutSIMD := features &^ api.CoreFeatureSIMD
+	if !platform.CompilerSupports(withoutSIMD) {
+		return features, false
+	}
+	// Takes the FS so that dropping SIMD and checking that the corpus can stand
+	// it are the same call, and a suite cannot do the first without the second.
+	RequireNoV128ValueTypes(t, testDataFS, features)
+	return withoutSIMD, true
+}
+
+// RequireNoV128ValueTypes fails unless no module in the corpus mentions the v128
+// value type in a function signature, a global, or a local.
+//
+// This is the invariant that lets CompilerFeatures drop SIMD. Dropping it is only
+// sound while the corpus never needs a vector unit, and there are two ways it
+// could: a vector *opcode*, which the validator rejects and so fails the suite
+// loudly, and the v128 *value type*, which it does not. wazy gates only the
+// vector opcode prefix on CoreFeatureSIMD (internal/wasm/func_validation.go), so
+// a module whose body is plain `select` over v128 parameters -- v2's
+// simd_select.wast is exactly that, v128 valtypes and not one 0xfd byte --
+// validates with SIMD disabled, compiles, and then executes vector instructions
+// on a machine that has no vector unit. That is a SIGILL out of CI with no usable
+// stack trace, so it is worth a cheap check here rather than trust.
+//
+// Only the silent half needs checking; the loud half reports itself.
+func RequireNoV128ValueTypes(t *testing.T, testDataFS fs.FS, features api.CoreFeatures) {
+	t.Helper()
+	entries, err := fs.Glob(testDataFS, "testdata/*.wasm")
+	require.NoError(t, err)
+	hasV128 := func(vts []wasm.ValueType) bool {
+		for _, vt := range vts {
+			if vt == wasm.ValueTypeV128 {
+				return true
+			}
+		}
+		return false
+	}
+	for _, name := range entries {
+		bin, err := fs.ReadFile(testDataFS, name)
+		require.NoError(t, err)
+		m, err := binary.DecodeModule(bin, features, wasm.MemoryLimitPages, false, 0, false, false)
+		if err != nil {
+			continue // A deliberately malformed case; the suite asserts that itself.
+		}
+		for i := range m.TypeSection {
+			ft := &m.TypeSection[i]
+			require.False(t, hasV128(ft.Params) || hasV128(ft.Results),
+				"%s: type[%d] uses the v128 value type, so this suite cannot run with SIMD cleared", name, i)
+		}
+		for i := range m.GlobalSection {
+			require.NotEqual(t, wasm.ValueTypeV128, m.GlobalSection[i].Type.ValType,
+				"%s: global[%d] is v128, so this suite cannot run with SIMD cleared", name, i)
+		}
+		for i := range m.CodeSection {
+			require.False(t, hasV128(m.CodeSection[i].LocalTypes),
+				"%s: code[%d] has a v128 local, so this suite cannot run with SIMD cleared", name, i)
+		}
+	}
+}
 
 type (
 	testbase struct {

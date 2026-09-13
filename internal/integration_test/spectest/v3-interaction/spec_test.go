@@ -32,7 +32,10 @@ import (
 var testcases embed.FS
 
 func TestCompiler(t *testing.T) {
-	if !platform.CompilerSupported() {
+	// CoreFeaturesV3 includes SIMD and this corpus needs it: it cannot have SIMD
+	// cleared the way the proposal suites can, because a module can carry v128
+	// value types with no vector opcode to reject. The emulated job covers these.
+	if !platform.CompilerSupports(api.CoreFeaturesV3) {
 		t.Skip()
 	}
 	spectest.Run(t, testcases, context.Background(),
