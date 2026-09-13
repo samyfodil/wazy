@@ -13,6 +13,19 @@ func CompilerSupported() bool {
 	return CompilerSupports(api.CoreFeaturesV2)
 }
 
+// SIMDSupported reports whether this platform's compiler backend can execute
+// 128-bit vector instructions.
+//
+// Distinct from CompilerSupports(CoreFeaturesV2) in that it asks only about the
+// vector unit and does not probe for executable memory: callers are code
+// generators choosing a store width, not engine selection. A module needs no
+// SIMD feature to reach a lowering that wants a 128-bit store -- memory.fill is
+// bulk-memory -- so the two questions genuinely differ on riscv64, where the
+// vector extension is optional.
+func SIMDSupported() bool {
+	return compilerPlatformSupports(api.CoreFeaturesV2)
+}
+
 func CompilerSupports(features api.CoreFeatures) bool {
 	if !nativeCompilerAvailable {
 		return false
