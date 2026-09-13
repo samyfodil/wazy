@@ -13,6 +13,19 @@ func CompilerSupported() bool {
 	return CompilerSupports(api.CoreFeaturesV2)
 }
 
+// SIMDSupported reports whether this platform's compiler backend can execute
+// 128-bit vector instructions.
+//
+// Distinct from CompilerSupports(CoreFeaturesV2) in that it asks only about the
+// vector unit and does not probe for executable memory: callers are code
+// generators choosing a store width, not engine selection. A module needs no
+// SIMD feature to reach a lowering that wants a 128-bit store -- memory.fill is
+// bulk-memory -- so the two questions genuinely differ on riscv64, where the
+// vector extension is optional.
+func SIMDSupported() bool {
+	return compilerPlatformSupports(api.CoreFeaturesV2)
+}
+
 func CompilerSupports(features api.CoreFeatures) bool {
 	if !nativeCompilerAvailable {
 		return false
@@ -25,6 +38,15 @@ func CompilerSupports(features api.CoreFeatures) bool {
 }
 
 func compilerPlatformSupports(features api.CoreFeatures) bool {
+	// riscv64 is Linux and nothing else. golang.org/x/sys/cpu reads the vector
+	// extension out of AT_HWCAP, which is a Linux interface and reports nothing
+	// elsewhere -- so on another OS every module would silently fall back to the
+	// interpreter with no way to tell that from a CPU without RVV. Nor has this
+	// backend been run anywhere else. The interpreter still serves those.
+	if runtime.GOARCH == "riscv64" {
+		return runtime.GOOS == "linux" && riscv64CompilerSupports(features)
+	}
+
 	switch runtime.GOOS {
 	case "linux", "darwin", "freebsd", "netbsd", "windows":
 		if runtime.GOARCH == "arm64" {
@@ -69,6 +91,31 @@ func executableMmapSupported() bool {
 	}()
 	if err := MprotectCodeSegment(seg); err != nil {
 		return false
+	}
+	return true
+}
+
+// riscv64CompilerSupports reports whether the riscv64 backend can compile a
+// module with the given feature set.
+//
+// SIMD needs RVV, and unlike SSE4.1 on amd64 that genuinely varies: the vector
+// extension is optional on RISC-V and a good deal of shipping hardware has
+// none. Where it is absent the interpreter takes SIMD modules, exactly as it
+// does on an amd64 without SSE4.1.
+//
+// Threads needs the A extension, which RV64GC includes and the baseline the
+// backend targets assumes. What the baseline does not include is Zabha or
+// Zacas, so the sub-word and compare-exchange forms are LR/SC loops rather than
+// single instructions -- a code-size question, not a correctness one.
+//
+// What the spec suites under qemu-user do not establish is the *ordering*: it
+// runs guest threads as host threads, so an x86 host's stronger model hides the
+// reorderings a weakly ordered machine would expose. The sequences carry the
+// fences and the aq/rl bits the memory model asks for; confirming that on
+// silicon is still worth doing.
+func riscv64CompilerSupports(features api.CoreFeatures) bool {
+	if features.IsEnabled(api.CoreFeatureSIMD) {
+		return CpuFeatures.Has(CpuFeatureRiscv64V)
 	}
 	return true
 }

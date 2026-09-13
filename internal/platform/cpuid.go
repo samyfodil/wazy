@@ -17,6 +17,13 @@ const (
 	CpuFeatureArm64Atomic CpuFeatureFlags = 1 << iota
 )
 
+const (
+	// CpuFeatureRiscv64V is the flag to query CpuFeatureFlags.Has for the RVV
+	// vector extension on riscv64. wasm's v128 needs it, and needs VLEN >= 128,
+	// which every RVV 1.0 implementation provides.
+	CpuFeatureRiscv64V CpuFeatureFlags = 1 << iota
+)
+
 func (c CpuFeatureFlags) Has(f CpuFeatureFlags) bool {
 	return c&f != 0
 }

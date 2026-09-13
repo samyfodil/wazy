@@ -167,9 +167,9 @@ jobs:
             no_prot_exec: true
           - os: ubuntu-24.04-arm
             arch: arm64
-          # riscv64 disabled: the hosted ubuntu-24.04-riscv runner never completes
-          # (hangs to the 24h ceiling); the interpreter suite itself passes fine
-          # under qemu-riscv64. Re-add when the runner is reliable.
+          # riscv64 is not here: this job's scratch-container machinery is what
+          # hung on that runner. test_riscv64_native runs it with a plain
+          # `go test`, and test_riscv64 runs it emulated.
 
     steps:
 
@@ -262,6 +262,170 @@ jobs:
           environment_variables: WAZYCLI
           # This runs all tests compiled above in sequence.
           run: find _tests -name "*.test" | xargs -t -Itestbin nice testbin -test.short -test.v
+
+  # Native riscv64, on real hardware.
+  #
+  # ubuntu-24.04-riscv resolves through RISE RISC-V Runners
+  # (https://riscv-runners.riseproject.dev), a managed service that RISE offers
+  # free to open-source projects: a GitHub App provisions ephemeral runners on
+  # real RISC-V nodes. It needs the App installed on the account --
+  # github.com/apps/rise-risc-v-runners-personal for a personal account,
+  # github.com/apps/rise-risc-v-runners for an org -- and until it is, jobs with
+  # this label sit queued with no runner assigned rather than failing. That is
+  # what the earlier "never once completed" note was seeing.
+  #
+  # Only one label is user-facing and it does not choose a board; today it lands
+  # on Scaleway EM-RV1, which reports `rv64imafdcsu` -- RV64GC exactly, the
+  # baseline this backend targets, with no vector extension. So this job does NOT
+  # set WAZY_RISCV64_REQUIRE_V: on hardware that genuinely has no RVV, a SIMD
+  # module falling to the interpreter is correct behaviour and not a failure, and
+  # the emulated job below is where the vector lowering executes. It still records
+  # the ISA string, because a different board behind the same label would change
+  # which half of that is true.
+  #
+  # Worth having even so, and not only for weak memory ordering: real silicon with
+  # no vector unit is what caught memory.fill being lowered to 16-byte stores,
+  # which no emulator configuration here had ever executed.
+  test_riscv64_native:
+    name: riscv64, Linux (native)
+    runs-on: ubuntu-24.04-riscv
+    needs: spectest_corpus  # for the generated 3.0 cases, which are not committed
+    timeout-minutes: 60
+
+    steps:
+
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: spectest-v3-corpus
+          path: internal/integration_test/spectest/v3/testdata
+
+      # Which extensions this silicon has decides which suites run, so a green
+      # run should not be ambiguous about it.
+      - name: Report the machine
+        run: |
+          uname -m
+          grep -m1 -E '^isa' /proc/cpuinfo || true
+          grep -m1 -E '^uarch|^mvendorid' /proc/cpuinfo || true
+
+      - run: go test -timeout 45m ./...
+        env:
+          WAZY_SPECTEST_REQUIRE_CASES: "1"  # the corpus came from the artifact; skipping means it did not
+
+  # And under the emulator, for the vector extension and nothing else.
+  #
+  # The native runner above reports `rv64imafdcsu`: plain RV64GC, no V. RVV is an
+  # optional extension and that silicon does not carry it, so every module the
+  # backend would lower to vector instructions falls to the interpreter there --
+  # correctly, but leaving the SIMD lowering unexecuted. qemu-user is the only
+  # RVV machine available to this workflow, which is the whole reason this job
+  # exists; WAZY_RISCV64_REQUIRE_V below makes an emulator that quietly loses the
+  # extension fail instead of going green on skipped suites.
+  #
+  # It runs the whole tree rather than a SIMD subset because most suites gate
+  # their compiler half on CoreFeaturesV2 -- which includes SIMD -- so on a
+  # machine without RVV they skip it. Until those gates ask for the feature set
+  # they actually need, "the packages that exercise RVV" is very nearly all of
+  # them, and a subset would be a coverage cliff rather than a saving. 16 minutes
+  # against the native job's 10.
+  #
+  # Without -one-insn-per-tb, which the test.riscv64 make target carries: that
+  # flag guards against qemu-user holding a stale translation of a page the JIT
+  # has rewritten, and it costs about 25x -- half an hour here against a couple
+  # of minutes. The risk it covers does not vary by suite, so paying it on
+  # every push buys little; `make test.riscv64` is the thorough form and is
+  # what to run before a release.
+  test_riscv64:
+    name: riscv64, Linux (qemu, RVV)
+    runs-on: ubuntu-24.04
+    needs: spectest_corpus  # for the generated 3.0 cases, which are not committed
+    timeout-minutes: 45  # an emulated run of the whole tree
+
+    steps:
+
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: spectest-v3-corpus
+          path: internal/integration_test/spectest/v3/testdata
+
+      # Not the distro's qemu. ubuntu-24.04 ships 8.2.2, which emulates
+      # /proc/self/maps without holding mmap_lock: a concurrent mapping change
+      # can leave its maps printer looking at a guest mapping absent from its
+      # own host snapshot, interval_tree_iter_first() returns null, and the next
+      # field access dereferences it. Anything that writes a CPU or heap profile
+      # reaches it, because runtime/pprof's profile builder reads that file --
+      # which made cmd/wazy die with "QEMU internal SIGSEGV {code=MAPERR,
+      # addr=0x20}" about one run in six.
+      #
+      # Upstream fix bbd5630a75e7, backported as dad762774e, released in 8.2.8.
+      # Ubuntu has not backported it to noble at any patch level (checked
+      # through 8.2.2+ds-0ubuntu1.18), so take a fixed build instead. Measured
+      # locally on the same test binaries: 8.2.2 fails 1 run in 10, 9.2.1 zero
+      # in 30. The binary is static-pie linked, so it needs nothing else.
+      # Two emulators, deliberately, each where it is needed.
+      #
+      # The distro package is installed for its binfmt_misc handler alone: that
+      # is what lets a test exec a riscv64 binary, and examples/cli and the wasi
+      # cat example both run the CLI as a subprocess. Without a handler that is
+      # "exit status 1". Those subprocesses write no profiles, so the handler's
+      # 8.2.2 is fine for them.
+      #
+      # The test binaries themselves go through -exec, and those are the ones
+      # that write profiles, so they get 9.2.1.
+      #
+      # It is used from where it unpacks rather than replacing the handler's
+      # binary, because the handler is registered with the F flag, which pins the
+      # interpreter file open -- overwriting it is ETXTBSY.
+      - name: Install the emulators
+        run: |
+          sudo apt-get update && sudo apt-get install -y qemu-user-static
+          deb=qemu-user_9.2.1+ds-1ubuntu5_amd64.deb
+          curl -fsSL -o "$deb" "http://archive.ubuntu.com/ubuntu/pool/universe/q/qemu/$deb"
+          dpkg -x "$deb" "$PWD/.qemu"
+          echo "QEMU_RISCV64=$PWD/.qemu/usr/bin/qemu-riscv64" >> "$GITHUB_ENV"
+          "$PWD/.qemu/usr/bin/qemu-riscv64" --version
+          # Fail here, not thirty minutes later, if the handler is missing.
+          test -e /proc/sys/fs/binfmt_misc/qemu-riscv64
+
+      # The CLI, cross-built, so the two examples that shell out to it run that
+      # instead of `go run` -- which every other cross-architecture job in this
+      # file already does for the same reason.
+      - name: Cross-build the CLI for the examples that exec it
+        run: go build -o "$PWD/wazycli" ./cmd/wazy
+        env:
+          GOARCH: riscv64
+          CGO_ENABLED: 0
+
+      # The whole tree, not a chosen subset. Every defect this backend has had
+      # since the spec suites went green was outside them: the API's []uint64
+      # encoding, a v128 crossing into a host function, a trampoline that spun
+      # on a large signature, and a segfault that only a TinyGo binary's
+      # register pressure produced. A subset would have caught none of them.
+      - name: The tree, on the riscv64 backend
+        run: go test -p 1 -timeout 40m -exec "$QEMU_RISCV64" ./...
+        env:
+          GOARCH: riscv64
+          CGO_ENABLED: 0
+          WAZYCLI: ${{ github.workspace }}/wazycli
+          # SIMD and threads are gated on RVV, and without it every suite from
+          # v2 up skips itself and still reports ok. This makes that loud.
+          WAZY_RISCV64_REQUIRE_V: "1"
+          WAZY_SPECTEST_REQUIRE_CASES: "1"  # the corpus came from the artifact; skipping means it did not
 
   test_vm:
     name: amd64, ${{ matrix.os.name }}

@@ -11,7 +11,11 @@ import (
 )
 
 func TestCompiler(t *testing.T) {
-	if !platform.CompilerSupported() {
+	// Ask about the feature set this suite actually runs with, not the
+	// default. platform.CompilerSupported() reports on CoreFeaturesV2, which
+	// includes SIMD; a backend that compiles V1 but not V2 -- riscv64 today --
+	// would skip this entire suite despite being perfectly able to run it.
+	if !platform.CompilerSupports(api.CoreFeaturesV1) {
 		t.Skip()
 	}
 	spectest.Run(t, Testcases, context.Background(), wazy.NewRuntimeConfigCompiler().WithCoreFeatures(api.CoreFeaturesV1))

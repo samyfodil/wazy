@@ -1,0 +1,1057 @@
+package riscv64
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/samyfodil/wazy/internal/engine/native/backend/regalloc"
+	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
+	"github.com/samyfodil/wazy/internal/engine/native/ssa"
+)
+
+// compilerBuf is the slice of backend.Compiler the encoders here need. Keeping
+// it narrow lets the multi-instruction sequences be unit tested against a plain
+// buffer instead of a whole compiler.
+type compilerBuf interface {
+	Emit4Bytes(uint32)
+	Emit8Bytes(uint64)
+}
+
+// intRd returns the encoding number of an integer destination register,
+// refusing the ones compiled code must never write.
+//
+// x27 is Go's g. Clobbering it does not fail where it happens: the program
+// runs on until the next signal arrives, and the runtime then reports "fatal:
+// bad g in signal handler" from somewhere entirely unrelated, with no
+// traceback, because it has no goroutine to attribute the fault to. x3 (gp)
+// and x4 (tp) are reserved by the psABI and fail just as remotely. Catching
+// the write at encode time turns all three into a normal Go panic naming the
+// instruction that did it.
+func intRd(v regalloc.VReg) uint32 {
+	switch r := v.RealReg(); r {
+	case x27:
+		panic("BUG: compiled code must not write x27, which is Go's g")
+	case x3, x4:
+		panic("BUG: compiled code must not write " + regNames[r] + ", reserved by the psABI")
+	default:
+		return regNumberInEncoding[r]
+	}
+}
+
+// size returns the number of bytes this instruction occupies once encoded.
+// Every real RISC-V instruction here is 4 bytes -- the backend never emits the
+// compressed RVC forms -- so only meta instructions and the multi-instruction
+// expansions differ.
+func (i *instruction) size() int64 {
+	switch i.kind {
+	case nop0, sourceOffsetInfo, loadConstBlockArg, nopDefReg, nopUseReg:
+		return 0
+	case fpuConstPoolData:
+		return int64(i.u2) / 8 // 4 or 8 bytes of raw data.
+	case adr:
+		return 8 // auipc + addi
+	case atomicRmw:
+		if i.u1>>8&1 != 0 && i.u2 == 4 {
+			return 12 // the AMO + the two zero-extending shifts
+		}
+		return 4
+	case atomicCas:
+		if i.u1&1 != 0 && i.u2 != 8 {
+			return 24 // the retry loop + the two zero-extending shifts
+		}
+		return 16 // lr + the mismatch branch + sc + the retry branch
+	case atomicRmwSeq, atomicCasSeq:
+		return 52 // the mask, then a ten-instruction retry loop
+	case atomicLoad:
+		return 12 // fence + the load + fence
+	case atomicStore:
+		return 8 // fence + the store
+	case call, tailCall:
+		return callSequenceSize // auipc + jalr
+	case exitSequence:
+		return exitSequenceSize
+	case condBr:
+		switch i.condBrExpansion() {
+		case 0:
+			return 4
+		case 1:
+			return 8
+		default:
+			return 12
+		}
+	case br:
+		if i.brExpansion() == 0 {
+			return 4
+		}
+		return 8
+	case brTableSequence:
+		return brTableSequenceOffsetTableBegin + int64(i.u2)*4
+	case vecRR:
+		if i.u1&(1<<24) != 0 {
+			return 20 // vsetivli + zeroing + vsetivli + the operation + a copy out
+		}
+		if i.u1&(1<<25) != 0 {
+			return 12 // vsetivli + the operation + a copy out of the temp
+		}
+		return 8 // vsetivli + the operation
+	case vecRRR:
+		if i.vecNeedsNoOverlap() {
+			return 12 // vsetivli + the operation + a copy out of the temp
+		}
+		return 8 // vsetivli + the operation
+	case vecRX, vecSplat:
+		return 8 // vsetivli + the operation
+	case vecShiftImm:
+		return 8 // vsetivli + the shift
+	case vecInsertLane0:
+		return 8 // vsetivli + vmv.s.x
+	case vecRound:
+		// vsetivli, the limit, |x|, the in-range mask, the two conversions,
+		// the sign restore, the merge, and for every mode but truncation the
+		// pair of frm writes around it. The f64 limit needs one shift more.
+		n := int64(40)
+		if uint32(i.u2) == vsew64 {
+			n += 4
+		}
+		if roundMode(i.u1) != roundModeTrunc {
+			n += 8
+		}
+		return n
+	case vecSelectLt:
+		return 12 // vsetivli + compare + merge
+	case vecHighBits:
+		return 24 // vsetivli + compare + vsetivli + readout + two shifts
+	case vecExtract:
+		if signed := i.u1&1 != 0; !signed && uint32(i.u2) < vsew32 {
+			return 16 // vsetivli + the lane read + the two zero-extending shifts
+		}
+		return 8 // vsetivli + the lane read
+	case vecInsert:
+		return 20 // vsetivli + index splat + compare + scalar splat + merge
+	case vecNarrow:
+		return 12 // vsetivli + vnclip + a copy out of the temp
+	case vecConst:
+		return 16 // vsetivli + a lane write + a slide + a second lane write
+	case vecSlide:
+		if i.u1>>8&1 == 1 {
+			return 16 // vsetivli + copy in + slideup + copy out
+		}
+		return 8 // vsetivli + the slide
+	case vecNaNZero:
+		if uint32(i.u1) != uint32(i.u2) {
+			return 16 // vsetivli + vmfeq + a second vsetivli + vmerge
+		}
+		return 12 // vsetivli + vmfeq + vmerge
+	case vecCmp:
+		return 16 // vsetivli + compare + zeros + merge
+	case vecMaskPop:
+		return 12 // vsetivli + compare + vcpop
+	case vecMov:
+		return 4 // vmv1r.v needs no vtype
+	case vecLoad, vecStore:
+		if i.bigOffset() {
+			return 20 // lui + add + addi + vsetivli + the access
+		}
+		return 12 // address materialization + vsetivli + the access
+	case load, store, fpuLoad, fpuStore:
+		if i.bigOffset() {
+			return 12 // lui + add + the access itself.
+		}
+		return 4
+	default:
+		return 4
+	}
+}
+
+// emitAccessBase materializes the address base a load/store should use,
+// handling the grown out-of-range-displacement form. It returns the base
+// register number and the displacement to put in the access itself.
+func emitAccessBase(c compilerBuf, i *instruction) (base uint32, disp int32) {
+	a := i.getAmode()
+	rn := regNumberInEncoding[a.rn.RealReg()]
+	if !i.bigOffset() {
+		return rn, int32(a.imm)
+	}
+	tmp := regNumberInEncoding[tmpReg]
+	// lui+add has no truncating tail either: the displacement reaches the load
+	// through a register, not through a 32-bit-result instruction.
+	hi, lo := splitImm32PCRel(a.imm, "oversized stack displacement")
+	c.Emit4Bytes(encodeLui(tmp, hi))
+	c.Emit4Bytes(encodeAluRRR(aluOpAdd, tmp, tmp, rn, true))
+	return tmp, lo
+}
+
+// encode appends this instruction's machine code to the compiler's buffer.
+func (i *instruction) encode(m *machine) {
+	c := m.compiler
+	switch i.kind {
+	case nop0, loadConstBlockArg, sourceOffsetInfo, nopDefReg, nopUseReg:
+	case aluRRR:
+		op := aluOp(i.u1)
+		_64bit := i.u2 == 1
+		rd := intRd(i.rd)
+		rs1 := regNumberInEncoding[i.rs1.realReg()]
+		if i.rs2.kind == operandKindImm {
+			c.Emit4Bytes(encodeAluRRImm(op, rd, rs1, int32(i.rs2.imm), _64bit))
+		} else {
+			c.Emit4Bytes(encodeAluRRR(op, rd, rs1, regNumberInEncoding[i.rs2.realReg()], _64bit))
+		}
+	case shiftImm:
+		c.Emit4Bytes(encodeAluRRImm(aluOp(i.u1), intRd(i.rd),
+			regNumberInEncoding[i.rs1.realReg()], int32(i.rs2.imm), i.u2 == 1))
+	case lui:
+		c.Emit4Bytes(encodeLui(intRd(i.rd), int32(uint32(i.u1))))
+	case adr:
+		// resolveRelativeAddresses put the PC-relative displacement in u2.
+		rd := intRd(i.rd)
+		hi, lo := splitImm32PCRel(int64(int32(uint32(i.u2))), "adr")
+		c.Emit4Bytes(encodeAuipc(rd, hi))
+		c.Emit4Bytes(encodeAluRRImm(aluOpAdd, rd, rd, lo, true))
+	case mov:
+		// `mv rd, rs` is `addi rd, rs, 0`.
+		c.Emit4Bytes(encodeAluRRImm(aluOpAdd, intRd(i.rd),
+			regNumberInEncoding[i.rs1.realReg()], 0, true))
+	case fpuMov:
+		// `fmv.d rd, rs` is `fsgnj.d rd, rs, rs`.
+		r := regNumberInEncoding[i.rs1.realReg()]
+		c.Emit4Bytes(encodeFpuRRR(fpuBinOpSgnj, regNumberInEncoding[i.rd.RealReg()], r, r, true))
+	case load:
+		base, disp := emitAccessBase(c, i)
+		c.Emit4Bytes(encodeLoad(intRd(i.rd), base, disp, byte(i.u1), i.loadIsSigned()))
+	case store:
+		base, disp := emitAccessBase(c, i)
+		c.Emit4Bytes(encodeStore(regNumberInEncoding[i.rd.RealReg()], base, disp, byte(i.u1)))
+	case fpuLoad:
+		base, disp := emitAccessBase(c, i)
+		c.Emit4Bytes(encodeFpuLoad(regNumberInEncoding[i.rd.RealReg()], base, disp, byte(i.u1)))
+	case fpuStore:
+		base, disp := emitAccessBase(c, i)
+		c.Emit4Bytes(encodeFpuStore(regNumberInEncoding[i.rd.RealReg()], base, disp, byte(i.u1)))
+	case condBr:
+		encodeCondBr(c, i)
+	case br:
+		encodeBr(c, i)
+	case call:
+		// The auipc+jalr pair is patched by ResolveRelocations once the
+		// callee's address is known; emit a correctly sized placeholder.
+		c.AddRelocationInfo(i.callFuncRef(), false)
+		c.Emit4Bytes(encodeAuipc(regNumberInEncoding[raReg], 0))
+		c.Emit4Bytes(encodeJalr(regNumberInEncoding[raReg], regNumberInEncoding[raReg], 0))
+	case tailCall:
+		c.AddRelocationInfo(i.callFuncRef(), true)
+		c.Emit4Bytes(encodeAuipc(regNumberInEncoding[tmpReg], 0))
+		c.Emit4Bytes(encodeJalr(regNumberInEncoding[zeroReg], regNumberInEncoding[tmpReg], 0))
+	case callInd:
+		c.Emit4Bytes(encodeJalr(regNumberInEncoding[raReg], regNumberInEncoding[i.rs1.realReg()], 0))
+	case tailCallInd:
+		c.Emit4Bytes(encodeJalr(regNumberInEncoding[zeroReg], regNumberInEncoding[i.rs1.realReg()], 0))
+	case ret:
+		c.Emit4Bytes(encodeRet())
+	case udf:
+		c.Emit4Bytes(encodeEbreak())
+	case exitSequence:
+		encodeExitSequence(c, i.rs1.nr())
+	case fpuRRR:
+		c.Emit4Bytes(encodeFpuRRR(fpuBinOp(i.u1), regNumberInEncoding[i.rd.RealReg()],
+			regNumberInEncoding[i.rs1.realReg()], regNumberInEncoding[i.rs2.realReg()], i.u2 == 1))
+	case fpuRR:
+		encodeFpuRR(c, i)
+	case fpuCmp:
+		c.Emit4Bytes(encodeFpuCmp(fpuCmpOp(i.u1), intRd(i.rd),
+			regNumberInEncoding[i.rs1.realReg()], regNumberInEncoding[i.rs2.realReg()], i.u2 == 1))
+	case fcvtToInt:
+		dst64, src64, signed := i.u1&1 == 1, i.u1>>1&1 == 1, i.u1>>2&1 == 1
+		c.Emit4Bytes(encodeFcvtToIntRM(intRd(i.rd),
+			regNumberInEncoding[i.rs1.realReg()], dst64, src64, signed, uint32(i.u2)))
+	case fcvtFromInt:
+		dst64, src64, signed := i.u1&1 == 1, i.u1>>1&1 == 1, i.u1>>2&1 == 1
+		c.Emit4Bytes(encodeFcvtFromInt(regNumberInEncoding[i.rd.RealReg()],
+			regNumberInEncoding[i.rs1.realReg()], dst64, src64, signed))
+	case fcvtSD:
+		c.Emit4Bytes(encodeFcvtSD(regNumberInEncoding[i.rd.RealReg()],
+			regNumberInEncoding[i.rs1.realReg()], i.u1 == 1))
+	case fmvToInt:
+		c.Emit4Bytes(encodeFmvToInt(intRd(i.rd),
+			regNumberInEncoding[i.rs1.realReg()], i.u1 == 1))
+	case fmvFromInt:
+		c.Emit4Bytes(encodeFmvFromInt(regNumberInEncoding[i.rd.RealReg()],
+			regNumberInEncoding[i.rs1.realReg()], i.u1 == 1))
+	case fclass:
+		c.Emit4Bytes(encodeFclass(intRd(i.rd),
+			regNumberInEncoding[i.rs1.realReg()], i.u1 == 1))
+	case fence:
+		c.Emit4Bytes(encodeFence(0b0011, 0b0011))
+	case atomicRmw:
+		encodeAtomicRmw(c, i)
+	case atomicRmwSeq:
+		encodeAtomicRmwSeq(c, i)
+	case atomicCas:
+		encodeAtomicCas(c, i)
+	case atomicCasSeq:
+		encodeAtomicCasSeq(c, i)
+	case atomicLoad:
+		encodeAtomicLoad(c, i)
+	case atomicStore:
+		// Release: everything before is visible before the store. Paired with
+		// the load's leading full fence this is the sequentially consistent
+		// mapping of the RISC-V memory model appendix.
+		c.Emit4Bytes(encodeFence(0b0011, 0b0001))
+		c.Emit4Bytes(encodeStore(regNumberInEncoding[i.rs2.realReg()],
+			regNumberInEncoding[i.rs1.realReg()], 0, byte(i.u2)*8))
+	case fpuConstPoolData:
+		if i.u2 == 32 {
+			c.Emit4Bytes(uint32(i.u1))
+		} else {
+			c.Emit8Bytes(i.u1)
+		}
+	case vecRRR:
+		funct6, form := uint32(i.u1&0xff), uint32(i.u1>>8&0xff)
+		emitVsetivli(c, uint32(i.u2))
+		if i.vecNeedsNoOverlap() {
+			tmp := regNumberInEncoding[vecTmpReg]
+			c.Emit4Bytes(encodeVecVV(funct6, tmp, vecReg(i.rs1.nr()), vecReg(i.rs2.nr()), form))
+			c.Emit4Bytes(encodeVmv1r(vecReg(i.rd), tmp))
+			return
+		}
+		c.Emit4Bytes(encodeVecVV(funct6, vecReg(i.rd), vecReg(i.rs1.nr()), vecReg(i.rs2.nr()), form))
+	case vecRR:
+		funct6, form, variant := uint32(i.u1&0xff), uint32(i.u1>>8&0xff), uint32(i.u1>>16&0xff)
+		widening, extending := i.u1&(1<<24) != 0, i.u1&(1<<25) != 0
+		if widening || extending {
+			// The result goes to the reserved vector temp and is copied out,
+			// because a widening or narrowing instruction may not write its
+			// own source register -- and vd and vs2 are routinely the same
+			// after allocation.
+			sew := uint32(i.u2)
+			tmp := regNumberInEncoding[vecTmpReg]
+			if widening {
+				// Half the elements, not vecAVLFor's whole sixteen bytes: one
+				// side of the operation is twice as wide, so sixteen bytes of
+				// it is half the count. Relying on vsetivli to clamp would
+				// pin the backend to VLEN=128.
+				//
+				// The zeroing covers the narrowing direction, whose result
+				// fills only half the register; for the widening direction it
+				// is overwritten in full.
+				emitVsetivli(c, vsew8)
+				c.Emit4Bytes(encodeVmvVI(tmp, 0))
+				c.Emit4Bytes(encodeVsetivliLMulTU(vecAVLFor(sew)/2, sew, vlmulMF2))
+			} else {
+				emitVsetivli(c, sew)
+			}
+			c.Emit4Bytes(encodeVecUnary(funct6, tmp, vecReg(i.rs1.nr()), variant, form))
+			c.Emit4Bytes(encodeVmv1r(vecReg(i.rd), tmp))
+			return
+		}
+		emitVsetivli(c, uint32(i.u2))
+		c.Emit4Bytes(encodeVecUnary(funct6, vecReg(i.rd), vecReg(i.rs1.nr()), variant, form))
+	case vecRX:
+		emitVsetivli(c, uint32(i.u2))
+		c.Emit4Bytes(encodeVecVX(uint32(i.u1), vecReg(i.rd), vecReg(i.rs1.nr()),
+			regNumberInEncoding[i.rs2.realReg()]))
+	case vecSplat:
+		emitVsetivli(c, uint32(i.u2))
+		c.Emit4Bytes(encodeVmvVX(vecReg(i.rd), regNumberInEncoding[i.rs1.realReg()]))
+	case vecSlide:
+		offset, up := uint32(i.u1&0xff), i.u1>>8&1 == 1
+		emitVsetivli(c, uint32(i.u2))
+		if !up {
+			c.Emit4Bytes(encodeVecVIu(vfunctSlidedown, vecReg(i.rd), vecReg(i.rs1.nr()), offset))
+			return
+		}
+		// vslideup reads elements below the ones it writes, so it may not
+		// write its own source; and it leaves the lanes below the offset
+		// alone, so the destination has to start from them.
+		tmp := regNumberInEncoding[vecTmpReg]
+		c.Emit4Bytes(encodeVmv1r(tmp, vecReg(i.rd)))
+		c.Emit4Bytes(encodeVecVIu(vfunctSlideup, tmp, vecReg(i.rs1.nr()), offset))
+		c.Emit4Bytes(encodeVmv1r(vecReg(i.rd), tmp))
+	case vecNaNZero:
+		cmpSew, mergeSew := uint32(i.u2), uint32(i.u1)
+		emitVsetivli(c, cmpSew)
+		// vmfeq of a value with itself is false exactly on the NaN lanes.
+		c.Emit4Bytes(encodeVecVV(vfunctMfeq, regNumberInEncoding[vecMaskReg],
+			vecReg(i.rs1.nr()), vecReg(i.rs1.nr()), opfvv))
+		if mergeSew != cmpSew {
+			emitVsetivli(c, mergeSew)
+		}
+		// Keep rd where ordered, take the zero vector where not.
+		c.Emit4Bytes(encodeVmerge(vecReg(i.rd), vecReg(i.rs2.nr()), vecReg(i.rd)))
+	case vecShiftImm:
+		funct6, amount := uint32(i.u1&0xff), uint32(i.u1>>8)
+		emitVsetivli(c, uint32(i.u2))
+		c.Emit4Bytes(encodeVecVIu(funct6, vecReg(i.rd), vecReg(i.rs1.nr()), amount))
+	case vecInsertLane0:
+		emitVsetivli(c, uint32(i.u2))
+		c.Emit4Bytes(encodeVmvSX(vecReg(i.rd), regNumberInEncoding[i.rs1.realReg()]))
+	case vecRound:
+		encodeVecRound(c, i)
+	case vecSelectLt:
+		sew := uint32(i.u2)
+		mask := regNumberInEncoding[vecMaskReg]
+		emitVsetivli(c, sew)
+		fp := sew >= vsew32 // pmin/pmax only exist for float lanes.
+		funct6, form := uint32(vfunctMslt), uint32(opivv)
+		if fp {
+			funct6, form = vfunctMflt, opfvv
+		}
+		// vs2 is the *left* operand of an RVV compare, so rs1 goes there:
+		// the mask wanted is `a < b`, in the lowering's own order.
+		c.Emit4Bytes(encodeVec(funct6, 1, vecReg(i.rs1.nr()), vecReg(i.rs2.nr()), form, mask))
+		// vmerge picks between the two sources directly. Copying one into rd
+		// first would destroy the other whenever regalloc gave them the same
+		// register.
+		c.Emit4Bytes(encodeVmerge(vecReg(i.rd), vecReg(i.rs4.nr()), vecReg(i.rs3.nr())))
+	case vecHighBits:
+		sew := uint32(i.u2)
+		mask := regNumberInEncoding[vecMaskReg]
+		emitVsetivli(c, sew)
+		// Lanes whose sign bit is set are exactly those below zero.
+		c.Emit4Bytes(encodeVec(vfunctMslt, 1, vecReg(i.rs1.nr()), 0, opivx, mask))
+		// Read the mask bits out as an integer. One bit per lane, so an
+		// element wide enough to hold the lane count suffices.
+		emitVsetivli(c, vsew16)
+		c.Emit4Bytes(encodeVmvXS(intRd(i.rd), mask))
+		// vmv.x.s sign-extends, and the mask bits above the lane count are
+		// tail-agnostic -- so anything from lane 16 up is either garbage or a
+		// sign. Keep exactly the lanes that exist.
+		rd := intRd(i.rd)
+		shift := int32(64 - 16>>sew) // 48, 56, 60 or 62: never zero.
+		c.Emit4Bytes(encodeAluRRImm(aluOpSll, rd, rd, shift, true))
+		c.Emit4Bytes(encodeAluRRImm(aluOpSrl, rd, rd, shift, true))
+	case vecExtract:
+		sew := uint32(i.u2)
+		lane := ssa.VecLane(i.u1 >> 8)
+		emitVsetivli(c, sew)
+		if lane == ssa.VecLaneF32x4 || lane == ssa.VecLaneF64x2 {
+			c.Emit4Bytes(encodeVfmvFS(regNumberInEncoding[i.rd.RealReg()], vecReg(i.rs1.nr())))
+			return
+		}
+		rd := intRd(i.rd)
+		c.Emit4Bytes(encodeVmvXS(rd, vecReg(i.rs1.nr())))
+		// vmv.x.s sign-extends from SEW, which is what the signed forms want.
+		// The unsigned ones have to undo it.
+		if signed := i.u1&1 != 0; !signed && sew < vsew32 {
+			shift := int32(64 - 8<<sew)
+			c.Emit4Bytes(encodeAluRRImm(aluOpSll, rd, rd, shift, true))
+			c.Emit4Bytes(encodeAluRRImm(aluOpSrl, rd, rd, shift, true))
+		}
+	case vecInsert:
+		sew, index := uint32(i.u2), uint32(i.u1)
+		mask := regNumberInEncoding[vecMaskReg]
+		tmp := regNumberInEncoding[vecTmpReg]
+		emitVsetivli(c, sew)
+		// Build the one-lane mask by splatting the target index and comparing
+		// it against each lane's own index, which vid.v supplies.
+		c.Emit4Bytes(encodeVid(tmp))
+		c.Emit4Bytes(encodeVecVI(vfunctMseq, mask, tmp, int32(index)))
+		c.Emit4Bytes(encodeVmvVX(tmp, regNumberInEncoding[i.rs2.realReg()]))
+		c.Emit4Bytes(encodeVmerge(vecReg(i.rd), vecReg(i.rs1.nr()), tmp))
+	case vecNarrow:
+		// Narrowing: the vtype carries the destination width, and the source
+		// is twice that -- so the fractional grouping keeps the source at one
+		// register. The destination goes through the temp for the same
+		// no-overlap rule as the widening operations.
+		sew := uint32(i.u2)
+		tmp := regNumberInEncoding[vecTmpReg]
+		c.Emit4Bytes(encodeVsetivliLMul(vecAVLFor(sew)/2, sew, vlmulMF2))
+		c.Emit4Bytes(encodeVecVIu(uint32(i.u1), tmp, vecReg(i.rs1.nr()), 0))
+		c.Emit4Bytes(encodeVmv1r(vecReg(i.rd), tmp))
+	case vecConst:
+		tmp := regNumberInEncoding[vecTmpReg]
+		emitVsetivli(c, vsew64)
+		// vmv.s.x writes lane 0 only, so the high half goes in first and is
+		// slid up into lane 1, freeing lane 0 for the low half.
+		c.Emit4Bytes(encodeVmvSX(tmp, regNumberInEncoding[i.rs2.realReg()]))
+		c.Emit4Bytes(encodeVecVIu(vfunctSlideup, vecReg(i.rd), tmp, 1))
+		c.Emit4Bytes(encodeVmvSX(vecReg(i.rd), regNumberInEncoding[i.rs1.realReg()]))
+	case vecCmp:
+		encodeVecCmp(c, i)
+	case vecMaskPop:
+		encodeVecMaskPop(c, i)
+	case vecMov:
+		c.Emit4Bytes(encodeVmv1r(vecReg(i.rd), vecReg(i.rs1.nr())))
+	case vecLoad:
+		base := emitVecAddress(c, i)
+		emitVsetivli(c, vsew8)
+		c.Emit4Bytes(encodeVectorLoad(vecReg(i.rd), base, vsew8))
+	case vecStore:
+		base := emitVecAddress(c, i)
+		emitVsetivli(c, vsew8)
+		c.Emit4Bytes(encodeVectorStore(vecReg(i.rd), base, vsew8))
+	case brTableSequence:
+		encodeBrTableSequence(c, m, i)
+	default:
+		panic(fmt.Sprintf("BUG: unhandled instruction kind %d in encode: %s", i.kind, i))
+	}
+}
+
+// encodeCondBr emits a conditional branch at whichever expansion level
+// resolveRelativeAddresses settled on.
+func encodeCondBr(c compilerBuf, i *instruction) {
+	cond := i.condBrCond()
+	rs1 := regNumberInEncoding[i.rs1.realReg()]
+	rs2 := regNumberInEncoding[i.rs2.realReg()]
+	offset := i.condBrOffset()
+
+	switch i.condBrExpansion() {
+	case 0:
+		c.Emit4Bytes(encodeBranch(cond, rs1, rs2, int32(offset)))
+	case 1:
+		// Branch *over* the jal when the condition does not hold.
+		c.Emit4Bytes(encodeBranch(cond.invert(), rs1, rs2, 8))
+		c.Emit4Bytes(encodeJal(regNumberInEncoding[zeroReg], int32(offset-4)))
+	default:
+		c.Emit4Bytes(encodeBranch(cond.invert(), rs1, rs2, 12))
+		hi, lo := splitImm32PCRel(offset-4, "long conditional branch")
+		c.Emit4Bytes(encodeAuipc(regNumberInEncoding[tmpReg], hi))
+		c.Emit4Bytes(encodeJalr(regNumberInEncoding[zeroReg], regNumberInEncoding[tmpReg], lo))
+	}
+}
+
+func encodeBr(c compilerBuf, i *instruction) {
+	offset := i.brOffset()
+	if i.brExpansion() == 0 {
+		c.Emit4Bytes(encodeJal(regNumberInEncoding[zeroReg], int32(offset)))
+		return
+	}
+	hi, lo := splitImm32PCRel(offset, "long unconditional branch")
+	c.Emit4Bytes(encodeAuipc(regNumberInEncoding[tmpReg], hi))
+	c.Emit4Bytes(encodeJalr(regNumberInEncoding[zeroReg], regNumberInEncoding[tmpReg], lo))
+}
+
+// encodeFpuRR emits the one-operand FP instructions. RISC-V has no fneg or
+// fabs opcode: both are sign-injection aliases of fsgnj with one source used
+// twice.
+func encodeFpuRR(c compilerBuf, i *instruction) {
+	rd := regNumberInEncoding[i.rd.RealReg()]
+	rs := regNumberInEncoding[i.rs1.realReg()]
+	_64bit := i.u2 == 1
+	switch fpuUniOp(i.u1) {
+	case fpuUniOpSqrt:
+		c.Emit4Bytes(encodeFsqrt(rd, rs, _64bit))
+	case fpuUniOpNeg:
+		c.Emit4Bytes(encodeFpuRRR(fpuBinOpSgnjn, rd, rs, rs, _64bit))
+	case fpuUniOpAbs:
+		c.Emit4Bytes(encodeFpuRRR(fpuBinOpSgnjx, rd, rs, rs, _64bit))
+	default:
+		panic(fmt.Sprintf("BUG: unknown fpuUniOp %d", i.u1))
+	}
+}
+
+// exitSequenceSize is the byte length of encodeExitSequence's output. It is
+// fixed: the context-eviction move is emitted unconditionally so that callers
+// recording a resume address (insertExitSequence, emitTrapIslands) can add a
+// constant rather than depend on which register the context landed in.
+const exitSequenceSize = 5 * 4
+
+// adrSequenceSize is the size of the auipc+addi pair an `adr` expands to.
+const adrSequenceSize = 8
+
+// goExitResumeOffsetFromAdr is how far past its own `adr` the resume address
+// of a Go exit lies: the adr itself, the store that puts its result into the
+// execution context, and then the exit sequence.
+//
+// It is spelled out rather than written as a number because the obvious number
+// is arm64's. There the adr is a single instruction, so the same distance is
+// 8+exitSequenceSize; here the adr is a pair, and copying that constant across
+// leaves the resume address four bytes short -- pointing into the middle of
+// the exit sequence rather than past it. Nothing fails at that point: the
+// program runs on until a signal arrives and the runtime reports "fatal: bad g
+// in signal handler" from somewhere unrelated.
+const goExitResumeOffsetFromAdr = adrSequenceSize + 4 + exitSequenceSize
+
+// encodeExitSequence restores Go's ra, frame pointer and sp from the execution
+// context and returns, handing control back to the Go side of the call.
+//
+// SP is an ordinary register on RISC-V, so it is reloaded directly -- arm64
+// needs a scratch because it cannot load into SP. s0 is Go's frame pointer on
+// riscv64 and this backend allocates it, so it has to be restored here for
+// Go's traceback to work on the other side.
+func encodeExitSequence(c compilerBuf, ctxReg regalloc.VReg) {
+	// Move the context into the reserved scratch first. This is unconditional
+	// so the sequence is a constant size, and it is necessary whenever the
+	// context happens to live in ra or s0, which the loads below overwrite.
+	ctx := regNumberInEncoding[ctxReg.RealReg()]
+	tmp := regNumberInEncoding[tmpReg]
+	c.Emit4Bytes(encodeAluRRImm(aluOpAdd, tmp, ctx, 0, true)) // mv tmp, ctx
+
+	c.Emit4Bytes(encodeLoad(regNumberInEncoding[raReg], tmp,
+		int32(nativeapi.ExecutionContextOffsetGoReturnAddress.I64()), 64, false))
+	c.Emit4Bytes(encodeLoad(regNumberInEncoding[x8], tmp,
+		int32(nativeapi.ExecutionContextOffsetOriginalFramePointer.I64()), 64, false))
+	c.Emit4Bytes(encodeLoad(regNumberInEncoding[spReg], tmp,
+		int32(nativeapi.ExecutionContextOffsetOriginalStackPointer.I64()), 64, false))
+	c.Emit4Bytes(encodeRet())
+}
+
+// brTableSequenceOffsetTableBegin is the byte offset, from the start of the
+// br_table sequence, at which the jump table itself begins -- i.e. the size of
+// the seven instructions encodeBrTableSequence emits ahead of the data.
+const brTableSequenceOffsetTableBegin = 7 * 4
+
+// encodeBrTableSequence emits the br_table dispatch and the table it reads.
+//
+// Each table entry is a 32-bit displacement from the table's own address (see
+// resolveRelativeAddresses), which keeps the table position-independent -- the
+// executable is mmap'd at an address unknown at compile time, so an absolute
+// target could not be baked in.
+//
+//	auipc tmp,  0            ; tmp  = address of this instruction
+//	addi  tmp,  tmp, 28      ; tmp  = address of the table
+//	slli  tmp2, idx, 2       ; tmp2 = idx * 4
+//	add   tmp2, tmp, tmp2    ; tmp2 = &table[idx]
+//	lw    tmp2, 0(tmp2)      ; tmp2 = table[idx], sign-extended
+//	add   tmp,  tmp, tmp2    ; tmp  = table address + displacement
+//	jalr  zero, 0(tmp)
+//	<table>
+//
+// The index has already been bounds-checked by the lowering, so no negative or
+// out-of-range entry can be reached here.
+func encodeBrTableSequence(c compilerBuf, m *machine, i *instruction) {
+	tmp := regNumberInEncoding[tmpReg]
+	tmp2 := regNumberInEncoding[tmpReg2]
+	idx := regNumberInEncoding[i.rs1.realReg()]
+
+	c.Emit4Bytes(encodeAuipc(tmp, 0))
+	c.Emit4Bytes(encodeAluRRImm(aluOpAdd, tmp, tmp, brTableSequenceOffsetTableBegin, true))
+	c.Emit4Bytes(encodeAluRRImm(aluOpSll, tmp2, idx, 2, true))
+	c.Emit4Bytes(encodeAluRRR(aluOpAdd, tmp2, tmp, tmp2, true))
+	c.Emit4Bytes(encodeLoad(tmp2, tmp2, 0, 32, true))
+	c.Emit4Bytes(encodeAluRRR(aluOpAdd, tmp, tmp, tmp2, true))
+	c.Emit4Bytes(encodeJalr(regNumberInEncoding[zeroReg], tmp, 0))
+
+	for _, off := range m.jmpTableTargets[i.u1] {
+		c.Emit4Bytes(off)
+	}
+}
+
+// resolveRelativeAddresses assigns every label its binary offset, grows the
+// branches whose displacement does not fit, and writes the resolved
+// displacements back into the instructions.
+//
+// The expansion loop runs to a fixed point. A branch's level only ever
+// increases (condBrExpansionFor never returns below the current level), so
+// each pass can only grow the function and there are finitely many branches
+// to grow -- the loop terminates.
+func (m *machine) resolveRelativeAddresses(ctx context.Context) {
+	m.resolveAddressModes()
+	m.unresolvedAddressModes = m.unresolvedAddressModes[:0]
+
+	for {
+		var fn string
+		var fnIndex int
+		var labelPosToLabel map[*labelPosition]label
+		if nativeapi.PerfMapEnabled {
+			labelPosToLabel = make(map[*labelPosition]label)
+			for i := 0; i <= m.labelPositionPool.MaxIDEncountered(); i++ {
+				labelPosToLabel[m.labelPositionPool.Get(i)] = label(i)
+			}
+			fn = nativeapi.GetCurrentFunctionName(ctx)
+			fnIndex = nativeapi.GetCurrentFunctionIndex(ctx)
+		}
+
+		// Lay out every block to learn each label's offset.
+		var offset int64
+		for _, pos := range m.orderedSSABlockLabelPos {
+			pos.binaryOffset = offset
+			var size int64
+			for cur := pos.begin; ; cur = cur.next {
+				if cur.kind == nop0 {
+					if l, ok := cur.nop0Label(); ok {
+						if lp := m.labelPositionPool.Get(int(l)); lp != nil {
+							lp.binaryOffset = offset + size
+						}
+					}
+				}
+				size += cur.size()
+				if cur == pos.end {
+					break
+				}
+			}
+			if nativeapi.PerfMapEnabled && size > 0 {
+				nativeapi.PerfMap.AddModuleEntry(fnIndex, offset, uint64(size),
+					fmt.Sprintf("%s:::::%s", fn, labelPosToLabel[pos]))
+			}
+			offset += size
+		}
+
+		// Grow any branch whose displacement no longer fits.
+		needRerun := false
+		var currentOffset int64
+		for cur := m.rootInstr; cur != nil; cur = cur.next {
+			switch cur.kind {
+			case condBr:
+				target := m.labelPositionPool.Get(int(cur.condBrLabel())).binaryOffset
+				if want := condBrExpansionFor(target-currentOffset, cur.condBrExpansion()); want != cur.condBrExpansion() {
+					cur.setCondBrExpansion(want)
+					needRerun = true
+				}
+			case br:
+				target := m.labelPositionPool.Get(int(cur.brLabel())).binaryOffset
+				if cur.brExpansion() == 0 && !fitsInSignedImm21(target-currentOffset) {
+					cur.setBrExpansion(1)
+					needRerun = true
+				}
+			}
+			currentOffset += cur.size()
+		}
+
+		if !needRerun {
+			break
+		}
+		if nativeapi.PerfMapEnabled {
+			nativeapi.PerfMap.Clear()
+		}
+	}
+
+	// Write the resolved displacements back.
+	var currentOffset int64
+	for cur := m.rootInstr; cur != nil; cur = cur.next {
+		switch cur.kind {
+		case br:
+			cur.brOffsetResolve(m.labelOffset(cur.brLabel(), "br") - currentOffset)
+		case condBr:
+			cur.condBrOffsetResolve(m.labelOffset(cur.condBrLabel(), "condBr") - currentOffset)
+		case adr:
+			// asAdrPCRel carries its displacement directly and marks u1 with
+			// the invalid sentinel, precisely so it is not looked up here.
+			if l := label(cur.u1); l != labelInvalid && l != labelReturn {
+				cur.u2 = uint64(uint32(int32(m.labelOffset(l, "adr") - currentOffset)))
+			}
+		case brTableSequence:
+			targets := m.jmpTableTargets[cur.u1]
+			for i := range targets {
+				t := m.labelOffset(label(targets[i]), "br_table entry")
+				targets[i] = uint32(int32(t - (currentOffset + brTableSequenceOffsetTableBegin)))
+			}
+		case sourceOffsetInfo:
+			m.compiler.AddSourceOffsetInfo(currentOffset, cur.sourceOffset())
+		}
+		currentOffset += cur.size()
+	}
+}
+
+// condBrExpansionFor returns the smallest expansion level that can encode the
+// given displacement, never below the level already reached.
+func condBrExpansionFor(diff int64, current byte) byte {
+	var want byte
+	switch {
+	case fitsInSignedImm13(diff):
+		want = 0
+	case fitsInSignedImm21(diff - 4):
+		want = 1
+	default:
+		want = 2
+	}
+	if want < current {
+		return current
+	}
+	return want
+}
+
+// labelOffset returns a label's resolved offset, failing loudly rather than
+// dereferencing nil when a branch names a label that was never placed -- which
+// is a lowering bug, and one that is otherwise reported as an opaque nil
+// dereference deep inside encoding.
+func (m *machine) labelOffset(l label, what string) int64 {
+	pos := m.labelPositionPool.Get(int(l))
+	if pos == nil {
+		panic(fmt.Sprintf("BUG: %s targets %s, which has no position", what, l))
+	}
+	return pos.binaryOffset
+}
+
+// vecReg is the encoding number of a vector register.
+func vecReg(v regalloc.VReg) uint32 { return regNumberInEncoding[v.RealReg()] }
+
+// emitVsetivli configures the vector unit for exactly 16 bytes at the given
+// element width.
+//
+// It is emitted before every vector operation rather than tracked across them.
+// A vtype is a piece of machine state, and getting it wrong is silent -- the
+// operation simply reads the wrong number of lanes at the wrong width -- so
+// the correct-by-construction version comes first. Collapsing runs of
+// identical vsetivli is a straightforward peephole over the final instruction
+// list, and worth doing, but it is an optimization and belongs after the
+// semantics are pinned by the spec suite.
+func emitVsetivli(c compilerBuf, sew uint32) {
+	c.Emit4Bytes(encodeVsetivli(vecAVLFor(sew), sew))
+}
+
+// encodeVecCmp emits a lane-wise comparison as all-ones/all-zeros lanes.
+//
+// RVV comparisons produce a *mask* -- one bit per lane -- where wasm wants a
+// full-width vector of all-ones or all-zeros. The mask therefore has to be
+// materialized: build the two candidate vectors, run the comparison into v0
+// (the architecturally fixed mask register, which is why it is held out of
+// allocation), and merge.
+func encodeVecCmp(c compilerBuf, i *instruction) {
+	funct6, form := uint32(i.u1&0xff), uint32(i.u1>>8&0xff)
+	sew := uint32(i.u2)
+	vd, vs2, vs1 := vecReg(i.rd), vecReg(i.rs1.nr()), vecReg(i.rs2.nr())
+
+	emitVsetivli(c, sew)
+	// The compare comes first: vd may well be one of its sources, and the
+	// zeroing below would otherwise read as a comparison against zero.
+	c.Emit4Bytes(encodeVec(funct6, 1, vs2, vs1, form, regNumberInEncoding[vecMaskReg]))
+	c.Emit4Bytes(encodeVmvVI(vd, 0))
+	c.Emit4Bytes(encodeVmergeVI(vd, vd, -1))
+}
+
+// encodeVecMaskPop answers any_true and all_true.
+//
+// Both reduce to counting lanes: any_true is "not every lane is zero" and
+// all_true is "no lane is zero", so one comparison against zero and a
+// population count of the resulting mask serves both, with the caller
+// comparing the count afterwards.
+func encodeVecMaskPop(c compilerBuf, i *instruction) {
+	sew := uint32(i.u2)
+	rd := intRd(i.rd)
+	vs2 := vecReg(i.rs1.nr())
+	mask := regNumberInEncoding[vecMaskReg]
+
+	emitVsetivli(c, sew)
+	// vmseq.vi v0, vs2, 0 -- lanes that are zero.
+	c.Emit4Bytes(encodeVec(vfunctMseq, 1, vs2, 0, opivi, mask))
+	c.Emit4Bytes(encodeVcpopM(rd, mask))
+}
+
+// encodeVecRound emits the lane-wise ceil, floor, trunc and nearest.
+//
+// The conversion out and back is only exact while every integer in range is
+// representable, so lanes at or above 2^23 (2^52 for f64) are left as they
+// are -- which is right, because such a value is already integral, and it also
+// covers NaN and the infinities, since the magnitude comparison reports them
+// as out of range.
+//
+// Unlike the scalar form, the rounding mode cannot be named in the
+// instruction: RVV's vfcvt always follows frm. So every mode but truncation
+// writes frm, converts, and writes it back.
+func encodeVecRound(c compilerBuf, i *instruction) {
+	sew := uint32(i.u2)
+	mode := roundMode(i.u1)
+	vd, vs2 := vecReg(i.rd), vecReg(i.rs1.nr())
+	tmp := regNumberInEncoding[vecTmpReg]
+	mask := regNumberInEncoding[vecMaskReg]
+	scratch := regNumberInEncoding[tmpReg]
+
+	emitVsetivli(c, sew)
+
+	// The largest magnitude whose round trip through an integer is exact:
+	// 2^23 for f32, 2^52 for f64. Both are a single lui away, the second
+	// shifted into the high half.
+	fpTmp := regNumberInEncoding[fpTmpReg]
+	if sew == vsew64 {
+		c.Emit4Bytes(encodeLui(scratch, 0x43300000))
+		c.Emit4Bytes(encodeAluRRImm(aluOpSll, scratch, scratch, 32, true))
+	} else {
+		c.Emit4Bytes(encodeLui(scratch, 0x4b000000))
+	}
+	c.Emit4Bytes(encodeFmvFromInt(fpTmp, scratch, sew == vsew64))
+
+	// The in-range mask, built before tmp is needed for the conversion.
+	// NaN compares false, which keeps the input -- and a NaN is its own
+	// rounding.
+	c.Emit4Bytes(encodeVecVV(vfunctFsgnjx, tmp, vs2, vs2, opfvv)) // |x|
+	c.Emit4Bytes(encodeVecVV(vfunctMflt, mask, tmp, fpTmp, opfvf))
+
+	dynamic := mode != roundModeTrunc
+	if dynamic {
+		c.Emit4Bytes(encodeFsrmi(scratch, frmFor(mode)))
+	}
+
+	// Convert out and back under the selected mode.
+	variant := uint32(vsubCvtXF)
+	if !dynamic {
+		variant = vsubCvtRtzXF
+	}
+	c.Emit4Bytes(encodeVecUnary(vfunctFunary0, tmp, vs2, variant, opfvv))
+	c.Emit4Bytes(encodeVecUnary(vfunctFunary0, tmp, tmp, vsubCvtFX, opfvv))
+	// Restore the sign, so that ceil(-0.3) is -0.0 rather than +0.0. Two
+	// negating copies: the first takes the negated sign of the input, the
+	// second negates that back.
+	c.Emit4Bytes(encodeVecVV(vfunctFsgnjn, tmp, tmp, vs2, opfvv))
+	c.Emit4Bytes(encodeVecVV(vfunctFsgnjn, tmp, tmp, tmp, opfvv))
+
+	if dynamic {
+		c.Emit4Bytes(encodeFsrm(regNumberInEncoding[zeroReg], scratch))
+	}
+
+	// Keep the rounded lanes only where the input was small enough for the
+	// round trip to be exact; elsewhere keep the input, which is already
+	// integral.
+	c.Emit4Bytes(encodeVmerge(vd, vs2, tmp))
+}
+
+// frmFor maps a wasm rounding operator to the fcsr rounding mode.
+func frmFor(mode roundMode) uint32 {
+	switch mode {
+	case roundModeNearest:
+		return rmRNE
+	case roundModeFloor:
+		return rmRDN
+	case roundModeCeil:
+		return rmRUP
+	default:
+		return rmRTZ
+	}
+}
+
+// emitVecAddress materializes a vector access's address into the reserved
+// scratch, since RVV load and store take a bare base register.
+//
+// The access itself uses byte elements rather than the 64-bit ones the
+// register's contents suggest. Sixteen e8 elements move the same sixteen
+// bytes, but a unit-stride access requires only its *element* width of
+// alignment -- so e8 needs none, where e64 would require the address to be
+// eight-byte aligned. wasm permits an unaligned v128.load, and simd_address
+// exercises exactly that with align=1 and odd offsets.
+func emitVecAddress(c compilerBuf, i *instruction) uint32 {
+	a := i.getAmode()
+	tmp := regNumberInEncoding[tmpReg]
+	rn := regNumberInEncoding[a.rn.RealReg()]
+	if i.bigOffset() {
+		// Past +/-2KiB from SP, which a function with enough stack-passed v128
+		// arguments reaches -- and every v128 argument is stack-passed on this
+		// ISA. The whole displacement has to end up in the register, low half
+		// included, because an RVV access has no displacement field to put it
+		// in.
+		hi, lo := splitImm32PCRel(a.imm, "oversized vector stack displacement")
+		c.Emit4Bytes(encodeLui(tmp, hi))
+		c.Emit4Bytes(encodeAluRRR(aluOpAdd, tmp, tmp, rn, true))
+		c.Emit4Bytes(encodeAluRRImm(aluOpAdd, tmp, tmp, lo, true))
+		return tmp
+	}
+	if !fitsInSignedImm12(a.imm) {
+		panic(fmt.Sprintf("BUG: vector access displacement %d does not fit imm12", a.imm))
+	}
+	c.Emit4Bytes(encodeAluRRImm(aluOpAdd, tmp, rn, int32(a.imm), true))
+	return tmp
+}
+
+// ---------------------------------------------------------------------------
+// Atomics
+// ---------------------------------------------------------------------------
+
+// zeroExtendTo32 emits the two shifts that clear the upper half of a register.
+//
+// A 32-bit atomic leaves its result sign-extended, which is what an i32 wants;
+// the i64 forms (i64.atomic.*32_u) want the same bits zero-extended instead.
+func zeroExtendTo32(c compilerBuf, rd uint32) {
+	c.Emit4Bytes(encodeAluRRImm(aluOpSll, rd, rd, 32, true))
+	c.Emit4Bytes(encodeAluRRImm(aluOpSrl, rd, rd, 32, true))
+}
+
+func encodeAtomicRmw(c compilerBuf, i *instruction) {
+	funct5, wide := uint32(i.u1&0xff), i.u1>>8&1 != 0
+	rd := intRd(i.rd)
+	c.Emit4Bytes(encodeAMO(funct5, rd,
+		regNumberInEncoding[i.rs1.realReg()], regNumberInEncoding[i.rs2.realReg()], i.u2 == 8))
+	if wide && i.u2 == 4 {
+		zeroExtendTo32(c, rd)
+	}
+}
+
+func encodeAtomicLoad(c compilerBuf, i *instruction) {
+	rd := intRd(i.rd)
+	bits := int(i.u2) * 8
+	// A 32-bit load is the one width where signedness is a choice: lw for an
+	// i32 result, which lives sign-extended, lwu for an i64 one.
+	signed := bits == 32 && i.u1&1 == 0
+	c.Emit4Bytes(encodeFence(0b0011, 0b0011))
+	c.Emit4Bytes(encodeLoad(rd, regNumberInEncoding[i.rs1.realReg()], 0, byte(bits), signed))
+	c.Emit4Bytes(encodeFence(0b0010, 0b0011))
+}
+
+// emitFieldMask builds the in-place mask for a sub-word atomic: the low `bits`
+// set, shifted up to where the field sits in its word.
+func emitFieldMask(c compilerBuf, mask, shift uint32, bits int) {
+	c.Emit4Bytes(encodeAluRRImm(aluOpAdd, mask, regNumberInEncoding[zeroReg], -1, true))
+	c.Emit4Bytes(encodeAluRRImm(aluOpSrl, mask, mask, int32(64-bits), true))
+	c.Emit4Bytes(encodeAluRRR(aluOpSll, mask, mask, shift, true))
+}
+
+// encodeAtomicRmwSeq expands a byte or halfword read-modify-write.
+//
+// The field is read out of its containing word, the operation runs on it
+// widened to 64 bits -- which is safe because only the low `bits` of the result
+// are kept -- and the word is written back with just that field replaced.
+func encodeAtomicRmwSeq(c compilerBuf, i *instruction) {
+	op := ssa.AtomicRmwOp(i.u1)
+	bits := int(i.u2) * 8
+	rd := intRd(i.rd)
+	addr, val, shift := regNumberInEncoding[i.rs1.realReg()],
+		regNumberInEncoding[i.rs2.realReg()], regNumberInEncoding[i.rs3.realReg()]
+	mask, old, tmp := regNumberInEncoding[tmpReg3], regNumberInEncoding[tmpReg2], regNumberInEncoding[tmpReg]
+
+	emitFieldMask(c, mask, shift, bits)
+	// retry:
+	c.Emit4Bytes(encodeLR(old, addr, false))
+	c.Emit4Bytes(encodeAluRRR(aluOpAnd, rd, old, mask, true))
+	c.Emit4Bytes(encodeAluRRR(aluOpSrl, rd, rd, shift, true)) // the result
+	switch op {
+	case ssa.AtomicRmwOpAdd:
+		c.Emit4Bytes(encodeAluRRR(aluOpAdd, tmp, rd, val, true))
+	case ssa.AtomicRmwOpSub:
+		c.Emit4Bytes(encodeAluRRR(aluOpSub, tmp, rd, val, true))
+	case ssa.AtomicRmwOpAnd:
+		c.Emit4Bytes(encodeAluRRR(aluOpAnd, tmp, rd, val, true))
+	case ssa.AtomicRmwOpOr:
+		c.Emit4Bytes(encodeAluRRR(aluOpOr, tmp, rd, val, true))
+	case ssa.AtomicRmwOpXor:
+		c.Emit4Bytes(encodeAluRRR(aluOpXor, tmp, rd, val, true))
+	case ssa.AtomicRmwOpXchg:
+		c.Emit4Bytes(encodeAluRRR(aluOpAdd, tmp, regNumberInEncoding[zeroReg], val, true))
+	default:
+		panic(fmt.Sprintf("BUG: unknown atomic rmw op %s", op))
+	}
+	// Splice the new field into the word: old ^ ((old ^ new<<shift) & mask).
+	c.Emit4Bytes(encodeAluRRR(aluOpSll, tmp, tmp, shift, true))
+	c.Emit4Bytes(encodeAluRRR(aluOpXor, tmp, tmp, old, true))
+	c.Emit4Bytes(encodeAluRRR(aluOpAnd, tmp, tmp, mask, true))
+	c.Emit4Bytes(encodeAluRRR(aluOpXor, tmp, tmp, old, true))
+	c.Emit4Bytes(encodeSC(old, addr, tmp, false))
+	c.Emit4Bytes(encodeBranch(condNE, old, regNumberInEncoding[zeroReg], -9*4))
+}
+
+func encodeAtomicCas(c compilerBuf, i *instruction) {
+	wide, _64bit := i.u1&1 != 0, i.u2 == 8
+	rd := intRd(i.rd)
+	addr, exp, repl := regNumberInEncoding[i.rs1.realReg()],
+		regNumberInEncoding[i.rs2.realReg()], regNumberInEncoding[i.rs3.realReg()]
+	status := regNumberInEncoding[tmpReg]
+
+	// retry:
+	c.Emit4Bytes(encodeLR(rd, addr, _64bit))
+	c.Emit4Bytes(encodeBranch(condNE, rd, exp, 3*4)) // mismatch: leave it alone
+	c.Emit4Bytes(encodeSC(status, addr, repl, _64bit))
+	c.Emit4Bytes(encodeBranch(condNE, status, regNumberInEncoding[zeroReg], -3*4))
+	// done:
+	if wide && !_64bit {
+		zeroExtendTo32(c, rd)
+	}
+}
+
+func encodeAtomicCasSeq(c compilerBuf, i *instruction) {
+	bits := int(i.u2) * 8
+	rd := intRd(i.rd)
+	addr, exp, repl, shift := regNumberInEncoding[i.rs1.realReg()],
+		regNumberInEncoding[i.rs2.realReg()], regNumberInEncoding[i.rs3.realReg()],
+		regNumberInEncoding[i.rs4.realReg()]
+	mask, old, tmp := regNumberInEncoding[tmpReg3], regNumberInEncoding[tmpReg2], regNumberInEncoding[tmpReg]
+
+	emitFieldMask(c, mask, shift, bits)
+	// retry:
+	c.Emit4Bytes(encodeLR(old, addr, false))
+	c.Emit4Bytes(encodeAluRRR(aluOpAnd, rd, old, mask, true))
+	c.Emit4Bytes(encodeAluRRR(aluOpSrl, rd, rd, shift, true)) // the result
+	c.Emit4Bytes(encodeBranch(condNE, rd, exp, 7*4))          // mismatch: leave it alone
+	c.Emit4Bytes(encodeAluRRR(aluOpSll, tmp, repl, shift, true))
+	c.Emit4Bytes(encodeAluRRR(aluOpXor, tmp, tmp, old, true))
+	c.Emit4Bytes(encodeAluRRR(aluOpAnd, tmp, tmp, mask, true))
+	c.Emit4Bytes(encodeAluRRR(aluOpXor, tmp, tmp, old, true))
+	c.Emit4Bytes(encodeSC(old, addr, tmp, false))
+	c.Emit4Bytes(encodeBranch(condNE, old, regNumberInEncoding[zeroReg], -9*4))
+	// done:
+}

@@ -282,7 +282,7 @@ func (c *compiler) assignVirtualRegisters() {
 
 // AllocateVReg implements Compiler.AllocateVReg.
 func (c *compiler) AllocateVReg(typ ssa.Type) regalloc.VReg {
-	regType := regalloc.RegTypeOf(typ)
+	regType := regalloc.RegTypeOf(typ, c.mach.V128RegType())
 	r := regalloc.VReg(c.nextVRegID).SetRegType(regType)
 
 	id := r.ID()
@@ -459,6 +459,6 @@ func (c *compiler) GetFunctionABI(sig *ssa.Signature) *FunctionABI {
 		return abi
 	}
 
-	abi.Init(sig, c.argResultInts, c.argResultFloats)
+	abi.Init(sig, c.argResultInts, c.argResultFloats, c.mach.V128RegType())
 	return abi
 }

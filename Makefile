@@ -18,9 +18,32 @@ main_packages := $(sort $(foreach f,$(dir $(main_sources)),$(if $(findstring ./,
 
 go_test_options ?= -timeout 300s
 
+# Local development only. Every test/benchmark run goes through scripts/cap: a
+# rootless memory-capped cgroup scope, so a runaway suite is killed inside its
+# own cgroup instead of taking the desktop down. Override the ceiling with
+# `make test cap_mem=4G`.
+#
+# It drops out entirely under CI. A hosted runner is disposable and already
+# bounded, has no user systemd session for the scope, and is not the machine
+# this protects; scripts/cap refuses to run uncapped rather than falling back
+# silently, so leaving it in CI's path turns every `make test` into exit 70.
+#
+# 2G, not 1G, and the difference is measured rather than guessed: the SIMD
+# spectests peak at 1084 MiB and the rest of the spectest corpus at 1059 MiB
+# (cgroup memory.peak, run sequentially). At a 1G ceiling MemoryHigh sits at
+# 921 MiB, so those suites never exceed the cap -- they live permanently in the
+# reclaim band instead, which is slower and generates exactly the system-wide
+# pressure the cap exists to avoid. A ceiling below a job's real working set
+# does not contain it, it strangles it.
+cap_mem ?= 2G
+# CI is set by GitHub Actions and every other CI worth naming.
+cap     := $(if $(CI),,./scripts/cap $(cap_mem) --)
+cap3    := $(if $(CI),,../../../scripts/cap $(cap_mem) --)
+cap4    := $(if $(CI),,../../../../scripts/cap $(cap_mem) --)
+
 .PHONY: test.examples
 test.examples:
-	@go test $(go_test_options) ./examples/... ./imports/assemblyscript/example/... ./imports/emscripten/... ./imports/wasi_snapshot_preview1/example/...
+	@$(cap) go test $(go_test_options) ./examples/... ./imports/assemblyscript/example/... ./imports/emscripten/... ./imports/wasi_snapshot_preview1/example/...
 
 .PHONY: build.examples.as
 build.examples.as:
@@ -410,29 +433,52 @@ build.spectest.multi_memory:
 
 .PHONY: test
 test:
-	@go test $(go_test_options) ./...
-	@cd internal/version/testdata && go test $(go_test_options) ./...
-	@cd internal/integration_test/fuzz/wazylib && CGO_ENABLED=0 WASM_BINARY_PATH=testdata/test.wasm go test ./...
+	@$(cap) go test $(go_test_options) ./...
+	@cd internal/version/testdata && $(cap3) go test $(go_test_options) ./...
+	@cd internal/integration_test/fuzz/wazylib && CGO_ENABLED=0 WASM_BINARY_PATH=testdata/test.wasm $(cap4) go test ./...
 
 .PHONY: test.arm64
 test.arm64: ## Run the suite for the arm64 compiler backend under qemu-user
 	# -one-insn-per-tb works around a qemu-user (<=8.2.2) multi-insn-TB self-modifying-code
 	# bug that flaky-SIGSEGVs (~30%) on wazy's JIT'd code. Needs qemu-aarch64-static. See
 	# CONTRIBUTING.md. Slower emulation, so a longer timeout than the host `test` target.
-	@GOARCH=arm64 CGO_ENABLED=0 go test -timeout 90m -exec 'qemu-aarch64-static -one-insn-per-tb' ./...
+	@GOARCH=arm64 CGO_ENABLED=0 $(cap) go test -timeout 90m -exec 'qemu-aarch64-static -one-insn-per-tb' ./...
 
 .PHONY: test.interp
-test.interp: ## Run the suite against the interpreter engine (riscv64 cross-run, no compiler)
-	# A non-amd64/arm64 GOARCH auto-selects the interpreter; qemu-riscv64 runs it (no JIT, no
-	# flag needed). Compiler-codegen tests self-skip via platform.CompilerSupported(). Needs
-	# qemu-riscv64-static.
-	@GOARCH=riscv64 CGO_ENABLED=0 go test -timeout 60m -exec qemu-riscv64-static ./...
+test.interp: ## Run the suite against the interpreter engine (s390x cross-run, no compiler)
+	# An arch with no backend auto-selects the interpreter. That used to be
+	# riscv64; now that riscv64 has a backend, an arch is needed that still does
+	# not -- s390x is the one `make check` already cross-builds. No JIT, so no
+	# -one-insn-per-tb. Needs qemu-s390x-static.
+	#
+	# Three packages do not pass here, none of them about the engine, which is
+	# why this is not in CI:
+	#   - internal/engine/native does not build: stack_pool_test.go is
+	#     //go:build amd64 || arm64 || riscv64, and the ungated e2e_test.go
+	#     calls RetainedStackLenForTest from it. That breaks on any arch without
+	#     a backend, and has since before riscv64 had one.
+	#   - internal/sysfs and imports/wasi_snapshot_preview1 disagree on
+	#     timestamp granularity under this emulator (223000005000 vs
+	#     223000000000).
+	@GOARCH=s390x CGO_ENABLED=0 $(cap) go test -p 1 -timeout 60m -exec qemu-s390x-static ./...
+
+.PHONY: test.riscv64
+test.riscv64: ## Run the suite for the riscv64 compiler backend under qemu-user
+	# -one-insn-per-tb works around the same qemu-user multi-insn-TB
+	# self-modifying-code bug that test.arm64 documents: JIT'd code is written
+	# and then executed, and qemu can hold a stale translation. It also costs
+	# about 25x, hence the timeout. Needs qemu-riscv64-static.
+	#
+	# -p 1 because each emulated test binary holds around a gigabyte, and four
+	# of them at once do not fit under the memory cap -- the run does not fail,
+	# it goes to disk and takes an hour to do a minute of work.
+	@GOARCH=riscv64 CGO_ENABLED=0 $(cap) go test -p 1 -timeout 90m -exec 'qemu-riscv64-static -one-insn-per-tb' ./...
 
 .PHONY: coverage
 # replace spaces with commas
 coverpkg = $(shell echo $(main_packages) | tr ' ' ',')
 coverage: ## Generate test coverage
-	@go test -coverprofile=coverage.txt -covermode=atomic --coverpkg=$(coverpkg) $(main_packages)
+	@$(cap) go test -coverprofile=coverage.txt -covermode=atomic --coverpkg=$(coverpkg) $(main_packages)
 	@go tool cover -func coverage.txt
 
 golangci_lint_path := $(shell go env GOPATH)/bin/golangci-lint
@@ -499,7 +545,7 @@ fuzz_default_flags := --no-trace-compares --sanitizer=none -- -rss_limit_mb=8192
 fuzz_timeout_seconds ?= 10
 .PHONY: fuzz
 fuzz:
-	@cd internal/integration_test/fuzz && cargo test
+	@cd internal/integration_test/fuzz && $(cap3) cargo test
 	@cd internal/integration_test/fuzz && cargo fuzz run logging_no_diff $(fuzz_default_flags) -max_total_time=$(fuzz_timeout_seconds)
 	@cd internal/integration_test/fuzz && cargo fuzz run no_diff $(fuzz_default_flags) -max_total_time=$(fuzz_timeout_seconds)
 	@cd internal/integration_test/fuzz && cargo fuzz run memory_no_diff $(fuzz_default_flags) -max_total_time=$(fuzz_timeout_seconds)
@@ -514,15 +560,23 @@ libsodium:
 #### CLI release related ####
 
 VERSION ?= dev
-non_windows_platforms := darwin_amd64 darwin_arm64 linux_amd64 linux_arm64
+# linux_riscv64 is Linux-only on purpose: the compiler backend for it is gated to
+# Linux (golang.org/x/sys/cpu reads the vector extension out of AT_HWCAP, which no
+# other OS provides), and nothing else has been run there.
+non_windows_platforms := darwin_amd64 darwin_arm64 linux_amd64 linux_arm64 linux_riscv64
 non_windows_archives  := $(non_windows_platforms:%=dist/wazy_$(VERSION)_%.tar.gz)
 windows_platforms     := windows_amd64 # TODO: add arm64 windows once we start testing on it.
 windows_archives      := $(windows_platforms:%=dist/wazy_$(VERSION)_%.zip)
 checksum_txt          := dist/wazy_$(VERSION)_checksums.txt
 
-# define macros for multi-platform builds. these parse the filename being built
-go-arch = $(if $(findstring amd64,$1),amd64,arm64)
-go-os   = $(if $(findstring .exe,$1),windows,$(if $(findstring linux,$1),linux,darwin))
+# Macros for multi-platform builds, taking the target from the path being built:
+# build/wazy_<goos>_<goarch>/wazy[.exe]. Read out rather than guessed at -- the
+# previous form was `$(if $(findstring amd64,$1),amd64,arm64)`, which answers
+# arm64 for anything that is not amd64, so adding a third architecture would have
+# built an arm64 binary and named it riscv64.
+go-platform = $(patsubst wazy_%,%,$(notdir $(patsubst %/,%,$(dir $1))))
+go-os   = $(firstword $(subst _, ,$(call go-platform,$1)))
+go-arch = $(lastword $(subst _, ,$(call go-platform,$1)))
 
 build/wazy_%/wazy:
 	$(call go-build,$@,$<)

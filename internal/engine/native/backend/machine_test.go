@@ -47,6 +47,9 @@ func (m mockMachine) ArgsResultsRegs() (argResultInts, argResultFloats []regallo
 	return m.argResultInts, m.argResultFloats
 }
 
+// V128RegType mirrors arm64/amd64: vectors share the float register file.
+func (m mockMachine) V128RegType() regalloc.RegType { return regalloc.RegTypeFloat }
+
 func (m mockMachine) RegAlloc() { panic("implement me") }
 
 func (m mockMachine) LowerParams(params []ssa.Value) { panic("implement me") }

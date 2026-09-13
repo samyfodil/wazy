@@ -176,8 +176,15 @@ const (
 	desiredLocStack       = desiredLoc(desiredLocKindStack)
 )
 
+// newDesiredLocReg packs a register into the two bits above the kind.
+//
+// The widening is not cosmetic: RealReg is a byte, so shifting one that names a
+// register above 63 -- which riscv64's third register file does -- wraps inside
+// the byte before it ever reaches the uint16. RealReg 65 (v1) came back out as
+// RealReg 1 (ra), and a v128 phi was reconciled by moving a vector register
+// into an integer one.
 func newDesiredLocReg(r RealReg) desiredLoc {
-	return desiredLoc(desiredLocKindReg) | desiredLoc(r<<2)
+	return desiredLoc(desiredLocKindReg) | desiredLoc(uint16(r)<<2)
 }
 
 func (d desiredLoc) realReg() RealReg {
@@ -217,7 +224,7 @@ func (s *state[I, B, F]) dump(info *RegisterInfo) { //nolint:unused
 func (s *state[I, B, F]) reset() {
 	s.argRealRegs = s.argRealRegs[:0]
 	s.vrStates.Reset()
-	s.allocatedRegSet = RegSet(0)
+	s.allocatedRegSet = RegSet{}
 	s.regsInUse.reset()
 	s.currentBlockID = -1
 }
@@ -945,7 +952,7 @@ func (a *Allocator[I, B, F]) allocBlock(f F, blk B) {
 					}
 					if r == RealRegInvalid {
 						typ := def.RegType()
-						r = a.findOrSpillAllocatable(s, a.regInfo.AllocatableRegisters[typ], RegSet(0), RealRegInvalid)
+						r = a.findOrSpillAllocatable(s, a.regInfo.AllocatableRegisters[typ], RegSet{}, RealRegInvalid)
 					}
 					s.useRealReg(r, vState)
 				}
@@ -1006,20 +1013,22 @@ func (a *Allocator[I, B, F]) allocBlock(f F, blk B) {
 func (a *Allocator[I, B, F]) releaseCallerSavedRegs(addrReg RealReg) {
 	s := &a.state
 
-	for m := s.regsInUse.mask; m != 0; m &= m - 1 {
-		allocated := RealReg(bits.TrailingZeros64(m))
-		if allocated == addrReg { // If this is the call indirect, we should not touch the addr register.
-			continue
+	for w, m := range s.regsInUse.mask {
+		for ; m != 0; m &= m - 1 {
+			allocated := RealReg(w*64 + bits.TrailingZeros64(m))
+			if allocated == addrReg { // If this is the call indirect, we should not touch the addr register.
+				continue
+			}
+			vs := s.regsInUse.get(allocated)
+			if vs.v.IsRealReg() {
+				continue // This is the argument register as it's already used by VReg backed by the corresponding RealReg.
+			}
+			if !a.regInfo.CallerSavedRegisters.has(allocated) {
+				// If this is not a caller-saved register, it is safe to keep it across the call.
+				continue
+			}
+			s.releaseRealReg(allocated)
 		}
-		vs := s.regsInUse.get(allocated)
-		if vs.v.IsRealReg() {
-			continue // This is the argument register as it's already used by VReg backed by the corresponding RealReg.
-		}
-		if !a.regInfo.CallerSavedRegisters.has(allocated) {
-			// If this is not a caller-saved register, it is safe to keep it across the call.
-			continue
-		}
-		s.releaseRealReg(allocated)
 	}
 }
 
@@ -1035,7 +1044,7 @@ func (a *Allocator[I, B, F]) fixMergeState(f F, blk B) {
 	bID := blk.ID()
 	blkSt := a.getOrAllocateBlockState(bID)
 	desiredOccupants := &blkSt.startRegs
-	desiredOccupantsSet := RegSet(desiredOccupants.mask)
+	desiredOccupantsSet := desiredOccupants.set()
 
 	if nativeapi.RegAllocLoggingEnabled {
 		fmt.Println("fixMergeState", blk.ID(), ":", desiredOccupants.format(a.regInfo))
@@ -1054,36 +1063,35 @@ func (a *Allocator[I, B, F]) fixMergeState(f F, blk B) {
 
 		s.resetAt(predSt)
 
-		// Finds the free registers if any.
-		intTmp, floatTmp := VRegInvalid, VRegInvalid
-		if intFree := s.findAllocatable(
-			a.regInfo.AllocatableRegisters[RegTypeInt], desiredOccupantsSet,
-		); intFree != RealRegInvalid {
-			intTmp = FromRealReg(intFree, RegTypeInt)
-		}
-		if floatFree := s.findAllocatable(
-			a.regInfo.AllocatableRegisters[RegTypeFloat], desiredOccupantsSet,
-		); floatFree != RealRegInvalid {
-			floatTmp = FromRealReg(floatFree, RegTypeFloat)
-		}
-
-		for m := desiredOccupants.mask; m != 0; m &= m - 1 {
-			r := RealReg(bits.TrailingZeros64(m))
-			desiredVReg := desiredOccupants.get(r)
-
-			currentVReg := s.regsInUse.get(r)
-			if currentVReg != nil && desiredVReg.v.ID() == currentVReg.v.ID() {
-				continue
+		// Find a free temporary per register class, if any. This is per class
+		// rather than an int/float pair because a temporary must come from the
+		// same physical file as the value it shuffles: on an ISA where vectors
+		// live outside the float file (RegTypeVec), handing a v128 an
+		// f-register temporary would silently truncate it. Classes the ISA
+		// does not have contribute an empty list and stay VRegInvalid.
+		var tmps [NumRegType]VReg
+		for t := RegTypeInt; t < NumRegType; t++ {
+			tmps[t] = VRegInvalid
+			if free := s.findAllocatable(
+				a.regInfo.AllocatableRegisters[t], desiredOccupantsSet,
+			); free != RealRegInvalid {
+				tmps[t] = FromRealReg(free, t)
 			}
+		}
 
-			typ := desiredVReg.v.RegType()
-			var tmpRealReg VReg
-			if typ == RegTypeInt {
-				tmpRealReg = intTmp
-			} else {
-				tmpRealReg = floatTmp
+		for w, m := range desiredOccupants.mask {
+			for ; m != 0; m &= m - 1 {
+				r := RealReg(w*64 + bits.TrailingZeros64(m))
+				desiredVReg := desiredOccupants.get(r)
+
+				currentVReg := s.regsInUse.get(r)
+				if currentVReg != nil && desiredVReg.v.ID() == currentVReg.v.ID() {
+					continue
+				}
+
+				typ := desiredVReg.v.RegType()
+				a.reconcileEdge(f, r, pred, currentVReg, desiredVReg, tmps[typ], typ)
 			}
-			a.reconcileEdge(f, r, pred, currentVReg, desiredVReg, tmpRealReg, typ)
 		}
 	}
 }
@@ -1211,11 +1219,16 @@ func (a *Allocator[I, B, F]) scheduleSpill(f F, vs *vrState[I, B, F]) {
 	}
 	for pos != definingBlk {
 		st := a.getOrAllocateBlockState(pos.ID())
-		for m := st.startRegs.mask; m != 0; m &= m - 1 {
-			rr := RealReg(bits.TrailingZeros64(m))
-			if st.startRegs.get(rr).v == v {
-				r = rr
-				// Already in the register, so we can place the spill at the beginning of the block.
+		for w, m := range st.startRegs.mask {
+			for ; m != 0; m &= m - 1 {
+				rr := RealReg(w*64 + bits.TrailingZeros64(m))
+				if st.startRegs.get(rr).v == v {
+					r = rr
+					// Already in the register, so we can place the spill at the beginning of the block.
+					break
+				}
+			}
+			if r != RealRegInvalid {
 				break
 			}
 		}

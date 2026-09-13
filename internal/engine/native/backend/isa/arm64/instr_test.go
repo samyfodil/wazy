@@ -61,7 +61,12 @@ func TestInstruction_String(t *testing.T) {
 			},
 			exp: "ldr d0?, #8; b 16; data.f64 12345.987491",
 		},
-		{exp: "nop0", i: &instruction{kind: nop0}},
+		// A nop built the way production code builds one anchors no label...
+		{exp: "nop0", i: (&instruction{}).asNop0()},
+		// ...while one that anchors L0 prints it. These are different
+		// instructions and used to be indistinguishable, which is the bug
+		// labelInvalid exists to prevent.
+		{exp: "L0:", i: &instruction{kind: nop0, u1: uint64(label(0))}},
 		{exp: "b L0", i: &instruction{kind: br, u1: uint64(label(0))}},
 	} {
 		t.Run(tc.exp, func(t *testing.T) { require.Equal(t, tc.exp, tc.i.String()) })
