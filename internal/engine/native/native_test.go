@@ -16,7 +16,17 @@ import (
 var ctx = context.Background()
 
 func TestMain(m *testing.M) {
-	if !platform.CompilerSupported() {
+	// CoreFeaturesV1, not CompilerSupported() -- which asks about V2, and so
+	// about SIMD.
+	//
+	// On riscv64 SIMD needs the vector extension, which is optional and which a
+	// good deal of shipping hardware does not have; asking about V2 there made
+	// this whole binary exit before running a single test, on the architecture
+	// whose backend it exists to cover. V1 is the question that actually
+	// decides whether this binary can run anything: can the platform compile at
+	// all. The few cases that genuinely execute v128 skip themselves; see
+	// compilerFeatures in e2e_test.go.
+	if !platform.CompilerSupports(api.CoreFeaturesV1) {
 		os.Exit(0)
 	}
 	os.Exit(m.Run())

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"unsafe"
@@ -20,6 +21,7 @@ import (
 	"github.com/samyfodil/wazy/internal/engine/native"
 	"github.com/samyfodil/wazy/internal/engine/native/testcases"
 	"github.com/samyfodil/wazy/internal/leb128"
+	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
 	"github.com/samyfodil/wazy/internal/testing/dwarftestdata"
 	"github.com/samyfodil/wazy/internal/testing/require"
@@ -34,6 +36,42 @@ const (
 	f64  = wasm.ValueTypeF64
 	v128 = wasm.ValueTypeV128
 )
+
+// compilerFeatures adapts a case's feature set to what this platform's compiler
+// can actually take.
+//
+// A case here asks for CoreFeaturesV2 as a baseline and then adds the one
+// proposal it is about; almost none of them use v128. On riscv64 SIMD needs the
+// vector extension, which is optional -- the RISE runners' silicon is plain
+// RV64GC -- so asking for V2 there makes the whole set unsupportable over a
+// feature the case does not use. wazy.NewRuntimeConfig would hand such a case to
+// the interpreter, where it proves nothing about this backend and quietly
+// disagrees with it: NaN payloads propagate where RISC-V canonicalizes them, and
+// memory.wait checks bounds and alignment in the other order.
+//
+// So clear SIMD rather than lose the case. The few cases that do execute v128
+// fail to validate without it and skip themselves, which is all hardware with no
+// vector unit can do; the emulated job covers those.
+func compilerFeatures(features api.CoreFeatures) api.CoreFeatures {
+	if features == 0 {
+		features = api.CoreFeaturesV2 // wazy.NewRuntimeConfig's default
+	}
+	if !platform.CompilerSupports(features) && platform.CompilerSupports(features&^api.CoreFeatureSIMD) {
+		features &^= api.CoreFeatureSIMD
+	}
+	return features
+}
+
+// simdUnavailable reports whether err is the validator refusing a module that
+// executes v128, under a feature set compilerFeatures cleared SIMD from.
+//
+// Asking the validator beats deciding from the module: v128 turns up in a
+// signature, a global or only in a function body, and a scan that misses the
+// third emits vector instructions on a machine with no vector unit -- an illegal
+// instruction, from CI, with no stack trace worth reading.
+func simdUnavailable(err error) bool {
+	return err != nil && strings.Contains(err.Error(), `feature "simd" is disabled`)
+}
 
 func TestE2E(t *testing.T) {
 	tmp := t.TempDir()
@@ -996,6 +1034,7 @@ func TestE2E(t *testing.T) {
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
+			features := compilerFeatures(tc.features)
 			for i := 0; i < 1; i++ {
 				var name string
 				if i == 0 {
@@ -1006,10 +1045,8 @@ func TestE2E(t *testing.T) {
 				t.Run(name, func(t *testing.T) {
 					cache, err := wazy.NewCompilationCacheWithDir(tmp)
 					require.NoError(t, err)
-					config := wazy.NewRuntimeConfig().WithCompilationCache(cache)
-					if tc.features != 0 {
-						config = config.WithCoreFeatures(tc.features)
-					}
+					config := wazy.NewRuntimeConfig().WithCompilationCache(cache).
+						WithCoreFeatures(features)
 
 					ctx := context.Background()
 					r := wazy.NewRuntimeWithConfig(ctx, config)
@@ -1019,6 +1056,9 @@ func TestE2E(t *testing.T) {
 
 					if tc.imported != nil {
 						imported, err := r.CompileModule(ctx, binaryencoding.EncodeModule(tc.imported))
+						if simdUnavailable(err) {
+							t.Skip("executes v128 and this compiler has no vector unit")
+						}
 						require.NoError(t, err)
 
 						_, err = r.InstantiateModule(ctx, imported, wazy.NewModuleConfig())
@@ -1026,6 +1066,9 @@ func TestE2E(t *testing.T) {
 					}
 
 					compiled, err := r.CompileModule(ctx, binaryencoding.EncodeModule(tc.m))
+					if simdUnavailable(err) {
+						t.Skip("executes v128 and this compiler has no vector unit")
+					}
 					require.NoError(t, err)
 
 					inst, err := r.InstantiateModule(ctx, compiled, wazy.NewModuleConfig())
@@ -1049,7 +1092,12 @@ func TestE2E(t *testing.T) {
 							} else {
 								require.NoError(t, err)
 								exp := cc.expResults
-								if runtime.GOARCH == "riscv64" && cc.expResultsRiscv64 != nil {
+								// The backend produced this, not the architecture:
+								// where the compiler cannot take these features
+								// the interpreter ran, and it propagates NaN
+								// payloads like amd64 does.
+								if runtime.GOARCH == "riscv64" && cc.expResultsRiscv64 != nil &&
+									platform.CompilerSupports(features) {
 									exp = cc.expResultsRiscv64
 								}
 								require.Equal(t, len(exp), len(result))
@@ -1632,6 +1680,12 @@ func TestListener_imported(t *testing.T) {
 }
 
 func TestListener_long(t *testing.T) {
+	// v128 in the signature, and NewRuntimeConfigCompiler does not fall back to
+	// the interpreter, so on a machine with no vector unit this would compile to
+	// instructions it cannot execute.
+	if !platform.CompilerSupports(api.CoreFeaturesV2) {
+		t.Skip("executes v128 and this compiler has no vector unit")
+	}
 	pickOneParam := binaryencoding.EncodeModule(&wasm.Module{
 		TypeSection: []wasm.FunctionType{{Results: []wasm.ValueType{i32}, Params: []wasm.ValueType{
 			i32, i32, f32, f64, i64, i32, i32, v128, f32,
