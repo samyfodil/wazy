@@ -45,6 +45,8 @@ func elemContainsResourceHandle(t binary.TypeDesc, resolve abi.Resolver, depth i
 		return true
 	case binary.ListDesc:
 		return elemRefContainsResourceHandle(&d.Element, resolve, depth)
+	case binary.MapDesc:
+		return elemRefContainsResourceHandle(&d.Key, resolve, depth) || elemRefContainsResourceHandle(&d.Value, resolve, depth)
 	case binary.OptionDesc:
 		return elemRefContainsResourceHandle(&d.Element, resolve, depth)
 	case binary.RecordDesc:
@@ -103,6 +105,8 @@ func elemContainsBorrowHandle(t binary.TypeDesc, resolve abi.Resolver, depth int
 		return false
 	case binary.ListDesc:
 		return elemRefContainsBorrowHandle(&d.Element, resolve, depth)
+	case binary.MapDesc:
+		return elemRefContainsBorrowHandle(&d.Key, resolve, depth) || elemRefContainsBorrowHandle(&d.Value, resolve, depth)
 	case binary.OptionDesc:
 		return elemRefContainsBorrowHandle(&d.Element, resolve, depth)
 	case binary.RecordDesc:

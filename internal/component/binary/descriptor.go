@@ -77,6 +77,24 @@ type TupleDesc struct {
 func (TupleDesc) isTypeDesc()  {}
 func (TupleDesc) Kind() string { return "tuple" }
 
+// MapDesc represents a map<K,V>: an unordered association of keys to values.
+// Per the Canonical ABI's despecialize() step, a map has no wire
+// representation of its own -- it is byte-for-byte identical to
+// list<tuple<K,V>> (same alignment, size, flattening, and lift/lower), so
+// every ABI function that handles MapDesc does so by delegating to its
+// TupleDesc/ListDesc counterpart with a synthetic `tuple<Key,Value>` element
+// rather than repeating the layout. A map's Value is therefore the same
+// shape as list<tuple<K,V>>: a []Value of two-element []Value pairs
+// ([]Value{key, value}), in whatever order the guest produced them -- a map
+// carries no ordering guarantee.
+type MapDesc struct {
+	Key   TypeRef
+	Value TypeRef
+}
+
+func (MapDesc) isTypeDesc()  {}
+func (MapDesc) Kind() string { return "map" }
+
 // FlagsDesc represents a flags type (set of named booleans).
 type FlagsDesc struct {
 	Names []string
@@ -451,6 +469,13 @@ func readDefvaltypeDesc(buf []byte, off int, tag byte) (TypeDesc, int, error) {
 	case 0x6f: // tuple: vec(valtype)
 		elems, off2, e := readValtypeVecDesc(buf, off)
 		desc, off, err = TupleDesc{Elements: elems}, off2, e
+	case 0x63: // map: key valtype, value valtype
+		key, off2, e := readValTypeRef(buf, off)
+		if e != nil {
+			return nil, off2, e
+		}
+		val, off3, e := readValTypeRef(buf, off2)
+		desc, off, err = MapDesc{Key: key, Value: val}, off3, e
 	case 0x6e: // flags: vec(label)
 		names, off2, e := readLabelVecDesc(buf, off)
 		desc, off, err = FlagsDesc{Names: names}, off2, e

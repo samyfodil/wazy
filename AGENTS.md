@@ -60,6 +60,10 @@ Use the Makefile; it encodes the real invocations.
   (`[]byte`, `[]uint32`, `[]float64`, `[]bool`, `[]rune`); every other list is a
   `[]Value`. Read one with `component.ListOf[T]`, which takes either shape and does
   not copy the typed one. Lowering accepts both, so only *reading* a list cares.
+  A `map<K,V>` has no Canonical ABI representation of its own -- it despecializes
+  to `list<tuple<K,V>>` (identical alignment/size/flatten/lift/lower, independent
+  of K/V) -- so its value is that list's shape: a `[]Value` of two-element
+  `[]Value{key, value}` pairs. Read one with `component.MapOf[K,V]`.
 - **Component ABI hot paths:** the lift/lower tree runs per value per call, so an
   allocation there is an allocation per request. Two habits it has been burned by:
   boxing a value type into an interface inside a recursive walk, and building a

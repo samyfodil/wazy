@@ -871,6 +871,8 @@ func typeContainsResource(t binary.TypeDesc, resolve abi.Resolver, depth int) bo
 		return d.Prim == "error-context" // same reasoning, for error-context
 	case binary.ListDesc:
 		return typeRefContainsResource(&d.Element, resolve, depth)
+	case binary.MapDesc:
+		return typeRefContainsResource(&d.Key, resolve, depth) || typeRefContainsResource(&d.Value, resolve, depth)
 	case binary.OptionDesc:
 		return typeRefContainsResource(&d.Element, resolve, depth)
 	case binary.RecordDesc:
@@ -934,6 +936,8 @@ func typeContainsAsyncValueNested(t binary.TypeDesc, resolve abi.Resolver, depth
 	switch d := t.(type) {
 	case binary.ListDesc:
 		return typeRefContainsAsyncValueNested(&d.Element, resolve, depth)
+	case binary.MapDesc:
+		return typeRefContainsAsyncValueNested(&d.Key, resolve, depth) || typeRefContainsAsyncValueNested(&d.Value, resolve, depth)
 	case binary.OptionDesc:
 		return typeRefContainsAsyncValueNested(&d.Element, resolve, depth)
 	case binary.RecordDesc:
@@ -1058,6 +1062,26 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		}
 		out := make([]abi.Value, len(list))
 		for i, e := range list {
+			if out[i], err = in.resolveArgHandlesDepth(e, et, depth+1); err != nil {
+				return nil, err
+			}
+		}
+		return out, nil
+
+	case binary.MapDesc:
+		// map<K,V> despecializes to list<tuple<K,V>> (see MapDesc's doc): each
+		// entry is a []abi.Value{key, value} pair, walked the same way a list
+		// element is -- the tuple element type is already resolved (Key/Value
+		// are TypeRefs, not indices needing a further lookup), so no resolve
+		// call is needed here, unlike ListDesc's single Element.
+		entries, ok := v.([]abi.Value)
+		if !ok {
+			return v, nil
+		}
+		et := binary.TupleDesc{Elements: []binary.TypeRef{d.Key, d.Value}}
+		out := make([]abi.Value, len(entries))
+		var err error
+		for i, e := range entries {
 			if out[i], err = in.resolveArgHandlesDepth(e, et, depth+1); err != nil {
 				return nil, err
 			}
@@ -2388,6 +2412,10 @@ func usesMemory(t binary.TypeDesc, resolve abi.Resolver) bool {
 	case binary.PrimitiveDesc:
 		return d.Prim == "string"
 	case binary.ListDesc:
+		return true
+	case binary.MapDesc:
+		// map<K,V> despecializes to list<tuple<K,V>>: always memory-backed,
+		// same as ListDesc above, independent of K/V.
 		return true
 	case binary.RecordDesc:
 		for _, f := range d.Fields {
