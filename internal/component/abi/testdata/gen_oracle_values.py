@@ -142,6 +142,9 @@ def build_type(spec, by_name):
     if kind == "list":
         return ref.ListType(build_type(spec["elem"], by_name), None)
 
+    if kind == "map":
+        return ref.MapType(build_type(spec["key"], by_name), build_type(spec["value"], by_name))
+
     if kind == "tuple":
         return ref.TupleType([build_type(e, by_name) for e in spec["elems"]])
 
@@ -179,6 +182,7 @@ def convert_value_to_refabi(v, t):
     - int/float: numbers
     - string: string
     - list: [...]
+    - map: [[key, value], ...] (despecialized to list<tuple<K,V>> by the reference)
     - record: [field_values] (array in field order)
     - tuple: [element_values]
     - variant: {"disc": N, "payload": value or null}
@@ -203,6 +207,12 @@ def convert_value_to_refabi(v, t):
         return (s, 'utf8', byte_len)
     elif isinstance(t, ref.ListType):
         return [convert_value_to_refabi(e, t.t) for e in v]
+    elif isinstance(t, ref.MapType):
+        # map<K,V> despecializes (inside store/load) to list<tuple<K,V>>, so the
+        # value it expects is a Python list of the same {"0": key, "1": value}
+        # dicts the TupleType branch below produces -- v is a JSON array of
+        # [key, value] pairs.
+        return [{"0": convert_value_to_refabi(k, t.k), "1": convert_value_to_refabi(val, t.v)} for k, val in v]
     elif isinstance(t, ref.RecordType):
         # v is array of field values in order
         rec = {}
@@ -273,6 +283,8 @@ def convert_value_from_refabi(v, t):
         return s
     elif isinstance(t, ref.ListType):
         return [convert_value_from_refabi(e, t.t) for e in v]
+    elif isinstance(t, ref.MapType):
+        return [[convert_value_from_refabi(pair["0"], t.k), convert_value_from_refabi(pair["1"], t.v)] for pair in v]
     elif isinstance(t, ref.RecordType):
         # Return array of field values in order
         result = []
@@ -345,13 +357,19 @@ def main():
     mem_bytes = bytearray(65536)
     golden = {}
 
+    # Battery entries can reference an earlier one by name (kind "ref" -- e.g. a
+    # map's composite value), so the type table is built up across the whole loop
+    # rather than fresh per entry.
+    type_table = {}
+
     for entry in battery:
         name = entry["name"]
         type_spec = entry["type"]
         value_json = entry["value"]
 
         # Build the type
-        t = build_type(type_spec, {})
+        t = build_type(type_spec, type_table)
+        type_table[name] = t
 
         # Convert JSON value to reference ABI format
         refabi_value = convert_value_to_refabi(value_json, t)

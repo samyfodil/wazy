@@ -69,6 +69,15 @@ type (
 	ListDesc = binary.ListDesc
 	// TupleDesc is a positional product type. Its Value is a []Value.
 	TupleDesc = binary.TupleDesc
+	// MapDesc is map<K,V>, an unordered association of keys to values. It has
+	// no wire representation of its own -- the Canonical ABI treats it exactly
+	// as list<tuple<K,V>> -- so its Value is the same shape as a list of
+	// tuples: a []Value of two-element []Value{key, value} pairs, in whatever
+	// order the guest produced them. See component.MapOf for reading one as a
+	// Go map[K]V. K is restricted by the spec to bool, an integer, char, or
+	// string (see binary.IsValidMapKeyPrimitive) -- TypeTable.Map enforces
+	// this when building one by hand.
+	MapDesc = binary.MapDesc
 	// FlagsDesc is a named bitset. Its Value is a uint32 of set bits.
 	FlagsDesc = binary.FlagsDesc
 	// EnumDesc is a set of named cases with no payloads. Its Value is the

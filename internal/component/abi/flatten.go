@@ -24,6 +24,10 @@ func Flatten(t binary.TypeDesc, resolve Resolver) ([]string, error) {
 	// Composite types
 	case binary.ListDesc:
 		return flattenList(desc, resolve)
+	case binary.MapDesc:
+		// map<K,V> despecializes to list<tuple<K,V>> (see MapDesc's doc):
+		// pointer + length, independent of K/V, same as flattenList.
+		return flattenList(binary.ListDesc{}, resolve)
 	case binary.RecordDesc:
 		return flattenRecord(desc, resolve)
 	case binary.VariantDesc:
