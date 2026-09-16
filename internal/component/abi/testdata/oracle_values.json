@@ -112,6 +112,24 @@
       "value": [10, 20]
     },
     {
+      "name": "map_string_u32",
+      "type": {
+        "kind": "map",
+        "key": {"kind": "primitive", "prim": "string"},
+        "value": {"kind": "primitive", "prim": "u32"}
+      },
+      "value": [["a", 1], ["bb", 2]]
+    },
+    {
+      "name": "map_string_record",
+      "type": {
+        "kind": "map",
+        "key": {"kind": "primitive", "prim": "string"},
+        "value": {"kind": "ref", "name": "record_pair_u32"}
+      },
+      "value": [["k1", [1, 2]], ["k2", [3, 4]]]
+    },
+    {
       "name": "record_mixed",
       "type": {
         "kind": "record",

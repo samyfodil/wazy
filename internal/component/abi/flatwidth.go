@@ -47,6 +47,11 @@ func FlatWidth(t binary.TypeDesc, resolve Resolver) (int, error) {
 		// A dynamic list is a pointer and a length.
 		return 2, nil
 
+	case binary.MapDesc:
+		// map<K,V> despecializes to list<tuple<K,V>> (see MapDesc's doc): a
+		// pointer and a length, same as any dynamic list.
+		return 2, nil
+
 	case binary.RecordDesc:
 		total := 0
 		for i := range desc.Fields {

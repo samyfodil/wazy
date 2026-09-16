@@ -102,6 +102,9 @@ def build_type(spec, by_name):
     if kind == "list":
         return ref.ListType(build_type(spec["elem"], by_name), None)
 
+    if kind == "map":
+        return ref.MapType(build_type(spec["key"], by_name), build_type(spec["value"], by_name))
+
     if kind == "tuple":
         return ref.TupleType([build_type(e, by_name) for e in spec["elems"]])
 

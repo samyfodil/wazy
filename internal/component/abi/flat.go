@@ -107,6 +107,9 @@ func lowerFlatImpl(v Value, t binary.TypeDesc, flat []string, resolve Resolver, 
 		}
 		return lowerFlatList(v, elemType, resolve, realloc, mem)
 
+	case binary.MapDesc:
+		return lowerFlatList(v, mapElemType(desc), resolve, realloc, mem)
+
 	case binary.RecordDesc:
 		return lowerFlatRecord(v, desc, resolve, realloc, mem)
 
@@ -751,6 +754,9 @@ func liftFlatImpl(vi valueIter, t binary.TypeDesc, flat []string, resolve Resolv
 			return nil, err
 		}
 		return liftFlatList(vi, elemType, resolve, mem)
+
+	case binary.MapDesc:
+		return liftFlatList(vi, mapElemType(desc), resolve, mem)
 
 	case binary.RecordDesc:
 		return liftFlatRecord(vi, desc, resolve, mem)

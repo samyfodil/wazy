@@ -36,6 +36,10 @@ func Alignment(t binary.TypeDesc, resolve Resolver) (uint32, error) {
 	// Composite types
 	case binary.ListDesc:
 		return alignmentList(desc, resolve)
+	case binary.MapDesc:
+		// map<K,V> despecializes to list<tuple<K,V>> (see MapDesc's doc):
+		// same pointer alignment as any dynamic list, independent of K/V.
+		return alignmentList(binary.ListDesc{}, resolve)
 	case binary.RecordDesc:
 		return alignmentRecord(desc, resolve)
 	case binary.VariantDesc:
@@ -79,6 +83,9 @@ func Size(t binary.TypeDesc, resolve Resolver) (uint32, error) {
 	// Composite types
 	case binary.ListDesc:
 		return sizeList(desc, resolve)
+	case binary.MapDesc:
+		// Same despecialization as Alignment above: pointer + length, always.
+		return sizeList(binary.ListDesc{}, resolve)
 	case binary.RecordDesc:
 		return sizeRecord(desc, resolve)
 	case binary.VariantDesc:
@@ -194,6 +201,14 @@ func sizePrimitive(prim string) (uint32, error) {
 }
 
 // ------- Composite Types -------
+
+// mapElemType returns the synthetic tuple<Key,Value> that a MapDesc
+// despecializes to (see MapDesc's doc). Every ABI function that needs to
+// load/store/flatten/lift/lower a map value builds this and hands it to its
+// list<T> counterpart, rather than duplicating list's layout logic for maps.
+func mapElemType(d binary.MapDesc) binary.TupleDesc {
+	return binary.TupleDesc{Elements: []binary.TypeRef{d.Key, d.Value}}
+}
 
 func alignmentList(_ binary.ListDesc, _ Resolver) (uint32, error) {
 	// A dynamic list is represented as pointer + length; its alignment is the

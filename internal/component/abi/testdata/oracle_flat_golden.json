@@ -604,6 +604,38 @@
     "mem_hex": "6772656574"
   },
   {
+    "name": "map_string_u32_vals",
+    "type": "map_string_u32",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 1024
+      },
+      {
+        "kind": "i32",
+        "bits": 2
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": "180400000100000001000000190400000200000002000000616262"
+  },
+  {
+    "name": "map_string_record_vals",
+    "type": "map_string_record",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 1024
+      },
+      {
+        "kind": "i32",
+        "bits": 2
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": "28040000020000002a04000005000000010000002f040000020000003104000002000000020000006b3167726565746b326869"
+  },
+  {
     "name": "option_string_some",
     "type": "option_string",
     "core_vals": [
