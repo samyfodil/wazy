@@ -51,6 +51,42 @@ func TestTypeTable_Map(t *testing.T) {
 	}
 }
 
+// TypeTable.Map panics on a key type the spec doesn't allow -- a float, or a
+// composite/handle (anything requiring a table slot) -- the same fail-fast
+// contract Record has for a malformed argument list.
+func TestTypeTable_MapInvalidKey(t *testing.T) {
+	t.Run("float key", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Error("expected a panic for a float map key")
+			}
+		}()
+		component.NewTypeTable().Map(component.Prim("f64"), component.Prim("string"))
+	})
+
+	t.Run("composite key", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Error("expected a panic for a composite map key")
+			}
+		}()
+		tbl := component.NewTypeTable()
+		recordKey := tbl.Record("id", component.Prim("u32"))
+		tbl.Map(recordKey, component.Prim("string"))
+	})
+
+	t.Run("optional key", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Error("expected a panic for an optional map key")
+			}
+		}()
+		tbl := component.NewTypeTable()
+		optionalKey := tbl.Option(component.Prim("string"))
+		tbl.Map(optionalKey, component.Prim("string"))
+	})
+}
+
 func TestMapOf(t *testing.T) {
 	in := []component.Value{
 		[]component.Value{"x", uint32(1)},

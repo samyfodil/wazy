@@ -53,6 +53,53 @@ func TestReadDefvaltypeDesc_MapValueByTypeIndex(t *testing.T) {
 	}
 }
 
+// TestIsValidMapKeyPrimitive pins the exact keytype grammar (design/mvp/
+// Explainer.md): every primvaltype is a valtype, but only a subset is a
+// keytype -- notably f32/f64 (float equality/NaN) and error-context are
+// excluded even though they decode via isPrimValtype like any other
+// primitive.
+func TestIsValidMapKeyPrimitive(t *testing.T) {
+	valid := []string{"bool", "s8", "u8", "s16", "u16", "s32", "u32", "s64", "u64", "char", "string"}
+	for _, p := range valid {
+		if !IsValidMapKeyPrimitive(p) {
+			t.Errorf("IsValidMapKeyPrimitive(%q) = false, want true", p)
+		}
+	}
+	invalid := []string{"f32", "f64", "error-context", "", "u128", "record"}
+	for _, p := range invalid {
+		if IsValidMapKeyPrimitive(p) {
+			t.Errorf("IsValidMapKeyPrimitive(%q) = true, want false", p)
+		}
+	}
+}
+
+// A map key outside the keytype grammar is a decode error -- both when it is
+// an inline primitive the spec excludes (f32) and when it is a type index
+// (which, per IsValidMapKeyPrimitive's doc, can never itself be a valid
+// keytype: every keytype is always spelled inline).
+func TestReadDefvaltypeDesc_MapInvalidKey(t *testing.T) {
+	t.Run("excluded primitive (f32)", func(t *testing.T) {
+		buf := []byte{0x76, 0x79} // key: f32, value: u32
+		if _, _, err := readDefvaltypeDesc(buf, 0, 0x63); err == nil {
+			t.Fatal("expected an error for map<f32, u32>")
+		}
+	})
+
+	t.Run("excluded primitive (error-context)", func(t *testing.T) {
+		buf := []byte{0x64, 0x79} // key: error-context, value: u32
+		if _, _, err := readDefvaltypeDesc(buf, 0, 0x63); err == nil {
+			t.Fatal("expected an error for map<error-context, u32>")
+		}
+	})
+
+	t.Run("key by type index", func(t *testing.T) {
+		buf := []byte{0x02, 0x79} // key: type index 2, value: u32
+		if _, _, err := readDefvaltypeDesc(buf, 0, 0x63); err == nil {
+			t.Fatal("expected an error for a map key given by type index")
+		}
+	})
+}
+
 // A truncated map body (missing the value valtype) is a decode error, not a
 // silent mis-walk -- see readDefvaltypeDesc's doc on M1's "loud failure"
 // design rule.

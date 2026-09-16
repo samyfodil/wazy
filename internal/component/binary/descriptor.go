@@ -87,6 +87,12 @@ func (TupleDesc) Kind() string { return "tuple" }
 // shape as list<tuple<K,V>>: a []Value of two-element []Value pairs
 // ([]Value{key, value}), in whatever order the guest produced them -- a map
 // carries no ordering guarantee.
+//
+// Key is restricted by the spec's own `keytype` grammar (design/mvp/
+// Explainer.md) to bool, an integer, char, or string -- a conservative
+// subset of `valtype` picked to simplify bindings generation, deliberately
+// excluding f32/f64 (float equality/NaN) and every composite, handle, and
+// async type. See IsValidMapKeyPrimitive.
 type MapDesc struct {
 	Key   TypeRef
 	Value TypeRef
@@ -94,6 +100,25 @@ type MapDesc struct {
 
 func (MapDesc) isTypeDesc()  {}
 func (MapDesc) Kind() string { return "map" }
+
+// IsValidMapKeyPrimitive reports whether prim is one of the primitives the
+// Component Model spec's `keytype` grammar allows as a map key: bool, every
+// integer width, char, or string. It only ever sees MapDesc.Key.Primitive,
+// so it cannot itself resolve a key given by type index -- every keytype is,
+// however, a bare primitive a conformant producer always spells inline (see
+// readValTypeRef), so an index there (Key.Primitive == "") already names
+// something keytype does not permit: a composite, a resource handle, or a
+// stream/future. TypeTable.Map treats it that way for the one type index
+// that can occur in this codebase's own type tables (which never assign an
+// index to a primitive to begin with -- see TypeTable.Add).
+func IsValidMapKeyPrimitive(prim string) bool {
+	switch prim {
+	case "bool", "s8", "u8", "s16", "u16", "s32", "u32", "s64", "u64", "char", "string":
+		return true
+	default:
+		return false
+	}
+}
 
 // FlagsDesc represents a flags type (set of named booleans).
 type FlagsDesc struct {
@@ -473,6 +498,16 @@ func readDefvaltypeDesc(buf []byte, off int, tag byte) (TypeDesc, int, error) {
 		key, off2, e := readValTypeRef(buf, off)
 		if e != nil {
 			return nil, off2, e
+		}
+		// A conformant producer always spells a keytype inline (see
+		// IsValidMapKeyPrimitive's doc); a type-index key already fails this
+		// the same way an invalid inline primitive does, since Primitive is
+		// "" for it.
+		if key.TypeIndex != nil {
+			return nil, off2, fmt.Errorf("map: invalid key type (type index %d): spec restricts map keys to bool, an integer, char, or string", *key.TypeIndex)
+		}
+		if !IsValidMapKeyPrimitive(key.Primitive) {
+			return nil, off2, fmt.Errorf("map: invalid key type %q: spec restricts map keys to bool, an integer, char, or string", key.Primitive)
 		}
 		val, off3, e := readValTypeRef(buf, off2)
 		desc, off, err = MapDesc{Key: key, Value: val}, off3, e

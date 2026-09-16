@@ -64,7 +64,13 @@ func (t *TypeTable) List(elem TypeRef) TypeRef {
 }
 
 // Map interns map<key, value>.
+//
+// A map's key is restricted to bool, an integer, char, or string (see
+// binary.IsValidMapKeyPrimitive). Panics on any other key type.
 func (t *TypeTable) Map(key, value TypeRef) TypeRef {
+	if !binary.IsValidMapKeyPrimitive(key.Primitive) {
+		panic("component: TypeTable.Map: invalid map key type (must be bool, an integer, char, or string)")
+	}
 	return t.Add(binary.MapDesc{Key: key, Value: value})
 }
 
