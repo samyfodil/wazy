@@ -96,6 +96,16 @@ class BumpAllocator:
             return ptr
 
 
+class Ctx:
+    """Minimal context for store/load."""
+
+    def __init__(self, opts, alloc):
+        self.opts = opts
+        self.alloc = alloc
+        self.inst = type('obj', (object,), {'handles': ref.Table()})()
+        self.borrow_scope = None
+
+
 def build_type(spec, by_name):
     """Recursively build a ValType from JSON spec."""
     kind = spec.get("kind")
@@ -172,7 +182,7 @@ def convert_value_to_refabi(v, t):
     - int/float: numbers
     - string: string
     - list: [...]
-    - map: [[key, value], ...] (converted to list<tuple<K,V>> internally by despecialize)
+    - map: [[key, value], ...] (despecialized to list<tuple<K,V>> by the reference)
     - record: [field_values] (array in field order)
     - tuple: [element_values]
     - variant: {"disc": N, "payload": value or null}
@@ -198,10 +208,10 @@ def convert_value_to_refabi(v, t):
     elif isinstance(t, ref.ListType):
         return [convert_value_to_refabi(e, t.t) for e in v]
     elif isinstance(t, ref.MapType):
-        # map<K,V> despecializes (inside store/load) to list<tuple<K,V>>, so
-        # the value it expects is a Python list of the same {"0": key,
-        # "1": value} dicts the TupleType branch below produces -- v is a
-        # JSON array of [key, value] pairs.
+        # map<K,V> despecializes (inside store/load) to list<tuple<K,V>>, so the
+        # value it expects is a Python list of the same {"0": key, "1": value}
+        # dicts the TupleType branch below produces -- v is a JSON array of
+        # [key, value] pairs.
         return [{"0": convert_value_to_refabi(k, t.k), "1": convert_value_to_refabi(val, t.v)} for k, val in v]
     elif isinstance(t, ref.RecordType):
         # v is array of field values in order
@@ -347,9 +357,9 @@ def main():
     mem_bytes = bytearray(65536)
     golden = {}
 
-    # Battery entries can reference an earlier one by name (kind "ref" --
-    # e.g. a map's composite value), so the type table is built up across the
-    # whole loop rather than fresh per entry.
+    # Battery entries can reference an earlier one by name (kind "ref" -- e.g. a
+    # map's composite value), so the type table is built up across the whole loop
+    # rather than fresh per entry.
     type_table = {}
 
     for entry in battery:
@@ -364,19 +374,11 @@ def main():
         # Convert JSON value to reference ABI format
         refabi_value = convert_value_to_refabi(value_json, t)
 
-        # Create allocator and context. LiftLowerContext.allocate/reallocate
-        # (definitions.py) round-trips opts.realloc through
-        # Store.lift/canon_lift as a core func -- ([old_ptr, old_size, align,
-        # new_size]) -> [ptr] -- and asserts a real ComponentInstance, so the
-        # hand-rolled Ctx this used to build (no .allocate/.reallocate at all)
-        # no longer stands in for it; ref.LiftLowerContext itself does, given
-        # a real (if otherwise-unused) Store()/ComponentInstance() -- see
-        # gen_oracle_flat.py's make_context, which hit the same gap.
+        # Create allocator and context
         alloc = BumpAllocator(start=1024, mem=mem_bytes)
         opts = Opts(mem_bytes)
-        opts.realloc = lambda flat_args, alloc=alloc: [alloc.alloc(*flat_args)]
-        inst = ref.ComponentInstance(ref.Store())
-        ctx = ref.LiftLowerContext(opts, inst)
+        opts.realloc = alloc.alloc
+        ctx = Ctx(opts, alloc)
 
         # Store the value
         try:

@@ -70,14 +70,12 @@ class BumpAllocator:
 def make_context():
     """Builds a fresh (cx, mem, allocator) triple for lowering one value."""
     mem = ref.MemInst(bytearray(MEM_SIZE), PTR_TYPE)
-    store = ref.Store()
-    inst = ref.ComponentInstance(store)
     opts = ref.CanonicalOptions()
     opts.memory = mem
     opts.string_encoding = "utf8"
     allocator = BumpAllocator()
-    opts.realloc = lambda flat_args: [allocator(*flat_args)]
-    cx = ref.LiftLowerContext(opts, inst)
+    opts.realloc = allocator
+    cx = ref.LiftLowerContext(opts, None, None)
     return cx, mem, allocator
 
 def build_type(spec, by_name):
@@ -105,9 +103,6 @@ def build_type(spec, by_name):
     if kind == "list":
         return ref.ListType(build_type(spec["elem"], by_name))
 
-    if kind == "map":
-        return ref.MapType(build_type(spec["key"], by_name), build_type(spec["value"], by_name))
-
     if kind == "ref":
         return by_name[spec["name"]]
 
@@ -129,6 +124,9 @@ def build_type(spec, by_name):
         ok = build_type(spec["ok"], by_name) if spec.get("ok") is not None else None
         err = build_type(spec["err"], by_name) if spec.get("err") is not None else None
         return ref.ResultType(ok, err)
+
+    if kind == "map":
+        return ref.MapType(build_type(spec["key"], by_name), build_type(spec["value"], by_name))
 
     if kind == "tuple":
         elems = [build_type(e, by_name) for e in spec["elems"]]
@@ -165,9 +163,6 @@ def convert_value(raw_value, t):
       - flags:   despecializes to per-label booleans -> {label: bool, ...}
       - enum:    despecializes to a no-payload variant -> {label: None}
       - list:    a plain Python list of converted elements
-      - map:     despecializes to list<tuple<K,V>> -> a plain Python list of
-                 {"0": key, "1": value} dicts, from a JSON array of
-                 [key, value] pairs
       - string:  the (str, encoding, tagged_code_units) triple above
     """
     match t:
@@ -183,10 +178,10 @@ def convert_value(raw_value, t):
             return chr(int(raw_value))
         case ref.StringType():
             return to_string_triple(str(raw_value))
-        case ref.ListType(t=elem_t):
-            return [convert_value(v, elem_t) for v in raw_value]
         case ref.MapType(k=k_t, v=v_t):
             return [{"0": convert_value(k, k_t), "1": convert_value(v, v_t)} for k, v in raw_value]
+        case ref.ListType(t=elem_t):
+            return [convert_value(v, elem_t) for v in raw_value]
         case ref.RecordType(fields=fields):
             return {f.label: convert_value(v, f.t) for v, f in zip(raw_value, fields)}
         case ref.TupleType(ts=ts):
