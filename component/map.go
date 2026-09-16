@@ -21,6 +21,9 @@ import (
 // map<K, option<V>> is read by instantiating K or V as a pointer:
 // MapOf[string, *uint32] on a map<string, option<u32>> gives a nil *uint32 for
 // an entry whose value is none and a pointer to the lifted value otherwise.
+//
+// Duplicate keys in the backing list are collapsed in the resulting map. The
+// value for the last key is preserved.
 func MapOf[K comparable, V any](v Value) (map[K]V, error) {
 	if v == nil {
 		return nil, nil
