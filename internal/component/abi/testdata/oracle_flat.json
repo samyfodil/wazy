@@ -265,6 +265,34 @@
       }
     },
     {
+      "name": "map_string_u32",
+      "type": {
+        "kind": "map",
+        "key": {
+          "kind": "primitive",
+          "prim": "string"
+        },
+        "value": {
+          "kind": "primitive",
+          "prim": "u32"
+        }
+      }
+    },
+    {
+      "name": "map_string_record",
+      "type": {
+        "kind": "map",
+        "key": {
+          "kind": "primitive",
+          "prim": "string"
+        },
+        "value": {
+          "kind": "ref",
+          "name": "record_string_u32"
+        }
+      }
+    },
+    {
       "name": "option_string",
       "type": {
         "kind": "option",
@@ -2477,6 +2505,22 @@
       "value": [
         "greet",
         42
+      ]
+    },
+    {
+      "type": "map_string_u32",
+      "name": "map_string_u32_vals",
+      "value": [
+        ["a", 1],
+        ["bb", 2]
+      ]
+    },
+    {
+      "type": "map_string_record",
+      "name": "map_string_record_vals",
+      "value": [
+        ["k1", ["greet", 1]],
+        ["k2", ["hi", 2]]
       ]
     },
     {

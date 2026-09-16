@@ -86,6 +86,37 @@ func jsonToValue(jsonVal any, t bintype.TypeDesc, resolve Resolver) (Value, erro
 		}
 		return result, nil
 
+	case bintype.MapDesc:
+		keyType, err := resolveType(&desc.Key, resolve)
+		if err != nil {
+			return nil, err
+		}
+		valType, err := resolveType(&desc.Value, resolve)
+		if err != nil {
+			return nil, err
+		}
+		jsonEntries, ok := jsonVal.([]any)
+		if !ok {
+			return nil, fmt.Errorf("jsonToValue: expected map, got %T", jsonVal)
+		}
+		result := make([]Value, len(jsonEntries))
+		for i, e := range jsonEntries {
+			pair, ok := e.([]any)
+			if !ok || len(pair) != 2 {
+				return nil, fmt.Errorf("jsonToValue map entry %d: expected a [key, value] pair, got %v", i, e)
+			}
+			k, err := jsonToValue(pair[0], keyType, resolve)
+			if err != nil {
+				return nil, fmt.Errorf("jsonToValue map entry %d key: %w", i, err)
+			}
+			v, err := jsonToValue(pair[1], valType, resolve)
+			if err != nil {
+				return nil, fmt.Errorf("jsonToValue map entry %d value: %w", i, err)
+			}
+			result[i] = []Value{k, v}
+		}
+		return result, nil
+
 	case bintype.RecordDesc:
 		// Records can be represented as either arrays (field order) or maps (field names)
 		result := make([]Value, len(desc.Fields))

@@ -265,6 +265,62 @@
       }
     },
     {
+      "name": "map_string_u32",
+      "type": {
+        "kind": "map",
+        "key": {
+          "kind": "primitive",
+          "prim": "string"
+        },
+        "value": {
+          "kind": "primitive",
+          "prim": "u32"
+        }
+      }
+    },
+    {
+      "name": "map_u32_string",
+      "type": {
+        "kind": "map",
+        "key": {
+          "kind": "primitive",
+          "prim": "u32"
+        },
+        "value": {
+          "kind": "primitive",
+          "prim": "string"
+        }
+      }
+    },
+    {
+      "name": "map_string_record",
+      "type": {
+        "kind": "map",
+        "key": {
+          "kind": "primitive",
+          "prim": "string"
+        },
+        "value": {
+          "kind": "ref",
+          "name": "record_simple"
+        }
+      }
+    },
+    {
+      "name": "map_nested",
+      "type": {
+        "kind": "map",
+        "key": {
+          "kind": "primitive",
+          "prim": "string"
+        },
+        "value": {
+          "kind": "ref",
+          "name": "map_string_u32"
+        }
+      }
+    },
+    {
       "name": "option_u32",
       "type": {
         "kind": "option",

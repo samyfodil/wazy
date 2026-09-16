@@ -45,6 +45,8 @@ type typeSpecNode struct {
 	Cases   json.RawMessage   `json:"cases"` // []caseSpecNode (variant) or []string (enum)
 	Elem    json.RawMessage   `json:"elem"`
 	Elems   []json.RawMessage `json:"elems"`
+	Key     json.RawMessage   `json:"key"`   // for kind == "map"
+	Value   json.RawMessage   `json:"value"` // for kind == "map"
 	Names   []string          `json:"names"`
 	Ok      json.RawMessage   `json:"ok"`
 	Err     json.RawMessage   `json:"err"`
@@ -164,6 +166,17 @@ func buildTypeDesc(raw json.RawMessage, nameToIndex map[string]uint32) (binary.T
 			return nil, fmt.Errorf("list element: %w", err)
 		}
 		return binary.ListDesc{Element: tr}, nil
+
+	case "map":
+		key, err := specToTypeRef(node.Key, nameToIndex)
+		if err != nil {
+			return nil, fmt.Errorf("map key: %w", err)
+		}
+		value, err := specToTypeRef(node.Value, nameToIndex)
+		if err != nil {
+			return nil, fmt.Errorf("map value: %w", err)
+		}
+		return binary.MapDesc{Key: key, Value: value}, nil
 
 	case "tuple":
 		elems := make([]binary.TypeRef, len(node.Elems))

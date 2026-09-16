@@ -186,6 +186,8 @@ func TestFlatOracleLowerFlat(t *testing.T) {
 		"list_u32_vals":          true,
 		"list_string_vals":       true,
 		"record_string_u32_vals": true,
+		"map_string_u32_vals":    true,
+		"map_string_record_vals": true,
 		"option_string_some":     true,
 		"result_string_u32_ok":   true,
 		"tuple_list_u32_vals":    true,
@@ -331,6 +333,8 @@ func specToFlatTypeDesc(spec json.RawMessage, nameToIndex map[string]uint32) (bi
 		Cases  []json.RawMessage `json:"cases"`
 		Elems  []json.RawMessage `json:"elems"`
 		Elem   json.RawMessage   `json:"elem"`
+		Key    json.RawMessage   `json:"key"`   // for kind == "map"
+		Value  json.RawMessage   `json:"value"` // for kind == "map"
 		Names  []string          `json:"names"`
 		Ok     json.RawMessage   `json:"ok"`
 		Err    json.RawMessage   `json:"err"`
@@ -350,6 +354,17 @@ func specToFlatTypeDesc(spec json.RawMessage, nameToIndex map[string]uint32) (bi
 			return nil, fmt.Errorf("list element: %w", err)
 		}
 		return binary.ListDesc{Element: elemRef}, nil
+
+	case "map":
+		keyRef, err := specToFlatTypeRef(node.Key, nameToIndex)
+		if err != nil {
+			return nil, fmt.Errorf("map key: %w", err)
+		}
+		valueRef, err := specToFlatTypeRef(node.Value, nameToIndex)
+		if err != nil {
+			return nil, fmt.Errorf("map value: %w", err)
+		}
+		return binary.MapDesc{Key: keyRef, Value: valueRef}, nil
 
 	case "record":
 		var fields []binary.RecordField
@@ -497,6 +512,37 @@ func convertTestValue(rawValue any, t binary.TypeDesc, resolve Resolver) (Value,
 		// are the battery's either way; only the container differs.
 		if typed, ok := scalarSliceOf(result, elemType); ok {
 			return typed, nil
+		}
+		return result, nil
+
+	case binary.MapDesc:
+		entries, ok := rawValue.([]any)
+		if !ok {
+			return nil, fmt.Errorf("cannot convert value %v to map", rawValue)
+		}
+		keyType, err := resolveType(&desc.Key, resolve)
+		if err != nil {
+			return nil, fmt.Errorf("map key: %w", err)
+		}
+		valType, err := resolveType(&desc.Value, resolve)
+		if err != nil {
+			return nil, fmt.Errorf("map value: %w", err)
+		}
+		result := make([]Value, len(entries))
+		for i, e := range entries {
+			pair, ok := e.([]any)
+			if !ok || len(pair) != 2 {
+				return nil, fmt.Errorf("map entry %d: expected a [key, value] pair, got %v", i, e)
+			}
+			k, err := convertTestValue(pair[0], keyType, resolve)
+			if err != nil {
+				return nil, fmt.Errorf("map entry %d key: %w", i, err)
+			}
+			v, err := convertTestValue(pair[1], valType, resolve)
+			if err != nil {
+				return nil, fmt.Errorf("map entry %d value: %w", i, err)
+			}
+			result[i] = []Value{k, v}
 		}
 		return result, nil
 
