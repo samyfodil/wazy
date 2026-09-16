@@ -52,10 +52,9 @@ type guestTask struct {
 	ctx        context.Context
 	exportName string // for error messages only
 
-	park        guestParkKind
-	wset        *waitableSet // parkWait only
-	cancellable bool         // is the current park a cancellable suspension?
-	cancelWake  bool         // request_cancellation resumed us with Cancelled.TRUE (§2.2)
+	park       guestParkKind
+	wset       *waitableSet // parkWait only
+	cancelWake bool         // request_cancellation resumed us with Cancelled.TRUE (§2.2)
 
 	// onStart, when non-nil, is the reference OnStart: produce lifted args
 	// (lazily!) -- used by startAsyncExportTask, where args must be lifted
@@ -163,12 +162,12 @@ func (s *guestSegment) handoff(mode resumeMode) error {
 // stackfulTask.block; the exclusive stays HELD across the park (reference
 // wait_until never releases it -- only the callback loop's frame-free WAIT
 // does, via leaveRun in advance).
-func (gt *guestTask) block(ready func() bool, cancellable bool) (cancelled bool) {
-	if gt.t.deliverPendingCancel(cancellable) {
+func (gt *guestTask) block(ready func() bool) (cancelled bool) {
+	if gt.t.deliverPendingCancel() {
 		return true
 	}
 	seg := gt.seg
-	gt.park, gt.cancellable = parkBlocked, cancellable
+	gt.park = parkBlocked
 	seg.parkReady = ready
 	gt.in.suspendRun()   // activeTask=nil, mayEnter=true; exclusive KEPT
 	gt.in.sched.park(gt) // safe: we hold the baton
@@ -177,7 +176,7 @@ func (gt *guestTask) block(ready func() bool, cancellable bool) (cancelled bool)
 	if mode == resumeAbort {
 		panic(errStackfulAbort) // unwinds guest frames via the engine's recover
 	}
-	gt.park, gt.cancellable = parkNone, false
+	gt.park = parkNone
 	seg.parkReady = nil
 	gt.in.enterRun(gt.t)
 	return mode == resumeCancelled
@@ -226,7 +225,7 @@ func (gt *guestTask) ready() bool {
 // succeeds immediately, run to the first suspension or EXIT.
 func (gt *guestTask) start() error {
 	if !gt.in.tryEnter(gt.t) {
-		gt.park, gt.cancellable = parkEntry, true // entry wait is cancellable (~494)
+		gt.park = parkEntry
 		gt.in.numWaitingToEnter++
 		gt.in.sched.park(gt)
 		return nil
@@ -341,7 +340,7 @@ func (gt *guestTask) resumeReady() error {
 		ws := gt.wset
 		ws.numWaiting--
 		ev := eventTuple{code: eventTaskCancelled}
-		if !gt.cancelWake && !gt.t.deliverPendingCancel(true) {
+		if !gt.cancelWake && !gt.t.deliverPendingCancel() {
 			ev = ws.getPendingEvent()
 		}
 		gt.cancelWake = false
@@ -351,7 +350,7 @@ func (gt *guestTask) resumeReady() error {
 
 	case parkYield:
 		ev := eventTuple{code: eventNone}
-		if gt.cancelWake || gt.t.deliverPendingCancel(true) {
+		if gt.cancelWake || gt.t.deliverPendingCancel() {
 			ev = eventTuple{code: eventTaskCancelled}
 		}
 		gt.cancelWake = false
@@ -425,7 +424,6 @@ func (gt *guestTask) advance(packed uint32) error {
 	switch code {
 	case callbackYield:
 		gt.park = parkYield
-		gt.cancellable = true
 		gt.in.leaveRun()
 		gt.in.sched.park(gt)
 		return nil
@@ -439,7 +437,6 @@ func (gt *guestTask) advance(packed uint32) error {
 		}
 		gt.park = parkWait
 		gt.wset = ws
-		gt.cancellable = true
 		ws.numWaiting++ // held across the park; released by resumeReady's parkWait arm
 		gt.in.leaveRun()
 		gt.in.sched.park(gt)

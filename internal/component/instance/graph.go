@@ -1324,7 +1324,7 @@ func startDelegatedFromBlocker(ctx context.Context, blk taskBlocker, tgt *guestA
 		return nil, err
 	}
 	if !resolved {
-		blk.block(func() bool { return resolved }, false) // non-cancellable, per ~2275
+		blk.block(func() bool { return resolved }) // reference: thread.wait_until(subtask.resolved)
 	}
 
 	if scope != nil && scope.numBorrows > 0 {

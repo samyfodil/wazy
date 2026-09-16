@@ -123,7 +123,7 @@ type task struct {
 // builtins and the sync-lower delegate use it instead of testing t.st
 // directly, so both suspension flavors share one call site.
 type taskBlocker interface {
-	block(ready func() bool, cancellable bool) (cancelled bool)
+	block(ready func() bool) (cancelled bool)
 }
 
 // blocker returns t's live mid-call suspension primitive, or nil (then the
@@ -160,17 +160,20 @@ func (t *task) returnValues(vals []abi.Value) error {
 	return nil
 }
 
-// cancelDeliverable mirrors the reference's inline check at every cancellable
-// suspension point (definitions.py ~404): a PENDING_CANCEL task is ready to
-// have its cancellation delivered.
+// cancelDeliverable mirrors the reference's inline check at every suspension
+// point: a PENDING_CANCEL task is ready to have its cancellation delivered.
+//
+// Every suspension is one. The canonical ABI used to let a built-in opt out via
+// a `cancellable` immediate; component-model#716 removed it after #707 made
+// cancellation always delivered, and the reference's wait_until no longer takes
+// the flag at any call site.
 func (t *task) cancelDeliverable() bool { return t.state == taskPendingCancel }
 
-// deliverPendingCancel mirrors Task.deliver_pending_cancel (~545): if
-// cancellable and a cancellation is pending, flip to CANCEL_DELIVERED and
-// report true (the caller then delivers TASK_CANCELLED instead of the
-// suspension's normal event).
-func (t *task) deliverPendingCancel(cancellable bool) bool {
-	if cancellable && t.state == taskPendingCancel {
+// deliverPendingCancel mirrors Task.deliver_pending_cancel: if a cancellation
+// is pending, flip to CANCEL_DELIVERED and report true (the caller then delivers
+// TASK_CANCELLED instead of the suspension's normal event).
+func (t *task) deliverPendingCancel() bool {
+	if t.state == taskPendingCancel {
 		t.state = taskCancelDelivered
 		return true
 	}
@@ -246,7 +249,7 @@ func (t *task) requestCancellation() error {
 	case taskStarted:
 		if t.st != nil {
 			heldByOther := t.inst.exclusiveHeld && t.inst.exclusiveOwner != t
-			if t.st.park == sparkBlock && t.st.cancellable && !heldByOther && t.inst.mayEnter {
+			if t.st.park == sparkBlock && !heldByOther && t.inst.mayEnter {
 				t.state = taskCancelDelivered
 				t.st.cancelWake = true
 				return t.st.resumeReady() // baton -> goroutine with resumeCancelled
@@ -260,9 +263,9 @@ func (t *task) requestCancellation() error {
 			// is alive at <-seg.resumeCh), exactly like the t.st arm above
 			// -- it must NOT be resumed the way a frame-free WAIT/YIELD is
 			// (those just re-run inline via resumeReady's own dispatch).
-			// Mirrors the t.st arm's heldByOther/cancellable/mayEnter gate.
+			// Mirrors the t.st arm's heldByOther/mayEnter gate.
 			heldByOther := t.inst.exclusiveHeld && t.inst.exclusiveOwner != t
-			if t.gt.cancellable && !heldByOther && t.inst.mayEnter {
+			if !heldByOther && t.inst.mayEnter {
 				t.state = taskCancelDelivered
 				t.gt.cancelWake = true
 				return t.gt.resumeReady() // -> gt.seg.handoff(resumeCancelled)
@@ -270,7 +273,7 @@ func (t *task) requestCancellation() error {
 			t.state = taskPendingCancel
 			return nil
 		}
-		if t.gt.park != parkNone && t.gt.cancellable && !t.inst.exclusiveHeld && t.inst.mayEnter {
+		if t.gt.park != parkNone && !t.inst.exclusiveHeld && t.inst.mayEnter {
 			t.state = taskCancelDelivered
 			// cancelWake forces an unconditional TASK_CANCELLED delivery on
 			// this resume (reference: thread.resume(Cancelled.TRUE) hands

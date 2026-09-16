@@ -81,25 +81,38 @@ func TestDeliverPendingCancel(t *testing.T) {
 	if !tk.cancelDeliverable() {
 		t.Fatal("cancelDeliverable() = false for a PENDING_CANCEL task")
 	}
-	if !tk.deliverPendingCancel(true) {
-		t.Fatal("deliverPendingCancel(true) = false, want true")
+	if !tk.deliverPendingCancel() {
+		t.Fatal("deliverPendingCancel() = false, want true")
 	}
 	if tk.state != taskCancelDelivered {
 		t.Fatalf("state = %v, want taskCancelDelivered", tk.state)
 	}
 	// Second call: no longer PENDING_CANCEL, returns false.
-	if tk.deliverPendingCancel(true) {
+	if tk.deliverPendingCancel() {
 		t.Fatal("deliverPendingCancel: second call should return false")
 	}
 }
 
-func TestDeliverPendingCancel_NotCancellable(t *testing.T) {
+// TestDeliverPendingCancel_UnconditionalAtEverySuspension pins that there is no
+// longer any suspension a pending cancellation can be withheld from.
+//
+// This replaces a test asserting the opposite. A built-in used to carry a
+// `cancellable` immediate, and a false one meant "do not deliver here";
+// component-model#716 removed it after #707 made cancellation always delivered,
+// so the only remaining question is whether a cancellation is pending.
+func TestDeliverPendingCancel_UnconditionalAtEverySuspension(t *testing.T) {
 	tk := &task{state: taskPendingCancel}
-	if tk.deliverPendingCancel(false) {
-		t.Fatal("deliverPendingCancel(false) should never fire")
+	if !tk.deliverPendingCancel() {
+		t.Fatal("deliverPendingCancel() = false for a PENDING_CANCEL task, want true")
 	}
-	if tk.state != taskPendingCancel {
-		t.Fatalf("state changed to %v despite cancellable=false", tk.state)
+	if tk.state != taskCancelDelivered {
+		t.Fatalf("state = %v, want taskCancelDelivered", tk.state)
+	}
+
+	// A task with nothing pending still reports false.
+	other := &task{state: taskStarted}
+	if other.deliverPendingCancel() {
+		t.Fatal("deliverPendingCancel() = true for a task with no pending cancellation")
 	}
 }
 
@@ -110,7 +123,7 @@ func TestRequestCancellation_InitialParkedEntry(t *testing.T) {
 	tk := &task{inst: in, state: taskInitial}
 	var resolvedCancelled bool
 	tk.onResolve = func(_ []abi.Value, cancelled bool) { resolvedCancelled = cancelled }
-	gt := &guestTask{t: tk, in: in, park: parkEntry, cancellable: true}
+	gt := &guestTask{t: tk, in: in, park: parkEntry}
 	tk.gt = gt
 	in.numWaitingToEnter = 1
 	in.sched.park(gt)
@@ -187,7 +200,7 @@ func TestRequestCancellation_StartedInlineResume(t *testing.T) {
 func TestRequestCancellation_StartedNotResumableParksAsPendingCancel(t *testing.T) {
 	in := &Instance{sched: &sched{}, mayEnter: true, exclusiveHeld: true} // a sibling task is running
 	tk := &task{inst: in, state: taskStarted}
-	gt := &guestTask{t: tk, in: in, park: parkWait, cancellable: true}
+	gt := &guestTask{t: tk, in: in, park: parkWait}
 	tk.gt = gt
 	if err := tk.requestCancellation(); err != nil {
 		t.Fatalf("requestCancellation: %v", err)
@@ -461,7 +474,7 @@ func TestGuestTaskReady_ParkWaitPendingCancelEdge(t *testing.T) {
 	in := &Instance{sched: &sched{}}
 	tk := &task{inst: in, state: taskPendingCancel}
 	ws := &waitableSet{}
-	gt := &guestTask{t: tk, in: in, park: parkWait, wset: ws, cancellable: true}
+	gt := &guestTask{t: tk, in: in, park: parkWait, wset: ws}
 	tk.gt = gt
 
 	in.exclusiveHeld = true // a sibling task is currently running

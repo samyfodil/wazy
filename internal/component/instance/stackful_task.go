@@ -72,10 +72,9 @@ type stackfulTask struct {
 	yieldCh  chan struct{}   // goroutine -> driver: suspended-or-done
 	spawned  bool
 
-	park        stackfulParkKind
-	parkReady   func() bool // sparkBlock only: the blocking site's predicate
-	cancellable bool        // is the current park a cancellable suspension?
-	cancelWake  bool        // requestCancellation resumed us with Cancelled.TRUE
+	park       stackfulParkKind
+	parkReady  func() bool // sparkBlock only: the blocking site's predicate
+	cancelWake bool        // requestCancellation resumed us with Cancelled.TRUE
 
 	onStart func() ([]abi.Value, error) // lazy caller-arg lift (delegated calls); nil => args
 	args    []abi.Value
@@ -91,7 +90,7 @@ type stackfulTask struct {
 // at sparkEntry (no goroutine yet) under backpressure, else spawn + first run.
 func (st *stackfulTask) startTask() error {
 	if !st.in.tryEnter(st.t) {
-		st.park, st.cancellable = sparkEntry, true
+		st.park = sparkEntry
 		st.in.numWaitingToEnter++
 		st.in.sched.park(st)
 		return nil
@@ -252,11 +251,11 @@ func (st *stackfulTask) finishOK() {
 // cancel wake). It is Thread.suspend/wait_until (~396-409) with the lock
 // handoff replaced by the baton channels. MUST be called with the baton held
 // (i.e. from a builtin invoked by this task's guest code, ON the goroutine).
-func (st *stackfulTask) block(ready func() bool, cancellable bool) (cancelled bool) {
-	if st.t.deliverPendingCancel(cancellable) { // wait_until's prologue (~404)
+func (st *stackfulTask) block(ready func() bool) (cancelled bool) {
+	if st.t.deliverPendingCancel() { // wait_until's prologue (~404)
 		return true
 	}
-	st.park, st.parkReady, st.cancellable = sparkBlock, ready, cancellable
+	st.park, st.parkReady = sparkBlock, ready
 	st.in.suspendRun()       // activeTask=nil, mayEnter=true; exclusive KEPT
 	st.in.sched.park(st)     // safe: we hold the baton
 	st.yieldCh <- struct{}{} // baton -> driver
@@ -264,7 +263,7 @@ func (st *stackfulTask) block(ready func() bool, cancellable bool) (cancelled bo
 	if mode == resumeAbort {
 		panic(errStackfulAbort)
 	}
-	st.park, st.parkReady, st.cancellable = sparkNone, nil, false
+	st.park, st.parkReady = sparkNone, nil
 	st.in.enterRun(st.t) // re-establish running brackets
 	return mode == resumeCancelled
 }

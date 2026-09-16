@@ -512,7 +512,7 @@ func streamCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 			// to waitable.join's/subtask.cancel's in-set trap (§6.3).
 			e.waitablePtr().syncWaiter = true
 			if blk != nil {
-				blk.block(e.hasPendingEvent, false)
+				blk.block(e.hasPendingEvent)
 			} else if derr := in.sched.drive(e.hasPendingEvent); derr != nil {
 				e.waitablePtr().syncWaiter = false
 				panic(wrapSchedErr(name, derr))
@@ -611,7 +611,7 @@ func futureCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 			// and identical syncWaiter bracket (§6.2).
 			e.waitablePtr().syncWaiter = true
 			if blk != nil {
-				blk.block(e.hasPendingEvent, false)
+				blk.block(e.hasPendingEvent)
 			} else if derr := in.sched.drive(e.hasPendingEvent); derr != nil {
 				e.waitablePtr().syncWaiter = false
 				panic(wrapSchedErr(name, derr))
@@ -757,7 +757,7 @@ func cancelCopyHostFunc(in *Instance, isFuture bool, side endSide, evCode eventC
 				// above) and identical syncWaiter bracket (§6.2).
 				w.syncWaiter = true
 				if blk != nil {
-					blk.block(hasPending, false)
+					blk.block(hasPending)
 				} else if derr := in.sched.drive(hasPending); derr != nil {
 					w.syncWaiter = false
 					panic(wrapSchedErr(name, derr))

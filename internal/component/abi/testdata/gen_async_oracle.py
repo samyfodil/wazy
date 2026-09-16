@@ -161,10 +161,10 @@ def kind_name(entry):
 
 
 _COPY_STATE_NAME = {
-    ref.CopyState.IDLE: "idle",
-    ref.CopyState.COPYING: "copying",
-    ref.CopyState.CANCELLING_COPY: "cancelling",
-    ref.CopyState.DONE: "done",
+    ref.End.State.IDLE: "idle",
+    ref.End.State.COPYING: "copying",
+    ref.End.State.CANCELLING_COPY: "cancelling",
+    ref.End.State.DONE: "done",
 }
 
 
@@ -176,7 +176,7 @@ def snapshot_table(inst):
         entry = {"index": i, "kind": kind_name(e)}
         if isinstance(e, ref.Subtask):
             entry["state"] = int(e.state)
-        elif isinstance(e, ref.CopyEnd):
+        elif isinstance(e, ref.End):
             entry["copy"] = _COPY_STATE_NAME[e.state]
         out.append(entry)
     out.sort(key=lambda x: x["index"])
@@ -242,7 +242,7 @@ def run_scenario(sc):
         mem[ptr:ptr + len(data)] = data
 
     def make_import_callee(behavior, resolve_after, result):
-        def callee(on_start, on_resolve, caller):
+        def callee(on_start, on_resolve):
             on_start()
             resolved = [False]
 
@@ -283,14 +283,14 @@ def run_scenario(sc):
 
         elif kind == "waitable-set.wait":
             si = resolve_handle(env, op["set"])
-            code = ref.canon_waitable_set_wait(op.get("cancellable", False), mem, si, EVENT_PTR)[0]
+            code = ref.canon_waitable_set_wait(mem, si, EVENT_PTR)[0]
             p1, p2 = mem[EVENT_PTR:EVENT_PTR + 4], mem[EVENT_PTR + 4:EVENT_PTR + 8]
             trace.append({"op": k, "kind": "event", "code": int(code),
                            "p1": int.from_bytes(p1, "little"), "p2": int.from_bytes(p2, "little")})
 
         elif kind == "waitable-set.poll":
             si = resolve_handle(env, op["set"])
-            code = ref.canon_waitable_set_poll(op.get("cancellable", False), mem, si, EVENT_PTR)[0]
+            code = ref.canon_waitable_set_poll(mem, si, EVENT_PTR)[0]
             p1, p2 = mem[EVENT_PTR:EVENT_PTR + 4], mem[EVENT_PTR + 4:EVENT_PTR + 8]
             trace.append({"op": k, "kind": "event", "code": int(code),
                            "p1": int.from_bytes(p1, "little"), "p2": int.from_bytes(p2, "little")})
@@ -352,7 +352,7 @@ def run_scenario(sc):
 
         elif kind == "thread.yield":
             cancellable = op.get("cancellable", False)
-            cancelled = ref.canon_thread_yield(cancellable)[0]
+            cancelled = ref.canon_thread_yield()[0]
             trace.append({"op": k, "kind": "ret", "vals": [int(cancelled)]})
 
         elif kind == "host.cancel-root":

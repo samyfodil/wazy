@@ -335,11 +335,6 @@ type Canon struct {
 	// -write, and future.cancel-read/-write.
 	Async bool
 
-	// Cancellable is waitable-set.wait/poll's cancellable:bool payload, and
-	// (decode-only -- see CanonKindThreadYield's doc) thread.yield/thread.
-	// suspend/thread.yield-then-resume's identically-shaped cancel:bool.
-	Cancellable bool
-
 	// TableIdx is thread.new-indirect's tbl:<core:tableidx> payload
 	// (decode-only). TypeIdx doubles as its ft:<typeidx> payload.
 	TableIdx uint32

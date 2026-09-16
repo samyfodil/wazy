@@ -7,7 +7,7 @@ import "testing"
 // level directly, hand-building a PROMOTED guestTask the way
 // stackful_task_test.go's TestStackfulReap_* suite does for stackfulTask --
 // no wasm needed, per §1.8 item 1's own prescription ("a hand-built
-// promoted guestTask whose segment fn calls gt.block(pred, false); assert
+// promoted guestTask whose segment fn calls gt.block(pred); assert
 // park/resume/abort transitions + goroutine delta 0").
 
 // newPromotedGuestTask builds a minimal (*task, *guestTask) pair wired the
@@ -35,7 +35,7 @@ func TestPromotedGuestTask_BlockParkResumeAbort(t *testing.T) {
 	ready := false
 	blockResult := make(chan bool, 1)
 	if err := gt.runSegment(func() error {
-		cancelled := gt.block(func() bool { return ready }, false)
+		cancelled := gt.block(func() bool { return ready })
 		blockResult <- cancelled
 		return nil
 	}); err != nil {
@@ -104,7 +104,7 @@ func TestPromotedGuestTask_ReapAbortsParkedSegment(t *testing.T) {
 
 	blockResult := make(chan bool, 1)
 	if err := gt.runSegment(func() error {
-		cancelled := gt.block(func() bool { return false }, false) // never ready on its own
+		cancelled := gt.block(func() bool { return false }) // never ready on its own
 		blockResult <- cancelled
 		return nil
 	}); err != nil {
@@ -157,7 +157,7 @@ func TestPromotedGuestTask_CancelNonCancellableParkBlocked(t *testing.T) {
 
 	blockResult := make(chan bool, 1)
 	if err := gt.runSegment(func() error {
-		cancelled := gt.block(func() bool { return false }, false) // non-cancellable
+		cancelled := gt.block(func() bool { return false }) // non-cancellable
 		blockResult <- cancelled
 		return nil
 	}); err != nil {

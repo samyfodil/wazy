@@ -206,7 +206,6 @@ func storeEvent(mod api.Module, builtin string, ptr uint32, ev eventTuple) event
 // cancellation up at the next scheduler check.
 func waitableSetWaitHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 	in.syncTaskNeeded = true
-	cancellable := canon.Cancellable
 	fn := api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 		requireMayLeave(in, "waitable-set.wait")
 		si := api.DecodeU32(stack[0])
@@ -215,7 +214,7 @@ func waitableSetWaitHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 		t, blk := blockingTask(in, "waitable-set.wait")
 
 		pred := func() bool {
-			return ws.hasPendingEvent() || (cancellable && t.cancelDeliverable())
+			return ws.hasPendingEvent() || t.cancelDeliverable()
 		}
 
 		var ev eventTuple
@@ -229,9 +228,9 @@ func waitableSetWaitHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 			// shared scheduler (invokeStackful/invokeAsyncCallback map
 			// errAsyncDeadlock to the spec's exact trap text).
 			ws.numWaiting++
-			cancelled := blk.block(pred, cancellable)
+			cancelled := blk.block(pred)
 			ws.numWaiting--
-			if cancelled || (cancellable && t.deliverPendingCancel(true)) {
+			if cancelled || t.deliverPendingCancel() {
 				ev = eventTuple{code: eventTaskCancelled}
 			} else {
 				ev = ws.getPendingEvent()
@@ -247,7 +246,7 @@ func waitableSetWaitHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 				}
 				panic(fmt.Errorf("component/instance: waitable-set.wait: %w", err))
 			}
-			if cancellable && t.deliverPendingCancel(true) {
+			if t.deliverPendingCancel() {
 				ev = eventTuple{code: eventTaskCancelled}
 			} else {
 				ev = ws.getPendingEvent()
@@ -266,14 +265,13 @@ func waitableSetWaitHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 // returned immediately, before even checking the set.
 func waitableSetPollHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 	in.syncTaskNeeded = true
-	cancellable := canon.Cancellable
 	fn := api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 		requireMayLeave(in, "waitable-set.poll")
 		si := api.DecodeU32(stack[0])
 		ptr := api.DecodeU32(stack[1])
 		ws := requireWaitableSet(in, "waitable-set.poll", si)
 		t := requireActiveTask(in, "waitable-set.poll")
-		if cancellable && t.deliverPendingCancel(true) {
+		if t.deliverPendingCancel() {
 			stack[0] = uint64(storeEvent(mod, "waitable-set.poll", ptr, eventTuple{code: eventTaskCancelled}))
 			return
 		}
@@ -468,7 +466,7 @@ func subtaskCancelHostFuncGraph(in *Instance, canon binary.Canon) hostFuncDef {
 				blk := earlyBlk
 				st.syncWaiter = true
 				if blk != nil {
-					blk.block(st.hasPendingEvent, false)
+					blk.block(st.hasPendingEvent)
 				} else if derr := in.sched.drive(st.hasPendingEvent); derr != nil {
 					st.syncWaiter = false
 					if errors.Is(derr, errAsyncDeadlock) {

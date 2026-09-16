@@ -979,13 +979,17 @@ func decodeCanonSection(buf []byte, offset int, sectionSize uint32) ([]Canon, in
 			offset = off
 			canon.Opts = opts
 
-		case CanonKindWaitableSetWait, CanonKindWaitableSetPoll: // cancellable:bool memory:u32
-			cancellable, off, err := decodeBool(buf, offset)
+		case CanonKindWaitableSetWait, CanonKindWaitableSetPoll: // 0x00 memory:u32
+			// The byte here used to be waitable-set.wait/poll's cancellable
+			// immediate. component-model#716 removed it -- cancellation is
+			// always delivered since #707 -- and fixed the position at 0x00,
+			// so a non-zero byte is no longer a flag to honour but a module
+			// that does not match the grammar.
+			off, err := expectReservedZero(buf, offset)
 			if err != nil {
-				return nil, off, fmt.Errorf("canon[%d] cancellable: %w", i, err)
+				return nil, off, fmt.Errorf("canon[%d] waitable-set.wait/poll: %w", i, err)
 			}
 			offset = off
-			canon.Cancellable = cancellable
 
 			memIdx, n, err := leb128.LoadUint32(buf[offset:])
 			if err != nil {
@@ -1016,13 +1020,13 @@ func decodeCanonSection(buf []byte, offset int, sectionSize uint32) ([]Canon, in
 			offset += int(n2)
 			canon.TableIdx = tbl
 
-		case CanonKindThreadYield, CanonKindThreadSuspend, CanonKindThreadYieldThenResume: // cancel?:bool
-			cancel, off, err := decodeBool(buf, offset)
+		case CanonKindThreadYield, CanonKindThreadSuspend, CanonKindThreadYieldThenResume: // 0x00
+			// Same reserved byte as waitable-set.wait/poll above.
+			off, err := expectReservedZero(buf, offset)
 			if err != nil {
-				return nil, off, fmt.Errorf("canon[%d] cancel?: %w", i, err)
+				return nil, off, fmt.Errorf("canon[%d] thread builtin: %w", i, err)
 			}
 			offset = off
-			canon.Cancellable = cancel
 
 		default:
 			return nil, offset, fmt.Errorf("canon[%d]: async canon kind %#x not yet supported", i, kind)
@@ -1040,6 +1044,24 @@ func decodeCanonSection(buf []byte, offset int, sectionSize uint32) ([]Canon, in
 // decodeBool reads a single bool byte (0x00 = false, 0x01 = true), used by
 // several async canon payloads (subtask.cancel's async_, waitable-set.wait/
 // poll's cancellable, stream/future cancel-read/-write's async_).
+// expectReservedZero consumes a byte the grammar fixes at 0x00.
+//
+// Both positions that use it once held a cancellable immediate, so a component
+// built before component-model#716 has 0x01 there. Rejecting it is deliberate:
+// the flag meant "this suspension may NOT be cancelled", which is no longer
+// expressible, and silently reading it as one would give that module the
+// opposite of the behaviour the current specification defines.
+func expectReservedZero(buf []byte, offset int) (int, error) {
+	if offset >= len(buf) {
+		return offset, ErrTruncatedBinary
+	}
+	if b := buf[offset]; b != 0x00 {
+		return offset, fmt.Errorf("reserved byte must be 0x00, got %#x "+
+			"(a pre-component-model#716 'cancellable' immediate?)", b)
+	}
+	return offset + 1, nil
+}
+
 func decodeBool(buf []byte, offset int) (bool, int, error) {
 	if offset >= len(buf) {
 		return false, offset, ErrTruncatedBinary

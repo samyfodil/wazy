@@ -115,19 +115,19 @@ func TestDecodeAsyncBuiltins_Canons(t *testing.T) {
 	if cn[6].Kind != CanonKindWaitableSetNew {
 		t.Errorf("canon[6] kind: got %#x, want WaitableSetNew", cn[6].Kind)
 	}
-	// [core func 7] WaitableSetWait { cancellable: false, memory: 0 }
+	// [core func 7] WaitableSetWait { 0x00 reserved, memory: 0 }
 	if cn[7].Kind != CanonKindWaitableSetWait {
 		t.Errorf("canon[7] kind: got %#x, want WaitableSetWait", cn[7].Kind)
 	}
-	if cn[7].Cancellable || cn[7].MemIdx != 0 {
-		t.Errorf("canon[7] wait payload: got cancellable=%v memIdx=%d, want false,0", cn[7].Cancellable, cn[7].MemIdx)
+	if cn[7].MemIdx != 0 {
+		t.Errorf("canon[7] wait payload: got memIdx=%d, want 0", cn[7].MemIdx)
 	}
-	// [core func 8] WaitableSetPoll { cancellable: false, memory: 0 }
+	// [core func 8] WaitableSetPoll { 0x00 reserved, memory: 0 }
 	if cn[8].Kind != CanonKindWaitableSetPoll {
 		t.Errorf("canon[8] kind: got %#x, want WaitableSetPoll", cn[8].Kind)
 	}
-	if cn[8].Cancellable || cn[8].MemIdx != 0 {
-		t.Errorf("canon[8] poll payload: got cancellable=%v memIdx=%d, want false,0", cn[8].Cancellable, cn[8].MemIdx)
+	if cn[8].MemIdx != 0 {
+		t.Errorf("canon[8] poll payload: got memIdx=%d, want 0", cn[8].MemIdx)
 	}
 	// [core func 9] WaitableSetDrop
 	if cn[9].Kind != CanonKindWaitableSetDrop {

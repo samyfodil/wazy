@@ -89,7 +89,6 @@ func (in *Instance) assertThreadsQuiescent(when string) {
 // (async_builtins.go).
 func threadYieldHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 	in.syncTaskNeeded, in.mayBlockSync = true, true
-	cancellable := canon.Cancellable
 	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		requireMayLeave(in, "thread.yield")
 		t := in.activeTask
@@ -103,7 +102,7 @@ func threadYieldHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 			// already-queued thunks/ready tasks), exactly the reference's
 			// "yielded thread re-enters the waiting list BEHIND already-ready
 			// threads".
-			if blk.block(func() bool { return true }, cancellable) {
+			if blk.block(func() bool { return true }) {
 				stack[0] = 1 // Cancelled.TRUE
 				return
 			}
@@ -119,7 +118,7 @@ func threadYieldHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 			// level). One deterministic scheduler round, then the
 			// pending-cancel check, mirroring wait_until's order as closely
 			// as a frame-held caller allows.
-			if t.deliverPendingCancel(cancellable) {
+			if t.deliverPendingCancel() {
 				stack[0] = 1
 				return
 			}
@@ -246,10 +245,9 @@ type guestThread struct {
 	// Thread.suspended(): not resumable by the scheduler, only by an explicit
 	// thread.yield-then-resume switch); parkReady != nil means WAITING
 	// (Thread.waiting()).
-	parked      bool
-	parkReady   func() bool
-	cancellable bool
-	cancelWake  bool
+	parked     bool
+	parkReady  func() bool
+	cancelWake bool
 
 	done     bool
 	err      error
@@ -270,7 +268,7 @@ func (th *guestThread) suspendedState() bool { return th.parked && th.parkReady 
 // the reference's suspended-thread cancel-wake gate (:373, "cancellable").
 func (th *guestThread) ready() bool {
 	return th.parkReady != nil &&
-		(th.cancelWake || (th.cancellable && th.t.cancelDeliverable()) || th.parkReady())
+		(th.cancelWake || th.t.cancelDeliverable() || th.parkReady())
 }
 
 // resumeReady is called by sched.step (driver), pumpSnapshot, task.
@@ -329,11 +327,11 @@ func (th *guestThread) main() {
 // identical to stackfulTask.block, plus the activeThread seam (§5.2): cleared
 // before parking (so the resumed baton holder sees the implicit thread
 // again), restored on our own resume.
-func (th *guestThread) block(ready func() bool, cancellable bool) (cancelled bool) {
-	if th.t.deliverPendingCancel(cancellable) { // wait_until's prologue (~404)
+func (th *guestThread) block(ready func() bool) (cancelled bool) {
+	if th.t.deliverPendingCancel() { // wait_until's prologue (~404)
 		return true
 	}
-	th.parked, th.parkReady, th.cancellable = true, ready, cancellable
+	th.parked, th.parkReady = true, ready
 	th.in.activeThread = nil
 	th.in.suspendRun()       // activeTask=nil, mayEnter=true; exclusive KEPT
 	th.in.sched.park(th)     // safe: we hold the baton
@@ -342,7 +340,7 @@ func (th *guestThread) block(ready func() bool, cancellable bool) (cancelled boo
 	if mode == resumeAbort {
 		panic(errStackfulAbort)
 	}
-	th.parkReady, th.cancellable = nil, false
+	th.parkReady = nil
 	th.in.enterRun(th.t) // re-establish running brackets
 	th.in.activeThread = th
 	return mode == resumeCancelled
@@ -444,7 +442,6 @@ func threadIndexHostFunc(in *Instance) hostFuncDef {
 // thread.yield-then-resume targeting its index.
 func threadSuspendHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 	in.syncTaskNeeded, in.mayBlockSync = true, true
-	cancellable := canon.Cancellable
 	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		requireMayLeave(in, "thread.suspend")
 		t, blk := blockingTask(in, "thread.suspend") // sync task -> the trap suite 3 asserts
@@ -454,11 +451,11 @@ func threadSuspendHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 			// suite (design §4.2, §11); fail loud rather than hang.
 			panic(fmt.Errorf("component/instance: thread.suspend: not supported from an unpromoted callback task"))
 		}
-		if t.deliverPendingCancel(cancellable) {
+		if t.deliverPendingCancel() {
 			stack[0] = 1
 			return
 		}
-		if blk.block(func() bool { return false }, cancellable) { // neverReady: suspend
+		if blk.block(func() bool { return false }) { // neverReady: suspend
 			stack[0] = 1
 			return
 		}
@@ -572,7 +569,6 @@ func threadNewIndirectHostFunc(
 // goroutine that must perform the switch.
 func threadYieldThenResumeHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 	in.syncTaskNeeded, in.mayBlockSync = true, true
-	cancellable := canon.Cancellable
 	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		requireMayLeave(in, "thread.yield-then-resume")
 		i := api.DecodeU32(stack[0])
@@ -587,7 +583,7 @@ func threadYieldThenResumeHostFunc(in *Instance, canon binary.Canon) hostFuncDef
 		if blk == nil {
 			panic(fmt.Errorf("component/instance: thread.yield-then-resume: not supported from an unpromoted callback task"))
 		}
-		if t.deliverPendingCancel(cancellable) {
+		if t.deliverPendingCancel() {
 			stack[0] = 1
 			return
 		}
@@ -606,7 +602,7 @@ func threadYieldThenResumeHostFunc(in *Instance, canon binary.Canon) hostFuncDef
 		// Now park SELF as ready-waiting (the "yield" half): the driver
 		// resumes us on its next step, behind any thunks/ready tasks queued
 		// meanwhile -- matching the reference's waiting-list re-entry.
-		if blk.block(func() bool { return true }, cancellable) {
+		if blk.block(func() bool { return true }) {
 			stack[0] = 1
 			return
 		}

@@ -96,42 +96,21 @@ func TestThreadYieldHostFunc_UnpromotedCallbackTask(t *testing.T) {
 
 // TestThreadYieldHostFunc_UnpromotedCallbackTask_PendingCancelDelivers pins
 // the middle arm's deliverPendingCancel prologue (design §4.1, mirroring
-// wait_until's ~404): a PENDING_CANCEL task with cancel?=true yielding must
-// flip to CANCEL_DELIVERED and report Cancelled.TRUE immediately, without
-// running a scheduler round at all.
+// wait_until's prologue): a PENDING_CANCEL task yielding must flip to
+// CANCEL_DELIVERED and report Cancelled.TRUE immediately, without running a
+// scheduler round at all. Every yield does this now -- the `cancellable`
+// immediate that could opt out was removed by component-model#716.
 func TestThreadYieldHostFunc_UnpromotedCallbackTask_PendingCancelDelivers(t *testing.T) {
 	tk := &task{state: taskPendingCancel}
 	in := &Instance{sched: &sched{}, mayLeave: true, activeTask: tk}
-	if got := callThreadYield(in, binary.Canon{Cancellable: true}); got != 1 {
-		t.Fatalf("thread.yield (pending cancel, cancellable) = %d, want 1 (Cancelled.TRUE)", got)
+	if got := callThreadYield(in, binary.Canon{}); got != 1 {
+		t.Fatalf("thread.yield (pending cancel) = %d, want 1 (Cancelled.TRUE)", got)
 	}
 	if tk.state != taskCancelDelivered {
 		t.Fatalf("task state = %v, want taskCancelDelivered", tk.state)
 	}
 }
 
-// TestThreadYieldHostFunc_UnpromotedCallbackTask_NonCancellableIgnoresPendingCancel
-// pins that a non-cancellable yield never consults cancelDeliverable/
-// deliverPendingCancel -- a PENDING_CANCEL task yielding without cancel?=true
-// just runs its scheduler round and returns NOT cancelled, staying
-// PENDING_CANCEL (the pending cancellation is only observed at a
-// cancellable suspension point).
-func TestThreadYieldHostFunc_UnpromotedCallbackTask_NonCancellableIgnoresPendingCancel(t *testing.T) {
-	tk := &task{state: taskPendingCancel}
-	in := &Instance{sched: &sched{}, mayLeave: true, activeTask: tk}
-	if got := callThreadYield(in, binary.Canon{Cancellable: false}); got != 0 {
-		t.Fatalf("thread.yield (pending cancel, non-cancellable) = %d, want 0 (not cancelled)", got)
-	}
-	if tk.state != taskPendingCancel {
-		t.Fatalf("task state = %v, want unchanged taskPendingCancel", tk.state)
-	}
-}
-
-// ------- Stage C: threadTable -------
-
-// TestThreadTable_ReservesIndexZero pins §4.3/§3's "index 0 reserved,
-// mirroring the reference Table's `array = [None]`" convention: the first
-// allocated slot must be index 1, never 0.
 func TestThreadTable_ReservesIndexZero(t *testing.T) {
 	var tt threadTable
 	idx := tt.add("first")
@@ -652,7 +631,7 @@ func TestGuestThread_ReadySuspendedVsWaiting(t *testing.T) {
 	}
 
 	ready := false
-	th.parked, th.parkReady, th.cancellable = true, func() bool { return ready }, false
+	th.parked, th.parkReady = true, func() bool { return ready }
 	if th.suspendedState() {
 		t.Fatal("suspendedState() = true with a non-nil parkReady, want false (WAITING)")
 	}
@@ -664,12 +643,13 @@ func TestGuestThread_ReadySuspendedVsWaiting(t *testing.T) {
 		t.Fatal("ready() = false after the predicate is satisfied")
 	}
 
-	// A cancellable WAITING thread wakes on a deliverable pending cancel even
-	// when its own predicate is false (cancelDeliverable() disjunct).
-	th.parked, th.parkReady, th.cancellable = true, func() bool { return false }, true
+	// A WAITING thread wakes on a deliverable pending cancel even when its own
+	// predicate is false (cancelDeliverable() disjunct) -- every suspension is
+	// cancel-aware since component-model#716.
+	th.parked, th.parkReady = true, func() bool { return false }
 	th.t.state = taskPendingCancel
 	if !th.ready() {
-		t.Fatal("ready() = false for a WAITING cancellable thread with a deliverable pending cancel, want true")
+		t.Fatal("ready() = false for a WAITING thread with a deliverable pending cancel, want true")
 	}
 
 	// But a SUSPENDED thread (parkReady == nil) never wakes this way -- only
@@ -710,7 +690,7 @@ func TestGuestThread_BlockResumeRoundtrip(t *testing.T) {
 	ready := false
 	blockResult := make(chan bool, 1)
 	th := newSuspendedGuestThreadSelfBlocking(in, tsk, func(th *guestThread, ctx context.Context, stack []uint64) error {
-		cancelled := th.block(func() bool { return ready }, false)
+		cancelled := th.block(func() bool { return ready })
 		blockResult <- cancelled
 		return nil
 	})
@@ -787,7 +767,7 @@ func TestGuestThread_ReapAbortsParkedSpawnedThread(t *testing.T) {
 	tsk := &task{state: taskStarted}
 	blockResult := make(chan bool, 1)
 	th := newSuspendedGuestThreadSelfBlocking(in, tsk, func(th *guestThread, ctx context.Context, stack []uint64) error {
-		cancelled := th.block(func() bool { return false }, false) // never ready on its own
+		cancelled := th.block(func() bool { return false }) // never ready on its own
 		blockResult <- cancelled
 		return nil
 	})
@@ -1133,7 +1113,7 @@ func TestThreadYieldThenResumeHostFunc_PendingCancelDeliversWithoutSwitching(t *
 		t.Fatal("other's thread func must not run when the caller's pending cancel delivers first")
 		return nil
 	})
-	def := threadYieldThenResumeHostFunc(in, binary.Canon{Cancellable: true})
+	def := threadYieldThenResumeHostFunc(in, binary.Canon{})
 	if got := callThreadYieldThenResume(def, th.index); got != 1 {
 		t.Fatalf("thread.yield-then-resume (pending cancel) = %d, want 1 (Cancelled.TRUE)", got)
 	}

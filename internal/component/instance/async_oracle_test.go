@@ -363,12 +363,11 @@ func runAsyncOracleScenario(t *testing.T, sc asyncScenario) (trace []asyncTraceE
 
 		case "waitable-set.wait", "waitable-set.poll":
 			si := resolveHandle(env, op["set"])
-			cancellable := opBool(op, "cancellable", false)
 			var def hostFuncDef
 			if kind == "waitable-set.wait" {
-				def = waitableSetWaitHostFunc(in, binary.Canon{Cancellable: cancellable})
+				def = waitableSetWaitHostFunc(in, binary.Canon{})
 			} else {
-				def = waitableSetPollHostFunc(in, binary.Canon{Cancellable: cancellable})
+				def = waitableSetPollHostFunc(in, binary.Canon{})
 			}
 			stack := []uint64{uint64(si), asyncEventPtr}
 			def.fn.Call(ctx, mod, stack)
@@ -463,8 +462,7 @@ func runAsyncOracleScenario(t *testing.T, sc asyncScenario) (trace []asyncTraceE
 			appendRet(k, nil)
 
 		case "thread.yield":
-			cancellable := opBool(op, "cancellable", false)
-			def := threadYieldHostFunc(in, binary.Canon{Cancellable: cancellable})
+			def := threadYieldHostFunc(in, binary.Canon{})
 			stack := []uint64{0}
 			def.fn.Call(ctx, mod, stack)
 			appendRet(k, []uint32{uint32(stack[0])})
