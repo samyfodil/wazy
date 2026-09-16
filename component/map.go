@@ -17,7 +17,15 @@ import (
 // A key or value that is not a K/V and cannot be converted to one (the same
 // widened-scalar case ListOf handles, e.g. a u16 value arriving as uint32) is
 // an error naming the offending entry.
+//
+// map<K, option<V>> is read by instantiating K or V as a pointer:
+// MapOf[string, *uint32] on a map<string, option<u32>> gives a nil *uint32 for
+// an entry whose value is none and a pointer to the lifted value otherwise.
 func MapOf[K comparable, V any](v Value) (map[K]V, error) {
+	if v == nil {
+		return nil, nil
+	}
+
 	entries, ok := v.([]Value)
 	if !ok {
 		var zk K
@@ -47,12 +55,33 @@ func MapOf[K comparable, V any](v Value) (map[K]V, error) {
 }
 
 // convertMapField narrows one map entry's key or value to T, the same way
-// ListOf narrows a widened scalar list element.
+// ListOf narrows a widened scalar list element. When T is a pointer type it
+// additionally unwraps an option<E>: v arrives as nil (none) or the bare
+// element value (some, per OptionDesc's doc -- never wrapped), so a nil
+// source becomes a nil T and a present one is boxed into a fresh *E.
 func convertMapField[T any](v Value, target reflect.Type, index int, which string) (T, error) {
 	if t, ok := v.(T); ok {
 		return t, nil
 	}
 	var zero T
+
+	if target.Kind() == reflect.Pointer {
+		if v == nil {
+			return zero, nil
+		}
+		elemType := target.Elem()
+		ev := reflect.ValueOf(v)
+		if !ev.IsValid() || !ev.CanConvert(elemType) {
+			return zero, fmt.Errorf("component: map entry %d %s is %T, want %s", index, which, v, target)
+		}
+		ptr := reflect.New(elemType)
+		ptr.Elem().Set(ev.Convert(elemType))
+		return ptr.Interface().(T), nil
+	}
+
+	if v == nil {
+		return zero, fmt.Errorf("component: map entry %d %s is none, want %T", index, which, zero)
+	}
 	ev := reflect.ValueOf(v)
 	if !ev.IsValid() || !ev.CanConvert(target) {
 		return zero, fmt.Errorf("component: map entry %d %s is %T, want %T", index, which, v, zero)

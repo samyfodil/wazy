@@ -184,3 +184,84 @@ func TestMapNestedInRecord(t *testing.T) {
 		t.Errorf("got %#v, want %#v", got, val)
 	}
 }
+
+// map<K, option<V>> -- an optional VALUE, per entry -- is the shape that
+// actually motivated MapDesc's map-in-a-record/tuple handling: the map's
+// synthetic tuple<K, option<V>> element must resolve its second field to an
+// OptionDesc and let Option's own none/some machinery run, same as any other
+// tuple field. Nothing map-specific is involved; this is the proof.
+func TestMapWithOptionalValue(t *testing.T) {
+	r := &tableResolver{}
+	optRef := r.add(binary.OptionDesc{Element: prim("u32")})
+	desc := binary.MapDesc{Key: prim("string"), Value: optRef}
+	resolve := r.resolver()
+
+	entries := []Value{
+		[]Value{"a", uint32(1)}, // some(1)
+		[]Value{"b", nil},       // none
+	}
+
+	mem := make([]byte, 4096)
+	if err := Store(mem, 0, desc, entries, resolve, bumpRealloc(64)); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+	got, err := Load(mem, 0, desc, resolve)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(got, entries) {
+		t.Errorf("got %#v, want %#v", got, entries)
+	}
+
+	// Same round trip through the flat ABI (LowerFlat/LiftFlat).
+	mem2 := make([]byte, 4096)
+	flat, err := LowerFlat(entries, desc, resolve, bumpRealloc(64), mem2)
+	if err != nil {
+		t.Fatalf("LowerFlat: %v", err)
+	}
+	got2, err := LiftFlat(flat, desc, resolve, mem2)
+	if err != nil {
+		t.Fatalf("LiftFlat: %v", err)
+	}
+	if !reflect.DeepEqual(got2, entries) {
+		t.Errorf("flat round trip: got %#v, want %#v", got2, entries)
+	}
+}
+
+// option<map<K,V>> is unremarkable at the Option level -- Option is generic
+// over its element's Size/Alignment/Load/Store, so this is really a check
+// that MapDesc plugs into that generic machinery cleanly, for both arms.
+func TestMapInsideOption(t *testing.T) {
+	r := &tableResolver{}
+	mapRef := r.add(binary.MapDesc{Key: prim("string"), Value: prim("u32")})
+	opt := binary.OptionDesc{Element: mapRef}
+	resolve := r.resolver()
+
+	t.Run("some", func(t *testing.T) {
+		mem := make([]byte, 4096)
+		if err := Store(mem, 0, opt, mapEntries(), resolve, bumpRealloc(64)); err != nil {
+			t.Fatalf("Store: %v", err)
+		}
+		got, err := Load(mem, 0, opt, resolve)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !reflect.DeepEqual(got, mapEntries()) {
+			t.Errorf("got %#v, want %#v", got, mapEntries())
+		}
+	})
+
+	t.Run("none", func(t *testing.T) {
+		mem := make([]byte, 4096)
+		if err := Store(mem, 0, opt, nil, resolve, bumpRealloc(64)); err != nil {
+			t.Fatalf("Store: %v", err)
+		}
+		got, err := Load(mem, 0, opt, resolve)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if got != nil {
+			t.Errorf("got %#v, want nil (none)", got)
+		}
+	})
+}

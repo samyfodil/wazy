@@ -65,6 +65,45 @@ func TestMapOf(t *testing.T) {
 	}
 }
 
+// The none arm of option<map<K,V>> lifts to a nil Value, same as any other
+// option element -- MapOf must accept it as an empty map, not an error.
+func TestMapOfNone(t *testing.T) {
+	got, err := component.MapOf[string, uint32](nil)
+	if err != nil {
+		t.Fatalf("MapOf(nil): %v", err)
+	}
+	if got != nil {
+		t.Fatalf("got %v, want a nil map", got)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got %d entries, want 0", len(got))
+	}
+}
+
+// map<K, option<V>> -- an optional VALUE, per entry -- is read with V
+// instantiated as a pointer: nil for that entry's none, a pointer to the
+// lifted value otherwise (option's Value shape is the bare element for
+// "some", never wrapped -- see OptionDesc).
+func TestMapOfOptionalValue(t *testing.T) {
+	in := []component.Value{
+		[]component.Value{"a", uint32(1)},
+		[]component.Value{"b", nil}, // option<u32>'s none
+	}
+	got, err := component.MapOf[string, *uint32](in)
+	if err != nil {
+		t.Fatalf("MapOf: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d entries, want 2", len(got))
+	}
+	if got["a"] == nil || *got["a"] != 1 {
+		t.Errorf(`got["a"] = %v, want a pointer to 1`, got["a"])
+	}
+	if got["b"] != nil {
+		t.Errorf(`got["b"] = %v, want nil (none)`, got["b"])
+	}
+}
+
 // A scalar value arrives widened (a u16 as uint32), the same as a list
 // element -- MapOf has to narrow it back for the caller's requested type.
 func TestMapOfNarrowsWidenedScalars(t *testing.T) {
@@ -98,6 +137,20 @@ func TestMapOfErrors(t *testing.T) {
 		in := []component.Value{[]component.Value{true, uint32(1)}}
 		if _, err := component.MapOf[string, uint32](in); err == nil {
 			t.Error("expected an error converting bool to string")
+		}
+	})
+
+	t.Run("none value for a non-optional (non-pointer) V", func(t *testing.T) {
+		in := []component.Value{[]component.Value{"a", nil}}
+		if _, err := component.MapOf[string, uint32](in); err == nil {
+			t.Error("expected an error for a none value against a non-pointer V")
+		}
+	})
+
+	t.Run("optional value of an unconvertible type", func(t *testing.T) {
+		in := []component.Value{[]component.Value{"a", true}}
+		if _, err := component.MapOf[string, *uint32](in); err == nil {
+			t.Error("expected an error converting bool to *uint32")
 		}
 	})
 }
