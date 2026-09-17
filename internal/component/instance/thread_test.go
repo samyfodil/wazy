@@ -94,20 +94,24 @@ func TestThreadYieldHostFunc_UnpromotedCallbackTask(t *testing.T) {
 	}
 }
 
-// TestThreadYieldHostFunc_UnpromotedCallbackTask_PendingCancelDelivers pins
-// the middle arm's deliverPendingCancel prologue (design §4.1, mirroring
-// wait_until's prologue): a PENDING_CANCEL task yielding must flip to
-// CANCEL_DELIVERED and report Cancelled.TRUE immediately, without running a
-// scheduler round at all. Every yield does this now -- the `cancellable`
-// immediate that could opt out was removed by component-model#716.
-func TestThreadYieldHostFunc_UnpromotedCallbackTask_PendingCancelDelivers(t *testing.T) {
+// TestThreadYieldHostFunc_PendingCancelIsNotReported pins that thread.yield
+// reports nothing about cancellation.
+//
+// canon_thread_yield is `thread.yield_(); return [0]` -- unconditional. An
+// earlier revision of this test asserted the opposite, from the shape the
+// built-in had while it still carried a `cancellable` immediate: back then a
+// cancellable yield delivered the pending cancellation and returned
+// Cancelled.TRUE. component-model#716 removed the immediate and the return
+// value with it; the pending cancellation stays pending until a suspension that
+// can actually report it (the callback loop's WAIT/YIELD disposition).
+func TestThreadYieldHostFunc_PendingCancelIsNotReported(t *testing.T) {
 	tk := &task{state: taskPendingCancel}
 	in := &Instance{sched: &sched{}, mayLeave: true, activeTask: tk}
-	if got := callThreadYield(in, binary.Canon{}); got != 1 {
-		t.Fatalf("thread.yield (pending cancel) = %d, want 1 (Cancelled.TRUE)", got)
+	if got := callThreadYield(in, binary.Canon{}); got != 0 {
+		t.Fatalf("thread.yield (pending cancel) = %d, want 0 -- yield never reports cancellation", got)
 	}
-	if tk.state != taskCancelDelivered {
-		t.Fatalf("task state = %v, want taskCancelDelivered", tk.state)
+	if tk.state != taskPendingCancel {
+		t.Fatalf("task state = %v, want it left at taskPendingCancel", tk.state)
 	}
 }
 
@@ -643,14 +647,20 @@ func TestGuestThread_ReadySuspendedVsWaiting(t *testing.T) {
 		t.Fatal("ready() = false after the predicate is satisfied")
 	}
 
-	// A WAITING thread wakes on a deliverable pending cancel even when its own
-	// predicate is false (cancelDeliverable() disjunct) -- every suspension is
-	// cancel-aware since component-model#716.
+	// A pending cancellation alone does NOT make a WAITING thread ready: the
+	// reference's Thread.ready() is `waiting() and ready_func()`, with no
+	// cancellation disjunct in either the old or the current revision. Only an
+	// explicit cancel-wake resume (cancelWake) or the predicate itself wakes it.
 	th.parked, th.parkReady = true, func() bool { return false }
 	th.t.state = taskPendingCancel
-	if !th.ready() {
-		t.Fatal("ready() = false for a WAITING thread with a deliverable pending cancel, want true")
+	if th.ready() {
+		t.Fatal("ready() = true for a WAITING thread on a pending cancel alone, want false")
 	}
+	th.cancelWake = true
+	if !th.ready() {
+		t.Fatal("ready() = false after an explicit cancel-wake resume, want true")
+	}
+	th.cancelWake = false
 
 	// But a SUSPENDED thread (parkReady == nil) never wakes this way -- only
 	// an explicit thread.yield-then-resume (or reap) can resume it (§3's

@@ -193,9 +193,7 @@ func storeEvent(mod api.Module, builtin string, ptr uint32, ev eventTuple) event
 // too, not just from a would-be sync/stackful task), write its (p1,p2) at
 // ptr/ptr+4, and return the event code.
 //
-// canon carries the cancellable:bool payload finally threaded through here
 // (Phase 3, docs/component-model-async-phase3-design.md §2.3): when
-// cancellable and this task has a delivered-or-deliverable cancellation
 // pending, the drive predicate also wakes on that, and TASK_CANCELLED is
 // stored instead of a set event -- deliverPendingCancel is checked at THIS
 // suspension's prologue exactly where the reference's wait_until does
@@ -211,11 +209,21 @@ func waitableSetWaitHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 		si := api.DecodeU32(stack[0])
 		ptr := api.DecodeU32(stack[1])
 		ws := requireWaitableSet(in, "waitable-set.wait", si)
-		t, blk := blockingTask(in, "waitable-set.wait")
+		_, blk := blockingTask(in, "waitable-set.wait")
 
-		pred := func() bool {
-			return ws.hasPendingEvent() || t.cancelDeliverable()
-		}
+		// canon_waitable_set_wait is WaitableSet.wait: it waits on
+		// has_pending_event alone, in both arms. A cancellation does not unblock
+		// it -- a task parked here when cancelled stays parked, and the deadlock
+		// is whoever drives the scheduler's to report. The cancel-aware wait is
+		// WaitableSet.wait_from_callback, which is the callback dispatch loop's
+		// WAIT disposition (guestTask.ready/resumeReady's parkWait arm), not
+		// this built-in.
+		// canon_waitable_set_wait is WaitableSet.wait, which waits on
+		// has_pending_event alone -- a cancellation does not unblock it, in
+		// either arm. The cancel-aware wait is WaitableSet.wait_from_callback,
+		// and that is the callback dispatch loop's WAIT disposition rather than
+		// this built-in (reference ~2094).
+		predEvent := ws.hasPendingEvent
 
 		var ev eventTuple
 		if blk != nil {
@@ -228,9 +236,11 @@ func waitableSetWaitHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 			// shared scheduler (invokeStackful/invokeAsyncCallback map
 			// errAsyncDeadlock to the spec's exact trap text).
 			ws.numWaiting++
-			cancelled := blk.block(pred)
+			cancelled := blk.block(predEvent)
 			ws.numWaiting--
-			if cancelled || t.deliverPendingCancel() {
+			// cancelled is an explicit cancel-wake resume (the reference's
+			// thread.resume(Cancelled.TRUE)), not the predicate firing.
+			if cancelled {
 				ev = eventTuple{code: eventTaskCancelled}
 			} else {
 				ev = ws.getPendingEvent()
@@ -238,7 +248,7 @@ func waitableSetWaitHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 		} else {
 			// Callback-task arm: unchanged nested drive (Phase 1-3).
 			ws.numWaiting++
-			err := in.sched.drive(pred)
+			err := in.sched.drive(predEvent)
 			ws.numWaiting--
 			if err != nil {
 				if errors.Is(err, errAsyncDeadlock) {
@@ -246,11 +256,7 @@ func waitableSetWaitHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 				}
 				panic(fmt.Errorf("component/instance: waitable-set.wait: %w", err))
 			}
-			if t.deliverPendingCancel() {
-				ev = eventTuple{code: eventTaskCancelled}
-			} else {
-				ev = ws.getPendingEvent()
-			}
+			ev = ws.getPendingEvent()
 		}
 		stack[0] = uint64(storeEvent(mod, "waitable-set.wait", ptr, ev))
 	})
@@ -260,8 +266,8 @@ func waitableSetWaitHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 // waitableSetPollHostFunc backs waitable-set.poll (CanonKindWaitableSetPoll,
 // 0x21) -- canon_waitable_set_poll, definitions.py ~2427. Same as wait but
 // non-blocking: returns EventCode.NONE immediately when nothing is pending
-// instead of driving the scheduler. The poll(cancellable) prologue (~834):
-// if cancellable and a cancellation is deliverable, TASK_CANCELLED is
+// instead of driving the scheduler. WaitableSet.poll reports NONE or the
+// pending event and never consults a cancellation, the same as wait:
 // returned immediately, before even checking the set.
 func waitableSetPollHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 	in.syncTaskNeeded = true
@@ -270,11 +276,10 @@ func waitableSetPollHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 		si := api.DecodeU32(stack[0])
 		ptr := api.DecodeU32(stack[1])
 		ws := requireWaitableSet(in, "waitable-set.poll", si)
-		t := requireActiveTask(in, "waitable-set.poll")
-		if t.deliverPendingCancel() {
-			stack[0] = uint64(storeEvent(mod, "waitable-set.poll", ptr, eventTuple{code: eventTaskCancelled}))
-			return
-		}
+		// WaitableSet.poll is has_pending_event-or-NONE. It does not consult a
+		// pending cancellation, the same as WaitableSet.wait: the cancel-aware
+		// waits are the callback loop's, not these built-ins.
+		requireActiveTask(in, "waitable-set.poll")
 		stack[0] = uint64(storeEvent(mod, "waitable-set.poll", ptr, ws.poll()))
 	})
 	return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, results: []api.ValueType{api.ValueTypeI32}}

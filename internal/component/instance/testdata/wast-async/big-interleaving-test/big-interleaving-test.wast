@@ -111,9 +111,9 @@
     (canon waitable.join (core func $waitable.join))
     (canon waitable-set.new (core func $waitable-set.new))
     (canon waitable-set.drop (core func $waitable-set.drop))
-    (canon stream.read $ST async (memory $memory "mem") (core func $stream.read))
+    (canon stream.read $ST async (memory (core memory $memory "mem")) (core func $stream.read))
     (canon stream.drop-readable $ST (core func $stream.drop-readable))
-    (canon future.read $FT async (memory $memory "mem") (core func $future.read))
+    (canon future.read $FT async (memory (core memory $memory "mem")) (core func $future.read))
     (canon future.drop-readable $FT (core func $future.drop-readable))
     (core instance $mm (instantiate $MM (with "" (instance
       (export "mem" (memory $memory "mem"))
@@ -131,13 +131,13 @@
       (export "future.read" (func $future.read))
       (export "future.drop-readable" (func $future.drop-readable))))))
     (func (export "sink") async (param "in" (stream u8)) (canon lift
-      (core func $mm "sink") async (memory $memory "mem") (callback (func $mm "sink_cb"))))
+      (core func $mm "sink") async (memory (core memory $memory "mem")) (callback (core func $mm "sink_cb"))))
     (func (export "sink-future") async (param "in" (future u8)) (canon lift
-      (core func $mm "sink-future") async (memory $memory "mem") (callback (func $mm "sink-future_cb"))))
+      (core func $mm "sink-future") async (memory (core memory $memory "mem")) (callback (core func $mm "sink-future_cb"))))
     (func (export "block-empty") async (canon lift
-      (core func $mm "block-empty") async (memory $memory "mem") (callback (func $mm "block-empty_cb"))))
+      (core func $mm "block-empty") async (memory (core memory $memory "mem")) (callback (core func $mm "block-empty_cb"))))
     (func (export "block-future") async (param "in" (future u8)) (canon lift
-      (core func $mm "block-future") async (memory $memory "mem") (callback (func $mm "block-future_cb"))))
+      (core func $mm "block-future") async (memory (core memory $memory "mem")) (callback (core func $mm "block-future_cb"))))
     (func (export "bp-inc") (canon lift (core func $mm "bp-inc")))
     (func (export "bp-dec") (canon lift (core func $mm "bp-dec")))
   )
@@ -221,6 +221,19 @@
 
       (func (export "subtask-drop") (param $sub-slot i32)
         (call $subtask.drop (call $sub (local.get $sub-slot))))
+
+      ;; Cancel the subtask and expect the given resolved state. 'subtask.cancel'
+      ;; resumes the cancelled task directly and each subtask cancelled here
+      ;; resolves upon receiving TASK_CANCELLED, so the cancellation completes
+      ;; eagerly rather than reporting BLOCKED.
+      (func (export "subtask-cancel-await") (param $sub-slot i32) (param $expected-state i32)
+        (local $st i32) (local $ret i32)
+        (local.set $st (call $sub (local.get $sub-slot)))
+        (local.set $ret (call $subtask.cancel (local.get $st)))
+        (if (i32.ne (local.get $ret) (local.get $expected-state))
+          (then unreachable))
+        (call $subtask.drop (local.get $st))
+        (call $task.return))
 
       (func (export "mock-bp-inc") (call $bp-inc))
       (func (export "mock-bp-dec") (call $bp-dec))
@@ -342,15 +355,15 @@
     (type $ST (stream u8))
     (type $FT (future u8))
     (canon stream.new $ST (core func $stream.new))
-    (canon stream.read $ST async (memory $memory "mem") (core func $stream.read))
-    (canon stream.write $ST async (memory $memory "mem") (core func $stream.write))
+    (canon stream.read $ST async (memory (core memory $memory "mem")) (core func $stream.read))
+    (canon stream.write $ST async (memory (core memory $memory "mem")) (core func $stream.write))
     (canon stream.cancel-read $ST async (core func $stream.cancel-read))
     (canon stream.cancel-write $ST async (core func $stream.cancel-write))
     (canon stream.drop-readable $ST (core func $stream.drop-readable))
     (canon stream.drop-writable $ST (core func $stream.drop-writable))
     (canon future.new $FT (core func $future.new))
-    (canon future.read $FT async (memory $memory "mem") (core func $future.read))
-    (canon future.write $FT async (memory $memory "mem") (core func $future.write))
+    (canon future.read $FT async (memory (core memory $memory "mem")) (core func $future.read))
+    (canon future.write $FT async (memory (core memory $memory "mem")) (core func $future.write))
     (canon future.cancel-read $FT async (core func $future.cancel-read))
     (canon future.cancel-write $FT async (core func $future.cancel-write))
     (canon future.drop-readable $FT (core func $future.drop-readable))
@@ -358,15 +371,15 @@
     (canon task.return (core func $task.return))
     (canon waitable.join (core func $waitable.join))
     (canon waitable-set.new (core func $waitable-set.new))
-    (canon waitable-set.poll (memory $memory "mem") (core func $waitable-set.poll))
-    (canon waitable-set.wait (memory $memory "mem") (core func $waitable-set.wait))
+    (canon waitable-set.poll (memory (core memory $memory "mem")) (core func $waitable-set.poll))
+    (canon waitable-set.wait (memory (core memory $memory "mem")) (core func $waitable-set.wait))
     (canon waitable-set.drop (core func $waitable-set.drop))
     (canon subtask.cancel async (core func $subtask.cancel))
     (canon subtask.drop (core func $subtask.drop))
-    (canon lower (func $sink) async (memory $memory "mem") (core func $sink'))
-    (canon lower (func $sink-future) async (memory $memory "mem") (core func $sink-future'))
-    (canon lower (func $block-empty) async (memory $memory "mem") (core func $block-empty'))
-    (canon lower (func $block-future) async (memory $memory "mem") (core func $block-future'))
+    (canon lower (func $sink) async (memory (core memory $memory "mem")) (core func $sink'))
+    (canon lower (func $sink-future) async (memory (core memory $memory "mem")) (core func $sink-future'))
+    (canon lower (func $block-empty) async (memory (core memory $memory "mem")) (core func $block-empty'))
+    (canon lower (func $block-future) async (memory (core memory $memory "mem")) (core func $block-future'))
     (canon lower (func $bp-inc) (core func $bp-inc'))
     (canon lower (func $bp-dec) (core func $bp-dec'))
     (core instance $tm (instantiate $TM (with "" (instance
@@ -401,7 +414,7 @@
       (export "waitable-set.drop" (func $waitable-set.drop))))))
     (func (export "poll-readable") (param "slot" u8) (param "event" u8) (param "payload" u32) (canon lift (core func $tm "poll-readable")))
     (func (export "await-readable") async (param "slot" u8) (param "event" u8) (param "payload" u32) (canon lift
-      (core func $tm "await-readable") async (memory $memory "mem")))
+      (core func $tm "await-readable") async (memory (core memory $memory "mem"))))
     (func (export "call-import") (param "slot" u8) (result s32) (canon lift (core func $tm "call-import")))
     (func (export "call-import-future") (param "slot" u8) (result s32) (canon lift (core func $tm "call-import-future")))
     (func (export "call-block-empty") (param "sub" u8) (result s32) (canon lift (core func $tm "call-block-empty")))
@@ -411,7 +424,9 @@
     (func (export "mock-bp-inc") (canon lift (core func $tm "mock-bp-inc")))
     (func (export "mock-bp-dec") (canon lift (core func $tm "mock-bp-dec")))
     (func (export "await-subtask") async (param "sub" u8) (param "state" u8) (canon lift
-      (core func $tm "await-subtask") async (memory $memory "mem")))
+      (core func $tm "await-subtask") async (memory (core memory $memory "mem"))))
+    (func (export "subtask-cancel-await") async (param "sub" u8) (param "state" u8) (canon lift
+      (core func $tm "subtask-cancel-await") async (memory (core memory $memory "mem"))))
     (func (export "stream-new") (param "slot" u8) (canon lift (core func $tm "stream-new")))
     (func (export "testee-write") (param "handle" u8) (param "bytes" u32) (result s32) (canon lift (core func $tm "testee-write")))
     (func (export "testee-read") (param "handle" u8) (param "bytes" u32) (result s32) (canon lift (core func $tm "testee-read")))
@@ -428,7 +443,7 @@
     (func (export "drop-writable") (param "slot" u8) (canon lift (core func $tm "drop-writable")))
     (func (export "poll") (param "slot" u8) (param "event" u8) (param "payload" u32) (canon lift (core func $tm "poll")))
     (func (export "await") async (param "slot" u8) (param "event" u8) (param "payload" u32) (canon lift
-      (core func $tm "await") async (memory $memory "mem")))
+      (core func $tm "await") async (memory (core memory $memory "mem"))))
   )
 
   (component $Driver
@@ -473,7 +488,8 @@
       (case "subtask-drop" u8)
       (case "await-subtask" $sub-expect-e)
       (case "mock-bp-inc")
-      (case "mock-bp-dec")))
+      (case "mock-bp-dec")
+      (case "subtask-cancel-await" $sub-expect-e)))
     (export $command-e "command" (type $command))
     (import "call-import" (func $call-import (param "slot" u8) (result s32)))
     (import "stream-new" (func $stream-new (param "slot" u8)))
@@ -500,6 +516,7 @@
     (import "subtask-cancel" (func $subtask-cancel (param "sub" u8) (result s32)))
     (import "subtask-drop" (func $subtask-drop (param "sub" u8)))
     (import "await-subtask" (func $await-subtask async (param "sub" u8) (param "state" u8)))
+    (import "subtask-cancel-await" (func $subtask-cancel-await async (param "sub" u8) (param "state" u8)))
     (import "mock-bp-inc" (func $mock-bp-inc))
     (import "mock-bp-dec" (func $mock-bp-dec))
 
@@ -529,6 +546,7 @@
       (import "" "subtask-cancel" (func $subtask-cancel (param i32) (result i32)))
       (import "" "subtask-drop" (func $subtask-drop (param i32)))
       (import "" "await-subtask" (func $await-subtask (param i32 i32) (result i32)))
+      (import "" "subtask-cancel-await" (func $subtask-cancel-await (param i32 i32) (result i32)))
       (import "" "mock-bp-inc" (func $mock-bp-inc))
       (import "" "mock-bp-dec" (func $mock-bp-dec))
       (memory (export "mem") 1)
@@ -572,6 +590,7 @@
       (global $AWAIT_SUBTASK        i32 (i32.const 28))
       (global $MOCK_BP_INC          i32 (i32.const 29))
       (global $MOCK_BP_DEC          i32 (i32.const 30))
+      (global $SUBTASK_CANCEL_AWAIT i32 (i32.const 31))
 
       (global $last (mut i32) (i32.const 0))
       (global $VOID_OK i32 (i32.const 1337))
@@ -692,6 +711,11 @@
                 (global.set $last (call $await-subtask
                   (i32.load8_u offset=4 (local.get $insn))
                   (i32.load8_u offset=5 (local.get $insn))))))
+            (if (i32.eq (local.get $op) (global.get $SUBTASK_CANCEL_AWAIT))
+              (then
+                (global.set $last (call $subtask-cancel-await
+                  (i32.load8_u offset=4 (local.get $insn))
+                  (i32.load8_u offset=5 (local.get $insn))))))
 
             (if (i32.eq (local.get $op) (global.get $MOCK_BP_INC))
               (then
@@ -739,6 +763,7 @@
     (canon lower (func $subtask-cancel) (core func $subtask-cancel'))
     (canon lower (func $subtask-drop) (core func $subtask-drop'))
     (canon lower (func $await-subtask) async (core func $await-subtask'))
+    (canon lower (func $subtask-cancel-await) async (core func $subtask-cancel-await'))
     (canon lower (func $mock-bp-inc) (core func $mock-bp-inc'))
     (canon lower (func $mock-bp-dec) (core func $mock-bp-dec'))
     (core instance $dm (instantiate $DM (with "" (instance
@@ -767,10 +792,11 @@
       (export "subtask-cancel" (func $subtask-cancel'))
       (export "subtask-drop" (func $subtask-drop'))
       (export "await-subtask" (func $await-subtask'))
+      (export "subtask-cancel-await" (func $subtask-cancel-await'))
       (export "mock-bp-inc" (func $mock-bp-inc'))
       (export "mock-bp-dec" (func $mock-bp-dec'))))))
     (func (export "run") (param "prog" (list $command-e))
-      (canon lift (core func $dm "run") (memory $dm "mem") (realloc (func $dm "realloc")))))
+      (canon lift (core func $dm "run") (memory (core memory $dm "mem")) (realloc (core func $dm "realloc")))))
 
   (instance $mock (instantiate $Mock))
   (instance $testee (instantiate $Testee
@@ -806,6 +832,7 @@
     (with "subtask-cancel" (func $testee "subtask-cancel"))
     (with "subtask-drop" (func $testee "subtask-drop"))
     (with "await-subtask" (func $testee "await-subtask"))
+    (with "subtask-cancel-await" (func $testee "subtask-cancel-await"))
     (with "mock-bp-inc" (func $testee "mock-bp-inc"))
     (with "mock-bp-dec" (func $testee "mock-bp-dec"))))
   (instance $types
@@ -1586,9 +1613,7 @@
     (list.const
       (variant.const "call-block-empty" (u8.const 0))
       (variant.const "expect-code" (s32.const 1))
-      (variant.const "subtask-cancel" (u8.const 0))
-      (variant.const "expect-code" (s32.const 4))
-      (variant.const "subtask-drop" (u8.const 0)))))
+      (variant.const "subtask-cancel-await" (record.const (field "sub" u8.const 0) (field "state" u8.const 4))))))
 
 (component instance $i $Tester)
 (assert_trap
@@ -1620,15 +1645,9 @@
       (variant.const "expect-code" (s32.const 1))
       (variant.const "call-block-empty" (u8.const 2))
       (variant.const "expect-code" (s32.const 1))
-      (variant.const "subtask-cancel" (u8.const 2))
-      (variant.const "expect-code" (s32.const 4))
-      (variant.const "subtask-cancel" (u8.const 0))
-      (variant.const "expect-code" (s32.const 4))
-      (variant.const "subtask-cancel" (u8.const 1))
-      (variant.const "expect-code" (s32.const 4))
-      (variant.const "subtask-drop" (u8.const 0))
-      (variant.const "subtask-drop" (u8.const 1))
-      (variant.const "subtask-drop" (u8.const 2)))))
+      (variant.const "subtask-cancel-await" (record.const (field "sub" u8.const 2) (field "state" u8.const 4)))
+      (variant.const "subtask-cancel-await" (record.const (field "sub" u8.const 0) (field "state" u8.const 4)))
+      (variant.const "subtask-cancel-await" (record.const (field "sub" u8.const 1) (field "state" u8.const 4))))))
 
 (assert_return
   (invoke "run"

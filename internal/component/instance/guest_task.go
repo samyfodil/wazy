@@ -17,7 +17,7 @@ import (
 // frame.
 //
 //   - run:    call the core func / callback, interpret the packed code.
-//   - park:   store (waitableSet, cancellable) on the guestTask and RETURN
+//   - park:   store the waitableSet on the guestTask and RETURN
 //     to whoever called us (the scheduler, or an async-lower wrapper that
 //     started us) -- see sched.park.
 //   - resume: sched.step (or task.requestCancellation) calls gt.resumeReady,

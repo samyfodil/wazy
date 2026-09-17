@@ -102,10 +102,11 @@ func threadYieldHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 			// already-queued thunks/ready tasks), exactly the reference's
 			// "yielded thread re-enters the waiting list BEHIND already-ready
 			// threads".
-			if blk.block(func() bool { return true }) {
-				stack[0] = 1 // Cancelled.TRUE
-				return
-			}
+			// canon_thread_yield is `thread.yield_(); return [0]` -- it does
+			// not report cancellation. The immediate that once made a yield
+			// cancellable went with component-model#716, and the built-in
+			// returns 0 whatever happens to the task meanwhile.
+			blk.block(func() bool { return true })
 			stack[0] = 0
 
 		case t != nil && !t.syncImplicit:
@@ -118,10 +119,6 @@ func threadYieldHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 			// level). One deterministic scheduler round, then the
 			// pending-cancel check, mirroring wait_until's order as closely
 			// as a frame-held caller allows.
-			if t.deliverPendingCancel() {
-				stack[0] = 1
-				return
-			}
 			if err := in.sched.pumpSnapshot(); err != nil {
 				panic(fmt.Errorf("component/instance: thread.yield: %w", err))
 			}
@@ -265,10 +262,14 @@ func (th *guestThread) suspendedState() bool { return th.parked && th.parkReady 
 // arm: a nil parkReady (SUSPENDED) is never ready via this path at all --
 // only an explicit thread.yield-then-resume (or reap) can resume a suspended
 // thread; cancelWake/cancelDeliverable only apply to a WAITING park, matching
-// the reference's suspended-thread cancel-wake gate (:373, "cancellable").
+// an explicit cancel-wake resume. A pending cancellation alone does NOT
+// make a waiting thread ready: the reference's Thread.ready() is
+// `waiting() and ready_func()`, and cancellation is instead a disjunct inside
+// the individual built-in's predicate (wait_from_callback) or observed at a
+// suspension prologue.
 func (th *guestThread) ready() bool {
 	return th.parkReady != nil &&
-		(th.cancelWake || th.t.cancelDeliverable() || th.parkReady())
+		(th.cancelWake || th.parkReady())
 }
 
 // resumeReady is called by sched.step (driver), pumpSnapshot, task.
