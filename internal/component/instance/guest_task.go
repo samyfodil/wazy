@@ -194,18 +194,21 @@ func (gt *guestTask) ready() bool {
 	// composition (exclusiveOwner is always either nil or the one running
 	// task there, so this evaluates exactly like the old bare
 	// !gt.in.exclusiveHeld check).
-	held := gt.in.exclusiveHeld && gt.in.exclusiveOwner != gt.t
 	switch gt.park {
 	case parkEntry:
 		return !gt.in.hasBackpressure()
 	case parkWait:
-		// wait_for_event_and(lambda: not exclusive, ...) -- the conjunct is
-		// load-bearing now (another task of the same instance may hold the
-		// callee's exclusive).
-		return !held &&
+		// wait_from_callback's ready(): `inst.exclusive_thread is None and
+		// (has_pending_event or has_pending_cancel)`. Strictly None, not
+		// "held by someone else" -- the callback loop releases its own
+		// exclusive before waiting (reference ~2084), so a waiter here never
+		// holds one, and treating self-held as free makes a task that yields
+		// while holding it instantly ready again: a livelock, not a wait.
+		return !gt.in.exclusiveHeld &&
 			(gt.cancelWake || gt.t.cancelDeliverable() || gt.wset.hasPendingEvent())
 	case parkYield:
-		return !held
+		// The YIELD disposition: wait_until(inst.exclusive_thread is None).
+		return !gt.in.exclusiveHeld
 	case parkBlocked:
 		// No !held conjunct, mirroring stackfulTask.ready's sparkBlock case:
 		// gt itself still holds its instance's exclusive across its own

@@ -314,8 +314,12 @@ const (
 	CanonKindBackpressureDec          byte = 0x25
 	CanonKindThreadIndex              byte = 0x26
 	CanonKindThreadNewIndirect        byte = 0x27
+	CanonKindThreadResumeLater        byte = 0x28
 	CanonKindThreadSuspend            byte = 0x29
+	CanonKindThreadSuspendThenResume  byte = 0x2a
 	CanonKindThreadYieldThenResume    byte = 0x2b
+	CanonKindThreadSuspendThenPromote byte = 0x2c
+	CanonKindThreadYieldThenPromote   byte = 0x2d
 )
 
 // Canon represents a canonical lift/lower binding (section 8).

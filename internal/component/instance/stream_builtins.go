@@ -512,7 +512,13 @@ func streamCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 			// to waitable.join's/subtask.cancel's in-set trap (§6.3).
 			e.waitablePtr().syncWaiter = true
 			if blk != nil {
-				blk.block(e.hasPendingEvent)
+				// A cancel-wake (subtask.cancel resuming us while parked here)
+				// returns from block with no event pending: cancel the copy so it
+				// reports CANCELLED, exactly as an explicit stream.cancel-read
+				// would, instead of reading an event that never arrived.
+				if blk.block(e.hasPendingEvent) && !e.hasPendingEvent() {
+					e.sharedCancel()
+				}
 			} else if derr := in.sched.drive(e.hasPendingEvent); derr != nil {
 				e.waitablePtr().syncWaiter = false
 				panic(wrapSchedErr(name, derr))
@@ -611,7 +617,13 @@ func futureCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 			// and identical syncWaiter bracket (§6.2).
 			e.waitablePtr().syncWaiter = true
 			if blk != nil {
-				blk.block(e.hasPendingEvent)
+				// A cancel-wake (subtask.cancel resuming us while parked here)
+				// returns from block with no event pending: cancel the copy so it
+				// reports CANCELLED, exactly as an explicit stream.cancel-read
+				// would, instead of reading an event that never arrived.
+				if blk.block(e.hasPendingEvent) && !e.hasPendingEvent() {
+					e.sharedCancel()
+				}
 			} else if derr := in.sched.drive(e.hasPendingEvent); derr != nil {
 				e.waitablePtr().syncWaiter = false
 				panic(wrapSchedErr(name, derr))
@@ -757,7 +769,9 @@ func cancelCopyHostFunc(in *Instance, isFuture bool, side endSide, evCode eventC
 				// above) and identical syncWaiter bracket (§6.2).
 				w.syncWaiter = true
 				if blk != nil {
-					blk.block(hasPending)
+					if blk.block(hasPending) && !hasPending() {
+						sharedCancel()
+					}
 				} else if derr := in.sched.drive(hasPending); derr != nil {
 					w.syncWaiter = false
 					panic(wrapSchedErr(name, derr))

@@ -1905,6 +1905,18 @@ func computeCanonHostFunc(
 	case binary.CanonKindThreadYieldThenResume:
 		def = threadYieldThenResumeHostFunc(in, canon)
 
+	case binary.CanonKindThreadResumeLater:
+		def = threadResumeLaterHostFunc(in)
+
+	case binary.CanonKindThreadSuspendThenResume:
+		def = threadSuspendThenResumeHostFunc(in)
+
+	case binary.CanonKindThreadSuspendThenPromote:
+		def = threadSuspendThenPromoteHostFunc(in)
+
+	case binary.CanonKindThreadYieldThenPromote:
+		def = threadYieldThenPromoteHostFunc(in)
+
 	case binary.CanonKindTaskCancel:
 		def = taskCancelHostFuncGraph(in)
 

@@ -808,3 +808,12 @@ func takeReadableFutureEnd(in *Instance, t *handleTable, elemDesc binary.TypeDes
 	t.removeEntry(i)
 	return fe.shared, nil
 }
+
+// sharedCancel cancels the in-flight copy on this end's shared object, which
+// installs a CANCELLED pending event for whichever side was parked on it. Named
+// on the end (rather than reaching through .shared at each call site) because
+// both the explicit cancel built-ins and the cancel-wake path in
+// stream_builtins.go need it, and the two end types differ only in the shared
+// object's type.
+func (e *streamEnd) sharedCancel() { e.shared.cancel() }
+func (e *futureEnd) sharedCancel() { e.shared.cancel() }

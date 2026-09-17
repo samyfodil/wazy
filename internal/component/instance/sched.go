@@ -181,7 +181,12 @@ func (s *sched) driveToQuiescence(pred func() bool) (done bool, err error) {
 // A no-op whenever nothing is ready, so every currently-green suite where
 // the drive already quiesced everything sees zero behavior change.
 func (s *sched) drainReady() error {
-	for {
+	// Bounded by the parked set as it stands on entry, not run to a fixed
+	// point: a callback loop that re-parks itself ready on every resume (a
+	// bare YIELD) is ready again the instant it is stepped, so an unbounded
+	// drain would never return. One pass per parked task is what "drain what
+	// is already ready" means.
+	for n := len(s.parked) + len(s.runq); n > 0; n-- {
 		progressed, err := s.step()
 		if err != nil {
 			return err
@@ -190,6 +195,7 @@ func (s *sched) drainReady() error {
 			return nil
 		}
 	}
+	return nil
 }
 
 // pumpSnapshot runs exactly the thunks queued at entry, not ones they

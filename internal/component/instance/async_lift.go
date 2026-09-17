@@ -105,7 +105,13 @@ func (in *Instance) invokeAsyncCallback(ctx context.Context, be *boundExport, ex
 		in.reapParkedGoroutines() // a trap may strand OTHER parked promoted segments (delegated callees)
 		return nil, err
 	}
-	if err := in.sched.drive(func() bool { return gt.done }); err != nil {
+	// Resolved is enough: the export's result exists the moment task.return
+	// runs, and the callback loop may legitimately keep parking itself after
+	// that -- during-sync-call-exclusive-resume's $C.arm resolves and then
+	// returns YIELD forever, waiting to be resumed during some LATER sync call.
+	// Waiting for EXIT here would drive that yield in a loop that never ends.
+	// The event loop stays parked; a subsequent entry point drives it.
+	if err := in.sched.drive(func() bool { return gt.done || t.state == taskResolved }); err != nil {
 		in.reapParkedGoroutines()
 		if errors.Is(err, errAsyncDeadlock) {
 			return nil, fmt.Errorf("component/instance: export %q: deadlock: the async task is suspended but the run queue is empty and no parked task is ready; an import resolved externally requires CallAsync (not yet implemented)", exportName)

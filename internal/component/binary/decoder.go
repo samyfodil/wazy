@@ -1020,7 +1020,11 @@ func decodeCanonSection(buf []byte, offset int, sectionSize uint32) ([]Canon, in
 			offset += int(n2)
 			canon.TableIdx = tbl
 
-		case CanonKindThreadYield, CanonKindThreadSuspend, CanonKindThreadYieldThenResume: // 0x00
+		case CanonKindThreadResumeLater: // thread.resume-later: no payload
+
+		case CanonKindThreadYield, CanonKindThreadSuspend, CanonKindThreadYieldThenResume,
+			CanonKindThreadSuspendThenResume, CanonKindThreadSuspendThenPromote,
+			CanonKindThreadYieldThenPromote: // 0x00
 			// Same reserved byte as waitable-set.wait/poll above.
 			off, err := expectReservedZero(buf, offset)
 			if err != nil {
