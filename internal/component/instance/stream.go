@@ -286,6 +286,26 @@ type sharedStream struct {
 
 	dropped bool
 
+	// readEnd/writeEnd are the LIVE end objects, one per side, so dropping one
+	// end can notify the other even when that other end is IDLE -- the
+	// reference's End.drop reaches its counterpart through End.other
+	// (definitions.py ~988-996) and notifies it whenever it is neither DONE nor
+	// already carrying an event. wazy's ends do not point at each other (they
+	// meet at this shared object), so the link lives here. At most one end per
+	// side is live at a time: a transfer across a component boundary replaces
+	// the readable end, which re-registers.
+	readEnd, writeEnd endNotifier
+
+	// dropNotify[side] records a DROPPED notification OWED to that side but not
+	// yet delivered. The reference has no such field because its End object
+	// itself moves between instances on a transfer, carrying its pending event;
+	// wazy mints a fresh end object on the receiving side, so the debt has to
+	// live on the shared object or a transfer would silently lose it.
+	// idle-drop.wast's transfer-then-park does exactly that: the producer drops
+	// the writable end and returns the readable end as a RESULT, and the
+	// receiver must still find the notification waiting.
+	dropNotify [2]bool
+
 	// The pending side. pendingInst identifies the guest instance whose
 	// buffer is parked (nil for a host buffer) -- consumed ONLY by the
 	// "temporary" same-instance trap below.
@@ -319,6 +339,11 @@ func (s *sharedStream) drop() {
 		}
 	}
 }
+
+// ends returns this shared object's two live end registrations.
+func (s *sharedStream) ends() (*endNotifier, *endNotifier) { return &s.readEnd, &s.writeEnd }
+
+func (s *sharedStream) dropDebt() *[2]bool { return &s.dropNotify }
 
 // write is a writable-end (or host-writer) call with src as the source
 // buffer. Branch-for-branch transliteration of stream_copy's write side.
@@ -642,7 +667,12 @@ type sharedFuture struct {
 	// elemIn is sharedStream.elemIn's twin -- see its doc.
 	elemIn *Instance
 
-	dropped           bool
+	dropped bool
+
+	// readEnd/writeEnd, dropNotify: see sharedStream's identical fields.
+	readEnd, writeEnd endNotifier
+	dropNotify        [2]bool
+
 	pendingInst       *Instance
 	pendingBuffer     copyBuffer
 	pendingOnCopyDone onCopyDoneFn
@@ -653,6 +683,11 @@ func (f *sharedFuture) resetPending() { f.setPending(nil, nil, nil) }
 func (f *sharedFuture) setPending(inst *Instance, b copyBuffer, ocd onCopyDoneFn) {
 	f.pendingInst, f.pendingBuffer, f.pendingOnCopyDone = inst, b, ocd
 }
+
+// ends returns this shared object's two live end registrations.
+func (f *sharedFuture) ends() (*endNotifier, *endNotifier) { return &f.readEnd, &f.writeEnd }
+
+func (f *sharedFuture) dropDebt() *[2]bool { return &f.dropNotify }
 
 func (f *sharedFuture) resetAndNotifyPending(result copyResult) {
 	ocd := f.pendingOnCopyDone
@@ -817,3 +852,44 @@ func takeReadableFutureEnd(in *Instance, t *handleTable, elemDesc binary.TypeDes
 // object's type.
 func (e *streamEnd) sharedCancel() { e.shared.cancel() }
 func (e *futureEnd) sharedCancel() { e.shared.cancel() }
+
+// endNotifier is one side's live end, as much of it as a drop notification
+// needs: whether it is still interested, and how to hand it a DROPPED event.
+//
+// The reference keeps the two ends pointing at each other (End.other) and
+// End.drop notifies the counterpart directly. wazy's ends meet at the shared
+// object instead, so the shared object holds these registrations and
+// notifyPeerDropped below plays End.drop's notify arm.
+type endNotifier struct {
+	// done reports whether this end has already reached DONE (a delivered
+	// terminal result), in which case there is nothing left to tell it.
+	done func() bool
+	// hasEvent reports whether an event is already pending on it -- a copy that
+	// was in flight has just been notified DROPPED through the normal path, and
+	// the notification must be delivered exactly once.
+	hasEvent func() bool
+	// notifyDropped installs the DROPPED event.
+	notifyDropped func()
+}
+
+// notifyPeerDropped is End.drop's notify arm (definitions.py ~991-995):
+//
+//	self.other.other = None
+//	if self.other.state != End.State.DONE and not self.other.has_pending_event():
+//	  self.other.notify(progress = 0)
+//
+// It runs for an IDLE counterpart too, which is the whole point of
+// idle-drop.wast: "dropping one end of a stream or future notifies the other
+// end even when that other end is idle, i.e. has no read or write in flight.
+// The notification is recorded at the time of the drop and delivered exactly
+// once, either through whatever waitable set the idle end is in or inline by a
+// subsequent read."
+func notifyPeerDropped(debt *[2]bool, peerSide endSide, peer *endNotifier) {
+	if peer.done != nil && (peer.done() || peer.hasEvent()) {
+		return // already terminal, or already told
+	}
+	debt[peerSide] = true
+	if peer.notifyDropped != nil {
+		peer.notifyDropped() // a live end: install it now
+	}
+}

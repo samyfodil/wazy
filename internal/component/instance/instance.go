@@ -1022,14 +1022,20 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		if !ok {
 			return nil, fmt.Errorf("stream arg: expected a *sharedStream (from NewStream or a transferred readable end), got %T", v)
 		}
-		return in.resources.addEntry(&streamEnd{side: sideReadable, state: copyIdle, shared: shared}), nil
+		e := &streamEnd{side: sideReadable, state: copyIdle, shared: shared}
+		idx := in.resources.addEntry(e)
+		registerStreamEnd(e, idx)
+		return idx, nil
 
 	case binary.FutureDesc:
 		shared, ok := v.(*sharedFuture)
 		if !ok {
 			return nil, fmt.Errorf("future arg: expected a *sharedFuture (from NewFuture or a transferred readable end), got %T", v)
 		}
-		return in.resources.addEntry(&futureEnd{side: sideReadable, state: copyIdle, shared: shared}), nil
+		e := &futureEnd{side: sideReadable, state: copyIdle, shared: shared}
+		idx := in.resources.addEntry(e)
+		registerFutureEnd(e, idx)
+		return idx, nil
 
 	case binary.PrimitiveDesc:
 		if d.Prim != "error-context" {

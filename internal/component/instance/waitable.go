@@ -132,13 +132,20 @@ func (w *waitable) join(wset *waitableSet) {
 	}
 }
 
-// dropWaitable mirrors Waitable.drop: only legal with no undelivered event and
-// no set membership. Callers that can violate this (subtask.drop) check their
-// own trap_if first; this asserts the invariant the reference asserts.
+// dropWaitable mirrors Waitable.drop, whose whole body is
+//
+//	assert(not self.has_sync_waiter)
+//	self.join(None)
+//
+// (definitions.py ~760-762): leave whatever set this waitable is in, and
+// discard an undelivered event. An undelivered event is explicitly fine --
+// dropping one end of a stream notifies the other end even when that end is
+// IDLE (idle-drop.wast), and the notified end may then simply be dropped
+// without ever collecting it. wazy used to assert the opposite here, which
+// turned that legal sequence into a panic. Callers with a real trap_if of their
+// own (subtask.drop) check it before getting here.
 func (w *waitable) dropWaitable() {
-	if w.hasPendingEvent() {
-		panic("BUG: dropping a waitable with a pending event")
-	}
+	w.pendingEvent, w.pendingSub = nil, nil
 	w.join(nil)
 }
 

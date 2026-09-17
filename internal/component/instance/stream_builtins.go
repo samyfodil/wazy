@@ -368,8 +368,12 @@ func streamNewHostFunc(in *Instance, elemDesc binary.TypeDesc, elemSz, align uin
 	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		requireMayLeave(in, "stream.new")
 		shared := &sharedStream{elem: elemDesc, elemSz: elemSz, align: align, numeric: numeric, elemIn: in}
-		ri := in.resources.addEntry(&streamEnd{side: sideReadable, state: copyIdle, shared: shared})
-		wi := in.resources.addEntry(&streamEnd{side: sideWritable, state: copyIdle, shared: shared})
+		re := &streamEnd{side: sideReadable, state: copyIdle, shared: shared}
+		we := &streamEnd{side: sideWritable, state: copyIdle, shared: shared}
+		ri := in.resources.addEntry(re)
+		wi := in.resources.addEntry(we)
+		registerStreamEnd(re, ri)
+		registerStreamEnd(we, wi)
 		stack[0] = uint64(ri) | uint64(wi)<<32
 	})
 	return hostFuncDef{fn: fn, params: nil, results: []api.ValueType{api.ValueTypeI64}}
@@ -381,8 +385,12 @@ func futureNewHostFunc(in *Instance, elemDesc binary.TypeDesc, elemSz, align uin
 	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		requireMayLeave(in, "future.new")
 		shared := &sharedFuture{elem: elemDesc, elemSz: elemSz, align: align, numeric: numeric, elemIn: in}
-		ri := in.resources.addEntry(&futureEnd{side: sideReadable, state: copyIdle, shared: shared})
-		wi := in.resources.addEntry(&futureEnd{side: sideWritable, state: copyIdle, shared: shared})
+		re := &futureEnd{side: sideReadable, state: copyIdle, shared: shared}
+		we := &futureEnd{side: sideWritable, state: copyIdle, shared: shared}
+		ri := in.resources.addEntry(re)
+		wi := in.resources.addEntry(we)
+		registerFutureEnd(re, ri)
+		registerFutureEnd(we, wi)
 		stack[0] = uint64(ri) | uint64(wi)<<32
 	})
 	return hostFuncDef{fn: fn, params: nil, results: []api.ValueType{api.ValueTypeI64}}
@@ -677,7 +685,10 @@ func streamDropHostFunc(in *Instance, side endSide, elemDesc binary.TypeDesc) ho
 			}
 			panic(fmt.Errorf("component/instance: %s: stream end %d: cannot %s busy stream", name, i, verb))
 		}
+		peer, peerSide := peerOfStream(e)
+		clearStreamEnd(e)
 		e.shared.drop() // counterpart's parked copy => DROPPED event
+		notifyPeerDropped(e.shared.dropDebt(), peerSide, peer)
 		e.dropWaitable()
 		in.resources.removeEntry(i)
 	})
@@ -705,7 +716,10 @@ func futureDropHostFunc(in *Instance, side endSide, elemDesc binary.TypeDesc) ho
 		if e.copying() {
 			panic(fmt.Errorf("component/instance: %s: future end %d: cannot have concurrent operations active on a future/stream", name, i))
 		}
+		peer, peerSide := peerOfFuture(e)
+		clearFutureEnd(e)
 		e.shared.drop()
+		notifyPeerDropped(e.shared.dropDebt(), peerSide, peer)
 		e.dropWaitable()
 		in.resources.removeEntry(i)
 	})
@@ -800,4 +814,106 @@ func cancelCopyHostFunc(in *Instance, isFuture bool, side endSide, evCode eventC
 		stack[0] = uint64(ev.p2)
 	})
 	return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32}, results: []api.ValueType{api.ValueTypeI32}}
+}
+
+// registerStreamEnd records e as its side's live end on the shared object, so
+// dropping the OTHER end can notify it even while it is idle (see
+// notifyPeerDropped). Called wherever a streamEnd is handed to a guest: the
+// stream.new pair, and every transfer that mints a fresh readable end on
+// another instance.
+func registerStreamEnd(e *streamEnd, idx uint32) {
+	code := eventStreamWrite
+	if e.side == sideReadable {
+		code = eventStreamRead
+	}
+	debt := e.shared.dropDebt()
+	slot, peer := e.shared.ends()
+	if e.side == sideWritable {
+		slot, peer = peer, slot
+	}
+	_ = peer
+	*slot = endNotifier{
+		done:     func() bool { return e.state == copyDone },
+		hasEvent: e.hasPendingEvent,
+		notifyDropped: func() {
+			e.livePending = false
+			e.setPendingEvent(func() eventTuple {
+				debt[e.side] = false
+				e.state = copyDone
+				return eventTuple{code: code, p1: idx, p2: packCopyResult(copyDropped, 0)}
+			})
+		},
+	}
+	// A notification owed to this side from before this end existed -- the
+	// producer dropped its end and the readable end was then transferred here.
+	if debt[e.side] && e.state != copyDone && !e.hasPendingEvent() {
+		slot.notifyDropped()
+	}
+}
+
+// registerFutureEnd is registerStreamEnd's future twin.
+func registerFutureEnd(e *futureEnd, idx uint32) {
+	code := eventFutureWrite
+	if e.side == sideReadable {
+		code = eventFutureRead
+	}
+	debt := e.shared.dropDebt()
+	slot, peer := e.shared.ends()
+	if e.side == sideWritable {
+		slot, peer = peer, slot
+	}
+	_ = peer
+	*slot = endNotifier{
+		done:     func() bool { return e.state == copyDone },
+		hasEvent: e.hasPendingEvent,
+		notifyDropped: func() {
+			e.setPendingEvent(func() eventTuple {
+				debt[e.side] = false
+				e.state = copyDone
+				return eventTuple{code: code, p1: idx, p2: uint32(copyDropped)}
+			})
+		},
+	}
+	// See registerStreamEnd's identical tail.
+	if debt[e.side] && e.state != copyDone && !e.hasPendingEvent() {
+		slot.notifyDropped()
+	}
+}
+
+// peerOf returns the registration of the end on the OTHER side from e's.
+func peerOfStream(e *streamEnd) (*endNotifier, endSide) {
+	r, w := e.shared.ends()
+	if e.side == sideReadable {
+		return w, sideWritable
+	}
+	return r, sideReadable
+}
+
+func peerOfFuture(e *futureEnd) (*endNotifier, endSide) {
+	r, w := e.shared.ends()
+	if e.side == sideReadable {
+		return w, sideWritable
+	}
+	return r, sideReadable
+}
+
+// clearStreamEnd drops e's registration: it is gone, so a later drop of the
+// other end has nobody to notify (the reference sets End.other = None on both
+// sides).
+func clearStreamEnd(e *streamEnd) {
+	slot, peer := e.shared.ends()
+	if e.side == sideWritable {
+		slot, peer = peer, slot
+	}
+	_ = peer
+	*slot = endNotifier{}
+}
+
+func clearFutureEnd(e *futureEnd) {
+	slot, peer := e.shared.ends()
+	if e.side == sideWritable {
+		slot, peer = peer, slot
+	}
+	_ = peer
+	*slot = endNotifier{}
 }

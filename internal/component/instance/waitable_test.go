@@ -29,15 +29,26 @@ func TestWaitable_JoinMoveDrop(t *testing.T) {
 	}
 }
 
-func TestWaitable_DropWithPendingEventPanics(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("expected panic dropping a waitable with a pending event")
-		}
-	}()
+// TestWaitable_DropWithPendingEventDiscardsIt replaces a test asserting a panic
+// here. Waitable.drop's whole body is `assert(not has_sync_waiter);
+// join(None)` (definitions.py ~760-762) -- an undelivered event is discarded,
+// not an error. Dropping one end of a stream notifies the other end even when
+// that end is IDLE (idle-drop.wast), and the notified end may then be dropped
+// without ever collecting the notification.
+func TestWaitable_DropWithPendingEventDiscardsIt(t *testing.T) {
+	b := &waitableSet{}
 	w := &waitable{}
+	w.join(b)
 	w.setPendingEvent(ev(eventSubtask, 3, 1))
+
 	w.dropWaitable()
+
+	if w.hasPendingEvent() {
+		t.Fatal("dropWaitable left the undelivered event in place")
+	}
+	if w.wset != nil || len(b.elems) != 0 {
+		t.Fatal("dropWaitable did not clear set membership")
+	}
 }
 
 func TestWaitable_GetPendingEventClears(t *testing.T) {

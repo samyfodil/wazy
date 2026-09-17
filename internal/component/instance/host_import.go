@@ -1194,7 +1194,10 @@ func allocHandleResult(resources *handleTable, rt binary.TypeDesc, v abi.Value) 
 		default:
 			return nil, fmt.Errorf("stream result: expected a *sharedStream (from NewStream) or *StreamReader, got %T", v)
 		}
-		return resources.addEntry(&streamEnd{side: sideReadable, state: copyIdle, shared: shared}), nil
+		e := &streamEnd{side: sideReadable, state: copyIdle, shared: shared}
+		idx := resources.addEntry(e)
+		registerStreamEnd(e, idx)
+		return idx, nil
 
 	case binary.FutureDesc:
 		var shared *sharedFuture
@@ -1206,7 +1209,10 @@ func allocHandleResult(resources *handleTable, rt binary.TypeDesc, v abi.Value) 
 		default:
 			return nil, fmt.Errorf("future result: expected a *sharedFuture (from NewFuture) or *FutureReader, got %T", v)
 		}
-		return resources.addEntry(&futureEnd{side: sideReadable, state: copyIdle, shared: shared}), nil
+		e := &futureEnd{side: sideReadable, state: copyIdle, shared: shared}
+		idx := resources.addEntry(e)
+		registerFutureEnd(e, idx)
+		return idx, nil
 
 	case binary.PrimitiveDesc:
 		if d.Prim != "error-context" {
