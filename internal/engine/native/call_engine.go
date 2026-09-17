@@ -58,6 +58,21 @@ type (
 		// is pure overhead. The tradeoff is a handle called exactly twice and then dropped, whose
 		// buffer goes to the GC rather than back to the pool.
 		stackRetained bool
+		// inFlight is set for the duration of one callWithStack invocation. A
+		// callEngine carries exactly one invocation's state -- the wasm stack
+		// buffer in c.stack, the aligned top in c.stackTop, and the
+		// executionContext whose address is baked into c.execCtxPtr at
+		// construction -- so a nested call through the SAME handle would run on
+		// the outer call's frame and read its locals. Host code can legitimately
+		// re-enter a cached api.Function: the Component Model permits
+		// reentrance, and a parent component's export called back from a child
+		// (reentrance.wast's mutual recursion f -> g -> f) recursed forever
+		// because the inner f saw the outer f's parameter. callWithStack hands
+		// such a call its own engine instead; see its prologue.
+		//
+		// Like stackRetained it lives in the padding after indexInModule, so it
+		// costs this struct nothing.
+		inFlight bool
 		// sizeOfParamResultSlice is the size of the parameter/result slice.
 		sizeOfParamResultSlice int
 		requiredParams         int
@@ -506,6 +521,22 @@ func (c *callEngine) CallWithStack(ctx context.Context, paramResultStack []uint6
 
 // CallWithStack implements api.Function.
 func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint64) (err error) {
+	// Reentrance: this handle already has a live invocation, so it cannot host
+	// a second one (see inFlight). Mint a sibling for the nested call -- exactly
+	// what the caller would have got from another ExportedFunction lookup --
+	// and run it there. Costs a bool test on the normal path.
+	if c.inFlight {
+		nested, ok := c.parent.NewFunction(c.indexInModule).(*callEngine)
+		if !ok {
+			// Unreachable: c is a callEngine, so its own index names a local
+			// (non-host) function and NewFunction returns a callEngine for it.
+			panic("BUG: reentrant call resolved to a non-callEngine")
+		}
+		return nested.callWithStack(ctx, paramResultStack)
+	}
+	c.inFlight = true
+	defer func() { c.inFlight = false }()
+
 	snapshotEnabled := expctxkeys.SnapshotterEnabled.Load() && ctx.Value(expctxkeys.EnableSnapshotterKey{}) != nil
 	if snapshotEnabled {
 		ctx = context.WithValue(ctx, expctxkeys.SnapshotterKey{}, c)
