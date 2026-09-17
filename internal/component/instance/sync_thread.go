@@ -38,8 +38,56 @@ type syncImplicitThread struct {
 	// neither suspended nor ready however its ready_func happens to read.
 	parked bool
 	// resumed is set when the driver actually resumes this thread, which is what
-	// the nested drive below waits for.
+	// the nested drive below waits for. Only the goroutine-less path uses it.
 	resumed bool
+
+	// The baton, when this thread has a goroutine of its own (runSyncCore).
+	// A sync lift whose instance can suspend runs its core call on that
+	// goroutine so the thread is a real continuation: parking hands the baton
+	// back to the driver rather than nesting a drive inside the guest's frames,
+	// which is what lets ANYTHING resume it later -- including a reentrant call
+	// running on top of the thread it switched to (reentrance.wast's last case).
+	// Instances that bind no suspending canon never spawn one and keep running
+	// the core call inline.
+	spawned  bool
+	resumeCh chan resumeMode
+	yieldCh  chan struct{}
+	done     bool
+	err      error
+	panicVal any
+}
+
+// main is the sync thread's goroutine body -- shape-identical to
+// stackfulTask.main.
+func (s *syncImplicitThread) main(fn func() error) {
+	mode := <-s.resumeCh
+	defer func() {
+		if r := recover(); r != nil && r != any(errStackfulAbort) {
+			s.panicVal = r // a real trap or bug: re-panicked on the driver
+		}
+		s.done = true
+		s.yieldCh <- struct{}{}
+	}()
+	if mode == resumeAbort {
+		return
+	}
+	s.err = fn()
+}
+
+// handoff gives the baton to the goroutine and waits for it back -- shape-
+// identical to stackfulTask.handoff.
+func (s *syncImplicitThread) handoff(mode resumeMode) error {
+	prevThread := s.in.activeThread
+	defer func() { s.in.activeThread = prevThread }()
+	s.resumeCh <- mode
+	<-s.yieldCh
+	if s.done {
+		if s.panicVal != nil {
+			panic(s.panicVal)
+		}
+		return s.err
+	}
+	return nil // parked again
 }
 
 func (s *syncImplicitThread) instance() *Instance { return s.in }
@@ -59,6 +107,10 @@ func (s *syncImplicitThread) resumeReady() error {
 	s.sw.catchResume()
 	s.in.sched.unpark(s)
 	s.readyFn, s.parked, s.resumed = nil, false, true
+	if s.spawned {
+		s.in.enterRun(s.t)
+		return s.handoff(resumeNormal)
+	}
 	return nil
 }
 
@@ -145,6 +197,21 @@ func suspendSyncThread(in *Instance, t *task, name string, selfReady func() bool
 	// resume-later or switch wakes it). Anything else is a wait_until.
 	sit.readyFn, sit.parked, sit.resumed = selfReady, true, false
 	in.sched.park(sit)
+
+	if sit.spawned {
+		// This thread owns a goroutine: hand the baton back to whoever resumed
+		// us (a driver's step) and wait there. No nested drive, so the thread's
+		// frames sit on a channel receive and anything can resume them.
+		prevTask, prevMayEnter := in.activeTask, in.mayEnter
+		in.suspendRun()
+		sit.yieldCh <- struct{}{}
+		mode := <-sit.resumeCh
+		in.activeTask, in.mayEnter = prevTask, prevMayEnter
+		if mode == resumeAbort {
+			panic(errStackfulAbort)
+		}
+		return
+	}
 
 	// The sync call's guest frames stay live on this goroutine, but the task is
 	// not RUNNING while parked: release the run state exactly as a stackful
@@ -312,4 +379,82 @@ func (w *switchWindow) catchResume() bool {
 		return true
 	}
 	return false
+}
+
+// runSyncCore runs a non-async-typed lift's core call.
+//
+// canon_lift gives EVERY call its own Thread with its own continuation, and for
+// a non-async-typed one it then drives
+//
+//	while task.state != Task.State.RESOLVED:
+//	  candidates = { t for t in inst.threads if t.ready() }
+//	  trap_if(not candidates)
+//	  random.choice(list(candidates)).resume()
+//
+// (definitions.py ~2116-2122). Two properties matter and wazy only had the
+// second: the call's thread is independently resumable, and blocking traps only
+// when no thread of this instance is ready.
+//
+// Running the core call inline on the caller's goroutine gives up the first one.
+// Its frames are then pinned beneath whatever it switches to, and the only way
+// to resume it is a scheduler drive nested inside those frames -- which cannot
+// reach the thread when something ELSE is mid-call on top of it. That is
+// reentrance.wast's last case: run suspends into an explicit thread, the
+// explicit thread reenters the same instance, and the reentrant call's own
+// thread switches back to run. So when this instance binds a canon that can
+// suspend, the core call gets its own baton goroutine and this function is the
+// sync-caller loop above.
+//
+// Instances that bind no such canon (the overwhelming majority: no thread.*, no
+// waitable-set.wait, no sync stream/future copy, no sync lower of an async lift)
+// keep calling straight through with no goroutine and no scheduler at all.
+func (in *Instance) runSyncCore(t *task, exportName string, call func() error) error {
+	// t == nil means this instance never needed task tracking, so there is no
+	// thread to give a continuation to (and nothing in it can suspend).
+	// mayThreadSwitch, not mayBlockSync: a continuation is only needed when
+	// something can resume THIS thread, which means a cooperative-thread canon
+	// is bound here. A sync lift that merely blocks (a sync stream copy, a sync
+	// lower of an async lift, waitable-set.wait) is resumed by its own nested
+	// drive and needs no goroutine. t == nil means the instance never needed
+	// task tracking at all.
+	if t == nil || !in.mayThreadSwitch {
+		return call()
+	}
+	sit := syncBlocker{in: in, t: t, name: exportName}.sit()
+	sit.spawned = true
+	sit.resumeCh, sit.yieldCh = make(chan resumeMode), make(chan struct{})
+	go sit.main(call)
+
+	if err := sit.handoff(resumeNormal); err != nil {
+		return err
+	}
+	if sit.done {
+		return sit.err
+	}
+	// Parked: drive this instance's own ready threads until the call finishes.
+	// driveScoped is the `candidates = { t for t in inst.threads ... }`
+	// restriction (during-sync-call-no-sibling-resume), and its no-candidate
+	// result is the loop's trap_if.
+	if err := in.sched.driveScoped(in, func() bool { return sit.done }); err != nil {
+		in.sched.unpark(sit)
+		sit.parked = false
+		in.abortSyncThread(sit)
+		if errors.Is(err, errAsyncDeadlock) {
+			return fmt.Errorf("cannot block a synchronous task before returning")
+		}
+		return err
+	}
+	return sit.err
+}
+
+// abortSyncThread unwinds a sync thread's goroutine that can never be resumed,
+// the way reapParkedGoroutines unwinds a stranded stackful task: hand it
+// resumeAbort so block() panics errStackfulAbort, the engine's recover turns
+// that into a returned error, and the goroutine exits.
+func (in *Instance) abortSyncThread(sit *syncImplicitThread) {
+	if !sit.spawned || sit.done {
+		return
+	}
+	sit.resumeCh <- resumeAbort
+	<-sit.yieldCh
 }

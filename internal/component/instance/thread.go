@@ -88,7 +88,7 @@ func (in *Instance) assertThreadsQuiescent(when string) {
 // invokeEntered), matching every other async builtin's bind-time flag
 // (async_builtins.go).
 func threadYieldHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
-	in.syncTaskNeeded, in.mayBlockSync = true, true
+	in.syncTaskNeeded, in.mayBlockSync, in.mayThreadSwitch = true, true, true
 	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		requireMayLeave(in, "thread.yield")
 		t := in.activeTask
@@ -199,6 +199,13 @@ func (m implicitThreadMarker) sched() switchableThread {
 	return nil
 }
 
+func (m implicitThreadMarker) instance() *Instance {
+	if m.t == nil {
+		return nil
+	}
+	return m.t.inst
+}
+
 func (m implicitThreadMarker) suspendedState() bool {
 	s := m.sched()
 	return s != nil && s.suspendedState()
@@ -285,6 +292,10 @@ func (tt *threadTable) replace(idx uint32, v any) {
 // reference draws no distinction -- inst.threads.get(i) returns a Thread and
 // every one of them can be suspended, resumed and switched to.
 type switchableThread interface {
+	// instance ties a thread to its component instance, so the scheduler can
+	// treat it as an ordinary parked entry (parkedTask).
+	instance() *Instance
+
 	suspendedState() bool
 	ready() bool
 	startWaiting()
@@ -542,7 +553,7 @@ func (in *Instance) currentBlocker() taskBlocker {
 // a spawned thread's OWN slot, by contrast, IS freed at guestThread.run's
 // unregister tail. Covered by thread_test.go only.
 func threadIndexHostFunc(in *Instance) hostFuncDef {
-	in.syncTaskNeeded, in.mayBlockSync = true, true
+	in.syncTaskNeeded, in.mayBlockSync, in.mayThreadSwitch = true, true, true
 	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		requireMayLeave(in, "thread.index")
 		// Stage D (design §4.3): a SPAWNED thread calling thread.index
@@ -579,7 +590,7 @@ func threadIndexHostFunc(in *Instance) hostFuncDef {
 // calling guestThread and park it SUSPENDED, resumable by a later
 // thread.yield-then-resume targeting its index.
 func threadSuspendHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
-	in.syncTaskNeeded, in.mayBlockSync = true, true
+	in.syncTaskNeeded, in.mayBlockSync, in.mayThreadSwitch = true, true, true
 	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		requireMayLeave(in, "thread.suspend")
 		// A sync task's implicit thread suspends too -- see sync_thread.go. Its
@@ -620,7 +631,7 @@ func threadNewIndirectHostFunc(
 	in *Instance, canon binary.Canon, neededTypes map[string]map[string]coreFuncSig, groupNames []string, entryName string,
 	coreTableTarget func(int) (api.Module, string, error),
 ) (hostFuncDef, error) {
-	in.syncTaskNeeded, in.mayBlockSync = true, true
+	in.syncTaskNeeded, in.mayBlockSync, in.mayThreadSwitch = true, true, true
 
 	ownerMod, tableName, err := coreTableTarget(int(canon.TableIdx))
 	if err != nil {
@@ -698,7 +709,7 @@ func threadNewIndirectHostFunc(
 // the handoff for other's entire run) -- required because the parker IS the
 // goroutine that must perform the switch.
 func threadYieldThenResumeHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
-	in.syncTaskNeeded, in.mayBlockSync = true, true
+	in.syncTaskNeeded, in.mayBlockSync, in.mayThreadSwitch = true, true, true
 	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		requireMayLeave(in, "thread.yield-then-resume")
 		i := api.DecodeU32(stack[0])
@@ -769,7 +780,7 @@ func threadResumeLaterHostFunc(in *Instance) hostFuncDef {
 // stays suspended until something explicitly resumes it (resume-later, or
 // another switch).
 func threadSuspendThenResumeHostFunc(in *Instance) hostFuncDef {
-	in.syncTaskNeeded, in.mayBlockSync = true, true
+	in.syncTaskNeeded, in.mayBlockSync, in.mayThreadSwitch = true, true, true
 	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		requireMayLeave(in, "thread.suspend-then-resume")
 		i := api.DecodeU32(stack[0])
@@ -789,7 +800,7 @@ func threadSuspendThenResumeHostFunc(in *Instance) hostFuncDef {
 // suspend/yield. Note it traps on i == self rather than requiring the target be
 // suspended -- a ready (waiting) target is the interesting case here.
 func threadSuspendThenPromoteHostFunc(in *Instance) hostFuncDef {
-	in.syncTaskNeeded, in.mayBlockSync = true, true
+	in.syncTaskNeeded, in.mayBlockSync, in.mayThreadSwitch = true, true, true
 	return promoteHostFunc(in, "thread.suspend-then-promote", nil)
 }
 
@@ -797,7 +808,7 @@ func threadSuspendThenPromoteHostFunc(in *Instance) hostFuncDef {
 // (CanonKindThreadYieldThenPromote, 0x2d) -- canon_thread_yield_then_promote.
 // Same as suspend-then-promote except the caller re-enters the waiting list.
 func threadYieldThenPromoteHostFunc(in *Instance) hostFuncDef {
-	in.syncTaskNeeded, in.mayBlockSync = true, true
+	in.syncTaskNeeded, in.mayBlockSync, in.mayThreadSwitch = true, true, true
 	return promoteHostFunc(in, "thread.yield-then-promote", alwaysReady)
 }
 
@@ -831,14 +842,16 @@ func switchToThread(in *Instance, other switchableThread, name string, selfReady
 	// Resolved BEFORE the switch: resuming other runs its code, which moves
 	// in.activeTask, and the caller must still park as itself.
 	park, win := captureSuspender(in, name)
-	// PUBLISHED before the switch, because the reference's suspend() captures
-	// the switcher's continuation before control moves: `other` must observe us
-	// as already suspended, and may switch straight back to us (see
-	// switchWindow). The park below closes the window.
+	// PUBLISHED before the park, so a thread that observes us between these two
+	// statements already sees a suspension (see switchWindow). With the switch
+	// itself deferred to the scheduler below, nothing actually runs in that
+	// window any more, but the publication is what makes the park install the
+	// ready_func the reference would have.
 	win.publish(selfReady)
-	if err := other.resumeReady(); err != nil {
-		panic(err)
-	}
+	// suspend(switch_to = other): hand the scheduler the target and park. The
+	// switch happens on the next step, from the driver, NOT from inside this
+	// frame -- see sched.pendingSwitch for why that matters.
+	in.sched.pendingSwitch = other
 	park(selfReady)
 }
 
@@ -866,3 +879,19 @@ func currentThreadIndex(in *Instance) (uint32, bool) {
 	}
 	return t.implicitThreadIdx, true
 }
+
+// Compile-time proof that every thread kind in the table satisfies both
+// interfaces: a missing method would otherwise only show up as a type assertion
+// in threadTable.getSwitchable quietly returning ok == false, which reads as
+// "no such thread" rather than as the bug it is.
+var (
+	_ switchableThread = implicitThreadMarker{}
+	_ switchableThread = (*guestThread)(nil)
+	_ switchableThread = (*syncImplicitThread)(nil)
+	_ switchableThread = (*guestTask)(nil)
+	_ switchableThread = (*stackfulTask)(nil)
+	_ parkedTask       = (*guestThread)(nil)
+	_ parkedTask       = (*syncImplicitThread)(nil)
+	_ parkedTask       = (*guestTask)(nil)
+	_ parkedTask       = (*stackfulTask)(nil)
+)

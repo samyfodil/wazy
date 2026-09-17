@@ -379,6 +379,17 @@ type Instance struct {
 	// WAITs only) never pay a goroutine.
 	mayBlockSync bool
 
+	// mayThreadSwitch is set at graph-bind time when this instance binds any
+	// cooperative-thread canon (thread.yield, thread.suspend, the four
+	// switch/promote built-ins, thread.new-indirect). Only those can make a
+	// NON-async-typed call's implicit thread the target of a resume, and only
+	// then does that thread have to be an independently resumable continuation
+	// rather than frames sitting inline on the caller's goroutine -- see
+	// runSyncCore, which spawns a goroutine for exactly this case. An instance
+	// that binds none (every sync component, wasi included) keeps calling
+	// straight through with no goroutine and no scheduler.
+	mayThreadSwitch bool
+
 	// syncTaskNeeded is set at graph-bind time when this instance wires any
 	// canon builtin that resolves the CURRENT TASK at call time (task.return,
 	// task.cancel, context.get/set, backpressure.inc/dec, waitable-set.wait/
@@ -1801,6 +1812,11 @@ func wrapUnreachableTrap(err error) error {
 // surface AS be.coreFn.CallWithStack failing, so this narrower rule still
 // covers everything that suite (or the spec) requires here.
 func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportName string, args []abi.Value) ([]abi.Value, error) {
+	// syncTask is this call's own Task, when the instance needs one: runSyncCore
+	// below runs the core call as that task's implicit thread. nil means this
+	// instance never needed task tracking at all, and the core call runs
+	// straight through.
+	var syncTask *task
 	if in.syncTaskNeeded {
 		// The reference's canon_lift constructs a Task for EVERY call,
 		// including a not-opts.async_ sync lift (definitions.py:2144-2202);
@@ -1813,6 +1829,7 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 		// task is restored on return -- including through the two poisoning
 		// error returns below, via defer.
 		t := &task{inst: in, be: be, state: taskStarted, syncImplicit: true}
+		syncTask = t
 		prevActive, prevBase, prevThread := in.activeTask, in.syncBase, in.activeThread
 		in.activeTask, in.syncBase = t, t
 		// This sync call's own implicit thread is current for its duration --
@@ -1869,7 +1886,12 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 	}
 	putCoreValueSlice(coreArgsPtr) // coreArgs' bits are now copied into stack; done with it
 
-	if err := be.coreFn.CallWithStack(ctx, stack); err != nil {
+	// Routed through runSyncCore so this call's implicit thread is a real,
+	// independently resumable continuation whenever the instance binds a canon
+	// that can suspend; a plain sync component calls straight through.
+	if err := in.runSyncCore(syncTask, exportName, func() error {
+		return be.coreFn.CallWithStack(ctx, stack)
+	}); err != nil {
 		putUint64Slice(stackPtr)
 		in.poisoned = true // guest code actually ran and trapped -- see this func's doc
 		err = wrapUnreachableTrap(err)

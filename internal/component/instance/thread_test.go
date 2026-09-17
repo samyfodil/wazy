@@ -1171,12 +1171,11 @@ func TestThreadYieldThenResumeHostFunc_UnpromotedCallbackTaskFailsLoud(t *testin
 // TestThreadYieldThenResumeHostFunc_PendingCancelDoesNotPreemptTheSwitch pins
 // that a pending cancellation neither preempts the switch nor is consumed by it.
 //
-// It replaces a test asserting the opposite. canon_thread_yield_then_resume is
-// `thread.yield_then_resume(other); return [0]` -- it never consults the task
-// state, and Thread.yield_then_resume/wait_until deliver no cancellation, so
-// the other thread runs, the built-in reports Cancelled.FALSE, and the request
-// stays PENDING_CANCEL for the event loop to deliver (cancel-delivery.wast's
-// test 3 asserts exactly this for the sibling built-in thread.yield).
+// canon_thread_yield_then_resume never consults the task state, and
+// Thread.yield_then_resume/wait_until deliver no cancellation, so the switch is
+// recorded, the built-in reports Cancelled.FALSE, and the request stays
+// PENDING_CANCEL for the event loop to deliver (cancel-delivery.wast's test 3
+// asserts exactly this for the sibling built-in thread.yield).
 func TestThreadYieldThenResumeHostFunc_PendingCancelDoesNotPreemptTheSwitch(t *testing.T) {
 	in := newAsyncInst()
 	tsk, st := newBareStackfulTask(in)
@@ -1198,10 +1197,8 @@ func TestThreadYieldThenResumeHostFunc_PendingCancelDoesNotPreemptTheSwitch(t *t
 		t.Fatalf("bareStackfulRun: %v", err)
 	}
 
-	select {
-	case <-ran:
-	default:
-		t.Fatal("the switched-to thread never ran: a pending cancel must not preempt the switch")
+	if in.sched.pendingSwitch != other {
+		t.Fatal("the switch was not recorded: a pending cancel must not preempt it")
 	}
 	if tsk.state != taskPendingCancel {
 		t.Fatalf("task state = %v after the switch, want taskPendingCancel -- the switch built-ins deliver no cancellation", tsk.state)
@@ -1210,9 +1207,17 @@ func TestThreadYieldThenResumeHostFunc_PendingCancelDoesNotPreemptTheSwitch(t *t
 		t.Fatal("st should be parked ready-waiting: the pending cancel must not skip the self-park")
 	}
 
-	// The task only resolves through its own event loop, so let the yield half
-	// complete and check the built-in's result.
-	tsk.state = taskResolved
+	// The scheduler performs the switch; other runs and exits.
+	tsk.state = taskResolved // other is the task's last thread on exit
+	if _, err := in.sched.step(); err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	select {
+	case <-ran:
+	default:
+		t.Fatal("the switched-to thread never ran")
+	}
+
 	if err := st.resumeReady(); err != nil {
 		t.Fatalf("st.resumeReady: %v", err)
 	}
@@ -1256,23 +1261,28 @@ func bareStackfulRun(st *stackfulTask, fn func() error) error {
 	return st.handoff(resumeNormal)
 }
 
-// TestThreadYieldThenResumeHostFunc_SwitchAndSelfPark is the design's §4.5
-// ordering-equivalence proof exercised end to end at the host-func level (the
-// exact mechanism trap-if-sync-and-waitable-set's $spawn-and-yield uses,
-// wast:69-72): $Main (a stackful implicit thread) switches directly to a
-// spawned thread that runs to completion, then parks itself ready-waiting;
-// resuming $Main later completes the call with Cancelled.FALSE.
+// TestThreadYieldThenResumeHostFunc_SwitchAndSelfPark pins the switch's shape
+// after it stopped resuming the target inline.
+//
+// canon_thread_yield_then_resume is start_waiting(lambda: True) then
+// switch_to(other), and switch_to is suspend(switch_to = other): the switcher's
+// continuation is captured and the TARGET is handed to the scheduler, which
+// performs the resume (definitions.py ~266-277, ~363-367). So the built-in parks
+// the caller ready-waiting and records the target; the switched-to thread runs on
+// the driver's next step, not from inside the switcher's frame. That is what
+// makes a suspended thread resumable from anywhere, which reentrance.wast's
+// outer-sync/inner-async case needs.
 func TestThreadYieldThenResumeHostFunc_SwitchAndSelfPark(t *testing.T) {
 	in := newAsyncInst()
 	tsk, st := newBareStackfulTask(in)
 	in.activeTask = tsk
 
 	ran := make(chan struct{})
-	other := newSuspendedGuestThread(in, tsk, func(ctx context.Context, stack []uint64) error {
+	other := newSuspendedGuestThread(in, tsk, func(context.Context, []uint64) error {
 		close(ran)
 		return nil
 	})
-	tsk.state = taskResolved // other becomes the last thread on exit; avoid the unresolved-task trap
+	tsk.state = taskResolved // other becomes the last thread on exit
 
 	before := numGoroutineStable(t)
 
@@ -1286,6 +1296,33 @@ func TestThreadYieldThenResumeHostFunc_SwitchAndSelfPark(t *testing.T) {
 		t.Fatalf("bareStackfulRun: %v", err)
 	}
 
+	// The built-in handed the baton back without running other: it parked itself
+	// and left the target for the scheduler.
+	select {
+	case <-ran:
+		t.Fatal("the switched-to thread ran from inside the switcher's frame; the scheduler must perform the switch")
+	default:
+	}
+	if in.sched.pendingSwitch != other {
+		t.Fatal("sched.pendingSwitch is not the switch target")
+	}
+	if !in.sched.isParked(st) {
+		t.Fatal("st should be parked ready-waiting after the switch built-in returns")
+	}
+	select {
+	case <-selfParked:
+		t.Fatal("the host func returned before st ever parked -- ordering violated")
+	default:
+	}
+
+	// One scheduler step performs the switch; other runs to completion.
+	progressed, err := in.sched.step()
+	if err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	if !progressed {
+		t.Fatal("step made no progress, so the pending switch was never performed")
+	}
 	select {
 	case <-ran:
 	default:
@@ -1297,17 +1334,8 @@ func TestThreadYieldThenResumeHostFunc_SwitchAndSelfPark(t *testing.T) {
 	if tsk.liveThreads != 0 {
 		t.Fatalf("tsk.liveThreads = %d, want 0", tsk.liveThreads)
 	}
-	if !in.sched.isParked(st) {
-		t.Fatal("st (the implicit thread) should be parked ready-waiting after the switch returns")
-	}
-	select {
-	case <-selfParked:
-		t.Fatal("the host func returned before st ever got a chance to self-park -- ordering violated")
-	default:
-	}
 
-	// Resume st (simulating the driver's next step): the "yield" half
-	// completes, Cancelled.FALSE.
+	// Resuming st completes the "yield" half with Cancelled.FALSE.
 	if err := st.resumeReady(); err != nil {
 		t.Fatalf("st.resumeReady: %v", err)
 	}

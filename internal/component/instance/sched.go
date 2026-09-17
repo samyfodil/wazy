@@ -36,6 +36,20 @@ type sched struct {
 	// order (plan §6's random.choice -> first monkeypatch).
 	parked []parkedTask
 
+	// pendingSwitch is the reference's Handler.switch_to (definitions.py
+	// ~269-277): the thread a switch built-in asked to run next.
+	//
+	// suspend(switch_to = other) captures the switcher's continuation and hands
+	// the scheduler the target in one step -- the switcher is parked BEFORE
+	// other runs, and other is resumed by the scheduler rather than from inside
+	// the switcher's own frame. wazy used to resume other inline instead, which
+	// left the switcher's goroutine blocked in a nested baton handoff: fine
+	// until something wanted to resume the switcher itself, which a reentrant
+	// call legitimately does (reentrance.wast's last case). Parking first and
+	// letting the next step perform the switch keeps every suspended thread
+	// resumable from anywhere, which is the whole point of a continuation.
+	pendingSwitch parkedTask
+
 	// instantiating is true while the root Instantiate is running core-module
 	// start functions (docs/component-model-async-stackful-design.md §4.3).
 	// One flag on the SHARED sched (one per composition tree) so every
@@ -122,6 +136,16 @@ func (s *sched) step() (progressed bool, err error) { return s.stepScoped(nil) }
 // import resolving), which in the reference happen outside this loop entirely,
 // so they are never scoped out.
 func (s *sched) stepScoped(only *Instance) (progressed bool, err error) {
+	// An explicit switch runs first and is never scoped out: the switcher named
+	// this thread, so it is not a candidate being chosen but a transfer already
+	// decided (see pendingSwitch).
+	if pt := s.pendingSwitch; pt != nil {
+		s.pendingSwitch = nil
+		s.pumping = true
+		err = pt.resumeReady()
+		s.pumping = false
+		return true, err
+	}
 	if len(s.runq) > 0 {
 		th := s.runq[0]
 		// Shift the remaining entries down in place (not s.runq[1:]) so the
