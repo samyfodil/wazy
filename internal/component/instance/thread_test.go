@@ -1105,6 +1105,7 @@ func TestThreadYieldThenResumeHostFunc_ImplicitMarkerNotSuspended(t *testing.T) 
 	def := threadYieldThenResumeHostFunc(in, binary.Canon{})
 	requirePanicContains(t, "cannot resume thread which is not suspended", func() { callThreadYieldThenResume(def, idx) })
 }
+
 func TestThreadYieldThenResumeHostFunc_NotSuspendedTraps(t *testing.T) {
 	in := newAsyncInst()
 	tsk := &task{}
@@ -1159,6 +1160,7 @@ func TestSuspendSelf_SyncTaskResumedByResumeLater(t *testing.T) {
 	})
 	suspendSelf(in, "thread.suspend", neverReady)
 }
+
 func TestThreadYieldThenResumeHostFunc_UnpromotedCallbackTaskFailsLoud(t *testing.T) {
 	in := newAsyncInst()
 	tsk := &task{} // no st, no gt -- blocker() == nil
@@ -1230,6 +1232,7 @@ func TestThreadYieldThenResumeHostFunc_PendingCancelDoesNotPreemptTheSwitch(t *t
 		t.Fatal("st did not resume to completion")
 	}
 }
+
 func newBareStackfulTask(in *Instance) (*task, *stackfulTask) {
 	tsk := &task{inst: in, state: taskStarted}
 	st := &stackfulTask{t: tsk, in: in}

@@ -97,6 +97,7 @@ func TestInvokeAsyncCallback_PoisonedRefused(t *testing.T) {
 	_, err := inst.invokeAsyncCallback(context.Background(), be, "run-async", nil)
 	requireErrContains(t, err, "cannot enter component instance")
 }
+
 func TestInvokeAsyncCallback_BackpressureParksThenDeadlocks(t *testing.T) {
 	inst, be := firstLightAsyncExport(t)
 	inst.backpressure = 1 // tryEnter parks entry; nothing clears backpressure
