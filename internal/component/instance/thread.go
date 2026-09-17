@@ -348,8 +348,17 @@ func (th *guestThread) suspendedState() bool {
 
 // startWaiting/stopWaiting are the reference's Thread.start_waiting and
 // stop_waiting: moving between SUSPENDED and WAITING without running anything.
-func (th *guestThread) startWaiting() { th.parkReady = alwaysReady }
-func (th *guestThread) stopWaiting()  { th.parkReady = nil }
+func (th *guestThread) startWaiting() {
+	if !th.sw.setReady(alwaysReady) {
+		th.parkReady = alwaysReady
+	}
+}
+
+func (th *guestThread) stopWaiting() {
+	if !th.sw.setReady(nil) {
+		th.parkReady = nil
+	}
+}
 
 func (th *guestThread) instance() *Instance { return th.in }
 
@@ -399,6 +408,17 @@ func (th *guestThread) resumeReady() error {
 // handoff gives the baton to the goroutine and waits for it back -- shape-
 // identical to stackfulTask.handoff.
 func (th *guestThread) handoff(mode resumeMode) error {
+	// The baton is strictly nested: this call blocks until it comes back, so
+	// whoever we hand it to (and anything IT hands it to) runs entirely inside
+	// this frame. Save and restore our own current-thread identity around that,
+	// or a spawned thread that merely runs and exits -- guestThread.run clears
+	// activeThread on the way out -- leaves the instance with no current thread
+	// at all, and the next builtin on THIS thread resolves the wrong blocker.
+	// during-sync-call-may-block-if-other-ready-threads arms exactly such a
+	// short-lived thread before blocking, and its switch back then parked the
+	// sync task's implicit thread instead of itself.
+	prevThread := th.in.activeThread
+	defer func() { th.in.activeThread = prevThread }()
 	th.resumeCh <- mode
 	<-th.yieldCh
 	if th.done {
@@ -445,7 +465,8 @@ func (th *guestThread) block(ready func() bool) (cancelled bool) {
 	// delivered at the event loop"). Every builtin that parks through here --
 	// thread.yield, thread.suspend, the four switch builtins, waitable-set.wait
 	// -- must leave a PENDING_CANCEL pending.
-	if th.sw.closeWindow() { // already resumed before we got here: do not park
+	ready = th.sw.effectiveReady(ready) // a start_waiting inside the window wins
+	if th.sw.closeWindow() {            // already resumed before we got here: do not park
 		return false
 	}
 	th.parked, th.parkReady = true, ready

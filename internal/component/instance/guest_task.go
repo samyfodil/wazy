@@ -152,6 +152,17 @@ func (s *guestSegment) main(fn func() error) {
 // Runs on whatever goroutine currently owns the baton (the starter on the
 // first handoff; sched.step's caller on resumes).
 func (s *guestSegment) handoff(mode resumeMode) error {
+	// The baton is strictly nested: this call blocks until it comes back, so
+	// whoever we hand it to (and anything IT hands it to) runs entirely inside
+	// this frame. Save and restore our own current-thread identity around that,
+	// or a spawned thread that merely runs and exits -- guestThread.run clears
+	// activeThread on the way out -- leaves the instance with no current thread
+	// at all, and the next builtin on THIS thread resolves the wrong blocker.
+	// during-sync-call-may-block-if-other-ready-threads arms exactly such a
+	// short-lived thread before blocking, and its switch back then parked the
+	// sync task's implicit thread instead of itself.
+	prevThread := s.gt.in.activeThread
+	defer func() { s.gt.in.activeThread = prevThread }()
 	s.resumeCh <- mode
 	<-s.yieldCh
 	if s.gt.seg == nil { // finished
@@ -182,6 +193,7 @@ func (gt *guestTask) block(ready func() bool) (cancelled bool) {
 	// delivered at the event loop"). Every builtin that parks through here --
 	// thread.yield, thread.suspend, the four switch builtins, waitable-set.wait
 	// -- must leave a PENDING_CANCEL pending.
+	ready = gt.sw.effectiveReady(ready)
 	if gt.sw.closeWindow() { // already resumed inside the window: do not park
 		return false
 	}
@@ -284,6 +296,9 @@ func (gt *guestTask) suspendedState() bool {
 }
 
 func (gt *guestTask) startWaiting() {
+	if gt.sw.setReady(alwaysReady) {
+		return
+	}
 	gt.suspendedOverride = false
 	if gt.park == parkBlocked && gt.seg != nil && gt.seg.parkReady == nil {
 		gt.seg.parkReady = alwaysReady // Thread.start_waiting(lambda: True)
@@ -291,6 +306,9 @@ func (gt *guestTask) startWaiting() {
 }
 
 func (gt *guestTask) stopWaiting() {
+	if gt.sw.setReady(nil) {
+		return
+	}
 	gt.suspendedOverride = true
 	if gt.park == parkBlocked && gt.seg != nil {
 		gt.seg.parkReady = nil

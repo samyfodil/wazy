@@ -265,6 +265,7 @@ func (st *stackfulTask) block(ready func() bool) (cancelled bool) {
 	// delivered at the event loop"). Every builtin that parks through here --
 	// thread.yield, thread.suspend, the four switch builtins, waitable-set.wait
 	// -- must leave a PENDING_CANCEL pending.
+	ready = st.sw.effectiveReady(ready)
 	if st.sw.closeWindow() { // already resumed inside the window: do not park
 		return false
 	}
@@ -326,8 +327,17 @@ func (st *stackfulTask) suspendedState() bool {
 // startWaiting is Thread.start_waiting(ready_func = lambda: True), the body of
 // resume_later; stopWaiting is Thread.stop_waiting, which clears ready_func and
 // so makes the thread SUSPENDED again.
-func (st *stackfulTask) startWaiting() { st.parkReady = alwaysReady }
-func (st *stackfulTask) stopWaiting()  { st.parkReady = nil }
+func (st *stackfulTask) startWaiting() {
+	if !st.sw.setReady(alwaysReady) {
+		st.parkReady = alwaysReady
+	}
+}
+
+func (st *stackfulTask) stopWaiting() {
+	if !st.sw.setReady(nil) {
+		st.parkReady = nil
+	}
+}
 
 // resumeReady is called only with st in sched.parked (goroutine at
 // <-resumeCh, or not yet spawned for sparkEntry), by sched.step/pumpSnapshot
@@ -367,6 +377,17 @@ func (st *stackfulTask) resumeReady() error {
 
 // handoff gives the baton to the goroutine and waits for it back.
 func (st *stackfulTask) handoff(mode resumeMode) error {
+	// The baton is strictly nested: this call blocks until it comes back, so
+	// whoever we hand it to (and anything IT hands it to) runs entirely inside
+	// this frame. Save and restore our own current-thread identity around that,
+	// or a spawned thread that merely runs and exits -- guestThread.run clears
+	// activeThread on the way out -- leaves the instance with no current thread
+	// at all, and the next builtin on THIS thread resolves the wrong blocker.
+	// during-sync-call-may-block-if-other-ready-threads arms exactly such a
+	// short-lived thread before blocking, and its switch back then parked the
+	// sync task's implicit thread instead of itself.
+	prevThread := st.in.activeThread
+	defer func() { st.in.activeThread = prevThread }()
 	st.resumeCh <- mode
 	<-st.yieldCh
 	if st.done {

@@ -73,8 +73,17 @@ func (s *syncImplicitThread) suspendedState() bool {
 
 // startWaiting is start_waiting(ready_func = lambda: True) -- resume_later's
 // body; stopWaiting clears ready_func, making the thread SUSPENDED again.
-func (s *syncImplicitThread) startWaiting() { s.readyFn = alwaysReady }
-func (s *syncImplicitThread) stopWaiting()  { s.readyFn = nil }
+func (s *syncImplicitThread) startWaiting() {
+	if !s.sw.setReady(alwaysReady) {
+		s.readyFn = alwaysReady
+	}
+}
+
+func (s *syncImplicitThread) stopWaiting() {
+	if !s.sw.setReady(nil) {
+		s.readyFn = nil
+	}
+}
 
 // suspendSelf parks the caller with the given readiness, whichever kind of task
 // it belongs to: an async task hands its blocker the predicate, and a sync
@@ -124,6 +133,7 @@ func captureSuspender(in *Instance, name string) (park func(selfReady func() boo
 // anything else is a wait_until on that predicate.
 func suspendSyncThread(in *Instance, t *task, name string, selfReady func() bool) {
 	sit := syncBlocker{in: in, t: t, name: name}.sit()
+	selfReady = sit.sw.effectiveReady(selfReady) // a resume-later inside the window wins
 	if sit.sw.closeWindow() {
 		// Resumed inside the publish-before-park window (see switchWindow): the
 		// switch we performed handed control to a thread that resumed us right
@@ -266,6 +276,33 @@ func (w *switchWindow) closeWindow() bool {
 // thread whose window is open, where the real park state is not set up yet.
 func (w *switchWindow) publishedSuspended() bool { return w.ready == nil }
 func (w *switchWindow) publishedReady() bool     { return w.ready != nil && w.ready() }
+
+// setReady redirects a Thread.start_waiting/stop_waiting that lands inside the
+// window onto the PUBLISHED ready_func, reporting whether it did.
+//
+// The reference's resume_later replaces the ready_func of a thread already
+// sitting in suspend(); the switcher installed its own before switch_to, and
+// whichever was written last is what the scheduler sees. Without this the park
+// that follows the switch would write the pre-switch value back over it --
+// during-sync-call-no-sibling-resume's X does exactly resume-later(implicit)
+// followed by thread.suspend, and the implicit thread has to come back ready.
+func (w *switchWindow) setReady(f func() bool) bool {
+	if w.open {
+		w.ready = f
+		return true
+	}
+	return false
+}
+
+// effectiveReady is the ready_func a park should actually install: the published
+// one (possibly replaced via setReady) while the window is open, else the
+// caller's own.
+func (w *switchWindow) effectiveReady(ready func() bool) func() bool {
+	if w.open {
+		return w.ready
+	}
+	return ready
+}
 
 // catchResume latches a resume arriving inside the window, reporting whether it
 // did so (the caller then skips its real resume path).

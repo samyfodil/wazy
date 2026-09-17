@@ -438,12 +438,22 @@ func subtaskCancelHostFuncGraph(in *Instance, canon binary.Canon) hostFuncDef {
 		if st.cancellationRequested { // trap_if(subtask.cancellation_requested)
 			panic(fmt.Errorf("component/instance: subtask.cancel: handle %d: cancellation already requested", i))
 		}
-		if st.inWaitableSet() && !async { // trap_if(in_waitable_set() and not async_)
+		// trap_if(subtask.in_waitable_set()) -- unconditional, both forms
+		// (definitions.py ~2381). The async form is not exempt: it still claims
+		// the subtask and consumes its resolution event, which a waitable set
+		// could otherwise steal, and trap-if-sync-and-waitable-set says so
+		// ("For subtask.cancel, *both* the sync and async forms trap").
+		if st.inWaitableSet() {
 			panic(fmt.Errorf("component/instance: subtask.cancel: handle %d: waitable cannot be used synchronously while added to a waitable set", i))
 		}
 
 		if !st.resolved() {
 			st.cancellationRequested = true
+			// has_sync_waiter goes up BEFORE on_cancel and for BOTH forms
+			// (~2384): it is what marks the subtask as claimed, so a
+			// waitable.join attempted while the cancel is in flight traps
+			// instead of stealing the resolution event.
+			st.syncWaiter = true
 			if st.hasOnCancel() { // false only for a host import with no OnCancel hook (§2.4)
 				// Bracket with sched.pumping exactly like sched.step's own
 				// thunk/resumeReady dispatch (sched.go): st.runOnCancel runs
@@ -472,6 +482,7 @@ func subtaskCancelHostFuncGraph(in *Instance, canon binary.Canon) hostFuncDef {
 			}
 			if !st.resolved() {
 				if async {
+					st.syncWaiter = false
 					stack[0] = blockedSentinel
 					return
 				}
@@ -485,10 +496,9 @@ func subtaskCancelHostFuncGraph(in *Instance, canon binary.Canon) hostFuncDef {
 				// syncImplicit case already trapped above, at earlyBlk's
 				// resolution).
 				blk := earlyBlk
-				st.syncWaiter = true
 				if blk != nil {
-					blk.block(st.hasPendingEvent)
-				} else if derr := in.sched.drive(st.hasPendingEvent); derr != nil {
+					blk.block(st.resolved)
+				} else if derr := in.sched.drive(st.resolved); derr != nil {
 					st.syncWaiter = false
 					if errors.Is(derr, errAsyncDeadlock) {
 						panic(fmt.Errorf("component/instance: subtask.cancel: deadlock: subtask %d's synchronous cancel is waiting on a subtask that nothing can resolve", i))
