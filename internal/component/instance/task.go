@@ -337,6 +337,16 @@ func (in *Instance) tryEnter(t *task) (entered bool) {
 func (in *Instance) enterRun(t *task) {
 	in.mayEnter = false
 	in.activeTask = t
+	// t's IMPLICIT thread is what is running now, so no spawned thread is
+	// current. The reference's current_thread() follows the continuation being
+	// run, and a reentrant call creates a new task with a new implicit thread --
+	// it must not still report the spawned thread whose Go frames it happens to
+	// be nested inside. reentrance.wast has such a call yield-then-promote that
+	// very thread, which is RUNNING and therefore neither ready nor suspended;
+	// wazy read it as the current thread instead and tripped the self-switch
+	// trap. The two guestThread sites that resume a real spawned thread set
+	// activeThread back immediately after calling this.
+	in.activeThread = nil
 	in.exclusiveHeld, in.exclusiveOwner = true, t
 }
 

@@ -783,6 +783,9 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 // an alias at all -- trap-on-reenter.wast's shape) exactly like it already
 // does for a sibling's export.
 func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, in *Instance, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver) (map[int]*Instance, []*Instance, error) {
+	// This component's OWN resource destructors, resolved on first need by the
+	// type-arg case below (most components pass no resource type down).
+	var ownDtors map[uint32]func() api.Function
 	if len(comp.Instances) == 0 {
 		return nil, nil, nil
 	}
@@ -1119,13 +1122,26 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 
 			case 0x03: // type: pass a resource type in. Tag the nested component's
 				// import of it with the outer's tag for the same resource, and
-				// carry the host destructor.
+				// carry the destructor down.
 				tag := effectiveResourceTypeIdx(comp, cfg, arg.SortIdx)
 				if idx, ok := importedTypeIndex(nested, arg.Name); ok {
 					typeArgTags[idx] = tag
 				}
 				if dtor := cfg.hostResDtors[tag]; dtor != nil {
 					subCfg.hostResDtors[tag] = dtor
+				}
+				// The OUTER component's own destructor for this resource, the
+				// same way a sibling's crosses via importedResDtors. The child
+				// has its own handle table, so without this its resource.drop
+				// finds no destructor at all and drops an own<R> silently:
+				// reentrance.wast's "a destructor is called reentrantly" passes
+				// the parent's resource type into a child, has the child drop
+				// it, and counts the definer's dtor running (it used to see 0).
+				if ownDtors == nil {
+					ownDtors = resolveDefinedResourceDtors(comp, coreFuncTarget)
+				}
+				if r := ownDtors[arg.SortIdx]; r != nil {
+					subCfg.importedResDtors[tag] = r
 				}
 
 			case 0x04: // component: pass a component DEFINITION in, satisfying

@@ -1807,9 +1807,15 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 		// task is restored on return -- including through the two poisoning
 		// error returns below, via defer.
 		t := &task{inst: in, be: be, state: taskStarted, syncImplicit: true}
-		prevActive, prevBase := in.activeTask, in.syncBase
+		prevActive, prevBase, prevThread := in.activeTask, in.syncBase, in.activeThread
 		in.activeTask, in.syncBase = t, t
-		defer func() { in.activeTask, in.syncBase = prevActive, prevBase }()
+		// This sync call's own implicit thread is current for its duration --
+		// see enterRun. A reentrant sync call nested inside a spawned thread's
+		// frames must not report that thread as current.
+		in.activeThread = nil
+		defer func() {
+			in.activeTask, in.syncBase, in.activeThread = prevActive, prevBase, prevThread
+		}()
 	}
 	mem, memAvailable := memoryBytesOf(be.mod)
 	realloc := cachedReallocOf(ctx, be)

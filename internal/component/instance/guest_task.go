@@ -357,6 +357,11 @@ func (gt *guestTask) firstRun() error {
 // onStart's caller-memory read is then legal because the baton serializes
 // it: the starter is blocked in seg.handoff while this goroutine runs.
 func (gt *guestTask) firstRunBody() error {
+	// Restore the caller's current thread on the way out: this may be a nested
+	// (reentrant) call running inside a spawned thread's frames, and enterRun
+	// below clears activeThread for the duration.
+	prevThread := gt.in.activeThread
+	defer func() { gt.in.activeThread = prevThread }()
 	gt.in.enterRun(gt.t)
 	be, t := gt.be, gt.t
 
@@ -489,6 +494,11 @@ func (gt *guestTask) runLoop(ev eventTuple) error {
 // For a PROMOTED task this runs on a fresh segment goroutine each
 // invocation (see runLoop/runSegment).
 func (gt *guestTask) runLoopBody(ev eventTuple) error {
+	// Restore the caller's current thread on the way out: this may be a nested
+	// (reentrant) call running inside a spawned thread's frames, and enterRun
+	// below clears activeThread for the duration.
+	prevThread := gt.in.activeThread
+	defer func() { gt.in.activeThread = prevThread }()
 	gt.in.enterRun(gt.t)
 	// Pooled (getUint64Slice/putUint64Slice, instance.go), not a stack
 	// array: CallWithStack's interface call makes escape analysis treat a

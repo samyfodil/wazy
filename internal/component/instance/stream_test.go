@@ -361,10 +361,18 @@ func TestStreamDrop_UndeliveredCompletion_TrapsCopyingNotAssert(t *testing.T) {
 	_ = w
 }
 
-// TestStreamCancel_RacingCompletionDeliversCompleted proves the second half
-// of §1.3: a cancel that races a completion must deliver COMPLETED (not
-// CANCELLED) because the already-pending event is what gets delivered.
-func TestStreamCancel_RacingCompletionDeliversCompleted(t *testing.T) {
+// TestStreamCancel_RacingCompletionDeliversCancelledWithProgress replaces a test
+// asserting the opposite.
+//
+// A cancel that races a completion delivers CANCELLED -- carrying the progress
+// the completion already made. StreamEnd.notify stores a closure that reads
+// self.state when the event is DELIVERED (definitions.py ~1008-1024), and
+// cancel_copy flips the state to CANCELLING_COPY before delivering, so the
+// already-pending event comes out as CANCELLED | progress<<4 rather than
+// COMPLETED. cancel-stream.wast's cancel-read-after-completion asserts the
+// exact packing, and goes on to require the end to be IDLE and reusable
+// afterwards.
+func TestStreamCancel_RacingCompletionDeliversCancelledWithProgress(t *testing.T) {
 	in := newAsyncInst()
 	r, _ := newBareStreamEnds(in)
 	asyncRead := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, true, nil, nil)
@@ -383,9 +391,8 @@ func TestStreamCancel_RacingCompletionDeliversCompleted(t *testing.T) {
 
 	cancelFn := cancelCopyHostFunc(in, false, sideReadable, eventStreamRead, nil, true)
 	out := callBuiltin(cancelFn, uint64(r))
-	res := copyResult(uint32(out[0]) & 0xf)
-	if res != copyCompleted {
-		t.Fatalf("cancel racing a completion delivered %v, want COMPLETED (the race was lost)", res)
+	if got, want := uint32(out[0]), packCopyResult(copyCancelled, 2); got != want {
+		t.Fatalf("cancel racing a completion delivered %#x, want %#x (CANCELLED with the 2 items already copied)", got, want)
 	}
 	if se.state != copyIdle {
 		t.Fatalf("state after delivering the raced completion = %v, want copyIdle", se.state)

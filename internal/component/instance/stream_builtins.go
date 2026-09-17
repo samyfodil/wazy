@@ -451,12 +451,28 @@ func streamCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 		}
 
 		// -- the three closures, verbatim from stream_copy --
-		streamEvent := func(result copyResult, reclaim func()) eventTuple {
+		// The result is decided HERE, at delivery, from the end's state -- not
+		// captured when the copy finished. StreamEnd.notify stores a closure and
+		// reads self.state inside it (definitions.py ~1008-1024), which is what
+		// lets a stream.cancel-write issued after a completion still report
+		// CANCELLED with the progress that already happened: cancel_copy flips
+		// the state to CANCELLING_COPY and then delivers the event that was
+		// already pending. cancel-stream.wast's cancel-{write,read}-after-
+		// completion assert exactly that packing (CANCELLED | 2<<4), and wazy
+		// baked COMPLETED into the closure at copy time instead.
+		//
+		// dropped is the reference's `self.other is None` -- the peer end is
+		// gone, which outranks a pending cancellation.
+		streamEvent := func(dropped bool, reclaim func()) eventTuple {
 			reclaim()
-			if result == copyDropped {
-				e.state = copyDone
-			} else {
-				e.state = copyIdle
+			var result copyResult
+			switch {
+			case dropped:
+				result, e.state = copyDropped, copyDone
+			case e.state == copyCancelling:
+				result, e.state = copyCancelled, copyIdle
+			default:
+				result, e.state = copyCompleted, copyIdle
 			}
 			return eventTuple{code: evCode, p1: i, p2: packCopyResult(result, buf.progressed())}
 		}
@@ -468,11 +484,12 @@ func streamCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 			// though it arrived via the same pre-copy-remain()>0 branch in
 			// sharedStream.write/read. See streamEnd.livePending's doc.
 			e.livePending = buf.remain() > 0
-			e.setPendingEvent(func() eventTuple { return streamEvent(copyCompleted, reclaim) })
+			e.setPendingEvent(func() eventTuple { return streamEvent(false, reclaim) })
 		}
 		onCopyDone := func(result copyResult) {
 			e.livePending = false // final -- see streamEnd.livePending's doc
-			e.setPendingEvent(func() eventTuple { return streamEvent(result, func() {}) })
+			dropped := result == copyDropped
+			e.setPendingEvent(func() eventTuple { return streamEvent(dropped, func() {}) })
 		}
 
 		e.livePending = false
