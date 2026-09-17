@@ -203,18 +203,22 @@ type hostImport struct {
 	// checks asyncTarget first.
 	asyncTarget *guestAsyncTarget
 
-	// lineage marks a composition delegate that crosses a DIRECT static
-	// parent<->child instantiation boundary: the outer's own local lift
-	// handed to a child as a func instantiate-arg (outerFuncArgImport's
-	// ComponentFuncFromCanonLift arm), or the outer's own canon lower of a
-	// locally-nested child's export (computeCanonHostFunc's local-sibling
-	// lower arm). The Component Model reference will eventually permit some
-	// of these (entering_set ancestor exclusion, definitions.py:220-248),
-	// but the conformance suite pins wasmtime's current behavior --
-	// trap-on-reenter.wast's own "for now, trap on parent-to-child /
-	// child-to-parent" -- so the call-time wrappers refuse them with the
-	// spec's exact re-entrancy trap text.
-	lineage bool
+	// Re-entrancy is NOT refused here. A composition delegate that crosses a
+	// direct static parent<->child instantiation boundary -- the outer's own
+	// local lift handed to a child as a func instantiate-arg, or the outer's
+	// own canon lower of a locally-nested child's export -- used to trap with
+	// the re-entrancy trap text, because the conformance suite pinned
+	// wasmtime's then-current "for now, trap on parent-to-child /
+	// child-to-parent" (trap-on-reenter.wast). That suite is gone: the
+	// reference dropped may_enter entirely (ComponentInstance has no such
+	// field any more, 0 occurrences in definitions.py), and reentrance.wast
+	// replaced it, asserting child-to-parent, parent-to-child, mutual
+	// recursion, sibling and reentrant-destructor calls all succeed
+	// ("Reentrance still doesn't trap"). Entry is now governed only by
+	// backpressure and the instance's exclusive lock, both of which park
+	// rather than trap, so an async-typed reentrant call waits and a
+	// non-async-typed one proceeds. Both delegates are fully wired already,
+	// so there is nothing to gate.
 }
 
 // guestAsyncTarget names the sibling composition instance/export an async
@@ -668,9 +672,6 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 	}
 
 	fn := api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
-		if hi.lineage {
-			panic(fmt.Errorf("component/instance: host import %q %q: wasm trap: cannot enter component instance", iface, funcName))
-		}
 		memMod := mod
 		if memOverride != nil {
 			memMod = memOverride
@@ -725,20 +726,13 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 		// blast radius outside Instantiate.
 		var blockingCaller taskBlocker
 		if tgt := hi.asyncTarget; in != nil && tgt != nil && (tgt.be.asyncCallback || tgt.be.stackful) {
-			// t.syncImplicit (a REAL plain-sync-lift call chain, installed by
-			// invokeEntered whenever this instance's syncTaskNeeded is set --
-			// e.g. by binding a thread.* canon, design
-			// docs/component-model-async-threads-design-fable.md §8.3) always
-			// traps here, matching blockingTask's own classification
-			// uniformly: trap-if-block-and-sync's trap-if-sync-call-async1/2
-			// (wast:290/292) are plain sync lifts reaching exactly this sync-
-			// lower-into-async-lift site. activeTask == nil (no task at all --
-			// syncTaskNeeded was never set for this instance) is narrower: it
-			// only traps during the instantiation window (a start func can
-			// never block); outside instantiation a host-entry sync call with
-			// no task keeps the pre-existing drive-and-deadlock-detect
-			// behavior other suites rely on.
-			if t := in.activeTask; (t != nil && t.syncImplicit) || (in.sched.instantiating && t == nil) {
+			// A task-less caller during the instantiation window is the one
+			// unconditional trap left: a core module's start function has no
+			// thread to park and no instance loop to drive. Outside
+			// instantiation a host-entry sync call with no task keeps the
+			// pre-existing drive-and-deadlock-detect behavior other suites
+			// rely on.
+			if in.sched.instantiating && in.activeTask == nil {
 				panic(fmt.Errorf("component/instance: host import %q %q: cannot block a synchronous task before returning", iface, funcName))
 			}
 			// §4.4 (generalized by Feature 1 §1.4): when the CALLER is
@@ -752,7 +746,25 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 			// unaffected (t.blocker() nil there) and keeps using hi.fn
 			// exactly as before.
 			if t := in.activeTask; t != nil {
-				blockingCaller = t.blocker()
+				if t.syncImplicit {
+					// A plain sync lift used to trap here on sight. It must not:
+					// canon_lift's sync-caller loop traps on `not candidates`,
+					// so a non-async-typed call may block whenever another
+					// thread of its instance is ready at that moment -- and
+					// need not block at all when the callee resolves eagerly
+					// (startDelegatedFromBlocker's `if !resolved` guard).
+					// during-sync-call-may-block-if-other-ready-threads arms a
+					// ready thread and then makes exactly this call; its
+					// counterpart trap-if-block-and-sync's
+					// trap-if-sync-call-async1/2 still traps, because there the
+					// callee blocks forever with nothing else ready.
+					blockingCaller = syncBlocker{
+						in: in, t: t,
+						name: fmt.Sprintf("host import %q %q", iface, funcName),
+					}
+				} else {
+					blockingCaller = t.blocker()
+				}
 			}
 		}
 

@@ -54,6 +54,7 @@ var errStackfulAbort = errors.New("component/instance: stackful task aborted")
 // (guest frames live inside be.coreFn.CallWithStack), and Thread.resume/
 // block's lock handoff is a pair of unbuffered channels.
 type stackfulTask struct {
+	sw         switchWindow // publish-before-park window (see switchWindow)
 	t          *task
 	in         *Instance
 	be         *boundExport
@@ -252,8 +253,20 @@ func (st *stackfulTask) finishOK() {
 // handoff replaced by the baton channels. MUST be called with the baton held
 // (i.e. from a builtin invoked by this task's guest code, ON the goroutine).
 func (st *stackfulTask) block(ready func() bool) (cancelled bool) {
-	if st.t.deliverPendingCancel() { // wait_until's prologue (~404)
-		return true
+	// No cancellation delivery here. The reference's Thread.wait_until (~353)
+	// does not deliver: delivery happens at exactly four sites, all of them in
+	// the callback dispatch loop or async entry -- the loop top, its YIELD and
+	// WAIT dispositions (WaitableSet.wait_from_callback, ~803), and
+	// Task.enter_implicit_thread's backpressure wait (~441). An older revision
+	// delivered in wait_until's prologue, which is where this used to be; the
+	// re-vendor to 07afb8145b80 dropped it, and cancel-delivery.wast asserts
+	// the difference directly ("a pending cancellation is not reported by the
+	// thread.yield and waitable-set.poll built-ins ... it survives them and is
+	// delivered at the event loop"). Every builtin that parks through here --
+	// thread.yield, thread.suspend, the four switch builtins, waitable-set.wait
+	// -- must leave a PENDING_CANCEL pending.
+	if st.sw.closeWindow() { // already resumed inside the window: do not park
+		return false
 	}
 	st.park, st.parkReady = sparkBlock, ready
 	st.in.suspendRun()       // activeTask=nil, mayEnter=true; exclusive KEPT
@@ -268,27 +281,62 @@ func (st *stackfulTask) block(ready func() bool) (cancelled bool) {
 	return mode == resumeCancelled
 }
 
+func (st *stackfulTask) instance() *Instance { return st.in }
+
 // ready mirrors guestTask.ready (guest_task.go ~69) for the two park kinds.
 // No !exclusiveHeld conjunct at sparkBlock: a sync-opts stackful task HOLDS
 // its instance's exclusive across its own suspension (reference: wait_until
 // never releases exclusive_thread; only the callback loop does, ~2177), so
 // gating on it would deadlock against ourselves. Cross-task exclusion is
 // per-instance and handled by exclusiveOwner (task.go/instance.go).
+func (st *stackfulTask) window() *switchWindow { return &st.sw }
+
 func (st *stackfulTask) ready() bool {
+	if st.sw.open {
+		return st.sw.publishedReady()
+	}
 	switch st.park {
 	case sparkEntry:
 		return !st.in.hasBackpressure()
 	case sparkBlock:
-		return st.cancelWake || st.t.cancelDeliverable() || st.parkReady()
+		// See guestTask.ready's parkBlocked arm for why there is no
+		// cancellation disjunct here. A nil parkReady is the reference's
+		// ready_func of None: SUSPENDED, so never ready (see suspendedState).
+		return st.cancelWake || (st.parkReady != nil && st.parkReady())
 	}
 	return false
 }
+
+// suspendedState/startWaiting/stopWaiting make a stackful task's implicit
+// thread a first-class Thread for the switch built-ins (§4.5): the reference
+// draws no distinction between a task's implicit thread and a spawned one, so
+// thread.{resume-later,suspend-then-resume,yield-then-resume,*-then-promote}
+// may target either. SUSPENDED is "parked mid-call with ready_func None" --
+// exactly what a thread.suspend leaves behind, since it installs no predicate
+// (Thread.suspend is a bare block(), definitions.py ~347) -- which is what
+// during-sync-scheduling-candidates and reentrance's outer-sync/inner-async
+// cases resume.
+func (st *stackfulTask) suspendedState() bool {
+	if st.sw.open {
+		return st.sw.publishedSuspended()
+	}
+	return st.park == sparkBlock && st.parkReady == nil
+}
+
+// startWaiting is Thread.start_waiting(ready_func = lambda: True), the body of
+// resume_later; stopWaiting is Thread.stop_waiting, which clears ready_func and
+// so makes the thread SUSPENDED again.
+func (st *stackfulTask) startWaiting() { st.parkReady = alwaysReady }
+func (st *stackfulTask) stopWaiting()  { st.parkReady = nil }
 
 // resumeReady is called only with st in sched.parked (goroutine at
 // <-resumeCh, or not yet spawned for sparkEntry), by sched.step/pumpSnapshot
 // or task.requestCancellation -- on whatever goroutine currently holds the
 // baton.
 func (st *stackfulTask) resumeReady() error {
+	if st.sw.catchResume() {
+		return nil
+	}
 	switch st.park {
 	case sparkEntry:
 		st.in.numWaitingToEnter--

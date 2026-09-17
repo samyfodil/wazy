@@ -52,6 +52,10 @@ type sched struct {
 type parkedTask interface {
 	ready() bool
 	resumeReady() error
+	// instance is which component instance this park belongs to, so a sync
+	// call's drive can restrict its candidates to that instance's own threads
+	// -- see stepScoped.
+	instance() *Instance
 }
 
 // schedThunk is one runq entry: exactly one of fe/fv is set. Storing both as
@@ -103,7 +107,21 @@ func (s *sched) unpark(pt parkedTask) {
 // step pops and runs one runq thunk, or -- if the queue is empty -- resumes
 // the first ready parked task. progressed=false means neither had any
 // work to do.
-func (s *sched) step() (progressed bool, err error) {
+func (s *sched) step() (progressed bool, err error) { return s.stepScoped(nil) }
+
+// stepScoped is step restricted to one instance's parked threads.
+//
+// canon_lift's sync-caller loop draws its candidates from `inst.threads`, not
+// from the whole store (definitions.py ~2119) -- while a non-async-typed export
+// call is in progress, the runtime resumes threads of THAT instance only, and
+// ready threads of sibling instances wait for the top-level event loop
+// (during-sync-call-no-sibling-resume.wast). Passing only == nil is the
+// top-level loop: every instance is a candidate.
+//
+// runq thunks are not threads: they are host-side completions (a deferred async
+// import resolving), which in the reference happen outside this loop entirely,
+// so they are never scoped out.
+func (s *sched) stepScoped(only *Instance) (progressed bool, err error) {
 	if len(s.runq) > 0 {
 		th := s.runq[0]
 		// Shift the remaining entries down in place (not s.runq[1:]) so the
@@ -121,6 +139,9 @@ func (s *sched) step() (progressed bool, err error) {
 		return true, err
 	}
 	for _, pt := range s.parked {
+		if only != nil && pt.instance() != only {
+			continue
+		}
 		if pt.ready() {
 			s.pumping = true
 			err = pt.resumeReady()
@@ -135,9 +156,12 @@ func (s *sched) step() (progressed bool, err error) {
 // still false, and no parked task ready, is a guaranteed-permanent deadlock
 // (nothing else can ever run to make it true) => errAsyncDeadlock; callers
 // wrap it with export/waitable-set context.
-func (s *sched) drive(pred func() bool) error {
+func (s *sched) drive(pred func() bool) error { return s.driveScoped(nil, pred) }
+
+// driveScoped is drive with stepScoped's instance restriction.
+func (s *sched) driveScoped(only *Instance, pred func() bool) error {
 	for !pred() {
-		progressed, err := s.step()
+		progressed, err := s.stepScoped(only)
 		if err != nil {
 			return err
 		}
@@ -232,6 +256,35 @@ func (s *sched) pumpSnapshot() error {
 		}
 	}
 	return nil
+}
+
+// resumeOneReady resumes the FIRST ready parked task of only (every instance
+// when only is nil) and reports whether it found one. It is
+// Task.request_cancellation's body under DETERMINISTIC_PROFILE
+// (definitions.py ~477-484):
+//
+//	while self.state != Task.State.RESOLVED:
+//	  candidates = { t for t in self.inst.threads if t.ready() }
+//	  if candidates: random.choice(list(candidates)).resume()
+//	  if not candidates or DETERMINISTIC_PROFILE or ...: break
+//
+// -- one resume, from the whole INSTANCE's ready threads and not just the
+// cancelled task's (cancel-instance-wide-resume.wast turns that distinction
+// into an assertion), then out of the loop. Unlike step it never runs a runq
+// thunk: the reference resumes a thread here, nothing else.
+func (s *sched) resumeOneReady(only *Instance) (resumed bool, err error) {
+	for _, pt := range s.parked {
+		if only != nil && pt.instance() != only {
+			continue
+		}
+		if pt.ready() {
+			s.pumping = true
+			err = pt.resumeReady()
+			s.pumping = false
+			return true, err
+		}
+	}
+	return false, nil
 }
 
 // isParked reports whether pt is currently in s.parked.

@@ -176,15 +176,57 @@ type implicitThreadMarker struct {
 }
 
 // implicitThreadMarker satisfies switchableThread so inst.threads.get(i) can
-// return it, exactly as the reference's thread table does. It is never
-// suspended: a task's implicit thread is either running, or parked as a
-// syncImplicitThread (which replaces the marker in the slot).
-func (implicitThreadMarker) suspendedState() bool { return false }
-func (implicitThreadMarker) ready() bool          { return false }
-func (implicitThreadMarker) startWaiting()        {}
-func (implicitThreadMarker) stopWaiting()         {}
-func (implicitThreadMarker) resumeReady() error {
-	return fmt.Errorf("component/instance: cannot resume thread which is not suspended")
+// return it, exactly as the reference's thread table does.
+//
+// The reference makes no distinction between a task's implicit thread and a
+// spawned one -- Task.implicit_thread is an ordinary Thread in inst.threads --
+// so every switch built-in may target it. For an async task the implicit
+// thread's suspension state IS the task's park state, which lives on the
+// guestTask/stackfulTask; sched() resolves it, and the marker forwards. A
+// SYNC task has neither: it parks as a syncImplicitThread, which replaces the
+// marker in the slot for the duration (see sync_thread.go), so sched() is nil
+// and these report "running" -- which it is, since the sync call's frames are
+// on the stack below us.
+func (m implicitThreadMarker) sched() switchableThread {
+	switch {
+	case m.t == nil:
+		return nil
+	case m.t.st != nil:
+		return m.t.st
+	case m.t.gt != nil:
+		return m.t.gt
+	}
+	return nil
+}
+
+func (m implicitThreadMarker) suspendedState() bool {
+	s := m.sched()
+	return s != nil && s.suspendedState()
+}
+
+func (m implicitThreadMarker) ready() bool {
+	s := m.sched()
+	return s != nil && s.ready()
+}
+
+func (m implicitThreadMarker) startWaiting() {
+	if s := m.sched(); s != nil {
+		s.startWaiting()
+	}
+}
+
+func (m implicitThreadMarker) stopWaiting() {
+	if s := m.sched(); s != nil {
+		s.stopWaiting()
+	}
+}
+
+func (m implicitThreadMarker) resumeReady() error {
+	s := m.sched()
+	if s == nil {
+		return fmt.Errorf("component/instance: cannot resume thread which is not suspended")
+	}
+	return s.resumeReady()
 }
 
 // add allocates a fresh (or free-list-recycled) slot for v, returning its
@@ -270,6 +312,7 @@ type guestThread struct {
 	in  *Instance // == t.inst
 	ctx context.Context
 
+	sw    switchWindow // publish-before-park window (see switchWindow)
 	index uint32       // slot in in.threads (reference Thread.index; :509)
 	fn    api.Function // the indirect-table func, resolved AT new-indirect time (:2692)
 	arg   uint64       // the `c` argument (:2696), raw bits (valid for both i32 and i64)
@@ -296,12 +339,19 @@ type guestThread struct {
 // ready predicate, resumable only by an explicit thread.yield-then-resume
 // switch or a cancellable cancel delivery -- never by the scheduler's own
 // ready() scan (see ready's doc below).
-func (th *guestThread) suspendedState() bool { return th.parked && th.parkReady == nil }
+func (th *guestThread) suspendedState() bool {
+	if th.sw.open {
+		return th.sw.publishedSuspended()
+	}
+	return th.parked && th.parkReady == nil
+}
 
 // startWaiting/stopWaiting are the reference's Thread.start_waiting and
 // stop_waiting: moving between SUSPENDED and WAITING without running anything.
 func (th *guestThread) startWaiting() { th.parkReady = alwaysReady }
 func (th *guestThread) stopWaiting()  { th.parkReady = nil }
+
+func (th *guestThread) instance() *Instance { return th.in }
 
 // ready mirrors the reference Thread.ready() (:340) plus wazy's cancel-wake
 // convention. Deliberately scoped tighter than stackfulTask.ready's sparkBlock
@@ -313,7 +363,12 @@ func (th *guestThread) stopWaiting()  { th.parkReady = nil }
 // `waiting() and ready_func()`, and cancellation is instead a disjunct inside
 // the individual built-in's predicate (wait_from_callback) or observed at a
 // suspension prologue.
+func (th *guestThread) window() *switchWindow { return &th.sw }
+
 func (th *guestThread) ready() bool {
+	if th.sw.open {
+		return th.sw.publishedReady()
+	}
 	return th.parkReady != nil &&
 		(th.cancelWake || th.parkReady())
 }
@@ -324,6 +379,9 @@ func (th *guestThread) ready() bool {
 // resume (a never-resumed thread costs nothing until now), then hands the
 // baton.
 func (th *guestThread) resumeReady() error {
+	if th.sw.catchResume() { // resumed inside its publish-before-park window
+		return nil
+	}
 	th.in.sched.unpark(th)
 	th.parked, th.parkReady = false, nil
 	mode := resumeNormal
@@ -375,8 +433,20 @@ func (th *guestThread) main() {
 // before parking (so the resumed baton holder sees the implicit thread
 // again), restored on our own resume.
 func (th *guestThread) block(ready func() bool) (cancelled bool) {
-	if th.t.deliverPendingCancel() { // wait_until's prologue (~404)
-		return true
+	// No cancellation delivery here. The reference's Thread.wait_until (~353)
+	// does not deliver: delivery happens at exactly four sites, all of them in
+	// the callback dispatch loop or async entry -- the loop top, its YIELD and
+	// WAIT dispositions (WaitableSet.wait_from_callback, ~803), and
+	// Task.enter_implicit_thread's backpressure wait (~441). An older revision
+	// delivered in wait_until's prologue, which is where this used to be; the
+	// re-vendor to 07afb8145b80 dropped it, and cancel-delivery.wast asserts
+	// the difference directly ("a pending cancellation is not reported by the
+	// thread.yield and waitable-set.poll built-ins ... it survives them and is
+	// delivered at the event loop"). Every builtin that parks through here --
+	// thread.yield, thread.suspend, the four switch builtins, waitable-set.wait
+	// -- must leave a PENDING_CANCEL pending.
+	if th.sw.closeWindow() { // already resumed before we got here: do not park
+		return false
 	}
 	th.parked, th.parkReady = true, ready
 	th.in.activeThread = nil
@@ -413,7 +483,7 @@ func (th *guestThread) run() error {
 		th.in.poisoned = true // guest code actually ran and trapped -- same rule as stackfulTask.run
 		return fmt.Errorf("component/instance: thread %d: %w", th.index, err)
 	}
-	if th.t.liveThreads == 0 && th.t.state != taskResolved {
+	if th.t.liveThreads == 0 && !th.t.implicitThreadAlive() && th.t.state != taskResolved {
 		return fmt.Errorf("component/instance: thread %d: last thread of the task exited before the task was resolved", th.index)
 	}
 	return nil
@@ -494,22 +564,10 @@ func threadSuspendHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 		// A sync task's implicit thread suspends too -- see sync_thread.go. Its
 		// guest frames are held on this goroutine, so it parks and drives the
 		// scheduler nested rather than switching away.
-		if t := in.activeTask; t != nil && t.syncImplicit {
-			suspendSyncThread(in, t, "thread.suspend")
-			stack[0] = 0
-			return
-		}
-		_, blk := blockingTask(in, "thread.suspend")
-		if blk == nil {
-			// Unpromoted callback ctx: a frame-held caller cannot suspend
-			// forever without deadlocking its own driver. Unexercised by any
-			// suite (design §4.2, §11); fail loud rather than hang.
-			panic(fmt.Errorf("component/instance: thread.suspend: not supported from an unpromoted callback task"))
-		}
 		// canon_thread_suspend is `thread.suspend(); return [0]` -- it does not
 		// report cancellation (component-model#716 took the immediate, and the
 		// return value with it).
-		blk.block(neverReady)
+		suspendSelf(in, "thread.suspend", nil)
 		stack[0] = 0
 	})
 	return hostFuncDef{fn: fn, params: nil, results: []api.ValueType{api.ValueTypeI32}}
@@ -625,25 +683,14 @@ func threadYieldThenResumeHostFunc(in *Instance, canon binary.Canon) hostFuncDef
 		i := api.DecodeU32(stack[0])
 		other := resolveOtherThread(in, "thread.yield-then-resume", i)
 		requireSuspended(other, "thread.yield-then-resume", i)
-		_, blk := blockingTask(in, "thread.yield-then-resume") // sync task -> the sync-block trap
-		if blk == nil {
-			panic(fmt.Errorf("component/instance: thread.yield-then-resume: not supported from an unpromoted callback task"))
-		}
 		// Direct switch: the CURRENT goroutine (which holds the baton) acts
 		// as the temporary driver for `other` -- resumes it and blocks in the
 		// handoff until other parks or finishes. Single-runnable holds: while
 		// other runs, we are blocked in <-other.yieldCh executing nothing.
-		if err := other.resumeReady(); err != nil {
-			// other's thread func trapped while we were suspended-in-spirit:
-			// surface it here, exactly as a failing sched thunk would surface
-			// on the driver (other.run already set in.poisoned for a real
-			// guest trap).
-			panic(err)
-		}
-		// Now park SELF as ready-waiting (the "yield" half): the driver
-		// resumes us on its next step, behind any thunks/ready tasks queued
-		// meanwhile -- matching the reference's waiting-list re-entry.
-		blk.block(alwaysReady)
+		// Resume other, then park SELF as ready-waiting (the "yield" half): the
+		// driver picks us up on its next step, behind anything already ready --
+		// the reference's waiting-list re-entry.
+		switchToThread(in, other, "thread.yield-then-resume", alwaysReady)
 		stack[0] = 0
 	})
 	return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32}, results: []api.ValueType{api.ValueTypeI32}}
@@ -707,11 +754,7 @@ func threadSuspendThenResumeHostFunc(in *Instance) hostFuncDef {
 		i := api.DecodeU32(stack[0])
 		other := resolveOtherThread(in, "thread.suspend-then-resume", i)
 		requireSuspended(other, "thread.suspend-then-resume", i)
-		_, blk := blockingTask(in, "thread.suspend-then-resume")
-		if blk == nil {
-			panic(fmt.Errorf("component/instance: thread.suspend-then-resume: not supported from an unpromoted callback task"))
-		}
-		switchToThread(in, other, blk, neverReady)
+		switchToThread(in, other, "thread.suspend-then-resume", nil)
 		stack[0] = 0
 	})
 	return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32}, results: []api.ValueType{api.ValueTypeI32}}
@@ -726,7 +769,7 @@ func threadSuspendThenResumeHostFunc(in *Instance) hostFuncDef {
 // suspended -- a ready (waiting) target is the interesting case here.
 func threadSuspendThenPromoteHostFunc(in *Instance) hostFuncDef {
 	in.syncTaskNeeded, in.mayBlockSync = true, true
-	return promoteHostFunc(in, "thread.suspend-then-promote", neverReady)
+	return promoteHostFunc(in, "thread.suspend-then-promote", nil)
 }
 
 // threadYieldThenPromoteHostFunc backs thread.yield-then-promote
@@ -749,15 +792,11 @@ func promoteHostFunc(in *Instance, name string, selfReady func() bool) hostFuncD
 			panic(fmt.Errorf("component/instance: %s: cannot resume thread which is not suspended", name))
 		}
 		other := resolveOtherThread(in, name, i)
-		_, blk := blockingTask(in, name)
-		if blk == nil {
-			panic(fmt.Errorf("component/instance: %s: not supported from an unpromoted callback task", name))
-		}
 		if other.ready() {
 			other.stopWaiting() // so the switch sees it suspended
-			switchToThread(in, other, blk, selfReady)
+			switchToThread(in, other, name, selfReady)
 		} else {
-			blk.block(selfReady) // plain suspend / yield
+			suspendSelf(in, name, selfReady) // plain suspend / yield
 		}
 		stack[0] = 0
 	})
@@ -767,15 +806,27 @@ func promoteHostFunc(in *Instance, name string, selfReady func() bool) hostFuncD
 // switchToThread is the reference's switch_to: hand the baton to other, then
 // park self with the given readiness. Shared by suspend-then-resume,
 // yield-then-resume and both promotes.
-func switchToThread(in *Instance, other switchableThread, blk taskBlocker, selfReady func() bool) {
+func switchToThread(in *Instance, other switchableThread, name string, selfReady func() bool) {
+	// Resolved BEFORE the switch: resuming other runs its code, which moves
+	// in.activeTask, and the caller must still park as itself.
+	park, win := captureSuspender(in, name)
+	// PUBLISHED before the switch, because the reference's suspend() captures
+	// the switcher's continuation before control moves: `other` must observe us
+	// as already suspended, and may switch straight back to us (see
+	// switchWindow). The park below closes the window.
+	win.publish(selfReady)
 	if err := other.resumeReady(); err != nil {
 		panic(err)
 	}
-	blk.block(selfReady)
+	park(selfReady)
 }
 
 func alwaysReady() bool { return true }
-func neverReady() bool  { return false }
+
+// neverReady is retained for tests that want an explicitly-never-ready park.
+// Production "suspend" sites pass a nil predicate instead, which is the
+// reference's ready_func of None and therefore SUSPENDED rather than WAITING.
+func neverReady() bool { return false }
 
 // currentThreadIndex is current_thread().index: a spawned thread carries its
 // own, and an implicit thread resolves through its task's slot the same lazy

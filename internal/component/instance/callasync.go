@@ -121,7 +121,7 @@ func (in *Instance) CallAsync(ctx context.Context, export string, args ...abi.Va
 	if !be.asyncCallback {
 		return nil, fmt.Errorf("component/instance: CallAsync %q: only async (callback) lifts are supported by this milestone", export)
 	}
-	if in.poisoned || !in.mayEnter {
+	if in.poisoned {
 		return nil, fmt.Errorf("component/instance: export %q: cannot enter component instance", export)
 	}
 	if len(args) != len(be.fd.Params) {

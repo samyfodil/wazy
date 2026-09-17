@@ -114,6 +114,38 @@ type task struct {
 	// thread's run() checks it; see thread.go's doc). Always 0 for a task
 	// that never spawns a thread.
 	liveThreads int
+
+	// syncThread is a sync (non-async-typed) task's implicit thread, created on
+	// first use and kept for the task's lifetime so a switch built-in can
+	// publish a suspension on it before control moves (see switchWindow). Nil
+	// for an async task, whose implicit thread IS its guestTask/stackfulTask.
+	syncThread *syncImplicitThread
+}
+
+// implicitThreadAlive reports whether this task's implicit thread is still in
+// the reference's Task.threads: register_thread runs in enter_implicit_thread
+// and the entry is removed by exit_implicit_thread, so the implicit thread is a
+// member for as long as the task's own body has not finished
+// (definitions.py ~431-461).
+//
+// liveThreads counts only SPAWNED threads, so the last-thread-unresolved trap
+// (unregister_thread's trap_if(state != RESOLVED), ~465-468) must consult this
+// too: a spawned thread exiting while the task's own body is merely PARKED is
+// not the last thread of the task. trap-if-block-and-sync's
+// yield-then-resume-is-fine and during-sync-scheduling-candidates both hinge on
+// it -- their spawned thread is created precisely to run and exit while the
+// implicit thread waits to be resumed.
+func (t *task) implicitThreadAlive() bool {
+	switch {
+	case t.st != nil:
+		return !t.st.done
+	case t.gt != nil:
+		return !t.gt.done
+	}
+	// A sync task has neither: its implicit thread is the goroutine whose frames
+	// the whole call is running on, so it is alive for the call's duration --
+	// which is exactly as long as any thread it spawned can be running.
+	return true
 }
 
 // taskBlocker is the mid-call suspension capability (Feature 1,
@@ -124,6 +156,11 @@ type task struct {
 // directly, so both suspension flavors share one call site.
 type taskBlocker interface {
 	block(ready func() bool) (cancelled bool)
+	// window is this blocker's publish-before-park window (see switchWindow):
+	// the switch built-ins open it so the thread they switch to observes the
+	// switcher as already suspended, and latch a resume that arrives before the
+	// park actually happens.
+	window() *switchWindow
 }
 
 // blocker returns t's live mid-call suspension primitive, or nil (then the
@@ -206,88 +243,64 @@ func (t *task) cancelResolve() error {
 func (t *task) cancelUnentered() error { return t.cancelResolve() }
 
 // requestCancellation transliterates Task.request_cancellation
-// (definitions.py ~527-543): called by canon_subtask_cancel via
+// (definitions.py ~472-485): called by canon_subtask_cancel via
 // subtask.onCancel (the only Phase-3 caller), and it is exactly the func a
 // future public CallAsync's cancel handle would call.
 //
-// Two collapse notes (docs/component-model-async-phase3-design.md §2.1):
+//	def request_cancellation(self):
+//	  if self.state == Task.State.INITIAL:
+//	    self.state = Task.State.PENDING_CANCEL
+//	    self.implicit_thread.resume()
+//	    assert(self.state == Task.State.RESOLVED)
+//	  else:
+//	    assert(self.state == Task.State.STARTED)
+//	    self.state = Task.State.PENDING_CANCEL
+//	    while self.state != Task.State.RESOLVED:
+//	      candidates = { t for t in self.inst.threads if t.ready() }
+//	      if candidates:
+//	        random.choice(list(candidates)).resume()
+//	      if not candidates or DETERMINISTIC_PROFILE or random.randint(0,1):
+//	        break
 //
-//   - The reference excludes the implicit thread from candidates when
-//     another thread holds the instance's exclusive (~535-536); with exactly
-//     one thread per task and exclusiveHeld false at every park, the
-//     "!t.inst.exclusiveHeld" conjunct below is the whole surviving check --
-//     it can only be true here if a DIFFERENT task of the same instance is
-//     running, in which case the parked target isn't resumable and PENDING_
-//     CANCEL is correct, exactly as the reference would take.
-//   - Deviation (blocking-builtin park): a task suspended inside the
-//     blocking waitable-set.wait builtin has live Go frames beneath it, so
-//     it cannot be resumed synchronously from here -- its drive predicate
-//     (async_builtins.go) includes cancelDeliverable(), so PENDING_CANCEL is
-//     set and it wakes at the drive loop's next check. Parked CALLBACK tasks
-//     (the only shape wit-bindgen/the oracle's deterministic scenarios
-//     drive) resume inline here, matching the reference exactly.
+// Two things this revision made simpler than the one wazy was written
+// against, and both are asserted by suites:
 //
-// The st arms generalize the two above for a stackfulTask
-// (docs/component-model-async-stackful-design.md §7): sparkEntry's landing
-// is identical (cancelUnentered via cancelWake+resumeReady); the sparkBlock
-// arm's readiness conjunct widens from "!exclusiveHeld" to "not held by a
-// DIFFERENT task" (heldByOther) -- the reference's "exclusive_thread not in
-// {None, implicit_thread}" (~535): a stackful task parked while holding ITS
-// OWN exclusive (needs_exclusive, held across its own suspensions -- task.go
-// enterRun/suspendRun's doc) is still cancellable in place; only a
-// DIFFERENT task's ownership blocks the synchronous resume.
+//   - The candidate set is the whole INSTANCE's ready threads, not the
+//     cancelled task's. cancel-instance-wide-resume.wast arranges for the only
+//     ready thread in the callee's instance to belong to a DIFFERENT task and
+//     requires it to run.
+//   - There is no "resume with Cancelled.TRUE" any more. A resumed thread
+//     learns of the cancellation through the ordinary delivery sites (the
+//     callback loop and wait_from_callback), so readiness is what selects the
+//     thread and nothing bypasses a ready_func. The only wake that still
+//     carries a flag is the INITIAL one below, which resumes a thread that has
+//     never run rather than one that is waiting on a predicate.
+//
+// DETERMINISTIC_PROFILE takes the `break` on the first iteration, so this is
+// exactly one resume attempt: if no thread of the instance is ready (say the
+// exclusive lock is held, or the task is blocked mid-core-call), the request
+// stays PENDING_CANCEL and subtask.cancel reports BLOCKED, with delivery
+// happening whenever the instance next drives a ready thread.
 func (t *task) requestCancellation() error {
 	switch t.state {
-	case taskInitial: // parked at entry, on_start never ran (~529-531)
+	case taskInitial: // parked at entry, on_start never ran (~473-476)
+		// The reference resumes the implicit thread unconditionally here (it is
+		// parked in enter_implicit_thread's backpressure wait, whose post-check
+		// delivers the cancellation and resolves the task), so this is the one
+		// resume that does not go through a readiness scan. cancelWake routes
+		// resumeReady's parkEntry arm to cancelUnentered, which is that
+		// post-check's `deliver_pending_cancel() -> self.cancel()`.
 		t.state = taskCancelDelivered
 		if t.st != nil {
 			t.st.cancelWake = true
-			return t.st.resumeReady() // -> cancelUnentered -> on_resolve(nil,true)
+			return t.st.resumeReady()
 		}
 		t.gt.cancelWake = true
-		return t.gt.resumeReady() // -> cancelUnentered -> on_resolve(nil,true)
+		return t.gt.resumeReady()
 	case taskStarted:
-		if t.st != nil {
-			heldByOther := t.inst.exclusiveHeld && t.inst.exclusiveOwner != t
-			if t.st.park == sparkBlock && !heldByOther && t.inst.mayEnter {
-				t.state = taskCancelDelivered
-				t.st.cancelWake = true
-				return t.st.resumeReady() // baton -> goroutine with resumeCancelled
-			}
-			t.state = taskPendingCancel
-			return nil
-		}
-		if t.gt.park == parkBlocked {
-			// Feature 1 (docs/component-model-async-final3-fable.md §1.6):
-			// a parkBlocked resume is a BATON HANDOFF (the segment goroutine
-			// is alive at <-seg.resumeCh), exactly like the t.st arm above
-			// -- it must NOT be resumed the way a frame-free WAIT/YIELD is
-			// (those just re-run inline via resumeReady's own dispatch).
-			// Mirrors the t.st arm's heldByOther/mayEnter gate.
-			heldByOther := t.inst.exclusiveHeld && t.inst.exclusiveOwner != t
-			if !heldByOther && t.inst.mayEnter {
-				t.state = taskCancelDelivered
-				t.gt.cancelWake = true
-				return t.gt.resumeReady() // -> gt.seg.handoff(resumeCancelled)
-			}
-			t.state = taskPendingCancel
-			return nil
-		}
-		if t.gt.park != parkNone && !t.inst.exclusiveHeld && t.inst.mayEnter {
-			t.state = taskCancelDelivered
-			// cancelWake forces an unconditional TASK_CANCELLED delivery on
-			// this resume (reference: thread.resume(Cancelled.TRUE) hands
-			// wait_until its return value directly, bypassing the normal
-			// ready_and_has_event predicate entirely -- ~538-541); without
-			// it resumeReady's parkWait/parkYield arms would fall through to
-			// deliverPendingCancel, which only fires from a PENDING_CANCEL
-			// state and would wrongly try to read a real (nonexistent)
-			// pending event here.
-			t.gt.cancelWake = true
-			return t.gt.resumeReady()
-		}
-		t.state = taskPendingCancel // (~543)
-		return nil
+		t.state = taskPendingCancel
+		_, err := t.inst.sched.resumeOneReady(t.inst)
+		return err
 	default:
 		panic("BUG: request_cancellation on a resolved task")
 	}

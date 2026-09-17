@@ -55,6 +55,13 @@ type guestTask struct {
 	park       guestParkKind
 	wset       *waitableSet // parkWait only
 	cancelWake bool         // request_cancellation resumed us with Cancelled.TRUE (§2.2)
+	// suspendedOverride records a Thread.stop_waiting on this task's implicit
+	// thread: its ready_func is cleared, so it is SUSPENDED rather than WAITING
+	// even though its park kind would otherwise supply a predicate. See
+	// suspendedState.
+	suspendedOverride bool
+	// sw is the publish-before-park window (see switchWindow).
+	sw switchWindow
 
 	// onStart, when non-nil, is the reference OnStart: produce lifted args
 	// (lazily!) -- used by startAsyncExportTask, where args must be lifted
@@ -163,8 +170,20 @@ func (s *guestSegment) handoff(mode resumeMode) error {
 // wait_until never releases it -- only the callback loop's frame-free WAIT
 // does, via leaveRun in advance).
 func (gt *guestTask) block(ready func() bool) (cancelled bool) {
-	if gt.t.deliverPendingCancel() {
-		return true
+	// No cancellation delivery here. The reference's Thread.wait_until (~353)
+	// does not deliver: delivery happens at exactly four sites, all of them in
+	// the callback dispatch loop or async entry -- the loop top, its YIELD and
+	// WAIT dispositions (WaitableSet.wait_from_callback, ~803), and
+	// Task.enter_implicit_thread's backpressure wait (~441). An older revision
+	// delivered in wait_until's prologue, which is where this used to be; the
+	// re-vendor to 07afb8145b80 dropped it, and cancel-delivery.wast asserts
+	// the difference directly ("a pending cancellation is not reported by the
+	// thread.yield and waitable-set.poll built-ins ... it survives them and is
+	// delivered at the event loop"). Every builtin that parks through here --
+	// thread.yield, thread.suspend, the four switch builtins, waitable-set.wait
+	// -- must leave a PENDING_CANCEL pending.
+	if gt.sw.closeWindow() { // already resumed inside the window: do not park
+		return false
 	}
 	seg := gt.seg
 	gt.park = parkBlocked
@@ -182,10 +201,20 @@ func (gt *guestTask) block(ready func() bool) (cancelled bool) {
 	return mode == resumeCancelled
 }
 
+func (gt *guestTask) instance() *Instance { return gt.in }
+
 // ready mirrors the reference's per-park wait_for_event_and/wait_until
 // predicate (docs/component-model-async-phase3-design.md §1.1): whether
 // sched.step may resume this parked task right now.
+func (gt *guestTask) window() *switchWindow { return &gt.sw }
+
 func (gt *guestTask) ready() bool {
+	if gt.sw.open {
+		return gt.sw.publishedReady()
+	}
+	if gt.suspendedOverride { // ready_func cleared by stop_waiting: never ready
+		return false
+	}
 	// held mirrors the reference's "exclusive_thread not in {None, self}"
 	// (docs/component-model-async-stackful-design.md §5): exclusiveOwner
 	// distinguishes "this instance's exclusive is free" from "held by a
@@ -216,9 +245,56 @@ func (gt *guestTask) ready() bool {
 		// exclusiveHeld/exclusiveOwner==gt.t), so held would always
 		// evaluate false here anyway -- gating on it would only risk a
 		// self-deadlock if that invariant ever shifted.
-		return gt.cancelWake || gt.t.cancelDeliverable() || gt.seg.parkReady()
+		//
+		// And no cancellation disjunct: Thread.wait_until's ready_func is the
+		// bare predicate, so a task blocked mid-core-call is NOT woken by a
+		// pending cancellation -- wait_from_callback's ready() is the only one
+		// in the reference that mentions cancellation. cancel-delivery.wast's
+		// $deferred asserts exactly this ("while a task is blocked in its
+		// initial core function it cannot be cancelled at all, so those
+		// cancellations deterministically report BLOCKED"): it blocks in a
+		// synchronous future.read, and the request must stay pending until the
+		// caller writes the future and the callback loop delivers it.
+		return gt.cancelWake || (gt.seg.parkReady != nil && gt.seg.parkReady())
 	}
 	return false
+}
+
+// suspendedState/startWaiting/stopWaiting make a callback task's implicit
+// thread a first-class Thread for the switch built-ins, the same way
+// stackfulTask's do (see the doc there).
+//
+// Two ways to be SUSPENDED. A thread.suspend taken mid-core-call parks at
+// parkBlocked installing no predicate, so seg.parkReady is nil -- the reference's
+// ready_func of None (during-sync-scheduling-candidates' "implicit thread of an
+// async callback task blocked not in the event loop (suspended mid-frame, still
+// holding the instance's exclusive lock)"). A stop_waiting on a thread parked in
+// its event loop instead clears the ready_func of a park whose predicate is
+// derived from the park kind rather than stored, and suspendedOverride records
+// that -- which is what thread.{yield,suspend}-then-promote does to a ready
+// event-loop thread before switching to it.
+func (gt *guestTask) suspendedState() bool {
+	if gt.sw.open {
+		return gt.sw.publishedSuspended()
+	}
+	if gt.park == parkNone {
+		return false
+	}
+	return gt.suspendedOverride || (gt.park == parkBlocked && gt.seg != nil && gt.seg.parkReady == nil)
+}
+
+func (gt *guestTask) startWaiting() {
+	gt.suspendedOverride = false
+	if gt.park == parkBlocked && gt.seg != nil && gt.seg.parkReady == nil {
+		gt.seg.parkReady = alwaysReady // Thread.start_waiting(lambda: True)
+	}
+}
+
+func (gt *guestTask) stopWaiting() {
+	gt.suspendedOverride = true
+	if gt.park == parkBlocked && gt.seg != nil {
+		gt.seg.parkReady = nil
+	}
 }
 
 // start is canon_lift's thread_func front half (~2145-2173): attempt entry;
@@ -322,6 +398,10 @@ func (gt *guestTask) firstRunBody() error {
 // task.requestCancellation's inline resume) when ready() is true (or a
 // cancel forces an out-of-band wake via cancelWake).
 func (gt *guestTask) resumeReady() error {
+	if gt.sw.catchResume() {
+		return nil
+	}
+	gt.suspendedOverride = false // running again: ready_func no longer applies
 	switch gt.park {
 	case parkEntry:
 		gt.in.numWaitingToEnter--

@@ -85,21 +85,18 @@ func TestInvokeAsyncCallback_ZeroCoreResults(t *testing.T) {
 	requireErrContains(t, err, "must return a single packed i32")
 }
 
-func TestInvokeAsyncCallback_NotReenterable(t *testing.T) {
+// TestInvokeAsyncCallback_PoisonedRefused pins what still refuses entry.
+//
+// It replaces a test asserting that a non-reenterable instance traps. The
+// current specification has no may_enter: entry waits on backpressure and, for a
+// task that needs the exclusive lock, on that lock -- a re-entering task parks
+// rather than trapping. Poisoning is the part that remains, and is sticky.
+func TestInvokeAsyncCallback_PoisonedRefused(t *testing.T) {
 	inst, be := firstLightAsyncExport(t)
-	inst.mayEnter = false
+	inst.poisoned = true
 	_, err := inst.invokeAsyncCallback(context.Background(), be, "run-async", nil)
 	requireErrContains(t, err, "cannot enter component instance")
 }
-
-// TestInvokeAsyncCallback_BackpressureParksThenDeadlocks pins Phase 3's
-// forced change: entry no longer traps on backpressure (Phase 1's
-// enterTask) -- it PARKS the guestTask at parkEntry (tryEnter fails,
-// task.go), exactly like a genuinely busy instance. With nothing else ever
-// able to clear the backpressure counter in this test, the scheduler drive
-// finds no ready parked task and no runq work, so it surfaces the same
-// deadlock shape a stuck WAIT would (errAsyncDeadlock, wrapped with export
-// context) -- see guest_task.go's ready() parkEntry arm and sched.step.
 func TestInvokeAsyncCallback_BackpressureParksThenDeadlocks(t *testing.T) {
 	inst, be := firstLightAsyncExport(t)
 	inst.backpressure = 1 // tryEnter parks entry; nothing clears backpressure

@@ -53,10 +53,15 @@ func requireActiveTask(in *Instance, builtin string) *task {
 //     driving goroutine, NOT promoted (or promoted but between segments) --
 //     suspend by NESTED sched.drive (Phase 1-3 behavior, kept as-is:
 //     wait-during-callback stays green).
-//   - t == nil: a synchronous context (a core module's instantiation-time
-//     start function, or a plain sync lift of a sync-TYPED func, or a
-//     top-level call to a boundExport this package never wires an
-//     activeTask for) -- the spec's sync-task-block trap.
+//   - blk != nil and t.syncImplicit: a non-async-typed call's own implicit
+//     thread -- parks and drives canon_lift's sync-caller loop nested, which
+//     raises the sync-task-block trap only if no other thread of this instance
+//     is ready (see syncBlocker).
+//   - t == nil: a synchronous context with no task at all (a core module's
+//     instantiation-time start function, or a top-level call to a boundExport
+//     this package never wires an activeTask for) -- there is no thread to
+//     park and no instance loop to drive, so the sync-task-block trap is
+//     immediate (dont-block-start's case 1).
 //
 // Every call site already calls requireMayLeave separately before reaching
 // here (preserving each builtin's existing may_leave-before-anything-else
@@ -64,8 +69,11 @@ func requireActiveTask(in *Instance, builtin string) *task {
 // re-derive it.
 func blockingTask(in *Instance, builtin string) (t *task, blk taskBlocker) {
 	t = in.activeTask
-	if t == nil || t.syncImplicit { // the spec's sync-task-block trap
+	if t == nil { // no thread to park at all: the spec's sync-task-block trap
 		panic(fmt.Errorf("component/instance: %s: cannot block a synchronous task before returning", builtin))
+	}
+	if t.syncImplicit {
+		return t, syncBlocker{in: in, t: t, name: builtin}
 	}
 	// design docs/component-model-async-threads-design-fable.md §5.2: prefer
 	// a SPAWNED guestThread's own baton over the task's implicit-thread
@@ -122,8 +130,13 @@ func activeBlocker(in *Instance) taskBlocker {
 // shapes) stays activeTask == nil and keeps nested-driving exactly as
 // before.
 func requireNotSyncImplicit(in *Instance, builtin string) taskBlocker {
+	// A sync task is no longer refused outright here either (see syncBlocker and
+	// blockingTask): it parks and drives the instance's own loop, which traps
+	// only when nothing else in the instance is ready. idle-drop's
+	// sync-read-consumes-notification is a plain sync lift whose stream.read
+	// must succeed because the notification is already recorded.
 	if t := in.activeTask; t != nil && t.syncImplicit {
-		panic(fmt.Errorf("component/instance: %s: cannot block a synchronous task before returning", builtin))
+		return syncBlocker{in: in, t: t, name: builtin}
 	}
 	return activeBlocker(in)
 }
@@ -193,17 +206,27 @@ func storeEvent(mod api.Module, builtin string, ptr uint32, ev eventTuple) event
 // too, not just from a would-be sync/stackful task), write its (p1,p2) at
 // ptr/ptr+4, and return the event code.
 //
-// (Phase 3, docs/component-model-async-phase3-design.md §2.3): when
-// pending, the drive predicate also wakes on that, and TASK_CANCELLED is
-// stored instead of a set event -- deliverPendingCancel is checked at THIS
-// suspension's prologue exactly where the reference's wait_until does
-// (~404). A blocking wait's cancel wake cannot resume synchronously the way
-// a parked callback loop's does (this builtin has live Go frames beneath
-// it -- see task.go's requestCancellation doc); it is instead a genuinely
-// PENDING_CANCEL task whose own drive predicate below picks the
-// cancellation up at the next scheduler check.
+// (Phase 3, docs/component-model-async-phase3-design.md §2.3): a pending
+// cancellation does NOT wake this built-in and is not reported by it.
+// WaitableSet.wait waits on has_pending_event alone and returns
+// get_pending_event(); only WaitableSet.wait_from_callback -- the callback
+// dispatch loop's WAIT disposition, not this canon -- consults a cancellation.
+// A task parked here when a cancellation is requested therefore stays parked
+// with the request pending, which is what cancel-delivery.wast asserts for the
+// sibling non-blocking built-ins ("neither may report the pending
+// cancellation ... which must survive until the task returns to its event
+// loop").
 func waitableSetWaitHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
-	in.syncTaskNeeded = true
+	// mayBlockSync: this canon IS the reference's mid-core-call blocking site
+	// (WaitableSet.wait via Thread.wait_until), so a callback task of this
+	// instance needs a segment goroutine to park on -- otherwise reaching it
+	// from a core function can only nested-drive the shared scheduler, which
+	// cannot hand control back to a GUEST caller waiting on the async lower
+	// that started this task. trap-if-block-and-sync's trap-if-sync-cancel
+	// depends on that handback: its callee blocks here, the async lower must
+	// return with the subtask unresolved, and only then does the caller reach
+	// the subtask.cancel whose trap the suite asserts.
+	in.syncTaskNeeded, in.mayBlockSync = true, true
 	fn := api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 		requireMayLeave(in, "waitable-set.wait")
 		si := api.DecodeU32(stack[0])
@@ -211,13 +234,6 @@ func waitableSetWaitHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 		ws := requireWaitableSet(in, "waitable-set.wait", si)
 		_, blk := blockingTask(in, "waitable-set.wait")
 
-		// canon_waitable_set_wait is WaitableSet.wait: it waits on
-		// has_pending_event alone, in both arms. A cancellation does not unblock
-		// it -- a task parked here when cancelled stays parked, and the deadlock
-		// is whoever drives the scheduler's to report. The cancel-aware wait is
-		// WaitableSet.wait_from_callback, which is the callback dispatch loop's
-		// WAIT disposition (guestTask.ready/resumeReady's parkWait arm), not
-		// this built-in.
 		// canon_waitable_set_wait is WaitableSet.wait, which waits on
 		// has_pending_event alone -- a cancellation does not unblock it, in
 		// either arm. The cancel-aware wait is WaitableSet.wait_from_callback,

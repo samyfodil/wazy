@@ -83,7 +83,7 @@ func (in *Instance) invokeAsyncCallback(ctx context.Context, be *boundExport, ex
 	// Instance): once any earlier call's guestTask/stackfulTask.fail has run,
 	// every later entry is refused permanently, matching the reference's
 	// Store poisoning invariant.
-	if in.poisoned || !in.mayEnter {
+	if in.poisoned {
 		return nil, fmt.Errorf("component/instance: export %q: cannot enter component instance", exportName)
 	}
 
@@ -99,6 +99,16 @@ func (in *Instance) invokeAsyncCallback(ctx context.Context, be *boundExport, ex
 	t.inst, t.be = in, be
 	gt.t, gt.in, gt.be, gt.ctx, gt.exportName = t, in, be, ctx, exportName
 	gt.args = args
+	// Promote for the same reason startAsyncExportTask does: a blocking builtin
+	// reached inside the initial core call needs live frames it can park, and
+	// only a segment goroutine can hold them. This used to be left false on the
+	// host-entry path, which made thread.suspend inside a callback lift's own
+	// core function unimplementable ("not supported from an unpromoted callback
+	// task") -- during-sync-scheduling-candidates' $setup does exactly that:
+	// task.return, then thread.suspend, so that a LATER non-async-typed call can
+	// resume its thread. mayBlockSync is set by binding any canon that can
+	// suspend, so a component that binds none still runs inline as before.
+	gt.promoted = in.mayBlockSync
 	t.gt = gt
 
 	if err := gt.start(); err != nil {
@@ -152,7 +162,7 @@ func (in *Instance) invokeStackful(ctx context.Context, be *boundExport, exportN
 	if be.flattenErr != nil {
 		return nil, fmt.Errorf("component/instance: export %q: flatten func type: %w", exportName, be.flattenErr)
 	}
-	if in.poisoned || !in.mayEnter { // Store.lift's prologue: trap_if(!may_enter_from)
+	if in.poisoned { // Store.lift's prologue: trap_if(!may_enter_from)
 		return nil, fmt.Errorf("component/instance: export %q: cannot enter component instance", exportName)
 	}
 
@@ -167,7 +177,17 @@ func (in *Instance) invokeStackful(ctx context.Context, be *boundExport, exportN
 		in.reapParkedGoroutines() // a trap may strand OTHER parked tasks (delegated callees)
 		return nil, err
 	}
-	if err := in.sched.drive(func() bool { return st.done }); err != nil {
+	// Resolved is enough, exactly as in invokeAsyncCallback above: canon_lift's
+	// sync-caller loop is `while task.state != Task.State.RESOLVED`
+	// (definitions.py ~2119), and an async-typed lift's caller sees the result
+	// the moment task.return runs. A stackful task's thread may legitimately
+	// keep yielding after that -- during-sync-scheduling-candidates' $setup
+	// calls task.return(1) and then loops on thread.yield forever, precisely so
+	// its thread stays a resumable candidate for the LATER sync calls to
+	// 'run'/'run-promote'. Waiting for st.done there drives that yield loop
+	// with no way out. The thread stays parked; a subsequent entry point
+	// resumes it.
+	if err := in.sched.drive(func() bool { return st.done || t.state == taskResolved }); err != nil {
 		in.reapParkedGoroutines()
 		if errors.Is(err, errAsyncDeadlock) {
 			return nil, fmt.Errorf("component/instance: export %q: wasm trap: deadlock detected: event loop cannot make further progress", exportName)
@@ -217,7 +237,7 @@ func (in *Instance) startAsyncExportTask(ctx context.Context, be *boundExport, e
 	// running, so by construction it cannot also be running on THIS
 	// instance unless this instance IS the caller re-entering itself --
 	// exactly the case mayEnter guards), kept as a real trap for parity.
-	if in.poisoned || !in.mayEnter {
+	if in.poisoned {
 		return nil, fmt.Errorf("component/instance: export %q: cannot enter component instance", exportName)
 	}
 	fr := &callbackFrame{}
@@ -266,7 +286,7 @@ func (in *Instance) startAsyncExportTask(ctx context.Context, be *boundExport, e
 func (in *Instance) startStackfulExportTask(ctx context.Context, be *boundExport, exportName string,
 	onStart func(*task) ([]abi.Value, error), onResolve func([]abi.Value, bool) error,
 ) (calleeTask *task, err error) {
-	if in.poisoned || !in.mayEnter {
+	if in.poisoned {
 		return nil, fmt.Errorf("component/instance: export %q: cannot enter component instance", exportName)
 	}
 	t := &task{inst: in, be: be}

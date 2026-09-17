@@ -416,11 +416,33 @@ func TestSubtaskCancelHostFunc_SyncDeadlockTraps(t *testing.T) {
 // anywhere in the instance) is a DIFFERENT case -- see
 // TestSubtaskCancelHostFunc_UnknownHandleTraps, which keeps the pre-existing
 // nested-drive-eligible behavior via newCancelTestInstance's benign task.
+// TestSubtaskCancelHostFunc_SyncTaskCannotBlock pins that a sync task's
+// blocking subtask.cancel still reports the sync-task-block trap -- but now
+// because the block ACTUALLY fails, not because a syncImplicit task is refused
+// on sight.
+//
+// canon_lift's sync-caller loop traps on `not candidates`, so whether a
+// non-async-typed call may block depends on whether any thread of its instance
+// is ready at that moment (during-sync-call-may-block-if-other-ready-threads
+// asserts the passing side). This instance has no other thread, so the nested
+// drive finds nothing and raises the trap -- same text, reached the reference's
+// way. The task is given a real implicit-thread slot so the suspender has
+// something to park.
 func TestSubtaskCancelHostFunc_SyncTaskCannotBlock(t *testing.T) {
-	in := &Instance{sched: &sched{}, mayLeave: true, resources: newHandleTable(), activeTask: &task{syncImplicit: true}}
+	in := &Instance{sched: &sched{}, mayLeave: true, resources: newHandleTable()}
+	in.activeTask = &task{syncImplicit: true, inst: in}
+	// An unresolved subtask with no cancel hook: the request is recorded and the
+	// synchronous form must then wait for it to resolve. Nothing in this
+	// instance can resolve it and no other thread is ready, so the nested
+	// sync-caller loop finds no candidate and raises the trap. The handle must
+	// be real -- canon_subtask_cancel validates it before anything can block
+	// (definitions.py ~2390), which is why an invalid handle now reports a
+	// handle trap instead.
+	st := newSubtask()
+	h := in.resources.addEntry(st)
 	def := subtaskCancelHostFuncGraph(in, binary.Canon{Async: false})
 	requirePanicContains(t, "cannot block a synchronous task before returning", func() {
-		def.fn.Call(context.Background(), nil, []uint64{0xdeadbeef})
+		def.fn.Call(context.Background(), nil, []uint64{uint64(h)})
 	})
 }
 
@@ -517,7 +539,10 @@ func TestStartAsyncExportTask_OnStartErrorPropagates(t *testing.T) {
 	requireErrContains(t, err, "boom")
 }
 
-func TestStartAsyncExportTask_NotReenterableTraps(t *testing.T) {
+// TestStartAsyncExportTask_PoisonedRefused is the startAsyncExportTask half of
+// TestInvokeAsyncCallback_PoisonedRefused: reentrancy is no longer refused,
+// poisoning still is.
+func TestStartAsyncExportTask_PoisonedRefused(t *testing.T) {
 	ctx := context.Background()
 	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)
@@ -528,7 +553,7 @@ func TestStartAsyncExportTask_NotReenterableTraps(t *testing.T) {
 	}
 	defer b.Close(ctx)
 	be := b.exports["run-async"]
-	b.mayEnter = false
+	b.poisoned = true
 
 	_, err = b.startAsyncExportTask(ctx, be, "run-async",
 		func(*task) ([]abi.Value, error) { return nil, nil },
