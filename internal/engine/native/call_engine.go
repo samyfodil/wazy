@@ -534,18 +534,23 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		}
 		return nested.callWithStack(ctx, paramResultStack)
 	}
-	c.inFlight = true
-	defer func() { c.inFlight = false }()
-
 	snapshotEnabled := expctxkeys.SnapshotterEnabled.Load() && ctx.Value(expctxkeys.EnableSnapshotterKey{}) != nil
 	if snapshotEnabled {
 		ctx = context.WithValue(ctx, expctxkeys.SnapshotterKey{}, c)
 	}
 
+	// Cleared by whichever of the two defers below this call takes -- exactly
+	// one always runs, and both are registered before anything that can return
+	// or panic. A defer of its own would be a fifth defer site in this function,
+	// which the existing ones are deliberately counted to avoid (see the release
+	// defer's comment): it cost ~12% on a plain synchronous component call.
+	c.inFlight = true
+
 	if nativeapi.StackGuardCheckEnabled {
 		// This build's stack is the one init() allocated and never recycles, so it is already stable to scan.
 		c.registerGC()
 		defer func() {
+			c.inFlight = false
 			c.unregisterGC()
 			nativeapi.CheckStackGuardPage(c.stack)
 		}()
@@ -578,6 +583,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		// Registered only now: a collection reads c.stack, so this call must own one first.
 		c.registerGC()
 		defer func() {
+			c.inFlight = false
 			// Unregister first: a collection may call ScanGCRoots right up until it returns, and that
 			// reads c.stack -- which the release below hands to whichever call takes it out of the pool
 			// next. Doing it here rather than in a defer of its own also makes the ordering a property

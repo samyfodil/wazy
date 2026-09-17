@@ -116,8 +116,8 @@ type task struct {
 	liveThreads int
 
 	// syncThread is a sync (non-async-typed) task's implicit thread, created on
-	// first use and kept for the task's lifetime so a switch built-in can
-	// publish a suspension on it before control moves (see switchWindow). Nil
+	// first use and kept for the task's lifetime -- a switch built-in resolves
+	// it by table index, and runSyncCore hangs the thread's baton off it. Nil
 	// for an async task, whose implicit thread IS its guestTask/stackfulTask.
 	syncThread *syncImplicitThread
 }
@@ -156,11 +156,6 @@ func (t *task) implicitThreadAlive() bool {
 // directly, so both suspension flavors share one call site.
 type taskBlocker interface {
 	block(ready func() bool) (cancelled bool)
-	// window is this blocker's publish-before-park window (see switchWindow):
-	// the switch built-ins open it so the thread they switch to observes the
-	// switcher as already suspended, and latch a resume that arrives before the
-	// park actually happens.
-	window() *switchWindow
 }
 
 // blocker returns t's live mid-call suspension primitive, or nil (then the

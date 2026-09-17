@@ -60,8 +60,6 @@ type guestTask struct {
 	// even though its park kind would otherwise supply a predicate. See
 	// suspendedState.
 	suspendedOverride bool
-	// sw is the publish-before-park window (see switchWindow).
-	sw switchWindow
 
 	// onStart, when non-nil, is the reference OnStart: produce lifted args
 	// (lazily!) -- used by startAsyncExportTask, where args must be lifted
@@ -193,10 +191,6 @@ func (gt *guestTask) block(ready func() bool) (cancelled bool) {
 	// delivered at the event loop"). Every builtin that parks through here --
 	// thread.yield, thread.suspend, the four switch builtins, waitable-set.wait
 	// -- must leave a PENDING_CANCEL pending.
-	ready = gt.sw.effectiveReady(ready)
-	if gt.sw.closeWindow() { // already resumed inside the window: do not park
-		return false
-	}
 	seg := gt.seg
 	gt.park = parkBlocked
 	seg.parkReady = ready
@@ -218,12 +212,7 @@ func (gt *guestTask) instance() *Instance { return gt.in }
 // ready mirrors the reference's per-park wait_for_event_and/wait_until
 // predicate (docs/component-model-async-phase3-design.md §1.1): whether
 // sched.step may resume this parked task right now.
-func (gt *guestTask) window() *switchWindow { return &gt.sw }
-
 func (gt *guestTask) ready() bool {
-	if gt.sw.open {
-		return gt.sw.publishedReady()
-	}
 	if gt.suspendedOverride { // ready_func cleared by stop_waiting: never ready
 		return false
 	}
@@ -286,9 +275,6 @@ func (gt *guestTask) ready() bool {
 // that -- which is what thread.{yield,suspend}-then-promote does to a ready
 // event-loop thread before switching to it.
 func (gt *guestTask) suspendedState() bool {
-	if gt.sw.open {
-		return gt.sw.publishedSuspended()
-	}
 	if gt.park == parkNone {
 		return false
 	}
@@ -296,9 +282,6 @@ func (gt *guestTask) suspendedState() bool {
 }
 
 func (gt *guestTask) startWaiting() {
-	if gt.sw.setReady(alwaysReady) {
-		return
-	}
 	gt.suspendedOverride = false
 	if gt.park == parkBlocked && gt.seg != nil && gt.seg.parkReady == nil {
 		gt.seg.parkReady = alwaysReady // Thread.start_waiting(lambda: True)
@@ -306,9 +289,6 @@ func (gt *guestTask) startWaiting() {
 }
 
 func (gt *guestTask) stopWaiting() {
-	if gt.sw.setReady(nil) {
-		return
-	}
 	gt.suspendedOverride = true
 	if gt.park == parkBlocked && gt.seg != nil {
 		gt.seg.parkReady = nil
@@ -421,9 +401,6 @@ func (gt *guestTask) firstRunBody() error {
 // task.requestCancellation's inline resume) when ready() is true (or a
 // cancel forces an out-of-band wake via cancelWake).
 func (gt *guestTask) resumeReady() error {
-	if gt.sw.catchResume() {
-		return nil
-	}
 	gt.suspendedOverride = false // running again: ready_func no longer applies
 	switch gt.park {
 	case parkEntry:

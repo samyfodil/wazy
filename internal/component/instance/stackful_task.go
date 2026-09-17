@@ -54,7 +54,6 @@ var errStackfulAbort = errors.New("component/instance: stackful task aborted")
 // (guest frames live inside be.coreFn.CallWithStack), and Thread.resume/
 // block's lock handoff is a pair of unbuffered channels.
 type stackfulTask struct {
-	sw         switchWindow // publish-before-park window (see switchWindow)
 	t          *task
 	in         *Instance
 	be         *boundExport
@@ -270,10 +269,6 @@ func (st *stackfulTask) block(ready func() bool) (cancelled bool) {
 	// delivered at the event loop"). Every builtin that parks through here --
 	// thread.yield, thread.suspend, the four switch builtins, waitable-set.wait
 	// -- must leave a PENDING_CANCEL pending.
-	ready = st.sw.effectiveReady(ready)
-	if st.sw.closeWindow() { // already resumed inside the window: do not park
-		return false
-	}
 	st.park, st.parkReady = sparkBlock, ready
 	st.in.suspendRun()       // activeTask=nil, mayEnter=true; exclusive KEPT
 	st.in.sched.park(st)     // safe: we hold the baton
@@ -295,12 +290,7 @@ func (st *stackfulTask) instance() *Instance { return st.in }
 // never releases exclusive_thread; only the callback loop does, ~2177), so
 // gating on it would deadlock against ourselves. Cross-task exclusion is
 // per-instance and handled by exclusiveOwner (task.go/instance.go).
-func (st *stackfulTask) window() *switchWindow { return &st.sw }
-
 func (st *stackfulTask) ready() bool {
-	if st.sw.open {
-		return st.sw.publishedReady()
-	}
 	switch st.park {
 	case sparkEntry:
 		return !st.in.hasBackpressure()
@@ -323,35 +313,20 @@ func (st *stackfulTask) ready() bool {
 // during-sync-scheduling-candidates and reentrance's outer-sync/inner-async
 // cases resume.
 func (st *stackfulTask) suspendedState() bool {
-	if st.sw.open {
-		return st.sw.publishedSuspended()
-	}
 	return st.park == sparkBlock && st.parkReady == nil
 }
 
 // startWaiting is Thread.start_waiting(ready_func = lambda: True), the body of
 // resume_later; stopWaiting is Thread.stop_waiting, which clears ready_func and
 // so makes the thread SUSPENDED again.
-func (st *stackfulTask) startWaiting() {
-	if !st.sw.setReady(alwaysReady) {
-		st.parkReady = alwaysReady
-	}
-}
-
-func (st *stackfulTask) stopWaiting() {
-	if !st.sw.setReady(nil) {
-		st.parkReady = nil
-	}
-}
+func (st *stackfulTask) startWaiting() { st.parkReady = alwaysReady }
+func (st *stackfulTask) stopWaiting()  { st.parkReady = nil }
 
 // resumeReady is called only with st in sched.parked (goroutine at
 // <-resumeCh, or not yet spawned for sparkEntry), by sched.step/pumpSnapshot
 // or task.requestCancellation -- on whatever goroutine currently holds the
 // baton.
 func (st *stackfulTask) resumeReady() error {
-	if st.sw.catchResume() {
-		return nil
-	}
 	switch st.park {
 	case sparkEntry:
 		st.in.numWaitingToEnter--

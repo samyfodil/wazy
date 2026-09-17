@@ -323,7 +323,6 @@ type guestThread struct {
 	in  *Instance // == t.inst
 	ctx context.Context
 
-	sw    switchWindow // publish-before-park window (see switchWindow)
 	index uint32       // slot in in.threads (reference Thread.index; :509)
 	fn    api.Function // the indirect-table func, resolved AT new-indirect time (:2692)
 	arg   uint64       // the `c` argument (:2696), raw bits (valid for both i32 and i64)
@@ -351,25 +350,13 @@ type guestThread struct {
 // switch or a cancellable cancel delivery -- never by the scheduler's own
 // ready() scan (see ready's doc below).
 func (th *guestThread) suspendedState() bool {
-	if th.sw.open {
-		return th.sw.publishedSuspended()
-	}
 	return th.parked && th.parkReady == nil
 }
 
 // startWaiting/stopWaiting are the reference's Thread.start_waiting and
 // stop_waiting: moving between SUSPENDED and WAITING without running anything.
-func (th *guestThread) startWaiting() {
-	if !th.sw.setReady(alwaysReady) {
-		th.parkReady = alwaysReady
-	}
-}
-
-func (th *guestThread) stopWaiting() {
-	if !th.sw.setReady(nil) {
-		th.parkReady = nil
-	}
-}
+func (th *guestThread) startWaiting() { th.parkReady = alwaysReady }
+func (th *guestThread) stopWaiting()  { th.parkReady = nil }
 
 func (th *guestThread) instance() *Instance { return th.in }
 
@@ -383,12 +370,7 @@ func (th *guestThread) instance() *Instance { return th.in }
 // `waiting() and ready_func()`, and cancellation is instead a disjunct inside
 // the individual built-in's predicate (wait_from_callback) or observed at a
 // suspension prologue.
-func (th *guestThread) window() *switchWindow { return &th.sw }
-
 func (th *guestThread) ready() bool {
-	if th.sw.open {
-		return th.sw.publishedReady()
-	}
 	return th.parkReady != nil &&
 		(th.cancelWake || th.parkReady())
 }
@@ -399,9 +381,6 @@ func (th *guestThread) ready() bool {
 // resume (a never-resumed thread costs nothing until now), then hands the
 // baton.
 func (th *guestThread) resumeReady() error {
-	if th.sw.catchResume() { // resumed inside its publish-before-park window
-		return nil
-	}
 	th.in.sched.unpark(th)
 	th.parked, th.parkReady = false, nil
 	mode := resumeNormal
@@ -476,10 +455,6 @@ func (th *guestThread) block(ready func() bool) (cancelled bool) {
 	// delivered at the event loop"). Every builtin that parks through here --
 	// thread.yield, thread.suspend, the four switch builtins, waitable-set.wait
 	// -- must leave a PENDING_CANCEL pending.
-	ready = th.sw.effectiveReady(ready) // a start_waiting inside the window wins
-	if th.sw.closeWindow() {            // already resumed before we got here: do not park
-		return false
-	}
 	th.parked, th.parkReady = true, ready
 	th.in.activeThread = nil
 	th.in.suspendRun()       // activeTask=nil, mayEnter=true; exclusive KEPT
@@ -841,16 +816,12 @@ func promoteHostFunc(in *Instance, name string, selfReady func() bool) hostFuncD
 func switchToThread(in *Instance, other switchableThread, name string, selfReady func() bool) {
 	// Resolved BEFORE the switch: resuming other runs its code, which moves
 	// in.activeTask, and the caller must still park as itself.
-	park, win := captureSuspender(in, name)
-	// PUBLISHED before the park, so a thread that observes us between these two
-	// statements already sees a suspension (see switchWindow). With the switch
-	// itself deferred to the scheduler below, nothing actually runs in that
-	// window any more, but the publication is what makes the park install the
-	// ready_func the reference would have.
-	win.publish(selfReady)
+	park := captureSuspender(in, name)
 	// suspend(switch_to = other): hand the scheduler the target and park. The
 	// switch happens on the next step, from the driver, NOT from inside this
-	// frame -- see sched.pendingSwitch for why that matters.
+	// frame -- see sched.pendingSwitch for why that matters. Nothing runs
+	// between these two statements, so by the time `other` is resumed the
+	// switcher is already parked with the ready_func the reference gives it.
 	in.sched.pendingSwitch = other
 	park(selfReady)
 }

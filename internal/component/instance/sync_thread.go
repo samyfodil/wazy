@@ -31,8 +31,6 @@ type syncImplicitThread struct {
 	// ready when the event arrives, which a boolean snapshot taken at park time
 	// could never notice.
 	readyFn func() bool
-	// sw is the publish-before-park window (see switchWindow).
-	sw switchWindow
 	// parked is true only while this thread is actually suspended: the record
 	// outlives any one suspension (task.syncThread), and a RUNNING thread is
 	// neither suspended nor ready however its ready_func happens to read.
@@ -92,19 +90,11 @@ func (s *syncImplicitThread) handoff(mode resumeMode) error {
 
 func (s *syncImplicitThread) instance() *Instance { return s.in }
 
-func (s *syncImplicitThread) window() *switchWindow { return &s.sw }
-
 func (s *syncImplicitThread) ready() bool {
-	if s.sw.open {
-		return s.sw.publishedReady()
-	}
 	return s.parked && s.readyFn != nil && s.readyFn()
 }
 
 func (s *syncImplicitThread) resumeReady() error {
-	// A resume inside the publish-before-park window still counts: latch it AND
-	// record resumed, so the drive this thread is about to enter returns at once.
-	s.sw.catchResume()
 	s.in.sched.unpark(s)
 	s.readyFn, s.parked, s.resumed = nil, false, true
 	if s.spawned {
@@ -117,25 +107,13 @@ func (s *syncImplicitThread) resumeReady() error {
 // suspendedState is the reference's Thread.suspended(): not running, with no
 // ready_func.
 func (s *syncImplicitThread) suspendedState() bool {
-	if s.sw.open {
-		return s.sw.publishedSuspended()
-	}
 	return s.parked && s.readyFn == nil
 }
 
 // startWaiting is start_waiting(ready_func = lambda: True) -- resume_later's
 // body; stopWaiting clears ready_func, making the thread SUSPENDED again.
-func (s *syncImplicitThread) startWaiting() {
-	if !s.sw.setReady(alwaysReady) {
-		s.readyFn = alwaysReady
-	}
-}
-
-func (s *syncImplicitThread) stopWaiting() {
-	if !s.sw.setReady(nil) {
-		s.readyFn = nil
-	}
-}
+func (s *syncImplicitThread) startWaiting() { s.readyFn = alwaysReady }
+func (s *syncImplicitThread) stopWaiting()  { s.readyFn = nil }
 
 // suspendSelf parks the caller with the given readiness, whichever kind of task
 // it belongs to: an async task hands its blocker the predicate, and a sync
@@ -144,8 +122,7 @@ func (s *syncImplicitThread) stopWaiting() {
 // reference draws no distinction -- Thread.suspend/yield_ work the same for an
 // implicit thread of a sync task as for a spawned one.
 func suspendSelf(in *Instance, name string, selfReady func() bool) {
-	park, _ := captureSuspender(in, name)
-	park(selfReady)
+	captureSuspender(in, name)(selfReady)
 }
 
 // captureSuspender resolves WHO is about to park, before anything else runs.
@@ -155,24 +132,23 @@ func suspendSelf(in *Instance, name string, selfReady func() bool) {
 // suspendSelf evaluated after the switch would read whoever is active by then
 // and park the wrong task, which showed up as a working example suddenly
 // reporting "cannot block a synchronous task before returning".
-func captureSuspender(in *Instance, name string) (park func(selfReady func() bool), win *switchWindow) {
+func captureSuspender(in *Instance, name string) func(selfReady func() bool) {
 	// A SPAWNED thread of a sync task must park itself, not its task's implicit
 	// thread: only the goroutine holding the baton may park, and the implicit
 	// thread may be separately parked already (design §5.2, the same preference
 	// currentBlocker makes). trap-if-block-and-sync's $thread-start-resume-back
 	// runs on such a thread and switches back to the sync implicit thread.
 	if th := in.activeThread; th != nil {
-		return func(selfReady func() bool) { th.block(selfReady) }, th.window()
+		return func(selfReady func() bool) { th.block(selfReady) }
 	}
 	if t := in.activeTask; t != nil && t.syncImplicit {
-		b := syncBlocker{in: in, t: t, name: name}
-		return b.blockVoid, b.window()
+		return syncBlocker{in: in, t: t, name: name}.blockVoid
 	}
 	_, blk := blockingTask(in, name)
 	if blk == nil {
 		panic(fmt.Errorf("component/instance: %s: not supported from an unpromoted callback task", name))
 	}
-	return func(selfReady func() bool) { blk.block(selfReady) }, blk.window()
+	return func(selfReady func() bool) { blk.block(selfReady) }
 }
 
 // suspendSyncThread parks this sync task's implicit thread and drives the
@@ -185,13 +161,6 @@ func captureSuspender(in *Instance, name string) (park func(selfReady func() boo
 // anything else is a wait_until on that predicate.
 func suspendSyncThread(in *Instance, t *task, name string, selfReady func() bool) {
 	sit := syncBlocker{in: in, t: t, name: name}.sit()
-	selfReady = sit.sw.effectiveReady(selfReady) // a resume-later inside the window wins
-	if sit.sw.closeWindow() {
-		// Resumed inside the publish-before-park window (see switchWindow): the
-		// switch we performed handed control to a thread that resumed us right
-		// back, so there is nothing left to wait for.
-		return
-	}
 	// selfReady nil is the reference's ready_func of None: a thread.suspend
 	// installs no predicate and the thread is SUSPENDED (only an explicit
 	// resume-later or switch wakes it). Anything else is a wait_until.
@@ -281,8 +250,6 @@ func (b syncBlocker) sit() *syncImplicitThread {
 	return b.t.syncThread
 }
 
-func (b syncBlocker) window() *switchWindow { return b.sit().window() }
-
 // block never reports a cancellation: the reference delivers one only in the
 // callback dispatch loop and wait_from_callback, neither of which a sync task
 // has (see guestThread.block's note).
@@ -295,90 +262,6 @@ func (b syncBlocker) block(ready func() bool) (cancelled bool) {
 // captureSuspender can hand it straight back as its park func.
 func (b syncBlocker) blockVoid(ready func() bool) {
 	suspendSyncThread(b.in, b.t, b.name, ready)
-}
-
-// switchWindow is the gap between PUBLISHING a thread's suspension and actually
-// performing it.
-//
-// The reference captures the switcher's continuation before control moves:
-//
-//	def switch_to(other): suspend(switch_to = other)
-//	def suspend(switch_to):
-//	  cont = Continuation(); ...; handler.switch_to = switch_to
-//	  handler.lock.release()   # other runs from here
-//	  cont.lock.acquire()      # we resume here
-//
-// so by the time `other` runs, the switcher is already not-running and (for the
-// suspend-flavoured built-ins) SUSPENDED -- and `other` may legitimately switch
-// straight back to it. trap-if-block-and-sync's $thread-start-resume-back does
-// exactly that: the spawned thread's whole body is a
-// thread.suspend-then-resume aimed at the thread that just switched to it.
-//
-// wazy cannot move live Go frames onto another goroutine, so it has to park
-// AFTER the switch. It publishes the suspension before instead, and a resume
-// that arrives in that window is latched here rather than handed to a goroutine
-// that is not yet waiting for a baton (which would deadlock). The subsequent
-// park sees the latch and returns immediately, exactly as the reference's
-// cont.lock.acquire() would return immediately on an already-released lock.
-type switchWindow struct {
-	open    bool
-	ready   func() bool // the published ready_func; nil means SUSPENDED
-	resumed bool
-}
-
-// publish opens the window with ready as the published ready_func.
-func (w *switchWindow) publish(ready func() bool) {
-	w.open, w.ready, w.resumed = true, ready, false
-}
-
-// closeWindow closes the window and reports whether a resume arrived while it
-// was open (in which case the caller must NOT park).
-func (w *switchWindow) closeWindow() bool {
-	resumed := w.resumed
-	w.open, w.ready, w.resumed = false, nil, false
-	return resumed
-}
-
-// publishedSuspended/publishedReady answer Thread.suspended()/ready() for a
-// thread whose window is open, where the real park state is not set up yet.
-func (w *switchWindow) publishedSuspended() bool { return w.ready == nil }
-func (w *switchWindow) publishedReady() bool     { return w.ready != nil && w.ready() }
-
-// setReady redirects a Thread.start_waiting/stop_waiting that lands inside the
-// window onto the PUBLISHED ready_func, reporting whether it did.
-//
-// The reference's resume_later replaces the ready_func of a thread already
-// sitting in suspend(); the switcher installed its own before switch_to, and
-// whichever was written last is what the scheduler sees. Without this the park
-// that follows the switch would write the pre-switch value back over it --
-// during-sync-call-no-sibling-resume's X does exactly resume-later(implicit)
-// followed by thread.suspend, and the implicit thread has to come back ready.
-func (w *switchWindow) setReady(f func() bool) bool {
-	if w.open {
-		w.ready = f
-		return true
-	}
-	return false
-}
-
-// effectiveReady is the ready_func a park should actually install: the published
-// one (possibly replaced via setReady) while the window is open, else the
-// caller's own.
-func (w *switchWindow) effectiveReady(ready func() bool) func() bool {
-	if w.open {
-		return w.ready
-	}
-	return ready
-}
-
-// catchResume latches a resume arriving inside the window, reporting whether it
-// did so (the caller then skips its real resume path).
-func (w *switchWindow) catchResume() bool {
-	if w.open {
-		w.resumed = true
-		return true
-	}
-	return false
 }
 
 // runSyncCore runs a non-async-typed lift's core call.
@@ -408,15 +291,16 @@ func (w *switchWindow) catchResume() bool {
 // Instances that bind no such canon (the overwhelming majority: no thread.*, no
 // waitable-set.wait, no sync stream/future copy, no sync lower of an async lift)
 // keep calling straight through with no goroutine and no scheduler at all.
+// The gate is mayThreadSwitch, not mayBlockSync: a continuation is only needed
+// when something can resume THIS thread, which means a cooperative-thread canon
+// is bound in this instance. A sync lift that merely blocks (a sync stream copy,
+// a sync lower of an async lift, waitable-set.wait) is resumed by its own nested
+// drive and needs no goroutine.
 func (in *Instance) runSyncCore(t *task, exportName string, call func() error) error {
 	// t == nil means this instance never needed task tracking, so there is no
 	// thread to give a continuation to (and nothing in it can suspend).
-	// mayThreadSwitch, not mayBlockSync: a continuation is only needed when
-	// something can resume THIS thread, which means a cooperative-thread canon
-	// is bound here. A sync lift that merely blocks (a sync stream copy, a sync
-	// lower of an async lift, waitable-set.wait) is resumed by its own nested
-	// drive and needs no goroutine. t == nil means the instance never needed
-	// task tracking at all.
+	// Callers test the gate themselves (invokeEntered) so the closure they pass
+	// is only built when it is actually needed; this is belt and braces.
 	if t == nil || !in.mayThreadSwitch {
 		return call()
 	}

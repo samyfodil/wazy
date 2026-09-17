@@ -99,16 +99,21 @@ func (in *Instance) invokeAsyncCallback(ctx context.Context, be *boundExport, ex
 	t.inst, t.be = in, be
 	gt.t, gt.in, gt.be, gt.ctx, gt.exportName = t, in, be, ctx, exportName
 	gt.args = args
-	// Promote for the same reason startAsyncExportTask does: a blocking builtin
-	// reached inside the initial core call needs live frames it can park, and
-	// only a segment goroutine can hold them. This used to be left false on the
-	// host-entry path, which made thread.suspend inside a callback lift's own
-	// core function unimplementable ("not supported from an unpromoted callback
-	// task") -- during-sync-scheduling-candidates' $setup does exactly that:
-	// task.return, then thread.suspend, so that a LATER non-async-typed call can
-	// resume its thread. mayBlockSync is set by binding any canon that can
-	// suspend, so a component that binds none still runs inline as before.
-	gt.promoted = in.mayBlockSync
+	// Promote when a cooperative-thread canon is bound: this task's implicit
+	// thread can then be the TARGET of a resume from another thread, which only
+	// works if its frames are on a goroutine that can park. This used to be
+	// false on the host-entry path unconditionally, which made thread.suspend
+	// inside a callback lift's own core function unimplementable ("not supported
+	// from an unpromoted callback task") -- during-sync-scheduling-candidates'
+	// $setup does exactly that: task.return, then thread.suspend, so a LATER
+	// non-async-typed call can resume its thread.
+	//
+	// Deliberately NOT mayBlockSync (which startAsyncExportTask uses): a
+	// host-entered task that merely blocks is resumed by the host-entry drive
+	// this function already runs, and nested-drives as it always has. Gating on
+	// the narrower flag keeps every async component that binds no thread.* canon
+	// -- which is all of them today -- at zero goroutines per call.
+	gt.promoted = in.mayThreadSwitch
 	t.gt = gt
 
 	if err := gt.start(); err != nil {

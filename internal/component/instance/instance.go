@@ -1886,12 +1886,22 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 	}
 	putCoreValueSlice(coreArgsPtr) // coreArgs' bits are now copied into stack; done with it
 
-	// Routed through runSyncCore so this call's implicit thread is a real,
-	// independently resumable continuation whenever the instance binds a canon
-	// that can suspend; a plain sync component calls straight through.
-	if err := in.runSyncCore(syncTask, exportName, func() error {
-		return be.coreFn.CallWithStack(ctx, stack)
-	}); err != nil {
+	// The gate is tested BEFORE the closure is built, not inside runSyncCore:
+	// `func() error { ... }` captures ctx, be and stack, so building it
+	// unconditionally puts a heap allocation on every synchronous component
+	// call -- the one path that has none to spare (BenchmarkCallAdd went from
+	// 2 allocs/op to 3 when this read as a single call).
+	var callErr error
+	if syncTask != nil && in.mayThreadSwitch {
+		// This call's implicit thread has to be a real, independently resumable
+		// continuation -- see runSyncCore.
+		callErr = in.runSyncCore(syncTask, exportName, func() error {
+			return be.coreFn.CallWithStack(ctx, stack)
+		})
+	} else {
+		callErr = be.coreFn.CallWithStack(ctx, stack)
+	}
+	if err := callErr; err != nil {
 		putUint64Slice(stackPtr)
 		in.poisoned = true // guest code actually ran and trapped -- see this func's doc
 		err = wrapUnreachableTrap(err)

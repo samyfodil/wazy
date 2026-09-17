@@ -610,6 +610,7 @@ type streamEnd struct {
 	waitable
 	side   endSide
 	state  copyState
+	index  uint32 // the handle this end is reachable by (reference End.index)
 	shared *sharedStream
 
 	// livePending is true while this end's pendingEvent is a LIVE, still-
@@ -648,6 +649,7 @@ type futureEnd struct {
 	waitable
 	side   endSide
 	state  copyState
+	index  uint32 // the handle this end is reachable by (reference End.index)
 	shared *sharedFuture
 }
 
@@ -854,42 +856,73 @@ func (e *streamEnd) sharedCancel() { e.shared.cancel() }
 func (e *futureEnd) sharedCancel() { e.shared.cancel() }
 
 // endNotifier is one side's live end, as much of it as a drop notification
-// needs: whether it is still interested, and how to hand it a DROPPED event.
+// needs.
 //
 // The reference keeps the two ends pointing at each other (End.other) and
 // End.drop notifies the counterpart directly. wazy's ends meet at the shared
 // object instead, so the shared object holds these registrations and
-// notifyPeerDropped below plays End.drop's notify arm.
-type endNotifier struct {
-	// done reports whether this end has already reached DONE (a delivered
+// notifyPeerDropped below plays End.drop's notify arm. An interface rather than
+// a struct of closures: the end object already exists, so registering it costs
+// nothing.
+type endNotifier interface {
+	// endDone reports whether this end has already reached DONE (a delivered
 	// terminal result), in which case there is nothing left to tell it.
-	done func() bool
-	// hasEvent reports whether an event is already pending on it -- a copy that
-	// was in flight has just been notified DROPPED through the normal path, and
-	// the notification must be delivered exactly once.
-	hasEvent func() bool
-	// notifyDropped installs the DROPPED event.
-	notifyDropped func()
+	endDone() bool
+	// endHasEvent reports whether an event is already pending on it -- a copy
+	// that was in flight has just been notified DROPPED through the normal
+	// path, and the notification must be delivered exactly once.
+	endHasEvent() bool
+	// endNotifyDropped installs the DROPPED event.
+	endNotifyDropped()
 }
 
-// notifyPeerDropped is End.drop's notify arm (definitions.py ~991-995):
-//
-//	self.other.other = None
-//	if self.other.state != End.State.DONE and not self.other.has_pending_event():
-//	  self.other.notify(progress = 0)
-//
-// It runs for an IDLE counterpart too, which is the whole point of
-// idle-drop.wast: "dropping one end of a stream or future notifies the other
-// end even when that other end is idle, i.e. has no read or write in flight.
-// The notification is recorded at the time of the drop and delivered exactly
-// once, either through whatever waitable set the idle end is in or inline by a
-// subsequent read."
-func notifyPeerDropped(debt *[2]bool, peerSide endSide, peer *endNotifier) {
-	if peer.done != nil && (peer.done() || peer.hasEvent()) {
+func notifyPeerDropped(debt *[2]bool, peerSide endSide, peer endNotifier) {
+	if peer != nil && (peer.endDone() || peer.endHasEvent()) {
 		return // already terminal, or already told
 	}
 	debt[peerSide] = true
-	if peer.notifyDropped != nil {
-		peer.notifyDropped() // a live end: install it now
+	if peer != nil {
+		peer.endNotifyDropped() // a live end: install it now
 	}
+}
+
+// index/eventCode are the reference End's own fields (definitions.py ~941-942):
+// the handle this end is reachable by, and the event code its notifications
+// carry. Recorded at registration so a drop notification can build its event
+// without the copy built-in's closures.
+func (e *streamEnd) endDone() bool     { return e.state == copyDone }
+func (e *streamEnd) endHasEvent() bool { return e.hasPendingEvent() }
+
+func (e *streamEnd) endNotifyDropped() {
+	e.livePending = false
+	e.setPendingEvent(func() eventTuple {
+		e.shared.dropNotify[e.side] = false
+		e.state = copyDone
+		return eventTuple{code: e.eventCode(), p1: e.index, p2: packCopyResult(copyDropped, 0)}
+	})
+}
+
+func (e *streamEnd) eventCode() eventCode {
+	if e.side == sideReadable {
+		return eventStreamRead
+	}
+	return eventStreamWrite
+}
+
+func (e *futureEnd) endDone() bool     { return e.state == copyDone }
+func (e *futureEnd) endHasEvent() bool { return e.hasPendingEvent() }
+
+func (e *futureEnd) endNotifyDropped() {
+	e.setPendingEvent(func() eventTuple {
+		e.shared.dropNotify[e.side] = false
+		e.state = copyDone
+		return eventTuple{code: e.eventCode(), p1: e.index, p2: uint32(copyDropped)}
+	})
+}
+
+func (e *futureEnd) eventCode() eventCode {
+	if e.side == sideReadable {
+		return eventFutureRead
+	}
+	return eventFutureWrite
 }
