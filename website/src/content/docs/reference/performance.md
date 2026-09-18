@@ -53,30 +53,56 @@ than optimizing it, so the 14.5x is against a path that no longer exists here �
 one. `memory.grow` is opt-in via `WithMemoryCapacityReservePages`; out-of-capacity, shared and
 imported memories keep the safe Go path.
 
-## At scale: a 6.5 MB Rust module, measured by someone else
+## At scale: a 6.8 MB Rust module, measured by someone else
 
 The suites above are kernels. [go-anydoc](https://github.com/xusenlin/go-anydoc) measured two
-orders of magnitude up: a 6.5 MB `wasm32-wasip1` command module (Rust 1.88, `opt-level = 3`,
+orders of magnitude up: a 6.8 MB `wasm32-wasip1` command module (Rust 1.88, `opt-level = 3`,
 `wasm-opt -O3`) run as a single instantiate — stdin in, stdout out, a long stretch of compute
 between. Same `.wasm`, same input, same machine, identical output, `CompileModule` excluded from
 every timing.
 
-| Converting | wazero v1.12.0 | wazy | |
+| Converting | wazero v1.12.0 | wazy v0.3.0 | |
 | --- | :---: | :---: | :---: |
-| 1 KB docx, compiled | 0.4 ms | 0.62 ms | **0.6x — wazero wins** |
-| 5 MB docx body, compiled | 0.86 s | 0.19 s | 4.5x |
-| 7.5 MB PDF, compiled | 3.4 s | 0.75 s | 4.5x |
-| 1 KB docx, interpreted | 3.5 ms | 2.7 ms | 1.3x |
-| 5 MB docx body, interpreted | 11.1 s | 8.6 s | 1.3x |
-| 7.5 MB PDF, interpreted | 41.4 s | 32.6 s | 1.3x |
+| 1 KB docx, compiled | 0.64 ms | 0.13 ms | 5.0x |
+| 5 MB docx body, compiled | 0.98 s | 0.19 s | 5.3x |
+| 7.6 MB PDF, compiled | 1.63 s | 0.33 s | 5.0x |
+| 1 KB docx, interpreted | 2.58 ms | 1.38 ms | 1.9x |
+| 5 MB docx body, interpreted | 11.9 s | 6.8 s | 1.8x |
+| 7.6 MB PDF, interpreted | 20.6 s | 12.1 s | 1.7x |
 
-Long compute is where the compiler wins; a document small enough that instantiation dominates goes
-the other way, and that first row is the crossover.
+**The compiled rows carry `WithCloseOnContextDone(true)`, and most of that 5x is what the option
+costs wazero rather than what its code generator produces.** go-anydoc sets it unconditionally —
+cancelling a context has to interrupt a conversion already running inside the guest — so every run
+of its benchmark carries it, while the suites above never set it. Toggling only that call on the
+5 MB body:
 
-Third-party measurement, not ours, and not reproducible from this repo. Apple M5 Pro (18-core),
-48 GB, macOS 26.5, Go 1.26.1, `CGO_ENABLED=0`, wazy `v0.0.0-20260807033006-cd2607360a17`,
-`anydoc.wasm` 6,542,355 bytes, best of 3 (best of 20 for the small input). Reported in
-[#29](https://github.com/samyfodil/wazy/issues/29).
+| Compiled, 5 MB docx body | wazero v1.12.0 | wazy v0.3.0 | |
+| --- | :---: | :---: | :---: |
+| close-on-context-done on | 0.94 s | 0.19 s | 5.0x |
+| off | 0.14 s | 0.11 s | 1.3x |
+| what the option costs | 6.5x | 1.7x | |
+
+With it off the two compilers are ~30% apart. Against an interpreter the option is free on both, so
+the 1.8x in the interpreted rows is the engines and nothing else.
+[go-pdfium](https://github.com/klippa-app/go-pdfium/blob/main/experimental/BENCHMARKS.md#the-cost-of-close-on-context-done)
+measured the same effect across 5,000 PDFs, at ~4.5x for wazero and ~1.4x for wazy. wazero's
+[#2533](https://github.com/wazero/wazero/pull/2533) cuts its cost to about 1.04x, better than our
+1.7x here; that is a gap to close, not one to report around.
+
+The 1 KB compiled row is the one that moved most. The first version of this report had wazy
+*losing* it at 0.6x, because instantiation dominates a document that small and two things made
+instantiation expensive: a funcref memo that scanned a list, which made taking a reference for each
+of the module's 593 element-segment entries quadratic, and a linear memory allocated at exactly its
+initial page count, which made every instantiation of a guest whose allocator grows the heap
+reallocate and copy the whole memory. Both are fixed as of v0.3.0; see
+[OPTIMIZATIONS.md](https://github.com/samyfodil/wazy/blob/main/OPTIMIZATIONS.md).
+
+Third-party measurement, not ours. Apple M5 Pro (18-core), 48 GB, macOS 26.5, Go 1.26.1,
+`CGO_ENABLED=0`, `anydoc.wasm` 6,781,177 bytes (anydoc 0.2.3), min of 3 at `-benchtime 3x`. The
+docx rows reproduce from a checkout of go-anydoc — `go test -run '^$' -bench 'ConvertDOCX|CloseOnContextDone' -benchtime 3x -count 3`,
+since its harness generates its own inputs; the PDF rows need a file of your own, and the wazero
+column is the same benchmarks with the three imports in its `anydoc.go` pointed at wazero.
+Originally reported in [#29](https://github.com/samyfodil/wazy/issues/29).
 
 ## Against wasmtime
 
