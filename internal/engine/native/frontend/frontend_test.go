@@ -264,26 +264,83 @@ signatures:
 	sig2: i64_v
 
 blk0: (v0:i64, v1:i64)
-	Jump blk1
+	v2:i64 = Load v0, 0x2f0
+	v3:i64 = Load v2, 0x0
+	v4:i64 = Iconst_64 0x0
+	v5:i32 = Icmp neq, v3, v4
+	Brnz v5, blk1
+	Jump blk2
 
-blk1: () <-- (blk0,blk1)
-	v2:i64 = Load v0, 0x58
-	CallIndirect v2:sig2, v0
-	Jump blk1
+blk1: () <-- (blk0)
+	v11:i64 = Load v0, 0x58
+	CallIndirect v11:sig2, v0
+	Jump blk2
 
-blk2: ()
+blk2: () <-- (blk0,blk1)
+	Jump blk3
+
+blk3: () <-- (blk2,blk6)
+	v6:i64 = Load v0, 0x2f0
+	v7:i64 = Load v6, 0x0
+	v8:i64 = Iconst_64 0x0
+	v9:i32 = Icmp neq, v7, v8
+	Brnz v9, blk5
+	Jump blk6
+
+blk4: ()
+
+blk5: () <-- (blk3)
+	v10:i64 = Load v0, 0x58
+	CallIndirect v10:sig2, v0
+	Jump blk6
+
+blk6: () <-- (blk3,blk5)
+	Jump blk3
 `,
+			// The two slow blocks (blk1 for the entry check, blk5 for the loop's)
+			// land after the loop body, so the module-closed branch is the forward,
+			// predicted-not-taken one and the body stays on the fallthrough.
 			expAfterPasses: `
 signatures:
 	sig2: i64_v
 
 blk0: (v0:i64, v1:i64)
+	v2:i64 = Load v0, 0x2f0
+	v3:i64 = Load v2, 0x0
+	v4:i64 = Iconst_64 0x0
+	v5:i32 = Icmp neq, v3, v4
+	Brnz v5, blk1
 	Jump fallthrough
 
-blk1: () <-- (blk0,blk1)
-	v2:i64 = Load v0, 0x58
-	CallIndirect v2:sig2, v0
-	Jump blk1
+blk7: () <-- (blk0)
+	Jump fallthrough
+
+blk2: () <-- (blk7,blk1)
+	Jump fallthrough
+
+blk3: () <-- (blk2,blk6)
+	v6:i64 = Load v0, 0x2f0
+	v7:i64 = Load v6, 0x0
+	v8:i64 = Iconst_64 0x0
+	v9:i32 = Icmp neq, v7, v8
+	Brnz v9, blk5
+	Jump fallthrough
+
+blk8: () <-- (blk3)
+	Jump fallthrough
+
+blk6: () <-- (blk8,blk5)
+	Jump blk3
+
+blk5: () <-- (blk3)
+	v10:i64 = Load v0, 0x58
+	CallIndirect v10:sig2, v0
+	Jump blk6
+
+blk1: () <-- (blk0)
+	v11:i64 = Load v0, 0x58
+	CallIndirect v11:sig2, v0
+	Jump blk2
 `,
 		},
 		{

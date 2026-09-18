@@ -116,12 +116,7 @@ type (
 		funcrefSlotsOnce sync.Once
 		// maxGCRoots is the most values any safepoint in this module writes; see
 		// frontend.Compiler.MaxGCRoots.
-		maxGCRoots int
-		// interruptCheckInterval is the (power-of-two) loop-header interrupt-check
-		// interval this module was compiled under. Seeds execCtx.interruptCheckMask
-		// (= interval-1) per callEngine so the amortized check's mask is a runtime
-		// value rather than a baked constant, allowing per-run/per-loop retuning.
-		interruptCheckInterval    uint64
+		maxGCRoots                int
 		listeners                 []api.FunctionListener
 		listenerBeforeTrampolines []*byte
 		listenerAfterTrampolines  []*byte
@@ -320,17 +315,10 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 	}
 
 	withListener := len(listeners) > 0
-	// The interval is validated at the API boundary (runtime.CompileModule) and
-	// folded into module.ID, so this read is consistent with that module's ID.
-	// It configures loop lowering below; a re-lower is a fresh CompileModule
-	// under a context carrying a different interval (a distinct module.ID, hence
-	// a distinct cached variant).
-	interruptCheckInterval := wasm.InterruptCheckIntervalFromContext(ctx)
 	cm := &compiledModule{
 		offsets: nativeapi.NewModuleContextOffsetData(module, withListener), parent: e, module: module,
-		ensureTermination:      ensureTermination,
-		interruptCheckInterval: uint64(interruptCheckInterval),
-		executables:            &executables{},
+		ensureTermination: ensureTermination,
+		executables:       &executables{},
 	}
 
 	importedFns, localFns := int(module.ImportFunctionCount), len(module.FunctionSection)
@@ -364,7 +352,6 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 		// Compile with a single goroutine.
 		fe := frontend.NewFrontendCompiler(module, ssaBuilder, &cm.offsets, ensureTermination, withListener, needSourceInfo)
 		fe.SetGCEnabled(e.enabledFeatures.IsEnabled(api.CoreFeatureGC))
-		fe.SetInterruptCheckInterval(interruptCheckInterval)
 
 		for i := range module.CodeSection {
 			if nativeapi.DeterministicCompilationVerifierEnabled {
@@ -426,7 +413,6 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 				fe := frontend.NewFrontendCompiler(
 					module, ssaBuilder, &cm.offsets, ensureTermination, withListener, needSourceInfo).
 					WithTryTableMetadata(sharedTTM)
-				fe.SetInterruptCheckInterval(interruptCheckInterval)
 				fe.SetGCEnabled(e.enabledFeatures.IsEnabled(api.CoreFeatureGC))
 
 				for {

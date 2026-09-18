@@ -2,15 +2,15 @@ package native
 
 import _ "unsafe"
 
-// entrypoint is implemented by the backend.
+// entrypointAsm is implemented by the backend.
 //
-//go:linkname entrypoint github.com/samyfodil/wazy/internal/engine/native/backend/isa/amd64.entrypoint
-func entrypoint(preambleExecutable, functionExecutable *byte, executionContextPtr uintptr, moduleContextPtr *byte, paramResultStackPtr *uint64, goAllocatedStackSlicePtr uintptr)
+//go:linkname entrypointAsm github.com/samyfodil/wazy/internal/engine/native/backend/isa/amd64.entrypoint
+func entrypointAsm(preambleExecutable, functionExecutable *byte, executionContextPtr uintptr, moduleContextPtr *byte, paramResultStackPtr *uint64, goAllocatedStackSlicePtr uintptr)
 
-// entrypoint is implemented by the backend.
+// entrypointAsm is implemented by the backend.
 //
-//go:linkname afterGoFunctionCallEntrypoint github.com/samyfodil/wazy/internal/engine/native/backend/isa/amd64.afterGoFunctionCallEntrypoint
-func afterGoFunctionCallEntrypoint(executable *byte, executionContextPtr uintptr, stackPointer, framePointer uintptr)
+//go:linkname afterGoFunctionCallEntrypointAsm github.com/samyfodil/wazy/internal/engine/native/backend/isa/amd64.afterGoFunctionCallEntrypoint
+func afterGoFunctionCallEntrypointAsm(executable *byte, executionContextPtr uintptr, stackPointer, framePointer uintptr)
 
 // rawAfterThrowTransferEntrypoint is implemented by the backend; see
 // amd64.afterThrowTransferEntrypoint's doc comment.

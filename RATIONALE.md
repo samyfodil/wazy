@@ -1899,17 +1899,25 @@ and as of Go 1.20, these assembler functions are considered as _unsafe_ for asyn
 From the Go runtime point of view, the execution of runtime-generated machine codes is considered as a part of
 that trampoline function. Therefore, runtime-generated machine code is also correctly considered unsafe for async preemption.
 
-## Why context cancellation is handled in Go code rather than native code
+## Why context cancellation is checked in native code
 
 Since [wazero v1.0.0-pre.9](https://github.com/tetratelabs/wazero/releases/tag/v1.0.0-pre.9), the runtime
 supports integration with Go contexts to interrupt execution after a timeout, or in response to explicit cancellation.
-This support is internally implemented as a special opcode `builtinFunctionCheckExitCode` that triggers the execution of
-a Go function (`ModuleInstance.FailIfClosed`) that atomically checks a sentinel value at strategic points in the code.
+It was long implemented as a Go round-trip — an opcode that called `ModuleInstance.FailIfClosed` — rather than
+[a direct read of the sentinel from native code][native_check], on the grounds that native code never preempts:
+checking the flag without leaving the native world would let a guest spin while the goroutine meant to *set* that
+flag never gets scheduled, so cancellation could never take place.
 
-[It _is indeed_ possible to check the sentinel value directly, without leaving the native world][native_check], thus sparing some cycles;
-however, because native code never preempts (see section above), this may lead to a state where the other goroutines
-never get the chance to run, and thus never get the chance to set the sentinel value, effectively preventing
-cancellation from taking place.
+The premise was right and the conclusion was avoidable. wazy brackets the entry into compiled code with
+`runtime.entersyscall` / `runtime.exitsyscall` (`internal/engine/native/runtime_syscall.go`), the same mechanism the
+Go runtime uses for syscalls and cgo calls. That detaches the P, so sysmon can retake it and schedule the
+cancellation watchdog even though the guest is in a long native loop. With the scheduler no longer starved, the
+check itself is free to be native: load `execCtx.moduleClosedPtr`, load the `ModuleInstance.Closed` word behind it,
+branch when non-zero. The authoritative, atomic check still happens in Go, behind the trampoline that branch calls;
+the native read only decides whether to go there.
+
+The bracketing is applied only when the module was compiled with `WithCloseOnContextDone`. Otherwise nothing has to
+run concurrently with the guest, and it would be pure overhead on every call and every host-call return.
 
 [native_check]: https://github.com/tetratelabs/wazero/issues/1409
 

@@ -113,16 +113,16 @@ defer cancel()
 _, err := fn.Call(ctx)   // returns once the deadline passes, even mid-loop
 ```
 
-The compiler inserts an amortized check rather than a Go round-trip per iteration, which is why a
-realistic loop — one calling a host function each iteration — pays about **+5%** where the naive
-shape costs +75%.
+The compiler inserts an inline load and a predicted-not-taken branch at every function entry and
+every loop back-edge, rather than a Go round-trip, which is why real compute — `fibonacci` — pays
+about **+15%** with the option on where wazero pays +2330%.
 
-That figure is workload-dependent, and the worst case is worth knowing before you switch this on: a
-near-empty compute kernel (a spin loop, or fibonacci's inner recursion) has no body to amortize the
-per-iteration counter against and pays **1.7–2.4×**. Tune the trade with
-`WithInterruptCheckInterval(ctx, n)` — a larger interval is cheaper and coarser — but note that
-sweeping the interval from 0 to 4096 on those kernels only takes them from 26.9× to 1.74× of the
-uninterrupted floor: the residual is counter bookkeeping no interval removes.
+That figure is workload-dependent, and two cases are worth knowing before you switch this on. A
+near-empty compute kernel (a bare spin loop) has no body to dilute the check against and pays
+**4.0×**. A host-call-dense loop pays **+66%**: compiled code runs inside `runtime.entersyscall` so
+the Go scheduler can preempt it, and every return from a host call back into wasm costs an
+`entersyscall`/`exitsyscall` pair — about 15 ns each time. Neither has a knob; if your workload is
+one of those and you do not need `Kill()` to interrupt a stuck guest, leave the option off.
 
 ## What wazy does not do
 

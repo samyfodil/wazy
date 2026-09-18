@@ -50,7 +50,7 @@ sources):
 | `BenchmarkCompileModulesExtensive` | Compiles five real producer outputs (TinyGo 370 KB, Rust 10 KB, Zig 5 KB, zig-cc 786 KB, cargo-wasi 104 KB) on a fresh runtime every iteration. |
 | `BenchmarkConstAddrLoads`, `BenchmarkDynAddrLoads`, `BenchmarkURemAddrLoads`, `BenchmarkDominatedBounds` | Bounds-check-elision kernels (constant, masked, `urem`-bounded and dominated addresses). |
 | `BenchmarkDispatch*` | A synthetic `call_indirect` dispatch kernel: `mono`, `poly`, `direct`, plus heavy-callee variants. |
-| `BenchmarkCloseOnContextDone`, `BenchmarkHostCallLoopCloseOnContextDone`, `BenchmarkFibCloseOnContextDone`, `BenchmarkInterruptCheckInterval` | Interruptible-loop cost under `WithCloseOnContextDone`, and the `WithInterruptCheckInterval` sweep. |
+| `BenchmarkCloseOnContextDone`, `BenchmarkHostCallLoopCloseOnContextDone`, `BenchmarkFibCloseOnContextDone` | Interruptible cost under `WithCloseOnContextDone`, on a near-empty spin kernel, a host-call-dense loop, and real compute. |
 | `BenchmarkCase3`, `BenchmarkCompile3`, `BenchmarkExecute3`, `BenchmarkExecute3Heavy`, `BenchmarkRelaxedSimd`, `BenchmarkSpectreCost` | The three-way arms that include wasmtime (see [§4](#4-against-wasmtime)). |
 
 ### The in-repo suites
@@ -152,12 +152,26 @@ The win from deleting reflection is structural, not per-call, and its magnitude
 belongs in [§3](#3-what-the-optimization-work-bought) because the path it beats
 is wazy's own, now-deleted one.
 
-The interruptible-loop advantage is not free everywhere. From the same H6 write-up:
-near-empty compute kernels (a bare spin loop, the inner fib loop) pay a **1.7–2.4x
-worst case** with `WithCloseOnContextDone` on, which is why the feature stays
-opt-in and why the per-loop check interval is tunable with
-`WithInterruptCheckInterval` (default 64, power of two, folded into the module ID
-so distinct intervals are distinct cache entries).
+The interruptible advantage is not free everywhere. From the same H6 write-up
+(amd64, Xeon D-2123IT, min of 10):
+
+| workload | wazy on/off | wazero on/off |
+|---|---|---|
+| `fibonacci` (real compute) | **1.15x** | 24.3x |
+| spin loop (near-empty kernel) | **4.04x** | 53.7x |
+| host-call loop (10k host calls/op) | **1.66x** | 1.82x |
+
+On arm64 (Apple M4) the spin kernel does far better than it does here: **1.03x**,
+down from 7.09x before the rework, i.e. the check is essentially free on that
+core. The amd64 residual is a property of that machine, not of the design.
+
+The spin kernel has no body to dilute a per-back-edge load and branch, so it is
+the worst case and always will be. The host-call loop is the one place the
+current design is *worse* than the amortized check it replaced (it was 1.06x):
+compiled code runs inside `runtime.entersyscall`, so every return from a host
+call back into wasm pays an `entersyscall`/`exitsyscall` pair — measured at
+~15 ns per host call. That is the price of the guarantee; the option stays
+opt-in.
 
 ### Compiled execution
 

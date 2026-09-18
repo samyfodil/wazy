@@ -37,23 +37,21 @@ func TestSerializeCompiledModule(t *testing.T) {
 				magic,
 				[]byte{byte(len(testVersion))},
 				[]byte(testVersion),
-				u32.LeBytes(1),                         // number of functions.
-				u64.LeBytes(0),                         // offset.
-				u64.LeBytes(5),                         // length of code.
-				[]byte{1, 2, 3, 4, 5},                  // code.
-				crcf([]byte{1, 2, 3, 4, 5}),            // crc for the code.
-				[]byte{0},                              // no source map.
-				[]byte{tryTableInfoFormatVersion},      // try-table info format version.
-				u32.LeBytes(0),                         // empty catch clause table.
-				[]byte{ehTableFormatVersion},           // eh table format version.
-				u32.LeBytes(1),                         // number of functions (eh tables).
-				u32.LeBytes(0),                         // func[0]: 0 eh entries.
-				u32.LeBytes(1),                         // number of function frame sizes.
-				u64.LeBytes(0),                         // func[0] frame size.
-				[]byte{interruptIntervalFormatVersion}, // interrupt-interval format version.
-				u64.LeBytes(0),                         // interrupt-check interval.
-				[]byte{entryPreambleFormatVersion},     // entry preamble format version.
-				u32.LeBytes(0),                         // no entry preambles.
+				u32.LeBytes(1),                     // number of functions.
+				u64.LeBytes(0),                     // offset.
+				u64.LeBytes(5),                     // length of code.
+				[]byte{1, 2, 3, 4, 5},              // code.
+				crcf([]byte{1, 2, 3, 4, 5}),        // crc for the code.
+				[]byte{0},                          // no source map.
+				[]byte{tryTableInfoFormatVersion},  // try-table info format version.
+				u32.LeBytes(0),                     // empty catch clause table.
+				[]byte{ehTableFormatVersion},       // eh table format version.
+				u32.LeBytes(1),                     // number of functions (eh tables).
+				u32.LeBytes(0),                     // func[0]: 0 eh entries.
+				u32.LeBytes(1),                     // number of function frame sizes.
+				u64.LeBytes(0),                     // func[0] frame size.
+				[]byte{entryPreambleFormatVersion}, // entry preamble format version.
+				u32.LeBytes(0),                     // no entry preambles.
 			),
 		},
 		{
@@ -67,23 +65,21 @@ func TestSerializeCompiledModule(t *testing.T) {
 				magic,
 				[]byte{byte(len(testVersion))},
 				[]byte(testVersion),
-				u32.LeBytes(1),                         // number of functions.
-				u64.LeBytes(0),                         // offset.
-				u64.LeBytes(5),                         // length of code.
-				[]byte{1, 2, 3, 4, 5},                  // code.
-				crcf([]byte{1, 2, 3, 4, 5}),            // crc for the code.
-				[]byte{0},                              // no source map.
-				[]byte{tryTableInfoFormatVersion},      // try-table info format version.
-				u32.LeBytes(0),                         // empty catch clause table.
-				[]byte{ehTableFormatVersion},           // eh table format version.
-				u32.LeBytes(1),                         // number of functions (eh tables).
-				u32.LeBytes(0),                         // func[0]: 0 eh entries.
-				u32.LeBytes(1),                         // number of function frame sizes.
-				u64.LeBytes(0),                         // func[0] frame size.
-				[]byte{interruptIntervalFormatVersion}, // interrupt-interval format version.
-				u64.LeBytes(0),                         // interrupt-check interval.
-				[]byte{entryPreambleFormatVersion},     // entry preamble format version.
-				u32.LeBytes(0),                         // no entry preambles.
+				u32.LeBytes(1),                     // number of functions.
+				u64.LeBytes(0),                     // offset.
+				u64.LeBytes(5),                     // length of code.
+				[]byte{1, 2, 3, 4, 5},              // code.
+				crcf([]byte{1, 2, 3, 4, 5}),        // crc for the code.
+				[]byte{0},                          // no source map.
+				[]byte{tryTableInfoFormatVersion},  // try-table info format version.
+				u32.LeBytes(0),                     // empty catch clause table.
+				[]byte{ehTableFormatVersion},       // eh table format version.
+				u32.LeBytes(1),                     // number of functions (eh tables).
+				u32.LeBytes(0),                     // func[0]: 0 eh entries.
+				u32.LeBytes(1),                     // number of function frame sizes.
+				u64.LeBytes(0),                     // func[0] frame size.
+				[]byte{entryPreambleFormatVersion}, // entry preamble format version.
+				u32.LeBytes(0),                     // no entry preambles.
 			),
 		},
 		{
@@ -103,23 +99,21 @@ func TestSerializeCompiledModule(t *testing.T) {
 				// Function index = 1.
 				u64.LeBytes(5), // offset.
 				// Executable.
-				u64.LeBytes(8),                         // length of code.
-				[]byte{1, 2, 3, 4, 5, 1, 2, 3},         // code.
-				crcf([]byte{1, 2, 3, 4, 5, 1, 2, 3}),   // crc for the code.
-				[]byte{0},                              // no source map.
-				[]byte{tryTableInfoFormatVersion},      // try-table info format version.
-				u32.LeBytes(0),                         // empty catch clause table.
-				[]byte{ehTableFormatVersion},           // eh table format version.
-				u32.LeBytes(2),                         // number of functions (eh tables).
-				u32.LeBytes(0),                         // func[0]: 0 eh entries.
-				u32.LeBytes(0),                         // func[1]: 0 eh entries.
-				u32.LeBytes(2),                         // number of function frame sizes.
-				u64.LeBytes(0),                         // func[0] frame size.
-				u64.LeBytes(0),                         // func[1] frame size.
-				[]byte{interruptIntervalFormatVersion}, // interrupt-interval format version.
-				u64.LeBytes(0),                         // interrupt-check interval.
-				[]byte{entryPreambleFormatVersion},     // entry preamble format version.
-				u32.LeBytes(0),                         // no entry preambles.
+				u64.LeBytes(8),                       // length of code.
+				[]byte{1, 2, 3, 4, 5, 1, 2, 3},       // code.
+				crcf([]byte{1, 2, 3, 4, 5, 1, 2, 3}), // crc for the code.
+				[]byte{0},                            // no source map.
+				[]byte{tryTableInfoFormatVersion},    // try-table info format version.
+				u32.LeBytes(0),                       // empty catch clause table.
+				[]byte{ehTableFormatVersion},         // eh table format version.
+				u32.LeBytes(2),                       // number of functions (eh tables).
+				u32.LeBytes(0),                       // func[0]: 0 eh entries.
+				u32.LeBytes(0),                       // func[1]: 0 eh entries.
+				u32.LeBytes(2),                       // number of function frame sizes.
+				u64.LeBytes(0),                       // func[0] frame size.
+				u64.LeBytes(0),                       // func[1] frame size.
+				[]byte{entryPreambleFormatVersion},   // entry preamble format version.
+				u32.LeBytes(0),                       // no entry preambles.
 			),
 		},
 	}
@@ -194,28 +188,25 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				u32.LeBytes(1), // number of functions.
 				u64.LeBytes(0), // offset.
 				// Executable.
-				u64.LeBytes(5),                         // size.
-				[]byte{1, 2, 3, 4, 5},                  // machine code.
-				crcf([]byte{1, 2, 3, 4, 5}),            // machine code.
-				[]byte{0},                              // no source map.
-				[]byte{tryTableInfoFormatVersion},      // try-table info format version.
-				u32.LeBytes(0),                         // empty catch clause table.
-				[]byte{ehTableFormatVersion},           // eh table format version.
-				u32.LeBytes(1),                         // number of functions (eh tables).
-				u32.LeBytes(0),                         // func[0]: 0 eh entries.
-				u32.LeBytes(1),                         // number of function frame sizes.
-				u64.LeBytes(0),                         // func[0] frame size.
-				[]byte{interruptIntervalFormatVersion}, // interrupt-interval format version.
-				u64.LeBytes(64),                        // interrupt-check interval.
-				[]byte{entryPreambleFormatVersion},     // entry preamble format version.
-				u32.LeBytes(0),                         // no entry preambles.
+				u64.LeBytes(5),                     // size.
+				[]byte{1, 2, 3, 4, 5},              // machine code.
+				crcf([]byte{1, 2, 3, 4, 5}),        // machine code.
+				[]byte{0},                          // no source map.
+				[]byte{tryTableInfoFormatVersion},  // try-table info format version.
+				u32.LeBytes(0),                     // empty catch clause table.
+				[]byte{ehTableFormatVersion},       // eh table format version.
+				u32.LeBytes(1),                     // number of functions (eh tables).
+				u32.LeBytes(0),                     // func[0]: 0 eh entries.
+				u32.LeBytes(1),                     // number of function frame sizes.
+				u64.LeBytes(0),                     // func[0] frame size.
+				[]byte{entryPreambleFormatVersion}, // entry preamble format version.
+				u32.LeBytes(0),                     // no entry preambles.
 			),
 			expCompiledModule: &compiledModule{
-				executables:            &executables{executable: []byte{1, 2, 3, 4, 5}},
-				functionOffsets:        []int{0},
-				ehTables:               [][]nativeapi.EhEntry{nil},
-				functionFrameSizes:     []int64{0},
-				interruptCheckInterval: 64,
+				executables:        &executables{executable: []byte{1, 2, 3, 4, 5}},
+				functionOffsets:    []int{0},
+				ehTables:           [][]nativeapi.EhEntry{nil},
+				functionFrameSizes: []int64{0},
 			},
 			expStaleCache: false,
 			expErr:        "",
@@ -235,28 +226,25 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				u64.LeBytes(10),                             // size.
 				[]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},       // machine code.
 				crcf([]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}), // crc for machine code.
-				[]byte{0},                              // no source map.
-				[]byte{tryTableInfoFormatVersion},      // try-table info format version.
-				u32.LeBytes(0),                         // empty catch clause table.
-				[]byte{ehTableFormatVersion},           // eh table format version.
-				u32.LeBytes(2),                         // number of functions (eh tables).
-				u32.LeBytes(0),                         // func[0]: 0 eh entries.
-				u32.LeBytes(0),                         // func[1]: 0 eh entries.
-				u32.LeBytes(2),                         // number of function frame sizes.
-				u64.LeBytes(0),                         // func[0] frame size.
-				u64.LeBytes(0),                         // func[1] frame size.
-				[]byte{interruptIntervalFormatVersion}, // interrupt-interval format version.
-				u64.LeBytes(64),                        // interrupt-check interval.
-				[]byte{entryPreambleFormatVersion},     // entry preamble format version.
-				u32.LeBytes(0),                         // no entry preambles.
+				[]byte{0},                          // no source map.
+				[]byte{tryTableInfoFormatVersion},  // try-table info format version.
+				u32.LeBytes(0),                     // empty catch clause table.
+				[]byte{ehTableFormatVersion},       // eh table format version.
+				u32.LeBytes(2),                     // number of functions (eh tables).
+				u32.LeBytes(0),                     // func[0]: 0 eh entries.
+				u32.LeBytes(0),                     // func[1]: 0 eh entries.
+				u32.LeBytes(2),                     // number of function frame sizes.
+				u64.LeBytes(0),                     // func[0] frame size.
+				u64.LeBytes(0),                     // func[1] frame size.
+				[]byte{entryPreambleFormatVersion}, // entry preamble format version.
+				u32.LeBytes(0),                     // no entry preambles.
 			),
 			importedFunctionCount: 1,
 			expCompiledModule: &compiledModule{
-				executables:            &executables{executable: []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}},
-				functionOffsets:        []int{0, 7},
-				ehTables:               [][]nativeapi.EhEntry{nil, nil},
-				functionFrameSizes:     []int64{0, 0},
-				interruptCheckInterval: 64,
+				executables:        &executables{executable: []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}},
+				functionOffsets:    []int{0, 7},
+				ehTables:           [][]nativeapi.EhEntry{nil, nil},
+				functionFrameSizes: []int64{0, 0},
 			},
 			expStaleCache: false,
 			expErr:        "",
