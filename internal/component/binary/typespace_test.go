@@ -129,12 +129,16 @@ func TestResolveType_Alias_Export_LocalInlineInstance_Success(t *testing.T) {
 
 func TestResolveType_Alias_Export_FromImportedInstance_Unresolved(t *testing.T) {
 	// The real-guest shape: aliasing a type export out of an IMPORTED
-	// instance. This decoder does not decode nested type declarations
-	// inside an imported instance type, so this must fail loud rather than
-	// silently misresolve -- see stdout_write_alias.wat in the instance
-	// package for the end-to-end proof that this is fine in practice (the
-	// own/borrow ResourceType index is never dereferenced through a
-	// resolver).
+	// instance. resolveAlias CAN follow this structurally when the import's
+	// own declared instancetype is known (see the
+	// FromImportedInstance_Resolved tests below) -- but here the import has
+	// no ComponentInstanceSpace entry at all (a hand-built Component that
+	// never went through Decode, or one instantiated standalone without the
+	// index space this resolution needs), so it must still fail loud rather
+	// than silently misresolve. See stdout_write_alias.wat in the instance
+	// package for the end-to-end proof that even a genuinely unresolvable
+	// case (an own/borrow ResourceType index) is fine in practice: that
+	// index is never dereferenced through a resolver.
 	c := &Component{
 		Imports: []Import{{Name: "test:cli/streams", ExternType: 0x05}},
 		Aliases: []AliasDef{
@@ -145,6 +149,145 @@ func TestResolveType_Alias_Export_FromImportedInstance_Unresolved(t *testing.T) 
 		},
 	}
 	_, err := c.ResolveType(0)
+	wantErrContains(t, err, "cannot resolve structurally")
+}
+
+// ------- alias export from an IMPORTED instance, structurally resolved -------
+//
+// `use iface.{T}` compiles to exactly this shape: a type-sort alias whose
+// TargetKind is export (0x00) and whose InstanceIdx names an IMPORTED
+// instance (via ComponentInstanceSpace), not a locally inline-exported one.
+// These hand-build that shape directly against Component/InstanceDesc rather
+// than going through Decode -- TestDecode_ImportedInstanceType_EndToEnd below
+// covers the real byte-level grammar these fields are built from.
+
+// TestResolveType_Alias_Export_FromImportedInstance_Resolved_Primitive covers
+// the simplest shape: an export whose local type has no further nested type
+// index at all (e.g. `type component = list<u8>`, componentized:component's
+// own `types` interface).
+func TestResolveType_Alias_Export_FromImportedInstance_Resolved_Primitive(t *testing.T) {
+	localIdx := uint32(0)
+	c := &Component{
+		Imports: []Import{{Name: "test:pkg/types", ExternType: 0x05, ExternIndex: 0}},
+		Types: []Type{{Descriptor: InstanceDesc{
+			Types:   []TypeDesc{ListDesc{Element: TypeRef{Primitive: "u8"}}},
+			Exports: map[string]TypeRef{"component": {TypeIndex: &localIdx}},
+		}}},
+		ComponentInstanceSpace: []ComponentInstanceSpaceEntry{
+			{Kind: ComponentInstanceFromImport, Import: 0},
+		},
+		Aliases: []AliasDef{
+			{Sort: 0x03, TargetKind: 0x00, InstanceIdx: 0, Name: "component"},
+		},
+		TypeSpace: []TypeSpaceEntry{
+			{Kind: TypeSpaceDef, Def: 0},
+			{Kind: TypeSpaceAlias, Alias: 0},
+		},
+	}
+	td, err := c.ResolveType(1)
+	if err != nil {
+		t.Fatalf("ResolveType: %v", err)
+	}
+	list, ok := td.(ListDesc)
+	if !ok {
+		t.Fatalf("got %T, want ListDesc", td)
+	}
+	if list.Element.Primitive != "u8" {
+		t.Errorf("Element = %#v, want primitive u8", list.Element)
+	}
+}
+
+// TestResolveType_Alias_Export_FromImportedInstance_Resolved_NestedLocalRef
+// covers the shape that actually broke real components: an exported type
+// whose own definition references ANOTHER type declared in the same
+// instancetype body by a LOCAL index (componentized:component's `types`
+// interface: `variant error { other(option<string>) }`, where `error` and
+// `option<string>` are two separate local deftypes). The nested local index
+// must come back globalized -- resolvable through c's ordinary Resolver, not
+// dangling as a meaningless index into this Component's own TypeSpace (which
+// is exactly what produced the reported "unknown type descriptor: <nil>").
+func TestResolveType_Alias_Export_FromImportedInstance_Resolved_NestedLocalRef(t *testing.T) {
+	optionLocalIdx := uint32(0)  // local type 0: option<string>
+	variantLocalIdx := uint32(1) // local type 1: variant error { other(<local 0>) }
+	errorCaseType := TypeRef{TypeIndex: &optionLocalIdx}
+	c := &Component{
+		Imports: []Import{{Name: "test:pkg/types", ExternType: 0x05, ExternIndex: 0}},
+		Types: []Type{{Descriptor: InstanceDesc{
+			Types: []TypeDesc{
+				OptionDesc{Element: TypeRef{Primitive: "string"}},
+				VariantDesc{Cases: []VariantCase{{Name: "other", Type: &errorCaseType}}},
+			},
+			Exports: map[string]TypeRef{"error": {TypeIndex: &variantLocalIdx}},
+		}}},
+		ComponentInstanceSpace: []ComponentInstanceSpaceEntry{
+			{Kind: ComponentInstanceFromImport, Import: 0},
+		},
+		Aliases: []AliasDef{
+			{Sort: 0x03, TargetKind: 0x00, InstanceIdx: 0, Name: "error"},
+		},
+		TypeSpace: []TypeSpaceEntry{
+			{Kind: TypeSpaceDef, Def: 0},
+			{Kind: TypeSpaceAlias, Alias: 0},
+		},
+	}
+	td, err := c.ResolveType(1)
+	if err != nil {
+		t.Fatalf("ResolveType: %v", err)
+	}
+	variant, ok := td.(VariantDesc)
+	if !ok {
+		t.Fatalf("got %T, want VariantDesc", td)
+	}
+	if len(variant.Cases) != 1 || variant.Cases[0].Name != "other" || variant.Cases[0].Type == nil {
+		t.Fatalf("Cases = %#v, want one case %q with a payload", variant.Cases, "other")
+	}
+	// The case's own type must be resolvable through c -- NOT the original
+	// dangling local index 0, which (against this Component's own TypeSpace)
+	// would misresolve to whatever real type happens to occupy index 0, or
+	// simply fail out of range.
+	caseIdx := variant.Cases[0].Type.TypeIndex
+	if caseIdx == nil {
+		t.Fatalf("case type has no TypeIndex: %#v", variant.Cases[0].Type)
+	}
+	if *caseIdx < extraTypeBase {
+		t.Errorf("case type index %d was not globalized into the escape range (>= %d)", *caseIdx, extraTypeBase)
+	}
+	elemTD, err := c.ResolveType(*caseIdx)
+	if err != nil {
+		t.Fatalf("ResolveType(case type): %v", err)
+	}
+	opt, ok := elemTD.(OptionDesc)
+	if !ok {
+		t.Fatalf("case type = %T, want OptionDesc", elemTD)
+	}
+	if opt.Element.Primitive != "string" {
+		t.Errorf("option element = %#v, want primitive string", opt.Element)
+	}
+}
+
+// TestResolveType_Alias_Export_FromImportedInstance_AbstractResourceUnresolved
+// covers a `sub`-bound (abstract resource) export: this decoder has no
+// structural definition for it at all, so it must stay unresolved rather
+// than fabricate one.
+func TestResolveType_Alias_Export_FromImportedInstance_AbstractResourceUnresolved(t *testing.T) {
+	c := &Component{
+		Imports: []Import{{Name: "test:pkg/types", ExternType: 0x05, ExternIndex: 0}},
+		Types: []Type{{Descriptor: InstanceDesc{
+			Types:   []TypeDesc{nil}, // the resource export's own reserved (unresolvable) slot
+			Exports: map[string]TypeRef{},
+		}}},
+		ComponentInstanceSpace: []ComponentInstanceSpaceEntry{
+			{Kind: ComponentInstanceFromImport, Import: 0},
+		},
+		Aliases: []AliasDef{
+			{Sort: 0x03, TargetKind: 0x00, InstanceIdx: 0, Name: "my-resource"},
+		},
+		TypeSpace: []TypeSpaceEntry{
+			{Kind: TypeSpaceDef, Def: 0},
+			{Kind: TypeSpaceAlias, Alias: 0},
+		},
+	}
+	_, err := c.ResolveType(1)
 	wantErrContains(t, err, "cannot resolve structurally")
 }
 
@@ -328,6 +471,101 @@ func TestDecode_TypeSpace_ImportedType(t *testing.T) {
 	}
 }
 
+// synthInstanceDeclType encodes one instancedecl of kind "type" (tag 0x01)
+// wrapping an already-encoded deftype body.
+func synthInstanceDeclType(deftypeBody []byte) []byte {
+	return append([]byte{0x01}, deftypeBody...)
+}
+
+// synthInstanceDeclExportEq encodes one instancedecl of kind "export" (tag
+// 0x04) naming a type-sort export bound `eq localIdx` -- localIdx indexes
+// the enclosing instancetype's OWN nested type-sort space (built by earlier
+// "type"/"export" instancedecls in the same body), never the enclosing
+// component's.
+func synthInstanceDeclExportEq(name string, localIdx byte) []byte {
+	out := []byte{0x04, 0x00} // tag=export, externname kind=0x00
+	out = append(out, synthLabel(name)...)
+	out = append(out, 0x03, 0x00, localIdx) // externdesc: type-sort, eq bound, localIdx
+	return out
+}
+
+// TestDecode_ImportedInstanceType_EndToEnd decodes a real component binary
+// carrying the exact shape that broke componentized:component/wit-tools: an
+// imported interface (`types`) declaring `variant error { other(option<string>) }`,
+// and a type-sort alias elsewhere (`use types.{error}`) naming it by export.
+// Before this fix, resolveAlias could not follow an alias into an IMPORTED
+// instance's own type declarations at all; this proves the whole path --
+// decodeImportSection capturing the instance import's declared type,
+// readInstancetypeDesc building its nested Types/Exports, and resolveAlias
+// globalizing the exported type's own local cross-reference -- works
+// end-to-end through the real binary decoder, not just against hand-built
+// Component/InstanceDesc values (see the FromImportedInstance_Resolved_*
+// tests above, which isolate resolveAlias/globalizeLocalRef on their own).
+func TestDecode_ImportedInstanceType_EndToEnd(t *testing.T) {
+	// The "types" interface's instancetype body:
+	//   local type 0: option<string>                  (0x6b, string=0x73)
+	//   local type 1: variant error { other(<local 0>) } (0x71, 1 case)
+	//   export "error" -> eq local type 1
+	optionBody := []byte{0x6b, 0x73} // option<string>
+	caseOther := append(synthLabel("other"), 0x01, 0x00, 0x00)
+	// case: label "other", opt(valtype)=some(typeidx 0), opt(refines)=none
+	variantBody := append([]byte{0x71, 0x01}, caseOther...) // variant, 1 case
+
+	instancetypeBody := []byte{0x03} // 3 instancedecls
+	instancetypeBody = append(instancetypeBody, synthInstanceDeclType(optionBody)...)
+	instancetypeBody = append(instancetypeBody, synthInstanceDeclType(variantBody)...)
+	instancetypeBody = append(instancetypeBody, synthInstanceDeclExportEq("error", 1)...)
+
+	instancetypeDeftype := append([]byte{0x42}, instancetypeBody...) // 0x42 = instancetype
+
+	typeSec := synthSection(7, append([]byte{0x01}, instancetypeDeftype...)) // 1 type-section entry
+	importSec := synthSection(10, append([]byte{0x01}, synthInstanceImport("test:pkg/types")...))
+
+	// Alias section: one type-sort export alias naming "error" out of
+	// ComponentInstanceSpace index 0 (our import) -- the `use types.{error}`
+	// shape.
+	aliasBody := []byte{0x01, 0x03, 0x00, 0x00} // count=1, sort=type, targetKind=export, instanceIdx=0
+	aliasBody = append(aliasBody, synthLabel("error")...)
+	aliasSec := synthSection(6, aliasBody)
+
+	raw := synthComponent(typeSec, importSec, aliasSec)
+
+	c, err := Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+
+	// Type index 0: the instancetype deftype itself (TypeSpaceDef).
+	// Type index 1: the alias (TypeSpaceAlias) -- what we actually want.
+	if len(c.TypeSpace) != 2 {
+		t.Fatalf("TypeSpace has %d entries, want 2 (1 deftype + 1 alias)", len(c.TypeSpace))
+	}
+
+	td, err := c.ResolveType(1)
+	if err != nil {
+		t.Fatalf("ResolveType(1) (the `use types.{error}` alias): %v", err)
+	}
+	variant, ok := td.(VariantDesc)
+	if !ok {
+		t.Fatalf("got %T, want VariantDesc", td)
+	}
+	if len(variant.Cases) != 1 || variant.Cases[0].Name != "other" {
+		t.Fatalf("Cases = %#v, want one case %q", variant.Cases, "other")
+	}
+	caseType := variant.Cases[0].Type
+	if caseType == nil || caseType.TypeIndex == nil {
+		t.Fatalf("case %q has no resolvable type: %#v", "other", caseType)
+	}
+	optTD, err := c.ResolveType(*caseType.TypeIndex)
+	if err != nil {
+		t.Fatalf("ResolveType(case %q's type): %v", "other", err)
+	}
+	opt, ok := optTD.(OptionDesc)
+	if !ok || opt.Element.Primitive != "string" {
+		t.Fatalf("case %q's type = %#v, want OptionDesc{Element: string}", "other", optTD)
+	}
+}
+
 // synthOuterTypeAlias encodes section 6 carrying one
 // `(alias outer <count> <idx> (type))`.
 func synthOuterTypeAlias(count, idx byte) []byte {
@@ -391,5 +629,45 @@ func TestResolveType_OuterAliasBeyondKnownEnclosingComponents(t *testing.T) {
 	_, err = standalone.ResolveType(0)
 	if err == nil || !strings.Contains(err.Error(), "but only 0 are known") {
 		t.Fatalf("ResolveType(0) error = %v, want it to report the missing enclosing component", err)
+	}
+}
+
+// ------- globalizeLocalRef -------
+
+// TestGlobalizeLocalRef_CycleGuard proves globalizeLocalRef terminates on a
+// genuine cycle between two locally-declared types (unconstructible from
+// real WIT, which always indirects through list/option/etc. -- but a
+// resource declared and referenced within the SAME imported instancetype
+// could plausibly nest this way) instead of recursing forever, the same way
+// resolveTypeDepth's own alias-chain depth guard protects a self-referential
+// alias (TestResolveType_AliasChain_CycleGuard above).
+func TestGlobalizeLocalRef_CycleGuard(t *testing.T) {
+	toOne := uint32(1)
+	toZero := uint32(0)
+	localTypes := []TypeDesc{
+		TupleDesc{Elements: []TypeRef{{TypeIndex: &toOne}}},  // local 0: tuple<local 1>
+		TupleDesc{Elements: []TypeRef{{TypeIndex: &toZero}}}, // local 1: tuple<local 0>
+	}
+	var c Component
+	start := uint32(0)
+	global, err := c.globalizeLocalRef(localTypes, TypeRef{TypeIndex: &start}, map[uint32]uint32{})
+	if err != nil {
+		t.Fatalf("globalizeLocalRef: %v", err)
+	}
+	if global.TypeIndex == nil {
+		t.Fatal("globalized ref has no TypeIndex")
+	}
+	td, err := c.ResolveType(*global.TypeIndex)
+	if err != nil {
+		t.Fatalf("ResolveType(globalized local 0): %v", err)
+	}
+	tup, ok := td.(TupleDesc)
+	if !ok || len(tup.Elements) != 1 || tup.Elements[0].TypeIndex == nil {
+		t.Fatalf("got %#v, want a 1-element TupleDesc with a resolvable element", td)
+	}
+	// The cycle closes back on the escape index reserved for local 0 itself
+	// -- resolving the nested element must not loop either.
+	if _, err := c.ResolveType(*tup.Elements[0].TypeIndex); err != nil {
+		t.Fatalf("ResolveType(nested, closing the cycle): %v", err)
 	}
 }
