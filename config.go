@@ -226,11 +226,11 @@ type RuntimeConfig interface {
 	// interpreter and compiler runtimes to insert the periodical checks on the conditions above. For that reason,
 	// this is disabled by default.
 	//
-	// In the compiler the check is an inline load and a predicted-not-taken branch at every function entry and
-	// every loop back-edge, and compiled code runs inside runtime.entersyscall so the Go scheduler can keep
-	// running while a guest does not yield. Two shapes pay noticeably more than the rest: a near-empty compute
-	// kernel, which has no body to dilute the per-back-edge check against, and a host-call-dense loop, where
-	// every return from a host call back into compiled code crosses an entersyscall/exitsyscall pair. See
+	// In the compiler the check is a decrement of a reserved register and a predicted-not-taken branch at every
+	// function entry and every loop back-edge. When the counter runs out the guest returns to Go, which checks
+	// whether the module has been closed and yields its P so the cancellation watchdog can run -- which is what
+	// makes the option work at all, since compiled code is otherwise not preemptible. The shape that pays most
+	// is a near-empty compute kernel, which has no body to dilute the per-back-edge check against. See
 	// docs/performance.md for measured numbers.
 	//
 	// See examples in context_done_example_test.go for the end-to-end demonstrations.

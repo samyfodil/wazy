@@ -1908,16 +1908,31 @@ It was long implemented as a Go round-trip — an opcode that called `ModuleInst
 checking the flag without leaving the native world would let a guest spin while the goroutine meant to *set* that
 flag never gets scheduled, so cancellation could never take place.
 
-The premise was right and the conclusion was avoidable. wazy brackets the entry into compiled code with
-`runtime.entersyscall` / `runtime.exitsyscall` (`internal/engine/native/runtime_syscall.go`), the same mechanism the
-Go runtime uses for syscalls and cgo calls. That detaches the P, so sysmon can retake it and schedule the
-cancellation watchdog even though the guest is in a long native loop. With the scheduler no longer starved, the
-check itself is free to be native: load `execCtx.moduleClosedPtr`, load the `ModuleInstance.Closed` word behind it,
-branch when non-zero. The authoritative, atomic check still happens in Go, behind the trampoline that branch calls;
-the native read only decides whether to go there.
+The premise is right; what it settles is *where the scheduler gets its turn*, not where the check lives. wazy keeps
+both native. Compiled code carries a **termination fuel counter** in a register reserved out of the allocatable set
+(`fuelVReg` in each backend's `abi.go`), spends one tick at every function entry and every loop back-edge, and
+branches out when it reaches zero. The check is therefore two instructions and no memory reference: a decrement and
+a branch that reads the decrement's own flags.
 
-The bracketing is applied only when the module was compiled with `WithCloseOnContextDone`. Otherwise nothing has to
-run concurrently with the guest, and it would be pure overhead on every call and every host-call return.
+Running out is what returns control to Go, and the Go side (`ExitCodeCheckModuleExitCode` in
+`internal/engine/native/call_engine.go`) does three things there: the authoritative atomic `FailIfClosed`, a
+`runtime.Gosched` so the cancellation watchdog can actually be scheduled, and a refill of the counter. The yield is
+the load-bearing part — it is what an earlier design bought by bracketing every entry into compiled code in
+`runtime.entersyscall` / `runtime.exitsyscall`, at the price of that pair on every host-call return.
+
+Two properties of the counter matter more than they look:
+
+- **Function entry, not just loop back-edges.** `loop` is the only backward branch *within* a function, so a
+  loop-free exponential call tree and `return_call` self-recursion both run unboundedly without crossing one. See
+  `TestEnsureTerminationWithoutLoops`.
+- **Preserved across an exit to Go, never refilled by one.** The register is a member of each backend's
+  `calleeSavedVRegs`, so a Go call saves and restores the live count; only the out-of-fuel exit writes a fresh one.
+  Refilling on every exit would let a guest calling a host function inside a loop spend forever without ever
+  reaching a check. See `TestEnsureTerminationHostCallLoop`.
+
+Cancellation latency is therefore bounded by the interval (`nativeapi.TerminationFuel`) rather than immediate: the
+flag is read when the fuel runs out, not at every back-edge. The exit re-checks after its `Gosched`, so a close that
+lands during the yield is seen on the same trip rather than the next one.
 
 [native_check]: https://github.com/tetratelabs/wazero/issues/1409
 

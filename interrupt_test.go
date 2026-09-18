@@ -21,8 +21,9 @@ func requireCompiler(t *testing.T) {
 }
 
 // infLoopWasm exports "loop_forever" = (loop (br 0)): a tight native loop with
-// no host calls. Under WithCloseOnContextDone it runs inside entersyscall, so
-// the P is released and Go can collect and cancel while it spins.
+// no host calls. Under WithCloseOnContextDone its back-edge spends termination
+// fuel, and running out returns to Go, which yields the P so Go can collect and
+// cancel while it spins.
 var infLoopWasm = []byte{
 	0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02,
 	0x01, 0x00, 0x07, 0x10, 0x01, 0x0c, 0x6c, 0x6f, 0x6f, 0x70, 0x5f, 0x66, 0x6f, 0x72, 0x65, 0x76,
@@ -77,10 +78,10 @@ func TestInterruptCheck_GCNotBlockedAndInterrupts(t *testing.T) {
 	}
 }
 
-// TestInterruptCheck_LoopResultsCorrect validates that the inline module-closed
-// test emitted into every loop header under WithCloseOnContextDone does not
-// disturb the loop's own values: the slow path is a separate block, so the loop
-// body's block parameters have to survive the extra edge.
+// TestInterruptCheck_LoopResultsCorrect validates that the inline fuel check
+// emitted into every loop header under WithCloseOnContextDone does not disturb
+// the loop's own values: the slow path is a separate block, so the loop body's
+// block parameters have to survive the extra edge.
 func TestInterruptCheck_LoopResultsCorrect(t *testing.T) {
 	ctx := context.Background()
 	requireCompiler(t)

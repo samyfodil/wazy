@@ -15,15 +15,30 @@ var (
 	floatParamResultRegs = []regalloc.RealReg{v0, v1, v2, v3, v4, v5, v6, v7}
 )
 
+// fuelVReg is the termination-fuel counter's home: reserved out of
+// AllocatableRegisters below, so nothing the register allocator emits can touch
+// it and it survives a wasm->wasm call for free. It is still a member of
+// calleeSavedRegistersSorted (abi_go_call.go), which is what carries it across an
+// exit to Go -- the counter has to be preserved, not refilled, or a guest calling
+// a host function inside a loop would reset it every iteration and never check
+// anything.
+//
+// x21 is a good one to take: callee-saved in both the AAPCS and wazy's own
+// convention, absent from intParamResultRegs so no ABI position depends on it, and
+// unused by the entry preamble and every trampoline, which take their fixed
+// registers from elsewhere in the callee-saved range. See ssa.OpcodeFuelDec.
+var fuelVReg = x21VReg
+
 var regInfo = &regalloc.RegisterInfo{
 	AllocatableRegisters: [regalloc.NumRegType][]regalloc.RealReg{
 		// We don't allocate:
 		// - x18: Reserved by the macOS: https://developer.apple.com/documentation/xcode/writing-arm64-code-for-apple-platforms#Respect-the-purpose-of-specific-CPU-registers
 		// - x28: Reserved by Go runtime.
 		// - x27(=tmpReg): because of the reason described on tmpReg.
+		// - x21(=fuelVReg): the termination fuel counter.
 		regalloc.RegTypeInt: {
 			x8, x9, x10, x11, x12, x13, x14, x15,
-			x16, x17, x19, x20, x21, x22, x23, x24, x25,
+			x16, x17, x19, x20, x22, x23, x24, x25,
 			x26, x29, x30,
 			// These are the argument/return registers. Less preferred in the allocation.
 			x7, x6, x5, x4, x3, x2, x1, x0,

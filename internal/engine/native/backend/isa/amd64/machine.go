@@ -472,6 +472,28 @@ func (m *machine) LowerConditionalBranch(b *ssa.Instruction) {
 	target := ssaBlockLabel(m.c.SSABuilder().BasicBlock(targetBlkID))
 	cvalDef := m.c.ValueDefinition(cval)
 
+	if m.c.MatchInstr(cvalDef, ssa.OpcodeFuelDec) {
+		// 		sub $1, %fuel
+		// 		jle  <slow>          ;; or jg, for a Brz
+		//
+		// SUB already sets the flags the branch needs, so the decrement and the test
+		// are the same instruction: the whole termination check is these two. Signed
+		// LE rather than Z so that a counter driven below zero -- which a re-entry
+		// restoring an already-exhausted value can do -- keeps taking the slow path
+		// instead of wrapping around for another 2^64 ticks.
+		//
+		// Matched here rather than through condBranchMatches because that list is
+		// shared with lowerSelect, which must never see a FuelDec.
+		m.insert(m.allocateInstr().asAluRmiR(aluRmiROpcodeSub, newOperandImm32(1), fuelVReg, true))
+		cc := condLE
+		if b.Opcode() == ssa.OpcodeBrz {
+			cc = condNLE
+		}
+		m.insert(m.allocateInstr().asJmpIf(cc, newOperandLabel(target)))
+		cvalDef.Instr.MarkLowered()
+		return
+	}
+
 	switch m.c.MatchInstrOneOf(cvalDef, condBranchMatches[:]) {
 	case ssa.OpcodeIcmp:
 		cvalInstr := cvalDef.Instr
@@ -548,6 +570,12 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 	switch op := instr.Opcode(); op {
 	case ssa.OpcodeBrz, ssa.OpcodeBrnz, ssa.OpcodeJump, ssa.OpcodeBrTable:
 		panic("BUG: branching instructions are handled by LowerBranches")
+	case ssa.OpcodeFuelDec:
+		// The frontend only ever emits this immediately before the branch that
+		// consumes it, so LowerConditionalBranch above has already folded it in and
+		// marked it lowered. Reaching here means something moved it away from its
+		// branch, which would leave the decrement without its test.
+		panic("BUG: FuelDec must be folded into the conditional branch consuming it")
 	case ssa.OpcodeReturn:
 		panic("BUG: return must be handled by backend.Compiler")
 	case ssa.OpcodeIconst, ssa.OpcodeF32const, ssa.OpcodeF64const: // Constant instructions are inlined.

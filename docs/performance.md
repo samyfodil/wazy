@@ -152,26 +152,29 @@ The win from deleting reflection is structural, not per-call, and its magnitude
 belongs in [§3](#3-what-the-optimization-work-bought) because the path it beats
 is wazy's own, now-deleted one.
 
-The interruptible advantage is not free everywhere. From the same H6 write-up
-(amd64, Xeon D-2123IT, min of 10):
+The interruptible cost is small and no longer shape-dependent. `WithCloseOnContextDone`
+compiles to a decrement of a reserved register and a predicted-not-taken branch at every
+function entry and loop back-edge; when the counter runs out, one trip through Go does the
+authoritative closed check and yields. Measured on an Atom C3558 (min of 10, interleaved),
+wazy close-on versus close-off:
 
-| workload | wazy on/off | wazero on/off |
+| workload | wazy | wazero |
 |---|---|---|
-| `fibonacci` (real compute) | **1.15x** | 24.3x |
-| spin loop (near-empty kernel) | **4.04x** | 53.7x |
-| host-call loop (10k host calls/op) | **1.66x** | 1.82x |
+| `fibonacci` (real compute) | **1.18x** | 11.6x |
+| host-call-dense loop | **1.02x** | 1.86x |
+| spin loop (near-empty kernel) | **1.44x** | 2.06x |
 
-On arm64 (Apple M4) the spin kernel does far better than it does here: **1.03x**,
-down from 7.09x before the rework, i.e. the check is essentially free on that
-core. The amd64 residual is a property of that machine, not of the design.
+The spin kernel is the worst case and always will be: it has no body to dilute a
+per-back-edge decrement against.
 
-The spin kernel has no body to dilute a per-back-edge load and branch, so it is
-the worst case and always will be. The host-call loop is the one place the
-current design is *worse* than the amortized check it replaced (it was 1.06x):
-compiled code runs inside `runtime.entersyscall`, so every return from a host
-call back into wasm pays an `entersyscall`/`exitsyscall` pair — measured at
-~15 ns per host call. That is the price of the guarantee; the option stays
-opt-in.
+**A note on why those numbers come from an Atom.** On a Skylake-family core, code
+*placement* swamps all of this. A branch that crosses or ends on a 32-byte boundary is not
+cached in the uop cache (Intel erratum SKX102), and wazy does nothing to control where its
+branches land -- functions are aligned to 16 bytes and nothing else. Shifting every compiled
+function by ten bytes, changing nothing else, moves `random_mat_mul` by 17% and `fibonacci`
+by 32% on a Xeon D-2123IT. Any A/B below roughly 10% on such a core is unreadable unless
+placement is held fixed or swept. The Atom has no uop cache, so it has no such lottery, and
+its numbers mean what they say.
 
 ### Compiled execution
 

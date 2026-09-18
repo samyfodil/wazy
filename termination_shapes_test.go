@@ -13,9 +13,9 @@ import (
 )
 
 // Guest code can run unboundedly without ever crossing a `loop` back-edge, which
-// used to be the only place WithCloseOnContextDone emitted its module-closed
-// check. Both shapes below ran forever under a cancelled context until the check
-// was also emitted at function entry.
+// used to be the only place WithCloseOnContextDone emitted its termination check.
+// Both shapes below ran forever under a cancelled context until the check was
+// also emitted at function entry.
 //
 // Wasm's structured control flow makes `loop` the only backward branch within a
 // function, so the call graph is the only other way to build one.
@@ -102,7 +102,66 @@ func requireInterrupted(t *testing.T, newCfg func() wazy.RuntimeConfig, bin []by
 		require.Error(t, callErr)
 		require.Contains(t, callErr.Error(), "module closed with context deadline exceeded")
 	case <-time.After(hardLimit):
-		t.Fatal("call was never interrupted: the module-closed check is not reached on this shape")
+		t.Fatal("call was never interrupted: the termination check is not reached on this shape")
+	}
+}
+
+// hostCallLoopModule is `loop (call $cb) (br 0)`: an infinite loop whose body
+// leaves compiled code on every iteration. It is the shape that breaks a naive
+// fuel counter: a Go call restores the counter that compiled code was holding in
+// a register, so a counter that is REFILLED rather than PRESERVED across an exit
+// to Go would start every iteration with a full budget and never run out -- and
+// the module-closed check, which only happens when it does, would never run.
+func hostCallLoopModule() []byte {
+	return binaryencoding.EncodeModule(&wasm.Module{
+		TypeSection:     []wasm.FunctionType{voidFuncType()},
+		ImportSection:   []wasm.Import{{Module: "env", Name: "cb", Type: wasm.ExternTypeFunc, DescFunc: 0}},
+		FunctionSection: []wasm.Index{0},
+		ExportSection:   []wasm.Export{{Name: "run", Type: wasm.ExternTypeFunc, Index: 1}},
+		CodeSection: []wasm.Code{
+			// loop (call 0) (br 0) end
+			{Body: []byte{0x03, 0x40, opCall, 0x00, 0x0c, 0x00, opEnd, opEnd}},
+		},
+	})
+}
+
+// TestEnsureTerminationHostCallLoop is requireInterrupted for that shape. It
+// needs its own runner because the guest imports a host function.
+func TestEnsureTerminationHostCallLoop(t *testing.T) {
+	requireCompiler(t)
+
+	const timeout = 200 * time.Millisecond
+	const hardLimit = 30 * time.Second
+
+	ctx := context.Background()
+	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler().WithCloseOnContextDone(true))
+	defer r.Close(ctx)
+
+	_, err := wazy.HostProc0(r.NewHostModuleBuilder("env").NewFunctionBuilder(), func(context.Context, api.Module) {}).
+		Export("cb").
+		Instantiate(ctx)
+	require.NoError(t, err)
+
+	mod, err := r.Instantiate(ctx, hostCallLoopModule())
+	require.NoError(t, err)
+	run := mod.ExportedFunction("run")
+	require.NotNil(t, run)
+
+	callCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, callErr := run.Call(callCtx)
+		done <- callErr
+	}()
+
+	select {
+	case callErr := <-done:
+		require.Error(t, callErr)
+		require.Contains(t, callErr.Error(), "module closed with context deadline exceeded")
+	case <-time.After(hardLimit):
+		t.Fatal("call was never interrupted: a host call is resetting the termination check")
 	}
 }
 

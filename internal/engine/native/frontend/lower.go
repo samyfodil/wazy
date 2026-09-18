@@ -44,12 +44,12 @@ type (
 		// that pending entry's BodyBlkIDEnd once the try body has been
 		// fully lowered. Unused (left zero) for all other frame kinds.
 		pendingEhIdx int
-		// moduleClosedSlow and notClosed are the two successors of this loop's
-		// inline module-closed test; see emitModuleClosedTest. Both are nil unless
-		// this is a loop frame under ensureTermination. They are recorded here
-		// rather than recovered from the header's successor list because the GC
-		// safepoint may already have split the header block.
-		moduleClosedSlow, notClosed ssa.BasicBlock
+		// fuelSlow and fuelOK are the two successors of this loop's inline fuel
+		// check; see emitFuelCheck. Both are nil unless this is a loop frame under
+		// ensureTermination. They are recorded here rather than recovered from the
+		// header's successor list because the GC safepoint may already have split
+		// the header block.
+		fuelSlow, fuelOK ssa.BasicBlock
 	}
 
 	controlFrameKind byte
@@ -175,9 +175,9 @@ func (c *Compiler) lowerBody(entryBlk ssa.BasicBlock) {
 	// a fixed stack depth, and return_call self-recursion runs forever at a fixed
 	// depth without growing the stack. Neither ever crosses a `loop`. Checking on
 	// entry closes both, and covers every call form since they all arrive here.
-	var moduleClosedSlow, body ssa.BasicBlock
+	var fuelSlow, body ssa.BasicBlock
 	if c.ensureTermination {
-		moduleClosedSlow, body = c.emitModuleClosedTest()
+		fuelSlow, body = c.emitFuelCheck()
 	}
 
 	if c.needListener {
@@ -205,7 +205,7 @@ func (c *Compiler) lowerBody(entryBlk ssa.BasicBlock) {
 	}
 
 	if c.ensureTermination {
-		c.ssaBuilder.SetCurrentBlock(moduleClosedSlow)
+		c.ssaBuilder.SetCurrentBlock(fuelSlow)
 		c.emitCheckModuleExitCodeCall(body)
 		c.ssaBuilder.Seal(body)
 	}
@@ -1374,12 +1374,12 @@ func (c *Compiler) lowerCurrentOpcode() {
 		}
 
 		if c.ensureTermination {
-			// Poll ModuleInstance.Closed on every back-edge. The slow path is left
-			// empty here and filled in at this loop's End (see OpcodeEnd), so that
-			// block layout -- which follows emission order -- puts the rare path on
-			// the forward branch and keeps the loop body on the fallthrough.
+			// Spend a tick of termination fuel on every back-edge. The slow path is
+			// left empty here and filled in at this loop's End (see OpcodeEnd), so
+			// that block layout -- which follows emission order -- puts the rare path
+			// on the forward branch and keeps the loop body on the fallthrough.
 			frame := state.ctrlPeekAt(0)
-			frame.moduleClosedSlow, frame.notClosed = c.emitModuleClosedTest()
+			frame.fuelSlow, frame.fuelOK = c.emitFuelCheck()
 		}
 	case wasm.OpcodeIf:
 		bt := c.readBlockType()
@@ -1495,8 +1495,8 @@ func (c *Compiler) lowerCurrentOpcode() {
 		case controlFrameKindFunction:
 			break // This is the very end of function.
 		case controlFrameKindLoop:
-			if ctrl.moduleClosedSlow != nil {
-				// Emit the module-closed slow path now, at the end of the loop body, so
+			if ctrl.fuelSlow != nil {
+				// Emit the out-of-fuel slow path now, at the end of the loop body, so
 				// it lays out after the body rather than between the header and it.
 				//
 				// Save and restore the current block around it: on the fallThrough path
@@ -1504,9 +1504,9 @@ func (c *Compiler) lowerCurrentOpcode() {
 				// in followingBlk, so leaving the builder pointed at the slow block would
 				// emit the rest of the enclosing frame into it, after its terminator.
 				cur := builder.CurrentBlock()
-				builder.SetCurrentBlock(ctrl.moduleClosedSlow)
-				c.emitCheckModuleExitCodeCall(ctrl.notClosed)
-				builder.Seal(ctrl.notClosed)
+				builder.SetCurrentBlock(ctrl.fuelSlow)
+				c.emitCheckModuleExitCodeCall(ctrl.fuelOK)
+				builder.Seal(ctrl.fuelOK)
 				builder.SetCurrentBlock(cur)
 			}
 			// Loop header block can be reached from any br/br_table contained in the loop,
@@ -4477,53 +4477,47 @@ func (c *Compiler) lowerTailCallReturnCallRef(typeIndex uint32) {
 	c.lowerReturn(builder)
 }
 
-// emitModuleClosedTest emits the inline module-closed poll into the current block
-// and returns its two successors: the slow block, which the caller fills in with
-// emitCheckModuleExitCodeCall, and the not-closed block, which is left as the
+// emitFuelCheck emits the inline termination-fuel check into the current block and
+// returns its two successors: the slow block, which the caller fills in with
+// emitCheckModuleExitCodeCall, and the still-fuelled block, which is left as the
 // current block and stays unsealed until the caller decides the slow path rejoins
 // it.
 //
-// Load moduleClosedPtr out of execCtx, then load the ModuleInstance.Closed it
-// aims at. Zero falls through; non-zero -- set either by the cancellation watchdog
-// or by an explicit Close from another goroutine -- takes the slow path.
+// The whole check is one decrement of a reserved register and one branch (see
+// ssa.OpcodeFuelDec): the backends fold the decrement's own flags into the branch,
+// so nothing is loaded, nothing is stored, and the loop-carried dependency is the
+// single cycle of the decrement itself.
 //
-// Neither load is atomic, and neither needs to be. The pointer is written once
-// during callEngine setup, and the flag is a single aligned word that only ever
-// goes from zero to non-zero, so the worst a racing close costs is being noticed
-// one check later. The authoritative, atomic check still happens in Go, behind
-// the trampoline the slow path calls.
-func (c *Compiler) emitModuleClosedTest() (moduleClosedSlow, notClosed ssa.BasicBlock) {
+// What it does NOT do is read ModuleInstance.Closed. That check is not skipped,
+// only moved: running out of fuel exits to Go, and the Go side does the
+// authoritative atomic check there (see ExitCodeCheckModuleExitCode in
+// native/call_engine.go). Reading the flag inline would be cheap to write and is
+// what this used to do, but it cannot terminate a guest on its own -- a spinning
+// guest holds its P, so the watchdog goroutine that sets the flag never gets to
+// run. Guaranteeing a return to Go is the point; the flag is what Go looks at
+// once it is back.
+func (c *Compiler) emitFuelCheck() (fuelSlow, fuelOK ssa.BasicBlock) {
 	builder := c.ssaBuilder
 
-	closedPtr := builder.AllocateInstruction().
-		AsLoad(c.execCtxPtrValue,
-			nativeapi.ExecutionContextOffsetModuleClosedPtr.U32(),
-			ssa.TypeI64,
-		).Insert(builder).Return()
-	closed := builder.AllocateInstruction().
-		AsLoad(closedPtr, 0, ssa.TypeI64).Insert(builder).Return()
+	exhausted := builder.AllocateInstruction().AsFuelDec().Insert(builder).Return()
 
-	zero := builder.AllocateInstruction().AsIconst64(0).Insert(builder).Return()
-	closedNonZero := builder.AllocateInstruction().
-		AsIcmp(closed, zero, ssa.IntegerCmpCondNotEqual).Insert(builder).Return()
-
-	moduleClosedSlow, notClosed = builder.AllocateBasicBlock(), builder.AllocateBasicBlock()
+	fuelSlow, fuelOK = builder.AllocateBasicBlock(), builder.AllocateBasicBlock()
 	builder.AllocateInstruction().
-		AsBrnz(closedNonZero, ssa.ValuesNil, moduleClosedSlow).
+		AsBrnz(exhausted, ssa.ValuesNil, fuelSlow).
 		Insert(builder)
-	c.insertJumpToBlock(ssa.ValuesNil, notClosed)
+	c.insertJumpToBlock(ssa.ValuesNil, fuelOK)
 
 	// This branch is the slow block's only way in, so it is already complete.
-	builder.Seal(moduleClosedSlow)
+	builder.Seal(fuelSlow)
 
-	builder.SetCurrentBlock(notClosed)
+	builder.SetCurrentBlock(fuelOK)
 	return
 }
 
 // emitCheckModuleExitCodeCall calls the trampoline that re-enters Go for the full
-// atomic module-closed check, then jumps to target. The trampoline normally panics
-// with the exit error and never returns; target is the path taken when the flag
-// turned out to be a false alarm.
+// atomic module-closed check, then jumps to target. The trampoline refills the fuel
+// counter on its way back, and normally panics with the exit error and never
+// returns at all; target is the path taken when the module is still open.
 func (c *Compiler) emitCheckModuleExitCodeCall(target ssa.BasicBlock) {
 	builder := c.ssaBuilder
 

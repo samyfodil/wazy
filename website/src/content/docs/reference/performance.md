@@ -30,7 +30,7 @@ Measured against wazero in the same runs, on the same workloads.
 | Path | wazy vs wazero | What & why |
 | --- | :--: | --- |
 | **Instantiate** | **9.1x** | 1.724 µs vs 15.74 µs, on a 37 KB TinyGo module. |
-| **Interruptible loops** (`WithCloseOnContextDone`) | **21x** on real compute; +15% vs +81% overhead | The check is an inline load and a predicted-not-taken branch, not a Go round-trip: `fibonacci` pays +15% with the option on where wazero pays +2330%. A near-empty spin kernel is the worst case at 4.0x. A host-call-dense loop pays +66%, most of it the `entersyscall`/`exitsyscall` pair each host-call return needs. Against `wazero@main`. |
+| **Interruptible loops** (`WithCloseOnContextDone`) | **9.8x** on real compute; +18% vs +1057% overhead | The check is a register decrement and a predicted-not-taken branch, not a Go round-trip: `fibonacci` pays +18% with the option on where wazero pays +1057%. A near-empty spin kernel is the worst case at +44%; a host-call-dense loop pays +2% against wazero's +86%. Measured on a core with no uop cache, because code placement swamps smaller differences on Skylake -- see [docs/performance.md](docs/performance.md). Against `wazero@main`. |
 | **Compiled execution** | memory-heavy code leads | `string_manipulation` −18%, `reverse_array` −14%, `base64` −12%, `fibonacci` a wash — the advantage tracks memory-access intensity, not arithmetic. |
 | **Host calls** (Go ↔ Wasm) | a tie | 47.8 ns here, 48.3 ns there, on `HostCall/gomodule/CallWithStack` — the shared baseline both runtimes implement the same way. The win is structural, not per-call. |
 | **Cumulative** | geomean **−17.8%**, B/op **−22.9%** | Across `internal/integration_test/bench`, versus the wazero fork point, with upstream wazero as a control in the same runs — its arms stayed flat. |
@@ -91,9 +91,8 @@ The head-to-head module also carries a three-way comparison against wasmtime —
 - **Use `CallWithStack`** in hot loops; `Call` allocates the result slice.
 - **Reserve memory capacity** with `WithMemoryCapacityReservePages` if the guest grows its memory
   repeatedly.
-- **Know what `WithCloseOnContextDone` costs you.** Real compute pays about +15%, a near-empty spin
-  kernel 4.0x, and a host-call-dense loop +66% (every host-call return crosses
-  `entersyscall`/`exitsyscall`). There is no knob; leave it off unless you need to interrupt a stuck
-  guest.
+- **Know what `WithCloseOnContextDone` costs you.** Real compute pays about +18%, a
+  near-empty spin kernel +44%, and a host-call-dense loop +2%. There is no knob; leave it
+  off unless you need to interrupt a stuck guest.
 - **Do not pool instances.** Instantiation is 1.7 µs and 3.3 KB; a fresh instance per request is
   both faster to reason about and safer than scrubbing a reused one.

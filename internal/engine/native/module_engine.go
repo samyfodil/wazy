@@ -255,10 +255,6 @@ func (m *moduleEngine) NewFunction(index wasm.Index) api.Function {
 	ce.execCtx.tryTableLeaveTrampolineAddress = sharedFunctions.tryTableLeaveAddress
 	ce.execCtx.memmoveAddress = memmovPtr
 	ce.execCtx.memclrAddress = memclrPtr
-	// atomic.Uint64's value word is at offset 0 (the noCopy/align64 markers ahead of
-	// it are zero-sized), so this aims straight at the word Closed.Load() reads.
-	// TestModuleClosedPtrAliasesClosed pins that.
-	ce.execCtx.moduleClosedPtr = (*uint64)(unsafe.Pointer(&m.module.Closed))
 	ce.init()
 	return ce
 }

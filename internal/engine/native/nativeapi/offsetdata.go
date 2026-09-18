@@ -106,11 +106,6 @@ const (
 	// ExecutionContextOffsetMemclrAddress is the offset of `memclrAddress`, the entry PC of
 	// the Go runtime's memclrNoHeapPointers, called by the memory.fill lowering.
 	ExecutionContextOffsetMemclrAddress Offset = 744
-	// ExecutionContextOffsetModuleClosedPtr is the offset of `moduleClosedPtr`, a
-	// *uint64 aimed at ModuleInstance.Closed. Under WithCloseOnContextDone compiled
-	// code reads it at every function entry and loop back-edge: load the pointer,
-	// load the uint64 behind it, branch to the slow path when non-zero.
-	ExecutionContextOffsetModuleClosedPtr Offset = 752
 )
 
 // AssertSavedRegistersFit panics if a save/restore layout that ends at absolute offset end
