@@ -86,8 +86,10 @@ With it off the two compilers are ~30% apart. Against an interpreter the option 
 the 1.8x in the interpreted rows is the engines and nothing else.
 [go-pdfium](https://github.com/klippa-app/go-pdfium/blob/main/experimental/BENCHMARKS.md#the-cost-of-close-on-context-done)
 measured the same effect across 5,000 PDFs, at ~4.5x for wazero and ~1.4x for wazy. wazero's
-[#2533](https://github.com/wazero/wazero/pull/2533) cuts its cost to about 1.04x, better than our
-1.7x here; that is a gap to close, not one to report around.
+[#2533](https://github.com/wazero/wazero/pull/2533) solves the same problem on their side; wazy's
+own check became native in [#71](https://github.com/samyfodil/wazy/pull/71), so the 1.7x above is
+what v0.3.0 cost rather than what current `main` costs — there it is 1.04x–1.28x depending on the
+core, against 1.01x–1.10x for wazero with its three in-flight PRs.
 
 The 1 KB compiled row is the one that moved most. The first version of this report had wazy
 *losing* it at 0.6x, because instantiation dominates a document that small and two things made

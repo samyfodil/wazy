@@ -260,8 +260,12 @@ same 5 MB body:
 With it off the two compilers are ~30% apart. Against an interpreter the option is free on both —
 6.79 s with it and 6.87 s without on wazy, 11.96 s and 11.91 s on wazero — so the 1.7x in the
 interpreted rows is the engines and nothing else. [go-pdfium][pdfium-ccd] measured the same effect
-across 5,000 PDFs, at ~4.5x for wazero and ~1.4x for wazy. wazero's [#2533][w2533] cuts its cost to
-about 1.04x, better than our 1.7x here; that is a gap to close, not one to report around.
+across 5,000 PDFs, at ~4.5x for wazero and ~1.4x for wazy. wazero's [#2533][w2533] solves the same
+problem on their side; wazy's own check became native in [#71][pr71], which is in this branch, so
+the 1.7x above is what v0.3.0 cost and not what `main` costs. On `main` it is 1.04x–1.28x depending
+on the core, against 1.01x–1.10x for wazero with its three in-flight PRs — level on x86, behind on
+the M4, and faster than both in absolute time. All three machines are in
+[docs/performance.md](docs/performance.md).
 
 So: long compute is where the compiler wins, but 4.9x is the figure for a caller who needs
 cancellation, and ~1.3x is the figure for the code generators. The small-document row measures
@@ -324,3 +328,4 @@ Apache 2.0. See [LICENSE](LICENSE).
 [i29]: https://github.com/samyfodil/wazy/issues/29
 [pdfium-ccd]: https://github.com/klippa-app/go-pdfium/blob/main/experimental/BENCHMARKS.md#the-cost-of-close-on-context-done
 [w2533]: https://github.com/wazero/wazero/pull/2533
+[pr71]: https://github.com/samyfodil/wazy/pull/71
