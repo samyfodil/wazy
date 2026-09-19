@@ -80,13 +80,13 @@ regression on the common path) + drain/OSR in-flight frames + per-function mmap
 
 ## 3. What *does* exist, and the tractable directions
 
-- **Module-granular variant selection — already works.** `WithInterruptCheckInterval`
-  folds a compile parameter into `module.ID` (`module.go`), so recompiling the
+- **Module-granular variant selection — the mechanism works.** `AssignModuleID`
+  folds compile parameters into `module.ID` (`module.go`), so recompiling the
   whole module under a different context yields a distinct cached
-  `compiledModule` (H6). This is the "seam" — but it is whole-module recompile
-  under a *flag*, not hotness tiering, and it produces fresh code only for the
-  *next* instantiation. Useful for e.g. dialing interrupt-check density per
-  deployment; not a path to swapping a running instance.
+  `compiledModule`. `WithInterruptCheckInterval` rode this seam until H6's
+  rework removed it (see `OPTIMIZATIONS.md`). Either way it is whole-module
+  recompile under a *flag*, not hotness tiering, and it produces fresh code only
+  for the *next* instantiation — not a path to swapping a running instance.
 - **Reusable pieces for a future baseline tier:** `compileLocalWasmFunction`
   (`engine.go`) is an isolated per-function compile; the PC→function mappers and
   the native stack walker exist (read side of OSR). The write side does not.
@@ -180,27 +180,14 @@ Correctness verified both ISAs (amd64 + arm64/qemu): spec v1/v2, and the
 infinite-loop terminate-on-cancel/timeout/close suite all pass with the runtime
 mask + hoist.
 
-**Status: shipped (stable API).** The real-producer data retired the cost
-objection (free-to-neutral on Go/Rust/clang-C; the +5% is a synthetic-empty-loop
-artifact), so the runtime-mask path plus a setter were landed:
-
-- `wazy.SetInterruptCheckInterval(fn api.Function, interval uint64) error` (the
-  runtime counterpart of the compile-time `WithInterruptCheckInterval`, in the
-  root package) — bridges (interface assertion) to the native `callEngine`, which
-  validates the interval (0 or power of two) and writes `execCtx.interruptCheckMask`
-  with an atomic store. Per-function (per-callEngine) granularity: set it on the
-  `api.Function` handle you will call. Its doc carries the awareness notes
-  (raising the interval defers cancellation/GC yield for up to `interval`
-  iterations — only for loops known to be bounded).
-- **Gated to modules compiled with `WithCloseOnContextDone` + a non-zero
-  `WithInterruptCheckInterval`** — that is the *only* configuration under which any
-  interrupt-check code (hence the runtime-mask path) is emitted at loop headers;
-  otherwise the setter errors loudly rather than silently no-op'ing. The
-  interpreter engine also errors (no support).
-- **Benignly racy:** the mask affects only yield frequency, never correctness, so
-  another goroutine may retune a running function; because the mask is hoisted to
-  each loop's preheader, a change takes effect on the *next* loop entry (the
-  set-then-call use), not mid-spin.
+**Status: removed.** This shipped as `wazy.SetInterruptCheckInterval` and was
+later deleted along with the compile-time `WithInterruptCheckInterval`. The
+amortization it tuned existed because the loop-header check was a Go round-trip;
+once that became an inline load-and-branch (see H6), a counter guarding the check
+cost more than the check it guarded, and there was nothing left to tune. The
+runtime-retune idea is recorded here because the *shape* — an interface assertion
+from an `api.Function` down to the engine, writing a per-callEngine value that
+compiled code loads — is the one to reuse if another knob ever needs it.
 
 Verified both ISAs (amd64 + arm64/qemu): spec v1/v2, the terminate-on-cancel/
 timeout/close suite, and dedicated setter tests (retune + still-cancellable,

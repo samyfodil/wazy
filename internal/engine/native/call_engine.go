@@ -277,25 +277,10 @@ type (
 		// localsSaveAreaPtr points to the tryHandler's localsSaveArea slice
 		// backing array. Handlers load locals from this slice.
 		localsSaveAreaPtr uintptr
-		// interruptCounter is a monotonically increasing counter bumped at every
-		// loop header when WithCloseOnContextDone is active with a non-zero
-		// interrupt-check interval. The module-exit-code check is only performed
-		// when (interruptCounter & (interval-1)) == 0, amortizing the Go
-		// round-trip (which is also the scheduler/GC yield point) over N
-		// iterations. Its starting value is irrelevant to correctness.
-		interruptCounter uint64
-		// interruptCheckMask is (interval-1), loaded by loop headers to decide
-		// when to perform the module-exit-code check: the check runs when
-		// (interruptCounter & interruptCheckMask) == 0. Seeded per callEngine
-		// from the compiled module's interval, but a runtime value so the yield
-		// frequency can be retuned (e.g. for an observed-hot loop) without a
-		// recompile. mask==0 => check every iteration.
-		interruptCheckMask uint64
 		// gcCheckTrampolineAddress holds the address of the GC runtime type check trampoline.
 		gcCheckTrampolineAddress *byte
 		// memclrAddress holds the address of memclrNoHeapPointers implemented by the Go
-		// runtime. See memclr.go. It is last in this struct because the offsets in
-		// nativeapi are hand-maintained and additions go at the end.
+		// runtime. See memclr.go.
 		memclrAddress uintptr
 	}
 )
@@ -411,39 +396,6 @@ func (c *callEngine) Definition() api.FunctionDefinition {
 	return c.parent.module.Source.FunctionDefinition(c.indexInModule)
 }
 
-// SetInterruptCheckInterval retunes, at runtime, how often this function's
-// compiled loops perform the module-exit-code check (the scheduler/GC yield and
-// cancellation point) — a larger interval trades cancellation/GC responsiveness
-// for lower per-iteration overhead on a known-hot loop. It writes the amortized
-// check's mask (interval-1) into this callEngine's execution context, so no
-// recompile is needed. Implements the bridge interface behind
-// wazy.SetInterruptCheckInterval.
-//
-// The write is atomic and benignly racy: the mask affects only yield frequency,
-// never correctness, so another goroutine may call this while the function runs.
-// Because the mask is loaded once at each loop's preheader, a change applies the
-// next time a loop is entered (the common set-then-call use); it does not alter
-// the yield rate of a loop already spinning.
-//
-// It errors unless the module was compiled with WithCloseOnContextDone and a
-// non-zero WithInterruptCheckInterval (only then is the runtime-mask path
-// present in the code).
-func (c *callEngine) SetInterruptCheckInterval(interval uint64) error {
-	if err := wasm.ValidateInterruptCheckInterval(interval); err != nil {
-		return err
-	}
-	cm := c.parent.parent
-	if !cm.ensureTermination || cm.interruptCheckInterval == 0 {
-		return fmt.Errorf("runtime interrupt-check interval requires the module compiled with WithCloseOnContextDone and a non-zero WithInterruptCheckInterval")
-	}
-	var mask uint64
-	if interval > 1 {
-		mask = interval - 1 // interval 0 or 1 => mask 0 => check every iteration
-	}
-	atomic.StoreUint64(&c.execCtx.interruptCheckMask, mask)
-	return nil
-}
-
 // Call implements api.Function.
 func (c *callEngine) Call(ctx context.Context, params ...uint64) ([]uint64, error) {
 	if c.requiredParams != len(params) {
@@ -494,6 +446,40 @@ func (c *callEngine) addFrame(builder wasmdebug.ErrorBuilder, addr uintptr) (def
 		}
 	}
 	return
+}
+
+// outOfFuel is the body of the ExitCodeCheckModuleExitCode arm of the dispatch
+// loop below: the guest spent its last tick of termination fuel
+// (nativeapi.TerminationFuel) and is back in Go for the two things it cannot do
+// itself.
+//
+// The first is the check. Whether the module has been closed is state only Go can
+// read atomically, and closing it is what the deadline watchdog does.
+//
+// The second is the yield, and it is the reason this exit exists at all. Compiled
+// code is entered through asm trampolines marked unsafe for async preemption, so a
+// guest that never calls out holds its P for as long as it runs: the watchdog
+// goroutine that would close the module cannot be scheduled, and neither can a
+// stop-the-world. Handing the P back here is what makes both possible -- it is
+// what an entersyscall/exitsyscall bracket around every entry into compiled code
+// used to buy, at 28.5ns (amd64) on every host-call return rather than once per
+// 8192 fuel ticks.
+//
+// Then the check again, because the yield is exactly the window the watchdog
+// needed: without the second look a close landing during it would wait for the
+// next time the fuel ran out, doubling the worst-case latency for one atomic load.
+//
+// It is a function of its own rather than twenty lines inside the switch because
+// the loop it belongs to is also the hot path for host calls, and that loop is
+// easier to read when each arm is short.
+func outOfFuel(m *wasm.ModuleInstance) {
+	if err := m.FailIfClosed(); err != nil {
+		panic(err)
+	}
+	runtime.Gosched()
+	if err := m.FailIfClosed(); err != nil {
+		panic(err)
+	}
 }
 
 // CallWithStack implements api.Function.
@@ -656,7 +642,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 	if c.stackTop&(16-1) != 0 {
 		panic("BUG: stack must be aligned to 16 bytes")
 	}
-	entrypoint(c.preambleExecutable, c.executable, c.execCtxPtr, c.parent.opaquePtr, paramResultPtr, c.stackTop)
+	entrypointAsm(c.preambleExecutable, c.executable, c.execCtxPtr, c.parent.opaquePtr, paramResultPtr, c.stackTop)
 	for {
 		switch ec := c.execCtx.exitCode; ec & nativeapi.ExitCodeMask {
 		case nativeapi.ExitCodeOK:
@@ -700,7 +686,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 				runtime.KeepAlive(oldStack)
 			}
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
-			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr, newsp, newfp)
+			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr, newsp, newfp)
 		case nativeapi.ExitCodeGrowMemory:
 			mod := c.callerModuleInstance()
 			s := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
@@ -719,7 +705,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 				s[0] = res
 			}
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
-			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr, uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
+			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr, uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case nativeapi.ExitCodeTableGrow:
 			mod := c.callerModuleInstance()
 			s := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
@@ -733,7 +719,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 				s[0] = uint64(table.Grow(uint32(num), ref))
 			}
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
-			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
+			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case nativeapi.ExitCodeCallGoFunction:
 			index := nativeapi.GoFunctionIndexFromExitCode(ec)
@@ -751,7 +737,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			c.gcExec.LeaveGo()
 			// Back to the native code.
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
-			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
+			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case nativeapi.ExitCodeCallGoFunctionWithListener:
 			index := nativeapi.GoFunctionIndexFromExitCode(ec)
@@ -776,7 +762,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			listener.After(ctx, callerModule, def, s)
 			// Back to the native code.
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
-			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
+			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case nativeapi.ExitCodeCallGoModuleFunction:
 			index := nativeapi.GoFunctionIndexFromExitCode(ec)
@@ -793,7 +779,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			c.gcExec.LeaveGo()
 			// Back to the native code.
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
-			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
+			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case nativeapi.ExitCodeCallGoModuleFunctionWithListener:
 			index := nativeapi.GoFunctionIndexFromExitCode(ec)
@@ -818,7 +804,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			listener.After(ctx, callerModule, def, s)
 			// Back to the native code.
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
-			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
+			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case nativeapi.ExitCodeCallListenerBefore:
 			stack := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
@@ -828,7 +814,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			def := mod.Source.FunctionDefinition(index + mod.Source.ImportFunctionCount)
 			listener.Before(ctx, mod, def, stack[1:], c.stackIterator(false))
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
-			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
+			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case nativeapi.ExitCodeCallListenerAfter:
 			stack := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
@@ -838,17 +824,12 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			def := mod.Source.FunctionDefinition(index + mod.Source.ImportFunctionCount)
 			listener.After(ctx, mod, def, stack[1:])
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
-			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
+			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case nativeapi.ExitCodeCheckModuleExitCode:
-			// Note: this operation must be done in Go, not native code. The reason is that
-			// native code cannot be preempted and that means it can block forever if there are not
-			// enough OS threads (which we don't have control over).
-			if err := m.FailIfClosed(); err != nil {
-				panic(err)
-			}
+			outOfFuel(m)
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
-			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
+			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case nativeapi.ExitCodeRefFunc:
 			mod := c.callerModuleInstance()
@@ -857,7 +838,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			ref := mod.Engine.FunctionInstanceReference(funcIndex)
 			s[0] = uint64(ref)
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
-			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
+			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case nativeapi.ExitCodeGCCheck:
 			mod := c.callerModuleInstance()
@@ -874,7 +855,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 				s[0] = wasm.RunGC(mod, s[0], s[1], s[2], s[3], s[4], s[5], nil)
 			}
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
-			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
+			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case nativeapi.ExitCodeMemoryWait32:
 			mod := c.callerModuleInstance()
@@ -894,7 +875,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			})
 			s[0] = res
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
-			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
+			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case nativeapi.ExitCodeMemoryWait64:
 			mod := c.callerModuleInstance()
@@ -914,7 +895,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			})
 			s[0] = uint64(res)
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
-			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
+			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case nativeapi.ExitCodeMemoryNotify:
 			mod := c.callerModuleInstance()
@@ -925,7 +906,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			res := mem.Notify(offset, count)
 			s[0] = uint64(res)
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
-			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
+			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case nativeapi.ExitCodeUnreachable:
 			panic(wasmruntime.ErrRuntimeUnreachable)
@@ -965,7 +946,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			// wasm.ExceptionTable.
 			s[0] = mod.ExceptionTable().Ref(exn)
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
-			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
+			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case nativeapi.ExitCodeThrow:
 			// Throw trampoline: (execCtx, exnref) → ().
@@ -1082,7 +1063,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			// to read after the trampoline returns.
 			c.execCtx.caughtExceptionClauseIdx = -1
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
-			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
+			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case nativeapi.ExitCodeTryTableLeave:
 			// Pop the most recent scope and restore the locals save area
@@ -1092,7 +1073,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 				c.restoreLocalsSaveAreaPtrFrom(c.activeCatchScopes, n-2)
 			}
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
-			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
+			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		default:
 			panic("BUG")
@@ -1198,7 +1179,7 @@ func (c *callEngine) handleThrow(exn *wasm.Exception) bool {
 				sp, fp := resolveThrowTransferSPFP(fr, cm.functionFrameSizes[fnIdx])
 				resumePC := scopes[scopeIdx].resumePC
 				restoreFn := cm.sharedFunctions.throwTransferRegisterRestoreAddress
-				afterThrowTransferEntrypoint(restoreFn, c.execCtxPtr, sp, fp, resumePC)
+				afterThrowTransferEntrypointAsm(restoreFn, c.execCtxPtr, sp, fp, resumePC)
 				return true
 			}
 			containing++

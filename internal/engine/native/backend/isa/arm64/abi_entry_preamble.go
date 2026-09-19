@@ -157,6 +157,14 @@ func (m *machine) constructEntryPreamble(sig *ssa.Signature) (root *instruction)
 	// 		mov sp, goAllocatedStackPtr
 	cur = m.move64(spVReg, goAllocatedStackPtr, cur)
 
+	// Fill the termination-fuel counter for this entry into compiled code.
+	// 		movz fuel, #TerminationFuel
+	//
+	// Emitted unconditionally: the preamble is shared by every module, and one
+	// immediate move per entry into compiled code is not worth a second preamble to
+	// avoid when the option is off. See fuelVReg.
+	cur = m.lowerConstantI64AndInsert(cur, fuelVReg, nativeapi.TerminationFuel)
+
 	prReg := paramResultSlicePtr
 	if len(abi.Args) > 2 && len(abi.Rets) > 0 {
 		// paramResultSlicePtr is modified during the execution of goEntryPreamblePassArg,

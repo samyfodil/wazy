@@ -50,7 +50,7 @@ sources):
 | `BenchmarkCompileModulesExtensive` | Compiles five real producer outputs (TinyGo 370 KB, Rust 10 KB, Zig 5 KB, zig-cc 786 KB, cargo-wasi 104 KB) on a fresh runtime every iteration. |
 | `BenchmarkConstAddrLoads`, `BenchmarkDynAddrLoads`, `BenchmarkURemAddrLoads`, `BenchmarkDominatedBounds` | Bounds-check-elision kernels (constant, masked, `urem`-bounded and dominated addresses). |
 | `BenchmarkDispatch*` | A synthetic `call_indirect` dispatch kernel: `mono`, `poly`, `direct`, plus heavy-callee variants. |
-| `BenchmarkCloseOnContextDone`, `BenchmarkHostCallLoopCloseOnContextDone`, `BenchmarkFibCloseOnContextDone`, `BenchmarkInterruptCheckInterval` | Interruptible-loop cost under `WithCloseOnContextDone`, and the `WithInterruptCheckInterval` sweep. |
+| `BenchmarkCloseOnContextDone`, `BenchmarkHostCallLoopCloseOnContextDone`, `BenchmarkFibCloseOnContextDone` | Interruptible cost under `WithCloseOnContextDone`, on a near-empty spin kernel, a host-call-dense loop, and real compute. |
 | `BenchmarkCase3`, `BenchmarkCompile3`, `BenchmarkExecute3`, `BenchmarkExecute3Heavy`, `BenchmarkRelaxedSimd`, `BenchmarkSpectreCost` | The three-way arms that include wasmtime (see [§4](#4-against-wasmtime)). |
 
 ### The in-repo suites
@@ -152,12 +152,52 @@ The win from deleting reflection is structural, not per-call, and its magnitude
 belongs in [§3](#3-what-the-optimization-work-bought) because the path it beats
 is wazy's own, now-deleted one.
 
-The interruptible-loop advantage is not free everywhere. From the same H6 write-up:
-near-empty compute kernels (a bare spin loop, the inner fib loop) pay a **1.7–2.4x
-worst case** with `WithCloseOnContextDone` on, which is why the feature stays
-opt-in and why the per-loop check interval is tunable with
-`WithInterruptCheckInterval` (default 64, power of two, folded into the module ID
-so distinct intervals are distinct cache entries).
+The interruptible cost is small and no longer shape-dependent. `WithCloseOnContextDone`
+compiles to a decrement of a reserved register and a predicted-not-taken branch at every
+function entry and loop back-edge; when the counter runs out, one trip through Go does the
+authoritative closed check and yields. Measured on an Atom C3558 (min of 10, interleaved).
+
+**Every ratio below is one runtime against itself** -- the same build with the option
+on divided by the same build with it off, i.e. what enabling it costs you. It is not a
+wazy-versus-wazero comparison; the two columns are two separate self-ratios, and a
+smaller number is better in both.
+
+| workload | wazy on/off | wazero on/off |
+|---|---|---|
+| `fibonacci` (real compute) | **1.18x** | 11.6x |
+| host-call-dense loop | **1.02x** | 1.86x |
+| spin loop (near-empty kernel) | **1.44x** | 2.06x |
+
+The spin kernel is the worst case and always will be: it has no body to dilute a
+per-back-edge decrement against.
+
+arm64 agrees, measured on an Apple M4 (min of 10). Same self-ratio: the host-call-dense
+loop costs **1.03x** and the spin kernel **1.13x**, where the loop-header design this
+replaced cost 7.44x on that kernel. The M4 does far better on the spin kernel than any x86 core here,
+which is the same placement story as below -- it has no uop cache erratum to hit.
+
+**A note on why those numbers come from an Atom, and on the JCC erratum.** On a
+Skylake-family core, code *placement* used to swamp all of this. A branch that crosses or
+ends on a 32-byte boundary is not cached in the uop cache (Intel erratum SKX102), and wazy
+emitted about 15% of its branches in that state purely by accident of byte counts. Shifting
+every compiled function by ten bytes, changing nothing else, moved `random_mat_mul` by 17%
+and `fibonacci` by 32% on a Xeon D-2123IT. The Atom has no uop cache, so it has no such
+lottery, which is why the table above is measured there.
+
+wazy now mitigates it: on a CPU that has the erratum, functions are aligned to 32 bytes and
+multi-byte NOPs keep every branch clear of the boundaries, taking a real TinyGo module from
+398 affected branches to **0** for **+2.1%** code size. The gate is CPUID family/model
+against Intel's own affected list, so unaffected Intel parts and all AMD parts pay nothing,
+and it is part of the compilation cache key -- a module compiled on an affected host is not
+loaded by an unaffected one. On arm64 it is a compile-time no-op, verified byte-identical.
+
+What this buys, placement-marginalised over 16 placements on that Xeon, is mostly
+*predictability*: `fibonacci`'s spread across placements collapses from 24.7% to 3.1% and
+`random_mat_mul`'s from 14.6% to 1.2%. Median throughput moves less -- the per-workload
+deltas are at or near the +-3% floor that wazero's control rows show -- with two exceptions
+well outside it, both on the branch-dense interruptible path: the spin kernel is **-32%**
+and `fibonacci` under `WithCloseOnContextDone` is **-23%**. Aligning functions to 32 bytes
+without the NOP padding is flat everywhere, so the win is the padding, not the alignment.
 
 ### Compiled execution
 

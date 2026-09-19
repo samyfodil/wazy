@@ -44,6 +44,12 @@ type (
 		// that pending entry's BodyBlkIDEnd once the try body has been
 		// fully lowered. Unused (left zero) for all other frame kinds.
 		pendingEhIdx int
+		// fuelSlow and fuelOK are the two successors of this loop's inline fuel
+		// check; see emitFuelCheck. Both are nil unless this is a loop frame under
+		// ensureTermination. They are recorded here rather than recovered from the
+		// header's successor list because the GC safepoint may already have split
+		// the header block.
+		fuelSlow, fuelOK ssa.BasicBlock
 	}
 
 	controlFrameKind byte
@@ -164,6 +170,16 @@ func (l *loweringState) ctrlPeekAt(n int) (ret *controlFrame) {
 func (c *Compiler) lowerBody(entryBlk ssa.BasicBlock) {
 	c.ssaBuilder.Seal(entryBlk)
 
+	// A loop back-edge is not the only way a guest runs unboundedly. A loop-free
+	// call graph (f calls g twice, g calls h twice, ...) performs 2^depth calls at
+	// a fixed stack depth, and return_call self-recursion runs forever at a fixed
+	// depth without growing the stack. Neither ever crosses a `loop`. Checking on
+	// entry closes both, and covers every call form since they all arrive here.
+	var fuelSlow, body ssa.BasicBlock
+	if c.ensureTermination {
+		fuelSlow, body = c.emitFuelCheck()
+	}
+
 	if c.needListener {
 		c.callListenerBefore()
 	}
@@ -186,6 +202,12 @@ func (c *Compiler) lowerBody(entryBlk ssa.BasicBlock) {
 			// After that, we initialize the known bounds for the new compilation target block.
 			c.initializeCurrentBlockKnownBounds()
 		}
+	}
+
+	if c.ensureTermination {
+		c.ssaBuilder.SetCurrentBlock(fuelSlow)
+		c.emitCheckModuleExitCodeCall(body)
+		c.ssaBuilder.Seal(body)
 	}
 }
 
@@ -1337,17 +1359,6 @@ func (c *Compiler) lowerCurrentOpcode() {
 
 		args := c.allocateVarLengthValues(len(bt.Params), state.values[originalLen:]...)
 
-		// The interrupt-check mask is loop-invariant, so load it once here in the
-		// preheader (which dominates the loop header) rather than every iteration.
-		var interruptMaskVal ssa.Value
-		if c.ensureTermination && c.interruptCheckInterval != 0 {
-			interruptMaskVal = builder.AllocateInstruction().
-				AsLoad(c.execCtxPtrValue,
-					nativeapi.ExecutionContextOffsetInterruptCheckMask.U32(),
-					ssa.TypeI64,
-				).Insert(builder).Return()
-		}
-
 		// Insert the jump to the header of loop.
 		br := builder.AllocateInstruction()
 		br.AsJump(args, loopHeader)
@@ -1363,49 +1374,12 @@ func (c *Compiler) lowerCurrentOpcode() {
 		}
 
 		if c.ensureTermination {
-			if c.interruptCheckInterval == 0 {
-				// Check every iteration: a Go round-trip (also the scheduler/GC
-				// yield point) at every loop header.
-				c.emitCheckModuleExitCode(builder)
-			} else {
-				// Amortized checking: bump a counter in the execution context and
-				// only do the Go round-trip when (counter & mask) == 0. The mask
-				// (= interval-1) was hoisted to the preheader (interruptMaskVal) and
-				// comes from the execution context at runtime rather than baked in,
-				// so the yield frequency can be retuned per run/per loop without
-				// recompiling. mask==0 (interval 1) degenerates to checking every
-				// iteration.
-				current := builder.AllocateInstruction().
-					AsLoad(c.execCtxPtrValue,
-						nativeapi.ExecutionContextOffsetInterruptCounter.U32(),
-						ssa.TypeI64,
-					).Insert(builder).Return()
-				one := builder.AllocateInstruction().AsIconst64(1).Insert(builder).Return()
-				next := builder.AllocateInstruction().AsIadd(current, one).Insert(builder).Return()
-				builder.AllocateInstruction().
-					AsStore(ssa.OpcodeStore, next, c.execCtxPtrValue,
-						nativeapi.ExecutionContextOffsetInterruptCounter.U32()).
-					Insert(builder)
-
-				masked := builder.AllocateInstruction().AsBand(next, interruptMaskVal).Insert(builder).Return()
-				zero := builder.AllocateInstruction().AsIconst64(0).Insert(builder).Return()
-				cond := builder.AllocateInstruction().
-					AsIcmp(masked, zero, ssa.IntegerCmpCondEqual).Insert(builder).Return()
-
-				checkBlk := builder.AllocateBasicBlock()
-				afterBlk := builder.AllocateBasicBlock()
-
-				builder.AllocateInstruction().AsBrnz(cond, ssa.ValuesNil, checkBlk).Insert(builder)
-				builder.AllocateInstruction().AsJump(ssa.ValuesNil, afterBlk).Insert(builder)
-
-				builder.SetCurrentBlock(checkBlk)
-				c.emitCheckModuleExitCode(builder)
-				builder.AllocateInstruction().AsJump(ssa.ValuesNil, afterBlk).Insert(builder)
-				builder.Seal(checkBlk)
-
-				builder.SetCurrentBlock(afterBlk)
-				builder.Seal(afterBlk)
-			}
+			// Spend a tick of termination fuel on every back-edge. The slow path is
+			// left empty here and filled in at this loop's End (see OpcodeEnd), so
+			// that block layout -- which follows emission order -- puts the rare path
+			// on the forward branch and keeps the loop body on the fallthrough.
+			frame := state.ctrlPeekAt(0)
+			frame.fuelSlow, frame.fuelOK = c.emitFuelCheck()
 		}
 	case wasm.OpcodeIf:
 		bt := c.readBlockType()
@@ -1521,6 +1495,20 @@ func (c *Compiler) lowerCurrentOpcode() {
 		case controlFrameKindFunction:
 			break // This is the very end of function.
 		case controlFrameKindLoop:
+			if ctrl.fuelSlow != nil {
+				// Emit the out-of-fuel slow path now, at the end of the loop body, so
+				// it lays out after the body rather than between the header and it.
+				//
+				// Save and restore the current block around it: on the fallThrough path
+				// above, lowering continues in the block we are in right now rather than
+				// in followingBlk, so leaving the builder pointed at the slow block would
+				// emit the rest of the enclosing frame into it, after its terminator.
+				cur := builder.CurrentBlock()
+				builder.SetCurrentBlock(ctrl.fuelSlow)
+				c.emitCheckModuleExitCodeCall(ctrl.fuelOK)
+				builder.Seal(ctrl.fuelOK)
+				builder.SetCurrentBlock(cur)
+			}
 			// Loop header block can be reached from any br/br_table contained in the loop,
 			// so now that we've reached End of it, we can seal it.
 			builder.Seal(ctrl.blk)
@@ -4489,21 +4477,60 @@ func (c *Compiler) lowerTailCallReturnCallRef(typeIndex uint32) {
 	c.lowerReturn(builder)
 }
 
-// emitCheckModuleExitCode emits the indirect call to the check-module-exit-code
-// trampoline. This is a Go round-trip: besides observing a pending
-// WithCloseOnContextDone cancellation, it is the only scheduler/GC yield point
-// in an otherwise non-preemptible compiled loop, so it must stay a Go call.
-func (c *Compiler) emitCheckModuleExitCode(builder ssa.Builder) {
+// emitFuelCheck emits the inline termination-fuel check into the current block and
+// returns its two successors: the slow block, which the caller fills in with
+// emitCheckModuleExitCodeCall, and the still-fuelled block, which is left as the
+// current block and stays unsealed until the caller decides the slow path rejoins
+// it.
+//
+// The whole check is one decrement of a reserved register and one branch (see
+// ssa.OpcodeFuelDec): the backends fold the decrement's own flags into the branch,
+// so nothing is loaded, nothing is stored, and the loop-carried dependency is the
+// single cycle of the decrement itself.
+//
+// What it does NOT do is read ModuleInstance.Closed. That check is not skipped,
+// only moved: running out of fuel exits to Go, and the Go side does the
+// authoritative atomic check there (see ExitCodeCheckModuleExitCode in
+// native/call_engine.go). Reading the flag inline would be cheap to write and is
+// what this used to do, but it cannot terminate a guest on its own -- a spinning
+// guest holds its P, so the watchdog goroutine that sets the flag never gets to
+// run. Guaranteeing a return to Go is the point; the flag is what Go looks at
+// once it is back.
+func (c *Compiler) emitFuelCheck() (fuelSlow, fuelOK ssa.BasicBlock) {
+	builder := c.ssaBuilder
+
+	exhausted := builder.AllocateInstruction().AsFuelDec().Insert(builder).Return()
+
+	fuelSlow, fuelOK = builder.AllocateBasicBlock(), builder.AllocateBasicBlock()
+	builder.AllocateInstruction().
+		AsBrnz(exhausted, ssa.ValuesNil, fuelSlow).
+		Insert(builder)
+	c.insertJumpToBlock(ssa.ValuesNil, fuelOK)
+
+	// This branch is the slow block's only way in, so it is already complete.
+	builder.Seal(fuelSlow)
+
+	builder.SetCurrentBlock(fuelOK)
+	return
+}
+
+// emitCheckModuleExitCodeCall calls the trampoline that re-enters Go for the full
+// atomic module-closed check, then jumps to target. The trampoline refills the fuel
+// counter on its way back, and normally panics with the exit error and never
+// returns at all; target is the path taken when the module is still open.
+func (c *Compiler) emitCheckModuleExitCodeCall(target ssa.BasicBlock) {
+	builder := c.ssaBuilder
+
 	checkModuleExitCodePtr := builder.AllocateInstruction().
 		AsLoad(c.execCtxPtrValue,
 			nativeapi.ExecutionContextOffsetCheckModuleExitCodeTrampolineAddress.U32(),
 			ssa.TypeI64,
 		).Insert(builder).Return()
-
-	args := c.allocateVarLengthValues(1, c.execCtxPtrValue)
 	builder.AllocateInstruction().
-		AsCallIndirect(checkModuleExitCodePtr, &c.checkModuleExitCodeSig, args).
+		AsCallIndirect(checkModuleExitCodePtr, &c.checkModuleExitCodeSig,
+			c.allocateVarLengthValues(1, c.execCtxPtrValue)).
 		Insert(builder)
+	c.insertJumpToBlock(ssa.ValuesNil, target)
 }
 
 // memOpSetup inserts the bounds check and calculates the address of the memory operation (loads/stores).

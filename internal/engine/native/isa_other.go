@@ -35,9 +35,9 @@ func resolveThrowTransferSPFP(fr nativeapi.ThrowFrame, frameSize int64) (sp, fp 
 	panic("unsupported architecture")
 }
 
-// afterThrowTransferEntrypoint transfers control to a throw's matched
+// afterThrowTransferEntrypointAsm transfers control to a throw's matched
 // landing pad; see the arm64/amd64 implementations.
-func afterThrowTransferEntrypoint(restoreFn *byte, executionContextPtr uintptr, sp, fp, targetPC uintptr) {
+func afterThrowTransferEntrypointAsm(restoreFn *byte, executionContextPtr uintptr, sp, fp, targetPC uintptr) {
 	panic("unsupported architecture")
 }
 

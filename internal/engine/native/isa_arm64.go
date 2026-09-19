@@ -41,13 +41,13 @@ func resolveThrowTransferSPFP(fr nativeapi.ThrowFrame, _ int64) (sp, fp uintptr)
 	return fr.SP, 0
 }
 
-// afterThrowTransferEntrypoint transfers control to a throw's matched landing
+// afterThrowTransferEntrypointAsm transfers control to a throw's matched landing
 // pad, restoring callee-saved registers from execCtx.savedRegisters (via
 // restoreFn) before jumping -- see (*callEngine).handleThrow and the
 // backend.Machine.CompileThrowTransferRegisterRestore doc comment for why
 // this, and not afterGoFunctionCallEntrypoint, is needed here. FP is unused
 // on arm64 (see rawAfterThrowTransferEntrypoint in entrypoint_arm64.go).
-func afterThrowTransferEntrypoint(restoreFn *byte, executionContextPtr uintptr, sp, _, targetPC uintptr) {
+func afterThrowTransferEntrypointAsm(restoreFn *byte, executionContextPtr uintptr, sp, _, targetPC uintptr) {
 	rawAfterThrowTransferEntrypoint(restoreFn, executionContextPtr, sp, targetPC)
 }
 

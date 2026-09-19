@@ -30,7 +30,7 @@ Measured against wazero in the same runs, on the same workloads.
 | Path | wazy vs wazero | What & why |
 | --- | :--: | --- |
 | **Instantiate** | **9.1x** | 1.724 µs vs 15.74 µs, on a 37 KB TinyGo module. |
-| **Interruptible loops** (`WithCloseOnContextDone`) | **12–13x**; +5% vs +75% overhead | On a loop calling a host function each iteration. The check is amortized, not a Go round-trip per iteration; a near-empty compute kernel is the worst case at 1.7–2.4x, tunable with `WithInterruptCheckInterval`. Against `wazero@main`. |
+| **Interruptible loops** (`WithCloseOnContextDone`) | **9.8x** vs wazero with the option on | The check is a register decrement and a predicted-not-taken branch, not a Go round-trip. Enabling it costs wazy **+18%** on `fibonacci` and wazero **+1057%** -- each against its own build with the option off -- which is where the 9.8x head-to-head comes from. A near-empty spin kernel is the worst case at +44%; a host-call-dense loop pays +2% against wazero's +86%. Measured on a core with no uop cache, because code placement swamps smaller differences on Skylake-family parts. Against `wazero@main`. |
 | **Compiled execution** | memory-heavy code leads | `string_manipulation` −18%, `reverse_array` −14%, `base64` −12%, `fibonacci` a wash — the advantage tracks memory-access intensity, not arithmetic. |
 | **Host calls** (Go ↔ Wasm) | a tie | 47.8 ns here, 48.3 ns there, on `HostCall/gomodule/CallWithStack` — the shared baseline both runtimes implement the same way. The win is structural, not per-call. |
 | **Cumulative** | geomean **−17.8%**, B/op **−22.9%** | Across `internal/integration_test/bench`, versus the wazero fork point, with upstream wazero as a control in the same runs — its arms stayed flat. |
@@ -91,8 +91,8 @@ The head-to-head module also carries a three-way comparison against wasmtime —
 - **Use `CallWithStack`** in hot loops; `Call` allocates the result slice.
 - **Reserve memory capacity** with `WithMemoryCapacityReservePages` if the guest grows its memory
   repeatedly.
-- **Tune `WithInterruptCheckInterval`** if you use `WithCloseOnContextDone`. The +5% is a loop that
-  calls a host function each iteration; a near-empty compute kernel pays 1.7–2.4x, and the interval
-  sweep moves that from 26.9x of floor at 0 to 1.74x at 4096.
+- **Know what `WithCloseOnContextDone` costs you.** Real compute pays about +18%, a
+  near-empty spin kernel +44%, and a host-call-dense loop +2%. There is no knob; leave it
+  off unless you need to interrupt a stuck guest.
 - **Do not pool instances.** Instantiation is 1.7 µs and 3.3 KB; a fresh instance per request is
   both faster to reason about and safer than scrubbing a reused one.
