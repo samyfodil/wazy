@@ -554,8 +554,17 @@ func (r *engineRelocator) appendFunction(
 	ehEntries []nativeapi.EhEntry,
 	frameSize int64,
 ) {
-	// Align 16-bytes boundary.
-	r.totalSize = (r.totalSize + 15) &^ 15
+	// Align 16-bytes boundary -- or 32 when the amd64 backend is avoiding Intel
+	// erratum SKX102, since its NOP padding is computed against code-buffer
+	// offsets and only equals the final address modulo 32 if every function
+	// starts on a 32-byte boundary. See amd64/jcc_erratum.go.
+	//
+	// This is the compile-side layout only: a cache hit replays the
+	// functionOffsets it was serialized with, and the padding decision is part
+	// of the cache key (fileCacheKey hashes platform.CpuFeatures), so the two
+	// can never disagree.
+	align := functionAlignmentMask()
+	r.totalSize = (r.totalSize + align) &^ align
 	cm.functionOffsets[fnum] = r.totalSize
 
 	needSourceInfo := module.DWARFLines != nil
@@ -619,6 +628,20 @@ func (r *engineRelocator) appendFunction(
 			r.totalSize += r.callTrampolineIslandSize
 		}
 	}
+}
+
+// functionAlignmentMask returns the mask that rounds a function's offset in the
+// executable up to its required alignment.
+//
+// 16 bytes is the default, and stays the default everywhere the JCC-erratum
+// workaround is not in force -- including arm64, deliberately: its instructions
+// are a fixed 4 bytes wide and it has no DSB erratum to dodge, so 32-byte
+// function alignment there would only grow every module for nothing.
+func functionAlignmentMask() int {
+	if platform.JCCErratumWorkaroundEnabled() {
+		return 31
+	}
+	return 15
 }
 
 func (e *engine) compileLocalWasmFunction(

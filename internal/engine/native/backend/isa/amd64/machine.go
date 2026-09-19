@@ -2461,11 +2461,23 @@ func (m *machine) Encode(ctx context.Context) (err error) {
 		fnIndex = nativeapi.GetCurrentFunctionIndex(ctx)
 	}
 
+	// Intel erratum SKX102 (see jcc_erratum.go). Hoisted out of the loop: the
+	// answer cannot change while one function is being encoded, and on every
+	// architecture but amd64 it folds away to a constant false.
+	padJCC := platform.JCCErratumWorkaroundEnabled()
+	extentSink := InstrExtentSink
+	var extents []InstrExtent
+
 	m.labelResolutionPends = m.labelResolutionPends[:0]
 	for _, pos := range m.orderedSSABlockLabelPos {
 		offset := int64(len(*bufPtr))
 		pos.binaryOffset = offset
 		for cur := pos.begin; cur != pos.end.next; cur = cur.next {
+			if padJCC {
+				// Before the offset is taken: a label bound to a padded branch
+				// must name the NOPs, which fall through into it.
+				jccErratumPad(m.c, int64(len(*bufPtr)), cur)
+			}
 			offset := int64(len(*bufPtr))
 
 			switch cur.kind {
@@ -2484,6 +2496,9 @@ func (m *machine) Encode(ctx context.Context) (err error) {
 					labelResolutionPend{instr: cur, instrOffset: offset, imm32Offset: int64(len(*bufPtr)) - 4},
 				)
 			}
+			if extentSink != nil {
+				extents = append(extents, InstrExtent{Offset: offset, Length: int64(len(*bufPtr)) - offset})
+			}
 		}
 
 		if nativeapi.PerfMapEnabled {
@@ -2491,6 +2506,11 @@ func (m *machine) Encode(ctx context.Context) (err error) {
 			size := int64(len(*bufPtr)) - offset
 			nativeapi.PerfMap.AddModuleEntry(fnIndex, offset, uint64(size), fmt.Sprintf("%s:::::%s", fn, l))
 		}
+	}
+
+	if extentSink != nil {
+		// Before the constant pool, which is data and never executed.
+		extentSink(extents, *bufPtr)
 	}
 
 	for i := range m.consts {

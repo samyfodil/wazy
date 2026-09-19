@@ -30,6 +30,17 @@ func fileCacheKey(m *wasm.Module) (ret filecache.Key) {
 	s.Write(magic)
 	// Write the CPU features so that we can cache the compiled module for the same CPU.
 	// This prevents the incompatible CPU features from being used.
+	//
+	// "Features" here means everything about the host CPU that changes the code
+	// the compiler emits, capabilities and errata alike. In particular it
+	// carries CpuFeatureAmd64JCCErratum, so a module compiled with the Intel
+	// SKX102 NOP padding and the 32-byte function alignment it needs is keyed
+	// apart from one compiled without them -- otherwise a cache directory
+	// shared by a Skylake host and an Ice Lake host would silently hand each
+	// the other's layout. (module.ID itself, see wasm.Module.AssignModuleID,
+	// covers only the per-module compile flags such as ensureTermination; the
+	// host's identity belongs here, where it does not have to be threaded
+	// through every AssignModuleID caller.)
 	cpu := platform.CpuFeatures.Raw()
 	// Reuse the `ret` buffer to write the first 8 bytes of the CPU features so that we can avoid the allocation.
 	binary.LittleEndian.PutUint64(ret[:8], cpu)
