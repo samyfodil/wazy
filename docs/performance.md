@@ -155,10 +155,14 @@ is wazy's own, now-deleted one.
 The interruptible cost is small and no longer shape-dependent. `WithCloseOnContextDone`
 compiles to a decrement of a reserved register and a predicted-not-taken branch at every
 function entry and loop back-edge; when the counter runs out, one trip through Go does the
-authoritative closed check and yields. Measured on an Atom C3558 (min of 10, interleaved),
-wazy close-on versus close-off:
+authoritative closed check and yields. Measured on an Atom C3558 (min of 10, interleaved).
 
-| workload | wazy | wazero |
+**Every ratio below is one runtime against itself** -- the same build with the option
+on divided by the same build with it off, i.e. what enabling it costs you. It is not a
+wazy-versus-wazero comparison; the two columns are two separate self-ratios, and a
+smaller number is better in both.
+
+| workload | wazy on/off | wazero on/off |
 |---|---|---|
 | `fibonacci` (real compute) | **1.18x** | 11.6x |
 | host-call-dense loop | **1.02x** | 1.86x |
@@ -167,9 +171,9 @@ wazy close-on versus close-off:
 The spin kernel is the worst case and always will be: it has no body to dilute a
 per-back-edge decrement against.
 
-arm64 agrees, measured on an Apple M4 (min of 10): the host-call-dense loop is
-**1.03x** and the spin kernel **1.13x**, against 7.44x for the loop-header design
-this replaced. The M4 does far better on the spin kernel than any x86 core here,
+arm64 agrees, measured on an Apple M4 (min of 10). Same self-ratio: the host-call-dense
+loop costs **1.03x** and the spin kernel **1.13x**, where the loop-header design this
+replaced cost 7.44x on that kernel. The M4 does far better on the spin kernel than any x86 core here,
 which is the same placement story as below -- it has no uop cache erratum to hit.
 
 **A note on why those numbers come from an Atom.** On a Skylake-family core, code
