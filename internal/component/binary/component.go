@@ -136,6 +136,17 @@ type Component struct {
 	// The graph engine uses it to tell "legitimately no core funcs" from "index
 	// spaces were never built"; see graph.go.
 	Decoded bool
+
+	// extraTypes backs a private, decode-independent index range (see
+	// typespace.go's extraTypeBase) this Component uses to "globalize" a
+	// TypeDesc discovered structurally inside an IMPORTED instance's declared
+	// instancetype (resolveAlias's case 0x00 import branch, for `use
+	// iface.{T}`) whenever T's own definition references ANOTHER type
+	// declared in that same instancetype body by a local index -- see
+	// InstanceDesc's doc. Appending here can never collide with, or shift,
+	// any real file-declared type index the way inserting into Types/
+	// TypeSpace at decode time would.
+	extraTypes []TypeDesc
 }
 
 // Type represents a value type in the component type section.

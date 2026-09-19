@@ -406,6 +406,8 @@ func decodeImportSection(buf []byte, offset int, sectionSize uint32) ([]Import, 
 			imports[i].TypeEqBound = true
 		case sort == 0x01 && hasEq: // func import: eqIdx is the func's own type index
 			imports[i].ExternIndex = eqIdx
+		case sort == 0x05 && hasEq: // instance import: eqIdx is the instancetype's own type index
+			imports[i].ExternIndex = eqIdx
 		}
 	}
 

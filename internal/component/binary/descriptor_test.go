@@ -442,3 +442,121 @@ func TestReadResourcetypeDesc_RepIsCoreType(t *testing.T) {
 		t.Error("expected error on invalid core rep valtype 0x72")
 	}
 }
+
+// ------- readInstancetypeDesc / readInstanceDeclDesc -------
+
+// TestReadInstancetypeDesc_TypeAndExport covers the ordinary shape: one local
+// deftype followed by an eq-bound export naming it. Both a "type" instancedecl
+// (tag 0x01) and an eq-bound "export" instancedecl (tag 0x04) must land in
+// Types, in declaration order, and the export must additionally show up in
+// Exports keyed by name.
+func TestReadInstancetypeDesc_TypeAndExport(t *testing.T) {
+	buf := []byte{
+		0x02,       // 2 instancedecls
+		0x01, 0x79, // decl 0: type -- u32 (local type index 0)
+	}
+	buf = append(buf, 0x04, 0x00) // decl 1: export, externname kind=0x00
+	buf = append(buf, synthLabel("n")...)
+	buf = append(buf, 0x03, 0x00, 0x00) // externdesc: type-sort, eq bound, local index 0
+
+	desc, off, err := readInstancetypeDesc(buf, 0)
+	if err != nil {
+		t.Fatalf("readInstancetypeDesc: %v", err)
+	}
+	if off != len(buf) {
+		t.Errorf("offset: got %d, want %d (consumed the whole body)", off, len(buf))
+	}
+	if len(desc.Types) != 2 {
+		t.Fatalf("Types: got %d entries, want 2 (the deftype + the export's own slot)", len(desc.Types))
+	}
+	if p, ok := desc.Types[0].(PrimitiveDesc); !ok || p.Prim != "u32" {
+		t.Fatalf("Types[0] = %#v, want PrimitiveDesc{u32}", desc.Types[0])
+	}
+	ref, ok := desc.Exports["n"]
+	if !ok {
+		t.Fatal(`Exports["n"] missing`)
+	}
+	if ref.TypeIndex == nil || *ref.TypeIndex != 0 {
+		t.Errorf(`Exports["n"] = %#v, want TypeRef{TypeIndex: 0}`, ref)
+	}
+}
+
+// TestReadInstancetypeDesc_AbstractResourceExport covers a `sub`-bound
+// (abstract resource) export: this decoder has no structural definition for
+// it, so it must reserve the type-sort slot (so a later decl referencing it
+// by number still fails loud instead of misindexing) without adding anything
+// to Exports.
+func TestReadInstancetypeDesc_AbstractResourceExport(t *testing.T) {
+	buf := []byte{0x01, 0x04, 0x00} // 1 instancedecl: export, externname kind=0x00
+	buf = append(buf, synthLabel("my-resource")...)
+	buf = append(buf, 0x03, 0x01) // externdesc: type-sort, sub bound (abstract)
+
+	desc, off, err := readInstancetypeDesc(buf, 0)
+	if err != nil {
+		t.Fatalf("readInstancetypeDesc: %v", err)
+	}
+	if off != len(buf) {
+		t.Errorf("offset: got %d, want %d", off, len(buf))
+	}
+	if len(desc.Types) != 1 || desc.Types[0] != nil {
+		t.Fatalf("Types: got %#v, want one nil (unresolved) entry", desc.Types)
+	}
+	if _, ok := desc.Exports["my-resource"]; ok {
+		t.Error(`Exports["my-resource"] present, want absent (unresolvable sub-bound export)`)
+	}
+}
+
+// TestReadInstancetypeDesc_ExportIndexOutOfRange proves an eq-bound export
+// naming a local index this instancetype never declared decodes without
+// error -- readInstancetypeDesc only records the TypeRef, exactly as it does
+// for a validly-bound export (see TestReadInstancetypeDesc_TypeAndExport);
+// nothing here can distinguish a genuinely out-of-range index from one that
+// simply hasn't been reached yet by a caller resolving it. The error surfaces
+// later, when something actually tries to use the export -- Component's
+// globalizeLocalRef, which resolveAlias's imported-instance branch calls --
+// fails loud on the same out-of-range index instead of panicking or
+// returning a zero-value type.
+func TestReadInstancetypeDesc_ExportIndexOutOfRange(t *testing.T) {
+	buf := []byte{0x01, 0x04, 0x00} // 1 instancedecl: export, externname kind=0x00
+	buf = append(buf, synthLabel("n")...)
+	buf = append(buf, 0x03, 0x00, 0x05) // externdesc: type-sort, eq bound, local index 5 (never declared)
+
+	desc, _, err := readInstancetypeDesc(buf, 0)
+	if err != nil {
+		t.Fatalf("readInstancetypeDesc: %v", err)
+	}
+	ref, ok := desc.Exports["n"]
+	if !ok || ref.TypeIndex == nil || *ref.TypeIndex != 5 {
+		t.Fatalf(`Exports["n"] = %#v, want TypeRef{TypeIndex: 5}`, ref)
+	}
+
+	var c Component
+	if _, err := c.globalizeLocalRef(desc.Types, ref, map[uint32]uint32{}); err == nil {
+		t.Fatal("globalizeLocalRef: expected an out-of-range error, got nil")
+	}
+}
+
+// TestReadInstanceDeclDesc_ThrowawayPathIgnoresOutOfRangeExport is a
+// regression test: readInstanceDeclDesc (used by readComponentDecl for a
+// componenttype body, which shares this grammar but ALSO allows "import"
+// instancedecls readInstanceDeclDescInto has no way to count) must only
+// validate an eq-bound export's local index when a caller actually wants
+// Exports (readInstancetypeDesc passes a non-nil map); otherwise it must
+// still correctly consume the bytes and return no error, even when the
+// index it can't check would have been out of range. Skipping this check on
+// the throwaway path is what makes componentdecl bodies whose import
+// decls precede an export decl (a real shape wasm-tools emits) decodable at
+// all -- see readInstanceDeclDescInto's doc.
+func TestReadInstanceDeclDesc_ThrowawayPathIgnoresOutOfRangeExport(t *testing.T) {
+	buf := []byte{0x04, 0x00} // export, externname kind=0x00
+	buf = append(buf, synthLabel("n")...)
+	buf = append(buf, 0x03, 0x00, 0x05) // externdesc: type-sort, eq bound, local index 5
+
+	off, err := readInstanceDeclDesc(buf, 0)
+	if err != nil {
+		t.Fatalf("readInstanceDeclDesc: %v", err)
+	}
+	if off != len(buf) {
+		t.Errorf("offset: got %d, want %d", off, len(buf))
+	}
+}

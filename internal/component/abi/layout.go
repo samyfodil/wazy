@@ -650,7 +650,11 @@ func resolveType(ref *binary.TypeRef, resolve Resolver) (binary.TypeDesc, error)
 		if resolve == nil {
 			return nil, fmt.Errorf("type index %d requires resolver", *ref.TypeIndex)
 		}
-		return resolve(*ref.TypeIndex), nil
+		t := resolve(*ref.TypeIndex)
+		if t == nil {
+			return nil, fmt.Errorf("type index %d not found", *ref.TypeIndex)
+		}
+		return t, nil
 	}
 	return nil, fmt.Errorf("type reference has neither primitive nor index")
 }

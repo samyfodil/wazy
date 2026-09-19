@@ -64,6 +64,22 @@ type TypeSpaceEntry struct {
 // malformed or cyclic alias chain fails loud instead of looping forever.
 const maxTypeAliasDepth = 32
 
+// extraTypeBase marks the start of a private, decode-independent index range
+// backed by Component.extraTypes rather than TypeSpace/Types -- see that
+// field's doc for why (globalizing a type discovered inside an imported
+// instance's declared instancetype, for `use iface.{T}`, without disturbing
+// any real file-declared type index). Comfortably above any realistic
+// component's real type count: a LEB128 vec count large enough to reach it
+// would need gigabytes of encoding just for the count's own declarations.
+const extraTypeBase = 1 << 30
+
+// internExtraType appends d to c.extraTypes and returns its escape-range
+// index (see extraTypeBase).
+func (c *Component) internExtraType(d TypeDesc) uint32 {
+	c.extraTypes = append(c.extraTypes, d)
+	return extraTypeBase + uint32(len(c.extraTypes)-1)
+}
+
 // ResolveType resolves a component type index -- which may name a
 // type-section deftype directly, or (transitively) a type-sort alias -- to
 // its underlying TypeDesc, walking the component's full TypeSpace rather
@@ -143,6 +159,22 @@ func (c *Component) resolveTypeDepth(idx uint32, depth int) (TypeDesc, error) {
 		return nil, fmt.Errorf("type index %d: alias chain exceeds depth %d (cycle?)", idx, maxTypeAliasDepth)
 	}
 
+	if idx >= extraTypeBase {
+		i := idx - extraTypeBase
+		if int(i) >= len(c.extraTypes) {
+			return nil, fmt.Errorf("type index %d: out of range of the %d-entry extra type table", idx, len(c.extraTypes))
+		}
+		if c.extraTypes[i] == nil {
+			// A slot reserved by globalizeLocalRef whose recursion then
+			// failed. Nothing hands that index out, so this is unreachable
+			// today -- but returning it as a nil TypeDesc with a nil error is
+			// precisely the shape that produced "unknown type descriptor:
+			// <nil>", so refuse rather than propagate it.
+			return nil, fmt.Errorf("type index %d: extra type table entry was reserved but never filled", idx)
+		}
+		return c.extraTypes[i], nil
+	}
+
 	if len(c.TypeSpace) == 0 {
 		// No TypeSpace: either a component with no type-index-producing
 		// definitions at all, or (far more commonly in this codebase's
@@ -208,14 +240,15 @@ func (c *Component) resolveTypeDepth(idx uint32, depth int) (TypeDesc, error) {
 func (c *Component) resolveAlias(al AliasDef, idx uint32, depth int) (TypeDesc, error) {
 	switch al.TargetKind {
 	case 0x00: // export
-		// The only export-alias target this decoder can follow structurally
-		// is one of this component's own inline-export instances (Instances,
-		// section 5, Kind == 0x01): its Exports list directly names a
-		// sortidx, so a type-sort export within it is just another index
-		// into this same TypeSpace. An alias exporting from an *imported*
-		// instance -- the common real-guest shape -- cannot be followed:
-		// this decoder does not retain the imported instance type's nested
-		// declarations (see the package doc on instance.go).
+		// This component's own inline-export instances (Instances, section
+		// 5, Kind == 0x01): its Exports list directly names a sortidx, so a
+		// type-sort export within it is just another index into this same
+		// TypeSpace. al.InstanceIdx here is treated as a raw index into
+		// Instances (section-5-only), not the full component instance index
+		// space (see componentinstancespace.go) -- kept as-is (rather than
+		// routed through ComponentInstanceSpace like the import branch
+		// below) so a hand-built Component with no ComponentInstanceSpace
+		// still resolves this the way it always has.
 		if int(al.InstanceIdx) < len(c.Instances) {
 			inst := c.Instances[al.InstanceIdx]
 			if inst.Kind == 0x01 {
@@ -226,7 +259,41 @@ func (c *Component) resolveAlias(al AliasDef, idx uint32, depth int) (TypeDesc, 
 				}
 			}
 		}
-		return nil, fmt.Errorf("type index %d: alias exports %q from instance %d, which this decoder cannot resolve structurally (an imported instance, or a locally-instantiated instance whose nested type declarations are not decoded)", idx, al.Name, al.InstanceIdx)
+		// Otherwise, al.InstanceIdx may instead be a component instance-sort
+		// index (ComponentInstanceSpace) naming an IMPORTED instance -- the
+		// common real-guest shape for `use iface.{T}`. Unlike a locally
+		// inline-exported instance, an import's exports aren't visible via
+		// Instances at all; its declared instancetype's own Exports (built
+		// structurally by readInstancetypeDesc -- see InstanceDesc.Exports'
+		// doc) answers this directly instead.
+		if int(al.InstanceIdx) < len(c.ComponentInstanceSpace) {
+			if e := c.ComponentInstanceSpace[al.InstanceIdx]; e.Kind == ComponentInstanceFromImport && int(e.Import) < len(c.Imports) {
+				if im := c.Imports[e.Import]; im.ExternType == 0x05 {
+					if td, err := c.resolveTypeDepth(im.ExternIndex, depth+1); err == nil {
+						if instDesc, ok := td.(InstanceDesc); ok {
+							if exp, ok := instDesc.Exports[al.Name]; ok {
+								// exp is a TypeRef into instDesc.Types (this
+								// instancetype's own local type-sort index
+								// space, not this Component's) -- globalize it
+								// before returning, so any TypeRef nested
+								// inside the result is resolvable through c's
+								// ordinary Resolver like any other (see
+								// InstanceDesc's doc and globalizeLocalRef).
+								global, gerr := c.globalizeLocalRef(instDesc.Types, exp, map[uint32]uint32{})
+								if gerr != nil {
+									return nil, fmt.Errorf("type index %d: alias exports %q from instance %d: %w", idx, al.Name, al.InstanceIdx, gerr)
+								}
+								if global.Primitive != "" {
+									return PrimitiveDesc{Prim: global.Primitive}, nil
+								}
+								return c.resolveTypeDepth(*global.TypeIndex, depth+1)
+							}
+						}
+					}
+				}
+			}
+		}
+		return nil, fmt.Errorf("type index %d: alias exports %q from instance %d, which this decoder cannot resolve structurally (an imported instance whose export type this decoder could not resolve -- e.g. an abstract resource, or a further alias -- or a locally-instantiated instance whose nested type declarations are not decoded)", idx, al.Name, al.InstanceIdx)
 
 	case 0x02: // outer
 		// The de Bruijn count is the number of enclosing components to skip:
@@ -254,5 +321,172 @@ func (c *Component) resolveAlias(al AliasDef, idx uint32, depth int) (TypeDesc, 
 		// type), but decodeAliasSection does not itself reject the
 		// combination, so fail loud here rather than mis-index.
 		return nil, fmt.Errorf("type index %d: alias target kind %#x cannot resolve to a type", idx, al.TargetKind)
+	}
+}
+
+// globalizeLocalRef rewrites one TypeRef found inside an imported instance's
+// local type graph (localTypes -- an InstanceDesc's own Types, per its doc)
+// so it resolves through c's ordinary Resolver: unchanged if it's a
+// primitive, or remapped to a fresh Component.extraTypes index (recursively
+// globalizing, and interning, the local type it names) if it names a local
+// index. memo caches localIdx -> already-assigned extraTypes index, both to
+// avoid re-interning a local type reachable more than once and to break a
+// genuine cycle (e.g. a locally-declared resource referencing its own
+// handle) by returning the placeholder reserved for an in-progress index
+// instead of recursing forever.
+func (c *Component) globalizeLocalRef(localTypes []TypeDesc, ref TypeRef, memo map[uint32]uint32) (TypeRef, error) {
+	if ref.Primitive != "" || ref.TypeIndex == nil {
+		return ref, nil
+	}
+	localIdx := *ref.TypeIndex
+	if g, ok := memo[localIdx]; ok {
+		return TypeRef{TypeIndex: &g}, nil
+	}
+	if int(localIdx) >= len(localTypes) || localTypes[localIdx] == nil {
+		return TypeRef{}, fmt.Errorf("local type index %d is out of range, or was not resolved structurally by this decoder (an abstract resource export, or a type-sort alias)", localIdx)
+	}
+	// Reserve (and memoize) the escape slot before recursing, so a
+	// self-referential local type terminates instead of looping forever.
+	global := c.internExtraType(nil)
+	memo[localIdx] = global
+	rewritten, err := c.globalizeLocalTypeDesc(localTypes, localTypes[localIdx], memo)
+	if err != nil {
+		return TypeRef{}, err
+	}
+	c.extraTypes[global-extraTypeBase] = rewritten
+	return TypeRef{TypeIndex: &global}, nil
+}
+
+// globalizeLocalTypeDesc rewrites every TypeRef nested directly inside d (a
+// TypeDesc from an imported instance's local type declarations) via
+// globalizeLocalRef, returning an equivalent TypeDesc whose own TypeRefs are
+// all either primitives or Component.extraTypes indices -- safe to embed in a
+// TypeDesc handed to an ordinary caller of this Component's Resolver.
+func (c *Component) globalizeLocalTypeDesc(localTypes []TypeDesc, d TypeDesc, memo map[uint32]uint32) (TypeDesc, error) {
+	switch t := d.(type) {
+	case PrimitiveDesc, FlagsDesc, EnumDesc:
+		return d, nil
+
+	case ListDesc:
+		elem, err := c.globalizeLocalRef(localTypes, t.Element, memo)
+		if err != nil {
+			return nil, err
+		}
+		return ListDesc{Element: elem}, nil
+
+	case MapDesc:
+		key, err := c.globalizeLocalRef(localTypes, t.Key, memo)
+		if err != nil {
+			return nil, err
+		}
+		val, err := c.globalizeLocalRef(localTypes, t.Value, memo)
+		if err != nil {
+			return nil, err
+		}
+		return MapDesc{Key: key, Value: val}, nil
+
+	case RecordDesc:
+		fields := make([]RecordField, len(t.Fields))
+		for i, f := range t.Fields {
+			ft, err := c.globalizeLocalRef(localTypes, f.Type, memo)
+			if err != nil {
+				return nil, err
+			}
+			fields[i] = RecordField{Name: f.Name, Type: ft}
+		}
+		return RecordDesc{Fields: fields}, nil
+
+	case TupleDesc:
+		elems := make([]TypeRef, len(t.Elements))
+		for i, e := range t.Elements {
+			er, err := c.globalizeLocalRef(localTypes, e, memo)
+			if err != nil {
+				return nil, err
+			}
+			elems[i] = er
+		}
+		return TupleDesc{Elements: elems}, nil
+
+	case VariantDesc:
+		cases := make([]VariantCase, len(t.Cases))
+		for i, cs := range t.Cases {
+			nc := VariantCase{Name: cs.Name}
+			if cs.Type != nil {
+				ct, err := c.globalizeLocalRef(localTypes, *cs.Type, memo)
+				if err != nil {
+					return nil, err
+				}
+				nc.Type = &ct
+			}
+			cases[i] = nc
+		}
+		return VariantDesc{Cases: cases}, nil
+
+	case OptionDesc:
+		elem, err := c.globalizeLocalRef(localTypes, t.Element, memo)
+		if err != nil {
+			return nil, err
+		}
+		return OptionDesc{Element: elem}, nil
+
+	case ResultDesc:
+		nr := ResultDesc{}
+		if t.Ok != nil {
+			ok, err := c.globalizeLocalRef(localTypes, *t.Ok, memo)
+			if err != nil {
+				return nil, err
+			}
+			nr.Ok = &ok
+		}
+		if t.Err != nil {
+			er, err := c.globalizeLocalRef(localTypes, *t.Err, memo)
+			if err != nil {
+				return nil, err
+			}
+			nr.Err = &er
+		}
+		return nr, nil
+
+	case StreamDesc:
+		ns := StreamDesc{}
+		if t.Element != nil {
+			el, err := c.globalizeLocalRef(localTypes, *t.Element, memo)
+			if err != nil {
+				return nil, err
+			}
+			ns.Element = &el
+		}
+		return ns, nil
+
+	case FutureDesc:
+		nf := FutureDesc{}
+		if t.Element != nil {
+			el, err := c.globalizeLocalRef(localTypes, *t.Element, memo)
+			if err != nil {
+				return nil, err
+			}
+			nf.Element = &el
+		}
+		return nf, nil
+
+	case OwnDesc, BorrowDesc:
+		// ResourceType is an index, and unlike every other TypeRef here it
+		// cannot be globalized into the escape range: composition reads it as
+		// an index into this Component's TypeSpace, not through a Resolver --
+		// canonTag feeds it to the resource canonicalizer, resourceOrigin
+		// keys on it, and importedTypeIndex scans TypeSpace for it (see
+		// instance/composition.go). An extraTypes index is as wrong there as
+		// the instance-local one it came from.
+		//
+		// So fail, rather than hand back a descriptor carrying an index from
+		// the wrong space. That matches the abstract-resource case, which
+		// already errors via the nil check in globalizeLocalRef, and keeps
+		// this path loud instead of silently canonicalizing the wrong
+		// resource -- the same failure mode this whole change exists to fix
+		// one layer up.
+		return nil, fmt.Errorf("cannot resolve a %s handle from an imported instance's type declarations: its resource index belongs to that instance's local type space, and composition reads it as a component TypeSpace index", d.Kind())
+
+	default:
+		return nil, fmt.Errorf("cannot resolve a locally-declared %s type from an imported instance's type declarations", d.Kind())
 	}
 }

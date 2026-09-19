@@ -284,6 +284,45 @@ func TestTaskReturnHostFuncGraph_ResolveTypeError(t *testing.T) {
 	requireErrContains(t, err, "resolve result type")
 }
 
+// TestTaskReturnHostFuncGraph_UsesExportMemoryNotCallerModule is a
+// regression test: task.return's own core func must lift a memory-backed
+// result (here, a string: pointer+length) through the active task's export
+// binding (t.be.mod), not whichever module happened to invoke it directly.
+// Once several canons are packed into one shared "regrouping shim" core
+// module (graph.go's "core instance N: inline export" merge -- the shape a
+// real wit-component-produced binary with multiple async exports takes),
+// that direct caller is the shim, which has no memory of its own; using it
+// instead of t.be.mod produced a "buffer overflow ... mem_len=0" (or a
+// panic, for a result requiring memory but finding none) even though the
+// real guest module right there in t.be.mod has the bytes. mod=nil here
+// stands in for that memory-less shim.
+func TestTaskReturnHostFuncGraph_UsesExportMemoryNotCallerModule(t *testing.T) {
+	_, realMod := memModule(t)
+	if !realMod.Memory().WriteString(0, "hi") {
+		t.Fatal("write failed")
+	}
+
+	strRef := binary.TypeRef{Primitive: "string"}
+	canon := binary.Canon{TaskReturnResult: binary.FuncResults{Unnamed: &strRef}}
+	in := &Instance{sched: &sched{}, mayLeave: true, resolve: u32TypeIdxResolver(nil)}
+	def, err := taskReturnHostFuncGraph(in, canon)
+	if err != nil {
+		t.Fatalf("taskReturnHostFuncGraph: %v", err)
+	}
+
+	var got []abi.Value
+	tk := &task{
+		be:        &boundExport{resultType: binary.PrimitiveDesc{Prim: "string"}, mod: realMod},
+		onResolve: func(vals []abi.Value, _ bool) { got = vals },
+	}
+	in.activeTask = tk
+
+	def.fn.Call(context.Background(), nil, []uint64{0, 2}) // ptr=0, len=2 ("hi") -- mod=nil, the shim stand-in
+	if len(got) != 1 || got[0].(string) != "hi" {
+		t.Fatalf("result = %#v, want [\"hi\"]", got)
+	}
+}
+
 // TestReturnValues_NumBorrowsPanics pins the reference's
 // trap_if(num_borrows > 0): task.return's second trap condition, reachable
 // today only via a directly-constructed task since nothing in this
