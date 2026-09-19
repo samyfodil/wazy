@@ -167,6 +167,11 @@ wazy close-on versus close-off:
 The spin kernel is the worst case and always will be: it has no body to dilute a
 per-back-edge decrement against.
 
+arm64 agrees, measured on an Apple M4 (min of 10): the host-call-dense loop is
+**1.03x** and the spin kernel **1.13x**, against 7.44x for the loop-header design
+this replaced. The M4 does far better on the spin kernel than any x86 core here,
+which is the same placement story as below -- it has no uop cache erratum to hit.
+
 **A note on why those numbers come from an Atom.** On a Skylake-family core, code
 *placement* swamps all of this. A branch that crosses or ends on a 32-byte boundary is not
 cached in the uop cache (Intel erratum SKX102), and wazy does nothing to control where its
