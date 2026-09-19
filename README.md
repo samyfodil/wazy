@@ -244,8 +244,32 @@ same machine, identical output, `CompileModule` excluded from every timing.
 | 1 KB docx, interpreted | 2.62 ms | 1.53 ms | 1.7x |
 | 5 MB docx body, interpreted | 13.1 s | 7.7 s | 1.7x |
 
-Long compute is where the compiler wins — a 5 MB body converts 4.9x faster. The small-document row
-measures something else: instantiation dominates it and the conversion is noise, so it is setup
+**Those compiled rows carry `WithCloseOnContextDone(true)`, and most of the 4.9x is what that
+option costs wazero rather than what its code generator produces.** go-anydoc sets it
+unconditionally — cancelling a context has to interrupt a conversion already running inside the
+guest — so every run of its benchmark carries it, while `benchmarks/vs-wazero` above never sets it.
+The two suites were not measuring the same configuration. Toggling only that call, same module,
+same 5 MB body:
+
+| Compiled, 5 MB docx body | wazero v1.12.0 | wazy v0.3.0 | |
+| --- | :---: | :---: | :---: |
+| close-on-context-done on | 0.94 s | 0.19 s | 5.0x |
+| off | 0.14 s | 0.11 s | 1.3x |
+| what the option costs | 6.5x | 1.7x | |
+
+With it off the two compilers are ~30% apart. Against an interpreter the option is free on both —
+6.79 s with it and 6.87 s without on wazy, 11.96 s and 11.91 s on wazero — so the 1.7x in the
+interpreted rows is the engines and nothing else. [go-pdfium][pdfium-ccd] measured the same effect
+across 5,000 PDFs, at ~4.5x for wazero and ~1.4x for wazy. wazero's [#2533][w2533] solves the same
+problem on their side; wazy's own check became native in [#71][pr71], which is in this branch, so
+the 1.7x above is what v0.3.0 cost and not what `main` costs. On `main` it is 1.04x–1.28x depending
+on the core, against 1.01x–1.10x for wazero with its three in-flight PRs — level on x86, behind on
+the M4, and faster than both in absolute time. All three machines are in
+[docs/performance.md](docs/performance.md).
+
+So: long compute is where the compiler wins, but 4.9x is the figure for a caller who needs
+cancellation, and ~1.3x is the figure for the code generators. The small-document row measures
+something else again: instantiation dominates it and the conversion is noise, so it is setup
 cost rather than throughput. That row used to be the weak one. go-anydoc's own report had wazy
 *losing* it at 0.6x, and reproducing it here found two independent causes, both since fixed. A
 funcref memo scanned a list, so taking a reference for each of the module's 593 element-segment
@@ -261,6 +285,15 @@ the harness, so a checkout is enough to reproduce it. Arms interleaved, min of 8
 (large) — the M4 has performance and efficiency cores and no `taskset`, which makes medians on this
 machine untrustworthy. The original third-party report, including PDF figures this table omits
 because no PDF worth measuring is small enough to commit, is [#29][i29].</sub>
+
+<sub>The toggle table is a separate third-party run — Apple M5 Pro (18-core), macOS 26.5, Go 1.26.1,
+`CGO_ENABLED=0`, `anydoc.wasm` 6,781,177 bytes (the module has since been rebuilt on anydoc 0.2.3),
+wazy v0.3.0 against wazero v1.12.0, min of 3 at `-benchtime 3x`. Reproduce it with
+`go test -run '^$' -bench CloseOnContextDone -benchtime 3x -count 3` in a checkout of
+[go-anydoc][anydoc], which carries a benchmark that toggles the option on both engines; the wazero
+column is the same benchmark with the three imports in its `anydoc.go` pointed at wazero. Different
+machine and a newer module than the table above, so read the ratios rather than the
+milliseconds.</sub>
 
 ## Moving fast
 
@@ -293,3 +326,6 @@ Apache 2.0. See [LICENSE](LICENSE).
 [pr679]: https://github.com/WebAssembly/component-model/pull/679
 [anydoc]: https://github.com/xusenlin/go-anydoc
 [i29]: https://github.com/samyfodil/wazy/issues/29
+[pdfium-ccd]: https://github.com/klippa-app/go-pdfium/blob/main/experimental/BENCHMARKS.md#the-cost-of-close-on-context-done
+[w2533]: https://github.com/wazero/wazero/pull/2533
+[pr71]: https://github.com/samyfodil/wazy/pull/71

@@ -176,6 +176,39 @@ loop costs **1.03x** and the spin kernel **1.13x**, where the loop-header design
 replaced cost 7.44x on that kernel. The M4 does far better on the spin kernel than any x86 core here,
 which is the same placement story as below -- it has no uop cache erratum to hit.
 
+### On two real modules, and why the ratio is not one number
+
+The kernels above are the worst case by construction. Two real producer modules, both from
+outside this repo, put a ceiling on what any of it means in practice.
+
+**go-anydoc** — a 6.8 MB Rust module (anydoc 0.2.3) converting a 5 MB docx body, run through
+that project's own `BenchmarkCloseOnContextDone`, min of 3 at `-benchtime 3x`. What enabling
+the option costs, each runtime against itself:
+
+| | Apple M4 | Xeon D-2123IT | Atom C3558 |
+|---|---|---|---|
+| wazy | **1.28x** | **1.04x** | **1.10x** |
+| wazero v1.12.0 | 6.38x | 4.24x | 3.02x |
+| wazero + [#2529](https://github.com/tetratelabs/wazero/pull/2529)/[#2530](https://github.com/tetratelabs/wazero/pull/2530)/[#2533](https://github.com/tetratelabs/wazero/pull/2533) | 1.05x | 1.01x | 1.10x |
+
+**The spread across machines is the point.** The same wazy build costs 1.28x on one core and
+1.04x on another, so a single figure for "what the option costs" is not meaningful without
+naming the machine. wazero's in-flight #2533 is level with wazy on both x86 parts here and
+ahead on the M4, and it is a fair comparison: it solves the same problem on their side.
+
+Ratios also hide the wall clock, and the two disagree here. With the option on, wazy is
+faster than wazero+those-PRs in absolute time on all three machines — 0.95x on the M4, 0.74x
+on the Xeon, 0.63x on the Atom — because their unoption baseline is slower to begin with
+(647 ms against 464 ms on the Xeon for the same document). Quote both or neither.
+
+**go-pdfium** — 144 real PDFs rendered through a 5.7 MB PDFium module, that project's own
+corpus tool, mean ms per document, zero pixel mismatches. On the Atom: 43.9 ms by default and
+44.4 ms with the option on (**+1.3%**), against wazero's 49.1 → 68.1 ms (+38.8%) and
+wazero+PRs' 48.0 → 48.3 ms (+0.5%). Compile plus first worker is 5.8 s against wazero's 11.5 s.
+
+Neither module behaves like the kernels: a 5.7 MB guest spends its time in its own compute,
+not in a termination check, so ratios like the spin kernel's do not transfer.
+
 **A note on why those numbers come from an Atom, and on the JCC erratum.** On a
 Skylake-family core, code *placement* used to swamp all of this. A branch that crosses or
 ends on a 32-byte boundary is not cached in the uop cache (Intel erratum SKX102), and wazy
@@ -351,6 +384,12 @@ The harness contains four traps it documents rather than hides:
   two different computations.
 
 ### The 6.5 MB module, at scale, measured by someone else
+
+> These are third-party figures as first reported, against **wazy v0.3.0** and a
+> 6,542,355-byte module. go-anydoc has since moved to a 6,781,177-byte one, and the
+> compiled rows here were taken with `WithCloseOnContextDone` on, which costs the two
+> runtimes very differently — see [the real-module section above](#on-two-real-modules-and-why-the-ratio-is-not-one-number)
+> for current `main` on three machines. They are kept as recorded rather than restated.
 
 The first-party suites are kernels; their largest guest is 37 KB.
 [go-anydoc][anydoc] measured two orders of magnitude up — a 6.5 MB
