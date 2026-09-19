@@ -93,10 +93,21 @@ jobs:
         with:
           go-version: ${{ matrix.go-version }}
 
-      - uses: actions/download-artifact@v4
+      # actions/download-artifact@v4 makes a single attempt and fails hard on a transient
+      # "Artifact not found" right after spectest_corpus uploads it, so retry instead of
+      # letting one early 404 fail the whole job.
+      - name: Download spectest v3 corpus
+        uses: nick-fields/retry@v3
         with:
-          name: spectest-v3-corpus
-          path: internal/integration_test/spectest/v3/testdata
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_wait_seconds: 15
+          command: >
+            gh run download ${{ github.run_id }}
+            --name spectest-v3-corpus
+            --dir internal/integration_test/spectest/v3/testdata
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # Ensure the pagefile is large enough to execute tests like TestStore_hammer_close on Windows.
       - name: configure Pagefile
