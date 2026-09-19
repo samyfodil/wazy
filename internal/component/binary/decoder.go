@@ -346,6 +346,13 @@ func decodeComponent(buf []byte) (*Component, error) {
 		return nil, err
 	}
 
+	// Intern every internable type now, so ResolveType is a pure, lock-free
+	// read for the life of this Component (see typesFrozen). An alias that
+	// cannot be resolved is not an error -- plenty of real components carry
+	// one, and it must still fail at the same call site with the same message
+	// -- it just leaves the Component unfrozen.
+	c.typesFrozen = c.precomputeImportedAliases()
+
 	c.Decoded = true
 	c.Bytes = buf
 	return c, nil

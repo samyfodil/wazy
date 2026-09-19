@@ -174,13 +174,68 @@ func (c *Component) internExtraType(d TypeDesc) uint32 {
 // resolved directly against Types instead, matching this method's behavior
 // before TypeSpace existed.
 func (c *Component) ResolveType(idx uint32) (TypeDesc, error) {
-	// Resolution INTERNS (see Component.mu): it appends to extraTypes and
-	// fills aliasCache, so it is a write, not a pure read. Hold mu for the
-	// whole walk; resolveTypeDepth and everything below it assume it is held
-	// and must not retake it.
+	// The hot path: abi.Resolver funnels here (instance's typeResolver), so
+	// every nested TypeRef of every lifted/lowered value is one call. For a
+	// decoded Component precomputeImportedAliases has already interned
+	// everything internable, so this is a pure read and takes no lock --
+	// typesFrozen is written once during Decode, before the Component is
+	// reachable from any other goroutine.
+	// Fast path, hoisted so it makes no call at all and this method stays
+	// within Go's inlining budget: a frozen component (every decoded one --
+	// see typesFrozen) resolving a plain type-section deftype, which is what
+	// the overwhelming majority of indices are. resolveTypeDepth would reach
+	// the identical Types[Def] load; getting there just costs a call, and at
+	// one call per nested TypeRef of every lifted and lowered value that is
+	// most of what a resolution costs.
+	// Compared as uint32, not via int(idx): on a 32-bit build int(idx) is
+	// negative for an index above 2^31 -- including every escape-range one --
+	// which would pass a signed bounds check and then panic on the index.
+	if c.typesFrozen && idx < uint32(len(c.TypeSpace)) {
+		if e := c.TypeSpace[idx]; e.Kind == TypeSpaceDef && e.Def < uint32(len(c.Types)) {
+			return c.Types[e.Def].Descriptor, nil
+		}
+	}
+	return c.resolveTypeSlow(idx)
+}
+
+// resolveTypeSlow is everything ResolveType's fast path does not handle: an
+// alias or import to follow, an escape-range index, a hand-built Component
+// with no TypeSpace, an out-of-range index -- and the unfrozen case, which
+// still interns and so must hold the lock for the whole walk (resolveTypeDepth
+// and everything below it assume it is held and must not retake it).
+func (c *Component) resolveTypeSlow(idx uint32) (TypeDesc, error) {
+	if c.typesFrozen {
+		return c.resolveTypeDepth(idx, 0)
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.resolveTypeDepth(idx, 0)
+}
+
+// precomputeImportedAliases resolves every type-sort export alias once, at the
+// end of Decode, so ResolveType never has to intern (and so never has to lock)
+// afterwards. Reports whether all of them resolved: one that did not leaves
+// the Component unfrozen, so the lazy, locked path still handles it.
+//
+// Only Sort 0x03 / TargetKind 0x00 aliases -- the export form, the one branch
+// of resolveAlias that interns. An "outer" alias (0x02) is deliberately left
+// alone: Component.Outer is not wired up until after this Component's own
+// decode returns, so resolving one here would fail for a reason that will not
+// be true later.
+func (c *Component) precomputeImportedAliases() bool {
+	complete := true
+	for idx, entry := range c.TypeSpace {
+		if entry.Kind != TypeSpaceAlias || int(entry.Alias) >= len(c.Aliases) {
+			continue
+		}
+		if al := c.Aliases[entry.Alias]; al.Sort != 0x03 || al.TargetKind != 0x00 {
+			continue
+		}
+		if _, err := c.resolveTypeDepth(uint32(idx), 0); err != nil {
+			complete = false
+		}
+	}
+	return complete
 }
 
 // ResourceDefIndex maps a resource type index to the canonical index where the
@@ -356,8 +411,15 @@ func (c *Component) resolveAlias(al AliasDef, idx uint32, depth int) (TypeDesc, 
 								// inside the result is resolvable through c's
 								// ordinary Resolver like any other (see
 								// InstanceDesc's doc and globalizeLocalRef).
+								// A failed globalize leaves the slots it reserved
+								// behind, so roll extraTypes back to the mark:
+								// nothing handed out an index past it, and a
+								// precompute attempt that fails must not grow
+								// the table it exists to keep bounded.
+								mark := len(c.extraTypes)
 								global, gerr := c.globalizeLocalRef(instDesc.Types, exp, map[uint32]uint32{})
 								if gerr != nil {
+									c.extraTypes = c.extraTypes[:mark]
 									return nil, fmt.Errorf("type index %d: alias exports %q from instance %d: %w", idx, al.Name, al.InstanceIdx, gerr)
 								}
 								var resolved TypeDesc

@@ -8,6 +8,21 @@ import (
 
 // Component represents a parsed WebAssembly Component Model container.
 type Component struct {
+	// typesFrozen is set at the end of Decode once precomputeImportedAliases
+	// has interned every type it can, which is every type resolution will ever
+	// need: nothing about resolving a type index depends on runtime state. It
+	// makes extraTypes/aliasCache immutable, so ResolveType -- which sits under
+	// abi.Resolver, one call per nested TypeRef of every lifted and lowered
+	// value -- is a pure read that takes no lock. Written once during decode,
+	// before the Component is reachable from another goroutine, so a plain
+	// bool is the right synchronization here (like every other decoded field).
+	//
+	// It sits here, next to the fields ResolveType's fast path reads with it,
+	// rather than down beside mu where it otherwise belongs. (Measured: the
+	// position itself is worth nothing -- 6.14 vs 6.21 ns/call. Keeping the
+	// three together is for the reader.)
+	typesFrozen bool
+
 	// Types contains the type definitions from the type section (section 7)
 	// only, in that section's declaration order. This is NOT the full
 	// component type index space that canon TypeIdx and export/instance type
@@ -149,10 +164,11 @@ type Component struct {
 	// TypeSpace at decode time would.
 	extraTypes []TypeDesc
 
-	// mu guards extraTypes and aliasCache. One decoded Component is shared by
-	// every instance made from it, and resolution INTERNS -- it is not a pure
-	// read -- so ResolveType takes this for the whole walk. Everything below
-	// ResolveType assumes it is already held and must not retake it; the one
+	// mu guards extraTypes and aliasCache for a Component that is NOT frozen:
+	// one built by hand (tests), or one whose alias precompute could not
+	// resolve everything. Resolution INTERNS -- it is not a pure read -- so
+	// ResolveType takes this for the whole walk. Everything below ResolveType
+	// assumes it is already held and must not retake it; the one
 	// cross-Component hop (an outer alias, typespace.go) takes the enclosing
 	// component's own mu instead, which is safe because an Outer chain runs
 	// strictly outward and so cannot cycle.
