@@ -342,6 +342,10 @@ func decodeComponent(buf []byte) (*Component, error) {
 		}
 	}
 
+	if err := c.validateFileTypeIndices(); err != nil {
+		return nil, err
+	}
+
 	c.Decoded = true
 	c.Bytes = buf
 	return c, nil

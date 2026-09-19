@@ -285,6 +285,9 @@ func readValTypeRef(buf []byte, off int) (TypeRef, int, error) {
 	}
 	// Positive value is a type index
 	idx := uint32(v)
+	if err := checkFileTypeIndex(idx, "valtype"); err != nil {
+		return TypeRef{}, off, err
+	}
 	return TypeRef{TypeIndex: &idx}, off, nil
 }
 
@@ -695,10 +698,20 @@ func readInstanceDeclDescInto(buf []byte, off int, localTypes *[]TypeDesc, expor
 		if sort == 0x03 { // type-sort export: a new local type-sort index
 			// hasIdx is false for a `sub`-bound (abstract resource) export,
 			// which this decoder cannot resolve structurally -- its slot is
-			// still reserved (nil) so a later decl referencing it by number
-			// fails loud rather than misindexing, but it contributes nothing
-			// to exports.
-			*localTypes = append(*localTypes, nil)
+			// reserved as nil so a later decl referencing it by number fails
+			// loud rather than misindexing, but it contributes nothing to
+			// exports.
+			//
+			// An `eq N`-bound export, though, IS resolvable: it is local type
+			// N. Its own new index must resolve to the same descriptor, or a
+			// later decl naming the EXPORT (rather than N) meets the nil and
+			// fails as "not resolved structurally" -- which is the very
+			// failure this whole path exists to avoid.
+			var exported TypeDesc
+			if hasIdx && int(idx) < len(*localTypes) {
+				exported = (*localTypes)[idx] // still nil if N was itself unresolvable
+			}
+			*localTypes = append(*localTypes, exported)
 			if hasIdx && exports != nil { // `eq N`-bound: an alias of local type N
 				if *exports == nil {
 					// Built on first type-sort export rather than up front:

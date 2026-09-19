@@ -3,6 +3,7 @@ package binary
 import (
 	"fmt"
 	"io"
+	"sync"
 )
 
 // Component represents a parsed WebAssembly Component Model container.
@@ -147,6 +148,25 @@ type Component struct {
 	// any real file-declared type index the way inserting into Types/
 	// TypeSpace at decode time would.
 	extraTypes []TypeDesc
+
+	// mu guards extraTypes and aliasCache. One decoded Component is shared by
+	// every instance made from it, and resolution INTERNS -- it is not a pure
+	// read -- so ResolveType takes this for the whole walk. Everything below
+	// ResolveType assumes it is already held and must not retake it; the one
+	// cross-Component hop (an outer alias, typespace.go) takes the enclosing
+	// component's own mu instead, which is safe because an Outer chain runs
+	// strictly outward and so cannot cycle.
+	mu sync.Mutex
+
+	// aliasCache memoizes the result of resolving a type-sort alias that
+	// reaches into an IMPORTED instance, keyed by the component type index.
+	// Without it every resolution re-globalizes and interns the same type
+	// afresh: extraTypes grows for the life of the Component, and -- because
+	// two resolutions then hand back descriptors holding different escape
+	// indices -- reflect.DeepEqual says one type does not equal itself, which
+	// is how task.return decides whether a result type matches its binding
+	// (instance/async_builtins.go).
+	aliasCache map[uint32]TypeDesc
 }
 
 // Type represents a value type in the component type section.

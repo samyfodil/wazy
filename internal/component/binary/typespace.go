@@ -73,6 +73,71 @@ const maxTypeAliasDepth = 32
 // would need gigabytes of encoding just for the count's own declarations.
 const extraTypeBase = 1 << 30
 
+// checkFileTypeIndex rejects a type index READ FROM A COMPONENT BINARY that
+// lands in extraTypes' private escape range. No real component reaches it --
+// declaring 2^30 type-space entries would take gigabytes -- so such an index
+// is always malformed. Unchecked it is worse than malformed: resolveTypeDepth
+// routes anything >= extraTypeBase to extraTypes before it ever bounds-checks
+// TypeSpace, so a forged index would silently resolve to an unrelated type
+// this Component interned internally. Every path that turns file bytes into a
+// type index goes through here or through validateFileTypeIndices.
+func checkFileTypeIndex(idx uint32, what string) error {
+	if idx >= extraTypeBase {
+		return fmt.Errorf("%s: type index %d is in the range reserved for internal use (>= %d)", what, idx, extraTypeBase)
+	}
+	return nil
+}
+
+// validateFileTypeIndices rejects an escape-range index in any of the
+// top-level type-index fields decodeComponent fills. Nested valtypes are
+// covered at their single read site (readValTypeRef); these are the indices
+// read by their own leb128 calls, which resolveTypeDepth reaches directly.
+func (c *Component) validateFileTypeIndices() error {
+	for i, im := range c.Imports {
+		// ExternType 0x03 names a type, 0x05 an instancetype -- both resolve
+		// through resolveTypeDepth.
+		if im.ExternType == 0x03 || im.ExternType == 0x05 {
+			if err := checkFileTypeIndex(im.ExternIndex, fmt.Sprintf("import %d (%q)", i, im.Name)); err != nil {
+				return err
+			}
+		}
+		if im.TypeEqBound {
+			if err := checkFileTypeIndex(im.TypeEqIndex, fmt.Sprintf("import %d (%q) eq bound", i, im.Name)); err != nil {
+				return err
+			}
+		}
+	}
+	for i, ex := range c.Exports {
+		if ex.ExternType == 0x03 {
+			if err := checkFileTypeIndex(ex.ExternIndex, fmt.Sprintf("export %d (%q)", i, ex.Name)); err != nil {
+				return err
+			}
+		}
+	}
+	for i, al := range c.Aliases {
+		if al.Sort == 0x03 && al.TargetKind == 0x02 {
+			if err := checkFileTypeIndex(al.OuterIndex, fmt.Sprintf("alias %d (outer)", i)); err != nil {
+				return err
+			}
+		}
+	}
+	for i, inst := range c.Instances {
+		for _, ie := range inst.Exports {
+			if ie.Sort == 0x03 {
+				if err := checkFileTypeIndex(ie.SortIdx, fmt.Sprintf("instance %d export %q", i, ie.Name)); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	for i, cn := range c.Canons {
+		if err := checkFileTypeIndex(cn.TypeIdx, fmt.Sprintf("canon %d", i)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // internExtraType appends d to c.extraTypes and returns its escape-range
 // index (see extraTypeBase).
 func (c *Component) internExtraType(d TypeDesc) uint32 {
@@ -109,6 +174,12 @@ func (c *Component) internExtraType(d TypeDesc) uint32 {
 // resolved directly against Types instead, matching this method's behavior
 // before TypeSpace existed.
 func (c *Component) ResolveType(idx uint32) (TypeDesc, error) {
+	// Resolution INTERNS (see Component.mu): it appends to extraTypes and
+	// fills aliasCache, so it is a write, not a pure read. Hold mu for the
+	// whole walk; resolveTypeDepth and everything below it assume it is held
+	// and must not retake it.
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.resolveTypeDepth(idx, 0)
 }
 
@@ -266,6 +337,12 @@ func (c *Component) resolveAlias(al AliasDef, idx uint32, depth int) (TypeDesc, 
 		// Instances at all; its declared instancetype's own Exports (built
 		// structurally by readInstancetypeDesc -- see InstanceDesc.Exports'
 		// doc) answers this directly instead.
+		if td, ok := c.aliasCache[idx]; ok {
+			// Already resolved once. Returning the cached descriptor instead
+			// of globalizing afresh is what keeps extraTypes bounded and makes
+			// a type equal to itself across resolutions -- see aliasCache's doc.
+			return td, nil
+		}
 		if int(al.InstanceIdx) < len(c.ComponentInstanceSpace) {
 			if e := c.ComponentInstanceSpace[al.InstanceIdx]; e.Kind == ComponentInstanceFromImport && int(e.Import) < len(c.Imports) {
 				if im := c.Imports[e.Import]; im.ExternType == 0x05 {
@@ -283,10 +360,17 @@ func (c *Component) resolveAlias(al AliasDef, idx uint32, depth int) (TypeDesc, 
 								if gerr != nil {
 									return nil, fmt.Errorf("type index %d: alias exports %q from instance %d: %w", idx, al.Name, al.InstanceIdx, gerr)
 								}
+								var resolved TypeDesc
 								if global.Primitive != "" {
-									return PrimitiveDesc{Prim: global.Primitive}, nil
+									resolved = PrimitiveDesc{Prim: global.Primitive}
+								} else if resolved, err = c.resolveTypeDepth(*global.TypeIndex, depth+1); err != nil {
+									return nil, err
 								}
-								return c.resolveTypeDepth(*global.TypeIndex, depth+1)
+								if c.aliasCache == nil {
+									c.aliasCache = make(map[uint32]TypeDesc, 4)
+								}
+								c.aliasCache[idx] = resolved
+								return resolved, nil
 							}
 						}
 					}
@@ -312,6 +396,13 @@ func (c *Component) resolveAlias(al AliasDef, idx uint32, depth int) (TypeDesc, 
 				return nil, fmt.Errorf("type index %d: outer alias (count=%d) targets %d enclosing component(s), but only %d are known (this component was decoded standalone, or is hand-built)", idx, al.OuterCount, al.OuterCount, i)
 			}
 			outer = outer.Outer
+		}
+		if outer != c {
+			// A different Component means a different mu; take it rather than
+			// interning into it unguarded. Outer chains run strictly outward,
+			// so nesting these cannot cycle.
+			outer.mu.Lock()
+			defer outer.mu.Unlock()
 		}
 		return outer.resolveTypeDepth(al.OuterIndex, depth+1)
 
