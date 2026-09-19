@@ -224,8 +224,28 @@ type FuncResult struct {
 }
 
 // InstanceDesc represents an instance type (collection of exports).
+//
+// An instancetype opens its own nested type-sort index space, the same way a
+// nested component opens its own (see Component.Outer) -- so Types and the
+// TypeIndex side of an Exports TypeRef both index into THIS InstanceDesc's
+// own space, never into the enclosing component's TypeSpace. A TypeRef here
+// with TypeIndex set is only ever resolvable through Types directly (see
+// resolveAlias's case 0x00, which globalizes it into the enclosing
+// Component's escape range before handing it to a caller) -- never through
+// an ordinary Resolver.
 type InstanceDesc struct {
-	Exports map[string]TypeRef // export name -> type
+	// Exports maps each type-sort export name to its type. A name absent
+	// from this map was either not exported at all, or was exported but this
+	// decoder could not resolve it structurally (a `sub`-bound/abstract
+	// resource export, or a type-sort alias).
+	Exports map[string]TypeRef
+
+	// Types holds the deftypes declared locally within this instancetype's
+	// own body (instancedecl tag 0x01), plus one nil placeholder per other
+	// type-sort-index-producing instancedecl (a type-sort alias, or a
+	// `sub`-bound export) this decoder cannot resolve structurally, in
+	// declaration order -- see readInstanceDeclDescInto.
+	Types []TypeDesc
 }
 
 func (InstanceDesc) isTypeDesc()  {}
@@ -265,6 +285,9 @@ func readValTypeRef(buf []byte, off int) (TypeRef, int, error) {
 	}
 	// Positive value is a type index
 	idx := uint32(v)
+	if err := checkFileTypeIndex(idx, "valtype"); err != nil {
+		return TypeRef{}, off, err
+	}
 	return TypeRef{TypeIndex: &idx}, off, nil
 }
 
@@ -619,33 +642,109 @@ func coreValtypeName(b byte) (string, error) {
 	}
 }
 
-// readInstanceDeclDesc consumes one instancedecl and may contribute to the
-// descriptor model. For M1, instance types with nested types or complex
-// exports are not fully represented.
+// readInstanceDeclDesc consumes one instancedecl without retaining its
+// structure. Used only where no caller needs the enclosing instancetype's own
+// nested type-sort index space (a componenttype body -- see
+// readComponentDecl); readInstancetypeDesc uses readInstanceDeclDescInto
+// directly instead, since it does need that space to build InstanceDesc's
+// Exports.
 func readInstanceDeclDesc(buf []byte, off int) (int, error) {
+	var localTypes []TypeDesc
+	return readInstanceDeclDescInto(buf, off, &localTypes, nil)
+}
+
+// readInstanceDeclDescInto consumes one instancedecl, contributing to
+// *localTypes -- the enclosing instancetype's own nested type-sort index
+// space, opened fresh by the instancetype the same way a nested component
+// opens its own (see Component.Outer) -- and, for a named type export, to
+// exports (may be nil when the caller, like readInstanceDeclDesc, has no use
+// for it). A TypeRef placed in exports whose TypeIndex is set names an index
+// into *localTypes, NOT into any enclosing component's TypeSpace -- see
+// InstanceDesc's doc.
+//
+// Per the component binary format, a "type" (tag 0x01), a type-sort "alias"
+// (tag 0x02, sort byte 0x03), and a type-sort "export" (tag 0x04, externdesc
+// sort 0x03) each introduce a new entry in *localTypes, in declaration order
+// -- exactly mirroring how Component.TypeSpace is built for the enclosing
+// component (see typespace.go's doc), just scoped to this one instancetype
+// body. Tracking every contributor, not just "type" decls, matters even
+// though only "type" decls produce a resolvable TypeDesc here: skipping the
+// others would misindex any later decl that references one of their slots by
+// number, silently returning the wrong local type instead of failing loud.
+func readInstanceDeclDescInto(buf []byte, off int, localTypes *[]TypeDesc, exports *map[string]TypeRef) (int, error) {
 	if off >= len(buf) {
 		return off, ErrTruncatedBinary
 	}
 	tag := buf[off]
 	off++
 	switch tag {
-	case 0x01: // type: a deftype
-		_, off2, err := readDeftypeDesc(buf, off)
-		return off2, err
-	case 0x04: // export decl: externname externdesc
-		_, off2, err := readExternName(buf, off)
+	case 0x01: // type: a deftype -- a new local type-sort index
+		d, off2, err := readDeftypeDesc(buf, off)
 		if err != nil {
 			return off2, err
 		}
-		_, _, _, off2, err = readExterndesc(buf, off2)
-		return off2, err
-	case 0x02: // alias
+		*localTypes = append(*localTypes, d)
+		return off2, nil
+
+	case 0x04: // export decl: externname externdesc
+		name, off2, err := readExternName(buf, off)
+		if err != nil {
+			return off2, err
+		}
+		sort, idx, hasIdx, off3, err := readExterndesc(buf, off2)
+		if err != nil {
+			return off3, err
+		}
+		if sort == 0x03 { // type-sort export: a new local type-sort index
+			// hasIdx is false for a `sub`-bound (abstract resource) export,
+			// which this decoder cannot resolve structurally -- its slot is
+			// reserved as nil so a later decl referencing it by number fails
+			// loud rather than misindexing, but it contributes nothing to
+			// exports.
+			//
+			// An `eq N`-bound export, though, IS resolvable: it is local type
+			// N. Its own new index must resolve to the same descriptor, or a
+			// later decl naming the EXPORT (rather than N) meets the nil and
+			// fails as "not resolved structurally" -- which is the very
+			// failure this whole path exists to avoid.
+			var exported TypeDesc
+			if hasIdx && int(idx) < len(*localTypes) {
+				exported = (*localTypes)[idx] // still nil if N was itself unresolvable
+			}
+			*localTypes = append(*localTypes, exported)
+			if hasIdx && exports != nil { // `eq N`-bound: an alias of local type N
+				if *exports == nil {
+					// Built on first type-sort export rather than up front:
+					// most instancetypes export only functions, and an always
+					// allocated map is one of the few per-import costs of
+					// retaining these declarations at all.
+					*exports = make(map[string]TypeRef, 4)
+				}
+				idx := idx
+				(*exports)[name] = TypeRef{TypeIndex: &idx}
+			}
+		}
+		return off3, nil
+
+	case 0x02: // alias -- a new local type-sort index, but only when its sort
+		// is type (0x03); readAlias itself discards the sort byte (its other
+		// caller, the top-level alias section, reads it separately -- see
+		// decodeAliasSection), so peek it here first. This decoder cannot
+		// follow an alias target structurally from inside an instancetype
+		// body (see resolveAlias), so the slot is recorded unresolved.
+		if off < len(buf) && buf[off] == 0x03 {
+			*localTypes = append(*localTypes, nil)
+		}
 		return readAlias(buf, off)
+
 	case 0x00: // core:type -- a core func/module type defined inline in the
-		// instance or component type. It carries no runtime obligation (these
-		// type-only validation shapes are opaque tags -- see the package doc);
-		// consume its bytes to stay synchronized.
+		// instance or component type. This is the CORE type-sort index space,
+		// disjoint from the component type-sort space *localTypes tracks, so
+		// it never contributes here. It carries no runtime obligation either
+		// way (these type-only validation shapes are opaque tags -- see the
+		// package doc); consume its bytes to stay synchronized.
 		return readCoretypeDef(buf, off)
+
 	default:
 		return off, fmt.Errorf("instancedecl: invalid tag %#x", tag)
 	}
@@ -799,23 +898,33 @@ func skipName(buf []byte, off int) (int, error) {
 	return off + int(n), nil
 }
 
-// readInstancetypeDesc reads an instance type: vec(instancedecl).
-// For M1, we consume the bytes but do not fully represent all nested structures.
+// readInstancetypeDesc reads an instance type: vec(instancedecl), building
+// Types (this instancetype's own nested type-sort index space) and Exports
+// via readInstanceDeclDescInto. See InstanceDesc's doc for why a TypeRef in
+// Exports indexes Types, not any enclosing component's TypeSpace.
 func readInstancetypeDesc(buf []byte, off int) (InstanceDesc, int, error) {
 	count, n, err := leb128.LoadUint32(buf[off:])
 	if err != nil {
 		return InstanceDesc{}, off, err
 	}
 	off += int(n)
-	// For M1, we skip building a full descriptor for instance contents.
-	// Just consume the bytes to stay synchronized.
+
+	var localTypes []TypeDesc
+	var exports map[string]TypeRef
+	// Every declaration consumes at least one byte, and only some of them
+	// produce a local type, so both count and the bytes left are upper bounds
+	// -- take the smaller so a bogus LEB128 count cannot make this allocate
+	// before the read that would reject it.
+	if cap := min(int(count), len(buf)-off); cap > 0 {
+		localTypes = make([]TypeDesc, 0, cap)
+	}
 	for i := range count {
-		off, err = readInstanceDeclDesc(buf, off)
+		off, err = readInstanceDeclDescInto(buf, off, &localTypes, &exports)
 		if err != nil {
 			return InstanceDesc{}, off, fmt.Errorf("instancedecl[%d]: %w", i, err)
 		}
 	}
-	return InstanceDesc{Exports: make(map[string]TypeRef)}, off, nil
+	return InstanceDesc{Exports: exports, Types: localTypes}, off, nil
 }
 
 // readDeftypeDesc consumes one deftype and returns a TypeDesc, OR a kind string

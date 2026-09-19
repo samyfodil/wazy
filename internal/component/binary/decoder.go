@@ -342,6 +342,17 @@ func decodeComponent(buf []byte) (*Component, error) {
 		}
 	}
 
+	if err := c.validateFileTypeIndices(); err != nil {
+		return nil, err
+	}
+
+	// Intern every internable type now, so ResolveType is a pure, lock-free
+	// read for the life of this Component (see typesFrozen). An alias that
+	// cannot be resolved is not an error -- plenty of real components carry
+	// one, and it must still fail at the same call site with the same message
+	// -- it just leaves the Component unfrozen.
+	c.typesFrozen = c.precomputeImportedAliases()
+
 	c.Decoded = true
 	c.Bytes = buf
 	return c, nil
@@ -405,6 +416,8 @@ func decodeImportSection(buf []byte, offset int, sectionSize uint32) ([]Import, 
 			imports[i].TypeEqIndex = eqIdx
 			imports[i].TypeEqBound = true
 		case sort == 0x01 && hasEq: // func import: eqIdx is the func's own type index
+			imports[i].ExternIndex = eqIdx
+		case sort == 0x05 && hasEq: // instance import: eqIdx is the instancetype's own type index
 			imports[i].ExternIndex = eqIdx
 		}
 	}

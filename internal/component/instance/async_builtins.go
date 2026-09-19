@@ -541,7 +541,22 @@ func taskReturnHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, err
 
 		var result []abi.Value
 		if resultType != nil {
-			mem, memAvailable := memoryBytesOf(mod)
+			// The canon-declared memory to lift the result through is the
+			// TASK's own export binding (t.be.mod), not mod -- the module
+			// that happened to call this shared task.return core func
+			// directly. Once several canons are packed into one regrouping
+			// shim module (graph.go's "core instance N: inline export"
+			// merge), mod is that shim, which has no memory of its own; t.be
+			// is the guest module that actually declared the memory option,
+			// exactly like every other lift/lower site keys off be.mod (see
+			// e.g. guest_task.go's start, instance.go's invoke). t.be is nil
+			// only off the defensive path already guarded above; mod remains
+			// the fallback there.
+			memMod := mod
+			if t.be != nil {
+				memMod = t.be.mod
+			}
+			mem, memAvailable := memoryBytesOf(memMod)
 			if spills {
 				if !memAvailable {
 					panic(fmt.Errorf("component/instance: task.return: result flattens beyond %d core value(s) and requires linear memory, but the core module exports no memory", abi.MaxFlatParams))

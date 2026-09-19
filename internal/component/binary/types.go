@@ -108,10 +108,14 @@ func readExternName(buf []byte, off int) (string, int, error) {
 // idx is the func's own type index -- decodeImportSection needs it (on
 // Import.ExternIndex) to resolve a top-level func import's declared type
 // (e.g. checking its Async bit against a canon lower's async option -- see
-// validateAsyncOptAgreesWithType). hasIdx is false for a `sub` type bound
-// (0x01, an opaque resource) and for component/instance sorts (0x04/0x05,
-// whose own typeidx no caller currently needs; decode it yourself if that
-// changes).
+// validateAsyncOptAgreesWithType) -- and for an instance-sort (0x05)
+// externdesc, whose idx is the instance's own declared instancetype index --
+// decodeImportSection likewise needs it (on Import.ExternIndex) so
+// typespace.go's resolveAlias can look up what a `use iface.{T}` alias
+// actually names in the imported instance's InstanceDesc.Exports. hasIdx is
+// false for a `sub` type bound (0x01, an opaque resource) and for a
+// component-sort (0x04) externdesc, whose own typeidx no caller currently
+// needs; decode it yourself if that changes.
 func readExterndesc(buf []byte, off int) (sort byte, idx uint32, hasIdx bool, _ int, err error) {
 	if off >= len(buf) {
 		return 0, 0, false, off, ErrTruncatedBinary
@@ -136,12 +140,19 @@ func readExterndesc(buf []byte, off int) (sort byte, idx uint32, hasIdx bool, _ 
 		}
 		off += int(n)
 		return sort, fIdx, true, off, nil
-	case 0x04, 0x05: // component, instance: typeidx
+	case 0x04: // component: typeidx
 		_, n, e := leb128.LoadUint32(buf[off:])
 		if e != nil {
 			return sort, 0, false, off, e
 		}
 		off += int(n)
+	case 0x05: // instance: typeidx
+		iIdx, n, e := leb128.LoadUint32(buf[off:])
+		if e != nil {
+			return sort, 0, false, off, e
+		}
+		off += int(n)
+		return sort, iIdx, true, off, nil
 	case 0x03: // type bound: 0x00 typeidx (eq) | 0x01 (sub)
 		if off >= len(buf) {
 			return sort, 0, false, off, ErrTruncatedBinary
