@@ -1,6 +1,12 @@
 package platform
 
-// CpuFeatureFlags exposes methods for querying CPU capabilities
+// CpuFeatureFlags exposes methods for querying CPU capabilities.
+//
+// The flags describe everything about the host CPU that changes the machine
+// code the compiler emits -- capabilities it may use, and errata it must work
+// around. Raw is folded into the compilation cache key (see fileCacheKey), so
+// anything recorded here is automatically prevented from leaking across a
+// heterogeneous fleet sharing one cache directory.
 type CpuFeatureFlags uint64
 
 const (
@@ -10,6 +16,11 @@ const (
 	CpuFeatureAmd64BMI1
 	// CpuExtraFeatureABM is the flag to query CpuFeatureFlags.Has for Advanced Bit Manipulation capabilities (e.g. LZCNT) on amd64
 	CpuFeatureAmd64ABM
+	// CpuFeatureAmd64JCCErratum is the flag to query CpuFeatureFlags.Has for a Skylake-family
+	// amd64 core subject to Intel erratum SKX102, the "JCC erratum". Unlike the others this is
+	// not a capability but a defect the code layout has to route around; see cpuid_jcc.go and
+	// JCCErratumWorkaroundEnabled.
+	CpuFeatureAmd64JCCErratum
 )
 
 const (

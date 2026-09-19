@@ -472,6 +472,28 @@ func (m *machine) LowerConditionalBranch(b *ssa.Instruction) {
 	target := ssaBlockLabel(m.c.SSABuilder().BasicBlock(targetBlkID))
 	cvalDef := m.c.ValueDefinition(cval)
 
+	if m.c.MatchInstr(cvalDef, ssa.OpcodeFuelDec) {
+		// 		sub $1, %fuel
+		// 		jle  <slow>          ;; or jg, for a Brz
+		//
+		// SUB already sets the flags the branch needs, so the decrement and the test
+		// are the same instruction: the whole termination check is these two. Signed
+		// LE rather than Z so that a counter driven below zero -- which a re-entry
+		// restoring an already-exhausted value can do -- keeps taking the slow path
+		// instead of wrapping around for another 2^64 ticks.
+		//
+		// Matched here rather than through condBranchMatches because that list is
+		// shared with lowerSelect, which must never see a FuelDec.
+		m.insert(m.allocateInstr().asAluRmiR(aluRmiROpcodeSub, newOperandImm32(1), fuelVReg, true))
+		cc := condLE
+		if b.Opcode() == ssa.OpcodeBrz {
+			cc = condNLE
+		}
+		m.insert(m.allocateInstr().asJmpIf(cc, newOperandLabel(target)))
+		cvalDef.Instr.MarkLowered()
+		return
+	}
+
 	switch m.c.MatchInstrOneOf(cvalDef, condBranchMatches[:]) {
 	case ssa.OpcodeIcmp:
 		cvalInstr := cvalDef.Instr
@@ -548,6 +570,12 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 	switch op := instr.Opcode(); op {
 	case ssa.OpcodeBrz, ssa.OpcodeBrnz, ssa.OpcodeJump, ssa.OpcodeBrTable:
 		panic("BUG: branching instructions are handled by LowerBranches")
+	case ssa.OpcodeFuelDec:
+		// The frontend only ever emits this immediately before the branch that
+		// consumes it, so LowerConditionalBranch above has already folded it in and
+		// marked it lowered. Reaching here means something moved it away from its
+		// branch, which would leave the decrement without its test.
+		panic("BUG: FuelDec must be folded into the conditional branch consuming it")
 	case ssa.OpcodeReturn:
 		panic("BUG: return must be handled by backend.Compiler")
 	case ssa.OpcodeIconst, ssa.OpcodeF32const, ssa.OpcodeF64const: // Constant instructions are inlined.
@@ -2433,11 +2461,23 @@ func (m *machine) Encode(ctx context.Context) (err error) {
 		fnIndex = nativeapi.GetCurrentFunctionIndex(ctx)
 	}
 
+	// Intel erratum SKX102 (see jcc_erratum.go). Hoisted out of the loop: the
+	// answer cannot change while one function is being encoded, and on every
+	// architecture but amd64 it folds away to a constant false.
+	padJCC := platform.JCCErratumWorkaroundEnabled()
+	extentSink := InstrExtentSink
+	var extents []InstrExtent
+
 	m.labelResolutionPends = m.labelResolutionPends[:0]
 	for _, pos := range m.orderedSSABlockLabelPos {
 		offset := int64(len(*bufPtr))
 		pos.binaryOffset = offset
 		for cur := pos.begin; cur != pos.end.next; cur = cur.next {
+			if padJCC {
+				// Before the offset is taken: a label bound to a padded branch
+				// must name the NOPs, which fall through into it.
+				jccErratumPad(m.c, int64(len(*bufPtr)), cur)
+			}
 			offset := int64(len(*bufPtr))
 
 			switch cur.kind {
@@ -2456,6 +2496,9 @@ func (m *machine) Encode(ctx context.Context) (err error) {
 					labelResolutionPend{instr: cur, instrOffset: offset, imm32Offset: int64(len(*bufPtr)) - 4},
 				)
 			}
+			if extentSink != nil {
+				extents = append(extents, InstrExtent{Offset: offset, Length: int64(len(*bufPtr)) - offset})
+			}
 		}
 
 		if nativeapi.PerfMapEnabled {
@@ -2463,6 +2506,11 @@ func (m *machine) Encode(ctx context.Context) (err error) {
 			size := int64(len(*bufPtr)) - offset
 			nativeapi.PerfMap.AddModuleEntry(fnIndex, offset, uint64(size), fmt.Sprintf("%s:::::%s", fn, l))
 		}
+	}
+
+	if extentSink != nil {
+		// Before the constant pool, which is data and never executed.
+		extentSink(extents, *bufPtr)
 	}
 
 	for i := range m.consts {

@@ -434,6 +434,15 @@ func (c *compiler) compile(sig *wasm.FunctionType, body []byte, localTypes []was
 		kind:      controlFrameKindFunction,
 	})
 
+	// A loop back-edge is not the only way a guest runs unboundedly. A loop-free
+	// call graph (f calls g twice, g calls h twice, ...) performs 2^depth calls at
+	// a fixed stack depth, and return_call self-recursion runs forever at a fixed
+	// depth without growing the stack. Neither ever crosses a `loop`. Checking on
+	// entry closes both, and covers every call form since they all arrive here.
+	if c.ensureTermination {
+		c.emit(newOperationBuiltinFunctionCheckExitCode())
+	}
+
 	// Now, enter the function body.
 	for !c.controlFrames.empty() && c.pc < uint64(len(c.body)) {
 		if err := c.handleInstruction(); err != nil {

@@ -271,6 +271,16 @@ func (m *machine) CompileGoFunctionTrampoline(exitCode nativeapi.ExitCode, sig *
 	// Before return, we need to restore the callee saved registers.
 	cur = m.restoreRegistersInExecutionContext(cur, execCtrPtr, calleeSavedVRegs)
 
+	if exitCode == nativeapi.ExitCodeCheckModuleExitCode {
+		// This is the one exit that is reached because the fuel ran out, so it is
+		// the one that refills it -- overwriting the exhausted value the restore
+		// above just put back. Every other exit wants that value preserved exactly:
+		// refilling on a host call would let a guest that calls one inside a loop
+		// spend forever without ever reaching a check.
+		// 		mov $TerminationFuel, %fuel
+		cur = linkInstr(cur, m.allocateInstr().asImm(fuelVReg, uint64(nativeapi.TerminationFuel), false))
+	}
+
 	if argOverlapWithExecCtxOffset >= 0 {
 		// At this point execCtt is not used anymore, so we can finally store the
 		// result to the register which overlaps with the execution context pointer.

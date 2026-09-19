@@ -264,26 +264,71 @@ signatures:
 	sig2: i64_v
 
 blk0: (v0:i64, v1:i64)
-	Jump blk1
+	v2:i32 = FuelDec
+	Brnz v2, blk1
+	Jump blk2
 
-blk1: () <-- (blk0,blk1)
-	v2:i64 = Load v0, 0x58
-	CallIndirect v2:sig2, v0
-	Jump blk1
+blk1: () <-- (blk0)
+	v5:i64 = Load v0, 0x58
+	CallIndirect v5:sig2, v0
+	Jump blk2
 
-blk2: ()
+blk2: () <-- (blk0,blk1)
+	Jump blk3
+
+blk3: () <-- (blk2,blk6)
+	v3:i32 = FuelDec
+	Brnz v3, blk5
+	Jump blk6
+
+blk4: ()
+
+blk5: () <-- (blk3)
+	v4:i64 = Load v0, 0x58
+	CallIndirect v4:sig2, v0
+	Jump blk6
+
+blk6: () <-- (blk3,blk5)
+	Jump blk3
 `,
+			// The two slow blocks (blk1 for the entry check, blk5 for the loop's)
+			// land after the loop body, so the out-of-fuel branch is the forward,
+			// predicted-not-taken one and the body stays on the fallthrough.
 			expAfterPasses: `
 signatures:
 	sig2: i64_v
 
 blk0: (v0:i64, v1:i64)
+	v2:i32 = FuelDec
+	Brnz v2, blk1
 	Jump fallthrough
 
-blk1: () <-- (blk0,blk1)
-	v2:i64 = Load v0, 0x58
-	CallIndirect v2:sig2, v0
-	Jump blk1
+blk7: () <-- (blk0)
+	Jump fallthrough
+
+blk2: () <-- (blk7,blk1)
+	Jump fallthrough
+
+blk3: () <-- (blk2,blk6)
+	v3:i32 = FuelDec
+	Brnz v3, blk5
+	Jump fallthrough
+
+blk8: () <-- (blk3)
+	Jump fallthrough
+
+blk6: () <-- (blk8,blk5)
+	Jump blk3
+
+blk5: () <-- (blk3)
+	v4:i64 = Load v0, 0x58
+	CallIndirect v4:sig2, v0
+	Jump blk6
+
+blk1: () <-- (blk0)
+	v5:i64 = Load v0, 0x58
+	CallIndirect v5:sig2, v0
+	Jump blk2
 `,
 		},
 		{

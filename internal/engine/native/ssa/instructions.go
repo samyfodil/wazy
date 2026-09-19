@@ -644,6 +644,26 @@ const (
 	// for tail calls. Semantically, it combines CallIndirect + Return into a single operation.
 	OpcodeTailCallReturnCallIndirect
 
+	// OpcodeFuelDec decrements the termination fuel counter and returns whether it
+	// ran out: `v = FuelDec`, non-zero when the counter reached zero or below.
+	//
+	// The counter is not an SSA value. It lives in one register reserved out of the
+	// allocatable set for the whole program (see the fuel register in each backend's
+	// abi.go), which is what keeps the check to two instructions -- a decrement and
+	// a rarely-taken branch that reads the decrement's own flags -- touching no
+	// memory at all. Reserving that register is not free; it costs the allocator one
+	// of fourteen integer registers on amd64 and one of thirty-one on arm64.
+	// Emitted only under WithCloseOnContextDone; see
+	// (*frontend.Compiler).emitFuelCheck.
+	//
+	// It is classified sideEffectTraps rather than sideEffectStrict: "always alive"
+	// keeps it out of dead code elimination, while staying inside its instruction
+	// group is what lets a backend fold it into the branch that consumes it (a
+	// strict effect starts a new group, and folding only happens within one).
+	// sideEffectTraps also keeps it out of loop-invariant code motion, which would
+	// otherwise hoist the one check a loop has out of that loop.
+	OpcodeFuelDec
+
 	// opcodeEnd marks the end of the opcode list.
 	opcodeEnd
 )
@@ -889,6 +909,7 @@ var instructionSideEffects = [opcodeEnd]sideEffect{
 	OpcodeAtomicStore:                 sideEffectStrict,
 	OpcodeAtomicCas:                   sideEffectStrict,
 	OpcodeFence:                       sideEffectStrict,
+	OpcodeFuelDec:                     sideEffectTraps,
 	OpcodeTailCallReturnCall:          sideEffectStrict,
 	OpcodeTailCallReturnCallIndirect:  sideEffectStrict,
 	OpcodeWideningPairwiseDotProductS: sideEffectNone,
@@ -1047,6 +1068,7 @@ var instructionReturnTypes = [opcodeEnd]returnTypesFn{
 	OpcodeAtomicStore:                 returnTypesFnNoReturns,
 	OpcodeAtomicCas:                   returnTypesFnSingle,
 	OpcodeFence:                       returnTypesFnNoReturns,
+	OpcodeFuelDec:                     returnTypesFnI32,
 	OpcodeTailCallReturnCallIndirect:  returnTypesFnCallIndirect,
 	OpcodeTailCallReturnCall:          returnTypesFnCall,
 	OpcodeWideningPairwiseDotProductS: returnTypesFnV128,
@@ -2112,6 +2134,13 @@ func (i *Instruction) AsFence(order byte) *Instruction {
 	return i
 }
 
+// AsFuelDec initializes this instruction as a termination-fuel decrement. See OpcodeFuelDec.
+func (i *Instruction) AsFuelDec() *Instruction {
+	i.opcode = OpcodeFuelDec
+	i.typ = TypeI32
+	return i
+}
+
 // AtomicRmwData returns the data for this atomic read-modify-write instruction.
 func (i *Instruction) AtomicRmwData() (op AtomicRmwOp, size uint64) {
 	return AtomicRmwOp(i.u1), i.u2
@@ -2764,6 +2793,8 @@ func (i *Instruction) Format(b Builder) string {
 		instSuffix = fmt.Sprintf("_%d, %s, %s, %s", 8*i.u1, i.v.Format(b), i.v2.Format(b), i.v3.Format(b))
 	case OpcodeFence:
 		instSuffix = fmt.Sprintf(" %d", i.u1)
+	case OpcodeFuelDec:
+		instSuffix = ""
 	case OpcodeTailCallReturnCall, OpcodeTailCallReturnCallIndirect:
 		view := i.vs.View()
 		vs := make([]string, len(view))
@@ -3034,6 +3065,8 @@ func (o Opcode) String() (ret string) {
 		return "AtomicStore"
 	case OpcodeFence:
 		return "Fence"
+	case OpcodeFuelDec:
+		return "FuelDec"
 	case OpcodeTailCallReturnCall:
 		return "ReturnCall"
 	case OpcodeTailCallReturnCallIndirect:

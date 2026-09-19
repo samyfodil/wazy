@@ -2984,6 +2984,7 @@ func Test_ensureTermination(t *testing.T) {
 		{
 			ensureTermination: true,
 			exp: `.entrypoint
+	BuiltinFunctionCheckExitCode
 	ConstI32 0x0
 	Br .L2
 .L2

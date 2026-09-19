@@ -30,6 +30,17 @@ func fileCacheKey(m *wasm.Module) (ret filecache.Key) {
 	s.Write(magic)
 	// Write the CPU features so that we can cache the compiled module for the same CPU.
 	// This prevents the incompatible CPU features from being used.
+	//
+	// "Features" here means everything about the host CPU that changes the code
+	// the compiler emits, capabilities and errata alike. In particular it
+	// carries CpuFeatureAmd64JCCErratum, so a module compiled with the Intel
+	// SKX102 NOP padding and the 32-byte function alignment it needs is keyed
+	// apart from one compiled without them -- otherwise a cache directory
+	// shared by a Skylake host and an Ice Lake host would silently hand each
+	// the other's layout. (module.ID itself, see wasm.Module.AssignModuleID,
+	// covers only the per-module compile flags such as ensureTermination; the
+	// host's identity belongs here, where it does not have to be threaded
+	// through every AssignModuleID caller.)
 	cpu := platform.CpuFeatures.Raw()
 	// Reuse the `ret` buffer to write the first 8 bytes of the CPU features so that we can avoid the allocation.
 	binary.LittleEndian.PutUint64(ret[:8], cpu)
@@ -267,15 +278,6 @@ func serializeCompiledModule(wazyVersion string, cm *compiledModule) io.Reader {
 		tail.Write(u64.LeBytes(uint64(sz)))
 	}
 
-	// Interrupt-check interval: a format-version byte then the interval (8
-	// bytes). This is part of the module's compile identity and seeds the
-	// runtime interruptCheckMask, so a cache-loaded module keeps the yield
-	// frequency it was compiled with (rather than defaulting to 0 =
-	// check-every-iteration). Own version byte so an older cache entry lacking
-	// this section is detected as stale rather than misparsed.
-	tail.WriteByte(interruptIntervalFormatVersion)
-	tail.Write(u64.LeBytes(cm.interruptCheckInterval))
-
 	// Entry preambles: position-independent Go->wasm trampolines, one per
 	// entry in the module's TypeSection (see compileEntryPreambles). They're
 	// pure register-relative code with no absolute-address fixups, so the
@@ -332,19 +334,16 @@ const ehTableFormatVersion = 1
 // entries are detected as stale rather than misparsed.
 const tryTableInfoFormatVersion = 1
 
-// interruptIntervalFormatVersion guards the trailing interrupt-check-interval
-// scalar, same rationale as ehTableFormatVersion: a cache entry written before
-// this section existed hits EOF at the version byte and is treated as stale
-// (forcing one recompile) rather than misparsed.
-const interruptIntervalFormatVersion = 1
-
 // entryPreambleFormatVersion guards the trailing entry-preambles cache
 // section (cm.entryPreambles / cm.entryPreamblesPtrs), same rationale as
-// ehTableFormatVersion / interruptIntervalFormatVersion: its own version byte
-// means a cache entry written before this section existed (or under an
-// incompatible layout) hits EOF/mismatch here and is treated as stale rather
-// than misparsed.
-const entryPreambleFormatVersion = 1
+// ehTableFormatVersion: its own version byte means a cache entry written before
+// this section existed (or under an incompatible layout) hits EOF/mismatch here
+// and is treated as stale rather than misparsed.
+//
+// Bumped to 2 when the interrupt-check-interval section that used to precede it
+// was removed: without the bump an older entry's interval version byte would be
+// read as this one's and its scalar misparsed as preamble data.
+const entryPreambleFormatVersion = 2
 
 func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *compiledModule, staleCache bool, err error) {
 	defer reader.Close()
@@ -589,19 +588,6 @@ func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *co
 		}
 		cm.functionFrameSizes[i] = int64(sz)
 	}
-
-	// Interrupt-check interval section (see serialize). A cache entry written
-	// before this section existed EOFs here; treat that (and any short read or
-	// version mismatch) as stale so it is recompiled rather than loaded with a
-	// zero interval.
-	if _, err = io.ReadFull(bufReader, eightBytes[:1]); err != nil || eightBytes[0] != interruptIntervalFormatVersion {
-		return nil, true, nil
-	}
-	interval, err := readUint64(bufReader, &eightBytes)
-	if err != nil {
-		return nil, true, nil
-	}
-	cm.interruptCheckInterval = interval
 
 	// Entry preambles section (see serialize). A cache entry written before
 	// this section existed EOFs here; treat that (and any short read or

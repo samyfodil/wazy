@@ -1673,7 +1673,7 @@ L0 (SSA Block: blk0):
 	defineUninitializedReg %rdx
 	pxor %xmm15, %xmm15
 	movq 16(%rsp), %rcx
-	callq *760(%rcx)
+	callq *744(%rcx)
 	nop_use_reg %xmm0
 	nop_use_reg %xmm1
 	nop_use_reg %xmm2
@@ -1730,7 +1730,7 @@ L0 (SSA Block: blk0):
 	b.lo #0x28, (L2)
 	ldr x10, [x1, #0x8]
 	add x9, x10, x9
-	ldr x10, [x0, #0x2f8]
+	ldr x10, [x0, #0x2e8]
 	mov x0, x9
 	mov x1, x8
 	bl x10

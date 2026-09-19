@@ -100,22 +100,12 @@ const (
 	// where locals are mirrored inside try_table bodies, so that handler blocks
 	// can read throw-time local values after stack-clone restore.
 	ExecutionContextOffsetLocalsSaveAreaPtr Offset = 728
-	// ExecutionContextOffsetInterruptCounter is an offset of the `interruptCounter`
-	// field. Loop headers increment it and, under WithCloseOnContextDone with a
-	// non-zero interrupt-check interval, only perform the module-exit-code check
-	// when (counter & (interval-1)) == 0 (see frontend loop lowering).
-	ExecutionContextOffsetInterruptCounter Offset = 736
-	// ExecutionContextOffsetInterruptCheckMask is an offset of the
-	// `interruptCheckMask` field. It holds (interval-1); loop headers load it at
-	// runtime (rather than baking it as a constant) so the amortized-check
-	// frequency can be retuned per run/per loop without recompiling.
-	ExecutionContextOffsetInterruptCheckMask Offset = 744
 	// ExecutionContextOffsetGCCheckTrampolineAddress is the address of the trampoline behind ref.test,
 	// ref.cast and the subtype-aware call_indirect check. See nativeapi.ExitCodeGCCheck.
-	ExecutionContextOffsetGCCheckTrampolineAddress Offset = 752
+	ExecutionContextOffsetGCCheckTrampolineAddress Offset = 736
 	// ExecutionContextOffsetMemclrAddress is the offset of `memclrAddress`, the entry PC of
 	// the Go runtime's memclrNoHeapPointers, called by the memory.fill lowering.
-	ExecutionContextOffsetMemclrAddress Offset = 760
+	ExecutionContextOffsetMemclrAddress Offset = 744
 )
 
 // AssertSavedRegistersFit panics if a save/restore layout that ends at absolute offset end
