@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const root = 'dist';
-const BASE = '/wazy'; // must match `base` in astro.config.mjs
+const BASE = ''; // must match `base` in astro.config.mjs (empty for base: '/')
 const basePrefix = new RegExp(`^${BASE}(?=/|$)`); // anchored to a path-segment boundary
 const pages = [];
 (function walk(d) {

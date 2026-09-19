@@ -6,7 +6,7 @@ The documentation site, built with [Astro](https://astro.build) and
 
 ```bash
 npm ci
-npm run dev        # http://localhost:4321/wazy/
+npm run dev        # http://localhost:4321/
 npm run build      # -> dist/
 npm run check:links
 ```
@@ -30,12 +30,13 @@ check-links.mjs            resolves every internal href against dist/
 
 ## Three things that will bite you
 
-**Relative links are not rewritten for `base`.** The site is served under `/wazy/`, and Astro
-emits relative markdown links verbatim. Write them relative to the *served URL*, not to the
-source file: from `src/content/docs/examples/wasi.mdx` (served at `/wazy/examples/wasi/`), the
-guides are at `../../guides/`, not `../guides/`. `npm run check:links` resolves every internal
-href against the built tree and is the only thing standing between you and a wall of 404s — the
-Pages workflow runs it after every build.
+**Relative links are not rewritten for `base`.** Astro emits relative markdown links verbatim, so
+write them relative to the *served URL*, not to the source file: from
+`src/content/docs/examples/wasi.mdx` (served at `/examples/wasi/`), the guides are at
+`../../guides/`, not `../guides/`. `npm run check:links` resolves every internal href against the
+built tree and is the only thing standing between you and a wall of 404s — the Pages workflow runs
+it after every build. `check-links.mjs`'s own `BASE` constant must keep matching `base` in
+`astro.config.mjs`.
 
 **Changing `ec.config.mjs` invalidates the code-block stylesheet, but not Astro's cached page
 output.** Pages rendered before the change keep a `<link>` to the old hash, which no longer
