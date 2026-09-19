@@ -668,7 +668,7 @@ func readInstanceDeclDesc(buf []byte, off int) (int, error) {
 // though only "type" decls produce a resolvable TypeDesc here: skipping the
 // others would misindex any later decl that references one of their slots by
 // number, silently returning the wrong local type instead of failing loud.
-func readInstanceDeclDescInto(buf []byte, off int, localTypes *[]TypeDesc, exports map[string]TypeRef) (int, error) {
+func readInstanceDeclDescInto(buf []byte, off int, localTypes *[]TypeDesc, exports *map[string]TypeRef) (int, error) {
 	if off >= len(buf) {
 		return off, ErrTruncatedBinary
 	}
@@ -700,8 +700,15 @@ func readInstanceDeclDescInto(buf []byte, off int, localTypes *[]TypeDesc, expor
 			// to exports.
 			*localTypes = append(*localTypes, nil)
 			if hasIdx && exports != nil { // `eq N`-bound: an alias of local type N
+				if *exports == nil {
+					// Built on first type-sort export rather than up front:
+					// most instancetypes export only functions, and an always
+					// allocated map is one of the few per-import costs of
+					// retaining these declarations at all.
+					*exports = make(map[string]TypeRef, 4)
+				}
 				idx := idx
-				exports[name] = TypeRef{TypeIndex: &idx}
+				(*exports)[name] = TypeRef{TypeIndex: &idx}
 			}
 		}
 		return off3, nil
@@ -889,10 +896,17 @@ func readInstancetypeDesc(buf []byte, off int) (InstanceDesc, int, error) {
 	}
 	off += int(n)
 
-	exports := make(map[string]TypeRef)
 	var localTypes []TypeDesc
+	var exports map[string]TypeRef
+	// Every declaration consumes at least one byte, and only some of them
+	// produce a local type, so both count and the bytes left are upper bounds
+	// -- take the smaller so a bogus LEB128 count cannot make this allocate
+	// before the read that would reject it.
+	if cap := min(int(count), len(buf)-off); cap > 0 {
+		localTypes = make([]TypeDesc, 0, cap)
+	}
 	for i := range count {
-		off, err = readInstanceDeclDescInto(buf, off, &localTypes, exports)
+		off, err = readInstanceDeclDescInto(buf, off, &localTypes, &exports)
 		if err != nil {
 			return InstanceDesc{}, off, fmt.Errorf("instancedecl[%d]: %w", i, err)
 		}
