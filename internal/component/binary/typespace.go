@@ -164,6 +164,14 @@ func (c *Component) resolveTypeDepth(idx uint32, depth int) (TypeDesc, error) {
 		if int(i) >= len(c.extraTypes) {
 			return nil, fmt.Errorf("type index %d: out of range of the %d-entry extra type table", idx, len(c.extraTypes))
 		}
+		if c.extraTypes[i] == nil {
+			// A slot reserved by globalizeLocalRef whose recursion then
+			// failed. Nothing hands that index out, so this is unreachable
+			// today -- but returning it as a nil TypeDesc with a nil error is
+			// precisely the shape that produced "unknown type descriptor:
+			// <nil>", so refuse rather than propagate it.
+			return nil, fmt.Errorf("type index %d: extra type table entry was reserved but never filled", idx)
+		}
 		return c.extraTypes[i], nil
 	}
 
@@ -462,11 +470,21 @@ func (c *Component) globalizeLocalTypeDesc(localTypes []TypeDesc, d TypeDesc, me
 		return nf, nil
 
 	case OwnDesc, BorrowDesc:
-		// ResourceType is an opaque tag, never dereferenced through a
-		// Resolver (see OwnDesc/BorrowDesc's doc) -- left as its original
-		// local index even though it is technically still one, since nothing
-		// ever looks it up.
-		return d, nil
+		// ResourceType is an index, and unlike every other TypeRef here it
+		// cannot be globalized into the escape range: composition reads it as
+		// an index into this Component's TypeSpace, not through a Resolver --
+		// canonTag feeds it to the resource canonicalizer, resourceOrigin
+		// keys on it, and importedTypeIndex scans TypeSpace for it (see
+		// instance/composition.go). An extraTypes index is as wrong there as
+		// the instance-local one it came from.
+		//
+		// So fail, rather than hand back a descriptor carrying an index from
+		// the wrong space. That matches the abstract-resource case, which
+		// already errors via the nil check in globalizeLocalRef, and keeps
+		// this path loud instead of silently canonicalizing the wrong
+		// resource -- the same failure mode this whole change exists to fix
+		// one layer up.
+		return nil, fmt.Errorf("cannot resolve a %s handle from an imported instance's type declarations: its resource index belongs to that instance's local type space, and composition reads it as a component TypeSpace index", d.Kind())
 
 	default:
 		return nil, fmt.Errorf("cannot resolve a locally-declared %s type from an imported instance's type declarations", d.Kind())

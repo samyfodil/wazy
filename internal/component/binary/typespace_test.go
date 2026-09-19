@@ -671,3 +671,47 @@ func TestGlobalizeLocalRef_CycleGuard(t *testing.T) {
 		t.Fatalf("ResolveType(nested, closing the cycle): %v", err)
 	}
 }
+
+// A handle's ResourceType is an index into the *Component's* TypeSpace --
+// instance/composition.go's canonTag, resourceOrigin and importedTypeIndex all
+// read it that way -- so a handle carrying an imported instance's local index
+// cannot be globalized, only refused. Returning the descriptor unchanged would
+// canonicalize the wrong resource, silently.
+func TestGlobalizeLocalRef_HandleIsRefusedNotCarriedOver(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		desc TypeDesc
+	}{
+		{"own", OwnDesc{ResourceType: 7}},
+		{"borrow", BorrowDesc{ResourceType: 7}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A record whose field is the handle: the record globalizes, and
+			// the handle inside it is what must not slip through.
+			handle := uint32(1)
+			localTypes := []TypeDesc{
+				RecordDesc{Fields: []RecordField{{Name: "h", Type: TypeRef{TypeIndex: &handle}}}},
+				tc.desc,
+			}
+			var c Component
+			start := uint32(0)
+			_, err := c.globalizeLocalRef(localTypes, TypeRef{TypeIndex: &start}, map[uint32]uint32{})
+			wantErrContains(t, err, "imported instance's type declarations")
+			wantErrContains(t, err, "local type space")
+		})
+	}
+}
+
+// globalizeLocalRef reserves an escape slot before recursing, so a failed
+// recursion leaves a nil behind. Nothing hands that index out today, but
+// resolving one must not report success with a nil TypeDesc -- that is exactly
+// the "unknown type descriptor: <nil>" shape this decoder is meant to stop.
+func TestResolveType_ReservedButUnfilledExtraType(t *testing.T) {
+	var c Component
+	idx := c.internExtraType(nil)
+	td, err := c.ResolveType(idx)
+	wantErrContains(t, err, "reserved but never filled")
+	if td != nil {
+		t.Fatalf("got %#v, want a nil TypeDesc alongside the error", td)
+	}
+}
