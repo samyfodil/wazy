@@ -194,8 +194,19 @@ type MemoryInstance struct {
 // counter they all share. The word is only ever written by the one goroutine
 // running that callEngine, on that callEngine's own cache line.
 type CallSlot struct {
+	// inFlight is slotIdle, slotBusy, or slotHandoff. The owning goroutine
+	// moves it idle->busy on entry and busy->idle on exit; a close that finds
+	// it busy moves it busy->handoff, which is how the exiting call learns it
+	// owes a release WITHOUT loading anything per memory. That keeps the exit
+	// path one atomic and no loop, which is most of what this costs per call.
 	inFlight uint32
 }
+
+const (
+	slotIdle uint32 = iota
+	slotBusy
+	slotHandoff
+)
 
 // Enter records that a top-level call is starting.
 //
@@ -204,7 +215,7 @@ type CallSlot struct {
 // scans the slots: both orders are in the same total order, so either the
 // close sees this call in flight and defers the release, or this call sees the
 // close.
-func (s *CallSlot) Enter() { atomic.StoreUint32(&s.inFlight, 1) }
+func (s *CallSlot) Enter() { atomic.StoreUint32(&s.inFlight, slotBusy) }
 
 // RegisterCallSlot makes s visible to every memory this module can reach. It
 // runs once per callEngine, when the callEngine is built.
@@ -240,11 +251,23 @@ func (m *ModuleInstance) RegisterCallSlot(s *CallSlot) {
 // ExitCall records that a top-level call on s has finished, and performs a
 // release the close deferred if this was the last call out.
 func (m *ModuleInstance) ExitCall(s *CallSlot) {
-	atomic.StoreUint32(&s.inFlight, 0)
+	if atomic.SwapUint32(&s.inFlight, slotIdle) == slotBusy {
+		return // the overwhelmingly common case: nothing closed under us
+	}
+	m.exitHandoff()
+}
+
+// exitHandoff runs only when a close marked this slot while the call was
+// running, so this call owes it the release it deferred.
+//
+// Deliberately not inlined: it is the cold path, and inlining its loop into
+// ExitCall costs 77 of Go's 80-unit budget, which puts ExitCall itself over
+// and turns every call's exit into a real call instead of two instructions.
+//
+//go:noinline
+func (m *ModuleInstance) exitHandoff() {
 	for _, mem := range m.Memories {
 		if mem.released.Load() {
-			// Only a memory whose storage a close already claimed can have
-			// anything waiting; every other call pays one relaxed load.
 			mem.exitAfterRelease()
 		}
 	}
@@ -272,13 +295,26 @@ func (m *MemoryInstance) exitAfterRelease() {
 
 // anyCallInFlightLocked reports whether any callEngine that can reach this
 // memory is inside a top-level call. Mux must be held.
+// anyCallInFlightLocked reports whether any callEngine that can reach this
+// memory is inside a top-level call, AND hands the release to whichever of
+// them leaves last by moving its slot to slotHandoff. Mux must be held.
+//
+// A call that exits between this CAS and its own Swap reads slotBusy and
+// returns without taking the handoff -- which is correct, because this scan
+// then sees slotIdle for it and does not count it as in flight.
 func (m *MemoryInstance) anyCallInFlightLocked() bool {
+	busy := false
 	for _, c := range m.callers {
-		if s := c.Value(); s != nil && atomic.LoadUint32(&s.inFlight) != 0 {
-			return true
+		s := c.Value()
+		if s == nil {
+			continue
+		}
+		if atomic.CompareAndSwapUint32(&s.inFlight, slotBusy, slotHandoff) ||
+			atomic.LoadUint32(&s.inFlight) == slotHandoff {
+			busy = true
 		}
 	}
-	return false
+	return busy
 }
 
 // NewMemoryInstance creates a new instance based on the parameters in the SectionIDMemory.
