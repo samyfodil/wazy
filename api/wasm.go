@@ -591,19 +591,24 @@ type MutableGlobal interface {
 // A Memory may be used from any goroutine, including one racing the owning
 // module's Close -- which an embedder cannot always avoid, since
 // RuntimeConfig.WithCloseOnContextDone closes a module from a watchdog
-// goroutine while a call is still unwinding through host code. Every method
-// here is safe to call then: once the runtime has reclaimed the memory's
-// storage it reads as empty, so Size returns 0 and every accessor returns
-// false rather than touching it. A memory another live module still holds --
-// an imported or a shared one -- keeps working, as it must.
+// goroutine while a call is still unwinding through host code. A method that
+// STARTS after the storage was reclaimed is safe: the memory reads as empty,
+// so Size returns 0 and every accessor returns false rather than touching it.
+// A memory another live module still holds -- an imported or a shared one --
+// keeps working, as it must.
 //
-// The one thing that is NOT safe is retaining a []byte that Read returned
-// across that close. wazy recycles a closed module's linear memory into a pool
-// (which is worth about 2x on Instantiate; wazero, which wazy derives from,
-// does not), so the array a previously returned slice points into may be
-// handed to an unrelated module and overwritten. Copy anything that must
-// outlive the call, and do not keep a Read slice past the close of the module
-// it came from.
+// Two things are NOT safe, and neither is fixed yet:
+//
+//   - Retaining a []byte that Read returned across that close. wazy recycles a
+//     closed module's linear memory into a pool (worth about 2x on Instantiate;
+//     wazero, which wazy derives from, does not), so the array a previously
+//     returned slice points into may be handed to an unrelated module and
+//     overwritten. Copy anything that must outlive the call.
+//   - An accessor already RUNNING when the close lands. Each one bounds-checks
+//     and then reads or writes as two steps, and nothing holds the storage
+//     alive between them, so the access can land in memory the runtime has
+//     already reclaimed. See the tracking issue for api.Memory accessor
+//     lifetime.
 type Memory interface {
 	// Definition is metadata about this memory from its defining module.
 	Definition() MemoryDefinition
