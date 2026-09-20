@@ -212,7 +212,14 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 					// release to whichever call leaves last rather than pulling
 					// the memory out from under it. See callers.
 					if mem.anyCallInFlightLocked() {
-						mem.pendingRelease.recycle, mem.pendingRelease.free = recycle, free
+						// Stash the WHOLE backing, not candidate: that call can
+						// still grow the memory and write above candidate's
+						// length, and the pool clears only what it is handed.
+						// exitAfterRelease takes the prefix once it has drained.
+						mem.pendingRelease.recycle, mem.pendingRelease.free = mem.allocatedBuffer(), free
+						if free != nil {
+							mem.pendingRelease.recycle = nil
+						}
 						recycle, free = nil, nil
 						deferred = true
 					}
@@ -250,7 +257,8 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 					recycle = candidate
 					poolAuditPut(mem)
 					if mem.anyCallInFlightLocked() {
-						mem.pendingRelease.recycle = recycle
+						// Whole backing; see the owner branch above.
+						mem.pendingRelease.recycle = mem.allocatedBuffer()
 						recycle, deferred = nil, true
 					}
 				}
