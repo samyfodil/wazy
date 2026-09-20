@@ -185,6 +185,27 @@ type MemoryInstance struct {
 // done with it. Paired with ExitCall; see callsInFlight.
 func (m *MemoryInstance) EnterCall() { m.callsInFlight.Add(1) }
 
+// EnterCallMemories brackets a top-level call over every memory the module can
+// reach. Paired with ExitCallMemories, which the engines defer.
+//
+// This exists as a method taking the loop rather than the engines deferring
+// inside one, because `defer` in a loop cannot be open-coded: it forced Go's
+// heap-allocated defer path and cost an allocation on EVERY call (+1 alloc/op
+// across the whole suite, and ~21% on wasi fd_read/fd_write).
+func (m *ModuleInstance) EnterCallMemories() {
+	for _, mem := range m.Memories {
+		mem.callsInFlight.Add(1)
+	}
+}
+
+// ExitCallMemories is EnterCallMemories' pair; see its doc for why the loop
+// lives here.
+func (m *ModuleInstance) ExitCallMemories() {
+	for _, mem := range m.Memories {
+		mem.ExitCall()
+	}
+}
+
 // ExitCall records that a top-level call has finished, and performs the
 // release a close deferred if this was the last one out.
 func (m *MemoryInstance) ExitCall() {
@@ -812,21 +833,26 @@ func (m *MemoryInstance) hasSize64(offset, byteCount uint64) bool {
 }
 
 func (m *MemoryInstance) byteSize() uint64 {
-	if m.released.Load() {
-		// The storage is gone -- pooled, or freed by a custom allocator -- so
-		// report an empty memory. That makes every bounds check above fail and
-		// every api.Memory accessor return ok == false, instead of reading a
-		// recycled array (or, for an allocator, freed pages), and keeps Size
-		// and Pages consistent with those failures. See released, and note
-		// that the guest never arrives here: both engines index mem.Buffer
-		// directly, so this load is on the api.Memory path only.
-		return 0
-	}
 	var size uint64
 	if m.Shared {
 		size = atomic.LoadUint64(&m.sizeBytes)
 	} else {
 		size = m.sizeBytes
+	}
+	// The storage is gone once released -- pooled, or freed by a custom
+	// allocator -- so report an empty memory. That makes every bounds check
+	// above fail and every api.Memory accessor return ok == false, instead of
+	// reading a recycled array (or, for an allocator, freed pages), and keeps
+	// Size and Pages consistent with those failures. See released; note that
+	// the guest never arrives here, since both engines index mem.Buffer
+	// directly, so this load is on the api.Memory path only.
+	//
+	// Checked AFTER the size load, not before it: both are independent loads,
+	// and letting them issue together rather than serializing behind this
+	// branch is worth ~0.5ns of the ~1ns this check costs (Read 4.60 -> 4.09
+	// ns, ReadUint32Le 4.57 -> 4.18, min of 8 on a pinned core).
+	if m.released.Load() {
+		return 0
 	}
 	if size != 0 || len(m.Buffer) == 0 {
 		return size

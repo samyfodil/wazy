@@ -1189,10 +1189,8 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 	// This loop indexes mem.Buffer directly and never checks whether the
 	// module was closed, so a concurrent close must not recycle the buffer
 	// until we are done with it. See MemoryInstance.callsInFlight.
-	for _, mem := range m.Memories {
-		mem.EnterCall()
-		defer mem.ExitCall()
-	}
+	m.EnterCallMemories()
+	defer m.ExitCallMemories()
 
 	ce.callFunction(ctx, m, ce.f)
 
