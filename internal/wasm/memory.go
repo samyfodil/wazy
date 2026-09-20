@@ -149,12 +149,67 @@ type MemoryInstance struct {
 	//
 	// What it guarantees: a read that observes it fails cleanly (ok == false)
 	// rather than seeing whatever the pool later hands that array to. What it
-	// does not: a read that observes false may still be slicing the buffer as
-	// the close recycles it, and a []byte an earlier Read returned keeps
-	// aliasing the array regardless. See api.Memory's doc -- neither can be
-	// fixed while the buffer is pooled at all, and the pool is worth 2.1x on
-	// Instantiate.
+	// does not: a []byte an earlier Read returned keeps aliasing the array
+	// regardless. See api.Memory's doc -- that one cannot be fixed while the
+	// buffer is pooled at all, and the pool is worth 2.1x on Instantiate.
 	released atomic.Bool
+
+	// callsInFlight counts top-level calls currently executing against this
+	// memory, bracketed by EnterCall/ExitCall in both engines' Call.
+	//
+	// It exists because released does NOT reach the engines: the interpreter
+	// and the native engine index mem.Buffer directly on their hot paths, as
+	// they must, so neither notices that the memory was closed. Closing a
+	// module whose call is still running -- exactly what
+	// WithCloseOnContextDone does, and what go-pdfium's Kill() relies on --
+	// therefore pooled the buffer while that call was still reading and
+	// writing it, and the next instantiation got the same array. Observed as
+	// one instance's i64.store racing another's i32.load at the same address.
+	//
+	// So a close that lands with calls in flight marks the memory released,
+	// which stops every api.Memory accessor, but leaves the actual recycle to
+	// the last call out (see ExitCall and pendingRelease).
+	callsInFlight atomic.Int64
+
+	// pendingRelease is the storage a close claimed but could not release,
+	// because callsInFlight was not zero. The last call to leave performs it.
+	// Guarded by Mux; exactly one of the two fields is set.
+	pendingRelease struct {
+		recycle []byte           // hand to putPooledMemoryBuffer
+		free    api.LinearMemory // a custom allocator's pages
+	}
+}
+
+// EnterCall records that a top-level call is about to execute against this
+// memory, so a concurrent close defers recycling the buffer until the call is
+// done with it. Paired with ExitCall; see callsInFlight.
+func (m *MemoryInstance) EnterCall() { m.callsInFlight.Add(1) }
+
+// ExitCall records that a top-level call has finished, and performs the
+// release a close deferred if this was the last one out.
+func (m *MemoryInstance) ExitCall() {
+	if m.callsInFlight.Add(-1) != 0 || !m.released.Load() {
+		// The common case by far: other calls are still running, or nothing
+		// has closed this memory. No lock on the call path.
+		return
+	}
+	m.releasePending()
+}
+
+// releasePending performs a deferred release exactly once, whoever gets there
+// first -- the last call out, or the close itself re-checking after it saw a
+// call in flight. Taking the claim under Mux is what makes that single-shot.
+func (m *MemoryInstance) releasePending() {
+	m.Mux.Lock()
+	recycle, free := m.pendingRelease.recycle, m.pendingRelease.free
+	m.pendingRelease.recycle, m.pendingRelease.free = nil, nil
+	m.Mux.Unlock()
+
+	if free != nil {
+		free.Free()
+	} else if recycle != nil {
+		putPooledMemoryBuffer(recycle)
+	}
 }
 
 // NewMemoryInstance creates a new instance based on the parameters in the SectionIDMemory.

@@ -194,21 +194,41 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 			// also means a reader racing this close sees an empty memory from
 			// the moment the buffer is spoken for, not from the moment it
 			// actually lands in the pool.
+			var free api.LinearMemory
+			var deferred bool
 			if mem.expBuffer != nil || (mem.poolable && mem.importers == 0) {
 				// Take the slice BEFORE the claim: byteSize reports 0 once
 				// released is set, so claiming first would pool an empty one.
 				candidate := mem.allocatedBuffer()[:mem.byteSize()]
-				if !mem.released.Swap(true) && mem.expBuffer == nil {
-					recycle = candidate
+				if !mem.released.Swap(true) {
+					if mem.expBuffer != nil {
+						free, mem.expBuffer = mem.expBuffer, nil
+					} else {
+						recycle = candidate
+						poolAuditPut(mem)
+					}
+					// A call still executing reads and writes this buffer
+					// directly, without ever consulting released -- so hand the
+					// release to whichever call leaves last rather than pulling
+					// the memory out from under it. See callsInFlight.
+					if mem.callsInFlight.Load() != 0 {
+						mem.pendingRelease.recycle, mem.pendingRelease.free = recycle, free
+						recycle, free = nil, nil
+						deferred = true
+					}
 				}
 			}
 			mem.Mux.Unlock()
 
-			if mem.expBuffer != nil {
-				mem.expBuffer.Free()
-				mem.expBuffer = nil
+			if deferred {
+				// The last call may have left between the check and the store,
+				// in which case nobody is coming back for it.
+				if mem.callsInFlight.Load() == 0 {
+					mem.releasePending()
+				}
+			} else if free != nil {
+				free.Free()
 			} else if recycle != nil {
-				poolAuditPut(mem)
 				putPooledMemoryBuffer(recycle)
 			}
 		} else {
@@ -224,16 +244,25 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 				mem.importers--
 			}
 			var recycle []byte
+			var deferred bool
 			if mem.ownerClosed && mem.importers == 0 && mem.poolable {
 				// Slice first, claim second -- see the owner branch above.
 				candidate := mem.allocatedBuffer()[:mem.byteSize()]
 				if !mem.released.Swap(true) {
 					recycle = candidate
+					poolAuditPut(mem)
+					if mem.callsInFlight.Load() != 0 {
+						mem.pendingRelease.recycle = recycle
+						recycle, deferred = nil, true
+					}
 				}
 			}
 			mem.Mux.Unlock()
-			if recycle != nil {
-				poolAuditPut(mem)
+			if deferred {
+				if mem.callsInFlight.Load() == 0 {
+					mem.releasePending()
+				}
+			} else if recycle != nil {
 				putPooledMemoryBuffer(recycle)
 			}
 		}

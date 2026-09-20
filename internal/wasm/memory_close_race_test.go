@@ -98,6 +98,102 @@ func TestMemoryClose_ConcurrentClosesReleaseOnce(t *testing.T) {
 	require.False(t, ok)
 }
 
+// The engines index mem.Buffer directly and never consult released, so a close
+// landing while a call is still executing must NOT hand that buffer to the
+// pool -- the next instantiation would get the same array and write it under
+// the running call. Observed in go-pdfium's suite as one instance's i64.store
+// racing another's i32.load at one address. The release waits for the last call
+// out instead.
+func TestMemoryClose_DoesNotRecycleWhileACallIsInFlight(t *testing.T) {
+	owner := &mockModuleEngine{}
+	mem := NewMemoryInstance(&Memory{Min: 1, Cap: 1, Max: 1}, nil, owner, uint64(MemoryLimitPages))
+	m := &ModuleInstance{Memories: []*MemoryInstance{mem}, Engine: owner}
+
+	mem.EnterCall() // a call is running against this memory
+	require.NoError(t, m.ensureResourcesClosed(context.Background()))
+
+	// Closed for api.Memory purposes, but the buffer is still ours.
+	require.True(t, mem.released.Load(), "the close must still mark the memory released")
+	_, ok := mem.Read(0, 1)
+	require.False(t, ok)
+
+	mem.Mux.Lock()
+	pending := mem.pendingRelease.recycle
+	mem.Mux.Unlock()
+	require.NotNil(t, pending, "the recycle must be deferred while a call is in flight")
+
+	mem.ExitCall() // last call out performs it
+
+	mem.Mux.Lock()
+	pending = mem.pendingRelease.recycle
+	mem.Mux.Unlock()
+	require.Nil(t, pending, "the last call out must have performed the deferred recycle")
+}
+
+// Nested and concurrent calls: only the LAST one out releases.
+func TestMemoryClose_ReleasesOnLastCallOut(t *testing.T) {
+	owner := &mockModuleEngine{}
+	mem := NewMemoryInstance(&Memory{Min: 1, Cap: 1, Max: 1}, nil, owner, uint64(MemoryLimitPages))
+	m := &ModuleInstance{Memories: []*MemoryInstance{mem}, Engine: owner}
+
+	mem.EnterCall()
+	mem.EnterCall()
+	mem.EnterCall()
+	require.NoError(t, m.ensureResourcesClosed(context.Background()))
+
+	pendingRecycle := func() []byte {
+		mem.Mux.Lock()
+		defer mem.Mux.Unlock()
+		return mem.pendingRelease.recycle
+	}
+
+	mem.ExitCall()
+	require.NotNil(t, pendingRecycle(), "two calls still in flight")
+	mem.ExitCall()
+	require.NotNil(t, pendingRecycle(), "one call still in flight")
+	mem.ExitCall()
+	require.Nil(t, pendingRecycle(), "the last call out releases")
+}
+
+// A close that finds no call in flight releases inline, as before -- the
+// deferral must not cost the common path a trip through pendingRelease.
+func TestMemoryClose_ReleasesInlineWithNoCallInFlight(t *testing.T) {
+	owner := &mockModuleEngine{}
+	mem := NewMemoryInstance(&Memory{Min: 1, Cap: 1, Max: 1}, nil, owner, uint64(MemoryLimitPages))
+	m := &ModuleInstance{Memories: []*MemoryInstance{mem}, Engine: owner}
+
+	require.NoError(t, m.ensureResourcesClosed(context.Background()))
+	require.True(t, mem.released.Load())
+
+	mem.Mux.Lock()
+	defer mem.Mux.Unlock()
+	require.Nil(t, mem.pendingRelease.recycle, "nothing to defer when no call is running")
+	require.Nil(t, mem.pendingRelease.free)
+}
+
+// The close and the last ExitCall can interleave either way; the buffer must be
+// released exactly once regardless. Run under -race.
+func TestMemoryClose_ConcurrentCloseAndCallExitReleaseOnce(t *testing.T) {
+	for range 200 {
+		owner := &mockModuleEngine{}
+		mem := NewMemoryInstance(&Memory{Min: 1, Cap: 1, Max: 1}, nil, owner, uint64(MemoryLimitPages))
+		m := &ModuleInstance{Memories: []*MemoryInstance{mem}, Engine: owner}
+
+		mem.EnterCall()
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); require.NoError(t, m.ensureResourcesClosed(context.Background())) }()
+		go func() { defer wg.Done(); mem.ExitCall() }()
+		wg.Wait()
+
+		mem.Mux.Lock()
+		leftover := mem.pendingRelease.recycle != nil || mem.pendingRelease.free != nil
+		mem.Mux.Unlock()
+		require.False(t, leftover, "the buffer was claimed but never released")
+		require.True(t, mem.released.Load())
+	}
+}
+
 // An allocator-backed memory frees its pages at close. A read racing that used
 // to reach freed memory; now it fails, for the same reason and by the same
 // flag as the pooled case.

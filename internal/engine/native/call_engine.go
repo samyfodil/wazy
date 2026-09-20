@@ -639,6 +639,14 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		defer done()
 	}
 
+	// Compiled code holds the memory base directly and never checks whether
+	// the module was closed, so a concurrent close must not recycle the buffer
+	// until this call is done with it. See MemoryInstance.callsInFlight.
+	for _, mem := range m.Memories {
+		mem.EnterCall()
+		defer mem.ExitCall()
+	}
+
 	if c.stackTop&(16-1) != 0 {
 		panic("BUG: stack must be aligned to 16 bytes")
 	}
