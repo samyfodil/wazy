@@ -1202,6 +1202,16 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 	ce.slot.Enter()
 	defer m.ExitCall(&ce.slot)
 
+	// Refuse a call that arrives after the module closed. Enter above is a
+	// sequentially consistent store and this is the paired load, against a
+	// close that sets Closed and then scans the slots -- so either the close
+	// sees this call in flight and defers releasing the memory, or this call
+	// sees the close and does not run. Without it, a handle taken before the
+	// close still executes, against a buffer already back in the pool.
+	if m.Closed.Load() != 0 {
+		return nil, m.FailIfClosed()
+	}
+
 	ce.callFunction(ctx, m, ce.f)
 
 	// This returns a safe copy of the results, instead of a slice view. If we

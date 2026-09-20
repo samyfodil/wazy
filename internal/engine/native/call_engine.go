@@ -585,7 +585,18 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 	if len(paramResultStack) > 0 {
 		paramResultPtr = &paramResultStack[0]
 	}
+	// Compiled code holds the memory base directly and never checks whether
+	// the module was closed, so a concurrent close must not recycle the buffer
+	// until this call is done with it. See MemoryInstance.callers.
+	//
+	// The exit is folded into the recover defer below rather than deferred on
+	// its own: this function's defers are open-coded, and Go keeps them so
+	// only while defers*returns stays within its budget -- one more of each
+	// breaks it, which costs 40%+ on every call.
+	c.slot.Enter()
+
 	defer func() {
+		m.ExitCall(&c.slot)
 		r := recover()
 		if s, ok := r.(*snapshot); ok {
 			// A snapshot that wasn't handled was created by a different call engine possibly from a nested wasm invocation,
@@ -644,11 +655,15 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		defer done()
 	}
 
-	// Compiled code holds the memory base directly and never checks whether
-	// the module was closed, so a concurrent close must not recycle the buffer
-	// until this call is done with it. See MemoryInstance.callers.
-	c.slot.Enter()
-	defer m.ExitCall(&c.slot)
+	// Refuse a call that arrives after the module closed. Enter above is a
+	// sequentially consistent store and this is the paired load, against a
+	// close that sets Closed and then scans the slots -- so either the close
+	// sees this call in flight and defers releasing the memory, or this call
+	// sees the close and does not run. Without it, a handle taken before the
+	// close still executes, against a buffer already back in the pool.
+	if m.Closed.Load() != 0 {
+		return m.FailIfClosed()
+	}
 
 	if c.stackTop&(16-1) != 0 {
 		panic("BUG: stack must be aligned to 16 bytes")
