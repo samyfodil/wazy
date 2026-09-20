@@ -118,6 +118,13 @@ type (
 		Tables     []*TableInstance
 		Tags       []*TagInstance
 
+		// heldMemories are memories this module does NOT own or import, but can
+		// still run code against because it imported a function or a table from
+		// the module that does. It registers as a holder of each (the same
+		// registration a memory import performs) so none is recycled while this
+		// module is alive, and releases them on Close. See holdMemoriesOf.
+		heldMemories []*MemoryInstance
+
 		// Engine implements function calls for this module.
 		Engine ModuleEngine
 
@@ -553,6 +560,20 @@ func (m *ModuleInstance) resolveImports(ctx context.Context, module *Module) (er
 			}
 		}
 
+		// Importing a FUNCTION (or a table, which can carry funcrefs into it)
+		// lets this module execute code that runs against the exporting
+		// module's memory -- but only a MEMORY import used to register as a
+		// holder of it, so the exporting module's close could pool a buffer
+		// this module was about to run against. See issue #74.
+		for _, i := range imports {
+			if i.Type == ExternTypeFunc || i.Type == ExternTypeTable {
+				if err = m.holdMemoriesOf(importedModule); err != nil {
+					return err
+				}
+				break
+			}
+		}
+
 		for _, i := range imports {
 			var imported *Export
 			imported, err = importedModule.getExport(i.Name, i.Type)
@@ -946,4 +967,33 @@ func (s *Store) CloseWithExitCode(ctx context.Context, exitCode uint32) error {
 	s.nameToModuleCap = 0
 	s.typeIDs = nil
 	return errors.Join(errs...)
+}
+
+// holdMemoriesOf registers this module as a holder of every memory `other`
+// owns, so those buffers are not recycled while this module can still run code
+// against them -- which importing a function, or a table that can carry
+// funcrefs, lets it do. Balanced by releaseHeldMemories on this module's Close.
+//
+// It is the same registration a memory import performs, for the case where no
+// memory was imported at all: only the memory import used to do it, so a
+// cross-module call through a function import ran against a memory nothing was
+// holding. See issue #74.
+func (m *ModuleInstance) holdMemoriesOf(other *ModuleInstance) error {
+	for _, mem := range other.Memories {
+		if mem == nil {
+			continue
+		}
+		mem.Mux.Lock()
+		closed := mem.ownerClosed
+		if !closed {
+			mem.importers++
+			poolAuditHold(mem, m)
+		}
+		mem.Mux.Unlock()
+		if closed {
+			return fmt.Errorf("module %q was closed concurrently", other.ModuleName)
+		}
+		m.heldMemories = append(m.heldMemories, mem)
+	}
+	return nil
 }

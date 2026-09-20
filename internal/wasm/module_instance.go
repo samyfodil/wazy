@@ -212,7 +212,14 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 					// release to whichever call leaves last rather than pulling
 					// the memory out from under it. See callers.
 					if mem.anyCallInFlightLocked() {
-						mem.pendingRelease.recycle, mem.pendingRelease.free = recycle, free
+						// Stash the WHOLE backing, not candidate: that call can
+						// still grow the memory and write above candidate's
+						// length, and the pool clears only what it is handed.
+						// exitAfterRelease takes the prefix once it has drained.
+						mem.pendingRelease.recycle, mem.pendingRelease.free = mem.allocatedBuffer(), free
+						if free != nil {
+							mem.pendingRelease.recycle = nil
+						}
 						recycle, free = nil, nil
 						deferred = true
 					}
@@ -250,7 +257,8 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 					recycle = candidate
 					poolAuditPut(mem)
 					if mem.anyCallInFlightLocked() {
-						mem.pendingRelease.recycle = recycle
+						// Whole backing; see the owner branch above.
+						mem.pendingRelease.recycle = mem.allocatedBuffer()
 						recycle, deferred = nil, true
 					}
 				}
@@ -263,6 +271,23 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 			}
 		}
 	}
+
+	// Memories this module could reach through a function or table import but
+	// does not own. Dropping the hold can make this the last holder, in which
+	// case the owner's deferred recycle happens here. See holdMemoriesOf.
+	for _, mem := range m.heldMemories {
+		mem.Mux.Lock()
+		if mem.importers > 0 {
+			mem.importers--
+		}
+		last := mem.ownerClosed && mem.importers == 0 && mem.poolable
+		mem.Mux.Unlock()
+		poolAuditRelease(mem, m)
+		if last {
+			mem.releaseAfterLastHolder()
+		}
+	}
+	m.heldMemories = nil
 
 	if m.CodeCloser != nil {
 		if e := m.CodeCloser.Close(ctx); err == nil {

@@ -10,9 +10,6 @@ import (
 )
 
 func Test_procExit(t *testing.T) {
-	mod, r, log := requireProxyModule(t, wazy.NewModuleConfig())
-	defer r.Close(testCtx)
-
 	tests := []struct {
 		name        string
 		exitCode    uint32
@@ -38,6 +35,13 @@ func Test_procExit(t *testing.T) {
 		tc := tt
 
 		t.Run(tc.name, func(t *testing.T) {
+			// A fresh module per subtest: proc_exit CLOSES the module, and a
+			// call on a closed module no longer runs -- it reports the exit
+			// code the module already has. Sharing one module here meant the
+			// second subtest was exercising a call against a closed module,
+			// which is the lifetime hole tracked in #74.
+			mod, r, log := requireProxyModule(t, wazy.NewModuleConfig())
+			defer r.Close(testCtx)
 			defer log.Reset()
 
 			// Since procExit panics, any opcodes afterwards cannot be reached.

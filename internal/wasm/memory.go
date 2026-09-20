@@ -181,8 +181,15 @@ type MemoryInstance struct {
 	// pendingRelease is the storage a close claimed but could not release,
 	// because a call was still in flight. The last call to leave performs it.
 	// Guarded by Mux; exactly one of the two fields is set.
+	//
+	// recycle holds the WHOLE backing allocation, not the logically dirty
+	// prefix. The prefix is taken when the release actually happens, because
+	// the call this was deferred to can still grow the memory within reserved
+	// capacity and write above whatever the length was at close -- and the
+	// pool clears only the prefix it is handed, so those bytes would reach the
+	// next tenant. See putPooledMemoryBuffer, and issue #74.
 	pendingRelease struct {
-		recycle []byte           // hand to putPooledMemoryBuffer
+		recycle []byte           // whole backing; the prefix is taken at release
 		free    api.LinearMemory // a custom allocator's pages
 	}
 }
@@ -282,15 +289,64 @@ func (m *MemoryInstance) exitAfterRelease() {
 		m.Mux.Unlock()
 		return
 	}
-	recycle, free := m.pendingRelease.recycle, m.pendingRelease.free
+	backing, free := m.pendingRelease.recycle, m.pendingRelease.free
 	m.pendingRelease.recycle, m.pendingRelease.free = nil, nil
+	// Every call has drained, so the memory cannot grow again and this is the
+	// first moment the dirty prefix is final. Read sizeBytes directly:
+	// byteSize reports 0 from the moment the close set released.
+	dirty := m.dirtyLenLocked(backing)
 	m.Mux.Unlock()
 
 	if free != nil {
 		free.Free()
-	} else if recycle != nil {
-		putPooledMemoryBuffer(recycle)
+	} else if backing != nil {
+		putPooledMemoryBuffer(backing[:dirty])
 	}
+}
+
+// releaseAfterLastHolder claims and releases this memory's storage when the
+// caller has just dropped the last hold on it and the owner had already
+// closed. It is the holdMemoriesOf counterpart of the owner and importer close
+// paths: whichever of the three observes "owner closed, nobody left" claims the
+// buffer through released and pools it, so it is still released exactly once.
+func (m *MemoryInstance) releaseAfterLastHolder() {
+	m.Mux.Lock()
+	if m.released.Swap(true) {
+		m.Mux.Unlock()
+		return // another close already claimed it
+	}
+	backing := m.allocatedBuffer()
+	dirty := m.dirtyLenLocked(backing)
+	inFlight := m.anyCallInFlightLocked()
+	if inFlight {
+		m.pendingRelease.recycle = backing
+	}
+	m.Mux.Unlock()
+
+	if inFlight {
+		// A call is still running against it; the last one out releases.
+		m.exitAfterRelease()
+		return
+	}
+	poolAuditPut(m)
+	putPooledMemoryBuffer(backing[:dirty])
+}
+
+// dirtyLenLocked is how much of backing the guest could have written, taken
+// from the live size rather than from whatever it was when the close ran. Mux
+// must be held.
+func (m *MemoryInstance) dirtyLenLocked(backing []byte) int {
+	if backing == nil {
+		return 0
+	}
+	size := m.sizeBytes
+	if m.Shared {
+		size = atomic.LoadUint64(&m.sizeBytes)
+	}
+	if size > uint64(len(backing)) {
+		size = uint64(len(backing))
+	}
+	return int(size)
 }
 
 // anyCallInFlightLocked reports whether any callEngine that can reach this
