@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 	"unsafe"
+	"weak"
 
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/internalapi"
@@ -119,8 +120,9 @@ type MemoryInstance struct {
 	// concurrent resolveImports agree, race-free, on when it is safe to return
 	// Buffer to the linear-memory buffer pool (memory_pool.go): only once the
 	// owner has closed AND importers has fallen to 0. Whichever close observes
-	// that last claims Buffer under Mux (sets it nil) and pools it, so it is
-	// recycled exactly once. See memory_pool.go's doc for the full argument.
+	// that last claims the buffer under Mux (via released, below) and pools it,
+	// so it is recycled exactly once. See memory_pool.go's doc for the full
+	// argument.
 	importers   int
 	ownerClosed bool
 
@@ -131,6 +133,188 @@ type MemoryInstance struct {
 	// exclusive with expBuffer (allocator-backed) and Shared memories, which are
 	// never pooled.
 	poolable bool
+
+	// released is set by the close that releases this memory's underlying
+	// storage -- returning Buffer to the linear-memory pool, or freeing an
+	// allocator's expBuffer -- immediately BEFORE it does so, and is read by
+	// every api.Memory accessor through visibleBuffer.
+	//
+	// It replaces nil-ing Buffer/backing at close, which was a plain write to
+	// fields every accessor reads with no lock: a data race with any goroutine
+	// still reading the memory through an api.Memory it holds (issue #69), and
+	// with the interpreter's own direct mem.Buffer reads, which is reachable
+	// because WithCloseOnContextDone closes a module from a watchdog goroutine
+	// while its call is still unwinding. An atomic here costs one load on the
+	// api.Memory path -- which the guest never takes, since both engines index
+	// mem.Buffer directly -- and lets the close write nothing at all.
+	//
+	// What it guarantees: a read that observes it fails cleanly (ok == false)
+	// rather than seeing whatever the pool later hands that array to. What it
+	// does not: a []byte an earlier Read returned keeps aliasing the array
+	// regardless. See api.Memory's doc -- that one cannot be fixed while the
+	// buffer is pooled at all, and the pool is worth 2.1x on Instantiate.
+	released atomic.Bool
+
+	// callers is every callEngine that can run against this memory, held
+	// weakly so a handle the embedder drops does not pin its callEngine here
+	// for the life of the module.
+	//
+	// It exists because released does NOT reach the engines: the interpreter
+	// and the native engine index mem.Buffer directly on their hot paths, as
+	// they must, so neither notices that the memory was closed. Closing a
+	// module whose call is still running -- exactly what
+	// WithCloseOnContextDone does, and what go-pdfium's Kill() relies on --
+	// therefore pooled the buffer while that call was still reading and
+	// writing it, and the next instantiation got the same array. Observed as
+	// one instance's i64.store racing another's i32.load at the same address.
+	//
+	// The obvious shape for that -- one counter on this struct, incremented
+	// and decremented per call -- is a shared cache line that every caller
+	// writes, so N goroutines calling one module (the pattern
+	// api.Function.Call's own doc points at) serialize on it: measured at 3x
+	// main on four cores, and scaling backwards where main scales forwards.
+	// So each callEngine keeps its own CallSlot on its own line and the close
+	// scans these instead, which moves the only contended access to the close,
+	// where it is rare. Guarded by Mux.
+	callers []weak.Pointer[CallSlot]
+
+	// pendingRelease is the storage a close claimed but could not release,
+	// because a call was still in flight. The last call to leave performs it.
+	// Guarded by Mux; exactly one of the two fields is set.
+	pendingRelease struct {
+		recycle []byte           // hand to putPooledMemoryBuffer
+		free    api.LinearMemory // a custom allocator's pages
+	}
+}
+
+// CallSlot is one callEngine's record of whether it is inside a top-level call.
+// Each callEngine owns one and registers it with every memory its module can
+// reach (ModuleInstance.RegisterCallSlot), so a close can find the calls in
+// flight by scanning MemoryInstance.callers rather than every call writing a
+// counter they all share. The word is only ever written by the one goroutine
+// running that callEngine, on that callEngine's own cache line.
+type CallSlot struct {
+	// inFlight is slotIdle, slotBusy, or slotHandoff. The owning goroutine
+	// moves it idle->busy on entry and busy->idle on exit; a close that finds
+	// it busy moves it busy->handoff, which is how the exiting call learns it
+	// owes a release WITHOUT loading anything per memory. That keeps the exit
+	// path one atomic and no loop, which is most of what this costs per call.
+	inFlight uint32
+}
+
+const (
+	slotIdle uint32 = iota
+	slotBusy
+	slotHandoff
+)
+
+// Enter records that a top-level call is starting.
+//
+// It is a sequentially consistent store and the engines load
+// ModuleInstance.Closed right after it, while a close sets Closed and then
+// scans the slots: both orders are in the same total order, so either the
+// close sees this call in flight and defers the release, or this call sees the
+// close.
+func (s *CallSlot) Enter() { atomic.StoreUint32(&s.inFlight, slotBusy) }
+
+// RegisterCallSlot makes s visible to every memory this module can reach. It
+// runs once per callEngine, when the callEngine is built.
+func (m *ModuleInstance) RegisterCallSlot(s *CallSlot) {
+	p := weak.Make(s)
+	for _, mem := range m.Memories {
+		mem.Mux.Lock()
+		if len(mem.callers) == cap(mem.callers) && cap(mem.callers) > 0 {
+			// About to grow: first drop the slots whose callEngine has been
+			// collected, so a module that keeps looking up fresh handles
+			// reuses this space instead of growing forever. Compacting on the
+			// grow boundary makes it amortized -- the scan is only as frequent
+			// as the reallocation it replaces.
+			live := mem.callers[:0]
+			for _, c := range mem.callers {
+				if c.Value() != nil {
+					live = append(live, c)
+				}
+			}
+			clear(mem.callers[len(live):cap(mem.callers)])
+			mem.callers = live
+		}
+		mem.callers = append(mem.callers, p)
+		mem.Mux.Unlock()
+	}
+}
+
+// EnterCallMemories is a no-op kept for symmetry with ExitCall: the call
+// announces itself once, on its own CallSlot, rather than once per memory.
+//
+// ExitCall is the pair. The engines call s.Enter() directly.
+
+// ExitCall records that a top-level call on s has finished, and performs a
+// release the close deferred if this was the last call out.
+func (m *ModuleInstance) ExitCall(s *CallSlot) {
+	if atomic.SwapUint32(&s.inFlight, slotIdle) == slotBusy {
+		return // the overwhelmingly common case: nothing closed under us
+	}
+	m.exitHandoff()
+}
+
+// exitHandoff runs only when a close marked this slot while the call was
+// running, so this call owes it the release it deferred.
+//
+// Deliberately not inlined: it is the cold path, and inlining its loop into
+// ExitCall costs 77 of Go's 80-unit budget, which puts ExitCall itself over
+// and turns every call's exit into a real call instead of two instructions.
+//
+//go:noinline
+func (m *ModuleInstance) exitHandoff() {
+	for _, mem := range m.Memories {
+		if mem.released.Load() {
+			mem.exitAfterRelease()
+		}
+	}
+}
+
+// exitAfterRelease runs when a call leaves a memory whose storage a close has
+// already claimed. If no other call is still in flight, it performs the
+// release the close deferred.
+func (m *MemoryInstance) exitAfterRelease() {
+	m.Mux.Lock()
+	if m.anyCallInFlightLocked() {
+		m.Mux.Unlock()
+		return
+	}
+	recycle, free := m.pendingRelease.recycle, m.pendingRelease.free
+	m.pendingRelease.recycle, m.pendingRelease.free = nil, nil
+	m.Mux.Unlock()
+
+	if free != nil {
+		free.Free()
+	} else if recycle != nil {
+		putPooledMemoryBuffer(recycle)
+	}
+}
+
+// anyCallInFlightLocked reports whether any callEngine that can reach this
+// memory is inside a top-level call. Mux must be held.
+// anyCallInFlightLocked reports whether any callEngine that can reach this
+// memory is inside a top-level call, AND hands the release to whichever of
+// them leaves last by moving its slot to slotHandoff. Mux must be held.
+//
+// A call that exits between this CAS and its own Swap reads slotBusy and
+// returns without taking the handoff -- which is correct, because this scan
+// then sees slotIdle for it and does not count it as in flight.
+func (m *MemoryInstance) anyCallInFlightLocked() bool {
+	busy := false
+	for _, c := range m.callers {
+		s := c.Value()
+		if s == nil {
+			continue
+		}
+		if atomic.CompareAndSwapUint32(&s.inFlight, slotBusy, slotHandoff) ||
+			atomic.LoadUint32(&s.inFlight) == slotHandoff {
+			busy = true
+		}
+	}
+	return busy
 }
 
 // NewMemoryInstance creates a new instance based on the parameters in the SectionIDMemory.
@@ -739,6 +923,21 @@ func (m *MemoryInstance) byteSize() uint64 {
 	} else {
 		size = m.sizeBytes
 	}
+	// The storage is gone once released -- pooled, or freed by a custom
+	// allocator -- so report an empty memory. That makes every bounds check
+	// above fail and every api.Memory accessor return ok == false, instead of
+	// reading a recycled array (or, for an allocator, freed pages), and keeps
+	// Size and Pages consistent with those failures. See released; note that
+	// the guest never arrives here, since both engines index mem.Buffer
+	// directly, so this load is on the api.Memory path only.
+	//
+	// Checked AFTER the size load, not before it: both are independent loads,
+	// and letting them issue together rather than serializing behind this
+	// branch is worth ~0.5ns of the ~1ns this check costs (Read 4.60 -> 4.09
+	// ns, ReadUint32Le 4.57 -> 4.18, min of 8 on a pinned core).
+	if m.released.Load() {
+		return 0
+	}
 	if size != 0 || len(m.Buffer) == 0 {
 		return size
 	}
@@ -746,6 +945,9 @@ func (m *MemoryInstance) byteSize() uint64 {
 	return uint64(len(m.Buffer))
 }
 
+// visibleBuffer is empty once the memory is released, because byteSize is --
+// slicing to zero rather than branching here keeps the released check in one
+// place.
 func (m *MemoryInstance) visibleBuffer() []byte {
 	return m.allocatedBuffer()[:m.byteSize()]
 }

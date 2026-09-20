@@ -44,9 +44,14 @@ var reproNoMemPool = os.Getenv("WAZY_REPRO_NO_MEMPOOL") == "1"
 // then would let some unrelated, later-instantiated module's data land in
 // memory the importer believes is still its own -- a cross-tenant correctness
 // and security bug. So whichever close (owner or the last importer) observes
-// "owner closed AND importers == 0" claims Buffer under mem.Mux (takes it, sets
-// it nil) and pools it; the Buffer != nil claim guard makes that exactly-once
-// regardless of close order or concurrency. mem.Mux also serializes this
+// "owner closed AND importers == 0" claims Buffer under mem.Mux (takes the
+// slice, then sets mem.released) and pools it; that released.Swap is the claim
+// guard -- it used to be "whoever nils Buffer wins", which was a plain write to
+// a field every api.Memory accessor reads unlocked (issue #69) -- and it makes
+// the recycle exactly-once regardless of close order or concurrency. Setting
+// released also makes the memory read as empty from that moment, so a reader
+// racing the close fails cleanly instead of reaching the pooled array.
+// mem.Mux also serializes this
 // against a concurrent resolveImports (which refuses to increment once
 // ownerClosed is set -- see resolveImports and TestMemoryPool_ImportAfterOwnerClosed_Errors).
 //

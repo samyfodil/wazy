@@ -170,6 +170,12 @@ func (t *thrownException) doRestore(ce *callEngine, callerFrameCount int) {
 type callEngine struct {
 	internalapi.WazyOnlyType
 
+	// slot records whether this callEngine is inside a top-level call, on its
+	// own cache line rather than in a counter every caller shares, so
+	// concurrent calls to one module do not serialize on it. Registered with
+	// the module's memories in newCallEngine; see wasm.CallSlot.
+	slot wasm.CallSlot
+
 	// stack contains the operands.
 	// Note that all the values are represented as uint64.
 	stack []uint64
@@ -301,7 +307,11 @@ func (ce *callEngine) callWithUnwind(ctx context.Context, m *wasm.ModuleInstance
 }
 
 func (e *moduleEngine) newCallEngine(compiled *function) *callEngine {
-	return &callEngine{f: compiled}
+	ce := &callEngine{f: compiled}
+	// Make this callEngine's in-flight slot visible to the memories it can run
+	// against, so a close can tell whether it is mid-call. See wasm.CallSlot.
+	compiled.moduleInstance.RegisterCallSlot(&ce.slot)
+	return ce
 }
 
 func (ce *callEngine) pushValue(v uint64) {
@@ -1185,6 +1195,12 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 		done := m.CloseModuleOnCanceledOrTimeout(ctx)
 		defer done()
 	}
+
+	// This loop indexes mem.Buffer directly and never checks whether the
+	// module was closed, so a concurrent close must not recycle the buffer
+	// until we are done with it. See MemoryInstance.callers.
+	ce.slot.Enter()
+	defer m.ExitCall(&ce.slot)
 
 	ce.callFunction(ctx, m, ce.f)
 

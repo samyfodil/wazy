@@ -179,30 +179,54 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 		if mem.ownerModuleEngine == m.Engine {
 			// Owner close. Mark ownerClosed, and recycle Buffer to the pool now
 			// only if no importer is still live -- otherwise the LAST importer's
-			// Close recycles it (the importer branch below). The claim (take
-			// Buffer, set it nil) happens under Mux so exactly one close pools it.
+			// Close recycles it (the importer branch below). The claim (take the
+			// slice, set released) happens under Mux so exactly one close pools it.
 			// expBuffer (custom allocator) is owner-only and freed unconditionally,
 			// exactly as before; poolable is false for it and for shared memories.
 			poolAuditRelease(mem, m)
 			mem.Mux.Lock()
 			mem.ownerClosed = true
 			var recycle []byte
-			if mem.poolable && mem.importers == 0 && mem.Buffer != nil {
-				recycle = mem.allocatedBuffer()[:mem.byteSize()]
-				// Drop our own reference so a stale post-Close read of this (now
-				// closed) MemoryInstance -- e.g. through an api.Memory the caller
-				// kept past Close, already a misuse -- sees an empty memory rather
-				// than whatever unrelated module the pool later hands this array to.
-				mem.Buffer = nil
-				mem.backing = nil
+			// released doubles as the claim that made Buffer != nil work
+			// before: set under Mux, so exactly one close -- this one or the
+			// last importer's -- releases the storage however many run
+			// concurrently. Setting it here rather than just before the Put
+			// also means a reader racing this close sees an empty memory from
+			// the moment the buffer is spoken for, not from the moment it
+			// actually lands in the pool.
+			var free api.LinearMemory
+			var deferred bool
+			if mem.expBuffer != nil || (mem.poolable && mem.importers == 0) {
+				// Take the slice BEFORE the claim: byteSize reports 0 once
+				// released is set, so claiming first would pool an empty one.
+				candidate := mem.allocatedBuffer()[:mem.byteSize()]
+				if !mem.released.Swap(true) {
+					if mem.expBuffer != nil {
+						free, mem.expBuffer = mem.expBuffer, nil
+					} else {
+						recycle = candidate
+						poolAuditPut(mem)
+					}
+					// A call still executing reads and writes this buffer
+					// directly, without ever consulting released -- so hand the
+					// release to whichever call leaves last rather than pulling
+					// the memory out from under it. See callers.
+					if mem.anyCallInFlightLocked() {
+						mem.pendingRelease.recycle, mem.pendingRelease.free = recycle, free
+						recycle, free = nil, nil
+						deferred = true
+					}
+				}
 			}
 			mem.Mux.Unlock()
 
-			if mem.expBuffer != nil {
-				mem.expBuffer.Free()
-				mem.expBuffer = nil
+			if deferred {
+				// The last call may have left between the check and the store,
+				// in which case nobody is coming back for it.
+				mem.exitAfterRelease()
+			} else if free != nil {
+				free.Free()
 			} else if recycle != nil {
-				poolAuditPut(mem)
 				putPooledMemoryBuffer(recycle)
 			}
 		} else {
@@ -218,14 +242,23 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 				mem.importers--
 			}
 			var recycle []byte
-			if mem.ownerClosed && mem.importers == 0 && mem.poolable && mem.Buffer != nil {
-				recycle = mem.allocatedBuffer()[:mem.byteSize()]
-				mem.Buffer = nil
-				mem.backing = nil
+			var deferred bool
+			if mem.ownerClosed && mem.importers == 0 && mem.poolable {
+				// Slice first, claim second -- see the owner branch above.
+				candidate := mem.allocatedBuffer()[:mem.byteSize()]
+				if !mem.released.Swap(true) {
+					recycle = candidate
+					poolAuditPut(mem)
+					if mem.anyCallInFlightLocked() {
+						mem.pendingRelease.recycle = recycle
+						recycle, deferred = nil, true
+					}
+				}
 			}
 			mem.Mux.Unlock()
-			if recycle != nil {
-				poolAuditPut(mem)
+			if deferred {
+				mem.exitAfterRelease()
+			} else if recycle != nil {
 				putPooledMemoryBuffer(recycle)
 			}
 		}
