@@ -119,8 +119,9 @@ type MemoryInstance struct {
 	// concurrent resolveImports agree, race-free, on when it is safe to return
 	// Buffer to the linear-memory buffer pool (memory_pool.go): only once the
 	// owner has closed AND importers has fallen to 0. Whichever close observes
-	// that last claims Buffer under Mux (sets it nil) and pools it, so it is
-	// recycled exactly once. See memory_pool.go's doc for the full argument.
+	// that last claims the buffer under Mux (via released, below) and pools it,
+	// so it is recycled exactly once. See memory_pool.go's doc for the full
+	// argument.
 	importers   int
 	ownerClosed bool
 
@@ -131,6 +132,29 @@ type MemoryInstance struct {
 	// exclusive with expBuffer (allocator-backed) and Shared memories, which are
 	// never pooled.
 	poolable bool
+
+	// released is set by the close that releases this memory's underlying
+	// storage -- returning Buffer to the linear-memory pool, or freeing an
+	// allocator's expBuffer -- immediately BEFORE it does so, and is read by
+	// every api.Memory accessor through visibleBuffer.
+	//
+	// It replaces nil-ing Buffer/backing at close, which was a plain write to
+	// fields every accessor reads with no lock: a data race with any goroutine
+	// still reading the memory through an api.Memory it holds (issue #69), and
+	// with the interpreter's own direct mem.Buffer reads, which is reachable
+	// because WithCloseOnContextDone closes a module from a watchdog goroutine
+	// while its call is still unwinding. An atomic here costs one load on the
+	// api.Memory path -- which the guest never takes, since both engines index
+	// mem.Buffer directly -- and lets the close write nothing at all.
+	//
+	// What it guarantees: a read that observes it fails cleanly (ok == false)
+	// rather than seeing whatever the pool later hands that array to. What it
+	// does not: a read that observes false may still be slicing the buffer as
+	// the close recycles it, and a []byte an earlier Read returned keeps
+	// aliasing the array regardless. See api.Memory's doc -- neither can be
+	// fixed while the buffer is pooled at all, and the pool is worth 2.1x on
+	// Instantiate.
+	released atomic.Bool
 }
 
 // NewMemoryInstance creates a new instance based on the parameters in the SectionIDMemory.
@@ -733,6 +757,16 @@ func (m *MemoryInstance) hasSize64(offset, byteCount uint64) bool {
 }
 
 func (m *MemoryInstance) byteSize() uint64 {
+	if m.released.Load() {
+		// The storage is gone -- pooled, or freed by a custom allocator -- so
+		// report an empty memory. That makes every bounds check above fail and
+		// every api.Memory accessor return ok == false, instead of reading a
+		// recycled array (or, for an allocator, freed pages), and keeps Size
+		// and Pages consistent with those failures. See released, and note
+		// that the guest never arrives here: both engines index mem.Buffer
+		// directly, so this load is on the api.Memory path only.
+		return 0
+	}
 	var size uint64
 	if m.Shared {
 		size = atomic.LoadUint64(&m.sizeBytes)
@@ -746,6 +780,9 @@ func (m *MemoryInstance) byteSize() uint64 {
 	return uint64(len(m.Buffer))
 }
 
+// visibleBuffer is empty once the memory is released, because byteSize is --
+// slicing to zero rather than branching here keeps the released check in one
+// place.
 func (m *MemoryInstance) visibleBuffer() []byte {
 	return m.allocatedBuffer()[:m.byteSize()]
 }

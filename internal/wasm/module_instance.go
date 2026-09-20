@@ -179,22 +179,28 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 		if mem.ownerModuleEngine == m.Engine {
 			// Owner close. Mark ownerClosed, and recycle Buffer to the pool now
 			// only if no importer is still live -- otherwise the LAST importer's
-			// Close recycles it (the importer branch below). The claim (take
-			// Buffer, set it nil) happens under Mux so exactly one close pools it.
+			// Close recycles it (the importer branch below). The claim (take the
+			// slice, set released) happens under Mux so exactly one close pools it.
 			// expBuffer (custom allocator) is owner-only and freed unconditionally,
 			// exactly as before; poolable is false for it and for shared memories.
 			poolAuditRelease(mem, m)
 			mem.Mux.Lock()
 			mem.ownerClosed = true
 			var recycle []byte
-			if mem.poolable && mem.importers == 0 && mem.Buffer != nil {
-				recycle = mem.allocatedBuffer()[:mem.byteSize()]
-				// Drop our own reference so a stale post-Close read of this (now
-				// closed) MemoryInstance -- e.g. through an api.Memory the caller
-				// kept past Close, already a misuse -- sees an empty memory rather
-				// than whatever unrelated module the pool later hands this array to.
-				mem.Buffer = nil
-				mem.backing = nil
+			// released doubles as the claim that made Buffer != nil work
+			// before: set under Mux, so exactly one close -- this one or the
+			// last importer's -- releases the storage however many run
+			// concurrently. Setting it here rather than just before the Put
+			// also means a reader racing this close sees an empty memory from
+			// the moment the buffer is spoken for, not from the moment it
+			// actually lands in the pool.
+			if mem.expBuffer != nil || (mem.poolable && mem.importers == 0) {
+				// Take the slice BEFORE the claim: byteSize reports 0 once
+				// released is set, so claiming first would pool an empty one.
+				candidate := mem.allocatedBuffer()[:mem.byteSize()]
+				if !mem.released.Swap(true) && mem.expBuffer == nil {
+					recycle = candidate
+				}
 			}
 			mem.Mux.Unlock()
 
@@ -218,10 +224,12 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 				mem.importers--
 			}
 			var recycle []byte
-			if mem.ownerClosed && mem.importers == 0 && mem.poolable && mem.Buffer != nil {
-				recycle = mem.allocatedBuffer()[:mem.byteSize()]
-				mem.Buffer = nil
-				mem.backing = nil
+			if mem.ownerClosed && mem.importers == 0 && mem.poolable {
+				// Slice first, claim second -- see the owner branch above.
+				candidate := mem.allocatedBuffer()[:mem.byteSize()]
+				if !mem.released.Swap(true) {
+					recycle = candidate
+				}
 			}
 			mem.Mux.Unlock()
 			if recycle != nil {
