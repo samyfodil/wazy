@@ -30,6 +30,11 @@ type (
 	// callEngine implements api.Function.
 	callEngine struct {
 		internalapi.WazyOnly
+		// slot records whether this callEngine is inside a top-level call, on
+		// its own cache line rather than in a counter every caller shares, so
+		// concurrent calls to one module do not serialize on it. Registered
+		// with the module's memories in NewFunction; see wasm.CallSlot.
+		slot  wasm.CallSlot
 		stack []byte
 		// stackTop is the pointer to the *aligned* top of the stack. This must be updated
 		// whenever the stack is changed. This is passed to the assembly function
@@ -641,9 +646,9 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 
 	// Compiled code holds the memory base directly and never checks whether
 	// the module was closed, so a concurrent close must not recycle the buffer
-	// until this call is done with it. See MemoryInstance.callsInFlight.
-	m.EnterCallMemories()
-	defer m.ExitCallMemories()
+	// until this call is done with it. See MemoryInstance.callers.
+	c.slot.Enter()
+	defer m.ExitCall(&c.slot)
 
 	if c.stackTop&(16-1) != 0 {
 		panic("BUG: stack must be aligned to 16 bytes")

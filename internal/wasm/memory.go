@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 	"unsafe"
+	"weak"
 
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/internalapi"
@@ -154,8 +155,9 @@ type MemoryInstance struct {
 	// buffer is pooled at all, and the pool is worth 2.1x on Instantiate.
 	released atomic.Bool
 
-	// callsInFlight counts top-level calls currently executing against this
-	// memory, bracketed by EnterCall/ExitCall in both engines' Call.
+	// callers is every callEngine that can run against this memory, held
+	// weakly so a handle the embedder drops does not pin its callEngine here
+	// for the life of the module.
 	//
 	// It exists because released does NOT reach the engines: the interpreter
 	// and the native engine index mem.Buffer directly on their hot paths, as
@@ -166,13 +168,18 @@ type MemoryInstance struct {
 	// writing it, and the next instantiation got the same array. Observed as
 	// one instance's i64.store racing another's i32.load at the same address.
 	//
-	// So a close that lands with calls in flight marks the memory released,
-	// which stops every api.Memory accessor, but leaves the actual recycle to
-	// the last call out (see ExitCall and pendingRelease).
-	callsInFlight atomic.Int64
+	// The obvious shape for that -- one counter on this struct, incremented
+	// and decremented per call -- is a shared cache line that every caller
+	// writes, so N goroutines calling one module (the pattern
+	// api.Function.Call's own doc points at) serialize on it: measured at 3x
+	// main on four cores, and scaling backwards where main scales forwards.
+	// So each callEngine keeps its own CallSlot on its own line and the close
+	// scans these instead, which moves the only contended access to the close,
+	// where it is rare. Guarded by Mux.
+	callers []weak.Pointer[CallSlot]
 
 	// pendingRelease is the storage a close claimed but could not release,
-	// because callsInFlight was not zero. The last call to leave performs it.
+	// because a call was still in flight. The last call to leave performs it.
 	// Guarded by Mux; exactly one of the two fields is set.
 	pendingRelease struct {
 		recycle []byte           // hand to putPooledMemoryBuffer
@@ -180,48 +187,78 @@ type MemoryInstance struct {
 	}
 }
 
-// EnterCall records that a top-level call is about to execute against this
-// memory, so a concurrent close defers recycling the buffer until the call is
-// done with it. Paired with ExitCall; see callsInFlight.
-func (m *MemoryInstance) EnterCall() { m.callsInFlight.Add(1) }
+// CallSlot is one callEngine's record of whether it is inside a top-level call.
+// Each callEngine owns one and registers it with every memory its module can
+// reach (ModuleInstance.RegisterCallSlot), so a close can find the calls in
+// flight by scanning MemoryInstance.callers rather than every call writing a
+// counter they all share. The word is only ever written by the one goroutine
+// running that callEngine, on that callEngine's own cache line.
+type CallSlot struct {
+	inFlight uint32
+}
 
-// EnterCallMemories brackets a top-level call over every memory the module can
-// reach. Paired with ExitCallMemories, which the engines defer.
+// Enter records that a top-level call is starting.
 //
-// This exists as a method taking the loop rather than the engines deferring
-// inside one, because `defer` in a loop cannot be open-coded: it forced Go's
-// heap-allocated defer path and cost an allocation on EVERY call (+1 alloc/op
-// across the whole suite, and ~21% on wasi fd_read/fd_write).
-func (m *ModuleInstance) EnterCallMemories() {
+// It is a sequentially consistent store and the engines load
+// ModuleInstance.Closed right after it, while a close sets Closed and then
+// scans the slots: both orders are in the same total order, so either the
+// close sees this call in flight and defers the release, or this call sees the
+// close.
+func (s *CallSlot) Enter() { atomic.StoreUint32(&s.inFlight, 1) }
+
+// RegisterCallSlot makes s visible to every memory this module can reach. It
+// runs once per callEngine, when the callEngine is built.
+func (m *ModuleInstance) RegisterCallSlot(s *CallSlot) {
+	p := weak.Make(s)
 	for _, mem := range m.Memories {
-		mem.callsInFlight.Add(1)
+		mem.Mux.Lock()
+		if len(mem.callers) == cap(mem.callers) && cap(mem.callers) > 0 {
+			// About to grow: first drop the slots whose callEngine has been
+			// collected, so a module that keeps looking up fresh handles
+			// reuses this space instead of growing forever. Compacting on the
+			// grow boundary makes it amortized -- the scan is only as frequent
+			// as the reallocation it replaces.
+			live := mem.callers[:0]
+			for _, c := range mem.callers {
+				if c.Value() != nil {
+					live = append(live, c)
+				}
+			}
+			clear(mem.callers[len(live):cap(mem.callers)])
+			mem.callers = live
+		}
+		mem.callers = append(mem.callers, p)
+		mem.Mux.Unlock()
 	}
 }
 
-// ExitCallMemories is EnterCallMemories' pair; see its doc for why the loop
-// lives here.
-func (m *ModuleInstance) ExitCallMemories() {
+// EnterCallMemories is a no-op kept for symmetry with ExitCall: the call
+// announces itself once, on its own CallSlot, rather than once per memory.
+//
+// ExitCall is the pair. The engines call s.Enter() directly.
+
+// ExitCall records that a top-level call on s has finished, and performs a
+// release the close deferred if this was the last call out.
+func (m *ModuleInstance) ExitCall(s *CallSlot) {
+	atomic.StoreUint32(&s.inFlight, 0)
 	for _, mem := range m.Memories {
-		mem.ExitCall()
+		if mem.released.Load() {
+			// Only a memory whose storage a close already claimed can have
+			// anything waiting; every other call pays one relaxed load.
+			mem.exitAfterRelease()
+		}
 	}
 }
 
-// ExitCall records that a top-level call has finished, and performs the
-// release a close deferred if this was the last one out.
-func (m *MemoryInstance) ExitCall() {
-	if m.callsInFlight.Add(-1) != 0 || !m.released.Load() {
-		// The common case by far: other calls are still running, or nothing
-		// has closed this memory. No lock on the call path.
+// exitAfterRelease runs when a call leaves a memory whose storage a close has
+// already claimed. If no other call is still in flight, it performs the
+// release the close deferred.
+func (m *MemoryInstance) exitAfterRelease() {
+	m.Mux.Lock()
+	if m.anyCallInFlightLocked() {
+		m.Mux.Unlock()
 		return
 	}
-	m.releasePending()
-}
-
-// releasePending performs a deferred release exactly once, whoever gets there
-// first -- the last call out, or the close itself re-checking after it saw a
-// call in flight. Taking the claim under Mux is what makes that single-shot.
-func (m *MemoryInstance) releasePending() {
-	m.Mux.Lock()
 	recycle, free := m.pendingRelease.recycle, m.pendingRelease.free
 	m.pendingRelease.recycle, m.pendingRelease.free = nil, nil
 	m.Mux.Unlock()
@@ -231,6 +268,17 @@ func (m *MemoryInstance) releasePending() {
 	} else if recycle != nil {
 		putPooledMemoryBuffer(recycle)
 	}
+}
+
+// anyCallInFlightLocked reports whether any callEngine that can reach this
+// memory is inside a top-level call. Mux must be held.
+func (m *MemoryInstance) anyCallInFlightLocked() bool {
+	for _, c := range m.callers {
+		if s := c.Value(); s != nil && atomic.LoadUint32(&s.inFlight) != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // NewMemoryInstance creates a new instance based on the parameters in the SectionIDMemory.

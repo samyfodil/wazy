@@ -109,7 +109,9 @@ func TestMemoryClose_DoesNotRecycleWhileACallIsInFlight(t *testing.T) {
 	mem := NewMemoryInstance(&Memory{Min: 1, Cap: 1, Max: 1}, nil, owner, uint64(MemoryLimitPages))
 	m := &ModuleInstance{Memories: []*MemoryInstance{mem}, Engine: owner}
 
-	mem.EnterCall() // a call is running against this memory
+	var slot CallSlot
+	m.RegisterCallSlot(&slot)
+	slot.Enter() // a call is running against this memory
 	require.NoError(t, m.ensureResourcesClosed(context.Background()))
 
 	// Closed for api.Memory purposes, but the buffer is still ours.
@@ -122,7 +124,7 @@ func TestMemoryClose_DoesNotRecycleWhileACallIsInFlight(t *testing.T) {
 	mem.Mux.Unlock()
 	require.NotNil(t, pending, "the recycle must be deferred while a call is in flight")
 
-	mem.ExitCall() // last call out performs it
+	m.ExitCall(&slot) // last call out performs it
 
 	mem.Mux.Lock()
 	pending = mem.pendingRelease.recycle
@@ -136,9 +138,11 @@ func TestMemoryClose_ReleasesOnLastCallOut(t *testing.T) {
 	mem := NewMemoryInstance(&Memory{Min: 1, Cap: 1, Max: 1}, nil, owner, uint64(MemoryLimitPages))
 	m := &ModuleInstance{Memories: []*MemoryInstance{mem}, Engine: owner}
 
-	mem.EnterCall()
-	mem.EnterCall()
-	mem.EnterCall()
+	var s1, s2, s3 CallSlot
+	for _, s := range []*CallSlot{&s1, &s2, &s3} {
+		m.RegisterCallSlot(s)
+		s.Enter()
+	}
 	require.NoError(t, m.ensureResourcesClosed(context.Background()))
 
 	pendingRecycle := func() []byte {
@@ -147,11 +151,11 @@ func TestMemoryClose_ReleasesOnLastCallOut(t *testing.T) {
 		return mem.pendingRelease.recycle
 	}
 
-	mem.ExitCall()
+	m.ExitCall(&s1)
 	require.NotNil(t, pendingRecycle(), "two calls still in flight")
-	mem.ExitCall()
+	m.ExitCall(&s2)
 	require.NotNil(t, pendingRecycle(), "one call still in flight")
-	mem.ExitCall()
+	m.ExitCall(&s3)
 	require.Nil(t, pendingRecycle(), "the last call out releases")
 }
 
@@ -179,11 +183,13 @@ func TestMemoryClose_ConcurrentCloseAndCallExitReleaseOnce(t *testing.T) {
 		mem := NewMemoryInstance(&Memory{Min: 1, Cap: 1, Max: 1}, nil, owner, uint64(MemoryLimitPages))
 		m := &ModuleInstance{Memories: []*MemoryInstance{mem}, Engine: owner}
 
-		mem.EnterCall()
+		var slot CallSlot
+		m.RegisterCallSlot(&slot)
+		slot.Enter()
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() { defer wg.Done(); require.NoError(t, m.ensureResourcesClosed(context.Background())) }()
-		go func() { defer wg.Done(); mem.ExitCall() }()
+		go func() { defer wg.Done(); m.ExitCall(&slot) }()
 		wg.Wait()
 
 		mem.Mux.Lock()

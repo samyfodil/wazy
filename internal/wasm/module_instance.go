@@ -210,8 +210,8 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 					// A call still executing reads and writes this buffer
 					// directly, without ever consulting released -- so hand the
 					// release to whichever call leaves last rather than pulling
-					// the memory out from under it. See callsInFlight.
-					if mem.callsInFlight.Load() != 0 {
+					// the memory out from under it. See callers.
+					if mem.anyCallInFlightLocked() {
 						mem.pendingRelease.recycle, mem.pendingRelease.free = recycle, free
 						recycle, free = nil, nil
 						deferred = true
@@ -223,9 +223,7 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 			if deferred {
 				// The last call may have left between the check and the store,
 				// in which case nobody is coming back for it.
-				if mem.callsInFlight.Load() == 0 {
-					mem.releasePending()
-				}
+				mem.exitAfterRelease()
 			} else if free != nil {
 				free.Free()
 			} else if recycle != nil {
@@ -251,7 +249,7 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 				if !mem.released.Swap(true) {
 					recycle = candidate
 					poolAuditPut(mem)
-					if mem.callsInFlight.Load() != 0 {
+					if mem.anyCallInFlightLocked() {
 						mem.pendingRelease.recycle = recycle
 						recycle, deferred = nil, true
 					}
@@ -259,9 +257,7 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 			}
 			mem.Mux.Unlock()
 			if deferred {
-				if mem.callsInFlight.Load() == 0 {
-					mem.releasePending()
-				}
+				mem.exitAfterRelease()
 			} else if recycle != nil {
 				putPooledMemoryBuffer(recycle)
 			}
