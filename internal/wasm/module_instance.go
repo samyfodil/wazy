@@ -272,6 +272,23 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 		}
 	}
 
+	// Memories this module could reach through a function or table import but
+	// does not own. Dropping the hold can make this the last holder, in which
+	// case the owner's deferred recycle happens here. See holdMemoriesOf.
+	for _, mem := range m.heldMemories {
+		mem.Mux.Lock()
+		if mem.importers > 0 {
+			mem.importers--
+		}
+		last := mem.ownerClosed && mem.importers == 0 && mem.poolable
+		mem.Mux.Unlock()
+		poolAuditRelease(mem, m)
+		if last {
+			mem.releaseAfterLastHolder()
+		}
+	}
+	m.heldMemories = nil
+
 	if m.CodeCloser != nil {
 		if e := m.CodeCloser.Close(ctx); err == nil {
 			err = e

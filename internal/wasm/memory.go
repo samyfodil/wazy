@@ -304,6 +304,34 @@ func (m *MemoryInstance) exitAfterRelease() {
 	}
 }
 
+// releaseAfterLastHolder claims and releases this memory's storage when the
+// caller has just dropped the last hold on it and the owner had already
+// closed. It is the holdMemoriesOf counterpart of the owner and importer close
+// paths: whichever of the three observes "owner closed, nobody left" claims the
+// buffer through released and pools it, so it is still released exactly once.
+func (m *MemoryInstance) releaseAfterLastHolder() {
+	m.Mux.Lock()
+	if m.released.Swap(true) {
+		m.Mux.Unlock()
+		return // another close already claimed it
+	}
+	backing := m.allocatedBuffer()
+	dirty := m.dirtyLenLocked(backing)
+	inFlight := m.anyCallInFlightLocked()
+	if inFlight {
+		m.pendingRelease.recycle = backing
+	}
+	m.Mux.Unlock()
+
+	if inFlight {
+		// A call is still running against it; the last one out releases.
+		m.exitAfterRelease()
+		return
+	}
+	poolAuditPut(m)
+	putPooledMemoryBuffer(backing[:dirty])
+}
+
 // dirtyLenLocked is how much of backing the guest could have written, taken
 // from the live size rather than from whatever it was when the close ran. Mux
 // must be held.
