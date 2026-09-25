@@ -36,14 +36,25 @@ const (
 	stackPoolBaseSize = 10240
 
 	// stackPoolNumClasses caps the doubling sequence at
-	// stackPoolBaseSize<<(stackPoolNumClasses-1) (~5GiB), comfortably past
-	// callStackCeiling (~50MB): every stack size this engine can ever
-	// legitimately produce has a class. A request or release outside that
-	// range (which would require an absurdly large param/result
-	// signature, or a stack past the overflow ceiling that growStack
-	// already rejects) simply isn't pooled -- see
-	// stackPoolClassForAcquire/Release.
-	stackPoolNumClasses = 20
+	// stackPoolBaseSize<<(stackPoolNumClasses-1) (640MiB), past
+	// callStackCeiling: every stack size this engine can ever legitimately
+	// produce has a class. A request or release outside that range (which
+	// would require an absurdly large param/result signature, or a stack
+	// past the overflow ceiling that growStack already rejects) simply
+	// isn't pooled -- see stackPoolClassForAcquire/Release.
+	//
+	// callStackCeiling counts uint64 slots, so the byte ceiling it enforces
+	// is 400MB, not the ~50MB its own name suggests; 17 classes is the
+	// smallest count that still covers it. It used to be 20, whose top
+	// class was 5GiB. Those extra classes were unreachable -- growStack
+	// rejects any stack past the ceiling long before them -- and they were
+	// not free: exercising the "too large for any class" path then meant
+	// allocating just over 5GiB, and Go memclrs a large allocation whenever
+	// the span it lands on is reused rather than fresh from the OS. That
+	// touched all 5GiB, which wedged the whole test binary against any
+	// memory ceiling below it, intermittently, depending on which spans the
+	// allocator happened to hand out.
+	stackPoolNumClasses = 17
 )
 
 // stackPoolClassForAcquire returns the smallest class c (0-based) whose

@@ -157,7 +157,12 @@ func resetLabelPosition(l *labelPosition) {
 	*l = labelPosition{}
 }
 
-const labelReturn = math.MaxUint32
+const (
+	labelReturn = math.MaxUint32
+	// labelInvalid marks a nop that anchors no label. It cannot be the zero
+	// value: label 0 is SSA block 0, the entry block.
+	labelInvalid = labelReturn - 1
+)
 
 func ssaBlockLabel(sb ssa.BasicBlock) label {
 	if sb.ReturnBlock() {
@@ -2414,10 +2419,10 @@ func (m *machine) encodeWithoutSSA(root *instruction) {
 	for cur := root; cur != nil; cur = cur.next {
 		offset := int64(len(*bufPtr))
 		if cur.kind == nop0 {
-			l := cur.nop0Label()
-			pos := m.labelPositionPool.Get(int(l))
-			if pos != nil {
-				pos.binaryOffset = offset
+			if l, ok := cur.nop0Label(); ok {
+				if pos := m.labelPositionPool.Get(int(l)); pos != nil {
+					pos.binaryOffset = offset
+				}
 			}
 		}
 
@@ -2482,9 +2487,10 @@ func (m *machine) Encode(ctx context.Context) (err error) {
 
 			switch cur.kind {
 			case nop0:
-				l := cur.nop0Label()
-				if pos := m.labelPositionPool.Get(int(l)); pos != nil {
-					pos.binaryOffset = offset
+				if l, ok := cur.nop0Label(); ok {
+					if pos := m.labelPositionPool.Get(int(l)); pos != nil {
+						pos.binaryOffset = offset
+					}
 				}
 			case sourceOffsetInfo:
 				m.c.AddSourceOffsetInfo(offset, cur.sourceOffsetInfo())
@@ -2625,6 +2631,9 @@ func (m *machine) allocateInstr() *instruction {
 func (m *machine) allocateNop() *instruction {
 	instr := m.allocateInstr()
 	instr.kind = nop0
+	// See labelInvalid: a zero label field would make this block-boundary nop
+	// claim to anchor the entry block's label.
+	instr.u1 = uint64(labelInvalid)
 	return instr
 }
 

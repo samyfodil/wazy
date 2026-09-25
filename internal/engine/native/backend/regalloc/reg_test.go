@@ -8,10 +8,17 @@ import (
 )
 
 func TestRegTypeOf(t *testing.T) {
-	require.Equal(t, RegTypeInt, RegTypeOf(ssa.TypeI32))
-	require.Equal(t, RegTypeInt, RegTypeOf(ssa.TypeI64))
-	require.Equal(t, RegTypeFloat, RegTypeOf(ssa.TypeF32))
-	require.Equal(t, RegTypeFloat, RegTypeOf(ssa.TypeF64))
+	// Scalars ignore the v128 class entirely.
+	for _, v128 := range []RegType{RegTypeFloat, RegTypeVec} {
+		require.Equal(t, RegTypeInt, RegTypeOf(ssa.TypeI32, v128))
+		require.Equal(t, RegTypeInt, RegTypeOf(ssa.TypeI64, v128))
+		require.Equal(t, RegTypeFloat, RegTypeOf(ssa.TypeF32, v128))
+		require.Equal(t, RegTypeFloat, RegTypeOf(ssa.TypeF64, v128))
+	}
+	// A v128 follows whichever file the ISA keeps vectors in: the same
+	// registers as floats on arm64/amd64, a separate file on riscv64.
+	require.Equal(t, RegTypeFloat, RegTypeOf(ssa.TypeV128, RegTypeFloat))
+	require.Equal(t, RegTypeVec, RegTypeOf(ssa.TypeV128, RegTypeVec))
 }
 
 func TestVReg_String(t *testing.T) {

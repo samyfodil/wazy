@@ -40,27 +40,30 @@ func TestCompiler_lowerMemoryFill_dispatch(t *testing.T) {
 		// rung of the scalar ladder, which only a region that may be shorter
 		// than one vector reaches.
 		byteTail bool
-		// stores is the exact number of 128-bit stores, when they are unrolled.
+		// stores is the exact number of fillStoreBytes-wide stores, when they are
+		// unrolled. Expressed in terms of the width rather than 16, because it is
+		// 8 on a platform with no vector unit -- riscv64 without the V extension.
 		stores int
 	}{
 		{
 			// Under the constant ceiling: straight-line stores, no branch, no call.
 			name:  "constant size, constant value, inline",
 			value: constOp(0), size: constOp(memoryFillInlineMaxBytes),
-			blocks: 1, stores: memoryFillInlineMaxBytes / 16,
+			blocks: 1, stores: memoryFillInlineMaxBytes / int(fillStoreBytes),
 		},
 		{
-			// A size that is not a multiple of 16 gets an overlapping last store.
-			name:  "constant size not a multiple of 16",
+			// A size that is not a multiple of the store width gets an overlapping
+			// last store.
+			name:  "constant size not a multiple of the store width",
 			value: constOp(0xab), size: constOp(100),
-			blocks: 1, stores: 100/16 + 1,
+			blocks: 1, stores: 100/int(fillStoreBytes) + 1,
 		},
 		{
 			// A dynamic value still folds to straight-line stores: only the
 			// size decides the shape.
 			name:  "constant size, dynamic value, inline",
 			value: localOp(0), size: constOp(64),
-			blocks: 1, stores: 4,
+			blocks: 1, stores: 64 / int(fillStoreBytes),
 		},
 		{
 			// Zero and large: memclr directly, with no run-time dispatch.
@@ -125,7 +128,8 @@ func TestCompiler_lowerMemoryFill_dispatch(t *testing.T) {
 			// context; its slot is what distinguishes it from memmove.
 			memclrLoad := fmt.Sprintf("Load v0, %#x", nativeapi.ExecutionContextOffsetMemclrAddress.U32())
 			require.Equal(t, tc.memclr, strings.Contains(got, memclrLoad), got)
-			// Istore8 is only ever the byte tail here: every other store is a vector.
+			// Istore8 is only ever the byte tail here: every other store is a full
+			// fillStoreBytes wide.
 			require.Equal(t, tc.byteTail, strings.Contains(got, "Istore8"), got)
 			if tc.stores > 0 {
 				require.Equal(t, tc.stores, strings.Count(got, "Store v"), got)

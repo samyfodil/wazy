@@ -268,7 +268,7 @@ func TestAbiImpl_init(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			abi := FunctionABI{}
-			abi.Init(tc.sig, intParamResultRegs, floatParamResultRegs)
+			abi.Init(tc.sig, intParamResultRegs, floatParamResultRegs, regalloc.RegTypeFloat)
 			require.Equal(t, tc.exp.Args, abi.Args)
 			require.Equal(t, tc.exp.Rets, abi.Rets)
 			require.Equal(t, tc.exp.ArgStackSize, abi.ArgStackSize)

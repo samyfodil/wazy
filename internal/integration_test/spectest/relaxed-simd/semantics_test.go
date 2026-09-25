@@ -252,7 +252,9 @@ func TestRelaxedSemantics(t *testing.T) {
 	configs := map[string]wazy.RuntimeConfig{
 		"interpreter": wazy.NewRuntimeConfigInterpreter().WithCoreFeatures(enabledFeatures),
 	}
-	if platform.CompilerSupported() {
+	// Relaxed SIMD is built on SIMD: every module here executes v128, so this
+	// asks for the whole set rather than the V2 default.
+	if platform.CompilerSupports(enabledFeatures) {
 		configs["compiler"] = wazy.NewRuntimeConfigCompiler().WithCoreFeatures(enabledFeatures)
 	}
 

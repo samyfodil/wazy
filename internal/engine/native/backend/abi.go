@@ -66,17 +66,17 @@ func (a ABIArgKind) String() string {
 }
 
 // Init initializes the abiImpl for the given signature.
-func (a *FunctionABI) Init(sig *ssa.Signature, argResultInts, argResultFloats []regalloc.RealReg) {
+func (a *FunctionABI) Init(sig *ssa.Signature, argResultInts, argResultFloats []regalloc.RealReg, v128RegType regalloc.RegType) {
 	if len(a.Rets) < len(sig.Results) {
 		a.Rets = make([]ABIArg, len(sig.Results))
 	}
 	a.Rets = a.Rets[:len(sig.Results)]
-	a.RetStackSize = a.setABIArgs(a.Rets, sig.Results, argResultInts, argResultFloats)
+	a.RetStackSize = a.setABIArgs(a.Rets, sig.Results, argResultInts, argResultFloats, v128RegType)
 	if argsNum := len(sig.Params); len(a.Args) < argsNum {
 		a.Args = make([]ABIArg, argsNum)
 	}
 	a.Args = a.Args[:len(sig.Params)]
-	a.ArgStackSize = a.setABIArgs(a.Args, sig.Params, argResultInts, argResultFloats)
+	a.ArgStackSize = a.setABIArgs(a.Args, sig.Params, argResultInts, argResultFloats, v128RegType)
 
 	// Gather the real registers usages in arg/return.
 	a.ArgIntRealRegs, a.ArgFloatRealRegs = 0, 0
@@ -107,7 +107,7 @@ func (a *FunctionABI) Init(sig *ssa.Signature, argResultInts, argResultFloats []
 
 // setABIArgs sets the ABI arguments in the given slice. This assumes that len(s) >= len(types)
 // where if len(s) > len(types), the last elements of s is for the multi-return slot.
-func (a *FunctionABI) setABIArgs(s []ABIArg, types []ssa.Type, ints, floats []regalloc.RealReg) (stackSize int64) {
+func (a *FunctionABI) setABIArgs(s []ABIArg, types []ssa.Type, ints, floats []regalloc.RealReg, v128RegType regalloc.RegType) (stackSize int64) {
 	il, fl := len(ints), len(floats)
 
 	var stackOffset int64
@@ -128,7 +128,14 @@ func (a *FunctionABI) setABIArgs(s []ABIArg, types []ssa.Type, ints, floats []re
 				intParamIndex++
 			}
 		} else {
-			if floatParamIndex >= fl {
+			// `floats` is a single list of float-file registers. Where the ISA
+			// keeps vectors in a separate file (v128RegType == RegTypeVec)
+			// those registers cannot hold a v128 at all, so such arguments go
+			// on the stack. Only the call boundary pays for it; inside a
+			// function v128 values live in the vector file as normal.
+			onStack := floatParamIndex >= fl ||
+				(typ == ssa.TypeV128 && v128RegType == regalloc.RegTypeVec)
+			if onStack {
 				arg.Kind = ABIArgKindStack
 				slotSize := int64(8)   // Align at least 8 bytes.
 				if typ.Bits() == 128 { // Vector.
