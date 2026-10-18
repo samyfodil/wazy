@@ -24,7 +24,7 @@ func TestCopysignRegalloc(t *testing.T) {
 		name string
 		cfg  wazy.RuntimeConfig
 	}{
-		{"compiler", wazy.NewRuntimeConfigCompiler()},
+		{"default", wazy.NewRuntimeConfig()},
 		{"interpreter", wazy.NewRuntimeConfigInterpreter()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
