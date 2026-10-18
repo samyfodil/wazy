@@ -3,7 +3,16 @@ package wasm
 import (
 	"sync"
 	"sync/atomic"
+
+	"github.com/samyfodil/wazy/api"
 )
+
+// CollectorEnabled reports whether a runtime with these features hands out references the store's collector
+// reclaims -- struct and array references under the GC proposal, exnrefs under exception handling -- and so
+// whether its engines must register their calls and poll at loop headers.
+func CollectorEnabled(features api.CoreFeatures) bool {
+	return features.IsEnabled(api.CoreFeatureGC) || features.IsEnabled(api.CoreFeatureExceptionHandling)
+}
 
 // This file reclaims the objects on the managed heap that guest code can no longer reach.
 //
@@ -102,8 +111,16 @@ func (g *gcController) init() {
 // RegisterGCExecution registers one wasm call in flight. pause is the flag the engine polls at its parking
 // points, which the collector writes into; it must stay valid until Unregister.
 func (s *Store) RegisterGCExecution(roots GCRoots, pause *uint32) *GCExecution {
+	return s.RegisterGCExecutionInto(new(GCExecution), roots, pause)
+}
+
+// RegisterGCExecutionInto is RegisterGCExecution registering e, so that an engine making call after call can keep
+// one GCExecution rather than allocate one per call. e must not be registered already. Reusing it after
+// Unregister is safe: once Unregister returns, no collection holds e any more (see the handshake above).
+func (s *Store) RegisterGCExecutionInto(e *GCExecution, roots GCRoots, pause *uint32) *GCExecution {
 	g := &s.gc
-	e := &GCExecution{s: s, roots: roots, pause: pause}
+	e.s, e.roots, e.pause = s, roots, pause
+	e.parked.Store(false)
 	e.cell = g.take(e)
 	// The cell became visible to a collection the moment take filled it, so a collection already scanning
 	// may have this call in hand before it has run an instruction: it must stand still rather than start.
@@ -286,6 +303,11 @@ func (e *GCExecution) waitOut() {
 // RegisterGCExecution is Store.RegisterGCExecution, reachable from the engines through a module instance.
 func (m *ModuleInstance) RegisterGCExecution(roots GCRoots, pause *uint32) *GCExecution {
 	return m.s.RegisterGCExecution(roots, pause)
+}
+
+// RegisterGCExecutionInto is Store.RegisterGCExecutionInto, reachable from the engines through a module instance.
+func (m *ModuleInstance) RegisterGCExecutionInto(e *GCExecution, roots GCRoots, pause *uint32) *GCExecution {
+	return m.s.RegisterGCExecutionInto(e, roots, pause)
 }
 
 // GCLiveObjects is how many objects the store's heap holds. It exists for tests, which have no other way to

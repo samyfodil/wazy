@@ -1,7 +1,5 @@
 package wasm
 
-import "sync"
-
 // Exception represents a thrown WebAssembly exception.
 type Exception struct {
 	// Tag is the tag instance that was thrown.
@@ -16,7 +14,7 @@ const ExnRefNull uint64 = 0
 
 // ExceptionTable hands out the exnref values guest code holds.
 //
-// # Why a table
+// # Why a handle
 //
 // An exnref must not be a raw pointer to the Exception. The value is opaque to
 // the guest, but it is a Go heap address the collector cannot see: nothing in
@@ -29,45 +27,50 @@ const ExnRefNull uint64 = 0
 // again, and re-threw the first reference read the wrong tag or crashed the
 // process, reproducibly.
 //
-// Handing out an index into this table instead keeps the Exception rooted for
-// as long as any exnref can name it, so guest code can never dereference freed
-// memory, and an unknown handle traps instead of being followed.
-//
 // # Lifetime
 //
-// The table lives on the Store, because an exnref crosses module instances:
-// an exception thrown in a callee is caught, and can be re-thrown, in a
-// caller from another module. Entries are held until the Store is closed --
-// exnrefs are garbage-collected values in the spec, and wazy has no way to
-// observe a guest dropping one, so the alternative to holding them is exactly
-// the dangling pointer this replaces. Only `catch_ref`/`catch_all_ref` and a
-// `throw` reaching guest code allocate an entry; a plain `catch` never does.
+// An exnref is a handle on the store's managed heap (GCHeap), the same kind of
+// handle a struct or an array has, so the store's collector decides when the
+// exception it names can go: it stays while any wasm stack, global, table, GC
+// object field, or the params of another live exception holds the handle, and
+// is reclaimed once none does. Exceptions are garbage-collected values in the
+// spec, and before this a store kept every one it ever handed out until it was
+// closed -- two entries for every throw a guest caught, which a long-running
+// C++ guest turns into an unbounded leak.
+//
+// An exception object's fields are its params, so whatever references the
+// exception carries -- a struct, another exnref -- stay alive with it.
+//
+// The handle carries its slot's generation, so one kept past a collection that
+// reclaimed it names nothing, and `throw_ref` on it traps rather than reaching
+// whatever took the slot over. Only wasm can keep an exnref alive: one handed
+// to the host outlives nothing.
 type ExceptionTable struct {
-	mu sync.RWMutex
-	// live is indexed by exnref-1, so that the zero exnref is ExnRefNull.
-	live []*Exception
+	s *Store
 }
 
-// Ref returns the exnref naming exn, allocating one if it has none yet.
-func (t *ExceptionTable) Ref(exn *Exception) uint64 {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.live = append(t.live, exn)
-	return uint64(len(t.live)) // index+1, so the first is 1, not ExnRefNull
+// Ref returns a new exnref naming exn. It may ask the store for a collection,
+// which happens at the next safepoint, never here.
+func (t ExceptionTable) Ref(exn *Exception) uint64 {
+	o := &GCObject{Exn: exn, Fields: exn.Params}
+	ref, collect := t.s.GC.Alloc(o)
+	if collect {
+		t.s.RequestGC()
+	}
+	return ref
 }
 
 // Lookup returns the exception an exnref names, or false if it names none.
 // Guest code cannot forge an exnref -- there is no instruction converting an
-// integer to one -- but a handle from a different Store would land here, and
-// must trap rather than resolve.
-func (t *ExceptionTable) Lookup(ref uint64) (*Exception, bool) {
+// integer to one -- but a handle from a different Store, or one handed to the
+// host and since reclaimed, would land here, and must trap rather than resolve.
+func (t ExceptionTable) Lookup(ref uint64) (*Exception, bool) {
 	if ref == ExnRefNull {
 		return nil, false
 	}
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	if ref > uint64(len(t.live)) {
+	s, ok := t.s.GC.slotOf(ref)
+	if !ok || s.obj.Exn == nil {
 		return nil, false
 	}
-	return t.live[ref-1], true
+	return s.obj.Exn, true
 }

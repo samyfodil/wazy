@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
@@ -60,9 +59,6 @@ func TestHostI32Result_negative(t *testing.T) {
 	} {
 		for hostName, host := range hosts {
 			t.Run(engine.name+"/"+hostName, func(t *testing.T) {
-				if engine.name == "compiler" && !platform.CompilerSupported() {
-					t.Skip("compiler not supported here, e.g. executable mmap is unavailable")
-				}
 				r := NewRuntimeWithConfig(testCtx, engine.config())
 				defer r.Close(testCtx)
 				_, err := host(r.NewHostModuleBuilder("env").NewFunctionBuilder()).Export("echo").Instantiate(testCtx)

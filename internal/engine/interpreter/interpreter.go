@@ -199,6 +199,8 @@ type callEngine struct {
 	// gcExec is this call's registration with the store, and is nil unless the GC proposal is enabled.
 	gcPause uint32
 	gcExec  *wasm.GCExecution
+	// gcExecSlot is the storage gcExec points at while registered, kept here so a call does not allocate one.
+	gcExecSlot wasm.GCExecution
 }
 
 // ScanGCRoots implements wasm.GCRoots. Every operand and local this call holds lives in one flat []uint64, so
@@ -617,7 +619,7 @@ func (e *engine) CompileModule(_ context.Context, module *wasm.Module, listeners
 		}
 		compiled.source = module
 		compiled.ensureTermination = ensureTermination
-		compiled.gcEnabled = e.enabledFeatures.IsEnabled(api.CoreFeatureGC)
+		compiled.gcEnabled = wasm.CollectorEnabled(e.enabledFeatures)
 		compiled.listener = lsn
 		compiled.index = imported + uint32(i)
 	}
@@ -1170,7 +1172,7 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 	}
 
 	if ce.f.parent.gcEnabled {
-		ce.gcExec = m.RegisterGCExecution(ce, &ce.gcPause)
+		ce.gcExec = m.RegisterGCExecutionInto(&ce.gcExecSlot, ce, &ce.gcPause)
 		defer func() {
 			ce.gcExec.Unregister()
 			ce.gcExec = nil

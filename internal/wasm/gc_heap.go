@@ -31,7 +31,7 @@ import (
 // The index is what keeps this sound. A raw Go pointer parked in a []uint64 is invisible to Go's collector:
 // nothing in a wasm local, a wasm global or a wasm table roots the object it points at, so the guest would be
 // holding a dangling pointer as soon as the last Go reference went away. That is the same reasoning, and the
-// same bug (https://github.com/tetratelabs/wazero/issues/2522), that put exnrefs behind ExceptionTable.
+// same bug (https://github.com/tetratelabs/wazero/issues/2522), that made exnrefs handles on this heap too.
 
 const (
 	// GCRefNull is the reference every `ref.null` in the any hierarchy produces.
@@ -80,6 +80,9 @@ type GCObject struct {
 	Type *FunctionType
 	// TypeID is Type's store-wide identity, which is what ref.test and ref.cast compare against.
 	TypeID FunctionTypeID
+	// Exn is set, and Type nil, when this object is an exception rather than a struct or an array; Fields
+	// is then its params, which is all a collection needs to see. See ExceptionTable.
+	Exn *Exception
 	// Fields holds a struct's fields or an array's elements, flattened into words. Every storage type takes
 	// one word except v128, which takes two -- see FunctionType.FieldSlots for a struct's layout and
 	// ElemSlots for an array's. A packed (i8/i16) field is stored truncated and widened on read; see Get.

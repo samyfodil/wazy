@@ -4,7 +4,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
@@ -24,9 +23,6 @@ func TestCompilationCache_concurrentCompileClose(t *testing.T) {
 		{"interpreter", NewRuntimeConfigInterpreter},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.name == "compiler" && !platform.CompilerSupported() {
-				t.Skip("compiler not supported here, e.g. executable mmap is unavailable")
-			}
 			cache := NewCompilationCache()
 			defer cache.Close(testCtx)
 			bin := []byte{0, 'a', 's', 'm', 1, 0, 0, 0}

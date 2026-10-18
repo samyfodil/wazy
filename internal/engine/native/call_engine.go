@@ -77,6 +77,9 @@ type (
 		// Nothing else about the collector lives here: this struct is allocated per call and sits just under
 		// a Go size class boundary, so every field added to it costs a whole class.
 		gcExec *wasm.GCExecution
+		// gcExecSlot is the storage gcExec points at while registered, allocated by the first call and kept
+		// so later ones do not allocate. A pointer rather than the value: see TestCallEngineFitsItsSizeClass.
+		gcExecSlot *wasm.GCExecution
 		// activeCatchScopes is the stack of currently-open try_table (with
 		// catch clauses) activations, pushed/popped 1:1 by
 		// ExitCodeTryTableEnter/Leave exactly as tryHandlers was before,
@@ -367,7 +370,10 @@ func (c *callEngine) stackCheckLimitPtr(base int) *byte {
 // called once this callEngine's stack is one it owns.
 func (c *callEngine) registerGC() {
 	if c.parent.gcEnabled {
-		c.gcExec = c.parent.module.RegisterGCExecution(c, &c.execCtx.gcPause)
+		if c.gcExecSlot == nil {
+			c.gcExecSlot = new(wasm.GCExecution)
+		}
+		c.gcExec = c.parent.module.RegisterGCExecutionInto(c.gcExecSlot, c, &c.execCtx.gcPause)
 	}
 }
 
@@ -1606,5 +1612,13 @@ func (c *callEngine) ScanGCRoots(visit func(uint64)) {
 	for i := range c.execCtx.savedRegisters {
 		visit(c.execCtx.savedRegisters[i][0])
 		visit(c.execCtx.savedRegisters[i][1])
+	}
+	// The exception last thrown or caught: a handler reads its params and exnref from here rather than from
+	// the stack, so they are roots until it has.
+	visit(uint64(c.execCtx.exceptionRef))
+	if exn := c.pendingException; exn != nil {
+		for _, w := range exn.Params {
+			visit(w)
+		}
 	}
 }

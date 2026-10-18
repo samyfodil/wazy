@@ -164,7 +164,7 @@ var _ wasm.Engine = (*engine)(nil)
 // gcSafepoints reports whether this engine's code polls the collector at loop headers and spills its roots
 // there, and so whether its calls register with the store's collector.
 func (e *engine) gcSafepoints() bool {
-	return e.enabledFeatures.IsEnabled(api.CoreFeatureGC)
+	return wasm.CollectorEnabled(e.enabledFeatures)
 }
 
 // NewEngine returns the implementation of wasm.Engine.
