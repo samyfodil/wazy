@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"testing"
 
+	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
@@ -34,6 +35,9 @@ func TestPageFaultOnWasmStack(t *testing.T) {
 		{"interpreter", NewRuntimeConfigInterpreter},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler not supported here, e.g. executable mmap is unavailable")
+			}
 			for range 4 {
 				r := NewRuntimeWithConfig(testCtx, tc.config())
 				mod, err := r.Instantiate(testCtx, bin)
