@@ -23,6 +23,13 @@ import (
 // * ExportSection is represented as a map for lookup convenience.
 // * Code.GoFunc is contains any go `func`. It may be present when Code.Body is not.
 type Module struct {
+	// FunctionMayThrow is indexed by function index (imports first) and is false for a function that can
+	// never throw a wasm exception, so a caller's try_table need not be ready to catch at its call. It is
+	// set by validation when exception handling is enabled, and nil otherwise. See mayThrowBuilder.
+	FunctionMayThrow []bool
+	// mayThrow collects FunctionMayThrow's inputs while the functions are validated.
+	mayThrow *mayThrowBuilder
+
 	// TypeSection contains the unique FunctionType of functions imported or defined in this module.
 	//
 	// Note: Currently, there is no type ambiguity in the index as WebAssembly 1.0 only defines function type.
@@ -531,17 +538,27 @@ func (m *Module) validateFunctions(enabledFeatures api.CoreFeatures, functions [
 	br := bytes.NewReader(nil)
 	// Also, we reuse the stacks across multiple function validations to reduce allocations.
 	vs := &stacks{}
+	m.FunctionMayThrow = nil
+	if enabledFeatures.IsEnabled(api.CoreFeatureExceptionHandling) {
+		m.mayThrow = &mayThrowBuilder{direct: make([]bool, len(functions)), imports: m.ImportFunctionCount}
+	}
 	for idx, typeIndex := range m.FunctionSection {
 		if typeIndex >= typeCount {
 			return fmt.Errorf("invalid %s: type section index %d out of range", m.funcDesc(SectionIDFunction, Index(idx)), typeIndex)
 		}
 		c := &m.CodeSection[idx]
 		if c.GoFunc != nil {
+			m.mayThrow.throws(Index(idx))
 			continue
 		}
 		if err = m.validateFunction(vs, enabledFeatures, Index(idx), functions, globals, memories, tables, tags, declaredFuncIndexes, br); err != nil {
+			m.mayThrow = nil
 			return fmt.Errorf("invalid %s: %w", m.funcDesc(SectionIDFunction, Index(idx)), err)
 		}
+	}
+	if m.mayThrow != nil {
+		m.FunctionMayThrow = m.mayThrow.solve()
+		m.mayThrow = nil
 	}
 	return nil
 }

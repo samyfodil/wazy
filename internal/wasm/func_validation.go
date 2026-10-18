@@ -637,6 +637,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			// br_table instruction is stack-polymorphic.
 			valueTypeStack.unreachable()
 		} else if op == OpcodeThrow {
+			m.mayThrow.throws(idx)
 			if err := enabledFeatures.RequireEnabled(api.CoreFeatureExceptionHandling); err != nil {
 				return fmt.Errorf("%s invalid as %v", OpcodeThrowName, err)
 			}
@@ -659,6 +660,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			// throw is stack-polymorphic (never returns).
 			valueTypeStack.unreachable()
 		} else if op == OpcodeThrowRef {
+			m.mayThrow.throws(idx)
 			if err := enabledFeatures.RequireEnabled(api.CoreFeatureExceptionHandling); err != nil {
 				return fmt.Errorf("%s invalid as %v", OpcodeThrowRefName, err)
 			}
@@ -782,6 +784,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			if indexOutOfRange(index, len(functions)) {
 				return fmt.Errorf("invalid function index")
 			}
+			m.mayThrow.call(idx, index)
 
 			var opcodeName string
 			if op == OpcodeCall {
@@ -802,6 +805,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				valueTypeStack.unreachable()
 			}
 		} else if op == OpcodeCallIndirect || op == OpcodeTailCallReturnCallIndirect {
+			m.mayThrow.throws(idx)
 			pc++
 			typeIndex, num, err := leb128.LoadUint32(body[pc:])
 			if err != nil {
@@ -857,6 +861,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				valueTypeStack.unreachable()
 			}
 		} else if op == OpcodeCallRef || op == OpcodeReturnCallRef {
+			m.mayThrow.throws(idx)
 			if err := enabledFeatures.RequireEnabled(api.CoreFeatureTypedFunctionReferences); err != nil {
 				return fmt.Errorf("%s invalid as %v", instructionNames[op], err)
 			}

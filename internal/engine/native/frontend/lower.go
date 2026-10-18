@@ -4069,7 +4069,10 @@ func (c *Compiler) lowerCall(fnIndex uint32) {
 		call.AsCall(ssa.FuncRef(funcRefOrPtrValue), sig, args)
 	}
 	builder.InsertInstruction(call)
-	c.emitCatchCheck(call)
+	// A callee that provably cannot throw (wasm.Module.FunctionMayThrow) is not a point a throw resumes at.
+	if mayThrow := c.m.FunctionMayThrow; mayThrow == nil || mayThrow[fnIndex] {
+		c.emitCatchCheck(call)
+	}
 
 	first, rest := call.Returns()
 	if first.Valid() {
