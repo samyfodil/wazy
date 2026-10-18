@@ -389,9 +389,33 @@ type callFrame struct {
 	base int
 }
 
+// lazyModule is shared by the not-yet-lowered functions of one module compiled
+// with api.WithInterpreterLazyLowering. It owns the IR compiler, which is not
+// safe for concurrent use, so mux serialises lowering across goroutines.
+type lazyModule struct {
+	mux      sync.Mutex
+	compiler *compiler
+	engine   *engine
+	// pending counts functions not lowered yet; the compiler is dropped when it
+	// reaches zero so a fully warmed module retains no more than an eager one.
+	pending int
+}
+
+// lazyFunction is the per-function lowering state. It is separate from
+// compiledFunction so the eager path pays one nil pointer, not a sync.Once.
+type lazyFunction struct {
+	module    *lazyModule
+	once      sync.Once
+	err       error
+	codeIndex int
+}
+
 type compiledFunction struct {
 	source *wasm.Module
 	body   []unionOperation
+	// lazy is non-nil only for a function compiled with lazy lowering; its body
+	// is lowered by lower on the first call. Nil on the eager path.
+	lazy *lazyFunction
 	// sideTable holds the variable-length uint64 payloads moved out of
 	// unionOperation (I8): BrTable targets/ranges, V128Shuffle lanes, and
 	// tail-call [dropDepth,label]. An op that needs one stores its index here in
@@ -575,7 +599,7 @@ func (e *engine) HasCompiledModule(module *wasm.Module, _ []api.FunctionListener
 }
 
 // CompileModule implements the same method as documented on wasm.Engine.
-func (e *engine) CompileModule(_ context.Context, module *wasm.Module, listeners []api.FunctionListener, ensureTermination bool) error {
+func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listeners []api.FunctionListener, ensureTermination bool) error {
 	if _, ok := e.getCompiledFunctions(module, true); ok { // cache hit!
 		return nil
 	}
@@ -584,6 +608,10 @@ func (e *engine) CompileModule(_ context.Context, module *wasm.Module, listeners
 	irCompiler, err := newCompiler(e.enabledFeatures, callFrameStackSize, module, ensureTermination)
 	if err != nil {
 		return err
+	}
+	var lazy *lazyModule
+	if api.GetInterpreterLazyLowering(ctx) {
+		lazy = &lazyModule{compiler: irCompiler, engine: e}
 	}
 	imported := module.ImportFunctionCount
 	for i := range module.CodeSection {
@@ -604,6 +632,11 @@ func (e *engine) CompileModule(_ context.Context, module *wasm.Module, listeners
 			case api.GoFunction:
 				compiled.goFn = fn
 			}
+		} else if lazy != nil {
+			// The module was fully validated before reaching the engine, so
+			// deferring lowering defers no validation error.
+			compiled.lazy = &lazyFunction{module: lazy, codeIndex: i}
+			lazy.pending++
 		} else {
 			ir, err := irCompiler.Next()
 			if err != nil {
@@ -623,6 +656,38 @@ func (e *engine) CompileModule(_ context.Context, module *wasm.Module, listeners
 	}
 	e.addCompiledFunctions(module, funcs)
 	return nil
+}
+
+// lower lowers a lazily compiled function body on its first call. It is safe to
+// call from several goroutines at once: once makes one of them lower while the
+// others wait, and the shared compiler is guarded by the module mutex. Lowering
+// cannot fail on a validated module; if it ever does, the error is kept and
+// raised on every call rather than running an empty body.
+//
+// Kept out of line so the caller's check stays a single nil test.
+//
+//go:noinline
+func (c *compiledFunction) lower() {
+	l := c.lazy
+	l.once.Do(func() {
+		m := l.module
+		m.mux.Lock()
+		defer m.mux.Unlock()
+		ir, err := m.compiler.CompileFunction(l.codeIndex)
+		if err == nil {
+			err = m.engine.lowerIR(ir, c)
+		}
+		if err != nil {
+			def := c.source.FunctionDefinition(c.index)
+			l.err = fmt.Errorf("failed to lower func[%s] to interpreterir: %w", def.DebugName(), err)
+		}
+		if m.pending--; m.pending == 0 {
+			m.compiler = nil
+		}
+	})
+	if l.err != nil {
+		panic(l.err)
+	}
 }
 
 // NewModuleEngine implements the same method as documented on wasm.Engine.
@@ -1284,7 +1349,12 @@ func (ce *callEngine) recoverOnCall(ctx context.Context, m *wasm.ModuleInstance,
 func (ce *callEngine) callFunction(ctx context.Context, m *wasm.ModuleInstance, f *function) {
 	if f.parent.hostFn != nil {
 		ce.callGoFuncWithStack(ctx, m, f)
-	} else if lsn := f.parent.listener; lsn != nil {
+		return
+	}
+	if f.parent.lazy != nil {
+		f.parent.lower()
+	}
+	if lsn := f.parent.listener; lsn != nil {
 		ce.callNativeFuncWithListener(ctx, m, f, lsn)
 	} else {
 		ce.callNativeFunc(ctx, m, f)
@@ -5534,6 +5604,10 @@ func (ce *callEngine) resetPc(frame *callFrame, f *function) (body []unionOperat
 	// The compiler is currently allowing proper tail call only across functions
 	// that belong to the same module; thus, we can overwrite the frame in-place.
 	// For details, see internal/engine/RATIONALE.md
+	// A tail call enters the body without going through callFunction.
+	if f.parent.lazy != nil {
+		f.parent.lower()
+	}
 	frame.f = f
 	frame.base = len(ce.stack)
 	frame.pc = 0

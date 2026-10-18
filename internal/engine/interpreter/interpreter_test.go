@@ -405,6 +405,40 @@ func TestInterpreter_Compile(t *testing.T) {
 		_, ok := e.compiledFunctions[errModule.ID]
 		require.False(t, ok)
 	})
+	t.Run("lazy", func(t *testing.T) {
+		e := NewEngine(testCtx, api.CoreFeaturesV1, nil).(*engine)
+		m := &wasm.Module{
+			TypeSection:     []wasm.FunctionType{{}},
+			FunctionSection: []wasm.Index{0, 0, 0},
+			CodeSection: []wasm.Code{
+				{Body: []byte{wasm.OpcodeEnd}},
+				{Body: []byte{wasm.OpcodeNop, wasm.OpcodeEnd}},
+				// Invalid. The runtime validates before the engine sees a module;
+				// skipping that here shows what the engine does if it is bypassed.
+				{Body: []byte{wasm.OpcodeCall}},
+			},
+		}
+		require.NoError(t, e.CompileModule(api.WithInterpreterLazyLowering(testCtx), m, nil, false))
+		funcs := e.compiledFunctions[m.ID].funcs
+		for i := range funcs {
+			require.Nil(t, funcs[i].body)
+		}
+		lazy := funcs[0].lazy.module
+		require.Equal(t, 3, lazy.pending)
+
+		funcs[0].lower()
+		funcs[0].lower() // lowered once
+		require.NotEqual(t, 0, len(funcs[0].body))
+		require.Nil(t, funcs[1].body)
+
+		err := require.CapturePanic(funcs[2].lower)
+		require.Contains(t, err.Error(), "failed to lower func[.$2] to interpreterir")
+		// The error sticks instead of running an empty body.
+		require.Equal(t, err, require.CapturePanic(funcs[2].lower))
+
+		funcs[1].lower()
+		require.Nil(t, lazy.compiler) // released once every function is lowered
+	})
 	t.Run("ok", func(t *testing.T) {
 		e := NewEngine(testCtx, api.CoreFeaturesV1, nil).(*engine)
 
