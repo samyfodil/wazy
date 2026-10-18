@@ -120,7 +120,11 @@ func (s *Store) RegisterGCExecution(roots GCRoots, pause *uint32) *GCExecution {
 func (s *Store) RegisterGCExecutionInto(e *GCExecution, roots GCRoots, pause *uint32) *GCExecution {
 	g := &s.gc
 	e.s, e.roots, e.pause = s, roots, pause
-	e.parked.Store(false)
+	// Only a reused e can still be marked parked, and it must not be once take publishes it. An atomic store
+	// is a locked instruction on amd64, so skip it in the common case where there is nothing to clear.
+	if e.parked.Load() {
+		e.parked.Store(false)
+	}
 	e.cell = g.take(e)
 	// The cell became visible to a collection the moment take filled it, so a collection already scanning
 	// may have this call in hand before it has run an instruction: it must stand still rather than start.
