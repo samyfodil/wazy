@@ -275,13 +275,10 @@ jobs:
           run: |
             ls _tests
             export GOTRACEBACK=crash
-            for i in 1 2 3; do ./_tests/wazy.test -test.short -test.run '.' > /tmp/o 2>&1 && echo "== FULL ok" || { echo "== FULL CRASH"; grep -m3 -E "^=== RUN|fatal|SIG" /tmp/o | tail -3; grep -B1 -m1 "newstack\|fatal error" /tmp/o; tail -n 200 /tmp/o | grep -m1 -B2 "newstack"; }; done
-            for i in 1 2 3; do ./_tests/wazy.test -test.short -test.run 'TestModuleComposition|TestHostI32' > /tmp/o 2>&1 && echo "== COMP ok" || { echo "== COMP CRASH"; grep -m3 -E "^=== RUN|fatal|SIG" /tmp/o | tail -3; grep -B1 -m1 "newstack\|fatal error" /tmp/o; tail -n 200 /tmp/o | grep -m1 -B2 "newstack"; }; done
-            for i in 1 2 3; do ./_tests/wazy.test -test.short -test.run 'TestCloseOnContextDoneCompilesRealModules|TestHostI32' > /tmp/o 2>&1 && echo "== CLOSE ok" || { echo "== CLOSE CRASH"; grep -m3 -E "^=== RUN|fatal|SIG" /tmp/o | tail -3; grep -B1 -m1 "newstack\|fatal error" /tmp/o; tail -n 200 /tmp/o | grep -m1 -B2 "newstack"; }; done
-            for i in 1 2 3; do ./_tests/wazy.test -test.short -test.run 'TestNewHostModuleBuilder|TestHostI32' > /tmp/o 2>&1 && echo "== BUILD ok" || { echo "== BUILD CRASH"; grep -m3 -E "^=== RUN|fatal|SIG" /tmp/o | tail -3; grep -B1 -m1 "newstack\|fatal error" /tmp/o; tail -n 200 /tmp/o | grep -m1 -B2 "newstack"; }; done
-            for i in 1 2 3; do ./_tests/wazy.test -test.short -test.run 'TestCompilationCache|TestCache_|TestHostI32' > /tmp/o 2>&1 && echo "== CACHE ok" || { echo "== CACHE CRASH"; grep -m3 -E "^=== RUN|fatal|SIG" /tmp/o | tail -3; grep -B1 -m1 "newstack\|fatal error" /tmp/o; tail -n 200 /tmp/o | grep -m1 -B2 "newstack"; }; done
-            for i in 1 2 3; do ./_tests/wazy.test -test.short -test.run 'Config|compiledModule|TestMemoryCapacity|TestHostI32' > /tmp/o 2>&1 && echo "== CFG ok" || { echo "== CFG CRASH"; grep -m3 -E "^=== RUN|fatal|SIG" /tmp/o | tail -3; grep -B1 -m1 "newstack\|fatal error" /tmp/o; tail -n 200 /tmp/o | grep -m1 -B2 "newstack"; }; done
-            for i in 1 2 3; do ./_tests/wazy.test -test.short -test.run 'TestModuleComposition|TestCloseOnContextDoneCompilesRealModules|TestNewHostModuleBuilder|TestCompilationCache|TestCache_|Config|compiledModule|TestMemoryCapacity|TestHostI32' > /tmp/o 2>&1 && echo "== UPTO ok" || { echo "== UPTO CRASH"; grep -m3 -E "^=== RUN|fatal|SIG" /tmp/o | tail -3; grep -B1 -m1 "newstack\|fatal error" /tmp/o; tail -n 200 /tmp/o | grep -m1 -B2 "newstack"; }; done
+            echo "== A: HostI32 alone x20"; ./_tests/wazy.test -test.short -test.run 'TestHostI32' -test.count=20 2>&1 | tail -40 || true
+            echo "== B: concurrent then HostI32 x5"; ./_tests/wazy.test -test.short -test.run 'TestCompilationCache_concurrent|TestHostI32' -test.count=5 2>&1 | grep -v "^\s*/" | tail -60 || true
+            echo "== C: typed host only x20"; ./_tests/wazy.test -test.short -test.run 'TestHostI32Result_negative/compiler/typed' -test.count=20 2>&1 | tail -40 || true
+            echo "== D: HostFunc typed suite"; ./_tests/wazy.test -test.short -test.run 'TestHost' -test.count=3 2>&1 | tail -20 || true
             exit 1
 
   test_vm:
