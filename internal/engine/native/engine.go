@@ -1015,7 +1015,6 @@ func checkAddrInBytes(addr uintptr, b []byte) bool {
 // NewModuleEngine implements wasm.Engine.
 func (e *engine) NewModuleEngine(m *wasm.Module, mi *wasm.ModuleInstance) (wasm.ModuleEngine, error) {
 	me := &moduleEngine{gcEnabled: e.gcSafepoints()}
-	me.gcRegisterOnEntry = me.gcEnabled && (e.enabledFeatures.IsEnabled(api.CoreFeatureGC) || !m.ExnRefClosed)
 
 	// Note: imported functions are resolved in moduleEngine.ResolveImportedFunction.
 	me.importedFunctions = make([]importedFunction, m.ImportFunctionCount)

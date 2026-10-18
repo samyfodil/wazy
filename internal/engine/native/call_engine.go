@@ -371,15 +371,7 @@ func (c *callEngine) stackCheckLimitPtr(base int) *byte {
 // inline into callWithStack, where a runtime without the collector pays only the flag check; the rest is in
 // registerGCSlow.
 func (c *callEngine) registerGC() {
-	if c.parent.gcRegisterOnEntry {
-		c.registerGCSlow()
-	}
-}
-
-// ensureGCRegistered registers a call that registerGC left out, before it allocates its first exnref. Until
-// then its frames hold no reference the collector hands out, so it had nothing to show one.
-func (c *callEngine) ensureGCRegistered() {
-	if c.parent.gcEnabled && !c.gcExec.Registered() {
+	if c.parent.gcEnabled {
 		c.registerGCSlow()
 	}
 }
@@ -1000,7 +992,6 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			// a pointer: guest code can hold an exnref for as long as it likes -- in a local, or an exnref-typed
 			// global that outlives this call -- and the collector cannot see a pointer parked there. See
 			// wasm.ExceptionTable.
-			c.ensureGCRegistered()
 			s[0] = mod.ExceptionTable().Ref(exn)
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
 			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr,
@@ -1218,7 +1209,6 @@ func (c *callEngine) handleThrow(exn *wasm.Exception) bool {
 				}
 				// catch_ref/catch_all_ref read this as the exnref they push. A handle, for the same reason the
 				// throw path returns one: guest code may keep it past this call. See wasm.ExceptionTable.
-				c.ensureGCRegistered()
 				c.execCtx.exceptionRef = uintptr(mod.ExceptionTable().Ref(exn))
 				// The matched clause index, read by the compiled code at
 				// resumePC exactly where the non-throwing path reads -1.

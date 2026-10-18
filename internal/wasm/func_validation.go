@@ -720,7 +720,6 @@ func (m *Module) validateFunctionWithMaxStackValues(
 					var catchTypes []ValueType
 					catchTypes = append(catchTypes, tagType.Params...)
 					if catchKind == CatchKindCatchRef {
-						sts.exnRefOpen = true
 						catchTypes = append(catchTypes, ValueTypeExnref.AsNonNullable())
 					}
 					if len(catchTypes) != len(expectedTypes) {
@@ -750,7 +749,6 @@ func (m *Module) validateFunctionWithMaxStackValues(
 					}
 					var catchTypes []ValueType
 					if catchKind == CatchKindCatchAllRef {
-						sts.exnRefOpen = true
 						catchTypes = append(catchTypes, ValueTypeExnref.AsNonNullable())
 					}
 					if len(catchTypes) != len(expectedTypes) {
@@ -804,7 +802,6 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				valueTypeStack.unreachable()
 			}
 		} else if op == OpcodeCallIndirect || op == OpcodeTailCallReturnCallIndirect {
-			sts.exnRefOpen = true
 			pc++
 			typeIndex, num, err := leb128.LoadUint32(body[pc:])
 			if err != nil {
@@ -860,7 +857,6 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				valueTypeStack.unreachable()
 			}
 		} else if op == OpcodeCallRef || op == OpcodeReturnCallRef {
-			sts.exnRefOpen = true
 			if err := enabledFeatures.RequireEnabled(api.CoreFeatureTypedFunctionReferences); err != nil {
 				return fmt.Errorf("%s invalid as %v", instructionNames[op], err)
 			}
@@ -2635,8 +2631,6 @@ type stacks struct {
 	ls []uint32
 	// initLocals tracks which non-nullable ref locals have been initialized.
 	initLocals map[uint32]struct{}
-	// exnRefOpen is set by an instruction that rules out Module.ExnRefClosed.
-	exnRefOpen bool
 }
 
 func (sts *stacks) reset(functionType *FunctionType) {

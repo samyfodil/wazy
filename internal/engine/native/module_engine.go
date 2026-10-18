@@ -37,11 +37,6 @@ type (
 		// gcEnabled caches whether this runtime enables the GC proposal, so the per-call check in
 		// callWithStack is one load off an already-hot pointer rather than three dependent ones.
 		gcEnabled bool
-		// gcRegisterOnEntry is whether a call registers with the collector as it starts. It is gcEnabled,
-		// except for an instance whose frames can only ever hold exnrefs they allocated themselves (see
-		// wasm.Module.ExnRefClosed) under exception handling without the GC proposal: a call into that
-		// registers just before its first allocation instead (callEngine.ensureGCRegistered).
-		gcRegisterOnEntry bool
 		// gcRootsReserve is callEngine.gcRootsReserve's answer, precomputed. It is read twice on every
 		// call -- to size the stack and to place its limit -- and deriving it there meant reaching
 		// through to the compiled module for maxGCRoots on a path that otherwise never touches it.
@@ -338,11 +333,6 @@ func (m *moduleEngine) ResolveImportedFunction(index, descFunc, indexInImportedM
 
 	// Write importedFunction so that it can be used by NewFunction.
 	m.importedFunctions[index] = importedFunction{me: importedME, indexInModule: indexInImportedModule}
-	// Another module's wasm code runs in this instance's frames, and can hold exnrefs it did not allocate. A
-	// host function cannot: nothing hands one to Go.
-	if m.gcEnabled && !importedME.module.Source.IsHostModule {
-		m.gcRegisterOnEntry = true
-	}
 }
 
 // ResolveImportedMemory implements wasm.ModuleEngine.
