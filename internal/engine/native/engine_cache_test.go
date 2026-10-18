@@ -287,6 +287,7 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0), // offset.
 				// Executable.
 				u64.LeBytes(5),                     // size.
+				codePadding(1),                     // aligns the code.
 				[]byte{1, 2, 3, 4, 5},              // machine code.
 				crcf([]byte{1, 2, 3, 4, 5}),        // machine code.
 				[]byte{0},                          // no source map.
