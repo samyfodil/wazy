@@ -35,13 +35,17 @@ type compiledFunctionWithCount struct {
 
 // engine is an interpreter implementation of wasm.Engine
 type engine struct {
+	// requireCacheHit is set for a read-only compilation cache, which this
+	// engine can never hit, see CompileModule.
+	requireCacheHit   bool
 	enabledFeatures   api.CoreFeatures
 	compiledFunctions map[wasm.ModuleID]*compiledFunctionWithCount // guarded by mutex.
 	mux               sync.Mutex
 }
 
-func NewEngine(_ context.Context, enabledFeatures api.CoreFeatures, _ filecache.Cache) wasm.Engine {
+func NewEngine(_ context.Context, enabledFeatures api.CoreFeatures, fc filecache.Cache) wasm.Engine {
 	return &engine{
+		requireCacheHit:   filecache.ReadOnly(fc),
 		enabledFeatures:   enabledFeatures,
 		compiledFunctions: map[wasm.ModuleID]*compiledFunctionWithCount{},
 	}
@@ -600,6 +604,11 @@ func (e *engine) HasCompiledModule(module *wasm.Module, _ []api.FunctionListener
 
 // CompileModule implements the same method as documented on wasm.Engine.
 func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listeners []api.FunctionListener, ensureTermination bool) error {
+	// The interpreter has no persistent form to load, so a cache that only
+	// serves hits can't serve one.
+	if e.requireCacheHit && !module.IsHostModule {
+		return filecache.ErrUnsupported
+	}
 	if _, ok := e.getCompiledFunctions(module, true); ok { // cache hit!
 		return nil
 	}
