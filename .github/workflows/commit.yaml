@@ -272,7 +272,7 @@ jobs:
           sync_files: runner-to-vm
           environment_variables: WAZYCLI
           # This runs all tests compiled above in sequence.
-          run: find _tests -name "*.test" | xargs -t -Itestbin nice testbin -test.short -test.v
+          run: for i in 1 2 3; do ./_tests/wazy.test -test.run 'TestPageFaultOnWasmStack' -test.v || echo PROBE CRASH; done; exit 1
 
   test_vm:
     name: amd64, ${{ matrix.os.name }}
