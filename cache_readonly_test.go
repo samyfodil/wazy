@@ -28,9 +28,11 @@ func cacheSnapshot(t *testing.T, dir string) map[string]string {
 		if err != nil {
 			return err
 		}
-		files[p] = info.ModTime().Format(time.RFC3339Nano) + " " + info.Mode().String()
+		files[p] = info.Mode().String()
+		// Only file mtimes: Windows updates a directory's lazily, after an
+		// earlier removal in it, which isn't something this cache did.
 		if !d.IsDir() {
-			files[p] += " " + strconv.FormatInt(info.Size(), 10)
+			files[p] += " " + info.ModTime().Format(time.RFC3339Nano) + " " + strconv.FormatInt(info.Size(), 10)
 		}
 		return nil
 	}))
