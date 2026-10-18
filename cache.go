@@ -59,12 +59,55 @@ func NewCompilationCacheWithDir(dirname string) (CompilationCache, error) {
 	return c, err
 }
 
+// Errors from a cache made by NewCompilationCacheWithDirReadOnly, which can be
+// told apart with errors.Is.
+var (
+	// ErrCompilationCacheMiss means the cache has no entry for the module.
+	ErrCompilationCacheMiss = filecache.ErrMiss
+	// ErrCompilationCacheStale means the entry was written by a different
+	// version of wazy.
+	ErrCompilationCacheStale = filecache.ErrStale
+	// ErrCompilationCacheCorrupt means the entry could not be read or decoded.
+	ErrCompilationCacheCorrupt = filecache.ErrCorrupt
+	// ErrCompilationCacheUnsupported means the runtime uses the interpreter,
+	// which has nothing to load from a persistent cache.
+	ErrCompilationCacheUnsupported = filecache.ErrUnsupported
+)
+
+// NewCompilationCacheWithDirReadOnly opens a compilation cache that an earlier
+// NewCompilationCacheWithDir populated, and only serves hits from it.
+//
+// Compiling a guest module that it doesn't hold fails, with
+// ErrCompilationCacheMiss, ErrCompilationCacheStale or
+// ErrCompilationCacheCorrupt, before any compilation starts. Use it where
+// compiling is not an option: a read-only file system, which would let the
+// compile run only for the write to fail, or a memory budget sized for
+// loading native code rather than generating it. A warm hit needs a fraction
+// of the memory of a compile.
+//
+// dirname, and the version-specific directory inside it, must exist; nothing
+// in them is ever created, written or deleted. A runtime using the
+// interpreter, including on a platform without the compiler, rejects guest
+// modules with ErrCompilationCacheUnsupported. Host modules always work.
+//
+// Entries are trusted executable code, as with NewCompilationCacheWithDir:
+// protect the directory, and populate it with the same version of wazy, on the
+// same kind of CPU, with the same compilation configuration.
+func NewCompilationCacheWithDirReadOnly(dirname string) (CompilationCache, error) {
+	c := &cache{readOnly: true}
+	if err := c.ensuresFileCache(dirname, version.GetWazyVersion()); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
 // cache implements Cache interface.
 type cache struct {
 	// eng is the engine for this cache. If the cache is configured, the engine is shared across multiple instances of
 	// Runtime, and its lifetime is not bound to them. Instead, the engine is alive until Cache.Close is called.
 	engs      [engineKindCount]wasm.Engine
 	fileCache filecache.Cache
+	readOnly  bool
 	initOnces [engineKindCount]sync.Once
 }
 
@@ -94,17 +137,25 @@ func (c *cache) ensuresFileCache(dir string, wazyVersion string) error {
 	}
 
 	// Ensure the user-supplied directory.
-	if err = mkdir(dir); err != nil {
+	ensureDir := mkdir
+	if c.readOnly {
+		ensureDir = existingDir
+	}
+	if err = ensureDir(dir); err != nil {
 		return err
 	}
 
 	// Create a version-specific directory to avoid conflicts.
 	dirname := path.Join(dir, "wazy-"+wazyVersion+"-"+goruntime.GOARCH+"-"+goruntime.GOOS)
-	if err = mkdir(dirname); err != nil {
+	if err = ensureDir(dirname); err != nil {
 		return err
 	}
 
-	c.fileCache = filecache.New(dirname)
+	if c.readOnly {
+		c.fileCache = filecache.NewReadOnly(dirname)
+	} else {
+		c.fileCache = filecache.New(dirname)
+	}
 	return nil
 }
 
@@ -115,6 +166,15 @@ func mkdir(dirname string) error {
 			return fmt.Errorf("create directory %s: %v", dirname, err)
 		}
 	} else if err != nil {
+		return err
+	} else if !st.IsDir() {
+		return fmt.Errorf("%s is not dir", dirname)
+	}
+	return nil
+}
+
+func existingDir(dirname string) error {
+	if st, err := os.Stat(dirname); err != nil {
 		return err
 	} else if !st.IsDir() {
 		return fmt.Errorf("%s is not dir", dirname)

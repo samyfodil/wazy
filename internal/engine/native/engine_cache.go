@@ -142,7 +142,7 @@ func (e *engine) getCompiledModuleFromMemory(module *wasm.Module, increaseRefCou
 }
 
 func (e *engine) addCompiledModuleToCache(module *wasm.Module, cm *compiledModule) (err error) {
-	if e.fileCache == nil || module.IsHostModule {
+	if e.fileCache == nil || module.IsHostModule || filecache.ReadOnly(e.fileCache) {
 		return
 	}
 	err = e.fileCache.Add(fileCacheKey(module, e.gcSafepoints()), serializeCompiledModule(e.wazyVersion, cm))
@@ -167,9 +167,15 @@ func (e *engine) getCompiledModuleFromCache(module *wasm.Module) (cm *compiledMo
 	// Note: cached.Close is ensured to be called in deserializeCodes.
 	cm, staleCache, err = deserializeCompiledModule(e.wazyVersion, cached)
 	if err != nil {
+		if filecache.ReadOnly(e.fileCache) {
+			err = fmt.Errorf("%w: %w", filecache.ErrCorrupt, err)
+		}
 		hit = false
 		return
 	} else if staleCache {
+		if filecache.ReadOnly(e.fileCache) {
+			return nil, false, filecache.ErrStale
+		}
 		return nil, false, e.fileCache.Delete(fileCacheKey(module, e.gcSafepoints()))
 	}
 	return
