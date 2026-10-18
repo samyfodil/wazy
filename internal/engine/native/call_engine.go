@@ -72,14 +72,14 @@ type (
 		execCtxPtr        uintptr
 		numberOfResults   int
 		stackIteratorImpl stackIterator
-		// gcExec is this call's registration with the store's collector, nil unless the GC proposal is on.
+		// gcExec is this call's registration with the store's collector, nil unless the collector is on (see
+		// wasm.CollectorEnabled). The first call allocates it and later ones re-register the same one, so a
+		// call does not allocate.
 		//
 		// Nothing else about the collector lives here: this struct is allocated per call and sits just under
-		// a Go size class boundary, so every field added to it costs a whole class.
+		// a Go size class boundary, so every field added to it costs a whole class, and a pointer field also
+		// lengthens the prefix the allocator and the GC have to walk on every fresh callEngine.
 		gcExec *wasm.GCExecution
-		// gcExecSlot is the storage gcExec points at while registered, allocated by the first call and kept
-		// so later ones do not allocate. A pointer rather than the value: see TestCallEngineFitsItsSizeClass.
-		gcExecSlot *wasm.GCExecution
 		// activeCatchScopes is the stack of currently-open try_table (with
 		// catch clauses) activations, pushed/popped 1:1 by
 		// ExitCodeTryTableEnter/Leave exactly as tryHandlers was before,
@@ -370,18 +370,16 @@ func (c *callEngine) stackCheckLimitPtr(base int) *byte {
 // called once this callEngine's stack is one it owns.
 func (c *callEngine) registerGC() {
 	if c.parent.gcEnabled {
-		if c.gcExecSlot == nil {
-			c.gcExecSlot = new(wasm.GCExecution)
+		if c.gcExec == nil {
+			c.gcExec = new(wasm.GCExecution)
 		}
-		c.gcExec = c.parent.module.RegisterGCExecutionInto(c.gcExecSlot, c, &c.execCtx.gcPause)
+		c.parent.module.RegisterGCExecutionInto(c.gcExec, c, &c.execCtx.gcPause)
 	}
 }
 
 func (c *callEngine) unregisterGC() {
-	if c.gcExec != nil {
-		c.gcExec.Unregister()
-		c.gcExec = nil
-	}
+	// Unregister is a no-op on an execution that is not registered, so the kept one needs no flag.
+	c.gcExec.Unregister()
 }
 
 // gcRootsReserve is how many bytes at the bottom of the wasm stack are set aside for the values a safepoint
