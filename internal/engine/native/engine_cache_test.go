@@ -53,6 +53,8 @@ func TestSerializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0),                     // func[0] frame size.
 				[]byte{entryPreambleFormatVersion}, // entry preamble format version.
 				u32.LeBytes(0),                     // no entry preambles.
+				[]byte{gcRootsFormatVersion},       // gc roots format version.
+				u32.LeBytes(0),                     // max gc roots.
 			),
 		},
 		{
@@ -81,6 +83,8 @@ func TestSerializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0),                     // func[0] frame size.
 				[]byte{entryPreambleFormatVersion}, // entry preamble format version.
 				u32.LeBytes(0),                     // no entry preambles.
+				[]byte{gcRootsFormatVersion},       // gc roots format version.
+				u32.LeBytes(0),                     // max gc roots.
 			),
 		},
 		{
@@ -115,6 +119,8 @@ func TestSerializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0),                       // func[1] frame size.
 				[]byte{entryPreambleFormatVersion},   // entry preamble format version.
 				u32.LeBytes(0),                       // no entry preambles.
+				[]byte{gcRootsFormatVersion},         // gc roots format version.
+				u32.LeBytes(0),                       // max gc roots.
 			),
 		},
 	}
@@ -202,12 +208,15 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0),                     // func[0] frame size.
 				[]byte{entryPreambleFormatVersion}, // entry preamble format version.
 				u32.LeBytes(0),                     // no entry preambles.
+				[]byte{gcRootsFormatVersion},       // gc roots format version.
+				u32.LeBytes(3),                     // max gc roots.
 			),
 			expCompiledModule: &compiledModule{
 				executables:        &executables{executable: []byte{1, 2, 3, 4, 5}},
 				functionOffsets:    []int{0},
 				ehTables:           [][]nativeapi.EhEntry{nil},
 				functionFrameSizes: []int64{0},
+				maxGCRoots:         3,
 			},
 			expStaleCache: false,
 			expErr:        "",
@@ -239,6 +248,8 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0),                     // func[1] frame size.
 				[]byte{entryPreambleFormatVersion}, // entry preamble format version.
 				u32.LeBytes(0),                     // no entry preambles.
+				[]byte{gcRootsFormatVersion},       // gc roots format version.
+				u32.LeBytes(0),                     // max gc roots.
 			),
 			importedFunctionCount: 1,
 			expCompiledModule: &compiledModule{
@@ -249,6 +260,33 @@ func TestDeserializeCompiledModule(t *testing.T) {
 			},
 			expStaleCache: false,
 			expErr:        "",
+		},
+		{
+			// An entry written before maxGCRoots was cached: loading it would size no root-spill region for
+			// code whose safepoints spill into one, so it must be recompiled.
+			name: "old cache without gc roots (stale)",
+			in: concat(
+				magic,
+				[]byte{byte(len(testVersion))},
+				[]byte(testVersion),
+				u32.LeBytes(1), // number of functions.
+				u64.LeBytes(0), // offset.
+				// Executable.
+				u64.LeBytes(5),                     // size.
+				[]byte{1, 2, 3, 4, 5},              // machine code.
+				crcf([]byte{1, 2, 3, 4, 5}),        // machine code.
+				[]byte{0},                          // no source map.
+				[]byte{tryTableInfoFormatVersion},  // try-table info format version.
+				u32.LeBytes(0),                     // empty catch clause table.
+				[]byte{ehTableFormatVersion},       // eh table format version.
+				u32.LeBytes(1),                     // number of functions (eh tables).
+				u32.LeBytes(0),                     // func[0]: 0 eh entries.
+				u32.LeBytes(1),                     // number of function frame sizes.
+				u64.LeBytes(0),                     // func[0] frame size.
+				[]byte{entryPreambleFormatVersion}, // entry preamble format version.
+				u32.LeBytes(0),                     // no entry preambles.
+			),
+			expStaleCache: true,
 		},
 		{
 			name: "old cache without catch clause table (stale)",
@@ -475,7 +513,7 @@ func Test_fileCacheKey(t *testing.T) {
 	m := &wasm.Module{}
 	s.Sum(m.ID[:0])
 	original := m.ID
-	result := fileCacheKey(m)
+	result := fileCacheKey(m, false)
 	require.Equal(t, original, m.ID)
 	require.NotEqual(t, original, result)
 }
@@ -503,13 +541,25 @@ func Test_fileCacheKey_cpuFeatures(t *testing.T) {
 		platform.CpuFeatureAmd64ABM,
 	} {
 		platform.CpuFeatures = saved &^ flag
-		without := fileCacheKey(m)
+		without := fileCacheKey(m, false)
 		platform.CpuFeatures = saved | flag
-		with := fileCacheKey(m)
+		with := fileCacheKey(m, false)
 		require.NotEqual(t, without, with, "cache key does not depend on CPU feature %#x", uint64(flag))
 
 		// And it is stable: the same flags always give the same key, otherwise
 		// the cache would simply never hit and the check above would be vacuous.
-		require.Equal(t, with, fileCacheKey(m))
+		require.Equal(t, with, fileCacheKey(m, false))
 	}
+}
+
+// Test_fileCacheKey_gcSafepoints: code compiled with the collector's loop-header safepoints and code compiled
+// without them must not share an entry. Without safepoints a loop never parks, so a collection on a runtime
+// that loaded such code would wait on it forever.
+func Test_fileCacheKey_gcSafepoints(t *testing.T) {
+	m := &wasm.Module{}
+	s := sha256.New()
+	s.Write([]byte("hello world"))
+	s.Sum(m.ID[:0])
+	require.NotEqual(t, fileCacheKey(m, false), fileCacheKey(m, true))
+	require.Equal(t, fileCacheKey(m, true), fileCacheKey(m, true))
 }

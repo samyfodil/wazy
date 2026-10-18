@@ -29,6 +29,29 @@ func TestCollector(t *testing.T) {
 		}
 		runCollector(t, wazy.NewRuntimeConfigCompiler().WithCoreFeatures(v128GCFeatures))
 	})
+	// A module loaded from the file cache must reserve the same root-spill region at the bottom of its stack
+	// as one compiled fresh, or its safepoints spill into memory the call engine never set aside.
+	t.Run("compiler from file cache", func(t *testing.T) {
+		if !platform.CompilerSupported() {
+			t.Skip()
+		}
+		ctx := context.Background()
+		dir := t.TempDir()
+		config := func() wazy.RuntimeConfig {
+			// A cache object per runtime, so the second one cannot be served from the first one's memory.
+			cache, err := wazy.NewCompilationCacheWithDir(dir)
+			require.NoError(t, err)
+			t.Cleanup(func() { cache.Close(ctx) })
+			return wazy.NewRuntimeConfigCompiler().WithCoreFeatures(v128GCFeatures).WithCompilationCache(cache)
+		}
+
+		// Fill the file cache from one runtime, then run the module out of it in another.
+		warm := wazy.NewRuntimeWithConfig(ctx, config())
+		_, err := warm.CompileModule(ctx, gcLoopWasm)
+		require.NoError(t, err)
+		require.NoError(t, warm.Close(ctx))
+		runCollector(t, config())
+	})
 }
 
 func runCollector(t *testing.T, config wazy.RuntimeConfig) {

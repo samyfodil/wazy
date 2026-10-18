@@ -24,7 +24,11 @@ var crc = crc32.MakeTable(crc32.Castagnoli)
 // fileCacheKey returns a key for the file cache.
 // In order to avoid collisions with the existing compiler, we do not use m.ID directly,
 // but instead we rehash it with magic.
-func fileCacheKey(m *wasm.Module) (ret filecache.Key) {
+//
+// gcSafepoints says whether the code polls the collector at its loop headers and spills roots there; see
+// frontend.Compiler.SetGCEnabled. That changes the code but not the module, so it is keyed here: a runtime
+// that collects must never run code compiled for one that does not, whose loops would never park.
+func fileCacheKey(m *wasm.Module, gcSafepoints bool) (ret filecache.Key) {
 	s := sha256.New()
 	s.Write(m.ID[:])
 	s.Write(magic)
@@ -45,6 +49,9 @@ func fileCacheKey(m *wasm.Module) (ret filecache.Key) {
 	// Reuse the `ret` buffer to write the first 8 bytes of the CPU features so that we can avoid the allocation.
 	binary.LittleEndian.PutUint64(ret[:8], cpu)
 	s.Write(ret[:8])
+	if gcSafepoints {
+		s.Write([]byte{1})
+	}
 	// Finally, write the hash to the ret buffer.
 	s.Sum(ret[:0])
 	return
@@ -137,7 +144,7 @@ func (e *engine) addCompiledModuleToCache(module *wasm.Module, cm *compiledModul
 	if e.fileCache == nil || module.IsHostModule {
 		return
 	}
-	err = e.fileCache.Add(fileCacheKey(module), serializeCompiledModule(e.wazyVersion, cm))
+	err = e.fileCache.Add(fileCacheKey(module, e.gcSafepoints()), serializeCompiledModule(e.wazyVersion, cm))
 	return
 }
 
@@ -148,7 +155,7 @@ func (e *engine) getCompiledModuleFromCache(module *wasm.Module) (cm *compiledMo
 
 	// Check if the entries exist in the external cache.
 	var cached io.ReadCloser
-	cached, hit, err = e.fileCache.Get(fileCacheKey(module))
+	cached, hit, err = e.fileCache.Get(fileCacheKey(module, e.gcSafepoints()))
 	if !hit || err != nil {
 		return
 	}
@@ -162,7 +169,7 @@ func (e *engine) getCompiledModuleFromCache(module *wasm.Module) (cm *compiledMo
 		hit = false
 		return
 	} else if staleCache {
-		return nil, false, e.fileCache.Delete(fileCacheKey(module))
+		return nil, false, e.fileCache.Delete(fileCacheKey(module, e.gcSafepoints()))
 	}
 	return
 }
@@ -314,6 +321,13 @@ func serializeCompiledModule(wazyVersion string, cm *compiledModule) io.Reader {
 		tail.Write(u32.LeBytes(crc32.Checksum(cm.entryPreambles, crc)))
 	}
 
+	// GC root spill size: maxGCRoots is baked into the safepoints of the code above as a compile-time
+	// constant, and the call engine sizes the spill region at the bottom of the stack from it. A cache hit
+	// that lost it reserved no region, so every safepoint spilled below the stack buffer and the collector
+	// never read the spilled roots. Layout: gcRootsFormatVersion (1 byte), maxGCRoots (4 bytes).
+	tail.WriteByte(gcRootsFormatVersion)
+	tail.Write(u32.LeBytes(uint32(cm.maxGCRoots)))
+
 	// *bytes.Buffer already implements io.Reader; MultiReader drains each once,
 	// which is exactly the single-pass consumption fileCache.Add performs. Only
 	// the executable needs a wrapping reader (it's a raw []byte). This avoids
@@ -344,6 +358,10 @@ const tryTableInfoFormatVersion = 1
 // was removed: without the bump an older entry's interval version byte would be
 // read as this one's and its scalar misparsed as preamble data.
 const entryPreambleFormatVersion = 2
+
+// gcRootsFormatVersion guards the trailing GC-roots section (cm.maxGCRoots). An entry written before it existed
+// hits EOF there and is treated as stale.
+const gcRootsFormatVersion = 1
 
 func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *compiledModule, staleCache bool, err error) {
 	defer reader.Close()
@@ -649,6 +667,13 @@ func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *co
 		}
 	}
 
+	if _, err = io.ReadFull(bufReader, eightBytes[:1]); err != nil || eightBytes[0] != gcRootsFormatVersion {
+		return nil, true, nil
+	}
+	if _, err = io.ReadFull(bufReader, eightBytes[:4]); err != nil {
+		return nil, true, nil
+	}
+	cm.maxGCRoots = int(binary.LittleEndian.Uint32(eightBytes[:4]))
 	return
 }
 

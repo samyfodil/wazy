@@ -161,6 +161,12 @@ type sourceMap struct {
 
 var _ wasm.Engine = (*engine)(nil)
 
+// gcSafepoints reports whether this engine's code polls the collector at loop headers and spills its roots
+// there, and so whether its calls register with the store's collector.
+func (e *engine) gcSafepoints() bool {
+	return e.enabledFeatures.IsEnabled(api.CoreFeatureGC)
+}
+
 // NewEngine returns the implementation of wasm.Engine.
 func NewEngine(ctx context.Context, enabledFeatures api.CoreFeatures, fc filecache.Cache) wasm.Engine {
 	e := &engine{
@@ -351,7 +357,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 	if workers := api.GetCompilationWorkers(ctx); workers <= 1 {
 		// Compile with a single goroutine.
 		fe := frontend.NewFrontendCompiler(module, ssaBuilder, &cm.offsets, ensureTermination, withListener, needSourceInfo)
-		fe.SetGCEnabled(e.enabledFeatures.IsEnabled(api.CoreFeatureGC))
+		fe.SetGCEnabled(e.gcSafepoints())
 
 		for i := range module.CodeSection {
 			if nativeapi.DeterministicCompilationVerifierEnabled {
@@ -413,7 +419,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 				fe := frontend.NewFrontendCompiler(
 					module, ssaBuilder, &cm.offsets, ensureTermination, withListener, needSourceInfo).
 					WithTryTableMetadata(sharedTTM)
-				fe.SetGCEnabled(e.enabledFeatures.IsEnabled(api.CoreFeatureGC))
+				fe.SetGCEnabled(e.gcSafepoints())
 
 				for {
 					if err := ctx.Err(); err != nil {
@@ -984,7 +990,7 @@ func checkAddrInBytes(addr uintptr, b []byte) bool {
 
 // NewModuleEngine implements wasm.Engine.
 func (e *engine) NewModuleEngine(m *wasm.Module, mi *wasm.ModuleInstance) (wasm.ModuleEngine, error) {
-	me := &moduleEngine{gcEnabled: e.enabledFeatures.IsEnabled(api.CoreFeatureGC)}
+	me := &moduleEngine{gcEnabled: e.gcSafepoints()}
 
 	// Note: imported functions are resolved in moduleEngine.ResolveImportedFunction.
 	me.importedFunctions = make([]importedFunction, m.ImportFunctionCount)
