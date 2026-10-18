@@ -87,6 +87,7 @@ func _poll(fds []pollFd, timeoutMillis int32) (n int, errno sys.Errno) {
 	}
 	count := nregular + npipes + nsockets
 	if count > 0 {
+		reportRevents(fds, regular, pipes, sockets)
 		return count, 0
 	}
 
@@ -101,6 +102,7 @@ func _poll(fds []pollFd, timeoutMillis int32) (n int, errno sys.Errno) {
 			}
 			count = nregular + npipes + nsockets
 			if count > 0 {
+				reportRevents(fds, regular, pipes, sockets)
 				return count, 0
 			}
 		}
@@ -129,16 +131,39 @@ func peekAll(pipes, sockets []pollFd) (npipes, nsockets int, errno sys.Errno) {
 }
 
 func peekPipes(fds []pollFd) (n int, errno sys.Errno) {
-	for _, fd := range fds {
-		bytes, errno := peekNamedPipe(syscall.Handle(fd.fd))
+	for i := range fds {
+		bytes, errno := peekNamedPipe(syscall.Handle(fds[i].fd))
 		if errno != 0 {
 			return -1, sys.UnwrapOSError(errno)
 		}
+		fds[i].revents = 0
 		if bytes > 0 {
+			fds[i].revents = _POLLIN
 			n++
 		}
 	}
 	return
+}
+
+// reportRevents writes back into fds which of them are ready, as poll(2) does, from the partitions _poll
+// checked: a regular file always is, and a pipe or socket is when its peek or WSAPoll said so. The partitions
+// are copies, so this is what lets a caller tell which handle is ready rather than only how many are.
+func reportRevents(fds, regular, pipes, sockets []pollFd) {
+	for i := range fds {
+		fds[i].revents = 0
+		for _, p := range regular {
+			if p.fd == fds[i].fd {
+				fds[i].revents = _POLLIN
+			}
+		}
+		for _, part := range [][]pollFd{pipes, sockets} {
+			for _, p := range part {
+				if p.fd == fds[i].fd {
+					fds[i].revents |= p.revents
+				}
+			}
+		}
+	}
 }
 
 // wsaPoll is the WSAPoll function from winsock2.
