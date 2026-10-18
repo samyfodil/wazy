@@ -54,7 +54,12 @@ func TestCompilationCache(t *testing.T) {
 		barCompiled, err := bar.CompileModule(ctx, facWasm)
 		require.NoError(t, err)
 
-		// Ensures compiled modules are the same modulo type IDs, which is unique per store.
+		// Ensures compiled modules are the same modulo type IDs, which is unique per store, and
+		// ExnRefClosed, which only validating function bodies computes and a cache hit skips: the
+		// engines keep their own copy for that reason.
+		require.True(t, compiled.(*compiledModule).module.ExnRefClosed)
+		require.False(t, barCompiled.(*compiledModule).module.ExnRefClosed)
+		barCompiled.(*compiledModule).module.ExnRefClosed = true
 		require.Equal(t, compiled.(*compiledModule).module, barCompiled.(*compiledModule).module)
 		require.Equal(t, compiled.(*compiledModule).closeWithModule, barCompiled.(*compiledModule).closeWithModule)
 		require.Equal(t, compiled.(*compiledModule).compiledEngine, barCompiled.(*compiledModule).compiledEngine)

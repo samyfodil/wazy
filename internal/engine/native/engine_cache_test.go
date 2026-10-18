@@ -59,6 +59,7 @@ func TestSerializeCompiledModule(t *testing.T) {
 				u32.LeBytes(0),                     // no entry preambles.
 				[]byte{gcRootsFormatVersion},       // gc roots format version.
 				u32.LeBytes(0),                     // max gc roots.
+				[]byte{0},                          // exnref closed.
 			),
 		},
 		{
@@ -90,6 +91,7 @@ func TestSerializeCompiledModule(t *testing.T) {
 				u32.LeBytes(0),                     // no entry preambles.
 				[]byte{gcRootsFormatVersion},       // gc roots format version.
 				u32.LeBytes(0),                     // max gc roots.
+				[]byte{0},                          // exnref closed.
 			),
 		},
 		{
@@ -127,6 +129,7 @@ func TestSerializeCompiledModule(t *testing.T) {
 				u32.LeBytes(0),                       // no entry preambles.
 				[]byte{gcRootsFormatVersion},         // gc roots format version.
 				u32.LeBytes(0),                       // max gc roots.
+				[]byte{0},                            // exnref closed.
 			),
 		},
 	}
@@ -223,6 +226,7 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				u32.LeBytes(0),                     // no entry preambles.
 				[]byte{gcRootsFormatVersion},       // gc roots format version.
 				u32.LeBytes(3),                     // max gc roots.
+				[]byte{1},                          // exnref closed.
 			),
 			expCompiledModule: &compiledModule{
 				executables:        &executables{executable: []byte{1, 2, 3, 4, 5}},
@@ -230,6 +234,7 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				ehTables:           [][]nativeapi.EhEntry{nil},
 				functionFrameSizes: []int64{0},
 				maxGCRoots:         3,
+				exnRefClosed:       true,
 			},
 			expStaleCache: false,
 			expErr:        "",
@@ -264,6 +269,7 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				u32.LeBytes(0),                     // no entry preambles.
 				[]byte{gcRootsFormatVersion},       // gc roots format version.
 				u32.LeBytes(0),                     // max gc roots.
+				[]byte{0},                          // exnref closed.
 			),
 			importedFunctionCount: 1,
 			expCompiledModule: &compiledModule{

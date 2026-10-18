@@ -116,7 +116,10 @@ type (
 		funcrefSlotsOnce sync.Once
 		// maxGCRoots is the most values any safepoint in this module writes; see
 		// frontend.Compiler.MaxGCRoots.
-		maxGCRoots                int
+		maxGCRoots int
+		// exnRefClosed is the source module's wasm.Module.ExnRefClosed, kept here because only validation
+		// computes it and a cache hit skips the validation of function bodies.
+		exnRefClosed              bool
 		listeners                 []api.FunctionListener
 		listenerBeforeTrampolines []*byte
 		listenerAfterTrampolines  []*byte
@@ -401,6 +404,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 		}
 		cm.tryTableInfo = fe.TryTableMetadata()
 		cm.maxGCRoots = fe.MaxGCRoots()
+		cm.exnRefClosed = module.ExnRefClosed
 	} else {
 		// Compile with N worker goroutines.
 		// Collect compiled functions across workers in a slice,
@@ -488,6 +492,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 
 		wg.Wait()
 		cm.maxGCRoots = int(maxGCRoots.Load())
+		cm.exnRefClosed = module.ExnRefClosed
 		if err := context.Cause(ctx); err != nil {
 			return nil, err
 		}
@@ -1015,7 +1020,6 @@ func checkAddrInBytes(addr uintptr, b []byte) bool {
 // NewModuleEngine implements wasm.Engine.
 func (e *engine) NewModuleEngine(m *wasm.Module, mi *wasm.ModuleInstance) (wasm.ModuleEngine, error) {
 	me := &moduleEngine{gcEnabled: e.gcSafepoints()}
-	me.gcRegisterOnEntry = me.gcEnabled && (e.enabledFeatures.IsEnabled(api.CoreFeatureGC) || !m.ExnRefClosed)
 
 	// Note: imported functions are resolved in moduleEngine.ResolveImportedFunction.
 	me.importedFunctions = make([]importedFunction, m.ImportFunctionCount)
@@ -1026,6 +1030,7 @@ func (e *engine) NewModuleEngine(m *wasm.Module, mi *wasm.ModuleInstance) (wasm.
 	}
 	me.parent = compiled
 	me.module = mi
+	me.gcRegisterOnEntry = me.gcEnabled && (e.enabledFeatures.IsEnabled(api.CoreFeatureGC) || !compiled.exnRefClosed)
 	if me.gcEnabled && compiled.maxGCRoots > 0 {
 		// The spilled words plus their count, 16-byte aligned so the go-call margin above the region keeps
 		// the alignment the trampoline wants. See callEngine.gcRootsReserve.

@@ -57,7 +57,7 @@ func TestDeserializeCompiledModule_unmapsCodeOnError(t *testing.T) {
 		stale := append([]byte(nil), entry...)
 		// Everything up to the entry preambles section decodes; a format
 		// version it doesn't know makes the entry stale.
-		stale[len(stale)-5] = entryPreambleFormatVersion + 1
+		stale[len(stale)-6] = entryPreambleFormatVersion + 1
 		f := cacheFile(t, stale)
 		requireExecutableMapping(t, f)
 		cm, staleCache, err := deserializeCompiledModule(testVersion, f)
