@@ -50,6 +50,10 @@ type (
 		// header's successor list because the GC safepoint may already have split
 		// the header block.
 		fuelSlow, fuelOK ssa.BasicBlock
+		// landingBlk and catches are a controlFrameKindTryTableWithCatch
+		// frame's landing pad and catch clauses; see lowerCatchLanding.
+		landingBlk ssa.BasicBlock
+		catches    []catchClause
 	}
 
 	controlFrameKind byte
@@ -1094,9 +1098,6 @@ func (c *Compiler) lowerCurrentOpcode() {
 		variable := c.localVariable(index)
 		newValue := state.pop()
 		builder.DefineVariableInCurrentBB(variable, newValue)
-		if c.tryTableDepth > 0 {
-			c.storeLocalToSaveArea(wasm.Index(index), newValue)
-		}
 
 	case wasm.OpcodeLocalTee:
 		index := c.readI32u()
@@ -1106,9 +1107,6 @@ func (c *Compiler) lowerCurrentOpcode() {
 		variable := c.localVariable(index)
 		newValue := state.peek()
 		builder.DefineVariableInCurrentBB(variable, newValue)
-		if c.tryTableDepth > 0 {
-			c.storeLocalToSaveArea(wasm.Index(index), newValue)
-		}
 
 	case wasm.OpcodeSelect, wasm.OpcodeTypedSelect:
 		if op == wasm.OpcodeTypedSelect {
@@ -1473,13 +1471,6 @@ func (c *Compiler) lowerCurrentOpcode() {
 			(ctrl.kind == controlFrameKindBlock || ctrl.kind == controlFrameKindLoop)
 
 		if !unreachable {
-			// For try_table with catch clauses, emit the leave trampoline
-			// before the jump to the following block. If there are no catch clauses,
-			// skip since they never pushed a handler.
-			if ctrl.isTryCatch() {
-				c.emitTryTableLeave()
-			}
-
 			if !fallThrough {
 				// Top n-th args will be used as a result of the current control frame.
 				args := c.nPeekDup(len(ctrl.blockType.Results))
@@ -1518,15 +1509,13 @@ func (c *Compiler) lowerCurrentOpcode() {
 			builder.SetCurrentBlock(elseBlk)
 			c.insertJumpToBlock(ctrl.clonedArgs, followingBlk)
 		case controlFrameKindTryTableWithCatch:
-			if c.tryTableDepth > 0 {
-				c.tryTableDepth--
-			}
 			// Finalize the pending EH entry's body block-ID range
 			// regardless of reachability at this `end` (even if the body
 			// became unreachable partway through, e.g. it always throws,
 			// any of its blocks that DID get compiled must still be
 			// covered by the side table).
 			c.pendingEhEntries[ctrl.pendingEhIdx].BodyBlkIDEnd = ssa.BasicBlockID(c.ssaBuilder.BlockIDMax())
+			c.lowerCatchLanding(&ctrl)
 		}
 
 		builder.Seal(followingBlk)
@@ -1550,7 +1539,6 @@ func (c *Compiler) lowerCurrentOpcode() {
 			break
 		}
 
-		c.emitTryTableLeaves(int(labelIndex))
 		targetBlk, argNum := state.brTargetArgNumFor(labelIndex)
 		args := c.nPeekDup(argNum)
 		c.insertJumpToBlock(args, targetBlk)
@@ -1568,20 +1556,6 @@ func (c *Compiler) lowerCurrentOpcode() {
 		targetBlk, argNum := state.brTargetArgNumFor(labelIndex)
 		args := c.nPeekDup(argNum)
 		var sealTargetBlk bool
-
-		// If the branch exits any try_table frames, emit TryTableLeave
-		// calls in a trampoline block that only runs on the taken path.
-		if c.branchExitsTryTable(int(labelIndex)) {
-			current := builder.CurrentBlock()
-			trampolineBlk := builder.AllocateBasicBlock()
-			builder.SetCurrentBlock(trampolineBlk)
-			c.emitTryTableLeaves(int(labelIndex))
-			c.insertJumpToBlock(args, targetBlk)
-			builder.SetCurrentBlock(current)
-			targetBlk = trampolineBlk
-			sealTargetBlk = true
-			args = ssa.ValuesNil
-		}
 
 		if c.needListener && targetBlk.ReturnBlock() { // In this case, we have to call the listener before returning.
 			// Save the currently active block.
@@ -1648,7 +1622,6 @@ func (c *Compiler) lowerCurrentOpcode() {
 		if state.unreachable {
 			break
 		}
-		c.emitTryTableLeaves(len(state.controlFrames))
 		if c.needListener {
 			c.callListenerAfter()
 		}
@@ -3620,7 +3593,6 @@ func (c *Compiler) lowerCurrentOpcode() {
 		}
 		// Per spec, return_call leaves the current frame, so all enclosing
 		// try_table handlers must be popped before the tail call.
-		c.emitTryTableLeaves(len(c.state().controlFrames))
 		_, _ = typeIndex, tableIndex
 		c.lowerTailCallReturnCallIndirect(typeIndex, tableIndex)
 		state.unreachable = true
@@ -3632,7 +3604,6 @@ func (c *Compiler) lowerCurrentOpcode() {
 		}
 		// Per spec, return_call leaves the current frame, so all enclosing
 		// try_table handlers must be popped before the tail call.
-		c.emitTryTableLeaves(len(c.state().controlFrames))
 		c.lowerTailCallReturnCall(fnIndex)
 		state.unreachable = true
 
@@ -3770,7 +3741,6 @@ func (c *Compiler) lowerCurrentOpcode() {
 		tryTableID := c.tryTableMetadata.Append(nativeapi.TryTableInfo{
 			CatchClauses: clauseInstances,
 			NumLocals:    numLocals,
-			ReuseLocals:  c.tryTableDepth > 0,
 			FloorSize:    floorSize,
 		})
 
@@ -3778,71 +3748,25 @@ func (c *Compiler) lowerCurrentOpcode() {
 		followingBlk := builder.AllocateBasicBlock()
 		c.addBlockParamsFromWasmTypes(bt.Results, followingBlk)
 
-		// bodyBlk is allocated *after* the handler blocks below (when there
-		// are catch clauses) so that [bodyBlk.ID(), BlockIDMax() at this
-		// try's `end`) is a block-ID range uncontaminated by handler-block
-		// IDs -- see EhPendingEntry's doc comment.
 		var bodyBlk ssa.BasicBlock
 		var pendingEhIdx int
 
+		// A try_table costs nothing on entry or exit. Every call in its body
+		// that can throw is followed by a check of the caught-exception flag
+		// (emitCatchCheck) that branches to landingBlk, where the catch
+		// clauses are matched in compiled code. A throw resumes the catching
+		// frame right after that call, so the locals reach the handlers as
+		// ordinary SSA values. landingBlk is allocated before bodyBlk so the
+		// body's block-ID range never contains it (see EhPendingEntry).
+		var landingBlk ssa.BasicBlock
 		if len(catchClauses) > 0 {
-			// Store the caller module context so the dispatch loop can find the module.
-			c.storeCallerModuleContext()
-
-			// For each catch clause, create a handler block that loads exception
-			// params and jumps to the wasm target label.
-			// NOTE: catch clause label indices do NOT include the try_table itself
-			// (the try_table is pushed onto the control stack after the catch clauses
-			// are processed, per the spec). So we resolve labels BEFORE pushing.
-			varPool := builder.VarLengthPool()
-			targets := varPool.Allocate(len(catchClauses) + 1) // +1 for bodyBlk
-
-			currentBlk := builder.CurrentBlock()
+			landingBlk = builder.AllocateBasicBlock()
 			pendingClauses := make([]EhPendingClause, 0, len(catchClauses))
 			for _, cc := range catchClauses {
-				handlerBlk := builder.AllocateBasicBlock()
-				builder.SetCurrentBlock(handlerBlk)
-				c.reloadAfterCall()
-				c.reloadLocalsFromSaveArea()
-
-				// Resolve the wasm target label.
-				targetBlk, _ := state.brTargetArgNumFor(cc.labelIdx)
-
-				// Load exception params and jump to wasm target.
-				var brArgs []ssa.Value
-				switch cc.kind {
-				case wasm.CatchKindCatch:
-					if tagType := c.resolveTagType(cc.tagIndex); tagType != nil {
-						brArgs = c.loadExceptionParams(tagType)
-					}
-				case wasm.CatchKindCatchRef:
-					if tagType := c.resolveTagType(cc.tagIndex); tagType != nil {
-						brArgs = c.loadExceptionParams(tagType)
-					}
-					brArgs = append(brArgs, c.loadExnRef())
-				case wasm.CatchKindCatchAll:
-					// No values.
-				case wasm.CatchKindCatchAllRef:
-					brArgs = append(brArgs, c.loadExnRef())
-				}
-
-				// Pop any enclosing try_table handlers that the jump crosses.
-				c.emitTryTableLeaves(int(cc.labelIdx))
-
-				jmpArgs := c.allocateVarLengthValues(len(brArgs), brArgs...)
-				c.insertJumpToBlock(jmpArgs, targetBlk)
-
-				targets = targets.Append(varPool, ssa.Value(handlerBlk.ID()))
 				pendingClauses = append(pendingClauses, EhPendingClause{
-					Kind: cc.kind, TagIndex: cc.tagIndex, HandlerBlkID: handlerBlk.ID(),
+					Kind: cc.kind, TagIndex: cc.tagIndex, HandlerBlkID: landingBlk.ID(),
 				})
 			}
-
-			// Now allocate the body block (see the comment above) and
-			// record the pending exception side-table entry for this
-			// try_table. BodyBlkIDEnd is filled in at this try's own
-			// OpcodeEnd, once its whole body (including nested constructs)
-			// has been lowered.
 			bodyBlk = builder.AllocateBasicBlock()
 			pendingEhIdx = len(c.pendingEhEntries)
 			c.pendingEhEntries = append(c.pendingEhEntries, EhPendingEntry{
@@ -3850,67 +3774,12 @@ func (c *Compiler) lowerCurrentOpcode() {
 				Clauses:        pendingClauses,
 				TryTableID:     tryTableID,
 			})
-
-			// Last target is the body block (default for clauseIdx == -1 / out of range).
-			targets = targets.Append(varPool, ssa.Value(bodyBlk.ID()))
-
-			// Back to the original block: call the try_table enter trampoline,
-			// then dispatch on the caught clause index.
-			builder.SetCurrentBlock(currentBlk)
-			encodedExitCode := uint64(nativeapi.ExitCodeTryTableEnter | nativeapi.ExitCode(tryTableID<<8))
-
-			// Load trampoline address from execCtx.
-			enterPtr := builder.AllocateInstruction().
-				AsLoad(c.execCtxPtrValue,
-					nativeapi.ExecutionContextOffsetTryTableEnterTrampolineAddress.U32(),
-					ssa.TypeI64,
-				).Insert(builder).Return()
-
-			// Call the trampoline: (execCtx, encodedExitCode) -> ().
-			exitCodeVal := builder.AllocateInstruction().AsIconst64(encodedExitCode).Insert(builder).Return()
-			args := c.allocateVarLengthValues(2, c.execCtxPtrValue, exitCodeVal)
-			builder.AllocateInstruction().
-				AsCallIndirect(enterPtr, &c.tryTableEnterSig, args).
-				Insert(builder)
-
-			// Load the caught clause index written by the dispatch loop.
-			clauseIdx := builder.AllocateInstruction().
-				AsLoad(c.execCtxPtrValue,
-					nativeapi.ExecutionContextOffsetCaughtExceptionClauseIdx.U32(),
-					ssa.TypeI64,
-				).Insert(builder).Return()
-
-			// Dispatch to handler blocks or body block via br_table.
-			brTable := builder.AllocateInstruction()
-			brTable.AsBrTable(clauseIdx, targets)
-			builder.InsertInstruction(brTable)
-
-			// Seal handler blocks after BrTable is inserted (so predecessors are registered).
-			for _, targetID := range targets.View() {
-				blk := builder.BasicBlock(ssa.BasicBlockID(targetID))
-				if !blk.Sealed() {
-					builder.Seal(blk)
-				}
-			}
 		} else {
-			// No catch clauses — try_table acts as a plain block.
-			// Jump directly to body without entering exception handling.
 			bodyBlk = builder.AllocateBasicBlock()
-			c.insertJumpToBlock(ssa.ValuesNil, bodyBlk)
 		}
-
-		if !bodyBlk.Sealed() {
-			builder.Seal(bodyBlk)
-		}
+		c.insertJumpToBlock(ssa.ValuesNil, bodyBlk)
+		builder.Seal(bodyBlk)
 		builder.SetCurrentBlock(bodyBlk)
-		if len(catchClauses) > 0 {
-			// Body block is entered after the trampoline call, so we need to reload.
-			c.reloadAfterCall()
-			// Initialize the locals save area so handlers can read
-			// correct values after a stack restore.
-			c.storeAllLocalsToSaveArea()
-			c.tryTableDepth++
-		}
 
 		// Push the try_table control frame AFTER resolving catch labels.
 		kind := controlFrameKind(controlFrameKindTryTable)
@@ -3923,6 +3792,8 @@ func (c *Compiler) lowerCurrentOpcode() {
 			originalStackLenWithoutParam: len(state.values) - len(bt.Params),
 			followingBlock:               followingBlk,
 			blockType:                    bt,
+			landingBlk:                   landingBlk,
+			catches:                      catchClauses,
 		})
 
 	case wasm.OpcodeRefAsNonNull:
@@ -3954,18 +3825,6 @@ func (c *Compiler) lowerCurrentOpcode() {
 		targetBlk, argNum := state.brTargetArgNumFor(labelIndex)
 		args := c.nPeekDup(argNum)
 		var sealTargetBlk bool
-
-		if c.branchExitsTryTable(int(labelIndex)) {
-			current := builder.CurrentBlock()
-			trampolineBlk := builder.AllocateBasicBlock()
-			builder.SetCurrentBlock(trampolineBlk)
-			c.emitTryTableLeaves(int(labelIndex))
-			c.insertJumpToBlock(args, targetBlk)
-			builder.SetCurrentBlock(current)
-			targetBlk = trampolineBlk
-			sealTargetBlk = true
-			args = ssa.ValuesNil
-		}
 
 		if c.needListener && targetBlk.ReturnBlock() {
 			current := builder.CurrentBlock()
@@ -4015,18 +3874,6 @@ func (c *Compiler) lowerCurrentOpcode() {
 		args = args.Append(builder.VarLengthPool(), r)
 		var sealTargetBlk bool
 
-		if c.branchExitsTryTable(int(labelIndex)) {
-			current := builder.CurrentBlock()
-			trampolineBlk := builder.AllocateBasicBlock()
-			builder.SetCurrentBlock(trampolineBlk)
-			c.emitTryTableLeaves(int(labelIndex))
-			c.insertJumpToBlock(args, targetBlk)
-			builder.SetCurrentBlock(current)
-			targetBlk = trampolineBlk
-			sealTargetBlk = true
-			args = ssa.ValuesNil
-		}
-
 		if c.needListener && targetBlk.ReturnBlock() {
 			current := builder.CurrentBlock()
 			targetBlk = builder.AllocateBasicBlock()
@@ -4066,7 +3913,6 @@ func (c *Compiler) lowerCurrentOpcode() {
 		if state.unreachable {
 			break
 		}
-		c.emitTryTableLeaves(len(c.state().controlFrames))
 		c.lowerTailCallReturnCallRef(typeIndex)
 		state.unreachable = true
 
@@ -4223,6 +4069,7 @@ func (c *Compiler) lowerCall(fnIndex uint32) {
 		call.AsCall(ssa.FuncRef(funcRefOrPtrValue), sig, args)
 	}
 	builder.InsertInstruction(call)
+	c.emitCatchCheck(call)
 
 	first, rest := call.Returns()
 	if first.Valid() {
@@ -4324,6 +4171,7 @@ func (c *Compiler) lowerCallIndirect(typeIndex, tableIndex uint32) {
 	call := builder.AllocateInstruction()
 	call.AsCallIndirect(executablePtr, c.signatures[typ], args)
 	builder.InsertInstruction(call)
+	c.emitCatchCheck(call)
 
 	first, rest := call.Returns()
 	if first.Valid() {
@@ -4439,6 +4287,7 @@ func (c *Compiler) lowerCallRef(typeIndex uint32) {
 	call := builder.AllocateInstruction()
 	call.AsCallIndirect(executablePtr, c.signatures[typ], args)
 	builder.InsertInstruction(call)
+	c.emitCatchCheck(call)
 
 	first, rest := call.Returns()
 	if first.Valid() {
@@ -5598,127 +5447,133 @@ func (c *Compiler) emitThrow(exnref ssa.Value) {
 			ssa.TypeI64,
 		).Insert(builder).Return()
 	throwArgs := c.allocateVarLengthValues(2, c.execCtxPtrValue, exnref)
-	builder.AllocateInstruction().
+	call := builder.AllocateInstruction().
 		AsCallIndirect(throwPtr, &c.throwSig, throwArgs).
 		Insert(builder)
+	c.emitCatchCheck(call)
 
 	exit := builder.AllocateInstruction()
 	exit.AsExitWithCode(c.execCtxPtrValue, nativeapi.ExitCodeUnreachable)
 	builder.InsertInstruction(exit)
 }
 
-// loadLocalsSaveAreaPtr emits a load of the locals save area pointer from execCtx.
-func (c *Compiler) loadLocalsSaveAreaPtr() ssa.Value {
-	return c.ssaBuilder.AllocateInstruction().
-		AsLoad(c.execCtxPtrValue,
-			nativeapi.ExecutionContextOffsetLocalsSaveAreaPtr.U32(),
-			ssa.TypeI64).
-		Insert(c.ssaBuilder).Return()
-}
-
-// storeLocalToSaveArea emits a store of the given local value to the
-// heap-allocated locals save area.
-func (c *Compiler) storeLocalToSaveArea(localIdx wasm.Index, val ssa.Value) {
-	ptr := c.loadLocalsSaveAreaPtr()
-	store := c.ssaBuilder.AllocateInstruction()
-	store.AsStore(ssa.OpcodeStore, val, ptr, uint32(localIdx)*16)
-	c.ssaBuilder.InsertInstruction(store)
-}
-
-// reloadLocalsFromSaveArea loads all locals from the heap-allocated save area
-// and redefines the SSA variables, so handler blocks see throw-time values.
-func (c *Compiler) reloadLocalsFromSaveArea() {
-	builder := c.ssaBuilder
-	ptr := c.loadLocalsSaveAreaPtr()
-	numParams := len(c.wasmFunctionTyp.Params)
-	numLocals := numParams + len(c.wasmFunctionLocalTypes)
-	for i := 0; i < numLocals; i++ {
-		localIdx := wasm.Index(i)
-		var wasmType wasm.ValueType
-		if i < numParams {
-			wasmType = c.wasmFunctionTyp.Params[i]
-		} else {
-			wasmType = c.wasmFunctionLocalTypes[i-numParams]
+// innermostCatchLanding returns the landing pad of the innermost enclosing
+// try_table with catch clauses, or nil if there is none.
+func (c *Compiler) innermostCatchLanding() ssa.BasicBlock {
+	frames := c.state().controlFrames
+	for i := len(frames) - 1; i >= 0; i-- {
+		if frames[i].isTryCatch() {
+			return frames[i].landingBlk
 		}
-		ssaType := WasmTypeToSSAType(wasmType)
-		load := builder.AllocateInstruction()
-		load.AsLoad(ptr, uint32(localIdx)*16, ssaType)
-		builder.InsertInstruction(load)
-		variable := c.localVariable(localIdx)
-		builder.DefineVariableInCurrentBB(variable, load.Return())
 	}
+	return nil
 }
 
-// storeAllLocalsToSaveArea stores all locals to the save area at once.
-func (c *Compiler) storeAllLocalsToSaveArea() {
-	builder := c.ssaBuilder
-	ptr := c.loadLocalsSaveAreaPtr()
-	numParams := len(c.wasmFunctionTyp.Params)
-	numLocals := numParams + len(c.wasmFunctionLocalTypes)
-	for i := 0; i < numLocals; i++ {
-		localIdx := wasm.Index(i)
-		variable := c.localVariable(localIdx)
-		val := builder.MustFindValue(variable)
-		store := builder.AllocateInstruction()
-		store.AsStore(ssa.OpcodeStore, val, ptr, uint32(localIdx)*16)
-		builder.InsertInstruction(store)
+// emitCatchCheck makes the call just inserted a point a caught exception can
+// resume at, if it sits inside a try_table with catch clauses. The throw path
+// (callEngine.handleThrow) resumes the catching frame right after the call
+// with a non-zero execCtx.caughtExceptionClauseIdx; on the normal path it is
+// zero, so the check costs a load and a not-taken branch.
+func (c *Compiler) emitCatchCheck(call *ssa.Instruction) {
+	landing := c.innermostCatchLanding()
+	if landing == nil {
+		return
 	}
+	call.MarkMayThrow()
+	builder := c.ssaBuilder
+	caught := builder.AllocateInstruction().
+		AsLoad(c.execCtxPtrValue, nativeapi.ExecutionContextOffsetCaughtExceptionClauseIdx.U32(), ssa.TypeI64).
+		Insert(builder).Return()
+	builder.AllocateInstruction().AsBrnz(caught, ssa.ValuesNil, landing).Insert(builder)
+	cont := builder.AllocateBasicBlock()
+	c.insertJumpToBlock(ssa.ValuesNil, cont)
+	builder.Seal(cont)
+	builder.SetCurrentBlock(cont)
 }
 
-// emitTryTableLeave emits a trampoline call to pop the try handler in the dispatch loop.
-func (c *Compiler) emitTryTableLeave() {
+// lowerCatchLanding emits the landing pad of a try_table with catch clauses,
+// once its body is lowered and every branch into the pad is known. The pad
+// clears the caught flag, then tests the clauses in order against the thrown
+// tag. A matching clause loads the exception's values and branches to its
+// label. If none matches, the exception goes on to the enclosing try_table in
+// this function, or is rethrown to the frames above.
+func (c *Compiler) lowerCatchLanding(ctrl *controlFrame) {
 	builder := c.ssaBuilder
-	c.storeCallerModuleContext()
+	landing := ctrl.landingBlk
+	builder.Seal(landing)
+	if landing.Preds() == 0 {
+		return // Nothing in the body can throw.
+	}
+	cur := builder.CurrentBlock()
+	builder.SetCurrentBlock(landing)
 
-	leavePtr := builder.AllocateInstruction().
-		AsLoad(c.execCtxPtrValue,
-			nativeapi.ExecutionContextOffsetTryTableLeaveTrampolineAddress.U32(),
-			ssa.TypeI64,
-		).Insert(builder).Return()
-
-	args := c.allocateVarLengthValues(1, c.execCtxPtrValue)
+	zero := builder.AllocateInstruction().AsIconst64(0).Insert(builder).Return()
 	builder.AllocateInstruction().
-		AsCallIndirect(leavePtr, &c.tryTableLeaveSig, args).
+		AsStore(ssa.OpcodeStore, zero, c.execCtxPtrValue, nativeapi.ExecutionContextOffsetCaughtExceptionClauseIdx.U32()).
 		Insert(builder)
+	c.reloadAfterCall()
+
+	state := c.state()
+	matchedAll := false
+	for _, cc := range ctrl.catches {
+		handler := builder.AllocateBasicBlock()
+		switch cc.kind {
+		case wasm.CatchKindCatch, wasm.CatchKindCatchRef:
+			tag := builder.AllocateInstruction().
+				AsLoad(c.moduleCtxPtrValue, c.offset.TagOffset(int(cc.tagIndex)).U32(), ssa.TypeI64).
+				Insert(builder).Return()
+			thrown := builder.AllocateInstruction().
+				AsLoad(c.execCtxPtrValue, nativeapi.ExecutionContextOffsetThrownTag.U32(), ssa.TypeI64).
+				Insert(builder).Return()
+			eq := builder.AllocateInstruction().AsIcmp(tag, thrown, ssa.IntegerCmpCondEqual).Insert(builder).Return()
+			builder.AllocateInstruction().AsBrnz(eq, ssa.ValuesNil, handler).Insert(builder)
+			next := builder.AllocateBasicBlock()
+			c.insertJumpToBlock(ssa.ValuesNil, next)
+			builder.Seal(next)
+			builder.SetCurrentBlock(handler)
+			builder.Seal(handler)
+			c.lowerCatchHandler(cc, state)
+			builder.SetCurrentBlock(next)
+		default: // catch_all, catch_all_ref: always matches.
+			c.insertJumpToBlock(ssa.ValuesNil, handler)
+			builder.Seal(handler)
+			builder.SetCurrentBlock(handler)
+			c.lowerCatchHandler(cc, state)
+			matchedAll = true
+		}
+		if matchedAll {
+			break
+		}
+	}
+	if !matchedAll {
+		if outer := c.innermostCatchLanding(); outer != nil {
+			c.insertJumpToBlock(ssa.ValuesNil, outer)
+		} else {
+			c.storeCallerModuleContext()
+			c.emitThrow(c.loadExnRef())
+		}
+	}
+	builder.SetCurrentBlock(cur)
 }
 
-// branchExitsTryTable returns true if a branch to the given depth would
-// exit at least one try_table frame that has catch clauses.
-func (c *Compiler) branchExitsTryTable(depth int) bool {
-	state := c.state()
-	tail := len(state.controlFrames) - 1
-	for i := 0; i < depth; i++ {
-		if state.controlFrames[tail-i].isTryCatch() {
-			return true
+// lowerCatchHandler loads what clause cc delivers and branches to its label.
+func (c *Compiler) lowerCatchHandler(cc catchClause, state *loweringState) {
+	var brArgs []ssa.Value
+	switch cc.kind {
+	case wasm.CatchKindCatch:
+		if tagType := c.resolveTagType(cc.tagIndex); tagType != nil {
+			brArgs = c.loadExceptionParams(tagType)
 		}
-	}
-	// A br to a non-loop target also exits that frame.
-	if depth <= tail {
-		cf := &state.controlFrames[tail-depth]
-		if !cf.isLoop() && cf.isTryCatch() {
-			return true
+	case wasm.CatchKindCatchRef:
+		if tagType := c.resolveTagType(cc.tagIndex); tagType != nil {
+			brArgs = c.loadExceptionParams(tagType)
 		}
+		brArgs = append(brArgs, c.loadExnRef())
+	case wasm.CatchKindCatchAllRef:
+		brArgs = append(brArgs, c.loadExnRef())
 	}
-	return false
-}
-
-// emitTryTableLeaves emits TryTableLeave calls for try_table frames
-// with catch clauses that would be exited by a branch to the given depth.
-func (c *Compiler) emitTryTableLeaves(depth int) {
-	state := c.state()
-	tail := len(state.controlFrames) - 1
-	for i := 0; i < depth; i++ {
-		if state.controlFrames[tail-i].isTryCatch() {
-			c.emitTryTableLeave()
-		}
-	}
-	// A br to a non-loop target also exits that frame.
-	if depth <= tail {
-		cf := &state.controlFrames[tail-depth]
-		if !cf.isLoop() && cf.isTryCatch() {
-			c.emitTryTableLeave()
-		}
-	}
+	targetBlk, _ := state.brTargetArgNumFor(cc.labelIdx)
+	c.insertJumpToBlock(c.allocateVarLengthValues(len(brArgs), brArgs...), targetBlk)
 }
 
 // catchClause holds a parsed catch clause from a try_table instruction.
@@ -6057,7 +5912,6 @@ func (c *Compiler) lowerBrTable(labels []uint32, index ssa.Value) {
 		targetBlk, _ := state.brTargetArgNumFor(l)
 		trampoline := builder.AllocateBasicBlock()
 		builder.SetCurrentBlock(trampoline)
-		c.emitTryTableLeaves(int(l))
 		c.insertJumpToBlock(args, targetBlk)
 		trampolineBlockIDs = trampolineBlockIDs.Append(builder.VarLengthPool(), ssa.Value(trampoline.ID()))
 	}
@@ -6544,18 +6398,6 @@ func (c *Compiler) lowerBrOnCast(gcOp wasm.OpcodeGC) {
 	targetBlk, argNum := state.brTargetArgNumFor(labelIndex)
 	args := c.nPeekDup(argNum)
 	var sealTargetBlk bool
-
-	if c.branchExitsTryTable(int(labelIndex)) {
-		current := builder.CurrentBlock()
-		trampolineBlk := builder.AllocateBasicBlock()
-		builder.SetCurrentBlock(trampolineBlk)
-		c.emitTryTableLeaves(int(labelIndex))
-		c.insertJumpToBlock(args, targetBlk)
-		builder.SetCurrentBlock(current)
-		targetBlk = trampolineBlk
-		sealTargetBlk = true
-		args = ssa.ValuesNil
-	}
 
 	if c.needListener && targetBlk.ReturnBlock() {
 		current := builder.CurrentBlock()

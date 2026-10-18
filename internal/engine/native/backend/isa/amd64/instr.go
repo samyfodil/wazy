@@ -15,6 +15,9 @@ type instruction struct {
 	b1                  bool
 	addedBeforeRegAlloc bool
 	kind                instructionKind
+	// mayThrow is set on a call a caught exception resumes after; see
+	// ClobbersAllRegisters.
+	mayThrow bool
 }
 
 // IsCall implements regalloc.Instr.
@@ -24,6 +27,9 @@ func (i *instruction) IsCall() bool { return i.kind == call }
 func (i *instruction) IsIndirectCall() bool {
 	return i.kind == callIndirect
 }
+
+// ClobbersAllRegisters implements regalloc.Instr.
+func (i *instruction) ClobbersAllRegisters() bool { return i.mayThrow }
 
 // IsReturn implements regalloc.Instr.
 func (i *instruction) IsReturn() bool { return i.kind == ret }

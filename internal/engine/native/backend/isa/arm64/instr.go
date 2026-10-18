@@ -29,6 +29,9 @@ type (
 		rm, rn              operand
 		kind                instructionKind
 		addedBeforeRegAlloc bool
+		// mayThrow is set on a call a caught exception resumes after; see
+		// ClobbersAllRegisters.
+		mayThrow bool
 	}
 
 	// instructionKind represents the kind of instruction.
@@ -45,6 +48,9 @@ func (i *instruction) IsCall() bool {
 func (i *instruction) IsIndirectCall() bool {
 	return i.kind == callInd
 }
+
+// ClobbersAllRegisters implements regalloc.Instr.
+func (i *instruction) ClobbersAllRegisters() bool { return i.mayThrow }
 
 // IsReturn implements regalloc.Instr IsReturn.
 func (i *instruction) IsReturn() bool {

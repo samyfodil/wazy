@@ -40,6 +40,9 @@ type Instruction struct {
 	typ            Type
 	live           bool
 	alreadyLowered bool
+	// mayThrow marks a call inside a try_table with catch clauses: a throw
+	// can resume execution right after it. See MarkMayThrow.
+	mayThrow bool
 }
 
 // SourceOffset represents the offset of the source of an instruction.
@@ -79,6 +82,22 @@ func (i *Instruction) MarkLowered() {
 // Lowered returns true if this instruction is already lowered.
 func (i *Instruction) Lowered() bool {
 	return i.alreadyLowered
+}
+
+// MarkMayThrow marks this call as one a caught exception resumes after. A
+// throw abandons every frame below the catching one without running their
+// epilogues, so whatever those callees left in callee-saved registers is
+// garbage at the resume point. The backend therefore treats such a call as
+// clobbering every allocatable register: nothing is live in a register across
+// it, and the function's prologue saves all callee-saved registers for its
+// caller. This is what lets a try_table cost nothing until something throws.
+func (i *Instruction) MarkMayThrow() {
+	i.mayThrow = true
+}
+
+// MayThrow reports whether MarkMayThrow was called on this call.
+func (i *Instruction) MayThrow() bool {
+	return i.mayThrow
 }
 
 // resetInstruction resets this instruction to the initial state.

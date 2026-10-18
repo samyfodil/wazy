@@ -118,6 +118,11 @@ type (
 		// IsIndirectCall returns true if this instruction is an indirect call instruction which calls a function pointer.
 		//  The result is used to insert caller saved register spills and restores.
 		IsIndirectCall() bool
+		// ClobbersAllRegisters returns true for a call that a caught exception
+		// can resume after (ssa.Instruction.MayThrow): no value may stay in any
+		// register across it, callee-saved ones included, and the function must
+		// save every callee-saved register in its prologue.
+		ClobbersAllRegisters() bool
 		// IsReturn returns true if this instruction is a return instruction.
 		IsReturn() bool
 	}

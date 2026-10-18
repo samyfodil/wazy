@@ -417,7 +417,7 @@ func readExecutable(rc io.ReadCloser, bufReader *bufio.Reader, offset int64, exe
 // (cm.ehTables / cm.functionFrameSizes) independently of wazyVersion: bump
 // this whenever that section's binary layout changes, so that old cache
 // entries are detected as stale rather than misparsed.
-const ehTableFormatVersion = 1
+const ehTableFormatVersion = 2
 
 // tryTableInfoFormatVersion guards the try-table-info cache section
 // (cm.tryTableInfo) independently of wazyVersion, same rationale as

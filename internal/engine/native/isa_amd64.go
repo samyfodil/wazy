@@ -24,14 +24,6 @@ func unwindStackForThrow(_, fp, top uintptr, frames []nativeapi.ThrowFrame) []na
 	return amd64.UnwindStackForThrow(fp, top, frames)
 }
 
-// firstReturnAddress returns the return address of the frame at (sp, fp) --
-// on amd64 recovered in O(1) from the RBP chain at fp. Used at
-// try_table-enter time to capture the enter-continuation (activeCatchScope.resumePC);
-// see call_engine.go's ExitCodeTryTableEnter.
-func firstReturnAddress(_, fp, _ uintptr) uintptr {
-	return amd64.FirstReturnAddress(fp)
-}
-
 // resolveThrowTransferSPFP resolves the SP/FP afterGoFunctionCallEntrypoint
 // needs to resume directly inside the frame identified by fr. Frame 0 (the
 // throw site) already has both known exactly (they're what a Go exit always

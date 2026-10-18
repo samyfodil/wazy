@@ -281,11 +281,13 @@ func (m *machine) lowerCall(si *ssa.Instruction) {
 	if isDirectCall {
 		call := m.allocateInstr()
 		call.asCall(directCallee, calleeABI)
+		call.mayThrow = si.MayThrow()
 		m.insert(call)
 	} else {
 		ptr := m.compiler.VRegOf(indirectCalleePtr)
 		callInd := m.allocateInstr()
 		callInd.asCallIndirect(ptr, calleeABI)
+		callInd.mayThrow = si.MayThrow()
 		m.insert(callInd)
 	}
 

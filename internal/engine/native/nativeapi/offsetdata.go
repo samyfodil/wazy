@@ -82,30 +82,28 @@ const (
 	// ExecutionContextOffsetThrowAllocTrampolineAddress is the address of the
 	// throw-alloc trampoline, which allocates the Exception heap object,
 	// sets exceptionParamsPtr, and returns the exnref.
-	ExecutionContextOffsetThrowAllocTrampolineAddress    Offset = 672
-	ExecutionContextOffsetThrowTrampolineAddress         Offset = 680
-	ExecutionContextOffsetTryTableEnterTrampolineAddress Offset = 688
-	ExecutionContextOffsetTryTableLeaveTrampolineAddress Offset = 696
+	ExecutionContextOffsetThrowAllocTrampolineAddress Offset = 672
+	ExecutionContextOffsetThrowTrampolineAddress      Offset = 680
 	// ExecutionContextOffsetExceptionRef holds the exnref of the caught exception,
 	// used on the throw side and by catch_ref/catch_all_ref handlers.
-	ExecutionContextOffsetExceptionRef Offset = 704
+	ExecutionContextOffsetExceptionRef Offset = 688
 	// ExecutionContextOffsetExceptionParamsPtr points into the Exception's
 	// Params slice backing array. Used by both throw (store params) and
 	// catch (load params) sides.
-	ExecutionContextOffsetExceptionParamsPtr Offset = 712
-	// ExecutionContextOffsetCaughtExceptionClauseIdx is the matched catch clause index
-	// written by handleException and read by compiled handler dispatch code.
-	ExecutionContextOffsetCaughtExceptionClauseIdx Offset = 720
-	// ExecutionContextOffsetLocalsSaveAreaPtr points to a heap-allocated buffer
-	// where locals are mirrored inside try_table bodies, so that handler blocks
-	// can read throw-time local values after stack-clone restore.
-	ExecutionContextOffsetLocalsSaveAreaPtr Offset = 728
+	ExecutionContextOffsetExceptionParamsPtr Offset = 696
+	// ExecutionContextOffsetCaughtExceptionClauseIdx is the caught flag: non-zero
+	// while a throw resumes a catching frame, read by the check after every call
+	// that can throw inside a try_table and cleared by its landing pad.
+	ExecutionContextOffsetCaughtExceptionClauseIdx Offset = 704
+	// ExecutionContextOffsetThrownTag is the *wasm.TagInstance of the exception
+	// being caught, which the landing pad compares against its catch clauses.
+	ExecutionContextOffsetThrownTag Offset = 712
 	// ExecutionContextOffsetGCCheckTrampolineAddress is the address of the trampoline behind ref.test,
 	// ref.cast and the subtype-aware call_indirect check. See nativeapi.ExitCodeGCCheck.
-	ExecutionContextOffsetGCCheckTrampolineAddress Offset = 736
+	ExecutionContextOffsetGCCheckTrampolineAddress Offset = 720
 	// ExecutionContextOffsetMemclrAddress is the offset of `memclrAddress`, the entry PC of
 	// the Go runtime's memclrNoHeapPointers, called by the memory.fill lowering.
-	ExecutionContextOffsetMemclrAddress Offset = 744
+	ExecutionContextOffsetMemclrAddress Offset = 728
 )
 
 // AssertSavedRegistersFit panics if a save/restore layout that ends at absolute offset end

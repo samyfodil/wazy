@@ -42,13 +42,6 @@ const (
 	ExitCodeThrow
 	// ExitCodeNullReference is an exit code for a null reference trap (throw_ref with null exnref).
 	ExitCodeNullReference
-	// ExitCodeTryTableEnter is an exit code for entering a try_table block.
-	// The catch clause info is encoded in the upper bits. The dispatch loop
-	// saves the current SP/FP/returnAddress as a try handler checkpoint.
-	ExitCodeTryTableEnter
-	// ExitCodeTryTableLeave is an exit code for leaving a try_table block.
-	// The dispatch loop pops the most recent try handler.
-	ExitCodeTryTableLeave
 	// ExitCodeGCCheck is the shared exit code for the GC proposal's runtime type checks: ref.test,
 	// ref.cast, and the subtype-aware call_indirect check. Which one is meant is the trampoline's mode
 	// operand; see gcCheckMode.
@@ -115,12 +108,8 @@ func (e ExitCode) String() string {
 		return "throw"
 	case ExitCodeNullReference:
 		return "null_reference"
-	case ExitCodeTryTableEnter:
-		return "try_table_enter"
 	case ExitCodeGCCheck:
 		return "gc_check"
-	case ExitCodeTryTableLeave:
-		return "try_table_leave"
 	}
 	panic("TODO")
 }
@@ -141,12 +130,6 @@ func ExitCodeCallGoFunctionWithIndex(index int, withListener bool) ExitCode {
 
 func GoFunctionIndexFromExitCode(exitCode ExitCode) int {
 	return int(exitCode >> 8)
-}
-
-// TryTableIDFromExitCode extracts the try-table ID from an ExitCodeTryTableEnter
-// exit code. Uses the same encoding as GoFunctionIndexFromExitCode (upper 24 bits).
-func TryTableIDFromExitCode(exitCode ExitCode) int {
-	return GoFunctionIndexFromExitCode(exitCode)
 }
 
 // TerminationFuel is how many fuel ticks a guest gets before compiled code has to

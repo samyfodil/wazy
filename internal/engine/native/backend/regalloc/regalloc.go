@@ -870,6 +870,9 @@ func (a *Allocator[I, B, F]) allocBlock(f F, blk B) {
 				addr = uses[0].RealReg()
 			}
 			a.releaseCallerSavedRegs(addr)
+			if instr.ClobbersAllRegisters() {
+				a.releaseCalleeSavedRegs(addr)
+			}
 		}
 
 		for _, r := range killSet {
@@ -1021,6 +1024,25 @@ func (a *Allocator[I, B, F]) releaseCallerSavedRegs(addrReg RealReg) {
 		}
 		s.releaseRealReg(allocated)
 	}
+}
+
+// releaseCalleeSavedRegs evicts every value held in a callee-saved register
+// across a call that clobbers all registers, and records every callee-saved
+// register as used so the prologue saves (and the epilogue restores) them all:
+// the callees a throw abandons never restore theirs.
+func (a *Allocator[I, B, F]) releaseCalleeSavedRegs(addrReg RealReg) {
+	s := &a.state
+	for m := s.regsInUse.mask; m != 0; m &= m - 1 {
+		allocated := RealReg(bits.TrailingZeros64(m))
+		if allocated == addrReg || !a.regInfo.CalleeSavedRegisters.has(allocated) {
+			continue
+		}
+		if s.regsInUse.get(allocated).v.IsRealReg() {
+			continue
+		}
+		s.releaseRealReg(allocated)
+	}
+	s.allocatedRegSet |= a.regInfo.CalleeSavedRegisters
 }
 
 func (a *Allocator[I, B, F]) fixMergeState(f F, blk B) {

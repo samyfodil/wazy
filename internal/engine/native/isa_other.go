@@ -23,12 +23,6 @@ func unwindStackForThrow(sp, fp, top uintptr, frames []nativeapi.ThrowFrame) []n
 	panic("unsupported architecture")
 }
 
-// firstReturnAddress captures a frame's return address for the try_table
-// enter-continuation; see the arm64/amd64 implementations.
-func firstReturnAddress(sp, fp, top uintptr) uintptr {
-	panic("unsupported architecture")
-}
-
 // resolveThrowTransferSPFP resolves the SP/FP for a throw-time control
 // transfer; see the arm64/amd64 implementations.
 func resolveThrowTransferSPFP(fr nativeapi.ThrowFrame, frameSize int64) (sp, fp uintptr) {

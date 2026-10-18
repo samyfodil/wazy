@@ -2852,14 +2852,12 @@ func TestCompiler_declareSignatures(t *testing.T) {
 			// EH signatures.
 			{ID: 12, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64}},
 			{ID: 13, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
-			{ID: 14, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
-			{ID: 15, Params: []ssa.Type{ssa.TypeI64}},
 			// GC runtime. The safepoint shares it rather than declaring one of its own.
-			{ID: 16, Params: []ssa.Type{
+			{ID: 14, Params: []ssa.Type{
 				ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64,
 			}, Results: []ssa.Type{ssa.TypeI64}},
 			// memclr signature.
-			{ID: 17, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
+			{ID: 15, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
 		}
 
 		require.Equal(t, len(expected), len(declaredSigs))
@@ -2902,14 +2900,12 @@ func TestCompiler_declareSignatures(t *testing.T) {
 			// EH signatures.
 			{ID: 20, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64}},
 			{ID: 21, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
-			{ID: 22, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
-			{ID: 23, Params: []ssa.Type{ssa.TypeI64}},
 			// GC runtime. The safepoint shares it rather than declaring one of its own.
-			{ID: 24, Params: []ssa.Type{
+			{ID: 22, Params: []ssa.Type{
 				ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64,
 			}, Results: []ssa.Type{ssa.TypeI64}},
 			// memclr signature.
-			{ID: 25, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
+			{ID: 23, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
 		}
 		require.Equal(t, len(expected), len(declaredSigs))
 		for i := 0; i < len(declaredSigs); i++ {

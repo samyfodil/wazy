@@ -120,29 +120,6 @@ func UnwindStackForThrow(sp, top uintptr, frames []nativeapi.ThrowFrame) []nativ
 	return frames
 }
 
-// FirstReturnAddress returns, in O(1), the return address of the frame that
-// owns the just-below-sp frame -- i.e. the address the function whose frame
-// sits at sp will return to. It reads exactly the words UnwindStackForThrow
-// reads on its first iteration (frame_size at sp, then the ReturnAddress
-// slot one frame up), without walking the rest of the stack. Used to recover
-// a try_table's enter-continuation from the still-live enter trampoline
-// frame at try_table-enter time (see call_engine.go's firstReturnAddress and
-// ExitCodeTryTableEnter).
-func FirstReturnAddress(sp, top uintptr) uintptr {
-	l := int(top - sp)
-
-	var stackBuf []byte
-	{
-		hdr := (*sliceHeader)(unsafe.Pointer(&stackBuf))
-		hdr.Data = sp
-		hdr.Len = l
-		hdr.Cap = l
-	}
-
-	frameSize := binary.LittleEndian.Uint64(stackBuf[0:])
-	return uintptr(binary.LittleEndian.Uint64(stackBuf[frameSize+16:]))
-}
-
 // GoCallStackView implements native.goCallStackView.
 func GoCallStackView(stackPointerBeforeGoCall *uint64) []uint64 {
 	//                  (high address)

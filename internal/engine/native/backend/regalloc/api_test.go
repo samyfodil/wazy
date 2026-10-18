@@ -36,9 +36,9 @@ type (
 
 	// mockInstr implements Instr.
 	mockInstr struct {
-		next, prev                 *mockInstr
-		defs, uses                 []VReg
-		isCopy, isCall, isIndirect bool
+		next, prev                              *mockInstr
+		defs, uses                              []VReg
+		isCopy, isCall, isIndirect, clobbersAll bool
 	}
 )
 
@@ -280,6 +280,8 @@ func (m *mockInstr) IsCall() bool { return m.isCall }
 
 // IsIndirectCall implements Instr.
 func (m *mockInstr) IsIndirectCall() bool { return m.isIndirect }
+
+func (m *mockInstr) ClobbersAllRegisters() bool { return m.clobbersAll }
 
 // IsReturn implements Instr.
 func (m *mockInstr) IsReturn() bool { return false }

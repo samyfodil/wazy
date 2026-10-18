@@ -1673,7 +1673,7 @@ L0 (SSA Block: blk0):
 	defineUninitializedReg %rdx
 	pxor %xmm15, %xmm15
 	movq 16(%rsp), %rcx
-	callq *744(%rcx)
+	callq *728(%rcx)
 	nop_use_reg %xmm0
 	nop_use_reg %xmm1
 	nop_use_reg %xmm2
@@ -1730,7 +1730,7 @@ L0 (SSA Block: blk0):
 	b.lo #0x28, (L2)
 	ldr x10, [x1, #0x8]
 	add x9, x10, x9
-	ldr x10, [x0, #0x2e8]
+	ldr x10, [x0, #0x2d8]
 	mov x0, x9
 	mov x1, x8
 	bl x10
@@ -2292,67 +2292,18 @@ L5 (SSA Block: blk5):
 			afterFinalizeARM64: `
 L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
-	sub sp, sp, #0x10
-	orr x27, xzr, #0x10
-	str x27, [sp, #-0x10]!
-	stp x0, x1, [sp, #0x10]
-	str x1, [x0, #0x8]
-	ldr x8, [x0, #0x2b0]
-	movz x9, #0x1b, lsl 0
-	mov x1, x9
-	bl x8
-	ldr x8, [sp, #0x10]
-	ldr x9, [x8, #0x2d0]
-	orr w10, wzr, #0x1
-	subs wzr, w9, w10
-	csel w9, w10, w9, hs
-	br_table_sequence x9, table_index=0
-L3 (SSA Block: blk3):
-L1 (SSA Block: blk1):
-	mov x0, xzr
-	add sp, sp, #0x10
-	add sp, sp, #0x10
-	ldr x30, [sp], #0x10
-	ret
+	str xzr, [sp, #-0x10]!
 L4 (SSA Block: blk4):
-	ldr x9, [sp, #0x18]
-	str x9, [x8, #0x8]
-	ldr x9, [x8, #0x2b8]
-	mov x0, x8
-	bl x9
 	movz w0, #0x2a, lsl 0
-	add sp, sp, #0x10
 	add sp, sp, #0x10
 	ldr x30, [sp], #0x10
 	ret
 `,
 			afterLoweringARM64: `
 L0 (SSA Block: blk0):
-	mov x128?, x0
-	mov x129?, x1
-	str x129?, [x128?, #0x8]
-	ldr x130?, [x128?, #0x2b0]
-	mov x0, x128?
-	movz x131?, #0x1b, lsl 0
-	mov x1, x131?
-	bl x130?
-	ldr x132?, [x128?, #0x2d0]
-	orr w136?, wzr, #0x1
-	subs wzr, w132?, w136?
-	csel w137?, w136?, w132?, hs
-	br_table_sequence x137?, table_index=0
-L3 (SSA Block: blk3):
-L1 (SSA Block: blk1):
-	mov x133?, xzr
-	mov x0, x133?
-	ret
 L4 (SSA Block: blk4):
-	str x129?, [x128?, #0x8]
-	ldr x135?, [x128?, #0x2b8]
-	mov x0, x128?
-	bl x135?
-	movz w134?, #0x2a, lsl 0
-	mov x0, x134?
+	movz w130?, #0x2a, lsl 0
+	mov x0, x130?
 	ret
 `,
 		},
@@ -2361,48 +2312,67 @@ L4 (SSA Block: blk4):
 			afterFinalizeARM64: `
 L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
+	sub sp, sp, #0x130
+	stp x19, x20, [sp]
+	stp x21, x22, [sp, #0x10]
+	stp x23, x24, [sp, #0x20]
+	stp x25, x26, [sp, #0x30]
+	str x28, [sp, #0x40]
+	stp q18, q19, [sp, #0x50]
+	stp q20, q21, [sp, #0x70]
+	stp q22, q23, [sp, #0x90]
+	stp q24, q25, [sp, #0xb0]
+	stp q26, q27, [sp, #0xd0]
+	stp q28, q29, [sp, #0xf0]
+	stp q30, q31, [sp, #0x110]
 	sub sp, sp, #0x10
-	orr x27, xzr, #0x10
+	movz x27, #0x140, lsl 0
 	str x27, [sp, #-0x10]!
-	stp x0, x1, [sp, #0x10]
-	str x1, [x0, #0x8]
-	ldr x8, [x0, #0x2b0]
-	movz x9, #0x1b, lsl 0
-	mov x1, x9
-	bl x8
-	ldr x8, [sp, #0x10]
-	ldr x9, [x8, #0x2d0]
-	orr w10, wzr, #0x1
-	subs wzr, w9, w10
-	csel w9, w10, w9, hs
-	br_table_sequence x9, table_index=0
-L3 (SSA Block: blk3):
-L1 (SSA Block: blk1):
-	movz w0, #0x2a, lsl 0
-	add sp, sp, #0x10
-	add sp, sp, #0x10
-	ldr x30, [sp], #0x10
-	ret
+	str x0, [sp, #0x10]
 L4 (SSA Block: blk4):
-	ldr x9, [sp, #0x18]
-	str x9, [x8, #0x8]
-	ldr x9, [x8, #0x2a0]
-	mov x0, x8
+	str x1, [x0, #0x8]
+	ldr x8, [x0, #0x2a0]
 	mov x1, xzr
-	bl x9
+	bl x8
 	mov x1, x0
 	ldr x8, [sp, #0x10]
 	ldr x9, [x8, #0x2a8]
 	mov x0, x8
 	bl x9
-	movz x8, #0x3, lsl 0
-	ldr x9, [sp, #0x10]
-	str w8, [x9]
-	mov x8, sp
-	str x8, [x9, #0x38]
-	adr x8, #0x0
-	str x8, [x9, #0x30]
-	exit_sequence x9
+	ldr x8, [sp, #0x10]
+	ldr x9, [x8, #0x2c0]
+	cbnz w9, #0x34 (L3)
+L5 (SSA Block: blk5):
+	movz x9, #0x3, lsl 0
+	str w9, [x8]
+	mov x9, sp
+	str x9, [x8, #0x38]
+	adr x9, #0x0
+	str x9, [x8, #0x30]
+	exit_sequence x8
+L3 (SSA Block: blk3):
+	mov x9, xzr
+	str x9, [x8, #0x2c0]
+L6 (SSA Block: blk6):
+L1 (SSA Block: blk1):
+	movz w0, #0x2a, lsl 0
+	add sp, sp, #0x10
+	add sp, sp, #0x10
+	ldp x19, x20, [sp]
+	ldp x21, x22, [sp, #0x10]
+	ldp x23, x24, [sp, #0x20]
+	ldp x25, x26, [sp, #0x30]
+	ldr x28, [sp, #0x40]
+	ldp q18, q19, [sp, #0x50]
+	ldp q20, q21, [sp, #0x70]
+	ldp q22, q23, [sp, #0x90]
+	ldp q24, q25, [sp, #0xb0]
+	ldp q26, q27, [sp, #0xd0]
+	ldp q28, q29, [sp, #0xf0]
+	ldp q30, q31, [sp, #0x110]
+	add sp, sp, #0x130
+	ldr x30, [sp], #0x10
+	ret
 `,
 		},
 		{
@@ -2414,8 +2384,21 @@ L4 (SSA Block: blk4):
 			afterFinalizeARM64: `
 L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
+	sub sp, sp, #0x130
+	stp x19, x20, [sp]
+	stp x21, x22, [sp, #0x10]
+	stp x23, x24, [sp, #0x20]
+	stp x25, x26, [sp, #0x30]
+	str x28, [sp, #0x40]
+	stp q18, q19, [sp, #0x50]
+	stp q20, q21, [sp, #0x70]
+	stp q22, q23, [sp, #0x90]
+	stp q24, q25, [sp, #0xb0]
+	stp q26, q27, [sp, #0xd0]
+	stp q28, q29, [sp, #0xf0]
+	stp q30, q31, [sp, #0x110]
 	sub sp, sp, #0x30
-	orr x27, xzr, #0x30
+	movz x27, #0x160, lsl 0
 	str x27, [sp, #-0x10]!
 	str x0, [sp, #0x10]
 	str x1, [sp, #0x30]
@@ -2424,19 +2407,49 @@ L0 (SSA Block: blk0):
 	str w4, [sp, #0x20]
 	str w5, [sp, #0x24]
 	str w6, [sp, #0x28]
+L4 (SSA Block: blk4):
 	str x1, [x0, #0x8]
-	ldr x8, [x0, #0x2b0]
-	movz x9, #0x1b, lsl 0
+	ldr x8, [x0, #0x2a0]
+	mov x9, xzr
 	mov x1, x9
 	bl x8
+	mov x1, x0
 	ldr x8, [sp, #0x10]
-	ldr x9, [x8, #0x2d0]
-	orr w10, wzr, #0x1
-	subs wzr, w9, w10
-	csel w9, w10, w9, hs
-	br_table_sequence x9, table_index=0
+	ldr x9, [x8, #0x2b8]
+	ldr w10, [sp, #0x18]
+	str w10, [x9]
+	ldr w10, [sp, #0x1c]
+	str w10, [x9, #0x8]
+	ldr w10, [sp, #0x20]
+	str w10, [x9, #0x10]
+	ldr w10, [sp, #0x24]
+	str w10, [x9, #0x18]
+	ldr w10, [sp, #0x28]
+	str w10, [x9, #0x20]
+	ldr x9, [x8, #0x2a8]
+	mov x0, x8
+	bl x9
+	ldr x8, [sp, #0x10]
+	ldr x9, [x8, #0x2c0]
+	cbnz w9, #0x34 (L3)
+L5 (SSA Block: blk5):
+	movz x9, #0x3, lsl 0
+	str w9, [x8]
+	mov x9, sp
+	str x9, [x8, #0x38]
+	adr x9, #0x0
+	str x9, [x8, #0x30]
+	exit_sequence x8
 L3 (SSA Block: blk3):
-	ldr x8, [x8, #0x2c8]
+	mov x9, xzr
+	str x9, [x8, #0x2c0]
+	ldr x9, [sp, #0x30]
+	ldr x10, [x9, #0x8]
+	ldr x11, [x8, #0x2c8]
+	subs xzr, x10, x11
+	b.ne #0x74, (L7)
+L6 (SSA Block: blk6):
+	ldr x8, [x8, #0x2b8]
 	ldr w9, [x8]
 	ldr w10, [x8, #0x8]
 	ldr w11, [x8, #0x10]
@@ -2450,39 +2463,24 @@ L1 (SSA Block: blk1):
 	mov x0, x9
 	add sp, sp, #0x10
 	add sp, sp, #0x30
+	ldp x19, x20, [sp]
+	ldp x21, x22, [sp, #0x10]
+	ldp x23, x24, [sp, #0x20]
+	ldp x25, x26, [sp, #0x30]
+	ldr x28, [sp, #0x40]
+	ldp q18, q19, [sp, #0x50]
+	ldp q20, q21, [sp, #0x70]
+	ldp q22, q23, [sp, #0x90]
+	ldp q24, q25, [sp, #0xb0]
+	ldp q26, q27, [sp, #0xd0]
+	ldp q28, q29, [sp, #0xf0]
+	ldp q30, q31, [sp, #0x110]
+	add sp, sp, #0x130
 	ldr x30, [sp], #0x10
 	ret
-L4 (SSA Block: blk4):
-	ldr x9, [x8, #0x2d8]
-	ldr w10, [sp, #0x18]
-	str w10, [x9]
-	ldr w11, [sp, #0x1c]
-	str w11, [x9, #0x10]
-	ldr w12, [sp, #0x20]
-	str w12, [x9, #0x20]
-	ldr w13, [sp, #0x24]
-	str w13, [x9, #0x30]
-	ldr w14, [sp, #0x28]
-	str w14, [x9, #0x40]
-	ldr x9, [sp, #0x30]
+L7 (SSA Block: blk7):
 	str x9, [x8, #0x8]
-	ldr x9, [x8, #0x2a0]
-	mov x0, x8
-	mov x1, xzr
-	bl x9
-	mov x1, x0
-	ldr x8, [sp, #0x10]
-	ldr x9, [x8, #0x2c8]
-	ldr w10, [sp, #0x18]
-	str w10, [x9]
-	ldr w10, [sp, #0x1c]
-	str w10, [x9, #0x8]
-	ldr w10, [sp, #0x20]
-	str w10, [x9, #0x10]
-	ldr w10, [sp, #0x24]
-	str w10, [x9, #0x18]
-	ldr w10, [sp, #0x28]
-	str w10, [x9, #0x20]
+	ldr x1, [x8, #0x2b0]
 	ldr x9, [x8, #0x2a8]
 	mov x0, x8
 	bl x9
@@ -2501,37 +2499,76 @@ L4 (SSA Block: blk4):
 			afterFinalizeARM64: `
 L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
+	sub sp, sp, #0x130
+	stp x19, x20, [sp]
+	stp x21, x22, [sp, #0x10]
+	stp x23, x24, [sp, #0x20]
+	stp x25, x26, [sp, #0x30]
+	str x28, [sp, #0x40]
+	stp q18, q19, [sp, #0x50]
+	stp q20, q21, [sp, #0x70]
+	stp q22, q23, [sp, #0x90]
+	stp q24, q25, [sp, #0xb0]
+	stp q26, q27, [sp, #0xd0]
+	stp q28, q29, [sp, #0xf0]
+	stp q30, q31, [sp, #0x110]
 	sub sp, sp, #0x10
-	orr x27, xzr, #0x10
+	movz x27, #0x140, lsl 0
 	str x27, [sp, #-0x10]!
 	stp x0, x1, [sp, #0x10]
+L4 (SSA Block: blk4):
 	str x1, [x0, #0x8]
-	ldr x8, [x0, #0x2b0]
-	movz x9, #0x1b, lsl 0
+	ldr x8, [x0, #0x2a0]
+	mov x9, xzr
 	mov x1, x9
 	bl x8
+	mov x1, x0
 	ldr x8, [sp, #0x10]
-	ldr x9, [x8, #0x2d0]
-	orr w10, wzr, #0x1
-	subs wzr, w9, w10
-	csel w9, w10, w9, hs
-	br_table_sequence x9, table_index=0
+	ldr x9, [x8, #0x2a8]
+	mov x0, x8
+	bl x9
+	ldr x8, [sp, #0x10]
+	ldr x9, [x8, #0x2c0]
+	cbnz w9, #0x34 (L3)
+L5 (SSA Block: blk5):
+	movz x9, #0x3, lsl 0
+	str w9, [x8]
+	mov x9, sp
+	str x9, [x8, #0x38]
+	adr x9, #0x0
+	str x9, [x8, #0x30]
+	exit_sequence x8
 L3 (SSA Block: blk3):
+	mov x9, xzr
+	str x9, [x8, #0x2c0]
+	ldr x9, [sp, #0x18]
+	ldr x10, [x9, #0x8]
+	ldr x11, [x8, #0x2c8]
+	subs xzr, x10, x11
+	b.ne #0x4c, (L7)
+L6 (SSA Block: blk6):
 L1 (SSA Block: blk1):
 	movz w0, #0x17, lsl 0
 	add sp, sp, #0x10
 	add sp, sp, #0x10
+	ldp x19, x20, [sp]
+	ldp x21, x22, [sp, #0x10]
+	ldp x23, x24, [sp, #0x20]
+	ldp x25, x26, [sp, #0x30]
+	ldr x28, [sp, #0x40]
+	ldp q18, q19, [sp, #0x50]
+	ldp q20, q21, [sp, #0x70]
+	ldp q22, q23, [sp, #0x90]
+	ldp q24, q25, [sp, #0xb0]
+	ldp q26, q27, [sp, #0xd0]
+	ldp q28, q29, [sp, #0xf0]
+	ldp q30, q31, [sp, #0x110]
+	add sp, sp, #0x130
 	ldr x30, [sp], #0x10
 	ret
-L4 (SSA Block: blk4):
-	ldr x9, [sp, #0x18]
+L7 (SSA Block: blk7):
 	str x9, [x8, #0x8]
-	ldr x9, [x8, #0x2a0]
-	mov x0, x8
-	mov x1, xzr
-	bl x9
-	mov x1, x0
-	ldr x8, [sp, #0x10]
+	ldr x1, [x8, #0x2b0]
 	ldr x9, [x8, #0x2a8]
 	mov x0, x8
 	bl x9

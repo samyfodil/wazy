@@ -276,6 +276,20 @@ func encodeModuleAdv(m *wasm.Module) []byte {
 		}
 		return s
 	})
+	if len(m.ImportSection) > 0 { // function imports only
+		buf = appendSection(buf, 2, func(s []byte) []byte {
+			s = appendUleb128(s, uint32(len(m.ImportSection)))
+			for _, imp := range m.ImportSection {
+				s = appendUleb128(s, uint32(len(imp.Module)))
+				s = append(s, imp.Module...)
+				s = appendUleb128(s, uint32(len(imp.Name)))
+				s = append(s, imp.Name...)
+				s = append(s, wasm.ExternTypeFunc)
+				s = appendUleb128(s, imp.DescFunc)
+			}
+			return s
+		})
+	}
 	buf = appendSection(buf, 3, func(s []byte) []byte {
 		s = appendUleb128(s, uint32(len(m.FunctionSection)))
 		for _, idx := range m.FunctionSection {
