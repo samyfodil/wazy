@@ -96,9 +96,8 @@ func TestCompilationCache_mappedCodeOutlivesCompiledModule(t *testing.T) {
 	waitCalls()
 
 	// Replace every entry the way the file cache does, by renaming a new file
-	// over it, then remove them. Windows refuses both while an entry is
-	// mapped, which is the point of the file cache tolerating that.
-	if goruntime.GOOS != "windows" {
+	// over it, then remove them.
+	{
 		var entries []string
 		require.NoError(t, filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 			if err == nil && !d.IsDir() {
