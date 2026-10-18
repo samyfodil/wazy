@@ -187,11 +187,35 @@ func (e *engine) HasCompiledModule(module *wasm.Module, listeners []api.Function
 		defer nativeapi.PerfMap.Unlock()
 	}
 	_, ok, err := e.getCompiledModule(module, listeners, ensureTermination)
+	if ok {
+		releaseFunctionBodies(module)
+	}
 	return ok, err
+}
+
+// releaseFunctionBodies drops module's function bodies once this engine has
+// native code for it, from a compile or from either cache. Nothing reads them
+// after that, and for a large module they are tens of megabytes, kept alive
+// for as long as the CompiledModule is. A module whose compiled code is
+// deleted can't be instantiated again, so it never needs them back.
+func releaseFunctionBodies(module *wasm.Module) {
+	if module.IsHostModule {
+		return
+	}
+	for i := range module.CodeSection {
+		module.CodeSection[i].Body = nil
+	}
 }
 
 // CompileModule implements wasm.Engine.
 func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listeners []api.FunctionListener, ensureTermination bool) (err error) {
+	// Deferred first so that it runs last, after a recovered panic has set err.
+	defer func() {
+		if err == nil {
+			releaseFunctionBodies(module)
+		}
+	}()
+
 	// The compiler asserts with panics rather than threading errors through
 	// every tree-matching site, so a shape it cannot lower arrives here as a
 	// panic. The module reaching this point has already passed validation, so
