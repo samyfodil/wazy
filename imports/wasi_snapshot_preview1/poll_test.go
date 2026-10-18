@@ -230,9 +230,9 @@ func Test_pollOneoff_Stdin(t *testing.T) {
 `,
 		},
 		{
-			name:            "20ms timeout, fdread on tty (buffer ready): both events are written",
+			name:            "20ms timeout, fdread on tty (buffer ready): only the fd event, the clock has not expired",
 			nsubscriptions:  2,
-			expectedNevents: 2,
+			expectedNevents: 1,
 			stdin:           &ttyStdinFile{StdinFile: sys.StdinFile{Reader: strings.NewReader("test")}},
 			mem: concat(
 				clockNsSub(20*1000*1000),
@@ -244,23 +244,22 @@ func Test_pollOneoff_Stdin(t *testing.T) {
 			expectedMem: []byte{
 				0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, // userdata
 				byte(wasip1.ErrnoSuccess), 0x0, // errno is 16 bit
-				wasip1.EventTypeClock, 0x0, 0x0, 0x0, // 4 bytes for type enum
-				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, // pad to 32
-				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
-				0x0, 0x0,
-
-				0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, // userdata
-				byte(wasip1.ErrnoSuccess), 0x0, // errno is 16 bit
 				wasip1.EventTypeFdRead, 0x0, 0x0, 0x0, // 4 bytes for type enum
 				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, // pad to 32
 				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
 				0x0, 0x0,
 
+				// 32 empty bytes
+				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+
 				'?', // stopped after encoding
 			},
 			expectedLog: `
 ==> wasi_snapshot_preview1.poll_oneoff(in=0,out=128,nsubscriptions=2)
-<== (nevents=2,errno=ESUCCESS)
+<== (nevents=1,errno=ESUCCESS)
 `,
 		},
 		{
@@ -269,7 +268,7 @@ func Test_pollOneoff_Stdin(t *testing.T) {
 			expectedNevents: 2,
 			stdin:           &ttyStdinFile{StdinFile: sys.StdinFile{Reader: strings.NewReader("test")}},
 			mem: concat(
-				clockNsSub(20*1000*1000),
+				clockNsSub(0),
 				fdReadSub,
 			),
 			expectedErrno: wasip1.ErrnoSuccess,
@@ -278,14 +277,14 @@ func Test_pollOneoff_Stdin(t *testing.T) {
 			expectedMem: []byte{
 				0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, // userdata
 				byte(wasip1.ErrnoSuccess), 0x0, // errno is 16 bit
-				wasip1.EventTypeClock, 0x0, 0x0, 0x0, // 4 bytes for type enum
+				wasip1.EventTypeFdRead, 0x0, 0x0, 0x0, // 4 bytes for type enum
 				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, // pad to 32
 				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
 				0x0, 0x0,
 
 				0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, // userdata
 				byte(wasip1.ErrnoSuccess), 0x0, // errno is 16 bit
-				wasip1.EventTypeFdRead, 0x0, 0x0, 0x0, // 4 bytes for type enum
+				wasip1.EventTypeClock, 0x0, 0x0, 0x0, // 4 bytes for type enum
 				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, // pad to 32
 				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
 				0x0, 0x0,
@@ -303,7 +302,7 @@ func Test_pollOneoff_Stdin(t *testing.T) {
 			expectedNevents: 2,
 			stdin:           &sys.StdinFile{Reader: strings.NewReader("test")},
 			mem: concat(
-				clockNsSub(20*1000*1000),
+				clockNsSub(0),
 				fdReadSub,
 			),
 			expectedErrno: wasip1.ErrnoSuccess,
@@ -312,14 +311,14 @@ func Test_pollOneoff_Stdin(t *testing.T) {
 			expectedMem: []byte{
 				0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, // userdata
 				byte(wasip1.ErrnoSuccess), 0x0, // errno is 16 bit
-				wasip1.EventTypeClock, 0x0, 0x0, 0x0, // 4 bytes for type enum
+				wasip1.EventTypeFdRead, 0x0, 0x0, 0x0, // 4 bytes for type enum
 				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, // pad to 32
 				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
 				0x0, 0x0,
 
 				0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, // userdata
 				byte(wasip1.ErrnoSuccess), 0x0, // errno is 16 bit
-				wasip1.EventTypeFdRead, 0x0, 0x0, 0x0, // 4 bytes for type enum
+				wasip1.EventTypeClock, 0x0, 0x0, 0x0, // 4 bytes for type enum
 				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, // pad to 32
 				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
 				0x0, 0x0,
@@ -332,9 +331,9 @@ func Test_pollOneoff_Stdin(t *testing.T) {
 `,
 		},
 		{
-			name:            "1ns timeout, fdread on regular file: both events are written",
+			name:            "20ms timeout, fdread on regular file: only the fd event, the clock has not expired",
 			nsubscriptions:  2,
-			expectedNevents: 2,
+			expectedNevents: 1,
 			stdin:           &sys.StdinFile{Reader: strings.NewReader("test")},
 			mem: concat(
 				clockNsSub(20*1000*1000),
@@ -346,23 +345,22 @@ func Test_pollOneoff_Stdin(t *testing.T) {
 			expectedMem: []byte{
 				0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, // userdata
 				byte(wasip1.ErrnoSuccess), 0x0, // errno is 16 bit
-				wasip1.EventTypeClock, 0x0, 0x0, 0x0, // 4 bytes for type enum
-				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, // pad to 32
-				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
-				0x0, 0x0,
-
-				0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, // userdata
-				byte(wasip1.ErrnoSuccess), 0x0, // errno is 16 bit
 				wasip1.EventTypeFdRead, 0x0, 0x0, 0x0, // 4 bytes for type enum
 				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, // pad to 32
 				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
 				0x0, 0x0,
 
+				// 32 empty bytes
+				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+
 				'?', // stopped after encoding
 			},
 			expectedLog: `
 ==> wasi_snapshot_preview1.poll_oneoff(in=0,out=128,nsubscriptions=2)
-<== (nevents=2,errno=ESUCCESS)
+<== (nevents=1,errno=ESUCCESS)
 `,
 		},
 		{
@@ -402,7 +400,7 @@ func Test_pollOneoff_Stdin(t *testing.T) {
 		{
 			name:            "pollable pipe, multiple subs, events returned out of order",
 			nsubscriptions:  3,
-			expectedNevents: 3,
+			expectedNevents: 2,
 			mem: concat(
 				fdReadSub,
 				clockNsSub(20*1000*1000),
@@ -413,14 +411,6 @@ func Test_pollOneoff_Stdin(t *testing.T) {
 			out:           128, // past in
 			resultNevents: 512, // past out
 			expectedMem: []byte{
-				// Clock is acknowledged first.
-				0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, // userdata
-				byte(wasip1.ErrnoSuccess), 0x0, // errno is 16 bit
-				wasip1.EventTypeClock, 0x0, 0x0, 0x0, // 4 bytes for type enum
-				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
-				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
-				0x0, 0x0,
-
 				// Then an illegal file with custom user data.
 				0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, // userdata
 				byte(wasip1.ErrnoBadf), 0x0, // errno is 16 bit
@@ -438,11 +428,17 @@ func Test_pollOneoff_Stdin(t *testing.T) {
 				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
 				0x0, 0x0,
 
+				// 32 empty bytes
+				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+
 				'?', // stopped after encoding
 			},
 			expectedLog: `
 ==> wasi_snapshot_preview1.poll_oneoff(in=0,out=128,nsubscriptions=3)
-<== (nevents=3,errno=ESUCCESS)
+<== (nevents=2,errno=ESUCCESS)
 `,
 		},
 	}
@@ -509,19 +505,19 @@ func Test_pollOneoff_Zero(t *testing.T) {
 		),
 	)
 
+	// The fd is ready; the 20ms clock has not expired, so it is not reported.
 	expectedMem := []byte{
-		0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, // userdata
-		byte(wasip1.ErrnoSuccess), 0x0, // errno is 16 bit
-		wasip1.EventTypeClock, 0x0, 0x0, 0x0, // 4 bytes for type enum
-		0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
-		0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
-
 		0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, // userdata
 		byte(wasip1.ErrnoSuccess), 0x0, // errno is 16 bit
 		wasip1.EventTypeFdRead, 0x0, 0x0, 0x0, // 4 bytes for type enum
 		0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, // pad to 32
 		0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
 		0x0, 0x0,
+
+		0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+		0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+		0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+		0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
 
 		'?', // stopped after encoding
 	}
@@ -536,7 +532,7 @@ func Test_pollOneoff_Zero(t *testing.T) {
 	// Events should be written on success regardless of nested failure.
 	nevents, ok := mod.Memory().ReadUint32Le(resultNevents)
 	require.True(t, ok)
-	require.Equal(t, uint32(2), nevents)
+	require.Equal(t, uint32(1), nevents)
 
 	// second run: simulate no more data on the fd
 	poller.ready = false
@@ -781,7 +777,9 @@ func Test_pollOneoff_NonStdinPollableTimeoutBudget(t *testing.T) {
 ==> wasi_snapshot_preview1.poll_oneoff(in=0,out=128,nsubscriptions=3)
 <== (nevents=1,errno=ESUCCESS)
 `, "\n"+log.String())
-	require.Equal(t, []int32{10}, firstPoller.timeouts)
+	// Neither fd is ever waited on: with two that cannot be polled together,
+	// each is only checked, so a slow first one cannot delay the second.
+	require.Equal(t, []int32{0}, firstPoller.timeouts)
 	require.Equal(t, []int32{0}, secondPoller.timeouts)
 
 	outMem, ok := mod.Memory().Read(out, 96)
@@ -985,4 +983,116 @@ func Test_pollOneoff_BlockingFdTimeout(t *testing.T) {
 			require.Equal(t, uint32(1), nevents)
 		})
 	}
+}
+
+// clockNsSubWithUserData is clockNsSub with the given userdata, to tell
+// several clock events apart.
+func clockNsSubWithUserData(ns uint64, userdata byte) []byte {
+	sub := clockNsSub(ns)
+	sub[0] = userdata
+	return sub
+}
+
+// Test_pollOneoff_OnlyExpiredClocks is the reproducer from
+// https://github.com/tetratelabs/wazero/issues/2399: two clocks, of 10ms and
+// 1000s. poll_oneoff returns when the first expires, and must report only
+// that one -- every clock used to be acknowledged up front, so the 1000s one
+// was reported as expired too.
+func Test_pollOneoff_OnlyExpiredClocks(t *testing.T) {
+	mod, r, _ := requireProxyModule(t, wazy.NewModuleConfig())
+	defer r.Close(testCtx)
+
+	maskMemory(t, mod, 1024)
+	mod.Memory().Write(0, concat(
+		clockNsSubWithUserData(uint64(10*time.Millisecond), 1),
+		clockNsSubWithUserData(uint64(1000*time.Second), 2),
+	))
+
+	requireErrnoResult(t, wasip1.ErrnoSuccess, mod, wasip1.PollOneoffName,
+		uint64(0), uint64(128), uint64(2), uint64(512))
+	nevents, ok := mod.Memory().ReadUint32Le(512)
+	require.True(t, ok)
+	require.Equal(t, uint32(1), nevents)
+	userdata, ok := mod.Memory().ReadByte(128)
+	require.True(t, ok)
+	require.Equal(t, byte(1), userdata, "reported the clock that has not expired")
+}
+
+// Test_pollOneoff_ReadyEventDoesNotSleep: an event that is ready at once ends
+// the call at once. A clock beside an fd_write subscription used to be slept
+// out in full, and then reported as expired.
+func Test_pollOneoff_ReadyEventDoesNotSleep(t *testing.T) {
+	var slept []int64
+	mod, r, _ := requireProxyModule(t, wazy.NewModuleConfig().
+		WithNanosleep(func(ns int64) { slept = append(slept, ns) }))
+	defer r.Close(testCtx)
+
+	maskMemory(t, mod, 1024)
+	mod.Memory().Write(0, concat(
+		clockNsSubWithUserData(uint64(10*time.Second), 1),
+		[]byte{
+			0x02, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, // userdata
+			wasip1.EventTypeFdWrite, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+			byte(sys.FdStdout), 0x0, 0x0, 0x0, // valid writable fd
+			0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+			0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+			0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+			0x0, 0x0, 0x0, 0x0, // pad to 48 bytes
+		},
+	))
+
+	requireErrnoResult(t, wasip1.ErrnoSuccess, mod, wasip1.PollOneoffName,
+		uint64(0), uint64(128), uint64(2), uint64(512))
+	require.Zero(t, len(slept))
+	nevents, ok := mod.Memory().ReadUint32Le(512)
+	require.True(t, ok)
+	require.Equal(t, uint32(1), nevents)
+	userdata, ok := mod.Memory().ReadByte(128)
+	require.True(t, ok)
+	require.Equal(t, byte(2), userdata, "expected only the fd_write event")
+}
+
+// Test_pollOneoff_AnyReadyUnbatched covers
+// https://github.com/tetratelabs/wazero/issues/2480 for fds that cannot be
+// polled in one call, such as an embedder's own files: with the first never
+// ready and the second ready, poll_oneoff returns the second promptly. Polling
+// them in turn used to wait out the whole timeout on the first.
+func Test_pollOneoff_AnyReadyUnbatched(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(tmpDir+"/one.txt", []byte("one"), 0o600))
+	require.NoError(t, os.WriteFile(tmpDir+"/two.txt", []byte("two"), 0o600))
+	mod, r, _ := requireProxyModule(t, wazy.NewModuleConfig().WithFSConfig(
+		wazy.NewFSConfig().WithDirMount(tmpDir, "/")))
+	defer r.Close(testCtx)
+
+	firstFD := requirePollOpenFile(t, mod, "one.txt")
+	secondFD := requirePollOpenFile(t, mod, "two.txt")
+	never := &pollableFile{}
+	ready := &pollableFile{ready: true}
+	fsc := mod.(*wasm.ModuleInstance).Sys.FS()
+	entry, ok := fsc.LookupFile(firstFD)
+	require.True(t, ok)
+	entry.File = never
+	entry, ok = fsc.LookupFile(secondFD)
+	require.True(t, ok)
+	entry.File = ready
+
+	maskMemory(t, mod, 1024)
+	mod.Memory().Write(0, concat(
+		clockNsSub(uint64(10*time.Second)),
+		fdReadSubFdWithUserData(byte(firstFD), []byte{1, 0, 0, 0, 0, 0, 0, 0}),
+		fdReadSubFdWithUserData(byte(secondFD), []byte{2, 0, 0, 0, 0, 0, 0, 0}),
+	))
+
+	start := time.Now()
+	requireErrnoResult(t, wasip1.ErrnoSuccess, mod, wasip1.PollOneoffName,
+		uint64(0), uint64(128), uint64(3), uint64(512))
+	require.True(t, time.Since(start) < 5*time.Second, "waited on the fd that was not ready")
+	require.Equal(t, []int32{0}, never.timeouts)
+	nevents, ok := mod.Memory().ReadUint32Le(512)
+	require.True(t, ok)
+	require.Equal(t, uint32(1), nevents)
+	userdata, ok := mod.Memory().ReadByte(128)
+	require.True(t, ok)
+	require.Equal(t, byte(2), userdata)
 }
