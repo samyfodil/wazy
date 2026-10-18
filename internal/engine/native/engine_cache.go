@@ -82,7 +82,7 @@ func (e *engine) getCompiledModule(module *wasm.Module, listeners []api.Function
 			}
 		}
 		e.addCompiledModuleToMemory(module, cm)
-		// ponytail: entry preambles are deserialized from the cache entry
+		// Entry preambles are deserialized from the cache entry
 		// above (see the entryPreambleFormatVersion section in
 		// deserializeCompiledModule), so no recompile is needed here. One
 		// thing intentionally left out on this hit path: PerfMap entries for

@@ -1118,7 +1118,7 @@ func wasiSocketOptions(sockets *wasiSockets) []component.Option {
 	// setListenBacklogSize is a no-op that reports Ok: net.Listen uses the
 	// OS default backlog and this host exposes no knob to change it, but a
 	// guest (rust std sets a default backlog during bind) only needs the call
-	// to succeed. ponytail: no-op; wire net.ListenConfig if a guest ever
+	// to succeed. Deliberately a no-op; wire net.ListenConfig if a guest ever
 	// depends on the backlog value.
 	setListenBacklogSize := func(context.Context, []component.Value) ([]component.Value, error) {
 		return []component.Value{component.ResultValue{IsErr: false, Payload: nil}}, nil
@@ -1884,7 +1884,7 @@ func wasiSocketSetOptSig(selfResType uint32, paramPrim string) (component.FuncDe
 // the WASI sockets spec permits a host to ignore, and Go's net package exposes
 // no portable knob for most of them, so wazy accepts and ignores them (returns
 // Ok) rather than trapping -- keeping any real guest that tweaks socket options
-// running. ponytail: wire net.Dialer/ListenConfig knobs only if a guest ever
+// running. Deliberate simplification: wire net.Dialer/ListenConfig knobs only if a guest ever
 // depends on an option actually taking effect.
 func wasiSocketSetOptOK(context.Context, []component.Value) ([]component.Value, error) {
 	return []component.Value{component.ResultValue{IsErr: false, Payload: nil}}, nil

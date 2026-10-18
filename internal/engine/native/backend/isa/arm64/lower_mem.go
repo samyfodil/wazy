@@ -329,7 +329,7 @@ func (m *machine) lowerToAddressModeFromAddends(a32s *nativeapi.Queue[addend32],
 		if !a64s.Empty() {
 			base = a64s.Dequeue()
 		} else {
-			// ponytail: rare (load off a pure shifted value with no base); one mov to seed the base.
+			// Rare (load off a pure shifted value with no base); one mov to seed the base.
 			base = m.compiler.AllocateVReg(ssa.TypeI64)
 			m.lowerConstantI64(base, offset)
 			offset = 0

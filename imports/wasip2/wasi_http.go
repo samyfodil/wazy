@@ -22,7 +22,7 @@ package wasip2
 //     immediately. incoming-body.stream reuses the fs input-stream path so the
 //     guest's blocking-read of the response body needs no new machinery.
 //
-// # Scope (ponytail)
+// # Scope
 //
 // Implemented: the wasi:http/types subset a wit-bindgen proxy guest actually
 // calls -- request line read (incoming-request.{method, path-with-query}),
@@ -587,7 +587,7 @@ func (h *wasiHTTP) fieldsGet(_ context.Context, args []component.Value) ([]compo
 // Collapsing them is the caller's decision (and loses information -- Set-Cookie
 // must never be joined), so this does not make it here.
 //
-// ponytail: cost is linear in the TOTAL header bytes, with a ~16x memory
+// Known cost: linear in the TOTAL header bytes, with a ~16x memory
 // amplification, because component.Value renders list<u8> as []component.Value (one
 // interface word per byte -- see component.Value's doc, and bytesToU8List, which
 // fields.get has always paid the same way). Measured: 8 headers x 32B is

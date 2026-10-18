@@ -5864,7 +5864,7 @@ func encodeRefTarget(heapType int64, nullable bool) (uint64, bool) {
 // callGC emits a call to the trampoline behind every GC runtime operation, returning its result. See
 // wasm.RunGC for what the operands mean per mode; unused ones are passed as zero.
 //
-// ponytail: a Go round trip per GC instruction. The answer needs store-wide type identity and the managed
+// Deliberate simplification: a Go round trip per GC instruction. The answer needs store-wide type identity and the managed
 // heap, neither of which compiled code can reach today, and no GC instruction is on a hot path yet -- so this
 // buys the whole proposal for one trampoline. Inlining the common shapes (a struct field load, an i31 test) is
 // the upgrade if a profile ever asks for it.

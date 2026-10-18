@@ -67,7 +67,7 @@ type Compiler struct {
 	// fixed to key on the memory-length SSA value too and stays enabled; this
 	// linear-path pre-cache is disabled outright for multi-memory rather than
 	// threading the same fix through the N-way predecessor intersection.
-	// ponytail: coarse ceiling -- ship correct now, add the memory-aware merge
+	// A deliberately coarse ceiling: ship correct now, add the memory-aware merge
 	// if multi-memory codegen benchmarks show it's worth it.
 	multiMemory    bool
 	memoryShared   []bool

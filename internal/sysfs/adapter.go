@@ -38,7 +38,7 @@ func (a *AdaptFS) Lstat(path string) (sys.Stat_t, sys.Errno) {
 
 // Stat implements the same method as documented on sys.FS
 func (a *AdaptFS) Stat(path string) (sys.Stat_t, sys.Errno) {
-	// ponytail: fs.StatFS avoids the open+fstat+close round trip (W2). Skipped on
+	// fs.StatFS avoids the open+fstat+close round trip (W2). Skipped on
 	// Windows, where NewStat_t(info) can't fill Dev/Ino from a plain FileInfo —
 	// only the handle-based open path (GetFileInformationByHandle) has them.
 	// runtime.GOOS is a compile-time constant, so this branch folds away off Windows.
