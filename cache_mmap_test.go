@@ -56,7 +56,9 @@ func TestCompilationCache_mappedCodeOutlivesCompiledModule(t *testing.T) {
 	mod, err := r.InstantiateModule(ctx, compiled, NewModuleConfig())
 	require.NoError(t, err)
 	fac := mod.ExportedFunction("fac-ssa")
-	if goruntime.GOOS == "linux" {
+	// Check the code really is mapped, where the directory allows mapping
+	// code at all: a noexec /tmp, as in some CI containers, falls back to the copy.
+	if goruntime.GOOS == "linux" && canMapCode(t, dir) {
 		maps, err := os.ReadFile("/proc/self/maps")
 		require.NoError(t, err)
 		require.True(t, strings.Contains(string(maps), dir), "code is not mapped from %s", dir)
@@ -198,4 +200,21 @@ func TestCompileModule_releasesFunctionBodies(t *testing.T) {
 	compiled, err = interp.CompileModule(ctx, facWasm)
 	require.NoError(t, err)
 	require.NotNil(t, compiled.(*compiledModule).module.CodeSection[0].Body)
+}
+
+// canMapCode reports whether a file in dir can be mapped executable.
+func canMapCode(t *testing.T, dir string) bool {
+	p := filepath.Join(dir, "probe")
+	require.NoError(t, os.WriteFile(p, []byte{0}, 0o600))
+	defer os.Remove(p)
+	f, err := os.Open(p)
+	require.NoError(t, err)
+	defer f.Close()
+	code, err := platform.MapCodeSegmentFromFile(f, 0, 1)
+	if err != nil {
+		t.Logf("cannot map code from %s: %v", dir, err)
+		return false
+	}
+	require.NoError(t, platform.MunmapCodeSegment(code))
+	return true
 }
