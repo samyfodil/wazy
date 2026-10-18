@@ -408,8 +408,12 @@ type lazyModule struct {
 // lazyFunction is the per-function lowering state. It is separate from
 // compiledFunction so the eager path pays one nil pointer, not a sync.Once.
 type lazyFunction struct {
-	module    *lazyModule
-	once      sync.Once
+	module *lazyModule
+	once   sync.Once
+	// lowered is set, after the body is written, once lowering succeeds. Calls
+	// test it inline, so a warmed function skips the out-of-line lower call;
+	// the atomic store publishes the body to goroutines that load it.
+	lowered   atomic.Bool
 	err       error
 	codeIndex int
 }
@@ -673,7 +677,7 @@ func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listene
 // cannot fail on a validated module; if it ever does, the error is kept and
 // raised on every call rather than running an empty body.
 //
-// Kept out of line so the caller's check stays a single nil test.
+// Kept out of line so the caller's check stays a nil test and a flag load.
 //
 //go:noinline
 func (c *compiledFunction) lower() {
@@ -692,6 +696,9 @@ func (c *compiledFunction) lower() {
 		}
 		if m.pending--; m.pending == 0 {
 			m.compiler = nil
+		}
+		if l.err == nil {
+			l.lowered.Store(true)
 		}
 	})
 	if l.err != nil {
@@ -1360,7 +1367,7 @@ func (ce *callEngine) callFunction(ctx context.Context, m *wasm.ModuleInstance, 
 		ce.callGoFuncWithStack(ctx, m, f)
 		return
 	}
-	if f.parent.lazy != nil {
+	if l := f.parent.lazy; l != nil && !l.lowered.Load() {
 		f.parent.lower()
 	}
 	if lsn := f.parent.listener; lsn != nil {
@@ -5614,7 +5621,7 @@ func (ce *callEngine) resetPc(frame *callFrame, f *function) (body []unionOperat
 	// that belong to the same module; thus, we can overwrite the frame in-place.
 	// For details, see internal/engine/RATIONALE.md
 	// A tail call enters the body without going through callFunction.
-	if f.parent.lazy != nil {
+	if l := f.parent.lazy; l != nil && !l.lowered.Load() {
 		f.parent.lower()
 	}
 	frame.f = f
