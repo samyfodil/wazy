@@ -76,13 +76,11 @@ func DecodeI31U(ref uint64) uint32 { return uint32(ref & gcRefI31Mask) }
 // GCObject is one struct or array instance on the managed heap.
 type GCObject struct {
 	// Type is the defined type this was allocated from, which says whether Fields are struct fields or
-	// array elements and what storage type each has.
+	// array elements and what storage type each has. It is nil for an exception, whose Fields are its params
+	// and which is embedded in its Exception; see ExceptionTable.
 	Type *FunctionType
 	// TypeID is Type's store-wide identity, which is what ref.test and ref.cast compare against.
 	TypeID FunctionTypeID
-	// Exn is set, and Type nil, when this object is an exception rather than a struct or an array; Fields
-	// is then its params, which is all a collection needs to see. See ExceptionTable.
-	Exn *Exception
 	// Fields holds a struct's fields or an array's elements, flattened into words. Every storage type takes
 	// one word except v128, which takes two -- see FunctionType.FieldSlots for a struct's layout and
 	// ElemSlots for an array's. A packed (i8/i16) field is stored truncated and widened on read; see Get.

@@ -1,7 +1,14 @@
 package wasm
 
+import "unsafe"
+
 // Exception represents a thrown WebAssembly exception.
 type Exception struct {
+	// obj is this exception's object on the store's managed heap, which every exnref naming it points at.
+	// It comes first so that Lookup can get from the object back to the exception, and lives here rather than
+	// as a field of GCObject so that struct and array objects stay in their size class. Its Type is nil,
+	// which is how an exception object is told from a struct or an array.
+	obj GCObject
 	// Tag is the tag instance that was thrown.
 	Tag *TagInstance
 	// Params holds the argument values matching the tag's function type params.
@@ -52,8 +59,8 @@ type ExceptionTable struct {
 // Ref returns a new exnref naming exn. It may ask the store for a collection,
 // which happens at the next safepoint, never here.
 func (t ExceptionTable) Ref(exn *Exception) uint64 {
-	o := &GCObject{Exn: exn, Fields: exn.Params}
-	ref, collect := t.s.GC.Alloc(o)
+	exn.obj.Fields = exn.Params
+	ref, collect := t.s.GC.Alloc(&exn.obj)
 	if collect {
 		t.s.RequestGC()
 	}
@@ -69,8 +76,8 @@ func (t ExceptionTable) Lookup(ref uint64) (*Exception, bool) {
 		return nil, false
 	}
 	s, ok := t.s.GC.slotOf(ref)
-	if !ok || s.obj.Exn == nil {
+	if !ok || s.obj.Type != nil {
 		return nil, false
 	}
-	return s.obj.Exn, true
+	return (*Exception)(unsafe.Pointer(s.obj)), true
 }
