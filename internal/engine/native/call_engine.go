@@ -14,6 +14,7 @@ import (
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
 	"github.com/samyfodil/wazy/internal/expctxkeys"
 	"github.com/samyfodil/wazy/internal/internalapi"
+	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/wasm"
 	"github.com/samyfodil/wazy/internal/wasmdebug"
 	"github.com/samyfodil/wazy/internal/wasmruntime"
@@ -328,7 +329,7 @@ func (c *callEngine) init() {
 		// to still be all-zero, which a reused buffer cannot guarantee) --
 		// so it keeps the simple eager-allocate-once-here behavior.
 		stackSize := c.requiredInitialStackSize() + nativeapi.StackGuardCheckGuardPageSize
-		c.stack = make([]byte, stackSize)
+		c.stack = platform.MakeStack(stackSize)
 		c.stackTop = alignedStackTop(c.stack)
 		c.execCtx.stackBottomPtr = c.stackCheckLimitPtr(nativeapi.StackGuardCheckGuardPageSize)
 	}
@@ -1353,7 +1354,7 @@ func (c *callEngine) growStack() (newSP, newFP uintptr, err error) {
 	// promise), matching init's debug path.
 	var newStack []byte
 	if nativeapi.StackGuardCheckEnabled {
-		newStack = make([]byte, newLen)
+		newStack = platform.MakeStack(int(newLen))
 	} else {
 		newStack, _ = c.eng.acquireStack(int(newLen))
 	}
@@ -1369,7 +1370,7 @@ func (c *callEngine) growStack() (newSP, newFP uintptr, err error) {
 // transient stack pool; growStack instead sources its buffer from the pool and
 // calls cloneStackInto directly.
 func (c *callEngine) cloneStack(l uintptr) (newSP, newFP, newTop uintptr, newStack []byte) {
-	newStack = make([]byte, l)
+	newStack = platform.MakeStack(int(l))
 	newSP, newFP, newTop = c.cloneStackInto(newStack)
 	return
 }

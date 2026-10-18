@@ -5,7 +5,10 @@ import (
 	"crypto/sha256"
 	"hash/crc32"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
+	"testing/iotest"
 
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
 	"github.com/samyfodil/wazy/internal/platform"
@@ -41,6 +44,7 @@ func TestSerializeCompiledModule(t *testing.T) {
 				u32.LeBytes(1),                     // number of functions.
 				u64.LeBytes(0),                     // offset.
 				u64.LeBytes(5),                     // length of code.
+				codePadding(1),                     // aligns the code.
 				[]byte{1, 2, 3, 4, 5},              // code.
 				crcf([]byte{1, 2, 3, 4, 5}),        // crc for the code.
 				[]byte{0},                          // no source map.
@@ -71,6 +75,7 @@ func TestSerializeCompiledModule(t *testing.T) {
 				u32.LeBytes(1),                     // number of functions.
 				u64.LeBytes(0),                     // offset.
 				u64.LeBytes(5),                     // length of code.
+				codePadding(1),                     // aligns the code.
 				[]byte{1, 2, 3, 4, 5},              // code.
 				crcf([]byte{1, 2, 3, 4, 5}),        // crc for the code.
 				[]byte{0},                          // no source map.
@@ -105,6 +110,7 @@ func TestSerializeCompiledModule(t *testing.T) {
 				u64.LeBytes(5), // offset.
 				// Executable.
 				u64.LeBytes(8),                       // length of code.
+				codePadding(2),                       // aligns the code.
 				[]byte{1, 2, 3, 4, 5, 1, 2, 3},       // code.
 				crcf([]byte{1, 2, 3, 4, 5, 1, 2, 3}), // crc for the code.
 				[]byte{0},                            // no source map.
@@ -130,6 +136,12 @@ func TestSerializeCompiledModule(t *testing.T) {
 		require.NoError(t, err, i)
 		require.Equal(t, tc.exp, actual, i)
 	}
+}
+
+// codePadding returns the padding before the code of an entry for
+// testVersion with the given number of functions.
+func codePadding(functions int) []byte {
+	return make([]byte, executablePadding(len(magic)+1+len(testVersion)+4+8*functions+8))
 }
 
 func concat(ins ...[]byte) (ret []byte) {
@@ -164,7 +176,7 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				[]byte(testVersion),
 				u32.LeBytes(1), // number of functions.
 			),
-			expErr: "compilationcache: invalid magic number: got NATIVE but want abcdef",
+			expErr: "compilationcache: invalid magic number: got NATIV2 but want abcdef",
 		},
 		{
 			name: "version mismatch",
@@ -196,6 +208,7 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0), // offset.
 				// Executable.
 				u64.LeBytes(5),                     // size.
+				codePadding(1),                     // aligns the code.
 				[]byte{1, 2, 3, 4, 5},              // machine code.
 				crcf([]byte{1, 2, 3, 4, 5}),        // machine code.
 				[]byte{0},                          // no source map.
@@ -234,6 +247,7 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				u64.LeBytes(7), // offset.
 				// Executable.
 				u64.LeBytes(10),                             // size.
+				codePadding(2),                              // aligns the code.
 				[]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},       // machine code.
 				crcf([]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}), // crc for machine code.
 				[]byte{0},                          // no source map.
@@ -273,6 +287,7 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0), // offset.
 				// Executable.
 				u64.LeBytes(5),                     // size.
+				codePadding(1),                     // aligns the code.
 				[]byte{1, 2, 3, 4, 5},              // machine code.
 				crcf([]byte{1, 2, 3, 4, 5}),        // machine code.
 				[]byte{0},                          // no source map.
@@ -298,6 +313,7 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0), // offset.
 				// Executable.
 				u64.LeBytes(5),              // size.
+				codePadding(1),              // aligns the code.
 				[]byte{1, 2, 3, 4, 5},       // machine code.
 				crcf([]byte{1, 2, 3, 4, 5}), // machine code.
 				[]byte{0},                   // no source map.
@@ -322,6 +338,7 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0), // offset.
 				// Executable.
 				u64.LeBytes(5),              // size.
+				codePadding(1),              // aligns the code.
 				[]byte{1, 2, 3, 4, 5},       // machine code.
 				crcf([]byte{1, 2, 3, 4, 5}), // machine code.
 				[]byte{0},                   // no source map.
@@ -344,6 +361,7 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0), // offset.
 				// Executable.
 				u64.LeBytes(5),                    // size.
+				codePadding(1),                    // aligns the code.
 				[]byte{1, 2, 3, 4, 5},             // machine code.
 				crcf([]byte{1, 2, 3, 4, 5}),       // machine code.
 				[]byte{0},                         // no source map.
@@ -383,6 +401,7 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				u64.LeBytes(5), // offset.
 				// Executable.
 				u64.LeBytes(5), // size of the executable.
+				codePadding(2), // aligns the code.
 				// Lack of machine code here.
 			),
 			expErr: "compilationcache: error reading executable (len=5): EOF",
@@ -397,6 +416,7 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0), // offset.
 				// Executable.
 				u64.LeBytes(5),        // size.
+				codePadding(1),        // aligns the code.
 				[]byte{1, 2, 3, 4, 5}, // machine code.
 				[]byte{1, 2, 3, 4},    // crc for machine code.
 			),
@@ -417,6 +437,7 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0), // offset.
 				// Executable.
 				u64.LeBytes(5),        // size.
+				codePadding(1),        // aligns the code.
 				[]byte{1, 2, 3, 4, 5}, // machine code.
 			),
 			expCompiledModule: &compiledModule{
@@ -436,6 +457,7 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0), // offset.
 				// Executable.
 				u64.LeBytes(5),              // size.
+				codePadding(1),              // aligns the code.
 				[]byte{1, 2, 3, 4, 5},       // machine code.
 				crcf([]byte{1, 2, 3, 4, 5}), // crc for machine code.
 			),
@@ -451,18 +473,41 @@ func TestDeserializeCompiledModule(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			cm, staleCache, err := deserializeCompiledModule(testVersion, io.NopCloser(bytes.NewReader(tc.in)))
-
-			if tc.expErr != "" {
-				require.EqualError(t, err, tc.expErr)
-			} else {
-				require.NoError(t, err)
-				require.Equal(t, tc.expCompiledModule, cm)
+			check := func(t *testing.T, cm *compiledModule, staleCache bool, err error) {
+				if tc.expErr != "" {
+					require.EqualError(t, err, tc.expErr)
+				} else {
+					require.NoError(t, err)
+					require.Equal(t, tc.expCompiledModule, cm)
+				}
+				require.Equal(t, tc.expStaleCache, staleCache)
 			}
-
-			require.Equal(t, tc.expStaleCache, staleCache)
+			t.Run("reader", func(t *testing.T) {
+				cm, staleCache, err := deserializeCompiledModule(testVersion, io.NopCloser(bytes.NewReader(tc.in)))
+				check(t, cm, staleCache, err)
+			})
+			// A reader may fill less than each field it is asked for.
+			t.Run("one byte", func(t *testing.T) {
+				cm, staleCache, err := deserializeCompiledModule(testVersion, io.NopCloser(iotest.OneByteReader(bytes.NewReader(tc.in))))
+				check(t, cm, staleCache, err)
+			})
+			// A file, as the file cache returns, maps the code instead of
+			// copying it, and must decode the same way.
+			t.Run("file", func(t *testing.T) {
+				cm, staleCache, err := deserializeCompiledModule(testVersion, cacheFile(t, tc.in))
+				check(t, cm, staleCache, err)
+			})
 		})
 	}
+}
+
+// cacheFile writes content to a file and opens it, as filecache.Get does.
+func cacheFile(t *testing.T, content []byte) *os.File {
+	path := filepath.Join(t.TempDir(), "entry")
+	require.NoError(t, os.WriteFile(path, content, 0o600))
+	f, err := os.Open(path)
+	require.NoError(t, err)
+	return f
 }
 
 // TestSerializeDeserializeEntryPreambles exercises the numPreambles>0 path:
