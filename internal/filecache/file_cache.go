@@ -30,7 +30,7 @@ func (fc *fileCache) path(key Key) string {
 }
 
 func (fc *fileCache) Get(key Key) (content io.ReadCloser, ok bool, err error) {
-	f, err := os.Open(fc.path(key))
+	f, err := openEntry(fc.path(key))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, false, nil
 	} else if err != nil {
@@ -63,12 +63,12 @@ func (fc *fileCache) Add(key Key, content io.Reader) (err error) {
 	if err = file.Close(); err != nil {
 		return
 	}
-	err = os.Rename(file.Name(), path)
+	err = replaceEntry(file.Name(), path)
 	return
 }
 
 func (fc *fileCache) Delete(key Key) (err error) {
-	err = os.Remove(fc.path(key))
+	err = removeEntry(fc.path(key))
 	if errors.Is(err, os.ErrNotExist) {
 		err = nil
 	}

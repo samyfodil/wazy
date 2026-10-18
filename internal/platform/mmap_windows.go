@@ -8,6 +8,9 @@ import (
 
 func munmapCodeSegment(code []byte) error {
 	address := unsafe.Pointer(&code[0])
+	if isFileView(code) {
+		return windows.UnmapViewOfFile(uintptr(address))
+	}
 	size := uintptr(0) // size must be 0 because we're using MEM_RELEASE.
 	return windows.VirtualFree(uintptr(address), size, windows.MEM_RELEASE)
 }
