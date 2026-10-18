@@ -120,7 +120,11 @@ func (s *Store) RegisterGCExecution(roots GCRoots, pause *uint32) *GCExecution {
 func (s *Store) RegisterGCExecutionInto(e *GCExecution, roots GCRoots, pause *uint32) *GCExecution {
 	g := &s.gc
 	e.s, e.roots, e.pause = s, roots, pause
-	e.parked.Store(false)
+	// A reused e is normally unparked already; a call that unwound out of EnterGo is the exception. Nothing
+	// else can see e until take publishes it, so testing first spares the locked store on every call.
+	if e.parked.Load() {
+		e.parked.Store(false)
+	}
 	e.cell = g.take(e)
 	// The cell became visible to a collection the moment take filled it, so a collection already scanning
 	// may have this call in hand before it has run an instruction: it must stand still rather than start.
@@ -151,6 +155,12 @@ func (g *gcController) take(e *GCExecution) *gcExecCell {
 	return c
 }
 
+// Registered reports whether e is a call in flight the collector can see: registered and not unregistered
+// since. Only the goroutine running the call may ask.
+func (e *GCExecution) Registered() bool {
+	return e != nil && e.cell != nil && e.cell.exec.Load() == e
+}
+
 // Unregister drops this execution, waking a collector that is waiting for it to stop.
 func (e *GCExecution) Unregister() {
 	if e == nil {
@@ -169,6 +179,13 @@ func (e *GCExecution) Unregister() {
 // Whichever execution gets here first while a collection is wanted runs it; the rest park until it is done.
 func (e *GCExecution) Safepoint() {
 	if e == nil {
+		return
+	}
+	if !e.Registered() {
+		// A request that reached this execution's flag just before it unregistered, seen by a later call
+		// on the same engine that has not registered (see Module.ExnRefClosed). Nothing to park for, but
+		// the flag must not stay set or every parking point would come here.
+		atomic.StoreUint32(e.pause, 0)
 		return
 	}
 	g := &e.s.gc

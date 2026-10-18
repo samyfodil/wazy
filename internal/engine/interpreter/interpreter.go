@@ -112,6 +112,10 @@ type moduleEngine struct {
 
 	// parentEngine holds *engine from which this module engine is created from.
 	parentEngine *engine
+
+	// gcRegisterOnEntry is whether a call into this instance registers with the collector as it starts,
+	// rather than just before it can first hold an exnref; see the native engine's field of the same name.
+	gcRegisterOnEntry bool
 }
 
 // GetGlobalValue implements the same method as documented on wasm.ModuleEngine.
@@ -153,8 +157,17 @@ type thrownException struct {
 func (t *thrownException) canRestore(ce *callEngine, callerFrameCount int) bool {
 	ce.frames = ce.frames[:callerFrameCount]
 	frame := &ce.frames[callerFrameCount-1]
+	ce.ensureGCRegistered()
 	t.clause, t.values = searchExceptionTable(t.exception, frame)
 	return t.clause != nil
+}
+
+// ensureGCRegistered registers a call that started unregistered (see moduleEngine.gcRegisterOnEntry) before
+// a catch can turn its exception into an exnref.
+func (ce *callEngine) ensureGCRegistered() {
+	if ce.f.parent.gcEnabled && ce.gcExec == nil {
+		ce.gcExec = ce.f.moduleInstance.RegisterGCExecutionInto(&ce.gcExecSlot, ce, &ce.gcPause)
+	}
 }
 
 func (t *thrownException) doRestore(ce *callEngine, callerFrameCount int) {
@@ -633,6 +646,8 @@ func (e *engine) NewModuleEngine(module *wasm.Module, instance *wasm.ModuleInsta
 		parentEngine: e,
 		functions:    make([]function, len(module.FunctionSection)+int(module.ImportFunctionCount)),
 	}
+	me.gcRegisterOnEntry = wasm.CollectorEnabled(e.enabledFeatures) &&
+		(e.enabledFeatures.IsEnabled(api.CoreFeatureGC) || !module.ExnRefClosed)
 
 	codes, ok := e.getCompiledFunctions(module, false)
 	if !ok {
@@ -1081,6 +1096,10 @@ func (e *engine) setLabelAddress(op *uint64, label label, labelAddressResolution
 func (e *moduleEngine) ResolveImportedFunction(index, descFunc, indexInImportedModule wasm.Index, importedModuleEngine wasm.ModuleEngine) {
 	imported := importedModuleEngine.(*moduleEngine)
 	e.functions[index] = imported.functions[indexInImportedModule]
+	// Another module's wasm code runs in this instance's calls, and can hold exnrefs it did not allocate.
+	if src := e.functions[index].moduleInstance.Source; src != nil && !src.IsHostModule && wasm.CollectorEnabled(e.parentEngine.enabledFeatures) {
+		e.gcRegisterOnEntry = true
+	}
 }
 
 // ResolveImportedMemory implements wasm.ModuleEngine.
@@ -1172,10 +1191,14 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 	}
 
 	if ce.f.parent.gcEnabled {
-		ce.gcExec = m.RegisterGCExecutionInto(&ce.gcExecSlot, ce, &ce.gcPause)
+		if ce.f.moduleInstance.Engine.(*moduleEngine).gcRegisterOnEntry {
+			ce.gcExec = m.RegisterGCExecutionInto(&ce.gcExecSlot, ce, &ce.gcPause)
+		}
 		defer func() {
-			ce.gcExec.Unregister()
-			ce.gcExec = nil
+			if ce.gcExec != nil {
+				ce.gcExec.Unregister()
+				ce.gcExec = nil
+			}
 		}()
 	}
 
@@ -2393,6 +2416,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 				params[i] = popValue()
 			}
 			exn := &wasm.Exception{Tag: tag, Params: params}
+			ce.ensureGCRegistered()
 			if clause, values := searchExceptionTable(exn, frame); clause != nil {
 				ce.applyExceptionHandler(frame, clause, values)
 				pc = frame.pc // reload: handler set frame.pc to the catch target
@@ -2949,7 +2973,12 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, m
 		ce.pushValue(wasm.RunGC(ce.f.moduleInstance, wasm.GCCheckRefTest, ref, op.U1, 0, 0, 0, nil))
 	case operationKindGCSafepoint:
 		if atomic.LoadUint32(&ce.gcPause) != 0 {
-			ce.gcExec.Safepoint()
+			if ce.gcExec != nil {
+				ce.gcExec.Safepoint()
+			} else {
+				// A request that reached this flag as an earlier call on this engine unregistered.
+				atomic.StoreUint32(&ce.gcPause, 0)
+			}
 		}
 	case operationKindGC:
 		ce.execGC(op)

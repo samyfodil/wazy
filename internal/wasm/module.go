@@ -183,6 +183,14 @@ type Module struct {
 	// IsHostModule true if this is the host module, false otherwise.
 	IsHostModule bool
 
+	// ExnRefClosed is set by validation when this module's own code can never hold an existing exnref: no
+	// exnref appears in its types, locals, globals or tables, no try_table clause catches one, and it makes
+	// no call_indirect or call_ref, which could run another module's code in its frames. An exnref such a
+	// module's frames hold is then one its own call allocated, so under exception handling alone a call into
+	// it registers with the collector just before that first allocation rather than on entry. An instance
+	// importing wasm functions still registers on entry; see the engines. False unless proven.
+	ExnRefClosed bool
+
 	// functionDefinitionSectionInitOnce guards FunctionDefinitionSection so that it is initialized exactly once.
 	functionDefinitionSectionInitOnce sync.Once
 
@@ -543,7 +551,41 @@ func (m *Module) validateFunctions(enabledFeatures api.CoreFeatures, functions [
 			return fmt.Errorf("invalid %s: %w", m.funcDesc(SectionIDFunction, Index(idx)), err)
 		}
 	}
+	m.ExnRefClosed = !vs.exnRefOpen && m.exnRefClosedDecls(globals, tables)
 	return nil
+}
+
+// exnRefClosedDecls reports whether no type, local, global or table of m names an exnref: the declaration half
+// of ExnRefClosed, whose instruction half validation collects.
+func (m *Module) exnRefClosedDecls(globals []GlobalType, tables []Table) bool {
+	isExn := func(v ValueType) bool { return v.Kind() == ValueTypeExnref.Kind() }
+	for i := range m.TypeSection {
+		t := &m.TypeSection[i]
+		if slices.ContainsFunc(t.Params, isExn) || slices.ContainsFunc(t.Results, isExn) {
+			return false
+		}
+		for _, f := range t.Fields {
+			if isExn(f.Type) {
+				return false
+			}
+		}
+	}
+	for i := range m.CodeSection {
+		if slices.ContainsFunc(m.CodeSection[i].LocalTypes, isExn) {
+			return false
+		}
+	}
+	for _, g := range globals {
+		if isExn(g.ValType) {
+			return false
+		}
+	}
+	for _, t := range tables {
+		if isExn(t.Type) {
+			return false
+		}
+	}
+	return true
 }
 
 // declaredFunctionIndexes returns a set of function indexes that can be used as an immediate for OpcodeRefFunc instruction.
