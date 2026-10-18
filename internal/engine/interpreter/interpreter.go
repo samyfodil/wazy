@@ -720,18 +720,13 @@ func (e *engine) NewModuleEngine(module *wasm.Module, instance *wasm.ModuleInsta
 		parentEngine: e,
 		functions:    make([]function, len(module.FunctionSection)+int(module.ImportFunctionCount)),
 	}
+	me.gcRegisterOnEntry = wasm.CollectorEnabled(e.enabledFeatures) &&
+		(e.enabledFeatures.IsEnabled(api.CoreFeatureGC) || !module.ExnRefClosed)
 
 	codes, ok := e.getCompiledFunctions(module, false)
 	if !ok {
 		return nil, errors.New("source module must be compiled before instantiation")
 	}
-	// Read the flag off the module the functions were compiled from: only validation sets it, and a cache
-	// hit hands this function a module whose function bodies were never validated.
-	closed := module.ExnRefClosed
-	if len(codes) > 0 {
-		closed = codes[0].source.ExnRefClosed
-	}
-	me.gcRegisterOnEntry = wasm.CollectorEnabled(e.enabledFeatures) && (e.enabledFeatures.IsEnabled(api.CoreFeatureGC) || !closed)
 
 	for i := range codes {
 		c := &codes[i]

@@ -345,15 +345,9 @@ func serializeCompiledModule(wazyVersion string, cm *compiledModule) io.Reader {
 	// GC root spill size: maxGCRoots is baked into the safepoints of the code above as a compile-time
 	// constant, and the call engine sizes the spill region at the bottom of the stack from it. A cache hit
 	// that lost it reserved no region, so every safepoint spilled below the stack buffer and the collector
-	// never read the spilled roots. Layout: gcRootsFormatVersion (1 byte), maxGCRoots (4 bytes), then
-	// exnRefClosed (1 byte), which a cache hit cannot recompute because it skips validating function bodies.
+	// never read the spilled roots. Layout: gcRootsFormatVersion (1 byte), maxGCRoots (4 bytes).
 	tail.WriteByte(gcRootsFormatVersion)
 	tail.Write(u32.LeBytes(uint32(cm.maxGCRoots)))
-	if cm.exnRefClosed {
-		tail.WriteByte(1)
-	} else {
-		tail.WriteByte(0)
-	}
 
 	// *bytes.Buffer already implements io.Reader; MultiReader drains each once,
 	// which is exactly the single-pass consumption fileCache.Add performs. Only
@@ -443,10 +437,9 @@ const tryTableInfoFormatVersion = 1
 // read as this one's and its scalar misparsed as preamble data.
 const entryPreambleFormatVersion = 2
 
-// gcRootsFormatVersion guards the trailing GC-roots section (cm.maxGCRoots, cm.exnRefClosed). An entry written
-// before it existed hits EOF there, and one from version 1 (no exnRefClosed) fails the version check; both are
-// treated as stale.
-const gcRootsFormatVersion = 2
+// gcRootsFormatVersion guards the trailing GC-roots section (cm.maxGCRoots). An entry written before it existed
+// hits EOF there and is treated as stale.
+const gcRootsFormatVersion = 1
 
 func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *compiledModule, staleCache bool, err error) {
 	defer reader.Close()
@@ -754,10 +747,6 @@ func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *co
 		return nil, true, nil
 	}
 	cm.maxGCRoots = int(binary.LittleEndian.Uint32(eightBytes[:4]))
-	if _, err = io.ReadFull(bufReader, eightBytes[:1]); err != nil {
-		return nil, true, nil
-	}
-	cm.exnRefClosed = eightBytes[0] == 1
 	return
 }
 

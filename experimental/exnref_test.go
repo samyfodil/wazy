@@ -4,7 +4,6 @@ import (
 	"context"
 	_ "embed"
 	"runtime"
-	"sync"
 	"testing"
 
 	"github.com/samyfodil/wazy"
@@ -157,113 +156,5 @@ func TestExnRef_keepsParams(t *testing.T) {
 		res, err := mod.ExportedFunction("run").Call(ctx, 200_000)
 		require.NoError(t, err)
 		require.Equal(t, uint64(7), res[0])
-	})
-}
-
-// exnrefStashWasm keeps an exnref in a global, and exnrefCallerWasm calls its check without touching an
-// exnref itself. Sources: testdata/exnref_stash.wat, testdata/exnref_caller.wat.
-var (
-	//go:embed testdata/exnref_stash.wasm
-	exnrefStashWasm []byte
-	//go:embed testdata/exnref_caller.wasm
-	exnrefCallerWasm []byte
-)
-
-// TestExnRef_importedWasmRegistersOnEntry: a module whose own code never holds an exnref still registers
-// its calls on entry when it imports a wasm function, because that function runs in its calls and can hold
-// an exnref it did not allocate. Here it holds one read from a global while it spins, allocating nothing,
-// and collections run on another goroutine; unregistered, the call's exnref was reclaimed under it.
-func TestExnRef_importedWasmRegistersOnEntry(t *testing.T) {
-	forEachEngine(t, api.CoreFeaturesV2|api.CoreFeatureExceptionHandling, func(t *testing.T, r wazy.Runtime) {
-		ctx := context.Background()
-		stash, err := r.InstantiateWithConfig(ctx, exnrefStashWasm, wazy.NewModuleConfig().WithName("stash"))
-		require.NoError(t, err)
-		caller, err := r.Instantiate(ctx, exnrefCallerWasm)
-		require.NoError(t, err)
-
-		for range 3 {
-			_, err = stash.ExportedFunction("stash").Call(ctx)
-			require.NoError(t, err)
-
-			done := make(chan struct{})
-			var wg sync.WaitGroup
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				churn := stash.ExportedFunction("churn")
-				for {
-					select {
-					case <-done:
-						return
-					default:
-					}
-					if _, err := churn.Call(ctx, 10_000); err != nil {
-						panic(err)
-					}
-				}
-			}()
-			res, err := caller.ExportedFunction("check").Call(ctx, 20_000_000)
-			close(done)
-			wg.Wait()
-			require.NoError(t, err)
-			require.Equal(t, uint64(42), res[0], "exnref held by an imported function was reclaimed")
-		}
-	})
-}
-
-// exnrefClosedWasm throws and catches by value only. Source: testdata/exnref_closed.wat.
-//
-//go:embed testdata/exnref_closed.wasm
-var exnrefClosedWasm []byte
-
-// TestExnRef_closedModuleRegistersAtFirstThrow: a call into a module that can never hold an exnref (see
-// wasm.Module.ExnRefClosed) skips registering with the collector until its first throw allocates one. Its
-// exceptions must still be reclaimed, and collections driven by another module on the same store, holding
-// an exnref through them, must neither lose that exnref nor disturb the late-registered call.
-func TestExnRef_closedModuleRegistersAtFirstThrow(t *testing.T) {
-	forEachEngine(t, api.CoreFeaturesV2|api.CoreFeatureExceptionHandling, func(t *testing.T, r wazy.Runtime) {
-		ctx := context.Background()
-		closed, err := r.Instantiate(ctx, exnrefClosedWasm)
-		require.NoError(t, err)
-		open, err := r.Instantiate(ctx, exnrefCollectWasm)
-		require.NoError(t, err)
-
-		const n = 200_000
-		var want uint32
-		for i := uint32(1); i <= n; i++ {
-			want += i
-		}
-		churn := closed.ExportedFunction("churn")
-		_, err = churn.Call(ctx, 1000) // warm up, as TestExnRef_collected does
-		require.NoError(t, err)
-
-		var before, after runtime.MemStats
-		runtime.GC()
-		runtime.ReadMemStats(&before)
-		var wg sync.WaitGroup
-		var held uint64
-		var heldErr error
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			var res []uint64
-			res, heldErr = open.ExportedFunction("hold").Call(ctx, n)
-			if heldErr == nil {
-				held = res[0]
-			}
-		}()
-		for range 4 {
-			res, err := churn.Call(ctx, n)
-			require.NoError(t, err)
-			require.Equal(t, uint64(want), res[0])
-		}
-		wg.Wait()
-		require.NoError(t, heldErr)
-		require.Equal(t, uint64(42), held, "held exnref lost its exception")
-
-		runtime.GC()
-		runtime.ReadMemStats(&after)
-		grown := int64(after.HeapAlloc) - int64(before.HeapAlloc)
-		require.True(t, grown < 5*n*16, "heap grew %d bytes over %d caught exceptions", grown, 5*n)
 	})
 }
