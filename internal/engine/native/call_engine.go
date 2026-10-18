@@ -367,19 +367,28 @@ func (c *callEngine) stackCheckLimitPtr(base int) *byte {
 }
 
 // registerGC makes this call visible to the collector, which may then stop it and scan its stack. Only ever
-// called once this callEngine's stack is one it owns.
+// called once this callEngine's stack is one it owns. It runs on every call, so it stays small enough to
+// inline into callWithStack, where a runtime without the collector pays only the flag check; the rest is in
+// registerGCSlow.
 func (c *callEngine) registerGC() {
 	if c.parent.gcEnabled {
-		if c.gcExec == nil {
-			c.gcExec = new(wasm.GCExecution)
-		}
-		c.parent.module.RegisterGCExecutionInto(c.gcExec, c, &c.execCtx.gcPause)
+		c.registerGCSlow()
 	}
 }
 
+func (c *callEngine) registerGCSlow() {
+	if c.gcExec == nil {
+		c.gcExec = new(wasm.GCExecution)
+	}
+	c.parent.module.RegisterGCExecutionInto(c.gcExec, c, &c.execCtx.gcPause)
+}
+
+// unregisterGC undoes registerGC. gcExec is kept for the next call, and Unregister is a no-op on one that is
+// not registered, so the check below is only to skip the call where there is no collector.
 func (c *callEngine) unregisterGC() {
-	// Unregister is a no-op on an execution that is not registered, so the kept one needs no flag.
-	c.gcExec.Unregister()
+	if c.gcExec != nil {
+		c.gcExec.Unregister()
+	}
 }
 
 // gcRootsReserve is how many bytes at the bottom of the wasm stack are set aside for the values a safepoint
