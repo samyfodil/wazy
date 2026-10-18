@@ -2,6 +2,7 @@ package wasi_snapshot_preview1
 
 import (
 	"context"
+	"math"
 	"time"
 
 	"github.com/samyfodil/wazy/api"
@@ -92,6 +93,12 @@ func pollOneoffFn(_ context.Context, mod api.Module, params []uint64) sys.Errno 
 	// The timeout is initialized at max Duration, the loop will find the minimum.
 	const noTimeout = time.Duration(1<<63 - 1)
 	timeout := noTimeout
+	// hasClock, not timeout == noTimeout, says whether a clock subscription
+	// exists: a relative clock of exactly MaxInt64 ns is a real timeout.
+	hasClock := false
+	// clocks counts the clock events acked up front; any event beyond them is
+	// an fd result already waiting to be reported.
+	clocks := uint32(0)
 	// Count of all the subscriptions that have been already written back to outBuf.
 	// nevents*32 returns at all times the offset where the next event should be written:
 	// this way we ensure that there are no gaps between records.
@@ -120,6 +127,8 @@ func pollOneoffFn(_ context.Context, mod api.Module, params []uint64) sys.Errno 
 			if err != 0 {
 				return err
 			}
+			hasClock = true
+			clocks++
 			// Min timeout.
 			if newTimeout < timeout {
 				timeout = newTimeout
@@ -171,7 +180,7 @@ func pollOneoffFn(_ context.Context, mod api.Module, params []uint64) sys.Errno 
 		// We only need to observe the timeout (lowered only by clock
 		// subscriptions) and return. Without a clock subscription the timeout
 		// keeps its sentinel, e.g. wasi-libc's poll(fds, n, -1), so don't sleep.
-		if timeout != noTimeout && timeout > 0 {
+		if hasClock && timeout > 0 {
 			sysCtx.Nanosleep(int64(timeout))
 		}
 		return 0
@@ -194,7 +203,7 @@ func pollOneoffFn(_ context.Context, mod api.Module, params []uint64) sys.Errno 
 			}
 		}
 		if allPollable {
-			if ready, errno, batched := sysfs.PollReadiness(pollables, int32(timeout.Milliseconds())); batched {
+			if ready, errno, batched := sysfs.PollReadiness(pollables, pollMillis(timeout, hasClock, nevents > clocks)); batched {
 				switch errno {
 				case 0:
 					for i, sub := range blockingPollSubs {
@@ -236,7 +245,7 @@ func pollOneoffFn(_ context.Context, mod api.Module, params []uint64) sys.Errno 
 			continue
 		}
 		start := time.Now()
-		ready, errno := p.Poll(sys.POLLIN, int32(remaining.Milliseconds()))
+		ready, errno := p.Poll(sys.POLLIN, pollMillis(remaining, hasClock, nevents > clocks))
 		switch errno {
 		case 0:
 			if ready {
@@ -265,6 +274,23 @@ func pollOneoffFn(_ context.Context, mod api.Module, params []uint64) sys.Errno 
 	}
 
 	return 0
+}
+
+// pollMillis is the timeout to poll the blocking fds with. An event already
+// written (a bad fd, a ready one) means poll_oneoff has something to report,
+// so the fds are only checked, never waited on. Without a clock the wait is
+// unbounded, which a negative timeout means to every Pollable.
+func pollMillis(d time.Duration, hasClock, haveEvents bool) int32 {
+	switch {
+	case haveEvents:
+		return 0
+	case !hasClock:
+		return -1
+	}
+	if ms := d.Milliseconds(); ms < math.MaxInt32 {
+		return int32(ms)
+	}
+	return math.MaxInt32
 }
 
 // processClockEvent supports only relative name events, as that's what's used

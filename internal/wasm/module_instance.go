@@ -60,18 +60,37 @@ func (m *ModuleInstance) closeModuleOnCanceledOrTimeout(ctx context.Context, can
 			// case go will randomize which branch of the outer select to enter
 			// and we don't want to close the module.
 		default:
-			// This is the same logic as CloseWithCtxErr except this calls closeWithExitCodeWithoutClosingResource
-			// so that we can defer the resource closure in FailIfClosed.
-			switch {
-			case errors.Is(ctx.Err(), context.Canceled):
-				// TODO: figure out how to report error here.
-				_ = m.closeWithExitCodeWithoutClosingResource(sys.ExitCodeContextCanceled)
-			case errors.Is(ctx.Err(), context.DeadlineExceeded):
-				// TODO: figure out how to report error here.
-				_ = m.closeWithExitCodeWithoutClosingResource(sys.ExitCodeDeadlineExceeded)
-			}
+			m.closeOnCtxDone(ctx, cancelChan)
 		}
 	case <-cancelChan:
+	}
+}
+
+// closeOnCtxDone is the watcher's close. It is the same logic as
+// CloseWithCtxErr except it calls closeWithExitCodeWithoutClosingResource, so
+// that the call still running releases the resources in FailIfClosed rather
+// than pulling them out from under it.
+//
+// The call may already be past that FailIfClosed: it can leave between the
+// watcher seeing cancelChan open and the close below. The close also removed
+// the module from the store, so Runtime.Close would not find it either. So
+// look at cancelChan again once Closed is set: the call closes cancelChan
+// before its final FailIfClosed, so either that load sees the close, or this
+// receive sees cancelChan closed and the release falls to the watcher. Both
+// can happen; closeDeferredResources lets exactly one of them release.
+func (m *ModuleInstance) closeOnCtxDone(ctx context.Context, cancelChan <-chan struct{}) {
+	switch {
+	case errors.Is(ctx.Err(), context.Canceled):
+		// TODO: figure out how to report error here.
+		_ = m.closeWithExitCodeWithoutClosingResource(sys.ExitCodeContextCanceled)
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		// TODO: figure out how to report error here.
+		_ = m.closeWithExitCodeWithoutClosingResource(sys.ExitCodeDeadlineExceeded)
+	}
+	select {
+	case <-cancelChan:
+		_ = m.closeDeferredResources(context.Background())
+	default:
 	}
 }
 

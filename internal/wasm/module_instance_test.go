@@ -372,6 +372,33 @@ func TestModuleInstance_CloseModuleOnCanceledOrTimeout(t *testing.T) {
 		wg.Wait()
 	})
 
+	t.Run("close after the call left releases", func(t *testing.T) {
+		// The watcher saw cancelChan open, then the call left -- closing
+		// cancelChan and running its last FailIfClosed -- before the watcher
+		// closed the module. Nobody else will release it now.
+		cc := &ModuleInstance{ModuleName: "test", s: s, Sys: internalsys.DefaultContext(nil)}
+		cancelChan := make(chan struct{})
+		close(cancelChan)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		cc.closeOnCtxDone(ctx, cancelChan)
+
+		require.Equal(t, exitCodeFlag(exitCodeFlagResourceClosed), cc.Closed.Load()&exitCodeFlagMask)
+		require.Nil(t, cc.Sys)
+	})
+
+	t.Run("close during the call defers the release", func(t *testing.T) {
+		cc := &ModuleInstance{ModuleName: "test", s: s, Sys: internalsys.DefaultContext(nil)}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		cc.closeOnCtxDone(ctx, make(chan struct{}))
+
+		require.Equal(t, exitCodeFlag(exitCodeFlagResourceNotClosed), cc.Closed.Load()&exitCodeFlagMask)
+		require.NotNil(t, cc.Sys)
+	})
+
 	t.Run("no close on all resources canceled", func(t *testing.T) {
 		cc := &ModuleInstance{ModuleName: "test", s: s}
 		cancelChan := make(chan struct{})

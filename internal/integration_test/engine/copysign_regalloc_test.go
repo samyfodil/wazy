@@ -13,8 +13,13 @@ import (
 //go:embed testdata/copysign_regalloc.wasm
 var copysignRegallocWasm []byte
 
+// The same module with every f32 replaced by f64.
+//
+//go:embed testdata/copysign_regalloc_f64.wasm
+var copysignRegallocF64Wasm []byte
+
 // TestCopysignRegalloc is a regression test for an amd64 compiler bug where
-// f32.copysign, with its sign taken from a float select and its magnitude
+// f32/f64.copysign, with its sign taken from a float select and its magnitude
 // from a call result, could have a sign-mask temporary allocated to xmm0
 // while xmm0 still held the call result, flipping the result's sign.
 // See https://github.com/wazero/wazero/issues/2555.
@@ -38,6 +43,14 @@ func TestCopysignRegalloc(t *testing.T) {
 			result, err := mod.ExportedFunction("f").Call(ctx, api.EncodeF32(1.5))
 			require.NoError(t, err)
 			require.Equal(t, float32(1.5), api.DecodeF32(result[0]))
+
+			mod64, err := r.Instantiate(ctx, copysignRegallocF64Wasm)
+			require.NoError(t, err)
+			defer mod64.Close(ctx)
+
+			result, err = mod64.ExportedFunction("f").Call(ctx, api.EncodeF64(1.5))
+			require.NoError(t, err)
+			require.Equal(t, 1.5, api.DecodeF64(result[0]))
 		})
 	}
 }

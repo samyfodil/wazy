@@ -2,6 +2,7 @@ package wasi_snapshot_preview1_test
 
 import (
 	"io/fs"
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -924,4 +925,64 @@ func (p *pollableFile) Poll(flag sysapi.Pflag, timeoutMillis int32) (ready bool,
 		time.Sleep(p.sleep)
 	}
 	return p.ready, p.errno
+}
+
+// Test_pollOneoff_MaxClockSleeps verifies that a relative clock of exactly
+// MaxInt64 ns, the value the "no clock" sentinel happens to share, still sleeps.
+func Test_pollOneoff_MaxClockSleeps(t *testing.T) {
+	var slept []int64
+	mod, r, _ := requireProxyModule(t, wazy.NewModuleConfig().
+		WithNanosleep(func(ns int64) { slept = append(slept, ns) }))
+	defer r.Close(testCtx)
+
+	maskMemory(t, mod, 1024)
+	mod.Memory().Write(0, clockNsSub(math.MaxInt64))
+
+	requireErrnoResult(t, wasip1.ErrnoSuccess, mod, wasip1.PollOneoffName,
+		uint64(0), uint64(128), uint64(1), uint64(512))
+	require.Equal(t, []int64{math.MaxInt64}, slept)
+}
+
+// Test_pollOneoff_BlockingFdTimeout verifies the timeout a blocking fd is
+// polled with: unbounded without a clock, and zero once another subscription
+// already produced an event to report.
+func Test_pollOneoff_BlockingFdTimeout(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(tmpDir+"/test.txt", []byte("data"), 0o600))
+	cfg := wazy.NewModuleConfig().WithFSConfig(wazy.NewFSConfig().WithDirMount(tmpDir, "/"))
+
+	tests := []struct {
+		name             string
+		ready, badFd     bool
+		expectedTimeouts []int32
+	}{
+		{name: "no clock waits indefinitely", ready: true, expectedTimeouts: []int32{-1}},
+		{name: "bad fd event does not wait", badFd: true, expectedTimeouts: []int32{0}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mod, r, _ := requireProxyModule(t, cfg)
+			defer r.Close(testCtx)
+
+			fd := requirePollOpenFile(t, mod, "test.txt")
+			poller := &pollableFile{ready: tc.ready}
+			entry, ok := mod.(*wasm.ModuleInstance).Sys.FS().LookupFile(fd)
+			require.True(t, ok)
+			entry.File = poller
+
+			maskMemory(t, mod, 1024)
+			subs, n := fdReadSubFd(byte(fd)), uint64(1)
+			if tc.badFd {
+				subs, n = concat(fdReadSubFd(99), subs), 2
+			}
+			mod.Memory().Write(0, subs)
+
+			requireErrnoResult(t, wasip1.ErrnoSuccess, mod, wasip1.PollOneoffName,
+				uint64(0), uint64(128), n, uint64(512))
+			require.Equal(t, tc.expectedTimeouts, poller.timeouts)
+			nevents, ok := mod.Memory().ReadUint32Le(512)
+			require.True(t, ok)
+			require.Equal(t, uint32(1), nevents)
+		})
+	}
 }

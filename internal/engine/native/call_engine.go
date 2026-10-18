@@ -589,7 +589,10 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		r := recover()
 		if s, ok := r.(*snapshot); ok {
 			// A snapshot that wasn't handled was created by a different call engine possibly from a nested wasm invocation,
-			// let it propagate up to be handled by the caller.
+			// let it propagate up to be handled by the caller. Release first
+			// what a context-done close of this module deferred: the unwind
+			// skips the FailIfClosed below, and nothing later reaches it.
+			_ = c.parent.module.FailIfClosed()
 			panic(s)
 		}
 		if r != nil {

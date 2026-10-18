@@ -98,7 +98,16 @@ func testCloseOnContextDoneReleasesResources(t *testing.T, config wazy.RuntimeCo
 	compiled, err := r.CompileModule(ctx, binaryencoding.EncodeModule(mod))
 	require.NoError(t, err)
 
-	for _, fn := range []string{"exit", "trap", "panic", "overflow", "return"} {
+	// overflow never gets to overflow: both engines poll for a close
+	// throughout the recursion and leave with the close's error, so
+	// a pending deferred release cannot reach the stack-overflow exit.
+	for fn, wantErr := range map[string]string{
+		"exit":     "module closed with exit_code(7)",
+		"trap":     "wasm error: unreachable",
+		"panic":    "host panic (recovered by wazy)",
+		"overflow": "module closed with context canceled",
+		"return":   "module closed with context canceled",
+	} {
 		t.Run(fn, func(t *testing.T) {
 			notifier := &countingCloseNotifier{}
 			callCtx, cancelFn := context.WithCancel(api.WithCloseNotifier(ctx, notifier))
@@ -115,6 +124,7 @@ func testCloseOnContextDoneReleasesResources(t *testing.T, config wazy.RuntimeCo
 
 			_, err = m.ExportedFunction(fn).Call(callCtx)
 			require.Error(t, err)
+			require.Contains(t, err.Error(), wantErr)
 
 			require.True(t, m.IsClosed())
 			require.Equal(t, uint32(0), m.Memory().Size(), "memory not released when the call returned")
@@ -126,4 +136,71 @@ func testCloseOnContextDoneReleasesResources(t *testing.T, config wazy.RuntimeCo
 			require.Equal(t, int32(1), notifier.n.Load())
 		})
 	}
+}
+
+func TestCloseOnContextDoneSnapshotUnwind_Compiler(t *testing.T) {
+	if !platform.CompilerSupported() {
+		t.Skip()
+	}
+	testCloseOnContextDoneSnapshotUnwind(t, wazy.NewRuntimeConfigCompiler())
+}
+
+func TestCloseOnContextDoneSnapshotUnwind_Interpreter(t *testing.T) {
+	testCloseOnContextDoneSnapshotUnwind(t, wazy.NewRuntimeConfigInterpreter())
+}
+
+// testCloseOnContextDoneSnapshotUnwind covers the one exit that leaves a call
+// without returning from it: restoring a snapshot taken by an outer call. The
+// inner module's context is done and its release deferred when the restore
+// unwinds through the inner call, which must still release it.
+func testCloseOnContextDoneSnapshotUnwind(t *testing.T, config wazy.RuntimeConfig) {
+	ctx := context.Background()
+	r := wazy.NewRuntimeWithConfig(ctx, config.WithCloseOnContextDone(true))
+	defer r.Close(ctx)
+
+	var inner api.Module
+	var snap api.Snapshot
+	innerCtx, cancelInner := context.WithCancel(ctx)
+	defer cancelInner()
+
+	b := r.NewHostModuleBuilder("host")
+	wazy.HostProc0(b.NewFunctionBuilder(), func(ctx context.Context, _ api.Module) {
+		snap = api.GetSnapshotter(ctx).Snapshot()
+		_, err := inner.ExportedFunction("run").Call(innerCtx)
+		require.NoError(t, err) // unreachable: the restore unwinds past it.
+	}).Export("snap")
+	wazy.HostProc0(b.NewFunctionBuilder(), func(_ context.Context, m api.Module) {
+		cancelInner()
+		for !m.IsClosed() {
+			time.Sleep(time.Millisecond)
+		}
+		snap.Restore(nil)
+	}).Export("cancel_restore")
+	_, err := b.Instantiate(ctx)
+	require.NoError(t, err)
+
+	module := func(importName string) []byte {
+		mod := &wasm.Module{
+			TypeSection:     []wasm.FunctionType{{}},
+			ImportSection:   []wasm.Import{{Module: "host", Name: importName, Type: wasm.ExternTypeFunc, DescFunc: 0}},
+			FunctionSection: []wasm.Index{0},
+			MemorySection:   []wasm.Memory{{Min: 1, Cap: 1, Max: 1}},
+			CodeSection:     []wasm.Code{{Body: []byte{wasm.OpcodeCall, 0, wasm.OpcodeEnd}}},
+			ExportSection:   []wasm.Export{{Name: "run", Type: wasm.ExternTypeFunc, Index: 1}},
+		}
+		require.NoError(t, mod.Validate(api.CoreFeaturesV2))
+		return binaryencoding.EncodeModule(mod)
+	}
+	cfg := wazy.NewModuleConfig().WithFSConfig(wazy.NewFSConfig().WithDirMount(t.TempDir(), "/"))
+	inner, err = r.InstantiateWithConfig(ctx, module("cancel_restore"), cfg.WithName("inner"))
+	require.NoError(t, err)
+	outer, err := r.InstantiateWithConfig(ctx, module("snap"), cfg.WithName("outer"))
+	require.NoError(t, err)
+
+	_, err = outer.ExportedFunction("run").Call(api.WithSnapshotter(ctx))
+	require.NoError(t, err)
+
+	require.True(t, inner.IsClosed())
+	require.Equal(t, uint32(0), inner.Memory().Size(), "memory not released by the unwind")
+	require.Nil(t, inner.(*wasm.ModuleInstance).Sys, "fds not released by the unwind")
 }
