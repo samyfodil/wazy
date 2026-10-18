@@ -17,18 +17,7 @@ func (m *ModuleInstance) FailIfClosed() (err error) {
 		case exitCodeFlagResourceNotClosed:
 			// This happens when this module is closed asynchronously in CloseModuleOnCanceledOrTimeout,
 			// and the closure of resources have been deferred here.
-			//
-			// Flip the flag FIRST, and only run the deferred cleanup if we won
-			// the CAS. ensureResourcesClosed is not idempotent -- its importer
-			// branch does mem.importers--, so running it twice under-counts the
-			// live importers of a shared memory. Once the count reaches zero
-			// early, the next importer's close pools the buffer while another
-			// module is still pointing at it, and two modules end up sharing
-			// one array. FailIfClosed is called on every host-function entry,
-			// so without this the cleanup re-ran on every call.
-			if m.Closed.CompareAndSwap(closed, closed&^uint64(exitCodeFlagResourceNotClosed)|exitCodeFlagResourceClosed) {
-				_ = m.ensureResourcesClosed(context.Background())
-			}
+			_ = m.closeDeferredResources(context.Background())
 		}
 		return sys.NewExitError(uint32(closed >> 32)) // Unpack the high order bits as the exit code.
 	}
@@ -119,7 +108,11 @@ func (m *ModuleInstance) Close(ctx context.Context) (err error) {
 // CloseWithExitCode implements the same method as documented on api.Module.
 func (m *ModuleInstance) CloseWithExitCode(ctx context.Context, exitCode uint32) (err error) {
 	if !m.setExitCode(exitCode, exitCodeFlagResourceClosed) {
-		return nil // not an error to have already closed
+		// Not an error to have already closed. But if that close was the
+		// asynchronous one and nothing has released the resources since --
+		// say the context was done after the last FailIfClosed of the call it
+		// watched -- this is the last chance to release them.
+		return m.closeDeferredResources(ctx)
 	}
 	_ = m.s.deleteModule(m)
 	return m.ensureResourcesClosed(ctx)
@@ -141,7 +134,7 @@ func (m *ModuleInstance) closeWithExitCodeWithoutClosingResource(exitCode uint32
 // closeWithExitCode is the same as CloseWithExitCode besides this doesn't delete it from Store.moduleList.
 func (m *ModuleInstance) closeWithExitCode(ctx context.Context, exitCode uint32) (err error) {
 	if !m.setExitCode(exitCode, exitCodeFlagResourceClosed) {
-		return nil // not an error to have already closed
+		return m.closeDeferredResources(ctx) // see CloseWithExitCode
 	}
 	return m.ensureResourcesClosed(ctx)
 }
@@ -160,6 +153,27 @@ const (
 func (m *ModuleInstance) setExitCode(exitCode uint32, flag exitCodeFlag) bool {
 	closed := flag | uint64(exitCode)<<32 // Store exitCode as high-order bits.
 	return m.Closed.CompareAndSwap(0, closed)
+}
+
+// closeDeferredResources releases the resources of a module closed by
+// closeWithExitCodeWithoutClosingResource, at most once however many callers
+// race to do it, and does nothing otherwise.
+//
+// It flips the flag FIRST and releases only if it won the CAS.
+// ensureResourcesClosed is not idempotent -- its importer branch does
+// mem.importers--, so running it twice under-counts the live importers of a
+// shared memory. Once the count reaches zero early, the next importer's close
+// pools the buffer while another module is still pointing at it, and two
+// modules end up sharing one array.
+func (m *ModuleInstance) closeDeferredResources(ctx context.Context) error {
+	closed := m.Closed.Load()
+	if closed&exitCodeFlagMask != exitCodeFlagResourceNotClosed {
+		return nil
+	}
+	if !m.Closed.CompareAndSwap(closed, closed&^uint64(exitCodeFlagResourceNotClosed)|exitCodeFlagResourceClosed) {
+		return nil
+	}
+	return m.ensureResourcesClosed(ctx)
 }
 
 // ensureResourcesClosed ensures that resources assigned to ModuleInstance is released.

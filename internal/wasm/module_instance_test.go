@@ -542,3 +542,32 @@ func TestFailIfClosed_DeferredCleanupRunsOnce(t *testing.T) {
 			"cleanup ran more than once, so a still-live importer's reference was dropped", mem.importers)
 	}
 }
+
+// TestClose_ReleasesDeferredResources pins that Close releases the resources
+// of a module the context watcher closed after the call's last FailIfClosed:
+// nothing else is left to release them, and Close used to return early on
+// the already-closed module. Concurrent callers must release only once.
+func TestClose_ReleasesDeferredResources(t *testing.T) {
+	mem := &MemoryInstance{Buffer: make([]byte, 8), Min: 1, Cap: 1, Max: 1, importers: 2}
+	m := &ModuleInstance{Memories: []*MemoryInstance{mem}, Engine: &mockModuleEngine{}}
+	if !m.setExitCode(3, exitCodeFlagResourceNotClosed) {
+		t.Fatal("setExitCode")
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = m.Close(context.Background())
+		}()
+	}
+	wg.Wait()
+
+	if mem.importers != 1 {
+		t.Fatalf("importers = %d, want 1: deferred cleanup ran %d times", mem.importers, 2-mem.importers)
+	}
+	if got := m.Closed.Load(); got&exitCodeFlagMask != exitCodeFlagResourceClosed || got>>32 != 3 {
+		t.Fatalf("Closed = %#x, want resources closed with exit code 3", got)
+	}
+}
