@@ -258,6 +258,28 @@ func (c *callEngine) stackCheckLimitPtr(base, reserve int) *byte {
 	return &c.stack[base+reserve+backend.StackBoundsCheckMarginBytes]
 }
 
+// prepareStack gets this call a wasm stack -- the one kept from the last call if it is still big enough, or
+// one from eng's pool, returned boxed for releasing -- and places its limit and GC root region. It is out of
+// line so the values it works with take no room in callWithStack's frame, which every exit runs on.
+//
+//go:noinline
+func (c *callEngine) prepareStack(eng *engine) (stackBoxed *[]byte) {
+	reserve := c.gcRootsReserve()
+	if c.stack != nil && reserve > 0 && len(c.stack) < c.requiredInitialStackSize(reserve) {
+		// Kept from an earlier call, before the engine's root region outgrew it.
+		eng.releaseStack(c.stack, nil)
+		c.stack = nil
+	}
+	if c.stack == nil {
+		c.stack, stackBoxed = eng.acquireStack(c.requiredInitialStackSize(reserve))
+		c.stackTop = alignedStackTop(c.stack)
+	}
+	// Recomputed even on a retained buffer: it is what clears the previous call's spilled-root count, which
+	// must not read as this call's (see stackCheckLimitPtr).
+	c.execCtx.stackBottomPtr = c.stackCheckLimitPtr(0, reserve)
+	return
+}
+
 // rootsReserveInUse is the size of the root region under the current stack limit, read back from its header.
 // A call keeps the region it started with until it returns: one placed again for a larger engine reserve could
 // land on frames the call already has.
@@ -448,21 +470,13 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		eng := c.parent.parent.parent
 		c.eng = eng // so growStack / the grow loop can reach the pool
 		var stackBoxed *[]byte
-		reserve := c.gcRootsReserve()
-		if c.stack != nil && reserve > 0 && len(c.stack) < c.requiredInitialStackSize(reserve) {
-			// Kept from an earlier call, before the engine's root region outgrew it.
-			eng.releaseStack(c.stack, nil)
-			c.stack = nil
-		}
-		if c.stack == nil {
-			c.stack, stackBoxed = eng.acquireStack(c.requiredInitialStackSize(reserve))
-			c.stackTop = alignedStackTop(c.stack)
+		if c.stack != nil && c.parent.gcRootsReserve == nil {
+			// The common case, a kept stack and no collector, stays inline.
+			c.execCtx.stackBottomPtr = c.stackCheckLimitPtr(0, 0)
+		} else {
+			stackBoxed = c.prepareStack(eng)
 		}
 		acquiredLen := len(c.stack)
-		// Recomputed even on a retained buffer: it is what clears the
-		// previous call's spilled-root count, which must not read as this
-		// call's (see stackCheckLimitPtr).
-		c.execCtx.stackBottomPtr = c.stackCheckLimitPtr(0, reserve)
 		// Registered only now: a collection reads c.stack, so this call must own one first.
 		c.registerGC()
 		defer func() {
