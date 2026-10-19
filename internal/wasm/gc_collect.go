@@ -113,20 +113,25 @@ func (g *gcController) init() {
 // RegisterGCExecution registers one wasm call in flight. pause is the flag the engine polls at its parking
 // points, which the collector writes into; it must stay valid until Unregister.
 func (s *Store) RegisterGCExecution(roots GCRoots, pause *uint32) *GCExecution {
-	return s.RegisterGCExecutionInto(new(GCExecution), roots, pause)
+	return s.publishGCExecution(&GCExecution{s: s, roots: roots, pause: pause})
 }
 
 // RegisterGCExecutionInto is RegisterGCExecution registering e, so that an engine making call after call can keep
 // one GCExecution rather than allocate one per call. e must not be registered already. Reusing it after
 // Unregister is safe: once Unregister returns, no collection holds e any more (see the handshake above).
 func (s *Store) RegisterGCExecutionInto(e *GCExecution, roots GCRoots, pause *uint32) *GCExecution {
-	g := &s.gc
 	e.s, e.roots, e.pause = s, roots, pause
-	// Only a reused e can still be marked parked, and it must not be once take publishes it. An atomic store
+	// Only a reused e can still be marked parked, and it must not be once it is published. An atomic store
 	// is a locked instruction on amd64, so skip it in the common case where there is nothing to clear.
 	if e.parked.Load() {
 		e.parked.Store(false)
 	}
+	return s.publishGCExecution(e)
+}
+
+// publishGCExecution makes e, filled in and not parked, visible to collections.
+func (s *Store) publishGCExecution(e *GCExecution) *GCExecution {
+	g := &s.gc
 	e.cell = g.take(e)
 	// The cell became visible to a collection the moment take filled it, so a collection already scanning
 	// may have this call in hand before it has run an instruction: it must stand still rather than start.
