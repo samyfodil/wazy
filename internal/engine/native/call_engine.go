@@ -878,12 +878,12 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case nativeapi.ExitCodeUnreachable:
-			// frameReserve is never used for anything: touching it on this cold path keeps 128 bytes in
-			// this function's frame, which holds the frame at the size it had before the exception
+			// frameReserve is never used for anything: touching it on this cold path holds this function's
+			// frame at 0x4c8 bytes on amd64, the size it had before the exception
 			// exits left this loop. Every exit runs on this frame, and on the Atom C3558 shrinking it by
 			// those 128 bytes cost GCCall/walk (an exit per link) 3.5-5% in every code placement tried.
-			var frameReserve [16]uint64
-			frameReserveSink = frameReserve[ec>>8&15]
+			var frameReserve [15]uint64
+			runtime.KeepAlive(frameReserve[(ec>>8)%15])
 			panic(wasmruntime.ErrRuntimeUnreachable)
 		case nativeapi.ExitCodeMemoryOutOfBounds:
 			panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
@@ -1335,6 +1335,3 @@ func (c *callEngine) ScanGCRoots(visit func(uint64)) (complete bool) {
 	}
 	return
 }
-
-// frameReserveSink keeps callWithStack's frameReserve from being optimized away.
-var frameReserveSink uint64
