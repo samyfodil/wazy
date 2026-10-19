@@ -291,16 +291,17 @@ type (
 	}
 )
 
-func (c *callEngine) requiredInitialStackSize() int {
+// requiredInitialStackSize is how big a buffer a call needs when reserve bytes of it go to the GC root region.
+func (c *callEngine) requiredInitialStackSize(reserve int) int {
 	// stackPoolBaseSize (stack_pool.go) is this function's own default, kept
 	// as a single source of truth since it is also pool size class 0's
 	// canonical size -- see that file's doc comment.
 	stackSize := stackPoolBaseSize
 	paramResultInBytes := c.sizeOfParamResultSlice * 8 * 2 // * 8 because uint64 is 8 bytes, and *2 because we need both separated param/result slots.
 	required := paramResultInBytes + 32 + 16               // 32 is enough to accommodate the call frame info, and 16 exists just in case when []byte is not aligned to 16 bytes.
-	if reserve := c.gcRootsReserve(); reserve > 0 {
-		// This much of the buffer is below the stack limit, so the guest never gets it; and stackCheckLimitPtr
-		// gives the region at most half the buffer.
+	if reserve > 0 {
+		// This much of the buffer is below the stack limit, so the guest never gets it. At least as much again
+		// is left for the guest, so a large region does not leave it a sliver.
 		required = max(required+reserve, 2*(reserve+backend.StackBoundsCheckMarginBytes))
 	}
 	if required > stackSize {
@@ -332,10 +333,11 @@ func (c *callEngine) init() {
 		// for why (in short: CheckStackGuardPage requires the guard page
 		// to still be all-zero, which a reused buffer cannot guarantee) --
 		// so it keeps the simple eager-allocate-once-here behavior.
-		stackSize := c.requiredInitialStackSize() + nativeapi.StackGuardCheckGuardPageSize
+		reserve := c.gcRootsReserve()
+		stackSize := c.requiredInitialStackSize(reserve) + nativeapi.StackGuardCheckGuardPageSize
 		c.stack = platform.MakeStack(stackSize)
 		c.stackTop = alignedStackTop(c.stack)
-		c.execCtx.stackBottomPtr = c.stackCheckLimitPtr(nativeapi.StackGuardCheckGuardPageSize)
+		c.execCtx.stackBottomPtr = c.stackCheckLimitPtr(nativeapi.StackGuardCheckGuardPageSize, reserve)
 	}
 	c.execCtxPtr = uintptr(unsafe.Pointer(&c.execCtx))
 }
@@ -358,19 +360,29 @@ func alignedStackTop(s []byte) uintptr {
 // indexing is always in range: the real buffer is >= stackPoolBaseSize
 // (10240) and only ever grows, so base+MARGIN < len(stack) always holds. See
 // the invariant proof on backend.StackBoundsCheckMarginBytes.
-func (c *callEngine) stackCheckLimitPtr(base int) *byte {
-	reserve := c.gcRootsReserve()
+//
+// reserve is the size of the GC root region below the limit (see gcRootsReserve), which the caller makes sure
+// fits: at the start of a call it is the engine's and the buffer was sized for it, and in the middle of one it
+// is rootsReserveInUse, the one the call started with.
+func (c *callEngine) stackCheckLimitPtr(base, reserve int) *byte {
 	if reserve > 0 {
-		// A buffer kept from before the engine's reserve grew may be too small for it. Take what fits, keeping
-		// half the buffer for the guest; a safepoint that then has no room says so rather than overflow.
-		if half := (len(c.stack)-base)/2 - backend.StackBoundsCheckMarginBytes; reserve > half {
-			reserve = max(half&^15, 16)
-		}
 		// A stack fresh from the pool holds another call's words; a zero count keeps them from reading as this
-		// call's roots.
+		// call's roots. The high half is how many words the region holds.
 		binary.LittleEndian.PutUint64(c.stack[base+reserve-8:], uint64((reserve-8)/8)<<32)
 	}
 	return &c.stack[base+reserve+backend.StackBoundsCheckMarginBytes]
+}
+
+// rootsReserveInUse is the size of the root region under the current stack limit, read back from its header.
+// A call keeps the region it started with until it returns: one placed again for a larger engine reserve could
+// land on frames the call already has.
+func (c *callEngine) rootsReserveInUse() int {
+	if c.parent == nil || c.parent.gcRootsReserve == nil || c.execCtx.stackBottomPtr == nil {
+		return 0
+	}
+	hdr := int(uintptr(unsafe.Pointer(c.execCtx.stackBottomPtr))-uintptr(unsafe.Pointer(&c.stack[0]))) -
+		backend.StackBoundsCheckMarginBytes - 8
+	return int(binary.LittleEndian.Uint64(c.stack[hdr:])>>32)*8 + 8
 }
 
 // registerGC makes this call visible to the collector, which may then stop it and scan its stack. Only ever
@@ -541,20 +553,21 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		eng := c.parent.parent.parent
 		c.eng = eng // so growStack / the grow loop can reach the pool
 		var stackBoxed *[]byte
-		if c.stack != nil && c.parent.gcRootsReserve != nil && len(c.stack) < c.requiredInitialStackSize() {
+		reserve := c.gcRootsReserve()
+		if c.stack != nil && reserve > 0 && len(c.stack) < c.requiredInitialStackSize(reserve) {
 			// Kept from an earlier call, before the engine's root region outgrew it.
 			eng.releaseStack(c.stack, nil)
 			c.stack = nil
 		}
 		if c.stack == nil {
-			c.stack, stackBoxed = eng.acquireStack(c.requiredInitialStackSize())
+			c.stack, stackBoxed = eng.acquireStack(c.requiredInitialStackSize(reserve))
 			c.stackTop = alignedStackTop(c.stack)
 		}
 		acquiredLen := len(c.stack)
 		// Recomputed even on a retained buffer: it is what clears the
 		// previous call's spilled-root count, which must not read as this
 		// call's (see stackCheckLimitPtr).
-		c.execCtx.stackBottomPtr = c.stackCheckLimitPtr(0)
+		c.execCtx.stackBottomPtr = c.stackCheckLimitPtr(0, reserve)
 		// Registered only now: a collection reads c.stack, so this call must own one first.
 		c.registerGC()
 		defer func() {
@@ -1342,12 +1355,13 @@ func (c *callEngine) growStackWithGuarded() (newSP uintptr, newFP uintptr, err e
 	if nativeapi.StackGuardCheckEnabled {
 		nativeapi.CheckStackGuardPage(c.stack)
 	}
+	reserve := c.rootsReserveInUse()
 	newSP, newFP, err = c.growStack()
 	if err != nil {
 		return
 	}
 	if nativeapi.StackGuardCheckEnabled {
-		c.execCtx.stackBottomPtr = c.stackCheckLimitPtr(nativeapi.StackGuardCheckGuardPageSize)
+		c.execCtx.stackBottomPtr = c.stackCheckLimitPtr(nativeapi.StackGuardCheckGuardPageSize, reserve)
 	}
 	return
 }
@@ -1377,9 +1391,10 @@ func (c *callEngine) growStack() (newSP, newFP uintptr, err error) {
 	} else {
 		newStack, _ = c.eng.acquireStack(int(newLen))
 	}
+	reserve := c.rootsReserveInUse()
 	newSP, newFP, c.stackTop = c.cloneStackInto(newStack)
 	c.stack = newStack
-	c.execCtx.stackBottomPtr = c.stackCheckLimitPtr(0)
+	c.execCtx.stackBottomPtr = c.stackCheckLimitPtr(0, reserve)
 	return
 }
 
@@ -1531,10 +1546,12 @@ func (s *snapshot) doRestore() {
 	copy(view, s.ret)
 
 	c := s.c
+	// The snapshot was taken in this call, whose region it was sized with.
+	reserve := c.rootsReserveInUse()
 	c.stack = s.stack
 	c.stackTop = s.top
 	ec := &c.execCtx
-	ec.stackBottomPtr = c.stackCheckLimitPtr(0)
+	ec.stackBottomPtr = c.stackCheckLimitPtr(0, reserve)
 	ec.stackPointerBeforeGoCall = spp
 	ec.framePointerBeforeGoCall = s.fp
 	ec.goCallReturnAddress = s.returnAddress
@@ -1606,7 +1623,7 @@ func (c *callEngine) ScanGCRoots(visit func(uint64)) (complete bool) {
 	// is written from the bottom up and reused, so a safepoint holding fewer values than one before it leaves
 	// the difference behind.
 	floor := 0
-	if c.gcRootsReserve() > 0 && c.execCtx.stackBottomPtr != nil {
+	if c.parent != nil && c.parent.gcRootsReserve != nil && c.execCtx.stackBottomPtr != nil {
 		floor = int(uintptr(unsafe.Pointer(c.execCtx.stackBottomPtr))-bottom) - backend.StackBoundsCheckMarginBytes
 		if floor >= 8 && floor <= len(c.stack) {
 			hdr := binary.LittleEndian.Uint64(c.stack[floor-8:])
