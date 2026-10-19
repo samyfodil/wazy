@@ -89,8 +89,9 @@ func TestCallEngine_growStack(t *testing.T) {
 		c.stackTop = alignedStackTop(c.stack)
 		c.execCtx.stackBottomPtr = c.stackCheckLimitPtr(0, c.gcRootsReserve())
 		c.execCtx.stackGrowRequiredSize = 64
-		c.execCtx.stackPointerBeforeGoCall = (*uint64)(unsafe.Pointer(c.stackTop - 32))
-		c.execCtx.framePointerBeforeGoCall = c.stackTop - 16
+		top := int(c.stackTop - uintptr(unsafe.Pointer(&c.stack[0])))
+		c.execCtx.stackPointerBeforeGoCall = (*uint64)(unsafe.Pointer(&c.stack[top-32]))
+		c.execCtx.framePointerBeforeGoCall = uintptr(unsafe.Pointer(&c.stack[top-16]))
 		require.Equal(t, 32, c.rootsReserveInUse())
 
 		eng.noteGCRoots(100)
