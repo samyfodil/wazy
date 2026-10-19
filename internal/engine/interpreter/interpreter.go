@@ -207,10 +207,11 @@ type callEngine struct {
 
 // ScanGCRoots implements wasm.GCRoots. Every operand and local this call holds lives in one flat []uint64, so
 // the whole of it is offered to the collector, which decides what looks like a reference.
-func (ce *callEngine) ScanGCRoots(visit func(uint64)) {
+func (ce *callEngine) ScanGCRoots(visit func(uint64)) bool {
 	for _, v := range ce.stack {
 		visit(v)
 	}
+	return true
 }
 
 // matchCatchClause checks whether a single catch clause matches the given exception.

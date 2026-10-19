@@ -298,3 +298,8 @@ func align16(o Offset) Offset {
 func align8(o Offset) Offset {
 	return (o + 7) &^ 7
 }
+
+// GCRootsMissing is the count a GC safepoint writes into the root region's header in place of the number of
+// words it spilled, when the region is too small to hold them. The collector then cannot see that call's roots
+// and reclaims nothing. See frontend's materializeGCRoots and callEngine.ScanGCRoots.
+const GCRootsMissing = 0xffff_ffff
