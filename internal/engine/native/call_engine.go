@@ -554,14 +554,13 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		eng := c.parent.parent.parent
 		c.eng = eng // so growStack / the grow loop can reach the pool
 		var stackBoxed *[]byte
-		required := c.requiredInitialStackSize()
-		if c.stack != nil && len(c.stack) < required {
+		if c.stack != nil && c.parent.gcRootsReserve != nil && len(c.stack) < c.requiredInitialStackSize() {
 			// Kept from an earlier call, before the engine's root region outgrew it.
 			eng.releaseStack(c.stack, nil)
 			c.stack = nil
 		}
 		if c.stack == nil {
-			c.stack, stackBoxed = eng.acquireStack(required)
+			c.stack, stackBoxed = eng.acquireStack(c.requiredInitialStackSize())
 			c.stackTop = alignedStackTop(c.stack)
 		}
 		acquiredLen := len(c.stack)
