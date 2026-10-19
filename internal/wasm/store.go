@@ -82,12 +82,8 @@ type (
 		// before the slice header naming it is stored, and never changes afterwards.
 		typeSupers atomic.Pointer[[]FunctionTypeID]
 
-		// Exceptions hands out the exnref values guest code holds, and keeps the exceptions they name alive. It
-		// is per-Store because an exnref crosses module instances. See ExceptionTable.
-		Exceptions ExceptionTable
-
-		// GC hands out the references guest code holds for struct and array instances, and is per-Store for
-		// the same reason Exceptions is. See GCHeap.
+		// GC hands out the references guest code holds for struct and array instances, and for exceptions
+		// (see ExceptionTable). It is per-Store because a reference crosses module instances. See GCHeap.
 		GC GCHeap
 
 		// gc is the stop-the-world handshake that reclaims what GC hands out. See gcController.
@@ -218,8 +214,8 @@ const maximumFunctionTypes = 1 << 27
 // ExceptionTable returns the store-wide table naming live exceptions. Engines
 // use it to turn an Exception into the exnref guest code holds, and back. See
 // ExceptionTable.
-func (m *ModuleInstance) ExceptionTable() *ExceptionTable {
-	return &m.s.Exceptions
+func (m *ModuleInstance) ExceptionTable() ExceptionTable {
+	return ExceptionTable{s: m.s}
 }
 
 // NoFunctionTypeID marks the absence of a supertype in Store.typeSupers. Real IDs are dense from zero and

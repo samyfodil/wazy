@@ -571,7 +571,7 @@ operatorSwitch:
 		}
 		// A loop header is also where execution parks for a collection: a guest cannot run unboundedly
 		// without passing one, so this is what bounds how long a collection waits.
-		if c.enabledFeatures.IsEnabled(api.CoreFeatureGC) {
+		if wasm.CollectorEnabled(c.enabledFeatures) {
 			c.emit(newOperationGCSafepoint())
 		}
 	case wasm.OpcodeIf:

@@ -36,7 +36,11 @@ type (
 		compiledModules map[wasm.ModuleID]*compiledModuleWithCount
 		// sortedCompiledModules is a list of compiled modules sorted by the initial address of the executable.
 		sortedCompiledModules []*compiledModule
-		mux                   sync.RWMutex
+		// gcRootsReserve is the size of the region at the bottom of every wasm stack that GC safepoints spill
+		// into: enough for the largest safepoint of any module this engine has instantiated, since a call can
+		// reach functions of any of them. See callEngine.gcRootsReserve.
+		gcRootsReserve atomic.Int32
+		mux            sync.RWMutex
 		// sharedFunctions is compiled functions shared by all modules.
 		sharedFunctions *sharedFunctions
 		// setFinalizer defaults to runtime.SetFinalizer, but overridable for tests.
@@ -160,7 +164,7 @@ var _ wasm.Engine = (*engine)(nil)
 // gcSafepoints reports whether this engine's code polls the collector at loop headers and spills its roots
 // there, and so whether its calls register with the store's collector.
 func (e *engine) gcSafepoints() bool {
-	return e.enabledFeatures.IsEnabled(api.CoreFeatureGC)
+	return wasm.CollectorEnabled(e.enabledFeatures)
 }
 
 // NewEngine returns the implementation of wasm.Engine.
@@ -1008,6 +1012,20 @@ func checkAddrInBytes(addr uintptr, b []byte) bool {
 	return uintptr(unsafe.Pointer(&b[0])) <= addr && addr <= uintptr(unsafe.Pointer(&b[len(b)-1]))
 }
 
+// noteGCRoots grows the engine's root region to fit a module whose largest safepoint spills n words: the words,
+// plus the header, 16-byte aligned so the go-call margin above the region keeps the alignment the trampoline
+// wants. Even n == 0 gets the header, which is where a safepoint of a module instantiated later finds that the
+// region is too small for it.
+func (e *engine) noteGCRoots(n int) {
+	want := int32((8*n + 8 + 15) &^ 15)
+	for {
+		cur := e.gcRootsReserve.Load()
+		if cur >= want || e.gcRootsReserve.CompareAndSwap(cur, want) {
+			return
+		}
+	}
+}
+
 // NewModuleEngine implements wasm.Engine.
 func (e *engine) NewModuleEngine(m *wasm.Module, mi *wasm.ModuleInstance) (wasm.ModuleEngine, error) {
 	me := &moduleEngine{gcEnabled: e.gcSafepoints()}
@@ -1021,10 +1039,9 @@ func (e *engine) NewModuleEngine(m *wasm.Module, mi *wasm.ModuleInstance) (wasm.
 	}
 	me.parent = compiled
 	me.module = mi
-	if me.gcEnabled && compiled.maxGCRoots > 0 {
-		// The spilled words plus their count, 16-byte aligned so the go-call margin above the region keeps
-		// the alignment the trampoline wants. See callEngine.gcRootsReserve.
-		me.gcRootsReserve = int32((8*compiled.maxGCRoots + 8 + 15) &^ 15)
+	if me.gcEnabled {
+		e.noteGCRoots(compiled.maxGCRoots)
+		me.gcRootsReserve = &e.gcRootsReserve
 	}
 	me.listeners = compiled.listeners
 

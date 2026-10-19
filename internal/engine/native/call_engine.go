@@ -72,10 +72,13 @@ type (
 		execCtxPtr        uintptr
 		numberOfResults   int
 		stackIteratorImpl stackIterator
-		// gcExec is this call's registration with the store's collector, nil unless the GC proposal is on.
+		// gcExec is this call's registration with the store's collector, nil unless the collector is on (see
+		// wasm.CollectorEnabled). The first call allocates it and later ones re-register the same one, so a
+		// call does not allocate.
 		//
 		// Nothing else about the collector lives here: this struct is allocated per call and sits just under
-		// a Go size class boundary, so every field added to it costs a whole class.
+		// a Go size class boundary, so every field added to it costs a whole class, and a pointer field also
+		// lengthens the prefix the allocator and the GC have to walk on every fresh callEngine.
 		gcExec *wasm.GCExecution
 		// pendingException holds the most recently caught exception, so handler
 		// code can read its params after re-entry.
@@ -180,7 +183,11 @@ func (c *callEngine) requiredInitialStackSize() int {
 	stackSize := stackPoolBaseSize
 	paramResultInBytes := c.sizeOfParamResultSlice * 8 * 2 // * 8 because uint64 is 8 bytes, and *2 because we need both separated param/result slots.
 	required := paramResultInBytes + 32 + 16               // 32 is enough to accommodate the call frame info, and 16 exists just in case when []byte is not aligned to 16 bytes.
-	required += c.gcRootsReserve()                         // this much of the buffer is below the stack limit, so the guest never gets it.
+	if reserve := c.gcRootsReserve(); reserve > 0 {
+		// This much of the buffer is below the stack limit, so the guest never gets it; and stackCheckLimitPtr
+		// gives the region at most half the buffer.
+		required = max(required+reserve, 2*(reserve+backend.StackBoundsCheckMarginBytes))
+	}
 	if required > stackSize {
 		stackSize = required
 	}
@@ -239,25 +246,40 @@ func alignedStackTop(s []byte) uintptr {
 func (c *callEngine) stackCheckLimitPtr(base int) *byte {
 	reserve := c.gcRootsReserve()
 	if reserve > 0 {
-		// A stack fresh from the pool holds another call's words; clear the count so they do not read as
-		// this call's roots.
-		binary.LittleEndian.PutUint64(c.stack[base+reserve-8:], 0)
+		// A buffer kept from before the engine's reserve grew may be too small for it. Take what fits, keeping
+		// half the buffer for the guest; a safepoint that then has no room says so rather than overflow.
+		if half := (len(c.stack)-base)/2 - backend.StackBoundsCheckMarginBytes; reserve > half {
+			reserve = max(half&^15, 16)
+		}
+		// A stack fresh from the pool holds another call's words; a zero count keeps them from reading as this
+		// call's roots.
+		binary.LittleEndian.PutUint64(c.stack[base+reserve-8:], uint64((reserve-8)/8)<<32)
 	}
 	return &c.stack[base+reserve+backend.StackBoundsCheckMarginBytes]
 }
 
 // registerGC makes this call visible to the collector, which may then stop it and scan its stack. Only ever
-// called once this callEngine's stack is one it owns.
+// called once this callEngine's stack is one it owns. It runs on every call, so it stays small enough to
+// inline into callWithStack, where a runtime without the collector pays only the flag check; the rest is in
+// registerGCSlow.
 func (c *callEngine) registerGC() {
 	if c.parent.gcEnabled {
-		c.gcExec = c.parent.module.RegisterGCExecution(c, &c.execCtx.gcPause)
+		c.registerGCSlow()
 	}
 }
 
+func (c *callEngine) registerGCSlow() {
+	if c.gcExec == nil {
+		c.gcExec = new(wasm.GCExecution)
+	}
+	c.parent.module.RegisterGCExecutionInto(c.gcExec, c, &c.execCtx.gcPause)
+}
+
+// unregisterGC undoes registerGC. gcExec is kept for the next call, and Unregister is a no-op on one that is
+// not registered, so the check below is only to skip the call where there is no collector.
 func (c *callEngine) unregisterGC() {
 	if c.gcExec != nil {
 		c.gcExec.Unregister()
-		c.gcExec = nil
 	}
 }
 
@@ -270,13 +292,18 @@ func (c *callEngine) unregisterGC() {
 // draw from, and no pointer to keep in the execution context, because compiled code already holds the stack
 // limit at a fixed offset there and the region is a constant distance below it.
 //
-// The layout, from the bottom of the buffer up, is: the spilled words, then the count of them, then the go-call
-// margin, then the stack the guest actually gets.
+// The layout, from the bottom of the buffer up, is: the spilled words, then a header word, then the go-call
+// margin, then the stack the guest actually gets. The header's high half is how many words the region holds and
+// its low half how many the last safepoint wrote (see nativeapi.GCRootsMissing).
+//
+// The size is the engine's, not the module's: a call runs whatever functions it reaches, through imports and
+// tables, and every one of them spills into this same region. It covers every module the engine had
+// instantiated when the call placed its limit; see engine.noteGCRoots.
 func (c *callEngine) gcRootsReserve() int {
-	if c.parent == nil {
-		return 0 // a callEngine built by hand in a test has no module behind it.
+	if c.parent == nil || c.parent.gcRootsReserve == nil {
+		return 0 // no collector, or a callEngine built by hand in a test with no module behind it.
 	}
-	return int(c.parent.gcRootsReserve)
+	return int(c.parent.gcRootsReserve.Load())
 }
 
 // Definition implements api.Function.
@@ -409,6 +436,11 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		eng := c.parent.parent.parent
 		c.eng = eng // so growStack / the grow loop can reach the pool
 		var stackBoxed *[]byte
+		if c.stack != nil && c.parent.gcRootsReserve != nil && len(c.stack) < c.requiredInitialStackSize() {
+			// Kept from an earlier call, before the engine's root region outgrew it.
+			eng.releaseStack(c.stack, nil)
+			c.stack = nil
+		}
 		if c.stack == nil {
 			c.stack, stackBoxed = eng.acquireStack(c.requiredInitialStackSize())
 			c.stackTop = alignedStackTop(c.stack)
@@ -1211,7 +1243,8 @@ func callGoModuleFunctionWithSnapshotRecover(c *callEngine, ctx context.Context,
 // Words that are not references, and stale ones left by an earlier safepoint, are visited too. That costs a
 // failed lookup: a handle carries the generation of the slot it names, so a word that no longer names a live
 // object matches nothing.
-func (c *callEngine) ScanGCRoots(visit func(uint64)) {
+func (c *callEngine) ScanGCRoots(visit func(uint64)) (complete bool) {
+	complete = true
 	if len(c.stack) == 0 {
 		return
 	}
@@ -1229,14 +1262,18 @@ func (c *callEngine) ScanGCRoots(visit func(uint64)) {
 	// is written from the bottom up and reused, so a safepoint holding fewer values than one before it leaves
 	// the difference behind.
 	floor := 0
-	if reserve := c.gcRootsReserve(); reserve > 0 && c.execCtx.stackBottomPtr != nil {
+	if c.gcRootsReserve() > 0 && c.execCtx.stackBottomPtr != nil {
 		floor = int(uintptr(unsafe.Pointer(c.execCtx.stackBottomPtr))-bottom) - backend.StackBoundsCheckMarginBytes
 		if floor >= 8 && floor <= len(c.stack) {
-			n := int(binary.LittleEndian.Uint64(c.stack[floor-8:]))
-			if max := (reserve - 8) / 8; n > max {
-				n = max // never trust a count read out of a buffer the guest could have influenced.
+			hdr := binary.LittleEndian.Uint64(c.stack[floor-8:])
+			n := uint32(hdr)
+			if n == nativeapi.GCRootsMissing {
+				complete = false
+				n = 0
 			}
-			for i := 0; i < n; i++ {
+			// Never trust a count read out of a buffer the guest could have influenced.
+			n = min(n, uint32(hdr>>32), uint32((floor-8)/8))
+			for i := 0; i < int(n); i++ {
 				visit(binary.LittleEndian.Uint64(c.stack[floor-16-8*i:]))
 			}
 		} else {
@@ -1251,4 +1288,13 @@ func (c *callEngine) ScanGCRoots(visit func(uint64)) {
 		visit(c.execCtx.savedRegisters[i][0])
 		visit(c.execCtx.savedRegisters[i][1])
 	}
+	// The exception last thrown or caught: a handler reads its params and exnref from here rather than from
+	// the stack, so they are roots until it has.
+	visit(uint64(c.execCtx.exceptionRef))
+	if exn := c.pendingException; exn != nil {
+		for _, w := range exn.Params {
+			visit(w)
+		}
+	}
+	return
 }
