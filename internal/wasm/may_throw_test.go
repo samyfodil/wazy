@@ -29,11 +29,11 @@ func TestModule_FunctionMayThrow(t *testing.T) {
 		FunctionSection: []Index{0, 0, 0, 0, 0},
 		TagSection:      []Tag{{Type: 0}},
 		CodeSection: []Code{
-			{Body: []byte{OpcodeCall, 1, OpcodeEnd}},                                 // calls one that throws
-			{Body: []byte{OpcodeThrow, 0, OpcodeEnd}},                                // throws
-			{Body: []byte{OpcodeNop, OpcodeEnd}},                                     // does not
-			{Body: []byte{OpcodeI32Const, 0, OpcodeCallIndirect, 0, 0, OpcodeEnd}},   // calls an unknown target
-			{Body: []byte{OpcodeTailCallReturnCall, 2, OpcodeEnd}},                   // tail-calls one that does not
+			{Body: []byte{OpcodeCall, 1, OpcodeEnd}},                               // calls one that throws
+			{Body: []byte{OpcodeThrow, 0, OpcodeEnd}},                              // throws
+			{Body: []byte{OpcodeNop, OpcodeEnd}},                                   // does not
+			{Body: []byte{OpcodeI32Const, 0, OpcodeCallIndirect, 0, 0, OpcodeEnd}}, // calls an unknown target
+			{Body: []byte{OpcodeTailCallReturnCall, 2, OpcodeEnd}},                 // tail-calls one that does not
 		},
 		TableSection: []Table{{Type: RefTypeFuncref}},
 	}
