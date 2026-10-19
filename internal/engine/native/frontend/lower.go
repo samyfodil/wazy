@@ -6724,19 +6724,47 @@ func (c *Compiler) materializeGCRoots(builder ssa.Builder) {
 	limit := builder.AllocateInstruction().
 		AsLoad(c.execCtxPtrValue, nativeapi.ExecutionContextOffsetStackBottomPtr.U32(), ssa.TypeI64).
 		Insert(builder).Return()
-	// The count sits one margin below the limit and the spilled words below that, so this safepoint's n
-	// words start n+1 words down. The scan reads the count first, which is what keeps a shorter safepoint
-	// from retaining what a longer one before it left behind.
-	back := builder.AllocateInstruction().
-		AsIconst64(uint64(backend.StackBoundsCheckMarginBytes + 8*(len(vals)+1))).Insert(builder).Return()
-	base := builder.AllocateInstruction().AsIsub(limit, back).Insert(builder).Return()
+	// The header word sits one margin below the limit and the spilled words below it. Its low half is the
+	// count this safepoint writes; its high half is how many words the region holds, written by the engine
+	// when it placed the limit. The scan reads the count first, which is what keeps a shorter safepoint from
+	// retaining what a longer one before it left behind.
+	hdrBack := builder.AllocateInstruction().
+		AsIconst64(uint64(backend.StackBoundsCheckMarginBytes + 8)).Insert(builder).Return()
+	hdr := builder.AllocateInstruction().AsIsub(limit, hdrBack).Insert(builder).Return()
+	// The region is sized for every module the engine had compiled when the call started, which covers any
+	// function the call can reach then. One compiled later and reached through a table can need more: rather
+	// than write below the buffer, mark the spill as missing, and the collector does not reclaim this time.
+	capacity := builder.AllocateInstruction().AsExtLoad(ssa.OpcodeUload32, hdr, 4, true).Insert(builder).Return()
+	need := builder.AllocateInstruction().AsIconst64(uint64(len(vals))).Insert(builder).Return()
+	fits := builder.AllocateInstruction().
+		AsIcmp(capacity, need, ssa.IntegerCmpCondUnsignedGreaterThanOrEqual).Insert(builder).Return()
+
+	spillBlk := builder.AllocateBasicBlock()
+	overflowBlk := builder.AllocateBasicBlock()
+	doneBlk := builder.AllocateBasicBlock()
+	builder.AllocateInstruction().AsBrnz(fits, ssa.ValuesNil, spillBlk).Insert(builder)
+	builder.AllocateInstruction().AsJump(ssa.ValuesNil, overflowBlk).Insert(builder)
+
+	builder.SetCurrentBlock(overflowBlk)
+	builder.Seal(overflowBlk)
+	missing := builder.AllocateInstruction().AsIconst32(nativeapi.GCRootsMissing).Insert(builder).Return()
+	builder.AllocateInstruction().AsStore(ssa.OpcodeIstore32, missing, hdr, 0).Insert(builder)
+	builder.AllocateInstruction().AsJump(ssa.ValuesNil, doneBlk).Insert(builder)
+
+	builder.SetCurrentBlock(spillBlk)
+	builder.Seal(spillBlk)
+	back := builder.AllocateInstruction().AsIconst64(uint64(8 * len(vals))).Insert(builder).Return()
+	base := builder.AllocateInstruction().AsIsub(hdr, back).Insert(builder).Return()
 	for i, v := range vals {
 		builder.AllocateInstruction().
 			AsStore(ssa.OpcodeStore, v, base, uint32(i*8)).Insert(builder)
 	}
-	count := builder.AllocateInstruction().AsIconst64(uint64(len(vals))).Insert(builder).Return()
-	builder.AllocateInstruction().
-		AsStore(ssa.OpcodeStore, count, base, uint32(8*len(vals))).Insert(builder)
+	count := builder.AllocateInstruction().AsIconst32(uint32(len(vals))).Insert(builder).Return()
+	builder.AllocateInstruction().AsStore(ssa.OpcodeIstore32, count, hdr, 0).Insert(builder)
+	builder.AllocateInstruction().AsJump(ssa.ValuesNil, doneBlk).Insert(builder)
+
+	builder.SetCurrentBlock(doneBlk)
+	builder.Seal(doneBlk)
 }
 
 // emitGCSafepoint emits the loop-header poll of the collector's pause flag. The flag is a word in the

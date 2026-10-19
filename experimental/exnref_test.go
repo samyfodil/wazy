@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"runtime"
+	"sync"
 	"testing"
 
 	"github.com/samyfodil/wazy"
@@ -156,5 +157,57 @@ func TestExnRef_keepsParams(t *testing.T) {
 		res, err := mod.ExportedFunction("run").Call(ctx, 200_000)
 		require.NoError(t, err)
 		require.Equal(t, uint64(7), res[0])
+	})
+}
+
+// exnrefStashWasm keeps an exnref in a global, and exnrefCallerWasm calls its check without touching an
+// exnref itself. Sources: testdata/exnref_stash.wat, testdata/exnref_caller.wat.
+var (
+	//go:embed testdata/exnref_stash.wasm
+	exnrefStashWasm []byte
+	//go:embed testdata/exnref_caller.wasm
+	exnrefCallerWasm []byte
+)
+
+// TestExnRef_heldByImportedFunction: an imported wasm function runs on the stack of the call into the module
+// that imports it, so the safepoints it parks at spill their roots into that stack. Here it holds an exnref
+// read from a global while it spins, allocating nothing, and collections run on another goroutine. The
+// importer's own code has no safepoint, and when the region a safepoint spills into was sized from the
+// importer alone, the spill landed below the stack buffer, over whatever Go object came before it.
+func TestExnRef_heldByImportedFunction(t *testing.T) {
+	forEachEngine(t, api.CoreFeaturesV2|api.CoreFeatureExceptionHandling, func(t *testing.T, r wazy.Runtime) {
+		ctx := context.Background()
+		stash, err := r.InstantiateWithConfig(ctx, exnrefStashWasm, wazy.NewModuleConfig().WithName("stash"))
+		require.NoError(t, err)
+		caller, err := r.Instantiate(ctx, exnrefCallerWasm)
+		require.NoError(t, err)
+
+		for range 3 {
+			_, err = stash.ExportedFunction("stash").Call(ctx)
+			require.NoError(t, err)
+
+			done := make(chan struct{})
+			var wg sync.WaitGroup
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				churn := stash.ExportedFunction("churn")
+				for {
+					select {
+					case <-done:
+						return
+					default:
+					}
+					if _, err := churn.Call(ctx, 10_000); err != nil {
+						panic(err)
+					}
+				}
+			}()
+			res, err := caller.ExportedFunction("check").Call(ctx, 20_000_000)
+			close(done)
+			wg.Wait()
+			require.NoError(t, err)
+			require.Equal(t, uint64(42), res[0], "exnref held by an imported function was reclaimed")
+		}
 	})
 }

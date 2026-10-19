@@ -59,8 +59,10 @@ func CollectorEnabled(features api.CoreFeatures) bool {
 // GCRoots is what an engine exposes so a collection can find the references one wasm call in flight holds.
 type GCRoots interface {
 	// ScanGCRoots calls visit with every word that could be a reference: the whole value stack, plus
-	// whatever else the engine keeps live values in. It is called only while this execution is parked.
-	ScanGCRoots(visit func(word uint64))
+	// whatever else the engine keeps live values in. It is called only while this execution is parked. It
+	// returns false if some of the call's references could not be offered, in which case the collection
+	// reclaims nothing.
+	ScanGCRoots(visit func(word uint64)) (complete bool)
 }
 
 // GCExecution is one wasm call in flight, registered with a Store so that a collection can find its roots and
@@ -370,10 +372,18 @@ func (s *Store) collectGarbageLocked() {
 		pending = append(pending, slot.obj)
 	}
 
+	complete := true
 	for c := s.gc.execs.Load(); c != nil; c = c.next {
-		if e := c.exec.Load(); e != nil {
-			e.roots.ScanGCRoots(mark)
+		if e := c.exec.Load(); e != nil && !e.roots.ScanGCRoots(mark) {
+			complete = false
 		}
+	}
+	if !complete {
+		// Something live may be unmarked, so nothing can be freed. Try again after as many allocations as a
+		// collection that freed nothing would have waited for.
+		h.allocs = 0
+		h.nextAt = h.used - len(h.free) + gcInitialThreshold
+		return
 	}
 	s.scanModuleRootsLocked(mark)
 

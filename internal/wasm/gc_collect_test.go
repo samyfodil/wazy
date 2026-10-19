@@ -17,14 +17,17 @@ import (
 type stackRoots struct {
 	mu    sync.Mutex
 	words []uint64
+	// incomplete makes ScanGCRoots report that it could not offer every root.
+	incomplete bool
 }
 
-func (r *stackRoots) ScanGCRoots(visit func(uint64)) {
+func (r *stackRoots) ScanGCRoots(visit func(uint64)) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, w := range r.words {
 		visit(w)
 	}
+	return !r.incomplete
 }
 
 func (r *stackRoots) set(words ...uint64) {
@@ -96,6 +99,17 @@ func TestCollector(t *testing.T) {
 		require.NotNil(t, f.s.GC.Deref(kept))
 		// The reclaimed one's handle no longer names anything, and says so rather than aliasing.
 		require.Equal(t, wasmruntime.ErrRuntimeCastFailure, requirePanic(t, func() { f.s.GC.Deref(dead) }))
+	})
+
+	t.Run("nothing is reclaimed when a call cannot offer every root", func(t *testing.T) {
+		f := newGCCollectFixture(t)
+		f.alloc()
+		f.roots.incomplete = true
+		f.collect()
+		require.Equal(t, 1, f.s.GC.Live())
+		f.roots.incomplete = false
+		f.collect()
+		require.Equal(t, 0, f.s.GC.Live())
 	})
 
 	t.Run("the scan follows fields, and cycles terminate", func(t *testing.T) {
