@@ -33,7 +33,7 @@ func TestRootRegionIsTheEngines(t *testing.T) {
 	const n = 300_000
 	const want = 7 + n*(n+1)/2
 
-	setup := func(t *testing.T, prepare func(context.Context, wazy.Runtime)) (api.Module, func() int) {
+	setup := func(t *testing.T, prepare func(context.Context, wazy.Runtime)) (caller, callee api.Module, live func() int) {
 		ctx := context.Background()
 		r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler().WithCoreFeatures(v128GCFeatures))
 		t.Cleanup(func() { r.Close(ctx) })
@@ -41,19 +41,30 @@ func TestRootRegionIsTheEngines(t *testing.T) {
 			func(ctx context.Context, _ api.Module) { prepare(ctx, r) }).
 			Export("prepare").Instantiate(ctx)
 		require.NoError(t, err)
-		callee, err := r.InstantiateWithConfig(ctx, reserveCalleeWasm, wazy.NewModuleConfig().WithName("callee"))
+		callee, err = r.InstantiateWithConfig(ctx, reserveCalleeWasm, wazy.NewModuleConfig().WithName("callee"))
 		require.NoError(t, err)
-		caller, err := r.InstantiateWithConfig(ctx, reserveCallerWasm, wazy.NewModuleConfig().WithName("caller"))
+		caller, err = r.InstantiateWithConfig(ctx, reserveCallerWasm, wazy.NewModuleConfig().WithName("caller"))
 		require.NoError(t, err)
-		return caller, callee.(*wasm.ModuleInstance).GCLiveObjects
+		return caller, callee, callee.(*wasm.ModuleInstance).GCLiveObjects
 	}
 
 	// The callee's function, imported: its spills must land in the caller's stack, and its garbage must
 	// still be reclaimed.
 	t.Run("imported", func(t *testing.T) {
-		caller, live := setup(t, func(context.Context, wazy.Runtime) {})
+		caller, _, live := setup(t, func(context.Context, wazy.Runtime) {})
 		for range 3 {
 			res, err := caller.ExportedFunction("direct").Call(context.Background(), n)
+			require.NoError(t, err)
+			require.Equal(t, uint64(want), res[0])
+		}
+		require.True(t, live() < n, "nothing was reclaimed: %d live", live())
+	})
+
+	// A stack that grows in the middle of the call keeps the region it started with, header and all.
+	t.Run("stack grown during the call", func(t *testing.T) {
+		_, callee, live := setup(t, func(context.Context, wazy.Runtime) {})
+		for range 3 {
+			res, err := callee.ExportedFunction("deep").Call(context.Background(), 5000, n)
 			require.NoError(t, err)
 			require.Equal(t, uint64(want), res[0])
 		}
@@ -65,7 +76,7 @@ func TestRootRegionIsTheEngines(t *testing.T) {
 	// could not spill, and the collector reclaims nothing rather than miss their roots.
 	t.Run("instantiated during the call", func(t *testing.T) {
 		var instantiated bool
-		caller, live := setup(t, func(ctx context.Context, r wazy.Runtime) {
+		caller, _, live := setup(t, func(ctx context.Context, r wazy.Runtime) {
 			if instantiated {
 				return
 			}
