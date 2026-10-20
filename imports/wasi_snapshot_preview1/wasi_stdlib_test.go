@@ -604,12 +604,13 @@ func Test_ProtocPlugin(t *testing.T) {
 		WithSysWalltime().
 		WithRandSource(rand.Reader).
 		WithFSConfig(wazy.NewFSConfig().WithDirMount(filepath.VolumeName(cwd)+string(filepath.Separator), "/")))
-	require.NoError(t, err)
-	stdoutW.Close()
-	stderrW.Close()
+	require.NoError(t, stdoutW.Close())
+	require.NoError(t, stderrW.Close())
+	gotStdout, gotStderr := <-stdout, <-stderr
+	require.NoError(t, err, "guest stderr:\n%s", gotStderr)
 
-	require.Equal(t, string(bytes.ToUpper(req)), string(<-stdout))
-	require.Equal(t, fmt.Sprintf("plugin: %d bytes\n", len(req)), string(<-stderr))
+	require.Equal(t, string(bytes.ToUpper(req)), string(gotStdout))
+	require.Equal(t, fmt.Sprintf("plugin: %d bytes\n", len(req)), string(gotStderr))
 }
 
 func Test_LargeStdout(t *testing.T) {
