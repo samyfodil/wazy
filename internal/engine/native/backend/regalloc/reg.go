@@ -95,6 +95,13 @@ const (
 	RegTypeInvalid RegType = iota
 	RegTypeInt
 	RegTypeFloat
+	// RegTypeVec is a register file distinct from both the integer and the
+	// float files. Most ISAs do not have one -- on arm64 and amd64 a vector
+	// and a float value live in the same physical register, so v128 belongs to
+	// RegTypeFloat and this class stays empty. RISC-V is the exception: its
+	// f-registers are 64 bits and RVV's v-registers are a separate file, so a
+	// v128 there is neither an int nor a float as far as allocation goes.
+	RegTypeVec
 	NumRegType
 )
 
@@ -105,18 +112,24 @@ func (r RegType) String() string {
 		return "int"
 	case RegTypeFloat:
 		return "float"
+	case RegTypeVec:
+		return "vec"
 	default:
 		return "invalid"
 	}
 }
 
-// RegTypeOf returns the RegType of the given ssa.Type.
-func RegTypeOf(p ssa.Type) RegType {
+// RegTypeOf returns the RegType of the given ssa.Type. v128RegType is the
+// class the active ISA keeps vectors in -- RegTypeFloat where the float and
+// vector files are the same registers, RegTypeVec where they are not.
+func RegTypeOf(p ssa.Type, v128RegType RegType) RegType {
 	switch p {
 	case ssa.TypeI32, ssa.TypeI64:
 		return RegTypeInt
-	case ssa.TypeF32, ssa.TypeF64, ssa.TypeV128:
+	case ssa.TypeF32, ssa.TypeF64:
 		return RegTypeFloat
+	case ssa.TypeV128:
+		return v128RegType
 	default:
 		panic("invalid type")
 	}

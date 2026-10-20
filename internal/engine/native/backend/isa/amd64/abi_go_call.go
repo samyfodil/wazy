@@ -20,7 +20,7 @@ func (m *machine) CompileGoFunctionTrampoline(exitCode nativeapi.ExitCode, sig *
 	}
 
 	abi := &backend.FunctionABI{}
-	abi.Init(sig, intArgResultRegs, floatArgResultRegs)
+	abi.Init(sig, intArgResultRegs, floatArgResultRegs, regalloc.RegTypeFloat)
 	m.currentABI = abi
 
 	cur := m.allocateNop()

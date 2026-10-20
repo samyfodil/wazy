@@ -13,7 +13,11 @@ import (
 const enabledFeatures = api.CoreFeaturesV2
 
 func TestCompiler(t *testing.T) {
-	if !platform.CompilerSupported() {
+	// This corpus needs the vector extension and cannot have SIMD cleared the way
+	// the proposal suites can: simd_select.wast is v128 value types with no vector
+	// opcode at all, so it validates with SIMD disabled and then executes vector
+	// instructions. The emulated riscv64 job is where these run.
+	if !platform.CompilerSupports(enabledFeatures) {
 		t.Skip()
 	}
 	spectest.Run(t, Testcases, context.Background(), wazy.NewRuntimeConfigCompiler().WithCoreFeatures(enabledFeatures))

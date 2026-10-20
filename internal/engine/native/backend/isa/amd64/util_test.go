@@ -96,7 +96,7 @@ func (m *mockCompiler) ResolveSignature(id ssa.SignatureID) *ssa.Signature {
 // AllocateVReg implements backend.Compiler.
 func (m *mockCompiler) AllocateVReg(typ ssa.Type) regalloc.VReg {
 	m.vRegCounter++
-	regType := regalloc.RegTypeOf(typ)
+	regType := regalloc.RegTypeOf(typ, regalloc.RegTypeFloat)
 	ret := regalloc.VReg(m.vRegCounter).SetRegType(regType)
 	m.typeOf[ret.ID()] = typ
 	return ret

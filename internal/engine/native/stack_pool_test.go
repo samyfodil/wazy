@@ -1,9 +1,9 @@
-//go:build amd64 || arm64
+//go:build amd64 || arm64 || riscv64
 
-// This file's fixtures are sized to a 64-bit host: stack size classes in the
-// gibibytes, and uintptr return addresses above 2^32. The native compiler only
-// runs on amd64 and arm64, both 64-bit, so constrain the file to them rather
-// than shrinking what it covers.
+// This file's fixtures are sized to a 64-bit host: a top stack size class in
+// the hundreds of megabytes, and uintptr return addresses above 2^32. Every
+// host the native compiler runs on is 64-bit, so constrain the file to them
+// rather than shrinking what it covers.
 
 package native
 
@@ -174,15 +174,34 @@ func TestEngine_releaseStack_grownBufferGoesToItsOwnClass(t *testing.T) {
 }
 
 func TestEngine_acquireStack_tooLargeIsNotPooled(t *testing.T) {
+	// Holding GC off makes the common case deterministic: a cycle between the
+	// Put and the Get below moves what was offered to the victim cache, and a
+	// second cycle discards it. It is not sufficient on its own -- sync.Pool
+	// promises nothing about a Get returning what a Put offered, GC or no GC,
+	// and this test failed on a macos runner under -race with GC already off --
+	// so the assertion is retried, as the two tests above retry theirs.
+	disableGC(t)
+
 	e := &engine{}
 	n := (stackPoolBaseSize << (stackPoolNumClasses - 1)) + 1
 	buf, boxed := e.acquireStack(n)
 	require.Equal(t, n, len(buf))
 	require.Nil(t, boxed)
 
-	// Releasing an oversized buffer beyond the largest class floors into
-	// the top class rather than panicking or growing the array.
-	e.releaseStack(buf, nil)
+	// Releasing an oversized buffer beyond the largest class floors into the top
+	// class rather than panicking or growing the array. Taking it back out is
+	// what checks that: the release on its own only asserts nothing panicked,
+	// not that the buffer landed in the *top* class.
+	//
+	// The same buffer is offered each time, so the retries cost no further
+	// allocation -- which matters when it is over half a gigabyte.
+	var got any
+	for i := 0; i < maxPoolRetries && got == nil; i++ {
+		e.releaseStack(buf, nil)
+		got = e.stackPools[stackPoolNumClasses-1].Get()
+	}
+	require.NotNil(t, got, "an oversized release never reached the top class in %d attempts", maxPoolRetries)
+	require.Equal(t, n, len(*got.(*[]byte)))
 }
 
 // RetainedStackLenForTest reports the length of the wasm stack f is holding on to between calls, or

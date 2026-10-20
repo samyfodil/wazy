@@ -391,20 +391,20 @@ func Test_findOrSpillAllocatable_prefersSpill(t *testing.T) {
 		a := &_allocator{}
 		s := &_state{regsInUse: newRegInUseSet[*mockInstr, *mockBlock, *mockFunction]()}
 		s.regsInUse.add(RealReg(1), &_vrState{v: VReg(2222222)})
-		got := a.findOrSpillAllocatable(s, []RealReg{3}, 0, 3)
+		got := a.findOrSpillAllocatable(s, []RealReg{3}, RegSet{}, 3)
 		require.Equal(t, RealReg(3), got)
 	})
 	t.Run("preferred but in use", func(t *testing.T) {
 		a := &_allocator{}
 		s := &_state{vrStates: nativeapi.NewIDedPool[_vrState](_resetVrState)}
 		s.regsInUse.add(RealReg(3), &_vrState{v: VReg(1).SetRealReg(3)})
-		got := a.findOrSpillAllocatable(s, []RealReg{3, 4}, 0, 3)
+		got := a.findOrSpillAllocatable(s, []RealReg{3, 4}, RegSet{}, 3)
 		require.Equal(t, RealReg(4), got)
 	})
 	t.Run("preferred but forbidden", func(t *testing.T) {
 		a := &_allocator{}
 		s := &_state{vrStates: nativeapi.NewIDedPool[_vrState](_resetVrState)}
-		got := a.findOrSpillAllocatable(s, []RealReg{3, 4}, RegSet(0).add(3), 3)
+		got := a.findOrSpillAllocatable(s, []RealReg{3, 4}, RegSet{}.add(3), 3)
 		require.Equal(t, RealReg(4), got)
 	})
 }
