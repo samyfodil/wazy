@@ -573,8 +573,8 @@ func Test_ProtocPlugin(t *testing.T) {
 	// Larger than any pipe buffer, so both sides block mid-transfer.
 	req := bytes.Repeat([]byte("message Foo { string bar = 1; }\n"), 1<<15)
 	go func() {
-		stdinW.Write(req)
-		stdinW.Close()
+		_, _ = stdinW.Write(req)
+		_ = stdinW.Close()
 	}()
 	stdout := make(chan []byte, 1)
 	go func() {
