@@ -58,6 +58,10 @@ func main() {
 		mainStdout()
 	case "largestdout":
 		mainLargeStdout()
+	case "plugin":
+		if err := mainPlugin(); err != nil {
+			panic(err)
+		}
 	}
 }
 
@@ -259,6 +263,42 @@ func mainStdin() error {
 	}
 	os.Stdout.Write(b)
 	return nil
+}
+
+// mainPlugin behaves like a protoc plugin, the guest in
+// https://github.com/tetratelabs/wazero/issues/2420: it reads the whole
+// request from stdin, works on it with a few goroutines while the GC runs, and
+// writes the response to stdout and a log line to stderr.
+func mainPlugin() error {
+	req, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return err
+	}
+	const workers = 4
+	parts := make([][]byte, workers)
+	chunk := (len(req) + workers - 1) / workers
+	var wg sync.WaitGroup
+	for i := range parts {
+		lo, hi := min(i*chunk, len(req)), min((i+1)*chunk, len(req))
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var out []byte
+			for _, b := range req[lo:hi] {
+				// Grow one byte at a time so the GC has work to do.
+				out = append(out, bytes.ToUpper([]byte{b})...)
+			}
+			parts[i] = out
+		}()
+	}
+	wg.Wait()
+	for _, p := range parts {
+		if _, err := os.Stdout.Write(p); err != nil {
+			return err
+		}
+	}
+	_, err = fmt.Fprintf(os.Stderr, "plugin: %d bytes\n", len(req))
+	return err
 }
 
 func mainStdout() {
