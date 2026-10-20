@@ -423,7 +423,7 @@ func TestInterpreter_Compile(t *testing.T) {
 		for i := range funcs {
 			require.Nil(t, funcs[i].body)
 		}
-		lazy := funcs[0].lazy.module
+		lazy := funcs[0].hostFn.(*lazyFunction).module
 		require.Equal(t, 3, lazy.pending)
 
 		funcs[0].lower()

@@ -408,8 +408,9 @@ type lazyModule struct {
 	pending int
 }
 
-// lazyFunction is the per-function lowering state. It is separate from
-// compiledFunction so the eager path pays one nil pointer, not a sync.Once.
+// lazyFunction is the per-function lowering state. It rides in
+// compiledFunction.hostFn so the eager path's layout and checks are those of a
+// plain wasm function: no field, no flag.
 type lazyFunction struct {
 	module *lazyModule
 	once   sync.Once
@@ -424,9 +425,6 @@ type lazyFunction struct {
 type compiledFunction struct {
 	source *wasm.Module
 	body   []unionOperation
-	// lazy is non-nil only for a function compiled with lazy lowering; its body
-	// is lowered by lower on the first call. Nil on the eager path.
-	lazy *lazyFunction
 	// sideTable holds the variable-length uint64 payloads moved out of
 	// unionOperation (I8): BrTable targets/ranges, V128Shuffle lanes, and
 	// tail-call [dropDepth,label]. An op that needs one stores its index here in
@@ -435,7 +433,11 @@ type compiledFunction struct {
 	exceptionTable      []exceptionTableEntry
 	listener            api.FunctionListener
 	offsetsInWasmBinary []uint64
-	hostFn              interface{}
+	// hostFn is the host function's Go function, or a *lazyFunction for a
+	// function compiled with lazy lowering, whose body is lowered by lower on
+	// the first call. Nil for an eagerly lowered wasm function, so that path's
+	// call does one nil test, as it did before lazy lowering existed.
+	hostFn interface{}
 	// goModuleFn and goFn are hostFn settled into its one concrete shape at instantiation (H8),
 	// so a host call dispatches on a nil check instead of a runtime.interfaceSwitch. Exactly one
 	// is ever non-nil, and only for a host function.
@@ -651,7 +653,7 @@ func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listene
 		} else if lazy != nil {
 			// The module was fully validated before reaching the engine, so
 			// deferring lowering defers no validation error.
-			compiled.lazy = &lazyFunction{module: lazy, codeIndex: i}
+			compiled.hostFn = &lazyFunction{module: lazy, codeIndex: i}
 			lazy.pending++
 		} else {
 			ir, err := irCompiler.Next()
@@ -684,7 +686,7 @@ func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listene
 //
 //go:noinline
 func (c *compiledFunction) lower() {
-	l := c.lazy
+	l := c.hostFn.(*lazyFunction)
 	l.once.Do(func() {
 		m := l.module
 		m.mux.Lock()
@@ -1366,12 +1368,15 @@ func (ce *callEngine) recoverOnCall(ctx context.Context, m *wasm.ModuleInstance,
 }
 
 func (ce *callEngine) callFunction(ctx context.Context, m *wasm.ModuleInstance, f *function) {
-	if f.parent.hostFn != nil {
-		ce.callGoFuncWithStack(ctx, m, f)
-		return
-	}
-	if l := f.parent.lazy; l != nil && !l.lowered.Load() {
-		f.parent.lower()
+	if fn := f.parent.hostFn; fn != nil {
+		l, lazy := fn.(*lazyFunction)
+		if !lazy {
+			ce.callGoFuncWithStack(ctx, m, f)
+			return
+		}
+		if !l.lowered.Load() {
+			f.parent.lower()
+		}
 	}
 	if lsn := f.parent.listener; lsn != nil {
 		ce.callNativeFuncWithListener(ctx, m, f, lsn)
@@ -5624,7 +5629,7 @@ func (ce *callEngine) resetPc(frame *callFrame, f *function) (body []unionOperat
 	// that belong to the same module; thus, we can overwrite the frame in-place.
 	// For details, see internal/engine/RATIONALE.md
 	// A tail call enters the body without going through callFunction.
-	if l := f.parent.lazy; l != nil && !l.lowered.Load() {
+	if l, ok := f.parent.hostFn.(*lazyFunction); ok && !l.lowered.Load() {
 		f.parent.lower()
 	}
 	frame.f = f
