@@ -39,6 +39,9 @@ func readFd(fd uintptr, buf []byte) (int, sys.Errno) {
 	if errno == syscall.ERROR_BROKEN_PIPE {
 		return 0, 0
 	}
+	if errno != 0 {
+		return -1, sys.UnwrapOSError(errno)
+	}
 	if n == 0 {
 		return -1, sys.EAGAIN
 	}

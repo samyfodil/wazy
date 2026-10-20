@@ -133,10 +133,18 @@ func peekAll(pipes, sockets []pollFd) (npipes, nsockets int, errno sys.Errno) {
 func peekPipes(fds []pollFd) (n int, errno sys.Errno) {
 	for i := range fds {
 		bytes, errno := peekNamedPipe(syscall.Handle(fds[i].fd))
+		fds[i].revents = 0
+		// A pipe whose writer has closed is at EOF, and EOF is readable: the
+		// read returns 0, as poll(2) reports POLLIN|POLLHUP. Failing the whole
+		// poll instead makes a Go guest's netpoll throw "poll_oneoff failed".
+		if errno == syscall.ERROR_BROKEN_PIPE {
+			fds[i].revents = _POLLIN
+			n++
+			continue
+		}
 		if errno != 0 {
 			return -1, sys.UnwrapOSError(errno)
 		}
-		fds[i].revents = 0
 		if bytes > 0 {
 			fds[i].revents = _POLLIN
 			n++
