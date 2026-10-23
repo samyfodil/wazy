@@ -16,6 +16,14 @@ FROM node:22.23.4-trixie-slim@sha256:8eb619e402eaede1748a3c8173bffab391592812e85
 RUN rm -rf /usr/share/doc /usr/share/man /usr/share/info /usr/share/locale
 COPY --from=jco /opt/js /opt/js
 COPY --from=tools /opt/wasm /opt/wasm
+# componentize-js runs wizer with an environment that drops HOME, so wasmtime
+# falls back to the passwd entry for its config dir. An arbitrary --user uid
+# has none, and wizer fails ("config file not specified and failed to get the
+# default"). Wrap the binary to give it a HOME.
+RUN w=$(echo /opt/js/node_modules/@bytecodealliance/wizer-linux-*/wizer) \
+ && mv "$w" "$w.real" \
+ && printf '#!/bin/sh\nHOME=${HOME:-/tmp} exec "$0.real" "$@"\n' > "$w" \
+ && chmod 755 "$w"
 ENV PATH=/opt/js/node_modules/.bin:/opt/wasm/bin:$PATH \
     HOME=/tmp \
     npm_config_cache=/tmp/npm-cache \
