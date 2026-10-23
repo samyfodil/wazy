@@ -27,7 +27,8 @@ jobs:
           # --accept REPLACES lychee's default set, so 404 is not accepted -- and the
           # README's Docs link 404s until wazy.dev's DNS and the repo's custom-domain
           # setting finish propagating, hence the exclude. REMOVE IT once
-          # https://wazy.dev/ serves 200.
-          args: --no-progress --max-retries 5 --retry-wait-time 3 --accept 200,204,206,429 --exclude 'wazy\.dev' README.md
+          # https://wazy.dev/ serves 200. go-anydoc's repo is gone (its author's
+          # account was deleted); the case study keeps the link for attribution.
+          args: --no-progress --max-retries 5 --retry-wait-time 3 --accept 200,204,206,429 --exclude 'wazy\.dev' --exclude 'github\.com/xusenlin/go-anydoc' README.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

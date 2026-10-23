@@ -23,7 +23,7 @@ Declare the contract in a small `.wit` interface file and implement your half in
 
 **Guests that suspend and resume.** wazy runs the **WASI 0.3 async ABI**: `stream<T>` and `future<T>`, subtasks, cancellation, backpressure and cooperative threads, with goroutines and channels as the substrate. It passes all 31 official async conformance suites. You call an async export exactly like a synchronous one — the scheduler runs underneath and `Call` returns when the task completes.
 
-**Cheap.** Instantiating a compiled 37 KB module takes 1.7 µs and 3.3 KB of heap, so every request gets its own fresh linear memory instead of a pooled one you scrub between calls. A host call costs 48 ns and allocates nothing on the stack-reusing path, so your host API stays fine-grained instead of batching to hide the boundary. wazy serves a warm `wasi:http` component — a guest that answers HTTP requests — through `net/http` in 3.37 µs and 45 allocations; two orders of magnitude up, a 6.5 MB Rust document converter turns a 7.5 MB PDF in 0.75 s inside a pure-Go host ([go-anydoc][anydoc]'s measurement, [#29][i29]). Every first-party figure is a benchmark in this repo: commands under [Benchmarks](#benchmarks), method and the optimizations **measured and rejected** in [OPTIMIZATIONS.md](OPTIMIZATIONS.md).
+**Cheap.** Instantiating a compiled 37 KB module takes 1.7 µs and 3.3 KB of heap, so every request gets its own fresh linear memory instead of a pooled one you scrub between calls. A host call costs 48 ns and allocates nothing on the stack-reusing path, so your host API stays fine-grained instead of batching to hide the boundary. wazy serves a warm `wasi:http` component — a guest that answers HTTP requests — through `net/http` in 3.37 µs and 45 allocations; two orders of magnitude up, a 6.5 MB Rust document converter turns a 7.5 MB PDF in 0.75 s inside a pure-Go host ([go-anydoc][anydoc]'s measurement). Every first-party figure is a benchmark in this repo: commands under [Benchmarks](#benchmarks), method and the optimizations **measured and rejected** in [OPTIMIZATIONS.md](OPTIMIZATIONS.md).
 
 ## Run it
 
@@ -295,7 +295,7 @@ instantiation ever asked for, so nothing was reused either. See
 the harness, so a checkout is enough to reproduce it. Arms interleaved, min of 8 (small) and 4
 (large) — the M4 has performance and efficiency cores and no `taskset`, which makes medians on this
 machine untrustworthy. The original third-party report, including PDF figures this table omits
-because no PDF worth measuring is small enough to commit, is [#29][i29].</sub>
+because no PDF worth measuring is small enough to commit, was issue #29, since deleted.</sub>
 
 <sub>The toggle table is a separate third-party run — Apple M5 Pro (18-core), macOS 26.5, Go 1.26.1,
 `CGO_ENABLED=0`, `anydoc.wasm` 6,781,177 bytes (the module has since been rebuilt on anydoc 0.2.3),
@@ -336,7 +336,6 @@ Apache 2.0. See [LICENSE](LICENSE).
 [wasitest]: https://github.com/WebAssembly/wasi-testsuite
 [pr679]: https://github.com/WebAssembly/component-model/pull/679
 [anydoc]: https://github.com/xusenlin/go-anydoc
-[i29]: https://github.com/samyfodil/wazy/issues/29
 [pdfium-ccd]: https://github.com/klippa-app/go-pdfium/blob/main/experimental/BENCHMARKS.md#the-cost-of-close-on-context-done
 [w2533]: https://github.com/wazero/wazero/pull/2533
 [pr71]: https://github.com/samyfodil/wazy/pull/71

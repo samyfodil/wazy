@@ -338,7 +338,7 @@ it.
 | Workload | Result | Source |
 | --- | --- | --- |
 | `Case3/fibonacci` (pure recursion, ~2.7M direct calls) | wazy **~16% behind** wasmtime/Cranelift, described as a raw-codegen gap | OPTIMIZATIONS.md H7-followup, min-of-8 interleaved, verified-quiet i9-12900HK |
-| 7.5 MB PDF through a 6.5 MB Rust module | native Rust 0.28 s, wasmtime (Cranelift) 0.37 s, **wazy 0.75 s**, wasmtime (Winch) 0.90 s, wazero 3.4 s — roughly **2x behind Cranelift** | Third-party: [go-anydoc][anydoc], reported in [#29][i29]. Recorded in this repository's README history (commit `35cb198a~1`); the current README keeps only the wazero columns |
+| 7.5 MB PDF through a 6.5 MB Rust module | native Rust 0.28 s, wasmtime (Cranelift) 0.37 s, **wazy 0.75 s**, wasmtime (Winch) 0.90 s, wazero 3.4 s — roughly **2x behind Cranelift** | Third-party: [go-anydoc][anydoc], reported in issue #29 (since deleted). Recorded in this repository's README history (commit `35cb198a~1`); the current README keeps only the wazero columns |
 
 ### Where the gap closed
 
@@ -412,7 +412,7 @@ instantiation dominates goes the other way, and the first row is the crossover.
 (the module is not vendored here). Apple M5 Pro (18-core), 48 GB, macOS 26.5,
 Go 1.26.1, `CGO_ENABLED=0`, wazy `v0.0.0-20260807033006-cd2607360a17`,
 `anydoc.wasm` 6,542,355 bytes, best of 3 (best of 20 for the small input).
-Reported in [#29][i29]. The wasmtime and native-Rust columns for the 7.5 MB PDF
+Reported in issue #29 (since deleted). The wasmtime and native-Rust columns for the 7.5 MB PDF
 are in [§4](#where-wazy-is-behind).
 
 ## 5. Method
@@ -484,4 +484,3 @@ still serializes instantiate against close, and the 2431-line validator body was
 left alone deliberately because correctness of validation outranks its speed.
 
 [anydoc]: https://github.com/xusenlin/go-anydoc
-[i29]: https://github.com/samyfodil/wazy/issues/29

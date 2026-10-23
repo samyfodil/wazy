@@ -104,7 +104,7 @@ Third-party measurement, not ours. Apple M5 Pro (18-core), 48 GB, macOS 26.5, Go
 docx rows reproduce from a checkout of go-anydoc — `go test -run '^$' -bench 'ConvertDOCX|CloseOnContextDone' -benchtime 3x -count 3`,
 since its harness generates its own inputs; the PDF rows need a file of your own, and the wazero
 column is the same benchmarks with the three imports in its `anydoc.go` pointed at wazero.
-Originally reported in [#29](https://github.com/samyfodil/wazy/issues/29).
+Originally reported in issue #29 (since deleted).
 
 ## Against wasmtime
 
