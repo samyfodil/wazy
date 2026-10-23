@@ -4,18 +4,18 @@ Docker images that compile source to WebAssembly components that run on wazy.
 Each image is a pinned toolchain for one language. Every published tag has
 passed the tests described below, on linux/amd64 and on linux/arm64.
 
-| Image | Tag | Toolchain | Worlds tested | Size amd64 (compressed / unpacked) |
-| --- | --- | --- | --- | --- |
-| [`ghcr.io/samyfodil/wazy-build-rust`](rust/README.md) | `1.99.1-cc0.21.1` | Rust 1.99.1 (`wasm32-wasip1`, `wasm32-wasip2`), cargo-component 0.21.1 | command, proxy | 426 MB / 1222 MB |
-| [`ghcr.io/samyfodil/wazy-build-go`](go/README.md) | `1.26.10` | Go 1.26.10 | command | 134 MB / 399 MB |
-| [`ghcr.io/samyfodil/wazy-build-tinygo`](tinygo/README.md) | `0.43.0-go1.26.10` | TinyGo 0.43.0, Go 1.26.10, wit-bindgen-go 0.7.0 | command, proxy | 222 MB / 635 MB |
-| [`ghcr.io/samyfodil/wazy-build-c`](c/README.md) | `34.0` | wasi-sdk 34.0 (clang 23), C and C++ | command, proxy | 172 MB / 498 MB |
-| [`ghcr.io/samyfodil/wazy-build-python`](python/README.md) | `0.25.1-py3.13.9` | componentize-py 0.25.1, Python 3.13.9 | command, proxy | 100 MB / 273 MB |
-| [`ghcr.io/samyfodil/wazy-build-js`](js/README.md) | `1.39.0-cjs0.23.0-node22.23.4` | jco 1.39.0, componentize-js 0.23.0, Node 22.23.4 | command, proxy | 213 MB / 675 MB |
-| [`ghcr.io/samyfodil/wazy-build-csharp`](csharp/README.md) | `0.8.0-preview00011-net10.0.402` | componentize-dotnet 0.8.0-preview00011, .NET SDK 10.0.402, NativeAOT-LLVM 10.0.0-rc.1.26306.1, wasi-sdk 29.0 | command, proxy | 560 MB / 1570 MB |
+| Image | Tag | Toolchain | Worlds tested | Size amd64 (compressed / unpacked) | Size arm64 (unpacked) |
+| --- | --- | --- | --- | --- | --- |
+| [`ghcr.io/samyfodil/wazy-build-rust`](rust/README.md) | `1.99.1-cc0.21.1` | Rust 1.99.1 (`wasm32-wasip1`, `wasm32-wasip2`), cargo-component 0.21.1 | command, proxy | 426 MB / 1222 MB | 1120 MB |
+| [`ghcr.io/samyfodil/wazy-build-go`](go/README.md) | `1.26.10` | Go 1.26.10 | command | 134 MB / 399 MB | 403 MB |
+| [`ghcr.io/samyfodil/wazy-build-tinygo`](tinygo/README.md) | `0.43.0-go1.26.10` | TinyGo 0.43.0, Go 1.26.10, wit-bindgen-go 0.7.0 | command, proxy | 222 MB / 635 MB | 625 MB |
+| [`ghcr.io/samyfodil/wazy-build-c`](c/README.md) | `34.0` | wasi-sdk 34.0 (clang 23), C and C++ | command, proxy | 172 MB / 498 MB | 505 MB |
+| [`ghcr.io/samyfodil/wazy-build-python`](python/README.md) | `0.25.1-py3.13.9` | componentize-py 0.25.1, Python 3.13.9 | command, proxy | 100 MB / 273 MB | 281 MB |
+| [`ghcr.io/samyfodil/wazy-build-js`](js/README.md) | `1.39.0-cjs0.23.0-node22.23.4` | jco 1.39.0, componentize-js 0.23.0, Node 22.23.4 | command, proxy | 213 MB / 675 MB | 693 MB |
+| [`ghcr.io/samyfodil/wazy-build-csharp`](csharp/README.md) | `0.8.0-preview00011-net10.0.402` | componentize-dotnet 0.8.0-preview00011, .NET SDK 10.0.402, NativeAOT-LLVM 10.0.0-rc.1.26306.1, wasi-sdk 29.0 | command, proxy | 560 MB / 1570 MB | 1606 MB |
 
 Compressed is `docker save | gzip`, close to the pull size; unpacked is the
-image's size on disk. The arm64 sizes are in each image's `size.arm64`.
+image's size on disk (MiB). Exact byte counts are in each image's `size.<arch>`.
 
 ## Usage
 
