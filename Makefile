@@ -10,8 +10,10 @@ all_testdata  := $(wildcard testdata/* */testdata/* */*/testdata/* */*/testdata/
 all_testing   := $(wildcard internal/testing/* internal/testing/*/* internal/testing/*/*/*)
 all_examples  := $(wildcard examples/* examples/*/* examples/*/*/* examples/*/*/*/* examples/*/*/*/*/* */*/example/* */*/example/*/* */*/example/*/*/*)
 all_it        := $(wildcard internal/integration_test/* internal/integration_test/*/* internal/integration_test/*/*/*)
-# main_sources exclude any test or example related code
-main_sources  := $(wildcard $(filter-out %_test.go benchmarks/% $(all_testdata) $(all_testing) $(all_examples) $(all_it), $(all_sources)))
+all_samples   := $(wildcard build-images/*/sample/*.go build-images/*/sample/*/*.go)
+# main_sources exclude any test or example related code, and the build-image
+# samples, which are their own modules
+main_sources  := $(wildcard $(filter-out %_test.go benchmarks/% $(all_samples) $(all_testdata) $(all_testing) $(all_examples) $(all_it), $(all_sources)))
 # main_packages collect the unique main source directories (sort will dedupe).
 # Paths need to all start with ./, so we do that manually vs foreach which strips it.
 main_packages := $(sort $(foreach f,$(dir $(main_sources)),$(if $(findstring ./,$(f)),./,./$(f))))
