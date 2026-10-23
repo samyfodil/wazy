@@ -1199,19 +1199,6 @@ func wasiSocketOptions(sockets *wasiSockets) []component.Option {
 		return []component.Value{wasiPollableRep}, nil
 	}
 
-	// streamSubscribe backs both [method]input-stream.subscribe and
-	// [method]output-stream.subscribe: self is already resolved (and
-	// validated live) by liftHostArgs before this closure runs, and every
-	// pollable this package mints is the same always-ready singleton (see
-	// wasiPollableRep's doc), so there is nothing left to distinguish
-	// between the two methods' bodies.
-	streamSubscribe := func(_ context.Context, args []component.Value) ([]component.Value, error) {
-		if len(args) != 1 {
-			return nil, fmt.Errorf("[method]stream.subscribe: expected 1 arg (self), got %d", len(args))
-		}
-		return []component.Value{wasiPollableRep}, nil
-	}
-
 	instNetFD, instNetResolve := wasiInstanceNetworkSig()
 	createTCPFD, createTCPResolve := wasiCreateTCPSocketSig()
 	startConnectFD, startConnectResolve := wasiTCPStartConnectSig()
@@ -1225,8 +1212,6 @@ func wasiSocketOptions(sockets *wasiSockets) []component.Option {
 	remoteAddrFD, remoteAddrResolve := wasiTCPLocalAddressSig()
 	setBacklogFD, setBacklogResolve := wasiTCPSetListenBacklogSig()
 	tcpSubFD, tcpSubResolve := wasiSubscribeSig(wasiTCPSocketResType)
-	inSubFD, inSubResolve := wasiSubscribeSig(wasiInputStreamResType)
-	outSubFD, outSubResolve := wasiSubscribeSig(wasiOutputStreamResType)
 	resolveFD, resolveResolve := wasiResolveAddressesSig()
 	resolveNextFD, resolveNextResolve := wasiResolveNextAddressSig()
 	resolveSubFD, resolveSubResolve := wasiSubscribeSig(wasiResolveStreamResType)
@@ -1286,8 +1271,6 @@ func wasiSocketOptions(sockets *wasiSockets) []component.Option {
 		tcpSetOpt("[method]tcp-socket.set-receive-buffer-size", "u64"),
 		tcpSetOpt("[method]tcp-socket.set-send-buffer-size", "u64"),
 		component.WithImportCustom(wasiIfaceSocketsTCP, "[method]tcp-socket.subscribe", tcpSubscribe, tcpSubFD, tcpSubResolve),
-		component.WithImportCustom(wasiIfaceStreams, "[method]input-stream.subscribe", streamSubscribe, inSubFD, inSubResolve),
-		component.WithImportCustom(wasiIfaceStreams, "[method]output-stream.subscribe", streamSubscribe, outSubFD, outSubResolve),
 	}
 }
 

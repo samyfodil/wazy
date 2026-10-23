@@ -12,6 +12,7 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/component"
+	"github.com/samyfodil/wazy/sys"
 )
 
 // This file implements a host WASI 0.2 ("wasip2") surface sufficient to run
@@ -53,8 +54,8 @@ import (
 //     backpressure to model against a Go io.Writer.
 //   - wasi:cli/exit.exit, wasi:cli/environment.{get-environment,
 //     get-arguments}, wasi:filesystem/preopens.get-directories: real,
-//     WIT-correct implementations, but exit always fails the call (see
-//     wasiExit's doc) since wazy has no process to actually terminate, and
+//     WIT-correct implementations, but exit always aborts the call with a
+//     *sys.ExitError (code 0 for ok) since wazy has no process to terminate, and
 //     get-environment/get-arguments/get-directories return whatever
 //     WASIConfig.Env/Args/FS hold (all empty by default, so no preopened
 //     directories) respectively -- these are not on run()'s stdio
@@ -442,14 +443,16 @@ func WithWASI(cfg WASIConfig) []component.Option {
 		if !ok {
 			return nil, fmt.Errorf("wasi:cli/exit.exit: expected a result<_,_> arg, got %T", args[0])
 		}
+		// wazy has no host process for exit() to terminate, so it aborts the
+		// originating Call with a *sys.ExitError -- the same error a core
+		// wasip1 module's proc_exit produces. Exit code 0 is a clean exit
+		// (TinyGo and standard Go call exit(ok) after main returns); a host
+		// running a command treats errors.As(err, *sys.ExitError) with code 0
+		// as success.
 		if rv.IsErr {
-			return nil, fmt.Errorf("wasi:cli/exit.exit: guest called exit with an error status")
+			return nil, sys.NewExitError(1)
 		}
-		// wazy has no host process for a successful exit() to terminate, so
-		// this aborts the originating Call with a specific, named error
-		// rather than either silently continuing (wrong: the guest asked to
-		// stop) or panicking the host.
-		return nil, fmt.Errorf("wasi:cli/exit.exit: guest called exit(ok); wazy has no process to exit")
+		return nil, sys.NewExitError(0)
 	}
 
 	getEnvironment := func(context.Context, []component.Value) ([]component.Value, error) {

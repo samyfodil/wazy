@@ -315,6 +315,8 @@ func wasiClockPollOptions(p *wasiPoll) []component.Option {
 	monoResFD, monoResR := wasiMonotonicNowSig() // () -> u64, same shape as now
 	wallNowFD, wallNowR := wasiWallClockNowSig()
 	wallResFD, wallResR := wasiWallClockNowSig() // () -> datetime, same shape as now
+	inSubFD, inSubR := wasiSubscribeSig(wasiInputStreamResType)
+	outSubFD, outSubR := wasiSubscribeSig(wasiOutputStreamResType)
 
 	return []component.Option{
 		component.WithResourcesHook(p.setResources),
@@ -331,7 +333,26 @@ func wasiClockPollOptions(p *wasiPoll) []component.Option {
 
 		component.WithImportCustom(wasiIfaceClocksWall, "now", p.wallNow, wallNowFD, wallNowR),
 		component.WithImportCustom(wasiIfaceClocksWall, "resolution", p.wallResolution, wallResFD, wallResR),
+
+		// Every stream -- stdio, file, socket, http body -- subscribes the
+		// same way, so this lives here rather than with any one stream
+		// source: wasi-libc's wasip2 write() subscribes to stdout before
+		// writing, so a plain printf needs it with no sockets enabled.
+		component.WithImportCustom(wasiIfaceStreams, "[method]input-stream.subscribe", streamSubscribe, inSubFD, inSubR),
+		component.WithImportCustom(wasiIfaceStreams, "[method]output-stream.subscribe", streamSubscribe, outSubFD, outSubR),
 	}
+}
+
+// streamSubscribe backs both [method]input-stream.subscribe and
+// [method]output-stream.subscribe: self is already resolved (and validated
+// live) by liftHostArgs before this runs, and every stream's pollable is the
+// same always-ready singleton (see wasiPollableRep's doc), so there is nothing
+// to distinguish between the two methods' bodies.
+func streamSubscribe(_ context.Context, args []component.Value) ([]component.Value, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("[method]stream.subscribe: expected 1 arg (self), got %d", len(args))
+	}
+	return []component.Value{wasiPollableRep}, nil
 }
 
 // wasiMonotonicNowSig builds the FuncDesc/resolver for monotonic-clock.now() ->

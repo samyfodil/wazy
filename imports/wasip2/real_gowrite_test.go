@@ -60,13 +60,13 @@ func TestRealGoWrite(t *testing.T) {
 
 	// A standard-Go command guest ends in runtime.exit -> proc_exit, which the
 	// adapter routes to wasi:cli/exit.exit; wazy has no process to terminate so
-	// that call always fails (see wasiExit). exit(ok) is the success signal here
-	// -- it means main returned normally rather than panicking mid-write.
+	// that call aborts run() with a *sys.ExitError. Code 0 is the success signal
+	// here -- it means main returned normally rather than panicking mid-write.
 	_, err = inst.Call(ctx, "wasi:cli/run@0.2.3#run")
 	if err == nil {
 		t.Fatalf("Call run(): expected the guest to reach exit(ok), got no error (stdout: %q)", stdout.String())
 	}
-	requireErrContains(t, err, "guest called exit(ok)")
+	requireExitCode(t, err, 0)
 
 	sizes := []int{1, 8, 4096, 70000}
 	var want bytes.Buffer
