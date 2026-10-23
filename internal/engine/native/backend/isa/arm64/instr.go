@@ -735,10 +735,6 @@ func (i *instruction) asCondBr(c cond, target label, is64bit bool) {
 	}
 }
 
-func (i *instruction) setCondBrTargets(target label) {
-	i.u2 = uint64(target)
-}
-
 func (i *instruction) condBrLabel() label {
 	return label(i.u2)
 }

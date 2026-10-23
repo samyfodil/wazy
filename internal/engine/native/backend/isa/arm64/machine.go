@@ -138,9 +138,7 @@ type (
 		cbr *instruction
 		// currentLabelPos is the labelPosition within which condBr is defined.
 		currentLabelPos *labelPosition
-		// Next block's labelPosition.
-		nextLabel label
-		offset    int64
+		offset          int64
 	}
 
 	// trapIsland is a shared per-function exit sequence for conditional traps
@@ -506,7 +504,7 @@ func (m *machine) resolveRelativeAddresses(ctx context.Context) {
 
 		// Next, in order to determine the offsets of relative jumps, we have to calculate the size of each label.
 		var offset int64
-		for i, pos := range m.orderedSSABlockLabelPos {
+		for _, pos := range m.orderedSSABlockLabelPos {
 			pos.binaryOffset = offset
 			var size int64
 			for cur := pos.begin; ; cur = cur.next {
@@ -518,15 +516,8 @@ func (m *machine) resolveRelativeAddresses(ctx context.Context) {
 					}
 				case condBr:
 					if !cur.condBrOffsetResolved() {
-						var nextLabel label
-						if i < len(m.orderedSSABlockLabelPos)-1 {
-							// Note: this is only used when the block ends with fallthrough,
-							// therefore can be safely assumed that the next block exists when it's needed.
-							nextLabel = ssaBlockLabel(m.orderedSSABlockLabelPos[i+1].sb)
-						}
 						m.condBrRelocs = append(m.condBrRelocs, condBrReloc{
 							cbr: cur, currentLabelPos: pos, offset: offset + size,
-							nextLabel: nextLabel,
 						})
 					}
 				case loadFpuConstPooled:
@@ -559,9 +550,9 @@ func (m *machine) resolveRelativeAddresses(ctx context.Context) {
 			offsetOfTarget := m.labelPositionPool.Get(int(target)).binaryOffset
 			diff := offsetOfTarget - offset
 			if divided := diff >> 2; divided < minSignedInt19 || divided > maxSignedInt19 {
-				// This case the conditional branch is too huge. We place the trampoline instructions at the end of the current block,
-				// and jump to it.
-				m.insertConditionalJumpTrampoline(cbr, reloc.currentLabelPos, reloc.nextLabel)
+				// The target is out of the conditional branch's ±1MB range: branch
+				// over an unconditional (±128MB) branch to it instead.
+				m.insertConditionalJumpTrampoline(cbr, reloc.currentLabelPos)
 				// Then, we need to recall this function to fix up the label offsets
 				// as they have changed after the trampoline is inserted.
 				needRerun = true
@@ -647,33 +638,43 @@ const (
 	minSignedInt19 = -(1 << 18)
 )
 
-func (m *machine) insertConditionalJumpTrampoline(cbr *instruction, currentBlk *labelPosition, nextLabel label) {
-	cur := currentBlk.end
+// insertConditionalJumpTrampoline rewrites a conditional branch whose target is out of its ±1MB
+// range into the inverted condition skipping over an unconditional branch to the target:
+//
+//	b.cond L          =>    b.!cond Lskip
+//	                        b L
+//	                        Lskip:
+//
+// The sequence sits at the branch itself, so it is in range wherever the branch is. (Putting the
+// trampoline at the end of the branch's block instead fails when the block itself is over 1MB --
+// a function the backend lays out as one huge block, such as CPython's interpreter loop -- and
+// the relaxation loop then never converges.)
+func (m *machine) insertConditionalJumpTrampoline(cbr *instruction, currentBlk *labelPosition) {
 	originalTarget := cbr.condBrLabel()
-	endNext := cur.next
+	next := cbr.next
 
-	if cur.kind != br {
-		// If the current block ends with a conditional branch, we can just insert the trampoline after it.
-		// Otherwise, we need to insert "skip" instruction to skip the trampoline instructions.
-		skip := m.allocateInstr()
-		skip.asBr(nextLabel)
-		cur = linkInstr(cur, skip)
+	c := cbr.condBrCond()
+	switch c.kind() {
+	case condKindRegisterZero:
+		c = registerAsRegNotZeroCond(c.register())
+	case condKindRegisterNotZero:
+		c = registerAsRegZeroCond(c.register())
+	default:
+		c = c.flag().invert().asCond()
 	}
+	skipInstr, skipLabel := m.allocateBrTarget()
+	cbr.asCondBr(c, skipLabel, cbr.condBr64bit())
 
-	cbrNewTargetInstr, cbrNewTargetLabel := m.allocateBrTarget()
-	cbr.setCondBrTargets(cbrNewTargetLabel)
-	cur = linkInstr(cur, cbrNewTargetInstr)
-
-	// Then insert the unconditional branch to the original, which should be possible to get encoded
-	// as 26-bit offset should be enough for any practical application.
 	br := m.allocateInstr()
 	br.asBr(originalTarget)
-	cur = linkInstr(cur, br)
-
-	// Update the end of the current block.
-	currentBlk.end = cur
-
-	linkInstr(cur, endNext)
+	linkInstr(cbr, br)
+	linkInstr(br, skipInstr)
+	if next != nil {
+		linkInstr(skipInstr, next)
+	}
+	if currentBlk.end == cbr {
+		currentBlk.end = skipInstr
+	}
 }
 
 // Format implements backend.Machine.

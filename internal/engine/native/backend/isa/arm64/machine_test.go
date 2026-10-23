@@ -125,94 +125,95 @@ func TestMachine_getVRegSpillSlotOffsetFromSP(t *testing.T) {
 
 func TestMachine_insertConditionalJumpTrampoline(t *testing.T) {
 	for _, tc := range []struct {
-		brAtEnd             bool
+		name                string
+		cond                cond
+		atEnd, last         bool
 		expBefore, expAfter string
 	}{
 		{
-			brAtEnd: true,
+			name: "flag, mid-block",
+			cond: eq.asCond(),
 			expBefore: `
 L100:
 	b.eq L12345
-	b L888888888
+	udf
 L200:
 	exit_sequence x0
 `,
 			expAfter: `
 L100:
-	b.eq L10000000
-	b L888888888
-L10000000:
+	b.ne L10000000
 	b L12345
+L10000000:
+	udf
 L200:
 	exit_sequence x0
 `,
 		},
 		{
-			brAtEnd: false,
+			name:  "cbz, block end",
+			cond:  registerAsRegZeroCond(x1VReg),
+			atEnd: true,
 			expBefore: `
 L100:
-	b.eq L12345
-	udf
+	cbz w1, (L12345)
 L200:
 	exit_sequence x0
 `,
 			expAfter: `
 L100:
-	b.eq L10000000
-	udf
-	b L200
-L10000000:
+	cbnz w1, L10000000
 	b L12345
+L10000000:
 L200:
 	exit_sequence x0
 `,
 		},
+		{
+			// The last instruction of the function: there is nothing after it to relink.
+			name:  "cbnz, function end",
+			cond:  registerAsRegNotZeroCond(x1VReg),
+			atEnd: true, last: true,
+			expBefore: `
+L100:
+	cbnz w1, L12345
+`,
+			expAfter: `
+L100:
+	cbz w1, (L10000000)
+	b L12345
+L10000000:
+`,
+		},
 	} {
-		var name string
-		if tc.brAtEnd {
-			name = "brAtEnd"
-		} else {
-			name = "brNotAtEnd"
-		}
-
-		t.Run(name, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			m := NewBackend().(*machine)
 			m.maxSSABlockID, m.nextLabel = 0, 10000000
-			const (
-				originLabel     = 100
-				originLabelNext = 200
-				targetLabel     = 12345
-			)
 
 			cbr := m.allocateInstr()
-			cbr.asCondBr(eq.asCond(), targetLabel, false)
-
-			end := m.allocateInstr()
-			if tc.brAtEnd {
-				end.asBr(888888888)
-			} else {
+			cbr.asCondBr(tc.cond, 12345, false)
+			pos := m.labelPositionPool.GetOrAllocate(100)
+			pos.begin, pos.end = cbr, cbr
+			if !tc.atEnd {
+				end := m.allocateInstr()
 				end.asUDF()
+				pos.end = linkInstr(cbr, end)
 			}
-
-			originalEndNext := m.allocateInstr()
-			originalEndNext.asExitSequence(x0VReg)
-
-			originLabelPos := m.labelPositionPool.GetOrAllocate(originLabel)
-			originLabelPos.begin = cbr
-			originLabelPos.end = linkInstr(cbr, end)
-			originNextLabelPos := m.labelPositionPool.GetOrAllocate(originLabelNext)
-			originNextLabelPos.begin = originalEndNext
-			linkInstr(originLabelPos.end, originalEndNext)
-
+			if !tc.last {
+				exit := m.allocateInstr()
+				exit.asExitSequence(x0VReg)
+				nextPos := m.labelPositionPool.GetOrAllocate(200)
+				nextPos.begin = exit
+				linkInstr(pos.end, exit)
+			}
 			m.rootInstr = cbr
 			require.Equal(t, tc.expBefore, m.Format())
 
-			m.insertConditionalJumpTrampoline(cbr, originLabelPos, originLabelNext)
-
+			m.insertConditionalJumpTrampoline(cbr, pos)
 			require.Equal(t, tc.expAfter, m.Format())
-
-			// The original label position should be updated to the unconditional jump to the original target destination.
-			require.Equal(t, "b L12345", originLabelPos.end.String())
+			if tc.atEnd {
+				require.Equal(t, label(10000000), pos.end.nop0Label())
+			}
 		})
 	}
 }
