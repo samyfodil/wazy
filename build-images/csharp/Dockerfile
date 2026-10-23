@@ -7,9 +7,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY common/install-tools.sh /install-tools.sh
 RUN sh /install-tools.sh
 
-# wasi-sdk 29 is the version NativeAOT-LLVM 10.0.0-rc.1 expects. Installing it
-# here (WASI_SDK_PATH) stops componentize-dotnet downloading it into $HOME on
-# every fresh container. Cut down to the wasm32-wasip2 C toolchain it uses.
+# wasi-sdk 29 is the version NativeAOT-LLVM 10.0.0-rc.1 expects. componentize-dotnet
+# ignores WASI_SDK_PATH: it always uses $HOME/.wasi-sdk/wasi-sdk-29.0 and, when
+# that is missing, downloads the x86_64 build there (wrong on arm64, and slow on
+# every fresh container). So the SDK installed here is linked into that path
+# below. Cut down to the wasm32-wasip2 C toolchain it uses.
 FROM tools AS wasi-sdk
 RUN set -eu; \
     case "$(uname -m)" in \
@@ -34,7 +36,8 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0.402-noble@sha256:747cbade5bfd918a175ac32f
 COPY --from=wasi-sdk /opt/wasi-sdk /opt/wasi-sdk
 ENV NUGET_PACKAGES=/opt/nuget WASI_SDK_PATH=/opt/wasi-sdk DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
 COPY csharp/sample /warm
-RUN cd /warm && dotnet build -c Release hello \
+RUN mkdir -p /root/.wasi-sdk && ln -s /opt/wasi-sdk /root/.wasi-sdk/wasi-sdk-29.0 \
+ && cd /warm && dotnet build -c Release hello \
  && rm -rf /warm /opt/nuget/*/*/*.nupkg \
  && chmod -R a+rwX /opt/nuget
 
@@ -45,6 +48,7 @@ COPY --from=dotnet /usr/share/dotnet /usr/share/dotnet
 COPY --from=dotnet /opt/nuget /opt/nuget
 COPY --from=wasi-sdk /opt/wasi-sdk /opt/wasi-sdk
 COPY --from=tools /opt/wasm /opt/wasm
+RUN mkdir -p /tmp/.wasi-sdk && ln -s /opt/wasi-sdk /tmp/.wasi-sdk/wasi-sdk-29.0
 ENV PATH=/usr/share/dotnet:/opt/wasm/bin:$PATH \
     HOME=/tmp \
     DOTNET_ROOT=/usr/share/dotnet \
