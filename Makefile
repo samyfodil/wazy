@@ -408,6 +408,14 @@ build.spectest.multi_memory:
 		wast2json --enable-multi-memory --debug-names $$f; \
 	done
 
+# Builds one build image and tests it: its samples are built in the image,
+# validated, and run under wazy from this checkout. See build-images/README.md.
+#   make build-image-test IMAGE_LANG=rust
+.PHONY: build-image-test
+build-image-test:
+	@test -n "$(IMAGE_LANG)" || (echo "usage: make build-image-test IMAGE_LANG=<$$(ls build-images/*/Dockerfile | cut -d/ -f2 | tr '\n' ' ')>"; exit 2)
+	build-images/test.sh $(IMAGE_LANG)
+
 .PHONY: test
 test:
 	@go test $(go_test_options) ./...

@@ -1,0 +1,221 @@
+name: Build images
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'build-images/**'
+      - '.github/workflows/build-images.yaml'
+  push:
+    tags: 'v[0-9]+.[0-9]+.[0-9]+**'  # Ex. v0.2.0 v0.2.1-rc2
+
+env:  # Update this prior to requiring a higher minor version in go.mod
+  GO_VERSION: "1.26"
+  REGISTRY: ghcr.io/samyfodil
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ${{ github.ref }}-${{ github.workflow }}-${{ github.actor }}
+  cancel-in-progress: true
+
+jobs:
+  # plan picks the images to test: on a pull request, those whose inputs
+  # changed (all of them when a shared input did); on a release tag, all.
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      langs: ${{ steps.plan.outputs.langs }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - id: plan
+        run: |
+          all=$(ls build-images/*/Dockerfile | cut -d/ -f2)
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            # Docs and recorded sizes are not image inputs.
+            changed=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- build-images .github/workflows/build-images.yaml \
+              | grep -vE '\.md$|/size\.[a-z0-9]+$' || true)
+            if echo "$changed" | grep -qE '^(build-images/(common|wit|runner)/|build-images/test.sh|\.github/)'; then
+              langs=$all
+            else
+              langs=$(echo "$changed" | cut -d/ -f2 | sort -u | while read -r l; do [ -f "build-images/$l/Dockerfile" ] && echo "$l"; done)
+            fi
+          else
+            langs=$all
+          fi
+          echo "images: $(echo $langs)"
+          echo "langs=$(echo $langs)" >> "$GITHUB_OUTPUT"
+          echo "matrix=$(for l in $langs; do
+              printf '{"lang":"%s","arch":"amd64","runner":"ubuntu-24.04"}\n{"lang":"%s","arch":"arm64","runner":"ubuntu-24.04-arm"}\n' "$l" "$l"
+            done | jq -cs '{include: .}')" >> "$GITHUB_OUTPUT"
+
+  # test builds one image on one architecture, natively, and runs
+  # build-images/test.sh against it with wazy from this commit. On a release
+  # tag a passing image whose tag is not yet in the registry is pushed by
+  # digest; merge assembles the multi-arch tag.
+  test:
+    needs: plan
+    if: needs.plan.outputs.langs != ''
+    name: ${{ matrix.lang }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false  # one image failing must not hide another's result
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          cache: false
+          go-version: ${{ env.GO_VERSION }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login into GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          tag=$(cat build-images/${{ matrix.lang }}/TAG)
+          ref=$REGISTRY/wazy-build-${{ matrix.lang }}:$tag
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          if docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Tags are immutable: a change to an image's inputs must come with a
+      # new tag (a new toolchain version, or the next -N rebuild suffix).
+      - name: Require a new tag for a changed image
+        if: github.event_name == 'pull_request' && steps.tag.outputs.exists == 'true'
+        run: |
+          echo "::error::${{ steps.tag.outputs.ref }} is already published; bump build-images/${{ matrix.lang }}/TAG"
+          exit 1
+
+      - name: Build
+        run: |
+          docker buildx build --load -t wazy-build-${{ matrix.lang }}:test \
+            --cache-from type=gha,scope=${{ matrix.lang }}-${{ matrix.arch }} \
+            --cache-to type=gha,mode=max,scope=${{ matrix.lang }}-${{ matrix.arch }} \
+            -f build-images/${{ matrix.lang }}/Dockerfile build-images
+
+      - name: Test
+        run: IMAGE=wazy-build-${{ matrix.lang }}:test build-images/test.sh ${{ matrix.lang }}
+
+      - name: Report size
+        run: |
+          size=$(docker image inspect -f '{{.Size}}' wazy-build-${{ matrix.lang }}:test)
+          compressed=$(docker save wazy-build-${{ matrix.lang }}:test | gzip -c | wc -c)
+          echo "| ${{ matrix.lang }} | ${{ matrix.arch }} | $size | $compressed |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Push by digest
+        if: github.event_name == 'push' && steps.tag.outputs.exists == 'false'
+        run: |
+          # Same builder and cache as the tested build, so this re-emits the
+          # tested image rather than building a new one.
+          docker buildx build --push \
+            --output type=image,name=$REGISTRY/wazy-build-${{ matrix.lang }},push-by-digest=true,name-canonical=true \
+            --cache-from type=gha,scope=${{ matrix.lang }}-${{ matrix.arch }} \
+            --metadata-file meta.json \
+            -f build-images/${{ matrix.lang }}/Dockerfile build-images
+          mkdir -p result
+          jq -r '."containerimage.digest"' meta.json > result/digest
+
+      - name: Record result
+        if: github.event_name == 'push'
+        run: |
+          mkdir -p result
+          echo "${{ steps.tag.outputs.ref }}" > result/ref
+
+      - if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ matrix.lang }}-${{ matrix.arch }}
+          path: result/
+
+  # merge runs on release tags: every image that passed on both architectures
+  # is listed in the release notes, and the ones not yet in the registry get
+  # their multi-arch tag.
+  merge:
+    if: always() && github.event_name == 'push' && needs.plan.outputs.langs != ''
+    needs: [plan, test]
+    name: Publish
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          path: results
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login into GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create multi-arch tags
+        id: publish
+        run: |
+          : > verified.md
+          for lang in ${{ needs.plan.outputs.langs }}; do
+            amd=results/result-$lang-amd64 arm=results/result-$lang-arm64
+            if [ ! -f "$amd/ref" ] || [ ! -f "$arm/ref" ]; then
+              echo "::warning::$lang did not pass on both architectures; not published"
+              continue
+            fi
+            ref=$(cat "$amd/ref")
+            if [ -f "$amd/digest" ] && [ -f "$arm/digest" ]; then
+              repo=${ref%:*}
+              docker buildx imagetools create -t "$ref" "$repo@$(cat "$amd/digest")" "$repo@$(cat "$arm/digest")"
+              echo "- \`$ref\` (published)" >> verified.md
+            else
+              echo "- \`$ref\` (already published)" >> verified.md
+            fi
+          done
+          cat verified.md
+          if [ -s verified.md ]; then echo "any=true" >> "$GITHUB_OUTPUT"; fi
+
+      # The Release CLI workflow creates the draft release from the same tag;
+      # wait for it, then append the verified images to its notes.
+      - name: Append to release notes
+        if: steps.publish.outputs.any == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          for _ in $(seq 60); do
+            gh release view "$tag" >/dev/null 2>&1 && break
+            sleep 30
+          done
+          {
+            gh release view "$tag" --json body --jq .body
+            echo
+            echo "### Build images"
+            echo
+            echo "Verified against $tag on linux/amd64 and linux/arm64: each image built its samples, validated them, and ran them under this release."
+            echo
+            cat verified.md
+          } > notes.md
+          gh release edit "$tag" --notes-file notes.md

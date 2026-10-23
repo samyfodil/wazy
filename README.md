@@ -123,6 +123,17 @@ _, err = inst.Call(ctx, "wasi:cli/run@0.2.3#run")
 
 Call an interface export directly with `inst.CallExport(ctx, "component:adder/calc", "add", uint32(2), uint32(3))`, or hand a `wasi:http/incoming-handler` component to `wasip2.Handler(inst)`, which returns an `http.Handler` — somebody else's handler, as a route on your mux. [`examples/custom-wit`](examples/custom-wit) goes the other way: a WIT plugin API, resources and `result<list<string>, variant>` included, implemented host-side in Go.
 
+### Build images
+
+Pinned Docker images compile Rust, Go, TinyGo, C/C++, Python, JavaScript and C# to components that run on wazy, for `linux/amd64` and `linux/arm64`:
+
+```sh
+docker run --rm -v "$PWD":/src -w /src --user "$(id -u):$(id -g)" \
+  ghcr.io/samyfodil/wazy-build-rust:1.99.1-cc0.21.1 cargo build --release --target wasm32-wasip2
+```
+
+Every published tag has built a `wasi:cli/command` component (and a `wasi:http/proxy` one, where the language has bindings for it) and run it on wazy. Tags, toolchain versions and usage: [build-images/README.md](build-images/README.md).
+
 ## Async — the WASI 0.3 async ABI
 
 wazy runs the [WASI 0.3][wasi] async ABI: components that suspend, await, and resume.

@@ -54,6 +54,7 @@ export default defineConfig({
             { slug: 'guides/host-functions' },
             { slug: 'guides/components' },
             { slug: 'guides/custom-wit' },
+            { slug: 'guides/build-images' },
             { slug: 'guides/wasi' },
             { slug: 'guides/async' },
             { slug: 'guides/sandboxing' },

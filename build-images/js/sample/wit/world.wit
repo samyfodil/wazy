@@ -1,0 +1,9 @@
+package example:sample;
+
+world command {
+  include wasi:cli/command@0.2.12;
+}
+
+world proxy {
+  include wasi:http/proxy@0.2.12;
+}
