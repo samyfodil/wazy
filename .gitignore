@@ -64,6 +64,14 @@ zig-out/
 # their testdata/, which also keeps the directory their tests embed.
 /internal/integration_test/spectest/v3-interaction/testdata/wasmtime-*
 
+# Fetched by `make build.wasi_testdata`.
+/internal/component/wit/testdata/random.wit
+/internal/component/wit/testdata/streams.wit
+
+# Fetched by `make build.wasi_otel_wit`. Each guest's world.wit is ours.
+/imports/wasi_otel/testdata/*/wit/*
+!/imports/wasi_otel/testdata/*/wit/world.wit
+
 # Netlify CLI local state
 .netlify/
 .gstack/

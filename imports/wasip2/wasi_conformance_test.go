@@ -3,6 +3,7 @@ package wasip2
 import (
 	"embed"
 	"fmt"
+	"io/fs"
 	"path"
 	"sort"
 	"strings"
@@ -10,11 +11,12 @@ import (
 
 	"github.com/samyfodil/wazy/component/componenttest"
 	"github.com/samyfodil/wazy/internal/component/wit"
+	"github.com/samyfodil/wazy/internal/testing/upstream"
 )
 
 // This file checks wazy's WASI host imports against the REFERENCE WASI 0.2
-// interface definitions (testdata/wasi-wit, copied verbatim from the wasip2
-// crate's vendored WebAssembly/WASI sources) rather than against wazy's own
+// interface definitions (testdata/wasi-wit: WebAssembly/WASI's own, fetched at
+// v0.2.12 by `make build.wasi_testdata`) rather than against wazy's own
 // beliefs about them.
 //
 // # Why this exists
@@ -43,16 +45,17 @@ import (
 // by reading the reference and is pinned by a behavioral test instead. A
 // green run here means the surface lines up, not that each func is right.
 
-//go:embed testdata/wasi-wit/*.wit
+//go:embed all:testdata/wasi-wit
 var wasiWITFS embed.FS
 
-// witFuncNames parses one reference .wit file and returns, per interface, the
-// set of canonical func names a component would import from it -- the same
-// spelling withImportCustom registers ("[method]fields.get",
-// "[constructor]fields", "[static]fields.from-list", or a bare "get-stdin").
-func witFuncNames(t *testing.T, file string) map[string]map[string]bool {
+// witFuncNames parses one reference .wit file and returns the package it
+// declares, if it does, and per interface, the set of canonical func names a
+// component would import from it -- the same spelling withImportCustom
+// registers ("[method]fields.get", "[constructor]fields",
+// "[static]fields.from-list", or a bare "get-stdin").
+func witFuncNames(t *testing.T, file string) (string, map[string]map[string]bool) {
 	t.Helper()
-	src, err := wasiWITFS.ReadFile(path.Join("testdata/wasi-wit", file))
+	src, err := wasiWITFS.ReadFile(file)
 	if err != nil {
 		t.Fatalf("reading %s: %v", file, err)
 	}
@@ -89,28 +92,45 @@ func witFuncNames(t *testing.T, file string) map[string]map[string]bool {
 				}
 			}
 		}
-		// Key by the package-qualified interface name, minus the version --
-		// exactly what mkImportKey reduces a registration to.
-		out[strings.Split(pkg.Name, "@")[0]+"/"+iface.Name] = names
+		out[iface.Name] = names
 	}
-	return out
+	return pkg.Name, out
 }
 
-// referenceWASI parses every vendored reference file into one
-// iface -> funcs index.
+// referenceWASI parses every reference package into one iface -> funcs index.
+// A package is a directory of .wit files, only one of which need declare it.
 func referenceWASI(t *testing.T) map[string]map[string]bool {
 	t.Helper()
-	entries, err := wasiWITFS.ReadDir("testdata/wasi-wit")
+	upstream.Require(t, wasiWITFS, "testdata/wasi-wit/*/*.wit", "build.wasi_testdata")
+	files, err := fs.Glob(wasiWITFS, "testdata/wasi-wit/*/*.wit")
 	if err != nil {
 		t.Fatal(err)
 	}
-	all := map[string]map[string]bool{}
-	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".wit") {
-			continue
+	pkgs := map[string]string{}
+	ifaces := map[string]map[string]map[string]bool{}
+	for _, f := range files {
+		dir := path.Dir(f)
+		name, funcs := witFuncNames(t, f)
+		if name != "" {
+			pkgs[dir] = name
 		}
-		for iface, funcs := range witFuncNames(t, e.Name()) {
-			all[iface] = funcs
+		if ifaces[dir] == nil {
+			ifaces[dir] = map[string]map[string]bool{}
+		}
+		for iface, names := range funcs {
+			ifaces[dir][iface] = names
+		}
+	}
+	all := map[string]map[string]bool{}
+	for dir, funcs := range ifaces {
+		name, ok := pkgs[dir]
+		if !ok {
+			t.Fatalf("no file in %s declares its package", dir)
+		}
+		// Key by the package-qualified interface name, minus the version --
+		// exactly what mkImportKey reduces a registration to.
+		for iface, names := range funcs {
+			all[strings.Split(name, "@")[0]+"/"+iface] = names
 		}
 	}
 	if len(all) == 0 {

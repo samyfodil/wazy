@@ -120,13 +120,11 @@ package c:d { interface e { type t = u8; } }`)
 
 func TestParse_TestdataFiles(t *testing.T) {
 	for _, name := range []string{"random.wit", "simple.wit", "streams.wit"} {
-		src, err := samples.ReadFile("testdata/" + name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := Parse(name, string(src)); err != nil {
-			t.Errorf("%s: %v", name, err)
-		}
+		t.Run(name, func(t *testing.T) {
+			if _, err := Parse(name, string(sample(t, name))); err != nil {
+				t.Error(err)
+			}
+		})
 	}
 }
 

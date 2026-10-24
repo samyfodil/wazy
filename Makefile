@@ -530,6 +530,50 @@ build.component_testdata: $(wasm_tools) $(wasm_tools_next)
 	@cp $(component_wast_dir)/resources/resources.20.wasm imports/wasip2/testdata/component-model/
 	@cp $(component_model_dir)/design/mvp/canonical-abi/definitions.py internal/component/abi/testdata/
 
+# WASI's own interface definitions, from WebAssembly/WASI at the commits its release tags name. wasip2
+# checks every host import it registers against 0.2.12's; the wit parser's tests read two 0.2.8 files.
+wasi_version_0_2_12 := 281ba75fafcd50961ef55f9e52747afcc9b71ede
+wasi_version_0_2_8 := b26023f7d540bc7f0faae24052ca887421541acf
+wasi_dir := build/wasi
+wasip2_wit_dir := imports/wasip2/testdata/wasi-wit
+wasip2_wit_packages := cli clocks filesystem http io random sockets
+
+.PHONY: build.wasi_testdata
+build.wasi_testdata:
+	@rm -rf $(wasi_dir) && mkdir -p $(wasi_dir)
+	@curl -fsSL --retry 5 --retry-all-errors \
+		https://codeload.github.com/WebAssembly/WASI/tar.gz/$(wasi_version_0_2_12) \
+		| tar -xzf - -C $(wasi_dir) --strip-components 1 WASI-$(wasi_version_0_2_12)/proposals
+	@$(call clean_fetched,$(wasip2_wit_dir))
+	@for p in $(wasip2_wit_packages); do \
+		mkdir -p $(wasip2_wit_dir)/$$p && cp $(wasi_dir)/proposals/$$p/wit/*.wit $(wasip2_wit_dir)/$$p/ || exit 1; \
+	done
+	@for f in io/streams random/random; do \
+		curl -fsSL --retry 5 --retry-all-errors \
+			https://raw.githubusercontent.com/WebAssembly/WASI/$(wasi_version_0_2_8)/wasip2/$$f.wit \
+			-o internal/component/wit/testdata/$$(basename $$f).wit || exit 1; \
+	done
+
+# The wasi:otel guests' WIT is upstream's, apart from the world each guest declares: the proposal's
+# current WIT for otelguest, and the opentelemetry-wasi SDK's, which still has the old span-context
+# name, for outerguest. Only rebuilding a guest needs it; the tests embed the built .wasm.
+wasi_otel_version := e5262a84044aff064c9599eebc05013bb3432795
+opentelemetry_wasi_version := 2962a286aa66188314bcafd79c800c4e39ce41e1
+wasi_otel_wit_deps := deps/wasi-clocks-0.2.0/package.wit deps/wasi-io-0.2.0/package.wit
+
+.PHONY: build.wasi_otel_wit
+build.wasi_otel_wit:
+	@for f in types.wit tracing.wit metrics.wit logs.wit $(wasi_otel_wit_deps); do \
+		curl -fsSL --retry 5 --retry-all-errors --create-dirs \
+			https://raw.githubusercontent.com/WebAssembly/wasi-otel/$(wasi_otel_version)/wit/$$f \
+			-o imports/wasi_otel/testdata/otelguest/wit/$$f || exit 1; \
+	done
+	@for f in types.wit tracing.wit $(wasi_otel_wit_deps); do \
+		curl -fsSL --retry 5 --retry-all-errors --create-dirs \
+			https://raw.githubusercontent.com/bytecodealliance/opentelemetry-wasi/$(opentelemetry_wasi_version)/wit/$$f \
+			-o imports/wasi_otel/testdata/outerguest/wit/$$f || exit 1; \
+	done
+
 # Builds one build image and tests it: its samples are built in the image,
 # validated, and run under wazy from this checkout. See build-images/README.md.
 #   make build-image-test IMAGE_LANG=rust
