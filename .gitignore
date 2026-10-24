@@ -68,6 +68,9 @@ zig-out/
 /internal/component/wit/testdata/random.wit
 /internal/component/wit/testdata/streams.wit
 
+# Fetched by `make build.guest_testdata`.
+/imports/http_handler/nethttp/testdata/panic_on_handle_request.wasm
+
 # Fetched by `make build.wasi_otel_wit`. Each guest's world.wit is ours.
 /imports/wasi_otel/testdata/*/wit/*
 !/imports/wasi_otel/testdata/*/wit/world.wit

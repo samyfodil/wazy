@@ -3,7 +3,7 @@ package wasi_http
 import (
 	"bytes"
 	"context"
-	_ "embed"
+	"embed"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +14,7 @@ import (
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/imports/wasi_snapshot_preview1"
 	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/testing/upstream"
 )
 
 // httpGuest is dapr's own wasm test fixture, byte for byte:
@@ -21,10 +22,15 @@ import (
 // (Apache 2.0). It is a Go guest built against dev-wasm's wasi-http client
 // bindings that GETs os.Args[1] and prints the status and body. Keeping
 // dapr's binary rather than building our own is the point: it is compiled
-// against wasi-go's ABI, so it fails if this package drifts from it.
-//
-//go:embed testdata/http/main.wasm
-var httpGuest []byte
+// against wasi-go's ABI, so it fails if this package drifts from it. It is
+// fetched from dapr at a pinned commit by `make build.guest_testdata`.
+func httpGuest(t *testing.T) []byte {
+	t.Helper()
+	return upstream.ReadFile(t, guestFS, "testdata/http/main.wasm", "build.guest_testdata")
+}
+
+//go:embed all:testdata/http
+var guestFS embed.FS
 
 const guestOutput = "Status: 200\nBody: \nhello from the host\n"
 
@@ -63,7 +69,7 @@ func TestGuest(t *testing.T) {
 	require.NoError(t, err)
 	defer closer.Close(ctx)
 
-	compiled, err := r.CompileModule(ctx, httpGuest)
+	compiled, err := r.CompileModule(ctx, httpGuest(t))
 	require.NoError(t, err)
 
 	require.Equal(t, guestOutput, runGuest(ctx, t, r, compiled, "http-1", ts.URL))
@@ -83,7 +89,7 @@ func TestGuest_concurrent(t *testing.T) {
 	require.NoError(t, err)
 	defer closer.Close(ctx)
 
-	compiled, err := r.CompileModule(ctx, httpGuest)
+	compiled, err := r.CompileModule(ctx, httpGuest(t))
 	require.NoError(t, err)
 
 	const instances = 8
@@ -120,7 +126,7 @@ func TestGuest_serverStatus(t *testing.T) {
 	require.NoError(t, err)
 	defer closer.Close(ctx)
 
-	compiled, err := r.CompileModule(ctx, httpGuest)
+	compiled, err := r.CompileModule(ctx, httpGuest(t))
 	require.NoError(t, err)
 
 	require.Equal(t, "Status: 418\nBody: \nshort and stout\n", runGuest(ctx, t, r, compiled, "http-teapot", ts.URL))

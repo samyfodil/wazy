@@ -450,6 +450,16 @@ build.spectest.multi_memory: $(wast2json)
 	done
 	@rm -f $(spectest_multi_memory_testdata_dir)/*.wast
 
+# Everything below is fetched from where it lives, at a pinned commit, rather than committed. Like the
+# spectest suites, CI builds it once and hands it to every test job; without it the tests that need it
+# skip, naming the target that fetches it.
+.PHONY: build.testdata
+build.testdata:
+	@$(MAKE) build.spectest
+	@$(MAKE) build.component_testdata
+	@$(MAKE) build.wasi_testdata
+	@$(MAKE) build.guest_testdata
+
 # Component-model cases, generated into what the tests read with the pinned wasm-tools:
 #
 #   - WebAssembly/component-model's own suites. Its test/wasmtime holds cases that repository took in
@@ -552,6 +562,24 @@ build.wasi_testdata:
 		curl -fsSL --retry 5 --retry-all-errors \
 			https://raw.githubusercontent.com/WebAssembly/WASI/$(wasi_version_0_2_8)/wasip2/$$f.wit \
 			-o internal/component/wit/testdata/$$(basename $$f).wit || exit 1; \
+	done
+
+# Guests other projects test their own hosts with, fetched from those projects: dapr's wasi-http
+# fixture, which wasi_http has to run the way dapr does, and http-wasm's TCK guest and trapping guest
+# for http_handler. http-wasm's example guests stay committed beside the latter: they back testable
+# examples, and an example cannot skip when its guest is missing.
+dapr_contrib_version := 3b9591ed81daddb02e2482289caafe8f44c304c3
+http_wasm_version := d9e07495db6c4192ce0995de036e2ad450616883
+# <file the tests read>=<URL it is fetched from>
+guest_testdata := \
+	imports/wasi_http/testdata/http/main.wasm=https://raw.githubusercontent.com/dapr/components-contrib/$(dapr_contrib_version)/bindings/wasm/testdata/http/main.wasm \
+	imports/http_handler/nethttp/internal/tck/testdata/tck.wasm=https://raw.githubusercontent.com/http-wasm/http-wasm-host-go/$(http_wasm_version)/tck/tck.wasm \
+	imports/http_handler/nethttp/testdata/panic_on_handle_request.wasm=https://raw.githubusercontent.com/http-wasm/http-wasm-host-go/$(http_wasm_version)/internal/test/testdata/error/panic_on_handle_request.wasm
+
+.PHONY: build.guest_testdata
+build.guest_testdata:
+	@for g in $(guest_testdata); do \
+		curl -fsSL --retry 5 --retry-all-errors $${g#*=} -o $${g%%=*} || exit 1; \
 	done
 
 # The wasi:otel guests' WIT is upstream's, apart from the world each guest declares: the proposal's

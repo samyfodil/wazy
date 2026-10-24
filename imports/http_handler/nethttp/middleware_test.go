@@ -2,7 +2,7 @@ package nethttp
 
 import (
 	"context"
-	_ "embed"
+	"embed"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,14 +11,20 @@ import (
 
 	"github.com/samyfodil/wazy/imports/http_handler"
 	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/testing/upstream"
 )
 
 var testCtx = context.Background()
 
-// binPanicOnHandleRequest is http-wasm's own fixture for a guest that traps.
-//
-//go:embed testdata/panic_on_handle_request.wasm
-var binPanicOnHandleRequest []byte
+//go:embed testdata
+var testdataFS embed.FS
+
+// panicOnHandleRequest is http-wasm's own fixture for a guest that traps,
+// fetched at a pinned commit by `make build.guest_testdata`.
+func panicOnHandleRequest(t *testing.T) []byte {
+	t.Helper()
+	return upstream.ReadFile(t, testdataFS, "testdata/panic_on_handle_request.wasm", "build.guest_testdata")
+}
 
 //go:embed testdata/router.wasm
 var binRouter []byte
@@ -34,7 +40,7 @@ func TestNewMiddleware_error(t *testing.T) {
 // TestServeHTTP_guestError covers the trap path: a guest that panics gets a
 // 500 with the reason, and the next handler is never called.
 func TestServeHTTP_guestError(t *testing.T) {
-	mw, err := NewMiddleware(testCtx, binPanicOnHandleRequest)
+	mw, err := NewMiddleware(testCtx, panicOnHandleRequest(t))
 	require.NoError(t, err)
 	defer mw.Close(testCtx)
 

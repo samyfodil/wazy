@@ -1,0 +1,3 @@
+# http-wasm's TCK guest, fetched by `make build.guest_testdata`. Only this file is committed: the TCK embeds the directory.
+*
+!.gitignore

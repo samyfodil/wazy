@@ -1,7 +1,7 @@
 package tck
 
 import (
-	_ "embed"
+	"embed"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,13 +9,19 @@ import (
 	"testing"
 
 	handler "github.com/samyfodil/wazy/imports/http_handler"
+	"github.com/samyfodil/wazy/internal/testing/upstream"
 )
 
-// GuestWASM is the guest wasm module used by the TCK. The host must load this
-// module in the server being tested by Run.
-//
-//go:embed tck.wasm
-var GuestWASM []byte
+// Guest returns the guest wasm module used by the TCK, which `make
+// build.guest_testdata` fetches from http-wasm at a pinned commit. The host
+// must load this module in the server being tested by Run.
+func Guest(t testing.TB) []byte {
+	t.Helper()
+	return upstream.ReadFile(t, testdataFS, "testdata/tck.wasm", "build.guest_testdata")
+}
+
+//go:embed all:testdata
+var testdataFS embed.FS
 
 // Run executes the TCK. The client is http.DefaultClient, or a different value
 // to test the HTTP/2.0 transport. The url must point to a server with the
