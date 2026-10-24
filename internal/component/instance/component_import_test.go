@@ -343,3 +343,37 @@ func TestFuncAliasSeesThroughUninstantiatedInstances(t *testing.T) {
 		requireErrContains(t, err, "resolves to an imported func rather than a lift")
 	}
 }
+
+// A resource the supplied component defines reaches the host through the
+// root's whole re-export of its instance: the constructor mints a handle,
+// the method borrows it, and DropResource -- asked of the root -- drops it
+// in the supplied component's table, where it lives. A component whose
+// method takes the resource by own where the declared type borrows it is
+// refused for that.
+func TestComponentImport_ResourceThroughSuppliedComponent(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+	root := componentImportFixture(t, "counter_root")
+	in, err := Instantiate(ctx, r, root, WithComponentImport("counter", componentImportFixture(t, "counter")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close(ctx)
+	h, err := in.CallExport(ctx, "c", "[constructor]counter", uint32(41))
+	if err != nil || len(h) != 1 {
+		t.Fatalf("constructor = %v, %v", h, err)
+	}
+	got, err := in.CallExport(ctx, "c", "[method]counter.get", h[0])
+	if err != nil || len(got) != 1 || got[0] != uint32(41) {
+		t.Fatalf("get = %v, %v; want [41]", got, err)
+	}
+	if err := in.DropResource(ctx, "c", "counter", h[0].(uint32)); err != nil {
+		t.Fatalf("DropResource: %v", err)
+	}
+	err = in.DropResource(ctx, "c", "counter", h[0].(uint32))
+	requireErrContains(t, err, "does not name a live resource")
+
+	_, err = Instantiate(ctx, r, root, WithComponentImport("counter", componentImportFixture(t, "counter_own")))
+	requireErrContains(t, err, "type mismatch for export `[method]counter.get`: type mismatch in function parameter `self`: expected borrow, found own")
+}

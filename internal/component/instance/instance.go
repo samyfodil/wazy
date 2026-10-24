@@ -2162,7 +2162,16 @@ func (in *Instance) validateLiftedStreamFutureResult(rt binary.TypeDesc, val abi
 // guest-defined resource); if no such export exists the handle is still
 // removed. Host-owned resources (WASI/http) are not dropped this way -- the
 // host owns their lifecycle directly.
+//
+// An interface this component only re-exposes -- one a component it
+// instantiated defines, re-exported through an alias or with that instance
+// whole -- had its handles minted by that component, in its own table, so
+// the drop is the defining component's to make, under its own name for the
+// interface.
 func (in *Instance) DropResource(ctx context.Context, iface, resourceName string, handle uint32) error {
+	if r, ok := in.reexposedInstances[iface]; ok {
+		return r.owner.DropResource(ctx, r.name, resourceName, handle)
+	}
 	rep, err := in.resources.DropOwned(handle)
 	if err != nil {
 		return fmt.Errorf("component/instance: DropResource %s/%s handle %d: %w", iface, resourceName, handle, err)

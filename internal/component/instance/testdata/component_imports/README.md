@@ -19,3 +19,5 @@ tests without it to reach the runtime's own refusal.
   `shim_two_exports_root` alias funcs out of instances never instantiated;
   `shim_bad_index_root`, `shim_missing_arg_root`, `inline_alias_missing_root`
   and `shim_no_export_root` are the malformed ones.
+- `counter_root` imports a component defining a resource and re-exports its
+  instance whole; `counter` is of that type, `counter_own` is not.
