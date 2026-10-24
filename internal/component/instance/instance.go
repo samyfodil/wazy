@@ -1302,6 +1302,9 @@ func Instantiate(ctx context.Context, r wazy.Runtime, componentBytes []byte, opt
 	if err := validateAsyncCanonOptsAgreeWithTypes(comp); err != nil {
 		return nil, err
 	}
+	if err := validateCanonTypes(comp); err != nil {
+		return nil, err
+	}
 	// The other one: every instantiation's arguments against what the
 	// instantiated component imports -- likewise before any import is looked
 	// at. This is also where a component supplied for a component import is
@@ -1631,6 +1634,48 @@ func validateAsyncCanonOptsAgreeWithTypes(comp *binary.Component) error {
 		}
 		if resolved && !fd.Async {
 			return fmt.Errorf("component/instance: canon[%d]: the `async` canonical option requires an async function type", i)
+		}
+	}
+	return nil
+}
+
+// validateCanonTypes rejects, in comp or any component nested in it, a canon
+// built-in whose type immediate is not one it takes: a task.return result
+// holding a borrow anywhere, since a borrow cannot outlive the call that lent
+// it and task.return's value outlives the task (validate-task-return.wast),
+// or a stream or future built-in naming anything but a stream or future type
+// (forward.wast). A type that does not resolve here is left to the bind.
+func validateCanonTypes(comp *binary.Component) error {
+	var resolve abi.Resolver
+	for i, cn := range comp.Canons {
+		switch {
+		case cn.Kind == binary.CanonKindTaskReturn:
+			if resolve == nil {
+				resolve = typeResolver(comp)
+			}
+			for _, ref := range funcResultTypeRefs(binary.FuncDesc{Results: cn.TaskReturnResult}) {
+				if elemRefContainsBorrowHandle(&ref, resolve, 0) {
+					return fmt.Errorf("component/instance: canon[%d]: `task.return` result cannot contain a `borrow` type", i)
+				}
+			}
+		case isStreamCanonKind(cn.Kind) || isFutureCanonKind(cn.Kind):
+			td, err := comp.ResolveType(cn.TypeIdx)
+			if err != nil {
+				continue
+			}
+			_, isFuture := td.(binary.FutureDesc)
+			_, isStream := td.(binary.StreamDesc)
+			if isFutureCanonKind(cn.Kind) && !isFuture {
+				return fmt.Errorf("component/instance: canon[%d]: `%s` requires a future type", i, binary.CanonKindName(cn.Kind))
+			}
+			if isStreamCanonKind(cn.Kind) && !isStream {
+				return fmt.Errorf("component/instance: canon[%d]: `%s` requires a stream type", i, binary.CanonKindName(cn.Kind))
+			}
+		}
+	}
+	for _, nested := range comp.NestedComponents {
+		if err := validateCanonTypes(nested); err != nil {
+			return err
 		}
 	}
 	return nil
