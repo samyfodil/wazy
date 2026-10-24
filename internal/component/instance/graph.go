@@ -1171,13 +1171,14 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 				return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q: unsupported sort %#x", compInstIdx, arg.Name, arg.Sort)
 			}
 		}
-		// The func args, and the funcs of the bundles and shim instances
-		// passed, once every arg's resources are lined up: a handle crossing
-		// one is retagged to whichever arg carried its resource. Each is wired
-		// in as a delegate to whatever the outer's func names -- a host
-		// import (outerFuncArgImport falls back to importInterfaceName), an
-		// export of an earlier sibling nested instance (byIdx), or this
-		// component's own lift.
+		// The funcs passed -- func args, and the funcs of the sibling
+		// instances, bundles and shim instances passed as instance args --
+		// once every arg's resources are lined up: a handle crossing one is
+		// retagged to whichever arg carried its resource. A func arg or a
+		// bundle's or shim's func is a delegate to whatever the outer's func
+		// names -- a host import (outerFuncArgImport falls back to
+		// importInterfaceName), an export of an earlier sibling nested
+		// instance (byIdx), or this component's own lift.
 		for _, arg := range inst.Args {
 			if arg.Sort == 0x01 {
 				hi, err := outerFuncArgImport(comp, cfg, in, nest, byIdx, arg.SortIdx, componentFunc, coreFuncTarget, resolve)
