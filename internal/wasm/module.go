@@ -496,12 +496,11 @@ func (m *Module) validateGlobals(globals []GlobalType, numFuncts, maxGlobals uin
 	}
 
 	// Up to 2.0 a global's initializer could only name an imported global; from 3.0 it may name any global
-	// declared before it. wazy gates that on extended-const, which is where the rest of the same relaxation
-	// lives. See resolveConstExprGlobalType.
-	extended := enabledFeatures.IsEnabled(api.CoreFeatureExtendedConst)
+	// declared before it. See resolveConstExprGlobalType.
+	defined := readsDefinedGlobals(enabledFeatures)
 	for i := range m.GlobalSection {
 		visible := globals[:m.ImportGlobalCount]
-		if extended {
+		if defined {
 			visible = globals[:m.ImportGlobalCount+Index(i)]
 		}
 		g := &m.GlobalSection[i]
@@ -704,7 +703,7 @@ func (m *Module) validateMemory(memories []Memory, globals []GlobalType, enabled
 			// memory it initializes: i64 for a 64-bit memory.
 			// An offset may name any global from 3.0 on, not just an imported one; see validateGlobals.
 			visible := importedGlobals
-			if enabledFeatures.IsEnabled(api.CoreFeatureExtendedConst) {
+			if readsDefinedGlobals(enabledFeatures) {
 				visible = globals
 			}
 			if err := m.validateConstExpression(visible, 0, &d.OffsetExpression, memories[d.MemoryIndex].IndexType()); err != nil {
@@ -789,6 +788,9 @@ func (m *Module) validateConstExpression(globals []GlobalType, numFuncs uint32, 
 			if uint32(len(globals)) <= globalIndex {
 				return 0, 0, 0, fmt.Errorf("global index out of range")
 			}
+			if globals[globalIndex].Mutable {
+				return 0, 0, 0, errMutableConstExprGlobal(globalIndex)
+			}
 			return globals[globalIndex].ValType, 0, 0, nil
 		},
 		func(funcIndex Index) (Reference, error) {
@@ -852,6 +854,16 @@ func (m *ModuleInstance) buildGlobals(module *Module, funcRefResolver func(funcI
 	}
 }
 
+// readsDefinedGlobals reports whether a constant expression may read a module-defined global. Up to 2.0
+// it may read only an imported one; 3.0 lifted that as part of GC, not extended-const.
+func readsDefinedGlobals(enabledFeatures api.CoreFeatures) bool {
+	return enabledFeatures.IsEnabled(api.CoreFeatureGC)
+}
+
+func errMutableConstExprGlobal(idx Index) error {
+	return fmt.Errorf("constant expression required: global.get %d of a mutable global", idx)
+}
+
 func (m *Module) resolveConstExprGlobalType(enabledFeatures api.CoreFeatures, sectionID SectionID, sectionIdx Index, idx Index) (ValueType, error) {
 	if idx < m.ImportGlobalCount {
 		// Imports are not exclusively globals. This is the current global index in the loop.
@@ -862,6 +874,9 @@ func (m *Module) resolveConstExprGlobalType(enabledFeatures api.CoreFeatures, se
 				continue
 			}
 			if idx == cur {
+				if imp.DescGlobal.Mutable {
+					return 0, errMutableConstExprGlobal(idx)
+				}
 				return imp.DescGlobal.ValType, nil
 			}
 			cur++
@@ -871,27 +886,26 @@ func (m *Module) resolveConstExprGlobalType(enabledFeatures api.CoreFeatures, se
 		return 0, fmt.Errorf("index %d not found in imported globals", idx)
 	}
 
-	// NOTE: in the <= 2.0 spec, global.get in a constant expression can only refer to imported globals.
-	// In version 3.0, this restriction is removed, and all globals prior to the current one are allowed.
-	// To avoid implementing too many flags, this relaxation is gated behind the CoreFeaturesExtendedConst flag,
-	// which includes other related extensions in constant expressions.
-	if !enabledFeatures.IsEnabled(api.CoreFeatureExtendedConst) {
+	if !readsDefinedGlobals(enabledFeatures) {
 		return 0, fmt.Errorf("%s[%d] (global.get %d): out of range of imported globals", SectionIDName(sectionID), sectionIdx, idx)
 	}
 
-	idx -= uint32(m.ImportGlobalCount)
+	defined := idx - m.ImportGlobalCount
 
-	// Check that the given global has been initialized.
-	if sectionIdx == Index(SectionIDGlobal) && idx >= sectionIdx {
+	// A global's initializer sees only the globals declared before it.
+	if sectionID == SectionIDGlobal && defined >= sectionIdx {
 		return 0, fmt.Errorf("%s[%d] global %d out of range of initialized globals", SectionIDName(sectionID), sectionIdx, idx)
 	}
 
-	// Bounds check:
-	if idx >= uint32(len(m.GlobalSection)) {
+	if defined >= uint32(len(m.GlobalSection)) {
 		return 0, fmt.Errorf("%s[%d] (global.get %d): out of range of initialized globals", SectionIDName(sectionID), sectionIdx, idx)
 	}
 
-	return m.GlobalSection[idx].Type.ValType, nil
+	g := &m.GlobalSection[defined].Type
+	if g.Mutable {
+		return 0, errMutableConstExprGlobal(idx)
+	}
+	return g.ValType, nil
 }
 
 func paramNames(localNames IndirectNameMap, funcIdx uint32, paramLen int) []string {
