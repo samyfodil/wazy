@@ -303,7 +303,7 @@ func TestGraph_BindInstanceExport_NotPureShim(t *testing.T) {
 	comp := decodeRealHello(t)
 	comp.NestedComponents[0].Canons = append(comp.NestedComponents[0].Canons, binary.Canon{})
 	_, err := runGraph(t, comp)
-	requireErrContains(t, err, "nested component instance 10: component/instance: export \"run\": component func index 0 names an imported func")
+	requireErrContains(t, err, "nested component instance 10: component/instance: component export `run` is a reexport of an imported function which is not implemented")
 }
 
 // TestGraph_BindInstanceExport_MemberNotFuncSkipped proves a non-func member

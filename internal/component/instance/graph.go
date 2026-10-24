@@ -103,6 +103,28 @@ const graphEmptyImportKey = "wazy:component/empty-import"
 // instance.go) is handled separately; every other component -- host-import or
 // multi-core -- is instantiated here (see Instantiate's routing).
 
+// refuseImportedFuncReexport refuses a component exporting a func it
+// imports, which wazy cannot bind: an export runs a lift, or a func of an
+// instance this component instantiated, and an imported func is neither. It is
+// refused up front, whatever the embedder supplies -- as Wasmtime refuses it,
+// in Wasmtime's words -- rather than for an unsupplied import first.
+func refuseImportedFuncReexport(comp *binary.Component) error {
+	for _, ex := range comp.Exports {
+		idx := ex.ExternIndex
+		for ex.ExternType == 0x01 && int(idx) < len(comp.ComponentFuncSpace) {
+			e := comp.ComponentFuncSpace[idx]
+			if e.Kind == binary.ComponentFuncFromImport {
+				return fmt.Errorf("component/instance: component export `%s` is a reexport of an imported function which is not implemented", ex.Name)
+			}
+			if e.Kind != binary.ComponentFuncFromExport {
+				break
+			}
+			idx = comp.Exports[e.Export].ExternIndex
+		}
+	}
+	return nil
+}
+
 // coreFuncSig is a core-level (i32/i64/f32/f64) function signature,
 // discovered from a real embedded core module's own import declaration --
 // see discoverNeededFuncTypes.
@@ -116,6 +138,9 @@ type coreFuncSig struct {
 func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Component, componentBytes []byte, cfg *config) (*Instance, error) {
 	if cfg.scope.comp != comp { // the root: the embedder's components are all it is given
 		cfg.scope = scope{comp: comp, supplied: cfg.componentArgs}
+	}
+	if err := refuseImportedFuncReexport(comp); err != nil {
+		return nil, err
 	}
 	for _, im := range comp.Imports {
 		// Type imports (extern sort 0x03) carry no runtime obligation -- they

@@ -42,9 +42,6 @@ const (
 	// Wasmtime refuses a root component export; wazy accepts one, as it
 	// does a root core module export -- a definition, with nothing to bind.
 	gapRootComponentExport = "wazy accepts a root component export, which Wasmtime refuses"
-	// wazy refuses a root func import at instantiation, before the
-	// re-export of it Wasmtime refuses is reached.
-	gapRootFuncImport = "a root func import is refused at instantiation, before its re-export is reached"
 )
 
 // wastValidationGaps is the EXACT set of commands wazy answers differently
@@ -53,16 +50,19 @@ const (
 // not here fails, and so does an entry whose command is now answered as the
 // suite says -- the gap closed, and the entry must go.
 //
-// Every component-level type check the suites make is answered as they say;
-// what is listed is core-level, or a deliberate difference from Wasmtime.
+// Every check the suites make is answered as they say -- component-level and
+// core-level alike, wasm-tools' words included. What is listed is where wazy
+// deliberately differs from Wasmtime, whose restrictions suite pins what
+// Wasmtime does not implement rather than what the component model forbids:
+// wazy runs a root-level component import a component is supplied for, and
+// accepts a root component export, both of which wasm-tools' validator
+// accepts too.
 var wastValidationGaps = map[string]map[string]wastValidationGap{
 	"wasmtime-restrictions": {
 		// line 2: root-level component imports are not supported
 		"restrictions.0.wasm": {"was not supplied; supply a component for it with WithComponentImport", gapRootComponentImport},
 		// line 6: exporting a component from the root component is not supported
 		"restrictions.1.wasm": {"", gapRootComponentExport},
-		// line 10: component export `f` is a reexport of an imported function which is not implemented
-		"restrictions.2.wasm": {"is a func import (sort 0x1)", gapRootFuncImport},
 		// line 17: root-level component imports are not supported
 		"restrictions.3.wasm": {"was not supplied; supply a component for it with WithComponentImport", gapRootComponentImport},
 	},
