@@ -90,7 +90,7 @@ func TestCTTypeAndEntitySub(t *testing.T) {
 	// Entities of every sort, and the sorts' names in a mismatch.
 	requireSubErr(t, ctEntitySub(ctEntity{sort: ctSortType, ty: ctType{val: prim("u8")}}, ctEntity{sort: ctSortValue}), "expected value, found type")
 	requireSubErr(t, ctEntitySub(ctEntity{sort: ctSortType}, ctEntity{sort: 0x42}), "expected sort 0x42, found type")
-	requireSubErr(t, ctEntitySub(ctEntity{sort: ctSortCoreModule}, ctEntity{sort: ctSortCoreModule}), "")
+	requireSubErr(t, ctEntitySub(ctEntity{sort: ctSortCoreModule, mod: &ctModule{}}, ctEntity{sort: ctSortCoreModule, mod: &ctModule{exports: []ctCoreExport{{name: "f"}}}}), "missing expected export `f`")
 	requireSubErr(t, ctEntitySub(ctEntity{sort: ctSortComponent, comp: comp}, ctEntity{sort: ctSortComponent, comp: &ctComponent{imports: inst.exports}}), "")
 }
 

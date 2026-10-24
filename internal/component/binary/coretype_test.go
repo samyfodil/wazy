@@ -208,3 +208,45 @@ func TestTypeDeclCoreType(t *testing.T) {
 		t.Fatal("a truncated module type was accepted")
 	}
 }
+
+// A core module's exports are read off its export section alone; a module
+// cut short anywhere on the way is refused.
+func TestCoreModuleExports(t *testing.T) {
+	head := []byte{0, 'a', 's', 'm', 1, 0, 0, 0}
+	module := append(append([]byte{}, head...),
+		0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type section, stepped over
+		0x07, 0x0a, 0x02, // export section: 2 exports
+		0x01, 'f', 0x00, 0x00, // "f" func 0
+		0x02, 'm', 'm', 0x02, // "mm" memory ...
+		0x00, // ... 0
+	)
+	var got []string
+	if err := CoreModuleExports(module, func(name []byte, kind byte) { got = append(got, string(name)+string('0'+kind)) }); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "f0,mm2" {
+		t.Fatalf("exports %v", got)
+	}
+	for _, tc := range []struct {
+		name string
+		body []byte
+		want string
+	}{
+		{"section size", []byte{0x07}, "section 7"},
+		{"section past the end", []byte{0x07, 0x05, 0x00}, "section 7: truncated"},
+		{"count", []byte{0x07, 0x01, 0x80}, "section 7: "},
+		{"name length", []byte{0x07, 0x02, 0x01, 0x80}, "section 7 entry 0"},
+		{"name past the end", []byte{0x07, 0x03, 0x01, 0x05, 'f'}, "section 7 entry 0: truncated"},
+		{"index", []byte{0x07, 0x04, 0x01, 0x01, 'f', 0x00}, "section 7 entry 0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := CoreModuleExports(append(append([]byte{}, head...), tc.body...), func([]byte, byte) {})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want it to contain %q", err, tc.want)
+			}
+		})
+	}
+	if err := CoreModuleExports(head[:4], nil); err != ErrTruncatedBinary {
+		t.Fatalf("a module shorter than its header: %v", err)
+	}
+}

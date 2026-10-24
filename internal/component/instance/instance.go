@@ -1428,12 +1428,21 @@ func instantiateComponent(ctx context.Context, r wazy.Runtime, comp *binary.Comp
 
 	core, err := r.InstantiateWithConfig(ctx, coreBytes, wazy.NewModuleConfig())
 	if err != nil {
-		return nil, fmt.Errorf("component/instance: instantiate embedded core module: %w", err)
+		return nil, fmt.Errorf("component/instance: instantiate embedded core module: %w", coreLinkError(comp, 0, err))
 	}
 
 	coreFuncIdx, err := buildCoreFuncIndexSpace(comp)
 	if err != nil {
 		core.Close(ctx) //nolint:errcheck // best-effort cleanup; the wiring error below is what matters
+		return nil, err
+	}
+	if err := checkResourceDtors(comp, func(idx uint32) api.Function {
+		if int(idx) >= len(coreFuncIdx) {
+			return nil
+		}
+		return core.ExportedFunction(coreFuncIdx[idx])
+	}); err != nil {
+		core.Close(ctx) //nolint:errcheck
 		return nil, err
 	}
 	if err := validateCanons(comp, coreFuncIdx); err != nil {

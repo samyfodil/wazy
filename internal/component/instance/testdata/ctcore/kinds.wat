@@ -1,0 +1,25 @@
+;; A core module importing and exporting one item of every core extern sort,
+;; for ctModuleOfDefinition to read the type of; and, since a decode does not
+;; validate, exports of items that are not there, whose types are not known.
+(module
+  (import "a" "f" (func (param i32)))
+  (import "a" "t" (table 1 2 funcref))
+  (import "a" "m" (memory 1 2 shared))
+  (import "a" "g" (global (mut i64)))
+  (import "a" "e" (tag (param i32)))
+  (table (export "t2") 3 externref)
+  (memory (export "m2") 1)
+  (global (export "g2") f32 (f32.const 0))
+  (tag (export "e2"))
+  (func (export "f2") (result i32) i32.const 0)
+  (export "f" (func 0))
+  (export "t" (table 0))
+  (export "m" (memory 0))
+  (export "g" (global 0))
+  (export "e" (tag 0))
+  (export "missing-func" (func 99))
+  (export "missing-table" (table 9))
+  (export "missing-memory" (memory 9))
+  (export "missing-global" (global 9))
+  (export "missing-tag" (tag 9))
+)

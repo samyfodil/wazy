@@ -23,6 +23,9 @@ type ctScope interface {
 	// newResource is a `(resource ...)` definition, which only a component
 	// can make.
 	newResource() (*ctResource, error)
+	// coreTypeAt is core type idx: the core type index space is a scope's
+	// too, the one a core module type's outer alias reaches.
+	coreTypeAt(idx uint32) (ctCoreType, error)
 }
 
 // outerScope walks count scopes out, for an `alias outer count idx`, and
@@ -242,9 +245,17 @@ func ctConvertVal(s ctScope, d binary.TypeDesc) (*ctVal, error) {
 // ctDeclScope is the body of a component or instance type: it opens type and
 // instance index spaces of its own, which its declarations fill.
 type ctDeclScope struct {
-	up    ctScope
-	types []ctType
-	insts []*ctInstance
+	up        ctScope
+	types     []ctType
+	insts     []*ctInstance
+	coreTypes []ctCoreType
+}
+
+func (s *ctDeclScope) coreTypeAt(idx uint32) (ctCoreType, error) {
+	if int(idx) >= len(s.coreTypes) {
+		return ctCoreType{}, fmt.Errorf("unknown core type %d: type index out of bounds", idx)
+	}
+	return s.coreTypes[idx], nil
 }
 
 func (s *ctDeclScope) typeAt(idx uint32) (ctType, error) {
@@ -267,7 +278,12 @@ func ctEntityOfDesc(s ctScope, d binary.ExternDesc, name string) (ctEntity, erro
 	e := ctEntity{sort: d.Sort}
 	switch d.Sort {
 	case ctSortCoreModule:
-		return e, nil
+		t, err := s.coreTypeAt(d.Index)
+		if err == nil && t.mod == nil {
+			err = fmt.Errorf("core type index %d is not a module type", d.Index)
+		}
+		e.mod = t.mod
+		return e, err
 	case ctSortType:
 		if !d.Eq {
 			e.ty.res = &ctResource{name: name}
@@ -322,8 +338,18 @@ func ctBuildDeclType(up ctScope, decls []binary.TypeDecl, component bool) (*ctIn
 		var err error
 		switch d.Kind {
 		case binary.TypeDeclCoreType:
-			// The core type index space, which only a core module import or
-			// export would use -- and those are not checked (ctEntitySub).
+			// The next index of the body's own core type space, which its
+			// core module imports and exports name.
+			if mt := d.CoreType.Module; mt != nil {
+				var mod *ctModule
+				if mod, err = ctModuleOfType(s, mt); err == nil {
+					s.coreTypes = append(s.coreTypes, ctCoreType{mod: mod})
+				}
+				break
+			}
+			for _, f := range ctCoreRec(d.CoreType.Rec) {
+				s.coreTypes = append(s.coreTypes, ctCoreType{fn: f})
+			}
 		case binary.TypeDeclType:
 			var t ctType
 			if t, err = ctConvert(s, d.Type); err == nil {
@@ -397,6 +423,17 @@ func (s *ctDeclScope) alias(al binary.AliasDef) error {
 		}
 		s.types = append(s.types, t)
 		return nil
+	case al.TargetKind == 0x02 && al.Sort == 0x00 && al.CoreSort == 0x10: // core type
+		outer, _, err := outerScope(s, al.OuterCount)
+		if err != nil {
+			return err
+		}
+		t, err := outer.coreTypeAt(al.OuterIndex)
+		if err != nil {
+			return err
+		}
+		s.coreTypes = append(s.coreTypes, t)
+		return nil
 	}
 	return fmt.Errorf("aliases in a component or instance type may only refer to types or instances")
 }
@@ -442,6 +479,10 @@ type ctEnv struct {
 
 	children map[*binary.Component]*ctEnv
 	self     *ctComponent
+
+	// core holds the core index spaces (ctenv_core.go), allocated when one
+	// is first asked for: most components never are.
+	core *ctCoreSpaces
 }
 
 func newCTEnv(comp *binary.Component, up *ctEnv) *ctEnv {
@@ -659,9 +700,7 @@ func (e *ctEnv) entityAt(sort byte, idx uint32) (ctEntity, error) {
 	var err error
 	switch sort {
 	case ctSortCoreModule:
-		if int(idx) >= e.coreModuleCount() {
-			err = fmt.Errorf("unknown module %d: module index out of bounds", idx)
-		}
+		ent.mod, err = e.moduleAt(idx)
 	case ctSortFunc:
 		ent.fn, err = e.funcAt(idx)
 	case ctSortType:
@@ -1070,6 +1109,9 @@ func (e *ctEnv) check() error {
 		}
 	}
 	if err := e.checkCoreIndices(); err != nil {
+		return err
+	}
+	if err := e.checkCoreInstances(); err != nil {
 		return err
 	}
 	// A core module aliased out of a component instance's exports: wazy

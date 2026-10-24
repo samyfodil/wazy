@@ -504,3 +504,48 @@ func skipU64(buf []byte, off int) (int, error) {
 	}
 	return off + int(n), nil
 }
+
+// CoreModuleExports calls fn with each export of a core module -- its name,
+// which aliases the module's bytes, and its sort -- reading the export
+// section alone: every other section, the code included, is stepped over by
+// its size. It is all a check of export names needs, and allocates nothing.
+func CoreModuleExports(module []byte, fn func(name []byte, kind byte)) error {
+	if len(module) < 8 {
+		return ErrTruncatedBinary
+	}
+	off := 8 // magic and version
+	for off < len(module) {
+		id := module[off]
+		size, end, err := readU32(module, off+1)
+		if err != nil {
+			return fmt.Errorf("section %d: %w", id, err)
+		}
+		if uint64(end)+uint64(size) > uint64(len(module)) {
+			return fmt.Errorf("section %d: %w", id, ErrTruncatedBinary)
+		}
+		body := module[:end+int(size)]
+		off = end + int(size)
+		if id != 7 {
+			continue
+		}
+		count, p, err := readU32(body, end)
+		if err != nil {
+			return fmt.Errorf("section 7: %w", err)
+		}
+		for i := range count {
+			var n uint32
+			if n, p, err = readU32(body, p); err != nil {
+				return fmt.Errorf("section 7 entry %d: %w", i, err)
+			}
+			if uint64(p)+uint64(n) >= uint64(len(body)) {
+				return fmt.Errorf("section 7 entry %d: %w", i, ErrTruncatedBinary)
+			}
+			name, kind := body[p:p+int(n)], body[p+int(n)]
+			if _, p, err = readU32(body, p+int(n)+1); err != nil {
+				return fmt.Errorf("section 7 entry %d: %w", i, err)
+			}
+			fn(name, kind)
+		}
+	}
+	return nil
+}

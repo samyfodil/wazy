@@ -206,14 +206,14 @@ func ctSortDesc(sort byte) string {
 }
 
 // ctEntity is the type of one importable or exportable thing: the field
-// its sort selects is set (none for a core module, whose type wazy does not
-// check -- see ctEntitySub).
+// its sort selects is set.
 type ctEntity struct {
 	sort byte
 	fn   *ctFunc
 	inst *ctInstance
 	comp *ctComponent
 	ty   ctType
+	mod  *ctModule
 }
 
 func ctLookup(list []ctNamed, name string) (ctEntity, bool) {
@@ -418,14 +418,7 @@ func ctEntitySub(a, b ctEntity) error {
 	case ctSortType:
 		return ctTypeSub(a.ty, b.ty)
 	}
-	// A core module. wazy does not model core module types, because it does
-	// not run a component that hands one to another: a component importing
-	// one, an instantiation passing one to a component that instantiates
-	// it, and a core module export are each refused when instantiated. So
-	// the type a core module is passed as is not checked here -- nothing
-	// wazy runs relies on it -- and a component that merely passes one along
-	// to something that never instantiates it stays valid, as before.
-	return nil
+	return ctModuleSub(a.mod, b.mod)
 }
 
 // ctTypeSub reports whether type a is a subtype of type b.

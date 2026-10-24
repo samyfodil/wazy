@@ -63,6 +63,35 @@ func resolveDefinedResourceDtors(comp *binary.Component, coreFuncTarget func(int
 	return out
 }
 
+// checkResourceDtors checks that every destructor comp's resource
+// definitions name is a core function of type [rep] -> [], as the component
+// model's validator does when the resource is defined; dtorFunc resolves one
+// by its core func index once the core instances exporting it exist. wazy
+// calls a destructor only when a handle is dropped, so a wrong one would
+// otherwise be refused only then, or never. A destructor that does not
+// resolve is skipped, as resolveDefinedResourceDtors skips it.
+func checkResourceDtors(comp *binary.Component, dtorFunc func(idx uint32) api.Function) error {
+	for _, t := range comp.Types {
+		rd, ok := t.Descriptor.(binary.ResourceDesc)
+		if !ok || rd.Dtor == nil {
+			continue
+		}
+		fn := dtorFunc(*rd.Dtor)
+		if fn == nil {
+			continue
+		}
+		rep := api.ValueTypeI32
+		if rd.Rep.Primitive == "i64" {
+			rep = api.ValueTypeI64
+		}
+		def := fn.Definition()
+		if p := def.ParamTypes(); len(p) != 1 || p[0] != rep || len(def.ResultTypes()) != 0 {
+			return fmt.Errorf("component/instance: core function %d has wrong signature for a destructor", *rd.Dtor)
+		}
+	}
+	return nil
+}
+
 // exportedResourceDefs returns, for a component, each resource it EXPORTS by
 // name mapped to its canonical definition index (ResourceDefIndex of the type
 // the export names). Used to line a provider's exported resources up with an

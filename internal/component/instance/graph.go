@@ -289,7 +289,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		neededTypes, rewrittenCore, err = discoverNeededFuncTypes(r, comp, componentBytes, emptyNameTarget)
 	}
 	if err != nil {
-		return nil, err
+		return nil, coreLinkError(comp, -1, err)
 	}
 
 	resources := newHandleTable()
@@ -591,7 +591,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			// the graph is wired (see shim.go), not eagerly here.
 			mod, err := instantiateCoreModule(argCtx, r, cfg, coreBytes, wazy.NewModuleConfig().WithName("").WithStartFunctions())
 			if err != nil {
-				return fail(fmt.Errorf("component/instance: instantiate core module %d (key %q): %w", ci.ModuleIdx, key, err))
+				return fail(fmt.Errorf("component/instance: instantiate core module %d (key %q): %w", ci.ModuleIdx, key, coreLinkError(comp, k, err)))
 			}
 			instMods[k] = mod
 			keyToInst[coreInstanceKey(k)] = mod
@@ -697,6 +697,16 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		default:
 			return fail(fmt.Errorf("component/instance: core instance %d has unknown kind %#x", k, ci.Kind))
 		}
+	}
+
+	if err := checkResourceDtors(comp, func(idx uint32) api.Function {
+		mod, name, err := coreFuncTarget(int(idx))
+		if err != nil {
+			return nil
+		}
+		return safeExportedFunction(mod, name)
+	}); err != nil {
+		return fail(err)
 	}
 
 	// Recursively instantiate any nested component instances (comp.Instances,
