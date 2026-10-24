@@ -139,7 +139,7 @@ type coreFuncSig struct {
 // engine -- see this file's package doc for the algorithm.
 func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Component, componentBytes []byte, cfg *config) (*Instance, error) {
 	if cfg.scope.comp != comp { // the root: the embedder's components are all it is given
-		cfg.scope = scope{comp: comp, supplied: cfg.componentArgs}
+		cfg.scope = scope{comp: comp, supplied: cfg.scope.supplied}
 	}
 	if err := refuseImportedFuncReexport(comp); err != nil {
 		return nil, err
@@ -176,7 +176,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			}
 		}
 		if im.ExternType == 0x04 {
-			if _, ok := cfg.componentArgs[im.Name]; ok {
+			if _, ok := cfg.scope.supplied[im.Name]; ok {
 				continue
 			}
 			return nil, fmt.Errorf("component/instance: component import %q was not supplied; supply a component for it with WithComponentImport", im.Name)
@@ -343,20 +343,19 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	// this function became field assignments on this same pointer instead
 	// of a fresh allocation. mayEnter/mayLeave start true -- see their doc
 	// on Instance.
-	sh := cfg.sharedSched
-	if sh == nil { // this instantiation is its own composition-tree root
-		sh = &sched{}
-		cfg.sharedSched = sh // propagated to every subCfg by instantiateNestedInstances below
+	// The composition root has a scheduler of its own, and its table is the
+	// embedder's; a nested instance shares the root's (nesting's doc).
+	sh, hostResources := &sched{}, resources
+	if n := cfg.nest; n != nil {
+		sh, hostResources = n.sched, n.hostResources
+		// A composed sub-instance inherits the destructors for the resources
+		// it imports from a sibling, keyed by the table tag its own
+		// resource.drop uses.
+		for tag, resolve := range n.importedResDtors {
+			resources.registerDtor(tag, resourceDtor(resolve))
+		}
 	}
-	if cfg.hostResources == nil { // the composition root: its table is the embedder's
-		cfg.hostResources = resources
-	}
-	in := &Instance{resolve: resolve, resources: resources, hostResources: cfg.hostResources, mayEnter: true, mayLeave: true, sched: sh}
-	// A composed sub-instance inherits the destructors for the resources it
-	// imports from a sibling, keyed by the table tag its own resource.drop uses.
-	for tag, resolve := range cfg.importedResDtors {
-		resources.registerDtor(tag, resourceDtor(resolve))
-	}
+	in := &Instance{resolve: resolve, resources: resources, hostResources: hostResources, mayEnter: true, mayLeave: true, sched: sh}
 	// Host-provided resources: the embedder's Go destructor runs when the guest
 	// drops an own<R> of a host resource.
 	for tag, fn := range cfg.hostResDtors {
@@ -537,8 +536,8 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	instanceDtors := resolveDefinedResourceDtors(comp, coreFuncTarget)
 	for defIdx, resolve := range instanceDtors {
 		tag := defIdx
-		if cfg.resCanon != nil {
-			tag = cfg.resCanon(defIdx)
+		if canon := cfg.resCanon(); canon != nil {
+			tag = canon(defIdx)
 		}
 		resources.registerDtor(tag, resourceDtor(resolve))
 	}
@@ -796,8 +795,9 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	in.closers = closers
 	in.subInstances = subInstances
 	in.resourceDtors = instanceDtors
-	in.resCanon = cfg.resCanon
-	in.resourceOrigin = cfg.resourceOrigin
+	if n := cfg.nest; n != nil {
+		in.resCanon, in.resourceOrigin = n.resCanon, n.resourceOrigin
+	}
 	in.comp = comp
 	in.coreModuleCount = coreModuleCount
 	in.wasiCalls = wasiCalls
@@ -958,20 +958,29 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 		// nested component's own table under its own resource index, and the
 		// sibling's (definer's) destructor is registered under the tag the nested
 		// component's resource.drop uses.
-		subCfg := &config{
-			imports:          map[importKey]*hostImport{},
-			compileCache:     cfg.compileCache,
-			resCanon:         nested.ResourceDefIndex, // reduce a resource's deftype/export-alias indices to one tag
-			importedResDtors: map[uint32]func() api.Function{},
-			resourceOrigin:   map[uint32]resourceIdentity{},
-			hostResDtors:     map[uint32]func(context.Context, uint32) error{},
-			sharedSched:      cfg.sharedSched, // see instantiateGraph's "sh" resolution below
-			hostResources:    cfg.hostResources,
-			// What nested's own module, component and instance indices
-			// name: it closes over the scope it was defined in, and its
-			// imports are these args, read in this component's scope.
-			scope: scope{comp: nested, outer: cv.env, args: inst.Args, from: &cfg.scope},
+		nc := &struct { // one allocation for the config and its nesting
+			config
+			nesting
+		}{
+			config: config{
+				imports:      map[importKey]*hostImport{},
+				compileCache: cfg.compileCache,
+				hostResDtors: map[uint32]func(context.Context, uint32) error{},
+				// What nested's own module, component and instance indices
+				// name: it closes over the scope it was defined in, and its
+				// imports are these args, read in this component's scope.
+				scope: scope{comp: nested, outer: cv.env, inst: &comp.Instances[i], from: &cfg.scope},
+			},
+			nesting: nesting{
+				resCanon:         nested.ResourceDefIndex, // reduce a resource's deftype/export-alias indices to one tag
+				importedResDtors: map[uint32]func() api.Function{},
+				resourceOrigin:   map[uint32]resourceIdentity{},
+				sched:            in.sched,
+				hostResources:    in.hostResources,
+			},
 		}
+		subCfg, nest := &nc.config, &nc.nesting
+		subCfg.nest = nest
 		// typeArgTags maps a resource type the nested component IMPORTS (by its
 		// own type-import TypeSpace index) to the composition-global tag the outer
 		// provides for it -- so the nested component's own<r>/borrow<r>/
@@ -1106,9 +1115,9 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 						if dIdx, ok := importerResIdx[rname]; ok {
 							tag := nested.ResourceDefIndex(dIdx)
 							if dtor := prov.resourceDtors[provDef]; dtor != nil {
-								subCfg.importedResDtors[tag] = dtor
+								nest.importedResDtors[tag] = dtor
 							}
-							subCfg.resourceOrigin[tag] = prov.originOf(provDef)
+							nest.resourceOrigin[tag] = prov.originOf(provDef)
 						}
 					}
 				}
@@ -1124,7 +1133,7 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 				// (yet) cover, preserving prior behavior exactly when it applied.
 				provToImp := func(provIdx uint32) (uint32, bool) {
 					origin := prov.originOf(prov.canonTag(provIdx))
-					for dIdx, o := range subCfg.resourceOrigin {
+					for dIdx, o := range nest.resourceOrigin {
 						if o == origin {
 							return dIdx, true
 						}
@@ -1235,7 +1244,7 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 		// (importedResourceFirstAlias), the index typeArgTags is keyed by.
 		if first := importedResourceFirstAlias(nested); len(typeArgTags) > 0 || len(first) > 0 {
 			base := nested.ResourceDefIndex
-			subCfg.resCanon = func(idx uint32) uint32 {
+			nest.resCanon = func(idx uint32) uint32 {
 				if f, ok := first[idx]; ok {
 					idx = f
 				}
@@ -2233,8 +2242,8 @@ func resourceCanonHostFuncGraph(comp *binary.Component, cfg *config, resources *
 		}
 	}
 	typeIdx := effectiveResourceTypeIdx(comp, cfg, canon.TypeIdx)
-	if cfg.resCanon != nil { // composition: tag by the global id siblings agree on
-		typeIdx = cfg.resCanon(canon.TypeIdx)
+	if resCanon := cfg.resCanon(); resCanon != nil { // composition: tag by the global id siblings agree on
+		typeIdx = resCanon(canon.TypeIdx)
 	}
 
 	switch canon.Kind {

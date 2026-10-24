@@ -91,10 +91,10 @@ func typeCheck(comp *binary.Component, cfg *config) error {
 			}
 			cfg.rememberTypeChecked(key)
 		}
-		if cfg.componentArgs == nil {
-			cfg.componentArgs = map[string]*binary.Component{}
+		if cfg.scope.supplied == nil {
+			cfg.scope.supplied = map[string]*binary.Component{}
 		}
-		cfg.componentArgs[im.Name] = supplied
+		cfg.scope.supplied[im.Name] = supplied
 	}
 	return nil
 }

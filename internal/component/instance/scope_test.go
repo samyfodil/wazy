@@ -111,7 +111,7 @@ func TestScope_InstantiationClosesOverItsDefinition(t *testing.T) {
 	root := &binary.Component{CoreModules: []binary.CoreModule{{}}}
 	rootScope := &scope{comp: root}
 	// parent, instantiated by root with root's module 0 for "p".
-	ps := &scope{comp: parent, args: []binary.InstantiateArg{{Name: "p", Sort: ctSortCoreModule, SortIdx: 0}}, from: rootScope}
+	ps := &scope{comp: parent, inst: &binary.Instance{Args: []binary.InstantiateArg{{Name: "p", Sort: ctSortCoreModule, SortIdx: 0}}}, from: rootScope}
 
 	for _, tc := range []struct {
 		name  string

@@ -274,7 +274,7 @@ type Instance struct {
 	resources *handleTable
 
 	// hostResources is the embedder's handle table: the composition root's
-	// (see config.hostResources). It is resources itself on the root, and
+	// (see nesting.hostResources). It is resources itself on the root, and
 	// differs only on a nested component, whose host imports then move the
 	// handles nested in their args and results across (hostHandleTransfer).
 	hostResources *handleTable
@@ -314,7 +314,7 @@ type Instance struct {
 	// that A's WAIT drive can resume B's parked task, so every Instance in
 	// one composition TREE shares the same *sched, created by the root
 	// instantiation and inherited by instantiateNestedInstances via
-	// subCfg.sharedSched. A flat (non-composed) instance is its own tree
+	// nesting.sched. A flat (non-composed) instance is its own tree
 	// root and behaves exactly as before this change (its own private
 	// scheduler, just heap-allocated instead of inline).
 	sched *sched

@@ -202,7 +202,7 @@ func TestResolveComponentDef(t *testing.T) {
 		t.Fatal("expected a nil cfg to leave a component import unsatisfied")
 	}
 	// Satisfied by the parent's `(with "x" (component N))` arg.
-	got, err := resolveComponentDef(comp, &config{componentArgs: map[string]*binary.Component{"x": supplied}}, 0)
+	got, err := resolveComponentDef(comp, &config{scope: scope{supplied: map[string]*binary.Component{"x": supplied}}}, 0)
 	if err != nil {
 		t.Fatalf("resolveComponentDef: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestGraph_ComponentImportSatisfiedByAParentArg(t *testing.T) {
 	r := wazy.NewRuntime(ctx)
 	t.Cleanup(func() { r.Close(ctx) })
 	cfg := newConfig(nil)
-	cfg.componentArgs = map[string]*binary.Component{comp.Imports[0].Name: {}}
+	cfg.scope.supplied = map[string]*binary.Component{comp.Imports[0].Name: {}}
 	// It gets past the import gate; whatever happens after is this fixture's
 	// own business (its remaining imports are unregistered), so only assert
 	// that the gate itself no longer rejects it.

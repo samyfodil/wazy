@@ -58,8 +58,39 @@ type config struct {
 	// and cannot add a field to Instance from outside this package.
 	hostState map[any]any
 
-	// resCanon and importedResDtors are set only when this instantiation is a
-	// nested sub-component of a composition (see instantiateNestedInstances).
+	// hostResDtors maps a HOST-provided resource's tag (see resourceTags) to a
+	// Go destructor run when the GUEST drops an own<R> of that resource via
+	// canon resource.drop -- e.g. an embedder tracking outstanding host objects.
+	// Keyed by tag so the drop canon (which resolves the guest's imported
+	// resource index to that tag) finds it. Set via withHostResourceDtor.
+	hostResDtors map[uint32]func(ctx context.Context, rep uint32) error
+
+	// scope is what this instantiation's core module, component and instance
+	// indices name as definitions (scope.go): the root's, over the components
+	// supplied for its component imports (scope.supplied, which typeCheck
+	// fills from componentImports), set by instantiateGraph; a nested
+	// instantiation's -- the scope its component was defined in, and the
+	// args it was given -- set by instantiateNestedInstances.
+	scope scope
+
+	// componentImports are the component binaries WithComponentImport
+	// supplied for the root's component imports, by import name.
+	componentImports map[string][]byte
+
+	// nest is what only a nested sub-component of a composition has (see
+	// instantiateNestedInstances); nil for the root, or a flat instantiation.
+	// It sits behind one pointer, allocated with the nested config, so the
+	// config every Instantiate allocates stays small.
+	nest *nesting
+
+	// siblings are this instantiation's nested component instances
+	// instantiated so far, by component instance index: what a canon lower
+	// of one's export delegates to (computeCanonHostFunc).
+	siblings map[int]*Instance
+}
+
+// nesting is a nested instantiation's share of its config.
+type nesting struct {
 	// Every sub-instance has its OWN handle table (per the spec -- resource
 	// tables are per-instance, so two instances of one component number handles
 	// independently); a resource CROSSING a delegating import is transferred by
@@ -69,7 +100,7 @@ type config struct {
 	// (a deftype and its export alias) to a single table tag. importedResDtors
 	// maps the table tag of a resource this component imports to the DEFINER's
 	// destructor, so this component's resource.drop of an own<R> it received
-	// runs that dtor. Both nil for a flat instantiation.
+	// runs that dtor.
 	resCanon         func(uint32) uint32
 	importedResDtors map[uint32]func() api.Function
 
@@ -77,58 +108,30 @@ type config struct {
 	// same name (see its doc on Instance) -- populated by
 	// instantiateNestedInstances as it wires each instantiate-arg, tracing a
 	// resource this component receives back to the sibling that ultimately
-	// defines it. nil for a flat instantiation, same as resCanon/
-	// importedResDtors.
+	// defines it.
 	resourceOrigin map[uint32]resourceIdentity
 
-	// hostResDtors maps a HOST-provided resource's tag (see resourceTags) to a
-	// Go destructor run when the GUEST drops an own<R> of that resource via
-	// canon resource.drop -- e.g. an embedder tracking outstanding host objects.
-	// Keyed by tag so the drop canon (which resolves the guest's imported
-	// resource index to that tag) finds it. Set via withHostResourceDtor.
-	hostResDtors map[uint32]func(ctx context.Context, rep uint32) error
-
-	// sharedSched, when set, is the *sched every Instance of one composition
-	// TREE shares (Phase 3 forced change #1 -- see Instance.sched's doc).
-	// instantiateNestedInstances sets it on every subCfg it builds, to the
-	// root instantiation's own in.sched, so a sibling's guestTask can be
-	// parked and later resumed by ANY instance in the tree's scheduler
-	// drive. nil for a flat (non-composed) instantiation, which then becomes
-	// its own tree root (instantiateGraph allocates a fresh *sched).
-	sharedSched *sched
+	// sched is the *sched every Instance of one composition TREE shares
+	// (Phase 3 forced change #1 -- see Instance.sched's doc): the root's, so a
+	// sibling's guestTask can be parked and later resumed by ANY instance in
+	// the tree's scheduler drive. The root allocates its own.
+	sched *sched
 
 	// hostResources is the composition root's handle table: the one the
 	// resource hooks are given, and so the one every host func reads and
-	// mints its handles in. instantiateGraph sets it on the root's config and
-	// every subCfg inherits it, so a nested component's host imports can move
-	// the handles nested in their args and results across (hostHandleTransfer).
+	// mints its handles in, so a nested component's host imports can move the
+	// handles nested in their args and results across (hostHandleTransfer).
+	// The root's is its own table.
 	hostResources *handleTable
+}
 
-	// componentArgs maps a COMPONENT-sort import name of the ROOT component
-	// to the component DEFINITION the embedder supplied for it via
-	// WithComponentImport (typeCheck decodes and type-checks it into here).
-	// Unlike every other import sort, nothing is instantiated on the
-	// component's behalf: a component-sort import is code, occupying a slot
-	// in its own component index space, which it instantiates itself with its
-	// own args at its own instance section (Explainer.md, "Instance
-	// Definitions"). A nested component's imports are its scope's args.
-	componentArgs map[string]*binary.Component
-
-	// scope is what this instantiation's core module, component and instance
-	// indices name as definitions (scope.go): the root's, over componentArgs,
-	// set by instantiateGraph; a nested instantiation's -- the scope its
-	// component was defined in, and the args it was given -- set by
-	// instantiateNestedInstances.
-	scope scope
-
-	// componentImports are the component binaries WithComponentImport
-	// supplied for the root's component imports, by import name.
-	componentImports map[string][]byte
-
-	// siblings are this instantiation's nested component instances
-	// instantiated so far, by component instance index: what a canon lower
-	// of one's export delegates to (computeCanonHostFunc).
-	siblings map[int]*Instance
+// resCanon is the nested instantiation's resource canonicalizer, nil for the
+// root.
+func (c *config) resCanon() func(uint32) uint32 {
+	if c.nest == nil {
+		return nil
+	}
+	return c.nest.resCanon
 }
 
 // withHostResourceDtor registers a Go destructor for a host-provided resource,

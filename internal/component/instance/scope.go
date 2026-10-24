@@ -38,10 +38,10 @@ type scope struct {
 	// what an `alias outer` walks. nil for the root and for a component the
 	// embedder supplied, neither of which is nested in anything.
 	outer *scope
-	// args are the instantiate-args comp was instantiated with, naming
-	// indices of from, the instantiating component's scope. from is nil for
-	// the root, whose only args are the components in supplied.
-	args     []binary.InstantiateArg
+	// inst is the instantiation of comp, whose args name indices of from, the
+	// instantiating component's scope. from is nil for the root, whose only
+	// args are the components in supplied.
+	inst     *binary.Instance
 	from     *scope
 	supplied map[string]*binary.Component
 }
@@ -63,7 +63,7 @@ func (cfg *config) scopeFor(comp *binary.Component) *scope {
 	if cfg.scope.comp == comp {
 		return &cfg.scope
 	}
-	return &scope{comp: comp, supplied: cfg.componentArgs}
+	return &scope{comp: comp, supplied: cfg.scope.supplied}
 }
 
 // scopeMaxDepth bounds a walk through exports and aliases. A well-formed
@@ -139,7 +139,7 @@ func (s *scope) def(sort byte, idx uint32) (ds *scope, local uint32, supplied *b
 // sort: an index in the instantiating component's scope.
 func (s *scope) arg(name string, sort byte) (*scope, uint32, bool) {
 	if s.from != nil {
-		for _, a := range s.args {
+		for _, a := range s.inst.Args {
 			if a.Name == name && a.Sort == sort {
 				return s.from, a.SortIdx, true
 			}
@@ -185,7 +185,7 @@ func (s *scope) instanceExport(idx uint32, name string, sort byte) (*scope, uint
 		}
 		for _, x := range cv.def.Exports {
 			if x.Name == name && x.ExternType == sort {
-				return &scope{comp: cv.def, outer: cv.env, args: inst.Args, from: ds}, x.ExternIndex, nil
+				return &scope{comp: cv.def, outer: cv.env, inst: inst, from: ds}, x.ExternIndex, nil
 			}
 		}
 	}

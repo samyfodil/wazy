@@ -59,7 +59,7 @@ func TestGuestGuestAsyncLower_ImmediateFastPath(t *testing.T) {
 
 	aComp := decodeAsync(t, awaitImportImmediateAsyncWasm)
 	aCfg := newConfig(nil)
-	aCfg.sharedSched = bInst.sched // composition-tree invariant (Instance.sched's doc)
+	aCfg.nest = &nesting{sched: bInst.sched, hostResources: bInst.hostResources} // composition-tree invariant (Instance.sched's doc)
 	aCfg.imports[mkImportKey("get", "")] = &hostImport{
 		asyncTarget: &guestAsyncTarget{sub: bInst, be: bBE, exportName: "run-async"},
 		results:     []binary.TypeDesc{binary.PrimitiveDesc{Prim: "u32"}},
@@ -118,7 +118,7 @@ func TestGuestGuestAsyncLower_ParkThenCrossInstanceResume(t *testing.T) {
 
 	aComp := decodeAsync(t, awaitImportAsyncWasm)
 	aCfg := newConfig(nil)
-	aCfg.sharedSched = bInst.sched
+	aCfg.nest = &nesting{sched: bInst.sched, hostResources: bInst.hostResources}
 	aCfg.imports[mkImportKey("get", "")] = &hostImport{
 		asyncTarget: &guestAsyncTarget{sub: bInst, be: bBE, exportName: "run-async"},
 		results:     []binary.TypeDesc{binary.PrimitiveDesc{Prim: "u32"}},
@@ -313,7 +313,7 @@ func TestSchedPumpSnapshot_ResumesAllReadyParkedTasksOnce(t *testing.T) {
 
 	newYieldTask := func() *guestTask {
 		cfg := newConfig(nil)
-		cfg.sharedSched = sh
+		cfg.nest = &nesting{sched: sh}
 		inst, err := instantiateGraph(ctx, r, comp, yieldThenReturnAsyncWasm, cfg)
 		if err != nil {
 			t.Fatalf("instantiateGraph: %v", err)
