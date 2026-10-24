@@ -13,7 +13,8 @@ tests without it to reach the runtime's own refusal.
   are supplied for it, and `calc_reexport_root` re-exports its instance whole.
 - `fixedlist_match_root` and `fixedlist_match_y` are the case wasm-tools'
   `fixed-length-lists.wast` must accept beside the two it refuses.
-- `shim_root` and `shim` supply a pure re-export shim.
+- `shim_root` and `shim` supply a pure re-export shim; `shim_whole_arg_root`
+  passes an instance of one whole to a nested component with code.
 - `nested_whole_root` and `nested_whole_nested_iface_root` export nested
   instances whole, the second one whose component exports an interface of
   its own; `nested_iface_paths_root` reaches such a nested interface through

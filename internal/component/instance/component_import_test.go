@@ -353,6 +353,62 @@ func TestComponentImport_ShimSeeThroughErrors(t *testing.T) {
 	}
 }
 
+// A pure re-export shim passed whole to a nested component with code: each
+// func the shim exports is wired in as the func it was passed, so $C's
+// times(6, seven()) runs $P's mul and seven. A shim export that cannot be
+// seen through, or that names no func, is refused against the arg and export,
+// and an instance with code that is not instantiated yet is refused as before.
+func TestShimPassedWholeToNestedComponent(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+	wasm := componentImportFixture(t, "shim_whole_arg_root")
+	in, err := Instantiate(ctx, r, wasm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := in.Call(ctx, "run")
+	in.Close(ctx)
+	if err != nil || len(got) != 1 || got[0] != uint32(42) {
+		t.Fatalf("run = %v, %v; want [42]", got, err)
+	}
+
+	// $S is the second nested component, $s the second instance.
+	for _, tc := range []struct {
+		name   string
+		mangle func(c *binary.Component)
+		want   string
+	}{
+		{
+			"bad index", func(c *binary.Component) { c.NestedComponents[1].Exports[0].ExternIndex = 5 },
+			`arg "calc": export "times": shim export "times": func index 5 out of range of the shim's 2 func import(s)`,
+		},
+		{
+			"missing arg", func(c *binary.Component) { c.Instances[1].Args[0].Name = "x" },
+			`arg "calc": export "times": shim export "times" re-exports the shim's import "times", which no func instantiate-arg supplies`,
+		},
+		{
+			"bad func", func(c *binary.Component) { c.Instances[1].Args[0].SortIdx = 99 },
+			`arg "calc": export "times": func arg index 99 out of range of the component func index space`,
+		},
+		// An instance with code, not instantiated yet: $c passed to itself.
+		{
+			"not yet", func(c *binary.Component) { c.Instances[2].Args[0].SortIdx = 2 },
+			`arg "calc" references instance 2, which is neither a prior nested instantiation nor an imported instance: instance definition 2 was not instantiated`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			comp, err := binary.Decode(bytes.NewReader(wasm))
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.mangle(comp)
+			_, err = instantiateGraph(ctx, r, comp, wasm, newConfig(nil))
+			requireErrContains(t, err, tc.want)
+		})
+	}
+}
+
 // A func alias sees through every instance this component never
 // instantiates to the func it names: an inline-export instance's member,
 // any one of a nested shim's exports. An alias naming nothing there is

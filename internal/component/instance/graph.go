@@ -1022,22 +1022,47 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 					forwardImportedInstance(cfg, subCfg, nested, tgt.importName, arg.Name, typeArgTags)
 					continue
 				}
-				if d, ok := componentInstanceDef(comp, tgt.spaceIdx); ok && len(tgt.projection) == 0 && comp.Instances[d].Kind == 0x01 {
-					// An inline bundle, `(instance (export ...) ...)`, which
-					// instantiates nothing. Its funcs are this component's
-					// own, each wired in as a func arg would be; the modules,
-					// components and instances it carries are definitions
-					// the nested component's scope resolves for itself.
-					for _, x := range comp.Instances[d].Exports {
-						if x.Sort != ctSortFunc {
-							continue
+				if def, shim, ok := uninstantiatedInstance(comp, cfg, byIdx, tgt); ok {
+					// An inline bundle, `(instance (export ...) ...)`, or an
+					// instance of a pure re-export shim: neither
+					// instantiates anything. Its funcs are this component's
+					// own, or what it was passed, each wired in as a func
+					// arg would be; the modules, components and instances a
+					// bundle carries are definitions the nested component's
+					// scope resolves for itself.
+					wire := func(name string) error {
+						funcIdx, _, err := funcAliasSource(comp, cfg, aliasTarget{instIdx: tgt.spaceIdx, name: name})
+						var hi *hostImport
+						if err == nil {
+							hi, err = outerFuncArgImport(comp, cfg, in, byIdx, funcIdx, componentFunc, coreFuncTarget, resolve)
 						}
-						hi, err := outerFuncArgImport(comp, cfg, in, byIdx, x.SortIdx, componentFunc, coreFuncTarget, resolve)
 						if err != nil {
-							failClose()
-							return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q: export %q: %w", compInstIdx, arg.Name, x.Name, err)
+							return fmt.Errorf("component/instance: component instance %d arg %q: export %q: %w", compInstIdx, arg.Name, name, err)
 						}
-						subCfg.imports[mkImportKey(arg.Name, x.Name)] = hi
+						subCfg.imports[mkImportKey(arg.Name, name)] = hi
+						return nil
+					}
+					var err error
+					if shim == nil {
+						for _, x := range def.Exports {
+							if x.Sort == ctSortFunc {
+								if err = wire(x.Name); err != nil {
+									break
+								}
+							}
+						}
+					} else {
+						for _, x := range shim.Exports {
+							if x.ExternType == ctSortFunc {
+								if err = wire(x.Name); err != nil {
+									break
+								}
+							}
+						}
+					}
+					if err != nil {
+						failClose()
+						return nil, nil, err
 					}
 					continue
 				}
@@ -2597,6 +2622,28 @@ func funcAliasSource(comp *binary.Component, cfg *config, at aliasTarget) (funcI
 		return 0, false, fmt.Errorf("shim export %q re-exports the shim's import %q, which no func instantiate-arg supplies", at.name, imports[ex.ExternIndex])
 	}
 	return 0, false, nil
+}
+
+// uninstantiatedInstance reports the definition of the instance tgt denotes
+// when it is one funcAliasSource sees through: an inline bundle (shim nil), or
+// an instance of the pure re-export shim shim.
+func uninstantiatedInstance(comp *binary.Component, cfg *config, byIdx map[int]*Instance, tgt instanceArgTarget) (def *binary.Instance, shim *binary.Component, ok bool) {
+	d, ok := componentInstanceDef(comp, tgt.spaceIdx)
+	if !ok || len(tgt.projection) > 0 {
+		return nil, nil, false
+	}
+	def = &comp.Instances[d]
+	if def.Kind == 0x01 {
+		return def, nil, true
+	}
+	if _, done := byIdx[int(tgt.spaceIdx)]; done || def.Kind != 0x00 {
+		return nil, nil, false
+	}
+	shim, err := resolveComponentDef(comp, cfg, def.ComponentIdx)
+	if err != nil || validateShimComponent(shim) != nil {
+		return nil, nil, false
+	}
+	return def, shim, true
 }
 
 // resolvePostReturnFuncGraph is resolvePostReturnFunc's graph-engine
