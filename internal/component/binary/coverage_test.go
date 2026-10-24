@@ -473,6 +473,36 @@ func TestImportSectionOverrun(t *testing.T) {
 	}
 }
 
+// TestDecodeImportSection_InstanceSortCapturesExternIndex proves an instance
+// import's declared instancetype index lands on Import.ExternIndex, the same
+// way a func import's own type index already does -- decodeImportSection's
+// `sort == 0x05 && hasEq` branch, needed so typespace.go's resolveAlias can
+// look up the import's declared instancetype at all (via
+// c.resolveTypeDepth(im.ExternIndex, ...)) when following a `use iface.{T}`
+// alias.
+func TestDecodeImportSection_InstanceSortCapturesExternIndex(t *testing.T) {
+	// A type section entry so the import's externdesc names a real type
+	// index (an empty instancetype, tag 0x42, 0 decls).
+	typeSec := synthSection(7, []byte{0x01, 0x42, 0x00})
+	importSec := synthSection(10, append([]byte{0x01}, synthInstanceImport("test:pkg/types")...))
+	raw := synthComponent(typeSec, importSec)
+
+	c, err := Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if len(c.Imports) != 1 {
+		t.Fatalf("Imports: got %d, want 1", len(c.Imports))
+	}
+	im := c.Imports[0]
+	if im.ExternType != 0x05 {
+		t.Fatalf("ExternType = %#x, want 0x05 (instance)", im.ExternType)
+	}
+	if im.ExternIndex != 0 {
+		t.Errorf("ExternIndex = %d, want 0 (the instancetype declared in the type section)", im.ExternIndex)
+	}
+}
+
 func TestExportSectionTruncated(t *testing.T) {
 	tests := []struct {
 		name string
@@ -610,6 +640,7 @@ func TestReadExterndescSorts(t *testing.T) {
 		{"instance (0x05)", []byte{0x05, 0x00}, false},
 		{"type bound eq (0x03 0x00)", []byte{0x03, 0x00, 0x00}, false},
 		{"type bound sub (0x03 0x01)", []byte{0x03, 0x01}, false},
+		{"type bound invalid (0x03 0x02)", []byte{0x03, 0x02}, true},
 		{"type bound truncated", []byte{0x03}, true},
 		{"type bound eq truncated index", []byte{0x03, 0x00}, true},
 		{"unsupported sort (value, 0x02)", []byte{0x02}, true},
@@ -619,121 +650,43 @@ func TestReadExterndescSorts(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, _, _, err := readExterndesc(tt.buf, 0)
+			_, _, err := readExternDesc(tt.buf, 0)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("readExterndesc(%v) err=%v, wantErr=%v", tt.buf, err, tt.wantErr)
+				t.Errorf("readExternDesc(%v) err=%v, wantErr=%v", tt.buf, err, tt.wantErr)
 			}
 		})
 	}
 }
 
-func TestReadSort(t *testing.T) {
-	tests := []struct {
-		name    string
-		buf     []byte
-		wantOff int
-		wantErr bool
+// TestReadExternDesc_CapturesTypeidx pins what decodeImportSection and the
+// component-type checker (internal/component/instance) depend on: every sort
+// but type reports its declared type index, and a type bound reports whether
+// it is `eq` (with the index) or `sub resource` (without one). Before an
+// instance import kept its index, resolveAlias could not follow a `use
+// iface.{T}` alias into the imported instance's own declarations at all (see
+// typespace_test.go's FromImportedInstance_Resolved tests); before a
+// component import kept its index, its declared component type was lost.
+func TestReadExternDesc_CapturesTypeidx(t *testing.T) {
+	for _, tc := range []struct {
+		buf  []byte
+		want ExternDesc
+		off  int
 	}{
-		{"core sort", []byte{0x00, 0x01}, 2, false},
-		{"core sort truncated", []byte{0x00}, 0, true},
-		{"non-core sort", []byte{0x01}, 1, false},
-		{"empty", nil, 0, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			off, err := readSort(tt.buf, 0)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("err=%v, wantErr=%v", err, tt.wantErr)
-			}
-			if err == nil && off != tt.wantOff {
-				t.Errorf("off=%d, want %d", off, tt.wantOff)
-			}
-		})
-	}
-}
-
-func TestReadAlias(t *testing.T) {
-	t.Run("core export target", func(t *testing.T) {
-		// sort=core(0x00)+discriminator(0x01=func), target=0x00 (export),
-		// instance idx=0x00, name len=1 "x".
-		buf := []byte{0x00, 0x01, 0x00, 0x00, 0x01, 'x'}
-		off, err := readAlias(buf, 0)
+		{[]byte{0x05, 0x07}, ExternDesc{Sort: 0x05, Index: 7}, 2},
+		{[]byte{0x04, 0x07}, ExternDesc{Sort: 0x04, Index: 7}, 2},
+		{[]byte{0x01, 0x03}, ExternDesc{Sort: 0x01, Index: 3}, 2},
+		{[]byte{0x00, 0x11, 0x02}, ExternDesc{Sort: 0x00, Index: 2}, 3},
+		{[]byte{0x03, 0x00, 0x09}, ExternDesc{Sort: 0x03, Index: 9, Eq: true}, 3},
+		{[]byte{0x03, 0x01}, ExternDesc{Sort: 0x03}, 2},
+	} {
+		got, off, err := readExternDesc(tc.buf, 0)
 		if err != nil {
-			t.Fatalf("readAlias: %v", err)
+			t.Fatalf("readExternDesc(%x): %v", tc.buf, err)
 		}
-		if off != len(buf) {
-			t.Errorf("off=%d, want %d", off, len(buf))
+		if got != tc.want || off != tc.off {
+			t.Errorf("readExternDesc(%x) = %+v at %d, want %+v at %d", tc.buf, got, off, tc.want, tc.off)
 		}
-	})
-
-	t.Run("outer target", func(t *testing.T) {
-		// sort=type(0x03)+bound eq(0x00)+typeidx(0x00), target=0x02
-		// (outer), outer-count=0x01, index=0x00.
-		buf := []byte{0x03, 0x00, 0x00, 0x02, 0x01, 0x00}
-		off, err := readAlias(buf, 0)
-		if err != nil {
-			t.Fatalf("readAlias: %v", err)
-		}
-		if off != len(buf) {
-			t.Errorf("off=%d, want %d", off, len(buf))
-		}
-	})
-
-	t.Run("invalid target kind", func(t *testing.T) {
-		buf := []byte{0x01, 0xff}
-		_, err := readAlias(buf, 0)
-		if err == nil || !strings.Contains(err.Error(), "invalid target kind") {
-			t.Errorf("got err=%v, want invalid target kind error", err)
-		}
-	})
-
-	t.Run("truncated before target", func(t *testing.T) {
-		buf := []byte{0x01}
-		_, err := readAlias(buf, 0)
-		if !errors.Is(err, ErrTruncatedBinary) {
-			t.Errorf("got err=%v, want ErrTruncatedBinary", err)
-		}
-	})
-
-	t.Run("export target truncated instance idx", func(t *testing.T) {
-		buf := []byte{0x01, 0x00}
-		_, err := readAlias(buf, 0)
-		if err == nil {
-			t.Fatal("expected error")
-		}
-	})
-
-	t.Run("export target truncated name", func(t *testing.T) {
-		buf := []byte{0x01, 0x00, 0x00}
-		_, err := readAlias(buf, 0)
-		if err == nil {
-			t.Fatal("expected error")
-		}
-	})
-
-	t.Run("outer target truncated", func(t *testing.T) {
-		buf := []byte{0x01, 0x02}
-		_, err := readAlias(buf, 0)
-		if err == nil {
-			t.Fatal("expected error")
-		}
-	})
-
-	t.Run("outer target truncated second index", func(t *testing.T) {
-		buf := []byte{0x01, 0x02, 0x00}
-		_, err := readAlias(buf, 0)
-		if err == nil {
-			t.Fatal("expected error")
-		}
-	})
-
-	t.Run("bad sort propagates", func(t *testing.T) {
-		buf := []byte{}
-		_, err := readAlias(buf, 0)
-		if !errors.Is(err, ErrTruncatedBinary) {
-			t.Errorf("got err=%v, want ErrTruncatedBinary", err)
-		}
-	})
+	}
 }
 
 func TestReadComponentDecl(t *testing.T) {
@@ -789,7 +742,7 @@ func TestReadComponentDecl(t *testing.T) {
 func TestReadComponenttype(t *testing.T) {
 	t.Run("empty", func(t *testing.T) {
 		buf := []byte{0x00} // count=0
-		off, err := readComponenttype(buf, 0)
+		_, off, err := readComponenttypeDesc(buf, 0)
 		if err != nil || off != 1 {
 			t.Errorf("off=%d err=%v, want 1,nil", off, err)
 		}
@@ -797,9 +750,9 @@ func TestReadComponenttype(t *testing.T) {
 
 	t.Run("one import decl", func(t *testing.T) {
 		buf := []byte{0x01, 0x03, 0x00, 0x01, 'x', 0x01, 0x00}
-		off, err := readComponenttype(buf, 0)
+		_, off, err := readComponenttypeDesc(buf, 0)
 		if err != nil {
-			t.Fatalf("readComponenttype: %v", err)
+			t.Fatalf("readComponenttypeDesc: %v", err)
 		}
 		if off != len(buf) {
 			t.Errorf("off=%d, want %d", off, len(buf))
@@ -807,7 +760,7 @@ func TestReadComponenttype(t *testing.T) {
 	})
 
 	t.Run("bad count", func(t *testing.T) {
-		_, err := readComponenttype(nil, 0)
+		_, _, err := readComponenttypeDesc(nil, 0)
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -815,7 +768,7 @@ func TestReadComponenttype(t *testing.T) {
 
 	t.Run("propagates componentdecl error with index", func(t *testing.T) {
 		buf := []byte{0x02, 0x03, 0x00, 0x01, 'x', 0x01, 0x00, 0xff}
-		_, err := readComponenttype(buf, 0)
+		_, _, err := readComponenttypeDesc(buf, 0)
 		if err == nil || !strings.Contains(err.Error(), "componentdecl[1]") {
 			t.Errorf("got err=%v, want componentdecl[1] error", err)
 		}
@@ -1059,49 +1012,6 @@ func TestReadInstanceDeclDesc(t *testing.T) {
 		}
 	})
 
-	t.Run("core type: func type with params/results", func(t *testing.T) {
-		// 0x60 functype, 1 param i32 (0x7f), 1 result i32.
-		buf := []byte{0x60, 0x01, 0x7f, 0x01, 0x7f}
-		off, err := readCoretypeDef(buf, 0)
-		if err != nil {
-			t.Fatalf("readCoretypeDef: %v", err)
-		}
-		if off != len(buf) {
-			t.Errorf("off=%d, want %d", off, len(buf))
-		}
-	})
-
-	t.Run("core type: module type with import/type/alias/export decls", func(t *testing.T) {
-		buf := []byte{
-			0x50, 0x04, // module type, 4 decls
-			0x00, 0x00, 0x00, 0x00, 0x00, // import: nm "" nm "" importdesc(func 0)
-			0x01, 0x60, 0x00, 0x00, // type: empty func type
-			0x02, 0x00, 0x01, 0x00, 0x00, // alias: sort 0x00, outer(0x01) ct 0 idx 0
-			0x03, 0x00, 0x00, 0x00, // export: nm "" importdesc(func 0)
-		}
-		off, err := readCoretypeDef(buf, 0)
-		if err != nil {
-			t.Fatalf("readCoretypeDef: %v", err)
-		}
-		if off != len(buf) {
-			t.Errorf("off=%d, want %d", off, len(buf))
-		}
-	})
-
-	t.Run("core type: invalid tags", func(t *testing.T) {
-		if _, err := readCoretypeDef([]byte{0x7f}, 0); err == nil {
-			t.Error("expected an error for an invalid core:type tag")
-		}
-		// module type with an invalid moduledecl tag.
-		if _, err := readCoretypeDef([]byte{0x50, 0x01, 0x7f}, 0); err == nil {
-			t.Error("expected an error for an invalid coremoduledecl tag")
-		}
-		// import with an unsupported (non-func) importdesc sort.
-		if _, err := readCoretypeDef([]byte{0x50, 0x01, 0x00, 0x00, 0x00, 0x02}, 0); err == nil {
-			t.Error("expected an error for an unsupported core:importdesc sort")
-		}
-	})
-
 	t.Run("invalid tag", func(t *testing.T) {
 		buf := []byte{0xff}
 		_, err := readInstanceDeclDesc(buf, 0)
@@ -1182,16 +1092,21 @@ func TestReadLabelTruncated(t *testing.T) {
 	})
 }
 
+// An empty label at the very end of the buffer has no byte to view.
+func TestReadLabelEmptyAtEnd(t *testing.T) {
+	if s, off, err := readLabel([]byte{0x00}, 0); s != "" || off != 1 || err != nil {
+		t.Fatalf("got %q, %d, %v", s, off, err)
+	}
+}
+
 // ---------------------------------------------------------------------
 // readDeftypeDesc: unsupported-construct and truncation paths not
 // otherwise reachable through a real wasm-tools fixture.
 // ---------------------------------------------------------------------
 
 func TestReadDeftypeDescUnsupportedTag(t *testing.T) {
-	// 0x67 is not a recognized defvaltype tag (valid tags are documented as
-	// 0x68..0x72 plus the primvaltype range and the 0x3f/0x40/0x41/0x42
-	// aggregate tags).
-	buf := []byte{0x67}
+	// 0x6c is not a defvaltype tag: it was union's, which the spec dropped.
+	buf := []byte{0x6c}
 	_, _, err := readDeftypeDesc(buf, 0)
 	if err == nil || !strings.Contains(err.Error(), "unsupported (M1)") {
 		t.Errorf("got err=%v, want unsupported (M1) defvaltype tag error", err)

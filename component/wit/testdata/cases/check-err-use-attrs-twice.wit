@@ -1,0 +1,6 @@
+package a:b;
+interface j { type t = u8; }
+interface i {
+  @since(version = 1.0.0) @since(version = 1.0.0)
+  use j.{t};
+}

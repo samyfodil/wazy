@@ -7,9 +7,11 @@ const repo = 'https://github.com/samyfodil/wazy';
 export default defineConfig({
   // Keeps the dev overlay out of screenshots and off the page while designing.
   devToolbar: { enabled: false },
-  // GitHub Pages project site. Swap both for a custom domain (and add a CNAME).
-  site: 'https://samyfodil.github.io',
-  base: '/wazy',
+  // Custom domain via GitHub Pages: public/CNAME pins the domain, the repo's
+  // Settings > Pages > Custom domain field must match, and DNS must point
+  // wazy.dev at GitHub's Pages IPs.
+  site: 'https://wazy.dev',
+  base: '/',
   integrations: [
     starlight({
       title: 'wazy',
@@ -52,6 +54,7 @@ export default defineConfig({
             { slug: 'guides/host-functions' },
             { slug: 'guides/components' },
             { slug: 'guides/custom-wit' },
+            { slug: 'guides/build-images' },
             { slug: 'guides/wasi' },
             { slug: 'guides/async' },
             { slug: 'guides/sandboxing' },

@@ -50,7 +50,7 @@ sources):
 | `BenchmarkCompileModulesExtensive` | Compiles five real producer outputs (TinyGo 370 KB, Rust 10 KB, Zig 5 KB, zig-cc 786 KB, cargo-wasi 104 KB) on a fresh runtime every iteration. |
 | `BenchmarkConstAddrLoads`, `BenchmarkDynAddrLoads`, `BenchmarkURemAddrLoads`, `BenchmarkDominatedBounds` | Bounds-check-elision kernels (constant, masked, `urem`-bounded and dominated addresses). |
 | `BenchmarkDispatch*` | A synthetic `call_indirect` dispatch kernel: `mono`, `poly`, `direct`, plus heavy-callee variants. |
-| `BenchmarkCloseOnContextDone`, `BenchmarkHostCallLoopCloseOnContextDone`, `BenchmarkFibCloseOnContextDone`, `BenchmarkInterruptCheckInterval` | Interruptible-loop cost under `WithCloseOnContextDone`, and the `WithInterruptCheckInterval` sweep. |
+| `BenchmarkCloseOnContextDone`, `BenchmarkHostCallLoopCloseOnContextDone`, `BenchmarkFibCloseOnContextDone` | Interruptible cost under `WithCloseOnContextDone`, on a near-empty spin kernel, a host-call-dense loop, and real compute. |
 | `BenchmarkCase3`, `BenchmarkCompile3`, `BenchmarkExecute3`, `BenchmarkExecute3Heavy`, `BenchmarkRelaxedSimd`, `BenchmarkSpectreCost` | The three-way arms that include wasmtime (see [§4](#4-against-wasmtime)). |
 
 ### The in-repo suites
@@ -152,12 +152,85 @@ The win from deleting reflection is structural, not per-call, and its magnitude
 belongs in [§3](#3-what-the-optimization-work-bought) because the path it beats
 is wazy's own, now-deleted one.
 
-The interruptible-loop advantage is not free everywhere. From the same H6 write-up:
-near-empty compute kernels (a bare spin loop, the inner fib loop) pay a **1.7–2.4x
-worst case** with `WithCloseOnContextDone` on, which is why the feature stays
-opt-in and why the per-loop check interval is tunable with
-`WithInterruptCheckInterval` (default 64, power of two, folded into the module ID
-so distinct intervals are distinct cache entries).
+The interruptible cost is small and no longer shape-dependent. `WithCloseOnContextDone`
+compiles to a decrement of a reserved register and a predicted-not-taken branch at every
+function entry and loop back-edge; when the counter runs out, one trip through Go does the
+authoritative closed check and yields. Measured on an Atom C3558 (min of 10, interleaved).
+
+**Every ratio below is one runtime against itself** -- the same build with the option
+on divided by the same build with it off, i.e. what enabling it costs you. It is not a
+wazy-versus-wazero comparison; the two columns are two separate self-ratios, and a
+smaller number is better in both.
+
+| workload | wazy on/off | wazero on/off |
+|---|---|---|
+| `fibonacci` (real compute) | **1.18x** | 11.6x |
+| host-call-dense loop | **1.02x** | 1.86x |
+| spin loop (near-empty kernel) | **1.44x** | 2.06x |
+
+The spin kernel is the worst case and always will be: it has no body to dilute a
+per-back-edge decrement against.
+
+arm64 agrees, measured on an Apple M4 (min of 10). Same self-ratio: the host-call-dense
+loop costs **1.03x** and the spin kernel **1.13x**, where the loop-header design this
+replaced cost 7.44x on that kernel. The M4 does far better on the spin kernel than any x86 core here,
+which is the same placement story as below -- it has no uop cache erratum to hit.
+
+### On two real modules, and why the ratio is not one number
+
+The kernels above are the worst case by construction. Two real producer modules, both from
+outside this repo, put a ceiling on what any of it means in practice.
+
+**go-anydoc** — a 6.8 MB Rust module (anydoc 0.2.3) converting a 5 MB docx body, run through
+that project's own `BenchmarkCloseOnContextDone`, min of 3 at `-benchtime 3x`. What enabling
+the option costs, each runtime against itself:
+
+| | Apple M4 | Xeon D-2123IT | Atom C3558 |
+|---|---|---|---|
+| wazy | **1.28x** | **1.04x** | **1.10x** |
+| wazero v1.12.0 | 6.38x | 4.24x | 3.02x |
+| wazero + [#2529](https://github.com/tetratelabs/wazero/pull/2529)/[#2530](https://github.com/tetratelabs/wazero/pull/2530)/[#2533](https://github.com/tetratelabs/wazero/pull/2533) | 1.05x | 1.01x | 1.10x |
+
+**The spread across machines is the point.** The same wazy build costs 1.28x on one core and
+1.04x on another, so a single figure for "what the option costs" is not meaningful without
+naming the machine. wazero's in-flight #2533 is level with wazy on both x86 parts here and
+ahead on the M4, and it is a fair comparison: it solves the same problem on their side.
+
+Ratios also hide the wall clock, and the two disagree here. With the option on, wazy is
+faster than wazero+those-PRs in absolute time on all three machines — 0.95x on the M4, 0.74x
+on the Xeon, 0.63x on the Atom — because their unoption baseline is slower to begin with
+(647 ms against 464 ms on the Xeon for the same document). Quote both or neither.
+
+**go-pdfium** — 144 real PDFs rendered through a 5.7 MB PDFium module, that project's own
+corpus tool, mean ms per document, zero pixel mismatches. On the Atom: 43.9 ms by default and
+44.4 ms with the option on (**+1.3%**), against wazero's 49.1 → 68.1 ms (+38.8%) and
+wazero+PRs' 48.0 → 48.3 ms (+0.5%). Compile plus first worker is 5.8 s against wazero's 11.5 s.
+
+Neither module behaves like the kernels: a 5.7 MB guest spends its time in its own compute,
+not in a termination check, so ratios like the spin kernel's do not transfer.
+
+**A note on why those numbers come from an Atom, and on the JCC erratum.** On a
+Skylake-family core, code *placement* used to swamp all of this. A branch that crosses or
+ends on a 32-byte boundary is not cached in the uop cache (Intel erratum SKX102), and wazy
+emitted about 15% of its branches in that state purely by accident of byte counts. Shifting
+every compiled function by ten bytes, changing nothing else, moved `random_mat_mul` by 17%
+and `fibonacci` by 32% on a Xeon D-2123IT. The Atom has no uop cache, so it has no such
+lottery, which is why the table above is measured there.
+
+wazy now mitigates it: on a CPU that has the erratum, functions are aligned to 32 bytes and
+multi-byte NOPs keep every branch clear of the boundaries, taking a real TinyGo module from
+398 affected branches to **0** for **+2.1%** code size. The gate is CPUID family/model
+against Intel's own affected list, so unaffected Intel parts and all AMD parts pay nothing,
+and it is part of the compilation cache key -- a module compiled on an affected host is not
+loaded by an unaffected one. On arm64 it is a compile-time no-op, verified byte-identical.
+
+What this buys, placement-marginalised over 16 placements on that Xeon, is mostly
+*predictability*: `fibonacci`'s spread across placements collapses from 24.7% to 3.1% and
+`random_mat_mul`'s from 14.6% to 1.2%. Median throughput moves less -- the per-workload
+deltas are at or near the +-3% floor that wazero's control rows show -- with two exceptions
+well outside it, both on the branch-dense interruptible path: the spin kernel is **-32%**
+and `fibonacci` under `WithCloseOnContextDone` is **-23%**. Aligning functions to 32 bytes
+without the NOP padding is flat everywhere, so the win is the padding, not the alignment.
 
 ### Compiled execution
 
@@ -265,7 +338,7 @@ it.
 | Workload | Result | Source |
 | --- | --- | --- |
 | `Case3/fibonacci` (pure recursion, ~2.7M direct calls) | wazy **~16% behind** wasmtime/Cranelift, described as a raw-codegen gap | OPTIMIZATIONS.md H7-followup, min-of-8 interleaved, verified-quiet i9-12900HK |
-| 7.5 MB PDF through a 6.5 MB Rust module | native Rust 0.28 s, wasmtime (Cranelift) 0.37 s, **wazy 0.75 s**, wasmtime (Winch) 0.90 s, wazero 3.4 s — roughly **2x behind Cranelift** | Third-party: [go-anydoc][anydoc], reported in [#29][i29]. Recorded in this repository's README history (commit `35cb198a~1`); the current README keeps only the wazero columns |
+| 7.5 MB PDF through a 6.5 MB Rust module | native Rust 0.28 s, wasmtime (Cranelift) 0.37 s, **wazy 0.75 s**, wasmtime (Winch) 0.90 s, wazero 3.4 s — roughly **2x behind Cranelift** | Third-party: [go-anydoc][anydoc], reported in issue #29 (since deleted). Recorded in this repository's README history (commit `35cb198a~1`); the current README keeps only the wazero columns |
 
 ### Where the gap closed
 
@@ -312,6 +385,12 @@ The harness contains four traps it documents rather than hides:
 
 ### The 6.5 MB module, at scale, measured by someone else
 
+> These are third-party figures as first reported, against **wazy v0.3.0** and a
+> 6,542,355-byte module. go-anydoc has since moved to a 6,781,177-byte one, and the
+> compiled rows here were taken with `WithCloseOnContextDone` on, which costs the two
+> runtimes very differently — see [the real-module section above](#on-two-real-modules-and-why-the-ratio-is-not-one-number)
+> for current `main` on three machines. They are kept as recorded rather than restated.
+
 The first-party suites are kernels; their largest guest is 37 KB.
 [go-anydoc][anydoc] measured two orders of magnitude up — a 6.5 MB
 `wasm32-wasip1` command module (Rust 1.88, `opt-level = 3`, `wasm-opt -O3`) run as
@@ -333,7 +412,7 @@ instantiation dominates goes the other way, and the first row is the crossover.
 (the module is not vendored here). Apple M5 Pro (18-core), 48 GB, macOS 26.5,
 Go 1.26.1, `CGO_ENABLED=0`, wazy `v0.0.0-20260807033006-cd2607360a17`,
 `anydoc.wasm` 6,542,355 bytes, best of 3 (best of 20 for the small input).
-Reported in [#29][i29]. The wasmtime and native-Rust columns for the 7.5 MB PDF
+Reported in issue #29 (since deleted). The wasmtime and native-Rust columns for the 7.5 MB PDF
 are in [§4](#where-wazy-is-behind).
 
 ## 5. Method
@@ -405,4 +484,3 @@ still serializes instantiate against close, and the 2431-line validator body was
 left alone deliberately because correctness of validation outranks its speed.
 
 [anydoc]: https://github.com/xusenlin/go-anydoc
-[i29]: https://github.com/samyfodil/wazy/issues/29

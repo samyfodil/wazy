@@ -1,0 +1,7 @@
+package a:b;
+interface i { type t = u32; }
+interface j {
+  @unstable(feature = active)
+  use i.{t};
+  f: func(x: t);
+}

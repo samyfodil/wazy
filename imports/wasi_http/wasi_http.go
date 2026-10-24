@@ -102,7 +102,7 @@ func newHost() *host {
 
 // host holds the handle tables backing one Instantiate call.
 //
-// ponytail: one mutex for all five tables. Every critical section is an O(1)
+// Deliberately one mutex for all five tables. Every critical section is an O(1)
 // map operation - the HTTP round trip and all guest memory access happen
 // outside it - so per-table locks would buy nothing measurable.
 type host struct {

@@ -1,0 +1,3 @@
+package a:b;
+@since(version = 1.0.0)
+world w {}

@@ -3,6 +3,7 @@ package wasip2
 import (
 	"bytes"
 	"context"
+	"errors"
 	"math"
 	"testing"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/samyfodil/wazy/component/componenttest"
 	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
+	"github.com/samyfodil/wazy/sys"
 )
 
 // wasiHostFunc extracts the raw component.HostFunc WithWASI registered for iface/name,
@@ -74,16 +76,27 @@ func TestWASI_Exit(t *testing.T) {
 
 	t.Run("ok", func(t *testing.T) {
 		_, err := fn(context.Background(), []abi.Value{abi.ResultValue{IsErr: false}})
-		requireErrContains(t, err, "wazy has no process to exit")
+		requireExitCode(t, err, 0)
 	})
 	t.Run("err", func(t *testing.T) {
 		_, err := fn(context.Background(), []abi.Value{abi.ResultValue{IsErr: true}})
-		requireErrContains(t, err, "guest called exit with an error status")
+		requireExitCode(t, err, 1)
 	})
 	t.Run("bad arg type", func(t *testing.T) {
 		_, err := fn(context.Background(), []abi.Value{uint32(0)})
 		requireErrContains(t, err, "expected a result")
 	})
+}
+
+func requireExitCode(t *testing.T, err error, want uint32) {
+	t.Helper()
+	var ee *sys.ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("want a *sys.ExitError, got %v", err)
+	}
+	if ee.ExitCode() != want {
+		t.Fatalf("exit code = %d, want %d", ee.ExitCode(), want)
+	}
 }
 
 func TestWASI_GetEnvironment(t *testing.T) {
@@ -449,5 +462,21 @@ func TestWasiFuncSigs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestWASI_StreamSubscribeWithoutSockets pins that stream subscribe is
+// registered with no sockets enabled: wasi-libc's wasip2 write() subscribes to
+// stdout before writing, so a plain printf needs it.
+func TestWASI_StreamSubscribeWithoutSockets(t *testing.T) {
+	for _, name := range []string{"[method]input-stream.subscribe", "[method]output-stream.subscribe"} {
+		fn := wasiHostFunc(t, WASIConfig{}, wasiIfaceStreams, name)
+		results, err := fn(context.Background(), []abi.Value{uint32(1)})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(results) != 1 || results[0] != abi.Value(wasiPollableRep) {
+			t.Fatalf("%s: got %#v, want the always-ready pollable", name, results)
+		}
 	}
 }

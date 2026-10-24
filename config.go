@@ -226,6 +226,13 @@ type RuntimeConfig interface {
 	// interpreter and compiler runtimes to insert the periodical checks on the conditions above. For that reason,
 	// this is disabled by default.
 	//
+	// In the compiler the check is a decrement of a reserved register and a predicted-not-taken branch at every
+	// function entry and every loop back-edge. When the counter runs out the guest returns to Go, which checks
+	// whether the module has been closed and yields its P so the cancellation watchdog can run -- which is what
+	// makes the option work at all, since compiled code is otherwise not preemptible. The shape that pays most
+	// is a near-empty compute kernel, which has no body to dilute the per-back-edge check against. See
+	// docs/performance.md for measured numbers.
+	//
 	// See examples in context_done_example_test.go for the end-to-end demonstrations.
 	//
 	// When the invocations of api.Function are closed due to this, sys.ExitError is raised to the callers and

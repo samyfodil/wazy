@@ -9,14 +9,17 @@ import "fmt"
 // <core:moduleidx>` names an index in the component's core module index
 // space, which is populated -- in declaration order across sections -- by:
 //   - an embedded core module (section 1)
-//   - a core-module ALIAS (section 6, sort core 0x00 / core:sort module 0x11)
+//   - a core-module ALIAS (section 6, sort core 0x00 / core:sort module 0x11):
+//     `alias outer` of an enclosing component's module, or an export alias of
+//     a module a component instance exports, `(module $i "m")`
+//   - a core-module IMPORT (section 10, sort core module 0x00 0x11)
+//   - a core-module EXPORT (section 11), which introduces an index aliasing
+//     the module it exports, as every export does
 //
-// Only the `outer` form of that alias exists in practice: Explainer.md's
-// outeraliassort grammar lists `core module` among the four sorts an
-// `alias outer <count> <idx>` may name, and there is no other way to obtain a
-// core module index (a core module is not an instance export, and there is no
-// core-module import in the component model -- a component imports a
-// *component* or an *instance*, never a bare core module).
+// Only a definition, an `alias outer` reaching one, and an export of either
+// name a module statically; an import or an export alias names whatever the
+// instantiation supplies, so ResolveCoreModule refuses those and the instance
+// package resolves them against what it was given.
 //
 // Equating the space with CoreModules (section 1) alone is what made
 // fused.23.wast fail to instantiate: its two nested components each reach the
@@ -40,14 +43,21 @@ const (
 	// CoreModuleFromAlias: a core-module alias (section 6, Sort == 0x00 core,
 	// CoreSort == 0x11 module).
 	CoreModuleFromAlias
+	// CoreModuleFromImport: a core module import (section 10, sort 0x00).
+	CoreModuleFromImport
+	// CoreModuleFromExport: a core module export (section 11, sort 0x00).
+	CoreModuleFromExport
 )
 
 // CoreModuleSpaceEntry is one entry in the component's core module index
-// space. Exactly one of Module/Alias is meaningful, selected by Kind.
+// space. Exactly one of Module/Alias/Import/Export is meaningful, selected by
+// Kind.
 type CoreModuleSpaceEntry struct {
 	Kind   CoreModuleSpaceEntryKind
 	Module uint32 // index into Component.CoreModules (Kind == CoreModuleFromDefinition)
 	Alias  uint32 // index into Component.Aliases     (Kind == CoreModuleFromAlias)
+	Import uint32 // index into Component.Imports     (Kind == CoreModuleFromImport)
+	Export uint32 // index into Component.Exports     (Kind == CoreModuleFromExport)
 }
 
 // resolveCoreModuleMaxDepth bounds ResolveCoreModule's alias-chain walk. A
@@ -87,17 +97,25 @@ func (c *Component) ResolveCoreModule(idx uint32) (owner *Component, moduleIdx u
 				return nil, 0, fmt.Errorf("core module %d: internal error: module index %d out of range of %d embedded modules", idx, e.Module, len(cur.CoreModules))
 			}
 			return cur, e.Module, nil
+		case CoreModuleFromImport:
+			if int(e.Import) >= len(cur.Imports) {
+				return nil, 0, fmt.Errorf("core module %d: internal error: import index %d out of range of %d imports", idx, e.Import, len(cur.Imports))
+			}
+			return nil, 0, fmt.Errorf("core module %d is the core module import %q, which only an instantiation supplies", idx, cur.Imports[e.Import].Name)
+		case CoreModuleFromExport:
+			if int(e.Export) >= len(cur.Exports) {
+				return nil, 0, fmt.Errorf("core module %d: internal error: export index %d out of range of %d exports", idx, e.Export, len(cur.Exports))
+			}
+			idx = cur.Exports[e.Export].ExternIndex
 		case CoreModuleFromAlias:
 			if int(e.Alias) >= len(cur.Aliases) {
 				return nil, 0, fmt.Errorf("core module %d: internal error: alias index %d out of range of %d aliases", idx, e.Alias, len(cur.Aliases))
 			}
 			al := cur.Aliases[e.Alias]
 			if al.TargetKind != 0x02 { // outer
-				// A core module can only be obtained by `alias outer`; an
-				// export alias (0x00/0x01) of a core module is not a thing
-				// the grammar admits. decodeAliasSection does not itself
-				// reject the combination, so fail loud rather than mis-index.
-				return nil, 0, fmt.Errorf("core module %d: alias target kind %#x cannot name a core module (only `alias outer` can)", idx, al.TargetKind)
+				// An export alias names the module some component instance
+				// exports, which only an instantiation knows.
+				return nil, 0, fmt.Errorf("core module %d is an alias of the export %q of instance %d, which only an instantiation supplies", idx, al.Name, al.InstanceIdx)
 			}
 			// The de Bruijn count is the number of enclosing components to
 			// skip; 0 means this same component (Explainer.md permits it),

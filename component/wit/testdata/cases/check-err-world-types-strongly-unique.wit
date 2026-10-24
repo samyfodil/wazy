@@ -1,0 +1,5 @@
+package a:b;
+world w {
+  type a-b = u8;
+  type ab = u8;
+}

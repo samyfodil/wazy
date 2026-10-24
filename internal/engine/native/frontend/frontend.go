@@ -67,7 +67,7 @@ type Compiler struct {
 	// fixed to key on the memory-length SSA value too and stays enabled; this
 	// linear-path pre-cache is disabled outright for multi-memory rather than
 	// threading the same fix through the N-way predecessor intersection.
-	// ponytail: coarse ceiling -- ship correct now, add the memory-aware merge
+	// A deliberately coarse ceiling: ship correct now, add the memory-aware merge
 	// if multi-memory codegen benchmarks show it's worth it.
 	multiMemory    bool
 	memoryShared   []bool
@@ -92,12 +92,6 @@ type Compiler struct {
 	declaresSubtypes     bool
 	needListener         bool
 	needSourceOffsetInfo bool
-	// interruptCheckInterval controls loop interrupt-check lowering when
-	// ensureTermination is set: 0 means check every iteration (a Go round-trip
-	// per loop header), a power of two N means check only every Nth iteration
-	// via a counter in the execution context. Defaults to 0; set per compile by
-	// the engine (see SetInterruptCheckInterval).
-	interruptCheckInterval uint64
 	// br is reused during lowering.
 	br            *bytes.Reader
 	loweringState loweringState
@@ -117,16 +111,8 @@ type Compiler struct {
 	// throwSig is the signature for the throw/throw_ref trampoline:
 	// (execCtx, exnref) → (). Searches for a matching handler and restores.
 	throwSig ssa.Signature
-	// tryTableEnterSig is the signature for the try_table enter trampoline.
-	tryTableEnterSig ssa.Signature
-	// tryTableLeaveSig is the signature for the try_table leave trampoline.
-	tryTableLeaveSig ssa.Signature
 	// tryTableMetadata accumulates try_table metadata during compilation.
 	tryTableMetadata tryTableMetadata
-	// tryTableDepth tracks try_table nesting. When > 0, local.set/local.tee
-	// emit extra stores to the locals save area so handler blocks can read
-	// throw-time values.
-	tryTableDepth int
 	// pendingEhEntries accumulates, purely per-function (reset in Init;
 	// never shared across parallel-compile workers, unlike tryTableMetadata,
 	// because the exception side table is organized per-function rather
@@ -182,13 +168,6 @@ func (c *Compiler) SetGCEnabled(on bool) { c.gcEnabled = on }
 // MaxGCRoots is the most values any safepoint lowered so far writes into the root buffer. It accumulates
 // across every function the compiler lowers, so the engine can size one buffer per call for the whole module.
 func (c *Compiler) MaxGCRoots() int { return c.maxGCRoots }
-
-// SetInterruptCheckInterval sets the loop interrupt-check interval used when
-// ensureTermination is active. interval must be 0 (check every iteration) or a
-// power of two. It must be called before lowering.
-func (c *Compiler) SetInterruptCheckInterval(interval uint64) {
-	c.interruptCheckInterval = interval
-}
 
 // tryTableMetadata accumulates try_table metadata during compilation.
 type tryTableMetadata interface {
@@ -403,22 +382,8 @@ func (c *Compiler) declareSignatures(listenerOn bool) {
 	}
 	c.ssaBuilder.DeclareSignature(&c.throwSig)
 
-	c.tryTableEnterSig = ssa.Signature{
-		ID:      c.throwSig.ID + 1,
-		Params:  []ssa.Type{ssa.TypeI64 /* exec context */, ssa.TypeI64 /* encoded exit code */},
-		Results: []ssa.Type{},
-	}
-	c.ssaBuilder.DeclareSignature(&c.tryTableEnterSig)
-
-	c.tryTableLeaveSig = ssa.Signature{
-		ID:      c.tryTableEnterSig.ID + 1,
-		Params:  []ssa.Type{ssa.TypeI64 /* exec context */},
-		Results: []ssa.Type{},
-	}
-	c.ssaBuilder.DeclareSignature(&c.tryTableLeaveSig)
-
 	c.gcSig = ssa.Signature{
-		ID: c.tryTableLeaveSig.ID + 1,
+		ID: c.throwSig.ID + 1,
 		// exec context, then the mode and five operands of wasm.RunGC.
 		Params: []ssa.Type{
 			ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64,
@@ -465,7 +430,6 @@ func (c *Compiler) Init(idx, typIndex wasm.Index, typ *wasm.FunctionType, localT
 	c.wasmFunctionBody = body
 	c.wasmFunctionBodyOffsetInCodeSection = bodyOffsetInCodeSection
 	c.needListener = needListener
-	c.tryTableDepth = 0
 	c.pendingEhEntries = c.pendingEhEntries[:0]
 	c.clearSafeBounds()
 	c.varLengthKnownSafeBoundWithIDPool.Reset()

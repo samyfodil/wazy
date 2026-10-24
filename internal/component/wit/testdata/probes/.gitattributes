@@ -1,0 +1,2 @@
+# Probe inputs are kept byte for byte: crlf.wit tests "\r\n" line ends.
+*.wit -text

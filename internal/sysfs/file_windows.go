@@ -39,10 +39,14 @@ func readFd(fd uintptr, buf []byte) (int, sys.Errno) {
 	if errno == syscall.ERROR_BROKEN_PIPE {
 		return 0, 0
 	}
+	if errno != 0 {
+		return -1, sys.UnwrapOSError(errno)
+	}
 	if n == 0 {
 		return -1, sys.EAGAIN
 	}
-	un, err := syscall.Read(handle, buf[0:n])
+	// The pipe can hold more than the caller asked for: read at most len(buf).
+	un, err := syscall.Read(handle, buf[:min(int(n), len(buf))])
 	return un, sys.UnwrapOSError(err)
 }
 

@@ -17,18 +17,7 @@ func (m *ModuleInstance) FailIfClosed() (err error) {
 		case exitCodeFlagResourceNotClosed:
 			// This happens when this module is closed asynchronously in CloseModuleOnCanceledOrTimeout,
 			// and the closure of resources have been deferred here.
-			//
-			// Flip the flag FIRST, and only run the deferred cleanup if we won
-			// the CAS. ensureResourcesClosed is not idempotent -- its importer
-			// branch does mem.importers--, so running it twice under-counts the
-			// live importers of a shared memory. Once the count reaches zero
-			// early, the next importer's close pools the buffer while another
-			// module is still pointing at it, and two modules end up sharing
-			// one array. FailIfClosed is called on every host-function entry,
-			// so without this the cleanup re-ran on every call.
-			if m.Closed.CompareAndSwap(closed, closed&^uint64(exitCodeFlagResourceNotClosed)|exitCodeFlagResourceClosed) {
-				_ = m.ensureResourcesClosed(context.Background())
-			}
+			_ = m.closeDeferredResources(context.Background())
 		}
 		return sys.NewExitError(uint32(closed >> 32)) // Unpack the high order bits as the exit code.
 	}
@@ -71,18 +60,37 @@ func (m *ModuleInstance) closeModuleOnCanceledOrTimeout(ctx context.Context, can
 			// case go will randomize which branch of the outer select to enter
 			// and we don't want to close the module.
 		default:
-			// This is the same logic as CloseWithCtxErr except this calls closeWithExitCodeWithoutClosingResource
-			// so that we can defer the resource closure in FailIfClosed.
-			switch {
-			case errors.Is(ctx.Err(), context.Canceled):
-				// TODO: figure out how to report error here.
-				_ = m.closeWithExitCodeWithoutClosingResource(sys.ExitCodeContextCanceled)
-			case errors.Is(ctx.Err(), context.DeadlineExceeded):
-				// TODO: figure out how to report error here.
-				_ = m.closeWithExitCodeWithoutClosingResource(sys.ExitCodeDeadlineExceeded)
-			}
+			m.closeOnCtxDone(ctx, cancelChan)
 		}
 	case <-cancelChan:
+	}
+}
+
+// closeOnCtxDone is the watcher's close. It is the same logic as
+// CloseWithCtxErr except it calls closeWithExitCodeWithoutClosingResource, so
+// that the call still running releases the resources in FailIfClosed rather
+// than pulling them out from under it.
+//
+// The call may already be past that FailIfClosed: it can leave between the
+// watcher seeing cancelChan open and the close below. The close also removed
+// the module from the store, so Runtime.Close would not find it either. So
+// look at cancelChan again once Closed is set: the call closes cancelChan
+// before its final FailIfClosed, so either that load sees the close, or this
+// receive sees cancelChan closed and the release falls to the watcher. Both
+// can happen; closeDeferredResources lets exactly one of them release.
+func (m *ModuleInstance) closeOnCtxDone(ctx context.Context, cancelChan <-chan struct{}) {
+	switch {
+	case errors.Is(ctx.Err(), context.Canceled):
+		// TODO: figure out how to report error here.
+		_ = m.closeWithExitCodeWithoutClosingResource(sys.ExitCodeContextCanceled)
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		// TODO: figure out how to report error here.
+		_ = m.closeWithExitCodeWithoutClosingResource(sys.ExitCodeDeadlineExceeded)
+	}
+	select {
+	case <-cancelChan:
+		_ = m.closeDeferredResources(context.Background())
+	default:
 	}
 }
 
@@ -119,7 +127,11 @@ func (m *ModuleInstance) Close(ctx context.Context) (err error) {
 // CloseWithExitCode implements the same method as documented on api.Module.
 func (m *ModuleInstance) CloseWithExitCode(ctx context.Context, exitCode uint32) (err error) {
 	if !m.setExitCode(exitCode, exitCodeFlagResourceClosed) {
-		return nil // not an error to have already closed
+		// Not an error to have already closed. But if that close was the
+		// asynchronous one and nothing has released the resources since --
+		// say the context was done after the last FailIfClosed of the call it
+		// watched -- this is the last chance to release them.
+		return m.closeDeferredResources(ctx)
 	}
 	_ = m.s.deleteModule(m)
 	return m.ensureResourcesClosed(ctx)
@@ -141,7 +153,7 @@ func (m *ModuleInstance) closeWithExitCodeWithoutClosingResource(exitCode uint32
 // closeWithExitCode is the same as CloseWithExitCode besides this doesn't delete it from Store.moduleList.
 func (m *ModuleInstance) closeWithExitCode(ctx context.Context, exitCode uint32) (err error) {
 	if !m.setExitCode(exitCode, exitCodeFlagResourceClosed) {
-		return nil // not an error to have already closed
+		return m.closeDeferredResources(ctx) // see CloseWithExitCode
 	}
 	return m.ensureResourcesClosed(ctx)
 }
@@ -162,6 +174,27 @@ func (m *ModuleInstance) setExitCode(exitCode uint32, flag exitCodeFlag) bool {
 	return m.Closed.CompareAndSwap(0, closed)
 }
 
+// closeDeferredResources releases the resources of a module closed by
+// closeWithExitCodeWithoutClosingResource, at most once however many callers
+// race to do it, and does nothing otherwise.
+//
+// It flips the flag FIRST and releases only if it won the CAS.
+// ensureResourcesClosed is not idempotent -- its importer branch does
+// mem.importers--, so running it twice under-counts the live importers of a
+// shared memory. Once the count reaches zero early, the next importer's close
+// pools the buffer while another module is still pointing at it, and two
+// modules end up sharing one array.
+func (m *ModuleInstance) closeDeferredResources(ctx context.Context) error {
+	closed := m.Closed.Load()
+	if closed&exitCodeFlagMask != exitCodeFlagResourceNotClosed {
+		return nil
+	}
+	if !m.Closed.CompareAndSwap(closed, closed&^uint64(exitCodeFlagResourceNotClosed)|exitCodeFlagResourceClosed) {
+		return nil
+	}
+	return m.ensureResourcesClosed(ctx)
+}
+
 // ensureResourcesClosed ensures that resources assigned to ModuleInstance is released.
 // Only one call will happen per module, due to external atomic guards on Closed.
 func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) {
@@ -179,30 +212,61 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 		if mem.ownerModuleEngine == m.Engine {
 			// Owner close. Mark ownerClosed, and recycle Buffer to the pool now
 			// only if no importer is still live -- otherwise the LAST importer's
-			// Close recycles it (the importer branch below). The claim (take
-			// Buffer, set it nil) happens under Mux so exactly one close pools it.
+			// Close recycles it (the importer branch below). The claim (take the
+			// slice, set released) happens under Mux so exactly one close pools it.
 			// expBuffer (custom allocator) is owner-only and freed unconditionally,
 			// exactly as before; poolable is false for it and for shared memories.
 			poolAuditRelease(mem, m)
 			mem.Mux.Lock()
 			mem.ownerClosed = true
 			var recycle []byte
-			if mem.poolable && mem.importers == 0 && mem.Buffer != nil {
-				recycle = mem.allocatedBuffer()[:mem.byteSize()]
-				// Drop our own reference so a stale post-Close read of this (now
-				// closed) MemoryInstance -- e.g. through an api.Memory the caller
-				// kept past Close, already a misuse -- sees an empty memory rather
-				// than whatever unrelated module the pool later hands this array to.
-				mem.Buffer = nil
-				mem.backing = nil
+			// released doubles as the claim that made Buffer != nil work
+			// before: set under Mux, so exactly one close -- this one or the
+			// last importer's -- releases the storage however many run
+			// concurrently. Setting it here rather than just before the Put
+			// also means a reader racing this close sees an empty memory from
+			// the moment the buffer is spoken for, not from the moment it
+			// actually lands in the pool.
+			var free api.LinearMemory
+			var deferred bool
+			if mem.expBuffer != nil || (mem.poolable && mem.importers == 0) {
+				// Take the slice BEFORE the claim: byteSize reports 0 once
+				// released is set, so claiming first would pool an empty one.
+				candidate := mem.allocatedBuffer()[:mem.byteSize()]
+				if !mem.released.Swap(true) {
+					if mem.expBuffer != nil {
+						free, mem.expBuffer = mem.expBuffer, nil
+					} else {
+						recycle = candidate
+						poolAuditPut(mem)
+					}
+					// A call still executing reads and writes this buffer
+					// directly, without ever consulting released -- so hand the
+					// release to whichever call leaves last rather than pulling
+					// the memory out from under it. See callers.
+					if mem.anyCallInFlightLocked() {
+						// Stash the WHOLE backing, not candidate: that call can
+						// still grow the memory and write above candidate's
+						// length, and the pool clears only what it is handed.
+						// exitAfterRelease takes the prefix once it has drained.
+						mem.pendingRelease.recycle, mem.pendingRelease.free = mem.allocatedBuffer(), free
+						if free != nil {
+							mem.pendingRelease.recycle = nil
+						}
+						recycle, free = nil, nil
+						deferred = true
+					}
+				}
 			}
 			mem.Mux.Unlock()
 
-			if mem.expBuffer != nil {
-				mem.expBuffer.Free()
-				mem.expBuffer = nil
+			if deferred {
+				// The last call may have left between the check and the store,
+				// in which case nobody is coming back for it.
+				mem.exitAfterRelease()
+			} else if free != nil {
+				free.Free()
 			} else if recycle != nil {
-				poolAuditPut(mem)
 				putPooledMemoryBuffer(recycle)
 			}
 		} else {
@@ -218,18 +282,45 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 				mem.importers--
 			}
 			var recycle []byte
-			if mem.ownerClosed && mem.importers == 0 && mem.poolable && mem.Buffer != nil {
-				recycle = mem.allocatedBuffer()[:mem.byteSize()]
-				mem.Buffer = nil
-				mem.backing = nil
+			var deferred bool
+			if mem.ownerClosed && mem.importers == 0 && mem.poolable {
+				// Slice first, claim second -- see the owner branch above.
+				candidate := mem.allocatedBuffer()[:mem.byteSize()]
+				if !mem.released.Swap(true) {
+					recycle = candidate
+					poolAuditPut(mem)
+					if mem.anyCallInFlightLocked() {
+						// Whole backing; see the owner branch above.
+						mem.pendingRelease.recycle = mem.allocatedBuffer()
+						recycle, deferred = nil, true
+					}
+				}
 			}
 			mem.Mux.Unlock()
-			if recycle != nil {
-				poolAuditPut(mem)
+			if deferred {
+				mem.exitAfterRelease()
+			} else if recycle != nil {
 				putPooledMemoryBuffer(recycle)
 			}
 		}
 	}
+
+	// Memories this module could reach through a function or table import but
+	// does not own. Dropping the hold can make this the last holder, in which
+	// case the owner's deferred recycle happens here. See holdMemoriesOf.
+	for _, mem := range m.heldMemories {
+		mem.Mux.Lock()
+		if mem.importers > 0 {
+			mem.importers--
+		}
+		last := mem.ownerClosed && mem.importers == 0 && mem.poolable
+		mem.Mux.Unlock()
+		poolAuditRelease(mem, m)
+		if last {
+			mem.releaseAfterLastHolder()
+		}
+	}
+	m.heldMemories = nil
 
 	if m.CodeCloser != nil {
 		if e := m.CodeCloser.Close(ctx); err == nil {

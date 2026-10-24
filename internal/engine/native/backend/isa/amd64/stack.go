@@ -100,19 +100,6 @@ func UnwindStackForThrow(rbp, top uintptr, frames []nativeapi.ThrowFrame) []nati
 	return frames
 }
 
-// FirstReturnAddress returns, in O(1), the return address of the frame
-// whose callee's frame is chained from rbp -- i.e. the address the function
-// at rbp will return to. On amd64 the RBP chain stores [Caller_RBP,
-// ReturnAddress] at rbp, so the return address is the second word. Used to
-// recover a try_table's enter-continuation from the still-live enter
-// trampoline frame at try_table-enter time (see call_engine.go's
-// firstReturnAddress and ExitCodeTryTableEnter); it reads the exact word
-// UnwindStackForThrow would read for its first frame.
-func FirstReturnAddress(rbp uintptr) uintptr {
-	stackBuf := stackView(rbp, rbp+16)
-	return uintptr(binary.LittleEndian.Uint64(stackBuf[8:]))
-}
-
 // GoCallStackView implements native.goCallStackView.
 func GoCallStackView(stackPointerBeforeGoCall *uint64) []uint64 {
 	//                  (high address)

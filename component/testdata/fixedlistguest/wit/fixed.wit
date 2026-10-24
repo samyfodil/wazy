@@ -1,0 +1,22 @@
+package wazy:fixed@0.1.0;
+
+interface host {
+  record point { x: s32, y: s32 }
+  reverse: func(v: list<u32, 4>) -> list<u32, 4>;
+  greet: func(name: string) -> list<string, 2>;
+  shift: func(ps: list<point, 2>, by: s32) -> list<point, 2>;
+}
+
+interface api {
+  use host.{point};
+  run: func(v: list<u32, 4>) -> list<u32, 4>;
+  names: func(n: list<string, 2>) -> list<string, 2>;
+  points: func(ps: list<point, 2>) -> list<point, 2>;
+  matrix: func(m: list<list<u8, 3>, 2>) -> list<list<u8, 3>, 2>;
+  wide: func(v: list<u64, 20>) -> u64;
+}
+
+world guest {
+  import host;
+  export api;
+}

@@ -1,0 +1,4 @@
+package a:b@1.0.0;
+@unstable(feature = x)
+@unstable(feature = y)
+interface i {}

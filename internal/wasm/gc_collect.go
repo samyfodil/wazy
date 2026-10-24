@@ -3,7 +3,16 @@ package wasm
 import (
 	"sync"
 	"sync/atomic"
+
+	"github.com/samyfodil/wazy/api"
 )
+
+// CollectorEnabled reports whether a runtime with these features hands out references the store's collector
+// reclaims -- struct and array references under the GC proposal, exnrefs under exception handling -- and so
+// whether its engines must register their calls and poll at loop headers.
+func CollectorEnabled(features api.CoreFeatures) bool {
+	return features.IsEnabled(api.CoreFeatureGC) || features.IsEnabled(api.CoreFeatureExceptionHandling)
+}
 
 // This file reclaims the objects on the managed heap that guest code can no longer reach.
 //
@@ -50,8 +59,10 @@ import (
 // GCRoots is what an engine exposes so a collection can find the references one wasm call in flight holds.
 type GCRoots interface {
 	// ScanGCRoots calls visit with every word that could be a reference: the whole value stack, plus
-	// whatever else the engine keeps live values in. It is called only while this execution is parked.
-	ScanGCRoots(visit func(word uint64))
+	// whatever else the engine keeps live values in. It is called only while this execution is parked. It
+	// returns false if some of the call's references could not be offered, in which case the collection
+	// reclaims nothing.
+	ScanGCRoots(visit func(word uint64)) (complete bool)
 }
 
 // GCExecution is one wasm call in flight, registered with a Store so that a collection can find its roots and
@@ -102,8 +113,25 @@ func (g *gcController) init() {
 // RegisterGCExecution registers one wasm call in flight. pause is the flag the engine polls at its parking
 // points, which the collector writes into; it must stay valid until Unregister.
 func (s *Store) RegisterGCExecution(roots GCRoots, pause *uint32) *GCExecution {
+	return s.publishGCExecution(&GCExecution{s: s, roots: roots, pause: pause})
+}
+
+// RegisterGCExecutionInto is RegisterGCExecution registering e, so that an engine making call after call can keep
+// one GCExecution rather than allocate one per call. e must not be registered already. Reusing it after
+// Unregister is safe: once Unregister returns, no collection holds e any more (see the handshake above).
+func (s *Store) RegisterGCExecutionInto(e *GCExecution, roots GCRoots, pause *uint32) *GCExecution {
+	e.s, e.roots, e.pause = s, roots, pause
+	// Only a reused e can still be marked parked, and it must not be once it is published. An atomic store
+	// is a locked instruction on amd64, so skip it in the common case where there is nothing to clear.
+	if e.parked.Load() {
+		e.parked.Store(false)
+	}
+	return s.publishGCExecution(e)
+}
+
+// publishGCExecution makes e, filled in and not parked, visible to collections.
+func (s *Store) publishGCExecution(e *GCExecution) *GCExecution {
 	g := &s.gc
-	e := &GCExecution{s: s, roots: roots, pause: pause}
 	e.cell = g.take(e)
 	// The cell became visible to a collection the moment take filled it, so a collection already scanning
 	// may have this call in hand before it has run an instruction: it must stand still rather than start.
@@ -288,6 +316,11 @@ func (m *ModuleInstance) RegisterGCExecution(roots GCRoots, pause *uint32) *GCEx
 	return m.s.RegisterGCExecution(roots, pause)
 }
 
+// RegisterGCExecutionInto is Store.RegisterGCExecutionInto, reachable from the engines through a module instance.
+func (m *ModuleInstance) RegisterGCExecutionInto(e *GCExecution, roots GCRoots, pause *uint32) *GCExecution {
+	return m.s.RegisterGCExecutionInto(e, roots, pause)
+}
+
 // GCLiveObjects is how many objects the store's heap holds. It exists for tests, which have no other way to
 // see a collection happen: nothing about reclamation is observable through the public API.
 func (m *ModuleInstance) GCLiveObjects() int { return m.s.GC.Live() }
@@ -344,10 +377,18 @@ func (s *Store) collectGarbageLocked() {
 		pending = append(pending, slot.obj)
 	}
 
+	complete := true
 	for c := s.gc.execs.Load(); c != nil; c = c.next {
-		if e := c.exec.Load(); e != nil {
-			e.roots.ScanGCRoots(mark)
+		if e := c.exec.Load(); e != nil && !e.roots.ScanGCRoots(mark) {
+			complete = false
 		}
+	}
+	if !complete {
+		// Something live may be unmarked, so nothing can be freed. Try again after as many allocations as a
+		// collection that freed nothing would have waited for.
+		h.allocs = 0
+		h.nextAt = h.used - len(h.free) + gcInitialThreshold
+		return
 	}
 	s.scanModuleRootsLocked(mark)
 

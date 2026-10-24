@@ -1,0 +1,5 @@
+package a:b;
+world w {
+  type t = own<u>;
+  type u = u8;
+}

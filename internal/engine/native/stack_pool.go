@@ -27,6 +27,9 @@ package native
 // satisfies rather than rounding up, so a bucket can never hand out a buffer
 // smaller than its class promises. See that function's doc comment for why
 // it must NOT be the same function as stackPoolClassForAcquire's ceiling.
+
+import "github.com/samyfodil/wazy/internal/platform"
+
 const (
 	// stackPoolBaseSize is class 0's canonical size. It matches
 	// (*callEngine).requiredInitialStackSize's own default -- the size
@@ -114,13 +117,13 @@ func stackPoolClassForRelease(n int) int {
 func (e *engine) acquireStack(n int) (buf []byte, boxed *[]byte) {
 	class := stackPoolClassForAcquire(n)
 	if class < 0 {
-		return make([]byte, n), nil
+		return platform.MakeStack(n), nil
 	}
 	if v := e.stackPools[class].Get(); v != nil {
 		boxed = v.(*[]byte)
 		return *boxed, boxed
 	}
-	return make([]byte, stackPoolBaseSize<<uint(class)), nil
+	return platform.MakeStack(stackPoolBaseSize << uint(class)), nil
 }
 
 // releaseStack returns stack -- callEngine.stack as of the outermost call's

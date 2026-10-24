@@ -1,0 +1,6 @@
+package a:b;
+interface i {
+  @unstable(feature = active)
+  type t = u32;
+  f: func(x: option<t>);
+}

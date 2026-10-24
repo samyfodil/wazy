@@ -30,7 +30,7 @@ Measured against wazero in the same runs, on the same workloads.
 | Path | wazy vs wazero | What & why |
 | --- | :--: | --- |
 | **Instantiate** | **9.1x** | 1.724 µs vs 15.74 µs, on a 37 KB TinyGo module. |
-| **Interruptible loops** (`WithCloseOnContextDone`) | **12–13x**; +5% vs +75% overhead | On a loop calling a host function each iteration. The check is amortized, not a Go round-trip per iteration; a near-empty compute kernel is the worst case at 1.7–2.4x, tunable with `WithInterruptCheckInterval`. Against `wazero@main`. |
+| **Interruptible loops** (`WithCloseOnContextDone`) | **9.8x** vs wazero with the option on | The check is a register decrement and a predicted-not-taken branch, not a Go round-trip. Enabling it costs wazy **+18%** on `fibonacci` and wazero **+1057%** -- each against its own build with the option off -- which is where the 9.8x head-to-head comes from. A near-empty spin kernel is the worst case at +44%; a host-call-dense loop pays +2% against wazero's +86%. Measured on a core with no uop cache, because code placement swamps smaller differences on Skylake-family parts. Against `wazero@main`. |
 | **Compiled execution** | memory-heavy code leads | `string_manipulation` −18%, `reverse_array` −14%, `base64` −12%, `fibonacci` a wash — the advantage tracks memory-access intensity, not arithmetic. |
 | **Host calls** (Go ↔ Wasm) | a tie | 47.8 ns here, 48.3 ns there, on `HostCall/gomodule/CallWithStack` — the shared baseline both runtimes implement the same way. The win is structural, not per-call. |
 | **Cumulative** | geomean **−17.8%**, B/op **−22.9%** | Across `internal/integration_test/bench`, versus the wazero fork point, with upstream wazero as a control in the same runs — its arms stayed flat. |
@@ -53,30 +53,58 @@ than optimizing it, so the 14.5x is against a path that no longer exists here �
 one. `memory.grow` is opt-in via `WithMemoryCapacityReservePages`; out-of-capacity, shared and
 imported memories keep the safe Go path.
 
-## At scale: a 6.5 MB Rust module, measured by someone else
+## At scale: a 6.8 MB Rust module, measured by someone else
 
 The suites above are kernels. [go-anydoc](https://github.com/xusenlin/go-anydoc) measured two
-orders of magnitude up: a 6.5 MB `wasm32-wasip1` command module (Rust 1.88, `opt-level = 3`,
+orders of magnitude up: a 6.8 MB `wasm32-wasip1` command module (Rust 1.88, `opt-level = 3`,
 `wasm-opt -O3`) run as a single instantiate — stdin in, stdout out, a long stretch of compute
 between. Same `.wasm`, same input, same machine, identical output, `CompileModule` excluded from
 every timing.
 
-| Converting | wazero v1.12.0 | wazy | |
+| Converting | wazero v1.12.0 | wazy v0.3.0 | |
 | --- | :---: | :---: | :---: |
-| 1 KB docx, compiled | 0.4 ms | 0.62 ms | **0.6x — wazero wins** |
-| 5 MB docx body, compiled | 0.86 s | 0.19 s | 4.5x |
-| 7.5 MB PDF, compiled | 3.4 s | 0.75 s | 4.5x |
-| 1 KB docx, interpreted | 3.5 ms | 2.7 ms | 1.3x |
-| 5 MB docx body, interpreted | 11.1 s | 8.6 s | 1.3x |
-| 7.5 MB PDF, interpreted | 41.4 s | 32.6 s | 1.3x |
+| 1 KB docx, compiled | 0.64 ms | 0.13 ms | 5.0x |
+| 5 MB docx body, compiled | 0.98 s | 0.19 s | 5.3x |
+| 7.6 MB PDF, compiled | 1.63 s | 0.33 s | 5.0x |
+| 1 KB docx, interpreted | 2.58 ms | 1.38 ms | 1.9x |
+| 5 MB docx body, interpreted | 11.9 s | 6.8 s | 1.8x |
+| 7.6 MB PDF, interpreted | 20.6 s | 12.1 s | 1.7x |
 
-Long compute is where the compiler wins; a document small enough that instantiation dominates goes
-the other way, and that first row is the crossover.
+**The compiled rows carry `WithCloseOnContextDone(true)`, and most of that 5x is what the option
+costs wazero rather than what its code generator produces.** go-anydoc sets it unconditionally —
+cancelling a context has to interrupt a conversion already running inside the guest — so every run
+of its benchmark carries it, while the suites above never set it. Toggling only that call on the
+5 MB body:
 
-Third-party measurement, not ours, and not reproducible from this repo. Apple M5 Pro (18-core),
-48 GB, macOS 26.5, Go 1.26.1, `CGO_ENABLED=0`, wazy `v0.0.0-20260807033006-cd2607360a17`,
-`anydoc.wasm` 6,542,355 bytes, best of 3 (best of 20 for the small input). Reported in
-[#29](https://github.com/samyfodil/wazy/issues/29).
+| Compiled, 5 MB docx body | wazero v1.12.0 | wazy v0.3.0 | |
+| --- | :---: | :---: | :---: |
+| close-on-context-done on | 0.94 s | 0.19 s | 5.0x |
+| off | 0.14 s | 0.11 s | 1.3x |
+| what the option costs | 6.5x | 1.7x | |
+
+With it off the two compilers are ~30% apart. Against an interpreter the option is free on both, so
+the 1.8x in the interpreted rows is the engines and nothing else.
+[go-pdfium](https://github.com/klippa-app/go-pdfium/blob/main/experimental/BENCHMARKS.md#the-cost-of-close-on-context-done)
+measured the same effect across 5,000 PDFs, at ~4.5x for wazero and ~1.4x for wazy. wazero's
+[#2533](https://github.com/wazero/wazero/pull/2533) solves the same problem on their side; wazy's
+own check became native in [#71](https://github.com/samyfodil/wazy/pull/71), so the 1.7x above is
+what v0.3.0 cost rather than what current `main` costs — there it is 1.04x–1.28x depending on the
+core, against 1.01x–1.10x for wazero with its three in-flight PRs.
+
+The 1 KB compiled row is the one that moved most. The first version of this report had wazy
+*losing* it at 0.6x, because instantiation dominates a document that small and two things made
+instantiation expensive: a funcref memo that scanned a list, which made taking a reference for each
+of the module's 593 element-segment entries quadratic, and a linear memory allocated at exactly its
+initial page count, which made every instantiation of a guest whose allocator grows the heap
+reallocate and copy the whole memory. Both are fixed as of v0.3.0; see
+[OPTIMIZATIONS.md](https://github.com/samyfodil/wazy/blob/main/OPTIMIZATIONS.md).
+
+Third-party measurement, not ours. Apple M5 Pro (18-core), 48 GB, macOS 26.5, Go 1.26.1,
+`CGO_ENABLED=0`, `anydoc.wasm` 6,781,177 bytes (anydoc 0.2.3), min of 3 at `-benchtime 3x`. The
+docx rows reproduce from a checkout of go-anydoc — `go test -run '^$' -bench 'ConvertDOCX|CloseOnContextDone' -benchtime 3x -count 3`,
+since its harness generates its own inputs; the PDF rows need a file of your own, and the wazero
+column is the same benchmarks with the three imports in its `anydoc.go` pointed at wazero.
+Originally reported in issue #29 (since deleted).
 
 ## Against wasmtime
 
@@ -91,8 +119,8 @@ The head-to-head module also carries a three-way comparison against wasmtime —
 - **Use `CallWithStack`** in hot loops; `Call` allocates the result slice.
 - **Reserve memory capacity** with `WithMemoryCapacityReservePages` if the guest grows its memory
   repeatedly.
-- **Tune `WithInterruptCheckInterval`** if you use `WithCloseOnContextDone`. The +5% is a loop that
-  calls a host function each iteration; a near-empty compute kernel pays 1.7–2.4x, and the interval
-  sweep moves that from 26.9x of floor at 0 to 1.74x at 4096.
+- **Know what `WithCloseOnContextDone` costs you.** Real compute pays about +18%, a
+  near-empty spin kernel +44%, and a host-call-dense loop +2%. There is no knob; leave it
+  off unless you need to interrupt a stuck guest.
 - **Do not pool instances.** Instantiation is 1.7 µs and 3.3 KB; a fresh instance per request is
   both faster to reason about and safer than scrubbing a reused one.

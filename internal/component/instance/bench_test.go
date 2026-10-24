@@ -14,10 +14,12 @@ package instance
 // engine's instantiation cost.
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
 	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/internal/component/binary"
 )
 
 // BenchmarkInstantiate measures Instantiate(real_adder) end to end: component
@@ -238,5 +240,30 @@ func BenchmarkCallGreet(b *testing.B) {
 		if got, ok := results[0].(string); !ok || got != "hello, wazy!" {
 			b.Fatalf("greet(%q) = %v, want %q", "wazy", results[0], "hello, wazy!")
 		}
+	}
+}
+
+// BenchmarkTypeCheck measures the component-level type check (ctenv.go) on
+// its own: what an uncached Instantiate pays for it on every call, and a
+// cached one only on the first. real_hello's instantiations each check a
+// shim's imports against what the wasip2 CLI adapter passes it.
+func BenchmarkTypeCheck(b *testing.B) {
+	for _, tc := range []struct {
+		name string
+		wasm []byte
+	}{{"adder", realAdderWasm}, {"hello", realHelloWasm}} {
+		b.Run(tc.name, func(b *testing.B) {
+			comp, err := binary.Decode(bytes.NewReader(tc.wasm))
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if err := typeCheck(comp, &config{}); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }

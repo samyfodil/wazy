@@ -113,6 +113,47 @@ func TestResolveTypeIndexRequiresResolver(t *testing.T) {
 	}
 }
 
+// nilResolver simulates a resolver reporting "not found" (its documented nil
+// contract -- see Resolver's doc), as opposed to mapResolver's panic-on-miss
+// (a test-authoring safety net for an unexpectedly-requested index, not a
+// legitimate "not found" outcome).
+func nilResolver(uint32) binary.TypeDesc { return nil }
+
+// TestResolveTypeIndexNotFound guards against a nil TypeDesc from a resolver
+// silently propagating as a "successful" resolution: before this decoder
+// returned no error and a nil TypeDesc for an unresolvable index (an
+// unresolved type-sort alias, e.g. `use iface.{T}` naming a type this
+// decoder cannot follow), so the nil reached Flatten's default case as the
+// unhelpful "unknown type descriptor: <nil>" instead of naming the missing
+// index -- see resolveTypeRef's identical guard in the instance package.
+func TestResolveTypeIndexNotFound(t *testing.T) {
+	idx := uint32(7)
+	record := binary.RecordDesc{
+		Fields: []binary.RecordField{{Name: "x", Type: binary.TypeRef{TypeIndex: &idx}}},
+	}
+	for name, fn := range map[string]func() (any, error){
+		"Size":      func() (any, error) { return Size(record, nilResolver) },
+		"Alignment": func() (any, error) { return Alignment(record, nilResolver) },
+		"Flatten":   func() (any, error) { return Flatten(record, nilResolver) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := fn()
+			if err == nil {
+				t.Fatal("expected an error for an unresolvable type index, got nil")
+			}
+			if strings.Contains(err.Error(), "<nil>") {
+				t.Errorf("got %q, want a message naming the missing index, not the raw nil descriptor", err)
+			}
+			if !strings.Contains(err.Error(), "type index 7") {
+				t.Errorf("got %q, want it to name type index 7", err)
+			}
+			if !strings.Contains(err.Error(), "not found") {
+				t.Errorf("got %q, want it to say the index was not found", err)
+			}
+		})
+	}
+}
+
 // --- Error propagation through every composite kind ---
 //
 // Each composite embeds a badRef payload so resolveType fails, and we assert

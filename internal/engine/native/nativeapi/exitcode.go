@@ -42,13 +42,6 @@ const (
 	ExitCodeThrow
 	// ExitCodeNullReference is an exit code for a null reference trap (throw_ref with null exnref).
 	ExitCodeNullReference
-	// ExitCodeTryTableEnter is an exit code for entering a try_table block.
-	// The catch clause info is encoded in the upper bits. The dispatch loop
-	// saves the current SP/FP/returnAddress as a try handler checkpoint.
-	ExitCodeTryTableEnter
-	// ExitCodeTryTableLeave is an exit code for leaving a try_table block.
-	// The dispatch loop pops the most recent try handler.
-	ExitCodeTryTableLeave
 	// ExitCodeGCCheck is the shared exit code for the GC proposal's runtime type checks: ref.test,
 	// ref.cast, and the subtype-aware call_indirect check. Which one is meant is the trampoline's mode
 	// operand; see gcCheckMode.
@@ -115,12 +108,8 @@ func (e ExitCode) String() string {
 		return "throw"
 	case ExitCodeNullReference:
 		return "null_reference"
-	case ExitCodeTryTableEnter:
-		return "try_table_enter"
 	case ExitCodeGCCheck:
 		return "gc_check"
-	case ExitCodeTryTableLeave:
-		return "try_table_leave"
 	}
 	panic("TODO")
 }
@@ -143,8 +132,19 @@ func GoFunctionIndexFromExitCode(exitCode ExitCode) int {
 	return int(exitCode >> 8)
 }
 
-// TryTableIDFromExitCode extracts the try-table ID from an ExitCodeTryTableEnter
-// exit code. Uses the same encoding as GoFunctionIndexFromExitCode (upper 24 bits).
-func TryTableIDFromExitCode(exitCode ExitCode) int {
-	return GoFunctionIndexFromExitCode(exitCode)
-}
+// TerminationFuel is how many fuel ticks a guest gets before compiled code has to
+// return to Go. Under WithCloseOnContextDone a tick is spent at every function
+// entry and every loop back-edge (see ssa.OpcodeFuelDec), and running out exits
+// with ExitCodeCheckModuleExitCode, which does the authoritative closed check,
+// yields the P so the cancellation watchdog can run, and refills the counter.
+//
+// The number sets both the tax on running code and the worst-case cancellation
+// latency, and the two pull in opposite directions. At 8192 the tax is already
+// invisible: a build with the counter raised to 1<<26, so that a whole benchmark
+// runs without ever reaching this exit, measured the same as 8192 on fibonacci,
+// which is the shape that runs out most often (about 330 times per call). What is
+// left is the latency, 8192 back-edges or function entries -- microseconds for the
+// tight loops that are the hard case, and still bounded for loops whose bodies are
+// slow. Powers of two are not required; this one is a round number in the flat
+// part of that trade.
+const TerminationFuel = 8192

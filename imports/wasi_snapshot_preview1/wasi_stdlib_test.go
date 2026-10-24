@@ -3,13 +3,16 @@ package wasi_snapshot_preview1_test
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	_ "embed"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -542,6 +545,72 @@ func testStdin(t *testing.T, bin []byte) {
 	_, _ = stdoutReader.Read(buf)
 	require.Equal(t, "foo", string(buf))
 	<-ch
+}
+
+// Test_ProtocPlugin reconstructs https://github.com/tetratelabs/wazero/issues/2420,
+// a Go 1.25 wasip1 protoc plugin that crashed only on Windows. protoc runs a
+// plugin with OS pipes for stdin, stdout and stderr, writes the request while
+// the plugin starts, and reads the response while it writes. The guest gets the
+// configuration a wasip1 plugin runner gives it: real clocks, the host root
+// mounted, and the pipes as its stdio.
+func Test_ProtocPlugin(t *testing.T) {
+	if wasmGo == nil {
+		t.Skip("wasip1 Go guest not compiled")
+	}
+
+	stdinR, stdinW, err := os.Pipe()
+	require.NoError(t, err)
+	stdoutR, stdoutW, err := os.Pipe()
+	require.NoError(t, err)
+	stderrR, stderrW, err := os.Pipe()
+	require.NoError(t, err)
+	defer func() {
+		for _, f := range []*os.File{stdinR, stdinW, stdoutR, stdoutW, stderrR, stderrW} {
+			f.Close()
+		}
+	}()
+
+	// Larger than any pipe buffer, so both sides block mid-transfer.
+	req := bytes.Repeat([]byte("message Foo { string bar = 1; }\n"), 1<<15)
+	go func() {
+		_, _ = stdinW.Write(req)
+		_ = stdinW.Close()
+	}()
+	stdout := make(chan []byte, 1)
+	go func() {
+		b, _ := io.ReadAll(stdoutR)
+		stdout <- b
+	}()
+	stderr := make(chan []byte, 1)
+	go func() {
+		b, _ := io.ReadAll(stderrR)
+		stderr <- b
+	}()
+
+	r := wazy.NewRuntimeWithConfig(testCtx, runtimeCfg)
+	defer r.Close(testCtx)
+	wasi_snapshot_preview1.MustInstantiate(testCtx, r)
+
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	_, err = r.InstantiateWithConfig(testCtx, wasmGo, wazy.NewModuleConfig().
+		WithArgs("protoc-gen-test", "plugin").
+		WithEnv("PWD", cwd).
+		WithStdin(stdinR).
+		WithStdout(stdoutW).
+		WithStderr(stderrW).
+		WithSysNanosleep().
+		WithSysNanotime().
+		WithSysWalltime().
+		WithRandSource(rand.Reader).
+		WithFSConfig(wazy.NewFSConfig().WithDirMount(filepath.VolumeName(cwd)+string(filepath.Separator), "/")))
+	require.NoError(t, stdoutW.Close())
+	require.NoError(t, stderrW.Close())
+	gotStdout, gotStderr := <-stdout, <-stderr
+	require.NoError(t, err, "guest stderr:\n%s", gotStderr)
+
+	require.Equal(t, string(bytes.ToUpper(req)), string(gotStdout))
+	require.Equal(t, fmt.Sprintf("plugin: %d bytes\n", len(req)), string(gotStderr))
 }
 
 func Test_LargeStdout(t *testing.T) {

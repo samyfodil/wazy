@@ -1,0 +1,6 @@
+package a:b;
+interface i {
+  @unstable(feature = x)
+  resource r;
+  f: func(x: own<r>);
+}

@@ -1899,17 +1899,40 @@ and as of Go 1.20, these assembler functions are considered as _unsafe_ for asyn
 From the Go runtime point of view, the execution of runtime-generated machine codes is considered as a part of
 that trampoline function. Therefore, runtime-generated machine code is also correctly considered unsafe for async preemption.
 
-## Why context cancellation is handled in Go code rather than native code
+## Why context cancellation is checked in native code
 
 Since [wazero v1.0.0-pre.9](https://github.com/tetratelabs/wazero/releases/tag/v1.0.0-pre.9), the runtime
 supports integration with Go contexts to interrupt execution after a timeout, or in response to explicit cancellation.
-This support is internally implemented as a special opcode `builtinFunctionCheckExitCode` that triggers the execution of
-a Go function (`ModuleInstance.FailIfClosed`) that atomically checks a sentinel value at strategic points in the code.
+It was long implemented as a Go round-trip — an opcode that called `ModuleInstance.FailIfClosed` — rather than
+[a direct read of the sentinel from native code][native_check], on the grounds that native code never preempts:
+checking the flag without leaving the native world would let a guest spin while the goroutine meant to *set* that
+flag never gets scheduled, so cancellation could never take place.
 
-[It _is indeed_ possible to check the sentinel value directly, without leaving the native world][native_check], thus sparing some cycles;
-however, because native code never preempts (see section above), this may lead to a state where the other goroutines
-never get the chance to run, and thus never get the chance to set the sentinel value, effectively preventing
-cancellation from taking place.
+The premise is right; what it settles is *where the scheduler gets its turn*, not where the check lives. wazy keeps
+both native. Compiled code carries a **termination fuel counter** in a register reserved out of the allocatable set
+(`fuelVReg` in each backend's `abi.go`), spends one tick at every function entry and every loop back-edge, and
+branches out when it reaches zero. The check is therefore two instructions and no memory reference: a decrement and
+a branch that reads the decrement's own flags.
+
+Running out is what returns control to Go, and the Go side (`ExitCodeCheckModuleExitCode` in
+`internal/engine/native/call_engine.go`) does three things there: the authoritative atomic `FailIfClosed`, a
+`runtime.Gosched` so the cancellation watchdog can actually be scheduled, and a refill of the counter. The yield is
+the load-bearing part — it is what an earlier design bought by bracketing every entry into compiled code in
+`runtime.entersyscall` / `runtime.exitsyscall`, at the price of that pair on every host-call return.
+
+Two properties of the counter matter more than they look:
+
+- **Function entry, not just loop back-edges.** `loop` is the only backward branch *within* a function, so a
+  loop-free exponential call tree and `return_call` self-recursion both run unboundedly without crossing one. See
+  `TestEnsureTerminationWithoutLoops`.
+- **Preserved across an exit to Go, never refilled by one.** The register is a member of each backend's
+  `calleeSavedVRegs`, so a Go call saves and restores the live count; only the out-of-fuel exit writes a fresh one.
+  Refilling on every exit would let a guest calling a host function inside a loop spend forever without ever
+  reaching a check. See `TestEnsureTerminationHostCallLoop`.
+
+Cancellation latency is therefore bounded by the interval (`nativeapi.TerminationFuel`) rather than immediate: the
+flag is read when the fuel runs out, not at every back-edge. The exit re-checks after its `Gosched`, so a close that
+lands during the yield is seen on the same trip rather than the next one.
 
 [native_check]: https://github.com/tetratelabs/wazero/issues/1409
 

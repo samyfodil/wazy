@@ -31,6 +31,25 @@ func TestPoll_Windows(t *testing.T) {
 		require.EqualErrno(t, sys.ENOSYS, errno)
 	})
 
+	t.Run("a pipe whose writer closed is readable, not an error", func(t *testing.T) {
+		r, w, err := os.Pipe()
+		require.NoError(t, err)
+		defer r.Close()
+		require.NoError(t, w.Close())
+
+		fds := []pollFd{{fd: r.Fd(), events: _POLLIN}}
+		n, errno := _poll(fds, 0)
+		require.EqualErrno(t, 0, errno)
+		require.Equal(t, 1, n)
+		require.Equal(t, int16(_POLLIN), fds[0].revents)
+
+		// And the read reports EOF.
+		buf := make([]byte, 4)
+		rn, errno := readFd(r.Fd(), buf)
+		require.EqualErrno(t, 0, errno)
+		require.Zero(t, rn)
+	})
+
 	t.Run("peekNamedPipe should report the correct state of incoming data in the pipe", func(t *testing.T) {
 		r, w, err := os.Pipe()
 		require.NoError(t, err)

@@ -121,17 +121,18 @@ func TestPoll_BlockAlwaysReadyNoOp(t *testing.T) {
 
 func TestPoll_BlockCtxCancel(t *testing.T) {
 	p := newTestPoll(time.Now())
-	// A 10s timer, cancelled immediately, must return promptly (not hang).
-	res, _ := p.subscribeInstant(context.Background(), []abi.Value{uint64(p.base.Add(10 * time.Second).Sub(p.base))})
+	// An hour-long timer, cancelled immediately, must return before it is
+	// due: woken by ctx, not by the timer, however slow the machine.
+	res, _ := p.subscribeInstant(context.Background(), []abi.Value{uint64(p.base.Add(time.Hour).Sub(p.base))})
 	rep := res[0].(uint32)
+	deadline, _ := p.deadlineOf(rep)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	start := time.Now()
 	if _, err := p.block(ctx, []abi.Value{rep}); err != nil {
 		t.Fatal(err)
 	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("cancelled block took %v, want prompt return", elapsed)
+	if returnedAt := time.Now(); !returnedAt.Before(deadline) {
+		t.Fatalf("cancelled block returned at %v, not before the timer's deadline %v", returnedAt, deadline)
 	}
 }
 
@@ -149,11 +150,22 @@ func TestPoll_PollReadyImmediate(t *testing.T) {
 	}
 }
 
+// TestPoll_PollBlocksUntilTimer pins that poll, with nothing ready, sleeps
+// until the earliest timer and reports exactly the timers then due.
+//
+// The later timer is an hour out, not a few milliseconds: poll's wakeup can
+// be late by however long the scheduler takes, and a later timer only tens
+// of milliseconds after the sooner one was due too by the time a loaded
+// machine woke the test -- which then saw two timers ready, not one. An
+// hour cannot pass that way, so exactly one is due. ctx bounds the wait
+// instead: a poll that slept to the later deadline is woken by it with
+// nothing due, which fails as surely as the near timer once did.
 func TestPoll_PollBlocksUntilTimer(t *testing.T) {
 	p := newTestPoll(time.Now())
-	// Two timers: 60ms and 20ms. poll should block ~20ms and report the sooner.
-	r1, _ := p.subscribeDuration(context.Background(), []abi.Value{uint64(60 * time.Millisecond)})
-	r2, _ := p.subscribeDuration(context.Background(), []abi.Value{uint64(20 * time.Millisecond)})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	r1, _ := p.subscribeDuration(ctx, []abi.Value{uint64(time.Hour)})
+	r2, _ := p.subscribeDuration(ctx, []abi.Value{uint64(20 * time.Millisecond)})
 	h1 := pollHandle(t, p, r1[0].(uint32))
 	soonerRep := r2[0].(uint32)
 	h2 := pollHandle(t, p, soonerRep)
@@ -161,17 +173,20 @@ func TestPoll_PollBlocksUntilTimer(t *testing.T) {
 	if !ok {
 		t.Fatal("sooner timer deadline not found")
 	}
-	res, err := p.poll(context.Background(), []abi.Value{[]abi.Value{h1, h2}})
+	res, err := p.poll(ctx, []abi.Value{[]abi.Value{h1, h2}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if returnedAt := time.Now(); returnedAt.Before(soonerDeadline) {
 		t.Fatalf("poll returned at %v, before sooner timer deadline %v", returnedAt, soonerDeadline)
 	}
+	if ctx.Err() != nil {
+		t.Fatal("poll slept past the sooner timer, until ctx woke it")
+	}
 	out := res[0].([]abi.Value)
-	// The 20ms timer (index 1) must be ready; the 60ms one (index 0) not yet.
+	// The sooner timer (index 1) must be ready; the later one (index 0) not.
 	if len(out) != 1 || out[0].(uint32) != 1 {
-		t.Fatalf("poll ready indices = %v, want [1] (only the 20ms timer due)", out)
+		t.Fatalf("poll ready indices = %v, want [1] (only the sooner timer due)", out)
 	}
 }
 
@@ -245,10 +260,15 @@ func TestPoll_DropAlwaysReadyPollable(t *testing.T) {
 	}
 }
 
+// TestSleepUntilPast pins that a deadline already past returns without
+// waiting. A bound on the elapsed time would measure the scheduler too, so
+// ctx bounds the wait instead: a sleep that waited out the hour's distance is
+// woken by it, which then has an error.
 func TestSleepUntilPast(t *testing.T) {
-	start := time.Now()
-	wasiSleepUntil(context.Background(), time.Now().Add(-time.Hour))
-	if time.Since(start) > 10*time.Millisecond {
-		t.Fatalf("past deadline should return immediately, took %v", time.Since(start))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	wasiSleepUntil(ctx, time.Now().Add(-time.Hour))
+	if ctx.Err() != nil {
+		t.Fatal("past deadline waited, until ctx woke it")
 	}
 }

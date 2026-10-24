@@ -239,7 +239,7 @@ func TestGraph_ExportNotFuncOrInstance(t *testing.T) {
 	comp := decodeRealHello(t)
 	comp.Exports[0].ExternType = 0x02 // value
 	_, err := runGraph(t, comp)
-	requireErrContains(t, err, "only func and instance exports")
+	requireErrContains(t, err, "is a value export (sort 0x2); only func, instance, type, core module and component exports")
 }
 
 func TestGraph_BindInstanceExport_ImportedInstanceDirectly(t *testing.T) {
@@ -294,11 +294,16 @@ func TestGraph_BindInstanceExport_NestedComponentOutOfRange(t *testing.T) {
 	requireErrContains(t, err, "out of range of the 1-entry component index space")
 }
 
+// A nested component exported whole that is NOT a pure shim -- here
+// real_hello's shim given a canon of its own -- is no longer seen through:
+// it is instantiated like any component with code (reexposeWholeInstance).
+// This one then fails as such a component does when it re-exports a func it
+// imports, which only a shim may.
 func TestGraph_BindInstanceExport_NotPureShim(t *testing.T) {
 	comp := decodeRealHello(t)
 	comp.NestedComponents[0].Canons = append(comp.NestedComponents[0].Canons, binary.Canon{})
 	_, err := runGraph(t, comp)
-	requireErrContains(t, err, "not a pure re-export shim")
+	requireErrContains(t, err, "nested component instance 10: component/instance: component export `run` is a reexport of an imported function which is not implemented")
 }
 
 // TestGraph_BindInstanceExport_MemberNotFuncSkipped proves a non-func member
@@ -706,7 +711,10 @@ func TestDiscoverNeededFuncTypes_BadImportTypeIndex(t *testing.T) {
 		0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type section: 1 func type () -> ()
 		0x02, 0x07, 0x01, 0x01, 'm', 0x01, 'f', 0x00, 0x05, // import m.f func, typeidx 5
 	}
-	comp := &binary.Component{CoreModules: []binary.CoreModule{{Offset: 0, Size: len(coreBytes)}}}
+	comp := &binary.Component{
+		CoreModules:   []binary.CoreModule{{Offset: 0, Size: len(coreBytes)}},
+		CoreInstances: []binary.CoreInstance{{Kind: 0x00, ModuleIdx: 0}}, // only an instantiated module is planned
+	}
 
 	r := wazy.NewRuntime(context.Background())
 	defer r.Close(context.Background())

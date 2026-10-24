@@ -1,0 +1,5 @@
+package a:b;
+interface i {
+  type t = u8;
+  type x = map<own<t>, u8>;
+}

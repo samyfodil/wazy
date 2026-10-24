@@ -50,10 +50,13 @@ engine.go:427-454), the EH tables, the PC→function mappers. **No new placement
 trampoline, or relocation machinery** — this is the key reason A is tractable: it
 is the existing pipeline with one component swapped.
 
-**The selection seam already exists.** `WithInterruptCheckInterval` folds a compile
-parameter into `module.ID` (engine.go:275, the H6 seam), so a distinct value
-yields a distinct cached `compiledModule` and the entire cache/ID/fileCache path
-is unchanged. A `WithCompileTier(tier0)` flag folds in the same way.
+**The selection seam is a known shape.** `AssignModuleID` already folds compile
+parameters (listener presence, `ensureTermination`) into `module.ID`, so a
+distinct value yields a distinct cached `compiledModule` and the entire
+cache/ID/fileCache path is unchanged. `WithInterruptCheckInterval` used to be a
+third such parameter and demonstrated the mechanism end to end before it was
+removed (see H6 in `OPTIMIZATIONS.md`); a `WithCompileTier(tier0)` flag would
+fold in the same way.
 
 **The one real new component:** a stripped `Allocator` implementation behind the
 existing generic interface (`backend.Machine.RegAlloc` → `Allocator.DoAllocation`).

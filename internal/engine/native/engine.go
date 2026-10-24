@@ -36,7 +36,11 @@ type (
 		compiledModules map[wasm.ModuleID]*compiledModuleWithCount
 		// sortedCompiledModules is a list of compiled modules sorted by the initial address of the executable.
 		sortedCompiledModules []*compiledModule
-		mux                   sync.RWMutex
+		// gcRootsReserve is the size of the region at the bottom of every wasm stack that GC safepoints spill
+		// into: enough for the largest safepoint of any module this engine has instantiated, since a call can
+		// reach functions of any of them. See callEngine.gcRootsReserve.
+		gcRootsReserve atomic.Int32
+		mux            sync.RWMutex
 		// sharedFunctions is compiled functions shared by all modules.
 		sharedFunctions *sharedFunctions
 		// setFinalizer defaults to runtime.SetFinalizer, but overridable for tests.
@@ -80,10 +84,6 @@ type (
 		throwAllocTrampolineAddress *byte
 		// throwTrampolineAddress is the address of the throw/throw_ref trampoline function.
 		throwTrampolineAddress *byte
-		// tryTableEnterAddress is the address of try_table enter trampoline.
-		tryTableEnterAddress *byte
-		// tryTableLeaveAddress is the address of try_table leave trampoline.
-		tryTableLeaveAddress *byte
 		// throwTransferRegisterRestoreAddress is the address of the tiny
 		// callable blob (backend.Machine.CompileThrowTransferRegisterRestore)
 		// that restores callee-saved registers from
@@ -116,12 +116,7 @@ type (
 		funcrefSlotsOnce sync.Once
 		// maxGCRoots is the most values any safepoint in this module writes; see
 		// frontend.Compiler.MaxGCRoots.
-		maxGCRoots int
-		// interruptCheckInterval is the (power-of-two) loop-header interrupt-check
-		// interval this module was compiled under. Seeds execCtx.interruptCheckMask
-		// (= interval-1) per callEngine so the amortized check's mask is a runtime
-		// value rather than a baked constant, allowing per-run/per-loop retuning.
-		interruptCheckInterval    uint64
+		maxGCRoots                int
 		listeners                 []api.FunctionListener
 		listenerBeforeTrampolines []*byte
 		listenerAfterTrampolines  []*byte
@@ -166,6 +161,12 @@ type sourceMap struct {
 
 var _ wasm.Engine = (*engine)(nil)
 
+// gcSafepoints reports whether this engine's code polls the collector at loop headers and spills its roots
+// there, and so whether its calls register with the store's collector.
+func (e *engine) gcSafepoints() bool {
+	return wasm.CollectorEnabled(e.enabledFeatures)
+}
+
 // NewEngine returns the implementation of wasm.Engine.
 func NewEngine(ctx context.Context, enabledFeatures api.CoreFeatures, fc filecache.Cache) wasm.Engine {
 	e := &engine{
@@ -186,11 +187,35 @@ func (e *engine) HasCompiledModule(module *wasm.Module, listeners []api.Function
 		defer nativeapi.PerfMap.Unlock()
 	}
 	_, ok, err := e.getCompiledModule(module, listeners, ensureTermination)
+	if ok {
+		releaseFunctionBodies(module)
+	}
 	return ok, err
+}
+
+// releaseFunctionBodies drops module's function bodies once this engine has
+// native code for it, from a compile or from either cache. Nothing reads them
+// after that, and for a large module they are tens of megabytes, kept alive
+// for as long as the CompiledModule is. A module whose compiled code is
+// deleted can't be instantiated again, so it never needs them back.
+func releaseFunctionBodies(module *wasm.Module) {
+	if module.IsHostModule {
+		return
+	}
+	for i := range module.CodeSection {
+		module.CodeSection[i].Body = nil
+	}
 }
 
 // CompileModule implements wasm.Engine.
 func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listeners []api.FunctionListener, ensureTermination bool) (err error) {
+	// Deferred first so that it runs last, after a recovered panic has set err.
+	defer func() {
+		if err == nil {
+			releaseFunctionBodies(module)
+		}
+	}()
+
 	// The compiler asserts with panics rather than threading errors through
 	// every tree-matching site, so a shape it cannot lower arrives here as a
 	// panic. The module reaching this point has already passed validation, so
@@ -320,17 +345,10 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 	}
 
 	withListener := len(listeners) > 0
-	// The interval is validated at the API boundary (runtime.CompileModule) and
-	// folded into module.ID, so this read is consistent with that module's ID.
-	// It configures loop lowering below; a re-lower is a fresh CompileModule
-	// under a context carrying a different interval (a distinct module.ID, hence
-	// a distinct cached variant).
-	interruptCheckInterval := wasm.InterruptCheckIntervalFromContext(ctx)
 	cm := &compiledModule{
 		offsets: nativeapi.NewModuleContextOffsetData(module, withListener), parent: e, module: module,
-		ensureTermination:      ensureTermination,
-		interruptCheckInterval: uint64(interruptCheckInterval),
-		executables:            &executables{},
+		ensureTermination: ensureTermination,
+		executables:       &executables{},
 	}
 
 	importedFns, localFns := int(module.ImportFunctionCount), len(module.FunctionSection)
@@ -363,8 +381,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 	if workers := api.GetCompilationWorkers(ctx); workers <= 1 {
 		// Compile with a single goroutine.
 		fe := frontend.NewFrontendCompiler(module, ssaBuilder, &cm.offsets, ensureTermination, withListener, needSourceInfo)
-		fe.SetGCEnabled(e.enabledFeatures.IsEnabled(api.CoreFeatureGC))
-		fe.SetInterruptCheckInterval(interruptCheckInterval)
+		fe.SetGCEnabled(e.gcSafepoints())
 
 		for i := range module.CodeSection {
 			if nativeapi.DeterministicCompilationVerifierEnabled {
@@ -426,8 +443,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 				fe := frontend.NewFrontendCompiler(
 					module, ssaBuilder, &cm.offsets, ensureTermination, withListener, needSourceInfo).
 					WithTryTableMetadata(sharedTTM)
-				fe.SetInterruptCheckInterval(interruptCheckInterval)
-				fe.SetGCEnabled(e.enabledFeatures.IsEnabled(api.CoreFeatureGC))
+				fe.SetGCEnabled(e.gcSafepoints())
 
 				for {
 					if err := ctx.Err(); err != nil {
@@ -568,8 +584,17 @@ func (r *engineRelocator) appendFunction(
 	ehEntries []nativeapi.EhEntry,
 	frameSize int64,
 ) {
-	// Align 16-bytes boundary.
-	r.totalSize = (r.totalSize + 15) &^ 15
+	// Align 16-bytes boundary -- or 32 when the amd64 backend is avoiding Intel
+	// erratum SKX102, since its NOP padding is computed against code-buffer
+	// offsets and only equals the final address modulo 32 if every function
+	// starts on a 32-byte boundary. See amd64/jcc_erratum.go.
+	//
+	// This is the compile-side layout only: a cache hit replays the
+	// functionOffsets it was serialized with, and the padding decision is part
+	// of the cache key (fileCacheKey hashes platform.CpuFeatures), so the two
+	// can never disagree.
+	align := functionAlignmentMask()
+	r.totalSize = (r.totalSize + align) &^ align
 	cm.functionOffsets[fnum] = r.totalSize
 
 	needSourceInfo := module.DWARFLines != nil
@@ -633,6 +658,20 @@ func (r *engineRelocator) appendFunction(
 			r.totalSize += r.callTrampolineIslandSize
 		}
 	}
+}
+
+// functionAlignmentMask returns the mask that rounds a function's offset in the
+// executable up to its required alignment.
+//
+// 16 bytes is the default, and stays the default everywhere the JCC-erratum
+// workaround is not in force -- including arm64, deliberately: its instructions
+// are a fixed 4 bytes wide and it has no DSB erratum to dodge, so 32-byte
+// function alignment there would only grow every module for nothing.
+func functionAlignmentMask() int {
+	if platform.JCCErratumWorkaroundEnabled() {
+		return 31
+	}
+	return 15
 }
 
 func (e *engine) compileLocalWasmFunction(
@@ -973,9 +1012,23 @@ func checkAddrInBytes(addr uintptr, b []byte) bool {
 	return uintptr(unsafe.Pointer(&b[0])) <= addr && addr <= uintptr(unsafe.Pointer(&b[len(b)-1]))
 }
 
+// noteGCRoots grows the engine's root region to fit a module whose largest safepoint spills n words: the words,
+// plus the header, 16-byte aligned so the go-call margin above the region keeps the alignment the trampoline
+// wants. Even n == 0 gets the header, which is where a safepoint of a module instantiated later finds that the
+// region is too small for it.
+func (e *engine) noteGCRoots(n int) {
+	want := int32((8*n + 8 + 15) &^ 15)
+	for {
+		cur := e.gcRootsReserve.Load()
+		if cur >= want || e.gcRootsReserve.CompareAndSwap(cur, want) {
+			return
+		}
+	}
+}
+
 // NewModuleEngine implements wasm.Engine.
 func (e *engine) NewModuleEngine(m *wasm.Module, mi *wasm.ModuleInstance) (wasm.ModuleEngine, error) {
-	me := &moduleEngine{gcEnabled: e.enabledFeatures.IsEnabled(api.CoreFeatureGC)}
+	me := &moduleEngine{gcEnabled: e.gcSafepoints()}
 
 	// Note: imported functions are resolved in moduleEngine.ResolveImportedFunction.
 	me.importedFunctions = make([]importedFunction, m.ImportFunctionCount)
@@ -986,10 +1039,9 @@ func (e *engine) NewModuleEngine(m *wasm.Module, mi *wasm.ModuleInstance) (wasm.
 	}
 	me.parent = compiled
 	me.module = mi
-	if me.gcEnabled && compiled.maxGCRoots > 0 {
-		// The spilled words plus their count, 16-byte aligned so the go-call margin above the region keeps
-		// the alignment the trampoline wants. See callEngine.gcRootsReserve.
-		me.gcRootsReserve = int32((8*compiled.maxGCRoots + 8 + 15) &^ 15)
+	if me.gcEnabled {
+		e.noteGCRoots(compiled.maxGCRoots)
+		me.gcRootsReserve = &e.gcRootsReserve
 	}
 	me.listeners = compiled.listeners
 
@@ -1098,22 +1150,6 @@ func (e *engine) compileSharedFunctions() {
 		}, false))
 
 	be.Init()
-	addTrampoline(10,
-		machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeTryTableEnter, &ssa.Signature{
-			// exec context, catch clause info (encoded)
-			Params:  []ssa.Type{ssa.TypeI64, ssa.TypeI64},
-			Results: []ssa.Type{},
-		}, false))
-
-	be.Init()
-	addTrampoline(11,
-		machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeTryTableLeave, &ssa.Signature{
-			// exec context
-			Params:  []ssa.Type{ssa.TypeI64},
-			Results: []ssa.Type{},
-		}, false))
-
-	be.Init()
 	addTrampoline(12, machine.CompileThrowTransferRegisterRestore())
 
 	be.Init()
@@ -1153,10 +1189,6 @@ func (e *engine) compileSharedFunctions() {
 	offset += sizes[8]
 	fns.throwTrampolineAddress = &fns.executable[offset]
 	offset += sizes[9]
-	fns.tryTableEnterAddress = &fns.executable[offset]
-	offset += sizes[10]
-	fns.tryTableLeaveAddress = &fns.executable[offset]
-	offset += sizes[11]
 	fns.throwTransferRegisterRestoreAddress = &fns.executable[offset]
 	offset += sizes[12]
 	fns.gcCheckAddress = &fns.executable[offset]
@@ -1172,8 +1204,6 @@ func (e *engine) compileSharedFunctions() {
 		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.memoryNotifyAddress)), uint64(sizes[7]), "memory_notify_trampoline")
 		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.throwAllocTrampolineAddress)), uint64(sizes[8]), "throw_alloc_trampoline")
 		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.throwTrampolineAddress)), uint64(sizes[9]), "throw_trampoline")
-		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.tryTableEnterAddress)), uint64(sizes[10]), "try_table_enter_trampoline")
-		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.tryTableLeaveAddress)), uint64(sizes[11]), "try_table_leave_trampoline")
 		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.throwTransferRegisterRestoreAddress)), uint64(sizes[12]), "throw_transfer_register_restore")
 		nativeapi.PerfMap.AddEntry(uintptr(unsafe.Pointer(fns.gcCheckAddress)), uint64(sizes[13]), "gc_check_trampoline")
 	}

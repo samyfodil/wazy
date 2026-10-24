@@ -377,6 +377,13 @@ func newCompiler(enabledFeatures api.CoreFeatures, callFrameStackSizeInUint64 in
 	return c, nil
 }
 
+// CompileFunction compiles the function at codeIndex (an index into the code
+// section) out of order. Used by lazy lowering.
+func (c *compiler) CompileFunction(codeIndex int) (*compilationResult, error) {
+	c.next = codeIndex
+	return c.Next()
+}
+
 // Next returns the next compilationResult for this compiler.
 func (c *compiler) Next() (*compilationResult, error) {
 	funcIndex := c.next
@@ -433,6 +440,15 @@ func (c *compiler) compile(sig *wasm.FunctionType, body []byte, localTypes []was
 		blockType: c.sig,
 		kind:      controlFrameKindFunction,
 	})
+
+	// A loop back-edge is not the only way a guest runs unboundedly. A loop-free
+	// call graph (f calls g twice, g calls h twice, ...) performs 2^depth calls at
+	// a fixed stack depth, and return_call self-recursion runs forever at a fixed
+	// depth without growing the stack. Neither ever crosses a `loop`. Checking on
+	// entry closes both, and covers every call form since they all arrive here.
+	if c.ensureTermination {
+		c.emit(newOperationBuiltinFunctionCheckExitCode())
+	}
 
 	// Now, enter the function body.
 	for !c.controlFrames.empty() && c.pc < uint64(len(c.body)) {
@@ -555,7 +571,7 @@ operatorSwitch:
 		}
 		// A loop header is also where execution parks for a collection: a guest cannot run unboundedly
 		// without passing one, so this is what bounds how long a collection waits.
-		if c.enabledFeatures.IsEnabled(api.CoreFeatureGC) {
+		if wasm.CollectorEnabled(c.enabledFeatures) {
 			c.emit(newOperationGCSafepoint())
 		}
 	case wasm.OpcodeIf:

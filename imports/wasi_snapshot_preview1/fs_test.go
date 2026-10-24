@@ -2605,8 +2605,18 @@ func Test_fdRenumber(t *testing.T) {
 			require.EqualErrno(t, 0, errno)
 			require.Equal(t, int32(dirFD), dirFDAssigned)
 
+			fromFile, _ := fsc.LookupFile(int32(tc.from))
 			requireErrnoResult(t, tc.expectedErrno, mod, wasip1.FdRenumberName, uint64(tc.from), uint64(tc.to))
 			require.Equal(t, tc.expectedLog, "\n"+log.String())
+
+			// A renumber moves the file: to now holds what from did, and from is free.
+			if tc.expectedErrno == wasip1.ErrnoSuccess && tc.from != tc.to {
+				toFile, ok := fsc.LookupFile(int32(tc.to))
+				require.True(t, ok)
+				require.Equal(t, fromFile, toFile)
+				_, ok = fsc.LookupFile(int32(tc.from))
+				require.False(t, ok)
+			}
 		})
 	}
 }

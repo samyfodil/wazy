@@ -48,6 +48,13 @@ A `wasi:cli/command` component's entry point is a versioned interface export:
 _, err := inst.Call(ctx, "wasi:cli/run@0.2.3#run")
 ```
 
+An interface nested in an exported instance — an instance exported whole whose component exports
+interfaces of its own — is named by the path of export names leading to it, joined by `#`:
+
+```go
+res, err := inst.CallExport(ctx, "outer#component:adder/calc", "add", uint32(2), uint32(3))
+```
+
 ## How values map
 
 | WIT | Go |
@@ -118,6 +125,11 @@ opts := []component.Option{
 }
 ```
 
+A host that drives an exported interface mints the handles it passes in with
+`inst.ResourcesFor(iface)`: the handle table of the component that defines the interface, which is
+not the root's when the root only re-exposes it — a composition's inner component, or a supplied
+one.
+
 :::danger
 A `WithResourceTag` **without** a matching `WithHostResourceDtor` leaks: nothing runs when the
 guest drops the handle. If several interfaces share a tag — the WASI `input-stream` /
@@ -133,6 +145,36 @@ wazy instantiates the whole graph — which is why a rustc `wasi:cli/command` ru
 prints `hello world` with no `wasm-tools` preprocessing on your side.
 
 With a [compile cache](../caching/), re-instantiating that entire graph costs 350.5 µs.
+
+## Component imports
+
+A component can import a *component*: `(import "x" (component ...))`. It is a definition, not an
+instance — the importer instantiates it itself, with arguments of its own. `wac compose
+--import-dependencies` emits one per dependency it does not embed. Supply the binary with
+`WithComponentImport`:
+
+```go
+inst, err := component.Instantiate(ctx, r, composedWasm,
+	component.WithComponentImport("unlocked-dep=<wazy:provider>", providerWasm),
+	component.WithComponentImport("unlocked-dep=<wazy:consumer>", consumerWasm))
+```
+
+Before anything runs, each supplied component is checked against the type its import declares, by
+the Component Model's subtyping rules: it may import less and export more, what it does import and
+export must match, and its resources are lined up with the declared ones. A mismatch fails
+`Instantiate` with the reason — `missing import named …`, `type mismatch for export …`. Every
+instantiation's arguments are checked against what the instantiated component imports the same
+way, whether or not anything was supplied — core modules included: a module passed or imported
+where a module type is declared is checked by core subtyping, in wasm-tools' words. With a compile
+cache, the supplied component's decode and compilation are cached, and a check that passed is not
+repeated.
+
+Core modules and components are values like any other: a nested component can import a core
+module or a component its parent passes it, and a component can export one or alias one out of an
+instance it instantiated. At the root, only a component import can be supplied.
+
+Wasmtime refuses any component import of the root component; wazy runs one given
+`WithComponentImport` and otherwise refuses it as not supplied.
 
 ## Async exports
 

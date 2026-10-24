@@ -1,0 +1,5 @@
+package a:b;
+interface i {
+  type k = u32;
+  type x = map<k, u8>;
+}

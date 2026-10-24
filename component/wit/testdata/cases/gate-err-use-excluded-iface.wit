@@ -1,0 +1,9 @@
+package a:b;
+@unstable(feature = active)
+interface i {
+  @unstable(feature = active)
+  type t = u32;
+}
+interface j {
+  use i.{t};
+}

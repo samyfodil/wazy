@@ -101,7 +101,8 @@ def build_type(spec, by_name):
         return prim_map[spec["prim"]]()
 
     if kind == "list":
-        return ref.ListType(build_type(spec["elem"], by_name))
+        # "len" makes it a fixed-length list<T, N> (ListType's maybe_length).
+        return ref.ListType(build_type(spec["elem"], by_name), spec.get("len"))
 
     if kind == "ref":
         return by_name[spec["name"]]
@@ -124,6 +125,9 @@ def build_type(spec, by_name):
         ok = build_type(spec["ok"], by_name) if spec.get("ok") is not None else None
         err = build_type(spec["err"], by_name) if spec.get("err") is not None else None
         return ref.ResultType(ok, err)
+
+    if kind == "map":
+        return ref.MapType(build_type(spec["key"], by_name), build_type(spec["value"], by_name))
 
     if kind == "tuple":
         elems = [build_type(e, by_name) for e in spec["elems"]]
@@ -175,6 +179,8 @@ def convert_value(raw_value, t):
             return chr(int(raw_value))
         case ref.StringType():
             return to_string_triple(str(raw_value))
+        case ref.MapType(k=k_t, v=v_t):
+            return [{"0": convert_value(k, k_t), "1": convert_value(v, v_t)} for k, v in raw_value]
         case ref.ListType(t=elem_t):
             return [convert_value(v, elem_t) for v in raw_value]
         case ref.RecordType(fields=fields):

@@ -1,0 +1,93 @@
+accessor-bad-id|invalid character in identifier '_'|accessor-bad-id.wit:1:31
+attr-key-feature|expected `feature`, found `features`|attr-key-feature.wit:1:24
+attr-key|expected `version`, found `versio`|attr-key.wit:1:21
+attr-unknown|unknown attribute `foo`|attr-unknown.wit:1:15
+bidi|Input contains bidirectional override codepoint EscapeUnicode(EscapeIterInner('\u{202e}'))|bidi.wit:1:17
+bom|OK
+char-backslash|unexpected character '\\'|char-backslash.wit:1:14
+char-quote|unexpected character '\''|char-quote.wit:1:14
+char-unexpected-cr|unexpected character '\r'|char-unexpected-cr.wit:1:13
+char-unexpected|unexpected character '$'|char-unexpected.wit:1:14
+comment-nested|OK
+comment-unterminated|unterminated block comment|comment-unterminated.wit:1:14
+control|Control code '\u{7}'|control.wit:1:14
+crlf-error|expected a type, found ';'|crlf-error.wit:3:16
+crlf|OK
+decl-item|expected `world`, `interface` or `use`, found keyword `type`|decl-item.wit:1:14
+deprecated|Codepoint EscapeUnicode(EscapeIterInner('\u{149}')) is discouraged by Unicode|deprecated.wit:1:17
+describe|expected an identifier or string, found '}'|describe.wit:1:32
+doc-unterminated|unterminated block comment|doc-unterminated.wit:1:1
+eof-iface-name|expected an identifier or string, found eof|eof-iface-name.wit:1:23
+func-bad-id|invalid character in identifier '_'|func-bad-id.wit:1:28
+header-semicolon-bad|unexpected character '$'|header-semicolon-bad.wit:1:12
+id-case|invalid character in identifier 'B'|id-case.wit:1:24
+id-dashes|identifiers must have characters between '-'s|id-dashes.wit:1:24
+id-digit|OK
+id-explicit|OK
+id-leading-dash|expected an identifier or string, found `-`|id-leading-dash.wit:1:24
+id-percent-digit|identifiers must have characters between '-'s|id-percent-digit.wit:1:24
+id-percent|identifiers must have characters between '-'s|id-percent.wit:1:24
+id-underscore|invalid character in identifier '_'|id-underscore.wit:1:24
+id-unicode|invalid character in identifier 'é'|id-unicode.wit:1:24
+iface-item|expected `type`, `resource` or `func`, found keyword `import`|iface-item.wit:1:28
+import-int|expected an identifier or string, found an integer|import-int.wit:1:31
+keywords|OK
+list-size-eof|expected fixed-length, found eof|list-size-eof.wit:1:45
+list-size|invalid list size: number too large to fit in target type|list-size.wit:1:46
+method-bad-id|invalid character in identifier '_'|method-bad-id.wit:1:41
+nest-package-deep|package nesting too deep|nest-package-deep.wit:102:1
+nest-type-deep|nest-type-deep.wit:1:537: type nesting too deep|
+nest-type-eof|nest-type-eof.wit:1:537: type nesting too deep|
+nested-attrs|cannot place attributes on nested packages|nested-attrs.wit:1:38
+resource-eof|expected `constructor` or identifier, found eof|resource-eof.wit:1:41
+resource-item|expected `constructor` or identifier, found keyword `static`|resource-item.wit:1:41
+str-char|invalid string character '\t'|str-char.wit:1:43
+str-eof|unexpected end of file|str-eof.wit:1:45
+str-escape-eof|unexpected end of file|str-escape-eof.wit:1:43
+str-escape|invalid string escape 'q'|str-escape.wit:1:43
+str-hex-digit|invalid hex digit 'z'|str-hex-digit.wit:1:44
+str-hex-eof|unexpected end of file|str-hex-eof.wit:1:44
+str-hexnum-eof|unexpected end of file|str-hexnum-eof.wit:1:46
+str-nbsp-escape|invalid string escape '\u{a0}'|str-nbsp-escape.wit:1:43
+str-newline|invalid string character '\n'|str-newline.wit:1:43
+str-ok|OK
+str-too-big|number is too big to fit in a u32|str-too-big.wit:1:53
+str-u-brace|expected character '{'|str-u-brace.wit:1:44
+str-u-close|expected character '}'|str-u-close.wit:1:47
+str-u-eof|unexpected end of file|str-u-eof.wit:1:44
+str-u-hex|invalid hex digit 'z'|str-u-hex.wit:1:45
+str-underscore|trailing underscore in number|str-underscore.wit:1:45
+str-unicode-big|invalid unicode value 0x110000|str-unicode-big.wit:1:43
+str-unicode-surrogate|invalid unicode value 0xd800|str-unicode-surrogate.wit:1:43
+str-utf8|invalid UTF-8: invalid utf-8 sequence of 1 bytes from index 0|str-utf8.wit:1:41
+type-eof|expected a type, found eof|type-eof.wit:1:40
+type-keyword|expected a type, found keyword `record`|type-keyword.wit:1:41
+use-empty|OK
+use-eof|expected '}', found eof|use-eof.wit:1:39
+utf8-e0|invalid UTF-8: invalid utf-8 sequence of 1 bytes from index 0|utf8-e0.wit:1:41
+utf8-e1-incomplete|invalid UTF-8: incomplete utf-8 byte sequence from index 0|utf8-e1-incomplete.wit:1:41
+utf8-e1-third|invalid UTF-8: invalid utf-8 sequence of 2 bytes from index 0|utf8-e1-third.wit:1:41
+utf8-ed|invalid UTF-8: invalid utf-8 sequence of 1 bytes from index 0|utf8-ed.wit:1:41
+utf8-f0|invalid UTF-8: invalid utf-8 sequence of 1 bytes from index 0|utf8-f0.wit:1:41
+utf8-f1-fourth|invalid UTF-8: invalid utf-8 sequence of 3 bytes from index 0|utf8-f1-fourth.wit:1:41
+utf8-f4|invalid UTF-8: invalid utf-8 sequence of 1 bytes from index 0|utf8-f4.wit:1:41
+utf8-incomplete-2|invalid UTF-8: incomplete utf-8 byte sequence from index 0|utf8-incomplete-2.wit:1:41
+utf8-invalid-2|invalid UTF-8: invalid utf-8 sequence of 1 bytes from index 0|utf8-invalid-2.wit:1:41
+utf8-valid-multi|OK
+ver-build-char|unexpected character '_' after build metadata|ver-build-char.wit:1:13
+ver-build-dot|empty identifier segment in build metadata|ver-build-dot.wit:1:13
+ver-build-empty|OK
+ver-build-underscore|empty identifier segment in build metadata|ver-build-underscore.wit:1:13
+ver-leading-zero|invalid leading zero in major version number|ver-leading-zero.wit:1:13
+ver-minor-zero|invalid leading zero in minor version number|ver-minor-zero.wit:1:13
+ver-missing|expected '.', found ';'|ver-missing.wit:1:16
+ver-ok|OK
+ver-overflow|value of major version number exceeds u64::MAX|ver-overflow.wit:1:13
+ver-patch-zero|invalid leading zero in patch version number|ver-patch-zero.wit:1:13
+ver-pre-char|unexpected character '_' after pre-release identifier|ver-pre-char.wit:1:13
+ver-pre-dot|empty identifier segment in pre-release identifier|ver-pre-dot.wit:1:13
+ver-pre-empty-then|expected '{', found '.'|ver-pre-empty-then.wit:1:20
+ver-pre-empty|OK
+ver-pre-underscore|empty identifier segment in pre-release identifier|ver-pre-underscore.wit:1:13
+ver-pre-zero|invalid leading zero in pre-release identifier|ver-pre-zero.wit:1:13
+world-item|expected `import`, `export`, `include`, `use`, or type definition, found keyword `func`|world-item.wit:1:24

@@ -1,0 +1,36 @@
+// include ... with renaming every kind of world item that has a name of its
+// own: a func, an interface written inline, a resource (with its funcs), a
+// type and a use -- and renaming what an earlier include already renamed.
+package a:b;
+
+interface i { type t = u32; }
+
+world a {
+  import x: interface {
+    use i.{t};
+    resource r {
+      constructor();
+      m: func();
+    }
+    f: func(y: r, z: t);
+  }
+  export e: interface { g: func(); }
+  import h: func();
+  export k: func();
+  resource res {
+    constructor();
+    m: func();
+    sm: static func() -> res;
+  }
+  record p { q: u32 }
+  use i.{t as tt};
+  import uses: func(a: res, b: p, c: tt) -> option<res>;
+}
+
+world b {
+  include a with { x as y, e as e2, h as h2, k as k2, res as res2, p as p2, tt as t3 }
+}
+
+world c {
+  include b with { y as z, res2 as res3, p2 as p3 }
+}

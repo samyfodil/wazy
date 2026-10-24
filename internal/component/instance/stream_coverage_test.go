@@ -231,6 +231,7 @@ func TestElemContainsResourceHandle_AllShapes(t *testing.T) {
 		{"own", binary.OwnDesc{ResourceType: 1}, true},
 		{"borrow", binary.BorrowDesc{ResourceType: 1}, true},
 		{"list", binary.ListDesc{Element: ownRef}, true},
+		{"fixed-length list", binary.FixedListDesc{Element: ownRef, Length: 2}, true},
 		{"option", binary.OptionDesc{Element: ownRef}, true},
 		{"record", binary.RecordDesc{Fields: []binary.RecordField{{Name: "f", Type: ownRef}}}, true},
 		{"tuple", binary.TupleDesc{Elements: []binary.TypeRef{ownRef}}, true},
@@ -268,6 +269,9 @@ func TestTypeContainsAsyncValueNested(t *testing.T) {
 		t.Error("a top-level stream must not trip the nested ceiling")
 	}
 	// Nested inside a list: trips.
+	if !typeContainsAsyncValueNested(binary.FixedListDesc{Element: stRef, Length: 2}, resolve, 0) {
+		t.Error("a fixed-length list of streams nests one")
+	}
 	if !typeContainsAsyncValueNested(binary.ListDesc{Element: stRef}, resolve, 0) {
 		t.Error("list<stream<...>> should trip the nested ceiling")
 	}

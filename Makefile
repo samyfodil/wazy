@@ -10,8 +10,10 @@ all_testdata  := $(wildcard testdata/* */testdata/* */*/testdata/* */*/testdata/
 all_testing   := $(wildcard internal/testing/* internal/testing/*/* internal/testing/*/*/*)
 all_examples  := $(wildcard examples/* examples/*/* examples/*/*/* examples/*/*/*/* examples/*/*/*/*/* */*/example/* */*/example/*/* */*/example/*/*/*)
 all_it        := $(wildcard internal/integration_test/* internal/integration_test/*/* internal/integration_test/*/*/*)
-# main_sources exclude any test or example related code
-main_sources  := $(wildcard $(filter-out %_test.go benchmarks/% $(all_testdata) $(all_testing) $(all_examples) $(all_it), $(all_sources)))
+all_samples   := $(wildcard build-images/*/sample/*.go build-images/*/sample/*/*.go)
+# main_sources exclude any test or example related code, and the build-image
+# samples, which are their own modules
+main_sources  := $(wildcard $(filter-out %_test.go benchmarks/% $(all_samples) $(all_testdata) $(all_testing) $(all_examples) $(all_it), $(all_sources)))
 # main_packages collect the unique main source directories (sort will dedupe).
 # Paths need to all start with ./, so we do that manually vs foreach which strips it.
 main_packages := $(sort $(foreach f,$(dir $(main_sources)),$(if $(findstring ./,$(f)),./,./$(f))))
@@ -407,6 +409,53 @@ build.spectest.multi_memory:
 	@cd $(spectest_multi_memory_testdata_dir) && for f in `find . -name '*.wast'`; do \
 		wast2json --enable-multi-memory --debug-names $$f; \
 	done
+
+# Component-model cases from the component-model repository and the Bytecode Alliance, fetched at a
+# pinned commit rather than copied in. Each .wast is one file, so it is curled; wit-parser's UI suite
+# is a tree, so it comes out of that commit's tarball. What the tests read is generated from them with
+# wasm-tools 1.262.0, the version their expected results were written against. None of it is
+# committed, so CI builds it once and hands it to every test job, as with the 3.0 spectest corpus.
+component_model_version := d095e2f60ddae1f9a1e9b1e2fb547ec1114da677
+wasm_tools_tests_version := 2e6b2d6db499501a91a0b88a848435345bef1f66
+component_model_raw := https://raw.githubusercontent.com/WebAssembly/component-model/$(component_model_version)/test
+wasm_tools_raw := https://raw.githubusercontent.com/bytecodealliance/wasm-tools/$(wasm_tools_tests_version)/tests/cli/component-model
+wasmtime_raw := https://raw.githubusercontent.com/bytecodealliance/wasmtime/$(wasmtime_version)/tests/misc_testsuite/component-model
+# <directory the tests read>=<.wast it is generated from>
+component_wast_suites := \
+	internal/component/binary/testdata/wast/component-model-max-value-size=$(component_model_raw)/validation/max-value-size.wast \
+	internal/component/binary/testdata/wast/wasm-tools-max-value-size=$(wasm_tools_raw)/max-value-size.wast \
+	internal/component/instance/testdata/wast/fixed_length_lists=$(wasmtime_raw)/fixed_length_lists.wast \
+	internal/component/instance/testdata/wast/wasm-tools-fixed-length-lists=$(wasm_tools_raw)/fixed-length-lists.wast \
+	internal/component/instance/testdata/wast/cm-validation-instantiation=$(component_model_raw)/validation/instantiation.wast \
+	internal/component/instance/testdata/wast/cm-validation-resources=$(component_model_raw)/validation/resources.wast \
+	internal/component/instance/testdata/wast/wasm-tools-instantiate=$(wasm_tools_raw)/instantiate.wast \
+	internal/component/instance/testdata/wast/wasm-tools-virtualize=$(wasm_tools_raw)/virtualize.wast \
+	internal/component/instance/testdata/wast/wasmtime-nested=$(wasmtime_raw)/nested.wast \
+	internal/component/instance/testdata/wast/wasmtime-restrictions=$(wasmtime_raw)/restrictions.wast
+wit_parser_ui_dir := component/wit/testdata/wit-parser/ui
+
+.PHONY: build.component_testdata
+build.component_testdata:
+	@for s in $(component_wast_suites); do \
+		dir=$${s%%=*} url=$${s#*=} f=$${s##*/}; \
+		rm -rf $$dir && mkdir -p $$dir \
+		&& curl -sfSL --retry 5 --retry-all-errors $$url -o $$dir/$$f \
+		&& (cd $$dir && wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f) || exit 1; \
+	done
+	@rm -rf $(wit_parser_ui_dir) && mkdir -p $(wit_parser_ui_dir)
+	@curl -sfSL --retry 5 --retry-all-errors \
+		https://codeload.github.com/bytecodealliance/wasm-tools/tar.gz/$(wasm_tools_tests_version) \
+		| tar -xzf - -C $(wit_parser_ui_dir) --strip-components 5 \
+			wasm-tools-$(wasm_tools_tests_version)/crates/wit-parser/tests/ui
+	@sh component/wit/testdata/gen-oracle.sh
+
+# Builds one build image and tests it: its samples are built in the image,
+# validated, and run under wazy from this checkout. See build-images/README.md.
+#   make build-image-test IMAGE_LANG=rust
+.PHONY: build-image-test
+build-image-test:
+	@test -n "$(IMAGE_LANG)" || (echo "usage: make build-image-test IMAGE_LANG=<$$(ls build-images/*/Dockerfile | cut -d/ -f2 | tr '\n' ' ')>"; exit 2)
+	build-images/test.sh $(IMAGE_LANG)
 
 .PHONY: test
 test:

@@ -113,16 +113,15 @@ defer cancel()
 _, err := fn.Call(ctx)   // returns once the deadline passes, even mid-loop
 ```
 
-The compiler inserts an amortized check rather than a Go round-trip per iteration, which is why a
-realistic loop — one calling a host function each iteration — pays about **+5%** where the naive
-shape costs +75%.
+The compiler decrements a reserved register and takes a predicted-not-taken branch at every
+function entry and every loop back-edge, rather than calling back into Go. When the counter
+runs out, one trip through Go does the authoritative check and yields to the scheduler. Real
+compute pays about **+18%** with the option on, where wazero pays +1057%.
 
-That figure is workload-dependent, and the worst case is worth knowing before you switch this on: a
-near-empty compute kernel (a spin loop, or fibonacci's inner recursion) has no body to amortize the
-per-iteration counter against and pays **1.7–2.4×**. Tune the trade with
-`WithInterruptCheckInterval(ctx, n)` — a larger interval is cheaper and coarser — but note that
-sweeping the interval from 0 to 4096 on those kernels only takes them from 26.9× to 1.74× of the
-uninterrupted floor: the residual is counter bookkeeping no interval removes.
+The worst case is a near-empty compute kernel (a bare spin loop), which has no body to dilute
+the per-back-edge decrement against and pays **+44%**. A host-call-dense loop, which used to
+be the expensive shape, now pays **+2%**. There is no knob; if your workload is a tight
+compute kernel and you do not need `Kill()` to interrupt a stuck guest, leave the option off.
 
 ## What wazy does not do
 

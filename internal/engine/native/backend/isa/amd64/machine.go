@@ -472,6 +472,28 @@ func (m *machine) LowerConditionalBranch(b *ssa.Instruction) {
 	target := ssaBlockLabel(m.c.SSABuilder().BasicBlock(targetBlkID))
 	cvalDef := m.c.ValueDefinition(cval)
 
+	if m.c.MatchInstr(cvalDef, ssa.OpcodeFuelDec) {
+		// 		sub $1, %fuel
+		// 		jle  <slow>          ;; or jg, for a Brz
+		//
+		// SUB already sets the flags the branch needs, so the decrement and the test
+		// are the same instruction: the whole termination check is these two. Signed
+		// LE rather than Z so that a counter driven below zero -- which a re-entry
+		// restoring an already-exhausted value can do -- keeps taking the slow path
+		// instead of wrapping around for another 2^64 ticks.
+		//
+		// Matched here rather than through condBranchMatches because that list is
+		// shared with lowerSelect, which must never see a FuelDec.
+		m.insert(m.allocateInstr().asAluRmiR(aluRmiROpcodeSub, newOperandImm32(1), fuelVReg, true))
+		cc := condLE
+		if b.Opcode() == ssa.OpcodeBrz {
+			cc = condNLE
+		}
+		m.insert(m.allocateInstr().asJmpIf(cc, newOperandLabel(target)))
+		cvalDef.Instr.MarkLowered()
+		return
+	}
+
 	switch m.c.MatchInstrOneOf(cvalDef, condBranchMatches[:]) {
 	case ssa.OpcodeIcmp:
 		cvalInstr := cvalDef.Instr
@@ -548,6 +570,12 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 	switch op := instr.Opcode(); op {
 	case ssa.OpcodeBrz, ssa.OpcodeBrnz, ssa.OpcodeJump, ssa.OpcodeBrTable:
 		panic("BUG: branching instructions are handled by LowerBranches")
+	case ssa.OpcodeFuelDec:
+		// The frontend only ever emits this immediately before the branch that
+		// consumes it, so LowerConditionalBranch above has already folded it in and
+		// marked it lowered. Reaching here means something moved it away from its
+		// branch, which would leave the decrement without its test.
+		panic("BUG: FuelDec must be folded into the conditional branch consuming it")
 	case ssa.OpcodeReturn:
 		panic("BUG: return must be handled by backend.Compiler")
 	case ssa.OpcodeIconst, ssa.OpcodeF32const, ssa.OpcodeF64const: // Constant instructions are inlined.
@@ -2162,10 +2190,12 @@ func (m *machine) lowerCall(si *ssa.Instruction) {
 
 	if isDirectCall {
 		call := m.allocateInstr().asCall(directCallee, calleeABI)
+		call.mayThrow = si.MayThrow()
 		m.insert(call)
 	} else {
 		ptrOp := m.getOperand_Mem_Reg(m.c.ValueDefinition(indirectCalleePtr))
 		callInd := m.allocateInstr().asCallIndirect(ptrOp, calleeABI)
+		callInd.mayThrow = si.MayThrow()
 		m.insert(callInd)
 	}
 
@@ -2433,11 +2463,23 @@ func (m *machine) Encode(ctx context.Context) (err error) {
 		fnIndex = nativeapi.GetCurrentFunctionIndex(ctx)
 	}
 
+	// Intel erratum SKX102 (see jcc_erratum.go). Hoisted out of the loop: the
+	// answer cannot change while one function is being encoded, and on every
+	// architecture but amd64 it folds away to a constant false.
+	padJCC := platform.JCCErratumWorkaroundEnabled()
+	extentSink := InstrExtentSink
+	var extents []InstrExtent
+
 	m.labelResolutionPends = m.labelResolutionPends[:0]
 	for _, pos := range m.orderedSSABlockLabelPos {
 		offset := int64(len(*bufPtr))
 		pos.binaryOffset = offset
 		for cur := pos.begin; cur != pos.end.next; cur = cur.next {
+			if padJCC {
+				// Before the offset is taken: a label bound to a padded branch
+				// must name the NOPs, which fall through into it.
+				jccErratumPad(m.c, int64(len(*bufPtr)), cur)
+			}
 			offset := int64(len(*bufPtr))
 
 			switch cur.kind {
@@ -2456,6 +2498,9 @@ func (m *machine) Encode(ctx context.Context) (err error) {
 					labelResolutionPend{instr: cur, instrOffset: offset, imm32Offset: int64(len(*bufPtr)) - 4},
 				)
 			}
+			if extentSink != nil {
+				extents = append(extents, InstrExtent{Offset: offset, Length: int64(len(*bufPtr)) - offset})
+			}
 		}
 
 		if nativeapi.PerfMapEnabled {
@@ -2463,6 +2508,11 @@ func (m *machine) Encode(ctx context.Context) (err error) {
 			size := int64(len(*bufPtr)) - offset
 			nativeapi.PerfMap.AddModuleEntry(fnIndex, offset, uint64(size), fmt.Sprintf("%s:::::%s", fn, l))
 		}
+	}
+
+	if extentSink != nil {
+		// Before the constant pool, which is data and never executed.
+		extentSink(extents, *bufPtr)
 	}
 
 	for i := range m.consts {
@@ -2974,6 +3024,13 @@ func (m *machine) lowerFcopysign(instr *ssa.Instruction) {
 	rn := m.getOperand_Reg(yDef)
 	rd := m.c.VRegOf(instr.Return())
 
+	// Work on copies of both operands. Masking them in place, or masking the
+	// constants with them as sources, let the register allocator place a mask
+	// in a register that still held a live operand (e.g. a call result in
+	// xmm0), clobbering it. See https://github.com/wazero/wazero/issues/2555.
+	tmpX := m.copyToTmp(rm.reg())
+	tmpY := m.copyToTmp(rn.reg())
+
 	// Clear the non-sign bits of src via AND with the mask.
 	var opAnd, opOr sseOpcode
 	var signMask uint64
@@ -2989,18 +3046,18 @@ func (m *machine) lowerFcopysign(instr *ssa.Instruction) {
 	m.lowerFconst(nonSignBitReg, ^signMask, _64)
 
 	// Extract the sign bits of rn.
-	and := m.allocateInstr().asXmmRmR(opAnd, rn, signBitReg)
+	and := m.allocateInstr().asXmmRmR(opAnd, newOperandReg(signBitReg), tmpY)
 	m.insert(and)
 
 	// Clear the sign bit of dst via AND with the non-sign bit mask.
-	xor := m.allocateInstr().asXmmRmR(opAnd, rm, nonSignBitReg)
+	xor := m.allocateInstr().asXmmRmR(opAnd, newOperandReg(nonSignBitReg), tmpX)
 	m.insert(xor)
 
 	// Copy the sign bits of src to dst via OR.
-	or := m.allocateInstr().asXmmRmR(opOr, newOperandReg(signBitReg), nonSignBitReg)
+	or := m.allocateInstr().asXmmRmR(opOr, newOperandReg(tmpY), tmpX)
 	m.insert(or)
 
-	m.copyTo(nonSignBitReg, rd)
+	m.copyTo(tmpX, rd)
 }
 
 func (m *machine) lowerBitcast(instr *ssa.Instruction) {

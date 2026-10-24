@@ -153,6 +153,20 @@ func loadValue(mem []byte, ptr uint32, t bintype.TypeDesc, resolve Resolver) (Va
 		}
 		return loadList(mem, ptr, elemType, resolve)
 
+	case bintype.MapDesc:
+		// map<K,V> despecializes to list<tuple<K,V>> (see MapDesc's doc): a
+		// map's Value is a []Value of two-element [key, value] pairs, the same
+		// shape loadList already produces for a list of tuples.
+		return loadList(mem, ptr, mapElemType(desc), resolve)
+
+	case bintype.FixedListDesc:
+		// In place: n elements back to back where the list sits.
+		elemType, err := resolveType(&desc.Element, resolve)
+		if err != nil {
+			return nil, err
+		}
+		return loadAnyListFromRange(mem, ptr, desc.Length, elemType, resolve)
+
 	case bintype.RecordDesc:
 		return loadRecord(mem, ptr, desc, resolve)
 
@@ -735,6 +749,16 @@ func storeValue(mem []byte, ptr uint32, t bintype.TypeDesc, v Value, align uint3
 			return mem, err
 		}
 		return storeList(mem, ptr, v, elemType, resolve, realloc)
+
+	case bintype.MapDesc:
+		return storeList(mem, ptr, v, mapElemType(desc), resolve, realloc)
+
+	case bintype.FixedListDesc:
+		elemType, err := resolveType(&desc.Element, resolve)
+		if err != nil {
+			return mem, err
+		}
+		return storeFixedList(mem, ptr, v, desc.Length, elemType, resolve, realloc)
 
 	case bintype.RecordDesc:
 		return storeRecord(mem, ptr, v, desc, resolve, realloc)

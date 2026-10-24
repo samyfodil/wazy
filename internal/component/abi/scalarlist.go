@@ -205,10 +205,7 @@ func storeScalarList(mem []byte, v Value, prim string, realloc Realloc) (ptr, n 
 		if !ok {
 			return 0, 0, mem, false, nil
 		}
-		ptr, n, mem, err = encodeScalarList(mem, in, 1, 1, realloc, func(b []byte, e int8) error {
-			b[0] = byte(e)
-			return nil
-		})
+		ptr, n, mem, err = encodeScalarList(mem, in, 1, 1, realloc, putS8)
 		return ptr, n, mem, true, err
 
 	case "bool":
@@ -216,13 +213,7 @@ func storeScalarList(mem []byte, v Value, prim string, realloc Realloc) (ptr, n 
 		if !ok {
 			return 0, 0, mem, false, nil
 		}
-		ptr, n, mem, err = encodeScalarList(mem, in, 1, 1, realloc, func(b []byte, e bool) error {
-			b[0] = 0
-			if e {
-				b[0] = 1
-			}
-			return nil
-		})
+		ptr, n, mem, err = encodeScalarList(mem, in, 1, 1, realloc, putBool)
 		return ptr, n, mem, true, err
 
 	case "u16":
@@ -230,10 +221,7 @@ func storeScalarList(mem []byte, v Value, prim string, realloc Realloc) (ptr, n 
 		if !ok {
 			return 0, 0, mem, false, nil
 		}
-		ptr, n, mem, err = encodeScalarList(mem, in, 2, 2, realloc, func(b []byte, e uint16) error {
-			binary.LittleEndian.PutUint16(b, e)
-			return nil
-		})
+		ptr, n, mem, err = encodeScalarList(mem, in, 2, 2, realloc, putU16)
 		return ptr, n, mem, true, err
 
 	case "s16":
@@ -241,10 +229,7 @@ func storeScalarList(mem []byte, v Value, prim string, realloc Realloc) (ptr, n 
 		if !ok {
 			return 0, 0, mem, false, nil
 		}
-		ptr, n, mem, err = encodeScalarList(mem, in, 2, 2, realloc, func(b []byte, e int16) error {
-			binary.LittleEndian.PutUint16(b, uint16(e))
-			return nil
-		})
+		ptr, n, mem, err = encodeScalarList(mem, in, 2, 2, realloc, putS16)
 		return ptr, n, mem, true, err
 
 	case "u32":
@@ -252,10 +237,7 @@ func storeScalarList(mem []byte, v Value, prim string, realloc Realloc) (ptr, n 
 		if !ok {
 			return 0, 0, mem, false, nil
 		}
-		ptr, n, mem, err = encodeScalarList(mem, in, 4, 4, realloc, func(b []byte, e uint32) error {
-			binary.LittleEndian.PutUint32(b, e)
-			return nil
-		})
+		ptr, n, mem, err = encodeScalarList(mem, in, 4, 4, realloc, putU32)
 		return ptr, n, mem, true, err
 
 	case "s32":
@@ -263,10 +245,7 @@ func storeScalarList(mem []byte, v Value, prim string, realloc Realloc) (ptr, n 
 		if !ok {
 			return 0, 0, mem, false, nil
 		}
-		ptr, n, mem, err = encodeScalarList(mem, in, 4, 4, realloc, func(b []byte, e int32) error {
-			binary.LittleEndian.PutUint32(b, uint32(e))
-			return nil
-		})
+		ptr, n, mem, err = encodeScalarList(mem, in, 4, 4, realloc, putS32)
 		return ptr, n, mem, true, err
 
 	case "u64":
@@ -274,10 +253,7 @@ func storeScalarList(mem []byte, v Value, prim string, realloc Realloc) (ptr, n 
 		if !ok {
 			return 0, 0, mem, false, nil
 		}
-		ptr, n, mem, err = encodeScalarList(mem, in, 8, 8, realloc, func(b []byte, e uint64) error {
-			binary.LittleEndian.PutUint64(b, e)
-			return nil
-		})
+		ptr, n, mem, err = encodeScalarList(mem, in, 8, 8, realloc, putU64)
 		return ptr, n, mem, true, err
 
 	case "s64":
@@ -285,10 +261,7 @@ func storeScalarList(mem []byte, v Value, prim string, realloc Realloc) (ptr, n 
 		if !ok {
 			return 0, 0, mem, false, nil
 		}
-		ptr, n, mem, err = encodeScalarList(mem, in, 8, 8, realloc, func(b []byte, e int64) error {
-			binary.LittleEndian.PutUint64(b, uint64(e))
-			return nil
-		})
+		ptr, n, mem, err = encodeScalarList(mem, in, 8, 8, realloc, putS64)
 		return ptr, n, mem, true, err
 
 	case "f32":
@@ -296,10 +269,7 @@ func storeScalarList(mem []byte, v Value, prim string, realloc Realloc) (ptr, n 
 		if !ok {
 			return 0, 0, mem, false, nil
 		}
-		ptr, n, mem, err = encodeScalarList(mem, in, 4, 4, realloc, func(b []byte, e float32) error {
-			binary.LittleEndian.PutUint32(b, math.Float32bits(e))
-			return nil
-		})
+		ptr, n, mem, err = encodeScalarList(mem, in, 4, 4, realloc, putF32)
 		return ptr, n, mem, true, err
 
 	case "f64":
@@ -307,10 +277,7 @@ func storeScalarList(mem []byte, v Value, prim string, realloc Realloc) (ptr, n 
 		if !ok {
 			return 0, 0, mem, false, nil
 		}
-		ptr, n, mem, err = encodeScalarList(mem, in, 8, 8, realloc, func(b []byte, e float64) error {
-			binary.LittleEndian.PutUint64(b, math.Float64bits(e))
-			return nil
-		})
+		ptr, n, mem, err = encodeScalarList(mem, in, 8, 8, realloc, putF64)
 		return ptr, n, mem, true, err
 
 	case "char":
@@ -318,19 +285,79 @@ func storeScalarList(mem []byte, v Value, prim string, realloc Realloc) (ptr, n 
 		if !ok {
 			return 0, 0, mem, false, nil
 		}
-		ptr, n, mem, err = encodeScalarList(mem, in, 4, 4, realloc, func(b []byte, e rune) error {
-			if e < 0 || e >= 0x110000 {
-				return fmt.Errorf("store char: value %d out of range", e)
-			}
-			if e >= 0xD800 && e <= 0xDFFF {
-				return fmt.Errorf("store char: surrogate half %d not allowed", e)
-			}
-			binary.LittleEndian.PutUint32(b, uint32(e))
-			return nil
-		})
+		ptr, n, mem, err = encodeScalarList(mem, in, 4, 4, realloc, putChar)
 		return ptr, n, mem, true, err
 	}
 	return 0, 0, mem, false, nil
+}
+
+// The element encoders a typed slice is stored with: one element's bytes
+// each, written in place. Shared by the dynamic list (storeScalarList) and
+// the fixed-length one (storeFixedScalars), so the two cannot encode an
+// element differently.
+
+func putS8(b []byte, e int8) error {
+	b[0] = byte(e)
+	return nil
+}
+
+func putBool(b []byte, e bool) error {
+	b[0] = 0
+	if e {
+		b[0] = 1
+	}
+	return nil
+}
+
+func putU16(b []byte, e uint16) error {
+	binary.LittleEndian.PutUint16(b, e)
+	return nil
+}
+
+func putS16(b []byte, e int16) error {
+	binary.LittleEndian.PutUint16(b, uint16(e))
+	return nil
+}
+
+func putU32(b []byte, e uint32) error {
+	binary.LittleEndian.PutUint32(b, e)
+	return nil
+}
+
+func putS32(b []byte, e int32) error {
+	binary.LittleEndian.PutUint32(b, uint32(e))
+	return nil
+}
+
+func putU64(b []byte, e uint64) error {
+	binary.LittleEndian.PutUint64(b, e)
+	return nil
+}
+
+func putS64(b []byte, e int64) error {
+	binary.LittleEndian.PutUint64(b, uint64(e))
+	return nil
+}
+
+func putF32(b []byte, e float32) error {
+	binary.LittleEndian.PutUint32(b, math.Float32bits(e))
+	return nil
+}
+
+func putF64(b []byte, e float64) error {
+	binary.LittleEndian.PutUint64(b, math.Float64bits(e))
+	return nil
+}
+
+func putChar(b []byte, e rune) error {
+	if e < 0 || e >= 0x110000 {
+		return fmt.Errorf("store char: value %d out of range", e)
+	}
+	if e >= 0xD800 && e <= 0xDFFF {
+		return fmt.Errorf("store char: surrogate half %d not allowed", e)
+	}
+	binary.LittleEndian.PutUint32(b, uint32(e))
+	return nil
 }
 
 // scalarPrim returns the primitive name of a list's element type, if the

@@ -73,7 +73,7 @@ func (*resourceEntry) entryKind() entryKind { return entryResource }
 // reference Table, which reserves index 0 by seeding its backing array with
 // a single nil entry.
 //
-// ponytail: this is the M4 STEP 1 ceiling, not the full spec:
+// Deliberate simplification: this is the M4 STEP 1 ceiling, not the full spec:
 //
 //   - No cross-instance handle transfer. The Canonical ABI lets an own<T>
 //     handle move between component instances (lift_own/lower_own operate on

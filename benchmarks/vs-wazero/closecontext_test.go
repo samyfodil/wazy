@@ -3,7 +3,6 @@ package vswazero
 import (
 	"context"
 	_ "embed"
-	"strconv"
 	"testing"
 
 	"github.com/tetratelabs/wazero"
@@ -12,10 +11,10 @@ import (
 )
 
 // spinWasm exports "spin" (param i64 n) (result i64): a tight countdown loop
-// with a near-empty body, so the per-loop-header interrupt check (emitted only
+// with a near-empty body, so the per-back-edge interrupt check (emitted only
 // under WithCloseOnContextDone) dominates. This is the workload that exercises
-// H6 / #2482: wazy amortizes the check to every 64th iteration by default;
-// wazero@main (no #2482) checks every iteration.
+// H6: wazy's check is two loads and a predicted-not-taken branch; wazero@main
+// does a Go round-trip every iteration.
 //
 //go:embed testdata/spin.wasm
 var spinWasm []byte
@@ -33,7 +32,7 @@ type callable interface {
 // WithCloseOnContextDone on wazy and wazero.
 //
 //   - close=off: no interrupt check emitted (baseline loop cost).
-//   - close=on:  wazy checks every 64th iteration (default interval); wazero
+//   - close=on:  wazy loads the module-closed word and branches; wazero
 //     checks every iteration.
 func BenchmarkCloseOnContextDone(b *testing.B) {
 	ctx := context.Background()
@@ -133,53 +132,11 @@ func BenchmarkHostCallLoopCloseOnContextDone(b *testing.B) {
 	}
 }
 
-// BenchmarkInterruptCheckInterval sweeps wazy.WithInterruptCheckInterval on the
-// real caseWasm fibonacci (fib=30) under WithCloseOnContextDone, to show how
-// the amortization scales: interval=0 checks every iteration (worst), larger
-// powers of two check less often. "off" is the no-check floor for reference.
-func BenchmarkInterruptCheckInterval(b *testing.B) {
-	ctx := context.Background()
-	const n = uint64(30)
-
-	bench := func(b *testing.B, r wazy.Runtime, compileCtx context.Context) {
-		compiled, err := r.CompileModule(compileCtx, caseWasm)
-		if err != nil {
-			b.Fatal(err)
-		}
-		mod, err := r.InstantiateModule(ctx, compiled, wazy.NewModuleConfig().WithName(""))
-		if err != nil {
-			b.Fatal(err)
-		}
-		fn := mod.ExportedFunction("fibonacci")
-		stack := make([]uint64, 1)
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			stack[0] = n
-			if err := fn.CallWithStack(ctx, stack); err != nil {
-				b.Fatal(err)
-			}
-		}
-	}
-
-	for _, interval := range []uint64{0, 64, 256, 1024, 4096} {
-		b.Run("interval="+strconv.FormatUint(interval, 10), func(b *testing.B) {
-			r := newCaseRuntimeWazyClose(b)
-			defer r.Close(ctx)
-			bench(b, r, wazy.WithInterruptCheckInterval(ctx, interval))
-		})
-	}
-	b.Run("off", func(b *testing.B) {
-		r := newCaseRuntimeWazy(b)
-		defer r.Close(ctx)
-		bench(b, r, ctx)
-	})
-}
-
 // BenchmarkFibCloseOnContextDone runs the real caseWasm fibonacci export
 // (fib=30) with and without WithCloseOnContextDone. Unlike the near-empty spin
-// body, fibonacci is a realistic workload: if it contains a loop, its heavier
-// body dilutes the per-check overhead relative to spin; if it is pure
-// recursion, no loop-header check is emitted and close=on ≈ close=off.
+// body, fibonacci is a realistic workload: its heavier body dilutes the
+// per-check overhead relative to spin. Pure recursion still pays, since the
+// check is emitted at function entry as well as at loop back-edges.
 func BenchmarkFibCloseOnContextDone(b *testing.B) {
 	ctx := context.Background()
 	const n = uint64(30)

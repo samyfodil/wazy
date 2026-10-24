@@ -64,7 +64,11 @@ func TestWastConformance(t *testing.T) {
 	// instantiate are the ones wastKnownSkips names. Not vendored: post-return
 	// (module_definition/module_instance linking + reentrance-trap builtins) and
 	// linking/* (multi top-level component linking).
-	for _, suite := range []string{"concat", "strings", "types", "simple", "fused", "multiple-resources", "resources"} {
+	//
+	// fixed_length_lists comes from Wasmtime's suite rather than the
+	// component-model repo's, which has no runtime test of them: two
+	// components passing nested list<T, N> values through a fused adapter.
+	for _, suite := range []string{"concat", "strings", "types", "simple", "fused", "multiple-resources", "resources", "fixed_length_lists"} {
 		t.Run(suite, func(t *testing.T) {
 			runWastSuite(t, suite)
 		})
@@ -102,6 +106,7 @@ type wastCmd struct {
 
 func runWastSuite(t *testing.T, suite string) {
 	dir := path.Join("testdata", "wast", suite)
+	fetched(t, dir)
 	raw, err := wastFS.ReadFile(path.Join(dir, suite+".json"))
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)

@@ -1,0 +1,5 @@
+package a:b@1.0.0+build.1;
+interface i {
+  @since(version = 1.0.0+build.2)
+  f: func();
+}

@@ -324,57 +324,6 @@ func TestMachine_CompileGoFunctionTrampoline(t *testing.T) {
 	ret
 `,
 		},
-		{
-			name:     "try_table_enter",
-			exitCode: nativeapi.ExitCodeTryTableEnter,
-			sig: &ssa.Signature{
-				Params:  []ssa.Type{ssa.TypeI64, ssa.TypeI64},
-				Results: []ssa.Type{},
-			},
-			exp: `
-	stp x30, xzr, [sp, #-0x10]!
-	stp x19, x20, [x0, #0x60]
-	stp x21, x22, [x0, #0x70]
-	stp x23, x24, [x0, #0x80]
-	stp x25, x26, [x0, #0x90]
-	str x28, [x0, #0xa0]
-	stp q18, q19, [x0, #0xb0]
-	stp q20, q21, [x0, #0xd0]
-	stp q22, q23, [x0, #0xf0]
-	stp q24, q25, [x0, #0x110]
-	stp q26, q27, [x0, #0x130]
-	stp q28, q29, [x0, #0x150]
-	stp q30, q31, [x0, #0x170]
-	sub sp, sp, #0x10
-	mov x15, sp
-	str x1, [x15], #0x8
-	orr x27, xzr, #0x10
-	orr x16, xzr, #0x1
-	stp x27, x16, [sp, #-0x10]!
-	movz w17, #0x1b, lsl 0
-	str w17, [x0]
-	mov x27, sp
-	str x27, [x0, #0x38]
-	adr x27, #0x20
-	str x27, [x0, #0x30]
-	exit_sequence x0
-	ldp x19, x20, [x0, #0x60]
-	ldp x21, x22, [x0, #0x70]
-	ldp x23, x24, [x0, #0x80]
-	ldp x25, x26, [x0, #0x90]
-	ldr x28, [x0, #0xa0]
-	ldp q18, q19, [x0, #0xb0]
-	ldp q20, q21, [x0, #0xd0]
-	ldp q22, q23, [x0, #0xf0]
-	ldp q24, q25, [x0, #0x110]
-	ldp q26, q27, [x0, #0x130]
-	ldp q28, q29, [x0, #0x150]
-	ldp q30, q31, [x0, #0x170]
-	add sp, sp, #0x20
-	ldr x30, [sp], #0x10
-	ret
-`,
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, _, m := newSetupWithMockContext()

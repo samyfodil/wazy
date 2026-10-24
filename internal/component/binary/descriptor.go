@@ -69,6 +69,21 @@ type ListDesc struct {
 func (ListDesc) isTypeDesc()  {}
 func (ListDesc) Kind() string { return "list" }
 
+// FixedListDesc represents a fixed-length list, list<T, N> (🔧 in the
+// Component Model spec): exactly Length elements, N > 0. Its Canonical ABI
+// is a homogeneous tuple's: the elements are laid out back to back at the
+// element's alignment, with no pointer or length, and flatten to the
+// element's flattening Length times. Its Value has a dynamic list's shape --
+// the Go slice of a fixed-width primitive element, else a []Value -- of
+// exactly Length elements.
+type FixedListDesc struct {
+	Element TypeRef
+	Length  uint32
+}
+
+func (FixedListDesc) isTypeDesc()  {}
+func (FixedListDesc) Kind() string { return "fixed-length-list" }
+
 // TupleDesc represents a tuple (unnamed record).
 type TupleDesc struct {
 	Elements []TypeRef
@@ -76,6 +91,49 @@ type TupleDesc struct {
 
 func (TupleDesc) isTypeDesc()  {}
 func (TupleDesc) Kind() string { return "tuple" }
+
+// MapDesc represents a map<K,V>: an unordered association of keys to values.
+// Per the Canonical ABI's despecialize() step, a map has no wire
+// representation of its own -- it is byte-for-byte identical to
+// list<tuple<K,V>> (same alignment, size, flattening, and lift/lower), so
+// every ABI function that handles MapDesc does so by delegating to its
+// TupleDesc/ListDesc counterpart with a synthetic `tuple<Key,Value>` element
+// rather than repeating the layout. A map's Value is therefore the same
+// shape as list<tuple<K,V>>: a []Value of two-element []Value pairs
+// ([]Value{key, value}), in whatever order the guest produced them -- a map
+// carries no ordering guarantee.
+//
+// Key is restricted by the spec's own `keytype` grammar (design/mvp/
+// Explainer.md) to bool, an integer, char, or string -- a conservative
+// subset of `valtype` picked to simplify bindings generation, deliberately
+// excluding f32/f64 (float equality/NaN) and every composite, handle, and
+// async type. See IsValidMapKeyPrimitive.
+type MapDesc struct {
+	Key   TypeRef
+	Value TypeRef
+}
+
+func (MapDesc) isTypeDesc()  {}
+func (MapDesc) Kind() string { return "map" }
+
+// IsValidMapKeyPrimitive reports whether prim is one of the primitives the
+// Component Model spec's `keytype` grammar allows as a map key: bool, every
+// integer width, char, or string. It only ever sees MapDesc.Key.Primitive,
+// so it cannot itself resolve a key given by type index -- every keytype is,
+// however, a bare primitive a conformant producer always spells inline (see
+// readValTypeRef), so an index there (Key.Primitive == "") already names
+// something keytype does not permit: a composite, a resource handle, or a
+// stream/future. TypeTable.Map treats it that way for the one type index
+// that can occur in this codebase's own type tables (which never assign an
+// index to a primitive to begin with -- see TypeTable.Add).
+func IsValidMapKeyPrimitive(prim string) bool {
+	switch prim {
+	case "bool", "s8", "u8", "s16", "u16", "s32", "u32", "s64", "u64", "char", "string":
+		return true
+	default:
+		return false
+	}
+}
 
 // FlagsDesc represents a flags type (set of named booleans).
 type FlagsDesc struct {
@@ -181,17 +239,60 @@ type FuncResult struct {
 }
 
 // InstanceDesc represents an instance type (collection of exports).
+//
+// An instancetype opens its own nested type-sort index space, the same way a
+// nested component opens its own (see Component.Outer) -- so Types and the
+// TypeIndex side of an Exports TypeRef both index into THIS InstanceDesc's
+// own space, never into the enclosing component's TypeSpace. A TypeRef here
+// with TypeIndex set is only ever resolvable through Types directly (see
+// resolveAlias's case 0x00, which globalizes it into the enclosing
+// Component's escape range before handing it to a caller) -- never through
+// an ordinary Resolver.
 type InstanceDesc struct {
-	Exports map[string]TypeRef // export name -> type
+	// Exports maps each type-sort export name to its type. A name absent
+	// from this map was either not exported at all, or was exported but this
+	// decoder could not resolve it structurally (a `sub`-bound/abstract
+	// resource export, or a type-sort alias).
+	Exports map[string]TypeRef
+
+	// Types holds the deftypes declared locally within this instancetype's
+	// own body (instancedecl tag 0x01), plus one nil placeholder per other
+	// type-sort-index-producing instancedecl (a type-sort alias, or a
+	// `sub`-bound export) this decoder cannot resolve structurally, in
+	// declaration order -- see typeBody.read.
+	Types []TypeDesc
+
+	// Outer maps each nil slot of Types that aliases a type of an enclosing
+	// type index space ("alias outer"), or is exported as one ("eq" of such
+	// a slot), to what it aliases.
+	Outer map[uint32]OuterAlias
+
+	// Decls are its declarations, every one, in order: what a type check
+	// computes the instance type from. Exports and Types are what the ABI
+	// needs of them, kept apart so it does not walk them.
+	Decls []TypeDecl
+}
+
+// OuterAlias is "alias outer Count Index": type Index of the type index
+// space Count levels out -- 1 being the component (or component type) the
+// declaring type is defined in, 0 the declaring type's own.
+type OuterAlias struct {
+	Count, Index uint32
 }
 
 func (InstanceDesc) isTypeDesc()  {}
 func (InstanceDesc) Kind() string { return "instance" }
 
-// ComponentDesc represents a component type (collection of declarations).
+// ComponentDesc represents a component type: what a component import, or a
+// component export's type ascription, declares the component to be.
 type ComponentDesc struct {
-	// For now, component decls are not fully represented.
-	// This is a stub; M1 focuses on function and data types.
+	// Types and Outer are its own type index space, as InstanceDesc's are:
+	// a type-sort import adds a slot as a type-sort export does there.
+	Types []TypeDesc
+	Outer map[uint32]OuterAlias
+
+	// Decls are its declarations, in order; see InstanceDesc.Decls.
+	Decls []TypeDecl
 }
 
 func (ComponentDesc) isTypeDesc()  {}
@@ -222,6 +323,9 @@ func readValTypeRef(buf []byte, off int) (TypeRef, int, error) {
 	}
 	// Positive value is a type index
 	idx := uint32(v)
+	if err := checkFileTypeIndex(idx, "valtype"); err != nil {
+		return TypeRef{}, off, err
+	}
 	return TypeRef{TypeIndex: &idx}, off, nil
 }
 
@@ -448,9 +552,39 @@ func readDefvaltypeDesc(buf []byte, off int, tag byte) (TypeDesc, int, error) {
 	case 0x70: // list: one valtype
 		elem, off2, e := readValTypeRef(buf, off)
 		desc, off, err = ListDesc{Element: elem}, off2, e
+	case 0x67: // fixed-length list: valtype, then u32 length (> 0)
+		elem, off2, e := readValTypeRef(buf, off)
+		if e != nil {
+			return nil, off2, e
+		}
+		n, used, e := leb128.LoadUint32(buf[off2:])
+		if e != nil {
+			return nil, off2, fmt.Errorf("fixed-length list: length: %w", e)
+		}
+		if n == 0 {
+			return nil, off2, fmt.Errorf("fixed-length lists must have more than zero elements")
+		}
+		desc, off, err = FixedListDesc{Element: elem, Length: n}, off2+int(used), nil
 	case 0x6f: // tuple: vec(valtype)
 		elems, off2, e := readValtypeVecDesc(buf, off)
 		desc, off, err = TupleDesc{Elements: elems}, off2, e
+	case 0x63: // map: key valtype, value valtype
+		key, off2, e := readValTypeRef(buf, off)
+		if e != nil {
+			return nil, off2, e
+		}
+		// A conformant producer always spells a keytype inline (see
+		// IsValidMapKeyPrimitive's doc); a type-index key already fails this
+		// the same way an invalid inline primitive does, since Primitive is
+		// "" for it.
+		if key.TypeIndex != nil {
+			return nil, off2, fmt.Errorf("map: invalid key type (type index %d): spec restricts map keys to bool, an integer, char, or string", *key.TypeIndex)
+		}
+		if !IsValidMapKeyPrimitive(key.Primitive) {
+			return nil, off2, fmt.Errorf("map: invalid key type %q: spec restricts map keys to bool, an integer, char, or string", key.Primitive)
+		}
+		val, off3, e := readValTypeRef(buf, off2)
+		desc, off, err = MapDesc{Key: key, Value: val}, off3, e
 	case 0x6e: // flags: vec(label)
 		names, off2, e := readLabelVecDesc(buf, off)
 		desc, off, err = FlagsDesc{Names: names}, off2, e
@@ -559,203 +693,31 @@ func coreValtypeName(b byte) (string, error) {
 	}
 }
 
-// readInstanceDeclDesc consumes one instancedecl and may contribute to the
-// descriptor model. For M1, instance types with nested types or complex
-// exports are not fully represented.
-func readInstanceDeclDesc(buf []byte, off int) (int, error) {
-	if off >= len(buf) {
-		return off, ErrTruncatedBinary
-	}
-	tag := buf[off]
-	off++
-	switch tag {
-	case 0x01: // type: a deftype
-		_, off2, err := readDeftypeDesc(buf, off)
-		return off2, err
-	case 0x04: // export decl: externname externdesc
-		_, off2, err := readExternName(buf, off)
-		if err != nil {
-			return off2, err
-		}
-		_, _, _, off2, err = readExterndesc(buf, off2)
-		return off2, err
-	case 0x02: // alias
-		return readAlias(buf, off)
-	case 0x00: // core:type -- a core func/module type defined inline in the
-		// instance or component type. It carries no runtime obligation (these
-		// type-only validation shapes are opaque tags -- see the package doc);
-		// consume its bytes to stay synchronized.
-		return readCoretypeDef(buf, off)
-	default:
-		return off, fmt.Errorf("instancedecl: invalid tag %#x", tag)
-	}
-}
-
-// readCoretypeDef consumes one core:type definition -- a core func type (0x60)
-// or a core module type (0x50) -- to keep the decoder synchronized when one
-// appears inside an instance/component type. It parses the grammar rather than
-// guessing a length, so a non-empty module type (imports/exports/nested types/
-// aliases) is consumed correctly too.
-func readCoretypeDef(buf []byte, off int) (int, error) {
-	if off >= len(buf) {
-		return off, ErrTruncatedBinary
-	}
-	tag := buf[off]
-	off++
-	switch tag {
-	case 0x60: // core:functype = vec(valtype) params, vec(valtype) results
-		var err error
-		if off, err = readCoreValtypeVec(buf, off); err != nil {
-			return off, err
-		}
-		return readCoreValtypeVec(buf, off)
-	case 0x50: // core:moduletype = vec(core:moduledecl)
-		count, n, err := leb128.LoadUint32(buf[off:])
-		if err != nil {
-			return off, err
-		}
-		off += int(n)
-		for i := uint32(0); i < count; i++ {
-			if off, err = readCoreModuleDecl(buf, off); err != nil {
-				return off, fmt.Errorf("coremoduledecl[%d]: %w", i, err)
+// addLocalType adds the local type a type-sort export or import declares:
+// for an `eq N` bound, local type N again -- nil if N is, and aliasing what
+// N aliases -- and for a `sub` bound, an abstract resource, nil.
+func addLocalType(localTypes *[]TypeDesc, outer *map[uint32]OuterAlias, idx uint32, hasIdx bool) {
+	var t TypeDesc
+	if hasIdx && int(idx) < len(*localTypes) {
+		t = (*localTypes)[idx]
+		if outer != nil {
+			if o, ok := (*outer)[idx]; ok {
+				(*outer)[uint32(len(*localTypes))] = o
 			}
 		}
-		return off, nil
-	default:
-		return off, fmt.Errorf("core:type: invalid tag %#x", tag)
 	}
+	*localTypes = append(*localTypes, t)
 }
 
-// readCoreValtypeVec consumes vec(core:valtype); each core valtype is a single
-// byte (0x7f i32 … 0x7b v128, plus reference-type bytes), so the whole vector
-// is count single bytes.
-func readCoreValtypeVec(buf []byte, off int) (int, error) {
-	count, n, err := leb128.LoadUint32(buf[off:])
-	if err != nil {
-		return off, err
-	}
-	off += int(n)
-	if off+int(count) > len(buf) {
-		return off, ErrTruncatedBinary
-	}
-	return off + int(count), nil
-}
-
-// readCoreModuleDecl consumes one core:moduledecl inside a core module type:
-// an import (0x00), a nested core type (0x01), a core alias (0x02), or an
-// export (0x03).
-func readCoreModuleDecl(buf []byte, off int) (int, error) {
-	if off >= len(buf) {
-		return off, ErrTruncatedBinary
-	}
-	tag := buf[off]
-	off++
-	switch tag {
-	case 0x00: // import: nm nm core:importdesc
-		var err error
-		if off, err = skipName(buf, off); err != nil {
-			return off, err
-		}
-		if off, err = skipName(buf, off); err != nil {
-			return off, err
-		}
-		return readCoreImportdesc(buf, off)
-	case 0x01: // type: core:type (recursive)
-		return readCoretypeDef(buf, off)
-	case 0x02: // alias: core:alias -- sort byte + target; consumed conservatively
-		return readCoreModuleAlias(buf, off)
-	case 0x03: // export: nm core:importdesc
-		var err error
-		if off, err = skipName(buf, off); err != nil {
-			return off, err
-		}
-		return readCoreImportdesc(buf, off)
-	default:
-		return off, fmt.Errorf("coremoduledecl: invalid tag %#x", tag)
-	}
-}
-
-// readCoreImportdesc consumes a core:importdesc = sort byte + typeidx (func
-// 0x00, table 0x01, memory 0x02, global 0x03, tag 0x04). Table/memory/global
-// carry a small inline type rather than an index, but these type-only shapes
-// only ever use func imports/exports in practice; a non-func desc fails loud.
-func readCoreImportdesc(buf []byte, off int) (int, error) {
-	if off >= len(buf) {
-		return off, ErrTruncatedBinary
-	}
-	sort := buf[off]
-	off++
-	switch sort {
-	case 0x00: // func: typeidx
-		_, n, err := leb128.LoadUint32(buf[off:])
-		if err != nil {
-			return off, err
-		}
-		return off + int(n), nil
-	default:
-		return off, fmt.Errorf("core:importdesc: unsupported sort %#x", sort)
-	}
-}
-
-// readCoreModuleAlias consumes a core:alias inside a core module type: a sort
-// byte then a target (0x00 export: instanceidx + name, 0x01 outer: ct + idx).
-func readCoreModuleAlias(buf []byte, off int) (int, error) {
-	if off >= len(buf) {
-		return off, ErrTruncatedBinary
-	}
-	off++ // sort byte
-	if off >= len(buf) {
-		return off, ErrTruncatedBinary
-	}
-	target := buf[off]
-	off++
-	switch target {
-	case 0x01: // outer: ct idx
-		_, n, err := leb128.LoadUint32(buf[off:])
-		if err != nil {
-			return off, err
-		}
-		off += int(n)
-		_, n, err = leb128.LoadUint32(buf[off:])
-		if err != nil {
-			return off, err
-		}
-		return off + int(n), nil
-	default:
-		return off, fmt.Errorf("core:alias: unsupported target %#x", target)
-	}
-}
-
-// skipName consumes a name = vec(byte) (leb length + that many bytes).
-func skipName(buf []byte, off int) (int, error) {
-	n, m, err := leb128.LoadUint32(buf[off:])
-	if err != nil {
-		return off, err
-	}
-	off += int(m)
-	if off+int(n) > len(buf) {
-		return off, ErrTruncatedBinary
-	}
-	return off + int(n), nil
-}
-
-// readInstancetypeDesc reads an instance type: vec(instancedecl).
-// For M1, we consume the bytes but do not fully represent all nested structures.
+// readInstancetypeDesc reads an instance type: vec(instancedecl). See
+// InstanceDesc's doc for why a TypeRef in Exports indexes Types, not any
+// enclosing component's TypeSpace.
 func readInstancetypeDesc(buf []byte, off int) (InstanceDesc, int, error) {
-	count, n, err := leb128.LoadUint32(buf[off:])
+	b, off, err := readTypeBody(buf, off, false)
 	if err != nil {
 		return InstanceDesc{}, off, err
 	}
-	off += int(n)
-	// For M1, we skip building a full descriptor for instance contents.
-	// Just consume the bytes to stay synchronized.
-	for i := range count {
-		off, err = readInstanceDeclDesc(buf, off)
-		if err != nil {
-			return InstanceDesc{}, off, fmt.Errorf("instancedecl[%d]: %w", i, err)
-		}
-	}
-	return InstanceDesc{Exports: make(map[string]TypeRef)}, off, nil
+	return InstanceDesc{Exports: b.exports, Types: b.types, Outer: b.outer, Decls: b.decls}, off, nil
 }
 
 // readDeftypeDesc consumes one deftype and returns a TypeDesc, OR a kind string
@@ -776,9 +738,8 @@ func readDeftypeDesc(buf []byte, off int) (TypeDesc, int, error) {
 		d.Async = true
 		return d, off, err
 	case tag == 0x41:
-		// Component type: consume but do not fully represent in M1.
-		off, err := readComponenttype(buf, off)
-		return ComponentDesc{}, off, err
+		d, off, err := readComponenttypeDesc(buf, off)
+		return d, off, err
 	case tag == 0x42:
 		d, off, err := readInstancetypeDesc(buf, off)
 		return d, off, err

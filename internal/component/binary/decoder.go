@@ -33,6 +33,9 @@ var (
 // It validates the preamble, iterates outer component sections, and decodes
 // type, import, and export sections into Go structs. Other sections are
 // recorded but not fully decoded.
+//
+// The decoded component's names are views of the buffer read (see
+// readLabel), which it keeps as Component.Bytes: nothing may write to it.
 func Decode(r io.Reader) (*Component, error) {
 	// Read the entire binary into memory for slice-based offset tracking.
 	// (Matching the pattern of the core wasm decoder.)
@@ -42,6 +45,13 @@ func Decode(r io.Reader) (*Component, error) {
 	}
 
 	return decodeComponent(buf)
+}
+
+// DecodeBytes is Decode of b. It copies b, once and to size, where
+// io.ReadAll would grow a buffer to it: the copy is the decoder's own, which
+// the names it decodes are views of, so b stays the caller's to change.
+func DecodeBytes(b []byte) (*Component, error) {
+	return decodeComponent(bytes.Clone(b))
 }
 
 func decodeComponent(buf []byte) (*Component, error) {
@@ -122,12 +132,20 @@ func decodeComponent(buf []byte) (*Component, error) {
 			offset = newOffset
 			c.CoreInstances = append(c.CoreInstances, coreInstances...)
 
-		case 3: // Core Type section (not yet fully decoded)
-			if sectionSize > uint32(len(buf)-offset) {
-				return nil, fmt.Errorf("section %s: %w", sectionIDName(sectionID), ErrTruncatedBinary)
+		case 3: // Core Type section
+			defs, newOffset, err := decodeCoreTypeSection(buf, offset, sectionSize)
+			if err != nil {
+				return nil, fmt.Errorf("core type section: %w", err)
 			}
-			c.RawSections = append(c.RawSections, RawSection{ID: sectionID, Size: sectionSize})
-			offset += int(sectionSize)
+			offset = newOffset
+			// Each definition opens as many core type indices as it
+			// defines types: one per member of a recursion group.
+			for j, d := range defs {
+				for m := uint32(0); m < d.Count; m++ {
+					c.CoreTypeSpace = append(c.CoreTypeSpace, CoreTypeSpaceEntry{Kind: CoreTypeFromDefinition, Def: uint32(len(c.CoreTypes) + j), Member: m})
+				}
+			}
+			c.CoreTypes = append(c.CoreTypes, defs...)
 
 		case 4: // Component section: a fully embedded nested component.
 			if sectionSize > uint32(len(buf)-offset) {
@@ -144,6 +162,10 @@ func decodeComponent(buf []byte) (*Component, error) {
 			// The enclosing link is what makes the nested component's
 			// `alias outer` definitions resolvable -- see Component.Outer.
 			nested.Outer = c
+			// Now that its outer aliases resolve, its types can be sized.
+			if err := nested.validateValueSizes(); err != nil {
+				return nil, fmt.Errorf("nested component[%d]: %w", len(c.NestedComponents), err)
+			}
 			c.NestedComponents = append(c.NestedComponents, nested)
 			// Every nested component occupies the next index in the
 			// component index space, interleaved with component imports,
@@ -158,6 +180,9 @@ func decodeComponent(buf []byte) (*Component, error) {
 			}
 			offset = newOffset
 			instanceBase := uint32(len(c.Instances))
+			for j := range instances {
+				instances[j].CoreInstancesBefore = uint32(len(c.CoreInstances))
+			}
 			c.Instances = append(c.Instances, instances...)
 			// Every instance definition occupies the next index in the
 			// component's instance index space, interleaved with instance
@@ -207,6 +232,11 @@ func decodeComponent(buf []byte) (*Component, error) {
 				// coremodulespace.go.
 				if al.Sort == 0x00 && al.CoreSort == 0x11 {
 					c.CoreModuleSpace = append(c.CoreModuleSpace, CoreModuleSpaceEntry{Kind: CoreModuleFromAlias, Alias: aliasBase + uint32(j)})
+				}
+				// A core type alias (sort 0x00 core, core:sort 0x10 type)
+				// occupies the next index in the core type index space.
+				if al.Sort == 0x00 && al.CoreSort == 0x10 {
+					c.CoreTypeSpace = append(c.CoreTypeSpace, CoreTypeSpaceEntry{Kind: CoreTypeFromAlias, Alias: aliasBase + uint32(j)})
 				}
 				// A component alias (sort 0x04) occupies the next index in the
 				// component index space -- see componentspace.go.
@@ -296,6 +326,12 @@ func decodeComponent(buf []byte) (*Component, error) {
 				if im.ExternType == 0x04 {
 					c.ComponentSpace = append(c.ComponentSpace, ComponentSpaceEntry{Kind: ComponentFromImport, Import: importBase + uint32(j)})
 				}
+				// A core module import (sort core module 0x00) occupies the
+				// next index in the core module index space -- see
+				// coremodulespace.go.
+				if im.ExternType == 0x00 {
+					c.CoreModuleSpace = append(c.CoreModuleSpace, CoreModuleSpaceEntry{Kind: CoreModuleFromImport, Import: importBase + uint32(j)})
+				}
 			}
 
 		case 11: // Export section
@@ -310,6 +346,9 @@ func decodeComponent(buf []byte) (*Component, error) {
 			// index aliasing the exported func -- see componentfuncspace.go.
 			for j, ex := range exports {
 				switch ex.ExternType {
+				case 0x00: // core module export: introduces a core module index
+					// aliasing the exported module -- see coremodulespace.go.
+					c.CoreModuleSpace = append(c.CoreModuleSpace, CoreModuleSpaceEntry{Kind: CoreModuleFromExport, Export: exportBase + uint32(j)})
 				case 0x01: // func export: introduces a component func index
 					c.ComponentFuncSpace = append(c.ComponentFuncSpace, ComponentFuncSpaceEntry{Kind: ComponentFuncFromExport, Export: exportBase + uint32(j)})
 				case 0x03: // type export: introduces a type index aliasing the
@@ -340,6 +379,21 @@ func decodeComponent(buf []byte) (*Component, error) {
 		if int(sectionSize) != bytesRead {
 			return nil, fmt.Errorf("section %s: expected %d bytes but read %d", sectionIDName(sectionID), sectionSize, bytesRead)
 		}
+	}
+
+	if err := c.validateFileTypeIndices(); err != nil {
+		return nil, err
+	}
+
+	// Intern every internable type now, so ResolveType is a pure, lock-free
+	// read for the life of this Component (see typesFrozen). An alias that
+	// cannot be resolved is not an error -- plenty of real components carry
+	// one, and it must still fail at the same call site with the same message
+	// -- it just leaves the Component unfrozen.
+	c.typesFrozen = c.precomputeImportedAliases()
+
+	if err := c.validateValueSizes(); err != nil {
+		return nil, err
 	}
 
 	c.Decoded = true
@@ -394,18 +448,21 @@ func decodeImportSection(buf []byte, offset int, sectionSize uint32) ([]Import, 
 		if err != nil {
 			return nil, off, fmt.Errorf("import[%d] name: %w", i, err)
 		}
-		sort, eqIdx, hasEq, off2, err := readExterndesc(buf, off)
+		d, off2, err := readExternDesc(buf, off)
 		if err != nil {
 			return nil, off2, fmt.Errorf("import[%d] externdesc: %w", i, err)
 		}
 		offset = off2
-		imports[i] = Import{Name: name, ExternType: sort}
+		imports[i] = Import{Name: name, ExternType: d.Sort}
 		switch {
-		case sort == 0x03 && hasEq: // type import with an `eq N` bound
-			imports[i].TypeEqIndex = eqIdx
+		case d.Sort == 0x03 && d.Eq: // type import with an `eq N` bound
+			imports[i].TypeEqIndex = d.Index
 			imports[i].TypeEqBound = true
-		case sort == 0x01 && hasEq: // func import: eqIdx is the func's own type index
-			imports[i].ExternIndex = eqIdx
+		case d.Sort != 0x03:
+			// The item's declared type: a func's functype, an instance's
+			// instancetype, a component's componenttype, a core module's
+			// (core) module type.
+			imports[i].ExternIndex = d.Index
 		}
 	}
 
@@ -417,8 +474,7 @@ func decodeImportSection(buf []byte, offset int, sectionSize uint32) ([]Import, 
 
 // decodeExportSection decodes the export section (section id 11): vec(export),
 // where export = externname sortidx opt(externdesc). The optional ascribed
-// externdesc is not decoded in M1; the per-section size check catches any
-// export that carries one.
+// externdesc lands in Export.Ascribed.
 func decodeExportSection(buf []byte, offset int, sectionSize uint32) ([]Export, int, error) {
 	sectionStart := offset
 
@@ -444,18 +500,20 @@ func decodeExportSection(buf []byte, offset int, sectionSize uint32) ([]Export, 
 		}
 		hasType := buf[off2]
 		off2++
+		exports[i] = Export{Name: name, ExternType: sort, ExternIndex: idx}
 		switch hasType {
 		case 0x00:
 			// no ascribed type
 		case 0x01:
-			if _, _, _, off2, err = readExterndesc(buf, off2); err != nil {
+			var d ExternDesc
+			if d, off2, err = readExternDesc(buf, off2); err != nil {
 				return nil, off2, fmt.Errorf("export[%d] ascribed type: %w", i, err)
 			}
+			exports[i].Ascribed = &d
 		default:
 			return nil, off2, fmt.Errorf("export[%d]: invalid type-ascription tag %#x", i, hasType)
 		}
 		offset = off2
-		exports[i] = Export{Name: name, ExternType: sort, ExternIndex: idx}
 	}
 
 	if bytesRead := offset - sectionStart; bytesRead > int(sectionSize) {
@@ -725,71 +783,11 @@ func decodeAliasSection(buf []byte, offset int, sectionSize uint32) ([]AliasDef,
 
 	aliases := make([]AliasDef, count)
 	for i := range count {
-		if offset >= len(buf) {
-			return nil, offset, ErrTruncatedBinary
+		alias, off, err := readAliasDef(buf, offset)
+		if err != nil {
+			return nil, off, fmt.Errorf("alias[%d]: %w", i, err)
 		}
-		sort := buf[offset]
-		offset++
-
-		var coreSort byte
-		// Handle core sort (0x00 carries a discriminator: func/table/memory/
-		// global/tag/type/module/instance) that the instance engine needs to
-		// tell a core-func alias apart from a core-memory/table/global alias.
-		if sort == 0x00 {
-			if offset >= len(buf) {
-				return nil, offset, ErrTruncatedBinary
-			}
-			coreSort = buf[offset]
-			offset++
-		}
-
-		if offset >= len(buf) {
-			return nil, offset, ErrTruncatedBinary
-		}
-		targetKind := buf[offset]
-		offset++
-
-		var alias AliasDef
-		alias.Sort = sort
-		alias.CoreSort = coreSort
-		alias.TargetKind = targetKind
-
-		switch targetKind {
-		case 0x00, 0x01: // export or core export
-			instanceIdx, n, err := leb128.LoadUint32(buf[offset:])
-			if err != nil {
-				return nil, offset, fmt.Errorf("alias[%d] instance index: %w", i, err)
-			}
-			offset += int(n)
-			alias.InstanceIdx = instanceIdx
-
-			// Alias names are simple labels, not extern names
-			name, off, err := readLabel(buf, offset)
-			if err != nil {
-				return nil, off, fmt.Errorf("alias[%d] name: %w", i, err)
-			}
-			offset = off
-			alias.Name = name
-
-		case 0x02: // outer
-			outerCount, n, err := leb128.LoadUint32(buf[offset:])
-			if err != nil {
-				return nil, offset, fmt.Errorf("alias[%d] outer count: %w", i, err)
-			}
-			offset += int(n)
-			alias.OuterCount = outerCount
-
-			outerIdx, n, err := leb128.LoadUint32(buf[offset:])
-			if err != nil {
-				return nil, offset, fmt.Errorf("alias[%d] outer index: %w", i, err)
-			}
-			offset += int(n)
-			alias.OuterIndex = outerIdx
-
-		default:
-			return nil, offset, fmt.Errorf("alias[%d]: invalid target kind %#x", i, targetKind)
-		}
-
+		offset = off
 		aliases[i] = alias
 	}
 
@@ -797,6 +795,71 @@ func decodeAliasSection(buf []byte, offset int, sectionSize uint32) ([]AliasDef,
 		return nil, offset, fmt.Errorf("alias section: read %d bytes but section is only %d", bytesRead, sectionSize)
 	}
 	return aliases, offset, nil
+}
+
+// readAliasDef consumes one alias: a sort (a core sort carries its core:sort
+// discriminator) and an alias target -- an export or core export (instance
+// index and name) or an outer alias (count and index). The same production
+// appears in the alias section and inside component and instance types.
+func readAliasDef(buf []byte, offset int) (AliasDef, int, error) {
+	var alias AliasDef
+	if offset >= len(buf) {
+		return alias, offset, ErrTruncatedBinary
+	}
+	alias.Sort = buf[offset]
+	offset++
+	// Handle core sort (0x00 carries a discriminator: func/table/memory/
+	// global/tag/type/module/instance) that the instance engine needs to
+	// tell a core-func alias apart from a core-memory/table/global alias.
+	if alias.Sort == 0x00 {
+		if offset >= len(buf) {
+			return alias, offset, ErrTruncatedBinary
+		}
+		alias.CoreSort = buf[offset]
+		offset++
+	}
+	if offset >= len(buf) {
+		return alias, offset, ErrTruncatedBinary
+	}
+	alias.TargetKind = buf[offset]
+	offset++
+
+	switch alias.TargetKind {
+	case 0x00, 0x01: // export or core export
+		instanceIdx, n, err := leb128.LoadUint32(buf[offset:])
+		if err != nil {
+			return alias, offset, fmt.Errorf("instance index: %w", err)
+		}
+		offset += int(n)
+		alias.InstanceIdx = instanceIdx
+
+		// Alias names are simple labels, not extern names
+		name, off, err := readLabel(buf, offset)
+		if err != nil {
+			return alias, off, fmt.Errorf("name: %w", err)
+		}
+		offset = off
+		alias.Name = name
+
+	case 0x02: // outer
+		outerCount, n, err := leb128.LoadUint32(buf[offset:])
+		if err != nil {
+			return alias, offset, fmt.Errorf("outer count: %w", err)
+		}
+		offset += int(n)
+		alias.OuterCount = outerCount
+
+		outerIdx, n, err := leb128.LoadUint32(buf[offset:])
+		if err != nil {
+			return alias, offset, fmt.Errorf("outer index: %w", err)
+		}
+		offset += int(n)
+		alias.OuterIndex = outerIdx
+
+	default:
+		return alias, offset, fmt.Errorf("invalid target kind %#x", alias.TargetKind)
+	}
+	return alias, offset, nil
 }
 
 // decodeCanonSection decodes the canonical section (section 8).

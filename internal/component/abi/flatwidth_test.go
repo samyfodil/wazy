@@ -60,6 +60,7 @@ func flatWidthCases() (map[string]binary.TypeDesc, Resolver) {
 		"error-context": binary.PrimitiveDesc{Prim: "error-context"},
 
 		"list":   binary.ListDesc{Element: prim("u8")},
+		"map":    binary.MapDesc{Key: prim("string"), Value: prim("u32")},
 		"enum":   binary.EnumDesc{Cases: []string{"a", "b", "c"}},
 		"flags":  binary.FlagsDesc{Names: []string{"x", "y"}},
 		"own":    binary.OwnDesc{ResourceType: 1},

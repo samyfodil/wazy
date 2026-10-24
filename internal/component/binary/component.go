@@ -3,10 +3,26 @@ package binary
 import (
 	"fmt"
 	"io"
+	"sync"
 )
 
 // Component represents a parsed WebAssembly Component Model container.
 type Component struct {
+	// typesFrozen is set at the end of Decode once precomputeImportedAliases
+	// has interned every type it can, which is every type resolution will ever
+	// need: nothing about resolving a type index depends on runtime state. It
+	// makes extraTypes/aliasCache immutable, so ResolveType -- which sits under
+	// abi.Resolver, one call per nested TypeRef of every lifted and lowered
+	// value -- is a pure read that takes no lock. Written once during decode,
+	// before the Component is reachable from another goroutine, so a plain
+	// bool is the right synchronization here (like every other decoded field).
+	//
+	// It sits here, next to the fields ResolveType's fast path reads with it,
+	// rather than down beside mu where it otherwise belongs. (Measured: the
+	// position itself is worth nothing -- 6.14 vs 6.21 ns/call. Keeping the
+	// three together is for the reader.)
+	typesFrozen bool
+
 	// Types contains the type definitions from the type section (section 7)
 	// only, in that section's declaration order. This is NOT the full
 	// component type index space that canon TypeIdx and export/instance type
@@ -61,6 +77,12 @@ type Component struct {
 	// ResolveCoreModule rather than indexing CoreModules directly. See
 	// coremodulespace.go.
 	CoreModuleSpace []CoreModuleSpaceEntry
+
+	// CoreTypes are the core type section's definitions, in order, and
+	// CoreTypeSpace the core type index space they and the core type
+	// aliases make -- see coretype.go.
+	CoreTypes     []CoreTypeDef
+	CoreTypeSpace []CoreTypeSpaceEntry
 
 	// CoreInstances instantiate core modules with arguments (section 2).
 	CoreInstances []CoreInstance
@@ -125,7 +147,8 @@ type Component struct {
 	// Bytes is the complete binary this component was decoded from (the whole
 	// buffer for a top-level component; the section-4 sub-slice for a nested
 	// one). CoreModule.Offset/Size index into it, so recursively instantiating
-	// a NestedComponents entry needs its own Bytes, not the parent's.
+	// a NestedComponents entry needs its own Bytes, not the parent's. The
+	// decoded names are views of it, so it is read-only.
 	Bytes []byte
 
 	// Decoded is set true by Decode. It distinguishes a component that went
@@ -136,6 +159,37 @@ type Component struct {
 	// The graph engine uses it to tell "legitimately no core funcs" from "index
 	// spaces were never built"; see graph.go.
 	Decoded bool
+
+	// extraTypes backs a private, decode-independent index range (see
+	// typespace.go's extraTypeBase) this Component uses to "globalize" a
+	// TypeDesc discovered structurally inside an IMPORTED instance's declared
+	// instancetype (resolveAlias's case 0x00 import branch, for `use
+	// iface.{T}`) whenever T's own definition references ANOTHER type
+	// declared in that same instancetype body by a local index -- see
+	// InstanceDesc's doc. Appending here can never collide with, or shift,
+	// any real file-declared type index the way inserting into Types/
+	// TypeSpace at decode time would.
+	extraTypes []TypeDesc
+
+	// mu guards extraTypes and aliasCache for a Component that is NOT frozen:
+	// one built by hand (tests), or one whose alias precompute could not
+	// resolve everything. Resolution INTERNS -- it is not a pure read -- so
+	// ResolveType takes this for the whole walk. Everything below ResolveType
+	// assumes it is already held and must not retake it; the one
+	// cross-Component hop (an outer alias, typespace.go) takes the enclosing
+	// component's own mu instead, which is safe because an Outer chain runs
+	// strictly outward and so cannot cycle.
+	mu sync.Mutex
+
+	// aliasCache memoizes the result of resolving a type-sort alias that
+	// reaches into an IMPORTED instance, keyed by the component type index.
+	// Without it every resolution re-globalizes and interns the same type
+	// afresh: extraTypes grows for the life of the Component, and -- because
+	// two resolutions then hand back descriptors holding different escape
+	// indices -- reflect.DeepEqual says one type does not equal itself, which
+	// is how task.return decides whether a result type matches its binding
+	// (instance/async_builtins.go).
+	aliasCache map[uint32]TypeDesc
 }
 
 // Type represents a value type in the component type section.
@@ -164,7 +218,10 @@ type Import struct {
 	// ExternType distinguishes the import kind (e.g., component, instance, func, value, type, module).
 	ExternType byte
 
-	// ExternIndex is the index into the appropriate namespace (e.g., component index, function index).
+	// ExternIndex is the item's declared type index: the functype of a func
+	// (0x01), the instancetype of an instance (0x05), the componenttype of a
+	// component (0x04), the core module type of a core module (0x00, a CORE
+	// type index). Unused for a type import (0x03), whose bound is below.
 	ExternIndex uint32
 
 	// TypeEqIndex, valid when ExternType == 0x03 (type) and TypeEqBound is
@@ -187,6 +244,13 @@ type Export struct {
 
 	// ExternIndex is the index into the appropriate namespace.
 	ExternIndex uint32
+
+	// Ascribed is the export's optional type ascription -- `(export "f"
+	// (func $f) (func (type $t)))` -- or nil when it carries none. What a
+	// component exports has the ascribed type, which the exported item's own
+	// type must be a subtype of. wit-component ascribes every export of the
+	// shim components it emits.
+	Ascribed *ExternDesc
 }
 
 // CoreModule represents an embedded core wasm module (section 1).
@@ -236,8 +300,12 @@ type InlineExport struct {
 type Instance struct {
 	Kind         byte   // 0x00 = instantiate, 0x01 = inline exports
 	ComponentIdx uint32 // used if Kind == 0x00
-	Args         []InstantiateArg
-	Exports      []InlineExport
+	// CoreInstancesBefore is how many core instances the binary defines
+	// before this one. Definitions are instantiated in the order they
+	// appear, so those are instantiated first.
+	CoreInstancesBefore uint32
+	Args                []InstantiateArg
+	Exports             []InlineExport
 }
 
 // CanonOpt represents a canonical option.

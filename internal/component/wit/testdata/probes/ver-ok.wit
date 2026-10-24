@@ -1,0 +1,1 @@
+package a:b@1.0.0-rc.1-x+build.007-z; interface i { use c:d/j@2.0.0-a.{t}; } package c:d@2.0.0-a { interface j { type t = u8; } }

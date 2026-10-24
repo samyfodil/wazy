@@ -1,0 +1,6 @@
+package a:b@1.0.0;
+interface i {
+  @unstable(feature = x)
+  @since(version = 1.0.0)
+  f: func();
+}

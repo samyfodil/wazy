@@ -166,6 +166,15 @@ func (m *machine) CompileGoFunctionTrampoline(exitCode nativeapi.ExitCode, sig *
 	// After the call, we need to restore the callee saved registers.
 	cur = m.restoreRegistersInExecutionContext(cur, calleeSavedRegistersSorted)
 
+	if exitCode == nativeapi.ExitCodeCheckModuleExitCode {
+		// This is the one exit that is reached because the fuel ran out, so it is the
+		// one that refills it -- overwriting the exhausted value the restore above
+		// just put back. Every other exit wants that value preserved exactly:
+		// refilling on a host call would let a guest that calls one inside a loop
+		// spend forever without ever reaching a check.
+		cur = m.lowerConstantI64AndInsert(cur, fuelVReg, nativeapi.TerminationFuel)
+	}
+
 	// Get the pointer to the arg[0]/ret[0]: We need to skip `frame_size + sliceSize`.
 	if len(abi.Rets) > 0 {
 		cur = m.addsAddOrSubStackPointer(cur, arg0ret0AddrReg, frameInfoSize, true)

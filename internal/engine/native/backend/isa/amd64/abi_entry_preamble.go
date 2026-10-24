@@ -52,6 +52,15 @@ func (m *machine) compileEntryPreamble(sig *ssa.Signature) *instruction {
 	// 		mov %goAllocatedStackPtr, %rsp
 	cur = m.move64(goAllocatedStackPtr, rspVReg, cur)
 
+	// Fill the termination-fuel counter for this entry into compiled code.
+	// 		mov $TerminationFuel, %fuel
+	//
+	// goAllocatedStackPtr IS the fuel register (see fuelVReg), which is why this
+	// has to come after the move above and not before it. Emitted unconditionally:
+	// the preamble is shared by every module, and one immediate move per entry into
+	// compiled code is not worth a second preamble to avoid when the option is off.
+	cur = linkInstr(cur, m.allocateInstr().asImm(fuelVReg, uint64(nativeapi.TerminationFuel), false))
+
 	if stackSlotSize := abi.AlignedArgResultStackSlotSize(); stackSlotSize > 0 {
 		// Allocate stack slots for the arguments and return values.
 		// 		sub $stackSlotSize, %rsp

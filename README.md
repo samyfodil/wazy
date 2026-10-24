@@ -9,7 +9,7 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/samyfodil/wazy.svg)](https://pkg.go.dev/github.com/samyfodil/wazy) [![Test](https://github.com/samyfodil/wazy/actions/workflows/commit.yaml/badge.svg)](https://github.com/samyfodil/wazy/actions/workflows/commit.yaml) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-[**Docs**](https://samyfodil.github.io/wazy/) · [**API**](https://pkg.go.dev/github.com/samyfodil/wazy) · [**Examples**](examples) · [**Components**](examples/component) · [**Benchmarks**](#benchmarks) · [**Optimizations**](OPTIMIZATIONS.md)
+[**Docs**](https://wazy.dev/) · [**API**](https://pkg.go.dev/github.com/samyfodil/wazy) · [**Examples**](examples) · [**Components**](examples/component) · [**Benchmarks**](#benchmarks) · [**Optimizations**](OPTIMIZATIONS.md)
 
 </div>
 
@@ -23,7 +23,7 @@ Declare the contract in a small `.wit` interface file and implement your half in
 
 **Guests that suspend and resume.** wazy runs the **WASI 0.3 async ABI**: `stream<T>` and `future<T>`, subtasks, cancellation, backpressure and cooperative threads, with goroutines and channels as the substrate. It passes all 31 official async conformance suites. You call an async export exactly like a synchronous one — the scheduler runs underneath and `Call` returns when the task completes.
 
-**Cheap.** Instantiating a compiled 37 KB module takes 1.7 µs and 3.3 KB of heap, so every request gets its own fresh linear memory instead of a pooled one you scrub between calls. A host call costs 48 ns and allocates nothing on the stack-reusing path, so your host API stays fine-grained instead of batching to hide the boundary. wazy serves a warm `wasi:http` component — a guest that answers HTTP requests — through `net/http` in 3.37 µs and 45 allocations; two orders of magnitude up, a 6.5 MB Rust document converter turns a 7.5 MB PDF in 0.75 s inside a pure-Go host ([go-anydoc][anydoc]'s measurement, [#29][i29]). Every first-party figure is a benchmark in this repo: commands under [Benchmarks](#benchmarks), method and the optimizations **measured and rejected** in [OPTIMIZATIONS.md](OPTIMIZATIONS.md).
+**Cheap.** Instantiating a compiled 37 KB module takes 1.7 µs and 3.3 KB of heap, so every request gets its own fresh linear memory instead of a pooled one you scrub between calls. A host call costs 48 ns and allocates nothing on the stack-reusing path, so your host API stays fine-grained instead of batching to hide the boundary. wazy serves a warm `wasi:http` component — a guest that answers HTTP requests — through `net/http` in 3.37 µs and 45 allocations; two orders of magnitude up, a 6.5 MB Rust document converter turns a 7.5 MB PDF in 0.75 s inside a pure-Go host ([go-anydoc][anydoc]'s measurement). Every first-party figure is a benchmark in this repo: commands under [Benchmarks](#benchmarks), method and the optimizations **measured and rejected** in [OPTIMIZATIONS.md](OPTIMIZATIONS.md).
 
 ## Run it
 
@@ -108,6 +108,7 @@ Components stay components: genuine `wasm32-wasip2` binaries from rustc and wasm
 - **The Canonical ABI** — the value conversions, both directions, for every type (primitives, `string`, `list`, `record`, `variant`, `enum`, `flags`, `option`, `result`, `tuple`) and `own`/`borrow` resource handles, including drop/rep and cross-instance borrows.
 - **WASI 0.2 host interfaces** — `wasi:cli`, `wasi:clocks`, `wasi:filesystem`, `wasi:io`, `wasi:random`, `wasi:sockets`, `wasi:http`; capabilities opt in per instantiation (filesystem preopens, `AllowTCP`, `AllowUDP`, a custom `Dialer`, `EnableHTTP`).
 - **Multi-module component graphs** — nested instances, canonical lowering of host imports, resource lifetimes and the wasip2 adapter wiring, so a real rustc `wasi:cli/command` runs end to end and prints `hello world`; with a `CompileCache`, re-instantiating that whole graph costs 350.5 µs.
+- **Component imports** — a component that imports a component (what `wac compose --import-dependencies` emits) runs given `component.WithComponentImport`, after the supplied component is checked against the import's declared type by the Component Model's subtyping rules. Every instantiation's arguments are checked against the instantiated component's imports the same way.
 
 ```go
 inst, err := component.Instantiate(ctx, r, helloWasm,
@@ -122,6 +123,17 @@ _, err = inst.Call(ctx, "wasi:cli/run@0.2.3#run")
 ```
 
 Call an interface export directly with `inst.CallExport(ctx, "component:adder/calc", "add", uint32(2), uint32(3))`, or hand a `wasi:http/incoming-handler` component to `wasip2.Handler(inst)`, which returns an `http.Handler` — somebody else's handler, as a route on your mux. [`examples/custom-wit`](examples/custom-wit) goes the other way: a WIT plugin API, resources and `result<list<string>, variant>` included, implemented host-side in Go.
+
+### Build images
+
+Pinned Docker images compile Rust, Go, TinyGo, C/C++, Python, JavaScript and C# to components that run on wazy, for `linux/amd64` and `linux/arm64`:
+
+```sh
+docker run --rm -v "$PWD":/src -w /src --user "$(id -u):$(id -g)" \
+  ghcr.io/samyfodil/wazy-build-rust:1.99.1-cc0.21.1 cargo build --release --target wasm32-wasip2
+```
+
+Every published tag has built a `wasi:cli/command` component (and a `wasi:http/proxy` one, where the language has bindings for it) and run it on wazy. Tags, toolchain versions and usage: [build-images/README.md](build-images/README.md).
 
 ## Async — the WASI 0.3 async ABI
 
@@ -179,6 +191,7 @@ Correctness here is a pass count against somebody else's suite, not a claim.
 | Core spec tests | [WebAssembly/testsuite][testsuite] + the proposal repos | 13 corpora, **711 generated case files, no skip list**; the 3.0 corpus runs on **both** engines. |
 | Component Model async | the official async `.wast` suites | **31 suites, 0 skipped, 0 failed.** |
 | Canonical ABI values | the official `test/values` suites | **7 suites, 0 skipped, 0 failed**, through `wasm-tools json-from-wast` — every vendored module instantiates. |
+| Component type checking | the official `test/validation` instantiation and resources suites, wasm-tools' `instantiate` and `virtualize`, wasmtime's `restrictions` and `nested` | **274 commands**; every component-level and core-level check (core module types, core instantiation, core aliases, destructors) answered as the suite says, in wasm-tools' words. The 3 answered differently are deliberate differences from wasmtime's restrictions -- wazy runs a root-level component import given a component for it, and accepts a root component export, as wasm-tools' validator does -- each listed with its reason in `wastValidationGaps`, reconciled in both directions. |
 | wasi-testsuite | [WebAssembly/wasi-testsuite][wasitest] | AssemblyScript, C and Rust, **no skipped tests**, on Linux, macOS **and** Windows, through the `wazy` CLI. |
 | Cross-proposal interaction | wasmtime's `tests/misc_testsuite` | 9 `.wast` vendored from wasmtime, beside 5 written here. |
 
@@ -207,7 +220,7 @@ Measured against wazero in the same runs, on the same workloads:
 | Path | wazy vs wazero | What & why |
 | --- | :--: | --- |
 | **Instantiate** | **9.1x** | 1.724 µs vs 15.74 µs, on a 37 KB TinyGo module. |
-| **Interruptible loops** (`WithCloseOnContextDone`) | **12–13x**; +5% vs +75% overhead | On a loop calling a host function each iteration. The check is amortized, not a Go round-trip per iteration; a near-empty compute kernel is the worst case at 1.7–2.4x, tunable with `WithInterruptCheckInterval`. Against `wazero@main`. |
+| **Interruptible loops** (`WithCloseOnContextDone`) | **9.8x** vs wazero with the option on | The check is a register decrement and a predicted-not-taken branch, not a Go round-trip. Enabling it costs wazy **+18%** on `fibonacci` and wazero **+1057%** -- each against its own build with the option off -- which is where the 9.8x head-to-head comes from. A near-empty spin kernel is the worst case at +44%; a host-call-dense loop pays +2% against wazero's +86%. Measured on a core with no uop cache, because code placement swamps smaller differences on Skylake -- see [docs/performance.md](docs/performance.md). Against `wazero@main`. |
 | **Compiled execution** | memory-heavy code leads | `string_manipulation` −18%, `reverse_array` −14%, `base64` −12%, `fibonacci` a wash — the advantage tracks memory-access intensity, not arithmetic. |
 | **`memory.fill`** | **1.68x** | Geomean over a size sweep, against wazero *at HEAD* — i.e. with its own inline-store rewrite already in it. 7.1x at 15 bytes and 4.6x at 31, down to parity once the fill is memory-bandwidth-bound at 64 KiB. Constant-size clears 1.8–2.5x. |
 | **Host calls** (Go ↔ Wasm) | a tie | 47.8 ns here, 48.3 ns there, on the `WithGoModuleFunction` arm both runtimes implement the same way. The win is structural, not per-call: see below. |
@@ -244,8 +257,32 @@ same machine, identical output, `CompileModule` excluded from every timing.
 | 1 KB docx, interpreted | 2.62 ms | 1.53 ms | 1.7x |
 | 5 MB docx body, interpreted | 13.1 s | 7.7 s | 1.7x |
 
-Long compute is where the compiler wins — a 5 MB body converts 4.9x faster. The small-document row
-measures something else: instantiation dominates it and the conversion is noise, so it is setup
+**Those compiled rows carry `WithCloseOnContextDone(true)`, and most of the 4.9x is what that
+option costs wazero rather than what its code generator produces.** go-anydoc sets it
+unconditionally — cancelling a context has to interrupt a conversion already running inside the
+guest — so every run of its benchmark carries it, while `benchmarks/vs-wazero` above never sets it.
+The two suites were not measuring the same configuration. Toggling only that call, same module,
+same 5 MB body:
+
+| Compiled, 5 MB docx body | wazero v1.12.0 | wazy v0.3.0 | |
+| --- | :---: | :---: | :---: |
+| close-on-context-done on | 0.94 s | 0.19 s | 5.0x |
+| off | 0.14 s | 0.11 s | 1.3x |
+| what the option costs | 6.5x | 1.7x | |
+
+With it off the two compilers are ~30% apart. Against an interpreter the option is free on both —
+6.79 s with it and 6.87 s without on wazy, 11.96 s and 11.91 s on wazero — so the 1.7x in the
+interpreted rows is the engines and nothing else. [go-pdfium][pdfium-ccd] measured the same effect
+across 5,000 PDFs, at ~4.5x for wazero and ~1.4x for wazy. wazero's [#2533][w2533] solves the same
+problem on their side; wazy's own check became native in [#71][pr71], which is in this branch, so
+the 1.7x above is what v0.3.0 cost and not what `main` costs. On `main` it is 1.04x–1.28x depending
+on the core, against 1.01x–1.10x for wazero with its three in-flight PRs — level on x86, behind on
+the M4, and faster than both in absolute time. All three machines are in
+[docs/performance.md](docs/performance.md).
+
+So: long compute is where the compiler wins, but 4.9x is the figure for a caller who needs
+cancellation, and ~1.3x is the figure for the code generators. The small-document row measures
+something else again: instantiation dominates it and the conversion is noise, so it is setup
 cost rather than throughput. That row used to be the weak one. go-anydoc's own report had wazy
 *losing* it at 0.6x, and reproducing it here found two independent causes, both since fixed. A
 funcref memo scanned a list, so taking a reference for each of the module's 593 element-segment
@@ -260,7 +297,16 @@ instantiation ever asked for, so nothing was reused either. See
 the harness, so a checkout is enough to reproduce it. Arms interleaved, min of 8 (small) and 4
 (large) — the M4 has performance and efficiency cores and no `taskset`, which makes medians on this
 machine untrustworthy. The original third-party report, including PDF figures this table omits
-because no PDF worth measuring is small enough to commit, is [#29][i29].</sub>
+because no PDF worth measuring is small enough to commit, was issue #29, since deleted.</sub>
+
+<sub>The toggle table is a separate third-party run — Apple M5 Pro (18-core), macOS 26.5, Go 1.26.1,
+`CGO_ENABLED=0`, `anydoc.wasm` 6,781,177 bytes (the module has since been rebuilt on anydoc 0.2.3),
+wazy v0.3.0 against wazero v1.12.0, min of 3 at `-benchtime 3x`. Reproduce it with
+`go test -run '^$' -bench CloseOnContextDone -benchtime 3x -count 3` in a checkout of
+[go-anydoc][anydoc], which carries a benchmark that toggles the option on both engines; the wazero
+column is the same benchmark with the three imports in its `anydoc.go` pointed at wazero. Different
+machine and a newer module than the table above, so read the ratios rather than the
+milliseconds.</sub>
 
 ## Moving fast
 
@@ -292,4 +338,6 @@ Apache 2.0. See [LICENSE](LICENSE).
 [wasitest]: https://github.com/WebAssembly/wasi-testsuite
 [pr679]: https://github.com/WebAssembly/component-model/pull/679
 [anydoc]: https://github.com/xusenlin/go-anydoc
-[i29]: https://github.com/samyfodil/wazy/issues/29
+[pdfium-ccd]: https://github.com/klippa-app/go-pdfium/blob/main/experimental/BENCHMARKS.md#the-cost-of-close-on-context-done
+[w2533]: https://github.com/wazero/wazero/pull/2533
+[pr71]: https://github.com/samyfodil/wazy/pull/71

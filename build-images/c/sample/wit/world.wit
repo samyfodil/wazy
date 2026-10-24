@@ -1,0 +1,5 @@
+package example:proxy;
+
+world proxy {
+  include wasi:http/proxy@0.2.12;
+}

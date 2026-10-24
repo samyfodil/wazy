@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"os"
 	"unsafe"
 
 	"github.com/samyfodil/wazy/api"
@@ -24,16 +25,34 @@ var crc = crc32.MakeTable(crc32.Castagnoli)
 // fileCacheKey returns a key for the file cache.
 // In order to avoid collisions with the existing compiler, we do not use m.ID directly,
 // but instead we rehash it with magic.
-func fileCacheKey(m *wasm.Module) (ret filecache.Key) {
+//
+// gcSafepoints says whether the code polls the collector at its loop headers and spills roots there; see
+// frontend.Compiler.SetGCEnabled. That changes the code but not the module, so it is keyed here: a runtime
+// that collects must never run code compiled for one that does not, whose loops would never park.
+func fileCacheKey(m *wasm.Module, gcSafepoints bool) (ret filecache.Key) {
 	s := sha256.New()
 	s.Write(m.ID[:])
 	s.Write(magic)
 	// Write the CPU features so that we can cache the compiled module for the same CPU.
 	// This prevents the incompatible CPU features from being used.
+	//
+	// "Features" here means everything about the host CPU that changes the code
+	// the compiler emits, capabilities and errata alike. In particular it
+	// carries CpuFeatureAmd64JCCErratum, so a module compiled with the Intel
+	// SKX102 NOP padding and the 32-byte function alignment it needs is keyed
+	// apart from one compiled without them -- otherwise a cache directory
+	// shared by a Skylake host and an Ice Lake host would silently hand each
+	// the other's layout. (module.ID itself, see wasm.Module.AssignModuleID,
+	// covers only the per-module compile flags such as ensureTermination; the
+	// host's identity belongs here, where it does not have to be threaded
+	// through every AssignModuleID caller.)
 	cpu := platform.CpuFeatures.Raw()
 	// Reuse the `ret` buffer to write the first 8 bytes of the CPU features so that we can avoid the allocation.
 	binary.LittleEndian.PutUint64(ret[:8], cpu)
 	s.Write(ret[:8])
+	if gcSafepoints {
+		s.Write([]byte{1})
+	}
 	// Finally, write the hash to the ret buffer.
 	s.Sum(ret[:0])
 	return
@@ -71,7 +90,7 @@ func (e *engine) getCompiledModule(module *wasm.Module, listeners []api.Function
 			}
 		}
 		e.addCompiledModuleToMemory(module, cm)
-		// ponytail: entry preambles are deserialized from the cache entry
+		// Entry preambles are deserialized from the cache entry
 		// above (see the entryPreambleFormatVersion section in
 		// deserializeCompiledModule), so no recompile is needed here. One
 		// thing intentionally left out on this hit path: PerfMap entries for
@@ -123,10 +142,10 @@ func (e *engine) getCompiledModuleFromMemory(module *wasm.Module, increaseRefCou
 }
 
 func (e *engine) addCompiledModuleToCache(module *wasm.Module, cm *compiledModule) (err error) {
-	if e.fileCache == nil || module.IsHostModule {
+	if e.fileCache == nil || module.IsHostModule || filecache.ReadOnly(e.fileCache) {
 		return
 	}
-	err = e.fileCache.Add(fileCacheKey(module), serializeCompiledModule(e.wazyVersion, cm))
+	err = e.fileCache.Add(fileCacheKey(module, e.gcSafepoints()), serializeCompiledModule(e.wazyVersion, cm))
 	return
 }
 
@@ -137,7 +156,7 @@ func (e *engine) getCompiledModuleFromCache(module *wasm.Module) (cm *compiledMo
 
 	// Check if the entries exist in the external cache.
 	var cached io.ReadCloser
-	cached, hit, err = e.fileCache.Get(fileCacheKey(module))
+	cached, hit, err = e.fileCache.Get(fileCacheKey(module, e.gcSafepoints()))
 	if !hit || err != nil {
 		return
 	}
@@ -148,15 +167,35 @@ func (e *engine) getCompiledModuleFromCache(module *wasm.Module) (cm *compiledMo
 	// Note: cached.Close is ensured to be called in deserializeCodes.
 	cm, staleCache, err = deserializeCompiledModule(e.wazyVersion, cached)
 	if err != nil {
+		if filecache.ReadOnly(e.fileCache) {
+			err = fmt.Errorf("%w: %w", filecache.ErrCorrupt, err)
+		}
 		hit = false
 		return
 	} else if staleCache {
-		return nil, false, e.fileCache.Delete(fileCacheKey(module))
+		if filecache.ReadOnly(e.fileCache) {
+			return nil, false, filecache.ErrStale
+		}
+		return nil, false, e.fileCache.Delete(fileCacheKey(module, e.gcSafepoints()))
 	}
 	return
 }
 
-var magic = []byte{'N', 'A', 'T', 'I', 'V', 'E'}
+// magic starts every cache entry, and is part of its key, so changing it
+// when the layout changes makes older entries miss rather than misparse.
+// "NATIV2" aligns the native code to platform.CodeFileAlignment.
+var magic = []byte{'N', 'A', 'T', 'I', 'V', '2'}
+
+// executablePadding returns the number of zero bytes between the end of the
+// code length field, which ends at offset in the entry, and the native code.
+// The padding aligns the code so that a file cache hit can map it from the
+// entry rather than copy it (see readExecutable).
+func executablePadding(offset int) int {
+	return (platform.CodeFileAlignment - offset%platform.CodeFileAlignment) % platform.CodeFileAlignment
+}
+
+// zeroPadding is the source of executablePadding's zero bytes.
+var zeroPadding [platform.CodeFileAlignment]byte
 
 func serializeCompiledModule(wazyVersion string, cm *compiledModule) io.Reader {
 	// The native code (cm.executable) is often hundreds of KiB; copying it
@@ -267,15 +306,6 @@ func serializeCompiledModule(wazyVersion string, cm *compiledModule) io.Reader {
 		tail.Write(u64.LeBytes(uint64(sz)))
 	}
 
-	// Interrupt-check interval: a format-version byte then the interval (8
-	// bytes). This is part of the module's compile identity and seeds the
-	// runtime interruptCheckMask, so a cache-loaded module keeps the yield
-	// frequency it was compiled with (rather than defaulting to 0 =
-	// check-every-iteration). Own version byte so an older cache entry lacking
-	// this section is detected as stale rather than misparsed.
-	tail.WriteByte(interruptIntervalFormatVersion)
-	tail.Write(u64.LeBytes(cm.interruptCheckInterval))
-
 	// Entry preambles: position-independent Go->wasm trampolines, one per
 	// entry in the module's TypeSection (see compileEntryPreambles). They're
 	// pure register-relative code with no absolute-address fixups, so the
@@ -312,18 +342,82 @@ func serializeCompiledModule(wazyVersion string, cm *compiledModule) io.Reader {
 		tail.Write(u32.LeBytes(crc32.Checksum(cm.entryPreambles, crc)))
 	}
 
+	// GC root spill size: maxGCRoots is baked into the safepoints of the code above as a compile-time
+	// constant, and the call engine sizes the spill region at the bottom of the stack from it. A cache hit
+	// that lost it reserved no region, so every safepoint spilled below the stack buffer and the collector
+	// never read the spilled roots. Layout: gcRootsFormatVersion (1 byte), maxGCRoots (4 bytes).
+	tail.WriteByte(gcRootsFormatVersion)
+	tail.Write(u32.LeBytes(uint32(cm.maxGCRoots)))
+
 	// *bytes.Buffer already implements io.Reader; MultiReader drains each once,
 	// which is exactly the single-pass consumption fileCache.Add performs. Only
 	// the executable needs a wrapping reader (it's a raw []byte). This avoids
 	// the extra bytes.NewReader wrappers around the head/tail buffers.
-	return io.MultiReader(head, bytes.NewReader(cm.executable), tail)
+	if len(cm.executable) == 0 {
+		return io.MultiReader(head, tail)
+	}
+	pad := bytes.NewReader(zeroPadding[:executablePadding(headSize)])
+	return io.MultiReader(head, pad, bytes.NewReader(cm.executable), tail)
+}
+
+// readExecutable reads executableLen bytes of native code, at offset in the
+// cache entry, and the checksum after them, from bufReader. When the entry is
+// a file, it maps the code from the file instead of copying it, so the code
+// is shared through the page cache and only becomes resident as it runs; the
+// bytes are still read through bufReader, which doesn't touch the mapping, to
+// verify the checksum. Where the file can't be mapped, it copies, as before.
+func readExecutable(rc io.ReadCloser, bufReader *bufio.Reader, offset int64, executableLen uint64) (_ []byte, err error) {
+	var code []byte
+	mapped := false
+	if f, ok := rc.(*os.File); ok {
+		code, err = platform.MapCodeSegmentFromFile(f, offset, int(executableLen))
+		mapped = err == nil
+	}
+	if !mapped {
+		if code, err = platform.MmapCodeSegment(int(executableLen)); err != nil {
+			return nil, fmt.Errorf("compilationcache: error mmapping executable (len=%d): %v", executableLen, err)
+		}
+	}
+	defer func() {
+		if err != nil {
+			_ = platform.MunmapCodeSegment(code)
+		}
+	}()
+
+	var expected uint32
+	if mapped {
+		h := crc32.New(crc)
+		if _, err = io.CopyN(h, bufReader, int64(executableLen)); err != nil {
+			return nil, fmt.Errorf("compilationcache: error reading executable (len=%d): %v", executableLen, err)
+		}
+		expected = h.Sum32()
+	} else {
+		if _, err = io.ReadFull(bufReader, code); err != nil {
+			return nil, fmt.Errorf("compilationcache: error reading executable (len=%d): %v", executableLen, err)
+		}
+		expected = crc32.Checksum(code, crc)
+	}
+
+	var checksum [4]byte
+	if _, err = io.ReadFull(bufReader, checksum[:]); err != nil {
+		return nil, fmt.Errorf("compilationcache: could not read checksum: %v", err)
+	} else if got := binary.LittleEndian.Uint32(checksum[:]); expected != got {
+		return nil, fmt.Errorf("compilationcache: checksum mismatch (expected %d, got %d)", expected, got)
+	}
+
+	if !mapped {
+		if err = platform.MprotectCodeSegment(code); err != nil {
+			return nil, err
+		}
+	}
+	return code, nil
 }
 
 // ehTableFormatVersion guards the exception side-table cache section
 // (cm.ehTables / cm.functionFrameSizes) independently of wazyVersion: bump
 // this whenever that section's binary layout changes, so that old cache
 // entries are detected as stale rather than misparsed.
-const ehTableFormatVersion = 1
+const ehTableFormatVersion = 2
 
 // tryTableInfoFormatVersion guards the try-table-info cache section
 // (cm.tryTableInfo) independently of wazyVersion, same rationale as
@@ -332,19 +426,20 @@ const ehTableFormatVersion = 1
 // entries are detected as stale rather than misparsed.
 const tryTableInfoFormatVersion = 1
 
-// interruptIntervalFormatVersion guards the trailing interrupt-check-interval
-// scalar, same rationale as ehTableFormatVersion: a cache entry written before
-// this section existed hits EOF at the version byte and is treated as stale
-// (forcing one recompile) rather than misparsed.
-const interruptIntervalFormatVersion = 1
-
 // entryPreambleFormatVersion guards the trailing entry-preambles cache
 // section (cm.entryPreambles / cm.entryPreamblesPtrs), same rationale as
-// ehTableFormatVersion / interruptIntervalFormatVersion: its own version byte
-// means a cache entry written before this section existed (or under an
-// incompatible layout) hits EOF/mismatch here and is treated as stale rather
-// than misparsed.
-const entryPreambleFormatVersion = 1
+// ehTableFormatVersion: its own version byte means a cache entry written before
+// this section existed (or under an incompatible layout) hits EOF/mismatch here
+// and is treated as stale rather than misparsed.
+//
+// Bumped to 2 when the interrupt-check-interval section that used to precede it
+// was removed: without the bump an older entry's interval version byte would be
+// read as this one's and its scalar misparsed as preamble data.
+const entryPreambleFormatVersion = 2
+
+// gcRootsFormatVersion guards the trailing GC-roots section (cm.maxGCRoots). An entry written before it existed
+// hits EOF there and is treated as stale.
+const gcRootsFormatVersion = 1
 
 func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *compiledModule, staleCache bool, err error) {
 	defer reader.Close()
@@ -402,29 +497,24 @@ func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *co
 	}
 
 	if executableLen > 0 {
-		executable, err := platform.MmapCodeSegment(int(executableLen))
-		if err != nil {
-			err = fmt.Errorf("compilationcache: error mmapping executable (len=%d): %v", executableLen, err)
-			return nil, false, err
+		offset := cacheHeaderSize + 8*int(functionsNum) + 8
+		padding := executablePadding(offset)
+		if _, err = bufReader.Discard(padding); err != nil {
+			return nil, false, fmt.Errorf("compilationcache: error reading executable padding: %v", err)
 		}
-
-		_, err = io.ReadFull(bufReader, executable)
-		if err != nil {
-			err = fmt.Errorf("compilationcache: error reading executable (len=%d): %v", executableLen, err)
-			return nil, false, err
-		}
-
-		expected := crc32.Checksum(executable, crc)
-		if _, err = io.ReadFull(bufReader, eightBytes[:4]); err != nil {
-			return nil, false, fmt.Errorf("compilationcache: could not read checksum: %v", err)
-		} else if checksum := binary.LittleEndian.Uint32(eightBytes[:4]); expected != checksum {
-			return nil, false, fmt.Errorf("compilationcache: checksum mismatch (expected %d, got %d)", expected, checksum)
-		}
-
-		if err = platform.MprotectCodeSegment(executable); err != nil {
+		var executable []byte
+		if executable, err = readExecutable(reader, bufReader, int64(offset+padding), executableLen); err != nil {
 			return nil, false, err
 		}
 		cm.executable = executable
+		// Nothing owns the code until this returns cm, so release it if the
+		// rest of the entry fails to decode or turns out stale.
+		defer func() {
+			if err != nil || staleCache {
+				_ = platform.MunmapCodeSegment(executable)
+				cm = nil
+			}
+		}()
 	}
 
 	if _, err := io.ReadFull(bufReader, eightBytes[:1]); err != nil {
@@ -590,19 +680,6 @@ func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *co
 		cm.functionFrameSizes[i] = int64(sz)
 	}
 
-	// Interrupt-check interval section (see serialize). A cache entry written
-	// before this section existed EOFs here; treat that (and any short read or
-	// version mismatch) as stale so it is recompiled rather than loaded with a
-	// zero interval.
-	if _, err = io.ReadFull(bufReader, eightBytes[:1]); err != nil || eightBytes[0] != interruptIntervalFormatVersion {
-		return nil, true, nil
-	}
-	interval, err := readUint64(bufReader, &eightBytes)
-	if err != nil {
-		return nil, true, nil
-	}
-	cm.interruptCheckInterval = interval
-
 	// Entry preambles section (see serialize). A cache entry written before
 	// this section existed EOFs here; treat that (and any short read or
 	// version mismatch) as stale so it is recompiled rather than loaded
@@ -663,6 +740,13 @@ func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *co
 		}
 	}
 
+	if _, err = io.ReadFull(bufReader, eightBytes[:1]); err != nil || eightBytes[0] != gcRootsFormatVersion {
+		return nil, true, nil
+	}
+	if _, err = io.ReadFull(bufReader, eightBytes[:4]); err != nil {
+		return nil, true, nil
+	}
+	cm.maxGCRoots = int(binary.LittleEndian.Uint32(eightBytes[:4]))
 	return
 }
 

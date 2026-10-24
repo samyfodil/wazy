@@ -83,6 +83,26 @@ func (m *machine) LowerConditionalBranch(b *ssa.Instruction) {
 	cvalDef := m.compiler.ValueDefinition(cval)
 
 	switch {
+	case m.compiler.MatchInstr(cvalDef, ssa.OpcodeFuelDec):
+		// 		subs fuel, fuel, #1
+		// 		b.le <slow>              ;; or b.gt, for a Brz
+		//
+		// SUBS already sets the flags the branch needs, so the decrement and the
+		// test are the same instruction: the whole termination check is these two.
+		// Signed LE rather than EQ so that a counter driven below zero -- which a
+		// re-entry restoring an already-exhausted value can do -- keeps taking the
+		// slow path instead of wrapping around for another 2^64 ticks.
+		subs := m.allocateInstr()
+		subs.asALU(aluOpSubS, fuelVReg, operandNR(fuelVReg), operandImm12(1, 0), true)
+		m.insert(subs)
+		cc := le
+		if b.Opcode() == ssa.OpcodeBrz {
+			cc = gt
+		}
+		cbr := m.allocateInstr()
+		cbr.asCondBr(cc.asCond(), target, false /* ignored */)
+		m.insert(cbr)
+		cvalDef.Instr.MarkLowered()
 	case m.compiler.MatchInstr(cvalDef, ssa.OpcodeIcmp): // This case, we can use the ALU flag set by SUBS instruction.
 		cvalInstr := cvalDef.Instr
 		x, y, c := cvalInstr.IcmpData()
@@ -159,6 +179,12 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 	switch op := instr.Opcode(); op {
 	case ssa.OpcodeBrz, ssa.OpcodeBrnz, ssa.OpcodeJump, ssa.OpcodeBrTable:
 		panic("BUG: branching instructions are handled by LowerBranches")
+	case ssa.OpcodeFuelDec:
+		// The frontend only ever emits this immediately before the branch that
+		// consumes it, so LowerConditionalBranch above has already folded it in and
+		// marked it lowered. Reaching here means something moved it away from its
+		// branch, which would leave the decrement without its test.
+		panic("BUG: FuelDec must be folded into the conditional branch consuming it")
 	case ssa.OpcodeReturn:
 		panic("BUG: return must be handled by backend.Compiler")
 	case ssa.OpcodeIadd, ssa.OpcodeIsub:

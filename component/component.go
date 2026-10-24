@@ -81,7 +81,11 @@ func NewCompileCache() *CompileCache { return instance.NewCompileCache() }
 // arguments and results and of host-import args/results.
 //
 // A list of a fixed-width primitive is the Go slice of that primitive rather
-// than a []Value -- see ListDesc in types.go.
+// than a []Value -- see ListDesc in types.go -- and a fixed-length
+// list<T, N> has the same shape, of N elements. A map<K,V> has no Canonical ABI
+// representation of its own and lifts exactly as list<tuple<K,V>> would: a
+// []Value of two-element []Value{key, value} pairs -- see MapDesc and
+// MapOf.
 type Value = abi.Value
 
 // TypeDesc, PrimitiveDesc, and the rest of the WIT type vocabulary live in
@@ -110,6 +114,22 @@ type AsyncCall = instance.AsyncCall
 // (or "" for a bare top-level func import).
 func WithImport(iface, name string, fn HostFunc, params, results []TypeDesc) Option {
 	return instance.WithImport(iface, name, fn, params, results)
+}
+
+// WithComponentImport supplies componentBytes, a component binary, for the
+// component's component import name -- `(import "name" (component ...))`,
+// which `wac compose --import-dependencies` emits for each dependency it does
+// not embed. The importing component instantiates the supplied component
+// itself, as many times and with whatever arguments its own instance section
+// says; with WithCompileCache, the supplied component's decode and
+// compilation are cached like the importer's.
+//
+// The supplied component is checked against the type the import declares,
+// by the Component Model's subtyping rules, before anything is instantiated:
+// it may import less and export more, and what it imports and exports must
+// match. Instantiate fails with the mismatch otherwise.
+func WithComponentImport(name string, componentBytes []byte) Option {
+	return instance.WithComponentImport(name, componentBytes)
 }
 
 // WithAsyncImport registers fn as the component's async-lowered import

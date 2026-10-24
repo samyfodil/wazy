@@ -218,7 +218,7 @@ func TestRuntime_CompileModule_CacheHitSkipsFunctionBodyValidation(t *testing.T)
 	// override, so the interval is wasm.DefaultInterruptCheckInterval), so the
 	// mock engine can be pre-seeded as already holding a compiled artifact.
 	var idOnly wasm.Module
-	idOnly.AssignModuleID(bin, nil, false, wasm.DefaultInterruptCheckInterval)
+	idOnly.AssignModuleID(bin, nil, false)
 
 	t.Run("cold: full validation runs and rejects the bad function body", func(t *testing.T) {
 		engine := &mockEngine{name: "mock", cachedModules: map[*wasm.Module]struct{}{}}

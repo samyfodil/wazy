@@ -1,0 +1,5 @@
+package a:b@1.0.0;
+world w {
+  @deprecated(version = 1.0.0)
+  import f: func();
+}

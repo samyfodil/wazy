@@ -1,0 +1,6 @@
+package a:b;
+world v { type t = u8; }
+world w {
+  import t: func();
+  include v;
+}

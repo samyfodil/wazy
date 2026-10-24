@@ -15,6 +15,10 @@ const (
 // Flatten converts a type into a sequence of core WebAssembly value types.
 // This mirrors the canonical ABI flatten_type() function.
 // Returns a slice of core type names: "i32", "i64", "f32", "f64".
+//
+// One departure, which no caller can observe: a fixed-length list wider than
+// MaxFlatParams is spelled out only until it is wider (see fixedListCopies),
+// since any type holding one spills to memory instead of flattening.
 func Flatten(t binary.TypeDesc, resolve Resolver) ([]string, error) {
 	switch desc := t.(type) {
 	// Primitives map directly
@@ -24,6 +28,12 @@ func Flatten(t binary.TypeDesc, resolve Resolver) ([]string, error) {
 	// Composite types
 	case binary.ListDesc:
 		return flattenList(desc, resolve)
+	case binary.MapDesc:
+		// map<K,V> despecializes to list<tuple<K,V>> (see MapDesc's doc):
+		// pointer + length, independent of K/V, same as flattenList.
+		return flattenList(binary.ListDesc{}, resolve)
+	case binary.FixedListDesc:
+		return flattenFixedList(desc, resolve)
 	case binary.RecordDesc:
 		return flattenRecord(desc, resolve)
 	case binary.VariantDesc:

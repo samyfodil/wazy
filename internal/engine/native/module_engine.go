@@ -37,10 +37,10 @@ type (
 		// gcEnabled caches whether this runtime enables the GC proposal, so the per-call check in
 		// callWithStack is one load off an already-hot pointer rather than three dependent ones.
 		gcEnabled bool
-		// gcRootsReserve is callEngine.gcRootsReserve's answer, precomputed. It is read twice on every
-		// call -- to size the stack and to place its limit -- and deriving it there meant reaching
-		// through to the compiled module for maxGCRoots on a path that otherwise never touches it.
-		gcRootsReserve int32
+		// gcRootsReserve is the engine's root region size (see callEngine.gcRootsReserve), nil without the
+		// collector. It is read twice on every call -- to size the stack and to place its limit -- so it is
+		// kept here rather than reached through the compiled module.
+		gcRootsReserve *atomic.Int32
 	}
 
 	functionInstance struct {
@@ -239,9 +239,9 @@ func (m *moduleEngine) NewFunction(index wasm.Index) api.Function {
 		numberOfResults:        typ.ResultNumInUint64,
 	}
 
-	if p.interruptCheckInterval != 0 {
-		ce.execCtx.interruptCheckMask = p.interruptCheckInterval - 1
-	}
+	// Make this callEngine's in-flight slot visible to the memories it can run
+	// against, so a close can tell whether it is mid-call. See wasm.CallSlot.
+	m.module.RegisterCallSlot(&ce.slot)
 
 	sharedFunctions := p.sharedFunctions
 	ce.execCtx.memoryGrowTrampolineAddress = sharedFunctions.memoryGrowAddress
@@ -254,9 +254,7 @@ func (m *moduleEngine) NewFunction(index wasm.Index) api.Function {
 	ce.execCtx.memoryNotifyTrampolineAddress = sharedFunctions.memoryNotifyAddress
 	ce.execCtx.throwAllocTrampolineAddress = sharedFunctions.throwAllocTrampolineAddress
 	ce.execCtx.throwTrampolineAddress = sharedFunctions.throwTrampolineAddress
-	ce.execCtx.tryTableEnterTrampolineAddress = sharedFunctions.tryTableEnterAddress
 	ce.execCtx.gcCheckTrampolineAddress = sharedFunctions.gcCheckAddress
-	ce.execCtx.tryTableLeaveTrampolineAddress = sharedFunctions.tryTableLeaveAddress
 	ce.execCtx.memmoveAddress = memmovPtr
 	ce.execCtx.memclrAddress = memclrPtr
 	ce.init()

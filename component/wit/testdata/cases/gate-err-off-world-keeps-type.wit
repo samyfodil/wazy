@@ -1,0 +1,5 @@
+package a:b;
+@unstable(feature = active)
+world w {
+  type t = u32;
+}

@@ -24,14 +24,6 @@ func unwindStackForThrow(_, fp, top uintptr, frames []nativeapi.ThrowFrame) []na
 	return amd64.UnwindStackForThrow(fp, top, frames)
 }
 
-// firstReturnAddress returns the return address of the frame at (sp, fp) --
-// on amd64 recovered in O(1) from the RBP chain at fp. Used at
-// try_table-enter time to capture the enter-continuation (activeCatchScope.resumePC);
-// see call_engine.go's ExitCodeTryTableEnter.
-func firstReturnAddress(_, fp, _ uintptr) uintptr {
-	return amd64.FirstReturnAddress(fp)
-}
-
 // resolveThrowTransferSPFP resolves the SP/FP afterGoFunctionCallEntrypoint
 // needs to resume directly inside the frame identified by fr. Frame 0 (the
 // throw site) already has both known exactly (they're what a Go exit always
@@ -48,12 +40,12 @@ func resolveThrowTransferSPFP(fr nativeapi.ThrowFrame, frameSize int64) (sp, fp 
 	return fr.FP - uintptr(frameSize), fr.FP
 }
 
-// afterThrowTransferEntrypoint transfers control to a throw's matched landing
+// afterThrowTransferEntrypointAsm transfers control to a throw's matched landing
 // pad, restoring callee-saved registers from execCtx.savedRegisters (via
 // restoreFn) before jumping -- see (*callEngine).handleThrow and the
 // backend.Machine.CompileThrowTransferRegisterRestore doc comment for why
 // this, and not afterGoFunctionCallEntrypoint, is needed here.
-func afterThrowTransferEntrypoint(restoreFn *byte, executionContextPtr uintptr, sp, fp, targetPC uintptr) {
+func afterThrowTransferEntrypointAsm(restoreFn *byte, executionContextPtr uintptr, sp, fp, targetPC uintptr) {
 	rawAfterThrowTransferEntrypoint(restoreFn, executionContextPtr, sp, fp, targetPC)
 }
 

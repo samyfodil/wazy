@@ -336,7 +336,7 @@ type fsMount struct {
 // what its file happens to permit today.
 //
 // A descriptor holds no open sys.File: every operation opens the path, acts,
-// and closes again. ponytail: that is one extra open+close per stream chunk;
+// and closes again. The trade-off: that is one extra open+close per stream chunk;
 // it buys a descriptor (and stream) lifetime with no host resource to leak
 // when a guest drops a handle without telling us, or aborts mid-call. Cache
 // the open file on the node -- with a withHostResourceDtor to close it -- if

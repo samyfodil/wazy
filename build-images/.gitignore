@@ -1,0 +1,9 @@
+# Sample build outputs (build.sh / test.sh)
+*/sample/out/
+*/sample/gen/
+*/sample/build/
+*/sample/target/
+*/sample/wit/deps/
+*/sample/*/wit/deps/
+*/sample/*/bin/
+*/sample/*/obj/
