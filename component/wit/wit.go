@@ -80,10 +80,8 @@
 // type kept by its own gate inside an interface or world that is left out.
 // An @since gate needs a package version no earlier than its own.
 //
-// One difference from wit-parser 1.262.0: there, a type or use inside a world
-// that its gate leaves out is an error ("found a reference to a type which is
-// excluded"), because its world pass maps the type before checking its gate.
-// Here it is left out like any other item.
+// A type or use of a world that its gate leaves out is an error, though, as
+// in wit-parser, whose world pass maps the type before it checks the gate.
 package wit
 
 import (

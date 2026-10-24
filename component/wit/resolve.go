@@ -485,10 +485,18 @@ func (r *resolver) world(w *worldState) error {
 	}
 	w.done = true
 	s := newScope(r, w.file, "", "world "+w.ast.Name)
+	// wit-parser refuses a type or use of a world that its gate leaves out:
+	// its world pass maps the type before it checks the gate.
+	excluded := func(name string) error {
+		return fmt.Errorf("wit: world %s: %s: %w", w.ast.Name, name, errExcluded("type"))
+	}
 	for _, item := range w.ast.Items {
 		switch it := item.(type) {
 		case *ast.TypeDef:
 			funcs, err := s.declareType(it)
+			if err == nil && s.off[it.Name] {
+				err = excluded(it.Name)
+			}
 			if err != nil {
 				return err
 			}
@@ -500,6 +508,12 @@ func (r *resolver) world(w *worldState) error {
 		case *ast.Use:
 			if err := s.declareUse(it); err != nil {
 				return err
+			}
+			// The use's names share its gate: one is left out when all are.
+			if len(it.Names) > 0 {
+				if name, _ := it.Names[0].Local(); s.off[name] {
+					return excluded(name)
+				}
 			}
 		}
 	}

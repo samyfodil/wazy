@@ -44,16 +44,6 @@ var skipped = map[string]string{
 	"kinds-of-deps": "deps encoded as components (.wasm, .wat)",
 }
 
-// divergences are the results that differ from wit-parser's on purpose, by
-// input and feature set.
-var divergences = map[string]string{
-	// wit-parser rejects a type or use inside a world whose gate leaves it
-	// out: its world pass maps the type before checking the gate. Here it
-	// is left out like any other item (see the package doc).
-	"gated-include.none":    "gated world use",
-	"gate-world-types.none": "gated world type",
-}
-
 // TestWitParserUI parses each of wit-parser's inputs -- a .wit file, or a
 // directory with deps/ -- under each feature set and compares the result
 // with wit-parser's: the same packages, interfaces, types, funcs and world
@@ -91,12 +81,6 @@ func runOracle(t *testing.T, dir string, shipped bool) {
 					wantJSON = readTestdata(t, path.Join(dir, name+".wit.json"))
 				} else {
 					wantJSON, wantErr = oracle(t, name+"."+set)
-				}
-				if why, ok := divergences[name+"."+set]; ok {
-					if gotErr != nil || wantErr == "" {
-						t.Fatalf("divergence (%s) no longer holds: ours %v, wit-parser %q", why, gotErr, wantErr)
-					}
-					return
 				}
 				switch {
 				case wantErr != "":
