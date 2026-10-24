@@ -9,10 +9,10 @@ import (
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/integration_test/spectest"
 	"github.com/samyfodil/wazy/internal/platform"
+	"github.com/samyfodil/wazy/internal/testing/upstream"
 )
 
-//go:embed testdata/*.wasm
-//go:embed testdata/*.json
+//go:embed all:testdata
 var testcases embed.FS
 
 // The feature set the GC proposal's own branch assumes: 2.0 plus the three proposals it builds on. Not the
@@ -29,9 +29,11 @@ func TestCompiler(t *testing.T) {
 	if !platform.CompilerSupported() {
 		t.Skip()
 	}
+	upstream.Require(t, testcases, "testdata/*.json", "build.spectest.gc")
 	spectest.Run(t, testcases, context.Background(), wazy.NewRuntimeConfigCompiler().WithCoreFeatures(enabledFeatures))
 }
 
 func TestInterpreter(t *testing.T) {
+	upstream.Require(t, testcases, "testdata/*.json", "build.spectest.gc")
 	spectest.Run(t, testcases, context.Background(), wazy.NewRuntimeConfigInterpreter().WithCoreFeatures(enabledFeatures))
 }

@@ -1,0 +1,3 @@
+# Fetched by `make build.spectest.multi_memory`. Only this file is committed: the tests embed the directory.
+*
+!.gitignore

@@ -43,7 +43,7 @@ func typedFuncRefsConfigs() []struct {
 func TestCallRefWithConcreteRefLocals(t *testing.T) {
 	buf, err := os.ReadFile("../spectest/typed-function-references/testdata/call_ref.0.wasm")
 	if err != nil {
-		t.Skipf("could not read call_ref.0.wasm: %v", err)
+		t.Skipf("no call_ref.0.wasm: run `make build.spectest.typed_function_references` to fetch it (%v)", err)
 	}
 
 	configs := []struct {
@@ -174,7 +174,7 @@ func TestRefAsNonNullTrapOnNull(t *testing.T) {
 func TestBrOnNull(t *testing.T) {
 	buf, err := os.ReadFile("../spectest/typed-function-references/testdata/br_on_null.0.wasm")
 	if err != nil {
-		t.Skipf("could not read br_on_null.0.wasm: %v", err)
+		t.Skipf("no br_on_null.0.wasm: run `make build.spectest.typed_function_references` to fetch it (%v)", err)
 	}
 
 	for _, tc := range typedFuncRefsConfigs() {
@@ -225,7 +225,7 @@ func TestBrOnNonNull(t *testing.T) {
 	// Instead, test via a pre-compiled spec wasm.
 	buf, err := os.ReadFile("../spectest/typed-function-references/testdata/br_on_non_null.0.wasm")
 	if err != nil {
-		t.Skipf("could not read br_on_non_null.0.wasm: %v", err)
+		t.Skipf("no br_on_non_null.0.wasm: run `make build.spectest.typed_function_references` to fetch it (%v)", err)
 	}
 
 	for _, tc := range typedFuncRefsConfigs() {

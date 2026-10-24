@@ -17,6 +17,7 @@ import (
 	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
 	"github.com/samyfodil/wazy/internal/testing/require"
+	"github.com/samyfodil/wazy/internal/testing/upstream"
 	"github.com/samyfodil/wazy/internal/wasm"
 	"github.com/samyfodil/wazy/logging"
 )
@@ -41,6 +42,7 @@ func runAllFileCacheTests(t *testing.T, config wazy.RuntimeConfig) {
 }
 
 func testSpecTestCompilerCache(t *testing.T, config wazy.RuntimeConfig) {
+	upstream.Require(t, v1.Testcases, "testdata/*.json", "build.spectest.v1")
 	const cachePathKey = "FILE_CACHE_DIR"
 	cacheDir := os.Getenv(cachePathKey)
 	if len(cacheDir) == 0 {

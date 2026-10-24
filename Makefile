@@ -117,6 +117,38 @@ spectest_base_dir := internal/integration_test/spectest
 # becomes 5000 and the flake goes away.
 gh_api_curl := curl -fsSL --retry 5 --retry-all-errors $(if $(GITHUB_TOKEN),-H "Authorization: Bearer $(GITHUB_TOKEN)")
 
+# The tools the fetched suites are built with, pinned like the suites themselves: another version can emit
+# different bytes. Each is downloaded for this host into build/tools on first use, rather than taken from
+# whatever happens to be on PATH.
+wabt_version := 1.0.39
+wasm_tools_version := 1.253.0
+tools_dir := $(CURDIR)/build/tools
+wast2json := $(tools_dir)/wabt-$(wabt_version)/wast2json
+wasm_tools := $(tools_dir)/wasm-tools-$(wasm_tools_version)/wasm-tools
+host_arm64 = $(filter arm64 aarch64,$(shell uname -m))
+host_darwin = $(filter Darwin,$(shell uname -s))
+wabt_release = wabt-$(wabt_version)-$(if $(host_darwin),macos,linux)-$(if $(host_arm64),arm64,x64)
+wasm_tools_release = wasm-tools-$(1)-$(if $(host_arm64),aarch64,x86_64)-$(if $(host_darwin),macos,linux)
+
+$(wast2json):
+	@rm -rf $(@D) $(@D).tmp && mkdir -p $(@D).tmp
+	@curl -fsSL --retry 5 --retry-all-errors \
+		https://github.com/WebAssembly/wabt/releases/download/$(wabt_version)/$(wabt_release).tar.gz \
+		| tar --strip-components 2 -C $(@D).tmp -xzf - wabt-$(wabt_version)/bin/wast2json
+	@mv $(@D).tmp $(@D)
+
+$(tools_dir)/wasm-tools-%/wasm-tools:
+	@rm -rf $(@D) $(@D).tmp && mkdir -p $(@D).tmp
+	@curl -fsSL --retry 5 --retry-all-errors \
+		https://github.com/bytecodealliance/wasm-tools/releases/download/v$*/$(call wasm_tools_release,$*).tar.gz \
+		| tar --strip-components 1 -C $(@D).tmp -xzf - $(call wasm_tools_release,$*)/wasm-tools
+	@mv $(@D).tmp $(@D)
+
+# Empties a fetched directory but for the .gitignore that keeps it in the tree: the tests embed the
+# directory, so it has to exist whether or not anything has been fetched into it. Once a suite is built
+# its .wast go too: the tests read the .json and .wasm, and the source would only bloat their binaries.
+clean_fetched = find $(1) -mindepth 1 ! -name .gitignore -delete
+
 
 # WebAssembly/testsuite as a submodule: the amalgamated core suite, pinned by gitlink rather than
 # copied in. Suites generated from it keep no cases in the tree -- refreshing upstream is a submodule
@@ -166,6 +198,10 @@ spec_version_tail_call := 88e97b0f742f4c3ee01fea683da130f344dd7b02
 
 spectest_extended_const_dir := $(spectest_base_dir)/extended-const
 spectest_extended_const_testdata_dir := $(spectest_extended_const_dir)/testdata
+# These stay committed: they are a trimmed copy, inherited from wazero, of the proposal's data.wast, elem.wast
+# and global.wast (WebAssembly/testsuite@0a394e3c proposals/extended-const), which exists nowhere upstream.
+# The untrimmed files also assert 2.0's rule that a constant expression reads only imported globals, and
+# wazy, with extended-const enabled, accepts a module-defined one.
 
 spectest_exception_handling_dir := $(spectest_base_dir)/exception-handling
 spectest_exception_handling_testdata_dir := $(spectest_exception_handling_dir)/testdata
@@ -239,9 +275,8 @@ build.spectest:
 	@$(MAKE) build.spectest.gc
 
 .PHONY: build.spectest.v1
-build.spectest.v1: # Note: wabt by default uses >1.0 features, so wast2json flags might drift as they include more. See WebAssembly/wabt#1878
-	@rm -rf $(spectest_v1_testdata_dir)
-	@mkdir -p $(spectest_v1_testdata_dir)
+build.spectest.v1: $(wast2json) # Note: wabt by default uses >1.0 features, so wast2json flags might drift as they include more. See WebAssembly/wabt#1878
+	@$(call clean_fetched,$(spectest_v1_testdata_dir))
 	@cd $(spectest_v1_testdata_dir) \
 		&& $(gh_api_curl) 'https://api.github.com/repos/WebAssembly/spec/contents/test/core?ref=$(spec_version_v1)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
 	@cd $(spectest_v1_testdata_dir) && for f in `find . -name '*.wast'`; do \
@@ -255,7 +290,7 @@ build.spectest.v1: # Note: wabt by default uses >1.0 features, so wast2json flag
 		perl -pi -e 's/\(assert_return_arithmetic_nan\s(\(invoke\s"[a-z._0-9]+"\s\((f[0-9]{2})\.const\s[a-z0-9.+:-]+\)\s\([a-z0-9.\s+-:]+\)\))\)/\(assert_return $$1 \($$2.const nan:arithmetic\)\)/g' $$f; \
 		perl -pi -e 's/\(assert_return_canonical_nan\s(\(invoke\s"[a-z._0-9]+"\s\((f[0-9]{2})\.const\s[a-z0-9.+:-]+\)\))\)/\(assert_return $$1 \($$2.const nan:canonical\)\)/g' $$f; \
 		perl -pi -e 's/\(assert_return_arithmetic_nan\s(\(invoke\s"[a-z._0-9]+"\s\((f[0-9]{2})\.const\s[a-z0-9.+:-]+\)\))\)/\(assert_return $$1 \($$2.const nan:arithmetic\)\)/g' $$f; \
-		wast2json \
+		$(wast2json) \
 			--disable-saturating-float-to-int \
 			--disable-sign-extension \
 			--disable-simd \
@@ -264,39 +299,40 @@ build.spectest.v1: # Note: wabt by default uses >1.0 features, so wast2json flag
 			--disable-reference-types \
 			--debug-names $$f; \
 	done
+	@rm -f $(spectest_v1_testdata_dir)/*.wast
 
 .PHONY: build.spectest.v2
-build.spectest.v2: # Note: SIMD cases are placed in the "simd" subdirectory.
-	@rm -rf $(spectest_v2_testdata_dir)
-	@mkdir -p $(spectest_v2_testdata_dir)
+build.spectest.v2: $(wast2json) # Note: SIMD cases are placed in the "simd" subdirectory.
+	@$(call clean_fetched,$(spectest_v2_testdata_dir))
 	@cd $(spectest_v2_testdata_dir) \
 		&& $(gh_api_curl) 'https://api.github.com/repos/WebAssembly/spec/contents/test/core?ref=$(spec_version_v2)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
 	@cd $(spectest_v2_testdata_dir) \
 		&& $(gh_api_curl) 'https://api.github.com/repos/WebAssembly/spec/contents/test/core/simd?ref=$(spec_version_v2)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
 	@cd $(spectest_v2_testdata_dir) && for f in `find . -name '*.wast'`; do \
-		wast2json --debug-names --no-check $$f || true; \
+		$(wast2json) --debug-names --no-check $$f || true; \
 	done # Ignore the error here as some tests (e.g. comments.wast right now) are not supported by wast2json yet.
+	@rm -f $(spectest_v2_testdata_dir)/*.wast
 
 .PHONY: build.spectest.v3
-build.spectest.v3: $(spectest_testsuite_dir)/binary.wast # Needs wasm-tools: the corpus spans every 3.0 proposal, including the GC type section and memory64's "module definition".
+build.spectest.v3: $(wasm_tools) $(spectest_testsuite_dir)/binary.wast # Needs wasm-tools: the corpus spans every 3.0 proposal, including the GC type section and memory64's "module definition".
 	@rm -rf $(spectest_v3_testdata_dir)
 	@mkdir -p $(spectest_v3_testdata_dir)
 	@cp $(spectest_testsuite_dir)/*.wast $(spectest_v3_testdata_dir)/
 	@cd $(spectest_v3_testdata_dir) && for f in `find . -name '*.wast'`; do \
-		wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
+		$(wasm_tools) json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
 	done
 	@sh $(spectest_v3_dir)/assemble-text-modules.sh $(spectest_v3_testdata_dir)
 	@rm -f $(spectest_v3_testdata_dir)/*.wast # The submodule is the source; these were a working copy.
 
 .PHONY: build.spectest.v3_interaction
-build.spectest.v3_interaction: # Refreshes the vendored wasmtime cases, then rebuilds every case from its .wast.
+build.spectest.v3_interaction: $(wasm_tools) # Refreshes the vendored wasmtime cases, then rebuilds every case from its .wast.
 	@cd $(spectest_v3_interaction_testdata_dir) \
 		&& for f in $(wasmtime_interaction_wast_files); do \
 			curl -sfJL "https://raw.githubusercontent.com/bytecodealliance/wasmtime/$(wasmtime_version)/tests/misc_testsuite/$$f" \
 				-o "wasmtime-$$(echo $$f | tr '/' '-')"; \
 		done
 	@cd $(spectest_v3_interaction_testdata_dir) && rm -f *.json *.wasm && for f in `find . -name '*.wast'`; do \
-		wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
+		$(wasm_tools) json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
 	done
 
 # Note: We currently cannot build the "threads" subdirectory that spawns threads due to missing support in wast2json.
@@ -315,100 +351,100 @@ build.spectest.v3_interaction: # Refreshes the vendored wasmtime cases, then reb
 # two tables is invalid -- which wazy correctly accepts. It also imports a "shared_memory" the spectest
 # host module does not export.
 .PHONY: build.spectest.threads
-build.spectest.threads: $(spectest_testsuite_dir)/binary.wast
-	@rm -rf $(spectest_threads_testdata_dir)
-	@mkdir -p $(spectest_threads_testdata_dir)
+build.spectest.threads: $(wast2json) $(spectest_testsuite_dir)/binary.wast
+	@$(call clean_fetched,$(spectest_threads_testdata_dir))
 	@cd $(spectest_threads_testdata_dir) \
 		&& $(gh_api_curl) 'https://api.github.com/repos/WebAssembly/threads/contents/test/core/threads?ref=$(spec_version_threads)' | jq -r '.[]| .download_url' | grep -E "/atomic.wast" | xargs -Iurl curl -sJL url -O
 	@cp $(spectest_testsuite_dir)/proposals/threads/exports.wast $(spectest_testsuite_dir)/proposals/threads/memory.wast \
 		$(spectest_threads_testdata_dir)/
 	@cd $(spectest_threads_testdata_dir) && for f in `find . -name '*.wast'`; do \
-		wast2json --enable-threads --debug-names $$f; \
+		$(wast2json) --enable-threads --debug-names $$f; \
 	done
+	@rm -f $(spectest_threads_testdata_dir)/*.wast
 
 .PHONY: build.spectest.extended_const
-build.spectest.extended_const:
+build.spectest.extended_const: $(wast2json)
 	@cd $(spectest_extended_const_testdata_dir) && for f in `find . -name '*.wast'`; do \
-		wast2json --enable-extended-const --debug-names $$f; \
+		$(wast2json) --enable-extended-const --debug-names $$f; \
 	done
 
 .PHONY: build.spectest.tail_call
-build.spectest.tail_call:
-	@rm -rf $(spectest_tail_call_testdata_dir)
-	@mkdir -p $(spectest_tail_call_testdata_dir)
+build.spectest.tail_call: $(wast2json)
+	@$(call clean_fetched,$(spectest_tail_call_testdata_dir))
 	@cd $(spectest_tail_call_testdata_dir) \
 		&& $(gh_api_curl) 'https://api.github.com/repos/WebAssembly/testsuite/contents/proposals/tail-call?ref=$(spec_version_tail_call)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
 	@cd $(spectest_tail_call_testdata_dir) && for f in `find . -name '*.wast'`; do \
-		wast2json --enable-tail-call --debug-names $$f; \
+		$(wast2json) --enable-tail-call --debug-names $$f; \
 	done
+	@rm -f $(spectest_tail_call_testdata_dir)/*.wast
 
 .PHONY: build.spectest.exception_handling
-build.spectest.exception_handling:
-	@rm -rf $(spectest_exception_handling_testdata_dir)
-	@mkdir -p $(spectest_exception_handling_testdata_dir)
+build.spectest.exception_handling: $(wasm_tools)
+	@$(call clean_fetched,$(spectest_exception_handling_testdata_dir))
 	@cd $(spectest_exception_handling_testdata_dir) \
 		&& $(gh_api_curl) 'https://api.github.com/repos/WebAssembly/spec/contents/test/core/exceptions?ref=$(spec_version_exception_handling)' \
 		| jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
 	@cd $(spectest_exception_handling_testdata_dir) && for f in `find . -name '*.wast'`; do \
-		wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f || true; \
+		$(wasm_tools) json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f || true; \
 	done
+	@rm -f $(spectest_exception_handling_testdata_dir)/*.wast
 
 .PHONY: build.spectest.typed_function_references
-build.spectest.typed_function_references:
-	@rm -rf $(spectest_typed_function_references_testdata_dir)
-	@mkdir -p $(spectest_typed_function_references_testdata_dir)
+build.spectest.typed_function_references: $(wasm_tools)
+	@$(call clean_fetched,$(spectest_typed_function_references_testdata_dir))
 	@cd $(spectest_typed_function_references_testdata_dir) \
 		&& for f in $(typed_function_references_wast_files); do \
 			curl -sJL "https://raw.githubusercontent.com/WebAssembly/function-references/$(spec_version_typed_function_references)/test/core/$$f" -O; \
 		done
 	@cd $(spectest_typed_function_references_testdata_dir) && for f in `find . -name '*.wast'`; do \
-		wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f || true; \
+		$(wasm_tools) json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f || true; \
 	done
+	@rm -f $(spectest_typed_function_references_testdata_dir)/*.wast
 
 .PHONY: build.spectest.relaxed_simd
-build.spectest.relaxed_simd: # Needs wasm-tools: wast2json drops the proposal's multi-result "either" expectations.
-	@rm -rf $(spectest_relaxed_simd_testdata_dir)
-	@mkdir -p $(spectest_relaxed_simd_testdata_dir)
+build.spectest.relaxed_simd: $(wasm_tools) # Needs wasm-tools: wast2json drops the proposal's multi-result "either" expectations.
+	@$(call clean_fetched,$(spectest_relaxed_simd_testdata_dir))
 	@cd $(spectest_relaxed_simd_testdata_dir) \
 		&& $(gh_api_curl) 'https://api.github.com/repos/WebAssembly/relaxed-simd/contents/test/core/relaxed-simd?ref=$(spec_version_relaxed_simd)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
 	@cd $(spectest_relaxed_simd_testdata_dir) && for f in `find . -name '*.wast'`; do \
-		wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
+		$(wasm_tools) json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
 	done
+	@rm -f $(spectest_relaxed_simd_testdata_dir)/*.wast
 
 .PHONY: build.spectest.memory64
-build.spectest.memory64: # Needs wasm-tools: wast2json cannot emit the "module definition" command memory64.wast uses.
-	@rm -rf $(spectest_memory64_testdata_dir)
-	@mkdir -p $(spectest_memory64_testdata_dir)
+build.spectest.memory64: $(wasm_tools) # Needs wasm-tools: wast2json cannot emit the "module definition" command memory64.wast uses.
+	@$(call clean_fetched,$(spectest_memory64_testdata_dir))
 	@cd $(spectest_memory64_testdata_dir) \
 		&& for f in $(memory64_wast_files); do \
 			curl -sJL "https://raw.githubusercontent.com/WebAssembly/memory64/$(spec_version_memory64)/test/core/$$f" -O; \
 		done
 	@cd $(spectest_memory64_testdata_dir) && for f in `find . -name '*.wast'`; do \
-		wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
+		$(wasm_tools) json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
 	done
+	@rm -f $(spectest_memory64_testdata_dir)/*.wast
 
 .PHONY: build.spectest.gc
-build.spectest.gc: # Needs wasm-tools: wast2json does not support the GC proposal's type section.
-	@rm -rf $(spectest_gc_testdata_dir)
-	@mkdir -p $(spectest_gc_testdata_dir)
+build.spectest.gc: $(wasm_tools) # Needs wasm-tools: wast2json does not support the GC proposal's type section.
+	@$(call clean_fetched,$(spectest_gc_testdata_dir))
 	@cd $(spectest_gc_testdata_dir) \
 		&& for f in $(gc_wast_files); do \
 			curl -sfJL "https://raw.githubusercontent.com/WebAssembly/gc/$(spec_version_gc)/test/core/$$f" -o $$f \
 			|| curl -sfJL "https://raw.githubusercontent.com/WebAssembly/gc/$(spec_version_gc)/test/core/gc/$$f" -o $$f; \
 		done
 	@cd $(spectest_gc_testdata_dir) && for f in `find . -name '*.wast'`; do \
-		wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
+		$(wasm_tools) json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
 	done
+	@rm -f $(spectest_gc_testdata_dir)/*.wast
 
 .PHONY: build.spectest.multi_memory
-build.spectest.multi_memory:
-	@rm -rf $(spectest_multi_memory_testdata_dir)
-	@mkdir -p $(spectest_multi_memory_testdata_dir)
+build.spectest.multi_memory: $(wast2json)
+	@$(call clean_fetched,$(spectest_multi_memory_testdata_dir))
 	@cd $(spectest_multi_memory_testdata_dir) \
 		&& $(gh_api_curl) 'https://api.github.com/repos/WebAssembly/multi-memory/contents/test/core/multi-memory?ref=$(spec_version_multi_memory)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
 	@cd $(spectest_multi_memory_testdata_dir) && for f in `find . -name '*.wast'`; do \
-		wast2json --enable-multi-memory --debug-names $$f; \
+		$(wast2json) --enable-multi-memory --debug-names $$f; \
 	done
+	@rm -f $(spectest_multi_memory_testdata_dir)/*.wast
 
 # Component-model cases from the component-model repository and the Bytecode Alliance, fetched at a
 # pinned commit rather than copied in. Each .wast is one file, so it is curled; wit-parser's UI suite
