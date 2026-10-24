@@ -53,7 +53,7 @@ world base {
 
 world app {
   import api;
-  import acme:app/types@1.0.0;
+  import types;
   import log: func(msg: string);
   import inline: interface { ping: func() -> u8; }
   record req { body: list<u8> }
@@ -288,18 +288,14 @@ func TestParse_Worlds(t *testing.T) {
 	}
 }
 
-func TestParse_NoPackageDeclaration(t *testing.T) {
-	pkg := mustParse(t, "interface host { f: func(); }")
-	if pkg.Name != "" || pkg.Interface("host") == nil || pkg.Interface("host").Name != "host" {
-		t.Errorf("unnamed package: %+v", pkg)
-	}
-}
-
 // depsFS is a package split over two files, with a dep directory and a
 // single-file dep, plus files ParseFS must ignore.
 func depsFS() fstest.MapFS {
 	return fstest.MapFS{
 		"wit/a.wit": {Data: []byte(`
+use wasi:io/streams@0.2.0;
+use acme:single/x as sx;
+use other as local-alias;
 interface host {
   use streams.{input-stream as stream-in};
   use sx.{token};
@@ -307,16 +303,13 @@ interface host {
   read: func(s: borrow<stream-in>, t: token, th: thing) -> own<stream-in>;
 }`)},
 		"wit/b.wit": {Data: []byte(`package acme:app@1.0.0;
-use wasi:io/streams@0.2.0;
-use acme:single/x as sx;
-use other as local-alias;
 interface other { type thing = u8; }
 world w { import wasi:io/streams@0.2.0; import host; }`)},
 		"wit/notes.txt":                 {Data: []byte("not wit")},
 		"wit/sub/ignored.wit":           {Data: []byte("not even parsed")},
 		"wit/deps/README.md":            {Data: []byte("ignored")},
 		"wit/deps/wasi-io/streams.wit":  {Data: []byte(`package wasi:io@0.2.0; interface streams { use error.{err}; resource input-stream { read: func(n: u64) -> result<list<u8>, err>; } }`)},
-		"wit/deps/wasi-io/error.wit":    {Data: []byte(`interface error { type err = string; }`)},
+		"wit/deps/wasi-io/error.wit":    {Data: []byte(`package wasi:io@0.2.0; interface error { type err = string; }`)},
 		"wit/deps/single.wit":           {Data: []byte(`package acme:single; interface x { type token = u32; }`)},
 		"wit/deps/wasi-io/sub/skip.txt": {Data: []byte("")},
 	}
@@ -433,20 +426,6 @@ world app {
 	// import acme:api/host@1.0.0
 	// export run
 	// lookup param q is a query
-}
-
-func TestParseFS_VersionlessUse(t *testing.T) {
-	pkg, err := wit.ParseFS(fstest.MapFS{
-		"w/a.wit":      {Data: []byte("package a:b; interface i { use c:d/j.{t}; f: func(x: t); }")},
-		"w/deps/1.wit": {Data: []byte("package c:d@1.0.0; interface j { type t = u8; }")},
-	}, "w")
-	if err != nil {
-		t.Fatal(err)
-	}
-	sig, err := pkg.Interface("i").Func("f").Signature(nil)
-	if err != nil || sig.Desc.Params[0].Type.Primitive != "u8" {
-		t.Errorf("a versionless use of the only c:d: %+v, %v", sig, err)
-	}
 }
 
 // Exports that share a dependency the world does not export: it is imported
@@ -604,5 +583,38 @@ interface i {
 	}
 	if sig.TypeNames[*p[0].Type.TypeIndex] != "quad" {
 		t.Errorf("alias name %v", sig.TypeNames)
+	}
+}
+
+// A Signature builds what a parse only checked, so it fails where the
+// binary format or the host's tags do.
+func TestSignature_Errors(t *testing.T) {
+	pkg := mustParse(t, `package a:b;
+interface i {
+  resource r;
+  variant v { a(own<r>) }
+  owned: func() -> r;
+  pair: func(x: tuple<u8, own<r>>);
+  fallible: func(x: result<_, own<r>>);
+  shaped: func(x: v);
+  empty: func(x: list<u8, 0>);
+}
+world w {
+  resource local;
+  import make: func() -> local;
+}`)
+	for name, want := range map[string]string{
+		"owned":    "a:b/i#owned: result: no tag for resource r of interface a:b/i",
+		"pair":     "a:b/i#pair: param x: no tag for resource r of interface a:b/i",
+		"fallible": "a:b/i#fallible: param x: no tag for resource r of interface a:b/i",
+		"shaped":   "a:b/i#shaped: param x: interface a:b/i: type v: case a: no tag for resource r of interface a:b/i",
+		"empty":    "a:b/i#empty: param x: list<u8, 0>: a fixed-length list needs at least one element",
+	} {
+		if _, err := pkg.Interface("i").Func(name).Signature(nil); err == nil || err.Error() != "wit: "+want {
+			t.Errorf("%s: %v\nwant %s", name, err, want)
+		}
+	}
+	if _, err := pkg.World("w").Imports[0].Func.Signature(nil); err == nil || err.Error() != "wit: make: result: no tag for resource local of world w" {
+		t.Errorf("world func: %v", err)
 	}
 }

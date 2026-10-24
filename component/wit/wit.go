@@ -26,6 +26,19 @@
 //	}
 //	opt := component.WithImportCustom(host.Name, "lookup", fn, sig.Desc, sig.Types.Resolver())
 //
+// # Validation
+//
+// A source is read as wit-parser, the Bytecode Alliance's reference WIT
+// resolver, reads it, and fails where it fails, with its message: syntax
+// errors (with their file:line:col), names that are not strongly unique or
+// not defined, cycles among types, interfaces, worlds or packages, handles
+// of what is not a resource, ill-formed records, variants, enums, flags,
+// tuples and maps, constructor and accessor signatures, returned borrows,
+// and the conflicts an include brings in. Every file needs a package header;
+// a file may also hold nested "package ns:name { ... }" blocks, each a
+// package of its own. A top-level use names an item for its own file, and a
+// package is named with its exact version.
+//
 // # Resources
 //
 // own<R> and borrow<R> name a resource by the tag the host mints its handles
@@ -38,6 +51,12 @@
 //	opt := component.WithResourceTag(host.Name, "counter", counterTag)
 //
 // # Names
+//
+// An accessor ("size: get() -> u32;", "size: set(v: u32);") is a Func
+// named "[get]size" or "[set]size", a resource's "[method][get]r.size" and
+// so on, with its Accessor set. An import or export under a label of its
+// own ("import primary: store;") is the interface it implements, copied
+// under the label, as WorldItem.Implements says.
 //
 // A Signature carries every name a code generator needs alongside the types:
 // FuncDesc params keep their WIT names, the descriptors in the TypeTable keep
@@ -68,11 +87,11 @@
 package wit
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path"
-	"sort"
 	"strings"
 
 	"github.com/samyfodil/wazy/component"
@@ -81,8 +100,7 @@ import (
 
 // Package is one WIT package with every name in it resolved.
 type Package struct {
-	// Name is the package name as declared, e.g. "acme:api@1.0.0". It is empty
-	// for a source with no package declaration.
+	// Name is the package name as declared, e.g. "acme:api@1.0.0".
 	Name string
 	// Interfaces are the package's interfaces in declaration order.
 	Interfaces []*Interface
@@ -180,10 +198,26 @@ const (
 	Constructor
 )
 
+// Accessor says whether a Func is a property's getter or setter.
+type Accessor int
+
+const (
+	// NotAccessor is a func of its own.
+	NotAccessor Accessor = iota
+	// Getter is "name: get() -> T", named "[get]name" -- or for a resource,
+	// a "[method][get]r.name" or "[static][get]r.name".
+	Getter
+	// Setter is "name: set(value: T)", named "[set]name" and so on. A world
+	// or interface with a setter has the getter of the same name too.
+	Setter
+)
+
 // Func is one WIT func.
 type Func struct {
 	// Name is the canonical import name: "lookup", "[constructor]counter",
-	// "[method]counter.bump" or "[static]counter.zero".
+	// "[method]counter.bump" or "[static]counter.zero", with a [get] or
+	// [set] after any of those for an accessor ("[get]size",
+	// "[method][set]counter.value").
 	Name string
 	// Interface is the qualified name of the declaring interface, or "" for a
 	// func declared directly in a world.
@@ -191,6 +225,7 @@ type Func struct {
 	// Resource is the resource a Method, Static or Constructor belongs to.
 	Resource string
 	Kind     FuncKind
+	Accessor Accessor
 
 	scope *scope
 	fn    ast.Func
@@ -200,8 +235,8 @@ type Func struct {
 type World struct {
 	// Name is the world's name as declared, e.g. "app".
 	Name string
-	// Imports and Exports are in declaration order, with any include
-	// expanded in place -- and renamed as its "with { a as b }" says, which
+	// Imports and Exports are the world's own, in declaration order, then
+	// what each include brings in -- renamed as its "with { a as b }" says, which
 	// may rename a func, an interface written inline (with its funcs and
 	// resources, and so the interface its resources' tags are keyed by), or
 	// one of the world's types, a resource renaming its funcs too -- and
@@ -217,11 +252,17 @@ type World struct {
 // WorldItem is one import or export of a world: an interface or a func.
 type WorldItem struct {
 	// Name is the name the component imports or exports the item by: an
-	// interface's qualified name, or a func's or inline interface's own name.
+	// interface's qualified name, or a func's, inline interface's or
+	// label's own name.
 	Name string
 	// Exactly one of Interface and Func is set.
 	Interface *Interface
 	Func      *Func
+	// Implements is, for an interface under a label of its own
+	// ("import primary: store;"), the qualified name of the interface it
+	// implements. Its Interface is that one's copy, named by the label as an
+	// inline interface is.
+	Implements string
 }
 
 // ResourceKey identifies a resource the way component.WithResourceTag does:
@@ -267,15 +308,15 @@ func (f *Func) where() string {
 	return f.Interface + "#" + f.Name
 }
 
-// Parse reads one WIT source, and the packages it nests as
+// Parse reads one WIT source: a package, with any nested
 // "package ns:name { ... }" blocks, which become its Deps. Names resolve
-// within them. filename is used only in error messages.
+// within it. filename is used only in error messages.
 func Parse(filename, src string, opts ...Option) (*Package, error) {
-	raw, nested, err := parseSource(filename, src)
+	main, nested, err := loadSources([]source{{filename, src}})
 	if err != nil {
 		return nil, err
 	}
-	return resolve(raw, nested, newConfig(opts))
+	return resolve(append(nested, main), main.name, newConfig(opts))
 }
 
 // ParseFile reads the single WIT file at path, as Parse does.
@@ -296,10 +337,11 @@ func ParseDir(dir string, opts ...Option) (*Package, error) {
 
 // ParseFS is ParseDir over an fs.FS, such as an embed.FS.
 func ParseFS(fsys fs.FS, dir string, opts ...Option) (*Package, error) {
-	root, deps, err := loadDir(fsys, dir)
+	main, pkgs, err := loadDir(fsys, dir)
 	if err != nil {
 		return nil, err
 	}
+	pkgs = append(pkgs, main)
 	entries, err := fs.ReadDir(fsys, path.Join(dir, "deps"))
 	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("wit: %w", err)
@@ -312,93 +354,94 @@ func ParseFS(fsys fs.FS, dir string, opts ...Option) (*Package, error) {
 		case e.IsDir():
 			dep, nested, err = loadDir(fsys, p)
 		case strings.HasSuffix(e.Name(), ".wit"):
-			dep, nested, err = loadFile(fsys, p)
+			src, rerr := fs.ReadFile(fsys, p)
+			if rerr != nil {
+				return nil, fmt.Errorf("wit: %w", rerr)
+			}
+			dep, nested, err = loadSources([]source{{p, string(src)}})
 		default:
 			continue
 		}
 		if err != nil {
 			return nil, err
 		}
-		if dep.name == "" {
-			return nil, fmt.Errorf("wit: %s: no package declaration", p)
-		}
-		deps = append(append(deps, nested...), dep)
+		pkgs = append(append(pkgs, nested...), dep)
 	}
-	return resolve(root, deps, newConfig(opts))
+	return resolve(pkgs, main.name, newConfig(opts))
 }
 
-// rawPackage is a package's parsed items, before any name is resolved.
+// rawPackage is one package's parsed files, before any name is resolved.
 type rawPackage struct {
 	name  string
-	items []ast.PackageItem
+	pos   ast.Pos // where the name is declared
+	files []*ast.Package
+	deps  []dep // the other packages it names, as first named
+	// What it names in other packages, in the order it first names them.
+	foreign      []*foreignItem
+	foreignTypes []foreignType
 }
 
-// parseSource parses one source: its own package, and those it nests.
-func parseSource(filename, src string) (*rawPackage, []*rawPackage, error) {
-	pkg, err := ast.Parse(filename, src)
-	if err != nil {
-		return nil, nil, fmt.Errorf("wit: %s: %w", filename, err)
-	}
-	var nested []*rawPackage
-	for _, n := range pkg.Nested {
-		nested = append(nested, &rawPackage{name: n.Name, items: n.Items})
-	}
-	return &rawPackage{name: pkg.Name, items: pkg.Items}, nested, nil
-}
+// source is one WIT file.
+type source struct{ name, text string }
 
-func loadFile(fsys fs.FS, p string) (*rawPackage, []*rawPackage, error) {
-	src, err := fs.ReadFile(fsys, p)
-	if err != nil {
-		return nil, nil, fmt.Errorf("wit: %w", err)
-	}
-	return parseSource(p, string(src))
-}
-
-// loadDir merges every .wit file directly in dir into one package, and
-// returns the packages they nest beside it. Files may omit the package
-// declaration, but those that have one must agree.
+// loadDir reads every .wit file directly in dir as one package.
 func loadDir(fsys fs.FS, dir string) (*rawPackage, []*rawPackage, error) {
 	entries, err := fs.ReadDir(fsys, dir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("wit: %w", err)
 	}
-	var out *rawPackage
-	var nested []*rawPackage
+	var srcs []source
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".wit") {
 			continue
 		}
-		f, n, err := loadFile(fsys, path.Join(dir, e.Name()))
+		p := path.Join(dir, e.Name())
+		src, err := fs.ReadFile(fsys, p)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("wit: %w", err)
 		}
-		nested = append(nested, n...)
-		switch {
-		case out == nil:
-			out = f
-			continue
-		case out.name == "":
-			out.name = f.name
-		case f.name != "" && f.name != out.name:
-			return nil, nil, fmt.Errorf("wit: %s: files declare both package %s and %s", dir, out.name, f.name)
-		}
-		out.items = append(out.items, f.items...)
+		srcs = append(srcs, source{p, string(src)})
 	}
-	if out == nil {
-		return nil, nil, fmt.Errorf("wit: %s: no .wit files", dir)
-	}
-	if out.name == "" {
-		return nil, nil, fmt.Errorf("wit: %s: no package declaration", dir)
-	}
-	return out, nested, nil
+	return loadSources(srcs)
 }
 
-// sortedDeps returns the non-root packages in name order.
-func sortedDeps(pkgs []*pkgScope) []*Package {
-	out := make([]*Package, 0, len(pkgs))
-	for _, p := range pkgs {
-		out = append(out, p.pub)
+// loadSources parses the files of one package, in name order, as
+// wit-parser does: each file's nested packages are packages of their own,
+// checked as the file is read, and the files that name the package must
+// agree on it.
+func loadSources(srcs []source) (*rawPackage, []*rawPackage, error) {
+	main := &rawPackage{}
+	docs := false
+	var nested []*rawPackage
+	for _, src := range srcs {
+		f, err := ast.Parse(src.name, src.text)
+		if err != nil {
+			return nil, nil, fmt.Errorf("wit: %w", err)
+		}
+		for _, n := range f.Nested {
+			if len(n.Nested) > 0 {
+				return nil, nil, errAt(n.Nested[0].NamePos, "nested packages must be placed at the top-level")
+			}
+			p := &rawPackage{name: n.Name, pos: n.NamePos, files: []*ast.Package{n}}
+			if err := check(p); err != nil {
+				return nil, nil, err
+			}
+			nested = append(nested, p)
+		}
+		if f.Name != "" {
+			if main.name != "" && f.Name != main.name {
+				return nil, nil, errAt(f.NamePos, "package identifier `%s` does not match previous package name of `%s`", f.Name, main.name)
+			}
+			main.name, main.pos = f.Name, f.NamePos
+			if f.Docs && docs {
+				return nil, nil, errAt(f.NamePos, "found doc comments on multiple 'package' items")
+			}
+			docs = docs || f.Docs
+		}
+		main.files = append(main.files, f)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out
+	if main.name == "" {
+		return nil, nil, errors.New("wit: no `package` header was found in any WIT file for this package")
+	}
+	return main, nested, check(main)
 }

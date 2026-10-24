@@ -11,40 +11,58 @@ import (
 	ast "github.com/samyfodil/wazy/internal/component/wit"
 )
 
-// resolver holds every package being resolved together: the root and its
-// deps, any of which may name any other.
+// resolver holds every package being resolved together: the root, its
+// nested packages and its deps, any of which may name any other. check has
+// already validated each package on its own; what is left is what depends
+// on the other packages and on which feature gates are enabled, as
+// wit-parser's Resolve leaves it.
 type resolver struct {
-	pkgs   []*pkgScope // the root first
+	pkgs   []*pkgScope // each after the packages it names
 	byName map[string]*pkgScope
 	scopes []*scope // every interface and world scope, for validation
 	funcs  []*Func  // every func, for validation
 	cfg    config
+	// offTypes are the other packages' types a package's uses take whose
+	// first use's gate leaves them out: wit-parser gates such a type by its
+	// first use, so through any use it is excluded.
+	offTypes map[offType]bool
+}
+
+type offType struct {
+	from        *pkgScope
+	iface, name string
 }
 
 type pkgScope struct {
 	name   string
+	index  int // in resolver.pkgs
 	raw    *rawPackage
 	ifaces map[string]*scope // by short name
 	worlds map[string]*worldState
 	order  []*worldState
-	uses   map[string]string // package-level use: local name -> interface path
 	pub    *Package
-	// The interfaces, worlds and package-level uses a gate left out, so that
-	// a reference to one fails as wit-parser fails it rather than as unknown.
-	offIfaces, offWorlds, offUses map[string]bool
+	// The interfaces and worlds a gate left out, so that a reference to
+	// one fails as wit-parser fails it.
+	offIfaces, offWorlds map[string]bool
+}
+
+// fileScope is one file of a package, whose top-level uses name items for
+// that file alone.
+type fileScope struct {
+	pkg  *pkgScope
+	uses map[string]string // local name -> path
 }
 
 // scope is the namespace one interface or world declares its types in.
 type scope struct {
 	res   *resolver
-	pkg   *pkgScope
+	file  *fileScope
 	iface string // the interface's qualified name; "" for a world
 	where string // for error messages
 	types map[string]*ast.TypeDef
 	order []string // type names in declaration order
 	uses  map[string]useRef
-	used  []string // use aliases in declaration order
-	names map[string]bool
+	used  []string        // use aliases in declaration order
 	off   map[string]bool // types and use aliases a gate left out
 	pub   *Interface      // nil for a world
 }
@@ -54,40 +72,35 @@ type scope struct {
 type useRef struct{ path, name string }
 
 type worldState struct {
-	pkg   *pkgScope
-	ast   *ast.World
-	pub   *World
-	state int // 0 unresolved, 1 resolving, 2 resolved
+	file *fileScope
+	ast  *ast.World
+	pub  *World
+	done bool
 	// types are the world's types, as items of its own.
 	types []worldType
-	// named is every interface the world itself imports or exports by name,
-	// keyed by whether it exports it: one world may not name an interface
-	// twice, though what it includes may bring one in again.
-	named map[namedKey]bool
+	// keys are the names the world imports and exports items by -- its
+	// types too, which are imports -- in the order wit-parser keeps them:
+	// its own, then what each include brings in.
+	keys [2][]string
 }
 
-type namedKey struct {
-	iface  *Interface
-	export bool
-}
-
-func resolve(root *rawPackage, deps []*rawPackage, cfg config) (*Package, error) {
-	r := &resolver{byName: map[string]*pkgScope{}, cfg: cfg}
-	for _, raw := range append([]*rawPackage{root}, deps...) {
-		if r.byName[raw.name] != nil {
-			return nil, fmt.Errorf("wit: package %s is defined more than once", raw.name)
-		}
+func resolve(pkgs []*rawPackage, root string, cfg config) (*Package, error) {
+	order, err := sortPackages(pkgs)
+	if err != nil {
+		return nil, err
+	}
+	r := &resolver{byName: map[string]*pkgScope{}, cfg: cfg, offTypes: map[offType]bool{}}
+	for i, raw := range order {
 		p := &pkgScope{
 			name:   raw.name,
+			index:  i,
 			raw:    raw,
 			ifaces: map[string]*scope{},
 			worlds: map[string]*worldState{},
-			uses:   map[string]string{},
 			pub:    &Package{Name: raw.name, short: map[string]*Interface{}},
 
 			offIfaces: map[string]bool{},
 			offWorlds: map[string]bool{},
-			offUses:   map[string]bool{},
 		}
 		r.byName[raw.name] = p
 		r.pkgs = append(r.pkgs, p)
@@ -124,100 +137,201 @@ func resolve(root *rawPackage, deps []*rawPackage, cfg config) (*Package, error)
 		if _, err := newBuilder(nil, true).funcDesc(f); err != nil {
 			return nil, fmt.Errorf("wit: %s: %w", f.where(), err)
 		}
+		if f.fn.Result != nil && hasBorrow(f.scope, f.fn.Result) {
+			return nil, fmt.Errorf("wit: function `%s` returns a type which contains a `borrow<T>` which is not supported", f.Name)
+		}
 	}
-	r.pkgs[0].pub.Deps = sortedDeps(r.pkgs[1:])
-	return r.pkgs[0].pub, nil
+	rp := r.byName[root]
+	rp.pub.Deps = sortedDeps(r.pkgs, rp)
+	return rp.pub, nil
+}
+
+// sortPackages refuses a package defined twice and orders the packages so
+// that each comes after those it names, failing on a cycle, as wit-parser
+// does: visiting them in name order, and each one's deps in the order it
+// first names them.
+func sortPackages(pkgs []*rawPackage) ([]*rawPackage, error) {
+	byName := map[string]*rawPackage{}
+	for _, p := range pkgs {
+		if prev := byName[p.name]; prev != nil {
+			return nil, fmt.Errorf("wit: package `%s` is defined in two different locations:\n  * %s\n  * %s", p.name, p.pos, prev.pos)
+		}
+		byName[p.name] = p
+	}
+	sorted := slices.Clone(pkgs)
+	sort.Slice(sorted, func(i, j int) bool { return comparePackageNames(sorted[i].name, sorted[j].name) < 0 })
+	var order []*rawPackage
+	done := map[*rawPackage]bool{}
+	visiting := map[string]bool{}
+	var visit func(p *rawPackage) error
+	visit = func(p *rawPackage) error {
+		if done[p] {
+			return nil
+		}
+		for _, d := range p.deps {
+			if visiting[d.name] {
+				return errAt(d.pos, "package `%s` creates a dependency cycle", d.name)
+			}
+			visiting[d.name] = true
+			if q := byName[d.name]; q != nil {
+				if err := visit(q); err != nil {
+					return err
+				}
+			}
+			delete(visiting, d.name)
+		}
+		done[p] = true
+		order = append(order, p)
+		return nil
+	}
+	for _, p := range sorted {
+		if err := visit(p); err != nil {
+			return nil, err
+		}
+	}
+	return order, nil
+}
+
+// comparePackageNames orders "ns:name@ver" names as wit-parser's
+// PackageName does: by namespace, name, then version, none first.
+func comparePackageNames(a, b string) int {
+	an, av, aok := strings.Cut(a, "@")
+	bn, bv, bok := strings.Cut(b, "@")
+	ans, aname, _ := strings.Cut(an, ":")
+	bns, bname, _ := strings.Cut(bn, ":")
+	if c := strings.Compare(ans, bns); c != 0 {
+		return c
+	}
+	if c := strings.Compare(aname, bname); c != 0 {
+		return c
+	}
+	// Not both without a version: they would be the same package.
+	switch {
+	case aok && bok:
+		return parseSemver(av).compare(parseSemver(bv))
+	case aok:
+		return 1
+	}
+	return -1
 }
 
 func (r *resolver) declarePackage(p *pkgScope) error {
-	for _, item := range p.raw.items {
-		switch it := item.(type) {
-		case *ast.Interface:
-			if p.ifaces[it.Name] != nil || p.offIfaces[it.Name] {
-				return fmt.Errorf("wit: package %s: interface %s is defined more than once", p.name, it.Name)
-			}
-			name := qualify(p.name, it.Name)
-			on, err := r.enabled(p, it.Gate)
-			if err != nil {
-				return fmt.Errorf("wit: interface %s: %w", name, err)
-			}
-			if !on {
-				p.offIfaces[it.Name] = true
-				for _, item := range it.Items {
-					if err := r.offItem(p, "interface "+name, "interface", item); err != nil {
-						return err
+	if err := r.foreignDeps(p); err != nil {
+		return err
+	}
+	for _, file := range p.raw.files {
+		f := &fileScope{pkg: p, uses: map[string]string{}}
+		for _, item := range file.Items {
+			switch it := item.(type) {
+			case *ast.ToplevelUse:
+				name, _ := it.Local()
+				f.uses[name] = it.Path
+			case *ast.Interface:
+				name := qualify(p.name, it.Name)
+				on, err := r.enabled(p, it.Gate)
+				if err != nil {
+					return fmt.Errorf("wit: interface %s: %w", name, err)
+				}
+				if !on {
+					p.offIfaces[it.Name] = true
+					for _, item := range it.Items {
+						if err := r.offItem(f, "interface "+name, "interface", item); err != nil {
+							return err
+						}
 					}
+					continue
 				}
-				continue
-			}
-			s, err := r.newInterface(p, name, it.Items)
-			if err != nil {
-				return err
-			}
-			p.ifaces[it.Name] = s
-			p.pub.short[it.Name] = s.pub
-			p.pub.Interfaces = append(p.pub.Interfaces, s.pub)
-		case *ast.World:
-			if p.worlds[it.Name] != nil || p.offWorlds[it.Name] {
-				return fmt.Errorf("wit: package %s: world %s is defined more than once", p.name, it.Name)
-			}
-			on, err := r.enabled(p, it.Gate)
-			if err != nil {
-				return fmt.Errorf("wit: world %s: %w", it.Name, err)
-			}
-			if !on {
-				p.offWorlds[it.Name] = true
-				for _, item := range it.Items {
-					if err := r.offItem(p, "world "+it.Name, "world", item); err != nil {
-						return err
+				s, err := r.newInterface(f, name, it.Items)
+				if err != nil {
+					return err
+				}
+				p.ifaces[it.Name] = s
+				p.pub.short[it.Name] = s.pub
+				p.pub.Interfaces = append(p.pub.Interfaces, s.pub)
+			case *ast.World:
+				on, err := r.enabled(p, it.Gate)
+				if err != nil {
+					return fmt.Errorf("wit: world %s: %w", it.Name, err)
+				}
+				if !on {
+					p.offWorlds[it.Name] = true
+					for _, item := range it.Items {
+						if err := r.offItem(f, "world "+it.Name, "world", item); err != nil {
+							return err
+						}
 					}
+					continue
 				}
-				continue
+				w := &worldState{file: f, ast: it, pub: &World{Name: it.Name}}
+				p.worlds[it.Name] = w
+				p.order = append(p.order, w)
+				p.pub.Worlds = append(p.pub.Worlds, w.pub)
 			}
-			w := &worldState{pkg: p, ast: it, pub: &World{Name: it.Name}}
-			p.worlds[it.Name] = w
-			p.order = append(p.order, w)
-			p.pub.Worlds = append(p.pub.Worlds, w.pub)
-		case *ast.Use:
-			// "use a:b/c;" names interface c locally; "use a:b/c as d;" names
-			// it d. The parser records the second as Names[d] = path.
-			on, err := r.enabled(p, it.Gate)
-			if err != nil {
-				return fmt.Errorf("wit: package %s: use %s: %w", p.name, it.Path, err)
-			}
-			var aliases []string
-			if len(it.Names) == 0 {
-				aliases = append(aliases, lastSegment(it.Path))
-			}
-			for alias, target := range it.Names {
-				if target != it.Path {
-					return fmt.Errorf("wit: package %s: use %s.{...} names types, which only an interface or world can", p.name, it.Path)
-				}
-				aliases = append(aliases, alias)
-			}
-			for _, alias := range aliases {
-				if on {
-					p.uses[alias] = it.Path
-				} else {
-					p.offUses[alias] = true
-				}
-			}
-		case *ast.TypeDef:
-			return fmt.Errorf("wit: package %s: type %s is outside any interface or world", p.name, it.Name)
 		}
 	}
 	return nil
 }
 
-func newScope(r *resolver, p *pkgScope, iface, where string) *scope {
+// foreignDeps checks what package p names in the packages before it, as
+// wit-parser does first thing: every package it names must exist, and so
+// must every interface and world that a place whose gate is enabled names,
+// and every type such a use takes.
+func (r *resolver) foreignDeps(p *pkgScope) error {
+	// Interfaces, then worlds.
+	for _, worlds := range []bool{false, true} {
+		for _, it := range p.raw.foreign {
+			if it.world != worlds {
+				continue
+			}
+			pkg, err := r.pkg(it.pkg, p)
+			if err != nil {
+				return fmt.Errorf("wit: %w", err)
+			}
+			on := false
+			for _, g := range it.gates {
+				if on, err = r.enabled(p, g); err != nil {
+					return fmt.Errorf("wit: %s/%s: %w", it.pkg, it.name, err)
+				}
+				if on {
+					break
+				}
+			}
+			switch {
+			case !on:
+			case worlds && pkg.worlds[it.name] == nil:
+				return fmt.Errorf("wit: world '%s' not found in package '%s'", it.name, it.pkg)
+			case !worlds && pkg.ifaces[it.name] == nil:
+				return fmt.Errorf("wit: interface '%s' not found in package '%s'", it.name, it.pkg)
+			}
+		}
+	}
+	for _, t := range p.raw.foreignTypes {
+		on, err := r.enabled(p, t.gate)
+		if err != nil {
+			return fmt.Errorf("wit: %s/%s.%s: %w", t.pkg, t.iface, t.name, err)
+		}
+		if !on {
+			r.offTypes[offType{p, qualify(t.pkg, t.iface), t.name}] = true
+			continue
+		}
+		// The interface is there: this use's gate is enabled, so it was
+		// looked for above.
+		s := r.byName[t.pkg].ifaces[t.iface]
+		if s.types[t.name] == nil && !slices.Contains(s.used, t.name) {
+			return errAt(t.pos, "type `%s` not defined in interface", t.name)
+		}
+	}
+	return nil
+}
+
+func newScope(r *resolver, f *fileScope, iface, where string) *scope {
 	s := &scope{
 		res:   r,
-		pkg:   p,
+		file:  f,
 		iface: iface,
 		where: where,
 		types: map[string]*ast.TypeDef{},
 		uses:  map[string]useRef{},
-		names: map[string]bool{},
 		off:   map[string]bool{},
 	}
 	r.scopes = append(r.scopes, s)
@@ -225,8 +339,8 @@ func newScope(r *resolver, p *pkgScope, iface, where string) *scope {
 }
 
 // newInterface declares an interface's types, uses and funcs.
-func (r *resolver) newInterface(p *pkgScope, name string, items []ast.InterfaceItem) (*scope, error) {
-	s := newScope(r, p, name, "interface "+name)
+func (r *resolver) newInterface(f *fileScope, name string, items []ast.InterfaceItem) (*scope, error) {
+	s := newScope(r, f, name, "interface "+name)
 	s.pub = &Interface{Name: name, scope: s}
 	for _, item := range items {
 		switch it := item.(type) {
@@ -244,12 +358,13 @@ func (r *resolver) newInterface(p *pkgScope, name string, items []ast.InterfaceI
 				return nil, err
 			}
 		case *ast.InterfaceFunc:
-			f, err := s.newGatedFunc(it.Name, it.Gate, Freestanding, "", it.Func)
+			fname := freestandingName(it.Name, it.Func.Accessor)
+			fn, err := s.newGatedFunc(fname, it.Gate, Freestanding, "", it.Func)
 			if err != nil {
 				return nil, err
 			}
-			if f != nil {
-				s.pub.Funcs = append(s.pub.Funcs, f)
+			if fn != nil {
+				s.pub.Funcs = append(s.pub.Funcs, fn)
 			}
 		}
 	}
@@ -258,31 +373,20 @@ func (r *resolver) newInterface(p *pkgScope, name string, items []ast.InterfaceI
 
 // on reports whether the item called name, behind gate g, is read in scope s.
 func (s *scope) on(name string, g ast.Gate) (bool, error) {
-	on, err := s.res.enabled(s.pkg, g)
+	on, err := s.res.enabled(s.file.pkg, g)
 	if err != nil {
 		return false, fmt.Errorf("wit: %s: %s: %w", s.where, name, err)
 	}
 	return on, nil
 }
 
-func (s *scope) declare(name string) error {
-	if s.names[name] {
-		return fmt.Errorf("wit: %s: %s is defined more than once", s.where, name)
-	}
-	s.names[name] = true
-	return nil
-}
-
 // declareType adds a type to the scope, returning the funcs a resource
 // declares (non-nil, possibly empty, for a resource). A type its gate leaves
-// out only takes its name, so a duplicate still fails and a reference to it
-// fails as excluded; it returns no funcs.
+// out only takes its name, so a reference to it fails as excluded; it
+// returns no funcs.
 func (s *scope) declareType(td *ast.TypeDef) ([]*Func, error) {
 	on, err := s.on(td.Name, td.Gate)
 	if err != nil {
-		return nil, err
-	}
-	if err := s.declare(td.Name); err != nil {
 		return nil, err
 	}
 	if !on {
@@ -297,14 +401,14 @@ func (s *scope) declareType(td *ast.TypeDef) ([]*Func, error) {
 	}
 	funcs := []*Func{}
 	for _, m := range res.Methods {
-		kind, name := Method, "[method]"+td.Name+"."+m.Name
+		kind := Method
 		switch {
 		case m.IsConstructor:
-			kind, name = Constructor, "[constructor]"+td.Name
+			kind = Constructor
 		case m.IsStatic:
-			kind, name = Static, "[static]"+td.Name+"."+m.Name
+			kind = Static
 		}
-		f, err := s.newGatedFunc(name, m.Gate, kind, td.Name, m.Func)
+		f, err := s.newGatedFunc(resourceFuncName(td.Name, m), m.Gate, kind, td.Name, m.Func)
 		if err != nil {
 			return nil, err
 		}
@@ -323,7 +427,7 @@ func (s *scope) offResource(td *ast.TypeDef) error {
 		return nil
 	}
 	for _, m := range res.Methods {
-		name := td.Name + "." + methodName(m)
+		name := resourceFuncName(td.Name, m)
 		on, err := s.on(name, m.Gate)
 		if err != nil {
 			return err
@@ -340,59 +444,47 @@ func (s *scope) declareUse(u *ast.Use) error {
 	if err != nil {
 		return err
 	}
-	// Sorted so a duplicate is reported the same way every run.
-	aliases := make([]string, 0, len(u.Names))
-	for alias := range u.Names {
-		aliases = append(aliases, alias)
-	}
-	sort.Strings(aliases)
-	for _, alias := range aliases {
-		if err := s.declare(alias); err != nil {
-			return err
+	for _, n := range u.Names {
+		alias, _ := n.Local()
+		// A use after a type of the same name takes its place, as in
+		// wit-parser.
+		if s.types[alias] != nil {
+			delete(s.types, alias)
+			s.order = slices.DeleteFunc(s.order, func(name string) bool { return name == alias })
 		}
-		if !on {
-			s.off[alias] = true
-			continue
+		s.off[alias] = !on
+		if on {
+			s.uses[alias] = useRef{path: u.Path, name: n.Name}
+			s.used = append(s.used, alias)
 		}
-		s.uses[alias] = useRef{path: u.Path, name: u.Names[alias]}
-		s.used = append(s.used, alias)
 	}
 	return nil
 }
 
-func (s *scope) newFunc(name string, kind FuncKind, resource string, fn ast.Func) (*Func, error) {
-	if err := s.declare(name); err != nil {
-		return nil, err
-	}
-	f := &Func{Name: name, Interface: s.iface, Resource: resource, Kind: kind, scope: s, fn: fn}
+func (s *scope) newFunc(name string, kind FuncKind, resource string, fn ast.Func) *Func {
+	f := &Func{Name: name, Interface: s.iface, Resource: resource, Kind: kind, Accessor: Accessor(fn.Accessor), scope: s, fn: fn}
 	s.res.funcs = append(s.res.funcs, f)
-	return f, nil
+	return f
 }
 
-// newGatedFunc is newFunc for a func behind gate g. One the gate leaves out
-// only takes its name, so a duplicate still fails, and is nil.
+// newGatedFunc is newFunc for a func behind gate g, or nil when the gate
+// leaves it out.
 func (s *scope) newGatedFunc(name string, g ast.Gate, kind FuncKind, resource string, fn ast.Func) (*Func, error) {
 	on, err := s.on(name, g)
-	if err != nil {
+	if err != nil || !on {
 		return nil, err
 	}
-	if !on {
-		return nil, s.declare(name)
-	}
-	return s.newFunc(name, kind, resource, fn)
+	return s.newFunc(name, kind, resource, fn), nil
 }
 
-// world resolves a world's imports and exports, expanding includes.
+// world resolves a world: its own types, imports and exports, then what
+// each include brings in, then the interfaces they need.
 func (r *resolver) world(w *worldState) error {
-	switch w.state {
-	case 2:
+	if w.done {
 		return nil
-	case 1:
-		return fmt.Errorf("wit: world %s includes itself", w.ast.Name)
 	}
-	w.state = 1
-	s := newScope(r, w.pkg, "", "world "+w.ast.Name)
-	// Types and uses first: an import or export may name any of them.
+	w.done = true
+	s := newScope(r, w.file, "", "world "+w.ast.Name)
 	for _, item := range w.ast.Items {
 		switch it := item.(type) {
 		case *ast.TypeDef:
@@ -401,8 +493,7 @@ func (r *resolver) world(w *worldState) error {
 				return err
 			}
 			// A resource declared in a world is imported with the world's
-			// own funcs, at the top level. newFunc has already refused a
-			// duplicate name.
+			// own funcs, at the top level.
 			for _, f := range funcs {
 				w.pub.Imports = append(w.pub.Imports, WorldItem{Name: f.Name, Func: f})
 			}
@@ -414,42 +505,160 @@ func (r *resolver) world(w *worldState) error {
 	}
 	for _, name := range append(slices.Clone(s.order), s.used...) {
 		w.types = append(w.types, worldType{name, s})
+		w.keys[0] = append(w.keys[0], name)
+	}
+	for _, it := range w.pub.Imports {
+		w.keys[0] = append(w.keys[0], it.Name)
 	}
 	for _, item := range w.ast.Items {
 		var err error
 		switch it := item.(type) {
 		case *ast.Import:
-			err = r.worldItem(w, s, &w.pub.Imports, it.Name, it.Gate, importParts(it.Type))
+			err = r.worldItem(w, s, false, it.Extern)
 		case *ast.Export:
-			err = r.worldItem(w, s, &w.pub.Exports, it.Name, it.Gate, exportParts(it.Type))
-		case *ast.Include:
-			var on bool
-			if on, err = s.on("include "+it.Path, it.Gate); on {
-				err = r.include(w, it)
-			}
+			err = r.worldItem(w, s, true, it.Extern)
 		}
 		if err != nil {
 			return err
 		}
 	}
-	if err := r.elaborate(w, s); err != nil {
+	for _, item := range w.ast.Items {
+		if inc, ok := item.(*ast.Include); ok {
+			on, err := s.on("include "+inc.Path, inc.Gate)
+			if err == nil && on {
+				err = r.include(w, inc)
+			}
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if err := w.checkNames(); err != nil {
 		return err
 	}
-	w.state = 2
+	return r.elaborate(w, s)
+}
+
+// named says whether an item is keyed by its name in the world -- a func,
+// or an interface written inline or under a label -- rather than by the
+// interface it is, as an interface named by its path is.
+func (it WorldItem) named() bool {
+	return it.Func != nil || it.Interface.inline
+}
+
+func (w *worldState) list(export bool) *[]WorldItem {
+	if export {
+		return &w.pub.Exports
+	}
+	return &w.pub.Imports
+}
+
+func listIndex(export bool) int {
+	if export {
+		return 1
+	}
+	return 0
+}
+
+// worldItem resolves one import or export of the world itself.
+func (r *resolver) worldItem(w *worldState, s *scope, export bool, ext ast.Extern) error {
+	on, err := s.on(ext.Name, ext.Gate)
+	if err != nil {
+		return err
+	}
+	if !on {
+		return r.offWorldItem(w.file, ext)
+	}
+	var item WorldItem
+	switch k := ext.Kind.(type) {
+	case *ast.ExternFunc:
+		f := &Func{Name: freestandingName(ext.Name, k.Func.Accessor), Kind: Freestanding, Accessor: Accessor(k.Func.Accessor), scope: s, fn: k.Func}
+		r.funcs = append(r.funcs, f)
+		item = WorldItem{Name: f.Name, Func: f}
+	case *ast.ExternInterface:
+		ifc, err := r.newInterface(w.file, ext.Name, k.Items)
+		if err != nil {
+			return err
+		}
+		ifc.pub.inline = true
+		item = WorldItem{Name: ext.Name, Interface: ifc.pub}
+	case *ast.ExternNamedPath:
+		ifc, err := r.iface(w.file, k.Path)
+		if err != nil {
+			return fmt.Errorf("wit: world %s: %w", w.ast.Name, err)
+		}
+		item = WorldItem{Name: ext.Name, Interface: r.renameIface(ifc.pub, ext.Name), Implements: ifc.pub.Name}
+	default:
+		ifc, err := r.iface(w.file, ext.Name)
+		if err != nil {
+			return fmt.Errorf("wit: world %s: %w", w.ast.Name, err)
+		}
+		item = WorldItem{Name: ifc.pub.Name, Interface: ifc.pub}
+	}
+	list := w.list(export)
+	*list = append(*list, item)
+	if item.named() {
+		w.keys[listIndex(export)] = append(w.keys[listIndex(export)], item.Name)
+	}
 	return nil
 }
 
-// worldFunc declares a func a world imports or exports. An import shares the
-// world's namespace with its types; an export has a namespace of its own, so
-// it may share an import's name, as in wit-parser. add refuses a duplicate
-// within either list.
-func (s *scope) worldFunc(name string, export bool, fn ast.Func) (*Func, error) {
-	if !export {
-		return s.newFunc(name, Freestanding, "", fn)
+// add adds an item an include brings in: an interface the world already
+// has is merged, and any other name already there is shadowed, which
+// wit-parser refuses.
+func (w *worldState) add(export bool, item WorldItem) error {
+	list, i := w.list(export), listIndex(export)
+	if !item.named() {
+		for _, have := range *list {
+			if have.Interface == item.Interface {
+				return nil
+			}
+		}
+		*list = append(*list, item)
+		return nil
 	}
-	f := &Func{Name: name, Kind: Freestanding, scope: s, fn: fn}
-	s.res.funcs = append(s.res.funcs, f)
-	return f, nil
+	if err := w.shadows(export, item.Name); err != nil {
+		return err
+	}
+	*list = append(*list, item)
+	w.keys[i] = append(w.keys[i], item.Name)
+	return nil
+}
+
+func (w *worldState) shadows(export bool, name string) error {
+	if slices.Contains(w.keys[listIndex(export)], name) {
+		verb := "import"
+		if export {
+			verb = "export"
+		}
+		return fmt.Errorf("wit: world %s: %s of `%s` shadows previously %sed items", w.ast.Name, verb, name, verb)
+	}
+	return nil
+}
+
+// checkNames checks what includes may have broken: the names of the
+// world's imports, and of its exports, must be strongly unique, and each
+// setter needs a getter of the same name.
+func (w *worldState) checkNames() error {
+	for i, verb := range []string{"import", "export"} {
+		seen := map[string]string{}
+		for _, name := range w.keys[i] {
+			c := canonicalName(name)
+			if prev, ok := seen[c]; ok {
+				return fmt.Errorf("wit: world %s: %s `%s` in world `%s` conflicts with %s `%s` (names must be strongly unique)", w.ast.Name, verb, name, w.ast.Name, verb, prev)
+			}
+			seen[c] = name
+		}
+		for _, it := range *w.list(i == 1) {
+			if it.Func == nil || it.Func.Accessor != Setter {
+				continue
+			}
+			if g := getterFor(it.Name); !slices.Contains(w.keys[i], g) {
+				return fmt.Errorf("wit: world %s: %s `%s` in world `%s` has no corresponding getter `%s`", w.ast.Name, verb, it.Name, w.ast.Name, g)
+			}
+		}
+	}
+	return nil
 }
 
 // elaborate adds the interfaces a world's interfaces need, as wit-parser
@@ -460,6 +669,16 @@ func (s *scope) worldFunc(name string, export bool, fn ast.Func) (*Func, error) 
 // the world exports them and imported when not -- and none may need to be
 // both.
 func (r *resolver) elaborate(w *worldState, s *scope) error {
+	// An interface under a label keeps saying what it implements.
+	implements := map[*Interface]string{}
+	for _, it := range slices.Concat(w.pub.Imports, w.pub.Exports) {
+		if it.Implements != "" {
+			implements[it.Interface] = it.Implements
+		}
+	}
+	itemFor := func(i *Interface) WorldItem {
+		return WorldItem{Name: i.Name, Interface: i, Implements: implements[i]}
+	}
 	var imports []WorldItem
 	imported := map[*Interface]bool{}
 	var addImport func(i *Interface) error
@@ -477,7 +696,7 @@ func (r *resolver) elaborate(w *worldState, s *scope) error {
 				return err
 			}
 		}
-		imports = append(imports, WorldItem{Name: i.Name, Interface: i})
+		imports = append(imports, itemFor(i))
 		return nil
 	}
 	uses, err := r.deps(s)
@@ -529,12 +748,12 @@ func (r *resolver) elaborate(w *worldState, s *scope) error {
 			return false, nil
 		case export:
 			exported[i] = true
-			exports = append(exports, WorldItem{Name: i.Name, Interface: i})
+			exports = append(exports, itemFor(i))
 		default:
 			required[i] = true
 			if !imported[i] {
 				imported[i] = true
-				imports = append(imports, WorldItem{Name: i.Name, Interface: i})
+				imports = append(imports, itemFor(i))
 			}
 		}
 		return true, nil
@@ -563,9 +782,9 @@ func (r *resolver) deps(s *scope) ([]*Interface, error) {
 	seen := map[*Interface]bool{}
 	for _, alias := range s.used {
 		u := s.uses[alias]
-		t, err := r.iface(s.pkg, u.path)
+		t, err := r.iface(s.file, u.path)
 		if err != nil {
-			return nil, fmt.Errorf("wit: %s: use %s: %w", s.where, u.path, err)
+			return nil, fmt.Errorf("wit: %s: use %s: %w", s.where, u.path, errExcluded("type"))
 		}
 		if !seen[t.pub] {
 			seen[t.pub] = true
@@ -575,121 +794,28 @@ func (r *resolver) deps(s *scope) ([]*Interface, error) {
 	return out, nil
 }
 
-// itemParts is what an import or export declares: a func, an inline
-// interface, or (neither) an interface named by path.
-type itemParts struct {
-	fn     *ast.Func
-	inline []ast.InterfaceItem
-	isIfc  bool
-}
-
-func importParts(t ast.ImportType) itemParts {
-	switch t := t.(type) {
-	case *ast.ImportFunc:
-		return itemParts{fn: &t.Func}
-	case *ast.ImportInterface:
-		return itemParts{inline: t.Items, isIfc: true}
-	}
-	return itemParts{}
-}
-
-func exportParts(t ast.ExportType) itemParts {
-	switch t := t.(type) {
-	case *ast.ExportFunc:
-		return itemParts{fn: &t.Func}
-	case *ast.ExportInterface:
-		return itemParts{inline: t.Items, isIfc: true}
-	}
-	return itemParts{}
-}
-
-func (r *resolver) worldItem(w *worldState, s *scope, list *[]WorldItem, name string, g ast.Gate, parts itemParts) error {
-	on, err := s.on(name, g)
-	if err != nil {
-		return err
-	}
-	if !on {
-		for _, item := range parts.inline {
-			if err := r.offItem(w.pkg, "interface "+name, "interface", item); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	switch {
-	case parts.fn != nil:
-		f, err := s.worldFunc(name, list == &w.pub.Exports, *parts.fn)
-		if err != nil {
-			return err
-		}
-		return w.add(list, WorldItem{Name: name, Func: f})
-	case parts.isIfc:
-		ifc, err := r.newInterface(w.pkg, name, parts.inline)
-		if err != nil {
-			return err
-		}
-		ifc.pub.inline = true
-		return w.add(list, WorldItem{Name: name, Interface: ifc.pub})
-	default:
-		ifc, err := r.iface(w.pkg, name)
-		if err != nil {
-			return fmt.Errorf("wit: world %s: %w", w.ast.Name, err)
-		}
-		key := namedKey{ifc.pub, list == &w.pub.Exports}
-		if w.named[key] {
-			verb := "imported"
-			if key.export {
-				verb = "exported"
-			}
-			return fmt.Errorf("wit: world %s: %s: interface cannot be %s more than once", w.ast.Name, ifc.pub.Name, verb)
-		}
-		if w.named == nil {
-			w.named = map[namedKey]bool{}
-		}
-		w.named[key] = true
-		return w.add(list, WorldItem{Name: ifc.pub.Name, Interface: ifc.pub})
-	}
-}
-
-// add appends item unless the same interface is already listed under its
-// name, which is how a world and a world it includes may both import one.
-func (w *worldState) add(list *[]WorldItem, item WorldItem) error {
-	for _, have := range *list {
-		if have.Name != item.Name {
-			continue
-		}
-		if have.Interface != nil && have.Interface == item.Interface {
-			return nil
-		}
-		return fmt.Errorf("wit: world %s: %s is declared more than once", w.ast.Name, item.Name)
-	}
-	*list = append(*list, item)
-	return nil
-}
-
 func (r *resolver) include(w *worldState, inc *ast.Include) error {
-	p, name := w.pkg, inc.Path
-	if strings.Contains(inc.Path, ":") {
-		pkgName, n, err := splitPath(inc.Path)
-		if err != nil {
-			return fmt.Errorf("wit: world %s: %w", w.ast.Name, err)
-		}
-		if p, err = r.pkg(pkgName); err != nil {
-			return fmt.Errorf("wit: world %s: %w", w.ast.Name, err)
-		}
-		name = n
-	}
-	target := p.worlds[name]
-	switch {
-	case target == nil && p == w.pkg && p.offWorlds[name]:
-		return fmt.Errorf("wit: world %s: include %s: %w", w.ast.Name, inc.Path, errExcluded("world"))
-	case target == nil:
-		return fmt.Errorf("wit: world %s: unknown world %s", w.ast.Name, inc.Path)
+	target, err := r.lookupWorld(w.file, inc.Path)
+	if err != nil {
+		return fmt.Errorf("wit: world %s: include %s: %w", w.ast.Name, inc.Path, err)
 	}
 	if err := r.world(target); err != nil {
 		return err
 	}
-	rn := &renamer{r: r, to: inc.Renames, used: map[string]bool{}, types: map[*scope]map[string]string{}, clones: map[*scope]*scope{}}
+	rn := &renamer{r: r, to: map[string]string{}, types: map[*scope]map[string]string{}, clones: map[*scope]*scope{}}
+	for _, n := range inc.Renames {
+		if _, ok := rn.to[n.Name]; !ok {
+			rn.to[n.Name] = n.As
+		}
+	}
+	// A rename that names nothing the world has fails before anything is
+	// brought in.
+	names := slices.Concat(target.keys[0], target.keys[1])
+	for _, n := range inc.Renames {
+		if !slices.ContainsFunc(names, func(name string) bool { return renamesName(name, n.Name) }) {
+			return fmt.Errorf("wit: world %s: include %s: no import or export kebab-name `%s`. Note that an ID does not support renaming", w.ast.Name, inc.Path, n.Name)
+		}
+	}
 	// Types first: renaming one of a scope's types makes a copy of the
 	// scope, and the funcs declared in it move to the copy.
 	types := slices.Clone(target.types)
@@ -710,29 +836,28 @@ func (r *resolver) include(w *worldState, inc *ast.Include) error {
 		if c := rn.clones[t.s]; c != nil {
 			types[i].s = c
 		}
+		if err := w.shadows(false, types[i].name); err != nil {
+			return err
+		}
+		w.keys[0] = append(w.keys[0], types[i].name)
 	}
 	w.types = append(w.types, types...)
-	for _, from := range []struct {
-		src []WorldItem
-		dst *[]WorldItem
-	}{{target.pub.Imports, &w.pub.Imports}, {target.pub.Exports, &w.pub.Exports}} {
-		for _, item := range from.src {
-			if err := w.add(from.dst, rn.item(item)); err != nil {
+	for _, export := range []bool{false, true} {
+		for _, item := range *target.list(export) {
+			if err := w.add(export, rn.item(item)); err != nil {
 				return err
 			}
 		}
 	}
-	names := make([]string, 0, len(inc.Renames))
-	for name := range inc.Renames {
-		names = append(names, name)
-	}
-	slices.Sort(names)
-	for _, name := range names {
-		if !rn.used[name] {
-			return fmt.Errorf("wit: world %s: include %s: no import or export kebab-name `%s`. Note that an ID does not support renaming", w.ast.Name, inc.Path, name)
-		}
-	}
 	return nil
+}
+
+// renamesName says whether the include rename of from applies to name, as
+// wit-parser's rename decides it.
+func renamesName(name, from string) bool {
+	rest := name[strings.LastIndexByte(name, ']')+1:]
+	key, _, _ := strings.Cut(rest, ".")
+	return key == from
 }
 
 // worldType is a type a world has as an item of its own: one it declares or
@@ -744,9 +869,8 @@ type worldType struct {
 
 // renamer applies one include's "with { a as b }" to what it brings in.
 type renamer struct {
-	r    *resolver
-	to   map[string]string
-	used map[string]bool
+	r  *resolver
+	to map[string]string
 	// types are the renamed types of each scope, old name to new, and
 	// clones the copy of the scope that has them; order is the order the
 	// scopes came up in.
@@ -766,7 +890,6 @@ func (rn *renamer) rename(name string) (string, bool) {
 	if !ok {
 		return name, false
 	}
-	rn.used[key] = true
 	if dotted {
 		return prefix + to + "." + tail, true
 	}
@@ -775,9 +898,9 @@ func (rn *renamer) rename(name string) (string, bool) {
 
 // item renames one item an include brings in. A func is renamed itself, or
 // moved to the copy of its scope that renames its types (and its resource);
-// an interface written inline in the world is renamed with everything it
-// declares. An interface named by its path keeps it: the name is not the
-// world's to give.
+// an interface written inline in the world, or under a label, is renamed
+// with everything it declares. An interface named by its path keeps it:
+// the name is not the world's to give.
 func (rn *renamer) item(item WorldItem) WorldItem {
 	switch {
 	case item.Func != nil:
@@ -799,7 +922,7 @@ func (rn *renamer) item(item WorldItem) WorldItem {
 		return WorldItem{Name: nf.Name, Func: &nf}
 	case item.Interface.inline:
 		if name, ok := rn.rename(item.Name); ok {
-			return WorldItem{Name: name, Interface: rn.r.renameIface(item.Interface, name)}
+			return WorldItem{Name: name, Interface: rn.r.renameIface(item.Interface, name), Implements: item.Implements}
 		}
 	}
 	return item
@@ -807,7 +930,7 @@ func (rn *renamer) item(item WorldItem) WorldItem {
 
 // copyScope copies a scope's names under a new interface name.
 func (r *resolver) copyScope(sc *scope, iface, where string) *scope {
-	c := newScope(r, sc.pkg, iface, where)
+	c := newScope(r, sc.file, iface, where)
 	maps.Copy(c.types, sc.types)
 	maps.Copy(c.uses, sc.uses)
 	maps.Copy(c.off, sc.off)
@@ -841,9 +964,9 @@ func (r *resolver) renameTypes(sc *scope, m map[string]string) *scope {
 	return c
 }
 
-// renameIface is a copy of inline interface i, its funcs and its resources,
-// under a new name -- which is also the name its resources' tags are keyed
-// by.
+// renameIface is a copy of interface i, its funcs and its resources, under
+// a new name -- which is also the name its resources' tags are keyed by --
+// as the world names it: inline, or under a label.
 func (r *resolver) renameIface(i *Interface, name string) *Interface {
 	c := r.copyScope(i.scope, name, "interface "+name)
 	ni := &Interface{Name: name, scope: c, inline: true}
@@ -866,91 +989,55 @@ func (r *resolver) renameIface(i *Interface, name string) *Interface {
 	return ni
 }
 
-// iface finds the interface a use or a world names by path, relative to
-// package p: a bare name is an interface of p, or one a package-level use
+// iface finds the interface a use or a world names by path from file f: a
+// bare name is an interface of f's package, or one a top-level use of f
 // brought in; "ns:pkg/name@ver" is an interface of that package.
-func (r *resolver) iface(p *pkgScope, path string) (*scope, error) {
-	if !strings.Contains(path, ":") {
-		if p.ifaces[path] == nil && !p.offIfaces[path] {
-			target, ok := p.uses[path]
-			switch {
-			case !ok && p.offUses[path]:
-				return nil, fmt.Errorf("%s: %w", path, errExcluded("interface"))
-			case !ok:
-				return nil, fmt.Errorf("unknown interface %s", path)
-			}
-			path = target
-		}
-		if !strings.Contains(path, ":") {
-			return p.lookupIface(path, path, true)
-		}
+func (r *resolver) iface(f *fileScope, path string) (*scope, error) {
+	if target, ok := f.uses[path]; ok {
+		path = target
 	}
-	pkgName, name, err := splitPath(path)
-	if err != nil {
-		return nil, err
+	// Another package's interface is there: what an enabled reference
+	// names was looked for in foreignDeps.
+	if pkgName, name, foreign := splitForeign(path); foreign {
+		return r.byName[pkgName].ifaces[name], nil
 	}
-	pkg, err := r.pkg(pkgName)
-	if err != nil {
-		return nil, err
+	if s := f.pkg.ifaces[path]; s != nil {
+		return s, nil
 	}
-	return pkg.lookupIface(name, path, pkg == p)
+	return nil, fmt.Errorf("%s: %w", path, errExcluded("interface"))
 }
 
-// lookupIface finds interface name of p; path is how it was asked for, and
-// local says whether from p itself (see excludedError).
-func (p *pkgScope) lookupIface(name, path string, local bool) (*scope, error) {
-	switch {
-	case p.ifaces[name] != nil:
-		return p.ifaces[name], nil
-	case local && p.offIfaces[name]:
-		return nil, fmt.Errorf("%s: %w", path, errExcluded("interface"))
+// lookupWorld is iface for a world an include names.
+func (r *resolver) lookupWorld(f *fileScope, path string) (*worldState, error) {
+	if target, ok := f.uses[path]; ok {
+		path = target
 	}
-	return nil, fmt.Errorf("unknown interface %s", path)
+	if pkgName, name, foreign := splitForeign(path); foreign {
+		return r.byName[pkgName].worlds[name], nil
+	}
+	if w := f.pkg.worlds[path]; w != nil {
+		return w, nil
+	}
+	return nil, errExcluded("world")
 }
 
-// pkg finds a package by name. A name without a version matches the one
-// package of that name, whatever its version.
-func (r *resolver) pkg(name string) (*pkgScope, error) {
+// pkg finds a package by name, as package from names it.
+func (r *resolver) pkg(name string, from *pkgScope) (*pkgScope, error) {
 	if p := r.byName[name]; p != nil {
 		return p, nil
 	}
-	if !strings.Contains(name, "@") {
-		var found *pkgScope
-		for _, p := range r.pkgs {
-			if base, _, _ := strings.Cut(p.name, "@"); base == name {
-				if found != nil {
-					return nil, fmt.Errorf("package %s is ambiguous: both %s and %s are present", name, found.name, p.name)
-				}
-				found = p
-			}
-		}
-		if found != nil {
-			return found, nil
-		}
+	// wit-parser knows the packages resolved so far, and the one at hand.
+	var b strings.Builder
+	fmt.Fprintf(&b, "package '%s' not found. known packages:", name)
+	for _, p := range r.pkgs[:from.index+1] {
+		fmt.Fprintf(&b, "\n    %s", p.name)
 	}
-	return nil, fmt.Errorf("package %s not found (is it in deps/?)", name)
-}
-
-// splitPath splits "ns:pkg/name@ver" into the package "ns:pkg@ver" and the
-// item "name".
-func splitPath(path string) (pkg, name string, err error) {
-	ns, rest, ok := strings.Cut(path, "/")
-	if !ok || rest == "" {
-		return "", "", fmt.Errorf("malformed path %s: want ns:pkg/name", path)
-	}
-	name, ver, hasVer := strings.Cut(rest, "@")
-	if hasVer {
-		return ns + "@" + ver, name, nil
-	}
-	return ns, name, nil
+	return nil, errors.New(b.String())
 }
 
 // qualify names interface iface of package pkg as a component imports it:
 // "ns:pkg/iface@ver".
 func qualify(pkg, iface string) string {
-	if pkg == "" {
-		return iface
-	}
 	base, ver, hasVer := strings.Cut(pkg, "@")
 	if hasVer {
 		return base + "/" + iface + "@" + ver
@@ -958,65 +1045,77 @@ func qualify(pkg, iface string) string {
 	return base + "/" + iface
 }
 
-// lastSegment is the interface name in "ns:pkg/name@ver".
-func lastSegment(path string) string {
-	name, _, _ := strings.Cut(path[strings.LastIndex(path, "/")+1:], "@")
-	return name
-}
-
 // lookupResource is lookupType through any type definitions that alias the
 // resource ("type r2 = r;"), to the resource itself.
 func (s *scope) lookupResource(name string) (*scope, *ast.TypeDef, error) {
 	ds, td, err := s.lookupType(name)
-	seen := map[*ast.TypeDef]bool{}
 	for err == nil {
 		alias, ok := td.Type.(*ast.TypeAlias)
 		if !ok || alias.Target.Kind != "named" {
 			break
 		}
-		if seen[td] {
-			return nil, nil, fmt.Errorf("%s: type %s refers to itself", ds.where, td.Name)
-		}
-		seen[td] = true
 		ds, td, err = ds.lookupType(alias.Target.Name)
 	}
 	return ds, td, err
 }
 
 // lookupType finds where the type called name in s is defined, following
-// uses across interfaces.
+// uses across interfaces. A name check has seen and that is not there is
+// one a gate left out.
 func (s *scope) lookupType(name string) (*scope, *ast.TypeDef, error) {
-	type key struct {
-		s    *scope
-		name string
-	}
-	seen := map[key]bool{}
 	for {
 		if td := s.types[name]; td != nil {
 			return s, td, nil
 		}
 		u, ok := s.uses[name]
-		switch {
-		case !ok && s.off[name]:
+		if !ok {
 			return nil, nil, fmt.Errorf("%s: %s: %w", s.where, name, errExcluded("type"))
-		case !ok:
-			return nil, nil, fmt.Errorf("%s: unknown type %s", s.where, name)
 		}
-		k := key{s, name}
-		if seen[k] {
-			return nil, nil, fmt.Errorf("%s: use of %s is circular", s.where, name)
-		}
-		seen[k] = true
-		t, err := s.res.iface(s.pkg, u.path)
-		var ex *excludedError
-		switch {
-		case errors.As(err, &ex):
+		t, err := s.res.iface(s.file, u.path)
+		if err != nil || s.res.offTypes[offType{s.file.pkg, t.iface, u.name}] {
 			// What a use names in an interface a gate left out is either
 			// left out too or already an error there, as an ungated type.
 			return nil, nil, fmt.Errorf("%s: use %s: %w", s.where, u.path, errExcluded("type"))
-		case err != nil:
-			return nil, nil, fmt.Errorf("%s: use %s: %w", s.where, u.path, err)
 		}
 		s, name = t, u.name
 	}
+}
+
+// hasBorrow says whether type t, written in scope s, contains a borrow
+// handle, which a func may not return.
+func hasBorrow(s *scope, t *ast.TypeRef) bool {
+	switch t.Kind {
+	case "borrow":
+		return true
+	case "named":
+		// funcDesc has found every name the func's types use.
+		ds, td, _ := s.lookupType(t.Name)
+		switch b := td.Type.(type) {
+		case *ast.TypeAlias:
+			return hasBorrow(ds, &b.Target)
+		case *ast.Record:
+			return slices.ContainsFunc(b.Fields, func(f ast.RecordField) bool { return hasBorrow(ds, &f.Type) })
+		case *ast.Variant:
+			return slices.ContainsFunc(b.Cases, func(c ast.VariantCase) bool { return c.Type != nil && hasBorrow(ds, c.Type) })
+		}
+		return false
+	}
+	for _, inner := range append([]*ast.TypeRef{t.Inner, t.Inner2}, t.Tuple...) {
+		if inner != nil && hasBorrow(s, inner) {
+			return true
+		}
+	}
+	return false
+}
+
+// sortedDeps returns every package but root, in name order.
+func sortedDeps(pkgs []*pkgScope, root *pkgScope) []*Package {
+	out := make([]*Package, 0, len(pkgs)-1)
+	for _, p := range pkgs {
+		if p != root {
+			out = append(out, p.pub)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }

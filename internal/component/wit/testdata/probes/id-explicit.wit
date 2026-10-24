@@ -1,0 +1,1 @@
+package a:b; interface %interface { %type: func(%record: %u32); type %u32 = u32; }

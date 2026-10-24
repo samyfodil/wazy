@@ -1,0 +1,62 @@
+{
+  "worlds": [],
+  "interfaces": [
+    {
+      "name": "j",
+      "types": {
+        "t": 0
+      },
+      "functions": {},
+      "package": 0
+    },
+    {
+      "name": "i",
+      "types": {
+        "t": 1
+      },
+      "functions": {
+        "f": {
+          "name": "f",
+          "kind": "freestanding",
+          "params": [
+            {
+              "name": "x",
+              "type": 1
+            }
+          ]
+        }
+      },
+      "package": 0
+    }
+  ],
+  "types": [
+    {
+      "name": "t",
+      "kind": {
+        "type": "u32"
+      },
+      "owner": {
+        "interface": 0
+      }
+    },
+    {
+      "name": "t",
+      "kind": {
+        "type": 0
+      },
+      "owner": {
+        "interface": 1
+      }
+    }
+  ],
+  "packages": [
+    {
+      "name": "a:b",
+      "interfaces": {
+        "j": 0,
+        "i": 1
+      },
+      "worlds": {}
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+package a:b;
+interface j { type t = u32; }
+interface i {
+  type t = u8;
+  use j.{t};
+  f: func(x: t);
+}

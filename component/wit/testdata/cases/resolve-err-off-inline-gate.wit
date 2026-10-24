@@ -1,0 +1,6 @@
+package a:b;
+@unstable(feature = x)
+world w {
+  @since(version = 1.0.0)
+  import x: interface {}
+}

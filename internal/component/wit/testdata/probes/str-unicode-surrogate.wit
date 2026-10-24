@@ -1,0 +1,1 @@
+package a:b; interface i { @external-id("\u{d800}") type t = u8; }

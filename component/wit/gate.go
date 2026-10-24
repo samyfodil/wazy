@@ -2,7 +2,6 @@ package wit
 
 import (
 	"cmp"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -47,44 +46,24 @@ func newConfig(opts []Option) config {
 
 // stability is what an item's gate says, as wit-parser reads it: nothing (the
 // item is always there), @since a version, or @unstable behind a feature.
-// @deprecated only qualifies one of the other two.
+// @deprecated only qualifies one of the other two. check has already
+// refused a gate wit-parser refuses.
 type stability struct {
 	since   string
-	sinceV  semver
 	feature string
 }
 
-// readGate checks a gate's attributes the way wit-parser does for every item,
-// whether or not the item ends up read: each attribute at most once, @since
-// and @unstable not both, @deprecated never alone, and versions that are
-// semver. Error text follows wit-parser's, so it greps the same.
-func readGate(g ast.Gate) (stability, error) {
+func gateOf(g ast.Gate) stability {
 	var st stability
-	seen := map[string]bool{}
 	for _, it := range g {
-		if seen[it.Kind] {
-			return st, fmt.Errorf("cannot specify @%s twice", it.Kind)
-		}
-		seen[it.Kind] = true
-		if it.Kind == "unstable" {
+		switch it.Kind {
+		case "since":
+			st.since = it.Version
+		case "unstable":
 			st.feature = it.Feature
-			continue
-		}
-		v, ok := parseSemver(it.Version)
-		if !ok {
-			return st, fmt.Errorf("@%s(version = %s): not a valid semver version", it.Kind, it.Version)
-		}
-		if it.Kind == "since" {
-			st.since, st.sinceV = it.Version, v
 		}
 	}
-	switch {
-	case seen["since"] && seen["unstable"]:
-		return st, errors.New("cannot specify both @since and @unstable")
-	case seen["deprecated"] && !seen["since"] && !seen["unstable"]:
-		return st, errors.New("cannot specify both @deprecated without @since or @unstable")
-	}
-	return st, nil
+	return st
 }
 
 // enabled reports whether the item gate g guards in package p is read, as
@@ -93,10 +72,7 @@ func readGate(g ast.Gate) (stability, error) {
 // released version of the package, so the package needs a version no earlier
 // than the gate's.
 func (r *resolver) enabled(p *pkgScope, g ast.Gate) (bool, error) {
-	st, err := readGate(g)
-	if err != nil {
-		return false, err
-	}
+	st := gateOf(g)
 	switch {
 	case st.feature != "":
 		return r.cfg.all || r.cfg.features[st.feature], nil
@@ -107,11 +83,7 @@ func (r *resolver) enabled(p *pkgScope, g ast.Gate) (bool, error) {
 	if !ok {
 		return false, fmt.Errorf("package [%s] contains a feature gate with a version specifier, so it must have a version", p.name)
 	}
-	pv, ok := parseSemver(ver)
-	if !ok {
-		return false, fmt.Errorf("package [%s]: version %s is not a valid semver version", p.name, ver)
-	}
-	if st.sinceV.compare(pv) > 0 {
+	if parseSemver(st.since).compare(parseSemver(ver)) > 0 {
 		return false, fmt.Errorf("feature gate cannot reference unreleased version %s of package [%s] (current version %s)", st.since, p.name, ver)
 	}
 	return true, nil
@@ -132,27 +104,22 @@ func errExcluded(kind string) error { return &excludedError{kind} }
 // left out. The container's funcs go with it unchecked, as in wit-parser, but
 // a type -- and so a use, which declares one -- is gated on its own: one its
 // own gate keeps would belong to a container that is not there.
-func (r *resolver) offItem(p *pkgScope, where, owner string, item any) error {
+func (r *resolver) offItem(f *fileScope, where, owner string, item any) error {
 	var g ast.Gate
 	var name string
 	switch it := item.(type) {
 	case *ast.TypeDef:
-		if err := checkMethodGates(it); err != nil {
-			return fmt.Errorf("wit: %s: %w", where, err)
-		}
 		g, name = it.Gate, it.Name
 	case *ast.Use:
 		g, name = it.Gate, "use "+it.Path
-	case *ast.InterfaceFunc:
-		return gateError(where, it.Name, it.Gate)
 	case *ast.Import:
-		return r.offWorldItem(p, where, it.Name, it.Gate, importParts(it.Type))
+		return r.offWorldItem(f, it.Extern)
 	case *ast.Export:
-		return r.offWorldItem(p, where, it.Name, it.Gate, exportParts(it.Type))
-	case *ast.Include:
-		return gateError(where, "include "+it.Path, it.Gate)
+		return r.offWorldItem(f, it.Extern)
+	default:
+		return nil
 	}
-	on, err := r.enabled(p, g)
+	on, err := r.enabled(f.pkg, g)
 	if err != nil {
 		return fmt.Errorf("wit: %s: %s: %w", where, name, err)
 	}
@@ -162,54 +129,27 @@ func (r *resolver) offItem(p *pkgScope, where, owner string, item any) error {
 	return nil
 }
 
-// offWorldItem checks an import or export of a world. An inline interface is
-// an interface of its own, gated by the import's gate: when that is enabled
-// it is resolved like any other, even in a world that is itself left out,
-// which is what wit-parser does with it.
-func (r *resolver) offWorldItem(p *pkgScope, where, name string, g ast.Gate, parts itemParts) error {
-	if !parts.isIfc {
-		return gateError(where, name, g)
-	}
-	on, err := r.enabled(p, g)
-	if err != nil {
-		return fmt.Errorf("wit: %s: %s: %w", where, name, err)
-	}
-	if on {
-		_, err := r.newInterface(p, name, parts.inline)
-		return err
-	}
-	for _, item := range parts.inline {
-		if err := r.offItem(p, "interface "+name, "interface", item); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// checkMethodGates checks the gates of a resource's funcs.
-func checkMethodGates(td *ast.TypeDef) error {
-	res, ok := td.Type.(*ast.Resource)
+// offWorldItem checks an import or export of a world left out. An inline
+// interface is an interface of its own, gated by the import's gate: when
+// that is enabled it is resolved like any other, even in a world that is
+// itself left out, which is what wit-parser does with it.
+func (r *resolver) offWorldItem(f *fileScope, ext ast.Extern) error {
+	inline, ok := ext.Kind.(*ast.ExternInterface)
 	if !ok {
 		return nil
 	}
-	for _, m := range res.Methods {
-		if _, err := readGate(m.Gate); err != nil {
-			return fmt.Errorf("%s.%s: %w", td.Name, methodName(m), err)
+	on, err := r.enabled(f.pkg, ext.Gate)
+	if err != nil {
+		return fmt.Errorf("wit: interface %s: %w", ext.Name, err)
+	}
+	if on {
+		_, err := r.newInterface(f, ext.Name, inline.Items)
+		return err
+	}
+	for _, item := range inline.Items {
+		if err := r.offItem(f, "interface "+ext.Name, "interface", item); err != nil {
+			return err
 		}
-	}
-	return nil
-}
-
-func methodName(m ast.ResourceMethod) string {
-	if m.IsConstructor {
-		return "constructor"
-	}
-	return m.Name
-}
-
-func gateError(where, name string, g ast.Gate) error {
-	if _, err := readGate(g); err != nil {
-		return fmt.Errorf("wit: %s: %s: %w", where, name, err)
 	}
 	return nil
 }
@@ -222,55 +162,27 @@ type semver struct {
 }
 
 // parseSemver parses major.minor.patch, then an optional -pre-release and
-// +build. Numbers have no leading zeros, except in build metadata.
-func parseSemver(s string) (semver, bool) {
+// +build, from a version the parser has already checked.
+func parseSemver(s string) semver {
 	var v semver
 	rest, build, hasBuild := strings.Cut(s, "+")
 	core, pre, hasPre := strings.Cut(rest, "-")
 	parts := strings.Split(core, ".")
-	if len(parts) != 3 {
-		return v, false
-	}
 	for i, dst := range []*uint64{&v.major, &v.minor, &v.patch} {
-		if !isNumeric(parts[i]) || hasLeadingZero(parts[i]) {
-			return v, false
-		}
-		n, err := strconv.ParseUint(parts[i], 10, 64)
-		if err != nil {
-			return v, false
-		}
-		*dst = n
+		*dst, _ = strconv.ParseUint(parts[i], 10, 64)
 	}
-	ok := true
 	if hasPre {
-		v.pre, ok = idents(pre, true)
+		v.pre = strings.Split(pre, ".")
 	}
-	if ok && hasBuild {
-		v.build, ok = idents(build, false)
+	if hasBuild {
+		v.build = strings.Split(build, ".")
 	}
-	return v, ok
-}
-
-// idents splits dot-separated identifiers: non-empty runs of [0-9A-Za-z-],
-// where a numeric pre-release identifier has no leading zero.
-func idents(s string, pre bool) ([]string, bool) {
-	ids := strings.Split(s, ".")
-	for _, id := range ids {
-		if id == "" || strings.TrimLeft(id, "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-") != "" {
-			return nil, false
-		}
-		if pre && isNumeric(id) && hasLeadingZero(id) {
-			return nil, false
-		}
-	}
-	return ids, true
+	return v
 }
 
 func isNumeric(s string) bool {
 	return s != "" && strings.TrimLeft(s, "0123456789") == ""
 }
-
-func hasLeadingZero(s string) bool { return len(s) > 1 && s[0] == '0' }
 
 // compare orders a against b: -1, 0 or 1. A pre-release sorts before its
 // release, and build metadata breaks the remaining ties, empty first.

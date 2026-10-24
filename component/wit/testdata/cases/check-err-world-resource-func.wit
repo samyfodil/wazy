@@ -1,0 +1,6 @@
+package a:b;
+world w {
+  resource r {
+    m: func(x: nope);
+  }
+}

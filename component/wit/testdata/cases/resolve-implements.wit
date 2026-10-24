@@ -1,0 +1,15 @@
+package a:b;
+interface types { type t = u8; }
+interface store {
+  use types.{t};
+  resource handle { get: func() -> t; }
+  open: func() -> handle;
+}
+world w {
+  import primary: store;
+  import backup: store;
+  export cache: store;
+}
+world v {
+  include w with { primary as first }
+}

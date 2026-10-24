@@ -1,0 +1,6 @@
+package a:b;
+interface j { type t = u8; }
+world w {
+  @since(version = 1.0.0)
+  use j.{t};
+}

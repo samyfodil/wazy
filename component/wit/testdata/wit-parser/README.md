@@ -11,25 +11,22 @@ Bytecode Alliance's reference WIT resolver, at
 - `ui/parse-fail/*.wit` with `*.wit.result`: an input wit-parser rejects, and
   its error.
 
-`oracle_test.go` parses each input and compares the outcome with these,
-and, under the other feature sets (none, and all), with what wit-parser
-makes of it there, kept in `../oracle/` (see `../gen-oracle.sh`).
+Every input there is copied. `oracle_test.go` parses each one and compares
+the outcome with these, and, under the other feature sets (none, and all),
+with what wit-parser makes of it there, kept in `../oracle/` (see
+`../gen-oracle.sh`). An error must carry wit-parser's message (its first
+line, without the context its test runner wraps a directory's error in).
 
-Not copied, because this package does not do what they test:
+`parse-fail/` keeps three `.wit.result` files whose inputs wit-parser no
+longer has (`async`, `async1`, `unterminated-string`); nothing runs them.
 
-- WIT accessors (`prop: get() -> T;`, `accessors*.wit`,
-  `include-accessor-pair.wit`, `parse-fail/accessor-*`).
-- Directories whose deps are `.wasm`/`.wat` (`kinds-of-deps`).
-- `parse-fail` inputs for checks this package does not make, which it
-  accepts: names that differ only in case, duplicate fields, cases and
-  params, empty enums, tuples and variants, more than 32 flags, a returned
-  `borrow`, constructor result shapes, package and interface dependency
-  cycles, and doc-comment and `@external-id` placement rules.
-- The other `parse-fail` inputs, which this package rejects in words of its
-  own; only those that bear on world items are copied, with their wording
-  listed in `oracle_test.go`.
+One input is skipped, with its reason in `oracle_test.go`: `kinds-of-deps`,
+whose `deps/` holds WIT packages encoded as components, in the binary
+(`e.wasm`) and the text (`d.wat`) format, which this package does not read
+(it reads `.wit` deps only). `simple-wasm-text.wat` is such a package too;
+the test reads `.wit` inputs only.
 
-To update, re-copy the same files from a newer commit, run
+To update, re-copy `crates/wit-parser/tests/ui/` from a newer commit, run
 `../gen-oracle.sh`, and re-run the tests.
 
 Licensed Apache-2.0 WITH LLVM-exception, or Apache-2.0, or MIT, per

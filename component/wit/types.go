@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/samyfodil/wazy/component"
-	"github.com/samyfodil/wazy/internal/component/binary"
 	ast "github.com/samyfodil/wazy/internal/component/wit"
 )
 
@@ -20,7 +19,6 @@ type builder struct {
 	// memo interns each named type once per table, which is also what makes
 	// a type used twice in one signature share a slot.
 	memo map[typeKey]component.TypeRef
-	busy map[typeKey]bool
 }
 
 // typeKey names one named type: the scope defining it, its name, and for a
@@ -38,7 +36,6 @@ func newBuilder(tags Tags, probe bool) *builder {
 		tags:  tags,
 		probe: probe,
 		memo:  map[typeKey]component.TypeRef{},
-		busy:  map[typeKey]bool{},
 	}
 }
 
@@ -97,8 +94,11 @@ func (b *builder) ref(s *scope, t *ast.TypeRef) (component.TypeRef, error) {
 		switch {
 		case !t.Fixed:
 			return b.tbl.List(*inner), nil
+		case t.Length == 0 && b.probe:
+			// wit-parser reads list<T, 0>, so a parse does too ...
+			return b.tbl.List(*inner), nil
 		case t.Length == 0:
-			// wit-parser reads list<T, 0>; the binary format refuses it.
+			// ... but the binary format, and so a Signature, refuses it.
 			return component.TypeRef{}, fmt.Errorf("%s: a fixed-length list needs at least one element", t)
 		}
 		return b.tbl.FixedList(*inner, t.Length), nil
@@ -127,9 +127,6 @@ func (b *builder) ref(s *scope, t *ast.TypeRef) (component.TypeRef, error) {
 	case "result":
 		return b.tbl.Add(component.ResultDesc{Ok: inner, Err: second}), nil
 	case "map":
-		if !binary.IsValidMapKeyPrimitive(inner.Primitive) {
-			return component.TypeRef{}, fmt.Errorf("map key must be bool, an integer, char or string")
-		}
 		return b.tbl.Map(*inner, *second), nil
 	}
 	return component.TypeRef{}, fmt.Errorf("type kind %q is not supported", t.Kind)
@@ -161,12 +158,6 @@ func (b *builder) named(s *scope, name string) (component.TypeRef, error) {
 	if ref, ok := b.memo[key]; ok {
 		return ref, nil
 	}
-	if b.busy[key] {
-		return component.TypeRef{}, fmt.Errorf("%s: type %s refers to itself", ds.where, td.Name)
-	}
-	b.busy[key] = true
-	defer delete(b.busy, key)
-
 	var ref component.TypeRef
 	switch body := td.Type.(type) {
 	case *ast.TypeAlias:
@@ -214,7 +205,9 @@ func (b *builder) handle(s *scope, name, kind string) (component.TypeRef, error)
 		return component.TypeRef{}, err
 	}
 	if _, ok := td.Type.(*ast.Resource); !ok {
-		return component.TypeRef{}, fmt.Errorf("%s<%s>: %s is not a resource", kind, name, name)
+		// check refuses such a handle in its own package; this is one
+		// whose resource is another package's.
+		return component.TypeRef{}, fmt.Errorf("%s<%s>: type used in a handle must be a resource", kind, name)
 	}
 	key := typeKey{s: ds, name: td.Name, handle: kind}
 	if ref, ok := b.memo[key]; ok {

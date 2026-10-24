@@ -1,0 +1,6 @@
+package a:b;
+world v { export f: func(); }
+world w {
+  export f: func();
+  include v;
+}
