@@ -53,9 +53,6 @@ const (
 	// wazy does not run a component that exports a core module, aliases one
 	// out of an instance, or passes one to a nested component.
 	gapCoreModuleRuntime = "wazy does not run a component that exports, aliases or passes a core module"
-	// The decoder refuses a core module type declaring a non-func import or
-	// export (readCoreImportdesc).
-	gapCoreModuleTypeDecode = "the decoder refuses a core module type with a non-func import or export"
 	// Wasmtime refuses every root-level component import; wazy runs one when
 	// a component is supplied for it (WithComponentImport), and otherwise
 	// refuses it for that.
@@ -127,8 +124,6 @@ var wastValidationGaps = map[string]map[string]wastValidationGap{
 		"instantiate.19.wasm": {"was not supplied", gapCoreModuleTypes},
 		// line 226: missing expected export `x`
 		"instantiate.20.wasm": {"was not supplied", gapCoreModuleTypes},
-		// line 236: (valid)
-		"instantiate.21.wasm": {"core:importdesc: unsupported sort 0x3", gapCoreModuleTypeDecode},
 		// line 286: expected: (func)
 		"instantiate.24.wasm": {"is a core module import", gapCoreModuleImport},
 		// line 294: expected: (func)
@@ -177,14 +172,10 @@ var wastValidationGaps = map[string]map[string]wastValidationGap{
 		"nested.6.wasm": {"unsupported sort 0x0", gapCoreModuleRuntime},
 		// line 128: (valid)
 		"nested.7.wasm": {"only func and instance exports are supported", gapCoreModuleRuntime},
-		// line 149: (valid)
-		"nested.8.wasm": {"core:importdesc: unsupported sort 0x3", gapCoreModuleTypeDecode},
 		// line 175: (valid)
-		"nested.9.wasm": {"core:importdesc: unsupported sort 0x3", gapCoreModuleTypeDecode},
+		"nested.9.wasm": {"which only an instantiation supplies", gapCoreModuleRuntime},
 		// line 213: (valid)
 		"nested.10.wasm": {"only func and instance exports are supported", gapCoreModuleRuntime},
-		// line 219: (valid)
-		"nested.11.wasm": {"core:importdesc: unsupported sort 0x3", gapCoreModuleTypeDecode},
 		// line 264: (valid)
 		"nested.14.wasm": {"which only an instantiation supplies", gapCoreModuleRuntime},
 		// line 322: (valid)

@@ -18,8 +18,9 @@ import (
 type TypeDeclKind byte
 
 const (
-	// TypeDeclCoreType is a core type definition (core:type), opening no
-	// component-level index.
+	// TypeDeclCoreType is a core type definition (core:type): TypeDecl.CoreType.
+	// It opens the next index of the type's own core type index space, not of
+	// a component-level one.
 	TypeDeclCoreType TypeDeclKind = 0x00
 	// TypeDeclType is a type definition: TypeDecl.Type.
 	TypeDeclType TypeDeclKind = 0x01
@@ -45,6 +46,9 @@ type TypeDecl struct {
 
 	// Alias is the alias of a TypeDeclAlias.
 	Alias AliasDef
+
+	// CoreType is the definition of a TypeDeclCoreType.
+	CoreType *CoreTypeDef
 
 	// Name and Desc are the name and the declared type of a TypeDeclImport
 	// or TypeDeclExport.
@@ -96,7 +100,10 @@ func readTypeDecl(buf []byte, off int, component bool) (TypeDecl, int, error) {
 	var err error
 	switch d.Kind {
 	case TypeDeclCoreType:
-		off, err = readCoretypeDef(buf, off)
+		var ct CoreTypeDef
+		if ct, off, err = readCoreTypeDef(buf, off); err == nil {
+			d.CoreType = &ct
+		}
 	case TypeDeclType:
 		d.Type, off, err = readDeftypeDesc(buf, off)
 	case TypeDeclAlias:

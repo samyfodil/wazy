@@ -122,12 +122,20 @@ func decodeComponent(buf []byte) (*Component, error) {
 			offset = newOffset
 			c.CoreInstances = append(c.CoreInstances, coreInstances...)
 
-		case 3: // Core Type section (not yet fully decoded)
-			if sectionSize > uint32(len(buf)-offset) {
-				return nil, fmt.Errorf("section %s: %w", sectionIDName(sectionID), ErrTruncatedBinary)
+		case 3: // Core Type section
+			defs, newOffset, err := decodeCoreTypeSection(buf, offset, sectionSize)
+			if err != nil {
+				return nil, fmt.Errorf("core type section: %w", err)
 			}
-			c.RawSections = append(c.RawSections, RawSection{ID: sectionID, Size: sectionSize})
-			offset += int(sectionSize)
+			offset = newOffset
+			// Each definition opens as many core type indices as it
+			// defines types: one per member of a recursion group.
+			for j, d := range defs {
+				for m := uint32(0); m < d.Count; m++ {
+					c.CoreTypeSpace = append(c.CoreTypeSpace, CoreTypeSpaceEntry{Kind: CoreTypeFromDefinition, Def: uint32(len(c.CoreTypes) + j), Member: m})
+				}
+			}
+			c.CoreTypes = append(c.CoreTypes, defs...)
 
 		case 4: // Component section: a fully embedded nested component.
 			if sectionSize > uint32(len(buf)-offset) {
@@ -211,6 +219,11 @@ func decodeComponent(buf []byte) (*Component, error) {
 				// coremodulespace.go.
 				if al.Sort == 0x00 && al.CoreSort == 0x11 {
 					c.CoreModuleSpace = append(c.CoreModuleSpace, CoreModuleSpaceEntry{Kind: CoreModuleFromAlias, Alias: aliasBase + uint32(j)})
+				}
+				// A core type alias (sort 0x00 core, core:sort 0x10 type)
+				// occupies the next index in the core type index space.
+				if al.Sort == 0x00 && al.CoreSort == 0x10 {
+					c.CoreTypeSpace = append(c.CoreTypeSpace, CoreTypeSpaceEntry{Kind: CoreTypeFromAlias, Alias: aliasBase + uint32(j)})
 				}
 				// A component alias (sort 0x04) occupies the next index in the
 				// component index space -- see componentspace.go.

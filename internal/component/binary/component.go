@@ -78,6 +78,12 @@ type Component struct {
 	// coremodulespace.go.
 	CoreModuleSpace []CoreModuleSpaceEntry
 
+	// CoreTypes are the core type section's definitions, in order, and
+	// CoreTypeSpace the core type index space they and the core type
+	// aliases make -- see coretype.go.
+	CoreTypes     []CoreTypeDef
+	CoreTypeSpace []CoreTypeSpaceEntry
+
 	// CoreInstances instantiate core modules with arguments (section 2).
 	CoreInstances []CoreInstance
 
