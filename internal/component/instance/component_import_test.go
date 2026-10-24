@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"embed"
+	"fmt"
 	"path"
 	"testing"
 
 	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
 )
 
@@ -376,4 +378,35 @@ func TestComponentImport_ResourceThroughSuppliedComponent(t *testing.T) {
 
 	_, err = Instantiate(ctx, r, root, WithComponentImport("counter", componentImportFixture(t, "counter_own")))
 	requireErrContains(t, err, "type mismatch for export `[method]counter.get`: type mismatch in function parameter `self`: expected borrow, found own")
+}
+
+// Instantiations racing on one CompileCache share its decode of the
+// supplied component and its record of the checks that passed.
+func TestComponentImport_ConcurrentOnOneCache(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+	cache := NewCompileCache()
+	defer cache.Close(ctx)
+	root, calc := componentImportFixture(t, "calc_root"), componentImportFixture(t, "calc_exact")
+	errs := make(chan error, 8)
+	for range 8 {
+		go func() {
+			in, err := Instantiate(ctx, r, root, WithCompileCache(cache), WithComponentImport("calc", calc))
+			if err == nil {
+				var got []abi.Value
+				got, err = in.Call(ctx, "sum", []int32{2, 2, 2, 2})
+				if err == nil && (len(got) != 1 || got[0] != int32(8)) {
+					err = fmt.Errorf("sum = %v, want [8]", got)
+				}
+				in.Close(ctx)
+			}
+			errs <- err
+		}()
+	}
+	for range 8 {
+		if err := <-errs; err != nil {
+			t.Error(err)
+		}
+	}
 }
