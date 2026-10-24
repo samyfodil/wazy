@@ -51,11 +51,6 @@ reproduced the reporter's failure all along and still reported PASS
   implementation (`definitions.py`).
 - Four fuzz targets run in CI — three differential against the interpreter, one for validation.
 
-One official async fixture was broken upstream; the 31/31 runs a corrected copy, the one fixture
-committed here. Upstream fixed it differently
-([component-model#679](https://github.com/WebAssembly/component-model/pull/679), `cf242a7`), and
-wazy does not pass that version yet.
-
 ## Wasm 3.0
 
 There is no separate 3.0 suite in the specification repository — `WebAssembly/testsuite@main` *is*

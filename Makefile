@@ -473,11 +473,11 @@ build.testdata:
 # 1.253.0: that reproduces them byte for byte, while 1.262.0 encodes several differently. The
 # max-value-size and fixed-length-list cases are later, and written against 1.262.0.
 #
-# One async suite, sync-streams, stays committed: the copy here is the broken upstream fixture with the
-# store it lacked added (component-model#679). Upstream fixed it differently in cf242a7, by making $D's
-# call to $C.set async, and wazy does not pass that version yet.
+# One async suite, sync-streams, is a later commit's (#705): cf242a7's copy expects a result the spec's
+# own reference implementation does not give, and #705 corrected it. It needs wasm-tools 1.262.0.
 component_model_version := d095e2f60ddae1f9a1e9b1e2fb547ec1114da677
 component_model_conformance_version := cf242a7a50d58aed650bc467212c5fb93433287b
+component_model_sync_streams_version := 2f1326540f73f8d58237028f8331c048b3e44d76
 wasm_tools_tests_version := 2e6b2d6db499501a91a0b88a848435345bef1f66
 component_model_raw := https://raw.githubusercontent.com/WebAssembly/component-model/$(component_model_version)/test
 wasm_tools_raw := https://raw.githubusercontent.com/bytecodealliance/wasm-tools/$(wasm_tools_tests_version)/tests/cli/component-model
@@ -536,6 +536,10 @@ build.component_testdata: $(wasm_tools) $(wasm_tools_next)
 		[ $$(basename $$d) = sync-streams ] && continue; \
 		(cd $$d && $(wasm_tools) json-from-wast --wasm-dir . -o $$(basename $$d).json $$(basename $$d).wast) || exit 1; \
 	done
+	@rm -rf $(component_async_dir)/sync-streams && mkdir -p $(component_async_dir)/sync-streams \
+		&& curl -sfSL --retry 5 --retry-all-errors -o $(component_async_dir)/sync-streams/sync-streams.wast \
+			https://raw.githubusercontent.com/WebAssembly/component-model/$(component_model_sync_streams_version)/test/async/sync-streams.wast \
+		&& (cd $(component_async_dir)/sync-streams && $(wasm_tools_next) json-from-wast --wasm-dir . -o sync-streams.json sync-streams.wast)
 	@$(call clean_fetched,imports/wasip2/testdata/component-model)
 	@cp $(component_wast_dir)/resources/resources.20.wasm imports/wasip2/testdata/component-model/
 	@cp $(component_model_dir)/design/mvp/canonical-abi/definitions.py internal/component/abi/testdata/
