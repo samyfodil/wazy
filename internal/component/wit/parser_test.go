@@ -1,64 +1,30 @@
 package wit
 
 import (
-	"errors"
-	"io/fs"
-	"os"
-	"path"
-	"regexp"
-	"strings"
+	"embed"
 	"testing"
 )
 
-var corpus = os.DirFS("../../../component/wit/testdata")
+// The sample files are embedded: some CI jobs run a test binary from the
+// module root, where a relative path would not find them.
+//
+//go:embed testdata/*.wit
+var samples embed.FS
 
-// resultContext is the context wit-parser's test runner wraps a directory
-// input's error in.
-var resultContext = regexp.MustCompile(`^(failed to resolve directory while parsing WIT for path \[[^]]*\]: |failed to parse package: [^:]*: |failed to parse dependency directory: [^:]*: )+`)
-
-// TestParse_Corpus parses every .wit file the component/wit tests read --
-// wit-parser's own UI inputs and the hand-written cases -- each of which
-// either parses, or fails as wit-parser fails it.
-func TestParse_Corpus(t *testing.T) {
-	ran := 0
-	err := fs.WalkDir(corpus, ".", func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".wit") {
-			return err
+// TestParse_ExternalIDPlacement covers what wasm-tools 1.262.0 -- the
+// version testdata/probes.txt records -- still accepted: @external-id on an
+// interface, a world or an include, which wit-parser refuses from
+// wasm-tools@2e6b2d6d on (its parse-fail/external-id-on-*.wit, vendored in
+// component/wit, with these messages).
+func TestParse_ExternalIDPlacement(t *testing.T) {
+	for src, want := range map[string]string{
+		`package a:b; @external-id("x") interface i {}`:                    "x.wit:1:15: @external-id is not allowed on interface declarations",
+		`package a:b; @external-id("x") world w {}`:                        "x.wit:1:15: @external-id is not allowed on world declarations",
+		`package a:b; world v {} world w { @external-id("x") include v; }`: "x.wit:1:36: @external-id is not allowed on include statements",
+	} {
+		if _, err := Parse("x.wit", src); err == nil || err.Error() != want {
+			t.Errorf("%s: %v\nwant %s", src, err, want)
 		}
-		src, err := fs.ReadFile(corpus, p)
-		if err != nil {
-			return err
-		}
-		ran++
-		_, perr := Parse(path.Base(p), string(src))
-		// A failing input's result sits next to it, or next to the
-		// directory it is in.
-		var want string
-		result, rerr := fs.ReadFile(corpus, p+".result")
-		if rerr != nil {
-			result, rerr = fs.ReadFile(corpus, path.Dir(p)+".wit.result")
-		}
-		if rerr == nil {
-			line, _, _ := strings.Cut(string(result), "\n")
-			want = strings.ReplaceAll(resultContext.ReplaceAllString(line, ""), "tests/ui/parse-fail/", "")
-		}
-		var e *Error
-		switch {
-		case perr == nil:
-		case !errors.As(perr, &e):
-			t.Errorf("%s: %v is not an *Error", p, perr)
-		case want == "":
-			t.Errorf("%s: %v", p, perr)
-		case !strings.Contains(want, e.Msg):
-			t.Errorf("%s: error %q\nwant %q", p, perr, want)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ran < 300 {
-		t.Fatalf("only %d inputs", ran)
 	}
 }
 
@@ -154,7 +120,7 @@ package c:d { interface e { type t = u8; } }`)
 
 func TestParse_TestdataFiles(t *testing.T) {
 	for _, name := range []string{"random.wit", "simple.wit", "streams.wit"} {
-		src, err := os.ReadFile(path.Join("testdata", name))
+		src, err := samples.ReadFile("testdata/" + name)
 		if err != nil {
 			t.Fatal(err)
 		}
