@@ -29,6 +29,7 @@ func moduleValuesWasm(t *testing.T, name string) []byte {
 
 func nestedWasm(t *testing.T, n string) []byte {
 	t.Helper()
+	fetched(t, "testdata/wast/wasmtime-nested")
 	b, err := wastFS.ReadFile(path.Join("testdata/wast/wasmtime-nested", "nested."+n+".wasm"))
 	if err != nil {
 		t.Fatal(err)
@@ -79,6 +80,7 @@ func TestModuleValues_RuntimeCannotDecode(t *testing.T) {
 	opaque := struct{ wazy.Runtime }{r} // hides DecodeModuleNoCompile
 	cache := NewCompileCache()
 	defer cache.Close(ctx)
+	fetched(t, "testdata/wast/wasm-tools-instantiate")
 	instantiate35, err := wastFS.ReadFile("testdata/wast/wasm-tools-instantiate/instantiate.35.wasm")
 	if err != nil {
 		t.Fatal(err)

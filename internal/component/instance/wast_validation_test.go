@@ -12,8 +12,9 @@ import (
 	"github.com/samyfodil/wazy/internal/component/binary"
 )
 
-// wastValidationSuites are the vendored validator suites (see each one's
-// README) that TestWastValidation runs: the component-model specification's
+// wastValidationSuites are the validator suites, fetched by `make
+// build.component_testdata` at the commits the Makefile pins, that
+// TestWastValidation runs: the component-model specification's
 // test/validation instantiation and resources suites, wasm-tools'
 // instantiate and virtualize, and Wasmtime's restrictions and nested. The
 // directory's name ends in the name of its .wast.
@@ -83,6 +84,7 @@ func TestWastValidation(t *testing.T) {
 
 func runWastValidationSuite(t *testing.T, suite string) {
 	dir := path.Join("testdata", "wast", suite)
+	fetched(t, dir)
 	stem := suite[strings.LastIndexByte(suite, '-')+1:]
 	raw, err := wastFS.ReadFile(path.Join(dir, stem+".json"))
 	if err != nil {

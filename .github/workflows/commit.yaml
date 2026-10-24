@@ -198,6 +198,12 @@ jobs:
             internal/component/binary/testdata/wast/wasm-tools-max-value-size
             internal/component/instance/testdata/wast/fixed_length_lists
             internal/component/instance/testdata/wast/wasm-tools-fixed-length-lists
+            internal/component/instance/testdata/wast/cm-validation-instantiation
+            internal/component/instance/testdata/wast/cm-validation-resources
+            internal/component/instance/testdata/wast/wasm-tools-instantiate
+            internal/component/instance/testdata/wast/wasm-tools-virtualize
+            internal/component/instance/testdata/wast/wasmtime-nested
+            internal/component/instance/testdata/wast/wasmtime-restrictions
           if-no-files-found: error
           retention-days: 1
 
