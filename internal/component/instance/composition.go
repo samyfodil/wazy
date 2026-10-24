@@ -3,6 +3,7 @@ package instance
 import (
 	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/component/abi"
@@ -285,6 +286,113 @@ func importedResourceIndices(comp *binary.Component, importName string) map[stri
 	return out
 }
 
+// uninstantiatedTypeExport returns the type of comp that the type export name
+// of inst denotes, for an instance that instantiates nothing: an inline
+// bundle's member, or what was passed for the type import a pure re-export
+// shim's export re-exports.
+func uninstantiatedTypeExport(comp *binary.Component, cfg *config, inst *binary.Instance, name string) (uint32, bool) {
+	if inst.Kind == 0x01 {
+		for _, x := range inst.Exports {
+			if x.Name == name && x.Sort == ctSortType {
+				return x.SortIdx, true
+			}
+		}
+		return 0, false
+	}
+	shim, err := resolveComponentDef(comp, cfg, inst.ComponentIdx)
+	if err != nil || validateShimComponent(shim) != nil {
+		return 0, false
+	}
+	for _, ex := range shim.Exports {
+		if ex.Name != name || ex.ExternType != ctSortType || int(ex.ExternIndex) >= len(shim.TypeSpace) {
+			continue
+		}
+		e := shim.TypeSpace[ex.ExternIndex]
+		if e.Kind != binary.TypeSpaceImport || int(e.Import) >= len(shim.Imports) {
+			return 0, false
+		}
+		for _, a := range inst.Args {
+			if a.Name == shim.Imports[e.Import].Name && a.Sort == ctSortType {
+				return a.SortIdx, true
+			}
+		}
+		return 0, false
+	}
+	return 0, false
+}
+
+// traceResource follows a resource type of comp through the inline bundles
+// and pure re-export shims it may have been passed along in, to where it comes
+// from. A nested instance defining it is prov, with its canonical index for it
+// in idx; an instance comp imports leaves prov nil, with idx comp's alias of
+// it. ok is false for a resource comp defines itself.
+func traceResource(comp *binary.Component, cfg *config, byIdx map[int]*Instance, typeIdx uint32) (prov *Instance, idx uint32, ok bool) {
+	for range instanceArgMaxDepth {
+		if int(typeIdx) >= len(comp.TypeSpace) {
+			break
+		}
+		e := comp.TypeSpace[typeIdx]
+		if e.Kind != binary.TypeSpaceAlias || int(e.Alias) >= len(comp.Aliases) {
+			break
+		}
+		al := comp.Aliases[e.Alias]
+		if al.Sort != ctSortType || al.TargetKind != 0x00 {
+			break
+		}
+		tgt, err := resolveInstanceArgTarget(comp, al.InstanceIdx)
+		if err != nil {
+			break
+		}
+		if tgt.imported {
+			return nil, typeIdx, true
+		}
+		if sib, ok := byIdx[int(tgt.spaceIdx)]; ok {
+			if len(tgt.projection) == 0 {
+				def, ok := exportedResourceDefs(sib.comp)[al.Name]
+				return sib, def, ok
+			}
+			iface := strings.Join(tgt.projection, "#")
+			if r, ok := sib.reexposedInstances[iface]; ok {
+				sib, iface = r.owner, r.name
+			}
+			def, ok := exportedInstanceResourceDefs(sib.comp, iface)[al.Name]
+			return sib, def, ok
+		}
+		d, ok := componentInstanceDef(comp, tgt.spaceIdx)
+		if !ok || len(tgt.projection) > 0 {
+			break
+		}
+		if typeIdx, ok = uninstantiatedTypeExport(comp, cfg, &comp.Instances[d], al.Name); !ok {
+			break
+		}
+	}
+	return nil, 0, false
+}
+
+// lineUp records that this component's resource tag names prov's resource
+// def: the resource it traces back to, and the destructor its drop runs.
+func (n *nesting) lineUp(tag uint32, prov *Instance, def uint32) {
+	o := prov.originOf(def)
+	if dtor := o.def.resourceDtors[o.tag]; dtor != nil {
+		n.importedResDtors[tag] = dtor
+	}
+	n.resourceOrigin[tag] = o
+}
+
+// importerTag maps a resource type of prov's, as prov's func types name it, to
+// this component's tag for the same resource.
+func (n *nesting) importerTag(prov *Instance) func(uint32) (uint32, bool) {
+	return func(idx uint32) (uint32, bool) {
+		o := prov.originOf(prov.canonTag(idx))
+		for tag, x := range n.resourceOrigin {
+			if x == o {
+				return tag, true
+			}
+		}
+		return 0, false
+	}
+}
+
 // instanceArgMaxDepth bounds resolveInstanceArgTarget's export/alias chain
 // walk, exactly as resolveInstanceMaxDepth does in the binary package. A
 // well-formed binary can only chain forward-declared definitions, so this is a
@@ -550,7 +658,7 @@ func translateResourceFD(fd binary.FuncDesc, providerResolve abi.Resolver, trans
 // then delegated to precisely like a sibling's export -- the outer's own
 // core func is always ready here (instantiateNestedInstances, this func's
 // only caller, runs after the core-instance loop that builds it).
-func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, byIdx map[int]*Instance, funcIdx uint32, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver) (*hostImport, error) {
+func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, nest *nesting, byIdx map[int]*Instance, funcIdx uint32, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver) (*hostImport, error) {
 	if int(funcIdx) >= len(comp.ComponentFuncSpace) {
 		return nil, fmt.Errorf("func arg index %d out of range of the component func index space", funcIdx)
 	}
@@ -568,14 +676,13 @@ func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, byIdx
 		if berr != nil {
 			return nil, fmt.Errorf("func arg index %d: %w", funcIdx, berr)
 		}
-		// No resource-type wiring for a bare (non-instance) func arg -- see
-		// the sibling-export case's identical comment below.
-		provToImp := func(uint32) (uint32, bool) { return 0, false }
-		hi := delegatingHostImport(newGuestAsyncTarget(in, be, diagName, provToImp))
 		// This func arg names the outer component's OWN local func, handed
 		// down to a directly-nested child as a `(with "x" (func N))`
 		// instantiate-arg -- a direct static parent<->child lineage delegate
-		// (see hostImport.lineage's doc). Refused at call time.
+		// (see hostImport.lineage's doc). Refused at call time, so no handle
+		// ever crosses it and its resources need no line-up.
+		provToImp := func(uint32) (uint32, bool) { return 0, false }
+		hi := delegatingHostImport(newGuestAsyncTarget(in, be, diagName, provToImp))
 		hi.lineage = true
 		return hi, nil
 	}
@@ -611,17 +718,12 @@ func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, byIdx
 		if !ok {
 			return nil, fmt.Errorf("func arg index %d: sibling component instance %d has no export %q", funcIdx, al.InstanceIdx, key)
 		}
-		// No resource-type wiring for a bare (non-instance) func arg -- a
-		// resource crossing this boundary would need its own `(with "r"
-		// (type ...))` arg, handled by the arg.Sort == 0x03 case alongside
-		// this one; provToImp is only consulted when the func signature
-		// itself has an own<R>/borrow<R> param or result.
-		provToImp := func(uint32) (uint32, bool) { return 0, false }
 		// The sibling may itself only RE-EXPOSE the aliased export, in which
 		// case the call belongs to whatever instance defines it -- see
-		// boundExport.home and ownerOf.
+		// boundExport.home and ownerOf. A handle crossing it is retagged to
+		// the nested component's resource lined up with the owner's.
 		owner, ownerKey := ownerOf(be, sib, key)
-		hi := delegatingHostImport(newGuestAsyncTarget(owner, be, ownerKey, provToImp))
+		hi := delegatingHostImport(newGuestAsyncTarget(owner, be, ownerKey, nest.importerTag(owner)))
 		return hi, nil
 	}
 	iface, err := importInterfaceName(comp, al.InstanceIdx)

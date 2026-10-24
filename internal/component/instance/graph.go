@@ -987,6 +987,25 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 		// resource.drop tag the shared handle table consistently with the
 		// provider (a host resource passed in as a `(with "r" (type ...))` arg).
 		typeArgTags := map[uint32]uint32{}
+		// passResource lines the nested component's resource import dIdx up
+		// with the resource typeIdx names here: one a sibling defines by its
+		// identity, so a handle crossing is moved between the two tables, and
+		// any other by this component's tag for it, with the host destructor.
+		passResource := func(dIdx, typeIdx uint32) {
+			prov, idx, ok := traceResource(comp, cfg, byIdx, typeIdx)
+			if prov != nil {
+				nest.lineUp(nested.ResourceDefIndex(dIdx), prov, idx)
+				return
+			}
+			if ok {
+				typeIdx = idx
+			}
+			tag := effectiveResourceTypeIdx(comp, cfg, typeIdx)
+			typeArgTags[dIdx] = tag
+			if dtor := cfg.hostResDtors[tag]; dtor != nil {
+				subCfg.hostResDtors[tag] = dtor
+			}
+		}
 		for _, arg := range inst.Args {
 			switch arg.Sort {
 			case 0x05: // instance: a sibling sub-Instance (possibly projected
@@ -1022,47 +1041,18 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 					forwardImportedInstance(cfg, subCfg, nested, tgt.importName, arg.Name, typeArgTags)
 					continue
 				}
-				if def, shim, ok := uninstantiatedInstance(comp, cfg, byIdx, tgt); ok {
+				if def, _, ok := uninstantiatedInstance(comp, cfg, byIdx, tgt); ok {
 					// An inline bundle, `(instance (export ...) ...)`, or an
 					// instance of a pure re-export shim: neither
-					// instantiates anything. Its funcs are this component's
-					// own, or what it was passed, each wired in as a func
-					// arg would be; the modules, components and instances a
-					// bundle carries are definitions the nested component's
-					// scope resolves for itself.
-					wire := func(name string) error {
-						funcIdx, _, err := funcAliasSource(comp, cfg, aliasTarget{instIdx: tgt.spaceIdx, name: name})
-						var hi *hostImport
-						if err == nil {
-							hi, err = outerFuncArgImport(comp, cfg, in, byIdx, funcIdx, componentFunc, coreFuncTarget, resolve)
+					// instantiates anything. The resources it carries are
+					// lined up with the nested component's imports of them;
+					// its funcs are wired in below. The modules, components
+					// and instances a bundle carries are definitions the
+					// nested component's scope resolves for itself.
+					for name, dIdx := range importedResourceIndices(nested, arg.Name) {
+						if t, ok := uninstantiatedTypeExport(comp, cfg, def, name); ok {
+							passResource(dIdx, t)
 						}
-						if err != nil {
-							return fmt.Errorf("component/instance: component instance %d arg %q: export %q: %w", compInstIdx, arg.Name, name, err)
-						}
-						subCfg.imports[mkImportKey(arg.Name, name)] = hi
-						return nil
-					}
-					var err error
-					if shim == nil {
-						for _, x := range def.Exports {
-							if x.Sort == ctSortFunc {
-								if err = wire(x.Name); err != nil {
-									break
-								}
-							}
-						}
-					} else {
-						for _, x := range shim.Exports {
-							if x.ExternType == ctSortFunc {
-								if err = wire(x.Name); err != nil {
-									break
-								}
-							}
-						}
-					}
-					if err != nil {
-						failClose()
-						return nil, nil, err
 					}
 					continue
 				}
@@ -1221,28 +1211,11 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 					subCfg.imports[mkImportKey(arg.Name, name)] = hi
 				}
 
-			case 0x01: // func: satisfy the nested component's func import of the
-				// same name with whatever the outer's aliased func names --
-				// either a host import (outerFuncArgImport falls back to
-				// importInterfaceName) or, just as often in the async
-				// suites' multi-nested-component .wast shape, a single named
-				// export of an earlier sibling nested instance (byIdx).
-				hi, err := outerFuncArgImport(comp, cfg, in, byIdx, arg.SortIdx, componentFunc, coreFuncTarget, resolve)
-				if err != nil {
-					failClose()
-					return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q: %w", compInstIdx, arg.Name, err)
-				}
-				subCfg.imports[mkImportKey(arg.Name, "")] = hi
+			case 0x01: // func: wired below.
 
-			case 0x03: // type: pass a resource type in. Tag the nested component's
-				// import of it with the outer's tag for the same resource, and
-				// carry the host destructor.
-				tag := effectiveResourceTypeIdx(comp, cfg, arg.SortIdx)
+			case 0x03: // type: pass a resource type in.
 				if idx, ok := importedTypeIndex(nested, arg.Name); ok {
-					typeArgTags[idx] = tag
-				}
-				if dtor := cfg.hostResDtors[tag]; dtor != nil {
-					subCfg.hostResDtors[tag] = dtor
+					passResource(idx, arg.SortIdx)
 				}
 
 			case ctSortComponent, ctSortCoreModule: // a DEFINITION, satisfying
@@ -1257,6 +1230,68 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 			default:
 				failClose()
 				return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q: unsupported sort %#x", compInstIdx, arg.Name, arg.Sort)
+			}
+		}
+		// The func args, and the funcs of the bundles and shim instances
+		// passed, once every arg's resources are lined up: a handle crossing
+		// one is retagged to whichever arg carried its resource. Each is wired
+		// in as a delegate to whatever the outer's func names -- a host
+		// import (outerFuncArgImport falls back to importInterfaceName), an
+		// export of an earlier sibling nested instance (byIdx), or this
+		// component's own lift.
+		for _, arg := range inst.Args {
+			if arg.Sort == 0x01 {
+				hi, err := outerFuncArgImport(comp, cfg, in, nest, byIdx, arg.SortIdx, componentFunc, coreFuncTarget, resolve)
+				if err != nil {
+					failClose()
+					return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q: %w", compInstIdx, arg.Name, err)
+				}
+				subCfg.imports[mkImportKey(arg.Name, "")] = hi
+				continue
+			}
+			if arg.Sort != 0x05 {
+				continue
+			}
+			tgt, err := resolveInstanceArgTarget(comp, arg.SortIdx)
+			if err != nil || tgt.imported {
+				continue // refused, or forwarded, above
+			}
+			def, shim, ok := uninstantiatedInstance(comp, cfg, byIdx, tgt)
+			if !ok {
+				continue
+			}
+			wire := func(name string) error {
+				funcIdx, _, err := funcAliasSource(comp, cfg, aliasTarget{instIdx: tgt.spaceIdx, name: name})
+				var hi *hostImport
+				if err == nil {
+					hi, err = outerFuncArgImport(comp, cfg, in, nest, byIdx, funcIdx, componentFunc, coreFuncTarget, resolve)
+				}
+				if err != nil {
+					return fmt.Errorf("component/instance: component instance %d arg %q: export %q: %w", compInstIdx, arg.Name, name, err)
+				}
+				subCfg.imports[mkImportKey(arg.Name, name)] = hi
+				return nil
+			}
+			if shim == nil {
+				for _, x := range def.Exports {
+					if x.Sort == ctSortFunc {
+						if err = wire(x.Name); err != nil {
+							break
+						}
+					}
+				}
+			} else {
+				for _, x := range shim.Exports {
+					if x.ExternType == ctSortFunc {
+						if err = wire(x.Name); err != nil {
+							break
+						}
+					}
+				}
+			}
+			if err != nil {
+				failClose()
+				return nil, nil, err
 			}
 		}
 		// If any type args mapped a nested type import to an outer tag, layer that
