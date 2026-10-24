@@ -83,13 +83,16 @@ jobs:
       # actions/download-artifact@v4 makes a single attempt and fails hard on a transient
       # "Artifact not found" right after spectest_corpus uploads it, so retry instead of
       # letting one early 404 fail the whole job.
+      # The corpus also carries files the checkout already has, and gh run download refuses to
+      # overwrite, so it unpacks beside the tree and is copied over; a retry starts from empty.
       - name: Download spectest corpus
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 5
           max_attempts: 3
           retry_wait_seconds: 15
-          command: gh run download ${{ github.run_id }} --name spectest-corpus --dir internal/integration_test/spectest
+          shell: bash
+          command: rm -rf .corpus/spectest-corpus && gh run download ${{ github.run_id }} --name spectest-corpus --dir .corpus/spectest-corpus && cp -R .corpus/spectest-corpus/. internal/integration_test/spectest/ && rm -rf .corpus/spectest-corpus
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -99,7 +102,8 @@ jobs:
           timeout_minutes: 5
           max_attempts: 3
           retry_wait_seconds: 15
-          command: gh run download ${{ github.run_id }} --name component-corpus --dir .
+          shell: bash
+          command: rm -rf .corpus/component-corpus && gh run download ${{ github.run_id }} --name component-corpus --dir .corpus/component-corpus && cp -R .corpus/component-corpus/. ./ && rm -rf .corpus/component-corpus
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -214,13 +218,16 @@ jobs:
         with:
           go-version: ${{ matrix.go-version }}
 
+      # The corpus also carries files the checkout already has, and gh run download refuses to
+      # overwrite, so it unpacks beside the tree and is copied over; a retry starts from empty.
       - name: Download spectest corpus
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 5
           max_attempts: 3
           retry_wait_seconds: 15
-          command: gh run download ${{ github.run_id }} --name spectest-corpus --dir internal/integration_test/spectest
+          shell: bash
+          command: rm -rf .corpus/spectest-corpus && gh run download ${{ github.run_id }} --name spectest-corpus --dir .corpus/spectest-corpus && cp -R .corpus/spectest-corpus/. internal/integration_test/spectest/ && rm -rf .corpus/spectest-corpus
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -230,7 +237,8 @@ jobs:
           timeout_minutes: 5
           max_attempts: 3
           retry_wait_seconds: 15
-          command: gh run download ${{ github.run_id }} --name component-corpus --dir .
+          shell: bash
+          command: rm -rf .corpus/component-corpus && gh run download ${{ github.run_id }} --name component-corpus --dir .corpus/component-corpus && cp -R .corpus/component-corpus/. ./ && rm -rf .corpus/component-corpus
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -292,13 +300,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # The corpus also carries files the checkout already has, and gh run download refuses to
+      # overwrite, so it unpacks beside the tree and is copied over; a retry starts from empty.
       - name: Download spectest corpus
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 5
           max_attempts: 3
           retry_wait_seconds: 15
-          command: gh run download ${{ github.run_id }} --name spectest-corpus --dir internal/integration_test/spectest
+          shell: bash
+          command: rm -rf .corpus/spectest-corpus && gh run download ${{ github.run_id }} --name spectest-corpus --dir .corpus/spectest-corpus && cp -R .corpus/spectest-corpus/. internal/integration_test/spectest/ && rm -rf .corpus/spectest-corpus
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -308,7 +319,8 @@ jobs:
           timeout_minutes: 5
           max_attempts: 3
           retry_wait_seconds: 15
-          command: gh run download ${{ github.run_id }} --name component-corpus --dir .
+          shell: bash
+          command: rm -rf .corpus/component-corpus && gh run download ${{ github.run_id }} --name component-corpus --dir .corpus/component-corpus && cp -R .corpus/component-corpus/. ./ && rm -rf .corpus/component-corpus
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -358,13 +370,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # The corpus also carries files the checkout already has, and gh run download refuses to
+      # overwrite, so it unpacks beside the tree and is copied over; a retry starts from empty.
       - name: Download spectest corpus
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 5
           max_attempts: 3
           retry_wait_seconds: 15
-          command: gh run download ${{ github.run_id }} --name spectest-corpus --dir internal/integration_test/spectest
+          shell: bash
+          command: rm -rf .corpus/spectest-corpus && gh run download ${{ github.run_id }} --name spectest-corpus --dir .corpus/spectest-corpus && cp -R .corpus/spectest-corpus/. internal/integration_test/spectest/ && rm -rf .corpus/spectest-corpus
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -374,7 +389,8 @@ jobs:
           timeout_minutes: 5
           max_attempts: 3
           retry_wait_seconds: 15
-          command: gh run download ${{ github.run_id }} --name component-corpus --dir .
+          shell: bash
+          command: rm -rf .corpus/component-corpus && gh run download ${{ github.run_id }} --name component-corpus --dir .corpus/component-corpus && cp -R .corpus/component-corpus/. ./ && rm -rf .corpus/component-corpus
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
