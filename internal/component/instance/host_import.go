@@ -125,20 +125,10 @@ type config struct {
 	// supplied for the root's component imports, by import name.
 	componentImports map[string][]byte
 
-	// pendingDelegates accumulates a canon lower's forward reference to a
-	// nested sibling component instance that had not yet been instantiated
-	// at the point THIS instance's own core-instance loop needed to bind it
-	// -- trap-on-reenter.wast's shape: a top-level canon lower, wired
-	// directly into the outer component's own core-instance graph (built by
-	// instantiateGraph's CoreInstances loop), references a LATER-declared
-	// nested component instantiate's export (only instantiated afterward, by
-	// instantiateNestedInstances). computeCanonHostFunc appends here instead
-	// of failing outright; instantiateGraph resolves every entry (filling in
-	// its tgt.sub/tgt.be) immediately after instantiateNestedInstances
-	// returns, then clears this slice -- see resolveStaticExportFuncDesc and
-	// delegatingHostImportDeferred (composition.go). Always nil outside that
-	// one shape.
-	pendingDelegates []*pendingSiblingDelegate
+	// siblings are this instantiation's nested component instances
+	// instantiated so far, by component instance index: what a canon lower
+	// of one's export delegates to (computeCanonHostFunc).
+	siblings map[int]*Instance
 }
 
 // withHostResourceDtor registers a Go destructor for a host-provided resource,

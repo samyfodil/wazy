@@ -180,6 +180,9 @@ func decodeComponent(buf []byte) (*Component, error) {
 			}
 			offset = newOffset
 			instanceBase := uint32(len(c.Instances))
+			for j := range instances {
+				instances[j].CoreInstancesBefore = uint32(len(c.CoreInstances))
+			}
 			c.Instances = append(c.Instances, instances...)
 			// Every instance definition occupies the next index in the
 			// component's instance index space, interleaved with instance

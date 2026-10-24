@@ -300,8 +300,12 @@ type InlineExport struct {
 type Instance struct {
 	Kind         byte   // 0x00 = instantiate, 0x01 = inline exports
 	ComponentIdx uint32 // used if Kind == 0x00
-	Args         []InstantiateArg
-	Exports      []InlineExport
+	// CoreInstancesBefore is how many core instances the binary defines
+	// before this one. Definitions are instantiated in the order they
+	// appear, so those are instantiated first.
+	CoreInstancesBefore uint32
+	Args                []InstantiateArg
+	Exports             []InlineExport
 }
 
 // CanonOpt represents a canonical option.

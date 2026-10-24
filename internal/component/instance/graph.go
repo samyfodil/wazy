@@ -65,7 +65,9 @@ const graphEmptyImportKey = "wazy:component/empty-import"
 //    func's re-export already commits to an exact core-level type, and that
 //    binary is right here.
 // 6. Walk comp.CoreInstances in order, exactly mirroring the binary's own
-//    core instance index space:
+//    core instance index space, with each nested component instance
+//    (comp.Instances) instantiated between the core instances defined before
+//    and after it -- definitions are instantiated in binary order:
 //      - Kind 0x00 (instantiate): instantiate the named embedded core
 //        module for real via Runtime.InstantiateWithConfig, registered under
 //        its own collision-free identity key (coreInstanceKey) plus, as a
@@ -549,14 +551,19 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	// an async lift must trap eagerly, before the callee's core code ever
 	// runs; the flag lives on the shared *sched (one per composition tree)
 	// so a sibling nested component's already-instantiated async export
-	// sees it too. Recursing into a NESTED component's own instantiateGraph
-	// call (instantiateNestedInstances, below) brackets ITS OWN core-
-	// instance loop the same way, so this is correctly scoped per component
-	// even though sched.instantiating is one shared bool: core-instance
-	// loops across the tree run strictly sequentially, never concurrently.
+	// sees it too. A NESTED component's own instantiateGraph call
+	// (instantiateNestedInstances, below), which runs between this one's core
+	// instances, sets it the same way and restores it on return:
+	// instantiations across the tree run strictly sequentially, never
+	// concurrently.
+	prevInstantiating := sh.instantiating
 	sh.instantiating = true
-	defer func() { sh.instantiating = false }()
-	for k, ci := range comp.CoreInstances {
+	defer func() { sh.instantiating = prevInstantiating }()
+	// instantiateCore instantiates core instance k. Core and component
+	// instances are instantiated in the order the binary defines them
+	// (coreUpTo), so everything k names already exists.
+	instantiateCore := func(k int) error {
+		ci := comp.CoreInstances[k]
 		// groupNames are the consumer-declared "with" names this instance is
 		// passed under -- the module names a real core module spells its
 		// imports of this group with, hence the neededTypes lookup keys. key
@@ -573,7 +580,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			// NOT by comp.CoreModules position, which misses every
 			// core-module outer alias.
 			if int(ci.ModuleIdx) >= len(rewrittenCore) {
-				return fail(fmt.Errorf("component/instance: core instance %d references core module %d, out of range of the %d-entry core module index space", k, ci.ModuleIdx, len(rewrittenCore)))
+				return fmt.Errorf("component/instance: core instance %d references core module %d, out of range of the %d-entry core module index space", k, ci.ModuleIdx, len(rewrittenCore))
 			}
 			// rewrittenCore[ci.ModuleIdx] already holds this module's bytes after
 			// coreModuleBytes + the (stable) empty-import-name rewrite, computed
@@ -603,7 +610,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			for _, arg := range ci.Args {
 				src, ok := instMods[int(arg.InstanceIdx)]
 				if !ok {
-					return fail(fmt.Errorf("component/instance: core module %d instantiate arg %q references core instance %d, which was not instantiated", ci.ModuleIdx, arg.Name, arg.InstanceIdx))
+					return fmt.Errorf("component/instance: core module %d instantiate arg %q references core instance %d, which was not instantiated", ci.ModuleIdx, arg.Name, arg.InstanceIdx)
 				}
 				if graphResolver(argImportName(arg.Name, emptyNameTarget)) != src {
 					needLocal = true
@@ -629,7 +636,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			// the graph is wired (see shim.go), not eagerly here.
 			mod, err := instantiateCoreModule(argCtx, r, cfg, coreBytes, wazy.NewModuleConfig().WithName("").WithStartFunctions())
 			if err != nil {
-				return fail(fmt.Errorf("component/instance: instantiate core module %d (key %q): %w", ci.ModuleIdx, key, coreLinkError(comp, k, err)))
+				return fmt.Errorf("component/instance: instantiate core module %d (key %q): %w", ci.ModuleIdx, key, coreLinkError(comp, k, err))
 			}
 			instMods[k] = mod
 			keyToInst[coreInstanceKey(k)] = mod
@@ -652,11 +659,11 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 					comp.CoreFuncSpace[e.CoreSortIdx].Kind == binary.CoreFuncFromCanon {
 					centry := comp.CoreFuncSpace[e.CoreSortIdx]
 					if int(centry.Canon) >= len(comp.Canons) {
-						return fail(fmt.Errorf("component/instance: core instance %d: inline export %q references canon %d, out of range", k, e.Name, centry.Canon))
+						return fmt.Errorf("component/instance: core instance %d: inline export %q references canon %d, out of range", k, e.Name, centry.Canon)
 					}
 					def, wasiCall, cerr := computeCanonHostFunc(ctx, r, comp, cfg, resources, in, comp.Canons[centry.Canon], neededTypes, groupNames, e.Name, coreMemTarget, coreFuncTarget, coreTableTarget)
 					if cerr != nil {
-						return fail(fmt.Errorf("component/instance: core instance %d: inline export %q: %w", k, e.Name, cerr))
+						return fmt.Errorf("component/instance: core instance %d: inline export %q: %w", k, e.Name, cerr)
 					}
 					if wasiCall != "" {
 						wasiCalls = append(wasiCalls, wasiCall)
@@ -671,7 +678,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 				// lookups; the shim names its alias sources by coreInstanceKey.
 				item, wasiCall, privMod, err := resolveInlineExportItem(ctx, r, comp, cfg, resources, in, e, coreMemSpace, coreTableSpace, coreGlobalSpace, instMods, neededTypes, groupNames, nextPrivateName, coreFuncTarget, coreMemTarget, coreTableTarget)
 				if err != nil {
-					return fail(fmt.Errorf("component/instance: core instance %d: %w", k, err))
+					return fmt.Errorf("component/instance: core instance %d: %w", k, err)
 				}
 				items = append(items, item)
 				if wasiCall != "" {
@@ -687,7 +694,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			if len(canonDefs) > 0 {
 				hostMod, herr := buildMergedCanonHostModule(ctx, r, nextPrivateName(), canonDefs)
 				if herr != nil {
-					return fail(fmt.Errorf("component/instance: core instance %d: %w", k, herr))
+					return fmt.Errorf("component/instance: core instance %d: %w", k, herr)
 				}
 				closers = append(closers, hostMod)
 				// Reference the merged module by a COMPONENT-CONSTANT resolver key
@@ -714,7 +721,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			}
 			shimBytes, err := buildPassthroughShim(items)
 			if err != nil {
-				return fail(fmt.Errorf("component/instance: core instance %d: %w", k, err))
+				return fmt.Errorf("component/instance: core instance %d: %w", k, err)
 			}
 			// Anonymous like the embedded modules above; consumers import it by
 			// its key via the resolver, not by a global name. Every FromModule is
@@ -725,7 +732,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			// defensive canon-key fallback above, where the bytes are not stable.
 			mod, err := instantiateCoreModuleCacheable(instCtx, r, cfg, shimBytes, wazy.NewModuleConfig().WithName("").WithStartFunctions(), cacheableShim)
 			if err != nil {
-				return fail(fmt.Errorf("component/instance: instantiate regrouping shim for core instance %d (key %q): %w", k, key, err))
+				return fmt.Errorf("component/instance: instantiate regrouping shim for core instance %d (key %q): %w", k, key, err)
 			}
 			instMods[k] = mod
 			keyToInst[coreInstanceKey(k)] = mod
@@ -733,60 +740,46 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			closers = append(closers, mod)
 
 		default:
-			return fail(fmt.Errorf("component/instance: core instance %d has unknown kind %#x", k, ci.Kind))
+			return fmt.Errorf("component/instance: core instance %d has unknown kind %#x", k, ci.Kind)
 		}
+		return nil
+	}
+	coreDone := 0
+	coreUpTo := func(n uint32) error {
+		for ; coreDone < int(n) && coreDone < len(comp.CoreInstances); coreDone++ {
+			if err := instantiateCore(coreDone); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 
-	if err := checkResourceDtors(comp, func(idx uint32) api.Function {
-		mod, name, err := coreFuncTarget(int(idx))
-		if err != nil {
-			return nil
-		}
-		return safeExportedFunction(mod, name)
-	}); err != nil {
-		return fail(err)
-	}
-
-	// Recursively instantiate any nested component instances (comp.Instances,
-	// the fused-adapter / nested-composition shape) and link siblings, before
-	// binding exports -- an outer export may alias a nested instance's export.
-	compInstances, subInstances, err := instantiateNestedInstances(ctx, r, comp, cfg, in, componentFunc, coreFuncTarget, resolve)
-	if err != nil {
-		return fail(err)
-	}
+	// The nested component instances (comp.Instances, the fused-adapter /
+	// nested-composition shape), each after the core instances defined before
+	// it, then the core instances defined after the last of them -- all before
+	// binding exports, since an outer export may alias a nested instance's.
+	compInstances, subInstances, err := instantiateNestedInstances(ctx, r, comp, cfg, in, coreUpTo, componentFunc, coreFuncTarget, resolve)
 	closeSubs := func() {
 		for _, s := range subInstances {
 			s.Close(ctx) //nolint:errcheck // best-effort cleanup on an error path
 		}
 	}
-
-	// Resolve every deferred sibling delegate a canon lower's forward
-	// reference queued while the core-instance loop above ran (see
-	// cfg.pendingDelegates' doc) -- every sibling it could possibly need now
-	// exists (instantiateNestedInstances just returned them). Nothing has
-	// dereferenced pd.tgt.sub/.be yet (both hi.fn's and hi.asyncTarget's
-	// closures only read tgt at actual guest-call time, which can't happen
-	// before this Instantiate call returns), so filling them in now is
-	// always in time. Also re-runs the Feature 1 promotion-gate check
-	// computeCanonHostFunc's SYNC-lower arm had to skip (tgt.be wasn't known
-	// yet there) -- see that check's own doc.
-	for _, pd := range cfg.pendingDelegates {
-		sib, ok := compInstances[pd.instIdx]
-		if !ok {
-			closeSubs()
-			return fail(fmt.Errorf("component/instance: component instance %d, referenced by an earlier canon lower, was never instantiated", pd.instIdx))
-		}
-		be, ok := sib.exports[pd.exportName]
-		if !ok {
-			closeSubs()
-			return fail(fmt.Errorf("component/instance: component instance %d has no export %q, referenced by an earlier canon lower", pd.instIdx, pd.exportName))
-		}
-		pd.tgt.sub, pd.tgt.be = sib, be
-		if !pd.isAsyncLower && (be.asyncCallback || be.stackful) {
-			in.mayBlockSync = true
-		}
+	if err == nil {
+		err = coreUpTo(uint32(len(comp.CoreInstances)))
 	}
-	cfg.pendingDelegates = nil
+	if err == nil {
+		err = checkResourceDtors(comp, func(idx uint32) api.Function {
+			mod, name, err := coreFuncTarget(int(idx))
+			if err != nil {
+				return nil
+			}
+			return safeExportedFunction(mod, name)
+		})
+	}
+	if err != nil {
+		closeSubs()
+		return fail(err)
+	}
 
 	exports, reexposed, err := bindImportExportsGraph(comp, cfg, componentFunc, coreFuncTarget, resolve, compInstances)
 	if err != nil {
@@ -832,14 +825,17 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 // (inline-export) instances are the pass-through-shim shape handled in
 // bindInstanceExportGraph, not here.
 //
+// coreUpTo instantiates the outer component's core instances up to a count,
+// which this calls with each instance's CoreInstancesBefore: definitions are
+// instantiated in the order the binary gives them.
+//
 // in/componentFunc/coreFuncTarget/resolve are the OUTER component's own
-// (already fully core-instance-instantiated, since this runs after that
-// loop) Instance and static-resolution closures -- threaded through purely
+// Instance and static-resolution closures -- threaded through purely
 // so outerFuncArgImport can build a delegating hostImport for a `(with "x"
 // (func N))` arg naming the outer's OWN local func (a plain canon lift, not
 // an alias at all -- trap-on-reenter.wast's shape) exactly like it already
 // does for a sibling's export.
-func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, in *Instance, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver) (map[int]*Instance, []*Instance, error) {
+func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, in *Instance, coreUpTo func(uint32) error, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver) (map[int]*Instance, []*Instance, error) {
 	if len(comp.Instances) == 0 {
 		return nil, nil, nil
 	}
@@ -920,6 +916,7 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 	}
 
 	byIdx := make(map[int]*Instance, len(comp.Instances))
+	cfg.siblings = byIdx
 	var order []*Instance
 	failClose := func() {
 		for _, s := range order {
@@ -930,6 +927,10 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 		compInstIdx := spaceIdx[i]
 		if !needed[compInstIdx] || inst.Kind != 0x00 {
 			continue
+		}
+		if err := coreUpTo(inst.CoreInstancesBefore); err != nil {
+			failClose()
+			return nil, nil, err
 		}
 		cv, err := cfg.scope.component(inst.ComponentIdx)
 		if err != nil {
@@ -1870,7 +1871,7 @@ func computeCanonHostFunc(
 		}
 
 		var iface, fname string
-		var hi *hostImport // pre-built below for a deferred-sibling lower; nil otherwise (looked up from cfg.imports)
+		var hi *hostImport // built below for a nested instance's export; nil otherwise (looked up from cfg.imports)
 		switch fe.Kind {
 		case binary.ComponentFuncFromImport:
 			if int(fe.Import) >= len(comp.Imports) {
@@ -1897,35 +1898,25 @@ func computeCanonHostFunc(
 				// A canon lower wired directly into the outer component's
 				// own core-instance graph, referencing a LOCALLY nested
 				// component instantiate's export -- trap-on-reenter.wast's
-				// shape. That sibling may not be instantiated yet (this
-				// core-instance loop runs before instantiateNestedInstances
-				// does, see instantiateGraph's doc), so its live
-				// *Instance/*boundExport aren't available here -- only its
-				// static shape is, which is all THIS bind-time step needs
-				// (the wasm shim's core func type must be fixed now
-				// regardless). See cfg.pendingDelegates' doc for how the
-				// live sibling is filled in once it exists, always before
-				// any guest call could reach this func.
-				instRef := comp.Instances[localIdx]
-				if instRef.Kind != 0x00 {
+				// shape. The instance is defined before the alias and so
+				// before this lower: it was instantiated first.
+				if comp.Instances[localIdx].Kind != 0x00 {
 					return hostFuncDef{}, "", fmt.Errorf("lower func index %d: component instance %d is not a real nested component instantiation", fi, al.InstanceIdx)
 				}
-				// Through the component index space, not NestedComponents
-				// directly: a component that both imports and defines
-				// components indexes the two interleaved (componentspace.go).
-				nested, nerr := resolveComponentDef(comp, cfg, instRef.ComponentIdx)
-				if nerr != nil {
-					return hostFuncDef{}, "", fmt.Errorf("lower func index %d: component instance %d: %w", fi, al.InstanceIdx, nerr)
+				sib, key := resolveFuncAliasInstance(comp, aliasTarget{instIdx: al.InstanceIdx, name: al.Name}, cfg.siblings)
+				if sib == nil {
+					return hostFuncDef{}, "", fmt.Errorf("lower func index %d: component instance %d was never instantiated", fi, al.InstanceIdx)
 				}
-				sfd, sresolve, serr := resolveStaticExportFuncDesc(nested, al.Name)
-				if serr != nil {
-					return hostFuncDef{}, "", fmt.Errorf("lower func index %d: sibling component instance %d export %q: %w", fi, al.InstanceIdx, al.Name, serr)
+				be, ok := sib.exports[key]
+				if !ok {
+					return hostFuncDef{}, "", fmt.Errorf("lower func index %d: component instance %d has no export %q", fi, al.InstanceIdx, key)
 				}
 				// No resource-type wiring for a bare (non-instance) func
 				// alias -- matches outerFuncArgImport's identical case.
 				provToImp := func(uint32) (uint32, bool) { return 0, false }
-				tgt := &guestAsyncTarget{exportName: al.Name, provToImp: provToImp}
-				hi = delegatingHostImportDeferred(tgt, sfd, sresolve)
+				owner, ownerKey := ownerOf(be, sib, key)
+				hi = delegatingHostImport(owner, ownerKey, be, provToImp)
+				hi.asyncTarget = &guestAsyncTarget{sub: owner, be: be, exportName: ownerKey, provToImp: provToImp}
 				// A canon lower declared directly in the OUTER component's
 				// own core-instance graph, targeting a locally-instantiated
 				// child's export -- a direct static parent<->child lineage
@@ -1934,9 +1925,6 @@ func computeCanonHostFunc(
 				// via instantiate-args (arg.Sort == 0x05, outerFuncArgImport's
 				// sibling-alias arm), which are never flagged.
 				hi.lineage = true
-				cfg.pendingDelegates = append(cfg.pendingDelegates, &pendingSiblingDelegate{
-					instIdx: int(al.InstanceIdx), exportName: al.Name, tgt: tgt, isAsyncLower: isAsyncLower,
-				})
 				iface, fname = fmt.Sprintf("component-instance-%d", al.InstanceIdx), al.Name
 				break
 			}
@@ -1980,11 +1968,8 @@ func computeCanonHostFunc(
 			// time so a promoted callback task's segment (guestTask.block)
 			// can park at it instead of nested-driving/livelocking. Flagged
 			// on the IMPORTING instance (in), which is whose callback tasks
-			// might reach this sync-lowered call site. Skipped for a
-			// deferred sibling (hi.asyncTarget.be still nil here) --
-			// instantiateGraph re-runs this exact check once tgt.be is
-			// known, right after resolving cfg.pendingDelegates.
-			if !isAsyncLower && hi.asyncTarget != nil && hi.asyncTarget.be != nil && (hi.asyncTarget.be.asyncCallback || hi.asyncTarget.be.stackful) {
+			// might reach this sync-lowered call site.
+			if !isAsyncLower && hi.asyncTarget != nil && (hi.asyncTarget.be.asyncCallback || hi.asyncTarget.be.stackful) {
 				in.mayBlockSync = true
 			}
 			var fn api.GoModuleFunction
