@@ -170,9 +170,10 @@ spec_version_v2 := wg-2.0
 
 spectest_v3_interaction_dir := $(spectest_base_dir)/v3-interaction
 spectest_v3_interaction_testdata_dir := $(spectest_v3_interaction_dir)/testdata
-# The cases crossing two of 3.0's proposals. The wasmtime-*.wast are vendored from the Bytecode
-# Alliance's own hand-written extras (Apache-2.0), the wazy-*.wast are this repository's, for the
-# crossings those do not reach. Both are committed as source; only the .json and .wasm regenerate.
+# The cases crossing two of 3.0's proposals. The wasmtime-*.wast are Wasmtime's own tests, from its
+# tests/misc_testsuite: an implementation's hand-written extras, not the specification's suite. They are
+# fetched at this pin and not committed. The wazy-*.wast are this repository's, for the crossings those
+# do not reach, and are committed along with what they generate.
 wasmtime_version := d8a0da6d661605713798c1c9c76be5c28e3159ff
 wasmtime_interaction_wast_files := \
 	gc/alloc-v128-struct.wast gc/array-init-data.wast gc/array-new-data.wast \

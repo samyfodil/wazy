@@ -59,6 +59,10 @@ zig-out/
 /internal/component/instance/testdata/wast/wasmtime-nested/
 /internal/component/instance/testdata/wast/wasmtime-restrictions/
 
+# Fetched by `make build.spectest`. The suites that are fetched whole are ignored by a .gitignore in
+# their testdata/, which also keeps the directory their tests embed.
+/internal/integration_test/spectest/v3-interaction/testdata/wasmtime-*
+
 # Netlify CLI local state
 .netlify/
 .gstack/
