@@ -274,6 +274,12 @@ type Instance struct {
 	// never need a nil check.
 	resources *handleTable
 
+	// hostResources is the embedder's handle table: the composition root's
+	// (see config.hostResources). It is resources itself on the root, and
+	// differs only on a nested component, whose host imports then move the
+	// handles nested in their args and results across (hostHandleTransfer).
+	hostResources *handleTable
+
 	// coreModuleCount is the number of EMBEDDED core modules (binary.Component
 	// CoreModules, instantiated via a Kind == 0x00 "instantiate" core
 	// instance) this Instance wired up -- set only by the general graph

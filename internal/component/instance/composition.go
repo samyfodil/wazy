@@ -205,6 +205,37 @@ func exportedInstanceResourceDefs(comp *binary.Component, instanceExportName str
 	return out
 }
 
+// importedResourceFirstAlias maps every TypeSpace index of comp that aliases a
+// resource out of an imported instance to the FIRST index aliasing the same
+// one -- the index importedResourceIndices reports, and so the one the
+// composition's tags are keyed by. A component may alias one resource many
+// times (wit-component re-aliases wasi:io/streams' output-stream once per
+// interface that uses it, and again where its resource.drop is built), and
+// every alias must tag the handle table alike, or a handle minted under one
+// is refused -- or worse, taken for another resource -- under the next.
+func importedResourceFirstAlias(comp *binary.Component) map[uint32]uint32 {
+	type key struct{ iface, name string }
+	var first map[key]uint32
+	var out map[uint32]uint32
+	for idx := range comp.TypeSpace {
+		iface, name, ok := resolveImportedResourceName(comp, uint32(idx))
+		if !ok {
+			continue
+		}
+		if first == nil {
+			first, out = map[key]uint32{}, map[uint32]uint32{}
+		}
+		k := key{iface, name}
+		f, seen := first[k]
+		if !seen {
+			first[k] = uint32(idx)
+			continue
+		}
+		out[uint32(idx)] = f
+	}
+	return out
+}
+
 // importedResourceIndices returns, for a component, each resource it IMPORTS
 // through the instance named importName mapped to the local TypeSpace index that
 // names it (a type-sort export alias into that imported instance). That index is
@@ -680,6 +711,7 @@ func delegatingHostImportDeferred(tgt *guestAsyncTarget, fd binary.FuncDesc, res
 		}
 	}
 	return &hostImport{
+		delegate: true,
 		fn: func(ctx context.Context, args []abi.Value) ([]abi.Value, error) {
 			sub, be, exportName := tgt.sub, tgt.be, tgt.exportName
 			var scope *task

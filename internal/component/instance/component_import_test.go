@@ -370,6 +370,11 @@ func TestComponentImport_ResourceThroughSuppliedComponent(t *testing.T) {
 	if err != nil || len(got) != 1 || got[0] != uint32(41) {
 		t.Fatalf("get = %v, %v; want [41]", got, err)
 	}
+	// The handle lives in the supplied component's table, which is where a
+	// host minting for "c" must mint; for anything else the root's is it.
+	if in.ResourcesFor("c") == in.Resources() || in.ResourcesFor("other") != in.Resources() {
+		t.Fatal("ResourcesFor does not name the defining component's table")
+	}
 	if err := in.DropResource(ctx, "c", "counter", h[0].(uint32)); err != nil {
 		t.Fatalf("DropResource: %v", err)
 	}

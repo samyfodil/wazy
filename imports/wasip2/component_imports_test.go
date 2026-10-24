@@ -3,6 +3,7 @@ package wasip2
 import (
 	"context"
 	_ "embed"
+	"net/http"
 	"reflect"
 	"strings"
 	"testing"
@@ -100,5 +101,35 @@ func TestComponentImports_WacImportDependenciesRefusesTheWrongComponent(t *testi
 	_, err := component.Instantiate(ctx, r, wacComposedWasm, WithWASI(WASIConfig{})...)
 	if err == nil || !strings.Contains(err.Error(), `component import "unlocked-dep=<wazy:provider>" was not supplied`) {
 		t.Fatalf("with nothing supplied: %v", err)
+	}
+}
+
+//go:embed testdata/component_imports/http_root.wasm
+var httpRootWasm []byte
+
+// A root that imports an HTTP handler as a component and re-exports its
+// wasi:http/incoming-handler serves requests: the host mints the
+// incoming-request and response-outparam handles in the table of the
+// component that defines the handler -- the one whose canonical ABI reads
+// them -- not in the root's, which only re-exposes the interface.
+func TestComponentImports_ServeHTTPThroughSuppliedHandler(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+	opts := append(WithWASI(WASIConfig{EnableHTTP: true}),
+		component.WithComponentImport("unlocked-dep=<wazy:handler>", realHTTPIncomingWasm))
+	in, err := component.Instantiate(ctx, r, httpRootWasm, opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close(ctx)
+	for _, path := range []string{"/hello?x=1", "/again"} {
+		status, _, body, _, err := serveHTTPCall(in, ctx, "GET", mustURL(path), http.Header{}, nil, nil)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		if want := "method=Method::Get path=" + path + "\n"; status != 200 || string(body) != want {
+			t.Fatalf("%s: %d %q, want 200 %q", path, status, body, want)
+		}
 	}
 }

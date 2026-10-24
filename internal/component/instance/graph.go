@@ -308,7 +308,10 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		sh = &sched{}
 		cfg.sharedSched = sh // propagated to every subCfg by instantiateNestedInstances below
 	}
-	in := &Instance{resolve: resolve, resources: resources, mayEnter: true, mayLeave: true, sched: sh}
+	if cfg.hostResources == nil { // the composition root: its table is the embedder's
+		cfg.hostResources = resources
+	}
+	in := &Instance{resolve: resolve, resources: resources, hostResources: cfg.hostResources, mayEnter: true, mayLeave: true, sched: sh}
 	// A composed sub-instance inherits the destructors for the resources it
 	// imports from a sibling, keyed by the table tag its own resource.drop uses.
 	for tag, resolve := range cfg.importedResDtors {
@@ -913,6 +916,7 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 			resourceOrigin:   map[uint32]resourceIdentity{},
 			hostResDtors:     map[uint32]func(context.Context, uint32) error{},
 			sharedSched:      cfg.sharedSched, // see instantiateGraph's "sh" resolution below
+			hostResources:    cfg.hostResources,
 		}
 		// typeArgTags maps a resource type the nested component IMPORTS (by its
 		// own type-import TypeSpace index) to the composition-global tag the outer
@@ -1174,9 +1178,14 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 		}
 		// If any type args mapped a nested type import to an outer tag, layer that
 		// over the default deftype/export-alias canonicalizer.
-		if len(typeArgTags) > 0 {
+		// Every alias of one imported resource tags as its first alias does
+		// (importedResourceFirstAlias), the index typeArgTags is keyed by.
+		if first := importedResourceFirstAlias(nested); len(typeArgTags) > 0 || len(first) > 0 {
 			base := nested.ResourceDefIndex
 			subCfg.resCanon = func(idx uint32) uint32 {
+				if f, ok := first[idx]; ok {
+					idx = f
+				}
 				if t, ok := typeArgTags[idx]; ok {
 					return t
 				}
@@ -1243,6 +1252,7 @@ func delegatingHostImport(sub *Instance, exportName string, be *boundExport, pro
 		}
 	}
 	return &hostImport{
+		delegate: true,
 		fn: func(ctx context.Context, args []abi.Value) ([]abi.Value, error) {
 			var scope *task
 			if hasBorrowParam {

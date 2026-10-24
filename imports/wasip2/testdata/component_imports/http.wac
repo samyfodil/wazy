@@ -1,0 +1,5 @@
+package wazy:http-root;
+
+let handler = new wazy:handler { ... };
+
+export handler["wasi:http/incoming-handler@0.2.12"];

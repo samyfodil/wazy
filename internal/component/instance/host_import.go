@@ -97,6 +97,13 @@ type config struct {
 	// its own tree root (instantiateGraph allocates a fresh *sched).
 	sharedSched *sched
 
+	// hostResources is the composition root's handle table: the one the
+	// resource hooks are given, and so the one every host func reads and
+	// mints its handles in. instantiateGraph sets it on the root's config and
+	// every subCfg inherits it, so a nested component's host imports can move
+	// the handles nested in their args and results across (hostHandleTransfer).
+	hostResources *handleTable
+
 	// componentArgs maps a COMPONENT-sort import name of the component being
 	// instantiated to the component DEFINITION supplied for it: by the parent,
 	// via a `(with "x" (component N))` instantiate-arg (types.11.wast), or --
@@ -203,6 +210,11 @@ type hostImport struct {
 	// enforces that beyond call-site discipline -- buildAsyncHostWrapper
 	// checks asyncTarget first.
 	asyncTarget *guestAsyncTarget
+
+	// delegate marks a composition delegate: fn calls a sibling component's
+	// export rather than the embedder's Go func, so the handles it is passed
+	// are the sibling's business, not the host table's (hostHandleTransfer).
+	delegate bool
 
 	// lineage marks a composition delegate that crosses a DIRECT static
 	// parent<->child instantiation boundary: the outer's own local lift
@@ -668,6 +680,14 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 		overrideReallocCall = coreReallocCall(reallocOverride)
 	}
 
+	// A nested component's call into the embedder's Go func: the handles
+	// below the top level of its args and results cross between this
+	// component's table and the embedder's (hostHandleTransfer).
+	var transfer *hostHandleTransfer
+	if in != nil && in.hostResources != nil && in.hostResources != resources && !hi.delegate {
+		transfer = newHostHandleTransfer(fd, resolve, resources, in.hostResources)
+	}
+
 	fn := api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 		if hi.lineage {
 			panic(fmt.Errorf("component/instance: host import %q %q: wasm trap: cannot enter component instance", iface, funcName))
@@ -712,6 +732,13 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 			}
 			putValueSlice(argsp)
 		}()
+		if transfer != nil {
+			borrows, err := transfer.moveArgs(args)
+			defer transfer.releaseBorrows(borrows)
+			if err != nil {
+				panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
+			}
+		}
 		// A sync canon lower whose callee is an async lift (callback or
 		// stackful) is a potential block (docs/component-model-async-
 		// stackful-design.md §4.3): a composition delegate
@@ -775,6 +802,11 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 		}
 		if err != nil {
 			panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
+		}
+		if transfer != nil {
+			if err := transfer.moveResults(results); err != nil {
+				panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
+			}
 		}
 		var realloc abi.Realloc
 		if overrideReallocCall != nil {
@@ -1362,4 +1394,259 @@ func toApiValueTypes(kinds []string) ([]api.ValueType, error) {
 		}
 	}
 	return out, nil
+}
+
+// hostHandleTransfer carries the handles nested inside a host func's args and
+// results across the boundary between a composed component's own handle table
+// and the embedder's -- the composition root's, which WithResourcesHook hands
+// the host and which every handle a host func reads or mints below the top
+// level lives in. The root's own host calls need none of this (its table IS
+// the embedder's), and a top-level own/borrow needs none either:
+// resolveHandleArg and allocHandleResult already turn it into the rep. What is
+// left is a handle a nested component passes or receives inside a composite --
+// wasi:io/poll's list<borrow<pollable>>, wasi:http's
+// result<own<outgoing-response>> -- which the host would otherwise look up in
+// the wrong table.
+//
+// params[i]/results[i] are the types of the params and results holding a
+// handle below the top level, nil for the rest; a func with none gets no
+// transfer at all.
+type hostHandleTransfer struct {
+	params, results []binary.TypeDesc
+	resolve         abi.Resolver
+	guest, host     *handleTable
+}
+
+// newHostHandleTransfer returns the transfer for one host import of a nested
+// component, or nil when no param or result holds a handle below the top
+// level. fd's types all resolve: buildHostWrapper has flattened them.
+func newHostHandleTransfer(fd binary.FuncDesc, resolve abi.Resolver, guest, host *handleTable) *hostHandleTransfer {
+	x := &hostHandleTransfer{resolve: resolve, guest: guest, host: host}
+	found := false
+	pick := func(ref *binary.TypeRef) binary.TypeDesc {
+		t, err := resolveTypeRef(ref, resolve)
+		if err != nil || !nestedHandleIn(t, resolve, 0) {
+			return nil
+		}
+		found = true
+		return t
+	}
+	for i := range fd.Params {
+		x.params = append(x.params, pick(&fd.Params[i].Type))
+	}
+	refs := funcResultTypeRefs(fd)
+	for i := range refs {
+		x.results = append(x.results, pick(&refs[i]))
+	}
+	if !found {
+		return nil
+	}
+	return x
+}
+
+// nestedHandleIn reports whether a value of type t holds an own or borrow
+// handle at depth 1 or more -- t itself is depth 0.
+func nestedHandleIn(t binary.TypeDesc, resolve abi.Resolver, depth int) bool {
+	sub := func(ref *binary.TypeRef) bool {
+		if ref == nil {
+			return false
+		}
+		st, err := resolveTypeRef(ref, resolve)
+		return err == nil && nestedHandleIn(st, resolve, depth+1)
+	}
+	switch d := t.(type) {
+	case binary.OwnDesc, binary.BorrowDesc:
+		return depth > 0
+	case binary.RecordDesc:
+		for i := range d.Fields {
+			if sub(&d.Fields[i].Type) {
+				return true
+			}
+		}
+	case binary.TupleDesc:
+		for i := range d.Elements {
+			if sub(&d.Elements[i]) {
+				return true
+			}
+		}
+	case binary.VariantDesc:
+		for i := range d.Cases {
+			if sub(d.Cases[i].Type) {
+				return true
+			}
+		}
+	case binary.OptionDesc:
+		return sub(&d.Element)
+	case binary.ResultDesc:
+		return sub(d.Ok) || sub(d.Err)
+	case binary.ListDesc:
+		return sub(&d.Element)
+	case binary.FixedListDesc:
+		return sub(&d.Element)
+	case binary.MapDesc:
+		return sub(&d.Key) || sub(&d.Value)
+	}
+	return false
+}
+
+// moveArgs moves the nested handles of a lifted arg list from the guest's table
+// into the host's: an own is taken out of the guest's table and minted anew
+// in the host's, as the guest's lift_own gives it up; a borrow is minted in
+// the host's table for the call alone. It returns those borrows, for
+// releaseBorrows once the call returns -- also when it fails part way.
+func (x *hostHandleTransfer) moveArgs(args []abi.Value) ([]uint32, error) {
+	var borrows []uint32
+	for i, t := range x.params {
+		if t == nil || i >= len(args) {
+			continue
+		}
+		v, err := x.move(args[i], t, 0, x.guest, x.host, &borrows)
+		if err != nil {
+			return borrows, fmt.Errorf("param %d: %w", i, err)
+		}
+		args[i] = v
+	}
+	return borrows, nil
+}
+
+// moveResults moves the nested handles of a host func's results from the host's
+// table into the guest's.
+func (x *hostHandleTransfer) moveResults(results []abi.Value) error {
+	for i, t := range x.results {
+		if t == nil || i >= len(results) {
+			continue
+		}
+		v, err := x.move(results[i], t, 0, x.host, x.guest, nil)
+		if err != nil {
+			return fmt.Errorf("result %d: %w", i, err)
+		}
+		results[i] = v
+	}
+	return nil
+}
+
+// releaseBorrows drops the borrows moveArgs minted in the host's table.
+func (x *hostHandleTransfer) releaseBorrows(borrows []uint32) {
+	for _, h := range borrows {
+		x.host.removeEntry(h)
+	}
+}
+
+// move returns v, of type t, with every handle in it moved from one table to
+// the other; t is never a handle itself at depth 0, since those params and
+// results hold no handle below the top level. A composite holding one is copied rather than
+// rewritten: a result is the host's value, which it may keep. borrows
+// collects the borrows minted on the way in; a borrow cannot travel the
+// other way, out of a host func's results, which the validator refuses.
+func (x *hostHandleTransfer) move(v abi.Value, t binary.TypeDesc, depth int, from, to *handleTable, borrows *[]uint32) (abi.Value, error) {
+	sub := func(v abi.Value, ref *binary.TypeRef) (abi.Value, error) {
+		st, err := resolveTypeRef(ref, x.resolve)
+		if err != nil {
+			return nil, err
+		}
+		if !nestedHandleIn(st, x.resolve, depth+1) {
+			return v, nil
+		}
+		return x.move(v, st, depth+1, from, to, borrows)
+	}
+	each := func(vs []abi.Value, ref func(int) *binary.TypeRef) (abi.Value, error) {
+		out := make([]abi.Value, len(vs))
+		for i, e := range vs {
+			nv, err := sub(e, ref(i))
+			if err != nil {
+				return nil, err
+			}
+			out[i] = nv
+		}
+		return out, nil
+	}
+	switch d := t.(type) {
+	case binary.OwnDesc:
+		h, ok := v.(uint32)
+		if !ok {
+			return nil, fmt.Errorf("own<%s>: expected a uint32 handle, got %T", from.shortTypeName(d.ResourceType), v)
+		}
+		rep, err := from.TakeOwn(d.ResourceType, h)
+		if err != nil {
+			return nil, err
+		}
+		return to.NewOwn(d.ResourceType, rep), nil
+	case binary.BorrowDesc:
+		h, ok := v.(uint32)
+		if !ok {
+			return nil, fmt.Errorf("borrow<%s>: expected a uint32 handle, got %T", from.shortTypeName(d.ResourceType), v)
+		}
+		if borrows == nil {
+			return nil, fmt.Errorf("borrow<%s> in a result", from.shortTypeName(d.ResourceType))
+		}
+		rep, err := from.Rep(d.ResourceType, h)
+		if err != nil {
+			return nil, err
+		}
+		nh := to.NewBorrow(d.ResourceType, rep)
+		*borrows = append(*borrows, nh)
+		return nh, nil
+	case binary.RecordDesc, binary.TupleDesc, binary.ListDesc, binary.FixedListDesc, binary.MapDesc:
+		vs, ok := v.([]abi.Value)
+		if !ok {
+			return nil, fmt.Errorf("%T: expected []Value, got %T", t, v)
+		}
+		switch d := t.(type) {
+		case binary.RecordDesc:
+			return each(vs, func(i int) *binary.TypeRef { return &d.Fields[i].Type })
+		case binary.TupleDesc:
+			return each(vs, func(i int) *binary.TypeRef { return &d.Elements[i] })
+		case binary.ListDesc:
+			return each(vs, func(int) *binary.TypeRef { return &d.Element })
+		case binary.FixedListDesc:
+			return each(vs, func(int) *binary.TypeRef { return &d.Element })
+		default: // map<K, V>: a list of [K, V] pairs
+			pair := binary.TupleDesc{Elements: []binary.TypeRef{t.(binary.MapDesc).Key, t.(binary.MapDesc).Value}}
+			out := make([]abi.Value, len(vs))
+			for i, e := range vs {
+				nv, err := x.move(e, pair, depth+1, from, to, borrows)
+				if err != nil {
+					return nil, err
+				}
+				out[i] = nv
+			}
+			return out, nil
+		}
+	case binary.VariantDesc:
+		vv, ok := v.(abi.VariantValue)
+		if !ok {
+			return nil, fmt.Errorf("variant: expected VariantValue, got %T", v)
+		}
+		if int(vv.Disc) >= len(d.Cases) || d.Cases[vv.Disc].Type == nil {
+			return v, nil
+		}
+		p, err := sub(vv.Payload, d.Cases[vv.Disc].Type)
+		if err != nil {
+			return nil, err
+		}
+		return abi.VariantValue{Disc: vv.Disc, Payload: p}, nil
+	case binary.OptionDesc:
+		if v == nil {
+			return nil, nil
+		}
+		return sub(v, &d.Element)
+	case binary.ResultDesc:
+		rv, ok := v.(abi.ResultValue)
+		if !ok {
+			return nil, fmt.Errorf("result: expected ResultValue, got %T", v)
+		}
+		ref := d.Ok
+		if rv.IsErr {
+			ref = d.Err
+		}
+		if ref == nil {
+			return v, nil
+		}
+		p, err := sub(rv.Payload, ref)
+		if err != nil {
+			return nil, err
+		}
+		return abi.ResultValue{IsErr: rv.IsErr, Payload: p}, nil
+	}
+	return v, nil
 }
