@@ -70,7 +70,7 @@ type (
 	ResourceDesc  = binary.ResourceDesc
 )
 
-// The declarations of an instance or component type, from its Decls method,
+// The declarations of an instance or component type, its Decls field,
 // and what an import, an export's ascription, or a declaration says an item
 // is.
 type (

@@ -74,16 +74,21 @@ func (k ctValKind) desc() string {
 	}[k]
 }
 
-// ctVal is a value type.
+// ctVal is a value type. It is never changed once made, so one may be
+// shared: every use of a primitive is the same one (ctPrim).
 type ctVal struct {
 	kind ctValKind
 
-	// prim is a primitive's name ("u32", "string", ...). defined is set when
-	// it was named through a type definition rather than written inline,
-	// which only changes how a mismatch is worded (wasmparser says
-	// "expected primitive" of the former).
-	prim    string
+	// defined is set when a primitive was named through a type definition
+	// rather than written inline, which only changes how a mismatch is
+	// worded (wasmparser says "expected primitive" of the former).
 	defined bool
+
+	// length is a fixed-length list's.
+	length uint32
+
+	// prim is a primitive's name ("u32", "string", ...).
+	prim string
 
 	// labels are a record's field names, a variant's case names, or the
 	// names of a flags or enum.
@@ -96,12 +101,49 @@ type ctVal struct {
 	// map's key and value.
 	elems []*ctVal
 
-	// length is a fixed-length list's.
-	length uint32
-
 	// res is an own's or borrow's resource.
 	res *ctResource
+
+	// inline holds elems when there are no more than two, as for every
+	// list, option, result and map: one allocation for the type, not two.
+	inline [2]*ctVal
 }
+
+// ctValOf is a value type of the given kind and elements, which it holds
+// inline when they fit.
+func ctValOf(kind ctValKind, n int) *ctVal {
+	v := &ctVal{kind: kind}
+	if n <= len(v.inline) {
+		v.elems = v.inline[:n:n]
+	} else {
+		v.elems = make([]*ctVal, n)
+	}
+	return v
+}
+
+// ctPrim is primitive prim's value type, written inline or, defined, named
+// through a type definition.
+func ctPrim(prim string, defined bool) *ctVal {
+	if v := ctPrims[ctPrimKey{prim, defined}]; v != nil {
+		return v
+	}
+	return &ctVal{kind: ctvPrim, prim: prim, defined: defined}
+}
+
+type ctPrimKey struct {
+	prim    string
+	defined bool
+}
+
+var ctPrims = func() map[ctPrimKey]*ctVal {
+	m := map[ctPrimKey]*ctVal{}
+	for _, p := range []string{"bool", "s8", "u8", "s16", "u16", "s32", "u32", "s64", "u64", "f32", "f64", "char", "string", "error-context"} {
+		for _, defined := range []bool{false, true} {
+			m[ctPrimKey{p, defined}] = &ctVal{kind: ctvPrim, prim: p, defined: defined}
+		}
+	}
+	return m
+}()
 
 // ctField is a named func parameter or result.
 type ctField struct {
@@ -114,6 +156,20 @@ type ctFunc struct {
 	async   bool
 	params  []ctField
 	results []ctField // one unnamed result has the name ""
+
+	// inline holds params and results when they fit, as they mostly do.
+	inline [3]ctField
+}
+
+// ctNewFunc is a func type with room for np params and nr results.
+func ctNewFunc(async bool, np, nr int) *ctFunc {
+	f := &ctFunc{async: async}
+	fields := f.inline[:]
+	if np+nr > len(fields) {
+		fields = make([]ctField, np+nr)
+	}
+	f.params, f.results = fields[:np:np], fields[np:np+nr:np+nr]
+	return f
 }
 
 // ctNamed is one import or export.
@@ -260,37 +316,34 @@ func (s ctSubst) val(v *ctVal) *ctVal {
 	return &c
 }
 
-func (s ctSubst) fields(fs []ctField) []ctField {
-	var out []ctField
-	for i, f := range fs {
-		if n := s.val(f.t); n != f.t {
-			if out == nil {
-				out = append([]ctField(nil), fs...)
-			}
-			out[i].t = n
-		}
-	}
-	if out == nil {
-		return fs
-	}
-	return out
-}
-
 func (s ctSubst) fn(f *ctFunc) *ctFunc {
 	if f == nil || len(s) == 0 {
 		return f
 	}
-	params, results := s.fields(f.params), s.fields(f.results)
-	if sameFields(params, f.params) && sameFields(results, f.results) {
+	// A copy only if something changes, and then one allocation for it.
+	var g *ctFunc
+	for k, list := range [2][]ctField{f.params, f.results} {
+		for i := range list {
+			n := s.val(list[i].t)
+			if n == list[i].t {
+				continue
+			}
+			if g == nil {
+				g = ctNewFunc(f.async, len(f.params), len(f.results))
+				copy(g.params, f.params)
+				copy(g.results, f.results)
+			}
+			if k == 0 {
+				g.params[i].t = n
+			} else {
+				g.results[i].t = n
+			}
+		}
+	}
+	if g == nil {
 		return f
 	}
-	return &ctFunc{async: f.async, params: params, results: results}
-}
-
-// sameFields reports whether a and b are the same slice, which is how fields
-// says it changed nothing.
-func sameFields(a, b []ctField) bool {
-	return len(a) == len(b) && (len(a) == 0 || &a[0] == &b[0])
+	return g
 }
 
 func (s ctSubst) named(list []ctNamed) []ctNamed {
@@ -374,33 +427,36 @@ func (s ctSubst) entity(e ctEntity) ctEntity {
 	return e
 }
 
-// ctFreshen gives an import or export of entity e its own copy of the
+// ctFreshen gives import or export name, of entity e, its own copy of the
 // resources e's instance type introduces -- importing one instance type
 // twice yields two instances whose resources differ -- and returns where
-// each new resource sits, relative to e.
-func ctFreshen(e ctEntity) (ctEntity, []ctResPath) {
+// each new resource sits: name, then the path inside e.
+func ctFreshen(e ctEntity, name string) (ctEntity, []ctResPath) {
 	if e.sort != ctSortInstance || len(e.inst.fresh) == 0 {
 		return e, nil
 	}
-	s := make(ctSubst, len(e.inst.fresh))
-	paths := make([]ctResPath, len(e.inst.fresh))
-	for i, p := range e.inst.fresh {
-		n := &ctResource{name: p.res.name}
-		s[p.res] = n
-		paths[i] = ctResPath{res: n, path: p.path}
+	fresh := e.inst.fresh
+	s := make(ctSubst, len(fresh))
+	// One allocation each for the resources, the paths, and every name on
+	// the paths, rather than one per resource and path.
+	res := make([]ctResource, len(fresh))
+	paths := make([]ctResPath, len(fresh))
+	n := len(fresh)
+	for _, p := range fresh {
+		n += len(p.path)
+	}
+	names := make([]string, 0, n)
+	for i, p := range fresh {
+		res[i].name = p.res.name
+		s[p.res] = &res[i]
+		start := len(names)
+		names = append(append(names, name), p.path...)
+		paths[i] = ctResPath{res: &res[i], path: names[start:len(names):len(names)]}
 	}
 	// A new instance either way: the copy introduces nothing of its own, so
 	// the template's fresh list must not come along.
 	e.inst = &ctInstance{exports: s.named(e.inst.exports)}
 	return e, paths
-}
-
-// prefix puts name in front of every path.
-func prefixPaths(name string, paths []ctResPath) []ctResPath {
-	for i := range paths {
-		paths[i].path = append([]string{name}, paths[i].path...)
-	}
-	return paths
 }
 
 // ctEntitySub reports whether a is a subtype of b, and why not.
@@ -538,7 +594,10 @@ func ctOpen(args []ctNamed, c *ctComponent, imports bool) (ctSubst, error) {
 	// First line each of c's abstract resources up with the one args puts
 	// at the same path. An arg of the wrong shape maps nothing: the check
 	// below then fails on it, with the better message.
-	s := make(ctSubst, len(resources))
+	var s ctSubst
+	if len(resources) > 0 {
+		s = make(ctSubst, len(resources))
+	}
 	for _, rp := range resources {
 		arg, ok := ctLookup(args, rp.path[0])
 		for _, name := range rp.path[1:] {

@@ -91,10 +91,7 @@ func TestInstanceDescDecls(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		decls, err := desc.(binary.InstanceDesc).Decls()
-		if err != nil {
-			t.Fatal(err)
-		}
+		decls := desc.(binary.InstanceDesc).Decls
 		for _, d := range decls {
 			if d.Kind == binary.TypeDeclExport && d.Name == "get-stdout" && d.Desc.Sort == 0x01 {
 				return

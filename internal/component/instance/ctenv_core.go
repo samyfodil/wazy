@@ -339,6 +339,13 @@ func coreLinkError(comp *binary.Component, k int, err error) error {
 	for i := len(chain) - 1; i >= 0; i-- {
 		e = newCTEnv(chain[i], e)
 	}
+	defer func() {
+		for e != nil {
+			up := e.up
+			e.release()
+			e = up
+		}
+	}()
 	for j, ci := range comp.CoreInstances {
 		if ci.Kind != 0x00 || (k >= 0 && j != k) {
 			continue

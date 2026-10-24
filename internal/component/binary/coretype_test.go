@@ -200,11 +200,11 @@ func TestDecodeCoreTypeSection(t *testing.T) {
 // A core type declared inside a component or instance type is decoded too.
 func TestTypeDeclCoreType(t *testing.T) {
 	// vec(instancedecl): one core:type, an empty module type.
-	decls, err := readTypeDecls([]byte{0x01, 0x00, 0x50, 0x00}, false)
-	if err != nil || len(decls) != 1 || decls[0].CoreType == nil || decls[0].CoreType.Module == nil {
+	b, _, err := readTypeBody([]byte{0x01, 0x00, 0x50, 0x00}, 0, false)
+	if decls := b.decls; err != nil || len(decls) != 1 || decls[0].CoreType == nil || decls[0].CoreType.Module == nil {
 		t.Fatalf("decls %+v, %v", decls, err)
 	}
-	if _, err := readTypeDecls([]byte{0x01, 0x00, 0x50, 0x01}, false); err == nil {
+	if _, _, err := readTypeBody([]byte{0x01, 0x00, 0x50, 0x01}, 0, false); err == nil {
 		t.Fatal("a truncated module type was accepted")
 	}
 }

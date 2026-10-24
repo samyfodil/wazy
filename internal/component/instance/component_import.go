@@ -1,7 +1,6 @@
 package instance
 
 import (
-	"bytes"
 	"fmt"
 
 	"github.com/samyfodil/wazy/internal/component/binary"
@@ -58,6 +57,11 @@ func typeCheck(comp *binary.Component, cfg *config) error {
 		return nil
 	}
 	var env *ctEnv
+	defer func() {
+		if env != nil {
+			env.release()
+		}
+	}()
 	if !cfg.typeChecked(ctCheckKey{comp: comp}) {
 		env = newCTEnv(comp, nil)
 		if err := env.check(); err != nil {
@@ -103,6 +107,7 @@ func checkSupplied(env *ctEnv, i uint32, supplied *binary.Component) error {
 		return err
 	}
 	senv := newCTEnv(supplied, nil)
+	defer senv.release()
 	if err := senv.check(); err != nil { // which computes senv.self
 		return fmt.Errorf("the supplied component is invalid: %w", err)
 	}
@@ -116,7 +121,7 @@ func decodeSupplied(cfg *config, src []byte) (*binary.Component, error) {
 	if cfg.compileCache != nil {
 		return cfg.compileCache.getOrDecode(src)
 	}
-	return binary.Decode(bytes.NewReader(src))
+	return binary.DecodeBytes(src)
 }
 
 func (cfg *config) typeChecked(k ctCheckKey) bool {

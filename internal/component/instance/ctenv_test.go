@@ -87,6 +87,24 @@ func TestCTEnvCheck(t *testing.T) {
 	}
 }
 
+// A check's envs serve the checks after it (ctEnvs), whatever they checked
+// and however it ended: the verdicts do not depend on what ran before.
+func TestTypeCheckReusesEnvs(t *testing.T) {
+	good, bad := decodeCTEnvFixture(t, "ascribe_instance"), decodeCTEnvFixture(t, "local_resource_unexported")
+	for range 3 {
+		for _, fixture := range []string{"ascribe_resource", "decl_alias_wrong_sort", "outer_component_bound"} {
+			want := map[string]string{
+				"ascribe_resource":      "expected resource, found defined type",
+				"decl_alias_wrong_sort": "export `a` for instance 0 is not a type",
+			}[fixture]
+			requireSubErr(t, typeCheck(decodeCTEnvFixture(t, fixture), &config{}), want)
+		}
+		requireSubErr(t, typeCheck(good, &config{}), "")
+		requireSubErr(t, typeCheck(bad, &config{}), "local resource type found in export but not exported itself")
+		requireSubErr(t, coreLinkError(decodeCTEnvFixture(t, "core_arg_later"), -1, nil), "unknown core instance 5: instance index out of bounds")
+	}
+}
+
 // An ascribed instance type's `(sub resource)` exports name the resources
 // the item has at the same places, and the ascribed `(sub resource)` of a
 // type export is a resource of its own.
@@ -148,12 +166,6 @@ func TestCTEnvUndecodable(t *testing.T) {
 	if _, err := ctConvert(s, nil); err == nil || !strings.Contains(err.Error(), "not decoded") {
 		t.Errorf("nil TypeDesc: %v", err)
 	}
-	if _, err := ctConvert(s, binary.InstanceDesc{Body: []byte{0x01}}); err == nil {
-		t.Error("a truncated instance type body decoded")
-	}
-	if _, err := ctConvert(s, binary.ComponentDesc{}); err == nil {
-		t.Error("an empty component type body decoded")
-	}
 	if _, err := ctConvertVal(s, binary.FuncDesc{}); err == nil || !strings.Contains(err.Error(), "unsupported type definition func") {
 		t.Errorf("a func as a value type: %v", err)
 	}
@@ -172,7 +184,7 @@ func TestCTEnvUndecodable(t *testing.T) {
 		t.Error("nothing holds no borrow")
 	}
 	// A value-sort externdesc, and entity: values are not modelled.
-	if _, err := ctEntityOfDesc(s, binary.ExternDesc{Sort: ctSortValue}, "v"); err == nil {
+	if _, err := ctEntityOfDesc(s, binary.ExternDesc{Sort: ctSortValue}); err == nil {
 		t.Error("a value externdesc was typed")
 	}
 	env := newCTEnv(&binary.Component{}, nil)

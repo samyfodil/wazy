@@ -2,6 +2,8 @@ package instance
 
 import (
 	"fmt"
+	"slices"
+	"sync"
 
 	"github.com/samyfodil/wazy/internal/component/binary"
 )
@@ -69,7 +71,7 @@ func outerType(s ctScope, count, idx uint32) (ctType, error) {
 // ctValRef resolves a valtype.
 func ctValRef(s ctScope, ref binary.TypeRef) (*ctVal, error) {
 	if ref.Primitive != "" {
-		return &ctVal{kind: ctvPrim, prim: ref.Primitive}, nil
+		return ctPrim(ref.Primitive, false), nil
 	}
 	if ref.TypeIndex == nil {
 		return nil, fmt.Errorf("value type names neither a primitive nor a type index")
@@ -102,18 +104,10 @@ func ctConvert(s ctScope, d binary.TypeDesc) (ctType, error) {
 		f, err := ctConvertFunc(s, d)
 		return ctType{fn: f}, err
 	case binary.InstanceDesc:
-		decls, err := d.Decls()
-		if err != nil {
-			return ctType{}, err
-		}
-		inst, _, err := ctBuildDeclType(s, decls, false)
+		inst, _, err := ctBuildDeclType(s, d.Decls, false)
 		return ctType{inst: inst}, err
 	case binary.ComponentDesc:
-		decls, err := d.Decls()
-		if err != nil {
-			return ctType{}, err
-		}
-		_, comp, err := ctBuildDeclType(s, decls, true)
+		_, comp, err := ctBuildDeclType(s, d.Decls, true)
 		return ctType{comp: comp}, err
 	case binary.ResourceDesc:
 		r, err := s.newResource()
@@ -126,7 +120,11 @@ func ctConvert(s ctScope, d binary.TypeDesc) (ctType, error) {
 }
 
 func ctConvertFunc(s ctScope, d binary.FuncDesc) (*ctFunc, error) {
-	f := &ctFunc{async: d.Async, params: make([]ctField, len(d.Params))}
+	nr := len(d.Results.Named)
+	if d.Results.Unnamed != nil {
+		nr++
+	}
+	f := ctNewFunc(d.Async, len(d.Params), nr)
 	for i, p := range d.Params {
 		t, err := ctValRef(s, p.Type)
 		if err != nil {
@@ -139,14 +137,15 @@ func ctConvertFunc(s ctScope, d binary.FuncDesc) (*ctFunc, error) {
 		if err != nil {
 			return nil, fmt.Errorf("result: %w", err)
 		}
-		f.results = []ctField{{t: t}}
+		f.results[0] = ctField{t: t}
 	}
-	for _, r := range d.Results.Named {
+	named := f.results[nr-len(d.Results.Named):]
+	for i, r := range d.Results.Named {
 		t, err := ctValRef(s, r.Type)
 		if err != nil {
 			return nil, fmt.Errorf("result `%s`: %w", r.Name, err)
 		}
-		f.results = append(f.results, ctField{name: r.Name, t: t})
+		named[i] = ctField{name: r.Name, t: t}
 	}
 	for _, r := range f.results {
 		if ctHasBorrow(r.t) {
@@ -193,23 +192,27 @@ func ctConvertVal(s ctScope, d binary.TypeDesc) (*ctVal, error) {
 	var v *ctVal
 	switch d := d.(type) {
 	case binary.PrimitiveDesc:
-		v = &ctVal{kind: ctvPrim, prim: d.Prim, defined: true}
+		return ctPrim(d.Prim, true), nil
 	case binary.RecordDesc:
-		v = &ctVal{kind: ctvRecord, labels: make([]string, len(d.Fields)), elems: make([]*ctVal, len(d.Fields))}
+		v = ctValOf(ctvRecord, len(d.Fields))
+		v.labels = make([]string, len(d.Fields))
 		for i, f := range d.Fields {
 			v.labels[i], v.elems[i] = f.Name, ref(f.Type)
 		}
 	case binary.VariantDesc:
-		v = &ctVal{kind: ctvVariant, labels: make([]string, len(d.Cases)), elems: make([]*ctVal, len(d.Cases))}
+		v = ctValOf(ctvVariant, len(d.Cases))
+		v.labels = make([]string, len(d.Cases))
 		for i, c := range d.Cases {
 			v.labels[i], v.elems[i] = c.Name, optRef(c.Type)
 		}
 	case binary.ListDesc:
-		v = &ctVal{kind: ctvList, elems: []*ctVal{ref(d.Element)}}
+		v = ctValOf(ctvList, 1)
+		v.elems[0] = ref(d.Element)
 	case binary.FixedListDesc:
-		v = &ctVal{kind: ctvFixedList, elems: []*ctVal{ref(d.Element)}, length: d.Length}
+		v = ctValOf(ctvFixedList, 1)
+		v.elems[0], v.length = ref(d.Element), d.Length
 	case binary.TupleDesc:
-		v = &ctVal{kind: ctvTuple, elems: make([]*ctVal, len(d.Elements))}
+		v = ctValOf(ctvTuple, len(d.Elements))
 		for i, e := range d.Elements {
 			v.elems[i] = ref(e)
 		}
@@ -218,15 +221,20 @@ func ctConvertVal(s ctScope, d binary.TypeDesc) (*ctVal, error) {
 	case binary.EnumDesc:
 		v = &ctVal{kind: ctvEnum, labels: d.Cases}
 	case binary.OptionDesc:
-		v = &ctVal{kind: ctvOption, elems: []*ctVal{ref(d.Element)}}
+		v = ctValOf(ctvOption, 1)
+		v.elems[0] = ref(d.Element)
 	case binary.ResultDesc:
-		v = &ctVal{kind: ctvResult, elems: []*ctVal{optRef(d.Ok), optRef(d.Err)}}
+		v = ctValOf(ctvResult, 2)
+		v.elems[0], v.elems[1] = optRef(d.Ok), optRef(d.Err)
 	case binary.MapDesc:
-		v = &ctVal{kind: ctvMap, elems: []*ctVal{ref(d.Key), ref(d.Value)}}
+		v = ctValOf(ctvMap, 2)
+		v.elems[0], v.elems[1] = ref(d.Key), ref(d.Value)
 	case binary.StreamDesc:
-		v = &ctVal{kind: ctvStream, elems: []*ctVal{optRef(d.Element)}}
+		v = ctValOf(ctvStream, 1)
+		v.elems[0] = optRef(d.Element)
 	case binary.FutureDesc:
-		v = &ctVal{kind: ctvFuture, elems: []*ctVal{optRef(d.Element)}}
+		v = ctValOf(ctvFuture, 1)
+		v.elems[0] = optRef(d.Element)
 	case binary.OwnDesc:
 		v = &ctVal{kind: ctvOwn}
 		v.res, err = ctResourceRef(s, d.ResourceType)
@@ -251,6 +259,15 @@ type ctDeclScope struct {
 	coreTypes []ctCoreType
 }
 
+// ctDeclScopes keeps scopes between the types built in them: the type a
+// body declares is built of what its declarations name, never of the scope.
+var ctDeclScopes = sync.Pool{New: func() any { return new(ctDeclScope) }}
+
+func (s *ctDeclScope) release() {
+	*s = ctDeclScope{types: ctEmpty(s.types), insts: ctEmpty(s.insts), coreTypes: ctEmpty(s.coreTypes)}
+	ctDeclScopes.Put(s)
+}
+
 func (s *ctDeclScope) coreTypeAt(idx uint32) (ctCoreType, error) {
 	if int(idx) >= len(s.coreTypes) {
 		return ctCoreType{}, fmt.Errorf("unknown core type %d: type index out of bounds", idx)
@@ -271,10 +288,9 @@ func (s *ctDeclScope) newResource() (*ctResource, error) {
 	return nil, fmt.Errorf("resources can only be defined within a concrete component")
 }
 
-// ctEntityOfDesc is the type an externdesc names in scope s -- for `(sub
-// resource)`, a new resource, which the caller records as introduced by the
-// import or export it describes.
-func ctEntityOfDesc(s ctScope, d binary.ExternDesc, name string) (ctEntity, error) {
+// ctEntityOfDesc is the type an externdesc names in scope s; one of a `(sub
+// resource)` is a new resource each time, which ctDeclared makes.
+func ctEntityOfDesc(s ctScope, d binary.ExternDesc) (ctEntity, error) {
 	e := ctEntity{sort: d.Sort}
 	switch d.Sort {
 	case ctSortCoreModule:
@@ -284,11 +300,7 @@ func ctEntityOfDesc(s ctScope, d binary.ExternDesc, name string) (ctEntity, erro
 		}
 		e.mod = t.mod
 		return e, err
-	case ctSortType:
-		if !d.Eq {
-			e.ty.res = &ctResource{name: name}
-			return e, nil
-		}
+	case ctSortType: // an `eq` bound: ctDeclared makes a `sub resource`
 		t, err := s.typeAt(d.Index)
 		e.ty = t
 		return e, err
@@ -317,15 +329,30 @@ func ctEntityOfDesc(s ctScope, d binary.ExternDesc, name string) (ctEntity, erro
 // it introduces -- a new one for `(sub resource)`, its own copies of those
 // of an instance type -- located by paths starting with its name.
 func ctDeclared(s ctScope, name string, d binary.ExternDesc) (ctEntity, []ctResPath, error) {
-	e, err := ctEntityOfDesc(s, d, name)
+	if d.Sort == ctSortType && !d.Eq {
+		r := newSubResource(name)
+		return ctEntity{sort: ctSortType, ty: ctType{res: r.path[0].res}}, r.path[:], nil
+	}
+	e, err := ctEntityOfDesc(s, d)
 	if err != nil {
 		return e, nil, err
 	}
-	if e.sort == ctSortType && !d.Eq {
-		return e, []ctResPath{{res: e.ty.res, path: []string{name}}}, nil
-	}
-	e, paths := ctFreshen(e)
-	return e, prefixPaths(name, paths), nil
+	e, paths := ctFreshen(e, name)
+	return e, paths, nil
+}
+
+// subResource is the resource a `(sub resource)` import or export named name
+// introduces, and the path to it, made in one allocation.
+type subResource struct {
+	res  ctResource
+	path [1]ctResPath
+	name [1]string
+}
+
+func newSubResource(name string) *subResource {
+	r := &subResource{res: ctResource{name: name}, name: [1]string{name}}
+	r.path[0] = ctResPath{res: &r.res, path: r.name[:]}
+	return r
 }
 
 // ctBuildDeclType builds the instance type (component false) or component
@@ -345,7 +372,9 @@ func ctBuildDeclType(up ctScope, decls []binary.TypeDecl, component bool) (*ctIn
 			nTypes++
 		}
 	}
-	s := &ctDeclScope{up: up, types: make([]ctType, 0, nTypes)}
+	s := ctDeclScopes.Get().(*ctDeclScope)
+	defer s.release()
+	s.up, s.types = up, slices.Grow(s.types, nTypes)
 	imports, exports := make([]ctNamed, 0, nImports), make([]ctNamed, 0, nExports)
 	var importedRes, definedRes []ctResPath
 	for i, d := range decls {
@@ -479,7 +508,8 @@ type ctEnv struct {
 	exports  []ctEntity
 	exportSt []byte
 
-	// importedRes are the resources the imports introduce, by import index.
+	// importedRes are the resources the imports introduce, by import index;
+	// empty until an import introduces one.
 	importedRes [][]ctResPath
 
 	// created are the resources this component makes: its resource
@@ -491,41 +521,79 @@ type ctEnv struct {
 	created map[*ctResource]bool
 	local   map[*ctResource]bool
 
-	children map[*binary.Component]*ctEnv
+	children []*ctEnv // by nested component, made on first use
 	self     *ctComponent
 
 	// core holds the core index spaces (ctenv_core.go), allocated when one
 	// is first asked for: most components never are.
 	core *ctCoreSpaces
+
+	// st and ents back the memo states and the import and export entities.
+	st   []byte
+	ents []ctEntity
 }
+
+// ctEnvs keeps envs between type checks. Nothing a check computes outlives
+// it but its verdict, so once a check is over its envs -- and every slice
+// they hold, sized for the components checked so far -- serve the next one
+// (see release).
+var ctEnvs = sync.Pool{New: func() any { return new(ctEnv) }}
 
 func newCTEnv(comp *binary.Component, up *ctEnv) *ctEnv {
 	nT, nF, nI, nC := len(comp.TypeSpace), len(comp.ComponentFuncSpace), len(comp.ComponentInstanceSpace), len(comp.ComponentSpace)
 	nIm, nEx := len(comp.Imports), len(comp.Exports)
-	// One allocation for every memo state, cut into a slice per space.
-	st := make([]byte, nT+nF+nI+nC+nIm+nEx)
+	e := ctEnvs.Get().(*ctEnv)
+	e.comp, e.up = comp, up
+	// One slice for every memo state, cut into one per space.
+	e.st = ctResize(e.st, nT+nF+nI+nC+nIm+nEx)
+	st := e.st
 	cut := func(n int) []byte {
 		b := st[:n:n]
 		st = st[n:]
 		return b
 	}
-	return &ctEnv{
-		comp:        comp,
-		up:          up,
-		types:       make([]ctType, nT),
-		typeSt:      cut(nT),
-		funcs:       make([]*ctFunc, nF),
-		funcSt:      cut(nF),
-		insts:       make([]*ctInstance, nI),
-		instSt:      cut(nI),
-		comps:       make([]*ctComponent, nC),
-		compSt:      cut(nC),
-		imports:     make([]ctEntity, nIm),
-		importSt:    cut(nIm),
-		exports:     make([]ctEntity, nEx),
-		exportSt:    cut(nEx),
-		importedRes: make([][]ctResPath, nIm),
+	e.types, e.typeSt = ctResize(e.types, nT), cut(nT)
+	e.funcs, e.funcSt = ctResize(e.funcs, nF), cut(nF)
+	e.insts, e.instSt = ctResize(e.insts, nI), cut(nI)
+	e.comps, e.compSt = ctResize(e.comps, nC), cut(nC)
+	// And one for the entities of both the imports and the exports.
+	e.ents = ctResize(e.ents, nIm+nEx)
+	e.imports, e.importSt = e.ents[:nIm:nIm], cut(nIm)
+	e.exports, e.exportSt = e.ents[nIm:], cut(nEx)
+	return e
+}
+
+// release returns e, and the envs of the components nested in it, to
+// ctEnvs, once the check they served is over. What they hold is emptied, so
+// it keeps nothing of the check alive.
+func (e *ctEnv) release() {
+	for _, ch := range e.children {
+		if ch != nil {
+			ch.release()
+		}
 	}
+	clear(e.created)
+	clear(e.local)
+	*e = ctEnv{
+		types: ctEmpty(e.types), funcs: ctEmpty(e.funcs), insts: ctEmpty(e.insts), comps: ctEmpty(e.comps),
+		importedRes: ctEmpty(e.importedRes), children: ctEmpty(e.children),
+		created: e.created, local: e.local, st: ctEmpty(e.st), ents: ctEmpty(e.ents),
+	}
+	ctEnvs.Put(e)
+}
+
+// ctEmpty is s with no elements, and zero in all it has room for.
+func ctEmpty[T any](s []T) []T {
+	clear(s[:cap(s)])
+	return s[:0]
+}
+
+// ctResize is s, which ctEmpty emptied, at length n.
+func ctResize[T any](s []T, n int) []T {
+	if cap(s) < n {
+		return make([]T, n)
+	}
+	return s[:n]
 }
 
 // create records r as made by this component (and, when local, defined
@@ -695,7 +763,7 @@ func (e *ctEnv) componentAt(idx uint32) (ct *ctComponent, err error) {
 	var ent ctEntity
 	switch en := c.ComponentSpace[idx]; en.Kind {
 	case binary.ComponentFromDefinition:
-		return e.child(c.NestedComponents[en.Component]).selfType()
+		return e.child(en.Component).selfType()
 	case binary.ComponentFromImport:
 		ent, err = e.importAt(en.Import)
 	case binary.ComponentFromExport:
@@ -715,18 +783,16 @@ func (e *ctEnv) componentAt(idx uint32) (ct *ctComponent, err error) {
 	return ent.comp, err
 }
 
-// child is the env of a nested component definition, whose outer aliases
+// child is the env of nested component definition i, whose outer aliases
 // reach this one.
-func (e *ctEnv) child(nested *binary.Component) *ctEnv {
-	if ch, ok := e.children[nested]; ok {
-		return ch
+func (e *ctEnv) child(i uint32) *ctEnv {
+	if len(e.children) == 0 {
+		e.children = ctResize(e.children, len(e.comp.NestedComponents))
 	}
-	if e.children == nil {
-		e.children = map[*binary.Component]*ctEnv{}
+	if e.children[i] == nil {
+		e.children[i] = newCTEnv(e.comp.NestedComponents[i], e)
 	}
-	ch := newCTEnv(nested, e)
-	e.children[nested] = ch
-	return ch
+	return e.children[i]
 }
 
 // entityAt is the type of item idx of the given sort.
@@ -766,7 +832,12 @@ func (e *ctEnv) importAt(i uint32) (ent ctEntity, err error) {
 	if err != nil {
 		return ent, fmt.Errorf("import `%s`: %w", im.Name, err)
 	}
-	e.importedRes[i] = paths
+	if len(paths) > 0 {
+		if len(e.importedRes) == 0 {
+			e.importedRes = ctResize(e.importedRes, len(e.imports))
+		}
+		e.importedRes[i] = paths
+	}
 	return ent, nil
 }
 
@@ -855,6 +926,9 @@ func (e *ctEnv) instantiate(def binary.Instance) (*ctInstance, error) {
 	}
 	for _, rp := range c.definedRes {
 		n := &ctResource{name: rp.res.name}
+		if s == nil {
+			s = make(ctSubst, len(c.definedRes))
+		}
 		s[rp.res] = n
 		e.create(n, false)
 	}
@@ -867,14 +941,17 @@ func (e *ctEnv) selfType() (*ctComponent, error) {
 		return e.self, nil
 	}
 	c := e.comp
-	t := &ctComponent{imports: make([]ctNamed, len(c.Imports)), exports: make([]ctNamed, len(c.Exports))}
+	named := make([]ctNamed, len(c.Imports)+len(c.Exports))
+	t := &ctComponent{imports: named[:len(c.Imports):len(c.Imports)], exports: named[len(c.Imports):]}
 	for i, im := range c.Imports {
 		ent, err := e.importAt(uint32(i))
 		if err != nil {
 			return nil, err
 		}
 		t.imports[i] = ctNamed{name: im.Name, ent: ent}
-		t.importedRes = append(t.importedRes, e.importedRes[i]...)
+		if len(e.importedRes) > 0 {
+			t.importedRes = append(t.importedRes, e.importedRes[i]...)
+		}
 	}
 	for i, ex := range c.Exports {
 		ent, err := e.exportAt(uint32(i))
@@ -887,6 +964,10 @@ func (e *ctEnv) selfType() (*ctComponent, error) {
 	// exports reach, each at the first place an export names it as a type.
 	// One an export uses without exporting it could not be lined up with
 	// anything, so -- as for wasmparser -- the component is malformed.
+	if len(e.created) == 0 {
+		e.self = t
+		return t, nil
+	}
 	seen := map[*ctResource]bool{}
 	var walk func(list []ctNamed, prefix []string)
 	walk = func(list []ctNamed, prefix []string) {
@@ -938,11 +1019,17 @@ func (e *ctEnv) checkCoreIndices() error {
 			}
 		}
 	}
-	bound := map[byte]uint32{0x00: uint32(len(c.CoreFuncSpace)), 0x01: tables, 0x02: mems, 0x03: globals}
-	what := map[byte]string{0x00: "function", 0x01: "table", 0x02: "memory", 0x03: "global"}
+	bound := [...]uint32{0x00: uint32(len(c.CoreFuncSpace)), 0x01: tables, 0x02: mems, 0x03: globals}
+	what := [...]string{0x00: "function", 0x01: "table", 0x02: "memory", 0x03: "global"}
 	modules := e.coreModuleCount()
+	// One set of names, sized for the longest list and emptied for each.
+	most := 0
+	for _, ci := range c.CoreInstances {
+		most = max(most, len(ci.Args)+len(ci.Exports))
+	}
+	names := make(map[string]bool, most)
 	for k, ci := range c.CoreInstances {
-		names := make(map[string]bool, len(ci.Args)+len(ci.Exports))
+		clear(names)
 		if ci.Kind == 0x00 {
 			if int(ci.ModuleIdx) >= modules {
 				return fmt.Errorf("core instance %d: unknown module %d: module index out of bounds", k, ci.ModuleIdx)
@@ -963,7 +1050,7 @@ func (e *ctEnv) checkCoreIndices() error {
 				return fmt.Errorf("core instance %d: export name `%s` already defined", k, x.Name)
 			}
 			names[x.Name] = true
-			if n, ok := bound[x.Sort]; ok && x.CoreSortIdx >= n {
+			if int(x.Sort) < len(bound) && x.CoreSortIdx >= bound[x.Sort] {
 				return fmt.Errorf("core instance %d: export `%s`: unknown %s %d: %s index out of bounds", k, x.Name, what[x.Sort], x.CoreSortIdx, what[x.Sort])
 			}
 		}
@@ -1163,8 +1250,8 @@ func (e *ctEnv) check() error {
 			return err
 		}
 	}
-	for i, nested := range e.comp.NestedComponents {
-		if err := e.child(nested).check(); err != nil {
+	for i := range e.comp.NestedComponents {
+		if err := e.child(uint32(i)).check(); err != nil {
 			return fmt.Errorf("nested component %d: %w", i, err)
 		}
 	}

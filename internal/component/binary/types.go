@@ -9,7 +9,8 @@ import (
 
 // This file implements leaf byte-walking helpers for the component-model
 // type grammar (deftype / defvaltype / functype / instancetype /
-// componenttype / resourcetype) plus the componenttype/componentdecl walker.
+// componenttype / resourcetype); typedecl.go walks the declarations of an
+// instance or component type.
 // The single structural walk that builds the semantic type graph lives in
 // descriptor.go (readDeftypeDesc and friends); this file must not grow a
 // second parallel walker for the same grammar.
@@ -160,103 +161,12 @@ func readExternDesc(buf []byte, off int) (ExternDesc, int, error) {
 	return d, off + int(n), nil
 }
 
-// readSort consumes a sort byte; the core sort (0x00) carries one extra
-// discriminator byte.
-func readSort(buf []byte, off int) (int, error) {
-	if off >= len(buf) {
-		return off, ErrTruncatedBinary
-	}
-	if buf[off] == 0x00 { // core sort
-		if off+1 >= len(buf) {
-			return off, ErrTruncatedBinary
-		}
-		return off + 2, nil
-	}
-	return off + 1, nil
-}
-
-// readAlias consumes an alias (used inside instance/component type decls):
-// a sort followed by an alias target (export 0x00, core export 0x01, outer
-// 0x02).
-func readAlias(buf []byte, off int) (int, error) {
-	off, err := readSort(buf, off)
-	if err != nil {
-		return off, err
-	}
-	if off >= len(buf) {
-		return off, ErrTruncatedBinary
-	}
-	target := buf[off]
-	off++
-	readU32 := func(off int) (int, error) {
-		_, n, e := leb128.LoadUint32(buf[off:])
-		if e != nil {
-			return off, e
-		}
-		return off + int(n), nil
-	}
-	switch target {
-	case 0x00, 0x01: // (core) export: instanceidx then a name
-		if off, err = readU32(off); err != nil { // instance index
-			return off, err
-		}
-		if _, off, err = readLabel(buf, off); err != nil { // export name
-			return off, err
-		}
-		return off, nil
-	case 0x02: // outer: outer-count then index
-		if off, err = readU32(off); err != nil {
-			return off, err
-		}
-		return readU32(off)
-	default:
-		return off, fmt.Errorf("alias: invalid target kind %#x", target)
-	}
-}
-
-// readComponentDecl consumes one componentdecl (0x03 import, else
-// instancedecl) without retaining it.
-func readComponentDecl(buf []byte, off int) (int, error) {
-	var d ComponentDesc
-	return readComponentDeclInto(buf, off, &d)
-}
-
-// readComponentDeclInto consumes one componentdecl into d's type index
-// space: an import of a type adds a slot, as an instancedecl's export of
-// one does.
-func readComponentDeclInto(buf []byte, off int, d *ComponentDesc) (int, error) {
-	if off >= len(buf) {
-		return off, ErrTruncatedBinary
-	}
-	if buf[off] != 0x03 { // not an import decl
-		return readInstanceDeclDescInto(buf, off, &d.Types, nil, &d.Outer)
-	}
-	_, off, err := readExternName(buf, off+1)
-	if err != nil {
-		return off, err
-	}
-	ed, off, err := readExternDesc(buf, off)
-	if err == nil && ed.Sort == 0x03 {
-		addLocalType(&d.Types, &d.Outer, ed.Index, ed.Eq)
-	}
-	return off, err
-}
-
 // readComponenttypeDesc reads vec(componentdecl) (the 0x41 tag already
 // read).
 func readComponenttypeDesc(buf []byte, off int) (ComponentDesc, int, error) {
-	var d ComponentDesc
-	start := off
-	count, n, err := leb128.LoadUint32(buf[off:])
+	b, off, err := readTypeBody(buf, off, true)
 	if err != nil {
-		return d, off, err
+		return ComponentDesc{}, off, err
 	}
-	off += int(n)
-	for i := range count {
-		if off, err = readComponentDeclInto(buf, off, &d); err != nil {
-			return d, off, fmt.Errorf("componentdecl[%d]: %w", i, err)
-		}
-	}
-	d.Body = buf[start:off:off]
-	return d, off, nil
+	return ComponentDesc{Types: b.types, Outer: b.outer, Decls: b.decls}, off, nil
 }

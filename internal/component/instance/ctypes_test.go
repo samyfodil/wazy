@@ -221,3 +221,17 @@ func TestCTDescs(t *testing.T) {
 		}
 	}
 }
+
+// The primitives are shared; a name that is none of them -- which only a
+// hand-built descriptor carries -- still makes a value type.
+func TestCTPrim(t *testing.T) {
+	if a, b := ctPrim("u32", false), ctPrim("u32", false); a != b || a.prim != "u32" || a.defined {
+		t.Errorf("u32: %+v, %+v", a, b)
+	}
+	if v := ctPrim("u32", true); !v.defined || v == ctPrim("u32", false) {
+		t.Errorf("defined u32: %+v", v)
+	}
+	if v := ctPrim("weird", false); v.kind != ctvPrim || v.prim != "weird" {
+		t.Errorf("weird: %+v", v)
+	}
+}
