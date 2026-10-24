@@ -118,6 +118,7 @@ func TestComponentImport_SuppliedComponentRefused(t *testing.T) {
 
 func mustWastFile(t *testing.T, name string) []byte {
 	t.Helper()
+	fetched(t, path.Dir(name))
 	b, err := wastFS.ReadFile(name)
 	if err != nil {
 		t.Fatal(err)
