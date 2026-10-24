@@ -86,6 +86,13 @@ type CompileCache struct {
 	// computed once and reused across instantiations (see graphPlanFor).
 	planMu sync.Mutex
 	byPlan map[*binary.Component]*graphPlan
+
+	// checkMu guards checked -- the component-level type checks that passed
+	// (see typeCheck), keyed by the shared *binary.Component pointers they
+	// were made on. Pure over the immutable components, so a pass holds for
+	// every later instantiation.
+	checkMu sync.Mutex
+	checked map[ctCheckKey]bool
 }
 
 // graphPlan is the cached, per-component output of the graph import-discovery

@@ -1280,6 +1280,13 @@ func Instantiate(ctx context.Context, r wazy.Runtime, componentBytes []byte, opt
 	if err := validateAsyncCanonOptsAgreeWithTypes(comp); err != nil {
 		return nil, err
 	}
+	// The other one: every instantiation's arguments against what the
+	// instantiated component imports -- likewise before any import is looked
+	// at. This is also where a component supplied for a component import is
+	// checked against the import's type and handed to the graph engine.
+	if err := typeCheck(comp, cfg); err != nil {
+		return nil, err
+	}
 
 	if needsGraphPath(comp) || needsImportPath(comp) {
 		// The graph engine handles every host-import shape the old

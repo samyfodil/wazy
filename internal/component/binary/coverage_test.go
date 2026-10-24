@@ -640,6 +640,7 @@ func TestReadExterndescSorts(t *testing.T) {
 		{"instance (0x05)", []byte{0x05, 0x00}, false},
 		{"type bound eq (0x03 0x00)", []byte{0x03, 0x00, 0x00}, false},
 		{"type bound sub (0x03 0x01)", []byte{0x03, 0x01}, false},
+		{"type bound invalid (0x03 0x02)", []byte{0x03, 0x02}, true},
 		{"type bound truncated", []byte{0x03}, true},
 		{"type bound eq truncated index", []byte{0x03, 0x00}, true},
 		{"unsupported sort (value, 0x02)", []byte{0x02}, true},
@@ -649,44 +650,42 @@ func TestReadExterndescSorts(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, _, _, err := readExterndesc(tt.buf, 0)
+			_, _, err := readExternDesc(tt.buf, 0)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("readExterndesc(%v) err=%v, wantErr=%v", tt.buf, err, tt.wantErr)
+				t.Errorf("readExternDesc(%v) err=%v, wantErr=%v", tt.buf, err, tt.wantErr)
 			}
 		})
 	}
 }
 
-// TestReadExterndesc_InstanceSortCapturesTypeidx pins the behavior
-// decodeImportSection's `sort == 0x05 && hasEq` branch depends on: an
-// instance-sort (0x05) externdesc must report hasIdx=true with the
-// instance's own declared instancetype index, unlike a component-sort (0x04)
-// externdesc (whose typeidx no caller needs yet, so it stays hasIdx=false).
-// Before this, an instance import's declared type was silently dropped,
-// which is what made resolveAlias unable to follow a `use iface.{T}` alias
-// into an imported instance's own type declarations at all (see
-// typespace_test.go's FromImportedInstance_Resolved tests).
-func TestReadExterndesc_InstanceSortCapturesTypeidx(t *testing.T) {
-	sort, idx, hasIdx, off, err := readExterndesc([]byte{0x05, 0x07}, 0)
-	if err != nil {
-		t.Fatalf("readExterndesc: %v", err)
-	}
-	if sort != 0x05 {
-		t.Errorf("sort = %#x, want 0x05", sort)
-	}
-	if !hasIdx || idx != 7 {
-		t.Errorf("hasIdx=%v idx=%d, want hasIdx=true idx=7", hasIdx, idx)
-	}
-	if off != 2 {
-		t.Errorf("off = %d, want 2", off)
-	}
-
-	_, _, hasIdx, _, err = readExterndesc([]byte{0x04, 0x07}, 0)
-	if err != nil {
-		t.Fatalf("readExterndesc (component sort): %v", err)
-	}
-	if hasIdx {
-		t.Error("component-sort (0x04) externdesc: hasIdx = true, want false")
+// TestReadExternDesc_CapturesTypeidx pins what decodeImportSection and the
+// component-type checker (internal/component/instance) depend on: every sort
+// but type reports its declared type index, and a type bound reports whether
+// it is `eq` (with the index) or `sub resource` (without one). Before an
+// instance import kept its index, resolveAlias could not follow a `use
+// iface.{T}` alias into the imported instance's own declarations at all (see
+// typespace_test.go's FromImportedInstance_Resolved tests); before a
+// component import kept its index, its declared component type was lost.
+func TestReadExternDesc_CapturesTypeidx(t *testing.T) {
+	for _, tc := range []struct {
+		buf  []byte
+		want ExternDesc
+		off  int
+	}{
+		{[]byte{0x05, 0x07}, ExternDesc{Sort: 0x05, Index: 7}, 2},
+		{[]byte{0x04, 0x07}, ExternDesc{Sort: 0x04, Index: 7}, 2},
+		{[]byte{0x01, 0x03}, ExternDesc{Sort: 0x01, Index: 3}, 2},
+		{[]byte{0x00, 0x11, 0x02}, ExternDesc{Sort: 0x00, Index: 2}, 3},
+		{[]byte{0x03, 0x00, 0x09}, ExternDesc{Sort: 0x03, Index: 9, Eq: true}, 3},
+		{[]byte{0x03, 0x01}, ExternDesc{Sort: 0x03}, 2},
+	} {
+		got, off, err := readExternDesc(tc.buf, 0)
+		if err != nil {
+			t.Fatalf("readExternDesc(%x): %v", tc.buf, err)
+		}
+		if got != tc.want || off != tc.off {
+			t.Errorf("readExternDesc(%x) = %+v at %d, want %+v at %d", tc.buf, got, off, tc.want, tc.off)
+		}
 	}
 }
 

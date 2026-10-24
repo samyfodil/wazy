@@ -261,15 +261,24 @@ type InstanceDesc struct {
 	// `sub`-bound export) this decoder cannot resolve structurally, in
 	// declaration order -- see readInstanceDeclDescInto.
 	Types []TypeDesc
+
+	// Body is the instancetype's encoded vec(instancedecl), a sub-slice of
+	// the buffer it was decoded from. Decls parses it in full on demand:
+	// Exports and Types keep only what the ABI needs, and every component
+	// imports instances, so the whole declaration list is not kept for each
+	// one on the off chance a type check wants it.
+	Body []byte
 }
 
 func (InstanceDesc) isTypeDesc()  {}
 func (InstanceDesc) Kind() string { return "instance" }
 
-// ComponentDesc represents a component type (collection of declarations).
+// ComponentDesc represents a component type: what a component import, or a
+// component export's type ascription, declares the component to be.
 type ComponentDesc struct {
-	// For now, component decls are not fully represented.
-	// This is a stub; M1 focuses on function and data types.
+	// Body is the componenttype's encoded vec(componentdecl), a sub-slice of
+	// the buffer it was decoded from. Decls parses it; see InstanceDesc.Body.
+	Body []byte
 }
 
 func (ComponentDesc) isTypeDesc()  {}
@@ -719,11 +728,12 @@ func readInstanceDeclDescInto(buf []byte, off int, localTypes *[]TypeDesc, expor
 		if err != nil {
 			return off2, err
 		}
-		sort, idx, hasIdx, off3, err := readExterndesc(buf, off2)
+		d, off3, err := readExternDesc(buf, off2)
 		if err != nil {
 			return off3, err
 		}
-		if sort == 0x03 { // type-sort export: a new local type-sort index
+		if d.Sort == 0x03 { // type-sort export: a new local type-sort index
+			idx, hasIdx := d.Index, d.Eq
 			// hasIdx is false for a `sub`-bound (abstract resource) export,
 			// which this decoder cannot resolve structurally -- its slot is
 			// reserved as nil so a later decl referencing it by number fails
@@ -931,6 +941,7 @@ func skipName(buf []byte, off int) (int, error) {
 // via readInstanceDeclDescInto. See InstanceDesc's doc for why a TypeRef in
 // Exports indexes Types, not any enclosing component's TypeSpace.
 func readInstancetypeDesc(buf []byte, off int) (InstanceDesc, int, error) {
+	start := off
 	count, n, err := leb128.LoadUint32(buf[off:])
 	if err != nil {
 		return InstanceDesc{}, off, err
@@ -952,7 +963,7 @@ func readInstancetypeDesc(buf []byte, off int) (InstanceDesc, int, error) {
 			return InstanceDesc{}, off, fmt.Errorf("instancedecl[%d]: %w", i, err)
 		}
 	}
-	return InstanceDesc{Exports: exports, Types: localTypes}, off, nil
+	return InstanceDesc{Exports: exports, Types: localTypes, Body: buf[start:off:off]}, off, nil
 }
 
 // readDeftypeDesc consumes one deftype and returns a TypeDesc, OR a kind string
@@ -973,9 +984,14 @@ func readDeftypeDesc(buf []byte, off int) (TypeDesc, int, error) {
 		d.Async = true
 		return d, off, err
 	case tag == 0x41:
-		// Component type: consume but do not fully represent in M1.
+		// Component type: walked here to stay in sync, kept as its body for
+		// ComponentDesc.Decls.
+		start := off
 		off, err := readComponenttype(buf, off)
-		return ComponentDesc{}, off, err
+		if err != nil {
+			return ComponentDesc{}, off, err
+		}
+		return ComponentDesc{Body: buf[start:off:off]}, off, nil
 	case tag == 0x42:
 		d, off, err := readInstancetypeDesc(buf, off)
 		return d, off, err

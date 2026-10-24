@@ -216,16 +216,15 @@ func TestResolveComponentDef(t *testing.T) {
 	}
 }
 
-// A ROOT component that imports a COMPONENT is still rejected: only an
-// enclosing component's `(with "x" (component N))` instantiate-arg can supply
-// a component definition, and there is deliberately no Option that does. This
-// is what the official suite's simple.4 ("root-level component imports are not
-// supported") asserts.
+// A ROOT component whose component import nothing supplied is refused, and
+// says what would supply it. (Wasmtime refuses every root-level component
+// import -- the official suite's simple.4 asserts its "root-level component
+// imports are not supported" -- while wazy runs one given WithComponentImport.)
 func TestGraph_RootLevelComponentImportRejected(t *testing.T) {
 	comp := decodeRealHello(t)
 	comp.Imports[0].ExternType = 0x04 // component
 	_, err := runGraph(t, comp)
-	requireErrContains(t, err, "only instance imports are supported")
+	requireErrContains(t, err, "was not supplied; supply a component for it with WithComponentImport")
 }
 
 // The same import IS satisfiable once an enclosing component supplied a
@@ -243,7 +242,7 @@ func TestGraph_ComponentImportSatisfiedByAParentArg(t *testing.T) {
 	// own business (its remaining imports are unregistered), so only assert
 	// that the gate itself no longer rejects it.
 	_, err := instantiateGraph(ctx, r, comp, realHelloWasm, cfg)
-	if err != nil && strings.Contains(err.Error(), "only instance imports are supported") {
+	if err != nil && strings.Contains(err.Error(), "only instance imports are supported") || err != nil && strings.Contains(err.Error(), "was not supplied") {
 		t.Fatalf("a supplied component import must pass the import gate, got: %v", err)
 	}
 }

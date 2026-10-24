@@ -132,20 +132,26 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 				continue
 			}
 		}
-		// A component import (0x04) -- a nested component parameterized by a
-		// COMPONENT, satisfied by a `(with "x" (component N))` instantiate-arg
-		// the parent recorded in cfg.componentArgs. It carries no runtime
-		// obligation of its own: the definition is code this component
-		// instantiates itself, wherever its instance section says. Only
-		// allowed when actually supplied, so a ROOT component importing a
-		// component is still rejected.
+		// A component import (0x04): a component DEFINITION, supplied by a
+		// parent's `(with "x" (component N))` instantiate-arg or, for the
+		// root, by WithComponentImport -- either way recorded in
+		// cfg.componentArgs. It carries no runtime obligation of its own: the
+		// definition is code this component instantiates itself, wherever its
+		// instance section says.
 		if im.ExternType == 0x04 {
 			if _, ok := cfg.componentArgs[im.Name]; ok {
 				continue
 			}
+			return nil, fmt.Errorf("component/instance: component import %q was not supplied; supply a component for it with WithComponentImport", im.Name)
 		}
 		if im.ExternType != 0x05 { // instance
-			return nil, fmt.Errorf("component/instance: import %q has extern kind %s (%#x); only instance imports are supported", im.Name, api.ExternTypeName(im.ExternType), im.ExternType)
+			// api.ExternTypeName names CORE extern kinds, which number the
+			// sorts differently; ctSortDesc names the component's.
+			kind := ctSortDesc(im.ExternType)
+			if im.ExternType == ctSortCoreModule {
+				kind = "core module"
+			}
+			return nil, fmt.Errorf("component/instance: import %q is a %s import (sort %#x); only instance imports are supported, and component imports supplied with WithComponentImport", im.Name, kind, im.ExternType)
 		}
 	}
 	// A hand-built (non-decoded) Component with aliases/canons never had its

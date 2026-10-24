@@ -96,81 +96,60 @@ func readExternName(buf []byte, off int) (string, int, error) {
 	}
 }
 
-// readExterndesc consumes an externdesc (used by import/export/instance/
-// component decls) and returns the sort byte. Core module uses the two-byte
-// prefix 0x00 0x11.
-// readExterndesc reads one externdesc, returning its sort byte plus, for a
-// type-sort import/export whose bound is `eq <typeidx>` (bound 0x00), that
-// referenced type index in idx with hasIdx=true -- so an `import "point"
-// (type (eq N))` (what wit-component/cargo-component emit for a world's
-// exported types) can be resolved through to type N rather than treated as an
-// opaque import. hasIdx is also true for a func-sort (0x01) externdesc, whose
-// idx is the func's own type index -- decodeImportSection needs it (on
-// Import.ExternIndex) to resolve a top-level func import's declared type
-// (e.g. checking its Async bit against a canon lower's async option -- see
-// validateAsyncOptAgreesWithType) -- and for an instance-sort (0x05)
-// externdesc, whose idx is the instance's own declared instancetype index --
-// decodeImportSection likewise needs it (on Import.ExternIndex) so
-// typespace.go's resolveAlias can look up what a `use iface.{T}` alias
-// actually names in the imported instance's InstanceDesc.Exports. hasIdx is
-// false for a `sub` type bound (0x01, an opaque resource) and for a
-// component-sort (0x04) externdesc, whose own typeidx no caller currently
-// needs; decode it yourself if that changes.
-func readExterndesc(buf []byte, off int) (sort byte, idx uint32, hasIdx bool, _ int, err error) {
+// ExternDesc is one externdesc of the binary format: what an import, an
+// export's type ascription, or an import/export declaration inside a
+// component or instance type says the item is.
+//
+// Sort is the sort byte: 0x00 core module, 0x01 func, 0x02 value, 0x03 type,
+// 0x04 component, 0x05 instance. For every sort but type, Index is the type
+// index of the item's declared type (a core module type for 0x00, which is a
+// CORE type index). For a type, Eq reports the bound: true for `(eq Index)`,
+// false for `(sub resource)`, which names no index and introduces a fresh
+// abstract resource type.
+type ExternDesc struct {
+	Sort  byte
+	Index uint32
+	Eq    bool
+}
+
+// readExternDesc consumes one externdesc. A value-sort (0x02) externdesc is
+// refused: values are a gated feature this decoder does not model.
+func readExternDesc(buf []byte, off int) (ExternDesc, int, error) {
 	if off >= len(buf) {
-		return 0, 0, false, off, ErrTruncatedBinary
+		return ExternDesc{}, off, ErrTruncatedBinary
 	}
-	sort = buf[off]
+	d := ExternDesc{Sort: buf[off]}
 	off++
-	switch sort {
-	case 0x00: // core:type — expect 0x11 then core typeidx
+	switch d.Sort {
+	case 0x00: // core:type -- expect 0x11 then core typeidx
 		if off >= len(buf) || buf[off] != 0x11 {
-			return sort, 0, false, off, fmt.Errorf("externdesc: expected core module type prefix 0x11")
+			return d, off, fmt.Errorf("externdesc: expected core module type prefix 0x11")
 		}
 		off++
-		_, n, e := leb128.LoadUint32(buf[off:])
-		if e != nil {
-			return sort, 0, false, off, e
-		}
-		off += int(n)
-	case 0x01: // func: typeidx
-		fIdx, n, e := leb128.LoadUint32(buf[off:])
-		if e != nil {
-			return sort, 0, false, off, e
-		}
-		off += int(n)
-		return sort, fIdx, true, off, nil
-	case 0x04: // component: typeidx
-		_, n, e := leb128.LoadUint32(buf[off:])
-		if e != nil {
-			return sort, 0, false, off, e
-		}
-		off += int(n)
-	case 0x05: // instance: typeidx
-		iIdx, n, e := leb128.LoadUint32(buf[off:])
-		if e != nil {
-			return sort, 0, false, off, e
-		}
-		off += int(n)
-		return sort, iIdx, true, off, nil
-	case 0x03: // type bound: 0x00 typeidx (eq) | 0x01 (sub)
+	case 0x01, 0x04, 0x05: // func, component, instance: typeidx
+	case 0x03: // type bound: 0x00 typeidx (eq) | 0x01 (sub resource)
 		if off >= len(buf) {
-			return sort, 0, false, off, ErrTruncatedBinary
+			return d, off, ErrTruncatedBinary
 		}
 		bound := buf[off]
 		off++
-		if bound == 0x00 {
-			eqIdx, n, e := leb128.LoadUint32(buf[off:])
-			if e != nil {
-				return sort, 0, false, off, e
-			}
-			off += int(n)
-			return sort, eqIdx, true, off, nil
+		switch bound {
+		case 0x00:
+			d.Eq = true
+		case 0x01:
+			return d, off, nil
+		default:
+			return d, off, fmt.Errorf("externdesc: invalid type bound %#x", bound)
 		}
 	default:
-		return sort, 0, false, off, fmt.Errorf("unsupported (M1): externdesc sort %#x", sort)
+		return d, off, fmt.Errorf("unsupported (M1): externdesc sort %#x", d.Sort)
 	}
-	return sort, 0, false, off, nil
+	idx, n, err := leb128.LoadUint32(buf[off:])
+	if err != nil {
+		return d, off, err
+	}
+	d.Index = idx
+	return d, off + int(n), nil
 }
 
 // readSort consumes a sort byte; the core sort (0x00) carries one extra
@@ -238,7 +217,7 @@ func readComponentDecl(buf []byte, off int) (int, error) {
 		if err != nil {
 			return off2, err
 		}
-		_, _, _, off2, err = readExterndesc(buf, off2)
+		_, off2, err = readExternDesc(buf, off2)
 		return off2, err
 	}
 	return readInstanceDeclDesc(buf, off)

@@ -116,6 +116,22 @@ func WithImport(iface, name string, fn HostFunc, params, results []TypeDesc) Opt
 	return instance.WithImport(iface, name, fn, params, results)
 }
 
+// WithComponentImport supplies componentBytes, a component binary, for the
+// component's component import name -- `(import "name" (component ...))`,
+// which `wac compose --import-dependencies` emits for each dependency it does
+// not embed. The importing component instantiates the supplied component
+// itself, as many times and with whatever arguments its own instance section
+// says; with WithCompileCache, the supplied component's decode and
+// compilation are cached like the importer's.
+//
+// The supplied component is checked against the type the import declares,
+// by the Component Model's subtyping rules, before anything is instantiated:
+// it may import less and export more, and what it imports and exports must
+// match. Instantiate fails with the mismatch otherwise.
+func WithComponentImport(name string, componentBytes []byte) Option {
+	return instance.WithComponentImport(name, componentBytes)
+}
+
 // WithAsyncImport registers fn as the component's async-lowered import
 // iface/name. Pair it with Instance.CallAsync so fn may complete the call later,
 // from another goroutine (real I/O), via AsyncCall.Resolve.

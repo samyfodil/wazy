@@ -98,18 +98,19 @@ type config struct {
 	sharedSched *sched
 
 	// componentArgs maps a COMPONENT-sort import name of the component being
-	// instantiated to the component DEFINITION the parent supplied for it via
-	// a `(with "x" (component N))` instantiate-arg (types.11.wast). Unlike
-	// every other arg sort, nothing is instantiated on the child's behalf: a
-	// component-sort import is code, occupying a slot in the child's own
-	// component index space, which the child instantiates itself with its own
-	// args at its own instance section (Explainer.md, "Instance Definitions").
-	//
-	// nil for a root instantiation -- there is deliberately no Option to fill
-	// it, so a ROOT component with a component import still fails loud, which
-	// is what simple.4.wast's "root-level component imports are not supported"
-	// expects.
+	// instantiated to the component DEFINITION supplied for it: by the parent,
+	// via a `(with "x" (component N))` instantiate-arg (types.11.wast), or --
+	// for the root -- by the embedder, via WithComponentImport (typeCheck
+	// decodes and type-checks it into here). Unlike every other arg sort,
+	// nothing is instantiated on the child's behalf: a component-sort import
+	// is code, occupying a slot in the child's own component index space,
+	// which the child instantiates itself with its own args at its own
+	// instance section (Explainer.md, "Instance Definitions").
 	componentArgs map[string]*binary.Component
+
+	// componentImports are the component binaries WithComponentImport
+	// supplied for the root's component imports, by import name.
+	componentImports map[string][]byte
 
 	// pendingDelegates accumulates a canon lower's forward reference to a
 	// nested sibling component instance that had not yet been instantiated
