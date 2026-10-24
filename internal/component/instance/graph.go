@@ -1177,8 +1177,7 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 						// sib runs it against a component that holds none of
 						// the state the call needs (boundExport.home's doc).
 						owner, ownerKey := ownerOf(entry.be, sib, entry.name)
-						hi := delegatingHostImport(owner, ownerKey, entry.be, provToImp)
-						hi.asyncTarget = &guestAsyncTarget{sub: owner, be: entry.be, exportName: ownerKey, provToImp: provToImp}
+						hi := delegatingHostImport(newGuestAsyncTarget(owner, entry.be, ownerKey, provToImp))
 						subCfg.imports[mkImportKey(arg.Name, member)] = hi
 					}
 					continue
@@ -1188,15 +1187,12 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 						continue
 					}
 					owner, ownerKey := ownerOf(be, sib, name) // the definer, if sib only re-exposes it
-					hi := delegatingHostImport(owner, ownerKey, be, provToImp)
-					// Register the async arm too (Phase 3, docs/component-
-					// model-async-phase3-design.md §3.1): an async lower
-					// through this import now routes to sib's export as a
-					// guestTask instead of bind-failing with "register it
-					// with WithAsyncImport instead" -- see
-					// computeCanonHostFunc's lower case and
+					// The target serves the async arm too (Phase 3, docs/
+					// component-model-async-phase3-design.md §3.1): an async
+					// lower through this import routes to sib's export as a
+					// guestTask -- see computeCanonHostFunc's lower case and
 					// buildAsyncHostWrapper's callee arm.
-					hi.asyncTarget = &guestAsyncTarget{sub: owner, be: be, exportName: ownerKey, provToImp: provToImp}
+					hi := delegatingHostImport(newGuestAsyncTarget(owner, be, ownerKey, provToImp))
 					subCfg.imports[mkImportKey(arg.Name, name)] = hi
 				}
 
@@ -1275,10 +1271,12 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 // numbering. Inside, own<R>/borrow<R> args arrive as reps (the importer wrapper
 // already reduced its handle) and are re-minted in the PROVIDER's table for the
 // provider call; own/borrow results (provider handles) are reduced back to reps
-// for the importer wrapper. Non-resource params pass straight through -- the
-// fused-adapter (char roundtrip) case leaves the signature unchanged.
+// for the importer wrapper -- at every depth: a handle inside a record, list,
+// variant, option or result crosses the same way (guestAsyncTarget.nested).
+// Non-resource params pass straight through -- the fused-adapter (char
+// roundtrip) case leaves the signature unchanged.
 //
-// hasBorrowParam is computed once here (a paramDescs walk), not per call: a
+// tgt.borrows is computed once (newGuestAsyncTarget), not per call: a
 // cross-instance borrow<R> param needs a call-scoped mint (Phase 3, docs/
 // component-model-async-phase3-design.md §4.1 site 1/site 3) -- the
 // PROVIDER's borrow handle is minted scoped to a scope-only *task built
@@ -1288,7 +1286,7 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 // its own to run). A func with no borrow param skips the scope entirely
 // (scope stays nil; repToProviderHandle then takes its unscoped NewBorrow
 // fallback, unreachable here since no BorrowDesc param exists to trigger it).
-func delegatingHostImport(sub *Instance, exportName string, be *boundExport, provToImp func(uint32) (uint32, bool)) *hostImport {
+func delegatingHostImport(tgt *guestAsyncTarget) *hostImport {
 	// be.fd's type indices belong to the component whose `canon lift` produced
 	// be, which is sub only when be was not re-exposed out of something deeper
 	// -- so resolve them through be's OWN resolver (boundExport.resolve, set
@@ -1299,39 +1297,20 @@ func delegatingHostImport(sub *Instance, exportName string, be *boundExport, pro
 	// "type index N not found" before any guest code runs. Callers pass the
 	// owner (ownerOf) too, so this is belt-and-braces -- but it is the half
 	// that is correct even for a caller that does not.
-	provResolve := be.resolve
-	if provResolve == nil {
-		provResolve = sub.resolve // a hand-built Instance's exports (instance.go's trivial path)
-	}
-	fd, importerResolve := translateResourceFD(be.fd, provResolve, provToImp)
-	paramDescs := be.paramTypes
-	resDescs := resultDescs(be)
-	hasBorrowParam := false
-	for _, d := range paramDescs {
-		if _, ok := d.(binary.BorrowDesc); ok {
-			hasBorrowParam = true
-			break
-		}
-	}
+	fd, importerResolve := translateResourceFD(tgt.be.fd, tgt.resolve, tgt.provToImp)
 	return &hostImport{
-		delegate: true,
+		delegate:    true,
+		asyncTarget: tgt,
 		fn: func(ctx context.Context, args []abi.Value) ([]abi.Value, error) {
 			var scope *task
-			if hasBorrowParam {
-				scope = &task{inst: sub}
+			if tgt.borrows {
+				scope = &task{inst: tgt.sub}
 			}
-			in := make([]abi.Value, len(args))
-			for i, a := range args {
-				var err error
-				if i < len(paramDescs) {
-					a, err = repToProviderHandle(sub, paramDescs[i], a, scope)
-					if err != nil {
-						return nil, err
-					}
-				}
-				in[i] = a
+			in, err := tgt.toProvider(args, scope)
+			if err != nil {
+				return nil, err
 			}
-			out, err := sub.invoke(ctx, be, exportName, in)
+			out, err := tgt.sub.invoke(ctx, tgt.be, tgt.exportName, in)
 			if err != nil {
 				return nil, err
 			}
@@ -1340,16 +1319,9 @@ func delegatingHostImport(sub *Instance, exportName string, be *boundExport, pro
 			// (num_borrows > 0) covers this; wazy's sync invoke() has no
 			// task, so the delegate supplies the equivalent check here.
 			if scope != nil && scope.numBorrows > 0 {
-				return nil, fmt.Errorf("component/instance: %s: borrow handles still remain at the end of the call (%d still held)", exportName, scope.numBorrows)
+				return nil, fmt.Errorf("component/instance: %s: borrow handles still remain at the end of the call (%d still held)", tgt.exportName, scope.numBorrows)
 			}
-			for i := range out {
-				if i < len(resDescs) {
-					if out[i], err = providerHandleToRep(sub, resDescs[i], out[i]); err != nil {
-						return nil, err
-					}
-				}
-			}
-			return out, nil
+			return out, tgt.fromProvider(out)
 		},
 		customFD:      &fd,
 		customResolve: importerResolve,
@@ -1373,30 +1345,13 @@ func delegatingHostImport(sub *Instance, exportName string, be *boundExport, pro
 // non-promoted callback-caller's own nested drive) keeps using hi.fn
 // unchanged.
 func startDelegatedFromBlocker(ctx context.Context, blk taskBlocker, tgt *guestAsyncTarget, args []abi.Value) ([]abi.Value, error) {
-	sub, be, exportName := tgt.sub, tgt.be, tgt.exportName
-	paramDescs := be.paramTypes
-	resDescs := resultDescs(be)
-	hasBorrowParam := false
-	for _, d := range paramDescs {
-		if _, ok := d.(binary.BorrowDesc); ok {
-			hasBorrowParam = true
-			break
-		}
-	}
 	var scope *task
-	if hasBorrowParam {
-		scope = &task{inst: sub}
+	if tgt.borrows {
+		scope = &task{inst: tgt.sub}
 	}
-	in := make([]abi.Value, len(args))
-	for i, a := range args {
-		var err error
-		if i < len(paramDescs) {
-			a, err = repToProviderHandle(sub, paramDescs[i], a, scope)
-			if err != nil {
-				return nil, err
-			}
-		}
-		in[i] = a
+	in, err := tgt.toProvider(args, scope)
+	if err != nil {
+		return nil, err
 	}
 
 	var resolved bool
@@ -1408,7 +1363,7 @@ func startDelegatedFromBlocker(ctx context.Context, blk taskBlocker, tgt *guestA
 		res, resolved = vals, true
 		return nil
 	}
-	if _, err := sub.startAsyncExportTask(ctx, be, exportName, onStart, onResolve); err != nil {
+	if _, err := tgt.sub.startAsyncExportTask(ctx, tgt.be, tgt.exportName, onStart, onResolve); err != nil {
 		return nil, err
 	}
 	if !resolved {
@@ -1416,19 +1371,9 @@ func startDelegatedFromBlocker(ctx context.Context, blk taskBlocker, tgt *guestA
 	}
 
 	if scope != nil && scope.numBorrows > 0 {
-		return nil, fmt.Errorf("component/instance: %s: borrow handles still remain at the end of the call (%d still held)", exportName, scope.numBorrows)
+		return nil, fmt.Errorf("component/instance: %s: borrow handles still remain at the end of the call (%d still held)", tgt.exportName, scope.numBorrows)
 	}
-	out := make([]abi.Value, len(res))
-	for i, v := range res {
-		if i < len(resDescs) {
-			var err error
-			if v, err = providerHandleToRep(sub, resDescs[i], v); err != nil {
-				return nil, err
-			}
-		}
-		out[i] = v
-	}
-	return out, nil
+	return res, tgt.fromProvider(res)
 }
 
 // coreInstanceKey is the COMPONENT-CONSTANT, collision-free resolver key that
@@ -1924,8 +1869,7 @@ func computeCanonHostFunc(
 				// alias -- matches outerFuncArgImport's identical case.
 				provToImp := func(uint32) (uint32, bool) { return 0, false }
 				owner, ownerKey := ownerOf(be, sib, key)
-				hi = delegatingHostImport(owner, ownerKey, be, provToImp)
-				hi.asyncTarget = &guestAsyncTarget{sub: owner, be: be, exportName: ownerKey, provToImp: provToImp}
+				hi = delegatingHostImport(newGuestAsyncTarget(owner, be, ownerKey, provToImp))
 				// A canon lower declared directly in the OUTER component's
 				// own core-instance graph, targeting a locally-instantiated
 				// child's export -- a direct static parent<->child lineage

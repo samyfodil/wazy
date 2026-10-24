@@ -359,6 +359,12 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 		resources: resources, reallocOverride: reallocOverride,
 	}
 
+	// A delegate's handles below the top level cross as in buildHostWrapper.
+	var transfer *hostHandleTransfer
+	if tgt := hi.asyncTarget; tgt != nil && tgt.nested != nil {
+		transfer = tgt.importerTransfer(resources)
+	}
+
 	fn := api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 		if hi.lineage {
 			panic(fmt.Errorf("component/instance: async lower %q %q: wasm trap: cannot enter component instance", iface, funcName))
@@ -414,7 +420,12 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 					return nil, fmt.Errorf("async lower %q %q: %w", iface, funcName, aerr)
 				}
 				st.state = subtaskStarted // on_start complete (STARTING -> STARTED, ~2250)
-				return mapArgsToProvider(tgt, args, calleeTask)
+				if transfer != nil {
+					if _, err := transfer.moveArgs(args); err != nil {
+						return nil, err
+					}
+				}
+				return tgt.toProvider(args, calleeTask)
 			}
 
 			onResolve := func(vals []abi.Value, cancelled bool) error {
@@ -427,11 +438,14 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 						st.resolve(subtaskCancelledBeforeReturned, nil)
 					}
 				} else {
-					mapped, merr := mapResultsFromProvider(tgt, vals)
-					if merr != nil {
-						return fmt.Errorf("async lower %q %q: %w", iface, funcName, merr)
+					err := tgt.fromProvider(vals)
+					if err == nil && transfer != nil {
+						err = transfer.moveResults(vals)
 					}
-					if aerr := st.applyResolve(mapped); aerr != nil {
+					if err != nil {
+						return fmt.Errorf("async lower %q %q: %w", iface, funcName, err)
+					}
+					if aerr := st.applyResolve(vals); aerr != nil {
 						return aerr
 					}
 				}
@@ -519,49 +533,6 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 		stack[0] = uint64(uint32(st.state)) | uint64(subtaski)<<4
 	})
 	return fn, apiParams, apiResults, nil
-}
-
-// mapArgsToProvider is repToProviderHandle applied across a whole (already-
-// lifted, importer-side) arg list, for the guest<->guest callee arm's
-// on_start (Phase 3, docs/component-model-async-phase3-design.md §3.2) --
-// composition.go's delegatingHostImport does the identical mapping for the
-// sync arm. calleeTask is B's real task (it already exists by the time
-// on_start runs, unlike the sync delegate's throwaway scope-only task),
-// so a cross-instance borrow<T> arg is minted call-scoped against it.
-func mapArgsToProvider(tgt *guestAsyncTarget, args []abi.Value, calleeTask *task) ([]abi.Value, error) {
-	paramDescs := tgt.be.paramTypes
-	out := make([]abi.Value, len(args))
-	for i, a := range args {
-		if i < len(paramDescs) {
-			var err error
-			if a, err = repToProviderHandle(tgt.sub, paramDescs[i], a, calleeTask); err != nil {
-				return nil, err
-			}
-		}
-		out[i] = a
-	}
-	return out, nil
-}
-
-// mapResultsFromProvider is providerHandleToRep applied across a whole
-// (provider-side) result list, for the guest<->guest callee arm's
-// on_resolve -- the result-side mirror of mapArgsToProvider. The output
-// feeds st.applyResolve exactly as a Go AsyncHostFunc's Resolve results do
-// (a bare rep for an own/borrow result), so the two arms share the same
-// lowering-into-memory code.
-func mapResultsFromProvider(tgt *guestAsyncTarget, vals []abi.Value) ([]abi.Value, error) {
-	resDescs := resultDescs(tgt.be)
-	out := make([]abi.Value, len(vals))
-	for i, v := range vals {
-		if i < len(resDescs) {
-			var err error
-			if v, err = providerHandleToRep(tgt.sub, resDescs[i], v); err != nil {
-				return nil, err
-			}
-		}
-		out[i] = v
-	}
-	return out, nil
 }
 
 // liftAsyncHostArgsSpilled is liftAsyncHostArgsPlanned's counterpart for a

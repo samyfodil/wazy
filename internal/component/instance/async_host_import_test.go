@@ -3,6 +3,7 @@ package instance
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/samyfodil/wazy/api"
@@ -435,17 +436,17 @@ func TestAsyncCall_ResolveCancelled_OutsideSchedulerTraps(t *testing.T) {
 	requirePanicContains(t, "external completion requires CallAsync", func() { ac.ResolveCancelled() })
 }
 
-// ------- mapArgsToProvider / mapResultsFromProvider -------
+// ------- guestAsyncTarget.toProvider / fromProvider -------
 
-func TestMapArgsToProvider_BorrowArgIsCallScopedInProviderTable(t *testing.T) {
+func TestToProvider_BorrowArgIsCallScopedInProviderTable(t *testing.T) {
 	sub := &Instance{resources: newHandleTable()}
 	// A provider that does NOT itself own the resource (isGuestResource
 	// false, or nil): the cross-instance scoped-mint path applies (§4.1).
 	tgt := &guestAsyncTarget{sub: sub, be: &boundExport{paramTypes: []binary.TypeDesc{binary.BorrowDesc{ResourceType: 1}}}}
 	scope := &task{}
-	out, err := mapArgsToProvider(tgt, []abi.Value{uint32(42)}, scope)
+	out, err := tgt.toProvider([]abi.Value{uint32(42)}, scope)
 	if err != nil {
-		t.Fatalf("mapArgsToProvider: %v", err)
+		t.Fatalf("toProvider: %v", err)
 	}
 	if len(out) != 1 {
 		t.Fatalf("got %d value(s), want 1", len(out))
@@ -463,31 +464,59 @@ func TestMapArgsToProvider_BorrowArgIsCallScopedInProviderTable(t *testing.T) {
 	}
 }
 
-func TestMapArgsToProvider_ProviderOwnsResource_NoScope(t *testing.T) {
+func TestToProvider_ProviderOwnsResource_NoScope(t *testing.T) {
 	sub := &Instance{resources: newHandleTable(), isGuestResource: func(uint32) bool { return true }}
 	tgt := &guestAsyncTarget{sub: sub, be: &boundExport{paramTypes: []binary.TypeDesc{binary.BorrowDesc{ResourceType: 1}}}}
 	scope := &task{}
-	if _, err := mapArgsToProvider(tgt, []abi.Value{uint32(9)}, scope); err != nil {
-		t.Fatalf("mapArgsToProvider: %v", err)
+	if _, err := tgt.toProvider([]abi.Value{uint32(9)}, scope); err != nil {
+		t.Fatalf("toProvider: %v", err)
 	}
 	if scope.numBorrows != 0 {
 		t.Fatalf("scope.numBorrows = %d, want 0 (same-instance exemption: provider owns the resource)", scope.numBorrows)
 	}
 }
 
-func TestMapResultsFromProvider_OwnResult(t *testing.T) {
+func TestFromProvider_OwnResult(t *testing.T) {
 	sub := &Instance{resources: newHandleTable()}
 	h := sub.resources.NewOwn(2, 77)
 	tgt := &guestAsyncTarget{sub: sub, be: &boundExport{hasResult: true, resultType: binary.OwnDesc{ResourceType: 2}}}
-	out, err := mapResultsFromProvider(tgt, []abi.Value{h})
-	if err != nil {
-		t.Fatalf("mapResultsFromProvider: %v", err)
+	out := []abi.Value{h}
+	if err := tgt.fromProvider(out); err != nil {
+		t.Fatalf("fromProvider: %v", err)
 	}
 	if len(out) != 1 || out[0].(uint32) != 77 {
 		t.Fatalf("got %v, want [77] (the rep, own consumed)", out)
 	}
 	if _, err := sub.resources.Rep(2, h); err == nil {
 		t.Fatal("expected the own handle to have been consumed (TakeOwn)")
+	}
+}
+
+// A list<own<r>> / list<borrow<r>> arg: each element is minted in the
+// provider's table, a borrow scoped to the call; an element that is not a rep
+// is refused.
+func TestToProvider_NestedHandles(t *testing.T) {
+	handles := []binary.TypeDesc{binary.OwnDesc{ResourceType: 1}, binary.BorrowDesc{ResourceType: 1}}
+	resolve := func(idx uint32) binary.TypeDesc { return handles[idx] }
+	list := func(idx uint32) binary.TypeDesc { return binary.ListDesc{Element: binary.TypeRef{TypeIndex: &idx}} }
+	sub := &Instance{resources: newHandleTable()}
+	tgt := newGuestAsyncTarget(sub, &boundExport{paramTypes: []binary.TypeDesc{list(0), list(1)}, resolve: resolve}, "f", nil)
+	if !tgt.borrows {
+		t.Fatal("a list of borrows did not mark the target as taking borrows")
+	}
+	scope := &task{}
+	out, err := tgt.toProvider([]abi.Value{[]abi.Value{uint32(5)}, []abi.Value{uint32(6)}}, scope)
+	if err != nil {
+		t.Fatalf("toProvider: %v", err)
+	}
+	if rep, err := sub.resources.TakeOwn(1, out[0].([]abi.Value)[0].(uint32)); err != nil || rep != 5 {
+		t.Fatalf("own element: TakeOwn = (%d, %v), want (5, nil)", rep, err)
+	}
+	if rep, err := sub.resources.Rep(1, out[1].([]abi.Value)[0].(uint32)); err != nil || rep != 6 || scope.numBorrows != 1 {
+		t.Fatalf("borrow element: Rep = (%d, %v), numBorrows %d; want (6, nil), 1", rep, err, scope.numBorrows)
+	}
+	if _, err := tgt.toProvider([]abi.Value{[]abi.Value{"x"}, []abi.Value{}}, scope); err == nil || !strings.Contains(err.Error(), "expected a uint32 rep") {
+		t.Fatalf("toProvider of a non-rep element = %v, want a refusal", err)
 	}
 }
 

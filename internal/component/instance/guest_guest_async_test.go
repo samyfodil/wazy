@@ -152,7 +152,7 @@ func TestGuestGuestAsyncLower_ParkThenCrossInstanceResume(t *testing.T) {
 // OWN never-resolving import, so requestCancellation's STARTED branch
 // resumes it INLINE with TASK_CANCELLED; B's callback acks via `canon
 // task.cancel`; the ack flows back through startAsyncExportTask's onResolve
-// (mapResultsFromProvider is a no-op for a cancelled resolve) and
+// (fromProvider is skipped for a cancelled resolve) and
 // installSubtaskEvent, and subtask.cancel's own getPendingEvent delivery
 // returns CANCELLED_BEFORE_RETURNED to A -- all synchronously, no scheduler
 // drive needed (the sync form's `if !st.resolved()` block is skipped

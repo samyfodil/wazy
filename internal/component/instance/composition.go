@@ -571,8 +571,7 @@ func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, byIdx
 		// No resource-type wiring for a bare (non-instance) func arg -- see
 		// the sibling-export case's identical comment below.
 		provToImp := func(uint32) (uint32, bool) { return 0, false }
-		hi := delegatingHostImport(in, diagName, be, provToImp)
-		hi.asyncTarget = &guestAsyncTarget{sub: in, be: be, exportName: diagName, provToImp: provToImp}
+		hi := delegatingHostImport(newGuestAsyncTarget(in, be, diagName, provToImp))
 		// This func arg names the outer component's OWN local func, handed
 		// down to a directly-nested child as a `(with "x" (func N))`
 		// instantiate-arg -- a direct static parent<->child lineage delegate
@@ -622,8 +621,7 @@ func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, byIdx
 		// case the call belongs to whatever instance defines it -- see
 		// boundExport.home and ownerOf.
 		owner, ownerKey := ownerOf(be, sib, key)
-		hi := delegatingHostImport(owner, ownerKey, be, provToImp)
-		hi.asyncTarget = &guestAsyncTarget{sub: owner, be: be, exportName: ownerKey, provToImp: provToImp}
+		hi := delegatingHostImport(newGuestAsyncTarget(owner, be, ownerKey, provToImp))
 		return hi, nil
 	}
 	iface, err := importInterfaceName(comp, al.InstanceIdx)
@@ -861,6 +859,56 @@ func providerHandleToRep(sub *Instance, desc binary.TypeDesc, v abi.Value) (abi.
 	default:
 		return v, nil
 	}
+}
+
+// toProvider maps an importer-side arg list, whose handles the importer's
+// wrapper already reduced to reps, to the provider's: each own and borrow, at
+// any depth, is minted in the provider's table (repToProviderHandle), a borrow
+// scoped to scope.
+func (tgt *guestAsyncTarget) toProvider(args []abi.Value, scope *task) ([]abi.Value, error) {
+	paramDescs := tgt.be.paramTypes
+	out := make([]abi.Value, len(args))
+	for i, a := range args {
+		if i < len(paramDescs) {
+			var err error
+			if a, err = repToProviderHandle(tgt.sub, paramDescs[i], a, scope); err != nil {
+				return nil, err
+			}
+			if n := tgt.nested; n != nil && n.params[i] != nil {
+				a, err = walkHandles(a, n.params[i], n.resolve, 0, func(t binary.TypeDesc, v abi.Value) (abi.Value, error) {
+					return repToProviderHandle(tgt.sub, t, v, scope)
+				})
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+		out[i] = a
+	}
+	return out, nil
+}
+
+// fromProvider reduces the handles in the provider's results, at any depth,
+// back to reps (providerHandleToRep), in place, for the importer's wrapper to
+// mint in its own table.
+func (tgt *guestAsyncTarget) fromProvider(vals []abi.Value) error {
+	if !tgt.be.hasResult || len(vals) == 0 {
+		return nil
+	}
+	v, err := providerHandleToRep(tgt.sub, tgt.be.resultType, vals[0])
+	if err != nil {
+		return err
+	}
+	if n := tgt.nested; n != nil && n.results[0] != nil {
+		v, err = walkHandles(v, n.results[0], n.resolve, 0, func(t binary.TypeDesc, v abi.Value) (abi.Value, error) {
+			return providerHandleToRep(tgt.sub, t, v)
+		})
+		if err != nil {
+			return err
+		}
+	}
+	vals[0] = v
+	return nil
 }
 
 // resultDescs returns a boundExport's result TypeDescs (one for the single

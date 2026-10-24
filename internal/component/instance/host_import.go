@@ -229,18 +229,65 @@ type hostImport struct {
 	lineage bool
 }
 
-// guestAsyncTarget names the sibling composition instance/export an async
-// lower through a delegating import (composition.go's delegatingHostImport)
+// guestAsyncTarget names the sibling composition instance/export a lower
+// through a delegating import (composition.go's delegatingHostImport)
 // ultimately calls into (Phase 3, docs/component-model-async-phase3-design.md
-// §3.1). provToImp is the same PROVIDER-resource-def -> IMPORTER-type-index
-// mapping delegatingHostImport's sync arm uses, needed here too since
-// mapArgsToProvider (async_host_import.go) performs the identical own/borrow
-// crossing repToProviderHandle/providerHandleToRep do for the sync path.
+// §3.1). provToImp is the PROVIDER-resource-def -> IMPORTER-type-index
+// mapping a handle crossing the call is retagged by; toProvider and
+// fromProvider (composition.go) perform that own/borrow crossing for every
+// arm, sync and async.
 type guestAsyncTarget struct {
 	sub        *Instance
 	be         *boundExport
 	exportName string
 	provToImp  func(uint32) (uint32, bool)
+	// resolve resolves be's types: the defining component's.
+	resolve abi.Resolver
+
+	// borrows says a param holds a borrow, at any depth: the call then
+	// mints the provider's borrows scoped to it.
+	borrows bool
+	// nested holds the provider's types of the params and results holding a
+	// handle below the top level, nil when none does. Those cross the
+	// importer's table and the provider's in two halves, as the top-level
+	// ones do: the importer's wrapper reduces them to reps (nested.guest is
+	// left nil here; each wrapper sets its own table on a copy), and
+	// toProvider/fromProvider mint and take them in the provider's.
+	nested *hostHandleTransfer
+}
+
+// importerTransfer is nested, for the importer whose handles live in
+// resources.
+func (tgt *guestAsyncTarget) importerTransfer(resources *handleTable) *hostHandleTransfer {
+	x := *tgt.nested
+	x.guest = resources
+	return &x
+}
+
+// newGuestAsyncTarget returns the target for a delegate to be, sub's export
+// under exportName.
+func newGuestAsyncTarget(sub *Instance, be *boundExport, exportName string, provToImp func(uint32) (uint32, bool)) *guestAsyncTarget {
+	resolve := be.resolve
+	if resolve == nil {
+		resolve = sub.resolve // a hand-built Instance's exports (instance.go's trivial path)
+	}
+	tgt := &guestAsyncTarget{sub: sub, be: be, exportName: exportName, provToImp: provToImp, resolve: resolve}
+	for _, d := range be.paramTypes {
+		if _, ok := d.(binary.BorrowDesc); ok {
+			tgt.borrows = true
+		}
+	}
+	params, inParams := nestedHandleTypes(be.paramTypes, resolve)
+	results, inResults := nestedHandleTypes(resultDescs(be), resolve)
+	if inParams || inResults {
+		tgt.nested = &hostHandleTransfer{params: params, results: results, resolve: resolve, tag: provToImp}
+		for _, t := range params {
+			if t != nil && nestedBorrowIn(t, resolve) {
+				tgt.borrows = true
+			}
+		}
+	}
+	return tgt
 }
 
 func newConfig(opts []Option) *config {
@@ -685,6 +732,12 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 	var transfer *hostHandleTransfer
 	if in != nil && in.hostResources != nil && in.hostResources != resources && !hi.delegate {
 		transfer = newHostHandleTransfer(fd, resolve, resources, in.hostResources)
+	}
+	// A delegate to a sibling's export: its handles below the top level
+	// leave this component's table as reps, and its results' come back in,
+	// as the top-level ones do (guestAsyncTarget.nested).
+	if tgt := hi.asyncTarget; hi.delegate && tgt != nil && tgt.nested != nil {
+		transfer = tgt.importerTransfer(resources)
 	}
 
 	fn := api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
@@ -1410,10 +1463,16 @@ func toApiValueTypes(kinds []string) ([]api.ValueType, error) {
 // params[i]/results[i] are the types of the params and results holding a
 // handle below the top level, nil for the rest; a func with none gets no
 // transfer at all.
+//
+// A delegate to a sibling's export (guestAsyncTarget.nested) uses the same
+// walk with host nil -- the reps the provider's side mints its own handles
+// for -- and tag retagging the provider's resource indices the types name
+// to the importer's.
 type hostHandleTransfer struct {
 	params, results []binary.TypeDesc
 	resolve         abi.Resolver
 	guest, host     *handleTable
+	tag             func(uint32) (uint32, bool)
 }
 
 // newHostHandleTransfer returns the transfer for one host import of a nested
@@ -1443,18 +1502,43 @@ func newHostHandleTransfer(fd binary.FuncDesc, resolve abi.Resolver, guest, host
 	return x
 }
 
+// nestedHandleTypes returns ts with nil for each type holding no handle below
+// the top level, and whether any does.
+func nestedHandleTypes(ts []binary.TypeDesc, resolve abi.Resolver) ([]binary.TypeDesc, bool) {
+	out := make([]binary.TypeDesc, len(ts))
+	found := false
+	for i, t := range ts {
+		if nestedHandleIn(t, resolve, 0) {
+			out[i], found = t, true
+		}
+	}
+	return out, found
+}
+
 // nestedHandleIn reports whether a value of type t holds an own or borrow
 // handle at depth 1 or more -- t itself is depth 0.
 func nestedHandleIn(t binary.TypeDesc, resolve abi.Resolver, depth int) bool {
+	return handleIn(t, resolve, depth, false)
+}
+
+// nestedBorrowIn reports whether a value of type t holds a borrow handle
+// below the top level.
+func nestedBorrowIn(t binary.TypeDesc, resolve abi.Resolver) bool {
+	return handleIn(t, resolve, 0, true)
+}
+
+func handleIn(t binary.TypeDesc, resolve abi.Resolver, depth int, borrowOnly bool) bool {
 	sub := func(ref *binary.TypeRef) bool {
 		if ref == nil {
 			return false
 		}
 		st, err := resolveTypeRef(ref, resolve)
-		return err == nil && nestedHandleIn(st, resolve, depth+1)
+		return err == nil && handleIn(st, resolve, depth+1, borrowOnly)
 	}
 	switch d := t.(type) {
-	case binary.OwnDesc, binary.BorrowDesc:
+	case binary.OwnDesc:
+		return depth > 0 && !borrowOnly
+	case binary.BorrowDesc:
 		return depth > 0
 	case binary.RecordDesc:
 		for i := range d.Fields {
@@ -1499,7 +1583,7 @@ func (x *hostHandleTransfer) moveArgs(args []abi.Value) ([]uint32, error) {
 		if t == nil || i >= len(args) {
 			continue
 		}
-		v, err := x.move(args[i], t, 0, x.guest, x.host, &borrows)
+		v, err := x.move(args[i], t, x.guest, x.host, &borrows)
 		if err != nil {
 			return borrows, fmt.Errorf("param %d: %w", i, err)
 		}
@@ -1515,13 +1599,23 @@ func (x *hostHandleTransfer) moveResults(results []abi.Value) error {
 		if t == nil || i >= len(results) {
 			continue
 		}
-		v, err := x.move(results[i], t, 0, x.host, x.guest, nil)
+		v, err := x.move(results[i], t, x.host, x.guest, nil)
 		if err != nil {
 			return fmt.Errorf("result %d: %w", i, err)
 		}
 		results[i] = v
 	}
 	return nil
+}
+
+// tagOf is the table tag of resource index r, as the types name it.
+func (x *hostHandleTransfer) tagOf(r uint32) uint32 {
+	if x.tag != nil {
+		if t, ok := x.tag(r); ok {
+			return t
+		}
+	}
+	return r
 }
 
 // releaseBorrows drops the borrows moveArgs minted in the host's table.
@@ -1533,20 +1627,65 @@ func (x *hostHandleTransfer) releaseBorrows(borrows []uint32) {
 
 // move returns v, of type t, with every handle in it moved from one table to
 // the other; t is never a handle itself at depth 0, since those params and
-// results hold no handle below the top level. A composite holding one is copied rather than
-// rewritten: a result is the host's value, which it may keep. borrows
-// collects the borrows minted on the way in; a borrow cannot travel the
-// other way, out of a host func's results, which the validator refuses.
-func (x *hostHandleTransfer) move(v abi.Value, t binary.TypeDesc, depth int, from, to *handleTable, borrows *[]uint32) (abi.Value, error) {
+// results hold no handle below the top level. A nil table is the rep side: a
+// handle comes out of from as its rep, or a rep goes into to as a handle.
+// borrows collects the borrows minted on the way in; a borrow cannot travel
+// the other way, out of a func's results, which the validator refuses.
+func (x *hostHandleTransfer) move(v abi.Value, t binary.TypeDesc, from, to *handleTable, borrows *[]uint32) (abi.Value, error) {
+	names := from
+	if names == nil {
+		names = to
+	}
+	return walkHandles(v, t, x.resolve, 0, func(t binary.TypeDesc, v abi.Value) (abi.Value, error) {
+		own, isOwn := t.(binary.OwnDesc)
+		r := own.ResourceType
+		kind := "own"
+		if !isOwn {
+			r, kind = t.(binary.BorrowDesc).ResourceType, "borrow"
+		}
+		tag := x.tagOf(r)
+		h, ok := v.(uint32)
+		if !ok {
+			return nil, fmt.Errorf("%s<%s>: expected a uint32 handle, got %T", kind, names.shortTypeName(tag), v)
+		}
+		if !isOwn && borrows == nil {
+			return nil, fmt.Errorf("borrow<%s> in a result", names.shortTypeName(tag))
+		}
+		rep := h
+		var err error
+		switch {
+		case from == nil:
+		case isOwn:
+			rep, err = from.TakeOwn(tag, h)
+		default:
+			rep, err = from.Rep(tag, h)
+		}
+		if err != nil || to == nil {
+			return rep, err
+		}
+		if isOwn {
+			return to.NewOwn(tag, rep), nil
+		}
+		nh := to.NewBorrow(tag, rep)
+		*borrows = append(*borrows, nh)
+		return nh, nil
+	})
+}
+
+// walkHandles returns v, of type t, with visit applied to each own and borrow
+// handle in it below depth 0, given the handle's type and value. A composite
+// holding one is copied rather than rewritten: a result is the host's value,
+// which it may keep.
+func walkHandles(v abi.Value, t binary.TypeDesc, resolve abi.Resolver, depth int, visit func(binary.TypeDesc, abi.Value) (abi.Value, error)) (abi.Value, error) {
 	sub := func(v abi.Value, ref *binary.TypeRef) (abi.Value, error) {
-		st, err := resolveTypeRef(ref, x.resolve)
+		st, err := resolveTypeRef(ref, resolve)
 		if err != nil {
 			return nil, err
 		}
-		if !nestedHandleIn(st, x.resolve, depth+1) {
+		if !nestedHandleIn(st, resolve, depth+1) {
 			return v, nil
 		}
-		return x.move(v, st, depth+1, from, to, borrows)
+		return walkHandles(v, st, resolve, depth+1, visit)
 	}
 	each := func(vs []abi.Value, ref func(int) *binary.TypeRef) (abi.Value, error) {
 		out := make([]abi.Value, len(vs))
@@ -1560,31 +1699,11 @@ func (x *hostHandleTransfer) move(v abi.Value, t binary.TypeDesc, depth int, fro
 		return out, nil
 	}
 	switch d := t.(type) {
-	case binary.OwnDesc:
-		h, ok := v.(uint32)
-		if !ok {
-			return nil, fmt.Errorf("own<%s>: expected a uint32 handle, got %T", from.shortTypeName(d.ResourceType), v)
+	case binary.OwnDesc, binary.BorrowDesc:
+		if depth == 0 {
+			return v, nil
 		}
-		rep, err := from.TakeOwn(d.ResourceType, h)
-		if err != nil {
-			return nil, err
-		}
-		return to.NewOwn(d.ResourceType, rep), nil
-	case binary.BorrowDesc:
-		h, ok := v.(uint32)
-		if !ok {
-			return nil, fmt.Errorf("borrow<%s>: expected a uint32 handle, got %T", from.shortTypeName(d.ResourceType), v)
-		}
-		if borrows == nil {
-			return nil, fmt.Errorf("borrow<%s> in a result", from.shortTypeName(d.ResourceType))
-		}
-		rep, err := from.Rep(d.ResourceType, h)
-		if err != nil {
-			return nil, err
-		}
-		nh := to.NewBorrow(d.ResourceType, rep)
-		*borrows = append(*borrows, nh)
-		return nh, nil
+		return visit(t, v)
 	case binary.RecordDesc, binary.TupleDesc, binary.ListDesc, binary.FixedListDesc, binary.MapDesc:
 		vs, ok := v.([]abi.Value)
 		if !ok {
@@ -1603,7 +1722,7 @@ func (x *hostHandleTransfer) move(v abi.Value, t binary.TypeDesc, depth int, fro
 			pair := binary.TupleDesc{Elements: []binary.TypeRef{t.(binary.MapDesc).Key, t.(binary.MapDesc).Value}}
 			out := make([]abi.Value, len(vs))
 			for i, e := range vs {
-				nv, err := x.move(e, pair, depth+1, from, to, borrows)
+				nv, err := walkHandles(e, pair, resolve, depth+1, visit)
 				if err != nil {
 					return nil, err
 				}
