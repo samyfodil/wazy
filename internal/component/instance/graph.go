@@ -977,6 +977,25 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 					forwardImportedInstance(cfg, subCfg, nested, tgt.importName, arg.Name, typeArgTags)
 					continue
 				}
+				if d, ok := componentInstanceDef(comp, tgt.spaceIdx); ok && len(tgt.projection) == 0 && comp.Instances[d].Kind == 0x01 {
+					// An inline bundle, `(instance (export ...) ...)`, which
+					// instantiates nothing. Its funcs are this component's
+					// own, each wired in as a func arg would be; the modules,
+					// components and instances it carries are definitions
+					// the nested component's scope resolves for itself.
+					for _, x := range comp.Instances[d].Exports {
+						if x.Sort != ctSortFunc {
+							continue
+						}
+						hi, err := outerFuncArgImport(comp, cfg, in, byIdx, x.SortIdx, componentFunc, coreFuncTarget, resolve)
+						if err != nil {
+							failClose()
+							return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q: export %q: %w", compInstIdx, arg.Name, x.Name, err)
+						}
+						subCfg.imports[mkImportKey(arg.Name, x.Name)] = hi
+					}
+					continue
+				}
 				sib, ok := byIdx[int(tgt.spaceIdx)]
 				if !ok {
 					failClose()

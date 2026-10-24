@@ -2,12 +2,27 @@ package instance
 
 import (
 	"context"
+	"embed"
 	"path"
 	"strings"
 	"testing"
 
 	"github.com/samyfodil/wazy"
 )
+
+// The hand-written components of testdata/module_values (see its README).
+//
+//go:embed testdata/module_values/*.wasm
+var moduleValuesFS embed.FS
+
+func moduleValuesWasm(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := moduleValuesFS.ReadFile(path.Join("testdata/module_values", name+".wasm"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
 
 func nestedWasm(t *testing.T, n string) []byte {
 	t.Helper()
@@ -81,4 +96,23 @@ func TestModuleValues_RuntimeCannotDecode(t *testing.T) {
 			}
 		})
 	}
+}
+
+// An inline bundle passed to a nested component with code of its own carries
+// both sorts of thing in: the module, which the nested component's scope
+// resolves, and the func, wired in as a func arg would be.
+func TestModuleValues_BundleArg(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+	in, err := Instantiate(ctx, r, moduleValuesWasm(t, "bundle_arg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := in.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Instantiate(ctx, r, moduleValuesWasm(t, "bundle_arg_unresolved"))
+	requireErrContains(t, err, `arg "b": export "f": func arg index 1 aliases component instance 0, which is not a prior nested instantiation`)
 }
