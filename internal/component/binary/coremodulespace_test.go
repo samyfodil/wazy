@@ -180,7 +180,35 @@ func TestCoreModuleSpace_FailLoudBranches(t *testing.T) {
 				CoreModuleSpace: []CoreModuleSpaceEntry{{Kind: CoreModuleFromAlias, Alias: 0}},
 				Aliases:         []AliasDef{{Sort: 0x00, CoreSort: 0x11, TargetKind: 0x00}},
 			},
-			want: "alias target kind 0x0 cannot name a core module",
+			want: "is an alias of the export \"\" of instance 0, which only an instantiation supplies",
+		},
+		{
+			name: "an import is the instantiation's to supply",
+			comp: &Component{
+				CoreModuleSpace: []CoreModuleSpaceEntry{{Kind: CoreModuleFromImport}},
+				Imports:         []Import{{Name: "m"}},
+			},
+			want: `core module 0 is the core module import "m", which only an instantiation supplies`,
+		},
+		{
+			name: "import entry naming a missing import",
+			comp: &Component{CoreModuleSpace: []CoreModuleSpaceEntry{{Kind: CoreModuleFromImport, Import: 2}}},
+			want: "import index 2 out of range of 0 imports",
+		},
+		{
+			name: "export entry naming a missing export",
+			comp: &Component{CoreModuleSpace: []CoreModuleSpaceEntry{{Kind: CoreModuleFromExport, Export: 4}}},
+			want: "export index 4 out of range of 0 exports",
+		},
+		{
+			name: "an export of an import",
+			comp: &Component{
+				CoreModuleSpace: []CoreModuleSpaceEntry{{Kind: CoreModuleFromImport}, {Kind: CoreModuleFromExport}},
+				Imports:         []Import{{Name: "m"}},
+				Exports:         []Export{{Name: "e", ExternType: 0x00, ExternIndex: 0}},
+			},
+			idx:  1,
+			want: `the core module import "m"`,
 		},
 		{
 			name: "outer alias with no enclosing component",

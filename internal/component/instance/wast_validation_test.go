@@ -150,7 +150,7 @@ var wastValidationGaps = map[string]map[string]wastValidationGap{
 		// line 358: type mismatch in export `g`
 		"instantiate.33.wasm": {"is a core module import", gapCoreModuleImport},
 		// line 373: (valid)
-		"instantiate.35.wasm": {"cannot name a core module", gapCoreModuleRuntime},
+		"instantiate.35.wasm": {"which only an instantiation supplies", gapCoreModuleRuntime},
 		// line 451: expected global, found func
 		"instantiate.47.wasm": {"export \"\" in module \"\" is a func, not a global", gapCoreLinker},
 		// line 584: module instantiation argument `` does not export an item named `table`
@@ -168,9 +168,9 @@ var wastValidationGaps = map[string]map[string]wastValidationGap{
 	},
 	"wasmtime-nested": {
 		// line 24: (valid)
-		"nested.3.wasm": {"cannot name a core module", gapCoreModuleRuntime},
+		"nested.3.wasm": {"which only an instantiation supplies", gapCoreModuleRuntime},
 		// line 36: (valid)
-		"nested.4.wasm": {"cannot name a core module", gapCoreModuleRuntime},
+		"nested.4.wasm": {"which only an instantiation supplies", gapCoreModuleRuntime},
 		// line 70: (valid)
 		"nested.5.wasm": {"unsupported sort 0x0", gapCoreModuleRuntime},
 		// line 100: (valid)
@@ -186,11 +186,11 @@ var wastValidationGaps = map[string]map[string]wastValidationGap{
 		// line 219: (valid)
 		"nested.11.wasm": {"core:importdesc: unsupported sort 0x3", gapCoreModuleTypeDecode},
 		// line 264: (valid)
-		"nested.14.wasm": {"cannot name a core module", gapCoreModuleRuntime},
+		"nested.14.wasm": {"which only an instantiation supplies", gapCoreModuleRuntime},
 		// line 322: (valid)
-		"nested.16.wasm": {"cannot name a core module", gapCoreModuleRuntime},
+		"nested.16.wasm": {"which only an instantiation supplies", gapCoreModuleRuntime},
 		// line 374: (valid)
-		"nested.17.wasm": {"cannot name a core module", gapCoreModuleRuntime},
+		"nested.17.wasm": {"which only an instantiation supplies", gapCoreModuleRuntime},
 	},
 }
 

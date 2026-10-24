@@ -1016,26 +1016,9 @@ func ctFreeInVal(v *ctVal, bound, set map[*ctResource]bool) {
 	}
 }
 
-// coreModuleCount bounds the core module index space, which
-// CoreModuleSpace records only the definitions and aliases of: a core module
-// import takes an index too. (So does a core module export; leaving those
-// out refuses only re-exporting a core module export, which wazy does not
-// run either.)
-func (e *ctEnv) coreModuleCount() int {
-	c := e.comp
-	n := len(c.CoreModuleSpace)
-	for _, im := range c.Imports {
-		if im.ExternType == ctSortCoreModule {
-			n++
-		}
-	}
-	for _, al := range c.Aliases {
-		if al.Sort == 0x00 && al.CoreSort == 0x11 && al.TargetKind == 0x00 {
-			n++
-		}
-	}
-	return n
-}
+// coreModuleCount bounds the core module index space: definitions, aliases,
+// imports and exports alike (binary.CoreModuleSpace).
+func (e *ctEnv) coreModuleCount() int { return len(e.comp.CoreModuleSpace) }
 
 // check computes the type of every instance definition, alias and export of
 // the component, and of every component nested in it, so every

@@ -300,6 +300,12 @@ func decodeComponent(buf []byte) (*Component, error) {
 				if im.ExternType == 0x04 {
 					c.ComponentSpace = append(c.ComponentSpace, ComponentSpaceEntry{Kind: ComponentFromImport, Import: importBase + uint32(j)})
 				}
+				// A core module import (sort core module 0x00) occupies the
+				// next index in the core module index space -- see
+				// coremodulespace.go.
+				if im.ExternType == 0x00 {
+					c.CoreModuleSpace = append(c.CoreModuleSpace, CoreModuleSpaceEntry{Kind: CoreModuleFromImport, Import: importBase + uint32(j)})
+				}
 			}
 
 		case 11: // Export section
@@ -314,6 +320,9 @@ func decodeComponent(buf []byte) (*Component, error) {
 			// index aliasing the exported func -- see componentfuncspace.go.
 			for j, ex := range exports {
 				switch ex.ExternType {
+				case 0x00: // core module export: introduces a core module index
+					// aliasing the exported module -- see coremodulespace.go.
+					c.CoreModuleSpace = append(c.CoreModuleSpace, CoreModuleSpaceEntry{Kind: CoreModuleFromExport, Export: exportBase + uint32(j)})
 				case 0x01: // func export: introduces a component func index
 					c.ComponentFuncSpace = append(c.ComponentFuncSpace, ComponentFuncSpaceEntry{Kind: ComponentFuncFromExport, Export: exportBase + uint32(j)})
 				case 0x03: // type export: introduces a type index aliasing the
