@@ -3,6 +3,8 @@ package instance
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -112,6 +114,9 @@ type coreFuncSig struct {
 // instantiateGraph is the general multi-core-module instantiation graph
 // engine -- see this file's package doc for the algorithm.
 func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Component, componentBytes []byte, cfg *config) (*Instance, error) {
+	if cfg.scope.comp != comp { // the root: the embedder's components are all it is given
+		cfg.scope = scope{comp: comp, supplied: cfg.componentArgs}
+	}
 	for _, im := range comp.Imports {
 		// Type imports (extern sort 0x03) carry no runtime obligation -- they
 		// are type-equality constraints (e.g. cargo-component re-imports a
@@ -132,12 +137,17 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 				continue
 			}
 		}
-		// A component import (0x04): a component DEFINITION, supplied by a
-		// parent's `(with "x" (component N))` instantiate-arg or, for the
-		// root, by WithComponentImport -- either way recorded in
-		// cfg.componentArgs. It carries no runtime obligation of its own: the
-		// definition is code this component instantiates itself, wherever its
-		// instance section says.
+		// A component (0x04) or core module import: a DEFINITION, supplied by
+		// a parent's `(with "x" (component N))` / `(with "x" (core module N))`
+		// instantiate-arg -- one of this instantiation's scope args -- or, for
+		// a root component import, by WithComponentImport. It carries no
+		// runtime obligation of its own: the definition is code this
+		// component instantiates itself, wherever its sections say.
+		if im.ExternType == 0x04 || im.ExternType == ctSortCoreModule {
+			if _, _, ok := cfg.scope.arg(im.Name, im.ExternType); ok {
+				continue
+			}
+		}
 		if im.ExternType == 0x04 {
 			if _, ok := cfg.componentArgs[im.Name]; ok {
 				continue
@@ -287,6 +297,9 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		}
 	} else {
 		neededTypes, rewrittenCore, err = discoverNeededFuncTypes(r, comp, componentBytes, emptyNameTarget)
+	}
+	if err == nil {
+		neededTypes, rewrittenCore, err = planScopedModules(r, comp, cfg, emptyNameTarget, neededTypes, rewrittenCore)
 	}
 	if err != nil {
 		return nil, coreLinkError(comp, -1, err)
@@ -893,11 +906,12 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 		if !needed[compInstIdx] || inst.Kind != 0x00 {
 			continue
 		}
-		nested, err := resolveComponentDef(comp, cfg, inst.ComponentIdx)
+		cv, err := cfg.scope.component(inst.ComponentIdx)
 		if err != nil {
 			failClose()
 			return nil, nil, fmt.Errorf("component/instance: component instance %d: %w", compInstIdx, err)
 		}
+		nested := cv.def
 
 		// A pure re-export shim (no core module/canon of its own) is seen
 		// through by bindInstanceExportGraph -- it just re-exports funcs passed
@@ -927,6 +941,10 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 			hostResDtors:     map[uint32]func(context.Context, uint32) error{},
 			sharedSched:      cfg.sharedSched, // see instantiateGraph's "sh" resolution below
 			hostResources:    cfg.hostResources,
+			// What nested's own module, component and instance indices
+			// name: it closes over the scope it was defined in, and its
+			// imports are these args, read in this component's scope.
+			scope: scope{comp: nested, outer: cv.env, args: inst.Args, from: &cfg.scope},
 		}
 		// typeArgTags maps a resource type the nested component IMPORTS (by its
 		// own type-import TypeSpace index) to the composition-global tag the outer
@@ -967,6 +985,25 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 					// entries under the arg name instead. See
 					// forwardImportedInstance.
 					forwardImportedInstance(cfg, subCfg, nested, tgt.importName, arg.Name, typeArgTags)
+					continue
+				}
+				if d, ok := componentInstanceDef(comp, tgt.spaceIdx); ok && len(tgt.projection) == 0 && comp.Instances[d].Kind == 0x01 {
+					// An inline bundle, `(instance (export ...) ...)`, which
+					// instantiates nothing. Its funcs are this component's
+					// own, each wired in as a func arg would be; the modules,
+					// components and instances it carries are definitions
+					// the nested component's scope resolves for itself.
+					for _, x := range comp.Instances[d].Exports {
+						if x.Sort != ctSortFunc {
+							continue
+						}
+						hi, err := outerFuncArgImport(comp, cfg, in, byIdx, x.SortIdx, componentFunc, coreFuncTarget, resolve)
+						if err != nil {
+							failClose()
+							return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q: export %q: %w", compInstIdx, arg.Name, x.Name, err)
+						}
+						subCfg.imports[mkImportKey(arg.Name, x.Name)] = hi
+					}
 					continue
 				}
 				sib, ok := byIdx[int(tgt.spaceIdx)]
@@ -1152,28 +1189,14 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 					subCfg.hostResDtors[tag] = dtor
 				}
 
-			case 0x04: // component: pass a component DEFINITION in, satisfying
-				// the nested component's own component-sort import of this
-				// name. Nothing is instantiated here -- the definition is
-				// code, occupying a slot in the CHILD's component index space,
-				// which the child instantiates itself at its own instance
-				// section (types.11.wast). That is also why, unlike a 0x05
-				// arg, there is no sibling to pull into `needed` above.
-				//
-				// It resolves against the OUTER comp/cfg, so a component arg
-				// the outer itself received as an import forwards down an
-				// arbitrary chain for free.
-				def, derr := resolveComponentDef(comp, cfg, arg.SortIdx)
-				if derr != nil {
-					failClose()
-					return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q: %w", compInstIdx, arg.Name, derr)
-				}
-				if subCfg.componentArgs == nil {
-					// Lazily: virtually no composition has a component arg,
-					// and subCfg is built for every nested instantiation.
-					subCfg.componentArgs = map[string]*binary.Component{}
-				}
-				subCfg.componentArgs[arg.Name] = def
+			case ctSortComponent, ctSortCoreModule: // a DEFINITION, satisfying
+				// the nested component's own component or core module import
+				// of this name. Nothing is instantiated here: the definition
+				// is code, occupying a slot in the CHILD's index space, which
+				// the child instantiates itself where its own sections say
+				// (types.11.wast). Its scope reads the arg there, resolving
+				// it in this component's scope -- so an arg this component
+				// itself received as an import forwards down any chain.
 
 			default:
 				failClose()
@@ -1522,12 +1545,6 @@ func quoteNames(names []string) string {
 // after validation, which a decode-only pass skips). The real, single compile
 // -- cache-aware -- still happens in instantiateCoreModuleCacheable.
 func discoverNeededFuncTypes(r wazy.Runtime, comp *binary.Component, componentBytes []byte, emptyNameTarget string) (map[string]map[string]coreFuncSig, [][]byte, error) {
-	dec, ok := r.(interface {
-		DecodeModuleNoCompile(bin []byte) (*wasm.Module, error)
-	})
-	if !ok {
-		return nil, nil, fmt.Errorf("component/instance: runtime %T cannot decode core modules for import discovery", r)
-	}
 	out := make(map[string]map[string]coreFuncSig)
 	// rewritten[i] is core module i's bytes after coreModuleBytes + the empty-
 	// import-name rewrite -- the exact bytes the main instantiation loop needs,
@@ -1539,12 +1556,21 @@ func discoverNeededFuncTypes(r wazy.Runtime, comp *binary.Component, componentBy
 	// component's module (fused.23.wast). ResolveCoreModule hands back the
 	// component that actually embeds the module, whose own Bytes the module's
 	// Offset/Size index into -- so an aliased module is sliced out of the
-	// PARENT's buffer, not this component's.
+	// PARENT's buffer, not this component's. Only what a core instance
+	// instantiates is planned: a module this component merely passes on or
+	// exports is planned by whoever instantiates it.
 	rewritten := make([][]byte, comp.CoreModuleSpaceLen())
-	for i := range rewritten {
-		owner, modIdx, err := comp.ResolveCoreModule(uint32(i))
+	for _, ci := range comp.CoreInstances {
+		i := ci.ModuleIdx
+		if ci.Kind != 0x00 || int(i) >= len(rewritten) || rewritten[i] != nil {
+			continue
+		}
+		owner, modIdx, err := comp.ResolveCoreModule(i)
 		if err != nil {
-			return nil, nil, fmt.Errorf("component/instance: %w", err)
+			// An import or an export alias: only an instantiation names its
+			// module, so instantiateGraph plans it there, through its scope,
+			// and reports there what a core instance cannot instantiate.
+			continue
 		}
 		// A self-owned entry keeps using the CALLER's componentBytes: a
 		// hand-built (non-decoded) Component has nil Bytes, and its caller
@@ -1553,40 +1579,99 @@ func discoverNeededFuncTypes(r wazy.Runtime, comp *binary.Component, componentBy
 		if owner != comp {
 			ownerBytes = owner.Bytes
 		}
-		coreBytes, err := coreModuleBytes(owner.CoreModules[modIdx], ownerBytes)
-		if err != nil {
-			return nil, nil, err
-		}
-		if emptyNameTarget != "" {
-			coreBytes, _, err = rewriteEmptyImportModuleName(coreBytes, emptyNameTarget)
-			if err != nil {
-				return nil, nil, fmt.Errorf("component/instance: core module %d: %w", i, err)
-			}
-		}
-		rewritten[i] = coreBytes
-		mod, err := dec.DecodeModuleNoCompile(coreBytes)
-		if err != nil {
-			return nil, nil, fmt.Errorf("component/instance: core module %d: discover import types: %w", i, err)
-		}
-		for j := range mod.ImportSection {
-			imp := &mod.ImportSection[j]
-			if imp.Type != wasm.ExternTypeFunc {
-				continue
-			}
-			if int(imp.DescFunc) >= len(mod.TypeSection) {
-				return nil, nil, fmt.Errorf("component/instance: core module %d: import %q.%q references type index %d, out of range of the %d-entry type section", i, imp.Module, imp.Name, imp.DescFunc, len(mod.TypeSection))
-			}
-			ft := &mod.TypeSection[imp.DescFunc]
-			if out[imp.Module] == nil {
-				out[imp.Module] = make(map[string]coreFuncSig)
-			}
-			out[imp.Module][imp.Name] = coreFuncSig{
-				params:  wasm.ToApiValueType(ft.Params),
-				results: wasm.ToApiValueType(ft.Results),
-			}
+		if rewritten[i], err = planCoreModule(r, owner.CoreModules[modIdx], ownerBytes, emptyNameTarget, out); err != nil {
+			return nil, nil, fmt.Errorf("component/instance: core module %d: %w", i, err)
 		}
 	}
 	return out, rewritten, nil
+}
+
+// planCoreModule slices the core module cm out of the buffer of the
+// component that embeds it, applies the empty-import-name rewrite, and
+// records the core-level signature of every func it imports into out. It
+// returns the bytes to instantiate.
+func planCoreModule(r wazy.Runtime, cm binary.CoreModule, ownerBytes []byte, emptyNameTarget string, out map[string]map[string]coreFuncSig) ([]byte, error) {
+	dec, ok := r.(interface {
+		DecodeModuleNoCompile(bin []byte) (*wasm.Module, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("runtime %T cannot decode core modules for import discovery", r)
+	}
+	coreBytes, err := coreModuleBytes(cm, ownerBytes)
+	if err != nil {
+		return nil, err
+	}
+	if emptyNameTarget != "" {
+		if coreBytes, _, err = rewriteEmptyImportModuleName(coreBytes, emptyNameTarget); err != nil {
+			return nil, err
+		}
+	}
+	mod, err := dec.DecodeModuleNoCompile(coreBytes)
+	if err != nil {
+		return nil, fmt.Errorf("discover import types: %w", err)
+	}
+	for j := range mod.ImportSection {
+		imp := &mod.ImportSection[j]
+		if imp.Type != wasm.ExternTypeFunc {
+			continue
+		}
+		if int(imp.DescFunc) >= len(mod.TypeSection) {
+			return nil, fmt.Errorf("import %q.%q references type index %d, out of range of the %d-entry type section", imp.Module, imp.Name, imp.DescFunc, len(mod.TypeSection))
+		}
+		ft := &mod.TypeSection[imp.DescFunc]
+		if out[imp.Module] == nil {
+			out[imp.Module] = make(map[string]coreFuncSig)
+		}
+		out[imp.Module][imp.Name] = coreFuncSig{
+			params:  wasm.ToApiValueType(ft.Params),
+			results: wasm.ToApiValueType(ft.Results),
+		}
+	}
+	return coreBytes, nil
+}
+
+// planScopedModules plans the modules comp's core instances instantiate that
+// discovery could not name -- an imported module, or one an instance exports
+// -- by resolving each through this instantiation's scope to its definition.
+// The plan of a definition is pure over it, so a CompileCache keeps it per
+// definition, not per instantiation. neededTypes and rewritten come from the
+// per-component plan, which may be shared, so they are copied before the
+// first change; with nothing to plan both come back as they were.
+func planScopedModules(r wazy.Runtime, comp *binary.Component, cfg *config, emptyNameTarget string, neededTypes map[string]map[string]coreFuncSig, rewritten [][]byte) (map[string]map[string]coreFuncSig, [][]byte, error) {
+	copied := false
+	for k, ci := range comp.CoreInstances {
+		if ci.Kind != 0x00 || int(ci.ModuleIdx) >= len(rewritten) || rewritten[ci.ModuleIdx] != nil {
+			continue
+		}
+		owner, modIdx, err := cfg.scope.module(ci.ModuleIdx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("component/instance: core instance %d: %w", k, err)
+		}
+		plan, err := cfg.compileCache.modulePlanFor(modulePlanKey{owner: owner, module: modIdx, emptyNameTarget: emptyNameTarget}, func() (*modulePlan, error) {
+			p := &modulePlan{neededTypes: make(map[string]map[string]coreFuncSig)}
+			var err error
+			p.bytes, err = planCoreModule(r, owner.CoreModules[modIdx], owner.Bytes, emptyNameTarget, p.neededTypes)
+			return p, err
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("component/instance: core instance %d: core module %d: %w", k, ci.ModuleIdx, err)
+		}
+		if !copied {
+			copied = true
+			rewritten = slices.Clone(rewritten)
+			neededTypes = maps.Clone(neededTypes)
+		}
+		rewritten[ci.ModuleIdx] = plan.bytes
+		for mod, fields := range plan.neededTypes {
+			merged := maps.Clone(neededTypes[mod])
+			if merged == nil {
+				merged = make(map[string]coreFuncSig, len(fields))
+			}
+			maps.Copy(merged, fields)
+			neededTypes[mod] = merged
+		}
+	}
+	return neededTypes, rewritten, nil
 }
 
 // resolveInlineExportItem resolves one CoreInlineExport entry (func, table,
@@ -2245,8 +2330,13 @@ func bindImportExportsGraph(comp *binary.Component, cfg *config, componentFunc f
 			// mirroring the type-import skip. Only func/instance are callable.
 			continue
 
+		case ctSortCoreModule, ctSortComponent: // a definition, not running
+			// code: whoever instantiates it resolves it through the scope of
+			// this instantiation (scope.go), so there is nothing to bind.
+			continue
+
 		default:
-			return nil, nil, fmt.Errorf("component/instance: export %q has extern kind %s (%#x); only func and instance exports are supported", exp.Name, api.ExternTypeName(exp.ExternType), exp.ExternType)
+			return nil, nil, fmt.Errorf("component/instance: export %q is a %s export (sort %#x); only func, instance, type, core module and component exports are supported", exp.Name, ctSortDesc(exp.ExternType), exp.ExternType)
 		}
 	}
 	return exports, reexposed, nil
@@ -2690,30 +2780,16 @@ func componentInstanceSpaceIndices(comp *binary.Component) []int {
 }
 
 // resolveComponentDef resolves an index in comp's COMPONENT index space to
-// the component definition it names: one of comp's own section-4 nested
-// components (possibly reached through an `alias outer` into an enclosing
-// component), or -- for a component-sort IMPORT -- the definition the parent
-// supplied for that import name via a `(with "x" (component N))`
-// instantiate-arg, which instantiateNestedInstances recorded in
-// cfg.componentArgs.
+// the component definition it names, in cfg's scope (scope.go): one of comp's
+// own section-4 nested components or an enclosing component's, or what the
+// instantiation supplied for a component import or an instance exports.
 //
 // cfg may be nil at a bind-time site that only needs a nested component's
-// static shape; a component import is then simply unsatisfiable, which is the
-// correct (and previously the only) answer there.
+// static shape; anything an instantiation supplies is then simply
+// unresolvable, which is the correct (and previously the only) answer there.
 func resolveComponentDef(comp *binary.Component, cfg *config, idx uint32) (*binary.Component, error) {
-	def, importName, err := comp.ResolveComponent(idx)
-	if err != nil {
-		return nil, err
-	}
-	if def != nil {
-		return def, nil
-	}
-	if cfg != nil {
-		if d, ok := cfg.componentArgs[importName]; ok {
-			return d, nil
-		}
-	}
-	return nil, fmt.Errorf("component %d names the component import %q, which nothing supplied (a component import is satisfied only by a `(with %q (component ...))` instantiate-arg of an enclosing component)", idx, importName, importName)
+	cv, err := cfg.scopeFor(comp).component(idx)
+	return cv.def, err
 }
 
 // bindInstanceExportGraph is bindInstanceExport's graph-engine counterpart --
