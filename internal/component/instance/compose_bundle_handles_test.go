@@ -16,7 +16,8 @@ import (
 // their importers as inline bundles and as instances of pure re-export shims:
 // own and borrow handles in composites, into P, which defines r, and into Q,
 // which does not. The same crossings through the instances themselves are
-// the control. See the .wat for the shape.
+// the control, and are repeated with Q's interface passed before P's, whose
+// resource Q's funcs take. See the .wat for the shape.
 //
 //go:embed testdata/compose_bundle_handles.wasm
 var composeBundleHandlesWasm []byte
@@ -32,10 +33,11 @@ func TestComposeBundleHandles(t *testing.T) {
 		{export: "borrow-owner", want: (18+5)*100 + 3},
 		{export: "borrow-other", want: (100+11+12+11)*100 + 2},
 		{export: "own-other", want: (100+21+22)*100 + 2},
+		{export: "borrow-top-other", want: (1000+7)*100 + 1},
 		{export: "async", want: (3+5+4)*1000 + 2*uint32(subtaskReturned)*10 + 3},
 		{export: "leak", err: "borrow handles still remain"},
 	}
-	for _, via := range []string{"direct", "bundle", "shim"} {
+	for _, via := range []string{"direct", "reversed", "bundle", "shim"} {
 		for _, tc := range cases {
 			export := via + "-" + tc.export
 			t.Run(export, func(t *testing.T) {

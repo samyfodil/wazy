@@ -1,7 +1,7 @@
 ;; compose_nested_handles.wat's components, composed three ways: A and Q
-;; given P's and Q's interfaces as the instances they are (the control), as
-;; inline bundles built from their exports, and as instances of pure re-export
-;; shims. A handle crossing a bundle or shim is moved or borrowed into the
+;; given P's and Q's interfaces as the instances they are (the control, and
+;; with Q's passed first), as inline bundles built from their exports, and as
+;; instances of pure re-export shims. A handle crossing a bundle or shim is moved or borrowed into the
 ;; receiver's table under the receiver's tag, as it is on the direct path, so
 ;; every export behaves the same whichever way it was wired (see
 ;; compose_bundle_handles_test.go). Q also takes own handles here (keep2): an
@@ -167,6 +167,11 @@
       ;; Returns still holding its borrows, which the call refuses.
       (func (export "keep2") (param $s i32) (param $ptr i32) (param $len i32) (result i32)
         (call $sum (local.get $s) (local.get $ptr) (local.get $len) (i32.const 1)))
+      (func (export "value2") (param $h i32) (result i32)
+        (local $v i32)
+        (local.set $v (i32.add (i32.const 1000) (call $value (local.get $h))))
+        (call $drop (local.get $h))
+        (local.get $v))
       (func (export "leak2") (param $s i32) (param $ptr i32) (param $len i32) (result i32)
         (call $sum (local.get $s) (local.get $ptr) (local.get $len) (i32.const 0))))
     (core instance $maini (instantiate $main
@@ -176,6 +181,7 @@
     (type $peek2 (tuple u32 (list (borrow $r))))
     (func $peek2 (param "x" $peek2) (result u32)
       (canon lift (core func $maini "peek2") (memory (core memory $maini "mem")) (realloc (core func $maini "realloc"))))
+    (func $value2 (param "x" (borrow $r)) (result u32) (canon lift (core func $maini "value2")))
     (type $keep2 (tuple u32 (list (own $r))))
     (func $keep2 (param "x" $keep2) (result u32)
       (canon lift (core func $maini "keep2") (memory (core memory $maini "mem")) (realloc (core func $maini "realloc"))))
@@ -184,10 +190,13 @@
     (instance $iface
       (export "peek2" (func $peek2))
       (export "keep2" (func $keep2))
+      (export "value2" (func $value2))
       (export "leak2" (func $leak2)))
     (export "test:nest/q" (instance $iface)))
 
   (component $A
+    (type $pad0 u32)
+    (type $pad1 u32)
     (import "test:nest/p" (instance $p
       (export "r" (type $r (sub resource)))
       (type $rec' (record (field "a" u32) (field "h" (own $r))))
@@ -215,6 +224,7 @@
       (export "peek2" (func (param "x" $peek2) (result u32)))
       (type $keep2 (tuple u32 (list (own $r))))
       (export "keep2" (func (param "x" $keep2) (result u32)))
+      (export "value2" (func (param "x" (borrow $r)) (result u32)))
       (export "leak2" (func (param "x" $peek2) (result u32)))))
 
     (core module $Mem
@@ -240,6 +250,7 @@
     (alias export $p "count" (func $count))
     (alias export $q "peek2" (func $peek2))
     (alias export $q "keep2" (func $keep2))
+    (alias export $q "value2" (func $value2))
     (alias export $q "leak2" (func $leak2))
     (core func $make' (canon lower (func $make)))
     (core func $value' (canon lower (func $value)))
@@ -254,6 +265,7 @@
     (core func $count' (canon lower (func $count)))
     (core func $peek2' (canon lower (func $peek2) (memory (core memory $m "mem"))))
     (core func $keep2' (canon lower (func $keep2) (memory (core memory $m "mem"))))
+    (core func $value2' (canon lower (func $value2)))
     (core func $leak2' (canon lower (func $leak2) (memory (core memory $m "mem"))))
     (alias export $p "take-list-async" (func $take-list-a))
     (alias export $p "make-rec-async" (func $make-rec-a))
@@ -282,6 +294,7 @@
       (import "p" "make-bad-async" (func $make-bad-async (param i32) (result i32)))
       (import "q" "peek2" (func $peek2 (param i32 i32 i32) (result i32)))
       (import "q" "keep2" (func $keep2 (param i32 i32 i32) (result i32)))
+      (import "q" "value2" (func $value2 (param i32) (result i32)))
       (import "q" "leak2" (func $leak2 (param i32 i32 i32) (result i32)))
 
       ;; own handles into P: a record field, option<result<own>>'s payload,
@@ -370,6 +383,14 @@
         (local.set $s (call $keep2 (i32.const 100) (i32.const 0x900) (i32.const 2)))
         (i32.add (i32.mul (local.get $s) (i32.const 100)) (call $count)))
 
+      ;; A borrow at the top level into Q. (1000 + 7) * 100 + 1.
+      (func (export "borrow-top-other") (result i32)
+        (local $h i32) (local $s i32)
+        (local.set $h (call $make (i32.const 7)))
+        (local.set $s (call $value2 (local.get $h)))
+        (call $drop (local.get $h))
+        (i32.add (i32.mul (local.get $s) (i32.const 100)) (call $count)))
+
       (func (export "bad-arg") (result i32)
         (call $take-rec (i32.const 1) (i32.const 999)))
       (func (export "bad-result") (result i32)
@@ -404,6 +425,7 @@
       (with "q" (instance
         (export "peek2" (func $peek2'))
         (export "keep2" (func $keep2'))
+        (export "value2" (func $value2'))
         (export "leak2" (func $leak2'))))))
 
     (func (export "own-args") (result u32) (canon lift (core func $maini "own-args")))
@@ -412,6 +434,7 @@
     (func (export "borrow-other") (result u32) (canon lift (core func $maini "borrow-other")))
     (func (export "async") (result u32) (canon lift (core func $maini "async")))
     (func (export "own-other") (result u32) (canon lift (core func $maini "own-other")))
+    (func (export "borrow-top-other") (result u32) (canon lift (core func $maini "borrow-top-other")))
     (func (export "bad-arg") (result u32) (canon lift (core func $maini "bad-arg")))
     (func (export "bad-result") (result u32) (canon lift (core func $maini "bad-result")))
     (func (export "leak") (result u32) (canon lift (core func $maini "leak")))
@@ -463,9 +486,11 @@
     (type $keep2 (tuple u32 (list (own $r))))
     (import "peek2" (func $peek2 (param "x" $peek2) (result u32)))
     (import "keep2" (func $keep2 (param "x" $keep2) (result u32)))
+    (import "value2" (func $value2 (param "x" (borrow $r)) (result u32)))
     (import "leak2" (func $leak2 (param "x" $peek2) (result u32)))
     (export "peek2" (func $peek2))
     (export "keep2" (func $keep2))
+    (export "value2" (func $value2))
     (export "leak2" (func $leak2)))
   (instance $p (instantiate $P))
   (alias export $p "test:nest/p" (instance $pi))
@@ -534,17 +559,33 @@
   (export "direct-borrow-other" (func $a.direct "borrow-other"))
   (export "direct-async" (func $a.direct "async"))
   (export "direct-own-other" (func $a.direct "own-other"))
+  (export "direct-borrow-top-other" (func $a.direct "borrow-top-other"))
   (export "direct-leak" (func $a.direct "leak"))
+
+  ;; The same, Q's interface passed before P's, whose r it uses.
+  (instance $a.reversed (instantiate $A
+    (with "test:nest/q" (instance $qi.direct))
+    (with "test:nest/p" (instance $pi))))
+  (export "reversed-own-args" (func $a.reversed "own-args"))
+  (export "reversed-own-results" (func $a.reversed "own-results"))
+  (export "reversed-borrow-owner" (func $a.reversed "borrow-owner"))
+  (export "reversed-borrow-other" (func $a.reversed "borrow-other"))
+  (export "reversed-async" (func $a.reversed "async"))
+  (export "reversed-own-other" (func $a.reversed "own-other"))
+  (export "reversed-borrow-top-other" (func $a.reversed "borrow-top-other"))
+  (export "reversed-leak" (func $a.reversed "leak"))
 
   ;; Q is given P's bundle, and A both as bundles.
   (instance $q.bundle (instantiate $Q (with "test:nest/p" (instance $pb))))
   (alias export $q.bundle "test:nest/q" (instance $qi.bundle))
   (alias export $qi.bundle "peek2" (func $q.bundle.peek2))
   (alias export $qi.bundle "keep2" (func $q.bundle.keep2))
+  (alias export $qi.bundle "value2" (func $q.bundle.value2))
   (alias export $qi.bundle "leak2" (func $q.bundle.leak2))
   (instance $qb
     (export "peek2" (func $q.bundle.peek2))
     (export "keep2" (func $q.bundle.keep2))
+    (export "value2" (func $q.bundle.value2))
     (export "leak2" (func $q.bundle.leak2)))
   (instance $a.bundle (instantiate $A
     (with "test:nest/p" (instance $pb))
@@ -555,6 +596,7 @@
   (export "bundle-borrow-other" (func $a.bundle "borrow-other"))
   (export "bundle-async" (func $a.bundle "async"))
   (export "bundle-own-other" (func $a.bundle "own-other"))
+  (export "bundle-borrow-top-other" (func $a.bundle "borrow-top-other"))
   (export "bundle-leak" (func $a.bundle "leak"))
 
   ;; Q is given P's shim, and A both as shim instances.
@@ -562,11 +604,13 @@
   (alias export $q.shim "test:nest/q" (instance $qi.shim))
   (alias export $qi.shim "peek2" (func $q.shim.peek2))
   (alias export $qi.shim "keep2" (func $q.shim.keep2))
+  (alias export $qi.shim "value2" (func $q.shim.value2))
   (alias export $qi.shim "leak2" (func $q.shim.leak2))
   (instance $qs (instantiate $QS
     (with "r" (type $r))
     (with "peek2" (func $q.shim.peek2))
     (with "keep2" (func $q.shim.keep2))
+    (with "value2" (func $q.shim.value2))
     (with "leak2" (func $q.shim.leak2))))
   (instance $a.shim (instantiate $A
     (with "test:nest/p" (instance $ps))
@@ -577,4 +621,5 @@
   (export "shim-borrow-other" (func $a.shim "borrow-other"))
   (export "shim-async" (func $a.shim "async"))
   (export "shim-own-other" (func $a.shim "own-other"))
+  (export "shim-borrow-top-other" (func $a.shim "borrow-top-other"))
   (export "shim-leak" (func $a.shim "leak")))

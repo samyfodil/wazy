@@ -1068,7 +1068,8 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 				// itself re-exporting it by name, e.g. dont-drop's `(borrow $R)`
 				// param in drop-cross-task-borrow.wast, where $D never exports
 				// "R" at all -- can still recognize it as the same resource; see
-				// provToImp below and resourceIdentity's doc).
+				// nesting.importerTag and resourceIdentity's doc). Its funcs
+				// are wired below, once every arg's resources are lined up.
 				importerResIdx := importedResourceIndices(nested, arg.Name)
 				// Which instance's resource DEFINITIONS this arg really
 				// carries, and under which of ITS names. Normally sib itself.
@@ -1111,7 +1112,6 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 					failClose()
 					return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q passes instance %d whole, and that instance re-exposes an interface defined by another component while %q imports resources; pass the specific interface instead (an instance-export alias), which is what a composer emits", compInstIdx, arg.Name, arg.SortIdx, arg.Name)
 				}
-				provDefToName := map[uint32]string{}
 				if prov.comp != nil {
 					// Projecting: the resources to line up are the ones
 					// reachable through the ALIASED export, not prov's top
@@ -1126,7 +1126,6 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 						provRes = exportedInstanceResourceDefs(prov.comp, provIface)
 					}
 					for rname, provDef := range provRes {
-						provDefToName[provDef] = rname
 						if dIdx, ok := importerResIdx[rname]; ok {
 							tag := nested.ResourceDefIndex(dIdx)
 							if dtor := prov.resourceDtors[provDef]; dtor != nil {
@@ -1136,79 +1135,19 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 						}
 					}
 				}
-				// provToImp translates a resource type index as it appears in
-				// prov's OWN func descriptors (e.g. prov's borrow<R> param) to
-				// nested's local resource tag for the SAME underlying resource.
-				// Try resourceIdentity first: it matches even when prov itself
-				// never re-exports the resource under any name (prov merely
-				// reuses a resource it imports from a further sibling) -- the
-				// name-based provDefToName/importerResIdx pair (populated only
-				// from prov's OWN exports) can't see that case at all. Fall back
-				// to the name-based path for anything resourceIdentity doesn't
-				// (yet) cover, preserving prior behavior exactly when it applied.
-				provToImp := func(provIdx uint32) (uint32, bool) {
-					origin := prov.originOf(prov.canonTag(provIdx))
-					for dIdx, o := range nest.resourceOrigin {
-						if o == origin {
-							return dIdx, true
-						}
-					}
-					name, ok := provDefToName[prov.canonTag(provIdx)]
-					if !ok {
-						return 0, false
-					}
-					dIdx, ok := importerResIdx[name]
-					return dIdx, ok
-				}
 				if len(tgt.projection) > 0 {
-					// Bind the members of the PROJECTED interface. sib's
-					// exports hold them flat under "X#member" keys, indexed by
-					// instanceExports; the importee's canon lower, meanwhile,
-					// looks each one up under its OWN import name plus the
-					// member name (importInterfaceName + the alias name, see
-					// computeCanonHostFunc). So the lookup is by the alias's
-					// export name X and the registration is by the arg name Y
-					// -- the one place the X != Y distinction is load-bearing.
-					members, mok := sib.instanceExports[projKey]
-					if !mok {
+					if _, ok := sib.instanceExports[projKey]; !ok {
 						// Only func exports become "X#member" keys, so an
 						// interface carrying just a record or a resource is
 						// absent here even though it is genuinely exported.
-						// Bind nothing and continue: there are no functions to
-						// wire, and the types themselves travel through the
-						// resource plumbing above, not through imports.
-						if _, deeper := sib.reexposedInstances[projKey]; deeper || componentExportsInstance(sib.comp, projKey) {
-							continue
+						// There are no functions to wire, and the types
+						// themselves travel through the resource plumbing
+						// above, not through imports.
+						if _, deeper := sib.reexposedInstances[projKey]; !deeper && !componentExportsInstance(sib.comp, projKey) {
+							failClose()
+							return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q: instance %d projects the export %q of nested instance %d, which exports no such instance", compInstIdx, arg.Name, arg.SortIdx, projKey, tgt.spaceIdx)
 						}
-						failClose()
-						return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q: instance %d projects the export %q of nested instance %d, which exports no such instance", compInstIdx, arg.Name, arg.SortIdx, projKey, tgt.spaceIdx)
 					}
-					for member, entry := range members {
-						// entry.name is the flat "X#member" key invoke and the
-						// async diagnostics want; member is the bare name the
-						// importee imports. Delegate to the export's OWNER
-						// under the owner's OWN key: when sib merely
-						// re-exposes a deeper instance's export, calling it on
-						// sib runs it against a component that holds none of
-						// the state the call needs (boundExport.home's doc).
-						owner, ownerKey := ownerOf(entry.be, sib, entry.name)
-						hi := delegatingHostImport(newGuestAsyncTarget(owner, entry.be, ownerKey, provToImp))
-						subCfg.imports[mkImportKey(arg.Name, member)] = hi
-					}
-					continue
-				}
-				for name, be := range sib.exports {
-					if strings.ContainsRune(name, '#') { // interface-member export, not a plain func
-						continue
-					}
-					owner, ownerKey := ownerOf(be, sib, name) // the definer, if sib only re-exposes it
-					// The target serves the async arm too (Phase 3, docs/
-					// component-model-async-phase3-design.md §3.1): an async
-					// lower through this import routes to sib's export as a
-					// guestTask -- see computeCanonHostFunc's lower case and
-					// buildAsyncHostWrapper's callee arm.
-					hi := delegatingHostImport(newGuestAsyncTarget(owner, be, ownerKey, provToImp))
-					subCfg.imports[mkImportKey(arg.Name, name)] = hi
 				}
 
 			case 0x01: // func: wired below.
@@ -1255,6 +1194,10 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 			tgt, err := resolveInstanceArgTarget(comp, arg.SortIdx)
 			if err != nil || tgt.imported {
 				continue // refused, or forwarded, above
+			}
+			if sib, ok := byIdx[int(tgt.spaceIdx)]; ok {
+				wireSiblingFuncs(subCfg, nest, sib, tgt.projection, arg.Name)
+				continue
 			}
 			def, shim, ok := uninstantiatedInstance(comp, cfg, byIdx, tgt)
 			if !ok {
@@ -1320,6 +1263,45 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 		order = append(order, sub)
 	}
 	return byIdx, order, nil
+}
+
+// wireSiblingFuncs satisfies the nested component's instance import argName
+// with the funcs of sib, or of the interface projection names in it: each a
+// delegate to the export's owner, its handles retagged to the nested
+// component's resources lined up with the owner's.
+func wireSiblingFuncs(subCfg *config, nest *nesting, sib *Instance, projection []string, argName string) {
+	if len(projection) > 0 {
+		// Bind the members of the PROJECTED interface. sib's exports hold
+		// them flat under "X#member" keys, indexed by instanceExports; the
+		// importee's canon lower, meanwhile, looks each one up under its OWN
+		// import name plus the member name (importInterfaceName + the alias
+		// name, see computeCanonHostFunc). So the lookup is by the alias's
+		// export name X and the registration is by the arg name Y -- the one
+		// place the X != Y distinction is load-bearing.
+		for member, entry := range sib.instanceExports[strings.Join(projection, "#")] {
+			// entry.name is the flat "X#member" key invoke and the async
+			// diagnostics want; member is the bare name the importee imports.
+			// Delegate to the export's OWNER under the owner's OWN key: when
+			// sib merely re-exposes a deeper instance's export, calling it on
+			// sib runs it against a component that holds none of the state
+			// the call needs (boundExport.home's doc).
+			owner, ownerKey := ownerOf(entry.be, sib, entry.name)
+			subCfg.imports[mkImportKey(argName, member)] = delegatingHostImport(newGuestAsyncTarget(owner, entry.be, ownerKey, nest.importerTag(owner)))
+		}
+		return
+	}
+	for name, be := range sib.exports {
+		if strings.ContainsRune(name, '#') { // interface-member export, not a plain func
+			continue
+		}
+		owner, ownerKey := ownerOf(be, sib, name) // the definer, if sib only re-exposes it
+		// The target serves the async arm too (Phase 3, docs/
+		// component-model-async-phase3-design.md §3.1): an async lower
+		// through this import routes to sib's export as a guestTask -- see
+		// computeCanonHostFunc's lower case and buildAsyncHostWrapper's
+		// callee arm.
+		subCfg.imports[mkImportKey(argName, name)] = delegatingHostImport(newGuestAsyncTarget(owner, be, ownerKey, nest.importerTag(owner)))
+	}
 }
 
 // delegatingHostImport wraps a provider sub-Instance's exported func as a host
