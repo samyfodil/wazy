@@ -238,3 +238,23 @@ func TestDecodeTruncated(t *testing.T) {
 		t.Fatal("expected truncated preamble to be rejected")
 	}
 }
+
+// The names DecodeBytes decodes are views of its own copy of the binary, so
+// changing the caller's bytes afterwards changes none of them.
+func TestDecodeBytes_OwnsItsCopy(t *testing.T) {
+	data, err := fixtureFS.ReadFile("testdata/host_component.wasm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := DecodeBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clear(data)
+	if got := c.Imports[0].Name; got != "test:pkg/host" {
+		t.Fatalf("import name %q after the input was cleared", got)
+	}
+	if _, err := DecodeBytes(nil); err != ErrInvalidMagicNumber {
+		t.Fatalf("nil: %v, want ErrInvalidMagicNumber", err)
+	}
+}

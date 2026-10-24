@@ -2,6 +2,7 @@ package binary
 
 import (
 	"fmt"
+	"unsafe"
 
 	"github.com/samyfodil/wazy/internal/leb128"
 )
@@ -65,6 +66,11 @@ func primName(b byte) string {
 
 // readLabel consumes an unprefixed name (used for field/param/case/flag/enum
 // labels): len:u32 followed by that many UTF-8 bytes.
+//
+// The name is a view of buf, not a copy: every buffer the decoder reads is
+// its own copy of the binary (see Decode and DecodeBytes), which nothing
+// writes after, and which the decoded Component keeps as Bytes anyway. A
+// copy per name was most of what decoding a component allocated.
 func readLabel(buf []byte, off int) (string, int, error) {
 	length, n, err := leb128.LoadUint32(buf[off:])
 	if err != nil {
@@ -74,8 +80,10 @@ func readLabel(buf []byte, off int) (string, int, error) {
 	if off+int(length) > len(buf) {
 		return "", off, ErrTruncatedBinary
 	}
-	s := string(buf[off : off+int(length)])
-	return s, off + int(length), nil
+	if length == 0 {
+		return "", off, nil
+	}
+	return unsafe.String(&buf[off], int(length)), off + int(length), nil
 }
 
 // readExternName consumes an import/export name: a 0x00/0x01 kind byte, a

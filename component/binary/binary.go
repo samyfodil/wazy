@@ -27,15 +27,11 @@
 // ErrInvalidVersion. Use package github.com/samyfodil/wazy/binary for those.
 package binary
 
-import (
-	"bytes"
-
-	"github.com/samyfodil/wazy/internal/component/binary"
-)
+import "github.com/samyfodil/wazy/internal/component/binary"
 
 // Decode decodes a component binary.
 func Decode(b []byte) (*Component, error) {
-	return binary.Decode(bytes.NewReader(b))
+	return binary.DecodeBytes(b)
 }
 
 // The errors Decode returns for a malformed preamble or section.

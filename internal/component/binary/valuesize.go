@@ -1,6 +1,9 @@
 package binary
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+)
 
 // maxValueSize bounds every value type: Binary.md requires that, for every
 // defvaltype t, elem_size(t, 'i64') -- its Canonical ABI size with 64-bit
@@ -22,12 +25,13 @@ type layout64 struct {
 // component type it defines declares, at any depth.
 //
 // It runs on every decode, so it allocates little: the type index spaces it
-// walks share one memo table and live in one slice, and where a type is
-// declared is put into words only for an error.
+// walks share one memo table and live in one slice, which the decodes after
+// it reuse (sizeChecks), and where a type is declared is put into words only
+// for an error.
 func (c *Component) validateValueSizes() error {
-	var spaces [8]sizeSpace
-	var path [8]pathElem
-	v := sizeCheck{comp: c, spaces: spaces[:0], path: path[:0]}
+	v := sizeChecks.Get().(*sizeCheck)
+	defer v.release()
+	v.comp = c
 	top := v.push(sizeSpace{up: -1})
 	for i := range c.Types {
 		v.path = append(v.path, pathElem{"", i})
@@ -51,6 +55,20 @@ type sizeCheck struct {
 	memo   map[sizeKey]layout64
 	path   []pathElem
 	nextID int
+}
+
+// sizeChecks keeps sizeChecks between decodes. The walk is recursive, so
+// escape analysis puts a sizeCheck's slices on the heap however they start
+// out; reusing them is what keeps a decode from allocating them.
+var sizeChecks = sync.Pool{New: func() any { return new(sizeCheck) }}
+
+// release empties v -- of everything that would keep the component it
+// checked alive, too -- and returns it to sizeChecks.
+func (v *sizeCheck) release() {
+	clear(v.spaces[:cap(v.spaces)])
+	clear(v.memo)
+	*v = sizeCheck{spaces: v.spaces[:0], memo: v.memo, path: v.path[:0]}
+	sizeChecks.Put(v)
 }
 
 // sizeSpace is one type index space: the component's (local false), or the
