@@ -30,6 +30,7 @@ var refusedOtherwise = map[string]string{
 // refusedOtherwise.
 func TestWasmToolsFixedLengthLists(t *testing.T) {
 	const dir = "testdata/wast/wasm-tools-fixed-length-lists"
+	fetched(t, dir)
 	raw, err := wastFS.ReadFile(path.Join(dir, "fixed-length-lists.json"))
 	if err != nil {
 		t.Fatal(err)

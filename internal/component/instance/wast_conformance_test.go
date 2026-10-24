@@ -106,6 +106,7 @@ type wastCmd struct {
 
 func runWastSuite(t *testing.T, suite string) {
 	dir := path.Join("testdata", "wast", suite)
+	fetched(t, dir)
 	raw, err := wastFS.ReadFile(path.Join(dir, suite+".json"))
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)

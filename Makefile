@@ -410,6 +410,39 @@ build.spectest.multi_memory:
 		wast2json --enable-multi-memory --debug-names $$f; \
 	done
 
+# Component-model cases from the component-model repository and the Bytecode Alliance, fetched at a
+# pinned commit rather than copied in. Each .wast is one file, so it is curled; wit-parser's UI suite
+# is a tree, so it comes out of that commit's tarball. What the tests read is generated from them with
+# wasm-tools 1.262.0, the version their expected results were written against. None of it is
+# committed, so CI builds it once and hands it to every test job, as with the 3.0 spectest corpus.
+component_model_version := d095e2f60ddae1f9a1e9b1e2fb547ec1114da677
+wasm_tools_tests_version := 2e6b2d6db499501a91a0b88a848435345bef1f66
+component_model_raw := https://raw.githubusercontent.com/WebAssembly/component-model/$(component_model_version)/test
+wasm_tools_raw := https://raw.githubusercontent.com/bytecodealliance/wasm-tools/$(wasm_tools_tests_version)/tests/cli/component-model
+wasmtime_raw := https://raw.githubusercontent.com/bytecodealliance/wasmtime/$(wasmtime_version)/tests/misc_testsuite/component-model
+# <directory the tests read>=<.wast it is generated from>
+component_wast_suites := \
+	internal/component/binary/testdata/wast/component-model-max-value-size=$(component_model_raw)/validation/max-value-size.wast \
+	internal/component/binary/testdata/wast/wasm-tools-max-value-size=$(wasm_tools_raw)/max-value-size.wast \
+	internal/component/instance/testdata/wast/fixed_length_lists=$(wasmtime_raw)/fixed_length_lists.wast \
+	internal/component/instance/testdata/wast/wasm-tools-fixed-length-lists=$(wasm_tools_raw)/fixed-length-lists.wast
+wit_parser_ui_dir := component/wit/testdata/wit-parser/ui
+
+.PHONY: build.component_testdata
+build.component_testdata:
+	@for s in $(component_wast_suites); do \
+		dir=$${s%%=*} url=$${s#*=} f=$${s##*/}; \
+		rm -rf $$dir && mkdir -p $$dir \
+		&& curl -sfSL --retry 5 --retry-all-errors $$url -o $$dir/$$f \
+		&& (cd $$dir && wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f) || exit 1; \
+	done
+	@rm -rf $(wit_parser_ui_dir) && mkdir -p $(wit_parser_ui_dir)
+	@curl -sfSL --retry 5 --retry-all-errors \
+		https://codeload.github.com/bytecodealliance/wasm-tools/tar.gz/$(wasm_tools_tests_version) \
+		| tar -xzf - -C $(wit_parser_ui_dir) --strip-components 5 \
+			wasm-tools-$(wasm_tools_tests_version)/crates/wit-parser/tests/ui
+	@sh component/wit/testdata/gen-oracle.sh
+
 # Builds one build image and tests it: its samples are built in the image,
 # validated, and run under wazy from this checkout. See build-images/README.md.
 #   make build-image-test IMAGE_LANG=rust

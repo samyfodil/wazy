@@ -1,4 +1,0 @@
-package a:b;
-
-@external-id("x")
-interface i {}

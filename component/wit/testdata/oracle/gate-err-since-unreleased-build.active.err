@@ -1,1 +1,0 @@
-feature gate cannot reference unreleased version 1.0.0+build.2 of package [a:b@1.0.0+build.1] (current version 1.0.0+build.1)

@@ -1,5 +1,0 @@
-cannot specify @external-id twice
-     --> tests/ui/parse-fail/external-id-twice.wit:5:4
-      |
-    5 |   @external-id("y")
-      |    ^----------
