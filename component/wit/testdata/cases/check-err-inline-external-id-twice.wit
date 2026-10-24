@@ -1,0 +1,5 @@
+package a:b;
+world w {
+  @external-id("a") @external-id("b")
+  import x: interface {}
+}

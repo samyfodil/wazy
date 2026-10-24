@@ -1,0 +1,26 @@
+package x:y;
+use x:z/i;
+interface j {
+  /// docs before a method
+  resource r {
+    /// a constructor
+    constructor();
+    /// a getter
+    get: func() -> u8;
+    set: get() -> u8;
+  }
+  get: func(get: u8);
+  type alias = %r;
+}
+@unstable(feature = f)
+world w {
+  @unstable(feature = f)
+  import j;
+  include u;
+  import get: get() -> u8;
+  export i;
+}
+world u {}
+package x:z {
+  interface i {}
+}

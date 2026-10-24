@@ -1,0 +1,6 @@
+package a:b;
+@unstable(feature = x)
+interface store {}
+world w {
+  import primary: store;
+}

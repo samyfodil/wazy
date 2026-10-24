@@ -1,0 +1,5 @@
+package a:b;
+interface i {
+  @unstable(feature = x) @unstable(feature = y)
+  type t = u8;
+}

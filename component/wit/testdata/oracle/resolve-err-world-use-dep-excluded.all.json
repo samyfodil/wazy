@@ -1,0 +1,103 @@
+{
+  "worlds": [
+    {
+      "name": "w",
+      "imports": {
+        "interface-0": {
+          "interface": {
+            "id": 0
+          }
+        },
+        "interface-1": {
+          "interface": {
+            "id": 1
+          }
+        },
+        "x": {
+          "type": 3
+        }
+      },
+      "exports": {},
+      "package": 0
+    }
+  ],
+  "interfaces": [
+    {
+      "name": "j",
+      "types": {
+        "t": 0
+      },
+      "functions": {},
+      "stability": {
+        "unstable": {
+          "feature": "x"
+        }
+      },
+      "package": 0
+    },
+    {
+      "name": "i",
+      "types": {
+        "t": 1,
+        "x": 2
+      },
+      "functions": {},
+      "package": 0
+    }
+  ],
+  "types": [
+    {
+      "name": "t",
+      "kind": {
+        "type": "u8"
+      },
+      "owner": {
+        "interface": 0
+      },
+      "stability": {
+        "unstable": {
+          "feature": "x"
+        }
+      }
+    },
+    {
+      "name": "t",
+      "kind": {
+        "type": 0
+      },
+      "owner": {
+        "interface": 1
+      }
+    },
+    {
+      "name": "x",
+      "kind": {
+        "type": "u8"
+      },
+      "owner": {
+        "interface": 1
+      }
+    },
+    {
+      "name": "x",
+      "kind": {
+        "type": 2
+      },
+      "owner": {
+        "world": 0
+      }
+    }
+  ],
+  "packages": [
+    {
+      "name": "a:b",
+      "interfaces": {
+        "j": 0,
+        "i": 1
+      },
+      "worlds": {
+        "w": 0
+      }
+    }
+  ]
+}

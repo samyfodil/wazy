@@ -1,0 +1,1938 @@
+seed-eof-0|no `package` header was found in any WIT file for this package|
+seed-bad-0|unexpected character '$'|m.wit:1:1
+seed-eof-1|expected `world`, `interface` or `use`, found `/`|m.wit:1:1
+seed-bad-1|expected `world`, `interface` or `use`, found `/`|m.wit:1:1
+seed-eof-2|no `package` header was found in any WIT file for this package|
+seed-bad-2|OK
+seed-eof-3|no `package` header was found in any WIT file for this package|
+seed-bad-3|OK
+seed-eof-4|no `package` header was found in any WIT file for this package|
+seed-bad-4|OK
+seed-eof-7|no `package` header was found in any WIT file for this package|
+seed-bad-7|OK
+seed-eof-8|no `package` header was found in any WIT file for this package|
+seed-bad-8|OK
+seed-eof-15|no `package` header was found in any WIT file for this package|
+seed-bad-15|OK
+seed-eof-16|no `package` header was found in any WIT file for this package|
+seed-bad-16|OK
+seed-eof-17|no `package` header was found in any WIT file for this package|
+seed-bad-17|unexpected character '$'|m.wit:2:1
+seed-eof-24|expected an identifier or string, found eof|m.wit:2:8
+seed-bad-24|unexpected character '$'|m.wit:2:8
+seed-eof-25|expected an identifier or string, found eof|m.wit:2:9
+seed-bad-25|unexpected character '$'|m.wit:2:9
+seed-eof-26|expected ':', found eof|m.wit:2:10
+seed-bad-26|unexpected character '$'|m.wit:2:10
+seed-eof-27|expected an identifier or string, found eof|m.wit:2:11
+seed-bad-27|unexpected character '$'|m.wit:2:11
+seed-eof-28|expected '{', found eof|m.wit:2:12
+seed-bad-28|unexpected character '$'|m.wit:2:12
+seed-eof-29|expected an integer, found eof|m.wit:2:13
+seed-bad-29|unexpected character '$'|m.wit:2:13
+seed-eof-30|expected '.', found eof|m.wit:2:14
+seed-bad-30|unexpected character '$'|m.wit:2:14
+seed-eof-31|expected an integer, found eof|m.wit:2:15
+seed-bad-31|unexpected character '$'|m.wit:2:15
+seed-eof-32|expected '.', found eof|m.wit:2:16
+seed-bad-32|unexpected character '$'|m.wit:2:16
+seed-eof-33|expected an integer, found eof|m.wit:2:17
+seed-bad-33|unexpected character '$'|m.wit:2:17
+seed-eof-37|expected '{', found eof|m.wit:2:21
+seed-bad-37|unexpected character '$'|m.wit:2:21
+seed-eof-38|expected '{', found '.'|m.wit:2:21
+seed-bad-38|unexpected character '$'|m.wit:2:22
+seed-eof-39|expected '{', found eof|m.wit:2:23
+seed-bad-39|unexpected character '$'|m.wit:2:23
+seed-eof-40|expected '{', found eof|m.wit:2:24
+seed-bad-40|unexpected character '$'|m.wit:2:24
+seed-eof-45|expected '{', found eof|m.wit:2:29
+seed-bad-45|unexpected character '$'|m.wit:2:29
+seed-eof-46|expected '{', found '.'|m.wit:2:29
+seed-bad-46|unexpected character '$'|m.wit:2:30
+seed-eof-47|expected '{', found eof|m.wit:2:31
+seed-bad-47|unexpected character '$'|m.wit:2:31
+seed-eof-48|OK
+seed-bad-48|unexpected character '$'|m.wit:2:32
+seed-eof-50|OK
+seed-bad-50|unexpected character '$'|m.wit:4:1
+seed-eof-53|expected an identifier or string, found eof|m.wit:4:4
+seed-bad-53|unexpected character '$'|m.wit:4:4
+seed-eof-54|expected an identifier or string, found eof|m.wit:4:5
+seed-bad-54|unexpected character '$'|m.wit:4:5
+seed-eof-55|expected ';', found eof|m.wit:4:6
+seed-bad-55|unexpected character '$'|m.wit:4:6
+seed-eof-56|expected an identifier or string, found eof|m.wit:4:7
+seed-bad-56|unexpected character '$'|m.wit:4:7
+seed-eof-57|expected `/`, found eof|m.wit:4:8
+seed-bad-57|unexpected character '$'|m.wit:4:8
+seed-eof-58|expected an identifier or string, found eof|m.wit:4:9
+seed-bad-58|unexpected character '$'|m.wit:4:9
+seed-eof-59|expected ';', found eof|m.wit:4:10
+seed-bad-59|unexpected character '$'|m.wit:4:10
+seed-eof-60|expected an integer, found eof|m.wit:4:11
+seed-bad-60|unexpected character '$'|m.wit:4:11
+seed-eof-61|expected '.', found eof|m.wit:4:12
+seed-bad-61|unexpected character '$'|m.wit:4:12
+seed-eof-62|expected an integer, found eof|m.wit:4:13
+seed-bad-62|unexpected character '$'|m.wit:4:13
+seed-eof-63|expected '.', found eof|m.wit:4:14
+seed-bad-63|unexpected character '$'|m.wit:4:14
+seed-eof-64|expected an integer, found eof|m.wit:4:15
+seed-bad-64|unexpected character '$'|m.wit:4:15
+seed-eof-65|expected ';', found eof|m.wit:4:16
+seed-bad-65|unexpected character '$'|m.wit:4:16
+seed-eof-66|expected ';', found eof|m.wit:4:17
+seed-bad-66|unexpected character '$'|m.wit:4:17
+seed-eof-68|expected an identifier or string, found eof|m.wit:4:19
+seed-bad-68|unexpected character '$'|m.wit:4:19
+seed-eof-69|expected an identifier or string, found eof|m.wit:4:20
+seed-bad-69|unexpected character '$'|m.wit:4:20
+seed-eof-71|expected ';', found eof|m.wit:4:22
+seed-bad-71|unexpected character '$'|m.wit:4:22
+seed-eof-72|package 'c:d@1.0.0' not found. known packages:|
+seed-bad-72|unexpected character '$'|m.wit:4:23
+seed-eof-74|package 'c:d@1.0.0' not found. known packages:|
+seed-bad-74|unexpected character '$'|m.wit:6:1
+seed-eof-75|expected `world`, `interface` or `use`, found `/`|m.wit:6:1
+seed-bad-75|expected `world`, `interface` or `use`, found `/`|m.wit:6:1
+seed-eof-76|unterminated block comment|m.wit:6:1
+seed-bad-76|OK
+seed-eof-77|unterminated block comment|m.wit:6:1
+seed-bad-77|OK
+seed-eof-78|unterminated block comment|m.wit:6:1
+seed-bad-78|OK
+seed-eof-80|unterminated block comment|m.wit:6:1
+seed-bad-80|OK
+seed-eof-81|unterminated block comment|m.wit:6:1
+seed-bad-81|OK
+seed-eof-90|unterminated block comment|m.wit:6:1
+seed-bad-90|OK
+seed-eof-91|unterminated block comment|m.wit:6:1
+seed-bad-91|OK
+seed-eof-92|unterminated block comment|m.wit:6:1
+seed-bad-92|OK
+seed-eof-93|unterminated block comment|m.wit:6:1
+seed-bad-93|unterminated block comment|m.wit:6:1
+seed-eof-94|package 'c:d@1.0.0' not found. known packages:|
+seed-bad-94|unexpected character '$'|m.wit:6:21
+seed-eof-95|package 'c:d@1.0.0' not found. known packages:|
+seed-bad-95|unexpected character '$'|m.wit:7:1
+seed-eof-96|expected an identifier or string, found eof|m.wit:7:2
+seed-bad-96|unexpected character '$'|m.wit:7:2
+seed-eof-101|expected '(', found eof|m.wit:7:7
+seed-bad-101|unexpected character '$'|m.wit:7:7
+seed-eof-102|expected an identifier or string, found eof|m.wit:7:8
+seed-bad-102|unexpected character '$'|m.wit:7:8
+seed-eof-109|expected '=', found eof|m.wit:7:15
+seed-bad-109|unexpected character '$'|m.wit:7:15
+seed-eof-110|expected '=', found eof|m.wit:7:16
+seed-bad-110|unexpected character '$'|m.wit:7:16
+seed-eof-111|expected an integer, found eof|m.wit:7:17
+seed-bad-111|unexpected character '$'|m.wit:7:17
+seed-eof-112|expected an integer, found eof|m.wit:7:18
+seed-bad-112|unexpected character '$'|m.wit:7:18
+seed-eof-113|expected '.', found eof|m.wit:7:19
+seed-bad-113|unexpected character '$'|m.wit:7:19
+seed-eof-114|expected an integer, found eof|m.wit:7:20
+seed-bad-114|unexpected character '$'|m.wit:7:20
+seed-eof-115|expected '.', found eof|m.wit:7:21
+seed-bad-115|unexpected character '$'|m.wit:7:21
+seed-eof-116|expected an integer, found eof|m.wit:7:22
+seed-bad-116|unexpected character '$'|m.wit:7:22
+seed-eof-117|expected ')', found eof|m.wit:7:23
+seed-bad-117|unexpected character '$'|m.wit:7:23
+seed-eof-118|expected `world`, `interface` or `use`, found eof|m.wit:7:24
+seed-bad-118|unexpected character '$'|m.wit:7:24
+seed-eof-119|expected `world`, `interface` or `use`, found eof|m.wit:8:1
+seed-bad-119|unexpected character '$'|m.wit:8:1
+seed-eof-128|expected an identifier or string, found eof|m.wit:8:10
+seed-bad-128|unexpected character '$'|m.wit:8:10
+seed-eof-129|expected an identifier or string, found eof|m.wit:8:11
+seed-bad-129|unexpected character '$'|m.wit:8:11
+seed-eof-130|expected '{', found eof|m.wit:8:12
+seed-bad-130|unexpected character '$'|m.wit:8:12
+seed-eof-131|expected '{', found eof|m.wit:8:13
+seed-bad-131|unexpected character '$'|m.wit:8:13
+seed-eof-132|expected `type`, `resource` or `func`, found eof|m.wit:8:14
+seed-bad-132|unexpected character '$'|m.wit:8:14
+seed-eof-135|expected `type`, `resource` or `func`, found eof|m.wit:9:3
+seed-bad-135|unexpected character '$'|m.wit:9:3
+seed-eof-138|expected an identifier or string, found eof|m.wit:9:6
+seed-bad-138|unexpected character '$'|m.wit:9:6
+seed-eof-139|expected an identifier or string, found eof|m.wit:9:7
+seed-bad-139|unexpected character '$'|m.wit:9:7
+seed-eof-141|expected '.', found eof|m.wit:9:9
+seed-bad-141|unexpected character '$'|m.wit:9:9
+seed-eof-142|expected '{', found eof|m.wit:9:10
+seed-bad-142|unexpected character '$'|m.wit:9:10
+seed-eof-143|expected an identifier or string, found eof|m.wit:9:11
+seed-bad-143|unexpected character '$'|m.wit:9:11
+seed-eof-144|expected '}', found eof|m.wit:9:12
+seed-bad-144|unexpected character '$'|m.wit:9:12
+seed-eof-145|expected an identifier or string, found eof|m.wit:9:13
+seed-bad-145|unexpected character '$'|m.wit:9:13
+seed-eof-146|expected an identifier or string, found eof|m.wit:9:14
+seed-bad-146|unexpected character '$'|m.wit:9:14
+seed-eof-147|expected '}', found eof|m.wit:9:15
+seed-bad-147|unexpected character '$'|m.wit:9:15
+seed-eof-148|expected '}', found eof|m.wit:9:16
+seed-bad-148|unexpected character '$'|m.wit:9:16
+seed-eof-150|expected an identifier or string, found eof|m.wit:9:18
+seed-bad-150|unexpected character '$'|m.wit:9:18
+seed-eof-151|expected an identifier or string, found eof|m.wit:9:19
+seed-bad-151|unexpected character '$'|m.wit:9:19
+seed-eof-153|expected '}', found eof|m.wit:9:21
+seed-bad-153|unexpected character '$'|m.wit:9:21
+seed-eof-154|expected ';', found eof|m.wit:9:22
+seed-bad-154|unexpected character '$'|m.wit:9:22
+seed-eof-155|expected `type`, `resource` or `func`, found eof|m.wit:9:23
+seed-bad-155|unexpected character '$'|m.wit:9:23
+seed-eof-158|expected `type`, `resource` or `func`, found eof|m.wit:10:3
+seed-bad-158|unexpected character '$'|m.wit:10:3
+seed-eof-159|expected `type`, `resource` or `func`, found `/`|m.wit:10:3
+seed-bad-159|expected `type`, `resource` or `func`, found `/`|m.wit:10:3
+seed-eof-160|expected `type`, `resource` or `func`, found eof|m.wit:10:5
+seed-bad-160|OK
+seed-eof-161|expected `type`, `resource` or `func`, found eof|m.wit:10:6
+seed-bad-161|OK
+seed-eof-162|expected `type`, `resource` or `func`, found eof|m.wit:10:7
+seed-bad-162|OK
+seed-eof-163|expected `type`, `resource` or `func`, found eof|m.wit:10:8
+seed-bad-163|OK
+seed-eof-164|expected `type`, `resource` or `func`, found eof|m.wit:10:9
+seed-bad-164|OK
+seed-eof-170|expected `type`, `resource` or `func`, found eof|m.wit:10:15
+seed-bad-170|OK
+seed-eof-171|expected `type`, `resource` or `func`, found eof|m.wit:10:16
+seed-bad-171|OK
+seed-eof-174|expected `type`, `resource` or `func`, found eof|m.wit:11:3
+seed-bad-174|unexpected character '$'|m.wit:11:3
+seed-eof-180|expected an identifier or string, found eof|m.wit:11:9
+seed-bad-180|unexpected character '$'|m.wit:11:9
+seed-eof-181|expected an identifier or string, found eof|m.wit:11:10
+seed-bad-181|unexpected character '$'|m.wit:11:10
+seed-eof-182|expected '{', found eof|m.wit:11:11
+seed-bad-182|unexpected character '$'|m.wit:11:11
+seed-eof-183|expected '{', found eof|m.wit:11:12
+seed-bad-183|unexpected character '$'|m.wit:11:12
+seed-eof-184|expected an identifier or string, found eof|m.wit:11:13
+seed-bad-184|unexpected character '$'|m.wit:11:13
+seed-eof-185|expected an identifier or string, found eof|m.wit:11:14
+seed-bad-185|unexpected character '$'|m.wit:11:14
+seed-eof-186|expected ':', found eof|m.wit:11:15
+seed-bad-186|unexpected character '$'|m.wit:11:15
+seed-eof-187|expected a type, found eof|m.wit:11:16
+seed-bad-187|unexpected character '$'|m.wit:11:16
+seed-eof-188|expected a type, found eof|m.wit:11:17
+seed-bad-188|unexpected character '$'|m.wit:11:17
+seed-eof-190|expected '}', found eof|m.wit:11:19
+seed-bad-190|unexpected character '$'|m.wit:11:19
+seed-eof-191|expected an identifier or string, found eof|m.wit:11:20
+seed-bad-191|unexpected character '$'|m.wit:11:20
+seed-eof-192|expected an identifier or string, found eof|m.wit:11:21
+seed-bad-192|unexpected character '$'|m.wit:11:21
+seed-eof-193|expected ':', found eof|m.wit:11:22
+seed-bad-193|unexpected character '$'|m.wit:11:22
+seed-eof-194|expected a type, found eof|m.wit:11:23
+seed-bad-194|unexpected character '$'|m.wit:11:23
+seed-eof-195|expected a type, found eof|m.wit:11:24
+seed-bad-195|unexpected character '$'|m.wit:11:24
+seed-eof-199|expected '<', found eof|m.wit:11:28
+seed-bad-199|unexpected character '$'|m.wit:11:28
+seed-eof-200|expected a type, found eof|m.wit:11:29
+seed-bad-200|unexpected character '$'|m.wit:11:29
+seed-eof-202|expected '>', found eof|m.wit:11:31
+seed-bad-202|unexpected character '$'|m.wit:11:31
+seed-eof-203|expected fixed-length, found eof|m.wit:11:32
+seed-bad-203|unexpected character '$'|m.wit:11:32
+seed-eof-204|expected fixed-length, found eof|m.wit:11:33
+seed-bad-204|unexpected character '$'|m.wit:11:33
+seed-eof-205|expected '>', found eof|m.wit:11:34
+seed-bad-205|unexpected character '$'|m.wit:11:34
+seed-eof-206|expected '}', found eof|m.wit:11:35
+seed-bad-206|unexpected character '$'|m.wit:11:35
+seed-eof-207|expected an identifier or string, found eof|m.wit:11:36
+seed-bad-207|unexpected character '$'|m.wit:11:36
+seed-eof-208|expected an identifier or string, found eof|m.wit:11:37
+seed-bad-208|unexpected character '$'|m.wit:11:37
+seed-eof-209|expected `type`, `resource` or `func`, found eof|m.wit:11:38
+seed-bad-209|unexpected character '$'|m.wit:11:38
+seed-eof-212|expected `type`, `resource` or `func`, found eof|m.wit:12:3
+seed-bad-212|unexpected character '$'|m.wit:12:3
+seed-eof-219|expected an identifier or string, found eof|m.wit:12:10
+seed-bad-219|unexpected character '$'|m.wit:12:10
+seed-eof-220|expected an identifier or string, found eof|m.wit:12:11
+seed-bad-220|unexpected character '$'|m.wit:12:11
+seed-eof-223|expected '{', found eof|m.wit:12:14
+seed-bad-223|unexpected character '$'|m.wit:12:14
+seed-eof-224|expected '{', found eof|m.wit:12:15
+seed-bad-224|unexpected character '$'|m.wit:12:15
+seed-eof-225|expected an identifier or string, found eof|m.wit:12:16
+seed-bad-225|unexpected character '$'|m.wit:12:16
+seed-eof-226|expected an identifier or string, found eof|m.wit:12:17
+seed-bad-226|unexpected character '$'|m.wit:12:17
+seed-eof-230|expected '}', found eof|m.wit:12:21
+seed-bad-230|unexpected character '$'|m.wit:12:21
+seed-eof-231|expected an identifier or string, found eof|m.wit:12:22
+seed-bad-231|unexpected character '$'|m.wit:12:22
+seed-eof-232|expected an identifier or string, found eof|m.wit:12:23
+seed-bad-232|unexpected character '$'|m.wit:12:23
+seed-eof-236|expected '}', found eof|m.wit:12:27
+seed-bad-236|unexpected character '$'|m.wit:12:27
+seed-eof-237|expected a type, found eof|m.wit:12:28
+seed-bad-237|unexpected character '$'|m.wit:12:28
+seed-eof-238|expected ')', found eof|m.wit:12:29
+seed-bad-238|unexpected character '$'|m.wit:12:29
+seed-eof-239|expected '}', found eof|m.wit:12:30
+seed-bad-239|unexpected character '$'|m.wit:12:30
+seed-eof-240|expected '}', found eof|m.wit:12:31
+seed-bad-240|unexpected character '$'|m.wit:12:31
+seed-eof-241|expected `type`, `resource` or `func`, found eof|m.wit:12:32
+seed-bad-241|unexpected character '$'|m.wit:12:32
+seed-eof-244|expected `type`, `resource` or `func`, found eof|m.wit:13:3
+seed-bad-244|unexpected character '$'|m.wit:13:3
+seed-eof-248|expected an identifier or string, found eof|m.wit:13:7
+seed-bad-248|unexpected character '$'|m.wit:13:7
+seed-eof-249|expected an identifier or string, found eof|m.wit:13:8
+seed-bad-249|unexpected character '$'|m.wit:13:8
+seed-eof-250|expected '{', found eof|m.wit:13:9
+seed-bad-250|unexpected character '$'|m.wit:13:9
+seed-eof-251|expected '{', found eof|m.wit:13:10
+seed-bad-251|unexpected character '$'|m.wit:13:10
+seed-eof-252|expected an identifier or string, found eof|m.wit:13:11
+seed-bad-252|unexpected character '$'|m.wit:13:11
+seed-eof-253|expected an identifier or string, found eof|m.wit:13:12
+seed-bad-253|unexpected character '$'|m.wit:13:12
+seed-eof-254|expected '}', found eof|m.wit:13:13
+seed-bad-254|unexpected character '$'|m.wit:13:13
+seed-eof-255|expected an identifier or string, found eof|m.wit:13:14
+seed-bad-255|unexpected character '$'|m.wit:13:14
+seed-eof-256|expected an identifier or string, found eof|m.wit:13:15
+seed-bad-256|unexpected character '$'|m.wit:13:15
+seed-eof-257|expected '}', found eof|m.wit:13:16
+seed-bad-257|unexpected character '$'|m.wit:13:16
+seed-eof-258|expected '}', found eof|m.wit:13:17
+seed-bad-258|unexpected character '$'|m.wit:13:17
+seed-eof-259|expected `type`, `resource` or `func`, found eof|m.wit:13:18
+seed-bad-259|unexpected character '$'|m.wit:13:18
+seed-eof-262|expected `type`, `resource` or `func`, found eof|m.wit:14:3
+seed-bad-262|unexpected character '$'|m.wit:14:3
+seed-eof-267|expected an identifier or string, found eof|m.wit:14:8
+seed-bad-267|unexpected character '$'|m.wit:14:8
+seed-eof-268|expected an identifier or string, found eof|m.wit:14:9
+seed-bad-268|unexpected character '$'|m.wit:14:9
+seed-eof-269|expected '{', found eof|m.wit:14:10
+seed-bad-269|unexpected character '$'|m.wit:14:10
+seed-eof-270|expected '{', found eof|m.wit:14:11
+seed-bad-270|unexpected character '$'|m.wit:14:11
+seed-eof-271|expected an identifier or string, found eof|m.wit:14:12
+seed-bad-271|unexpected character '$'|m.wit:14:12
+seed-eof-272|expected an identifier or string, found eof|m.wit:14:13
+seed-bad-272|unexpected character '$'|m.wit:14:13
+seed-eof-273|expected '}', found eof|m.wit:14:14
+seed-bad-273|unexpected character '$'|m.wit:14:14
+seed-eof-274|expected an identifier or string, found eof|m.wit:14:15
+seed-bad-274|unexpected character '$'|m.wit:14:15
+seed-eof-275|expected an identifier or string, found eof|m.wit:14:16
+seed-bad-275|unexpected character '$'|m.wit:14:16
+seed-eof-276|expected '}', found eof|m.wit:14:17
+seed-bad-276|unexpected character '$'|m.wit:14:17
+seed-eof-277|expected '}', found eof|m.wit:14:18
+seed-bad-277|unexpected character '$'|m.wit:14:18
+seed-eof-278|expected `type`, `resource` or `func`, found eof|m.wit:14:19
+seed-bad-278|unexpected character '$'|m.wit:14:19
+seed-eof-281|expected `type`, `resource` or `func`, found eof|m.wit:15:3
+seed-bad-281|unexpected character '$'|m.wit:15:3
+seed-eof-289|expected an identifier or string, found eof|m.wit:15:11
+seed-bad-289|unexpected character '$'|m.wit:15:11
+seed-eof-290|expected an identifier or string, found eof|m.wit:15:12
+seed-bad-290|unexpected character '$'|m.wit:15:12
+seed-eof-293|expected ';', found eof|m.wit:15:15
+seed-bad-293|unexpected character '$'|m.wit:15:15
+seed-eof-294|expected ';', found eof|m.wit:15:16
+seed-bad-294|unexpected character '$'|m.wit:15:16
+seed-eof-295|expected `constructor` or identifier, found eof|m.wit:15:17
+seed-bad-295|unexpected character '$'|m.wit:15:17
+seed-eof-300|expected `constructor` or identifier, found eof|m.wit:16:5
+seed-bad-300|unexpected character '$'|m.wit:16:5
+seed-eof-311|expected '(', found eof|m.wit:16:16
+seed-bad-311|unexpected character '$'|m.wit:16:16
+seed-eof-312|expected an identifier or string, found eof|m.wit:16:17
+seed-bad-312|unexpected character '$'|m.wit:16:17
+seed-eof-313|expected ':', found eof|m.wit:16:18
+seed-bad-313|unexpected character '$'|m.wit:16:18
+seed-eof-314|expected a type, found eof|m.wit:16:19
+seed-bad-314|unexpected character '$'|m.wit:16:19
+seed-eof-315|expected a type, found eof|m.wit:16:20
+seed-bad-315|unexpected character '$'|m.wit:16:20
+seed-eof-317|expected ')', found eof|m.wit:16:22
+seed-bad-317|unexpected character '$'|m.wit:16:22
+seed-eof-318|expected ';', found eof|m.wit:16:23
+seed-bad-318|unexpected character '$'|m.wit:16:23
+seed-eof-319|expected ';', found eof|m.wit:16:24
+seed-bad-319|unexpected character '$'|m.wit:16:24
+seed-eof-320|expected ';', found `-`|m.wit:16:24
+seed-bad-320|expected ';', found `-`|m.wit:16:24
+seed-eof-321|expected a type, found eof|m.wit:16:26
+seed-bad-321|unexpected character '$'|m.wit:16:26
+seed-eof-322|expected a type, found eof|m.wit:16:27
+seed-bad-322|unexpected character '$'|m.wit:16:27
+seed-eof-328|expected ';', found eof|m.wit:16:33
+seed-bad-328|unexpected character '$'|m.wit:16:33
+seed-eof-329|expected a type, found eof|m.wit:16:34
+seed-bad-329|unexpected character '$'|m.wit:16:34
+seed-eof-332|expected '>', found eof|m.wit:16:37
+seed-bad-332|unexpected character '$'|m.wit:16:37
+seed-eof-333|expected a type, found eof|m.wit:16:38
+seed-bad-333|unexpected character '$'|m.wit:16:38
+seed-eof-334|expected a type, found eof|m.wit:16:39
+seed-bad-334|unexpected character '$'|m.wit:16:39
+seed-eof-340|expected '>', found eof|m.wit:16:45
+seed-bad-340|unexpected character '$'|m.wit:16:45
+seed-eof-341|expected ';', found eof|m.wit:16:46
+seed-bad-341|unexpected character '$'|m.wit:16:46
+seed-eof-342|expected `constructor` or identifier, found eof|m.wit:16:47
+seed-bad-342|unexpected character '$'|m.wit:16:47
+seed-eof-347|expected `constructor` or identifier, found eof|m.wit:17:5
+seed-bad-347|unexpected character '$'|m.wit:17:5
+seed-eof-348|expected ':', found eof|m.wit:17:6
+seed-bad-348|unexpected character '$'|m.wit:17:6
+seed-eof-349|expected keyword `func`, found eof|m.wit:17:7
+seed-bad-349|unexpected character '$'|m.wit:17:7
+seed-eof-350|expected keyword `func`, found eof|m.wit:17:8
+seed-bad-350|unexpected character '$'|m.wit:17:8
+seed-eof-354|expected '(', found eof|m.wit:17:12
+seed-bad-354|unexpected character '$'|m.wit:17:12
+seed-eof-355|expected an identifier or string, found eof|m.wit:17:13
+seed-bad-355|unexpected character '$'|m.wit:17:13
+seed-eof-356|expected ':', found eof|m.wit:17:14
+seed-bad-356|unexpected character '$'|m.wit:17:14
+seed-eof-357|expected a type, found eof|m.wit:17:15
+seed-bad-357|unexpected character '$'|m.wit:17:15
+seed-eof-358|expected a type, found eof|m.wit:17:16
+seed-bad-358|unexpected character '$'|m.wit:17:16
+seed-eof-364|expected '<', found eof|m.wit:17:22
+seed-bad-364|unexpected character '$'|m.wit:17:22
+seed-eof-365|expected an identifier or string, found eof|m.wit:17:23
+seed-bad-365|unexpected character '$'|m.wit:17:23
+seed-eof-368|expected '>', found eof|m.wit:17:26
+seed-bad-368|unexpected character '$'|m.wit:17:26
+seed-eof-369|expected ')', found eof|m.wit:17:27
+seed-bad-369|unexpected character '$'|m.wit:17:27
+seed-eof-370|expected ';', found eof|m.wit:17:28
+seed-bad-370|unexpected character '$'|m.wit:17:28
+seed-eof-371|expected `constructor` or identifier, found eof|m.wit:17:29
+seed-bad-371|unexpected character '$'|m.wit:17:29
+seed-eof-376|expected `constructor` or identifier, found eof|m.wit:18:5
+seed-bad-376|unexpected character '$'|m.wit:18:5
+seed-eof-377|expected an identifier or string, found eof|m.wit:18:6
+seed-bad-377|unexpected character '$'|m.wit:18:6
+seed-eof-387|expected '(', found eof|m.wit:18:16
+seed-bad-387|unexpected character '$'|m.wit:18:16
+seed-eof-388|expected an identifier or string, found eof|m.wit:18:17
+seed-bad-388|unexpected character '$'|m.wit:18:17
+seed-eof-395|expected '=', found eof|m.wit:18:24
+seed-bad-395|unexpected character '$'|m.wit:18:24
+seed-eof-396|expected '=', found eof|m.wit:18:25
+seed-bad-396|unexpected character '$'|m.wit:18:25
+seed-eof-397|expected an integer, found eof|m.wit:18:26
+seed-bad-397|unexpected character '$'|m.wit:18:26
+seed-eof-398|expected an integer, found eof|m.wit:18:27
+seed-bad-398|unexpected character '$'|m.wit:18:27
+seed-eof-399|expected '.', found eof|m.wit:18:28
+seed-bad-399|unexpected character '$'|m.wit:18:28
+seed-eof-400|expected an integer, found eof|m.wit:18:29
+seed-bad-400|unexpected character '$'|m.wit:18:29
+seed-eof-401|expected '.', found eof|m.wit:18:30
+seed-bad-401|unexpected character '$'|m.wit:18:30
+seed-eof-402|expected an integer, found eof|m.wit:18:31
+seed-bad-402|unexpected character '$'|m.wit:18:31
+seed-eof-403|expected ')', found eof|m.wit:18:32
+seed-bad-403|unexpected character '$'|m.wit:18:32
+seed-eof-404|expected `constructor` or identifier, found eof|m.wit:18:33
+seed-bad-404|unexpected character '$'|m.wit:18:33
+seed-eof-405|expected `constructor` or identifier, found eof|m.wit:18:34
+seed-bad-405|unexpected character '$'|m.wit:18:34
+seed-eof-406|expected an identifier or string, found eof|m.wit:18:35
+seed-bad-406|unexpected character '$'|m.wit:18:35
+seed-eof-411|expected '(', found eof|m.wit:18:40
+seed-bad-411|unexpected character '$'|m.wit:18:40
+seed-eof-412|expected an identifier or string, found eof|m.wit:18:41
+seed-bad-412|unexpected character '$'|m.wit:18:41
+seed-eof-419|expected '=', found eof|m.wit:18:48
+seed-bad-419|unexpected character '$'|m.wit:18:48
+seed-eof-420|expected '=', found eof|m.wit:18:49
+seed-bad-420|unexpected character '$'|m.wit:18:49
+seed-eof-421|expected an integer, found eof|m.wit:18:50
+seed-bad-421|unexpected character '$'|m.wit:18:50
+seed-eof-422|expected an integer, found eof|m.wit:18:51
+seed-bad-422|unexpected character '$'|m.wit:18:51
+seed-eof-423|expected '.', found eof|m.wit:18:52
+seed-bad-423|unexpected character '$'|m.wit:18:52
+seed-eof-424|expected an integer, found eof|m.wit:18:53
+seed-bad-424|unexpected character '$'|m.wit:18:53
+seed-eof-425|expected '.', found eof|m.wit:18:54
+seed-bad-425|unexpected character '$'|m.wit:18:54
+seed-eof-426|expected an integer, found eof|m.wit:18:55
+seed-bad-426|unexpected character '$'|m.wit:18:55
+seed-eof-427|expected ')', found eof|m.wit:18:56
+seed-bad-427|unexpected character '$'|m.wit:18:56
+seed-eof-428|expected `constructor` or identifier, found eof|m.wit:18:57
+seed-bad-428|unexpected character '$'|m.wit:18:57
+seed-eof-433|expected `constructor` or identifier, found eof|m.wit:19:5
+seed-bad-433|unexpected character '$'|m.wit:19:5
+seed-eof-434|expected ':', found eof|m.wit:19:6
+seed-bad-434|unexpected character '$'|m.wit:19:6
+seed-eof-435|expected keyword `func`, found eof|m.wit:19:7
+seed-bad-435|unexpected character '$'|m.wit:19:7
+seed-eof-436|expected keyword `func`, found eof|m.wit:19:8
+seed-bad-436|unexpected character '$'|m.wit:19:8
+seed-eof-442|expected keyword `func`, found eof|m.wit:19:14
+seed-bad-442|unexpected character '$'|m.wit:19:14
+seed-eof-443|expected keyword `func`, found eof|m.wit:19:15
+seed-bad-443|unexpected character '$'|m.wit:19:15
+seed-eof-447|expected '(', found eof|m.wit:19:19
+seed-bad-447|unexpected character '$'|m.wit:19:19
+seed-eof-448|expected an identifier or string, found eof|m.wit:19:20
+seed-bad-448|unexpected character '$'|m.wit:19:20
+seed-eof-449|expected ';', found eof|m.wit:19:21
+seed-bad-449|unexpected character '$'|m.wit:19:21
+seed-eof-450|expected ';', found eof|m.wit:19:22
+seed-bad-450|unexpected character '$'|m.wit:19:22
+seed-eof-451|expected ';', found `-`|m.wit:19:22
+seed-bad-451|expected ';', found `-`|m.wit:19:22
+seed-eof-452|expected a type, found eof|m.wit:19:24
+seed-bad-452|unexpected character '$'|m.wit:19:24
+seed-eof-453|expected a type, found eof|m.wit:19:25
+seed-bad-453|unexpected character '$'|m.wit:19:25
+seed-eof-456|expected ';', found eof|m.wit:19:28
+seed-bad-456|unexpected character '$'|m.wit:19:28
+seed-eof-457|expected `constructor` or identifier, found eof|m.wit:19:29
+seed-bad-457|unexpected character '$'|m.wit:19:29
+seed-eof-462|expected `constructor` or identifier, found eof|m.wit:20:5
+seed-bad-462|unexpected character '$'|m.wit:20:5
+seed-eof-466|expected ':', found eof|m.wit:20:9
+seed-bad-466|unexpected character '$'|m.wit:20:9
+seed-eof-467|expected keyword `func`, found eof|m.wit:20:10
+seed-bad-467|unexpected character '$'|m.wit:20:10
+seed-eof-468|expected keyword `func`, found eof|m.wit:20:11
+seed-bad-468|unexpected character '$'|m.wit:20:11
+seed-eof-471|expected keyword `func`, found an identifier|m.wit:20:11
+seed-bad-471|unexpected character '$'|m.wit:20:14
+seed-eof-472|expected an identifier or string, found eof|m.wit:20:15
+seed-bad-472|unexpected character '$'|m.wit:20:15
+seed-eof-473|expected ';', found eof|m.wit:20:16
+seed-bad-473|unexpected character '$'|m.wit:20:16
+seed-eof-474|expected ';', found eof|m.wit:20:17
+seed-bad-474|unexpected character '$'|m.wit:20:17
+seed-eof-475|expected ';', found `-`|m.wit:20:17
+seed-bad-475|expected ';', found `-`|m.wit:20:17
+seed-eof-476|expected a type, found eof|m.wit:20:19
+seed-bad-476|unexpected character '$'|m.wit:20:19
+seed-eof-477|expected a type, found eof|m.wit:20:20
+seed-bad-477|unexpected character '$'|m.wit:20:20
+seed-eof-479|expected ';', found eof|m.wit:20:22
+seed-bad-479|unexpected character '$'|m.wit:20:22
+seed-eof-480|expected `constructor` or identifier, found eof|m.wit:20:23
+seed-bad-480|unexpected character '$'|m.wit:20:23
+seed-eof-485|expected `constructor` or identifier, found eof|m.wit:21:5
+seed-bad-485|unexpected character '$'|m.wit:21:5
+seed-eof-489|expected ':', found eof|m.wit:21:9
+seed-bad-489|unexpected character '$'|m.wit:21:9
+seed-eof-490|expected keyword `func`, found eof|m.wit:21:10
+seed-bad-490|unexpected character '$'|m.wit:21:10
+seed-eof-491|expected keyword `func`, found eof|m.wit:21:11
+seed-bad-491|unexpected character '$'|m.wit:21:11
+seed-eof-494|expected keyword `func`, found an identifier|m.wit:21:11
+seed-bad-494|unexpected character '$'|m.wit:21:14
+seed-eof-495|expected an identifier or string, found eof|m.wit:21:15
+seed-bad-495|unexpected character '$'|m.wit:21:15
+seed-eof-496|expected ':', found eof|m.wit:21:16
+seed-bad-496|unexpected character '$'|m.wit:21:16
+seed-eof-497|expected a type, found eof|m.wit:21:17
+seed-bad-497|unexpected character '$'|m.wit:21:17
+seed-eof-498|expected a type, found eof|m.wit:21:18
+seed-bad-498|unexpected character '$'|m.wit:21:18
+seed-eof-500|expected ')', found eof|m.wit:21:20
+seed-bad-500|unexpected character '$'|m.wit:21:20
+seed-eof-501|expected ';', found eof|m.wit:21:21
+seed-bad-501|unexpected character '$'|m.wit:21:21
+seed-eof-502|expected ';', found eof|m.wit:21:22
+seed-bad-502|unexpected character '$'|m.wit:21:22
+seed-eof-503|expected ';', found `-`|m.wit:21:22
+seed-bad-503|expected ';', found `-`|m.wit:21:22
+seed-eof-504|expected a type, found eof|m.wit:21:24
+seed-bad-504|unexpected character '$'|m.wit:21:24
+seed-eof-505|expected a type, found eof|m.wit:21:25
+seed-bad-505|unexpected character '$'|m.wit:21:25
+seed-eof-511|expected ';', found eof|m.wit:21:31
+seed-bad-511|unexpected character '$'|m.wit:21:31
+seed-eof-512|expected a type, found eof|m.wit:21:32
+seed-bad-512|unexpected character '$'|m.wit:21:32
+seed-eof-513|expected ',', found eof|m.wit:21:33
+seed-bad-513|unexpected character '$'|m.wit:21:33
+seed-eof-514|expected a type, found eof|m.wit:21:34
+seed-bad-514|unexpected character '$'|m.wit:21:34
+seed-eof-515|expected a type, found eof|m.wit:21:35
+seed-bad-515|unexpected character '$'|m.wit:21:35
+seed-eof-521|expected '>', found eof|m.wit:21:41
+seed-bad-521|unexpected character '$'|m.wit:21:41
+seed-eof-522|expected ';', found eof|m.wit:21:42
+seed-bad-522|unexpected character '$'|m.wit:21:42
+seed-eof-523|expected `constructor` or identifier, found eof|m.wit:21:43
+seed-bad-523|unexpected character '$'|m.wit:21:43
+seed-eof-528|expected `constructor` or identifier, found eof|m.wit:22:5
+seed-bad-528|unexpected character '$'|m.wit:22:5
+seed-eof-531|expected ':', found eof|m.wit:22:8
+seed-bad-531|unexpected character '$'|m.wit:22:8
+seed-eof-532|expected keyword `func`, found eof|m.wit:22:9
+seed-bad-532|unexpected character '$'|m.wit:22:9
+seed-eof-533|expected keyword `func`, found eof|m.wit:22:10
+seed-bad-533|unexpected character '$'|m.wit:22:10
+seed-eof-539|expected keyword `func`, found eof|m.wit:22:16
+seed-bad-539|unexpected character '$'|m.wit:22:16
+seed-eof-540|expected keyword `func`, found eof|m.wit:22:17
+seed-bad-540|unexpected character '$'|m.wit:22:17
+seed-eof-543|expected keyword `func`, found an identifier|m.wit:22:17
+seed-bad-543|unexpected character '$'|m.wit:22:20
+seed-eof-544|expected an identifier or string, found eof|m.wit:22:21
+seed-bad-544|unexpected character '$'|m.wit:22:21
+seed-eof-545|expected ';', found eof|m.wit:22:22
+seed-bad-545|unexpected character '$'|m.wit:22:22
+seed-eof-546|expected ';', found eof|m.wit:22:23
+seed-bad-546|unexpected character '$'|m.wit:22:23
+seed-eof-547|expected ';', found `-`|m.wit:22:23
+seed-bad-547|expected ';', found `-`|m.wit:22:23
+seed-eof-548|expected a type, found eof|m.wit:22:25
+seed-bad-548|unexpected character '$'|m.wit:22:25
+seed-eof-549|expected a type, found eof|m.wit:22:26
+seed-bad-549|unexpected character '$'|m.wit:22:26
+seed-eof-552|expected ';', found eof|m.wit:22:29
+seed-bad-552|unexpected character '$'|m.wit:22:29
+seed-eof-553|expected `constructor` or identifier, found eof|m.wit:22:30
+seed-bad-553|unexpected character '$'|m.wit:22:30
+seed-eof-556|expected `constructor` or identifier, found eof|m.wit:23:3
+seed-bad-556|unexpected character '$'|m.wit:23:3
+seed-eof-557|expected `type`, `resource` or `func`, found eof|m.wit:23:4
+seed-bad-557|unexpected character '$'|m.wit:23:4
+seed-eof-560|expected `type`, `resource` or `func`, found eof|m.wit:24:3
+seed-bad-560|unexpected character '$'|m.wit:24:3
+seed-eof-561|expected an identifier or string, found eof|m.wit:24:4
+seed-bad-561|unexpected character '$'|m.wit:24:4
+seed-eof-572|expected '(', found eof|m.wit:24:15
+seed-bad-572|unexpected character '$'|m.wit:24:15
+seed-eof-573|expected a string literal, found eof|m.wit:24:16
+seed-bad-573|unexpected character '$'|m.wit:24:16
+seed-eof-574|unexpected end of file|m.wit:24:17
+seed-bad-574|OK
+seed-eof-575|unexpected end of file|m.wit:24:18
+seed-bad-575|OK
+seed-eof-576|unexpected end of file|m.wit:24:19
+seed-bad-576|invalid string escape '$'|m.wit:24:19
+seed-eof-577|unexpected end of file|m.wit:24:20
+seed-bad-577|OK
+seed-eof-578|unexpected end of file|m.wit:24:21
+seed-bad-578|invalid string escape '$'|m.wit:24:21
+seed-eof-579|unexpected end of file|m.wit:24:22
+seed-bad-579|expected character '{'|m.wit:24:22
+seed-eof-580|unexpected end of file|m.wit:24:23
+seed-bad-580|invalid hex digit '$'|m.wit:24:23
+seed-eof-582|unexpected end of file|m.wit:24:25
+seed-bad-582|expected character '}'|m.wit:24:25
+seed-eof-583|unexpected end of file|m.wit:24:26
+seed-bad-583|OK
+seed-eof-584|unexpected end of file|m.wit:24:27
+seed-bad-584|invalid string escape '$'|m.wit:24:27
+seed-eof-586|unexpected end of file|m.wit:24:29
+seed-bad-586|OK
+seed-eof-587|expected ')', found eof|m.wit:24:30
+seed-bad-587|unexpected character '$'|m.wit:24:30
+seed-eof-588|expected `type`, `resource` or `func`, found eof|m.wit:24:31
+seed-bad-588|unexpected character '$'|m.wit:24:31
+seed-eof-591|expected `type`, `resource` or `func`, found eof|m.wit:25:3
+seed-bad-591|unexpected character '$'|m.wit:25:3
+seed-eof-595|expected an identifier or string, found eof|m.wit:25:7
+seed-bad-595|unexpected character '$'|m.wit:25:7
+seed-eof-596|expected an identifier or string, found eof|m.wit:25:8
+seed-bad-596|unexpected character '$'|m.wit:25:8
+seed-eof-597|expected '=', found eof|m.wit:25:9
+seed-bad-597|unexpected character '$'|m.wit:25:9
+seed-eof-598|expected '=', found eof|m.wit:25:10
+seed-bad-598|unexpected character '$'|m.wit:25:10
+seed-eof-599|expected a type, found eof|m.wit:25:11
+seed-bad-599|unexpected character '$'|m.wit:25:11
+seed-eof-600|expected a type, found eof|m.wit:25:12
+seed-bad-600|unexpected character '$'|m.wit:25:12
+seed-eof-606|expected ';', found eof|m.wit:25:18
+seed-bad-606|unexpected character '$'|m.wit:25:18
+seed-eof-607|expected a type, found eof|m.wit:25:19
+seed-bad-607|unexpected character '$'|m.wit:25:19
+seed-eof-608|expected ',', found eof|m.wit:25:20
+seed-bad-608|unexpected character '$'|m.wit:25:20
+seed-eof-609|expected a type, found eof|m.wit:25:21
+seed-bad-609|unexpected character '$'|m.wit:25:21
+seed-eof-610|expected a type, found eof|m.wit:25:22
+seed-bad-610|unexpected character '$'|m.wit:25:22
+seed-eof-612|expected '>', found eof|m.wit:25:24
+seed-bad-612|unexpected character '$'|m.wit:25:24
+seed-eof-613|expected ';', found eof|m.wit:25:25
+seed-bad-613|unexpected character '$'|m.wit:25:25
+seed-eof-614|expected `type`, `resource` or `func`, found eof|m.wit:25:26
+seed-bad-614|unexpected character '$'|m.wit:25:26
+seed-eof-617|expected `type`, `resource` or `func`, found eof|m.wit:26:3
+seed-bad-617|unexpected character '$'|m.wit:26:3
+seed-eof-621|expected an identifier or string, found eof|m.wit:26:7
+seed-bad-621|unexpected character '$'|m.wit:26:7
+seed-eof-622|expected an identifier or string, found eof|m.wit:26:8
+seed-bad-622|unexpected character '$'|m.wit:26:8
+seed-eof-623|expected '=', found eof|m.wit:26:9
+seed-bad-623|unexpected character '$'|m.wit:26:9
+seed-eof-624|expected '=', found eof|m.wit:26:10
+seed-bad-624|unexpected character '$'|m.wit:26:10
+seed-eof-625|expected a type, found eof|m.wit:26:11
+seed-bad-625|unexpected character '$'|m.wit:26:11
+seed-eof-626|expected a type, found eof|m.wit:26:12
+seed-bad-626|unexpected character '$'|m.wit:26:12
+seed-eof-629|expected '<', found eof|m.wit:26:15
+seed-bad-629|unexpected character '$'|m.wit:26:15
+seed-eof-630|expected an identifier or string, found eof|m.wit:26:16
+seed-bad-630|unexpected character '$'|m.wit:26:16
+seed-eof-633|expected '>', found eof|m.wit:26:19
+seed-bad-633|unexpected character '$'|m.wit:26:19
+seed-eof-634|expected ';', found eof|m.wit:26:20
+seed-bad-634|unexpected character '$'|m.wit:26:20
+seed-eof-635|expected `type`, `resource` or `func`, found eof|m.wit:26:21
+seed-bad-635|unexpected character '$'|m.wit:26:21
+seed-eof-638|expected `type`, `resource` or `func`, found eof|m.wit:27:3
+seed-bad-638|unexpected character '$'|m.wit:27:3
+seed-eof-642|expected an identifier or string, found eof|m.wit:27:7
+seed-bad-642|unexpected character '$'|m.wit:27:7
+seed-eof-643|expected an identifier or string, found eof|m.wit:27:8
+seed-bad-643|unexpected character '$'|m.wit:27:8
+seed-eof-647|expected '=', found eof|m.wit:27:12
+seed-bad-647|unexpected character '$'|m.wit:27:12
+seed-eof-648|expected '=', found eof|m.wit:27:13
+seed-bad-648|unexpected character '$'|m.wit:27:13
+seed-eof-649|expected a type, found eof|m.wit:27:14
+seed-bad-649|unexpected character '$'|m.wit:27:14
+seed-eof-650|expected a type, found eof|m.wit:27:15
+seed-bad-650|unexpected character '$'|m.wit:27:15
+seed-eof-655|expected '<', found eof|m.wit:27:20
+seed-bad-655|unexpected character '$'|m.wit:27:20
+seed-eof-656|expected a type, found eof|m.wit:27:21
+seed-bad-656|unexpected character '$'|m.wit:27:21
+seed-eof-658|expected '>', found eof|m.wit:27:23
+seed-bad-658|unexpected character '$'|m.wit:27:23
+seed-eof-659|expected a type, found eof|m.wit:27:24
+seed-bad-659|unexpected character '$'|m.wit:27:24
+seed-eof-660|expected a type, found eof|m.wit:27:25
+seed-bad-660|unexpected character '$'|m.wit:27:25
+seed-eof-663|expected '>', found eof|m.wit:27:28
+seed-bad-663|unexpected character '$'|m.wit:27:28
+seed-eof-664|expected a type, found eof|m.wit:27:29
+seed-bad-664|unexpected character '$'|m.wit:27:29
+seed-eof-665|expected a type, found eof|m.wit:27:30
+seed-bad-665|unexpected character '$'|m.wit:27:30
+seed-eof-668|expected '>', found eof|m.wit:27:33
+seed-bad-668|unexpected character '$'|m.wit:27:33
+seed-eof-669|expected a type, found eof|m.wit:27:34
+seed-bad-669|unexpected character '$'|m.wit:27:34
+seed-eof-670|expected a type, found eof|m.wit:27:35
+seed-bad-670|unexpected character '$'|m.wit:27:35
+seed-eof-673|expected '>', found eof|m.wit:27:38
+seed-bad-673|unexpected character '$'|m.wit:27:38
+seed-eof-674|expected a type, found eof|m.wit:27:39
+seed-bad-674|unexpected character '$'|m.wit:27:39
+seed-eof-675|expected a type, found eof|m.wit:27:40
+seed-bad-675|unexpected character '$'|m.wit:27:40
+seed-eof-678|expected '>', found eof|m.wit:27:43
+seed-bad-678|unexpected character '$'|m.wit:27:43
+seed-eof-679|expected a type, found eof|m.wit:27:44
+seed-bad-679|unexpected character '$'|m.wit:27:44
+seed-eof-680|expected a type, found eof|m.wit:27:45
+seed-bad-680|unexpected character '$'|m.wit:27:45
+seed-eof-683|expected '>', found eof|m.wit:27:48
+seed-bad-683|unexpected character '$'|m.wit:27:48
+seed-eof-684|expected a type, found eof|m.wit:27:49
+seed-bad-684|unexpected character '$'|m.wit:27:49
+seed-eof-685|expected a type, found eof|m.wit:27:50
+seed-bad-685|unexpected character '$'|m.wit:27:50
+seed-eof-688|expected '>', found eof|m.wit:27:53
+seed-bad-688|unexpected character '$'|m.wit:27:53
+seed-eof-689|expected a type, found eof|m.wit:27:54
+seed-bad-689|unexpected character '$'|m.wit:27:54
+seed-eof-690|expected a type, found eof|m.wit:27:55
+seed-bad-690|unexpected character '$'|m.wit:27:55
+seed-eof-693|expected '>', found eof|m.wit:27:58
+seed-bad-693|unexpected character '$'|m.wit:27:58
+seed-eof-694|expected a type, found eof|m.wit:27:59
+seed-bad-694|unexpected character '$'|m.wit:27:59
+seed-eof-695|expected a type, found eof|m.wit:27:60
+seed-bad-695|unexpected character '$'|m.wit:27:60
+seed-eof-698|expected '>', found eof|m.wit:27:63
+seed-bad-698|unexpected character '$'|m.wit:27:63
+seed-eof-699|expected a type, found eof|m.wit:27:64
+seed-bad-699|unexpected character '$'|m.wit:27:64
+seed-eof-700|expected a type, found eof|m.wit:27:65
+seed-bad-700|unexpected character '$'|m.wit:27:65
+seed-eof-704|expected '>', found eof|m.wit:27:69
+seed-bad-704|unexpected character '$'|m.wit:27:69
+seed-eof-705|expected a type, found eof|m.wit:27:70
+seed-bad-705|unexpected character '$'|m.wit:27:70
+seed-eof-706|expected a type, found eof|m.wit:27:71
+seed-bad-706|unexpected character '$'|m.wit:27:71
+seed-eof-710|expected '>', found eof|m.wit:27:75
+seed-bad-710|unexpected character '$'|m.wit:27:75
+seed-eof-711|expected a type, found eof|m.wit:27:76
+seed-bad-711|unexpected character '$'|m.wit:27:76
+seed-eof-712|expected a type, found eof|m.wit:27:77
+seed-bad-712|unexpected character '$'|m.wit:27:77
+seed-eof-718|expected '>', found eof|m.wit:27:83
+seed-bad-718|unexpected character '$'|m.wit:27:83
+seed-eof-719|expected a type, found eof|m.wit:27:84
+seed-bad-719|unexpected character '$'|m.wit:27:84
+seed-eof-720|expected a type, found eof|m.wit:27:85
+seed-bad-720|unexpected character '$'|m.wit:27:85
+seed-eof-733|expected '>', found eof|m.wit:27:98
+seed-bad-733|unexpected character '$'|m.wit:27:98
+seed-eof-734|expected a type, found eof|m.wit:27:99
+seed-bad-734|unexpected character '$'|m.wit:27:99
+seed-eof-735|expected a type, found eof|m.wit:27:100
+seed-bad-735|unexpected character '$'|m.wit:27:100
+seed-eof-741|expected '<', found eof|m.wit:27:106
+seed-bad-741|unexpected character '$'|m.wit:27:106
+seed-eof-742|expected a type, found eof|m.wit:27:107
+seed-bad-742|unexpected character '$'|m.wit:27:107
+seed-eof-744|expected '>', found eof|m.wit:27:109
+seed-bad-744|unexpected character '$'|m.wit:27:109
+seed-eof-745|expected '>', found eof|m.wit:27:110
+seed-bad-745|unexpected character '$'|m.wit:27:110
+seed-eof-746|expected a type, found eof|m.wit:27:111
+seed-bad-746|unexpected character '$'|m.wit:27:111
+seed-eof-747|expected a type, found eof|m.wit:27:112
+seed-bad-747|unexpected character '$'|m.wit:27:112
+seed-eof-753|expected '>', found eof|m.wit:27:118
+seed-bad-753|unexpected character '$'|m.wit:27:118
+seed-eof-754|expected a type, found eof|m.wit:27:119
+seed-bad-754|unexpected character '$'|m.wit:27:119
+seed-eof-755|expected a type, found eof|m.wit:27:120
+seed-bad-755|unexpected character '$'|m.wit:27:120
+seed-eof-761|expected '>', found eof|m.wit:27:126
+seed-bad-761|unexpected character '$'|m.wit:27:126
+seed-eof-762|expected a type, found eof|m.wit:27:127
+seed-bad-762|unexpected character '$'|m.wit:27:127
+seed-eof-764|expected '>', found eof|m.wit:27:129
+seed-bad-764|unexpected character '$'|m.wit:27:129
+seed-eof-765|expected '>', found eof|m.wit:27:130
+seed-bad-765|unexpected character '$'|m.wit:27:130
+seed-eof-766|expected a type, found eof|m.wit:27:131
+seed-bad-766|unexpected character '$'|m.wit:27:131
+seed-eof-767|expected a type, found eof|m.wit:27:132
+seed-bad-767|unexpected character '$'|m.wit:27:132
+seed-eof-773|expected '>', found eof|m.wit:27:138
+seed-bad-773|unexpected character '$'|m.wit:27:138
+seed-eof-774|expected a type, found eof|m.wit:27:139
+seed-bad-774|unexpected character '$'|m.wit:27:139
+seed-eof-776|expected '>', found eof|m.wit:27:141
+seed-bad-776|unexpected character '$'|m.wit:27:141
+seed-eof-777|expected a type, found eof|m.wit:27:142
+seed-bad-777|unexpected character '$'|m.wit:27:142
+seed-eof-778|expected a type, found eof|m.wit:27:143
+seed-bad-778|unexpected character '$'|m.wit:27:143
+seed-eof-780|expected '>', found eof|m.wit:27:145
+seed-bad-780|unexpected character '$'|m.wit:27:145
+seed-eof-781|expected '>', found eof|m.wit:27:146
+seed-bad-781|unexpected character '$'|m.wit:27:146
+seed-eof-782|expected a type, found eof|m.wit:27:147
+seed-bad-782|unexpected character '$'|m.wit:27:147
+seed-eof-783|expected a type, found eof|m.wit:27:148
+seed-bad-783|unexpected character '$'|m.wit:27:148
+seed-eof-789|expected '>', found eof|m.wit:27:154
+seed-bad-789|unexpected character '$'|m.wit:27:154
+seed-eof-790|expected a type, found eof|m.wit:27:155
+seed-bad-790|unexpected character '$'|m.wit:27:155
+seed-eof-791|expected a type, found eof|m.wit:27:156
+seed-bad-791|unexpected character '$'|m.wit:27:156
+seed-eof-797|expected '>', found eof|m.wit:27:162
+seed-bad-797|unexpected character '$'|m.wit:27:162
+seed-eof-798|expected a type, found eof|m.wit:27:163
+seed-bad-798|unexpected character '$'|m.wit:27:163
+seed-eof-800|expected '>', found eof|m.wit:27:165
+seed-bad-800|unexpected character '$'|m.wit:27:165
+seed-eof-801|expected '>', found eof|m.wit:27:166
+seed-bad-801|unexpected character '$'|m.wit:27:166
+seed-eof-802|expected a type, found eof|m.wit:27:167
+seed-bad-802|unexpected character '$'|m.wit:27:167
+seed-eof-803|expected a type, found eof|m.wit:27:168
+seed-bad-803|unexpected character '$'|m.wit:27:168
+seed-eof-809|expected '>', found eof|m.wit:27:174
+seed-bad-809|unexpected character '$'|m.wit:27:174
+seed-eof-810|expected a type, found eof|m.wit:27:175
+seed-bad-810|unexpected character '$'|m.wit:27:175
+seed-eof-811|expected a type, found eof|m.wit:27:176
+seed-bad-811|unexpected character '$'|m.wit:27:176
+seed-eof-817|expected '>', found eof|m.wit:27:182
+seed-bad-817|unexpected character '$'|m.wit:27:182
+seed-eof-818|expected a type, found eof|m.wit:27:183
+seed-bad-818|unexpected character '$'|m.wit:27:183
+seed-eof-820|expected '>', found eof|m.wit:27:185
+seed-bad-820|unexpected character '$'|m.wit:27:185
+seed-eof-821|expected '>', found eof|m.wit:27:186
+seed-bad-821|unexpected character '$'|m.wit:27:186
+seed-eof-822|expected a type, found eof|m.wit:27:187
+seed-bad-822|unexpected character '$'|m.wit:27:187
+seed-eof-823|expected a type, found eof|m.wit:27:188
+seed-bad-823|unexpected character '$'|m.wit:27:188
+seed-eof-826|expected '<', found eof|m.wit:27:191
+seed-bad-826|unexpected character '$'|m.wit:27:191
+seed-eof-827|expected a type, found eof|m.wit:27:192
+seed-bad-827|unexpected character '$'|m.wit:27:192
+seed-eof-833|expected ',', found eof|m.wit:27:198
+seed-bad-833|unexpected character '$'|m.wit:27:198
+seed-eof-834|expected a type, found eof|m.wit:27:199
+seed-bad-834|unexpected character '$'|m.wit:27:199
+seed-eof-835|expected a type, found eof|m.wit:27:200
+seed-bad-835|unexpected character '$'|m.wit:27:200
+seed-eof-837|expected '>', found eof|m.wit:27:202
+seed-bad-837|unexpected character '$'|m.wit:27:202
+seed-eof-838|expected '>', found eof|m.wit:27:203
+seed-bad-838|unexpected character '$'|m.wit:27:203
+seed-eof-839|expected a type, found eof|m.wit:27:204
+seed-bad-839|unexpected character '$'|m.wit:27:204
+seed-eof-840|expected a type, found eof|m.wit:27:205
+seed-bad-840|unexpected character '$'|m.wit:27:205
+seed-eof-844|expected '<', found eof|m.wit:27:209
+seed-bad-844|unexpected character '$'|m.wit:27:209
+seed-eof-845|expected a type, found eof|m.wit:27:210
+seed-bad-845|unexpected character '$'|m.wit:27:210
+seed-eof-847|expected '>', found eof|m.wit:27:212
+seed-bad-847|unexpected character '$'|m.wit:27:212
+seed-eof-848|expected '>', found eof|m.wit:27:213
+seed-bad-848|unexpected character '$'|m.wit:27:213
+seed-eof-849|expected ';', found eof|m.wit:27:214
+seed-bad-849|unexpected character '$'|m.wit:27:214
+seed-eof-850|expected `type`, `resource` or `func`, found eof|m.wit:27:215
+seed-bad-850|unexpected character '$'|m.wit:27:215
+seed-eof-853|expected `type`, `resource` or `func`, found eof|m.wit:28:3
+seed-bad-853|unexpected character '$'|m.wit:28:3
+seed-eof-854|expected an identifier or string, found eof|m.wit:28:4
+seed-bad-854|unexpected character '$'|m.wit:28:4
+seed-eof-862|expected '(', found eof|m.wit:28:12
+seed-bad-862|unexpected character '$'|m.wit:28:12
+seed-eof-863|expected an identifier or string, found eof|m.wit:28:13
+seed-bad-863|unexpected character '$'|m.wit:28:13
+seed-eof-870|expected '=', found eof|m.wit:28:20
+seed-bad-870|unexpected character '$'|m.wit:28:20
+seed-eof-871|expected '=', found eof|m.wit:28:21
+seed-bad-871|unexpected character '$'|m.wit:28:21
+seed-eof-872|expected an identifier or string, found eof|m.wit:28:22
+seed-bad-872|unexpected character '$'|m.wit:28:22
+seed-eof-873|expected an identifier or string, found eof|m.wit:28:23
+seed-bad-873|unexpected character '$'|m.wit:28:23
+seed-eof-878|expected ')', found eof|m.wit:28:28
+seed-bad-878|unexpected character '$'|m.wit:28:28
+seed-eof-879|expected `type`, `resource` or `func`, found eof|m.wit:28:29
+seed-bad-879|unexpected character '$'|m.wit:28:29
+seed-eof-882|expected `type`, `resource` or `func`, found eof|m.wit:29:3
+seed-bad-882|unexpected character '$'|m.wit:29:3
+seed-eof-887|expected ':', found eof|m.wit:29:8
+seed-bad-887|unexpected character '$'|m.wit:29:8
+seed-eof-888|expected keyword `func`, found eof|m.wit:29:9
+seed-bad-888|unexpected character '$'|m.wit:29:9
+seed-eof-889|expected keyword `func`, found eof|m.wit:29:10
+seed-bad-889|unexpected character '$'|m.wit:29:10
+seed-eof-894|expected keyword `func`, found eof|m.wit:29:15
+seed-bad-894|unexpected character '$'|m.wit:29:15
+seed-eof-895|expected keyword `func`, found eof|m.wit:29:16
+seed-bad-895|unexpected character '$'|m.wit:29:16
+seed-eof-899|expected '(', found eof|m.wit:29:20
+seed-bad-899|unexpected character '$'|m.wit:29:20
+seed-eof-900|expected an identifier or string, found eof|m.wit:29:21
+seed-bad-900|unexpected character '$'|m.wit:29:21
+seed-eof-901|expected ':', found eof|m.wit:29:22
+seed-bad-901|unexpected character '$'|m.wit:29:22
+seed-eof-902|expected a type, found eof|m.wit:29:23
+seed-bad-902|unexpected character '$'|m.wit:29:23
+seed-eof-903|expected a type, found eof|m.wit:29:24
+seed-bad-903|unexpected character '$'|m.wit:29:24
+seed-eof-908|expected '<', found eof|m.wit:29:29
+seed-bad-908|unexpected character '$'|m.wit:29:29
+seed-eof-909|expected a type, found eof|m.wit:29:30
+seed-bad-909|unexpected character '$'|m.wit:29:30
+seed-eof-911|expected '>', found eof|m.wit:29:32
+seed-bad-911|unexpected character '$'|m.wit:29:32
+seed-eof-912|expected a type, found eof|m.wit:29:33
+seed-bad-912|unexpected character '$'|m.wit:29:33
+seed-eof-913|expected a type, found eof|m.wit:29:34
+seed-bad-913|unexpected character '$'|m.wit:29:34
+seed-eof-919|expected '>', found eof|m.wit:29:40
+seed-bad-919|unexpected character '$'|m.wit:29:40
+seed-eof-920|expected ')', found eof|m.wit:29:41
+seed-bad-920|unexpected character '$'|m.wit:29:41
+seed-eof-921|expected ';', found eof|m.wit:29:42
+seed-bad-921|unexpected character '$'|m.wit:29:42
+seed-eof-922|expected ';', found eof|m.wit:29:43
+seed-bad-922|unexpected character '$'|m.wit:29:43
+seed-eof-923|expected ';', found `-`|m.wit:29:43
+seed-bad-923|expected ';', found `-`|m.wit:29:43
+seed-eof-924|expected a type, found eof|m.wit:29:45
+seed-bad-924|unexpected character '$'|m.wit:29:45
+seed-eof-925|expected a type, found eof|m.wit:29:46
+seed-bad-925|unexpected character '$'|m.wit:29:46
+seed-eof-928|expected '<', found eof|m.wit:29:49
+seed-bad-928|unexpected character '$'|m.wit:29:49
+seed-eof-929|expected a type, found eof|m.wit:29:50
+seed-bad-929|unexpected character '$'|m.wit:29:50
+seed-eof-935|expected ',', found eof|m.wit:29:56
+seed-bad-935|unexpected character '$'|m.wit:29:56
+seed-eof-936|expected a type, found eof|m.wit:29:57
+seed-bad-936|unexpected character '$'|m.wit:29:57
+seed-eof-937|expected a type, found eof|m.wit:29:58
+seed-bad-937|unexpected character '$'|m.wit:29:58
+seed-eof-943|expected '<', found eof|m.wit:29:64
+seed-bad-943|unexpected character '$'|m.wit:29:64
+seed-eof-944|expected a type, found eof|m.wit:29:65
+seed-bad-944|unexpected character '$'|m.wit:29:65
+seed-eof-946|expected '>', found eof|m.wit:29:67
+seed-bad-946|unexpected character '$'|m.wit:29:67
+seed-eof-947|expected '>', found eof|m.wit:29:68
+seed-bad-947|unexpected character '$'|m.wit:29:68
+seed-eof-948|expected ';', found eof|m.wit:29:69
+seed-bad-948|unexpected character '$'|m.wit:29:69
+seed-eof-949|expected `type`, `resource` or `func`, found eof|m.wit:29:70
+seed-bad-949|unexpected character '$'|m.wit:29:70
+seed-eof-952|expected `type`, `resource` or `func`, found eof|m.wit:30:3
+seed-bad-952|unexpected character '$'|m.wit:30:3
+seed-eof-956|expected ':', found eof|m.wit:30:7
+seed-bad-956|unexpected character '$'|m.wit:30:7
+seed-eof-957|expected keyword `func`, found eof|m.wit:30:8
+seed-bad-957|unexpected character '$'|m.wit:30:8
+seed-eof-958|expected keyword `func`, found eof|m.wit:30:9
+seed-bad-958|unexpected character '$'|m.wit:30:9
+seed-eof-961|expected keyword `func`, found an identifier|m.wit:30:9
+seed-bad-961|unexpected character '$'|m.wit:30:12
+seed-eof-962|expected an identifier or string, found eof|m.wit:30:13
+seed-bad-962|unexpected character '$'|m.wit:30:13
+seed-eof-963|expected ';', found eof|m.wit:30:14
+seed-bad-963|unexpected character '$'|m.wit:30:14
+seed-eof-964|expected ';', found eof|m.wit:30:15
+seed-bad-964|unexpected character '$'|m.wit:30:15
+seed-eof-965|expected ';', found `-`|m.wit:30:15
+seed-bad-965|expected ';', found `-`|m.wit:30:15
+seed-eof-966|expected a type, found eof|m.wit:30:17
+seed-bad-966|unexpected character '$'|m.wit:30:17
+seed-eof-967|expected a type, found eof|m.wit:30:18
+seed-bad-967|unexpected character '$'|m.wit:30:18
+seed-eof-970|expected ';', found eof|m.wit:30:21
+seed-bad-970|unexpected character '$'|m.wit:30:21
+seed-eof-971|expected `type`, `resource` or `func`, found eof|m.wit:30:22
+seed-bad-971|unexpected character '$'|m.wit:30:22
+seed-eof-974|expected `type`, `resource` or `func`, found eof|m.wit:31:3
+seed-bad-974|unexpected character '$'|m.wit:31:3
+seed-eof-978|expected ':', found eof|m.wit:31:7
+seed-bad-978|unexpected character '$'|m.wit:31:7
+seed-eof-979|expected keyword `func`, found eof|m.wit:31:8
+seed-bad-979|unexpected character '$'|m.wit:31:8
+seed-eof-980|expected keyword `func`, found eof|m.wit:31:9
+seed-bad-980|unexpected character '$'|m.wit:31:9
+seed-eof-983|expected keyword `func`, found an identifier|m.wit:31:9
+seed-bad-983|unexpected character '$'|m.wit:31:12
+seed-eof-984|expected an identifier or string, found eof|m.wit:31:13
+seed-bad-984|unexpected character '$'|m.wit:31:13
+seed-eof-985|expected ':', found eof|m.wit:31:14
+seed-bad-985|unexpected character '$'|m.wit:31:14
+seed-eof-986|expected a type, found eof|m.wit:31:15
+seed-bad-986|unexpected character '$'|m.wit:31:15
+seed-eof-987|expected a type, found eof|m.wit:31:16
+seed-bad-987|unexpected character '$'|m.wit:31:16
+seed-eof-990|expected ')', found eof|m.wit:31:19
+seed-bad-990|unexpected character '$'|m.wit:31:19
+seed-eof-991|expected ';', found eof|m.wit:31:20
+seed-bad-991|unexpected character '$'|m.wit:31:20
+seed-eof-992|expected `type`, `resource` or `func`, found eof|m.wit:31:21
+seed-bad-992|unexpected character '$'|m.wit:31:21
+seed-eof-993|expected `type`, `resource` or `func`, found eof|m.wit:32:1
+seed-bad-993|unexpected character '$'|m.wit:32:1
+seed-eof-994|package 'c:d@1.0.0' not found. known packages:|
+seed-bad-994|unexpected character '$'|m.wit:32:2
+seed-eof-996|package 'c:d@1.0.0' not found. known packages:|
+seed-bad-996|unexpected character '$'|m.wit:34:1
+seed-eof-1001|expected an identifier or string, found eof|m.wit:34:6
+seed-bad-1001|unexpected character '$'|m.wit:34:6
+seed-eof-1002|expected an identifier or string, found eof|m.wit:34:7
+seed-bad-1002|unexpected character '$'|m.wit:34:7
+seed-eof-1003|expected '{', found eof|m.wit:34:8
+seed-bad-1003|unexpected character '$'|m.wit:34:8
+seed-eof-1004|expected '{', found eof|m.wit:34:9
+seed-bad-1004|unexpected character '$'|m.wit:34:9
+seed-eof-1005|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:34:10
+seed-bad-1005|unexpected character '$'|m.wit:34:10
+seed-eof-1008|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:35:3
+seed-bad-1008|unexpected character '$'|m.wit:35:3
+seed-eof-1011|expected an identifier or string, found eof|m.wit:35:6
+seed-bad-1011|unexpected character '$'|m.wit:35:6
+seed-eof-1012|expected an identifier or string, found eof|m.wit:35:7
+seed-bad-1012|unexpected character '$'|m.wit:35:7
+seed-eof-1013|expected '.', found eof|m.wit:35:8
+seed-bad-1013|unexpected character '$'|m.wit:35:8
+seed-eof-1014|expected '{', found eof|m.wit:35:9
+seed-bad-1014|unexpected character '$'|m.wit:35:9
+seed-eof-1015|expected an identifier or string, found eof|m.wit:35:10
+seed-bad-1015|unexpected character '$'|m.wit:35:10
+seed-eof-1016|expected '}', found eof|m.wit:35:11
+seed-bad-1016|unexpected character '$'|m.wit:35:11
+seed-eof-1017|expected ';', found eof|m.wit:35:12
+seed-bad-1017|unexpected character '$'|m.wit:35:12
+seed-eof-1018|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:35:13
+seed-bad-1018|unexpected character '$'|m.wit:35:13
+seed-eof-1021|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:36:3
+seed-bad-1021|unexpected character '$'|m.wit:36:3
+seed-eof-1025|expected an identifier or string, found eof|m.wit:36:7
+seed-bad-1025|unexpected character '$'|m.wit:36:7
+seed-eof-1026|expected an identifier or string, found eof|m.wit:36:8
+seed-bad-1026|unexpected character '$'|m.wit:36:8
+seed-eof-1031|expected '=', found eof|m.wit:36:13
+seed-bad-1031|unexpected character '$'|m.wit:36:13
+seed-eof-1032|expected '=', found eof|m.wit:36:14
+seed-bad-1032|unexpected character '$'|m.wit:36:14
+seed-eof-1033|expected a type, found eof|m.wit:36:15
+seed-bad-1033|unexpected character '$'|m.wit:36:15
+seed-eof-1034|expected a type, found eof|m.wit:36:16
+seed-bad-1034|unexpected character '$'|m.wit:36:16
+seed-eof-1036|expected ';', found eof|m.wit:36:18
+seed-bad-1036|unexpected character '$'|m.wit:36:18
+seed-eof-1037|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:36:19
+seed-bad-1037|unexpected character '$'|m.wit:36:19
+seed-eof-1040|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:37:3
+seed-bad-1040|unexpected character '$'|m.wit:37:3
+seed-eof-1048|expected an identifier or string, found eof|m.wit:37:11
+seed-bad-1048|unexpected character '$'|m.wit:37:11
+seed-eof-1049|expected an identifier or string, found eof|m.wit:37:12
+seed-bad-1049|unexpected character '$'|m.wit:37:12
+seed-eof-1053|expected ';', found eof|m.wit:37:16
+seed-bad-1053|unexpected character '$'|m.wit:37:16
+seed-eof-1054|expected ';', found eof|m.wit:37:17
+seed-bad-1054|unexpected character '$'|m.wit:37:17
+seed-eof-1055|expected `constructor` or identifier, found eof|m.wit:37:18
+seed-bad-1055|unexpected character '$'|m.wit:37:18
+seed-eof-1056|expected `constructor` or identifier, found eof|m.wit:37:19
+seed-bad-1056|unexpected character '$'|m.wit:37:19
+seed-eof-1060|expected ':', found eof|m.wit:37:23
+seed-bad-1060|unexpected character '$'|m.wit:37:23
+seed-eof-1061|expected keyword `func`, found eof|m.wit:37:24
+seed-bad-1061|unexpected character '$'|m.wit:37:24
+seed-eof-1062|expected keyword `func`, found eof|m.wit:37:25
+seed-bad-1062|unexpected character '$'|m.wit:37:25
+seed-eof-1066|expected '(', found eof|m.wit:37:29
+seed-bad-1066|unexpected character '$'|m.wit:37:29
+seed-eof-1067|expected an identifier or string, found eof|m.wit:37:30
+seed-bad-1067|unexpected character '$'|m.wit:37:30
+seed-eof-1068|expected ';', found eof|m.wit:37:31
+seed-bad-1068|unexpected character '$'|m.wit:37:31
+seed-eof-1069|expected `constructor` or identifier, found eof|m.wit:37:32
+seed-bad-1069|unexpected character '$'|m.wit:37:32
+seed-eof-1070|expected `constructor` or identifier, found eof|m.wit:37:33
+seed-bad-1070|unexpected character '$'|m.wit:37:33
+seed-eof-1071|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:37:34
+seed-bad-1071|unexpected character '$'|m.wit:37:34
+seed-eof-1074|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:38:3
+seed-bad-1074|unexpected character '$'|m.wit:38:3
+seed-eof-1080|expected an identifier or string, found eof|m.wit:38:9
+seed-bad-1080|unexpected character '$'|m.wit:38:9
+seed-eof-1081|expected an identifier or string, found eof|m.wit:38:10
+seed-bad-1081|unexpected character '$'|m.wit:38:10
+seed-eof-1086|expected ';', found eof|m.wit:38:15
+seed-bad-1086|unexpected character '$'|m.wit:38:15
+seed-eof-1087|expected an identifier or string, found eof|m.wit:38:16
+seed-bad-1087|unexpected character '$'|m.wit:38:16
+seed-eof-1088|expected an identifier or string, found eof|m.wit:38:17
+seed-bad-1088|unexpected character '$'|m.wit:38:17
+seed-eof-1089|expected ';', found eof|m.wit:38:18
+seed-bad-1089|unexpected character '$'|m.wit:38:18
+seed-eof-1090|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:38:19
+seed-bad-1090|unexpected character '$'|m.wit:38:19
+seed-eof-1093|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:39:3
+seed-bad-1093|unexpected character '$'|m.wit:39:3
+seed-eof-1099|expected an identifier or string, found eof|m.wit:39:9
+seed-bad-1099|unexpected character '$'|m.wit:39:9
+seed-eof-1100|expected an identifier or string, found eof|m.wit:39:10
+seed-bad-1100|unexpected character '$'|m.wit:39:10
+seed-eof-1101|expected ';', found eof|m.wit:39:11
+seed-bad-1101|unexpected character '$'|m.wit:39:11
+seed-eof-1102|expected an identifier or string, found eof|m.wit:39:12
+seed-bad-1102|unexpected character '$'|m.wit:39:12
+seed-eof-1103|expected ';', found eof|m.wit:39:13
+seed-bad-1103|unexpected character '$'|m.wit:39:13
+seed-eof-1104|expected an identifier or string, found eof|m.wit:39:14
+seed-bad-1104|unexpected character '$'|m.wit:39:14
+seed-eof-1105|expected ';', found eof|m.wit:39:15
+seed-bad-1105|unexpected character '$'|m.wit:39:15
+seed-eof-1106|expected an integer, found eof|m.wit:39:16
+seed-bad-1106|unexpected character '$'|m.wit:39:16
+seed-eof-1107|expected '.', found eof|m.wit:39:17
+seed-bad-1107|unexpected character '$'|m.wit:39:17
+seed-eof-1108|expected an integer, found eof|m.wit:39:18
+seed-bad-1108|unexpected character '$'|m.wit:39:18
+seed-eof-1109|expected '.', found eof|m.wit:39:19
+seed-bad-1109|unexpected character '$'|m.wit:39:19
+seed-eof-1110|expected an integer, found eof|m.wit:39:20
+seed-bad-1110|unexpected character '$'|m.wit:39:20
+seed-eof-1111|expected ';', found eof|m.wit:39:21
+seed-bad-1111|unexpected character '$'|m.wit:39:21
+seed-eof-1112|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:39:22
+seed-bad-1112|unexpected character '$'|m.wit:39:22
+seed-eof-1115|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:40:3
+seed-bad-1115|unexpected character '$'|m.wit:40:3
+seed-eof-1121|expected an identifier or string, found eof|m.wit:40:9
+seed-bad-1121|unexpected character '$'|m.wit:40:9
+seed-eof-1122|expected an identifier or string, found eof|m.wit:40:10
+seed-bad-1122|unexpected character '$'|m.wit:40:10
+seed-eof-1123|expected ';', found eof|m.wit:40:11
+seed-bad-1123|unexpected character '$'|m.wit:40:11
+seed-eof-1124|expected an identifier or string, found eof|m.wit:40:12
+seed-bad-1124|unexpected character '$'|m.wit:40:12
+seed-eof-1125|expected an identifier or string, found eof|m.wit:40:13
+seed-bad-1125|unexpected character '$'|m.wit:40:13
+seed-eof-1129|expected '(', found eof|m.wit:40:17
+seed-bad-1129|unexpected character '$'|m.wit:40:17
+seed-eof-1130|expected an identifier or string, found eof|m.wit:40:18
+seed-bad-1130|unexpected character '$'|m.wit:40:18
+seed-eof-1131|expected ':', found eof|m.wit:40:19
+seed-bad-1131|unexpected character '$'|m.wit:40:19
+seed-eof-1132|expected a type, found eof|m.wit:40:20
+seed-bad-1132|unexpected character '$'|m.wit:40:20
+seed-eof-1133|expected a type, found eof|m.wit:40:21
+seed-bad-1133|unexpected character '$'|m.wit:40:21
+seed-eof-1134|expected ')', found eof|m.wit:40:22
+seed-bad-1134|unexpected character '$'|m.wit:40:22
+seed-eof-1135|expected ';', found eof|m.wit:40:23
+seed-bad-1135|unexpected character '$'|m.wit:40:23
+seed-eof-1136|expected ';', found eof|m.wit:40:24
+seed-bad-1136|unexpected character '$'|m.wit:40:24
+seed-eof-1137|expected ';', found `-`|m.wit:40:24
+seed-bad-1137|expected ';', found `-`|m.wit:40:24
+seed-eof-1138|expected a type, found eof|m.wit:40:26
+seed-bad-1138|unexpected character '$'|m.wit:40:26
+seed-eof-1139|expected a type, found eof|m.wit:40:27
+seed-bad-1139|unexpected character '$'|m.wit:40:27
+seed-eof-1144|expected ';', found eof|m.wit:40:32
+seed-bad-1144|unexpected character '$'|m.wit:40:32
+seed-eof-1145|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:40:33
+seed-bad-1145|unexpected character '$'|m.wit:40:33
+seed-eof-1148|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:41:3
+seed-bad-1148|unexpected character '$'|m.wit:41:3
+seed-eof-1154|expected an identifier or string, found eof|m.wit:41:9
+seed-bad-1154|unexpected character '$'|m.wit:41:9
+seed-eof-1155|expected an identifier or string, found eof|m.wit:41:10
+seed-bad-1155|unexpected character '$'|m.wit:41:10
+seed-eof-1156|expected ';', found eof|m.wit:41:11
+seed-bad-1156|unexpected character '$'|m.wit:41:11
+seed-eof-1157|expected an identifier or string, found eof|m.wit:41:12
+seed-bad-1157|unexpected character '$'|m.wit:41:12
+seed-eof-1158|expected an identifier or string, found eof|m.wit:41:13
+seed-bad-1158|unexpected character '$'|m.wit:41:13
+seed-eof-1163|expected keyword `func`, found eof|m.wit:41:18
+seed-bad-1163|unexpected character '$'|m.wit:41:18
+seed-eof-1164|expected keyword `func`, found eof|m.wit:41:19
+seed-bad-1164|unexpected character '$'|m.wit:41:19
+seed-eof-1168|expected '(', found eof|m.wit:41:23
+seed-bad-1168|unexpected character '$'|m.wit:41:23
+seed-eof-1169|expected an identifier or string, found eof|m.wit:41:24
+seed-bad-1169|unexpected character '$'|m.wit:41:24
+seed-eof-1170|expected ';', found eof|m.wit:41:25
+seed-bad-1170|unexpected character '$'|m.wit:41:25
+seed-eof-1171|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:41:26
+seed-bad-1171|unexpected character '$'|m.wit:41:26
+seed-eof-1174|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:42:3
+seed-bad-1174|unexpected character '$'|m.wit:42:3
+seed-eof-1180|expected an identifier or string, found eof|m.wit:42:9
+seed-bad-1180|unexpected character '$'|m.wit:42:9
+seed-eof-1181|expected an identifier or string, found eof|m.wit:42:10
+seed-bad-1181|unexpected character '$'|m.wit:42:10
+seed-eof-1182|expected ';', found eof|m.wit:42:11
+seed-bad-1182|unexpected character '$'|m.wit:42:11
+seed-eof-1183|expected an identifier or string, found eof|m.wit:42:12
+seed-bad-1183|unexpected character '$'|m.wit:42:12
+seed-eof-1184|expected an identifier or string, found eof|m.wit:42:13
+seed-bad-1184|unexpected character '$'|m.wit:42:13
+seed-eof-1187|expected ';', found eof|m.wit:42:16
+seed-bad-1187|unexpected character '$'|m.wit:42:16
+seed-eof-1188|expected an identifier or string, found eof|m.wit:42:17
+seed-bad-1188|unexpected character '$'|m.wit:42:17
+seed-eof-1189|expected ';', found eof|m.wit:42:18
+seed-bad-1189|unexpected character '$'|m.wit:42:18
+seed-eof-1190|expected ';', found eof|m.wit:42:19
+seed-bad-1190|unexpected character '$'|m.wit:42:19
+seed-eof-1191|expected ';', found `-`|m.wit:42:19
+seed-bad-1191|expected ';', found `-`|m.wit:42:19
+seed-eof-1192|expected a type, found eof|m.wit:42:21
+seed-bad-1192|unexpected character '$'|m.wit:42:21
+seed-eof-1193|expected a type, found eof|m.wit:42:22
+seed-bad-1193|unexpected character '$'|m.wit:42:22
+seed-eof-1195|expected ';', found eof|m.wit:42:24
+seed-bad-1195|unexpected character '$'|m.wit:42:24
+seed-eof-1196|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:42:25
+seed-bad-1196|unexpected character '$'|m.wit:42:25
+seed-eof-1199|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:43:3
+seed-bad-1199|unexpected character '$'|m.wit:43:3
+seed-eof-1205|expected an identifier or string, found eof|m.wit:43:9
+seed-bad-1205|unexpected character '$'|m.wit:43:9
+seed-eof-1206|expected an identifier or string, found eof|m.wit:43:10
+seed-bad-1206|unexpected character '$'|m.wit:43:10
+seed-eof-1207|expected ';', found eof|m.wit:43:11
+seed-bad-1207|unexpected character '$'|m.wit:43:11
+seed-eof-1208|expected an identifier or string, found eof|m.wit:43:12
+seed-bad-1208|unexpected character '$'|m.wit:43:12
+seed-eof-1209|expected an identifier or string, found eof|m.wit:43:13
+seed-bad-1209|unexpected character '$'|m.wit:43:13
+seed-eof-1218|expected '{', found eof|m.wit:43:22
+seed-bad-1218|unexpected character '$'|m.wit:43:22
+seed-eof-1219|expected '{', found eof|m.wit:43:23
+seed-bad-1219|unexpected character '$'|m.wit:43:23
+seed-eof-1220|expected `type`, `resource` or `func`, found eof|m.wit:43:24
+seed-bad-1220|unexpected character '$'|m.wit:43:24
+seed-eof-1221|expected `type`, `resource` or `func`, found eof|m.wit:43:25
+seed-bad-1221|unexpected character '$'|m.wit:43:25
+seed-eof-1222|expected ':', found eof|m.wit:43:26
+seed-bad-1222|unexpected character '$'|m.wit:43:26
+seed-eof-1223|expected keyword `func`, found eof|m.wit:43:27
+seed-bad-1223|unexpected character '$'|m.wit:43:27
+seed-eof-1224|expected keyword `func`, found eof|m.wit:43:28
+seed-bad-1224|unexpected character '$'|m.wit:43:28
+seed-eof-1228|expected '(', found eof|m.wit:43:32
+seed-bad-1228|unexpected character '$'|m.wit:43:32
+seed-eof-1229|expected an identifier or string, found eof|m.wit:43:33
+seed-bad-1229|unexpected character '$'|m.wit:43:33
+seed-eof-1230|expected ';', found eof|m.wit:43:34
+seed-bad-1230|unexpected character '$'|m.wit:43:34
+seed-eof-1231|expected `type`, `resource` or `func`, found eof|m.wit:43:35
+seed-bad-1231|unexpected character '$'|m.wit:43:35
+seed-eof-1232|expected `type`, `resource` or `func`, found eof|m.wit:43:36
+seed-bad-1232|unexpected character '$'|m.wit:43:36
+seed-eof-1233|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:43:37
+seed-bad-1233|unexpected character '$'|m.wit:43:37
+seed-eof-1236|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:44:3
+seed-bad-1236|unexpected character '$'|m.wit:44:3
+seed-eof-1242|expected an identifier or string, found eof|m.wit:44:9
+seed-bad-1242|unexpected character '$'|m.wit:44:9
+seed-eof-1243|expected an identifier or string, found eof|m.wit:44:10
+seed-bad-1243|unexpected character '$'|m.wit:44:10
+seed-eof-1244|expected ';', found eof|m.wit:44:11
+seed-bad-1244|unexpected character '$'|m.wit:44:11
+seed-eof-1245|expected an identifier or string, found eof|m.wit:44:12
+seed-bad-1245|unexpected character '$'|m.wit:44:12
+seed-eof-1246|expected an identifier or string, found eof|m.wit:44:13
+seed-bad-1246|unexpected character '$'|m.wit:44:13
+seed-eof-1250|expected '(', found eof|m.wit:44:17
+seed-bad-1250|unexpected character '$'|m.wit:44:17
+seed-eof-1251|expected an identifier or string, found eof|m.wit:44:18
+seed-bad-1251|unexpected character '$'|m.wit:44:18
+seed-eof-1252|expected ';', found eof|m.wit:44:19
+seed-bad-1252|unexpected character '$'|m.wit:44:19
+seed-eof-1253|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:44:20
+seed-bad-1253|unexpected character '$'|m.wit:44:20
+seed-eof-1256|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:45:3
+seed-bad-1256|unexpected character '$'|m.wit:45:3
+seed-eof-1263|expected an identifier or string, found eof|m.wit:45:10
+seed-bad-1263|unexpected character '$'|m.wit:45:10
+seed-eof-1264|expected an identifier or string, found eof|m.wit:45:11
+seed-bad-1264|unexpected character '$'|m.wit:45:11
+seed-eof-1265|expected ';', found eof|m.wit:45:12
+seed-bad-1265|unexpected character '$'|m.wit:45:12
+seed-eof-1266|expected ';', found eof|m.wit:45:13
+seed-bad-1266|unexpected character '$'|m.wit:45:13
+seed-eof-1270|expected '{', found eof|m.wit:45:17
+seed-bad-1270|unexpected character '$'|m.wit:45:17
+seed-eof-1271|expected '{', found eof|m.wit:45:18
+seed-bad-1271|unexpected character '$'|m.wit:45:18
+seed-eof-1272|expected an identifier or string, found eof|m.wit:45:19
+seed-bad-1272|unexpected character '$'|m.wit:45:19
+seed-eof-1273|expected an identifier or string, found eof|m.wit:45:20
+seed-bad-1273|unexpected character '$'|m.wit:45:20
+seed-eof-1274|expected keyword `as`, found eof|m.wit:45:21
+seed-bad-1274|unexpected character '$'|m.wit:45:21
+seed-eof-1275|expected keyword `as`, found eof|m.wit:45:22
+seed-bad-1275|unexpected character '$'|m.wit:45:22
+seed-eof-1277|expected an identifier or string, found eof|m.wit:45:24
+seed-bad-1277|unexpected character '$'|m.wit:45:24
+seed-eof-1278|expected an identifier or string, found eof|m.wit:45:25
+seed-bad-1278|unexpected character '$'|m.wit:45:25
+seed-eof-1280|expected '}', found eof|m.wit:45:27
+seed-bad-1280|unexpected character '$'|m.wit:45:27
+seed-eof-1281|expected an identifier or string, found eof|m.wit:45:28
+seed-bad-1281|unexpected character '$'|m.wit:45:28
+seed-eof-1282|expected an identifier or string, found eof|m.wit:45:29
+seed-bad-1282|unexpected character '$'|m.wit:45:29
+seed-eof-1283|expected keyword `as`, found eof|m.wit:45:30
+seed-bad-1283|unexpected character '$'|m.wit:45:30
+seed-eof-1284|expected keyword `as`, found eof|m.wit:45:31
+seed-bad-1284|unexpected character '$'|m.wit:45:31
+seed-eof-1286|expected an identifier or string, found eof|m.wit:45:33
+seed-bad-1286|unexpected character '$'|m.wit:45:33
+seed-eof-1287|expected an identifier or string, found eof|m.wit:45:34
+seed-bad-1287|unexpected character '$'|m.wit:45:34
+seed-eof-1289|expected '}', found eof|m.wit:45:36
+seed-bad-1289|unexpected character '$'|m.wit:45:36
+seed-eof-1290|expected '}', found eof|m.wit:45:37
+seed-bad-1290|unexpected character '$'|m.wit:45:37
+seed-eof-1291|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:45:38
+seed-bad-1291|unexpected character '$'|m.wit:45:38
+seed-eof-1294|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:46:3
+seed-bad-1294|unexpected character '$'|m.wit:46:3
+seed-eof-1301|expected an identifier or string, found eof|m.wit:46:10
+seed-bad-1301|unexpected character '$'|m.wit:46:10
+seed-eof-1302|expected an identifier or string, found eof|m.wit:46:11
+seed-bad-1302|unexpected character '$'|m.wit:46:11
+seed-eof-1303|expected ';', found eof|m.wit:46:12
+seed-bad-1303|unexpected character '$'|m.wit:46:12
+seed-eof-1304|expected an identifier or string, found eof|m.wit:46:13
+seed-bad-1304|unexpected character '$'|m.wit:46:13
+seed-eof-1305|expected `/`, found eof|m.wit:46:14
+seed-bad-1305|unexpected character '$'|m.wit:46:14
+seed-eof-1306|expected an identifier or string, found eof|m.wit:46:15
+seed-bad-1306|unexpected character '$'|m.wit:46:15
+seed-eof-1307|expected ';', found eof|m.wit:46:16
+seed-bad-1307|unexpected character '$'|m.wit:46:16
+seed-eof-1308|expected an integer, found eof|m.wit:46:17
+seed-bad-1308|unexpected character '$'|m.wit:46:17
+seed-eof-1309|expected '.', found eof|m.wit:46:18
+seed-bad-1309|unexpected character '$'|m.wit:46:18
+seed-eof-1310|expected an integer, found eof|m.wit:46:19
+seed-bad-1310|unexpected character '$'|m.wit:46:19
+seed-eof-1311|expected '.', found eof|m.wit:46:20
+seed-bad-1311|unexpected character '$'|m.wit:46:20
+seed-eof-1312|expected an integer, found eof|m.wit:46:21
+seed-bad-1312|unexpected character '$'|m.wit:46:21
+seed-eof-1313|expected ';', found eof|m.wit:46:22
+seed-bad-1313|unexpected character '$'|m.wit:46:22
+seed-eof-1314|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:46:23
+seed-bad-1314|unexpected character '$'|m.wit:46:23
+seed-eof-1315|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:47:1
+seed-bad-1315|unexpected character '$'|m.wit:47:1
+seed-eof-1316|interface or world `v` does not exist|m.wit:45:11
+seed-bad-1316|unexpected character '$'|m.wit:47:2
+seed-eof-1318|interface or world `v` does not exist|m.wit:45:11
+seed-bad-1318|unexpected character '$'|m.wit:49:1
+seed-eof-1323|expected an identifier or string, found eof|m.wit:49:6
+seed-bad-1323|unexpected character '$'|m.wit:49:6
+seed-eof-1324|expected an identifier or string, found eof|m.wit:49:7
+seed-bad-1324|unexpected character '$'|m.wit:49:7
+seed-eof-1325|expected '{', found eof|m.wit:49:8
+seed-bad-1325|unexpected character '$'|m.wit:49:8
+seed-eof-1326|expected '{', found eof|m.wit:49:9
+seed-bad-1326|unexpected character '$'|m.wit:49:9
+seed-eof-1327|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:49:10
+seed-bad-1327|unexpected character '$'|m.wit:49:10
+seed-eof-1328|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:49:11
+seed-bad-1328|unexpected character '$'|m.wit:49:11
+seed-eof-1334|expected an identifier or string, found eof|m.wit:49:17
+seed-bad-1334|unexpected character '$'|m.wit:49:17
+seed-eof-1335|expected an identifier or string, found eof|m.wit:49:18
+seed-bad-1335|unexpected character '$'|m.wit:49:18
+seed-eof-1336|expected ';', found eof|m.wit:49:19
+seed-bad-1336|unexpected character '$'|m.wit:49:19
+seed-eof-1337|expected an identifier or string, found eof|m.wit:49:20
+seed-bad-1337|unexpected character '$'|m.wit:49:20
+seed-eof-1338|expected an identifier or string, found eof|m.wit:49:21
+seed-bad-1338|unexpected character '$'|m.wit:49:21
+seed-eof-1342|expected '(', found eof|m.wit:49:25
+seed-bad-1342|unexpected character '$'|m.wit:49:25
+seed-eof-1343|expected an identifier or string, found eof|m.wit:49:26
+seed-bad-1343|unexpected character '$'|m.wit:49:26
+seed-eof-1344|expected ';', found eof|m.wit:49:27
+seed-bad-1344|unexpected character '$'|m.wit:49:27
+seed-eof-1345|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:49:28
+seed-bad-1345|unexpected character '$'|m.wit:49:28
+seed-eof-1346|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:49:29
+seed-bad-1346|unexpected character '$'|m.wit:49:29
+seed-eof-1352|expected an identifier or string, found eof|m.wit:49:35
+seed-bad-1352|unexpected character '$'|m.wit:49:35
+seed-eof-1353|expected an identifier or string, found eof|m.wit:49:36
+seed-bad-1353|unexpected character '$'|m.wit:49:36
+seed-eof-1354|expected ';', found eof|m.wit:49:37
+seed-bad-1354|unexpected character '$'|m.wit:49:37
+seed-eof-1355|expected an identifier or string, found eof|m.wit:49:38
+seed-bad-1355|unexpected character '$'|m.wit:49:38
+seed-eof-1356|expected an identifier or string, found eof|m.wit:49:39
+seed-bad-1356|unexpected character '$'|m.wit:49:39
+seed-eof-1360|expected '(', found eof|m.wit:49:43
+seed-bad-1360|unexpected character '$'|m.wit:49:43
+seed-eof-1361|expected an identifier or string, found eof|m.wit:49:44
+seed-bad-1361|unexpected character '$'|m.wit:49:44
+seed-eof-1362|expected ';', found eof|m.wit:49:45
+seed-bad-1362|unexpected character '$'|m.wit:49:45
+seed-eof-1363|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:49:46
+seed-bad-1363|unexpected character '$'|m.wit:49:46
+seed-eof-1364|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:49:47
+seed-bad-1364|unexpected character '$'|m.wit:49:47
+seed-eof-1365|package 'c:d@1.0.0' not found. known packages:|
+seed-bad-1365|unexpected character '$'|m.wit:49:48
+seed-eof-1367|package 'c:d@1.0.0' not found. known packages:|
+seed-bad-1367|unexpected character '$'|m.wit:51:1
+seed-eof-1374|expected an identifier or string, found eof|m.wit:51:8
+seed-bad-1374|unexpected character '$'|m.wit:51:8
+seed-eof-1375|expected an identifier or string, found eof|m.wit:51:9
+seed-bad-1375|unexpected character '$'|m.wit:51:9
+seed-eof-1376|expected ':', found eof|m.wit:51:10
+seed-bad-1376|unexpected character '$'|m.wit:51:10
+seed-eof-1377|expected an identifier or string, found eof|m.wit:51:11
+seed-bad-1377|unexpected character '$'|m.wit:51:11
+seed-eof-1378|expected '{', found eof|m.wit:51:12
+seed-bad-1378|unexpected character '$'|m.wit:51:12
+seed-eof-1379|expected an integer, found eof|m.wit:51:13
+seed-bad-1379|unexpected character '$'|m.wit:51:13
+seed-eof-1380|expected '.', found eof|m.wit:51:14
+seed-bad-1380|unexpected character '$'|m.wit:51:14
+seed-eof-1381|expected an integer, found eof|m.wit:51:15
+seed-bad-1381|unexpected character '$'|m.wit:51:15
+seed-eof-1382|expected '.', found eof|m.wit:51:16
+seed-bad-1382|unexpected character '$'|m.wit:51:16
+seed-eof-1383|expected an integer, found eof|m.wit:51:17
+seed-bad-1383|unexpected character '$'|m.wit:51:17
+seed-eof-1384|expected '{', found eof|m.wit:51:18
+seed-bad-1384|unexpected character '$'|m.wit:51:18
+seed-eof-1385|expected '{', found eof|m.wit:51:19
+seed-bad-1385|unexpected character '$'|m.wit:51:19
+seed-eof-1386|expected `world`, `interface` or `use`, found eof|m.wit:51:20
+seed-bad-1386|unexpected character '$'|m.wit:51:20
+seed-eof-1389|expected `world`, `interface` or `use`, found eof|m.wit:52:3
+seed-bad-1389|unexpected character '$'|m.wit:52:3
+seed-eof-1398|expected an identifier or string, found eof|m.wit:52:12
+seed-bad-1398|unexpected character '$'|m.wit:52:12
+seed-eof-1399|expected an identifier or string, found eof|m.wit:52:13
+seed-bad-1399|unexpected character '$'|m.wit:52:13
+seed-eof-1400|expected '{', found eof|m.wit:52:14
+seed-bad-1400|unexpected character '$'|m.wit:52:14
+seed-eof-1401|expected '{', found eof|m.wit:52:15
+seed-bad-1401|unexpected character '$'|m.wit:52:15
+seed-eof-1402|expected `type`, `resource` or `func`, found eof|m.wit:52:16
+seed-bad-1402|unexpected character '$'|m.wit:52:16
+seed-eof-1403|expected `type`, `resource` or `func`, found eof|m.wit:52:17
+seed-bad-1403|unexpected character '$'|m.wit:52:17
+seed-eof-1407|expected an identifier or string, found eof|m.wit:52:21
+seed-bad-1407|unexpected character '$'|m.wit:52:21
+seed-eof-1408|expected an identifier or string, found eof|m.wit:52:22
+seed-bad-1408|unexpected character '$'|m.wit:52:22
+seed-eof-1409|expected '=', found eof|m.wit:52:23
+seed-bad-1409|unexpected character '$'|m.wit:52:23
+seed-eof-1410|expected '=', found eof|m.wit:52:24
+seed-bad-1410|unexpected character '$'|m.wit:52:24
+seed-eof-1411|expected a type, found eof|m.wit:52:25
+seed-bad-1411|unexpected character '$'|m.wit:52:25
+seed-eof-1412|expected a type, found eof|m.wit:52:26
+seed-bad-1412|unexpected character '$'|m.wit:52:26
+seed-eof-1414|expected ';', found eof|m.wit:52:28
+seed-bad-1414|unexpected character '$'|m.wit:52:28
+seed-eof-1415|expected `type`, `resource` or `func`, found eof|m.wit:52:29
+seed-bad-1415|unexpected character '$'|m.wit:52:29
+seed-eof-1416|expected `type`, `resource` or `func`, found eof|m.wit:52:30
+seed-bad-1416|unexpected character '$'|m.wit:52:30
+seed-eof-1417|expected `world`, `interface` or `use`, found eof|m.wit:52:31
+seed-bad-1417|unexpected character '$'|m.wit:52:31
+seed-eof-1420|expected `world`, `interface` or `use`, found eof|m.wit:53:3
+seed-bad-1420|unexpected character '$'|m.wit:53:3
+seed-eof-1425|expected an identifier or string, found eof|m.wit:53:8
+seed-bad-1425|unexpected character '$'|m.wit:53:8
+seed-eof-1426|expected an identifier or string, found eof|m.wit:53:9
+seed-bad-1426|unexpected character '$'|m.wit:53:9
+seed-eof-1427|expected '{', found eof|m.wit:53:10
+seed-bad-1427|unexpected character '$'|m.wit:53:10
+seed-eof-1428|expected '{', found eof|m.wit:53:11
+seed-bad-1428|unexpected character '$'|m.wit:53:11
+seed-eof-1429|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:53:12
+seed-bad-1429|unexpected character '$'|m.wit:53:12
+seed-eof-1430|expected `world`, `interface` or `use`, found eof|m.wit:53:13
+seed-bad-1430|unexpected character '$'|m.wit:53:13
+seed-eof-1431|expected `world`, `interface` or `use`, found eof|m.wit:54:1
+seed-bad-1431|unexpected character '$'|m.wit:54:1
+seed-eof-1432|OK
+seed-bad-1432|unexpected character '$'|m.wit:54:2
+seed2-eof-0|no `package` header was found in any WIT file for this package|
+seed2-bad-0|unexpected character '$'|m.wit:1:1
+seed2-eof-7|expected an identifier or string, found eof|m.wit:1:8
+seed2-bad-7|unexpected character '$'|m.wit:1:8
+seed2-eof-8|expected an identifier or string, found eof|m.wit:1:9
+seed2-bad-8|unexpected character '$'|m.wit:1:9
+seed2-eof-9|expected ':', found eof|m.wit:1:10
+seed2-bad-9|unexpected character '$'|m.wit:1:10
+seed2-eof-10|expected an identifier or string, found eof|m.wit:1:11
+seed2-bad-10|unexpected character '$'|m.wit:1:11
+seed2-eof-11|expected '{', found eof|m.wit:1:12
+seed2-bad-11|unexpected character '$'|m.wit:1:12
+seed2-eof-12|OK
+seed2-bad-12|unexpected character '$'|m.wit:1:13
+seed2-eof-13|OK
+seed2-bad-13|unexpected character '$'|m.wit:2:1
+seed2-eof-16|expected an identifier or string, found eof|m.wit:2:4
+seed2-bad-16|unexpected character '$'|m.wit:2:4
+seed2-eof-17|expected an identifier or string, found eof|m.wit:2:5
+seed2-bad-17|unexpected character '$'|m.wit:2:5
+seed2-eof-18|expected ';', found eof|m.wit:2:6
+seed2-bad-18|unexpected character '$'|m.wit:2:6
+seed2-eof-19|expected an identifier or string, found eof|m.wit:2:7
+seed2-bad-19|unexpected character '$'|m.wit:2:7
+seed2-eof-20|expected `/`, found eof|m.wit:2:8
+seed2-bad-20|unexpected character '$'|m.wit:2:8
+seed2-eof-21|expected an identifier or string, found eof|m.wit:2:9
+seed2-bad-21|unexpected character '$'|m.wit:2:9
+seed2-eof-22|expected ';', found eof|m.wit:2:10
+seed2-bad-22|unexpected character '$'|m.wit:2:10
+seed2-eof-23|package 'x:z' not found. known packages:|
+seed2-bad-23|unexpected character '$'|m.wit:2:11
+seed2-eof-24|package 'x:z' not found. known packages:|
+seed2-bad-24|unexpected character '$'|m.wit:3:1
+seed2-eof-33|expected an identifier or string, found eof|m.wit:3:10
+seed2-bad-33|unexpected character '$'|m.wit:3:10
+seed2-eof-34|expected an identifier or string, found eof|m.wit:3:11
+seed2-bad-34|unexpected character '$'|m.wit:3:11
+seed2-eof-35|expected '{', found eof|m.wit:3:12
+seed2-bad-35|unexpected character '$'|m.wit:3:12
+seed2-eof-36|expected '{', found eof|m.wit:3:13
+seed2-bad-36|unexpected character '$'|m.wit:3:13
+seed2-eof-37|expected `type`, `resource` or `func`, found eof|m.wit:3:14
+seed2-bad-37|unexpected character '$'|m.wit:3:14
+seed2-eof-40|expected `type`, `resource` or `func`, found eof|m.wit:4:3
+seed2-bad-40|unexpected character '$'|m.wit:4:3
+seed2-eof-41|expected `type`, `resource` or `func`, found `/`|m.wit:4:3
+seed2-bad-41|expected `type`, `resource` or `func`, found `/`|m.wit:4:3
+seed2-eof-42|expected `type`, `resource` or `func`, found eof|m.wit:4:5
+seed2-bad-42|OK
+seed2-eof-43|expected `type`, `resource` or `func`, found eof|m.wit:4:6
+seed2-bad-43|OK
+seed2-eof-44|expected `type`, `resource` or `func`, found eof|m.wit:4:7
+seed2-bad-44|OK
+seed2-eof-48|expected `type`, `resource` or `func`, found eof|m.wit:4:11
+seed2-bad-48|OK
+seed2-eof-49|expected `type`, `resource` or `func`, found eof|m.wit:4:12
+seed2-bad-49|OK
+seed2-eof-55|expected `type`, `resource` or `func`, found eof|m.wit:4:18
+seed2-bad-55|OK
+seed2-eof-56|expected `type`, `resource` or `func`, found eof|m.wit:4:19
+seed2-bad-56|OK
+seed2-eof-57|expected `type`, `resource` or `func`, found eof|m.wit:4:20
+seed2-bad-57|OK
+seed2-eof-58|expected `type`, `resource` or `func`, found eof|m.wit:4:21
+seed2-bad-58|OK
+seed2-eof-64|expected `type`, `resource` or `func`, found eof|m.wit:4:27
+seed2-bad-64|OK
+seed2-eof-67|expected `type`, `resource` or `func`, found eof|m.wit:5:3
+seed2-bad-67|unexpected character '$'|m.wit:5:3
+seed2-eof-75|expected an identifier or string, found eof|m.wit:5:11
+seed2-bad-75|unexpected character '$'|m.wit:5:11
+seed2-eof-76|expected an identifier or string, found eof|m.wit:5:12
+seed2-bad-76|unexpected character '$'|m.wit:5:12
+seed2-eof-77|expected ';', found eof|m.wit:5:13
+seed2-bad-77|unexpected character '$'|m.wit:5:13
+seed2-eof-78|expected ';', found eof|m.wit:5:14
+seed2-bad-78|unexpected character '$'|m.wit:5:14
+seed2-eof-79|expected `constructor` or identifier, found eof|m.wit:5:15
+seed2-bad-79|unexpected character '$'|m.wit:5:15
+seed2-eof-84|expected `constructor` or identifier, found eof|m.wit:6:5
+seed2-bad-84|unexpected character '$'|m.wit:6:5
+seed2-eof-85|expected `constructor` or identifier, found `/`|m.wit:6:5
+seed2-bad-85|expected `constructor` or identifier, found `/`|m.wit:6:5
+seed2-eof-86|expected `constructor` or identifier, found eof|m.wit:6:7
+seed2-bad-86|OK
+seed2-eof-87|expected `constructor` or identifier, found eof|m.wit:6:8
+seed2-bad-87|OK
+seed2-eof-88|expected `constructor` or identifier, found eof|m.wit:6:9
+seed2-bad-88|OK
+seed2-eof-89|expected `constructor` or identifier, found eof|m.wit:6:10
+seed2-bad-89|OK
+seed2-eof-90|expected `constructor` or identifier, found eof|m.wit:6:11
+seed2-bad-90|OK
+seed2-eof-101|expected `constructor` or identifier, found eof|m.wit:6:22
+seed2-bad-101|OK
+seed2-eof-106|expected `constructor` or identifier, found eof|m.wit:7:5
+seed2-bad-106|unexpected character '$'|m.wit:7:5
+seed2-eof-117|expected '(', found eof|m.wit:7:16
+seed2-bad-117|unexpected character '$'|m.wit:7:16
+seed2-eof-118|expected an identifier or string, found eof|m.wit:7:17
+seed2-bad-118|unexpected character '$'|m.wit:7:17
+seed2-eof-119|expected ';', found eof|m.wit:7:18
+seed2-bad-119|unexpected character '$'|m.wit:7:18
+seed2-eof-120|expected `constructor` or identifier, found eof|m.wit:7:19
+seed2-bad-120|unexpected character '$'|m.wit:7:19
+seed2-eof-125|expected `constructor` or identifier, found eof|m.wit:8:5
+seed2-bad-125|unexpected character '$'|m.wit:8:5
+seed2-eof-126|expected `constructor` or identifier, found `/`|m.wit:8:5
+seed2-bad-126|expected `constructor` or identifier, found `/`|m.wit:8:5
+seed2-eof-127|expected `constructor` or identifier, found eof|m.wit:8:7
+seed2-bad-127|OK
+seed2-eof-128|expected `constructor` or identifier, found eof|m.wit:8:8
+seed2-bad-128|OK
+seed2-eof-129|expected `constructor` or identifier, found eof|m.wit:8:9
+seed2-bad-129|OK
+seed2-eof-130|expected `constructor` or identifier, found eof|m.wit:8:10
+seed2-bad-130|OK
+seed2-eof-131|expected `constructor` or identifier, found eof|m.wit:8:11
+seed2-bad-131|OK
+seed2-eof-137|expected `constructor` or identifier, found eof|m.wit:8:17
+seed2-bad-137|OK
+seed2-eof-142|expected `constructor` or identifier, found eof|m.wit:9:5
+seed2-bad-142|unexpected character '$'|m.wit:9:5
+seed2-eof-145|expected ':', found eof|m.wit:9:8
+seed2-bad-145|unexpected character '$'|m.wit:9:8
+seed2-eof-146|expected keyword `func`, found eof|m.wit:9:9
+seed2-bad-146|unexpected character '$'|m.wit:9:9
+seed2-eof-147|expected keyword `func`, found eof|m.wit:9:10
+seed2-bad-147|unexpected character '$'|m.wit:9:10
+seed2-eof-151|expected '(', found eof|m.wit:9:14
+seed2-bad-151|unexpected character '$'|m.wit:9:14
+seed2-eof-152|expected an identifier or string, found eof|m.wit:9:15
+seed2-bad-152|unexpected character '$'|m.wit:9:15
+seed2-eof-153|expected ';', found eof|m.wit:9:16
+seed2-bad-153|unexpected character '$'|m.wit:9:16
+seed2-eof-154|expected ';', found eof|m.wit:9:17
+seed2-bad-154|unexpected character '$'|m.wit:9:17
+seed2-eof-155|expected ';', found `-`|m.wit:9:17
+seed2-bad-155|expected ';', found `-`|m.wit:9:17
+seed2-eof-156|expected a type, found eof|m.wit:9:19
+seed2-bad-156|unexpected character '$'|m.wit:9:19
+seed2-eof-157|expected a type, found eof|m.wit:9:20
+seed2-bad-157|unexpected character '$'|m.wit:9:20
+seed2-eof-159|expected ';', found eof|m.wit:9:22
+seed2-bad-159|unexpected character '$'|m.wit:9:22
+seed2-eof-160|expected `constructor` or identifier, found eof|m.wit:9:23
+seed2-bad-160|unexpected character '$'|m.wit:9:23
+seed2-eof-165|expected `constructor` or identifier, found eof|m.wit:10:5
+seed2-bad-165|unexpected character '$'|m.wit:10:5
+seed2-eof-168|expected ':', found eof|m.wit:10:8
+seed2-bad-168|unexpected character '$'|m.wit:10:8
+seed2-eof-169|expected keyword `func`, found eof|m.wit:10:9
+seed2-bad-169|unexpected character '$'|m.wit:10:9
+seed2-eof-170|expected keyword `func`, found eof|m.wit:10:10
+seed2-bad-170|unexpected character '$'|m.wit:10:10
+seed2-eof-173|expected keyword `func`, found an identifier|m.wit:10:10
+seed2-bad-173|unexpected character '$'|m.wit:10:13
+seed2-eof-174|expected an identifier or string, found eof|m.wit:10:14
+seed2-bad-174|unexpected character '$'|m.wit:10:14
+seed2-eof-175|expected ';', found eof|m.wit:10:15
+seed2-bad-175|unexpected character '$'|m.wit:10:15
+seed2-eof-176|expected ';', found eof|m.wit:10:16
+seed2-bad-176|unexpected character '$'|m.wit:10:16
+seed2-eof-177|expected ';', found `-`|m.wit:10:16
+seed2-bad-177|expected ';', found `-`|m.wit:10:16
+seed2-eof-178|expected a type, found eof|m.wit:10:18
+seed2-bad-178|unexpected character '$'|m.wit:10:18
+seed2-eof-179|expected a type, found eof|m.wit:10:19
+seed2-bad-179|unexpected character '$'|m.wit:10:19
+seed2-eof-181|expected ';', found eof|m.wit:10:21
+seed2-bad-181|unexpected character '$'|m.wit:10:21
+seed2-eof-182|expected `constructor` or identifier, found eof|m.wit:10:22
+seed2-bad-182|unexpected character '$'|m.wit:10:22
+seed2-eof-185|expected `constructor` or identifier, found eof|m.wit:11:3
+seed2-bad-185|unexpected character '$'|m.wit:11:3
+seed2-eof-186|expected `type`, `resource` or `func`, found eof|m.wit:11:4
+seed2-bad-186|unexpected character '$'|m.wit:11:4
+seed2-eof-189|expected `type`, `resource` or `func`, found eof|m.wit:12:3
+seed2-bad-189|unexpected character '$'|m.wit:12:3
+seed2-eof-192|expected ':', found eof|m.wit:12:6
+seed2-bad-192|unexpected character '$'|m.wit:12:6
+seed2-eof-193|expected keyword `func`, found eof|m.wit:12:7
+seed2-bad-193|unexpected character '$'|m.wit:12:7
+seed2-eof-194|expected keyword `func`, found eof|m.wit:12:8
+seed2-bad-194|unexpected character '$'|m.wit:12:8
+seed2-eof-198|expected '(', found eof|m.wit:12:12
+seed2-bad-198|unexpected character '$'|m.wit:12:12
+seed2-eof-199|expected an identifier or string, found eof|m.wit:12:13
+seed2-bad-199|unexpected character '$'|m.wit:12:13
+seed2-eof-202|expected ':', found eof|m.wit:12:16
+seed2-bad-202|unexpected character '$'|m.wit:12:16
+seed2-eof-203|expected a type, found eof|m.wit:12:17
+seed2-bad-203|unexpected character '$'|m.wit:12:17
+seed2-eof-204|expected a type, found eof|m.wit:12:18
+seed2-bad-204|unexpected character '$'|m.wit:12:18
+seed2-eof-206|expected ')', found eof|m.wit:12:20
+seed2-bad-206|unexpected character '$'|m.wit:12:20
+seed2-eof-207|expected ';', found eof|m.wit:12:21
+seed2-bad-207|unexpected character '$'|m.wit:12:21
+seed2-eof-208|expected `type`, `resource` or `func`, found eof|m.wit:12:22
+seed2-bad-208|unexpected character '$'|m.wit:12:22
+seed2-eof-211|expected `type`, `resource` or `func`, found eof|m.wit:13:3
+seed2-bad-211|unexpected character '$'|m.wit:13:3
+seed2-eof-215|expected an identifier or string, found eof|m.wit:13:7
+seed2-bad-215|unexpected character '$'|m.wit:13:7
+seed2-eof-216|expected an identifier or string, found eof|m.wit:13:8
+seed2-bad-216|unexpected character '$'|m.wit:13:8
+seed2-eof-221|expected '=', found eof|m.wit:13:13
+seed2-bad-221|unexpected character '$'|m.wit:13:13
+seed2-eof-222|expected '=', found eof|m.wit:13:14
+seed2-bad-222|unexpected character '$'|m.wit:13:14
+seed2-eof-223|expected a type, found eof|m.wit:13:15
+seed2-bad-223|unexpected character '$'|m.wit:13:15
+seed2-eof-224|expected a type, found eof|m.wit:13:16
+seed2-bad-224|unexpected character '$'|m.wit:13:16
+seed2-eof-226|expected ';', found eof|m.wit:13:18
+seed2-bad-226|unexpected character '$'|m.wit:13:18
+seed2-eof-227|expected `type`, `resource` or `func`, found eof|m.wit:13:19
+seed2-bad-227|unexpected character '$'|m.wit:13:19
+seed2-eof-228|expected `type`, `resource` or `func`, found eof|m.wit:14:1
+seed2-bad-228|unexpected character '$'|m.wit:14:1
+seed2-eof-229|package 'x:z' not found. known packages:|
+seed2-bad-229|unexpected character '$'|m.wit:14:2
+seed2-eof-230|package 'x:z' not found. known packages:|
+seed2-bad-230|unexpected character '$'|m.wit:15:1
+seed2-eof-231|expected an identifier or string, found eof|m.wit:15:2
+seed2-bad-231|unexpected character '$'|m.wit:15:2
+seed2-eof-239|expected '(', found eof|m.wit:15:10
+seed2-bad-239|unexpected character '$'|m.wit:15:10
+seed2-eof-240|expected an identifier or string, found eof|m.wit:15:11
+seed2-bad-240|unexpected character '$'|m.wit:15:11
+seed2-eof-247|expected '=', found eof|m.wit:15:18
+seed2-bad-247|unexpected character '$'|m.wit:15:18
+seed2-eof-248|expected '=', found eof|m.wit:15:19
+seed2-bad-248|unexpected character '$'|m.wit:15:19
+seed2-eof-249|expected an identifier or string, found eof|m.wit:15:20
+seed2-bad-249|unexpected character '$'|m.wit:15:20
+seed2-eof-250|expected an identifier or string, found eof|m.wit:15:21
+seed2-bad-250|unexpected character '$'|m.wit:15:21
+seed2-eof-251|expected ')', found eof|m.wit:15:22
+seed2-bad-251|unexpected character '$'|m.wit:15:22
+seed2-eof-252|expected `world`, `interface` or `use`, found eof|m.wit:15:23
+seed2-bad-252|unexpected character '$'|m.wit:15:23
+seed2-eof-253|expected `world`, `interface` or `use`, found eof|m.wit:16:1
+seed2-bad-253|unexpected character '$'|m.wit:16:1
+seed2-eof-258|expected an identifier or string, found eof|m.wit:16:6
+seed2-bad-258|unexpected character '$'|m.wit:16:6
+seed2-eof-259|expected an identifier or string, found eof|m.wit:16:7
+seed2-bad-259|unexpected character '$'|m.wit:16:7
+seed2-eof-260|expected '{', found eof|m.wit:16:8
+seed2-bad-260|unexpected character '$'|m.wit:16:8
+seed2-eof-261|expected '{', found eof|m.wit:16:9
+seed2-bad-261|unexpected character '$'|m.wit:16:9
+seed2-eof-262|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:16:10
+seed2-bad-262|unexpected character '$'|m.wit:16:10
+seed2-eof-265|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:17:3
+seed2-bad-265|unexpected character '$'|m.wit:17:3
+seed2-eof-266|expected an identifier or string, found eof|m.wit:17:4
+seed2-bad-266|unexpected character '$'|m.wit:17:4
+seed2-eof-274|expected '(', found eof|m.wit:17:12
+seed2-bad-274|unexpected character '$'|m.wit:17:12
+seed2-eof-275|expected an identifier or string, found eof|m.wit:17:13
+seed2-bad-275|unexpected character '$'|m.wit:17:13
+seed2-eof-282|expected '=', found eof|m.wit:17:20
+seed2-bad-282|unexpected character '$'|m.wit:17:20
+seed2-eof-283|expected '=', found eof|m.wit:17:21
+seed2-bad-283|unexpected character '$'|m.wit:17:21
+seed2-eof-284|expected an identifier or string, found eof|m.wit:17:22
+seed2-bad-284|unexpected character '$'|m.wit:17:22
+seed2-eof-285|expected an identifier or string, found eof|m.wit:17:23
+seed2-bad-285|unexpected character '$'|m.wit:17:23
+seed2-eof-286|expected ')', found eof|m.wit:17:24
+seed2-bad-286|unexpected character '$'|m.wit:17:24
+seed2-eof-287|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:17:25
+seed2-bad-287|unexpected character '$'|m.wit:17:25
+seed2-eof-290|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:18:3
+seed2-bad-290|unexpected character '$'|m.wit:18:3
+seed2-eof-296|expected an identifier or string, found eof|m.wit:18:9
+seed2-bad-296|unexpected character '$'|m.wit:18:9
+seed2-eof-297|expected an identifier or string, found eof|m.wit:18:10
+seed2-bad-297|unexpected character '$'|m.wit:18:10
+seed2-eof-298|expected ';', found eof|m.wit:18:11
+seed2-bad-298|unexpected character '$'|m.wit:18:11
+seed2-eof-299|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:18:12
+seed2-bad-299|unexpected character '$'|m.wit:18:12
+seed2-eof-302|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:19:3
+seed2-bad-302|unexpected character '$'|m.wit:19:3
+seed2-eof-309|expected an identifier or string, found eof|m.wit:19:10
+seed2-bad-309|unexpected character '$'|m.wit:19:10
+seed2-eof-310|expected an identifier or string, found eof|m.wit:19:11
+seed2-bad-310|unexpected character '$'|m.wit:19:11
+seed2-eof-311|expected ';', found eof|m.wit:19:12
+seed2-bad-311|unexpected character '$'|m.wit:19:12
+seed2-eof-312|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:19:13
+seed2-bad-312|unexpected character '$'|m.wit:19:13
+seed2-eof-315|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:20:3
+seed2-bad-315|unexpected character '$'|m.wit:20:3
+seed2-eof-321|expected an identifier or string, found eof|m.wit:20:9
+seed2-bad-321|unexpected character '$'|m.wit:20:9
+seed2-eof-322|expected an identifier or string, found eof|m.wit:20:10
+seed2-bad-322|unexpected character '$'|m.wit:20:10
+seed2-eof-325|expected ';', found eof|m.wit:20:13
+seed2-bad-325|unexpected character '$'|m.wit:20:13
+seed2-eof-326|expected an identifier or string, found eof|m.wit:20:14
+seed2-bad-326|unexpected character '$'|m.wit:20:14
+seed2-eof-327|expected an identifier or string, found eof|m.wit:20:15
+seed2-bad-327|unexpected character '$'|m.wit:20:15
+seed2-eof-330|expected ';', found eof|m.wit:20:18
+seed2-bad-330|unexpected character '$'|m.wit:20:18
+seed2-eof-331|expected an identifier or string, found eof|m.wit:20:19
+seed2-bad-331|unexpected character '$'|m.wit:20:19
+seed2-eof-332|expected ';', found eof|m.wit:20:20
+seed2-bad-332|unexpected character '$'|m.wit:20:20
+seed2-eof-333|expected ';', found eof|m.wit:20:21
+seed2-bad-333|unexpected character '$'|m.wit:20:21
+seed2-eof-334|expected ';', found `-`|m.wit:20:21
+seed2-bad-334|expected ';', found `-`|m.wit:20:21
+seed2-eof-335|expected a type, found eof|m.wit:20:23
+seed2-bad-335|unexpected character '$'|m.wit:20:23
+seed2-eof-336|expected a type, found eof|m.wit:20:24
+seed2-bad-336|unexpected character '$'|m.wit:20:24
+seed2-eof-338|expected ';', found eof|m.wit:20:26
+seed2-bad-338|unexpected character '$'|m.wit:20:26
+seed2-eof-339|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:20:27
+seed2-bad-339|unexpected character '$'|m.wit:20:27
+seed2-eof-342|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:21:3
+seed2-bad-342|unexpected character '$'|m.wit:21:3
+seed2-eof-348|expected an identifier or string, found eof|m.wit:21:9
+seed2-bad-348|unexpected character '$'|m.wit:21:9
+seed2-eof-349|expected an identifier or string, found eof|m.wit:21:10
+seed2-bad-349|unexpected character '$'|m.wit:21:10
+seed2-eof-350|expected ';', found eof|m.wit:21:11
+seed2-bad-350|unexpected character '$'|m.wit:21:11
+seed2-eof-351|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:21:12
+seed2-bad-351|unexpected character '$'|m.wit:21:12
+seed2-eof-352|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:22:1
+seed2-bad-352|unexpected character '$'|m.wit:22:1
+seed2-eof-353|interface or world `u` does not exist|m.wit:19:11
+seed2-bad-353|unexpected character '$'|m.wit:22:2
+seed2-eof-354|interface or world `u` does not exist|m.wit:19:11
+seed2-bad-354|unexpected character '$'|m.wit:23:1
+seed2-eof-359|expected an identifier or string, found eof|m.wit:23:6
+seed2-bad-359|unexpected character '$'|m.wit:23:6
+seed2-eof-360|expected an identifier or string, found eof|m.wit:23:7
+seed2-bad-360|unexpected character '$'|m.wit:23:7
+seed2-eof-361|expected '{', found eof|m.wit:23:8
+seed2-bad-361|unexpected character '$'|m.wit:23:8
+seed2-eof-362|expected '{', found eof|m.wit:23:9
+seed2-bad-362|unexpected character '$'|m.wit:23:9
+seed2-eof-363|expected `import`, `export`, `include`, `use`, or type definition, found eof|m.wit:23:10
+seed2-bad-363|unexpected character '$'|m.wit:23:10
+seed2-eof-364|package 'x:z' not found. known packages:|
+seed2-bad-364|unexpected character '$'|m.wit:23:11
+seed2-eof-365|package 'x:z' not found. known packages:|
+seed2-bad-365|unexpected character '$'|m.wit:24:1
+seed2-eof-372|expected an identifier or string, found eof|m.wit:24:8
+seed2-bad-372|unexpected character '$'|m.wit:24:8
+seed2-eof-373|expected an identifier or string, found eof|m.wit:24:9
+seed2-bad-373|unexpected character '$'|m.wit:24:9
+seed2-eof-374|expected ':', found eof|m.wit:24:10
+seed2-bad-374|unexpected character '$'|m.wit:24:10
+seed2-eof-375|expected an identifier or string, found eof|m.wit:24:11
+seed2-bad-375|unexpected character '$'|m.wit:24:11
+seed2-eof-376|expected '{', found eof|m.wit:24:12
+seed2-bad-376|unexpected character '$'|m.wit:24:12
+seed2-eof-377|expected '{', found eof|m.wit:24:13
+seed2-bad-377|unexpected character '$'|m.wit:24:13
+seed2-eof-378|expected `world`, `interface` or `use`, found eof|m.wit:24:14
+seed2-bad-378|unexpected character '$'|m.wit:24:14
+seed2-eof-381|expected `world`, `interface` or `use`, found eof|m.wit:25:3
+seed2-bad-381|unexpected character '$'|m.wit:25:3
+seed2-eof-390|expected an identifier or string, found eof|m.wit:25:12
+seed2-bad-390|unexpected character '$'|m.wit:25:12
+seed2-eof-391|expected an identifier or string, found eof|m.wit:25:13
+seed2-bad-391|unexpected character '$'|m.wit:25:13
+seed2-eof-392|expected '{', found eof|m.wit:25:14
+seed2-bad-392|unexpected character '$'|m.wit:25:14
+seed2-eof-393|expected '{', found eof|m.wit:25:15
+seed2-bad-393|unexpected character '$'|m.wit:25:15
+seed2-eof-394|expected `type`, `resource` or `func`, found eof|m.wit:25:16
+seed2-bad-394|unexpected character '$'|m.wit:25:16
+seed2-eof-395|expected `world`, `interface` or `use`, found eof|m.wit:25:17
+seed2-bad-395|unexpected character '$'|m.wit:25:17
+seed2-eof-396|expected `world`, `interface` or `use`, found eof|m.wit:26:1
+seed2-bad-396|unexpected character '$'|m.wit:26:1
+seed2-eof-397|OK
+seed2-bad-397|unexpected character '$'|m.wit:26:2

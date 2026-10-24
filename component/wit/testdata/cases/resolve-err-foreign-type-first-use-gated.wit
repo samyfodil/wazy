@@ -1,0 +1,4 @@
+package a:b;
+interface i { @unstable(feature = x) use c:d/j.{t}; }
+interface k { use c:d/j.{t}; }
+package c:d { interface j { type t = u8; } }

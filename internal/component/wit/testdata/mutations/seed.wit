@@ -1,0 +1,54 @@
+/// The package.
+package a:b@1.2.3-rc.1+build.7;
+
+use c:d/e@1.0.0 as e2;
+
+/** An interface. */
+@since(version = 1.0.0)
+interface i {
+  use e2.{t, t as %u};
+  /// A record.
+  record r { a: u8, b: list<u8, 4>, }
+  variant var { none, some(r) }
+  enum e { x, y }
+  flags f { p, q }
+  resource res {
+    constructor(x: u8) -> result<res, string>;
+    m: func(a: borrow<res>);
+    @deprecated(version = 0.1.0) @since(version = 0.1.0)
+    s: static func() -> res;
+    prop: get() -> u8;
+    prop: set(v: u8) -> result<_, string>;
+    max: static get() -> u64;
+  }
+  @external-id("x\"\u{41}\41")
+  type a = result<_, u8>;
+  type o = own<res>;
+  type misc = tuple<s8, s16, s32, s64, u16, u32, u64, f32, f64, char, bool, string, error-context, option<u8>, result, result<u8>, result<u8, u8>, future, future<u8>, stream, stream<u8>, map<string, u8>, list<u8>>;
+  @unstable(feature = fancy)
+  %func: async func(x: tuple<u8, string>) -> map<string, option<u8>>;
+  size: get() -> u32;
+  size: set(v: u32);
+}
+
+world w {
+  use i.{r};
+  type local = u8;
+  resource lres { poke: func(); }
+  import label: i;
+  import c:d/e@1.0.0;
+  import h: func(x: r) -> local;
+  import k: async func();
+  import g: get() -> u8;
+  export x: interface { f: func(); }
+  export y: func();
+  include v with { z as z2, q as q2 }
+  include c:d/w@1.0.0;
+}
+
+world v { import z: func(); export q: func(); }
+
+package c:d@1.0.0 {
+  interface e { type t = u8; }
+  world w {}
+}

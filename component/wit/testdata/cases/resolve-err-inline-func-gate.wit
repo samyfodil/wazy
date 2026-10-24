@@ -1,0 +1,7 @@
+package a:b;
+world w {
+  import x: interface {
+    @since(version = 1.0.0)
+    f: func();
+  }
+}

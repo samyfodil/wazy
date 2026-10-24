@@ -10,7 +10,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"testing/fstest"
+
+	ast "github.com/samyfodil/wazy/internal/component/wit"
 )
 
 // testdata holds two sets of WIT inputs, each run under three feature sets:
@@ -33,6 +34,14 @@ var featureSets = map[string][]Option{
 	"none":   nil,
 	"active": {WithFeatures("active")},
 	"all":    {WithAllFeatures()},
+}
+
+// skipped are the inputs this package cannot read at all, and why.
+var skipped = map[string]string{
+	// wit-parser also reads a dep that is a WIT package encoded as a
+	// component, in the binary format (deps/e.wasm) or the text format
+	// (deps/d.wat); ParseFS reads only .wit deps.
+	"kinds-of-deps": "deps encoded as components (.wasm, .wat)",
 }
 
 // divergences are the results that differ from wit-parser's on purpose, by
@@ -72,6 +81,9 @@ func runOracle(t *testing.T, dir string, shipped bool) {
 		for _, set := range []string{"none", "active", "all"} {
 			ran++
 			t.Run(name+"."+set, func(t *testing.T) {
+				if why, ok := skipped[name]; ok {
+					t.Skip(why)
+				}
 				got, gotErr := parseInput(t, path.Join(dir, e.Name()), e.IsDir(), featureSets[set]...)
 				var wantJSON []byte
 				var wantErr string
@@ -91,8 +103,8 @@ func runOracle(t *testing.T, dir string, shipped bool) {
 					if gotErr == nil {
 						t.Fatalf("parsed; wit-parser rejects it: %s", wantErr)
 					}
-					if want := ourError(wantErr); !strings.Contains(gotErr.Error(), want) {
-						t.Fatalf("error %q\nwant it to contain %q", gotErr, want)
+					if !strings.Contains(gotErr.Error(), wantErr) {
+						t.Fatalf("error %q\nwant it to contain %q", gotErr, wantErr)
 					}
 				case gotErr != nil:
 					t.Fatalf("wit-parser accepts it: %v", gotErr)
@@ -131,20 +143,8 @@ func oracle(t *testing.T, key string) (jsonSrc []byte, errLine string) {
 	return b, ""
 }
 
-var notFound = regexp.MustCompile(`^(interface|world) '(.+)' not found in package '(.+)'$`)
-
-// ourError is the text our error must contain for one wit-parser gives.
-// wit-parser resolves each package on its own, so an item another package's
-// gate left out is "not found" there; here it is unknown.
-func ourError(witParser string) string {
-	if m := notFound.FindStringSubmatch(witParser); m != nil {
-		return "unknown " + m[1]
-	}
-	return witParser
-}
-
 // parseInput parses one of wit-parser's inputs: a directory as ParseFS reads
-// it, or a single file with its nested packages split out.
+// it, or a single file as Parse does.
 func parseInput(t *testing.T, p string, isDir bool, opts ...Option) (*Package, error) {
 	if isDir {
 		sub, err := fs.Sub(testdata, p)
@@ -157,40 +157,7 @@ func parseInput(t *testing.T, p string, isDir bool, opts ...Option) (*Package, e
 	if err != nil {
 		t.Fatal(err)
 	}
-	return ParseFS(splitNested(t, string(src)), ".", opts...)
-}
-
-// splitNested turns a source with nested "package x { ... }" blocks, which
-// wit-parser's tests use for dependencies, into a root file and one deps/
-// file per block, the layout ParseFS reads.
-func splitNested(t *testing.T, src string) fstest.MapFS {
-	fsys := fstest.MapFS{}
-	open := regexp.MustCompile(`(?m)^package\s+([^\s;{]+)\s*\{`)
-	for i := 0; ; i++ {
-		loc := open.FindStringSubmatchIndex(src)
-		if loc == nil {
-			break
-		}
-		depth, end := 0, -1
-		for j := loc[1] - 1; j < len(src) && end < 0; j++ {
-			switch src[j] {
-			case '{':
-				depth++
-			case '}':
-				if depth--; depth == 0 {
-					end = j
-				}
-			}
-		}
-		if end < 0 {
-			t.Fatalf("unbalanced package block %s", src[loc[2]:loc[3]])
-		}
-		body := "package " + src[loc[2]:loc[3]] + ";\n" + src[loc[1]:end]
-		fsys[fmt.Sprintf("deps/dep%d.wit", i)] = &fstest.MapFile{Data: []byte(body)}
-		src = src[:loc[0]] + src[end+1:]
-	}
-	fsys["root.wit"] = &fstest.MapFile{Data: []byte(src)}
-	return fsys
+	return Parse(path.Base(p), string(src), opts...)
 }
 
 // summarize lists what a parse resolved, one sorted line per package,
@@ -205,7 +172,7 @@ func summarize(root *Package) []string {
 			for _, f := range i.Funcs {
 				funcs = append(funcs, f.Name)
 			}
-			out = append(out, ifaceLine(p.Name, lastSegment(i.Name), types, funcs))
+			out = append(out, ifaceLine(p.Name, ast.LastSegment(i.Name), types, funcs))
 		}
 		for _, w := range p.Worlds {
 			var imports, exports []string
@@ -307,24 +274,18 @@ func summarizeJSON(t *testing.T, src []byte) []string {
 	return out
 }
 
-// wordingDiffers are wit-parser failing inputs that fail here too, for the
-// same reason, under different words.
-var wordingDiffers = map[string]string{
-	"async-bad-world.wit":      "x is defined more than once",
-	"async-bad-world2.wit":     "x is declared more than once",
-	"async-bad-world3.wit":     "x is defined more than once",
-	"async-bad-world4.wit":     "x is declared more than once",
-	"bad-world-type1.wit":      "a is defined more than once",
-	"world-same-fields2.wit":   "foo is declared more than once",
-	"world-same-fields3.wit":   "foo is declared more than once",
-	"world-top-level-func.wit": "foo is defined more than once",
-	"kebab-name-include.wit":   "a is declared more than once",
+// resultContext is the context wit-parser's test runner wraps an error of
+// a directory input in, which is not the error's own.
+var resultContext = regexp.MustCompile(`^(failed to resolve directory while parsing WIT for path \[[^]]*\]: |failed to parse package: [^:]*: |failed to parse dependency directory: [^:]*: )+`)
+
+// wantError is the first line of a .wit.result, the error itself.
+func wantError(result string) string {
+	line, _, _ := strings.Cut(result, "\n")
+	return strings.ReplaceAll(resultContext.ReplaceAllString(line, ""), "tests/ui/parse-fail/", "")
 }
 
 // TestWitParserParseFail runs wit-parser's own failing inputs: each must
-// fail here too, with wit-parser's text -- or, for a syntax error
-// ("expected ..."), which comes from this package's own parser, with its own
-// "expected ...", and for wordingDiffers, with the text listed there.
+// fail here too, with wit-parser's text.
 func TestWitParserParseFail(t *testing.T) {
 	const dir = "testdata/wit-parser/ui/parse-fail"
 	entries, err := fs.ReadDir(testdata, dir)
@@ -342,12 +303,7 @@ func TestWitParserParseFail(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want, _, _ := strings.Cut(string(result), "\n")
-			if alt, ok := wordingDiffers[e.Name()]; ok {
-				want = alt
-			} else if strings.HasPrefix(want, "expected ") {
-				want = "expected "
-			}
+			want := wantError(string(result))
 			_, gotErr := parseInput(t, path.Join(dir, e.Name()), e.IsDir(), WithFeatures("active"))
 			switch {
 			case gotErr == nil:

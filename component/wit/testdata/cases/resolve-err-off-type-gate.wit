@@ -1,0 +1,6 @@
+package a:b;
+@unstable(feature = x)
+interface i {
+  @since(version = 1.0.0)
+  type t = u8;
+}

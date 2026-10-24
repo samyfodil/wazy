@@ -1,0 +1,7 @@
+package a:b;
+world w { import c:d/j; }
+interface i {
+  @since(version = 1.0.0)
+  use c:d/j.{t};
+}
+package c:d { interface j { type t = u8; } }

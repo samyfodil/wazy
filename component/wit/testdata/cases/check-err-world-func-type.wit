@@ -1,0 +1,4 @@
+package a:b;
+world w {
+  import f: func(x: nope);
+}

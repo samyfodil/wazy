@@ -363,6 +363,22 @@ func (c *Component) resolveTypeDepth(idx uint32, depth int) (TypeDesc, error) {
 // TypeDesc where this decoder has enough structure to do so. idx and depth
 // are the original index and current alias-chain depth, threaded through
 // purely for error messages and the cycle guard.
+// importedInstanceType is the instance type of the imported instance at
+// component instance index instIdx, its index resolved with resolve.
+func (c *Component) importedInstanceType(instIdx uint32, resolve func(uint32) (TypeDesc, error)) (InstanceDesc, bool) {
+	if int(instIdx) < len(c.ComponentInstanceSpace) {
+		if e := c.ComponentInstanceSpace[instIdx]; e.Kind == ComponentInstanceFromImport && int(e.Import) < len(c.Imports) {
+			if im := c.Imports[e.Import]; im.ExternType == 0x05 {
+				if td, err := resolve(im.ExternIndex); err == nil {
+					inst, ok := td.(InstanceDesc)
+					return inst, ok
+				}
+			}
+		}
+	}
+	return InstanceDesc{}, false
+}
+
 func (c *Component) resolveAlias(al AliasDef, idx uint32, depth int) (TypeDesc, error) {
 	switch al.TargetKind {
 	case 0x00: // export
@@ -398,45 +414,39 @@ func (c *Component) resolveAlias(al AliasDef, idx uint32, depth int) (TypeDesc, 
 			// a type equal to itself across resolutions -- see aliasCache's doc.
 			return td, nil
 		}
-		if int(al.InstanceIdx) < len(c.ComponentInstanceSpace) {
-			if e := c.ComponentInstanceSpace[al.InstanceIdx]; e.Kind == ComponentInstanceFromImport && int(e.Import) < len(c.Imports) {
-				if im := c.Imports[e.Import]; im.ExternType == 0x05 {
-					if td, err := c.resolveTypeDepth(im.ExternIndex, depth+1); err == nil {
-						if instDesc, ok := td.(InstanceDesc); ok {
-							if exp, ok := instDesc.Exports[al.Name]; ok {
-								// exp is a TypeRef into instDesc.Types (this
-								// instancetype's own local type-sort index
-								// space, not this Component's) -- globalize it
-								// before returning, so any TypeRef nested
-								// inside the result is resolvable through c's
-								// ordinary Resolver like any other (see
-								// InstanceDesc's doc and globalizeLocalRef).
-								// A failed globalize leaves the slots it reserved
-								// behind, so roll extraTypes back to the mark:
-								// nothing handed out an index past it, and a
-								// precompute attempt that fails must not grow
-								// the table it exists to keep bounded.
-								mark := len(c.extraTypes)
-								global, gerr := c.globalizeLocalRef(instDesc.Types, exp, map[uint32]uint32{})
-								if gerr != nil {
-									c.extraTypes = c.extraTypes[:mark]
-									return nil, fmt.Errorf("type index %d: alias exports %q from instance %d: %w", idx, al.Name, al.InstanceIdx, gerr)
-								}
-								var resolved TypeDesc
-								if global.Primitive != "" {
-									resolved = PrimitiveDesc{Prim: global.Primitive}
-								} else if resolved, err = c.resolveTypeDepth(*global.TypeIndex, depth+1); err != nil {
-									return nil, err
-								}
-								if c.aliasCache == nil {
-									c.aliasCache = make(map[uint32]TypeDesc, 4)
-								}
-								c.aliasCache[idx] = resolved
-								return resolved, nil
-							}
-						}
+		resolve := func(i uint32) (TypeDesc, error) { return c.resolveTypeDepth(i, depth+1) }
+		if instDesc, ok := c.importedInstanceType(al.InstanceIdx, resolve); ok {
+			if exp, ok := instDesc.Exports[al.Name]; ok {
+				// exp is a TypeRef into instDesc.Types (this instancetype's
+				// own local type-sort index space, not this Component's) --
+				// globalize it before returning, so any TypeRef nested
+				// inside the result is resolvable through c's ordinary
+				// Resolver like any other (see InstanceDesc's doc and
+				// globalizeLocalRef). A failed globalize leaves the slots it
+				// reserved behind, so roll extraTypes back to the mark:
+				// nothing handed out an index past it, and a precompute
+				// attempt that fails must not grow the table it exists to
+				// keep bounded.
+				mark := len(c.extraTypes)
+				global, gerr := c.globalizeLocalRef(instDesc.Types, exp, map[uint32]uint32{})
+				if gerr != nil {
+					c.extraTypes = c.extraTypes[:mark]
+					return nil, fmt.Errorf("type index %d: alias exports %q from instance %d: %w", idx, al.Name, al.InstanceIdx, gerr)
+				}
+				var resolved TypeDesc
+				if global.Primitive != "" {
+					resolved = PrimitiveDesc{Prim: global.Primitive}
+				} else {
+					var err error
+					if resolved, err = c.resolveTypeDepth(*global.TypeIndex, depth+1); err != nil {
+						return nil, err
 					}
 				}
+				if c.aliasCache == nil {
+					c.aliasCache = make(map[uint32]TypeDesc, 4)
+				}
+				c.aliasCache[idx] = resolved
+				return resolved, nil
 			}
 		}
 		return nil, fmt.Errorf("type index %d: alias exports %q from instance %d, which this decoder cannot resolve structurally (an imported instance whose export type this decoder could not resolve -- e.g. an abstract resource, or a further alias -- or a locally-instantiated instance whose nested type declarations are not decoded)", idx, al.Name, al.InstanceIdx)

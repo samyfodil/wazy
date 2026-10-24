@@ -1,0 +1,1 @@
+package a:b; interface i { f: func(a: s8, b: s16, c: s32, d: s64, e: u16, f: u64, g: f32, h: f64, i: char, j: bool, k: string, l: error-context, m: option<u8>, n: result<u8>, o: result<_, u8>, p: result<u8, u8>, q: result, r: future, s: future<u8>, t: stream, u: stream<u8>, v: tuple<u8>, w: map<u8, u8>, x: list<u8, 2>); }

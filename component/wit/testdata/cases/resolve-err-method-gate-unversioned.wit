@@ -1,0 +1,7 @@
+package a:b;
+interface i {
+  resource r {
+    @since(version = 1.0.0)
+    m: func();
+  }
+}

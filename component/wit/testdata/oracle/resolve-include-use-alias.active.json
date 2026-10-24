@@ -1,0 +1,44 @@
+{
+  "worlds": [
+    {
+      "name": "v",
+      "imports": {
+        "f": {
+          "function": {
+            "name": "f",
+            "kind": "freestanding",
+            "params": []
+          }
+        }
+      },
+      "exports": {},
+      "package": 0
+    },
+    {
+      "name": "w",
+      "imports": {
+        "f": {
+          "function": {
+            "name": "f",
+            "kind": "freestanding",
+            "params": []
+          }
+        }
+      },
+      "exports": {},
+      "package": 0
+    }
+  ],
+  "interfaces": [],
+  "types": [],
+  "packages": [
+    {
+      "name": "a:b",
+      "interfaces": {},
+      "worlds": {
+        "v": 0,
+        "w": 1
+      }
+    }
+  ]
+}

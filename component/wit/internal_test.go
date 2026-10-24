@@ -12,7 +12,7 @@ import (
 // a zero TypeRef.
 func TestBuilder_RejectsUnknownShapes(t *testing.T) {
 	r := &resolver{byName: map[string]*pkgScope{}}
-	sc := newScope(r, &pkgScope{}, "a:b/i", "interface a:b/i")
+	sc := newScope(r, &fileScope{pkg: &pkgScope{}}, "a:b/i", "interface a:b/i")
 	sc.types["odd"] = &ast.TypeDef{Name: "odd"}
 
 	b := newBuilder(nil, false)

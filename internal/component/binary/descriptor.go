@@ -262,6 +262,11 @@ type InstanceDesc struct {
 	// declaration order -- see readInstanceDeclDescInto.
 	Types []TypeDesc
 
+	// Outer maps each nil slot of Types that aliases a type of an enclosing
+	// type index space ("alias outer"), or is exported as one ("eq" of such
+	// a slot), to what it aliases.
+	Outer map[uint32]OuterAlias
+
 	// Body is the instancetype's encoded vec(instancedecl), a sub-slice of
 	// the buffer it was decoded from. Decls parses it in full on demand:
 	// Exports and Types keep only what the ABI needs, and every component
@@ -270,14 +275,27 @@ type InstanceDesc struct {
 	Body []byte
 }
 
+// OuterAlias is "alias outer Count Index": type Index of the type index
+// space Count levels out -- 1 being the component (or component type) the
+// declaring type is defined in, 0 the declaring type's own.
+type OuterAlias struct {
+	Count, Index uint32
+}
+
 func (InstanceDesc) isTypeDesc()  {}
 func (InstanceDesc) Kind() string { return "instance" }
 
 // ComponentDesc represents a component type: what a component import, or a
 // component export's type ascription, declares the component to be.
 type ComponentDesc struct {
+	// Types and Outer are its own type index space, as InstanceDesc's are:
+	// a type-sort import adds a slot as a type-sort export does there.
+	Types []TypeDesc
+	Outer map[uint32]OuterAlias
+
 	// Body is the componenttype's encoded vec(componentdecl), a sub-slice of
-	// the buffer it was decoded from. Decls parses it; see InstanceDesc.Body.
+	// the buffer it was decoded from. Decls parses it in full; see
+	// InstanceDesc.Body.
 	Body []byte
 }
 
@@ -687,7 +705,7 @@ func coreValtypeName(b byte) (string, error) {
 // Exports.
 func readInstanceDeclDesc(buf []byte, off int) (int, error) {
 	var localTypes []TypeDesc
-	return readInstanceDeclDescInto(buf, off, &localTypes, nil)
+	return readInstanceDeclDescInto(buf, off, &localTypes, nil, nil)
 }
 
 // readInstanceDeclDescInto consumes one instancedecl, contributing to
@@ -708,7 +726,10 @@ func readInstanceDeclDesc(buf []byte, off int) (int, error) {
 // though only "type" decls produce a resolvable TypeDesc here: skipping the
 // others would misindex any later decl that references one of their slots by
 // number, silently returning the wrong local type instead of failing loud.
-func readInstanceDeclDescInto(buf []byte, off int, localTypes *[]TypeDesc, exports *map[string]TypeRef) (int, error) {
+//
+// outer, when not nil, collects the local slots that alias an enclosing
+// type (see InstanceDesc.Outer).
+func readInstanceDeclDescInto(buf []byte, off int, localTypes *[]TypeDesc, exports *map[string]TypeRef, outer *map[uint32]OuterAlias) (int, error) {
 	if off >= len(buf) {
 		return off, ErrTruncatedBinary
 	}
@@ -745,11 +766,7 @@ func readInstanceDeclDescInto(buf []byte, off int, localTypes *[]TypeDesc, expor
 			// later decl naming the EXPORT (rather than N) meets the nil and
 			// fails as "not resolved structurally" -- which is the very
 			// failure this whole path exists to avoid.
-			var exported TypeDesc
-			if hasIdx && int(idx) < len(*localTypes) {
-				exported = (*localTypes)[idx] // still nil if N was itself unresolvable
-			}
-			*localTypes = append(*localTypes, exported)
+			addLocalType(localTypes, outer, idx, hasIdx)
 			if hasIdx && exports != nil { // `eq N`-bound: an alias of local type N
 				if *exports == nil {
 					// Built on first type-sort export rather than up front:
@@ -771,6 +788,12 @@ func readInstanceDeclDescInto(buf []byte, off int, localTypes *[]TypeDesc, expor
 		// follow an alias target structurally from inside an instancetype
 		// body (see resolveAlias), so the slot is recorded unresolved.
 		if off < len(buf) && buf[off] == 0x03 {
+			if o, ok := peekOuterAlias(buf, off+1); ok && outer != nil {
+				if *outer == nil {
+					*outer = map[uint32]OuterAlias{}
+				}
+				(*outer)[uint32(len(*localTypes))] = o
+			}
 			*localTypes = append(*localTypes, nil)
 		}
 		return readAlias(buf, off)
@@ -786,6 +809,39 @@ func readInstanceDeclDescInto(buf []byte, off int, localTypes *[]TypeDesc, expor
 	default:
 		return off, fmt.Errorf("instancedecl: invalid tag %#x", tag)
 	}
+}
+
+// addLocalType adds the local type a type-sort export or import declares:
+// for an `eq N` bound, local type N again -- nil if N is, and aliasing what
+// N aliases -- and for a `sub` bound, an abstract resource, nil.
+func addLocalType(localTypes *[]TypeDesc, outer *map[uint32]OuterAlias, idx uint32, hasIdx bool) {
+	var t TypeDesc
+	if hasIdx && int(idx) < len(*localTypes) {
+		t = (*localTypes)[idx]
+		if outer != nil {
+			if o, ok := (*outer)[idx]; ok {
+				(*outer)[uint32(len(*localTypes))] = o
+			}
+		}
+	}
+	*localTypes = append(*localTypes, t)
+}
+
+// peekOuterAlias reads an alias target at off, without consuming it: the
+// count and index of an outer alias (0x02), or ok false for any other.
+func peekOuterAlias(buf []byte, off int) (OuterAlias, bool) {
+	if off >= len(buf) || buf[off] != 0x02 {
+		return OuterAlias{}, false
+	}
+	count, n, err := leb128.LoadUint32(buf[off+1:])
+	if err != nil {
+		return OuterAlias{}, false
+	}
+	index, _, err := leb128.LoadUint32(buf[off+1+int(n):])
+	if err != nil {
+		return OuterAlias{}, false
+	}
+	return OuterAlias{count, index}, true
 }
 
 // readCoretypeDef consumes one core:type definition -- a core func type (0x60)
@@ -950,6 +1006,7 @@ func readInstancetypeDesc(buf []byte, off int) (InstanceDesc, int, error) {
 
 	var localTypes []TypeDesc
 	var exports map[string]TypeRef
+	var outer map[uint32]OuterAlias
 	// Every declaration consumes at least one byte, and only some of them
 	// produce a local type, so both count and the bytes left are upper bounds
 	// -- take the smaller so a bogus LEB128 count cannot make this allocate
@@ -958,12 +1015,12 @@ func readInstancetypeDesc(buf []byte, off int) (InstanceDesc, int, error) {
 		localTypes = make([]TypeDesc, 0, cap)
 	}
 	for i := range count {
-		off, err = readInstanceDeclDescInto(buf, off, &localTypes, &exports)
+		off, err = readInstanceDeclDescInto(buf, off, &localTypes, &exports, &outer)
 		if err != nil {
 			return InstanceDesc{}, off, fmt.Errorf("instancedecl[%d]: %w", i, err)
 		}
 	}
-	return InstanceDesc{Exports: exports, Types: localTypes, Body: buf[start:off:off]}, off, nil
+	return InstanceDesc{Exports: exports, Types: localTypes, Outer: outer, Body: buf[start:off:off]}, off, nil
 }
 
 // readDeftypeDesc consumes one deftype and returns a TypeDesc, OR a kind string
@@ -984,14 +1041,8 @@ func readDeftypeDesc(buf []byte, off int) (TypeDesc, int, error) {
 		d.Async = true
 		return d, off, err
 	case tag == 0x41:
-		// Component type: walked here to stay in sync, kept as its body for
-		// ComponentDesc.Decls.
-		start := off
-		off, err := readComponenttype(buf, off)
-		if err != nil {
-			return ComponentDesc{}, off, err
-		}
-		return ComponentDesc{Body: buf[start:off:off]}, off, nil
+		d, off, err := readComponenttypeDesc(buf, off)
+		return d, off, err
 	case tag == 0x42:
 		d, off, err := readInstancetypeDesc(buf, off)
 		return d, off, err

@@ -1,0 +1,6 @@
+package a:b;
+@unstable(feature = x)
+interface j { @unstable(feature = x) type t = u8; }
+interface k { use j.{t}; }
+interface i { use k.{t}; }
+world w { export i; }

@@ -1,0 +1,4 @@
+package a:b;
+world v { import f: func(); }
+use v as v2;
+world w { include v2; }
