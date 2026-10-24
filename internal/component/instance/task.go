@@ -120,6 +120,11 @@ type task struct {
 	// it by table index, and runSyncCore hangs the thread's baton off it. Nil
 	// for an async task, whose implicit thread IS its guestTask/stackfulTask.
 	syncThread *syncImplicitThread
+
+	// noExclusive marks a task whose lift is async with no callback: the
+	// reference's needs_exclusive() is false for it, so it neither waits for
+	// its instance's exclusive lock nor takes it (definitions.py ~421-423).
+	noExclusive bool
 }
 
 // implicitThreadAlive reports whether this task's implicit thread is still in
@@ -216,7 +221,7 @@ func (t *task) deliverPendingCancel() bool {
 // cancellation via the task.cancel builtin.
 func (t *task) cancelResolve() error {
 	if t.state != taskCancelDelivered {
-		return fmt.Errorf("task.cancel: no cancellation has been delivered to this task")
+		return fmt.Errorf("`task.cancel` called by task which has not been cancelled")
 	}
 	if t.numBorrows > 0 {
 		return fmt.Errorf("task.cancel: borrow handles still remain at the end of the call (%d still held)", t.numBorrows)
@@ -238,7 +243,7 @@ func (t *task) cancelResolve() error {
 func (t *task) cancelUnentered() error { return t.cancelResolve() }
 
 // requestCancellation transliterates Task.request_cancellation
-// (definitions.py ~472-485): called by canon_subtask_cancel via
+// (definitions.py ~467-476): called by canon_subtask_cancel via
 // subtask.onCancel (the only Phase-3 caller), and it is exactly the func a
 // future public CallAsync's cancel handle would call.
 //
@@ -250,32 +255,16 @@ func (t *task) cancelUnentered() error { return t.cancelResolve() }
 //	  else:
 //	    assert(self.state == Task.State.STARTED)
 //	    self.state = Task.State.PENDING_CANCEL
-//	    while self.state != Task.State.RESOLVED:
-//	      candidates = { t for t in self.inst.threads if t.ready() }
-//	      if candidates:
-//	        random.choice(list(candidates)).resume()
-//	      if not candidates or DETERMINISTIC_PROFILE or random.randint(0,1):
-//	        break
+//	    if self.implicit_thread.cancellable and self.implicit_thread.ready():
+//	      self.implicit_thread.resume()
 //
-// Two things this revision made simpler than the one wazy was written
-// against, and both are asserted by suites:
-//
-//   - The candidate set is the whole INSTANCE's ready threads, not the
-//     cancelled task's. cancel-instance-wide-resume.wast arranges for the only
-//     ready thread in the callee's instance to belong to a DIFFERENT task and
-//     requires it to run.
-//   - There is no "resume with Cancelled.TRUE" any more. A resumed thread
-//     learns of the cancellation through the ordinary delivery sites (the
-//     callback loop and wait_from_callback), so readiness is what selects the
-//     thread and nothing bypasses a ready_func. The only wake that still
-//     carries a flag is the INITIAL one below, which resumes a thread that has
-//     never run rather than one that is waiting on a predicate.
-//
-// DETERMINISTIC_PROFILE takes the `break` on the first iteration, so this is
-// exactly one resume attempt: if no thread of the instance is ready (say the
-// exclusive lock is held, or the task is blocked mid-core-call), the request
-// stays PENDING_CANCEL and subtask.cancel reports BLOCKED, with delivery
-// happening whenever the instance next drives a ready thread.
+// Only the cancelled task's own implicit thread is ever resumed, and only
+// while it is cancellable: parked in its callback loop's YIELD or WAIT
+// disposition, the window canon_lift brackets with thread.cancellable
+// (cancel-targeted-resume.wast). Anywhere else -- blocked mid-core-call, a
+// stackful task, the exclusive lock held -- the request stays PENDING_CANCEL
+// and subtask.cancel reports BLOCKED, with delivery happening at the next of
+// the ordinary delivery sites the thread reaches.
 func (t *task) requestCancellation() error {
 	switch t.state {
 	case taskInitial: // parked at entry, on_start never ran (~473-476)
@@ -294,32 +283,35 @@ func (t *task) requestCancellation() error {
 		return t.gt.resumeReady()
 	case taskStarted:
 		t.state = taskPendingCancel
-		_, err := t.inst.sched.resumeOneReady(t.inst)
-		return err
+		if gt := t.gt; gt != nil && (gt.park == parkYield || gt.park == parkWait) && t.inst.sched.isParked(gt) && gt.ready() {
+			return t.inst.sched.resume(gt)
+		}
+		return nil
 	default:
 		panic("BUG: request_cancellation on a resolved task")
 	}
 }
 
-// hasBackpressure mirrors the reference's inst.has_backpressure() (~489):
-// needs_exclusive() is always true for a callback lift, so the "or
-// needs_exclusive() and exclusive_thread is not None" disjunct collapses to
-// just exclusiveHeld.
-func (in *Instance) hasBackpressure() bool {
-	return in.backpressure > 0 || in.exclusiveHeld
+// hasBackpressure mirrors the reference's Task.enter_implicit_thread
+// has_backpressure() (~428-430) for t: the exclusive lock only holds back a
+// task that needs it.
+func (in *Instance) hasBackpressure(t *task) bool {
+	return in.backpressure > 0 || (in.exclusiveHeld && !t.noExclusive)
 }
 
 // tryEnter is the reference Task.enter_implicit_thread's non-blocking
-// attempt (~485-503): returns entered=false when the task must park at
+// attempt (~425-443): returns entered=false when the task must park at
 // parkEntry instead (see guestTask.start, guest_task.go). numWaitingToEnter
-// mirrors the reference's FIFO fairness (~492-495): a later caller may not
-// jump ahead of an earlier one already parked waiting to enter.
+// mirrors the reference's FIFO fairness: a later caller may not jump ahead of
+// an earlier one already parked waiting to enter.
 func (in *Instance) tryEnter(t *task) (entered bool) {
-	if in.hasBackpressure() || in.numWaitingToEnter > 0 {
+	if in.hasBackpressure(t) || in.numWaitingToEnter > 0 {
 		return false
 	}
 	in.activeTask = t
-	in.exclusiveHeld, in.exclusiveOwner = true, t
+	if !t.noExclusive {
+		in.exclusiveHeld, in.exclusiveOwner = true, t
+	}
 	return true
 }
 
@@ -342,12 +334,25 @@ func (in *Instance) enterRun(t *task) {
 	// trap. The two guestThread sites that resume a real spawned thread set
 	// activeThread back immediately after calling this.
 	in.activeThread = nil
-	in.exclusiveHeld, in.exclusiveOwner = true, t
+	if !t.noExclusive {
+		in.exclusiveHeld, in.exclusiveOwner = true, t
+	}
 }
 
 func (in *Instance) leaveRun() {
 	in.exclusiveHeld, in.exclusiveOwner = false, nil
 	in.activeTask = in.syncBase // nil pre-implicit-task: identical to the old `= nil`
+	in.mayEnter = true
+}
+
+// leaveRunOf is leaveRun for t's own code, which leaves alone an exclusive
+// lock a noExclusive task never took: another task may hold it.
+func (in *Instance) leaveRunOf(t *task) {
+	if !t.noExclusive {
+		in.leaveRun()
+		return
+	}
+	in.activeTask = in.syncBase
 	in.mayEnter = true
 }
 

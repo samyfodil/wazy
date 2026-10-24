@@ -142,7 +142,7 @@ func (st *stackfulTask) run() error {
 	if st.onStart != nil {
 		var err error
 		if args, err = st.onStart(); err != nil {
-			in.leaveRun()
+			in.leaveRunOf(t)
 			return st.fail(err)
 		}
 	}
@@ -156,13 +156,13 @@ func (st *stackfulTask) run() error {
 	coreArgs, err := in.lowerParams(be, args, mem, memAvailable, realloc, st.exportName, *coreArgsPtr)
 	if err != nil {
 		coreValueSlicePool.Put(coreArgsPtr)
-		in.leaveRun()
+		in.leaveRunOf(t)
 		return st.fail(err)
 	}
 	*coreArgsPtr = coreArgs
 	if len(coreArgs) != len(be.coreParamsWant) {
 		putCoreValueSlice(coreArgsPtr)
-		in.leaveRun()
+		in.leaveRunOf(t)
 		return st.fail(fmt.Errorf("component/instance: export %q: parameter list flattens to %d core value(s) but the core signature expects %d; whole-parameter-list spilling to memory is not supported by this milestone", st.exportName, len(coreArgs), len(be.coreParamsWant)))
 	}
 
@@ -180,8 +180,8 @@ func (st *stackfulTask) run() error {
 
 	if err := be.coreFn.CallWithStack(st.ctx, stack); err != nil {
 		putUint64Slice(stackPtr)
-		in.leaveRun()
-		in.poisoned = true // guest code actually ran and trapped -- see fail's doc
+		in.leaveRunOf(t)
+		in.sched.lockdown = true // guest code actually ran and trapped -- see fail's doc
 		return st.fail(fmt.Errorf("component/instance: export %q: call core func %q: %w", st.exportName, be.funcName, err))
 	}
 
@@ -190,8 +190,8 @@ func (st *stackfulTask) run() error {
 		// trap_if(state != RESOLVED) (~522), same text as guestTask's
 		// finishExit.
 		putUint64Slice(stackPtr)
-		in.leaveRun()
-		if t.state != taskResolved {
+		in.leaveRunOf(t)
+		if t.state != taskResolved && t.liveThreads == 0 {
 			return st.fail(fmt.Errorf("component/instance: export %q: stackful async export returned before task.return resolved the task", st.exportName))
 		}
 		st.finishOK()
@@ -208,36 +208,36 @@ func (st *stackfulTask) run() error {
 	results, err := in.liftResult(be, rawResults, mem, memAvailable, st.exportName)
 	if err != nil {
 		putUint64Slice(stackPtr)
-		in.leaveRun()
+		in.leaveRunOf(t)
 		return st.fail(err)
 	}
 	if err := t.returnValues(results); err != nil { // traps if guest already resolved
 		putUint64Slice(stackPtr)
-		in.leaveRun()
+		in.leaveRunOf(t)
 		return st.fail(fmt.Errorf("component/instance: export %q: %w", st.exportName, err))
 	}
 	if be.postReturnFuncName != "" {
 		if be.postReturnFn == nil {
 			putUint64Slice(stackPtr)
-			in.leaveRun()
+			in.leaveRunOf(t)
 			return st.fail(fmt.Errorf("component/instance: export %q: post-return core func %q not found", st.exportName, be.postReturnFuncName))
 		}
 		if err := be.postReturnFn.CallWithStack(st.ctx, rawResults); err != nil {
 			putUint64Slice(stackPtr)
-			in.leaveRun()
-			in.poisoned = true // guest code actually ran and trapped -- see fail's doc
+			in.leaveRunOf(t)
+			in.sched.lockdown = true // guest code actually ran and trapped -- see fail's doc
 			return st.fail(fmt.Errorf("component/instance: export %q: post-return %q: %w", st.exportName, be.postReturnFuncName, err))
 		}
 	}
 	putUint64Slice(stackPtr)
-	in.leaveRun()
+	in.leaveRunOf(t)
 	st.finishOK()
 	return nil
 }
 
 // fail records a trap. Like guestTask.fail, it does NOT itself poison st.in
 // -- see that doc; only run's be.coreFn.CallWithStack and be.postReturnFn.
-// CallWithStack (guest code that actually ran) set st.in.poisoned = true.
+// CallWithStack (guest code that actually ran) set st.in.sched.lockdown = true.
 func (st *stackfulTask) fail(err error) error {
 	st.err = err
 	if st.finish != nil {
@@ -293,7 +293,7 @@ func (st *stackfulTask) instance() *Instance { return st.in }
 func (st *stackfulTask) ready() bool {
 	switch st.park {
 	case sparkEntry:
-		return !st.in.hasBackpressure()
+		return !st.in.hasBackpressure(st.t)
 	case sparkBlock:
 		// See guestTask.ready's parkBlocked arm for why there is no
 		// cancellation disjunct here. A nil parkReady is the reference's

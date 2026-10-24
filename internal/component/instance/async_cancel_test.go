@@ -35,7 +35,7 @@ var cancelAckWasm []byte
 func TestTaskCancelHostFunc_NoCancellationDeliveredTraps(t *testing.T) {
 	in := &Instance{sched: &sched{}, mayLeave: true, activeTask: &task{state: taskStarted}}
 	def := taskCancelHostFuncGraph(in)
-	requirePanicContains(t, "no cancellation has been delivered", func() {
+	requirePanicContains(t, "called by task which has not been cancelled", func() {
 		def.fn.Call(context.Background(), nil, nil)
 	})
 }
@@ -553,7 +553,7 @@ func TestStartAsyncExportTask_PoisonedRefused(t *testing.T) {
 	}
 	defer b.Close(ctx)
 	be := b.exports["run-async"]
-	b.poisoned = true
+	b.sched.lockdown = true
 
 	_, err = b.startAsyncExportTask(ctx, be, "run-async",
 		func(*task) ([]abi.Value, error) { return nil, nil },

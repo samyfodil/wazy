@@ -435,20 +435,6 @@ type Instance struct {
 	// as activeTask itself (task.go's enterRun/suspendRun).
 	activeThread *guestThread
 
-	// poisoned is true once an unhandled trap has ever escaped a call into
-	// this instance (any error surfacing from guest code actually running --
-	// a core `unreachable`, or a canonical-ABI trap_if failing mid-call, from
-	// EITHER the plain sync invoke() path or an async task's fail() --
-	// permanently blocking every later entry with "cannot enter component
-	// instance", per the spec's Store poisoning invariant. Unlike mayEnter
-	// (which enterRun/leaveRun/suspendRun toggle back and forth as a task
-	// merely runs/parks/resumes), poisoned is sticky: nothing ever resets it
-	// back to false once set -- see invokeEntered's defer,
-	// guestTask.fail/stackfulTask.fail, and every mayEnter check in
-	// async_lift.go, all of which now check poisoned first. Initialized
-	// false; never true for an instance that has never had a call fail.
-	poisoned bool
-
 	// inHostCall counts nested host-import invocations currently on the Go
 	// call stack (bracketed by buildHostWrapper/buildAsyncHostWrapper). Along
 	// with sched.pumping, it is how requireSchedulable (stream_host.go)
@@ -1830,7 +1816,7 @@ func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName stri
 	// (be.home's doc) -- run the call against THAT Instance, not against
 	// whichever component republished the export. Everything below this point
 	// reads per-Instance state the definer owns and the republisher does not:
-	// the async dispatch paths' runtime state, poisoning, and (through
+	// the async dispatch paths' runtime state and (through
 	// invokeEntered) the syncImplicit task plus the handle table, resource
 	// tags and resolver lowerParams/liftResult work in.
 	target := in
@@ -1843,16 +1829,16 @@ func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName stri
 	if be.stackful {
 		return target.invokeStackful(ctx, be, exportName, args)
 	}
-	// target.poisoned mirrors the async paths' own check (async_lift.go) --
+	// target.sched.lockdown mirrors the async paths' own check (async_lift.go) --
 	// a sync export gets no enterRun/leaveRun bracketing (mayEnter never
 	// applies to it), but it still must stay permanently un-enterable once
 	// ANY earlier call (sync or async) has let a trap escape target, per the
-	// spec's Store poisoning invariant (see Instance.poisoned's doc). Placed
+	// spec's Store lockdown invariant (see sched.lockdown's doc). Placed
 	// before the param-count/bind-shape checks below, same as async_lift.go's
-	// mayEnter/poisoned check precedes ITS own param-count check -- a
-	// poisoned instance refuses entry outright, independent of whether this
+	// mayEnter/lockdown check precedes ITS own param-count check -- a
+	// locked-down store refuses entry outright, independent of whether this
 	// particular call would otherwise even be well-formed.
-	if target.poisoned {
+	if target.sched.lockdown {
 		return nil, fmt.Errorf("component/instance: export %q: cannot enter component instance", exportName)
 	}
 	fd := be.fd
@@ -1897,7 +1883,7 @@ func wrapUnreachableTrap(err error) error {
 }
 
 // invokeEntered is invoke's actual call body, split out purely for
-// readability at the poisoning boundary (see the two explicit in.poisoned =
+// readability at the poisoning boundary (see the two explicit in.sched.lockdown =
 // true sites below, at the ONLY two points this export's own guest code
 // actually runs: be.coreFn.CallWithStack and be.postReturnFn.CallWithStack).
 //
@@ -2008,7 +1994,7 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 	}
 	if err := callErr; err != nil {
 		putUint64Slice(stackPtr)
-		in.poisoned = true // guest code actually ran and trapped -- see this func's doc
+		in.sched.lockdown = true // guest code actually ran and trapped -- see this func's doc
 		err = wrapUnreachableTrap(err)
 		return nil, fmt.Errorf("component/instance: export %q: call core func %q: %w", exportName, be.funcName, err)
 	}
@@ -2040,7 +2026,7 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 		// it reuse rawResults' own buffer (the guest reads params, writes none).
 		if err := be.postReturnFn.CallWithStack(ctx, rawResults); err != nil {
 			putUint64Slice(stackPtr)
-			in.poisoned = true // guest code actually ran and trapped -- see this func's doc
+			in.sched.lockdown = true // guest code actually ran and trapped -- see this func's doc
 			return nil, fmt.Errorf("component/instance: export %q: post-return %q: %w", exportName, be.postReturnFuncName, err)
 		}
 	}

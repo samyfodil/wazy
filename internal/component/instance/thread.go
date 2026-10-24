@@ -479,7 +479,7 @@ func (th *guestThread) run() error {
 	stack := []uint64{th.arg} // ft is (i32)->() or (i64)->(); no results
 	err := th.fn.CallWithStack(th.ctx, stack)
 	th.in.activeThread = nil
-	th.in.leaveRun()
+	th.in.leaveRunOf(th.t)
 	// unregister_thread (:518-525): free the table slot, decrement the
 	// owning task's live-thread count. Done unconditionally (success, guest
 	// trap, or reap-abort) -- see reapParkedGoroutines' doc for why the
@@ -487,7 +487,7 @@ func (th *guestThread) run() error {
 	th.in.threads.remove(th.index)
 	th.t.liveThreads--
 	if err != nil {
-		th.in.poisoned = true // guest code actually ran and trapped -- same rule as stackfulTask.run
+		th.in.sched.lockdown = true // guest code actually ran and trapped -- same rule as stackfulTask.run
 		return fmt.Errorf("component/instance: thread %d: %w", th.index, err)
 	}
 	if th.t.liveThreads == 0 && !th.t.implicitThreadAlive() && th.t.state != taskResolved {

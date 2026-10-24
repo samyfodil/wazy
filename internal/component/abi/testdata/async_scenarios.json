@@ -125,7 +125,7 @@
       "ops": [
         {"op": "task.cancel"}
       ],
-      "go_trap_contains": "no cancellation"
+      "go_trap_contains": "has not been cancelled"
     },
     {
       "name": "host-cancel-blocking-wait",

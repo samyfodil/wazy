@@ -226,7 +226,7 @@ func (gt *guestTask) ready() bool {
 	// !gt.in.exclusiveHeld check).
 	switch gt.park {
 	case parkEntry:
-		return !gt.in.hasBackpressure()
+		return !gt.in.hasBackpressure(gt.t)
 	case parkWait:
 		// wait_from_callback's ready(): `inst.exclusive_thread is None and
 		// (has_pending_event or has_pending_cancel)`. Strictly None, not
@@ -388,7 +388,7 @@ func (gt *guestTask) firstRunBody() error {
 	if err := be.coreFn.CallWithStack(gt.ctx, stack); err != nil {
 		putUint64Slice(stackPtr)
 		gt.in.leaveRun()
-		gt.in.poisoned = true // guest code actually ran and trapped -- see fail's doc
+		gt.in.sched.lockdown = true // guest code actually ran and trapped -- see fail's doc
 		return gt.fail(fmt.Errorf("component/instance: export %q: call core func %q: %w", gt.exportName, be.funcName, err))
 	}
 	packed := uint32(stack[0])
@@ -487,7 +487,7 @@ func (gt *guestTask) runLoopBody(ev eventTuple) error {
 	if err := gt.be.callbackFn.CallWithStack(gt.ctx, cbStack); err != nil {
 		putUint64Slice(cbStackPtr)
 		gt.in.leaveRun()
-		gt.in.poisoned = true // guest code actually ran and trapped -- see fail's doc
+		gt.in.sched.lockdown = true // guest code actually ran and trapped -- see fail's doc
 		return gt.fail(fmt.Errorf("component/instance: export %q: callback %q: %w", gt.exportName, gt.be.callbackFuncName, err))
 	}
 	packed := uint32(cbStack[0])
@@ -541,7 +541,9 @@ func (gt *guestTask) advance(packed uint32) error {
 // before task.return resolved the task").
 func (gt *guestTask) finishExit() error {
 	gt.in.leaveRun()
-	if gt.t.state != taskResolved {
+	// unregister_thread's trap_if(state != RESOLVED) applies only once the
+	// task has no thread left: a spawned thread may still resolve it.
+	if gt.t.state != taskResolved && gt.t.liveThreads == 0 {
 		return gt.fail(fmt.Errorf("component/instance: export %q: callback returned EXIT before task.return resolved the task", gt.exportName))
 	}
 	gt.done = true
@@ -564,7 +566,7 @@ func (gt *guestTask) finishExit() error {
 // unrelated call, exactly the regression invokeEntered's doc describes for
 // resolveArgHandles on a dropped resource handle. Only firstRun's
 // be.coreFn.CallWithStack and runLoop's be.callbackFn.CallWithStack --
-// guest code that actually ran and trapped -- set gt.in.poisoned = true
+// guest code that actually ran and trapped -- set gt.in.sched.lockdown = true
 // themselves, right where they call fail.
 func (gt *guestTask) fail(err error) error {
 	gt.done = true

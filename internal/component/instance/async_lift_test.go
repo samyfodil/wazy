@@ -93,7 +93,7 @@ func TestInvokeAsyncCallback_ZeroCoreResults(t *testing.T) {
 // rather than trapping. Poisoning is the part that remains, and is sticky.
 func TestInvokeAsyncCallback_PoisonedRefused(t *testing.T) {
 	inst, be := firstLightAsyncExport(t)
-	inst.poisoned = true
+	inst.sched.lockdown = true
 	_, err := inst.invokeAsyncCallback(context.Background(), be, "run-async", nil)
 	requireErrContains(t, err, "cannot enter component instance")
 }

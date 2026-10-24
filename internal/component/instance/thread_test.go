@@ -980,8 +980,8 @@ func TestGuestThread_RunGuestTrapPropagatesAndPoisons(t *testing.T) {
 		t.Fatal("expected the guest trap to propagate out of resumeReady")
 	}
 	requireErrContains(t, err, "boom")
-	if !in.poisoned {
-		t.Fatal("in.poisoned = false after a spawned thread's guest code trapped, want true")
+	if !in.sched.lockdown {
+		t.Fatal("in.sched.lockdown = false after a spawned thread's guest code trapped, want true")
 	}
 	if tsk.liveThreads != 0 {
 		t.Fatalf("tsk.liveThreads = %d, want 0 (unregister still happens on trap)", tsk.liveThreads)

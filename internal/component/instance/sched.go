@@ -22,6 +22,15 @@ var errAsyncDeadlock = errors.New("async deadlock: no runnable work")
 type sched struct {
 	runq []schedThunk
 
+	// lockdown is the reference's Store.lockdown (definitions.py ~508-522):
+	// set once a trap escapes guest code anywhere in the store, after which
+	// no call may enter any of its instances ("cannot enter component
+	// instance"). The store is the composition: every instance nested in a
+	// root shares the root's sched. It is set where guest code actually ran
+	// and trapped, not on a host-side validation failure that ran none, and
+	// nothing ever clears it.
+	lockdown bool
+
 	// pumping is true while a thunk from runq -- or a parked task's
 	// resumeReady -- is executing. AsyncCall.Resolve checks it to tell
 	// "called from inside the scheduler" (legal) apart from "called from an
@@ -282,33 +291,21 @@ func (s *sched) pumpSnapshot() error {
 	return nil
 }
 
-// resumeOneReady resumes the FIRST ready parked task of only (every instance
-// when only is nil) and reports whether it found one. It is
-// Task.request_cancellation's body under DETERMINISTIC_PROFILE
-// (definitions.py ~477-484):
-//
-//	while self.state != Task.State.RESOLVED:
-//	  candidates = { t for t in self.inst.threads if t.ready() }
-//	  if candidates: random.choice(list(candidates)).resume()
-//	  if not candidates or DETERMINISTIC_PROFILE or ...: break
-//
-// -- one resume, from the whole INSTANCE's ready threads and not just the
-// cancelled task's (cancel-instance-wide-resume.wast turns that distinction
-// into an assertion), then out of the loop. Unlike step it never runs a runq
-// thunk: the reference resumes a thread here, nothing else.
-func (s *sched) resumeOneReady(only *Instance) (resumed bool, err error) {
-	for _, pt := range s.parked {
-		if only != nil && pt.instance() != only {
-			continue
+// resume resumes the parked pt directly, out of the scheduler's own order, and
+// then whatever it switched to, as Thread.resume follows each continuation's
+// switch_to (definitions.py ~329-337): a thread resumed here may switch away
+// rather than block, and the thread it named must run before control returns.
+func (s *sched) resume(pt parkedTask) error {
+	for pt != nil {
+		s.pumping = true
+		err := pt.resumeReady()
+		s.pumping = false
+		if err != nil {
+			return err
 		}
-		if pt.ready() {
-			s.pumping = true
-			err = pt.resumeReady()
-			s.pumping = false
-			return true, err
-		}
+		pt, s.pendingSwitch = s.pendingSwitch, nil
 	}
-	return false, nil
+	return nil
 }
 
 // isParked reports whether pt is currently in s.parked.
