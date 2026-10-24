@@ -200,7 +200,7 @@ go test ./internal/integration_test/spectest/...  # core spec corpora
 go test ./internal/component/...                  # component ABI + async .wast
 ```
 
-**The Canonical ABI skip list is empty, and that is enforced.** `wastKnownSkips` in `internal/component/instance/wast_conformance_test.go` is `map[string]map[string]string{}` — every vendored module of every suite instantiates — and the harness fails if that set changes in *either* direction: a new entry is a regression, a stale one means a gap closed and the list must shrink. The last four (`types.11`, `fused.22`, `fused.23`, `resources.14`) were all a nested component naming a definition an enclosing component owns; closing them meant modelling the core-module and component index spaces separately, linking each component to its outer one at decode time so an `alias outer` resolves, and masking flags to their label count on lift. The mechanism exists because a silent skip once hid a bug ([#25](https://github.com/samyfodil/wazy/issues/25)). A separate workflow runs the Zig standard-library test binary, the Go `wasip1` standard-library tests on two Go versions and libsodium's suite on every push; a differential trace-oracle byte-compares the async runtime against the spec's reference implementation (`definitions.py`). One official async fixture is broken; the 31/31 above runs against a corrected copy, and the fix is filed upstream as [component-model#679][pr679].
+**The Canonical ABI skip list is empty, and that is enforced.** `wastKnownSkips` in `internal/component/instance/wast_conformance_test.go` is `map[string]map[string]string{}` — every vendored module of every suite instantiates — and the harness fails if that set changes in *either* direction: a new entry is a regression, a stale one means a gap closed and the list must shrink. The last four (`types.11`, `fused.22`, `fused.23`, `resources.14`) were all a nested component naming a definition an enclosing component owns; closing them meant modelling the core-module and component index spaces separately, linking each component to its outer one at decode time so an `alias outer` resolves, and masking flags to their label count on lift. The mechanism exists because a silent skip once hid a bug ([#25](https://github.com/samyfodil/wazy/issues/25)). A separate workflow runs the Zig standard-library test binary, the Go `wasip1` standard-library tests on two Go versions and libsodium's suite on every push; a differential trace-oracle byte-compares the async runtime against the spec's reference implementation (`definitions.py`).
 
 ## Benchmarks
 
@@ -336,7 +336,6 @@ Apache 2.0. See [LICENSE](LICENSE).
 [wasi]: https://wasi.dev/
 [testsuite]: https://github.com/WebAssembly/testsuite
 [wasitest]: https://github.com/WebAssembly/wasi-testsuite
-[pr679]: https://github.com/WebAssembly/component-model/pull/679
 [anydoc]: https://github.com/xusenlin/go-anydoc
 [pdfium-ccd]: https://github.com/klippa-app/go-pdfium/blob/main/experimental/BENCHMARKS.md#the-cost-of-close-on-context-done
 [w2533]: https://github.com/wazero/wazero/pull/2533

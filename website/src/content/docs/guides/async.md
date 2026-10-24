@@ -107,7 +107,3 @@ the async ABI through it.
 The 31 official async `.wast` suites run in CI on both engines, and a differential trace-oracle
 byte-compares wazy's async runtime against the specification's reference implementation
 (`definitions.py`).
-
-One official fixture — the sync-streams case — is itself broken upstream, missing a store. The
-31/31 above runs against a corrected copy, and the fix is filed as
-[component-model#679](https://github.com/WebAssembly/component-model/pull/679).
