@@ -6,7 +6,7 @@ import (
 )
 
 // TestTypeRefString exercises every branch of TypeRef.String(), including the
-// nil receiver, the Unsupported escape hatch, every Kind case with both the
+// nil receiver, every Kind case with both the
 // Inner-present and Inner-nil forms where applicable, and the default
 // (named-type) case.
 func TestTypeRefString(t *testing.T) {
@@ -19,7 +19,6 @@ func TestTypeRefString(t *testing.T) {
 		want string
 	}{
 		{"nil", nil, "nil"},
-		{"unsupported", &TypeRef{Unsupported: "core-type"}, "UNSUPPORTED(core-type)"},
 		{"u8", &TypeRef{Kind: "u8"}, "u8"},
 		{"u16", &TypeRef{Kind: "u16"}, "u16"},
 		{"u32", &TypeRef{Kind: "u32"}, "u32"},
@@ -36,6 +35,7 @@ func TestTypeRefString(t *testing.T) {
 		{"error-context", &TypeRef{Kind: "error-context"}, "error-context"},
 		{"list with inner", &TypeRef{Kind: "list", Inner: u32}, "list<u32>"},
 		{"list without inner", &TypeRef{Kind: "list"}, "list"},
+		{"fixed-length list", &TypeRef{Kind: "list", Inner: u32, Fixed: true, Length: 4}, "list<u32, 4>"},
 		{"option with inner", &TypeRef{Kind: "option", Inner: str}, "option<string>"},
 		{"option without inner", &TypeRef{Kind: "option"}, "option"},
 		{"result both", &TypeRef{Kind: "result", Inner: u32, Inner2: str}, "result<u32,string>"},
@@ -570,19 +570,36 @@ func TestDanglingGateAtEOF(t *testing.T) {
 	}
 }
 
-// TestListWithLengthSpecifier tests "list<T, N>" (fixed-length list), whose
-// length specifier is parsed and discarded.
+// TestListWithLengthSpecifier tests "list<T, N>" (fixed-length list): N is
+// kept, read as a u32 as wit-parser reads it (leading zeros and all, and 0,
+// which only an ABI refuses), and anything else is an error.
 func TestListWithLengthSpecifier(t *testing.T) {
-	src := "package t:t; interface i { type t = list<u32, 4>; }"
-	pkg, err := Parse("listlen.wit", src)
-	if err != nil {
-		t.Fatalf("Parse failed: %v", err)
+	for src, want := range map[string]uint32{
+		"list<u32, 4>":          4,
+		"list<u32, 07>":         7,
+		"list<u32, 0>":          0,
+		"list<u32, 4294967295>": 4294967295,
+	} {
+		pkg, err := Parse("listlen.wit", "package t:t; interface i { type t = "+src+"; }")
+		if err != nil {
+			t.Fatalf("%s: Parse failed: %v", src, err)
+		}
+		alias := pkg.Items[0].(*Interface).Items[0].(*TypeDef).Type.(*TypeAlias)
+		if alias.Target.Kind != "list" || alias.Target.Inner.Kind != "u32" || !alias.Target.Fixed || alias.Target.Length != want {
+			t.Errorf("%s: unexpected list type: %+v", src, alias.Target)
+		}
 	}
-	iface := pkg.Items[0].(*Interface)
-	td := iface.Items[0].(*TypeDef)
-	alias := td.Type.(*TypeAlias)
-	if alias.Target.Kind != "list" || alias.Target.Inner.Kind != "u32" {
-		t.Errorf("unexpected list type: %+v", alias.Target)
+	pkg, err := Parse("list.wit", "package t:t; interface i { type t = list<u32>; }")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alias := pkg.Items[0].(*Interface).Items[0].(*TypeDef).Type.(*TypeAlias); alias.Target.Fixed {
+		t.Errorf("list<u32> read as fixed: %+v", alias.Target)
+	}
+	for _, src := range []string{"list<u32, 4294967296>", "list<u32, n>", "list<u32, 1.0>"} {
+		if _, err := Parse("bad.wit", "package t:t; interface i { type t = "+src+"; }"); err == nil {
+			t.Errorf("%s: parsed", src)
+		}
 	}
 }
 

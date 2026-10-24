@@ -2,6 +2,7 @@ package wit
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -1005,16 +1006,21 @@ func (p *Parser) parseListType() (TypeRef, error) {
 		return TypeRef{}, err
 	}
 
-	unsupported := ""
-	if p.current.Type == TokenComma {
+	var length uint32
+	fixed := p.current.Type == TokenComma
+	if fixed {
+		// list<T, N>: a fixed-length list. N is a u32, as in wit-parser,
+		// which leaves refusing 0 to whoever gives the type an ABI.
 		p.advance()
-		// The length is not recorded, so mark the type: read as a plain
-		// list<T>, a fixed-size list would get the wrong ABI.
-		if p.current.Type != TokenIdent && p.current.Type != TokenVersion {
+		if p.current.Type != TokenVersion {
 			return TypeRef{}, p.errorf("expected length specifier in list")
 		}
+		n, err := strconv.ParseUint(p.current.Text, 10, 32)
+		if err != nil {
+			return TypeRef{}, p.errorf("invalid list size %q: %v", p.current.Text, err)
+		}
+		length = uint32(n)
 		p.advance()
-		unsupported = "fixed-size list"
 	}
 
 	if !p.expect(TokenRAngle) {
@@ -1022,7 +1028,7 @@ func (p *Parser) parseListType() (TypeRef, error) {
 	}
 	p.advance()
 
-	return TypeRef{Kind: "list", Inner: &innerType, Unsupported: unsupported}, nil
+	return TypeRef{Kind: "list", Inner: &innerType, Fixed: fixed, Length: length}, nil
 }
 
 // parseOptionType parses "option<Type>".

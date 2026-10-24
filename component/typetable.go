@@ -15,9 +15,9 @@ import (
 // descriptor, so a FuncDesc and the table it was built from must be passed to
 // WithImportCustom together.
 //
-// The Add method is the primitive; the sugar methods below (List, Map,
-// Option, Result, Tuple, Record, Variant) cover the shapes that actually
-// occur and keep TypeRef out of caller code:
+// The Add method is the primitive; the sugar methods below (List,
+// FixedList, Map, Option, Result, Tuple, Record, Variant) cover the shapes
+// that actually occur and keep TypeRef out of caller code:
 //
 //	tbl := component.NewTypeTable()
 //	fd := tbl.Func(
@@ -61,6 +61,16 @@ func (t *TypeTable) Resolver() Resolver {
 // List interns list<elem>.
 func (t *TypeTable) List(elem TypeRef) TypeRef {
 	return t.Add(binary.ListDesc{Element: elem})
+}
+
+// FixedList interns list<elem, n>, a list of exactly n elements.
+//
+// The spec has no fixed-length list of none. Panics if n is 0.
+func (t *TypeTable) FixedList(elem TypeRef, n uint32) TypeRef {
+	if n == 0 {
+		panic("component: TypeTable.FixedList: a fixed-length list needs at least one element")
+	}
+	return t.Add(binary.FixedListDesc{Element: elem, Length: n})
 }
 
 // Map interns map<key, value>.

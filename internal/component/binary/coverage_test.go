@@ -1251,10 +1251,8 @@ func TestReadLabelTruncated(t *testing.T) {
 // ---------------------------------------------------------------------
 
 func TestReadDeftypeDescUnsupportedTag(t *testing.T) {
-	// 0x67 is not a recognized defvaltype tag (valid tags are documented as
-	// 0x68..0x72 plus the primvaltype range and the 0x3f/0x40/0x41/0x42
-	// aggregate tags).
-	buf := []byte{0x67}
+	// 0x6c is not a defvaltype tag: it was union's, which the spec dropped.
+	buf := []byte{0x6c}
 	_, _, err := readDeftypeDesc(buf, 0)
 	if err == nil || !strings.Contains(err.Error(), "unsupported (M1)") {
 		t.Errorf("got err=%v, want unsupported (M1) defvaltype tag error", err)

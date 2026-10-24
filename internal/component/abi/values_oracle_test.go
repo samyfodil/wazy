@@ -86,6 +86,10 @@ func jsonToValue(jsonVal any, t bintype.TypeDesc, resolve Resolver) (Value, erro
 		}
 		return result, nil
 
+	case bintype.FixedListDesc:
+		// A fixed-length list's value has a dynamic list's shape.
+		return jsonToValue(jsonVal, bintype.ListDesc{Element: desc.Element}, resolve)
+
 	case bintype.MapDesc:
 		keyType, err := resolveType(&desc.Key, resolve)
 		if err != nil {
@@ -470,7 +474,7 @@ func TestValuesOracleRoundTrip(t *testing.T) {
 			}
 
 			// Compare loaded value (after JSON round-trip to normalize)
-			loadedJSON, err := json.Marshal(loaded)
+			loadedJSON, err := json.Marshal(jsonable(loaded))
 			if err != nil {
 				t.Fatalf("marshaling loaded value: %v", err)
 			}
@@ -485,4 +489,25 @@ func TestValuesOracleRoundTrip(t *testing.T) {
 			}
 		})
 	}
+}
+
+// jsonable is v with every []byte -- a list<u8>'s typed shape, which
+// encoding/json would write as base64 -- turned into a list of numbers, as
+// the golden file holds it.
+func jsonable(v Value) any {
+	switch t := v.(type) {
+	case []byte:
+		out := make([]int, len(t))
+		for i, b := range t {
+			out[i] = int(b)
+		}
+		return out
+	case []Value:
+		out := make([]any, len(t))
+		for i, e := range t {
+			out[i] = jsonable(e)
+		}
+		return out
+	}
+	return v
 }

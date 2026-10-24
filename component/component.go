@@ -81,7 +81,8 @@ func NewCompileCache() *CompileCache { return instance.NewCompileCache() }
 // arguments and results and of host-import args/results.
 //
 // A list of a fixed-width primitive is the Go slice of that primitive rather
-// than a []Value -- see ListDesc in types.go. A map<K,V> has no Canonical ABI
+// than a []Value -- see ListDesc in types.go -- and a fixed-length
+// list<T, N> has the same shape, of N elements. A map<K,V> has no Canonical ABI
 // representation of its own and lifts exactly as list<tuple<K,V>> would: a
 // []Value of two-element []Value{key, value} pairs -- see MapDesc and
 // MapOf.

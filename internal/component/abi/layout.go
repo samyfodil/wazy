@@ -40,6 +40,8 @@ func Alignment(t binary.TypeDesc, resolve Resolver) (uint32, error) {
 		// map<K,V> despecializes to list<tuple<K,V>> (see MapDesc's doc):
 		// same pointer alignment as any dynamic list, independent of K/V.
 		return alignmentList(binary.ListDesc{}, resolve)
+	case binary.FixedListDesc:
+		return alignmentFixedList(desc, resolve)
 	case binary.RecordDesc:
 		return alignmentRecord(desc, resolve)
 	case binary.VariantDesc:
@@ -86,6 +88,8 @@ func Size(t binary.TypeDesc, resolve Resolver) (uint32, error) {
 	case binary.MapDesc:
 		// Same despecialization as Alignment above: pointer + length, always.
 		return sizeList(binary.ListDesc{}, resolve)
+	case binary.FixedListDesc:
+		return sizeFixedList(desc, resolve)
 	case binary.RecordDesc:
 		return sizeRecord(desc, resolve)
 	case binary.VariantDesc:

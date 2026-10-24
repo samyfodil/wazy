@@ -250,12 +250,13 @@ func (*ExportInterface) exportType() {}
 
 // TypeRef represents a type reference (including primitive types and compound types).
 type TypeRef struct {
-	Kind        string     // "u32", "string", "list", "option", "result", "record", etc.
-	Name        string     // for named types (user-defined or resource types)
-	Inner       *TypeRef   // for list<T>, option<T>, own<T>, borrow<T>
-	Inner2      *TypeRef   // for result<T,E>, map<K,V>, tuple element
-	Tuple       []*TypeRef // for tuple<T1, T2, ...>
-	Unsupported string     // if an unsupported construct is detected, name it here
+	Kind   string     // "u32", "string", "list", "option", "result", "record", etc.
+	Name   string     // for named types (user-defined or resource types)
+	Inner  *TypeRef   // for list<T>, option<T>, own<T>, borrow<T>
+	Inner2 *TypeRef   // for result<T,E>, map<K,V>, tuple element
+	Tuple  []*TypeRef // for tuple<T1, T2, ...>
+	Fixed  bool       // for list<T, N>: a fixed-length list
+	Length uint32     // for list<T, N>: N
 }
 
 // String returns a human-readable representation of the type.
@@ -263,14 +264,14 @@ func (t *TypeRef) String() string {
 	if t == nil {
 		return "nil"
 	}
-	if t.Unsupported != "" {
-		return fmt.Sprintf("UNSUPPORTED(%s)", t.Unsupported)
-	}
 	switch t.Kind {
 	case "u8", "u16", "u32", "u64", "s8", "s16", "s32", "s64", "f32", "f64", "bool", "char", "string", "error-context":
 		return t.Kind
 	case "list":
-		if t.Inner != nil {
+		switch {
+		case t.Inner != nil && t.Fixed:
+			return fmt.Sprintf("list<%s, %d>", t.Inner.String(), t.Length)
+		case t.Inner != nil:
 			return fmt.Sprintf("list<%s>", t.Inner.String())
 		}
 		return "list"

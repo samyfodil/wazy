@@ -527,6 +527,13 @@ func (c *Component) globalizeLocalTypeDesc(localTypes []TypeDesc, d TypeDesc, me
 		}
 		return ListDesc{Element: elem}, nil
 
+	case FixedListDesc:
+		elem, err := c.globalizeLocalRef(localTypes, t.Element, memo)
+		if err != nil {
+			return nil, err
+		}
+		return FixedListDesc{Element: elem, Length: t.Length}, nil
+
 	case MapDesc:
 		key, err := c.globalizeLocalRef(localTypes, t.Key, memo)
 		if err != nil {

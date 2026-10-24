@@ -18,6 +18,8 @@ import (
 // The typed shape costs nothing -- it is returned as it arrived, not copied --
 // so this is not a slow compatibility wrapper for the case it was written for.
 //
+// A fixed-length list<T, N> has the same two shapes, so ListOf reads it too.
+//
 // It also accepts the []Value shape for a scalar list, which is what a host
 // function written before lists were typed will have been asserting, and what
 // a caller building one by hand still produces. Converting between the two is

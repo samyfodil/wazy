@@ -41,6 +41,131 @@
     "mem_len": 0,
     "ptr": 1024
   },
+  "fixed_char_3": {
+    "loaded_value": [
+      97,
+      233,
+      128512
+    ],
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "fixed_f64_2": {
+    "loaded_value": [
+      0.5,
+      -1e+300
+    ],
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "fixed_nested_u16_3x2": {
+    "loaded_value": [
+      [
+        1,
+        2,
+        3
+      ],
+      [
+        4,
+        5,
+        65535
+      ]
+    ],
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "fixed_opt_u64": {
+    "loaded_value": null,
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "fixed_option_u64_2": {
+    "loaded_value": [
+      null,
+      12884901893
+    ],
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "fixed_rec_ab": {
+    "loaded_value": [
+      1,
+      2
+    ],
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "fixed_record_2": {
+    "loaded_value": [
+      [
+        1,
+        2
+      ],
+      [
+        3,
+        4
+      ]
+    ],
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "fixed_s16_2": {
+    "loaded_value": [
+      -32768,
+      32767
+    ],
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "fixed_u16_3": {
+    "loaded_value": [
+      1,
+      2,
+      3
+    ],
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "fixed_u32_3": {
+    "loaded_value": [
+      10,
+      11,
+      12
+    ],
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "fixed_u32_4": {
+    "loaded_value": [
+      1,
+      2,
+      4294967295,
+      0
+    ],
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "fixed_u8_3": {
+    "loaded_value": [
+      0,
+      128,
+      255
+    ],
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
   "flags_eight": {
     "loaded_value": 5,
     "mem_hex": "",
@@ -131,6 +256,20 @@
     "loaded_value": [
       10,
       20
+    ],
+    "mem_hex": "",
+    "mem_len": 0,
+    "ptr": 1024
+  },
+  "record_with_fixed": {
+    "loaded_value": [
+      9,
+      [
+        10,
+        11,
+        12
+      ],
+      13
     ],
     "mem_hex": "",
     "mem_len": 0,

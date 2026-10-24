@@ -333,6 +333,7 @@ func specToFlatTypeDesc(spec json.RawMessage, nameToIndex map[string]uint32) (bi
 		Cases  []json.RawMessage `json:"cases"`
 		Elems  []json.RawMessage `json:"elems"`
 		Elem   json.RawMessage   `json:"elem"`
+		Len    *uint32           `json:"len"`   // for kind == "list": a fixed-length list
 		Key    json.RawMessage   `json:"key"`   // for kind == "map"
 		Value  json.RawMessage   `json:"value"` // for kind == "map"
 		Names  []string          `json:"names"`
@@ -352,6 +353,9 @@ func specToFlatTypeDesc(spec json.RawMessage, nameToIndex map[string]uint32) (bi
 		elemRef, err := specToFlatTypeRef(node.Elem, nameToIndex)
 		if err != nil {
 			return nil, fmt.Errorf("list element: %w", err)
+		}
+		if node.Len != nil {
+			return binary.FixedListDesc{Element: elemRef, Length: *node.Len}, nil
 		}
 		return binary.ListDesc{Element: elemRef}, nil
 
@@ -514,6 +518,10 @@ func convertTestValue(rawValue any, t binary.TypeDesc, resolve Resolver) (Value,
 			return typed, nil
 		}
 		return result, nil
+
+	case binary.FixedListDesc:
+		// A fixed-length list's value has a dynamic list's shape.
+		return convertTestValue(rawValue, binary.ListDesc{Element: desc.Element}, resolve)
 
 	case binary.MapDesc:
 		entries, ok := rawValue.([]any)

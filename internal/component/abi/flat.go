@@ -110,6 +110,13 @@ func lowerFlatImpl(v Value, t binary.TypeDesc, flat []string, resolve Resolver, 
 	case binary.MapDesc:
 		return lowerFlatList(v, mapElemType(desc), resolve, realloc, mem)
 
+	case binary.FixedListDesc:
+		elemType, err := resolveType(&desc.Element, resolve)
+		if err != nil {
+			return nil, err
+		}
+		return lowerFlatFixedList(v, desc.Length, elemType, resolve, realloc, mem)
+
 	case binary.RecordDesc:
 		return lowerFlatRecord(v, desc, resolve, realloc, mem)
 
@@ -245,13 +252,7 @@ func lowerPrimitiveCore(v Value, prim string) (CoreValue, error) {
 
 	case "char":
 		if r, ok := v.(rune); ok {
-			if r < 0 || r >= 0x110000 {
-				return CoreValue{}, fmt.Errorf("lowerFlat char: value %d out of range", r)
-			}
-			if r >= 0xD800 && r <= 0xDFFF {
-				return CoreValue{}, fmt.Errorf("lowerFlat char: surrogate half %d not allowed", r)
-			}
-			return NewCoreValueI32(uint32(r)), nil
+			return lowerChar(r)
 		}
 		return CoreValue{}, fmt.Errorf("lowerFlat char: expected rune, got %T", v)
 
@@ -758,6 +759,13 @@ func liftFlatImpl(vi valueIter, t binary.TypeDesc, flat []string, resolve Resolv
 	case binary.MapDesc:
 		return liftFlatList(vi, mapElemType(desc), resolve, mem)
 
+	case binary.FixedListDesc:
+		elemType, err := resolveType(&desc.Element, resolve)
+		if err != nil {
+			return nil, err
+		}
+		return liftFlatFixedList(vi, desc.Length, elemType, resolve, mem)
+
 	case binary.RecordDesc:
 		return liftFlatRecord(vi, desc, resolve, mem)
 
@@ -861,20 +869,41 @@ func liftScalarPrimitive(cv CoreValue, prim string) (Value, error) {
 	case "f64":
 		return cv.AsF64(), nil
 	case "char":
-		i := cv.AsI32()
-		if i >= 0x110000 {
-			return nil, fmt.Errorf("liftFlat char: value %d out of range", i)
+		r, err := liftChar(cv)
+		if err != nil {
+			return nil, err
 		}
-		if i >= 0xD800 && i <= 0xDFFF {
-			return nil, fmt.Errorf("liftFlat char: surrogate half %d not allowed", i)
-		}
-		return rune(i), nil
+		return r, nil
 	case "error-context":
 		// Opaque i32 handle -- same lifting as own/borrow.
 		return cv.AsI32(), nil
 	default:
 		return nil, fmt.Errorf("liftFlat: unknown primitive type %s", prim)
 	}
+}
+
+// lowerChar lowers one char: a Unicode scalar value, so neither out of range
+// nor a surrogate half.
+func lowerChar(r rune) (CoreValue, error) {
+	if r < 0 || r >= 0x110000 {
+		return CoreValue{}, fmt.Errorf("lowerFlat char: value %d out of range", r)
+	}
+	if r >= 0xD800 && r <= 0xDFFF {
+		return CoreValue{}, fmt.Errorf("lowerFlat char: surrogate half %d not allowed", r)
+	}
+	return NewCoreValueI32(uint32(r)), nil
+}
+
+// liftChar lifts one char, refusing what lowerChar refuses.
+func liftChar(cv CoreValue) (rune, error) {
+	i := cv.AsI32()
+	if i >= 0x110000 {
+		return 0, fmt.Errorf("liftFlat char: value %d out of range", i)
+	}
+	if i >= 0xD800 && i <= 0xDFFF {
+		return 0, fmt.Errorf("liftFlat char: surrogate half %d not allowed", i)
+	}
+	return rune(i), nil
 }
 
 // liftFlatString lifts a string value.

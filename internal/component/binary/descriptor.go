@@ -69,6 +69,21 @@ type ListDesc struct {
 func (ListDesc) isTypeDesc()  {}
 func (ListDesc) Kind() string { return "list" }
 
+// FixedListDesc represents a fixed-length list, list<T, N> (🔧 in the
+// Component Model spec): exactly Length elements, N > 0. Its Canonical ABI
+// is a homogeneous tuple's: the elements are laid out back to back at the
+// element's alignment, with no pointer or length, and flatten to the
+// element's flattening Length times. Its Value has a dynamic list's shape --
+// the Go slice of a fixed-width primitive element, else a []Value -- of
+// exactly Length elements.
+type FixedListDesc struct {
+	Element TypeRef
+	Length  uint32
+}
+
+func (FixedListDesc) isTypeDesc()  {}
+func (FixedListDesc) Kind() string { return "fixed-length-list" }
+
 // TupleDesc represents a tuple (unnamed record).
 type TupleDesc struct {
 	Elements []TypeRef
@@ -514,6 +529,19 @@ func readDefvaltypeDesc(buf []byte, off int, tag byte) (TypeDesc, int, error) {
 	case 0x70: // list: one valtype
 		elem, off2, e := readValTypeRef(buf, off)
 		desc, off, err = ListDesc{Element: elem}, off2, e
+	case 0x67: // fixed-length list: valtype, then u32 length (> 0)
+		elem, off2, e := readValTypeRef(buf, off)
+		if e != nil {
+			return nil, off2, e
+		}
+		n, used, e := leb128.LoadUint32(buf[off2:])
+		if e != nil {
+			return nil, off2, fmt.Errorf("fixed-length list: length: %w", e)
+		}
+		if n == 0 {
+			return nil, off2, fmt.Errorf("fixed-length lists must have more than zero elements")
+		}
+		desc, off, err = FixedListDesc{Element: elem, Length: n}, off2+int(used), nil
 	case 0x6f: // tuple: vec(valtype)
 		elems, off2, e := readValtypeVecDesc(buf, off)
 		desc, off, err = TupleDesc{Elements: elems}, off2, e

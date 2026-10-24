@@ -47,6 +47,7 @@ func TestResolveArgHandles(t *testing.T) {
 		{"top-level borrow", descs[0], borrowH, rep},
 		{"host-owned borrow untouched", descs[2], hostH, hostH},
 		{"list", binary.ListDesc{Element: borrowRef}, []abi.Value{borrowH, borrowH}, []abi.Value{rep, rep}},
+		{"fixed-length list", binary.FixedListDesc{Element: borrowRef, Length: 2}, []abi.Value{borrowH, borrowH}, []abi.Value{rep, rep}},
 		{"map", binary.MapDesc{Key: u32Ref, Value: borrowRef}, []abi.Value{[]abi.Value{uint32(1), borrowH}}, []abi.Value{[]abi.Value{uint32(1), rep}}},
 		{"record", binary.RecordDesc{Fields: []binary.RecordField{{Name: "a", Type: u32Ref}, {Name: "c", Type: borrowRef}}}, []abi.Value{uint32(1), borrowH}, []abi.Value{uint32(1), rep}},
 		{"tuple", binary.TupleDesc{Elements: []binary.TypeRef{borrowRef, u32Ref}}, []abi.Value{borrowH, uint32(9)}, []abi.Value{rep, uint32(9)}},
@@ -73,6 +74,7 @@ func TestResolveArgHandles(t *testing.T) {
 	// typeContainsResource across every composite branch.
 	yes := []binary.TypeDesc{
 		binary.ListDesc{Element: borrowRef},
+		binary.FixedListDesc{Element: borrowRef, Length: 3},
 		binary.MapDesc{Key: u32Ref, Value: borrowRef},
 		binary.MapDesc{Key: borrowRef, Value: u32Ref},
 		binary.OptionDesc{Element: borrowRef},
@@ -91,6 +93,7 @@ func TestResolveArgHandles(t *testing.T) {
 		binary.RecordDesc{Fields: []binary.RecordField{{Name: "a", Type: u32Ref}}},
 		binary.TupleDesc{Elements: []binary.TypeRef{u32Ref, u32Ref}},
 		binary.MapDesc{Key: u32Ref, Value: u32Ref},
+		binary.FixedListDesc{Element: u32Ref, Length: 3},
 		binary.PrimitiveDesc{Prim: "string"},
 		binary.ResultDesc{Ok: &u32Ref},
 	}

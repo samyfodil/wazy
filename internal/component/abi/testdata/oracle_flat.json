@@ -2249,6 +2249,159 @@
           }
         ]
       }
+    },
+    {
+      "name": "fl_u32_4",
+      "type": {
+        "kind": "list",
+        "elem": {
+          "kind": "primitive",
+          "prim": "u32"
+        },
+        "len": 4
+      }
+    },
+    {
+      "name": "fl_s8_3",
+      "type": {
+        "kind": "list",
+        "elem": {
+          "kind": "primitive",
+          "prim": "s8"
+        },
+        "len": 3
+      }
+    },
+    {
+      "name": "fl_bool_2",
+      "type": {
+        "kind": "list",
+        "elem": {
+          "kind": "primitive",
+          "prim": "bool"
+        },
+        "len": 2
+      }
+    },
+    {
+      "name": "fl_f32_2",
+      "type": {
+        "kind": "list",
+        "elem": {
+          "kind": "primitive",
+          "prim": "f32"
+        },
+        "len": 2
+      }
+    },
+    {
+      "name": "fl_char_2",
+      "type": {
+        "kind": "list",
+        "elem": {
+          "kind": "primitive",
+          "prim": "char"
+        },
+        "len": 2
+      }
+    },
+    {
+      "name": "fl_u64_2",
+      "type": {
+        "kind": "list",
+        "elem": {
+          "kind": "primitive",
+          "prim": "u64"
+        },
+        "len": 2
+      }
+    },
+    {
+      "name": "fl_string_2",
+      "type": {
+        "kind": "list",
+        "elem": {
+          "kind": "primitive",
+          "prim": "string"
+        },
+        "len": 2
+      }
+    },
+    {
+      "name": "fl_rec_ab",
+      "type": {
+        "kind": "record",
+        "fields": [
+          {
+            "name": "a",
+            "type": {
+              "kind": "primitive",
+              "prim": "u8"
+            }
+          },
+          {
+            "name": "b",
+            "type": {
+              "kind": "primitive",
+              "prim": "u32"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "fl_record_2",
+      "type": {
+        "kind": "list",
+        "elem": {
+          "kind": "ref",
+          "name": "fl_rec_ab"
+        },
+        "len": 2
+      }
+    },
+    {
+      "name": "fl_s16_2",
+      "type": {
+        "kind": "list",
+        "elem": {
+          "kind": "primitive",
+          "prim": "s16"
+        },
+        "len": 2
+      }
+    },
+    {
+      "name": "fl_nested_s16_2x2",
+      "type": {
+        "kind": "list",
+        "elem": {
+          "kind": "ref",
+          "name": "fl_s16_2"
+        },
+        "len": 2
+      }
+    },
+    {
+      "name": "fl_opt_u8",
+      "type": {
+        "kind": "option",
+        "elem": {
+          "kind": "primitive",
+          "prim": "u8"
+        }
+      }
+    },
+    {
+      "name": "fl_option_u8_3",
+      "type": {
+        "kind": "list",
+        "elem": {
+          "kind": "ref",
+          "name": "fl_opt_u8"
+        },
+        "len": 3
+      }
     }
   ],
   "values": [
@@ -2871,6 +3024,102 @@
       "value": [
         "0xdeadbeefcafef00d",
         "-9007199254740993"
+      ]
+    },
+    {
+      "type": "fl_u32_4",
+      "name": "fl_u32_4_vals",
+      "value": [
+        1,
+        2,
+        4294967295,
+        0
+      ]
+    },
+    {
+      "type": "fl_s8_3",
+      "name": "fl_s8_3_vals",
+      "value": [
+        -128,
+        0,
+        127
+      ]
+    },
+    {
+      "type": "fl_bool_2",
+      "name": "fl_bool_2_vals",
+      "value": [
+        true,
+        false
+      ]
+    },
+    {
+      "type": "fl_f32_2",
+      "name": "fl_f32_2_vals",
+      "value": [
+        1.5,
+        -2.25
+      ]
+    },
+    {
+      "type": "fl_char_2",
+      "name": "fl_char_2_vals",
+      "value": [
+        65,
+        128512
+      ]
+    },
+    {
+      "type": "fl_u64_2",
+      "name": "fl_u64_2_vals",
+      "value": [
+        12884901893,
+        7
+      ]
+    },
+    {
+      "type": "fl_string_2",
+      "name": "fl_string_2_vals",
+      "value": [
+        "ab",
+        "héllo"
+      ]
+    },
+    {
+      "type": "fl_record_2",
+      "name": "fl_record_2_vals",
+      "value": [
+        [
+          1,
+          2
+        ],
+        [
+          255,
+          4294967295
+        ]
+      ]
+    },
+    {
+      "type": "fl_nested_s16_2x2",
+      "name": "fl_nested_s16_vals",
+      "value": [
+        [
+          -1,
+          2
+        ],
+        [
+          -32768,
+          32767
+        ]
+      ]
+    },
+    {
+      "type": "fl_option_u8_3",
+      "name": "fl_option_u8_3_vals",
+      "value": [
+        null,
+        7,
+        null
       ]
     }
   ]

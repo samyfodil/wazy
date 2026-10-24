@@ -144,6 +144,10 @@ func decodeComponent(buf []byte) (*Component, error) {
 			// The enclosing link is what makes the nested component's
 			// `alias outer` definitions resolvable -- see Component.Outer.
 			nested.Outer = c
+			// Now that its outer aliases resolve, its types can be sized.
+			if err := nested.validateValueSizes(); err != nil {
+				return nil, fmt.Errorf("nested component[%d]: %w", len(c.NestedComponents), err)
+			}
 			c.NestedComponents = append(c.NestedComponents, nested)
 			// Every nested component occupies the next index in the
 			// component index space, interleaved with component imports,
@@ -352,6 +356,10 @@ func decodeComponent(buf []byte) (*Component, error) {
 	// one, and it must still fail at the same call site with the same message
 	// -- it just leaves the Component unfrozen.
 	c.typesFrozen = c.precomputeImportedAliases()
+
+	if err := c.validateValueSizes(); err != nil {
+		return nil, err
+	}
 
 	c.Decoded = true
 	c.Bytes = buf

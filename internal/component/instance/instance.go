@@ -871,6 +871,8 @@ func typeContainsResource(t binary.TypeDesc, resolve abi.Resolver, depth int) bo
 		return d.Prim == "error-context" // same reasoning, for error-context
 	case binary.ListDesc:
 		return typeRefContainsResource(&d.Element, resolve, depth)
+	case binary.FixedListDesc:
+		return typeRefContainsResource(&d.Element, resolve, depth)
 	case binary.MapDesc:
 		return typeRefContainsResource(&d.Key, resolve, depth) || typeRefContainsResource(&d.Value, resolve, depth)
 	case binary.OptionDesc:
@@ -935,6 +937,8 @@ func typeContainsAsyncValueNested(t binary.TypeDesc, resolve abi.Resolver, depth
 	}
 	switch d := t.(type) {
 	case binary.ListDesc:
+		return typeRefContainsAsyncValueNested(&d.Element, resolve, depth)
+	case binary.FixedListDesc:
 		return typeRefContainsAsyncValueNested(&d.Element, resolve, depth)
 	case binary.MapDesc:
 		return typeRefContainsAsyncValueNested(&d.Key, resolve, depth) || typeRefContainsAsyncValueNested(&d.Value, resolve, depth)
@@ -1067,6 +1071,10 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 			}
 		}
 		return out, nil
+
+	case binary.FixedListDesc:
+		// Its value has a dynamic list's shape, so it is walked as one.
+		return in.resolveArgHandlesDepth(v, binary.ListDesc{Element: d.Element}, depth)
 
 	case binary.MapDesc:
 		// map<K,V> despecializes to list<tuple<K,V>> (see MapDesc's doc): each
@@ -2417,6 +2425,10 @@ func usesMemory(t binary.TypeDesc, resolve abi.Resolver) bool {
 		// map<K,V> despecializes to list<tuple<K,V>>: always memory-backed,
 		// same as ListDesc above, independent of K/V.
 		return true
+	case binary.FixedListDesc:
+		// In place, like a tuple: memory only if its element needs it.
+		et, err := resolveTypeRef(&d.Element, resolve)
+		return err == nil && usesMemory(et, resolve)
 	case binary.RecordDesc:
 		for _, f := range d.Fields {
 			if ft, err := resolveTypeRef(&f.Type, resolve); err == nil && usesMemory(ft, resolve) {

@@ -101,7 +101,8 @@ def build_type(spec, by_name):
         return prim_map[spec["prim"]]()
 
     if kind == "list":
-        return ref.ListType(build_type(spec["elem"], by_name))
+        # "len" makes it a fixed-length list<T, N> (ListType's maybe_length).
+        return ref.ListType(build_type(spec["elem"], by_name), spec.get("len"))
 
     if kind == "ref":
         return by_name[spec["name"]]

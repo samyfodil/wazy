@@ -64,6 +64,8 @@ Use the Makefile; it encodes the real invocations.
   to `list<tuple<K,V>>` (identical alignment/size/flatten/lift/lower, independent
   of K/V) -- so its value is that list's shape: a `[]Value` of two-element
   `[]Value{key, value}` pairs. Read one with `component.MapOf[K,V]`.
+  A fixed-length `list<T, N>` has a `list`'s shape, of exactly N elements (lowering
+  any other length is an error), though on the wire it is a tuple of N `T`s.
 - **Component ABI hot paths:** the lift/lower tree runs per value per call, so an
   allocation there is an allocation per request. Two habits it has been burned by:
   boxing a value type into an interface inside a recursive walk, and building a

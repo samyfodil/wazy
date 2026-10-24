@@ -576,3 +576,33 @@ world c { include b with { s as u } }`)
 		}
 	}
 }
+
+// list<T, N> keeps N: each lowers to a FixedListDesc, nested or not.
+func TestSignature_FixedLengthList(t *testing.T) {
+	pkg := mustParse(t, `package a:b;
+interface i {
+  record point { x: s32, y: s32 }
+  type quad = list<u32, 4>;
+  f: func(a: quad, b: list<string, 2>, c: list<list<u8, 3>, 2>) -> list<point, 2>;
+}`)
+	sig, err := pkg.Interface("i").Func("f").Signature(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := sig.Desc.Params
+	if desc(sig, p[0].Type) != (component.FixedListDesc{Element: component.Prim("u32"), Length: 4}) ||
+		desc(sig, p[1].Type) != (component.FixedListDesc{Element: component.Prim("string"), Length: 2}) {
+		t.Errorf("params %#v, %#v", desc(sig, p[0].Type), desc(sig, p[1].Type))
+	}
+	outer, ok := desc(sig, p[2].Type).(component.FixedListDesc)
+	if !ok || outer.Length != 2 || desc(sig, outer.Element) != (component.FixedListDesc{Element: component.Prim("u8"), Length: 3}) {
+		t.Errorf("nested %#v", desc(sig, p[2].Type))
+	}
+	res, ok := desc(sig, *sig.Desc.Results.Unnamed).(component.FixedListDesc)
+	if !ok || res.Length != 2 || sig.TypeNames[*res.Element.TypeIndex] != "point" {
+		t.Errorf("result %#v, names %v", res, sig.TypeNames)
+	}
+	if sig.TypeNames[*p[0].Type.TypeIndex] != "quad" {
+		t.Errorf("alias name %v", sig.TypeNames)
+	}
+}

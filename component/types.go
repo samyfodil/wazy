@@ -67,6 +67,12 @@ type (
 	// Both shapes are accepted when lowering a scalar list, so a host func
 	// may hand over either; lifting produces the typed one.
 	ListDesc = binary.ListDesc
+	// FixedListDesc is list<T, N>, a list of exactly Length elements
+	// (Length > 0). Its Value has ListDesc's shape -- the typed slice for a
+	// fixed-width primitive element, a []Value otherwise -- so ListOf reads
+	// it; lowering either shape with any other length is an error. On the
+	// wire it is a tuple of N T's: no pointer, no length, no allocation.
+	FixedListDesc = binary.FixedListDesc
 	// TupleDesc is a positional product type. Its Value is a []Value.
 	TupleDesc = binary.TupleDesc
 	// MapDesc is map<K,V>, an unordered association of keys to values. It has

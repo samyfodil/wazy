@@ -21,6 +21,8 @@ func TestGlobalizeLocalTypeDesc_EveryKind(t *testing.T) {
 		switch t := d.(type) {
 		case ListDesc:
 			return []TypeRef{t.Element}
+		case FixedListDesc:
+			return []TypeRef{t.Element}
 		case OptionDesc:
 			return []TypeRef{t.Element}
 		case MapDesc:
@@ -68,6 +70,7 @@ func TestGlobalizeLocalTypeDesc_EveryKind(t *testing.T) {
 		want int // TypeRefs expected to be rewritten
 	}{
 		{"list", ListDesc{Element: ref()}, 1},
+		{"fixed-length list", FixedListDesc{Element: ref(), Length: 3}, 1},
 		{"option", OptionDesc{Element: ref()}, 1},
 		{"map", MapDesc{Key: ref(), Value: ref()}, 2},
 		{"tuple", TupleDesc{Elements: []TypeRef{ref(), ref()}}, 2},
@@ -134,6 +137,7 @@ func TestGlobalizeLocalTypeDesc_PropagatesRefErrors(t *testing.T) {
 		in   TypeDesc
 	}{
 		{"list", ListDesc{Element: oob()}},
+		{"fixed-length list", FixedListDesc{Element: oob(), Length: 3}},
 		{"option", OptionDesc{Element: oob()}},
 		{"map key", MapDesc{Key: oob(), Value: TypeRef{Primitive: "u32"}}},
 		{"map value", MapDesc{Key: TypeRef{Primitive: "u32"}, Value: oob()}},

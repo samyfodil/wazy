@@ -52,6 +52,9 @@ func FlatWidth(t binary.TypeDesc, resolve Resolver) (int, error) {
 		// pointer and a length, same as any dynamic list.
 		return 2, nil
 
+	case binary.FixedListDesc:
+		return flatWidthFixedList(desc, resolve)
+
 	case binary.RecordDesc:
 		total := 0
 		for i := range desc.Fields {

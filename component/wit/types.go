@@ -78,9 +78,6 @@ func (b *builder) funcDesc(f *Func) (component.FuncDesc, error) {
 
 // ref lowers one type expression written in scope s.
 func (b *builder) ref(s *scope, t *ast.TypeRef) (component.TypeRef, error) {
-	if t.Unsupported != "" {
-		return component.TypeRef{}, fmt.Errorf("%s is not supported", t.Unsupported)
-	}
 	switch t.Kind {
 	case "bool", "s8", "s16", "s32", "s64", "u8", "u16", "u32", "u64",
 		"f32", "f64", "char", "string", "error-context":
@@ -97,7 +94,14 @@ func (b *builder) ref(s *scope, t *ast.TypeRef) (component.TypeRef, error) {
 	}
 	switch t.Kind {
 	case "list":
-		return b.tbl.List(*inner), nil
+		switch {
+		case !t.Fixed:
+			return b.tbl.List(*inner), nil
+		case t.Length == 0:
+			// wit-parser reads list<T, 0>; the binary format refuses it.
+			return component.TypeRef{}, fmt.Errorf("%s: a fixed-length list needs at least one element", t)
+		}
+		return b.tbl.FixedList(*inner, t.Length), nil
 	case "option":
 		return b.tbl.Option(*inner), nil
 	case "future":

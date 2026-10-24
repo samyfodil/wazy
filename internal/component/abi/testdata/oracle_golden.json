@@ -15,6 +15,283 @@
     "kind": "value",
     "size": 1
   },
+  "fixed_char_2": {
+    "alignment": 4,
+    "flatten": [
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 8
+  },
+  "fixed_f64_2": {
+    "alignment": 8,
+    "flatten": [
+      "f64",
+      "f64"
+    ],
+    "kind": "value",
+    "size": 16
+  },
+  "fixed_nested_u16_3x2": {
+    "alignment": 2,
+    "flatten": [
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 12
+  },
+  "fixed_opt_u64": {
+    "alignment": 8,
+    "flatten": [
+      "i32",
+      "i64"
+    ],
+    "kind": "value",
+    "size": 16
+  },
+  "fixed_option_u64_2": {
+    "alignment": 8,
+    "flatten": [
+      "i32",
+      "i64",
+      "i32",
+      "i64"
+    ],
+    "kind": "value",
+    "size": 32
+  },
+  "fixed_rec_ab": {
+    "alignment": 4,
+    "flatten": [
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 8
+  },
+  "fixed_record_2": {
+    "alignment": 4,
+    "flatten": [
+      "i32",
+      "i32",
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 16
+  },
+  "fixed_string_2": {
+    "alignment": 4,
+    "flatten": [
+      "i32",
+      "i32",
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 16
+  },
+  "fixed_u16_3": {
+    "alignment": 2,
+    "flatten": [
+      "i32",
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 6
+  },
+  "fixed_u32_100": {
+    "alignment": 4,
+    "flatten": [
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 400
+  },
+  "fixed_u32_3": {
+    "alignment": 4,
+    "flatten": [
+      "i32",
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 12
+  },
+  "fixed_u32_4": {
+    "alignment": 4,
+    "flatten": [
+      "i32",
+      "i32",
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 16
+  },
+  "fixed_u8_16": {
+    "alignment": 1,
+    "flatten": [
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 16
+  },
+  "fixed_u8_17": {
+    "alignment": 1,
+    "flatten": [
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 17
+  },
+  "fixed_u8_3": {
+    "alignment": 1,
+    "flatten": [
+      "i32",
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 3
+  },
   "flags_16": {
     "alignment": 2,
     "flatten": [
@@ -192,6 +469,15 @@
       ],
       "results": []
     }
+  },
+  "list_of_fixed_char_2": {
+    "alignment": 4,
+    "flatten": [
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 8
   },
   "list_record": {
     "alignment": 4,
@@ -395,6 +681,18 @@
     ],
     "kind": "value",
     "size": 8
+  },
+  "record_with_fixed": {
+    "alignment": 4,
+    "flatten": [
+      "i32",
+      "i32",
+      "i32",
+      "i32",
+      "i32"
+    ],
+    "kind": "value",
+    "size": 20
   },
   "result_empty": {
     "alignment": 1,

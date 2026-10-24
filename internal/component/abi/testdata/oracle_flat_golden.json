@@ -1394,5 +1394,217 @@
     ],
     "mem_base": 1024,
     "mem_hex": ""
+  },
+  {
+    "name": "fl_u32_4_vals",
+    "type": "fl_u32_4",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 1
+      },
+      {
+        "kind": "i32",
+        "bits": 2
+      },
+      {
+        "kind": "i32",
+        "bits": 4294967295
+      },
+      {
+        "kind": "i32",
+        "bits": 0
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "fl_s8_3_vals",
+    "type": "fl_s8_3",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 4294967168
+      },
+      {
+        "kind": "i32",
+        "bits": 0
+      },
+      {
+        "kind": "i32",
+        "bits": 127
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "fl_bool_2_vals",
+    "type": "fl_bool_2",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 1
+      },
+      {
+        "kind": "i32",
+        "bits": 0
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "fl_f32_2_vals",
+    "type": "fl_f32_2",
+    "core_vals": [
+      {
+        "kind": "f32",
+        "bits": 1069547520
+      },
+      {
+        "kind": "f32",
+        "bits": 3222274048
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "fl_char_2_vals",
+    "type": "fl_char_2",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 65
+      },
+      {
+        "kind": "i32",
+        "bits": 128512
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "fl_u64_2_vals",
+    "type": "fl_u64_2",
+    "core_vals": [
+      {
+        "kind": "i64",
+        "bits": 12884901893
+      },
+      {
+        "kind": "i64",
+        "bits": 7
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "fl_string_2_vals",
+    "type": "fl_string_2",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 1024
+      },
+      {
+        "kind": "i32",
+        "bits": 2
+      },
+      {
+        "kind": "i32",
+        "bits": 1026
+      },
+      {
+        "kind": "i32",
+        "bits": 6
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": "616268c3a96c6c6f"
+  },
+  {
+    "name": "fl_record_2_vals",
+    "type": "fl_record_2",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 1
+      },
+      {
+        "kind": "i32",
+        "bits": 2
+      },
+      {
+        "kind": "i32",
+        "bits": 255
+      },
+      {
+        "kind": "i32",
+        "bits": 4294967295
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "fl_nested_s16_vals",
+    "type": "fl_nested_s16_2x2",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 4294967295
+      },
+      {
+        "kind": "i32",
+        "bits": 2
+      },
+      {
+        "kind": "i32",
+        "bits": 4294934528
+      },
+      {
+        "kind": "i32",
+        "bits": 32767
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
+  },
+  {
+    "name": "fl_option_u8_3_vals",
+    "type": "fl_option_u8_3",
+    "core_vals": [
+      {
+        "kind": "i32",
+        "bits": 0
+      },
+      {
+        "kind": "i32",
+        "bits": 0
+      },
+      {
+        "kind": "i32",
+        "bits": 1
+      },
+      {
+        "kind": "i32",
+        "bits": 7
+      },
+      {
+        "kind": "i32",
+        "bits": 0
+      },
+      {
+        "kind": "i32",
+        "bits": 0
+      }
+    ],
+    "mem_base": 1024,
+    "mem_hex": ""
   }
 ]

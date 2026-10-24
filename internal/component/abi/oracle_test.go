@@ -44,6 +44,7 @@ type typeSpecNode struct {
 	Fields  []fieldSpecNode   `json:"fields"`
 	Cases   json.RawMessage   `json:"cases"` // []caseSpecNode (variant) or []string (enum)
 	Elem    json.RawMessage   `json:"elem"`
+	Len     *uint32           `json:"len"` // for kind == "list": a fixed-length list
 	Elems   []json.RawMessage `json:"elems"`
 	Key     json.RawMessage   `json:"key"`   // for kind == "map"
 	Value   json.RawMessage   `json:"value"` // for kind == "map"
@@ -164,6 +165,9 @@ func buildTypeDesc(raw json.RawMessage, nameToIndex map[string]uint32) (binary.T
 		tr, err := specToTypeRef(node.Elem, nameToIndex)
 		if err != nil {
 			return nil, fmt.Errorf("list element: %w", err)
+		}
+		if node.Len != nil {
+			return binary.FixedListDesc{Element: tr, Length: *node.Len}, nil
 		}
 		return binary.ListDesc{Element: tr}, nil
 
@@ -398,6 +402,12 @@ func TestOracleAgainstReference(t *testing.T) {
 			flat, err := Flatten(desc, resolve)
 			if err != nil {
 				t.Fatalf("Flatten: %v", err)
+			}
+			// Flatten spells a fixed-length list out only until it is wider
+			// than MaxFlatParams (see fixedListCopies): past that, what it
+			// gives is a prefix of the reference's, still too wide to flatten.
+			if len(want.Flatten) > MaxFlatParams && len(flat) > MaxFlatParams && len(flat) < len(want.Flatten) {
+				want.Flatten = want.Flatten[:len(flat)]
 			}
 			assertStringSlice(t, "Flatten", flat, want.Flatten)
 		})

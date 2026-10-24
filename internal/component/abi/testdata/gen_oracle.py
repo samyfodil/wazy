@@ -100,7 +100,8 @@ def build_type(spec, by_name):
         return ref.VariantType(cases)
 
     if kind == "list":
-        return ref.ListType(build_type(spec["elem"], by_name), None)
+        # "len" makes it a fixed-length list<T, N> (ListType's maybe_length).
+        return ref.ListType(build_type(spec["elem"], by_name), spec.get("len"))
 
     if kind == "map":
         return ref.MapType(build_type(spec["key"], by_name), build_type(spec["value"], by_name))
