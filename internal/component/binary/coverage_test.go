@@ -852,7 +852,7 @@ func TestReadComponentDecl(t *testing.T) {
 func TestReadComponenttype(t *testing.T) {
 	t.Run("empty", func(t *testing.T) {
 		buf := []byte{0x00} // count=0
-		off, err := readComponenttype(buf, 0)
+		_, off, err := readComponenttypeDesc(buf, 0)
 		if err != nil || off != 1 {
 			t.Errorf("off=%d err=%v, want 1,nil", off, err)
 		}
@@ -860,9 +860,9 @@ func TestReadComponenttype(t *testing.T) {
 
 	t.Run("one import decl", func(t *testing.T) {
 		buf := []byte{0x01, 0x03, 0x00, 0x01, 'x', 0x01, 0x00}
-		off, err := readComponenttype(buf, 0)
+		_, off, err := readComponenttypeDesc(buf, 0)
 		if err != nil {
-			t.Fatalf("readComponenttype: %v", err)
+			t.Fatalf("readComponenttypeDesc: %v", err)
 		}
 		if off != len(buf) {
 			t.Errorf("off=%d, want %d", off, len(buf))
@@ -870,7 +870,7 @@ func TestReadComponenttype(t *testing.T) {
 	})
 
 	t.Run("bad count", func(t *testing.T) {
-		_, err := readComponenttype(nil, 0)
+		_, _, err := readComponenttypeDesc(nil, 0)
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -878,7 +878,7 @@ func TestReadComponenttype(t *testing.T) {
 
 	t.Run("propagates componentdecl error with index", func(t *testing.T) {
 		buf := []byte{0x02, 0x03, 0x00, 0x01, 'x', 0x01, 0x00, 0xff}
-		_, err := readComponenttype(buf, 0)
+		_, _, err := readComponenttypeDesc(buf, 0)
 		if err == nil || !strings.Contains(err.Error(), "componentdecl[1]") {
 			t.Errorf("got err=%v, want componentdecl[1] error", err)
 		}

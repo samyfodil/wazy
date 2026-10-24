@@ -18,40 +18,98 @@ type layout64 struct {
 }
 
 // validateValueSizes refuses a component that defines a value type of
-// maxValueSize bytes or more: one of its own, or one an instance type it
-// defines declares.
+// maxValueSize bytes or more: one of its own, or one an instance or
+// component type it defines declares, at any depth.
 func (c *Component) validateValueSizes() error {
-	s := sizer{resolve: c.ResolveType, memo: map[uint32]layout64{}}
+	s := &sizer{resolve: c.ResolveType, memo: map[uint32]layout64{}}
+	s.fallback = func(idx uint32, depth int) layout64 { return c.importedExportLayout(s, idx, depth) }
 	for i, td := range c.Types {
-		if err := s.check(td.Descriptor, fmt.Sprintf("type[%d]", i)); err != nil {
+		where := fmt.Sprintf("type[%d]", i)
+		if err := s.check(td.Descriptor, where); err != nil {
 			return err
 		}
-		inst, ok := td.Descriptor.(InstanceDesc)
-		if !ok {
-			continue
-		}
-		local := sizer{resolve: func(idx uint32) (TypeDesc, error) {
-			if int(idx) < len(inst.Types) && inst.Types[idx] != nil {
-				return inst.Types[idx], nil
-			}
-			return nil, fmt.Errorf("local type %d is not resolved", idx)
-		}, memo: map[uint32]layout64{}}
-		for j, d := range inst.Types {
-			if err := local.check(d, fmt.Sprintf("type[%d]: instance type[%d]", i, j)); err != nil {
-				return err
-			}
+		if err := checkDecls(td.Descriptor, []*sizer{s}, where); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-// sizer computes layouts over one type index space.
-type sizer struct {
-	resolve func(uint32) (TypeDesc, error)
-	memo    map[uint32]layout64
+// checkDecls checks the types an instance or component type declares, in
+// its own type index space; enclosing are the spaces around it, innermost
+// first, for what it aliases from them.
+func checkDecls(d TypeDesc, enclosing []*sizer, where string) error {
+	var types []TypeDesc
+	var outer map[uint32]OuterAlias
+	switch t := d.(type) {
+	case InstanceDesc:
+		types, outer = t.Types, t.Outer
+	case ComponentDesc:
+		types, outer = t.Types, t.Outer
+	default:
+		return nil
+	}
+	local := localSizer(types, outer, enclosing)
+	for j, td := range types {
+		w := fmt.Sprintf("%s: %s type[%d]", where, d.Kind(), j)
+		if err := local.check(td, w); err != nil {
+			return err
+		}
+		if err := checkDecls(td, append([]*sizer{local}, enclosing...), w); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-func (s sizer) check(d TypeDesc, where string) error {
+// localSizer sizes the types of an instance or component type's own type
+// index space: those it declares, and those it aliases from the enclosing
+// spaces.
+func localSizer(types []TypeDesc, outer map[uint32]OuterAlias, enclosing []*sizer) *sizer {
+	s := &sizer{resolve: func(idx uint32) (TypeDesc, error) {
+		if int(idx) < len(types) && types[idx] != nil {
+			return types[idx], nil
+		}
+		return nil, fmt.Errorf("local type %d is not resolved", idx)
+	}, memo: map[uint32]layout64{}}
+	s.fallback = func(idx uint32, depth int) layout64 {
+		o, ok := outer[idx]
+		if spaces := append([]*sizer{s}, enclosing...); ok && int(o.Count) < len(spaces) {
+			return spaces[o.Count].layoutRef(&TypeRef{TypeIndex: &o.Index}, depth)
+		}
+		return layout64{}
+	}
+	return s
+}
+
+// importedExportLayout sizes type idx of the component when it is an alias
+// of a type an imported instance exports, which ResolveType does not
+// follow when the instance type itself aliases it from the component.
+func (c *Component) importedExportLayout(s *sizer, idx uint32, depth int) layout64 {
+	if int(idx) >= len(c.TypeSpace) || c.TypeSpace[idx].Kind != TypeSpaceAlias {
+		return layout64{}
+	}
+	al := c.Aliases[c.TypeSpace[idx].Alias]
+	if al.TargetKind != 0x00 {
+		return layout64{}
+	}
+	inst, ok := c.importedInstanceType(al.InstanceIdx, c.ResolveType)
+	exp, exported := inst.Exports[al.Name]
+	if !ok || !exported {
+		return layout64{}
+	}
+	return localSizer(inst.Types, inst.Outer, []*sizer{s}).layoutRef(&exp, depth)
+}
+
+// sizer computes layouts over one type index space. fallback, when set,
+// sizes an index resolve cannot.
+type sizer struct {
+	resolve  func(uint32) (TypeDesc, error)
+	fallback func(idx uint32, depth int) layout64
+	memo     map[uint32]layout64
+}
+
+func (s *sizer) check(d TypeDesc, where string) error {
 	if l := s.layoutOf(d, 0); l.known && l.size >= maxValueSize {
 		return fmt.Errorf("type section: %s: %s of %d bytes exceeds maximum byte size of %d", where, d.Kind(), l.size, uint64(maxValueSize-1))
 	}
@@ -66,7 +124,7 @@ const maxLayoutSize = 1 << 62
 // bounded: a cycle, which a well-formed component cannot have, ends there.
 const maxLayoutDepth = 128
 
-func (s sizer) layoutRef(ref *TypeRef, depth int) layout64 {
+func (s *sizer) layoutRef(ref *TypeRef, depth int) layout64 {
 	if ref.Primitive != "" {
 		return primLayout64(ref.Primitive)
 	}
@@ -76,11 +134,12 @@ func (s sizer) layoutRef(ref *TypeRef, depth int) layout64 {
 	if l, ok := s.memo[*ref.TypeIndex]; ok {
 		return l
 	}
-	d, err := s.resolve(*ref.TypeIndex)
-	if err != nil {
-		return layout64{}
+	var l layout64
+	if d, err := s.resolve(*ref.TypeIndex); err == nil {
+		l = s.layoutOf(d, depth+1)
+	} else if s.fallback != nil {
+		l = s.fallback(*ref.TypeIndex, depth+1)
 	}
-	l := s.layoutOf(d, depth+1)
 	s.memo[*ref.TypeIndex] = l
 	return l
 }
@@ -88,7 +147,7 @@ func (s sizer) layoutRef(ref *TypeRef, depth int) layout64 {
 // layoutOf mirrors the Canonical ABI's elem_size and alignment for ptr_type
 // i64. A type that is not a value type (a func, a resource, an instance) is
 // not known: there is nothing to check.
-func (s sizer) layoutOf(d TypeDesc, depth int) layout64 {
+func (s *sizer) layoutOf(d TypeDesc, depth int) layout64 {
 	switch t := d.(type) {
 	case PrimitiveDesc:
 		return primLayout64(t.Prim)
@@ -159,7 +218,7 @@ func primLayout64(prim string) layout64 {
 func alignTo(n, align uint64) uint64 { return (n + align - 1) / align * align }
 
 // recordLayout lays fields out in order, each at its alignment.
-func (s sizer) recordLayout(fields []*TypeRef, depth int) layout64 {
+func (s *sizer) recordLayout(fields []*TypeRef, depth int) layout64 {
 	out := layout64{0, 1, true}
 	for _, f := range fields {
 		l := s.layoutRef(f, depth)
@@ -175,7 +234,7 @@ func (s sizer) recordLayout(fields []*TypeRef, depth int) layout64 {
 
 // variantLayout is a discriminant sized for the case count, then the widest
 // case at the widest case's alignment. A nil case carries no payload.
-func (s sizer) variantLayout(cases []*TypeRef, depth int) layout64 {
+func (s *sizer) variantLayout(cases []*TypeRef, depth int) layout64 {
 	disc := uint64(1)
 	switch n := len(cases); {
 	case n > 1<<16:
