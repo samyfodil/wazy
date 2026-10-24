@@ -331,8 +331,22 @@ func ctDeclared(s ctScope, name string, d binary.ExternDesc) (ctEntity, []ctResP
 // ctBuildDeclType builds the instance type (component false) or component
 // type a list of declarations declares, in scope up.
 func ctBuildDeclType(up ctScope, decls []binary.TypeDecl, component bool) (*ctInstance, *ctComponent, error) {
-	s := &ctDeclScope{up: up}
-	var imports, exports []ctNamed
+	// Sized once from the declarations, rather than grown one append at a
+	// time: every instance type a component imports goes through here.
+	var nImports, nExports, nTypes int
+	for i := range decls {
+		switch decls[i].Kind {
+		case binary.TypeDeclImport:
+			nImports++
+		case binary.TypeDeclExport:
+			nExports++
+		}
+		if decls[i].Kind != binary.TypeDeclCoreType {
+			nTypes++
+		}
+	}
+	s := &ctDeclScope{up: up, types: make([]ctType, 0, nTypes)}
+	imports, exports := make([]ctNamed, 0, nImports), make([]ctNamed, 0, nExports)
 	var importedRes, definedRes []ctResPath
 	for i, d := range decls {
 		var err error
@@ -486,24 +500,46 @@ type ctEnv struct {
 }
 
 func newCTEnv(comp *binary.Component, up *ctEnv) *ctEnv {
+	nT, nF, nI, nC := len(comp.TypeSpace), len(comp.ComponentFuncSpace), len(comp.ComponentInstanceSpace), len(comp.ComponentSpace)
+	nIm, nEx := len(comp.Imports), len(comp.Exports)
+	// One allocation for every memo state, cut into a slice per space.
+	st := make([]byte, nT+nF+nI+nC+nIm+nEx)
+	cut := func(n int) []byte {
+		b := st[:n:n]
+		st = st[n:]
+		return b
+	}
 	return &ctEnv{
 		comp:        comp,
 		up:          up,
-		types:       make([]ctType, len(comp.TypeSpace)),
-		typeSt:      make([]byte, len(comp.TypeSpace)),
-		funcs:       make([]*ctFunc, len(comp.ComponentFuncSpace)),
-		funcSt:      make([]byte, len(comp.ComponentFuncSpace)),
-		insts:       make([]*ctInstance, len(comp.ComponentInstanceSpace)),
-		instSt:      make([]byte, len(comp.ComponentInstanceSpace)),
-		comps:       make([]*ctComponent, len(comp.ComponentSpace)),
-		compSt:      make([]byte, len(comp.ComponentSpace)),
-		imports:     make([]ctEntity, len(comp.Imports)),
-		importSt:    make([]byte, len(comp.Imports)),
-		exports:     make([]ctEntity, len(comp.Exports)),
-		exportSt:    make([]byte, len(comp.Exports)),
-		importedRes: make([][]ctResPath, len(comp.Imports)),
-		created:     map[*ctResource]bool{},
-		local:       map[*ctResource]bool{},
+		types:       make([]ctType, nT),
+		typeSt:      cut(nT),
+		funcs:       make([]*ctFunc, nF),
+		funcSt:      cut(nF),
+		insts:       make([]*ctInstance, nI),
+		instSt:      cut(nI),
+		comps:       make([]*ctComponent, nC),
+		compSt:      cut(nC),
+		imports:     make([]ctEntity, nIm),
+		importSt:    cut(nIm),
+		exports:     make([]ctEntity, nEx),
+		exportSt:    cut(nEx),
+		importedRes: make([][]ctResPath, nIm),
+	}
+}
+
+// create records r as made by this component (and, when local, defined
+// here); the sets are allocated by the first resource a component makes.
+func (e *ctEnv) create(r *ctResource, local bool) {
+	if e.created == nil {
+		e.created = map[*ctResource]bool{}
+	}
+	e.created[r] = true
+	if local {
+		if e.local == nil {
+			e.local = map[*ctResource]bool{}
+		}
+		e.local[r] = true
 	}
 }
 
@@ -516,8 +552,7 @@ func (e *ctEnv) enclosing() ctScope {
 
 func (e *ctEnv) newResource() (*ctResource, error) {
 	r := &ctResource{}
-	e.created[r] = true
-	e.local[r] = true
+	e.create(r, true)
 	return r, nil
 }
 
@@ -775,7 +810,7 @@ func (e *ctEnv) ascribe(actual ctEntity, d binary.ExternDesc, name string) (ctEn
 		return asc, err
 	}
 	for _, p := range paths {
-		e.created[p.res] = true
+		e.create(p.res, false)
 	}
 	return asc, nil
 }
@@ -821,7 +856,7 @@ func (e *ctEnv) instantiate(def binary.Instance) (*ctInstance, error) {
 	for _, rp := range c.definedRes {
 		n := &ctResource{name: rp.res.name}
 		s[rp.res] = n
-		e.created[n] = true
+		e.create(n, false)
 	}
 	return &ctInstance{exports: s.named(c.exports)}, nil
 }
