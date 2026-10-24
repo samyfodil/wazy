@@ -205,6 +205,13 @@ type callEngine struct {
 	gcExec  *wasm.GCExecution
 	// gcExecSlot is the storage gcExec points at while registered, kept here so a call does not allocate one.
 	gcExecSlot wasm.GCExecution
+
+	// inFlight is set while a call runs on this engine. Host code may re-enter
+	// the same api.Function (the Component Model permits reentrance, and binds
+	// each export to one handle). A nested call on this engine would grow the
+	// stack a host function beneath it is still writing its results through,
+	// so call runs it on a fresh engine instead.
+	inFlight bool
 }
 
 // ScanGCRoots implements wasm.GCRoots. Every operand and local this call holds lives in one flat []uint64, so
@@ -1240,6 +1247,11 @@ func (ce *callEngine) CallWithStack(ctx context.Context, stack []uint64) error {
 
 func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []uint64, err error) {
 	m := ce.f.moduleInstance
+	if ce.inFlight {
+		nested := &callEngine{f: ce.f}
+		m.RegisterCallSlot(&nested.slot)
+		return nested.call(ctx, params, results)
+	}
 	if ce.f.parent.ensureTermination {
 		select {
 		case <-ctx.Done():
@@ -1263,7 +1275,9 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 		}()
 	}
 
+	ce.inFlight = true
 	defer func() {
+		ce.inFlight = false
 		// If the module closed during the call, and the call didn't err for another reason, set an ExitError.
 		if err == nil {
 			err = m.FailIfClosed()

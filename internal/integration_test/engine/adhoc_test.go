@@ -40,6 +40,7 @@ var tests = map[string]testCase{
 	"huge stack":                                                       {f: testHugeStack},
 	"unreachable":                                                      {f: testUnreachable},
 	"recursive entry":                                                  {f: testRecursiveEntry},
+	"reentrant call through one handle":                                {f: testReentrantSameHandle},
 	"host func memory":                                                 {f: testHostFuncMemory},
 	"host function with context parameter":                             {f: testHostFunctionContextParameter},
 	"host function with nested context":                                {f: testNestedGoContext},
@@ -389,6 +390,58 @@ func testRecursiveEntry(t *testing.T, r wazy.Runtime) {
 
 	_, err = module.ExportedFunction("main").Call(testCtx, 1)
 	require.NoError(t, err)
+}
+
+// testReentrantSameHandle re-enters one api.Function from the host while it is
+// already running: each level must see its own argument, not the one of the
+// call beneath it.
+func testReentrantSameHandle(t *testing.T, r wazy.Runtime) {
+	var f api.Function
+	b := r.NewHostModuleBuilder(t.Name() + "-host")
+	wazy.HostFunc1(b.NewFunctionBuilder(), func(ctx context.Context, _ api.Module, n uint32) uint32 {
+		res, err := f.Call(ctx, uint64(n))
+		require.NoError(t, err)
+		return uint32(res[0])
+	}).Export("reenter")
+	host, err := b.Instantiate(testCtx)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, host.Close(testCtx))
+	}()
+
+	module := &wasm.Module{
+		TypeSection:     []wasm.FunctionType{{Params: []wasm.ValueType{i32}, Results: []wasm.ValueType{i32}}},
+		ImportSection:   []wasm.Import{{Module: t.Name() + "-host", Name: "reenter", Type: wasm.ExternTypeFunc, DescFunc: 0}},
+		FunctionSection: []wasm.Index{0},
+		ExportSection:   []wasm.Export{{Name: "f", Type: wasm.ExternTypeFunc, Index: 1}},
+		CodeSection: []wasm.Code{{Body: []byte{
+			// (if (result i32) (i32.eqz (local.get 0))
+			//   (then (i32.const 100))
+			//   (else (i32.add (call $reenter (i32.sub (local.get 0) (i32.const 1))) (i32.const 1))))
+			wasm.OpcodeLocalGet, 0, wasm.OpcodeI32Eqz,
+			wasm.OpcodeIf, byte(i32),
+			wasm.OpcodeI32Const, 0xe4, 0x00,
+			wasm.OpcodeElse,
+			wasm.OpcodeLocalGet, 0, wasm.OpcodeI32Const, 1, wasm.OpcodeI32Sub,
+			wasm.OpcodeCall, 0,
+			wasm.OpcodeI32Const, 1, wasm.OpcodeI32Add,
+			wasm.OpcodeEnd,
+			wasm.OpcodeEnd,
+		}}},
+	}
+	require.NoError(t, module.Validate(api.CoreFeaturesV2))
+	mod, err := r.Instantiate(testCtx, binaryencoding.EncodeModule(module))
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, mod.Close(testCtx))
+	}()
+
+	f = mod.ExportedFunction("f")
+	for range 2 { // and again on the same handle once the nested calls are done
+		res, err := f.Call(testCtx, 3)
+		require.NoError(t, err)
+		require.Equal(t, uint64(103), res[0])
+	}
 }
 
 // testHostFuncMemory ensures that host functions can see the callers' memory
