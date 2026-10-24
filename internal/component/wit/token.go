@@ -267,14 +267,18 @@ func (lex *Lexer) skipWhitespaceAndComments() {
 					lex.advance()
 				}
 			} else if lex.peek() == '*' {
-				// Block comment
+				// Block comment. They nest, as in wit-parser:
+				// "/* a /* b */ c */" is one comment.
 				lex.advance()
 				lex.advance()
-				for lex.pos < len(lex.input) {
-					if lex.ch == '*' && lex.peek() == '/' {
+				for depth := 1; depth > 0 && lex.pos < len(lex.input); {
+					switch {
+					case lex.ch == '*' && lex.peek() == '/':
+						depth--
 						lex.advance()
+					case lex.ch == '/' && lex.peek() == '*':
+						depth++
 						lex.advance()
-						break
 					}
 					lex.advance()
 				}
@@ -317,20 +321,28 @@ func (lex *Lexer) readString() string {
 	return result
 }
 
-// readVersion reads a semantic version or integer. A '.' is only consumed as
-// part of the version when followed by a digit, so that constructs like
-// "pkg@0.2.8.{name}" (a version immediately followed by a use-names list)
-// don't have their trailing '.' swallowed into the version text.
+// readVersion reads a semantic version or integer: a numeric core, then
+// optionally a -pre-release and a +build, each made of dot-separated
+// identifiers of [0-9A-Za-z-] ("0.2.0-rc-2023-11-10", "1.0.0-alpha.1+b.5").
+// A '.' is only consumed when what follows continues the version -- a digit
+// in the core, an identifier character after '-' or '+' -- so that
+// constructs like "pkg@0.2.8.{name}" (a version immediately followed by a
+// use-names list) don't have their trailing '.' swallowed into the version
+// text.
 func (lex *Lexer) readVersion() string {
 	start := lex.pos
+	tail := false // past the '-' or '+' that ends the numeric core
 	for lex.pos < len(lex.input) {
-		if unicode.IsDigit(lex.ch) || lex.ch == '-' || lex.ch == '+' {
-			lex.advance()
-		} else if lex.ch == '.' && unicode.IsDigit(lex.peek()) {
-			lex.advance()
-		} else {
-			break
+		switch {
+		case unicode.IsDigit(lex.ch):
+		case lex.ch == '-' || lex.ch == '+':
+			tail = true
+		case tail && isIdentMiddle(lex.ch) && lex.ch != '_':
+		case lex.ch == '.' && (unicode.IsDigit(lex.peek()) || tail && isIdentMiddle(lex.peek()) && lex.peek() != '_'):
+		default:
+			return lex.input[start:lex.pos]
 		}
+		lex.advance()
 	}
 	return lex.input[start:lex.pos]
 }

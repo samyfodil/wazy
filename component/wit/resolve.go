@@ -50,6 +50,15 @@ type worldState struct {
 	ast   *ast.World
 	pub   *World
 	state int // 0 unresolved, 1 resolving, 2 resolved
+	// named is every interface the world itself imports or exports by name,
+	// keyed by whether it exports it: one world may not name an interface
+	// twice, though what it includes may bring one in again.
+	named map[namedKey]bool
+}
+
+type namedKey struct {
+	iface  *Interface
+	export bool
 }
 
 func resolve(root *rawPackage, deps []*rawPackage) (*Package, error) {
@@ -164,7 +173,7 @@ func newScope(r *resolver, p *pkgScope, iface, where string) *scope {
 // newInterface declares an interface's types, uses and funcs.
 func (r *resolver) newInterface(p *pkgScope, name string, items []ast.InterfaceItem) (*scope, error) {
 	s := newScope(r, p, name, "interface "+name)
-	s.pub = &Interface{Name: name}
+	s.pub = &Interface{Name: name, scope: s}
 	for _, item := range items {
 		switch it := item.(type) {
 		case *ast.TypeDef:
@@ -299,8 +308,147 @@ func (r *resolver) world(w *worldState) error {
 			return err
 		}
 	}
+	if err := r.elaborate(w, s); err != nil {
+		return err
+	}
 	w.state = 2
 	return nil
+}
+
+// worldFunc declares a func a world imports or exports. An import shares the
+// world's namespace with its types; an export has a namespace of its own, so
+// it may share an import's name, as in wit-parser. add refuses a duplicate
+// within either list.
+func (s *scope) worldFunc(name string, export bool, fn ast.Func) (*Func, error) {
+	if !export {
+		return s.newFunc(name, Freestanding, "", fn)
+	}
+	f := &Func{Name: name, Kind: Freestanding, scope: s, fn: fn}
+	s.res.funcs = append(s.res.funcs, f)
+	return f, nil
+}
+
+// elaborate adds the interfaces a world's interfaces need, as wit-parser
+// elaborates a world. An interface that uses another's types needs that one
+// too, and gets it right before itself: an imported interface's dependencies
+// are imported, and so are those the world's own uses name, ahead of
+// everything else. An exported interface's dependencies are exported when
+// the world exports them and imported when not -- and none may need to be
+// both.
+func (r *resolver) elaborate(w *worldState, s *scope) error {
+	var imports []WorldItem
+	imported := map[*Interface]bool{}
+	var addImport func(i *Interface) error
+	addImport = func(i *Interface) error {
+		if imported[i] {
+			return nil
+		}
+		imported[i] = true
+		deps, err := r.deps(i.scope)
+		if err != nil {
+			return err
+		}
+		for _, d := range deps {
+			if err := addImport(d); err != nil {
+				return err
+			}
+		}
+		imports = append(imports, WorldItem{Name: i.Name, Interface: i})
+		return nil
+	}
+	uses, err := r.deps(s)
+	if err != nil {
+		return err
+	}
+	for _, d := range uses {
+		if err := addImport(d); err != nil {
+			return err
+		}
+	}
+	for _, it := range w.pub.Imports {
+		if it.Interface == nil {
+			imports = append(imports, it)
+		} else if err := addImport(it.Interface); err != nil {
+			return err
+		}
+	}
+
+	declared := map[*Interface]bool{}
+	for _, it := range w.pub.Exports {
+		if it.Interface != nil {
+			declared[it.Interface] = true
+		}
+	}
+	var exports []WorldItem
+	exported, required := map[*Interface]bool{}, map[*Interface]bool{}
+	// addExport places i, as an export or else as an import, after its
+	// dependencies; false means it would have to be both.
+	var addExport func(i *Interface, export bool) (bool, error)
+	addExport = func(i *Interface, export bool) (bool, error) {
+		switch {
+		case exported[i]:
+			return export, nil
+		case !export && required[i]:
+			return true, nil
+		}
+		deps, err := r.deps(i.scope)
+		if err != nil {
+			return false, err
+		}
+		for _, d := range deps {
+			if ok, err := addExport(d, export && declared[d]); !ok || err != nil {
+				return ok, err
+			}
+		}
+		switch {
+		case export && required[i]:
+			return false, nil
+		case export:
+			exported[i] = true
+			exports = append(exports, WorldItem{Name: i.Name, Interface: i})
+		default:
+			required[i] = true
+			if !imported[i] {
+				imported[i] = true
+				imports = append(imports, WorldItem{Name: i.Name, Interface: i})
+			}
+		}
+		return true, nil
+	}
+	for _, it := range w.pub.Exports {
+		if it.Interface == nil {
+			exports = append(exports, it)
+			continue
+		}
+		ok, err := addExport(it.Interface, true)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("wit: world %s: interface `%s` transitively depends on an interface in incompatible ways", w.ast.Name, it.Name)
+		}
+	}
+	w.pub.Imports, w.pub.Exports = imports, exports
+	return nil
+}
+
+// deps lists the interfaces whose types scope s uses, in the order its uses
+// name them.
+func (r *resolver) deps(s *scope) ([]*Interface, error) {
+	var out []*Interface
+	seen := map[*Interface]bool{}
+	for _, alias := range s.used {
+		u := s.uses[alias]
+		t, err := r.iface(s.pkg, u.path)
+		if err != nil {
+			return nil, fmt.Errorf("wit: %s: use %s: %w", s.where, u.path, err)
+		}
+		if !seen[t.pub] {
+			seen[t.pub] = true
+			out = append(out, t.pub)
+		}
+	}
+	return out, nil
 }
 
 // itemParts is what an import or export declares: a func, an inline
@@ -334,7 +482,7 @@ func exportParts(t ast.ExportType) itemParts {
 func (r *resolver) worldItem(w *worldState, s *scope, list *[]WorldItem, name string, parts itemParts) error {
 	switch {
 	case parts.fn != nil:
-		f, err := s.newFunc(name, Freestanding, "", *parts.fn)
+		f, err := s.worldFunc(name, list == &w.pub.Exports, *parts.fn)
 		if err != nil {
 			return err
 		}
@@ -350,6 +498,18 @@ func (r *resolver) worldItem(w *worldState, s *scope, list *[]WorldItem, name st
 		if err != nil {
 			return fmt.Errorf("wit: world %s: %w", w.ast.Name, err)
 		}
+		key := namedKey{ifc.pub, list == &w.pub.Exports}
+		if w.named[key] {
+			verb := "imported"
+			if key.export {
+				verb = "exported"
+			}
+			return fmt.Errorf("wit: world %s: %s: interface cannot be %s more than once", w.ast.Name, ifc.pub.Name, verb)
+		}
+		if w.named == nil {
+			w.named = map[namedKey]bool{}
+		}
+		w.named[key] = true
 		return w.add(list, WorldItem{Name: ifc.pub.Name, Interface: ifc.pub})
 	}
 }
@@ -500,6 +660,25 @@ func qualify(pkg, iface string) string {
 func lastSegment(path string) string {
 	name, _, _ := strings.Cut(path[strings.LastIndex(path, "/")+1:], "@")
 	return name
+}
+
+// lookupResource is lookupType through any type definitions that alias the
+// resource ("type r2 = r;"), to the resource itself.
+func (s *scope) lookupResource(name string) (*scope, *ast.TypeDef, error) {
+	ds, td, err := s.lookupType(name)
+	seen := map[*ast.TypeDef]bool{}
+	for err == nil {
+		alias, ok := td.Type.(*ast.TypeAlias)
+		if !ok || alias.Target.Kind != "named" {
+			break
+		}
+		if seen[td] {
+			return nil, nil, fmt.Errorf("%s: type %s refers to itself", ds.where, td.Name)
+		}
+		seen[td] = true
+		ds, td, err = ds.lookupType(alias.Target.Name)
+	}
+	return ds, td, err
 }
 
 // lookupType finds where the type called name in s is defined, following

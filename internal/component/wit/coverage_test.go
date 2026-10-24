@@ -245,6 +245,37 @@ func TestLexerDirect(t *testing.T) {
 			t.Errorf("got %+v, want TokenVersion", tok)
 		}
 	})
+
+	// A version is all of semver -- pre-release and build identifiers
+	// included -- and stops at a '.' that does not continue it.
+	for src, want := range map[string]string{
+		"0.2.0-rc-2023-11-10;": "0.2.0-rc-2023-11-10",
+		"1.0.0-alpha.1+b.5 x":  "1.0.0-alpha.1+b.5",
+		"1.0.0-x.y-z.0+0.a-b;": "1.0.0-x.y-z.0+0.a-b",
+		"0.2.8.{a}":            "0.2.8",
+		"1.0.0-rc.{a}":         "1.0.0-rc",
+		"1.0.0-rc_x":           "1.0.0-rc",
+		"4>":                   "4",
+		"1.0.0-a":              "1.0.0-a",
+	} {
+		t.Run("version "+src, func(t *testing.T) {
+			tok := NewLexer(src).NextToken()
+			if tok.Type != TokenVersion || tok.Text != want {
+				t.Errorf("got %+v, want TokenVersion %q", tok, want)
+			}
+		})
+	}
+}
+
+// Block comments nest, as in wit-parser; one left open runs to the end.
+func TestLexerNestedComments(t *testing.T) {
+	tok := NewLexer("/* a /* b /* c */ d */ e */ x").NextToken()
+	if tok.Type != TokenIdent || tok.Text != "x" {
+		t.Errorf("got %+v, want ident x", tok)
+	}
+	if tok := NewLexer("/* a /* b */ c").NextToken(); tok.Type != TokenEOF {
+		t.Errorf("unterminated: got %+v, want EOF", tok)
+	}
 }
 
 // TestTokenizeError checks that Tokenize propagates a lexer error with

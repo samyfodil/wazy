@@ -256,14 +256,15 @@ func TestSignature_EveryTypeForm(t *testing.T) {
 func TestParse_Worlds(t *testing.T) {
 	pkg := mustParse(t, everything)
 	app := pkg.World("app")
-	wantImports := []string{"[method]local.poke", "acme:app/api@1.0.0", "acme:app/types@1.0.0", "log", "inline", "tock", "tick"}
+	// api uses types, so types comes first, though app names it second.
+	wantImports := []string{"[method]local.poke", "acme:app/types@1.0.0", "acme:app/api@1.0.0", "log", "inline", "tock", "tick"}
 	if got := itemNames(app.Imports); !slices.Equal(got, wantImports) {
 		t.Errorf("imports %v, want %v", got, wantImports)
 	}
 	if got := itemNames(app.Exports); !slices.Equal(got, []string{"handle", "acme:app/api@1.0.0", "out"}) {
 		t.Errorf("exports %v", got)
 	}
-	if app.Imports[1].Interface != pkg.Interface("api") || app.Imports[3].Func == nil || app.Imports[3].Func.Interface != "" {
+	if app.Imports[2].Interface != pkg.Interface("api") || app.Imports[3].Func == nil || app.Imports[3].Func.Interface != "" {
 		t.Errorf("import items %+v", app.Imports)
 	}
 	inline := app.Imports[4].Interface
@@ -332,7 +333,9 @@ func TestParseFS_Deps(t *testing.T) {
 	if streams == nil || streams != pkg.Deps[1].Interface("streams") {
 		t.Fatal("dep interface not found by qualified name")
 	}
-	if got := itemNames(pkg.World("w").Imports); !slices.Equal(got, []string{"wasi:io/streams@0.2.0", "acme:app/host@1.0.0"}) {
+	// Elaborated as wit-parser does: what host uses comes in ahead of it.
+	wantImports := []string{"wasi:io/error@0.2.0", "wasi:io/streams@0.2.0", "acme:single/x", "acme:app/other@1.0.0", "acme:app/host@1.0.0"}
+	if got := itemNames(pkg.World("w").Imports); !slices.Equal(got, wantImports) {
 		t.Errorf("world imports %v", got)
 	}
 
@@ -442,5 +445,41 @@ func TestParseFS_VersionlessUse(t *testing.T) {
 	sig, err := pkg.Interface("i").Func("f").Signature(nil)
 	if err != nil || sig.Desc.Params[0].Type.Primitive != "u8" {
 		t.Errorf("a versionless use of the only c:d: %+v, %v", sig, err)
+	}
+}
+
+// Exports that share a dependency the world does not export: it is imported
+// once, ahead of nothing, and both exports come after it.
+func TestParse_ElaborateSharedExportDep(t *testing.T) {
+	pkg := mustParse(t, `package a:b;
+interface d { type t = u32; }
+interface e1 { use d.{t}; f: func(x: t); }
+interface e2 { use d.{t}; }
+world w { export e1; export e2; }`)
+	w := pkg.World("w")
+	if got := itemNames(w.Imports); !slices.Equal(got, []string{"a:b/d"}) {
+		t.Errorf("imports %v", got)
+	}
+	if got := itemNames(w.Exports); !slices.Equal(got, []string{"a:b/e1", "a:b/e2"}) {
+		t.Errorf("exports %v", got)
+	}
+}
+
+// An own or borrow may name a resource through an alias.
+func TestSignature_HandleThroughAlias(t *testing.T) {
+	pkg := mustParse(t, `package a:b;
+interface i {
+  resource r;
+  type r2 = r;
+  f: func(x: borrow<r2>) -> own<r2>;
+}`)
+	key := wit.ResourceKey{Interface: "a:b/i", Name: "r"}
+	sig, err := pkg.Interface("i").Func("f").Signature(wit.Tags{key: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if desc(sig, sig.Desc.Params[0].Type) != (component.BorrowDesc{ResourceType: 7}) ||
+		desc(sig, *sig.Desc.Results.Unnamed) != (component.OwnDesc{ResourceType: 7}) {
+		t.Errorf("signature %+v", sig.Desc)
 	}
 }

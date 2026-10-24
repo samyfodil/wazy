@@ -202,9 +202,10 @@ func (b *builder) named(s *scope, name string) (component.TypeRef, error) {
 	return ref, nil
 }
 
-// handle lowers own<name> or borrow<name> in scope s.
+// handle lowers own<name> or borrow<name> in scope s; name is the resource or
+// an alias of it.
 func (b *builder) handle(s *scope, name, kind string) (component.TypeRef, error) {
-	ds, td, err := s.lookupType(name)
+	ds, td, err := s.lookupResource(name)
 	if err != nil {
 		return component.TypeRef{}, err
 	}

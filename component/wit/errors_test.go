@@ -54,6 +54,18 @@ func TestParse_Errors(t *testing.T) {
 		{"fixed-size list", "package a:b; interface i { type t = list<u8, 4>; }", "fixed-size list is not supported"},
 		{"map key", "package a:b; interface i { type t = map<f32, u8>; }", "map key must be"},
 		{"own of a non-resource", "package a:b; interface i { type t = u8; f: func(x: own<t>); }", "own<t>: t is not a resource"},
+		{"handle of an alias cycle", "package a:b; interface i { type t = borrow<a>; type a = b; type b = a; }", "refers to itself"},
+		{"interface imported twice", "package a:b; interface i {} world w { import i; import i; }", "a:b/i: interface cannot be imported more than once"},
+		{"interface exported twice", "package a:b; interface i {} world w { export i; export i; }", "a:b/i: interface cannot be exported more than once"},
+		// A world's interfaces bring in what they use, so a bad use fails
+		// when the world is elaborated: from an import, a dependency of
+		// one, the world's own use, a dependency of that, and an export.
+		{"import uses unknown", "package a:b; interface i { use nope.{t}; } world w { import i; }", "interface a:b/i: use nope: unknown interface nope"},
+		{"import dep uses unknown", "package a:b; interface j { use nope.{t}; } interface i { use j.{t}; } world w { import i; }", "interface a:b/j: use nope: unknown interface nope"},
+		{"world use of unknown", "package a:b; world w { use nope.{t}; }", "world w: use nope: unknown interface nope"},
+		{"world use dep uses unknown", "package a:b; interface j { use nope.{t}; } world w { use j.{t}; }", "interface a:b/j: use nope: unknown interface nope"},
+		{"export uses unknown", "package a:b; interface i { use nope.{t}; } world w { export i; }", "interface a:b/i: use nope: unknown interface nope"},
+		{"export dep uses unknown", "package a:b; interface j { use nope.{t}; } interface i { use j.{t}; } world w { export i; }", "interface a:b/j: use nope: unknown interface nope"},
 		{"borrow of nothing", "package a:b; interface i { f: func(x: borrow<nope>); }", "unknown type nope"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -119,6 +119,8 @@ type Interface struct {
 	// Resources are the resources the interface declares, in declaration
 	// order.
 	Resources []*Resource
+
+	scope *scope
 }
 
 // Func returns the func with the canonical import name name, or nil.
@@ -179,7 +181,11 @@ type World struct {
 	// Name is the world's name as declared, e.g. "app".
 	Name string
 	// Imports and Exports are in declaration order, with any include
-	// expanded in place.
+	// expanded in place, and elaborated as wit-parser elaborates a world:
+	// an interface that uses another's types brings that one in too, right
+	// before itself -- as an import, or for an export that the world does
+	// not export, also as an import. The interfaces the world's own uses
+	// name come first.
 	Imports []WorldItem
 	Exports []WorldItem
 }
