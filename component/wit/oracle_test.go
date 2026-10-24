@@ -318,6 +318,7 @@ var wordingDiffers = map[string]string{
 	"world-same-fields2.wit":   "foo is declared more than once",
 	"world-same-fields3.wit":   "foo is declared more than once",
 	"world-top-level-func.wit": "foo is defined more than once",
+	"kebab-name-include.wit":   "a is declared more than once",
 }
 
 // TestWitParserParseFail runs wit-parser's own failing inputs: each must

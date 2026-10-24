@@ -1580,6 +1580,9 @@ func (p *Parser) parseInclude(gate Gate, externalID string) (WorldItem, error) {
 			return nil, p.errorf("expected '}' to close include rename list")
 		}
 		p.advance()
+		// The list ends the item: "include w with { a as b }" takes no
+		// ';', as in WIT's grammar and wit-parser.
+		return &Include{Path: path, Renames: renames, Gate: gate, ExternalID: externalID}, nil
 	}
 
 	if !p.expect(TokenSemicolon) {

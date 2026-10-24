@@ -2,6 +2,7 @@ package wit_test
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -60,7 +61,7 @@ world app {
   export handle: func(r: req) -> u16;
   export api;
   export out: interface { pong: func(); }
-  include base with { tick as tock };
+  include base with { tick as tock }
   include base;
 }
 `
@@ -481,5 +482,97 @@ interface i {
 	if desc(sig, sig.Desc.Params[0].Type) != (component.BorrowDesc{ResourceType: 7}) ||
 		desc(sig, *sig.Desc.Results.Unnamed) != (component.OwnDesc{ResourceType: 7}) {
 		t.Errorf("signature %+v", sig.Desc)
+	}
+}
+
+// include ... with renames an inline interface along with everything in it:
+// its funcs and resources say the new name, and the resource's tag is keyed
+// by it, since that is the name the component imports it by.
+func TestInclude_RenamesInlineInterface(t *testing.T) {
+	pkg := mustParse(t, `package a:b;
+world a {
+  import x: interface {
+    resource r {
+      constructor();
+      m: func();
+    }
+    f: func(y: borrow<r>);
+  }
+}
+world b { include a with { x as y } }
+world c { include b with { y as z } }`)
+	orig := pkg.World("a").Imports[0].Interface
+	for _, name := range []string{"y", "z"} {
+		w := pkg.World(map[string]string{"y": "b", "z": "c"}[name])
+		if len(w.Imports) != 1 || w.Imports[0].Name != name {
+			t.Fatalf("%s: imports %v", name, itemNames(w.Imports))
+		}
+		i := w.Imports[0].Interface
+		if i == orig || i.Name != name || len(i.Resources) != 1 || i.Resources[0].Interface != name {
+			t.Fatalf("%s: interface %+v", name, i)
+		}
+		m := i.Func("[method]r.m")
+		if m == nil || m.Interface != name || i.Resources[0].Funcs[1] != m {
+			t.Fatalf("%s: method %+v", name, m)
+		}
+		sig, err := m.Signature(wit.Tags{{Interface: name, Name: "r"}: 9})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if desc(sig, sig.Desc.Params[0].Type) != (component.BorrowDesc{ResourceType: 9}) {
+			t.Errorf("%s: self %+v", name, sig.Desc.Params[0])
+		}
+		if _, err := m.Signature(wit.Tags{{Interface: "x", Name: "r"}: 9}); err == nil {
+			t.Errorf("%s: the old name's tag still applies", name)
+		}
+	}
+	if orig.Name != "x" || orig.Func("f").Interface != "x" {
+		t.Errorf("the included world's interface changed: %+v", orig)
+	}
+}
+
+// Renaming a world's resource renames its funcs and every use of it in the
+// world's funcs, through any number of includes; renaming a record renames
+// it in signatures.
+func TestInclude_RenamesWorldTypes(t *testing.T) {
+	pkg := mustParse(t, `package a:b;
+interface i { type t = u32; }
+world a {
+  resource r {
+    constructor();
+    m: func();
+  }
+  record p { q: u32 }
+  use i.{t};
+  import f: func(x: r, y: p, z: t) -> option<r>;
+}
+world b { include a with { r as s, p as p2, t as t2 } }
+world c { include b with { s as u } }`)
+	for world, res := range map[string]string{"a": "r", "b": "s", "c": "u"} {
+		w := pkg.World(world)
+		want := []string{"[constructor]" + res, "[method]" + res + ".m", "f"}
+		if got := itemNames(w.Imports); !slices.Equal(got[1:], want) || got[0] != "a:b/i" {
+			t.Fatalf("%s: imports %v", world, got)
+		}
+		m := w.Imports[2].Func
+		if m.Resource != res {
+			t.Errorf("%s: method of %q", world, m.Resource)
+		}
+		tags := wit.Tags{{Name: res}: 4}
+		if _, err := m.Signature(tags); err != nil {
+			t.Errorf("%s: method: %v", world, err)
+		}
+		sig, err := w.Imports[3].Func.Signature(tags)
+		if err != nil {
+			t.Fatalf("%s: %v", world, err)
+		}
+		names := slices.Sorted(maps.Values(sig.TypeNames))
+		wantNames := map[string][]string{"a": {"p", "r"}, "b": {"p2", "s"}, "c": {"p2", "u"}}[world]
+		if !slices.Equal(names, wantNames) {
+			t.Errorf("%s: type names %v, want %v", world, names, wantNames)
+		}
+		if desc(sig, sig.Desc.Params[0].Type) != (component.OwnDesc{ResourceType: 4}) {
+			t.Errorf("%s: param %+v", world, sig.Desc.Params[0])
+		}
 	}
 }

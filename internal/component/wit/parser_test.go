@@ -798,7 +798,8 @@ world my-world {
     handle: func(req: string) -> string;
   }
 
-  include other-world with { a as a1, b as b1 };
+  include other-world with { a as a1, b as b1 }
+  include plain-world;
 }`
 
 	pkg, err := Parse("test.wit", src)
@@ -814,8 +815,8 @@ world my-world {
 	if !ok {
 		t.Fatalf("expected World, got %T", pkg.Items[1])
 	}
-	if len(world.Items) != 5 {
-		t.Fatalf("expected 5 world items, got %d", len(world.Items))
+	if len(world.Items) != 6 {
+		t.Fatalf("expected 6 world items, got %d", len(world.Items))
 	}
 
 	if _, ok := world.Items[0].(*Use); !ok {
@@ -862,6 +863,10 @@ world my-world {
 	}
 	if inc.Renames["a"] != "a1" || inc.Renames["b"] != "b1" {
 		t.Errorf("unexpected include renames: %+v", inc.Renames)
+	}
+	plain, ok := world.Items[len(world.Items)-1].(*Include)
+	if !ok || plain.Path != "plain-world" || len(plain.Renames) != 0 {
+		t.Errorf("plain include: %+v", world.Items[len(world.Items)-1])
 	}
 }
 

@@ -180,7 +180,7 @@ func (*Use) interfaceItem() {}
 func (*Use) worldItem()     {}
 
 // Include represents an "include world;" or
-// "include world with { a as a1, b as b1 };" statement.
+// "include world with { a as a1, b as b1 }" statement.
 type Include struct {
 	Path       string
 	Renames    map[string]string // original name -> alias

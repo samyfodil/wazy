@@ -3,6 +3,8 @@ package wit
 import (
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 
@@ -56,6 +58,8 @@ type worldState struct {
 	ast   *ast.World
 	pub   *World
 	state int // 0 unresolved, 1 resolving, 2 resolved
+	// types are the world's types, as items of its own.
+	types []worldType
 	// named is every interface the world itself imports or exports by name,
 	// keyed by whether it exports it: one world may not name an interface
 	// twice, though what it includes may bring one in again.
@@ -408,6 +412,9 @@ func (r *resolver) world(w *worldState) error {
 			}
 		}
 	}
+	for _, name := range append(slices.Clone(s.order), s.used...) {
+		w.types = append(w.types, worldType{name, s})
+	}
 	for _, item := range w.ast.Items {
 		var err error
 		switch it := item.(type) {
@@ -621,6 +628,7 @@ func (r *resolver) worldItem(w *worldState, s *scope, list *[]WorldItem, name st
 		if err != nil {
 			return err
 		}
+		ifc.pub.inline = true
 		return w.add(list, WorldItem{Name: name, Interface: ifc.pub})
 	default:
 		ifc, err := r.iface(w.pkg, name)
@@ -681,25 +689,181 @@ func (r *resolver) include(w *worldState, inc *ast.Include) error {
 	if err := r.world(target); err != nil {
 		return err
 	}
+	rn := &renamer{r: r, to: inc.Renames, used: map[string]bool{}, types: map[*scope]map[string]string{}, clones: map[*scope]*scope{}}
+	// Types first: renaming one of a scope's types makes a copy of the
+	// scope, and the funcs declared in it move to the copy.
+	types := slices.Clone(target.types)
+	for i, t := range types {
+		if to, ok := rn.rename(t.name); ok {
+			if rn.types[t.s] == nil {
+				rn.types[t.s] = map[string]string{}
+				rn.order = append(rn.order, t.s)
+			}
+			rn.types[t.s][t.name] = to
+			types[i].name = to
+		}
+	}
+	for _, sc := range rn.order {
+		rn.clones[sc] = r.renameTypes(sc, rn.types[sc])
+	}
+	for i, t := range types {
+		if c := rn.clones[t.s]; c != nil {
+			types[i].s = c
+		}
+	}
+	w.types = append(w.types, types...)
 	for _, from := range []struct {
 		src []WorldItem
 		dst *[]WorldItem
 	}{{target.pub.Imports, &w.pub.Imports}, {target.pub.Exports, &w.pub.Exports}} {
 		for _, item := range from.src {
-			if alias, ok := inc.Renames[item.Name]; ok {
-				if item.Func == nil {
-					return fmt.Errorf("wit: world %s: include %s: renaming interface %s is not supported", w.ast.Name, inc.Path, item.Name)
-				}
-				f := *item.Func
-				f.Name = alias
-				item = WorldItem{Name: alias, Func: &f}
-			}
-			if err := w.add(from.dst, item); err != nil {
+			if err := w.add(from.dst, rn.item(item)); err != nil {
 				return err
 			}
 		}
 	}
+	names := make([]string, 0, len(inc.Renames))
+	for name := range inc.Renames {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		if !rn.used[name] {
+			return fmt.Errorf("wit: world %s: include %s: no import or export kebab-name `%s`. Note that an ID does not support renaming", w.ast.Name, inc.Path, name)
+		}
+	}
 	return nil
+}
+
+// worldType is a type a world has as an item of its own: one it declares or
+// uses, or one an include brought in, with the scope that names it.
+type worldType struct {
+	name string
+	s    *scope
+}
+
+// renamer applies one include's "with { a as b }" to what it brings in.
+type renamer struct {
+	r    *resolver
+	to   map[string]string
+	used map[string]bool
+	// types are the renamed types of each scope, old name to new, and
+	// clones the copy of the scope that has them; order is the order the
+	// scopes came up in.
+	types  map[*scope]map[string]string
+	clones map[*scope]*scope
+	order  []*scope
+}
+
+// rename applies the renames to one world item name, as wit-parser does: the
+// whole name, after any "[...]" prefix, or the resource part of a resource
+// func's ("[method]r.m", with r as s, is "[method]s.m").
+func (rn *renamer) rename(name string) (string, bool) {
+	i := strings.LastIndexByte(name, ']') + 1
+	prefix, rest := name[:i], name[i:]
+	key, tail, dotted := strings.Cut(rest, ".")
+	to, ok := rn.to[key]
+	if !ok {
+		return name, false
+	}
+	rn.used[key] = true
+	if dotted {
+		return prefix + to + "." + tail, true
+	}
+	return prefix + to, true
+}
+
+// item renames one item an include brings in. A func is renamed itself, or
+// moved to the copy of its scope that renames its types (and its resource);
+// an interface written inline in the world is renamed with everything it
+// declares. An interface named by its path keeps it: the name is not the
+// world's to give.
+func (rn *renamer) item(item WorldItem) WorldItem {
+	switch {
+	case item.Func != nil:
+		f := item.Func
+		name, renamed := rn.rename(f.Name)
+		c := rn.clones[f.scope]
+		if !renamed && c == nil {
+			return item
+		}
+		nf := *f
+		nf.Name = name
+		if c != nil {
+			nf.scope = c
+			if to, ok := rn.types[f.scope][f.Resource]; ok {
+				nf.Resource = to
+			}
+		}
+		rn.r.funcs = append(rn.r.funcs, &nf)
+		return WorldItem{Name: nf.Name, Func: &nf}
+	case item.Interface.inline:
+		if name, ok := rn.rename(item.Name); ok {
+			return WorldItem{Name: name, Interface: rn.r.renameIface(item.Interface, name)}
+		}
+	}
+	return item
+}
+
+// copyScope copies a scope's names under a new interface name.
+func (r *resolver) copyScope(sc *scope, iface, where string) *scope {
+	c := newScope(r, sc.pkg, iface, where)
+	maps.Copy(c.types, sc.types)
+	maps.Copy(c.uses, sc.uses)
+	maps.Copy(c.off, sc.off)
+	c.order, c.used = slices.Clone(sc.order), slices.Clone(sc.used)
+	return c
+}
+
+// renameTypes is a copy of world scope sc with the types m names renamed:
+// each is there under its new name, and under its old one too, so that the
+// scope's other types and funcs, which name it the old way, find it renamed.
+func (r *resolver) renameTypes(sc *scope, m map[string]string) *scope {
+	c := r.copyScope(sc, sc.iface, sc.where)
+	for from, to := range m {
+		if td := sc.types[from]; td != nil {
+			renamed := *td
+			renamed.Name = to
+			// Every name it goes by, including one an earlier include
+			// renamed it from.
+			for name, have := range sc.types {
+				if have == td {
+					c.types[name] = &renamed
+				}
+			}
+			c.types[to] = &renamed
+			c.order[slices.Index(c.order, from)] = to
+			continue
+		}
+		c.uses[to] = sc.uses[from]
+		c.used[slices.Index(c.used, from)] = to
+	}
+	return c
+}
+
+// renameIface is a copy of inline interface i, its funcs and its resources,
+// under a new name -- which is also the name its resources' tags are keyed
+// by.
+func (r *resolver) renameIface(i *Interface, name string) *Interface {
+	c := r.copyScope(i.scope, name, "interface "+name)
+	ni := &Interface{Name: name, scope: c, inline: true}
+	c.pub = ni
+	moved := map[*Func]*Func{}
+	for _, f := range i.Funcs {
+		nf := *f
+		nf.Interface, nf.scope = name, c
+		moved[f] = &nf
+		r.funcs = append(r.funcs, &nf)
+		ni.Funcs = append(ni.Funcs, &nf)
+	}
+	for _, res := range i.Resources {
+		nr := &Resource{Interface: name, Name: res.Name}
+		for _, f := range res.Funcs {
+			nr.Funcs = append(nr.Funcs, moved[f])
+		}
+		ni.Resources = append(ni.Resources, nr)
+	}
+	return ni
 }
 
 // iface finds the interface a use or a world names by path, relative to

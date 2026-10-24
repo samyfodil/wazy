@@ -138,7 +138,8 @@ type Interface struct {
 	// order.
 	Resources []*Resource
 
-	scope *scope
+	scope  *scope
+	inline bool // written inline in a world, so named by the world
 }
 
 // Func returns the func with the canonical import name name, or nil.
@@ -199,7 +200,11 @@ type World struct {
 	// Name is the world's name as declared, e.g. "app".
 	Name string
 	// Imports and Exports are in declaration order, with any include
-	// expanded in place, and elaborated as wit-parser elaborates a world:
+	// expanded in place -- and renamed as its "with { a as b }" says, which
+	// may rename a func, an interface written inline (with its funcs and
+	// resources, and so the interface its resources' tags are keyed by), or
+	// one of the world's types, a resource renaming its funcs too -- and
+	// elaborated as wit-parser elaborates a world:
 	// an interface that uses another's types brings that one in too, right
 	// before itself -- as an import, or for an export that the world does
 	// not export, also as an import. The interfaces the world's own uses

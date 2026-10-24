@@ -450,7 +450,8 @@ func TestParseErrors(t *testing.T) {
 		{"include rename missing alias", "package t:t; world w { include a with { x as }; }"},
 		{"include rename missing comma", "package t:t; world w { include a with { x as y z as w }; }"},
 		{"include rename missing rbrace", "package t:t; world w { include a with { x as y ; }"},
-		{"include missing semicolon", "package t:t; world w { include a with { x as y } }"},
+		{"include missing semicolon", "package t:t; world w { include a }"},
+		{"include with then semicolon", "package t:t; world w { include a with { x as y }; }"},
 
 		// Invalid characters / unterminated braces / unterminated parens at
 		// various nesting depths.
