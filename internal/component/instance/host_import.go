@@ -215,6 +215,11 @@ type hostImport struct {
 	// are the sibling's business, not the host table's (hostHandleTransfer).
 	delegate bool
 
+	// transfer is set only on buildHostWrapper's own copy of a hostImport
+	// whose call moves handles below the top level (hostHandleTransfer); fn
+	// is then already wrapped in it, and startDelegatedFromBlocker takes it.
+	transfer *hostHandleTransfer
+
 	// lineage marks a composition delegate that crosses a DIRECT static
 	// parent<->child instantiation boundary: the outer's own local lift
 	// handed to a child as a func instantiate-arg (outerFuncArgImport's
@@ -739,6 +744,18 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 	if tgt := hi.asyncTarget; hi.delegate && tgt != nil && tgt.nested != nil {
 		transfer = tgt.importerTransfer(resources)
 	}
+	// A transfer brackets the func it moves handles for: the wrapper below
+	// calls a copy of hi whose fn is wrapped in it, so a call with none --
+	// every flat host call -- runs no transfer code at all.
+	if transfer != nil {
+		x, inner := transfer, hi.fn
+		wrapped := *hi
+		wrapped.fn = func(ctx context.Context, args []abi.Value) ([]abi.Value, error) {
+			return x.call(ctx, args, inner)
+		}
+		wrapped.transfer = x
+		hi = &wrapped
+	}
 
 	fn := api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 		if hi.lineage {
@@ -784,13 +801,6 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 			}
 			putValueSlice(argsp)
 		}()
-		if transfer != nil {
-			borrows, err := transfer.moveArgs(args)
-			defer transfer.releaseBorrows(borrows)
-			if err != nil {
-				panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
-			}
-		}
 		// A sync canon lower whose callee is an async lift (callback or
 		// stackful) is a potential block (docs/component-model-async-
 		// stackful-design.md §4.3): a composition delegate
@@ -845,7 +855,7 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 		}
 		var results []abi.Value
 		if blockingCaller != nil {
-			results, err = startDelegatedFromBlocker(ctx, blockingCaller, hi.asyncTarget, args)
+			results, err = startDelegatedFromBlocker(ctx, blockingCaller, hi.asyncTarget, args, hi.transfer)
 		} else {
 			results, err = hi.fn(ctx, args)
 		}
@@ -854,11 +864,6 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 		}
 		if err != nil {
 			panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
-		}
-		if transfer != nil {
-			if err := transfer.moveResults(results); err != nil {
-				panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
-			}
 		}
 		var realloc abi.Realloc
 		if overrideReallocCall != nil {
@@ -1590,6 +1595,21 @@ func (x *hostHandleTransfer) moveArgs(args []abi.Value) ([]uint32, error) {
 		args[i] = v
 	}
 	return borrows, nil
+}
+
+// call runs fn on args with their nested handles moved in, and its results'
+// moved back out. The borrows moved in last exactly as long as fn's call.
+func (x *hostHandleTransfer) call(ctx context.Context, args []abi.Value, fn HostFunc) ([]abi.Value, error) {
+	borrows, err := x.moveArgs(args)
+	defer x.releaseBorrows(borrows)
+	if err != nil {
+		return nil, err
+	}
+	results, err := fn(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	return results, x.moveResults(results)
 }
 
 // moveResults moves the nested handles of a host func's results from the host's

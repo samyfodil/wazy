@@ -1386,8 +1386,14 @@ func delegatingHostImport(tgt *guestAsyncTarget) *hostImport {
 // host_import.go's buildHostWrapper calls this in place of hi.fn when it
 // detects this exact shape; everything else (host-entry sync calls, a
 // non-promoted callback-caller's own nested drive) keeps using hi.fn
-// unchanged.
-func startDelegatedFromBlocker(ctx context.Context, blk taskBlocker, tgt *guestAsyncTarget, args []abi.Value) ([]abi.Value, error) {
+// unchanged. x, when set, is the wrapper's transfer, bracketing the call as it
+// brackets hi.fn.
+func startDelegatedFromBlocker(ctx context.Context, blk taskBlocker, tgt *guestAsyncTarget, args []abi.Value, x *hostHandleTransfer) ([]abi.Value, error) {
+	if x != nil {
+		return x.call(ctx, args, func(ctx context.Context, args []abi.Value) ([]abi.Value, error) {
+			return startDelegatedFromBlocker(ctx, blk, tgt, args, nil)
+		})
+	}
 	var scope *task
 	if tgt.borrows {
 		scope = &task{inst: tgt.sub}
