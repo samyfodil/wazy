@@ -1005,13 +1005,16 @@ func (p *Parser) parseListType() (TypeRef, error) {
 		return TypeRef{}, err
 	}
 
+	unsupported := ""
 	if p.current.Type == TokenComma {
 		p.advance()
-		// Skip the length specifier for now
+		// The length is not recorded, so mark the type: read as a plain
+		// list<T>, a fixed-size list would get the wrong ABI.
 		if p.current.Type != TokenIdent && p.current.Type != TokenVersion {
 			return TypeRef{}, p.errorf("expected length specifier in list")
 		}
 		p.advance()
+		unsupported = "fixed-size list"
 	}
 
 	if !p.expect(TokenRAngle) {
@@ -1019,7 +1022,7 @@ func (p *Parser) parseListType() (TypeRef, error) {
 	}
 	p.advance()
 
-	return TypeRef{Kind: "list", Inner: &innerType}, nil
+	return TypeRef{Kind: "list", Inner: &innerType, Unsupported: unsupported}, nil
 }
 
 // parseOptionType parses "option<Type>".

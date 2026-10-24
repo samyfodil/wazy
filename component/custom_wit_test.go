@@ -67,14 +67,19 @@ func (c *counterHost) bump(rep, by uint32) (uint32, error) {
 	return v, nil
 }
 
-func TestCustomWIT_HostImplementsResourcesAndNestedTypes(t *testing.T) {
-	ctx := context.Background()
-	r := wazy.NewRuntime(ctx)
-	defer r.Close(ctx)
+// customWITImport is one import of testdata/custom_wit.wit: its signature
+// and the host func behind it.
+type customWITImport struct {
+	fd      component.FuncDesc
+	resolve component.Resolver
+	fn      component.HostFunc
+}
 
-	counters := newCounterHost()
-	const iface = "acme:api/host@1.0.0"
+const customWITIface = "acme:api/host@1.0.0"
 
+// customWITHandBuilt returns the interface's imports with every signature
+// built by hand from a TypeTable, keyed by import name.
+func customWITHandBuilt(counters *counterHost) map[string]customWITImport {
 	// --- lookup(q: query) -> result<list<string>, failure> ------------------
 	//
 	// The signature WithImport cannot express: the result is a result<> whose
@@ -149,16 +154,35 @@ func TestCustomWIT_HostImplementsResourcesAndNestedTypes(t *testing.T) {
 		component.Prim("u32"),
 	)
 
+	return map[string]customWITImport{
+		"lookup":               {lookupFD, lookupTbl.Resolver(), lookup},
+		"make":                 {makeFD, makeTbl.Resolver(), makeFn},
+		"[method]counter.bump": {bumpFD, bumpTbl.Resolver(), bumpFn},
+		"use-it":               {useFD, useTbl.Resolver(), bumpFn},
+	}
+}
+
+func TestCustomWIT_HostImplementsResourcesAndNestedTypes(t *testing.T) {
+	runCustomWIT(t, customWITHandBuilt(newCounterHost()))
+}
+
+// runCustomWIT registers imports and runs the guest, which exercises every
+// one of them.
+func runCustomWIT(t *testing.T, imports map[string]customWITImport) {
+	t.Helper()
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
 	opts := []component.Option{
-		component.WithImportCustom(iface, "lookup", lookup, lookupFD, lookupTbl.Resolver()),
-		component.WithImportCustom(iface, "make", makeFn, makeFD, makeTbl.Resolver()),
-		component.WithImportCustom(iface, "[method]counter.bump", bumpFn, bumpFD, bumpTbl.Resolver()),
-		component.WithImportCustom(iface, "use-it", bumpFn, useFD, useTbl.Resolver()),
 		// Without this the guest's own resource.drop of the owned counter
 		// tags the handle with the component binary's type index, not
 		// counterResType, and the drop trips the handle table's
 		// cross-type-confusion check.
-		component.WithResourceTag(iface, "counter", counterResType),
+		component.WithResourceTag(customWITIface, "counter", counterResType),
+	}
+	for name, imp := range imports {
+		opts = append(opts, component.WithImportCustom(customWITIface, name, imp.fn, imp.fd, imp.resolve))
 	}
 
 	inst, err := component.Instantiate(ctx, r, customWITWasm, opts...)
