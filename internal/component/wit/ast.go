@@ -21,6 +21,10 @@ type Package struct {
 
 	// Items are the top-level declarations (interfaces, worlds, type definitions, use statements).
 	Items []PackageItem
+
+	// Nested are the packages the source writes as "package ns:name { ... }"
+	// blocks, each a package of its own.
+	Nested []*Package
 }
 
 // PackageItem is a marker interface for top-level package items.

@@ -88,8 +88,9 @@ type Package struct {
 	Interfaces []*Interface
 	// Worlds are the package's worlds in declaration order.
 	Worlds []*World
-	// Deps are the packages read from the deps/ directory, sorted by name.
-	// Parse and ParseFile read no deps.
+	// Deps are the other packages read with it, sorted by name: those the
+	// deps/ directory holds, and those written as nested
+	// "package ns:name { ... }" blocks in its files or theirs.
 	Deps []*Package
 
 	short map[string]*Interface
@@ -266,15 +267,15 @@ func (f *Func) where() string {
 	return f.Interface + "#" + f.Name
 }
 
-// Parse reads one WIT source. Names resolve within it; a reference to
-// another package is an error, since a lone source has no deps. filename is
-// used only in error messages.
+// Parse reads one WIT source, and the packages it nests as
+// "package ns:name { ... }" blocks, which become its Deps. Names resolve
+// within them. filename is used only in error messages.
 func Parse(filename, src string, opts ...Option) (*Package, error) {
-	raw, err := parseSource(filename, src)
+	raw, nested, err := parseSource(filename, src)
 	if err != nil {
 		return nil, err
 	}
-	return resolve(raw, nil, newConfig(opts))
+	return resolve(raw, nested, newConfig(opts))
 }
 
 // ParseFile reads the single WIT file at path, as Parse does.
@@ -295,7 +296,7 @@ func ParseDir(dir string, opts ...Option) (*Package, error) {
 
 // ParseFS is ParseDir over an fs.FS, such as an embed.FS.
 func ParseFS(fsys fs.FS, dir string, opts ...Option) (*Package, error) {
-	root, err := loadDir(fsys, dir)
+	root, deps, err := loadDir(fsys, dir)
 	if err != nil {
 		return nil, err
 	}
@@ -303,15 +304,15 @@ func ParseFS(fsys fs.FS, dir string, opts ...Option) (*Package, error) {
 	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("wit: %w", err)
 	}
-	var deps []*rawPackage
 	for _, e := range entries {
 		p := path.Join(dir, "deps", e.Name())
 		var dep *rawPackage
+		var nested []*rawPackage
 		switch {
 		case e.IsDir():
-			dep, err = loadDir(fsys, p)
+			dep, nested, err = loadDir(fsys, p)
 		case strings.HasSuffix(e.Name(), ".wit"):
-			dep, err = loadFile(fsys, p)
+			dep, nested, err = loadFile(fsys, p)
 		default:
 			continue
 		}
@@ -321,7 +322,7 @@ func ParseFS(fsys fs.FS, dir string, opts ...Option) (*Package, error) {
 		if dep.name == "" {
 			return nil, fmt.Errorf("wit: %s: no package declaration", p)
 		}
-		deps = append(deps, dep)
+		deps = append(append(deps, nested...), dep)
 	}
 	return resolve(root, deps, newConfig(opts))
 }
@@ -332,38 +333,46 @@ type rawPackage struct {
 	items []ast.PackageItem
 }
 
-func parseSource(filename, src string) (*rawPackage, error) {
+// parseSource parses one source: its own package, and those it nests.
+func parseSource(filename, src string) (*rawPackage, []*rawPackage, error) {
 	pkg, err := ast.Parse(filename, src)
 	if err != nil {
-		return nil, fmt.Errorf("wit: %s: %w", filename, err)
+		return nil, nil, fmt.Errorf("wit: %s: %w", filename, err)
 	}
-	return &rawPackage{name: pkg.Name, items: pkg.Items}, nil
+	var nested []*rawPackage
+	for _, n := range pkg.Nested {
+		nested = append(nested, &rawPackage{name: n.Name, items: n.Items})
+	}
+	return &rawPackage{name: pkg.Name, items: pkg.Items}, nested, nil
 }
 
-func loadFile(fsys fs.FS, p string) (*rawPackage, error) {
+func loadFile(fsys fs.FS, p string) (*rawPackage, []*rawPackage, error) {
 	src, err := fs.ReadFile(fsys, p)
 	if err != nil {
-		return nil, fmt.Errorf("wit: %w", err)
+		return nil, nil, fmt.Errorf("wit: %w", err)
 	}
 	return parseSource(p, string(src))
 }
 
-// loadDir merges every .wit file directly in dir into one package. Files may
-// omit the package declaration, but those that have one must agree.
-func loadDir(fsys fs.FS, dir string) (*rawPackage, error) {
+// loadDir merges every .wit file directly in dir into one package, and
+// returns the packages they nest beside it. Files may omit the package
+// declaration, but those that have one must agree.
+func loadDir(fsys fs.FS, dir string) (*rawPackage, []*rawPackage, error) {
 	entries, err := fs.ReadDir(fsys, dir)
 	if err != nil {
-		return nil, fmt.Errorf("wit: %w", err)
+		return nil, nil, fmt.Errorf("wit: %w", err)
 	}
 	var out *rawPackage
+	var nested []*rawPackage
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".wit") {
 			continue
 		}
-		f, err := loadFile(fsys, path.Join(dir, e.Name()))
+		f, n, err := loadFile(fsys, path.Join(dir, e.Name()))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
+		nested = append(nested, n...)
 		switch {
 		case out == nil:
 			out = f
@@ -371,17 +380,17 @@ func loadDir(fsys fs.FS, dir string) (*rawPackage, error) {
 		case out.name == "":
 			out.name = f.name
 		case f.name != "" && f.name != out.name:
-			return nil, fmt.Errorf("wit: %s: files declare both package %s and %s", dir, out.name, f.name)
+			return nil, nil, fmt.Errorf("wit: %s: files declare both package %s and %s", dir, out.name, f.name)
 		}
 		out.items = append(out.items, f.items...)
 	}
 	if out == nil {
-		return nil, fmt.Errorf("wit: %s: no .wit files", dir)
+		return nil, nil, fmt.Errorf("wit: %s: no .wit files", dir)
 	}
 	if out.name == "" {
-		return nil, fmt.Errorf("wit: %s: no package declaration", dir)
+		return nil, nil, fmt.Errorf("wit: %s: no package declaration", dir)
 	}
-	return out, nil
+	return out, nested, nil
 }
 
 // sortedDeps returns the non-root packages in name order.

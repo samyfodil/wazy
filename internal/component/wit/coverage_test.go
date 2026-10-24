@@ -728,18 +728,38 @@ interface i {
 	})
 }
 
-// TestNestedPackageDeclUnsupported verifies that a brace-bodied package
-// declaration (not supported by this parser, which only accepts the
-// semicolon-terminated form) fails loudly rather than silently mis-parsing.
-func TestNestedPackageDeclUnsupported(t *testing.T) {
-	src := `package foo:bar {
+// TestNestedPackages covers "package ns:name { ... }" blocks: each is a
+// package of its own, beside the file's own package or without one.
+func TestNestedPackages(t *testing.T) {
+	pkg, err := Parse("nested.wit", `package a:b;
+package foo:bar@1.0.0 {
   interface i {
     f: func();
   }
-}`
-	_, err := Parse("nested.wit", src)
-	if err == nil {
-		t.Fatal("expected error for brace-bodied package declaration")
+}
+interface j {}
+package baz:qux {}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pkg.Name != "a:b" || len(pkg.Items) != 1 || len(pkg.Nested) != 2 ||
+		pkg.Nested[0].Name != "foo:bar@1.0.0" || len(pkg.Nested[0].Items) != 1 || pkg.Nested[1].Name != "baz:qux" {
+		t.Fatalf("package %+v", pkg)
+	}
+	only, err := Parse("nested.wit", "package foo:bar { interface i {} }")
+	if err != nil || only.Name != "" || len(only.Nested) != 1 {
+		t.Fatalf("only a nested package: %+v, %v", only, err)
+	}
+	for _, src := range []string{
+		"package foo:bar { interface i {} ", // unclosed
+		"package foo:bar = 1;",              // neither ';' nor '{'
+		"package a:b; package foo:bar;",     // a second header
+		"package foo:bar { bogus }",         // a bad item
+		"package a:b; package @ { }",        // a bad name
+	} {
+		if _, err := Parse("nested.wit", src); err == nil {
+			t.Errorf("%q: parsed", src)
+		}
 	}
 }
 

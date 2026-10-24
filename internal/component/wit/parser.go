@@ -32,38 +32,74 @@ func Parse(name, src string) (*Package, error) {
 	}
 
 	pkg := &Package{Name: ""}
-	var items []PackageItem
 
-	// Parse optional package declaration
+	// Parse the optional package declaration, "package ns:name;" -- unless
+	// it is "package ns:name { ... }", a nested package, which is an item.
 	if p.current.Type == TokenPackage {
-		pkgName, err := p.parsePackageDecl()
+		save := p.pos
+		pkgName, err := p.parsePackageName()
 		if err != nil {
 			return nil, err
 		}
-		pkg.Name = pkgName
+		if p.current.Type == TokenSemicolon {
+			p.advance()
+			pkg.Name = pkgName
+		} else {
+			p.pos, p.current = save, p.tokens[save]
+		}
 	}
 
 	// Parse package items
 	for p.current.Type != TokenEOF {
+		if p.current.Type == TokenPackage {
+			nested, err := p.parseNestedPackage()
+			if err != nil {
+				return nil, err
+			}
+			pkg.Nested = append(pkg.Nested, nested)
+			continue
+		}
 		item, err := p.parsePackageItem()
 		if err != nil {
 			return nil, err
 		}
 		if item != nil {
-			items = append(items, item)
+			pkg.Items = append(pkg.Items, item)
 		}
 	}
-
-	pkg.Items = items
 	return pkg, nil
 }
 
-// parsePackageDecl parses "package namespace:name@version;" or "package namespace:name;"
-func (p *Parser) parsePackageDecl() (string, error) {
-	if !p.expect(TokenPackage) {
-		return "", p.errorf("expected 'package'")
+// parseNestedPackage parses "package ns:name { items }".
+func (p *Parser) parseNestedPackage() (*Package, error) {
+	name, err := p.parsePackageName()
+	if err != nil {
+		return nil, err
+	}
+	if !p.expect(TokenLBrace) {
+		return nil, p.errorf("expected '{' after nested package name")
 	}
 	p.advance()
+	pkg := &Package{Name: name}
+	for p.current.Type != TokenRBrace {
+		if p.current.Type == TokenEOF {
+			return nil, p.errorf("expected '}' to close package %s", name)
+		}
+		item, err := p.parsePackageItem()
+		if err != nil {
+			return nil, err
+		}
+		pkg.Items = append(pkg.Items, item)
+	}
+	p.advance()
+	return pkg, nil
+}
+
+// parsePackageName parses "package namespace:name@version" or "package
+// namespace:name", up to what follows: the ';' of a declaration, or the '{' of
+// a nested package.
+func (p *Parser) parsePackageName() (string, error) {
+	p.advance() // the 'package' the caller saw
 
 	var name strings.Builder
 
@@ -93,11 +129,9 @@ func (p *Parser) parsePackageDecl() (string, error) {
 		}
 	}
 
-	if !p.expect(TokenSemicolon) {
-		return "", p.errorf("expected ';' after package declaration")
+	if p.current.Type != TokenSemicolon && p.current.Type != TokenLBrace {
+		return "", p.errorf("expected ';' or '{' after package name")
 	}
-	p.advance()
-
 	return name.String(), nil
 }
 

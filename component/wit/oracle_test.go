@@ -10,7 +10,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"testing/fstest"
 )
 
 // testdata holds two sets of WIT inputs, each run under three feature sets:
@@ -144,7 +143,7 @@ func ourError(witParser string) string {
 }
 
 // parseInput parses one of wit-parser's inputs: a directory as ParseFS reads
-// it, or a single file with its nested packages split out.
+// it, or a single file as Parse does.
 func parseInput(t *testing.T, p string, isDir bool, opts ...Option) (*Package, error) {
 	if isDir {
 		sub, err := fs.Sub(testdata, p)
@@ -157,40 +156,7 @@ func parseInput(t *testing.T, p string, isDir bool, opts ...Option) (*Package, e
 	if err != nil {
 		t.Fatal(err)
 	}
-	return ParseFS(splitNested(t, string(src)), ".", opts...)
-}
-
-// splitNested turns a source with nested "package x { ... }" blocks, which
-// wit-parser's tests use for dependencies, into a root file and one deps/
-// file per block, the layout ParseFS reads.
-func splitNested(t *testing.T, src string) fstest.MapFS {
-	fsys := fstest.MapFS{}
-	open := regexp.MustCompile(`(?m)^package\s+([^\s;{]+)\s*\{`)
-	for i := 0; ; i++ {
-		loc := open.FindStringSubmatchIndex(src)
-		if loc == nil {
-			break
-		}
-		depth, end := 0, -1
-		for j := loc[1] - 1; j < len(src) && end < 0; j++ {
-			switch src[j] {
-			case '{':
-				depth++
-			case '}':
-				if depth--; depth == 0 {
-					end = j
-				}
-			}
-		}
-		if end < 0 {
-			t.Fatalf("unbalanced package block %s", src[loc[2]:loc[3]])
-		}
-		body := "package " + src[loc[2]:loc[3]] + ";\n" + src[loc[1]:end]
-		fsys[fmt.Sprintf("deps/dep%d.wit", i)] = &fstest.MapFile{Data: []byte(body)}
-		src = src[:loc[0]] + src[end+1:]
-	}
-	fsys["root.wit"] = &fstest.MapFile{Data: []byte(src)}
-	return fsys
+	return Parse(path.Base(p), string(src), opts...)
 }
 
 // summarize lists what a parse resolved, one sorted line per package,
