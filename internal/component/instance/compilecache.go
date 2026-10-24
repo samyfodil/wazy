@@ -1,7 +1,6 @@
 package instance
 
 import (
-	"bytes"
 	"context"
 	"sync"
 
@@ -201,7 +200,7 @@ func (c *CompileCache) getOrDecode(componentBytes []byte) (*binary.Component, er
 	}
 	c.decMu.Unlock()
 
-	comp, err := binary.Decode(bytes.NewReader(componentBytes))
+	comp, err := binary.DecodeBytes(componentBytes)
 	if err != nil {
 		return nil, err
 	}

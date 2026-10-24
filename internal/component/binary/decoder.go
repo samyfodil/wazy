@@ -33,6 +33,9 @@ var (
 // It validates the preamble, iterates outer component sections, and decodes
 // type, import, and export sections into Go structs. Other sections are
 // recorded but not fully decoded.
+//
+// The decoded component's names are views of the buffer read (see
+// readLabel), which it keeps as Component.Bytes: nothing may write to it.
 func Decode(r io.Reader) (*Component, error) {
 	// Read the entire binary into memory for slice-based offset tracking.
 	// (Matching the pattern of the core wasm decoder.)
@@ -42,6 +45,13 @@ func Decode(r io.Reader) (*Component, error) {
 	}
 
 	return decodeComponent(buf)
+}
+
+// DecodeBytes is Decode of b. It copies b, once and to size, where
+// io.ReadAll would grow a buffer to it: the copy is the decoder's own, which
+// the names it decodes are views of, so b stays the caller's to change.
+func DecodeBytes(b []byte) (*Component, error) {
+	return decodeComponent(bytes.Clone(b))
 }
 
 func decodeComponent(buf []byte) (*Component, error) {

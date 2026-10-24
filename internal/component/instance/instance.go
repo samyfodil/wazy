@@ -52,7 +52,6 @@
 package instance
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1263,7 +1262,7 @@ func Instantiate(ctx context.Context, r wazy.Runtime, componentBytes []byte, opt
 	if cfg.compileCache != nil {
 		comp, err = cfg.compileCache.getOrDecode(componentBytes)
 	} else {
-		comp, err = binary.Decode(bytes.NewReader(componentBytes))
+		comp, err = binary.DecodeBytes(componentBytes)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: decode component: %w", err)

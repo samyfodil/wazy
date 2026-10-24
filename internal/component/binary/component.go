@@ -141,7 +141,8 @@ type Component struct {
 	// Bytes is the complete binary this component was decoded from (the whole
 	// buffer for a top-level component; the section-4 sub-slice for a nested
 	// one). CoreModule.Offset/Size index into it, so recursively instantiating
-	// a NestedComponents entry needs its own Bytes, not the parent's.
+	// a NestedComponents entry needs its own Bytes, not the parent's. The
+	// decoded names are views of it, so it is read-only.
 	Bytes []byte
 
 	// Decoded is set true by Decode. It distinguishes a component that went

@@ -1245,6 +1245,13 @@ func TestReadLabelTruncated(t *testing.T) {
 	})
 }
 
+// An empty label at the very end of the buffer has no byte to view.
+func TestReadLabelEmptyAtEnd(t *testing.T) {
+	if s, off, err := readLabel([]byte{0x00}, 0); s != "" || off != 1 || err != nil {
+		t.Fatalf("got %q, %d, %v", s, off, err)
+	}
+}
+
 // ---------------------------------------------------------------------
 // readDeftypeDesc: unsupported-construct and truncation paths not
 // otherwise reachable through a real wasm-tools fixture.
