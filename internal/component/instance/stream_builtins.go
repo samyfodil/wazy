@@ -223,11 +223,23 @@ func hasAsyncOpt(canon binary.Canon) bool {
 	return false
 }
 
+func isStreamCanonKind(k byte) bool {
+	switch k {
+	case binary.CanonKindStreamNew, binary.CanonKindStreamRead, binary.CanonKindStreamWrite,
+		binary.CanonKindStreamCancelRead, binary.CanonKindStreamCancelWrite,
+		binary.CanonKindStreamDropReadable, binary.CanonKindStreamDropWritable,
+		binary.CanonKindStreamForward:
+		return true
+	}
+	return false
+}
+
 func isFutureCanonKind(k byte) bool {
 	switch k {
 	case binary.CanonKindFutureNew, binary.CanonKindFutureRead, binary.CanonKindFutureWrite,
 		binary.CanonKindFutureCancelRead, binary.CanonKindFutureCancelWrite,
-		binary.CanonKindFutureDropReadable, binary.CanonKindFutureDropWritable:
+		binary.CanonKindFutureDropReadable, binary.CanonKindFutureDropWritable,
+		binary.CanonKindFutureForward:
 		return true
 	}
 	return false
@@ -318,6 +330,11 @@ func streamFutureCanonHostFunc(comp *binary.Component, in *Instance, canon binar
 		}
 		return futureDropHostFunc(in, side, elemDesc), nil
 
+	case binary.CanonKindStreamForward:
+		return streamForwardHostFunc(in, elemDesc), nil
+	case binary.CanonKindFutureForward:
+		return futureForwardHostFunc(in, elemDesc), nil
+
 	default:
 		return hostFuncDef{}, fmt.Errorf("canon kind %#x is not a stream/future builtin", canon.Kind)
 	}
@@ -330,15 +347,18 @@ func streamFutureCanonHostFunc(comp *binary.Component, in *Instance, canon binar
 // state checks, matching Phase 1's validate-then-remove convention.
 func requireStreamEnd(in *Instance, name string, i uint32, side endSide, elemDesc binary.TypeDesc) *streamEnd {
 	raw, ok := in.resources.getEntry(i)
+	if !ok {
+		panic(fmt.Errorf("component/instance: %s: unknown handle index %d", name, i))
+	}
 	se, isSE := raw.(*streamEnd)
-	if !ok || !isSE {
-		panic(fmt.Errorf("component/instance: %s: handle %d is not a stream end", name, i))
+	if !isSE {
+		panic(fmt.Errorf("component/instance: %s: handle index %d used with the wrong type: not a stream end", name, i))
 	}
 	if se.side != side {
-		panic(fmt.Errorf("component/instance: %s: handle %d is not a %s stream end", name, i, sideName(side)))
+		panic(fmt.Errorf("component/instance: %s: handle index %d used with the wrong type: not a %s stream end", name, i, sideName(side)))
 	}
 	if !elemTypesCompatible(se.shared.elemIn, se.shared.elem, in, elemDesc) {
-		panic(fmt.Errorf("component/instance: %s: handle %d: stream element type mismatch", name, i))
+		panic(fmt.Errorf("component/instance: %s: handle index %d used with the wrong type: stream element type mismatch", name, i))
 	}
 	return se
 }
@@ -346,15 +366,18 @@ func requireStreamEnd(in *Instance, name string, i uint32, side endSide, elemDes
 // requireFutureEnd is requireStreamEnd's future twin.
 func requireFutureEnd(in *Instance, name string, i uint32, side endSide, elemDesc binary.TypeDesc) *futureEnd {
 	raw, ok := in.resources.getEntry(i)
+	if !ok {
+		panic(fmt.Errorf("component/instance: %s: unknown handle index %d", name, i))
+	}
 	fe, isFE := raw.(*futureEnd)
-	if !ok || !isFE {
-		panic(fmt.Errorf("component/instance: %s: handle %d is not a future end", name, i))
+	if !isFE {
+		panic(fmt.Errorf("component/instance: %s: handle index %d used with the wrong type: not a future end", name, i))
 	}
 	if fe.side != side {
-		panic(fmt.Errorf("component/instance: %s: handle %d is not a %s future end", name, i, sideName(side)))
+		panic(fmt.Errorf("component/instance: %s: handle index %d used with the wrong type: not a %s future end", name, i, sideName(side)))
 	}
 	if !elemTypesCompatible(fe.shared.elemIn, fe.shared.elem, in, elemDesc) {
-		panic(fmt.Errorf("component/instance: %s: handle %d: future element type mismatch", name, i))
+		panic(fmt.Errorf("component/instance: %s: handle index %d used with the wrong type: future element type mismatch", name, i))
 	}
 	return fe
 }
@@ -693,14 +716,29 @@ func streamDropHostFunc(in *Instance, side endSide, elemDesc binary.TypeDesc) ho
 			}
 			panic(fmt.Errorf("component/instance: %s: stream end %d: cannot %s busy stream", name, i, verb))
 		}
-		peer, peerSide := peerOfStream(e)
-		clearStreamEnd(e)
-		e.shared.drop() // counterpart's parked copy => DROPPED event
-		notifyPeerDropped(e.shared.dropDebt(), peerSide, peer)
-		e.dropWaitable()
+		e.drop()
 		in.resources.removeEntry(i)
 	})
 	return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32}, results: nil}
+}
+
+// drop is End.drop for an end already taken out of its table: the
+// counterpart's parked copy, or the idle counterpart itself, learns of it.
+func (e *streamEnd) drop() {
+	peer, peerSide := peerOfStream(e)
+	clearStreamEnd(e)
+	e.shared.drop() // counterpart's parked copy => DROPPED event
+	notifyPeerDropped(e.shared.dropDebt(), peerSide, peer)
+	e.dropWaitable()
+}
+
+// drop is streamEnd.drop's future twin.
+func (e *futureEnd) drop() {
+	peer, peerSide := peerOfFuture(e)
+	clearFutureEnd(e)
+	e.shared.drop()
+	notifyPeerDropped(e.shared.dropDebt(), peerSide, peer)
+	e.dropWaitable()
 }
 
 // futureDropHostFunc backs future.drop-readable (0x1a) / future.drop-writable
@@ -724,14 +762,118 @@ func futureDropHostFunc(in *Instance, side endSide, elemDesc binary.TypeDesc) ho
 		if e.copying() {
 			panic(fmt.Errorf("component/instance: %s: future end %d: cannot have concurrent operations active on a future/stream", name, i))
 		}
-		peer, peerSide := peerOfFuture(e)
-		clearFutureEnd(e)
-		e.shared.drop()
-		notifyPeerDropped(e.shared.dropDebt(), peerSide, peer)
-		e.dropWaitable()
+		e.drop()
 		in.resources.removeEntry(i)
 	})
 	return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32}, results: nil}
+}
+
+// forwardTrapText is what canon_{stream,future}.forward traps with for an end
+// that is not IDLE or is joined to a waitable set, or "" when it is neither.
+func forwardTrapText(kind string, side endSide, state copyState, inSet bool) string {
+	switch {
+	case state == copyDone:
+		peer := "writable"
+		if side == sideWritable {
+			peer = "readable"
+		}
+		return "cannot forward " + kind + " after being notified that the " + peer + " end dropped"
+	case state != copyIdle:
+		return "cannot forward busy " + kind
+	case inSet:
+		return "cannot forward " + kind + " while it's in a waitable set"
+	}
+	return ""
+}
+
+// streamForwardHostFunc backs stream.forward (0x2e), canon_stream_forward.
+// Core sig (ri, wi: i32) -> (): this instance gives up the readable end ri and
+// the writable end wi, and the writer feeding ri is joined directly to the
+// reader wi feeds, so no copy passes through this instance again.
+func streamForwardHostFunc(in *Instance, elemDesc binary.TypeDesc) hostFuncDef {
+	const name = "stream.forward"
+	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
+		requireMayLeave(in, name)
+		ri, wi := api.DecodeU32(stack[0]), api.DecodeU32(stack[1])
+		src := requireStreamEnd(in, name, ri, sideReadable, elemDesc)
+		if msg := forwardTrapText("stream", sideReadable, src.state, src.inWaitableSet()); msg != "" {
+			panic(fmt.Errorf("component/instance: %s: stream end %d: %s", name, ri, msg))
+		}
+		if wi == ri { // the reference has already removed ri by now
+			panic(fmt.Errorf("component/instance: %s: unknown handle index %d", name, wi))
+		}
+		dst := requireStreamEnd(in, name, wi, sideWritable, elemDesc)
+		if msg := forwardTrapText("stream", sideWritable, dst.state, dst.inWaitableSet()); msg != "" {
+			panic(fmt.Errorf("component/instance: %s: stream end %d: %s", name, wi, msg))
+		}
+		in.resources.removeEntry(ri)
+		in.resources.removeEntry(wi)
+		if err := forwardStream(src, dst); err != nil {
+			panic(fmt.Errorf("component/instance: %s: %w", name, err))
+		}
+	})
+	return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, results: nil}
+}
+
+// futureForwardHostFunc backs future.forward (0x2f), streamForwardHostFunc's
+// future twin.
+func futureForwardHostFunc(in *Instance, elemDesc binary.TypeDesc) hostFuncDef {
+	const name = "future.forward"
+	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
+		requireMayLeave(in, name)
+		ri, wi := api.DecodeU32(stack[0]), api.DecodeU32(stack[1])
+		src := requireFutureEnd(in, name, ri, sideReadable, elemDesc)
+		if msg := forwardTrapText("future", sideReadable, src.state, src.inWaitableSet()); msg != "" {
+			panic(fmt.Errorf("component/instance: %s: future end %d: %s", name, ri, msg))
+		}
+		if wi == ri {
+			panic(fmt.Errorf("component/instance: %s: unknown handle index %d", name, wi))
+		}
+		dst := requireFutureEnd(in, name, wi, sideWritable, elemDesc)
+		if msg := forwardTrapText("future", sideWritable, dst.state, dst.inWaitableSet()); msg != "" {
+			panic(fmt.Errorf("component/instance: %s: future end %d: %s", name, wi, msg))
+		}
+		in.resources.removeEntry(ri)
+		in.resources.removeEntry(wi)
+		if err := forwardFuture(src, dst); err != nil {
+			panic(fmt.Errorf("component/instance: %s: %w", name, err))
+		}
+	})
+	return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, results: nil}
+}
+
+// forwardStream is End.forward (definitions.py ~992-1008). src and dst are out
+// of their table. When either has nobody on its other side, or src's other side
+// is dst itself, both are simply dropped. Otherwise both are discarded without
+// a drop -- the ends on their other sides must see nothing -- and dst's stream
+// takes on src's writer, carrying over a copy the writer has parked.
+func forwardStream(src, dst *streamEnd) error {
+	from, to := src.shared, dst.shared
+	if from == to || from.dropped || to.dropped {
+		src.drop()
+		dst.drop()
+		return nil
+	}
+	clearStreamEnd(src)
+	clearStreamEnd(dst)
+	src.dropWaitable()
+	dst.dropWaitable()
+	return to.absorb(from)
+}
+
+// forwardFuture is forwardStream's future twin.
+func forwardFuture(src, dst *futureEnd) error {
+	from, to := src.shared, dst.shared
+	if from == to || from.dropped || to.dropped {
+		src.drop()
+		dst.drop()
+		return nil
+	}
+	clearFutureEnd(src)
+	clearFutureEnd(dst)
+	src.dropWaitable()
+	dst.dropWaitable()
+	return to.absorb(from)
 }
 
 // cancelCopyHostFunc backs stream.cancel-read/write (0x11/0x12) and

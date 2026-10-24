@@ -388,6 +388,8 @@ const (
 	CanonKindThreadYieldThenResume    byte = 0x2b
 	CanonKindThreadSuspendThenPromote byte = 0x2c
 	CanonKindThreadYieldThenPromote   byte = 0x2d
+	CanonKindStreamForward            byte = 0x2e
+	CanonKindFutureForward            byte = 0x2f
 )
 
 // Canon represents a canonical lift/lower binding (section 8).
@@ -638,7 +640,7 @@ func (c *Component) Dump(w io.Writer) error {
 				// Async builtins (0x05+): named but with no per-field dump
 				// yet -- Phase 0 is decode + typing only, so a name plus the
 				// raw kind byte is enough for now.
-				kindStr = fmt.Sprintf("%s (kind %#x)", canonKindName(cn.Kind), cn.Kind)
+				kindStr = fmt.Sprintf("%s (kind %#x)", CanonKindName(cn.Kind), cn.Kind)
 			}
 			if _, err := fmt.Fprintf(w, "  [%d] %s\n", i, kindStr); err != nil {
 				return err
@@ -690,11 +692,10 @@ func externTypeName(t byte) string {
 	}
 }
 
-// canonKindName maps a Canon.Kind byte to its builtin name, for Dump and
-// decode error messages. Kinds not in the CanonKind* table (0x08, 0x0c,
-// 0x26+) never reach here -- decodeCanonSection fails loud on them
-// before a Canon value exists.
-func canonKindName(k byte) string {
+// CanonKindName maps a Canon.Kind byte to its built-in's text-format name, for
+// Dump and error messages. A kind outside the CanonKind* table never reaches
+// here: decodeCanonSection fails loud on it before a Canon value exists.
+func CanonKindName(k byte) string {
 	switch k {
 	case CanonKindLift:
 		return "lift"
@@ -748,6 +749,10 @@ func canonKindName(k byte) string {
 		return "future.drop-readable"
 	case CanonKindFutureDropWritable:
 		return "future.drop-writable"
+	case CanonKindStreamForward:
+		return "stream.forward"
+	case CanonKindFutureForward:
+		return "future.forward"
 	case CanonKindErrorContextNew:
 		return "error-context.new"
 	case CanonKindErrorContextDebugMessage:
@@ -778,6 +783,14 @@ func canonKindName(k byte) string {
 		return "thread.suspend"
 	case CanonKindThreadYieldThenResume:
 		return "thread.yield-then-resume"
+	case CanonKindThreadResumeLater:
+		return "thread.resume-later"
+	case CanonKindThreadSuspendThenResume:
+		return "thread.suspend-then-resume"
+	case CanonKindThreadSuspendThenPromote:
+		return "thread.suspend-then-promote"
+	case CanonKindThreadYieldThenPromote:
+		return "thread.yield-then-promote"
 	default:
 		return fmt.Sprintf("canon kind %#x", k)
 	}

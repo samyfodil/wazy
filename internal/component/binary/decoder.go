@@ -994,7 +994,8 @@ func decodeCanonSection(buf []byte, offset int, sectionSize uint32) ([]Canon, in
 
 		case CanonKindStreamNew, CanonKindFutureNew,
 			CanonKindStreamDropReadable, CanonKindStreamDropWritable,
-			CanonKindFutureDropReadable, CanonKindFutureDropWritable: // ty:typeidx
+			CanonKindFutureDropReadable, CanonKindFutureDropWritable,
+			CanonKindStreamForward, CanonKindFutureForward: // ty:typeidx
 			typeIdx, n, err := leb128.LoadUint32(buf[offset:])
 			if err != nil {
 				return nil, offset, fmt.Errorf("canon[%d] type index: %w", i, err)

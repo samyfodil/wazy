@@ -105,7 +105,9 @@ func (in *Instance) NewStream(elem binary.TypeDesc) (*StreamWriter, abi.Value, e
 		return nil, nil, err
 	}
 	shared := &sharedStream{elem: elem, elemSz: elemSz, align: align, numeric: numeric}
-	return &StreamWriter{in: in, shared: shared, state: copyIdle}, shared, nil
+	w := &StreamWriter{in: in, shared: shared, state: copyIdle}
+	shared.hostWriter = w
+	return w, shared, nil
 }
 
 // NewFuture is NewStream's future twin.
@@ -115,7 +117,9 @@ func (in *Instance) NewFuture(elem binary.TypeDesc) (*FutureWriter, abi.Value, e
 		return nil, nil, err
 	}
 	shared := &sharedFuture{elem: elem, elemSz: elemSz, align: align, numeric: numeric}
-	return &FutureWriter{in: in, shared: shared, state: copyIdle}, shared, nil
+	w := &FutureWriter{in: in, shared: shared, state: copyIdle}
+	shared.hostWriter = w
+	return w, shared, nil
 }
 
 func (w *StreamWriter) copying() bool { return w.state == copyCopying || w.state == copyCancelling }

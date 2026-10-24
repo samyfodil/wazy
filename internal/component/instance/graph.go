@@ -2107,7 +2107,8 @@ func computeCanonHostFunc(
 		binary.CanonKindStreamDropReadable, binary.CanonKindStreamDropWritable,
 		binary.CanonKindFutureNew, binary.CanonKindFutureRead, binary.CanonKindFutureWrite,
 		binary.CanonKindFutureCancelRead, binary.CanonKindFutureCancelWrite,
-		binary.CanonKindFutureDropReadable, binary.CanonKindFutureDropWritable:
+		binary.CanonKindFutureDropReadable, binary.CanonKindFutureDropWritable,
+		binary.CanonKindStreamForward, binary.CanonKindFutureForward:
 		var serr error
 		def, serr = streamFutureCanonHostFunc(comp, in, canon, coreMemTarget, coreFuncTarget)
 		if serr != nil {

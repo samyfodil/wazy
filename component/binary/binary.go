@@ -162,6 +162,8 @@ const (
 	CanonKindFutureCancelWrite        = binary.CanonKindFutureCancelWrite
 	CanonKindFutureDropReadable       = binary.CanonKindFutureDropReadable
 	CanonKindFutureDropWritable       = binary.CanonKindFutureDropWritable
+	CanonKindStreamForward            = binary.CanonKindStreamForward
+	CanonKindFutureForward            = binary.CanonKindFutureForward
 	CanonKindErrorContextNew          = binary.CanonKindErrorContextNew
 	CanonKindErrorContextDebugMessage = binary.CanonKindErrorContextDebugMessage
 	CanonKindErrorContextDrop         = binary.CanonKindErrorContextDrop

@@ -746,7 +746,7 @@ func TestRequireFutureEnd_WrongSideAndKindTraps(t *testing.T) {
 	requirePanicContains(t, "not a readable future end", func() {
 		callBuiltin(futureDropHostFunc(in, sideReadable, nil), uint64(w))
 	})
-	requirePanicContains(t, "not a future end", func() {
+	requirePanicContains(t, "unknown handle index 999", func() {
 		callBuiltin(futureDropHostFunc(in, sideReadable, nil), uint64(999))
 	})
 	_ = r

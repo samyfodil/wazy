@@ -1,6 +1,7 @@
 package instance
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/samyfodil/wazy/internal/component/abi"
@@ -447,8 +448,12 @@ func TestStreamDrop_WrongSideAndKindTrap(t *testing.T) {
 	requirePanicContains(t, "not a readable stream end", func() {
 		callBuiltin(streamDropHostFunc(in, sideReadable, nil), uint64(w))
 	})
-	requirePanicContains(t, "not a stream end", func() {
+	requirePanicContains(t, "unknown handle index 999", func() {
 		callBuiltin(streamDropHostFunc(in, sideReadable, nil), uint64(999))
+	})
+	fr, _ := newBareFutureEnds(in)
+	requirePanicContains(t, fmt.Sprintf("handle index %d used with the wrong type: not a stream end", fr), func() {
+		callBuiltin(streamDropHostFunc(in, sideReadable, nil), uint64(fr))
 	})
 	_ = r
 }
