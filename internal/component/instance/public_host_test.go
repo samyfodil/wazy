@@ -49,10 +49,12 @@ func TestHarness(t *testing.T) {
 		t.Error("the tagged resource has no name in the table")
 	}
 	// The dtor option lands in the config the harness built.
-	if fn := h.cfg.hostResDtors[7]; fn == nil {
+	fn7 := h.cfg.hostResDtors[7]
+	if fn7 == nil {
 		t.Fatal("WithHostResourceDtor registered nothing")
-	} else if fn(context.Background(), 1); !dtorRan {
-		t.Error("the registered dtor is not the one given")
+	}
+	if err := fn7(context.Background(), 1); err != nil || !dtorRan {
+		t.Errorf("the registered dtor is not the one given: %v, ran=%v", err, dtorRan)
 	}
 }
 
