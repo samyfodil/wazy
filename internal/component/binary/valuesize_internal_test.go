@@ -15,7 +15,8 @@ func TestLayout64(t *testing.T) {
 		FuncDesc{}, // 1: not a value type
 		FixedListDesc{Element: TypeRef{TypeIndex: new(uint32)}, Length: 1 << 31}, // 2: 2^65 bytes
 	}
-	s := sizer{resolve: func(i uint32) (TypeDesc, error) { return types[i], nil }, memo: map[uint32]layout64{}}
+	s := &sizeCheck{}
+	sp := s.push(sizeSpace{local: true, types: types, up: -1})
 	labels := func(n int) []string { return make([]string, n) }
 	cases := func(n int) []VariantCase { return make([]VariantCase, n) }
 	for _, tc := range []struct {
@@ -39,12 +40,12 @@ func TestLayout64(t *testing.T) {
 		{"case without index", VariantDesc{Cases: []VariantCase{{Type: &TypeRef{}}}}, layout64{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := s.layoutOf(tc.d, 0); got != tc.want {
+			if got := s.layoutOf(sp, tc.d, 0); got != tc.want {
 				t.Errorf("got %+v, want %+v", got, tc.want)
 			}
 		})
 	}
-	if got := s.layoutRef(&TypeRef{TypeIndex: new(uint32)}, maxLayoutDepth+1); got.known {
+	if got := s.layoutRef(sp, &TypeRef{TypeIndex: new(uint32)}, maxLayoutDepth+1); got.known {
 		t.Errorf("past the depth limit: %+v", got)
 	}
 }
@@ -111,9 +112,10 @@ func TestValueSizes_Declarations(t *testing.T) {
 		Imports:                []Import{{Name: "i", ExternType: 0x05, ExternIndex: 0}},
 		ComponentInstanceSpace: []ComponentInstanceSpaceEntry{{Kind: ComponentInstanceFromImport, Import: 0}},
 	}
-	s := &sizer{resolve: c.ResolveType, memo: map[uint32]layout64{}}
+	s := &sizeCheck{comp: c}
+	top := s.push(sizeSpace{up: -1})
 	for _, idx := range []uint32{1, 2, 3, 4, 5, 99} {
-		if l := c.importedExportLayout(s, idx, 0); l.known {
+		if l := s.importedExportLayout(top, idx, 0); l.known {
 			t.Errorf("type %d: %+v", idx, l)
 		}
 	}
