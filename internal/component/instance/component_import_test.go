@@ -6,6 +6,7 @@ import (
 	"embed"
 	"fmt"
 	"path"
+	"slices"
 	"testing"
 
 	"github.com/samyfodil/wazy"
@@ -252,8 +253,62 @@ func TestComponentImport_InstanceExportedWhole(t *testing.T) {
 		t.Fatalf("c#f = %v, %v; want [1]", got, err)
 	}
 
-	_, err = Instantiate(ctx, r, componentImportFixture(t, "nested_whole_nested_iface_root"))
-	requireErrContains(t, err, `export "d" re-exports an instance that exports interfaces of its own ("iface"); only one level of instance export is supported`)
+	// An instance exported whole whose component exports an interface of its
+	// own: the interface is "d#iface", the path of names leading to it.
+	deep, err := Instantiate(ctx, r, componentImportFixture(t, "nested_whole_nested_iface_root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deep.Close(ctx)
+	if got, err := deep.CallExport(ctx, "d#iface", "f"); err != nil || len(got) != 1 || got[0] != uint32(1) {
+		t.Fatalf("d#iface#f = %v, %v; want [1]", got, err)
+	}
+	if exports := deep.InstanceExports(); len(exports) != 1 || exports[0] != "d#iface" {
+		t.Errorf("InstanceExports() = %v, want [d#iface]", exports)
+	}
+	if deep.ResourcesFor("d#iface") == deep.Resources() {
+		t.Error("ResourcesFor(d#iface) is the root's table, not the defining component's")
+	}
+}
+
+// An interface nested in an exported instance is reached every way a
+// component can reach one: through an alias two levels deep, a func alias
+// off that, an instantiate-arg, and a further whole export, three levels
+// down. See nested_iface_paths_root.wat.
+func TestNestedInterfacePaths(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+	in, err := Instantiate(ctx, r, componentImportFixture(t, "nested_iface_paths_root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close(ctx)
+	for _, tc := range []struct {
+		iface, member string
+		want          uint32
+	}{{"x", "f", 1}, {"", "g", 1}, {"", "h", 2}, {"whole#d#iface", "f", 1}} {
+		var got []abi.Value
+		if tc.iface == "" {
+			got, err = in.Call(ctx, tc.member)
+		} else {
+			got, err = in.CallExport(ctx, tc.iface, tc.member)
+		}
+		if err != nil || len(got) != 1 || got[0] != tc.want {
+			t.Errorf("%s#%s = %v, %v; want [%d]", tc.iface, tc.member, got, err, tc.want)
+		}
+	}
+	got := in.InstanceExports()
+	slices.Sort(got)
+	if want := []string{"whole#d#iface", "x"}; !slices.Equal(got, want) {
+		t.Errorf("InstanceExports() = %v, want %v", got, want)
+	}
+	// Each nested interface's handles live with the component defining it,
+	// $D's instance inside $W -- one table, whichever path names it.
+	d := in.ResourcesFor("x")
+	if d == in.Resources() || in.ResourcesFor("whole#d#iface") != d || in.ResourcesFor("whole#d") != d {
+		t.Error("ResourcesFor does not reach $D's table through every path")
+	}
 }
 
 // A pure re-export shim -- a component with no code -- supplied for a

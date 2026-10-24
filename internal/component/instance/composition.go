@@ -579,11 +579,7 @@ func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, byIdx
 	// has an entry for. It also resolves that space through
 	// componentInstanceDef rather than numImported arithmetic, since an
 	// interleaved instance export shifts every later definition.
-	sib, key, rerr := resolveFuncAliasInstance(comp, aliasTarget{instIdx: al.InstanceIdx, name: al.Name}, byIdx)
-	if rerr != nil {
-		return nil, fmt.Errorf("func arg index %d %w", funcIdx, rerr)
-	}
-	if sib != nil {
+	if sib, key := resolveFuncAliasInstance(comp, aliasTarget{instIdx: al.InstanceIdx, name: al.Name}, byIdx); sib != nil {
 		be, ok := sib.exports[key]
 		if !ok {
 			return nil, fmt.Errorf("func arg index %d: sibling component instance %d has no export %q", funcIdx, al.InstanceIdx, key)

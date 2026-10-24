@@ -178,9 +178,9 @@ func TestGraph_InstanceAliasFailsLoudOnShapesItCannotWire(t *testing.T) {
 		wantErr string
 	}{{
 		// A chained alias: `(alias export $g "deeper" (instance $h))` on top of
-		// the composition's own alias. A sub-Instance's exports are flat
-		// "X#member" keys, which materializes exactly one level of nesting, so
-		// there is no second level to look anything up in.
+		// the composition's own alias names an interface nested in the
+		// exported one -- filed as "X#deeper" (reexposeWholeInstance) -- and
+		// the adder exports none.
 		name:    "an alias of the alias, two levels deep",
 		fixture: composeAliasWasm,
 		mutate: func(t *testing.T, comp *binary.Component) {
@@ -191,7 +191,7 @@ func TestGraph_InstanceAliasFailsLoudOnShapesItCannotWire(t *testing.T) {
 			})
 			repointArg(comp, slot, uint32(len(comp.ComponentInstanceSpace)-1))
 		},
-		wantErr: `projects a nested instance export ("test:compose/adder@1.0.0 -> deeper"); only one level of instance-export projection is supported`,
+		wantErr: `instance 4 projects the export "test:compose/adder@1.0.0#deeper" of nested instance 0, which exports no such instance`,
 	}, {
 		// An `alias outer` names an instance in an ENCLOSING component's index
 		// space, which this engine does not model at all. It must never fall

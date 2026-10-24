@@ -15,7 +15,10 @@ tests without it to reach the runtime's own refusal.
   `fixed-length-lists.wast` must accept beside the two it refuses.
 - `shim_root` and `shim` supply a pure re-export shim.
 - `nested_whole_root` and `nested_whole_nested_iface_root` export nested
-  instances whole; `inline_alias_root`, `inline_of_nested_root` and
+  instances whole, the second one whose component exports an interface of
+  its own; `nested_iface_paths_root` reaches such a nested interface through
+  a two-level alias, a func alias, an instantiate-arg and a further whole
+  export; `inline_alias_root`, `inline_of_nested_root` and
   `shim_two_exports_root` alias funcs out of instances never instantiated;
   `shim_bad_index_root`, `shim_missing_arg_root`, `inline_alias_missing_root`
   and `shim_no_export_root` are the malformed ones.

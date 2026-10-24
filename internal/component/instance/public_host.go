@@ -90,6 +90,8 @@ func (in *Instance) HostState(key any) any {
 
 // InstanceExports returns the names of the interfaces this component
 // instance exports, as they appear in the binary (version suffix included).
+// An interface nested in an exported instance is named by the path of export
+// names leading to it, joined by "#" ("outer#iface"), as CallExport takes it.
 //
 // A host implementation needs this to find an export whose exact versioned
 // name it cannot know in advance: a component exporting

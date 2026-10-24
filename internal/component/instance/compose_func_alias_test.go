@@ -58,25 +58,22 @@ func TestComposeFuncAliasThroughInstanceAliasAsInstantiateArg(t *testing.T) {
 	}
 }
 
-// The one shape the shared resolution refuses rather than half-binds: a func
-// alias reached through TWO instance aliases.
+// A func alias reached through TWO instance aliases names a member of an
+// interface nested in an exported instance -- "X#deeper#greet", the key such a
+// member is filed under (reexposeWholeInstance) -- and here there is none:
 //
 //	(alias export $p "X" (instance $g))
-//	(alias export $g "deeper" (instance $h))
+//	(alias export $g "deeper" (instance $h))   ;; X has no "deeper"
 //	(alias export $h "greet" (func $greet))
 //
-// A sub-Instance's exports are flat "iface#member" keys, which materializes
-// exactly one level of instance nesting, so there is no second level to reach
-// into -- the same limit the instantiate-arg and instance-export sides already
-// enforce, and stated in the same words so a user meeting it through any of the
-// three gets one diagnosis. What it must NOT do is fall back to the
-// "resolves to an imported func rather than a lift" message the alias-miss used
-// to produce: the func is neither imported nor unreachable for that reason, and
-// sending the reader after a non-existent import wastes the whole investigation.
+// so it is refused for naming no export, through either site, rather than
+// falling back to the "resolves to an imported func rather than a lift"
+// message the alias-miss once produced: the func is neither imported nor
+// unreachable for that reason. TestNestedInterfacePaths runs the shape where
+// the nested interface exists.
 //
 // Mutating a decoded fixture, rather than hand-writing a .wat, keeps the shape
-// under test the ONLY difference from a composition that does work -- and no
-// WIT-based tool can emit a nested interface to build the .wat from anyway.
+// under test the ONLY difference from a composition that does work.
 func TestComposeFuncAliasFailsLoudOnATwoLevelProjection(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -86,13 +83,13 @@ func TestComposeFuncAliasFailsLoudOnATwoLevelProjection(t *testing.T) {
 		// bindFuncExportGraph: the alias is what the component exports.
 		name:    "as a func export",
 		fixture: composeFuncAliasWasm,
-		wantErr: `export "greet" aliases instance 2, which projects a nested instance export ("test:compose/greeter@1.0.0 -> deeper"); only one level of instance-export projection is supported`,
+		wantErr: `export "greet": nested component instance 2 has no export "test:compose/greeter@1.0.0#deeper#greet"`,
 	}, {
 		// outerFuncArgImport: the same alias handed to a sibling as a
 		// `(with "greet" (func $greet))` arg, which is bound first.
 		name:    "as a func instantiate-arg",
 		fixture: composeFuncAliasArgWasm,
-		wantErr: `func arg index 0 aliases instance 3, which projects a nested instance export ("test:compose/greeter@1.0.0 -> deeper"); only one level of instance-export projection is supported`,
+		wantErr: `func arg index 0: sibling component instance 3 has no export "test:compose/greeter@1.0.0#deeper#greet"`,
 	}}
 
 	for _, tt := range tests {

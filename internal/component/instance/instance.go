@@ -1677,6 +1677,11 @@ func (in *Instance) Call(ctx context.Context, exportName string, args ...abi.Val
 // This is sugar for Call(ctx, instanceName+"#"+memberName, args...); both
 // spellings work, since instance members are bound into the same exports
 // map as plain func exports.
+//
+// An interface nested inside an exported instance -- an instance exported
+// whole whose component exports interfaces of its own -- is named by the
+// path of export names leading to it, joined by "#":
+// CallExport(ctx, "outer#wasi:http/incoming-handler@0.2.0", "handle", ...).
 func (in *Instance) CallExport(ctx context.Context, instanceName, memberName string, args ...abi.Value) ([]abi.Value, error) {
 	// Fast path: two map reads against instanceExports, no string
 	// concatenation -- instanceExportKey's "instance#member" join is a fresh
@@ -1730,7 +1735,9 @@ type instanceExportEntry struct {
 func buildInstanceExportIndex(exports map[string]*boundExport) map[string]map[string]instanceExportEntry {
 	var out map[string]map[string]instanceExportEntry
 	for key, be := range exports {
-		i := strings.IndexByte(key, '#')
+		// The LAST "#": an interface nested in an exported instance is filed
+		// as "E#iface#member" (reexposeWholeInstance), and "E#iface" names it.
+		i := strings.LastIndexByte(key, '#')
 		if i < 0 {
 			continue
 		}

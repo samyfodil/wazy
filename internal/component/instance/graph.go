@@ -934,17 +934,11 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 					failClose()
 					return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q references instance %d, which is neither a prior nested instantiation nor an imported instance: %w", compInstIdx, arg.Name, arg.SortIdx, terr)
 				}
-				if len(tgt.projection) > 1 {
-					// A sub-Instance is FLAT: an exported interface lives in
-					// its exports under "X#member" keys (buildInstanceExportIndex),
-					// which materializes exactly ONE level of instance
-					// nesting. There is nothing to look a second level up in,
-					// and no WIT-based tool can emit one (WIT interfaces do
-					// not nest), so refuse rather than quietly binding the
-					// outermost name and dropping the rest.
-					failClose()
-					return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q: instance %d projects a nested instance export (%q); only one level of instance-export projection is supported", compInstIdx, arg.Name, arg.SortIdx, strings.Join(tgt.projection, " -> "))
-				}
+				// A sub-Instance files an interface nested in an exported
+				// instance under the path of names leading to it, joined by
+				// "#" (see reexposeWholeInstance), so a projection of any
+				// depth is one key.
+				projKey := strings.Join(tgt.projection, "#")
 				if tgt.imported {
 					if len(tgt.projection) > 0 {
 						// An imported instance has no *Instance and no
@@ -994,8 +988,8 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 				// name for the interface, which need not be the name sib
 				// republished it under.
 				prov, provIface := sib, ""
-				if len(tgt.projection) == 1 {
-					provIface = tgt.projection[0]
+				if len(tgt.projection) > 0 {
+					provIface = projKey
 					if r, ok := sib.reexposedInstances[provIface]; ok {
 						prov, provIface = r.owner, r.name
 					}
@@ -1069,7 +1063,7 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 					dIdx, ok := importerResIdx[name]
 					return dIdx, ok
 				}
-				if len(tgt.projection) == 1 {
+				if len(tgt.projection) > 0 {
 					// Bind the members of the PROJECTED interface. sib's
 					// exports hold them flat under "X#member" keys, indexed by
 					// instanceExports; the importee's canon lower, meanwhile,
@@ -1078,7 +1072,7 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 					// computeCanonHostFunc). So the lookup is by the alias's
 					// export name X and the registration is by the arg name Y
 					// -- the one place the X != Y distinction is load-bearing.
-					members, mok := sib.instanceExports[tgt.projection[0]]
+					members, mok := sib.instanceExports[projKey]
 					if !mok {
 						// Only func exports become "X#member" keys, so an
 						// interface carrying just a record or a resource is
@@ -1086,11 +1080,11 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 						// Bind nothing and continue: there are no functions to
 						// wire, and the types themselves travel through the
 						// resource plumbing above, not through imports.
-						if componentExportsInstance(sib.comp, tgt.projection[0]) {
+						if _, deeper := sib.reexposedInstances[projKey]; deeper || componentExportsInstance(sib.comp, projKey) {
 							continue
 						}
 						failClose()
-						return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q: instance %d projects the export %q of nested instance %d, which exports no such instance", compInstIdx, arg.Name, arg.SortIdx, tgt.projection[0], tgt.spaceIdx)
+						return nil, nil, fmt.Errorf("component/instance: component instance %d arg %q: instance %d projects the export %q of nested instance %d, which exports no such instance", compInstIdx, arg.Name, arg.SortIdx, projKey, tgt.spaceIdx)
 					}
 					for member, entry := range members {
 						// entry.name is the flat "X#member" key invoke and the
@@ -2212,6 +2206,12 @@ func bindImportExportsGraph(comp *binary.Component, cfg *config, componentFunc f
 	// which is only ever true of a composer's output, never of a component
 	// that defines what it exports. See Instance.reexposedInstances.
 	var reexposed map[string]reexposedIface
+	addReexposed := func(name string, r reexposedIface) {
+		if reexposed == nil {
+			reexposed = make(map[string]reexposedIface)
+		}
+		reexposed[name] = r
+	}
 	for _, exp := range comp.Exports {
 		switch exp.ExternType {
 		case 0x01: // func
@@ -2222,15 +2222,12 @@ func bindImportExportsGraph(comp *binary.Component, cfg *config, componentFunc f
 			exports[exp.Name] = be
 
 		case 0x05: // instance
-			owner, err := bindInstanceExportGraph(comp, cfg, exp, componentFunc, coreFuncTarget, resolve, exports, compInstances)
+			owner, err := bindInstanceExportGraph(comp, cfg, exp, componentFunc, coreFuncTarget, resolve, exports, compInstances, addReexposed)
 			if err != nil {
 				return nil, nil, err
 			}
 			if owner != nil {
-				if reexposed == nil {
-					reexposed = make(map[string]reexposedIface)
-				}
-				reexposed[exp.Name] = *owner
+				addReexposed(exp.Name, *owner)
 			}
 
 		case 0x03: // type: a component re-exporting its named types (rec-t,
@@ -2257,14 +2254,25 @@ func bindImportExportsGraph(comp *binary.Component, cfg *config, componentFunc f
 // The record it returns names sub's top level (name "") as what E really
 // is, so a further composition lining E's resources up finds them where
 // sub defines them.
-func reexposeWholeInstance(exp binary.Export, sub *Instance, exports map[string]*boundExport) (*reexposedIface, error) {
+func reexposeWholeInstance(exp binary.Export, sub *Instance, exports map[string]*boundExport, addReexposed func(string, reexposedIface)) *reexposedIface {
 	for name, be := range sub.exports {
-		if strings.ContainsRune(name, '#') {
-			return nil, fmt.Errorf("component/instance: export %q re-exports an instance that exports interfaces of its own (%q); only one level of instance export is supported", exp.Name, name[:strings.IndexByte(name, '#')])
-		}
 		exports[instanceExportKey(exp.Name, name)] = reexposedSubExport(sub, be, name)
 	}
-	return &reexposedIface{owner: sub}, nil
+	// An interface sub exports is one nested in E, filed under "E#iface"
+	// ("E#iface#member" for its members, just above): record who defines
+	// it, as for an interface re-exposed on its own -- the deepest owner,
+	// for one sub only re-exposes in turn.
+	for name, r := range sub.reexposedInstances {
+		addReexposed(instanceExportKey(exp.Name, name), r)
+	}
+	if sub.comp != nil {
+		for _, e := range sub.comp.Exports {
+			if _, deeper := sub.reexposedInstances[e.Name]; e.ExternType == 0x05 && !deeper {
+				addReexposed(instanceExportKey(exp.Name, e.Name), reexposedIface{owner: sub, name: e.Name})
+			}
+		}
+	}
+	return &reexposedIface{owner: sub}
 }
 
 // reexposedSubExport prepares a nested sub-Instance's already-bound export to
@@ -2348,49 +2356,36 @@ func ownerOf(be *boundExport, fallback *Instance, key string) (*Instance, string
 // the operand the way the instance-arg side already does yields the base
 // definition plus the projection, and a projected member lives in the base's
 // flat exports under its "iface#member" key (buildInstanceExportIndex) -- so
-// the answer is that base and that key.
+// the answer is that base and that key. A projection of more than one level
+// reaches an interface nested in an exported instance, filed under the path of
+// names leading to it ("E#iface#member", see reexposeWholeInstance).
 //
 // The definition-slot fast path comes first so every shape that already worked
 // keeps resolving byte-identically, error text included.
 //
-// Three outcomes, because the callers' own fallbacks are right for one of the
-// two failures and wrong for the other:
-//
-//   - a sub-Instance and its key: resolved.
-//   - a nil *Instance and a nil error: the operand does not name a local
-//     instance at all -- an import, or something resolveInstanceArgTarget will
-//     not follow (an `alias outer`, a malformed chain). Every
-//     caller's existing diagnostic ("resolves to an imported func", or the
-//     imported-instance lookup) already says the right thing there, so say
-//     nothing and let it.
-//   - an error: the operand DOES name a local instance, through a projection
-//     more than one level deep. That is refused rather than half-bound, for the
-//     same reason the instantiate-arg and instance-export sides refuse it -- a
-//     sub-Instance's exports are flat "iface#member" keys, which materializes
-//     exactly one level, so there is no second level to reach into -- and it
-//     needs its own message, because "resolves to an imported func" would be
-//     false about a func that is neither imported nor unreachable for that
-//     reason. Worded to match the other two sites verbatim.
-func resolveFuncAliasInstance(comp *binary.Component, at aliasTarget, compInstances map[int]*Instance) (*Instance, string, error) {
+// A nil *Instance means the operand does not name a local instance at all --
+// an import, or something resolveInstanceArgTarget will not follow (an `alias
+// outer`, a malformed chain). Every caller's existing diagnostic ("resolves to
+// an imported func", or the imported-instance lookup) already says the right
+// thing there, so say nothing and let it.
+func resolveFuncAliasInstance(comp *binary.Component, at aliasTarget, compInstances map[int]*Instance) (*Instance, string) {
 	if sub, ok := compInstances[int(at.instIdx)]; ok {
-		return sub, at.name, nil
+		return sub, at.name
 	}
 	tgt, err := resolveInstanceArgTarget(comp, at.instIdx)
 	if err != nil || tgt.imported {
-		return nil, "", nil
+		return nil, ""
 	}
 	sub, ok := compInstances[int(tgt.spaceIdx)]
 	if !ok {
-		return nil, "", nil
+		return nil, ""
 	}
-	switch len(tgt.projection) {
-	case 0:
-		return sub, at.name, nil
-	case 1:
-		return sub, instanceExportKey(tgt.projection[0], at.name), nil
-	default:
-		return nil, "", fmt.Errorf("aliases instance %d, which projects a nested instance export (%q); only one level of instance-export projection is supported", at.instIdx, strings.Join(tgt.projection, " -> "))
+	if len(tgt.projection) == 0 {
+		return sub, at.name
 	}
+	// An interface nested in an exported instance is filed under the path of
+	// names leading to it (reexposeWholeInstance), so any depth is one key.
+	return sub, instanceExportKey(strings.Join(tgt.projection, "#"), at.name)
 }
 
 // bindFuncExportGraph is bindFuncExport's graph-engine counterpart -- see
@@ -2417,11 +2412,7 @@ func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc f
 		// an export-produced slot -- so it is resolved through
 		// resolveFuncAliasInstance rather than looked up in compInstances (keyed
 		// by definition slots) directly.
-		sub, key, rerr := resolveFuncAliasInstance(comp, at, compInstances)
-		if rerr != nil {
-			return nil, fmt.Errorf("component/instance: export %q %w", diagName, rerr)
-		}
-		if sub != nil {
+		if sub, key := resolveFuncAliasInstance(comp, at, compInstances); sub != nil {
 			if be, ok := sub.exports[key]; ok {
 				return reexposedSubExport(sub, be, key), nil
 			}
@@ -2724,7 +2715,7 @@ func resolveComponentDef(comp *binary.Component, cfg *config, idx uint32) (*bina
 // component defines itself -- the record Instance.reexposedInstances is built
 // from. Returned rather than written into a map the caller owns because there
 // is at most one record per call, and because the common answer is "none".
-func bindInstanceExportGraph(comp *binary.Component, cfg *config, exp binary.Export, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver, exports map[string]*boundExport, compInstances map[int]*Instance) (*reexposedIface, error) {
+func bindInstanceExportGraph(comp *binary.Component, cfg *config, exp binary.Export, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver, exports map[string]*boundExport, compInstances map[int]*Instance, addReexposed func(string, reexposedIface)) (*reexposedIface, error) {
 	// An instance export naming an instance ALIAS re-exposes an INTERFACE of a
 	// nested instance this component instantiated: `(alias export $sub "X"
 	// (instance $g))` + `(export "E" (instance $g))`, which is how a composed
@@ -2741,22 +2732,20 @@ func bindInstanceExportGraph(comp *binary.Component, cfg *config, exp binary.Exp
 	tgt, terr := resolveInstanceArgTarget(comp, exp.ExternIndex)
 	if terr == nil && !tgt.imported && len(tgt.projection) == 0 {
 		if sub, ok := compInstances[int(tgt.spaceIdx)]; ok {
-			return reexposeWholeInstance(exp, sub, exports)
+			return reexposeWholeInstance(exp, sub, exports, addReexposed), nil
 		}
 	}
 	if terr == nil && len(tgt.projection) > 0 {
-		switch {
-		case tgt.imported:
+		if tgt.imported {
 			return nil, fmt.Errorf("component/instance: export %q references instance %d, which aliases the export %q of the IMPORTED instance %q; an imported instance has no instance-typed exports in this runtime", exp.Name, exp.ExternIndex, tgt.projection[0], tgt.importName)
-		case len(tgt.projection) > 1:
-			// Same one-level limit as the instantiate-arg side: a
-			// sub-Instance's exports are flat "X#member" keys, so there is no
-			// second level to project through.
-			return nil, fmt.Errorf("component/instance: export %q references instance %d, which projects a nested instance export (%q); only one level of instance-export projection is supported", exp.Name, exp.ExternIndex, strings.Join(tgt.projection, " -> "))
 		}
+		// An interface nested in a sub-Instance's exported instance is filed
+		// under the path of names leading to it, joined by "#" (see
+		// reexposeWholeInstance), so a projection of any depth is one key.
+		key := strings.Join(tgt.projection, "#")
 		sub, ok := compInstances[int(tgt.spaceIdx)]
 		if !ok {
-			return nil, fmt.Errorf("component/instance: export %q references instance %d, which projects the export %q of instance definition %d; that definition was never instantiated", exp.Name, exp.ExternIndex, tgt.projection[0], tgt.spaceIdx)
+			return nil, fmt.Errorf("component/instance: export %q references instance %d, which projects the export %q of instance definition %d; that definition was never instantiated", exp.Name, exp.ExternIndex, key, tgt.spaceIdx)
 		}
 		// Record who really owns the interface BEFORE looking its members up,
 		// so a types-only interface -- which has no members at all, and so
@@ -2766,18 +2755,18 @@ func bindInstanceExportGraph(comp *binary.Component, cfg *config, exp binary.Exp
 		// yet a further composition still has to line its resources up against
 		// the definer. Chase sub's own record first, so a chain of wrappers
 		// resolves to the deepest owner in one lookup rather than N.
-		owner := &reexposedIface{owner: sub, name: tgt.projection[0]}
+		owner := &reexposedIface{owner: sub, name: key}
 		if r, ok := sub.reexposedInstances[owner.name]; ok {
 			*owner = r
 		}
-		members, ok := sub.instanceExports[tgt.projection[0]]
+		members, ok := sub.instanceExports[key]
 		if !ok {
 			// A types-only interface has no func members to re-expose; see the
 			// matching arm in instantiateNestedInstances.
-			if componentExportsInstance(sub.comp, tgt.projection[0]) {
+			if _, deeper := sub.reexposedInstances[key]; deeper || componentExportsInstance(sub.comp, key) {
 				return owner, nil
 			}
-			return nil, fmt.Errorf("component/instance: export %q references instance %d, which projects the export %q of nested instance %d; that instance exports no such instance", exp.Name, exp.ExternIndex, tgt.projection[0], tgt.spaceIdx)
+			return nil, fmt.Errorf("component/instance: export %q references instance %d, which projects the export %q of nested instance %d; that instance exports no such instance", exp.Name, exp.ExternIndex, key, tgt.spaceIdx)
 		}
 		for member, entry := range members {
 			// entry.name is the key the member is filed under in SUB's own
