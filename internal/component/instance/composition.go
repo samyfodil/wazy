@@ -505,7 +505,7 @@ func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, byIdx
 			return nil, fmt.Errorf("func arg index %d is not an instance-export alias", funcIdx)
 		}
 		diagName := fmt.Sprintf("$%d", funcIdx)
-		be, berr := bindFuncExportGraph(comp, funcIdx, componentFunc, coreFuncTarget, resolve, diagName, cfg.compileCache, nil)
+		be, berr := bindFuncExportGraph(comp, funcIdx, componentFunc, coreFuncTarget, resolve, diagName, cfg, nil)
 		if berr != nil {
 			return nil, fmt.Errorf("func arg index %d: %w", funcIdx, berr)
 		}

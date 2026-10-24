@@ -1,12 +1,14 @@
 package instance
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"path"
 	"testing"
 
 	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/internal/component/binary"
 )
 
 // componentImportsFS holds the hand-written fixtures of component imports
@@ -217,4 +219,127 @@ func TestComponentImport_CheckSuppliedBuildsEnvOnWarmCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	in.Close(ctx)
+}
+
+// The root re-exports the supplied component's instance whole -- an
+// interface whose members are its exports -- which works the same for a
+// supplied component as for one nested in the root.
+func TestComponentImport_InstanceExportedWhole(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+	in, err := Instantiate(ctx, r, componentImportFixture(t, "calc_reexport_root"), WithComponentImport("calc", componentImportFixture(t, "calc_exact")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close(ctx)
+	got, err := in.CallExport(ctx, "calc", "sum", []int32{1, 2, 3, 4})
+	if err != nil || len(got) != 1 || got[0] != int32(10) {
+		t.Fatalf("calc#sum = %v, %v; want [10]", got, err)
+	}
+	if exports := in.InstanceExports(); len(exports) != 1 || exports[0] != "calc" {
+		t.Errorf("InstanceExports() = %v, want [calc]", exports)
+	}
+
+	nested, err := Instantiate(ctx, r, componentImportFixture(t, "nested_whole_root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nested.Close(ctx)
+	if got, err := nested.CallExport(ctx, "c", "f"); err != nil || len(got) != 1 || got[0] != uint32(1) {
+		t.Fatalf("c#f = %v, %v; want [1]", got, err)
+	}
+
+	_, err = Instantiate(ctx, r, componentImportFixture(t, "nested_whole_nested_iface_root"))
+	requireErrContains(t, err, `export "d" re-exports an instance that exports interfaces of its own ("iface"); only one level of instance export is supported`)
+}
+
+// A pure re-export shim -- a component with no code -- supplied for a
+// component import is seen through like a nested one: its export is the
+// func the root passed it, reached through an alias or its instance whole.
+func TestComponentImport_SuppliedShim(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+	in, err := Instantiate(ctx, r, componentImportFixture(t, "shim_root"), WithComponentImport("shim", componentImportFixture(t, "shim")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close(ctx)
+	if got, err := in.Call(ctx, "g"); err != nil || len(got) != 1 || got[0] != uint32(7) {
+		t.Fatalf("g = %v, %v; want [7]", got, err)
+	}
+	if got, err := in.CallExport(ctx, "s", "g"); err != nil || len(got) != 1 || got[0] != uint32(7) {
+		t.Fatalf("s#g = %v, %v; want [7]", got, err)
+	}
+}
+
+// The two ways a func alias can fail to see through a shim, on components
+// the type check would have refused first (instantiated here without it):
+// the shim's export names no import, or nothing was passed for the import it
+// re-exports.
+func TestComponentImport_ShimSeeThroughErrors(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+	for name, want := range map[string]string{
+		"shim_bad_index_root":   `export "g": shim export "g": func index 5 out of range of the shim's 1 func import(s)`,
+		"shim_missing_arg_root": `export "g": shim export "g" re-exports the shim's import "f", which no func instantiate-arg supplies`,
+	} {
+		wasm := componentImportFixture(t, name)
+		comp, err := binary.Decode(bytes.NewReader(wasm))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = instantiateGraph(ctx, r, comp, wasm, newConfig(nil))
+		requireErrContains(t, err, want)
+	}
+}
+
+// A func alias sees through every instance this component never
+// instantiates to the func it names: an inline-export instance's member,
+// any one of a nested shim's exports. An alias naming nothing there is
+// what it was before -- a func that is not this component's lift.
+func TestFuncAliasSeesThroughUninstantiatedInstances(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+	for name, want := range map[string]uint32{"inline_alias_root": 3, "shim_two_exports_root": 2} {
+		in, err := Instantiate(ctx, r, componentImportFixture(t, name))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		export := map[string]string{"inline_alias_root": "h", "shim_two_exports_root": "b"}[name]
+		got, err := in.Call(ctx, export)
+		in.Close(ctx)
+		if err != nil || len(got) != 1 || got[0] != want {
+			t.Fatalf("%s: %s = %v, %v; want [%d]", name, export, got, err, want)
+		}
+	}
+	in, err := Instantiate(ctx, r, componentImportFixture(t, "inline_of_nested_root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := in.CallExport(ctx, "i", "f")
+	in.Close(ctx)
+	if err != nil || len(got) != 1 || got[0] != uint32(5) {
+		t.Fatalf("i#f = %v, %v; want [5]", got, err)
+	}
+	// A nested component with code is instantiated, never seen through.
+	comp, err := binary.Decode(bytes.NewReader(componentImportFixture(t, "inline_of_nested_root")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := funcAliasSource(comp, nil, aliasTarget{instIdx: 0, name: "f"}); ok || err != nil {
+		t.Errorf("funcAliasSource saw through an instance of a component with code: %v, %v", ok, err)
+	}
+	for _, name := range []string{"inline_alias_missing_root", "shim_no_export_root"} {
+		wasm := componentImportFixture(t, name)
+		comp, err := binary.Decode(bytes.NewReader(wasm))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = instantiateGraph(ctx, r, comp, wasm, newConfig(nil))
+		requireErrContains(t, err, "resolves to an imported func rather than a lift")
+	}
 }

@@ -737,7 +737,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	}
 	cfg.pendingDelegates = nil
 
-	exports, reexposed, err := bindImportExportsGraph(comp, componentFunc, coreFuncTarget, resolve, cfg.compileCache, compInstances)
+	exports, reexposed, err := bindImportExportsGraph(comp, cfg, componentFunc, coreFuncTarget, resolve, compInstances)
 	if err != nil {
 		closeSubs()
 		return fail(err)
@@ -799,12 +799,12 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 	spaceIdx := componentInstanceSpaceIndices(comp)
 
 	// A component instance re-exported directly as an INSTANCE (the WIT-
-	// exports-an-interface shim shape, comp.Exports' ExternType==0x05) is
-	// bindInstanceExportGraph's exclusive responsibility -- it does its own
-	// instantiation/validation there (nested-component-index bounds,
-	// pure-shim shape) and must keep being the ONLY consumer for that shape;
-	// don't preempt it here. Such an export's ExternIndex IS a component-
-	// instance index, matching this func's compInstIdx.
+	// exports-an-interface shim shape, comp.Exports' ExternType==0x05) of a
+	// pure re-export shim is bindInstanceExportGraph's exclusive
+	// responsibility -- it sees through the shim to the funcs passed in, and
+	// does its own validation there (nested-component-index bounds,
+	// pure-shim shape); don't preempt it here. Such an export's ExternIndex
+	// IS a component-instance index, matching this func's compInstIdx.
 	exportedAsInstance := make(map[int]bool)
 	for _, exp := range comp.Exports {
 		if exp.ExternType == 0x05 {
@@ -820,13 +820,23 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 	// instantiated purely so its start function runs (and traps); nothing
 	// ever references $D's exports (it has none). needed therefore
 	// defaults to every local Kind==0x00 instance not already claimed by
-	// bindInstanceExportGraph above.
+	// bindInstanceExportGraph above -- which claims an exported instance
+	// only when its component is a pure shim, with nothing to instantiate.
+	// One with code of its own -- a component nested in this one, or one
+	// supplied for a component import -- is instantiated here like any other,
+	// and bindInstanceExportGraph re-exposes it whole (reexposeWholeInstance).
 	needed := make(map[int]bool)
 	for i, inst := range comp.Instances {
 		compInstIdx := spaceIdx[i]
-		if inst.Kind == 0x00 && !exportedAsInstance[compInstIdx] {
-			needed[compInstIdx] = true
+		if inst.Kind != 0x00 {
+			continue
 		}
+		if exportedAsInstance[compInstIdx] {
+			if def, err := resolveComponentDef(comp, cfg, inst.ComponentIdx); err == nil && validateShimComponent(def) == nil {
+				continue
+			}
+		}
+		needed[compInstIdx] = true
 	}
 	if len(needed) == 0 {
 		return nil, nil, nil
@@ -2186,7 +2196,7 @@ func resourceCanonHostFuncGraph(comp *binary.Component, cfg *config, resources *
 // coreFuncTarget instead of the flat (coreFuncAliases, numProducedCoreFuncs)
 // partition simpler components rely on, since the graph engine's core func
 // index space can genuinely interleave alias- and canon-produced entries.
-func bindImportExportsGraph(comp *binary.Component, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver, abiCache *CompileCache, compInstances map[int]*Instance) (map[string]*boundExport, map[string]reexposedIface, error) {
+func bindImportExportsGraph(comp *binary.Component, cfg *config, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver, compInstances map[int]*Instance) (map[string]*boundExport, map[string]reexposedIface, error) {
 	exports := make(map[string]*boundExport, len(comp.Exports))
 	// Left nil unless some instance export turns out to be a re-exposal --
 	// which is only ever true of a composer's output, never of a component
@@ -2195,14 +2205,14 @@ func bindImportExportsGraph(comp *binary.Component, componentFunc func(uint32) (
 	for _, exp := range comp.Exports {
 		switch exp.ExternType {
 		case 0x01: // func
-			be, err := bindFuncExportGraph(comp, exp.ExternIndex, componentFunc, coreFuncTarget, resolve, exp.Name, abiCache, compInstances)
+			be, err := bindFuncExportGraph(comp, exp.ExternIndex, componentFunc, coreFuncTarget, resolve, exp.Name, cfg, compInstances)
 			if err != nil {
 				return nil, nil, err
 			}
 			exports[exp.Name] = be
 
 		case 0x05: // instance
-			owner, err := bindInstanceExportGraph(comp, exp, componentFunc, coreFuncTarget, resolve, exports, abiCache, compInstances)
+			owner, err := bindInstanceExportGraph(comp, cfg, exp, componentFunc, coreFuncTarget, resolve, exports, compInstances)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -2223,6 +2233,28 @@ func bindImportExportsGraph(comp *binary.Component, componentFunc func(uint32) (
 		}
 	}
 	return exports, reexposed, nil
+}
+
+// reexposeWholeInstance binds exp, an export of an instance this component
+// instantiated from a component with code of its own -- `(export "E"
+// (instance $i))` -- as the interface E whose members are $i's exports:
+// each of sub's func exports f becomes "E#f", re-exposed exactly as a func
+// alias of it would be. An instance with exports of its own interfaces
+// would make E an interface of interfaces, which an Instance's flat
+// "iface#member" keys do not express (and no WIT world can have), so that
+// is refused rather than flattened.
+//
+// The record it returns names sub's top level (name "") as what E really
+// is, so a further composition lining E's resources up finds them where
+// sub defines them.
+func reexposeWholeInstance(exp binary.Export, sub *Instance, exports map[string]*boundExport) (*reexposedIface, error) {
+	for name, be := range sub.exports {
+		if strings.ContainsRune(name, '#') {
+			return nil, fmt.Errorf("component/instance: export %q re-exports an instance that exports interfaces of its own (%q); only one level of instance export is supported", exp.Name, name[:strings.IndexByte(name, '#')])
+		}
+		exports[instanceExportKey(exp.Name, name)] = reexposedSubExport(sub, be, name)
+	}
+	return &reexposedIface{owner: sub}, nil
 }
 
 // reexposedSubExport prepares a nested sub-Instance's already-bound export to
@@ -2353,7 +2385,15 @@ func resolveFuncAliasInstance(comp *binary.Component, at aliasTarget, compInstan
 
 // bindFuncExportGraph is bindFuncExport's graph-engine counterpart -- see
 // bindImportExportsGraph.
-func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver, diagName string, abiCache *CompileCache, compInstances map[int]*Instance) (*boundExport, error) {
+//
+// cfg may be nil (a unit test's): it supplies the CompileCache the ABI
+// metadata is cached in, and the components supplied for component imports,
+// one of which may be a shim an alias sees through (funcAliasSource).
+func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver, diagName string, cfg *config, compInstances map[int]*Instance) (*boundExport, error) {
+	var abiCache *CompileCache
+	if cfg != nil {
+		abiCache = cfg.compileCache
+	}
 	isLift, liftCanonIdx, at, err := componentFunc(funcIdx)
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: export %q: %w", diagName, err)
@@ -2376,6 +2416,15 @@ func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc f
 				return reexposedSubExport(sub, be, key), nil
 			}
 			return nil, fmt.Errorf("component/instance: export %q: nested component instance %d has no export %q", diagName, at.instIdx, key)
+		}
+		// An inline-export instance or a pure re-export shim's is never
+		// instantiated: the export IS a func of this component, so bind that.
+		src, ok, err := funcAliasSource(comp, cfg, at)
+		if err != nil {
+			return nil, fmt.Errorf("component/instance: export %q: %w", diagName, err)
+		}
+		if ok {
+			return bindFuncExportGraph(comp, src, componentFunc, coreFuncTarget, resolve, diagName, cfg, compInstances)
 		}
 		return nil, fmt.Errorf("component/instance: export %q resolves to an imported func rather than a lift; only lifted funcs may be exported", diagName)
 	}
@@ -2442,6 +2491,48 @@ func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc f
 	}
 	finalizeBoundExport(be, resolve, abiCache, comp, funcIdx)
 	return be, nil
+}
+
+// funcAliasSource sees through an alias of a func export of an instance
+// this component never instantiates -- one it builds from its own items with
+// inline exports, or one of a pure re-export shim, which has nothing to
+// instantiate -- to the func of this component the export is: the inline
+// export's item, or what was passed for the shim import the export
+// re-exports. ok is false when at's instance is neither.
+func funcAliasSource(comp *binary.Component, cfg *config, at aliasTarget) (funcIdx uint32, ok bool, err error) {
+	localIdx, isDef := componentInstanceDef(comp, at.instIdx)
+	if !isDef {
+		return 0, false, nil
+	}
+	inst := comp.Instances[localIdx]
+	if inst.Kind == 0x01 { // inline exports
+		for _, x := range inst.Exports {
+			if x.Name == at.name && x.Sort == 0x01 {
+				return x.SortIdx, true, nil
+			}
+		}
+		return 0, false, nil
+	}
+	nested, err := resolveComponentDef(comp, cfg, inst.ComponentIdx)
+	if err != nil || validateShimComponent(nested) != nil {
+		return 0, false, nil
+	}
+	for _, ex := range nested.Exports {
+		if ex.Name != at.name || ex.ExternType != 0x01 {
+			continue
+		}
+		imports := shimFuncImportNames(nested)
+		if int(ex.ExternIndex) >= len(imports) {
+			return 0, false, fmt.Errorf("shim export %q: func index %d out of range of the shim's %d func import(s)", at.name, ex.ExternIndex, len(imports))
+		}
+		for _, a := range inst.Args {
+			if a.Name == imports[ex.ExternIndex] && a.Sort == 0x01 {
+				return a.SortIdx, true, nil
+			}
+		}
+		return 0, false, fmt.Errorf("shim export %q re-exports the shim's import %q, which no func instantiate-arg supplies", at.name, imports[ex.ExternIndex])
+	}
+	return 0, false, nil
 }
 
 // resolvePostReturnFuncGraph is resolvePostReturnFunc's graph-engine
@@ -2623,7 +2714,7 @@ func resolveComponentDef(comp *binary.Component, cfg *config, idx uint32) (*bina
 // component defines itself -- the record Instance.reexposedInstances is built
 // from. Returned rather than written into a map the caller owns because there
 // is at most one record per call, and because the common answer is "none".
-func bindInstanceExportGraph(comp *binary.Component, exp binary.Export, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver, exports map[string]*boundExport, abiCache *CompileCache, compInstances map[int]*Instance) (*reexposedIface, error) {
+func bindInstanceExportGraph(comp *binary.Component, cfg *config, exp binary.Export, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver, exports map[string]*boundExport, compInstances map[int]*Instance) (*reexposedIface, error) {
 	// An instance export naming an instance ALIAS re-exposes an INTERFACE of a
 	// nested instance this component instantiated: `(alias export $sub "X"
 	// (instance $g))` + `(export "E" (instance $g))`, which is how a composed
@@ -2637,7 +2728,13 @@ func bindInstanceExportGraph(comp *binary.Component, exp binary.Export, componen
 	// `(export "E" (instance N))` introduces) is the pre-existing shim shape
 	// and falls through to the resolution below; a resolution failure does
 	// too, so the diagnostics there stay the ones callers already know.
-	if tgt, terr := resolveInstanceArgTarget(comp, exp.ExternIndex); terr == nil && len(tgt.projection) > 0 {
+	tgt, terr := resolveInstanceArgTarget(comp, exp.ExternIndex)
+	if terr == nil && !tgt.imported && len(tgt.projection) == 0 {
+		if sub, ok := compInstances[int(tgt.spaceIdx)]; ok {
+			return reexposeWholeInstance(exp, sub, exports)
+		}
+	}
+	if terr == nil && len(tgt.projection) > 0 {
 		switch {
 		case tgt.imported:
 			return nil, fmt.Errorf("component/instance: export %q references instance %d, which aliases the export %q of the IMPORTED instance %q; an imported instance has no instance-typed exports in this runtime", exp.Name, exp.ExternIndex, tgt.projection[0], tgt.importName)
@@ -2720,12 +2817,11 @@ func bindInstanceExportGraph(comp *binary.Component, exp binary.Export, componen
 				continue
 			}
 			diagName := instanceExportKey(exp.Name, member.Name)
-			// compInstances nil: same best-effort scope as the Kind==0x00 shim
-			// path below (its own doc: "never nested-instance aliases") -- an
-			// inline-export instance's func member aliasing a NESTED
-			// instance's export (rather than this component's own canon
-			// lift) is unexercised by any suite and out of scope here too.
-			be, err := bindFuncExportGraph(comp, member.SortIdx, componentFunc, coreFuncTarget, resolve, diagName, abiCache, nil)
+			// A member may be this component's own lift or an alias of a
+			// nested instance's export -- an instance assembled from what
+			// the components it instantiated export -- so bind it with the
+			// nested instances in reach.
+			be, err := bindFuncExportGraph(comp, member.SortIdx, componentFunc, coreFuncTarget, resolve, diagName, cfg, compInstances)
 			if err != nil {
 				return nil, err
 			}
@@ -2736,10 +2832,10 @@ func bindInstanceExportGraph(comp *binary.Component, exp binary.Export, componen
 	if inst.Kind != 0x00 {
 		return nil, fmt.Errorf("component/instance: export %q instance %d is not a component instantiation (kind %#x); inline-export instances are not supported", exp.Name, exp.ExternIndex, inst.Kind)
 	}
-	// Through the component index space (componentspace.go); cfg is not
-	// threaded into this bind-time path, so a component IMPORT here is simply
-	// unsatisfiable -- which is what it has always been.
-	nested, err := resolveComponentDef(comp, nil, inst.ComponentIdx)
+	// Through the component index space (componentspace.go), and through cfg
+	// for a component import: a component supplied for one may be a pure
+	// shim too.
+	nested, err := resolveComponentDef(comp, cfg, inst.ComponentIdx)
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: export %q instance %d: %w", exp.Name, exp.ExternIndex, err)
 	}
@@ -2777,7 +2873,7 @@ func bindInstanceExportGraph(comp *binary.Component, exp binary.Export, componen
 
 		// A shim's instantiate-arg funcs are this component's own canon lifts,
 		// never nested-instance aliases, so no compInstances are needed here.
-		be, err := bindFuncExportGraph(comp, arg.SortIdx, componentFunc, coreFuncTarget, resolve, diagName, abiCache, nil)
+		be, err := bindFuncExportGraph(comp, arg.SortIdx, componentFunc, coreFuncTarget, resolve, diagName, cfg, nil)
 		if err != nil {
 			return nil, err
 		}

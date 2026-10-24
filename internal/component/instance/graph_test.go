@@ -294,11 +294,16 @@ func TestGraph_BindInstanceExport_NestedComponentOutOfRange(t *testing.T) {
 	requireErrContains(t, err, "out of range of the 1-entry component index space")
 }
 
+// A nested component exported whole that is NOT a pure shim -- here
+// real_hello's shim given a canon of its own -- is no longer seen through:
+// it is instantiated like any component with code (reexposeWholeInstance).
+// This one then fails as such a component does when it re-exports a func it
+// imports, which only a shim may.
 func TestGraph_BindInstanceExport_NotPureShim(t *testing.T) {
 	comp := decodeRealHello(t)
 	comp.NestedComponents[0].Canons = append(comp.NestedComponents[0].Canons, binary.Canon{})
 	_, err := runGraph(t, comp)
-	requireErrContains(t, err, "not a pure re-export shim")
+	requireErrContains(t, err, "nested component instance 10: component/instance: export \"run\": component func index 0 names an imported func")
 }
 
 // TestGraph_BindInstanceExport_MemberNotFuncSkipped proves a non-func member

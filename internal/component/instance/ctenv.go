@@ -81,13 +81,6 @@ func ctValRef(s ctScope, ref binary.TypeRef) (*ctVal, error) {
 	return t.val, nil
 }
 
-func ctOptValRef(s ctScope, ref *binary.TypeRef) (*ctVal, error) {
-	if ref == nil {
-		return nil, nil
-	}
-	return ctValRef(s, *ref)
-}
-
 func ctResourceRef(s ctScope, idx uint32) (*ctResource, error) {
 	t, err := s.typeAt(idx)
 	if err != nil {
@@ -1071,11 +1064,9 @@ func (e *ctEnv) check() error {
 			}
 		}
 	}
-	for i, en := range c.ComponentFuncSpace {
-		if en.Kind == binary.ComponentFuncFromAlias {
-			if _, err := e.funcAt(uint32(i)); err != nil {
-				return err
-			}
+	for i := range c.ComponentFuncSpace {
+		if _, err := e.funcAt(uint32(i)); err != nil {
+			return err
 		}
 	}
 	for i, en := range c.ComponentSpace {
@@ -1117,5 +1108,6 @@ func (e *ctEnv) check() error {
 			return fmt.Errorf("nested component %d: %w", i, err)
 		}
 	}
-	return nil
+	_, err := e.selfType()
+	return err
 }

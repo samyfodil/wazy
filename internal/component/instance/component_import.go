@@ -103,14 +103,10 @@ func checkSupplied(env *ctEnv, i uint32, supplied *binary.Component) error {
 		return err
 	}
 	senv := newCTEnv(supplied, nil)
-	if err := senv.check(); err != nil {
+	if err := senv.check(); err != nil { // which computes senv.self
 		return fmt.Errorf("the supplied component is invalid: %w", err)
 	}
-	got, err := senv.selfType()
-	if err != nil {
-		return fmt.Errorf("the supplied component is invalid: %w", err)
-	}
-	if err := ctComponentSub(got, declared.comp); err != nil {
+	if err := ctComponentSub(senv.self, declared.comp); err != nil {
 		return fmt.Errorf("the supplied component does not match the declared type: %w", err)
 	}
 	return nil
