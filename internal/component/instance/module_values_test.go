@@ -1,6 +1,7 @@
 package instance
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"path"
@@ -8,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/internal/component/abi"
+	"github.com/samyfodil/wazy/internal/component/binary"
 )
 
 // The hand-written components of testdata/module_values (see its README).
@@ -112,7 +115,59 @@ func TestModuleValues_BundleArg(t *testing.T) {
 	if err := in.Close(ctx); err != nil {
 		t.Fatal(err)
 	}
+}
 
-	_, err = Instantiate(ctx, r, moduleValuesWasm(t, "bundle_arg_unresolved"))
-	requireErrContains(t, err, `arg "b": export "f": func arg index 1 aliases component instance 0, which is not a prior nested instantiation`)
+// A func aliased out of a bundle or a shim, neither instantiated, is the func
+// it holds: in a bundle passed on, and as a bare func arg, both calls land in
+// the sibling the shim was given. One that is this component's own lift is
+// refused when the nested component calls it, and an alias naming nothing
+// this component holds is refused when it is wired.
+func TestModuleValues_FuncAliasedOutOfBundleOrShim(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+	call := func(name string) ([]abi.Value, error) {
+		in, err := Instantiate(ctx, r, moduleValuesWasm(t, name))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		defer in.Close(ctx) //nolint:errcheck // test cleanup
+		return in.Call(ctx, "run")
+	}
+	if got, err := call("bundle_arg_seen_through"); err != nil || len(got) != 1 || got[0] != uint32(84) {
+		t.Fatalf("run = %v, %v; want [84]", got, err)
+	}
+	_, err := call("bundle_arg_parent_lift")
+	requireErrContains(t, err, `host import "b" "f": wasm trap: cannot enter component instance`)
+
+	// $p, $s, $b and $ci are instances 0..3; $pf, $sf and $bf funcs 0..2.
+	wasm := moduleValuesWasm(t, "bundle_arg_seen_through")
+	for _, tc := range []struct {
+		name   string
+		mangle func(c *binary.Component)
+		want   string
+	}{
+		{
+			"shim arg missing", func(c *binary.Component) { c.Instances[1].Args[0].Name = "x" },
+			`arg "b": export "f": func arg index 1: shim export "f" re-exports the shim's import "f", which no func instantiate-arg supplies`,
+		},
+		{
+			"alias of an instance with code", func(c *binary.Component) { c.Aliases[c.ComponentFuncSpace[2].Alias].InstanceIdx = 3 },
+			`arg "g": func arg index 2 aliases component instance 3, which is not a prior nested instantiation`,
+		},
+		{
+			"bundle names the alias itself", func(c *binary.Component) { c.Instances[2].Exports[0].SortIdx = 2 },
+			`arg "b": export "f": func arg index 2 aliases "f" of component instance 2, which names func 2, not an earlier one`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			comp, err := binary.Decode(bytes.NewReader(wasm))
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.mangle(comp)
+			_, err = instantiateGraph(ctx, r, comp, wasm, newConfig(nil))
+			requireErrContains(t, err, tc.want)
+		})
+	}
 }

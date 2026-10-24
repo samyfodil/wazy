@@ -1908,8 +1908,8 @@ func computeCanonHostFunc(
 				if !ok {
 					return hostFuncDef{}, "", fmt.Errorf("lower func index %d: component instance %d has no export %q", fi, al.InstanceIdx, key)
 				}
-				// No resource-type wiring for a bare (non-instance) func
-				// alias -- matches outerFuncArgImport's identical case.
+				// No resource line-up: the delegate is refused at call
+				// time (below), so no handle ever crosses it.
 				provToImp := func(uint32) (uint32, bool) { return 0, false }
 				owner, ownerKey := ownerOf(be, sib, key)
 				hi = delegatingHostImport(newGuestAsyncTarget(owner, be, ownerKey, provToImp))

@@ -633,8 +633,8 @@ func translateResourceFD(fd binary.FuncDesc, providerResolve abi.Resolver, trans
 // 0x00 "export") into a component instance, and the component-instance index
 // space it's aliased against is combined -- top-level imported instances
 // first, then comp.Instances (the same space numImported/byIdx use; see
-// instantiateNestedInstances' doc). Two cases fall out of al.InstanceIdx
-// against numImported:
+// instantiateNestedInstances' doc). Three cases fall out of what
+// al.InstanceIdx names:
 //
 //   - < numImported: a genuine host import (e.g. the host's
 //     [constructor]resource1), whose Go implementation the caller registered
@@ -647,6 +647,9 @@ func translateResourceFD(fd binary.FuncDesc, providerResolve abi.Resolver, trans
 //     "blocking-call" (func ...))` then `(with "blocking-call" (func N))`).
 //     Wired identically to the whole-instance (arg.Sort == 0x05) case one
 //     export at a time: a delegatingHostImport plus its guestAsyncTarget.
+//   - an inline bundle or a pure re-export shim, never instantiated: N is
+//     resolved again as the func the bundle holds or the shim was passed
+//     (funcAliasSource).
 //
 // N can ALSO be the outer component's own directly-declared local func -- a
 // plain `canon lift`, never exported, never an alias at all
@@ -693,13 +696,24 @@ func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, nest 
 	if al.Sort != 0x01 || al.TargetKind != 0x00 {
 		return nil, fmt.Errorf("func arg index %d is a %#x/%#x alias, not a func export alias", funcIdx, al.Sort, al.TargetKind)
 	}
-	// A local instance DEFINITION that has not been instantiated yet is a
-	// forward reference. Say exactly that, rather than falling through to the
-	// imported-instance path below, which would blame the import list for a
-	// problem in the instantiation order.
+	// A local instance DEFINITION not instantiated is an inline bundle or a
+	// pure re-export shim, which instantiate nothing: the func is what the
+	// bundle holds or the shim was passed, an earlier index of this
+	// component's. Anything else is a forward reference. Say exactly that,
+	// rather than falling through to the imported-instance path below, which
+	// would blame the import list for a problem in the instantiation order.
 	if _, isDef := componentInstanceDef(comp, al.InstanceIdx); isDef {
 		if _, instantiated := byIdx[int(al.InstanceIdx)]; !instantiated {
-			return nil, fmt.Errorf("func arg index %d aliases component instance %d, which is not a prior nested instantiation", funcIdx, al.InstanceIdx)
+			src, ok, err := funcAliasSource(comp, cfg, aliasTarget{instIdx: al.InstanceIdx, name: al.Name})
+			switch {
+			case err != nil:
+				return nil, fmt.Errorf("func arg index %d: %w", funcIdx, err)
+			case !ok:
+				return nil, fmt.Errorf("func arg index %d aliases component instance %d, which is not a prior nested instantiation", funcIdx, al.InstanceIdx)
+			case src >= funcIdx:
+				return nil, fmt.Errorf("func arg index %d aliases %q of component instance %d, which names func %d, not an earlier one", funcIdx, al.Name, al.InstanceIdx, src)
+			}
+			return outerFuncArgImport(comp, cfg, in, nest, byIdx, src, componentFunc, coreFuncTarget, resolve)
 		}
 	}
 	// A prior nested instantiation names a sibling; anything else is an
