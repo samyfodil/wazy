@@ -134,6 +134,30 @@ prints `hello world` with no `wasm-tools` preprocessing on your side.
 
 With a [compile cache](../caching/), re-instantiating that entire graph costs 350.5 µs.
 
+## Component imports
+
+A component can import a *component*: `(import "x" (component ...))`. It is a definition, not an
+instance — the importer instantiates it itself, with arguments of its own. `wac compose
+--import-dependencies` emits one per dependency it does not embed. Supply the binary with
+`WithComponentImport`:
+
+```go
+inst, err := component.Instantiate(ctx, r, composedWasm,
+	component.WithComponentImport("unlocked-dep=<wazy:provider>", providerWasm),
+	component.WithComponentImport("unlocked-dep=<wazy:consumer>", consumerWasm))
+```
+
+Before anything runs, each supplied component is checked against the type its import declares, by
+the Component Model's subtyping rules: it may import less and export more, what it does import and
+export must match, and its resources are lined up with the declared ones. A mismatch fails
+`Instantiate` with the reason — `missing import named …`, `type mismatch for export …`. Every
+instantiation's arguments are checked against what the instantiated component imports the same
+way, whether or not anything was supplied. With a compile cache, the supplied component's decode
+and compilation are cached, and a check that passed is not repeated.
+
+Wasmtime refuses any component import of the root component; wazy runs one given
+`WithComponentImport` and otherwise refuses it as not supplied.
+
 ## Async exports
 
 An async export is called exactly like a synchronous one — the scheduler runs underneath and
