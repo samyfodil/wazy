@@ -1,6 +1,7 @@
 package wit
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -15,6 +16,7 @@ type resolver struct {
 	byName map[string]*pkgScope
 	scopes []*scope // every interface and world scope, for validation
 	funcs  []*Func  // every func, for validation
+	cfg    config
 }
 
 type pkgScope struct {
@@ -25,6 +27,9 @@ type pkgScope struct {
 	order  []*worldState
 	uses   map[string]string // package-level use: local name -> interface path
 	pub    *Package
+	// The interfaces, worlds and package-level uses a gate left out, so that
+	// a reference to one fails as wit-parser fails it rather than as unknown.
+	offIfaces, offWorlds, offUses map[string]bool
 }
 
 // scope is the namespace one interface or world declares its types in.
@@ -38,7 +43,8 @@ type scope struct {
 	uses  map[string]useRef
 	used  []string // use aliases in declaration order
 	names map[string]bool
-	pub   *Interface // nil for a world
+	off   map[string]bool // types and use aliases a gate left out
+	pub   *Interface      // nil for a world
 }
 
 // useRef is one name a `use` brings into a scope: the interface it comes
@@ -61,8 +67,8 @@ type namedKey struct {
 	export bool
 }
 
-func resolve(root *rawPackage, deps []*rawPackage) (*Package, error) {
-	r := &resolver{byName: map[string]*pkgScope{}}
+func resolve(root *rawPackage, deps []*rawPackage, cfg config) (*Package, error) {
+	r := &resolver{byName: map[string]*pkgScope{}, cfg: cfg}
 	for _, raw := range append([]*rawPackage{root}, deps...) {
 		if r.byName[raw.name] != nil {
 			return nil, fmt.Errorf("wit: package %s is defined more than once", raw.name)
@@ -74,6 +80,10 @@ func resolve(root *rawPackage, deps []*rawPackage) (*Package, error) {
 			worlds: map[string]*worldState{},
 			uses:   map[string]string{},
 			pub:    &Package{Name: raw.name, short: map[string]*Interface{}},
+
+			offIfaces: map[string]bool{},
+			offWorlds: map[string]bool{},
+			offUses:   map[string]bool{},
 		}
 		r.byName[raw.name] = p
 		r.pkgs = append(r.pkgs, p)
@@ -119,10 +129,24 @@ func (r *resolver) declarePackage(p *pkgScope) error {
 	for _, item := range p.raw.items {
 		switch it := item.(type) {
 		case *ast.Interface:
-			if p.ifaces[it.Name] != nil {
+			if p.ifaces[it.Name] != nil || p.offIfaces[it.Name] {
 				return fmt.Errorf("wit: package %s: interface %s is defined more than once", p.name, it.Name)
 			}
-			s, err := r.newInterface(p, qualify(p.name, it.Name), it.Items)
+			name := qualify(p.name, it.Name)
+			on, err := r.enabled(p, it.Gate)
+			if err != nil {
+				return fmt.Errorf("wit: interface %s: %w", name, err)
+			}
+			if !on {
+				p.offIfaces[it.Name] = true
+				for _, item := range it.Items {
+					if err := r.offItem(p, "interface "+name, "interface", item); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+			s, err := r.newInterface(p, name, it.Items)
 			if err != nil {
 				return err
 			}
@@ -130,8 +154,21 @@ func (r *resolver) declarePackage(p *pkgScope) error {
 			p.pub.short[it.Name] = s.pub
 			p.pub.Interfaces = append(p.pub.Interfaces, s.pub)
 		case *ast.World:
-			if p.worlds[it.Name] != nil {
+			if p.worlds[it.Name] != nil || p.offWorlds[it.Name] {
 				return fmt.Errorf("wit: package %s: world %s is defined more than once", p.name, it.Name)
+			}
+			on, err := r.enabled(p, it.Gate)
+			if err != nil {
+				return fmt.Errorf("wit: world %s: %w", it.Name, err)
+			}
+			if !on {
+				p.offWorlds[it.Name] = true
+				for _, item := range it.Items {
+					if err := r.offItem(p, "world "+it.Name, "world", item); err != nil {
+						return err
+					}
+				}
+				continue
 			}
 			w := &worldState{pkg: p, ast: it, pub: &World{Name: it.Name}}
 			p.worlds[it.Name] = w
@@ -140,14 +177,26 @@ func (r *resolver) declarePackage(p *pkgScope) error {
 		case *ast.Use:
 			// "use a:b/c;" names interface c locally; "use a:b/c as d;" names
 			// it d. The parser records the second as Names[d] = path.
+			on, err := r.enabled(p, it.Gate)
+			if err != nil {
+				return fmt.Errorf("wit: package %s: use %s: %w", p.name, it.Path, err)
+			}
+			var aliases []string
 			if len(it.Names) == 0 {
-				p.uses[lastSegment(it.Path)] = it.Path
+				aliases = append(aliases, lastSegment(it.Path))
 			}
 			for alias, target := range it.Names {
 				if target != it.Path {
 					return fmt.Errorf("wit: package %s: use %s.{...} names types, which only an interface or world can", p.name, it.Path)
 				}
-				p.uses[alias] = it.Path
+				aliases = append(aliases, alias)
+			}
+			for _, alias := range aliases {
+				if on {
+					p.uses[alias] = it.Path
+				} else {
+					p.offUses[alias] = true
+				}
 			}
 		case *ast.TypeDef:
 			return fmt.Errorf("wit: package %s: type %s is outside any interface or world", p.name, it.Name)
@@ -165,6 +214,7 @@ func newScope(r *resolver, p *pkgScope, iface, where string) *scope {
 		types: map[string]*ast.TypeDef{},
 		uses:  map[string]useRef{},
 		names: map[string]bool{},
+		off:   map[string]bool{},
 	}
 	r.scopes = append(r.scopes, s)
 	return s
@@ -190,14 +240,25 @@ func (r *resolver) newInterface(p *pkgScope, name string, items []ast.InterfaceI
 				return nil, err
 			}
 		case *ast.InterfaceFunc:
-			f, err := s.newFunc(it.Name, Freestanding, "", it.Func)
+			f, err := s.newGatedFunc(it.Name, it.Gate, Freestanding, "", it.Func)
 			if err != nil {
 				return nil, err
 			}
-			s.pub.Funcs = append(s.pub.Funcs, f)
+			if f != nil {
+				s.pub.Funcs = append(s.pub.Funcs, f)
+			}
 		}
 	}
 	return s, nil
+}
+
+// on reports whether the item called name, behind gate g, is read in scope s.
+func (s *scope) on(name string, g ast.Gate) (bool, error) {
+	on, err := s.res.enabled(s.pkg, g)
+	if err != nil {
+		return false, fmt.Errorf("wit: %s: %s: %w", s.where, name, err)
+	}
+	return on, nil
 }
 
 func (s *scope) declare(name string) error {
@@ -209,10 +270,20 @@ func (s *scope) declare(name string) error {
 }
 
 // declareType adds a type to the scope, returning the funcs a resource
-// declares (non-nil, possibly empty, for a resource).
+// declares (non-nil, possibly empty, for a resource). A type its gate leaves
+// out only takes its name, so a duplicate still fails and a reference to it
+// fails as excluded; it returns no funcs.
 func (s *scope) declareType(td *ast.TypeDef) ([]*Func, error) {
+	on, err := s.on(td.Name, td.Gate)
+	if err != nil {
+		return nil, err
+	}
 	if err := s.declare(td.Name); err != nil {
 		return nil, err
+	}
+	if !on {
+		s.off[td.Name] = true
+		return nil, s.offResource(td)
 	}
 	s.types[td.Name] = td
 	s.order = append(s.order, td.Name)
@@ -229,16 +300,42 @@ func (s *scope) declareType(td *ast.TypeDef) ([]*Func, error) {
 		case m.IsStatic:
 			kind, name = Static, "[static]"+td.Name+"."+m.Name
 		}
-		f, err := s.newFunc(name, kind, td.Name, m.Func)
+		f, err := s.newGatedFunc(name, m.Gate, kind, td.Name, m.Func)
 		if err != nil {
 			return nil, err
 		}
-		funcs = append(funcs, f)
+		if f != nil {
+			funcs = append(funcs, f)
+		}
 	}
 	return funcs, nil
 }
 
+// offResource checks the funcs of a resource its gate left out: each needs
+// the resource, so one its own gate keeps refers to a type that is gone.
+func (s *scope) offResource(td *ast.TypeDef) error {
+	res, ok := td.Type.(*ast.Resource)
+	if !ok {
+		return nil
+	}
+	for _, m := range res.Methods {
+		name := td.Name + "." + methodName(m)
+		on, err := s.on(name, m.Gate)
+		if err != nil {
+			return err
+		}
+		if on {
+			return fmt.Errorf("wit: %s: %s: %w", s.where, name, errExcluded("type"))
+		}
+	}
+	return nil
+}
+
 func (s *scope) declareUse(u *ast.Use) error {
+	on, err := s.on("use "+u.Path, u.Gate)
+	if err != nil {
+		return err
+	}
 	// Sorted so a duplicate is reported the same way every run.
 	aliases := make([]string, 0, len(u.Names))
 	for alias := range u.Names {
@@ -248,6 +345,10 @@ func (s *scope) declareUse(u *ast.Use) error {
 	for _, alias := range aliases {
 		if err := s.declare(alias); err != nil {
 			return err
+		}
+		if !on {
+			s.off[alias] = true
+			continue
 		}
 		s.uses[alias] = useRef{path: u.Path, name: u.Names[alias]}
 		s.used = append(s.used, alias)
@@ -262,6 +363,19 @@ func (s *scope) newFunc(name string, kind FuncKind, resource string, fn ast.Func
 	f := &Func{Name: name, Interface: s.iface, Resource: resource, Kind: kind, scope: s, fn: fn}
 	s.res.funcs = append(s.res.funcs, f)
 	return f, nil
+}
+
+// newGatedFunc is newFunc for a func behind gate g. One the gate leaves out
+// only takes its name, so a duplicate still fails, and is nil.
+func (s *scope) newGatedFunc(name string, g ast.Gate, kind FuncKind, resource string, fn ast.Func) (*Func, error) {
+	on, err := s.on(name, g)
+	if err != nil {
+		return nil, err
+	}
+	if !on {
+		return nil, s.declare(name)
+	}
+	return s.newFunc(name, kind, resource, fn)
 }
 
 // world resolves a world's imports and exports, expanding includes.
@@ -298,11 +412,14 @@ func (r *resolver) world(w *worldState) error {
 		var err error
 		switch it := item.(type) {
 		case *ast.Import:
-			err = r.worldItem(w, s, &w.pub.Imports, it.Name, importParts(it.Type))
+			err = r.worldItem(w, s, &w.pub.Imports, it.Name, it.Gate, importParts(it.Type))
 		case *ast.Export:
-			err = r.worldItem(w, s, &w.pub.Exports, it.Name, exportParts(it.Type))
+			err = r.worldItem(w, s, &w.pub.Exports, it.Name, it.Gate, exportParts(it.Type))
 		case *ast.Include:
-			err = r.include(w, it)
+			var on bool
+			if on, err = s.on("include "+it.Path, it.Gate); on {
+				err = r.include(w, it)
+			}
 		}
 		if err != nil {
 			return err
@@ -479,7 +596,19 @@ func exportParts(t ast.ExportType) itemParts {
 	return itemParts{}
 }
 
-func (r *resolver) worldItem(w *worldState, s *scope, list *[]WorldItem, name string, parts itemParts) error {
+func (r *resolver) worldItem(w *worldState, s *scope, list *[]WorldItem, name string, g ast.Gate, parts itemParts) error {
+	on, err := s.on(name, g)
+	if err != nil {
+		return err
+	}
+	if !on {
+		for _, item := range parts.inline {
+			if err := r.offItem(w.pkg, "interface "+name, "interface", item); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	switch {
 	case parts.fn != nil:
 		f, err := s.worldFunc(name, list == &w.pub.Exports, *parts.fn)
@@ -531,21 +660,22 @@ func (w *worldState) add(list *[]WorldItem, item WorldItem) error {
 }
 
 func (r *resolver) include(w *worldState, inc *ast.Include) error {
-	var target *worldState
-	if !strings.Contains(inc.Path, ":") {
-		target = w.pkg.worlds[inc.Path]
-	} else {
-		pkgName, name, err := splitPath(inc.Path)
+	p, name := w.pkg, inc.Path
+	if strings.Contains(inc.Path, ":") {
+		pkgName, n, err := splitPath(inc.Path)
 		if err != nil {
 			return fmt.Errorf("wit: world %s: %w", w.ast.Name, err)
 		}
-		p, err := r.pkg(pkgName)
-		if err != nil {
+		if p, err = r.pkg(pkgName); err != nil {
 			return fmt.Errorf("wit: world %s: %w", w.ast.Name, err)
 		}
-		target = p.worlds[name]
+		name = n
 	}
-	if target == nil {
+	target := p.worlds[name]
+	switch {
+	case target == nil && p == w.pkg && p.offWorlds[name]:
+		return fmt.Errorf("wit: world %s: include %s: %w", w.ast.Name, inc.Path, errExcluded("world"))
+	case target == nil:
 		return fmt.Errorf("wit: world %s: unknown world %s", w.ast.Name, inc.Path)
 	}
 	if err := r.world(target); err != nil {
@@ -577,19 +707,18 @@ func (r *resolver) include(w *worldState, inc *ast.Include) error {
 // brought in; "ns:pkg/name@ver" is an interface of that package.
 func (r *resolver) iface(p *pkgScope, path string) (*scope, error) {
 	if !strings.Contains(path, ":") {
-		if s := p.ifaces[path]; s != nil {
-			return s, nil
-		}
-		target, ok := p.uses[path]
-		if !ok {
-			return nil, fmt.Errorf("unknown interface %s", path)
-		}
-		path = target
-		if !strings.Contains(path, ":") {
-			if s := p.ifaces[path]; s != nil {
-				return s, nil
+		if p.ifaces[path] == nil && !p.offIfaces[path] {
+			target, ok := p.uses[path]
+			switch {
+			case !ok && p.offUses[path]:
+				return nil, fmt.Errorf("%s: %w", path, errExcluded("interface"))
+			case !ok:
+				return nil, fmt.Errorf("unknown interface %s", path)
 			}
-			return nil, fmt.Errorf("unknown interface %s", path)
+			path = target
+		}
+		if !strings.Contains(path, ":") {
+			return p.lookupIface(path, path, true)
 		}
 	}
 	pkgName, name, err := splitPath(path)
@@ -600,8 +729,17 @@ func (r *resolver) iface(p *pkgScope, path string) (*scope, error) {
 	if err != nil {
 		return nil, err
 	}
-	if s := pkg.ifaces[name]; s != nil {
-		return s, nil
+	return pkg.lookupIface(name, path, pkg == p)
+}
+
+// lookupIface finds interface name of p; path is how it was asked for, and
+// local says whether from p itself (see excludedError).
+func (p *pkgScope) lookupIface(name, path string, local bool) (*scope, error) {
+	switch {
+	case p.ifaces[name] != nil:
+		return p.ifaces[name], nil
+	case local && p.offIfaces[name]:
+		return nil, fmt.Errorf("%s: %w", path, errExcluded("interface"))
 	}
 	return nil, fmt.Errorf("unknown interface %s", path)
 }
@@ -694,7 +832,10 @@ func (s *scope) lookupType(name string) (*scope, *ast.TypeDef, error) {
 			return s, td, nil
 		}
 		u, ok := s.uses[name]
-		if !ok {
+		switch {
+		case !ok && s.off[name]:
+			return nil, nil, fmt.Errorf("%s: %s: %w", s.where, name, errExcluded("type"))
+		case !ok:
 			return nil, nil, fmt.Errorf("%s: unknown type %s", s.where, name)
 		}
 		k := key{s, name}
@@ -703,7 +844,13 @@ func (s *scope) lookupType(name string) (*scope, *ast.TypeDef, error) {
 		}
 		seen[k] = true
 		t, err := s.res.iface(s.pkg, u.path)
-		if err != nil {
+		var ex *excludedError
+		switch {
+		case errors.As(err, &ex):
+			// What a use names in an interface a gate left out is either
+			// left out too or already an error there, as an ungated type.
+			return nil, nil, fmt.Errorf("%s: use %s: %w", s.where, u.path, errExcluded("type"))
+		case err != nil:
 			return nil, nil, fmt.Errorf("%s: use %s: %w", s.where, u.path, err)
 		}
 		s, name = t, u.name

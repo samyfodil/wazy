@@ -1,0 +1,40 @@
+{
+  "worlds": [
+    {
+      "name": "w",
+      "imports": {
+        "t": {
+          "type": 0
+        }
+      },
+      "exports": {},
+      "package": 0,
+      "stability": {
+        "unstable": {
+          "feature": "active"
+        }
+      }
+    }
+  ],
+  "interfaces": [],
+  "types": [
+    {
+      "name": "t",
+      "kind": {
+        "type": "u32"
+      },
+      "owner": {
+        "world": 0
+      }
+    }
+  ],
+  "packages": [
+    {
+      "name": "a:b",
+      "interfaces": {},
+      "worlds": {
+        "w": 0
+      }
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+{
+  "worlds": [
+    {
+      "name": "w",
+      "imports": {
+        "r": {
+          "type": 0
+        },
+        "[constructor]r": {
+          "function": {
+            "name": "[constructor]r",
+            "kind": {
+              "constructor": 0
+            },
+            "params": [],
+            "result": 1,
+            "stability": {
+              "stable": {
+                "since": "1.0.0"
+              }
+            }
+          }
+        }
+      },
+      "exports": {},
+      "package": 0
+    }
+  ],
+  "interfaces": [],
+  "types": [
+    {
+      "name": "r",
+      "kind": "resource",
+      "owner": {
+        "world": 0
+      },
+      "stability": {
+        "unstable": {
+          "feature": "active"
+        }
+      }
+    },
+    {
+      "name": null,
+      "kind": {
+        "handle": {
+          "own": 0
+        }
+      },
+      "owner": null
+    }
+  ],
+  "packages": [
+    {
+      "name": "a:b@1.0.0",
+      "interfaces": {},
+      "worlds": {
+        "w": 0
+      }
+    }
+  ]
+}

@@ -13,19 +13,52 @@ import (
 	"testing/fstest"
 )
 
-// testdata/wit-parser holds wit-parser's own UI tests, verbatim from
-// bytecodealliance/wasm-tools at a pinned commit (see its README). Each
-// ships its result: a .wit.json of the resolved packages, or a .wit.result
-// error under parse-fail/.
+// testdata holds two sets of WIT inputs, each run under three feature sets:
+// none, WithFeatures("active") and WithAllFeatures.
 //
-//go:embed testdata/wit-parser
+//   - testdata/wit-parser: wit-parser's own UI tests, verbatim from
+//     bytecodealliance/wasm-tools at a pinned commit (see its README). Each
+//     ships its result with "active" enabled: a .wit.json of the resolved
+//     packages, or a .wit.result error under parse-fail/.
+//   - testdata/cases: hand-written inputs for what those do not cover.
+//
+// testdata/oracle holds what wit-parser (wasm-tools 1.262.0, in a pinned
+// build image; see gen-oracle.sh) makes of both under the other feature
+// sets, and of the hand-written inputs under all three.
+//
+//go:embed testdata/wit-parser testdata/cases testdata/oracle
 var testdata embed.FS
 
+var featureSets = map[string][]Option{
+	"none":   nil,
+	"active": {WithFeatures("active")},
+	"all":    {WithAllFeatures()},
+}
+
+// divergences are the results that differ from wit-parser's on purpose, by
+// input and feature set.
+var divergences = map[string]string{
+	// wit-parser rejects a type or use inside a world whose gate leaves it
+	// out: its world pass maps the type before checking the gate. Here it
+	// is left out like any other item (see the package doc).
+	"gated-include.none":    "gated world use",
+	"gate-world-types.none": "gated world type",
+}
+
 // TestWitParserUI parses each of wit-parser's inputs -- a .wit file, or a
-// directory with deps/ -- and compares the result with wit-parser's: the
-// same packages, interfaces, types, funcs and world items.
+// directory with deps/ -- under each feature set and compares the result
+// with wit-parser's: the same packages, interfaces, types, funcs and world
+// items, or an error where wit-parser has one.
 func TestWitParserUI(t *testing.T) {
-	const dir = "testdata/wit-parser/ui"
+	runOracle(t, "testdata/wit-parser/ui", true)
+}
+
+// TestCases is TestWitParserUI for the hand-written inputs.
+func TestCases(t *testing.T) {
+	runOracle(t, "testdata/cases", false)
+}
+
+func runOracle(t *testing.T, dir string, shipped bool) {
 	entries, err := fs.ReadDir(testdata, dir)
 	if err != nil {
 		t.Fatal(err)
@@ -36,41 +69,95 @@ func TestWitParserUI(t *testing.T) {
 		if e.Name() == "parse-fail" || !e.IsDir() && name == e.Name() {
 			continue
 		}
-		ran++
-		t.Run(name, func(t *testing.T) {
-			want, err := fs.ReadFile(testdata, path.Join(dir, name+".wit.json"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			got, err := parseInput(t, path.Join(dir, e.Name()), e.IsDir())
-			if err != nil {
-				t.Fatalf("wit-parser accepts it: %v", err)
-			}
-			if g, w := summarize(got), summarizeJSON(t, want); !slices.Equal(g, w) {
-				t.Fatalf("got\n\t%s\nwant\n\t%s", strings.Join(g, "\n\t"), strings.Join(w, "\n\t"))
-			}
-		})
+		for _, set := range []string{"none", "active", "all"} {
+			ran++
+			t.Run(name+"."+set, func(t *testing.T) {
+				got, gotErr := parseInput(t, path.Join(dir, e.Name()), e.IsDir(), featureSets[set]...)
+				var wantJSON []byte
+				var wantErr string
+				if shipped && set == "active" {
+					wantJSON = readTestdata(t, path.Join(dir, name+".wit.json"))
+				} else {
+					wantJSON, wantErr = oracle(t, name+"."+set)
+				}
+				if why, ok := divergences[name+"."+set]; ok {
+					if gotErr != nil || wantErr == "" {
+						t.Fatalf("divergence (%s) no longer holds: ours %v, wit-parser %q", why, gotErr, wantErr)
+					}
+					return
+				}
+				switch {
+				case wantErr != "":
+					if gotErr == nil {
+						t.Fatalf("parsed; wit-parser rejects it: %s", wantErr)
+					}
+					if want := ourError(wantErr); !strings.Contains(gotErr.Error(), want) {
+						t.Fatalf("error %q\nwant it to contain %q", gotErr, want)
+					}
+				case gotErr != nil:
+					t.Fatalf("wit-parser accepts it: %v", gotErr)
+				default:
+					if g, w := summarize(got), summarizeJSON(t, wantJSON); !slices.Equal(g, w) {
+						t.Fatalf("got\n\t%s\nwant\n\t%s", strings.Join(g, "\n\t"), strings.Join(w, "\n\t"))
+					}
+				}
+			})
+		}
 	}
 	if ran == 0 {
 		t.Fatalf("no inputs in %s", dir)
 	}
 }
 
+func readTestdata(t *testing.T, p string) []byte {
+	b, err := fs.ReadFile(testdata, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// oracle reads wit-parser's result for one input and feature set: its
+// resolved JSON, or its error.
+func oracle(t *testing.T, key string) (jsonSrc []byte, errLine string) {
+	base := "testdata/oracle/" + key
+	if b, err := fs.ReadFile(testdata, base+".err"); err == nil {
+		return nil, strings.TrimSpace(string(b))
+	}
+	b, err := fs.ReadFile(testdata, base+".json")
+	if err != nil {
+		t.Fatalf("no oracle result for %s (run testdata/gen-oracle.sh): %v", key, err)
+	}
+	return b, ""
+}
+
+var notFound = regexp.MustCompile(`^(interface|world) '(.+)' not found in package '(.+)'$`)
+
+// ourError is the text our error must contain for one wit-parser gives.
+// wit-parser resolves each package on its own, so an item another package's
+// gate left out is "not found" there; here it is unknown.
+func ourError(witParser string) string {
+	if m := notFound.FindStringSubmatch(witParser); m != nil {
+		return "unknown " + m[1]
+	}
+	return witParser
+}
+
 // parseInput parses one of wit-parser's inputs: a directory as ParseFS reads
 // it, or a single file with its nested packages split out.
-func parseInput(t *testing.T, p string, isDir bool) (*Package, error) {
+func parseInput(t *testing.T, p string, isDir bool, opts ...Option) (*Package, error) {
 	if isDir {
 		sub, err := fs.Sub(testdata, p)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return ParseFS(sub, ".")
+		return ParseFS(sub, ".", opts...)
 	}
 	src, err := fs.ReadFile(testdata, p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return ParseFS(splitNested(t, string(src)), ".")
+	return ParseFS(splitNested(t, string(src)), ".", opts...)
 }
 
 // splitNested turns a source with nested "package x { ... }" blocks, which
@@ -260,7 +347,7 @@ func TestWitParserParseFail(t *testing.T) {
 			} else if strings.HasPrefix(want, "expected ") {
 				want = "expected "
 			}
-			_, gotErr := parseInput(t, path.Join(dir, e.Name()), e.IsDir())
+			_, gotErr := parseInput(t, path.Join(dir, e.Name()), e.IsDir(), WithFeatures("active"))
 			switch {
 			case gotErr == nil:
 				t.Fatalf("parsed; wit-parser rejects it: %s", want)

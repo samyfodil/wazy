@@ -1,0 +1,43 @@
+// Gates on a resource, its funcs, and the uses and funcs that reach it.
+package a:b@1.0.0;
+
+interface res {
+  resource r {
+    constructor();
+    @unstable(feature = x)
+    m: func();
+    @since(version = 1.0.0)
+    s: static func() -> r;
+    @unstable(feature = active)
+    a: func(t: t);
+  }
+  @unstable(feature = active)
+  resource g {
+    @unstable(feature = active)
+    constructor();
+    @unstable(feature = x)
+    n: func();
+  }
+  @unstable(feature = active)
+  use other.{t, u as u2};
+  @unstable(feature = active)
+  f: func(x: g, y: t) -> option<u2>;
+  @unstable(feature = x)
+  type later = list<g>;
+}
+
+interface other {
+  type t = u32;
+  @unstable(feature = active)
+  type u = string;
+}
+
+world w {
+  resource local {
+    @unstable(feature = active)
+    constructor();
+    @unstable(feature = x)
+    poke: func();
+  }
+  import res;
+}

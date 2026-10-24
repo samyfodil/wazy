@@ -1,0 +1,21 @@
+// A type, a resource and a use inside a world, each behind a gate. Here they
+// are left out like any other item. wit-parser 1.262.0 rejects this instead:
+// its world pass maps a world's type before it checks the type's gate.
+package a:b;
+
+interface i { type t = u32; }
+
+world w {
+  @unstable(feature = active)
+  type t = u32;
+  @unstable(feature = active)
+  resource r {
+    @unstable(feature = active)
+    constructor();
+  }
+  @unstable(feature = active)
+  use i.{t as t2};
+  @unstable(feature = active)
+  import f: func(x: t, y: t2) -> r;
+  import g: func();
+}

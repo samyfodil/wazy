@@ -45,8 +45,26 @@
 // names each table slot that holds a named WIT type. A resource's
 // constructor, methods and static funcs are grouped under Interface.Resources.
 //
-// Feature gates (@since, @unstable, @deprecated) are not applied: every item
-// in the source is read.
+// # Feature gates
+//
+// Gates apply as wit-parser applies them. An item marked @since or
+// @deprecated is always read; one marked @unstable(feature = x) is read only
+// when x is enabled with WithFeatures, or every feature is with
+// WithAllFeatures. By default none is, so a parse sees what a toolchain
+// targeting the stable API sees:
+//
+//	pkg, err := wit.ParseDir("wit", wit.WithFeatures("cli-exit-with-code"))
+//
+// An item left out is gone everywhere: from its interface or world, from its
+// resource, from a use that named it and from an include that would have
+// brought it in. Anything still read that refers to it is an error, as is a
+// type kept by its own gate inside an interface or world that is left out.
+// An @since gate needs a package version no earlier than its own.
+//
+// One difference from wit-parser 1.262.0: there, a type or use inside a world
+// that its gate leaves out is an error ("found a reference to a type which is
+// excluded"), because its world pass maps the type before checking its gate.
+// Here it is left out like any other item.
 package wit
 
 import (
@@ -246,32 +264,32 @@ func (f *Func) where() string {
 // Parse reads one WIT source. Names resolve within it; a reference to
 // another package is an error, since a lone source has no deps. filename is
 // used only in error messages.
-func Parse(filename, src string) (*Package, error) {
+func Parse(filename, src string, opts ...Option) (*Package, error) {
 	raw, err := parseSource(filename, src)
 	if err != nil {
 		return nil, err
 	}
-	return resolve(raw, nil)
+	return resolve(raw, nil, newConfig(opts))
 }
 
 // ParseFile reads the single WIT file at path, as Parse does.
-func ParseFile(path string) (*Package, error) {
+func ParseFile(path string, opts ...Option) (*Package, error) {
 	src, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("wit: %w", err)
 	}
-	return Parse(path, string(src))
+	return Parse(path, string(src), opts...)
 }
 
 // ParseDir reads the WIT package in dir -- every .wit file directly in it --
 // together with dir/deps/, where each dependency is a directory of .wit files
 // or a single .wit file. Uses resolve across all of them.
-func ParseDir(dir string) (*Package, error) {
-	return ParseFS(os.DirFS(dir), ".")
+func ParseDir(dir string, opts ...Option) (*Package, error) {
+	return ParseFS(os.DirFS(dir), ".", opts...)
 }
 
 // ParseFS is ParseDir over an fs.FS, such as an embed.FS.
-func ParseFS(fsys fs.FS, dir string) (*Package, error) {
+func ParseFS(fsys fs.FS, dir string, opts ...Option) (*Package, error) {
 	root, err := loadDir(fsys, dir)
 	if err != nil {
 		return nil, err
@@ -300,7 +318,7 @@ func ParseFS(fsys fs.FS, dir string) (*Package, error) {
 		}
 		deps = append(deps, dep)
 	}
-	return resolve(root, deps)
+	return resolve(root, deps, newConfig(opts))
 }
 
 // rawPackage is a package's parsed items, before any name is resolved.

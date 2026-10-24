@@ -1,0 +1,302 @@
+{
+  "worlds": [
+    {
+      "name": "w",
+      "imports": {
+        "interface-0": {
+          "interface": {
+            "id": 0
+          }
+        },
+        "interface-1": {
+          "interface": {
+            "id": 1
+          }
+        },
+        "local": {
+          "type": 9
+        },
+        "[constructor]local": {
+          "function": {
+            "name": "[constructor]local",
+            "kind": {
+              "constructor": 9
+            },
+            "params": [],
+            "result": 13,
+            "stability": {
+              "unstable": {
+                "feature": "active"
+              }
+            }
+          }
+        }
+      },
+      "exports": {},
+      "package": 0
+    }
+  ],
+  "interfaces": [
+    {
+      "name": "other",
+      "types": {
+        "t": 0,
+        "u": 1
+      },
+      "functions": {},
+      "package": 0
+    },
+    {
+      "name": "res",
+      "types": {
+        "t": 2,
+        "u2": 3,
+        "r": 4,
+        "g": 5
+      },
+      "functions": {
+        "[constructor]r": {
+          "name": "[constructor]r",
+          "kind": {
+            "constructor": 4
+          },
+          "params": [],
+          "result": 11
+        },
+        "[static]r.s": {
+          "name": "[static]r.s",
+          "kind": {
+            "static": 4
+          },
+          "params": [],
+          "result": 11,
+          "stability": {
+            "stable": {
+              "since": "1.0.0"
+            }
+          }
+        },
+        "[method]r.a": {
+          "name": "[method]r.a",
+          "kind": {
+            "method": 4
+          },
+          "params": [
+            {
+              "name": "self",
+              "type": 6
+            },
+            {
+              "name": "t",
+              "type": 2
+            }
+          ],
+          "stability": {
+            "unstable": {
+              "feature": "active"
+            }
+          }
+        },
+        "[constructor]g": {
+          "name": "[constructor]g",
+          "kind": {
+            "constructor": 5
+          },
+          "params": [],
+          "result": 12,
+          "stability": {
+            "unstable": {
+              "feature": "active"
+            }
+          }
+        },
+        "f": {
+          "name": "f",
+          "kind": "freestanding",
+          "params": [
+            {
+              "name": "x",
+              "type": 12
+            },
+            {
+              "name": "y",
+              "type": 2
+            }
+          ],
+          "result": 8,
+          "stability": {
+            "unstable": {
+              "feature": "active"
+            }
+          }
+        }
+      },
+      "package": 0
+    }
+  ],
+  "types": [
+    {
+      "name": "t",
+      "kind": {
+        "type": "u32"
+      },
+      "owner": {
+        "interface": 0
+      }
+    },
+    {
+      "name": "u",
+      "kind": {
+        "type": "string"
+      },
+      "owner": {
+        "interface": 0
+      },
+      "stability": {
+        "unstable": {
+          "feature": "active"
+        }
+      }
+    },
+    {
+      "name": "t",
+      "kind": {
+        "type": 0
+      },
+      "owner": {
+        "interface": 1
+      },
+      "stability": {
+        "unstable": {
+          "feature": "active"
+        }
+      }
+    },
+    {
+      "name": "u2",
+      "kind": {
+        "type": 1
+      },
+      "owner": {
+        "interface": 1
+      },
+      "stability": {
+        "unstable": {
+          "feature": "active"
+        }
+      }
+    },
+    {
+      "name": "r",
+      "kind": "resource",
+      "owner": {
+        "interface": 1
+      }
+    },
+    {
+      "name": "g",
+      "kind": "resource",
+      "owner": {
+        "interface": 1
+      },
+      "stability": {
+        "unstable": {
+          "feature": "active"
+        }
+      }
+    },
+    {
+      "name": null,
+      "kind": {
+        "handle": {
+          "borrow": 4
+        }
+      },
+      "owner": null
+    },
+    {
+      "name": null,
+      "kind": {
+        "handle": {
+          "borrow": 5
+        }
+      },
+      "owner": null,
+      "stability": {
+        "unstable": {
+          "feature": "active"
+        }
+      }
+    },
+    {
+      "name": null,
+      "kind": {
+        "option": 3
+      },
+      "owner": null,
+      "stability": {
+        "unstable": {
+          "feature": "active"
+        }
+      }
+    },
+    {
+      "name": "local",
+      "kind": "resource",
+      "owner": {
+        "world": 0
+      }
+    },
+    {
+      "name": null,
+      "kind": {
+        "handle": {
+          "borrow": 9
+        }
+      },
+      "owner": null
+    },
+    {
+      "name": null,
+      "kind": {
+        "handle": {
+          "own": 4
+        }
+      },
+      "owner": null
+    },
+    {
+      "name": null,
+      "kind": {
+        "handle": {
+          "own": 5
+        }
+      },
+      "owner": null
+    },
+    {
+      "name": null,
+      "kind": {
+        "handle": {
+          "own": 9
+        }
+      },
+      "owner": null
+    }
+  ],
+  "packages": [
+    {
+      "name": "a:b@1.0.0",
+      "docs": {
+        "contents": "Gates on a resource, its funcs, and the uses and funcs that reach it."
+      },
+      "interfaces": {
+        "other": 0,
+        "res": 1
+      },
+      "worlds": {
+        "w": 0
+      }
+    }
+  ]
+}

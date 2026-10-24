@@ -1,0 +1,8 @@
+package a:b@1.0.0;
+world w {
+  @unstable(feature = active)
+  resource r {
+    @since(version = 1.0.0)
+    constructor();
+  }
+}

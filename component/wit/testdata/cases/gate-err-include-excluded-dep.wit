@@ -1,0 +1,8 @@
+package a:b;
+world w {
+  include c:d/v;
+}
+package c:d {
+  @unstable(feature = active)
+  world v {}
+}

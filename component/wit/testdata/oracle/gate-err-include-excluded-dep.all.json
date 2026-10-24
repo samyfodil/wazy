@@ -1,0 +1,39 @@
+{
+  "worlds": [
+    {
+      "name": "v",
+      "imports": {},
+      "exports": {},
+      "package": 0,
+      "stability": {
+        "unstable": {
+          "feature": "active"
+        }
+      }
+    },
+    {
+      "name": "w",
+      "imports": {},
+      "exports": {},
+      "package": 1
+    }
+  ],
+  "interfaces": [],
+  "types": [],
+  "packages": [
+    {
+      "name": "c:d",
+      "interfaces": {},
+      "worlds": {
+        "v": 0
+      }
+    },
+    {
+      "name": "a:b",
+      "interfaces": {},
+      "worlds": {
+        "w": 1
+      }
+    }
+  ]
+}

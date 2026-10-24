@@ -1,0 +1,450 @@
+{
+  "worlds": [
+    {
+      "name": "base",
+      "imports": {
+        "base-f": {
+          "function": {
+            "name": "base-f",
+            "kind": "freestanding",
+            "params": []
+          }
+        },
+        "base-x": {
+          "function": {
+            "name": "base-x",
+            "kind": "freestanding",
+            "params": [],
+            "stability": {
+              "unstable": {
+                "feature": "x"
+              }
+            }
+          }
+        }
+      },
+      "exports": {
+        "base-a": {
+          "function": {
+            "name": "base-a",
+            "kind": "freestanding",
+            "params": [],
+            "stability": {
+              "unstable": {
+                "feature": "active"
+              }
+            }
+          }
+        }
+      },
+      "package": 0
+    },
+    {
+      "name": "w",
+      "imports": {
+        "interface-0": {
+          "interface": {
+            "id": 0,
+            "stability": {
+              "stable": {
+                "since": "1.0.0"
+              }
+            }
+          }
+        },
+        "interface-1": {
+          "interface": {
+            "id": 1,
+            "stability": {
+              "unstable": {
+                "feature": "active"
+              }
+            }
+          }
+        },
+        "fa": {
+          "function": {
+            "name": "fa",
+            "kind": "freestanding",
+            "params": [],
+            "stability": {
+              "unstable": {
+                "feature": "active"
+              }
+            }
+          }
+        },
+        "fx": {
+          "function": {
+            "name": "fx",
+            "kind": "freestanding",
+            "params": [],
+            "stability": {
+              "unstable": {
+                "feature": "x"
+              }
+            }
+          }
+        },
+        "base-f": {
+          "function": {
+            "name": "base-f",
+            "kind": "freestanding",
+            "params": []
+          }
+        },
+        "base-x": {
+          "function": {
+            "name": "base-x",
+            "kind": "freestanding",
+            "params": [],
+            "stability": {
+              "unstable": {
+                "feature": "x"
+              }
+            }
+          }
+        }
+      },
+      "exports": {
+        "base-a": {
+          "function": {
+            "name": "base-a",
+            "kind": "freestanding",
+            "params": [],
+            "stability": {
+              "unstable": {
+                "feature": "active"
+              }
+            }
+          }
+        },
+        "ex": {
+          "interface": {
+            "id": 2,
+            "stability": {
+              "unstable": {
+                "feature": "x"
+              }
+            }
+          }
+        },
+        "ea": {
+          "interface": {
+            "id": 3,
+            "stability": {
+              "unstable": {
+                "feature": "active"
+              }
+            }
+          }
+        }
+      },
+      "package": 0
+    },
+    {
+      "name": "w2",
+      "imports": {
+        "base-f": {
+          "function": {
+            "name": "base-f",
+            "kind": "freestanding",
+            "params": []
+          }
+        },
+        "base-x": {
+          "function": {
+            "name": "base-x",
+            "kind": "freestanding",
+            "params": [],
+            "stability": {
+              "unstable": {
+                "feature": "x"
+              }
+            }
+          }
+        }
+      },
+      "exports": {
+        "d": {
+          "function": {
+            "name": "d",
+            "kind": "freestanding",
+            "params": [],
+            "stability": {
+              "stable": {
+                "since": "0.9.0",
+                "deprecated": "1.0.0"
+              }
+            }
+          }
+        },
+        "e": {
+          "function": {
+            "name": "e",
+            "kind": "freestanding",
+            "params": [],
+            "stability": {
+              "unstable": {
+                "feature": "active",
+                "deprecated": "1.0.0"
+              }
+            }
+          }
+        },
+        "base-a": {
+          "function": {
+            "name": "base-a",
+            "kind": "freestanding",
+            "params": [],
+            "stability": {
+              "unstable": {
+                "feature": "active"
+              }
+            }
+          }
+        }
+      },
+      "package": 0
+    },
+    {
+      "name": "off",
+      "imports": {
+        "interface-0": {
+          "interface": {
+            "id": 0
+          }
+        },
+        "inline": {
+          "interface": {
+            "id": 4
+          }
+        },
+        "gone": {
+          "interface": {
+            "id": 5,
+            "stability": {
+              "unstable": {
+                "feature": "x"
+              }
+            }
+          }
+        },
+        "t": {
+          "type": 0
+        },
+        "base-f": {
+          "function": {
+            "name": "base-f",
+            "kind": "freestanding",
+            "params": []
+          }
+        },
+        "base-x": {
+          "function": {
+            "name": "base-x",
+            "kind": "freestanding",
+            "params": [],
+            "stability": {
+              "unstable": {
+                "feature": "x"
+              }
+            }
+          }
+        }
+      },
+      "exports": {
+        "f2": {
+          "function": {
+            "name": "f2",
+            "kind": "freestanding",
+            "params": []
+          }
+        },
+        "base-a": {
+          "function": {
+            "name": "base-a",
+            "kind": "freestanding",
+            "params": [],
+            "stability": {
+              "unstable": {
+                "feature": "active"
+              }
+            }
+          }
+        }
+      },
+      "package": 0,
+      "stability": {
+        "unstable": {
+          "feature": "x"
+        }
+      }
+    }
+  ],
+  "interfaces": [
+    {
+      "name": "i",
+      "types": {},
+      "functions": {
+        "f": {
+          "name": "f",
+          "kind": "freestanding",
+          "params": []
+        }
+      },
+      "package": 0
+    },
+    {
+      "name": "j",
+      "types": {},
+      "functions": {
+        "g": {
+          "name": "g",
+          "kind": "freestanding",
+          "params": []
+        }
+      },
+      "stability": {
+        "unstable": {
+          "feature": "active"
+        }
+      },
+      "package": 0
+    },
+    {
+      "name": null,
+      "types": {},
+      "functions": {
+        "h": {
+          "name": "h",
+          "kind": "freestanding",
+          "params": []
+        }
+      },
+      "stability": {
+        "unstable": {
+          "feature": "x"
+        }
+      },
+      "package": 0
+    },
+    {
+      "name": null,
+      "types": {},
+      "functions": {
+        "h": {
+          "name": "h",
+          "kind": "freestanding",
+          "params": []
+        },
+        "hx": {
+          "name": "hx",
+          "kind": "freestanding",
+          "params": [],
+          "stability": {
+            "unstable": {
+              "feature": "x"
+            }
+          }
+        }
+      },
+      "stability": {
+        "unstable": {
+          "feature": "active"
+        }
+      },
+      "package": 0
+    },
+    {
+      "name": null,
+      "types": {
+        "t": 1
+      },
+      "functions": {
+        "k": {
+          "name": "k",
+          "kind": "freestanding",
+          "params": []
+        }
+      },
+      "package": 0
+    },
+    {
+      "name": null,
+      "types": {
+        "t": 2
+      },
+      "functions": {
+        "f": {
+          "name": "f",
+          "kind": "freestanding",
+          "params": []
+        }
+      },
+      "stability": {
+        "unstable": {
+          "feature": "x"
+        }
+      },
+      "package": 0
+    }
+  ],
+  "types": [
+    {
+      "name": "t",
+      "kind": {
+        "type": "u32"
+      },
+      "owner": {
+        "world": 3
+      },
+      "stability": {
+        "unstable": {
+          "feature": "x"
+        }
+      }
+    },
+    {
+      "name": "t",
+      "kind": {
+        "type": "u32"
+      },
+      "owner": {
+        "interface": 4
+      }
+    },
+    {
+      "name": "t",
+      "kind": {
+        "type": "u32"
+      },
+      "owner": {
+        "interface": 5
+      },
+      "stability": {
+        "unstable": {
+          "feature": "x"
+        }
+      }
+    }
+  ],
+  "packages": [
+    {
+      "name": "a:b@1.0.0",
+      "docs": {
+        "contents": "Every kind of world item behind a gate, and an include that brings in\nwhatever of the included world its gates leave."
+      },
+      "interfaces": {
+        "i": 0,
+        "j": 1
+      },
+      "worlds": {
+        "base": 0,
+        "w": 1,
+        "w2": 2,
+        "off": 3
+      }
+    }
+  ]
+}

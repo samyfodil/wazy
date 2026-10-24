@@ -1,0 +1,30 @@
+{
+  "worlds": [
+    {
+      "name": "mixed-world",
+      "imports": {},
+      "exports": {},
+      "package": 0
+    }
+  ],
+  "interfaces": [
+    {
+      "name": "with-resources",
+      "types": {},
+      "functions": {},
+      "package": 0
+    }
+  ],
+  "types": [],
+  "packages": [
+    {
+      "name": "a:b",
+      "interfaces": {
+        "with-resources": 0
+      },
+      "worlds": {
+        "mixed-world": 0
+      }
+    }
+  ]
+}

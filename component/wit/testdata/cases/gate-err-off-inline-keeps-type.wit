@@ -1,0 +1,7 @@
+package a:b;
+world w {
+  @unstable(feature = active)
+  import x: interface {
+    type t = u32;
+  }
+}

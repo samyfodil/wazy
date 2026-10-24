@@ -1,0 +1,64 @@
+// Every kind of world item behind a gate, and an include that brings in
+// whatever of the included world its gates leave.
+package a:b@1.0.0;
+
+interface i { f: func(); }
+
+@unstable(feature = active)
+interface j { g: func(); }
+
+world base {
+  import base-f: func();
+  @unstable(feature = x)
+  import base-x: func();
+  @unstable(feature = active)
+  export base-a: func();
+}
+
+world w {
+  @unstable(feature = active)
+  import fa: func();
+  @unstable(feature = x)
+  import fx: func();
+  @since(version = 1.0.0)
+  import i;
+  @unstable(feature = active)
+  import j;
+  @unstable(feature = x)
+  export ex: interface { h: func(); }
+  @unstable(feature = active)
+  export ea: interface {
+    h: func();
+    @unstable(feature = x)
+    hx: func();
+  }
+  @unstable(feature = x)
+  include base;
+}
+
+world w2 {
+  include base;
+  @since(version = 0.9.0)
+  @deprecated(version = 1.0.0)
+  export d: func();
+  @deprecated(version = 1.0.0)
+  @unstable(feature = active)
+  export e: func();
+}
+
+@unstable(feature = x)
+world off {
+  import i;
+  import inline: interface { type t = u32; k: func(); }
+  @unstable(feature = x)
+  import gone: interface {
+    @unstable(feature = x)
+    type t = u32;
+    f: func();
+  }
+  @unstable(feature = x)
+  type t = u32;
+  @unstable(feature = x)
+  include base;
+  export f2: func();
+}

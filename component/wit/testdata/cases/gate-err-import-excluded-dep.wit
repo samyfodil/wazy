@@ -1,0 +1,8 @@
+package a:b;
+world w {
+  import c:d/i;
+}
+package c:d {
+  @unstable(feature = active)
+  interface i {}
+}

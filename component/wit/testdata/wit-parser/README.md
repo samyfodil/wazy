@@ -11,7 +11,9 @@ Bytecode Alliance's reference WIT resolver, at
 - `ui/parse-fail/*.wit` with `*.wit.result`: an input wit-parser rejects, and
   its error.
 
-`oracle_test.go` parses each input and compares the outcome with these.
+`oracle_test.go` parses each input and compares the outcome with these,
+and, under the other feature sets (none, and all), with what wit-parser
+makes of it there, kept in `../oracle/` (see `../gen-oracle.sh`).
 wit-parser's single-file tests write dependencies as nested
 `package x { ... }` blocks, which this package does not read; the test splits
 those into a `deps/` directory, the layout `ParseFS` reads.
@@ -31,7 +33,8 @@ Not copied, because this package does not do what they test:
   own; only those that bear on world items are copied, with their wording
   listed in `oracle_test.go`.
 
-To update, re-copy the same files from a newer commit and re-run the tests.
+To update, re-copy the same files from a newer commit, run
+`../gen-oracle.sh`, and re-run the tests.
 
 Licensed Apache-2.0 WITH LLVM-exception, or Apache-2.0, or MIT, per
 wasm-tools; see `LICENSE-Apache-2.0_WITH_LLVM-exception` and `LICENSE-MIT`.

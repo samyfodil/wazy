@@ -1,0 +1,15 @@
+// @since against a pre-release package version: a pre-release sorts before
+// its release, and build metadata breaks ties.
+package a:b@1.0.0-rc.2+build.5;
+
+@since(version = 1.0.0-rc.1)
+interface older {
+  @since(version = 1.0.0-alpha.beta)
+  f: func();
+  @since(version = 1.0.0-rc.2)
+  g: func();
+  @since(version = 1.0.0-rc.2+build.4)
+  h: func();
+  @since(version = 0.99.99)
+  i: func();
+}

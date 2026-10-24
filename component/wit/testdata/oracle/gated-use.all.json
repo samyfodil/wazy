@@ -1,0 +1,65 @@
+{
+  "worlds": [],
+  "interfaces": [
+    {
+      "name": "stable",
+      "types": {
+        "unstable-resource": 0
+      },
+      "functions": {},
+      "package": 0
+    },
+    {
+      "name": "types",
+      "types": {
+        "unstable-resource": 1
+      },
+      "functions": {},
+      "package": 1
+    }
+  ],
+  "types": [
+    {
+      "name": "unstable-resource",
+      "kind": "resource",
+      "owner": {
+        "interface": 0
+      },
+      "stability": {
+        "unstable": {
+          "feature": "inactive"
+        }
+      }
+    },
+    {
+      "name": "unstable-resource",
+      "kind": {
+        "type": 0
+      },
+      "owner": {
+        "interface": 1
+      },
+      "stability": {
+        "unstable": {
+          "feature": "inactive"
+        }
+      }
+    }
+  ],
+  "packages": [
+    {
+      "name": "wasi:dep2@0.2.3",
+      "interfaces": {
+        "stable": 0
+      },
+      "worlds": {}
+    },
+    {
+      "name": "wasmtime:test",
+      "interfaces": {
+        "types": 1
+      },
+      "worlds": {}
+    }
+  ]
+}
