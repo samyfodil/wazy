@@ -59,7 +59,7 @@ func TestGuestGuestAsyncLower_ImmediateFastPath(t *testing.T) {
 
 	aComp := decodeAsync(t, awaitImportImmediateAsyncWasm)
 	aCfg := newConfig(nil)
-	aCfg.sharedSched = bInst.sched // composition-tree invariant (Instance.sched's doc)
+	aCfg.nest = &nesting{sched: bInst.sched, hostResources: bInst.hostResources} // composition-tree invariant (Instance.sched's doc)
 	aCfg.imports[mkImportKey("get", "")] = &hostImport{
 		asyncTarget: &guestAsyncTarget{sub: bInst, be: bBE, exportName: "run-async"},
 		results:     []binary.TypeDesc{binary.PrimitiveDesc{Prim: "u32"}},
@@ -118,7 +118,7 @@ func TestGuestGuestAsyncLower_ParkThenCrossInstanceResume(t *testing.T) {
 
 	aComp := decodeAsync(t, awaitImportAsyncWasm)
 	aCfg := newConfig(nil)
-	aCfg.sharedSched = bInst.sched
+	aCfg.nest = &nesting{sched: bInst.sched, hostResources: bInst.hostResources}
 	aCfg.imports[mkImportKey("get", "")] = &hostImport{
 		asyncTarget: &guestAsyncTarget{sub: bInst, be: bBE, exportName: "run-async"},
 		results:     []binary.TypeDesc{binary.PrimitiveDesc{Prim: "u32"}},
@@ -152,7 +152,7 @@ func TestGuestGuestAsyncLower_ParkThenCrossInstanceResume(t *testing.T) {
 // OWN never-resolving import, so requestCancellation's STARTED branch
 // resumes it INLINE with TASK_CANCELLED; B's callback acks via `canon
 // task.cancel`; the ack flows back through startAsyncExportTask's onResolve
-// (mapResultsFromProvider is a no-op for a cancelled resolve) and
+// (fromProvider is skipped for a cancelled resolve) and
 // installSubtaskEvent, and subtask.cancel's own getPendingEvent delivery
 // returns CANCELLED_BEFORE_RETURNED to A -- all synchronously, no scheduler
 // drive needed (the sync form's `if !st.resolved()` block is skipped
@@ -313,7 +313,7 @@ func TestSchedPumpSnapshot_ResumesAllReadyParkedTasksOnce(t *testing.T) {
 
 	newYieldTask := func() *guestTask {
 		cfg := newConfig(nil)
-		cfg.sharedSched = sh
+		cfg.nest = &nesting{sched: sh}
 		inst, err := instantiateGraph(ctx, r, comp, yieldThenReturnAsyncWasm, cfg)
 		if err != nil {
 			t.Fatalf("instantiateGraph: %v", err)

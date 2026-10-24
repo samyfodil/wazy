@@ -92,47 +92,40 @@ func checkFileTypeIndex(idx uint32, what string) error {
 // top-level type-index fields decodeComponent fills. Nested valtypes are
 // covered at their single read site (readValTypeRef); these are the indices
 // read by their own leb128 calls, which resolveTypeDepth reaches directly.
+//
+// The description of where an index is costs an allocation, and this runs on
+// every decode, so it is made only for an index that is refused.
 func (c *Component) validateFileTypeIndices() error {
 	for i, im := range c.Imports {
 		// ExternType 0x03 names a type, 0x05 an instancetype -- both resolve
 		// through resolveTypeDepth.
-		if im.ExternType == 0x03 || im.ExternType == 0x05 {
-			if err := checkFileTypeIndex(im.ExternIndex, fmt.Sprintf("import %d (%q)", i, im.Name)); err != nil {
-				return err
-			}
+		if (im.ExternType == 0x03 || im.ExternType == 0x05) && im.ExternIndex >= extraTypeBase {
+			return checkFileTypeIndex(im.ExternIndex, fmt.Sprintf("import %d (%q)", i, im.Name))
 		}
-		if im.TypeEqBound {
-			if err := checkFileTypeIndex(im.TypeEqIndex, fmt.Sprintf("import %d (%q) eq bound", i, im.Name)); err != nil {
-				return err
-			}
+		if im.TypeEqBound && im.TypeEqIndex >= extraTypeBase {
+			return checkFileTypeIndex(im.TypeEqIndex, fmt.Sprintf("import %d (%q) eq bound", i, im.Name))
 		}
 	}
 	for i, ex := range c.Exports {
-		if ex.ExternType == 0x03 {
-			if err := checkFileTypeIndex(ex.ExternIndex, fmt.Sprintf("export %d (%q)", i, ex.Name)); err != nil {
-				return err
-			}
+		if ex.ExternType == 0x03 && ex.ExternIndex >= extraTypeBase {
+			return checkFileTypeIndex(ex.ExternIndex, fmt.Sprintf("export %d (%q)", i, ex.Name))
 		}
 	}
 	for i, al := range c.Aliases {
-		if al.Sort == 0x03 && al.TargetKind == 0x02 {
-			if err := checkFileTypeIndex(al.OuterIndex, fmt.Sprintf("alias %d (outer)", i)); err != nil {
-				return err
-			}
+		if al.Sort == 0x03 && al.TargetKind == 0x02 && al.OuterIndex >= extraTypeBase {
+			return checkFileTypeIndex(al.OuterIndex, fmt.Sprintf("alias %d (outer)", i))
 		}
 	}
 	for i, inst := range c.Instances {
 		for _, ie := range inst.Exports {
-			if ie.Sort == 0x03 {
-				if err := checkFileTypeIndex(ie.SortIdx, fmt.Sprintf("instance %d export %q", i, ie.Name)); err != nil {
-					return err
-				}
+			if ie.Sort == 0x03 && ie.SortIdx >= extraTypeBase {
+				return checkFileTypeIndex(ie.SortIdx, fmt.Sprintf("instance %d export %q", i, ie.Name))
 			}
 		}
 	}
 	for i, cn := range c.Canons {
-		if err := checkFileTypeIndex(cn.TypeIdx, fmt.Sprintf("canon %d", i)); err != nil {
-			return err
+		if cn.TypeIdx >= extraTypeBase {
+			return checkFileTypeIndex(cn.TypeIdx, fmt.Sprintf("canon %d", i))
 		}
 	}
 	return nil
@@ -379,6 +372,19 @@ func (c *Component) importedInstanceType(instIdx uint32, resolve func(uint32) (T
 	return InstanceDesc{}, false
 }
 
+// unresolvedAliasError is resolveAlias's refusal of an export alias it
+// cannot follow. Its message is made only when asked for: every decode meets
+// one for each alias of an abstract resource (precomputeImportedAliases), and
+// asks it nothing.
+type unresolvedAliasError struct {
+	idx, inst uint32
+	name      string
+}
+
+func (e *unresolvedAliasError) Error() string {
+	return fmt.Sprintf("type index %d: alias exports %q from instance %d, which this decoder cannot resolve structurally (an imported instance whose export type this decoder could not resolve -- e.g. an abstract resource, or a further alias -- or a locally-instantiated instance whose nested type declarations are not decoded)", e.idx, e.name, e.inst)
+}
+
 func (c *Component) resolveAlias(al AliasDef, idx uint32, depth int) (TypeDesc, error) {
 	switch al.TargetKind {
 	case 0x00: // export
@@ -449,7 +455,7 @@ func (c *Component) resolveAlias(al AliasDef, idx uint32, depth int) (TypeDesc, 
 				return resolved, nil
 			}
 		}
-		return nil, fmt.Errorf("type index %d: alias exports %q from instance %d, which this decoder cannot resolve structurally (an imported instance whose export type this decoder could not resolve -- e.g. an abstract resource, or a further alias -- or a locally-instantiated instance whose nested type declarations are not decoded)", idx, al.Name, al.InstanceIdx)
+		return nil, &unresolvedAliasError{idx: idx, inst: al.InstanceIdx, name: al.Name}
 
 	case 0x02: // outer
 		// The de Bruijn count is the number of enclosing components to skip:

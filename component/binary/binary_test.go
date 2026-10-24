@@ -75,3 +75,29 @@ func Example() {
 	// import wasi:filesystem/preopens@0.2.3
 	// export wasi:cli/run@0.2.3
 }
+
+// An instance type's declarations, in full: what the stdout interface
+// exports, func included, which InstanceDesc's own Exports does not record.
+func TestInstanceDescDecls(t *testing.T) {
+	c, err := binary.Decode(testfixtures.RealHello)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, im := range c.Imports {
+		if im.Name != "wasi:cli/stdout@0.2.3" {
+			continue
+		}
+		desc, err := c.ResolveType(im.ExternIndex)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decls := desc.(binary.InstanceDesc).Decls
+		for _, d := range decls {
+			if d.Kind == binary.TypeDeclExport && d.Name == "get-stdout" && d.Desc.Sort == 0x01 {
+				return
+			}
+		}
+		t.Fatalf("no func export get-stdout among %+v", decls)
+	}
+	t.Fatal("no wasi:cli/stdout@0.2.3 import")
+}

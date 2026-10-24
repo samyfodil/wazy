@@ -1,0 +1,5 @@
+package wazy:demo;
+
+let p = new wazy:provider { ... };
+let c = new wazy:consumer { greeter: p.greeter, ... };
+export c.run;

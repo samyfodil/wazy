@@ -70,6 +70,24 @@ type (
 	ResourceDesc  = binary.ResourceDesc
 )
 
+// The declarations of an instance or component type, its Decls field,
+// and what an import, an export's ascription, or a declaration says an item
+// is.
+type (
+	TypeDecl     = binary.TypeDecl
+	TypeDeclKind = binary.TypeDeclKind
+	ExternDesc   = binary.ExternDesc
+)
+
+// The declaration kinds, TypeDecl.Kind.
+const (
+	TypeDeclCoreType = binary.TypeDeclCoreType
+	TypeDeclType     = binary.TypeDeclType
+	TypeDeclAlias    = binary.TypeDeclAlias
+	TypeDeclImport   = binary.TypeDeclImport
+	TypeDeclExport   = binary.TypeDeclExport
+)
+
 // The index spaces: each entry says what produced the item at that index.
 type (
 	TypeSpaceEntry                  = binary.TypeSpaceEntry

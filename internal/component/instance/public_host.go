@@ -90,6 +90,8 @@ func (in *Instance) HostState(key any) any {
 
 // InstanceExports returns the names of the interfaces this component
 // instance exports, as they appear in the binary (version suffix included).
+// An interface nested in an exported instance is named by the path of export
+// names leading to it, joined by "#" ("outer#iface"), as CallExport takes it.
 //
 // A host implementation needs this to find an export whose exact versioned
 // name it cannot know in advance: a component exporting
@@ -110,8 +112,22 @@ func (in *Instance) InstanceExports() []string {
 // handle nested in a result). This covers the other direction: a host that
 // DRIVES an exported interface must mint the own<T>/borrow<T> handles it
 // passes in, and only has the Instance to work from -- which is exactly what
-// wasi:http's server side does to hand the guest an incoming-request.
+// wasi:http's server side does to hand the guest an incoming-request. A host
+// minting for one exported interface wants ResourcesFor, which also answers
+// for an interface this instance only re-exposes.
 func (in *Instance) Resources() *HandleTable { return in.resources }
+
+// ResourcesFor returns the handle table the handles passed to the exported
+// interface iface live in: this instance's own, or -- for an interface it
+// only re-exposes, one a component it instantiated defines -- the table of
+// that component, whose canonical ABI is the one that reads them. A host that
+// mints the handles it passes to CallExport mints them here.
+func (in *Instance) ResourcesFor(iface string) *HandleTable {
+	if r, ok := in.reexposedInstances[iface]; ok {
+		return r.owner.ResourcesFor(r.name)
+	}
+	return in.resources
+}
 
 // Harness builds a host implementation's registered funcs without
 // instantiating a component, so they can be called directly. It backs the

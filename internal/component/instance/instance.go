@@ -273,6 +273,12 @@ type Instance struct {
 	// never need a nil check.
 	resources *handleTable
 
+	// hostResources is the embedder's handle table: the composition root's
+	// (see nesting.hostResources). It is resources itself on the root, and
+	// differs only on a nested component, whose host imports then move the
+	// handles nested in their args and results across (hostHandleTransfer).
+	hostResources *handleTable
+
 	// coreModuleCount is the number of EMBEDDED core modules (binary.Component
 	// CoreModules, instantiated via a Kind == 0x00 "instantiate" core
 	// instance) this Instance wired up -- set only by the general graph
@@ -308,7 +314,7 @@ type Instance struct {
 	// that A's WAIT drive can resume B's parked task, so every Instance in
 	// one composition TREE shares the same *sched, created by the root
 	// instantiation and inherited by instantiateNestedInstances via
-	// subCfg.sharedSched. A flat (non-composed) instance is its own tree
+	// nesting.sched. A flat (non-composed) instance is its own tree
 	// root and behaves exactly as before this change (its own private
 	// scheduler, just heap-allocated instead of inline).
 	sched *sched
@@ -1279,6 +1285,13 @@ func Instantiate(ctx context.Context, r wazy.Runtime, componentBytes []byte, opt
 	if err := validateAsyncCanonOptsAgreeWithTypes(comp); err != nil {
 		return nil, err
 	}
+	// The other one: every instantiation's arguments against what the
+	// instantiated component imports -- likewise before any import is looked
+	// at. This is also where a component supplied for a component import is
+	// checked against the import's type and handed to the graph engine.
+	if err := typeCheck(comp, cfg); err != nil {
+		return nil, err
+	}
 
 	if needsGraphPath(comp) || needsImportPath(comp) {
 		// The graph engine handles every host-import shape the old
@@ -1414,12 +1427,21 @@ func instantiateComponent(ctx context.Context, r wazy.Runtime, comp *binary.Comp
 
 	core, err := r.InstantiateWithConfig(ctx, coreBytes, wazy.NewModuleConfig())
 	if err != nil {
-		return nil, fmt.Errorf("component/instance: instantiate embedded core module: %w", err)
+		return nil, fmt.Errorf("component/instance: instantiate embedded core module: %w", coreLinkError(comp, 0, err))
 	}
 
 	coreFuncIdx, err := buildCoreFuncIndexSpace(comp)
 	if err != nil {
 		core.Close(ctx) //nolint:errcheck // best-effort cleanup; the wiring error below is what matters
+		return nil, err
+	}
+	if err := checkResourceDtors(comp, func(idx uint32) api.Function {
+		if int(idx) >= len(coreFuncIdx) {
+			return nil
+		}
+		return core.ExportedFunction(coreFuncIdx[idx])
+	}); err != nil {
+		core.Close(ctx) //nolint:errcheck
 		return nil, err
 	}
 	if err := validateCanons(comp, coreFuncIdx); err != nil {
@@ -1663,6 +1685,11 @@ func (in *Instance) Call(ctx context.Context, exportName string, args ...abi.Val
 // This is sugar for Call(ctx, instanceName+"#"+memberName, args...); both
 // spellings work, since instance members are bound into the same exports
 // map as plain func exports.
+//
+// An interface nested inside an exported instance -- an instance exported
+// whole whose component exports interfaces of its own -- is named by the
+// path of export names leading to it, joined by "#":
+// CallExport(ctx, "outer#wasi:http/incoming-handler@0.2.0", "handle", ...).
 func (in *Instance) CallExport(ctx context.Context, instanceName, memberName string, args ...abi.Value) ([]abi.Value, error) {
 	// Fast path: two map reads against instanceExports, no string
 	// concatenation -- instanceExportKey's "instance#member" join is a fresh
@@ -1716,7 +1743,9 @@ type instanceExportEntry struct {
 func buildInstanceExportIndex(exports map[string]*boundExport) map[string]map[string]instanceExportEntry {
 	var out map[string]map[string]instanceExportEntry
 	for key, be := range exports {
-		i := strings.IndexByte(key, '#')
+		// The LAST "#": an interface nested in an exported instance is filed
+		// as "E#iface#member" (reexposeWholeInstance), and "E#iface" names it.
+		i := strings.LastIndexByte(key, '#')
 		if i < 0 {
 			continue
 		}
@@ -2154,7 +2183,16 @@ func (in *Instance) validateLiftedStreamFutureResult(rt binary.TypeDesc, val abi
 // guest-defined resource); if no such export exists the handle is still
 // removed. Host-owned resources (WASI/http) are not dropped this way -- the
 // host owns their lifecycle directly.
+//
+// An interface this component only re-exposes -- one a component it
+// instantiated defines, re-exported through an alias or with that instance
+// whole -- had its handles minted by that component, in its own table, so
+// the drop is the defining component's to make, under its own name for the
+// interface.
 func (in *Instance) DropResource(ctx context.Context, iface, resourceName string, handle uint32) error {
+	if r, ok := in.reexposedInstances[iface]; ok {
+		return r.owner.DropResource(ctx, r.name, resourceName, handle)
+	}
 	rep, err := in.resources.DropOwned(handle)
 	if err != nil {
 		return fmt.Errorf("component/instance: DropResource %s/%s handle %d: %w", iface, resourceName, handle, err)

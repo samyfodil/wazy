@@ -78,6 +78,12 @@ type Component struct {
 	// coremodulespace.go.
 	CoreModuleSpace []CoreModuleSpaceEntry
 
+	// CoreTypes are the core type section's definitions, in order, and
+	// CoreTypeSpace the core type index space they and the core type
+	// aliases make -- see coretype.go.
+	CoreTypes     []CoreTypeDef
+	CoreTypeSpace []CoreTypeSpaceEntry
+
 	// CoreInstances instantiate core modules with arguments (section 2).
 	CoreInstances []CoreInstance
 
@@ -212,7 +218,10 @@ type Import struct {
 	// ExternType distinguishes the import kind (e.g., component, instance, func, value, type, module).
 	ExternType byte
 
-	// ExternIndex is the index into the appropriate namespace (e.g., component index, function index).
+	// ExternIndex is the item's declared type index: the functype of a func
+	// (0x01), the instancetype of an instance (0x05), the componenttype of a
+	// component (0x04), the core module type of a core module (0x00, a CORE
+	// type index). Unused for a type import (0x03), whose bound is below.
 	ExternIndex uint32
 
 	// TypeEqIndex, valid when ExternType == 0x03 (type) and TypeEqBound is
@@ -235,6 +244,13 @@ type Export struct {
 
 	// ExternIndex is the index into the appropriate namespace.
 	ExternIndex uint32
+
+	// Ascribed is the export's optional type ascription -- `(export "f"
+	// (func $f) (func (type $t)))` -- or nil when it carries none. What a
+	// component exports has the ascribed type, which the exported item's own
+	// type must be a subtype of. wit-component ascribes every export of the
+	// shim components it emits.
+	Ascribed *ExternDesc
 }
 
 // CoreModule represents an embedded core wasm module (section 1).
@@ -284,8 +300,12 @@ type InlineExport struct {
 type Instance struct {
 	Kind         byte   // 0x00 = instantiate, 0x01 = inline exports
 	ComponentIdx uint32 // used if Kind == 0x00
-	Args         []InstantiateArg
-	Exports      []InlineExport
+	// CoreInstancesBefore is how many core instances the binary defines
+	// before this one. Definitions are instantiated in the order they
+	// appear, so those are instantiated first.
+	CoreInstancesBefore uint32
+	Args                []InstantiateArg
+	Exports             []InlineExport
 }
 
 // CanonOpt represents a canonical option.

@@ -425,7 +425,13 @@ component_wast_suites := \
 	internal/component/binary/testdata/wast/component-model-max-value-size=$(component_model_raw)/validation/max-value-size.wast \
 	internal/component/binary/testdata/wast/wasm-tools-max-value-size=$(wasm_tools_raw)/max-value-size.wast \
 	internal/component/instance/testdata/wast/fixed_length_lists=$(wasmtime_raw)/fixed_length_lists.wast \
-	internal/component/instance/testdata/wast/wasm-tools-fixed-length-lists=$(wasm_tools_raw)/fixed-length-lists.wast
+	internal/component/instance/testdata/wast/wasm-tools-fixed-length-lists=$(wasm_tools_raw)/fixed-length-lists.wast \
+	internal/component/instance/testdata/wast/cm-validation-instantiation=$(component_model_raw)/validation/instantiation.wast \
+	internal/component/instance/testdata/wast/cm-validation-resources=$(component_model_raw)/validation/resources.wast \
+	internal/component/instance/testdata/wast/wasm-tools-instantiate=$(wasm_tools_raw)/instantiate.wast \
+	internal/component/instance/testdata/wast/wasm-tools-virtualize=$(wasm_tools_raw)/virtualize.wast \
+	internal/component/instance/testdata/wast/wasmtime-nested=$(wasmtime_raw)/nested.wast \
+	internal/component/instance/testdata/wast/wasmtime-restrictions=$(wasmtime_raw)/restrictions.wast
 wit_parser_ui_dir := component/wit/testdata/wit-parser/ui
 
 .PHONY: build.component_testdata

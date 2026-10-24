@@ -640,6 +640,7 @@ func TestReadExterndescSorts(t *testing.T) {
 		{"instance (0x05)", []byte{0x05, 0x00}, false},
 		{"type bound eq (0x03 0x00)", []byte{0x03, 0x00, 0x00}, false},
 		{"type bound sub (0x03 0x01)", []byte{0x03, 0x01}, false},
+		{"type bound invalid (0x03 0x02)", []byte{0x03, 0x02}, true},
 		{"type bound truncated", []byte{0x03}, true},
 		{"type bound eq truncated index", []byte{0x03, 0x00}, true},
 		{"unsupported sort (value, 0x02)", []byte{0x02}, true},
@@ -649,154 +650,43 @@ func TestReadExterndescSorts(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, _, _, err := readExterndesc(tt.buf, 0)
+			_, _, err := readExternDesc(tt.buf, 0)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("readExterndesc(%v) err=%v, wantErr=%v", tt.buf, err, tt.wantErr)
+				t.Errorf("readExternDesc(%v) err=%v, wantErr=%v", tt.buf, err, tt.wantErr)
 			}
 		})
 	}
 }
 
-// TestReadExterndesc_InstanceSortCapturesTypeidx pins the behavior
-// decodeImportSection's `sort == 0x05 && hasEq` branch depends on: an
-// instance-sort (0x05) externdesc must report hasIdx=true with the
-// instance's own declared instancetype index, unlike a component-sort (0x04)
-// externdesc (whose typeidx no caller needs yet, so it stays hasIdx=false).
-// Before this, an instance import's declared type was silently dropped,
-// which is what made resolveAlias unable to follow a `use iface.{T}` alias
-// into an imported instance's own type declarations at all (see
-// typespace_test.go's FromImportedInstance_Resolved tests).
-func TestReadExterndesc_InstanceSortCapturesTypeidx(t *testing.T) {
-	sort, idx, hasIdx, off, err := readExterndesc([]byte{0x05, 0x07}, 0)
-	if err != nil {
-		t.Fatalf("readExterndesc: %v", err)
-	}
-	if sort != 0x05 {
-		t.Errorf("sort = %#x, want 0x05", sort)
-	}
-	if !hasIdx || idx != 7 {
-		t.Errorf("hasIdx=%v idx=%d, want hasIdx=true idx=7", hasIdx, idx)
-	}
-	if off != 2 {
-		t.Errorf("off = %d, want 2", off)
-	}
-
-	_, _, hasIdx, _, err = readExterndesc([]byte{0x04, 0x07}, 0)
-	if err != nil {
-		t.Fatalf("readExterndesc (component sort): %v", err)
-	}
-	if hasIdx {
-		t.Error("component-sort (0x04) externdesc: hasIdx = true, want false")
-	}
-}
-
-func TestReadSort(t *testing.T) {
-	tests := []struct {
-		name    string
-		buf     []byte
-		wantOff int
-		wantErr bool
+// TestReadExternDesc_CapturesTypeidx pins what decodeImportSection and the
+// component-type checker (internal/component/instance) depend on: every sort
+// but type reports its declared type index, and a type bound reports whether
+// it is `eq` (with the index) or `sub resource` (without one). Before an
+// instance import kept its index, resolveAlias could not follow a `use
+// iface.{T}` alias into the imported instance's own declarations at all (see
+// typespace_test.go's FromImportedInstance_Resolved tests); before a
+// component import kept its index, its declared component type was lost.
+func TestReadExternDesc_CapturesTypeidx(t *testing.T) {
+	for _, tc := range []struct {
+		buf  []byte
+		want ExternDesc
+		off  int
 	}{
-		{"core sort", []byte{0x00, 0x01}, 2, false},
-		{"core sort truncated", []byte{0x00}, 0, true},
-		{"non-core sort", []byte{0x01}, 1, false},
-		{"empty", nil, 0, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			off, err := readSort(tt.buf, 0)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("err=%v, wantErr=%v", err, tt.wantErr)
-			}
-			if err == nil && off != tt.wantOff {
-				t.Errorf("off=%d, want %d", off, tt.wantOff)
-			}
-		})
-	}
-}
-
-func TestReadAlias(t *testing.T) {
-	t.Run("core export target", func(t *testing.T) {
-		// sort=core(0x00)+discriminator(0x01=func), target=0x00 (export),
-		// instance idx=0x00, name len=1 "x".
-		buf := []byte{0x00, 0x01, 0x00, 0x00, 0x01, 'x'}
-		off, err := readAlias(buf, 0)
+		{[]byte{0x05, 0x07}, ExternDesc{Sort: 0x05, Index: 7}, 2},
+		{[]byte{0x04, 0x07}, ExternDesc{Sort: 0x04, Index: 7}, 2},
+		{[]byte{0x01, 0x03}, ExternDesc{Sort: 0x01, Index: 3}, 2},
+		{[]byte{0x00, 0x11, 0x02}, ExternDesc{Sort: 0x00, Index: 2}, 3},
+		{[]byte{0x03, 0x00, 0x09}, ExternDesc{Sort: 0x03, Index: 9, Eq: true}, 3},
+		{[]byte{0x03, 0x01}, ExternDesc{Sort: 0x03}, 2},
+	} {
+		got, off, err := readExternDesc(tc.buf, 0)
 		if err != nil {
-			t.Fatalf("readAlias: %v", err)
+			t.Fatalf("readExternDesc(%x): %v", tc.buf, err)
 		}
-		if off != len(buf) {
-			t.Errorf("off=%d, want %d", off, len(buf))
+		if got != tc.want || off != tc.off {
+			t.Errorf("readExternDesc(%x) = %+v at %d, want %+v at %d", tc.buf, got, off, tc.want, tc.off)
 		}
-	})
-
-	t.Run("outer target", func(t *testing.T) {
-		// sort=type(0x03)+bound eq(0x00)+typeidx(0x00), target=0x02
-		// (outer), outer-count=0x01, index=0x00.
-		buf := []byte{0x03, 0x00, 0x00, 0x02, 0x01, 0x00}
-		off, err := readAlias(buf, 0)
-		if err != nil {
-			t.Fatalf("readAlias: %v", err)
-		}
-		if off != len(buf) {
-			t.Errorf("off=%d, want %d", off, len(buf))
-		}
-	})
-
-	t.Run("invalid target kind", func(t *testing.T) {
-		buf := []byte{0x01, 0xff}
-		_, err := readAlias(buf, 0)
-		if err == nil || !strings.Contains(err.Error(), "invalid target kind") {
-			t.Errorf("got err=%v, want invalid target kind error", err)
-		}
-	})
-
-	t.Run("truncated before target", func(t *testing.T) {
-		buf := []byte{0x01}
-		_, err := readAlias(buf, 0)
-		if !errors.Is(err, ErrTruncatedBinary) {
-			t.Errorf("got err=%v, want ErrTruncatedBinary", err)
-		}
-	})
-
-	t.Run("export target truncated instance idx", func(t *testing.T) {
-		buf := []byte{0x01, 0x00}
-		_, err := readAlias(buf, 0)
-		if err == nil {
-			t.Fatal("expected error")
-		}
-	})
-
-	t.Run("export target truncated name", func(t *testing.T) {
-		buf := []byte{0x01, 0x00, 0x00}
-		_, err := readAlias(buf, 0)
-		if err == nil {
-			t.Fatal("expected error")
-		}
-	})
-
-	t.Run("outer target truncated", func(t *testing.T) {
-		buf := []byte{0x01, 0x02}
-		_, err := readAlias(buf, 0)
-		if err == nil {
-			t.Fatal("expected error")
-		}
-	})
-
-	t.Run("outer target truncated second index", func(t *testing.T) {
-		buf := []byte{0x01, 0x02, 0x00}
-		_, err := readAlias(buf, 0)
-		if err == nil {
-			t.Fatal("expected error")
-		}
-	})
-
-	t.Run("bad sort propagates", func(t *testing.T) {
-		buf := []byte{}
-		_, err := readAlias(buf, 0)
-		if !errors.Is(err, ErrTruncatedBinary) {
-			t.Errorf("got err=%v, want ErrTruncatedBinary", err)
-		}
-	})
+	}
 }
 
 func TestReadComponentDecl(t *testing.T) {
@@ -1119,49 +1009,6 @@ func TestReadInstanceDeclDesc(t *testing.T) {
 	t.Run("core type: truncated", func(t *testing.T) {
 		if _, err := readInstanceDeclDesc([]byte{0x00}, 0); err == nil {
 			t.Error("expected an error for a truncated core:type")
-		}
-	})
-
-	t.Run("core type: func type with params/results", func(t *testing.T) {
-		// 0x60 functype, 1 param i32 (0x7f), 1 result i32.
-		buf := []byte{0x60, 0x01, 0x7f, 0x01, 0x7f}
-		off, err := readCoretypeDef(buf, 0)
-		if err != nil {
-			t.Fatalf("readCoretypeDef: %v", err)
-		}
-		if off != len(buf) {
-			t.Errorf("off=%d, want %d", off, len(buf))
-		}
-	})
-
-	t.Run("core type: module type with import/type/alias/export decls", func(t *testing.T) {
-		buf := []byte{
-			0x50, 0x04, // module type, 4 decls
-			0x00, 0x00, 0x00, 0x00, 0x00, // import: nm "" nm "" importdesc(func 0)
-			0x01, 0x60, 0x00, 0x00, // type: empty func type
-			0x02, 0x00, 0x01, 0x00, 0x00, // alias: sort 0x00, outer(0x01) ct 0 idx 0
-			0x03, 0x00, 0x00, 0x00, // export: nm "" importdesc(func 0)
-		}
-		off, err := readCoretypeDef(buf, 0)
-		if err != nil {
-			t.Fatalf("readCoretypeDef: %v", err)
-		}
-		if off != len(buf) {
-			t.Errorf("off=%d, want %d", off, len(buf))
-		}
-	})
-
-	t.Run("core type: invalid tags", func(t *testing.T) {
-		if _, err := readCoretypeDef([]byte{0x7f}, 0); err == nil {
-			t.Error("expected an error for an invalid core:type tag")
-		}
-		// module type with an invalid moduledecl tag.
-		if _, err := readCoretypeDef([]byte{0x50, 0x01, 0x7f}, 0); err == nil {
-			t.Error("expected an error for an invalid coremoduledecl tag")
-		}
-		// import with an unsupported (non-func) importdesc sort.
-		if _, err := readCoretypeDef([]byte{0x50, 0x01, 0x00, 0x00, 0x00, 0x02}, 0); err == nil {
-			t.Error("expected an error for an unsupported core:importdesc sort")
 		}
 	})
 

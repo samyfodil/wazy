@@ -121,24 +121,6 @@ func TestValueSizes_Declarations(t *testing.T) {
 	}
 }
 
-func TestPeekOuterAlias(t *testing.T) {
-	for _, tc := range []struct {
-		buf  []byte
-		want OuterAlias
-		ok   bool
-	}{
-		{[]byte{0x02, 0x01, 0x07}, OuterAlias{1, 7}, true},
-		{[]byte{0x00, 0x01, 0x07}, OuterAlias{}, false}, // an export alias
-		{nil, OuterAlias{}, false},
-		{[]byte{0x02, 0x80}, OuterAlias{}, false},       // a bad count
-		{[]byte{0x02, 0x01, 0x80}, OuterAlias{}, false}, // a bad index
-	} {
-		if got, ok := peekOuterAlias(tc.buf, 0); got != tc.want || ok != tc.ok {
-			t.Errorf("%x: %+v %v", tc.buf, got, ok)
-		}
-	}
-}
-
 // A component type's type import adds a slot to its type index space, as an
 // instance type's type export does.
 func TestReadComponenttypeDesc_TypeImport(t *testing.T) {

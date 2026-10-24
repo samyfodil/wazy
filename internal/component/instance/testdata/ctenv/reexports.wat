@@ -1,0 +1,1 @@
+(component (import "c" (component $c (export "f" (func)))) (instance $i (instantiate $c)) (alias export $i "f" (func $f)) (export "f" (func $f)) (export "g" (func 1)) (export "i" (instance $i)) (export "j" (instance 1)) (component $d) (export "d" (component $d)) (export "e" (component 2)))

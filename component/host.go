@@ -13,7 +13,10 @@ import (
 // HandleTable is one instance's resource handle table. Obtain it with
 // WithResourcesHook; use it to mint own<T>/borrow<T> handles that sit nested
 // inside a composite result, which the engine's automatic top-level handle
-// translation does not reach.
+// translation does not reach. A host driving an exported interface mints the
+// handles it passes in with Instance.ResourcesFor, which names the table of
+// the component that defines the interface -- a composition's inner one, when
+// the instance only re-exposes it.
 type HandleTable = instance.HandleTable
 
 // WithImportCustom registers fn as the host implementation of iface/name

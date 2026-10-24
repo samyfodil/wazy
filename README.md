@@ -108,6 +108,7 @@ Components stay components: genuine `wasm32-wasip2` binaries from rustc and wasm
 - **The Canonical ABI** — the value conversions, both directions, for every type (primitives, `string`, `list`, `record`, `variant`, `enum`, `flags`, `option`, `result`, `tuple`) and `own`/`borrow` resource handles, including drop/rep and cross-instance borrows.
 - **WASI 0.2 host interfaces** — `wasi:cli`, `wasi:clocks`, `wasi:filesystem`, `wasi:io`, `wasi:random`, `wasi:sockets`, `wasi:http`; capabilities opt in per instantiation (filesystem preopens, `AllowTCP`, `AllowUDP`, a custom `Dialer`, `EnableHTTP`).
 - **Multi-module component graphs** — nested instances, canonical lowering of host imports, resource lifetimes and the wasip2 adapter wiring, so a real rustc `wasi:cli/command` runs end to end and prints `hello world`; with a `CompileCache`, re-instantiating that whole graph costs 350.5 µs.
+- **Component imports** — a component that imports a component (what `wac compose --import-dependencies` emits) runs given `component.WithComponentImport`, after the supplied component is checked against the import's declared type by the Component Model's subtyping rules. Every instantiation's arguments are checked against the instantiated component's imports the same way.
 
 ```go
 inst, err := component.Instantiate(ctx, r, helloWasm,
@@ -190,6 +191,7 @@ Correctness here is a pass count against somebody else's suite, not a claim.
 | Core spec tests | [WebAssembly/testsuite][testsuite] + the proposal repos | 13 corpora, **711 generated case files, no skip list**; the 3.0 corpus runs on **both** engines. |
 | Component Model async | the official async `.wast` suites | **31 suites, 0 skipped, 0 failed.** |
 | Canonical ABI values | the official `test/values` suites | **7 suites, 0 skipped, 0 failed**, through `wasm-tools json-from-wast` — every vendored module instantiates. |
+| Component type checking | the official `test/validation` instantiation and resources suites, wasm-tools' `instantiate` and `virtualize`, wasmtime's `restrictions` and `nested` | **274 commands**; every component-level and core-level check (core module types, core instantiation, core aliases, destructors) answered as the suite says, in wasm-tools' words. The 3 answered differently are deliberate differences from wasmtime's restrictions -- wazy runs a root-level component import given a component for it, and accepts a root component export, as wasm-tools' validator does -- each listed with its reason in `wastValidationGaps`, reconciled in both directions. |
 | wasi-testsuite | [WebAssembly/wasi-testsuite][wasitest] | AssemblyScript, C and Rust, **no skipped tests**, on Linux, macOS **and** Windows, through the `wazy` CLI. |
 | Cross-proposal interaction | wasmtime's `tests/misc_testsuite` | 9 `.wast` vendored from wasmtime, beside 5 written here. |
 

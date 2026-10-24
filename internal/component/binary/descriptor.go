@@ -259,13 +259,18 @@ type InstanceDesc struct {
 	// own body (instancedecl tag 0x01), plus one nil placeholder per other
 	// type-sort-index-producing instancedecl (a type-sort alias, or a
 	// `sub`-bound export) this decoder cannot resolve structurally, in
-	// declaration order -- see readInstanceDeclDescInto.
+	// declaration order -- see typeBody.read.
 	Types []TypeDesc
 
 	// Outer maps each nil slot of Types that aliases a type of an enclosing
 	// type index space ("alias outer"), or is exported as one ("eq" of such
 	// a slot), to what it aliases.
 	Outer map[uint32]OuterAlias
+
+	// Decls are its declarations, every one, in order: what a type check
+	// computes the instance type from. Exports and Types are what the ABI
+	// needs of them, kept apart so it does not walk them.
+	Decls []TypeDecl
 }
 
 // OuterAlias is "alias outer Count Index": type Index of the type index
@@ -278,13 +283,16 @@ type OuterAlias struct {
 func (InstanceDesc) isTypeDesc()  {}
 func (InstanceDesc) Kind() string { return "instance" }
 
-// ComponentDesc represents a component type (collection of declarations).
-// Only its type index space is kept: what its imports and exports are is not.
+// ComponentDesc represents a component type: what a component import, or a
+// component export's type ascription, declares the component to be.
 type ComponentDesc struct {
 	// Types and Outer are its own type index space, as InstanceDesc's are:
 	// a type-sort import adds a slot as a type-sort export does there.
 	Types []TypeDesc
 	Outer map[uint32]OuterAlias
+
+	// Decls are its declarations, in order; see InstanceDesc.Decls.
+	Decls []TypeDecl
 }
 
 func (ComponentDesc) isTypeDesc()  {}
@@ -685,119 +693,6 @@ func coreValtypeName(b byte) (string, error) {
 	}
 }
 
-// readInstanceDeclDesc consumes one instancedecl without retaining its
-// structure. Used only where no caller needs the enclosing instancetype's own
-// nested type-sort index space (a componenttype body -- see
-// readComponentDecl); readInstancetypeDesc uses readInstanceDeclDescInto
-// directly instead, since it does need that space to build InstanceDesc's
-// Exports.
-func readInstanceDeclDesc(buf []byte, off int) (int, error) {
-	var localTypes []TypeDesc
-	return readInstanceDeclDescInto(buf, off, &localTypes, nil, nil)
-}
-
-// readInstanceDeclDescInto consumes one instancedecl, contributing to
-// *localTypes -- the enclosing instancetype's own nested type-sort index
-// space, opened fresh by the instancetype the same way a nested component
-// opens its own (see Component.Outer) -- and, for a named type export, to
-// exports (may be nil when the caller, like readInstanceDeclDesc, has no use
-// for it). A TypeRef placed in exports whose TypeIndex is set names an index
-// into *localTypes, NOT into any enclosing component's TypeSpace -- see
-// InstanceDesc's doc.
-//
-// Per the component binary format, a "type" (tag 0x01), a type-sort "alias"
-// (tag 0x02, sort byte 0x03), and a type-sort "export" (tag 0x04, externdesc
-// sort 0x03) each introduce a new entry in *localTypes, in declaration order
-// -- exactly mirroring how Component.TypeSpace is built for the enclosing
-// component (see typespace.go's doc), just scoped to this one instancetype
-// body. Tracking every contributor, not just "type" decls, matters even
-// though only "type" decls produce a resolvable TypeDesc here: skipping the
-// others would misindex any later decl that references one of their slots by
-// number, silently returning the wrong local type instead of failing loud.
-//
-// outer, when not nil, collects the local slots that alias an enclosing
-// type (see InstanceDesc.Outer).
-func readInstanceDeclDescInto(buf []byte, off int, localTypes *[]TypeDesc, exports *map[string]TypeRef, outer *map[uint32]OuterAlias) (int, error) {
-	if off >= len(buf) {
-		return off, ErrTruncatedBinary
-	}
-	tag := buf[off]
-	off++
-	switch tag {
-	case 0x01: // type: a deftype -- a new local type-sort index
-		d, off2, err := readDeftypeDesc(buf, off)
-		if err != nil {
-			return off2, err
-		}
-		*localTypes = append(*localTypes, d)
-		return off2, nil
-
-	case 0x04: // export decl: externname externdesc
-		name, off2, err := readExternName(buf, off)
-		if err != nil {
-			return off2, err
-		}
-		sort, idx, hasIdx, off3, err := readExterndesc(buf, off2)
-		if err != nil {
-			return off3, err
-		}
-		if sort == 0x03 { // type-sort export: a new local type-sort index
-			// hasIdx is false for a `sub`-bound (abstract resource) export,
-			// which this decoder cannot resolve structurally -- its slot is
-			// reserved as nil so a later decl referencing it by number fails
-			// loud rather than misindexing, but it contributes nothing to
-			// exports.
-			//
-			// An `eq N`-bound export, though, IS resolvable: it is local type
-			// N. Its own new index must resolve to the same descriptor, or a
-			// later decl naming the EXPORT (rather than N) meets the nil and
-			// fails as "not resolved structurally" -- which is the very
-			// failure this whole path exists to avoid.
-			addLocalType(localTypes, outer, idx, hasIdx)
-			if hasIdx && exports != nil { // `eq N`-bound: an alias of local type N
-				if *exports == nil {
-					// Built on first type-sort export rather than up front:
-					// most instancetypes export only functions, and an always
-					// allocated map is one of the few per-import costs of
-					// retaining these declarations at all.
-					*exports = make(map[string]TypeRef, 4)
-				}
-				idx := idx
-				(*exports)[name] = TypeRef{TypeIndex: &idx}
-			}
-		}
-		return off3, nil
-
-	case 0x02: // alias -- a new local type-sort index, but only when its sort
-		// is type (0x03); readAlias itself discards the sort byte (its other
-		// caller, the top-level alias section, reads it separately -- see
-		// decodeAliasSection), so peek it here first. This decoder cannot
-		// follow an alias target structurally from inside an instancetype
-		// body (see resolveAlias), so the slot is recorded unresolved.
-		if off < len(buf) && buf[off] == 0x03 {
-			if o, ok := peekOuterAlias(buf, off+1); ok && outer != nil {
-				if *outer == nil {
-					*outer = map[uint32]OuterAlias{}
-				}
-				(*outer)[uint32(len(*localTypes))] = o
-			}
-			*localTypes = append(*localTypes, nil)
-		}
-		return readAlias(buf, off)
-
-	case 0x00: // core:type -- a core func/module type defined inline in the
-		// instance or component type. This is the CORE type-sort index space,
-		// disjoint from the component type-sort space *localTypes tracks, so
-		// it never contributes here. It carries no runtime obligation either
-		// way (these type-only validation shapes are opaque tags -- see the
-		// package doc); consume its bytes to stay synchronized.
-		return readCoretypeDef(buf, off)
-
-	default:
-		return off, fmt.Errorf("instancedecl: invalid tag %#x", tag)
-	}
-}
-
 // addLocalType adds the local type a type-sort export or import declares:
 // for an `eq N` bound, local type N again -- nil if N is, and aliasing what
 // N aliases -- and for a `sub` bound, an abstract resource, nil.
@@ -814,199 +709,15 @@ func addLocalType(localTypes *[]TypeDesc, outer *map[uint32]OuterAlias, idx uint
 	*localTypes = append(*localTypes, t)
 }
 
-// peekOuterAlias reads an alias target at off, without consuming it: the
-// count and index of an outer alias (0x02), or ok false for any other.
-func peekOuterAlias(buf []byte, off int) (OuterAlias, bool) {
-	if off >= len(buf) || buf[off] != 0x02 {
-		return OuterAlias{}, false
-	}
-	count, n, err := leb128.LoadUint32(buf[off+1:])
-	if err != nil {
-		return OuterAlias{}, false
-	}
-	index, _, err := leb128.LoadUint32(buf[off+1+int(n):])
-	if err != nil {
-		return OuterAlias{}, false
-	}
-	return OuterAlias{count, index}, true
-}
-
-// readCoretypeDef consumes one core:type definition -- a core func type (0x60)
-// or a core module type (0x50) -- to keep the decoder synchronized when one
-// appears inside an instance/component type. It parses the grammar rather than
-// guessing a length, so a non-empty module type (imports/exports/nested types/
-// aliases) is consumed correctly too.
-func readCoretypeDef(buf []byte, off int) (int, error) {
-	if off >= len(buf) {
-		return off, ErrTruncatedBinary
-	}
-	tag := buf[off]
-	off++
-	switch tag {
-	case 0x60: // core:functype = vec(valtype) params, vec(valtype) results
-		var err error
-		if off, err = readCoreValtypeVec(buf, off); err != nil {
-			return off, err
-		}
-		return readCoreValtypeVec(buf, off)
-	case 0x50: // core:moduletype = vec(core:moduledecl)
-		count, n, err := leb128.LoadUint32(buf[off:])
-		if err != nil {
-			return off, err
-		}
-		off += int(n)
-		for i := uint32(0); i < count; i++ {
-			if off, err = readCoreModuleDecl(buf, off); err != nil {
-				return off, fmt.Errorf("coremoduledecl[%d]: %w", i, err)
-			}
-		}
-		return off, nil
-	default:
-		return off, fmt.Errorf("core:type: invalid tag %#x", tag)
-	}
-}
-
-// readCoreValtypeVec consumes vec(core:valtype); each core valtype is a single
-// byte (0x7f i32 … 0x7b v128, plus reference-type bytes), so the whole vector
-// is count single bytes.
-func readCoreValtypeVec(buf []byte, off int) (int, error) {
-	count, n, err := leb128.LoadUint32(buf[off:])
-	if err != nil {
-		return off, err
-	}
-	off += int(n)
-	if off+int(count) > len(buf) {
-		return off, ErrTruncatedBinary
-	}
-	return off + int(count), nil
-}
-
-// readCoreModuleDecl consumes one core:moduledecl inside a core module type:
-// an import (0x00), a nested core type (0x01), a core alias (0x02), or an
-// export (0x03).
-func readCoreModuleDecl(buf []byte, off int) (int, error) {
-	if off >= len(buf) {
-		return off, ErrTruncatedBinary
-	}
-	tag := buf[off]
-	off++
-	switch tag {
-	case 0x00: // import: nm nm core:importdesc
-		var err error
-		if off, err = skipName(buf, off); err != nil {
-			return off, err
-		}
-		if off, err = skipName(buf, off); err != nil {
-			return off, err
-		}
-		return readCoreImportdesc(buf, off)
-	case 0x01: // type: core:type (recursive)
-		return readCoretypeDef(buf, off)
-	case 0x02: // alias: core:alias -- sort byte + target; consumed conservatively
-		return readCoreModuleAlias(buf, off)
-	case 0x03: // export: nm core:importdesc
-		var err error
-		if off, err = skipName(buf, off); err != nil {
-			return off, err
-		}
-		return readCoreImportdesc(buf, off)
-	default:
-		return off, fmt.Errorf("coremoduledecl: invalid tag %#x", tag)
-	}
-}
-
-// readCoreImportdesc consumes a core:importdesc = sort byte + typeidx (func
-// 0x00, table 0x01, memory 0x02, global 0x03, tag 0x04). Table/memory/global
-// carry a small inline type rather than an index, but these type-only shapes
-// only ever use func imports/exports in practice; a non-func desc fails loud.
-func readCoreImportdesc(buf []byte, off int) (int, error) {
-	if off >= len(buf) {
-		return off, ErrTruncatedBinary
-	}
-	sort := buf[off]
-	off++
-	switch sort {
-	case 0x00: // func: typeidx
-		_, n, err := leb128.LoadUint32(buf[off:])
-		if err != nil {
-			return off, err
-		}
-		return off + int(n), nil
-	default:
-		return off, fmt.Errorf("core:importdesc: unsupported sort %#x", sort)
-	}
-}
-
-// readCoreModuleAlias consumes a core:alias inside a core module type: a sort
-// byte then a target (0x00 export: instanceidx + name, 0x01 outer: ct + idx).
-func readCoreModuleAlias(buf []byte, off int) (int, error) {
-	if off >= len(buf) {
-		return off, ErrTruncatedBinary
-	}
-	off++ // sort byte
-	if off >= len(buf) {
-		return off, ErrTruncatedBinary
-	}
-	target := buf[off]
-	off++
-	switch target {
-	case 0x01: // outer: ct idx
-		_, n, err := leb128.LoadUint32(buf[off:])
-		if err != nil {
-			return off, err
-		}
-		off += int(n)
-		_, n, err = leb128.LoadUint32(buf[off:])
-		if err != nil {
-			return off, err
-		}
-		return off + int(n), nil
-	default:
-		return off, fmt.Errorf("core:alias: unsupported target %#x", target)
-	}
-}
-
-// skipName consumes a name = vec(byte) (leb length + that many bytes).
-func skipName(buf []byte, off int) (int, error) {
-	n, m, err := leb128.LoadUint32(buf[off:])
-	if err != nil {
-		return off, err
-	}
-	off += int(m)
-	if off+int(n) > len(buf) {
-		return off, ErrTruncatedBinary
-	}
-	return off + int(n), nil
-}
-
-// readInstancetypeDesc reads an instance type: vec(instancedecl), building
-// Types (this instancetype's own nested type-sort index space) and Exports
-// via readInstanceDeclDescInto. See InstanceDesc's doc for why a TypeRef in
-// Exports indexes Types, not any enclosing component's TypeSpace.
+// readInstancetypeDesc reads an instance type: vec(instancedecl). See
+// InstanceDesc's doc for why a TypeRef in Exports indexes Types, not any
+// enclosing component's TypeSpace.
 func readInstancetypeDesc(buf []byte, off int) (InstanceDesc, int, error) {
-	count, n, err := leb128.LoadUint32(buf[off:])
+	b, off, err := readTypeBody(buf, off, false)
 	if err != nil {
 		return InstanceDesc{}, off, err
 	}
-	off += int(n)
-
-	var localTypes []TypeDesc
-	var exports map[string]TypeRef
-	var outer map[uint32]OuterAlias
-	// Every declaration consumes at least one byte, and only some of them
-	// produce a local type, so both count and the bytes left are upper bounds
-	// -- take the smaller so a bogus LEB128 count cannot make this allocate
-	// before the read that would reject it.
-	if cap := min(int(count), len(buf)-off); cap > 0 {
-		localTypes = make([]TypeDesc, 0, cap)
-	}
-	for i := range count {
-		off, err = readInstanceDeclDescInto(buf, off, &localTypes, &exports, &outer)
-		if err != nil {
-			return InstanceDesc{}, off, fmt.Errorf("instancedecl[%d]: %w", i, err)
-		}
-	}
-	return InstanceDesc{Exports: exports, Types: localTypes, Outer: outer}, off, nil
+	return InstanceDesc{Exports: b.exports, Types: b.types, Outer: b.outer, Decls: b.decls}, off, nil
 }
 
 // readDeftypeDesc consumes one deftype and returns a TypeDesc, OR a kind string

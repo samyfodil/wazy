@@ -1363,12 +1363,15 @@ func serveHTTPCall(in *component.Instance, ctx context.Context, method string, u
 	// incoming-body.finish only hands the trailers back. The clone was a
 	// second deep copy of every header on every request, discarded unread.
 	req := &httpIncomingRequest{method: strings.ToUpper(method), pathQ: pathQ, headers: headers, body: reqBody, trailers: reqTrailer}
+	// The handles go in the table of the component that defines the handler,
+	// which need not be in: a composition re-exposes its inner one's.
+	resources := in.ResourcesFor(handlerInstance)
 	reqRep := h.newIncomingRep(req)
-	reqHandle := in.Resources().NewOwn(wasiHTTPIncomingRequestResType, reqRep)
+	reqHandle := resources.NewOwn(wasiHTTPIncomingRequestResType, reqRep)
 
 	capture := &httpCapture{}
 	outRep := h.newOutparamRep(capture)
-	outHandle := in.Resources().NewOwn(wasiHTTPResponseOutparamResType, outRep)
+	outHandle := resources.NewOwn(wasiHTTPResponseOutparamResType, outRep)
 	// Every exit from here on is done with the outparam and the body behind
 	// it, including the error ones.
 	defer func() { h.releaseServeState(reqRep, outRep, capture) }()

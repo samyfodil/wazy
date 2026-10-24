@@ -1,9 +1,9 @@
 package instance
 
 import (
-	"context"
 	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/component/abi"
@@ -61,6 +61,35 @@ func resolveDefinedResourceDtors(comp *binary.Component, coreFuncTarget func(int
 		}
 	}
 	return out
+}
+
+// checkResourceDtors checks that every destructor comp's resource
+// definitions name is a core function of type [rep] -> [], as the component
+// model's validator does when the resource is defined; dtorFunc resolves one
+// by its core func index once the core instances exporting it exist. wazy
+// calls a destructor only when a handle is dropped, so a wrong one would
+// otherwise be refused only then, or never. A destructor that does not
+// resolve is skipped, as resolveDefinedResourceDtors skips it.
+func checkResourceDtors(comp *binary.Component, dtorFunc func(idx uint32) api.Function) error {
+	for _, t := range comp.Types {
+		rd, ok := t.Descriptor.(binary.ResourceDesc)
+		if !ok || rd.Dtor == nil {
+			continue
+		}
+		fn := dtorFunc(*rd.Dtor)
+		if fn == nil {
+			continue
+		}
+		rep := api.ValueTypeI32
+		if rd.Rep.Primitive == "i64" {
+			rep = api.ValueTypeI64
+		}
+		def := fn.Definition()
+		if p := def.ParamTypes(); len(p) != 1 || p[0] != rep || len(def.ResultTypes()) != 0 {
+			return fmt.Errorf("component/instance: core function %d has wrong signature for a destructor", *rd.Dtor)
+		}
+	}
+	return nil
 }
 
 // exportedResourceDefs returns, for a component, each resource it EXPORTS by
@@ -205,6 +234,37 @@ func exportedInstanceResourceDefs(comp *binary.Component, instanceExportName str
 	return out
 }
 
+// importedResourceFirstAlias maps every TypeSpace index of comp that aliases a
+// resource out of an imported instance to the FIRST index aliasing the same
+// one -- the index importedResourceIndices reports, and so the one the
+// composition's tags are keyed by. A component may alias one resource many
+// times (wit-component re-aliases wasi:io/streams' output-stream once per
+// interface that uses it, and again where its resource.drop is built), and
+// every alias must tag the handle table alike, or a handle minted under one
+// is refused -- or worse, taken for another resource -- under the next.
+func importedResourceFirstAlias(comp *binary.Component) map[uint32]uint32 {
+	type key struct{ iface, name string }
+	var first map[key]uint32
+	var out map[uint32]uint32
+	for idx := range comp.TypeSpace {
+		iface, name, ok := resolveImportedResourceName(comp, uint32(idx))
+		if !ok {
+			continue
+		}
+		if first == nil {
+			first, out = map[key]uint32{}, map[uint32]uint32{}
+		}
+		k := key{iface, name}
+		f, seen := first[k]
+		if !seen {
+			first[k] = uint32(idx)
+			continue
+		}
+		out[uint32(idx)] = f
+	}
+	return out
+}
+
 // importedResourceIndices returns, for a component, each resource it IMPORTS
 // through the instance named importName mapped to the local TypeSpace index that
 // names it (a type-sort export alias into that imported instance). That index is
@@ -224,6 +284,113 @@ func importedResourceIndices(comp *binary.Component, importName string) map[stri
 		}
 	}
 	return out
+}
+
+// uninstantiatedTypeExport returns the type of comp that the type export name
+// of inst denotes, for an instance that instantiates nothing: an inline
+// bundle's member, or what was passed for the type import a pure re-export
+// shim's export re-exports.
+func uninstantiatedTypeExport(comp *binary.Component, cfg *config, inst *binary.Instance, name string) (uint32, bool) {
+	if inst.Kind == 0x01 {
+		for _, x := range inst.Exports {
+			if x.Name == name && x.Sort == ctSortType {
+				return x.SortIdx, true
+			}
+		}
+		return 0, false
+	}
+	shim, err := resolveComponentDef(comp, cfg, inst.ComponentIdx)
+	if err != nil || validateShimComponent(shim) != nil {
+		return 0, false
+	}
+	for _, ex := range shim.Exports {
+		if ex.Name != name || ex.ExternType != ctSortType || int(ex.ExternIndex) >= len(shim.TypeSpace) {
+			continue
+		}
+		e := shim.TypeSpace[ex.ExternIndex]
+		if e.Kind != binary.TypeSpaceImport || int(e.Import) >= len(shim.Imports) {
+			return 0, false
+		}
+		for _, a := range inst.Args {
+			if a.Name == shim.Imports[e.Import].Name && a.Sort == ctSortType {
+				return a.SortIdx, true
+			}
+		}
+		return 0, false
+	}
+	return 0, false
+}
+
+// traceResource follows a resource type of comp through the inline bundles
+// and pure re-export shims it may have been passed along in, to where it comes
+// from. A nested instance defining it is prov, with its canonical index for it
+// in idx; an instance comp imports leaves prov nil, with idx comp's alias of
+// it. ok is false for a resource comp defines itself.
+func traceResource(comp *binary.Component, cfg *config, byIdx map[int]*Instance, typeIdx uint32) (prov *Instance, idx uint32, ok bool) {
+	for range instanceArgMaxDepth {
+		if int(typeIdx) >= len(comp.TypeSpace) {
+			break
+		}
+		e := comp.TypeSpace[typeIdx]
+		if e.Kind != binary.TypeSpaceAlias || int(e.Alias) >= len(comp.Aliases) {
+			break
+		}
+		al := comp.Aliases[e.Alias]
+		if al.Sort != ctSortType || al.TargetKind != 0x00 {
+			break
+		}
+		tgt, err := resolveInstanceArgTarget(comp, al.InstanceIdx)
+		if err != nil {
+			break
+		}
+		if tgt.imported {
+			return nil, typeIdx, true
+		}
+		if sib, ok := byIdx[int(tgt.spaceIdx)]; ok {
+			if len(tgt.projection) == 0 {
+				def, ok := exportedResourceDefs(sib.comp)[al.Name]
+				return sib, def, ok
+			}
+			iface := strings.Join(tgt.projection, "#")
+			if r, ok := sib.reexposedInstances[iface]; ok {
+				sib, iface = r.owner, r.name
+			}
+			def, ok := exportedInstanceResourceDefs(sib.comp, iface)[al.Name]
+			return sib, def, ok
+		}
+		d, ok := componentInstanceDef(comp, tgt.spaceIdx)
+		if !ok || len(tgt.projection) > 0 {
+			break
+		}
+		if typeIdx, ok = uninstantiatedTypeExport(comp, cfg, &comp.Instances[d], al.Name); !ok {
+			break
+		}
+	}
+	return nil, 0, false
+}
+
+// lineUp records that this component's resource tag names prov's resource
+// def: the resource it traces back to, and the destructor its drop runs.
+func (n *nesting) lineUp(tag uint32, prov *Instance, def uint32) {
+	o := prov.originOf(def)
+	if dtor := o.def.resourceDtors[o.tag]; dtor != nil {
+		n.importedResDtors[tag] = dtor
+	}
+	n.resourceOrigin[tag] = o
+}
+
+// importerTag maps a resource type of prov's, as prov's func types name it, to
+// this component's tag for the same resource.
+func (n *nesting) importerTag(prov *Instance) func(uint32) (uint32, bool) {
+	return func(idx uint32) (uint32, bool) {
+		o := prov.originOf(prov.canonTag(idx))
+		for tag, x := range n.resourceOrigin {
+			if x == o {
+				return tag, true
+			}
+		}
+		return 0, false
+	}
 }
 
 // instanceArgMaxDepth bounds resolveInstanceArgTarget's export/alias chain
@@ -466,8 +633,8 @@ func translateResourceFD(fd binary.FuncDesc, providerResolve abi.Resolver, trans
 // 0x00 "export") into a component instance, and the component-instance index
 // space it's aliased against is combined -- top-level imported instances
 // first, then comp.Instances (the same space numImported/byIdx use; see
-// instantiateNestedInstances' doc). Two cases fall out of al.InstanceIdx
-// against numImported:
+// instantiateNestedInstances' doc). Three cases fall out of what
+// al.InstanceIdx names:
 //
 //   - < numImported: a genuine host import (e.g. the host's
 //     [constructor]resource1), whose Go implementation the caller registered
@@ -480,6 +647,9 @@ func translateResourceFD(fd binary.FuncDesc, providerResolve abi.Resolver, trans
 //     "blocking-call" (func ...))` then `(with "blocking-call" (func N))`).
 //     Wired identically to the whole-instance (arg.Sort == 0x05) case one
 //     export at a time: a delegatingHostImport plus its guestAsyncTarget.
+//   - an inline bundle or a pure re-export shim, never instantiated: N is
+//     resolved again as the func the bundle holds or the shim was passed
+//     (funcAliasSource).
 //
 // N can ALSO be the outer component's own directly-declared local func -- a
 // plain `canon lift`, never exported, never an alias at all
@@ -491,7 +661,7 @@ func translateResourceFD(fd binary.FuncDesc, providerResolve abi.Resolver, trans
 // then delegated to precisely like a sibling's export -- the outer's own
 // core func is always ready here (instantiateNestedInstances, this func's
 // only caller, runs after the core-instance loop that builds it).
-func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, byIdx map[int]*Instance, funcIdx uint32, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver) (*hostImport, error) {
+func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, nest *nesting, byIdx map[int]*Instance, funcIdx uint32, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver) (*hostImport, error) {
 	if int(funcIdx) >= len(comp.ComponentFuncSpace) {
 		return nil, fmt.Errorf("func arg index %d out of range of the component func index space", funcIdx)
 	}
@@ -505,19 +675,17 @@ func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, byIdx
 			return nil, fmt.Errorf("func arg index %d is not an instance-export alias", funcIdx)
 		}
 		diagName := fmt.Sprintf("$%d", funcIdx)
-		be, berr := bindFuncExportGraph(comp, funcIdx, componentFunc, coreFuncTarget, resolve, diagName, cfg.compileCache, nil)
+		be, berr := bindFuncExportGraph(comp, funcIdx, componentFunc, coreFuncTarget, resolve, diagName, cfg, nil)
 		if berr != nil {
 			return nil, fmt.Errorf("func arg index %d: %w", funcIdx, berr)
 		}
-		// No resource-type wiring for a bare (non-instance) func arg -- see
-		// the sibling-export case's identical comment below.
-		provToImp := func(uint32) (uint32, bool) { return 0, false }
-		hi := delegatingHostImport(in, diagName, be, provToImp)
-		hi.asyncTarget = &guestAsyncTarget{sub: in, be: be, exportName: diagName, provToImp: provToImp}
 		// This func arg names the outer component's OWN local func, handed
 		// down to a directly-nested child as a `(with "x" (func N))`
 		// instantiate-arg -- a direct static parent<->child lineage delegate
-		// (see hostImport.lineage's doc). Refused at call time.
+		// (see hostImport.lineage's doc). Refused at call time, so no handle
+		// ever crosses it and its resources need no line-up.
+		provToImp := func(uint32) (uint32, bool) { return 0, false }
+		hi := delegatingHostImport(newGuestAsyncTarget(in, be, diagName, provToImp))
 		hi.lineage = true
 		return hi, nil
 	}
@@ -528,13 +696,24 @@ func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, byIdx
 	if al.Sort != 0x01 || al.TargetKind != 0x00 {
 		return nil, fmt.Errorf("func arg index %d is a %#x/%#x alias, not a func export alias", funcIdx, al.Sort, al.TargetKind)
 	}
-	// A local instance DEFINITION that has not been instantiated yet is a
-	// forward reference. Say exactly that, rather than falling through to the
-	// imported-instance path below, which would blame the import list for a
-	// problem in the instantiation order.
+	// A local instance DEFINITION not instantiated is an inline bundle or a
+	// pure re-export shim, which instantiate nothing: the func is what the
+	// bundle holds or the shim was passed, an earlier index of this
+	// component's. Anything else is a forward reference. Say exactly that,
+	// rather than falling through to the imported-instance path below, which
+	// would blame the import list for a problem in the instantiation order.
 	if _, isDef := componentInstanceDef(comp, al.InstanceIdx); isDef {
 		if _, instantiated := byIdx[int(al.InstanceIdx)]; !instantiated {
-			return nil, fmt.Errorf("func arg index %d aliases component instance %d, which is not a prior nested instantiation", funcIdx, al.InstanceIdx)
+			src, ok, err := funcAliasSource(comp, cfg, aliasTarget{instIdx: al.InstanceIdx, name: al.Name})
+			switch {
+			case err != nil:
+				return nil, fmt.Errorf("func arg index %d: %w", funcIdx, err)
+			case !ok:
+				return nil, fmt.Errorf("func arg index %d aliases component instance %d, which is not a prior nested instantiation", funcIdx, al.InstanceIdx)
+			case src >= funcIdx:
+				return nil, fmt.Errorf("func arg index %d aliases %q of component instance %d, which names func %d, not an earlier one", funcIdx, al.Name, al.InstanceIdx, src)
+			}
+			return outerFuncArgImport(comp, cfg, in, nest, byIdx, src, componentFunc, coreFuncTarget, resolve)
 		}
 	}
 	// A prior nested instantiation names a sibling; anything else is an
@@ -548,27 +727,17 @@ func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, byIdx
 	// has an entry for. It also resolves that space through
 	// componentInstanceDef rather than numImported arithmetic, since an
 	// interleaved instance export shifts every later definition.
-	sib, key, rerr := resolveFuncAliasInstance(comp, aliasTarget{instIdx: al.InstanceIdx, name: al.Name}, byIdx)
-	if rerr != nil {
-		return nil, fmt.Errorf("func arg index %d %w", funcIdx, rerr)
-	}
-	if sib != nil {
+	if sib, key := resolveFuncAliasInstance(comp, aliasTarget{instIdx: al.InstanceIdx, name: al.Name}, byIdx); sib != nil {
 		be, ok := sib.exports[key]
 		if !ok {
 			return nil, fmt.Errorf("func arg index %d: sibling component instance %d has no export %q", funcIdx, al.InstanceIdx, key)
 		}
-		// No resource-type wiring for a bare (non-instance) func arg -- a
-		// resource crossing this boundary would need its own `(with "r"
-		// (type ...))` arg, handled by the arg.Sort == 0x03 case alongside
-		// this one; provToImp is only consulted when the func signature
-		// itself has an own<R>/borrow<R> param or result.
-		provToImp := func(uint32) (uint32, bool) { return 0, false }
 		// The sibling may itself only RE-EXPOSE the aliased export, in which
 		// case the call belongs to whatever instance defines it -- see
-		// boundExport.home and ownerOf.
+		// boundExport.home and ownerOf. A handle crossing it is retagged to
+		// the nested component's resource lined up with the owner's.
 		owner, ownerKey := ownerOf(be, sib, key)
-		hi := delegatingHostImport(owner, ownerKey, be, provToImp)
-		hi.asyncTarget = &guestAsyncTarget{sub: owner, be: be, exportName: ownerKey, provToImp: provToImp}
+		hi := delegatingHostImport(newGuestAsyncTarget(owner, be, ownerKey, nest.importerTag(owner)))
 		return hi, nil
 	}
 	iface, err := importInterfaceName(comp, al.InstanceIdx)
@@ -580,143 +749,6 @@ func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, byIdx
 		return nil, fmt.Errorf("no host import registered for %q %q", iface, al.Name)
 	}
 	return hi, nil
-}
-
-// pendingSiblingDelegate is one entry of cfg.pendingDelegates -- see that
-// field's doc. instIdx is the composition-global component-instance index
-// (numImported + local index, the same numbering byIdx/compInstances use)
-// the deferred delegate targets; exportName is the export it needs off that
-// sibling once instantiated. tgt is the SAME *guestAsyncTarget the deferred
-// hostImport's closures (both hi.fn and hi.asyncTarget) read at actual call
-// time -- resolving this entry means filling in tgt.sub/tgt.be, nothing more
-// (every consumer already dereferences tgt lazily). isAsyncLower mirrors the
-// Feature 1 promotion-gate check computeCanonHostFunc runs immediately for a
-// same-tick-resolvable sibling (graph.go, "mayBlockSync"); a deferred sibling
-// can't run that check until tgt.be is known, so instantiateGraph re-runs it
-// here once resolution fills tgt.be in.
-type pendingSiblingDelegate struct {
-	instIdx      int
-	exportName   string
-	tgt          *guestAsyncTarget
-	isAsyncLower bool
-}
-
-// resolveStaticExportFuncDesc resolves a component's named func EXPORT to its
-// WIT-level FuncDesc plus a type resolver for it, purely from the
-// component's own static definition -- comp.ResolveType/typeResolver never
-// touch anything instantiation-dependent (core modules, handle tables,
-// sub-Instances), so this works before comp has been instantiated at all.
-//
-// Used by computeCanonHostFunc's deferred-sibling path (see
-// cfg.pendingDelegates' doc) to compute a forward-referenced nested
-// sibling's CORE-LEVEL signature immediately (bind time requires it -- the
-// wasm shim's function type is fixed the moment its module is built), while
-// the sibling's actual runtime Instance/boundExport (needed only to make the
-// real call, never to determine its shape) is resolved later.
-//
-// Only a direct canon-lift export is supported -- trap-on-reenter.wast's
-// (and every other observed forward-reference shape's) sibling exports are
-// always a plain `canon lift`; an export that is itself a re-export alias of
-// something deeper would need recursing through componentFunc's
-// ComponentFuncFromAlias/FromExport arms the way bindFuncExportGraph does,
-// which this narrower static helper deliberately doesn't attempt.
-func resolveStaticExportFuncDesc(comp *binary.Component, name string) (binary.FuncDesc, abi.Resolver, error) {
-	for _, exp := range comp.Exports {
-		if exp.ExternType != 0x01 || exp.Name != name {
-			continue
-		}
-		if int(exp.ExternIndex) >= len(comp.ComponentFuncSpace) {
-			return binary.FuncDesc{}, nil, fmt.Errorf("export %q func index %d out of range of the component func index space", name, exp.ExternIndex)
-		}
-		e := comp.ComponentFuncSpace[exp.ExternIndex]
-		if e.Kind != binary.ComponentFuncFromCanonLift {
-			return binary.FuncDesc{}, nil, fmt.Errorf("export %q does not resolve to a direct canon lift (kind %v); unsupported for a forward-referenced sibling", name, e.Kind)
-		}
-		canon := comp.Canons[e.Canon]
-		td, err := comp.ResolveType(canon.TypeIdx)
-		if err != nil {
-			return binary.FuncDesc{}, nil, fmt.Errorf("export %q lift references type %d: %w", name, canon.TypeIdx, err)
-		}
-		fd, ok := td.(binary.FuncDesc)
-		if !ok {
-			return binary.FuncDesc{}, nil, fmt.Errorf("export %q lift type %d is not a func type (got %T)", name, canon.TypeIdx, td)
-		}
-		return fd, typeResolver(comp), nil
-	}
-	return binary.FuncDesc{}, nil, fmt.Errorf("no func export named %q", name)
-}
-
-// delegatingHostImportDeferred is delegatingHostImport's forward-reference
-// counterpart: the sibling's *Instance/*boundExport aren't known yet (see
-// cfg.pendingDelegates' doc), only its static (fd, resolve) shape -- computed
-// by resolveStaticExportFuncDesc, or (for the outer component's own local
-// lift, outerFuncArgImport's ComponentFuncFromCanonLift arm) directly from
-// bindFuncExportGraph's already-finalized boundExport.fd/be.resolve, which
-// need no deferral at all (the outer's own core func is always ready by the
-// time an instantiate-arg needs it -- only a genuinely NOT-YET-instantiated
-// sibling needs this).
-//
-// tgt.sub/tgt.be start nil; every consumer (both the fn closure below and
-// buildAsyncHostWrapper's hi.asyncTarget arm, async_host_import.go) reads
-// them only at actual GUEST CALL time, always provably after this instance
-// finishes instantiating (a guest call can only happen once Instantiate has
-// returned a live *Instance to the caller) -- so resolving tgt in between
-// (instantiateGraph, right after instantiateNestedInstances) is always in
-// time. Otherwise identical to delegatingHostImport -- see its doc for the
-// resource-crossing/borrow-scope rationale, unchanged here.
-func delegatingHostImportDeferred(tgt *guestAsyncTarget, fd binary.FuncDesc, resolve abi.Resolver) *hostImport {
-	translated, importerResolve := translateResourceFD(fd, resolve, tgt.provToImp)
-	m := computeBoundExportABI(fd, resolve)
-	paramDescs := m.paramTypes
-	var resDescs []binary.TypeDesc
-	if m.hasResult {
-		resDescs = []binary.TypeDesc{m.resultType}
-	}
-	hasBorrowParam := false
-	for _, d := range paramDescs {
-		if _, ok := d.(binary.BorrowDesc); ok {
-			hasBorrowParam = true
-			break
-		}
-	}
-	return &hostImport{
-		fn: func(ctx context.Context, args []abi.Value) ([]abi.Value, error) {
-			sub, be, exportName := tgt.sub, tgt.be, tgt.exportName
-			var scope *task
-			if hasBorrowParam {
-				scope = &task{inst: sub}
-			}
-			in := make([]abi.Value, len(args))
-			for i, a := range args {
-				var err error
-				if i < len(paramDescs) {
-					a, err = repToProviderHandle(sub, paramDescs[i], a, scope)
-					if err != nil {
-						return nil, err
-					}
-				}
-				in[i] = a
-			}
-			out, err := sub.invoke(ctx, be, exportName, in)
-			if err != nil {
-				return nil, err
-			}
-			if scope != nil && scope.numBorrows > 0 {
-				return nil, fmt.Errorf("component/instance: %s: borrow handles still remain at the end of the call (%d still held)", exportName, scope.numBorrows)
-			}
-			for i := range out {
-				if i < len(resDescs) {
-					if out[i], err = providerHandleToRep(sub, resDescs[i], out[i]); err != nil {
-						return nil, err
-					}
-				}
-			}
-			return out, nil
-		},
-		customFD:      &translated,
-		customResolve: importerResolve,
-		asyncTarget:   tgt,
-	}
 }
 
 // importedTypeIndex returns the TypeSpace index of a component's top-level type
@@ -943,6 +975,56 @@ func providerHandleToRep(sub *Instance, desc binary.TypeDesc, v abi.Value) (abi.
 	default:
 		return v, nil
 	}
+}
+
+// toProvider maps an importer-side arg list, whose handles the importer's
+// wrapper already reduced to reps, to the provider's: each own and borrow, at
+// any depth, is minted in the provider's table (repToProviderHandle), a borrow
+// scoped to scope.
+func (tgt *guestAsyncTarget) toProvider(args []abi.Value, scope *task) ([]abi.Value, error) {
+	paramDescs := tgt.be.paramTypes
+	out := make([]abi.Value, len(args))
+	for i, a := range args {
+		if i < len(paramDescs) {
+			var err error
+			if a, err = repToProviderHandle(tgt.sub, paramDescs[i], a, scope); err != nil {
+				return nil, err
+			}
+			if n := tgt.nested; n != nil && n.params[i] != nil {
+				a, err = walkHandles(a, n.params[i], n.resolve, 0, func(t binary.TypeDesc, v abi.Value) (abi.Value, error) {
+					return repToProviderHandle(tgt.sub, t, v, scope)
+				})
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+		out[i] = a
+	}
+	return out, nil
+}
+
+// fromProvider reduces the handles in the provider's results, at any depth,
+// back to reps (providerHandleToRep), in place, for the importer's wrapper to
+// mint in its own table.
+func (tgt *guestAsyncTarget) fromProvider(vals []abi.Value) error {
+	if !tgt.be.hasResult || len(vals) == 0 {
+		return nil
+	}
+	v, err := providerHandleToRep(tgt.sub, tgt.be.resultType, vals[0])
+	if err != nil {
+		return err
+	}
+	if n := tgt.nested; n != nil && n.results[0] != nil {
+		v, err = walkHandles(v, n.results[0], n.resolve, 0, func(t binary.TypeDesc, v abi.Value) (abi.Value, error) {
+			return providerHandleToRep(tgt.sub, t, v)
+		})
+		if err != nil {
+			return err
+		}
+	}
+	vals[0] = v
+	return nil
 }
 
 // resultDescs returns a boundExport's result TypeDescs (one for the single

@@ -11,23 +11,15 @@ import (
 	"github.com/samyfodil/wazy/internal/component/abi"
 )
 
-// refusedOtherwise are the assert_invalid components of wasm-tools'
-// fixed-length-lists.wast that wazy refuses for a reason other than the one
-// the suite tests, with the error it gives. Both pass a type argument that
-// does not match an import's (eq (list s32 10)) bound -- to a component
-// import, which wazy does not support at all, so it never gets as far as
-// comparing the types (which it does not do for any type).
-var refusedOtherwise = map[string]string{
-	"fixed-length-lists.5.wasm": "only instance imports are supported",
-	"fixed-length-lists.6.wasm": "only instance imports are supported",
-}
-
 // TestWasmToolsFixedLengthLists runs wasm-tools' fixed-length-list cases
 // (testdata/wast/wasm-tools-fixed-length-lists): each module instantiates and
 // its export, whose core func is `unreachable`, gets as far as the trap --
 // so the list<u32, 4> was lifted from memory, or lowered to four i32s, on
-// the way -- and each component a validator must refuse is refused, but for
-// refusedOtherwise.
+// the way -- and each component a validator must refuse is refused for the
+// reason the suite gives. The last two instantiate an IMPORTED component with
+// a type argument that does not match its import's (eq (list s32 10))
+// bound; they are refused by the instantiation type check (ctenv.go) before
+// anything is looked up for the import, as a validator refuses them.
 func TestWasmToolsFixedLengthLists(t *testing.T) {
 	const dir = "testdata/wast/wasm-tools-fixed-length-lists"
 	fetched(t, dir)
@@ -85,8 +77,8 @@ func TestWasmToolsFixedLengthLists(t *testing.T) {
 				t.Errorf("line %d: instantiated; want it refused (%s)", c.Line, c.Text)
 				continue
 			}
-			want, other := refusedOtherwise[c.Filename]
-			if !other {
+			want := c.Text
+			if !strings.Contains(want, "type mismatch") {
 				// wasm-tools words these its own way; what matters is the
 				// reason: no elements, or too many bytes.
 				want = map[bool]string{true: "more than zero elements", false: "exceeds maximum byte size"}[strings.Contains(c.Text, "zero")]

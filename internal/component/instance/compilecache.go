@@ -85,6 +85,17 @@ type CompileCache struct {
 	// computed once and reused across instantiations (see graphPlanFor).
 	planMu sync.Mutex
 	byPlan map[*binary.Component]*graphPlan
+	// byModule, also under planMu, is the plan of a core module some
+	// instantiation reaches through an import or an instance export rather
+	// than by naming its definition -- see modulePlanFor.
+	byModule map[modulePlanKey]*modulePlan
+
+	// checkMu guards checked -- the component-level type checks that passed
+	// (see typeCheck), keyed by the shared *binary.Component pointers they
+	// were made on. Pure over the immutable components, so a pass holds for
+	// every later instantiation.
+	checkMu sync.Mutex
+	checked map[ctCheckKey]bool
 }
 
 // graphPlan is the cached, per-component output of the graph import-discovery
@@ -102,6 +113,23 @@ type graphPlan struct {
 	// is fixed -- which it is: the decoder sets it once and nothing re-parents
 	// a Component.
 	rewritten [][]byte
+}
+
+// modulePlan is graphPlan's counterpart for ONE core module definition: its
+// bytes after the empty-import-name rewrite, and the core-level signatures of
+// the funcs it imports. Immutable once stored.
+type modulePlan struct {
+	bytes       []byte
+	neededTypes map[string]map[string]coreFuncSig
+}
+
+// modulePlanKey names a core module definition -- the component that embeds
+// it and its index in that component's CoreModules -- and the empty-import
+// rewrite the instantiating component applies.
+type modulePlanKey struct {
+	owner           *binary.Component
+	module          uint32
+	emptyNameTarget string
 }
 
 // NewCompileCache returns an empty CompileCache ready to pass to
@@ -177,6 +205,39 @@ func (c *CompileCache) graphPlanFor(comp *binary.Component, compute func() (*gra
 		return existing, nil // lost a race -- both are equivalent (compute is pure)
 	}
 	c.byPlan[comp] = p
+	return p, nil
+}
+
+// modulePlanFor returns the plan of the core module definition key names,
+// computing it via compute on a miss -- every time for a nil cache. A plan is
+// pure over the definition, so it is shared by every instantiation that
+// reaches the module, however it reaches it. Same lock/recheck shape as
+// graphPlanFor.
+func (c *CompileCache) modulePlanFor(key modulePlanKey, compute func() (*modulePlan, error)) (*modulePlan, error) {
+	if c == nil {
+		return compute()
+	}
+	c.planMu.Lock()
+	if p, ok := c.byModule[key]; ok {
+		c.planMu.Unlock()
+		return p, nil
+	}
+	c.planMu.Unlock()
+
+	p, err := compute()
+	if err != nil {
+		return nil, err
+	}
+
+	c.planMu.Lock()
+	defer c.planMu.Unlock()
+	if existing, ok := c.byModule[key]; ok {
+		return existing, nil // lost a race -- both are equivalent (compute is pure)
+	}
+	if c.byModule == nil {
+		c.byModule = make(map[modulePlanKey]*modulePlan)
+	}
+	c.byModule[key] = p
 	return p, nil
 }
 
