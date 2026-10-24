@@ -104,16 +104,22 @@ type config struct {
 	// the handles nested in their args and results across (hostHandleTransfer).
 	hostResources *handleTable
 
-	// componentArgs maps a COMPONENT-sort import name of the component being
-	// instantiated to the component DEFINITION supplied for it: by the parent,
-	// via a `(with "x" (component N))` instantiate-arg (types.11.wast), or --
-	// for the root -- by the embedder, via WithComponentImport (typeCheck
-	// decodes and type-checks it into here). Unlike every other arg sort,
-	// nothing is instantiated on the child's behalf: a component-sort import
-	// is code, occupying a slot in the child's own component index space,
-	// which the child instantiates itself with its own args at its own
-	// instance section (Explainer.md, "Instance Definitions").
+	// componentArgs maps a COMPONENT-sort import name of the ROOT component
+	// to the component DEFINITION the embedder supplied for it via
+	// WithComponentImport (typeCheck decodes and type-checks it into here).
+	// Unlike every other import sort, nothing is instantiated on the
+	// component's behalf: a component-sort import is code, occupying a slot
+	// in its own component index space, which it instantiates itself with its
+	// own args at its own instance section (Explainer.md, "Instance
+	// Definitions"). A nested component's imports are its scope's args.
 	componentArgs map[string]*binary.Component
+
+	// scope is what this instantiation's core module, component and instance
+	// indices name as definitions (scope.go): the root's, over componentArgs,
+	// set by instantiateGraph; a nested instantiation's -- the scope its
+	// component was defined in, and the args it was given -- set by
+	// instantiateNestedInstances.
+	scope scope
 
 	// componentImports are the component binaries WithComponentImport
 	// supplied for the root's component imports, by import name.

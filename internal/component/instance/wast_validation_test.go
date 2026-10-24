@@ -50,15 +50,13 @@ const (
 	// Core-level validation a validator does and wazy does not: the core
 	// alias or the destructor is never used.
 	gapCoreValidation = "core-level validation wazy does not do: the core alias or destructor is never used"
-	// wazy does not run a component that exports a core module, aliases one
-	// out of an instance, or passes one to a nested component.
-	gapCoreModuleRuntime = "wazy does not run a component that exports, aliases or passes a core module"
 	// Wasmtime refuses every root-level component import; wazy runs one when
 	// a component is supplied for it (WithComponentImport), and otherwise
 	// refuses it for that.
 	gapRootComponentImport = "wazy runs a root-level component import given WithComponentImport; without one it is refused as not supplied"
-	// wazy refuses a root component export, in its own words.
-	gapRootComponentExport = "wazy refuses a root component export, worded its own way"
+	// Wasmtime refuses a root component export; wazy accepts one, as it
+	// does a root core module export -- a definition, with nothing to bind.
+	gapRootComponentExport = "wazy accepts a root component export, which Wasmtime refuses"
 	// wazy refuses a root func import at instantiation, before the
 	// re-export of it Wasmtime refuses is reached.
 	gapRootFuncImport = "a root func import is refused at instantiation, before its re-export is reached"
@@ -144,8 +142,6 @@ var wastValidationGaps = map[string]map[string]wastValidationGap{
 		"instantiate.32.wasm": {"is a core module import", gapCoreModuleImport},
 		// line 358: type mismatch in export `g`
 		"instantiate.33.wasm": {"is a core module import", gapCoreModuleImport},
-		// line 373: (valid)
-		"instantiate.35.wasm": {"which only an instantiation supplies", gapCoreModuleRuntime},
 		// line 451: expected global, found func
 		"instantiate.47.wasm": {"export \"\" in module \"\" is a func, not a global", gapCoreLinker},
 		// line 584: module instantiation argument `` does not export an item named `table`
@@ -155,33 +151,11 @@ var wastValidationGaps = map[string]map[string]wastValidationGap{
 		// line 2: root-level component imports are not supported
 		"restrictions.0.wasm": {"was not supplied; supply a component for it with WithComponentImport", gapRootComponentImport},
 		// line 6: exporting a component from the root component is not supported
-		"restrictions.1.wasm": {"only func and instance exports are supported", gapRootComponentExport},
+		"restrictions.1.wasm": {"", gapRootComponentExport},
 		// line 10: component export `f` is a reexport of an imported function which is not implemented
 		"restrictions.2.wasm": {"is a func import (sort 0x1)", gapRootFuncImport},
 		// line 17: root-level component imports are not supported
 		"restrictions.3.wasm": {"was not supplied; supply a component for it with WithComponentImport", gapRootComponentImport},
-	},
-	"wasmtime-nested": {
-		// line 24: (valid)
-		"nested.3.wasm": {"which only an instantiation supplies", gapCoreModuleRuntime},
-		// line 36: (valid)
-		"nested.4.wasm": {"which only an instantiation supplies", gapCoreModuleRuntime},
-		// line 70: (valid)
-		"nested.5.wasm": {"unsupported sort 0x0", gapCoreModuleRuntime},
-		// line 100: (valid)
-		"nested.6.wasm": {"unsupported sort 0x0", gapCoreModuleRuntime},
-		// line 128: (valid)
-		"nested.7.wasm": {"only func and instance exports are supported", gapCoreModuleRuntime},
-		// line 175: (valid)
-		"nested.9.wasm": {"which only an instantiation supplies", gapCoreModuleRuntime},
-		// line 213: (valid)
-		"nested.10.wasm": {"only func and instance exports are supported", gapCoreModuleRuntime},
-		// line 264: (valid)
-		"nested.14.wasm": {"which only an instantiation supplies", gapCoreModuleRuntime},
-		// line 322: (valid)
-		"nested.16.wasm": {"which only an instantiation supplies", gapCoreModuleRuntime},
-		// line 374: (valid)
-		"nested.17.wasm": {"which only an instantiation supplies", gapCoreModuleRuntime},
 	},
 }
 

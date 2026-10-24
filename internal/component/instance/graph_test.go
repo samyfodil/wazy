@@ -239,7 +239,7 @@ func TestGraph_ExportNotFuncOrInstance(t *testing.T) {
 	comp := decodeRealHello(t)
 	comp.Exports[0].ExternType = 0x02 // value
 	_, err := runGraph(t, comp)
-	requireErrContains(t, err, "only func and instance exports")
+	requireErrContains(t, err, "is a value export (sort 0x2); only func, instance, type, core module and component exports")
 }
 
 func TestGraph_BindInstanceExport_ImportedInstanceDirectly(t *testing.T) {
@@ -711,7 +711,10 @@ func TestDiscoverNeededFuncTypes_BadImportTypeIndex(t *testing.T) {
 		0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type section: 1 func type () -> ()
 		0x02, 0x07, 0x01, 0x01, 'm', 0x01, 'f', 0x00, 0x05, // import m.f func, typeidx 5
 	}
-	comp := &binary.Component{CoreModules: []binary.CoreModule{{Offset: 0, Size: len(coreBytes)}}}
+	comp := &binary.Component{
+		CoreModules:   []binary.CoreModule{{Offset: 0, Size: len(coreBytes)}},
+		CoreInstances: []binary.CoreInstance{{Kind: 0x00, ModuleIdx: 0}}, // only an instantiated module is planned
+	}
 
 	r := wazy.NewRuntime(context.Background())
 	defer r.Close(context.Background())
