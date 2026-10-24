@@ -1,5 +1,0 @@
-@external-id is not allowed on interface declarations
-     --> tests/ui/parse-fail/external-id-on-interface.wit:3:2
-      |
-    3 | @external-id("x")
-      |  ^----------

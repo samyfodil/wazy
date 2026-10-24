@@ -340,8 +340,17 @@ func ParseFS(fsys fs.FS, dir string, opts ...Option) (*Package, error) {
 		return nil, err
 	}
 	pkgs = append(pkgs, main)
-	entries, err := fs.ReadDir(fsys, path.Join(dir, "deps"))
-	if err != nil && !os.IsNotExist(err) {
+	// Stat first: on Windows, reading a file as a directory reports it as not existing.
+	deps := path.Join(dir, "deps")
+	var entries []fs.DirEntry
+	if fi, err := fs.Stat(fsys, deps); err == nil {
+		if !fi.IsDir() {
+			return nil, fmt.Errorf("wit: %s is not a directory", deps)
+		}
+		if entries, err = fs.ReadDir(fsys, deps); err != nil {
+			return nil, fmt.Errorf("wit: %w", err)
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("wit: %w", err)
 	}
 	for _, e := range entries {

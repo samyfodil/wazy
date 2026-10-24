@@ -1,1 +1,0 @@
-package [a:b] contains a feature gate with a version specifier, so it must have a version

@@ -1,7 +1,9 @@
 package wit_test
 
 import (
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,7 +16,7 @@ func TestParseFS_Errors(t *testing.T) {
 	named := &fstest.MapFile{Data: []byte("package a:b@1.0.0; interface i {}")}
 	for _, tc := range []struct {
 		name string
-		fs   fstest.MapFS
+		fs   fs.FS
 		want string
 	}{
 		{"no dir", fstest.MapFS{}, "file does not exist"},
@@ -29,6 +31,9 @@ func TestParseFS_Errors(t *testing.T) {
 		{"bad dep", fstest.MapFS{"w/a.wit": named, "w/deps/x/x.wit": {Data: []byte("interface {")}}, "w/deps/x/x.wit"},
 		{"bad single-file dep", fstest.MapFS{"w/a.wit": named, "w/deps/x.wit": {Data: []byte("interface {")}}, "w/deps/x.wit"},
 		{"unnamed dep", fstest.MapFS{"w/a.wit": named, "w/deps/x.wit": {Data: []byte("interface j {}")}}, "no `package` header was found in any WIT file for this package"},
+		{"deps is a file", fstest.MapFS{"w/a.wit": named, "w/deps": {}}, "w/deps is not a directory"},
+		{"deps unstattable", failingDeps{fstest.MapFS{"w/a.wit": named}, true}, "permission denied"},
+		{"deps unreadable", failingDeps{fstest.MapFS{"w/a.wit": named, "w/deps/x.wit": named}, false}, "permission denied"},
 		{
 			"package twice",
 			fstest.MapFS{"w/a.wit": named, "w/deps/x.wit": named},
@@ -51,6 +56,26 @@ func TestParseFS_Errors(t *testing.T) {
 			}
 		})
 	}
+}
+
+// failingDeps fails a Stat, or else a ReadDir, of the deps directory.
+type failingDeps struct {
+	fstest.MapFS
+	stat bool
+}
+
+func (f failingDeps) Stat(name string) (fs.FileInfo, error) {
+	if f.stat && path.Base(name) == "deps" {
+		return nil, fs.ErrPermission
+	}
+	return f.MapFS.Stat(name)
+}
+
+func (f failingDeps) ReadDir(name string) ([]fs.DirEntry, error) {
+	if path.Base(name) == "deps" {
+		return nil, fs.ErrPermission
+	}
+	return f.MapFS.ReadDir(name)
 }
 
 func TestParseDir_Errors(t *testing.T) {

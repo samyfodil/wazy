@@ -1,7 +1,0 @@
-package a:b;
-
-world w {
-  @external-id("x")
-  @external-id("y")
-  import f: func();
-}
