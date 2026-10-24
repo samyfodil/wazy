@@ -67,6 +67,17 @@ class BumpAllocator:
         self.next_free = ptr + new_size
         return ptr
 
+class Ctx(ref.LiftLowerContext):
+    """The reference reaches realloc through store.lift/invoke, which needs a
+    live store and task; this calls the allocator directly and keeps the checks
+    the reference applies to what it returns."""
+
+    def reallocate(self, old, old_size, alignment, new_size):
+        ptr = self.opts.realloc(old, old_size, alignment, new_size)
+        ref.trap_if(ptr != ref.align_to(ptr, alignment))
+        ref.trap_if(ptr + new_size > len(self.opts.memory))
+        return ptr
+
 def make_context():
     """Builds a fresh (cx, mem, allocator) triple for lowering one value."""
     mem = ref.MemInst(bytearray(MEM_SIZE), PTR_TYPE)
@@ -75,7 +86,7 @@ def make_context():
     opts.string_encoding = "utf8"
     allocator = BumpAllocator()
     opts.realloc = allocator
-    cx = ref.LiftLowerContext(opts, None, None)
+    cx = Ctx(opts, None, None)
     return cx, mem, allocator
 
 def build_type(spec, by_name):

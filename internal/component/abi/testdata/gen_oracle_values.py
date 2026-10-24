@@ -105,6 +105,18 @@ class Ctx:
         self.inst = type('obj', (object,), {'handles': ref.Table()})()
         self.borrow_scope = None
 
+    # The reference reaches realloc through store.lift/invoke, which needs a live
+    # store and task; call the allocator directly and keep the checks the
+    # reference applies to what it returns.
+    def reallocate(self, old, old_size, alignment, new_size):
+        ptr = self.opts.realloc(old, old_size, alignment, new_size)
+        ref.trap_if(ptr != ref.align_to(ptr, alignment))
+        ref.trap_if(ptr + new_size > len(self.opts.memory))
+        return ptr
+
+    def allocate(self, alignment, size):
+        return self.reallocate(0, 0, alignment, size)
+
 
 def build_type(spec, by_name):
     """Recursively build a ValType from JSON spec."""
