@@ -8,6 +8,7 @@ char-backslash|unexpected character '\\'|char-backslash.wit:1:14
 char-quote|unexpected character '\''|char-quote.wit:1:14
 char-unexpected-cr|unexpected character '\r'|char-unexpected-cr.wit:1:13
 char-unexpected|unexpected character '$'|char-unexpected.wit:1:14
+comment-nested|OK
 comment-unterminated|unterminated block comment|comment-unterminated.wit:1:14
 control|Control code '\u{7}'|control.wit:1:14
 crlf-error|expected a type, found ';'|crlf-error.wit:3:16
@@ -34,6 +35,7 @@ keywords|OK
 list-size-eof|expected fixed-length, found eof|list-size-eof.wit:1:45
 list-size|invalid list size: number too large to fit in target type|list-size.wit:1:46
 method-bad-id|invalid character in identifier '_'|method-bad-id.wit:1:41
+nest-package-deep|package nesting too deep|nest-package-deep.wit:102:1
 nest-type-deep|nest-type-deep.wit:1:537: type nesting too deep|
 nest-type-eof|nest-type-eof.wit:1:537: type nesting too deep|
 nested-attrs|cannot place attributes on nested packages|nested-attrs.wit:1:38
@@ -60,6 +62,7 @@ str-unicode-surrogate|invalid unicode value 0xd800|str-unicode-surrogate.wit:1:4
 str-utf8|invalid UTF-8: invalid utf-8 sequence of 1 bytes from index 0|str-utf8.wit:1:41
 type-eof|expected a type, found eof|type-eof.wit:1:40
 type-keyword|expected a type, found keyword `record`|type-keyword.wit:1:41
+use-empty|OK
 use-eof|expected '}', found eof|use-eof.wit:1:39
 utf8-e0|invalid UTF-8: invalid utf-8 sequence of 1 bytes from index 0|utf8-e0.wit:1:41
 utf8-e1-incomplete|invalid UTF-8: incomplete utf-8 byte sequence from index 0|utf8-e1-incomplete.wit:1:41

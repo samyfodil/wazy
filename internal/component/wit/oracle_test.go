@@ -2,9 +2,10 @@ package wit_test
 
 import (
 	"bufio"
+	"embed"
 	"encoding/base64"
 	"errors"
-	"os"
+	"io/fs"
 	"path"
 	"strings"
 	"testing"
@@ -19,13 +20,19 @@ import (
 // have the same one here. What parses is then resolved by component/wit,
 // for the errors wit-parser makes past parsing.
 
+// testdata is embedded: some CI jobs run a test binary from the module
+// root, where a relative path would not find it.
+//
+//go:embed testdata
+var testdata embed.FS
+
 // TestParse_Probes runs testdata/probes, inputs written to reach the
 // lexer's and parser's errors.
 func TestParse_Probes(t *testing.T) {
 	ran := 0
 	for _, line := range readLines(t, "testdata/probes.txt") {
 		name, want, _ := strings.Cut(line, "|")
-		src, err := os.ReadFile(path.Join("testdata/probes", name+".wit"))
+		src, err := fs.ReadFile(testdata, path.Join("testdata/probes", name+".wit"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -102,7 +109,7 @@ func compare(t *testing.T, file, src, want string) {
 
 func readLines(t *testing.T, p string) []string {
 	t.Helper()
-	f, err := os.Open(p)
+	f, err := testdata.Open(p)
 	if err != nil {
 		t.Fatal(err)
 	}
