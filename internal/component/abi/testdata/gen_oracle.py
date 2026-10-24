@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generates testdata/oracle_golden.json from testdata/oracle_types.json by
-building the corresponding canonical-ABI type objects using the vendored
+building the corresponding canonical-ABI type objects using the fetched
 reference implementation (testdata/definitions.py) and computing size,
 alignment, and flatten (and flatten_functype for func entries) for each.
 
@@ -23,7 +23,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def load_definitions():
-    """Import the vendored definitions.py as a module named 'refabi'.
+    """Import the fetched definitions.py as a module named 'refabi'.
+
+    `make build.component_testdata` fetches it from WebAssembly/component-model.
 
     definitions.py uses `from __future__ import annotations` plus @dataclass,
     whose introspection needs to find the module in sys.modules by name, so we

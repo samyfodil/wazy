@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generates testdata/async_oracle_golden.json from testdata/async_scenarios.json
-by interpreting each scenario's op sequence against the vendored reference
+by interpreting each scenario's op sequence against the fetched reference
 implementation (testdata/definitions.py), through a REAL async lift
 (Store.invoke/store.lift with ft.async_=True, opts.async_=True,
 opts.callback=None) so current_thread()/current_task() are real and blocking
@@ -61,7 +61,7 @@ ref.random.choice = _singleton_choice
 # generators/coroutines. A deliberately-deadlocking scenario (the oracle's own
 # normalized-deadlock trap, §2.3) leaves its scripted callee's thread parked
 # forever inside block() -- by design, our driver just stops pumping it. The
-# vendored cont_new (~276) spawns that thread as non-daemon, so at process
+# reference cont_new (~276) spawns that thread as non-daemon, so at process
 # exit CPython would block waiting for it to finish, hanging this script
 # forever. Force every thread cont_new spawns to be daemon so an abandoned
 # parked scenario thread is killed at interpreter exit instead. This is a

@@ -262,6 +262,7 @@ func TestGraph_InstanceAliasFailsLoudOnShapesItCannotWire(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			raw := tt.fixture
 			if raw == nil {
+				fetched(t, "testdata/wast/resources")
 				var err error
 				if raw, err = wastFS.ReadFile("testdata/wast/resources/resources.14.wasm"); err != nil {
 					t.Fatalf("read fixture: %v", err)

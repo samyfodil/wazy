@@ -122,9 +122,12 @@ gh_api_curl := curl -fsSL --retry 5 --retry-all-errors $(if $(GITHUB_TOKEN),-H "
 # whatever happens to be on PATH.
 wabt_version := 1.0.39
 wasm_tools_version := 1.253.0
+# Some component-model cases were written against a later wasm-tools than the rest reproduce under.
+wasm_tools_next_version := 1.262.0
 tools_dir := $(CURDIR)/build/tools
 wast2json := $(tools_dir)/wabt-$(wabt_version)/wast2json
 wasm_tools := $(tools_dir)/wasm-tools-$(wasm_tools_version)/wasm-tools
+wasm_tools_next := $(tools_dir)/wasm-tools-$(wasm_tools_next_version)/wasm-tools
 host_arm64 = $(filter arm64 aarch64,$(shell uname -m))
 host_darwin = $(filter Darwin,$(shell uname -s))
 wabt_release = wabt-$(wabt_version)-$(if $(host_darwin),macos,linux)-$(if $(host_arm64),arm64,x64)
@@ -447,12 +450,24 @@ build.spectest.multi_memory: $(wast2json)
 	done
 	@rm -f $(spectest_multi_memory_testdata_dir)/*.wast
 
-# Component-model cases from the component-model repository and the Bytecode Alliance, fetched at a
-# pinned commit rather than copied in. Each .wast is one file, so it is curled; wit-parser's UI suite
-# is a tree, so it comes out of that commit's tarball. What the tests read is generated from them with
-# wasm-tools 1.262.0, the version their expected results were written against. None of it is
-# committed, so CI builds it once and hands it to every test job, as with the 3.0 spectest corpus.
+# Component-model cases, generated into what the tests read with the pinned wasm-tools:
+#
+#   - WebAssembly/component-model's own suites. Its test/wasmtime holds cases that repository took in
+#     from Wasmtime and wasm-tools.
+#   - wasm-tools' and Wasmtime's own tests, where they reach what the component-model suite does not.
+#     They are implementations' tests, not the specification's. Also wit-parser's UI suite.
+#   - The Canonical ABI's reference implementation, definitions.py, which the abi package's oracle
+#     generators import, and one module of resources.wast that wasip2 runs on its own.
+#
+# component-model is pinned twice. The conformance suites below are cf242a7's, generated with wasm-tools
+# 1.253.0: that reproduces them byte for byte, while 1.262.0 encodes several differently. The
+# max-value-size and fixed-length-list cases are later, and written against 1.262.0.
+#
+# One async suite, sync-streams, stays committed: the copy here is the broken upstream fixture with the
+# store it lacked added (component-model#679). Upstream fixed it differently in cf242a7, by making $D's
+# call to $C.set async, and wazy does not pass that version yet.
 component_model_version := d095e2f60ddae1f9a1e9b1e2fb547ec1114da677
+component_model_conformance_version := cf242a7a50d58aed650bc467212c5fb93433287b
 wasm_tools_tests_version := 2e6b2d6db499501a91a0b88a848435345bef1f66
 component_model_raw := https://raw.githubusercontent.com/WebAssembly/component-model/$(component_model_version)/test
 wasm_tools_raw := https://raw.githubusercontent.com/bytecodealliance/wasm-tools/$(wasm_tools_tests_version)/tests/cli/component-model
@@ -470,21 +485,50 @@ component_wast_suites := \
 	internal/component/instance/testdata/wast/wasmtime-nested=$(wasmtime_raw)/nested.wast \
 	internal/component/instance/testdata/wast/wasmtime-restrictions=$(wasmtime_raw)/restrictions.wast
 wit_parser_ui_dir := component/wit/testdata/wit-parser/ui
+component_model_dir := build/component-model
+component_wast_dir := internal/component/instance/testdata/wast
+component_async_dir := internal/component/instance/testdata/wast-async
+# <directory under $(component_wast_dir)>=<.wast under component-model's test/>
+component_conformance_suites := concat=values/concat strings=values/strings \
+	multiple-resources=resources/multiple-resources fused=wasmtime/fused \
+	resources=wasmtime/resources simple=wasmtime/simple types=wasmtime/types
 
 .PHONY: build.component_testdata
-build.component_testdata:
+build.component_testdata: $(wasm_tools) $(wasm_tools_next)
 	@for s in $(component_wast_suites); do \
 		dir=$${s%%=*} url=$${s#*=} f=$${s##*/}; \
 		rm -rf $$dir && mkdir -p $$dir \
 		&& curl -sfSL --retry 5 --retry-all-errors $$url -o $$dir/$$f \
-		&& (cd $$dir && wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f) || exit 1; \
+		&& (cd $$dir && $(wasm_tools_next) json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f) || exit 1; \
 	done
 	@rm -rf $(wit_parser_ui_dir) && mkdir -p $(wit_parser_ui_dir)
 	@curl -sfSL --retry 5 --retry-all-errors \
 		https://codeload.github.com/bytecodealliance/wasm-tools/tar.gz/$(wasm_tools_tests_version) \
 		| tar -xzf - -C $(wit_parser_ui_dir) --strip-components 5 \
 			wasm-tools-$(wasm_tools_tests_version)/crates/wit-parser/tests/ui
-	@sh component/wit/testdata/gen-oracle.sh
+	@PATH="$(dir $(wasm_tools_next)):$$PATH" sh component/wit/testdata/gen-oracle.sh
+	@rm -rf $(component_model_dir) && mkdir -p $(component_model_dir)
+	@curl -fsSL --retry 5 --retry-all-errors \
+		https://codeload.github.com/WebAssembly/component-model/tar.gz/$(component_model_conformance_version) \
+		| tar -xzf - -C $(component_model_dir) --strip-components 1 \
+			component-model-$(component_model_conformance_version)/test \
+			component-model-$(component_model_conformance_version)/design/mvp/canonical-abi/definitions.py
+	@for s in $(component_conformance_suites); do \
+		rm -rf $(component_wast_dir)/$${s%%=*} && mkdir -p $(component_wast_dir)/$${s%%=*} \
+		&& cp $(component_model_dir)/test/$${s#*=}.wast $(component_wast_dir)/$${s%%=*}/ || exit 1; \
+	done
+	@for f in $(component_model_dir)/test/async/*.wast; do \
+		s=$$(basename $$f .wast); [ $$s = sync-streams ] && continue; \
+		rm -rf $(component_async_dir)/$$s && mkdir -p $(component_async_dir)/$$s && cp $$f $(component_async_dir)/$$s/; \
+	done
+	@for d in $(foreach s,$(component_conformance_suites),$(component_wast_dir)/$(firstword $(subst =, ,$(s)))) \
+		$(component_async_dir)/*; do \
+		[ $$(basename $$d) = sync-streams ] && continue; \
+		(cd $$d && $(wasm_tools) json-from-wast --wasm-dir . -o $$(basename $$d).json $$(basename $$d).wast) || exit 1; \
+	done
+	@$(call clean_fetched,imports/wasip2/testdata/component-model)
+	@cp $(component_wast_dir)/resources/resources.20.wasm imports/wasip2/testdata/component-model/
+	@cp $(component_model_dir)/design/mvp/canonical-abi/definitions.py internal/component/abi/testdata/
 
 # Builds one build image and tests it: its samples are built in the image,
 # validated, and run under wazy from this checkout. See build-images/README.md.

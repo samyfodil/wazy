@@ -1,0 +1,5 @@
+# Fetched by `make build.component_testdata`, but for sync-streams, which carries a local fix (see
+# the Makefile). The tests embed the directory, so this file keeps it in the tree.
+/*
+!/.gitignore
+!/sync-streams/

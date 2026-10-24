@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generates testdata/oracle_values_golden.json from testdata/oracle_values.json by
-storing component model values into memory using the vendored canonical-ABI reference
+storing component model values into memory using the fetched canonical-ABI reference
 implementation and capturing the resulting bytes and load round-trips.
 
 This is the reference (Python) half of the value differential oracle: values_oracle_test.go
@@ -22,7 +22,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def load_definitions():
-    """Import the vendored definitions.py as a module named 'refabi'."""
+    """Import the fetched definitions.py as a module named 'refabi'."""
     path = os.path.join(HERE, "definitions.py")
     spec = importlib.util.spec_from_file_location("refabi", path)
     mod = importlib.util.module_from_spec(spec)

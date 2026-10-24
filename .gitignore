@@ -58,6 +58,7 @@ zig-out/
 /internal/component/instance/testdata/wast/wasm-tools-virtualize/
 /internal/component/instance/testdata/wast/wasmtime-nested/
 /internal/component/instance/testdata/wast/wasmtime-restrictions/
+/internal/component/abi/testdata/definitions.py
 
 # Fetched by `make build.spectest`. The suites that are fetched whole are ignored by a .gitignore in
 # their testdata/, which also keeps the directory their tests embed.
