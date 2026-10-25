@@ -1232,6 +1232,9 @@ func (ce *callEngine) Call(ctx context.Context, params ...uint64) (results []uin
 	if n := ft.ParamNumInUint64; n != len(params) {
 		return nil, fmt.Errorf("expected %d params, but passed %d", n, len(params))
 	}
+	if ce.inFlight {
+		return ce.reentrant(ctx, params, nil)
+	}
 	return ce.call(ctx, params, nil)
 }
 
@@ -1241,17 +1244,25 @@ func (ce *callEngine) CallWithStack(ctx context.Context, stack []uint64) error {
 	if err != nil {
 		return err
 	}
-	_, err = ce.call(ctx, params, results)
+	if ce.inFlight {
+		_, err = ce.reentrant(ctx, params, results)
+	} else {
+		_, err = ce.call(ctx, params, results)
+	}
 	return err
+}
+
+// reentrant runs a call on a fresh engine, ce having one in flight already.
+// Call and CallWithStack test inFlight themselves rather than call: one more
+// return there pushes its defers off Go's open-coded path onto the defer stack.
+func (ce *callEngine) reentrant(ctx context.Context, params, results []uint64) ([]uint64, error) {
+	nested := &callEngine{f: ce.f}
+	ce.f.moduleInstance.RegisterCallSlot(&nested.slot)
+	return nested.call(ctx, params, results)
 }
 
 func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []uint64, err error) {
 	m := ce.f.moduleInstance
-	if ce.inFlight {
-		nested := &callEngine{f: ce.f}
-		m.RegisterCallSlot(&nested.slot)
-		return nested.call(ctx, params, results)
-	}
 	if ce.f.parent.ensureTermination {
 		select {
 		case <-ctx.Done():

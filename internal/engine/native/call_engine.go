@@ -367,7 +367,13 @@ func (c *callEngine) Call(ctx context.Context, params ...uint64) ([]uint64, erro
 	}
 	paramResultSlice := make([]uint64, c.sizeOfParamResultSlice)
 	copy(paramResultSlice, params)
-	if err := c.callWithStack(ctx, paramResultSlice); err != nil {
+	var err error
+	if c.inFlight {
+		err = c.reentrant(ctx, paramResultSlice)
+	} else {
+		err = c.callWithStack(ctx, paramResultSlice)
+	}
+	if err != nil {
 		return nil, err
 	}
 	return paramResultSlice[:c.numberOfResults], nil
@@ -451,24 +457,31 @@ func (c *callEngine) CallWithStack(ctx context.Context, paramResultStack []uint6
 	if c.sizeOfParamResultSlice > len(paramResultStack) {
 		return fmt.Errorf("need %d params, but stack size is %d", c.sizeOfParamResultSlice, len(paramResultStack))
 	}
+	if c.inFlight {
+		return c.reentrant(ctx, paramResultStack)
+	}
 	return c.callWithStack(ctx, paramResultStack)
 }
 
-// CallWithStack implements api.Function.
-func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint64) (err error) {
-	// Reentrance: this handle already has a live invocation, so it cannot host
-	// a second one (see inFlight). Mint a sibling for the nested call -- exactly
-	// what the caller would have got from another ExportedFunction lookup --
-	// and run it there. Costs a bool test on the normal path.
-	if c.inFlight {
-		nested, ok := c.parent.NewFunction(c.indexInModule).(*callEngine)
-		if !ok {
-			// Unreachable: c is a callEngine, so its own index names a local
-			// (non-host) function and NewFunction returns a callEngine for it.
-			panic("BUG: reentrant call resolved to a non-callEngine")
-		}
-		return nested.callWithStack(ctx, paramResultStack)
+// reentrant runs a call on a handle that already has a live invocation, which
+// it cannot host (see inFlight): on a sibling minted for it -- exactly what the
+// caller would have got from another ExportedFunction lookup.
+//
+// Call and CallWithStack test inFlight themselves rather than callWithStack:
+// one more return there pushes its defers off Go's open-coded path onto the
+// defer stack, +38% instructions on a host-to-wasm call.
+func (c *callEngine) reentrant(ctx context.Context, paramResultStack []uint64) error {
+	nested, ok := c.parent.NewFunction(c.indexInModule).(*callEngine)
+	if !ok {
+		// Unreachable: c is a callEngine, so its own index names a local
+		// (non-host) function and NewFunction returns a callEngine for it.
+		panic("BUG: reentrant call resolved to a non-callEngine")
 	}
+	return nested.callWithStack(ctx, paramResultStack)
+}
+
+// callWithStack runs one call on c, which has none in flight.
+func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint64) (err error) {
 	snapshotEnabled := expctxkeys.SnapshotterEnabled.Load() && ctx.Value(expctxkeys.EnableSnapshotterKey{}) != nil
 	if snapshotEnabled {
 		ctx = context.WithValue(ctx, expctxkeys.SnapshotterKey{}, c)
