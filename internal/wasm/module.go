@@ -692,7 +692,11 @@ func (m *Module) validateMemory(memories []Memory, globals []GlobalType, enabled
 
 	// Constant expression can only reference imported globals.
 	// https://github.com/WebAssembly/spec/blob/5900d839f38641989a9d8df2df4aee0513365d39/test/core/data.wast#L84-L91
-	importedGlobals := globals[:m.ImportGlobalCount]
+	// An offset may name any global from 3.0 on, not just an imported one; see validateGlobals.
+	visible := globals[:m.ImportGlobalCount]
+	if readsDefinedGlobals(enabledFeatures) {
+		visible = globals
+	}
 	for i := range m.DataSection {
 		d := &m.DataSection[i]
 		if !d.IsPassive() {
@@ -701,11 +705,6 @@ func (m *Module) validateMemory(memories []Memory, globals []GlobalType, enabled
 			}
 			// An active data segment's offset is given in the index type of the
 			// memory it initializes: i64 for a 64-bit memory.
-			// An offset may name any global from 3.0 on, not just an imported one; see validateGlobals.
-			visible := importedGlobals
-			if readsDefinedGlobals(enabledFeatures) {
-				visible = globals
-			}
 			if err := m.validateConstExpression(visible, 0, &d.OffsetExpression, memories[d.MemoryIndex].IndexType()); err != nil {
 				return fmt.Errorf("calculate offset: %w", err)
 			}
