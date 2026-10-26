@@ -1,0 +1,3 @@
+# Fetched by `make build.spectest.exception_handling`. Only this file is committed: the tests embed the directory.
+*
+!.gitignore

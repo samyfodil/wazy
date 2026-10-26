@@ -6,6 +6,5 @@ import (
 
 // Testcases is exported for cross-process file cache tests.
 //
-//go:embed testdata/*.wasm
-//go:embed testdata/*.json
+//go:embed all:testdata
 var Testcases embed.FS

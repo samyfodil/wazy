@@ -10,9 +10,10 @@ import (
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/integration_test/spectest"
 	"github.com/samyfodil/wazy/internal/platform"
+	"github.com/samyfodil/wazy/internal/testing/upstream"
 )
 
-//go:embed testdata
+//go:embed all:testdata
 var testcases embed.FS
 
 const enabledFeatures = api.CoreFeaturesV2 | api.CoreFeatureExceptionHandling | api.CoreFeatureTailCall | api.CoreFeatureTypedFunctionReferences
@@ -21,12 +22,14 @@ func TestCompiler(t *testing.T) {
 	if !platform.CompilerSupported() {
 		t.Skip()
 	}
+	upstream.Require(t, testcases, "testdata/*.json", "build.spectest.exception_handling")
 	ctx := context.Background()
 	config := wazy.NewRuntimeConfigCompiler().WithCoreFeatures(enabledFeatures)
 	runCases(t, ctx, config)
 }
 
 func TestInterpreter(t *testing.T) {
+	upstream.Require(t, testcases, "testdata/*.json", "build.spectest.exception_handling")
 	ctx := context.Background()
 	config := wazy.NewRuntimeConfigInterpreter().WithCoreFeatures(enabledFeatures)
 	runCases(t, ctx, config)

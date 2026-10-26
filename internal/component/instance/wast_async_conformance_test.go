@@ -94,6 +94,7 @@ func asyncWastSuites(t *testing.T) []string {
 // harness bug rather than a conformance result.
 func runAsyncWastSuite(t *testing.T, suite string) bool {
 	dir := path.Join("testdata", "wast-async", suite)
+	requireFetched(t, wastAsyncFS, dir)
 	raw, err := wastAsyncFS.ReadFile(path.Join(dir, suite+".json"))
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)

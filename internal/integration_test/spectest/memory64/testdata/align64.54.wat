@@ -1,1 +1,0 @@
-(module (memory i64 0) (func (i32.store16 align=7 (i64.const 0) (i32.const 0)))) 

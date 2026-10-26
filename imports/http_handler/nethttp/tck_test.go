@@ -28,7 +28,7 @@ func TestTCK(t *testing.T) {
 			// Everything here is scoped to this subtest: tck.Run marks it
 			// parallel, so it resumes after TestTCK itself returns, and a
 			// middleware closed in the parent would already be gone.
-			mw, err := NewMiddleware(ctx, tck.GuestWASM)
+			mw, err := NewMiddleware(ctx, tck.Guest(t))
 			if err != nil {
 				t.Fatal(err)
 			}

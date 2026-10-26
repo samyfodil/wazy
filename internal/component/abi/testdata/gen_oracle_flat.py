@@ -28,7 +28,7 @@ import struct
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 def load_definitions():
-    """Import the vendored definitions.py as a module."""
+    """Import the fetched definitions.py as a module."""
     path = os.path.join(HERE, "definitions.py")
     spec = importlib.util.spec_from_file_location("refabi", path)
     mod = importlib.util.module_from_spec(spec)

@@ -1,0 +1,3 @@
+# WebAssembly/WASI's WIT, fetched by `make build.wasi_testdata`. Only this file is committed: the tests embed the directory.
+*
+!.gitignore

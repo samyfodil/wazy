@@ -52,6 +52,12 @@ Use the Makefile; it encodes the real invocations.
 - **Fresh-checkout CI:** some integration suites (libsodium, stdlibs) download or
   compile fixtures into git-ignored `testdata/` dirs. Code that `//go:embed`s such a
   dir must sit behind a build tag, or a clean checkout won't compile.
+- **Upstream test data is fetched, not committed:** spec, proposal, WASI, Component
+  Model and other projects' suites come from where they live, at a pin, via
+  `make build.testdata` (pinned wabt/wasm-tools included). A test reading them goes
+  through `internal/testing/upstream`, which skips without them and fails in CI. An
+  embedded directory that holds only fetched files keeps a `.gitignore` of its own,
+  so the embed compiles on a clean checkout.
 - **Host functions:** use the generic, reflection-free `HostFunc0..16` / `HostProc0..16`
   in `host_typed.go`. Do not reintroduce `reflect`-based host dispatch.
 - **Component value shapes:** a `record`/`tuple` is a `[]Value` in declaration order,
