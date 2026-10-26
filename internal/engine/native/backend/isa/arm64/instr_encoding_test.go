@@ -1023,6 +1023,10 @@ func TestInstruction_encode(t *testing.T) {
 		{want: "60033fd6", setup: func(i *instruction) {
 			i.asCallIndirect(tmpRegVReg, nil)
 		}},
+		// mov x27, x8; str x30, [x27, #744]; ldr x30, [x27, #88]; blr x30.
+		{want: "fb0308aa7e7701f97e2f40f9c0033fd6", setup: func(i *instruction) {
+			i.asYield(x8VReg)
+		}},
 		{want: "fb633bcb", setup: func(i *instruction) {
 			i.asALU(aluOpSub, tmpRegVReg, operandNR(spVReg), operandNR(tmpRegVReg), true)
 		}},
@@ -1337,6 +1341,19 @@ func TestInstruction_encode(t *testing.T) {
 		{want: "01040034", setup: func(i *instruction) {
 			i.asCondBr(registerAsRegZeroCond(x1VReg), dummyLabel, false)
 			i.condBrOffsetResolve(0x80)
+		}},
+		// tbnz x1, #63, #0x80; tbz x1, #63, #0x80; tbnz x1, #63, #-0x80.
+		{want: "0104f8b7", setup: func(i *instruction) {
+			i.asCondBr(registerAsSignBitCond(x1VReg, true), dummyLabel, true)
+			i.condBrOffsetResolve(0x80)
+		}},
+		{want: "0104f8b6", setup: func(i *instruction) {
+			i.asCondBr(registerAsSignBitCond(x1VReg, false), dummyLabel, true)
+			i.condBrOffsetResolve(0x80)
+		}},
+		{want: "01fcffb7", setup: func(i *instruction) {
+			i.asCondBr(registerAsSignBitCond(x1VReg, true), dummyLabel, true)
+			i.condBrOffsetResolve(-0x80)
 		}},
 		{want: "010400b4", setup: func(i *instruction) {
 			i.asCondBr(registerAsRegZeroCond(x1VReg), dummyLabel, true)

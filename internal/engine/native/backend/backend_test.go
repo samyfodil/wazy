@@ -307,75 +307,307 @@ L1 (SSA Block: blk1):
 `,
 		},
 		{
+			name: "loop_counted", m: testcases.LoopCounted.Module,
+			afterFinalizeARM64: `
+L0 (SSA Block: blk0):
+	stp x30, xzr, [sp, #-0x10]!
+	str xzr, [sp, #-0x10]!
+	load_const_block_arg x8, 0x0
+	mov x8, xzr
+L1 (SSA Block: blk1):
+	ands wzr, w8, #0xfff
+	b.eq #0x38, (L8)
+L9:
+L4 (SSA Block: blk4):
+	add w8, w8, #0x1
+	orr w9, wzr, #0x1
+	cbnz w9, #0x8 (L6)
+	b #0x8 (L5)
+L6 (SSA Block: blk6):
+	b #-0x18 (L1)
+L5 (SSA Block: blk5):
+	add sp, sp, #0x10
+	ldr x30, [sp], #0x10
+	ret
+L3 (SSA Block: blk3):
+	yield x0
+	b #-0x38 (L1)
+L8:
+	ldr x27, [x21]
+	tbnz x27, #63, #-0x18 (L3)
+	b #-0x3c (L9)
+`,
+			afterFinalizeAMD64: `
+L0 (SSA Block: blk0):
+	pushq %rbp
+	movq %rsp, %rbp
+	pushq %rdx
+	xor %rcx, %rcx
+L1 (SSA Block: blk1):
+	testl $4095, %ecx
+	jz L8
+L9:
+L4 (SSA Block: blk4):
+	lea 1(%rcx), %ecx
+	movl $1, %edx
+	testl %edx, %edx
+	jnz L6
+	jmp L5
+L6 (SSA Block: blk6):
+	jmp L1
+L5 (SSA Block: blk5):
+	popq %rdx
+	movq %rbp, %rsp
+	popq %rbp
+	ret
+L3 (SSA Block: blk3):
+	yield *88(%rax)
+	jmp L1
+L8:
+	testb $0x80, 7(%r13)
+	jnz L3
+	jmp L9
+`,
+		},
+		{
+			name: "loop_bounded", m: testcases.LoopBounded.Module,
+			afterFinalizeARM64: `
+L0 (SSA Block: blk0):
+	stp x30, xzr, [sp, #-0x10]!
+	str xzr, [sp, #-0x10]!
+	ldr x8, [x21]
+	tbnz x8, #63, #0x28 (L6)
+L7 (SSA Block: blk7):
+	load_const_block_arg x8, 0x0
+	mov x8, xzr
+L1 (SSA Block: blk1):
+L4 (SSA Block: blk4):
+	add w8, w8, #0x1
+	subs wzr, w8, #0x64
+	b.lo #0x8, (L8)
+	b #0x8 (L5)
+L8 (SSA Block: blk8):
+	b #-0x10 (L1)
+L5 (SSA Block: blk5):
+	add sp, sp, #0x10
+	ldr x30, [sp], #0x10
+	ret
+L6 (SSA Block: blk6):
+	yield x0
+	load_const_block_arg x8, 0x0
+	mov x8, xzr
+	b #-0x34 (L1)
+`,
+			afterFinalizeAMD64: `
+L0 (SSA Block: blk0):
+	pushq %rbp
+	movq %rsp, %rbp
+	testb $0x80, 7(%r13)
+	jnz L6
+L7 (SSA Block: blk7):
+	xor %rax, %rax
+L1 (SSA Block: blk1):
+L4 (SSA Block: blk4):
+	lea 1(%rax), %eax
+	cmpl $100, %eax
+	jb L8
+	jmp L5
+L8 (SSA Block: blk8):
+	jmp L1
+L5 (SSA Block: blk5):
+	movq %rbp, %rsp
+	popq %rbp
+	ret
+L6 (SSA Block: blk6):
+	yield *88(%rax)
+	xor %rax, %rax
+	jmp L1
+`,
+		},
+		{
+			name: "loop_count_down", m: testcases.LoopCountDown.Module,
+			afterFinalizeARM64: `
+L0 (SSA Block: blk0):
+	stp x30, xzr, [sp, #-0x10]!
+	str xzr, [sp, #-0x10]!
+	ldr x8, [x21]
+	tbnz x8, #63, #0x34 (L7)
+L8 (SSA Block: blk8):
+L2 (SSA Block: blk2):
+	ands wzr, w2, #0xfff
+	b.eq #0x40, (L10)
+L11:
+L5 (SSA Block: blk5):
+L6 (SSA Block: blk6):
+	sub w2, w2, #0x1
+	b #-0xc (L2)
+L1 (SSA Block: blk1):
+	add sp, sp, #0x10
+	ldr x30, [sp], #0x10
+	ret
+L4 (SSA Block: blk4):
+	yield x0
+	b #-0x2c (L2)
+L7 (SSA Block: blk7):
+	yield x0
+	b #-0x40 (L2)
+L10:
+	ldr x27, [x21]
+	tbnz x27, #63, #-0x2c (L4)
+	subs wzr, w2, #0x0
+	b.eq #-0x40, (L1)
+	b #-0x4c (L11)
+`,
+			// The loop's test for zero moved into the island (L8), after the
+			// preemption check: the masked test sees every zero.
+			afterFinalizeAMD64: `
+L0 (SSA Block: blk0):
+	pushq %rbp
+	movq %rsp, %rbp
+	testb $0x80, 7(%r13)
+	jnz L7
+L8 (SSA Block: blk8):
+L2 (SSA Block: blk2):
+	testl $4095, %ecx
+	jz L10
+L11:
+L5 (SSA Block: blk5):
+L6 (SSA Block: blk6):
+	sub $1, %ecx
+	jmp L2
+L1 (SSA Block: blk1):
+	movq %rbp, %rsp
+	popq %rbp
+	ret
+L4 (SSA Block: blk4):
+	yield *88(%rax)
+	jmp L2
+L7 (SSA Block: blk7):
+	yield *88(%rax)
+	jmp L2
+L10:
+	testb $0x80, 7(%r13)
+	jnz L4
+	cmpl $0, %ecx
+	jz L1
+	jmp L11
+`,
+		},
+		{
 			name: "loop_br", m: testcases.LoopBr.Module,
 			afterLoweringARM64: `
 L0 (SSA Block: blk0):
+	mov x128?, x0
 L1 (SSA Block: blk1):
+	ldr x131?, [x21]
+	tbnz x131?, #63, L3
+L5 (SSA Block: blk5):
+L4 (SSA Block: blk4):
 	b L1
+L3 (SSA Block: blk3):
+	yield x128?
+	b L4
 `,
 			afterFinalizeARM64: `
 L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
 	str xzr, [sp, #-0x10]!
 L1 (SSA Block: blk1):
-	b #0x0 (L1)
+	ldr x8, [x21]
+	tbnz x8, #63, #0x8 (L3)
+L5 (SSA Block: blk5):
+L4 (SSA Block: blk4):
+	b #-0x8 (L1)
+L3 (SSA Block: blk3):
+	yield x0
+	b #-0x14 (L4)
 `,
 		},
 		{
 			name: "loop_with_param_results", m: testcases.LoopBrWithParamResults.Module,
 			afterLoweringARM64: `
 L0 (SSA Block: blk0):
+	mov x128?, x0
 	mov x130?, x2
 L1 (SSA Block: blk1):
-	orr w133?, wzr, #0x1
-	cbz w133?, (L3)
+	ldr x134?, [x21]
+	tbnz x134?, #63, L3
+L6 (SSA Block: blk6):
 L4 (SSA Block: blk4):
+	orr w135?, wzr, #0x1
+	cbz w135?, (L5)
+L7 (SSA Block: blk7):
 	b L1
-L3 (SSA Block: blk3):
+L5 (SSA Block: blk5):
 	mov x0, x130?
 	ret
+L3 (SSA Block: blk3):
+	yield x128?
+	b L4
 `,
 			afterFinalizeARM64: `
 L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
 	str xzr, [sp, #-0x10]!
 L1 (SSA Block: blk1):
-	orr w8, wzr, #0x1
-	cbz w8, #0x8 L3
+	ldr x8, [x21]
+	tbnz x8, #63, #0x20 (L3)
+L6 (SSA Block: blk6):
 L4 (SSA Block: blk4):
-	b #-0x8 (L1)
-L3 (SSA Block: blk3):
+	orr w8, wzr, #0x1
+	cbz w8, #0x8 L5
+L7 (SSA Block: blk7):
+	b #-0x10 (L1)
+L5 (SSA Block: blk5):
 	mov x0, x2
 	add sp, sp, #0x10
 	ldr x30, [sp], #0x10
 	ret
+L3 (SSA Block: blk3):
+	yield x0
+	b #-0x2c (L4)
 `,
 		},
 		{
 			name: "loop_br_if", m: testcases.LoopBrIf.Module,
 			afterLoweringARM64: `
 L0 (SSA Block: blk0):
+	mov x128?, x0
 L1 (SSA Block: blk1):
-	orr w131?, wzr, #0x1
-	cbz w131?, (L3)
+	ldr x132?, [x21]
+	tbnz x132?, #63, L3
+L6 (SSA Block: blk6):
 L4 (SSA Block: blk4):
+	orr w133?, wzr, #0x1
+	cbz w133?, (L5)
+L7 (SSA Block: blk7):
 	b L1
-L3 (SSA Block: blk3):
+L5 (SSA Block: blk5):
 	ret
+L3 (SSA Block: blk3):
+	yield x128?
+	b L4
 `,
 			afterFinalizeARM64: `
 L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
 	str xzr, [sp, #-0x10]!
 L1 (SSA Block: blk1):
-	orr w8, wzr, #0x1
-	cbz w8, #0x8 L3
+	ldr x8, [x21]
+	tbnz x8, #63, #0x1c (L3)
+L6 (SSA Block: blk6):
 L4 (SSA Block: blk4):
-	b #-0x8 (L1)
-L3 (SSA Block: blk3):
+	orr w8, wzr, #0x1
+	cbz w8, #0x8 L5
+L7 (SSA Block: blk7):
+	b #-0x10 (L1)
+L5 (SSA Block: blk5):
 	add sp, sp, #0x10
 	ldr x30, [sp], #0x10
 	ret
+L3 (SSA Block: blk3):
+	yield x0
+	b #-0x28 (L4)
 `,
 		},
 		{
@@ -527,6 +759,7 @@ L3 (SSA Block: blk3):
 L0 (SSA Block: blk0):
 	mov x130?, x2
 L1 (SSA Block: blk1):
+L4 (SSA Block: blk4):
 	mov x0, x130?
 	ret
 `,
@@ -535,6 +768,7 @@ L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
 	str xzr, [sp, #-0x10]!
 L1 (SSA Block: blk1):
+L4 (SSA Block: blk4):
 	mov x0, x2
 	add sp, sp, #0x10
 	ldr x30, [sp], #0x10
@@ -545,29 +779,45 @@ L1 (SSA Block: blk1):
 			name: "reference_value_from_unsealed_block2", m: testcases.ReferenceValueFromUnsealedBlock2.Module,
 			afterLoweringARM64: `
 L0 (SSA Block: blk0):
+	mov x128?, x0
 	mov x130?, x2
 L1 (SSA Block: blk1):
-	cbz w130?, (L4)
-L5 (SSA Block: blk5):
-	b L1
+	ldr x133?, [x21]
+	tbnz x133?, #63, L3
+L7 (SSA Block: blk7):
 L4 (SSA Block: blk4):
-	mov x131?, xzr
-	mov x0, x131?
+	cbz w130?, (L6)
+L8 (SSA Block: blk8):
+	b L1
+L6 (SSA Block: blk6):
+	mov x132?, xzr
+	mov x0, x132?
 	ret
+L3 (SSA Block: blk3):
+	yield x128?
+	b L4
 `,
 			afterFinalizeARM64: `
 L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
 	str xzr, [sp, #-0x10]!
 L1 (SSA Block: blk1):
-	cbz w2, #0x8 L4
-L5 (SSA Block: blk5):
-	b #-0x4 (L1)
+	ldr x8, [x21]
+	tbnz x8, #63, #0x20 (L3)
+L7 (SSA Block: blk7):
 L4 (SSA Block: blk4):
-	mov x0, xzr
+	cbz w2, #0x8 L6
+L8 (SSA Block: blk8):
+	b #-0xc (L1)
+L6 (SSA Block: blk6):
+	mov x8, xzr
+	mov x0, x8
 	add sp, sp, #0x10
 	ldr x30, [sp], #0x10
 	ret
+L3 (SSA Block: blk3):
+	yield x0
+	b #-0x2c (L4)
 `,
 		},
 		{
@@ -575,32 +825,47 @@ L4 (SSA Block: blk4):
 			// TODO: we should be able to invert cbnz in so that L2 can end with fallthrough. investigate builder.LayoutBlocks function.
 			afterLoweringARM64: `
 L0 (SSA Block: blk0):
+	mov x128?, x0
 	mov x130?, x2
 	mov x131?, x130?
 L1 (SSA Block: blk1):
-	cbnz w131?, L5
-	b L4
-L5 (SSA Block: blk5):
-	ret
+	ldr x134?, [x21]
+	tbnz x134?, #63, L3
+L7 (SSA Block: blk7):
 L4 (SSA Block: blk4):
+	cbnz w131?, L8
+	b L6
+L8 (SSA Block: blk8):
+	ret
+L6 (SSA Block: blk6):
 	load_const_block_arg x131?, 0x1
 	b L1
+L3 (SSA Block: blk3):
+	yield x128?
+	b L4
 `,
 			afterFinalizeARM64: `
 L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
 	str xzr, [sp, #-0x10]!
 L1 (SSA Block: blk1):
-	cbnz w2, #0x8 (L5)
-	b #0x10 (L4)
-L5 (SSA Block: blk5):
+	ldr x8, [x21]
+	tbnz x8, #63, #0x20 (L3)
+L7 (SSA Block: blk7):
+L4 (SSA Block: blk4):
+	cbnz w2, #0x8 (L8)
+	b #0x10 (L6)
+L8 (SSA Block: blk8):
 	add sp, sp, #0x10
 	ldr x30, [sp], #0x10
 	ret
-L4 (SSA Block: blk4):
+L6 (SSA Block: blk6):
 	load_const_block_arg x2, 0x1
 	orr w2, wzr, #0x1
-	b #-0x18 (L1)
+	b #-0x20 (L1)
+L3 (SSA Block: blk3):
+	yield x0
+	b #-0x2c (L4)
 `,
 		},
 		{
@@ -1593,17 +1858,24 @@ L0 (SSA Block: blk0):
 	mov x128?, x0
 	mov x129?, x1
 	mov x130?, x2
+	ldr x135?, [x21]
+	tbnz x135?, #63, L1
+L3 (SSA Block: blk3):
+L2 (SSA Block: blk2):
 	str x129?, [x128?, #0x8]
-	ldr x131?, [x129?, #0x8]
-	ldr x132?, [x129?, #0x10]
+	ldr x132?, [x129?, #0x8]
+	ldr x133?, [x129?, #0x10]
 	mov x0, x128?
-	mov x1, x132?
+	mov x1, x133?
 	mov x2, x130?
 	mov x3, x130?
-	bl x131?
-	mov x133?, x0
-	mov x0, x133?
+	bl x132?
+	mov x134?, x0
+	mov x0, x134?
 	ret
+L1 (SSA Block: blk1):
+	yield x128?
+	b L2
 `,
 			afterFinalizeARM64: `
 L0 (SSA Block: blk0):
@@ -1612,6 +1884,10 @@ L0 (SSA Block: blk0):
 	orr x27, xzr, #0x10
 	str x27, [sp, #-0x10]!
 	str w2, [sp, #0x10]
+	ldr x8, [x21]
+	tbnz x8, #63, #0x2c (L1)
+L3 (SSA Block: blk3):
+L2 (SSA Block: blk2):
 	str x1, [x0, #0x8]
 	ldr x8, [x1, #0x8]
 	ldr x1, [x1, #0x10]
@@ -1622,6 +1898,9 @@ L0 (SSA Block: blk0):
 	add sp, sp, #0x10
 	ldr x30, [sp], #0x10
 	ret
+L1 (SSA Block: blk1):
+	yield x0
+	b #-0x38 (L2)
 `,
 		},
 		{
@@ -2232,23 +2511,27 @@ L0 (SSA Block: blk0):
 	pushq %rbp
 	movq %rsp, %rbp
 	pushq %rdx
-	cmpl $0, %ecx
-	jnz L2
-L1 (SSA Block: blk1):
-	jmp L3
+	testb $0x80, 7(%r13)
+	jnz L1
+L9 (SSA Block: blk9):
 L2 (SSA Block: blk2):
-	cmpl $1, %ecx
-	jnz L5
-L4 (SSA Block: blk4):
-L6 (SSA Block: blk6):
-	movl %esi, %edi
+	cmpl $0, %ecx
+	jnz L4
 L3 (SSA Block: blk3):
+	jmp L5
+L4 (SSA Block: blk4):
+	cmpl $1, %ecx
+	jnz L7
+L6 (SSA Block: blk6):
+L8 (SSA Block: blk8):
+	movl %esi, %edi
+L5 (SSA Block: blk5):
 	movl %edi, %eax
 	popq %rdx
 	movq %rbp, %rsp
 	popq %rbp
 	ret
-L5 (SSA Block: blk5):
+L7 (SSA Block: blk7):
 	sub $1, %ecx
 	lea (%rdi,%rsi,1), %edx
 	movl %esi, %edi
@@ -2257,27 +2540,34 @@ L5 (SSA Block: blk5):
 	movq %rbp, %rsp
 	popq %rbp
 	tailCall f0
+L1 (SSA Block: blk1):
+	yield *88(%rax)
+	jmp L2
 `,
 			afterFinalizeARM64: `
 L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
 	str xzr, [sp, #-0x10]!
-	subs wzr, w2, #0x0
-	b.ne #0x8, (L2)
-L1 (SSA Block: blk1):
-	b #0x10 (L3)
+	ldr x8, [x21]
+	tbnz x8, #63, #0x48 (L1)
+L9 (SSA Block: blk9):
 L2 (SSA Block: blk2):
-	subs wzr, w2, #0x1
-	b.ne #0x18, (L5)
-L4 (SSA Block: blk4):
-L6 (SSA Block: blk6):
-	mov x3, x4
+	subs wzr, w2, #0x0
+	b.ne #0x8, (L4)
 L3 (SSA Block: blk3):
+	b #0x10 (L5)
+L4 (SSA Block: blk4):
+	subs wzr, w2, #0x1
+	b.ne #0x18, (L7)
+L6 (SSA Block: blk6):
+L8 (SSA Block: blk8):
+	mov x3, x4
+L5 (SSA Block: blk5):
 	mov x0, x3
 	add sp, sp, #0x10
 	ldr x30, [sp], #0x10
 	ret
-L5 (SSA Block: blk5):
+L7 (SSA Block: blk7):
 	sub w2, w2, #0x1
 	add w8, w3, w4
 	mov x3, x4
@@ -2285,6 +2575,9 @@ L5 (SSA Block: blk5):
 	add sp, sp, #0x10
 	ldr x30, [sp], #0x10
 	b f0
+L1 (SSA Block: blk1):
+	yield x0
+	b #-0x54 (L2)
 `,
 		},
 		{
@@ -2603,7 +2896,7 @@ L7 (SSA Block: blk7):
 
 			ssab := ssa.NewBuilder()
 			offset := nativeapi.NewModuleContextOffsetData(tc.m, false)
-			fc := frontend.NewFrontendCompiler(tc.m, ssab, &offset, false, false, false)
+			fc := frontend.NewFrontendCompiler(tc.m, ssab, &offset, false, false)
 			machine := newMachine()
 			machine.DisableStackCheck()
 			be := backend.NewCompiler(context.Background(), machine, ssab)

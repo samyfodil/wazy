@@ -331,6 +331,10 @@ func (o operationKind) String() (ret string) {
 		ret = "GC"
 	case operationKindGCSafepoint:
 		ret = "GCSafepoint"
+	case operationKindBrCheck:
+		ret = "BrCheck"
+	case operationKindBrIfCheck:
+		ret = "BrIfCheck"
 	case operationKindTableGet:
 		ret = "TableGet"
 	case operationKindTableSet:
@@ -1214,6 +1218,12 @@ const (
 	// wasm.RunGC, which is shared with the native engine. See newOperationGC.
 	operationKindGC
 
+	// operationKindBrCheck and operationKindBrIfCheck are a br and a br_if into a loop whose header
+	// check they run themselves, jumping past it, so an iteration pays for one dispatch rather than
+	// two. Lowering makes them; see fuseChecks.
+	operationKindBrCheck
+	operationKindBrIfCheck
+
 	// operationKindEnd is always placed at the bottom of this iota definition to be used in the test.
 	operationKindEnd
 )
@@ -1363,6 +1373,12 @@ func (o unionOperation) String() string {
 		thenTarget := label(o.U1)
 		elseTarget := label(o.U2)
 		return fmt.Sprintf("%s %s, %s", o.Kind, thenTarget, elseTarget)
+
+	case operationKindBrCheck:
+		return fmt.Sprintf("%s %d", o.Kind, o.U1)
+
+	case operationKindBrIfCheck:
+		return fmt.Sprintf("%s %d, %d", o.Kind, o.U1, o.U2)
 
 	case operationKindBrTable:
 		// The targets/ranges live in the function's side table (index U3), which

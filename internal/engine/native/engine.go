@@ -64,8 +64,8 @@ type (
 		executable []byte
 		// memoryGrowAddress is the address of memory.grow builtin function.
 		memoryGrowAddress *byte
-		// checkModuleExitCodeAddress is the address of checking module instance exit code.
-		// This is used when ensureTermination is true.
+		// checkModuleExitCodeAddress is the address of the trampoline preemption checks
+		// return to Go through. See nativeapi.ExitCodeCheckModuleExitCode.
 		checkModuleExitCodeAddress *byte
 		// stackGrowAddress is the address of growing stack builtin function.
 		stackGrowAddress *byte
@@ -105,10 +105,9 @@ type (
 	compiledModule struct {
 		*executables
 		// functionOffsets maps a local function index to the offset in the executable.
-		functionOffsets   []int
-		parent            *engine
-		module            *wasm.Module
-		ensureTermination bool
+		functionOffsets []int
+		parent          *engine
+		module          *wasm.Module
 		// funcrefSlots assigns a dense slot to each local function a funcref can name, so a
 		// moduleEngine memoizes one functionInstance per slot and finds it by index rather than
 		// by scanning. Built once per compiled module, lazily; see funcrefSlotsOf.
@@ -181,12 +180,12 @@ func NewEngine(ctx context.Context, enabledFeatures api.CoreFeatures, fc filecac
 }
 
 // HasCompiledModule implements wasm.Engine.
-func (e *engine) HasCompiledModule(module *wasm.Module, listeners []api.FunctionListener, ensureTermination bool) (bool, error) {
+func (e *engine) HasCompiledModule(module *wasm.Module, listeners []api.FunctionListener) (bool, error) {
 	if nativeapi.PerfMapEnabled {
 		nativeapi.PerfMap.Lock()
 		defer nativeapi.PerfMap.Unlock()
 	}
-	_, ok, err := e.getCompiledModule(module, listeners, ensureTermination)
+	_, ok, err := e.getCompiledModule(module, listeners)
 	if ok {
 		releaseFunctionBodies(module)
 	}
@@ -208,7 +207,7 @@ func releaseFunctionBodies(module *wasm.Module) {
 }
 
 // CompileModule implements wasm.Engine.
-func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listeners []api.FunctionListener, ensureTermination bool) (err error) {
+func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listeners []api.FunctionListener) (err error) {
 	// Deferred first so that it runs last, after a recovered panic has set err.
 	defer func() {
 		if err == nil {
@@ -234,7 +233,7 @@ func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listene
 		defer nativeapi.PerfMap.Unlock()
 	}
 
-	if _, ok, err := e.getCompiledModule(module, listeners, ensureTermination); ok { // cache hit!
+	if _, ok, err := e.getCompiledModule(module, listeners); ok { // cache hit!
 		return nil
 	} else if err != nil {
 		return err
@@ -243,7 +242,7 @@ func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listene
 	if nativeapi.DeterministicCompilationVerifierEnabled {
 		ctx = nativeapi.NewDeterministicCompilationVerifierContext(ctx, len(module.CodeSection))
 	}
-	cm, err := e.compileModule(ctx, module, listeners, ensureTermination)
+	cm, err := e.compileModule(ctx, module, listeners)
 	if err != nil {
 		return err
 	}
@@ -253,7 +252,7 @@ func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listene
 
 	if nativeapi.DeterministicCompilationVerifierEnabled {
 		for i := 0; i < nativeapi.DeterministicCompilationVerifyingIter; i++ {
-			_, err := e.compileModule(ctx, module, listeners, ensureTermination)
+			_, err := e.compileModule(ctx, module, listeners)
 			if err != nil {
 				return err
 			}
@@ -339,7 +338,7 @@ func acquireCompileUnit() *compileUnit {
 	return &compileUnit{machine: machine, builder: builder, be: backend.NewCompiler(context.Background(), machine, builder)}
 }
 
-func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listeners []api.FunctionListener, ensureTermination bool) (*compiledModule, error) {
+func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listeners []api.FunctionListener) (*compiledModule, error) {
 	if module.IsHostModule {
 		return e.compileHostModule(ctx, module, listeners)
 	}
@@ -347,8 +346,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 	withListener := len(listeners) > 0
 	cm := &compiledModule{
 		offsets: nativeapi.NewModuleContextOffsetData(module, withListener), parent: e, module: module,
-		ensureTermination: ensureTermination,
-		executables:       &executables{},
+		executables: &executables{},
 	}
 
 	importedFns, localFns := int(module.ImportFunctionCount), len(module.FunctionSection)
@@ -380,7 +378,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 
 	if workers := api.GetCompilationWorkers(ctx); workers <= 1 {
 		// Compile with a single goroutine.
-		fe := frontend.NewFrontendCompiler(module, ssaBuilder, &cm.offsets, ensureTermination, withListener, needSourceInfo)
+		fe := frontend.NewFrontendCompiler(module, ssaBuilder, &cm.offsets, withListener, needSourceInfo)
 		fe.SetGCEnabled(e.gcSafepoints())
 
 		for i := range module.CodeSection {
@@ -441,7 +439,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 				defer compileUnits.Put(unit)
 				ssaBuilder, be := unit.builder, unit.be
 				fe := frontend.NewFrontendCompiler(
-					module, ssaBuilder, &cm.offsets, ensureTermination, withListener, needSourceInfo).
+					module, ssaBuilder, &cm.offsets, withListener, needSourceInfo).
 					WithTryTableMetadata(sharedTTM)
 				fe.SetGCEnabled(e.gcSafepoints())
 
@@ -1090,11 +1088,7 @@ func (e *engine) compileSharedFunctions() {
 		}, false))
 
 	be.Init()
-	addTrampoline(2,
-		machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeCheckModuleExitCode, &ssa.Signature{
-			Params:  []ssa.Type{ssa.TypeI32 /* exec context */},
-			Results: []ssa.Type{ssa.TypeI32},
-		}, false))
+	addTrampoline(2, machine.CompileYieldTrampoline())
 
 	be.Init()
 	addTrampoline(3,

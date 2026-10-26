@@ -785,6 +785,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				return fmt.Errorf("invalid function index")
 			}
 			m.mayThrow.call(idx, index)
+			m.entryChecks.call(idx, index)
 
 			var opcodeName string
 			if op == OpcodeCall {
@@ -806,6 +807,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			}
 		} else if op == OpcodeCallIndirect || op == OpcodeTailCallReturnCallIndirect {
 			m.mayThrow.throws(idx)
+			m.entryChecks.callIndirect(idx)
 			pc++
 			typeIndex, num, err := leb128.LoadUint32(body[pc:])
 			if err != nil {
@@ -862,6 +864,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			}
 		} else if op == OpcodeCallRef || op == OpcodeReturnCallRef {
 			m.mayThrow.throws(idx)
+			m.entryChecks.callIndirect(idx)
 			if err := enabledFeatures.RequireEnabled(api.CoreFeatureTypedFunctionReferences); err != nil {
 				return fmt.Errorf("%s invalid as %v", instructionNames[op], err)
 			}
@@ -1328,6 +1331,10 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			// change the alias type of OpcodeMisc (which is currently byte) to uint32.
 			if uint32(byte(miscOp32)) != miscOp32 {
 				return fmt.Errorf("invalid misc opcode: %#x", miscOp32)
+			}
+			switch miscOpcode {
+			case OpcodeMiscMemoryInit, OpcodeMiscMemoryCopy, OpcodeMiscMemoryFill, OpcodeMiscTableInit, OpcodeMiscTableCopy, OpcodeMiscTableFill:
+				m.entryChecks.markUnbounded(idx)
 			}
 			if miscOpcode >= OpcodeMiscI32TruncSatF32S && miscOpcode <= OpcodeMiscI64TruncSatF64U {
 				if err := enabledFeatures.RequireEnabled(api.CoreFeatureNonTrappingFloatToIntConversion); err != nil {
@@ -2372,6 +2379,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				return fmt.Errorf("invalid atomic opcode: 0x%x", atomicOpcode)
 			}
 		} else if op == OpcodeLoop {
+			m.entryChecks.markUnbounded(idx)
 			bt, num, err := decodeBlockTypeFast(m.TypeSection, body, pc+1, enabledFeatures, br)
 			if err != nil {
 				return fmt.Errorf("read block: %w", err)

@@ -178,7 +178,7 @@ func TestCompile(t *testing.T) {
 			for _, tp := range tc.module.TypeSection {
 				tp.CacheNumInUint64()
 			}
-			c, err := newCompiler(enabledFeatures, 0, tc.module, false)
+			c, err := newCompiler(enabledFeatures, 0, tc.module)
 			require.NoError(t, err)
 
 			fn, err := c.Next()
@@ -298,7 +298,7 @@ func TestCompile_BulkMemoryOperations(t *testing.T) {
 		Types:            []wasm.FunctionType{v_v},
 	}
 
-	c, err := newCompiler(api.CoreFeatureBulkMemoryOperations, 0, module, false)
+	c, err := newCompiler(api.CoreFeatureBulkMemoryOperations, 0, module)
 	require.NoError(t, err)
 
 	actual, err := c.Next()
@@ -564,7 +564,7 @@ func TestCompile_MultiValue(t *testing.T) {
 			for _, tp := range tc.module.TypeSection {
 				tp.CacheNumInUint64()
 			}
-			c, err := newCompiler(enabledFeatures, 0, tc.module, false)
+			c, err := newCompiler(enabledFeatures, 0, tc.module)
 			require.NoError(t, err)
 
 			actual, err := c.Next()
@@ -599,7 +599,7 @@ func TestCompile_NonTrappingFloatToIntConversion(t *testing.T) {
 		Functions: []wasm.Index{0},
 		Types:     []wasm.FunctionType{f32_i32},
 	}
-	c, err := newCompiler(api.CoreFeatureNonTrappingFloatToIntConversion, 0, module, false)
+	c, err := newCompiler(api.CoreFeatureNonTrappingFloatToIntConversion, 0, module)
 	require.NoError(t, err)
 
 	actual, err := c.Next()
@@ -627,7 +627,7 @@ func TestCompile_SignExtensionOps(t *testing.T) {
 		Functions: []wasm.Index{0},
 		Types:     []wasm.FunctionType{i32_i32},
 	}
-	c, err := newCompiler(api.CoreFeatureSignExtensionOps, 0, module, false)
+	c, err := newCompiler(api.CoreFeatureSignExtensionOps, 0, module)
 	require.NoError(t, err)
 
 	actual, err := c.Next()
@@ -639,7 +639,7 @@ func requireCompilationResult(t *testing.T, enabledFeatures api.CoreFeatures, ex
 	if enabledFeatures == 0 {
 		enabledFeatures = api.CoreFeaturesV2
 	}
-	c, err := newCompiler(enabledFeatures, 0, module, false)
+	c, err := newCompiler(enabledFeatures, 0, module)
 	require.NoError(t, err)
 
 	actual, err := c.Next()
@@ -681,7 +681,7 @@ func TestCompile_CallIndirectNonZeroTableIndex(t *testing.T) {
 		Types:     []wasm.FunctionType{v_v, v_v, v_v},
 	}
 
-	c, err := newCompiler(api.CoreFeatureBulkMemoryOperations, 0, module, false)
+	c, err := newCompiler(api.CoreFeatureBulkMemoryOperations, 0, module)
 	require.NoError(t, err)
 
 	actual, err := c.Next()
@@ -774,7 +774,7 @@ func TestCompile_Refs(t *testing.T) {
 				FunctionSection: []wasm.Index{0},
 				CodeSection:     []wasm.Code{{Body: tc.body}},
 			}
-			c, err := newCompiler(api.CoreFeaturesV2, 0, module, false)
+			c, err := newCompiler(api.CoreFeaturesV2, 0, module)
 			require.NoError(t, err)
 
 			actual, err := c.Next()
@@ -846,7 +846,7 @@ func TestCompile_TableGetOrSet(t *testing.T) {
 				CodeSection:     []wasm.Code{{Body: tc.body}},
 				TableSection:    []wasm.Table{{}},
 			}
-			c, err := newCompiler(api.CoreFeaturesV2, 0, module, false)
+			c, err := newCompiler(api.CoreFeaturesV2, 0, module)
 			require.NoError(t, err)
 
 			actual, err := c.Next()
@@ -918,7 +918,7 @@ func TestCompile_TableGrowFillSize(t *testing.T) {
 				CodeSection:     []wasm.Code{{Body: tc.body}},
 				TableSection:    []wasm.Table{{}},
 			}
-			c, err := newCompiler(api.CoreFeaturesV2, 0, module, false)
+			c, err := newCompiler(api.CoreFeaturesV2, 0, module)
 			require.NoError(t, err)
 
 			actual, err := c.Next()
@@ -1129,7 +1129,7 @@ func TestCompile_Locals(t *testing.T) {
 	for _, tt := range tests {
 		tc := tt
 		t.Run(tc.name, func(t *testing.T) {
-			c, err := newCompiler(api.CoreFeaturesV2, 0, tc.mod, false)
+			c, err := newCompiler(api.CoreFeaturesV2, 0, tc.mod)
 			require.NoError(t, err)
 
 			actual, err := c.Next()
@@ -2616,7 +2616,7 @@ func TestCompile_Vec(t *testing.T) {
 				MemorySection:   []wasm.Memory{{}},
 				CodeSection:     []wasm.Code{{Body: tc.body}},
 			}
-			c, err := newCompiler(api.CoreFeaturesV2, 0, module, false)
+			c, err := newCompiler(api.CoreFeaturesV2, 0, module)
 			require.NoError(t, err)
 
 			res, err := c.Next()
@@ -2696,7 +2696,7 @@ func TestCompile_unreachable_Br_BrIf_BrTable(t *testing.T) {
 	for _, tt := range tests {
 		tc := tt
 		t.Run(tc.name, func(t *testing.T) {
-			c, err := newCompiler(api.CoreFeaturesV2, 0, tc.mod, false)
+			c, err := newCompiler(api.CoreFeaturesV2, 0, tc.mod)
 			require.NoError(t, err)
 
 			actual, err := c.Next()
@@ -2739,7 +2739,7 @@ func TestCompile_drop_vectors(t *testing.T) {
 	for _, tt := range tests {
 		tc := tt
 		t.Run(tc.name, func(t *testing.T) {
-			c, err := newCompiler(api.CoreFeaturesV2, 0, tc.mod, false)
+			c, err := newCompiler(api.CoreFeaturesV2, 0, tc.mod)
 			require.NoError(t, err)
 
 			actual, err := c.Next()
@@ -2812,7 +2812,7 @@ func TestCompile_select_vectors(t *testing.T) {
 	for _, tt := range tests {
 		tc := tt
 		t.Run(tc.name, func(t *testing.T) {
-			c, err := newCompiler(api.CoreFeaturesV2, 0, tc.mod, false)
+			c, err := newCompiler(api.CoreFeaturesV2, 0, tc.mod)
 			require.NoError(t, err)
 
 			actual, err := c.Next()
@@ -2976,71 +2976,83 @@ func TestCompiler_initializeStack(t *testing.T) {
 	}
 }
 
-func Test_ensureTermination(t *testing.T) {
+// Test_loopCheck pins that every loop header checks whether the call should stop.
+func Test_loopCheck(t *testing.T) {
+	mod := &wasm.Module{
+		TypeSection:     []wasm.FunctionType{v_v},
+		FunctionSection: []wasm.Index{0},
+		CodeSection: []wasm.Code{{
+			Body: []byte{
+				wasm.OpcodeI32Const, 0,
+				wasm.OpcodeLoop, 0, wasm.OpcodeI32Const, 1, wasm.OpcodeBrIf, 0, wasm.OpcodeEnd,
+				wasm.OpcodeI32Const, 1,
+				wasm.OpcodeLoop, 0, wasm.OpcodeEnd,
+				wasm.OpcodeI32Add,
+				wasm.OpcodeDrop,
+				wasm.OpcodeEnd,
+			},
+		}},
+	}
+	c, err := newCompiler(api.CoreFeaturesV2, 0, mod)
+	require.NoError(t, err)
+
+	actual, err := c.Next()
+	require.NoError(t, err)
+	require.Equal(t, `.entrypoint
+	ConstI32 0x0
+	Br .L2
+.L2
+	BuiltinFunctionCheckExitCode
+	ConstI32 0x1
+	BrIf .L2, .L3
+.L3
+	ConstI32 0x1
+	Br .L4
+.L4
+	BuiltinFunctionCheckExitCode
+	i32.Add
+	Drop 0..0
+	Br .return
+`, format(actual.Operations))
+}
+
+// A function that recurses is checked on entry, unless its body opens with a
+// loop, whose own check every call runs first.
+func Test_entryCheck(t *testing.T) {
 	for _, tc := range []struct {
-		ensureTermination bool
-		exp               string
+		name  string
+		body  []byte
+		entry bool
 	}{
 		{
-			ensureTermination: true,
-			exp: `.entrypoint
-	BuiltinFunctionCheckExitCode
-	ConstI32 0x0
-	Br .L2
-.L2
-	BuiltinFunctionCheckExitCode
-	ConstI32 0x1
-	BrIf .L2, .L3
-.L3
-	ConstI32 0x1
-	Br .L4
-.L4
-	BuiltinFunctionCheckExitCode
-	i32.Add
-	Drop 0..0
-	Br .return
-`,
+			name:  "opens with a call",
+			body:  []byte{wasm.OpcodeCall, 0, wasm.OpcodeEnd},
+			entry: true,
 		},
 		{
-			ensureTermination: false,
-			exp: `.entrypoint
-	ConstI32 0x0
-	Br .L2
-.L2
-	ConstI32 0x1
-	BrIf .L2, .L3
-.L3
-	ConstI32 0x1
-	Br .L4
-.L4
-	i32.Add
-	Drop 0..0
-	Br .return
-`,
+			name: "opens with a loop",
+			body: []byte{
+				wasm.OpcodeBlock, 0x40, wasm.OpcodeNop,
+				wasm.OpcodeLoop, 0x40, wasm.OpcodeI32Const, 1, wasm.OpcodeBrIf, 0, wasm.OpcodeEnd,
+				wasm.OpcodeEnd,
+				wasm.OpcodeCall, 0,
+				wasm.OpcodeEnd,
+			},
 		},
 	} {
-		t.Run(fmt.Sprintf("%v", tc.ensureTermination), func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			mod := &wasm.Module{
 				TypeSection:     []wasm.FunctionType{v_v},
 				FunctionSection: []wasm.Index{0},
-				CodeSection: []wasm.Code{{
-					Body: []byte{
-						wasm.OpcodeI32Const, 0,
-						wasm.OpcodeLoop, 0, wasm.OpcodeI32Const, 1, wasm.OpcodeBrIf, 0, wasm.OpcodeEnd,
-						wasm.OpcodeI32Const, 1,
-						wasm.OpcodeLoop, 0, wasm.OpcodeEnd,
-						wasm.OpcodeI32Add,
-						wasm.OpcodeDrop,
-						wasm.OpcodeEnd,
-					},
-				}},
+				CodeSection:     []wasm.Code{{Body: tc.body}},
 			}
-			c, err := newCompiler(api.CoreFeaturesV2, 0, mod, tc.ensureTermination)
+			require.NoError(t, mod.Validate(api.CoreFeaturesV2))
+			require.Equal(t, []bool{true}, mod.FunctionNeedsEntryCheck)
+			c, err := newCompiler(api.CoreFeaturesV2, 0, mod)
 			require.NoError(t, err)
-
 			actual, err := c.Next()
 			require.NoError(t, err)
-			require.Equal(t, tc.exp, format(actual.Operations))
+			require.Equal(t, tc.entry, actual.Operations[0].Kind == operationKindBuiltinFunctionCheckExitCode)
 		})
 	}
 }
@@ -3679,7 +3691,7 @@ func TestCompiler_threads(t *testing.T) {
 				MemorySection:   []wasm.Memory{{}},
 				CodeSection:     []wasm.Code{{Body: body}},
 			}
-			c, err := newCompiler(api.CoreFeaturesV2, 0, module, false)
+			c, err := newCompiler(api.CoreFeaturesV2, 0, module)
 			require.NoError(t, err)
 
 			res, err := c.Next()

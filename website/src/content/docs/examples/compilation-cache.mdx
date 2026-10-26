@@ -157,21 +157,22 @@ rebuilt per runtime, which is what keeps the state isolated.
 
 ## What the key is made of
 
-The disk entry is named by the hex of a sha256 over three things: the module identity, a six-byte
-tag naming the engine that produced it, and the raw CPU feature bits of the machine that compiled
-it.
+The disk entry is named by the hex of a sha256 over four things: the module identity, a six-byte
+tag naming the code layout the engine produces, the raw CPU feature bits of the machine that
+compiled it, and whether the code polls a garbage collector.
 
 ```go title="internal/engine/native/engine_cache.go"
-func fileCacheKey(m *wasm.Module) (ret filecache.Key) {
+func fileCacheKey(m *wasm.Module, gcSafepoints bool) (ret filecache.Key) {
 	s := sha256.New()
 	s.Write(m.ID[:])
 	s.Write(magic)
-	// Write the CPU features so that we can cache the compiled module for the same CPU.
-	// This prevents the incompatible CPU features from being used.
 	cpu := platform.CpuFeatures.Raw()
 	// Reuse the `ret` buffer to write the first 8 bytes of the CPU features so that we can avoid the allocation.
 	binary.LittleEndian.PutUint64(ret[:8], cpu)
 	s.Write(ret[:8])
+	if gcSafepoints {
+		s.Write([]byte{1})
+	}
 	// Finally, write the hash to the ret buffer.
 	s.Sum(ret[:0])
 	return
@@ -180,8 +181,8 @@ func fileCacheKey(m *wasm.Module) (ret filecache.Key) {
 
 `m.ID` is itself a hash, over the binary plus every flag that changes what the compiler emits:
 
-```go title="internal/wasm/module.go" {3,7-10,13,16}
-func (m *Module) AssignModuleID(wasm []byte, listeners []api.FunctionListener, withEnsureTermination bool, interruptCheckInterval uint64) {
+```go title="internal/wasm/module.go"
+func (m *Module) AssignModuleID(wasm []byte, listeners []api.FunctionListener) {
 	h := sha256.New()
 	h.Write(wasm)
 	// Use the pre-allocated space backed by m.ID below.
@@ -192,21 +193,14 @@ func (m *Module) AssignModuleID(wasm []byte, listeners []api.FunctionListener, w
 		m.ID[4] = boolToByte(l != nil)
 		h.Write(m.ID[:5])
 	}
-	// Write the flag of ensureTermination to the checksum.
-	m.ID[0] = boolToByte(withEnsureTermination)
-	h.Write(m.ID[:1])
-	// Write the interrupt-check interval to the checksum.
-	binary.LittleEndian.PutUint64(m.ID[:], interruptCheckInterval)
-	h.Write(m.ID[:8])
 	// Get checksum by passing the slice underlying m.ID.
 	h.Sum(m.ID[:0])
 }
 ```
 
-Flip `WithCloseOnContextDone`, attach a function listener to one function, change the interrupt-check
-interval, edit a single byte of the guest, move to a CPU without AVX: every one of those lands on a
-different key. The interpreter never enters into it — it is a separate engine that caches only in
-memory and writes no file at all.
+Attach a function listener to one function, edit a single byte of the guest, move to a CPU without
+AVX: every one of those lands on a different key. The interpreter never enters into it — it is a
+separate engine that caches only in memory and writes no file at all.
 
 One input is missing from the key: `CoreFeatures`. The enabled feature set reaches code generation —
 `CoreFeatureGC` changes what the compiler emits — but it is hashed into neither `m.ID` nor the file

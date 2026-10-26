@@ -66,11 +66,11 @@ func TestEngine_CompileModule(t *testing.T) {
 				ID: wasm.ModuleID{},
 			}
 
-			err := e.CompileModule(ctx, okModule, nil, false)
+			err := e.CompileModule(ctx, okModule, nil)
 			require.NoError(t, err)
 
 			// Compiling same module shouldn't be compiled again, but instead should be cached.
-			err = e.CompileModule(ctx, okModule, nil, false)
+			err = e.CompileModule(ctx, okModule, nil)
 			require.NoError(t, err)
 
 			// Pretend the finalizer executed, by invoking them one-by-one.
@@ -97,7 +97,7 @@ func TestEngine_CompileModule_alignment(t *testing.T) {
 		ID: wasm.ModuleID{},
 	}
 
-	err := e.CompileModule(ctx, okModule, nil, false)
+	err := e.CompileModule(ctx, okModule, nil)
 	require.NoError(t, err)
 
 	cm, ok := e.getCompiledModuleFromMemory(okModule, false)
@@ -256,14 +256,14 @@ func TestEngine_WasmModulesShareCompiledModule(t *testing.T) {
 		ID: wasm.ModuleID{},
 	}
 
-	err := e.CompileModule(ctx, m, nil, false)
+	err := e.CompileModule(ctx, m, nil)
 	require.NoError(t, err)
 
 	cm1, ok := e.compiledModules[m.ID]
 	require.True(t, ok)
 	require.Equal(t, 1, cm1.refCount)
 
-	err = e.CompileModule(ctx, m, nil, false)
+	err = e.CompileModule(ctx, m, nil)
 	require.NoError(t, err)
 	cm2, ok := e.compiledModules[m.ID]
 	require.True(t, ok)
@@ -328,7 +328,7 @@ func TestEngine_CompileModule_concurrent(t *testing.T) {
 
 	want := make([][]byte, len(mods))
 	for i, m := range mods {
-		cm, err := e.compileModule(ctx, m, nil, false)
+		cm, err := e.compileModule(ctx, m, nil)
 		require.NoError(t, err)
 		want[i] = append([]byte(nil), cm.executable...)
 	}
@@ -340,7 +340,7 @@ func TestEngine_CompileModule_concurrent(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			cm, err := e.compileModule(ctx, m, nil, false)
+			cm, err := e.compileModule(ctx, m, nil)
 			if err != nil {
 				errs[i] = err
 				return

@@ -26,6 +26,24 @@ type (
 		unreachableDepth int
 		tmpForBrTable    []uint32
 		pc               int
+		dispatch         dispatchLoop
+		// exits holds, by index in controlFrames, the frames branched to out of
+		// the innermost loop around the branch without a yield on the way, until
+		// that loop's check is settled. See deferExit.
+		exits []int
+	}
+	// dispatchLoop is a loop whose header only jumps on a local, with a br_table
+	// out of blocks opened right inside it: how Go's compiler lays out every
+	// function, so that it can resume one at any jump target. A jump sets the local
+	// and branches back to the loop. See detectDispatch.
+	dispatchLoop struct {
+		// frame is the loop's index in controlFrames, or -1 while there is none.
+		frame int
+		// local is what the header jumps on, labels the br_table's labels, default
+		// last, blocks how many blocks it opens and closed how many of them ended.
+		local          wasm.Index
+		labels         []uint32
+		blocks, closed uint32
 	}
 	controlFrame struct {
 		kind controlFrameKind
@@ -44,12 +62,33 @@ type (
 		// that pending entry's BodyBlkIDEnd once the try body has been
 		// fully lowered. Unused (left zero) for all other frame kinds.
 		pendingEhIdx int
-		// fuelSlow and fuelOK are the two successors of this loop's inline fuel
-		// check; see emitFuelCheck. Both are nil unless this is a loop frame under
-		// ensureTermination. They are recorded here rather than recovered from the
-		// header's successor list because the GC safepoint may already have split
-		// the header block.
-		fuelSlow, fuelOK ssa.BasicBlock
+		// checkSlow and checkBody are the slow path of a loop frame's
+		// emitPreemptCheck and the block it falls through to. They are recorded here
+		// rather than recovered from the header's successor list because the GC
+		// safepoint may already have split the header block.
+		checkSlow, checkBody ssa.BasicBlock
+		// preempt is a loop frame's emitPreemptCheck instruction, preheader the
+		// block it is entered from, and loopStart the offset of its loop opcode;
+		// notSimple is set once the loop is seen to hold another loop, or a call
+		// or bulk operation that may run long, and work sums the most wasm code the
+		// ones that may not run. See tunePreemptCheck.
+		preempt   *ssa.Instruction
+		preheader ssa.BasicBlock
+		loopStart int
+		notSimple bool
+		work      uint64
+		// yielded is set when every path from the start of this frame to the
+		// instruction being lowered has made a call that yields (see callYields),
+		// exitMissed once a path reaches the frame's end without one, and
+		// uncovered once a loop frame's header is branched back to without one.
+		// leading is set for the loop a function body opens with, and dispatch
+		// for loweringState.dispatch's loop. See finishPreemptCheck.
+		yielded, exitMissed, uncovered, leading, dispatch bool
+		// exitsFrom is where a loop frame's share of loweringState.exits starts,
+		// and checkedOnEntry is set once the loop is sure to check each time it is
+		// entered. See settleExits.
+		exitsFrom      int
+		checkedOnEntry bool
 		// landingBlk and catches are a controlFrameKindTryTableWithCatch
 		// frame's landing pad and catch clauses; see lowerCatchLanding.
 		landingBlk ssa.BasicBlock
@@ -124,6 +163,8 @@ func (l *loweringState) reset() {
 	l.pc = 0
 	l.unreachable = false
 	l.unreachableDepth = 0
+	l.dispatch.frame = -1
+	l.exits = l.exits[:0]
 }
 
 func (l *loweringState) peek() (ret ssa.Value) {
@@ -177,11 +218,12 @@ func (c *Compiler) lowerBody(entryBlk ssa.BasicBlock) {
 	// A loop back-edge is not the only way a guest runs unboundedly. A loop-free
 	// call graph (f calls g twice, g calls h twice, ...) performs 2^depth calls at
 	// a fixed stack depth, and return_call self-recursion runs forever at a fixed
-	// depth without growing the stack. Neither ever crosses a `loop`. Checking on
-	// entry closes both, and covers every call form since they all arrive here.
-	var fuelSlow, body ssa.BasicBlock
-	if c.ensureTermination {
-		fuelSlow, body = c.emitFuelCheck()
+	// depth without growing the stack. Neither ever crosses a `loop`, so the
+	// functions that can do either check on entry: see
+	// wasm.Module.FunctionNeedsEntryCheck.
+	c.entryCheck, c.opening, c.tunedWork = nil, true, 0
+	if c.loopYield && c.needsEntryCheck() {
+		c.entryCheck = c.emitInlinePreemptCheck()
 	}
 
 	if c.needListener {
@@ -207,12 +249,13 @@ func (c *Compiler) lowerBody(entryBlk ssa.BasicBlock) {
 			c.initializeCurrentBlockKnownBounds()
 		}
 	}
+}
 
-	if c.ensureTermination {
-		c.ssaBuilder.SetCurrentBlock(fuelSlow)
-		c.emitCheckModuleExitCodeCall(body)
-		c.ssaBuilder.Seal(body)
-	}
+// needsEntryCheck reports whether the function being compiled is one the module's
+// validation marked for a preemption check on entry.
+func (c *Compiler) needsEntryCheck() bool {
+	needs := c.m.FunctionNeedsEntryCheck
+	return int(c.wasmLocalFunctionIndex) < len(needs) && needs[c.wasmLocalFunctionIndex]
 }
 
 func (c *Compiler) state() *loweringState {
@@ -230,6 +273,18 @@ func (c *Compiler) lowerCurrentOpcode() {
 
 	builder := c.ssaBuilder
 	state := c.state()
+	switch op {
+	case wasm.OpcodeLoop, wasm.OpcodeCallIndirect, wasm.OpcodeCallRef:
+		c.markEnclosingLoopsNotSimple()
+	}
+	leading := false
+	if c.opening {
+		switch op {
+		case wasm.OpcodeBlock, wasm.OpcodeNop:
+		default:
+			c.opening, leading = false, op == wasm.OpcodeLoop
+		}
+	}
 	switch op {
 	case wasm.OpcodeI32Const:
 		c := c.readI32s()
@@ -655,6 +710,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 			// table.copy x y : [at_x, at_y, min(at_x, at_y)] -> [], so the
 			// length is i64 only when both tables are.
 			dst64, src64 := c.tableIsIndex64(dstTableIndex), c.tableIsIndex64(srcTableIndex)
+			c.bulkCheck(state.peek(), 8)
 			copySize := c.zeroExtendIndex(state.pop(), dst64 && src64)
 			srcOffset := c.zeroExtendIndex(state.pop(), src64)
 			dstOffset := c.zeroExtendIndex(state.pop(), dst64)
@@ -686,6 +742,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 			// memory.copy x y : [at_x, at_y, min(at_x, at_y)] -> [], so the
 			// length is i64 only when both memories are.
 			dst64, src64 := c.memoryIsIndex64(dstMemIndex), c.memoryIsIndex64(srcMemIndex)
+			c.bulkCheck(state.peek(), 1)
 			copySize := c.zeroExtendIndex(state.pop(), dst64 && src64)
 			srcOffset := c.zeroExtendIndex(state.pop(), src64)
 			dstOffset := c.zeroExtendIndex(state.pop(), dst64)
@@ -710,6 +767,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 			}
 			// table.fill x : [at, ref, at] -> []
 			index64 := c.tableIsIndex64(tableIndex)
+			c.bulkCheck(state.peek(), 8)
 			fillSize := state.pop()
 			value := state.pop()
 			offset := state.pop()
@@ -787,6 +845,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 
 			// memory.fill x : [at, i32, at] -> []
 			index64 := c.memoryIsIndex64(memIndex)
+			c.bulkCheck(state.peek(), 1)
 			fillSizeOperand := state.pop()
 			fillSize := c.zeroExtendIndex(fillSizeOperand, index64)
 			value := state.pop()
@@ -809,6 +868,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 
 			// memory.init x y : [at, i32, i32] -> [], so only the destination
 			// offset follows the memory's index type.
+			c.bulkCheck(state.peek(), 1)
 			copySize := c.zeroExtendIndex(state.pop(), false)
 			offsetInDataInstance := c.zeroExtendIndex(state.pop(), false)
 			offsetInMemory := c.zeroExtendIndex(state.pop(), c.memoryIsIndex64(memIndex))
@@ -838,6 +898,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 			// table.init x y : [at, i32, i32] -> [], so only the destination
 			// offset follows the table's index type.
 			index64 := c.tableIsIndex64(tableIndex)
+			c.bulkCheck(state.peek(), 8)
 			copySize := c.zeroExtendIndex(state.pop(), false)
 			offsetInElementInstance := c.zeroExtendIndex(state.pop(), false)
 			offsetInTable := c.zeroExtendIndex(state.pop(), index64)
@@ -1335,6 +1396,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 			blockType:                    bt,
 		})
 	case wasm.OpcodeLoop:
+		loopStart := state.pc
 		bt := c.readBlockType()
 
 		if state.unreachable {
@@ -1353,9 +1415,12 @@ func (c *Compiler) lowerCurrentOpcode() {
 			blk:                          loopHeader,
 			followingBlock:               afterLoopBlock,
 			blockType:                    bt,
+			leading:                      leading,
+			exitsFrom:                    len(state.exits),
 		})
 
 		args := c.allocateVarLengthValues(len(bt.Params), state.values[originalLen:]...)
+		preheader := builder.CurrentBlock()
 
 		// Insert the jump to the header of loop.
 		br := builder.AllocateInstruction()
@@ -1371,13 +1436,15 @@ func (c *Compiler) lowerCurrentOpcode() {
 			c.emitGCSafepoint(builder)
 		}
 
-		if c.ensureTermination {
-			// Spend a tick of termination fuel on every back-edge. The slow path is
-			// left empty here and filled in at this loop's End (see OpcodeEnd), so
-			// that block layout -- which follows emission order -- puts the rare path
-			// on the forward branch and keeps the loop body on the fallthrough.
+		if c.loopYield {
+			// A loop would never return to Go, so it checks whether the runtime has
+			// asked it to stop.
 			frame := state.ctrlPeekAt(0)
-			frame.fuelSlow, frame.fuelOK = c.emitFuelCheck()
+			frame.checkSlow, frame.preempt, frame.checkBody = c.emitPreemptCheck()
+			frame.preheader, frame.loopStart = preheader, loopStart
+			if state.dispatch.frame < 0 {
+				c.detectDispatch()
+			}
 		}
 	case wasm.OpcodeIf:
 		bt := c.readBlockType()
@@ -1437,9 +1504,11 @@ func (c *Compiler) lowerCurrentOpcode() {
 			followingBlk := ifctrl.followingBlock // == the BB after if-then-else.
 			args := c.nPeekDup(len(ifctrl.blockType.Results))
 			c.insertJumpToBlock(args, followingBlk)
+			ifctrl.exitMissed = ifctrl.exitMissed || !ifctrl.yielded
 		} else {
 			state.unreachable = false
 		}
+		ifctrl.yielded = false
 
 		// Reset the stack so that we can correctly handle the else block.
 		state.values = state.values[:ifctrl.originalStackLenWithoutParam]
@@ -1458,8 +1527,24 @@ func (c *Compiler) lowerCurrentOpcode() {
 
 		ctrl := state.ctrlPop()
 		followingBlk := ctrl.followingBlock
+		if d := &state.dispatch; d.frame >= 0 {
+			switch i := len(state.controlFrames); {
+			case i == d.frame:
+				d.frame = -1
+			case ctrl.kind == controlFrameKindBlock && i == d.frame+int(d.blocks-d.closed):
+				d.closed++
+			}
+		}
 
 		unreachable := state.unreachable
+		// The paths that reach the end are the branches to it, seen already, the
+		// fall through and, for an if without an else, the empty else.
+		if !unreachable && !ctrl.yielded || ctrl.kind == controlFrameKindIfWithoutElse {
+			ctrl.exitMissed = true
+		}
+		if len(state.controlFrames) > 0 && !ctrl.exitMissed {
+			state.ctrlPeekAt(0).yielded = true
+		}
 		// Nothing branched out of this frame, so its continuation block would
 		// only forward what is already here: stay in the current block instead,
 		// and let dead-block elimination drop the one we never used. Restricted
@@ -1486,23 +1571,13 @@ func (c *Compiler) lowerCurrentOpcode() {
 		case controlFrameKindFunction:
 			break // This is the very end of function.
 		case controlFrameKindLoop:
-			if ctrl.fuelSlow != nil {
-				// Emit the out-of-fuel slow path now, at the end of the loop body, so
-				// it lays out after the body rather than between the header and it.
-				//
-				// Save and restore the current block around it: on the fallThrough path
-				// above, lowering continues in the block we are in right now rather than
-				// in followingBlk, so leaving the builder pointed at the slow block would
-				// emit the rest of the enclosing frame into it, after its terminator.
-				cur := builder.CurrentBlock()
-				builder.SetCurrentBlock(ctrl.fuelSlow)
-				c.emitCheckModuleExitCodeCall(ctrl.fuelOK)
-				builder.Seal(ctrl.fuelOK)
-				builder.SetCurrentBlock(cur)
-			}
 			// Loop header block can be reached from any br/br_table contained in the loop,
 			// so now that we've reached End of it, we can seal it.
 			builder.Seal(ctrl.blk)
+			if ctrl.preempt != nil {
+				c.finishPreemptCheck(&ctrl)
+				c.settleExits(&ctrl)
+			}
 		case controlFrameKindIfWithoutElse:
 			// If this is the end of Then block, we have to emit the empty Else block.
 			elseBlk := ctrl.blk
@@ -1540,8 +1615,11 @@ func (c *Compiler) lowerCurrentOpcode() {
 		}
 
 		targetBlk, argNum := state.brTargetArgNumFor(labelIndex)
-		args := c.nPeekDup(argNum)
-		c.insertJumpToBlock(args, targetBlk)
+		if c.branchChecks(labelIndex) {
+			c.emitBranchPreemptCheck(targetBlk, argNum)
+		} else {
+			c.insertJumpToBlock(c.nPeekDup(argNum), targetBlk)
+		}
 
 		state.unreachable = true
 
@@ -1552,6 +1630,9 @@ func (c *Compiler) lowerCurrentOpcode() {
 		}
 
 		v := state.pop()
+		if c.branchChecks(labelIndex) {
+			c.emitInlinePreemptCheck()
+		}
 
 		targetBlk, argNum := state.brTargetArgNumFor(labelIndex)
 		args := c.nPeekDup(argNum)
@@ -1607,6 +1688,12 @@ func (c *Compiler) lowerCurrentOpcode() {
 		}
 
 		index := state.pop()
+		for _, l := range labels {
+			if c.branchChecks(l) {
+				c.emitInlinePreemptCheck()
+				break
+			}
+		}
 		if labelCount == 0 { // If this br_table is empty, we can just emit the unconditional jump.
 			targetBlk, argNum := state.brTargetArgNumFor(labels[0])
 			args := c.nPeekDup(argNum)
@@ -1644,6 +1731,9 @@ func (c *Compiler) lowerCurrentOpcode() {
 		if state.unreachable {
 			break
 		}
+		if c.m.ForeignFuncRefs {
+			c.checkFirst()
+		}
 		c.lowerCallIndirect(typeIndex, tableIndex)
 
 	case wasm.OpcodeCall:
@@ -1651,6 +1741,12 @@ func (c *Compiler) lowerCurrentOpcode() {
 		if state.unreachable {
 			break
 		}
+		if fnIndex < c.m.ImportFunctionCount {
+			c.checkFirst()
+		} else if c.callYields(fnIndex) {
+			state.ctrlPeekAt(0).yielded = true
+		}
+		c.addLoopWork(c.callWork(fnIndex))
 		c.lowerCall(fnIndex)
 
 	case wasm.OpcodeDrop:
@@ -3593,7 +3689,9 @@ func (c *Compiler) lowerCurrentOpcode() {
 		}
 		// Per spec, return_call leaves the current frame, so all enclosing
 		// try_table handlers must be popped before the tail call.
-		_, _ = typeIndex, tableIndex
+		if c.m.ForeignFuncRefs {
+			c.checkFirst()
+		}
 		c.lowerTailCallReturnCallIndirect(typeIndex, tableIndex)
 		state.unreachable = true
 
@@ -3604,6 +3702,9 @@ func (c *Compiler) lowerCurrentOpcode() {
 		}
 		// Per spec, return_call leaves the current frame, so all enclosing
 		// try_table handlers must be popped before the tail call.
+		if fnIndex < c.m.ImportFunctionCount {
+			c.checkFirst()
+		}
 		c.lowerTailCallReturnCall(fnIndex)
 		state.unreachable = true
 
@@ -3822,6 +3923,9 @@ func (c *Compiler) lowerCurrentOpcode() {
 			AsIcmp(r, zero.Return(), ssa.IntegerCmpCondEqual).
 			Insert(builder).Return()
 
+		if c.branchChecks(labelIndex) {
+			c.emitInlinePreemptCheck()
+		}
 		targetBlk, argNum := state.brTargetArgNumFor(labelIndex)
 		args := c.nPeekDup(argNum)
 		var sealTargetBlk bool
@@ -3867,6 +3971,9 @@ func (c *Compiler) lowerCurrentOpcode() {
 			Insert(builder).Return()
 
 		// When non-null, branch to label with args + the non-null ref.
+		if c.branchChecks(labelIndex) {
+			c.emitInlinePreemptCheck()
+		}
 		targetBlk, argNum := state.brTargetArgNumFor(labelIndex)
 		// The branch delivers argNum-1 values from the stack plus the ref.
 		// The ref is the last value delivered to the label target.
@@ -3906,12 +4013,18 @@ func (c *Compiler) lowerCurrentOpcode() {
 		if state.unreachable {
 			break
 		}
+		if c.m.ForeignFuncRefs {
+			c.checkFirst()
+		}
 		c.lowerCallRef(typeIndex)
 
 	case wasm.OpcodeReturnCallRef:
 		typeIndex := c.readI32u()
 		if state.unreachable {
 			break
+		}
+		if c.m.ForeignFuncRefs {
+			c.checkFirst()
 		}
 		c.lowerTailCallReturnCallRef(typeIndex)
 		state.unreachable = true
@@ -4329,60 +4442,401 @@ func (c *Compiler) lowerTailCallReturnCallRef(typeIndex uint32) {
 	c.lowerReturn(builder)
 }
 
-// emitFuelCheck emits the inline termination-fuel check into the current block and
-// returns its two successors: the slow block, which the caller fills in with
-// emitCheckModuleExitCodeCall, and the still-fuelled block, which is left as the
-// current block and stays unsealed until the caller decides the slow path rejoins
-// it.
+// emitPreemptCheck emits a loop header's check that the Go runtime has asked
+// this goroutine to stop, and returns its slow path, the check, which
+// tunePreemptCheck may make cheaper, and the block the loop's body goes on in.
 //
-// The whole check is one decrement of a reserved register and one branch (see
-// ssa.OpcodeFuelDec): the backends fold the decrement's own flags into the branch,
-// so nothing is loaded, nothing is stored, and the loop-carried dependency is the
-// single cycle of the decrement itself.
-//
-// What it does NOT do is read ModuleInstance.Closed. That check is not skipped,
-// only moved: running out of fuel exits to Go, and the Go side does the
-// authoritative atomic check there (see ExitCodeCheckModuleExitCode in
-// native/call_engine.go). Reading the flag inline would be cheap to write and is
-// what this used to do, but it cannot terminate a guest on its own -- a spinning
-// guest holds its P, so the watchdog goroutine that sets the flag never gets to
-// run. Guaranteeing a return to Go is the point; the flag is what Go looks at
-// once it is back.
-func (c *Compiler) emitFuelCheck() (fuelSlow, fuelOK ssa.BasicBlock) {
+// Go cannot preempt compiled code, so a loop that never calls out would hold up
+// every stop-the-world, and every goroutine with it, for as long as it runs. The
+// runtime asks a goroutine to stop by storing nativeapi.StackPreempt into its
+// g.stackguard0, which a Go prologue notices; this reads the same word (see
+// ssa.OpcodePreemptRequested) and, when it is set, the slow block returns to Go
+// through the module exit check, which yields there.
+func (c *Compiler) emitPreemptCheck() (slow ssa.BasicBlock, check *ssa.Instruction, ok ssa.BasicBlock) {
 	builder := c.ssaBuilder
 
-	exhausted := builder.AllocateInstruction().AsFuelDec().Insert(builder).Return()
+	check = builder.AllocateInstruction().AsPreemptRequested().Insert(builder)
+	requested := check.Return()
 
-	fuelSlow, fuelOK = builder.AllocateBasicBlock(), builder.AllocateBasicBlock()
-	builder.AllocateInstruction().
-		AsBrnz(exhausted, ssa.ValuesNil, fuelSlow).
-		Insert(builder)
-	c.insertJumpToBlock(ssa.ValuesNil, fuelOK)
+	slow, ok = builder.AllocateBasicBlock(), builder.AllocateBasicBlock()
+	builder.AllocateInstruction().AsBrnz(requested, ssa.ValuesNil, slow).Insert(builder)
+	c.insertJumpToBlock(ssa.ValuesNil, ok)
 
-	// This branch is the slow block's only way in, so it is already complete.
-	builder.Seal(fuelSlow)
-
-	builder.SetCurrentBlock(fuelOK)
+	// The slow block yields and goes on into the body, which sees the values the
+	// loop carries as the header's parameters, not copies, as if the check were its
+	// only way in (see ssa.yieldJoin): that is what lets tunePreemptCheck find the
+	// loop's counter. Block layout puts it after the loop. A check made masked
+	// sends it back to the header instead (see ssa.Builder.ReturnToHeader).
+	builder.SetCurrentBlock(slow)
+	builder.Seal(slow)
+	c.emitCheckModuleExitCodeCall(ok)
+	builder.SetCurrentBlock(ok)
+	builder.Seal(ok)
 	return
 }
 
-// emitCheckModuleExitCodeCall calls the trampoline that re-enters Go for the full
-// atomic module-closed check, then jumps to target. The trampoline refills the fuel
-// counter on its way back, and normally panics with the exit error and never
-// returns at all; target is the path taken when the module is still open.
-func (c *Compiler) emitCheckModuleExitCodeCall(target ssa.BasicBlock) {
-	builder := c.ssaBuilder
+// stripMineMaxBody is the largest loop body, in bytes of wasm, that is strip-mined
+// rather than given a masked check. The masked test is one fused uop an iteration,
+// a share of the loop that shrinks as the body grows, while the limit a
+// strip-mined loop carries takes a register for the whole loop, which a large
+// body is likelier to be short of.
+const stripMineMaxBody = 64
 
-	checkModuleExitCodePtr := builder.AllocateInstruction().
-		AsLoad(c.execCtxPtrValue,
-			nativeapi.ExecutionContextOffsetCheckModuleExitCodeTrampolineAddress.U32(),
-			ssa.TypeI64,
-		).Insert(builder).Return()
-	builder.AllocateInstruction().
-		AsCallIndirect(checkModuleExitCodePtr, &c.checkModuleExitCodeSig,
-			c.allocateVarLengthValues(1, c.execCtxPtrValue)).
-		Insert(builder)
+// preemptBudget is how much wasm code, in bytes, a loop may run between two
+// preemption checks: about as long as a stop-the-world is made to wait.
+const preemptBudget = wasm.PreemptBudget
+
+// detectDispatch makes the loop just opened loweringState.dispatch's if its header
+// is only blocks with no type, then local.get and br_table. A branch back to it
+// that has set the local to a constant lands where that br_table sends it, and
+// when that is the end of one of those blocks still open at the branch, it lands
+// ahead of the branch: a jump forward, which cannot repeat code. Any way round the
+// loop takes a branch back that lands at or behind itself, so the loop checks on
+// those branches (see branchChecks) rather than at its header, which every jump
+// of a Go function passes through.
+func (c *Compiler) detectDispatch() {
+	body, pc := c.wasmFunctionBody, c.loweringState.pc+1
+	var blocks uint32
+	for pc+1 < len(body) && body[pc] == wasm.OpcodeBlock && body[pc+1] == 0x40 { // no block type
+		blocks++
+		pc += 2
+	}
+	if blocks == 0 || pc >= len(body) || body[pc] != wasm.OpcodeLocalGet {
+		return
+	}
+	local, n, err := leb128.LoadUint32(body[pc+1:])
+	if err != nil {
+		return
+	}
+	pc += 1 + int(n)
+	if pc >= len(body) || body[pc] != wasm.OpcodeBrTable {
+		return
+	}
+	count, n, err := leb128.LoadUint32(body[pc+1:])
+	if err != nil {
+		return
+	}
+	pc += 1 + int(n)
+	d := &c.loweringState.dispatch
+	d.labels = d.labels[:0]
+	for range count + 1 {
+		l, n, err := leb128.LoadUint32(body[pc:])
+		if err != nil {
+			return
+		}
+		pc += int(n)
+		d.labels = append(d.labels, l)
+	}
+	d.frame, d.local, d.blocks, d.closed = len(c.loweringState.controlFrames)-1, local, blocks, 0
+	c.loweringState.ctrlPeekAt(0).dispatch = true
+}
+
+// targetsDispatch reports whether labelIndex names the dispatch loop.
+func (c *Compiler) targetsDispatch(labelIndex uint32) bool {
+	state := &c.loweringState
+	return state.dispatch.frame >= 0 && len(state.controlFrames)-1-int(labelIndex) == state.dispatch.frame
+}
+
+// branchChecks reports whether a branch to labelIndex goes back to the dispatch
+// loop without being sure to land ahead of itself (see detectDispatch), and so
+// checks for preemption.
+func (c *Compiler) branchChecks(labelIndex uint32) bool {
+	if !c.targetsDispatch(labelIndex) {
+		return false
+	}
+	d := &c.loweringState.dispatch
+	def := c.ssaBuilder.InstructionOfValue(c.ssaBuilder.MustFindValue(c.localVariable(d.local)))
+	if def == nil || !def.Constant() {
+		return true
+	}
+	l := d.labels[min(uint64(uint32(def.ConstantVal())), uint64(len(d.labels)-1))]
+	return l < d.closed || l == d.blocks // a block that has ended, or the loop again
+}
+
+// emitBranchPreemptCheck ends the current block with a branch to target, passing
+// the top argNum values, that checks for preemption first and yields out of line.
+func (c *Compiler) emitBranchPreemptCheck(target ssa.BasicBlock, argNum int) {
+	builder := c.ssaBuilder
+	requested := builder.AllocateInstruction().AsPreemptRequested().Insert(builder).Return()
+	slow := builder.AllocateBasicBlock()
+	builder.AllocateInstruction().AsBrnz(requested, ssa.ValuesNil, slow).Insert(builder)
+	c.insertJumpToBlock(c.nPeekDup(argNum), target)
+	builder.SetCurrentBlock(slow)
+	builder.Seal(slow)
+	c.emitCheckModuleExitCodeCallTo(target, c.nPeekDup(argNum))
+}
+
+// emitInlinePreemptCheck checks for preemption where lowering is, yielding out of
+// line, and goes on in a new block, which is sealed: what it reads of the locals
+// is what they held before the check. It returns the check.
+func (c *Compiler) emitInlinePreemptCheck() *ssa.Instruction {
+	builder := c.ssaBuilder
+	check := builder.AllocateInstruction().AsPreemptRequested().Insert(builder)
+	requested := check.Return()
+	slow, cont := builder.AllocateBasicBlock(), builder.AllocateBasicBlock()
+	builder.AllocateInstruction().AsBrnz(requested, ssa.ValuesNil, slow).Insert(builder)
+	c.insertJumpToBlock(ssa.ValuesNil, cont)
+	builder.SetCurrentBlock(slow)
+	builder.Seal(slow)
+	c.emitCheckModuleExitCodeCall(cont)
+	builder.SetCurrentBlock(cont)
+	builder.Seal(cont)
+	return check
+}
+
+// finishPreemptCheck settles a loop's check once its body is known. A loop that
+// makes a call to a function checked on entry on every path back to its header, or
+// enters an inner loop that checks each time it is entered (see settleExits),
+// needs no check of its own, and neither does a loop whose branches back check
+// instead (see detectDispatch). Otherwise, a loop that holds no call and no other
+// loop may get a cheaper one (see tunePreemptCheck). And a full check at the head
+// of the loop a function opens with runs on every call before anything else, so
+// it stands in for the function's entry check.
+func (c *Compiler) finishPreemptCheck(ctrl *controlFrame) {
+	switch {
+	case !ctrl.uncovered, ctrl.dispatch:
+		ctrl.preempt.ElidePreemptCheck()
+	case !ctrl.notSimple:
+		c.tunePreemptCheck(ctrl)
+	}
+	if ctrl.leading && c.entryCheck != nil {
+		if counter, _, elided := ctrl.preempt.PreemptCheckData(); !counter.Valid() && !elided {
+			c.entryCheck.ElidePreemptCheck()
+		}
+	}
+}
+
+// callYields reports whether a direct call to the local function fnIndex passes a
+// preemption check before it returns.
+func (c *Compiler) callYields(fnIndex uint32) bool {
+	needs := c.m.FunctionNeedsEntryCheck
+	i := int(fnIndex - c.m.ImportFunctionCount)
+	return i < len(needs) && needs[i]
+}
+
+// tunePreemptCheck makes the check of a loop that holds no call and no other loop
+// cheaper, now that its body is known. If the loop has a counter (see
+// ssa.LoopCounter) and is sure to end within preemptBudget, it needs no check at
+// all. If it ends by comparing the counter against a bound, it is strip-mined
+// (see ssa.Builder.StripMine): it compares against a limit preemptBudget's worth
+// of iterations away instead, and checks only when it reaches it, so the rest of
+// the time the loop pays nothing. Otherwise the check first tests w bits of the
+// counter, which an odd step leaves all zero once in every 2^w iterations, so the
+// full check runs that rarely and the rest of the time the loop pays one register
+// test; w is as large as keeps 2^w iterations within the budget. The body counts
+// the most code each call and bulk operation in it runs (see addLoopWork); inner
+// loops, and calls and bulk operations whose work is unbounded, are excluded,
+// since they leave an iteration's length unbounded. Each of these but the
+// shortest loops checks once on entry instead (see checkOnEntry), unless its
+// counter starts with the tested bits clear, so that its first test runs the full
+// check.
+func (c *Compiler) tunePreemptCheck(ctrl *controlFrame) {
+	builder := c.ssaBuilder
+	lc, ok := builder.FindLoopCounter(ctrl.blk, ctrl.preheader)
+	if !ok {
+		return
+	}
+	body := uint64(max(c.loweringState.pc-ctrl.loopStart, 1)) + ctrl.work
+	if trips, bounded := builder.TripBound(lc); bounded && trips <= preemptBudget/body && (trips <= uncheckedTripsMax || c.checkOnEntry(ctrl, trips*body)) {
+		ctrl.preempt.ElidePreemptCheck()
+		return
+	}
+	if body <= stripMineMaxBody && builder.StripMine(ctrl.blk, ctrl.preheader, ctrl.checkBody, lc, preemptBudget/body, c.emitCheckModuleExitCodeCallTo) {
+		ctrl.preempt.ElidePreemptCheck()
+		if !c.checkOnEntry(ctrl, preemptBudget) {
+			panic("BUG: StripMine left no preheader to check in")
+		}
+		return
+	}
+	mask := ssa.MaskedCheckBits(lc, bits.Len64(preemptBudget/body)-1)
+	switch {
+	case mask == 0:
+		return
+	case builder.MaskedCheckOnEntry(lc, mask):
+		ctrl.checkedOnEntry = true
+	case !c.checkOnEntry(ctrl, preemptBudget):
+		return
+	}
+	ctrl.preempt.MaskPreemptCheck(lc.Param, mask)
+	builder.ReturnToHeader(ctrl.checkSlow, ctrl.blk)
+}
+
+// uncheckedTripsMax is the most iterations a loop runs with no check at all, not
+// even on entry: validation counts a loop's code once (see
+// wasm.Module.FunctionNeedsEntryCheck), and a loop sure to end this soon runs it
+// at most this many times over. See checkOnEntry.
+const uncheckedTripsMax = 16
+
+// checkOnEntry makes the loop of ctrl, whose own check is to be elided or made
+// rarer, check once in its preheader each time it is entered, and reports whether
+// it does. Such a loop runs up to work before its first check, if it makes one,
+// while validation counts it as the code it is: a call tree making many calls to
+// it, or a function running many such loops one after another, would add those up
+// between two checks. In a function checked on entry, the loops whose work adds up
+// to within preemptBudget count on that check instead: each call runs each of them
+// at most once before it, or before a check of a loop around it.
+func (c *Compiler) checkOnEntry(ctrl *controlFrame, work uint64) bool {
+	if c.entryCheck != nil && c.tunedWork+work <= preemptBudget {
+		c.tunedWork += work
+		return true
+	}
+	if !c.ssaBuilder.CheckOnEntry(ctrl.blk, ctrl.preheader, c.emitCheckModuleExitCodeCallTo) {
+		return false
+	}
+	ctrl.checkedOnEntry = true
+	return true
+}
+
+// settleExits settles the branches out of the loop of ctrl that waited on its
+// check (see loweringState.deferExit), now that the check is settled. A loop that
+// checks each time it is entered, at its header or before it, has checked on every
+// way past it, out of it by a branch or on from its end. Otherwise each waits on
+// the next loop out, if it leaves that one too.
+func (c *Compiler) settleExits(ctrl *controlFrame) {
+	l := &c.loweringState
+	counter, _, elided := ctrl.preempt.PreemptCheckData()
+	if ctrl.checkedOnEntry || !counter.Valid() && !elided {
+		l.exits = l.exits[:ctrl.exitsFrom]
+		if len(l.controlFrames) > 0 {
+			l.ctrlPeekAt(0).yielded = true
+		}
+		return
+	}
+	next := -1
+	for i := len(l.controlFrames) - 1; i >= 0; i-- {
+		if f := &l.controlFrames[i]; f.isLoop() && f.preempt != nil {
+			next = i
+			break
+		}
+	}
+	kept := l.exits[:ctrl.exitsFrom]
+	for _, t := range l.exits[ctrl.exitsFrom:] {
+		if f := &l.controlFrames[t]; t < next {
+			kept = append(kept, t)
+		} else if f.isLoop() {
+			f.uncovered = true
+		} else {
+			f.exitMissed = true
+		}
+	}
+	l.exits = kept
+}
+
+// checkFirst checks for preemption ahead of what validation counts as a few bytes
+// of code but cannot bound the work of: a call that may run another module's code
+// (see wasm.entryCheckBuilder), or a bulk operation that may be long (see
+// bulkCheck). Every path past it has then made a check, as past a call that
+// yields.
+func (c *Compiler) checkFirst() {
+	if c.loopYield {
+		c.emitInlinePreemptCheck()
+		c.loweringState.ctrlPeekAt(0).yielded = true
+	}
+}
+
+// bulkCheckMax is the most work, in bytes, a bulk operation does without checking
+// first. See bulkCheck.
+const bulkCheckMax = 1 << 10
+
+// bulkCheck accounts for a bulk operation over length elements of size bytes,
+// about to be lowered. One of a constant length within bulkCheckMax counts as that
+// much work toward the loops around it (see addLoopWork). Any other leaves the
+// loops around it their full checks, and checks first unless the function checks
+// on entry, since a call tree could make many of them between two checks: with the
+// entry check, each call runs it at most once before a check, its own or one of
+// those loops'.
+func (c *Compiler) bulkCheck(length ssa.Value, size uint64) {
+	if w := c.bulkWork(length, size); w != 0 && w <= bulkCheckMax {
+		c.addLoopWork(w)
+		return
+	}
+	c.markEnclosingLoopsNotSimple()
+	if c.entryCheck == nil {
+		c.checkFirst()
+	}
+}
+
+// callWork is how much wasm code a direct call to fnIndex runs at most, or zero
+// when that may be unbounded. See wasm.Module.FunctionCallWork.
+func (c *Compiler) callWork(fnIndex uint32) uint64 {
+	if fnIndex < c.m.ImportFunctionCount {
+		return 0
+	}
+	work := c.m.FunctionCallWork
+	if i := int(fnIndex - c.m.ImportFunctionCount); i < len(work) {
+		return uint64(work[i])
+	}
+	return 0
+}
+
+// bulkWork is how much wasm code a bulk operation over length elements of size
+// bytes counts as: a byte moved as a byte of code, which overstates it. It is
+// zero when length is not a constant.
+func (c *Compiler) bulkWork(length ssa.Value, size uint64) uint64 {
+	def := c.ssaBuilder.InstructionOfValue(length)
+	if def == nil || !def.Constant() {
+		return 0
+	}
+	n := def.ConstantVal()
+	if length.Type() == ssa.TypeI32 {
+		n = uint64(uint32(n))
+	}
+	if n > preemptBudget {
+		return preemptBudget + 1
+	}
+	return max(n*size, 1)
+}
+
+// addLoopWork adds work, the most wasm code a call or bulk operation runs, to
+// every loop around the opcode being lowered, or marks them not simple when it is
+// zero, for unbounded. See tunePreemptCheck.
+func (c *Compiler) addLoopWork(work uint64) {
+	if work == 0 {
+		c.markEnclosingLoopsNotSimple()
+		return
+	}
+	frames := c.loweringState.controlFrames
+	for i := range frames {
+		if frames[i].kind == controlFrameKindLoop {
+			frames[i].work += work
+		}
+	}
+}
+
+// markEnclosingLoopsNotSimple records that every loop around the opcode being
+// lowered holds another loop, or a call or bulk operation that may run long. See
+// tunePreemptCheck.
+func (c *Compiler) markEnclosingLoopsNotSimple() {
+	frames := c.loweringState.controlFrames
+	for i := len(frames) - 1; i >= 0; i-- {
+		if frames[i].kind != controlFrameKindLoop {
+			continue
+		}
+		if frames[i].notSimple {
+			return // every loop around this one was marked along with it
+		}
+		frames[i].notSimple = true
+	}
+}
+
+// emitCheckModuleExitCodeCallTo is emitCheckModuleExitCodeCall for a target that
+// takes args.
+func (c *Compiler) emitCheckModuleExitCodeCallTo(target ssa.BasicBlock, args ssa.Values) {
+	c.emitCheckModuleExitCodeTrampoline()
+	c.insertJumpToBlock(args, target)
+}
+
+// emitCheckModuleExitCodeCall calls the trampoline that returns to Go to yield,
+// then jumps to target. Go checks there whether the module was closed or the
+// call's context is done, and if so unwinds the call rather than returning;
+// target is the path taken otherwise. See nativeapi.ExitCodeCheckModuleExitCode.
+func (c *Compiler) emitCheckModuleExitCodeCall(target ssa.BasicBlock) {
+	c.emitCheckModuleExitCodeTrampoline()
 	c.insertJumpToBlock(ssa.ValuesNil, target)
+}
+
+func (c *Compiler) emitCheckModuleExitCodeTrampoline() {
+	c.ssaBuilder.AllocateInstruction().AsYield(c.execCtxPtrValue).Insert(c.ssaBuilder)
 }
 
 // memOpSetup inserts the bounds check and calculates the address of the memory operation (loads/stores).
@@ -5575,6 +6029,17 @@ func (c *Compiler) lowerCatchHandler(cc catchClause, state *loweringState) {
 	case wasm.CatchKindCatchAllRef:
 		brArgs = append(brArgs, c.loadExnRef())
 	}
+	// The throw this lands could have come from anywhere in the try body, so
+	// whatever it yielded on the way is not known here, nor what it left in the
+	// local a dispatch loop jumps on.
+	if c.targetsDispatch(cc.labelIdx) {
+		c.emitInlinePreemptCheck()
+	}
+	if f := state.ctrlPeekAt(int(cc.labelIdx)); f.isLoop() {
+		f.uncovered = true
+	} else {
+		f.exitMissed = true
+	}
 	targetBlk, _ := state.brTargetArgNumFor(cc.labelIdx)
 	c.insertJumpToBlock(c.allocateVarLengthValues(len(brArgs), brArgs...), targetBlk)
 }
@@ -5932,12 +6397,42 @@ func (c *Compiler) lowerBrTable(labels []uint32, index ssa.Value) {
 
 func (l *loweringState) brTargetArgNumFor(labelIndex uint32) (targetBlk ssa.BasicBlock, argNum int) {
 	targetFrame := l.ctrlPeekAt(int(labelIndex))
+	yielded := l.yieldedSince(labelIndex) || l.deferExit(labelIndex)
 	if targetFrame.isLoop() {
+		targetFrame.uncovered = targetFrame.uncovered || !yielded
 		targetBlk, argNum = targetFrame.blk, len(targetFrame.blockType.Params)
 	} else {
+		targetFrame.exitMissed = targetFrame.exitMissed || !yielded
 		targetBlk, argNum = targetFrame.followingBlock, len(targetFrame.blockType.Results)
 	}
 	return
+}
+
+// yieldedSince reports whether every path from the start of the frame labelIndex
+// names to here has made a call that yields: whether any frame from that one in
+// has.
+func (l *loweringState) yieldedSince(labelIndex uint32) bool {
+	for i := 0; i <= int(labelIndex); i++ {
+		if l.ctrlPeekAt(i).yielded {
+			return true
+		}
+	}
+	return false
+}
+
+// deferExit takes a branch to the frame labelIndex names, made with no yield on
+// the way, that leaves a loop: it went through that loop's header, so whether it
+// checked on the way is up to the loop's check, which is settled only at the
+// loop's end (see Compiler.settleExits). It reports whether it took it, recording
+// the frame for the innermost loop around the branch.
+func (l *loweringState) deferExit(labelIndex uint32) bool {
+	for i := 0; i < int(labelIndex); i++ {
+		if f := l.ctrlPeekAt(i); f.isLoop() && f.preempt != nil {
+			l.exits = append(l.exits, len(l.controlFrames)-1-int(labelIndex))
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Compiler) callListenerBefore() {
@@ -6244,6 +6739,7 @@ func (c *Compiler) lowerGCInstruction(gcOp wasm.OpcodeGC) {
 		if state.unreachable {
 			return
 		}
+		c.bulkCheck(state.peek(), 8)
 		length := state.pop()
 		if gcOp == wasm.OpcodeGCArrayNewDefault {
 			state.push(c.callGC(wasm.GCArrayNewDefault, c.gcConst(uint64(typeIndex)), c.gcToI64(length)))
@@ -6276,6 +6772,7 @@ func (c *Compiler) lowerGCInstruction(gcOp wasm.OpcodeGC) {
 		if gcOp == wasm.OpcodeGCArrayNewElem {
 			mode = wasm.GCArrayNewElem
 		}
+		c.bulkCheck(state.peek(), 8)
 		length, offset := state.pop(), state.pop()
 		state.push(c.callGC(mode, c.gcConst(uint64(typeIndex)), c.gcConst(uint64(segment)),
 			c.gcToI64(offset), c.gcToI64(length)))
@@ -6319,6 +6816,7 @@ func (c *Compiler) lowerGCInstruction(gcOp wasm.OpcodeGC) {
 		if state.unreachable {
 			return
 		}
+		c.bulkCheck(state.peek(), 8)
 		length, v, index, ref := state.pop(), state.pop(), state.pop(), state.pop()
 		lo, hi := c.gcSplitWords(v)
 		c.callGC(wasm.GCArrayFill, ref, c.gcToI64(index), lo, c.gcToI64(length), hi)
@@ -6329,6 +6827,7 @@ func (c *Compiler) lowerGCInstruction(gcOp wasm.OpcodeGC) {
 		if state.unreachable {
 			return
 		}
+		c.bulkCheck(state.peek(), 8)
 		length, srcIndex, src, dstIndex, dst := state.pop(), state.pop(), state.pop(), state.pop(), state.pop()
 		c.callGC(wasm.GCArrayCopy, dst, c.gcToI64(dstIndex), src, c.gcToI64(srcIndex), c.gcToI64(length))
 
@@ -6342,6 +6841,7 @@ func (c *Compiler) lowerGCInstruction(gcOp wasm.OpcodeGC) {
 		if gcOp == wasm.OpcodeGCArrayInitElem {
 			mode = wasm.GCArrayInitElem
 		}
+		c.bulkCheck(state.peek(), 8)
 		length, offset, dstIndex, ref := state.pop(), state.pop(), state.pop(), state.pop()
 		c.callGC(mode, ref, c.gcToI64(dstIndex), c.gcConst(uint64(segment)), c.gcToI64(offset), c.gcToI64(length))
 
@@ -6398,6 +6898,9 @@ func (c *Compiler) lowerBrOnCast(gcOp wasm.OpcodeGC) {
 	zero := builder.AllocateInstruction().AsIconst64(0).Insert(builder).Return()
 	takeBranch := builder.AllocateInstruction().AsIcmp(matched, zero, cond).Insert(builder).Return()
 
+	if c.branchChecks(labelIndex) {
+		c.emitInlinePreemptCheck()
+	}
 	targetBlk, argNum := state.brTargetArgNumFor(labelIndex)
 	args := c.nPeekDup(argNum)
 	var sealTargetBlk bool

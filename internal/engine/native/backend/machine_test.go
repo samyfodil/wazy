@@ -61,6 +61,10 @@ func (m mockMachine) CompileStackGrowCallSequence() []byte {
 	panic("TODO")
 }
 
+func (m mockMachine) CompileYieldTrampoline() []byte {
+	panic("TODO")
+}
+
 // CompileGoFunctionTrampoline implements Machine.CompileGoFunctionTrampoline.
 func (m mockMachine) CompileGoFunctionTrampoline(nativeapi.ExitCode, *ssa.Signature, bool) []byte {
 	panic("TODO")

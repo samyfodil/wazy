@@ -21,6 +21,14 @@ func sortBlocks(blocks []*basicBlock) {
 		if iRoot == nil && jRoot == nil { // For testing.
 			return 0
 		}
+		// A block that opens by yielding is the slow path of a preemption check,
+		// which almost never runs: placed last, it leaves the check falling through.
+		if iYields, jYields := i.yields(), j.yields(); iYields != jYields {
+			if iYields {
+				return 1
+			}
+			return -1
+		}
 		if jRoot == nil {
 			return 1
 		}

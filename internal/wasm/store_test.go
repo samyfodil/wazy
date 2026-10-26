@@ -437,12 +437,12 @@ func (e *mockEngine) Close() error {
 }
 
 // CompileModule implements the same method as documented on wasm.Engine.
-func (e *mockEngine) CompileModule(context.Context, *Module, []api.FunctionListener, bool) error {
+func (e *mockEngine) CompileModule(context.Context, *Module, []api.FunctionListener) error {
 	return nil
 }
 
 // HasCompiledModule implements the same method as documented on wasm.Engine.
-func (e *mockEngine) HasCompiledModule(*Module, []api.FunctionListener, bool) (bool, error) {
+func (e *mockEngine) HasCompiledModule(*Module, []api.FunctionListener) (bool, error) {
 	return false, nil
 }
 

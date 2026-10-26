@@ -117,8 +117,8 @@ type Runtime interface {
 	//   - The module has a start function, and it failed to execute.
 	//   - The module was compiled to WASI and exited with a non-zero exit
 	//     code, you'll receive a sys.ExitError.
-	//   - RuntimeConfig.WithCloseOnContextDone was enabled and a context
-	//     cancellation or deadline triggered before a start function returned.
+	//   - The context was canceled or passed its deadline before a start
+	//     function returned.
 	InstantiateModule(ctx context.Context, compiled CompiledModule, config ModuleConfig) (api.Module, error)
 
 	// CloseWithExitCode closes all the modules that have been initialized in this Runtime with the provided exit code.
@@ -191,7 +191,6 @@ func NewRuntimeWithConfig(ctx context.Context, rConfig RuntimeConfig) Runtime {
 		memoryCapacityReservePages: config.memoryCapacityReservePages,
 		dwarfDisabled:              config.dwarfDisabled,
 		storeCustomSections:        config.storeCustomSections,
-		ensureTermination:          config.ensureTermination,
 	}
 }
 
@@ -213,8 +212,6 @@ type runtime struct {
 	// Note: Exclusively reading and updating this with atomics guarantees cross-goroutine observations.
 	// See /RATIONALE.md
 	closed atomic.Uint64
-
-	ensureTermination bool
 }
 
 // Module implements Runtime.Module.
@@ -260,7 +257,7 @@ func (r *runtime) CompileModule(ctx context.Context, binary []byte) (CompiledMod
 	}
 
 	// The module ID is a hash over the raw binary plus the compile-affecting
-	// flags (listener presence per function, ensureTermination). Computing it
+	// flags (listener presence per function). Computing it
 	// before validating lets us ask the engine whether it already has a
 	// compiled artifact for this exact binary and skip the (expensive)
 	// function-body validation pass below when it does.
@@ -281,14 +278,14 @@ func (r *runtime) CompileModule(ctx context.Context, binary []byte) (CompiledMod
 	var listeners []api.FunctionListener
 	var hasCompiled bool
 	if ctx.Value(expctxkeys.FunctionListenerFactoryKey{}) == nil {
-		internal.AssignModuleID(binary, nil, r.ensureTermination)
+		internal.AssignModuleID(binary, nil)
 
 		// hasCompiled acquires a reference on the engine's cached artifact
 		// for this module.ID (if any) - see wasm.Engine.HasCompiledModule. We
 		// must balance that reference: either reach the CompiledModule return
 		// below (whose Close releases it), or explicitly release it on any
 		// error returned between here and there.
-		if hasCompiled, err = r.store.Engine.HasCompiledModule(internal, nil, r.ensureTermination); err != nil {
+		if hasCompiled, err = r.store.Engine.HasCompiledModule(internal, nil); err != nil {
 			return nil, err
 		}
 
@@ -302,7 +299,7 @@ func (r *runtime) CompileModule(ctx context.Context, binary []byte) (CompiledMod
 			// *revalidation* of the source binary adds no new trust: a hit is
 			// only possible when module.ID - a sha256 over the raw binary plus
 			// every compile-affecting flag (see AssignModuleID: listener
-			// presence per function, ensureTermination) - matches exactly,
+			// presence per function) - matches exactly,
 			// which can only happen if this exact binary, with these exact
 			// flags, was already compiled (and therefore already ran the
 			// per-function-body opcode walk successfully) before.
@@ -330,7 +327,7 @@ func (r *runtime) CompileModule(ctx context.Context, binary []byte) (CompiledMod
 		if listeners, err = buildFunctionListeners(ctx, internal); err != nil {
 			return nil, err
 		}
-		internal.AssignModuleID(binary, listeners, r.ensureTermination)
+		internal.AssignModuleID(binary, listeners)
 	}
 
 	// Now that the module is validated, cache the memory definitions.
@@ -354,7 +351,7 @@ func (r *runtime) CompileModule(ctx context.Context, binary []byte) (CompiledMod
 		// On a miss, CompileModule performs its own (single) probe of memory
 		// and file cache before compiling; we don't duplicate that here to
 		// avoid racing a concurrent compile of the same module twice.
-		if err = r.store.Engine.CompileModule(ctx, internal, listeners, r.ensureTermination); err != nil {
+		if err = r.store.Engine.CompileModule(ctx, internal, listeners); err != nil {
 			return nil, err
 		}
 	}

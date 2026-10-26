@@ -82,6 +82,7 @@ type (
 		preds   []basicBlockPredecessorInfo
 		success []*basicBlock
 		// singlePred is the alias to preds[0] for fast lookup, and only set after Seal is called.
+		// A block whose other predecessor is a check's slow path has it too: see yieldJoin.
 		singlePred *basicBlock
 		// varDefsOff, varDefsLen locate this block's window in builder.varDefs, which holds
 		// the last definition of each Variable in this block. varDefsLen is zero until the
@@ -271,6 +272,12 @@ func (bb *basicBlock) Succ(i int) BasicBlock {
 // Root implements BasicBlock.Root.
 func (bb *basicBlock) Root() *Instruction {
 	return bb.rootInstr
+}
+
+// yields reports whether bb opens with OpcodeYield: the slow path of a preemption
+// check.
+func (bb *basicBlock) yields() bool {
+	return bb.rootInstr != nil && bb.rootInstr.opcode == OpcodeYield
 }
 
 // Tail implements BasicBlock.Tail.

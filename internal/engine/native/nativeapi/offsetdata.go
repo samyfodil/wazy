@@ -104,6 +104,12 @@ const (
 	// ExecutionContextOffsetMemclrAddress is the offset of `memclrAddress`, the entry PC of
 	// the Go runtime's memclrNoHeapPointers, called by the memory.fill lowering.
 	ExecutionContextOffsetMemclrAddress Offset = 728
+	// ExecutionContextOffsetPreemptWordAddress is the offset of `preemptWordAddress`, the address
+	// of the calling goroutine's g.stackguard0. See StackPreempt.
+	ExecutionContextOffsetPreemptWordAddress Offset = 736
+	// ExecutionContextOffsetYieldSavedLR is the offset of `yieldSavedLR`, where arm64 code keeps
+	// the link register while it yields from a preemption check. See ssa.OpcodeYield.
+	ExecutionContextOffsetYieldSavedLR Offset = 744
 )
 
 // AssertSavedRegistersFit panics if a save/restore layout that ends at absolute offset end

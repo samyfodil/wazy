@@ -27,7 +27,7 @@ func TestAbiImpl_constructEntryPreamble(t *testing.T) {
 	str x27, [x20, #0x18]
 	str x30, [x20, #0x20]
 	mov sp, x26
-	orr x21, xzr, #0x2000
+	ldr x21, [x20, #0x2e0]
 	bl x24
 	ldr x29, [x20, #0x10]
 	ldr x27, [x20, #0x18]
@@ -51,7 +51,7 @@ func TestAbiImpl_constructEntryPreamble(t *testing.T) {
 	str x27, [x20, #0x18]
 	str x30, [x20, #0x20]
 	mov sp, x26
-	orr x21, xzr, #0x2000
+	ldr x21, [x20, #0x2e0]
 	ldr s0, [x19], #0x8
 	ldr s1, [x19], #0x8
 	ldr s2, [x19], #0x8
@@ -80,7 +80,7 @@ func TestAbiImpl_constructEntryPreamble(t *testing.T) {
 	str x27, [x20, #0x18]
 	str x30, [x20, #0x20]
 	mov sp, x26
-	orr x21, xzr, #0x2000
+	ldr x21, [x20, #0x2e0]
 	ldr w2, [x19], #0x8
 	ldr w3, [x19], #0x8
 	ldr w4, [x19], #0x8
@@ -109,7 +109,7 @@ func TestAbiImpl_constructEntryPreamble(t *testing.T) {
 	str x27, [x20, #0x18]
 	str x30, [x20, #0x20]
 	mov sp, x26
-	orr x21, xzr, #0x2000
+	ldr x21, [x20, #0x2e0]
 	ldr w2, [x19], #0x8
 	ldr d0, [x19], #0x8
 	ldr w3, [x19], #0x8
@@ -146,7 +146,7 @@ func TestAbiImpl_constructEntryPreamble(t *testing.T) {
 	str x27, [x20, #0x18]
 	str x30, [x20, #0x20]
 	mov sp, x26
-	orr x21, xzr, #0x2000
+	ldr x21, [x20, #0x2e0]
 	mov x25, x19
 	ldr w2, [x25], #0x8
 	ldr d0, [x25], #0x8
@@ -184,7 +184,7 @@ func TestAbiImpl_constructEntryPreamble(t *testing.T) {
 	str x27, [x20, #0x18]
 	str x30, [x20, #0x20]
 	mov sp, x26
-	orr x21, xzr, #0x2000
+	ldr x21, [x20, #0x2e0]
 	bl x24
 	str s0, [x19], #0x8
 	str d1, [x19], #0x8
@@ -247,7 +247,7 @@ func TestAbiImpl_constructEntryPreamble(t *testing.T) {
 	str x27, [x20, #0x18]
 	str x30, [x20, #0x20]
 	mov sp, x26
-	orr x21, xzr, #0x2000
+	ldr x21, [x20, #0x2e0]
 	ldr q0, [x19], #0x10
 	ldr q1, [x19], #0x10
 	ldr q2, [x19], #0x10
@@ -320,7 +320,7 @@ func TestAbiImpl_constructEntryPreamble(t *testing.T) {
 	str x27, [x20, #0x18]
 	str x30, [x20, #0x20]
 	mov sp, x26
-	orr x21, xzr, #0x2000
+	ldr x21, [x20, #0x2e0]
 	mov x25, x19
 	ldr q0, [x25], #0x10
 	ldr q1, [x25], #0x10

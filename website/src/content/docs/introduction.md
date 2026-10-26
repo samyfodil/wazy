@@ -22,7 +22,7 @@ you `go:embed` and a function you call.
 
 The guest starts with nothing — no files beyond what you mount, no sockets unless you allow them,
 a fake clock on the WASI 0.1 path. You cap its memory with `WithMemoryLimitPages`, and a `context`
-deadline kills even a tight compiled loop with `WithCloseOnContextDone`.
+deadline ends a call even in a tight compiled loop.
 
 ## What it runs
 

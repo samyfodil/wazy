@@ -11,6 +11,91 @@ func (m *machine) PostRegAlloc() {
 	m.setupPrologue()
 	m.postRegAlloc()
 	m.emitTrapIslands()
+	m.emitPreemptIslands()
+}
+
+// emitPreemptIslands materializes the out-of-line halves of masked preemption
+// checks after everything else in the function:
+//
+//	island:
+//		testb $0x80, 7(%preempt)
+//		jnz  <slow>
+//		test %counter, %counter   ;; see foldZeroExit
+//		jz   <exit>
+//		jmp  <back>
+//
+// It runs after register allocation and takes no register: the slow block and
+// the loop both expect exactly the registers the masked test left.
+func (m *machine) emitPreemptIslands() {
+	if len(m.preemptIslands) == 0 {
+		return
+	}
+	lastPos := m.orderedSSABlockLabelPos[len(m.orderedSSABlockLabelPos)-1]
+	cur := lastPos.end
+	for cur.next != nil {
+		cur = cur.next
+	}
+	for _, pi := range m.preemptIslands {
+		nop := m.allocateInstr().asNop0WithLabel(pi.l)
+		pos := m.labelPositionPool.GetOrAllocate(int(pi.l))
+		pos.begin, pos.end = nop, nop
+		cur = linkInstr(cur, nop)
+		cur = linkInstr(cur, m.allocateInstr().asPreemptCheck(m.preemptWordTop()))
+		cur = linkInstr(cur, m.allocateInstr().asJmpIf(condNZ, newOperandLabel(pi.slow)))
+		if test, exit := m.foldZeroExit(pi); test != nil {
+			cur = linkInstr(cur, test)
+			cur = linkInstr(cur, m.allocateInstr().asJmpIf(condZ, newOperandLabel(exit)))
+		}
+		cur = linkInstr(cur, m.allocateInstr().asJmp(newOperandLabel(pi.back)))
+	}
+	// Extend the last block over the islands, so that encoding walks them.
+	lastPos.end = cur
+}
+
+// foldZeroExit moves the exit test of a loop that counts down to zero into its
+// preemption island, when it is the first thing after the masked check:
+//
+//		test $mask, %r
+//		jz   <island>
+//	back:
+//		test %r, %r      ;; or cmp $0, %r
+//		jz   <exit>
+//
+// Whenever %r is zero its masked bits are too, so the island sees every exit, and
+// the loop pays for neither the exit test nor the check. It returns a copy of the
+// test for the island, leaving nops in the loop, and the exit label, or nil if
+// the shape is not there.
+func (m *machine) foldZeroExit(pi preemptIsland) (*instruction, label) {
+	r := pi.test.op2.reg().RealReg()
+	t := pi.backInstr.next
+	for t != nil && t.kind == nop0 {
+		t = t.next
+	}
+	if t == nil || t.kind != cmpRmiR || t.op2.reg().RealReg() != r {
+		return nil, 0
+	}
+	switch {
+	case t.u1 == 0 && t.op1.kind == operandKindReg && t.op1.reg().RealReg() == r: // test %r, %r
+	case t.u1 == 1 && t.op1.kind == operandKindImm32 && t.op1.imm32() == 0: // cmp $0, %r
+	default:
+		return nil, 0
+	}
+	j := t.next
+	if j == nil || j.kind != jmpIf || cond(j.u1) != condZ || j.next == nil {
+		return nil, 0
+	}
+	switch j.next.kind {
+	case jmpIf, setcc, cmove:
+		return nil, 0 // reads the flags the test set
+	}
+	moved := m.allocateInstr()
+	*moved = *t
+	moved.prev, moved.next = nil, nil
+	exit := j.op1.label()
+	// In place rather than unlinked: either may end its block.
+	t.asNop0WithLabel(labelInvalid)
+	j.asNop0WithLabel(labelInvalid)
+	return moved, exit
 }
 
 // emitTrapIslands materializes the shared trap islands allocated by

@@ -11,7 +11,19 @@ TEXT ·entrypoint(SB), NOSPLIT|NOFRAME, $0-48
 	MOVD moduleContextPtr+24(FP), R1
 	MOVD paramResultSlicePtr+32(FP), R19
 	MOVD goAllocatedStackSlicePtr+40(FP), R26
-	JMP  (R27)
+
+	// Publish the address of this goroutine's g.stackguard0, which compiled code
+	// checks and a done context's watcher stores to (16 == GStackguard0Offset, 736 ==
+	// ExecutionContextOffsetPreemptWordAddress). Only a call on another goroutine
+	// than the last one changes it, so most calls only compare.
+	ADD  $16, g, R10
+	MOVD 736(R0), R11
+	CMP  R10, R11
+	BEQ  published
+	MOVD R10, 736(R0)
+
+published:
+	JMP (R27)
 
 TEXT ·afterGoFunctionCallEntrypoint(SB), NOSPLIT|NOFRAME, $0-32
 	MOVD goCallReturnAddress+0(FP), R20

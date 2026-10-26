@@ -1174,9 +1174,9 @@ func TestModule_declaredFunctionIndexes(t *testing.T) {
 }
 
 func TestModule_AssignModuleID(t *testing.T) {
-	getID := func(bin []byte, lsns []api.FunctionListener, withEnsureTermination bool) ModuleID {
+	getID := func(bin []byte, lsns []api.FunctionListener) ModuleID {
 		m := Module{}
-		m.AssignModuleID(bin, lsns, withEnsureTermination)
+		m.AssignModuleID(bin, lsns)
 		return m.ID
 	}
 
@@ -1185,66 +1185,20 @@ func TestModule_AssignModuleID(t *testing.T) {
 	// Ensures that different args always produce the different IDs.
 	exists := map[ModuleID]struct{}{}
 	for i, tc := range []struct {
-		bin                   []byte
-		withEnsureTermination bool
-		listeners             []api.FunctionListener
+		bin       []byte
+		listeners []api.FunctionListener
 	}{
-		{bin: []byte{1, 2, 3}, withEnsureTermination: false},
-		{bin: []byte{1, 2, 3}, withEnsureTermination: true},
-		{
-			bin:                   []byte{1, 2, 3},
-			listeners:             []api.FunctionListener{ml},
-			withEnsureTermination: false,
-		},
-		{
-			bin:                   []byte{1, 2, 3},
-			listeners:             []api.FunctionListener{ml},
-			withEnsureTermination: true,
-		},
-		{
-			bin:                   []byte{1, 2, 3},
-			listeners:             []api.FunctionListener{nil, ml},
-			withEnsureTermination: true,
-		},
-		{
-			bin:                   []byte{1, 2, 3},
-			listeners:             []api.FunctionListener{ml, ml},
-			withEnsureTermination: true,
-		},
-		{bin: []byte{1, 2, 3, 4}, withEnsureTermination: false},
-		{bin: []byte{1, 2, 3, 4}, withEnsureTermination: true},
-		{
-			bin:                   []byte{1, 2, 3, 4},
-			listeners:             []api.FunctionListener{ml},
-			withEnsureTermination: false,
-		},
-		{
-			bin:                   []byte{1, 2, 3, 4},
-			listeners:             []api.FunctionListener{ml},
-			withEnsureTermination: true,
-		},
-		{
-			bin:                   []byte{1, 2, 3, 4},
-			listeners:             []api.FunctionListener{nil},
-			withEnsureTermination: true,
-		},
-		{
-			bin:                   []byte{1, 2, 3, 4},
-			listeners:             []api.FunctionListener{nil, ml},
-			withEnsureTermination: true,
-		},
-		{
-			bin:                   []byte{1, 2, 3, 4},
-			listeners:             []api.FunctionListener{ml, ml},
-			withEnsureTermination: true,
-		},
-		{
-			bin:                   []byte{1, 2, 3, 4},
-			listeners:             []api.FunctionListener{ml, ml},
-			withEnsureTermination: false,
-		},
+		{bin: []byte{1, 2, 3}},
+		{bin: []byte{1, 2, 3}, listeners: []api.FunctionListener{ml}},
+		{bin: []byte{1, 2, 3}, listeners: []api.FunctionListener{nil, ml}},
+		{bin: []byte{1, 2, 3}, listeners: []api.FunctionListener{ml, ml}},
+		{bin: []byte{1, 2, 3, 4}},
+		{bin: []byte{1, 2, 3, 4}, listeners: []api.FunctionListener{ml}},
+		{bin: []byte{1, 2, 3, 4}, listeners: []api.FunctionListener{nil}},
+		{bin: []byte{1, 2, 3, 4}, listeners: []api.FunctionListener{nil, ml}},
+		{bin: []byte{1, 2, 3, 4}, listeners: []api.FunctionListener{ml, ml}},
 	} {
-		id := getID(tc.bin, tc.listeners, tc.withEnsureTermination)
+		id := getID(tc.bin, tc.listeners)
 		_, exist := exists[id]
 		require.False(t, exist, i)
 		exists[id] = struct{}{}

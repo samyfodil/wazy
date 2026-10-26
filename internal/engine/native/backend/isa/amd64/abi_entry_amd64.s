@@ -9,7 +9,19 @@ TEXT ·entrypoint(SB), NOSPLIT|NOFRAME, $0-48
 	MOVQ moduleContextPtr+24(FP), BX          // Second argument is passed in BX.
 	MOVQ paramResultSlicePtr+32(FP), R12
 	MOVQ goAllocatedStackSlicePtr+40(FP), R13
-	JMP  R11
+
+	// Publish the address of this goroutine's g.stackguard0, which compiled code
+	// checks and a done context's watcher stores to (16 == GStackguard0Offset, 736 ==
+	// ExecutionContextOffsetPreemptWordAddress). Only a call on another goroutine
+	// than the last one changes it, so most calls only compare.
+	MOVQ (TLS), R10
+	ADDQ $16, R10
+	CMPQ R10, 736(AX)
+	JEQ  published
+	MOVQ R10, 736(AX)
+
+published:
+	JMP R11
 
 // afterGoFunctionCallEntrypoint(executable *byte, executionContextPtr uintptr, stackPointer, framePointer uintptr)
 TEXT ·afterGoFunctionCallEntrypoint(SB), NOSPLIT|NOFRAME, $0-32

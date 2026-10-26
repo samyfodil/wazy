@@ -84,7 +84,9 @@ type (
 		// execCtx/moduleCtx slots and setupPrologue stores rax/rbx there. See
 		// backend.Machine.EhCtxSlotOffsets. P3.0 groundwork; nothing reads
 		// the slots yet.
-		hasEHContext  bool
+		hasEHContext bool
+		// yields are the yields lowered so far: see reloadYieldContexts.
+		yields        []*instruction
 		currentABI    *backend.FunctionABI
 		clobberedRegs []regalloc.VReg
 
@@ -101,6 +103,10 @@ type (
 		// sequences, one per exit code, emitted once after register
 		// allocation (see lowerExitIfTrueWithCodeShared and emitTrapIslands).
 		trapIslands []trapIsland
+
+		// preemptIslands are the out-of-line halves of masked preemption checks,
+		// emitted after register allocation (see emitPreemptIslands).
+		preemptIslands []preemptIsland
 
 		consts []_const
 
@@ -157,7 +163,11 @@ func resetLabelPosition(l *labelPosition) {
 	*l = labelPosition{}
 }
 
-const labelReturn = math.MaxUint32
+const (
+	labelReturn = math.MaxUint32
+	// labelInvalid names no position, so a nop0 bound to it is no label at all.
+	labelInvalid = labelReturn - 1
+)
 
 func ssaBlockLabel(sb ssa.BasicBlock) label {
 	if sb.ReturnBlock() {
@@ -201,6 +211,15 @@ type trapIsland struct {
 	l    label
 }
 
+// preemptIsland is the out-of-line half of a masked preemption check: at l, it
+// reads g.stackguard0 and branches to slow if the runtime asked the goroutine to
+// stop, and back to the loop otherwise. test is the masked test, and backInstr
+// the label instruction that back names.
+type preemptIsland struct {
+	l, slow, back   label
+	test, backInstr *instruction
+}
+
 // getOrCreateTrapIsland returns the label of this function's shared trap
 // island for the given exit code, allocating it on first use. The island
 // itself is materialized by emitTrapIslands after register allocation.
@@ -219,6 +238,7 @@ func (m *machine) getOrCreateTrapIsland(code nativeapi.ExitCode) label {
 func (m *machine) Reset() {
 	m.consts = m.consts[:0]
 	m.trapIslands = m.trapIslands[:0]
+	m.preemptIslands = m.preemptIslands[:0]
 	m.clobberedRegs = m.clobberedRegs[:0]
 	for key := range m.spillSlots {
 		m.clobberedRegs = append(m.clobberedRegs, regalloc.VReg(key))
@@ -229,6 +249,7 @@ func (m *machine) Reset() {
 
 	m.stackBoundsCheckDisabled = false
 	m.hasEHContext = false
+	m.yields = m.yields[:0]
 	m.regAlloc.Reset()
 	m.labelPositionPool.Reset()
 	m.instrPool.Reset()
@@ -350,7 +371,8 @@ func (m *machine) EhCtxSlotOffsets() (execCtxOffset, moduleCtxOffset int64) {
 // path (both execCtx and moduleCtx) and the shared conditional-trap islands
 // (execCtx only -- reloaded there instead of being re-saved at every trap
 // site; see lowerExitIfTrueWithCodeShared / emitTrapIslands). Trap islands are
-// created during lowering, so len(trapIslands) is final by RegAlloc time.
+// created during lowering, so len(trapIslands) is final by RegAlloc time. Yields
+// use it where it is there: see reloadYieldContexts.
 func (m *machine) needsCtxSlot() bool {
 	return m.hasEHContext || len(m.trapIslands) > 0
 }
@@ -363,6 +385,7 @@ func (m *machine) RegAlloc() {
 	// many spill slots this function ends up needing.
 	if m.needsCtxSlot() {
 		m.spillSlotSize = ehCtxReservedSlotSize
+		m.reloadYieldContexts()
 	}
 	m.regAllocStarted = true
 	m.regAlloc.DoAllocation(&m.regAllocFn)
@@ -458,6 +481,11 @@ func (m *machine) lowerBrTable(index ssa.Value, targets ssa.Values) {
 	m.insert(jmpTable)
 }
 
+// preemptWordTop addresses the top byte of g.stackguard0, which holds its sign bit.
+func (m *machine) preemptWordTop() *amode {
+	return m.newAmodeImmReg(7, preemptVReg)
+}
+
 // LowerConditionalBranch implements backend.Machine.
 func (m *machine) LowerConditionalBranch(b *ssa.Instruction) {
 	cval, args, targetBlkID := b.BranchData()
@@ -472,22 +500,50 @@ func (m *machine) LowerConditionalBranch(b *ssa.Instruction) {
 	target := ssaBlockLabel(m.c.SSABuilder().BasicBlock(targetBlkID))
 	cvalDef := m.c.ValueDefinition(cval)
 
-	if m.c.MatchInstr(cvalDef, ssa.OpcodeFuelDec) {
-		// 		sub $1, %fuel
-		// 		jle  <slow>          ;; or jg, for a Brz
+	if m.c.MatchInstr(cvalDef, ssa.OpcodePreemptRequested) {
+		// 		testb $0x80, 7(%preempt)
+		// 		jnz  <slow>          ;; or jz, for a Brz
 		//
-		// SUB already sets the flags the branch needs, so the decrement and the test
-		// are the same instruction: the whole termination check is these two. Signed
-		// LE rather than Z so that a counter driven below zero -- which a re-entry
-		// restoring an already-exhausted value can do -- keeps taking the slow path
-		// instead of wrapping around for another 2^64 ticks.
+		// or, masked,
+		// 		test $mask, %counter
+		// 		jz   <island>        ;; see emitPreemptIslands
+		// 	back:
 		//
-		// Matched here rather than through condBranchMatches because that list is
-		// shared with lowerSelect, which must never see a FuelDec.
-		m.insert(m.allocateInstr().asAluRmiR(aluRmiROpcodeSub, newOperandImm32(1), fuelVReg, true))
-		cc := condLE
-		if b.Opcode() == ssa.OpcodeBrz {
-			cc = condNLE
+		// The preempt register holds the address of g.stackguard0 (see
+		// ssa.OpcodePreemptRequested). StackPreempt sets its sign bit, which no
+		// stack bound does, so the test reads the top byte alone, in five bytes
+		// and no register. A masked check reads it only when the counter's masked
+		// bits are zero, and an elided one not at all.
+		counter, mask, elided := cvalDef.Instr.PreemptCheckData()
+		brz := b.Opcode() == ssa.OpcodeBrz
+		if elided {
+			if brz {
+				m.insert(m.allocateInstr().asJmp(newOperandLabel(target)))
+			}
+			cvalDef.Instr.MarkLowered()
+			return
+		}
+		if counter.Valid() {
+			if brz {
+				panic("BUG: a masked preemption check is only ever consumed by Brnz")
+			}
+			// The full check is out of line, so the loop falls through a branch
+			// that is almost never taken: a taken jump around an inline check would
+			// cost every iteration more than the check itself.
+			test := m.allocateInstr().asCmpRmiR(false, newOperandImm32(uint32(mask)), m.c.VRegOf(counter), counter.Type().Bits() == 64)
+			m.insert(test)
+			island, _ := m.allocateLabel()
+			m.insert(m.allocateInstr().asJmpIf(condZ, newOperandLabel(island)))
+			back, backLabel := m.allocateBrTarget()
+			m.insert(back)
+			m.preemptIslands = append(m.preemptIslands, preemptIsland{l: island, slow: target, back: backLabel, test: test, backInstr: back})
+			cvalDef.Instr.MarkLowered()
+			return
+		}
+		m.insert(m.allocateInstr().asPreemptCheck(m.preemptWordTop()))
+		cc := condNZ
+		if brz {
+			cc = condZ
 		}
 		m.insert(m.allocateInstr().asJmpIf(cc, newOperandLabel(target)))
 		cvalDef.Instr.MarkLowered()
@@ -570,17 +626,19 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 	switch op := instr.Opcode(); op {
 	case ssa.OpcodeBrz, ssa.OpcodeBrnz, ssa.OpcodeJump, ssa.OpcodeBrTable:
 		panic("BUG: branching instructions are handled by LowerBranches")
-	case ssa.OpcodeFuelDec:
+	case ssa.OpcodePreemptRequested:
 		// The frontend only ever emits this immediately before the branch that
 		// consumes it, so LowerConditionalBranch above has already folded it in and
 		// marked it lowered. Reaching here means something moved it away from its
-		// branch, which would leave the decrement without its test.
-		panic("BUG: FuelDec must be folded into the conditional branch consuming it")
+		// branch, which would leave the check without its test.
+		panic("BUG: " + op.String() + " must be folded into the conditional branch consuming it")
 	case ssa.OpcodeReturn:
 		panic("BUG: return must be handled by backend.Compiler")
 	case ssa.OpcodeIconst, ssa.OpcodeF32const, ssa.OpcodeF64const: // Constant instructions are inlined.
 	case ssa.OpcodeCall, ssa.OpcodeCallIndirect:
 		m.lowerCall(instr)
+	case ssa.OpcodeYield:
+		m.lowerYield(instr)
 	case ssa.OpcodeStore, ssa.OpcodeIstore8, ssa.OpcodeIstore16, ssa.OpcodeIstore32:
 		m.lowerStore(instr)
 	case ssa.OpcodeIadd:
@@ -1455,7 +1513,7 @@ func (m *machine) lowerSelect(x, y, cval, ret ssa.Value) {
 		xc, yc, cc := icmp.IcmpData()
 		m.lowerIcmpToFlag(m.c.ValueDefinition(xc), m.c.ValueDefinition(yc), xc.Type() == ssa.TypeI64)
 		cond = condFromSSAIntCmpCond(cc)
-		icmp.Lowered()
+		icmp.MarkLowered()
 	default: // TODO: match ssa.OpcodeFcmp for optimization, but seems a bit complex.
 		cv := m.getOperand_Reg(cvalDef)
 		test := m.allocateInstr().asCmpRmiR(false, cv, cv.reg(), false)
@@ -2154,6 +2212,37 @@ func (m *machine) lowerStore(si *ssa.Instruction) {
 		panic("BUG")
 	}
 	m.insert(store)
+}
+
+// lowerYield lowers the slow path of a preemption check: see yield. Below this
+// frame it takes 32 bytes, the pushed context and the trampoline's return
+// address, frame pointer and one more push, all it keeps on the stack. The
+// headroom a leaf leaves below its frame covers that (see
+// backend.LeafStackCheckHeadroomBytes), so unlike a call it leaves a function a
+// leaf, which needs no stack check of its own; the margin every call site keeps
+// covers it in any other function.
+func (m *machine) lowerYield(si *ssa.Instruction) {
+	ctx := m.c.VRegOf(si.Arg())
+	addr := m.newAmodeImmReg(nativeapi.ExecutionContextOffsetCheckModuleExitCodeTrampolineAddress.U32(), ctx)
+	y := m.allocateInstr().asYield(addr)
+	m.insert(y)
+	m.yields = append(m.yields, y)
+}
+
+// reloadYieldContexts makes each yield reload the execution context from the
+// reserved slot, in a function that has it anyway (see needsCtxSlot), as trap
+// islands do, rather than use the function's own: that would otherwise stay live
+// around a loop whose check's slow path yields, and in a register from the header
+// on, which the body pays for with a reload on every way back. A function with no
+// slot keeps using its own rather than pay to set one up.
+func (m *machine) reloadYieldContexts() {
+	execOff, _ := m.EhCtxSlotOffsets()
+	for _, y := range m.yields {
+		ctx := m.c.AllocateVReg(ssa.TypeI64)
+		load := m.allocateInstr().asMov64MR(newOperandMem(m.newAmodeImmReg(uint32(execOff), rspVReg)), ctx)
+		linkInstr(linkInstr(y.prev, load), y)
+		y.op1 = newOperandMem(m.newAmodeImmReg(nativeapi.ExecutionContextOffsetCheckModuleExitCodeTrampolineAddress.U32(), ctx))
+	}
 }
 
 func (m *machine) lowerCall(si *ssa.Instruction) {

@@ -335,10 +335,9 @@ func Test_stackGrowSaveVRegs(t *testing.T) {
 			}
 		}
 	}
-	// The fuel register is not allocatable (see fuelVReg), but a stack grow still
-	// has to give it back: it carries the termination counter, and refilling it
-	// here instead would hand a guest a fresh budget on every grow.
-	exp = append(exp, fuelVReg)
+	// The preempt register is not allocatable (see preemptVReg), but a stack grow
+	// still has to give it back: preemption checks read through it.
+	exp = append(exp, preemptVReg)
 	// Copy stackGrowSaveVRegs to avoid modifying the original.
 	var actual []regalloc.VReg
 	actual = append(actual, stackGrowSaveVRegs...)

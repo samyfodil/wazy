@@ -150,6 +150,7 @@ var defKinds = [numInstructionKinds]defKind{
 	loadConstBlockArg:    defKindRD,
 	tailCall:             defKindCall,
 	tailCallInd:          defKindCall,
+	yield:                defKindNone,
 }
 
 // Defs returns the list of regalloc.VReg that are defined by the instruction.
@@ -292,6 +293,7 @@ var useKinds = [numInstructionKinds]useKind{
 	dmb:                  useKindNone,
 	tailCall:             useKindCall,
 	tailCallInd:          useKindCallInd,
+	yield:                useKindRN,
 }
 
 // Uses returns the list of regalloc.VReg that are used by the instruction.
@@ -467,6 +469,8 @@ func (i *instruction) AssignUse(index int, reg regalloc.VReg) {
 			i.u1 = uint64(registerAsRegZeroCond(reg))
 		case condKindRegisterNotZero:
 			i.u1 = uint64(registerAsRegNotZeroCond(reg))
+		case condKindRegisterSignBit:
+			i.u1 = uint64(registerAsSignBitCond(reg, c.signBitSet()))
 		}
 	case useKindCall:
 		panic("BUG: call instructions shouldn't be assigned")
@@ -483,6 +487,11 @@ func (i *instruction) asCall(ref ssa.FuncRef, abi *backend.FunctionABI) {
 	if abi != nil {
 		i.u2 = abi.ABIInfoAsUint64()
 	}
+}
+
+func (i *instruction) asYield(execCtx regalloc.VReg) {
+	i.kind = yield
+	i.rn = operandNR(execCtx)
 }
 
 func (i *instruction) asCallIndirect(ptr regalloc.VReg, abi *backend.FunctionABI) {
@@ -1582,6 +1591,16 @@ func (i *instruction) String() (str string) {
 			} else {
 				str = fmt.Sprintf("cbnz %s, %s", formatVRegSized(c.register(), size), target.String())
 			}
+		case condKindRegisterSignBit:
+			op := "tbz"
+			if c.signBitSet() {
+				op = "tbnz"
+			}
+			if offset := i.condBrOffset(); offset != 0 {
+				str = fmt.Sprintf("%s %s, #63, #%#x (%s)", op, formatVRegSized(c.register(), 64), offset, target.String())
+			} else {
+				str = fmt.Sprintf("%s %s, #63, %s", op, formatVRegSized(c.register(), 64), target.String())
+			}
 		case condKindCondFlagSet:
 			if offset := i.condBrOffset(); offset != 0 {
 				if target == labelInvalid {
@@ -1654,6 +1673,8 @@ func (i *instruction) String() (str string) {
 		str = fmt.Sprintf("b %s", ssa.FuncRef(i.u1))
 	case tailCallInd:
 		str = fmt.Sprintf("b %s", formatVRegSized(i.rn.nr(), 64))
+	case yield:
+		str = fmt.Sprintf("yield %s", formatVRegSized(i.rn.nr(), 64))
 	case udf:
 		str = "udf"
 	case emitSourceOffsetInfo:
@@ -1926,6 +1947,18 @@ const (
 	udf
 	// loadConstBlockArg represents a load of a constant block argument.
 	loadConstBlockArg
+	// yield is the slow path of a preemption check: it calls the yield trampoline,
+	// whose address the execution context in rn holds, with that context in x27 and
+	// the lr it overwrites saved in it:
+	//
+	//	mov x27, rn
+	//	str x30, [x27, #yieldSavedLR]
+	//	ldr x30, [x27, #checkModuleExitCodeTrampolineAddress]
+	//	blr x30
+	//
+	// The trampoline preserves every register, lr included, so to the allocator this
+	// is no call. See ssa.OpcodeYield.
+	yield
 
 	// emitSourceOffsetInfo is a dummy instruction to emit source offset info.
 	// The existence of this instruction does not affect the execution.
@@ -2664,6 +2697,8 @@ func (i *instruction) size() int64 {
 		return int64(i.fpuConstPoolDataWidth()) / 8 // 4, 8 or 16 bytes of raw data.
 	case brTableSequence:
 		return 4*4 + int64(i.u2)*4
+	case yield:
+		return 4 * 4
 	default:
 		return 4
 	}

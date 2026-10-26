@@ -208,36 +208,6 @@ type RuntimeConfig interface {
 	//	c, err := r.CompileModule(ctx, wasm)
 	//	customSections := c.CustomSections()
 	WithCustomSections(bool) RuntimeConfig
-
-	// WithCloseOnContextDone ensures the executions of functions to be terminated under one of the following circumstances:
-	//
-	// 	- context.Context passed to the Call method of api.Function is canceled during execution. (i.e. ctx by context.WithCancel)
-	// 	- context.Context passed to the Call method of api.Function reaches timeout during execution. (i.e. ctx by context.WithTimeout or context.WithDeadline)
-	// 	- Close or CloseWithExitCode of api.Module is explicitly called during execution.
-	//
-	// This is especially useful when one wants to run untrusted Wasm binaries since otherwise, any invocation of
-	// api.Function can potentially block the corresponding Goroutine forever. Moreover, it might block the
-	// entire underlying OS thread which runs the api.Function call. See "Why it's safe to execute runtime-generated
-	// machine codes against async Goroutine preemption" section in RATIONALE.md for detail.
-	//
-	// Upon the termination of the function executions, api.Module is closed.
-	//
-	// Note that this comes with a bit of extra cost when enabled. The reason is that internally this forces
-	// interpreter and compiler runtimes to insert the periodical checks on the conditions above. For that reason,
-	// this is disabled by default.
-	//
-	// In the compiler the check is a decrement of a reserved register and a predicted-not-taken branch at every
-	// function entry and every loop back-edge. When the counter runs out the guest returns to Go, which checks
-	// whether the module has been closed and yields its P so the cancellation watchdog can run -- which is what
-	// makes the option work at all, since compiled code is otherwise not preemptible. The shape that pays most
-	// is a near-empty compute kernel, which has no body to dilute the per-back-edge check against. See
-	// docs/performance.md for measured numbers.
-	//
-	// See examples in context_done_example_test.go for the end-to-end demonstrations.
-	//
-	// When the invocations of api.Function are closed due to this, sys.ExitError is raised to the callers and
-	// the api.Module from which the functions are derived is made closed.
-	WithCloseOnContextDone(bool) RuntimeConfig
 }
 
 // NewRuntimeConfig returns a RuntimeConfig using the compiler if it is supported in this environment,
@@ -264,7 +234,6 @@ type runtimeConfig struct {
 	newEngine                  newEngine
 	cache                      CompilationCache
 	storeCustomSections        bool
-	ensureTermination          bool
 }
 
 // engineLessConfig helps avoid copy/pasting the wrong defaults.
@@ -331,13 +300,6 @@ func (c *runtimeConfig) clone() *runtimeConfig {
 func (c *runtimeConfig) WithCoreFeatures(features api.CoreFeatures) RuntimeConfig {
 	ret := c.clone()
 	ret.enabledFeatures = features
-	return ret
-}
-
-// WithCloseOnContextDone implements RuntimeConfig.WithCloseOnContextDone
-func (c *runtimeConfig) WithCloseOnContextDone(ensure bool) RuntimeConfig {
-	ret := c.clone()
-	ret.ensureTermination = ensure
 	return ret
 }
 

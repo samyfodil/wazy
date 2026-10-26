@@ -176,7 +176,7 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				[]byte(testVersion),
 				u32.LeBytes(1), // number of functions.
 			),
-			expErr: "compilationcache: invalid magic number: got NATIV2 but want abcdef",
+			expErr: "compilationcache: invalid magic number: got NATIV4 but want abcdef",
 		},
 		{
 			name: "version mismatch",

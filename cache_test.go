@@ -54,7 +54,16 @@ func TestCompilationCache(t *testing.T) {
 		barCompiled, err := bar.CompileModule(ctx, facWasm)
 		require.NoError(t, err)
 
-		// Ensures compiled modules are the same modulo type IDs, which is unique per store.
+		// Ensures compiled modules are the same modulo type IDs, which is unique per store, and
+		// FunctionNeedsEntryCheck, FunctionCallWork and ForeignFuncRefs: a cache hit skips validating
+		// function bodies (see Runtime.CompileModule), and with it that analysis, which only a compile
+		// reads.
+		require.Nil(t, barCompiled.(*compiledModule).module.FunctionNeedsEntryCheck)
+		require.Nil(t, barCompiled.(*compiledModule).module.FunctionCallWork)
+		require.False(t, barCompiled.(*compiledModule).module.ForeignFuncRefs)
+		compiled.(*compiledModule).module.FunctionNeedsEntryCheck = nil
+		compiled.(*compiledModule).module.FunctionCallWork = nil
+		compiled.(*compiledModule).module.ForeignFuncRefs = false
 		require.Equal(t, compiled.(*compiledModule).module, barCompiled.(*compiledModule).module)
 		require.Equal(t, compiled.(*compiledModule).closeWithModule, barCompiled.(*compiledModule).closeWithModule)
 		require.Equal(t, compiled.(*compiledModule).compiledEngine, barCompiled.(*compiledModule).compiledEngine)

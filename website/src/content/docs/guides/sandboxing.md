@@ -101,27 +101,39 @@ the specification allows.
 
 ## Wall-clock limits
 
-A `context` deadline kills even a tight compiled loop, if you ask for it:
+A `context` deadline ends a call, even in a tight compiled loop:
 
 ```go
-r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfig().
-	WithCloseOnContextDone(true))
-
 ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 defer cancel()
 
 _, err := fn.Call(ctx)   // returns once the deadline passes, even mid-loop
+// errors.Is(err, context.DeadlineExceeded) is true, and the module is still usable
 ```
 
-The compiler decrements a reserved register and takes a predicted-not-taken branch at every
-function entry and every loop back-edge, rather than calling back into Go. When the counter
-runs out, one trip through Go does the authoritative check and yields to the scheduler. Real
-compute pays about **+18%** with the option on, where wazero pays +1057%.
+There is nothing to turn on. Compiled code checks Go's own preemption request — the word every Go
+function prologue compares against — at loop headers and at the entry of the functions that can
+recurse, and returns to Go when it is set. A done context sets it, and so does the garbage
+collector when it needs a spinning guest to stop.
 
-The worst case is a near-empty compute kernel (a bare spin loop), which has no body to dilute
-the per-back-edge decrement against and pays **+44%**. A host-call-dense loop, which used to
-be the expensive shape, now pays **+2%**. There is no knob; if your workload is a tight
-compute kernel and you do not need `Kill()` to interrupt a stuck guest, leave the option off.
+The call ends the way a trap does. To close the module instead, say to release its memory at once,
+close it when the context is done:
+
+```go
+stop := context.AfterFunc(ctx, func() { mod.Close(context.Background()) })
+defer stop()
+```
+
+A call that is inside a host function when the context is done ends once it is back in the guest,
+so a host function that can block should watch `ctx` itself.
+
+Being interruptible costs little, and cannot be turned off: compiled code checks at loop headers
+and at the entries of functions that can recur, which costs recursive code like `fibonacci` up
+to about 4% against a build with no check at all, while most loops pay next to nothing, because
+a loop with a counter tests a few of its bits instead, and one that ends soon enough is not
+checked. The worst case measured is allocation-heavy TinyGo code on an Apple M4, at about 8%:
+its allocator's loops each call a small helper, which leaves them a full check every
+iteration. The interpreter looks at the context every 1024th loop iteration or recursive call.
 
 ## What wazy does not do
 

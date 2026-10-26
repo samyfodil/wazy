@@ -4,6 +4,8 @@
 package wasmdebug
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"runtime"
 	"runtime/debug"
@@ -133,6 +135,11 @@ func (s *stackTrace) FromRecovered(recovered interface{}) error {
 	// If the error was internal, don't mention it was recovered.
 	if wasmErr, ok := recovered.(*wasmruntime.Error); ok {
 		return fmt.Errorf("wasm error: %w\nwasm stack trace:\n\t%s", wasmErr, stack)
+	}
+
+	// A call its context ended reports that the way a trap does.
+	if err, ok := recovered.(error); ok && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		return fmt.Errorf("wasm error: %w\nwasm stack trace:\n\t%s", err, stack)
 	}
 
 	// If we have a runtime.Error, something severe happened which should include the stack trace. This could be

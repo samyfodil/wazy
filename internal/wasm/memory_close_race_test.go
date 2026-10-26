@@ -10,9 +10,9 @@ import (
 
 // readUntilClosed hammers mem through the api.Memory surface from one
 // goroutine while close runs on another, which is issue #69's shape: an
-// embedder that cannot order the two because the close is a kill (see
-// WithCloseOnContextDone) and the reader is a call still unwinding through
-// host code. Run under -race.
+// embedder that cannot order the two because the close is a kill from a
+// watchdog and the reader is a call still unwinding through host code. Run
+// under -race.
 func readUntilClosed(t *testing.T, mem *MemoryInstance, closeFn func()) {
 	t.Helper()
 	var wg sync.WaitGroup

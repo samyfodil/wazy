@@ -247,6 +247,10 @@ func (i *instruction) String() string {
 		return fmt.Sprintf("jump_table_island: jmp_table_index=%d", i.u1)
 	case exitSequence:
 		return fmt.Sprintf("exit_sequence %s", i.op1.format(true))
+	case preemptCheck:
+		return fmt.Sprintf("testb $0x80, %s", i.op1.format(true))
+	case yield:
+		return fmt.Sprintf("yield *%s", i.op1.format(true))
 	case ud2:
 		return "ud2"
 	case call:
@@ -908,6 +912,17 @@ const (
 	// nopUseReg is a meta instruction that uses one register and does nothing.
 	nopUseReg
 
+	// preemptCheck is `testb $0x80, 7(%r13)`: it tests the sign bit of Go's preemption
+	// word, whose address the preempt register holds, which StackPreempt sets and a
+	// stack bound never does. See ssa.OpcodePreemptRequested.
+	preemptCheck
+
+	// yield is the slow path of a preemption check, `pushq %ctx; callq *off(%ctx);
+	// add $8, %rsp`: it calls the yield trampoline, whose address the execution context
+	// in op1's base holds, with that context on the stack. The trampoline preserves
+	// every register, so to the allocator this is no call. See ssa.OpcodeYield.
+	yield
+
 	// tailCall is a meta instruction that emits a tail call.
 	tailCall
 
@@ -1222,6 +1237,10 @@ func (k instructionKind) String() string {
 		return "jmpTableIsland"
 	case exitSequence:
 		return "exit_sequence"
+	case preemptCheck:
+		return "preemptCheck"
+	case yield:
+		return "yield"
 	case ud2:
 		return "ud2"
 	case xchg:
@@ -1279,6 +1298,23 @@ func (a aluRmiROpcode) String() string {
 	default:
 		panic("BUG")
 	}
+}
+
+// asPreemptCheck makes i the test of the sign bit of Go's preemption word, whose
+// top byte is at amode; the preempt register is reserved, so the allocator never
+// sees it. Its flags are NZ when preemption is requested.
+func (i *instruction) asPreemptCheck(amode *amode) *instruction {
+	i.kind = preemptCheck
+	i.op1 = newOperandMem(amode)
+	return i
+}
+
+// asYield makes i the slow path of a preemption check, which calls the yield
+// trampoline at amode, in the execution context. See yield.
+func (i *instruction) asYield(amode *amode) *instruction {
+	i.kind = yield
+	i.op1 = newOperandMem(amode)
+	return i
 }
 
 func (i *instruction) asJmpIf(cond cond, target operand) *instruction {
@@ -2531,6 +2567,8 @@ var defKinds = [instrMax]defKind{
 	lockxadd:               defKindNone,
 	neg:                    defKindNone,
 	nopUseReg:              defKindNone,
+	preemptCheck:           defKindNone,
+	yield:                  defKindNone,
 	tailCall:               defKindCall,
 	tailCallIndirect:       defKindCall,
 	xmmLoadConst:           defKindOp2,
@@ -2623,6 +2661,8 @@ var useKinds = [instrMax]useKind{
 	lockxadd:               useKindOp1RegOp2,
 	neg:                    useKindOp1,
 	nopUseReg:              useKindOp1,
+	preemptCheck:           useKindNone,
+	yield:                  useKindOp1,
 	tailCall:               useKindCall,
 	tailCallIndirect:       useKindTailCallInd,
 	xmmLoadConst:           useKindOp1,

@@ -83,24 +83,62 @@ func (m *machine) LowerConditionalBranch(b *ssa.Instruction) {
 	cvalDef := m.compiler.ValueDefinition(cval)
 
 	switch {
-	case m.compiler.MatchInstr(cvalDef, ssa.OpcodeFuelDec):
-		// 		subs fuel, fuel, #1
-		// 		b.le <slow>              ;; or b.gt, for a Brz
+	case m.compiler.MatchInstr(cvalDef, ssa.OpcodePreemptRequested):
+		// 		ldr tmp, [preempt]
+		// 		tbnz tmp, #63, <slow>    ;; or tbz, for a Brz
 		//
-		// SUBS already sets the flags the branch needs, so the decrement and the
-		// test are the same instruction: the whole termination check is these two.
-		// Signed LE rather than EQ so that a counter driven below zero -- which a
-		// re-entry restoring an already-exhausted value can do -- keeps taking the
-		// slow path instead of wrapping around for another 2^64 ticks.
-		subs := m.allocateInstr()
-		subs.asALU(aluOpSubS, fuelVReg, operandNR(fuelVReg), operandImm12(1, 0), true)
-		m.insert(subs)
-		cc := le
-		if b.Opcode() == ssa.OpcodeBrz {
-			cc = gt
+		// or, masked,
+		// 		tst counter, #mask
+		// 		b.eq <island>            ;; see emitPreemptIslands
+		// 	back:
+		//
+		// The preempt register holds the address of g.stackguard0 (see
+		// ssa.OpcodePreemptRequested). A stack bound is a user address, with the
+		// top bit clear, and every value the runtime stores there instead --
+		// StackPreempt, and the stackFork and poison values a check might also
+		// see -- has it set: one that is not a preemption request makes the code
+		// yield for nothing, which is harmless. A masked check reads the word only
+		// when the counter's masked bits are zero, and an elided one not at all.
+		counter, mask, elided := cvalDef.Instr.PreemptCheckData()
+		brz := b.Opcode() == ssa.OpcodeBrz
+		if elided {
+			if brz {
+				br := m.allocateInstr()
+				br.asBr(target)
+				m.insert(br)
+			}
+			cvalDef.Instr.MarkLowered()
+			break
 		}
+		if counter.Valid() {
+			if brz {
+				panic("BUG: a masked preemption check is only ever consumed by Brnz")
+			}
+			// The full check is out of line, so the loop falls through a branch
+			// that is almost never taken: a taken jump around an inline check would
+			// cost every iteration more than the check itself.
+			tst := m.allocateInstr()
+			tst.asALUBitmaskImm(aluOpAnds, xzrVReg, m.compiler.VRegOf(counter), mask, counter.Type().Bits() == 64)
+			m.insert(tst)
+			island := m.nextLabel
+			m.nextLabel++
+			cbr := m.allocateInstr()
+			cbr.asCondBr(eq.asCond(), island, false /* ignored */)
+			m.insert(cbr)
+			back, backLabel := m.allocateBrTarget()
+			m.insert(back)
+			m.preemptIslands = append(m.preemptIslands, preemptIsland{l: island, slow: target, back: backLabel, test: tst, backInstr: back})
+			cvalDef.Instr.MarkLowered()
+			break
+		}
+		tmp := m.compiler.AllocateVReg(ssa.TypeI64)
+		amode := m.amodePool.Allocate()
+		*amode = addressMode{kind: addressModeKindRegUnsignedImm12, rn: preemptVReg}
+		load := m.allocateInstr()
+		load.asULoad(tmp, amode, 64)
+		m.insert(load)
 		cbr := m.allocateInstr()
-		cbr.asCondBr(cc.asCond(), target, false /* ignored */)
+		cbr.asCondBr(registerAsSignBitCond(tmp, !brz), target, true)
 		m.insert(cbr)
 		cvalDef.Instr.MarkLowered()
 	case m.compiler.MatchInstr(cvalDef, ssa.OpcodeIcmp): // This case, we can use the ALU flag set by SUBS instruction.
@@ -179,12 +217,12 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 	switch op := instr.Opcode(); op {
 	case ssa.OpcodeBrz, ssa.OpcodeBrnz, ssa.OpcodeJump, ssa.OpcodeBrTable:
 		panic("BUG: branching instructions are handled by LowerBranches")
-	case ssa.OpcodeFuelDec:
+	case ssa.OpcodePreemptRequested:
 		// The frontend only ever emits this immediately before the branch that
 		// consumes it, so LowerConditionalBranch above has already folded it in and
 		// marked it lowered. Reaching here means something moved it away from its
-		// branch, which would leave the decrement without its test.
-		panic("BUG: FuelDec must be folded into the conditional branch consuming it")
+		// branch, which would leave the check without its test.
+		panic("BUG: " + op.String() + " must be folded into the conditional branch consuming it")
 	case ssa.OpcodeReturn:
 		panic("BUG: return must be handled by backend.Compiler")
 	case ssa.OpcodeIadd, ssa.OpcodeIsub:
@@ -221,6 +259,16 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		m.lowerExtLoad(op, ptr, offset, ret)
 	case ssa.OpcodeCall, ssa.OpcodeCallIndirect:
 		m.lowerCall(instr)
+	case ssa.OpcodeYield:
+		// Below this frame the trampoline takes what a call passing nothing on the
+		// stack does, which the margin every call site keeps covers (see
+		// backend.StackBoundsCheckMarginBytes).
+		if m.maxRequiredStackSizeForCalls < 16 {
+			m.maxRequiredStackSizeForCalls = 16 // return address frame.
+		}
+		y := m.allocateInstr()
+		y.asYield(m.compiler.VRegOf(instr.Arg()))
+		m.insert(y)
 	case ssa.OpcodeIcmp:
 		m.lowerIcmp(instr)
 	case ssa.OpcodeVIcmp:
@@ -2175,14 +2223,17 @@ func (m *machine) lowerTrapCond(condDef backend.SSAValueDefinition) cond {
 	return condFlagFromSSAIntegerCmpCond(c).asCond()
 }
 
-// invertTrapCond returns the condition under which the trap is NOT taken, used
-// to branch over an inlined exit sequence.
+// invertTrapCond returns the opposite of c: the condition under which a trap is
+// not taken, to branch over an inlined exit sequence, or a branch to a target out
+// of c's range is not, to branch over a branch that reaches it.
 func invertTrapCond(c cond) cond {
 	switch c.kind() {
 	case condKindRegisterZero:
 		return registerAsRegNotZeroCond(c.register())
 	case condKindRegisterNotZero:
 		return registerAsRegZeroCond(c.register())
+	case condKindRegisterSignBit:
+		return registerAsSignBitCond(c.register(), !c.signBitSet())
 	default:
 		return c.flag().invert().asCond()
 	}

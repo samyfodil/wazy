@@ -36,6 +36,11 @@ type (
 		// with the module's memories in NewFunction; see wasm.CallSlot.
 		slot  wasm.CallSlot
 		stack []byte
+		// watch is the current call's context watcher, nil until watchContext
+		// registers it, and hostCalls counts the call's host calls. See
+		// watchContext.
+		watch     *wasm.CallWatch
+		hostCalls uint8
 		// stackTop is the pointer to the *aligned* top of the stack. This must be updated
 		// whenever the stack is changed. This is passed to the assembly function
 		// at the very beginning of api.Function Call/CallWithStack.
@@ -173,6 +178,14 @@ type (
 		// memclrAddress holds the address of memclrNoHeapPointers implemented by the Go
 		// runtime. See memclr.go.
 		memclrAddress uintptr
+		// preemptWordAddress is the address of the calling goroutine's g.stackguard0,
+		// which preemption checks read to learn that the runtime wants it to stop, and
+		// a done context's watcher writes to make them stop. See
+		// nativeapi.StackPreempt.
+		preemptWordAddress unsafe.Pointer
+		// yieldSavedLR is where arm64 code keeps the link register while it yields from a
+		// preemption check, since the call to the trampoline overwrites it. See ssa.OpcodeYield.
+		yieldSavedLR uintptr
 	}
 )
 
@@ -397,37 +410,100 @@ func (c *callEngine) addFrame(builder wasmdebug.ErrorBuilder, addr uintptr) (def
 	return
 }
 
-// outOfFuel is the body of the ExitCodeCheckModuleExitCode arm of the dispatch
-// loop below: the guest spent its last tick of termination fuel
-// (nativeapi.TerminationFuel) and is back in Go for the two things it cannot do
-// itself.
+// yieldToGo is the body of the ExitCodeCheckModuleExitCode arm of the dispatch
+// loop below: a preemption check found that the runtime asked this goroutine to
+// stop (see ssa.OpcodePreemptRequested), and the guest is back in Go for the two
+// things it cannot do itself.
 //
-// The first is the check. Whether the module has been closed is state only Go can
-// read atomically, and closing it is what the deadline watchdog does.
-//
-// The second is the yield, and it is the reason this exit exists at all. Compiled
+// The first is the yield, and it is the reason this exit exists at all. Compiled
 // code is entered through asm trampolines marked unsafe for async preemption, so a
-// guest that never calls out holds its P for as long as it runs: the watchdog
-// goroutine that would close the module cannot be scheduled, and neither can a
-// stop-the-world. Handing the P back here is what makes both possible -- it is
-// what an entersyscall/exitsyscall bracket around every entry into compiled code
-// used to buy, at 28.5ns (amd64) on every host-call return rather than once per
-// 8192 fuel ticks.
+// guest that never calls out would hold its P for as long as it ran: a
+// stop-the-world could not complete, and no goroutine waiting for that P could
+// run. Handing the P back here is what makes both possible.
 //
-// Then the check again, because the yield is exactly the window the watchdog
-// needed: without the second look a close landing during it would wait for the
-// next time the fuel ran out, doubling the worst-case latency for one atomic load.
+// The second is the check. Whether the module has been closed is state only Go can
+// read atomically. It is made on both sides of the yield, because the yield is
+// exactly the window another goroutine needed to close it.
 //
 // It is a function of its own rather than twenty lines inside the switch because
 // the loop it belongs to is also the hot path for host calls, and that loop is
 // easier to read when each arm is short.
-func outOfFuel(m *wasm.ModuleInstance) {
+func (c *callEngine) yieldToGo(ctx context.Context, m *wasm.ModuleInstance) {
 	if err := m.FailIfClosed(); err != nil {
 		panic(err)
 	}
+	c.watchContext(ctx)
+	c.failIfCanceled(ctx)
 	runtime.Gosched()
 	if err := m.FailIfClosed(); err != nil {
 		panic(err)
+	}
+	c.failIfCanceled(ctx)
+}
+
+// stackPreemptWord is nativeapi.StackPreempt at the width of a uintptr.
+const stackPreemptWord = ^uintptr(1313)
+
+// watchContext makes a done context end this call, if the context can be done
+// and nothing has arranged that yet.
+//
+// A call returns to Go when a preemption check finds that the runtime asked the
+// goroutine to stop, and the runtime asks every goroutine that has run for more
+// than a few milliseconds. So the first time a call yields is the first time it
+// needs watching, and a call that is over before then never pays for it: the
+// watcher is registered here, from yieldToGo, and from afterHostCall for a call
+// that keeps returning to Go through host calls instead. When the context is
+// done, the watcher (see wasm.WatchCall) marks the call canceled and stores
+// StackPreempt into the goroutine's g.stackguard0 itself, so compiled code stops
+// at its next check and Go sees the mark (see failIfCanceled). The mark comes
+// first because Go code the goroutine runs, a host function say, can clear the
+// word: the next 256th host call, stack growth or preemption request then
+// finds the mark.
+//
+// The store can land after the call is over, on a goroutine that has moved on.
+// To the runtime it is then a preemption request nobody made: the goroutine
+// reschedules once at its next function call. g structs are never freed, so the
+// address is always safe to store to.
+func (c *callEngine) watchContext(ctx context.Context) {
+	// A context that can never be done has nothing to watch, and asking first
+	// spares every yield of such a call the closure c.preempt would allocate.
+	if c.watch != nil || ctx.Done() == nil {
+		return
+	}
+	c.watch = wasm.WatchCall(ctx, c.preempt)
+}
+
+// preempt asks compiled code running this call to return to Go, by storing
+// StackPreempt where its preemption checks look. See watchContext.
+func (c *callEngine) preempt() {
+	if p := atomic.LoadPointer(&c.execCtx.preemptWordAddress); p != nil {
+		atomic.StoreUintptr((*uintptr)(p), stackPreemptWord)
+	}
+}
+
+// afterHostCall is what returning from a host function costs: a count. Every 256
+// calls it registers the watcher if it is not yet, and ends the call if the
+// context is done, for a call that keeps returning to Go this way: Go code can
+// serve a preemption request before compiled code ever sees it, so such a call
+// might never yield. Looking only every 256 calls keeps the cost off a single
+// call, and lets what the guest does right after one, a trap or a proc_exit, end
+// the call with its own error, as it always has.
+func (c *callEngine) afterHostCall(ctx context.Context) {
+	if c.hostCalls++; c.hostCalls == 0 { // every 256th
+		c.afterHostCalls(ctx)
+	}
+}
+
+func (c *callEngine) afterHostCalls(ctx context.Context) {
+	c.watchContext(ctx)
+	c.failIfCanceled(ctx)
+}
+
+// failIfCanceled ends this call if its watcher saw its context done. See
+// wasm.FailCanceled.
+func (c *callEngine) failIfCanceled(ctx context.Context) {
+	if c.watch.Canceled() {
+		wasm.FailCanceled(ctx)
 	}
 }
 
@@ -503,31 +579,21 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		}()
 	}
 
-	p := c.parent
-	ensureTermination := p.parent.ensureTermination
-	m := p.module
-	if ensureTermination {
-		select {
-		case <-ctx.Done():
-			// If the provided context is already done, close the module and return the error.
-			m.CloseWithCtxErr(ctx)
-			return m.FailIfClosed()
-		default:
-		}
-	}
+	m := c.parent.module
 
 	var paramResultPtr *uint64
 	if len(paramResultStack) > 0 {
 		paramResultPtr = &paramResultStack[0]
 	}
 	defer func() {
+		if c.watch != nil {
+			c.watch.Stop()
+			c.watch = nil // the next call starts unwatched; see watchContext
+		}
 		r := recover()
 		if s, ok := r.(*snapshot); ok {
 			// A snapshot that wasn't handled was created by a different call engine possibly from a nested wasm invocation,
-			// let it propagate up to be handled by the caller. Release first
-			// what a context-done close of this module deferred: the unwind
-			// skips the FailIfClosed below, and nothing later reaches it.
-			_ = c.parent.module.FailIfClosed()
+			// let it propagate up to be handled by the caller.
 			panic(s)
 		}
 		if r != nil {
@@ -563,15 +629,8 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			for _, lsn := range listeners {
 				lsn.lsn.Abort(ctx, m, lsn.def, err)
 			}
-		}
-
-		// Call FailIfClosed however the call ended -- trap, proc_exit, host
-		// panic or stack overflow, not only a normal return: if the context
-		// watcher closed the module while it ran, this is what releases the
-		// resources whose closing it deferred, and nothing later would.
-		closeErr := c.parent.module.FailIfClosed()
-		if r == nil && err != wasmruntime.ErrRuntimeStackOverflow { // Stackoverflow case shouldn't be panic (to avoid extreme stack unwinding).
-			err = closeErr
+		} else if err != wasmruntime.ErrRuntimeStackOverflow { // Stackoverflow case shouldn't be panic (to avoid extreme stack unwinding).
+			err = c.parent.module.FailIfClosed()
 		}
 
 		if err != nil {
@@ -580,11 +639,6 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			c.execCtx.caughtExceptionClauseIdx = 0
 		}
 	}()
-
-	if ensureTermination {
-		done := m.CloseModuleOnCanceledOrTimeout(ctx)
-		defer done()
-	}
 
 	// Compiled code holds the memory base directly and never checks whether
 	// the module was closed, so a concurrent close must not recycle the buffer
@@ -599,18 +653,20 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 	// sees the close and does not run. Without it, a handle taken before the
 	// close still executes, against a buffer already back in the pool.
 	//
-	// It goes out through outOfFuel -- the same panic a close landing MID-call
+	// It goes out through yieldToGo -- the same panic a close landing MID-call
 	// already takes, caught by the recover above -- rather than returning. A
 	// return here is one more than this function's defers can carry: they are
 	// open-coded only while defers*returns stays within Go's budget, and
 	// breaking that measured 40% worse on four cores.
 	if m.Closed.Load() != 0 {
-		outOfFuel(m)
+		c.yieldToGo(ctx, m)
 	}
 
 	if c.stackTop&(16-1) != 0 {
 		panic("BUG: stack must be aligned to 16 bytes")
 	}
+	// The entrypoint stores this goroutine's preemption word into
+	// execCtx.preemptWordAddress before entering compiled code.
 	entrypointAsm(c.preambleExecutable, c.executable, c.execCtxPtr, c.parent.opaquePtr, paramResultPtr, c.stackTop)
 	for {
 		switch ec := c.execCtx.exitCode; ec & nativeapi.ExitCodeMask {
@@ -653,6 +709,13 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			} else {
 				// Old stack must be alive until the new stack is adjusted.
 				runtime.KeepAlive(oldStack)
+			}
+			// The watcher's store into g.stackguard0 may have landed while Go code
+			// ran, in a host function or here, which serves it as a preemption and
+			// clears it. Recursion that follows reaches no host call, but it grows
+			// the stack, so this stores it again.
+			if c.watch.Canceled() {
+				c.preempt()
 			}
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
 			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr, newsp, newfp)
@@ -704,6 +767,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 				f.Call(ctx, stack)
 			}
 			c.gcExec.LeaveGo()
+			c.afterHostCall(ctx)
 			// Back to the native code.
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
 			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr,
@@ -729,6 +793,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			c.gcExec.LeaveGo()
 			// Call Listener.After.
 			listener.After(ctx, callerModule, def, s)
+			c.afterHostCall(ctx)
 			// Back to the native code.
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
 			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr,
@@ -746,6 +811,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 				f.Call(ctx, mod, stack)
 			}
 			c.gcExec.LeaveGo()
+			c.afterHostCall(ctx)
 			// Back to the native code.
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
 			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr,
@@ -771,6 +837,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			c.gcExec.LeaveGo()
 			// Call Listener.After.
 			listener.After(ctx, callerModule, def, s)
+			c.afterHostCall(ctx)
 			// Back to the native code.
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
 			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr,
@@ -796,7 +863,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case nativeapi.ExitCodeCheckModuleExitCode:
-			outOfFuel(m)
+			c.yieldToGo(ctx, m)
 			c.execCtx.exitCode = nativeapi.ExitCodeOK
 			afterGoFunctionCallEntrypointAsm(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)

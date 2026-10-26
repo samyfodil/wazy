@@ -1209,7 +1209,6 @@ func (a *Allocator[I, B, F]) scheduleSpills(f F) {
 
 func (a *Allocator[I, B, F]) scheduleSpill(f F, vs *vrState[I, B, F]) {
 	v := vs.v
-	// If the value is the phi value, we need to insert a spill after each phi definition.
 	if vs.isPhi {
 		for defInstr := vs.phiDefInstList; defInstr != nil; defInstr = defInstr.next {
 			f.StoreRegisterAfter(defInstr.v, defInstr.instr)
@@ -1231,22 +1230,32 @@ func (a *Allocator[I, B, F]) scheduleSpill(f F, vs *vrState[I, B, F]) {
 	if nativeapi.RegAllocLoggingEnabled {
 		fmt.Printf("v%d is spilled in blk%d, lca=blk%d\n", v.ID(), definingBlk.ID(), pos.ID())
 	}
-	for pos != definingBlk {
-		st := a.getOrAllocateBlockState(pos.ID())
+	// The spill goes at the start of the lowest block on the dominator chain from the
+	// reloads' common ancestor up to the definition that starts with the value in a
+	// register, but never inside a loop the definition is outside of: there it would
+	// run on every trip around the loop instead of once.
+	candidate := nilBlk
+	for blk := pos; blk != definingBlk; blk = f.Idom(blk) {
+		if blk.LoopHeader() {
+			candidate, r = nilBlk, RealRegInvalid // anything found so far is in that loop
+			continue
+		}
+		if r != RealRegInvalid {
+			continue
+		}
+		st := a.getOrAllocateBlockState(blk.ID())
 		for m := st.startRegs.mask; m != 0; m &= m - 1 {
 			rr := RealReg(bits.TrailingZeros64(m))
 			if st.startRegs.get(rr).v == v {
-				r = rr
-				// Already in the register, so we can place the spill at the beginning of the block.
+				candidate, r = blk, rr
 				break
 			}
 		}
-
-		if r != RealRegInvalid {
-			break
-		}
-
-		pos = f.Idom(pos)
+	}
+	if candidate != nilBlk {
+		pos = candidate
+	} else {
+		pos = definingBlk
 	}
 
 	if pos == definingBlk {

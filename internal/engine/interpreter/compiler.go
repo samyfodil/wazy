@@ -209,7 +209,6 @@ type compiler struct {
 	// bodyOffsetInCodeSection is the offset of the body of this function in the original Wasm binary's code section.
 	bodyOffsetInCodeSection uint64
 
-	ensureTermination bool
 	// Pre-allocated bytes.Reader to be used in various places.
 	br             *bytes.Reader
 	funcTypeToSigs funcTypeToIRSignatures
@@ -288,7 +287,7 @@ type compilationResult struct {
 
 // newCompiler returns the new *compiler for the given parameters.
 // Use compiler.Next function to get compilation result per function.
-func newCompiler(enabledFeatures api.CoreFeatures, callFrameStackSizeInUint64 int, module *wasm.Module, ensureTermination bool) (*compiler, error) {
+func newCompiler(enabledFeatures api.CoreFeatures, callFrameStackSizeInUint64 int, module *wasm.Module) (*compiler, error) {
 	functions, globals, memories, tables, tags, err := module.AllDeclarations()
 	if err != nil {
 		return nil, err
@@ -354,17 +353,16 @@ func newCompiler(enabledFeatures api.CoreFeatures, callFrameStackSizeInUint64 in
 			HasDataInstances:    hasDataInstances,
 			HasElementInstances: hasElementInstances,
 		},
-		globals:           globals,
-		memory64:          memory64,
-		anyMemory64:       anyMemory64,
-		table64:           table64,
-		anyTable64:        anyTable64,
-		anyIndex64:        anyMemory64 || anyTable64,
-		funcs:             functions,
-		tags:              tags,
-		types:             types,
-		ensureTermination: ensureTermination,
-		br:                bytes.NewReader(nil),
+		globals:     globals,
+		memory64:    memory64,
+		anyMemory64: anyMemory64,
+		table64:     table64,
+		anyTable64:  anyTable64,
+		anyIndex64:  anyMemory64 || anyTable64,
+		funcs:       functions,
+		tags:        tags,
+		types:       types,
+		br:          bytes.NewReader(nil),
 		funcTypeToSigs: funcTypeToIRSignatures{
 			indirectCalls:   make([]*signature, len(types)),
 			indirectCalls64: make([]*signature, len(types)),
@@ -413,6 +411,27 @@ func (c *compiler) Next() (*compilationResult, error) {
 // Compile lowers given function instance into interpreterir operations
 // so that the resulting operations can be consumed by the interpreter
 // or the compiler compilation engine.
+// opensWithLoop reports whether the function body, past any blocks and nops,
+// starts with a loop.
+func (c *compiler) opensWithLoop() bool {
+	r := bytes.NewReader(c.body)
+	for {
+		op, err := r.ReadByte()
+		if err != nil {
+			return false
+		}
+		switch op {
+		case wasm.OpcodeNop:
+		case wasm.OpcodeBlock:
+			if _, _, err = wasm.DecodeBlockType(c.types, r, c.enabledFeatures); err != nil {
+				return false
+			}
+		default:
+			return op == wasm.OpcodeLoop
+		}
+	}
+}
+
 func (c *compiler) compile(sig *wasm.FunctionType, body []byte, localTypes []wasm.ValueType, bodyOffsetInCodeSection uint64) error {
 	// Set function specific fields.
 	c.body = body
@@ -444,9 +463,11 @@ func (c *compiler) compile(sig *wasm.FunctionType, body []byte, localTypes []was
 	// A loop back-edge is not the only way a guest runs unboundedly. A loop-free
 	// call graph (f calls g twice, g calls h twice, ...) performs 2^depth calls at
 	// a fixed stack depth, and return_call self-recursion runs forever at a fixed
-	// depth without growing the stack. Neither ever crosses a `loop`. Checking on
-	// entry closes both, and covers every call form since they all arrive here.
-	if c.ensureTermination {
+	// depth without growing the stack. Neither ever crosses a `loop`, so the
+	// functions that can do either check on entry: see
+	// wasm.Module.FunctionNeedsEntryCheck. One that opens with a loop has that
+	// loop's check run first on every call already.
+	if needs := c.module.FunctionNeedsEntryCheck; c.next < len(needs) && needs[c.next] && !c.opensWithLoop() {
 		c.emit(newOperationBuiltinFunctionCheckExitCode())
 	}
 
@@ -457,6 +478,14 @@ func (c *compiler) compile(sig *wasm.FunctionType, body []byte, localTypes []was
 		}
 	}
 	return nil
+}
+
+// checkForeignCall checks before a call, if foreign, that may run another module's
+// code, which validation counts as nothing: see wasm.entryCheckBuilder.
+func (c *compiler) checkForeignCall(foreign bool) {
+	if foreign {
+		c.emit(newOperationBuiltinFunctionCheckExitCode())
+	}
 }
 
 // Translate the current Wasm instruction to interpreterir's operations,
@@ -566,9 +595,7 @@ operatorSwitch:
 		// the loop. In other words, this checks even when no br/br_if/br_table instructions jumping to this loop
 		// exist. However, in reality, that shouldn't be an issue since such "noop" loop header will highly likely be
 		// optimized out by almost all guest language compilers which have the control flow optimization passes.
-		if c.ensureTermination {
-			c.emit(newOperationBuiltinFunctionCheckExitCode())
-		}
+		c.emit(newOperationBuiltinFunctionCheckExitCode())
 		// A loop header is also where execution parks for a collection: a guest cannot run unboundedly
 		// without passing one, so this is what bounds how long a collection waits.
 		if wasm.CollectorEnabled(c.enabledFeatures) {
@@ -949,6 +976,7 @@ operatorSwitch:
 		}
 		c.controlFrames.push(frame)
 	case wasm.OpcodeCall:
+		c.checkForeignCall(index < c.module.ImportFunctionCount)
 		c.emit(
 			newOperationCall(index),
 		)
@@ -959,6 +987,7 @@ operatorSwitch:
 			return fmt.Errorf("read target for br_table: %w", err)
 		}
 		c.pc += n
+		c.checkForeignCall(c.module.ForeignFuncRefs)
 		c.emit(
 			newOperationCallIndirect(typeIndex, tableIndex),
 		)
@@ -3701,6 +3730,7 @@ operatorSwitch:
 		// Currently we do not support imported functions, we treat them as regular calls.
 		// For details, see internal/engine/RATIONALE.md
 		if _, _, isImport := fdef.Import(); isImport {
+			c.checkForeignCall(true)
 			c.emit(newOperationCall(index))
 			dropOp := newOperationDrop(c.getFrameDropRange(functionFrame, false))
 
@@ -3726,6 +3756,7 @@ operatorSwitch:
 
 		functionFrame := c.controlFrames.functionFrame()
 		dropRange := c.getFrameDropRange(functionFrame, false)
+		c.checkForeignCall(c.module.ForeignFuncRefs)
 		op := newOperationTailCallReturnCallIndirect(typeIndex, tableIndex)
 		op.U3 = c.addSideTable([]uint64{dropRange.AsU64(), uint64(functionFrame.asLabel())})
 		c.emit(op)
@@ -3736,11 +3767,13 @@ operatorSwitch:
 		c.markUnreachable()
 
 	case wasm.OpcodeCallRef:
+		c.checkForeignCall(c.module.ForeignFuncRefs)
 		c.emit(newOperationCallRef(index))
 
 	case wasm.OpcodeReturnCallRef:
 		functionFrame := c.controlFrames.functionFrame()
 		dropRange := c.getFrameDropRange(functionFrame, false)
+		c.checkForeignCall(c.module.ForeignFuncRefs)
 		op := newOperationReturnCallRef(index)
 		op.U3 = c.addSideTable([]uint64{dropRange.AsU64(), uint64(functionFrame.asLabel())})
 		c.emit(op)

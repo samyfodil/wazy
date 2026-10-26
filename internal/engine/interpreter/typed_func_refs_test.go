@@ -31,7 +31,7 @@ func TestCompile_LocalSetWithMultipleLocals_I32(t *testing.T) {
 	for _, tp := range module.TypeSection {
 		tp.CacheNumInUint64()
 	}
-	c, err := newCompiler(api.CoreFeaturesV2, 0, module, false)
+	c, err := newCompiler(api.CoreFeaturesV2, 0, module)
 	require.NoError(t, err)
 
 	result, err := c.Next()
@@ -84,7 +84,7 @@ func TestCompile_LocalSetWithMultipleConcreteRefLocals(t *testing.T) {
 	}
 
 	features := api.CoreFeaturesV2 | api.CoreFeatureTypedFunctionReferences | api.CoreFeatureTailCall
-	c, err := newCompiler(features, 0, module, false)
+	c, err := newCompiler(features, 0, module)
 	require.NoError(t, err)
 
 	result, err := c.Next()
@@ -136,7 +136,7 @@ func TestCompile_LocalSetWithMultipleFuncrefLocals(t *testing.T) {
 	for i := range module.TypeSection {
 		module.TypeSection[i].CacheNumInUint64()
 	}
-	c, err := newCompiler(api.CoreFeaturesV2, 0, module, false)
+	c, err := newCompiler(api.CoreFeaturesV2, 0, module)
 	require.NoError(t, err)
 
 	result, err := c.Next()

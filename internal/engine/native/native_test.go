@@ -81,4 +81,6 @@ func Test_ExecutionContextOffsets(t *testing.T) {
 	require.Equal(t, nativeapi.Offset(unsafe.Offsetof(execCtx.thrownTag)), nativeapi.ExecutionContextOffsetThrownTag)
 	require.Equal(t, nativeapi.Offset(unsafe.Offsetof(execCtx.gcCheckTrampolineAddress)), nativeapi.ExecutionContextOffsetGCCheckTrampolineAddress)
 	require.Equal(t, nativeapi.Offset(unsafe.Offsetof(execCtx.memclrAddress)), nativeapi.ExecutionContextOffsetMemclrAddress)
+	require.Equal(t, nativeapi.Offset(unsafe.Offsetof(execCtx.preemptWordAddress)), nativeapi.ExecutionContextOffsetPreemptWordAddress)
+	require.Equal(t, nativeapi.Offset(unsafe.Offsetof(execCtx.yieldSavedLR)), nativeapi.ExecutionContextOffsetYieldSavedLR)
 }

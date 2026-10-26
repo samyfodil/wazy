@@ -4,6 +4,7 @@ package frontend
 import (
 	"bytes"
 	"math"
+	"slices"
 	"sync"
 
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
@@ -19,20 +20,29 @@ type Compiler struct {
 	m      *wasm.Module
 	offset *nativeapi.ModuleContextOffsetData
 	// ssaBuilder is a ssa.Builder used by this frontend.
-	ssaBuilder             ssa.Builder
-	signatures             map[*wasm.FunctionType]*ssa.Signature
-	listenerSignatures     map[*wasm.FunctionType][2]*ssa.Signature
-	memoryGrowSig          ssa.Signature
-	memoryWait32Sig        ssa.Signature
-	memoryWait64Sig        ssa.Signature
-	memoryNotifySig        ssa.Signature
-	checkModuleExitCodeSig ssa.Signature
-	tableGrowSig           ssa.Signature
-	refFuncSig             ssa.Signature
-	gcSig                  ssa.Signature
-	memmoveSig             ssa.Signature
-	memclrSig              ssa.Signature
-	ensureTermination      bool
+	ssaBuilder         ssa.Builder
+	signatures         map[*wasm.FunctionType]*ssa.Signature
+	listenerSignatures map[*wasm.FunctionType][2]*ssa.Signature
+	memoryGrowSig      ssa.Signature
+	memoryWait32Sig    ssa.Signature
+	memoryWait64Sig    ssa.Signature
+	memoryNotifySig    ssa.Signature
+	tableGrowSig       ssa.Signature
+	refFuncSig         ssa.Signature
+	gcSig              ssa.Signature
+	memmoveSig         ssa.Signature
+	memclrSig          ssa.Signature
+	// loopYield makes loop headers, and the entries of the functions that need it,
+	// check whether the runtime has asked the goroutine to stop. See
+	// emitPreemptCheck.
+	loopYield bool
+	// entryCheck is the function's entry check, if it has one, and opening is
+	// set while only blocks and nops have been lowered. See finishPreemptCheck.
+	// tunedWork is the work of the loops that count on the entry check instead of
+	// checking on entry themselves. See checkOnEntry.
+	entryCheck *ssa.Instruction
+	opening    bool
+	tunedWork  uint64
 	// gcEnabled makes every loop header poll the collector's pause flag; see emitGCSafepoint.
 	gcEnabled bool
 	// maxGCRoots is the most values any one safepoint in this function writes, which is how big the root
@@ -125,6 +135,7 @@ type Compiler struct {
 
 	pointers []int
 	bounds   [][]knownSafeBoundWithID
+	preds    []ssa.BasicBlockID
 }
 
 type (
@@ -145,14 +156,18 @@ type (
 
 var knownSafeBoundsAtTheEndOfBlockNil = nativeapi.NewNilVarLength[knownSafeBoundWithID]()
 
+// LoopYield turns emitPreemptCheck on. It is a variable only so the hang test
+// can show that, without the check, its loops do hang the process.
+var LoopYield = true
+
 // NewFrontendCompiler returns a frontend Compiler.
-func NewFrontendCompiler(m *wasm.Module, ssaBuilder ssa.Builder, offset *nativeapi.ModuleContextOffsetData, ensureTermination bool, listenerOn bool, sourceInfo bool) *Compiler {
+func NewFrontendCompiler(m *wasm.Module, ssaBuilder ssa.Builder, offset *nativeapi.ModuleContextOffsetData, listenerOn bool, sourceInfo bool) *Compiler {
 	c := &Compiler{
 		m:                                 m,
 		ssaBuilder:                        ssaBuilder,
 		br:                                bytes.NewReader(nil),
 		offset:                            offset,
-		ensureTermination:                 ensureTermination,
+		loopYield:                         LoopYield,
 		needSourceOffsetInfo:              sourceInfo,
 		tryTableMetadata:                  &localTryTableMetadata{},
 		varLengthKnownSafeBoundWithIDPool: nativeapi.NewVarLengthPool[knownSafeBoundWithID](),
@@ -308,15 +323,8 @@ func (c *Compiler) declareSignatures(listenerOn bool) {
 	}
 	c.ssaBuilder.DeclareSignature(&c.memoryGrowSig)
 
-	c.checkModuleExitCodeSig = ssa.Signature{
-		ID: c.memoryGrowSig.ID + 1,
-		// Only takes execution context.
-		Params: []ssa.Type{ssa.TypeI64},
-	}
-	c.ssaBuilder.DeclareSignature(&c.checkModuleExitCodeSig)
-
 	c.tableGrowSig = ssa.Signature{
-		ID: c.checkModuleExitCodeSig.ID + 1,
+		ID: c.memoryGrowSig.ID + 1,
 		// As with memoryGrowSig, the entry count and result are i64 whatever the
 		// table's index type.
 		Params: []ssa.Type{ssa.TypeI64 /* exec context */, ssa.TypeI32 /* table index */, ssa.TypeI64 /* num */, ssa.TypeI64 /* ref */},
@@ -755,10 +763,22 @@ func (c *Compiler) finalizeKnownSafeBoundsAtTheEndOfBlock(bID ssa.BasicBlockID) 
 
 func (c *Compiler) initializeCurrentBlockKnownBounds() {
 	currentBlk := c.ssaBuilder.CurrentBlock()
-	switch preds := currentBlk.Preds(); preds {
+	c.preds = c.preds[:0]
+	for i := range currentBlk.Preds() {
+		// A preemption check's slow path only yields to Go, which changes neither the
+		// memory nor its size: it knows what the block it came from knows.
+		pred := currentBlk.Pred(i)
+		if root := pred.Root(); root != nil && root.Opcode() == ssa.OpcodeYield && pred.Preds() == 1 {
+			pred = pred.Pred(0)
+		}
+		if !slices.Contains(c.preds, pred.ID()) {
+			c.preds = append(c.preds, pred.ID())
+		}
+	}
+	switch preds := len(c.preds); preds {
 	case 0:
 	case 1:
-		pred := currentBlk.Pred(0).ID()
+		pred := c.preds[0]
 		for _, kb := range c.getKnownSafeBoundsAtTheEndOfBlocks(pred).View() {
 			// Unless the block is sealed, we cannot assume the absolute address is valid:
 			// later we might add another predecessor that has no visibility of that value.
@@ -771,8 +791,8 @@ func (c *Compiler) initializeCurrentBlockKnownBounds() {
 	default:
 		c.pointers = c.pointers[:0]
 		c.bounds = c.bounds[:0]
-		for i := 0; i < preds; i++ {
-			c.bounds = append(c.bounds, c.getKnownSafeBoundsAtTheEndOfBlocks(currentBlk.Pred(i).ID()).View())
+		for _, pred := range c.preds {
+			c.bounds = append(c.bounds, c.getKnownSafeBoundsAtTheEndOfBlocks(pred).View())
 			c.pointers = append(c.pointers, 0)
 		}
 

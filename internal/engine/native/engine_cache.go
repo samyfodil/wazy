@@ -43,7 +43,7 @@ func fileCacheKey(m *wasm.Module, gcSafepoints bool) (ret filecache.Key) {
 	// apart from one compiled without them -- otherwise a cache directory
 	// shared by a Skylake host and an Ice Lake host would silently hand each
 	// the other's layout. (module.ID itself, see wasm.Module.AssignModuleID,
-	// covers only the per-module compile flags such as ensureTermination; the
+	// covers only the per-module compile flags such as listener presence; the
 	// host's identity belongs here, where it does not have to be threaded
 	// through every AssignModuleID caller.)
 	cpu := platform.CpuFeatures.Raw()
@@ -66,7 +66,7 @@ func (e *engine) addCompiledModule(module *wasm.Module, cm *compiledModule) (c *
 	return
 }
 
-func (e *engine) getCompiledModule(module *wasm.Module, listeners []api.FunctionListener, ensureTermination bool) (cm *compiledModule, ok bool, err error) {
+func (e *engine) getCompiledModule(module *wasm.Module, listeners []api.FunctionListener) (cm *compiledModule, ok bool, err error) {
 	cm, ok = e.getCompiledModuleFromMemory(module, true)
 	if ok {
 		return
@@ -76,7 +76,6 @@ func (e *engine) getCompiledModule(module *wasm.Module, listeners []api.Function
 		cm.parent = e
 		cm.module = module
 		cm.sharedFunctions = e.sharedFunctions
-		cm.ensureTermination = ensureTermination
 		cm.offsets = nativeapi.NewModuleContextOffsetData(module, len(listeners) > 0)
 		if len(listeners) > 0 {
 			cm.listeners = listeners
@@ -183,8 +182,12 @@ func (e *engine) getCompiledModuleFromCache(module *wasm.Module) (cm *compiledMo
 
 // magic starts every cache entry, and is part of its key, so changing it
 // when the layout changes makes older entries miss rather than misparse.
-// "NATIV2" aligns the native code to platform.CodeFileAlignment.
-var magic = []byte{'N', 'A', 'T', 'I', 'V', '2'}
+// "NATIV2" aligns the native code to platform.CodeFileAlignment. "NATIV3" is
+// code that checks Go's preemption word in the register that used to hold a
+// fuel counter: entries from before it must not load, and builds that all call
+// themselves "dev" would otherwise share them. "NATIV4" yields through a
+// trampoline that preserves every register, which code from before calls wrongly.
+var magic = []byte{'N', 'A', 'T', 'I', 'V', '4'}
 
 // executablePadding returns the number of zero bytes between the end of the
 // code length field, which ends at offset in the entry, and the native code.

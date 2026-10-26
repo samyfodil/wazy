@@ -20,18 +20,18 @@ var (
 	wasiZigCCWasm []byte
 )
 
-// TestCloseOnContextDoneCompilesRealModules compiles real producer output with
-// WithCloseOnContextDone on.
+// TestPreemptChecksCompileRealModules compiles real producer output, every loop
+// of which gets a preemption check.
 //
 // The hand-written fixtures the rest of the suite uses are too small to build
 // the control-flow shape this needs: a loop whose `end` finds nothing branching
 // out of it takes the fall-through path in OpcodeEnd, where lowering continues
 // in the block it is already in rather than in the frame's continuation.
-// Emitting the module-closed slow path there without restoring the builder's
+// Emitting the check's slow path there without restoring the builder's
 // current block sent the remainder of the enclosing frame into a block that
 // already had a terminator, and the block-layout pass then dereferenced a nil
 // instruction. Nothing else in the suite reaches that shape.
-func TestCloseOnContextDoneCompilesRealModules(t *testing.T) {
+func TestPreemptChecksCompileRealModules(t *testing.T) {
 	requireCompiler(t)
 	ctx := context.Background()
 
@@ -44,7 +44,7 @@ func TestCloseOnContextDoneCompilesRealModules(t *testing.T) {
 		{"zig-cc wasi", wasiZigCCWasm},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler().WithCloseOnContextDone(true))
+			r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler())
 			defer r.Close(ctx)
 			_, err := r.CompileModule(ctx, tc.bin)
 			require.NoError(t, err)

@@ -3,6 +3,7 @@ package wazy_test
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -15,15 +16,13 @@ import (
 //go:embed internal/integration_test/engine/testdata/infinite_loop.wasm
 var infiniteLoopWasm []byte
 
-// ExampleRuntimeConfig_WithCloseOnContextDone_context_timeout demonstrates how to ensure the termination
-// of infinite loop function with context.Context created by context.WithTimeout powered by
-// RuntimeConfig.WithEnsureTermination configuration.
-func ExampleRuntimeConfig_WithCloseOnContextDone_context_timeout() {
+// Example_contextTimeout shows a context.WithTimeout ending a call that would
+// otherwise never return. The call ends the way a trap does, and the module
+// stays usable.
+func Example_contextTimeout() {
 	ctx := context.Background()
 
-	r := wazy.NewRuntimeWithConfig(ctx,
-		// Enables the WithCloseOnContextDone option.
-		wazy.NewRuntimeConfig().WithCloseOnContextDone(true))
+	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)
 
 	moduleInstance, err := r.InstantiateWithConfig(ctx, infiniteLoopWasm,
@@ -41,22 +40,19 @@ func ExampleRuntimeConfig_WithCloseOnContextDone_context_timeout() {
 	// Invoke the infinite loop with the timeout context.
 	_, err = infiniteLoop.Call(ctx)
 
-	// Timeout is correctly handled and triggers the termination of infinite loop.
-	fmt.Println(err)
+	// The error wraps the context's.
+	fmt.Println(errors.Is(err, context.DeadlineExceeded))
 
 	// Output:
-	//	module closed with context deadline exceeded
+	//	true
 }
 
-// ExampleRuntimeConfig_WithCloseOnContextDone_context_cancel demonstrates how to ensure the termination
-// of infinite loop function with context.Context created by context.WithCancel powered by
-// RuntimeConfig.WithEnsureTermination configuration.
-func ExampleRuntimeConfig_WithCloseOnContextDone_context_cancel() {
+// Example_contextCancel shows a context.WithCancel ending a call that would
+// otherwise never return.
+func Example_contextCancel() {
 	ctx := context.Background()
 
-	r := wazy.NewRuntimeWithConfig(ctx,
-		// Enables the WithCloseOnContextDone option.
-		wazy.NewRuntimeConfig().WithCloseOnContextDone(true))
+	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)
 
 	moduleInstance, err := r.InstantiateWithConfig(ctx, infiniteLoopWasm,
@@ -75,25 +71,22 @@ func ExampleRuntimeConfig_WithCloseOnContextDone_context_cancel() {
 		cancel()
 	}()
 
-	// Invoke the infinite loop with the timeout context.
+	// Invoke the infinite loop with the cancelable context.
 	_, err = infiniteLoop.Call(ctx)
 
-	// context Cancellation is correctly handled and triggers the termination of infinite loop.
-	fmt.Println(err)
+	// The error wraps the context's.
+	fmt.Println(errors.Is(err, context.Canceled))
 
 	// Output:
-	//	module closed with context canceled
+	//	true
 }
 
-// ExampleRuntimeConfig_WithCloseOnContextDone_moduleClose demonstrates how to ensure the termination
-// of infinite loop function with api.Module's CloseWithExitCode method powered by
-// RuntimeConfig.WithEnsureTermination configuration.
-func ExampleRuntimeConfig_WithCloseOnContextDone_moduleClose() {
+// Example_moduleClose shows closing a module, from another goroutine, ending a
+// call into it that would otherwise never return.
+func Example_moduleClose() {
 	ctx := context.Background()
 
-	r := wazy.NewRuntimeWithConfig(ctx,
-		// Enables the WithCloseOnContextDone option.
-		wazy.NewRuntimeConfig().WithCloseOnContextDone(true))
+	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)
 
 	moduleInstance, err := r.InstantiateWithConfig(ctx, infiniteLoopWasm,
@@ -113,7 +106,7 @@ func ExampleRuntimeConfig_WithCloseOnContextDone_moduleClose() {
 		}
 	}()
 
-	// Invoke the infinite loop with the timeout context.
+	// Invoke the infinite loop.
 	_, err = infiniteLoop.Call(ctx)
 
 	// The exit code is correctly handled and triggers the termination of infinite loop.

@@ -20,6 +20,7 @@ func (b *builder) RunPasses() {
 }
 
 func (b *builder) runPreBlockLayoutPasses() {
+	passRemoveElidedPreemptChecks(b)
 	passSortSuccessors(b)
 	passDeadBlockEliminationOpt(b)
 	// The result of passCalculateImmediateDominators will be used by various passes below.
@@ -229,6 +230,62 @@ func passDeadBlockEliminationOpt(b *builder) {
 			blk.invalid = true
 		}
 		blk.visited = 0
+	}
+}
+
+// passRemoveElidedPreemptChecks takes the preemption checks the frontend elided
+// (see Instruction.ElidePreemptCheck) out of the function, with the branches to
+// their slow blocks: an elided check compiles to nothing, but its slow path, which
+// makes a call, would still cost the code around it in registers and spills. A
+// slow block left without predecessors goes too, along with its edges, before
+// passDeadBlockEliminationOpt sees it.
+func passRemoveElidedPreemptChecks(b *builder) {
+	for blk := b.blockIteratorBegin(); blk != nil; blk = b.blockIteratorNext() {
+		br := blk.currentInstr // a conditional branch ends its block, or comes right before the jump that does
+		if br != nil && br.opcode == OpcodeJump {
+			br = br.prev
+		}
+		if br == nil || br.opcode != OpcodeBrnz {
+			continue
+		}
+		check := b.InstructionOfValue(br.v)
+		if check == nil || check.opcode != OpcodePreemptRequested {
+			continue
+		}
+		if _, _, elided := check.PreemptCheckData(); !elided {
+			continue
+		}
+		blk.removeInstruction(check)
+		blk.removeInstruction(br)
+		slow := b.basicBlock(BasicBlockID(br.rValue))
+		removeEdge(blk, slow, br)
+		if len(slow.preds) == 0 {
+			for _, succ := range slow.success {
+				for i := range succ.preds {
+					if succ.preds[i].blk == slow {
+						succ.preds = append(succ.preds[:i], succ.preds[i+1:]...)
+						break
+					}
+				}
+			}
+			slow.success = slow.success[:0]
+		}
+	}
+}
+
+// removeEdge removes the edge from pred to succ that branch makes.
+func removeEdge(pred, succ *basicBlock, branch *Instruction) {
+	for i := range succ.preds {
+		if succ.preds[i].branch == branch {
+			succ.preds = append(succ.preds[:i], succ.preds[i+1:]...)
+			break
+		}
+	}
+	for i, s := range pred.success {
+		if s == succ {
+			pred.success = append(pred.success[:i], pred.success[i+1:]...)
+			break
+		}
 	}
 }
 

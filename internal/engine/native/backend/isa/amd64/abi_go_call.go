@@ -270,17 +270,6 @@ func (m *machine) CompileGoFunctionTrampoline(exitCode nativeapi.ExitCode, sig *
 
 	// Before return, we need to restore the callee saved registers.
 	cur = m.restoreRegistersInExecutionContext(cur, execCtrPtr, calleeSavedVRegs)
-
-	if exitCode == nativeapi.ExitCodeCheckModuleExitCode {
-		// This is the one exit that is reached because the fuel ran out, so it is
-		// the one that refills it -- overwriting the exhausted value the restore
-		// above just put back. Every other exit wants that value preserved exactly:
-		// refilling on a host call would let a guest that calls one inside a loop
-		// spend forever without ever reaching a check.
-		// 		mov $TerminationFuel, %fuel
-		cur = linkInstr(cur, m.allocateInstr().asImm(fuelVReg, uint64(nativeapi.TerminationFuel), false))
-	}
-
 	if argOverlapWithExecCtxOffset >= 0 {
 		// At this point execCtt is not used anymore, so we can finally store the
 		// result to the register which overlaps with the execution context pointer.
@@ -402,6 +391,78 @@ func (m *machine) CompileStackGrowCallSequence() []byte {
 
 	m.encodeWithoutSSA(m.rootInstr)
 	return m.c.Buf()
+}
+
+// yieldSavedVRegs are the registers the yield trampoline keeps in the execution
+// context's savedRegisters, slot i for the i-th: RAX and the rest of what the stack
+// grow trampoline saves, which is every register but RSP and RBP.
+var yieldSavedVRegs = append([]regalloc.VReg{raxVReg}, stackGrowSaveVRegs...)
+
+// CompileYieldTrampoline implements backend.Machine. The caller has pushed the
+// execution context above the return address (see yield), and any register may
+// hold a live value.
+func (m *machine) CompileYieldTrampoline() []byte {
+	cur := m.allocateNop()
+	m.rootInstr = cur
+	cur = m.setupRBPRSP(cur)
+
+	// RAX is parked on the stack to take the execution context, then moved to its
+	// slot through RCX, once RCX is saved.
+	execCtx := raxVReg
+	cur = linkInstr(cur, m.allocateInstr().asPush64(newOperandReg(raxVReg)))
+	cur = linkInstr(cur, m.allocateInstr().asMov64MR(newOperandMem(m.newAmodeImmReg(16, rbpVReg)), execCtx))
+	cur = m.saveOrRestoreYieldRegisters(cur, execCtx, true)
+	cur = linkInstr(cur, m.allocateInstr().asPop64(rcxVReg))
+	cur = linkInstr(cur, m.allocateInstr().asMovRM(rcxVReg, newOperandMem(m.yieldSlot(0, execCtx)), 8))
+
+	exitCodeReg := r12VReg // Already saved.
+	cur = linkInstr(cur, m.allocateInstr().asImm(exitCodeReg, uint64(nativeapi.ExitCodeCheckModuleExitCode), false))
+	saveRsp, saveRbp, setExitCode := m.allocateExitInstructions(execCtx, exitCodeReg)
+	cur = linkInstr(cur, setExitCode)
+	cur = linkInstr(cur, saveRsp)
+	cur = linkInstr(cur, saveRbp)
+	cur = m.storeReturnAddressAndExit(cur, execCtx)
+
+	// Go comes back with the execution context in RAX, whose own value is restored last.
+	cur = m.saveOrRestoreYieldRegisters(cur, execCtx, false)
+	cur = linkInstr(cur, m.allocateInstr().asMov64MR(newOperandMem(m.yieldSlot(0, execCtx)), raxVReg))
+
+	cur = m.revertRBPRSP(cur)
+	linkInstr(cur, m.allocateInstr().asRet())
+
+	m.encodeWithoutSSA(m.rootInstr)
+	return m.c.Buf()
+}
+
+// saveOrRestoreYieldRegisters saves or restores yieldSavedVRegs but RAX, which the
+// trampoline handles itself.
+func (m *machine) saveOrRestoreYieldRegisters(cur *instruction, execCtx regalloc.VReg, save bool) *instruction {
+	for i, v := range yieldSavedVRegs {
+		if v == raxVReg {
+			continue
+		}
+		mem := newOperandMem(m.yieldSlot(i, execCtx))
+		instr := m.allocateInstr()
+		switch {
+		case v.RegType() == regalloc.RegTypeInt && save:
+			instr.asMovRM(v, mem, 8)
+		case v.RegType() == regalloc.RegTypeInt:
+			instr.asMov64MR(mem, v)
+		case save:
+			instr.asXmmMovRM(sseOpcodeMovdqu, v, mem)
+		default:
+			instr.asXmmUnaryRmR(sseOpcodeMovdqu, mem, v)
+		}
+		cur = linkInstr(cur, instr)
+	}
+	return cur
+}
+
+// yieldSlot is the address of yieldSavedVRegs[i]'s slot in savedRegisters.
+func (m *machine) yieldSlot(i int, execCtx regalloc.VReg) *amode {
+	offset := nativeapi.ExecutionContextOffsetSavedRegistersBegin.I64() + int64(i)*16
+	nativeapi.AssertSavedRegistersFit(offset + 16)
+	return m.newAmodeImmReg(uint32(offset), execCtx)
 }
 
 // CompileThrowTransferRegisterRestore implements backend.Machine. It

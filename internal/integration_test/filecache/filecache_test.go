@@ -3,6 +3,7 @@ package filecache
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -36,8 +37,8 @@ func runAllFileCacheTests(t *testing.T, config wazy.RuntimeConfig) {
 	t.Run("listeners", func(t *testing.T) {
 		testListeners(t, config)
 	})
-	t.Run("close on context done", func(t *testing.T) {
-		testWithCloseOnContextDone(t, config)
+	t.Run("context done", func(t *testing.T) {
+		testContextDone(t, config)
 	})
 }
 
@@ -226,8 +227,9 @@ func testListeners(t *testing.T, config wazy.RuntimeConfig) {
 	})
 }
 
-// TestWithCloseOnContextDone ensures that compilation cache works as expected on and off with respect to WithCloseOnContextDone config.
-func testWithCloseOnContextDone(t *testing.T, config wazy.RuntimeConfig) {
+// testContextDone ensures that code loaded from the compilation cache still
+// returns when its context is done.
+func testContextDone(t *testing.T, config wazy.RuntimeConfig) {
 	var (
 		zero    uint32 = 0
 		wasmBin        = binaryencoding.EncodeModule(&wasm.Module{
@@ -245,59 +247,24 @@ func testWithCloseOnContextDone(t *testing.T, config wazy.RuntimeConfig) {
 		})
 	)
 
-	t.Run("always on", func(t *testing.T) {
-		dir := t.TempDir()
-		ctx := context.Background()
-		{
-			cc, err := wazy.NewCompilationCacheWithDir(dir)
-			require.NoError(t, err)
-			rc := config.WithCompilationCache(cc).WithCloseOnContextDone(true)
-
-			r := wazy.NewRuntimeWithConfig(ctx, rc)
-			_, err = r.CompileModule(ctx, wasmBin)
-			require.NoError(t, err)
-			err = r.Close(ctx)
-			require.NoError(t, err)
-		}
-
+	dir := t.TempDir()
+	ctx := context.Background()
+	{
 		cc, err := wazy.NewCompilationCacheWithDir(dir)
 		require.NoError(t, err)
-		rc := config.WithCompilationCache(cc).WithCloseOnContextDone(true)
-		r := wazy.NewRuntimeWithConfig(ctx, rc)
-
-		timeoutCtx, done := context.WithTimeout(ctx, time.Second)
-		defer done()
-		_, err = r.Instantiate(timeoutCtx, wasmBin)
-		require.EqualError(t, err, "module closed with context deadline exceeded")
-		err = r.Close(ctx)
+		r := wazy.NewRuntimeWithConfig(ctx, config.WithCompilationCache(cc))
+		_, err = r.CompileModule(ctx, wasmBin)
 		require.NoError(t, err)
-	})
+		require.NoError(t, r.Close(ctx))
+	}
 
-	t.Run("off->on", func(t *testing.T) {
-		dir := t.TempDir()
-		ctx := context.Background()
-		{
-			cc, err := wazy.NewCompilationCacheWithDir(dir)
-			require.NoError(t, err)
-			rc := config.WithCompilationCache(cc).WithCloseOnContextDone(false)
+	cc, err := wazy.NewCompilationCacheWithDir(dir)
+	require.NoError(t, err)
+	r := wazy.NewRuntimeWithConfig(ctx, config.WithCompilationCache(cc))
 
-			r := wazy.NewRuntimeWithConfig(ctx, rc)
-			_, err = r.CompileModule(ctx, wasmBin)
-			require.NoError(t, err)
-			err = r.Close(ctx)
-			require.NoError(t, err)
-		}
-
-		cc, err := wazy.NewCompilationCacheWithDir(dir)
-		require.NoError(t, err)
-		rc := config.WithCompilationCache(cc).WithCloseOnContextDone(true)
-		r := wazy.NewRuntimeWithConfig(ctx, rc)
-
-		timeoutCtx, done := context.WithTimeout(ctx, time.Second)
-		defer done()
-		_, err = r.Instantiate(timeoutCtx, wasmBin)
-		require.EqualError(t, err, "module closed with context deadline exceeded")
-		err = r.Close(ctx)
-		require.NoError(t, err)
-	})
+	timeoutCtx, done := context.WithTimeout(ctx, time.Second)
+	defer done()
+	_, err = r.Instantiate(timeoutCtx, wasmBin)
+	require.True(t, errors.Is(err, context.DeadlineExceeded), "got %v", err)
+	require.NoError(t, r.Close(ctx))
 }

@@ -866,6 +866,23 @@ func (i *instruction) encode(c backend.Compiler) (needsLabelResolution bool) {
 			}
 		}
 
+	case yield:
+		amode := i.op1.addressMode()
+		ctx := regEncodings[amode.base.RealReg()]
+		if ctx.rexBit() > 0 {
+			c.EmitByte(rexEncodingDefault | 0x1)
+		}
+		c.EmitByte(0x50 | ctx.encoding()) // pushq %ctx
+		encodeRegMem(c, legacyPrefixesNone, 0xff, 1, regEnc(2), amode, rexInfo(0).clearW())
+		c.EmitByte(0x48) // add $8, %rsp
+		c.EmitByte(0x83)
+		c.EmitByte(0xc4)
+		c.EmitByte(0x08)
+	case preemptCheck:
+		// F6 /0 ib: test r/m8, imm8.
+		encodeEncMem(c, legacyPrefixesNone, 0xf6, 1, 0, i.op1.addressMode(), rexInfo(0).clearW())
+		c.EmitByte(0x80)
+
 	case cmpRmiR:
 		var opcode uint32
 		isCmp := i.u1 != 0
