@@ -120,7 +120,10 @@ func (st *stackfulTask) main() {
 	if mode == resumeAbort {
 		return // reaped before ever running (only via reap of a just-spawned task)
 	}
+	// Restore the caller's current thread afterwards, as guestTask.firstRunAsCaller does.
+	prevThread := st.in.activeThread
 	st.err = st.run()
+	st.in.activeThread = prevThread
 }
 
 // run is canon_lift's no-callback body (~2144-2171): guestTask.firstRun's
@@ -131,11 +134,6 @@ func (st *stackfulTask) main() {
 // again and enterRun's brackets are re-established (block()'s epilogue).
 func (st *stackfulTask) run() error {
 	in, be, t := st.in, st.be, st.t
-	// Restore the caller's current thread on the way out: this may be a nested
-	// (reentrant) call running inside a spawned thread's frames, and enterRun
-	// below clears activeThread for the duration.
-	prevThread := st.in.activeThread
-	defer func() { st.in.activeThread = prevThread }()
 	in.enterRun(t)
 
 	args := st.args

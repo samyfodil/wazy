@@ -321,9 +321,20 @@ func (gt *guestTask) start() error {
 // the non-promoted early return. Only the promoted branch still pays for it.
 func (gt *guestTask) firstRun() error {
 	if !gt.promoted {
-		return gt.firstRunBody()
+		return gt.firstRunAsCaller()
 	}
-	return gt.runSegment(gt.firstRunBody)
+	return gt.runSegment(gt.firstRunAsCaller)
+}
+
+// firstRunAsCaller runs firstRunBody and then restores the caller's current
+// thread: this may be a nested (reentrant) call running inside a spawned
+// thread's frames, and enterRun clears activeThread for the duration. It is a
+// wrapper rather than a defer in the body, which costs every async call.
+func (gt *guestTask) firstRunAsCaller() error {
+	prevThread := gt.in.activeThread
+	err := gt.firstRunBody()
+	gt.in.activeThread = prevThread
+	return err
 }
 
 // firstRunBody is task.start() -> lower params -> core call -> advance(packed),
@@ -337,11 +348,6 @@ func (gt *guestTask) firstRun() error {
 // onStart's caller-memory read is then legal because the baton serializes
 // it: the starter is blocked in seg.handoff while this goroutine runs.
 func (gt *guestTask) firstRunBody() error {
-	// Restore the caller's current thread on the way out: this may be a nested
-	// (reentrant) call running inside a spawned thread's frames, and enterRun
-	// below clears activeThread for the duration.
-	prevThread := gt.in.activeThread
-	defer func() { gt.in.activeThread = prevThread }()
 	gt.in.enterRun(gt.t)
 	be, t := gt.be, gt.t
 
@@ -460,9 +466,18 @@ func (gt *guestTask) resumeReady() error {
 // allocation on the unpromoted hot path.
 func (gt *guestTask) runLoop(ev eventTuple) error {
 	if !gt.promoted {
-		return gt.runLoopBody(ev)
+		return gt.runLoopAsCaller(ev)
 	}
-	return gt.runSegment(func() error { return gt.runLoopBody(ev) })
+	return gt.runSegment(func() error { return gt.runLoopAsCaller(ev) })
+}
+
+// runLoopAsCaller is runLoopBody with the caller's current thread restored, as
+// firstRunAsCaller is for firstRunBody.
+func (gt *guestTask) runLoopAsCaller(ev eventTuple) error {
+	prevThread := gt.in.activeThread
+	err := gt.runLoopBody(ev)
+	gt.in.activeThread = prevThread
+	return err
 }
 
 // runLoopBody delivers ev to the callback core func, then hands the packed
@@ -471,11 +486,6 @@ func (gt *guestTask) runLoop(ev eventTuple) error {
 // For a PROMOTED task this runs on a fresh segment goroutine each
 // invocation (see runLoop/runSegment).
 func (gt *guestTask) runLoopBody(ev eventTuple) error {
-	// Restore the caller's current thread on the way out: this may be a nested
-	// (reentrant) call running inside a spawned thread's frames, and enterRun
-	// below clears activeThread for the duration.
-	prevThread := gt.in.activeThread
-	defer func() { gt.in.activeThread = prevThread }()
 	gt.in.enterRun(gt.t)
 	// Pooled (getUint64Slice/putUint64Slice, instance.go), not a stack
 	// array: CallWithStack's interface call makes escape analysis treat a
