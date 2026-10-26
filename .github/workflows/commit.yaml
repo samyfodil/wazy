@@ -30,15 +30,6 @@ jobs:
     name: Pre-commit check
     runs-on: ubuntu-24.04
     steps:
-      - name: Install latest wast2json and wasm-tools
-        run: |  # Needed for build.spectest. wabt includes wast2json; wasm-tools is used for exception-handling spectests.
-          wabt_version=1.0.39
-          wabt_url=https://github.com/WebAssembly/wabt/releases/download/${wabt_version}/wabt-${wabt_version}-linux-x64.tar.gz
-          curl -sSL ${wabt_url} | tar --strip-components 2 -C /usr/local/bin -xzf - wabt-${wabt_version}/bin/wast2json
-          wasm_tools_version=1.245.1
-          wasm_tools_url=https://github.com/bytecodealliance/wasm-tools/releases/download/v${wasm_tools_version}/wasm-tools-${wasm_tools_version}-x86_64-linux.tar.gz
-          curl -sSL ${wasm_tools_url} | tar --strip-components 1 -C /usr/local/bin -xzf - wasm-tools-${wasm_tools_version}-x86_64-linux/wasm-tools
-
       - uses: actions/checkout@v6
         with:
           submodules: true
@@ -56,10 +47,6 @@ jobs:
             ~/go/pkg/mod
             ~/go/bin
           key: check-${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ hashFiles('**/go.sum', 'Makefile') }}
-
-      - run: make build.spectest
-        env:  # these targets make eleven GitHub API calls; unauthenticated they hit the hourly cap
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - run: make check
         env:
@@ -96,16 +83,16 @@ jobs:
       # actions/download-artifact@v4 makes a single attempt and fails hard on a transient
       # "Artifact not found" right after spectest_corpus uploads it, so retry instead of
       # letting one early 404 fail the whole job.
-      - name: Download spectest v3 corpus
+      # The corpus also carries files the checkout already has, and gh run download refuses to
+      # overwrite, so it unpacks beside the tree and is copied over; a retry starts from empty.
+      - name: Download spectest corpus
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 5
           max_attempts: 3
           retry_wait_seconds: 15
-          command: >
-            gh run download ${{ github.run_id }}
-            --name spectest-v3-corpus
-            --dir internal/integration_test/spectest/v3/testdata
+          shell: bash
+          command: rm -rf .corpus/spectest-corpus && gh run download ${{ github.run_id }} --name spectest-corpus --dir .corpus/spectest-corpus && cp -R .corpus/spectest-corpus/. internal/integration_test/spectest/ && rm -rf .corpus/spectest-corpus
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -115,7 +102,8 @@ jobs:
           timeout_minutes: 5
           max_attempts: 3
           retry_wait_seconds: 15
-          command: gh run download ${{ github.run_id }} --name component-corpus --dir .
+          shell: bash
+          command: rm -rf .corpus/component-corpus && gh run download ${{ github.run_id }} --name component-corpus --dir .corpus/component-corpus && cp -R .corpus/component-corpus/. ./ && rm -rf .corpus/component-corpus
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -145,65 +133,57 @@ jobs:
         run: bash <(curl -s https://codecov.io/bash)
 
   spectest_corpus:
-    # The 3.0 corpus is generated from the WebAssembly/testsuite submodule rather than committed, so
-    # something has to generate it before the test matrix can run those suites. Doing it once here and
-    # publishing it means the matrix does not need wasm-tools on three operating systems.
-    name: Build the 3.0 spectest corpus
+    # The spec and proposal suites, and Wasmtime's cases in v3-interaction, are fetched at pinned commits
+    # and generated rather than committed, so something has to build them before any job can run those
+    # suites. Doing it once here and publishing it means no other job needs wabt or wasm-tools, and the
+    # scratch and BSD jobs, whose test binaries embed the suites, get the same bytes as the matrix.
+    name: Build the spectest corpus
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: true
 
-      - name: Install wasm-tools
-        run: |
-          version=1.245.1
-          target=x86_64-linux
-          url=https://github.com/bytecodealliance/wasm-tools/releases/download/v${version}/wasm-tools-${version}-${target}.tar.gz
-          curl -sSL ${url} | tar --strip-components 1 -C /usr/local/bin -xzf - wasm-tools-${version}-${target}/wasm-tools
-
-      - run: make build.spectest.v3
+      - run: make build.spectest  # the Makefile downloads the wabt and wasm-tools it pins
+        env:  # these targets make a dozen GitHub API calls; unauthenticated they hit the hourly cap
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/upload-artifact@v4
         with:
-          name: spectest-v3-corpus
-          path: internal/integration_test/spectest/v3/testdata
+          name: spectest-corpus
+          path: internal/integration_test/spectest/*/testdata
+          if-no-files-found: error
           retention-days: 1
 
   component_corpus:
-    # The component-model cases are fetched from upstream at pinned commits rather than committed, and
-    # generated with a newer wasm-tools than the spectest corpus. Built once here like that corpus, and
-    # handed to the scratch and BSD jobs too, whose test binaries embed it.
+    # The component-model cases, WASI's WIT and other projects' guests are fetched from upstream at
+    # pinned commits rather than committed. Built once here like the spectest corpus, and handed to the
+    # scratch and BSD jobs too, whose test binaries embed it.
     name: Build the component-model test corpus
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install wasm-tools
-        run: |
-          version=1.262.0
-          target=x86_64-linux
-          url=https://github.com/bytecodealliance/wasm-tools/releases/download/v${version}/wasm-tools-${version}-${target}.tar.gz
-          curl -sSL ${url} | tar --strip-components 1 -C /usr/local/bin -xzf - wasm-tools-${version}-${target}/wasm-tools
-
-      - run: make build.component_testdata
+      - run: make build.component_testdata build.wasi_testdata build.guest_testdata
 
       - uses: actions/upload-artifact@v4
         with:
           name: component-corpus
-          path: |  # the directories .gitignore lists for build.component_testdata
+          path: |  # what .gitignore lists for those targets, and the testdata/ that ignore themselves
             component/wit/testdata/wit-parser/ui
             component/wit/testdata/oracle
             internal/component/binary/testdata/wast/component-model-max-value-size
             internal/component/binary/testdata/wast/wasm-tools-max-value-size
-            internal/component/instance/testdata/wast/fixed_length_lists
-            internal/component/instance/testdata/wast/wasm-tools-fixed-length-lists
-            internal/component/instance/testdata/wast/cm-validation-instantiation
-            internal/component/instance/testdata/wast/cm-validation-resources
-            internal/component/instance/testdata/wast/wasm-tools-instantiate
-            internal/component/instance/testdata/wast/wasm-tools-virtualize
-            internal/component/instance/testdata/wast/wasmtime-nested
-            internal/component/instance/testdata/wast/wasmtime-restrictions
+            internal/component/instance/testdata/wast
+            internal/component/instance/testdata/wast-async
+            internal/component/abi/testdata/definitions.py
+            internal/component/wit/testdata/random.wit
+            internal/component/wit/testdata/streams.wit
+            imports/wasip2/testdata/component-model
+            imports/wasip2/testdata/wasi-wit
+            imports/wasi_http/testdata/http
+            imports/http_handler/nethttp/internal/tck/testdata
+            imports/http_handler/nethttp/testdata/panic_on_handle_request.wasm
           if-no-files-found: error
           retention-days: 1
 
@@ -211,7 +191,7 @@ jobs:
     name: ${{ matrix.platform.arch }}, Linux (scratch), Go-${{ matrix.go-version }}${{ matrix.platform.no_prot_exec && ', no-prot-exec' }}
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 30  # a hung test binary must fail fast, never burn the 24h ceiling
-    needs: component_corpus  # embedded into the test binaries
+    needs: [spectest_corpus, component_corpus]  # embedded into the test binaries
     strategy:
       fail-fast: false  # don't fail fast as sometimes failures are arch/OS specific
       matrix:  # Use versions consistent with wazy's Go support policy.
@@ -238,13 +218,27 @@ jobs:
         with:
           go-version: ${{ matrix.go-version }}
 
+      # The corpus also carries files the checkout already has, and gh run download refuses to
+      # overwrite, so it unpacks beside the tree and is copied over; a retry starts from empty.
+      - name: Download spectest corpus
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_wait_seconds: 15
+          shell: bash
+          command: rm -rf .corpus/spectest-corpus && gh run download ${{ github.run_id }} --name spectest-corpus --dir .corpus/spectest-corpus && cp -R .corpus/spectest-corpus/. internal/integration_test/spectest/ && rm -rf .corpus/spectest-corpus
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Download component-model test corpus
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 5
           max_attempts: 3
           retry_wait_seconds: 15
-          command: gh run download ${{ github.run_id }} --name component-corpus --dir .
+          shell: bash
+          command: rm -rf .corpus/component-corpus && gh run download ${{ github.run_id }} --name component-corpus --dir .corpus/component-corpus && cp -R .corpus/component-corpus/. ./ && rm -rf .corpus/component-corpus
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -291,7 +285,7 @@ jobs:
   test_bsd:
     name: amd64, ${{ matrix.os.name }}
     runs-on: ubuntu-24.04
-    needs: component_corpus  # embedded into the test binaries
+    needs: [spectest_corpus, component_corpus]  # embedded into the test binaries
     strategy:
       fail-fast: false  # don't fail fast as sometimes failures are OS specific
       matrix:
@@ -306,13 +300,27 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # The corpus also carries files the checkout already has, and gh run download refuses to
+      # overwrite, so it unpacks beside the tree and is copied over; a retry starts from empty.
+      - name: Download spectest corpus
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_wait_seconds: 15
+          shell: bash
+          command: rm -rf .corpus/spectest-corpus && gh run download ${{ github.run_id }} --name spectest-corpus --dir .corpus/spectest-corpus && cp -R .corpus/spectest-corpus/. internal/integration_test/spectest/ && rm -rf .corpus/spectest-corpus
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Download component-model test corpus
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 5
           max_attempts: 3
           retry_wait_seconds: 15
-          command: gh run download ${{ github.run_id }} --name component-corpus --dir .
+          shell: bash
+          command: rm -rf .corpus/component-corpus && gh run download ${{ github.run_id }} --name component-corpus --dir .corpus/component-corpus && cp -R .corpus/component-corpus/. ./ && rm -rf .corpus/component-corpus
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -347,7 +355,7 @@ jobs:
   test_vm:
     name: amd64, ${{ matrix.os.name }}
     runs-on: ubuntu-24.04
-    needs: component_corpus  # embedded into the test binaries
+    needs: [spectest_corpus, component_corpus]  # embedded into the test binaries
     strategy:
       fail-fast: false  # don't fail fast as sometimes failures are OS specific
       matrix:
@@ -362,13 +370,27 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # The corpus also carries files the checkout already has, and gh run download refuses to
+      # overwrite, so it unpacks beside the tree and is copied over; a retry starts from empty.
+      - name: Download spectest corpus
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_wait_seconds: 15
+          shell: bash
+          command: rm -rf .corpus/spectest-corpus && gh run download ${{ github.run_id }} --name spectest-corpus --dir .corpus/spectest-corpus && cp -R .corpus/spectest-corpus/. internal/integration_test/spectest/ && rm -rf .corpus/spectest-corpus
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Download component-model test corpus
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 5
           max_attempts: 3
           retry_wait_seconds: 15
-          command: gh run download ${{ github.run_id }} --name component-corpus --dir .
+          shell: bash
+          command: rm -rf .corpus/component-corpus && gh run download ${{ github.run_id }} --name component-corpus --dir .corpus/component-corpus && cp -R .corpus/component-corpus/. ./ && rm -rf .corpus/component-corpus
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

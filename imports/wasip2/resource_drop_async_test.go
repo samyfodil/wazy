@@ -16,8 +16,8 @@ import (
 // async` production yet (confirmed empirically -- its wast grammar's error
 // message lists every other canon builtin but not this one), so there is no
 // way to author a fresh .wat fixture for it. Both tests below instead
-// byte-patch res20_own_dtor.component.wasm's two REAL, already-verified
-// `resource.drop` (kind 0x03) canon entries to kind 0x07 -- identical
+// byte-patch the own-dtor fixture's (resources.wast module 20) two REAL,
+// already-verified `resource.drop` (kind 0x03) canon entries to kind 0x07 -- identical
 // payload shape (a single typeidx), confirmed against a `wasm-tools dump`
 // of the unmodified fixture (see real_own_dtor_test.go's doc) -- and checks
 // the guest's own `start`-section self-test (dtor-run counters, dense
@@ -44,7 +44,7 @@ func patchResourceDropToAsync(t *testing.T, wasm []byte, offsets ...int) []byte 
 // real fixture's own resource.drop entries -- offsets 0xad/0xaf, dumped in
 // real_own_dtor_test.go's doc).
 func TestDecode_ResourceDropAsync(t *testing.T) {
-	patched := patchResourceDropToAsync(t, res20OwnDtorWasm, 0xad, 0xaf)
+	patched := patchResourceDropToAsync(t, ownDtorFixture(t), 0xad, 0xaf)
 	comp, err := binary.Decode(bytes.NewReader(patched))
 	if err != nil {
 		t.Fatalf("decode: %v", err)
@@ -70,7 +70,7 @@ func TestExecute_ResourceDropAsyncRunsDtor(t *testing.T) {
 	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)
 
-	patched := patchResourceDropToAsync(t, res20OwnDtorWasm, 0xad, 0xaf)
+	patched := patchResourceDropToAsync(t, ownDtorFixture(t), 0xad, 0xaf)
 	inst, err := component.Instantiate(ctx, r, patched)
 	if err != nil {
 		t.Fatalf("instantiate (start-section self-test failed under resource.drop async): %v", err)

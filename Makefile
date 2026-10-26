@@ -117,6 +117,41 @@ spectest_base_dir := internal/integration_test/spectest
 # becomes 5000 and the flake goes away.
 gh_api_curl := curl -fsSL --retry 5 --retry-all-errors $(if $(GITHUB_TOKEN),-H "Authorization: Bearer $(GITHUB_TOKEN)")
 
+# The tools the fetched suites are built with, pinned like the suites themselves: another version can emit
+# different bytes. Each is downloaded for this host into build/tools on first use, rather than taken from
+# whatever happens to be on PATH.
+wabt_version := 1.0.39
+wasm_tools_version := 1.253.0
+# Some component-model cases were written against a later wasm-tools than the rest reproduce under.
+wasm_tools_next_version := 1.262.0
+tools_dir := $(CURDIR)/build/tools
+wast2json := $(tools_dir)/wabt-$(wabt_version)/wast2json
+wasm_tools := $(tools_dir)/wasm-tools-$(wasm_tools_version)/wasm-tools
+wasm_tools_next := $(tools_dir)/wasm-tools-$(wasm_tools_next_version)/wasm-tools
+host_arm64 = $(filter arm64 aarch64,$(shell uname -m))
+host_darwin = $(filter Darwin,$(shell uname -s))
+wabt_release = wabt-$(wabt_version)-$(if $(host_darwin),macos,linux)-$(if $(host_arm64),arm64,x64)
+wasm_tools_release = wasm-tools-$(1)-$(if $(host_arm64),aarch64,x86_64)-$(if $(host_darwin),macos,linux)
+
+$(wast2json):
+	@rm -rf $(@D) $(@D).tmp && mkdir -p $(@D).tmp
+	@curl -fsSL --retry 5 --retry-all-errors \
+		https://github.com/WebAssembly/wabt/releases/download/$(wabt_version)/$(wabt_release).tar.gz \
+		| tar --strip-components 2 -C $(@D).tmp -xzf - wabt-$(wabt_version)/bin/wast2json
+	@mv $(@D).tmp $(@D)
+
+$(tools_dir)/wasm-tools-%/wasm-tools:
+	@rm -rf $(@D) $(@D).tmp && mkdir -p $(@D).tmp
+	@curl -fsSL --retry 5 --retry-all-errors \
+		https://github.com/bytecodealliance/wasm-tools/releases/download/v$*/$(call wasm_tools_release,$*).tar.gz \
+		| tar --strip-components 1 -C $(@D).tmp -xzf - $(call wasm_tools_release,$*)/wasm-tools
+	@mv $(@D).tmp $(@D)
+
+# Empties a fetched directory but for the .gitignore that keeps it in the tree: the tests embed the
+# directory, so it has to exist whether or not anything has been fetched into it. Once a suite is built
+# its .wast go too: the tests read the .json and .wasm, and the source would only bloat their binaries.
+clean_fetched = find $(1) -mindepth 1 ! -name .gitignore -delete
+
 
 # WebAssembly/testsuite as a submodule: the amalgamated core suite, pinned by gitlink rather than
 # copied in. Suites generated from it keep no cases in the tree -- refreshing upstream is a submodule
@@ -138,9 +173,10 @@ spec_version_v2 := wg-2.0
 
 spectest_v3_interaction_dir := $(spectest_base_dir)/v3-interaction
 spectest_v3_interaction_testdata_dir := $(spectest_v3_interaction_dir)/testdata
-# The cases crossing two of 3.0's proposals. The wasmtime-*.wast are vendored from the Bytecode
-# Alliance's own hand-written extras (Apache-2.0), the wazy-*.wast are this repository's, for the
-# crossings those do not reach. Both are committed as source; only the .json and .wasm regenerate.
+# The cases crossing two of 3.0's proposals. The wasmtime-*.wast are Wasmtime's own tests, from its
+# tests/misc_testsuite: an implementation's hand-written extras, not the specification's suite. They are
+# fetched at this pin and not committed. The wazy-*.wast are this repository's, for the crossings those
+# do not reach, and are committed along with what they generate.
 wasmtime_version := d8a0da6d661605713798c1c9c76be5c28e3159ff
 wasmtime_interaction_wast_files := \
 	gc/alloc-v128-struct.wast gc/array-init-data.wast gc/array-new-data.wast \
@@ -166,6 +202,10 @@ spec_version_tail_call := 88e97b0f742f4c3ee01fea683da130f344dd7b02
 
 spectest_extended_const_dir := $(spectest_base_dir)/extended-const
 spectest_extended_const_testdata_dir := $(spectest_extended_const_dir)/testdata
+# These stay committed: they are a trimmed copy, inherited from wazero, of the proposal's data.wast, elem.wast
+# and global.wast (WebAssembly/testsuite@0a394e3c proposals/extended-const), which exists nowhere upstream.
+# The untrimmed files also assert 2.0's rule that a constant expression reads only imported globals, and
+# wazy, with extended-const enabled, accepts a module-defined one.
 
 spectest_exception_handling_dir := $(spectest_base_dir)/exception-handling
 spectest_exception_handling_testdata_dir := $(spectest_exception_handling_dir)/testdata
@@ -239,9 +279,8 @@ build.spectest:
 	@$(MAKE) build.spectest.gc
 
 .PHONY: build.spectest.v1
-build.spectest.v1: # Note: wabt by default uses >1.0 features, so wast2json flags might drift as they include more. See WebAssembly/wabt#1878
-	@rm -rf $(spectest_v1_testdata_dir)
-	@mkdir -p $(spectest_v1_testdata_dir)
+build.spectest.v1: $(wast2json) # Note: wabt by default uses >1.0 features, so wast2json flags might drift as they include more. See WebAssembly/wabt#1878
+	@$(call clean_fetched,$(spectest_v1_testdata_dir))
 	@cd $(spectest_v1_testdata_dir) \
 		&& $(gh_api_curl) 'https://api.github.com/repos/WebAssembly/spec/contents/test/core?ref=$(spec_version_v1)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
 	@cd $(spectest_v1_testdata_dir) && for f in `find . -name '*.wast'`; do \
@@ -255,7 +294,7 @@ build.spectest.v1: # Note: wabt by default uses >1.0 features, so wast2json flag
 		perl -pi -e 's/\(assert_return_arithmetic_nan\s(\(invoke\s"[a-z._0-9]+"\s\((f[0-9]{2})\.const\s[a-z0-9.+:-]+\)\s\([a-z0-9.\s+-:]+\)\))\)/\(assert_return $$1 \($$2.const nan:arithmetic\)\)/g' $$f; \
 		perl -pi -e 's/\(assert_return_canonical_nan\s(\(invoke\s"[a-z._0-9]+"\s\((f[0-9]{2})\.const\s[a-z0-9.+:-]+\)\))\)/\(assert_return $$1 \($$2.const nan:canonical\)\)/g' $$f; \
 		perl -pi -e 's/\(assert_return_arithmetic_nan\s(\(invoke\s"[a-z._0-9]+"\s\((f[0-9]{2})\.const\s[a-z0-9.+:-]+\)\))\)/\(assert_return $$1 \($$2.const nan:arithmetic\)\)/g' $$f; \
-		wast2json \
+		$(wast2json) \
 			--disable-saturating-float-to-int \
 			--disable-sign-extension \
 			--disable-simd \
@@ -264,39 +303,40 @@ build.spectest.v1: # Note: wabt by default uses >1.0 features, so wast2json flag
 			--disable-reference-types \
 			--debug-names $$f; \
 	done
+	@rm -f $(spectest_v1_testdata_dir)/*.wast
 
 .PHONY: build.spectest.v2
-build.spectest.v2: # Note: SIMD cases are placed in the "simd" subdirectory.
-	@rm -rf $(spectest_v2_testdata_dir)
-	@mkdir -p $(spectest_v2_testdata_dir)
+build.spectest.v2: $(wast2json) # Note: SIMD cases are placed in the "simd" subdirectory.
+	@$(call clean_fetched,$(spectest_v2_testdata_dir))
 	@cd $(spectest_v2_testdata_dir) \
 		&& $(gh_api_curl) 'https://api.github.com/repos/WebAssembly/spec/contents/test/core?ref=$(spec_version_v2)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
 	@cd $(spectest_v2_testdata_dir) \
 		&& $(gh_api_curl) 'https://api.github.com/repos/WebAssembly/spec/contents/test/core/simd?ref=$(spec_version_v2)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
 	@cd $(spectest_v2_testdata_dir) && for f in `find . -name '*.wast'`; do \
-		wast2json --debug-names --no-check $$f || true; \
+		$(wast2json) --debug-names --no-check $$f || true; \
 	done # Ignore the error here as some tests (e.g. comments.wast right now) are not supported by wast2json yet.
+	@rm -f $(spectest_v2_testdata_dir)/*.wast
 
 .PHONY: build.spectest.v3
-build.spectest.v3: $(spectest_testsuite_dir)/binary.wast # Needs wasm-tools: the corpus spans every 3.0 proposal, including the GC type section and memory64's "module definition".
+build.spectest.v3: $(wasm_tools) $(spectest_testsuite_dir)/binary.wast # Needs wasm-tools: the corpus spans every 3.0 proposal, including the GC type section and memory64's "module definition".
 	@rm -rf $(spectest_v3_testdata_dir)
 	@mkdir -p $(spectest_v3_testdata_dir)
 	@cp $(spectest_testsuite_dir)/*.wast $(spectest_v3_testdata_dir)/
 	@cd $(spectest_v3_testdata_dir) && for f in `find . -name '*.wast'`; do \
-		wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
+		$(wasm_tools) json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
 	done
 	@sh $(spectest_v3_dir)/assemble-text-modules.sh $(spectest_v3_testdata_dir)
 	@rm -f $(spectest_v3_testdata_dir)/*.wast # The submodule is the source; these were a working copy.
 
 .PHONY: build.spectest.v3_interaction
-build.spectest.v3_interaction: # Refreshes the vendored wasmtime cases, then rebuilds every case from its .wast.
+build.spectest.v3_interaction: $(wasm_tools) # Refreshes the vendored wasmtime cases, then rebuilds every case from its .wast.
 	@cd $(spectest_v3_interaction_testdata_dir) \
 		&& for f in $(wasmtime_interaction_wast_files); do \
 			curl -sfJL "https://raw.githubusercontent.com/bytecodealliance/wasmtime/$(wasmtime_version)/tests/misc_testsuite/$$f" \
 				-o "wasmtime-$$(echo $$f | tr '/' '-')"; \
 		done
 	@cd $(spectest_v3_interaction_testdata_dir) && rm -f *.json *.wasm && for f in `find . -name '*.wast'`; do \
-		wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
+		$(wasm_tools) json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
 	done
 
 # Note: We currently cannot build the "threads" subdirectory that spawns threads due to missing support in wast2json.
@@ -315,107 +355,129 @@ build.spectest.v3_interaction: # Refreshes the vendored wasmtime cases, then reb
 # two tables is invalid -- which wazy correctly accepts. It also imports a "shared_memory" the spectest
 # host module does not export.
 .PHONY: build.spectest.threads
-build.spectest.threads: $(spectest_testsuite_dir)/binary.wast
-	@rm -rf $(spectest_threads_testdata_dir)
-	@mkdir -p $(spectest_threads_testdata_dir)
+build.spectest.threads: $(wast2json) $(spectest_testsuite_dir)/binary.wast
+	@$(call clean_fetched,$(spectest_threads_testdata_dir))
 	@cd $(spectest_threads_testdata_dir) \
 		&& $(gh_api_curl) 'https://api.github.com/repos/WebAssembly/threads/contents/test/core/threads?ref=$(spec_version_threads)' | jq -r '.[]| .download_url' | grep -E "/atomic.wast" | xargs -Iurl curl -sJL url -O
 	@cp $(spectest_testsuite_dir)/proposals/threads/exports.wast $(spectest_testsuite_dir)/proposals/threads/memory.wast \
 		$(spectest_threads_testdata_dir)/
 	@cd $(spectest_threads_testdata_dir) && for f in `find . -name '*.wast'`; do \
-		wast2json --enable-threads --debug-names $$f; \
+		$(wast2json) --enable-threads --debug-names $$f; \
 	done
+	@rm -f $(spectest_threads_testdata_dir)/*.wast
 
 .PHONY: build.spectest.extended_const
-build.spectest.extended_const:
+build.spectest.extended_const: $(wast2json)
 	@cd $(spectest_extended_const_testdata_dir) && for f in `find . -name '*.wast'`; do \
-		wast2json --enable-extended-const --debug-names $$f; \
+		$(wast2json) --enable-extended-const --debug-names $$f; \
 	done
 
 .PHONY: build.spectest.tail_call
-build.spectest.tail_call:
-	@rm -rf $(spectest_tail_call_testdata_dir)
-	@mkdir -p $(spectest_tail_call_testdata_dir)
+build.spectest.tail_call: $(wast2json)
+	@$(call clean_fetched,$(spectest_tail_call_testdata_dir))
 	@cd $(spectest_tail_call_testdata_dir) \
 		&& $(gh_api_curl) 'https://api.github.com/repos/WebAssembly/testsuite/contents/proposals/tail-call?ref=$(spec_version_tail_call)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
 	@cd $(spectest_tail_call_testdata_dir) && for f in `find . -name '*.wast'`; do \
-		wast2json --enable-tail-call --debug-names $$f; \
+		$(wast2json) --enable-tail-call --debug-names $$f; \
 	done
+	@rm -f $(spectest_tail_call_testdata_dir)/*.wast
 
 .PHONY: build.spectest.exception_handling
-build.spectest.exception_handling:
-	@rm -rf $(spectest_exception_handling_testdata_dir)
-	@mkdir -p $(spectest_exception_handling_testdata_dir)
+build.spectest.exception_handling: $(wasm_tools)
+	@$(call clean_fetched,$(spectest_exception_handling_testdata_dir))
 	@cd $(spectest_exception_handling_testdata_dir) \
 		&& $(gh_api_curl) 'https://api.github.com/repos/WebAssembly/spec/contents/test/core/exceptions?ref=$(spec_version_exception_handling)' \
 		| jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
 	@cd $(spectest_exception_handling_testdata_dir) && for f in `find . -name '*.wast'`; do \
-		wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f || true; \
+		$(wasm_tools) json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f || true; \
 	done
+	@rm -f $(spectest_exception_handling_testdata_dir)/*.wast
 
 .PHONY: build.spectest.typed_function_references
-build.spectest.typed_function_references:
-	@rm -rf $(spectest_typed_function_references_testdata_dir)
-	@mkdir -p $(spectest_typed_function_references_testdata_dir)
+build.spectest.typed_function_references: $(wasm_tools)
+	@$(call clean_fetched,$(spectest_typed_function_references_testdata_dir))
 	@cd $(spectest_typed_function_references_testdata_dir) \
 		&& for f in $(typed_function_references_wast_files); do \
 			curl -sJL "https://raw.githubusercontent.com/WebAssembly/function-references/$(spec_version_typed_function_references)/test/core/$$f" -O; \
 		done
 	@cd $(spectest_typed_function_references_testdata_dir) && for f in `find . -name '*.wast'`; do \
-		wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f || true; \
+		$(wasm_tools) json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f || true; \
 	done
+	@rm -f $(spectest_typed_function_references_testdata_dir)/*.wast
 
 .PHONY: build.spectest.relaxed_simd
-build.spectest.relaxed_simd: # Needs wasm-tools: wast2json drops the proposal's multi-result "either" expectations.
-	@rm -rf $(spectest_relaxed_simd_testdata_dir)
-	@mkdir -p $(spectest_relaxed_simd_testdata_dir)
+build.spectest.relaxed_simd: $(wasm_tools) # Needs wasm-tools: wast2json drops the proposal's multi-result "either" expectations.
+	@$(call clean_fetched,$(spectest_relaxed_simd_testdata_dir))
 	@cd $(spectest_relaxed_simd_testdata_dir) \
 		&& $(gh_api_curl) 'https://api.github.com/repos/WebAssembly/relaxed-simd/contents/test/core/relaxed-simd?ref=$(spec_version_relaxed_simd)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
 	@cd $(spectest_relaxed_simd_testdata_dir) && for f in `find . -name '*.wast'`; do \
-		wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
+		$(wasm_tools) json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
 	done
+	@rm -f $(spectest_relaxed_simd_testdata_dir)/*.wast
 
 .PHONY: build.spectest.memory64
-build.spectest.memory64: # Needs wasm-tools: wast2json cannot emit the "module definition" command memory64.wast uses.
-	@rm -rf $(spectest_memory64_testdata_dir)
-	@mkdir -p $(spectest_memory64_testdata_dir)
+build.spectest.memory64: $(wasm_tools) # Needs wasm-tools: wast2json cannot emit the "module definition" command memory64.wast uses.
+	@$(call clean_fetched,$(spectest_memory64_testdata_dir))
 	@cd $(spectest_memory64_testdata_dir) \
 		&& for f in $(memory64_wast_files); do \
 			curl -sJL "https://raw.githubusercontent.com/WebAssembly/memory64/$(spec_version_memory64)/test/core/$$f" -O; \
 		done
 	@cd $(spectest_memory64_testdata_dir) && for f in `find . -name '*.wast'`; do \
-		wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
+		$(wasm_tools) json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
 	done
+	@rm -f $(spectest_memory64_testdata_dir)/*.wast
 
 .PHONY: build.spectest.gc
-build.spectest.gc: # Needs wasm-tools: wast2json does not support the GC proposal's type section.
-	@rm -rf $(spectest_gc_testdata_dir)
-	@mkdir -p $(spectest_gc_testdata_dir)
+build.spectest.gc: $(wasm_tools) # Needs wasm-tools: wast2json does not support the GC proposal's type section.
+	@$(call clean_fetched,$(spectest_gc_testdata_dir))
 	@cd $(spectest_gc_testdata_dir) \
 		&& for f in $(gc_wast_files); do \
 			curl -sfJL "https://raw.githubusercontent.com/WebAssembly/gc/$(spec_version_gc)/test/core/$$f" -o $$f \
 			|| curl -sfJL "https://raw.githubusercontent.com/WebAssembly/gc/$(spec_version_gc)/test/core/gc/$$f" -o $$f; \
 		done
 	@cd $(spectest_gc_testdata_dir) && for f in `find . -name '*.wast'`; do \
-		wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
+		$(wasm_tools) json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f; \
 	done
+	@rm -f $(spectest_gc_testdata_dir)/*.wast
 
 .PHONY: build.spectest.multi_memory
-build.spectest.multi_memory:
-	@rm -rf $(spectest_multi_memory_testdata_dir)
-	@mkdir -p $(spectest_multi_memory_testdata_dir)
+build.spectest.multi_memory: $(wast2json)
+	@$(call clean_fetched,$(spectest_multi_memory_testdata_dir))
 	@cd $(spectest_multi_memory_testdata_dir) \
 		&& $(gh_api_curl) 'https://api.github.com/repos/WebAssembly/multi-memory/contents/test/core/multi-memory?ref=$(spec_version_multi_memory)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
 	@cd $(spectest_multi_memory_testdata_dir) && for f in `find . -name '*.wast'`; do \
-		wast2json --enable-multi-memory --debug-names $$f; \
+		$(wast2json) --enable-multi-memory --debug-names $$f; \
 	done
+	@rm -f $(spectest_multi_memory_testdata_dir)/*.wast
 
-# Component-model cases from the component-model repository and the Bytecode Alliance, fetched at a
-# pinned commit rather than copied in. Each .wast is one file, so it is curled; wit-parser's UI suite
-# is a tree, so it comes out of that commit's tarball. What the tests read is generated from them with
-# wasm-tools 1.262.0, the version their expected results were written against. None of it is
-# committed, so CI builds it once and hands it to every test job, as with the 3.0 spectest corpus.
+# Everything below is fetched from where it lives, at a pinned commit, rather than committed. Like the
+# spectest suites, CI builds it once and hands it to every test job; without it the tests that need it
+# skip, naming the target that fetches it.
+.PHONY: build.testdata
+build.testdata:
+	@$(MAKE) build.spectest
+	@$(MAKE) build.component_testdata
+	@$(MAKE) build.wasi_testdata
+	@$(MAKE) build.guest_testdata
+
+# Component-model cases, generated into what the tests read with the pinned wasm-tools:
+#
+#   - WebAssembly/component-model's own suites. Its test/wasmtime holds cases that repository took in
+#     from Wasmtime and wasm-tools.
+#   - wasm-tools' and Wasmtime's own tests, where they reach what the component-model suite does not.
+#     They are implementations' tests, not the specification's. Also wit-parser's UI suite.
+#   - The Canonical ABI's reference implementation, definitions.py, which the abi package's oracle
+#     generators import, and one module of resources.wast that wasip2 runs on its own.
+#
+# component-model is pinned twice. The conformance suites below are cf242a7's, generated with wasm-tools
+# 1.253.0: that reproduces them byte for byte, while 1.262.0 encodes several differently. The
+# max-value-size and fixed-length-list cases are later, and written against 1.262.0.
+#
+# One async suite, sync-streams, is a later commit's (#705): cf242a7's copy expects a result the spec's
+# own reference implementation does not give, and #705 corrected it. It needs wasm-tools 1.262.0.
 component_model_version := d095e2f60ddae1f9a1e9b1e2fb547ec1114da677
+component_model_conformance_version := cf242a7a50d58aed650bc467212c5fb93433287b
+component_model_sync_streams_version := 2f1326540f73f8d58237028f8331c048b3e44d76
 wasm_tools_tests_version := 2e6b2d6db499501a91a0b88a848435345bef1f66
 component_model_raw := https://raw.githubusercontent.com/WebAssembly/component-model/$(component_model_version)/test
 wasm_tools_raw := https://raw.githubusercontent.com/bytecodealliance/wasm-tools/$(wasm_tools_tests_version)/tests/cli/component-model
@@ -433,21 +495,116 @@ component_wast_suites := \
 	internal/component/instance/testdata/wast/wasmtime-nested=$(wasmtime_raw)/nested.wast \
 	internal/component/instance/testdata/wast/wasmtime-restrictions=$(wasmtime_raw)/restrictions.wast
 wit_parser_ui_dir := component/wit/testdata/wit-parser/ui
+component_model_dir := build/component-model
+component_wast_dir := internal/component/instance/testdata/wast
+component_async_dir := internal/component/instance/testdata/wast-async
+# <directory under $(component_wast_dir)>=<.wast under component-model's test/>
+component_conformance_suites := concat=values/concat strings=values/strings \
+	multiple-resources=resources/multiple-resources fused=wasmtime/fused \
+	resources=wasmtime/resources simple=wasmtime/simple types=wasmtime/types
 
 .PHONY: build.component_testdata
-build.component_testdata:
+build.component_testdata: $(wasm_tools) $(wasm_tools_next)
 	@for s in $(component_wast_suites); do \
 		dir=$${s%%=*} url=$${s#*=} f=$${s##*/}; \
 		rm -rf $$dir && mkdir -p $$dir \
 		&& curl -sfSL --retry 5 --retry-all-errors $$url -o $$dir/$$f \
-		&& (cd $$dir && wasm-tools json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f) || exit 1; \
+		&& (cd $$dir && $(wasm_tools_next) json-from-wast --wasm-dir . -o $$(basename $$f .wast).json $$f) || exit 1; \
 	done
 	@rm -rf $(wit_parser_ui_dir) && mkdir -p $(wit_parser_ui_dir)
 	@curl -sfSL --retry 5 --retry-all-errors \
 		https://codeload.github.com/bytecodealliance/wasm-tools/tar.gz/$(wasm_tools_tests_version) \
 		| tar -xzf - -C $(wit_parser_ui_dir) --strip-components 5 \
 			wasm-tools-$(wasm_tools_tests_version)/crates/wit-parser/tests/ui
-	@sh component/wit/testdata/gen-oracle.sh
+	@PATH="$(dir $(wasm_tools_next)):$$PATH" sh component/wit/testdata/gen-oracle.sh
+	@rm -rf $(component_model_dir) && mkdir -p $(component_model_dir)
+	@curl -fsSL --retry 5 --retry-all-errors \
+		https://codeload.github.com/WebAssembly/component-model/tar.gz/$(component_model_conformance_version) \
+		| tar -xzf - -C $(component_model_dir) --strip-components 1 \
+			component-model-$(component_model_conformance_version)/test \
+			component-model-$(component_model_conformance_version)/design/mvp/canonical-abi/definitions.py
+	@for s in $(component_conformance_suites); do \
+		rm -rf $(component_wast_dir)/$${s%%=*} && mkdir -p $(component_wast_dir)/$${s%%=*} \
+		&& cp $(component_model_dir)/test/$${s#*=}.wast $(component_wast_dir)/$${s%%=*}/ || exit 1; \
+	done
+	@for f in $(component_model_dir)/test/async/*.wast; do \
+		s=$$(basename $$f .wast); [ $$s = sync-streams ] && continue; \
+		rm -rf $(component_async_dir)/$$s && mkdir -p $(component_async_dir)/$$s && cp $$f $(component_async_dir)/$$s/; \
+	done
+	@for d in $(foreach s,$(component_conformance_suites),$(component_wast_dir)/$(firstword $(subst =, ,$(s)))) \
+		$(component_async_dir)/*; do \
+		[ $$(basename $$d) = sync-streams ] && continue; \
+		(cd $$d && $(wasm_tools) json-from-wast --wasm-dir . -o $$(basename $$d).json $$(basename $$d).wast) || exit 1; \
+	done
+	@rm -rf $(component_async_dir)/sync-streams && mkdir -p $(component_async_dir)/sync-streams \
+		&& curl -sfSL --retry 5 --retry-all-errors -o $(component_async_dir)/sync-streams/sync-streams.wast \
+			https://raw.githubusercontent.com/WebAssembly/component-model/$(component_model_sync_streams_version)/test/async/sync-streams.wast \
+		&& (cd $(component_async_dir)/sync-streams && $(wasm_tools_next) json-from-wast --wasm-dir . -o sync-streams.json sync-streams.wast)
+	@$(call clean_fetched,imports/wasip2/testdata/component-model)
+	@cp $(component_wast_dir)/resources/resources.20.wasm imports/wasip2/testdata/component-model/
+	@cp $(component_model_dir)/design/mvp/canonical-abi/definitions.py internal/component/abi/testdata/
+
+# WASI's own interface definitions, from WebAssembly/WASI at the commits its release tags name. wasip2
+# checks every host import it registers against 0.2.12's; the wit parser's tests read two 0.2.8 files.
+wasi_version_0_2_12 := 281ba75fafcd50961ef55f9e52747afcc9b71ede
+wasi_version_0_2_8 := b26023f7d540bc7f0faae24052ca887421541acf
+wasi_dir := build/wasi
+wasip2_wit_dir := imports/wasip2/testdata/wasi-wit
+wasip2_wit_packages := cli clocks filesystem http io random sockets
+
+.PHONY: build.wasi_testdata
+build.wasi_testdata:
+	@rm -rf $(wasi_dir) && mkdir -p $(wasi_dir)
+	@curl -fsSL --retry 5 --retry-all-errors \
+		https://codeload.github.com/WebAssembly/WASI/tar.gz/$(wasi_version_0_2_12) \
+		| tar -xzf - -C $(wasi_dir) --strip-components 1 WASI-$(wasi_version_0_2_12)/proposals
+	@$(call clean_fetched,$(wasip2_wit_dir))
+	@for p in $(wasip2_wit_packages); do \
+		mkdir -p $(wasip2_wit_dir)/$$p && cp $(wasi_dir)/proposals/$$p/wit/*.wit $(wasip2_wit_dir)/$$p/ || exit 1; \
+	done
+	@for f in io/streams random/random; do \
+		curl -fsSL --retry 5 --retry-all-errors \
+			https://raw.githubusercontent.com/WebAssembly/WASI/$(wasi_version_0_2_8)/wasip2/$$f.wit \
+			-o internal/component/wit/testdata/$$(basename $$f).wit || exit 1; \
+	done
+
+# Guests other projects test their own hosts with, fetched from those projects: dapr's wasi-http
+# fixture, which wasi_http has to run the way dapr does, and http-wasm's TCK guest and trapping guest
+# for http_handler. http-wasm's example guests stay committed beside the latter: they back testable
+# examples, and an example cannot skip when its guest is missing.
+dapr_contrib_version := 3b9591ed81daddb02e2482289caafe8f44c304c3
+http_wasm_version := d9e07495db6c4192ce0995de036e2ad450616883
+# <file the tests read>=<URL it is fetched from>
+guest_testdata := \
+	imports/wasi_http/testdata/http/main.wasm=https://raw.githubusercontent.com/dapr/components-contrib/$(dapr_contrib_version)/bindings/wasm/testdata/http/main.wasm \
+	imports/http_handler/nethttp/internal/tck/testdata/tck.wasm=https://raw.githubusercontent.com/http-wasm/http-wasm-host-go/$(http_wasm_version)/tck/tck.wasm \
+	imports/http_handler/nethttp/testdata/panic_on_handle_request.wasm=https://raw.githubusercontent.com/http-wasm/http-wasm-host-go/$(http_wasm_version)/internal/test/testdata/error/panic_on_handle_request.wasm
+
+.PHONY: build.guest_testdata
+build.guest_testdata:
+	@for g in $(guest_testdata); do \
+		curl -fsSL --retry 5 --retry-all-errors $${g#*=} -o $${g%%=*} || exit 1; \
+	done
+
+# The wasi:otel guests' WIT is upstream's, apart from the world each guest declares: the proposal's
+# current WIT for otelguest, and the opentelemetry-wasi SDK's, which still has the old span-context
+# name, for outerguest. Only rebuilding a guest needs it; the tests embed the built .wasm.
+wasi_otel_version := e5262a84044aff064c9599eebc05013bb3432795
+opentelemetry_wasi_version := 2962a286aa66188314bcafd79c800c4e39ce41e1
+wasi_otel_wit_deps := deps/wasi-clocks-0.2.0/package.wit deps/wasi-io-0.2.0/package.wit
+
+.PHONY: build.wasi_otel_wit
+build.wasi_otel_wit:
+	@for f in types.wit tracing.wit metrics.wit logs.wit $(wasi_otel_wit_deps); do \
+		curl -fsSL --retry 5 --retry-all-errors --create-dirs \
+			https://raw.githubusercontent.com/WebAssembly/wasi-otel/$(wasi_otel_version)/wit/$$f \
+			-o imports/wasi_otel/testdata/otelguest/wit/$$f || exit 1; \
+	done
+	@for f in types.wit tracing.wit $(wasi_otel_wit_deps); do \
+		curl -fsSL --retry 5 --retry-all-errors --create-dirs \
+			https://raw.githubusercontent.com/bytecodealliance/opentelemetry-wasi/$(opentelemetry_wasi_version)/wit/$$f \
+			-o imports/wasi_otel/testdata/outerguest/wit/$$f || exit 1; \
+	done
 
 # Builds one build image and tests it: its samples are built in the image,
 # validated, and run under wazy from this checkout. See build-images/README.md.

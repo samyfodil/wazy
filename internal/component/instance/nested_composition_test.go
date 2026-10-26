@@ -256,6 +256,7 @@ func TestGraph_InstanceArgIsNeitherSiblingNorImport(t *testing.T) {
 	// resources.14 is the fixture whose `(with "host" (instance $host))` names
 	// an imported instance; pointing that arg past every space slot makes it
 	// name nothing at all.
+	fetched(t, "testdata/wast/resources")
 	raw, err := wastFS.ReadFile("testdata/wast/resources/resources.14.wasm")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)

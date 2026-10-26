@@ -11,6 +11,10 @@ set -u
 RUN='TestAsyncWastConformance/trap-if-sync-and-waitable-set'
 BIN="${RUNNER_TEMP:-/tmp}/bisect-t.exe"
 
+# Commits from the one that stopped committing the async suites on read them fetched.
+suites=internal/component/instance/testdata/wast-async
+[ -d "$suites/deadlock" ] || cp -r "${RUNNER_TEMP:-/tmp}/wast-async/." "$suites/" || exit 125
+
 go test -c -o "$BIN" ./internal/component/instance/ || exit 125
 
 launches=25

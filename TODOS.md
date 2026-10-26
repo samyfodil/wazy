@@ -2,7 +2,7 @@
 
 ## Component Model async ABI — DONE
 - **DONE (the async ABI on top of the WASI 0.2 CM runtime):** callback and stackful lift, `future<T>`/`stream<T>` (rendezvous copy, per-element `own<R>` transfer, sync + async read/write, cancellation), task/subtask lifecycle (cancellation, backpressure, context storage, borrow scopes), a deterministic per-composition scheduler, and a `thread.*` cooperative fiber runtime (`new-indirect`/`yield`/`suspend`/`yield-then-resume`). Goroutines + an unbuffered-channel baton give exactly-one-runnable semantics (race-free, verified under `-race`) — the substrate advantage the plan predicted.
-- **Conformance:** all 31 official Component Model async `.wast` suites pass (0 skip, 0 fail), cross-checked by a differential trace-oracle vs the spec reference (`definitions.py`). One suite (`sync-streams`) carries a fixture fix filed upstream as WebAssembly/component-model#679 — the runtime itself needed no change. Design docs: `docs/component-model-async-*.md`.
+- **Conformance:** all 31 official Component Model async `.wast` suites pass (0 skip, 0 fail), cross-checked by a differential trace-oracle vs the spec reference (`definitions.py`). Design docs: `docs/component-model-async-*.md`.
 - **Follow-on still open:** the full WASI 0.3 host-interface surface (the reworked `wasi:io`/`wasi:sockets`/`wasi:http` 0.3 worlds folded into the async ABI) once the 0.3 spec settles — Wasmtime still marks its p3 support experimental as of 2026-07. The async ABI substrate is ready for it.
 
 ## Internal nested-component composition — func linking + cross-component resources DONE

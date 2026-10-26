@@ -9,11 +9,17 @@ Correctness here is a pass count against somebody else's suite, not a claim.
 | --- | --- | --- |
 | Core spec tests | [WebAssembly/testsuite](https://github.com/WebAssembly/testsuite) + the proposal repos | 13 corpora, **711 generated case files, no skip list**; the 3.0 corpus runs on **both** engines. |
 | Component Model async | the official async `.wast` suites | **31 suites, 0 skipped, 0 failed.** |
-| Canonical ABI values | the official `test/values` suites | **7 suites, 0 skipped, 0 failed**, through `wasm-tools json-from-wast`. Every vendored module instantiates — see below. |
+| Canonical ABI values | the official `test/values` suites | **7 suites, 0 skipped, 0 failed**, through `wasm-tools json-from-wast`. Every module instantiates — see below. |
 | wasi-testsuite | [WebAssembly/wasi-testsuite](https://github.com/WebAssembly/wasi-testsuite) | AssemblyScript, C and Rust, **no skipped tests**, on Linux, macOS **and** Windows, through the `wazy` CLI. |
-| Cross-proposal interaction | wasmtime's `tests/misc_testsuite` | 9 `.wast` vendored from wasmtime, beside 5 written here. |
+| Cross-proposal interaction | Wasmtime's own `tests/misc_testsuite`: an implementation's tests, not the spec's | 9 of Wasmtime's `.wast`, beside 5 written here. |
+
+The suites are not committed, apart from the few copies changed here, which exist nowhere
+upstream: `make build.testdata` fetches each from where it lives, at a pinned commit, and generates
+what the tests read with pinned releases of wabt and wasm-tools. Without it those tests skip, naming
+the target that fetches them.
 
 ```bash
+make build.testdata                               # fetch and generate every suite
 go test ./internal/integration_test/spectest/...  # core spec corpora
 go test ./internal/component/...                  # component ABI + async .wast
 ```
@@ -21,7 +27,7 @@ go test ./internal/component/...                  # component ABI + async .wast
 ## The skip list is empty, and the harness fails if that changes
 
 `wastKnownSkips` in `internal/component/instance/wast_conformance_test.go` is an empty map: every
-vendored module of all 7 suites instantiates. The harness fails if the observed set differs in
+module of all 7 suites instantiates. The harness fails if the observed set differs in
 **either** direction — a new entry is a regression, and a stale one means a gap closed and the list
 must shrink. An empty list is therefore an assertion the test enforces, not a claim made here.
 
@@ -45,14 +51,11 @@ reproduced the reporter's failure all along and still reported PASS
   implementation (`definitions.py`).
 - Four fuzz targets run in CI — three differential against the interpreter, one for validation.
 
-One official async fixture is broken upstream; the 31/31 runs against a corrected copy, and the fix
-is filed as [component-model#679](https://github.com/WebAssembly/component-model/pull/679).
-
 ## Wasm 3.0
 
 There is no separate 3.0 suite in the specification repository — `WebAssembly/testsuite@main` *is*
 it. wazy generates its corpus from that tree, and the 3.0 cases run on both the compiler and the
 interpreter. The cross-proposal cases in
 [`internal/integration_test/spectest/v3-interaction`](https://github.com/samyfodil/wazy/tree/main/internal/integration_test/spectest/v3-interaction)
-named `wasmtime-*.wast` are vendored from wasmtime's `tests/misc_testsuite`; the `wazy-*.wast`
-beside them are this repository's.
+named `wasmtime-*.wast` are Wasmtime's own tests, fetched from its `tests/misc_testsuite`: an
+implementation's tests, not the specification's. The `wazy-*.wast` beside them are this repository's.

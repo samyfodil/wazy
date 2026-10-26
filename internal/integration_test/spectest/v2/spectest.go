@@ -4,6 +4,5 @@ import "embed"
 
 // Testcases is exported for testing native in internal/engine/native.
 //
-//go:embed testdata/*.wasm
-//go:embed testdata/*.json
+//go:embed all:testdata
 var Testcases embed.FS

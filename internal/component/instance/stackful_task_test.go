@@ -25,6 +25,7 @@ func deadlockGoroutineFixture(t *testing.T) (*Instance, *boundExport) {
 	ctx := context.Background()
 	r := wazy.NewRuntime(ctx)
 	t.Cleanup(func() { r.Close(ctx) })
+	requireFetched(t, wastAsyncFS, "testdata/wast-async/deadlock")
 	wasm, err := wastAsyncFS.ReadFile(path.Join("testdata", "wast-async", "deadlock", "deadlock.0.wasm"))
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
@@ -140,6 +141,7 @@ func TestStackfulReap_InvokeStackfulReapsOnDeadlockTrap(t *testing.T) {
 	ctx := context.Background()
 	r := wazy.NewRuntime(ctx)
 	defer r.Close(ctx)
+	requireFetched(t, wastAsyncFS, "testdata/wast-async/deadlock")
 	wasm, err := wastAsyncFS.ReadFile(path.Join("testdata", "wast-async", "deadlock", "deadlock.0.wasm"))
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)

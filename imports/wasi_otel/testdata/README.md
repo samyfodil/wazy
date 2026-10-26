@@ -15,10 +15,14 @@ what proves it.
 
 ## Rebuilding
 
-Needs the `wasm32-wasip2` target (`rustup target add wasm32-wasip2`).
+Needs the `wasm32-wasip2` target (`rustup target add wasm32-wasip2`). Only each
+guest's `wit/world.wit` is committed; the rest of its WIT is the upstream
+repository's, fetched at a pinned commit by `make build.wasi_otel_wit` from the
+repository root.
 
 ```bash
-cd otelguest   # or outerguest
+make build.wasi_otel_wit
+cd imports/wasi_otel/testdata/otelguest   # or outerguest
 cargo build --release --target wasm32-wasip2
 cp target/wasm32-wasip2/release/otelguest.wasm ..
 ```
