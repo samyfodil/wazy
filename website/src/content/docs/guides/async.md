@@ -4,7 +4,7 @@ description: Components that suspend, await and resume — streams, futures, tas
 ---
 
 wazy runs the Component Model **async ABI**, the machinery WASI 0.3 is built on: components that
-suspend, await, and resume. It passes all **31 official async conformance suites**, zero skipped.
+suspend, await, and resume. It passes all **45 official async conformance suites**, zero skipped.
 
 ## Calling an async export
 
@@ -104,6 +104,6 @@ the async ABI through it.
 
 ## Conformance
 
-The 31 official async `.wast` suites run in CI on both engines, and a differential trace-oracle
+The 45 official async `.wast` suites run in CI on both engines, and a differential trace-oracle
 byte-compares wazy's async runtime against the specification's reference implementation
 (`definitions.py`).

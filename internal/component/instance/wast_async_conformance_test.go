@@ -70,6 +70,7 @@ func TestAsyncWastConformance(t *testing.T) {
 // is added or retired by moving that commit, not by editing a list.
 func asyncWastSuites(t *testing.T) []string {
 	t.Helper()
+	requireFetched(t, wastAsyncFS, "testdata/wast-async/*/*.json")
 	ents, err := fs.ReadDir(wastAsyncFS, "testdata/wast-async")
 	if err != nil {
 		t.Fatal(err)
@@ -79,9 +80,6 @@ func asyncWastSuites(t *testing.T) []string {
 		if e.IsDir() {
 			suites = append(suites, e.Name())
 		}
-	}
-	if len(suites) == 0 {
-		t.Fatal("no suites under testdata/wast-async")
 	}
 	return suites
 }
