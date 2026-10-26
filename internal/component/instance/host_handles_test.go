@@ -1,6 +1,8 @@
 package instance
 
 import (
+	"context"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -147,6 +149,68 @@ func TestHostHandleTransfer_BorrowLastsTheCall(t *testing.T) {
 	if err := x.moveResults([]abi.Value{uint32(77)}); err != nil {
 		t.Fatalf("a result without a nested handle: %v", err)
 	}
+}
+
+func TestHostHandleTransfer_Call(t *testing.T) {
+	resolve, _ := handleTypes()
+	borrows := binary.ListDesc{Element: borrowRef}
+	owns := binary.ListDesc{Element: ownRef}
+	setup := func() (*hostHandleTransfer, *handleTable, uint32) {
+		guest, host := newHandleTable(), newHandleTable()
+		x := &hostHandleTransfer{resolve: resolve, guest: guest, host: host, params: []binary.TypeDesc{borrows}, results: []binary.TypeDesc{owns}}
+		return x, host, guest.NewOwn(resTag, 9)
+	}
+
+	t.Run("moves both ways, borrows for the call", func(t *testing.T) {
+		x, host, gh := setup()
+		var hb uint32
+		results, err := x.call(context.Background(), []abi.Value{[]abi.Value{gh}}, func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+			hb = args[0].([]abi.Value)[0].(uint32)
+			if rep, err := host.Rep(resTag, hb); err != nil || rep != 9 {
+				t.Fatalf("host borrow during the call: rep %d, %v", rep, err)
+			}
+			return []abi.Value{[]abi.Value{host.NewOwn(resTag, 11)}}, nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := host.Rep(resTag, hb); err == nil {
+			t.Fatal("the borrow outlived the call")
+		}
+		if rep, err := x.guest.Rep(resTag, results[0].([]abi.Value)[0].(uint32)); err != nil || rep != 11 {
+			t.Fatalf("result own in the guest: rep %d, %v", rep, err)
+		}
+	})
+
+	t.Run("args refused", func(t *testing.T) {
+		x, _, _ := setup()
+		_, err := x.call(context.Background(), []abi.Value{[]abi.Value{uint32(3)}}, func(context.Context, []abi.Value) ([]abi.Value, error) {
+			t.Fatal("fn ran on refused args")
+			return nil, nil
+		})
+		requireErrContains(t, err, "param 0: ")
+	})
+
+	t.Run("fn fails", func(t *testing.T) {
+		x, host, gh := setup()
+		var hb uint32
+		_, err := x.call(context.Background(), []abi.Value{[]abi.Value{gh}}, func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+			hb = args[0].([]abi.Value)[0].(uint32)
+			return nil, errors.New("boom")
+		})
+		requireErrContains(t, err, "boom")
+		if _, err := host.Rep(resTag, hb); err == nil {
+			t.Fatal("the borrow outlived a failed call")
+		}
+	})
+
+	t.Run("results refused", func(t *testing.T) {
+		x, _, gh := setup()
+		_, err := x.call(context.Background(), []abi.Value{[]abi.Value{gh}}, func(context.Context, []abi.Value) ([]abi.Value, error) {
+			return []abi.Value{[]abi.Value{uint32(3)}}, nil
+		})
+		requireErrContains(t, err, "result 0: ")
+	})
 }
 
 func TestHostHandleTransfer_Refusals(t *testing.T) {
