@@ -589,7 +589,7 @@ func (m *machine) resolveRelativeAddresses(ctx context.Context) {
 		}
 		if needRerun {
 			if nativeapi.PerfMapEnabled {
-				nativeapi.PerfMap.Clear()
+				nativeapi.PerfMap.ClearFunction(fnIndex)
 			}
 		} else {
 			break
