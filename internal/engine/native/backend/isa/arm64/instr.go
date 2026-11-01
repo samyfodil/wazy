@@ -122,6 +122,7 @@ var defKinds = [numInstructionKinds]defKind{
 	cSel:                 defKindRD,
 	fpuCSel:              defKindRD,
 	movToVec:             defKindRD,
+	fpuMovFromInt:        defKindRD,
 	movFromVec:           defKindRD,
 	movFromVecSigned:     defKindRD,
 	vecDup:               defKindRD,
@@ -150,6 +151,7 @@ var defKinds = [numInstructionKinds]defKind{
 	loadConstBlockArg:    defKindRD,
 	tailCall:             defKindCall,
 	tailCallInd:          defKindCall,
+	yield:                defKindNone,
 }
 
 // Defs returns the list of regalloc.VReg that are defined by the instruction.
@@ -263,6 +265,7 @@ var useKinds = [numInstructionKinds]useKind{
 	cSel:                 useKindRNRM,
 	fpuCSel:              useKindRNRM,
 	movToVec:             useKindRN,
+	fpuMovFromInt:        useKindRN,
 	movFromVec:           useKindRN,
 	movFromVecSigned:     useKindRN,
 	vecDup:               useKindRN,
@@ -292,6 +295,7 @@ var useKinds = [numInstructionKinds]useKind{
 	dmb:                  useKindNone,
 	tailCall:             useKindCall,
 	tailCallInd:          useKindCallInd,
+	yield:                useKindRN,
 }
 
 // Uses returns the list of regalloc.VReg that are used by the instruction.
@@ -467,6 +471,8 @@ func (i *instruction) AssignUse(index int, reg regalloc.VReg) {
 			i.u1 = uint64(registerAsRegZeroCond(reg))
 		case condKindRegisterNotZero:
 			i.u1 = uint64(registerAsRegNotZeroCond(reg))
+		case condKindRegisterSignBit:
+			i.u1 = uint64(registerAsSignBitCond(reg, c.signBitSet()))
 		}
 	case useKindCall:
 		panic("BUG: call instructions shouldn't be assigned")
@@ -483,6 +489,11 @@ func (i *instruction) asCall(ref ssa.FuncRef, abi *backend.FunctionABI) {
 	if abi != nil {
 		i.u2 = abi.ABIInfoAsUint64()
 	}
+}
+
+func (i *instruction) asYield(execCtx regalloc.VReg) {
+	i.kind = yield
+	i.rn = operandNR(execCtx)
 }
 
 func (i *instruction) asCallIndirect(ptr regalloc.VReg, abi *backend.FunctionABI) {
@@ -990,6 +1001,16 @@ func (i *instruction) asMovToVec(rd regalloc.VReg, rn operand, arr vecArrangemen
 	i.u1, i.u2 = uint64(arr), uint64(index)
 }
 
+// asFpuMovFromInt moves the 32 or 64 bits of rn into the low bits of rd, zeroing the rest of rd.
+func (i *instruction) asFpuMovFromInt(rd regalloc.VReg, rn operand, _64bit bool) {
+	i.kind = fpuMovFromInt
+	i.rd = rd
+	i.rn = rn
+	if _64bit {
+		i.u1 = 1
+	}
+}
+
 func (i *instruction) asMovFromVec(rd regalloc.VReg, rn operand, arr vecArrangement, index vecIndex, signed bool) {
 	if signed {
 		i.kind = movFromVecSigned
@@ -1386,6 +1407,12 @@ func (i *instruction) String() (str string) {
 			formatVRegSized(i.rm.nr(), size),
 			condFlag(i.u1),
 		)
+	case fpuMovFromInt:
+		if i.u1 == 1 {
+			str = fmt.Sprintf("fmov %s, %s", formatVRegSized(i.rd, 64), formatVRegSized(i.rn.nr(), 64))
+		} else {
+			str = fmt.Sprintf("fmov %s, %s", formatVRegSized(i.rd, 32), formatVRegSized(i.rn.nr(), 32))
+		}
 	case movToVec:
 		var size byte
 		arr := vecArrangement(i.u1)
@@ -1582,6 +1609,16 @@ func (i *instruction) String() (str string) {
 			} else {
 				str = fmt.Sprintf("cbnz %s, %s", formatVRegSized(c.register(), size), target.String())
 			}
+		case condKindRegisterSignBit:
+			op := "tbz"
+			if c.signBitSet() {
+				op = "tbnz"
+			}
+			if offset := i.condBrOffset(); offset != 0 {
+				str = fmt.Sprintf("%s %s, #63, #%#x (%s)", op, formatVRegSized(c.register(), 64), offset, target.String())
+			} else {
+				str = fmt.Sprintf("%s %s, #63, %s", op, formatVRegSized(c.register(), 64), target.String())
+			}
 		case condKindCondFlagSet:
 			if offset := i.condBrOffset(); offset != 0 {
 				if target == labelInvalid {
@@ -1654,6 +1691,8 @@ func (i *instruction) String() (str string) {
 		str = fmt.Sprintf("b %s", ssa.FuncRef(i.u1))
 	case tailCallInd:
 		str = fmt.Sprintf("b %s", formatVRegSized(i.rn.nr(), 64))
+	case yield:
+		str = fmt.Sprintf("yield %s", formatVRegSized(i.rn.nr(), 64))
 	case udf:
 		str = "udf"
 	case emitSourceOffsetInfo:
@@ -1846,6 +1885,9 @@ const (
 	fpuCSel
 	// movToVec represents a move to a vector element from a GPR.
 	movToVec
+	// fpuMovFromInt represents FMOV (general) from a GPR to a scalar FP register. Unlike movToVec into lane
+	// 0, it writes the whole register, so it does not wait on whatever wrote the register last.
+	fpuMovFromInt
 	// movFromVec represents an unsigned move from a vector element to a GPR.
 	movFromVec
 	// movFromVecSigned represents a signed move from a vector element to a GPR.
@@ -1926,6 +1968,18 @@ const (
 	udf
 	// loadConstBlockArg represents a load of a constant block argument.
 	loadConstBlockArg
+	// yield is the slow path of a preemption check: it calls the yield trampoline,
+	// whose address the execution context in rn holds, with that context in x27 and
+	// the lr it overwrites saved in it:
+	//
+	//	mov x27, rn
+	//	str x30, [x27, #yieldSavedLR]
+	//	ldr x30, [x27, #checkModuleExitCodeTrampolineAddress]
+	//	blr x30
+	//
+	// The trampoline preserves every register, lr included, so to the allocator this
+	// is no call. See ssa.OpcodeYield.
+	yield
 
 	// emitSourceOffsetInfo is a dummy instruction to emit source offset info.
 	// The existence of this instruction does not affect the execution.
@@ -2664,6 +2718,8 @@ func (i *instruction) size() int64 {
 		return int64(i.fpuConstPoolDataWidth()) / 8 // 4, 8 or 16 bytes of raw data.
 	case brTableSequence:
 		return 4*4 + int64(i.u2)*4
+	case yield:
+		return 4 * 4
 	default:
 		return 4
 	}

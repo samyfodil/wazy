@@ -57,8 +57,6 @@ func TestSerializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0),                     // func[0] frame size.
 				[]byte{entryPreambleFormatVersion}, // entry preamble format version.
 				u32.LeBytes(0),                     // no entry preambles.
-				[]byte{gcRootsFormatVersion},       // gc roots format version.
-				u32.LeBytes(0),                     // max gc roots.
 			),
 		},
 		{
@@ -88,8 +86,6 @@ func TestSerializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0),                     // func[0] frame size.
 				[]byte{entryPreambleFormatVersion}, // entry preamble format version.
 				u32.LeBytes(0),                     // no entry preambles.
-				[]byte{gcRootsFormatVersion},       // gc roots format version.
-				u32.LeBytes(0),                     // max gc roots.
 			),
 		},
 		{
@@ -125,8 +121,6 @@ func TestSerializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0),                       // func[1] frame size.
 				[]byte{entryPreambleFormatVersion},   // entry preamble format version.
 				u32.LeBytes(0),                       // no entry preambles.
-				[]byte{gcRootsFormatVersion},         // gc roots format version.
-				u32.LeBytes(0),                       // max gc roots.
 			),
 		},
 	}
@@ -176,7 +170,7 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				[]byte(testVersion),
 				u32.LeBytes(1), // number of functions.
 			),
-			expErr: "compilationcache: invalid magic number: got NATIV2 but want abcdef",
+			expErr: "compilationcache: invalid magic number: got NATIV4 but want abcdef",
 		},
 		{
 			name: "version mismatch",
@@ -221,15 +215,12 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0),                     // func[0] frame size.
 				[]byte{entryPreambleFormatVersion}, // entry preamble format version.
 				u32.LeBytes(0),                     // no entry preambles.
-				[]byte{gcRootsFormatVersion},       // gc roots format version.
-				u32.LeBytes(3),                     // max gc roots.
 			),
 			expCompiledModule: &compiledModule{
 				executables:        &executables{executable: []byte{1, 2, 3, 4, 5}},
 				functionOffsets:    []int{0},
 				ehTables:           [][]nativeapi.EhEntry{nil},
 				functionFrameSizes: []int64{0},
-				maxGCRoots:         3,
 			},
 			expStaleCache: false,
 			expErr:        "",
@@ -262,8 +253,6 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0),                     // func[1] frame size.
 				[]byte{entryPreambleFormatVersion}, // entry preamble format version.
 				u32.LeBytes(0),                     // no entry preambles.
-				[]byte{gcRootsFormatVersion},       // gc roots format version.
-				u32.LeBytes(0),                     // max gc roots.
 			),
 			importedFunctionCount: 1,
 			expCompiledModule: &compiledModule{
@@ -274,34 +263,6 @@ func TestDeserializeCompiledModule(t *testing.T) {
 			},
 			expStaleCache: false,
 			expErr:        "",
-		},
-		{
-			// An entry written before maxGCRoots was cached: loading it would size no root-spill region for
-			// code whose safepoints spill into one, so it must be recompiled.
-			name: "old cache without gc roots (stale)",
-			in: concat(
-				magic,
-				[]byte{byte(len(testVersion))},
-				[]byte(testVersion),
-				u32.LeBytes(1), // number of functions.
-				u64.LeBytes(0), // offset.
-				// Executable.
-				u64.LeBytes(5),                     // size.
-				codePadding(1),                     // aligns the code.
-				[]byte{1, 2, 3, 4, 5},              // machine code.
-				crcf([]byte{1, 2, 3, 4, 5}),        // machine code.
-				[]byte{0},                          // no source map.
-				[]byte{tryTableInfoFormatVersion},  // try-table info format version.
-				u32.LeBytes(0),                     // empty catch clause table.
-				[]byte{ehTableFormatVersion},       // eh table format version.
-				u32.LeBytes(1),                     // number of functions (eh tables).
-				u32.LeBytes(0),                     // func[0]: 0 eh entries.
-				u32.LeBytes(1),                     // number of function frame sizes.
-				u64.LeBytes(0),                     // func[0] frame size.
-				[]byte{entryPreambleFormatVersion}, // entry preamble format version.
-				u32.LeBytes(0),                     // no entry preambles.
-			),
-			expStaleCache: true,
 		},
 		{
 			name: "old cache without catch clause table (stale)",

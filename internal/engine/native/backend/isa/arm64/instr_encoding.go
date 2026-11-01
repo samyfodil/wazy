@@ -67,6 +67,9 @@ func (i *instruction) encode(m *machine) {
 		case condKindRegisterNotZero:
 			rt := regNumberInEncoding[brCond.register().RealReg()]
 			c.Emit4Bytes(encodeCBZCBNZ(rt, true, imm19U32, i.condBr64bit()))
+		case condKindRegisterSignBit:
+			rt := regNumberInEncoding[brCond.register().RealReg()]
+			c.Emit4Bytes(encodeTBZTBNZSignBit(rt, brCond.signBitSet(), imm19/4))
 		case condKindCondFlagSet:
 			// https://developer.arm.com/documentation/ddi0596/2021-12/Base-Instructions/B-cond--Branch-conditionally-
 			fl := brCond.flag()
@@ -283,6 +286,12 @@ func (i *instruction) encode(m *machine) {
 			condFlag(i.u1),
 			i.u2 == 1,
 		))
+	case fpuMovFromInt:
+		c.Emit4Bytes(encodeFpuMovFromInt(
+			regNumberInEncoding[i.rd.RealReg()],
+			regNumberInEncoding[i.rn.realReg()],
+			i.u1 == 1,
+		))
 	case movToVec:
 		c.Emit4Bytes(encodeMoveToVec(
 			regNumberInEncoding[i.rd.RealReg()],
@@ -446,6 +455,17 @@ func (i *instruction) encode(m *machine) {
 		c.Emit4Bytes(encodeUnconditionalBranch(false, 0)) // 0 = placeholder
 	case tailCallInd:
 		c.Emit4Bytes(encodeUnconditionalBranchReg(regNumberInEncoding[i.rn.realReg()], false))
+	case yield:
+		const t, lr = 27, 30 // tmp and lr; see tmp
+		c.Emit4Bytes(encodeMov64(t, regNumberInEncoding[i.rn.realReg()], false, false))
+		c.Emit4Bytes(encodeLoadOrStore(store64, lr, addressMode{
+			kind: addressModeKindRegUnsignedImm12, rn: tmpRegVReg, imm: nativeapi.ExecutionContextOffsetYieldSavedLR.I64(),
+		}))
+		c.Emit4Bytes(encodeLoadOrStore(uLoad64, lr, addressMode{
+			kind: addressModeKindRegUnsignedImm12, rn: tmpRegVReg,
+			imm: nativeapi.ExecutionContextOffsetCheckModuleExitCodeTrampolineAddress.I64(),
+		}))
+		c.Emit4Bytes(encodeUnconditionalBranchReg(lr, true))
 	default:
 		panic(i.String())
 	}
@@ -918,6 +938,15 @@ func encodeFpuCSel(rd, rn, rm uint32, c condFlag, _64bit bool) uint32 {
 }
 
 // encodeMoveToVec encodes as "Move general-purpose register to a vector element" (represented as `ins`) in
+// encodeFpuMovFromInt encodes FMOV (general) from Wn to Sd, or from Xn to Dd.
+// https://developer.arm.com/documentation/ddi0602/2024-12/SIMD-FP-Instructions/FMOV--general---Floating-point-move-to-or-from-general-purpose-register-without-conversion-
+func encodeFpuMovFromInt(rd, rn uint32, _64bit bool) uint32 {
+	if _64bit {
+		return 0x9e670000 | rn<<5 | rd
+	}
+	return 0x1e270000 | rn<<5 | rd
+}
+
 // https://developer.arm.com/documentation/dui0801/g/A64-SIMD-Vector-Instructions/MOV--vector--from-general-
 // https://developer.arm.com/documentation/ddi0596/2020-12/SIMD-FP-Instructions/MOV--from-general---Move-general-purpose-register-to-a-vector-element--an-alias-of-INS--general--?lang=en
 func encodeMoveToVec(rd, rn uint32, arr vecArrangement, index vecIndex) uint32 {
@@ -1945,6 +1974,17 @@ func encodeUnconditionalBranch(link bool, imm26 int64) (ret uint32) {
 // encodeCBZCBNZ encodes as either CBZ or CBNZ:
 // https://developer.arm.com/documentation/ddi0596/2021-12/Base-Instructions/CBZ--Compare-and-Branch-on-Zero-
 // https://developer.arm.com/documentation/ddi0596/2021-12/Base-Instructions/CBNZ--Compare-and-Branch-on-Nonzero-
+// encodeTBZTBNZSignBit encodes TBNZ, or with nz false TBZ, of bit 63 of rt, to imm14
+// instructions away.
+// https://developer.arm.com/documentation/ddi0596/2020-12/Base-Instructions/TBNZ--Test-bit-and-Branch-if-Nonzero-
+func encodeTBZTBNZSignBit(rt uint32, nz bool, imm14 int64) (ret uint32) {
+	ret = 1<<31 | 0b011011<<25 | 0b11111<<19 | (uint32(imm14)&0x3fff)<<5 | rt
+	if nz {
+		ret |= 1 << 24
+	}
+	return
+}
+
 func encodeCBZCBNZ(rt uint32, nz bool, imm19 uint32, _64bit bool) (ret uint32) {
 	ret = rt
 	ret |= imm19 << 5

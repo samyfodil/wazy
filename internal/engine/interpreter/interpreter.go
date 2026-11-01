@@ -180,6 +180,9 @@ type callEngine struct {
 	// the module's memories in newCallEngine; see wasm.CallSlot.
 	slot wasm.CallSlot
 
+	// checks counts the loop and entry checks this engine ran. See check.
+	checks uint32
+
 	// stack contains the operands.
 	// Note that all the values are represented as uint64.
 	stack []uint64
@@ -199,7 +202,7 @@ type callEngine struct {
 	// stackiterator for Listeners to walk frames and stack.
 	stackIterator stackIterator
 
-	// gcPause is what a loop header polls: non-zero means a collection is waiting for this call to park.
+	// gcPause is what a parking point polls: non-zero means a collection is waiting for this call to park.
 	// gcExec is this call's registration with the store, and is nil unless the GC proposal is enabled.
 	gcPause uint32
 	gcExec  *wasm.GCExecution
@@ -208,13 +211,18 @@ type callEngine struct {
 }
 
 // ScanGCRoots implements wasm.GCRoots. Every operand and local this call holds lives in one flat []uint64, so
-// the whole of it is offered to the collector, which decides what looks like a reference.
+// the whole of it is offered to the collector, which decides what looks like a reference. That is all of it up to
+// its capacity: the results a finished call has popped into its caller's slice are still there while it waits
+// out a collection to unregister.
 func (ce *callEngine) ScanGCRoots(visit func(uint64)) bool {
-	for _, v := range ce.stack {
+	for _, v := range ce.stack[:cap(ce.stack)] {
 		visit(v)
 	}
 	return true
 }
+
+// RequestPark implements wasm.GCRoots. The interpreter reads its pause flag at every parking point.
+func (*callEngine) RequestPark() {}
 
 // matchCatchClause checks whether a single catch clause matches the given exception.
 // Returns whether it matched and the values to push onto the stack. The caller
@@ -441,9 +449,8 @@ type compiledFunction struct {
 	// goModuleFn and goFn are hostFn settled into its one concrete shape at instantiation (H8),
 	// so a host call dispatches on a nil check instead of a runtime.interfaceSwitch. Exactly one
 	// is ever non-nil, and only for a host function.
-	goModuleFn        api.GoModuleFunction
-	goFn              api.GoFunction
-	ensureTermination bool
+	goModuleFn api.GoModuleFunction
+	goFn       api.GoFunction
 	// gcEnabled mirrors the engine's feature set, so a call knows whether to register itself with the
 	// store's collector without reaching back through the module.
 	gcEnabled bool
@@ -606,13 +613,13 @@ const callFrameStackSize = 0
 // CompileModule itself does on a cache hit, exposed so callers can make that
 // check before CompileModule (see wasm.Engine.HasCompiledModule's docs on the
 // reference-acquisition contract this establishes).
-func (e *engine) HasCompiledModule(module *wasm.Module, _ []api.FunctionListener, _ bool) (bool, error) {
+func (e *engine) HasCompiledModule(module *wasm.Module, _ []api.FunctionListener) (bool, error) {
 	_, ok := e.getCompiledFunctions(module, true)
 	return ok, nil
 }
 
 // CompileModule implements the same method as documented on wasm.Engine.
-func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listeners []api.FunctionListener, ensureTermination bool) error {
+func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listeners []api.FunctionListener) error {
 	// The interpreter has no persistent form to load, so a cache that only
 	// serves hits can't serve one.
 	if e.requireCacheHit && !module.IsHostModule {
@@ -623,7 +630,7 @@ func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listene
 	}
 
 	funcs := make([]compiledFunction, len(module.FunctionSection))
-	irCompiler, err := newCompiler(e.enabledFeatures, callFrameStackSize, module, ensureTermination)
+	irCompiler, err := newCompiler(e.enabledFeatures, callFrameStackSize, module)
 	if err != nil {
 		return err
 	}
@@ -667,7 +674,6 @@ func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listene
 			}
 		}
 		compiled.source = module
-		compiled.ensureTermination = ensureTermination
 		compiled.gcEnabled = wasm.CollectorEnabled(e.enabledFeatures)
 		compiled.listener = lsn
 		compiled.index = imported + uint32(i)
@@ -1050,8 +1056,30 @@ func (e *engine) lowerIR(ir *compilationResult, ret *compiledFunction) error {
 	}
 
 	compactBody(ret)
+	fuseChecks(ret)
 
 	return nil
+}
+
+// fuseChecks turns a br or br_if into a loop into one that runs the loop's
+// check itself and lands past it, which spares each iteration a dispatch. The
+// check stays at the header for the way into the loop, and for the branches
+// left alone. It runs after compactBody, which leaves a branch to a loop
+// pointing at the check rather than at the label before it.
+func fuseChecks(ret *compiledFunction) {
+	body := ret.body
+	toCheck := func(target uint64) bool {
+		return target < uint64(len(body)) && body[target].Kind == operationKindBuiltinFunctionCheckExitCode
+	}
+	for i := range body {
+		op := &body[i]
+		switch {
+		case op.Kind == operationKindBr && toCheck(op.U1):
+			op.Kind, op.U1 = operationKindBrCheck, op.U1+1
+		case op.Kind == operationKindBrIf && toCheck(op.U1):
+			op.Kind, op.U1 = operationKindBrIfCheck, op.U1+1
+		}
+	}
 }
 
 // compactBody deletes the operations that dispatch to nothing and rewrites every
@@ -1238,25 +1266,48 @@ func (ce *callEngine) CallWithStack(ctx context.Context, stack []uint64) error {
 	return err
 }
 
-func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []uint64, err error) {
-	m := ce.f.moduleInstance
-	if ce.f.parent.ensureTermination {
+// check is what every 1024th loop or entry check does: end the call if the
+// module closed or the call's context is done. The interpreter is Go code, so
+// the scheduler preempts it without help, and nothing between the checks
+// needs to look at the context; see wasm.FailCanceled for how it ends the call.
+func (ce *callEngine) check(ctx context.Context, m *wasm.ModuleInstance) {
+	if err := m.FailIfClosed(); err != nil {
+		panic(err)
+	}
+	if done := ctx.Done(); done != nil {
 		select {
-		case <-ctx.Done():
-			// If the provided context is already done, close the call context
-			// and return the error.
-			m.CloseWithCtxErr(ctx)
-			return nil, m.FailIfClosed()
+		case <-done:
+			wasm.FailCanceled(ctx)
 		default:
 		}
 	}
+}
+
+// bulkCheckMin is the size, in bytes or table entries, from which a bulk
+// operation checks every time rather than every 1024th, as a back edge does: one
+// that large can take as long as the iterations between two of a loop's checks,
+// and a loop around it, which counts it as one, would otherwise run that much
+// longer before it stopped. A smaller one still counts toward the next check, since
+// validation counts it as a few bytes of code and a call tree could make many.
+const bulkCheckMin = 1 << 16
+
+func (ce *callEngine) checkBulk(ctx context.Context, m *wasm.ModuleInstance, size uint64) {
+	if ce.checks++; size >= bulkCheckMin || ce.checks&1023 == 0 {
+		ce.check(ctx, m)
+	}
+}
+
+func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []uint64, err error) {
+	m := ce.f.moduleInstance
 
 	if expctxkeys.SnapshotterEnabled.Load() && ctx.Value(expctxkeys.EnableSnapshotterKey{}) != nil {
 		ctx = context.WithValue(ctx, expctxkeys.SnapshotterKey{}, ce)
 	}
 
+	// Before registering, so a collection under way when this call joins sees the parameters.
+	ce.pushValues(params)
 	if ce.f.parent.gcEnabled {
-		ce.gcExec = m.RegisterGCExecutionInto(&ce.gcExecSlot, ce, &ce.gcPause)
+		ce.gcExec = m.RegisterGCExecutionInto(&ce.gcExecSlot, ce, &ce.gcPause, nil)
 		defer func() {
 			ce.gcExec.Unregister()
 			ce.gcExec = nil
@@ -1274,13 +1325,6 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 			err = ce.recoverOnCall(ctx, m, v)
 		}
 	}()
-
-	ce.pushValues(params)
-
-	if ce.f.parent.ensureTermination {
-		done := m.CloseModuleOnCanceledOrTimeout(ctx)
-		defer done()
-	}
 
 	// This loop indexes mem.Buffer directly and never checks whether the
 	// module was closed, so a concurrent close must not recycle the buffer
@@ -1469,6 +1513,14 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 	// common ALU / comparison / const / local / global-get / branch path never
 	// touches frame.pc.
 	pc := frame.pc
+	// A function's entry check is its first operation. Running it here spares
+	// each call a dispatch; a tail call back to the start still dispatches it.
+	if len(body) != 0 && body[0].Kind == operationKindBuiltinFunctionCheckExitCode {
+		if ce.checks++; ce.checks&1023 == 0 {
+			ce.check(ctx, m) // frame.pc is already 0
+		}
+		pc = 1
+	}
 	// I9: whether an unwind can land in this frame is a property of the function the frame is
 	// running, so it is computed here instead of on every call. snapshotEnabled cannot go from
 	// false to true while this frame runs: a ctx already carrying EnableSnapshotterKey means the
@@ -1502,9 +1554,9 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			// call that then matches no case and returns (I5).
 			pc++
 		case operationKindBuiltinFunctionCheckExitCode:
-			frame.pc = pc // sync: FailIfClosed may panic
-			if err := m.FailIfClosed(); err != nil {
-				panic(err)
+			if ce.checks++; ce.checks&1023 == 0 {
+				frame.pc = pc // sync: check may panic
+				ce.check(ctx, m)
 			}
 			pc++
 		case operationKindUnreachable:
@@ -1520,6 +1572,25 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 				// here is what keeps that case from paying for a CALL. Same below.
 				if op.U3 != 0 {
 					ce.drop(op.U3)
+				}
+				pc = op.U1
+			} else {
+				pc = op.U2
+			}
+		case operationKindBrCheck:
+			if ce.checks++; ce.checks&1023 == 0 {
+				frame.pc = op.U1 - 1 // sync: check may panic, as the loop's own would
+				ce.check(ctx, m)
+			}
+			pc = op.U1
+		case operationKindBrIfCheck:
+			if popValue() > 0 {
+				if op.U3 != 0 {
+					ce.drop(op.U3)
+				}
+				if ce.checks++; ce.checks&1023 == 0 {
+					frame.pc = op.U1 - 1 // sync: check may panic, as the loop's own would
+					ce.check(ctx, m)
 				}
 				pc = op.U1
 			} else {
@@ -2620,7 +2691,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 		default:
 			// SIMD/v128, atomics, and bulk memory/table ops: see callNativeFuncRare.
 			frame.pc = pc // sync: rare ops can trap (OOB mem/table, atomics); cold path
-			ce.callNativeFuncRare(op, frame, moduleInst, me)
+			ce.callNativeFuncRare(ctx, m, op, frame, moduleInst, me)
 			pc++
 		}
 	}
@@ -2635,7 +2706,7 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 // practice, so moving them here keeps callNativeFunc small enough for the
 // compiler to inline its hot-path helpers (popValue, pushValue, drop, etc.)
 // into the dispatch loop. pc++ for these ops is done once by the caller.
-func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, moduleInst *wasm.ModuleInstance, me *moduleEngine) {
+func (ce *callEngine) callNativeFuncRare(ctx context.Context, m *wasm.ModuleInstance, op *unionOperation, frame *callFrame, moduleInst *wasm.ModuleInstance, me *moduleEngine) {
 	functions := me.functions
 	// popValue: a func literal for the same reason as in callNativeFunc (I12) -- this function is
 	// "big" too, and the ~240 pops below were all real CALLs.
@@ -2956,6 +3027,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, m
 		dataInstance := dataInstances[op.U1]
 		mem := memories[op.U2]
 		copySize := popValue()
+		ce.checkBulk(ctx, m, copySize)
 		inDataOffset := popValue()
 		inMemoryOffset := popValue()
 		// rangeOutOfBounds rather than a plain addition: a 64-bit memory's
@@ -2973,6 +3045,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, m
 		dstMem, srcMem := memories[op.U1], memories[op.U2]
 		dstLen, srcLen := uint64(len(dstMem.Buffer)), uint64(len(srcMem.Buffer))
 		copySize := popValue()
+		ce.checkBulk(ctx, m, copySize)
 		sourceOffset := popValue()
 		destinationOffset := popValue()
 		if rangeOutOfBounds(sourceOffset, copySize, srcLen) ||
@@ -2985,6 +3058,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, m
 	case operationKindMemoryFill:
 		mem := memories[op.U1]
 		fillSize := popValue()
+		ce.checkBulk(ctx, m, fillSize)
 		value := byte(popValue())
 		offset := popValue()
 		if rangeOutOfBounds(offset, fillSize, uint64(len(mem.Buffer))) {
@@ -3006,6 +3080,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, m
 	case operationKindTableInit:
 		elementInstance := elementInstances[op.U1]
 		copySize := popValue()
+		ce.checkBulk(ctx, m, copySize)
 		inElementOffset := popValue()
 		inTableOffset := popValue()
 		table := tables[op.U2]
@@ -3023,6 +3098,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, m
 	case operationKindTableCopy:
 		srcTable, dstTable := tables[op.U1].References, tables[op.U2].References
 		copySize := popValue()
+		ce.checkBulk(ctx, m, copySize)
 		sourceOffset := popValue()
 		destinationOffset := popValue()
 		if rangeOutOfBounds(sourceOffset, copySize, uint64(len(srcTable))) ||
@@ -3044,7 +3120,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, m
 			ce.gcExec.Safepoint()
 		}
 	case operationKindGC:
-		ce.execGC(op)
+		ce.execGC(ctx, m, op)
 	case operationKindRefCast:
 		// The value stays on the stack: a successful cast only narrows its static type, and a failed one
 		// traps inside RunGCCheck.
@@ -3082,6 +3158,7 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, m
 	case operationKindTableFill:
 		table := tables[op.U1]
 		num := popValue()
+		ce.checkBulk(ctx, m, num)
 		ref := uintptr(popValue())
 		offset := popValue()
 		if rangeOutOfBounds(offset, num, uint64(len(table.References))) {
@@ -5267,12 +5344,17 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, m
 			if memoryOutOfBounds(mem, offset, 4) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
-			ce.pushValue(mem.Wait32(offset, uint32(exp), timeout, func(mem *wasm.MemoryInstance, offset uint64) uint32 {
+			// A wait can block for as long as a host call, so it is a parking point like one: otherwise a
+			// collection would wait for this call while the call that is to wake it waits for the collection.
+			ce.gcExec.EnterGo()
+			res := mem.Wait32(offset, uint32(exp), timeout, func(mem *wasm.MemoryInstance, offset uint64) uint32 {
 				mem.Mux.Lock()
 				defer mem.Mux.Unlock()
 				value, _ := mem.ReadUint32LeAt(offset)
 				return value
-			}))
+			})
+			ce.gcExec.LeaveGo()
+			ce.pushValue(res)
 		case unsignedTypeI64:
 			if offset%8 != 0 {
 				panic(wasmruntime.ErrRuntimeUnalignedAtomic)
@@ -5280,12 +5362,15 @@ func (ce *callEngine) callNativeFuncRare(op *unionOperation, frame *callFrame, m
 			if memoryOutOfBounds(mem, offset, 8) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
-			ce.pushValue(mem.Wait64(offset, exp, timeout, func(mem *wasm.MemoryInstance, offset uint64) uint64 {
+			ce.gcExec.EnterGo()
+			res := mem.Wait64(offset, exp, timeout, func(mem *wasm.MemoryInstance, offset uint64) uint64 {
 				mem.Mux.Lock()
 				defer mem.Mux.Unlock()
 				value, _ := mem.ReadUint64LeAt(offset)
 				return value
-			}))
+			})
+			ce.gcExec.LeaveGo()
+			ce.pushValue(res)
 		}
 	case operationKindAtomicMemoryNotify:
 		mem := memories[op.U3]
@@ -6000,8 +6085,10 @@ func v128Dot(x1Hi, x1Lo, x2Hi, x2Lo uint64) (uint64, uint64) {
 //
 // The operand order below is the order the instruction pushes them, so the pops read bottom-up. op.B1 is how
 // many words the moved value takes: two for a vector field or element, which becomes two calls into RunGC
-// because a reference-sized result cannot carry one.
-func (ce *callEngine) execGC(op *unionOperation) {
+// because a reference-sized result cannot carry one. The array operations that
+// take a length count toward the next check as bulk memory operations do (see
+// bulkCheckMin); caller is the module the check reads.
+func (ce *callEngine) execGC(ctx context.Context, caller *wasm.ModuleInstance, op *unionOperation) {
 	m := ce.f.moduleInstance
 	mode, imm1, imm2 := op.U1, op.U2, op.U3
 	wide := op.B1 == 2
@@ -6042,19 +6129,24 @@ func (ce *callEngine) execGC(op *unionOperation) {
 
 	case wasm.GCArrayNew:
 		length := ce.popValue()
+		ce.checkBulk(ctx, caller, length)
 		lo, hi := popWide()
 		ce.pushValue(wasm.RunGC(m, mode, imm1, length, lo, hi, 0, nil))
 
 	case wasm.GCArrayNewDefault:
-		ce.pushValue(wasm.RunGC(m, mode, imm1, ce.popValue(), 0, 0, 0, nil))
+		length := ce.popValue()
+		ce.checkBulk(ctx, caller, length)
+		ce.pushValue(wasm.RunGC(m, mode, imm1, length, 0, 0, 0, nil))
 
 	case wasm.GCArrayNewData, wasm.GCArrayNewElem:
 		length := ce.popValue()
+		ce.checkBulk(ctx, caller, length)
 		offset := ce.popValue()
 		ce.pushValue(wasm.RunGC(m, mode, imm1, imm2, offset, length, 0, nil))
 
 	case wasm.GCArrayInitData, wasm.GCArrayInitElem:
 		length := ce.popValue()
+		ce.checkBulk(ctx, caller, length)
 		offset := ce.popValue()
 		index := ce.popValue()
 		ref := ce.popValue()
@@ -6079,6 +6171,7 @@ func (ce *callEngine) execGC(op *unionOperation) {
 
 	case wasm.GCArrayFill:
 		length := ce.popValue()
+		ce.checkBulk(ctx, caller, length)
 		lo, hi := popWide()
 		index := ce.popValue()
 		ref := ce.popValue()
@@ -6086,6 +6179,7 @@ func (ce *callEngine) execGC(op *unionOperation) {
 
 	case wasm.GCArrayCopy:
 		length := ce.popValue()
+		ce.checkBulk(ctx, caller, length)
 		srcIndex := ce.popValue()
 		src := ce.popValue()
 		dstIndex := ce.popValue()

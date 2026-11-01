@@ -80,11 +80,11 @@ func TestEngineCompiler(t *testing.T) {
 	if !platform.CompilerSupported() {
 		t.Skip()
 	}
-	runAllTests(t, tests, wazy.NewRuntimeConfigCompiler().WithCloseOnContextDone(true), false)
+	runAllTests(t, tests, wazy.NewRuntimeConfigCompiler(), false)
 }
 
 func TestEngineInterpreter(t *testing.T) {
-	runAllTests(t, tests, wazy.NewRuntimeConfigInterpreter().WithCloseOnContextDone(true), false)
+	runAllTests(t, tests, wazy.NewRuntimeConfigInterpreter(), false)
 }
 
 // TestNativeDeepRecursionWithHostCalls runs testDeepRecursionWithHostCalls
@@ -97,7 +97,7 @@ func TestNativeDeepRecursionWithHostCalls(t *testing.T) {
 	if !platform.CompilerSupported() {
 		t.Skip()
 	}
-	testDeepRecursionWithHostCalls(t, wazy.NewRuntimeWithConfig(testCtx, wazy.NewRuntimeConfigCompiler().WithCloseOnContextDone(true)))
+	testDeepRecursionWithHostCalls(t, wazy.NewRuntimeWithConfig(testCtx, wazy.NewRuntimeConfigCompiler()))
 }
 
 type arbitrary struct{}
@@ -164,8 +164,7 @@ func testEnsureTerminationOnClose(t *testing.T, r wazy.Runtime) {
 			cancel()
 		}()
 		_, err = infinite.Call(ctx)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "module closed with context canceled")
+		require.True(t, errors.Is(err, context.Canceled), "got %v", err)
 	})
 
 	t.Run("context cancel in advance", func(t *testing.T) {
@@ -173,8 +172,7 @@ func testEnsureTerminationOnClose(t *testing.T, r wazy.Runtime) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		_, err = infinite.Call(ctx)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "module closed with context canceled")
+		require.True(t, errors.Is(err, context.Canceled), "got %v", err)
 	})
 
 	t.Run("context timeout", func(t *testing.T) {
@@ -182,8 +180,7 @@ func testEnsureTerminationOnClose(t *testing.T, r wazy.Runtime) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		_, err = infinite.Call(ctx)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "module closed with context deadline exceeded")
+		require.True(t, errors.Is(err, context.DeadlineExceeded), "got %v", err)
 	})
 
 	t.Run("explicit close of module", func(t *testing.T) {

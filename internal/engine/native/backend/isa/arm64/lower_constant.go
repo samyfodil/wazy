@@ -158,7 +158,7 @@ func (m *machine) lowerFpuConst32(rd regalloc.VReg, v uint64) {
 	tmp := m.compiler.AllocateVReg(ssa.TypeI32)
 	m.lowerConstantI32(tmp, int32(uint32(v)))
 	mov := m.allocateInstr()
-	mov.asMovToVec(rd, operandNR(tmp), vecArrangementS, vecIndex(0))
+	mov.asFpuMovFromInt(rd, operandNR(tmp), false)
 	m.insert(mov)
 }
 
@@ -171,7 +171,7 @@ func (m *machine) lowerFpuConst64(rd regalloc.VReg, v uint64) {
 		tmp := m.compiler.AllocateVReg(ssa.TypeI64)
 		m.lowerConstantI64(tmp, int64(v))
 		mov := m.allocateInstr()
-		mov.asMovToVec(rd, operandNR(tmp), vecArrangementD, vecIndex(0))
+		mov.asFpuMovFromInt(rd, operandNR(tmp), true)
 		m.insert(mov)
 		return
 	}
@@ -200,7 +200,8 @@ func (m *machine) lowerFpuConst128(rd regalloc.VReg, lo, hi uint64) {
 }
 
 // insVecLaneConst materializes laneVal in a GPR (xzr when zero) and moves it into rd's 64-bit lane
-// via `ins Vd.D[index], Xn`.
+// via `ins Vd.D[index], Xn`, or for lane 0 via `fmov Dd, Xn`, which zeroes lane 1 rather than wait on
+// whatever wrote rd last: lane 1 is inserted after it.
 func (m *machine) insVecLaneConst(rd regalloc.VReg, laneVal uint64, index vecIndex) {
 	gp := xzrVReg
 	if laneVal != 0 {
@@ -208,7 +209,11 @@ func (m *machine) insVecLaneConst(rd regalloc.VReg, laneVal uint64, index vecInd
 		m.lowerConstantI64(gp, int64(laneVal))
 	}
 	mov := m.allocateInstr()
-	mov.asMovToVec(rd, operandNR(gp), vecArrangementD, index)
+	if index == 0 {
+		mov.asFpuMovFromInt(rd, operandNR(gp), true)
+	} else {
+		mov.asMovToVec(rd, operandNR(gp), vecArrangementD, index)
+	}
 	m.insert(mov)
 }
 

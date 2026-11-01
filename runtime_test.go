@@ -213,12 +213,10 @@ func TestRuntime_CompileModule_CacheHitSkipsFunctionBodyValidation(t *testing.T)
 
 	// Compute the module ID exactly as runtime.CompileModule will for this
 	// call (testCtx carries no experimentalapi.FunctionListenerFactory, so
-	// listeners is nil; engineLessConfig-derived configs default
-	// ensureTermination to false; and no wazy.WithInterruptCheckInterval
-	// override, so the interval is wasm.DefaultInterruptCheckInterval), so the
-	// mock engine can be pre-seeded as already holding a compiled artifact.
+	// listeners is nil), so the mock engine can be pre-seeded as already
+	// holding a compiled artifact.
 	var idOnly wasm.Module
-	idOnly.AssignModuleID(bin, nil, false)
+	idOnly.AssignModuleID(bin, nil)
 
 	t.Run("cold: full validation runs and rejects the bad function body", func(t *testing.T) {
 		engine := &mockEngine{name: "mock", cachedModules: map[*wasm.Module]struct{}{}}
@@ -456,7 +454,7 @@ func TestModule_Global(t *testing.T) {
 
 			code := &compiledModule{module: tc.module}
 
-			err := r.store.Engine.CompileModule(testCtx, code.module, nil, false)
+			err := r.store.Engine.CompileModule(testCtx, code.module, nil)
 			require.NoError(t, err)
 
 			// Instantiate the module and get the export of the above global
@@ -956,13 +954,13 @@ type mockEngine struct {
 }
 
 // HasCompiledModule implements the same method as documented on wasm.Engine.
-func (e *mockEngine) HasCompiledModule(module *wasm.Module, _ []api.FunctionListener, _ bool) (bool, error) {
+func (e *mockEngine) HasCompiledModule(module *wasm.Module, _ []api.FunctionListener) (bool, error) {
 	e.hasCompiledModuleCalls++
 	return e.precompiledIDs[module.ID], nil
 }
 
 // CompileModule implements the same method as documented on wasm.Engine.
-func (e *mockEngine) CompileModule(_ context.Context, module *wasm.Module, _ []api.FunctionListener, _ bool) error {
+func (e *mockEngine) CompileModule(_ context.Context, module *wasm.Module, _ []api.FunctionListener) error {
 	e.compileModuleCalls++
 	e.cachedModules[module] = struct{}{}
 	return nil

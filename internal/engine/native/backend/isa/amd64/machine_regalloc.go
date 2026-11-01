@@ -15,18 +15,19 @@ type regAllocFn struct {
 
 // PostOrderBlockIteratorBegin implements regalloc.Function.
 func (f *regAllocFn) PostOrderBlockIteratorBegin() *labelPosition {
-	f.blockIter = len(f.m.orderedSSABlockLabelPos) - 1
-	return f.PostOrderBlockIteratorNext()
+	return f.labelOf(f.ssaB.BlockIteratorPostOrderBegin())
 }
 
 // PostOrderBlockIteratorNext implements regalloc.Function.
 func (f *regAllocFn) PostOrderBlockIteratorNext() *labelPosition {
-	if f.blockIter < 0 {
+	return f.labelOf(f.ssaB.BlockIteratorPostOrderNext())
+}
+
+func (f *regAllocFn) labelOf(blk ssa.BasicBlock) *labelPosition {
+	if blk == nil {
 		return nil
 	}
-	b := f.m.orderedSSABlockLabelPos[f.blockIter]
-	f.blockIter--
-	return b
+	return f.m.getOrAllocateSSABlockLabelPosition(blk)
 }
 
 // ReversePostOrderBlockIteratorBegin implements regalloc.Function.

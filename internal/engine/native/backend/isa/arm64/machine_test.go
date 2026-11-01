@@ -123,6 +123,17 @@ func TestMachine_getVRegSpillSlotOffsetFromSP(t *testing.T) {
 	require.Equal(t, int64(48), m.spillSlotSize)
 }
 
+func Test_condBrReaches(t *testing.T) {
+	cbz, tbnz := registerAsRegZeroCond(x1VReg), registerAsSignBitCond(x1VReg, true)
+	require.True(t, condBrReaches(cbz, 1<<20-4))
+	require.False(t, condBrReaches(cbz, 1<<20))
+	require.True(t, condBrReaches(cbz, -1<<20))
+	require.True(t, condBrReaches(tbnz, 1<<15-4))
+	require.False(t, condBrReaches(tbnz, 1<<15))
+	require.True(t, condBrReaches(tbnz, -1<<15))
+	require.False(t, condBrReaches(tbnz, -1<<15-4))
+}
+
 func TestMachine_insertConditionalJumpTrampoline(t *testing.T) {
 	for _, tc := range []struct {
 		name                string
@@ -163,6 +174,25 @@ L200:
 			expAfter: `
 L100:
 	cbnz w1, L10000000
+	b L12345
+L10000000:
+L200:
+	exit_sequence x0
+`,
+		},
+		{
+			name:  "tbnz, block end",
+			cond:  registerAsSignBitCond(x1VReg, true),
+			atEnd: true,
+			expBefore: `
+L100:
+	tbnz x1, #63, L12345
+L200:
+	exit_sequence x0
+`,
+			expAfter: `
+L100:
+	tbz x1, #63, L10000000
 	b L12345
 L10000000:
 L200:

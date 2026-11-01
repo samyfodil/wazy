@@ -47,9 +47,9 @@ var blockThenStoreModule = []byte{
 // resumes and writes into it. This checks the survivors' memory directly
 // rather than relying on the race detector to catch the overlap.
 //
-// Deliberately WITHOUT WithCloseOnContextDone: nothing then interrupts the
-// blocked call, so it is certain to still be running at the close -- the state
-// go-pdfium reached with a guest stuck in pdfium's own loop.
+// The call's context is never done, so nothing interrupts the blocked call and
+// it is certain to still be running at the close -- the state go-pdfium reached
+// with a guest stuck in pdfium's own loop.
 func TestClosedModuleBufferIsNotReusedWhileCallRuns(t *testing.T) {
 	for _, tc := range []struct {
 		name string

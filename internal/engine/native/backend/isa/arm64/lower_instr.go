@@ -83,24 +83,62 @@ func (m *machine) LowerConditionalBranch(b *ssa.Instruction) {
 	cvalDef := m.compiler.ValueDefinition(cval)
 
 	switch {
-	case m.compiler.MatchInstr(cvalDef, ssa.OpcodeFuelDec):
-		// 		subs fuel, fuel, #1
-		// 		b.le <slow>              ;; or b.gt, for a Brz
+	case m.compiler.MatchInstr(cvalDef, ssa.OpcodePreemptRequested):
+		// 		ldr tmp, [preempt]
+		// 		tbnz tmp, #63, <slow>    ;; or tbz, for a Brz
 		//
-		// SUBS already sets the flags the branch needs, so the decrement and the
-		// test are the same instruction: the whole termination check is these two.
-		// Signed LE rather than EQ so that a counter driven below zero -- which a
-		// re-entry restoring an already-exhausted value can do -- keeps taking the
-		// slow path instead of wrapping around for another 2^64 ticks.
-		subs := m.allocateInstr()
-		subs.asALU(aluOpSubS, fuelVReg, operandNR(fuelVReg), operandImm12(1, 0), true)
-		m.insert(subs)
-		cc := le
-		if b.Opcode() == ssa.OpcodeBrz {
-			cc = gt
+		// or, masked,
+		// 		tst counter, #mask
+		// 		b.eq <island>            ;; see emitPreemptIslands
+		// 	back:
+		//
+		// The preempt register holds the address of g.stackguard0 (see
+		// ssa.OpcodePreemptRequested). A stack bound is a user address, with the
+		// top bit clear, and every value the runtime stores there instead --
+		// StackPreempt, and the stackFork and poison values a check might also
+		// see -- has it set: one that is not a preemption request makes the code
+		// yield for nothing, which is harmless. A masked check reads the word only
+		// when the counter's masked bits are zero, and an elided one not at all.
+		counter, mask, elided := cvalDef.Instr.PreemptCheckData()
+		brz := b.Opcode() == ssa.OpcodeBrz
+		if elided {
+			if brz {
+				br := m.allocateInstr()
+				br.asBr(target)
+				m.insert(br)
+			}
+			cvalDef.Instr.MarkLowered()
+			break
 		}
+		if counter.Valid() {
+			if brz {
+				panic("BUG: a masked preemption check is only ever consumed by Brnz")
+			}
+			// The full check is out of line, so the loop falls through a branch
+			// that is almost never taken: a taken jump around an inline check would
+			// cost every iteration more than the check itself.
+			tst := m.allocateInstr()
+			tst.asALUBitmaskImm(aluOpAnds, xzrVReg, m.compiler.VRegOf(counter), mask, counter.Type().Bits() == 64)
+			m.insert(tst)
+			island := m.nextLabel
+			m.nextLabel++
+			cbr := m.allocateInstr()
+			cbr.asCondBr(eq.asCond(), island, false /* ignored */)
+			m.insert(cbr)
+			back, backLabel := m.allocateBrTarget()
+			m.insert(back)
+			m.preemptIslands = append(m.preemptIslands, preemptIsland{l: island, slow: target, back: backLabel, test: tst, backInstr: back})
+			cvalDef.Instr.MarkLowered()
+			break
+		}
+		tmp := m.compiler.AllocateVReg(ssa.TypeI64)
+		amode := m.amodePool.Allocate()
+		*amode = addressMode{kind: addressModeKindRegUnsignedImm12, rn: preemptVReg}
+		load := m.allocateInstr()
+		load.asULoad(tmp, amode, 64)
+		m.insert(load)
 		cbr := m.allocateInstr()
-		cbr.asCondBr(cc.asCond(), target, false /* ignored */)
+		cbr.asCondBr(registerAsSignBitCond(tmp, !brz), target, true)
 		m.insert(cbr)
 		cvalDef.Instr.MarkLowered()
 	case m.compiler.MatchInstr(cvalDef, ssa.OpcodeIcmp): // This case, we can use the ALU flag set by SUBS instruction.
@@ -179,12 +217,12 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 	switch op := instr.Opcode(); op {
 	case ssa.OpcodeBrz, ssa.OpcodeBrnz, ssa.OpcodeJump, ssa.OpcodeBrTable:
 		panic("BUG: branching instructions are handled by LowerBranches")
-	case ssa.OpcodeFuelDec:
+	case ssa.OpcodePreemptRequested:
 		// The frontend only ever emits this immediately before the branch that
 		// consumes it, so LowerConditionalBranch above has already folded it in and
 		// marked it lowered. Reaching here means something moved it away from its
-		// branch, which would leave the decrement without its test.
-		panic("BUG: FuelDec must be folded into the conditional branch consuming it")
+		// branch, which would leave the check without its test.
+		panic("BUG: " + op.String() + " must be folded into the conditional branch consuming it")
 	case ssa.OpcodeReturn:
 		panic("BUG: return must be handled by backend.Compiler")
 	case ssa.OpcodeIadd, ssa.OpcodeIsub:
@@ -221,6 +259,16 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		m.lowerExtLoad(op, ptr, offset, ret)
 	case ssa.OpcodeCall, ssa.OpcodeCallIndirect:
 		m.lowerCall(instr)
+	case ssa.OpcodeYield:
+		// Below this frame the trampoline takes what a call passing nothing on the
+		// stack does, which the margin every call site keeps covers (see
+		// backend.StackBoundsCheckMarginBytes).
+		if m.maxRequiredStackSizeForCalls < 16 {
+			m.maxRequiredStackSizeForCalls = 16 // return address frame.
+		}
+		y := m.allocateInstr()
+		y.asYield(m.compiler.VRegOf(instr.Arg()))
+		m.insert(y)
 	case ssa.OpcodeIcmp:
 		m.lowerIcmp(instr)
 	case ssa.OpcodeVIcmp:
@@ -1361,10 +1409,10 @@ func (m *machine) lowerFcopysignImpl(rd regalloc.VReg, rn, rm operand, tmpI, tmp
 	setMSB := m.allocateInstr()
 	if _64bit {
 		m.lowerConstantI64(tmpI, math.MinInt64)
-		setMSB.asMovToVec(tmpF, operandNR(tmpI), vecArrangementD, vecIndex(0))
+		setMSB.asFpuMovFromInt(tmpF, operandNR(tmpI), true)
 	} else {
 		m.lowerConstantI32(tmpI, math.MinInt32)
-		setMSB.asMovToVec(tmpF, operandNR(tmpI), vecArrangementS, vecIndex(0))
+		setMSB.asFpuMovFromInt(tmpF, operandNR(tmpI), false)
 	}
 	m.insert(setMSB)
 
@@ -1393,13 +1441,7 @@ func (m *machine) lowerBitcast(instr *ssa.Instruction) {
 	switch {
 	case srcInt && !dstInt: // Int to Float:
 		mov := m.allocateInstr()
-		var arr vecArrangement
-		if srcType.Bits() == 64 {
-			arr = vecArrangementD
-		} else {
-			arr = vecArrangementS
-		}
-		mov.asMovToVec(rd, rn, arr, vecIndex(0))
+		mov.asFpuMovFromInt(rd, rn, srcType.Bits() == 64)
 		m.insert(mov)
 	case !srcInt && dstInt: // Float to Int:
 		mov := m.allocateInstr()
@@ -2001,7 +2043,7 @@ func (m *machine) lowerPopcnt(x, result ssa.Value) {
 	// and the registers may use different names. In our encoding we use the following
 	// instructions:
 	//
-	//    ins v0.d[0], x0     ;; mov from GPR to vec (FMOV above) is encoded as INS
+	//    fmov d0, x0         ;; mov from GPR to vec
 	//    cnt v0.16b, v0.16b  ;; we use vec arrangement 16b
 	//    uaddlv h0, v0.8b    ;; h0 is still v0 with the dest width specifier 'H', implied when src arrangement is 8b
 	//    mov x5, v0.d[0]     ;; finally we mov the result back to a GPR
@@ -2011,9 +2053,9 @@ func (m *machine) lowerPopcnt(x, result ssa.Value) {
 	rn := m.getOperand_NR(m.compiler.ValueDefinition(x), extModeNone)
 
 	rf1 := operandNR(m.compiler.AllocateVReg(ssa.TypeF64))
-	ins := m.allocateInstr()
-	ins.asMovToVec(rf1.nr(), rn, vecArrangementD, vecIndex(0))
-	m.insert(ins)
+	fmov := m.allocateInstr()
+	fmov.asFpuMovFromInt(rf1.nr(), rn, true)
+	m.insert(fmov)
 
 	rf2 := operandNR(m.compiler.AllocateVReg(ssa.TypeF64))
 	cnt := m.allocateInstr()
@@ -2175,14 +2217,17 @@ func (m *machine) lowerTrapCond(condDef backend.SSAValueDefinition) cond {
 	return condFlagFromSSAIntegerCmpCond(c).asCond()
 }
 
-// invertTrapCond returns the condition under which the trap is NOT taken, used
-// to branch over an inlined exit sequence.
+// invertTrapCond returns the opposite of c: the condition under which a trap is
+// not taken, to branch over an inlined exit sequence, or a branch to a target out
+// of c's range is not, to branch over a branch that reaches it.
 func invertTrapCond(c cond) cond {
 	switch c.kind() {
 	case condKindRegisterZero:
 		return registerAsRegNotZeroCond(c.register())
 	case condKindRegisterNotZero:
 		return registerAsRegZeroCond(c.register())
+	case condKindRegisterSignBit:
+		return registerAsSignBitCond(c.register(), !c.signBitSet())
 	default:
 		return c.flag().invert().asCond()
 	}
@@ -2261,15 +2306,15 @@ func (m *machine) lowerSelect(c, x, y, result ssa.Value) {
 		case ssa.TypeF32, ssa.TypeF64:
 			// The condition holds when it is not zero, the same test as above, but the
 			// value is a float in a vector register now. fcmp takes two registers, so the
-			// zero to compare against is materialized first with INS Vd.D[0], XZR, which
-			// zeroes the low 64 bits, covering both the S and the D view of the temporary.
-			//	ins tmp.d[0], xzr
+			// zero to compare against is materialized first with FMOV Dd, XZR, which
+			// zeroes the register, covering both the S and the D view of the temporary.
+			//	fmov tmp, xzr
 			//	fcmp s/d(rn), s/d(tmp)
 			// A NaN condition compares unordered, which leaves Z clear, so it counts as
 			// non-zero and selects x, and -0.0 compares equal to zero and selects y.
 			tmp := m.compiler.AllocateVReg(ssa.TypeF64)
 			zero := m.allocateInstr()
-			zero.asMovToVec(tmp, operandNR(xzrVReg), vecArrangementD, vecIndex(0))
+			zero.asFpuMovFromInt(tmp, operandNR(xzrVReg), true)
 			m.insert(zero)
 
 			cmp := m.allocateInstr()

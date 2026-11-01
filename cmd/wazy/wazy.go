@@ -324,7 +324,6 @@ func doRun(args []string, stdOut io.Writer, stdErr logging.Writer) int {
 		newCtx, cancel := context.WithTimeout(ctx, timeout)
 		ctx = newCtx
 		defer cancel()
-		rtc = rtc.WithCloseOnContextDone(true)
 	} else if timeout < 0 {
 		fmt.Fprintf(stdErr, "timeout duration may not be negative, %v given\n", timeout)
 		printRunUsage(stdErr, flags)
@@ -381,12 +380,13 @@ func doRun(args []string, stdOut io.Writer, stdErr logging.Writer) int {
 	}
 
 	if err != nil {
-		if exitErr, ok := err.(*sys.ExitError); ok {
-			exitCode := exitErr.ExitCode()
-			if exitCode == sys.ExitCodeDeadlineExceeded {
-				fmt.Fprintf(stdErr, "error: %v (timeout %v)\n", exitErr, timeout)
-			}
+		if errors.Is(err, context.DeadlineExceeded) {
+			fmt.Fprintf(stdErr, "error: %v (timeout %v)\n", context.DeadlineExceeded, timeout)
+			exitCode := sys.ExitCodeDeadlineExceeded // a variable: see deadlineExitCode in the tests
 			return int(exitCode)
+		}
+		if exitErr, ok := err.(*sys.ExitError); ok {
+			return int(exitErr.ExitCode())
 		}
 		fmt.Fprintf(stdErr, "error instantiating wasm binary: %v\n", err)
 		return 1

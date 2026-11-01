@@ -29,8 +29,7 @@ func TestCollector(t *testing.T) {
 		}
 		runCollector(t, wazy.NewRuntimeConfigCompiler().WithCoreFeatures(v128GCFeatures))
 	})
-	// A module loaded from the file cache must reserve the same root-spill region at the bottom of its stack
-	// as one compiled fresh, or its safepoints spill into memory the call engine never set aside.
+	// A module loaded from the file cache must collect the same as one compiled fresh.
 	t.Run("compiler from file cache", func(t *testing.T) {
 		if !platform.CompilerSupported() {
 			t.Skip()

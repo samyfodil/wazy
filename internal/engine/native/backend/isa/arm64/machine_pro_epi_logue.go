@@ -13,7 +13,117 @@ func (m *machine) PostRegAlloc() {
 	m.postRegAlloc()
 	m.pairSpillAccesses()
 	m.emitTrapIslands()
+	m.emitPreemptIslands()
 	m.emitFpConstPool()
+}
+
+// emitPreemptIslands materializes the out-of-line halves of masked preemption
+// checks after the trap islands:
+//
+//	island:
+//		ldr  tmp, [preempt]
+//		cmn  tmp, #1314
+//		b.eq <slow>
+//		cbz  counter, <exit>    ;; see foldZeroExit
+//		b    <back>
+//
+// tmp is the register reserved for exactly this kind of scratch use, so nothing
+// the allocator placed is disturbed.
+func (m *machine) emitPreemptIslands() {
+	if len(m.preemptIslands) == 0 {
+		return
+	}
+	lastPos := m.orderedSSABlockLabelPos[len(m.orderedSSABlockLabelPos)-1]
+	cur := lastPos.end
+	for cur.next != nil {
+		cur = cur.next
+	}
+	for _, pi := range m.preemptIslands {
+		nop := m.allocateInstr()
+		nop.asNop0WithLabel(pi.l)
+		pos := m.labelPositionPool.GetOrAllocate(int(pi.l))
+		pos.begin, pos.end = nop, nop
+		cur = linkInstr(cur, nop)
+
+		amode := m.amodePool.Allocate()
+		*amode = addressMode{kind: addressModeKindRegUnsignedImm12, rn: preemptVReg}
+		load := m.allocateInstr()
+		load.asULoad(tmpRegVReg, amode, 64)
+		cur = linkInstr(cur, load)
+		toSlow := m.allocateInstr()
+		toSlow.asCondBr(registerAsSignBitCond(tmpRegVReg, true), pi.slow, true)
+		cur = linkInstr(cur, toSlow)
+		if test, exit := m.foldZeroExit(pi); exit != nil {
+			if test != nil {
+				cur = linkInstr(cur, test)
+			}
+			cur = linkInstr(cur, exit)
+		}
+		toBack := m.allocateInstr()
+		toBack.asBr(pi.back)
+		cur = linkInstr(cur, toBack)
+	}
+	// Extend the last block over the islands, so that encoding walks them.
+	lastPos.end = cur
+}
+
+// foldZeroExit moves the exit test of a loop that counts down to zero into its
+// preemption island, when it is the first thing after the masked check:
+//
+//		tst  counter, #mask
+//		b.eq <island>
+//	back:
+//		cbz  counter, <exit>      ;; or subs wzr, counter, #0; b.eq <exit>
+//
+// Whenever the counter is zero its masked bits are too, so the island sees every
+// exit, and the loop pays for neither the exit test nor the check. It returns
+// copies of the test for the island, leaving nops in the loop, or nil if the
+// shape is not there.
+func (m *machine) foldZeroExit(pi preemptIsland) (test, branch *instruction) {
+	r := pi.test.rn.nr().RealReg()
+	first := pi.backInstr.next
+	for first != nil && first.kind == nop0 {
+		first = first.next
+	}
+	if first == nil {
+		return nil, nil
+	}
+	switch first.kind {
+	case condBr: // cbz counter, <exit>
+		if c := cond(first.u1); c.kind() != condKindRegisterZero || c.register().RealReg() != r {
+			return nil, nil
+		}
+		branch = m.allocateInstr()
+		*branch = *first
+		branch.prev, branch.next = nil, nil
+		// In place rather than unlinked: it may end its block.
+		first.asNop0WithLabel(labelInvalid)
+		return nil, branch
+	case aluRRImm12: // subs wzr, counter, #0; b.eq <exit>
+		imm, shift := first.rm.imm12()
+		if aluOp(first.u1) != aluOpSubS || first.rd != xzrVReg || first.rn.nr().RealReg() != r || imm != 0 || shift != 0 {
+			return nil, nil
+		}
+		j := first.next
+		if j == nil || j.kind != condBr || cond(j.u1) != eq.asCond() || j.next == nil {
+			return nil, nil
+		}
+		switch k := j.next; k.kind {
+		case cSel, cSet, fpuCSel, cCmpImm:
+			return nil, nil // reads the flags the test set
+		case condBr:
+			if cond(k.u1).kind() == condKindCondFlagSet {
+				return nil, nil
+			}
+		}
+		test, branch = m.allocateInstr(), m.allocateInstr()
+		*test, *branch = *first, *j
+		test.prev, test.next, branch.prev, branch.next = nil, nil, nil, nil
+		first.asNop0WithLabel(labelInvalid)
+		j.asNop0WithLabel(labelInvalid)
+		return test, branch
+	}
+	return nil, nil
 }
 
 // emitFpConstPool materializes the deduplicated FP/SIMD literal pool after the

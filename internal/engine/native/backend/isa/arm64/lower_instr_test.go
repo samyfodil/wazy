@@ -757,12 +757,12 @@ tbl x1.16b, { v29.16b, v30.16b }, v1?.16b
 mov v29.16b, x2.16b
 mov v30.16b, x15.16b
 orr x2?, xzr, #0x100010001000100
-ins v1?.d[0], x2?
+fmov d1?, x2?
 orr x3?, xzr, #0x100010001000100
 ins v1?.d[1], x3?
 tbl x1.16b, { v29.16b, v30.16b }, v1?.16b
 `,
-			expectedBytes: "5d1ca24efe1daf4ee08308b2001c084ee08308b2001c184ea123004e",
+			expectedBytes: "5d1ca24efe1daf4ee08308b20000679ee08308b2001c184ea123004e",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -884,7 +884,7 @@ func TestMachine_lowerFcopysign(t *testing.T) {
 			_64bit: false,
 			exp: `
 movz w1?, #0x8000, lsl 16
-ins v2?.s[0], w1?
+fmov s2?, w1?
 mov v6?.8b, v3?.8b
 bit v6?.8b, v4?.8b, v2?.8b
 mov v5?.8b, v6?.8b
@@ -894,7 +894,7 @@ mov v5?.8b, v6?.8b
 			_64bit: true,
 			exp: `
 movz x1?, #0x8000, lsl 48
-ins v2?.d[0], x1?
+fmov d2?, x1?
 mov v6?.8b, v3?.8b
 bit v6?.8b, v4?.8b, v2?.8b
 mov v5?.8b, v6?.8b

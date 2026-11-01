@@ -15,7 +15,7 @@
 
 **A WebAssembly runtime written in pure Go** — guest code from other languages, sandboxed, inside your process, with nothing to install at runtime.
 
-**Run code you didn't write.** Ship a plugin system, execute a customer's untrusted script, or use a Rust or C library you would otherwise reach through cgo: compiled to Wasm it becomes a byte slice you `go:embed` and a function you call. The guest starts with nothing — no files beyond what you mount, no sockets unless you allow them, a fake clock on the WASI 0.1 path — you cap its memory with `WithMemoryLimitPages`, and a `context` deadline kills even a tight compiled loop with `WithCloseOnContextDone`. CI builds and runs guests from Rust, C, C++, Zig, TinyGo, AssemblyScript and Go, `CGO_ENABLED=0`, with no dependency beyond `golang.org/x/sys`.
+**Run code you didn't write.** Ship a plugin system, execute a customer's untrusted script, or use a Rust or C library you would otherwise reach through cgo: compiled to Wasm it becomes a byte slice you `go:embed` and a function you call. The guest starts with nothing — no files beyond what you mount, no sockets unless you allow them, a fake clock on the WASI 0.1 path — you cap its memory with `WithMemoryLimitPages`, and a `context` deadline ends a call even in a tight compiled loop, with no option to turn on. CI builds and runs guests from Rust, C, C++, Zig, TinyGo, AssemblyScript and Go, `CGO_ENABLED=0`, with no dependency beyond `golang.org/x/sys`.
 
 **Plugin contracts with types in them.** Embedding Wasm normally means `fn.Call(ctx, ptr, len)`, decoding a pair of i32s out of the guest's memory, and both halves hand-agreeing on layout and on who frees what. wazy runs WebAssembly *components* — a `.wasm` that carries its own typed interface — so `string`, records, lists, `option` and `result` cross as Go values, and a handle to a host object is a lifetime the runtime tracks and drops for you the moment you hand it a destructor.
 
@@ -214,7 +214,7 @@ cd benchmarks/vs-wazero && go test -bench .    # Instantiate, HostCall, Compile,
 go test -bench . ./imports/wasip2/... ./internal/integration_test/bench/...
 ```
 
-Figures on this page come from two machines, each stated where it matters: the head-to-head and cumulative numbers on an Apple M4, `memory.grow` and the interruptible-loop numbers on a core-pinned i9-12900HK. Both used `benchstat` over interleaved A/B runs with upstream wazero as a control in the same runs. Method, per-optimization numbers and the optimizations **measured and rejected** (including one that made arm64 8% slower) are in [OPTIMIZATIONS.md](OPTIMIZATIONS.md).
+Figures on this page come from two machines, each stated where it matters: the head-to-head and cumulative numbers on an Apple M4, `memory.grow` on a core-pinned i9-12900HK, and the interruptible-loop numbers on a core-pinned Atom C3558. Both used `benchstat` over interleaved A/B runs with upstream wazero as a control in the same runs. Method, per-optimization numbers and the optimizations **measured and rejected** (including one that made arm64 8% slower) are in [OPTIMIZATIONS.md](OPTIMIZATIONS.md).
 
 ### Head to head with wazero
 
@@ -223,7 +223,7 @@ Measured against wazero in the same runs, on the same workloads:
 | Path | wazy vs wazero | What & why |
 | --- | :--: | --- |
 | **Instantiate** | **9.1x** | 1.724 µs vs 15.74 µs, on a 37 KB TinyGo module. |
-| **Interruptible loops** (`WithCloseOnContextDone`) | **9.8x** vs wazero with the option on | The check is a register decrement and a predicted-not-taken branch, not a Go round-trip. Enabling it costs wazy **+18%** on `fibonacci` and wazero **+1057%** -- each against its own build with the option off -- which is where the 9.8x head-to-head comes from. A near-empty spin kernel is the worst case at +44%; a host-call-dense loop pays +2% against wazero's +86%. Measured on a core with no uop cache, because code placement swamps smaller differences on Skylake -- see [docs/performance.md](docs/performance.md). Against `wazero@main`. |
+| **Interruptible loops** | **10.8x** vs wazero with `WithCloseOnContextDone` | wazy is always interruptible, with no option: compiled code reads Go's own preemption word at loop headers and the entries of recursive functions, and a done context ends the call through it. wazero has to be configured for it, and then runs `fibonacci` 10.8x slower than wazy, a host-call-dense loop 2.5x and a near-empty spin kernel 60x. Against wazero with no check at all, wazy is 5% slower on `fibonacci` and faster on the other two. Measured on a core with no uop cache, because code placement swamps smaller differences on Skylake -- see [docs/performance.md](docs/performance.md). Against `wazero@6edbb8c` (main, 2026-09-04). |
 | **Compiled execution** | memory-heavy code leads | `string_manipulation` −18%, `reverse_array` −14%, `base64` −12%, `fibonacci` a wash — the advantage tracks memory-access intensity, not arithmetic. |
 | **`memory.fill`** | **1.68x** | Geomean over a size sweep, against wazero *at HEAD* — i.e. with its own inline-store rewrite already in it. 7.1x at 15 bytes and 4.6x at 31, down to parity once the fill is memory-bandwidth-bound at 64 KiB. Constant-size clears 1.8–2.5x. |
 | **Host calls** (Go ↔ Wasm) | a tie | 47.8 ns here, 48.3 ns there, on the `WithGoModuleFunction` arm both runtimes implement the same way. The win is structural, not per-call: see below. |
@@ -277,11 +277,12 @@ With it off the two compilers are ~30% apart. Against an interpreter the option 
 6.79 s with it and 6.87 s without on wazy, 11.96 s and 11.91 s on wazero — so the 1.7x in the
 interpreted rows is the engines and nothing else. [go-pdfium][pdfium-ccd] measured the same effect
 across 5,000 PDFs, at ~4.5x for wazero and ~1.4x for wazy. wazero's [#2533][w2533] solves the same
-problem on their side; wazy's own check became native in [#71][pr71], which is in this branch, so
-the 1.7x above is what v0.3.0 cost and not what `main` costs. On `main` it is 1.04x–1.28x depending
-on the core, against 1.01x–1.10x for wazero with its three in-flight PRs — level on x86, behind on
-the M4, and faster than both in absolute time. All three machines are in
-[docs/performance.md](docs/performance.md).
+problem on their side; wazy's own check became native in [#71][pr71], so the 1.7x above is what
+v0.3.0 cost. By v0.5.0 it was 1.04x–1.28x depending on the core, against 1.01x–1.10x for wazero
+with its three in-flight PRs — level on x86, behind on the M4, and faster than both in absolute
+time; all three machines are in [docs/performance.md](docs/performance.md). Since v0.6.0 there is
+no option to toggle: every call can be interrupted, and the check that makes it so is cheaper
+again, so the toggle benchmark below only builds against an older wazy.
 
 So: long compute is where the compiler wins, but 4.9x is the figure for a caller who needs
 cancellation, and ~1.3x is the figure for the code generators. The small-document row measures

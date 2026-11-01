@@ -84,20 +84,20 @@ func TestCompiler_lowerMemoryFill_dispatch(t *testing.T) {
 			// Nothing is known: the full shape, gate and memclr arm included.
 			name:  "dynamic size and value",
 			value: localOp(0), size: localOp(1),
-			blocks: 18, memclr: true, byteTail: true,
+			blocks: 20, memclr: true, byteTail: true,
 		},
 		{
 			// A constant zero byte folds half the dispatch away, but the size
 			// still has to be tested at run time.
 			name:  "dynamic size, constant zero value",
 			value: constOp(0), size: localOp(0),
-			blocks: 18, memclr: true, byteTail: true,
+			blocks: 20, memclr: true, byteTail: true,
 		},
 		{
 			// A constant nonzero byte folds the memclr arm away entirely.
 			name:  "dynamic size, constant nonzero value",
 			value: constOp(2), size: localOp(0),
-			blocks: 17, byteTail: true,
+			blocks: 19, byteTail: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -115,7 +115,7 @@ func TestCompiler_lowerMemoryFill_dispatch(t *testing.T) {
 
 			b := ssa.NewBuilder()
 			offset := nativeapi.NewModuleContextOffsetData(m, false)
-			fc := NewFrontendCompiler(m, b, &offset, false, false, false)
+			fc := NewFrontendCompiler(m, b, &offset, false, false)
 			fc.Init(0, 0, &m.TypeSection[0], nil, body, false, 0)
 			fc.LowerToSSA()
 			got := fc.formatBuilder()

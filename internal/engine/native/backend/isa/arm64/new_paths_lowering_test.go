@@ -447,11 +447,11 @@ func TestMachine_lowerSelect_nonIntegerCondition(t *testing.T) {
 		// Newly implemented: float conditions.
 		{
 			name: "f32 condition", cType: ssa.TypeF32, xyType: ssa.TypeI32,
-			exp: []string{"ins v11?.d[0], xzr", "fcmp s1?, s11?", "csel w4?, w2?, w3?, ne"},
+			exp: []string{"fmov d11?, xzr", "fcmp s1?, s11?", "csel w4?, w2?, w3?, ne"},
 		},
 		{
 			name: "f64 condition", cType: ssa.TypeF64, xyType: ssa.TypeI32,
-			exp: []string{"ins v11?.d[0], xzr", "fcmp d1?, d11?", "csel w4?, w2?, w3?, ne"},
+			exp: []string{"fmov d11?, xzr", "fcmp d1?, d11?", "csel w4?, w2?, w3?, ne"},
 		},
 		// Newly implemented: a vector condition, selecting between two floats.
 		{

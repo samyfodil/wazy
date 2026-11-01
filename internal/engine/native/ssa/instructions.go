@@ -663,17 +663,15 @@ const (
 	// for tail calls. Semantically, it combines CallIndirect + Return into a single operation.
 	OpcodeTailCallReturnCallIndirect
 
-	// OpcodeFuelDec decrements the termination fuel counter and returns whether it
-	// ran out: `v = FuelDec`, non-zero when the counter reached zero or below.
+	// OpcodePreemptRequested returns whether the Go runtime has asked the running
+	// goroutine to stop: `v = PreemptRequested`, non-zero when it has.
 	//
-	// The counter is not an SSA value. It lives in one register reserved out of the
-	// allocatable set for the whole program (see the fuel register in each backend's
-	// abi.go), which is what keeps the check to two instructions -- a decrement and
-	// a rarely-taken branch that reads the decrement's own flags -- touching no
-	// memory at all. Reserving that register is not free; it costs the allocator one
-	// of fourteen integer registers on amd64 and one of thirty-one on arm64.
-	// Emitted only under WithCloseOnContextDone; see
-	// (*frontend.Compiler).emitFuelCheck.
+	// It is the check loop headers, and the entries of the functions that need
+	// one, make so that compiled code returns to Go when Go needs it to; see
+	// (*frontend.Compiler).emitPreemptCheck. The runtime asks by storing
+	// nativeapi.StackPreempt into the goroutine's g.stackguard0, and the entry
+	// preamble puts that word's address in a register reserved for it (see the
+	// preempt register in each backend's abi.go).
 	//
 	// It is classified sideEffectTraps rather than sideEffectStrict: "always alive"
 	// keeps it out of dead code elimination, while staying inside its instruction
@@ -681,7 +679,16 @@ const (
 	// strict effect starts a new group, and folding only happens within one).
 	// sideEffectTraps also keeps it out of loop-invariant code motion, which would
 	// otherwise hoist the one check a loop has out of that loop.
-	OpcodeFuelDec
+	OpcodePreemptRequested
+
+	// OpcodeYield returns to Go from the slow path of a preemption check: `Yield execCtx`.
+	//
+	// It is a call, but one that preserves every register: the trampoline it goes
+	// through saves and restores the registers a call would clobber (see
+	// backend.Machine.CompileYieldTrampoline). So the register allocator sees no call
+	// here, and the values live across a check stay where they are, rather than
+	// being spilled, wherever they are defined, for a path that almost never runs.
+	OpcodeYield
 
 	// opcodeEnd marks the end of the opcode list.
 	opcodeEnd
@@ -928,7 +935,8 @@ var instructionSideEffects = [opcodeEnd]sideEffect{
 	OpcodeAtomicStore:                 sideEffectStrict,
 	OpcodeAtomicCas:                   sideEffectStrict,
 	OpcodeFence:                       sideEffectStrict,
-	OpcodeFuelDec:                     sideEffectTraps,
+	OpcodePreemptRequested:            sideEffectTraps,
+	OpcodeYield:                       sideEffectStrict,
 	OpcodeTailCallReturnCall:          sideEffectStrict,
 	OpcodeTailCallReturnCallIndirect:  sideEffectStrict,
 	OpcodeWideningPairwiseDotProductS: sideEffectNone,
@@ -1087,7 +1095,8 @@ var instructionReturnTypes = [opcodeEnd]returnTypesFn{
 	OpcodeAtomicStore:                 returnTypesFnNoReturns,
 	OpcodeAtomicCas:                   returnTypesFnSingle,
 	OpcodeFence:                       returnTypesFnNoReturns,
-	OpcodeFuelDec:                     returnTypesFnI32,
+	OpcodePreemptRequested:            returnTypesFnI32,
+	OpcodeYield:                       returnTypesFnNoReturns,
 	OpcodeTailCallReturnCallIndirect:  returnTypesFnCallIndirect,
 	OpcodeTailCallReturnCall:          returnTypesFnCall,
 	OpcodeWideningPairwiseDotProductS: returnTypesFnV128,
@@ -2153,11 +2162,41 @@ func (i *Instruction) AsFence(order byte) *Instruction {
 	return i
 }
 
-// AsFuelDec initializes this instruction as a termination-fuel decrement. See OpcodeFuelDec.
-func (i *Instruction) AsFuelDec() *Instruction {
-	i.opcode = OpcodeFuelDec
+// AsPreemptRequested initializes this instruction as a preemption check. See OpcodePreemptRequested.
+func (i *Instruction) AsPreemptRequested() *Instruction {
+	i.opcode = OpcodePreemptRequested
 	i.typ = TypeI32
 	return i
+}
+
+// AsYield initializes this instruction as a return to Go from a preemption check. See OpcodeYield.
+func (i *Instruction) AsYield(execCtx Value) *Instruction {
+	i.opcode = OpcodeYield
+	i.v = execCtx
+	return i
+}
+
+// MaskPreemptCheck makes this OpcodePreemptRequested check only when counter & mask is zero, which a
+// loop counter whose step is odd once mask's trailing zeros are shifted out reaches once every
+// 2^popcount(mask) iterations. See MaskedCheckBits.
+func (i *Instruction) MaskPreemptCheck(counter Value, mask uint64) {
+	i.v = counter
+	i.u1 = mask
+}
+
+// ElidePreemptCheck makes this OpcodePreemptRequested never check: its loop is known to end soon
+// enough. See Builder.TripBound.
+func (i *Instruction) ElidePreemptCheck() {
+	i.u2 = 1
+}
+
+// PreemptCheckData returns the counter and mask of a masked OpcodePreemptRequested (an invalid counter
+// when it is not masked), and whether the check is elided.
+func (i *Instruction) PreemptCheckData() (counter Value, mask uint64, elided bool) {
+	if i.u1 == 0 {
+		return ValueInvalid, 0, i.u2 != 0
+	}
+	return i.v, i.u1, i.u2 != 0
 }
 
 // AtomicRmwData returns the data for this atomic read-modify-write instruction.
@@ -2694,6 +2733,8 @@ func (i *Instruction) Format(b Builder) string {
 		instSuffix = fmt.Sprintf(" %s, %s, %#x", i.v.Format(b), i.v2.Format(b), uint32(i.u1))
 	case OpcodeLoad, OpcodeVZeroExtLoad:
 		instSuffix = fmt.Sprintf(" %s, %#x", i.v.Format(b), int32(i.u1))
+	case OpcodeYield:
+		instSuffix = " " + i.v.Format(b)
 	case OpcodeLoadSplat:
 		instSuffix = fmt.Sprintf(".%s %s, %#x", VecLane(i.u2), i.v.Format(b), int32(i.u1))
 	case OpcodeUload8, OpcodeUload16, OpcodeUload32, OpcodeSload8, OpcodeSload16, OpcodeSload32:
@@ -2812,8 +2853,13 @@ func (i *Instruction) Format(b Builder) string {
 		instSuffix = fmt.Sprintf("_%d, %s, %s, %s", 8*i.u1, i.v.Format(b), i.v2.Format(b), i.v3.Format(b))
 	case OpcodeFence:
 		instSuffix = fmt.Sprintf(" %d", i.u1)
-	case OpcodeFuelDec:
-		instSuffix = ""
+	case OpcodePreemptRequested:
+		switch counter, mask, elided := i.PreemptCheckData(); {
+		case elided:
+			instSuffix = " elided"
+		case counter.Valid():
+			instSuffix = fmt.Sprintf(" %s, %#x", counter.Format(b), mask)
+		}
 	case OpcodeTailCallReturnCall, OpcodeTailCallReturnCallIndirect:
 		view := i.vs.View()
 		vs := make([]string, len(view))
@@ -3084,8 +3130,10 @@ func (o Opcode) String() (ret string) {
 		return "AtomicStore"
 	case OpcodeFence:
 		return "Fence"
-	case OpcodeFuelDec:
-		return "FuelDec"
+	case OpcodePreemptRequested:
+		return "PreemptRequested"
+	case OpcodeYield:
+		return "Yield"
 	case OpcodeTailCallReturnCall:
 		return "ReturnCall"
 	case OpcodeTailCallReturnCallIndirect:

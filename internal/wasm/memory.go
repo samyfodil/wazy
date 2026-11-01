@@ -143,8 +143,8 @@ type MemoryInstance struct {
 	// fields every accessor reads with no lock: a data race with any goroutine
 	// still reading the memory through an api.Memory it holds (issue #69), and
 	// with the interpreter's own direct mem.Buffer reads, which is reachable
-	// because WithCloseOnContextDone closes a module from a watchdog goroutine
-	// while its call is still unwinding. An atomic here costs one load on the
+	// because an embedder may close a module from a watchdog goroutine while
+	// its call is still unwinding. An atomic here costs one load on the
 	// api.Memory path -- which the guest never takes, since both engines index
 	// mem.Buffer directly -- and lets the close write nothing at all.
 	//
@@ -162,8 +162,8 @@ type MemoryInstance struct {
 	// It exists because released does NOT reach the engines: the interpreter
 	// and the native engine index mem.Buffer directly on their hot paths, as
 	// they must, so neither notices that the memory was closed. Closing a
-	// module whose call is still running -- exactly what
-	// WithCloseOnContextDone does, and what go-pdfium's Kill() relies on --
+	// module whose call is still running -- what a watchdog does, and what
+	// go-pdfium's Kill() relies on --
 	// therefore pooled the buffer while that call was still reading and
 	// writing it, and the next instantiation got the same array. Observed as
 	// one instance's i64.store racing another's i32.load at the same address.

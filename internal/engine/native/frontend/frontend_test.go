@@ -26,9 +26,8 @@ func TestCompiler_LowerToSSA(t *testing.T) {
 	// what output should look like, you can run:
 	// `~/wasmtime/target/debug/clif-util wasm --target aarch64-apple-darwin testcase.wat -p -t`
 	for _, tc := range []struct {
-		name              string
-		ensureTermination bool
-		needListener      bool
+		name         string
+		needListener bool
 		// m is the *wasm.Module to be compiled in this test.
 		m *wasm.Module
 		// targetIndex is the index of a local function to be compiled in this test.
@@ -238,97 +237,108 @@ blk2: () <-- (blk0)
 `,
 		},
 		{
+			name: "loop - counted", m: testcases.LoopCounted.Module,
+			exp: `
+blk0: (v0:i64, v1:i64)
+	v2:i32 = Iconst_32 0x0
+	Jump blk1, v2
+
+blk1: (v4:i32) <-- (blk0,blk4,blk3)
+	v3:i32 = PreemptRequested v4, 0xfff
+	Brnz v3, blk3
+	Jump blk4
+
+blk2: ()
+
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk1, v4
+
+blk4: () <-- (blk1)
+	v5:i32 = Iconst_32 0x1
+	v6:i32 = Iadd v4, v5
+	v7:i32 = Iconst_32 0x1
+	Brnz v7, blk1, v6
+	Jump blk5
+
+blk5: () <-- (blk4)
+	Jump blk_ret
+`,
+		},
+		{
+			name: "loop - bounded", m: testcases.LoopBounded.Module,
+			exp: `
+blk0: (v0:i64, v1:i64)
+	v2:i32 = Iconst_32 0x0
+	v9:i32 = PreemptRequested
+	Brnz v9, blk6
+	Jump blk1, v2
+
+blk1: (v4:i32) <-- (blk0,blk4,blk6)
+	v3:i32 = PreemptRequested elided
+	Brnz v3, blk3
+	Jump blk4
+
+blk2: ()
+
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
+
+blk4: () <-- (blk1,blk3)
+	v5:i32 = Iconst_32 0x1
+	v6:i32 = Iadd v4, v5
+	v7:i32 = Iconst_32 0x64
+	v8:i32 = Icmp lt_u, v6, v7
+	Brnz v8, blk1, v6
+	Jump blk5
+
+blk5: () <-- (blk4)
+	Jump blk_ret
+
+blk6: () <-- (blk0)
+	Yield v0
+	Jump blk1, v2
+`,
+		},
+		{
 			name: "loop - br", m: testcases.LoopBr.Module,
 			exp: `
 blk0: (v0:i64, v1:i64)
 	Jump blk1
 
-blk1: () <-- (blk0,blk1)
-	Jump blk1
+blk1: () <-- (blk0,blk4)
+	v2:i32 = PreemptRequested
+	Brnz v2, blk3
+	Jump blk4
 
 blk2: ()
-`,
-			expAfterPasses: `
-blk0: (v0:i64, v1:i64)
-	Jump fallthrough
 
-blk1: () <-- (blk0,blk1)
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
+
+blk4: () <-- (blk1,blk3)
 	Jump blk1
 `,
-		},
-		{
-			name: "loop - br / ensure termination", m: testcases.LoopBr.Module,
-			ensureTermination: true,
-			exp: `
-signatures:
-	sig2: i64_v
-
-blk0: (v0:i64, v1:i64)
-	v2:i32 = FuelDec
-	Brnz v2, blk1
-	Jump blk2
-
-blk1: () <-- (blk0)
-	v5:i64 = Load v0, 0x58
-	CallIndirect v5:sig2, v0
-	Jump blk2
-
-blk2: () <-- (blk0,blk1)
-	Jump blk3
-
-blk3: () <-- (blk2,blk6)
-	v3:i32 = FuelDec
-	Brnz v3, blk5
-	Jump blk6
-
-blk4: ()
-
-blk5: () <-- (blk3)
-	v4:i64 = Load v0, 0x58
-	CallIndirect v4:sig2, v0
-	Jump blk6
-
-blk6: () <-- (blk3,blk5)
-	Jump blk3
-`,
-			// The two slow blocks (blk1 for the entry check, blk5 for the loop's)
-			// land after the loop body, so the out-of-fuel branch is the forward,
-			// predicted-not-taken one and the body stays on the fallthrough.
 			expAfterPasses: `
-signatures:
-	sig2: i64_v
-
 blk0: (v0:i64, v1:i64)
-	v2:i32 = FuelDec
-	Brnz v2, blk1
 	Jump fallthrough
 
-blk7: () <-- (blk0)
+blk1: () <-- (blk0,blk4)
+	v2:i32 = PreemptRequested
+	Brnz v2, blk3
 	Jump fallthrough
 
-blk2: () <-- (blk7,blk1)
+blk5: () <-- (blk1)
 	Jump fallthrough
 
-blk3: () <-- (blk2,blk6)
-	v3:i32 = FuelDec
-	Brnz v3, blk5
-	Jump fallthrough
+blk4: () <-- (blk5,blk3)
+	Jump blk1
 
-blk8: () <-- (blk3)
-	Jump fallthrough
-
-blk6: () <-- (blk8,blk5)
-	Jump blk3
-
-blk5: () <-- (blk3)
-	v4:i64 = Load v0, 0x58
-	CallIndirect v4:sig2, v0
-	Jump blk6
-
-blk1: () <-- (blk0)
-	v5:i64 = Load v0, 0x58
-	CallIndirect v5:sig2, v0
-	Jump blk2
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
 `,
 		},
 		{
@@ -337,30 +347,51 @@ blk1: () <-- (blk0)
 blk0: (v0:i64, v1:i64)
 	Jump blk1
 
-blk1: () <-- (blk0,blk1)
-	v2:i32 = Iconst_32 0x1
-	Brnz v2, blk1
-	Jump blk3
+blk1: () <-- (blk0,blk4)
+	v2:i32 = PreemptRequested
+	Brnz v2, blk3
+	Jump blk4
 
 blk2: ()
 
 blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
+
+blk4: () <-- (blk1,blk3)
+	v3:i32 = Iconst_32 0x1
+	Brnz v3, blk1
+	Jump blk5
+
+blk5: () <-- (blk4)
 	Return
 `,
 			expAfterPasses: `
 blk0: (v0:i64, v1:i64)
 	Jump fallthrough
 
-blk1: () <-- (blk0,blk4)
-	v2:i32 = Iconst_32 0x1
-	Brz v2, blk3
+blk1: () <-- (blk0,blk7)
+	v2:i32 = PreemptRequested
+	Brnz v2, blk3
 	Jump fallthrough
 
-blk4: () <-- (blk1)
+blk6: () <-- (blk1)
+	Jump fallthrough
+
+blk4: () <-- (blk6,blk3)
+	v3:i32 = Iconst_32 0x1
+	Brz v3, blk5
+	Jump fallthrough
+
+blk7: () <-- (blk4)
 	Jump blk1
 
-blk3: () <-- (blk1)
+blk5: () <-- (blk4)
 	Return
+
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
 `,
 		},
 		{
@@ -496,16 +527,28 @@ blk0: (v0:i64, v1:i64, v2:i32)
 	v3:i32 = Iconst_32 0x0
 	Jump blk1, v2
 
-blk1: (v4:i32) <-- (blk0)
-	Return v4
+blk1: (v5:i32) <-- (blk0)
+	v4:i32 = PreemptRequested elided
+	Brnz v4, blk3
+	Jump blk4
 
 blk2: ()
+
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
+
+blk4: () <-- (blk1,blk3)
+	Return v5
 `,
 			expAfterPasses: `
 blk0: (v0:i64, v1:i64, v2:i32)
 	Jump fallthrough
 
 blk1: () <-- (blk0)
+	Jump fallthrough
+
+blk4: () <-- (blk1)
 	Return v2
 `,
 		},
@@ -516,32 +559,53 @@ blk1: () <-- (blk0)
 blk0: (v0:i64, v1:i64, v2:i32)
 	Jump blk1, v2
 
-blk1: (v3:i32) <-- (blk0,blk1)
-	Brnz v3, blk1, v3
+blk1: (v4:i32) <-- (blk0,blk4)
+	v3:i32 = PreemptRequested
+	Brnz v3, blk3
 	Jump blk4
 
 blk2: ()
 
-blk3: ()
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
 
-blk4: () <-- (blk1)
-	v4:i32 = Iconst_32 0x0
-	Jump blk_ret, v4
+blk4: () <-- (blk1,blk3)
+	Brnz v4, blk1, v4
+	Jump blk6
+
+blk5: ()
+
+blk6: () <-- (blk4)
+	v5:i32 = Iconst_32 0x0
+	Jump blk_ret, v5
 `,
 			expAfterPasses: `
 blk0: (v0:i64, v1:i64, v2:i32)
 	Jump fallthrough
 
-blk1: () <-- (blk0,blk5)
-	Brz v2, blk4
+blk1: () <-- (blk0,blk8)
+	v3:i32 = PreemptRequested
+	Brnz v3, blk3
 	Jump fallthrough
 
-blk5: () <-- (blk1)
+blk7: () <-- (blk1)
+	Jump fallthrough
+
+blk4: () <-- (blk7,blk3)
+	Brz v2, blk6
+	Jump fallthrough
+
+blk8: () <-- (blk4)
 	Jump blk1
 
-blk4: () <-- (blk1)
-	v4:i32 = Iconst_32 0x0
-	Jump blk_ret, v4
+blk6: () <-- (blk4)
+	v5:i32 = Iconst_32 0x0
+	Jump blk_ret, v5
+
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
 `,
 		},
 		{
@@ -551,32 +615,53 @@ blk4: () <-- (blk1)
 blk0: (v0:i64, v1:i64, v2:i32)
 	Jump blk1, v2
 
-blk1: (v3:i32) <-- (blk0,blk4)
-	Brnz v3, blk_ret
+blk1: (v4:i32) <-- (blk0,blk6)
+	v3:i32 = PreemptRequested
+	Brnz v3, blk3
 	Jump blk4
 
 blk2: ()
 
-blk3: ()
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
 
-blk4: () <-- (blk1)
-	v4:i32 = Iconst_32 0x1
-	Jump blk1, v4
+blk4: () <-- (blk1,blk3)
+	Brnz v4, blk_ret
+	Jump blk6
+
+blk5: ()
+
+blk6: () <-- (blk4)
+	v5:i32 = Iconst_32 0x1
+	Jump blk1, v5
 `,
 			expAfterPasses: `
 blk0: (v0:i64, v1:i64, v2:i32)
 	Jump fallthrough, v2
 
-blk1: (v3:i32) <-- (blk0,blk4)
-	Brnz v3, blk5
-	Jump blk4
+blk1: (v4:i32) <-- (blk0,blk6)
+	v3:i32 = PreemptRequested
+	Brnz v3, blk3
+	Jump fallthrough
 
-blk5: () <-- (blk1)
+blk7: () <-- (blk1)
+	Jump fallthrough
+
+blk4: () <-- (blk7,blk3)
+	Brnz v4, blk8
+	Jump blk6
+
+blk8: () <-- (blk4)
 	Jump blk_ret
 
-blk4: () <-- (blk1)
-	v4:i32 = Iconst_32 0x1
-	Jump blk1, v4
+blk6: () <-- (blk4)
+	v5:i32 = Iconst_32 0x1
+	Jump blk1, v5
+
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
 `,
 		},
 		{
@@ -799,30 +884,51 @@ blk0: (v0:i64, v1:i64, v2:f64, v3:f32)
 blk0: (v0:i64, v1:i64, v2:i32, v3:i32)
 	Jump blk1, v2, v3
 
-blk1: (v4:i32,v5:i32) <-- (blk0,blk1)
-	v7:i32 = Iconst_32 0x1
-	Brnz v7, blk1, v4, v5
-	Jump blk3
+blk1: (v4:i32,v5:i32) <-- (blk0,blk4)
+	v7:i32 = PreemptRequested
+	Brnz v7, blk3
+	Jump blk4
 
 blk2: (v6:i32)
 
 blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
+
+blk4: () <-- (blk1,blk3)
+	v8:i32 = Iconst_32 0x1
+	Brnz v8, blk1, v4, v5
+	Jump blk5
+
+blk5: () <-- (blk4)
 	Jump blk_ret, v4
 `,
 			expAfterPasses: `
 blk0: (v0:i64, v1:i64, v2:i32, v3:i32)
 	Jump fallthrough
 
-blk1: () <-- (blk0,blk4)
-	v7:i32 = Iconst_32 0x1
-	Brz v7, blk3
+blk1: () <-- (blk0,blk7)
+	v7:i32 = PreemptRequested
+	Brnz v7, blk3
 	Jump fallthrough
 
-blk4: () <-- (blk1)
+blk6: () <-- (blk1)
+	Jump fallthrough
+
+blk4: () <-- (blk6,blk3)
+	v8:i32 = Iconst_32 0x1
+	Brz v8, blk5
+	Jump fallthrough
+
+blk7: () <-- (blk4)
 	Jump blk1
 
-blk3: () <-- (blk1)
+blk5: () <-- (blk4)
 	Jump blk_ret, v2
+
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
 `,
 		},
 		{
@@ -997,52 +1103,73 @@ signatures:
 	sig0: i64i64i32_i32
 
 blk0: (v0:i64, v1:i64, v2:i32)
-	v3:i32 = Iconst_32 0x2
-	v4:i32 = Icmp lt_s, v2, v3
-	Brz v4, blk2
-	Jump blk1
+	v3:i32 = PreemptRequested
+	Brnz v3, blk1
+	Jump blk2
 
 blk1: () <-- (blk0)
-	Return v2
+	Yield v0
+	Jump blk2
 
-blk2: () <-- (blk0)
+blk2: () <-- (blk0,blk1)
+	v4:i32 = Iconst_32 0x2
+	v5:i32 = Icmp lt_s, v2, v4
+	Brz v5, blk4
 	Jump blk3
 
 blk3: () <-- (blk2)
-	v5:i32 = Iconst_32 0x1
-	v6:i32 = Isub v2, v5
-	v7:i32 = Call f0:sig0, v0, v1, v6
-	v8:i32 = Iconst_32 0x2
-	v9:i32 = Isub v2, v8
-	v10:i32 = Call f0:sig0, v0, v1, v9
-	v11:i32 = Iadd v7, v10
-	Jump blk_ret, v11
+	Return v2
+
+blk4: () <-- (blk2)
+	Jump blk5
+
+blk5: () <-- (blk4)
+	v6:i32 = Iconst_32 0x1
+	v7:i32 = Isub v2, v6
+	v8:i32 = Call f0:sig0, v0, v1, v7
+	v9:i32 = Iconst_32 0x2
+	v10:i32 = Isub v2, v9
+	v11:i32 = Call f0:sig0, v0, v1, v10
+	v12:i32 = Iadd v8, v11
+	Jump blk_ret, v12
 `,
 			expAfterPasses: `
 signatures:
 	sig0: i64i64i32_i32
 
 blk0: (v0:i64, v1:i64, v2:i32)
-	v3:i32 = Iconst_32 0x2
-	v4:i32 = Icmp lt_s, v2, v3
-	Brz v4, blk2
+	v3:i32 = PreemptRequested
+	Brnz v3, blk1
 	Jump fallthrough
 
-blk1: () <-- (blk0)
-	Return v2
+blk6: () <-- (blk0)
+	Jump fallthrough
 
-blk2: () <-- (blk0)
+blk2: () <-- (blk6,blk1)
+	v4:i32 = Iconst_32 0x2
+	v5:i32 = Icmp lt_s, v2, v4
+	Brz v5, blk4
 	Jump fallthrough
 
 blk3: () <-- (blk2)
-	v5:i32 = Iconst_32 0x1
-	v6:i32 = Isub v2, v5
-	v7:i32 = Call f0:sig0, v0, v1, v6
-	v8:i32 = Iconst_32 0x2
-	v9:i32 = Isub v2, v8
-	v10:i32 = Call f0:sig0, v0, v1, v9
-	v11:i32 = Iadd v7, v10
-	Jump blk_ret, v11
+	Return v2
+
+blk4: () <-- (blk2)
+	Jump fallthrough
+
+blk5: () <-- (blk4)
+	v6:i32 = Iconst_32 0x1
+	v7:i32 = Isub v2, v6
+	v8:i32 = Call f0:sig0, v0, v1, v7
+	v9:i32 = Iconst_32 0x2
+	v10:i32 = Isub v2, v9
+	v11:i32 = Call f0:sig0, v0, v1, v10
+	v12:i32 = Iadd v8, v11
+	Jump blk_ret, v12
+
+blk1: () <-- (blk0)
+	Yield v0
+	Jump blk2
 `,
 		},
 		{
@@ -1163,11 +1290,20 @@ signatures:
 	sig1: i64i64i32i32_i32
 
 blk0: (v0:i64, v1:i64, v2:i32)
+	v3:i32 = PreemptRequested
+	Brnz v3, blk1
+	Jump blk2
+
+blk1: () <-- (blk0)
+	Yield v0
+	Jump blk2
+
+blk2: () <-- (blk0,blk1)
 	Store v1, v0, 0x8
-	v3:i64 = Load v1, 0x8
-	v4:i64 = Load v1, 0x10
-	v5:i32 = CallIndirect v3:sig1, v0, v4, v2, v2
-	Jump blk_ret, v5
+	v4:i64 = Load v1, 0x8
+	v5:i64 = Load v1, 0x10
+	v6:i32 = CallIndirect v4:sig1, v0, v5, v2, v2
+	Jump blk_ret, v6
 `,
 		},
 		{
@@ -1304,40 +1440,58 @@ signatures:
 	sig2: i64i32i64_i64
 
 blk0: (v0:i64, v1:i64)
+	v2:i32 = PreemptRequested
+	Brnz v2, blk1
+	Jump blk2
+
+blk1: () <-- (blk0)
+	Yield v0
+	Jump blk2
+
+blk2: () <-- (blk0,blk1)
 	Store v1, v0, 0x8
-	v2:i64 = Load v1, 0x20
-	v3:i64 = Load v1, 0x28
-	v4:i32 = CallIndirect v2:sig0, v0, v3
-	v5:i64 = Load v1, 0x8
-	v6:i64 = Load v5, 0x8
-	v7:i64 = Load v1, 0x8
-	v8:i64 = Load v7, 0x0
-	v9:i64 = Iconst_64 0x10
-	v10:i64 = Ushr v8, v9
-	v11:i32 = Ireduce v10
-	v12:i32 = Iconst_32 0xa
-	v13:i64 = UExtend v12, 32->64
+	v3:i64 = Load v1, 0x20
+	v4:i64 = Load v1, 0x28
+	v5:i32 = CallIndirect v3:sig0, v0, v4
+	v6:i64 = Load v1, 0x8
+	v7:i64 = Load v6, 0x8
+	v8:i64 = Load v1, 0x8
+	v9:i64 = Load v8, 0x0
+	v10:i64 = Iconst_64 0x10
+	v11:i64 = Ushr v9, v10
+	v12:i32 = Ireduce v11
+	v13:i32 = Iconst_32 0xa
+	v14:i64 = UExtend v13, 32->64
 	Store v1, v0, 0x8
-	v14:i64 = Load v0, 0x48
-	v15:i32 = Iconst_32 0x0
-	v16:i64 = CallIndirect v14:sig2, v0, v15, v13
-	v17:i32 = Ireduce v16
-	v18:i64 = Load v1, 0x8
-	v19:i64 = Load v18, 0x8
-	v20:i64 = Load v1, 0x8
-	v21:i64 = Load v20, 0x0
+	v15:i64 = Load v0, 0x48
+	v16:i32 = Iconst_32 0x0
+	v17:i64 = CallIndirect v15:sig2, v0, v16, v14
+	v18:i32 = Ireduce v17
+	v19:i64 = Load v1, 0x8
+	v20:i64 = Load v19, 0x8
+	v21:i64 = Load v1, 0x8
+	v22:i64 = Load v21, 0x0
+	v23:i32 = PreemptRequested
+	Brnz v23, blk3
+	Jump blk4
+
+blk3: () <-- (blk2)
+	Yield v0
+	Jump blk4
+
+blk4: () <-- (blk2,blk3)
 	Store v1, v0, 0x8
-	v22:i64 = Load v1, 0x20
-	v23:i64 = Load v1, 0x28
-	v24:i32 = CallIndirect v22:sig0, v0, v23
-	v25:i64 = Load v1, 0x8
-	v26:i64 = Load v25, 0x8
+	v24:i64 = Load v1, 0x20
+	v25:i64 = Load v1, 0x28
+	v26:i32 = CallIndirect v24:sig0, v0, v25
 	v27:i64 = Load v1, 0x8
-	v28:i64 = Load v27, 0x0
-	v29:i64 = Iconst_64 0x10
-	v30:i64 = Ushr v28, v29
-	v31:i32 = Ireduce v30
-	Jump blk_ret, v4, v11, v24, v31
+	v28:i64 = Load v27, 0x8
+	v29:i64 = Load v1, 0x8
+	v30:i64 = Load v29, 0x0
+	v31:i64 = Iconst_64 0x10
+	v32:i64 = Ushr v30, v31
+	v33:i32 = Ireduce v32
+	Jump blk_ret, v5, v12, v26, v33
 `,
 			expAfterPasses: `
 signatures:
@@ -1345,31 +1499,55 @@ signatures:
 	sig2: i64i32i64_i64
 
 blk0: (v0:i64, v1:i64)
+	v2:i32 = PreemptRequested
+	Brnz v2, blk1
+	Jump fallthrough
+
+blk5: () <-- (blk0)
+	Jump fallthrough
+
+blk2: () <-- (blk5,blk1)
 	Store v1, v0, 0x8
-	v2:i64 = Load v1, 0x20
-	v3:i64 = Load v1, 0x28
-	v4:i32 = CallIndirect v2:sig0, v0, v3
-	v7:i64 = Load v1, 0x8
-	v8:i64 = Load v7, 0x0
-	v9:i64 = Iconst_64 0x10
-	v10:i64 = Ushr v8, v9
-	v11:i32 = Ireduce v10
-	v12:i32 = Iconst_32 0xa
-	v13:i64 = UExtend v12, 32->64
+	v3:i64 = Load v1, 0x20
+	v4:i64 = Load v1, 0x28
+	v5:i32 = CallIndirect v3:sig0, v0, v4
+	v8:i64 = Load v1, 0x8
+	v9:i64 = Load v8, 0x0
+	v10:i64 = Iconst_64 0x10
+	v11:i64 = Ushr v9, v10
+	v12:i32 = Ireduce v11
+	v13:i32 = Iconst_32 0xa
+	v14:i64 = UExtend v13, 32->64
 	Store v1, v0, 0x8
-	v14:i64 = Load v0, 0x48
-	v15:i32 = Iconst_32 0x0
-	v16:i64 = CallIndirect v14:sig2, v0, v15, v13
+	v15:i64 = Load v0, 0x48
+	v16:i32 = Iconst_32 0x0
+	v17:i64 = CallIndirect v15:sig2, v0, v16, v14
+	v23:i32 = PreemptRequested
+	Brnz v23, blk3
+	Jump fallthrough
+
+blk6: () <-- (blk2)
+	Jump fallthrough
+
+blk4: () <-- (blk6,blk3)
 	Store v1, v0, 0x8
-	v22:i64 = Load v1, 0x20
-	v23:i64 = Load v1, 0x28
-	v24:i32 = CallIndirect v22:sig0, v0, v23
-	v27:i64 = Load v1, 0x8
-	v28:i64 = Load v27, 0x0
-	v29:i64 = Iconst_64 0x10
-	v30:i64 = Ushr v28, v29
-	v31:i32 = Ireduce v30
-	Jump blk_ret, v4, v11, v24, v31
+	v24:i64 = Load v1, 0x20
+	v25:i64 = Load v1, 0x28
+	v26:i32 = CallIndirect v24:sig0, v0, v25
+	v29:i64 = Load v1, 0x8
+	v30:i64 = Load v29, 0x0
+	v31:i64 = Iconst_64 0x10
+	v32:i64 = Ushr v30, v31
+	v33:i32 = Ireduce v32
+	Jump blk_ret, v5, v12, v26, v33
+
+blk3: () <-- (blk2)
+	Yield v0
+	Jump blk4
+
+blk1: () <-- (blk0)
+	Yield v0
+	Jump blk2
 `,
 		},
 		{
@@ -1562,28 +1740,37 @@ signatures:
 	sig2: i64i64_i32
 
 blk0: (v0:i64, v1:i64, v2:i32)
-	v3:i64 = Load v1, 0x10
-	v4:i32 = Load v3, 0x8
-	v5:i32 = Icmp ge_u, v2, v4
-	ExitIfTrue v5, v0, table_out_of_bounds
-	v6:i64 = Load v3, 0x0
-	v7:i64 = Iconst_64 0x3
-	v8:i32 = Ishl v2, v7
-	v9:i64 = Iadd v6, v8
-	v10:i64 = Load v9, 0x0
-	v11:i64 = Iconst_64 0x0
-	v12:i32 = Icmp eq, v10, v11
-	ExitIfTrue v12, v0, indirect_call_null_pointer
-	v13:i32 = Load v10, 0x10
-	v14:i64 = Load v1, 0x8
-	v15:i32 = Load v14, 0x8
-	v16:i32 = Icmp neq, v13, v15
-	ExitIfTrue v16, v0, indirect_call_type_mismatch
-	v17:i64 = Load v10, 0x0
-	v18:i64 = Load v10, 0x8
+	v3:i32 = PreemptRequested
+	Brnz v3, blk1
+	Jump blk2
+
+blk1: () <-- (blk0)
+	Yield v0
+	Jump blk2
+
+blk2: () <-- (blk0,blk1)
+	v4:i64 = Load v1, 0x10
+	v5:i32 = Load v4, 0x8
+	v6:i32 = Icmp ge_u, v2, v5
+	ExitIfTrue v6, v0, table_out_of_bounds
+	v7:i64 = Load v4, 0x0
+	v8:i64 = Iconst_64 0x3
+	v9:i32 = Ishl v2, v8
+	v10:i64 = Iadd v7, v9
+	v11:i64 = Load v10, 0x0
+	v12:i64 = Iconst_64 0x0
+	v13:i32 = Icmp eq, v11, v12
+	ExitIfTrue v13, v0, indirect_call_null_pointer
+	v14:i32 = Load v11, 0x10
+	v15:i64 = Load v1, 0x8
+	v16:i32 = Load v15, 0x8
+	v17:i32 = Icmp neq, v14, v16
+	ExitIfTrue v17, v0, indirect_call_type_mismatch
+	v18:i64 = Load v11, 0x0
+	v19:i64 = Load v11, 0x8
 	Store v1, v0, 0x8
-	v19:i32 = CallIndirect v17:sig2, v0, v18
-	Jump blk_ret, v19
+	v20:i32 = CallIndirect v18:sig2, v0, v19
+	Jump blk_ret, v20
 `,
 		},
 		{
@@ -1812,7 +1999,7 @@ blk0: (v0:i64, v1:i64, v2:v128, v3:v128)
 			features: api.CoreFeaturesV2 | experimental.CoreFeaturesThreads,
 			exp: `
 signatures:
-	sig6: i64i32i64i32i64_i32
+	sig5: i64i32i64i32i64_i32
 
 blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i64)
 	Store v1, v0, 0x8
@@ -1835,7 +2022,7 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i64)
 	ExitIfTrue v19, v0, unaligned_atomic
 	v20:i64 = Load v0, 0x288
 	v21:i32 = Iconst_32 0x0
-	v22:i32 = CallIndirect v20:sig6, v0, v21, v4, v3, v15
+	v22:i32 = CallIndirect v20:sig5, v0, v21, v4, v3, v15
 	Jump blk_ret, v22
 `,
 		},
@@ -1845,7 +2032,7 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i64)
 			features: api.CoreFeaturesV2 | experimental.CoreFeaturesThreads,
 			exp: `
 signatures:
-	sig7: i64i32i64i64i64_i32
+	sig6: i64i32i64i64i64_i32
 
 blk0: (v0:i64, v1:i64, v2:i32, v3:i64, v4:i64)
 	Store v1, v0, 0x8
@@ -1868,7 +2055,7 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i64, v4:i64)
 	ExitIfTrue v19, v0, unaligned_atomic
 	v20:i64 = Load v0, 0x290
 	v21:i32 = Iconst_32 0x0
-	v22:i32 = CallIndirect v20:sig7, v0, v21, v4, v3, v15
+	v22:i32 = CallIndirect v20:sig6, v0, v21, v4, v3, v15
 	Jump blk_ret, v22
 `,
 		},
@@ -1878,7 +2065,7 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i64, v4:i64)
 			features: api.CoreFeaturesV2 | experimental.CoreFeaturesThreads,
 			exp: `
 signatures:
-	sig8: i64i32i32i64_i32
+	sig7: i64i32i32i64_i32
 
 blk0: (v0:i64, v1:i64, v2:i32, v3:i32)
 	Store v1, v0, 0x8
@@ -1901,7 +2088,7 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32)
 	ExitIfTrue v18, v0, unaligned_atomic
 	v19:i64 = Load v0, 0x298
 	v20:i32 = Iconst_32 0x0
-	v21:i32 = CallIndirect v19:sig8, v0, v20, v3, v14
+	v21:i32 = CallIndirect v19:sig7, v0, v20, v3, v14
 	Jump blk_ret, v21
 `,
 		},
@@ -2696,51 +2883,69 @@ blk0: (v0:i64, v1:i64, v2:i32)
 	v10:i32 = Load v9, 0x10
 	Jump blk1, v2
 
-blk1: (v11:i32) <-- (blk0,blk6)
-	v12:i64 = Iconst_64 0x24
-	v13:i64 = UExtend v11, 32->64
-	v14:i64 = Load v1, 0x10
-	v15:i64 = Iadd v13, v12
-	v16:i32 = Icmp lt_u, v14, v15
-	ExitIfTrue v16, v0, memory_out_of_bounds
-	v17:i64 = Load v1, 0x8
-	v18:i64 = Iadd v17, v13
-	v19:i32 = Load v18, 0x20
-	Brz v19, blk4
-	Jump blk3
+blk1: (v12:i32) <-- (blk0,blk11)
+	v11:i32 = PreemptRequested
+	Brnz v11, blk3
+	Jump blk4
 
 blk2: ()
 
 blk3: () <-- (blk1)
-	Jump blk6, v11
+	Yield v0
+	Jump blk4
 
-blk4: () <-- (blk1)
-	Brnz v11, blk_ret
-	Jump blk9
+blk4: () <-- (blk1,blk3)
+	v13:i64 = Iconst_64 0x24
+	v14:i64 = UExtend v12, 32->64
+	v15:i64 = Load v1, 0x10
+	v16:i64 = Iadd v14, v13
+	v17:i32 = Icmp lt_u, v15, v16
+	ExitIfTrue v17, v0, memory_out_of_bounds
+	v18:i64 = Load v1, 0x8
+	v19:i64 = Iadd v18, v14
+	v20:i32 = Load v19, 0x20
+	Brz v20, blk6
+	Jump blk5
 
-blk5: () <-- (blk8,blk9)
+blk5: () <-- (blk4)
+	Jump blk8, v12
+
+blk6: () <-- (blk4)
+	Brnz v12, blk_ret
+	Jump blk13
+
+blk7: () <-- (blk12,blk13)
 	Jump blk_ret
 
-blk6: (v20:i32) <-- (blk3)
-	v21:i64 = Iconst_64 0x54
-	v22:i64 = UExtend v20, 32->64
-	v23:i64 = Load v1, 0x10
-	v24:i64 = Iadd v22, v21
-	v25:i32 = Icmp lt_u, v23, v24
-	ExitIfTrue v25, v0, memory_out_of_bounds
-	v26:i64 = Load v1, 0x8
-	v27:i64 = Iadd v26, v22
-	v28:i32 = Load v27, 0x50
-	Brnz v28, blk1, v20
-	Jump blk8
+blk8: (v22:i32) <-- (blk5)
+	v21:i32 = PreemptRequested elided
+	Brnz v21, blk10
+	Jump blk11
 
-blk7: ()
+blk9: ()
 
-blk8: () <-- (blk6)
-	Jump blk5
+blk10: () <-- (blk8)
+	Yield v0
+	Jump blk11
 
-blk9: () <-- (blk4)
-	Jump blk5
+blk11: () <-- (blk8,blk10)
+	v23:i64 = Iconst_64 0x54
+	v24:i64 = UExtend v22, 32->64
+	v25:i64 = Load v1, 0x10
+	v26:i64 = Iadd v24, v23
+	v27:i32 = Icmp lt_u, v25, v26
+	ExitIfTrue v27, v0, memory_out_of_bounds
+	v28:i64 = Load v1, 0x8
+	v29:i64 = Iadd v28, v24
+	v30:i32 = Load v29, 0x50
+	Brnz v30, blk1, v22
+	Jump blk12
+
+blk12: () <-- (blk11)
+	Jump blk7
+
+blk13: () <-- (blk6)
+	Jump blk7
 `,
 		},
 	} {
@@ -2758,7 +2963,7 @@ blk9: () <-- (blk4)
 			b := ssa.NewBuilder()
 
 			offset := nativeapi.NewModuleContextOffsetData(tc.m, tc.needListener)
-			fc := NewFrontendCompiler(tc.m, b, &offset, tc.ensureTermination, tc.needListener, false)
+			fc := NewFrontendCompiler(tc.m, b, &offset, tc.needListener, false)
 			typeIndex := tc.m.FunctionSection[tc.targetIndex]
 			code := &tc.m.CodeSection[tc.targetIndex]
 			fc.Init(tc.targetIndex, typeIndex, &tc.m.TypeSection[typeIndex], code.LocalTypes, code.Body, tc.needListener, 0)
@@ -2842,22 +3047,21 @@ func TestCompiler_declareSignatures(t *testing.T) {
 			{ID: 2, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeF64, ssa.TypeI32}},
 			{ID: 3, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64, ssa.TypeI32}},
 			{ID: 4, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64}},
-			{ID: 5, Params: []ssa.Type{ssa.TypeI64}},
-			{ID: 6, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64}},
-			{ID: 7, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32}, Results: []ssa.Type{ssa.TypeI64}},
-			{ID: 8, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeI64}},
-			{ID: 9, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
-			{ID: 10, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
-			{ID: 11, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
+			{ID: 5, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64}},
+			{ID: 6, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32}, Results: []ssa.Type{ssa.TypeI64}},
+			{ID: 7, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeI64}},
+			{ID: 8, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
+			{ID: 9, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
+			{ID: 10, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
 			// EH signatures.
-			{ID: 12, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64}},
-			{ID: 13, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
+			{ID: 11, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64}},
+			{ID: 12, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
 			// GC runtime. The safepoint shares it rather than declaring one of its own.
-			{ID: 14, Params: []ssa.Type{
+			{ID: 13, Params: []ssa.Type{
 				ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64,
 			}, Results: []ssa.Type{ssa.TypeI64}},
 			// memclr signature.
-			{ID: 15, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
+			{ID: 14, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
 		}
 
 		require.Equal(t, len(expected), len(declaredSigs))
@@ -2890,22 +3094,21 @@ func TestCompiler_declareSignatures(t *testing.T) {
 			{ID: 11, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI32}},
 			// Misc.
 			{ID: 12, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64}},
-			{ID: 13, Params: []ssa.Type{ssa.TypeI64}},
-			{ID: 14, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64}},
-			{ID: 15, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32}, Results: []ssa.Type{ssa.TypeI64}},
-			{ID: 16, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeI64}},
-			{ID: 17, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
-			{ID: 18, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
-			{ID: 19, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
+			{ID: 13, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64}},
+			{ID: 14, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32}, Results: []ssa.Type{ssa.TypeI64}},
+			{ID: 15, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeI64}},
+			{ID: 16, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
+			{ID: 17, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
+			{ID: 18, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
 			// EH signatures.
-			{ID: 20, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64}},
-			{ID: 21, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
+			{ID: 19, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64}},
+			{ID: 20, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
 			// GC runtime. The safepoint shares it rather than declaring one of its own.
-			{ID: 22, Params: []ssa.Type{
+			{ID: 21, Params: []ssa.Type{
 				ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64,
 			}, Results: []ssa.Type{ssa.TypeI64}},
 			// memclr signature.
-			{ID: 23, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
+			{ID: 22, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
 		}
 		require.Equal(t, len(expected), len(declaredSigs))
 		for i := 0; i < len(declaredSigs); i++ {
@@ -2984,7 +3187,7 @@ func TestKnownSafeBound_valid(t *testing.T) {
 }
 
 func TestCompiler_finalizeKnownSafeBoundsAtTheEndOoBlock(t *testing.T) {
-	c := NewFrontendCompiler(&wasm.Module{}, ssa.NewBuilder(), nil, false, false, false)
+	c := NewFrontendCompiler(&wasm.Module{}, ssa.NewBuilder(), nil, false, false)
 	blk := c.ssaBuilder.AllocateBasicBlock()
 	require.True(t, len(c.getKnownSafeBoundsAtTheEndOfBlocks(blk.ID()).View()) == 0)
 	c.ssaBuilder.SetCurrentBlock(blk)
@@ -3005,7 +3208,7 @@ func TestCompiler_finalizeKnownSafeBoundsAtTheEndOoBlock(t *testing.T) {
 
 func TestCompiler_initializeCurrentBlockKnownBounds(t *testing.T) {
 	t.Run("single (sealed)", func(t *testing.T) {
-		c := NewFrontendCompiler(&wasm.Module{}, ssa.NewBuilder(), nil, false, false, false)
+		c := NewFrontendCompiler(&wasm.Module{}, ssa.NewBuilder(), nil, false, false)
 		builder := c.ssaBuilder
 		child := builder.AllocateBasicBlock()
 		{
@@ -3036,7 +3239,7 @@ func TestCompiler_initializeCurrentBlockKnownBounds(t *testing.T) {
 		require.Equal(t, ssa.Value(54321), kb.absoluteAddr)
 	})
 	t.Run("single (unsealed)", func(t *testing.T) {
-		c := NewFrontendCompiler(&wasm.Module{}, ssa.NewBuilder(), nil, false, false, false)
+		c := NewFrontendCompiler(&wasm.Module{}, ssa.NewBuilder(), nil, false, false)
 		builder := c.ssaBuilder
 		child := builder.AllocateBasicBlock()
 		{
@@ -3066,7 +3269,7 @@ func TestCompiler_initializeCurrentBlockKnownBounds(t *testing.T) {
 		require.NotEqual(t, ssa.Value(54321), kb.absoluteAddr)
 	})
 	t.Run("multiple predecessors", func(t *testing.T) {
-		c := NewFrontendCompiler(&wasm.Module{}, ssa.NewBuilder(), nil, false, false, false)
+		c := NewFrontendCompiler(&wasm.Module{}, ssa.NewBuilder(), nil, false, false)
 		builder := c.ssaBuilder
 		child := builder.AllocateBasicBlock()
 		{

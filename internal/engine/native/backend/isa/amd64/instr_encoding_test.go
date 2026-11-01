@@ -26,6 +26,24 @@ func TestInstruction_format_encode(t *testing.T) {
 			want:       "c3",
 		},
 		{
+			// REX.B F6 /0, [r13+7], imm8 0x80.
+			setup:      func(i *instruction) { i.asPreemptCheck(newAmodeImmReg(7, r13VReg)) },
+			wantFormat: "testb $0x80, 7(%r13)",
+			want:       "41f6450780",
+		},
+		{
+			// pushq %rax; callq *88(%rax); add $8, %rsp.
+			setup:      func(i *instruction) { i.asYield(newAmodeImmReg(88, raxVReg)) },
+			wantFormat: "yield *88(%rax)",
+			want:       "50ff50584883c408",
+		},
+		{
+			// r12 takes a REX prefix in both the push and the call, and a SIB byte in the call.
+			setup:      func(i *instruction) { i.asYield(newAmodeImmReg(88, r12VReg)) },
+			wantFormat: "yield *88(%r12)",
+			want:       "415441ff5424584883c408",
+		},
+		{
 			setup:      func(i *instruction) { i.asImm(r14VReg, 1234567, false) },
 			wantFormat: "movl $1234567, %r14d",
 			want:       "41be87d61200",

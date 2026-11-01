@@ -64,25 +64,14 @@ func newCaseRuntimeWazy(tb testing.TB) wazy.Runtime {
 	return newCaseRuntimeWazyCfg(tb, wazy.NewRuntimeConfigCompiler())
 }
 
-// newCaseRuntimeWazyClose is newCaseRuntimeWazy with WithCloseOnContextDone, so
-// caseWasm's loop-containing exports emit the interrupt check (H6 / C21 area).
-func newCaseRuntimeWazyClose(tb testing.TB) wazy.Runtime {
-	return newCaseRuntimeWazyCfg(tb, wazy.NewRuntimeConfigCompiler().WithCloseOnContextDone(true))
-}
-
 // newHostLoopWazy builds a runtime with an env.cb host function (identity) and
-// returns the instantiated hostloop "work" function. closeOn toggles
-// WithCloseOnContextDone.
-func newHostLoopWazy(tb testing.TB, wasm []byte, closeOn bool) (wazy.Runtime, interface {
+// returns the instantiated hostloop "work" function.
+func newHostLoopWazy(tb testing.TB, wasm []byte) (wazy.Runtime, interface {
 	CallWithStack(context.Context, []uint64) error
 },
 ) {
 	ctx := context.Background()
-	cfg := wazy.NewRuntimeConfigCompiler()
-	if closeOn {
-		cfg = cfg.WithCloseOnContextDone(true)
-	}
-	r := wazy.NewRuntimeWithConfig(ctx, cfg)
+	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler())
 	hb := r.NewHostModuleBuilder("env")
 	hb.NewFunctionBuilder().WithGoModuleFunction(wazyapi.GoModuleFunc(func(ctx context.Context, mod wazyapi.Module, stack []uint64) {
 	}), []wazyapi.ValueType{wazyapi.ValueTypeI32}, []wazyapi.ValueType{wazyapi.ValueTypeI32}).Export("cb")

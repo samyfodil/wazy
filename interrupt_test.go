@@ -2,6 +2,7 @@ package wazy_test
 
 import (
 	"context"
+	"errors"
 	"runtime"
 	"testing"
 	"time"
@@ -21,9 +22,9 @@ func requireCompiler(t *testing.T) {
 }
 
 // infLoopWasm exports "loop_forever" = (loop (br 0)): a tight native loop with
-// no host calls. Under WithCloseOnContextDone its back-edge spends termination
-// fuel, and running out returns to Go, which yields the P so Go can collect and
-// cancel while it spins.
+// no host calls. Its header checks Go's preemption word, and returns to Go when
+// the runtime asks, which yields the P so Go can collect and cancel while it
+// spins.
 var infLoopWasm = []byte{
 	0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02,
 	0x01, 0x00, 0x07, 0x10, 0x01, 0x0c, 0x6c, 0x6f, 0x6f, 0x70, 0x5f, 0x66, 0x6f, 0x72, 0x65, 0x76,
@@ -32,7 +33,7 @@ var infLoopWasm = []byte{
 
 // spinWasm exports "spin" (param i64 n) (result i64): counts n down to 0 in a
 // tight loop and returns 0. Used to validate the loop lowering produces correct
-// results with the module-closed test in the header.
+// results with the preemption check in the header.
 var spinWasm = []byte{
 	0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7e, 0x01, 0x7e,
 	0x03, 0x02, 0x01, 0x00, 0x07, 0x08, 0x01, 0x04, 0x73, 0x70, 0x69, 0x6e, 0x00, 0x00, 0x0a, 0x1a,
@@ -40,15 +41,14 @@ var spinWasm = []byte{
 	0x7d, 0x21, 0x00, 0x0c, 0x00, 0x0b, 0x0b, 0x20, 0x00, 0x0b,
 }
 
-// TestInterruptCheck_GCNotBlockedAndInterrupts is the load-bearing test: under
-// WithCloseOnContextDone with wazy's non-zero default interval, a tight
+// TestInterruptCheck_GCNotBlockedAndInterrupts is the load-bearing test: a tight
 // infinite loop (a) still yields often enough that Go's GC stop-the-world is
 // not blocked, and (b) is terminated when the context deadline fires. Without
-// the interrupt check a tight loop blocks GC for its entire duration.
+// the preemption check a tight loop blocks GC for its entire duration.
 func TestInterruptCheck_GCNotBlockedAndInterrupts(t *testing.T) {
 	ctx := context.Background()
 	requireCompiler(t)
-	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler().WithCloseOnContextDone(true))
+	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler())
 	defer r.Close(ctx)
 	mod, err := r.Instantiate(ctx, infLoopWasm)
 	require.NoError(t, err)
@@ -72,26 +72,24 @@ func TestInterruptCheck_GCNotBlockedAndInterrupts(t *testing.T) {
 
 	select {
 	case e := <-errCh:
-		require.Error(t, e) // context deadline exceeded / module closed
+		require.True(t, errors.Is(e, context.DeadlineExceeded), "got %v", e)
 	case <-time.After(5 * time.Second):
 		t.Fatal("loop did not terminate on context cancellation")
 	}
 }
 
-// TestInterruptCheck_LoopResultsCorrect validates that the inline fuel check
-// emitted into every loop header under WithCloseOnContextDone does not disturb
-// the loop's own values: the slow path is a separate block, so the loop body's
-// block parameters have to survive the extra edge.
+// TestInterruptCheck_LoopResultsCorrect validates that the preemption check in
+// every loop header does not disturb the loop's own values: the slow path is a
+// separate block, so the loop body's block parameters have to survive the extra
+// edge.
 func TestInterruptCheck_LoopResultsCorrect(t *testing.T) {
 	ctx := context.Background()
 	requireCompiler(t)
-	for _, closeOnCtxDone := range []bool{false, true} {
-		r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler().WithCloseOnContextDone(closeOnCtxDone))
-		mod, err := r.Instantiate(ctx, spinWasm)
-		require.NoError(t, err)
-		res, err := mod.ExportedFunction("spin").Call(ctx, 5000)
-		require.NoError(t, err)
-		require.Equal(t, uint64(0), res[0])
-		r.Close(ctx)
-	}
+	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler())
+	defer r.Close(ctx)
+	mod, err := r.Instantiate(ctx, spinWasm)
+	require.NoError(t, err)
+	res, err := mod.ExportedFunction("spin").Call(ctx, 5000)
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), res[0])
 }

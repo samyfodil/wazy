@@ -276,6 +276,49 @@ func Test_swapInstruction(t *testing.T) {
 	})
 }
 
+// The layout order puts a check's slow path last, after the block it rejoins; the
+// post-order still lists every block after the blocks it goes on to.
+func TestBuilder_BlockIteratorPostOrder(t *testing.T) {
+	b := NewBuilder().(*builder)
+	entry, check, slow, cont := b.allocateBasicBlock(), b.allocateBasicBlock(), b.allocateBasicBlock(), b.allocateBasicBlock()
+	ctx := entry.AddParam(b, TypeI64)
+	b.SetCurrentBlock(entry)
+	b.AllocateInstruction().AsJump(ValuesNil, check).Insert(b)
+	b.SetCurrentBlock(check)
+	requested := b.AllocateInstruction().AsIconst32(1).Insert(b).Return()
+	b.AllocateInstruction().AsBrnz(requested, ValuesNil, slow).Insert(b)
+	b.AllocateInstruction().AsJump(ValuesNil, cont).Insert(b)
+	b.SetCurrentBlock(slow)
+	b.AllocateInstruction().AsYield(ctx).Insert(b)
+	b.AllocateInstruction().AsJump(ValuesNil, cont).Insert(b)
+	b.SetCurrentBlock(cont)
+	b.AllocateInstruction().AsJump(ValuesNil, b.ReturnBlock()).Insert(b)
+	for _, blk := range []*basicBlock{entry, check, slow, cont} {
+		b.Seal(blk)
+	}
+	b.runPreBlockLayoutPasses()
+	b.runBlockLayoutPass()
+
+	var layout []*basicBlock
+	for blk := b.BlockIteratorReversePostOrderBegin(); blk != nil; blk = b.BlockIteratorReversePostOrderNext() {
+		layout = append(layout, blk.(*basicBlock))
+	}
+	require.Equal(t, slow, layout[len(layout)-1])
+
+	pos := map[BasicBlockID]int{}
+	for blk := b.BlockIteratorPostOrderBegin(); blk != nil; blk = b.BlockIteratorPostOrderNext() {
+		pos[blk.ID()] = len(pos)
+	}
+	require.Equal(t, len(layout), len(pos))
+	for _, blk := range layout {
+		for _, succ := range blk.success {
+			if !succ.ReturnBlock() {
+				require.True(t, pos[succ.id] < pos[blk.id], "blk%d -> blk%d", blk.id, succ.id)
+			}
+		}
+	}
+}
+
 func TestBuilder_LayoutBlocks(t *testing.T) {
 	insertJump := func(b *builder, src, dst *basicBlock, vs ...Value) {
 		b.SetCurrentBlock(src)

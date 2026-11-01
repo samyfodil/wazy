@@ -18,9 +18,9 @@ var closeRaceModule = []byte{
 // Issue #69's reproducer, verbatim in shape: read a module's memory through an
 // api.Memory obtained before the close, from a goroutine, while another closes
 // the module. The embedder that reported it cannot order the two -- the close
-// is a kill for a call stuck in the guest (WithCloseOnContextDone) and the
-// reader is that call still unwinding through host code, so waiting for it is
-// the one thing the kill must not do.
+// is a kill for a call stuck in the guest, from a watchdog, and the reader is
+// that call still unwinding through host code, so waiting for it is the one
+// thing the kill must not do.
 //
 // A read that observes the close must fail; it must not be a data race, and it
 // must not read a buffer the pool has handed to some other module. Only

@@ -50,7 +50,7 @@ sources):
 | `BenchmarkCompileModulesExtensive` | Compiles five real producer outputs (TinyGo 370 KB, Rust 10 KB, Zig 5 KB, zig-cc 786 KB, cargo-wasi 104 KB) on a fresh runtime every iteration. |
 | `BenchmarkConstAddrLoads`, `BenchmarkDynAddrLoads`, `BenchmarkURemAddrLoads`, `BenchmarkDominatedBounds` | Bounds-check-elision kernels (constant, masked, `urem`-bounded and dominated addresses). |
 | `BenchmarkDispatch*` | A synthetic `call_indirect` dispatch kernel: `mono`, `poly`, `direct`, plus heavy-callee variants. |
-| `BenchmarkCloseOnContextDone`, `BenchmarkHostCallLoopCloseOnContextDone`, `BenchmarkFibCloseOnContextDone` | Interruptible cost under `WithCloseOnContextDone`, on a near-empty spin kernel, a host-call-dense loop, and real compute. |
+| `BenchmarkInterruptibleSpin`, `BenchmarkInterruptibleHostCallLoop`, `BenchmarkInterruptibleFib` | What being able to interrupt a running guest costs, on a near-empty spin kernel, a host-call-dense loop, and real compute: wazy, which always can, against wazero with `WithCloseOnContextDone` on and off. |
 | `BenchmarkCase3`, `BenchmarkCompile3`, `BenchmarkExecute3`, `BenchmarkExecute3Heavy`, `BenchmarkRelaxedSimd`, `BenchmarkSpectreCost` | The three-way arms that include wasmtime (see [§4](#4-against-wasmtime)). |
 
 ### The in-repo suites
@@ -136,9 +136,9 @@ Only figures where wazy and wazero were measured **in the same run** appear here
 | `Instantiate` (37 KB TinyGo module) | 1.724 µs | 15.74 µs | **9.1x** | OPTIMIZATIONS.md sweep round 3, Apple M4, benchstat over interleaved A/B runs |
 | `HostCall/gomodule/CallWithStack` | 47.82 ns | 48.26 ns | a tie | same run as above |
 | `BenchmarkConstAddrLoads` (constant-address load kernel) | 1.62 µs | 5.10 µs | **~3.1x** | OPTIMIZATIONS.md C21, core-pinned i9-12900HK, interleaved benchstat n=10 |
-| `BenchmarkCloseOnContextDone`, 100k-iteration tight loop, `WithCloseOnContextDone` | 160 µs | 2074 µs | **~12.9x** (−92.3%) | OPTIMIZATIONS.md H6, quiet i9-12900HK, benchstat n=10, vs `wazero@main` |
-| `case.wasm` `fibonacci` under `WithCloseOnContextDone` | 6.56 ms | 76.0 ms | **~11.6x** (−91.4%) | same run as above |
-| Loop calling a host function each iteration: cost of turning the feature on | +5.3% | +75.5% | wazy 2.0x faster close-on | same run as above |
+| `BenchmarkInterruptibleSpin`, 100k-iteration tight loop, interruptible | 96.2 µs | 5796 µs | **~60x** | v0.6.0, core-pinned Atom C3558, benchstat n=10, wazero with `WithCloseOnContextDone`, `wazero@6edbb8c` |
+| `BenchmarkInterruptibleFib`, `case.wasm` `fibonacci`, interruptible | 17.1 ms | 185.6 ms | **~10.8x** | same run as above |
+| `BenchmarkInterruptibleHostCallLoop`, a host call every iteration, interruptible | 688 µs | 1721 µs | **~2.5x** | same run as above |
 
 Two things about the host-call row. First, `host=gomodule` is the arm both
 runtimes implement identically, which is why it is the honest baseline — and
@@ -152,29 +152,44 @@ The win from deleting reflection is structural, not per-call, and its magnitude
 belongs in [§3](#3-what-the-optimization-work-bought) because the path it beats
 is wazy's own, now-deleted one.
 
-The interruptible cost is small and no longer shape-dependent. `WithCloseOnContextDone`
-compiles to a decrement of a reserved register and a predicted-not-taken branch at every
-function entry and loop back-edge; when the counter runs out, one trip through Go does the
-authoritative closed check and yields. Measured on an Atom C3558 (min of 10, interleaved).
+Since v0.6.0 wazy has no `WithCloseOnContextDone`: every call can be interrupted. Compiled
+code compares Go's own preemption word, which the runtime sets to stop a goroutine and a done
+context's watcher sets too, at loop headers and at the entries of the functions that can
+recur, and most loops pay less than that: a counted loop tests a few bits of its counter, a
+short one is strip-mined, and one that ends soon enough has no check (see RATIONALE.md). The
+same three kernels, on a core-pinned Atom C3558, benchstat n=10, interleaved, against v0.5.0
+built two ways:
 
-**Every ratio below is one runtime against itself** -- the same build with the option
-on divided by the same build with it off, i.e. what enabling it costs you. It is not a
-wazy-versus-wazero comparison; the two columns are two separate self-ratios, and a
-smaller number is better in both.
-
-| workload | wazy on/off | wazero on/off |
+| workload | v0.6.0 vs v0.5.0 with no check | v0.6.0 vs v0.5.0 with the option on |
 |---|---|---|
-| `fibonacci` (real compute) | **1.18x** | 11.6x |
-| host-call-dense loop | **1.02x** | 1.86x |
-| spin loop (near-empty kernel) | **1.44x** | 2.06x |
+| `fibonacci` (real compute) | **+3.7%** | **−11.3%** |
+| host-call-dense loop | **−7.6%** | **−8.0%** |
+| spin loop (near-empty kernel) | **−15.6%** | **−39.6%** |
 
-The spin kernel is the worst case and always will be: it has no body to dilute a
-per-back-edge decrement against.
+`fibonacci` pays for the check on every call, as a recursive function has to. The two loops
+come out ahead, but read them as level: the spin kernel, the worst case before, executes as
+many instructions as v0.5.0 with no check at all, since its loop counts down to zero and the
+test for zero doubles as the check's, and the host-call loop executes 5% more. Their lead in
+time is placement, not work.
 
-arm64 agrees, measured on an Apple M4 (min of 10). Same self-ratio: the host-call-dense
-loop costs **1.03x** and the spin kernel **1.13x**, where the loop-header design this
-replaced cost 7.44x on that kernel. The M4 does far better on the spin kernel than any x86 core here,
-which is the same placement story as below -- it has no uop cache erratum to hit.
+On an Apple M4 (interleaved, six rounds), against v0.5.0 with no check, the real modules
+come out level or ahead: go-anydoc's conversion 5-9% faster across runs, libsodium's test
+suite 1.6% faster, Go's wasip1 stdlib tests 2.7% faster, Zig's std tests and pdfium's render
+level. `BenchmarkInvocation` and `BenchmarkHostFunctionCall` come out at a geomean of -1.3%:
+every compiled kernel level or faster -- `string_manipulation` -3.9% and `reverse_array` -2% to
+-15% at their larger sizes -- but `string_manipulation` at size 100 (+1.2%) and `random_mat_mul`
+at 20 (+1.6%, inside the noise), host calls level, and the interpreter's `fibonacci` +2.9%, the
+price of the counter its loop check keeps.
+
+On the Atom, which has no uop cache for placement to move, the honest measure is the work:
+instructions retired in compiled code (perf samples on perfmap symbols, seeded input). Over
+v0.5.0 with no check, libsodium's slowest cases do 2-4% more (`aead_chacha20poly13052` +3.7%,
+`codecs` +2.3%, `verify1` +1.8%): a register test on each iteration of a loop whose length is
+not known, and a check on each entry to one, which is what being interruptible costs there.
+
+Compiling costs a little too: pdfium takes 5.7% more instructions to compile than v0.5.0 with
+no check (Xeon, `GOGC=off GOMAXPROCS=1`, which makes the count exact), less than v0.5.0 with the
+option on, at 6.2%.
 
 ### On two real modules, and why the ratio is not one number
 
@@ -182,8 +197,8 @@ The kernels above are the worst case by construction. Two real producer modules,
 outside this repo, put a ceiling on what any of it means in practice.
 
 **go-anydoc** — a 6.8 MB Rust module (anydoc 0.2.3) converting a 5 MB docx body, run through
-that project's own `BenchmarkCloseOnContextDone`, min of 3 at `-benchtime 3x`. What enabling
-the option costs, each runtime against itself:
+that project's own `BenchmarkCloseOnContextDone`, min of 3 at `-benchtime 3x`, on wazy v0.5.0,
+the last with the option. What enabling it costs, each runtime against itself:
 
 | | Apple M4 | Xeon D-2123IT | Atom C3558 |
 |---|---|---|---|
@@ -205,6 +220,15 @@ on the Xeon, 0.63x on the Atom — because their unoption baseline is slower to 
 corpus tool, mean ms per document, zero pixel mismatches. On the Atom: 43.9 ms by default and
 44.4 ms with the option on (**+1.3%**), against wazero's 49.1 → 68.1 ms (+38.8%) and
 wazero+PRs' 48.0 → 48.3 ms (+0.5%). Compile plus first worker is 5.8 s against wazero's 11.5 s.
+
+On the M4 with v0.6.0, which is always interruptible, against wazero+PRs with its option on
+(interleaved, 6 rounds, 121 documents that render): 194.6 ms for the corpus against 228.5,
+faster on every document, compile plus first render 0.90 s against 1.39. Two arm64 defects had
+kept wazy behind there. The collector polled at loop headers (OPTIMIZATIONS.md,
+H6-followup-3), which cost the heaviest documents up to 2.2x on a poll PDFium never needed:
+exception handling is what turns the collector on. And constants reached FP registers through
+an `ins` that waits on the register's old value (C8 part 2a), which cost a document that
+spends its time in `pow` 24%.
 
 Neither module behaves like the kernels: a 5.7 MB guest spends its time in its own compute,
 not in a termination check, so ratios like the spin kernel's do not transfer.

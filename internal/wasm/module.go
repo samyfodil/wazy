@@ -30,6 +30,20 @@ type Module struct {
 	// mayThrow collects FunctionMayThrow's inputs while the functions are validated.
 	mayThrow *mayThrowBuilder
 
+	// FunctionNeedsEntryCheck is indexed by local function index and true for a function the native
+	// compiler checks for preemption on entry. See entryCheckBuilder.
+	FunctionNeedsEntryCheck []bool
+	// FunctionCallWork is indexed by local function index and holds how much wasm code, in bytes, a call
+	// to the function runs at most, when that is sure to be short, and zero otherwise. See
+	// entryCheckBuilder.
+	FunctionCallWork []uint32
+	// ForeignFuncRefs is true when another module's function may reach this module's indirect calls,
+	// which then check for preemption first, as calls to imports do. See Module.foreignFuncRefs.
+	ForeignFuncRefs bool
+	// entryChecks collects FunctionNeedsEntryCheck's and FunctionCallWork's inputs while the functions
+	// are validated.
+	entryChecks *entryCheckBuilder
+
 	// TypeSection contains the unique FunctionType of functions imported or defined in this module.
 	//
 	// Note: Currently, there is no type ambiguity in the index as WebAssembly 1.0 only defines function type.
@@ -224,7 +238,7 @@ const (
 
 // AssignModuleID calculates a sha256 checksum on `wasm` and other args, and set Module.ID to the result.
 // See the doc on Module.ID on what it's used for.
-func (m *Module) AssignModuleID(wasm []byte, listeners []api.FunctionListener, withEnsureTermination bool) {
+func (m *Module) AssignModuleID(wasm []byte, listeners []api.FunctionListener) {
 	h := sha256.New()
 	h.Write(wasm)
 	// Use the pre-allocated space backed by m.ID below.
@@ -235,9 +249,6 @@ func (m *Module) AssignModuleID(wasm []byte, listeners []api.FunctionListener, w
 		m.ID[4] = boolToByte(l != nil)
 		h.Write(m.ID[:5])
 	}
-	// Write the flag of ensureTermination to the checksum.
-	m.ID[0] = boolToByte(withEnsureTermination)
-	h.Write(m.ID[:1])
 	// Get checksum by passing the slice underlying m.ID.
 	h.Sum(m.ID[:0])
 }
@@ -542,6 +553,9 @@ func (m *Module) validateFunctions(enabledFeatures api.CoreFeatures, functions [
 	if enabledFeatures.IsEnabled(api.CoreFeatureExceptionHandling) {
 		m.mayThrow = &mayThrowBuilder{direct: make([]bool, len(functions)), imports: m.ImportFunctionCount}
 	}
+	m.FunctionNeedsEntryCheck, m.FunctionCallWork = nil, nil
+	m.ForeignFuncRefs = m.foreignFuncRefs(declaredFuncIndexes, functions, globals, tags)
+	m.entryChecks = newEntryCheckBuilder(m, uint32(len(functions)-len(m.FunctionSection)))
 	for idx, typeIndex := range m.FunctionSection {
 		if typeIndex >= typeCount {
 			return fmt.Errorf("invalid %s: type section index %d out of range", m.funcDesc(SectionIDFunction, Index(idx)), typeIndex)
@@ -552,10 +566,12 @@ func (m *Module) validateFunctions(enabledFeatures api.CoreFeatures, functions [
 			continue
 		}
 		if err = m.validateFunction(vs, enabledFeatures, Index(idx), functions, globals, memories, tables, tags, declaredFuncIndexes, br); err != nil {
-			m.mayThrow = nil
+			m.mayThrow, m.entryChecks = nil, nil
 			return fmt.Errorf("invalid %s: %w", m.funcDesc(SectionIDFunction, Index(idx)), err)
 		}
 	}
+	m.FunctionNeedsEntryCheck, m.FunctionCallWork = m.entryChecks.solve(declaredFuncIndexes)
+	m.entryChecks = nil
 	if m.mayThrow != nil {
 		m.FunctionMayThrow = m.mayThrow.solve()
 		m.mayThrow = nil

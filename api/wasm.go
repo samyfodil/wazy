@@ -210,8 +210,6 @@ type Module interface {
 	//   - Closer was called directly.
 	//   - A guest function called Closer indirectly, such as `_start` calling
 	//     `proc_exit`, which internally closed the module.
-	//   - wazy.RuntimeConfig `WithCloseOnContextDone` was enabled and a
-	//     context completion closed the module.
 	//
 	// Where any of the above are possible, check this value before calling an
 	// ExportedFunction, even if you didn't formerly receive a sys.ExitError.
@@ -409,11 +407,13 @@ type Function interface {
 	// To safely encode/decode params/results expressed as uint64, users are encouraged to
 	// use api.EncodeXXX or DecodeXXX functions. See the docs on api.ValueType.
 	//
-	// When RuntimeConfig.WithCloseOnContextDone is toggled, the invocation of this Call method is ensured to be closed
-	// whenever one of the three conditions is met. In the event of close, sys.ExitError will be returned and
-	// the api.Module from which this api.Function is derived will be made closed. See the documentation of
-	// WithCloseOnContextDone on wazy.RuntimeConfig for detail. See examples in context_done_example_test.go for
-	// the end-to-end demonstrations of how these terminations can be performed.
+	// When ctx is done during the call -- canceled, or past its deadline -- the call ends the way a trap
+	// does: it returns an error that wraps ctx's (errors.Is(err, context.Canceled) or
+	// context.DeadlineExceeded), and the module stays usable. That holds however the guest runs, in a
+	// loop, through recursion or across a tree of calls, since compiled code returns to Go whenever the Go
+	// runtime asks it to: see "Why compiled code checks Go's preemption word" in RATIONALE.md. A call that
+	// is in a host function when ctx is done ends once it is back in the guest, so a host function that
+	// can block should watch ctx itself. See context_done_example_test.go for end-to-end demonstrations.
 	Call(ctx context.Context, params ...uint64) ([]uint64, error)
 
 	// CallWithStack is an optimized variation of Call that saves memory
@@ -589,9 +589,9 @@ type MutableGlobal interface {
 // # Concurrency and Module.Close
 //
 // A Memory may be used from any goroutine, including one racing the owning
-// module's Close -- which an embedder cannot always avoid, since
-// RuntimeConfig.WithCloseOnContextDone closes a module from a watchdog
-// goroutine while a call is still unwinding through host code. A method that
+// module's Close -- which an embedder cannot always avoid when it closes a
+// module from a watchdog goroutine, say on a context.AfterFunc, while a call
+// is still unwinding through host code. A method that
 // STARTS after the storage was reclaimed is safe: the memory reads as empty,
 // so Size returns 0 and every accessor returns false rather than touching it.
 // A memory another live module still holds -- an imported or a shared one --

@@ -70,6 +70,10 @@ type (
 		// allocation (see lowerExitIfTrueWithCodeShared and emitTrapIslands).
 		trapIslands []trapIsland
 
+		// preemptIslands are the out-of-line halves of masked preemption checks,
+		// emitted after register allocation (see emitPreemptIslands).
+		preemptIslands []preemptIsland
+
 		// fpConstPool is this function's deduplicated pool of high-entropy
 		// FP/SIMD constants, materialized once after the function body (see
 		// emitFpConstPool). Each entry is loaded via a PC-relative ldr-literal
@@ -341,6 +345,7 @@ func (m *machine) Reset() {
 	m.perBlockHead, m.perBlockEnd, m.rootInstr = nil, nil, nil
 	m.orderedSSABlockLabelPos = m.orderedSSABlockLabelPos[:0]
 	m.trapIslands = m.trapIslands[:0]
+	m.preemptIslands = m.preemptIslands[:0]
 	m.fpConstPool = m.fpConstPool[:0]
 	m.fpConstPoolRelocs = m.fpConstPoolRelocs[:0]
 }
@@ -358,6 +363,15 @@ func (m *machine) getOrAddFpConst(lo, hi uint64, width byte) label {
 	m.nextLabel++
 	m.fpConstPool = append(m.fpConstPool, fpConst{lo: lo, hi: hi, width: width, l: l})
 	return l
+}
+
+// preemptIsland is the out-of-line half of a masked preemption check: at l, it
+// reads g.stackguard0 and branches to slow if the runtime asked the goroutine to
+// stop, and back to the loop otherwise. test is the masked test, and backInstr
+// the label instruction that back names.
+type preemptIsland struct {
+	l, slow, back   label
+	test, backInstr *instruction
 }
 
 // getOrCreateTrapIsland returns the label of this function's shared trap
@@ -549,7 +563,7 @@ func (m *machine) resolveRelativeAddresses(ctx context.Context) {
 			target := cbr.condBrLabel()
 			offsetOfTarget := m.labelPositionPool.Get(int(target)).binaryOffset
 			diff := offsetOfTarget - offset
-			if divided := diff >> 2; divided < minSignedInt19 || divided > maxSignedInt19 {
+			if !condBrReaches(cbr.condBrCond(), diff) {
 				// The target is out of the conditional branch's ±1MB range: branch
 				// over an unconditional (±128MB) branch to it instead.
 				m.insertConditionalJumpTrampoline(cbr, reloc.currentLabelPos)
@@ -575,7 +589,7 @@ func (m *machine) resolveRelativeAddresses(ctx context.Context) {
 		}
 		if needRerun {
 			if nativeapi.PerfMapEnabled {
-				nativeapi.PerfMap.Clear()
+				nativeapi.PerfMap.ClearFunction(fnIndex)
 			}
 		} else {
 			break
@@ -600,8 +614,8 @@ func (m *machine) resolveRelativeAddresses(ctx context.Context) {
 				target := cur.condBrLabel()
 				offsetOfTarget := m.labelPositionPool.Get(int(target)).binaryOffset
 				diff := offsetOfTarget - currentOffset
-				if divided := diff >> 2; divided < minSignedInt19 || divided > maxSignedInt19 {
-					panic("BUG: branch relocation for large conditional branch larger than 19-bit range must be handled properly")
+				if !condBrReaches(cur.condBrCond(), diff) {
+					panic("BUG: branch relocation for large conditional branch beyond its range must be handled properly")
 				}
 				cur.condBrOffsetResolve(diff)
 			}
@@ -636,7 +650,19 @@ const (
 
 	maxSignedInt19 = 1<<18 - 1
 	minSignedInt19 = -(1 << 18)
+
+	maxSignedInt14 = 1<<13 - 1
+	minSignedInt14 = -(1 << 13)
 )
+
+// condBrReaches reports whether a conditional branch on c reaches diff bytes away.
+func condBrReaches(c cond, diff int64) bool {
+	divided := diff >> 2
+	if c.kind() == condKindRegisterSignBit {
+		return minSignedInt14 <= divided && divided <= maxSignedInt14
+	}
+	return minSignedInt19 <= divided && divided <= maxSignedInt19
+}
 
 // insertConditionalJumpTrampoline rewrites a conditional branch whose target is out of its ±1MB
 // range into the inverted condition skipping over an unconditional branch to the target:
@@ -653,15 +679,7 @@ func (m *machine) insertConditionalJumpTrampoline(cbr *instruction, currentBlk *
 	originalTarget := cbr.condBrLabel()
 	next := cbr.next
 
-	c := cbr.condBrCond()
-	switch c.kind() {
-	case condKindRegisterZero:
-		c = registerAsRegNotZeroCond(c.register())
-	case condKindRegisterNotZero:
-		c = registerAsRegZeroCond(c.register())
-	default:
-		c = c.flag().invert().asCond()
-	}
+	c := invertTrapCond(cbr.condBrCond())
 	skipInstr, skipLabel := m.allocateBrTarget()
 	cbr.asCondBr(c, skipLabel, cbr.condBr64bit())
 

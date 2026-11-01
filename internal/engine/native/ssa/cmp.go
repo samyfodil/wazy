@@ -105,3 +105,53 @@ func (f FloatCmpCond) String() string {
 		panic("invalid float comparison condition")
 	}
 }
+
+// Swapped returns the condition that holds for (y, x) exactly when i holds for (x, y).
+func (i IntegerCmpCond) Swapped() IntegerCmpCond {
+	switch i {
+	case IntegerCmpCondSignedLessThan:
+		return IntegerCmpCondSignedGreaterThan
+	case IntegerCmpCondSignedGreaterThan:
+		return IntegerCmpCondSignedLessThan
+	case IntegerCmpCondSignedLessThanOrEqual:
+		return IntegerCmpCondSignedGreaterThanOrEqual
+	case IntegerCmpCondSignedGreaterThanOrEqual:
+		return IntegerCmpCondSignedLessThanOrEqual
+	case IntegerCmpCondUnsignedLessThan:
+		return IntegerCmpCondUnsignedGreaterThan
+	case IntegerCmpCondUnsignedGreaterThan:
+		return IntegerCmpCondUnsignedLessThan
+	case IntegerCmpCondUnsignedLessThanOrEqual:
+		return IntegerCmpCondUnsignedGreaterThanOrEqual
+	case IntegerCmpCondUnsignedGreaterThanOrEqual:
+		return IntegerCmpCondUnsignedLessThanOrEqual
+	}
+	return i
+}
+
+// Inverted returns the condition that holds exactly when i does not.
+func (i IntegerCmpCond) Inverted() IntegerCmpCond {
+	switch i {
+	case IntegerCmpCondEqual:
+		return IntegerCmpCondNotEqual
+	case IntegerCmpCondNotEqual:
+		return IntegerCmpCondEqual
+	case IntegerCmpCondSignedLessThan:
+		return IntegerCmpCondSignedGreaterThanOrEqual
+	case IntegerCmpCondSignedGreaterThanOrEqual:
+		return IntegerCmpCondSignedLessThan
+	case IntegerCmpCondSignedGreaterThan:
+		return IntegerCmpCondSignedLessThanOrEqual
+	case IntegerCmpCondSignedLessThanOrEqual:
+		return IntegerCmpCondSignedGreaterThan
+	case IntegerCmpCondUnsignedLessThan:
+		return IntegerCmpCondUnsignedGreaterThanOrEqual
+	case IntegerCmpCondUnsignedGreaterThanOrEqual:
+		return IntegerCmpCondUnsignedLessThan
+	case IntegerCmpCondUnsignedGreaterThan:
+		return IntegerCmpCondUnsignedLessThanOrEqual
+	case IntegerCmpCondUnsignedLessThanOrEqual:
+		return IntegerCmpCondUnsignedGreaterThan
+	}
+	return i
+}

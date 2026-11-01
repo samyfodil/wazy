@@ -30,7 +30,7 @@ Measured against wazero in the same runs, on the same workloads.
 | Path | wazy vs wazero | What & why |
 | --- | :--: | --- |
 | **Instantiate** | **9.1x** | 1.724 µs vs 15.74 µs, on a 37 KB TinyGo module. |
-| **Interruptible loops** (`WithCloseOnContextDone`) | **9.8x** vs wazero with the option on | The check is a register decrement and a predicted-not-taken branch, not a Go round-trip. Enabling it costs wazy **+18%** on `fibonacci` and wazero **+1057%** -- each against its own build with the option off -- which is where the 9.8x head-to-head comes from. A near-empty spin kernel is the worst case at +44%; a host-call-dense loop pays +2% against wazero's +86%. Measured on a core with no uop cache, because code placement swamps smaller differences on Skylake-family parts. Against `wazero@main`. |
+| **Interruptible loops** | **10.8x** vs wazero with `WithCloseOnContextDone` | wazy is always interruptible, with no option: compiled code reads Go's own preemption word at loop headers and the entries of recursive functions, and a done context ends the call through it. wazero has to be configured for it, and then runs `fibonacci` 10.8x slower than wazy, a host-call-dense loop 2.5x and a near-empty spin kernel 60x. Against wazero with no check at all, wazy is 5% slower on `fibonacci` and faster on the other two. Measured on a core with no uop cache, because code placement swamps smaller differences on Skylake-family parts. Against `wazero@6edbb8c` (main, 2026-09-04). |
 | **Compiled execution** | memory-heavy code leads | `string_manipulation` −18%, `reverse_array` −14%, `base64` −12%, `fibonacci` a wash — the advantage tracks memory-access intensity, not arithmetic. |
 | **Host calls** (Go ↔ Wasm) | a tie | 47.8 ns here, 48.3 ns there, on `HostCall/gomodule/CallWithStack` — the shared baseline both runtimes implement the same way. The win is structural, not per-call. |
 | **Cumulative** | geomean **−17.8%**, B/op **−22.9%** | Across `internal/integration_test/bench`, versus the wazero fork point, with upstream wazero as a control in the same runs — its arms stayed flat. |
@@ -101,7 +101,8 @@ reallocate and copy the whole memory. Both are fixed as of v0.3.0; see
 
 Third-party measurement, not ours. Apple M5 Pro (18-core), 48 GB, macOS 26.5, Go 1.26.1,
 `CGO_ENABLED=0`, `anydoc.wasm` 6,781,177 bytes (anydoc 0.2.3), min of 3 at `-benchtime 3x`. The
-docx rows reproduce from a checkout of go-anydoc — `go test -run '^$' -bench 'ConvertDOCX|CloseOnContextDone' -benchtime 3x -count 3`,
+docx rows reproduce from a checkout of go-anydoc — `go test -run '^$' -bench 'ConvertDOCX|CloseOnContextDone' -benchtime 3x -count 3`
+against a wazy before v0.6.0, which removed the option that benchmark toggles,
 since its harness generates its own inputs; the PDF rows need a file of your own, and the wazero
 column is the same benchmarks with the three imports in its `anydoc.go` pointed at wazero.
 Originally reported in issue #29 (since deleted).
@@ -119,8 +120,10 @@ The head-to-head module also carries a three-way comparison against wasmtime —
 - **Use `CallWithStack`** in hot loops; `Call` allocates the result slice.
 - **Reserve memory capacity** with `WithMemoryCapacityReservePages` if the guest grows its memory
   repeatedly.
-- **Know what `WithCloseOnContextDone` costs you.** Real compute pays about +18%, a
-  near-empty spin kernel +44%, and a host-call-dense loop +2%. There is no knob; leave it
-  off unless you need to interrupt a stuck guest.
+- **Interruptibility is not a knob.** Every call can be stopped by its context. The check that
+  makes it so costs recursive code like `fibonacci` up to about 4% against v0.5.0, which had no
+  check unless asked, and loops with a counter or a host call next to nothing. The worst case
+  measured is allocation-heavy TinyGo code on an Apple M4, at about 8%: its allocator's loops
+  each call a small helper, which leaves them a full check every iteration.
 - **Do not pool instances.** Instantiation is 1.7 µs and 3.3 KB; a fresh instance per request is
   both faster to reason about and safer than scrubbing a reused one.

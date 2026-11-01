@@ -99,6 +99,11 @@ type (
 		// call the stack grow builtin function.
 		CompileStackGrowCallSequence() []byte
 
+		// CompileYieldTrampoline compiles the trampoline the slow path of a preemption check calls
+		// to return to Go (see ssa.OpcodeYield). Unlike a Go-call trampoline, it preserves every
+		// register.
+		CompileYieldTrampoline() []byte
+
 		// CompileThrowTransferRegisterRestore returns a tiny callable blob
 		// (execCtx in the ISA's conventional first-argument register in,
 		// callee-saved registers restored from
