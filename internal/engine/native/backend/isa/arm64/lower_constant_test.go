@@ -52,7 +52,7 @@ func TestMachine_lowerConstant(t *testing.T) {
 		// the FP register with `ins`, avoiding the executed branch-over-literal.
 		require.Equal(t, `movz w129?, #0xcb92, lsl 0
 movk w129?, #0x3f8f, lsl 16
-ins v128?.s[0], w129?`, formatEmittedInstructionsInCurrentBlock(m))
+fmov s128?, w129?`, formatEmittedInstructionsInCurrentBlock(m))
 	})
 
 	t.Run("TypeF64", func(t *testing.T) {

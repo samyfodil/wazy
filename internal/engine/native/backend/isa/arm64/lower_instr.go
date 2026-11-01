@@ -1409,10 +1409,10 @@ func (m *machine) lowerFcopysignImpl(rd regalloc.VReg, rn, rm operand, tmpI, tmp
 	setMSB := m.allocateInstr()
 	if _64bit {
 		m.lowerConstantI64(tmpI, math.MinInt64)
-		setMSB.asMovToVec(tmpF, operandNR(tmpI), vecArrangementD, vecIndex(0))
+		setMSB.asFpuMovFromInt(tmpF, operandNR(tmpI), true)
 	} else {
 		m.lowerConstantI32(tmpI, math.MinInt32)
-		setMSB.asMovToVec(tmpF, operandNR(tmpI), vecArrangementS, vecIndex(0))
+		setMSB.asFpuMovFromInt(tmpF, operandNR(tmpI), false)
 	}
 	m.insert(setMSB)
 
@@ -1441,13 +1441,7 @@ func (m *machine) lowerBitcast(instr *ssa.Instruction) {
 	switch {
 	case srcInt && !dstInt: // Int to Float:
 		mov := m.allocateInstr()
-		var arr vecArrangement
-		if srcType.Bits() == 64 {
-			arr = vecArrangementD
-		} else {
-			arr = vecArrangementS
-		}
-		mov.asMovToVec(rd, rn, arr, vecIndex(0))
+		mov.asFpuMovFromInt(rd, rn, srcType.Bits() == 64)
 		m.insert(mov)
 	case !srcInt && dstInt: // Float to Int:
 		mov := m.allocateInstr()
@@ -2049,7 +2043,7 @@ func (m *machine) lowerPopcnt(x, result ssa.Value) {
 	// and the registers may use different names. In our encoding we use the following
 	// instructions:
 	//
-	//    ins v0.d[0], x0     ;; mov from GPR to vec (FMOV above) is encoded as INS
+	//    fmov d0, x0         ;; mov from GPR to vec
 	//    cnt v0.16b, v0.16b  ;; we use vec arrangement 16b
 	//    uaddlv h0, v0.8b    ;; h0 is still v0 with the dest width specifier 'H', implied when src arrangement is 8b
 	//    mov x5, v0.d[0]     ;; finally we mov the result back to a GPR
@@ -2059,9 +2053,9 @@ func (m *machine) lowerPopcnt(x, result ssa.Value) {
 	rn := m.getOperand_NR(m.compiler.ValueDefinition(x), extModeNone)
 
 	rf1 := operandNR(m.compiler.AllocateVReg(ssa.TypeF64))
-	ins := m.allocateInstr()
-	ins.asMovToVec(rf1.nr(), rn, vecArrangementD, vecIndex(0))
-	m.insert(ins)
+	fmov := m.allocateInstr()
+	fmov.asFpuMovFromInt(rf1.nr(), rn, true)
+	m.insert(fmov)
 
 	rf2 := operandNR(m.compiler.AllocateVReg(ssa.TypeF64))
 	cnt := m.allocateInstr()
@@ -2312,15 +2306,15 @@ func (m *machine) lowerSelect(c, x, y, result ssa.Value) {
 		case ssa.TypeF32, ssa.TypeF64:
 			// The condition holds when it is not zero, the same test as above, but the
 			// value is a float in a vector register now. fcmp takes two registers, so the
-			// zero to compare against is materialized first with INS Vd.D[0], XZR, which
-			// zeroes the low 64 bits, covering both the S and the D view of the temporary.
-			//	ins tmp.d[0], xzr
+			// zero to compare against is materialized first with FMOV Dd, XZR, which
+			// zeroes the register, covering both the S and the D view of the temporary.
+			//	fmov tmp, xzr
 			//	fcmp s/d(rn), s/d(tmp)
 			// A NaN condition compares unordered, which leaves Z clear, so it counts as
 			// non-zero and selects x, and -0.0 compares equal to zero and selects y.
 			tmp := m.compiler.AllocateVReg(ssa.TypeF64)
 			zero := m.allocateInstr()
-			zero.asMovToVec(tmp, operandNR(xzrVReg), vecArrangementD, vecIndex(0))
+			zero.asFpuMovFromInt(tmp, operandNR(xzrVReg), true)
 			m.insert(zero)
 
 			cmp := m.allocateInstr()

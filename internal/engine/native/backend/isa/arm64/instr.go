@@ -122,6 +122,7 @@ var defKinds = [numInstructionKinds]defKind{
 	cSel:                 defKindRD,
 	fpuCSel:              defKindRD,
 	movToVec:             defKindRD,
+	fpuMovFromInt:        defKindRD,
 	movFromVec:           defKindRD,
 	movFromVecSigned:     defKindRD,
 	vecDup:               defKindRD,
@@ -264,6 +265,7 @@ var useKinds = [numInstructionKinds]useKind{
 	cSel:                 useKindRNRM,
 	fpuCSel:              useKindRNRM,
 	movToVec:             useKindRN,
+	fpuMovFromInt:        useKindRN,
 	movFromVec:           useKindRN,
 	movFromVecSigned:     useKindRN,
 	vecDup:               useKindRN,
@@ -999,6 +1001,16 @@ func (i *instruction) asMovToVec(rd regalloc.VReg, rn operand, arr vecArrangemen
 	i.u1, i.u2 = uint64(arr), uint64(index)
 }
 
+// asFpuMovFromInt moves the 32 or 64 bits of rn into the low bits of rd, zeroing the rest of rd.
+func (i *instruction) asFpuMovFromInt(rd regalloc.VReg, rn operand, _64bit bool) {
+	i.kind = fpuMovFromInt
+	i.rd = rd
+	i.rn = rn
+	if _64bit {
+		i.u1 = 1
+	}
+}
+
 func (i *instruction) asMovFromVec(rd regalloc.VReg, rn operand, arr vecArrangement, index vecIndex, signed bool) {
 	if signed {
 		i.kind = movFromVecSigned
@@ -1395,6 +1407,12 @@ func (i *instruction) String() (str string) {
 			formatVRegSized(i.rm.nr(), size),
 			condFlag(i.u1),
 		)
+	case fpuMovFromInt:
+		if i.u1 == 1 {
+			str = fmt.Sprintf("fmov %s, %s", formatVRegSized(i.rd, 64), formatVRegSized(i.rn.nr(), 64))
+		} else {
+			str = fmt.Sprintf("fmov %s, %s", formatVRegSized(i.rd, 32), formatVRegSized(i.rn.nr(), 32))
+		}
 	case movToVec:
 		var size byte
 		arr := vecArrangement(i.u1)
@@ -1867,6 +1885,9 @@ const (
 	fpuCSel
 	// movToVec represents a move to a vector element from a GPR.
 	movToVec
+	// fpuMovFromInt represents FMOV (general) from a GPR to a scalar FP register. Unlike movToVec into lane
+	// 0, it writes the whole register, so it does not wait on whatever wrote the register last.
+	fpuMovFromInt
 	// movFromVec represents an unsigned move from a vector element to a GPR.
 	movFromVec
 	// movFromVecSigned represents a signed move from a vector element to a GPR.

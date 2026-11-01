@@ -286,6 +286,12 @@ func (i *instruction) encode(m *machine) {
 			condFlag(i.u1),
 			i.u2 == 1,
 		))
+	case fpuMovFromInt:
+		c.Emit4Bytes(encodeFpuMovFromInt(
+			regNumberInEncoding[i.rd.RealReg()],
+			regNumberInEncoding[i.rn.realReg()],
+			i.u1 == 1,
+		))
 	case movToVec:
 		c.Emit4Bytes(encodeMoveToVec(
 			regNumberInEncoding[i.rd.RealReg()],
@@ -932,6 +938,15 @@ func encodeFpuCSel(rd, rn, rm uint32, c condFlag, _64bit bool) uint32 {
 }
 
 // encodeMoveToVec encodes as "Move general-purpose register to a vector element" (represented as `ins`) in
+// encodeFpuMovFromInt encodes FMOV (general) from Wn to Sd, or from Xn to Dd.
+// https://developer.arm.com/documentation/ddi0602/2024-12/SIMD-FP-Instructions/FMOV--general---Floating-point-move-to-or-from-general-purpose-register-without-conversion-
+func encodeFpuMovFromInt(rd, rn uint32, _64bit bool) uint32 {
+	if _64bit {
+		return 0x9e670000 | rn<<5 | rd
+	}
+	return 0x1e270000 | rn<<5 | rd
+}
+
 // https://developer.arm.com/documentation/dui0801/g/A64-SIMD-Vector-Instructions/MOV--vector--from-general-
 // https://developer.arm.com/documentation/ddi0596/2020-12/SIMD-FP-Instructions/MOV--from-general---Move-general-purpose-register-to-a-vector-element--an-alias-of-INS--general--?lang=en
 func encodeMoveToVec(rd, rn uint32, arr vecArrangement, index vecIndex) uint32 {
