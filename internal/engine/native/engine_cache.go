@@ -345,13 +345,6 @@ func serializeCompiledModule(wazyVersion string, cm *compiledModule) io.Reader {
 		tail.Write(u32.LeBytes(crc32.Checksum(cm.entryPreambles, crc)))
 	}
 
-	// GC root spill size: maxGCRoots is baked into the safepoints of the code above as a compile-time
-	// constant, and the call engine sizes the spill region at the bottom of the stack from it. A cache hit
-	// that lost it reserved no region, so every safepoint spilled below the stack buffer and the collector
-	// never read the spilled roots. Layout: gcRootsFormatVersion (1 byte), maxGCRoots (4 bytes).
-	tail.WriteByte(gcRootsFormatVersion)
-	tail.Write(u32.LeBytes(uint32(cm.maxGCRoots)))
-
 	// *bytes.Buffer already implements io.Reader; MultiReader drains each once,
 	// which is exactly the single-pass consumption fileCache.Add performs. Only
 	// the executable needs a wrapping reader (it's a raw []byte). This avoids
@@ -439,10 +432,6 @@ const tryTableInfoFormatVersion = 1
 // was removed: without the bump an older entry's interval version byte would be
 // read as this one's and its scalar misparsed as preamble data.
 const entryPreambleFormatVersion = 2
-
-// gcRootsFormatVersion guards the trailing GC-roots section (cm.maxGCRoots). An entry written before it existed
-// hits EOF there and is treated as stale.
-const gcRootsFormatVersion = 1
 
 func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *compiledModule, staleCache bool, err error) {
 	defer reader.Close()
@@ -743,13 +732,6 @@ func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *co
 		}
 	}
 
-	if _, err = io.ReadFull(bufReader, eightBytes[:1]); err != nil || eightBytes[0] != gcRootsFormatVersion {
-		return nil, true, nil
-	}
-	if _, err = io.ReadFull(bufReader, eightBytes[:4]); err != nil {
-		return nil, true, nil
-	}
-	cm.maxGCRoots = int(binary.LittleEndian.Uint32(eightBytes[:4]))
 	return
 }
 

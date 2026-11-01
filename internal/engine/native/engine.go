@@ -36,11 +36,7 @@ type (
 		compiledModules map[wasm.ModuleID]*compiledModuleWithCount
 		// sortedCompiledModules is a list of compiled modules sorted by the initial address of the executable.
 		sortedCompiledModules []*compiledModule
-		// gcRootsReserve is the size of the region at the bottom of every wasm stack that GC safepoints spill
-		// into: enough for the largest safepoint of any module this engine has instantiated, since a call can
-		// reach functions of any of them. See callEngine.gcRootsReserve.
-		gcRootsReserve atomic.Int32
-		mux            sync.RWMutex
+		mux                   sync.RWMutex
 		// sharedFunctions is compiled functions shared by all modules.
 		sharedFunctions *sharedFunctions
 		// setFinalizer defaults to runtime.SetFinalizer, but overridable for tests.
@@ -111,11 +107,8 @@ type (
 		// funcrefSlots assigns a dense slot to each local function a funcref can name, so a
 		// moduleEngine memoizes one functionInstance per slot and finds it by index rather than
 		// by scanning. Built once per compiled module, lazily; see funcrefSlotsOf.
-		funcrefSlots     map[wasm.Index]uint32
-		funcrefSlotsOnce sync.Once
-		// maxGCRoots is the most values any safepoint in this module writes; see
-		// frontend.Compiler.MaxGCRoots.
-		maxGCRoots                int
+		funcrefSlots              map[wasm.Index]uint32
+		funcrefSlotsOnce          sync.Once
 		listeners                 []api.FunctionListener
 		listenerBeforeTrampolines []*byte
 		listenerAfterTrampolines  []*byte
@@ -398,7 +391,6 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 			relocator.appendFunction(fctx, module, cm, i, fidx, body, relsPerFunc, be.SourceOffsetInfo(), ehEntries, frameSize)
 		}
 		cm.tryTableInfo = fe.TryTableMetadata()
-		cm.maxGCRoots = fe.MaxGCRoots()
 	} else {
 		// Compile with N worker goroutines.
 		// Collect compiled functions across workers in a slice,
@@ -424,9 +416,6 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 		sharedTTM := frontend.NewSharedTryTableMetadata()
 
 		var count atomic.Uint32
-		// maxGCRoots is the largest root-buffer size any worker's frontend needed; see
-		// frontend.Compiler.MaxGCRoots.
-		var maxGCRoots atomic.Int64
 		var wg sync.WaitGroup
 		wg.Add(workers)
 
@@ -468,9 +457,6 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 						return
 					}
 
-					if n := fe.MaxGCRoots(); n > int(maxGCRoots.Load()) {
-						maxGCRoots.Store(int64(n))
-					}
 					compiledFuncs[i] = compiledFunc{
 						fctx, i, fidx, body,
 						// These slices are internal to the backend compiler and since we are going to buffer them instead
@@ -485,7 +471,6 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 		}
 
 		wg.Wait()
-		cm.maxGCRoots = int(maxGCRoots.Load())
 		if err := context.Cause(ctx); err != nil {
 			return nil, err
 		}
@@ -1010,20 +995,6 @@ func checkAddrInBytes(addr uintptr, b []byte) bool {
 	return uintptr(unsafe.Pointer(&b[0])) <= addr && addr <= uintptr(unsafe.Pointer(&b[len(b)-1]))
 }
 
-// noteGCRoots grows the engine's root region to fit a module whose largest safepoint spills n words: the words,
-// plus the header, 16-byte aligned so the go-call margin above the region keeps the alignment the trampoline
-// wants. Even n == 0 gets the header, which is where a safepoint of a module instantiated later finds that the
-// region is too small for it.
-func (e *engine) noteGCRoots(n int) {
-	want := int32((8*n + 8 + 15) &^ 15)
-	for {
-		cur := e.gcRootsReserve.Load()
-		if cur >= want || e.gcRootsReserve.CompareAndSwap(cur, want) {
-			return
-		}
-	}
-}
-
 // NewModuleEngine implements wasm.Engine.
 func (e *engine) NewModuleEngine(m *wasm.Module, mi *wasm.ModuleInstance) (wasm.ModuleEngine, error) {
 	me := &moduleEngine{gcEnabled: e.gcSafepoints()}
@@ -1037,10 +1008,6 @@ func (e *engine) NewModuleEngine(m *wasm.Module, mi *wasm.ModuleInstance) (wasm.
 	}
 	me.parent = compiled
 	me.module = mi
-	if me.gcEnabled {
-		e.noteGCRoots(compiled.maxGCRoots)
-		me.gcRootsReserve = &e.gcRootsReserve
-	}
 	me.listeners = compiled.listeners
 
 	if m.IsHostModule {

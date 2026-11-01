@@ -30,6 +30,8 @@ func (r *stackRoots) ScanGCRoots(visit func(uint64)) bool {
 	return !r.incomplete
 }
 
+func (r *stackRoots) RequestPark() {}
+
 func (r *stackRoots) set(words ...uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -99,6 +101,22 @@ func TestCollector(t *testing.T) {
 		require.NotNil(t, f.s.GC.Deref(kept))
 		// The reclaimed one's handle no longer names anything, and says so rather than aliasing.
 		require.Equal(t, wasmruntime.ErrRuntimeCastFailure, requirePanic(t, func() { f.s.GC.Deref(dead) }))
+	})
+
+	t.Run("a call's parameter and result buffer is a root", func(t *testing.T) {
+		// The buffer is the caller's, outside any stack an engine scans: a call holds its parameters there
+		// until it starts, and its results once it is done, and may wait out a collection at either end.
+		f := newGCCollectFixture(t)
+		kept := f.alloc()
+		f.alloc()
+		var pause uint32
+		other := f.m.RegisterGCExecutionInto(new(GCExecution), &stackRoots{}, &pause, []uint64{kept})
+		other.EnterGo() // standing still, as a call does while it waits
+		f.collect()
+		other.LeaveGo()
+		other.Unregister()
+		require.Equal(t, 1, f.s.GC.Live())
+		require.NotNil(t, f.s.GC.Deref(kept))
 	})
 
 	t.Run("nothing is reclaimed when a call cannot offer every root", func(t *testing.T) {

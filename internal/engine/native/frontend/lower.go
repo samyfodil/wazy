@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/samyfodil/wazy/api"
-	"github.com/samyfodil/wazy/internal/engine/native/backend"
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
 	"github.com/samyfodil/wazy/internal/engine/native/ssa"
 	"github.com/samyfodil/wazy/internal/leb128"
@@ -1429,10 +1428,9 @@ func (c *Compiler) lowerCurrentOpcode() {
 
 		c.switchTo(originalLen, loopHeader)
 
-		if c.gcEnabled {
-			// A loop header is where execution parks for a collection: a guest cannot run unboundedly
-			// without passing one, so this is what bounds how long a collection waits. The poll itself is
-			// a load and a rarely-taken branch; only the branch calls into Go.
+		if c.gcEnabled && !c.loopYield {
+			// Without the check below, nothing would ring this loop for a collection (see
+			// callEngine.RequestPark), so it polls the pause flag itself.
 			c.emitGCSafepoint(builder)
 		}
 
@@ -7031,92 +7029,9 @@ func (c *Compiler) gcStoreElement(ref, index, v ssa.Value) {
 	c.callGC(wasm.GCArraySet, ref, index, hi, c.gcConst(2))
 }
 
-// materializeGCRoots spills every live wasm value -- the locals and the operand stack -- into the region the
-// call engine reserves at the bottom of the wasm stack, so a collection finds an exact root set in its ordinary
-// conservative scan rather than trying to work out where the backend put them.
-//
-// Only i64-shaped values are spilled, which is every reference plus some integers that are not; the collector
-// is conservative about what a word means, so including them costs nothing but a failed lookup. What it cannot
-// do is *miss* one, and inferring liveness from the machine state is exactly what does not survive a change of
-// register allocator: arm64 has enough registers to keep a loop's reference in one across the safepoint call,
-// where it appears in neither the wasm stack nor the saved registers.
-//
-// The region is addressed off the stack limit, which compiled code already holds at a fixed offset in the
-// execution context. Everything below that limit by more than the go-call margin is unreachable to generated
-// code and to the trampoline, so a spill stays put until the collector has read it. Both are compile-time
-// constants, so this is one subtract and n stores -- inside the park block, which is entered only when a
-// collection is actually waiting.
-func (c *Compiler) materializeGCRoots(builder ssa.Builder) {
-	var vals []ssa.Value
-	push := func(v ssa.Value) {
-		if v.Valid() && v.Type() == ssa.TypeI64 {
-			vals = append(vals, v)
-		}
-	}
-	// Only this function's locals: wasmLocalToVariable is reused across functions and keeps whatever the
-	// longest one before it needed, so its length is not the local count.
-	locals := len(c.wasmFunctionTyp.Params) + len(c.wasmFunctionLocalTypes)
-	for i := 0; i < locals && i < len(c.wasmLocalToVariable); i++ {
-		push(builder.MustFindValue(c.wasmLocalToVariable[i]))
-	}
-	for _, v := range c.state().values {
-		push(v)
-	}
-	if len(vals) == 0 {
-		return
-	}
-	if len(vals) > c.maxGCRoots {
-		c.maxGCRoots = len(vals)
-	}
-
-	limit := builder.AllocateInstruction().
-		AsLoad(c.execCtxPtrValue, nativeapi.ExecutionContextOffsetStackBottomPtr.U32(), ssa.TypeI64).
-		Insert(builder).Return()
-	// The header word sits one margin below the limit and the spilled words below it. Its low half is the
-	// count this safepoint writes; its high half is how many words the region holds, written by the engine
-	// when it placed the limit. The scan reads the count first, which is what keeps a shorter safepoint from
-	// retaining what a longer one before it left behind.
-	hdrBack := builder.AllocateInstruction().
-		AsIconst64(uint64(backend.StackBoundsCheckMarginBytes + 8)).Insert(builder).Return()
-	hdr := builder.AllocateInstruction().AsIsub(limit, hdrBack).Insert(builder).Return()
-	// The region is sized for every module the engine had compiled when the call started, which covers any
-	// function the call can reach then. One compiled later and reached through a table can need more: rather
-	// than write below the buffer, mark the spill as missing, and the collector does not reclaim this time.
-	capacity := builder.AllocateInstruction().AsExtLoad(ssa.OpcodeUload32, hdr, 4, true).Insert(builder).Return()
-	need := builder.AllocateInstruction().AsIconst64(uint64(len(vals))).Insert(builder).Return()
-	fits := builder.AllocateInstruction().
-		AsIcmp(capacity, need, ssa.IntegerCmpCondUnsignedGreaterThanOrEqual).Insert(builder).Return()
-
-	spillBlk := builder.AllocateBasicBlock()
-	overflowBlk := builder.AllocateBasicBlock()
-	doneBlk := builder.AllocateBasicBlock()
-	builder.AllocateInstruction().AsBrnz(fits, ssa.ValuesNil, spillBlk).Insert(builder)
-	builder.AllocateInstruction().AsJump(ssa.ValuesNil, overflowBlk).Insert(builder)
-
-	builder.SetCurrentBlock(overflowBlk)
-	builder.Seal(overflowBlk)
-	missing := builder.AllocateInstruction().AsIconst32(nativeapi.GCRootsMissing).Insert(builder).Return()
-	builder.AllocateInstruction().AsStore(ssa.OpcodeIstore32, missing, hdr, 0).Insert(builder)
-	builder.AllocateInstruction().AsJump(ssa.ValuesNil, doneBlk).Insert(builder)
-
-	builder.SetCurrentBlock(spillBlk)
-	builder.Seal(spillBlk)
-	back := builder.AllocateInstruction().AsIconst64(uint64(8 * len(vals))).Insert(builder).Return()
-	base := builder.AllocateInstruction().AsIsub(hdr, back).Insert(builder).Return()
-	for i, v := range vals {
-		builder.AllocateInstruction().
-			AsStore(ssa.OpcodeStore, v, base, uint32(i*8)).Insert(builder)
-	}
-	count := builder.AllocateInstruction().AsIconst32(uint32(len(vals))).Insert(builder).Return()
-	builder.AllocateInstruction().AsStore(ssa.OpcodeIstore32, count, hdr, 0).Insert(builder)
-	builder.AllocateInstruction().AsJump(ssa.ValuesNil, doneBlk).Insert(builder)
-
-	builder.SetCurrentBlock(doneBlk)
-	builder.Seal(doneBlk)
-}
-
-// emitGCSafepoint emits the loop-header poll of the collector's pause flag. The flag is a word in the
-// execution context that the collector writes, so the common path is one load and one not-taken branch.
+// emitGCSafepoint emits a poll of the collector's pause flag, a word in the execution context that the
+// collector writes. Its slow path yields, which saves every register where the collector's scan reads them,
+// and the yield's return to compiled code parks (see callEngine.parkIfPaused).
 func (c *Compiler) emitGCSafepoint(builder ssa.Builder) {
 	pause := builder.AllocateInstruction().
 		AsLoad(c.execCtxPtrValue, nativeapi.ExecutionContextOffsetGCPause.U32(), ssa.TypeI32).
@@ -7131,10 +7046,8 @@ func (c *Compiler) emitGCSafepoint(builder ssa.Builder) {
 	builder.AllocateInstruction().AsJump(ssa.ValuesNil, afterBlk).Insert(builder)
 
 	builder.SetCurrentBlock(parkBlk)
-	c.materializeGCRoots(builder)
-	c.callGC(wasm.GCSafepoint)
-	builder.AllocateInstruction().AsJump(ssa.ValuesNil, afterBlk).Insert(builder)
 	builder.Seal(parkBlk)
+	c.emitCheckModuleExitCodeCall(afterBlk)
 
 	builder.SetCurrentBlock(afterBlk)
 	builder.Seal(afterBlk)

@@ -221,6 +221,13 @@ corpus tool, mean ms per document, zero pixel mismatches. On the Atom: 43.9 ms b
 44.4 ms with the option on (**+1.3%**), against wazero's 49.1 → 68.1 ms (+38.8%) and
 wazero+PRs' 48.0 → 48.3 ms (+0.5%). Compile plus first worker is 5.8 s against wazero's 11.5 s.
 
+On the M4 with v0.6.0, which is always interruptible, against wazero+PRs with its option on
+(interleaved, 8 rounds, 121 documents that render): 203.9 ms for the corpus against 235.1,
+faster on 116 documents, compile plus first render 0.92 s against 1.40. Until the collector
+stopped polling at loop headers (OPTIMIZATIONS.md, H6-followup-3), wazy lost the heaviest
+documents there by up to 2.2x -- 256.8 ms for the corpus -- on a poll PDFium never needed:
+exception handling is what turns the collector on.
+
 Neither module behaves like the kernels: a 5.7 MB guest spends its time in its own compute,
 not in a termination check, so ratios like the spin kernel's do not transfer.
 

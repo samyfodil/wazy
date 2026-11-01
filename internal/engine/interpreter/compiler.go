@@ -468,7 +468,7 @@ func (c *compiler) compile(sig *wasm.FunctionType, body []byte, localTypes []was
 	// wasm.Module.FunctionNeedsEntryCheck. One that opens with a loop has that
 	// loop's check run first on every call already.
 	if needs := c.module.FunctionNeedsEntryCheck; c.next < len(needs) && needs[c.next] && !c.opensWithLoop() {
-		c.emit(newOperationBuiltinFunctionCheckExitCode())
+		c.emitCheck()
 	}
 
 	// Now, enter the function body.
@@ -484,7 +484,17 @@ func (c *compiler) compile(sig *wasm.FunctionType, body []byte, localTypes []was
 // code, which validation counts as nothing: see wasm.entryCheckBuilder.
 func (c *compiler) checkForeignCall(foreign bool) {
 	if foreign {
-		c.emit(newOperationBuiltinFunctionCheckExitCode())
+		c.emitCheck()
+	}
+}
+
+// emitCheck emits a check for preemption and, with the collector on, a place to park for a collection.
+// Where a guest can run unboundedly between two preemption checks it can between two parking points, so
+// the two go together: a cycle of return_calls passes no loop header.
+func (c *compiler) emitCheck() {
+	c.emit(newOperationBuiltinFunctionCheckExitCode())
+	if wasm.CollectorEnabled(c.enabledFeatures) {
+		c.emit(newOperationGCSafepoint())
 	}
 }
 
@@ -595,12 +605,7 @@ operatorSwitch:
 		// the loop. In other words, this checks even when no br/br_if/br_table instructions jumping to this loop
 		// exist. However, in reality, that shouldn't be an issue since such "noop" loop header will highly likely be
 		// optimized out by almost all guest language compilers which have the control flow optimization passes.
-		c.emit(newOperationBuiltinFunctionCheckExitCode())
-		// A loop header is also where execution parks for a collection: a guest cannot run unboundedly
-		// without passing one, so this is what bounds how long a collection waits.
-		if wasm.CollectorEnabled(c.enabledFeatures) {
-			c.emit(newOperationGCSafepoint())
-		}
+		c.emitCheck()
 	case wasm.OpcodeIf:
 		c.br.Reset(c.body[c.pc+1:])
 		bt, num, err := wasm.DecodeBlockType(c.types, c.br, c.enabledFeatures)

@@ -11,16 +11,26 @@ TEXT ·entrypoint(SB), NOSPLIT|NOFRAME, $0-48
 	MOVQ goAllocatedStackSlicePtr+40(FP), R13
 
 	// Publish the address of this goroutine's g.stackguard0, which compiled code
-	// checks and a done context's watcher stores to (16 == GStackguard0Offset, 736 ==
-	// ExecutionContextOffsetPreemptWordAddress). Only a call on another goroutine
-	// than the last one changes it, so most calls only compare.
+	// checks and a done context's watcher and the collector store to (16 ==
+	// GStackguard0Offset, 736 == ExecutionContextOffsetPreemptWordAddress). Only a
+	// call on another goroutine than the last one changes it, so most calls only
+	// compare.
 	MOVQ (TLS), R10
 	ADDQ $16, R10
 	CMPQ R10, 736(AX)
-	JEQ  published
-	MOVQ R10, 736(AX)
+	JEQ  enter
 
-published:
+	// A collection waiting for this call (4 == ExecutionContextOffsetGCPause) rang
+	// the address it read, the last call's goroutine, and so did callWithStack. It
+	// stores the flag before it reads the address, and XCHGQ is a full fence, so
+	// either it reads this one or the flag is seen here.
+	MOVQ  R10, CX
+	XCHGQ CX, 736(AX)
+	CMPL  4(AX), $0
+	JEQ   enter
+	MOVQ  $-1314, (R10) // StackPreempt
+
+enter:
 	JMP R11
 
 // afterGoFunctionCallEntrypoint(executable *byte, executionContextPtr uintptr, stackPointer, framePointer uintptr)

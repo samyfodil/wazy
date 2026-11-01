@@ -1862,15 +1862,29 @@ and matches nothing -- which is also what lets slots be reused rather than growi
 without bound. And a stack is only ever read while it is not being written to: a
 collection asks every call in flight to park, waits for all of them, marks,
 sweeps, and lets them go. The parking points are ones execution already passes
-through -- every loop header, and every host call, which is where an execution
-that is blocked outside wasm makes itself scannable. A guest cannot outrun a
-collection except by looping without a back edge, which no loop does.
+through. In compiled code they are its preemption checks: a collection rings each
+call in flight through its goroutine's preemption word, the doorbell a done
+context uses, so the next check yields, and the yield's return to compiled code
+parks. Every other return from Go to compiled code parks too -- after a host call,
+an allocation, a `memory.atomic.wait` -- and a call blocked in a host call or a
+wait is parked for as long as it is blocked. The interpreter reads its pause flag
+wherever it checks for preemption. Those checks bound the work between two of
+them, so a guest cannot outrun a collection: not in a loop, not through a cycle of
+`return_call`s, not blocked outside wasm.
+
+The yield trampoline saves every register the allocator hands out, and an exit to
+Go has the caller-saved ones spilled and the callee-saved ones saved, so a parked
+call's live references are on its stack or in the saved registers, and the
+conservative scan finds them without the backend saying where it kept anything.
 
 Nothing collects in the middle of an instruction: allocation only *asks* for a
-collection, and whichever execution reaches a parking point first runs it, where
-its own stack is stable too. The loop-header poll is one load and a not-taken
-branch, and it is emitted only when the GC proposal is enabled -- codegen for
-every other module is byte-identical to what it was before any of this landed.
+collection, and the call that asked runs it at its next parking point, the return
+from the allocation in compiled code. One that returns first leaves the request to
+whoever allocates next, which marks every call in flight again. Compiled code pays
+nothing for the collector. An earlier design polled the pause flag at every loop
+header with a call into Go behind it, and spilled every live value for the scan:
+that call made the register allocator store loop-carried values on every back
+edge, which cost PDFium 2.6x on some documents and 28% of its compile time.
 
 **A vector field takes two words.** Every other storage type fits in a
 `GCObject`'s single word; `v128` does not, so `FunctionType.FieldSlots` lays a

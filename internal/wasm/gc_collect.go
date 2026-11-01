@@ -34,8 +34,10 @@ func CollectorEnabled(features api.CoreFeatures) bool {
 //
 // A stack may only be scanned while it is not being written to, so a collection stops the world first: it
 // asks every wasm call in flight to park, waits for all of them, marks, sweeps, and lets them go. The parking
-// points are the ones execution already passes through -- every loop header, and the start and end of every
-// call -- so a guest cannot outrun a collection except by looping without a back edge, which no loop does.
+// points are the ones execution already passes through: wherever an engine checks whether to stop, which it
+// does often enough that a guest cannot run unboundedly without a check, and every return to Go -- a host
+// call, a wait, the start and end of a call. Asking is setting a call's pause flag and ringing it (see
+// GCRoots.RequestPark), for an engine that does not read the flag at every check.
 //
 // Nothing collects during an instruction. Allocation only *asks* for a collection (see GCHeap.Alloc); the
 // execution that notices runs it at its next parking point, where its own stack is stable too.
@@ -63,6 +65,9 @@ type GCRoots interface {
 	// returns false if some of the call's references could not be offered, in which case the collection
 	// reclaims nothing.
 	ScanGCRoots(visit func(word uint64)) (complete bool)
+	// RequestPark asks the call to reach a parking point soon, after its pause flag was set. The flag is the
+	// request, which the call reads at its parking points; this only hurries it there, and may be lost.
+	RequestPark()
 }
 
 // GCExecution is one wasm call in flight, registered with a Store so that a collection can find its roots and
@@ -81,6 +86,9 @@ type GCExecution struct {
 	parked atomic.Bool
 	// cell is this execution's place among the calls in flight.
 	cell *gcExecCell
+	// buf is the call's parameter/result buffer, a root for as long as the call is registered: its
+	// parameters are there until the call starts, and its results once it is done.
+	buf []uint64
 }
 
 // gcExecCell is one place in the list of calls in flight. A cell outlives the call that took it: Unregister
@@ -117,10 +125,11 @@ func (s *Store) RegisterGCExecution(roots GCRoots, pause *uint32) *GCExecution {
 }
 
 // RegisterGCExecutionInto is RegisterGCExecution registering e, so that an engine making call after call can keep
-// one GCExecution rather than allocate one per call. e must not be registered already. Reusing it after
-// Unregister is safe: once Unregister returns, no collection holds e any more (see the handshake above).
-func (s *Store) RegisterGCExecutionInto(e *GCExecution, roots GCRoots, pause *uint32) *GCExecution {
-	e.s, e.roots, e.pause = s, roots, pause
+// one GCExecution rather than allocate one per call, with buf the call's parameter/result buffer. e must not be
+// registered already. Reusing it after Unregister is safe: once Unregister returns, no collection holds e any
+// more (see the handshake above).
+func (s *Store) RegisterGCExecutionInto(e *GCExecution, roots GCRoots, pause *uint32, buf []uint64) *GCExecution {
+	e.s, e.roots, e.pause, e.buf = s, roots, pause, buf
 	// Only a reused e can still be marked parked, and it must not be once it is published. An atomic store
 	// is a locked instruction on amd64, so skip it in the common case where there is nothing to clear.
 	if e.parked.Load() {
@@ -174,6 +183,7 @@ func (e *GCExecution) Unregister() {
 	if e.cell.exec.CompareAndSwap(e, nil) && e.s.gc.collecting.Load() {
 		e.waitOut()
 	}
+	e.buf = nil
 }
 
 // Safepoint is called by an engine when it sees its pause flag set, at a point where its wasm stack is stable.
@@ -215,6 +225,7 @@ func (e *GCExecution) parkLocked() {
 		for c := g.execs.Load(); c != nil; c = c.next {
 			if other := c.exec.Load(); other != nil && other != e {
 				atomic.StoreUint32(other.pause, 1)
+				other.roots.RequestPark()
 			}
 		}
 		for !g.othersParkedLocked(e) {
@@ -317,8 +328,8 @@ func (m *ModuleInstance) RegisterGCExecution(roots GCRoots, pause *uint32) *GCEx
 }
 
 // RegisterGCExecutionInto is Store.RegisterGCExecutionInto, reachable from the engines through a module instance.
-func (m *ModuleInstance) RegisterGCExecutionInto(e *GCExecution, roots GCRoots, pause *uint32) *GCExecution {
-	return m.s.RegisterGCExecutionInto(e, roots, pause)
+func (m *ModuleInstance) RegisterGCExecutionInto(e *GCExecution, roots GCRoots, pause *uint32, buf []uint64) *GCExecution {
+	return m.s.RegisterGCExecutionInto(e, roots, pause, buf)
 }
 
 // GCLiveObjects is how many objects the store's heap holds. It exists for tests, which have no other way to
@@ -331,9 +342,18 @@ func (s *Store) RequestGC() {
 	g := &s.gc
 	// The threshold stays crossed until a collection actually happens, so every allocation after the one
 	// that crossed it lands here too; answer those without taking anything. The execution that asks is
-	// always one the walk below can see -- it registered before it could allocate -- so a request is never
-	// left with nobody to notice it.
-	if g.wanted.Load() || g.collecting.Load() {
+	// always one the walk below can see -- it registered before it could allocate -- but it may return
+	// before it reaches a parking point, leaving the request to calls that started after the walk. So a
+	// request made again marks whoever is in flight now, the execution allocating included.
+	if g.collecting.Load() {
+		return
+	}
+	if g.wanted.Load() {
+		for c := g.execs.Load(); c != nil; c = c.next {
+			if e := c.exec.Load(); e != nil && atomic.LoadUint32(e.pause) == 0 {
+				atomic.StoreUint32(e.pause, 1)
+			}
+		}
 		return
 	}
 	g.mu.Lock()
@@ -348,6 +368,8 @@ func (s *Store) RequestGC() {
 			atomic.StoreUint32(e.pause, 1)
 		}
 	}
+	// Nobody is rung. The execution that asked notices its own flag at its next parking point, and that is where
+	// the collection starts and rings the rest.
 }
 
 // collectGarbageLocked marks every object reachable from the roots and frees the rest. Store.gc.mu is held and
@@ -379,8 +401,13 @@ func (s *Store) collectGarbageLocked() {
 
 	complete := true
 	for c := s.gc.execs.Load(); c != nil; c = c.next {
-		if e := c.exec.Load(); e != nil && !e.roots.ScanGCRoots(mark) {
-			complete = false
+		if e := c.exec.Load(); e != nil {
+			for _, w := range e.buf {
+				mark(w)
+			}
+			if !e.roots.ScanGCRoots(mark) {
+				complete = false
+			}
 		}
 	}
 	if !complete {

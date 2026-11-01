@@ -20,12 +20,11 @@ const (
 const (
 	// ExecutionContextOffsetExitCodeOffset is an offset of `exitCode` field in native.executionContext
 	ExecutionContextOffsetExitCodeOffset Offset = 0
-	// ExecutionContextOffsetGCPause is the flag a loop header polls so a collection can stop the world: the
-	// collector writes 1 into it and compiled code calls the GC trampoline when it sees one. It sits in the
-	// padding after the exit code, and the safepoint reuses the GC trampoline rather than adding a second
-	// address field, so the collector costs this struct nothing at all -- which matters because it is
-	// embedded in the per-call callEngine, close enough to a Go size class boundary that eight bytes would
-	// cost 256 per call. See wasm.GCSafepoint.
+	// ExecutionContextOffsetGCPause is the flag the collector writes 1 into to stop the world, which a call reads
+	// where it can park (see frontend.Compiler.emitGCSafepoint and callEngine.parkIfPaused). It sits in the padding
+	// after the exit code, so the collector costs this struct nothing at all -- which matters because it is
+	// embedded in the per-call callEngine, close enough to a Go size class boundary that eight bytes would cost
+	// 256 per call.
 	ExecutionContextOffsetGCPause Offset = 4
 	// ExecutionContextOffsetCallerModuleContextPtr is an offset of `callerModuleContextPtr` field in native.executionContext
 	ExecutionContextOffsetCallerModuleContextPtr Offset = 8
@@ -302,8 +301,3 @@ func align16(o Offset) Offset {
 func align8(o Offset) Offset {
 	return (o + 7) &^ 7
 }
-
-// GCRootsMissing is the count a GC safepoint writes into the root region's header in place of the number of
-// words it spilled, when the region is too small to hold them. The collector then cannot see that call's roots
-// and reclaims nothing. See frontend's materializeGCRoots and callEngine.ScanGCRoots.
-const GCRootsMissing = 0xffff_ffff

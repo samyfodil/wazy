@@ -43,11 +43,9 @@ type Compiler struct {
 	entryCheck *ssa.Instruction
 	opening    bool
 	tunedWork  uint64
-	// gcEnabled makes every loop header poll the collector's pause flag; see emitGCSafepoint.
+	// gcEnabled makes loop headers poll the collector's pause flag where no preemption check does; see
+	// emitGCSafepoint.
 	gcEnabled bool
-	// maxGCRoots is the most values any one safepoint in this function writes, which is how big the root
-	// buffer has to be. See materializeGCRoots.
-	maxGCRoots int
 
 	// Followings are reset by per function, except the module-invariant memory,
 	// table and global tables that declareModuleInvariants fills in once.
@@ -177,12 +175,9 @@ func NewFrontendCompiler(m *wasm.Module, ssaBuilder ssa.Builder, offset *nativea
 	return c
 }
 
-// SetGCEnabled makes loop headers emit the collector's safepoint poll. It must be called before lowering.
+// SetGCEnabled makes loop headers poll the collector's pause flag where no preemption check does. It must be
+// called before lowering.
 func (c *Compiler) SetGCEnabled(on bool) { c.gcEnabled = on }
-
-// MaxGCRoots is the most values any safepoint lowered so far writes into the root buffer. It accumulates
-// across every function the compiler lowers, so the engine can size one buffer per call for the whole module.
-func (c *Compiler) MaxGCRoots() int { return c.maxGCRoots }
 
 // tryTableMetadata accumulates try_table metadata during compilation.
 type tryTableMetadata interface {

@@ -202,7 +202,7 @@ type callEngine struct {
 	// stackiterator for Listeners to walk frames and stack.
 	stackIterator stackIterator
 
-	// gcPause is what a loop header polls: non-zero means a collection is waiting for this call to park.
+	// gcPause is what a parking point polls: non-zero means a collection is waiting for this call to park.
 	// gcExec is this call's registration with the store, and is nil unless the GC proposal is enabled.
 	gcPause uint32
 	gcExec  *wasm.GCExecution
@@ -211,13 +211,18 @@ type callEngine struct {
 }
 
 // ScanGCRoots implements wasm.GCRoots. Every operand and local this call holds lives in one flat []uint64, so
-// the whole of it is offered to the collector, which decides what looks like a reference.
+// the whole of it is offered to the collector, which decides what looks like a reference. That is all of it up to
+// its capacity: the results a finished call has popped into its caller's slice are still there while it waits
+// out a collection to unregister.
 func (ce *callEngine) ScanGCRoots(visit func(uint64)) bool {
-	for _, v := range ce.stack {
+	for _, v := range ce.stack[:cap(ce.stack)] {
 		visit(v)
 	}
 	return true
 }
+
+// RequestPark implements wasm.GCRoots. The interpreter reads its pause flag at every parking point.
+func (*callEngine) RequestPark() {}
 
 // matchCatchClause checks whether a single catch clause matches the given exception.
 // Returns whether it matched and the values to push onto the stack. The caller
@@ -1299,8 +1304,10 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 		ctx = context.WithValue(ctx, expctxkeys.SnapshotterKey{}, ce)
 	}
 
+	// Before registering, so a collection under way when this call joins sees the parameters.
+	ce.pushValues(params)
 	if ce.f.parent.gcEnabled {
-		ce.gcExec = m.RegisterGCExecutionInto(&ce.gcExecSlot, ce, &ce.gcPause)
+		ce.gcExec = m.RegisterGCExecutionInto(&ce.gcExecSlot, ce, &ce.gcPause, nil)
 		defer func() {
 			ce.gcExec.Unregister()
 			ce.gcExec = nil
@@ -1318,8 +1325,6 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 			err = ce.recoverOnCall(ctx, m, v)
 		}
 	}()
-
-	ce.pushValues(params)
 
 	// This loop indexes mem.Buffer directly and never checks whether the
 	// module was closed, so a concurrent close must not recycle the buffer
@@ -5339,12 +5344,17 @@ func (ce *callEngine) callNativeFuncRare(ctx context.Context, m *wasm.ModuleInst
 			if memoryOutOfBounds(mem, offset, 4) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
-			ce.pushValue(mem.Wait32(offset, uint32(exp), timeout, func(mem *wasm.MemoryInstance, offset uint64) uint32 {
+			// A wait can block for as long as a host call, so it is a parking point like one: otherwise a
+			// collection would wait for this call while the call that is to wake it waits for the collection.
+			ce.gcExec.EnterGo()
+			res := mem.Wait32(offset, uint32(exp), timeout, func(mem *wasm.MemoryInstance, offset uint64) uint32 {
 				mem.Mux.Lock()
 				defer mem.Mux.Unlock()
 				value, _ := mem.ReadUint32LeAt(offset)
 				return value
-			}))
+			})
+			ce.gcExec.LeaveGo()
+			ce.pushValue(res)
 		case unsignedTypeI64:
 			if offset%8 != 0 {
 				panic(wasmruntime.ErrRuntimeUnalignedAtomic)
@@ -5352,12 +5362,15 @@ func (ce *callEngine) callNativeFuncRare(ctx context.Context, m *wasm.ModuleInst
 			if memoryOutOfBounds(mem, offset, 8) {
 				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 			}
-			ce.pushValue(mem.Wait64(offset, exp, timeout, func(mem *wasm.MemoryInstance, offset uint64) uint64 {
+			ce.gcExec.EnterGo()
+			res := mem.Wait64(offset, exp, timeout, func(mem *wasm.MemoryInstance, offset uint64) uint64 {
 				mem.Mux.Lock()
 				defer mem.Mux.Unlock()
 				value, _ := mem.ReadUint64LeAt(offset)
 				return value
-			}))
+			})
+			ce.gcExec.LeaveGo()
+			ce.pushValue(res)
 		}
 	case operationKindAtomicMemoryNotify:
 		mem := memories[op.U3]
