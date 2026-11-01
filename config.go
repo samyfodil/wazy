@@ -180,14 +180,16 @@ type RuntimeConfig interface {
 	//
 	// Below defines the shared cache across multiple instances of Runtime:
 	//
+	//	ctx := context.Background()
+	//
 	//	// Creates the new Cache and the runtime configuration with it.
 	//	cache := wazy.NewCompilationCache()
-	//	defer cache.Close()
-	//	config := wazy.NewRuntimeConfig().WithCompilationCache(c)
+	//	defer cache.Close(ctx)
+	//	config := wazy.NewRuntimeConfig().WithCompilationCache(cache)
 	//
 	//	// Creates two runtimes while sharing compilation caches.
-	//	foo := wazy.NewRuntimeWithConfig(context.Background(), config)
-	// 	bar := wazy.NewRuntimeWithConfig(context.Background(), config)
+	//	foo := wazy.NewRuntimeWithConfig(ctx, config)
+	//	bar := wazy.NewRuntimeWithConfig(ctx, config)
 	//
 	// # Cache Key
 	//
