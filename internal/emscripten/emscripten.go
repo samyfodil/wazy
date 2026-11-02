@@ -27,6 +27,15 @@ var NotifyMemoryGrowth = &wasm.HostFunc{
 // it ignores the error and does not act on it.
 const FunctionThrowLongjmp = "_emscripten_throw_longjmp"
 
+// TagCppException and TagCLongjmp are the tags a dynamic-linking build (MAIN_MODULE or SIDE_MODULE)
+// imports from "env" when it uses Wasm exception handling: C++ exceptions throw the first, and setjmp
+// and longjmp the second. Emscripten's JavaScript defines each with one pointer-sized parameter, so
+// that every module of the program throws and catches the same tag.
+const (
+	TagCppException = "__cpp_exception"
+	TagCLongjmp     = "__c_longjmp"
+)
+
 var (
 	ThrowLongjmpError = errors.New("_emscripten_throw_longjmp")
 	ThrowLongjmp      = &wasm.HostFunc{

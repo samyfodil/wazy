@@ -171,6 +171,18 @@ type HostModuleBuilder interface {
 	// NewFunctionBuilder begins the definition of a host function.
 	NewFunctionBuilder() HostFunctionBuilder
 
+	// ExportTag defines an exception-handling tag with the given parameter types
+	// and exports it under name, for guests to import and throw or catch. Every
+	// module importing it shares the one tag, so an exception thrown in one guest
+	// can be caught in another.
+	//
+	// Emscripten's dynamic-linking builds import __cpp_exception and __c_longjmp
+	// from "env" this way, and emscripten.InstantiateForModule provides them.
+	//
+	// Exporting a tag requires api.CoreFeatureExceptionHandling. Exporting a tag
+	// under a name already given to another tag replaces it.
+	ExportTag(name string, params ...api.ValueType) HostModuleBuilder
+
 	// Compile returns a CompiledModule that can be instantiated by Runtime.
 	Compile(context.Context) (CompiledModule, error)
 
@@ -204,6 +216,7 @@ type hostModuleBuilder struct {
 	moduleName     string
 	exportNames    []string
 	nameToHostFunc map[string]*wasm.HostFunc
+	tags           []wasm.HostTag
 }
 
 // NewHostModuleBuilder implements Runtime.NewHostModuleBuilder
@@ -287,6 +300,23 @@ func (b *hostModuleBuilder) ExportHostFunc(fn *wasm.HostFunc) {
 	b.nameToHostFunc[fn.ExportName] = fn
 }
 
+// ExportTag implements HostModuleBuilder.ExportTag
+func (b *hostModuleBuilder) ExportTag(name string, params ...api.ValueType) HostModuleBuilder {
+	b.ExportHostTag(wasm.HostTag{ExportName: name, ParamTypes: wasm.FromApiValueType(params)})
+	return b
+}
+
+// ExportHostTag implements wasm.HostTagExporter
+func (b *hostModuleBuilder) ExportHostTag(tag wasm.HostTag) {
+	for i := range b.tags {
+		if b.tags[i].ExportName == tag.ExportName {
+			b.tags[i] = tag
+			return
+		}
+	}
+	b.tags = append(b.tags, tag)
+}
+
 // NewFunctionBuilder implements HostModuleBuilder.NewFunctionBuilder
 func (b *hostModuleBuilder) NewFunctionBuilder() HostFunctionBuilder {
 	return &hostFunctionBuilder{b: b}
@@ -294,7 +324,7 @@ func (b *hostModuleBuilder) NewFunctionBuilder() HostFunctionBuilder {
 
 // Compile implements HostModuleBuilder.Compile
 func (b *hostModuleBuilder) Compile(ctx context.Context) (CompiledModule, error) {
-	module, err := wasm.NewHostModule(b.moduleName, b.exportNames, b.nameToHostFunc, b.r.enabledFeatures)
+	module, err := wasm.NewHostModule(b.moduleName, b.exportNames, b.nameToHostFunc, b.tags, b.r.enabledFeatures)
 	if err != nil {
 		return nil, err
 	} else if err = module.Validate(b.r.enabledFeatures); err != nil {
