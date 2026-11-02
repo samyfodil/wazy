@@ -178,7 +178,10 @@ type callEngine struct {
 	// own cache line rather than in a counter every caller shares, so
 	// concurrent calls to one module do not serialize on it. Registered with
 	// the module's memories in newCallEngine; see wasm.CallSlot.
-	slot wasm.CallSlot
+	slot *wasm.CallSlot
+	// ownSlot is the slot when the module registers this callEngine's own; see
+	// wasm.ModuleInstance.CallSlotFor.
+	ownSlot wasm.CallSlot
 
 	// checks counts the loop and entry checks this engine ran. See check.
 	checks uint32
@@ -325,7 +328,7 @@ func (e *moduleEngine) newCallEngine(compiled *function) *callEngine {
 	ce := &callEngine{f: compiled}
 	// Make this callEngine's in-flight slot visible to the memories it can run
 	// against, so a close can tell whether it is mid-call. See wasm.CallSlot.
-	compiled.moduleInstance.RegisterCallSlot(&ce.slot)
+	ce.slot = compiled.moduleInstance.CallSlotFor(&ce.ownSlot)
 	return ce
 }
 
@@ -1330,7 +1333,7 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 	// module was closed, so a concurrent close must not recycle the buffer
 	// until we are done with it. See MemoryInstance.callers.
 	ce.slot.Enter()
-	defer m.ExitCall(&ce.slot)
+	defer m.ExitCall(ce.slot)
 
 	// Refuse a call that arrives after the module closed. Enter above is a
 	// sequentially consistent store and this is the paired load, against a

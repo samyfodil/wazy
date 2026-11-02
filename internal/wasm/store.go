@@ -121,6 +121,13 @@ type (
 		// module is alive, and releases them on Close. See holdMemoriesOf.
 		heldMemories []*MemoryInstance
 
+		// slotMux guards the CallSlots this module hands its callEngines: how many registered their own,
+		// and the chunk the rest come from. See CallSlotFor.
+		slotMux     sync.Mutex
+		slotsSingly uint32
+		slotChunk   *callSlotChunk
+		slotNext    int
+
 		// Engine implements function calls for this module.
 		Engine ModuleEngine
 

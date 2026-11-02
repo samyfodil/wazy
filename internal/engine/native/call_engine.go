@@ -31,11 +31,14 @@ type (
 	callEngine struct {
 		internalapi.WazyOnly
 		// slot records whether this callEngine is inside a top-level call, on
-		// its own cache line rather than in a counter every caller shares, so
-		// concurrent calls to one module do not serialize on it. Registered
-		// with the module's memories in NewFunction; see wasm.CallSlot.
-		slot  wasm.CallSlot
-		stack []byte
+		// a line of its own rather than in a counter every caller shares, so
+		// concurrent calls to one module do not serialize on it. Set in
+		// NewFunction; see wasm.CallSlot.
+		slot *wasm.CallSlot
+		// ownSlot is the slot when the module registers this callEngine's own; see
+		// wasm.ModuleInstance.CallSlotFor.
+		ownSlot wasm.CallSlot
+		stack   []byte
 		// watch is the current call's context watcher, nil until watchContext
 		// registers it, and hostCalls counts the call's host calls. See
 		// watchContext.
@@ -612,7 +615,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 	// the module was closed, so a concurrent close must not recycle the buffer
 	// until this call is done with it. See MemoryInstance.callers.
 	c.slot.Enter()
-	defer m.ExitCall(&c.slot)
+	defer m.ExitCall(c.slot)
 
 	// Refuse a call that arrives after the module closed. Enter above is a
 	// sequentially consistent store and this is the paired load, against a

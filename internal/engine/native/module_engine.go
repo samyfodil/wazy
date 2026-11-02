@@ -237,7 +237,7 @@ func (m *moduleEngine) NewFunction(index wasm.Index) api.Function {
 
 	// Make this callEngine's in-flight slot visible to the memories it can run
 	// against, so a close can tell whether it is mid-call. See wasm.CallSlot.
-	m.module.RegisterCallSlot(&ce.slot)
+	ce.slot = m.module.CallSlotFor(&ce.ownSlot)
 
 	sharedFunctions := p.sharedFunctions
 	ce.execCtx.memoryGrowTrampolineAddress = sharedFunctions.memoryGrowAddress
