@@ -518,32 +518,52 @@ func (f *fsFile) rewindDir() sys.Errno {
 	return 0
 }
 
-// readdirFile allows masking the `Readdir` function on os.File.
+// readdirFile is a directory with both of os.File's listing methods, whose
+// entries carry inodes as an os.File's do.
 type readdirFile interface {
+	fs.ReadDirFile
 	Readdir(n int) ([]fs.FileInfo, error)
 }
 
-// readdir uses readdirFile.Readdir, special casing windows when path !="".
+// readdir reads up to n entries of f, or all of them when n <= 0, special
+// casing windows when path != "".
+//
+// An entry that is gone by the time its inode is read is skipped, as
+// os.File.Readdir skips one that was removed. That includes a closed
+// descriptor under /dev/fd, which reports EBADF rather than ENOENT. Skipping
+// one reads further, so a short result still means the end of the directory.
 func readdir(f readdirFile, path string, n int) (dirents []sys.Dirent, errno sys.Errno) {
-	fis, e := f.Readdir(n)
-	if errno = sys.UnwrapOSError(e); errno != 0 {
-		return
-	}
-
-	dirents = make([]sys.Dirent, 0, len(fis))
-
-	// linux/darwin won't have to fan out to lstat, but windows will.
-	var ino sys.Inode
-	for fi := range fis {
-		t := fis[fi]
-		// inoFromFileInfo is more efficient than sys.NewStat_t, as it gets the
-		// inode without allocating an instance and filling other fields.
-		if ino, errno = inoFromFileInfo(path, t); errno != 0 {
+	want := n
+	for {
+		des, e := f.ReadDir(want)
+		if errno = sys.UnwrapOSError(e); errno != 0 {
 			return
 		}
-		dirents = append(dirents, sys.Dirent{Name: t.Name(), Ino: ino, Type: t.Mode().Type()})
+		if dirents == nil {
+			dirents = make([]sys.Dirent, 0, len(des))
+		}
+		for _, de := range des {
+			info, e := de.Info()
+			switch errno = sys.UnwrapOSError(e); errno {
+			case 0:
+			case sys.ENOENT, sys.EBADF:
+				continue
+			default:
+				return nil, errno
+			}
+			// inoFromFileInfo is more efficient than sys.NewStat_t, as it gets
+			// the inode without allocating an instance and filling other fields.
+			var ino sys.Inode
+			if ino, errno = inoFromFileInfo(path, info); errno != 0 {
+				return nil, errno
+			}
+			dirents = append(dirents, sys.Dirent{Name: de.Name(), Ino: ino, Type: de.Type()})
+		}
+		if n <= 0 || len(des) < want || len(dirents) == n {
+			return dirents, 0
+		}
+		want = n - len(dirents)
 	}
-	return
 }
 
 func write(w io.Writer, buf []byte) (n int, errno sys.Errno) {

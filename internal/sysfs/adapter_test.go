@@ -196,6 +196,29 @@ func (f *zeroInoOsFile) Readdir(n int) ([]fs.FileInfo, error) {
 	return infos, nil
 }
 
+// ReadDir implements the same method as documented on os.File
+func (f *zeroInoOsFile) ReadDir(n int) ([]fs.DirEntry, error) {
+	entries, err := f.File.ReadDir(n)
+	if err != nil {
+		return nil, err
+	}
+	for i := range entries {
+		entries[i] = zeroInoDirEntry{entries[i]}
+	}
+	return entries, nil
+}
+
+type zeroInoDirEntry struct{ fs.DirEntry }
+
+// Info implements the same method as documented on fs.DirEntry
+func (e zeroInoDirEntry) Info() (fs.FileInfo, error) {
+	info, err := e.DirEntry.Info()
+	if err != nil {
+		return nil, err
+	}
+	return withZeroIno(info), nil
+}
+
 // Stat implements the same method as documented on fs.File
 func (f *zeroInoOsFile) Stat() (fs.FileInfo, error) {
 	info, err := f.File.Stat()
