@@ -234,7 +234,7 @@ type TableInstance struct {
 type ElementInstance = []Reference
 
 // Reference is the runtime representation of RefType which is either RefTypeFuncref or RefTypeExternref.
-type Reference = uintptr
+type Reference = uint64
 
 // validateTable ensures any ElementSegment is valid. This caches results via Module.validatedActiveElementSegments.
 // Note: limitsType are validated by decoders, so not re-validated here.
@@ -449,7 +449,7 @@ func (t *TableInstance) Grow(delta uint32, initialRef Reference) (currentLen uin
 		return 0xffffffff // = -1 in signed 32-bit integer.
 	}
 
-	t.References = append(t.References, make([]uintptr, delta)...)
+	t.References = append(t.References, make([]Reference, delta)...)
 	if initialRef == 0 {
 		return
 	}

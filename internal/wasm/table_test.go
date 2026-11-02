@@ -1104,7 +1104,7 @@ func TestTableInstance_Grow(t *testing.T) {
 	for _, tt := range tests {
 		tc := tt
 		t.Run(tc.name, func(t *testing.T) {
-			table := &TableInstance{References: make([]uintptr, tc.currentLen), Max: tc.max}
+			table := &TableInstance{References: make([]Reference, tc.currentLen), Max: tc.max}
 			actual := table.Grow(tc.delta, 0)
 			require.Equal(t, tc.exp, actual)
 		})

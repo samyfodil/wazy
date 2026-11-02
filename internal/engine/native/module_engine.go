@@ -368,7 +368,7 @@ func (m *moduleEngine) TypeIDOfReference(ref wasm.Reference) wasm.FunctionTypeID
 func (m *moduleEngine) FunctionInstanceReference(funcIndex wasm.Index) wasm.Reference {
 	if funcIndex < m.module.Source.ImportFunctionCount {
 		begin, _, _ := m.parent.offsets.ImportedFunctionOffset(funcIndex)
-		return uintptr(unsafe.Pointer(&m.opaque[begin]))
+		return wasm.Reference(uintptr(unsafe.Pointer(&m.opaque[begin])))
 	}
 	return m.localFuncref(funcIndex)
 }
@@ -397,7 +397,7 @@ func (m *moduleEngine) FunctionInstanceReference(funcIndex wasm.Index) wasm.Refe
 func (m *moduleEngine) localFuncref(funcIndex wasm.Index) wasm.Reference {
 	if slot, ok := m.parent.funcrefSlotsOf()[funcIndex]; ok {
 		m.funcrefsOnce.Do(m.buildFuncrefs)
-		return uintptr(unsafe.Pointer(&m.funcrefs[slot]))
+		return wasm.Reference(uintptr(unsafe.Pointer(&m.funcrefs[slot])))
 	}
 	return m.localFuncrefSlow(funcIndex)
 }
@@ -426,7 +426,7 @@ func (m *moduleEngine) localFuncrefSlow(funcIndex wasm.Index) wasm.Reference {
 		head := m.localFunctionInstances.Load()
 		for n := head; n != nil; n = n.next {
 			if n.fi.indexInModule == funcIndex {
-				return uintptr(unsafe.Pointer(&n.fi))
+				return wasm.Reference(uintptr(unsafe.Pointer(&n.fi)))
 			}
 		}
 		p, src := m.parent, m.module.Source
@@ -441,7 +441,7 @@ func (m *moduleEngine) localFuncrefSlow(funcIndex wasm.Index) wasm.Reference {
 		// this very index, in which case that node wins and this one is dropped, so one index keeps
 		// yielding one reference.
 		if m.localFunctionInstances.CompareAndSwap(head, n) {
-			return uintptr(unsafe.Pointer(&n.fi))
+			return wasm.Reference(uintptr(unsafe.Pointer(&n.fi)))
 		}
 	}
 }
@@ -456,7 +456,7 @@ func (m *moduleEngine) LookupFunction(t *wasm.TableInstance, typeId wasm.Functio
 		panic(wasmruntime.ErrRuntimeInvalidTableAccess)
 	}
 
-	tf := nativeapi.PtrFromUintptr[functionInstance](rawPtr)
+	tf := nativeapi.PtrFromUintptr[functionInstance](uintptr(rawPtr))
 	if tf.typeID != typeId {
 		panic(wasmruntime.ErrRuntimeIndirectCallTypeMismatch)
 	}
