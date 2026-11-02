@@ -3065,6 +3065,36 @@ func Test_fdWrite_Errors(t *testing.T) {
 	}
 }
 
+// iovs_len*8 must not wrap: 0x20000001*8 is 8 in 32 bits, room for one
+// iovec, and the call would then succeed having dropped the rest.
+func Test_fdReadWrite_iovsLenOverflow(t *testing.T) {
+	mod, fd, log, r := requireOpenFile(t, t.TempDir(), "test_path", []byte("wazy"), false)
+	defer r.Close(testCtx)
+
+	require.True(t, mod.Memory().Write(0, []byte{
+		16, 0, 0, 0, // = iovs[0].offset
+		4, 0, 0, 0, // = iovs[0].length
+	}))
+
+	for _, tc := range []struct{ name, expectedLog string }{
+		{wasip1.FdReadName, `
+==> wasi_snapshot_preview1.fd_read(fd=4,iovs=0,iovs_len=536870913)
+<== (nread=,errno=EFAULT)
+`},
+		{wasip1.FdWriteName, `
+==> wasi_snapshot_preview1.fd_write(fd=4,iovs=0,iovs_len=536870913)
+<== (nwritten=,errno=EFAULT)
+`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer log.Reset()
+
+			requireErrnoResult(t, wasip1.ErrnoFault, mod, tc.name, uint64(fd), 0, 0x20000001, 32)
+			require.Equal(t, tc.expectedLog, "\n"+log.String())
+		})
+	}
+}
+
 func Test_pathCreateDirectory(t *testing.T) {
 	tmpDir := t.TempDir() // open before loop to ensure no locking problems.
 	fsConfig := wazy.NewFSConfig().WithDirMount(tmpDir, "/")

@@ -805,13 +805,12 @@ func fdReadOrPread(mod api.Module, params []uint64, isPread bool) sysapi.Errno {
 
 func readv(mem api.Memory, iovs uint32, iovsCount uint32, reader func(buf []byte) (nread int, errno sysapi.Errno)) (uint32, sysapi.Errno) {
 	var nread uint32
-	iovsStop := iovsCount << 3 // iovsCount * 8
-	iovsBuf, ok := mem.Read(iovs, iovsStop)
-	if !ok {
-		return 0, sysapi.EFAULT
+	iovsBuf, errno := readIovs(mem, iovs, iovsCount)
+	if errno != 0 {
+		return 0, errno
 	}
 
-	for iovsPos := uint32(0); iovsPos < iovsStop; iovsPos += 8 {
+	for iovsPos := 0; iovsPos < len(iovsBuf); iovsPos += 8 {
 		offset := le.Uint32(iovsBuf[iovsPos:])
 		l := le.Uint32(iovsBuf[iovsPos+4:])
 
@@ -836,6 +835,20 @@ func readv(mem api.Memory, iovs uint32, iovsCount uint32, reader func(buf []byte
 		}
 	}
 	return nread, 0
+}
+
+// readIovs returns the iovsCount iovec records at iovs. The size is computed
+// in 64 bits, as iovsCount*8 in 32 would wrap and silently drop iovecs.
+func readIovs(mem api.Memory, iovs, iovsCount uint32) ([]byte, sysapi.Errno) {
+	size := uint64(iovsCount) * 8
+	if size > math.MaxUint32 {
+		return nil, sysapi.EFAULT
+	}
+	buf, ok := mem.Read(iovs, uint32(size))
+	if !ok {
+		return nil, sysapi.EFAULT
+	}
+	return buf, 0
 }
 
 // fdReaddir is the WASI function named wasip1.FdReaddirName which reads
@@ -1288,13 +1301,12 @@ func fdWriteOrPwrite(mod api.Module, params []uint64, isPwrite bool) sysapi.Errn
 
 func writev(mem api.Memory, iovs uint32, iovsCount uint32, writer func(buf []byte) (n int, errno sysapi.Errno)) (uint32, sysapi.Errno) {
 	var nwritten uint32
-	iovsStop := iovsCount << 3 // iovsCount * 8
-	iovsBuf, ok := mem.Read(iovs, iovsStop)
-	if !ok {
-		return 0, sysapi.EFAULT
+	iovsBuf, errno := readIovs(mem, iovs, iovsCount)
+	if errno != 0 {
+		return 0, errno
 	}
 
-	for iovsPos := uint32(0); iovsPos < iovsStop; iovsPos += 8 {
+	for iovsPos := 0; iovsPos < len(iovsBuf); iovsPos += 8 {
 		offset := le.Uint32(iovsBuf[iovsPos:])
 		l := le.Uint32(iovsBuf[iovsPos+4:])
 
