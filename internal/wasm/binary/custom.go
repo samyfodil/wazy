@@ -18,9 +18,9 @@ func decodeCustomSection(buf []byte, offset int, name string, limit uint64) (res
 	// large .debug_* DWARF sections, copied on every compile even though they are
 	// consumed only when formatting an error stack trace) are read-only views into
 	// the source binary. n matches what copy() would have transferred.
-	n := int(limit)
-	if avail := len(buf) - offset; n > avail {
-		n = avail
+	n := len(buf) - offset
+	if limit < uint64(n) {
+		n = int(limit)
 	}
 	result = &wasm.CustomSection{
 		Name: name,

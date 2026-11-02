@@ -29,11 +29,19 @@ type FS interface {
 	// # Errors
 	//
 	// A zero Errno is success. The below are expected otherwise:
-	//   - ENOSYS: the implementation does not support this function.
+	//   - ENOSYS: the implementation does not support this function, or is
+	//     read-only and `flag` asks for write access.
 	//   - EINVAL: `path` or `flag` is invalid.
 	//   - EISDIR: the path was a directory, but flag included O_RDWR or
 	//     O_WRONLY
 	//   - ENOENT: `path` doesn't exist and `flag` doesn't contain O_CREAT.
+	//   - EEXIST: `path` exists and `flag` contains both O_CREAT and O_EXCL.
+	//   - ENOTDIR: `path` is not a directory, but `flag` contains O_DIRECTORY
+	//     or `path` ends in a slash; or a parent component of `path` is not a
+	//     directory (Windows reports ENOENT for that).
+	//   - EACCES or EPERM: the host denied access to `path`.
+	//   - ELOOP: `path` is a symbolic link and `flag` contains O_NOFOLLOW, or
+	//     resolving `path` met too many symbolic links.
 	//
 	// # Constraints on the returned file
 	//

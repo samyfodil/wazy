@@ -68,18 +68,15 @@ type typeBody struct {
 // component type may have.
 func readTypeBody(buf []byte, off int, component bool) (typeBody, int, error) {
 	var b typeBody
-	count, n, err := leb128.LoadUint32(buf[off:])
+	count, n, err := leb128.LoadVecSize(buf[off:])
 	if err != nil {
 		return b, off, err
 	}
 	off += int(n)
-	// Every declaration consumes at least one byte, so both count and the
-	// bytes left bound the declarations -- take the smaller, so a bogus
-	// LEB128 count cannot make this allocate before the read that refuses
-	// it. Only some declarations add a type, but most do.
-	if c := min(int(count), len(buf)-off); c > 0 {
-		b.decls = make([]TypeDecl, 0, c)
-		b.types = make([]TypeDesc, 0, c)
+	// Only some declarations add a type, but most do.
+	if count > 0 {
+		b.decls = make([]TypeDecl, 0, count)
+		b.types = make([]TypeDesc, 0, count)
 	}
 	what := "instancedecl"
 	if component {

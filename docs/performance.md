@@ -136,9 +136,9 @@ Only figures where wazy and wazero were measured **in the same run** appear here
 | `Instantiate` (37 KB TinyGo module) | 1.724 µs | 15.74 µs | **9.1x** | OPTIMIZATIONS.md sweep round 3, Apple M4, benchstat over interleaved A/B runs |
 | `HostCall/gomodule/CallWithStack` | 47.82 ns | 48.26 ns | a tie | same run as above |
 | `BenchmarkConstAddrLoads` (constant-address load kernel) | 1.62 µs | 5.10 µs | **~3.1x** | OPTIMIZATIONS.md C21, core-pinned i9-12900HK, interleaved benchstat n=10 |
-| `BenchmarkInterruptibleSpin`, 100k-iteration tight loop, interruptible | 96.2 µs | 5796 µs | **~60x** | v0.6.0, core-pinned Atom C3558, benchstat n=10, wazero with `WithCloseOnContextDone`, `wazero@6edbb8c` |
-| `BenchmarkInterruptibleFib`, `case.wasm` `fibonacci`, interruptible | 17.1 ms | 185.6 ms | **~10.8x** | same run as above |
-| `BenchmarkInterruptibleHostCallLoop`, a host call every iteration, interruptible | 688 µs | 1721 µs | **~2.5x** | same run as above |
+| `BenchmarkInterruptibleSpin`, 100k-iteration tight loop, interruptible | 96.9 µs | 6220 µs | **~64x** | v0.6.0 (`b4a13b64`), core-pinned Atom C3558, 10 interleaved rounds, wazero with `WithCloseOnContextDone`, `wazero@6edbb8c` |
+| `BenchmarkInterruptibleFib`, `case.wasm` `fibonacci`, interruptible | 16.9 ms | 187.3 ms | **~11.1x** | same run as above |
+| `BenchmarkInterruptibleHostCallLoop`, a host call every iteration, interruptible | 698 µs | 1873 µs | **~2.7x** | same run as above |
 
 Two things about the host-call row. First, `host=gomodule` is the arm both
 runtimes implement identically, which is why it is the honest baseline — and
