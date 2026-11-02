@@ -78,7 +78,7 @@ func readLabel(buf []byte, off int) (string, int, error) {
 		return "", off, fmt.Errorf("label length: %w", err)
 	}
 	off += int(n)
-	if off+int(length) > len(buf) {
+	if uint64(length) > uint64(len(buf)-off) {
 		return "", off, ErrTruncatedBinary
 	}
 	if length == 0 {

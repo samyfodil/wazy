@@ -105,6 +105,11 @@ func (m *Module) ExportedGlobal(name string) api.Global {
 	return m.exportedGlobals[name]
 }
 
+// ExportedTable implements the same method as documented on api.Module. A Module exports no tables.
+func (m *Module) ExportedTable(string) api.Table {
+	return nil
+}
+
 // Close implements the same method as documented on api.Closer.
 func (m *Module) Close(ctx context.Context) error {
 	return m.CloseWithExitCode(ctx, 0)

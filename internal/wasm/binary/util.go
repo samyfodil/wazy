@@ -137,7 +137,8 @@ func readBytes(buf []byte, offset int, n int) (data []byte, newOffset int, err e
 	if avail <= 0 {
 		return nil, offset, io.EOF
 	}
-	if avail < n {
+	// n is negative when a length of 2^31 or more was converted to int on a 32-bit target.
+	if n < 0 || avail < n {
 		return nil, offset, io.ErrUnexpectedEOF
 	}
 	return buf[offset : offset+n], offset + n, nil

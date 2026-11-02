@@ -12,12 +12,6 @@ import (
 	"github.com/samyfodil/wazy/sys"
 )
 
-// dirNlinkIncludesDot is true because even though os.File filters out dot
-// entries, the underlying syscall.Stat includes them.
-//
-// Note: this is only used in tests
-const dirNlinkIncludesDot = true
-
 func lstat(path string) (sys.Stat_t, sys.Errno) {
 	var st syscall.Stat_t
 	if err := syscall.Lstat(path, &st); err != nil {

@@ -899,7 +899,8 @@ func (w *wasiFS) writeStreamWrite(rep uint32, buf []byte) error {
 // # Escaping
 //
 // rel may not escape the descriptor it is resolved against: it is cleaned
-// first (so "a/../b", which ends up going nowhere, is fine) and then checked
+// first (so "a/../b", which ends up going nowhere, is fine here; see
+// fsDescNode.join for the lookup that still requires "a") and then checked
 // with io/fs.ValidPath, which rejects a rooted path and anything left
 // starting with "..". This is the same two-line rule
 // wasi_snapshot_preview1's atPath applies (imports/wasi_snapshot_preview1/
@@ -939,6 +940,43 @@ func wasiJoinFSPath(dir, rel string) (joined string, ok bool) {
 		joined += "/" // path.Join cleans it off again, so restore it last
 	}
 	return joined, true
+}
+
+// join resolves rel against this directory descriptor like wasiJoinFSPath,
+// failing EPERM where that does, and also where looking rel up one component
+// at a time would: at a ".." after a component that is missing or not a
+// directory, as in "a/.." with "a" a file. The clean erases that step. This
+// is the same check wasi_snapshot_preview1's atPath makes.
+func (n *fsDescNode) join(rel string) (string, sys.Errno) {
+	full, ok := wasiJoinFSPath(n.path, rel)
+	if !ok {
+		return "", sys.EPERM
+	}
+	if !strings.Contains(rel, "..") {
+		return full, 0
+	}
+	var parts []string
+	verified := 0 // leading parts known to be directories
+	for _, c := range strings.Split(rel, "/") {
+		switch c {
+		case "", ".":
+		case "..":
+			if len(parts) > verified {
+				st, errno := n.fs.Stat(path.Join(n.path, strings.Join(parts, "/")))
+				if errno != 0 {
+					return "", errno
+				}
+				if !st.Mode.IsDir() {
+					return "", sys.ENOTDIR
+				}
+			}
+			parts = parts[:len(parts)-1]
+			verified = len(parts)
+		default:
+			parts = append(parts, c)
+		}
+	}
+	return full, 0
 }
 
 // wasiListFromBytes converts buf into the list<u8> shape component.Value expects
@@ -1050,9 +1088,9 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []component.Option 
 		if !node.isDir {
 			return []component.Value{component.ResultValue{IsErr: true, Payload: wasiErrorCodeNotDirectory}}, nil
 		}
-		full, ok := wasiJoinFSPath(node.path, path)
-		if !ok {
-			return []component.Value{component.ResultValue{IsErr: true, Payload: wasiErrorCodeNotPermitted}}, nil
+		full, errno := node.join(path)
+		if errno != 0 {
+			return fsErrResult(errno), nil
 		}
 		writable := descFlags&wasiDescFlagWrite != 0
 		readable := descFlags&wasiDescFlagRead != 0
@@ -1295,9 +1333,9 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []component.Option 
 		if !node.isDir {
 			return []component.Value{component.ResultValue{IsErr: true, Payload: wasiErrorCodeNotDirectory}}, nil
 		}
-		full, ok := wasiJoinFSPath(node.path, path)
-		if !ok {
-			return []component.Value{component.ResultValue{IsErr: true, Payload: wasiErrorCodeNotPermitted}}, nil
+		full, errno := node.join(path)
+		if errno != 0 {
+			return fsErrResult(errno), nil
 		}
 		st, errno := node.fs.Stat(full)
 		if errno != 0 {
@@ -1405,9 +1443,9 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []component.Option 
 		if !node.isDir {
 			return []component.Value{component.ResultValue{IsErr: true, Payload: wasiErrorCodeNotDirectory}}, nil
 		}
-		full, ok := wasiJoinFSPath(node.path, path)
-		if !ok {
-			return []component.Value{component.ResultValue{IsErr: true, Payload: wasiErrorCodeNotPermitted}}, nil
+		full, errno := node.join(path)
+		if errno != 0 {
+			return fsErrResult(errno), nil
 		}
 		if errno := node.fs.Unlink(full); errno != 0 {
 			return fsErrResult(errno), nil
@@ -1422,9 +1460,9 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []component.Option 
 		if err != nil || errVal != nil {
 			return errVal, err
 		}
-		full, ok := wasiJoinFSPath(node.path, path)
-		if !ok {
-			return []component.Value{component.ResultValue{IsErr: true, Payload: wasiErrorCodeNotPermitted}}, nil
+		full, errno := node.join(path)
+		if errno != 0 {
+			return fsErrResult(errno), nil
 		}
 		if errno := node.fs.Mkdir(full, 0o755); errno != 0 {
 			return fsErrResult(errno), nil
@@ -1440,9 +1478,9 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []component.Option 
 		if err != nil || errVal != nil {
 			return errVal, err
 		}
-		full, ok := wasiJoinFSPath(node.path, path)
-		if !ok {
-			return []component.Value{component.ResultValue{IsErr: true, Payload: wasiErrorCodeNotPermitted}}, nil
+		full, errno := node.join(path)
+		if errno != 0 {
+			return fsErrResult(errno), nil
 		}
 		if errno := node.fs.Rmdir(full); errno != 0 {
 			return fsErrResult(errno), nil
@@ -1491,10 +1529,13 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []component.Option 
 			// which is the signal for its copy-then-delete fallback.
 			return []component.Value{component.ResultValue{IsErr: true, Payload: wasiErrorCodeCrossDevice}}, nil
 		}
-		oldFull, ok1 := wasiJoinFSPath(selfNode.path, oldPath)
-		newFull, ok2 := wasiJoinFSPath(newNode.path, newPath)
-		if !ok1 || !ok2 {
-			return []component.Value{component.ResultValue{IsErr: true, Payload: wasiErrorCodeNotPermitted}}, nil
+		oldFull, errno := selfNode.join(oldPath)
+		if errno != 0 {
+			return fsErrResult(errno), nil
+		}
+		newFull, errno := newNode.join(newPath)
+		if errno != 0 {
+			return fsErrResult(errno), nil
 		}
 		if errno := selfNode.fs.Rename(oldFull, newFull); errno != 0 {
 			return fsErrResult(errno), nil
@@ -1543,10 +1584,13 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []component.Option 
 		if selfNode.mount != newNode.mount {
 			return []component.Value{component.ResultValue{IsErr: true, Payload: wasiErrorCodeCrossDevice}}, nil // see renameAt
 		}
-		oldFull, ok1 := wasiJoinFSPath(selfNode.path, oldPath)
-		newFull, ok2 := wasiJoinFSPath(newNode.path, newPath)
-		if !ok1 || !ok2 {
-			return []component.Value{component.ResultValue{IsErr: true, Payload: wasiErrorCodeNotPermitted}}, nil
+		oldFull, errno := selfNode.join(oldPath)
+		if errno != 0 {
+			return fsErrResult(errno), nil
+		}
+		newFull, errno := newNode.join(newPath)
+		if errno != 0 {
+			return fsErrResult(errno), nil
 		}
 		if errno := selfNode.fs.Link(oldFull, newFull); errno != 0 {
 			return fsErrResult(errno), nil
@@ -1774,9 +1818,9 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []component.Option 
 		if !node.isDir {
 			return []component.Value{component.ResultValue{IsErr: true, Payload: wasiErrorCodeNotDirectory}}, nil
 		}
-		full, ok := wasiJoinFSPath(node.path, path)
-		if !ok {
-			return []component.Value{component.ResultValue{IsErr: true, Payload: wasiErrorCodeNotPermitted}}, nil
+		full, errno := node.join(path)
+		if errno != 0 {
+			return fsErrResult(errno), nil
 		}
 		st, errno := node.fs.Stat(full)
 		if errno != 0 {
