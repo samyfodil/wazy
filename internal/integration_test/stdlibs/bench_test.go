@@ -105,7 +105,6 @@ var (
 				skip = append(skip, "TestRenameCaseDifference/dir", "TestDirFSPathsValid", "TestDirFS",
 					"TestDevNullFile", "TestOpenError", "TestSymlinkWithTrailingSlash", "TestCopyFS",
 					"TestRoot", "TestOpenInRoot", "ExampleAfterFunc_connection", "TestOpenFileDevNull",
-					"TestOpenFileCreateExclDanglingSymlink",
 				)
 			}
 			args = append(args, "-test.skip="+strings.Join(skip, "|"))
