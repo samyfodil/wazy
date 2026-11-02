@@ -3,12 +3,14 @@ package binary
 import (
 	"fmt"
 	"io"
-	"math"
 
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/leb128"
 	"github.com/samyfodil/wazy/internal/wasm"
 )
+
+// maxFunctionLocals is the most locals a function may declare.
+const maxFunctionLocals = 50_000
 
 // localsGroup is one decoded (type, count) run of locals. It holds only value types (no pointers), so the
 // backing scratch is safe to reuse across every function in a code section.
@@ -87,7 +89,9 @@ func decodeCode(buf []byte, offset, codeSectionStart int, arena []byte, arenaOff
 	}
 	*groups = g // keep the (possibly grown) backing array for the next function in this section.
 
-	if sum > math.MaxUint32 {
+	// Nothing in the input bounds the count, and LocalTypes is sized by it: a body of a few bytes could declare
+	// 2^32-1 locals and ask for gigabytes. V8 and wasmparser reject a function with more than this many.
+	if sum > maxFunctionLocals {
 		return offset, arenaOff, fmt.Errorf("too many locals: %d", sum)
 	}
 

@@ -328,3 +328,27 @@ func TestDecodeModule_VecSizeExceedsInput(t *testing.T) {
 		})
 	}
 }
+
+func TestDecodeModule_tooManyLocals(t *testing.T) {
+	module := func(locals uint32) []byte {
+		section := func(id wasm.SectionID, body ...byte) []byte {
+			return append(append([]byte{id}, leb128.EncodeUint32(uint32(len(body)))...), body...)
+		}
+		body := append(append([]byte{1}, leb128.EncodeUint32(locals)...), byte(wasm.ValueTypeI32), wasm.OpcodeEnd)
+		code := append(append([]byte{1}, leb128.EncodeUint32(uint32(len(body)))...), body...)
+		return bytes.Join([][]byte{
+			Magic, version,
+			section(wasm.SectionIDType, 1, compositeFunc, 0, 0),
+			section(wasm.SectionIDFunction, 1, 0),
+			section(wasm.SectionIDCode, code...),
+		}, nil)
+	}
+
+	m, err := DecodeModule(module(maxFunctionLocals), api.CoreFeaturesV2, wasm.MemoryLimitPages, false, 0, false, false)
+	require.NoError(t, err)
+	require.Equal(t, maxFunctionLocals, len(m.CodeSection[0].LocalTypes))
+
+	_, err = DecodeModule(module(maxFunctionLocals+1), api.CoreFeaturesV2, wasm.MemoryLimitPages, false, 0, false, false)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "too many locals")
+}
