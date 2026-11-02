@@ -14,16 +14,8 @@ import (
 	"github.com/samyfodil/wazy/sys"
 )
 
-func TestUtimens(t *testing.T) {
-	t.Run("doesn't exist", func(t *testing.T) {
-		err := utimens("nope", 0, 0)
-		require.EqualErrno(t, sys.ENOENT, err)
-	})
-	testUtimens(t, false)
-}
-
 func TestFileUtimens(t *testing.T) {
-	testUtimens(t, true)
+	testFutimens(t)
 
 	testEBADFIfFileClosed(t, func(f sys.File) sys.Errno {
 		return f.Utimens(sys.UTIME_OMIT, sys.UTIME_OMIT)
@@ -33,7 +25,7 @@ func TestFileUtimens(t *testing.T) {
 	})
 }
 
-func testUtimens(t *testing.T, futimes bool) {
+func testFutimens(t *testing.T) {
 	// Note: This sets microsecond granularity because Windows doesn't support
 	// nanosecond.
 	//
@@ -103,25 +95,20 @@ func testUtimens(t *testing.T, futimes bool) {
 				oldSt, errno := lstat(statPath)
 				require.EqualErrno(t, 0, errno)
 
-				if !futimes {
-					errno = utimens(path, tc.atim, tc.mtim)
-					require.EqualErrno(t, 0, errno)
-				} else {
-					flag := sys.O_RDWR
-					if path == dir {
-						flag = sys.O_RDONLY
-						if runtime.GOOS == "windows" {
-							// windows requires O_RDWR, which is invalid for directories
-							t.Skip("windows cannot update timestamps on a dir")
-						}
+				flag := sys.O_RDWR
+				if path == dir {
+					flag = sys.O_RDONLY
+					if runtime.GOOS == "windows" {
+						// windows requires O_RDWR, which is invalid for directories
+						t.Skip("windows cannot update timestamps on a dir")
 					}
-
-					f := requireOpenFile(t, path, flag, 0)
-
-					errno = f.Utimens(tc.atim, tc.mtim)
-					require.EqualErrno(t, 0, f.Close())
-					require.EqualErrno(t, 0, errno)
 				}
+
+				f := requireOpenFile(t, path, flag, 0)
+
+				errno = f.Utimens(tc.atim, tc.mtim)
+				require.EqualErrno(t, 0, f.Close())
+				require.EqualErrno(t, 0, errno)
 
 				newSt, errno := lstat(statPath)
 				require.EqualErrno(t, 0, errno)
