@@ -11,14 +11,6 @@ import (
 
 const _UTIME_OMIT = unix.UTIME_OMIT
 
-func utimens(path string, atim, mtim int64) sys.Errno {
-	var times [2]syscall.Timespec
-	if !timesToTimespecs(atim, mtim, &times) {
-		return 0
-	}
-	return sys.UnwrapOSError(syscall.UtimesNano(path, times[:]))
-}
-
 // On linux, implement futimens via utimensat with the NUL path.
 func futimens(fd uintptr, atim, mtim int64) sys.Errno {
 	var times [2]syscall.Timespec

@@ -64,10 +64,13 @@ There is no `..` escape. Both the core and the component path resolve a guest pa
 against — `../../..` and rooted paths alike — before the path reaches the filesystem. There is no
 way to turn that off: to give a guest a second directory, add a second mount.
 
+Symlinks are resolved inside the mount as well. One that leads outside it, through `../` or as an
+absolute path, is refused, whether the guest made it or it was already there. One that stays inside
+works.
+
 :::caution
-That check is **lexical**. A symlink *inside* a mounted directory that points outside it is
-resolved by the host OS well below this layer, and is followed. A directory whose symlinks you do
-not control is not safe to mount.
+The mount confines how a path is resolved, not what lies inside the directory. A bind mount, a hard
+link, or a device file inside it is reachable.
 :::
 
 ## Memory
