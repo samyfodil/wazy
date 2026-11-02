@@ -223,6 +223,37 @@ func TestNewHostModuleBuilder_Compile(t *testing.T) {
 	}
 }
 
+func TestNewHostModuleBuilder_ExportTag(t *testing.T) {
+	r := NewRuntimeWithConfig(testCtx, NewRuntimeConfig().WithCoreFeatures(api.CoreFeaturesV3))
+	defer r.Close(testCtx)
+
+	// Exporting "e" a second time replaces the first, in place.
+	compiled, err := r.NewHostModuleBuilder("env").
+		ExportTag("e", api.ValueTypeI64).
+		ExportTag("l", api.ValueTypeI32).
+		ExportTag("e", api.ValueTypeI32).
+		Compile(testCtx)
+	require.NoError(t, err)
+	m := compiled.(*compiledModule).module
+	require.Equal(t, 1, len(m.TypeSection))
+	require.Equal(t, []wasm.ValueType{wasm.ValueTypeI32}, m.TypeSection[0].Params)
+	require.Equal(t, []wasm.Tag{{Type: 0}, {Type: 0}}, m.TagSection)
+	require.Equal(t, []wasm.Export{
+		{Type: wasm.ExternTypeTag, Name: "e", Index: 0},
+		{Type: wasm.ExternTypeTag, Name: "l", Index: 1},
+	}, m.ExportSection)
+
+	_, err = r.InstantiateModule(testCtx, compiled, NewModuleConfig())
+	require.NoError(t, err)
+
+	t.Run("requires exception handling", func(t *testing.T) {
+		r := NewRuntime(testCtx)
+		defer r.Close(testCtx)
+		_, err := r.NewHostModuleBuilder("env").ExportTag("e").Compile(testCtx)
+		require.EqualError(t, err, `tag[env.e] invalid as feature "exception-handling" is disabled`)
+	})
+}
+
 // TestNewHostModuleBuilder_Instantiate ensures Runtime.InstantiateModule is called on success.
 func TestNewHostModuleBuilder_Instantiate(t *testing.T) {
 	r := NewRuntime(testCtx)
@@ -273,6 +304,7 @@ func requireHostModuleEquals(t *testing.T, expected, actual *wasm.Module) {
 	require.Equal(t, expected.StartSection, actual.StartSection)
 	require.Equal(t, expected.ElementSection, actual.ElementSection)
 	require.Equal(t, expected.DataSection, actual.DataSection)
+	require.Equal(t, expected.TagSection, actual.TagSection)
 	require.Equal(t, expected.NameSection, actual.NameSection)
 
 	// Special case because reflect.Value can't be compared with Equals
