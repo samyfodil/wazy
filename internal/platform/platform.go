@@ -37,10 +37,17 @@ func compilerPlatformSupports(features api.CoreFeatures) bool {
 		}
 		fallthrough
 	case "dragonfly", "solaris", "illumos":
-		return runtime.GOARCH == "amd64" && CpuFeatures.Has(CpuFeatureAmd64SSE4_1)
+		return runtime.GOARCH == "amd64" && amd64CompilerSupports(CpuFeatures)
 	default:
 		return false
 	}
+}
+
+// amd64CompilerSupports reports whether flags has every extension the amd64 compiler emits unconditionally:
+// SSE4.1, SSE4.2 (PCMPGTQ) and POPCNT. A CPU that has SSE4.1 but not the other two, such as Penryn, would
+// otherwise run compiled code into SIGILL.
+func amd64CompilerSupports(flags CpuFeatureFlags) bool {
+	return flags.Has(CpuFeatureAmd64SSE4_1) && flags.Has(CpuFeatureAmd64SSE4_2) && flags.Has(CpuFeatureAmd64POPCNT)
 }
 
 // MmapCodeSegment allocates and returns a byte slice to copy executable code into.

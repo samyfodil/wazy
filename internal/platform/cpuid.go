@@ -21,6 +21,10 @@ const (
 	// not a capability but a defect the code layout has to route around; see cpuid_jcc.go and
 	// JCCErratumWorkaroundEnabled.
 	CpuFeatureAmd64JCCErratum
+	// CpuFeatureAmd64SSE4_2 is the flag to query CpuFeatureFlags.Has for SSEv4.2 capabilities (e.g. PCMPGTQ) on amd64
+	CpuFeatureAmd64SSE4_2
+	// CpuFeatureAmd64POPCNT is the flag to query CpuFeatureFlags.Has for the POPCNT instruction on amd64
+	CpuFeatureAmd64POPCNT
 )
 
 const (
