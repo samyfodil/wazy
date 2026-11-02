@@ -288,14 +288,21 @@ func (c *FSContext) LookupFile(fd int32) (*FileEntry, bool) {
 // OpenFile opens the file into the table and returns its file descriptor.
 // The result must be closed by CloseFile or Close.
 func (c *FSContext) OpenFile(fs sys.FS, path string, flag sys.Oflag, perm fs.FileMode) (int32, sys.Errno) {
+	return c.OpenFileAs(fs, path, fs, path, flag, perm)
+}
+
+// OpenFileAs is OpenFile opening path in fs, for an entry that records the
+// file as name in mount: a directory may resolve the path through itself, but
+// the entry outlives it.
+func (c *FSContext) OpenFileAs(fs sys.FS, path string, mount sys.FS, name string, flag sys.Oflag, perm fs.FileMode) (int32, sys.Errno) {
 	if f, errno := fs.OpenFile(path, flag, perm); errno != 0 {
 		return 0, errno
 	} else {
-		fe := &FileEntry{FS: fs, File: f}
-		if path == "/" || path == "." {
+		fe := &FileEntry{FS: mount, File: f}
+		if name == "/" || name == "." {
 			fe.Name = ""
 		} else {
-			fe.Name = path
+			fe.Name = name
 		}
 		if newFD, ok := c.openedFiles.Insert(fe); !ok {
 			return 0, sys.EBADF

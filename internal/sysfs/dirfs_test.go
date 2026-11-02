@@ -1058,3 +1058,48 @@ func TestDirFS_backslash(t *testing.T) {
 	require.EqualErrno(t, sys.ENOENT, errno)
 	require.EqualErrno(t, sys.ENOENT, testFS.Unlink(`dir\x`))
 }
+
+// TestOsFile_DirFS checks that a directory opened through a bound DirFS
+// resolves paths through itself, so they reach it after a rename.
+func TestOsFile_DirFS(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.Mkdir(path.Join(tmpDir, "a"), 0o700))
+	testFS, closer := BindFS(DirFS(tmpDir))
+	defer closer.Close()
+
+	d, errno := testFS.OpenFile("a", sys.O_RDONLY|sys.O_DIRECTORY, 0)
+	require.EqualErrno(t, 0, errno)
+	defer d.Close()
+
+	require.EqualErrno(t, 0, testFS.Rename("a", "b"))
+	name := "b"
+	require.NoError(t, os.WriteFile(path.Join(tmpDir, name, "f"), []byte("hello"), 0o600))
+
+	dirFS, errno := d.(DirHandle).DirFS()
+	require.EqualErrno(t, 0, errno)
+	f, errno := dirFS.OpenFile("f", sys.O_RDONLY, 0)
+	require.EqualErrno(t, 0, errno)
+	defer f.Close()
+	buf := make([]byte, 5)
+	n, errno := f.Read(buf)
+	require.EqualErrno(t, 0, errno)
+	require.Equal(t, "hello", string(buf[:n]))
+	// It stays inside the directory.
+	_, errno = dirFS.Stat("../" + name)
+	require.EqualErrno(t, sys.EPERM, errno)
+
+	t.Run("unbound", func(t *testing.T) {
+		d, errno := DirFS(tmpDir).OpenFile(name, sys.O_RDONLY|sys.O_DIRECTORY, 0)
+		require.EqualErrno(t, 0, errno)
+		defer d.Close()
+		_, errno = d.(DirHandle).DirFS()
+		require.EqualErrno(t, sys.ENOSYS, errno)
+	})
+	t.Run("file", func(t *testing.T) {
+		f, errno := testFS.OpenFile(name+"/f", sys.O_RDONLY, 0)
+		require.EqualErrno(t, 0, errno)
+		defer f.Close()
+		_, errno = f.(DirHandle).DirFS()
+		require.EqualErrno(t, sys.ENOTDIR, errno)
+	})
+}

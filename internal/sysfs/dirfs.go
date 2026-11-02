@@ -183,7 +183,9 @@ func (d *dirFS) OpenFile(path string, flag sys.Oflag, perm fs.FileMode) (sys.Fil
 	if errno != 0 {
 		return nil, errno
 	}
-	return newOsFile(d.join(path), flag, perm, f), 0
+	file := newOsFile(d.join(path), flag, perm, f)
+	file.(*osFile).underRoot = d.bound
+	return file, 0
 }
 
 // Lstat implements the same method as documented on sys.FS
