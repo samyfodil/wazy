@@ -69,6 +69,12 @@ type (
 		// already meant for a 32-bit memory by way of the decoder.
 		MemoryLimitPages, Memory64LimitPages uint64
 
+		// TableLimitElements caps how many entries a table may hold, mirroring
+		// the embedder's WithTableLimitElements. A declared minimum over it, or
+		// a module's minimums summed, fails instantiation, and table.grow past
+		// it fails.
+		TableLimitElements uint64
+
 		// typeIDs maps each FunctionType.String() to a unique FunctionTypeID. This is used at runtime to
 		// do type-checks on indirect function calls.
 		typeIDs map[string]FunctionTypeID
@@ -378,6 +384,7 @@ func NewStore(enabledFeatures api.CoreFeatures, engine Engine) *Store {
 		functionMaxTypes:   maximumFunctionTypes,
 		MemoryLimitPages:   uint64(MemoryLimitPages),
 		Memory64LimitPages: uint64(MemoryLimitPages),
+		TableLimitElements: TableLimitElements,
 	}
 }
 
@@ -464,7 +471,7 @@ func (s *Store) instantiate(
 
 	err = m.buildTables(module,
 		// As of reference-types proposal, boundary check must be done after instantiation.
-		s.EnabledFeatures.IsEnabled(api.CoreFeatureReferenceTypes))
+		s.EnabledFeatures.IsEnabled(api.CoreFeatureReferenceTypes), s.TableLimitElements)
 	if err != nil {
 		return nil, err
 	}

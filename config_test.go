@@ -5,6 +5,7 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -73,6 +74,15 @@ func TestRuntimeConfig(t *testing.T) {
 			},
 		},
 		{
+			name: "tableLimitElements",
+			with: func(c RuntimeConfig) RuntimeConfig {
+				return c.WithTableLimitElements(65536)
+			},
+			expected: &runtimeConfig{
+				tableLimitElements: 65536,
+			},
+		},
+		{
 			name: "WithDebugInfoEnabled",
 			with: func(c RuntimeConfig) RuntimeConfig {
 				return c.WithDebugInfoEnabled(false)
@@ -110,6 +120,17 @@ func TestRuntimeConfig(t *testing.T) {
 			input.WithMemoryLimitPages(wasm.MemoryLimitPages + 1)
 		})
 		require.EqualError(t, err, "memoryLimitPages invalid: 65537 > 65536")
+	})
+
+	t.Run("tableLimitElements invalid panics", func(t *testing.T) {
+		if wasm.MaxTableLimitElements >= math.MaxUint32 {
+			t.Skip("every uint32 is a valid limit here")
+		}
+		err := require.CapturePanic(func() {
+			input := &runtimeConfig{}
+			input.WithTableLimitElements(math.MaxUint32)
+		})
+		require.EqualError(t, err, fmt.Sprintf("tableLimitElements invalid: 4294967295 > %d", wasm.MaxTableLimitElements))
 	})
 
 	t.Run("memory64LimitPages invalid panics", func(t *testing.T) {

@@ -64,9 +64,9 @@ func decodeTable(buf []byte, offset int, enabledFeatures api.CoreFeatures, ret *
 	// The declared minimum is bounded only by the index type's own range: the
 	// specification requires a module declaring more entries than any host could
 	// allocate to still be *valid* (test/core/table.wast defines a table of
-	// 2^32-1 entries without instantiating it). wazy's own MaximumFunctionIndex
-	// ceiling is applied at instantiation instead, in buildTables, which is also
-	// where the allocation would happen.
+	// 2^32-1 entries without instantiating it). The embedder's table limit is
+	// applied at instantiation instead, in buildTables, which is also where the
+	// allocation would happen.
 	ret.Min = min
 	if maxP != nil {
 		if *maxP < min {
