@@ -913,18 +913,13 @@ third `path_len` has ambiguous semantics.
 
 * `fd`: a file descriptor
 * `path`: the offset for the result path
-* `path_len`: In wazy, `FdPrestatDirName` writes the result path string to
-  `path` offset for the exact length of `path_len`.
+* `path_len`: In wazy, the size of the buffer at `path`. A buffer shorter than
+  the name fails with `ENAMETOOLONG`, and a longer one gets the name, with the
+  bytes past it untouched.
 
-Wasmer considers `path_len` to be the maximum length instead of the exact
-length that should be written.
-See https://github.com/wasmerio/wasmer/blob/3463c51268ed551933392a4063bd4f8e7498b0f6/lib/wasi/src/syscalls/mod.rs#L764
-
-The semantics in wazy follows that of wasmtime.
-See https://github.com/bytecodealliance/wasmtime/blob/2ca01ae9478f199337cf743a6ab543e8c3f3b238/crates/wasi-common/src/snapshots/preview_1.rs#L578-L582
-
-Their semantics match when `path_len` == the length of `path`, so in practice
-this difference won't matter much.
+This follows wasmtime, and wasi-testsuite's `dir_fd_op_failures` checks both
+sides of it.
+See https://github.com/bytecodealliance/wasmtime/blob/v26.0.0/crates/wasi/src/preview1.rs
 
 ## fd_readdir
 
