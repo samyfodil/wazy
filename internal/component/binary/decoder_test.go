@@ -307,3 +307,22 @@ func TestDecodeBytes_OwnsItsCopy(t *testing.T) {
 		t.Fatalf("nil: %v, want ErrInvalidMagicNumber", err)
 	}
 }
+
+// TestDecodeLengthPastInput covers lengths the input cannot hold: a label of 2^31 bytes, which a 32-bit target
+// used to turn negative and slice with, and a core module section claiming more bytes than follow it.
+func TestDecodeLengthPastInput(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []byte
+	}{
+		{name: "label", input: synthComponent(synthSection(7, append([]byte{1, 0x72, 1}, leb128.EncodeUint32(0x8000_0000)...)))},
+		{name: "core module", input: synthComponent(append(append([]byte{1}, leb128.EncodeUint32(1000)...), 0x00, 0x61, 0x73, 0x6d))},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := Decode(bytes.NewReader(tc.input)); err == nil {
+				t.Fatal("decoded a component whose lengths overrun the input")
+			}
+		})
+	}
+}

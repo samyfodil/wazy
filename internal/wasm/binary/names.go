@@ -67,7 +67,7 @@ func decodeNameSection(buf []byte, offset int, arena *stringArena, limit uint64)
 			// Note: this mirrors io.CopyN's behavior (used here prior to the slice-indexed rewrite), which
 			// reports io.EOF whenever fewer than subsectionSize bytes remain - unlike io.ReadFull, it never
 			// reports io.ErrUnexpectedEOF for a partial remainder.
-			if len(buf)-offset < int(subsectionSize) {
+			if uint64(len(buf)-offset) < uint64(subsectionSize) {
 				return nil, offset, fmt.Errorf("failed to skip subsection[%d]: %w", subsectionID, io.EOF)
 			}
 			offset += int(subsectionSize)

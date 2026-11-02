@@ -352,3 +352,27 @@ func TestDecodeModule_tooManyLocals(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "too many locals")
 }
+
+// TestDecodeModule_lengthPastInput covers lengths of 2^31 or more, which a 32-bit target used to turn negative and
+// slice with, panicking instead of reporting the truncated input.
+func TestDecodeModule_lengthPastInput(t *testing.T) {
+	huge := leb128.EncodeUint32(0x8000_0000)
+	section := func(id wasm.SectionID, body ...[]byte) []byte {
+		b := bytes.Join(body, nil)
+		return bytes.Join([][]byte{{id}, leb128.EncodeUint32(uint32(len(b))), b}, nil)
+	}
+	tests := []struct {
+		name  string
+		input []byte
+	}{
+		{name: "import module name", input: section(wasm.SectionIDImport, []byte{1}, huge, []byte("ab"))},
+		{name: "skipped name subsection", input: section(wasm.SectionIDCustom, []byte{4, 'n', 'a', 'm', 'e', 9}, huge)},
+		{name: "custom section", input: bytes.Join([][]byte{{wasm.SectionIDCustom}, leb128.EncodeUint32(0x8000_0005), {1, 'x'}}, nil)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := DecodeModule(append(append(Magic, version...), tc.input...), api.CoreFeaturesV2, wasm.MemoryLimitPages, false, 0, false, false)
+			require.Error(t, err)
+		})
+	}
+}

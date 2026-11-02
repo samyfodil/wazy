@@ -550,6 +550,9 @@ func decodeCoreModuleSection(buf []byte, offset int, sectionStart int, sectionSi
 	// Section 1 contains a single embedded core wasm module.
 	// We store it by its byte range but don't decode it here.
 	// Just advance the offset by sectionSize.
+	if sectionSize > uint32(len(buf)-offset) {
+		return offset, ErrTruncatedBinary
+	}
 	return offset + int(sectionSize), nil
 }
 
