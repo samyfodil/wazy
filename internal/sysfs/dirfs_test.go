@@ -951,6 +951,60 @@ func TestBindFS(t *testing.T) {
 	})
 }
 
+// TestDirFS_dotElems checks that a path ending in "." or ".." names the
+// directory it reached, which unlink, rmdir and rename refuse to act on as
+// POSIX does. Windows acts on that directory.
+func TestDirFS_dotElems(t *testing.T) {
+	t.Parallel()
+	forBinding(t, func(t *testing.T, mount func(dir string) sys.FS) {
+		tmpDir := t.TempDir()
+		require.NoError(t, os.MkdirAll(path.Join(tmpDir, "sub", "empty"), 0o700))
+		require.NoError(t, os.WriteFile(path.Join(tmpDir, "f"), nil, 0o600))
+		testFS := mount(tmpDir)
+
+		require.EqualErrno(t, sys.EINVAL, testFS.Rmdir("."))
+		require.EqualErrno(t, sys.EINVAL, testFS.Rmdir("sub/empty/."))
+		require.EqualErrno(t, sys.ENOTEMPTY, testFS.Rmdir("sub/empty/.."))
+		require.EqualErrno(t, sys.EISDIR, testFS.Unlink("sub/empty/."))
+		require.EqualErrno(t, sys.EISDIR, testFS.Unlink("sub/.."))
+		require.EqualErrno(t, sys.EINVAL, testFS.Rename("sub/empty/.", "moved"))
+		require.EqualErrno(t, sys.EINVAL, testFS.Rename("f", "sub/empty/."))
+		require.EqualErrno(t, sys.EINVAL, testFS.Rename("sub/empty/..", "moved"))
+
+		for _, dir := range []string{tmpDir, path.Join(tmpDir, "sub"), path.Join(tmpDir, "sub", "empty")} {
+			info, err := os.Stat(dir)
+			require.NoError(t, err)
+			require.True(t, info.IsDir())
+		}
+	})
+}
+
+// TestDirFS_notDir checks that a path through a file reports ENOTDIR, and one
+// through a missing directory ENOENT. Windows reports both the same way.
+func TestDirFS_notDir(t *testing.T) {
+	t.Parallel()
+	forBinding(t, func(t *testing.T, mount func(dir string) sys.FS) {
+		tmpDir := t.TempDir()
+		require.NoError(t, os.WriteFile(path.Join(tmpDir, "f"), nil, 0o600))
+		testFS := mount(tmpDir)
+
+		for _, name := range []string{"f/x", "f/x/y"} {
+			_, errno := testFS.OpenFile(name, sys.O_RDONLY, 0)
+			require.EqualErrno(t, sys.ENOTDIR, errno, name)
+			_, errno = testFS.OpenFile(name, sys.O_WRONLY|sys.O_CREAT, 0o600)
+			require.EqualErrno(t, sys.ENOTDIR, errno, name)
+			_, errno = testFS.Stat(name)
+			require.EqualErrno(t, sys.ENOTDIR, errno, name)
+		}
+		for _, name := range []string{"missing/x", "missing/x/y"} {
+			_, errno := testFS.OpenFile(name, sys.O_RDONLY, 0)
+			require.EqualErrno(t, sys.ENOENT, errno, name)
+			_, errno = testFS.Stat(name)
+			require.EqualErrno(t, sys.ENOENT, errno, name)
+		}
+	})
+}
+
 // TestDirFS_Rename_caseOnly checks that renaming a directory to a name that
 // differs only in case renames it, where on a case-insensitive filesystem
 // the new name already reaches the directory itself.
@@ -988,4 +1042,19 @@ func TestDirFS_Rename_overSymlink(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, info.IsDir())
 	})
+}
+
+// TestDirFS_backslash checks that a backslash is part of a name, not the
+// separator Windows takes it for.
+func TestDirFS_backslash(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.Mkdir(path.Join(tmpDir, "dir"), 0o700))
+	require.NoError(t, os.WriteFile(path.Join(tmpDir, "dir", "x"), nil, 0o600))
+	testFS := DirFS(tmpDir)
+
+	_, errno := testFS.OpenFile(`dir\x`, sys.O_RDONLY, 0)
+	require.EqualErrno(t, sys.ENOENT, errno)
+	_, errno = testFS.Stat(`dir\x`)
+	require.EqualErrno(t, sys.ENOENT, errno)
+	require.EqualErrno(t, sys.ENOENT, testFS.Unlink(`dir\x`))
 }
