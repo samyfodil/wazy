@@ -81,7 +81,7 @@ func decodeCompositeType(enabledFeatures api.CoreFeatures, buf []byte, offset in
 }
 
 func decodeFuncBody(enabledFeatures api.CoreFeatures, buf []byte, offset int, arena *valueTypeArena, ret *wasm.FunctionType) (int, error) {
-	paramCount, n, err := leb128.LoadUint32(buf[offset:])
+	paramCount, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
 		return offset, fmt.Errorf("could not read parameter count: %w", err)
 	}
@@ -92,7 +92,7 @@ func decodeFuncBody(enabledFeatures api.CoreFeatures, buf []byte, offset int, ar
 		return offset, fmt.Errorf("could not read parameter types: %w", err)
 	}
 
-	resultCount, n, err := leb128.LoadUint32(buf[offset:])
+	resultCount, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
 		return offset, fmt.Errorf("could not read result count: %w", err)
 	}
@@ -123,7 +123,7 @@ func decodeAggregateBody(enabledFeatures api.CoreFeatures, buf []byte, offset in
 		ret.CompositeKind = wasm.CompositeKindArray
 	} else {
 		ret.CompositeKind = wasm.CompositeKindStruct
-		c, n, err := leb128.LoadUint32(buf[offset:])
+		c, n, err := leb128.LoadVecSize(buf[offset:])
 		if err != nil {
 			return offset, fmt.Errorf("could not read field count: %w", err)
 		}

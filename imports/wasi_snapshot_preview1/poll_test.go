@@ -151,6 +151,20 @@ func Test_pollOneoff_Errors(t *testing.T) {
 `,
 		},
 		{
+			// 0x20000001*48 and 0x20000001*32 wrap to 48 and 32 in 32 bits:
+			// room for one subscription, which the loop would index past.
+			name:           "nsubscriptions overflows 32 bits",
+			nsubscriptions: 0x20000001,
+			mem:            clockNsSub(0),
+			out:            128, // past in
+			resultNevents:  512, // past out
+			expectedErrno:  wasip1.ErrnoFault,
+			expectedLog: `
+==> wasi_snapshot_preview1.poll_oneoff(in=0,out=128,nsubscriptions=536870913)
+<== (nevents=,errno=EFAULT)
+`,
+		},
+		{
 			name:          "nsubscriptions zero",
 			out:           128, // past in
 			resultNevents: 512, // past out

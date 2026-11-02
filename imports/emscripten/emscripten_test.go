@@ -339,12 +339,53 @@ func TestNewFunctionExporterForModule(t *testing.T) {
 
 			exporter, err := NewFunctionExporterForModule(guest)
 			require.NoError(t, err)
-			actual := exporter.(emscriptenFns)
+			actual := exporter.(*emscriptenExports).fns
 
 			require.Equal(t, len(tc.expected), len(actual))
 			for i, expected := range tc.expected {
 				require.Equal(t, expected, actual[i], actual[i].ExportName)
 			}
+		})
+	}
+}
+
+func TestNewFunctionExporterForModule_tags(t *testing.T) {
+	for _, pointer := range []wasm.ValueType{i32, wasm.ValueTypeI64} {
+		t.Run(wasm.ValueTypeName(pointer), func(t *testing.T) {
+			r := wazy.NewRuntimeWithConfig(testCtx, wazy.NewRuntimeConfig().WithCoreFeatures(api.CoreFeaturesV3))
+			defer r.Close(testCtx)
+
+			envTags := []wasm.Import{
+				{Module: "env", Name: internal.TagCppException, Type: wasm.ExternTypeTag},
+				{Module: "env", Name: internal.TagCLongjmp, Type: wasm.ExternTypeTag},
+			}
+			expected := []wasm.HostTag{
+				{ExportName: internal.TagCppException, ParamTypes: []wasm.ValueType{pointer}},
+				{ExportName: internal.TagCLongjmp, ParamTypes: []wasm.ValueType{pointer}},
+			}
+			types := []wasm.FunctionType{{Params: []wasm.ValueType{pointer}}}
+
+			// Tags emscripten does not define, or imported from another module, are left alone.
+			other, err := r.CompileModule(testCtx, binaryencoding.EncodeModule(&wasm.Module{
+				TypeSection: types,
+				ImportSection: append([]wasm.Import{
+					{Module: "other", Name: internal.TagCppException, Type: wasm.ExternTypeTag},
+					{Module: "env", Name: "__other_tag", Type: wasm.ExternTypeTag},
+				}, envTags...),
+			}))
+			require.NoError(t, err)
+			exporter, err := NewFunctionExporterForModule(other)
+			require.NoError(t, err)
+			require.Equal(t, expected, exporter.(*emscriptenExports).tags)
+
+			guest, err := r.CompileModule(testCtx, binaryencoding.EncodeModule(&wasm.Module{
+				TypeSection: types, ImportSection: envTags,
+			}))
+			require.NoError(t, err)
+			_, err = InstantiateForModule(testCtx, r, guest)
+			require.NoError(t, err)
+			_, err = r.InstantiateModule(testCtx, guest, wazy.NewModuleConfig())
+			require.NoError(t, err)
 		})
 	}
 }

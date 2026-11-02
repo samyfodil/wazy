@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -329,10 +330,15 @@ func (d *dirFS) Symlink(oldName, link string) sys.Errno {
 	// Note: do not resolve `oldName` relative to this dirFS. The link result is always resolved
 	// when dereference the `link` on its usage (e.g. readlink, read, etc).
 	// https://github.com/bytecodealliance/cap-std/blob/v1.0.4/cap-std/src/fs/dir.rs#L404-L409
-	// Windows reports an existing directory written with a trailing slash as
-	// EISDIR, which symlink never is on POSIX.
-	if errno = rootErrno(r.Symlink(oldName, link)); errno == sys.EISDIR {
-		errno = sys.EEXIST
+	errno = rootErrno(r.Symlink(oldName, link))
+	// Where something already is, Windows reports access denied, or EISDIR
+	// for a directory written with a trailing slash. POSIX reports EEXIST.
+	// Checking only after the failure leaves no window between the check
+	// and the create.
+	if errno != 0 && runtime.GOOS == "windows" {
+		if _, err := r.Lstat(link); err == nil {
+			errno = sys.EEXIST
+		}
 	}
 	return errno
 }
