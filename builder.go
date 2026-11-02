@@ -39,7 +39,7 @@ import (
 // not arbitrary memory in the process.
 //
 //	fn := func(ctx context.Context, m api.Module, offset uint32) uint32 {
-//		x, _ := m.Memory().ReadUint32Le(ctx, offset)
+//		x, _ := m.Memory().ReadUint32Le(offset)
 //		return x
 //	}
 //
@@ -81,8 +81,8 @@ type HostFunctionBuilder interface {
 	//		mem := m.Memory()
 	//		offset := api.DecodeU32(stack[0])
 	//
-	//		x, _ := mem.ReadUint32Le(ctx, offset)
-	//		y, _ := mem.ReadUint32Le(ctx, offset + 4) // 32 bits == 4 bytes!
+	//		x, _ := mem.ReadUint32Le(offset)
+	//		y, _ := mem.ReadUint32Le(offset + 4) // 32 bits == 4 bytes!
 	//		sum := x + y
 	//
 	//		stack[0] = api.EncodeU32(sum)

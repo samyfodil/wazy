@@ -1231,7 +1231,7 @@ pub fn main() !void {
 ```
 
 Besides Zig, this is also the case with TinyGo (`-target=wasi`) and Rust
-(`--target wasm32-wasi`).
+(`--target wasm32-wasip1`).
 
 We decided to expose `sys.Nanosleep` to allow overriding the implementation
 used in the common case, even if it isn't used by Go, because this gives an
