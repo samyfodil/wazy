@@ -170,7 +170,8 @@ type Module interface {
 	// definitions in this module, keyed on export name.
 	ExportedFunctionDefinitions() map[string]FunctionDefinition
 
-	// TODO: Table
+	// ExportedTable returns a table exported from this module or nil if it wasn't.
+	ExportedTable(name string) Table
 
 	// ExportedMemory returns a memory exported from this module or nil if it wasn't.
 	//
@@ -572,6 +573,49 @@ type MutableGlobal interface {
 	//
 	// See Global.Type for how to encode this value from a Go type.
 	Set(v uint64)
+
+	internalapi.WazyOnly
+}
+
+// Table is a table exported by a module: a resizable array of references.
+//
+// An externref table, such as the one wasm-bindgen's reference-types output
+// exports to hold host objects, is read and written as opaque 64-bit values, as
+// externref is everywhere else in this API. A table of functions is read as
+// Function values. Its entries themselves are engine internals, and writing one
+// the engine did not make would corrupt it, so they are not exposed.
+//
+// See https://webassembly.github.io/spec/core/syntax/modules.html#tables
+//
+// # Notes
+//
+//   - This is an interface for decoupling, not third-party implementations.
+//     All implementations are in wazy.
+//   - Like a Memory, a Table must not be used while a call into a module that
+//     can reach it is running: table.grow can reallocate it.
+type Table interface {
+	// Size returns the number of entries in the table.
+	Size() uint32
+
+	// Grow appends delta entries holding init and returns the previous size,
+	// or false if the table cannot grow that far: past its declared maximum or
+	// past a limit the runtime enforces. init is 0 for a null entry, or any
+	// externref for an externref table; a table whose type excludes null cannot
+	// grow with it.
+	Grow(delta uint32, init uint64) (previousSize uint32, ok bool)
+
+	// Get returns the externref at index, or false when index is out of range
+	// or the table holds something other than externref.
+	Get(index uint32) (uint64, bool)
+
+	// Set stores the externref v at index. It returns false when index is out
+	// of range, the table cannot hold any externref, or v is 0 and the table's
+	// type excludes null.
+	Set(index uint32, v uint64) bool
+
+	// Function returns the function at index, or nil when index is out of range,
+	// the entry is null, or the table does not hold functions.
+	Function(index uint32) Function
 
 	internalapi.WazyOnly
 }

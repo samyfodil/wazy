@@ -3,6 +3,7 @@ package leb128
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"math"
 	"testing"
 
@@ -124,6 +125,27 @@ func TestDecodeUint32(t *testing.T) {
 			require.Equal(t, uint64(len(c.bytes)), num)
 		}
 	}
+}
+
+func TestLoadVecSize(t *testing.T) {
+	v, n, err := LoadVecSize([]byte{0x02, 0xaa, 0xbb})
+	require.NoError(t, err)
+	require.Equal(t, uint32(2), v)
+	require.Equal(t, uint64(1), n)
+
+	v, n, err = LoadVecSize([]byte{0x00})
+	require.NoError(t, err)
+	require.Equal(t, uint32(0), v)
+	require.Equal(t, uint64(1), n)
+
+	_, _, err = LoadVecSize([]byte{0x03, 0xaa, 0xbb})
+	require.EqualError(t, err, "count 3 exceeds remaining input of 2 bytes")
+
+	_, _, err = LoadVecSize([]byte{0xff, 0xff, 0xff, 0xff, 0x0f})
+	require.EqualError(t, err, "count 4294967295 exceeds remaining input of 0 bytes")
+
+	_, _, err = LoadVecSize([]byte{0x80})
+	require.ErrorIs(t, err, io.EOF)
 }
 
 func TestDecodeUint64(t *testing.T) {

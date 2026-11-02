@@ -407,7 +407,7 @@ func decodeComponent(buf []byte) (*Component, error) {
 func decodeTypeSection(buf []byte, offset int, sectionSize uint32) ([]Type, int, error) {
 	sectionStart := offset
 
-	count, n, err := leb128.LoadUint32(buf[offset:])
+	count, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
 		return nil, offset, fmt.Errorf("read count: %w", err)
 	}
@@ -436,7 +436,7 @@ func decodeTypeSection(buf []byte, offset int, sectionSize uint32) ([]Type, int,
 func decodeImportSection(buf []byte, offset int, sectionSize uint32) ([]Import, int, error) {
 	sectionStart := offset
 
-	count, n, err := leb128.LoadUint32(buf[offset:])
+	count, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
 		return nil, offset, fmt.Errorf("read count: %w", err)
 	}
@@ -478,7 +478,7 @@ func decodeImportSection(buf []byte, offset int, sectionSize uint32) ([]Import, 
 func decodeExportSection(buf []byte, offset int, sectionSize uint32) ([]Export, int, error) {
 	sectionStart := offset
 
-	count, n, err := leb128.LoadUint32(buf[offset:])
+	count, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
 		return nil, offset, fmt.Errorf("read count: %w", err)
 	}
@@ -550,6 +550,9 @@ func decodeCoreModuleSection(buf []byte, offset int, sectionStart int, sectionSi
 	// Section 1 contains a single embedded core wasm module.
 	// We store it by its byte range but don't decode it here.
 	// Just advance the offset by sectionSize.
+	if sectionSize > uint32(len(buf)-offset) {
+		return offset, ErrTruncatedBinary
+	}
 	return offset + int(sectionSize), nil
 }
 
@@ -558,7 +561,7 @@ func decodeCoreModuleSection(buf []byte, offset int, sectionStart int, sectionSi
 func decodeCoreInstanceSection(buf []byte, offset int, sectionSize uint32) ([]CoreInstance, int, error) {
 	sectionStart := offset
 
-	count, n, err := leb128.LoadUint32(buf[offset:])
+	count, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
 		return nil, offset, fmt.Errorf("read count: %w", err)
 	}
@@ -585,7 +588,7 @@ func decodeCoreInstanceSection(buf []byte, offset int, sectionSize uint32) ([]Co
 			instance.ModuleIdx = moduleIdx
 
 			// Read args: vec(core:instantiatearg)
-			argCount, n, err := leb128.LoadUint32(buf[offset:])
+			argCount, n, err := leb128.LoadVecSize(buf[offset:])
 			if err != nil {
 				return nil, offset, fmt.Errorf("instance[%d] arg count: %w", i, err)
 			}
@@ -618,7 +621,7 @@ func decodeCoreInstanceSection(buf []byte, offset int, sectionSize uint32) ([]Co
 			instance.Args = args
 
 		case 0x01: // inline exports: vec(core:inlineexport)
-			exportCount, n, err := leb128.LoadUint32(buf[offset:])
+			exportCount, n, err := leb128.LoadVecSize(buf[offset:])
 			if err != nil {
 				return nil, offset, fmt.Errorf("instance[%d] export count: %w", i, err)
 			}
@@ -675,7 +678,7 @@ func decodeCoreInstanceSection(buf []byte, offset int, sectionSize uint32) ([]Co
 func decodeInstanceSection(buf []byte, offset int, sectionSize uint32) ([]Instance, int, error) {
 	sectionStart := offset
 
-	count, n, err := leb128.LoadUint32(buf[offset:])
+	count, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
 		return nil, offset, fmt.Errorf("read count: %w", err)
 	}
@@ -702,7 +705,7 @@ func decodeInstanceSection(buf []byte, offset int, sectionSize uint32) ([]Instan
 			instance.ComponentIdx = componentIdx
 
 			// Read args: vec(instantiatearg)
-			argCount, n, err := leb128.LoadUint32(buf[offset:])
+			argCount, n, err := leb128.LoadVecSize(buf[offset:])
 			if err != nil {
 				return nil, offset, fmt.Errorf("instance[%d] arg count: %w", i, err)
 			}
@@ -733,7 +736,7 @@ func decodeInstanceSection(buf []byte, offset int, sectionSize uint32) ([]Instan
 			instance.Args = args
 
 		case 0x01: // inline exports: vec(inlineexport)
-			exportCount, n, err := leb128.LoadUint32(buf[offset:])
+			exportCount, n, err := leb128.LoadVecSize(buf[offset:])
 			if err != nil {
 				return nil, offset, fmt.Errorf("instance[%d] export count: %w", i, err)
 			}
@@ -775,7 +778,7 @@ func decodeInstanceSection(buf []byte, offset int, sectionSize uint32) ([]Instan
 func decodeAliasSection(buf []byte, offset int, sectionSize uint32) ([]AliasDef, int, error) {
 	sectionStart := offset
 
-	count, n, err := leb128.LoadUint32(buf[offset:])
+	count, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
 		return nil, offset, fmt.Errorf("read count: %w", err)
 	}
@@ -867,7 +870,7 @@ func readAliasDef(buf []byte, offset int) (AliasDef, int, error) {
 func decodeCanonSection(buf []byte, offset int, sectionSize uint32) ([]Canon, int, error) {
 	sectionStart := offset
 
-	count, n, err := leb128.LoadUint32(buf[offset:])
+	count, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
 		return nil, offset, fmt.Errorf("read count: %w", err)
 	}
@@ -1121,7 +1124,7 @@ func decodeBool(buf []byte, offset int) (bool, int, error) {
 
 // decodeCanonOpts decodes vec(canonopt).
 func decodeCanonOpts(buf []byte, offset int) ([]CanonOpt, int, error) {
-	count, n, err := leb128.LoadUint32(buf[offset:])
+	count, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
 		return nil, offset, fmt.Errorf("read count: %w", err)
 	}
@@ -1171,7 +1174,7 @@ func decodeStartSection(buf []byte, offset int, sectionSize uint32) (*Start, int
 	offset += int(n)
 
 	// Read args: vec(valueidx)
-	argCount, n, err := leb128.LoadUint32(buf[offset:])
+	argCount, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
 		return nil, offset, fmt.Errorf("arg count: %w", err)
 	}
