@@ -950,3 +950,42 @@ func TestBindFS(t *testing.T) {
 		require.Equal(t, sys.FS(adapted), bound)
 	})
 }
+
+// TestDirFS_Rename_caseOnly checks that renaming a directory to a name that
+// differs only in case renames it, where on a case-insensitive filesystem
+// the new name already reaches the directory itself.
+func TestDirFS_Rename_caseOnly(t *testing.T) {
+	t.Parallel()
+	forBinding(t, func(t *testing.T, mount func(dir string) sys.FS) {
+		tmpDir := t.TempDir()
+		require.NoError(t, os.Mkdir(path.Join(tmpDir, "renameFROM"), 0o700))
+		testFS := mount(tmpDir)
+
+		require.EqualErrno(t, 0, testFS.Rename("renameFROM", "RENAMEfrom"))
+		entries, err := os.ReadDir(tmpDir)
+		require.NoError(t, err)
+		require.Equal(t, 1, len(entries))
+		require.Equal(t, "RENAMEfrom", entries[0].Name())
+	})
+}
+
+// TestDirFS_Rename_overSymlink checks that renaming onto a symlink replaces
+// the symlink, even one to a directory, as rename(2) does.
+func TestDirFS_Rename_overSymlink(t *testing.T) {
+	t.Parallel()
+	forBinding(t, func(t *testing.T, mount func(dir string) sys.FS) {
+		tmpDir := t.TempDir()
+		require.NoError(t, os.Mkdir(path.Join(tmpDir, "dir"), 0o700))
+		require.NoError(t, os.WriteFile(path.Join(tmpDir, "f"), []byte("f"), 0o600))
+		testFS := mount(tmpDir)
+		require.EqualErrno(t, 0, testFS.Symlink("dir", "dir-link"))
+
+		require.EqualErrno(t, 0, testFS.Rename("f", "dir-link"))
+		st, errno := testFS.Lstat("dir-link")
+		require.EqualErrno(t, 0, errno)
+		require.True(t, st.Mode.IsRegular())
+		info, err := os.Stat(path.Join(tmpDir, "dir"))
+		require.NoError(t, err)
+		require.True(t, info.IsDir())
+	})
+}

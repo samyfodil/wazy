@@ -68,11 +68,15 @@ func renameIn(r *os.Root, from, to string) sys.Errno {
 	// os.Root.Rename refuses to replace a directory as of Go 1.27, reporting
 	// EEXIST, where rename(2) replaces an empty one and reports a file over a
 	// directory as EISDIR. Replacing it takes removing it first, as on Windows.
-	if info, err := r.Lstat(to); err == nil && info.IsDir() {
-		if info, err := r.Lstat(from); err != nil {
+	if toInfo, err := r.Lstat(to); err == nil && toInfo.IsDir() {
+		if fromInfo, err := r.Lstat(from); err != nil {
 			return rootErrno(err)
-		} else if !info.IsDir() {
+		} else if !fromInfo.IsDir() {
 			return sys.EISDIR
+		} else if os.SameFile(fromInfo, toInfo) {
+			// On a case-insensitive filesystem, names that differ only in
+			// case reach the same directory, and the rename changes the case.
+			return rootErrno(r.Rename(from, to))
 		}
 		if strings.HasPrefix(to, strings.TrimSuffix(from, "/")+"/") {
 			return sys.EINVAL // a directory cannot move into itself

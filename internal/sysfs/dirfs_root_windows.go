@@ -55,22 +55,31 @@ func openFileIn(r *os.Root, name string, oflag sys.Oflag, perm fs.FileMode) (*os
 // statIn stats name through a handle, as statPath does, which is where the
 // inode comes from on Windows.
 func statIn(r *os.Root, name string, follow bool) (sys.Stat_t, sys.Errno) {
-	flag := os.O_RDONLY
-	if !follow {
-		flag |= syscall.FILE_FLAG_OPEN_REPARSE_POINT
-	}
-	f, err := r.OpenFile(name, flag, 0)
-	if err != nil {
-		errno := rootErrno(err)
-		// To match expectations of WASI, e.g. TinyGo TestStatBadDir, return
-		// ENOENT, not ENOTDIR.
-		if errno == sys.ENOTDIR {
-			errno = sys.ENOENT
+	var h syscall.Handle
+	if follow {
+		f, err := r.OpenFile(name, os.O_RDONLY, 0)
+		if err != nil {
+			return sys.Stat_t{}, statErrno(err)
 		}
-		return sys.Stat_t{}, errno
+		defer f.Close()
+		h = syscall.Handle(f.Fd())
+	} else {
+		var err error
+		if h, err = openLinkIn(r, name, fileReadAttributes); err != nil {
+			return sys.Stat_t{}, statErrno(err)
+		}
+		defer syscall.CloseHandle(h)
 	}
-	defer f.Close()
-	return statHandle(syscall.Handle(f.Fd()))
+	return statHandle(h)
+}
+
+// statErrno is the errno for an error opening a file to stat it. To match
+// expectations of WASI, e.g. TinyGo TestStatBadDir, it is ENOENT, not ENOTDIR.
+func statErrno(err error) sys.Errno {
+	if errno := rootErrno(err); errno != sys.ENOTDIR {
+		return errno
+	}
+	return sys.ENOENT
 }
 
 // unlinkIn removes the file or symlink name. os.Root.Remove removes a
@@ -95,24 +104,40 @@ func rmdirIn(r *os.Root, name string) sys.Errno {
 	return rootErrno(r.Remove(name))
 }
 
+// sameFileIn reports whether from and to name the same file.
+func sameFileIn(r *os.Root, from, to string) bool {
+	fromSt, errno := statIn(r, from, false)
+	if errno != 0 {
+		return false
+	}
+	toSt, errno := statIn(r, to, false)
+	return errno == 0 && fromSt.Dev == toSt.Dev && fromSt.Ino == toSt.Ino
+}
+
 func renameIn(r *os.Root, from, to string) sys.Errno {
 	if from == to {
 		return 0
 	}
 
+	// Rename acts on the names, not what a symlink at either one points to.
 	var fromIsDir, toIsDir bool
-	if info, err := r.Stat(from); err != nil {
+	if info, err := r.Lstat(from); err != nil {
 		return rootErrno(err) // failed to stat from
 	} else {
 		fromIsDir = info.IsDir()
 	}
-	if info, err := r.Stat(to); err != nil {
+	if info, err := r.Lstat(to); err != nil {
 		if errno := rootErrno(err); errno != sys.ENOENT {
 			return errno // failed to stat to
 		}
 		return rootErrno(r.Rename(from, to)) // file or dir to not-exist is ok
 	} else {
 		toIsDir = info.IsDir()
+	}
+	if sameFileIn(r, from, to) {
+		// Names that differ only in case reach the same file on Windows, and
+		// renaming one to the other changes the case.
+		return rootErrno(r.Rename(from, to))
 	}
 
 	// Now, handle known cases
