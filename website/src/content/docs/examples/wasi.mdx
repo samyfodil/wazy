@@ -433,12 +433,11 @@ against a preopened directory, and most take the first one. The Zig guest opens 
 this reason — with two mounts configured, Zig will not resolve a path under the second. When you
 mount more than one directory, the order you add them is part of the contract.
 
-**Escape is checked, but symlinks are not.** A guest path that climbs out of its mount — `../..`,
+**Escape is checked, symlinks included.** A guest path that climbs out of its mount — `../..`,
 or a rooted path — is rejected before it reaches the filesystem, and there is no option to turn that
-off. What the check does not cover is a symlink *inside* a mounted directory pointing outside it,
-because the host OS resolves that far below this layer. Mounting an `embed.FS`, as this example
-does, sidesteps the question entirely; mounting a directory whose contents you do not control does
-not.
+off. A symlink that leads outside a mounted directory is refused the same way, whether the guest made
+it or it was already there. Mounting an `embed.FS`, as this example does, keeps the host filesystem
+out of it entirely.
 
 ## Same thing, no host program
 

@@ -80,15 +80,16 @@ type FSConfig interface {
 	// to anything outside it: both runtimes reject a guest path that escapes
 	// the descriptor it is resolved against ("../../..." and rooted paths
 	// alike) before the path ever reaches this filesystem. See
-	// wasi_snapshot_preview1's atPath and, for components,
-	// internal/component/instance's wasiJoinFSPath, which apply the same
-	// path.Clean + fs.ValidPath rule. There is no way to turn that off: to
-	// give a guest a second directory, add a second mount.
+	// wasi_snapshot_preview1's atPath and, for components, wasip2's
+	// wasiJoinFSPath, which apply the same path.Clean + fs.ValidPath rule.
+	// There is no way to turn that off: to give a guest a second directory,
+	// add a second mount.
 	//
-	// That check is lexical. A *symlink* inside `dir` that points outside it
-	// is still followed, since it is resolved by the host OS well below this
-	// layer -- so a directory holding symlinks you do not control is not
-	// safe to mount.
+	// Symlinks are resolved inside `dir` as well. One that leads outside it,
+	// through "../" or as an absolute path, is refused, whether the guest made
+	// it or it was there already; one that stays inside works. What lies
+	// inside by other means is reachable: a bind mount, a hard link, or a
+	// device file.
 	//
 	// # os.DirFS
 	//
@@ -101,8 +102,8 @@ type FSConfig interface {
 	// beginning at `guestPath`.
 	//
 	// This is the same as WithDirMount except only read operations are
-	// permitted. However, escaping the directory via relative path lookups
-	// like "../../" is still allowed.
+	// permitted. Isolation is the same as WithDirMount's: a guest path cannot
+	// escape `dir`, through "../../" or through a symlink.
 	WithReadOnlyDirMount(dir, guestPath string) FSConfig
 
 	// WithFSMount assigns a fs.FS file system for any paths beginning at

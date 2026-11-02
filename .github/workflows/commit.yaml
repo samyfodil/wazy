@@ -340,6 +340,7 @@ jobs:
 
       - name: Run built test binaries
         uses: cross-platform-actions/action@v0.32.0
+        timeout-minutes: 20  # under 5 normally; a VM that never boots retries ssh for hours
         env:
           WAZYCLI: ./wazycli
           WAZY_SPECTEST_REQUIRE_CASES: "1"
@@ -412,6 +413,7 @@ jobs:
 
       - name: Run built test binaries
         uses: ./.github/actions/vmactions
+        timeout-minutes: 20  # under 5 normally; a VM that never boots retries ssh for hours
         env:
           WAZYCLI: ./wazycli
           WAZY_SPECTEST_REQUIRE_CASES: "1"

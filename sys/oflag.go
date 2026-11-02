@@ -52,8 +52,8 @@ const (
 
 	// O_NOFOLLOW is defined on some platforms as syscall.O_NOFOLLOW.
 	//
-	// Note: This allows programs to ensure that if the opened file is a
-	// symbolic link, the link itself is opened instead of its target.
+	// Note: If the last component of the path is a symbolic link, the open
+	// fails with ELOOP instead of following it.
 	O_NOFOLLOW
 
 	// O_NONBLOCK is defined on some platforms as syscall.O_NONBLOCK.
