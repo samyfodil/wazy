@@ -141,9 +141,14 @@ func TestDecodeDefinedType_GCErrors(t *testing.T) {
 			expectedErr: "could not read field count: EOF",
 		},
 		{
-			name:        "truncated struct field type",
+			name:        "struct field count past the input",
 			input:       []byte{0x5f, 1},
-			expectedErr: "could not read field[0] type: EOF",
+			expectedErr: "could not read field count: count 1 exceeds remaining input of 0 bytes",
+		},
+		{
+			name:        "truncated struct field type",
+			input:       []byte{0x5f, 2, i32, 0},
+			expectedErr: "could not read field[1] type: EOF",
 		},
 		{
 			name:        "missing field mutability",

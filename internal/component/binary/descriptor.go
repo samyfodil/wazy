@@ -355,7 +355,7 @@ func readLabelValtypeVecDesc(buf []byte, off int) ([]struct {
 	Type TypeRef
 }, int, error,
 ) {
-	count, n, err := leb128.LoadUint32(buf[off:])
+	count, n, err := leb128.LoadVecSize(buf[off:])
 	if err != nil {
 		return nil, off, err
 	}
@@ -382,7 +382,7 @@ func readLabelValtypeVecDesc(buf []byte, off int) ([]struct {
 
 // readLabelVecDesc reads a vec(label) and returns the slice of names.
 func readLabelVecDesc(buf []byte, off int) ([]string, int, error) {
-	count, n, err := leb128.LoadUint32(buf[off:])
+	count, n, err := leb128.LoadVecSize(buf[off:])
 	if err != nil {
 		return nil, off, err
 	}
@@ -401,7 +401,7 @@ func readLabelVecDesc(buf []byte, off int) ([]string, int, error) {
 
 // readValtypeVecDesc reads a vec(valtype) and returns the slice of TypeRefs.
 func readValtypeVecDesc(buf []byte, off int) ([]TypeRef, int, error) {
-	count, n, err := leb128.LoadUint32(buf[off:])
+	count, n, err := leb128.LoadVecSize(buf[off:])
 	if err != nil {
 		return nil, off, err
 	}
@@ -468,7 +468,7 @@ func readVariantCaseDesc(buf []byte, off int) (VariantCase, int, error) {
 
 // readVariantDesc reads a variant type: vec(case).
 func readVariantDesc(buf []byte, off int) (VariantDesc, int, error) {
-	count, n, err := leb128.LoadUint32(buf[off:])
+	count, n, err := leb128.LoadVecSize(buf[off:])
 	if err != nil {
 		return VariantDesc{}, off, err
 	}
