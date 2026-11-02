@@ -12,6 +12,7 @@ import (
 	"github.com/samyfodil/wazy/internal/expctxkeys"
 	"github.com/samyfodil/wazy/internal/internalapi"
 	internalsys "github.com/samyfodil/wazy/internal/sys"
+	"github.com/samyfodil/wazy/internal/u32"
 	"github.com/samyfodil/wazy/sys"
 )
 
@@ -822,7 +823,7 @@ func (s *Store) GetFunctionTypeIDs(ts []FunctionType) ([]FunctionTypeID, error) 
 		groupKey := ""
 		if !isPlainFuncType(ts, start, end) {
 			groupKey = RecGroupKey(ts, start, end, func(idx Index) string {
-				if indexOutOfRange(idx, len(ret)) {
+				if u32.OutOfRange(idx, len(ret)) {
 					return fmt.Sprintf("?%d", idx)
 				}
 				return fmt.Sprintf("#tid=%d", ret[idx])
@@ -878,7 +879,7 @@ func (s *Store) TypeIDIsSubtypeOf(actual, target FunctionTypeID) bool {
 	// Bounded by the number of types: the chain is acyclic by construction (a supertype index is always below
 	// its subtype's), but this is reached from guest execution, so do not depend on that for termination.
 	for i := 0; i <= len(supers); i++ {
-		if int(actual) >= len(supers) {
+		if u32.OutOfRange(uint32(actual), len(supers)) {
 			return false
 		}
 		actual = supers[actual]

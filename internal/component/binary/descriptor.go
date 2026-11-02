@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/samyfodil/wazy/internal/leb128"
+	"github.com/samyfodil/wazy/internal/u32"
 )
 
 // TypeDesc represents a full component type descriptor, capturing the complete
@@ -698,7 +699,7 @@ func coreValtypeName(b byte) (string, error) {
 // N aliases -- and for a `sub` bound, an abstract resource, nil.
 func addLocalType(localTypes *[]TypeDesc, outer *map[uint32]OuterAlias, idx uint32, hasIdx bool) {
 	var t TypeDesc
-	if hasIdx && int(idx) < len(*localTypes) {
+	if hasIdx && !u32.OutOfRange(idx, len(*localTypes)) {
 		t = (*localTypes)[idx]
 		if outer != nil {
 			if o, ok := (*outer)[idx]; ok {

@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/samyfodil/wazy/internal/component/binary"
+	"github.com/samyfodil/wazy/internal/u32"
 )
 
 // This file computes the component-level types of ctypes.go from a decoded
@@ -269,14 +270,14 @@ func (s *ctDeclScope) release() {
 }
 
 func (s *ctDeclScope) coreTypeAt(idx uint32) (ctCoreType, error) {
-	if int(idx) >= len(s.coreTypes) {
+	if u32.OutOfRange(idx, len(s.coreTypes)) {
 		return ctCoreType{}, fmt.Errorf("unknown core type %d: type index out of bounds", idx)
 	}
 	return s.coreTypes[idx], nil
 }
 
 func (s *ctDeclScope) typeAt(idx uint32) (ctType, error) {
-	if int(idx) >= len(s.types) {
+	if u32.OutOfRange(idx, len(s.types)) {
 		return ctType{}, fmt.Errorf("unknown type %d: type index out of bounds", idx)
 	}
 	return s.types[idx], nil
@@ -443,7 +444,7 @@ func ctBuildDeclType(up ctScope, decls []binary.TypeDecl, component bool) (*ctIn
 func (s *ctDeclScope) alias(al binary.AliasDef) error {
 	switch {
 	case al.TargetKind == 0x00 && (al.Sort == ctSortType || al.Sort == ctSortInstance):
-		if int(al.InstanceIdx) >= len(s.insts) {
+		if u32.OutOfRange(al.InstanceIdx, len(s.insts)) {
 			return fmt.Errorf("unknown instance %d: instance index out of bounds", al.InstanceIdx)
 		}
 		e, ok := ctLookup(s.insts[al.InstanceIdx].exports, al.Name)
@@ -627,7 +628,7 @@ func (e *ctEnv) newResource() (*ctResource, error) {
 // enter guards one slot's computation: a slot that is reached again while
 // it is being computed names itself, which no well-formed component does.
 func ctEnter(st []byte, idx uint32, what string) (done bool, err error) {
-	if int(idx) >= len(st) {
+	if u32.OutOfRange(idx, len(st)) {
 		return false, fmt.Errorf("unknown %s %d: %s index out of bounds", what, idx, what)
 	}
 	switch st[idx] {

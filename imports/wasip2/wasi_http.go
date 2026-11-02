@@ -47,6 +47,7 @@ import (
 	"time"
 
 	"github.com/samyfodil/wazy/component"
+	"github.com/samyfodil/wazy/internal/u32"
 )
 
 // Resource type tags for wasi:http/types resources. See resource.go; tags
@@ -1628,7 +1629,7 @@ func (h *wasiHTTP) outgoingRequestSetMethod(_ context.Context, args []component.
 	if err != nil {
 		return nil, err
 	}
-	if int(vv.Disc) < len(httpMethodCases) {
+	if !u32.OutOfRange(vv.Disc, len(httpMethodCases)) {
 		r.method = httpMethodCases[vv.Disc]
 	} else if s, ok := vv.Payload.(string); ok {
 		r.method = strings.ToUpper(s)

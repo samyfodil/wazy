@@ -9,6 +9,7 @@ import (
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
+	"github.com/samyfodil/wazy/internal/u32"
 )
 
 // This file wires the MVP async builtins (task.return, context.get/set,
@@ -624,7 +625,7 @@ func contextGetHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, err
 	slot := canon.Slot
 	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		t := requireActiveTask(in, "context.get")
-		if int(slot) >= len(t.ctxStorage) { // assert(i < len(thread.storage))
+		if u32.OutOfRange(slot, len(t.ctxStorage)) { // assert(i < len(thread.storage))
 			panic(fmt.Errorf("component/instance: context.get: slot %d out of range (storage has %d slot(s))", slot, len(t.ctxStorage)))
 		}
 		stack[0] = t.ctxStorage[slot]
@@ -644,7 +645,7 @@ func contextSetHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, err
 	slot := canon.Slot
 	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		t := requireActiveTask(in, "context.set")
-		if int(slot) >= len(t.ctxStorage) { // assert(i < len(thread.storage))
+		if u32.OutOfRange(slot, len(t.ctxStorage)) { // assert(i < len(thread.storage))
 			panic(fmt.Errorf("component/instance: context.set: slot %d out of range (storage has %d slot(s))", slot, len(t.ctxStorage)))
 		}
 		t.ctxStorage[slot] = stack[0]

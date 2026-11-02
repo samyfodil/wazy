@@ -13,6 +13,7 @@ import (
 	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
 	"github.com/samyfodil/wazy/internal/expctxkeys"
+	"github.com/samyfodil/wazy/internal/u32"
 	"github.com/samyfodil/wazy/internal/wasm"
 )
 
@@ -113,7 +114,7 @@ const graphEmptyImportKey = "wazy:component/empty-import"
 func refuseImportedFuncReexport(comp *binary.Component) error {
 	for _, ex := range comp.Exports {
 		idx := ex.ExternIndex
-		for ex.ExternType == 0x01 && int(idx) < len(comp.ComponentFuncSpace) {
+		for ex.ExternType == 0x01 && !u32.OutOfRange(idx, len(comp.ComponentFuncSpace)) {
 			e := comp.ComponentFuncSpace[idx]
 			if e.Kind == binary.ComponentFuncFromImport {
 				return fmt.Errorf("component/instance: component export `%s` is a reexport of an imported function which is not implemented", ex.Name)
@@ -213,7 +214,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	// cargo-component/wit-bindgen output) bound every export to the wrong lift.
 	var componentFunc func(idx uint32) (isLift bool, liftCanonIdx int, at aliasTarget, err error)
 	componentFunc = func(idx uint32) (isLift bool, liftCanonIdx int, at aliasTarget, err error) {
-		if int(idx) >= len(comp.ComponentFuncSpace) {
+		if u32.OutOfRange(idx, len(comp.ComponentFuncSpace)) {
 			return false, 0, aliasTarget{}, fmt.Errorf("component func index %d out of range of the %d-entry component func index space", idx, len(comp.ComponentFuncSpace))
 		}
 		e := comp.ComponentFuncSpace[idx]
@@ -424,7 +425,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			if mod, ok := canonMods[int(entry.Canon)]; ok {
 				return mod, "f", nil
 			}
-			if int(entry.Canon) >= len(comp.Canons) {
+			if u32.OutOfRange(entry.Canon, len(comp.Canons)) {
 				return nil, "", fmt.Errorf("core func index %d: canon index %d out of range", cfi, entry.Canon)
 			}
 			privName := nextPrivateName()
@@ -578,7 +579,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			// discoverNeededFuncTypes), which is what ModuleIdx names --
 			// NOT by comp.CoreModules position, which misses every
 			// core-module outer alias.
-			if int(ci.ModuleIdx) >= len(rewrittenCore) {
+			if u32.OutOfRange(ci.ModuleIdx, len(rewrittenCore)) {
 				return fmt.Errorf("component/instance: core instance %d references core module %d, out of range of the %d-entry core module index space", k, ci.ModuleIdx, len(rewrittenCore))
 			}
 			// rewrittenCore[ci.ModuleIdx] already holds this module's bytes after
@@ -654,10 +655,10 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			for _, e := range ci.Exports {
 				// Intercept an in-range canon func entry: compute its host func
 				// now, defer the module build so the whole group shares one module.
-				if e.Sort == 0x00 && int(e.CoreSortIdx) < len(comp.CoreFuncSpace) &&
+				if e.Sort == 0x00 && !u32.OutOfRange(e.CoreSortIdx, len(comp.CoreFuncSpace)) &&
 					comp.CoreFuncSpace[e.CoreSortIdx].Kind == binary.CoreFuncFromCanon {
 					centry := comp.CoreFuncSpace[e.CoreSortIdx]
-					if int(centry.Canon) >= len(comp.Canons) {
+					if u32.OutOfRange(centry.Canon, len(comp.Canons)) {
 						return fmt.Errorf("component/instance: core instance %d: inline export %q references canon %d, out of range", k, e.Name, centry.Canon)
 					}
 					def, wasiCall, cerr := computeCanonHostFunc(ctx, r, comp, cfg, resources, in, comp.Canons[centry.Canon], neededTypes, groupNames, e.Name, coreMemTarget, coreFuncTarget, coreTableTarget)
@@ -1585,7 +1586,7 @@ func discoverNeededFuncTypes(r wazy.Runtime, comp *binary.Component, componentBy
 	rewritten := make([][]byte, comp.CoreModuleSpaceLen())
 	for _, ci := range comp.CoreInstances {
 		i := ci.ModuleIdx
-		if ci.Kind != 0x00 || int(i) >= len(rewritten) || rewritten[i] != nil {
+		if ci.Kind != 0x00 || u32.OutOfRange(i, len(rewritten)) || rewritten[i] != nil {
 			continue
 		}
 		owner, modIdx, err := comp.ResolveCoreModule(i)
@@ -1638,7 +1639,7 @@ func planCoreModule(r wazy.Runtime, cm binary.CoreModule, ownerBytes []byte, emp
 		if imp.Type != wasm.ExternTypeFunc {
 			continue
 		}
-		if int(imp.DescFunc) >= len(mod.TypeSection) {
+		if u32.OutOfRange(imp.DescFunc, len(mod.TypeSection)) {
 			return nil, fmt.Errorf("import %q.%q references type index %d, out of range of the %d-entry type section", imp.Module, imp.Name, imp.DescFunc, len(mod.TypeSection))
 		}
 		ft := &mod.TypeSection[imp.DescFunc]
@@ -1663,7 +1664,7 @@ func planCoreModule(r wazy.Runtime, cm binary.CoreModule, ownerBytes []byte, emp
 func planScopedModules(r wazy.Runtime, comp *binary.Component, cfg *config, emptyNameTarget string, neededTypes map[string]map[string]coreFuncSig, rewritten [][]byte) (map[string]map[string]coreFuncSig, [][]byte, error) {
 	copied := false
 	for k, ci := range comp.CoreInstances {
-		if ci.Kind != 0x00 || int(ci.ModuleIdx) >= len(rewritten) || rewritten[ci.ModuleIdx] != nil {
+		if ci.Kind != 0x00 || u32.OutOfRange(ci.ModuleIdx, len(rewritten)) || rewritten[ci.ModuleIdx] != nil {
 			continue
 		}
 		owner, modIdx, err := cfg.scope.module(ci.ModuleIdx)
@@ -1725,7 +1726,7 @@ func resolveInlineExportItem(
 ) (shimItem, string, api.Module, error) {
 	switch e.Sort {
 	case 0x00: // func
-		if int(e.CoreSortIdx) >= len(comp.CoreFuncSpace) {
+		if u32.OutOfRange(e.CoreSortIdx, len(comp.CoreFuncSpace)) {
 			return shimItem{}, "", nil, fmt.Errorf("inline export %q references core func %d, out of range of the %d-entry core func index space", e.Name, e.CoreSortIdx, len(comp.CoreFuncSpace))
 		}
 		entry := comp.CoreFuncSpace[e.CoreSortIdx]
@@ -1761,7 +1762,7 @@ func resolveInlineExportItem(
 		}
 
 	case 0x02: // memory
-		if int(e.CoreSortIdx) >= len(coreMemSpace) {
+		if u32.OutOfRange(e.CoreSortIdx, len(coreMemSpace)) {
 			return shimItem{}, "", nil, fmt.Errorf("inline export %q references core memory %d, out of range of the %d-entry core memory index space", e.Name, e.CoreSortIdx, len(coreMemSpace))
 		}
 		at := coreMemSpace[e.CoreSortIdx]
@@ -1772,7 +1773,7 @@ func resolveInlineExportItem(
 		return shimItem{Sort: shimSortMemory, FromModule: coreInstanceKey(int(at.instIdx)), FromName: at.name, ExportName: e.Name}, "", nil, nil
 
 	case 0x01: // table
-		if int(e.CoreSortIdx) >= len(coreTableSpace) {
+		if u32.OutOfRange(e.CoreSortIdx, len(coreTableSpace)) {
 			return shimItem{}, "", nil, fmt.Errorf("inline export %q references core table %d, out of range of the %d-entry core table index space", e.Name, e.CoreSortIdx, len(coreTableSpace))
 		}
 		at := coreTableSpace[e.CoreSortIdx]
@@ -1795,7 +1796,7 @@ func resolveInlineExportItem(
 		// `__stack_pointer`, `__memory_base`/`__table_base` and its whole
 		// GOT.func/GOT.mem relocation table as core globals regrouped through
 		// inline-export instances.
-		if int(e.CoreSortIdx) >= len(coreGlobalSpace) {
+		if u32.OutOfRange(e.CoreSortIdx, len(coreGlobalSpace)) {
 			return shimItem{}, "", nil, fmt.Errorf("inline export %q references core global %d, out of range of the %d-entry core global index space", e.Name, e.CoreSortIdx, len(coreGlobalSpace))
 		}
 		at := coreGlobalSpace[e.CoreSortIdx]
@@ -1847,7 +1848,7 @@ func computeCanonHostFunc(
 		// aliases -- the older aliases+lifts reconstruction miscounts when an
 		// import precedes them.
 		fi := canon.FuncIdx
-		if int(fi) >= len(comp.ComponentFuncSpace) {
+		if u32.OutOfRange(fi, len(comp.ComponentFuncSpace)) {
 			return hostFuncDef{}, "", fmt.Errorf("lower func index %d out of range of the component func index space", fi)
 		}
 		fe := comp.ComponentFuncSpace[fi]
@@ -1871,7 +1872,7 @@ func computeCanonHostFunc(
 		var hi *hostImport // built below for a nested instance's export; nil otherwise (looked up from cfg.imports)
 		switch fe.Kind {
 		case binary.ComponentFuncFromImport:
-			if int(fe.Import) >= len(comp.Imports) {
+			if u32.OutOfRange(fe.Import, len(comp.Imports)) {
 				return hostFuncDef{}, "", fmt.Errorf("lower func index %d: import out of range", fi)
 			}
 			im := comp.Imports[fe.Import]
@@ -2629,7 +2630,7 @@ func funcAliasSource(comp *binary.Component, cfg *config, at aliasTarget) (funcI
 			continue
 		}
 		imports := shimFuncImportNames(nested)
-		if int(ex.ExternIndex) >= len(imports) {
+		if u32.OutOfRange(ex.ExternIndex, len(imports)) {
 			return 0, false, fmt.Errorf("shim export %q: func index %d out of range of the shim's %d func import(s)", at.name, ex.ExternIndex, len(imports))
 		}
 		for _, a := range inst.Args {
@@ -2794,7 +2795,7 @@ func componentInstanceSpaceIndices(comp *binary.Component) []int {
 			out[i] = -1
 		}
 		for spaceIdx, e := range comp.ComponentInstanceSpace {
-			if e.Kind == binary.ComponentInstanceFromDefinition && int(e.Instance) < len(out) {
+			if e.Kind == binary.ComponentInstanceFromDefinition && !u32.OutOfRange(e.Instance, len(out)) {
 				out[e.Instance] = spaceIdx
 			}
 		}
@@ -2905,7 +2906,7 @@ func bindInstanceExportGraph(comp *binary.Component, cfg *config, exp binary.Exp
 	// index space at all.
 	localIdx, ok := componentInstanceDef(comp, exp.ExternIndex)
 	if !ok {
-		if int(exp.ExternIndex) < len(comp.ComponentInstanceSpace) &&
+		if !u32.OutOfRange(exp.ExternIndex, len(comp.ComponentInstanceSpace)) &&
 			comp.ComponentInstanceSpace[exp.ExternIndex].Kind == binary.ComponentInstanceFromImport {
 			return nil, fmt.Errorf("component/instance: export %q references instance %d, which is an imported instance re-exported directly; unsupported", exp.Name, exp.ExternIndex)
 		}
@@ -2972,7 +2973,7 @@ func bindInstanceExportGraph(comp *binary.Component, cfg *config, exp binary.Exp
 			// skip them; only func members become boundExports.
 			continue
 		}
-		if int(member.ExternIndex) >= len(shimFuncImports) {
+		if u32.OutOfRange(member.ExternIndex, len(shimFuncImports)) {
 			return nil, fmt.Errorf("component/instance: %s: func index %d out of range of the shim's %d func import(s)", diagName, member.ExternIndex, len(shimFuncImports))
 		}
 		importName := shimFuncImports[member.ExternIndex]

@@ -63,6 +63,7 @@ import (
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
+	"github.com/samyfodil/wazy/internal/u32"
 	"github.com/samyfodil/wazy/internal/wasmruntime"
 )
 
@@ -1155,7 +1156,7 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 
 	case binary.VariantDesc:
 		vv, ok := v.(abi.VariantValue)
-		if !ok || int(vv.Disc) >= len(d.Cases) || d.Cases[vv.Disc].Type == nil || vv.Payload == nil {
+		if !ok || u32.OutOfRange(vv.Disc, len(d.Cases)) || d.Cases[vv.Disc].Type == nil || vv.Payload == nil {
 			return v, nil
 		}
 		ct, err := resolveTypeRef(d.Cases[vv.Disc].Type, in.resolve)
@@ -1436,7 +1437,7 @@ func instantiateComponent(ctx context.Context, r wazy.Runtime, comp *binary.Comp
 		return nil, err
 	}
 	if err := checkResourceDtors(comp, func(idx uint32) api.Function {
-		if int(idx) >= len(coreFuncIdx) {
+		if u32.OutOfRange(idx, len(coreFuncIdx)) {
 			return nil
 		}
 		return core.ExportedFunction(coreFuncIdx[idx])
@@ -1597,11 +1598,11 @@ func validateAsyncCanonOptsAgreeWithTypes(comp *binary.Component) error {
 				fd, resolved = td.(binary.FuncDesc)
 			}
 		case 0x01: // lower: canon.FuncIdx names a component-func-space entry
-			if int(cn.FuncIdx) >= len(comp.ComponentFuncSpace) {
+			if u32.OutOfRange(cn.FuncIdx, len(comp.ComponentFuncSpace)) {
 				continue
 			}
 			fe := comp.ComponentFuncSpace[cn.FuncIdx]
-			if fe.Kind != binary.ComponentFuncFromImport || int(fe.Import) >= len(comp.Imports) {
+			if fe.Kind != binary.ComponentFuncFromImport || u32.OutOfRange(fe.Import, len(comp.Imports)) {
 				continue
 			}
 			im := comp.Imports[fe.Import]
@@ -1626,7 +1627,7 @@ func validateCanons(comp *binary.Component, coreFuncIdx []string) error {
 		if cn.Kind != 0x00 {
 			return fmt.Errorf("component/instance: canon[%d] has kind %#x; only canon lift (0x00) is supported for no-import components", i, cn.Kind)
 		}
-		if int(cn.CoreFuncIdx) >= len(coreFuncIdx) {
+		if u32.OutOfRange(cn.CoreFuncIdx, len(coreFuncIdx)) {
 			return fmt.Errorf("component/instance: canon[%d] references core func index %d, but the core func index space only has %d entries", i, cn.CoreFuncIdx, len(coreFuncIdx))
 		}
 		td, err := comp.ResolveType(cn.TypeIdx)
@@ -1650,7 +1651,7 @@ func buildExportIndex(comp *binary.Component) (map[string]int, error) {
 		if exp.ExternType != 0x01 { // func
 			return nil, fmt.Errorf("component/instance: export %q has extern kind %s (%#x); only func exports are supported by this milestone", exp.Name, api.ExternTypeName(exp.ExternType), exp.ExternType)
 		}
-		if int(exp.ExternIndex) >= len(comp.Canons) {
+		if u32.OutOfRange(exp.ExternIndex, len(comp.Canons)) {
 			return nil, fmt.Errorf("component/instance: export %q references func index %d, out of range of the %d-entry component func index space", exp.Name, exp.ExternIndex, len(comp.Canons))
 		}
 		canonForExport[exp.Name] = int(exp.ExternIndex)

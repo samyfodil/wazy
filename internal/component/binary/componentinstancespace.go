@@ -1,5 +1,7 @@
 package binary
 
+import "github.com/samyfodil/wazy/internal/u32"
+
 // This file implements the COMPONENT-level instance index space, the
 // instance-sort counterpart of componentfuncspace.go's func index space.
 //
@@ -78,18 +80,18 @@ const resolveInstanceMaxDepth = 64
 // componentInstanceDef).
 func (c *Component) ResolveComponentInstance(idx uint32) (int, bool) {
 	for depth := 0; depth < resolveInstanceMaxDepth; depth++ {
-		if int(idx) >= len(c.ComponentInstanceSpace) {
+		if u32.OutOfRange(idx, len(c.ComponentInstanceSpace)) {
 			return 0, false
 		}
 		e := c.ComponentInstanceSpace[idx]
 		switch e.Kind {
 		case ComponentInstanceFromDefinition:
-			if int(e.Instance) >= len(c.Instances) {
+			if u32.OutOfRange(e.Instance, len(c.Instances)) {
 				return 0, false
 			}
 			return int(e.Instance), true
 		case ComponentInstanceFromExport:
-			if int(e.Export) >= len(c.Exports) {
+			if u32.OutOfRange(e.Export, len(c.Exports)) {
 				return 0, false
 			}
 			idx = c.Exports[e.Export].ExternIndex

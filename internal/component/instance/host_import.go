@@ -8,6 +8,7 @@ import (
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
+	"github.com/samyfodil/wazy/internal/u32"
 )
 
 // HostFunc is a Go implementation of a component import. It receives the
@@ -447,11 +448,11 @@ func effectiveResourceTypeIdx(comp *binary.Component, cfg *config, typeIdx uint3
 // alias of some other shape, or a Component with no TypeSpace (e.g. a
 // hand-built test Component that never went through Decode).
 func resolveImportedResourceName(comp *binary.Component, typeIdx uint32) (iface, name string, ok bool) {
-	if int(typeIdx) >= len(comp.TypeSpace) {
+	if u32.OutOfRange(typeIdx, len(comp.TypeSpace)) {
 		return "", "", false
 	}
 	entry := comp.TypeSpace[typeIdx]
-	if entry.Kind != binary.TypeSpaceAlias || int(entry.Alias) >= len(comp.Aliases) {
+	if entry.Kind != binary.TypeSpaceAlias || u32.OutOfRange(entry.Alias, len(comp.Aliases)) {
 		return "", "", false
 	}
 	al := comp.Aliases[entry.Alias]
@@ -915,7 +916,7 @@ func synthFuncDesc(params, results []binary.TypeDesc) (binary.FuncDesc, abi.Reso
 		fd.Results.Named = append(fd.Results.Named, binary.FuncResult{Name: fmt.Sprintf("r%d", i), Type: mkRef(rres)})
 	}
 	resolve := func(idx uint32) binary.TypeDesc {
-		if int(idx) >= len(table) {
+		if u32.OutOfRange(idx, len(table)) {
 			return nil
 		}
 		return table[idx]
@@ -1735,7 +1736,7 @@ func walkHandles(v abi.Value, t binary.TypeDesc, resolve abi.Resolver, depth int
 		if !ok {
 			return nil, fmt.Errorf("variant: expected VariantValue, got %T", v)
 		}
-		if int(vv.Disc) >= len(d.Cases) || d.Cases[vv.Disc].Type == nil {
+		if u32.OutOfRange(vv.Disc, len(d.Cases)) || d.Cases[vv.Disc].Type == nil {
 			return v, nil
 		}
 		p, err := sub(vv.Payload, d.Cases[vv.Disc].Type)

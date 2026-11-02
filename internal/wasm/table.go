@@ -7,6 +7,7 @@ import (
 
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/leb128"
+	"github.com/samyfodil/wazy/internal/u32"
 )
 
 // Table describes the limits of elements and its type in a table.
@@ -296,7 +297,7 @@ func (m *Module) validateTable(enabledFeatures api.CoreFeatures, tables []Table,
 		}
 
 		if elem.IsActive() {
-			if indexOutOfRange(elem.TableIndex, len(tables)) {
+			if u32.OutOfRange(elem.TableIndex, len(tables)) {
 				return fmt.Errorf("unknown table %d as active element target", elem.TableIndex)
 			}
 
