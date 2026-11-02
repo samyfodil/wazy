@@ -32,3 +32,12 @@ func writeFd(fd uintptr, buf []byte) (int, sys.Errno) {
 	errno := sys.UnwrapOSError(err)
 	return n, errno
 }
+
+// pwriteFd exposes syscall.Pwrite.
+func pwriteFd(fd uintptr, buf []byte, off int64) (int, sys.Errno) {
+	if len(buf) == 0 {
+		return 0, 0
+	}
+	n, err := syscall.Pwrite(int(fd), buf, off)
+	return max(n, 0), sys.UnwrapOSError(err)
+}

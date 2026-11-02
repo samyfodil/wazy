@@ -32,6 +32,7 @@ type ioStatusBlock struct {
 
 const (
 	fileReadAttributes        = 0x80
+	fileWriteAttributes       = 0x100
 	ntSynchronize             = 0x100000
 	objCaseInsensitive        = 0x40
 	fileOpen                  = 1

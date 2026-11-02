@@ -15,10 +15,13 @@ func openFileIn(r *os.Root, name string, oflag sys.Oflag, perm fs.FileMode) (*os
 		return nil, errno
 	}
 	flag := toOsOpenFlag(oflag)
+	readOnly := flag&(os.O_WRONLY|os.O_RDWR) == 0
 	f, err := r.OpenFile(name, flag, perm&fs.ModePerm)
-	if err == nil && flag&(os.O_WRONLY|os.O_RDWR) == 0 && flag&(os.O_CREATE|os.O_TRUNC) != 0 {
-		// os.Root gives a file it creates or truncates write access, which a
-		// read-only open must not have, so reopen it read-only.
+	if err == nil && (readOnly || flag&os.O_APPEND != 0) && flag&(os.O_CREATE|os.O_TRUNC) != 0 {
+		// os.Root gives a file it creates or truncates plain write access,
+		// which a read-only open must not have, and with which an append
+		// open writes at the offset instead. So reopen it without creating
+		// or truncating.
 		f.Close()
 		f, err = r.OpenFile(name, flag&^(os.O_CREATE|os.O_TRUNC|os.O_EXCL), 0)
 	}

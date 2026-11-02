@@ -319,6 +319,14 @@ func (f *osFile) Write(buf []byte) (n int, errno sys.Errno) {
 
 // Pwrite implements the same method as documented on sys.File
 func (f *osFile) Pwrite(buf []byte, off int64) (n int, errno sys.Errno) {
+	if f.IsAppend() {
+		// os.File.WriteAt refuses a file opened to append, where pwrite(2)
+		// writes at the offset, or on Linux at the end.
+		if n, errno = pwriteFd(f.fd, buf, off); errno != 0 {
+			errno = fileError(f, f.closed, errno)
+		}
+		return
+	}
 	if n, errno = pwrite(f.file, buf, off); errno != 0 {
 		// Defer validation overhead until we've already had an error.
 		errno = fileError(f, f.closed, errno)

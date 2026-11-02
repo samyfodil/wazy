@@ -294,6 +294,19 @@ func (d *dirFS) Link(oldName, newName string) sys.Errno {
 		return errno
 	}
 	defer d.done(r)
+	// A directory cannot be hard linked, which Windows reports as access
+	// denied.
+	if info, err := r.Lstat(oldName); err == nil && info.IsDir() {
+		return sys.EPERM
+	}
+	// A new name ending in a slash names a directory, which a link never
+	// makes, and Windows drops the slash.
+	if strings.HasSuffix(newName, "/") {
+		if _, err := r.Lstat(newName); err != nil {
+			return rootErrno(err)
+		}
+		return sys.EEXIST
+	}
 	errno = rootErrno(r.Link(oldName, newName))
 	if errno == sys.EINVAL && newName == "." {
 		errno = sys.EEXIST // the directory itself, which Windows reports as EINVAL
@@ -316,7 +329,12 @@ func (d *dirFS) Symlink(oldName, link string) sys.Errno {
 	// Note: do not resolve `oldName` relative to this dirFS. The link result is always resolved
 	// when dereference the `link` on its usage (e.g. readlink, read, etc).
 	// https://github.com/bytecodealliance/cap-std/blob/v1.0.4/cap-std/src/fs/dir.rs#L404-L409
-	return rootErrno(r.Symlink(oldName, link))
+	// Windows reports an existing directory written with a trailing slash as
+	// EISDIR, which symlink never is on POSIX.
+	if errno = rootErrno(r.Symlink(oldName, link)); errno == sys.EISDIR {
+		errno = sys.EEXIST
+	}
+	return errno
 }
 
 // Readlink implements the same method as documented on sys.FS

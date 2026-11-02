@@ -2,6 +2,7 @@ package sysfs
 
 import (
 	"errors"
+	"io"
 	"syscall"
 	"unsafe"
 
@@ -146,4 +147,25 @@ func peekNamedPipe(handle syscall.Handle) (uint32, syscall.Errno) {
 		uintptr(totalBytesPtr), // [out, optional] LPDWORD lpTotalBytesAvail,
 		0)                      // [out, optional] LPDWORD lpBytesLeftThisMessage
 	return totalBytesAvail, errno
+}
+
+// pwriteFd writes buf at off through an OVERLAPPED offset. That moves the
+// file pointer of a synchronous handle, so it is put back, as os.File.WriteAt
+// does.
+func pwriteFd(fd uintptr, buf []byte, off int64) (int, sys.Errno) {
+	if len(buf) == 0 {
+		return 0, 0
+	}
+	h := syscall.Handle(fd)
+	cur, err := syscall.Seek(h, 0, io.SeekCurrent)
+	if err != nil {
+		return 0, sys.UnwrapOSError(err)
+	}
+	o := syscall.Overlapped{Offset: uint32(off), OffsetHigh: uint32(off >> 32)}
+	var n uint32
+	err = syscall.WriteFile(h, buf, &n, &o)
+	if _, seekErr := syscall.Seek(h, cur, io.SeekStart); err == nil {
+		err = seekErr
+	}
+	return int(n), sys.UnwrapOSError(err)
 }

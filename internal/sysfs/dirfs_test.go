@@ -2,6 +2,7 @@ package sysfs
 
 import (
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -751,6 +752,12 @@ func TestDirFS_Link(t *testing.T) {
 	require.EqualErrno(t, testFS.Link("sub/test.txt", ""), sys.EEXIST)
 	require.EqualErrno(t, testFS.Link("sub/test.txt", "/"), sys.EEXIST)
 	require.EqualErrno(t, 0, testFS.Link("sub/test.txt", "foo"))
+	// A directory cannot be hard linked, which Windows reports as access
+	// denied.
+	require.EqualErrno(t, sys.EPERM, testFS.Link("sub", "sub-link"))
+	// A trailing slash names a directory, which a link never makes.
+	require.EqualErrno(t, sys.ENOENT, testFS.Link("sub/test.txt", "bar/"))
+	require.EqualErrno(t, sys.EEXIST, testFS.Link("sub/test.txt", "sub/"))
 }
 
 func TestDirFS_Symlink(t *testing.T) {
@@ -1102,4 +1109,60 @@ func TestOsFile_DirFS(t *testing.T) {
 		_, errno = f.(DirHandle).DirFS()
 		require.EqualErrno(t, sys.ENOTDIR, errno)
 	})
+}
+
+// TestDirFS_Lutimens checks the times of a symlink itself are set, and those
+// of what it points to are left alone.
+func TestDirFS_Lutimens(t *testing.T) {
+	t.Parallel()
+	forBinding(t, func(t *testing.T, mount func(dir string) sys.FS) {
+		tmpDir := t.TempDir()
+		require.NoError(t, os.MkdirAll(path.Join(tmpDir, "sub"), 0o700))
+		require.NoError(t, os.WriteFile(path.Join(tmpDir, "sub", "file"), nil, 0o600))
+		testFS := mount(tmpDir)
+		require.EqualErrno(t, 0, testFS.Symlink("file", "sub/link"))
+
+		fileSt, errno := testFS.Stat("sub/file")
+		require.EqualErrno(t, 0, errno)
+		linkSt, errno := testFS.Lstat("sub/link")
+		require.EqualErrno(t, 0, errno)
+
+		mtim := linkSt.Mtim - int64(200*time.Second)
+		require.EqualErrno(t, 0, testFS.(LutimensFS).Lutimens("sub/link", sys.UTIME_OMIT, mtim))
+
+		linkSt, errno = testFS.Lstat("sub/link")
+		require.EqualErrno(t, 0, errno)
+		require.Equal(t, mtim, linkSt.Mtim)
+		after, errno := testFS.Stat("sub/file")
+		require.EqualErrno(t, 0, errno)
+		require.Equal(t, fileSt.Mtim, after.Mtim)
+
+		// A file that is not a symlink has its own times set as well.
+		require.EqualErrno(t, 0, testFS.(LutimensFS).Lutimens("sub/file", sys.UTIME_OMIT, mtim))
+		after, errno = testFS.Stat("sub/file")
+		require.EqualErrno(t, 0, errno)
+		require.Equal(t, mtim, after.Mtim)
+	})
+}
+
+// TestDirFS_OpenFile_appendTruncate checks a file opened to append and
+// truncate appends, which on Windows takes reopening it after truncating.
+func TestDirFS_OpenFile_appendTruncate(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(path.Join(tmpDir, "f"), []byte("old content"), 0o600))
+	testFS := DirFS(tmpDir)
+
+	f, errno := testFS.OpenFile("f", sys.O_WRONLY|sys.O_CREAT|sys.O_TRUNC|sys.O_APPEND, 0o600)
+	require.EqualErrno(t, 0, errno)
+	defer f.Close()
+	_, errno = f.Write([]byte("ab"))
+	require.EqualErrno(t, 0, errno)
+	_, errno = f.Seek(0, io.SeekStart)
+	require.EqualErrno(t, 0, errno)
+	_, errno = f.Write([]byte("cd"))
+	require.EqualErrno(t, 0, errno)
+
+	b, err := os.ReadFile(path.Join(tmpDir, "f"))
+	require.NoError(t, err)
+	require.Equal(t, "abcd", string(b))
 }
