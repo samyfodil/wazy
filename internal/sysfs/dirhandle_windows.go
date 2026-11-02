@@ -9,18 +9,18 @@ import (
 
 var procGetFinalPathNameByHandleW = syscall.NewLazyDLL("kernel32.dll").NewProc("GetFinalPathNameByHandleW")
 
-// openRootOf opens the directory f has open as an os.Root, and returns where
-// it is now. A directory opened with FILE_SHARE_DELETE can be renamed while
-// open, so it is found by the path its handle has now, not the one it was
-// opened by.
-func openRootOf(f *os.File, path string) (*os.Root, string, error) {
+// dirFSOf is the directory f has open as a DirFS, found by the path its
+// handle has now: one opened with FILE_SHARE_DELETE can be renamed while open.
+// It is unbound, opening its root for each operation, as a root held open
+// keeps Windows from removing or renaming the directory.
+func dirFSOf(f *os.File, path string) (*dirFS, error) {
 	if current, err := finalPath(syscall.Handle(f.Fd())); err == nil {
-		if r, err := os.OpenRoot(current); err == nil {
-			return r, current, nil
-		}
+		path = current
 	}
-	r, err := os.OpenRoot(path)
-	return r, path, err
+	if _, err := os.Stat(path); err != nil {
+		return nil, err
+	}
+	return &dirFS{dir: path, cleanedDir: ensureTrailingPathSeparator(path)}, nil
 }
 
 func finalPath(h syscall.Handle) (string, error) {

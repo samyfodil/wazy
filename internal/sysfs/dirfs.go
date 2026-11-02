@@ -89,6 +89,14 @@ func (d *dirFS) String() string {
 	return d.dir
 }
 
+// boundDirFS is a bound DirFS of dir with r, a root already open on it.
+func boundDirFS(r *os.Root, dir string) *dirFS {
+	d := &dirFS{dir: dir, cleanedDir: ensureTrailingPathSeparator(dir), bound: true}
+	d.rootDir.Store(openRootDir(r))
+	d.cached.Store(r)
+	return d
+}
+
 // root returns the root for one operation, which done releases.
 func (d *dirFS) root() (*os.Root, sys.Errno) {
 	if !d.bound {

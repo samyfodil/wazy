@@ -397,13 +397,12 @@ func (f *osFile) DirFS() (sys.FS, sys.Errno) {
 	} else if !isDir {
 		return nil, sys.ENOTDIR
 	}
-	r, dir, err := openRootOf(f.file, f.path)
+	d, err := dirFSOf(f.file, f.path)
 	if err != nil {
 		return nil, rootErrno(err)
 	}
-	d := &dirFS{dir: dir, cleanedDir: ensureTrailingPathSeparator(dir), bound: true}
-	d.rootDir.Store(openRootDir(r))
-	d.cached.Store(r)
-	f.dir = d
+	if d.bound {
+		f.dir = d // it holds the directory open until the file closes
+	}
 	return d, 0
 }

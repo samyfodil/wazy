@@ -4,9 +4,12 @@ package sysfs
 
 import "os"
 
-// openRootOf opens the directory f has open as an os.Root, by its path, and
-// returns that path. One renamed since it was opened is not found there.
-func openRootOf(_ *os.File, path string) (*os.Root, string, error) {
+// dirFSOf is the directory f has open as a DirFS bound to it, opened by its
+// path. One renamed since it was opened is not found there.
+func dirFSOf(_ *os.File, path string) (*dirFS, error) {
 	r, err := os.OpenRoot(path)
-	return r, path, err
+	if err != nil {
+		return nil, err
+	}
+	return boundDirFS(r, path), nil
 }
