@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"runtime"
 
 	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/sys"
@@ -101,8 +102,17 @@ func (d *dirFS) Symlink(oldName, link string) sys.Errno {
 	// Note: do not resolve `oldName` relative to this dirFS. The link result is always resolved
 	// when dereference the `link` on its usage (e.g. readlink, read, etc).
 	// https://github.com/bytecodealliance/cap-std/blob/v1.0.4/cap-std/src/fs/dir.rs#L404-L409
-	err := os.Symlink(oldName, d.join(link))
-	return sys.UnwrapOSError(err)
+	link = d.join(link)
+	errno := sys.UnwrapOSError(os.Symlink(oldName, link))
+	// Windows reports access denied, not that it exists, when `link` is
+	// already a symlink, e.g. a dangling one. Checking only after the failure
+	// leaves no window between the check and the create.
+	if errno != 0 && runtime.GOOS == "windows" {
+		if _, err := os.Lstat(link); err == nil {
+			errno = sys.EEXIST
+		}
+	}
+	return errno
 }
 
 // Readlink implements the same method as documented on sys.FS
