@@ -369,8 +369,7 @@ func (bb *basicBlock) validate(b *builder) {
 	if len(bb.preds) > 0 {
 		for _, pred := range bb.preds {
 			if pred.branch.opcode != OpcodeBrTable {
-				blockID := int(pred.branch.rValue)
-				target := b.basicBlocksPool.View(blockID)
+				target := b.basicBlock(BasicBlockID(pred.branch.rValue))
 				if target != bb {
 					panic(fmt.Sprintf("BUG: '%s' is not branch to %s, but to %s",
 						pred.branch.Format(b), bb.Name(), target.Name()))

@@ -280,6 +280,7 @@ func Test_swapInstruction(t *testing.T) {
 // post-order still lists every block after the blocks it goes on to.
 func TestBuilder_BlockIteratorPostOrder(t *testing.T) {
 	b := NewBuilder().(*builder)
+	b.Init(&Signature{}) // a jump to the return block is checked against the signature's results
 	entry, check, slow, cont := b.allocateBasicBlock(), b.allocateBasicBlock(), b.allocateBasicBlock(), b.allocateBasicBlock()
 	ctx := entry.AddParam(b, TypeI64)
 	b.SetCurrentBlock(entry)
