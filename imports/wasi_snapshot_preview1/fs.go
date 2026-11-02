@@ -1669,15 +1669,15 @@ func atPath(fsc *sys.FSContext, mem api.Memory, fd int32, p, pathLen uint32) (sy
 	if !ok {
 		return nil, "", sysapi.EFAULT
 	}
-	pathName := string(b)
+	rawPath := string(b)
 
 	// interesting_paths wants us to break on trailing slash if the input ends
 	// up a file, not a directory!
-	hasTrailingSlash := strings.HasSuffix(pathName, "/")
+	hasTrailingSlash := strings.HasSuffix(rawPath, "/")
 
 	// interesting_paths includes paths that include relative links but end up
 	// not escaping
-	pathName = path.Clean(pathName)
+	pathName := path.Clean(rawPath)
 
 	// interesting_paths wants to break on root paths or anything that escapes.
 	// This part is the same as fs.FS.Open()
@@ -1690,18 +1690,55 @@ func atPath(fsc *sys.FSContext, mem api.Memory, fd int32, p, pathLen uint32) (sy
 		pathName = pathName + "/"
 	}
 
-	if f, ok := fsc.LookupFile(fd); !ok {
+	f, ok := fsc.LookupFile(fd)
+	if !ok {
 		return nil, "", sysapi.EBADF // closed or invalid
 	} else if isDir, errno := f.File.IsDir(); errno != 0 {
 		return nil, "", errno
 	} else if !isDir {
 		return nil, "", sysapi.ENOTDIR
-	} else if f.IsPreopen { // don't append the pre-open name
-		return f.FS, pathName, 0
-	} else {
-		// Join via concat to avoid name conflict on path.Join
-		return f.FS, f.Name + "/" + pathName, 0
 	}
+
+	var base string
+	if !f.IsPreopen { // don't prefix the pre-open name
+		// Join via concat to avoid name conflict on path.Join
+		base = f.Name + "/"
+	}
+	if strings.Contains(rawPath, "..") {
+		if errno := dotDotParentsAreDirs(f.FS, base, rawPath); errno != 0 {
+			return nil, "", errno
+		}
+	}
+	return f.FS, base + pathName, 0
+}
+
+// dotDotParentsAreDirs fails where looking p up one component at a time
+// would: at a ".." after a component that is missing or not a directory, as
+// in "a/.." with "a" a file. path.Clean erases that step, so without this the
+// lookup of the cleaned path succeeds. p must not escape, see fs.ValidPath.
+func dotDotParentsAreDirs(fsys sysapi.FS, base, p string) sysapi.Errno {
+	var parts []string
+	verified := 0 // leading parts known to be directories
+	for _, c := range strings.Split(p, "/") {
+		switch c {
+		case "", ".":
+		case "..":
+			if len(parts) > verified {
+				st, errno := fsys.Stat(base + strings.Join(parts, "/"))
+				if errno != 0 {
+					return errno
+				}
+				if !st.Mode.IsDir() {
+					return sysapi.ENOTDIR
+				}
+			}
+			parts = parts[:len(parts)-1]
+			verified = len(parts)
+		default:
+			parts = append(parts, c)
+		}
+	}
+	return 0
 }
 
 func preopenPath(fsc *sys.FSContext, fd int32) (string, sysapi.Errno) {

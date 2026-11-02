@@ -4118,6 +4118,64 @@ func writeAndCloseFile(t *testing.T, fsc *sys.FSContext, fd int32) []byte {
 	return contents
 }
 
+// A ".." steps out of the component before it, so that component must be a
+// directory even though path.Clean erases both: "file/../file" fails like it
+// does in a component-wise lookup.
+func Test_atPath_dotDot(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(joinPath(tmpDir, "file"), nil, 0o600))
+	require.NoError(t, os.Mkdir(joinPath(tmpDir, "dir"), 0o700))
+	require.NoError(t, os.WriteFile(joinPath(tmpDir, "dir/inner"), nil, 0o600))
+	require.NoError(t, os.Symlink("dir", joinPath(tmpDir, "dirlink")))
+	require.NoError(t, os.Symlink("missing", joinPath(tmpDir, "dangling")))
+
+	fsConfig := wazy.NewFSConfig().WithDirMount(tmpDir, "/")
+	mod, r, log := requireProxyModule(t, wazy.NewModuleConfig().WithFSConfig(fsConfig))
+	defer r.Close(testCtx)
+	dirFD := requireOpenFD(t, mod, "dir")
+
+	const resultFilestat = 256
+	for _, tc := range []struct {
+		fd            int32
+		path          string
+		expectedErrno wasip1.Errno
+	}{
+		{sys.FdPreopen, "file/../file", wasip1.ErrnoNotdir},
+		{sys.FdPreopen, "file/..", wasip1.ErrnoNotdir},
+		{sys.FdPreopen, "missing/../file", wasip1.ErrnoNoent},
+		{sys.FdPreopen, "dangling/../file", wasip1.ErrnoNoent},
+		{sys.FdPreopen, "dir/missing/../../file", wasip1.ErrnoNoent},
+		{sys.FdPreopen, "dir/inner/../inner", wasip1.ErrnoNotdir},
+		{sys.FdPreopen, "dir/../file", wasip1.ErrnoSuccess},
+		{sys.FdPreopen, "dirlink/../file", wasip1.ErrnoSuccess},
+		{sys.FdPreopen, "dir/.//../dir/./../dir/inner", wasip1.ErrnoSuccess},
+		{sys.FdPreopen, "file/../..", wasip1.ErrnoPerm}, // escapes are rejected first
+		{dirFD, "inner/../inner", wasip1.ErrnoNotdir},
+		{dirFD, "missing/../inner", wasip1.ErrnoNoent},
+		{dirFD, "./../dir/inner", wasip1.ErrnoPerm},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			defer log.Reset()
+
+			require.True(t, mod.Memory().Write(0, []byte(tc.path)))
+			requireErrnoResult(t, tc.expectedErrno, mod, wasip1.PathFilestatGetName,
+				uint64(tc.fd), 0, 0, uint64(len(tc.path)), resultFilestat)
+		})
+	}
+
+	// The case from wazero#2249: nothing named "a" exists to step out of.
+	t.Run("path_symlink", func(t *testing.T) {
+		defer log.Reset()
+
+		target, link := "file", "a/../a"
+		require.True(t, mod.Memory().Write(0, []byte(target+link)))
+		requireErrnoResult(t, wasip1.ErrnoNoent, mod, wasip1.PathSymlinkName,
+			0, uint64(len(target)), uint64(sys.FdPreopen), uint64(len(target)), uint64(len(link)))
+		_, err := os.Lstat(joinPath(tmpDir, "a"))
+		require.ErrorIs(t, err, fs.ErrNotExist)
+	})
+}
+
 func requireOpenFD(t *testing.T, mod api.Module, path string) int32 {
 	fsc := mod.(*wasm.ModuleInstance).Sys.FS()
 	preopen := getPreopen(t, fsc)
