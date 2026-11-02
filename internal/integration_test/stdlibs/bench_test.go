@@ -70,44 +70,26 @@ var (
 			sysroot := filepath.VolumeName(testdir) + string(os.PathSeparator)
 			normalizedTestdir := normalizeOsPath(testdir)
 
+			fsConfig := wazy.NewFSConfig().WithDirMount(sysroot, "/")
+			if runtime.GOOS == "windows" {
+				fsConfig = fsConfig.WithFSMount(devDir, "/dev").WithFSMount(etcDir, "/etc")
+			}
 			c, stdout, stderr = defaultModuleConfig()
-			c = c.WithFSConfig(
-				wazy.NewFSConfig().
-					WithDirMount(sysroot, "/")).
+			c = c.WithFSConfig(fsConfig).
 				WithEnv("PWD", normalizedTestdir).
 				WithEnv("GOWASIRUNTIME", "wazy")
 
 			args := []string{fname, "-test.short", "-test.v"}
-
-			// Some distributions of Go such as used by homebrew or GitHub actions do not
-			// contain the LICENSE file in the correct location for these.
-			skip := []string{
-				"TestFileReaddir/sysdir",
-				"TestFileReadDir/sysdir",
-				"TestFileReaddirnames/sysdir",
-				// Inherited wazero limitation: sysfs resolves paths against the
-				// mount root, so an open os.Root handle does not survive a rename
-				// of its parent directory (openat re-resolves the stale path).
-				"TestRootRenameAfterOpen",
+			if runtime.GOOS == "windows" {
+				c = c.WithEnv("GOROOT", normalizeOsPath(goroot))
+				// Two tests ask for what a Windows host cannot do. No Windows
+				// file name holds a colon or a backslash, and Go skips the first
+				// on Windows itself. The second renames a directory while files
+				// in it are open, which Windows refuses; Go accepts that failure
+				// on Windows, but the test runs in the guest, where GOOS is
+				// wasip1.
+				args = append(args, "-test.skip=^(TestDirFSPathsValid|TestRootRaceRenameDir)$")
 			}
-
-			// Skip tests that are fragile on Windows.
-			switch runtime.GOOS {
-			case "darwin":
-				skip = append(skip, "TestRootLinkFrom/symlink", "TestRootLinkFrom/symlink_dotdot_slash",
-					"TestRootLinkFrom/symlink_dotdot_dotdot_slash", "TestRootLinkFrom/symlink_chain",
-					"TestRootLinkFrom/symlink_cycle", "TestRootLinkFrom/relative_symlink",
-					"TestRootLinkFrom/symlink_chain_escapes",
-				)
-			case "windows":
-				c = c.
-					WithEnv("GOROOT", normalizeOsPath(goroot))
-				skip = append(skip, "TestRenameCaseDifference/dir", "TestDirFSPathsValid", "TestDirFS",
-					"TestDevNullFile", "TestOpenError", "TestSymlinkWithTrailingSlash", "TestCopyFS",
-					"TestRoot", "TestOpenInRoot", "ExampleAfterFunc_connection", "TestOpenFileDevNull",
-				)
-			}
-			args = append(args, "-test.skip="+strings.Join(skip, "|"))
 			c = c.WithArgs(args...)
 
 			return bin, c, stdout, stderr, err

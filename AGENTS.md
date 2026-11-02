@@ -85,9 +85,8 @@ Use the Makefile; it encodes the real invocations.
   `GOARCH=arm64 CGO_ENABLED=0 go test ./internal/engine/native/...` (needs qemu-user).
 - **wasip1 FS semantics:** the stdlib suite
   (`internal/integration_test/stdlibs/bench_test.go`) runs Go's own stdlib tests
-  compiled to wasip1. A few fail on inherited sysfs limitations (path-based
-  resolution) and are listed in `skip`. Add to that list, with a comment, when a
-  failure is a known wasip1 gap — not a regression.
+  compiled to wasip1, all of them but two on Windows that ask for what a Windows
+  host cannot do. A new failure there is a regression to fix, not an entry to add.
 
 ## Commits & PRs
 
