@@ -454,6 +454,76 @@ blk3: () <-- (blk1)
 `,
 		},
 		{
+			// The hint says the if is rarely true, so the then arm and the block only it reaches go last, and
+			// the branch is inverted for the else arm to fall through.
+			name: "if-else hinted unlikely", m: branchHinted(testcases.IfElse.Module, wasm.BranchHint{Offset: 2, Likely: false}),
+			exp: `
+blk0: (v0:i64, v1:i64)
+	v2:i32 = Iconst_32 0x0
+	Brz v2, blk2
+	Jump blk1
+
+blk1: () <-- (blk0)
+	Jump blk3
+
+blk2: () <-- (blk0)
+	Jump blk_ret
+
+blk3: () <-- (blk1)
+	Jump blk_ret
+`,
+			expAfterPasses: `
+blk0: (v0:i64, v1:i64)
+	v2:i32 = Iconst_32 0x0
+	Brnz v2, blk1
+	Jump fallthrough
+
+blk2: () <-- (blk0)
+	Jump blk_ret
+
+blk1: () <-- (blk0)
+	Jump fallthrough
+
+blk3: () <-- (blk1)
+	Jump blk_ret
+`,
+		},
+		{
+			// The hint says the if is usually true, so the else arm goes last and the then arm falls through
+			// to the block after the if, which it cannot when the else arm sits between them.
+			name: "if-else hinted likely", m: branchHinted(testcases.IfElse.Module, wasm.BranchHint{Offset: 2, Likely: true}),
+			exp: `
+blk0: (v0:i64, v1:i64)
+	v2:i32 = Iconst_32 0x0
+	Brz v2, blk2
+	Jump blk1
+
+blk1: () <-- (blk0)
+	Jump blk3
+
+blk2: () <-- (blk0)
+	Jump blk_ret
+
+blk3: () <-- (blk1)
+	Jump blk_ret
+`,
+			expAfterPasses: `
+blk0: (v0:i64, v1:i64)
+	v2:i32 = Iconst_32 0x0
+	Brz v2, blk2
+	Jump fallthrough
+
+blk1: () <-- (blk0)
+	Jump fallthrough
+
+blk3: () <-- (blk1)
+	Jump blk_ret
+
+blk2: () <-- (blk0)
+	Jump blk_ret
+`,
+		},
+		{
 			name: "single predecessor local refs", m: testcases.SinglePredecessorLocalRefs.Module,
 			exp: `
 blk0: (v0:i64, v1:i64)
@@ -3333,4 +3403,15 @@ func TestCompiler_initializeCurrentBlockKnownBounds(t *testing.T) {
 			})
 		}
 	})
+}
+
+// branchHinted returns single-function module m with that function carrying hints, as a branch hint section would
+// give them.
+func branchHinted(m *wasm.Module, hints ...wasm.BranchHint) *wasm.Module {
+	code := m.CodeSection[0]
+	code.BranchHints = hints
+	return &wasm.Module{
+		TypeSection: m.TypeSection, FunctionSection: m.FunctionSection,
+		CodeSection: []wasm.Code{code}, ExportSection: m.ExportSection,
+	}
 }
