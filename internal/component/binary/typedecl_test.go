@@ -58,7 +58,8 @@ func TestTypeDeclsRefused(t *testing.T) {
 	}{
 		{"an instance type importing", []byte{0x01, 0x03, 0x00, 0x01, 'f', 0x01, 0x00}, false, "instancedecl[0]: instancedecl: invalid tag 0x3"},
 		{"an unknown tag", []byte{0x01, 0x09}, true, "componentdecl[0]: instancedecl: invalid tag 0x9"},
-		{"a missing declaration", []byte{0x01}, true, ErrTruncatedBinary.Error()},
+		{"a count past the input", []byte{0x01}, true, "count 1 exceeds remaining input"},
+		{"a missing declaration", []byte{0x02, 0x01, 0x7f}, true, ErrTruncatedBinary.Error()},
 		{"no count", nil, true, "EOF"},
 		{"a bad deftype", []byte{0x01, 0x01, 0x6e}, true, "componentdecl[0]"},
 		{"a bad export name", []byte{0x01, 0x04, 0x07}, true, "componentdecl[0]"},

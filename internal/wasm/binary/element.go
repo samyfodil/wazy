@@ -24,7 +24,7 @@ func ensureElementKindFuncRef(buf []byte, offset int) (int, error) {
 // ElementSegment.Init without allocating a ConstantExpression (nor the LEB128 round-trip that would
 // otherwise be needed to re-encode it into one) per entry -- the hot path for large all-funcref tables.
 func decodeElementInitValueVector(buf []byte, offset int) ([]wasm.Index, int, error) {
-	vs, n, err := leb128.LoadUint32(buf[offset:])
+	vs, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
 		return nil, offset, fmt.Errorf("get size of vector: %w", err)
 	}
@@ -52,7 +52,7 @@ func decodeElementInitValueVector(buf []byte, offset int) ([]wasm.Index, int, er
 // representation described on ElementSegment.Init; only entries that don't fit a compact form (the rare
 // path) end up allocating/retaining a ConstantExpression.
 func decodeElementConstExprVector(buf []byte, offset int, elemType wasm.RefType, enabledFeatures api.CoreFeatures) ([]wasm.Index, []wasm.ConstantExpression, int, error) {
-	vs, n, err := leb128.LoadUint32(buf[offset:])
+	vs, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
 		return nil, nil, offset, fmt.Errorf("failed to get the size of constexpr vector: %w", err)
 	}

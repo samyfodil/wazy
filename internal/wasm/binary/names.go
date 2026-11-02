@@ -67,7 +67,7 @@ func decodeNameSection(buf []byte, offset int, arena *stringArena, limit uint64)
 			// Note: this mirrors io.CopyN's behavior (used here prior to the slice-indexed rewrite), which
 			// reports io.EOF whenever fewer than subsectionSize bytes remain - unlike io.ReadFull, it never
 			// reports io.ErrUnexpectedEOF for a partial remainder.
-			if len(buf)-offset < int(subsectionSize) {
+			if uint64(len(buf)-offset) < uint64(subsectionSize) {
 				return nil, offset, fmt.Errorf("failed to skip subsection[%d]: %w", subsectionID, io.EOF)
 			}
 			offset += int(subsectionSize)
@@ -115,7 +115,7 @@ func decodeLocalNames(buf []byte, offset int, arena *stringArena) (wasm.Indirect
 		}
 		offset = o
 
-		localCount, n, err := leb128.LoadUint32(buf[offset:])
+		localCount, n, err := leb128.LoadVecSize(buf[offset:])
 		if err != nil {
 			return nil, offset, fmt.Errorf("failed to read the local count for function[%d]: %w", functionIndex, err)
 		}
@@ -150,7 +150,7 @@ func decodeFunctionIndex(buf []byte, offset int, subsectionID uint8) (uint32, in
 }
 
 func decodeFunctionCount(buf []byte, offset int, subsectionID uint8) (uint32, int, error) {
-	functionCount, n, err := leb128.LoadUint32(buf[offset:])
+	functionCount, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
 		return 0, offset, fmt.Errorf("failed to read the function count of subsection[%d]: %w", subsectionID, err)
 	}

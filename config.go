@@ -493,6 +493,12 @@ func (c *compiledModule) ExportedFunctions() map[string]api.FunctionDefinition {
 	return c.module.ExportedFunctions()
 }
 
+// WasmModule returns the decoded module, for packages in this tree that need more of it than CompiledModule
+// exposes. Nothing outside the tree can name *wasm.Module, so nothing there can call it.
+func (c *compiledModule) WasmModule() *wasm.Module {
+	return c.module
+}
+
 // ImportedMemories implements CompiledModule.ImportedMemories
 func (c *compiledModule) ImportedMemories() []api.MemoryDefinition {
 	return c.module.ImportedMemories()

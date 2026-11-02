@@ -81,6 +81,12 @@ func (functionExporter) ExportFunctions(builder wazy.HostModuleBuilder) {
 
 type emscriptenFns []*wasm.HostFunc
 
+// emscriptenExports is what a guest-specific FunctionExporter adds to "env".
+type emscriptenExports struct {
+	fns  emscriptenFns
+	tags []wasm.HostTag
+}
+
 // InstantiateForModule instantiates a module named "env" populated with any
 // known functions used in emscripten.
 func InstantiateForModule(ctx context.Context, r wazy.Runtime, guest wazy.CompiledModule) (api.Closer, error) {
@@ -97,7 +103,8 @@ func InstantiateForModule(ctx context.Context, r wazy.Runtime, guest wazy.Compil
 }
 
 // NewFunctionExporterForModule returns a guest-specific FunctionExporter,
-// populated with any known functions used in emscripten.
+// populated with any known functions used in emscripten, and the
+// exception-handling tags a dynamic-linking build imports from "env".
 func NewFunctionExporterForModule(guest wazy.CompiledModule) (FunctionExporter, error) {
 	ret := emscriptenFns{}
 	for _, fn := range guest.ImportedFunctions() {
@@ -120,7 +127,26 @@ func NewFunctionExporterForModule(guest wazy.CompiledModule) (FunctionExporter, 
 		hf := internal.NewInvokeFunc(importName, fn.ParamTypes(), fn.ResultTypes())
 		ret = append(ret, hf)
 	}
-	return ret, nil
+	return &emscriptenExports{fns: ret, tags: importedTags(guest)}, nil
+}
+
+// importedTags returns the tags emscripten defines that guest imports from "env", each with the type guest
+// declares for it: the parameter is a pointer, an i64 in a wasm64 build.
+func importedTags(guest wazy.CompiledModule) (tags []wasm.HostTag) {
+	m, ok := guest.(interface{ WasmModule() *wasm.Module })
+	if !ok {
+		return nil
+	}
+	module := m.WasmModule()
+	for i := range module.ImportSection {
+		imp := &module.ImportSection[i]
+		if imp.Type != wasm.ExternTypeTag || imp.Module != "env" ||
+			(imp.Name != internal.TagCppException && imp.Name != internal.TagCLongjmp) {
+			continue
+		}
+		tags = append(tags, wasm.HostTag{ExportName: imp.Name, ParamTypes: module.TypeSection[imp.DescTag].Params})
+	}
+	return tags
 }
 
 // ExportFunctions implements FunctionExporter.ExportFunctions
@@ -128,5 +154,14 @@ func (i emscriptenFns) ExportFunctions(builder wazy.HostModuleBuilder) {
 	exporter := builder.(wasm.HostFuncExporter)
 	for _, fn := range i {
 		exporter.ExportHostFunc(fn)
+	}
+}
+
+// ExportFunctions implements FunctionExporter.ExportFunctions. It exports the guest's tags too.
+func (e *emscriptenExports) ExportFunctions(builder wazy.HostModuleBuilder) {
+	e.fns.ExportFunctions(builder)
+	exporter := builder.(wasm.HostTagExporter)
+	for _, tag := range e.tags {
+		exporter.ExportHostTag(tag)
 	}
 }

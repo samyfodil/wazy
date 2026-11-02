@@ -30,7 +30,7 @@ var (
 
 func TestNewHostModule(t *testing.T) {
 	t.Run("empty name not allowed", func(t *testing.T) {
-		_, err := NewHostModule("", nil, nil, api.CoreFeaturesV2)
+		_, err := NewHostModule("", nil, nil, nil, api.CoreFeaturesV2)
 		require.Error(t, err)
 	})
 
@@ -133,7 +133,7 @@ func TestNewHostModule(t *testing.T) {
 		tc := tt
 
 		t.Run(tc.name, func(t *testing.T) {
-			m, e := NewHostModule(tc.moduleName, tc.exportNames, tc.nameToHostFunc, api.CoreFeaturesV2)
+			m, e := NewHostModule(tc.moduleName, tc.exportNames, tc.nameToHostFunc, nil, api.CoreFeaturesV2)
 			require.NoError(t, e)
 			requireHostModuleEquals(t, tc.expected, m)
 			require.True(t, m.IsHostModule)
@@ -161,6 +161,7 @@ func requireHostModuleEquals(t *testing.T, expected, actual *Module) {
 	require.Equal(t, expected.StartSection, actual.StartSection)
 	require.Equal(t, expected.ElementSection, actual.ElementSection)
 	require.Equal(t, expected.DataSection, actual.DataSection)
+	require.Equal(t, expected.TagSection, actual.TagSection)
 	require.Equal(t, expected.NameSection, actual.NameSection)
 
 	// Special case because reflect.Value can't be compared with Equals
@@ -200,8 +201,67 @@ func TestNewHostModule_Errors(t *testing.T) {
 		tc := tt
 
 		t.Run(tc.name, func(t *testing.T) {
-			_, e := NewHostModule(tc.moduleName, tc.exportNames, tc.nameToHostFunc, api.CoreFeaturesV1)
+			_, e := NewHostModule(tc.moduleName, tc.exportNames, tc.nameToHostFunc, nil, api.CoreFeaturesV1)
 			require.EqualError(t, e, tc.expectedErr)
 		})
 	}
+}
+
+func TestNewHostModule_tags(t *testing.T) {
+	i32, i64 := ValueTypeI32, ValueTypeI64
+	fn := api.GoFunc(func(context.Context, []uint64) {})
+
+	t.Run("tags after functions, sharing their types", func(t *testing.T) {
+		m, err := NewHostModule("env", []string{"f"},
+			map[string]*HostFunc{"f": {ExportName: "f", ParamTypes: []ValueType{i32}, Code: Code{GoFunc: fn}}},
+			[]HostTag{{ExportName: "e", ParamTypes: []ValueType{i32}}, {ExportName: "l", ParamTypes: []ValueType{i64}}},
+			api.CoreFeaturesV3)
+		require.NoError(t, err)
+		require.Equal(t, []FunctionType{{Params: []ValueType{i32}}, {Params: []ValueType{i64}}}, stripCacheKeys(m.TypeSection))
+		require.Equal(t, []Tag{{Type: 0}, {Type: 1}}, m.TagSection)
+		require.Equal(t, []Export{
+			{Type: ExternTypeFunc, Name: "f", Index: 0},
+			{Type: ExternTypeTag, Name: "e", Index: 0},
+			{Type: ExternTypeTag, Name: "l", Index: 1},
+		}, m.ExportSection)
+		for i := range m.ExportSection {
+			require.True(t, &m.ExportSection[i] == m.Exports[m.ExportSection[i].Name])
+		}
+		require.NoError(t, m.Validate(api.CoreFeaturesV3))
+	})
+
+	t.Run("only tags", func(t *testing.T) {
+		m, err := NewHostModule("env", nil, nil, []HostTag{{ExportName: "e"}}, api.CoreFeaturesV3)
+		require.NoError(t, err)
+		require.Equal(t, []Tag{{Type: 0}}, m.TagSection)
+		require.Equal(t, 0, len(m.FunctionSection))
+		require.Equal(t, ExternTypeTag, m.Exports["e"].Type)
+		require.NoError(t, m.Validate(api.CoreFeaturesV3))
+	})
+
+	t.Run("exception handling disabled", func(t *testing.T) {
+		_, err := NewHostModule("env", nil, nil, []HostTag{{ExportName: "e"}}, api.CoreFeaturesV2)
+		require.EqualError(t, err, `tag[env.e] invalid as feature "exception-handling" is disabled`)
+	})
+
+	t.Run("a tag named like a function", func(t *testing.T) {
+		_, err := NewHostModule("env", []string{"e"},
+			map[string]*HostFunc{"e": {ExportName: "e", Code: Code{GoFunc: fn}}},
+			[]HostTag{{ExportName: "e"}}, api.CoreFeaturesV3)
+		require.EqualError(t, err, "tag[env.e] export name is already used")
+	})
+
+	t.Run("two tags with one name", func(t *testing.T) {
+		_, err := NewHostModule("env", nil, nil, []HostTag{{ExportName: "e"}, {ExportName: "e"}}, api.CoreFeaturesV3)
+		require.EqualError(t, err, "tag[env.e] export name is already used")
+	})
+}
+
+// stripCacheKeys returns types with only their signatures, for comparing with literals.
+func stripCacheKeys(types []FunctionType) []FunctionType {
+	ret := make([]FunctionType, len(types))
+	for i := range types {
+		ret[i] = FunctionType{Params: types[i].Params, Results: types[i].Results}
+	}
+	return ret
 }

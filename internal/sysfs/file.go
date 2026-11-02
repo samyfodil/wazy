@@ -4,7 +4,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"time"
 
 	"github.com/samyfodil/wazy/sys"
 )
@@ -563,41 +562,4 @@ func pwrite(w io.WriterAt, buf []byte, off int64) (n int, errno sys.Errno) {
 
 	n, err := w.WriteAt(buf, off)
 	return n, sys.UnwrapOSError(err)
-}
-
-func chtimes(path string, atim, mtim int64) (errno sys.Errno) { //nolint:unused
-	// When both inputs are omitted, there is nothing to change.
-	if atim == sys.UTIME_OMIT && mtim == sys.UTIME_OMIT {
-		return
-	}
-
-	// UTIME_OMIT is expensive until progress is made in Go, as it requires a
-	// stat to read-back the value to re-apply.
-	// - https://github.com/golang/go/issues/32558.
-	// - https://go-review.googlesource.com/c/go/+/219638 (unmerged)
-	var st sys.Stat_t
-	if atim == sys.UTIME_OMIT || mtim == sys.UTIME_OMIT {
-		if st, errno = stat(path); errno != 0 {
-			return
-		}
-	}
-
-	var atime, mtime time.Time
-	if atim == sys.UTIME_OMIT {
-		atime = epochNanosToTime(st.Atim)
-		mtime = epochNanosToTime(mtim)
-	} else if mtim == sys.UTIME_OMIT {
-		atime = epochNanosToTime(atim)
-		mtime = epochNanosToTime(st.Mtim)
-	} else {
-		atime = epochNanosToTime(atim)
-		mtime = epochNanosToTime(mtim)
-	}
-	return sys.UnwrapOSError(os.Chtimes(path, atime, mtime))
-}
-
-func epochNanosToTime(epochNanos int64) time.Time { //nolint:unused
-	seconds := epochNanos / 1e9
-	nanos := epochNanos % 1e9
-	return time.Unix(seconds, nanos)
 }

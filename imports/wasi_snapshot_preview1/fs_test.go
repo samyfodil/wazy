@@ -3065,6 +3065,36 @@ func Test_fdWrite_Errors(t *testing.T) {
 	}
 }
 
+// iovs_len*8 must not wrap: 0x20000001*8 is 8 in 32 bits, room for one
+// iovec, and the call would then succeed having dropped the rest.
+func Test_fdReadWrite_iovsLenOverflow(t *testing.T) {
+	mod, fd, log, r := requireOpenFile(t, t.TempDir(), "test_path", []byte("wazy"), false)
+	defer r.Close(testCtx)
+
+	require.True(t, mod.Memory().Write(0, []byte{
+		16, 0, 0, 0, // = iovs[0].offset
+		4, 0, 0, 0, // = iovs[0].length
+	}))
+
+	for _, tc := range []struct{ name, expectedLog string }{
+		{wasip1.FdReadName, `
+==> wasi_snapshot_preview1.fd_read(fd=4,iovs=0,iovs_len=536870913)
+<== (nread=,errno=EFAULT)
+`},
+		{wasip1.FdWriteName, `
+==> wasi_snapshot_preview1.fd_write(fd=4,iovs=0,iovs_len=536870913)
+<== (nwritten=,errno=EFAULT)
+`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer log.Reset()
+
+			requireErrnoResult(t, wasip1.ErrnoFault, mod, tc.name, uint64(fd), 0, 0x20000001, 32)
+			require.Equal(t, tc.expectedLog, "\n"+log.String())
+		})
+	}
+}
+
 func Test_pathCreateDirectory(t *testing.T) {
 	tmpDir := t.TempDir() // open before loop to ensure no locking problems.
 	fsConfig := wazy.NewFSConfig().WithDirMount(tmpDir, "/")
@@ -3500,7 +3530,7 @@ func Test_pathFilestatSetTimes(t *testing.T) {
 	file := "file"
 	writeFile(t, tmpDir, file, []byte("012"))
 	link := file + "-link"
-	require.NoError(t, os.Symlink(joinPath(tmpDir, file), joinPath(tmpDir, link)))
+	require.NoError(t, os.Symlink(file, joinPath(tmpDir, link)))
 
 	mod, r, log := requireProxyModule(t, wazy.NewModuleConfig().
 		WithSysWalltime().
@@ -4086,6 +4116,64 @@ func writeAndCloseFile(t *testing.T, fsc *sys.FSContext, fd int32) []byte {
 	require.EqualErrno(t, 0, errno)
 	require.EqualErrno(t, 0, fsc.CloseFile(fd))
 	return contents
+}
+
+// A ".." steps out of the component before it, so that component must be a
+// directory even though path.Clean erases both: "file/../file" fails like it
+// does in a component-wise lookup.
+func Test_atPath_dotDot(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(joinPath(tmpDir, "file"), nil, 0o600))
+	require.NoError(t, os.Mkdir(joinPath(tmpDir, "dir"), 0o700))
+	require.NoError(t, os.WriteFile(joinPath(tmpDir, "dir/inner"), nil, 0o600))
+	require.NoError(t, os.Symlink("dir", joinPath(tmpDir, "dirlink")))
+	require.NoError(t, os.Symlink("missing", joinPath(tmpDir, "dangling")))
+
+	fsConfig := wazy.NewFSConfig().WithDirMount(tmpDir, "/")
+	mod, r, log := requireProxyModule(t, wazy.NewModuleConfig().WithFSConfig(fsConfig))
+	defer r.Close(testCtx)
+	dirFD := requireOpenFD(t, mod, "dir")
+
+	const resultFilestat = 256
+	for _, tc := range []struct {
+		fd            int32
+		path          string
+		expectedErrno wasip1.Errno
+	}{
+		{sys.FdPreopen, "file/../file", wasip1.ErrnoNotdir},
+		{sys.FdPreopen, "file/..", wasip1.ErrnoNotdir},
+		{sys.FdPreopen, "missing/../file", wasip1.ErrnoNoent},
+		{sys.FdPreopen, "dangling/../file", wasip1.ErrnoNoent},
+		{sys.FdPreopen, "dir/missing/../../file", wasip1.ErrnoNoent},
+		{sys.FdPreopen, "dir/inner/../inner", wasip1.ErrnoNotdir},
+		{sys.FdPreopen, "dir/../file", wasip1.ErrnoSuccess},
+		{sys.FdPreopen, "dirlink/../file", wasip1.ErrnoSuccess},
+		{sys.FdPreopen, "dir/.//../dir/./../dir/inner", wasip1.ErrnoSuccess},
+		{sys.FdPreopen, "file/../..", wasip1.ErrnoPerm}, // escapes are rejected first
+		{dirFD, "inner/../inner", wasip1.ErrnoNotdir},
+		{dirFD, "missing/../inner", wasip1.ErrnoNoent},
+		{dirFD, "./../dir/inner", wasip1.ErrnoPerm},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			defer log.Reset()
+
+			require.True(t, mod.Memory().Write(0, []byte(tc.path)))
+			requireErrnoResult(t, tc.expectedErrno, mod, wasip1.PathFilestatGetName,
+				uint64(tc.fd), 0, 0, uint64(len(tc.path)), resultFilestat)
+		})
+	}
+
+	// The case from wazero#2249: nothing named "a" exists to step out of.
+	t.Run("path_symlink", func(t *testing.T) {
+		defer log.Reset()
+
+		target, link := "file", "a/../a"
+		require.True(t, mod.Memory().Write(0, []byte(target+link)))
+		requireErrnoResult(t, wasip1.ErrnoNoent, mod, wasip1.PathSymlinkName,
+			0, uint64(len(target)), uint64(sys.FdPreopen), uint64(len(target)), uint64(len(link)))
+		_, err := os.Lstat(joinPath(tmpDir, "a"))
+		require.ErrorIs(t, err, fs.ErrNotExist)
+	})
 }
 
 func requireOpenFD(t *testing.T, mod api.Module, path string) int32 {

@@ -2,6 +2,7 @@ package leb128
 
 import (
 	"errors"
+	"fmt"
 	"io"
 )
 
@@ -146,6 +147,19 @@ func LoadUint32(buf []byte) (ret uint32, bytesRead uint64, err error) {
 		s += 7
 	}
 	return 0, 0, errOverflow32
+}
+
+// LoadVecSize is LoadUint32 for a vector's element count, rejecting a count larger than the bytes left in buf
+// after it. Every element takes at least one byte, so such a count cannot be satisfied, and rejecting it before
+// a decoder sizes an allocation by it keeps a few bytes declaring 2^32-1 elements from asking for gigabytes.
+func LoadVecSize(buf []byte) (ret uint32, bytesRead uint64, err error) {
+	if ret, bytesRead, err = LoadUint32(buf); err != nil {
+		return 0, bytesRead, err
+	}
+	if remaining := uint64(len(buf)) - bytesRead; uint64(ret) > remaining {
+		return 0, bytesRead, fmt.Errorf("count %d exceeds remaining input of %d bytes", ret, remaining)
+	}
+	return ret, bytesRead, nil
 }
 
 // LoadUint64 is the same as LoadUint32, but for 64-bit results.
