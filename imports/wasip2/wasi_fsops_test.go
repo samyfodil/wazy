@@ -703,6 +703,59 @@ func TestWasiFS_AbsolutePathRejected(t *testing.T) {
 	}
 }
 
+// TestWasiFS_DotDotLookup pins fsDescNode.join: a ".." steps out of the
+// component before it, so that component must be a directory even though the
+// clean erases both. "file/../file" fails as a component-wise lookup does.
+func TestWasiFS_DotDotLookup(t *testing.T) {
+	h, resources, rootRep, dir := fsOpsFixture(t, map[string][]byte{"/file": []byte("x"), "/dir/inner": []byte("y")})
+	if err := os.Symlink("dir", filepath.Join(dir, "dirlink")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("missing", filepath.Join(dir, "dangling")); err != nil {
+		t.Fatal(err)
+	}
+	dirRep := openRep(t, h, resources, rootRep, "dir", wasiOpenFlagDirectory, 0)
+
+	for _, tt := range []struct {
+		rep  uint32
+		path string
+		want uint32 // 0 for ok
+	}{
+		{rootRep, "file/../file", wasiErrorCodeNotDirectory},
+		{rootRep, "file/..", wasiErrorCodeNotDirectory},
+		{rootRep, "missing/../file", wasiErrorCodeNoEntry},
+		{rootRep, "dangling/../file", wasiErrorCodeNoEntry},
+		{rootRep, "dir/missing/../../file", wasiErrorCodeNoEntry},
+		{rootRep, "dir/inner/../inner", wasiErrorCodeNotDirectory},
+		{rootRep, "dir/../file", 0},
+		{rootRep, "dirlink/../file", 0},
+		{rootRep, "dir/.//../dir/./../dir/inner", 0},
+		{rootRep, "file/../..", wasiErrorCodeNotPermitted}, // escapes are rejected first
+		{dirRep, "inner/../inner", wasiErrorCodeNotDirectory},
+		{dirRep, "missing/../inner", wasiErrorCodeNoEntry},
+		{dirRep, "./../dir/inner", wasiErrorCodeNotPermitted},
+	} {
+		rv := callFS(t, h, "[method]descriptor.stat-at", tt.rep, uint32(0), tt.path)
+		if tt.want == 0 {
+			requireOk(t, rv, "stat-at("+tt.path+")")
+		} else {
+			requireErrCode(t, rv, tt.want, "stat-at("+tt.path+")")
+		}
+	}
+
+	// The two-path methods check each path.
+	requireErrCode(t, callFS(t, h, "[method]descriptor.rename-at", rootRep, "file/../file", rootRep, "renamed"),
+		wasiErrorCodeNotDirectory, "rename-at old-path")
+	requireErrCode(t, callFS(t, h, "[method]descriptor.rename-at", rootRep, "file", rootRep, "missing/../renamed"),
+		wasiErrorCodeNoEntry, "rename-at new-path")
+	requireErrCode(t, callFS(t, h, "[method]descriptor.link-at", rootRep, uint32(0), "file/../file", rootRep, "linked"),
+		wasiErrorCodeNotDirectory, "link-at old-path")
+	requireErrCode(t, callFS(t, h, "[method]descriptor.link-at", rootRep, uint32(0), "file", rootRep, "missing/../linked"),
+		wasiErrorCodeNoEntry, "link-at new-path")
+	requireAbsent(t, dir, "/renamed")
+	requireAbsent(t, dir, "/linked")
+}
+
 // TestWasiFS_StatAt covers stat-at's success and no-entry paths, including
 // the real timestamps a mount now supplies where the old flat map could only
 // answer `none`.
