@@ -60,17 +60,19 @@ type (
 		eng *engine
 		// indexInModule is the index of the function in the module.
 		indexInModule wasm.Index
-		// stackRetained means this callEngine has already returned one stack to the pool, so the
-		// next call keeps its buffer in c.stack instead of doing a pool Get+Put per call. It lives
-		// in the padding after indexInModule, so it costs this struct nothing.
+		// stackReleases counts the calls that gave their stack back to the pool, up to
+		// stackReleasesBeforeKeep; from then on a call keeps its buffer in c.stack for the next
+		// one instead of doing a pool Get+Put per call. It lives in the padding after
+		// indexInModule, so it costs this struct nothing.
 		//
-		// The first call always releases: mod.ExportedFunction(name).Call(ctx) builds a fresh
-		// callEngine every time (see stack_pool.go), and a callEngine that is called once and
-		// dropped must give its buffer back or the pool drains and every lookup allocates ~10KB
-		// again. A callEngine called twice is a cached handle in a loop, where the pool round trip
-		// is pure overhead. The tradeoff is a handle called exactly twice and then dropped, whose
-		// buffer goes to the GC rather than back to the pool.
-		stackRetained bool
+		// The early calls release because a handle is often dropped after a few:
+		// mod.ExportedFunction(name).Call(ctx) builds a fresh callEngine every time (see
+		// stack_pool.go), and so does a handle looked up per request. A dropped handle that kept
+		// its buffer leaves it to the GC, and the next lookup's first call allocates ~10KB again,
+		// which costs about as much as 65 pool round trips. Keeping only after 64 of them bounds
+		// that waste at well under a round trip per call, whatever the pattern, while a handle
+		// called in a loop still stops paying for the pool.
+		stackReleases uint8
 		// sizeOfParamResultSlice is the size of the parameter/result slice.
 		sizeOfParamResultSlice int
 		requiredParams         int
@@ -217,7 +219,7 @@ func (c *callEngine) requiredInitialStackSize() int {
 // allocation is now done by (*callEngine).callWithStack, pulling from
 // engine.stackPools (stack_pool.go) instead, and released back when that
 // call returns -- except once this callEngine has proven to be a reused
-// handle, after which it holds onto the buffer instead (see stackRetained).
+// handle, after which it holds onto the buffer instead (see stackReleases).
 //
 // It can't just be done once here instead of in callWithStack: a
 // callEngine created and called once, which is what
@@ -258,6 +260,10 @@ func alignedStackTop(s []byte) uintptr {
 func (c *callEngine) stackCheckLimitPtr(base int) *byte {
 	return &c.stack[base+backend.StackBoundsCheckMarginBytes]
 }
+
+// stackReleasesBeforeKeep is how many calls a callEngine gives its stack back to the pool for before it
+// keeps one between calls. See callEngine.stackReleases.
+const stackReleasesBeforeKeep = 64
 
 // prepareStack gets this call a wasm stack from eng's pool, returned boxed for releasing, and places its limit.
 // It is out of line so the values it works with take no room in callWithStack's frame, which every exit runs on.
@@ -533,10 +539,12 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			// of the code instead of one of Go's defer order, and leaves the number of defers in this
 			// function where it was, which is what keeps them open-coded.
 			c.unregisterGC()
-			if c.stackRetained && len(c.stack) == acquiredLen {
-				return // kept for this callEngine's next call; see stackRetained.
+			if c.stackReleases == stackReleasesBeforeKeep && len(c.stack) == acquiredLen {
+				return // kept for this callEngine's next call; see stackReleases.
 			}
-			c.stackRetained = true
+			if c.stackReleases < stackReleasesBeforeKeep {
+				c.stackReleases++
+			}
 			// Release whichever buffer c.stack currently is -- not
 			// necessarily the one just acquired above: stack growth
 			// (growStack/cloneStack) or an experimental Snapshot restore
