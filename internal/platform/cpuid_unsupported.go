@@ -2,4 +2,4 @@
 
 package platform
 
-const CpuFeatures CpuFeatureFlags = 0
+var CpuFeatures CpuFeatureFlags
