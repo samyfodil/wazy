@@ -85,10 +85,11 @@ type FSConfig interface {
 	// path.Clean + fs.ValidPath rule. There is no way to turn that off: to
 	// give a guest a second directory, add a second mount.
 	//
-	// That check is lexical. A *symlink* inside `dir` that points outside it
-	// is still followed, since it is resolved by the host OS well below this
-	// layer -- so a directory holding symlinks you do not control is not
-	// safe to mount.
+	// Symlinks are resolved inside `dir` as well. One that leads outside it,
+	// through "../" or as an absolute path, is refused, whether the guest made
+	// it or it was there already; one that stays inside works. What lies
+	// inside by other means is reachable: a bind mount, a hard link, or a
+	// device file.
 	//
 	// # os.DirFS
 	//

@@ -271,7 +271,7 @@ func TestStatFile_dev_inode(t *testing.T) {
 	require.EqualErrno(t, 0, l2.Close())
 
 	// Renaming a file shouldn't change its inodes.
-	require.EqualErrno(t, 0, rename(path1, path2))
+	require.NoError(t, os.Rename(path1, path2))
 	f1 = requireOpenFile(t, path2, sys.O_RDONLY, 0)
 	defer f1.Close()
 
