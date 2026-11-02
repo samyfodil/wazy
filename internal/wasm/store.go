@@ -356,6 +356,15 @@ func (m *ModuleInstance) applyData(data []DataSegment) error {
 	return nil
 }
 
+// export is getExport for a caller that only needs to know whether the export is there. Instantiation looks up
+// each start function this way and most modules export none, so a miss must not cost an error.
+func (m *ModuleInstance) export(name string, et ExternType) *Export {
+	if exp, ok := m.Exports[name]; ok && exp.Type == et {
+		return exp
+	}
+	return nil
+}
+
 // GetExport returns an export of the given name and type or errs if not exported or the wrong type.
 func (m *ModuleInstance) getExport(name string, et ExternType) (*Export, error) {
 	exp, ok := m.Exports[name]

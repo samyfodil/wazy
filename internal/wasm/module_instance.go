@@ -210,8 +210,8 @@ func (m *ModuleInstance) Memory() api.Memory {
 
 // ExportedMemory implements the same method as documented on api.Module.
 func (m *ModuleInstance) ExportedMemory(name string) api.Memory {
-	exp, err := m.getExport(name, ExternTypeMemory)
-	if err != nil {
+	exp := m.export(name, ExternTypeMemory)
+	if exp == nil {
 		return nil
 	}
 	return m.Memories[exp.Index]
@@ -231,8 +231,8 @@ func (m *ModuleInstance) ExportedMemoryDefinitions() map[string]api.MemoryDefini
 
 // ExportedFunction implements the same method as documented on api.Module.
 func (m *ModuleInstance) ExportedFunction(name string) api.Function {
-	exp, err := m.getExport(name, ExternTypeFunc)
-	if err != nil {
+	exp := m.export(name, ExternTypeFunc)
+	if exp == nil {
 		return nil
 	}
 	return m.Engine.NewFunction(exp.Index)
@@ -257,8 +257,8 @@ func (m *ModuleInstance) GlobalVal(idx Index) uint64 {
 
 // ExportedGlobal implements the same method as documented on api.Module.
 func (m *ModuleInstance) ExportedGlobal(name string) api.Global {
-	exp, err := m.getExport(name, ExternTypeGlobal)
-	if err != nil {
+	exp := m.export(name, ExternTypeGlobal)
+	if exp == nil {
 		return nil
 	}
 	g := m.Globals[exp.Index]

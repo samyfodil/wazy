@@ -316,3 +316,17 @@ func TestModuleInstance_ensureResourcesClosed(t *testing.T) {
 		require.NotNil(t, mem.expBuffer)
 	})
 }
+
+// TestModuleInstance_exportMiss guards the allocation-free miss: instantiation looks up each start function, and
+// most modules export none.
+func TestModuleInstance_exportMiss(t *testing.T) {
+	m := &ModuleInstance{Exports: map[string]*Export{"g": {Name: "g", Type: ExternTypeGlobal}}}
+	require.Nil(t, m.ExportedFunction("missing"))
+	require.Nil(t, m.ExportedMemory("g"))
+	require.Nil(t, m.ExportedGlobal("missing"))
+	require.Equal(t, 0.0, testing.AllocsPerRun(100, func() {
+		m.ExportedFunction("missing")
+		m.ExportedMemory("g")
+		m.ExportedGlobal("missing")
+	}))
+}
