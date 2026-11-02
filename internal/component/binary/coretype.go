@@ -125,12 +125,12 @@ func decodeCoreTypeSection(buf []byte, offset int, sectionSize uint32) ([]CoreTy
 		return nil, offset, ErrTruncatedBinary
 	}
 	body := buf[:end]
-	count, n, err := leb128.LoadUint32(body[offset:])
+	count, n, err := leb128.LoadVecSize(body[offset:])
 	if err != nil {
 		return nil, offset, fmt.Errorf("count: %w", err)
 	}
 	off := offset + int(n)
-	defs := make([]CoreTypeDef, 0, min(int(count), end-off))
+	defs := make([]CoreTypeDef, 0, count)
 	for i := range count {
 		var d CoreTypeDef
 		if d, off, err = readCoreTypeDef(body, off); err != nil {
@@ -176,12 +176,12 @@ func readCoreTypeDef(buf []byte, off int) (CoreTypeDef, int, error) {
 
 // readCoreModuleType reads vec(core:moduledecl), the body of a module type.
 func readCoreModuleType(buf []byte, off int) (*CoreModuleType, int, error) {
-	count, n, err := leb128.LoadUint32(buf[off:])
+	count, n, err := leb128.LoadVecSize(buf[off:])
 	if err != nil {
 		return nil, off, fmt.Errorf("core:moduletype: %w", err)
 	}
 	off += int(n)
-	mt := &CoreModuleType{Decls: make([]CoreModuleDecl, 0, min(int(count), len(buf)-off))}
+	mt := &CoreModuleType{Decls: make([]CoreModuleDecl, 0, count)}
 	for i := range count {
 		var d CoreModuleDecl
 		if d, off, err = readCoreModuleDecl(buf, off); err != nil {

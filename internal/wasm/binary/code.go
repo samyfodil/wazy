@@ -21,7 +21,7 @@ type localsGroup struct {
 // offset. groups is a caller-owned scratch, reused across the section, into which the single locals pass records
 // its (type, count) runs before LocalTypes is materialized once.
 func decodeCode(buf []byte, offset, codeSectionStart int, arena []byte, arenaOff int, localTypesArena *valueTypeArena, groups *[]localsGroup, enabledFeatures api.CoreFeatures, ret *wasm.Code) (newOffset, newArenaOff int, err error) {
-	ss, n, err := leb128.LoadUint32(buf[offset:])
+	ss, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
 		return offset, arenaOff, fmt.Errorf("get the size of code: %w", err)
 	}

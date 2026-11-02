@@ -1,9 +1,11 @@
 package binary
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/leb128"
 	"github.com/samyfodil/wazy/internal/testing/binaryencoding"
 	"github.com/samyfodil/wazy/internal/testing/dwarftestdata"
 	"github.com/samyfodil/wazy/internal/testing/require"
@@ -271,6 +273,58 @@ func TestDecodeModule_Errors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			_, e := DecodeModule(tc.input, api.CoreFeaturesV1, wasm.MemoryLimitPages, false, 0, false, false)
 			require.EqualError(t, e, tc.expectedErr)
+		})
+	}
+}
+
+// TestDecodeModule_VecSizeExceedsInput covers every vector whose count sizes an allocation: a count larger than the
+// input left must be rejected before it is used, or a few bytes declaring 2^32-1 elements exhaust memory.
+func TestDecodeModule_VecSizeExceedsInput(t *testing.T) {
+	// Far more than any input below holds, yet small enough to allocate harmlessly if the check is missing.
+	count := leb128.EncodeUint32(100000)
+	withSize := func(prefix []byte, body ...[]byte) []byte {
+		b := bytes.Join(body, nil)
+		return bytes.Join([][]byte{prefix, leb128.EncodeUint32(uint32(len(b))), b}, nil)
+	}
+	section := func(id wasm.SectionID, body ...[]byte) []byte {
+		return withSize(bytes.Join([][]byte{Magic, version, {id}}, nil), body...)
+	}
+	nameSection := func(subsectionID byte, body ...[]byte) []byte {
+		return section(wasm.SectionIDCustom, []byte{4, 'n', 'a', 'm', 'e'}, withSize([]byte{subsectionID}, body...))
+	}
+	offsetExpr := []byte{wasm.OpcodeI32Const, 0, wasm.OpcodeEnd}
+
+	tests := []struct {
+		name  string
+		input []byte
+	}{
+		{name: "type", input: section(wasm.SectionIDType, count)},
+		{name: "import", input: section(wasm.SectionIDImport, count)},
+		{name: "function", input: section(wasm.SectionIDFunction, count)},
+		{name: "table", input: section(wasm.SectionIDTable, count)},
+		{name: "global", input: section(wasm.SectionIDGlobal, count)},
+		{name: "export", input: section(wasm.SectionIDExport, count)},
+		{name: "element", input: section(wasm.SectionIDElement, count)},
+		{name: "code", input: section(wasm.SectionIDCode, count)},
+		{name: "data", input: section(wasm.SectionIDData, count)},
+		{name: "tag", input: section(wasm.SectionIDTag, count)},
+		{name: "func params", input: section(wasm.SectionIDType, []byte{1, compositeFunc}, count)},
+		{name: "func results", input: section(wasm.SectionIDType, []byte{1, compositeFunc, 0}, count)},
+		{name: "struct fields", input: section(wasm.SectionIDType, []byte{1, compositeStruct}, count)},
+		{name: "element init", input: section(wasm.SectionIDElement, []byte{1, 0}, offsetExpr, count)},
+		{name: "element const expr", input: section(wasm.SectionIDElement, []byte{1, 4}, offsetExpr, count)},
+		{name: "code body", input: section(wasm.SectionIDCode, []byte{1}, count)},
+		{name: "data init", input: section(wasm.SectionIDData, []byte{1, byte(dataSegmentPrefixPassive)}, count)},
+		{name: "function names", input: nameSection(subsectionIDFunctionNames, count)},
+		{name: "local names", input: nameSection(subsectionIDLocalNames, count)},
+		{name: "local names of a function", input: nameSection(subsectionIDLocalNames, []byte{1, 0}, count)},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := DecodeModule(tc.input, api.CoreFeaturesV3, wasm.MemoryLimitPages, false, 0, false, false)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "count 100000 exceeds remaining input")
 		})
 	}
 }

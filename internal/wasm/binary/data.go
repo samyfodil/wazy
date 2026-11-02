@@ -69,7 +69,7 @@ func decodeDataSegment(buf []byte, offset int, enabledFeatures api.CoreFeatures,
 		return offset, err
 	}
 
-	vs, n, err := leb128.LoadUint32(buf[offset:])
+	vs, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
 		err = fmt.Errorf("get the size of vector: %v", err)
 		return offset, err
