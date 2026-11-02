@@ -20,6 +20,7 @@ func TestStat(t *testing.T) {
 	require.EqualErrno(t, sys.ENOENT, errno)
 
 	var st sys.Stat_t
+	var emptyNlink uint64
 
 	t.Run("empty dir", func(t *testing.T) {
 		st, errno = stat(tmpDir)
@@ -28,12 +29,11 @@ func TestStat(t *testing.T) {
 		require.True(t, st.Mode.IsDir())
 		require.NotEqual(t, uint64(0), st.Ino)
 
-		// We expect one link: the directory itself
-		expectedNlink := uint64(1)
-		if dirNlinkIncludesDot {
-			expectedNlink++
-		}
-		require.Equal(t, expectedNlink, st.Nlink, runtime.GOOS)
+		// The link count of a directory depends on the filesystem, not the
+		// OS: two (its name and its own ".") on most, but one on btrfs and
+		// NTFS, which do not count dot entries.
+		emptyNlink = st.Nlink
+		require.True(t, emptyNlink == 1 || emptyNlink == 2, "nlink %d", emptyNlink)
 	})
 
 	subdir := path.Join(tmpDir, "sub")
@@ -52,14 +52,12 @@ func TestStat(t *testing.T) {
 		st, errno = stat(tmpDir)
 		require.EqualErrno(t, 0, errno)
 
-		// We expect two links: the directory itself and the subdir
-		expectedNlink := uint64(2)
-		if dirNlinkIncludesDot {
+		// A filesystem that counts "." also counts the subdir's "..".
+		expectedNlink := emptyNlink
+		if emptyNlink == 2 {
 			expectedNlink++
-		} else if runtime.GOOS == "windows" {
-			expectedNlink = 1 // directory count is not returned.
 		}
-		require.Equal(t, expectedNlink, st.Nlink, runtime.GOOS)
+		require.Equal(t, expectedNlink, st.Nlink)
 	})
 
 	// TODO: Investigate why Nlink increases on BSD when a file is added, but
@@ -271,7 +269,7 @@ func TestStatFile_dev_inode(t *testing.T) {
 	require.EqualErrno(t, 0, l2.Close())
 
 	// Renaming a file shouldn't change its inodes.
-	require.EqualErrno(t, 0, rename(path1, path2))
+	require.NoError(t, os.Rename(path1, path2))
 	f1 = requireOpenFile(t, path2, sys.O_RDONLY, 0)
 	defer f1.Close()
 

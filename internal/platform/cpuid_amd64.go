@@ -11,6 +11,12 @@ func loadCpuFeatureFlags() (flags CpuFeatureFlags) {
 	if cpu.X86.HasSSE41 {
 		flags |= CpuFeatureAmd64SSE4_1
 	}
+	if cpu.X86.HasSSE42 {
+		flags |= CpuFeatureAmd64SSE4_2
+	}
+	if cpu.X86.HasPOPCNT {
+		flags |= CpuFeatureAmd64POPCNT
+	}
 	if cpu.X86.HasBMI1 {
 		flags |= CpuFeatureAmd64BMI1
 	}

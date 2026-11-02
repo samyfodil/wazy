@@ -127,23 +127,38 @@ func TestDecodeNameSection_Errors(t *testing.T) {
 			expectedErr: "failed to read module name: EOF",
 		},
 		{
-			name:        "EOF after function name count",
+			name:        "function name count past the input",
 			input:       []byte{subsectionIDFunctionNames, ignoredSubsectionSize, 2},
+			expectedErr: "failed to read the function count of subsection[1]: count 2 exceeds remaining input of 0 bytes",
+		},
+		{
+			name:        "local names function count past the input",
+			input:       []byte{subsectionIDLocalNames, ignoredSubsectionSize, 2},
+			expectedErr: "failed to read the function count of subsection[2]: count 2 exceeds remaining input of 0 bytes",
+		},
+		{
+			name:        "local count past the input",
+			input:       []byte{subsectionIDLocalNames, ignoredSubsectionSize, 1, 0, 2},
+			expectedErr: "failed to read the local count for function[0]: count 2 exceeds remaining input of 0 bytes",
+		},
+		{
+			name:        "EOF after function name count",
+			input:       []byte{subsectionIDFunctionNames, ignoredSubsectionSize, 2, 0, 0},
 			expectedErr: "failed to read a function index in subsection[1]: EOF",
 		},
 		{
 			name:        "EOF after local names function count",
-			input:       []byte{subsectionIDLocalNames, ignoredSubsectionSize, 2},
+			input:       []byte{subsectionIDLocalNames, ignoredSubsectionSize, 2, 0, 0},
 			expectedErr: "failed to read a function index in subsection[2]: EOF",
 		},
 		{
 			name:        "EOF after function name index",
-			input:       []byte{subsectionIDFunctionNames, ignoredSubsectionSize, 2, 0},
+			input:       []byte{subsectionIDFunctionNames, ignoredSubsectionSize, 1, 0},
 			expectedErr: "failed to read function[0] name size: EOF",
 		},
 		{
 			name:        "EOF after local names function index",
-			input:       []byte{subsectionIDLocalNames, ignoredSubsectionSize, 2, 0},
+			input:       []byte{subsectionIDLocalNames, ignoredSubsectionSize, 1, 0},
 			expectedErr: "failed to read the local count for function[0]: EOF",
 		},
 		{
@@ -153,12 +168,12 @@ func TestDecodeNameSection_Errors(t *testing.T) {
 		},
 		{
 			name:        "EOF after local names count for a function index",
-			input:       []byte{subsectionIDLocalNames, ignoredSubsectionSize, 2, 0, 2},
+			input:       []byte{subsectionIDLocalNames, ignoredSubsectionSize, 1, 0, 2, 0, 0},
 			expectedErr: "failed to read a local index of function[0]: EOF",
 		},
 		{
 			name:        "EOF after local name size",
-			input:       []byte{subsectionIDLocalNames, ignoredSubsectionSize, 2, 0, 2, 1},
+			input:       []byte{subsectionIDLocalNames, ignoredSubsectionSize, 1, 0, 1, 1},
 			expectedErr: "failed to read function[0] local[1] name size: EOF",
 		},
 	}

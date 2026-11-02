@@ -271,6 +271,9 @@ type FSContext struct {
 	// (or directories) and defaults to empty.
 	// TODO: This is unguarded, so not goroutine-safe!
 	openedFiles FileTable
+
+	// mounts release what the mounted filesystems hold open for this context.
+	mounts []io.Closer
 }
 
 // FileTable is a specialization of the descriptor.Table type used to map file
@@ -419,8 +422,14 @@ func (c *FSContext) Close() (err error) {
 		}
 		return true
 	})
+	for _, m := range c.mounts {
+		if e := m.Close(); e != nil {
+			err = e
+		}
+	}
 	// A closed FSContext cannot be reused so clear the state.
 	c.openedFiles = FileTable{}
+	c.mounts = nil
 	return
 }
 
@@ -454,6 +463,10 @@ func (c *Context) InitFSContext(
 		if StripPrefixesAndTrailingSlash(guestPath) == "" {
 			// Default to bind to '/' when guestPath is effectively empty.
 			guestPath = "/"
+		}
+		f, closer := sysfs.BindFS(f)
+		if closer != nil {
+			c.fsc.mounts = append(c.fsc.mounts, closer)
 		}
 		c.fsc.openedFiles.Insert(&FileEntry{
 			FS:        f,

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/samyfodil/wazy/internal/component/testfixtures"
+	"github.com/samyfodil/wazy/internal/leb128"
 )
 
 // host_component.wasm is a real component assembled by wasm-tools from
@@ -239,6 +240,54 @@ func TestDecodeTruncated(t *testing.T) {
 	}
 }
 
+// TestDecodeVecSizeExceedsInput covers every vector whose count sizes an
+// allocation: a count larger than the input left must be rejected before it
+// is used, or a few bytes declaring 2^32-1 elements exhaust memory.
+func TestDecodeVecSizeExceedsInput(t *testing.T) {
+	// Far more than any input below holds, yet small enough to allocate
+	// harmlessly if the check is missing.
+	count := leb128.EncodeUint32(100000)
+	section := func(id byte, prefix ...byte) []byte {
+		return synthComponent(synthSection(id, append(prefix, count...)))
+	}
+
+	tests := []struct {
+		name  string
+		input []byte
+	}{
+		{name: "core instance", input: section(2)},
+		{name: "core type", input: section(3)},
+		{name: "instance", input: section(5)},
+		{name: "alias", input: section(6)},
+		{name: "type", input: section(7)},
+		{name: "canon", input: section(8)},
+		{name: "import", input: section(10)},
+		{name: "export", input: section(11)},
+		{name: "core instantiate args", input: section(2, 1, 0x00, 0)},
+		{name: "core inline exports", input: section(2, 1, 0x01)},
+		{name: "core module type decls", input: section(3, 1, 0x50)},
+		{name: "instantiate args", input: section(5, 1, 0x00, 0)},
+		{name: "inline exports", input: section(5, 1, 0x01)},
+		{name: "record fields", input: section(7, 1, 0x72)},
+		{name: "variant cases", input: section(7, 1, 0x71)},
+		{name: "flags labels", input: section(7, 1, 0x6e)},
+		{name: "tuple elements", input: section(7, 1, 0x6f)},
+		{name: "func params", input: section(7, 1, 0x40)},
+		{name: "func named results", input: section(7, 1, 0x40, 0, 0x01)},
+		{name: "component type decls", input: section(7, 1, 0x41)},
+		{name: "instance type decls", input: section(7, 1, 0x42)},
+		{name: "canon opts", input: section(8, 1, CanonKindLift, 0x00, 0)},
+		{name: "start args", input: section(9, 0)},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := DecodeBytes(tc.input)
+			wantErrContains(t, err, "count 100000 exceeds remaining input")
+		})
+	}
+}
+
 // The names DecodeBytes decodes are views of its own copy of the binary, so
 // changing the caller's bytes afterwards changes none of them.
 func TestDecodeBytes_OwnsItsCopy(t *testing.T) {
@@ -256,5 +305,24 @@ func TestDecodeBytes_OwnsItsCopy(t *testing.T) {
 	}
 	if _, err := DecodeBytes(nil); err != ErrInvalidMagicNumber {
 		t.Fatalf("nil: %v, want ErrInvalidMagicNumber", err)
+	}
+}
+
+// TestDecodeLengthPastInput covers lengths the input cannot hold: a label of 2^31 bytes, which a 32-bit target
+// used to turn negative and slice with, and a core module section claiming more bytes than follow it.
+func TestDecodeLengthPastInput(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []byte
+	}{
+		{name: "label", input: synthComponent(synthSection(7, append([]byte{1, 0x72, 1}, leb128.EncodeUint32(0x8000_0000)...)))},
+		{name: "core module", input: synthComponent(append(append([]byte{1}, leb128.EncodeUint32(1000)...), 0x00, 0x61, 0x73, 0x6d))},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := Decode(bytes.NewReader(tc.input)); err == nil {
+				t.Fatal("decoded a component whose lengths overrun the input")
+			}
+		})
 	}
 }
