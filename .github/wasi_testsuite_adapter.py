@@ -1,47 +1,49 @@
-# adapter for wazy until/unless https://github.com/WebAssembly/wasi-testsuite/pull/55
+# wasi-testsuite runtime adapter for wazy.
+#
+# test-runner loads this as a module: TEST_RUNTIME_EXE names the wazy binary,
+# "wazy" on PATH by default.
 
-import argparse
-import subprocess
-import sys
 import os
 import shlex
+import subprocess
+from typing import Dict, List, Optional, Tuple
 
-# shlex.split() splits according to shell quoting rules
-WAZY = shlex.split(os.getenv("TEST_RUNTIME_EXE", "wazy"))
+# Windows paths keep their backslashes.
+WAZY = shlex.split(os.getenv("TEST_RUNTIME_EXE", "wazy"), posix=(os.name != "nt"))
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--version", action="store_true")
-parser.add_argument("--test-file", action="store")
-parser.add_argument("--arg", action="append", default=[])
-parser.add_argument("--env", action="append", default=[])
-parser.add_argument("--dir", action="append", default=[])
 
-args = parser.parse_args()
+def get_name() -> str:
+    return "wazy"
 
-if args.version:
-    version = subprocess.run(
-        WAZY + ["version"], capture_output=True, text=True
-    ).stdout.strip()
-    if version == "dev":
-        version = "0.0.0"
-    print("wazy", version)
-    sys.exit(0)
 
-TEST_FILE = args.test_file
-TEST_DIR = os.path.dirname(TEST_FILE)
-PROG_ARGS = []
-if args.arg:
-    PROG_ARGS = ["--"] + args.arg
-ENV_ARGS = [f"-env={e}" for e in args.env]
-cwd = os.getcwd()
-DIR_ARGS = [f"-mount={cwd}/{dir}:{dir}" for dir in args.dir]
+def get_version() -> str:
+    result = subprocess.run(WAZY[0:1] + ["version"], encoding="UTF-8",
+                            capture_output=True, check=True)
+    version = result.stdout.strip()
+    return "0.0.0" if version == "dev" else version
 
-PROG = (
-    WAZY
-    + ["run", "-hostlogging=filesystem"]
-    + ENV_ARGS
-    + DIR_ARGS
-    + [TEST_FILE]
-    + PROG_ARGS
-)
-sys.exit(subprocess.run(PROG, cwd=TEST_DIR).returncode)
+
+def get_wasi_versions() -> List[str]:
+    return ["wasm32-wasip1"]
+
+
+def get_wasi_worlds() -> List[str]:
+    return ["wasi:cli/command"]
+
+
+def get_timeout_seconds() -> float:
+    # A test compiles its module first, which a slow runner can take seconds on.
+    return 60.0
+
+
+def compute_argv(test_path: str,
+                 args_env_root: Tuple[List[str], Dict[str, str], Optional[str]],
+                 proposals: List[str],
+                 wasi_world: str,
+                 wasi_version: str) -> List[str]:
+    args, env, root = args_env_root
+    argv = WAZY + ["run", "-hostlogging=filesystem"]
+    argv += [f"-env={k}={v}" for k, v in env.items()]
+    if root:
+        argv += [f"-mount={root}:/"]
+    return argv + [test_path] + args

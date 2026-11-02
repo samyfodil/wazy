@@ -149,15 +149,14 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: WebAssembly/wasi-testsuite
-          # prod/testsuite-base branch, as of May 12, 2023.
-          # TODO: once the wasi-testsuite is stable, we should use the latest tag instead of a branch.
-          ref: c9c751586fd86b321d595bbef13f2c7403cfdbc5
+          # prod/testsuite-base as of October 30, 2026.
+          ref: 9d84631e427729802085c3d172d0a63cd360a1fa
           path: wasi-testsuite
 
       - name: Initialize Python environment
         uses: actions/setup-python@v6
         with:
-          python-version: '3.11' # latest version of python 3
+          python-version: '3.13' # test-runner needs 3.12 or later
           cache: pip
 
       - name: Install dependencies
@@ -169,10 +168,9 @@ jobs:
         working-directory: wasi-testsuite
         run: |
           python3 test-runner/wasi_test_runner.py \
-            -t ./tests/assemblyscript/testsuite/ \
-            ./tests/c/testsuite/ \
-            ./tests/rust/testsuite/ \
-            -f ../.github/wasi_testsuite_skip.json \
+            -t ./tests/assemblyscript/testsuite/wasm32-wasip1 \
+            ./tests/c/testsuite/wasm32-wasip1 \
+            ./tests/rust/testsuite/wasm32-wasip1 \
             -r ../.github/wasi_testsuite_adapter.py
 
   go_tests:
