@@ -177,6 +177,8 @@ type MemoryInstance struct {
 	// scans these instead, which moves the only contended access to the close,
 	// where it is rare. Guarded by Mux.
 	callers []weak.Pointer[CallSlot]
+	// callerChunks holds the rest of them, a chunk at a time. See CallSlotFor.
+	callerChunks []weak.Pointer[callSlotChunk]
 
 	// pendingRelease is the storage a close claimed but could not release,
 	// because a call was still in flight. The last call to leave performs it.
@@ -196,7 +198,7 @@ type MemoryInstance struct {
 
 // CallSlot is one callEngine's record of whether it is inside a top-level call.
 // Each callEngine owns one and registers it with every memory its module can
-// reach (ModuleInstance.RegisterCallSlot), so a close can find the calls in
+// reach (ModuleInstance.CallSlotFor), so a close can find the calls in
 // flight by scanning MemoryInstance.callers rather than every call writing a
 // counter they all share. The word is only ever written by the one goroutine
 // running that callEngine, on that callEngine's own cache line.
@@ -224,30 +226,77 @@ const (
 // close.
 func (s *CallSlot) Enter() { atomic.StoreUint32(&s.inFlight, slotBusy) }
 
-// RegisterCallSlot makes s visible to every memory this module can reach. It
-// runs once per callEngine, when the callEngine is built.
-func (m *ModuleInstance) RegisterCallSlot(s *CallSlot) {
-	p := weak.Make(s)
-	for _, mem := range m.Memories {
-		mem.Mux.Lock()
-		if len(mem.callers) == cap(mem.callers) && cap(mem.callers) > 0 {
-			// About to grow: first drop the slots whose callEngine has been
-			// collected, so a module that keeps looking up fresh handles
-			// reuses this space instead of growing forever. Compacting on the
-			// grow boundary makes it amortized -- the scan is only as frequent
-			// as the reallocation it replaces.
-			live := mem.callers[:0]
-			for _, c := range mem.callers {
-				if c.Value() != nil {
-					live = append(live, c)
-				}
-			}
-			clear(mem.callers[len(live):cap(mem.callers)])
-			mem.callers = live
-		}
-		mem.callers = append(mem.callers, p)
-		mem.Mux.Unlock()
+const (
+	// callSlotsSingly is how many callEngines a module registers their own CallSlot for before it hands out
+	// slots from chunks. A module instantiated per request looks up a few functions, and must not pay for a
+	// chunk it barely uses.
+	callSlotsSingly = 4
+	// callSlotsPerChunk is how many CallSlots one callSlotChunk holds.
+	callSlotsPerChunk = 32
+)
+
+// callSlotChunk is a batch of CallSlots for one module's callEngines. Each is alone on its line, so calls on
+// different callEngines never write the same one: 128 bytes is the line of Apple's arm64 cores and the pair of
+// lines an amd64 core prefetches together. A memory holds a chunk weakly, as it does a single slot, and a
+// callEngine's pointer into the chunk keeps all of it alive.
+type callSlotChunk [callSlotsPerChunk]struct {
+	CallSlot
+	_ [128 - unsafe.Sizeof(CallSlot{})]byte
+}
+
+// CallSlotFor returns the CallSlot a new callEngine of this module records its calls on, already visible to
+// every memory the module can reach. own is a slot inside the callEngine. It runs once per callEngine, when
+// the callEngine is built.
+//
+// A module's first callEngines register their own slot, a weak pointer each. Past callSlotsSingly, which is a
+// module looking up a function for every call, they get slots out of a chunk instead, and a chunk takes one
+// weak pointer for callSlotsPerChunk callEngines: weak.Make is most of what a lookup costs.
+func (m *ModuleInstance) CallSlotFor(own *CallSlot) *CallSlot {
+	if len(m.Memories) == 0 {
+		return own // there is nothing to register with
 	}
+	m.slotMux.Lock()
+	defer m.slotMux.Unlock()
+	if m.slotsSingly < callSlotsSingly {
+		m.slotsSingly++
+		p := weak.Make(own)
+		for _, mem := range m.Memories {
+			mem.Mux.Lock()
+			mem.callers = appendLive(mem.callers, p)
+			mem.Mux.Unlock()
+		}
+		return own
+	}
+	if m.slotChunk == nil || m.slotNext == callSlotsPerChunk {
+		m.slotChunk, m.slotNext = new(callSlotChunk), 0
+		p := weak.Make(m.slotChunk)
+		for _, mem := range m.Memories {
+			mem.Mux.Lock()
+			mem.callerChunks = appendLive(mem.callerChunks, p)
+			mem.Mux.Unlock()
+		}
+	}
+	s := &m.slotChunk[m.slotNext].CallSlot
+	m.slotNext++
+	return s
+}
+
+// appendLive appends p to ps. When that is about to grow ps, it first drops the pointers whose target was
+// collected, so a module that keeps looking up fresh handles reuses the space instead of growing forever.
+// Compacting on the grow boundary makes it amortized: the scan is only as frequent as the reallocation it
+// replaces.
+func appendLive[T any](ps []weak.Pointer[T], p weak.Pointer[T]) []weak.Pointer[T] {
+	if len(ps) == cap(ps) && cap(ps) > 0 {
+		live := ps[:0]
+		for _, c := range ps {
+			if c.Value() != nil {
+				live = append(live, c)
+			}
+		}
+		clear(ps[len(live):cap(ps)])
+		ps = live
+	}
+	return append(ps, p)
 }
 
 // EnterCallMemories is a no-op kept for symmetry with ExitCall: the call
@@ -361,16 +410,29 @@ func (m *MemoryInstance) dirtyLenLocked(backing []byte) int {
 func (m *MemoryInstance) anyCallInFlightLocked() bool {
 	busy := false
 	for _, c := range m.callers {
-		s := c.Value()
-		if s == nil {
-			continue
-		}
-		if atomic.CompareAndSwapUint32(&s.inFlight, slotBusy, slotHandoff) ||
-			atomic.LoadUint32(&s.inFlight) == slotHandoff {
+		if s := c.Value(); s != nil && s.claimIfBusy() {
 			busy = true
 		}
 	}
+	for _, c := range m.callerChunks {
+		chunk := c.Value()
+		if chunk == nil {
+			continue
+		}
+		for i := range chunk {
+			if chunk[i].claimIfBusy() {
+				busy = true
+			}
+		}
+	}
 	return busy
+}
+
+// claimIfBusy reports whether a call is in flight on s, and if one is, moves s to slotHandoff so that call
+// performs the release when it leaves. See anyCallInFlightLocked.
+func (s *CallSlot) claimIfBusy() bool {
+	return atomic.CompareAndSwapUint32(&s.inFlight, slotBusy, slotHandoff) ||
+		atomic.LoadUint32(&s.inFlight) == slotHandoff
 }
 
 // NewMemoryInstance creates a new instance based on the parameters in the SectionIDMemory.

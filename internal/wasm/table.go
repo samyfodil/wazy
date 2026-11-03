@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"unsafe"
 
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/leb128"
@@ -214,6 +215,10 @@ type TableInstance struct {
 	// IsTable64 is true when this table is indexed by i64 instead of i32.
 	IsTable64 bool
 
+	// limit is the most entries Grow lets this table reach: the store's TableLimitElements when
+	// the table was built.
+	limit uint64
+
 	// Type is either RefTypeFuncref or RefTypeExternRef.
 	Type RefType
 
@@ -235,6 +240,17 @@ type ElementInstance = []Reference
 
 // Reference is the runtime representation of RefType which is either RefTypeFuncref or RefTypeExternref.
 type Reference = uint64
+
+// TableLimitElements is the default ceiling on how many entries one table may hold. It is the limit V8
+// and SpiderMonkey apply, so no module that runs in a browser is refused, and it holds a table to 80MB
+// of host heap. A table lives outside every linear memory, so nothing else bounds it: without this a
+// single table.grow could ask for 2^32-1 entries.
+const TableLimitElements = 10_000_000
+
+// MaxTableLimitElements is the highest table limit an embedder may configure. A table's size stays
+// below math.MaxUint32, which table.grow returns for failure, and has to be a length make can give a
+// slice of References, which on a 32-bit platform is lower still.
+const MaxTableLimitElements = uint64(min(math.MaxUint32-1, math.MaxInt/unsafe.Sizeof(Reference(0))))
 
 // validateTable ensures any ElementSegment is valid. This caches results via Module.validatedActiveElementSegments.
 // Note: limitsType are validated by decoders, so not re-validated here.
@@ -362,23 +378,31 @@ func (m *Module) validateTable(enabledFeatures api.CoreFeatures, tables []Table,
 // If the result `init` is non-nil, it is the `tableInit` parameter of Engine.NewModuleEngine.
 //
 // Note: An error is only possible when an ElementSegment.OffsetExpr is out of range of the TableInstance.Min.
-func (m *ModuleInstance) buildTables(module *Module, skipBoundCheck bool) (err error) {
+func (m *ModuleInstance) buildTables(module *Module, skipBoundCheck bool, limit uint64) (err error) {
+	// A table's declared minimum is bounded only by its index type at validation time -- the
+	// specification requires a module declaring more entries than any host could allocate to still be
+	// *valid* -- so the embedder's limit is applied here, before anything is allocated. The sum is
+	// bounded too, as buildMemory bounds memories': one module must not claim N times the limit just by
+	// declaring N tables.
+	var total uint64
+	for i := range module.TableSection {
+		tsec := &module.TableSection[i]
+		if tsec.Min > limit {
+			return fmt.Errorf("table[%d] minimum of %d entries exceeds the limit of %d", i, tsec.Min, limit)
+		}
+		// No overflow: total is at most limit here or the loop has already returned.
+		total += tsec.Min
+		if total > limit {
+			return fmt.Errorf("total table minimum across %d tables (%d entries) exceeds %d", i+1, total, limit)
+		}
+	}
+
 	idx := module.ImportTableCount
 	for i := range module.TableSection {
 		tsec := &module.TableSection[i]
-		// A 64-bit table's declared minimum is bounded only by u64 at
-		// validation time -- the specification requires a module declaring more
-		// entries than any host could allocate to still be *valid* -- so the
-		// bound that a 32-bit table gets at decode time (MaximumFunctionIndex,
-		// see binary.decodeTable) has to be applied here instead, before
-		// anything is allocated.
-		if tsec.Min > uint64(MaximumFunctionIndex) {
-			return fmt.Errorf("table[%d] minimum of %d entries exceeds the limit of %d",
-				i, tsec.Min, MaximumFunctionIndex)
-		}
 		t := &TableInstance{
 			References: make([]Reference, tsec.Min), Min: tsec.Min, Max: tsec.Max,
-			Type: tsec.Type, IsTable64: tsec.IsTable64,
+			Type: tsec.Type, IsTable64: tsec.IsTable64, limit: limit,
 		}
 		if tsec.InitExpr != nil {
 			initVals := evaluateConstExprInModuleInstance(tsec.InitExpr, m)
@@ -445,7 +469,7 @@ func (t *TableInstance) Grow(delta uint32, initialRef Reference) (currentLen uin
 	// currentLen and delta are both bounded by 2^32-1, so their sum cannot
 	// overflow.
 	if newLen := uint64(currentLen) + uint64(delta); //
-	newLen >= math.MaxUint32 || (t.Max != nil && newLen > *t.Max) {
+	newLen > t.limit || (t.Max != nil && newLen > *t.Max) {
 		return 0xffffffff // = -1 in signed 32-bit integer.
 	}
 

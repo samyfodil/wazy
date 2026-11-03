@@ -102,6 +102,19 @@ memory may declare — bound by what a Go slice holds. A module asking for more 
 the specification allows.
 :::
 
+Tables live outside linear memory, so `WithMemoryLimitPages` does not bound them. Each entry costs 8
+bytes of Go heap, and without a limit a single `table.grow` could ask for four billion of them.
+`WithTableLimitElements` caps the entries in any one table, 10 million by default, the limit browsers
+apply:
+
+```go
+r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfig().
+	WithTableLimitElements(65536))
+```
+
+A module declaring a larger table, or tables whose declared sizes add up to more, fails to
+instantiate. A `table.grow` past the limit returns -1, as it does past the table's declared maximum.
+
 ## Wall-clock limits
 
 A `context` deadline ends a call, even in a tight compiled loop:

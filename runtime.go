@@ -182,6 +182,7 @@ func NewRuntimeWithConfig(ctx context.Context, rConfig RuntimeConfig) Runtime {
 	// specification requires to be valid. See wasm.Store.MemoryLimitPages.
 	store.MemoryLimitPages = uint64(config.memoryLimitPages)
 	store.Memory64LimitPages = config.memory64LimitPages
+	store.TableLimitElements = uint64(config.tableLimitElements)
 	return &runtime{
 		cache:                      cacheImpl,
 		store:                      store,
