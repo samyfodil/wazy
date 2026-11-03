@@ -1047,6 +1047,49 @@ func TestDirFS_Rename_overSymlink(t *testing.T) {
 	})
 }
 
+// TestDirFS_Link_dirSymlink checks that linking a symlink to a directory
+// links the symlink, which NTFS cannot hard link.
+func TestDirFS_Link_dirSymlink(t *testing.T) {
+	t.Parallel()
+	forBinding(t, func(t *testing.T, mount func(dir string) sys.FS) {
+		tmpDir := t.TempDir()
+		require.NoError(t, os.MkdirAll(path.Join(tmpDir, "sub", "dir"), 0o700))
+		testFS := mount(tmpDir)
+		require.EqualErrno(t, 0, testFS.Symlink("../sub/dir", "sub/link"))
+
+		require.EqualErrno(t, 0, testFS.Link("sub/link", "sub/copy"))
+		require.EqualErrno(t, sys.EEXIST, testFS.Link("sub/link", "sub/copy"))
+		require.EqualErrno(t, sys.EEXIST, testFS.Link("sub/link", "sub/dir"))
+		dst, errno := testFS.Readlink("sub/copy")
+		require.EqualErrno(t, 0, errno)
+		require.Equal(t, "../sub/dir", dst)
+		st, errno := testFS.Stat("sub/copy")
+		require.EqualErrno(t, 0, errno)
+		require.True(t, st.Mode.IsDir())
+	})
+}
+
+// TestDirFS_Mkdir_overSymlink checks that mkdir on a symlink reports that it
+// exists, also where the link's target has "/" separators, which Windows
+// does not read in a symlink target.
+func TestDirFS_Mkdir_overSymlink(t *testing.T) {
+	t.Parallel()
+	forBinding(t, func(t *testing.T, mount func(dir string) sys.FS) {
+		tmpDir := t.TempDir()
+		require.NoError(t, os.MkdirAll(path.Join(tmpDir, "a", "b"), 0o700))
+		testFS := mount(tmpDir)
+		require.EqualErrno(t, 0, testFS.Symlink("a/../a/b", "link"))
+
+		require.EqualErrno(t, sys.EEXIST, testFS.Mkdir("link", 0o700))
+		dst, errno := testFS.Readlink("link")
+		require.EqualErrno(t, 0, errno)
+		require.Equal(t, "a/../a/b", dst)
+		st, errno := testFS.Stat("link/")
+		require.EqualErrno(t, 0, errno)
+		require.True(t, st.Mode.IsDir())
+	})
+}
+
 // TestDirFS_backslash checks that a backslash is part of a name, not the
 // separator Windows takes it for.
 func TestDirFS_backslash(t *testing.T) {

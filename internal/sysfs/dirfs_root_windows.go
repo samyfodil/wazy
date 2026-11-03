@@ -1,6 +1,7 @@
 package sysfs
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"path"
@@ -126,6 +127,35 @@ func sameFileIn(r *os.Root, from, to string) bool {
 	}
 	toSt, errno := statIn(r, to, false)
 	return errno == 0 && fromSt.Dev == toSt.Dev && fromSt.Ino == toSt.Ino
+}
+
+// linkIn links newName to oldName. NTFS cannot hard link a directory
+// symlink, and reports access denied, so for one it makes a second symlink
+// with the same target: a symlink never changes, and the two differ only in
+// inode and link count.
+func linkIn(r *os.Root, oldName, newName string) sys.Errno {
+	err := r.Link(oldName, newName)
+	if !errors.Is(err, syscall.ERROR_ACCESS_DENIED) {
+		return rootErrno(err)
+	}
+	info, lerr := r.Lstat(oldName)
+	if lerr != nil || info.Mode()&fs.ModeSymlink == 0 {
+		return rootErrno(err)
+	}
+	if attrs, ok := info.Sys().(*syscall.Win32FileAttributeData); !ok || attrs.FileAttributes&syscall.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		return rootErrno(err)
+	}
+	target, lerr := r.Readlink(oldName)
+	if lerr != nil {
+		return rootErrno(lerr)
+	}
+	if lerr = r.Symlink(target, newName); lerr != nil {
+		if _, serr := r.Lstat(newName); serr == nil {
+			return sys.EEXIST
+		}
+		return rootErrno(lerr)
+	}
+	return 0
 }
 
 func renameIn(r *os.Root, from, to string) sys.Errno {
