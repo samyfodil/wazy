@@ -37,3 +37,17 @@ func TestBytes(t *testing.T) {
 		})
 	}
 }
+
+func TestOutOfRange(t *testing.T) {
+	// The point of the helper is the third case: an index above math.MaxInt32.
+	// "int(index) >= length" reads that as negative where an int is 32 bits
+	// wide (GOARCH=386, arm, wasm) and lets it through, so the caller indexes
+	// out of range and panics.
+	require.False(t, OutOfRange(0, 1))
+	require.False(t, OutOfRange(9, 10))
+	require.True(t, OutOfRange(10, 10))
+	require.True(t, OutOfRange(math.MaxUint32, 10))
+	require.True(t, OutOfRange(math.MaxInt32, 10))
+	require.True(t, OutOfRange(math.MaxInt32+1, 10))
+	require.True(t, OutOfRange(0, 0))
+}

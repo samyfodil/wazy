@@ -3,6 +3,8 @@ package wasm
 import (
 	"cmp"
 	"slices"
+
+	"github.com/samyfodil/wazy/internal/u32"
 )
 
 // PreemptBudget is how much wasm code, in bytes, compiled code may run between
@@ -387,14 +389,14 @@ func (m *Module) foreignFuncRefs(declared map[Index]struct{}, functions []Index,
 		}
 	}
 	carriesRef := func(typeIndex Index) bool {
-		if int(typeIndex) >= len(m.TypeSection) {
+		if u32.OutOfRange(typeIndex, len(m.TypeSection)) {
 			return true
 		}
 		t := &m.TypeSection[typeIndex]
 		return slices.ContainsFunc(t.Params, ValueType.IsRef) || slices.ContainsFunc(t.Results, ValueType.IsRef)
 	}
 	typeOf := func(types []Index, i Index) Index {
-		if int(i) < len(types) {
+		if !u32.OutOfRange(i, len(types)) {
 			return types[i]
 		}
 		return ^Index(0)
@@ -426,7 +428,7 @@ func (m *Module) foreignFuncRefs(declared map[Index]struct{}, functions []Index,
 				return true
 			}
 		case ExternTypeGlobal:
-			if int(exp.Index) >= len(globals) || globals[exp.Index].ValType.IsRef() {
+			if u32.OutOfRange(exp.Index, len(globals)) || globals[exp.Index].ValType.IsRef() {
 				return true
 			}
 		case ExternTypeTag:

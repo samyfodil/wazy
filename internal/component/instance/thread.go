@@ -7,6 +7,7 @@ import (
 
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/component/binary"
+	"github.com/samyfodil/wazy/internal/u32"
 	"github.com/samyfodil/wazy/internal/wasm"
 )
 
@@ -202,7 +203,7 @@ func (tt *threadTable) add(v any) uint32 {
 // arm; a task's own lazily-allocated implicit slot is never freed, see
 // threadIndexHostFunc's doc).
 func (tt *threadTable) remove(idx uint32) {
-	if idx == 0 || int(idx) >= len(tt.slots) || tt.slots[idx] == nil {
+	if idx == 0 || u32.OutOfRange(idx, len(tt.slots)) || tt.slots[idx] == nil {
 		return
 	}
 	tt.slots[idx] = nil
@@ -215,7 +216,7 @@ func (tt *threadTable) remove(idx uint32) {
 // thread, never a task's own implicit-thread slot). Used only by
 // thread.yield-then-resume.
 func (tt *threadTable) getThread(idx uint32) (*guestThread, bool) {
-	if idx == 0 || int(idx) >= len(tt.slots) {
+	if idx == 0 || u32.OutOfRange(idx, len(tt.slots)) {
 		return nil, false
 	}
 	th, ok := tt.slots[idx].(*guestThread)
@@ -507,7 +508,7 @@ func threadNewIndirectHostFunc(
 	if !eok || exp.Type != wasm.ExternTypeTable {
 		return hostFuncDef{}, fmt.Errorf("thread.new-indirect: table owner module has no exported table %q", tableName)
 	}
-	if int(exp.Index) >= len(wm.Tables) {
+	if u32.OutOfRange(exp.Index, len(wm.Tables)) {
 		return hostFuncDef{}, fmt.Errorf("thread.new-indirect: table export %q index %d out of range of %d table(s)", tableName, exp.Index, len(wm.Tables))
 	}
 	table := wm.Tables[exp.Index]

@@ -12,6 +12,7 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/component"
+	"github.com/samyfodil/wazy/internal/u32"
 	"github.com/samyfodil/wazy/sys"
 )
 
@@ -810,7 +811,7 @@ func (t *typeTable) add(td component.TypeDesc) component.TypeRef {
 // resolver returns the component.Resolver over t's current entries.
 func (t *typeTable) resolver() component.Resolver {
 	return func(idx uint32) component.TypeDesc {
-		if int(idx) >= len(t.entries) {
+		if u32.OutOfRange(idx, len(t.entries)) {
 			return nil
 		}
 		return t.entries[idx]

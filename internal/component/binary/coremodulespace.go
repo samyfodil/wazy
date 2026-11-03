@@ -1,6 +1,10 @@
 package binary
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/samyfodil/wazy/internal/u32"
+)
 
 // This file implements the CORE MODULE index space, the core-module-sort
 // counterpart of typespace.go's type index space.
@@ -80,35 +84,35 @@ const resolveCoreModuleMaxDepth = 64
 // TypeSpace / CoreFuncSpace.
 func (c *Component) ResolveCoreModule(idx uint32) (owner *Component, moduleIdx uint32, err error) {
 	if len(c.CoreModuleSpace) == 0 {
-		if int(idx) >= len(c.CoreModules) {
+		if u32.OutOfRange(idx, len(c.CoreModules)) {
 			return nil, 0, fmt.Errorf("core module %d out of range of %d modules", idx, len(c.CoreModules))
 		}
 		return c, idx, nil
 	}
 	cur := c
 	for depth := 0; depth < resolveCoreModuleMaxDepth; depth++ {
-		if int(idx) >= len(cur.CoreModuleSpace) {
+		if u32.OutOfRange(idx, len(cur.CoreModuleSpace)) {
 			return nil, 0, fmt.Errorf("core module %d out of range of the %d-entry core module index space", idx, len(cur.CoreModuleSpace))
 		}
 		e := cur.CoreModuleSpace[idx]
 		switch e.Kind {
 		case CoreModuleFromDefinition:
-			if int(e.Module) >= len(cur.CoreModules) {
+			if u32.OutOfRange(e.Module, len(cur.CoreModules)) {
 				return nil, 0, fmt.Errorf("core module %d: internal error: module index %d out of range of %d embedded modules", idx, e.Module, len(cur.CoreModules))
 			}
 			return cur, e.Module, nil
 		case CoreModuleFromImport:
-			if int(e.Import) >= len(cur.Imports) {
+			if u32.OutOfRange(e.Import, len(cur.Imports)) {
 				return nil, 0, fmt.Errorf("core module %d: internal error: import index %d out of range of %d imports", idx, e.Import, len(cur.Imports))
 			}
 			return nil, 0, fmt.Errorf("core module %d is the core module import %q, which only an instantiation supplies", idx, cur.Imports[e.Import].Name)
 		case CoreModuleFromExport:
-			if int(e.Export) >= len(cur.Exports) {
+			if u32.OutOfRange(e.Export, len(cur.Exports)) {
 				return nil, 0, fmt.Errorf("core module %d: internal error: export index %d out of range of %d exports", idx, e.Export, len(cur.Exports))
 			}
 			idx = cur.Exports[e.Export].ExternIndex
 		case CoreModuleFromAlias:
-			if int(e.Alias) >= len(cur.Aliases) {
+			if u32.OutOfRange(e.Alias, len(cur.Aliases)) {
 				return nil, 0, fmt.Errorf("core module %d: internal error: alias index %d out of range of %d aliases", idx, e.Alias, len(cur.Aliases))
 			}
 			al := cur.Aliases[e.Alias]

@@ -1214,21 +1214,6 @@ func (m mockListener) After(context.Context, api.Module, api.FunctionDefinition,
 
 func (m mockListener) Abort(context.Context, api.Module, api.FunctionDefinition, error) {}
 
-func TestIndexOutOfRange(t *testing.T) {
-	// The point of the helper is the third case: an index above math.MaxInt32.
-	// "int(index) >= length" reads that as negative where an int is 32 bits
-	// wide (GOARCH=386, arm, wasm) and lets it through, so the caller indexes
-	// out of range and panics. Every index it guards is LEB128-decoded from the
-	// module body, so a malformed module reaches it.
-	require.False(t, indexOutOfRange(0, 1))
-	require.False(t, indexOutOfRange(9, 10))
-	require.True(t, indexOutOfRange(10, 10))
-	require.True(t, indexOutOfRange(math.MaxUint32, 10))
-	require.True(t, indexOutOfRange(math.MaxInt32, 10))
-	require.True(t, indexOutOfRange(math.MaxInt32+1, 10))
-	require.True(t, indexOutOfRange(0, 0))
-}
-
 func repeatValueType(vt ValueType, n int) []ValueType {
 	ret := make([]ValueType, n)
 	for i := range ret {

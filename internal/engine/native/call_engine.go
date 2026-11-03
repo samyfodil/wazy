@@ -730,7 +730,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			s := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
 			// As with memory.grow, the trampoline passes the entry count as a
 			// full 64 bits whatever the table's index type.
-			tableIndex, num, ref := uint32(s[0]), s[1], uintptr(s[2])
+			tableIndex, num, ref := uint32(s[0]), s[1], s[2]
 			table := mod.Tables[tableIndex]
 			if table.IsTable64 {
 				s[0] = table.Grow64(num, ref)

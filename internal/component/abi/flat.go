@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/samyfodil/wazy/internal/component/binary"
+	"github.com/samyfodil/wazy/internal/u32"
 )
 
 // LowerFlat converts a Value to a slice of CoreValues in the flat ABI.
@@ -350,7 +351,7 @@ func lowerFlatVariant(v Value, desc binary.VariantDesc, flat []string, resolve R
 		return nil, fmt.Errorf("lowerFlat variant: expected VariantValue, got %T", v)
 	}
 
-	if int(vv.Disc) >= len(desc.Cases) {
+	if u32.OutOfRange(vv.Disc, len(desc.Cases)) {
 		return nil, fmt.Errorf("lowerFlat variant: case index %d out of range [0,%d)", vv.Disc, len(desc.Cases))
 	}
 
@@ -518,7 +519,7 @@ func lowerFlatEnum(v Value, desc binary.EnumDesc) ([]CoreValue, error) {
 	if !ok {
 		return nil, fmt.Errorf("lowerFlat enum: expected uint32, got %T", v)
 	}
-	if int(idx) >= len(desc.Cases) {
+	if u32.OutOfRange(idx, len(desc.Cases)) {
 		return nil, fmt.Errorf("lowerFlat enum: case index %d out of range [0,%d)", idx, len(desc.Cases))
 	}
 	return []CoreValue{NewCoreValueI32(idx)}, nil
@@ -992,7 +993,7 @@ func liftFlatVariant(vi valueIter, desc binary.VariantDesc, flat []string, resol
 	}
 	caseIdx := discCV.AsI32()
 
-	if int(caseIdx) >= len(desc.Cases) {
+	if u32.OutOfRange(caseIdx, len(desc.Cases)) {
 		return nil, fmt.Errorf("liftFlat variant: case index %d out of range [0,%d)", caseIdx, len(desc.Cases))
 	}
 
@@ -1213,7 +1214,7 @@ func liftFlatEnum(vi valueIter, desc binary.EnumDesc) (Value, error) {
 		return nil, err
 	}
 	idx := cv.AsI32()
-	if int(idx) >= len(desc.Cases) {
+	if u32.OutOfRange(idx, len(desc.Cases)) {
 		return nil, fmt.Errorf("liftFlat enum: case index %d out of range [0,%d)", idx, len(desc.Cases))
 	}
 	return idx, nil

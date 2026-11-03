@@ -1266,7 +1266,7 @@ func (e *moduleEngine) TypeIDOfReference(ref wasm.Reference) wasm.FunctionTypeID
 
 // FunctionInstanceReference implements the same method as documented on wasm.ModuleEngine.
 func (e *moduleEngine) FunctionInstanceReference(funcIndex wasm.Index) wasm.Reference {
-	return uintptr(unsafe.Pointer(&e.functions[funcIndex]))
+	return wasm.Reference(uintptr(unsafe.Pointer(&e.functions[funcIndex])))
 }
 
 // NewFunction implements the same method as documented on wasm.ModuleEngine.
@@ -1287,7 +1287,7 @@ func (e *moduleEngine) LookupFunction(t *wasm.TableInstance, typeId wasm.Functio
 		panic(wasmruntime.ErrRuntimeInvalidTableAccess)
 	}
 
-	tf := functionFromUintptr(rawPtr)
+	tf := functionFromUintptr(uintptr(rawPtr))
 	if !tf.typeMatches(typeId) {
 		panic(wasmruntime.ErrRuntimeIndirectCallTypeMismatch)
 	}
@@ -3208,7 +3208,7 @@ func (ce *callEngine) callNativeFuncRare(ctx context.Context, m *wasm.ModuleInst
 			panic(wasmruntime.ErrRuntimeInvalidTableAccess)
 		}
 
-		table.References[offset] = uintptr(ref) // externrefs are opaque uint64.
+		table.References[offset] = ref // externrefs are opaque uint64.
 	case operationKindTableSize:
 		table := tables[op.U1]
 		ce.pushValue(uint64(len(table.References)))
@@ -3216,15 +3216,15 @@ func (ce *callEngine) callNativeFuncRare(ctx context.Context, m *wasm.ModuleInst
 		table := tables[op.U1]
 		num, ref := popValue(), popValue()
 		if table.IsTable64 {
-			ce.pushValue(table.Grow64(num, uintptr(ref)))
+			ce.pushValue(table.Grow64(num, ref))
 		} else {
-			ce.pushValue(uint64(table.Grow(uint32(num), uintptr(ref))))
+			ce.pushValue(uint64(table.Grow(uint32(num), ref)))
 		}
 	case operationKindTableFill:
 		table := tables[op.U1]
 		num := popValue()
 		ce.checkBulk(ctx, m, num)
-		ref := uintptr(popValue())
+		ref := popValue()
 		offset := popValue()
 		if rangeOutOfBounds(offset, num, uint64(len(table.References))) {
 			panic(wasmruntime.ErrRuntimeInvalidTableAccess)
@@ -5797,7 +5797,7 @@ func (ce *callEngine) functionForOffset(table *wasm.TableInstance, offset uint64
 		panic(wasmruntime.ErrRuntimeInvalidTableAccess)
 	}
 
-	tf := functionFromUintptr(rawPtr)
+	tf := functionFromUintptr(uintptr(rawPtr))
 	if !tf.typeMatches(expectedTypeID) {
 		panic(wasmruntime.ErrRuntimeIndirectCallTypeMismatch)
 	}

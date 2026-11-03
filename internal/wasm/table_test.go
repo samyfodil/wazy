@@ -1135,7 +1135,7 @@ func TestTableInstance_Grow(t *testing.T) {
 			if limit == 0 {
 				limit = MaxTableLimitElements
 			}
-			table := &TableInstance{References: make([]uintptr, tc.currentLen), Max: tc.max, limit: limit}
+			table := &TableInstance{References: make([]Reference, tc.currentLen), Max: tc.max, limit: limit}
 			actual := table.Grow(tc.delta, 0)
 			require.Equal(t, tc.exp, actual)
 			if actual != expOnErr {
